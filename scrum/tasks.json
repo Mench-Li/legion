@@ -199,19 +199,25 @@
       "description": "在工作目录创建 e2e-marker.txt，内容 worker-in-worktree；用 type 命令验证内容后回复 JSON",
       "acceptance": [],
       "priority": "high",
-      "status": "todo",
-      "version": 2,
-      "soldier": null,
+      "status": "canceled",
+      "version": 6,
+      "soldier": "soldier-auto",
       "claimedRound": null,
-      "claimedAt": null,
+      "claimedAt": "2026-08-20T16:48:55.153Z",
       "ordersVersion": 1,
       "parent": null,
       "blocks": [],
       "blockedBy": [],
-      "comments": [],
+      "comments": [
+        {
+          "by": "soldier-auto",
+          "at": "2026-08-20T16:49:44.926Z",
+          "text": "✓ 完成并提交验收：已在 worktree 创建 e2e-marker.txt 且内容为 worker-in-worktree，并用 type 命令验证通过。\n证据：完成标准（自行拟定）：文件 D:\\project\\dsh\\legion\\.legion-worktrees\\T-005\\e2e-marker.txt 存在、内容精确等于 worker-in-worktree、经 Windows `type` 命令输出一致。验证结果：exists=true；readBack=\"worker-in-worktree\"；typeCommandOutput=\"worker-in-worktree\"；match=true（readBack 与预期完全一致，无多余换行）。工作目录 cwd 为 D:\\project\\dsh\\desktop\\DSH Desktop，文件写入目标为 worktree 目录，未越界。\n[worktree] 改动在分支 w/T-005。验收通过后 promote：git -C D:/project/dsh/legion merge --no-ff w/T-005；放弃：git -C D:/project/dsh/legion worktree remove --force D:\\project\\dsh\\legion\\.legion-worktrees\\T-005 && git -C D:/project/dsh/legion branch -D w/T-005"
+        }
+      ],
       "evidence": [],
       "createdAt": "2026-08-20T16:21:24.589Z",
-      "updatedAt": "2026-08-20T16:21:24.659Z"
+      "updatedAt": "2026-08-20T16:52:29.848Z"
     }
   }
 }

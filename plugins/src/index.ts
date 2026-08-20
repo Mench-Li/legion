@@ -68,7 +68,7 @@ export const Config = z.object({
   provider: z.string().default('spawn'),
   scrumDir: z.string().default('D:/project/dsh/legion/scrum'),
   workspace: z.string().default('D:/project/dsh'),
-  isolate: z.boolean().default(false),
+  isolate: z.boolean().default(true),
   repoRoot: z.string().default('D:/project/dsh/legion'),
   worktreeRoot: z.string().default(''),
   logFile: z.string().default(''),

@@ -92,7 +92,7 @@ curl -X POST http://127.0.0.1:4820/api/comment -H "Authorization: Bearer <t>" -H
 
 **done 永远留给人类**：守护最多把任务交到 `in_review`；是否真正完成由你在看板上把卡片拖到 Done 决定。
 
-配置（改 `cordis.patch.yml` 中插件行或注入器配置）：`role`（默认 `soldier-auto`）、`intervalMs`（默认 30000）、`maxWorkers`（并发上限，默认 1）、`workerTimeoutMs`（默认 600000）、`staleMinutes`（认领租约分钟数，默认 30，超时自动释放回 todo）、`provider`（默认 `spawn`）、`scrumDir`（默认 `D:/project/dsh/legion/scrum`）、`workspace`（worker 工作目录，默认 `D:/project/dsh`）、`isolate`（worktree 隔离开关，默认 false）、`repoRoot`（隔离所用 git 仓库根，默认 `D:/project/dsh/legion`）、`worktreeRoot`（worktree 目录根，默认 `repoRoot/.legion-worktrees`）。
+配置（改 `cordis.patch.yml` 中插件行或注入器配置）：`role`（默认 `soldier-auto`）、`intervalMs`（默认 30000）、`maxWorkers`（并发上限，默认 1）、`workerTimeoutMs`（默认 600000）、`staleMinutes`（认领租约分钟数，默认 30，超时自动释放回 todo）、`provider`（默认 `spawn`）、`scrumDir`（默认 `D:/project/dsh/legion/scrum`）、`workspace`（worker 工作目录，默认 `D:/project/dsh`）、`isolate`（worktree 隔离开关，默认 **true**）、`repoRoot`（隔离所用 git 仓库根，默认 `D:/project/dsh/legion`）、`worktreeRoot`（worktree 目录根，默认 `repoRoot/.legion-worktrees`）。
 
 日志：`~/.dsh/super-injector/dsh-scrum-worker.log`（每轮扫单/派工/提交都落盘）。卸载：`dev_uninject_plugin`（匹配 `dsh-scrum-worker`）。
 

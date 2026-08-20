@@ -9,6 +9,7 @@
 | `@deepseek-ai/dsh-tool-mesh` | host 工具插件 | ✅ 已发布 | 角色寻址消息总线：`mesh_register` / `mesh_send` / `mesh_recv`，士兵内容直连 |
 | `@deepseek-ai/dsh-client-ui-kanban` | client UI 插件 | ✅ 已实现 | Web GUI 侧栏看板操作项（iframe 嵌入实时看板，SSE 推送） |
 | `@deepseek-ai/dsh-tool-taskctl` | host 工具插件 | ✅ 已实现 | 任务库工具化：`task_create` / `task_claim` / `task_transition` / `task_comment` / `task_link` / `task_list`，模型直接调用（复用 taskctl 状态机/乐观锁/认领/依赖纪律） |
+| `@dsh-external/dsh-scrum-worker` | host 守护插件 | ✅ 已实现 | 士兵轮询守护：认领 todo → 派 worker → in_review；退回纠错；解阻续做；worktree 隔离 / 动态流 / 认领租约 / 依赖环检测 |
 
 ## 待插件化（路线图）
 

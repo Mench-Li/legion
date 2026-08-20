@@ -143,6 +143,27 @@ function validateTaskShape(t) {
   if (!PRIORITIES.includes(t.priority)) throw new Error(`非法优先级 ${t.priority}`)
 }
 
+/**
+ * `from` 是否（直接或传递）依赖 `to`：沿 blockedBy 边深度优先，命中 `to` 即返回 true。
+ * link 加边前用它检测是否会成环。
+ */
+function dependsOn(db, from, to) {
+  const seen = new Set()
+  const stack = [from]
+  while (stack.length > 0) {
+    const cur = stack.pop()
+    if (seen.has(cur)) continue
+    seen.add(cur)
+    const node = db.tasks[cur]
+    if (node === undefined) continue
+    for (const b of node.blockedBy) {
+      if (b === to) return true
+      stack.push(b)
+    }
+  }
+  return false
+}
+
 const commands = {
   /** 初始化权威数据库 */
   init() {
@@ -316,33 +337,83 @@ const commands = {
     printTask(t)
   },
 
-  /** 建立任务依赖/父子关系 */
+  /** 建立任务依赖/父子关系（blockedBy/blocks 成环即拒绝，整条 link 原子） */
   link(args) {
     const id = requireId(args)
     const db = loadDb()
     const t = task(db, id)
+    // t blocks b → b 依赖 t（边 b→t）：若 t 已（传递）依赖 b，则成环
     for (const b of args.blocks?.split(',') ?? []) {
       if (b.length === 0) continue
+      if (b === id) throw new Error(`任务不能阻塞自身（${id}）`)
       task(db, b)
+      if (dependsOn(db, t.id, b)) throw new Error(`依赖成环：${id} 已依赖 ${b}，不能再声明 ${id} 阻塞 ${b}`)
       if (!t.blocks.includes(b)) t.blocks.push(b)
       const target = db.tasks[b]
       if (!target.blockedBy.includes(t.id)) target.blockedBy.push(t.id)
     }
+    // t blockedBy b → t 依赖 b（边 t→b）：若 b 已（传递）依赖 t，则成环
     for (const b of args.blockedBy?.split(',') ?? []) {
       if (b.length === 0) continue
+      if (b === id) throw new Error(`任务不能依赖自身（${id}）`)
       task(db, b)
+      if (dependsOn(db, b, t.id)) throw new Error(`依赖成环：${b} 已依赖 ${id}，不能再声明 ${id} 依赖 ${b}`)
       if (!t.blockedBy.includes(b)) t.blockedBy.push(b)
       const target = db.tasks[b]
       if (!target.blocks.includes(t.id)) target.blocks.push(t.id)
     }
     if (args.parent !== undefined) {
       task(db, args.parent)
+      if (args.parent === id) throw new Error(`任务不能以自身为父（${id}）`)
       t.parent = args.parent
     }
     t.version += 1
     t.updatedAt = now()
     saveDb(db)
     printTask(t)
+  },
+
+  /** 归还：in_progress → todo，释放认领（士兵主动放弃或守护超时回收） */
+  release(args) {
+    requireArgs(args, ['by'])
+    const id = requireId(args)
+    const t = withLock({
+      id,
+      ifVersion: args.ifVersion,
+      mutate(t) {
+        if (t.status !== 'in_progress') throw new Error(`只能归还 in_progress 的任务，当前 ${t.status}`)
+        t.status = 'todo'
+        t.soldier = null
+        t.claimedAt = null
+        t.claimedRound = null
+        t.comments.push({ by: args.by, at: now(), text: args.reason ?? `归还（由 ${args.by} 释放）` })
+      },
+    })
+    printTask(t)
+  },
+
+  /** 守护批量回收：认领超过 --older-than 分钟无进展的 in_progress 任务释放回 todo */
+  'release-stale'(args) {
+    const minutes = Number(args.olderThan ?? 60)
+    const by = args.by ?? 'daemon'
+    if (!Number.isFinite(minutes) || minutes <= 0) throw new Error('--older-than 必须是正整数分钟数')
+    const db = loadDb()
+    const cutoff = Date.now() - minutes * 60_000
+    const released = []
+    for (const t of Object.values(db.tasks)) {
+      if (t.status !== 'in_progress' || t.claimedAt === null) continue
+      if (new Date(t.claimedAt).getTime() > cutoff) continue
+      t.status = 'todo'
+      t.soldier = null
+      t.claimedAt = null
+      t.claimedRound = null
+      t.comments.push({ by, at: now(), text: `守护检测到认领超过 ${minutes} 分钟无进展，自动释放回 todo` })
+      t.version += 1
+      t.updatedAt = now()
+      released.push(t.id)
+    }
+    if (released.length > 0) saveDb(db)
+    process.stdout.write(`${JSON.stringify({ ok: true, released }, null, 2)}\n`)
   },
 }
 

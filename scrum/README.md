@@ -11,7 +11,7 @@
 | `board.json` | 看板快照（render 生成，goal 进度 + 列 + 卡 + 士兵统计） |
 | `KANBAN.md` | 文本看板（可在聊天里直接展示） |
 | `kanban.html` | 看板视图：**双击即开**（文件模式，30 秒自动刷新）或通过服务打开（实时模式） |
-| `serve.mjs` | 零依赖本地服务：静态文件 + `/api/board` 轮询 + `/api/board/events` SSE 推送 |
+| `serve.mjs` | 零依赖本地服务：静态文件 + `/api/board` 轮询 + `/api/board/events` SSE + `/api/activity` + `/api/activity/events`（守护动态流） |
 
 刷新看板：`node legion/scrum/render.mjs`（将军每轮结束后运行）。
 
@@ -92,9 +92,16 @@ curl -X POST http://127.0.0.1:4820/api/comment -H "Authorization: Bearer <t>" -H
 
 **done 永远留给人类**：守护最多把任务交到 `in_review`；是否真正完成由你在看板上把卡片拖到 Done 决定。
 
-配置（改 `cordis.patch.yml` 中插件行或注入器配置）：`role`（默认 `soldier-auto`）、`intervalMs`（默认 30000）、`maxWorkers`（并发上限，默认 1）、`workerTimeoutMs`（默认 600000）、`provider`（默认 `spawn`）、`scrumDir`（默认 `D:/project/dsh/legion/scrum`）、`workspace`（worker 工作目录，默认 `D:/project/dsh`）。
+配置（改 `cordis.patch.yml` 中插件行或注入器配置）：`role`（默认 `soldier-auto`）、`intervalMs`（默认 30000）、`maxWorkers`（并发上限，默认 1）、`workerTimeoutMs`（默认 600000）、`staleMinutes`（认领租约分钟数，默认 30，超时自动释放回 todo）、`provider`（默认 `spawn`）、`scrumDir`（默认 `D:/project/dsh/legion/scrum`）、`workspace`（worker 工作目录，默认 `D:/project/dsh`）、`isolate`（worktree 隔离开关，默认 false）、`repoRoot`（隔离所用 git 仓库根，默认 `D:/project/dsh/legion`）、`worktreeRoot`（worktree 目录根，默认 `repoRoot/.legion-worktrees`）。
 
 日志：`~/.dsh/super-injector/dsh-scrum-worker.log`（每轮扫单/派工/提交都落盘）。卸载：`dev_uninject_plugin`（匹配 `dsh-scrum-worker`）。
+
+## 四项加固（隔离 / 动态流 / 租约 / 依赖环）
+
+1. **Git worktree 隔离**（守护 `isolate: true`）：每个任务建独立 worktree（分支 `w/<任务id>`，目录 `<repoRoot>/.legion-worktrees/<任务id>`），worker 在隔离目录干活，互不污染主工作树。完成后改动提交到 `w/<id>` 分支，**promote 显式**：验收通过后 `git -C <repoRoot> merge --no-ff w/<id>`；放弃则 `git -C <repoRoot> worktree remove --force <目录> && git -C <repoRoot> branch -D w/<id>`。守护同时安装公共 pre-push 守卫——`w/*` 分支一律禁止 push（防 worker 误推远程）。
+2. **实时动态流**：守护把认领/派工/完成/受阻/释放等生命周期事件写入 `scrum/activity.jsonl`；看板点"⚡ 动态"打开抽屉实时滚动（`/api/activity` + `/api/activity/events` SSE，断线自动降级轮询）。
+3. **认领租约**：`taskctl release <id>` 归还任务；`taskctl release-stale --older-than <分钟>` 批量回收认领超时无进展的 `in_progress`（守护每轮自动跑，`staleMinutes` 控阈值）。
+4. **依赖环检测**：`taskctl link --blockedBy/--blocks` 建边时检测传递依赖——A↔B 互依或自依赖直接拒绝，避免死锁。
 
 ## 多终端接入（手机 / 其他电脑）
 
@@ -155,10 +162,14 @@ node legion/scrum/taskctl.mjs claim T-001 --soldier soldier-a --round 5 --if-ver
 node legion/scrum/taskctl.mjs transition T-001 --to in_review --by soldier-a --if-version 3
 node legion/scrum/taskctl.mjs transition T-001 --to done --by general --if-version 5
 
-# 评论 / 验证证据 / 依赖
+# 评论 / 验证证据 / 依赖（link 建边会检测依赖环，成环/自依赖被拒绝）
 node legion/scrum/taskctl.mjs comment T-001 --by soldier-a --text "..."
 node legion/scrum/taskctl.mjs evidence T-001 --by general --text "typecheck 通过"
 node legion/scrum/taskctl.mjs link T-003 --blockedBy T-002
+
+# 归还 / 认领租约超时回收（守护每轮自动跑 release-stale）
+node legion/scrum/taskctl.mjs release T-001 --by soldier-a --reason "主动放弃"
+node legion/scrum/taskctl.mjs release-stale --older-than 60 --by daemon
 
 # 刷新看板
 node legion/scrum/render.mjs

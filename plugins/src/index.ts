@@ -16,7 +16,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { spawn } from 'node:child_process'
-import { appendFileSync, mkdirSync } from 'node:fs'
+import { appendFileSync, mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -42,12 +42,20 @@ export interface Config {
   maxWorkers: number
   /** 单个 worker 超时（毫秒），超时后中止并留待下一轮。 */
   workerTimeoutMs: number
+  /** 认领租约：in_progress 认领超过该分钟数无进展则由守护释放回 todo（须 > workerTimeoutMs/60000）。 */
+  staleMinutes: number
   /** ctx.subagents 上注册的 provider 名（spawn-in-process 默认注册为 spawn）。 */
   provider: string
   /** legion/scrum 目录（taskctl.mjs 所在）。 */
   scrumDir: string
-  /** worker 工作目录（仓库根）。 */
+  /** worker 工作目录（仓库根，isolate=false 时使用）。 */
   workspace: string
+  /** 是否用 git worktree 隔离每个任务的改动（需 repoRoot 是 git 仓库；promote 显式）。 */
+  isolate: boolean
+  /** worktree 隔离所用的 git 仓库根（legion 仓库）。 */
+  repoRoot: string
+  /** worktree 目录根（默认 repoRoot/.legion-worktrees）。 */
+  worktreeRoot: string
   logFile: string
 }
 
@@ -56,9 +64,13 @@ export const Config = z.object({
   intervalMs: z.number().min(5000).default(30000),
   maxWorkers: z.number().min(1).max(8).default(1),
   workerTimeoutMs: z.number().min(60000).default(600000),
+  staleMinutes: z.number().min(5).default(30),
   provider: z.string().default('spawn'),
   scrumDir: z.string().default('D:/project/dsh/legion/scrum'),
   workspace: z.string().default('D:/project/dsh'),
+  isolate: z.boolean().default(false),
+  repoRoot: z.string().default('D:/project/dsh/legion'),
+  worktreeRoot: z.string().default(''),
   logFile: z.string().default(''),
 })
 
@@ -120,6 +132,26 @@ function runTaskctl(scrumDir: string, argv: string[]): Promise<unknown> {
   })
 }
 
+/** 短字符串哈希（用于按 cwd 生成稳定的 foreman sessionId）。 */
+function hashStr(s: string): string {
+  let h = 0
+  for (let i = 0; i < s.length; i += 1) h = (h * 31 + s.charCodeAt(i)) | 0
+  return String(Math.abs(h))
+}
+
+/** 以子进程方式执行 git（worktree 隔离用），返回 { code, out, err }。 */
+function runGit(repoRoot: string, args: string[]): Promise<{ code: number; out: string; err: string }> {
+  return new Promise(resolve => {
+    const proc = spawn('git', args, { cwd: repoRoot })
+    let out = ''
+    let err = ''
+    proc.stdout.on('data', d => { out += d })
+    proc.stderr.on('data', d => { err += d })
+    proc.on('error', () => resolve({ code: -1, out, err: 'git 不可用' }))
+    proc.on('close', code => resolve({ code: code ?? -1, out, err }))
+  })
+}
+
 export function apply(ctx: AppContext, config: Config): void {
   const SHORT = 'dsh-scrum-worker'
   const logFile = config.logFile || join(homedir(), '.dsh', 'super-injector', SHORT + '.log')
@@ -130,8 +162,16 @@ export function apply(ctx: AppContext, config: Config): void {
     } catch { /* 日志失败静默 */ }
   }
 
-  let foreman: Agent | undefined
-  let disposeForeman: (() => Promise<void>) | undefined
+  /** 看板动态事件流：追加结构化事件到 scrum/activity.jsonl（serve.mjs 经 SSE 推给看板）。 */
+  const activityFile = join(config.scrumDir, 'activity.jsonl')
+  const activity = (kind: string, taskId: string, text: string): void => {
+    try {
+      mkdirSync(dirname(activityFile), { recursive: true })
+      appendFileSync(activityFile, `${JSON.stringify({ ts: new Date().toISOString(), kind, taskId, text })}\n`)
+    } catch { /* 动态写入失败静默，不影响派工 */ }
+  }
+
+  const foremen = new Map<string, { agent: Agent; dispose: () => Promise<void> }>()
   const inflight = new Set<string>()
   const controllers = new Set<AbortController>()
   let sweeping = false
@@ -139,21 +179,23 @@ export function apply(ctx: AppContext, config: Config): void {
   const listTasks = () => runTaskctl(config.scrumDir, ['list']) as Promise<Task[]>
   const getTask = (id: string) => runTaskctl(config.scrumDir, ['get', id]) as Promise<Task>
 
-  /** 惰性创建 foreman agent：worker subagent 的父（提供工作区、谱系与模型路由）。 */
-  async function ensureForeman(): Promise<void> {
-    if (foreman !== undefined) return
+  /** 惰性创建 foreman agent：worker subagent 的父（按工作目录缓存；worktree 隔离时每个 worktree 一个）。 */
+  async function ensureForeman(cwd: string): Promise<Agent | undefined> {
+    const existing = foremen.get(cwd)
+    if (existing !== undefined) return existing.agent
     try {
       const selection = ctx.agentDefaultModel.currentSelection()
       const handle = await ctx.agents.create({
-        sessionId: SessionId('scrum-worker-foreman'),
-        meta: { cwd: config.workspace },
+        sessionId: SessionId(`scrum-worker-foreman-${hashStr(cwd)}`),
+        meta: { cwd },
         agentOptions: { provider: selection.provider, model: selection.model },
       })
-      foreman = handle.agent
-      disposeForeman = () => handle.dispose()
-      log(`foreman 就绪：${handle.agent.session.id}（cwd=${config.workspace}，model=${selection.provider}/${selection.model}）`)
+      foremen.set(cwd, { agent: handle.agent, dispose: () => handle.dispose() })
+      log(`foreman 就绪：${handle.agent.session.id}（cwd=${cwd}，model=${selection.provider}/${selection.model}）`)
+      return handle.agent
     } catch (e) {
-      log(`foreman 创建失败（本轮跳过派工）：${String(e)}`)
+      log(`foreman 创建失败（本轮跳过派工，cwd=${cwd}）：${String(e)}`)
+      return undefined
     }
   }
 
@@ -172,11 +214,74 @@ export function apply(ctx: AppContext, config: Config): void {
     }
   }
 
-  function buildWorkerPrompt(t: Task, feedback: Task['comments']): string {
+  /** worktree 隔离：为任务建独立分支 worktree（w/<taskId>）。失败返回 null 由调用方回退。 */
+  async function prepareWorktree(taskId: string): Promise<string | null> {
+    const root = config.worktreeRoot || join(config.repoRoot, '.legion-worktrees')
+    const dir = join(root, taskId)
+    try {
+      await ensurePrePushGuard()
+      // 清残留（同 id 重派）：先移除 worktree 再删分支
+      await runGit(config.repoRoot, ['worktree', 'remove', '--force', dir])
+      await runGit(config.repoRoot, ['branch', '-D', `w/${taskId}`])
+      const add = await runGit(config.repoRoot, ['worktree', 'add', '-b', `w/${taskId}`, dir, 'HEAD'])
+      if (add.code !== 0) {
+        log(`${taskId} worktree 创建失败：${(add.err || add.out).trim()}`)
+        return null
+      }
+      activity('worktree', taskId, `隔离 worktree 就绪：${dir}（分支 w/${taskId}）`)
+      return dir
+    } catch (e) {
+      log(`${taskId} prepareWorktree 异常：${String(e)}`)
+      return null
+    }
+  }
+
+  /**
+   * 安装公共 pre-push 守卫：worktree 的钩子走公共 hooks 目录（无每-worktree 独立钩子），
+   * 故用一个通用钩子拦截所有 w/*（worktree 分支）push，放行普通分支。幂等，不覆盖已有自定义钩子。
+   */
+  async function ensurePrePushGuard(): Promise<void> {
+    const hooksDir = join(config.repoRoot, '.git', 'hooks')
+    const hook = join(hooksDir, 'pre-push')
+    const marker = 'legion worktree guard'
+    const script = `#!/bin/sh
+# ${marker}：禁止 push worktree 分支（w/*）；普通分支放行
+while read -r local_ref local_sha remote_ref remote_sha; do
+  case "$local_ref" in
+    refs/heads/w/*) echo "legion: worktree 分支 w/* 禁止 push（须经 promote 合并回主分支）" >&2; exit 1 ;;
+  esac
+done
+exit 0
+`
+    try {
+      mkdirSync(hooksDir, { recursive: true })
+      if (existsSync(hook)) {
+        if (readFileSync(hook, 'utf8').includes(marker)) return // 已装
+        log('检测到已有自定义 pre-push 钩子，跳过安装守卫（请自行确保 w/* 分支不被 push）')
+        return
+      }
+      writeFileSync(hook, script, { mode: 0o755 })
+      log('已安装 pre-push 守卫（拦截 w/* 分支 push）')
+    } catch (e) {
+      log(`pre-push 守卫安装失败：${String(e)}`)
+    }
+  }
+
+  /** 把 worktree 里的改动提交到 w/<taskId> 分支（done 时调用；blocked 保留未提交改动）。 */
+  async function commitWorktree(taskId: string, dir: string, summary: string): Promise<boolean> {
+    const add = await runGit(dir, ['add', '-A'])
+    if (add.code !== 0) { log(`${taskId} git add 失败：${add.err.trim()}`); return false }
+    const commit = await runGit(dir, ['commit', '-m', `${taskId}：${summary}`])
+    if (commit.code !== 0) { log(`${taskId} git commit 失败：${(commit.err || commit.out).trim()}`); return false }
+    return true
+  }
+
+  function buildWorkerPrompt(t: Task, feedback: Task['comments'], cwd: string, isolated: boolean): string {
     const lines = [
       `你是军团士兵 ${config.role}（守护循环派发的临时 worker），任务 ${t.id} 由你独立完成。`,
       '',
-      `工作目录（仓库根）：${config.workspace}`,
+      `工作目录：${cwd}`,
+      isolated ? `隔离模式：你在独立 git worktree（分支 w/${t.id}）中工作；不要 push（pre-push 已拦截）；改动只留在本 worktree，由将军验收后 promote 合并。` : '',
       `任务看板：${config.scrumDir}（taskctl 是唯一变更入口，但你不要调用它）`,
       '',
       `任务：${t.title}`,
@@ -204,8 +309,16 @@ export function apply(ctx: AppContext, config: Config): void {
 
   /** 派一个 worker 处理任务（认领已完成或任务本身可开工）。 */
   async function runWorker(t: Task, feedback: Task['comments']): Promise<void> {
-    await ensureForeman()
-    if (foreman === undefined) {
+    // 决定工作目录：isolate 时建 worktree（分支 w/<id>），失败回退 workspace
+    let cwd = config.workspace
+    let worktreeDir: string | null = null
+    if (config.isolate) {
+      worktreeDir = await prepareWorktree(t.id)
+      if (worktreeDir !== null) cwd = worktreeDir
+      else log(`${t.id} worktree 不可用，回退到 workspace 直接工作`)
+    }
+    const parent = await ensureForeman(cwd)
+    if (parent === undefined) {
       log(`${t.id} 跳过：foreman 不可用`)
       return
     }
@@ -216,8 +329,8 @@ export function apply(ctx: AppContext, config: Config): void {
       try {
         return await ctx.subagents.start(config.provider, {
           label: `scrum:${t.id}`,
-          prompt: [{ type: 'text', text: buildWorkerPrompt(t, feedback) }],
-          parent: foreman,
+          prompt: [{ type: 'text', text: buildWorkerPrompt(t, feedback, cwd, worktreeDir !== null) }],
+          parent,
           signal: controller.signal,
           outputSchema: WORKER_SCHEMA,
         })
@@ -231,21 +344,31 @@ export function apply(ctx: AppContext, config: Config): void {
       }
     })()
     if (run === undefined) return
+    activity('dispatch', t.id, 'worker 已派工，开始实现')
     const result = await run.result
     await run.dispose()
     if (result.stopReason !== 'completed' || result.structured === undefined) {
       log(`${t.id} worker 未完成（${result.stopReason}）`)
       await safeComment(t.id, `⚠ worker 未完成（${result.stopReason}），任务保留在 in_progress，等待人工处理或下一轮重试`)
+      activity('aborted', t.id, `worker 未完成（${result.stopReason}），保留 in_progress 待租约回收`)
       return
     }
     const report = result.structured as WorkerReport
     if (report.status === 'done') {
+      // worktree 隔离：先提交到 w/<id> 分支再进 in_review；promote 由将军显式执行
+      if (worktreeDir !== null) await commitWorktree(t.id, worktreeDir, report.summary)
       await transitionTo(t.id, 'in_review')
-      await safeComment(t.id, `✓ 完成并提交验收：${report.summary}\n证据：${report.evidence}`)
+      const promoteHint = worktreeDir !== null
+        ? `\n[worktree] 改动在分支 w/${t.id}。验收通过后 promote：git -C ${config.repoRoot} merge --no-ff w/${t.id}；放弃：git -C ${config.repoRoot} worktree remove --force ${worktreeDir} && git -C ${config.repoRoot} branch -D w/${t.id}`
+        : ''
+      await safeComment(t.id, `✓ 完成并提交验收：${report.summary}\n证据：${report.evidence}${promoteHint}`)
+      activity('done', t.id, `完成：${report.summary}${worktreeDir !== null ? `（worktree 分支 w/${t.id} 待 promote）` : ''}`)
       log(`${t.id} → in_review（${report.summary}）`)
     } else {
-      await safeComment(t.id, `⚠ 受阻：${report.blocker || report.summary}`)
+      const wtHint = worktreeDir !== null ? `\n[worktree] 部分改动在 ${worktreeDir}（分支 w/${t.id}，未提交）` : ''
+      await safeComment(t.id, `⚠ 受阻：${report.blocker || report.summary}${wtHint}`)
       await transitionTo(t.id, 'blocked')
+      activity('blocked', t.id, `受阻：${report.blocker || report.summary}`)
       log(`${t.id} → blocked（${report.blocker || report.summary}）`)
     }
   }
@@ -258,11 +381,13 @@ export function apply(ctx: AppContext, config: Config): void {
       log(`${t.id} 认领失败（可能已被他人认领）：${String(e)}`)
       return
     }
+    activity('claim', t.id, '认领开工')
     await runWorker(t, [])
   }
 
   /** 处理被退回/解阻的任务。 */
   async function workReturned(t: Task, feedback: Task['comments']): Promise<void> {
+    activity('redispatch', t.id, '被退回/解阻，重新派工')
     await runWorker(t, feedback)
   }
 
@@ -271,7 +396,7 @@ export function apply(ctx: AppContext, config: Config): void {
     if (sweeping) return
     sweeping = true
     try {
-      await ensureForeman()
+      await ensureForeman(config.workspace)
       let tasks: Task[]
       try {
         tasks = await listTasks()
@@ -281,6 +406,14 @@ export function apply(ctx: AppContext, config: Config): void {
       }
       const byId = new Map(tasks.map(t => [t.id, t]))
       const room = () => inflight.size < config.maxWorkers
+
+      // 0. 认领租约回收：释放超过 staleMinutes 无进展的 in_progress 任务（下一轮再认领）
+      try {
+        const res = await runTaskctl(config.scrumDir, ['release-stale', '--older-than', String(config.staleMinutes), '--by', 'daemon']) as { released?: string[] }
+        for (const id of res.released ?? []) activity('released', id, `认领超过 ${config.staleMinutes} 分钟无进展，自动释放回 todo`)
+      } catch (e) {
+        log(`release-stale 失败：${String(e)}`)
+      }
 
       // 1. todo：认领（互斥）→ 派工
       for (const t of tasks.filter(t => t.status === 'todo')) {
@@ -319,10 +452,10 @@ export function apply(ctx: AppContext, config: Config): void {
 
   ctx.effect(() => () => {
     for (const c of controllers) c.abort()
-    if (disposeForeman !== undefined) {
-      void disposeForeman().catch(e => log(`foreman 释放失败：${String(e)}`))
-      disposeForeman = undefined
+    for (const [, f] of foremen) {
+      void f.dispose().catch(e => log(`foreman 释放失败：${String(e)}`))
     }
+    foremen.clear()
   }, `${name}: teardown`)
 
   ctx.logger?.info?.(`[${name}] 士兵守护启动（角色=${config.role}，每 ${config.intervalMs}ms 扫单，并发=${config.maxWorkers}，看板=${config.scrumDir}）`)

@@ -8,6 +8,8 @@
  *   /KANBAN.md         → 文本看板
  *   /api/board         → board.json 内容（轮询端点）
  *   /api/board/events  → SSE：board.json 变化时推送完整看板数据
+ *   /api/activity         → 最近动态事件（守护生命周期流，JSON 数组，?limit=N）
+ *   /api/activity/events  → SSE：activity.jsonl 追加时推送新事件
  *   /api/config        → { auth, host, port } 供页面探测是否需要令牌
  *
  * 写接口（POST，配置了 token 时要求携带令牌）：
@@ -26,13 +28,14 @@
  */
 import { createServer } from 'node:http'
 import { spawn } from 'node:child_process'
-import { readFile, watch } from 'node:fs'
+import { readFile, watch, watchFile } from 'node:fs'
 import { dirname, extname, join, normalize } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const SCRUM = join(ROOT, 'scrum')
 const BOARD_FILE = join(SCRUM, 'board.json')
+const ACTIVITY_FILE = join(SCRUM, 'activity.jsonl')
 const TASKCTL = join(SCRUM, 'taskctl.mjs')
 const RENDER = join(SCRUM, 'render.mjs')
 
@@ -91,6 +94,36 @@ function broadcast() {
 }
 
 watch(BOARD_FILE, () => broadcast())
+
+/** 动态（activity）SSE 客户端集合与已广播字节偏移（activity.jsonl 只追加） */
+const activityClients = new Set()
+let activityOffset = 0
+
+/** 把若干行（每行一个 JSON 事件）推给单个动态 SSE 客户端 */
+function sendActivityLines(res, lines) {
+  for (const line of lines) res.write(`data: ${line}\n\n`)
+}
+
+/** 读取 activity.jsonl 自上次偏移后的完整新行，广播给所有动态 SSE 客户端 */
+function broadcastActivity() {
+  readFile(ACTIVITY_FILE, (err, buf) => {
+    if (err) return
+    const text = buf.toString('utf8')
+    const delta = text.slice(activityOffset)
+    const lastNewline = delta.lastIndexOf('\n')
+    if (lastNewline === -1) return // 无完整新行（尾行未写完）
+    const complete = delta.slice(0, lastNewline + 1)
+    activityOffset += complete.length
+    const lines = complete.split('\n').filter(l => l.length > 0)
+    for (const res of activityClients) sendActivityLines(res, lines)
+  })
+}
+
+// activity.jsonl 由守护追加（文件可能尚未创建），用 poll watchFile 处理不存在/截断
+watchFile(ACTIVITY_FILE, { interval: 1000 }, (curr, prev) => {
+  if (curr.size < prev.size) activityOffset = 0 // 文件被截断/轮转
+  if (curr.size !== prev.size) broadcastActivity()
+})
 
 /**
  * 以子进程方式执行 taskctl 命令（唯一变更入口，保证状态机/乐观锁/角色纪律一致）。
@@ -273,6 +306,45 @@ const server = createServer((req, res) => {
     req.on('close', () => {
       clearInterval(heartbeat)
       clients.delete(res)
+    })
+    return
+  }
+
+  if (url.pathname === '/api/activity') {
+    const limit = Number(url.searchParams.get('limit') ?? 50)
+    readFile(ACTIVITY_FILE, (err, data) => {
+      if (err) {
+        json(res, 200, []) // 尚无动态
+        return
+      }
+      const tail = data.toString('utf8').split('\n')
+        .filter(l => l.length > 0)
+        .slice(-limit)
+        .map(l => { try { return JSON.parse(l) } catch { return null } })
+        .filter(Boolean)
+      json(res, 200, tail)
+    })
+    return
+  }
+
+  if (url.pathname === '/api/activity/events') {
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive',
+    })
+    res.write('retry: 2000\n\n')
+    activityClients.add(res)
+    // 连接即推最近 30 条历史动态，之后只推增量
+    readFile(ACTIVITY_FILE, (err, data) => {
+      if (err) return
+      const recent = data.toString('utf8').split('\n').filter(l => l.length > 0).slice(-30)
+      sendActivityLines(res, recent)
+    })
+    const heartbeat = setInterval(() => res.write(':hb\n\n'), 15000)
+    req.on('close', () => {
+      clearInterval(heartbeat)
+      activityClients.delete(res)
     })
     return
   }

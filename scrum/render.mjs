@@ -210,6 +210,17 @@ function renderHtml(board) {
   .comment .who { color: #60a5fa; font-size: 11px; }
   .comment .at { color: #5d6a85; font-size: 10px; margin-left: 6px; }
   .comment .text { margin-top: 3px; white-space: pre-wrap; color: #c6cede; }
+  .activity-drawer { position: fixed; top: 0; right: 0; bottom: 0; width: 320px; max-width: 88vw; background: #121a2c; border-left: 1px solid #26334e; z-index: 40; transform: translateX(100%); transition: transform .2s ease; display: flex; flex-direction: column; }
+  .activity-drawer.open { transform: translateX(0); }
+  .activity-head { padding: 12px 14px; border-bottom: 1px solid #242f45; display: flex; justify-content: space-between; align-items: center; font-size: 13px; }
+  .activity-head button { background: none; border: none; color: #9aa6bd; cursor: pointer; font-size: 18px; line-height: 1; }
+  .activity-feed { flex: 1; overflow-y: auto; padding: 8px 12px; }
+  .activity-item { display: flex; gap: 8px; padding: 7px 0; border-bottom: 1px solid #1a2440; font-size: 12px; align-items: flex-start; }
+  .activity-item .a-ico { flex: 0 0 auto; }
+  .activity-item .a-task { color: #60a5fa; font-weight: 600; flex: 0 0 auto; }
+  .activity-item .a-text { color: #c6cede; flex: 1; }
+  .activity-item .a-time { flex: 0 0 auto; color: #5d6a85; font-size: 11px; margin-top: 1px; }
+  .activity-empty { color: #44506a; font-size: 12px; padding: 12px 0; }
 </style>
 </head>
 <body>
@@ -226,10 +237,15 @@ function renderHtml(board) {
     </label>
     <button type="button" id="btn-create">＋ 新建任务</button>
     <button type="button" id="btn-token">🔑 令牌</button>
+    <button type="button" id="btn-activity">⚡ 动态</button>
     <span class="hint" id="drag-hint"></span>
   </div>
   <div class="soldiers" id="soldiers"></div>
 </header>
+<aside class="activity-drawer" id="activity-drawer">
+  <div class="activity-head"><span>⚡ 动态<span id="activity-count" style="color:#6b7a94"></span></span><button type="button" id="btn-activity-close">×</button></div>
+  <div class="activity-feed" id="activity-feed"><div class="activity-empty">暂无动态（守护派工后这里实时滚动）</div></div>
+</aside>
 <main id="board"></main>
 <script id="board-data" type="application/json">${data}</script>
 <script>
@@ -244,6 +260,8 @@ function renderHtml(board) {
   let filter = null
   let dragging = null
   let detail = null
+  const AKIND = { claim: '🚀', dispatch: '▶️', done: '✅', blocked: '⛔', released: '♻️', redispatch: '🔁', aborted: '⚠️' }
+  let activity = []
 
   const identity = {
     get() { return localStorage.getItem('kanban.identity') || 'general' },
@@ -485,6 +503,26 @@ function renderHtml(board) {
     es.onmessage = e => { try { apply(JSON.parse(e.data)) } catch { /* 推送瞬间的重渲染冲突可忽略 */ } }
     es.onerror = () => { es.close(); startPolling() }
   }
+  function renderActivity() {
+    const el = document.getElementById('activity-feed')
+    if (!el) return
+    if (activity.length === 0) {
+      el.innerHTML = '<div class="activity-empty">暂无动态（守护派工后这里实时滚动）</div>'
+    } else {
+      el.innerHTML = activity.slice(0, 50).map(a => \`<div class="activity-item"><span class="a-ico">\${AKIND[a.kind] || '•'}</span><span class="a-task">\${esc(a.taskId || '')}</span><span class="a-text">\${esc(a.text || '')}</span><span class="a-time">\${fmt(a.ts)}</span></div>\`).join('')
+    }
+    const n = document.getElementById('activity-count')
+    if (n) n.textContent = activity.length ? ' · ' + activity.length + ' 条' : ''
+  }
+  function pushActivity(e) { activity.unshift(e); if (activity.length > 200) activity.length = 200; renderActivity() }
+  function startActivityPolling() {
+    setInterval(async () => { try { const r = await fetch('/api/activity?limit=50'); if (r.ok) { activity = await r.json(); renderActivity() } } catch { /* 静默重试 */ } }, 5000)
+  }
+  function startActivitySSE() {
+    const es = new EventSource('/api/activity/events')
+    es.onmessage = e => { try { pushActivity(JSON.parse(e.data)) } catch { /* 忽略坏行 */ } }
+    es.onerror = () => { es.close(); startActivityPolling() }
+  }
   function boot() {
     render()
     wireDrag()
@@ -495,11 +533,13 @@ function renderHtml(board) {
       token.set(t)
       toast(t ? '令牌已保存' : '令牌已清除')
     }
+    document.getElementById('btn-activity').onclick = () => document.getElementById('activity-drawer').classList.toggle('open')
+    document.getElementById('btn-activity-close').onclick = () => document.getElementById('activity-drawer').classList.remove('open')
     const mode = document.getElementById('mode-label')
     if (LIVE) {
       document.querySelector('meta[http-equiv="refresh"]')?.remove()
       if (mode) mode.textContent = '(Scrum · 实时 · 拖拽写回)'
-      if (window.EventSource) startSSE(); else startPolling()
+      if (window.EventSource) { startSSE(); startActivitySSE() } else { startPolling(); startActivityPolling() }
     } else if (mode) {
       mode.textContent = '(Scrum · 文件模式 · 只读 · 30s 自动刷新)'
     }

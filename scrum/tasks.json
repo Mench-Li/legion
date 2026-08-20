@@ -1,0 +1,197 @@
+{
+  "schemaVersion": 1,
+  "nextId": 5,
+  "tasks": {
+    "T-001": {
+      "id": "T-001",
+      "title": "实现士兵直连消息总线（dsh-tool-mesh）",
+      "description": "soldier 之间内容直连，将军只负责唤醒",
+      "acceptance": [
+        "typecheck 通过",
+        "19 个测试全绿",
+        "覆盖率 100%",
+        "Agent Note 齐"
+      ],
+      "priority": "high",
+      "status": "done",
+      "version": 6,
+      "soldier": "soldier-a",
+      "claimedRound": 3,
+      "claimedAt": "2026-08-14T17:28:12.988Z",
+      "ordersVersion": 1,
+      "parent": null,
+      "blocks": [],
+      "blockedBy": [],
+      "comments": [],
+      "evidence": [
+        {
+          "by": "general",
+          "at": "2026-08-14T17:28:13.101Z",
+          "text": "typecheck + 19 测试 + 覆盖率 100% 全部通过"
+        }
+      ],
+      "createdAt": "2026-08-14T17:28:12.672Z",
+      "updatedAt": "2026-08-14T17:28:13.159Z"
+    },
+    "T-002": {
+      "id": "T-002",
+      "title": "编写军团 Scrum 看板协议",
+      "description": "状态机/认领/乐观锁/依赖纪律 + taskctl CLI",
+      "acceptance": [
+        "taskctl 可用",
+        "状态机验证 19/19 通过",
+        "协议文档就绪"
+      ],
+      "priority": "medium",
+      "status": "done",
+      "version": 6,
+      "soldier": "soldier-b",
+      "claimedRound": 4,
+      "claimedAt": "2026-08-14T17:28:13.275Z",
+      "ordersVersion": 1,
+      "parent": null,
+      "blocks": [
+        "T-003"
+      ],
+      "blockedBy": [],
+      "comments": [],
+      "evidence": [
+        {
+          "by": "general",
+          "at": "2026-08-14T17:28:13.391Z",
+          "text": "状态机断言 19/19 通过"
+        }
+      ],
+      "createdAt": "2026-08-14T17:28:12.755Z",
+      "updatedAt": "2026-08-14T17:28:13.448Z"
+    },
+    "T-003": {
+      "id": "T-003",
+      "title": "看板接入将军轮次循环",
+      "description": "将军每轮更新任务库并刷新看板",
+      "acceptance": [
+        "COMMAND.md 更新",
+        "每轮跑 render",
+        "kanban.html 可打开"
+      ],
+      "priority": "medium",
+      "status": "done",
+      "version": 10,
+      "soldier": "general",
+      "claimedRound": 5,
+      "claimedAt": "2026-08-14T17:28:13.564Z",
+      "ordersVersion": 1,
+      "parent": null,
+      "blocks": [],
+      "blockedBy": [
+        "T-002"
+      ],
+      "comments": [
+        {
+          "by": "general",
+          "at": "2026-08-14T17:28:13.622Z",
+          "text": "本轮完成协议与 CLI，剩余：COMMAND.md 更新 + 协议文档 + 每轮渲染"
+        },
+        {
+          "by": "general",
+          "at": "2026-08-14T17:29:09.109Z",
+          "text": "本轮完成：任务库重建为真实数据;看板协议文档就绪"
+        },
+        {
+          "by": "general",
+          "at": "2026-08-14T17:29:15.881Z",
+          "text": "本轮完成：任务库重建为真实数据;看板协议文档就绪"
+        }
+      ],
+      "evidence": [
+        {
+          "by": "general",
+          "at": "2026-08-14T17:29:08.997Z",
+          "text": "COMMAND.md 已接入轮次循环;render 每轮自动跑;kanban.html 打开验证通过"
+        }
+      ],
+      "createdAt": "2026-08-14T17:28:12.814Z",
+      "updatedAt": "2026-08-14T17:29:41.147Z"
+    },
+    "T-004": {
+      "id": "T-004",
+      "title": "验证士兵守护：为 legion/scrum/README.md 补写『写回接口与远程访问』一节",
+      "description": "守护循环端到端验证任务：在 README.md 中补充 serve.mjs 的 POST /api/transition、/api/create、/api/comment 写接口与 token/0.0.0.0 远程访问用法",
+      "acceptance": [
+        "README.md 包含 POST /api/transition 说明",
+        "README.md 包含 --token 与 --host 0.0.0.0 用法",
+        "内容准确对应 serve.mjs 实现"
+      ],
+      "priority": "low",
+      "status": "in_review",
+      "version": 15,
+      "soldier": "soldier-auto",
+      "claimedRound": null,
+      "claimedAt": "2026-08-16T13:52:44.688Z",
+      "ordersVersion": 1,
+      "parent": null,
+      "blocks": [],
+      "blockedBy": [],
+      "comments": [
+        {
+          "by": "soldier-auto",
+          "at": "2026-08-16T13:52:44.831Z",
+          "text": "⚠ 派工失败：SubagentError: no subagent provider registered for \"spawn-in-process\""
+        },
+        {
+          "by": "general",
+          "at": "2026-08-16T13:53:59.333Z",
+          "text": "退回：之前派工因 provider 名错误失败（已修复），请继续完成原任务：为 legion/scrum/README.md 补写写回接口与远程访问一节"
+        },
+        {
+          "by": "soldier-auto",
+          "at": "2026-08-16T13:54:25.366Z",
+          "text": "⚠ worker 未完成（error），任务保留在 in_progress，等待人工处理或下一轮重试"
+        },
+        {
+          "by": "soldier-auto",
+          "at": "2026-08-16T13:54:55.612Z",
+          "text": "⚠ worker 未完成（error），任务保留在 in_progress，等待人工处理或下一轮重试"
+        },
+        {
+          "by": "soldier-auto",
+          "at": "2026-08-16T13:55:25.425Z",
+          "text": "⚠ worker 未完成（error），任务保留在 in_progress，等待人工处理或下一轮重试"
+        },
+        {
+          "by": "soldier-auto",
+          "at": "2026-08-16T13:55:55.401Z",
+          "text": "⚠ worker 未完成（error），任务保留在 in_progress，等待人工处理或下一轮重试"
+        },
+        {
+          "by": "soldier-auto",
+          "at": "2026-08-16T13:56:25.450Z",
+          "text": "⚠ worker 未完成（error），任务保留在 in_progress，等待人工处理或下一轮重试"
+        },
+        {
+          "by": "soldier-auto",
+          "at": "2026-08-16T13:56:55.421Z",
+          "text": "⚠ worker 未完成（error），任务保留在 in_progress，等待人工处理或下一轮重试"
+        },
+        {
+          "by": "soldier-auto",
+          "at": "2026-08-16T13:57:25.480Z",
+          "text": "⚠ worker 未完成（error），任务保留在 in_progress，等待人工处理或下一轮重试"
+        },
+        {
+          "by": "soldier-auto",
+          "at": "2026-08-16T13:57:55.539Z",
+          "text": "⚠ worker 未完成（error），任务保留在 in_progress，等待人工处理或下一轮重试"
+        },
+        {
+          "by": "soldier-auto",
+          "at": "2026-08-16T14:01:35.906Z",
+          "text": "✓ 完成并提交验收：已在 legion/scrum/README.md 新增『写回接口与远程访问』一节，覆盖 POST /api/transition、/api/create、/api/comment 写接口与 --token/--host 0.0.0.0 远程访问用法，内容与 serve.mjs 实现逐条核对一致，并经语法检查与真实服务冒烟测试验证。\n证据：改动：D:/project/dsh/legion/scrum/README.md（在『## Web GUI 侧栏插件』前插入『## 写回接口与远程访问』，含启动命令、令牌携带方式、401/409/400 错误映射、CORS、三个 POST 接口的 curl 示例+字段表+响应形态）。\n\n验收核对（grep 证据，README 第 35-71 行）：① `### POST /api/transition —— 状态迁移`（含 curl 示例与 id/to/by/ifVersion/force 字段表）✓ ② 启动命令 `node legion/scrum/serve.mjs --port 4820 --host 0.0.0.0 --token <t>` + 两条 bullet 解释 --token/--host 0.0.0.0 用法 + DSH_KANBAN_PORT/HOST/TOKEN 环境变量 ✓ ③ 内容与 serve.mjs 逐条对照：写操作复用 taskctl 状态机/乐观锁（runTaskctl）、写后自动 runRender + fs watch→SSE 广播（handleWrite/watch）、authorized() 支持 Bearer/x-dsh-token/?token 三种携带、乐观锁含\"乐观锁\"字样→409 其余→400、/api/config 返回 {auth,host,port}、COR"
+        }
+      ],
+      "evidence": [],
+      "createdAt": "2026-08-16T13:52:37.082Z",
+      "updatedAt": "2026-08-16T14:01:35.907Z"
+    }
+  }
+}

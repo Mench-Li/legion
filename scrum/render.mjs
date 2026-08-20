@@ -1,0 +1,540 @@
+#!/usr/bin/env node
+/**
+ * render —— 从权威任务库（scrum/tasks.json）与军团状态（state.json）聚合生成看板：
+ *   - scrum/board.json   机器可读看板快照（goal 进度、列、卡、士兵统计、版本/评论/描述）
+ *   - scrum/KANBAN.md    文本看板（可在聊天里直接展示）
+ *   - scrum/kanban.html  自包含单文件看板（双击即开只读；serve.mjs 下可拖拽写回）
+ *
+ * 用法：node legion/scrum/render.mjs [--out DIR]
+ * 将军每轮更新任务后运行一次，看板即刷新；serve.mjs 每次写操作后也会自动运行本脚本。
+ */
+import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
+const TASKS_FILE = join(ROOT, 'scrum', 'tasks.json')
+const STATE_FILE = join(ROOT, 'state.json')
+const COLUMN_ORDER = ['backlog', 'todo', 'in_progress', 'in_review', 'blocked', 'done']
+const COLUMN_LABEL = {
+  backlog: 'Backlog（未批准）',
+  todo: 'Todo（已批准）',
+  in_progress: 'In Progress（进行中）',
+  in_review: 'In Review（待验证）',
+  blocked: 'Blocked（受阻）',
+  done: 'Done（完成）',
+  canceled: 'Canceled（已取消）',
+}
+const PRIORITY_LABEL = { high: '🔴高', medium: '🟡中', low: '🟢低' }
+
+function readJson(file, fallback) {
+  if (!existsSync(file)) return fallback
+  try {
+    return JSON.parse(readFileSync(file, 'utf8'))
+  } catch {
+    return fallback
+  }
+}
+
+/** 由角色名派生稳定的徽章色相（0-360） */
+function hueOf(role) {
+  let sum = 0
+  for (const ch of role) sum += ch.codePointAt(0)
+  return sum % 360
+}
+
+function progressOf(tasks) {
+  const rows = Object.values(tasks)
+  const total = rows.filter(t => t.status !== 'canceled').length
+  const done = rows.filter(t => t.status === 'done').length
+  return { total, done, percent: total === 0 ? 0 : Math.round((done / total) * 100) }
+}
+
+function buildBoard() {
+  const tasks = readJson(TASKS_FILE, null)
+  if (tasks === null) throw new Error(`tasks.json 不存在（${TASKS_FILE}）：先运行 taskctl init`)
+  const state = readJson(STATE_FILE, {})
+  const progress = progressOf(tasks.tasks)
+
+  const columns = COLUMN_ORDER.map(status => ({
+    id: status,
+    label: COLUMN_LABEL[status],
+    cards: Object.values(tasks.tasks)
+      .filter(t => t.status === status)
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .map(card => ({
+        id: card.id,
+        title: card.title,
+        description: card.description,
+        priority: card.priority,
+        soldier: card.soldier,
+        claimedRound: card.claimedRound,
+        ordersVersion: card.ordersVersion,
+        acceptance: card.acceptance,
+        parent: card.parent,
+        blocks: card.blocks,
+        blockedBy: card.blockedBy,
+        version: card.version,
+        comments: card.comments,
+        evidence: card.evidence.length,
+        updatedAt: card.updatedAt,
+      })),
+  }))
+  const canceled = Object.values(tasks.tasks).filter(t => t.status === 'canceled').length
+
+  const soldiers = {}
+  for (const t of Object.values(tasks.tasks)) {
+    if (t.soldier === null) continue
+    const s = soldiers[t.soldier] ?? { role: t.soldier, inProgress: 0, inReview: 0, done: 0, blocked: 0, total: 0 }
+    s.total += 1
+    if (t.status === 'in_progress') s.inProgress += 1
+    if (t.status === 'in_review') s.inReview += 1
+    if (t.status === 'done') s.done += 1
+    if (t.status === 'blocked') s.blocked += 1
+    soldiers[t.soldier] = s
+  }
+
+  return {
+    generatedAt: new Date().toISOString(),
+    goal: {
+      objective: state.objective ?? '（未填写目标）',
+      phase: state.phase ?? 'unknown',
+      roundsCompleted: state.roundsCompleted ?? 0,
+      progress,
+      progressBar: bar(progress.percent),
+    },
+    totals: { open: progress.total - progress.done, done: progress.done, total: progress.total, canceled },
+    columns,
+    soldiers: Object.values(soldiers).sort((a, b) => a.role.localeCompare(b.role)),
+  }
+}
+
+function bar(percent, width = 20) {
+  const filled = Math.round((percent / 100) * width)
+  return `${'█'.repeat(filled)}${'░'.repeat(width - filled)}`
+}
+
+function renderMarkdown(board) {
+  const lines = ['# 军团看板（KANBAN）', '']
+  lines.push('## Goal 进度', '')
+  lines.push(`**${board.goal.objective}**`, '')
+  lines.push(`\`${board.goal.progressBar}\` **${board.goal.progress.percent}%**（${board.goal.progress.done}/${board.goal.progress.total} 完成）· 阶段 ${board.goal.phase} · 已完成 ${board.goal.roundsCompleted} 轮`, '')
+  lines.push('', '## 士兵统计', '', '| 士兵 | 进行中 | 待验证 | 完成 | 受阻 | 总计 |', '| --- | --- | --- | --- | --- | --- |')
+  for (const s of board.soldiers) {
+    lines.push(`| ${s.role} | ${s.inProgress} | ${s.inReview} | ${s.done} | ${s.blocked} | ${s.total} |`)
+  }
+  if (board.soldiers.length === 0) lines.push('| （尚无认领任务的士兵） | | | | | |')
+  lines.push('')
+  for (const col of board.columns) {
+    lines.push(`## ${col.label}（${col.cards.length}）`, '')
+    if (col.cards.length === 0) {
+      lines.push('_空_', '')
+      continue
+    }
+    for (const c of col.cards) {
+      const tags = [
+        c.priority !== 'medium' ? PRIORITY_LABEL[c.priority] : '',
+        c.soldier ? `@${c.soldier}` : '',
+        c.claimedRound ? `第${c.claimedRound}轮认领` : '',
+        c.blockedBy.length > 0 ? `依赖:${c.blockedBy.join(',')}` : '',
+      ].filter(Boolean).join(' ')
+      lines.push(`- **${c.id}** ${c.title}${tags ? `（${tags}）` : ''}`)
+      if (c.acceptance.length > 0) lines.push(`  - 验收：${c.acceptance.join('；')}`)
+    }
+    lines.push('')
+  }
+  lines.push(`_生成于 ${board.generatedAt}；运行 \`node legion/scrum/render.mjs\` 刷新_`)
+  return `${lines.join('\n')}\n`
+}
+
+function renderHtml(board) {
+  const data = JSON.stringify(board)
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="refresh" content="30">
+<title>军团看板 · ${board.goal.objective.slice(0, 40)}</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; background: #0f1420; color: #e6e9f0; }
+  header { padding: 14px 20px; background: #161d2e; border-bottom: 1px solid #242f45; position: sticky; top: 0; z-index: 10; }
+  h1 { margin: 0 0 6px; font-size: 18px; }
+  .goal-line { display: flex; align-items: center; gap: 12px; font-size: 13px; color: #9aa6bd; }
+  .progress { flex: 1; max-width: 520px; height: 14px; background: #1d2740; border-radius: 7px; overflow: hidden; }
+  .progress > i { display: block; height: 100%; background: linear-gradient(90deg, #3b82f6, #22c55e); }
+  .meta { font-size: 12px; color: #6b7a94; margin-left: auto; }
+  .toolbar { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+  .toolbar select, .toolbar button { background: #1a2237; color: #e6e9f0; border: 1px solid #26334e; border-radius: 8px; padding: 5px 10px; font-size: 12px; cursor: pointer; }
+  .toolbar .hint { color: #6b7a94; font-size: 12px; }
+  .soldiers { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .soldier { display: flex; align-items: center; gap: 6px; background: #1a2237; border: 1px solid #26334e; border-radius: 999px; padding: 3px 10px 3px 4px; font-size: 12px; cursor: pointer; user-select: none; }
+  .soldier .dot { width: 18px; height: 18px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 10px; color: #0f1420; font-weight: 700; }
+  .soldier .counts { color: #7d8aa3; }
+  .soldier.active { outline: 2px solid #60a5fa; }
+  main { display: flex; gap: 12px; padding: 14px; overflow-x: auto; align-items: flex-start; }
+  .column { flex: 0 0 300px; min-width: 280px; background: #131a2b; border: 1px solid #212c45; border-radius: 10px; padding: 8px; }
+  .column.drag-over { outline: 2px dashed #60a5fa; background: #16203a; }
+  .column h2 { margin: 4px 6px 10px; font-size: 13px; color: #9aa6bd; display: flex; justify-content: space-between; }
+  .column h2 .n { background: #1d2740; border-radius: 999px; padding: 0 8px; font-size: 11px; }
+  .card { background: #1a2237; border: 1px solid #26334e; border-left: 3px solid #3b82f6; border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; font-size: 12px; cursor: grab; }
+  .card.dragging { opacity: .4; }
+  .card.done { opacity: .62; border-left-color: #22c55e; }
+  .card.blocked { border-left-color: #ef4444; }
+  .card h3 { margin: 0 0 4px; font-size: 13px; }
+  .card .tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+  .tag { font-size: 10px; padding: 1px 6px; border-radius: 999px; background: #232f4d; color: #aeb9d1; }
+  .tag.p-high { background: #4c1d24; color: #fda4af; }
+  .tag.p-low { background: #173b2a; color: #86efac; }
+  .tag.soldier { background: #1e3a5f; }
+  .acceptance { margin-top: 6px; color: #7d8aa3; }
+  .acceptance li { margin-left: 14px; }
+  .footer { margin-top: 6px; color: #5d6a85; font-size: 11px; display: flex; justify-content: space-between; }
+  .footer button { background: none; border: none; color: #7d8aa3; cursor: pointer; font-size: 11px; padding: 0; }
+  .footer button:hover { color: #e6e9f0; }
+  .empty { color: #44506a; text-align: center; padding: 14px 0; font-size: 12px; }
+  .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: #1a2237; border: 1px solid #26334e; border-radius: 8px; padding: 8px 14px; font-size: 12px; z-index: 60; max-width: 80vw; }
+  .toast.err { border-color: #ef4444; color: #fda4af; }
+  .modal { position: fixed; inset: 0; background: rgba(10,14,24,.72); display: flex; align-items: center; justify-content: center; z-index: 50; }
+  .modal .panel { background: #131a2b; border: 1px solid #26334e; border-radius: 12px; padding: 18px 20px; width: min(520px, 90vw); max-height: 84vh; overflow: auto; }
+  .modal h3 { margin: 0 0 12px; font-size: 15px; }
+  .modal label { display: block; font-size: 12px; color: #9aa6bd; margin: 10px 0 4px; }
+  .modal input, .modal textarea, .modal select { width: 100%; background: #0f1420; color: #e6e9f0; border: 1px solid #26334e; border-radius: 8px; padding: 7px 9px; font-size: 12px; font-family: inherit; }
+  .modal .row { display: flex; gap: 10px; }
+  .modal .row > div { flex: 1; }
+  .modal .actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
+  .modal .actions button { background: #1d2740; color: #e6e9f0; border: 1px solid #26334e; border-radius: 8px; padding: 6px 14px; cursor: pointer; font-size: 12px; }
+  .modal .actions button.primary { background: #2563eb; border-color: #2563eb; }
+  .comment { border-top: 1px solid #212c45; padding: 8px 0; font-size: 12px; }
+  .comment .who { color: #60a5fa; font-size: 11px; }
+  .comment .at { color: #5d6a85; font-size: 10px; margin-left: 6px; }
+  .comment .text { margin-top: 3px; white-space: pre-wrap; color: #c6cede; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🏛 军团看板 <span style="font-size:12px;color:#6b7a94" id="mode-label"></span></h1>
+  <div class="goal-line">
+    <span id="goal-title">${escapeHtml(board.goal.objective)}</span>
+    <span id="goal-meta"></span>
+    <span class="meta" id="live-badge"></span>
+  </div>
+  <div class="toolbar">
+    <label style="font-size:12px;color:#9aa6bd">以身份操作
+      <select id="identity"></select>
+    </label>
+    <button type="button" id="btn-create">＋ 新建任务</button>
+    <button type="button" id="btn-token">🔑 令牌</button>
+    <span class="hint" id="drag-hint"></span>
+  </div>
+  <div class="soldiers" id="soldiers"></div>
+</header>
+<main id="board"></main>
+<script id="board-data" type="application/json">${data}</script>
+<script>
+  let board = JSON.parse(document.getElementById('board-data').textContent)
+  const hue = role => { let s = 0; for (const ch of role) s += ch.codePointAt(0); return s % 360 }
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
+  const fmt = iso => { const d = new Date(iso); return d.toLocaleString('zh-CN', { hour12: false }) }
+  const label = { backlog: 'Backlog', todo: 'Todo', in_progress: '进行中', in_review: '待验证', blocked: '受阻', done: '完成', canceled: '已取消' }
+  const pri = { high: '高', medium: '中', low: '低' }
+  const TRANSITIONS = { backlog:['todo','blocked','canceled'], todo:['in_progress','blocked','canceled'], in_progress:['in_review','todo','blocked','canceled'], in_review:['done','in_progress','blocked','canceled'], blocked:['todo','in_progress','canceled'], done:['in_progress','canceled'], canceled:[] }
+  const LIVE = location.protocol === 'http:' || location.protocol === 'https:'
+  let filter = null
+  let dragging = null
+  let detail = null
+
+  const identity = {
+    get() { return localStorage.getItem('kanban.identity') || 'general' },
+    set(v) { localStorage.setItem('kanban.identity', v) },
+  }
+  const token = {
+    get() { return localStorage.getItem('kanban.token') || '' },
+    set(v) { localStorage.setItem('kanban.token', v) },
+  }
+
+  function toast(msg, kind) {
+    const el = document.createElement('div')
+    el.className = 'toast' + (kind === 'err' ? ' err' : '')
+    el.textContent = msg
+    document.body.appendChild(el)
+    setTimeout(() => el.remove(), 4200)
+  }
+
+  function findCard(id) {
+    for (const col of board.columns) {
+      const c = col.cards.find(c => c.id === id)
+      if (c) return { ...c, status: col.id }
+    }
+    return null
+  }
+
+  async function api(path, body) {
+    const headers = { 'content-type': 'application/json' }
+    const t = token.get()
+    if (t) headers['authorization'] = 'Bearer ' + t
+    let r = await fetch(path, { method: 'POST', headers, body: JSON.stringify(body) })
+    if (r.status === 401) {
+      const t2 = prompt('看板开启了令牌保护，请输入令牌：', t)
+      if (!t2) return { ok: false, error: '未提供令牌' }
+      token.set(t2)
+      headers['authorization'] = 'Bearer ' + t2
+      r = await fetch(path, { method: 'POST', headers, body: JSON.stringify(body) })
+    }
+    const data = await r.json().catch(() => ({}))
+    return { ok: r.ok, error: data.error, data }
+  }
+
+  async function handleDrop(id, from, to) {
+    if (from === to) return
+    const allowed = TRANSITIONS[from] || []
+    if (!allowed.includes(to)) {
+      toast('非法迁移：' + label[from] + ' → ' + label[to] + '（服务端同样会拒绝）', 'err')
+      return
+    }
+    const card = findCard(id)
+    if (!card) return
+    const r = await api('/api/transition', { id, to, by: identity.get(), ifVersion: card.version })
+    if (r.ok) toast(id + ' → ' + label[to] + ' ✓')
+    else if (r.error) toast(r.error, 'err')
+  }
+
+  function card(c, status) {
+    const canDrag = LIVE ? 'draggable="true"' : ''
+    return \`
+    <div class="card \${esc(status)}" \${canDrag} data-id="\${esc(c.id)}" data-status="\${esc(status)}">
+      <h3>\${esc(c.id)} · \${esc(c.title)}</h3>
+      \${c.description ? \`<div style="color:#9aa6bd;margin:4px 0">\${esc(c.description.slice(0, 120))}\${c.description.length > 120 ? '…' : ''}</div>\` : ''}
+      <div class="tags">
+        <span class="tag p-\${esc(c.priority)}">\${pri[c.priority] || c.priority}</span>
+        \${c.soldier ? \`<span class="tag soldier" style="background:hsl(\${hue(c.soldier)},70%,25%)">@\${esc(c.soldier)}\</span>\` : ''}
+        \${c.claimedRound ? \`<span class="tag">第\${c.claimedRound}轮认领</span>\` : ''}
+        \${c.ordersVersion ? \`<span class="tag">orders v\${c.ordersVersion}</span>\` : ''}
+        \${c.blockedBy.length ? \`<span class="tag">依赖:\${esc(c.blockedBy.join(','))}</span>\` : ''}
+        \${c.evidence ? \`<span class="tag">✓\${c.evidence} 证据</span>\` : ''}
+      </div>
+      \${c.acceptance.length ? \`<ul class="acceptance">\${c.acceptance.map(a => \`<li>\${esc(a)}\</li>\`).join('')}</ul>\` : ''}
+      <div class="footer"><span>\${c.comments.length} 评论</span><span><button type="button" data-detail="\${esc(c.id)}">详情/评论</button> · v\${c.version} · \${fmt(c.updatedAt)}</span></div>
+    </div>\`
+  }
+
+  function identityBar() {
+    const el = document.getElementById('identity')
+    const roles = ['general', ...board.soldiers.map(s => s.role)]
+    el.innerHTML = roles.map(r => \`<option value="\${esc(r)}"\${identity.get() === r ? ' selected' : ''}>\${esc(r)}</option>\`).join('')
+    el.onchange = () => { identity.set(el.value); toast('身份：' + el.value) }
+    const hint = document.getElementById('drag-hint')
+    hint.textContent = LIVE ? '拖拽卡片跨列即迁移状态；in_review→done 需身份 general' : '文件模式只读；运行 serve.mjs 后拖拽生效'
+  }
+
+  function soldiersBar() {
+    const el = document.getElementById('soldiers')
+    el.innerHTML = board.soldiers.map(s => \`
+      <span class="soldier\${filter === s.role ? ' active' : ''}" data-role="\${esc(s.role)}">
+        <span class="dot" style="background:hsl(\${hue(s.role)},70%,60%)">\${s.role[0].toUpperCase()}</span>
+        \${esc(s.role)}
+        <span class="counts">▶\${s.inProgress} ✓\${s.done} ⛔\${s.blocked}</span>
+      </span>\`).join('') || '<span class="soldier">尚无认领任务的士兵</span>'
+    el.querySelectorAll('.soldier').forEach(el => el.onclick = () => {
+      filter = filter === el.dataset.role ? null : el.dataset.role
+      render()
+    })
+  }
+
+  function detailModal() {
+    const c = detail ? findCard(detail) : null
+    if (!c) return
+    const overlay = document.createElement('div')
+    overlay.className = 'modal'
+    overlay.innerHTML = \`
+      <div class="panel">
+        <h3>\${esc(c.id)} · \${esc(c.title)} <span class="tag">\${label[c.status]}</span></h3>
+        \${c.description ? \`<div style="color:#c6cede;white-space:pre-wrap;font-size:12px">\${esc(c.description)}</div>\` : ''}
+        \${c.acceptance.length ? \`<ul class="acceptance">\${c.acceptance.map(a => \`<li>\${esc(a)}\</li>\`).join('')}</ul>\` : ''}
+        <div style="margin-top:10px;color:#9aa6bd;font-size:12px">评论（\${c.comments.length}）</div>
+        \${c.comments.map(cm => \`<div class="comment"><span class="who">@\${esc(cm.by)}</span><span class="at">\${fmt(cm.at)}</span><div class="text">\${esc(cm.text)}</div></div>\`).join('') || '<div style="color:#5d6a85;font-size:12px;padding:6px 0">暂无评论</div>'}
+        <label>追加评论（\${esc(identity.get())} 身份；退回任务请写清原因）</label>
+        <textarea id="cmt-text" rows="2" placeholder="例如：验收不通过，需要补充 X……"></textarea>
+        <div class="actions">
+          <button type="button" data-close>关闭</button>
+          <button type="button" class="primary" id="cmt-send">提交评论</button>
+        </div>
+      </div>\`
+    document.body.appendChild(overlay)
+    overlay.querySelector('[data-close]').onclick = () => { overlay.remove(); detail = null }
+    overlay.addEventListener('click', e => { if (e.target === overlay) { overlay.remove(); detail = null } })
+    overlay.querySelector('#cmt-send').onclick = async () => {
+      const text = overlay.querySelector('#cmt-text').value.trim()
+      if (!text) { toast('评论不能为空', 'err'); return }
+      const r = await api('/api/comment', { id: c.id, by: identity.get(), text })
+      overlay.remove(); detail = null
+      toast(r.ok ? c.id + ' 评论已提交' : (r.error || '评论失败'), r.ok ? undefined : 'err')
+    }
+  }
+
+  function createModal() {
+    const overlay = document.createElement('div')
+    overlay.className = 'modal'
+    overlay.innerHTML = \`
+      <div class="panel">
+        <h3>新建任务（backlog，将军批准后士兵才可认领）</h3>
+        <label>标题</label><input id="n-title" placeholder="一句话说清做什么">
+        <label>描述（可选）</label><textarea id="n-desc" rows="3" placeholder="上下文、目标、成功定义"></textarea>
+        <label>验收标准（每行一条，可选）</label><textarea id="n-acc" rows="3" placeholder="每行一条验收标准"></textarea>
+        <div class="row">
+          <div><label>优先级</label><select id="n-pri"><option value="high">高</option><option value="medium" selected>中</option><option value="low">低</option></select></div>
+        </div>
+        <div class="actions">
+          <button type="button" data-close>取消</button>
+          <button type="button" class="primary" id="n-send">创建</button>
+        </div>
+      </div>\`
+    document.body.appendChild(overlay)
+    overlay.querySelector('[data-close]').onclick = () => overlay.remove()
+    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove() })
+    overlay.querySelector('#n-send').onclick = async () => {
+      const title = overlay.querySelector('#n-title').value.trim()
+      if (!title) { toast('标题不能为空', 'err'); return }
+      const r = await api('/api/create', {
+        title,
+        description: overlay.querySelector('#n-desc').value.trim(),
+        acceptance: overlay.querySelector('#n-acc').value.split('\\n').map(s => s.trim()).filter(Boolean),
+        priority: overlay.querySelector('#n-pri').value,
+      })
+      overlay.remove()
+      toast(r.ok ? '任务已创建（backlog）' : (r.error || '创建失败'), r.ok ? undefined : 'err')
+    }
+  }
+
+  function render() {
+    const el = document.getElementById('board')
+    el.innerHTML = board.columns.map(col => {
+      const cards = col.cards.filter(c => !filter || c.soldier === filter)
+      return \`
+      <section class="column" data-col="\${col.id}">
+        <h2><span>\${label[col.id]}</span><span class="n">\${cards.length}</span></h2>
+        \${cards.map(c => card(c, col.id)).join('') || '<div class="empty">空</div>'}
+      </section>\`
+    }).join('')
+    soldiersBar()
+    identityBar()
+    goalMeta()
+  }
+
+  function goalMeta() {
+    const el = document.getElementById('goal-meta')
+    if (el) {
+      const g = board.goal
+      el.innerHTML = \`<span class="progress"><i style="width:\${g.progress.percent}%"></i></span><strong>\${g.progress.percent}%</strong><span>\${g.progress.done}/\${g.progress.total} 完成</span><span class="meta">阶段 \${g.phase} · 第 \${g.roundsCompleted} 轮 · \${fmt(g.generatedAt)}</span>\`
+    }
+    document.title = \`军团看板 · \${board.goal.objective.slice(0, 40)}\`
+  }
+
+  function apply(next) { board = next; render() }
+
+  function wireDrag() {
+    const el = document.getElementById('board')
+    el.addEventListener('dragstart', e => {
+      const cardEl = e.target.closest('.card')
+      if (!cardEl) return
+      dragging = { id: cardEl.dataset.id, from: cardEl.dataset.status }
+      cardEl.classList.add('dragging')
+      e.dataTransfer.effectAllowed = 'move'
+    })
+    el.addEventListener('dragend', e => {
+      const cardEl = e.target.closest('.card')
+      if (cardEl) cardEl.classList.remove('dragging')
+      dragging = null
+    })
+    el.addEventListener('dragover', e => {
+      const col = e.target.closest('.column')
+      if (!col || !dragging) return
+      e.preventDefault()
+      e.dataTransfer.dropEffect = 'move'
+      col.classList.add('drag-over')
+    })
+    el.addEventListener('dragleave', e => {
+      const col = e.target.closest('.column')
+      if (col) col.classList.remove('drag-over')
+    })
+    el.addEventListener('drop', e => {
+      e.preventDefault()
+      const col = e.target.closest('.column')
+      if (col) col.classList.remove('drag-over')
+      if (!dragging) return
+      void handleDrop(dragging.id, dragging.from, col.dataset.col)
+      dragging = null
+    })
+    el.addEventListener('click', e => {
+      const btn = e.target.closest('[data-detail]')
+      if (btn) { detail = btn.dataset.detail; detailModal() }
+    })
+  }
+
+  function startPolling() {
+    const badge = document.getElementById('live-badge')
+    if (badge) badge.textContent = '● 轮询中'
+    setInterval(async () => {
+      try { const r = await fetch('/api/board'); if (r.ok) apply(await r.json()) } catch { /* 服务器未就绪时静默重试 */ }
+    }, 5000)
+  }
+  function startSSE() {
+    const es = new EventSource('/api/board/events')
+    es.onopen = () => { const badge = document.getElementById('live-badge'); if (badge) badge.textContent = '● 实时' }
+    es.onmessage = e => { try { apply(JSON.parse(e.data)) } catch { /* 推送瞬间的重渲染冲突可忽略 */ } }
+    es.onerror = () => { es.close(); startPolling() }
+  }
+  function boot() {
+    render()
+    wireDrag()
+    document.getElementById('btn-create').onclick = createModal
+    document.getElementById('btn-token').onclick = () => {
+      const t = prompt('看板写操作令牌（留空清除）：', token.get())
+      if (t === null) return
+      token.set(t)
+      toast(t ? '令牌已保存' : '令牌已清除')
+    }
+    const mode = document.getElementById('mode-label')
+    if (LIVE) {
+      document.querySelector('meta[http-equiv="refresh"]')?.remove()
+      if (mode) mode.textContent = '(Scrum · 实时 · 拖拽写回)'
+      if (window.EventSource) startSSE(); else startPolling()
+    } else if (mode) {
+      mode.textContent = '(Scrum · 文件模式 · 只读 · 30s 自动刷新)'
+    }
+  }
+  boot()
+</script>
+</body>
+</html>
+`
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+}
+
+function formatTime(iso) {
+  return new Date(iso).toLocaleString('zh-CN', { hour12: false })
+}
+
+function main() {
+  const args = process.argv.slice(2)
+  const outDir = args[0] === '--out' ? args[1] : join(ROOT, 'scrum')
+  if (outDir === undefined) throw new Error('--out 需要一个目录')
+  mkdirSync(outDir, { recursive: true })
+
+  const board = buildBoard()
+  const boardFile = join(outDir, 'board.json')
+  const mdFile = join(outDir, 'KANBAN.md')
+  const htmlFile = join(outDir, 'kanban.html')
+  writeFileSync(boardFile, `${JSON.stringify(board, null, 2)}\n`)
+  writeFileSync(mdFile, renderMarkdown(board))
+  writeFileSync(htmlFile, renderHtml(board))
+  process.stdout.write(
+    `${JSON.stringify({ ok: true, goal: board.goal.progress.percent, done: board.goal.progress.done, total: board.goal.progress.total, board: boardFile, kanban: mdFile, html: htmlFile }, null, 2)}\n`,
+  )
+}
+
+main()

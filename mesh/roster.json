@@ -1,0 +1,17 @@
+{
+  "roles": {
+    "general": {
+      "agentId": null,
+      "status": "active",
+      "mailbox": "legion/mesh/mailboxes/general.md",
+      "lastSeen": ""
+    },
+    "soldier-01": {
+      "agentId": null,
+      "status": "pending",
+      "mailbox": "legion/mesh/mailboxes/soldier-01.md",
+      "lastSeen": "",
+      "ordersVersion": 1
+    }
+  }
+}

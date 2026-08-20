@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>DSH Web GUI 侧栏嵌入军团看板 · 效果图（mockup）</title>
+<style>
+  * { box-sizing: border-box; margin: 0; }
+  body { font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; background: #0a0e16; color: #e6e9f0; height: 100vh; display: flex; flex-direction: column; }
+  /* ── 模拟 DSH Web GUI 窗口 ── */
+  .chrome { flex: 1; display: flex; flex-direction: column; border: 1px solid #1f2940; border-radius: 10px; overflow: hidden; margin: 12px; box-shadow: 0 8px 40px rgba(0,0,0,.5); }
+  .titlebar { display: flex; align-items: center; gap: 10px; padding: 8px 14px; background: #111827; border-bottom: 1px solid #1f2940; font-size: 12px; color: #8b98b0; }
+  .titlebar .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .titlebar .dot.r { background: #f87171; } .titlebar .dot.y { background: #fbbf24; } .titlebar .dot.g { background: #34d399; }
+  .titlebar .addr { background: #1a2237; border-radius: 6px; padding: 3px 12px; flex: 1; max-width: 480px; }
+  .body { flex: 1; display: flex; min-height: 0; }
+  /* 左侧导航 */
+  .nav { width: 56px; background: #0d1220; border-right: 1px solid #1f2940; display: flex; flex-direction: column; align-items: center; padding-top: 10px; gap: 14px; font-size: 18px; }
+  .nav .item { width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; border-radius: 8px; color: #5d6a85; }
+  .nav .item.active { background: #1e3a5f; color: #93c5fd; }
+  /* 聊天区 */
+  .chat { flex: 1; min-width: 0; display: flex; flex-direction: column; background: #0f1420; }
+  .chat .head { padding: 10px 16px; border-bottom: 1px solid #1f2940; font-size: 13px; color: #9aa6bd; }
+  .chat .msgs { flex: 1; overflow: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; font-size: 13px; }
+  .msg { max-width: 86%; padding: 9px 12px; border-radius: 10px; line-height: 1.55; }
+  .msg.user { align-self: flex-end; background: #1d4ed8; }
+  .msg.assistant { align-self: flex-start; background: #1a2237; border: 1px solid #26334e; }
+  .msg.soldier { align-self: flex-start; background: #14233a; border: 1px solid #1e3a5f; }
+  .msg .who { display: block; font-size: 10px; color: #7d8aa3; margin-bottom: 3px; }
+  .msg .mono { font-family: Consolas, monospace; font-size: 11px; color: #93c5fd; }
+  .chat .input { padding: 10px 14px; border-top: 1px solid #1f2940; color: #44506a; font-size: 12px; }
+  /* 右侧看板面板（ui-kanban 插件渲染区） */
+  .panel { width: 320px; background: #0d1220; border-left: 1px solid #1f2940; display: flex; flex-direction: column; min-height: 0; }
+  .panel .plughead { display: flex; align-items: center; gap: 6px; padding: 9px 12px; border-bottom: 1px solid #1f2940; font-size: 12px; color: #9aa6bd; }
+  .panel .plughead .pill { background: #1e3a5f; color: #93c5fd; font-size: 10px; border-radius: 999px; padding: 1px 8px; }
+  .panel .plughead .live { margin-left: auto; font-size: 10px; color: #34d399; }
+  .kanban { flex: 1; overflow: auto; padding: 10px; display: flex; flex-direction: column; gap: 10px; }
+  .goal { background: #131a2b; border: 1px solid #212c45; border-radius: 8px; padding: 10px; }
+  .goal .obj { font-size: 12px; line-height: 1.45; color: #c7d0e2; }
+  .goal .bar { margin-top: 8px; height: 10px; background: #1d2740; border-radius: 5px; overflow: hidden; }
+  .goal .bar i { display: block; height: 100%; background: linear-gradient(90deg, #3b82f6, #22c55e); }
+  .goal .row { display: flex; justify-content: space-between; margin-top: 6px; font-size: 11px; color: #8b98b0; }
+  .soldiers { display: flex; flex-wrap: wrap; gap: 6px; }
+  .soldier { display: flex; align-items: center; gap: 5px; background: #1a2237; border: 1px solid #26334e; border-radius: 999px; padding: 2px 8px 2px 3px; font-size: 11px; }
+  .soldier .dot { width: 16px; height: 16px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; color: #0f1420; }
+  .cols { display: flex; flex-direction: column; gap: 8px; }
+  .col { background: #131a2b; border: 1px solid #212c45; border-radius: 8px; padding: 8px; }
+  .col h4 { font-size: 11px; color: #8b98b0; margin-bottom: 6px; display: flex; justify-content: space-between; }
+  .col h4 .n { background: #1d2740; border-radius: 999px; padding: 0 7px; }
+  .mini { background: #1a2237; border-left: 3px solid #22c55e; border-radius: 6px; padding: 6px 8px; margin-bottom: 6px; font-size: 11px; }
+  .mini .t { color: #e6e9f0; }
+  .mini .meta { color: #6b7a94; font-size: 10px; margin-top: 2px; }
+  .fullscreen { display: block; text-align: center; margin: 0 10px 10px; padding: 7px; border: 1px solid #26334e; border-radius: 7px; background: #1a2237; color: #93c5fd; font-size: 12px; text-decoration: none; }
+  /* 插件化说明 */
+  .explain { background: #0d1220; border-top: 1px solid #1f2940; padding: 10px 16px; font-size: 11px; color: #7d8aa3; line-height: 1.7; }
+  .explain code { background: #1a2237; padding: 1px 5px; border-radius: 4px; color: #93c5fd; }
+</style>
+</head>
+<body>
+<div class="chrome">
+  <div class="titlebar">
+    <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+    <span class="addr">http://127.0.0.1:3080  ·  DSH Web GUI</span>
+    <span>军团会话 · deepseek-v4-flash</span>
+  </div>
+  <div class="body">
+    <div class="nav">
+      <span class="item">💬</span><span class="item active">📁</span><span class="item">⚙️</span><span class="item">🏛</span>
+    </div>
+    <div class="chat">
+      <div class="head">会话：军团协作 · 目标：参考 dashi-taskboard 做 Scrum 看板</div>
+      <div class="msgs">
+        <div class="msg user">继续给 kanban.html 加实时刷新，或把看板接入 GUI 侧栏</div>
+        <div class="msg assistant"><span class="who">assistant（将军）</span>
+          serve.mjs 已上线：<span class="mono">http://127.0.0.1:4820</span> SSE 实时推送验证通过。任务 <span class="mono">T-003</span> 完成，<span class="mono">render</span> 已刷新看板。
+        </div>
+        <div class="msg soldier"><span class="who">soldier-a（后台）</span>
+          mesh 报告：<span class="mono">T-001</span> done，evidence: typecheck + 19 测试 + 覆盖率 100% 全部通过（orders v1）
+        </div>
+        <div class="msg soldier"><span class="who">soldier-b（后台）</span>
+          mesh 报告：<span class="mono">T-002</span> done，evidence: 状态机断言 19/19 通过（orders v1）
+        </div>
+        <div class="msg assistant"><span class="who">assistant（将军）</span>
+          📋 KANBAN 摘要：goal <b>100%</b>（3/3）· @soldier-a ✓1 · @soldier-b ✓1 · 侧栏看板实时同步中
+        </div>
+      </div>
+      <div class="input">输入消息…（此处是真实 GUI 的输入框，侧栏为 ui-kanban 插件渲染）</div>
+    </div>
+    <div class="panel">
+      <div class="plughead">🏛 军团看板 <span class="pill">ui-kanban</span> <span class="live">● 实时(SSE)</span></div>
+      <div class="kanban">
+        <div class="goal">
+          <div class="obj">参考 dashi-taskboard，把军团协作任务看板化（Scrum 状态机 + 认领/乐观锁/依赖）</div>
+          <div class="bar"><i style="width:100%"></i></div>
+          <div class="row"><span>3/3 完成</span><span><b>100%</b> · 阶段 executing · 第 1 轮</span></div>
+        </div>
+        <div class="soldiers">
+          <span class="soldier"><span class="dot" style="background:hsl(50,70%,60%)">G</span>general <span style="color:#6b7a94">✓1</span></span>
+          <span class="soldier"><span class="dot" style="background:hsl(120,70%,60%)">A</span>soldier-a <span style="color:#6b7a94">✓1</span></span>
+          <span class="soldier"><span class="dot" style="background:hsl(220,70%,60%)">B</span>soldier-b <span style="color:#6b7a94">✓1</span></span>
+        </div>
+        <div class="cols">
+          <div class="col">
+            <h4><span>In Review · 待验证</span><span class="n">0</span></h4>
+            <div style="color:#44506a;font-size:11px;text-align:center;padding:6px">空</div>
+          </div>
+          <div class="col">
+            <h4><span>Done · 完成</span><span class="n">3</span></h4>
+            <div class="mini"><div class="t">T-001 · 实现士兵直连消息总线</div><div class="meta">@soldier-a · 第3轮 · ✓证据</div></div>
+            <div class="mini"><div class="t">T-002 · 编写军团 Scrum 看板协议</div><div class="meta">@soldier-b · 第4轮 · ✓证据</div></div>
+            <div class="mini"><div class="t">T-003 · 看板接入将军轮次循环</div><div class="meta">@general · 第5轮 · ✓证据</div></div>
+          </div>
+        </div>
+      </div>
+      <a class="fullscreen" href="http://127.0.0.1:4820" target="_blank">↗ 全屏打开实时看板</a>
+    </div>
+  </div>
+</div>
+<div class="explain">
+  <b>这是效果图（mockup），不是真实 GUI。</b>右侧面板 = 插件化侧栏嵌入：
+  ① <code>packages/client/ui-kanban</code>（DSH client 插件，dual-face）在侧栏注册一个面板入口，渲染区即上图；
+  ② 数据经 <code>EventSource('http://127.0.0.1:4820/api/board/events')</code> 实时推送（serve.mjs 已加 CORS）；
+  ③ 插拔：在 <code>cordis.patch.yml</code> 加一行 <code>- id: ui-kanban</code> 即启用，<code>disabled: true</code> 即卸载；可放进独立 profile/preset 按需开启；
+  ④ 成本：新增 client 包 + 组合挂载 + 重建 web 产物 + 约 70 个 web 快照重录（需 <code>DSH_SNAPSHOT=record</code>）。
+  ⑤ 已就绪的前置：serve.mjs（静态 + /api/board + SSE + CORS）可直接被任何页面 iframe/fetch 消费。
+</div>
+</body>
+</html>

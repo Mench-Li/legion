@@ -112,7 +112,12 @@ const WORKER_SCHEMA: ObjectJsonSchema = {
 /** 以子进程方式执行 taskctl 命令，成功解析 stdout JSON。 */
 function runTaskctl(scrumDir: string, argv: string[]): Promise<unknown> {
   return new Promise((resolve, reject) => {
-    const proc = spawn(process.execPath, [join(scrumDir, 'taskctl.mjs'), ...argv], { cwd: join(scrumDir, '..') })
+    const proc = spawn(process.execPath, [join(scrumDir, 'taskctl.mjs'), ...argv], {
+      cwd: join(scrumDir, '..'),
+      // Electron 里 process.execPath 是 DSH Desktop.exe（不是 node）；
+      // ELECTRON_RUN_AS_NODE=1 让它当 node 用。普通 node 进程里该变量是 no-op，双环境通用。
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+    })
     let out = ''
     let err = ''
     proc.stdout.on('data', d => { out += d })

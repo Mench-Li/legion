@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "nextId": 5,
+  "nextId": 6,
   "tasks": {
     "T-001": {
       "id": "T-001",
@@ -192,6 +192,26 @@
       "evidence": [],
       "createdAt": "2026-08-16T13:52:37.082Z",
       "updatedAt": "2026-08-16T14:01:35.907Z"
+    },
+    "T-005": {
+      "id": "T-005",
+      "title": "e2e:在 worktree 创建标记文件（验证隔离）",
+      "description": "在工作目录创建 e2e-marker.txt，内容 worker-in-worktree；用 type 命令验证内容后回复 JSON",
+      "acceptance": [],
+      "priority": "high",
+      "status": "todo",
+      "version": 2,
+      "soldier": null,
+      "claimedRound": null,
+      "claimedAt": null,
+      "ordersVersion": 1,
+      "parent": null,
+      "blocks": [],
+      "blockedBy": [],
+      "comments": [],
+      "evidence": [],
+      "createdAt": "2026-08-20T16:21:24.589Z",
+      "updatedAt": "2026-08-20T16:21:24.659Z"
     }
   }
 }

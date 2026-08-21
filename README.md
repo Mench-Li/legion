@@ -217,6 +217,7 @@ worker 是一次性 subagent，父为按 cwd 惰性创建的 foreman agent。wor
 | `isolate` | `true` | 是否用 git worktree 隔离每个任务 |
 | `repoRoot` | `D:/project/dsh/legion` | worktree 隔离所用 git 仓库根 |
 | `worktreeRoot` | 空 | worktree 目录根（默认 `repoRoot/.legion-worktrees`） |
+| `denyTools` | `[]` | worker 禁用的**全局**工具名（toolFilter.deny 只认全局工具；`web_search`/`web_fetch` 是本地工具无法过滤，断网靠提示词纪律） |
 | `logFile` | 空 | 日志文件（默认 `~/.dsh/super-injector/dsh-scrum-worker.log`） |
 
 守护当前经 `@dsh-external/dsh-super-injector` 注入到 DSH Desktop 的 `desktop` profile 中运行。
@@ -253,6 +254,19 @@ git -C D:/project/dsh/legion merge --no-ff w/<id>    # 合入
 | ③ 认领租约 / 过期检测 | `staleMinutes` 超时自动 `release-stale`，防止士兵认领后失踪 |
 | ④ pre-push 守卫 + 依赖环检测 | 拦截 `w/*` 分支 push；`link` 建依赖时成环即拒绝 |
 
+## 8.1 审阅闭环（借鉴 Codex 五项）
+
+| 项 | 命令 / 机制 | 说明 |
+| --- | --- | --- |
+| ① apply_patch | `taskctl patch`（守护自动调用） | worker 完成的改动被捕获为统一 diff，落盘 `scrum/patches/<id>-n.patch`，任务只存元数据 |
+| ② 士兵沙箱 | `denyTools` + 提示词纪律 | 默认断网靠提示词纪律；`denyTools` 可额外禁用全局工具（toolFilter 只认全局工具） |
+| ③ 规则注入 | `LEGION.md` | 守护每次派工前读 `LEGION.md`（其次 `AGENTS.md`）注入士兵提示词 |
+| ④ 审批门 | `taskctl promote` / `taskctl reject` | 合入主分支、打回回滚均为**将军专属**（`--by general` 强制） |
+| ⑤ 看板审阅 | `in_review` 卡片 | 「📄 diff」标签 + 「查看 diff」预览 + 「✅ 通过验收」/「↩ 打回重做」按钮；`/api/patch?id=` 取 diff |
+
+- 打回（`reject`）= 回滚 worktree（删分支 `w/<id>`）+ 归还 `todo` + 记录原因；验收通过后 `promote` 合入主分支并清理。
+- 审阅路径：`in_review` 卡片 → 看 diff → 通过（→ done → promote）或打回（→ todo → 守护重派）。
+
 ---
 
 ## 9. 日常工作流
@@ -262,7 +276,7 @@ git -C D:/project/dsh/legion merge --no-ff w/<id>    # 合入
 1. 建任务 → `create`。
 2. 批准 → `approve`（backlog → todo）。之后守护自动接手。
 3. 对 `in_review` 任务**独立验证**（跑真实命令，不信士兵自报）。
-4. 验收通过 → promote 合入 + `transition --to done --by general`；不通过 → `comment` 退回 + `transition --to in_progress`。
+4. 验收：看板 `in_review` 卡片「查看 diff」→ 通过：`transition --to done --by general` 后 `promote` 合入（或看板「✅ 通过验收」+「🔀 promote 合并」按钮）；不通过：`reject` 打回（或看板「↩ 打回重做」），自动回滚 worktree 并归还 todo。
 
 ### 士兵（守护自动）
 

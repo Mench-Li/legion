@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "nextId": 7,
+  "nextId": 6,
   "tasks": {
     "T-001": {
       "id": "T-001",
@@ -124,10 +124,10 @@
       ],
       "priority": "low",
       "status": "in_review",
-      "version": 15,
+      "version": 19,
       "soldier": "soldier-auto",
       "claimedRound": null,
-      "claimedAt": "2026-08-16T13:52:44.688Z",
+      "claimedAt": "2026-08-21T17:11:52.295Z",
       "ordersVersion": 1,
       "parent": null,
       "blocks": [],
@@ -187,11 +187,16 @@
           "by": "soldier-auto",
           "at": "2026-08-16T14:01:35.906Z",
           "text": "✓ 完成并提交验收：已在 legion/scrum/README.md 新增『写回接口与远程访问』一节，覆盖 POST /api/transition、/api/create、/api/comment 写接口与 --token/--host 0.0.0.0 远程访问用法，内容与 serve.mjs 实现逐条核对一致，并经语法检查与真实服务冒烟测试验证。\n证据：改动：D:/project/dsh/legion/scrum/README.md（在『## Web GUI 侧栏插件』前插入『## 写回接口与远程访问』，含启动命令、令牌携带方式、401/409/400 错误映射、CORS、三个 POST 接口的 curl 示例+字段表+响应形态）。\n\n验收核对（grep 证据，README 第 35-71 行）：① `### POST /api/transition —— 状态迁移`（含 curl 示例与 id/to/by/ifVersion/force 字段表）✓ ② 启动命令 `node legion/scrum/serve.mjs --port 4820 --host 0.0.0.0 --token <t>` + 两条 bullet 解释 --token/--host 0.0.0.0 用法 + DSH_KANBAN_PORT/HOST/TOKEN 环境变量 ✓ ③ 内容与 serve.mjs 逐条对照：写操作复用 taskctl 状态机/乐观锁（runTaskctl）、写后自动 runRender + fs watch→SSE 广播（handleWrite/watch）、authorized() 支持 Bearer/x-dsh-token/?token 三种携带、乐观锁含\"乐观锁\"字样→409 其余→400、/api/config 返回 {auth,host,port}、COR"
+        },
+        {
+          "by": "soldier-auto",
+          "at": "2026-08-21T17:15:58.586Z",
+          "text": "✓ 完成并提交验收：已验证并确认 legion/scrum/README.md 的「写回接口与远程访问」一节完整覆盖 POST /api/transition、/api/create、/api/comment 写接口及 --token/--host 0.0.0.0 远程访问用法，内容与 serve.mjs 实现逐条核对一致，并通过真实服务冒烟测试（/api/config 返回 {auth:true,host:\"0.0.0.0\"}，无令牌 POST 正确返回 401）。\n证据：① 验收1：README.md 含「### POST /api/transition —— 状态迁移」，字段表 id/to/by/ifVersion/force 与 serve.mjs 中 argv 拼装（transition id --to --by --if-version --force）逐一对应 ✓。② 验收2：README 含启动命令 `node legion/scrum/serve.mjs --port 4820 --host 0.0.0.0 --token <t>`，并有 --token（未配置时写操作放行、/api/config 返回 {auth,host,port}）与 --host 0.0.0.0（缺省 127.0.0.1）两条说明 bullet，另列 DSH_KANBAN_PORT/HOST/TOKEN 环境变量等价项 ✓。③ 验收3：逐条对照 serve.mjs 源码——令牌三种携带（Bearer/x-dsh-token/?token，见 authorized()）、401/409（乐观锁字样）/400 错误映射（handleWrite）、GET 开放、CORS `*`+OPTIONS 预检、/api/create 字段（title 必填、acceptance 以 ';' 拼接）"
         }
       ],
       "evidence": [],
       "createdAt": "2026-08-16T13:52:37.082Z",
-      "updatedAt": "2026-08-16T14:01:35.907Z"
+      "updatedAt": "2026-08-21T17:15:58.586Z"
     },
     "T-005": {
       "id": "T-005",
@@ -218,26 +223,6 @@
       "evidence": [],
       "createdAt": "2026-08-20T16:21:24.589Z",
       "updatedAt": "2026-08-20T16:52:29.848Z"
-    },
-    "T-006": {
-      "id": "T-006",
-      "title": "drag-back-test",
-      "description": "",
-      "acceptance": [],
-      "priority": "medium",
-      "status": "canceled",
-      "version": 6,
-      "soldier": null,
-      "claimedRound": null,
-      "claimedAt": null,
-      "ordersVersion": 1,
-      "parent": null,
-      "blocks": [],
-      "blockedBy": [],
-      "comments": [],
-      "evidence": [],
-      "createdAt": "2026-08-21T16:44:59.898Z",
-      "updatedAt": "2026-08-21T16:45:00.288Z"
     }
   }
 }

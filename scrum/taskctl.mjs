@@ -17,9 +17,14 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { spawnSync } from 'node:child_process'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const TASKS_FILE = join(ROOT, 'scrum', 'tasks.json')
+/** 补丁目录：patch 命令把统一 diff 落盘于此，看板经 /api/patch 按 id 取阅。 */
+const PATCHES_DIR = join(ROOT, 'scrum', 'patches')
+/** 默认 worktree 根（与守护 prepareWorktree 的默认值一致）。 */
+const WORKTREE_ROOT = join(ROOT, '.legion-worktrees')
 
 /** 合法状态集合与列顺序（看板列） */
 export const STATUSES = ['backlog', 'todo', 'in_progress', 'in_review', 'blocked', 'done', 'canceled']
@@ -194,6 +199,7 @@ const commands = {
       blockedBy: [],
       comments: [],
       evidence: [],
+      patches: [],
       createdAt: now(),
       updatedAt: now(),
     }
@@ -419,6 +425,93 @@ const commands = {
     }
     if (released.length > 0) saveDb(db)
     process.stdout.write(`${JSON.stringify({ ok: true, released }, null, 2)}\n`)
+  },
+
+  /** 记录一次改动为统一 diff：patch 内容落盘 scrum/patches/<id>，任务只存元数据（供将军审阅）。 */
+  patch(args) {
+    requireArgs(args, ['by', 'summary', 'diff'])
+    const id = requireId(args)
+    if (!existsSync(args.diff)) throw new Error(`--diff 不是存在的文件：${args.diff}`)
+    const diffContent = readFileSync(args.diff, 'utf8')
+    if (diffContent.trim().length === 0) throw new Error('--diff 文件为空，拒绝记录空补丁')
+    const t = withLock({
+      id,
+      ifVersion: args.ifVersion,
+      mutate(t) {
+        const list = t.patches ?? []
+        const patchId = `${t.id}-${list.length + 1}`
+        const diffFile = `${patchId}.patch`
+        mkdirSync(PATCHES_DIR, { recursive: true })
+        writeFileSync(join(PATCHES_DIR, diffFile), diffContent, 'utf8')
+        const files = (args.files ?? '').split(',').map(s => s.trim()).filter(s => s.length > 0)
+        list.push({ id: patchId, at: now(), by: args.by, summary: args.summary, files, diffFile })
+        t.patches = list
+      },
+    })
+    printTask(t)
+  },
+
+  /**
+   * 打回：将军退回 in_review/done 的任务——回滚 worktree（删分支 w/<id>）并归还 todo。
+   * 只有将军可执行（--by general）。
+   */
+  reject(args) {
+    requireArgs(args, ['by', 'reason'])
+    if (args.by !== 'general') throw new Error('只有将军（--by general）能打回任务')
+    const id = requireId(args)
+    const t = withLock({
+      id,
+      ifVersion: args.ifVersion,
+      mutate(t) {
+        if (t.status !== 'in_review' && t.status !== 'done') {
+          throw new Error(`只有 in_review/done 可打回，当前 ${t.status}`)
+        }
+        const git = a => spawnSync('git', a, { cwd: ROOT, encoding: 'utf8' })
+        let reverted = false
+        try {
+          git(['worktree', 'remove', '--force', join(WORKTREE_ROOT, id)])
+          reverted = git(['branch', '-D', `w/${id}`]).status === 0
+        } catch { /* 无 worktree 也继续（非隔离模式或已清理） */ }
+        t.status = 'todo'
+        t.soldier = null
+        t.claimedAt = null
+        t.claimedRound = null
+        t.comments.push({
+          by: args.by,
+          at: now(),
+          text: `打回：${args.reason}${reverted ? `（已回滚 worktree 改动并删除分支 w/${id}）` : '（worktree 回滚失败或不存在，需手动清理）'}`,
+        })
+      },
+    })
+    printTask(t)
+  },
+
+  /**
+   * promote：将军验收通过后把 worktree 分支 w/<id> 合并回主分支并清理。
+   * 只有将军可执行（--by general），任务须已 done。
+   */
+  promote(args) {
+    requireArgs(args, ['by'])
+    if (args.by !== 'general') throw new Error('只有将军（--by general）能 promote 合并')
+    const id = requireId(args)
+    const t = withLock({
+      id,
+      ifVersion: args.ifVersion,
+      mutate(t) {
+        if (t.status !== 'done') throw new Error(`只有 done 的任务可 promote，当前 ${t.status}`)
+        const git = a => spawnSync('git', a, { cwd: ROOT, encoding: 'utf8' })
+        const branch = `w/${id}`
+        if (git(['rev-parse', '--verify', branch]).status !== 0) {
+          throw new Error(`分支 ${branch} 不存在（可能已 promote 或非隔离模式）`)
+        }
+        const merge = git(['merge', '--no-ff', branch, '-m', `promote ${id}`])
+        if (merge.status !== 0) throw new Error(`merge 失败：${(merge.stderr || merge.stdout).trim()}`)
+        git(['worktree', 'remove', '--force', join(WORKTREE_ROOT, id)])
+        git(['branch', '-D', branch])
+        t.comments.push({ by: args.by, at: now(), text: `promote：分支 ${branch} 已合并回主分支并清理 worktree` })
+      },
+    })
+    printTask(t)
   },
 }
 

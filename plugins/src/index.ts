@@ -16,7 +16,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { spawn } from 'node:child_process'
-import { appendFileSync, mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -56,6 +56,8 @@ export interface Config {
   repoRoot: string
   /** worktree 目录根（默认 repoRoot/.legion-worktrees）。 */
   worktreeRoot: string
+  /** worker 禁用的工具名（默认断网：web_search/web_fetch），经 toolFilter 生效。 */
+  denyTools: string[]
   logFile: string
 }
 
@@ -71,6 +73,7 @@ export const Config = z.object({
   isolate: z.boolean().default(true),
   repoRoot: z.string().default('D:/project/dsh/legion'),
   worktreeRoot: z.string().default(''),
+  denyTools: z.array(z.string()).default(['web_search', 'web_fetch']),
   logFile: z.string().default(''),
 })
 
@@ -281,7 +284,43 @@ exit 0
     return true
   }
 
+  /** 读取仓库规则（LEGION.md 优先，其次 AGENTS.md），注入派工提示词。 */
+  function readRepoRules(): string {
+    const candidates = [
+      join(config.repoRoot, 'LEGION.md'),
+      join(config.repoRoot, 'AGENTS.md'),
+      join(config.scrumDir, 'LEGION.md'),
+    ]
+    for (const f of candidates) {
+      try {
+        if (existsSync(f)) return readFileSync(f, 'utf8').slice(0, 4000)
+      } catch { /* 读取失败跳过 */ }
+    }
+    return ''
+  }
+
+  /** 捕获 worktree 的改动 diff 并记录到任务（taskctl patch）。非隔离模式跳过。 */
+  async function recordPatch(taskId: string, dir: string | null, summary: string): Promise<void> {
+    if (dir === null) return
+    try {
+      const show = await runGit(dir, ['show', '--format=', 'HEAD'])
+      if (show.code !== 0 || show.out.trim().length === 0) return
+      const names = await runGit(dir, ['diff', '--name-only', 'HEAD~1', 'HEAD'])
+      const files = names.out.split('\n').map(s => s.trim()).filter(Boolean).join(',')
+      const tmp = join(dir, `.legion-${taskId}.patch`)
+      writeFileSync(tmp, show.out, 'utf8')
+      try {
+        await runTaskctl(config.scrumDir, ['patch', taskId, '--by', config.role, '--summary', summary, '--diff', tmp, '--files', files])
+      } finally {
+        try { rmSync(tmp) } catch { /* 清理失败静默 */ }
+      }
+    } catch (e) {
+      log(`${taskId} 记录 diff 失败：${String(e)}`)
+    }
+  }
+
   function buildWorkerPrompt(t: Task, feedback: Task['comments'], cwd: string, isolated: boolean): string {
+    const repoRules = readRepoRules()
     const lines = [
       `你是军团士兵 ${config.role}（守护循环派发的临时 worker），任务 ${t.id} 由你独立完成。`,
       '',
@@ -299,12 +338,16 @@ exit 0
       ...(t.comments.length > 0
         ? t.comments.map(c => `- @${c.by}（${c.at}）: ${c.text}`)
         : ['- （无）']),
+      ...(repoRules !== ''
+        ? ['', '仓库规则（必须遵守，来自 LEGION.md/AGENTS.md）：', repoRules]
+        : []),
       '',
       '纪律：',
       '1. 只做实现与验证；不要调用任何 taskctl / task_* / 看板写接口——状态迁移由守护负责，你只负责把代码和验证做好。',
       '2. 完成标准 = 验收标准逐条真实满足：跑真实命令验证（typecheck / build / test），给出证据。',
       '3. 改动落在工作目录内；如需更新 legion 文档一并更新。',
-      '4. 最终回复只输出 JSON 报告，不要额外叙述：',
+      '4. 禁止联网与任何 push（pre-push 已拦截 w/* 分支）；外部依赖若缺失，在证据里说明而非擅自下载。',
+      '5. 最终回复只输出 JSON 报告，不要额外叙述：',
       '   {"status":"done","summary":"一句话总结","evidence":"验证证据（命令与输出要点）","blocker":""}',
       '   或 {"status":"blocked","summary":"已完成的部分","evidence":"","blocker":"卡在哪个文件/命令/什么报错（必须具体）"}',
       '',
@@ -338,6 +381,7 @@ exit 0
           parent,
           signal: controller.signal,
           outputSchema: WORKER_SCHEMA,
+          ...(config.denyTools.length > 0 ? { toolFilter: { deny: config.denyTools } } : {}),
         })
       } catch (e) {
         log(`${t.id} 派工失败：${String(e)}`)
@@ -360,8 +404,9 @@ exit 0
     }
     const report = result.structured as WorkerReport
     if (report.status === 'done') {
-      // worktree 隔离：先提交到 w/<id> 分支再进 in_review；promote 由将军显式执行
+      // worktree 隔离：先提交到 w/<id> 分支再记录 diff，然后进 in_review；promote 由将军显式执行
       if (worktreeDir !== null) await commitWorktree(t.id, worktreeDir, report.summary)
+      await recordPatch(t.id, worktreeDir, report.summary)
       await transitionTo(t.id, 'in_review')
       const promoteHint = worktreeDir !== null
         ? `\n[worktree] 改动在分支 w/${t.id}。验收通过后 promote：git -C ${config.repoRoot} merge --no-ff w/${t.id}；放弃：git -C ${config.repoRoot} worktree remove --force ${worktreeDir} && git -C ${config.repoRoot} branch -D w/${t.id}`

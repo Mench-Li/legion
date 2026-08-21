@@ -77,6 +77,7 @@ function buildBoard() {
         version: card.version,
         comments: card.comments,
         evidence: card.evidence.length,
+        patches: (card.patches ?? []).map(p => ({ id: p.id, at: p.at, by: p.by, summary: p.summary, files: p.files })),
         updatedAt: card.updatedAt,
       })),
   }))
@@ -331,6 +332,7 @@ function renderHtml(board) {
         \${c.ordersVersion ? \`<span class="tag">orders v\${c.ordersVersion}</span>\` : ''}
         \${c.blockedBy.length ? \`<span class="tag">依赖:\${esc(c.blockedBy.join(','))}</span>\` : ''}
         \${c.evidence ? \`<span class="tag">✓\${c.evidence} 证据</span>\` : ''}
+        \${c.patches && c.patches.length ? \`<span class="tag">📄\${c.patches.length} diff</span>\` : ''}
       </div>
       \${c.acceptance.length ? \`<ul class="acceptance">\${c.acceptance.map(a => \`<li>\${esc(a)}\</li>\`).join('')}</ul>\` : ''}
       <div class="footer"><span>\${c.comments.length} 评论</span><span><button type="button" data-detail="\${esc(c.id)}">详情/评论</button> · v\${c.version} · \${fmt(c.updatedAt)}</span></div>
@@ -360,6 +362,23 @@ function renderHtml(board) {
     })
   }
 
+  async function viewPatch(patchId) {
+    const r = await fetch('/api/patch?id=' + encodeURIComponent(patchId))
+    if (!r.ok) { toast('diff 读取失败', 'err'); return }
+    const text = await r.text()
+    const overlay = document.createElement('div')
+    overlay.className = 'modal'
+    overlay.innerHTML = \`
+      <div class="panel" style="width:min(760px,92vw)">
+        <h3>改动 diff · \${esc(patchId)}</h3>
+        <pre style="background:#0f1420;border:1px solid #26334e;border-radius:8px;padding:10px;overflow:auto;max-height:60vh;font-size:11px;color:#c6cede;white-space:pre">\${esc(text.slice(0, 60000))}</pre>
+        <div class="actions"><button type="button" data-close>关闭</button></div>
+      </div>\`
+    document.body.appendChild(overlay)
+    overlay.querySelector('[data-close]').onclick = () => overlay.remove()
+    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove() })
+  }
+
   function detailModal() {
     const c = detail ? findCard(detail) : null
     if (!c) return
@@ -370,12 +389,15 @@ function renderHtml(board) {
         <h3>\${esc(c.id)} · \${esc(c.title)} <span class="tag">\${label[c.status]}</span></h3>
         \${c.description ? \`<div style="color:#c6cede;white-space:pre-wrap;font-size:12px">\${esc(c.description)}</div>\` : ''}
         \${c.acceptance.length ? \`<ul class="acceptance">\${c.acceptance.map(a => \`<li>\${esc(a)}\</li>\`).join('')}</ul>\` : ''}
+        \${c.patches && c.patches.length ? \`<div style="margin-top:10px;color:#9aa6bd;font-size:12px">改动 diff（\${c.patches.length}）</div>\${c.patches.map(p => \`<div class="comment"><span class="who">#\${esc(p.id)}</span><span class="at">\${fmt(p.at)}</span><div class="text">\${esc(p.summary)}\${p.files && p.files.length ? '（' + esc(p.files.join(', ')) + '）' : ''}</div><button type="button" data-patch="\${esc(p.id)}" style="margin-top:4px;background:#1d2740;color:#e6e9f0;border:1px solid #26334e;border-radius:8px;padding:3px 10px;cursor:pointer;font-size:11px">查看 diff</button></div>\`).join('')}\` : ''}
         <div style="margin-top:10px;color:#9aa6bd;font-size:12px">评论（\${c.comments.length}）</div>
         \${c.comments.map(cm => \`<div class="comment"><span class="who">@\${esc(cm.by)}</span><span class="at">\${fmt(cm.at)}</span><div class="text">\${esc(cm.text)}</div></div>\`).join('') || '<div style="color:#5d6a85;font-size:12px;padding:6px 0">暂无评论</div>'}
         <label>追加评论（\${esc(identity.get())} 身份；退回任务请写清原因）</label>
         <textarea id="cmt-text" rows="2" placeholder="例如：验收不通过，需要补充 X……"></textarea>
         <div class="actions">
           <button type="button" data-close>关闭</button>
+          \${c.status === 'in_review' ? \`<button type="button" class="primary" id="act-approve">✅ 通过验收</button><button type="button" id="act-reject">↩ 打回重做</button>\` : ''}
+          \${c.status === 'done' ? \`<button type="button" class="primary" id="act-promote">🔀 promote 合并</button>\` : ''}
           <button type="button" class="primary" id="cmt-send">提交评论</button>
         </div>
       </div>\`
@@ -388,6 +410,27 @@ function renderHtml(board) {
       const r = await api('/api/comment', { id: c.id, by: identity.get(), text })
       overlay.remove(); detail = null
       toast(r.ok ? c.id + ' 评论已提交' : (r.error || '评论失败'), r.ok ? undefined : 'err')
+    }
+    overlay.querySelectorAll('[data-patch]').forEach(btn => { btn.onclick = () => viewPatch(btn.dataset.patch) })
+    const approveBtn = overlay.querySelector('#act-approve')
+    if (approveBtn) approveBtn.onclick = async () => {
+      const r = await api('/api/transition', { id: c.id, to: 'done', by: identity.get(), ifVersion: c.version })
+      overlay.remove(); detail = null
+      toast(r.ok ? c.id + ' 已通过验收 → done' : (r.error || '通过失败'), r.ok ? undefined : 'err')
+    }
+    const rejectBtn = overlay.querySelector('#act-reject')
+    if (rejectBtn) rejectBtn.onclick = async () => {
+      const reason = prompt('打回原因（会写进评论并回滚 worktree 改动）：', '')
+      if (reason === null) return
+      if (!reason.trim()) { toast('打回原因不能为空', 'err'); return }
+      const r = await api('/api/reject', { id: c.id, by: identity.get(), reason: reason.trim(), ifVersion: c.version })
+      overlay.remove(); detail = null
+      toast(r.ok ? c.id + ' 已打回 → todo' : (r.error || '打回失败'), r.ok ? undefined : 'err')
+    }
+    const promoteBtn = overlay.querySelector('#act-promote')
+    if (promoteBtn) promoteBtn.onclick = async () => {
+      const r = await api('/api/promote', { id: c.id, by: identity.get(), ifVersion: c.version })
+      toast(r.ok ? c.id + ' 已 promote 合并' : (r.error || 'promote 失败'), r.ok ? undefined : 'err')
     }
   }
 

@@ -36,6 +36,7 @@ export function apply(ctx: Context, config: Config): void {
   const activityFile = join(scrumDir, 'activity.jsonl')
   const kanbanFile = join(scrumDir, 'kanban.html')
   const tasksFile = join(scrumDir, 'tasks.json')
+  const patchesDir = join(scrumDir, 'patches')
   const taskctl = join(scrumDir, 'taskctl.mjs')
   const render = join(scrumDir, 'render.mjs')
 
@@ -272,6 +273,51 @@ export function apply(ctx: Context, config: Config): void {
           if (typeof by !== 'string' || by.length === 0) throw new Error('缺少参数 by')
           if (typeof text !== 'string' || text.trim().length === 0) throw new Error('缺少参数 text')
           return runTaskctl(['comment', id, '--by', by, '--text', text.trim()])
+        })
+        return
+      }
+
+      if (req.method === 'POST' && path === '/api/reject') {
+        await handleWrite(req, res, (body) => {
+          const id = body.id
+          const by = body.by
+          const reason = body.reason
+          if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
+          if (typeof by !== 'string' || by.length === 0) throw new Error('缺少参数 by')
+          if (typeof reason !== 'string' || reason.trim().length === 0) throw new Error('缺少参数 reason')
+          const argv = ['reject', id, '--by', by, '--reason', reason.trim()]
+          if (typeof body.ifVersion === 'number') argv.push('--if-version', String(body.ifVersion))
+          return runTaskctl(argv)
+        })
+        return
+      }
+
+      if (req.method === 'POST' && path === '/api/promote') {
+        await handleWrite(req, res, (body) => {
+          const id = body.id
+          const by = body.by
+          if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
+          if (typeof by !== 'string' || by.length === 0) throw new Error('缺少参数 by')
+          const argv = ['promote', id, '--by', by]
+          if (typeof body.ifVersion === 'number') argv.push('--if-version', String(body.ifVersion))
+          return runTaskctl(argv)
+        })
+        return
+      }
+
+      if (req.method === 'GET' && path === '/api/patch') {
+        const patchId = url.searchParams.get('id') ?? ''
+        if (!/^[A-Za-z0-9-]+$/.test(patchId)) {
+          json(res, 400, { error: '非法 patch id' })
+          return
+        }
+        readFile(join(patchesDir, `${patchId}.patch`), (err, data) => {
+          if (err) {
+            json(res, 404, { error: `patch 不存在：${patchId}` })
+            return
+          }
+          res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
+          res.end(data)
         })
         return
       }

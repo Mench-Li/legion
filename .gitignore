@@ -11,6 +11,9 @@ scrum/board.json
 scrum/KANBAN.md
 scrum/kanban.html
 
+# 士兵改动的统一 diff 补丁（运行时产物）
+scrum/patches/
+
 # 守护 worktree 隔离目录
 .legion-worktrees/
 

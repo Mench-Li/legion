@@ -56,7 +56,7 @@ export interface Config {
   repoRoot: string
   /** worktree 目录根（默认 repoRoot/.legion-worktrees）。 */
   worktreeRoot: string
-  /** worker 禁用的工具名（默认断网：web_search/web_fetch），经 toolFilter 生效。 */
+  /** worker 禁用的全局工具名（toolFilter.deny 只认全局工具；web_search/web_fetch 是本地工具无法过滤，断网靠提示词纪律）。 */
   denyTools: string[]
   logFile: string
 }
@@ -73,7 +73,7 @@ export const Config = z.object({
   isolate: z.boolean().default(true),
   repoRoot: z.string().default('D:/project/dsh/legion'),
   worktreeRoot: z.string().default(''),
-  denyTools: z.array(z.string()).default(['web_search', 'web_fetch']),
+  denyTools: z.array(z.string()).default([]),
   logFile: z.string().default(''),
 })
 

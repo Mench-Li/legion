@@ -101,15 +101,20 @@ node scrum\taskctl.mjs <命令> [--key value …]
 | 命令 | 作用 | 关键参数 |
 | --- | --- | --- |
 | `init` | 初始化 `tasks.json` | — |
-| `create` | 建任务（backlog） | `--title`（必填）、`--description`、`--acceptance "a;b;c"`、`--priority high\|medium\|low`、`--parent <id>` |
+| `create` | 建任务（backlog） | `--title`（必填）、`--description`、`--acceptance "a;b;c"`、`--priority high\|medium\|low`、`--parent <id>`、`--role <r>`、`--status backlog\|todo` |
+| `goal` | 发布目标 → 按 `roles.json` 建首阶段任务（直接 todo） | `--title`（必填）、`--description`、`--acceptance`、`--priority` |
 | `get` | 读一个任务 | `<id>` |
-| `list` | 列任务 | `--status <s>`、`--soldier <s>` |
+| `list` | 列任务 | `--status <s>`、`--soldier <s>`、`--role <r>` |
 | `approve` | 批准 backlog → todo | `<id>`、`--if-version <N>` |
 | `claim` | 认领 todo/blocked → in_progress（互斥） | `<id>`、`--soldier <s>`（必填）、`--round <N>`、`--force`、`--if-version <N>` |
 | `transition` | 通用状态迁移（含合法性/依赖/角色检查） | `<id>`、`--to <status>`（必填）、`--by <who>`、`--force`、`--if-version <N>` |
+| `advance` | 流水线自动推进 in_progress/in_review → done | `<id>`、`--by <角色>`（须匹配任务角色）、`--if-version <N>` |
 | `comment` | 追加评论（退回反馈/需求变更） | `<id>`、`--by <who>`（必填）、`--text <t>`（必填） |
 | `evidence` | 追加验证证据 | `<id>`、`--by <who>`（必填）、`--text <t>`（必填） |
 | `link` | 建依赖/父子关系（成环即拒绝） | `<id>`、`--blocks "A,B"`、`--blockedBy "A,B"`、`--parent <id>` |
+| `patch` | 记录统一 diff（守护自动调用） | `<id>`、`--by <who>`、`--summary <s>`、`--diff <文件>`、`--files "a,b"` |
+| `reject` | 将军打回：回滚 worktree + 归还 todo | `<id>`、`--by general`、`--reason <r>`、`--if-version <N>` |
+| `promote` | 将军合入 worktree 分支到主分支 | `<id>`、`--by general`、`--if-version <N>` |
 | `release` | 归还 in_progress → todo | `<id>`、`--by <who>`（必填）、`--reason <r>` |
 | `release-stale` | 批量回收超时认领 | `--older-than <分钟>`（必填）、`--by <who>` |
 
@@ -218,6 +223,7 @@ worker 是一次性 subagent，父为按 cwd 惰性创建的 foreman agent。wor
 | `repoRoot` | `D:/project/dsh/legion` | worktree 隔离所用 git 仓库根 |
 | `worktreeRoot` | 空 | worktree 目录根（默认 `repoRoot/.legion-worktrees`） |
 | `denyTools` | `[]` | worker 禁用的**全局**工具名（toolFilter.deny 只认全局工具；`web_search`/`web_fetch` 是本地工具无法过滤，断网靠提示词纪律） |
+| `rolesFile` | 空 | 多角色流水线定义（默认 `repoRoot/roles.json`；存在则进入流水线模式） |
 | `logFile` | 空 | 日志文件（默认 `~/.dsh/super-injector/dsh-scrum-worker.log`） |
 
 守护当前经 `@dsh-external/dsh-super-injector` 注入到 DSH Desktop 的 `desktop` profile 中运行。
@@ -266,6 +272,29 @@ git -C D:/project/dsh/legion merge --no-ff w/<id>    # 合入
 
 - 打回（`reject`）= 回滚 worktree（删分支 `w/<id>`）+ 归还 `todo` + 记录原因；验收通过后 `promote` 合入主分支并清理。
 - 审阅路径：`in_review` 卡片 → 看 diff → 通过（→ done → promote）或打回（→ todo → 守护重派）。
+
+## 8.2 多角色士兵流水线
+
+将军发布一个目标/需求后，守护按 `roles.json` 里的角色逐阶段自动派工与流转，每个阶段由对应角色的士兵独立完成：
+
+```
+需求澄清 → 方案搜索 → 任务拆解 → 测试用例设计 → 编码实现 → 代码审查 → 测试执行 → 部署与 CI/CD
+```
+
+- **角色定义**：`legion/roles.json`，每个 stage 有 `role`（角色 id）、`label`（中文名）、`prompt`（角色职责，注入该阶段 worker 提示词）、`next`（完成后流转到的下一角色；`null` 为流水线终点）。
+- **发布目标**：`taskctl goal --title … --description …`，创建首阶段任务（`role` = 首 stage，`status` = todo），目标上下文写入描述。
+- **按角色认领**：守护只认领 `role` 匹配某个 stage 的任务，认领身份 = 角色 id（`soldier = role`），派工提示词含该角色的职责。
+- **自动流转**：中间阶段 worker 完成 → 自动合入主分支（autoPromote，merge `w/<id>`）→ `advance` 推进 done → 创建下一角色任务（`parent` 链 + 描述带上「前序阶段已完成」的 summary）。
+- **终点验收**：最后一个角色（`next: null`）完成后进 `in_review`，由将军验收（看板看 diff → 通过/打回）。
+- **通用任务不受影响**：`role` 为空的任务由单角色守护（`config.role`）处理，流水线模式自动跳过它们。
+
+### 发布目标示例
+
+```bash
+node scrum\taskctl.mjs goal --title "实现一个 Markdown 待办清单 Web 应用" --description "本地单页待办：增删改查、Markdown 渲染、localStorage 持久化"
+```
+
+之后看板逐列滚动：需求士兵写 `docs/REQUIREMENTS.md` → 搜索士兵写 `docs/RESEARCH.md` → 拆解士兵写 `docs/TASK_BREAKDOWN.md` → … → 部署士兵写 `docs/DEPLOY.md`，最后将军验收。
 
 ---
 

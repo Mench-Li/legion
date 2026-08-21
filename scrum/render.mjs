@@ -67,6 +67,7 @@ function buildBoard() {
         title: card.title,
         description: card.description,
         priority: card.priority,
+        role: card.role,
         soldier: card.soldier,
         claimedRound: card.claimedRound,
         ordersVersion: card.ordersVersion,
@@ -327,6 +328,7 @@ function renderHtml(board) {
       \${c.description ? \`<div style="color:#9aa6bd;margin:4px 0">\${esc(c.description.slice(0, 120))}\${c.description.length > 120 ? '…' : ''}</div>\` : ''}
       <div class="tags">
         <span class="tag p-\${esc(c.priority)}">\${pri[c.priority] || c.priority}</span>
+        \${c.role ? \`<span class="tag role" style="background:#2b3a55;color:#dbe6ff">⚙ \${esc(c.role)}</span>\` : ''}
         \${c.soldier ? \`<span class="tag soldier" style="background:hsl(\${hue(c.soldier)},70%,25%)">@\${esc(c.soldier)}\</span>\` : ''}
         \${c.claimedRound ? \`<span class="tag">第\${c.claimedRound}轮认领</span>\` : ''}
         \${c.ordersVersion ? \`<span class="tag">orders v\${c.ordersVersion}</span>\` : ''}

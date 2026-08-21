@@ -25,6 +25,8 @@ const TASKS_FILE = join(ROOT, 'scrum', 'tasks.json')
 const PATCHES_DIR = join(ROOT, 'scrum', 'patches')
 /** 默认 worktree 根（与守护 prepareWorktree 的默认值一致）。 */
 const WORKTREE_ROOT = join(ROOT, '.legion-worktrees')
+/** 多角色流水线定义（将军发布目标时读首阶段，守护按角色派工流转）。 */
+const ROLES_FILE = join(ROOT, 'roles.json')
 
 /** 合法状态集合与列顺序（看板列） */
 export const STATUSES = ['backlog', 'todo', 'in_progress', 'in_review', 'blocked', 'done', 'canceled']
@@ -169,6 +171,16 @@ function dependsOn(db, from, to) {
   return false
 }
 
+/** 读取多角色流水线定义（roles.json）。 */
+function readRoles() {
+  if (!existsSync(ROLES_FILE)) throw new Error(`roles.json 不存在（${ROLES_FILE}）`)
+  try {
+    return JSON.parse(readFileSync(ROLES_FILE, 'utf8'))
+  } catch (e) {
+    throw new Error(`roles.json 解析失败：${e.message}`)
+  }
+}
+
 const commands = {
   /** 初始化权威数据库 */
   init() {
@@ -188,13 +200,14 @@ const commands = {
       description: args.description ?? '',
       acceptance: (args.acceptance ?? '').split(';').map(s => s.trim()).filter(s => s.length > 0),
       priority: args.priority ?? 'medium',
-      status: 'backlog',
+      status: args.status ?? 'backlog',
       version: 1,
       soldier: null,
       claimedRound: null,
       claimedAt: null,
       ordersVersion: Number(args.ordersVersion ?? 1),
       parent: args.parent ?? null,
+      role: args.role ?? null,
       blocks: [],
       blockedBy: [],
       comments: [],
@@ -205,10 +218,56 @@ const commands = {
     }
     validateTaskShape(t)
     if (!PRIORITIES.includes(t.priority)) throw new Error(`非法优先级 ${t.priority}（high|medium|low）`)
+    if (t.status !== 'backlog' && t.status !== 'todo') throw new Error(`非法初始状态 ${t.status}（backlog|todo）`)
     if (t.parent !== null && db.tasks[t.parent] === undefined) throw new Error(`父任务 ${t.parent} 不存在`)
     db.tasks[id] = t
     saveDb(db)
     printTask(t)
+  },
+
+  /**
+   * 发布目标：读 roles.json 流水线，创建首个阶段任务（role = 首 stage），
+   * 目标上下文写入描述；默认直接 todo（守护自动接手，按角色逐阶段流转）。
+   */
+  goal(args) {
+    requireArgs(args, ['title'])
+    const roles = readRoles()
+    const stages = roles.stages ?? []
+    if (stages.length === 0) throw new Error('roles.json 无流水线阶段（stages 为空）')
+    const first = stages[0]
+    const description = [
+      args.description ?? '',
+      `[流水线] ${roles.name}：${stages.map(s => s.label).join(' → ')}`,
+      `[本阶段] ${first.label}（${first.role}）`,
+    ].filter(s => s.length > 0).join('\n\n')
+    const db = loadDb()
+    const id = nextId(db)
+    const t = {
+      id,
+      title: args.title.trim(),
+      description,
+      acceptance: (args.acceptance ?? '').split(';').map(s => s.trim()).filter(s => s.length > 0),
+      priority: args.priority ?? 'high',
+      status: 'todo',
+      version: 1,
+      soldier: null,
+      claimedRound: null,
+      claimedAt: null,
+      ordersVersion: Number(args.ordersVersion ?? 1),
+      parent: null,
+      role: first.role,
+      blocks: [],
+      blockedBy: [],
+      comments: [],
+      evidence: [],
+      patches: [],
+      createdAt: now(),
+      updatedAt: now(),
+    }
+    validateTaskShape(t)
+    db.tasks[id] = t
+    saveDb(db)
+    process.stdout.write(`${JSON.stringify({ ok: true, goal: args.title.trim(), pipeline: roles.name, stage: first.label, role: first.role, task: t }, null, 2)}\n`)
   },
 
   /** 读取一个任务 */
@@ -223,6 +282,7 @@ const commands = {
     const rows = all
       .filter(t => args.status === undefined || t.status === args.status)
       .filter(t => args.soldier === undefined || t.soldier === args.soldier)
+      .filter(t => args.role === undefined || t.role === args.role)
       .sort((a, b) => a.id.localeCompare(b.id))
     process.stdout.write(`${JSON.stringify(rows, null, 2)}\n`)
   },
@@ -481,6 +541,30 @@ const commands = {
           at: now(),
           text: `打回：${args.reason}${reverted ? `（已回滚 worktree 改动并删除分支 w/${id}）` : '（worktree 回滚失败或不存在，需手动清理）'}`,
         })
+      },
+    })
+    printTask(t)
+  },
+
+  /**
+   * 流水线自动推进：in_progress/in_review → done（守护调用，将军已授权整条流水线）。
+   * 推进者须匹配任务角色（流水线任务）或认领者（通用任务）。
+   */
+  advance(args) {
+    requireArgs(args, ['by'])
+    const id = requireId(args)
+    const t = withLock({
+      id,
+      ifVersion: args.ifVersion,
+      mutate(t) {
+        if (t.status !== 'in_progress' && t.status !== 'in_review') {
+          throw new Error(`无法推进：任务 ${t.id} 当前 ${t.status}`)
+        }
+        const expected = t.role ?? t.soldier
+        if (expected !== null && expected !== args.by) {
+          throw new Error(`只有 ${expected} 可推进任务 ${t.id}（当前 --by ${args.by}）`)
+        }
+        t.status = 'done'
       },
     })
     printTask(t)

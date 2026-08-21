@@ -58,6 +58,8 @@ export interface Config {
   worktreeRoot: string
   /** worker 禁用的全局工具名（toolFilter.deny 只认全局工具；web_search/web_fetch 是本地工具无法过滤，断网靠提示词纪律）。 */
   denyTools: string[]
+  /** 多角色流水线定义文件（默认 repoRoot/roles.json；存在则进入流水线模式）。 */
+  rolesFile: string
   logFile: string
 }
 
@@ -74,6 +76,7 @@ export const Config = z.object({
   repoRoot: z.string().default('D:/project/dsh/legion'),
   worktreeRoot: z.string().default(''),
   denyTools: z.array(z.string()).default([]),
+  rolesFile: z.string().default(''),
   logFile: z.string().default(''),
 })
 
@@ -88,8 +91,23 @@ interface Task {
   version: number
   soldier: string | null
   claimedAt: string | null
+  parent: string | null
+  role: string | null
   blockedBy: string[]
   comments: Array<{ by: string; at: string; text: string }>
+}
+
+/** 多角色流水线中的一个阶段（角色）。 */
+interface StageDef {
+  role: string
+  label: string
+  prompt: string
+  next: string | null
+}
+
+interface PipelineDef {
+  name: string
+  stages: StageDef[]
 }
 
 /** worker 结构回报。 */
@@ -187,6 +205,23 @@ export function apply(ctx: AppContext, config: Config): void {
   const listTasks = () => runTaskctl(config.scrumDir, ['list']) as Promise<Task[]>
   const getTask = (id: string) => runTaskctl(config.scrumDir, ['get', id]) as Promise<Task>
 
+  /** 多角色流水线：读 roles.json，存在则进入流水线模式（按角色派工 + done 自动流转）。 */
+  const rolesFilePath = config.rolesFile || join(config.repoRoot, 'roles.json')
+  function readPipeline(): PipelineDef | null {
+    try {
+      if (!existsSync(rolesFilePath)) return null
+      const raw = JSON.parse(readFileSync(rolesFilePath, 'utf8'))
+      if (!Array.isArray(raw.stages) || raw.stages.length === 0) return null
+      return raw as PipelineDef
+    } catch (e) {
+      log(`roles.json 读取失败（按单角色模式运行）：${String(e)}`)
+      return null
+    }
+  }
+  const pipeline = readPipeline()
+  const stageByRole = new Map<string, StageDef>((pipeline?.stages ?? []).map(s => [s.role, s]))
+  const isPipeline = pipeline !== null
+
   /** 惰性创建 foreman agent：worker subagent 的父（按工作目录缓存；worktree 隔离时每个 worktree 一个）。 */
   async function ensureForeman(cwd: string): Promise<Agent | undefined> {
     const existing = foremen.get(cwd)
@@ -211,6 +246,12 @@ export function apply(ctx: AppContext, config: Config): void {
   async function transitionTo(id: string, to: string): Promise<void> {
     const t = await getTask(id)
     await runTaskctl(config.scrumDir, ['transition', id, '--to', to, '--by', config.role, '--if-version', String(t.version)])
+  }
+
+  /** 流水线自动推进：in_progress/in_review → done（推进者=任务角色，将军已授权整条流水线）。 */
+  async function advanceTo(id: string, by: string): Promise<void> {
+    const t = await getTask(id)
+    await runTaskctl(config.scrumDir, ['advance', id, '--by', by, '--if-version', String(t.version)])
   }
 
   /** 追加评论（失败不抛出，避免污染主流程）。 */
@@ -319,11 +360,61 @@ exit 0
     }
   }
 
-  function buildWorkerPrompt(t: Task, feedback: Task['comments'], cwd: string, isolated: boolean): string {
+  /** 流水线中间阶段自动合入：merge w/<id> → 当前分支并清理 worktree，让下一角色基于最新主分支工作。 */
+  async function autoPromote(taskId: string, dir: string): Promise<void> {
+    try {
+      const merge = await runGit(config.repoRoot, ['merge', '--no-ff', `w/${taskId}`, '-m', `promote ${taskId}`])
+      if (merge.code !== 0) {
+        log(`${taskId} 自动合入失败：${(merge.err || merge.out).trim()}`)
+        return
+      }
+      await runGit(config.repoRoot, ['worktree', 'remove', '--force', dir])
+      await runGit(config.repoRoot, ['branch', '-D', `w/${taskId}`])
+      log(`${taskId} 已自动合入主分支并清理 worktree`)
+    } catch (e) {
+      log(`${taskId} 自动合入异常：${String(e)}`)
+    }
+  }
+
+  /** 流水线流转：done 任务所属角色有 next 且尚无后继时，创建下一角色任务（todo）。 */
+  async function advancePipeline(doneTask: Task): Promise<void> {
+    if (pipeline === null) return
+    const stage = stageByRole.get(doneTask.role ?? '')
+    if (!stage || !stage.next) return
+    const nextStage = stageByRole.get(stage.next)
+    if (!nextStage) return
+    const all = await listTasks()
+    if (all.some(t => t.parent === doneTask.id)) return
+    const doneSummary = doneTask.comments
+      .filter(c => c.text.startsWith('✓'))
+      .map(c => c.text.replace(/\n.*$/s, ''))
+      .slice(-1)[0] ?? doneTask.title
+    const base = (doneTask.description ?? '').replace(/\n\n\[本阶段\].*$/s, '')
+    const description = [
+      base,
+      `[前序阶段] ${stage.label}（${stage.role}）已完成：${doneSummary}`,
+      `[本阶段] ${nextStage.label}（${nextStage.role}）`,
+    ].filter(s => s.trim().length > 0).join('\n\n')
+    try {
+      const res = await runTaskctl(config.scrumDir, [
+        'create', '--title', doneTask.title, '--description', description,
+        '--role', nextStage.role, '--parent', doneTask.id, '--priority', doneTask.priority, '--status', 'todo',
+      ]) as { id?: string }
+      log(`${doneTask.id} 流水线流转：${stage.role} → ${nextStage.role}（新任务 ${res?.id ?? ''}）`)
+      activity('dispatch', doneTask.id, `流水线流转 ${stage.label} → ${nextStage.label}`)
+    } catch (e) {
+      log(`${doneTask.id} 流转失败：${String(e)}`)
+    }
+  }
+
+  function buildWorkerPrompt(t: Task, feedback: Task['comments'], cwd: string, isolated: boolean, stage?: StageDef): string {
     const repoRules = readRepoRules()
     const lines = [
-      `你是军团士兵 ${config.role}（守护循环派发的临时 worker），任务 ${t.id} 由你独立完成。`,
+      stage
+        ? `你是军团士兵，当前角色「${stage.label}」（${stage.role}）。任务 ${t.id} 由你独立完成。`
+        : `你是军团士兵 ${config.role}（守护循环派发的临时 worker），任务 ${t.id} 由你独立完成。`,
       '',
+      ...(stage ? [`角色职责（必须遵守）：${stage.prompt}`, ''] : []),
       `工作目录：${cwd}`,
       isolated ? `隔离模式：你在独立 git worktree（分支 w/${t.id}）中工作；不要 push（pre-push 已拦截）；改动只留在本 worktree，由将军验收后 promote 合并。` : '',
       `任务看板：${config.scrumDir}（taskctl 是唯一变更入口，但你不要调用它）`,
@@ -356,7 +447,7 @@ exit 0
   }
 
   /** 派一个 worker 处理任务（认领已完成或任务本身可开工）。 */
-  async function runWorker(t: Task, feedback: Task['comments']): Promise<void> {
+  async function runWorker(t: Task, feedback: Task['comments'], stage?: StageDef): Promise<void> {
     // 决定工作目录：isolate 时建 worktree（分支 w/<id>），失败回退 workspace
     let cwd = config.workspace
     let worktreeDir: string | null = null
@@ -377,7 +468,7 @@ exit 0
       try {
         return await ctx.subagents.start(config.provider, {
           label: `scrum:${t.id}`,
-          prompt: [{ type: 'text', text: buildWorkerPrompt(t, feedback, cwd, worktreeDir !== null) }],
+          prompt: [{ type: 'text', text: buildWorkerPrompt(t, feedback, cwd, worktreeDir !== null, stage) }],
           parent,
           signal: controller.signal,
           outputSchema: WORKER_SCHEMA,
@@ -404,16 +495,27 @@ exit 0
     }
     const report = result.structured as WorkerReport
     if (report.status === 'done') {
-      // worktree 隔离：先提交到 w/<id> 分支再记录 diff，然后进 in_review；promote 由将军显式执行
+      // worktree 隔离：先提交到 w/<id> 分支再记录 diff
       if (worktreeDir !== null) await commitWorktree(t.id, worktreeDir, report.summary)
       await recordPatch(t.id, worktreeDir, report.summary)
-      await transitionTo(t.id, 'in_review')
-      const promoteHint = worktreeDir !== null
-        ? `\n[worktree] 改动在分支 w/${t.id}。验收通过后 promote：git -C ${config.repoRoot} merge --no-ff w/${t.id}；放弃：git -C ${config.repoRoot} worktree remove --force ${worktreeDir} && git -C ${config.repoRoot} branch -D w/${t.id}`
-        : ''
-      await safeComment(t.id, `✓ 完成并提交验收：${report.summary}\n证据：${report.evidence}${promoteHint}`)
-      activity('done', t.id, `完成：${report.summary}${worktreeDir !== null ? `（worktree 分支 w/${t.id} 待 promote）` : ''}`)
-      log(`${t.id} → in_review（${report.summary}）`)
+      if (isPipeline && stage && stage.next) {
+        // 流水线中间阶段：自动合入主分支 → done → 流转下一角色
+        if (worktreeDir !== null) await autoPromote(t.id, worktreeDir)
+        await advanceTo(t.id, stage.role)
+        await safeComment(t.id, `✓ ${stage.label}完成：${report.summary}\n证据：${report.evidence}`)
+        activity('done', t.id, `${stage.label}完成：${report.summary}`)
+        log(`${t.id} → done（${stage.label}），流转下一角色`)
+        await advancePipeline(t)
+      } else {
+        // 最终阶段或单角色模式：进 in_review 供将军验收
+        await transitionTo(t.id, 'in_review')
+        const promoteHint = worktreeDir !== null
+          ? `\n[worktree] 改动在分支 w/${t.id}。验收通过后 promote：git -C ${config.repoRoot} merge --no-ff w/${t.id}；放弃：git -C ${config.repoRoot} worktree remove --force ${worktreeDir} && git -C ${config.repoRoot} branch -D w/${t.id}`
+          : ''
+        await safeComment(t.id, `✓ 完成并提交验收：${report.summary}\n证据：${report.evidence}${promoteHint}`)
+        activity('done', t.id, `完成：${report.summary}${worktreeDir !== null ? `（worktree 分支 w/${t.id} 待 promote）` : ''}`)
+        log(`${t.id} → in_review（${report.summary}）`)
+      }
     } else {
       const wtHint = worktreeDir !== null ? `\n[worktree] 部分改动在 ${worktreeDir}（分支 w/${t.id}，未提交）` : ''
       await safeComment(t.id, `⚠ 受阻：${report.blocker || report.summary}${wtHint}`)
@@ -423,22 +525,22 @@ exit 0
     }
   }
 
-  /** 认领 todo 并派工。 */
-  async function workTodo(t: Task): Promise<void> {
+  /** 认领 todo 并派工（流水线模式按任务角色认领 + 用角色提示词）。 */
+  async function workTodo(t: Task, stage?: StageDef): Promise<void> {
     try {
-      await runTaskctl(config.scrumDir, ['claim', t.id, '--soldier', config.role])
+      await runTaskctl(config.scrumDir, ['claim', t.id, '--soldier', stage ? stage.role : config.role])
     } catch (e) {
       log(`${t.id} 认领失败（可能已被他人认领）：${String(e)}`)
       return
     }
-    activity('claim', t.id, '认领开工')
-    await runWorker(t, [])
+    activity('claim', t.id, stage ? `${stage.label}（${stage.role}）认领开工` : '认领开工')
+    await runWorker(t, [], stage)
   }
 
   /** 处理被退回/解阻的任务。 */
-  async function workReturned(t: Task, feedback: Task['comments']): Promise<void> {
+  async function workReturned(t: Task, feedback: Task['comments'], stage?: StageDef): Promise<void> {
     activity('redispatch', t.id, '被退回/解阻，重新派工')
-    await runWorker(t, feedback)
+    await runWorker(t, feedback, stage)
   }
 
   /** 一轮扫单：todo 认领派工；本角色的退回任务纠错；依赖解除的 blocked 续做。 */
@@ -456,6 +558,10 @@ exit 0
       }
       const byId = new Map(tasks.map(t => [t.id, t]))
       const room = () => inflight.size < config.maxWorkers
+      // 流水线模式：守护按任务角色认领/派工；单角色模式：只认 config.role 的任务
+      const self = (t: Task) => (isPipeline ? (t.role ?? config.role) : config.role)
+      const isOurs = (t: Task) => (isPipeline ? (t.role !== null && stageByRole.has(t.role)) : t.soldier === config.role)
+      const stageOf = (t: Task) => (isPipeline ? stageByRole.get(t.role ?? '') : undefined)
 
       // 0. 认领租约回收：释放超过 staleMinutes 无进展的 in_progress 任务（下一轮再认领）
       try {
@@ -465,14 +571,15 @@ exit 0
         log(`release-stale 失败：${String(e)}`)
       }
 
-      // 1. todo：认领（互斥）→ 派工
+      // 1. todo：认领（互斥）→ 派工（流水线模式按任务角色）
       for (const t of tasks.filter(t => t.status === 'todo')) {
         if (!room() || inflight.has(t.id)) continue
+        if (isPipeline && stageOf(t) === undefined) continue // 流水线模式跳过无角色/未知角色任务
         inflight.add(t.id)
-        void workTodo(t).finally(() => inflight.delete(t.id))
+        void workTodo(t, stageOf(t)).finally(() => inflight.delete(t.id))
       }
       // 2. blocked 且本角色、依赖已全部解除：解阻续做
-      for (const t of tasks.filter(t => t.status === 'blocked' && t.soldier === config.role)) {
+      for (const t of tasks.filter(t => t.status === 'blocked' && isOurs(t))) {
         if (!room() || inflight.has(t.id)) continue
         const open = t.blockedBy.filter(depId => {
           const dep = byId.get(depId)
@@ -480,16 +587,16 @@ exit 0
         })
         if (open.length > 0) continue
         inflight.add(t.id)
-        void workReturned(t, []).finally(() => inflight.delete(t.id))
+        void workReturned(t, [], stageOf(t)).finally(() => inflight.delete(t.id))
       }
       // 3. in_progress 且本角色、认领后有他人评论：视为退回，附反馈纠错
-      for (const t of tasks.filter(t => t.status === 'in_progress' && t.soldier === config.role)) {
+      for (const t of tasks.filter(t => t.status === 'in_progress' && isOurs(t))) {
         if (!room() || inflight.has(t.id)) continue
         const feedback = t.comments.filter(c =>
-          c.by !== config.role && (t.claimedAt === null || new Date(c.at) > new Date(t.claimedAt)))
+          c.by !== self(t) && (t.claimedAt === null || new Date(c.at) > new Date(t.claimedAt)))
         if (feedback.length === 0) continue
         inflight.add(t.id)
-        void workReturned(t, feedback).finally(() => inflight.delete(t.id))
+        void workReturned(t, feedback, stageOf(t)).finally(() => inflight.delete(t.id))
       }
     } finally {
       sweeping = false

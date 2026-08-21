@@ -255,7 +255,7 @@ function renderHtml(board) {
   const fmt = iso => { const d = new Date(iso); return d.toLocaleString('zh-CN', { hour12: false }) }
   const label = { backlog: 'Backlog', todo: 'Todo', in_progress: '进行中', in_review: '待验证', blocked: '受阻', done: '完成', canceled: '已取消' }
   const pri = { high: '高', medium: '中', low: '低' }
-  const TRANSITIONS = { backlog:['todo','blocked','canceled'], todo:['in_progress','blocked','canceled'], in_progress:['in_review','todo','blocked','canceled'], in_review:['done','in_progress','blocked','canceled'], blocked:['todo','in_progress','canceled'], done:['in_progress','canceled'], canceled:[] }
+  const TRANSITIONS = { backlog:['todo','blocked','canceled'], todo:['in_progress','blocked','canceled'], in_progress:['in_review','todo','blocked','canceled'], in_review:['done','todo','in_progress','blocked','canceled'], blocked:['todo','in_progress','canceled'], done:['in_progress','canceled'], canceled:[] }
   const LIVE = location.protocol === 'http:' || location.protocol === 'https:'
   let filter = null
   let dragging = null

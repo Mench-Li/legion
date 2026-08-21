@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "nextId": 6,
+  "nextId": 7,
   "tasks": {
     "T-001": {
       "id": "T-001",
@@ -218,6 +218,26 @@
       "evidence": [],
       "createdAt": "2026-08-20T16:21:24.589Z",
       "updatedAt": "2026-08-20T16:52:29.848Z"
+    },
+    "T-006": {
+      "id": "T-006",
+      "title": "drag-back-test",
+      "description": "",
+      "acceptance": [],
+      "priority": "medium",
+      "status": "canceled",
+      "version": 6,
+      "soldier": null,
+      "claimedRound": null,
+      "claimedAt": null,
+      "ordersVersion": 1,
+      "parent": null,
+      "blocks": [],
+      "blockedBy": [],
+      "comments": [],
+      "evidence": [],
+      "createdAt": "2026-08-21T16:44:59.898Z",
+      "updatedAt": "2026-08-21T16:45:00.288Z"
     }
   }
 }

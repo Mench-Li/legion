@@ -28,7 +28,7 @@ const TRANSITIONS = {
   backlog: ['todo', 'blocked', 'canceled'],
   todo: ['in_progress', 'blocked', 'canceled'],
   in_progress: ['in_review', 'todo', 'blocked', 'canceled'],
-  in_review: ['done', 'in_progress', 'blocked', 'canceled'],
+  in_review: ['done', 'todo', 'in_progress', 'blocked', 'canceled'],
   blocked: ['todo', 'in_progress', 'canceled'],
   done: ['in_progress', 'canceled'],
   canceled: [],
@@ -291,6 +291,11 @@ const commands = {
           }
           t.soldier = args.by ?? t.soldier
           if (t.claimedAt === null) t.claimedAt = now()
+        }
+        if (args.to === 'todo') {
+          t.soldier = null
+          t.claimedAt = null
+          t.claimedRound = null
         }
         if (args.to === 'done') {
           if (t.status !== 'in_review') {

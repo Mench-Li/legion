@@ -323,7 +323,7 @@ function renderHtml(board) {
   function card(c, status) {
     const canDrag = LIVE ? 'draggable="true"' : ''
     return \`
-    <div class="card \${esc(status)}" \${canDrag} data-id="\${esc(c.id)}" data-status="\${esc(status)}">
+    <div class="card \${esc(status)}" \${canDrag} data-id="\${esc(c.id)}" data-status="\${esc(status)}" data-detail="\${esc(c.id)}" style="cursor:pointer">
       <h3>\${esc(c.id)} · \${esc(c.title)}</h3>
       \${c.description ? \`<div style="color:#9aa6bd;margin:4px 0">\${esc(c.description.slice(0, 120))}\${c.description.length > 120 ? '…' : ''}</div>\` : ''}
       <div class="tags">
@@ -498,6 +498,7 @@ function renderHtml(board) {
 
   function wireDrag() {
     const el = document.getElementById('board')
+    let suppressClick = false
     el.addEventListener('dragstart', e => {
       const cardEl = e.target.closest('.card')
       if (!cardEl) return
@@ -509,6 +510,8 @@ function renderHtml(board) {
       const cardEl = e.target.closest('.card')
       if (cardEl) cardEl.classList.remove('dragging')
       dragging = null
+      suppressClick = true
+      setTimeout(() => { suppressClick = false }, 200)
     })
     el.addEventListener('dragover', e => {
       const col = e.target.closest('.column')
@@ -530,6 +533,7 @@ function renderHtml(board) {
       dragging = null
     })
     el.addEventListener('click', e => {
+      if (suppressClick) return
       const btn = e.target.closest('[data-detail]')
       if (btn) { detail = btn.dataset.detail; detailModal() }
     })

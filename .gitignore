@@ -14,6 +14,9 @@ scrum/kanban.html
 # 士兵改动的统一 diff 补丁（运行时产物）
 scrum/patches/
 
+# 需求讨论群聊记录（运行时产物）
+scrum/discussion/
+
 # 守护 worktree 隔离目录
 .legion-worktrees/
 

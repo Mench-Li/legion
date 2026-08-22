@@ -86,6 +86,11 @@ function parseArgs(argv) {
     if (arg.startsWith('--')) {
       const key = arg.slice(2)
       const value = argv[i + 1]
+      // boolean flag：`--no-*` 无值即 true（如 --no-discuss）
+      if (key.startsWith('no-') && (value === undefined || value.startsWith('--'))) {
+        flags[key.replace(/-([a-z])/g, (_m, c) => c.toUpperCase())] = true
+        continue
+      }
       if (value === undefined || value.startsWith('--')) throw new Error(`参数 --${key} 缺少值`)
       // 连字符键转 camelCase：`--if-version` → `ifVersion`
       flags[key.replace(/-([a-z])/g, (_m, c) => c.toUpperCase())] = value
@@ -226,22 +231,39 @@ const commands = {
   },
 
   /**
-   * 发布目标：读 roles.json 流水线，创建首个阶段任务（role = 首 stage），
-   * 目标上下文写入描述；默认直接 todo（守护自动接手，按角色逐阶段流转）。
+   * 发布目标：读 roles.json。有 discussion 配置时默认先建「讨论任务」（role=discussion），
+   * 由将军 + 各角色士兵群聊收敛需求方向，再启动流水线；`--no-discuss` 跳过讨论直接建首阶段任务。
    */
   goal(args) {
     requireArgs(args, ['title'])
     const roles = readRoles()
     const stages = roles.stages ?? []
     if (stages.length === 0) throw new Error('roles.json 无流水线阶段（stages 为空）')
-    const first = stages[0]
-    const description = [
-      args.description ?? '',
-      `[流水线] ${roles.name}：${stages.map(s => s.label).join(' → ')}`,
-      `[本阶段] ${first.label}（${first.role}）`,
-    ].filter(s => s.length > 0).join('\n\n')
     const db = loadDb()
     const id = nextId(db)
+    const pipelineLine = `[流水线] ${roles.name}：${stages.map(s => s.label).join(' → ')}`
+    const discuss = roles.discussion !== undefined && !args.noDiscuss
+    let role, stageLabel, description
+    if (discuss) {
+      const members = roles.discussion.roles ?? stages.map(s => s.role)
+      const maxRounds = roles.discussion.maxRounds ?? 3
+      role = 'discussion'
+      stageLabel = `需求讨论（将军 + ${members.length} 名士兵，≤${maxRounds} 轮）`
+      description = [
+        args.description ?? '',
+        pipelineLine,
+        `[讨论] 将军与 ${members.join('、')} 等士兵先进行需求讨论（最多 ${maxRounds} 轮），澄清矛盾点并确定最终方向，之后按角色分工开工`,
+      ].filter(s => s.length > 0).join('\n\n')
+    } else {
+      const first = stages[0]
+      role = first.role
+      stageLabel = first.label
+      description = [
+        args.description ?? '',
+        pipelineLine,
+        `[本阶段] ${first.label}（${first.role}）`,
+      ].filter(s => s.length > 0).join('\n\n')
+    }
     const t = {
       id,
       title: args.title.trim(),
@@ -255,7 +277,7 @@ const commands = {
       claimedAt: null,
       ordersVersion: Number(args.ordersVersion ?? 1),
       parent: null,
-      role: first.role,
+      role,
       blocks: [],
       blockedBy: [],
       comments: [],
@@ -267,7 +289,7 @@ const commands = {
     validateTaskShape(t)
     db.tasks[id] = t
     saveDb(db)
-    process.stdout.write(`${JSON.stringify({ ok: true, goal: args.title.trim(), pipeline: roles.name, stage: first.label, role: first.role, task: t }, null, 2)}\n`)
+    process.stdout.write(`${JSON.stringify({ ok: true, goal: args.title.trim(), pipeline: roles.name, stage: stageLabel, role, discuss, task: t }, null, 2)}\n`)
   },
 
   /** 读取一个任务 */

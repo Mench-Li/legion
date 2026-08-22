@@ -105,8 +105,15 @@ interface StageDef {
   next: string | null
 }
 
+/** 需求讨论配置：哪些角色参与群聊 + 最多讨论几轮。 */
+interface DiscussionDef {
+  maxRounds: number
+  roles: string[]
+}
+
 interface PipelineDef {
   name: string
+  discussion?: DiscussionDef
   stages: StageDef[]
 }
 
@@ -118,6 +125,20 @@ interface WorkerReport {
   blocker: string
 }
 
+/** 讨论发言的结构化回报。 */
+interface SpeakerReport {
+  position: string
+  concerns: string
+  suggestions: string
+}
+
+/** 将军（主持人）收敛判断的结构化回报。 */
+interface ModeratorReport {
+  converged: boolean
+  final_direction: string
+  remaining_conflicts: string[]
+}
+
 const WORKER_SCHEMA: ObjectJsonSchema = {
   type: 'object',
   properties: {
@@ -127,6 +148,28 @@ const WORKER_SCHEMA: ObjectJsonSchema = {
     blocker: { type: 'string' },
   },
   required: ['status', 'summary', 'evidence'],
+  additionalProperties: false,
+}
+
+const SPEAKER_SCHEMA: ObjectJsonSchema = {
+  type: 'object',
+  properties: {
+    position: { type: 'string' },
+    concerns: { type: 'string' },
+    suggestions: { type: 'string' },
+  },
+  required: ['position'],
+  additionalProperties: false,
+}
+
+const MODERATOR_SCHEMA: ObjectJsonSchema = {
+  type: 'object',
+  properties: {
+    converged: { type: 'boolean' },
+    final_direction: { type: 'string' },
+    remaining_conflicts: { type: 'array', items: { type: 'string' } },
+  },
+  required: ['converged', 'final_direction'],
   additionalProperties: false,
 }
 
@@ -221,6 +264,13 @@ export function apply(ctx: AppContext, config: Config): void {
   const pipeline = readPipeline()
   const stageByRole = new Map<string, StageDef>((pipeline?.stages ?? []).map(s => [s.role, s]))
   const isPipeline = pipeline !== null
+  // 需求讨论群聊：讨论配置缺省时用全部流水线角色，最多 3 轮。
+  const discussion = pipeline?.discussion
+  const discussionMembers: StageDef[] = (discussion?.roles ?? (pipeline?.stages ?? []).map(s => s.role))
+    .map(r => stageByRole.get(r))
+    .filter((s): s is StageDef => s !== undefined)
+  const discussionMaxRounds = discussion?.maxRounds ?? 3
+  const isDiscussion = discussion !== undefined && discussionMembers.length > 0
 
   /** 惰性创建 foreman agent：worker subagent 的父（按工作目录缓存；worktree 隔离时每个 worktree 一个）。 */
   async function ensureForeman(cwd: string): Promise<Agent | undefined> {
@@ -543,6 +593,154 @@ exit 0
     await runWorker(t, feedback, stage)
   }
 
+  /** 派发一个一次性子 agent，返回结构化结果；失败返回 null（不抛，讨论/流水线容错继续）。 */
+  async function startOneShot<T>(label: string, promptText: string, schema: ObjectJsonSchema, cwd: string): Promise<T | null> {
+    const parent = await ensureForeman(cwd)
+    if (parent === undefined) return null
+    const controller = new AbortController()
+    controllers.add(controller)
+    const timer = setTimeout(() => controller.abort(), config.workerTimeoutMs)
+    try {
+      const run = await ctx.subagents.start(config.provider, {
+        label,
+        prompt: [{ type: 'text', text: promptText }],
+        parent,
+        signal: controller.signal,
+        outputSchema: schema,
+      })
+      const result = await run.result
+      await run.dispose()
+      if (result.stopReason !== 'completed' || result.structured === undefined) {
+        log(`${label} 未完成（${result.stopReason}）`)
+        return null
+      }
+      return result.structured as T
+    } catch (e) {
+      log(`${label} 派发失败：${String(e)}`)
+      return null
+    } finally {
+      clearTimeout(timer)
+      controllers.delete(controller)
+    }
+  }
+
+  /** 一名角色士兵在需求讨论群聊中发言（只输出意见，不写文件）。 */
+  async function dispatchSpeaker(t: Task, stage: StageDef, discussionText: string, cwd: string): Promise<SpeakerReport | null> {
+    const prompt = [
+      `你是军团士兵，正在「需求讨论群聊」中以「${stage.label}」（${stage.role}）身份发言。`,
+      `讨论目标：${t.title}`,
+      t.description ? `目标描述：${t.description}` : '',
+      '',
+      '当前讨论记录：',
+      '```',
+      discussionText,
+      '```',
+      '',
+      `请以「${stage.label}」的专业视角，针对这个目标/需求发言，输出：`,
+      '- position：你的立场与总体判断（一段话）',
+      '- concerns：你发现的矛盾点、模糊点、风险、缺失的边界或验收口径（无则空字符串）',
+      '- suggestions：你的具体建议，明确可执行（无则空字符串）',
+    ].filter(s => s !== '').join('\n')
+    return startOneShot<SpeakerReport>(`discuss:${t.id}:${stage.role}`, prompt, SPEAKER_SCHEMA, cwd)
+  }
+
+  /** 将军（主持人）判断讨论是否收敛，收敛则给出最终需求方向。 */
+  async function dispatchModerator(t: Task, discussionText: string, cwd: string): Promise<ModeratorReport | null> {
+    const prompt = [
+      `你是将军（讨论主持人）。以下是「${t.title}」的需求讨论群聊记录：`,
+      '```',
+      discussionText,
+      '```',
+      '',
+      '请判断讨论是否已收敛：主要矛盾点已澄清、方向已明确、可以开始按角色分工实施。',
+      '- converged：是否收敛（true/false）',
+      '- final_direction：最终需求方向总结（明确、可验收、无歧义；未收敛时给出当前倾向与待决点）',
+      '- remaining_conflicts：未收敛时，列出仍需澄清的问题（收敛时给空数组）',
+    ].join('\n')
+    return startOneShot<ModeratorReport>(`moderate:${t.id}`, prompt, MODERATOR_SCHEMA, cwd)
+  }
+
+  /** 讨论收敛后：创建流水线首阶段任务（role = 首 stage，parent = 讨论任务，描述带最终方向）。 */
+  async function launchPipeline(discussionTask: Task, finalDirection: string): Promise<void> {
+    if (pipeline === null) return
+    const first = pipeline.stages[0]
+    if (!first) return
+    const base = (discussionTask.description ?? '').replace(/\n\n\[讨论\].*$/s, '')
+    const description = [
+      base,
+      `[需求方向] ${finalDirection}`,
+      `[本阶段] ${first.label}（${first.role}）`,
+    ].filter(s => s.trim().length > 0).join('\n\n')
+    try {
+      const res = await runTaskctl(config.scrumDir, [
+        'create', '--title', discussionTask.title, '--description', description,
+        '--role', first.role, '--parent', discussionTask.id, '--priority', discussionTask.priority, '--status', 'todo',
+      ]) as { id?: string }
+      log(`${discussionTask.id} 讨论收敛 → 启动流水线首阶段 ${first.role}（新任务 ${res?.id ?? ''}）`)
+      activity('dispatch', discussionTask.id, `讨论收敛 → 启动流水线 ${first.label}`)
+    } catch (e) {
+      log(`${discussionTask.id} 启动流水线失败：${String(e)}`)
+    }
+  }
+
+  /** 需求讨论群聊：各角色士兵逐轮并发发言，将军收敛方向，然后启动流水线。 */
+  async function runDiscussion(t: Task): Promise<void> {
+    try {
+      await runTaskctl(config.scrumDir, ['claim', t.id, '--soldier', 'discussion'])
+    } catch (e) {
+      log(`${t.id} 讨论任务认领失败：${String(e)}`)
+      return
+    }
+    activity('claim', t.id, '进入需求讨论群聊（将军 + 各角色士兵）')
+    const cwd = config.workspace
+    const docPath = join(config.scrumDir, 'discussion', `${t.id}.md`)
+    mkdirSync(dirname(docPath), { recursive: true })
+    let text = `# 需求讨论：${t.title}\n\n> 目标：${t.description}\n`
+    let finalDirection = ''
+    let converged = false
+    for (let round = 1; round <= discussionMaxRounds; round++) {
+      text += `\n## 第 ${round} 轮\n`
+      activity('dispatch', t.id, `讨论第 ${round} 轮：${discussionMembers.length} 名士兵并发发言`)
+      const speeches = await Promise.all(discussionMembers.map(stage => dispatchSpeaker(t, stage, text, cwd).then(report => ({ stage, report }))))
+      for (const { stage, report } of speeches) {
+        if (report === null) {
+          text += `\n### @${stage.role}（${stage.label}）\n（本轮未发言）\n`
+          continue
+        }
+        text += `\n### @${stage.role}（${stage.label}）\n- 立场：${report.position}\n`
+        if (report.concerns) text += `- 矛盾/风险：${report.concerns}\n`
+        if (report.suggestions) text += `- 建议：${report.suggestions}\n`
+        await safeComment(t.id, `💬 [第${round}轮] @${stage.role}（${stage.label}）：${report.position}${report.concerns ? `\n⚠ 顾虑：${report.concerns}` : ''}`)
+      }
+      const mod = await dispatchModerator(t, text, cwd)
+      if (mod === null) {
+        text += '\n### 将军（主持人）\n（本轮未给出收敛判断）\n'
+        continue
+      }
+      if (mod.converged) {
+        converged = true
+        finalDirection = mod.final_direction
+        text += `\n### 将军（主持人）✅ 收敛\n${mod.final_direction}\n`
+        await safeComment(t.id, `✅ 将军判定收敛：${mod.final_direction}`)
+        break
+      }
+      finalDirection = mod.final_direction || finalDirection
+      text += `\n### 将军（主持人）\n未收敛，仍需澄清：${(mod.remaining_conflicts ?? []).join('、') || '（未说明）'}\n`
+      await safeComment(t.id, `🔄 第${round}轮未收敛，仍需澄清：${(mod.remaining_conflicts ?? []).join('、') || '（未说明）'}`)
+    }
+    writeFileSync(docPath, text, 'utf8')
+    if (!converged) {
+      await safeComment(t.id, '⚠ 达到讨论轮数上限，按当前讨论方向启动流水线')
+      log(`${t.id} 讨论达到轮数上限（${discussionMaxRounds}），按当前方向启动流水线`)
+    }
+    const direction = finalDirection || '（讨论未收敛，按各角色建议综合执行，详见讨论记录）'
+    await launchPipeline(t, direction)
+    await advanceTo(t.id, 'discussion')
+    await safeComment(t.id, `📋 讨论结束，已启动流水线：${direction}`)
+    activity('done', t.id, `讨论结束 → 流水线启动：${direction}`)
+    log(`${t.id} → done（讨论收敛），流水线已启动`)
+  }
+
   /** 一轮扫单：todo 认领派工；本角色的退回任务纠错；依赖解除的 blocked 续做。 */
   async function sweep(): Promise<void> {
     if (sweeping) return
@@ -571,12 +769,13 @@ exit 0
         log(`release-stale 失败：${String(e)}`)
       }
 
-      // 1. todo：认领（互斥）→ 派工（流水线模式按任务角色）
+      // 1. todo：认领（互斥）→ 派工（流水线模式按任务角色；讨论任务走群聊）
       for (const t of tasks.filter(t => t.status === 'todo')) {
         if (!room() || inflight.has(t.id)) continue
-        if (isPipeline && stageOf(t) === undefined) continue // 流水线模式跳过无角色/未知角色任务
+        if (isPipeline && stageOf(t) === undefined && t.role !== 'discussion') continue // 流水线模式跳过无角色/未知角色任务
         inflight.add(t.id)
-        void workTodo(t, stageOf(t)).finally(() => inflight.delete(t.id))
+        const job = t.role === 'discussion' ? runDiscussion(t) : workTodo(t, stageOf(t))
+        void job.finally(() => inflight.delete(t.id))
       }
       // 2. blocked 且本角色、依赖已全部解除：解阻续做
       for (const t of tasks.filter(t => t.status === 'blocked' && isOurs(t))) {

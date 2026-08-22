@@ -1,5 +1,9 @@
 {
   "name": "software",
+  "discussion": {
+    "maxRounds": 3,
+    "roles": ["requirement", "researcher", "breaker", "test-designer", "coder", "reviewer", "tester", "devops"]
+  },
   "stages": [
     {
       "role": "requirement",

@@ -102,7 +102,7 @@ node scrum\taskctl.mjs <命令> [--key value …]
 | --- | --- | --- |
 | `init` | 初始化 `tasks.json` | — |
 | `create` | 建任务（backlog） | `--title`（必填）、`--description`、`--acceptance "a;b;c"`、`--priority high\|medium\|low`、`--parent <id>`、`--role <r>`、`--status backlog\|todo` |
-| `goal` | 发布目标 → 按 `roles.json` 建首阶段任务（直接 todo） | `--title`（必填）、`--description`、`--acceptance`、`--priority` |
+| `goal` | 发布目标 → 默认先建「讨论任务」群聊收敛方向，再启动流水线 | `--title`（必填）、`--description`、`--acceptance`、`--priority`、`--no-discuss`（跳过讨论直接开工） |
 | `get` | 读一个任务 | `<id>` |
 | `list` | 列任务 | `--status <s>`、`--soldier <s>`、`--role <r>` |
 | `approve` | 批准 backlog → todo | `<id>`、`--if-version <N>` |
@@ -282,7 +282,7 @@ git -C D:/project/dsh/legion merge --no-ff w/<id>    # 合入
 ```
 
 - **角色定义**：`legion/roles.json`，每个 stage 有 `role`（角色 id）、`label`（中文名）、`prompt`（角色职责，注入该阶段 worker 提示词）、`next`（完成后流转到的下一角色；`null` 为流水线终点）。
-- **发布目标**：`taskctl goal --title … --description …`，创建首阶段任务（`role` = 首 stage，`status` = todo），目标上下文写入描述。
+- **需求讨论群聊（可选，默认开启）**：`roles.json` 配 `discussion` 时，`goal` 先建「讨论任务」（`role=discussion`）——守护让 `discussion.roles` 里的每名士兵**并发发言**（各从自己视角提意见/质疑/建议），将军（主持人）逐轮判断是否收敛并点出未决项，最多 `maxRounds` 轮；收敛后把「最终需求方向」写进首阶段任务描述再启动流水线。讨论全文落盘 `scrum/discussion/<id>.md`，每轮发言同步写进任务评论（看板可见）。`--no-discuss` 跳过讨论直接开工。
 - **按角色认领**：守护只认领 `role` 匹配某个 stage 的任务，认领身份 = 角色 id（`soldier = role`），派工提示词含该角色的职责。
 - **自动流转**：中间阶段 worker 完成 → 自动合入主分支（autoPromote，merge `w/<id>`）→ `advance` 推进 done → 创建下一角色任务（`parent` 链 + 描述带上「前序阶段已完成」的 summary）。
 - **终点验收**：最后一个角色（`next: null`）完成后进 `in_review`，由将军验收（看板看 diff → 通过/打回）。
@@ -291,10 +291,10 @@ git -C D:/project/dsh/legion merge --no-ff w/<id>    # 合入
 ### 发布目标示例
 
 ```bash
-node scrum\taskctl.mjs goal --title "实现一个 Markdown 待办清单 Web 应用" --description "本地单页待办：增删改查、Markdown 渲染、localStorage 持久化"
+node scrum\taskctl.mjs goal --title "实现一个多人实时协作白板 Web 应用" --description "多用户实时画板、协同光标、撤销重做，本地自托管"
 ```
 
-之后看板逐列滚动：需求士兵写 `docs/REQUIREMENTS.md` → 搜索士兵写 `docs/RESEARCH.md` → 拆解士兵写 `docs/TASK_BREAKDOWN.md` → … → 部署士兵写 `docs/DEPLOY.md`，最后将军验收。
+发布后：将军 + 8 名士兵先群聊讨论（最多 3 轮，每轮并发发言、将军收敛矛盾点）→ 产出最终需求方向 → 看板逐列滚动：需求士兵写 `docs/REQUIREMENTS.md` → 搜索士兵写 `docs/RESEARCH.md` → … → 部署士兵写 `docs/DEPLOY.md`，最后将军验收。想跳过讨论直接开工加 `--no-discuss`。
 
 ---
 

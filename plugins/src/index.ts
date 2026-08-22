@@ -125,18 +125,25 @@ interface WorkerReport {
   blocker: string
 }
 
-/** 讨论发言的结构化回报。 */
+/** 讨论发言（陈述）的结构化回报。 */
 interface SpeakerReport {
   position: string
   concerns: string
   suggestions: string
 }
 
-/** 将军（主持人）收敛判断的结构化回报。 */
+/** 头脑风暴交锋（回应他人观点）的结构化回报。 */
+interface ReplyReport {
+  challenges: string
+  insights: string
+}
+
+/** 将军（主持人）收敛判断 + 点名矛盾的结构化回报。 */
 interface ModeratorReport {
   converged: boolean
   final_direction: string
   remaining_conflicts: string[]
+  next_focus: string
 }
 
 const WORKER_SCHEMA: ObjectJsonSchema = {
@@ -162,12 +169,23 @@ const SPEAKER_SCHEMA: ObjectJsonSchema = {
   additionalProperties: false,
 }
 
+const REPLY_SCHEMA: ObjectJsonSchema = {
+  type: 'object',
+  properties: {
+    challenges: { type: 'string' },
+    insights: { type: 'string' },
+  },
+  required: ['challenges', 'insights'],
+  additionalProperties: false,
+}
+
 const MODERATOR_SCHEMA: ObjectJsonSchema = {
   type: 'object',
   properties: {
     converged: { type: 'boolean' },
     final_direction: { type: 'string' },
     remaining_conflicts: { type: 'array', items: { type: 'string' } },
+    next_focus: { type: 'string' },
   },
   required: ['converged', 'final_direction'],
   additionalProperties: false,
@@ -624,38 +642,60 @@ exit 0
     }
   }
 
-  /** 一名角色士兵在需求讨论群聊中发言（只输出意见，不写文件）。 */
-  async function dispatchSpeaker(t: Task, stage: StageDef, discussionText: string, cwd: string): Promise<SpeakerReport | null> {
+  /** 一名角色士兵在需求讨论群聊中做头脑风暴式陈述（只输出意见，不写文件）。 */
+  async function dispatchSpeaker(t: Task, stage: StageDef, discussionText: string, focus: string, cwd: string): Promise<SpeakerReport | null> {
     const prompt = [
-      `你是军团士兵，正在「需求讨论群聊」中以「${stage.label}」（${stage.role}）身份发言。`,
+      `你是军团士兵，正在「需求讨论群聊」头脑风暴中，以「${stage.label}」（${stage.role}）身份陈述观点。`,
       `讨论目标：${t.title}`,
       t.description ? `目标描述：${t.description}` : '',
+      focus ? `将军点名的交锋焦点：${focus}` : '',
       '',
       '当前讨论记录：',
       '```',
       discussionText,
       '```',
       '',
-      `请以「${stage.label}」的专业视角，针对这个目标/需求发言，输出：`,
-      '- position：你的立场与总体判断（一段话）',
+      `请以「${stage.label}」的专业视角做头脑风暴式陈述（你的观点随后会被其他角色挑战，要经得起反驳）：`,
+      '- position：你的立场与总体判断（明确、可被反驳）',
       '- concerns：你发现的矛盾点、模糊点、风险、缺失的边界或验收口径（无则空字符串）',
-      '- suggestions：你的具体建议，明确可执行（无则空字符串）',
+      '- suggestions：你的具体建议——可以大胆、反直觉，鼓励打开新思路（无则空字符串）',
     ].filter(s => s !== '').join('\n')
     return startOneShot<SpeakerReport>(`discuss:${t.id}:${stage.role}`, prompt, SPEAKER_SCHEMA, cwd)
   }
 
-  /** 将军（主持人）判断讨论是否收敛，收敛则给出最终需求方向。 */
+  /** 一名角色士兵针对本轮他人陈述做头脑风暴交锋（点名反驳 + 打开新思路）。 */
+  async function dispatchReplier(t: Task, stage: StageDef, roundStatements: string, focus: string, cwd: string): Promise<ReplyReport | null> {
+    const prompt = [
+      `你是军团士兵「${stage.label}」（${stage.role}），正在「需求讨论群聊」的头脑风暴交锋环节。`,
+      '不要复述自己的立场，专门针对**其他角色**的陈述做交锋。',
+      focus ? `将军点名的交锋焦点：${focus}` : '',
+      '',
+      '本轮各角色的陈述：',
+      '```',
+      roundStatements,
+      '```',
+      '',
+      '请做头脑风暴式交锋：',
+      '- challenges：点名 1-2 个你最不同意/最怀疑的其他角色观点（写清目标角色 + 对方观点 + 你的反驳理由）；',
+      '- insights：提出一个别人都没想到但重要的角度，或把某个你赞同的观点往前推一步（打开新思路）。',
+      '要具体到人、到点，不要泛泛而谈。',
+    ].filter(s => s !== '').join('\n')
+    return startOneShot<ReplyReport>(`debate:${t.id}:${stage.role}`, prompt, REPLY_SCHEMA, cwd)
+  }
+
+  /** 将军（主持人）判断收敛 + 点名矛盾 + 给下一轮交锋焦点。 */
   async function dispatchModerator(t: Task, discussionText: string, cwd: string): Promise<ModeratorReport | null> {
     const prompt = [
-      `你是将军（讨论主持人）。以下是「${t.title}」的需求讨论群聊记录：`,
+      `你是将军（讨论主持人 + 头脑风暴引导者）。以下是「${t.title}」的需求讨论群聊记录：`,
       '```',
       discussionText,
       '```',
       '',
-      '请判断讨论是否已收敛：主要矛盾点已澄清、方向已明确、可以开始按角色分工实施。',
+      '请：1) 判断讨论是否已收敛（主要矛盾已澄清、方向明确、可开工）；2) 识别最尖锐的对立点（哪两个角色在哪点上对立）；3) 未收敛时给出下一轮交锋焦点（让谁和谁正面 PK 什么问题）。',
       '- converged：是否收敛（true/false）',
       '- final_direction：最终需求方向总结（明确、可验收、无歧义；未收敛时给出当前倾向与待决点）',
-      '- remaining_conflicts：未收敛时，列出仍需澄清的问题（收敛时给空数组）',
+      '- remaining_conflicts：未收敛时列出仍需澄清的问题（收敛时给空数组）',
+      '- next_focus：未收敛时下一轮交锋的具体焦点（点名角色与问题；收敛时给空字符串）',
     ].join('\n')
     return startOneShot<ModeratorReport>(`moderate:${t.id}`, prompt, MODERATOR_SCHEMA, cwd)
   }
@@ -698,20 +738,40 @@ exit 0
     let text = `# 需求讨论：${t.title}\n\n> 目标：${t.description}\n`
     let finalDirection = ''
     let converged = false
+    let lastFocus = ''
     for (let round = 1; round <= discussionMaxRounds; round++) {
       text += `\n## 第 ${round} 轮\n`
-      activity('dispatch', t.id, `讨论第 ${round} 轮：${discussionMembers.length} 名士兵并发发言`)
-      const speeches = await Promise.all(discussionMembers.map(stage => dispatchSpeaker(t, stage, text, cwd).then(report => ({ stage, report }))))
+      const focus = lastFocus
+      // 1. 陈述：各角色并发头脑风暴式陈述
+      activity('dispatch', t.id, `讨论第 ${round} 轮：${discussionMembers.length} 名士兵并发陈述`)
+      const speeches = await Promise.all(discussionMembers.map(stage => dispatchSpeaker(t, stage, text, focus, cwd).then(report => ({ stage, report }))))
+      text += '\n### 陈述\n'
+      let roundStatements = ''
       for (const { stage, report } of speeches) {
         if (report === null) {
-          text += `\n### @${stage.role}（${stage.label}）\n（本轮未发言）\n`
+          const miss = `\n#### @${stage.role}（${stage.label}）\n（本轮未发言）\n`
+          text += miss
+          roundStatements += miss
           continue
         }
-        text += `\n### @${stage.role}（${stage.label}）\n- 立场：${report.position}\n`
-        if (report.concerns) text += `- 矛盾/风险：${report.concerns}\n`
-        if (report.suggestions) text += `- 建议：${report.suggestions}\n`
+        const block = `\n#### @${stage.role}（${stage.label}）\n- 立场：${report.position}\n` + (report.concerns ? `- 矛盾/风险：${report.concerns}\n` : '') + (report.suggestions ? `- 建议：${report.suggestions}\n` : '')
+        text += block
+        roundStatements += block
         await safeComment(t.id, `💬 [第${round}轮] @${stage.role}（${stage.label}）：${report.position}${report.concerns ? `\n⚠ 顾虑：${report.concerns}` : ''}`)
       }
+      // 2. 交锋：各角色针对本轮他人陈述点名反驳 + 打开新思路
+      activity('dispatch', t.id, `讨论第 ${round} 轮交锋：${discussionMembers.length} 名士兵互相反驳`)
+      const replies = await Promise.all(discussionMembers.map(stage => dispatchReplier(t, stage, roundStatements, focus, cwd).then(report => ({ stage, report }))))
+      text += '\n### 交锋\n'
+      for (const { stage, report } of replies) {
+        if (report === null) {
+          text += `\n#### @${stage.role}（${stage.label}）\n（本轮未交锋）\n`
+          continue
+        }
+        text += `\n#### @${stage.role}（${stage.label}）\n- 反驳/挑战：${report.challenges}\n- 新思路：${report.insights}\n`
+        await safeComment(t.id, `⚔ [第${round}轮交锋] @${stage.role}：${report.challenges}${report.insights ? ` | 💡 新思路：${report.insights}` : ''}`)
+      }
+      // 3. 将军主持：收敛判断 + 点名矛盾 + 给下一轮交锋焦点
       const mod = await dispatchModerator(t, text, cwd)
       if (mod === null) {
         text += '\n### 将军（主持人）\n（本轮未给出收敛判断）\n'
@@ -725,8 +785,9 @@ exit 0
         break
       }
       finalDirection = mod.final_direction || finalDirection
-      text += `\n### 将军（主持人）\n未收敛，仍需澄清：${(mod.remaining_conflicts ?? []).join('、') || '（未说明）'}\n`
-      await safeComment(t.id, `🔄 第${round}轮未收敛，仍需澄清：${(mod.remaining_conflicts ?? []).join('、') || '（未说明）'}`)
+      lastFocus = mod.next_focus || lastFocus
+      text += `\n### 将军（主持人）\n未收敛，仍需澄清：${(mod.remaining_conflicts ?? []).join('、') || '（未说明）'}\n下一轮焦点：${mod.next_focus || '（未指定）'}\n`
+      await safeComment(t.id, `🔄 第${round}轮未收敛：${(mod.remaining_conflicts ?? []).join('、') || '（未说明）'}${mod.next_focus ? `\n🎯 下一轮交锋焦点：${mod.next_focus}` : ''}`)
     }
     writeFileSync(docPath, text, 'utf8')
     if (!converged) {

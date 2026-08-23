@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>协作白板</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header id="toolbar">
+    <span class="brand">协作白板</span>
+    <div class="group" id="tools">
+      <button data-tool="select" class="tool active" title="选择/移动 (V)">选择</button>
+      <button data-tool="rect" class="tool" title="矩形 (R)">矩形</button>
+      <button data-tool="ellipse" class="tool" title="椭圆 (E)">椭圆</button>
+      <button data-tool="line" class="tool" title="直线/箭头 (L)">直线</button>
+      <button data-tool="freehand" class="tool" title="手绘 (P)">手绘</button>
+      <button data-tool="text" class="tool" title="文本 (T)">文本</button>
+    </div>
+    <div class="group">
+      <label>颜色 <input type="color" id="color" value="#1a73e8" /></label>
+      <label>线宽 <input type="range" id="width" min="1" max="24" value="3" /></label>
+      <label class="checkbox"><input type="checkbox" id="fill" /> 填充</label>
+      <label class="checkbox"><input type="checkbox" id="arrow" checked /> 箭头</label>
+    </div>
+    <div class="group">
+      <button id="undo" title="撤销 (Ctrl+Z)">撤销</button>
+      <button id="redo" title="重做 (Ctrl+Shift+Z)">重做</button>
+      <button id="del" title="删除 (Delete)">删除</button>
+    </div>
+    <div class="spacer"></div>
+    <div class="group" id="status">
+      <span id="conn" class="dot off"></span>
+      <span id="online">在线: 0</span>
+    </div>
+    <div id="peers" class="peers"></div>
+  </header>
+
+  <div id="stage">
+    <canvas id="board"></canvas>
+    <canvas id="overlay"></canvas>
+    <div id="hint">滚轮缩放 · 空格/中键拖拽平移 · 点击工具栏选择工具开始绘制</div>
+  </div>
+
+  <script type="module" src="/js/main.mjs"></script>
+</body>
+</html>

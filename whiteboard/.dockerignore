@@ -1,0 +1,4 @@
+node_modules
+apps/server/data
+.git
+*.log

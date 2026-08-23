@@ -1,0 +1,14 @@
+{
+  "name": "collab-whiteboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "多人实时协作白板 Web 应用（零外部依赖，Node 单进程自托管，v1 单实例）",
+  "engines": { "node": ">=22.5.0" },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "start": "node apps/server/src/index.js",
+    "test": "node --test packages/shared/test/contract.test.mjs packages/shared/test/crdt.test.mjs packages/shared/test/undo.test.mjs apps/server/test/ws-codec.test.mjs apps/server/test/storage.test.mjs apps/server/test/room.test.mjs apps/server/test/e2e.test.mjs",
+    "bench": "node scripts/bench/bench.mjs"
+  }
+}

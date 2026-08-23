@@ -1,161 +1,209 @@
-# 多人实时协作白板（T-010）方案搜索与选型报告
+# T-016 方案搜索与选型报告：离线优先分布式任务队列系统
 
-> 角色：researcher（方案搜索）｜阶段：方案搜索｜输入：需求澄清已收敛基线 + 3 项待决分歧
-> 结论一句话：**自建（基于 Yjs 原语）而非整体采用 tldraw/Excalidraw**——全栈许可证清洁（MIT）、范围可控、锁定成本最低。
+> 角色：researcher（方案搜索）｜阶段：方案搜索｜输入：docs/REQUIREMENTS.md（T-014 需求澄清，6 项定稿基线 + 3+1 待决点）
+> 结论一句话：**自建「原语组装型」队列——SQLite(WAL) 本地 outbox + 借用 NATS JetStream 幂等去重、CouchDB MVCC/changes-feed、etcd lease/fencing 三类成熟语义自研同步/栅栏胶水 + MQTT QoS1（或 NATS）做边缘传输 + TigerBeetle VOPR / FoundationDB flow / crashmonkey 做双 harness 验证。** 无单一成品满足合成需求；排除一切中心 broker 与 exactly-once 平台。
 
 ## 0. 结论速览（TL;DR）
-- 同步引擎：**Yjs (CRDT) + y-protocols/awareness + y-websocket**（MIT）。
-- 渲染：**Canvas 2D 单画布（形状+笔迹统一）+ 独立透明 presence overlay**，Renderer 接口解耦；自由手绘用 **perfect-freehand**。
-- 持久化：**SQLite(WAL) 单文件（better-sqlite3，备选 Node 24 内置 node:sqlite）+ StorageProvider 抽象**；拒绝 y-leveldb。
-- 撤销：**Y.UndoManager（origin 过滤 + 手势级事务）实现每用户局部撤销**；redo 语义采纳 6/8 方案（撤销后远端并发 op 落到本人历史前即清空 redo）。
-- 部署：**单容器 Docker + docker-compose + 静态前端 + 单进程 Node/ws + /healthz**，v1 显式单实例。
-- 待将军裁决：3 项分歧已给出 researcher 倾向（与 7/8 多数一致）+ 7 份 ADR 清单。
+- 存储/outbox：**SQLite（WAL，synchronous=FULL）+ UNIQUE/UPSERT**（public domain，崩溃安全，db-unique 信任根）。
+- 幂等/去重：**借用 NATS JetStream Nats-Msg-Id 去重窗口 + TigerBeetle 幂等账本语义**，自实现幂等键 + 有限去重窗口（对应 ⚖️-2 的「窗口+溢出策略」）。
+- 对等同步/版本序：**借用 CouchDB 多主复制 + MVCC 修订号 + changes feed 语义**（业务层版本序=CAS；L4 意图对账=changes feed 增量对账）；CRDT（Automerge/Yjs/Loro）仅备选。
+- 边缘传输/断点续传：**MQTT QoS1 + persistent session（Mosquitto，EPL-2.0）**，或 **NATS leaf node**（若接受中继）；仅同步通道，非中心存储。
+- lease/fencing：**借用 Chubby/etcd lease + fencing token 语义**，自实现单调 epoch + 持久 fence token；不引入 etcd 集群。
+- 验证：**TigerBeetle VOPR + FoundationDB flow 方法学（协议层确定性模拟）+ crashmonkey / kill -9 / 掉电 / ENOSPC（耐久层）**。
+- 待将军裁决：3+1 待决点给出 researcher 侧研究结论（§10），与 REQUIREMENTS.md §5 裁决口径对齐；§14 给出 7 份 ADR 建议清单。
 
 ## 1. 范围与方法
-- 约束：单实例自托管、无外部 SaaS、本阶段禁网（不得下载依赖）、v1 范围已收敛。
+- 约束：边缘轻量、离线优先、对等（无中心 broker）、at-least-once + 幂等键 = effective-once、全网禁 exactly-once、放弃 per-key FIFO。见 REQUIREMENTS.md §2/§4。
 - 评估维度（每决策域）：**适配度 / 成熟度 / 许可证 / 维护活跃度 / 迁移成本**。
-- 候选来源：开源白板成品（tldraw、Excalidraw）、CRDT/同步库（Yjs、Automerge、ShareDB）、渲染库（原生 Canvas2D、Konva、Fabric、Paper、Pixi）、持久化（better-sqlite3、node:sqlite、y-leveldb、y-indexeddb）。
-- 数据限制声明：本阶段禁网，许可证与活跃度为基于既有知识的定性评估；需联网复核项统一在 §9/§14 标注，不臆造精确数字（star 数 / commit 频率）。
+- 候选来源：本地持久化（SQLite/LMDB/RocksDB/LevelDB/自研 append-WAL）、幂等去重（NATS JetStream/TigerBeetle/DB UNIQUE/对象存储 CAS）、对等同步（CouchDB/PouchDB/Automerge/Yjs/Loro/RxDB）、边缘传输（Mosquitto/EMQX/NATS leaf）、租约（etcd/hashicorp raft/Dragonboat）、验证（FoundationDB/TigerBeetle VOPR/crashmonkey/Jepsen/Antithesis）、对照排除（Temporal/Cadence/Hatchet/Restate/Inngest/Kafka/Pulsar/RabbitMQ/BullMQ/Asynq/Celery）。
+- 数据限制声明：本阶段禁网，许可证与活跃度为基于既有知识的定性评估；不臆造精确数字（star/commit 频率）；需联网复核项统一标注「待核」，见 §15。
 
-## 2. 决策域 A：同步引擎（CRDT）
-requirement 已一票排除 OT/ShareDB，本域聚焦 Yjs vs Automerge vs 托管替代，并确认 Yjs 落地要点。
+## 2. 决策域 A：本地持久化 / outbox 原语
+requirement 定稿：本地 WAL/outbox 是唯一耐久根（§4.1）。候选：
 
 | 候选 | 许可证 | 成熟度/维护 | 适配度 | 迁移成本 |
 |---|---|---|---|---|
-| **Yjs + y-protocols + y-websocket** | MIT | 高，CRDT 事实标准，API 稳定 | **高**：Y.UndoManager 局部撤销、awareness 独立通道、离线 y-indexeddb、二进制增量小、单进程 ws 自托管最简 | **低**（y-websocket 即官方参考单进程 ws 实现） |
-| Automerge 2.x | MIT | 高，但网络/awareness 生态弱 | 中：语义好、自带历史，但无 awareness 标准、undo 无内置、无成熟 ws provider | 高（需自建 transport/presence/undo） |
-| ShareDB(OT) | MIT | 成熟 | 已排除：OT 全局/协作撤销与「每用户局部撤销」语义冲突、离线重连复杂 | — |
-| Liveblocks / PartyKit / y-sweet | 专有/托管 | — | 排除：Liveblocks 为 SaaS 非自托管；PartyKit/y-sweet 偏托管栈，单机自托管非主路径 | — |
+| **SQLite（WAL, synchronous=FULL）** | public domain | 极高，业界最全 crash 测试之一，持续活跃 | **高**：单文件、崩溃安全 WAL、事务（append+commit 原子）、UNIQUE/UPSERT 直接当 db-unique 信任根、单写者与「每节点本地 outbox」正好匹配 | **极低** |
+| LMDB（mmap B+树） | OpenLDAP Public License | 高，稳定 | 中：崩溃安全、单写者、mmap 快；但无 SQL 查询、无事务外 UNIQUE 语义、调试/对账可读性弱 | 中 |
+| RocksDB | Apache-2.0（或 GPL 双许可） | 高 | 低：LSM 面向 KV/批量写，无事务/UNIQUE，compaction 与队列出队语义相悖 | 中 |
+| LevelDB | BSD-3-Clause | 中（维护趋缓） | 低：同上，且单进程、生态老 | 中 |
+| 自研 append-only WAL | — | — | 中：可控但需自证崩溃安全（group commit/fsync/CRC/恢复），重复造轮子 | 高 |
 
-**推荐：Yjs + y-protocols/awareness + y-websocket。** 理由：与已定基线完全一致；局部撤销、awareness 物理分离、离线/重连、单机自托管四项诉求均有官方原语；迁移成本最低。落地要点：y-websocket 原生持久化用 y-leveldb（决策域 E 替换为 SQLite）；presence 由 y-protocols/awareness 提供，绝不写进 Y.Doc。
+**推荐：SQLite（WAL, synchronous=FULL）+ UNIQUE/UPSERT。** 理由：崩溃安全语义久经考验且零运维；ON CONFLICT 提供原子幂等插入（对应 L2 硬吸收的 B2 token 条件写落点之一）；单写者限制与「无中心 broker、每节点本地写、跨节点走复制」的架构天然对齐。取舍：LMDB 更快但不可查询、无 UNIQUE 语义（需自建索引判重）；RocksDB/LevelDB 是 KV 引擎而非「outbox + 账本」引擎，判重/对账要自建。
 
-## 3. 决策域 B：状态分层（已收敛，供 ADR）
-持久态 = 元素（入 undo/持久化）；临态 = 光标/在线列表（走 awareness 独立通道），presence 绝不入文档/undo 历史。
-- 验证：该分层即 y-protocols/awareness 的设计目的，是官方推荐模式；Excalidraw 房间式 JSON（无 CRDT）无法满足；tldraw 的 Yjs 绑定同样遵循该分层。
-- 落地：v1 元素存于单一 Y.Doc 内的容器（Y.Map<elementId, 元素 Y.Map> 或 Y.Array）；presence 只走 awareness states（cursor(x,y)、selection、用户颜色/名）。
+## 3. 决策域 B：幂等键 / 去重窗口 / CAS 原语
+requirement 定稿：at-least-once + 幂等键 = effective-once；B2 token 条件写 = 唯一硬吸收层，仅可版本化写（CAS/idempotent-key）（§4.3）。候选：
 
-## 4. 决策域 C：渲染（待裁决项 1）
-多数（7/8）：Canvas 2D 单画布 + 独立透明 overlay + Renderer 接口；coder：SVG(形状)+Canvas2D(笔迹)+overlay 三层。
+| 候选 | 许可证 | 成熟度/维护 | 适配度 | 迁移成本 |
+|---|---|---|---|---|
+| **SQLite UNIQUE + UPSERT（ON CONFLICT DO NOTHING）** | public domain | 极高 | **高**：db-unique 信任根，幂等插入 = effective-once 的最小原子原语 | **极低** |
+| **NATS JetStream 去重窗口（Nats-Msg-Id + DuplicateWindow）** | Apache-2.0 | 高，活跃 | **高**：有限去重窗口 + 显式溢出策略的现成先例（直接回答 ⚖️-2「窗口+溢出」） | 中（若引入 NATS） |
+| **TigerBeetle（幂等账本/transfer）** | Apache-2.0 | 高，非常活跃 | **高（语义参考）**：幂等键 + 双相记账 + CAS 的标杆实现与测试哲学 | 中（借语义非代码） |
+| 对象存储 CAS（S3/OSS If-Match） | 平台侧 | 高 | 中：object-cas 信任根（REQUIREMENTS.md §6.2 kind），适合大 blob 副作用，不适合高频队列元数据 | 中 |
 
-| 方案 | 优点 | 缺点 | 结论 |
-|---|---|---|---|
-| **Canvas 2D 单画布 + overlay（多数）** | 单渲染路径、1000–5000 元素轻松 ≥30fps、笔迹与形状渲染一致、代码量小 | 无 DOM 级命中、无障碍/文本选中 | **v1 推荐** |
-| SVG 形状 + Canvas 笔迹 + overlay（coder） | 元素级 DOM 命中、矢量清晰、无障碍/文本选中、调试直观 | 两套渲染路径需统一坐标/命中/选中；大量元素 DOM 节点开销；与「笔迹+形状统一渲染」目标相悖 | 备选；v2 若要求文本选中/无障碍再评估 |
+**推荐：SQLite UNIQUE/UPSERT 为默认信任根（db-unique），语义参考 NATS 去重窗口 + TigerBeetle 幂等账本。** 理由：NATS 的 DuplicateWindow（可配置 TTL 窗口 + 窗口溢出即放弃去重保证）是「幂等保证有界、溢出显式」的诚实先例，正好把 ⚖️-2 的「无限递归」变成「有限窗口 + 显式降级」；TigerBeetle 证明「幂等键 + CAS + 双存储校验」可被确定性模拟覆盖（对应 ⚖️-3 oracle 住测试侧）。
 
-渲染库选型（若不用裸 Canvas）：
+## 4. 决策域 C：对等同步 / 版本序 / 意图对账
+requirement 定稿：对等同步、无中心 broker；最终一致 + 业务层版本序（§4.4）；L4 意图对账 = 条件观测，P(未检测|intent durable)=0（§4.3）。候选：
 
-| 库 | 许可证 | 说明 | 结论 |
-|---|---|---|---|
-| **原生 Canvas2D + 自研场景图** | — | 零依赖、完全可控、命中测试自实现 | **v1 首选**（配合 Renderer 接口） |
-| Konva | MIT | 成熟场景图+命中+变换/选择器，开发快 | 备选（大量元素节点开销需压测验证） |
-| **perfect-freehand** | MIT | tldraw 同源，自由手绘平滑轮廓 | **手绘必选** |
-| Fabric.js / Paper.js | MIT | 偏对象模型/矢量编辑，功能过重 | 不选（v1 范围外） |
-| Pixi.js | MIT | WebGL，万级元素更稳但复杂度高 | v2 若超 1 万元素再评估 |
+| 候选 | 许可证 | 成熟度/维护 | 适配度 | 迁移成本 |
+|---|---|---|---|---|
+| **CouchDB（多主复制 + MVCC 修订号 + changes feed）** | Apache-2.0 | 极高，成熟 | **高（语义来源）**：MVCC 修订号=版本序/CAS；changes feed=L4 增量对账；多主=对等 | 中（本体偏重，借语义自实现轻量版） |
+| PouchDB | Apache-2.0 | 高，活跃 | 中：可嵌入的 CouchDB 协议实现，适合 Node/浏览器内嵌 | 中 |
+| Automerge | MIT | 高 | 中：CRDT 自动合并，但无 lease/fence/权威语义，表达 task_gate 派生/栅栏弱 | 中 |
+| Yjs | MIT | 高 | 低：协同文档 CRDT，非任务语义，无权威/租约概念 | 中 |
+| Loro | MIT/Apache（待核） | 中，新但活跃 | 中：新 CRDT，性能好，语义同 Automerge 局限 | 中 |
+| RxDB | Apache-2.0 | 高 | 中：离线优先 DB+复制插件，偏前端/文档，非队列 | 中 |
 
-**推荐：Canvas 2D 单画布（原生 API）+ perfect-freehand + 独立透明 overlay；Renderer 接口解耦。** 取舍：v1 元素 1000/5000、无富文本/图片/多选，Canvas2D 单路径最简且满足性能基线；SVG 混合的收益（无障碍/文本选中）在 v1 非需求，留待 v2。
+**推荐：自研轻量同步，语义照搬 CouchDB 的「MVCC 修订号 + changes feed + 多主冲突按业务版本序收敛」。** 理由：已定「业务层版本序」就是 MVCC 修订号的同构物；changes feed 天然支撑 L4 意图对账的「增量拉取对端变更→逐条比对 intent」；CRDT（Automerge/Yjs/Loro）解决「收敛」，但解决不了「谁持有 lease、栅栏在哪、task_gate 谁派生」这类权威问题——而 T-016 的核心难点恰恰是权威/栅栏而非收敛，故 CRDT 只作备选、不作主同步层。取舍：CouchDB 本体含集群管理/视图等边缘不需要的部件，故「借语义自实现轻量复制」优于「整机引入」。
 
-## 5. 决策域 D：v1 元素/操作清单（已收敛，供 ADR）
-- 元素：矩形 / 椭圆 / 直线(含箭头) / 自由手绘 / 单行纯文本。
-- 属性：位置、尺寸、颜色、线宽、文本内容（仅单行纯文本元素）、箭头标志。
-- 操作：单选、移动、元素缩放、删除、改色、线宽。
-- 视口：无限画布 pan/zoom 为视图变换，不入文档。
-- v2（明确排除）：多选、图片、旋转、编组、橡皮擦、压感、富文本、账号体系、多实例横向扩展。
-- 推荐 schema：每元素一个 Y.Map（type/id/x/y/w/h/color/strokeWidth/…；手绘=points[]；文本=text），容器用 Y.Map<elementId, Y.Map>。理由：按元素粒度 map 便于按 id 删除/局部更新，与 Y.UndoManager 的 origin 过滤天然配合。
+## 5. 决策域 D：边缘传输 / 断点续传通道
+requirement 定稿：无中心 broker（§4.1）；但「断点续传」需要 at-least-once 通道语义。本域把传输层与队列存储层解耦：队列=本地 outbox，传输=把 outbox 变更带到对端。
 
-## 6. 决策域 E：持久化（待裁决项 2）
-多数（7/8）：SQLite(WAL) 单文件 + StorageProvider 抽象；coder：y-leveldb。
+| 候选 | 许可证 | 成熟度/维护 | 适配度 | 迁移成本 |
+|---|---|---|---|---|
+| **Mosquitto（MQTT QoS1 + persistent session）** | EPL-2.0 | 极高 | **高**：QoS1=at-least-once、persistent session=断线重连续传、轻量、可嵌入/单机运行 | **低** |
+| EMQX | Apache-2.0 | 高，活跃 | 中：边缘集群更强，但更重 | 中 |
+| NATS leaf node + JetStream | Apache-2.0 | 高，非常活跃 | **高（备选）**：leaf 边缘→中心流 + 去重，与 §3 去重原语一体 | 中 |
 
-| 候选 | 许可证 | 单文件 | 可查询 | 迁移/运维成本 | 结论 |
-|---|---|---|---|---|---|
-| **better-sqlite3** | MIT | 是 | 是（SQL：board 列表/元素数/healthz/导出） | 低（WAL、同步 API、预编译二进制） | **v1 首选** |
-| node:sqlite（Node 22.5+/24 内置） | MIT(Node) | 是 | 是 | 最低（零原生依赖，需固定 Node≥22.5） | 备选（Docker 固定 Node 24 时） |
-| y-leveldb（Yjs 官方持久化） | MIT | 否（目录） | 否（不透明二进制） | 中（原生依赖、目录文件、不可查询） | **拒绝** |
-| y-indexeddb（客户端离线） | MIT | — | — | 低 | 客户端离线/重连缓冲配套使用 |
+**推荐：Mosquitto（MQTT QoS1 + persistent session）作默认传输；NATS leaf node 作「接受中继」场景的备选。** 理由：MQTT QoS1 + persistent session 是「离线/断点续传」最轻最成熟的现成语义；Mosquitto 可嵌入式单机运行、不强制中心集群，不违反「无中心 broker」。取舍：EMQX 需要更重边缘集群时才选；NATS 与 §3 幂等去重一体、运维统一，但引入 NATS 运行时。**关键边界：三者只作「传输/同步通道」，不承担队列状态权威——本地 outbox 仍是唯一耐久根，避免中心化复发。**
 
-**推荐：better-sqlite3（WAL）+ StorageProvider 接口**，服务端存 Yjs update 增量 + 定期快照压缩；客户端 y-indexeddb 做离线缓冲。拒绝 y-leveldb 理由：目录文件不符合「单文件嵌入式」、不可查询（无法做 /healthz、board 列表、导出、指标统计）。取舍：y-leveldb 与 Yjs 集成零成本（官方 provider），但被「单文件+可查询」目标否决；better-sqlite3 需自写约 100 行 provider（存 binary update + snapshot + 去重/压缩），一次性成本低。
+## 6. 决策域 E：lease / fencing / 双活窗口
+requirement 定稿：W = lease_TTL + takeover_latency + max_declared_side_effect_duration（§4.6）；lease 数值整列置空、由假死分布 × 双活代价标定（⚖️-1）。候选：
 
-## 7. 决策域 F：撤销/重做语义（待裁决项 3）
-基线：每用户局部撤销（仅撤本人操作），全局/协作撤销排除 v1，undo 深度 ≥100。
+| 候选 | 许可证 | 成熟度/维护 | 适配度 | 迁移成本 |
+|---|---|---|---|---|
+| **etcd lease + fencing token（Chubby 模式，语义借用）** | Apache-2.0 | 极高 | **高（语义）**：lease=失效检测上限、fencing token=单调 epoch 写，正是 B2/B3 需要的 | 高（若整机引入集群，重） |
+| hashicorp/raft | MPL-2.0 | 高 | 中：可嵌入 Raft 强一致，但 T-016 已定「对等同步」非全 Raft | 中 |
+| Dragonboat | Apache-2.0 | 高 | 中：同上 | 中 |
 
-实现候选：
+**推荐：借 Chubby/etcd 的「lease + fencing token」语义自实现：单调 epoch + 持久 fence token + lease TTL；不引入 etcd 集群。** 理由：已定「对等同步」不需要 Raft 全序，但「双活防护」必须借用 fencing 语义——「lease 到期前服务器保证不把所有权交给别人，持有者持单调 fence token 写」。对 ⚖️-1 的研究结论：**Chubby/etcd 中 lease 的量纲从来是时间（失效检测延迟上限），与磁盘预算正交**，故「存储预算反推 lease」无先例可依，成熟实现均以「假死/分区时长分布」为 lease 标定输入。取舍：整机引入 etcd 集群过重且与对等同步冲突，语义借用成本低。
 
-| 方案 | 说明 | 取舍 |
+## 7. 决策域 F：验证载体（协议层模拟 + 耐久层注入）
+requirement 定稿：协议层确定性模拟 + 耐久层真实二进制 kill -9/掉电/ENOSPC，两套 harness 互相校验（§4.5）。候选：
+
+| 候选 | 许可证 | 成熟度/维护 | 适配度 | 迁移成本 |
+|---|---|---|---|---|
+| **FoundationDB flow 确定性模拟** | Apache-2.0 | 极高 | **高（方法学）**：把网络/磁盘/时钟注入为可调度 actor，确定性模拟鼻祖 | 高（借方法非代码） |
+| **TigerBeetle VOPR** | Apache-2.0 | 高，非常活跃 | **高（方法学 + 幂等/CAS 测试哲学）**：真实故障注入 + 状态机比对，其幂等去重与 T-016 同构 | 中（借方法非代码） |
+| crashmonkey | MIT（待核） | 中 | 高：文件系统崩溃一致性注入（掉电/ENOSPC） | 低 |
+| Jepsen | EPL（待核） | 极高 | 中：黑盒 kill -9/分区注入，适合最终一致校验 | 中 |
+| Antithesis | 商业闭源 | 高 | 高但付费：确定性 hypervisor 故障注入 | 高（采购） |
+
+**推荐：协议层自建 VOPR 式确定性模拟（借 FoundationDB/TigerBeetle 方法学），耐久层用 crashmonkey + kill -9/掉电/ENOSPC 真实二进制注入；DSH 插件仅作协议内循环（如 requirement 已定）。** 理由：TigerBeetle 已证明「幂等键 + CAS + 双存储校验」能用 VOPR 覆盖到静默损坏；crashmonkey 专门注入文件系统崩溃一致性故障，匹配「耐久层真实二进制」。对 ⚖️-3 的研究结论：**oracle 住在模拟器/测试侧，不驻生产路径**——生产只留可检测信号（WAL CRC、fence 单调、幂等命中计数），静默损坏由「注入 ground-truth 交错 → 断言静默交错集合=∅」的可数性质覆盖。
+
+## 8. 对照排除（整体成品 vs 中心 broker vs 重平台）
+requirement 已排除「中心 broker / exactly-once 平台」，本节记录对照与排除理由，防止复发。
+
+| 候选 | 类别 | 排除理由 |
 |---|---|---|
-| **Y.UndoManager + origin 过滤 + 手势事务** | 只捕获本人 op；每手势一个事务（stopCapturing）使「一次绘制/一次移动」=1 步；undo/redo 仅回放本人 op | **v1 首选**，零自研栈 |
-| 命令模式（自研语义栈） | 语义级 add/move/setColor 命令栈，与 CRDT 解耦 | 更可控但需自维护一致性，v2 备选 |
+| Temporal / Cadence | durable execution | MIT；语义标杆（workflow-id 幂等 + event-sourced WAL + at-least-once），但中心服务 + 外部 DB，与「边缘本地 WAL」冲突；仅作语义参照 |
+| Hatchet | durable execution | Apache-2.0（待核）；Postgres 中心，边缘不现实；参考其 transactional outbox |
+| Restate | durable execution | BSL 源码可得（待核，非 OSI）；内嵌合规风险 |
+| Inngest | durable execution | source-available（待核）；非自托管，排除 |
+| Kafka / Pulsar | 中心 log | Apache-2.0；JVM 重、中心 log；其 exactly-once 是「有界+事务」，与「全网禁 exactly-once」相悖 |
+| RabbitMQ | 中心 broker | MPL-2.0；at-least-once 成熟但中心化、离线队列弱 |
+| BullMQ / Asynq / Celery | Redis/中心 broker | MIT/BSD；内存优先（Redis）、断电离线弱、中心依赖 |
 
-redo 语义（分歧）：
-- 6/8：撤销后，远端并发 op 落到本人历史前 → 清空本地 redo 栈。
-- breaker/coder：保留 redo，仅重放本人 op，由 CRDT 独立收敛。
+## 9. 选型建议（一等 + 备选 + 取舍）
 
-**推荐：采纳 6/8（清空 redo）。** 理由：①与「局部撤销、不承诺全局收敛语义」一致；②在并发插入后重放，Y.UndoManager 默认不保证结果直觉可预期，清空 redo 是最可预测、实现最简且无歧义；③「保留 redo 重放」在 CRDT 收敛理论上成立，但 UX 上「redo 出已被别人改动过的中间态」易困惑，且需额外跟踪本人 op 与远端交织，复杂度不值 v1。
-实现细节：监听远端 update（origin 非本地）作用于被管 scope 时清空 redo。注意 Y.UndoManager.clear() 会同时清空 undo+redo，故需包装或单独维护 redo 栈（或在本地 undo 后置 redo 哨兵、收到远端插入即丢弃哨兵）。此项须在 ADR-0006 明确。
+### 9.1 核心判断
+**无单一现成项目同时满足「离线优先 + 对等同步 + 副作用级幂等分类 + 栅栏边界吸收 + 全网禁 exactly-once」的合成体。正确姿势是「借已验证原语、自研薄胶水」。**
 
-## 8. 决策域 G：部署形态（已收敛，供 ADR + 选型）
-- 形态：单容器 Docker + docker-compose + 静态前端 + 单进程 Node/ws + /healthz；v1 显式单实例、不承诺横向扩展。
+### 9.2 一等选型（分层组合）
 
-| 候选 | 许可证 | 说明 | 结论 |
+| 层 | 一等 | 借用的关键语义 | 对齐基线 |
 |---|---|---|---|
-| **y-websocket（扩展）** | MIT | 官方参考 ws server，含 awareness + y-leveldb 持久化钩子；替换持久化为 SQLite + 加 /healthz | **v1 首选** |
-| Hocuspocus | MIT | 功能全（认证/扩展/持久化钩子）但重、面向富文本 | 不选（v1 过重） |
-| 自写 ws provider | — | 完全可控，约 200 行（y-protocols 编解码 + awareness + 广播） | 备选（需深度定制时） |
+| 本地 outbox/WAL | SQLite（WAL, synchronous=FULL, UNIQUE/UPSERT） | 崩溃安全 WAL、原子幂等插入（db-unique 信任根） | §4.1/§4.2 |
+| 幂等/去重/CAS | 自研，语义借用 NATS 去重窗口 + TigerBeetle 幂等账本 | effective-once、有限去重窗口+溢出策略、CAS 版本写 | §4.3 B2 |
+| 对等同步/版本序 | 自研，语义借用 CouchDB 多主 + MVCC 修订号 + changes feed | 版本序=CAS、L4 意图对账=增量对账 | §4.4/§4.3 L4 |
+| 边缘传输 | Mosquitto（MQTT QoS1 + persistent session） | at-least-once、断线重连续传 | §4.1（仅作通道） |
+| lease/fencing | 自研，语义借用 Chubby/etcd lease + fencing token | 单调 epoch、双活窗口 W | §4.6 |
+| 验证 | TigerBeetle VOPR + FoundationDB flow 方法学 + crashmonkey | 协议确定性模拟 + 耐久真实注入 | §4.5 |
 
-推荐：以 y-websocket 为基座，替换持久化为 better-sqlite3、增加 /healthz（探活：ws 可达 + SQLite 可写读）。Dockerfile 多阶段（Node 构建前端 → 运行 Node 单进程）；compose 挂 SQLite 卷。## 9. 许可证与合规总表
-| 候选 | 许可证 | 置信度 | 备注 |
+### 9.3 备选
+- **备选 1（最小自研，接受中继传输）**：NATS JetStream（leaf node + stream 去重 + KV）统一承担「传输 + 幂等去重 + KV 版本序」三层，本地仍 SQLite outbox。适用：若「非中心 broker」放宽为「非中心存储/执行」。
+- **备选 2（仅语义标尺）**：Temporal——不作为实现，仅作 durable execution 语义对齐标尺（幂等 workflow id、event-sourced、at-least-once）。
+- **备选 3（同步层）**：Automerge/Loro CRDT——若后续把「对等状态复制」单独拆出且只需收敛不需权威，可替换 CouchDB 语义。
+
+### 9.4 取舍理由
+- 排除中心 broker/平台：违反 §4.1「无中心 broker」；exactly-once 平台违反「全网禁 exactly-once」。
+- 排除整机引入 CouchDB/etcd：借语义足够，整机引入带入边缘不需要的集群/视图/权重。
+- 排除 RocksDB/LevelDB：KV 引擎无 UNIQUE/CAS/对账查询，outbox+账本语义需自建。
+- CRDT 不做主同步：解决收敛不解决权威（lease/栅栏/task_gate），与 T-016 难点错位。
+
+## 10. 三条待决冲突的研究映射（researcher 侧结论）
+
+### ⚖️-1 SLO/lease 推导链
+研究结论：**Chubby/etcd 的 lease 量纲恒为时间（失效检测延迟上限 + fencing token 有效期），业界无「存储预算→lease」推导先例；lease 必须由「假死时长分布分位数 × takeover_latency × per-class 双活代价」标定。** 选型落点：借 etcd fencing 语义；用 VOPR 式确定性模拟把「假死分布」作为注入输入、lease 作为标定输出（实测回填），支持 REQUIREMENTS.md 的 lineage 门禁与「设计界 vs 实测值」两态拆分。明确否定任何「D/M/K 反推 lease」的断链结论。
+
+### ⚖️-2 meta 递归终止
+研究结论：结构性排除与幂等不动点**不是二选一**。业界先例（NATS DuplicateWindow）给出「有限去重窗口 + 显式溢出策略」：窗口内幂等键去重（自坍缩），窗口溢出显式降级（不假装保证）。递归终止条件 = **「有限窗口 + 吸收器自身 Class A 幂等（其幂等键由在册信任根保证）+ L4 意图对账」三者组合**。选型落点：信任根枚举映射到 REQUIREMENTS.md §6.2 kind——db-unique=SQLite UNIQUE、object-cas=S3/OSS If-Match、third-party-idempotency-key=支付/短信平台幂等键；吸收器副作用 class 必须 ≤ 所依赖信任根 class；「补偿=Class A」写为显式前置假设（声明依赖），而非可测终止证明。
+
+### ⚖️-3 E[SilentDamage] 可测性
+研究结论：**oracle 住在测试/模拟侧，不驻生产路径**（FoundationDB/TigerBeetle 的一致答案）。生产只留可检测信号（WAL CRC、fence 单调、幂等命中计数）；静默损坏由「注入 ground-truth 双活交错 → 穷举断言『静默交错集合=∅、每条交错留 absorbed ∨ audited 痕迹』」的可数性质覆盖。选型落点：采纳 REQUIREMENTS.md 方案 A（CI 签「已检测集 + 审计完整性」可数性质，不签概率期望值）；耐久层用 crashmonkey + kill -9/掉电/ENOSPC 与协议层模拟互相校验。
+
+### ⚖️-4（schema 欠账）Class III 双窗口 Z
+研究结论（researcher 倾向，与 requirement 默认一致）：**Z 入 v1 schema**。Z = self_fence_interval + in-flight duration 是 Class C 唯一能产生不可逆静默损坏的残漏窗口，Z 不入 schema 则 E[SilentDamage] 的 C 类项无定义。选型含义：Z 不引入新库，但要求本地 outbox 记录「自栅栏发起时刻 + 动作完成时刻」两枚单调时间戳（SQLite 表字段即可），供审计与对账断言。
+
+## 11. 许可证与合规总表
+
+| 候选 | 许可证 | 置信度 | 结论 |
 |---|---|---|---|
-| Yjs | MIT | 高 | 采纳 |
-| y-protocols | MIT | 高 | 采纳 |
-| y-websocket | MIT | 高 | 采纳 |
-| y-indexeddb | MIT | 高 | 采纳（客户端离线） |
-| Automerge | MIT | 高 | 不选 |
-| ShareDB | MIT | 高 | 已排除 |
-| better-sqlite3 | MIT | 高 | 采纳 |
-| node:sqlite | MIT（Node 内置） | 高 | 备选 |
-| perfect-freehand | MIT | 高 | 采纳 |
-| Konva | MIT | 高 | 备选 |
-| Fabric.js / Paper.js / Pixi.js | MIT | 高 | 不选（v1） |
-| Excalidraw | MIT | 高 | 仅参考（无 CRDT，与基线冲突） |
-| tldraw | 自定义源可用（商用需授权评估）* | 低 | 仅架构参考，不直接采用 |
-| Hocuspocus | MIT | 高 | 不选（v1 过重） |
-| Liveblocks | 专有 | 高 | 排除（SaaS） |
+| SQLite | public domain | 高 | 采纳 |
+| NATS / JetStream | Apache-2.0 | 高 | 语义借用（备选运行时） |
+| TigerBeetle | Apache-2.0 | 高 | 语义 + 方法学借用 |
+| CouchDB / PouchDB | Apache-2.0 | 高 | 语义借用（PouchDB 备选内嵌） |
+| Mosquitto | EPL-2.0 | 高 | 采纳（传输） |
+| EMQX | Apache-2.0 | 高 | 备选 |
+| etcd | Apache-2.0 | 高 | 语义借用 |
+| hashicorp/raft | MPL-2.0 | 高 | 备选（若需强一致） |
+| Dragonboat | Apache-2.0 | 高 | 备选 |
+| FoundationDB | Apache-2.0 | 高 | 方法学借用 |
+| crashmonkey | MIT（待核） | 中 | 耐久层工具 |
+| Jepsen | EPL（待核） | 中 | 可选黑盒 |
+| Automerge / Yjs | MIT | 高 | 备选（CRDT） |
+| Loro | MIT/Apache（待核） | 低 | 备选（待核） |
+| Temporal / Cadence | MIT | 高 | 仅语义参照 |
+| Hatchet | Apache-2.0（待核） | 中 | 仅参考 outbox |
+| Restate | BSL（待核，非 OSI） | 中 | 排除 |
+| Inngest | source-available（待核） | 中 | 排除 |
+| Kafka / Pulsar | Apache-2.0 | 高 | 排除 |
+| RabbitMQ | MPL-2.0 | 高 | 排除 |
+| BullMQ | MIT | 高 | 排除 |
+| Asynq | MIT（待核） | 中 | 排除 |
+| Celery | BSD-3-Clause | 高 | 排除 |
 
-风险提示：tldraw 在 v2+ 转为自定义源可用许可（商用需授权评估），故「整体采用 tldraw」被排除在自建之外；仅引用其架构思路与 perfect-freehand（MIT）。带 * 项需联网复核。
-
-## 10. 量化基线的埋点/测量方法
-- 并发 20/50：k6 或自研 ws 客户端脚本模拟 N 个客户端同板操作；记录服务端 CPU/MEM、客户端 FPS/内存。
-- op→远端可见 P95 ≤200ms：A 发 op 前打 performance.now 时间戳随 update 附带；B 收到并完成渲染后记录 B 侧时间；先一次性 ping/pong 交换估算时钟偏移 δ，端到端 = t_B − (t_A + δ)；含 A 本地应用、ws 上行、服务端广播、ws 下行、B 应用+渲染；全 session 采样输出 P95。
-- 停止操作后 ≤1s 收敛：最后一条 op 后轮询各客户端 Y.Doc 的 state vector/状态摘要，直到全部相等，最大收敛时间 ≤1s。
-- undo 深度 ≥100：单测连续 150 个手势，undo 150 次断言恢复基线；再 redo 150 次断言回到 150 步态。
-- 单板 1000/5000 元素：种子脚本生成 N 元素；测加载（doc 载入→首帧渲染）与交互帧率（移动/缩放）≥30fps、内存预算；5000 为 soak。
-- 光标节流 20Hz：客户端对 awareness 光标更新节流，单测断言每秒 awareness 更新 ≤20 次（允许首帧即时一次）。
-
-## 11. 待签 ADR 清单（7 份）
-- ADR-0001 同步引擎 = Yjs(CRDT) + y-protocols/awareness（排除 OT/ShareDB/Automerge）
-- ADR-0002 渲染 = Canvas2D 单画布 + presence overlay + Renderer 接口（含 perfect-freehand）
-- ADR-0003 v1 元素/操作清单与数据 schema
-- ADR-0004 持久化 = SQLite(WAL) 单文件 + StorageProvider 抽象（拒绝 y-leveldb）
-- ADR-0005 部署 = 单容器/单进程/单实例 + /healthz
-- ADR-0006 撤销语义 = 每用户局部撤销 + redo 清空策略（6/8 方案）
-- ADR-0007 状态分层 = 持久态/临态物理分离（presence 不入文档/undo）
+风险提示：EPL-2.0（Mosquitto）为弱 copyleft，静态链接/内嵌需评估衍生作品条款，建议进程隔离或动态链接；BSL/source-available 项（Restate/Inngest）不作为依赖。带「待核」项落地前逐条复核（§15）。
 
 ## 12. 迁移成本 & 自建 vs 采用总评
-- 整体采用 tldraw：功能最全但许可证风险 + 超大表面积 + v1 范围外功能多 → 排除（仅作参考）。
-- 整体采用 Excalidraw：MIT 但 SVG+Canvas 混合、无 CRDT（房间 JSON 同步）、undo 为本地栈 → 与已定 Yjs 基线冲突 → 排除。
-- **自建（Yjs + Canvas2D + SQLite）**：许可证全 MIT、每层有官方/成熟原语、迁移成本 = 自写约 100 行持久化 provider + 渲染场景图 + 手势 undo 封装；锁定最低。
-- 结论：**自建**，逐域采用上表推荐；3 处待决分歧 researcher 倾向与 7/8 多数一致（渲染 Canvas2D、持久化 SQLite、redo 清空），请将军按 §11 落 ADR 后转 breaker。
+- 整体采用 Temporal/Cadence/Hatchet：语义成熟但中心服务 + 外部 DB，违反「边缘本地 WAL/无中心 broker」；排除（仅参照）。
+- 整体采用 Kafka/Pulsar/RabbitMQ/BullMQ：中心 broker/内存优先，违反定位；排除。
+- 整体采用 CouchDB/PouchDB：多主复制 + MVCC 契合，但队列权威（lease/栅栏/task_gate）不在其语义内，仍需自研，且整机引入偏重；**借语义自实现优于整机引入**。
+- **自建（SQLite outbox + 借 NATS/CouchDB/etcd 语义 + MQTT 传输 + VOPR 验证）**：每层有公开/成熟先例，自研量集中在「轻量复制协议 + fence/lease 胶水 + 确定性模拟器骨架」三块（各约数百行），锁定与合规风险最低。
+- 结论：**自建（原语组装型）**，逐域按 §9.2；3+1 待决点 researcher 倾向已给（§10），请将军按 REQUIREMENTS.md §5 裁决口径 + §14 ADR 落定后转拆解。
 
 ## 13. 本阶段验收标准（researcher 自定，因原验收标准留空）
-- AC1 docs/RESEARCH.md 存在且覆盖 6 个已收敛决策域 + 3 个待决分歧。
-- AC2 每决策域 ≥2 候选，逐项给适配度/成熟度/许可证/维护/迁移成本。
-- AC3 3 个待决分歧给出明确推荐 + 取舍理由。
-- AC4 6 项量化基线各给测量方法。
-- AC5 许可证表准确，不确定项标注「需复核」。
-- AC6 7 份 ADR 清单枚举。
-- AC7 未下载任何外部依赖；验证为本地命令（文件存在 + 结构检查）。
+- AC1 docs/RESEARCH.md 存在且已重写为 T-016（离线优先分布式任务队列），覆盖 6 项定稿基线 + 3+1 待决点。
+- AC2 每个决策域 ≥2 候选，逐项给适配度/成熟度/许可证/维护/迁移成本。
+- AC3 给出一等分层选型 + ≥2 备选 + 取舍理由，且与「无中心 broker、全网禁 exactly-once、放弃 per-key FIFO」基线对齐。
+- AC4 3+1 待决点各给「研究结论 → 借用先例/库 → 如何帮助闭合」映射。
+- AC5 许可证表准确，不确定项标注「待核」。
+- AC6 未下载任何外部依赖；验证为本地命令（文件写盘 + 读回 + 结构/关键词检查）。
 
-## 14. 风险与未知（联网后需复核）
-- tldraw 精确许可证条款（若未来考虑采用）。
-- 各库 star/commit 频率/最近 release（本阶段禁网，凭知识定性）。
-- better-sqlite3 预编译二进制在目标容器镜像（Debian/Alpine）的可用性（Alpine 需 musl 预编译；Debian slim 更稳）。
-- node:sqlite 在 Node 24 的稳定性（若选零原生依赖路线）。
-- y-websocket 持久化替换点的 API 版本差异。
+## 14. ADR 建议清单（7 份，交将军）
+- ADR-1001 存储/outbox = SQLite(WAL) + UNIQUE/UPSERT（排除 LMDB/RocksDB/自研 WAL）
+- ADR-1002 幂等/去重 = 有限去重窗口 + 溢出显式降级（借 NATS/TigerBeetle 语义）
+- ADR-1003 对等同步 = CouchDB 语义（MVCC + changes feed），CRDT 仅备选
+- ADR-1004 边缘传输 = MQTT QoS1 + persistent session（Mosquitto），仅作通道非权威
+- ADR-1005 lease/fencing = Chubby/etcd 语义（单调 epoch + fence token），不引入 etcd
+- ADR-1006 验证载体 = VOPR 式确定性模拟 + crashmonkey/kill -9/掉电/ENOSPC
+- ADR-1007 trust-root registry 落地（db-unique/object-cas/third-party-idempotency-key 三类信任根）
+
+## 15. 风险与未知（联网后需复核）
+- 各「待核」许可证逐条 SPDX 核对（Hatchet/Restate/Inngest/Asynq/Loro/crashmonkey/Jepsen）。
+- NATS JetStream DuplicateWindow 默认值/上限与 leaf node 去重行为。
+- Mosquitto EPL-2.0 静态链接/内嵌合规结论。
+- TigerBeetle VOPR 模拟器是否可外部复用（通常内嵌于 TB 仓库，作方法学借用）。
+- CouchDB MVCC/changes feed 无中心多主下的冲突上限与 tombstone 行为。
+- 各库 star/commit/最近 release（本阶段禁网，凭知识定性）。

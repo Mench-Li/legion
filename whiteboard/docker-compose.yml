@@ -1,0 +1,18 @@
+# docker-compose.yml — 单容器自托管（ADR-0005：单实例，不承诺横向扩展）
+services:
+  whiteboard:
+    build: .
+    image: collab-whiteboard:0.1.0
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - HOST=0.0.0.0
+      - DB_PATH=/data/whiteboard.db
+      - TTL_MS=10000
+    volumes:
+      - whiteboard-data:/data
+    restart: unless-stopped
+
+volumes:
+  whiteboard-data:

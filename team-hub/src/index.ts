@@ -197,6 +197,8 @@ export function apply(ctx: Context, config: Config): void {
           if (typeof body.description === 'string' && body.description.length > 0) argv.push('--description', body.description)
           if (typeof body.role === 'string' && body.role.length > 0) argv.push('--role', body.role)
           if (typeof body.priority === 'string' && body.priority.length > 0) argv.push('--priority', body.priority)
+          if (typeof body.parent === 'string' && body.parent.length > 0) argv.push('--parent', body.parent)
+          if (typeof body.status === 'string' && body.status.length > 0) argv.push('--status', body.status)
           void by
           return runTaskctl(argv)
         })
@@ -225,6 +227,17 @@ export function apply(ctx: Context, config: Config): void {
           const argv = ['transition', id, '--to', to, '--by', by]
           if (typeof body.ifVersion === 'number') argv.push('--if-version', String(body.ifVersion))
           if (body.force === true) argv.push('--force')
+          return runTaskctl(argv)
+        })
+        return
+      }
+
+      if (req.method === 'POST' && path === '/api/advance') {
+        await handleWrite(req, res, async (body, by) => {
+          const id = body.id
+          if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
+          const argv = ['advance', id, '--by', by]
+          if (typeof body.ifVersion === 'number') argv.push('--if-version', String(body.ifVersion))
           return runTaskctl(argv)
         })
         return

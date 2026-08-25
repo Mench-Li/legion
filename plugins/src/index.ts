@@ -61,6 +61,12 @@ export interface Config {
   /** 多角色流水线定义文件（默认 repoRoot/roles.json；存在则进入流水线模式）。 */
   rolesFile: string
   logFile: string
+  /** team-hub 地址（如 http://127.0.0.1:3080/team-hub）；非空则任务池读写走 hub（带身份 + scope）。 */
+  hubUrl: string
+  /** hub Bearer token（hub 开启鉴权时必填）。 */
+  hubToken: string
+  /** 守护负责的项目 scope（默认 default；goal 发布目标时默认用 roles.json 的 name）。 */
+  scope: string
 }
 
 export const Config = z.object({
@@ -78,6 +84,9 @@ export const Config = z.object({
   denyTools: z.array(z.string()).default([]),
   rolesFile: z.string().default(''),
   logFile: z.string().default(''),
+  hubUrl: z.string().default(''),
+  hubToken: z.string().default(''),
+  scope: z.string().default('default'),
 })
 
 /** 任务记录（taskctl 输出的字段子集，按需扩展）。 */
@@ -263,8 +272,40 @@ export function apply(ctx: AppContext, config: Config): void {
   const controllers = new Set<AbortController>()
   let sweeping = false
 
-  const listTasks = () => runTaskctl(config.scrumDir, ['list']) as Promise<Task[]>
-  const getTask = (id: string) => runTaskctl(config.scrumDir, ['get', id]) as Promise<Task>
+  const hubUrl = config.hubUrl.replace(/\/+$/, '')
+  const useHub = hubUrl !== ''
+
+  /** hub 写调用（POST，带 token；body 里带 by + scope）。 */
+  async function hubPost(path: string, body: Record<string, unknown>): Promise<unknown> {
+    const res = await fetch(`${hubUrl}${path}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(config.hubToken !== '' ? { authorization: `Bearer ${config.hubToken}` } : {}),
+      },
+      body: JSON.stringify(body),
+    })
+    const data = await res.json().catch(() => ({})) as Record<string, unknown>
+    if (!res.ok) throw new Error(String(data.error ?? `hub ${path} 失败（${res.status}）`))
+    return data.task ?? data
+  }
+
+  /** hub 读任务列表（按 scope 过滤）。 */
+  async function hubList(): Promise<Task[]> {
+    const res = await fetch(`${hubUrl}/api/board?scope=${encodeURIComponent(config.scope)}`)
+    if (!res.ok) throw new Error(`hub board 失败（${res.status}）`)
+    return res.json() as Promise<Task[]>
+  }
+
+  const listTasks = (): Promise<Task[]> => useHub ? hubList() : (runTaskctl(config.scrumDir, ['list']) as Promise<Task[]>)
+  const getTask = async (id: string): Promise<Task> => {
+    if (useHub) {
+      const t = (await hubList()).find(x => x.id === id)
+      if (t === undefined) throw new Error(`未知任务 ${id}`)
+      return t
+    }
+    return runTaskctl(config.scrumDir, ['get', id]) as Promise<Task>
+  }
 
   /** 多角色流水线：读 roles.json，存在则进入流水线模式（按角色派工 + done 自动流转）。 */
   const rolesFilePath = config.rolesFile || join(config.repoRoot, 'roles.json')
@@ -313,21 +354,42 @@ export function apply(ctx: AppContext, config: Config): void {
   /** 带乐观锁的状态迁移：先重读任务取最新 version。 */
   async function transitionTo(id: string, to: string): Promise<void> {
     const t = await getTask(id)
+    if (useHub) {
+      await hubPost('/api/transition', { id, to, by: config.role, ifVersion: t.version, scope: config.scope })
+      return
+    }
     await runTaskctl(config.scrumDir, ['transition', id, '--to', to, '--by', config.role, '--if-version', String(t.version)])
   }
 
   /** 流水线自动推进：in_progress/in_review → done（推进者=任务角色，将军已授权整条流水线）。 */
   async function advanceTo(id: string, by: string): Promise<void> {
     const t = await getTask(id)
+    if (useHub) {
+      await hubPost('/api/advance', { id, by, ifVersion: t.version, scope: config.scope })
+      return
+    }
     await runTaskctl(config.scrumDir, ['advance', id, '--by', by, '--if-version', String(t.version)])
   }
 
   /** 追加评论（失败不抛出，避免污染主流程）。 */
   async function safeComment(id: string, text: string): Promise<void> {
     try {
-      await runTaskctl(config.scrumDir, ['comment', id, '--by', config.role, '--text', text.slice(0, 800)])
+      if (useHub) {
+        await hubPost('/api/comment', { id, by: config.role, text: text.slice(0, 800), scope: config.scope })
+      } else {
+        await runTaskctl(config.scrumDir, ['comment', id, '--by', config.role, '--text', text.slice(0, 800)])
+      }
     } catch (e) {
       log(`comment ${id} 失败：${String(e)}`)
+    }
+  }
+
+  /** 认领任务（hub 或本地）。 */
+  async function claimTask(id: string, soldier: string): Promise<void> {
+    if (useHub) {
+      await hubPost('/api/claim', { id, soldier, scope: config.scope })
+    } else {
+      await runTaskctl(config.scrumDir, ['claim', id, '--soldier', soldier])
     }
   }
 
@@ -464,10 +526,19 @@ exit 0
       `[本阶段] ${nextStage.label}（${nextStage.role}）`,
     ].filter(s => s.trim().length > 0).join('\n\n')
     try {
-      const res = await runTaskctl(config.scrumDir, [
-        'create', '--title', doneTask.title, '--description', description,
-        '--role', nextStage.role, '--parent', doneTask.id, '--priority', doneTask.priority, '--status', 'todo',
-      ]) as { id?: string }
+      let res: { id?: string }
+      if (useHub) {
+        res = await hubPost('/api/create', {
+          title: doneTask.title, description, role: nextStage.role,
+          parent: doneTask.id, priority: doneTask.priority, status: 'todo',
+          by: config.role, scope: config.scope,
+        }) as { id?: string }
+      } else {
+        res = await runTaskctl(config.scrumDir, [
+          'create', '--title', doneTask.title, '--description', description,
+          '--role', nextStage.role, '--parent', doneTask.id, '--priority', doneTask.priority, '--status', 'todo',
+        ]) as { id?: string }
+      }
       log(`${doneTask.id} 流水线流转：${stage.role} → ${nextStage.role}（新任务 ${res?.id ?? ''}）`)
       activity('dispatch', doneTask.id, `流水线流转 ${stage.label} → ${nextStage.label}`)
     } catch (e) {
@@ -596,7 +667,7 @@ exit 0
   /** 认领 todo 并派工（流水线模式按任务角色认领 + 用角色提示词）。 */
   async function workTodo(t: Task, stage?: StageDef): Promise<void> {
     try {
-      await runTaskctl(config.scrumDir, ['claim', t.id, '--soldier', stage ? stage.role : config.role])
+      await claimTask(t.id, stage ? stage.role : config.role)
     } catch (e) {
       log(`${t.id} 认领失败（可能已被他人认领）：${String(e)}`)
       return
@@ -712,10 +783,19 @@ exit 0
       `[本阶段] ${first.label}（${first.role}）`,
     ].filter(s => s.trim().length > 0).join('\n\n')
     try {
-      const res = await runTaskctl(config.scrumDir, [
-        'create', '--title', discussionTask.title, '--description', description,
-        '--role', first.role, '--parent', discussionTask.id, '--priority', discussionTask.priority, '--status', 'todo',
-      ]) as { id?: string }
+      let res: { id?: string }
+      if (useHub) {
+        res = await hubPost('/api/create', {
+          title: discussionTask.title, description, role: first.role,
+          parent: discussionTask.id, priority: discussionTask.priority, status: 'todo',
+          by: config.role, scope: config.scope,
+        }) as { id?: string }
+      } else {
+        res = await runTaskctl(config.scrumDir, [
+          'create', '--title', discussionTask.title, '--description', description,
+          '--role', first.role, '--parent', discussionTask.id, '--priority', discussionTask.priority, '--status', 'todo',
+        ]) as { id?: string }
+      }
       log(`${discussionTask.id} 讨论收敛 → 启动流水线首阶段 ${first.role}（新任务 ${res?.id ?? ''}）`)
       activity('dispatch', discussionTask.id, `讨论收敛 → 启动流水线 ${first.label}`)
     } catch (e) {
@@ -726,7 +806,7 @@ exit 0
   /** 需求讨论群聊：各角色士兵逐轮并发发言，将军收敛方向，然后启动流水线。 */
   async function runDiscussion(t: Task): Promise<void> {
     try {
-      await runTaskctl(config.scrumDir, ['claim', t.id, '--soldier', 'discussion'])
+      await claimTask(t.id, 'discussion')
     } catch (e) {
       log(`${t.id} 讨论任务认领失败：${String(e)}`)
       return

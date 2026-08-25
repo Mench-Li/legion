@@ -30,8 +30,10 @@ export interface Config {
   routePrefix: string
   /** 团队共享 token；非空时写操作需 `Authorization: Bearer <token>`。 */
   teamToken: string
-  /** 成员白名单；非空时写操作的 `body.by` 必须是其中之一。 */
+  /** 全局成员白名单；非空时写操作的 `body.by` 必须是其中之一。 */
   members: string[]
+  /** scope 级成员白名单：scope 名 → 允许操作的成员列表（非空时该 scope 写操作须匹配）。 */
+  scopes: Record<string, string[]>
 }
 
 export const Config = z.object({
@@ -39,6 +41,7 @@ export const Config = z.object({
   routePrefix: z.string().default('/team-hub'),
   teamToken: z.string().default(''),
   members: z.array(z.string()).default([]),
+  scopes: z.dict(z.array(z.string())).default({}),
 })
 
 export function apply(ctx: Context, config: Config): void {
@@ -101,22 +104,31 @@ export function apply(ctx: Context, config: Config): void {
     return token === config.teamToken
   }
 
-  /** 校验操作者身份：by 非空，且（白名单非空时）在白名单内。 */
-  function requireMember(body: Record<string, unknown>): string {
+  /** 校验操作者身份：by 非空，且（全局白名单非空时）在全局白名单内，且（scope 白名单非空时）在 scope 白名单内。 */
+  function requireMember(body: Record<string, unknown>, scope: string): string {
     const by = body.by
     if (typeof by !== 'string' || by.trim().length === 0) throw new Error('缺少操作者身份 by')
     const member = by.trim()
     if (config.members.length > 0 && !config.members.includes(member)) {
-      throw new Error(`成员 ${member} 不在白名单（${config.members.join(', ')}）`)
+      throw new Error(`成员 ${member} 不在全局白名单（${config.members.join(', ')}）`)
+    }
+    const scopeMembers = config.scopes[scope]
+    if (scopeMembers !== undefined && scopeMembers.length > 0 && !scopeMembers.includes(member)) {
+      throw new Error(`成员 ${member} 不在 scope ${scope} 的白名单（${scopeMembers.join(', ')}）`)
     }
     return member
   }
 
-  /** 统一写入口：鉴权 → 读体 → 执行（body 里带 by）→ 返回结果。 */
+  /** 从请求体读 scope（缺省 'default'）。 */
+  function readScope(body: Record<string, unknown>): string {
+    return typeof body.scope === 'string' && body.scope.trim().length > 0 ? body.scope.trim() : 'default'
+  }
+
+  /** 统一写入口：鉴权 → 读体 → 执行（body 里带 by + scope）→ 返回结果。 */
   async function handleWrite(
     req: IncomingMessage,
     res: ServerResponse,
-    run: (body: Record<string, unknown>, by: string) => Promise<unknown>,
+    run: (body: Record<string, unknown>, by: string, scope: string) => Promise<unknown>,
   ): Promise<void> {
     try {
       if (!authorized(req)) {
@@ -124,8 +136,9 @@ export function apply(ctx: Context, config: Config): void {
         return
       }
       const body = await readBody(req)
-      const by = requireMember(body)
-      const result = await run(body, by)
+      const scope = readScope(body)
+      const by = requireMember(body, scope)
+      const result = await run(body, by, scope)
       json(res, 200, { ok: true, task: result })
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
@@ -177,10 +190,10 @@ export function apply(ctx: Context, config: Config): void {
 
       // ── 写接口（鉴权）──
       if (req.method === 'POST' && path === '/api/create') {
-        await handleWrite(req, res, async (body, by) => {
+        await handleWrite(req, res, async (body, by, scope) => {
           const title = body.title
           if (typeof title !== 'string' || title.trim().length === 0) throw new Error('缺少参数 title')
-          const argv = ['create', '--title', title.trim()]
+          const argv = ['create', '--title', title.trim(), '--scope', scope]
           if (typeof body.description === 'string' && body.description.length > 0) argv.push('--description', body.description)
           if (typeof body.role === 'string' && body.role.length > 0) argv.push('--role', body.role)
           if (typeof body.priority === 'string' && body.priority.length > 0) argv.push('--priority', body.priority)
@@ -258,6 +271,7 @@ export function apply(ctx: Context, config: Config): void {
         if (url.searchParams.get('status')) argv.push('--status', url.searchParams.get('status') as string)
         if (url.searchParams.get('soldier')) argv.push('--soldier', url.searchParams.get('soldier') as string)
         if (url.searchParams.get('role')) argv.push('--role', url.searchParams.get('role') as string)
+        if (url.searchParams.get('scope')) argv.push('--scope', url.searchParams.get('scope') as string)
         try {
           json(res, 200, await runTaskctl(argv))
         } catch (e) {

@@ -263,6 +263,7 @@ const commands = {
         ordersVersion: Number(args.ordersVersion ?? 1),
         parent: args.parent ?? null,
         role: args.role ?? null,
+        scope: args.scope ?? 'default',
         blocks: [],
         blockedBy: [],
         comments: [],
@@ -329,6 +330,7 @@ const commands = {
         ordersVersion: Number(args.ordersVersion ?? 1),
         parent: null,
         role,
+        scope: args.scope ?? roles.name,
         blocks: [],
         blockedBy: [],
         comments: [],
@@ -341,7 +343,7 @@ const commands = {
       db.tasks[id] = t
       return t
     })
-    process.stdout.write(`${JSON.stringify({ ok: true, goal: args.title.trim(), pipeline: roles.name, stage: stageLabel, role, discuss, task: t }, null, 2)}\n`)
+    process.stdout.write(`${JSON.stringify({ ok: true, goal: args.title.trim(), pipeline: roles.name, scope: args.scope ?? roles.name, stage: stageLabel, role, discuss, task: t }, null, 2)}\n`)
   },
 
   /** 读取一个任务 */
@@ -357,6 +359,7 @@ const commands = {
       .filter(t => args.status === undefined || t.status === args.status)
       .filter(t => args.soldier === undefined || t.soldier === args.soldier)
       .filter(t => args.role === undefined || t.role === args.role)
+      .filter(t => args.scope === undefined || (t.scope ?? 'default') === args.scope)
       .sort((a, b) => a.id.localeCompare(b.id))
     process.stdout.write(`${JSON.stringify(rows, null, 2)}\n`)
   },

@@ -351,3 +351,153 @@ node scrum\taskctl.mjs goal --title "实现一个多人实时协作白板 Web �
 - `COMMAND.md` — 作战总纲（指挥官轮次循环 + 军团纪律）
 - `scrum/README.md` — 看板协议（命令速查 / API / 守护配置）
 - `PLUGINS.md` — 插件状态
+
+---
+
+## 12. 团队协作架构（多成员）
+
+从「单人流水线」升级到「团队协作平台」的完整架构。核心思想一句话：**任务池是唯一权威，hub 是唯一鉴权入口，守护/看板/技能都经 hub 连到任务池，靠 scope 分区 + 跨进程锁 + 乐观锁保证多成员安全并发。**
+
+### 12.1 组件清单（谁是谁）
+
+| 组件 | 位置 | 形态 | 职责 |
+| --- | --- | --- | --- |
+| `taskctl.mjs` | `scrum/taskctl.mjs` | CLI（非插件） | 任务池状态机 + 跨进程文件锁 + 乐观锁，`tasks.json` 的唯一写入口 |
+| `roles.json` | `legion/roles.json` | 配置 | 8 角色流水线定义（`stages` + `discussion`），`name` 即项目 scope |
+| `dsh-scrum-worker` | `plugins/` | daemon-loop | 士兵守护：流水线派工 + 讨论群聊 + 拉取共享技能注入 worker |
+| `dsh-scrum-board` | `board-plugin/` | ui-panel | 看板 UI：HTTP 写接口 + SSE 实时刷新 + 拖拽验收 |
+| `dsh-team-hub`（v1） | `team-hub/src/index.ts` | 服务插件 | 团队中枢（DSH 内嵌 webServer）：鉴权 + 任务 API + SSE，后端调 taskctl |
+| `dsh-team-hub`（v2） | `team-hub/server.mjs` | 独立服务 | 团队中枢（独立进程 8787）：SQLite 任务池 + 技能 + 审计 + 在线状态 |
+| `render.mjs` | `scrum/render.mjs` | 脚本 | 看板渲染：`tasks.json` → `board.json`/`kanban.html` |
+| `LEGION.md` | `legion/LEGION.md` | 规则 | 项目规则，注入每个 worker 提示词 |
+
+### 12.2 架构连线图
+
+```
+                        ┌────────────────────────────────────────────────────────┐
+                        │              team-hub 团队中枢（鉴权 + 事件流）              │
+                        │  v1：DSH 插件 :3080/team-hub   v2：独立服务 :8787        │
+                        │  ┌────────────┬─────────────┬─────────────┬──────────┐   │
+                        │  │  任务 API   │  技能表      │  审计表      │  在线状态  │   │
+                        │  │ create/claim│ scope+grant │ audit       │ members   │   │
+                        │  │ transition  │             │             │ heartbeat │   │
+                        │  └─────┬──────┴──────┬──────┴──────┬──────┴─────┬────┘   │
+                        └────────┼─────────────┼─────────────┼────────────┼───────┘
+                                 │ 写/读        │ 拉技能       │ SSE 事件流  │ 心跳
+        ┌────────────────────────┼─────────────┼─────────────┼────────────┼──────────────┐
+        │                        ▼             ▼             ▼            ▼              │
+        │  ┌──────────────────────────┐  ┌────────────────────┐  ┌───────────────────┐  │
+        │  │  dsh-scrum-worker 守护    │  │  dsh-scrum-board 看板 │  │  人类成员（看板UI） │  │
+        │  │  sweep 扫单 → 认领 → 派工 │  │  HTTP+SSE → 实时卡片 │  │  点卡片/拖拽/验收  │  │
+        │  │  → worker(subagent) 干活  │  └─────────┬──────────┘  └───────────────────┘  │
+        │  │  → 提交 in_review/done    │            │ 写(带身份+scope)                    │
+        │  └──────────┬───────────────┘            │                                   │
+        │             │ 派 worker(subagent)          │                                   │
+        │             ▼                             │                                   │
+        │  ┌──────────────────────────┐              │                                   │
+        │  │  worker（一次性子 agent）  │              │                                   │
+        │  │  讨论发言 / 需求 / 编码…   │              │                                   │
+        │  └──────────┬───────────────┘              │                                   │
+        └─────────────┼──────────────────────────────┼───────────────────────────────────┘
+                      ▼                              ▼
+        ┌─────────────────────────────────────────────────────────────┐
+        │            任务池（唯一权威）                                    │
+        │  v1：tasks.json（taskctl.mjs 跨进程锁 + 乐观锁）                 │
+        │  v2：team.db（SQLite WAL，hub 自含，事务 + 版本检查）             │
+        │  scope 分区：software（软件流水线）/ default（Ozon 等）           │
+        └─────────────────────────────────────────────────────────────┘
+```
+
+### 12.3 连线详解（谁连谁、什么协议、什么数据、什么触发）
+
+#### 连线 1：客户端 → hub（写路径，带身份 + scope）
+
+| 项 | 内容 |
+| --- | --- |
+| 谁连谁 | 守护 `claimTask/transitionTo/safeComment`、看板写接口 → hub `/api/*` |
+| 协议 | HTTP POST + JSON；`Authorization: Bearer <teamToken>`（hub 开启鉴权时） |
+| 数据 | `{ id, to/by/soldier, ifVersion, scope, ... }`；`by`=操作者身份，`scope`=项目分区 |
+| 触发 | 守护 sweep 认领/提交；人类在看板点按钮/拖拽 |
+| 落地 | hub 校验身份 → 写任务池（SQLite 事务 / taskctl 文件锁）→ 版本 +1 → 记审计 |
+
+#### 连线 2：hub → 客户端（事件流，SSE）
+
+| 项 | 内容 |
+| --- | --- |
+| 谁连谁 | hub `/api/events` → 所有订阅者（看板 SSE、未来守护事件驱动） |
+| 协议 | Server-Sent Events（`text/event-stream`），15s 心跳 |
+| 数据 | 审计条目 `{ seq, ts, member, scope, action, taskId, detail }` |
+| 触发 | 每次写操作（create/claim/transition/comment/skill）落 audit 表后广播 |
+| 落地 | 看板实时刷新卡片；多成员看到同一进展 |
+
+#### 连线 3：客户端 → hub（读路径，scope 过滤）
+
+| 项 | 内容 |
+| --- | --- |
+| 谁连谁 | 守护 `hubList`、看板 `hubBoard` → hub `/api/board?scope=` |
+| 协议 | HTTP GET + 查询参数 |
+| 数据 | `scope/status/soldier/role` 过滤，返回任务数组 |
+| 触发 | 守护每轮 sweep；看板加载/刷新 |
+
+#### 连线 4：守护 → hub（技能拉取）
+
+| 项 | 内容 |
+| --- | --- |
+| 谁连谁 | 守护 `fetchSkills` → hub `/api/skills?scope=&member=` |
+| 协议 | HTTP GET |
+| 数据 | 技能列表（本 scope 的 + 授权给本角色的），每个含 `{id, name, prompt}` |
+| 触发 | 守护每轮 sweep 前刷新 |
+| 落地 | 缓存到 `sharedSkills`，注入 worker 提示词「团队共享技能」段 |
+
+#### 连线 5：守护 → worker（subagent 派工）
+
+| 项 | 内容 |
+| --- | --- |
+| 谁连谁 | 守护 → `ctx.subagents.start(provider, {parent, prompt, outputSchema})` |
+| 协议 | DSH subagent 服务（spawn-in-process），父为惰性 foreman agent |
+| 数据 | 完整任务上下文（标题/描述/验收/评论）+ 角色职责 + 仓库规则 + 共享技能 |
+| 触发 | sweep 认领 todo 后派 worker；讨论群聊并发派各角色发言 |
+| 落地 | worker 在 worktree 干活 → 结构回报 → 守护经 hub 提交状态 |
+
+#### 连线 6：hub → 任务池（持久化）
+
+| 项 | 内容 |
+| --- | --- |
+| v1 | hub 调 `taskctl.mjs` 子进程 → 跨进程文件锁读改写 `tasks.json` |
+| v2 | hub 直接用 `node:sqlite`（WAL）事务 + `BEGIN IMMEDIATE` 串行化写 + 版本检查 |
+| 一致性 | 两者状态机/乐观锁/角色纪律完全同构，`scope` 都是分区一等字段 |
+
+### 12.4 端到端数据流（一次完整协作）
+
+以「成员 A 发布目标 → 团队完成」为例，标注每一步走哪条连线：
+
+```
+① 成员A 看板点「发布目标」        ──连线1──▶  hub /api/create（by=alice, scope=software）
+                                              └─▶ 任务池写 discussion 任务 ──连线2──▶ 看板 SSE 刷新
+② 守护 sweep 发现 discussion 任务   ──连线3──▶  hub /api/board 读 ──连线1──▶ claim
+   └─▶ 群聊：并发派 8 角色发言（连线5）→ 将军收敛 → 产出需求方向
+   └─▶ 建首阶段任务（连线1）→ 流水线流转（连线5 各角色 worker）
+③ 守护 worker 干活               ──连线5──▶ 结构回报 → 守护经连线1 提交 in_review/done
+④ 将军（人类）看板看 diff          ──连线2──▶ SSE 实时 → 点验收 ──连线1──▶ done/promote
+⑤ 全程审计                       ──▶ audit 表，可查 /api/activity；成员心跳 /api/heartbeat
+```
+
+### 12.5 部署形态
+
+| 形态 | 说明 | 适用 |
+| --- | --- | --- |
+| **v1 单机** | hub 作为 DSH 插件挂在 `:3080/team-hub`，任务池 = `tasks.json`（文件锁） | 本机多 agent 协作（当前 Ozon + software 两工作流共存） |
+| **v2 分布式** | hub 独立进程 `node team-hub/server.mjs`（`:8787`），任务池 = SQLite(WAL) + 技能 + 审计 + 在线 | 多机器，守护/看板把 `hubUrl` 指向 `http://<hub-host>:8787` |
+
+**自动探测**：守护/看板启动时按 `:8787` → `:3080/team-hub` 顺序探测 hub，探测到即自动接入（带 scope），探测不到退回本地 taskctl 模式——**无需任何 config 注入**。
+
+### 12.6 连线速查表
+
+| # | 从 → 到 | 协议 | 方向 | 触发 |
+| --- | --- | --- | --- | --- |
+| 1 | 守护/看板 → hub 写接口 | HTTP POST | 写 | 认领/提交/评论/建任务 |
+| 2 | hub → 客户端 | SSE | 事件 | 每次写操作广播 |
+| 3 | 守护/看板 → hub 读接口 | HTTP GET | 读 | sweep / 看板刷新 |
+| 4 | 守护 → hub 技能 | HTTP GET | 读 | sweep 前同步 |
+| 5 | 守护 → worker | DSH subagent | 派工 | 认领后 / 讨论发言 |
+| 6 | hub → 任务池 | 文件锁 / SQLite 事务 | 持久化 | 每次写操作 |

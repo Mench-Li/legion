@@ -275,10 +275,10 @@ export function apply(ctx: AppContext, config: Config): void {
   let hubUrl = config.hubUrl.replace(/\/+$/, '')
   let useHub = hubUrl !== ''
 
-  /** 探测默认 hub（未显式配置 hubUrl 时）：同机 DSH web 端口的 /team-hub。 */
+  /** 探测默认 hub（未显式配置 hubUrl 时）：同机 DSH web 端口的 /team-hub，或 v2 独立服务 8787。 */
   async function detectHub(): Promise<void> {
     if (useHub) return
-    const candidates = ['http://127.0.0.1:3080/team-hub']
+    const candidates = ['http://127.0.0.1:8787', 'http://127.0.0.1:3080/team-hub']
     for (const url of candidates) {
       try {
         const res = await fetch(`${url}/api/config`, { signal: AbortSignal.timeout(2000) })
@@ -312,6 +312,21 @@ export function apply(ctx: AppContext, config: Config): void {
     const res = await fetch(`${hubUrl}/api/board?scope=${encodeURIComponent(scope)}`)
     if (!res.ok) throw new Error(`hub board 失败（${res.status}）`)
     return res.json() as Promise<Task[]>
+  }
+
+  /** 团队共享技能：从 hub 拉取本 scope + 授权给本角色的技能（缓存在内存，随 sweep 刷新）。 */
+  let sharedSkills: Array<{ id: string; name: string; prompt: string }> = []
+  async function fetchSkills(): Promise<void> {
+    if (!useHub) return
+    try {
+      const res = await fetch(`${hubUrl}/api/skills?scope=${encodeURIComponent(scope)}&member=${encodeURIComponent(config.role)}`)
+      if (!res.ok) return
+      const skills = await res.json() as Array<{ id: string; name: string; prompt: string }>
+      if (sharedSkills.length !== skills.length) {
+        sharedSkills = skills
+        log(`团队技能同步：${skills.map(s => s.id).join(', ') || '（无）'}（scope=${scope}）`)
+      }
+    } catch { /* 技能拉取失败不影响派工 */ }
   }
 
   const listTasks = (): Promise<Task[]> => useHub ? hubList() : (runTaskctl(config.scrumDir, ['list']) as Promise<Task[]>)
@@ -589,6 +604,9 @@ exit 0
         : ['- （无）']),
       ...(repoRules !== ''
         ? ['', '仓库规则（必须遵守，来自 LEGION.md/AGENTS.md）：', repoRules]
+        : []),
+      ...(sharedSkills.length > 0
+        ? ['', '团队共享技能（必须遵守，来自 team-hub）：', ...sharedSkills.map(s => `【${s.name}】${s.prompt}`)]
         : []),
       '',
       '纪律：',
@@ -907,6 +925,7 @@ exit 0
     sweeping = true
     try {
       await ensureForeman(config.workspace)
+      await fetchSkills()
       let tasks: Task[]
       try {
         tasks = await listTasks()

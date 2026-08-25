@@ -96,6 +96,20 @@ db.exec(`
     detail TEXT
   )
 `)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS skills (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    prompt TEXT DEFAULT '',
+    scope TEXT DEFAULT 'default',
+    owner TEXT,
+    grants TEXT DEFAULT '[]',
+    version INTEGER NOT NULL DEFAULT 1,
+    createdAt TEXT,
+    updatedAt TEXT
+  )
+`)
 
 let nextSeq = 1
 try {
@@ -200,6 +214,51 @@ function touchMember(member, scope, kind) {
     INSERT INTO members (id, scope, kind, lastSeenAt, online) VALUES (?, ?, ?, ?, 1)
     ON CONFLICT(id) DO UPDATE SET scope=excluded.scope, kind=excluded.kind, lastSeenAt=excluded.lastSeenAt, online=1
   `).run(member, scope, kind, now())
+}
+
+// ── 技能（scope-owned + grant，借鉴 QM shared skills）──
+function getSkill(id) {
+  const row = db.prepare('SELECT * FROM skills WHERE id = ?').get(id)
+  if (!row) throw new Error(`未知技能 ${id}`)
+  return { ...row, grants: parseJson(row.grants, []) }
+}
+
+function registerSkill(input) {
+  return withTx(() => {
+    const id = input.id
+    if (typeof id !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(id)) {
+      throw new Error('技能 id 非法：小写字母/数字开头，可含连字符，≤64 字符')
+    }
+    const existing = db.prepare('SELECT id FROM skills WHERE id = ?').get(id)
+    if (existing) {
+      db.prepare('UPDATE skills SET name=?, description=?, prompt=?, scope=?, version=version+1, updatedAt=? WHERE id=?')
+        .run(input.name, input.description ?? '', input.prompt ?? '', input.scope ?? 'default', now(), id)
+    } else {
+      db.prepare('INSERT INTO skills (id, name, description, prompt, scope, owner, grants, version, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)')
+        .run(id, input.name, input.description ?? '', input.prompt ?? '', input.scope ?? 'default', input.owner ?? null, '[]', now(), now())
+    }
+    return getSkill(id)
+  })
+}
+
+function listSkills({ scope, member } = {}) {
+  const rows = db.prepare('SELECT * FROM skills ORDER BY id').all()
+  return rows.map((r) => ({ ...r, grants: parseJson(r.grants, []) }))
+    .filter((s) => {
+      if (scope === undefined && member === undefined) return true
+      const inScope = scope !== undefined && s.scope === scope
+      const granted = member !== undefined && (s.grants.includes(member) || (scope !== undefined && s.grants.includes(`scope:${scope}`)))
+      return inScope || granted
+    })
+}
+
+function grantSkill(id, grants) {
+  return withTx(() => {
+    const s = getSkill(id)
+    const merged = [...new Set([...s.grants, ...grants])]
+    db.prepare('UPDATE skills SET grants=?, version=version+1, updatedAt=? WHERE id=?').run(JSON.stringify(merged), now(), id)
+    return getSkill(id)
+  })
 }
 
 // ── 写操作 ──
@@ -469,6 +528,51 @@ async function handle(req, res) {
         seq: r.seq, ts: r.ts, member: r.member, scope: r.scope, action: r.action, taskId: r.taskId,
         detail: parseJson(r.detail, {}),
       })))
+      return
+    }
+
+    // ── 技能（scope-owned + grant，借鉴 QM shared skills）──
+    if (req.method === 'POST' && path === '/api/skills/register') {
+      await handleWrite(req, res, (body, by, scope) => {
+        const id = body.id
+        const name = body.name
+        if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
+        if (typeof name !== 'string' || name.trim().length === 0) throw new Error('缺少参数 name')
+        const skill = registerSkill({
+          id: id.trim(), name: name.trim(), description: body.description,
+          prompt: body.prompt, scope: body.scope ?? scope, owner: by,
+        })
+        audit(by, scope, 'skill:register', id, { name: skill.name })
+        return skill
+      })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/skills/grant') {
+      await handleWrite(req, res, (body, by, scope) => {
+        const id = body.id
+        const grants = body.grants
+        if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
+        if (!Array.isArray(grants) || grants.length === 0) throw new Error('缺少参数 grants')
+        const skill = grantSkill(id, grants.map(String))
+        audit(by, scope, 'skill:grant', id, { grants: grants.map(String) })
+        return skill
+      })
+      return
+    }
+    if (req.method === 'GET' && path === '/api/skills') {
+      const skillId = url.searchParams.get('id')
+      if (skillId) {
+        try {
+          json(res, 200, getSkill(skillId))
+        } catch (e) {
+          json(res, 404, { error: e instanceof Error ? e.message : String(e) })
+        }
+        return
+      }
+      json(res, 200, listSkills({
+        scope: url.searchParams.get('scope') ?? undefined,
+        member: url.searchParams.get('member') ?? undefined,
+      }))
       return
     }
     if (req.method === 'GET' && path === '/api/events') {

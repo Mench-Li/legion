@@ -14,7 +14,7 @@
  * 乐观锁：每次写操作 `version` 递增；`--if-version N` 不匹配则拒绝并输出最新任务，
  * 调用方必须重读重试（绝不在过期版本上覆盖）。
  */
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync, existsSync, openSync, closeSync, unlinkSync, statSync, renameSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
@@ -52,9 +52,57 @@ function loadDb() {
   return JSON.parse(readFileSync(TASKS_FILE, 'utf8'))
 }
 
+/** 原子写：先写临时文件再 rename，任何时刻文件都是完整的（读不到半个 JSON）。 */
 function saveDb(db) {
   mkdirSync(dirname(TASKS_FILE), { recursive: true })
-  writeFileSync(TASKS_FILE, `${JSON.stringify(db, null, 2)}\n`)
+  const tmp = `${TASKS_FILE}.${process.pid}.${Date.now()}.tmp`
+  writeFileSync(tmp, `${JSON.stringify(db, null, 2)}\n`)
+  renameSync(tmp, TASKS_FILE)
+}
+
+/**
+ * 跨进程互斥文件锁：排他创建 `<file>.lock` 后执行 fn，保证「读-改-写」在多进程间互斥。
+ * `'wx'` 排他创建，EEXIST 则等 20ms 重试；锁超过 30s 未释放视为残留强制清除（持锁进程已死）。
+ * @param {string} file 被保护的文件（锁 = file + '.lock'）
+ * @param {() => any} fn 持锁期间执行的读-改-写
+ * @param {number} [timeoutMs] 获取锁超时
+ * @returns {any} fn 的返回值
+ */
+function withFileLock(file, fn, timeoutMs = 10000) {
+  const lock = file + '.lock'
+  const sleep = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+  const start = Date.now()
+  let fd
+  while (true) {
+    try {
+      fd = openSync(lock, 'wx')
+      writeFileSync(fd, JSON.stringify({ pid: process.pid, at: Date.now() }))
+      break
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > 30_000) unlinkSync(lock) // 残留锁清理
+      } catch { /* 锁刚被释放，下一轮重试 */ }
+      if (Date.now() - start > timeoutMs) throw new Error(`获取文件锁超时（${lock}），可能被其他进程长期占用`)
+      sleep(20)
+    }
+  }
+  try {
+    return fn()
+  } finally {
+    try { closeSync(fd) } catch { /* 关闭失败忽略 */ }
+    try { unlinkSync(lock) } catch { /* 锁已清理忽略 */ }
+  }
+}
+
+/** 一个原子事务：持锁读整个库 → fn 就地改 → 原子写回。所有多任务写路径都走它。 */
+function transact(fn) {
+  return withFileLock(TASKS_FILE, () => {
+    const db = loadDb()
+    const result = fn(db)
+    saveDb(db)
+    return result
+  })
 }
 
 function now() {
@@ -124,23 +172,23 @@ function requireId(args) {
  * @returns {object} 变更后的任务
  */
 function withLock(opts) {
-  const db = loadDb()
-  const t = task(db, opts.id)
-  if (opts.ifVersion !== undefined) {
-    const expected = Number(opts.ifVersion)
-    if (!Number.isInteger(expected)) throw new Error(`--if-version 必须是整数，收到 ${opts.ifVersion}`)
-    if (t.version !== expected) {
-      throw new Error(
-        `乐观锁冲突：任务 ${opts.id} 当前 version=${t.version}，你期望 ${expected}。` +
-        `请先 taskctl get ${opts.id} 重读最新状态再重试（绝不覆盖他人变更）`,
-      )
+  return transact(db => {
+    const t = task(db, opts.id)
+    if (opts.ifVersion !== undefined) {
+      const expected = Number(opts.ifVersion)
+      if (!Number.isInteger(expected)) throw new Error(`--if-version 必须是整数，收到 ${opts.ifVersion}`)
+      if (t.version !== expected) {
+        throw new Error(
+          `乐观锁冲突：任务 ${opts.id} 当前 version=${t.version}，你期望 ${expected}。` +
+          `请先 taskctl get ${opts.id} 重读最新状态再重试（绝不覆盖他人变更）`,
+        )
+      }
     }
-  }
-  opts.mutate(t, db)
-  t.version += 1
-  t.updatedAt = now()
-  saveDb(db)
-  return t
+    opts.mutate(t, db)
+    t.version += 1
+    t.updatedAt = now()
+    return t
+  })
 }
 
 /** 打印任务 JSON（成功输出） */
@@ -189,44 +237,47 @@ function readRoles() {
 const commands = {
   /** 初始化权威数据库 */
   init() {
-    if (existsSync(TASKS_FILE)) throw new Error(`tasks.json 已存在（${TASKS_FILE}），不覆盖`)
-    saveDb(emptyDb())
+    withFileLock(TASKS_FILE, () => {
+      if (existsSync(TASKS_FILE)) throw new Error(`tasks.json 已存在（${TASKS_FILE}），不覆盖`)
+      saveDb(emptyDb())
+    })
     process.stdout.write(`${JSON.stringify({ ok: true, file: TASKS_FILE }, null, 2)}\n`)
   },
 
   /** 创建任务（默认 backlog，未批准前不可开工） */
   create(args) {
     requireArgs(args, ['title'])
-    const db = loadDb()
-    const id = nextId(db)
-    const t = {
-      id,
-      title: args.title.trim(),
-      description: args.description ?? '',
-      acceptance: (args.acceptance ?? '').split(';').map(s => s.trim()).filter(s => s.length > 0),
-      priority: args.priority ?? 'medium',
-      status: args.status ?? 'backlog',
-      version: 1,
-      soldier: null,
-      claimedRound: null,
-      claimedAt: null,
-      ordersVersion: Number(args.ordersVersion ?? 1),
-      parent: args.parent ?? null,
-      role: args.role ?? null,
-      blocks: [],
-      blockedBy: [],
-      comments: [],
-      evidence: [],
-      patches: [],
-      createdAt: now(),
-      updatedAt: now(),
-    }
-    validateTaskShape(t)
-    if (!PRIORITIES.includes(t.priority)) throw new Error(`非法优先级 ${t.priority}（high|medium|low）`)
-    if (t.status !== 'backlog' && t.status !== 'todo') throw new Error(`非法初始状态 ${t.status}（backlog|todo）`)
-    if (t.parent !== null && db.tasks[t.parent] === undefined) throw new Error(`父任务 ${t.parent} 不存在`)
-    db.tasks[id] = t
-    saveDb(db)
+    const t = transact(db => {
+      const id = nextId(db)
+      const t = {
+        id,
+        title: args.title.trim(),
+        description: args.description ?? '',
+        acceptance: (args.acceptance ?? '').split(';').map(s => s.trim()).filter(s => s.length > 0),
+        priority: args.priority ?? 'medium',
+        status: args.status ?? 'backlog',
+        version: 1,
+        soldier: null,
+        claimedRound: null,
+        claimedAt: null,
+        ordersVersion: Number(args.ordersVersion ?? 1),
+        parent: args.parent ?? null,
+        role: args.role ?? null,
+        blocks: [],
+        blockedBy: [],
+        comments: [],
+        evidence: [],
+        patches: [],
+        createdAt: now(),
+        updatedAt: now(),
+      }
+      validateTaskShape(t)
+      if (!PRIORITIES.includes(t.priority)) throw new Error(`非法优先级 ${t.priority}（high|medium|low）`)
+      if (t.status !== 'backlog' && t.status !== 'todo') throw new Error(`非法初始状态 ${t.status}（backlog|todo）`)
+      if (t.parent !== null && db.tasks[t.parent] === undefined) throw new Error(`父任务 ${t.parent} 不存在`)
+      db.tasks[id] = t
+      return t
+    })
     printTask(t)
   },
 
@@ -239,8 +290,6 @@ const commands = {
     const roles = readRoles()
     const stages = roles.stages ?? []
     if (stages.length === 0) throw new Error('roles.json 无流水线阶段（stages 为空）')
-    const db = loadDb()
-    const id = nextId(db)
     const pipelineLine = `[流水线] ${roles.name}：${stages.map(s => s.label).join(' → ')}`
     const discuss = roles.discussion !== undefined && !args.noDiscuss
     let role, stageLabel, description
@@ -264,31 +313,34 @@ const commands = {
         `[本阶段] ${first.label}（${first.role}）`,
       ].filter(s => s.length > 0).join('\n\n')
     }
-    const t = {
-      id,
-      title: args.title.trim(),
-      description,
-      acceptance: (args.acceptance ?? '').split(';').map(s => s.trim()).filter(s => s.length > 0),
-      priority: args.priority ?? 'high',
-      status: 'todo',
-      version: 1,
-      soldier: null,
-      claimedRound: null,
-      claimedAt: null,
-      ordersVersion: Number(args.ordersVersion ?? 1),
-      parent: null,
-      role,
-      blocks: [],
-      blockedBy: [],
-      comments: [],
-      evidence: [],
-      patches: [],
-      createdAt: now(),
-      updatedAt: now(),
-    }
-    validateTaskShape(t)
-    db.tasks[id] = t
-    saveDb(db)
+    const t = transact(db => {
+      const id = nextId(db)
+      const t = {
+        id,
+        title: args.title.trim(),
+        description,
+        acceptance: (args.acceptance ?? '').split(';').map(s => s.trim()).filter(s => s.length > 0),
+        priority: args.priority ?? 'high',
+        status: 'todo',
+        version: 1,
+        soldier: null,
+        claimedRound: null,
+        claimedAt: null,
+        ordersVersion: Number(args.ordersVersion ?? 1),
+        parent: null,
+        role,
+        blocks: [],
+        blockedBy: [],
+        comments: [],
+        evidence: [],
+        patches: [],
+        createdAt: now(),
+        updatedAt: now(),
+      }
+      validateTaskShape(t)
+      db.tasks[id] = t
+      return t
+    })
     process.stdout.write(`${JSON.stringify({ ok: true, goal: args.title.trim(), pipeline: roles.name, stage: stageLabel, role, discuss, task: t }, null, 2)}\n`)
   },
 
@@ -433,36 +485,37 @@ const commands = {
   /** 建立任务依赖/父子关系（blockedBy/blocks 成环即拒绝，整条 link 原子） */
   link(args) {
     const id = requireId(args)
-    const db = loadDb()
-    const t = task(db, id)
-    // t blocks b → b 依赖 t（边 b→t）：若 t 已（传递）依赖 b，则成环
-    for (const b of args.blocks?.split(',') ?? []) {
-      if (b.length === 0) continue
-      if (b === id) throw new Error(`任务不能阻塞自身（${id}）`)
-      task(db, b)
-      if (dependsOn(db, t.id, b)) throw new Error(`依赖成环：${id} 已依赖 ${b}，不能再声明 ${id} 阻塞 ${b}`)
-      if (!t.blocks.includes(b)) t.blocks.push(b)
-      const target = db.tasks[b]
-      if (!target.blockedBy.includes(t.id)) target.blockedBy.push(t.id)
-    }
-    // t blockedBy b → t 依赖 b（边 t→b）：若 b 已（传递）依赖 t，则成环
-    for (const b of args.blockedBy?.split(',') ?? []) {
-      if (b.length === 0) continue
-      if (b === id) throw new Error(`任务不能依赖自身（${id}）`)
-      task(db, b)
-      if (dependsOn(db, b, t.id)) throw new Error(`依赖成环：${b} 已依赖 ${id}，不能再声明 ${id} 依赖 ${b}`)
-      if (!t.blockedBy.includes(b)) t.blockedBy.push(b)
-      const target = db.tasks[b]
-      if (!target.blocks.includes(t.id)) target.blocks.push(t.id)
-    }
-    if (args.parent !== undefined) {
-      task(db, args.parent)
-      if (args.parent === id) throw new Error(`任务不能以自身为父（${id}）`)
-      t.parent = args.parent
-    }
-    t.version += 1
-    t.updatedAt = now()
-    saveDb(db)
+    const t = transact(db => {
+      const t = task(db, id)
+      // t blocks b → b 依赖 t（边 b→t）：若 t 已（传递）依赖 b，则成环
+      for (const b of args.blocks?.split(',') ?? []) {
+        if (b.length === 0) continue
+        if (b === id) throw new Error(`任务不能阻塞自身（${id}）`)
+        task(db, b)
+        if (dependsOn(db, t.id, b)) throw new Error(`依赖成环：${id} 已依赖 ${b}，不能再声明 ${id} 阻塞 ${b}`)
+        if (!t.blocks.includes(b)) t.blocks.push(b)
+        const target = db.tasks[b]
+        if (!target.blockedBy.includes(t.id)) target.blockedBy.push(t.id)
+      }
+      // t blockedBy b → t 依赖 b（边 t→b）：若 b 已（传递）依赖 t，则成环
+      for (const b of args.blockedBy?.split(',') ?? []) {
+        if (b.length === 0) continue
+        if (b === id) throw new Error(`任务不能依赖自身（${id}）`)
+        task(db, b)
+        if (dependsOn(db, b, t.id)) throw new Error(`依赖成环：${b} 已依赖 ${id}，不能再声明 ${id} 依赖 ${b}`)
+        if (!t.blockedBy.includes(b)) t.blockedBy.push(b)
+        const target = db.tasks[b]
+        if (!target.blocks.includes(t.id)) target.blocks.push(t.id)
+      }
+      if (args.parent !== undefined) {
+        task(db, args.parent)
+        if (args.parent === id) throw new Error(`任务不能以自身为父（${id}）`)
+        t.parent = args.parent
+      }
+      t.version += 1
+      t.updatedAt = now()
+      return t
+    })
     printTask(t)
   },
 
@@ -490,22 +543,23 @@ const commands = {
     const minutes = Number(args.olderThan ?? 60)
     const by = args.by ?? 'daemon'
     if (!Number.isFinite(minutes) || minutes <= 0) throw new Error('--older-than 必须是正整数分钟数')
-    const db = loadDb()
-    const cutoff = Date.now() - minutes * 60_000
-    const released = []
-    for (const t of Object.values(db.tasks)) {
-      if (t.status !== 'in_progress' || t.claimedAt === null) continue
-      if (new Date(t.claimedAt).getTime() > cutoff) continue
-      t.status = 'todo'
-      t.soldier = null
-      t.claimedAt = null
-      t.claimedRound = null
-      t.comments.push({ by, at: now(), text: `守护检测到认领超过 ${minutes} 分钟无进展，自动释放回 todo` })
-      t.version += 1
-      t.updatedAt = now()
-      released.push(t.id)
-    }
-    if (released.length > 0) saveDb(db)
+    const released = transact(db => {
+      const cutoff = Date.now() - minutes * 60_000
+      const released = []
+      for (const t of Object.values(db.tasks)) {
+        if (t.status !== 'in_progress' || t.claimedAt === null) continue
+        if (new Date(t.claimedAt).getTime() > cutoff) continue
+        t.status = 'todo'
+        t.soldier = null
+        t.claimedAt = null
+        t.claimedRound = null
+        t.comments.push({ by, at: now(), text: `守护检测到认领超过 ${minutes} 分钟无进展，自动释放回 todo` })
+        t.version += 1
+        t.updatedAt = now()
+        released.push(t.id)
+      }
+      return released
+    })
     process.stdout.write(`${JSON.stringify({ ok: true, released }, null, 2)}\n`)
   },
 

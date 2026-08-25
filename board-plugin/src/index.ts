@@ -21,11 +21,17 @@ export interface Config {
   scrumDir: string
   /** webServer 路由前缀（看板挂在此前缀下）。 */
   routePrefix: string
+  /** team-hub 地址；非空则写/读走 hub（带 scope）。 */
+  hubUrl: string
+  /** hub 模式下的项目 scope（读过滤 + 写带上）。 */
+  scope: string
 }
 
 export const Config = z.object({
   scrumDir: z.string().default('D:/project/dsh/legion/scrum'),
   routePrefix: z.string().default('/scrum-board'),
+  hubUrl: z.string().default(''),
+  scope: z.string().default('software'),
 })
 
 export function apply(ctx: Context, config: Config): void {
@@ -39,6 +45,40 @@ export function apply(ctx: Context, config: Config): void {
   const patchesDir = join(scrumDir, 'patches')
   const taskctl = join(scrumDir, 'taskctl.mjs')
   const render = join(scrumDir, 'render.mjs')
+
+  let hubUrl = config.hubUrl.replace(/\/+$/, '')
+  let useHub = hubUrl !== ''
+
+  /** 探测默认 hub（未显式配置 hubUrl 时）：同机 DSH web 端口的 /team-hub。 */
+  async function detectHub(): Promise<void> {
+    if (useHub) return
+    try {
+      const res = await fetch('http://127.0.0.1:3080/team-hub/api/config', { signal: AbortSignal.timeout(2000) })
+      if (res.ok) {
+        hubUrl = 'http://127.0.0.1:3080/team-hub'
+        useHub = true
+      }
+    } catch { /* 探测失败保持本地模式 */ }
+  }
+
+  /** hub 写调用（POST）。 */
+  async function hubPost(path: string, body: Record<string, unknown>): Promise<unknown> {
+    const res = await fetch(`${hubUrl}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    const data = await res.json().catch(() => ({})) as Record<string, unknown>
+    if (!res.ok) throw new Error(String(data.error ?? `hub ${path} 失败（${res.status}）`))
+    return data.task ?? data
+  }
+
+  /** hub 读任务列表（按 scope 过滤）。 */
+  async function hubBoard(): Promise<unknown> {
+    const res = await fetch(`${hubUrl}/api/board?scope=${encodeURIComponent(config.scope)}`)
+    if (!res.ok) throw new Error(`hub board 失败（${res.status}）`)
+    return res.json()
+  }
 
   /** 以子进程执行 taskctl（Electron 下 process.execPath 非 node，加 ELECTRON_RUN_AS_NODE）。 */
   function runTaskctl(argv: string[]): Promise<unknown> {
@@ -179,8 +219,17 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
 
-  /** 读 board.json；缺失时先 render 再读。 */
+  /** 读 board.json；hub 模式下从 hub 读（带 scope 过滤），否则本地读。 */
   function serveBoard(res: ServerResponse): void {
+    if (useHub) {
+      hubBoard()
+        .then((data) => {
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify(data))
+        })
+        .catch((e) => json(res, 500, { error: e instanceof Error ? e.message : String(e) }))
+      return
+    }
     readFile(boardFile, (err, data) => {
       if (!err) {
         res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
@@ -240,8 +289,11 @@ export function apply(ctx: Context, config: Config): void {
           const to = body.to
           if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
           if (typeof to !== 'string' || to.length === 0) throw new Error('缺少参数 to')
-          const argv = ['transition', id, '--to', to]
-          if (typeof body.by === 'string' && body.by.length > 0) argv.push('--by', body.by)
+          const by = typeof body.by === 'string' && body.by.length > 0 ? body.by : 'general'
+          if (useHub) {
+            return hubPost('/api/transition', { id, to, by, ifVersion: body.ifVersion, force: body.force === true, scope: config.scope })
+          }
+          const argv = ['transition', id, '--to', to, '--by', by]
           if (typeof body.ifVersion === 'number') argv.push('--if-version', String(body.ifVersion))
           if (body.force === true) argv.push('--force')
           return runTaskctl(argv)
@@ -253,6 +305,9 @@ export function apply(ctx: Context, config: Config): void {
         await handleWrite(req, res, (body) => {
           const title = body.title
           if (typeof title !== 'string' || title.trim().length === 0) throw new Error('缺少参数 title')
+          if (useHub) {
+            return hubPost('/api/create', { title: title.trim(), description: body.description, priority: body.priority, by: 'general', scope: config.scope })
+          }
           const argv = ['create', '--title', title.trim()]
           if (typeof body.description === 'string' && body.description.length > 0) argv.push('--description', body.description)
           if (Array.isArray(body.acceptance) && body.acceptance.length > 0) {
@@ -272,6 +327,9 @@ export function apply(ctx: Context, config: Config): void {
           if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
           if (typeof by !== 'string' || by.length === 0) throw new Error('缺少参数 by')
           if (typeof text !== 'string' || text.trim().length === 0) throw new Error('缺少参数 text')
+          if (useHub) {
+            return hubPost('/api/comment', { id, by, text: text.trim(), scope: config.scope })
+          }
           return runTaskctl(['comment', id, '--by', by, '--text', text.trim()])
         })
         return
@@ -285,6 +343,9 @@ export function apply(ctx: Context, config: Config): void {
           if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
           if (typeof by !== 'string' || by.length === 0) throw new Error('缺少参数 by')
           if (typeof reason !== 'string' || reason.trim().length === 0) throw new Error('缺少参数 reason')
+          if (useHub) {
+            return hubPost('/api/reject', { id, by, reason: reason.trim(), ifVersion: body.ifVersion, scope: config.scope })
+          }
           const argv = ['reject', id, '--by', by, '--reason', reason.trim()]
           if (typeof body.ifVersion === 'number') argv.push('--if-version', String(body.ifVersion))
           return runTaskctl(argv)
@@ -298,6 +359,9 @@ export function apply(ctx: Context, config: Config): void {
           const by = body.by
           if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
           if (typeof by !== 'string' || by.length === 0) throw new Error('缺少参数 by')
+          if (useHub) {
+            return hubPost('/api/promote', { id, by, ifVersion: body.ifVersion, scope: config.scope })
+          }
           const argv = ['promote', id, '--by', by]
           if (typeof body.ifVersion === 'number') argv.push('--if-version', String(body.ifVersion))
           return runTaskctl(argv)
@@ -424,5 +488,7 @@ export function apply(ctx: Context, config: Config): void {
   }, `${name}: watchers`)
 
   // 启动即刷新一次看板（守护直接改 tasks.json 不改 board.json，需主动 render 保持新鲜）
+  // 启动即探测 hub（探测成功则读/写走 hub）+ 刷新一次看板
+  void detectHub()
   void runRender().catch(() => {})
 }

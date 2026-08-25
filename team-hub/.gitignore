@@ -2,3 +2,6 @@ node_modules/
 lib/
 *.tsbuildinfo
 *.tgz
+*.db
+*.db-wal
+*.db-shm

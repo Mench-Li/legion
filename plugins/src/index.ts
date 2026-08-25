@@ -387,7 +387,7 @@ export function apply(ctx: AppContext, config: Config): void {
   /** 认领任务（hub 或本地）。 */
   async function claimTask(id: string, soldier: string): Promise<void> {
     if (useHub) {
-      await hubPost('/api/claim', { id, soldier, scope: config.scope })
+      await hubPost('/api/claim', { id, soldier, by: config.role, scope: config.scope })
     } else {
       await runTaskctl(config.scrumDir, ['claim', id, '--soldier', soldier])
     }

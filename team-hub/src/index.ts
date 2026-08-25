@@ -209,7 +209,8 @@ export function apply(ctx: Context, config: Config): void {
         await handleWrite(req, res, async (body, by) => {
           const id = body.id
           if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
-          const argv = ['claim', id, '--soldier', by]
+          const soldier = typeof body.soldier === 'string' && body.soldier.length > 0 ? body.soldier : by
+          const argv = ['claim', id, '--soldier', soldier]
           if (typeof body.round === 'number') argv.push('--round', String(body.round))
           if (typeof body.ifVersion === 'number') argv.push('--if-version', String(body.ifVersion))
           if (body.force === true) argv.push('--force')

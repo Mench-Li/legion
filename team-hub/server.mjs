@@ -1,0 +1,504 @@
+#!/usr/bin/env node
+/**
+ * team-hub 独立服务（v2）—— 军团团队协作中枢，脱离 DSH webServer 独立进程运行。
+ *
+ * 用 node:sqlite（WAL）作为任务池 + 成员在线状态 + 审计日志的单一后端，
+ * 暴露 HTTP API（任务 CRUD/状态机/乐观锁/scope 鉴权）+ SSE 事件流，多机器的
+ * 守护（dsh-scrum-worker）、看板（dsh-scrum-board）经它读写同一任务池。
+ *
+ * 启动：node team-hub/server.mjs
+ * 环境变量：
+ *   TEAM_HUB_PORT  监听端口（默认 8787）
+ *   TEAM_HUB_DB    SQLite 文件（默认 team-hub/team.db）
+ *   TEAM_HUB_TOKEN 团队 token（非空时写操作需 Authorization: Bearer <token>）
+ *
+ * API：
+ *   GET  /api/board?scope=&status=&soldier=&role=   任务列表
+ *   GET  /api/activity?limit=                      最近动态（审计）
+ *   GET  /api/members                              成员在线状态
+ *   GET  /api/events                               SSE 事件流
+ *   POST /api/create|claim|transition|advance|comment|reject|promote   写操作
+ *   POST /api/heartbeat                            成员心跳（by + kind）
+ *
+ * 状态机 + 乐观锁 + 角色纪律与 taskctl.mjs 一致；scope 是任务分区的一等字段。
+ */
+import http from 'node:http'
+import { DatabaseSync } from 'node:sqlite'
+import { mkdirSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
+const DB_FILE = process.env.TEAM_HUB_DB || join(ROOT, 'team-hub', 'team.db')
+const PORT = Number(process.env.TEAM_HUB_PORT || 8787)
+const TOKEN = process.env.TEAM_HUB_TOKEN || ''
+const HOST = process.env.TEAM_HUB_HOST || '0.0.0.0'
+
+const STATUSES = ['backlog', 'todo', 'in_progress', 'in_review', 'blocked', 'done', 'canceled']
+const TRANSITIONS = {
+  backlog: ['todo', 'blocked', 'canceled'],
+  todo: ['in_progress', 'blocked', 'canceled'],
+  in_progress: ['in_review', 'todo', 'blocked', 'canceled'],
+  in_review: ['done', 'todo', 'in_progress', 'blocked', 'canceled'],
+  blocked: ['todo', 'in_progress', 'canceled'],
+  done: ['in_progress', 'canceled'],
+  canceled: [],
+}
+const PRIORITIES = ['high', 'medium', 'low']
+
+// ── SQLite ──
+mkdirSync(dirname(DB_FILE), { recursive: true })
+const db = new DatabaseSync(DB_FILE)
+db.exec('PRAGMA journal_mode = WAL')
+db.exec('PRAGMA busy_timeout = 5000')
+db.exec(`
+  CREATE TABLE IF NOT EXISTS tasks (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    acceptance TEXT DEFAULT '[]',
+    priority TEXT DEFAULT 'medium',
+    status TEXT NOT NULL DEFAULT 'backlog',
+    version INTEGER NOT NULL DEFAULT 1,
+    soldier TEXT,
+    claimedRound INTEGER,
+    claimedAt TEXT,
+    ordersVersion INTEGER DEFAULT 1,
+    parent TEXT,
+    role TEXT,
+    scope TEXT DEFAULT 'default',
+    blocks TEXT DEFAULT '[]',
+    blockedBy TEXT DEFAULT '[]',
+    comments TEXT DEFAULT '[]',
+    evidence TEXT DEFAULT '[]',
+    patches TEXT DEFAULT '[]',
+    createdAt TEXT,
+    updatedAt TEXT
+  )
+`)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS members (
+    id TEXT PRIMARY KEY,
+    scope TEXT DEFAULT 'default',
+    kind TEXT DEFAULT 'unknown',
+    lastSeenAt TEXT,
+    online INTEGER DEFAULT 0
+  )
+`)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS audit (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT,
+    member TEXT,
+    scope TEXT,
+    action TEXT,
+    taskId TEXT,
+    detail TEXT
+  )
+`)
+
+let nextSeq = 1
+try {
+  const row = db.prepare('SELECT COALESCE(MAX(seq),0) AS m FROM audit').get()
+  nextSeq = (row?.m ?? 0) + 1
+} catch { /* 空表 */ }
+
+function now() {
+  return new Date().toISOString()
+}
+
+function parseJson(text, fallback) {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return fallback
+  }
+}
+
+function rowToTask(row) {
+  if (!row) return null
+  return {
+    id: row.id,
+    title: row.title,
+    description: row.description,
+    acceptance: parseJson(row.acceptance, []),
+    priority: row.priority,
+    status: row.status,
+    version: row.version,
+    soldier: row.soldier,
+    claimedRound: row.claimedRound,
+    claimedAt: row.claimedAt,
+    ordersVersion: row.ordersVersion,
+    parent: row.parent,
+    role: row.role,
+    scope: row.scope,
+    blocks: parseJson(row.blocks, []),
+    blockedBy: parseJson(row.blockedBy, []),
+    comments: parseJson(row.comments, []),
+    evidence: parseJson(row.evidence, []),
+    patches: parseJson(row.patches, []),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  }
+}
+
+function listTasks(filter = {}) {
+  const where = []
+  const params = {}
+  if (filter.status) { where.push('status = $status'); params.status = filter.status }
+  if (filter.soldier) { where.push('soldier = $soldier'); params.soldier = filter.soldier }
+  if (filter.role) { where.push('role = $role'); params.role = filter.role }
+  if (filter.scope) { where.push('scope = $scope'); params.scope = filter.scope }
+  const sql = `SELECT * FROM tasks${where.length ? ' WHERE ' + where.join(' AND ') : ''} ORDER BY id`
+  const rows = db.prepare(sql).all(params)
+  return rows.map(rowToTask)
+}
+
+function getTask(id) {
+  const row = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id)
+  if (!row) throw new Error(`未知任务 ${id}`)
+  return rowToTask(row)
+}
+
+function assertUnblocked(t, force) {
+  if (force) return
+  const open = t.blockedBy.filter((b) => {
+    const dep = db.prepare('SELECT status FROM tasks WHERE id = ?').get(b)
+    return dep === undefined || (dep.status !== 'done' && dep.status !== 'canceled')
+  })
+  if (open.length > 0) throw new Error(`任务被未完成依赖阻塞：${open.join(', ')}（确认后加 force）`)
+}
+
+/** 写事务：BEGIN IMMEDIATE 串行化写 + 版本检查（乐观锁）。 */
+function withTx(mutate) {
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    const result = mutate()
+    db.exec('COMMIT')
+    return result
+  } catch (e) {
+    try { db.exec('ROLLBACK') } catch { /* 已回滚 */ }
+    throw e
+  }
+}
+
+function nextId() {
+  const row = db.prepare('SELECT COUNT(*) AS c FROM tasks').get()
+  return `T-${String((row?.c ?? 0) + 1).padStart(3, '0')}`
+}
+
+function audit(member, scope, action, taskId, detail) {
+  const seq = nextSeq++
+  db.prepare('INSERT INTO audit (seq, ts, member, scope, action, taskId, detail) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(seq, now(), member, scope, action, taskId, JSON.stringify(detail))
+  broadcastAudit({ seq, ts: now(), member, scope, action, taskId, detail })
+  return seq
+}
+
+function touchMember(member, scope, kind) {
+  db.prepare(`
+    INSERT INTO members (id, scope, kind, lastSeenAt, online) VALUES (?, ?, ?, ?, 1)
+    ON CONFLICT(id) DO UPDATE SET scope=excluded.scope, kind=excluded.kind, lastSeenAt=excluded.lastSeenAt, online=1
+  `).run(member, scope, kind, now())
+}
+
+// ── 写操作 ──
+function createTask(input) {
+  return withTx(() => {
+    const id = nextId()
+    const t = {
+      id,
+      title: input.title.trim(),
+      description: input.description ?? '',
+      acceptance: input.acceptance ?? [],
+      priority: input.priority ?? 'medium',
+      status: input.status ?? 'backlog',
+      version: 1,
+      soldier: null,
+      claimedRound: null,
+      claimedAt: null,
+      ordersVersion: input.ordersVersion ?? 1,
+      parent: input.parent ?? null,
+      role: input.role ?? null,
+      scope: input.scope ?? 'default',
+      blocks: [],
+      blockedBy: [],
+      comments: [],
+      evidence: [],
+      patches: [],
+      createdAt: now(),
+      updatedAt: now(),
+    }
+    if (t.title.length === 0) throw new Error('title 必须是非空字符串')
+    if (!PRIORITIES.includes(t.priority)) throw new Error(`非法优先级 ${t.priority}`)
+    if (t.status !== 'backlog' && t.status !== 'todo') throw new Error(`非法初始状态 ${t.status}`)
+    if (t.parent !== null && !db.prepare('SELECT 1 FROM tasks WHERE id=?').get(t.parent)) throw new Error(`父任务 ${t.parent} 不存在`)
+    db.prepare(`
+      INSERT INTO tasks (id, title, description, acceptance, priority, status, version, soldier, claimedRound, claimedAt,
+        ordersVersion, parent, role, scope, blocks, blockedBy, comments, evidence, patches, createdAt, updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?, 1, NULL, NULL, NULL, ?, ?, ?, ?, '[]', '[]', '[]', '[]', '[]', ?, ?)
+    `).run(t.id, t.title, t.description, JSON.stringify(t.acceptance), t.priority, t.status, t.ordersVersion, t.parent, t.role, t.scope, t.createdAt, t.updatedAt)
+    return getTask(id)
+  })
+}
+
+function claimTask(id, soldier, ifVersion, force, round) {
+  return withTx(() => {
+    const t = getTask(id)
+    if (ifVersion !== undefined) {
+      if (!Number.isInteger(ifVersion)) throw new Error(`ifVersion 必须是整数`)
+      if (t.version !== ifVersion) throw new Error(`乐观锁冲突：任务 ${id} 当前 version=${t.version}，你期望 ${ifVersion}`)
+    }
+    if (t.soldier !== null && t.soldier !== soldier) throw new Error(`任务 ${t.id} 已被 ${t.soldier} 认领，不得抢占`)
+    if (t.status !== 'todo' && t.status !== 'blocked') throw new Error(`无法认领：任务 ${t.id} 当前 ${t.status}`)
+    assertUnblocked(t, force)
+    db.prepare('UPDATE tasks SET status=\'in_progress\', soldier=?, claimedRound=?, claimedAt=?, version=version+1, updatedAt=? WHERE id=?')
+      .run(soldier, round ?? null, now(), now(), id)
+    return getTask(id)
+  })
+}
+
+function transitionTask(id, to, by, ifVersion, force) {
+  return withTx(() => {
+    const t = getTask(id)
+    if (ifVersion !== undefined) {
+      if (!Number.isInteger(ifVersion)) throw new Error(`ifVersion 必须是整数`)
+      if (t.version !== ifVersion) throw new Error(`乐观锁冲突：任务 ${id} 当前 version=${t.version}，你期望 ${ifVersion}`)
+    }
+    const allowed = TRANSITIONS[t.status] ?? []
+    if (!allowed.includes(to)) throw new Error(`非法迁移 ${t.status} → ${to}（允许：${allowed.join(', ')}）`)
+    if (to === 'in_progress') {
+      if (t.soldier !== null && t.soldier !== by) throw new Error(`任务 ${t.id} 已绑定 ${t.soldier}，不能由 ${by} 开工`)
+      assertUnblocked(t, force)
+      if (by) db.prepare('UPDATE tasks SET soldier=? WHERE id=?').run(by, id)
+    }
+    if (to === 'done') {
+      if (t.status !== 'in_review') throw new Error('只有 in_review 可完成；先迁移到 in_review')
+      if (by !== 'general') throw new Error('只有将军（by=general）能在用户接受后把任务移到 done')
+    }
+    if (to === 'in_review' && by && t.soldier !== null && t.soldier !== by) {
+      throw new Error(`任务 ${t.id} 由 ${t.soldier} 负责，不能由 ${by} 提交验收`)
+    }
+    if (to === 'todo') {
+      db.prepare('UPDATE tasks SET soldier=NULL, claimedAt=NULL, claimedRound=NULL WHERE id=?').run(id)
+    }
+    db.prepare('UPDATE tasks SET status=?, version=version+1, updatedAt=? WHERE id=?').run(to, now(), id)
+    return getTask(id)
+  })
+}
+
+function advanceTask(id, by, ifVersion) {
+  return withTx(() => {
+    const t = getTask(id)
+    if (ifVersion !== undefined && t.version !== ifVersion) throw new Error(`乐观锁冲突：任务 ${id} 当前 version=${t.version}`)
+    if (t.status !== 'in_progress' && t.status !== 'in_review') throw new Error(`无法推进：任务 ${id} 当前 ${t.status}`)
+    const expected = t.role ?? t.soldier
+    if (expected !== null && expected !== by) throw new Error(`只有 ${expected} 可推进任务 ${id}`)
+    db.prepare('UPDATE tasks SET status=\'done\', version=version+1, updatedAt=? WHERE id=?').run(now(), id)
+    return getTask(id)
+  })
+}
+
+function commentTask(id, by, text, isEvidence) {
+  return withTx(() => {
+    const t = getTask(id)
+    const field = isEvidence ? 'evidence' : 'comments'
+    const list = parseJson(t[field], [])
+    list.push({ by, at: now(), text })
+    db.prepare(`UPDATE tasks SET ${field}=?, version=version+1, updatedAt=? WHERE id=?`).run(JSON.stringify(list), now(), id)
+    return getTask(id)
+  })
+}
+
+// ── SSE ──
+const eventClients = new Set()
+function broadcastAudit(entry) {
+  const payload = `data: ${JSON.stringify(entry)}\n\n`
+  for (const res of eventClients) res.write(payload)
+}
+
+// ── HTTP ──
+function json(res, status, data) {
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
+  res.end(JSON.stringify(data, null, 2))
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let raw = ''
+    req.on('data', (d) => { raw += d })
+    req.on('end', () => {
+      try { resolve(raw.length === 0 ? {} : JSON.parse(raw)) } catch { reject(new Error('请求体不是合法 JSON')) }
+    })
+    req.on('error', reject)
+  })
+}
+
+function authorized(req) {
+  if (TOKEN === '') return true
+  const token = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '')
+  return token === TOKEN
+}
+
+function requireMember(body) {
+  const by = body.by
+  if (typeof by !== 'string' || by.trim().length === 0) throw new Error('缺少操作者身份 by')
+  return by.trim()
+}
+
+function readScope(body) {
+  return typeof body.scope === 'string' && body.scope.trim().length > 0 ? body.scope.trim() : 'default'
+}
+
+async function handleWrite(req, res, run) {
+  try {
+    if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+    const body = await readBody(req)
+    const by = requireMember(body)
+    const scope = readScope(body)
+    const result = await run(body, by, scope)
+    json(res, 200, { ok: true, task: result })
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e)
+    const status = message.includes('乐观锁') ? 409 : 400
+    json(res, status, { error: message })
+  }
+}
+
+async function handle(req, res) {
+  const url = new URL(req.url ?? '/', 'http://x')
+  const path = url.pathname
+  res.setHeader('access-control-allow-origin', '*')
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, { 'access-control-allow-methods': 'GET, POST, OPTIONS', 'access-control-allow-headers': 'content-type, authorization' })
+    res.end()
+    return
+  }
+
+  try {
+    // 写接口
+    if (req.method === 'POST' && path === '/api/create') {
+      await handleWrite(req, res, (body, by, scope) => {
+        const title = body.title
+        if (typeof title !== 'string' || title.trim().length === 0) throw new Error('缺少参数 title')
+        const task = createTask({
+          title: title.trim(), description: body.description, acceptance: body.acceptance,
+          priority: body.priority, status: body.status, parent: body.parent, role: body.role,
+          scope, ordersVersion: body.ordersVersion,
+        })
+        audit(by, scope, 'create', task.id, { title: task.title })
+        return task
+      })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/claim') {
+      await handleWrite(req, res, (body, by, scope) => {
+        const id = body.id
+        if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
+        const soldier = typeof body.soldier === 'string' && body.soldier.length > 0 ? body.soldier : by
+        const task = claimTask(id, soldier, body.ifVersion, body.force === true, body.round)
+        audit(by, scope, 'claim', id, { soldier })
+        return task
+      })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/transition') {
+      await handleWrite(req, res, (body, by, scope) => {
+        const id = body.id
+        const to = body.to
+        if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
+        if (typeof to !== 'string' || to.length === 0) throw new Error('缺少参数 to')
+        const task = transitionTask(id, to, by, body.ifVersion, body.force === true)
+        audit(by, scope, 'transition', id, { to })
+        return task
+      })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/advance') {
+      await handleWrite(req, res, (body, by, scope) => {
+        const id = body.id
+        if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
+        const task = advanceTask(id, by, body.ifVersion)
+        audit(by, scope, 'advance', id, {})
+        return task
+      })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/comment') {
+      await handleWrite(req, res, (body, by, scope) => {
+        const id = body.id
+        const text = body.text
+        if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
+        if (typeof text !== 'string' || text.trim().length === 0) throw new Error('缺少参数 text')
+        const task = commentTask(id, by, text.trim(), body.isEvidence === true)
+        audit(by, scope, body.isEvidence === true ? 'evidence' : 'comment', id, {})
+        return task
+      })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/heartbeat') {
+      await handleWrite(req, res, (body, by, scope) => {
+        touchMember(by, scope, typeof body.kind === 'string' ? body.kind : 'unknown')
+        return { member: by, scope, online: true }
+      })
+      return
+    }
+
+    // 读接口
+    if (req.method === 'GET' && path === '/api/board') {
+      json(res, 200, listTasks({
+        status: url.searchParams.get('status') ?? undefined,
+        soldier: url.searchParams.get('soldier') ?? undefined,
+        role: url.searchParams.get('role') ?? undefined,
+        scope: url.searchParams.get('scope') ?? undefined,
+      }))
+      return
+    }
+    if (req.method === 'GET' && path === '/api/members') {
+      const rows = db.prepare('SELECT * FROM members ORDER BY lastSeenAt DESC').all()
+      json(res, 200, rows.map((r) => ({
+        member: r.id, scope: r.scope, kind: r.kind, lastSeenAt: r.lastSeenAt,
+        online: Date.now() - new Date(r.lastSeenAt ?? 0).getTime() < 60000,
+      })))
+      return
+    }
+    if (req.method === 'GET' && path === '/api/activity') {
+      const limit = Math.min(Number(url.searchParams.get('limit') ?? 50) || 50, 500)
+      const rows = db.prepare('SELECT * FROM audit ORDER BY seq DESC LIMIT ?').all(limit)
+      json(res, 200, rows.map((r) => ({
+        seq: r.seq, ts: r.ts, member: r.member, scope: r.scope, action: r.action, taskId: r.taskId,
+        detail: parseJson(r.detail, {}),
+      })))
+      return
+    }
+    if (req.method === 'GET' && path === '/api/events') {
+      res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache', connection: 'keep-alive' })
+      res.write('retry: 2000\n\n')
+      eventClients.add(res)
+      const recent = db.prepare('SELECT * FROM audit ORDER BY seq DESC LIMIT 30').all().reverse()
+      for (const r of recent) {
+        res.write(`data: ${JSON.stringify({ seq: r.seq, ts: r.ts, member: r.member, scope: r.scope, action: r.action, taskId: r.taskId, detail: parseJson(r.detail, {}) })}\n\n`)
+      }
+      const heartbeat = setInterval(() => res.write(':hb\n\n'), 15000)
+      req.on('close', () => { clearInterval(heartbeat); eventClients.delete(res) })
+      return
+    }
+    if (req.method === 'GET' && path === '/api/config') {
+      json(res, 200, { auth: TOKEN !== '', db: DB_FILE, port: PORT })
+      return
+    }
+
+    json(res, 404, { error: `not found: ${path}` })
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e)
+    if (res.headersSent) res.end()
+    else json(res, 500, { error: message })
+  }
+}
+
+const server = http.createServer((req, res) => {
+  void handle(req, res)
+})
+server.listen(PORT, HOST, () => {
+  console.log(`[team-hub] v2 独立服务已启动：http://${HOST}:${PORT}（db=${DB_FILE}，鉴权=${TOKEN !== '' ? 'on' : 'off'}）`)
+})

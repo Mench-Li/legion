@@ -272,8 +272,25 @@ export function apply(ctx: AppContext, config: Config): void {
   const controllers = new Set<AbortController>()
   let sweeping = false
 
-  const hubUrl = config.hubUrl.replace(/\/+$/, '')
-  const useHub = hubUrl !== ''
+  let hubUrl = config.hubUrl.replace(/\/+$/, '')
+  let useHub = hubUrl !== ''
+
+  /** 探测默认 hub（未显式配置 hubUrl 时）：同机 DSH web 端口的 /team-hub。 */
+  async function detectHub(): Promise<void> {
+    if (useHub) return
+    const candidates = ['http://127.0.0.1:3080/team-hub']
+    for (const url of candidates) {
+      try {
+        const res = await fetch(`${url}/api/config`, { signal: AbortSignal.timeout(2000) })
+        if (res.ok) {
+          hubUrl = url
+          useHub = true
+          log(`探测到 team-hub：${url}，任务池读写走 hub（scope=${scope}）`)
+          return
+        }
+      } catch { /* 探测失败继续下一个 */ }
+    }
+  }
 
   /** hub 写调用（POST，带 token；body 里带 by + scope）。 */
   async function hubPost(path: string, body: Record<string, unknown>): Promise<unknown> {
@@ -292,7 +309,7 @@ export function apply(ctx: AppContext, config: Config): void {
 
   /** hub 读任务列表（按 scope 过滤）。 */
   async function hubList(): Promise<Task[]> {
-    const res = await fetch(`${hubUrl}/api/board?scope=${encodeURIComponent(config.scope)}`)
+    const res = await fetch(`${hubUrl}/api/board?scope=${encodeURIComponent(scope)}`)
     if (!res.ok) throw new Error(`hub board 失败（${res.status}）`)
     return res.json() as Promise<Task[]>
   }
@@ -330,6 +347,8 @@ export function apply(ctx: AppContext, config: Config): void {
     .filter((s): s is StageDef => s !== undefined)
   const discussionMaxRounds = discussion?.maxRounds ?? 3
   const isDiscussion = discussion !== undefined && discussionMembers.length > 0
+  // 项目 scope：显式配置优先，否则用 roles.json 的 name（软件流水线 = software），再否则 default。
+  const scope = config.scope !== 'default' ? config.scope : (pipeline?.name ?? 'default')
 
   /** 惰性创建 foreman agent：worker subagent 的父（按工作目录缓存；worktree 隔离时每个 worktree 一个）。 */
   async function ensureForeman(cwd: string): Promise<Agent | undefined> {
@@ -355,7 +374,7 @@ export function apply(ctx: AppContext, config: Config): void {
   async function transitionTo(id: string, to: string): Promise<void> {
     const t = await getTask(id)
     if (useHub) {
-      await hubPost('/api/transition', { id, to, by: config.role, ifVersion: t.version, scope: config.scope })
+      await hubPost('/api/transition', { id, to, by: config.role, ifVersion: t.version, scope: scope })
       return
     }
     await runTaskctl(config.scrumDir, ['transition', id, '--to', to, '--by', config.role, '--if-version', String(t.version)])
@@ -365,7 +384,7 @@ export function apply(ctx: AppContext, config: Config): void {
   async function advanceTo(id: string, by: string): Promise<void> {
     const t = await getTask(id)
     if (useHub) {
-      await hubPost('/api/advance', { id, by, ifVersion: t.version, scope: config.scope })
+      await hubPost('/api/advance', { id, by, ifVersion: t.version, scope: scope })
       return
     }
     await runTaskctl(config.scrumDir, ['advance', id, '--by', by, '--if-version', String(t.version)])
@@ -375,7 +394,7 @@ export function apply(ctx: AppContext, config: Config): void {
   async function safeComment(id: string, text: string): Promise<void> {
     try {
       if (useHub) {
-        await hubPost('/api/comment', { id, by: config.role, text: text.slice(0, 800), scope: config.scope })
+        await hubPost('/api/comment', { id, by: config.role, text: text.slice(0, 800), scope: scope })
       } else {
         await runTaskctl(config.scrumDir, ['comment', id, '--by', config.role, '--text', text.slice(0, 800)])
       }
@@ -387,7 +406,7 @@ export function apply(ctx: AppContext, config: Config): void {
   /** 认领任务（hub 或本地）。 */
   async function claimTask(id: string, soldier: string): Promise<void> {
     if (useHub) {
-      await hubPost('/api/claim', { id, soldier, by: config.role, scope: config.scope })
+      await hubPost('/api/claim', { id, soldier, by: config.role, scope: scope })
     } else {
       await runTaskctl(config.scrumDir, ['claim', id, '--soldier', soldier])
     }
@@ -531,7 +550,7 @@ exit 0
         res = await hubPost('/api/create', {
           title: doneTask.title, description, role: nextStage.role,
           parent: doneTask.id, priority: doneTask.priority, status: 'todo',
-          by: config.role, scope: config.scope,
+          by: config.role, scope: scope,
         }) as { id?: string }
       } else {
         res = await runTaskctl(config.scrumDir, [
@@ -788,7 +807,7 @@ exit 0
         res = await hubPost('/api/create', {
           title: discussionTask.title, description, role: first.role,
           parent: discussionTask.id, priority: discussionTask.priority, status: 'todo',
-          by: config.role, scope: config.scope,
+          by: config.role, scope: scope,
         }) as { id?: string }
       } else {
         res = await runTaskctl(config.scrumDir, [
@@ -946,6 +965,9 @@ exit 0
   ctx.setInterval(() => {
     void sweep().catch(e => log(`sweep 异常：${String(e)}`))
   }, config.intervalMs)
+
+  // 启动即探测 hub（探测成功则后续 sweep 走 hub 模式）
+  void detectHub()
 
   ctx.effect(() => () => {
     for (const c of controllers) c.abort()

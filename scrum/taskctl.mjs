@@ -404,6 +404,8 @@ const commands = {
       .filter(t => t.soldier === null || t.soldier === undefined)
       .filter(t => {
         const byRole = args.role === undefined || t.role === args.role
+        // --soldier 是「士兵名即角色名」的等价过滤：流水线士兵身份 = 角色，且 inbox 只含未认领
+        // 任务（soldier 恒为 null），故按 role 匹配（契约测试锁定，勿改成 t.soldier 比较）
         const bySoldier = args.soldier === undefined || t.role === args.soldier
         const byScope = args.scope === undefined || (t.scope ?? 'default') === args.scope
         return (args.role !== undefined ? byRole : true) && (args.soldier !== undefined ? bySoldier : true) && byScope
@@ -664,7 +666,11 @@ const commands = {
     printTask(t)
   },
 
-  /** 守护批量回收：认领超过 --older-than 分钟无进展、或已过 expiresAt 的 in_progress 任务释放回 todo */
+  /**
+   * 守护批量回收：认领超过 --older-than 分钟无进展（距最近一次 progress 起算，认领即 0% 心跳）、
+   * 或已过 expiresAt 的 in_progress 任务释放回 todo。--scope 限定只回收该 scope 的任务，
+   * 多守护/多 scope 部署下互不越界（人类成员经看板认领的任务长期无进展同样会被回收）。
+   */
   'release-stale'(args) {
     const minutes = Number(args.olderThan ?? 60)
     const by = args.by ?? 'daemon'
@@ -675,12 +681,16 @@ const commands = {
       const released = []
       for (const t of Object.values(db.tasks)) {
         if (t.status !== 'in_progress' || t.claimedAt === null) continue
-        const staleByAge = new Date(t.claimedAt).getTime() <= cutoff
+        if (args.scope !== undefined && (t.scope ?? 'default') !== args.scope) continue
+        // 无进展基准 = 最近一次 progress（progress 是 append-only 遥测，不碰 claimedAt/version）
+        const lastProgress = Array.isArray(t.progress) && t.progress.length > 0 ? t.progress[t.progress.length - 1] : null
+        const lastActive = lastProgress ? new Date(lastProgress.at).getTime() : new Date(t.claimedAt).getTime()
+        const staleByAge = lastActive <= cutoff
         const staleByTtl = t.expiresAt !== null && t.expiresAt !== undefined && new Date(t.expiresAt).getTime() <= nowMs
         if (!staleByAge && !staleByTtl) continue
         const reason = staleByTtl
           ? `守护检测到任务已过 TTL（expiresAt=${t.expiresAt}），自动释放回 todo`
-          : `守护检测到认领超过 ${minutes} 分钟无进展，自动释放回 todo`
+          : `守护检测到距最近进展超过 ${minutes} 分钟（上次进展 ${lastProgress ? lastProgress.at : t.claimedAt}），自动释放回 todo`
         t.status = 'todo'
         t.soldier = null
         t.claimedAt = null

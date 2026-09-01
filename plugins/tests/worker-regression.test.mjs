@@ -362,9 +362,13 @@ test('a failed intermediate auto-merge parks the task in in_review instead of si
   try {
     apply(harness.ctx, config(root, { isolate: true, repoRoot: repo, worktreeRoot: join(root, 'wt'), rolesFile: join(repo, 'roles.json') }))
     harness.intervals[0]()
-    // worker 挂起期间：删掉 w/T-001 分支引用 → 自动合入必然失败
+    // worker 挂起期间：删掉 w/T-001 分支引用 → 自动合入必然失败。
+    // 就绪信号用插件自己的 activity「隔离 worktree 就绪」（git worktree add 成功后才落盘）；
+    // 测试侧轮询 git status 会与 add 争抢 index.lock 导致 add 失败回退 workspace（ENOENT/误判合入成功）。
     await waitFor(() => requests.includes('claim:blocked'), 'task was never claimed')
-    await waitFor(() => git(repo, ['rev-parse', '--verify', 'w/T-001']).code === 0, 'worktree branch never created')
+    await waitFor(() => {
+      try { return readFileSync(join(root, 'scrum', 'activity.jsonl'), 'utf8').includes('隔离 worktree 就绪') } catch { return false }
+    }, 'worktree never became ready')
     assert.equal(git(repo, ['update-ref', '-d', 'refs/heads/w/T-001']).code, 0, 'branch ref delete failed')
     resolveWorker({ stopReason: 'completed', structured: { status: 'done', summary: 'coded', evidence: 'ok', blocker: '' } })
     await waitFor(() => requests.includes('transition:in_review:coder'), 'merge failure did not park the task in in_review')
@@ -424,7 +428,10 @@ test('unblocking reuses the previous worktree and preserves the blocked worker p
 
     // 第 1 轮：worker 挂起期间写入部分改动，然后报 blocked
     harness.intervals[0]()
-    await waitFor(() => git(repo, ['rev-parse', '--verify', 'w/T-001']).code === 0, 'worktree branch never created')
+    // 等插件 activity「隔离 worktree 就绪」（add 成功后才落盘；测试侧轮询 git 会争 index.lock）
+    await waitFor(() => {
+      try { return readFileSync(join(root, 'scrum', 'activity.jsonl'), 'utf8').includes('隔离 worktree 就绪') } catch { return false }
+    }, 'worktree never became ready')
     await waitFor(() => typeof resolveWorker === 'function', 'worker 1 never started')
     writeFileSync(join(wtDir, 'partial.txt'), 'partial work\n')
     resolveWorker({ stopReason: 'completed', structured: { status: 'blocked', summary: 'partial', evidence: '', blocker: 'missing input' } })
@@ -446,6 +453,67 @@ test('unblocking reuses the previous worktree and preserves the blocked worker p
     await waitFor(() => typeof resolveWorker === 'function', 'worker 2 never started')
     resolveWorker({ stopReason: 'completed', structured: { status: 'done', summary: 'finished', evidence: 'ok', blocker: '' } })
     await waitFor(() => requests.includes('transition:in_review'), 'resumed task never reached in_review')
+  } finally {
+    for (const dispose of harness.disposers) await dispose()
+    globalThis.fetch = originalFetch
+    restoreTasks()
+    await cleanup(root)
+  }
+})
+
+test('a single-role aborted worker is retried on the next sweep instead of stalling', async () => {
+  // D7 回归：单角色模式下守护自己的「⚠ worker 未完成」评论（by=config.role）会被 self 过滤，
+  // 导致中止的 worker 只能等 stale 释放（30 分钟）。修复后该评论触发下一轮重试（带退避）。
+  const root = await mkdtemp(join(tmpdir(), 'scrum-worker-abort-retry-'))
+  const originalFetch = globalThis.fetch
+  const restoreTasks = protectTasksFile(root)
+  const requests = []
+  let task = {
+    ...structuredClone(TASK),
+    status: 'in_progress',
+    claimedAt: new Date(Date.now() - 60_000).toISOString(),
+    comments: [{ by: 'soldier-auto', at: new Date().toISOString(), text: '⚠ worker 未完成（aborted），任务保留在 in_progress，等待人工处理或下一轮重试' }],
+  }
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input))
+    if (url.pathname === '/api/skills') return response([])
+    if (url.pathname === '/api/board') return response([task])
+    const body = JSON.parse(String(init.body))
+    if (url.pathname === '/api/comment') {
+      task = { ...task, comments: [...task.comments, { by: body.by, at: new Date().toISOString(), text: body.text }] }
+      return response({ task })
+    }
+    if (url.pathname === '/api/transition') {
+      requests.push(`transition:${body.to}`)
+      task = { ...task, status: body.to, version: task.version + 1 }
+      return response({ task })
+    }
+    if (url.pathname === '/api/claim') {
+      requests.push(`claim:${task.status}`)
+      return response({ task })
+    }
+    throw new Error(`unexpected request ${url.pathname}`)
+  }
+
+  let starts = 0
+  const harness = fakeContext(
+    { status: 'done', summary: 'finished', evidence: 'ok', blocker: '' },
+    async () => {},
+    async () => {},
+    async () => {
+      starts += 1
+      return {
+        result: Promise.resolve({ stopReason: 'completed', structured: { status: 'done', summary: 'finished', evidence: 'ok', blocker: '' } }),
+        dispose: async () => {},
+      }
+    },
+  )
+  try {
+    apply(harness.ctx, config(root))
+    harness.intervals[0]()
+    await waitFor(() => starts === 1, 'aborted task was not retried on the next sweep')
+    await waitFor(() => requests.includes('transition:in_review'), 'retried worker never completed')
+    assert.equal(starts, 1, 'aborted task should be retried exactly once here')
   } finally {
     for (const dispose of harness.disposers) await dispose()
     globalThis.fetch = originalFetch

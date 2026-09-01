@@ -294,6 +294,10 @@ export function apply(ctx: AppContext, config: Config): void {
   }
 
   const foremen = new Map<string, { agent: Agent; dispose: () => Promise<void> }>()
+  /** foreman 创建中的 promise 去重：同 cwd 并发请求只创建一次（isolate=false 且 maxWorkers>1 时多个 worker 同 cwd 的竞态防护） */
+  const foremanPending = new Map<string, Promise<Agent | undefined>>()
+  /** 中止类重试的退避时间戳：taskId → 上次「worker 未完成/派工失败」重试时间（防故障期热循环） */
+  const abortRetryAt = new Map<string, number>()
   const inflight = new Set<string>()
   const controllers = new Set<AbortController>()
   let sweeping = false
@@ -425,21 +429,29 @@ export function apply(ctx: AppContext, config: Config): void {
   async function ensureForeman(cwd: string): Promise<Agent | undefined> {
     const existing = foremen.get(cwd)
     if (existing !== undefined) return existing.agent
-    try {
-      const selection = ctx.agentDefaultModel.currentSelection()
-      const handle = await ctx.agents.create({
-        sessionId: SessionId(`scrum-worker-foreman-${hashStr(cwd)}`),
-        meta: { cwd },
-        agentOptions: { provider: selection.provider, model: selection.model },
-        setup: async (agentCtx: Context) => void await ctx.agentPresets.mount(agentCtx, config.agentPreset),
-      })
-      foremen.set(cwd, { agent: handle.agent, dispose: () => handle.dispose() })
-      log(`foreman 就绪：${handle.agent.session.id}（cwd=${cwd}，model=${selection.provider}/${selection.model}）`)
-      return handle.agent
-    } catch (e) {
-      log(`foreman 创建失败（本轮跳过派工，cwd=${cwd}）：${String(e)}`)
-      return undefined
-    }
+    const pending = foremanPending.get(cwd)
+    if (pending !== undefined) return pending
+    const creating = (async () => {
+      try {
+        const selection = ctx.agentDefaultModel.currentSelection()
+        const handle = await ctx.agents.create({
+          sessionId: SessionId(`scrum-worker-foreman-${hashStr(cwd)}`),
+          meta: { cwd },
+          agentOptions: { provider: selection.provider, model: selection.model },
+          setup: async (agentCtx: Context) => void await ctx.agentPresets.mount(agentCtx, config.agentPreset),
+        })
+        foremen.set(cwd, { agent: handle.agent, dispose: () => handle.dispose() })
+        log(`foreman 就绪：${handle.agent.session.id}（cwd=${cwd}，model=${selection.provider}/${selection.model}）`)
+        return handle.agent
+      } catch (e) {
+        log(`foreman 创建失败（本轮跳过派工，cwd=${cwd}）：${String(e)}`)
+        return undefined
+      } finally {
+        foremanPending.delete(cwd)
+      }
+    })()
+    foremanPending.set(cwd, creating)
+    return creating
   }
 
   /**
@@ -507,6 +519,7 @@ export function apply(ctx: AppContext, config: Config): void {
       await runTaskctl(config.scrumDir, argv)
     }
     await reportProgress(id, 0, '认领开工')
+    abortRetryAt.delete(id) // 新一轮认领（含解阻续做）重置中止退避
   }
 
   /**
@@ -1108,10 +1121,13 @@ exit 0
       const inboxIds = tasks.filter(t => (t.status === 'todo' || t.status === 'blocked') && (t.soldier === null || t.soldier === undefined) && isOurInbox(t))
       if (inboxIds.length > 0) log(`inbox=${inboxIds.length}（${inboxIds.map(t => t.id).join(', ')}）`)
 
-      // 0. 认领租约回收：释放超过 staleMinutes 无进展的 in_progress 任务（下一轮再认领）
+      // 0. 认领租约回收：释放超过 staleMinutes 无进展（距最近 progress 起算）或过 TTL 的 in_progress 任务。
+      //    hub 模式走 hub 的 /api/release-stale（守护不直连本地库，多存储部署下避免误碰其他任务池）；本地模式带 --scope 限定本守护 scope。
       try {
-        const res = await runTaskctl(config.scrumDir, ['release-stale', '--older-than', String(config.staleMinutes), '--by', 'daemon']) as { released?: string[] }
-        for (const id of res.released ?? []) activity('released', id, `认领超过 ${config.staleMinutes} 分钟无进展，自动释放回 todo`)
+        const res = useHub
+          ? await hubPost('/api/release-stale', { by: config.role, scope, olderThan: config.staleMinutes }) as { released?: string[] }
+          : await runTaskctl(config.scrumDir, ['release-stale', '--older-than', String(config.staleMinutes), '--by', config.role, '--scope', scope]) as { released?: string[] }
+        for (const id of res.released ?? []) activity('released', id, `距最近进展超过 ${config.staleMinutes} 分钟或过 TTL，自动释放回 todo`)
       } catch (e) {
         log(`release-stale 失败：${String(e)}`)
       }
@@ -1135,12 +1151,18 @@ exit 0
         inflight.add(t.id)
         runDetached(t.id, workTodo(t, stageOf(t)))
       }
-      // 3. in_progress 且本角色、认领后有他人评论：视为退回，附反馈纠错
+      // 3. in_progress 且本角色、认领后有他人评论：视为退回，附反馈纠错；
+      //    守护自己的「worker 未完成 / 派工失败」评论也触发重试（单角色模式 self=config.role 会把它过滤掉，
+      //    导致中止的 worker 只能等 stale 释放），带 ≥4 个扫单周期的退避，避免故障期间热循环
       for (const t of tasks.filter(t => t.status === 'in_progress' && isOurs(t))) {
         if (!room() || inflight.has(t.id)) continue
-        const feedback = t.comments.filter(c =>
-          c.by !== self(t) && (t.claimedAt === null || new Date(c.at) > new Date(t.claimedAt)))
-        if (feedback.length === 0) continue
+        const since = t.claimedAt === null ? 0 : new Date(t.claimedAt).getTime()
+        const feedback = t.comments.filter(c => new Date(c.at).getTime() > since && c.by !== self(t))
+        const abortDriven = feedback.length === 0 && t.comments.some(c =>
+          new Date(c.at).getTime() > since && (c.text.startsWith('⚠ worker 未完成') || c.text.startsWith('⚠ 派工失败')))
+        if (feedback.length === 0 && !abortDriven) continue
+        if (abortDriven && (abortRetryAt.get(t.id) ?? 0) + config.intervalMs * 4 > Date.now()) continue
+        if (abortDriven) abortRetryAt.set(t.id, Date.now())
         inflight.add(t.id)
         runDetached(t.id, workReturned(t, feedback, stageOf(t)))
       }

@@ -86,6 +86,40 @@ describe('TTL + 幂等认领 (P2)', () => {
     assert.equal(after.soldier, null)
     assert.equal(after.expiresAt, null)
   })
+
+  it('release-stale 距最近进展起算：认领久但近期有 progress 的长任务不回收', () => {
+    const t = ctl(['create', '--title', '长任务', '--scope', 'software'])
+    ctl(['approve', t.id])
+    ctl(['claim', t.id, '--soldier', 'coder'])
+    const file = env.LEGION_TASKS_FILE
+    const db = JSON.parse(readFileSync(file, 'utf8'))
+    db.tasks[t.id].claimedAt = new Date(Date.now() - 120 * 60_000).toISOString() // 2 小时前认领
+    db.tasks[t.id].progress = [{ by: 'coder', at: new Date(Date.now() - 10 * 60_000).toISOString(), percent: 50, note: '进行中' }]
+    writeFileSync(file, JSON.stringify(db, null, 2))
+    const res = ctl(['release-stale', '--older-than', '60'])
+    assert.ok(!res.released.includes(t.id), '有近期 progress 的任务不应被回收')
+    assert.equal(ctl(['get', t.id]).status, 'in_progress')
+  })
+
+  it('release-stale --scope 只回收该 scope，且 progress 老于阈值才回收', () => {
+    const a = ctl(['create', '--title', 'A软件', '--scope', 'software'])
+    const b = ctl(['create', '--title', 'B默认', '--scope', 'default'])
+    ctl(['approve', a.id])
+    ctl(['approve', b.id])
+    ctl(['claim', a.id, '--soldier', 'coder'])
+    ctl(['claim', b.id, '--soldier', 'coder'])
+    const file = env.LEGION_TASKS_FILE
+    const db = JSON.parse(readFileSync(file, 'utf8'))
+    for (const id of [a.id, b.id]) {
+      db.tasks[id].claimedAt = new Date(Date.now() - 120 * 60_000).toISOString()
+      db.tasks[id].progress = [{ by: 'coder', at: new Date(Date.now() - 120 * 60_000).toISOString(), percent: 30, note: '早期' }]
+    }
+    writeFileSync(file, JSON.stringify(db, null, 2))
+    const res = ctl(['release-stale', '--older-than', '60', '--scope', 'software'])
+    assert.ok(res.released.includes(a.id), 'software scope 的老任务应被回收')
+    assert.ok(!res.released.includes(b.id), '其他 scope 的任务不应被回收')
+    assert.equal(ctl(['get', b.id]).status, 'in_progress')
+  })
 })
 
 describe('转派 (P2)', () => {

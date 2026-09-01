@@ -248,6 +248,16 @@ export function apply(ctx: Context, config: Config): void {
         return
       }
 
+      if (req.method === 'POST' && path === '/api/release-stale') {
+        // 守护租约回收走 hub（守护不直连本地库，多存储部署下避免误碰其他任务池）；scope 内生效。
+        await handleWrite(req, res, async (body, by, scope) => {
+          const argv = ['release-stale', '--by', by, '--scope', scope]
+          if (typeof body.olderThan === 'number' && body.olderThan > 0) argv.push('--older-than', String(body.olderThan))
+          return runTaskctl(argv)
+        })
+        return
+      }
+
       if (req.method === 'POST' && path === '/api/artifact') {
         await handleWrite(req, res, async (body, by) => {
           const id = body.id

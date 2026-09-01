@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "nextId": 6,
+  "nextId": 9,
   "tasks": {
     "T-001": {
       "id": "T-001",
@@ -223,6 +223,161 @@
       "evidence": [],
       "createdAt": "2026-08-20T16:21:24.589Z",
       "updatedAt": "2026-08-20T16:52:29.848Z"
+    },
+    "T-006": {
+      "id": "T-006",
+      "title": "实现 worker 进度心跳（taskctl progress + 守护/看板展示）",
+      "description": "借鉴 agent-network 的 report_status(progress 0-100)，给 legion 加「士兵进度心跳」：士兵干活时上报进度，将军在看板看到百分比。改动只落在 worktree：\n\n1. scrum/taskctl.mjs：\n   - create 时给任务加 progress: [] 字段。\n   - 新增命令 progress <id> --by <name> --percent <0-100> --note <text>：向任务 progress 数组追加 {by, at, percent, note}(at=ISO 时间)。这是遥测：append-only，不要 bump version(用 transact 直接写、不走 withLock)，避免与状态迁移乐观锁互相干扰。percent 必须是 0-100 整数，by 非空。\n2. plugins/src/index.ts：\n   - buildWorkerPrompt 的「纪律」改为：仅允许调用 taskctl progress(遥测上报)，其余 taskctl/看板写接口仍禁止。\n   - 守护 claim 后写 progress(percent=0 认领开工)、派工后写(percent=10 已派工)。本地模式 runTaskctl(['progress',id,'--by',<角色>,'--percent','10','--note','...'])；hub 模式 hubPost('/api/progress',{...})。\n3. team-hub/src/index.ts(v1 plugin)：新增 POST /api/progress 透传 taskctl progress。\n4. scrum/render.mjs：生成 board.json 时每卡加 progress(取任务 progress 最后一项的 percent/note，无则 null)。\n5. scrum/kanban.html：卡片显示进度百分比(如 40% + note)。kanban.html 是 render.mjs 的模板产物，改 render.mjs 里生成它的 HTML 模板。\n\n验收：node --check scrum/taskctl.mjs 与 scrum/render.mjs 通过；progress 命令能追加且任务 version 不变；plugins 与 team-hub 的 tsc --noEmit 通过(若 worktree 无 node_modules 依赖无法 typecheck，证据里说明并保证语法正确)；board.json 每卡含 progress 且 kanban.html 渲染百分比。",
+      "acceptance": [
+        "node --check taskctl.mjs 与 render.mjs 通过",
+        "progress 命令追加且 version 不变",
+        "plugins/team-hub typecheck 通过(或说明 worktree 无依赖)",
+        "board.json 每卡含 progress 且 kanban.html 渲染百分比"
+      ],
+      "priority": "high",
+      "status": "canceled",
+      "version": 11,
+      "soldier": "coder",
+      "claimedRound": null,
+      "claimedAt": "2026-09-01T03:50:33.858Z",
+      "ttlMinutes": null,
+      "expiresAt": null,
+      "claimRequestId": null,
+      "ordersVersion": 1,
+      "parent": null,
+      "role": "coder",
+      "scope": "software",
+      "blocks": [],
+      "blockedBy": [],
+      "comments": [
+        {
+          "by": "soldier-auto",
+          "at": "2026-09-01T02:42:27.160Z",
+          "text": "⚠ 受阻：会话工具未注入：系统列出的 Available Tool Schemas 仅有 structured_output，无文件/命令工具。逐一尝试 bash、read_file、write_file、edit、list_files、ls、execute_command、shell、run_command、exec、terminal、cmd、str_replace_editor、read、write、list 等均返回 \"unknown tool\"。因此无法读取/修改工作目录 D:\\project\\DSH\\legion\\.legion-worktrees\\T-006 下的 scrum/taskctl.mjs、scrum/render.mjs、scrum/kanban.html、plugins/src/index.ts、team-hub/src/index.ts 等文件，也无法执行 node --check 或 tsc --noEmit 验证。需委派方以包含文件读写与命令执行工具的作用域重新启动本子代理。\n[worktree] 部分改动在 D:\\project\\DSH\\legion\\.legion-worktrees\\T-006（分支 w/T-006，未提交）"
+        },
+        {
+          "by": "soldier-auto",
+          "at": "2026-09-01T02:45:38.268Z",
+          "text": "⚠ 受阻：会话工具未注入：系统声明的可用工具（Available Tool Schemas）仅包含 structured_output，无任何文件/命令工具。逐一尝试 bash、execute_command、read_file、write_file、list_files、shell、run_command、exec、terminal、cmd、Bash、Read、Write、List、Grep、Glob 等工具名，均返回 \"unknown tool\"。因此无法读取/修改 D:\\project\\DSH\\legion\\.legion-worktrees\\T-006 下的 scrum/taskctl.mjs、scrum/render.mjs、scrum/kanban.html、plugins/src/index.ts、team-hub/src/index.ts 等文件，也无法执行 node --check 或 tsc --noEmit 验证。需委派方以包含文件读写与命令执行工具的作用域重新启动本子代理（与历史评论 soldier-auto 2026-09-01T02:42:27.160Z 记录的受阻原因相同，问题未解决）。\n[worktree] 部分改动在 D:\\project\\DSH\\legion\\.legion-worktrees\\T-006（分支 w/T-006，未提交）"
+        },
+        {
+          "by": "soldier-auto",
+          "at": "2026-09-01T03:14:16.278Z",
+          "text": "⚠ 受阻：会话工具未注入：可用工具仅 structured_output（无 bash/execute_command/read_file/write_file/edit/list_files 等文件与命令工具）。实测调用 bash 与 read_file 均返回 \"unknown tool\"，无法读取/修改 D:\\project\\DSH\\legion\\.legion-worktrees\\T-006 下的 scrum/taskctl.mjs、scrum/render.mjs、scrum/kanban.html、plugins/src/index.ts、team-hub/src/index.ts，也无法执行 node --check 或 tsc --noEmit 验证。需委派方以包含文件读写与命令执行工具的作用域重新启动本子代理。\n[worktree] 部分改动在 D:\\project\\DSH\\legion\\.legion-worktrees\\T-006（分支 w/T-006，未提交）"
+        },
+        {
+          "by": "general",
+          "at": "2026-09-01T03:57:08.121Z",
+          "text": "委派受阻：worker subagent 在当前模型下仅有 structured_output 工具、无文件读写/命令执行工具，无法实施。改由将军直接实现，本任务取消。"
+        },
+        {
+          "by": "soldier-auto",
+          "at": "2026-09-01T03:58:21.671Z",
+          "text": "⚠ worker 未完成（error），任务保留在 in_progress，等待人工处理或下一轮重试"
+        },
+        {
+          "by": "general",
+          "at": "2026-09-01T05:57:52.824Z",
+          "text": "✅ 已由将军直接实现并验证完毕（委派因 worker 子代理缺工具取消后改为直做）。P3 进度心跳：taskctl progress 命令 + 守护 0%/10% 遥测 + 看板进度条（测试绿）；P6 守护自述：daemon.json 心跳 + /api/daemon + /api/config pipeline；P5 btw：mesh/README.md + COMMAND.md 协议文档。"
+        }
+      ],
+      "evidence": [],
+      "patches": [],
+      "createdAt": "2026-09-01T02:40:32.859Z",
+      "updatedAt": "2026-09-01T05:57:52.825Z"
+    },
+    "T-007": {
+      "id": "T-007",
+      "title": "守护能力自述：daemon.json 心跳 + /api/daemon + /api/config 补 pipeline",
+      "description": "借鉴 agent-network 的节点生命周期/宿主 daemon 能力自述。实现：\n1. plugins/src/index.ts：守护启动时与每轮 sweep 结束时，写 scrum/daemon.json：{ role, provider, maxWorkers, isolate, intervalMs, workerTimeoutMs, staleMinutes, taskTtlMinutes, scope, pipeline:{name,stages:[role...]}, inbox, lastSweepAt, uptimeMs, model }。写失败静默(try/catch)，不阻塞派工。inbox=本轮扫到的本守护待办任务数；model 从 ctx.agentDefaultModel.currentSelection() 取 provider/model。\n2. scrum/serve.mjs：新增 GET /api/daemon 读 scrum/daemon.json 返回(不存在返回 {})；GET /api/config 增加 pipeline(roles.json 的 stages 数组) 与 daemon 摘要。\n3. kanban.html/render.mjs：看板顶部加守护状态条(角色/并发/isolate/上次扫单/待办)；若改动过重，至少 board.json 带 daemon 字段、kanban.html 显示一行状态。\n\n验收：守护运行后 scrum/daemon.json 存在且字段齐全；/api/daemon 返回 JSON、/api/config 含 pipeline+daemon；node --check scrum/serve.mjs 通过；plugins tsc --noEmit 通过(或证据说明 worktree 无依赖)。",
+      "acceptance": [
+        "daemon.json 存在且字段齐全",
+        "/api/daemon 返回 JSON 且 /api/config 含 pipeline+daemon",
+        "node --check serve.mjs 通过",
+        "plugins tsc --noEmit 通过(或说明)"
+      ],
+      "priority": "medium",
+      "status": "canceled",
+      "version": 7,
+      "soldier": "coder",
+      "claimedRound": null,
+      "claimedAt": "2026-09-01T02:42:28.097Z",
+      "ttlMinutes": null,
+      "expiresAt": null,
+      "claimRequestId": null,
+      "ordersVersion": 1,
+      "parent": null,
+      "role": "coder",
+      "scope": "software",
+      "blocks": [],
+      "blockedBy": [],
+      "comments": [
+        {
+          "by": "soldier-auto",
+          "at": "2026-09-01T02:43:37.448Z",
+          "text": "⚠ 受阻：本子代理会话未授予文件系统读写与 shell/命令执行权限（可用工具仅 structured_output，尝试 shell/bash/exec/read_file/write_file/list_files 等均报 unknown tool）。需要父代理（将军）重新委派并注入文件读写工具（read/write）与 shell 执行工具，我才能读取并修改 D:\\project\\DSH\\legion\\.legion-worktrees\\T-007 下的 plugins/src/index.ts、scrum/serve.mjs、kanban.html/render.mjs 并运行 node --check scrum/serve.mjs 与 tsc --noEmit 验证。\n[worktree] 部分改动在 D:\\project\\DSH\\legion\\.legion-worktrees\\T-007（分支 w/T-007，未提交）"
+        },
+        {
+          "by": "general",
+          "at": "2026-09-01T03:57:08.411Z",
+          "text": "委派受阻：worker subagent 在当前模型下仅有 structured_output 工具、无文件读写/命令执行工具，无法实施。改由将军直接实现，本任务取消。"
+        },
+        {
+          "by": "general",
+          "at": "2026-09-01T05:57:52.925Z",
+          "text": "✅ 已由将军直接实现并验证完毕（委派因 worker 子代理缺工具取消后改为直做）。P3 进度心跳：taskctl progress 命令 + 守护 0%/10% 遥测 + 看板进度条（测试绿）；P6 守护自述：daemon.json 心跳 + /api/daemon + /api/config pipeline；P5 btw：mesh/README.md + COMMAND.md 协议文档。"
+        }
+      ],
+      "evidence": [],
+      "patches": [],
+      "createdAt": "2026-09-01T02:41:12.522Z",
+      "updatedAt": "2026-09-01T05:57:52.926Z"
+    },
+    "T-008": {
+      "id": "T-008",
+      "title": "mesh 协议增加 btw 侧线程（不打断正在跑的一轮）",
+      "description": "借鉴 agent-network 的 /btw 侧线程。给 legion 的 mesh 消息协议加一种非打断消息类型 btw：\n1. mesh/README.md：消息类型表新增 btw(非紧急旁注/问题；接收方在当前轮结束后、下一轮开始前才读，绝不打断正在进行的 turn)；写明发送(mesh_send {to,type:'btw',...})与读取约定(士兵被唤醒后先 mesh_recv 再处理，btw 不触发即时行动)。\n2. COMMAND.md：「角色与通信协议」处新增「btw 侧线程」说明：将军/士兵用 btw 投递非紧急问题，不等回复、不打断正在跑的一轮。\n3. 若 mesh 协议有字段枚举/校验约定(roster.json/messages.jsonl/cursors.json)，同步补充 btw 为合法 type。\n\n验收：mesh/README.md 消息类型表含 btw 及「不打断」语义；COMMAND.md 含 btw 纪律；与 mesh/README.md 现有协议(rroster/messages/cursors 字段约定)一致。",
+      "acceptance": [
+        "mesh/README.md 消息类型表含 btw 及不打断语义",
+        "COMMAND.md 含 btw 纪律",
+        "与现有 mesh 协议字段约定一致"
+      ],
+      "priority": "medium",
+      "status": "canceled",
+      "version": 7,
+      "soldier": "coder",
+      "claimedRound": null,
+      "claimedAt": "2026-09-01T02:43:58.003Z",
+      "ttlMinutes": null,
+      "expiresAt": null,
+      "claimRequestId": null,
+      "ordersVersion": 1,
+      "parent": null,
+      "role": "coder",
+      "scope": "software",
+      "blocks": [],
+      "blockedBy": [],
+      "comments": [
+        {
+          "by": "soldier-auto",
+          "at": "2026-09-01T02:44:12.215Z",
+          "text": "⚠ 受阻：工具列表仅含 structured_output，尝试调用 bash 报 unknown tool: bash，无法读写工作目录文件\n[worktree] 部分改动在 D:\\project\\DSH\\legion\\.legion-worktrees\\T-008（分支 w/T-008，未提交）"
+        },
+        {
+          "by": "general",
+          "at": "2026-09-01T03:57:08.711Z",
+          "text": "委派受阻：worker subagent 在当前模型下仅有 structured_output 工具、无文件读写/命令执行工具，无法实施。改由将军直接实现，本任务取消。"
+        },
+        {
+          "by": "general",
+          "at": "2026-09-01T05:57:53.031Z",
+          "text": "✅ 已由将军直接实现并验证完毕（委派因 worker 子代理缺工具取消后改为直做）。P3 进度心跳：taskctl progress 命令 + 守护 0%/10% 遥测 + 看板进度条（测试绿）；P6 守护自述：daemon.json 心跳 + /api/daemon + /api/config pipeline；P5 btw：mesh/README.md + COMMAND.md 协议文档。"
+        }
+      ],
+      "evidence": [],
+      "patches": [],
+      "createdAt": "2026-09-01T02:41:13.580Z",
+      "updatedAt": "2026-09-01T05:57:53.032Z"
     }
   }
 }

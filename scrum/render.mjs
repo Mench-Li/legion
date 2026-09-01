@@ -79,6 +79,10 @@ function buildBoard() {
         comments: card.comments,
         evidence: card.evidence.length,
         patches: (card.patches ?? []).map(p => ({ id: p.id, at: p.at, by: p.by, summary: p.summary, files: p.files })),
+        progress: ((p) => {
+          const last = (p ?? []).slice(-1)[0]
+          return last ? { percent: last.percent, note: last.note, at: last.at, by: last.by } : null
+        })(card.progress),
         updatedAt: card.updatedAt,
       })),
   }))
@@ -192,6 +196,9 @@ function renderHtml(board) {
   .tag.soldier { background: #1e3a5f; }
   .acceptance { margin-top: 6px; color: #7d8aa3; }
   .acceptance li { margin-left: 14px; }
+  .prog { margin-top: 6px; position: relative; height: 14px; background: #1a2237; border-radius: 7px; overflow: hidden; }
+  .prog-bar { height: 100%; background: linear-gradient(90deg, #2563eb, #60a5fa); border-radius: 7px; }
+  .prog-text { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 10px; color: #e6e9f0; }
   .footer { margin-top: 6px; color: #5d6a85; font-size: 11px; display: flex; justify-content: space-between; }
   .footer button { background: none; border: none; color: #7d8aa3; cursor: pointer; font-size: 11px; padding: 0; }
   .footer button:hover { color: #e6e9f0; }
@@ -337,6 +344,7 @@ function renderHtml(board) {
         \${c.patches && c.patches.length ? \`<span class="tag">📄\${c.patches.length} diff</span>\` : ''}
       </div>
       \${c.acceptance.length ? \`<ul class="acceptance">\${c.acceptance.map(a => \`<li>\${esc(a)}\</li>\`).join('')}</ul>\` : ''}
+      \${c.progress ? \`<div class="prog"><div class="prog-bar" style="width:\${Math.max(0, Math.min(100, c.progress.percent))}%"></div><span class="prog-text">\${c.progress.percent}%\${c.progress.note ? ' · ' + esc(c.progress.note) : ''}</span></div>\` : ''}
       <div class="footer"><span>\${c.comments.length} 评论</span><span><button type="button" data-detail="\${esc(c.id)}">详情/评论</button> · v\${c.version} · \${fmt(c.updatedAt)}</span></div>
     </div>\`
   }

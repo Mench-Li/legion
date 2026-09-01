@@ -43,6 +43,7 @@
 - 消息总线：`@deepseek-ai/dsh-tool-mesh` 插件（`mesh_send` 直发 / `mesh_recv` 游标拉取 / `mesh_register` 注册）；需求版本在 `mesh/orders.md`。
 - 士兵 ↔ 将军：双向（`report`/`question` 上行，`order`/`relay` 下行）。
 - 士兵 ↔ 士兵：**内容直连**——`mesh_send({ to: '<目标>', type: 'relay' })` 直接投递，无需将军中转；将军每轮 `mesh_recv({ inbox: 'all' })` 只负责唤醒。
+- **btw 侧线程**：非紧急旁注用 `mesh_send({ to: '<目标>', type: 'btw' })` 投递（协议见 `mesh/README.md`）。btw **绝不打断正在跑的一轮**——接收方只在当前轮结束后、下一轮开始前读取，不触发即时行动、不期待即时回复；关键信息（命令/需求/验收）禁止走 btw。
 - "实时"由 goal 轮次驱动：每轮 = 一次"读总线 → 唤醒 → 发令 → 收报"心跳；士兵被唤醒后先 `mesh_recv()` 再按 `soldier-prompt.md` 的固定流程行动。
 
 ## 军团纪律（不可违反）

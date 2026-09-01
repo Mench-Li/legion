@@ -125,3 +125,28 @@ describe('inbox 计数 (P4)', () => {
     assert.equal(inbox.count, 1)
   })
 })
+
+describe('progress 进度心跳 (P3)', () => {
+  it('progress 追加且不 bump version（遥测）', () => {
+    const t = ctl(['create', '--title', '进度任务'])
+    assert.deepEqual(t.progress, [])
+    const before = t.version
+    const p1 = ctl(['progress', t.id, '--by', 'coder', '--percent', '40', '--note', '实现中'])
+    assert.equal(p1.version, before) // 不 bump
+    assert.equal(p1.progress.length, 1)
+    assert.equal(p1.progress[0].percent, 40)
+    assert.equal(p1.progress[0].note, '实现中')
+    // 第二次追加
+    const p2 = ctl(['progress', t.id, '--by', 'coder', '--percent', '100', '--note', '完成'])
+    assert.equal(p2.progress.length, 2)
+    assert.equal(p2.version, before) // 仍不 bump
+    assert.equal(p2.progress[1].percent, 100)
+  })
+
+  it('percent 越界/非整数拒绝', () => {
+    const t = ctl(['create', '--title', '越界'])
+    assert.throws(() => ctl(['progress', t.id, '--by', 'c', '--percent', '101']), /0-100/)
+    assert.throws(() => ctl(['progress', t.id, '--by', 'c', '--percent', '-1']), /0-100/)
+    assert.throws(() => ctl(['progress', t.id, '--by', 'c', '--percent', 'x']), /0-100/)
+  })
+})

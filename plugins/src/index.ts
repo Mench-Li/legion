@@ -373,6 +373,36 @@ export function apply(ctx: AppContext, config: Config): void {
   // 项目 scope：显式配置优先，否则用 roles.json 的 name（软件流水线 = software），再否则 default。
   const scope = config.scope !== 'default' ? config.scope : (pipeline?.name ?? 'default')
 
+  // ── 守护能力自述：daemon.json 心跳（借鉴 agent-network 的宿主 daemon 能力上报）──
+  const daemonStartedAt = Date.now()
+  const daemonStatusFile = join(config.scrumDir, 'daemon.json')
+  function writeDaemonStatus(inboxCount: number): void {
+    try {
+      const selection = ctx.agentDefaultModel.currentSelection()
+      const status = {
+        role: config.role,
+        provider: config.provider,
+        maxWorkers: config.maxWorkers,
+        isolate: config.isolate,
+        intervalMs: config.intervalMs,
+        workerTimeoutMs: config.workerTimeoutMs,
+        staleMinutes: config.staleMinutes,
+        taskTtlMinutes: config.taskTtlMinutes,
+        scope,
+        pipeline: pipeline ? { name: pipeline.name, stages: pipeline.stages.map(s => s.role) } : null,
+        inbox: inboxCount,
+        lastSweepAt: new Date().toISOString(),
+        uptimeMs: Date.now() - daemonStartedAt,
+        model: { provider: selection.provider, model: selection.model },
+      }
+      mkdirSync(dirname(daemonStatusFile), { recursive: true })
+      writeFileSync(daemonStatusFile, `${JSON.stringify(status, null, 2)}\n`)
+    } catch (e) {
+      log(`daemon.json 写入失败：${String(e)}`)
+    }
+  }
+  writeDaemonStatus(0)
+
   /** 惰性创建 foreman agent：worker subagent 的父（按工作目录缓存；worktree 隔离时每个 worktree 一个）。 */
   async function ensureForeman(cwd: string): Promise<Agent | undefined> {
     const existing = foremen.get(cwd)
@@ -427,6 +457,19 @@ export function apply(ctx: AppContext, config: Config): void {
     }
   }
 
+  /** 进度心跳（遥测）：本地走 taskctl progress，hub 走 /api/progress。失败不抛，避免污染派工主流程。 */
+  async function reportProgress(id: string, percent: number, note: string): Promise<void> {
+    try {
+      if (useHub) {
+        await hubPost('/api/progress', { id, by: config.role, percent, note, scope: scope })
+      } else {
+        await runTaskctl(config.scrumDir, ['progress', id, '--by', config.role, '--percent', String(percent), '--note', note])
+      }
+    } catch (e) {
+      log(`progress ${id} 失败：${String(e)}`)
+    }
+  }
+
   /** 认领任务（hub 或本地）。带幂等 request-id（同守护同任务稳定），可选 TTL。 */
   async function claimTask(id: string, soldier: string): Promise<void> {
     const requestId = `daemon:${config.role}:${id}`
@@ -440,6 +483,7 @@ export function apply(ctx: AppContext, config: Config): void {
       if (config.taskTtlMinutes > 0) argv.push('--ttl-minutes', String(config.taskTtlMinutes))
       await runTaskctl(config.scrumDir, argv)
     }
+    await reportProgress(id, 0, '认领开工')
   }
 
   /** worktree 隔离：为任务建独立分支 worktree（w/<taskId>）。失败返回 null 由调用方回退。 */
@@ -625,7 +669,7 @@ exit 0
         : []),
       '',
       '纪律：',
-      '1. 只做实现与验证；不要调用任何 taskctl / task_* / 看板写接口——状态迁移由守护负责，你只负责把代码和验证做好。',
+      '1. 只做实现与验证；状态迁移一律由守护负责。唯一允许调用的 taskctl 命令是 `taskctl progress <id> --by <角色> --percent <0-100> --note <一句话>`（上报进度遥测，不迁移状态）；其余 taskctl / task_* / 看板写接口一律禁止。',
       '2. 完成标准 = 验收标准逐条真实满足：跑真实命令验证（typecheck / build / test），给出证据。',
       '3. 改动落在工作目录内；如需更新 legion 文档一并更新。',
       '4. 禁止联网与任何 push（pre-push 已拦截 w/* 分支）；外部依赖若缺失，在证据里说明而非擅自下载。',
@@ -676,6 +720,7 @@ exit 0
     })()
     if (run === undefined) return
     activity('dispatch', t.id, 'worker 已派工，开始实现')
+    await reportProgress(t.id, 10, '已派工')
     const result = await run.result
     await run.dispose()
     if (result.stopReason !== 'completed' || result.structured === undefined) {
@@ -1001,6 +1046,7 @@ exit 0
         inflight.add(t.id)
         runDetached(t.id, workReturned(t, feedback, stageOf(t)))
       }
+      writeDaemonStatus(inboxIds.length)
     } finally {
       sweeping = false
     }

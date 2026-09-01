@@ -235,6 +235,19 @@ export function apply(ctx: Context, config: Config): void {
         return
       }
 
+      if (req.method === 'POST' && path === '/api/progress') {
+        await handleWrite(req, res, async (body, by) => {
+          const id = body.id
+          const percent = body.percent
+          if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
+          if (typeof percent !== 'number') throw new Error('缺少参数 percent')
+          const argv = ['progress', id, '--by', by, '--percent', String(percent)]
+          if (typeof body.note === 'string' && body.note.length > 0) argv.push('--note', body.note)
+          return runTaskctl(argv)
+        })
+        return
+      }
+
       if (req.method === 'POST' && path === '/api/transition') {
         await handleWrite(req, res, async (body, by) => {
           const id = body.id

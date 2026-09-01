@@ -96,6 +96,11 @@ curl -X POST http://127.0.0.1:4820/api/comment -H "Authorization: Bearer <t>" -H
 
 日志：`~/.dsh/super-injector/dsh-scrum-worker.log`（每轮扫单/派工/提交都落盘）。卸载：`dev_uninject_plugin`（匹配 `dsh-scrum-worker`）。
 
+### 进度心跳（P3）与守护能力自述（P6）
+
+- **进度心跳**：士兵/守护用 `taskctl progress <id> --by <角色> --percent <0-100> --note <一句话>` 上报进度（借鉴 agent-network 的 `report_status`）。它是 **append-only 遥测**：不 bump `version`、不改 `updatedAt`，避免与状态迁移的乐观锁互相干扰。看板每张卡显示最新进度条（`board.json` 卡片带 `progress` 字段，`kanban.html` 渲染百分比 + note）。守护在 `claim` 后写 `0% 认领开工`、派工后写 `10% 已派工`（本地模式直接调 taskctl，hub 模式走 `POST /api/progress`）。
+- **守护能力自述**：守护每轮扫单结束把自身状态写入 `scrum/daemon.json`（角色/并发/隔离/超时/scope/流水线阶段/当前模型/inbox 计数/本轮时间/uptime）。看板 `GET /api/daemon` 直接返回该文件，`GET /api/config` 附带 `pipeline`（roles.json 阶段）与 `daemon`——将军/用户随时能确认"守护活着吗、在跑哪个流水线、当前用哪个模型"。新增一个守护节点 = 在 `cordis.patch.yml` 加一个 worker 插件配置（`role`/`intervalMs`/`scrumDir` 等），重启后 `daemon.json` 出现即自述成功。
+
 ## 四项加固（隔离 / 动态流 / 租约 / 依赖环）
 
 1. **Git worktree 隔离**（守护 `isolate: true`）：每个任务建独立 worktree（分支 `w/<任务id>`，目录 `<repoRoot>/.legion-worktrees/<任务id>`），worker 在隔离目录干活，互不污染主工作树。完成后改动提交到 `w/<id>` 分支，**promote 显式**：验收通过后 `git -C <repoRoot> merge --no-ff w/<id>`；放弃则 `git -C <repoRoot> worktree remove --force <目录> && git -C <repoRoot> branch -D w/<id>`。守护同时安装公共 pre-push 守卫——`w/*` 分支一律禁止 push（防 worker 误推远程）。
@@ -170,6 +175,11 @@ node legion/scrum/taskctl.mjs link T-003 --blockedBy T-002
 # 归还 / 认领租约超时回收（守护每轮自动跑 release-stale）
 node legion/scrum/taskctl.mjs release T-001 --by soldier-a --reason "主动放弃"
 node legion/scrum/taskctl.mjs release-stale --older-than 60 --by daemon
+
+# 进度心跳（遥测：append-only，不 bump version）/ 离线 inbox / 转派
+node legion/scrum/taskctl.mjs progress T-001 --by soldier-a --percent 40 --note "实现中"
+node legion/scrum/taskctl.mjs inbox --role coder
+node legion/scrum/taskctl.mjs reassign T-001 --soldier soldier-b --by general
 
 # 刷新看板
 node legion/scrum/render.mjs

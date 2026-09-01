@@ -10,6 +10,7 @@ import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { spawn } from 'node:child_process'
 import { readFile, watch, watchFile, unwatchFile } from 'node:fs'
+import { readFile as readFileP } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
@@ -48,6 +49,15 @@ export function apply(ctx: Context, config: Config): void {
 
   let hubUrl = config.hubUrl.replace(/\/+$/, '')
   let useHub = hubUrl !== ''
+
+  /** 读 JSON 文件，不存在/损坏返回 null（daemon.json、roles.json 均为可缺失的旁路信息）。 */
+  async function readJson(file: string): Promise<unknown> {
+    try {
+      return JSON.parse(await readFileP(file, 'utf8'))
+    } catch {
+      return null
+    }
+  }
 
   /** 探测默认 hub（未显式配置 hubUrl 时）：同机 DSH web 端口的 /team-hub。 */
   async function detectHub(): Promise<void> {
@@ -387,7 +397,19 @@ export function apply(ctx: Context, config: Config): void {
       }
 
       if (path === '/api/config') {
-        json(res, 200, { auth: false, host: '127.0.0.1', port: ctx.webServer.port })
+        const [pipelineRaw, daemon] = await Promise.all([
+          readJson(join(repoRoot, 'roles.json')),
+          readJson(join(scrumDir, 'daemon.json')),
+        ])
+        const pipeline = pipelineRaw && typeof pipelineRaw === 'object' && 'stages' in pipelineRaw
+          ? { name: (pipelineRaw as { name?: string }).name ?? null, stages: (pipelineRaw as { stages?: { role?: string; label?: string }[] }).stages?.map(s => ({ role: s.role ?? null, label: s.label ?? null })) ?? [] }
+          : null
+        json(res, 200, { auth: false, host: '127.0.0.1', port: ctx.webServer.port, pipeline, daemon })
+        return
+      }
+      if (path === '/api/daemon') {
+        const daemon = await readJson(join(scrumDir, 'daemon.json'))
+        json(res, 200, daemon ?? {})
         return
       }
       if (path === '/api/board') {

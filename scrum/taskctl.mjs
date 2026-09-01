@@ -290,6 +290,7 @@ const commands = {
         comments: [],
         evidence: [],
         patches: [],
+        progress: [],
         createdAt: now(),
         updatedAt: now(),
       }
@@ -360,6 +361,7 @@ const commands = {
         comments: [],
         evidence: [],
         patches: [],
+        progress: [],
         createdAt: now(),
         updatedAt: now(),
       }
@@ -406,6 +408,27 @@ const commands = {
       })
       .sort((a, b) => a.id.localeCompare(b.id))
     process.stdout.write(`${JSON.stringify({ count: rows.length, tasks: rows.map(t => ({ id: t.id, status: t.status })) }, null, 2)}\n`)
+  },
+
+  /**
+   * 进度心跳（遥测）：向任务 progress 数组追加 {by, at, percent, note}。
+   * 这是 append-only 遥测：不 bump version、不改 updatedAt，避免与状态迁移乐观锁互相干扰。
+   * 士兵干活时用它上报 0-100 进度，将军/看板据此显示百分比。
+   */
+  progress(args) {
+    requireArgs(args, ['by', 'percent'])
+    const id = requireId(args)
+    const percent = Number(args.percent)
+    if (!Number.isInteger(percent) || percent < 0 || percent > 100) {
+      throw new Error(`--percent 必须是 0-100 的整数，收到 ${args.percent}`)
+    }
+    const t = transact(db => {
+      const t = task(db, id)
+      if (!Array.isArray(t.progress)) t.progress = []
+      t.progress.push({ by: args.by, at: now(), percent, note: args.note ?? '' })
+      return t
+    })
+    printTask(t)
   },
 
   /** 将军批准：backlog → todo（之后士兵才可认领） */

@@ -316,7 +316,29 @@ const server = createServer((req, res) => {
   }
 
   if (url.pathname === '/api/config') {
-    json(res, 200, { auth: Boolean(token), host, port })
+    readFile(join(ROOT, 'roles.json'), 'utf8', (e1, rolesRaw) => {
+      readFile(join(SCRUM, 'daemon.json'), 'utf8', (e2, daemonRaw) => {
+        let pipeline = null
+        let daemon = null
+        try {
+          const r = JSON.parse(rolesRaw)
+          pipeline = { name: r.name ?? null, stages: (r.stages ?? []).map(s => ({ role: s.role ?? null, label: s.label ?? null })) }
+        } catch { /* roles.json 缺失/损坏则 pipeline=null */ }
+        try { daemon = JSON.parse(daemonRaw) } catch { /* daemon.json 缺失则 daemon=null */ }
+        json(res, 200, { auth: Boolean(token), host, port, pipeline, daemon })
+      })
+    })
+    return
+  }
+
+  if (url.pathname === '/api/daemon') {
+    readFile(join(SCRUM, 'daemon.json'), 'utf8', (err, data) => {
+      if (err) {
+        json(res, 200, {})
+        return
+      }
+      try { json(res, 200, JSON.parse(data)) } catch { json(res, 200, {}) }
+    })
     return
   }
 

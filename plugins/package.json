@@ -1,6 +1,6 @@
 {
   "name": "@dsh-external/dsh-scrum-worker",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "军团士兵轮询守护：定时扫看板，认领 todo、读上下文派工、提交 in_review；退回纠错；blocked 解阻续做",
   "private": true,
   "type": "module",

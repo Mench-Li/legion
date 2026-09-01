@@ -663,6 +663,23 @@ function renderHtml(board) {
   }
   boot()
 </script>
+<div id="console-float" title="军团总指挥部：守护状态 + 任务实时总览（独立页面）" style="position:fixed;left:16px;bottom:16px;z-index:999;display:flex;align-items:center;gap:8px;background:rgba(17,24,39,.92);color:#dbe3f0;border:1px solid #1c2740;border-radius:999px;padding:8px 14px;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,.45);cursor:pointer;user-select:none">
+  <span id="console-dot" style="width:8px;height:8px;border-radius:50%;background:#5d6a85;display:inline-block;flex:none"></span>
+  🖥 总指挥部
+</div>
+<script>
+  (function () {
+    const dot = document.getElementById('console-dot')
+    const ping = () => {
+      fetch('/api/daemon', { headers: { accept: 'application/json' } })
+        .then(r => { if (dot) dot.style.background = r.ok ? '#4ade80' : '#f87171' })
+        .catch(() => { if (dot) dot.style.background = '#f87171' })
+    }
+    ping()
+    setInterval(ping, 30000)
+    document.getElementById('console-float')?.addEventListener('click', () => window.open('console.html', '_blank', 'noopener'))
+  })()
+</script>
 </body>
 </html>
 `

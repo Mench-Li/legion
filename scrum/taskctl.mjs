@@ -20,7 +20,8 @@ import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
-const TASKS_FILE = join(ROOT, 'scrum', 'tasks.json')
+/** 权威任务库；测试可用 LEGION_TASKS_FILE 指向临时文件，生产不设置即走默认路径。 */
+const TASKS_FILE = process.env.LEGION_TASKS_FILE ?? join(ROOT, 'scrum', 'tasks.json')
 /** 补丁目录：patch 命令把统一 diff 落盘于此，看板经 /api/patch 按 id 取阅。 */
 const PATCHES_DIR = join(ROOT, 'scrum', 'patches')
 /** 默认 worktree 根（与守护 prepareWorktree 的默认值一致）。 */
@@ -109,6 +110,20 @@ function now() {
   return new Date().toISOString()
 }
 
+/** 解析 --ttl-minutes：正整数分钟或 null（不设 TTL）。 */
+function ttlMinutes(value) {
+  if (value === undefined || value === null || value === '') return null
+  const n = Number(value)
+  if (!Number.isInteger(n) || n <= 0) throw new Error(`--ttl-minutes 必须是正整数分钟数，收到 ${value}`)
+  return n
+}
+
+/** 认领时刻 + TTL 分钟 → 过期时间（无 TTL 返回 null）。 */
+function expiresAt(claimedAtIso, ttl) {
+  if (ttl === null || ttl === undefined) return null
+  return new Date(new Date(claimedAtIso).getTime() + ttl * 60_000).toISOString()
+}
+
 /** 生成下一个任务 id（T-001、T-002…） */
 function nextId(db) {
   const id = `T-${String(db.nextId).padStart(3, '0')}`
@@ -184,7 +199,9 @@ function withLock(opts) {
         )
       }
     }
-    opts.mutate(t, db)
+    // mutate 返回 false 表示幂等命中（无实际变更），跳过 version 递增。
+    const bump = opts.mutate(t, db)
+    if (bump === false) return t
     t.version += 1
     t.updatedAt = now()
     return t
@@ -247,6 +264,7 @@ const commands = {
   /** 创建任务（默认 backlog，未批准前不可开工） */
   create(args) {
     requireArgs(args, ['title'])
+    const ttl = ttlMinutes(args.ttlMinutes)
     const t = transact(db => {
       const id = nextId(db)
       const t = {
@@ -260,6 +278,9 @@ const commands = {
         soldier: null,
         claimedRound: null,
         claimedAt: null,
+        ttlMinutes: ttl,
+        expiresAt: null,
+        claimRequestId: null,
         ordersVersion: Number(args.ordersVersion ?? 1),
         parent: args.parent ?? null,
         role: args.role ?? null,
@@ -364,6 +385,26 @@ const commands = {
     process.stdout.write(`${JSON.stringify(rows, null, 2)}\n`)
   },
 
+  /**
+   * 离线 inbox：某角色/士兵名下待处理（todo/blocked 未认领）任务计数与 id 列表。
+   * 守护/士兵每轮用它汇报「我还有几件待办」。
+   */
+  inbox(args) {
+    const db = loadDb()
+    const all = Object.values(db.tasks)
+    const rows = all
+      .filter(t => t.status === 'todo' || t.status === 'blocked')
+      .filter(t => t.soldier === null || t.soldier === undefined)
+      .filter(t => {
+        const byRole = args.role === undefined || t.role === args.role
+        const bySoldier = args.soldier === undefined || t.role === args.soldier
+        const byScope = args.scope === undefined || (t.scope ?? 'default') === args.scope
+        return (args.role !== undefined ? byRole : true) && (args.soldier !== undefined ? bySoldier : true) && byScope
+      })
+      .sort((a, b) => a.id.localeCompare(b.id))
+    process.stdout.write(`${JSON.stringify({ count: rows.length, tasks: rows.map(t => ({ id: t.id, status: t.status })) }, null, 2)}\n`)
+  },
+
   /** 将军批准：backlog → todo（之后士兵才可认领） */
   approve(args) {
     const id = requireId(args)
@@ -381,6 +422,8 @@ const commands = {
   /**
    * 士兵认领：todo → in_progress，绑定士兵身份与轮次。
    * 认领是互斥的：已被其他士兵认领的任务拒绝；已 in_progress 且绑定他人则拒绝。
+   * 幂等：带 --request-id 且与上次认领同 id 同士兵时，返回当前任务（不重复 bump）。
+   * TTL：--ttl-minutes 覆盖任务的 ttlMinutes，认领后 expiresAt = claimedAt + ttl。
    */
   claim(args) {
     requireArgs(args, ['soldier'])
@@ -389,6 +432,10 @@ const commands = {
       id,
       ifVersion: args.ifVersion,
       mutate(t) {
+        // 幂等命中：同 request-id + 同士兵 + 已 in_progress → 视为上次认领已生效
+        if (args.requestId !== undefined && t.claimRequestId === args.requestId && t.soldier === args.soldier && t.status === 'in_progress') {
+          return false
+        }
         if (t.status !== 'todo' && t.status !== 'blocked') {
           throw new Error(`无法认领：任务 ${t.id} 当前 ${t.status}（仅 todo/blocked 可认领）`)
         }
@@ -402,10 +449,15 @@ const commands = {
         if (open.length > 0 && args.force === undefined) {
           throw new Error(`任务被未完成依赖阻塞：${open.join(', ')}（确认后加 --force）`)
         }
+        const at = now()
+        const ttl = args.ttlMinutes !== undefined ? ttlMinutes(args.ttlMinutes) : (t.ttlMinutes ?? null)
         t.status = 'in_progress'
         t.soldier = args.soldier
         t.claimedRound = args.round !== undefined ? Number(args.round) : null
-        t.claimedAt = now()
+        t.claimedAt = at
+        t.ttlMinutes = ttl
+        t.expiresAt = expiresAt(at, ttl)
+        t.claimRequestId = args.requestId ?? null
       },
     })
     printTask(t)
@@ -439,6 +491,8 @@ const commands = {
           t.soldier = null
           t.claimedAt = null
           t.claimedRound = null
+          t.expiresAt = null
+          t.claimRequestId = null
         }
         if (args.to === 'done') {
           if (t.status !== 'in_review') {
@@ -535,28 +589,60 @@ const commands = {
         t.soldier = null
         t.claimedAt = null
         t.claimedRound = null
+        t.expiresAt = null
+        t.claimRequestId = null
         t.comments.push({ by: args.by, at: now(), text: args.reason ?? `归还（由 ${args.by} 释放）` })
       },
     })
     printTask(t)
   },
 
-  /** 守护批量回收：认领超过 --older-than 分钟无进展的 in_progress 任务释放回 todo */
+  /**
+   * 转派：把任务的负责士兵改成另一个（todo/in_progress/in_review/backlog 可转）。
+   * 不改状态机（仍是 withLock 的一次绑定变更），只记录归属变更与说明。
+   */
+  reassign(args) {
+    requireArgs(args, ['soldier'])
+    const id = requireId(args)
+    const by = args.by ?? 'general'
+    const t = withLock({
+      id,
+      ifVersion: args.ifVersion,
+      mutate(t) {
+        if (['done', 'canceled'].includes(t.status)) throw new Error(`任务 ${t.id} 已 ${t.status}，不可转派`)
+        if (t.soldier === args.soldier) throw new Error(`任务 ${t.id} 已由 ${args.soldier} 负责，无需转派`)
+        const prev = t.soldier ?? '（未分配）'
+        t.soldier = args.soldier
+        t.comments.push({ by, at: now(), text: `转派：${prev} → ${args.soldier}（由 ${by}）` })
+      },
+    })
+    printTask(t)
+  },
+
+  /** 守护批量回收：认领超过 --older-than 分钟无进展、或已过 expiresAt 的 in_progress 任务释放回 todo */
   'release-stale'(args) {
     const minutes = Number(args.olderThan ?? 60)
     const by = args.by ?? 'daemon'
     if (!Number.isFinite(minutes) || minutes <= 0) throw new Error('--older-than 必须是正整数分钟数')
     const released = transact(db => {
       const cutoff = Date.now() - minutes * 60_000
+      const nowMs = Date.now()
       const released = []
       for (const t of Object.values(db.tasks)) {
         if (t.status !== 'in_progress' || t.claimedAt === null) continue
-        if (new Date(t.claimedAt).getTime() > cutoff) continue
+        const staleByAge = new Date(t.claimedAt).getTime() <= cutoff
+        const staleByTtl = t.expiresAt !== null && t.expiresAt !== undefined && new Date(t.expiresAt).getTime() <= nowMs
+        if (!staleByAge && !staleByTtl) continue
+        const reason = staleByTtl
+          ? `守护检测到任务已过 TTL（expiresAt=${t.expiresAt}），自动释放回 todo`
+          : `守护检测到认领超过 ${minutes} 分钟无进展，自动释放回 todo`
         t.status = 'todo'
         t.soldier = null
         t.claimedAt = null
         t.claimedRound = null
-        t.comments.push({ by, at: now(), text: `守护检测到认领超过 ${minutes} 分钟无进展，自动释放回 todo` })
+        t.expiresAt = null
+        t.claimRequestId = null
+        t.comments.push({ by, at: now(), text: reason })
         t.version += 1
         t.updatedAt = now()
         released.push(t.id)
@@ -615,6 +701,8 @@ const commands = {
         t.soldier = null
         t.claimedAt = null
         t.claimedRound = null
+        t.expiresAt = null
+        t.claimRequestId = null
         t.comments.push({
           by: args.by,
           at: now(),

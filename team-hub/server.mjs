@@ -25,7 +25,8 @@
 import http from 'node:http'
 import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { createHash } from 'node:crypto'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -63,6 +64,9 @@ db.exec(`
     soldier TEXT,
     claimedRound INTEGER,
     claimedAt TEXT,
+    ttlMinutes INTEGER,
+    expiresAt TEXT,
+    claimRequestId TEXT,
     ordersVersion INTEGER DEFAULT 1,
     parent TEXT,
     role TEXT,
@@ -106,10 +110,25 @@ db.exec(`
     owner TEXT,
     grants TEXT DEFAULT '[]',
     version INTEGER NOT NULL DEFAULT 1,
+    status TEXT DEFAULT 'pending',
+    contentHash TEXT DEFAULT '',
+    reviewedAt TEXT,
     createdAt TEXT,
     updatedAt TEXT
   )
 `)
+// 老库迁移：skills 表先于 status/contentHash/reviewedAt 三列存在，缺列补上。
+function ensureColumn(table, column, ddl) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all()
+  if (!cols.some(c => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`)
+}
+ensureColumn('skills', 'status', "status TEXT DEFAULT 'pending'")
+ensureColumn('skills', 'contentHash', "contentHash TEXT DEFAULT ''")
+ensureColumn('skills', 'reviewedAt', 'reviewedAt TEXT')
+// 任务 TTL/幂等/转派列（老 tasks 表补齐）
+ensureColumn('tasks', 'ttlMinutes', 'ttlMinutes INTEGER')
+ensureColumn('tasks', 'expiresAt', 'expiresAt TEXT')
+ensureColumn('tasks', 'claimRequestId', 'claimRequestId TEXT')
 
 let nextSeq = 1
 try {
@@ -216,35 +235,68 @@ function touchMember(member, scope, kind) {
   `).run(member, scope, kind, now())
 }
 
-// ── 技能（scope-owned + grant，借鉴 QM shared skills）──
+// ── 技能（scope-owned + grant + 版本/review，借鉴 QM shared skills + RFC-032）──
+function skillContentHash(s) {
+  return createHash('sha256').update(JSON.stringify({
+    name: s.name, description: s.description ?? '', prompt: s.prompt ?? '', scope: s.scope ?? 'default',
+  })).digest('hex')
+}
+
 function getSkill(id) {
   const row = db.prepare('SELECT * FROM skills WHERE id = ?').get(id)
   if (!row) throw new Error(`未知技能 ${id}`)
   return { ...row, grants: parseJson(row.grants, []) }
 }
 
+/**
+ * 提交技能：同 (id, content) 幂等（返回已有行，不 bump version）；
+ * 内容变化 → version+1 并回 pending 待复审；新技能 → pending。
+ * 提交不自动发布：发布须经 reviewSkill。
+ */
 function registerSkill(input) {
   return withTx(() => {
     const id = input.id
     if (typeof id !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(id)) {
       throw new Error('技能 id 非法：小写字母/数字开头，可含连字符，≤64 字符')
     }
-    const existing = db.prepare('SELECT id FROM skills WHERE id = ?').get(id)
+    const name = input.name
+    const description = input.description ?? ''
+    const prompt = input.prompt ?? ''
+    const scope = input.scope ?? 'default'
+    const hash = skillContentHash({ name, description, prompt, scope })
+    const existing = db.prepare('SELECT * FROM skills WHERE id = ?').get(id)
     if (existing) {
-      db.prepare('UPDATE skills SET name=?, description=?, prompt=?, scope=?, version=version+1, updatedAt=? WHERE id=?')
-        .run(input.name, input.description ?? '', input.prompt ?? '', input.scope ?? 'default', now(), id)
+      if (existing.contentHash === hash) return getSkill(id) // 幂等：同内容重复提交不产生新版本
+      db.prepare('UPDATE skills SET name=?, description=?, prompt=?, scope=?, version=version+1, status=\'pending\', contentHash=?, reviewedAt=NULL, updatedAt=? WHERE id=?')
+        .run(name, description, prompt, scope, hash, now(), id)
     } else {
-      db.prepare('INSERT INTO skills (id, name, description, prompt, scope, owner, grants, version, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)')
-        .run(id, input.name, input.description ?? '', input.prompt ?? '', input.scope ?? 'default', input.owner ?? null, '[]', now(), now())
+      db.prepare('INSERT INTO skills (id, name, description, prompt, scope, owner, grants, version, status, contentHash, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, 1, \'pending\', ?, ?, ?)')
+        .run(id, name, description, prompt, scope, input.owner ?? null, '[]', hash, now(), now())
     }
     return getSkill(id)
   })
 }
 
-function listSkills({ scope, member } = {}) {
+/** 复审技能：pending → published | rejected。只有 pending 可审。 */
+function reviewSkill(id, action) {
+  return withTx(() => {
+    if (action !== 'publish' && action !== 'reject') throw new Error('action 必须是 publish 或 reject')
+    const s = getSkill(id)
+    if (s.status !== 'pending') throw new Error(`技能 ${id} 当前 ${s.status}，只有 pending 可审`)
+    db.prepare('UPDATE skills SET status=?, reviewedAt=?, updatedAt=? WHERE id=?').run(action === 'publish' ? 'published' : 'rejected', now(), now(), id)
+    return getSkill(id)
+  })
+}
+
+/**
+ * 列出技能。默认只返回 published（守护/士兵只该拿到已发布的）；
+ * `includePending=true` 供复审者查看待审/被拒。
+ */
+function listSkills({ scope, member, includePending } = {}) {
   const rows = db.prepare('SELECT * FROM skills ORDER BY id').all()
   return rows.map((r) => ({ ...r, grants: parseJson(r.grants, []) }))
     .filter((s) => {
+      if (includePending !== true && s.status !== 'published') return false
       if (scope === undefined && member === undefined) return true
       const inScope = scope !== undefined && s.scope === scope
       const granted = member !== undefined && (s.grants.includes(member) || (scope !== undefined && s.grants.includes(`scope:${scope}`)))
@@ -256,7 +308,7 @@ function grantSkill(id, grants) {
   return withTx(() => {
     const s = getSkill(id)
     const merged = [...new Set([...s.grants, ...grants])]
-    db.prepare('UPDATE skills SET grants=?, version=version+1, updatedAt=? WHERE id=?').run(JSON.stringify(merged), now(), id)
+    db.prepare('UPDATE skills SET grants=?, updatedAt=? WHERE id=?').run(JSON.stringify(merged), now(), id)
     return getSkill(id)
   })
 }
@@ -301,18 +353,25 @@ function createTask(input) {
   })
 }
 
-function claimTask(id, soldier, ifVersion, force, round) {
+function claimTask(id, soldier, ifVersion, force, round, requestId, ttlMinutes) {
   return withTx(() => {
     const t = getTask(id)
     if (ifVersion !== undefined) {
       if (!Number.isInteger(ifVersion)) throw new Error(`ifVersion 必须是整数`)
       if (t.version !== ifVersion) throw new Error(`乐观锁冲突：任务 ${id} 当前 version=${t.version}，你期望 ${ifVersion}`)
     }
+    // 幂等命中：同 request-id + 同士兵 + 已 in_progress → 视为上次认领已生效，不重复写
+    if (requestId !== undefined && t.claimRequestId === requestId && t.soldier === soldier && t.status === 'in_progress') {
+      return t
+    }
     if (t.soldier !== null && t.soldier !== soldier) throw new Error(`任务 ${t.id} 已被 ${t.soldier} 认领，不得抢占`)
     if (t.status !== 'todo' && t.status !== 'blocked') throw new Error(`无法认领：任务 ${t.id} 当前 ${t.status}`)
     assertUnblocked(t, force)
-    db.prepare('UPDATE tasks SET status=\'in_progress\', soldier=?, claimedRound=?, claimedAt=?, version=version+1, updatedAt=? WHERE id=?')
-      .run(soldier, round ?? null, now(), now(), id)
+    const at = now()
+    const ttl = ttlMinutes !== undefined ? ttlMinutes : t.ttlMinutes
+    const expires = ttl !== null && ttl !== undefined ? new Date(new Date(at).getTime() + ttl * 60_000).toISOString() : null
+    db.prepare('UPDATE tasks SET status=\'in_progress\', soldier=?, claimedRound=?, claimedAt=?, ttlMinutes=?, expiresAt=?, claimRequestId=?, version=version+1, updatedAt=? WHERE id=?')
+      .run(soldier, round ?? null, at, ttl ?? null, expires, requestId ?? null, now(), id)
     return getTask(id)
   })
 }
@@ -367,6 +426,54 @@ function commentTask(id, by, text, isEvidence) {
     db.prepare(`UPDATE tasks SET ${field}=?, version=version+1, updatedAt=? WHERE id=?`).run(JSON.stringify(list), now(), id)
     return getTask(id)
   })
+}
+
+// ── 转派 / 租约回收 / 离线 inbox ──
+function reassignTask(id, soldier, by) {
+  return withTx(() => {
+    const t = getTask(id)
+    if (t.status === 'done' || t.status === 'canceled') throw new Error(`任务 ${id} 已 ${t.status}，不可转派`)
+    if (t.soldier === soldier) throw new Error(`任务 ${id} 已由 ${soldier} 负责，无需转派`)
+    const prev = t.soldier ?? '（未分配）'
+    const comments = parseJson(t.comments, [])
+    comments.push({ by, at: now(), text: `转派：${prev} → ${soldier}（由 ${by}）` })
+    db.prepare('UPDATE tasks SET soldier=?, comments=?, version=version+1, updatedAt=? WHERE id=?').run(soldier, JSON.stringify(comments), now(), id)
+    return getTask(id)
+  })
+}
+
+/** 守护批量回收：认领超过 olderThan 分钟无进展、或已过 expiresAt 的 in_progress 任务释放回 todo。 */
+function releaseStaleTasks(olderThanMinutes, by) {
+  return withTx(() => {
+    const cutoff = Date.now() - olderThanMinutes * 60_000
+    const nowMs = Date.now()
+    const rows = db.prepare("SELECT id, claimedAt, expiresAt FROM tasks WHERE status='in_progress' AND claimedAt IS NOT NULL").all()
+    const released = []
+    for (const r of rows) {
+      const staleByAge = new Date(r.claimedAt).getTime() <= cutoff
+      const staleByTtl = r.expiresAt !== null && r.expiresAt !== undefined && new Date(r.expiresAt).getTime() <= nowMs
+      if (!staleByAge && !staleByTtl) continue
+      const reason = staleByTtl ? `守护检测到任务已过 TTL（expiresAt=${r.expiresAt}），自动释放回 todo` : `守护检测到认领超过 ${olderThanMinutes} 分钟无进展，自动释放回 todo`
+      const t = getTask(r.id)
+      const comments = parseJson(t.comments, [])
+      comments.push({ by, at: now(), text: reason })
+      db.prepare('UPDATE tasks SET status=\'todo\', soldier=NULL, claimedAt=NULL, claimedRound=NULL, ttlMinutes=NULL, expiresAt=NULL, claimRequestId=NULL, comments=?, version=version+1, updatedAt=? WHERE id=?')
+        .run(JSON.stringify(comments), now(), r.id)
+      released.push(r.id)
+    }
+    return released
+  })
+}
+
+/** 离线 inbox：某士兵/角色名下待处理（todo/blocked 未认领）任务计数与 id 列表。 */
+function inboxCount({ role, soldier, scope }) {
+  const conds = ["status IN ('todo','blocked')", 'soldier IS NULL']
+  const params = {}
+  if (role !== undefined) { conds.push('role = :role'); params.role = role }
+  if (soldier !== undefined) { conds.push('role = :soldier'); params.soldier = soldier }
+  if (scope !== undefined) { conds.push('scope = :scope'); params.scope = scope }
+  const rows = db.prepare(`SELECT id, status FROM tasks WHERE ${conds.join(' AND ')} ORDER BY id`).all(params)
+  return { count: rows.length, tasks: rows }
 }
 
 // ── SSE ──
@@ -455,7 +562,8 @@ async function handle(req, res) {
         const id = body.id
         if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
         const soldier = typeof body.soldier === 'string' && body.soldier.length > 0 ? body.soldier : by
-        const task = claimTask(id, soldier, body.ifVersion, body.force === true, body.round)
+        const ttl = typeof body.ttlMinutes === 'number' && Number.isInteger(body.ttlMinutes) && body.ttlMinutes > 0 ? body.ttlMinutes : undefined
+        const task = claimTask(id, soldier, body.ifVersion, body.force === true, body.round, body.requestId, ttl)
         audit(by, scope, 'claim', id, { soldier })
         return task
       })
@@ -481,6 +589,40 @@ async function handle(req, res) {
         audit(by, scope, 'advance', id, {})
         return task
       })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/reassign') {
+      await handleWrite(req, res, (body, by, scope) => {
+        const id = body.id
+        const soldier = body.soldier
+        if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
+        if (typeof soldier !== 'string' || soldier.trim().length === 0) throw new Error('缺少参数 soldier')
+        const task = reassignTask(id, soldier.trim(), by)
+        audit(by, scope, 'reassign', id, { soldier: soldier.trim() })
+        return task
+      })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/release-stale') {
+      await handleWrite(req, res, (body, by, scope) => {
+        const minutes = Number(body.olderThan ?? 60)
+        if (!Number.isFinite(minutes) || minutes <= 0) throw new Error('olderThan 必须是正整数分钟数')
+        const released = releaseStaleTasks(minutes, by)
+        audit(by, scope, 'release-stale', '*', { released })
+        return { released }
+      })
+      return
+    }
+    if (req.method === 'GET' && path === '/api/inbox') {
+      try {
+        const scopeParam = url.searchParams.get('scope') ?? undefined
+        const role = url.searchParams.get('role') ?? undefined
+        const soldier = url.searchParams.get('soldier') ?? undefined
+        if (role === undefined && soldier === undefined) throw new Error('inbox 需要 role 或 soldier 参数')
+        json(res, 200, inboxCount({ role, soldier, scope: scopeParam }))
+      } catch (e) {
+        json(res, 400, { error: e instanceof Error ? e.message : String(e) })
+      }
       return
     }
     if (req.method === 'POST' && path === '/api/comment') {
@@ -542,7 +684,19 @@ async function handle(req, res) {
           id: id.trim(), name: name.trim(), description: body.description,
           prompt: body.prompt, scope: body.scope ?? scope, owner: by,
         })
-        audit(by, scope, 'skill:register', id, { name: skill.name })
+        audit(by, scope, 'skill:submit', id, { name: skill.name, version: skill.version })
+        return skill
+      })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/skills/review') {
+      await handleWrite(req, res, (body, by, scope) => {
+        const id = body.id
+        const action = body.action
+        if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
+        if (typeof action !== 'string' || action.length === 0) throw new Error('缺少参数 action')
+        const skill = reviewSkill(id, action)
+        audit(by, scope, 'skill:review', id, { action, status: skill.status })
         return skill
       })
       return
@@ -563,7 +717,13 @@ async function handle(req, res) {
       const skillId = url.searchParams.get('id')
       if (skillId) {
         try {
-          json(res, 200, getSkill(skillId))
+          const s = getSkill(skillId)
+          // 未发布且非复审视角 → 对普通成员按「不存在」处理，不泄露待审内容
+          if (s.status !== 'published' && url.searchParams.get('include') !== 'pending') {
+            json(res, 404, { error: `skill_not_found: ${skillId}` })
+            return
+          }
+          json(res, 200, s)
         } catch (e) {
           json(res, 404, { error: e instanceof Error ? e.message : String(e) })
         }
@@ -572,6 +732,7 @@ async function handle(req, res) {
       json(res, 200, listSkills({
         scope: url.searchParams.get('scope') ?? undefined,
         member: url.searchParams.get('member') ?? undefined,
+        includePending: url.searchParams.get('include') === 'pending',
       }))
       return
     }
@@ -603,6 +764,13 @@ async function handle(req, res) {
 const server = http.createServer((req, res) => {
   void handle(req, res)
 })
-server.listen(PORT, HOST, () => {
-  console.log(`[team-hub] v2 独立服务已启动：http://${HOST}:${PORT}（db=${DB_FILE}，鉴权=${TOKEN !== '' ? 'on' : 'off'}）`)
-})
+
+// 直接运行（node server.mjs）才监听；被 import 时（测试/复用）不占端口。
+const isMain = process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+if (isMain) {
+  server.listen(PORT, HOST, () => {
+    console.log(`[team-hub] v2 独立服务已启动：http://${HOST}:${PORT}（db=${DB_FILE}，鉴权=${TOKEN !== '' ? 'on' : 'off'}）`)
+  })
+}
+
+export { db, registerSkill, reviewSkill, listSkills, grantSkill, getSkill }

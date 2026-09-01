@@ -44,6 +44,8 @@ export interface Config {
   workerTimeoutMs: number
   /** 认领租约：in_progress 认领超过该分钟数无进展则由守护释放回 todo（须 > workerTimeoutMs/60000）。 */
   staleMinutes: number
+  /** 任务级 TTL（分钟）：认领后超时未完成即由守护释放回 todo（0 = 不设 TTL，靠 staleMinutes 兜底）。 */
+  taskTtlMinutes: number
   /** ctx.subagents 上注册的 provider 名（spawn-in-process 默认注册为 spawn）。 */
   provider: string
   /** legion/scrum 目录（taskctl.mjs 所在）。 */
@@ -75,6 +77,7 @@ export const Config = z.object({
   maxWorkers: z.number().min(1).max(8).default(1),
   workerTimeoutMs: z.number().min(60000).default(600000),
   staleMinutes: z.number().min(5).default(30),
+  taskTtlMinutes: z.number().min(0).default(0),
   provider: z.string().default('spawn'),
   scrumDir: z.string().default('D:/project/dsh/legion/scrum'),
   workspace: z.string().default('D:/project/dsh'),
@@ -418,12 +421,18 @@ export function apply(ctx: AppContext, config: Config): void {
     }
   }
 
-  /** 认领任务（hub 或本地）。 */
+  /** 认领任务（hub 或本地）。带幂等 request-id（同守护同任务稳定），可选 TTL。 */
   async function claimTask(id: string, soldier: string): Promise<void> {
+    const requestId = `daemon:${config.role}:${id}`
     if (useHub) {
-      await hubPost('/api/claim', { id, soldier, by: config.role, scope: scope })
+      await hubPost('/api/claim', {
+        id, soldier, by: config.role, scope: scope, requestId,
+        ...(config.taskTtlMinutes > 0 ? { ttlMinutes: config.taskTtlMinutes } : {}),
+      })
     } else {
-      await runTaskctl(config.scrumDir, ['claim', id, '--soldier', soldier])
+      const argv = ['claim', id, '--soldier', soldier, '--request-id', requestId]
+      if (config.taskTtlMinutes > 0) argv.push('--ttl-minutes', String(config.taskTtlMinutes))
+      await runTaskctl(config.scrumDir, argv)
     }
   }
 
@@ -939,6 +948,11 @@ exit 0
       const self = (t: Task) => (isPipeline ? (t.role ?? config.role) : config.role)
       const isOurs = (t: Task) => (isPipeline ? (t.role !== null && stageByRole.has(t.role)) : t.soldier === config.role)
       const stageOf = (t: Task) => (isPipeline ? stageByRole.get(t.role ?? '') : undefined)
+
+      // 离线 inbox 计数：本守护名下待认领（todo/blocked 未认领）任务，每轮汇报一次
+      const isOurInbox = (t: Task) => (isPipeline ? (t.role !== null && stageByRole.has(t.role)) : true)
+      const inboxIds = tasks.filter(t => (t.status === 'todo' || t.status === 'blocked') && (t.soldier === null || t.soldier === undefined) && isOurInbox(t))
+      if (inboxIds.length > 0) log(`inbox=${inboxIds.length}（${inboxIds.map(t => t.id).join(', ')}）`)
 
       // 0. 认领租约回收：释放超过 staleMinutes 无进展的 in_progress 任务（下一轮再认领）
       try {

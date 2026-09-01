@@ -199,6 +199,7 @@ export function apply(ctx: Context, config: Config): void {
           if (typeof body.priority === 'string' && body.priority.length > 0) argv.push('--priority', body.priority)
           if (typeof body.parent === 'string' && body.parent.length > 0) argv.push('--parent', body.parent)
           if (typeof body.status === 'string' && body.status.length > 0) argv.push('--status', body.status)
+          if (typeof body.ttlMinutes === 'number') argv.push('--ttl-minutes', String(body.ttlMinutes))
           void by
           return runTaskctl(argv)
         })
@@ -213,7 +214,22 @@ export function apply(ctx: Context, config: Config): void {
           const argv = ['claim', id, '--soldier', soldier]
           if (typeof body.round === 'number') argv.push('--round', String(body.round))
           if (typeof body.ifVersion === 'number') argv.push('--if-version', String(body.ifVersion))
+          if (typeof body.requestId === 'string' && body.requestId.length > 0) argv.push('--request-id', body.requestId)
+          if (typeof body.ttlMinutes === 'number') argv.push('--ttl-minutes', String(body.ttlMinutes))
           if (body.force === true) argv.push('--force')
+          return runTaskctl(argv)
+        })
+        return
+      }
+
+      if (req.method === 'POST' && path === '/api/reassign') {
+        await handleWrite(req, res, async (body, by) => {
+          const id = body.id
+          const soldier = body.soldier
+          if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
+          if (typeof soldier !== 'string' || soldier.trim().length === 0) throw new Error('缺少参数 soldier')
+          const argv = ['reassign', id, '--soldier', soldier.trim(), '--by', by]
+          if (typeof body.ifVersion === 'number') argv.push('--if-version', String(body.ifVersion))
           return runTaskctl(argv)
         })
         return
@@ -329,6 +345,25 @@ export function apply(ctx: Context, config: Config): void {
           clearInterval(heartbeat)
           eventClients.delete(res)
         })
+        return
+      }
+
+      if (req.method === 'GET' && path === '/api/inbox') {
+        const role = url.searchParams.get('role')
+        const soldier = url.searchParams.get('soldier')
+        if (role === null && soldier === null) {
+          json(res, 400, { error: 'inbox 需要 role 或 soldier 参数' })
+          return
+        }
+        const argv = ['inbox']
+        if (role !== null) argv.push('--role', role)
+        if (soldier !== null) argv.push('--soldier', soldier)
+        if (url.searchParams.get('scope')) argv.push('--scope', url.searchParams.get('scope') as string)
+        try {
+          json(res, 200, await runTaskctl(argv))
+        } catch (e) {
+          json(res, 500, { error: e instanceof Error ? e.message : String(e) })
+        }
         return
       }
 

@@ -55,6 +55,7 @@ link_pkg @deepseek-ai/dsh-llm packages/llm/llm
 link_pkg @deepseek-ai/dsh-system-prompt packages/core/system-prompt
 link_pkg @deepseek-ai/dsh-agent packages/core/agent
 link_pkg @deepseek-ai/dsh-agent-default-model packages/core/agent-default-model
+link_pkg @deepseek-ai/dsh-agent-presets packages/preset/agent-presets
 link_pkg @deepseek-ai/dsh-session packages/core/session
 link_pkg @deepseek-ai/dsh-subagent packages/subagent/subagent
 # @types/node（编译类型；checkout 自带）

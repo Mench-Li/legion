@@ -217,6 +217,7 @@ worker 是一次性 subagent，父为按 cwd 惰性创建的 foreman agent。wor
 | `workerTimeoutMs` | `600000` | 单 worker 超时（毫秒，≥60000） |
 | `staleMinutes` | `30` | 认领租约（分钟，≥5，须 > workerTimeoutMs/60000） |
 | `provider` | `spawn` | ctx.subagents 上的 provider 名 |
+| `agentPreset` | `code` | foreman 使用的 agent preset；worker 继承其中的文件、终端等工具与提示词 |
 | `scrumDir` | `D:/project/dsh/legion/scrum` | taskctl.mjs 所在目录 |
 | `workspace` | `D:/project/dsh` | worker 工作目录（isolate=false 时用） |
 | `isolate` | `true` | 是否用 git worktree 隔离每个任务 |

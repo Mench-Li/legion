@@ -19,6 +19,7 @@ scrum/discussion/
 
 # 守护 worktree 隔离目录
 .legion-worktrees/
+.worktrees/
 
 # 日志与系统文件
 *.log

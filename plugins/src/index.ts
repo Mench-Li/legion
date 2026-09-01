@@ -23,15 +23,17 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import type { ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
+import type AgentPresets from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 
 type AppContext = Context & {
   subagents: SubagentRuntime
+  agentPresets: AgentPresets
   setInterval(fn: () => void, ms: number): any
 }
 
 export const name = '@dsh-external/dsh-scrum-worker'
-export const inject = ['timer', 'agents', 'subagents', 'agentDefaultModel']
+export const inject = ['timer', 'agents', 'subagents', 'agentDefaultModel', 'agentPresets']
 
 export interface Config {
   /** 守护士兵身份：认领与提交验收时使用的角色名。 */
@@ -48,6 +50,8 @@ export interface Config {
   taskTtlMinutes: number
   /** ctx.subagents 上注册的 provider 名（spawn-in-process 默认注册为 spawn）。 */
   provider: string
+  /** foreman 使用的 agent preset；worker 子 agent 会继承其工具与提示词。 */
+  agentPreset: string
   /** legion/scrum 目录（taskctl.mjs 所在）。 */
   scrumDir: string
   /** worker 工作目录（仓库根，isolate=false 时使用）。 */
@@ -79,6 +83,7 @@ export const Config = z.object({
   staleMinutes: z.number().min(5).default(30),
   taskTtlMinutes: z.number().min(0).default(0),
   provider: z.string().default('spawn'),
+  agentPreset: z.string().default('code'),
   scrumDir: z.string().default('D:/project/dsh/legion/scrum'),
   workspace: z.string().default('D:/project/dsh'),
   isolate: z.boolean().default(true),
@@ -378,6 +383,7 @@ export function apply(ctx: AppContext, config: Config): void {
         sessionId: SessionId(`scrum-worker-foreman-${hashStr(cwd)}`),
         meta: { cwd },
         agentOptions: { provider: selection.provider, model: selection.model },
+        setup: async (agentCtx: Context) => void await ctx.agentPresets.mount(agentCtx, config.agentPreset),
       })
       foremen.set(cwd, { agent: handle.agent, dispose: () => handle.dispose() })
       log(`foreman 就绪：${handle.agent.session.id}（cwd=${cwd}，model=${selection.provider}/${selection.model}）`)
@@ -948,6 +954,11 @@ exit 0
       const self = (t: Task) => (isPipeline ? (t.role ?? config.role) : config.role)
       const isOurs = (t: Task) => (isPipeline ? (t.role !== null && stageByRole.has(t.role)) : t.soldier === config.role)
       const stageOf = (t: Task) => (isPipeline ? stageByRole.get(t.role ?? '') : undefined)
+      const runDetached = (taskId: string, job: Promise<void>): void => {
+        void job
+          .catch(e => log(`${taskId} 后台派工异常：${String(e)}`))
+          .finally(() => inflight.delete(taskId))
+      }
 
       // 离线 inbox 计数：本守护名下待认领（todo/blocked 未认领）任务，每轮汇报一次
       const isOurInbox = (t: Task) => (isPipeline ? (t.role !== null && stageByRole.has(t.role)) : true)
@@ -968,7 +979,7 @@ exit 0
         if (isPipeline && stageOf(t) === undefined && t.role !== 'discussion') continue // 流水线模式跳过无角色/未知角色任务
         inflight.add(t.id)
         const job = t.role === 'discussion' ? runDiscussion(t) : workTodo(t, stageOf(t))
-        void job.finally(() => inflight.delete(t.id))
+        runDetached(t.id, job)
       }
       // 2. blocked 且本角色、依赖已全部解除：解阻续做
       for (const t of tasks.filter(t => t.status === 'blocked' && isOurs(t))) {
@@ -979,7 +990,7 @@ exit 0
         })
         if (open.length > 0) continue
         inflight.add(t.id)
-        void workReturned(t, [], stageOf(t)).finally(() => inflight.delete(t.id))
+        runDetached(t.id, workTodo(t, stageOf(t)))
       }
       // 3. in_progress 且本角色、认领后有他人评论：视为退回，附反馈纠错
       for (const t of tasks.filter(t => t.status === 'in_progress' && isOurs(t))) {
@@ -988,7 +999,7 @@ exit 0
           c.by !== self(t) && (t.claimedAt === null || new Date(c.at) > new Date(t.claimedAt)))
         if (feedback.length === 0) continue
         inflight.add(t.id)
-        void workReturned(t, feedback, stageOf(t)).finally(() => inflight.delete(t.id))
+        runDetached(t.id, workReturned(t, feedback, stageOf(t)))
       }
     } finally {
       sweeping = false

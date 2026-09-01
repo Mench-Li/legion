@@ -248,6 +248,21 @@ export function apply(ctx: Context, config: Config): void {
         return
       }
 
+      if (req.method === 'POST' && path === '/api/artifact') {
+        await handleWrite(req, res, async (body, by) => {
+          const id = body.id
+          const kind = body.kind
+          const path = body.path
+          if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
+          if (typeof kind !== 'string' || !['html', 'file', 'url'].includes(kind)) throw new Error('非法 kind（html|file|url）')
+          if (typeof path !== 'string' || path.length === 0) throw new Error('缺少参数 path')
+          const argv = ['artifact', id, '--by', by, '--kind', kind, '--path', path]
+          if (typeof body.title === 'string' && body.title.length > 0) argv.push('--title', body.title)
+          return runTaskctl(argv)
+        })
+        return
+      }
+
       if (req.method === 'POST' && path === '/api/transition') {
         await handleWrite(req, res, async (body, by) => {
           const id = body.id

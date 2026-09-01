@@ -290,6 +290,7 @@ const commands = {
         comments: [],
         evidence: [],
         patches: [],
+        artifacts: [],
         progress: [],
         createdAt: now(),
         updatedAt: now(),
@@ -361,6 +362,7 @@ const commands = {
         comments: [],
         evidence: [],
         patches: [],
+        artifacts: [],
         progress: [],
         createdAt: now(),
         updatedAt: now(),
@@ -560,6 +562,23 @@ const commands = {
       ifVersion: args.ifVersion,
       mutate(t) {
         t.evidence.push({ by: args.by, at: now(), text: args.text })
+      },
+    })
+    printTask(t)
+  },
+
+  /** 登记产物（worker 完成时写；看板详情据此预览 html / 链接文件）。kind: html|file|url */
+  artifact(args) {
+    requireArgs(args, ['by', 'kind', 'path'])
+    const id = requireId(args)
+    const kind = args.kind
+    if (!['html', 'file', 'url'].includes(kind)) throw new Error(`非法 kind ${kind}（html|file|url）`)
+    const t = withLock({
+      id,
+      ifVersion: args.ifVersion,
+      mutate(t) {
+        if (!Array.isArray(t.artifacts)) t.artifacts = []
+        t.artifacts.push({ kind, title: args.title ?? '', path: args.path, by: args.by, at: now() })
       },
     })
     printTask(t)

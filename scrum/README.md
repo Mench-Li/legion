@@ -101,6 +101,13 @@ curl -X POST http://127.0.0.1:4820/api/comment -H "Authorization: Bearer <t>" -H
 - **进度心跳**：士兵/守护用 `taskctl progress <id> --by <角色> --percent <0-100> --note <一句话>` 上报进度（借鉴 agent-network 的 `report_status`）。它是 **append-only 遥测**：不 bump `version`、不改 `updatedAt`，避免与状态迁移的乐观锁互相干扰。看板每张卡显示最新进度条（`board.json` 卡片带 `progress` 字段，`kanban.html` 渲染百分比 + note）。守护在 `claim` 后写 `0% 认领开工`、派工后写 `10% 已派工`（本地模式直接调 taskctl，hub 模式走 `POST /api/progress`）。
 - **守护能力自述**：守护每轮扫单结束把自身状态写入 `scrum/daemon.json`（角色/并发/隔离/超时/scope/流水线阶段/当前模型/inbox 计数/本轮时间/uptime）。看板 `GET /api/daemon` 直接返回该文件，`GET /api/config` 附带 `pipeline`（roles.json 阶段）与 `daemon`——将军/用户随时能确认"守护活着吗、在跑哪个流水线、当前用哪个模型"。新增一个守护节点 = 在 `cordis.patch.yml` 加一个 worker 插件配置（`role`/`intervalMs`/`scrumDir` 等），重启后 `daemon.json` 出现即自述成功。
 
+### 军团总指挥部 / 产物挂载 / 待决发光 / 动态预览（借鉴 dsh-worktable）
+
+- **🖥 军团总指挥部（`console.html`，看板右上角入口）**：借鉴 dsh-worktable 控制室的「节点 + 任务实时总览」——顶部守护状态条（角色/模型/流水线/并发/inbox/uptime/最近扫单），三列卡片（⚡ 工作中 / ⏳ 待你决定 = in_review+blocked / ✅ 已完成），每卡带运行时长、进度条、最近评论预览，底部滚动最近动态。数据源 = `daemon.json` + `board.json` + `activity.jsonl`，经 `board/events` SSE + 轮询驱动，**纯 UI、零 Token**。board-plugin 挂在 `/scrum-board/console`，serve.mjs 挂在 `/console.html`。
+- **📦 产物自动挂载**：借鉴 dsh-worktable 的 `widget-result.json` 握手——worker 完成时可在 JSON 报告里带 `artifact: {kind:'html'|'file'|'url', path, title}`；守护校验文件存在后 `taskctl artifact <id> --kind --path --title` 登记（hub 模式走 `POST /api/artifact`）。看板卡片显示「📦N 产物」徽标，详情页最新 html 产物直接 **iframe 预览**、file 下载链接、url 跳转。预览端点 `GET /api/artifact?task=<id>[&raw=1]` **只读 tasks.json 里的登记路径**（不读查询串），并做**根白名单校验**（仅 repoRoot + 配置的 `artifactRoots`，防任意文件读取）。
+- **✨ 待决发光 + ack**：借鉴 dsh-worktable 的 done/need 提醒镜像——卡片按状态发光（in_review 黄「待你决定」/ blocked 红 / done 绿 / in_progress 蓝），点开详情即 **ack**（localStorage `legion.notifyAck.v1`，同状态不重复亮），状态转移后重新点亮。
+- **👁 卡片动态预览**：借鉴 dsh-worktable 的冷会话消息预览（带宽非 Token 成本）——卡片显示最近一条评论的清洗预览（去代码围栏、压缩空白、截断 80 字）。
+
 ## 四项加固（隔离 / 动态流 / 租约 / 依赖环）
 
 1. **Git worktree 隔离**（守护 `isolate: true`）：每个任务建独立 worktree（分支 `w/<任务id>`，目录 `<repoRoot>/.legion-worktrees/<任务id>`），worker 在隔离目录干活，互不污染主工作树。完成后改动提交到 `w/<id>` 分支，**promote 显式**：验收通过后 `git -C <repoRoot> merge --no-ff w/<id>`；放弃则 `git -C <repoRoot> worktree remove --force <目录> && git -C <repoRoot> branch -D w/<id>`。守护同时安装公共 pre-push 守卫——`w/*` 分支一律禁止 push（防 worker 误推远程）。
@@ -180,6 +187,9 @@ node legion/scrum/taskctl.mjs release-stale --older-than 60 --by daemon
 node legion/scrum/taskctl.mjs progress T-001 --by soldier-a --percent 40 --note "实现中"
 node legion/scrum/taskctl.mjs inbox --role coder
 node legion/scrum/taskctl.mjs reassign T-001 --soldier soldier-b --by general
+
+# 产物登记（看板详情 iframe 预览 / 链接）
+node legion/scrum/taskctl.mjs artifact T-001 --by soldier-a --kind html --path "D:/legion/report.html" --title "验收报表"
 
 # 刷新看板
 node legion/scrum/render.mjs

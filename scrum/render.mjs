@@ -50,6 +50,28 @@ function progressOf(tasks) {
   return { total, done, percent: total === 0 ? 0 : Math.round((done / total) * 100) }
 }
 
+/**
+ * 清洗文本为短预览（借鉴 dsh-worktable 的 cleanPreviewText：带宽非 Token 成本）：
+ * 去掉 ``` 围栏与行内代码、压缩空白，截断到 max 字符。
+ */
+function cleanPreview(text, max = 80) {
+  const t = String(text ?? '')
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`[^`]*`/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return t.length > max ? t.slice(0, max - 1) + '…' : t
+}
+
+/** 状态 → 发光语义（借鉴 worktable 的 done/need/busy 提醒镜像）：in_review=待你决定(黄) > blocked=受阻(红) > done=完成(绿) > in_progress=工作中(蓝)。 */
+function glowOf(status) {
+  if (status === 'in_review') return 'need'
+  if (status === 'blocked') return 'danger'
+  if (status === 'done') return 'done'
+  if (status === 'in_progress') return 'busy'
+  return null
+}
+
 function buildBoard() {
   const tasks = readJson(TASKS_FILE, null)
   if (tasks === null) throw new Error(`tasks.json 不存在（${TASKS_FILE}）：先运行 taskctl init`)
@@ -70,6 +92,7 @@ function buildBoard() {
         role: card.role,
         soldier: card.soldier,
         claimedRound: card.claimedRound,
+        claimedAt: card.claimedAt,
         ordersVersion: card.ordersVersion,
         acceptance: card.acceptance,
         parent: card.parent,
@@ -77,8 +100,11 @@ function buildBoard() {
         blockedBy: card.blockedBy,
         version: card.version,
         comments: card.comments,
+        latestComment: ((c) => c ? { by: c.by, at: c.at, text: cleanPreview(c.text) } : null)((card.comments ?? []).slice(-1)[0]),
         evidence: card.evidence.length,
         patches: (card.patches ?? []).map(p => ({ id: p.id, at: p.at, by: p.by, summary: p.summary, files: p.files })),
+        artifacts: (card.artifacts ?? []).map(a => ({ kind: a.kind, title: a.title, path: a.path, at: a.at, by: a.by })),
+        glow: glowOf(card.status),
         progress: ((p) => {
           const last = (p ?? []).slice(-1)[0]
           return last ? { percent: last.percent, note: last.note, at: last.at, by: last.by } : null
@@ -199,6 +225,11 @@ function renderHtml(board) {
   .prog { margin-top: 6px; position: relative; height: 14px; background: #1a2237; border-radius: 7px; overflow: hidden; }
   .prog-bar { height: 100%; background: linear-gradient(90deg, #2563eb, #60a5fa); border-radius: 7px; }
   .prog-text { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 10px; color: #e6e9f0; }
+  .preview { margin-top: 6px; color: #7d8aa3; font-size: 11px; line-height: 1.4; max-height: 2.9em; overflow: hidden; }
+  .card.glow-need { outline: 2px solid #facc15; box-shadow: 0 0 10px rgba(250, 204, 21, .35); }
+  .card.glow-danger { outline: 2px solid #f87171; box-shadow: 0 0 10px rgba(248, 113, 113, .4); }
+  .card.glow-done { outline: 2px solid #4ade80; box-shadow: 0 0 8px rgba(74, 222, 128, .28); }
+  .card.glow-busy { outline: 2px solid #60a5fa; box-shadow: 0 0 8px rgba(96, 165, 250, .28); }
   .footer { margin-top: 6px; color: #5d6a85; font-size: 11px; display: flex; justify-content: space-between; }
   .footer button { background: none; border: none; color: #7d8aa3; cursor: pointer; font-size: 11px; padding: 0; }
   .footer button:hover { color: #e6e9f0; }
@@ -247,6 +278,7 @@ function renderHtml(board) {
     <button type="button" id="btn-create">＋ 新建任务</button>
     <button type="button" id="btn-token">🔑 令牌</button>
     <button type="button" id="btn-activity">⚡ 动态</button>
+    <a href="console.html" style="text-decoration:none"><button type="button" id="btn-console">🖥 总指挥部</button></a>
     <span class="hint" id="drag-hint"></span>
   </div>
   <div class="soldiers" id="soldiers"></div>
@@ -330,7 +362,7 @@ function renderHtml(board) {
   function card(c, status) {
     const canDrag = LIVE ? 'draggable="true"' : ''
     return \`
-    <div class="card \${esc(status)}" \${canDrag} data-id="\${esc(c.id)}" data-status="\${esc(status)}" data-detail="\${esc(c.id)}" style="cursor:pointer">
+    <div class="card \${esc(status)}" \${canDrag} data-id="\${esc(c.id)}" data-status="\${esc(status)}" data-glow="\${c.glow || ''}" data-detail="\${esc(c.id)}" style="cursor:pointer">
       <h3>\${esc(c.id)} · \${esc(c.title)}</h3>
       \${c.description ? \`<div style="color:#9aa6bd;margin:4px 0">\${esc(c.description.slice(0, 120))}\${c.description.length > 120 ? '…' : ''}</div>\` : ''}
       <div class="tags">
@@ -342,9 +374,11 @@ function renderHtml(board) {
         \${c.blockedBy.length ? \`<span class="tag">依赖:\${esc(c.blockedBy.join(','))}</span>\` : ''}
         \${c.evidence ? \`<span class="tag">✓\${c.evidence} 证据</span>\` : ''}
         \${c.patches && c.patches.length ? \`<span class="tag">📄\${c.patches.length} diff</span>\` : ''}
+        \${c.artifacts && c.artifacts.length ? \`<span class="tag">📦\${c.artifacts.length} 产物</span>\` : ''}
       </div>
       \${c.acceptance.length ? \`<ul class="acceptance">\${c.acceptance.map(a => \`<li>\${esc(a)}\</li>\`).join('')}</ul>\` : ''}
       \${c.progress ? \`<div class="prog"><div class="prog-bar" style="width:\${Math.max(0, Math.min(100, c.progress.percent))}%"></div><span class="prog-text">\${c.progress.percent}%\${c.progress.note ? ' · ' + esc(c.progress.note) : ''}</span></div>\` : ''}
+      \${c.latestComment ? \`<div class="preview">\${esc(c.latestComment.by)}: \${esc(c.latestComment.text)}</div>\` : ''}
       <div class="footer"><span>\${c.comments.length} 评论</span><span><button type="button" data-detail="\${esc(c.id)}">详情/评论</button> · v\${c.version} · \${fmt(c.updatedAt)}</span></div>
     </div>\`
   }
@@ -400,6 +434,7 @@ function renderHtml(board) {
         \${c.description ? \`<div style="color:#c6cede;white-space:pre-wrap;font-size:12px">\${esc(c.description)}</div>\` : ''}
         \${c.acceptance.length ? \`<ul class="acceptance">\${c.acceptance.map(a => \`<li>\${esc(a)}\</li>\`).join('')}</ul>\` : ''}
         \${c.patches && c.patches.length ? \`<div style="margin-top:10px;color:#9aa6bd;font-size:12px">改动 diff（\${c.patches.length}）</div>\${c.patches.map(p => \`<div class="comment"><span class="who">#\${esc(p.id)}</span><span class="at">\${fmt(p.at)}</span><div class="text">\${esc(p.summary)}\${p.files && p.files.length ? '（' + esc(p.files.join(', ')) + '）' : ''}</div><button type="button" data-patch="\${esc(p.id)}" style="margin-top:4px;background:#1d2740;color:#e6e9f0;border:1px solid #26334e;border-radius:8px;padding:3px 10px;cursor:pointer;font-size:11px">查看 diff</button></div>\`).join('')}\` : ''}
+        \${c.artifacts && c.artifacts.length ? \`<div style="margin-top:10px;color:#9aa6bd;font-size:12px">产物（\${c.artifacts.length}，最新一条可在下方预览）</div>\${c.artifacts.map((a, i) => \`<div class="comment"><span class="who">📦 \${esc(a.title || a.kind)}</span><span class="at">\${fmt(a.at)}</span><div class="text">\${esc(a.path)}</div>\${i === c.artifacts.length - 1 && a.kind === 'html' ? \`<iframe src='/api/artifact?task=\${esc(c.id)}&raw=1' style="width:100%;height:300px;border:1px solid #26334e;border-radius:8px;background:#fff;margin-top:4px"></iframe>\` : ''}\${i === c.artifacts.length - 1 && a.kind === 'url' ? \`<div style="margin-top:4px"><a href="\${esc(a.path)}" target="_blank" rel="noopener" style="color:#60a5fa">打开链接 ↗</a></div>\` : ''}\${i === c.artifacts.length - 1 && a.kind === 'file' ? \`<div style="margin-top:4px"><a href='/api/artifact?task=\${esc(c.id)}&raw=1' target="_blank" rel="noopener" style="color:#60a5fa">下载文件 ⬇</a></div>\` : ''}</div>\`).join('')}\` : ''}
         <div style="margin-top:10px;color:#9aa6bd;font-size:12px">评论（\${c.comments.length}）</div>
         \${c.comments.map(cm => \`<div class="comment"><span class="who">@\${esc(cm.by)}</span><span class="at">\${fmt(cm.at)}</span><div class="text">\${esc(cm.text)}</div></div>\`).join('') || '<div style="color:#5d6a85;font-size:12px;padding:6px 0">暂无评论</div>'}
         <label>追加评论（\${esc(identity.get())} 身份；退回任务请写清原因）</label>
@@ -491,6 +526,27 @@ function renderHtml(board) {
     soldiersBar()
     identityBar()
     goalMeta()
+    applyGlow()
+  }
+
+  // ── 待决提醒镜像（借鉴 dsh-worktable 的 done/need 发光 + ack 生命周期）──
+  // 发光只显示「当前状态 ≠ 上次 ack 状态」的任务：点开详情即 ack，状态转移后重新点亮。
+  function ackMap() {
+    try { return JSON.parse(localStorage.getItem('legion.notifyAck.v1') || '{}') } catch { return {} }
+  }
+  function applyGlow() {
+    const m = ackMap()
+    document.querySelectorAll('.card[data-glow]').forEach(el => {
+      const g = el.dataset.glow
+      if (!g) return
+      el.classList.toggle('glow-' + g, m[el.dataset.id] !== g)
+    })
+  }
+  function ack(id, status) {
+    const m = ackMap()
+    m[id] = status
+    try { localStorage.setItem('legion.notifyAck.v1', JSON.stringify(m)) } catch {}
+    applyGlow()
   }
 
   function goalMeta() {
@@ -543,7 +599,11 @@ function renderHtml(board) {
     el.addEventListener('click', e => {
       if (suppressClick) return
       const btn = e.target.closest('[data-detail]')
-      if (btn) { detail = btn.dataset.detail; detailModal() }
+      if (btn) {
+        detail = btn.dataset.detail
+        ack(detail, findCard(detail)?.status ?? '')
+        detailModal()
+      }
     })
   }
 

@@ -17,7 +17,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { spawn } from 'node:child_process'
 import { appendFileSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 import { homedir } from 'node:os'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -140,6 +140,14 @@ interface WorkerReport {
   summary: string
   evidence: string
   blocker: string
+  artifact: WorkerArtifact | null
+}
+
+/** worker 产物（借鉴 dsh-worktable 的 widget-result.json 握手：html 看板 iframe 预览、file 链接、url 跳转）。 */
+interface WorkerArtifact {
+  kind: 'html' | 'file' | 'url'
+  path: string
+  title: string
 }
 
 /** 讨论发言（陈述）的结构化回报。 */
@@ -170,6 +178,16 @@ const WORKER_SCHEMA: ObjectJsonSchema = {
     summary: { type: 'string' },
     evidence: { type: 'string' },
     blocker: { type: 'string' },
+    artifact: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['html', 'file', 'url'] },
+        path: { type: 'string' },
+        title: { type: 'string' },
+      },
+      required: ['kind', 'path'],
+      additionalProperties: false,
+    },
   },
   required: ['status', 'summary', 'evidence'],
   additionalProperties: false,
@@ -424,14 +442,19 @@ export function apply(ctx: AppContext, config: Config): void {
     }
   }
 
-  /** 带乐观锁的状态迁移：先重读任务取最新 version。 */
+  /**
+   * 带乐观锁的状态迁移：先重读任务取最新 version。
+   * by 默认取任务当前认领者（soldier）——流水线模式下认领者 = 阶段角色（如 devops），
+   * in_review 提交校验要求 by === soldier，若硬编码 config.role 会在最终阶段被 taskctl 拒绝。
+   */
   async function transitionTo(id: string, to: string): Promise<void> {
     const t = await getTask(id)
+    const by = t.soldier ?? config.role
     if (useHub) {
-      await hubPost('/api/transition', { id, to, by: config.role, ifVersion: t.version, scope: scope })
+      await hubPost('/api/transition', { id, to, by, ifVersion: t.version, scope: scope })
       return
     }
-    await runTaskctl(config.scrumDir, ['transition', id, '--to', to, '--by', config.role, '--if-version', String(t.version)])
+    await runTaskctl(config.scrumDir, ['transition', id, '--to', to, '--by', by, '--if-version', String(t.version)])
   }
 
   /** 流水线自动推进：in_progress/in_review → done（推进者=任务角色，将军已授权整条流水线）。 */
@@ -486,15 +509,37 @@ export function apply(ctx: AppContext, config: Config): void {
     await reportProgress(id, 0, '认领开工')
   }
 
-  /** worktree 隔离：为任务建独立分支 worktree（w/<taskId>）。失败返回 null 由调用方回退。 */
+  /**
+   * worktree 隔离：为任务建独立分支 worktree（w/<taskId>）。失败返回 null 由调用方回退。
+   * 复用优先：同任务已有 worktree（blocked 解阻 / 退回纠错续做）直接复用，不删除上一轮部分改动；
+   * worktree 被清理但分支仍在（blocked 时已提交 WIP）则从分支重新挂载。
+   */
   async function prepareWorktree(taskId: string): Promise<string | null> {
     const root = config.worktreeRoot || join(config.repoRoot, '.legion-worktrees')
     const dir = join(root, taskId)
     try {
       await ensurePrePushGuard()
-      // 清残留（同 id 重派）：先移除 worktree 再删分支
-      await runGit(config.repoRoot, ['worktree', 'remove', '--force', dir])
-      await runGit(config.repoRoot, ['branch', '-D', `w/${taskId}`])
+      if (existsSync(dir)) {
+        if (existsSync(join(dir, '.git'))) {
+          // 既有 worktree：直接复用（保留未提交/已提交改动）
+          activity('worktree', taskId, `复用既有 worktree：${dir}（分支 w/${taskId}）`)
+          log(`${taskId} 复用既有 worktree：${dir}`)
+          return dir
+        }
+        // 残留空目录/非 worktree 壳（daemon 自有路径），清理后重建
+        try { rmSync(dir, { recursive: true, force: true }) } catch { /* 清理失败继续 */ }
+      }
+      const branchExists = (await runGit(config.repoRoot, ['rev-parse', '--verify', `w/${taskId}`])).code === 0
+      if (branchExists) {
+        // 分支还在（上轮已提交 WIP/成果）：从分支挂载续做
+        const add = await runGit(config.repoRoot, ['worktree', 'add', dir, `w/${taskId}`])
+        if (add.code !== 0) {
+          log(`${taskId} 从分支 w/${taskId} 挂载 worktree 失败：${(add.err || add.out).trim()}`)
+          return null
+        }
+        activity('worktree', taskId, `复用分支 w/${taskId}：${dir}`)
+        return dir
+      }
       const add = await runGit(config.repoRoot, ['worktree', 'add', '-b', `w/${taskId}`, dir, 'HEAD'])
       if (add.code !== 0) {
         log(`${taskId} worktree 创建失败：${(add.err || add.out).trim()}`)
@@ -583,19 +628,54 @@ exit 0
     }
   }
 
-  /** 流水线中间阶段自动合入：merge w/<id> → 当前分支并清理 worktree，让下一角色基于最新主分支工作。 */
-  async function autoPromote(taskId: string, dir: string): Promise<void> {
+  /**
+   * 登记 worker 产物（借鉴 dsh-worktable 的 widget-result.json 握手）：
+   * html → 看板 iframe 预览；file → 看板链接；url → 跳转。相对路径按 worktree 解析；文件不存在则跳过并记录。
+   */
+  async function recordArtifact(taskId: string, a: WorkerArtifact, worktreeDir: string | null): Promise<void> {
+    try {
+      let path = a.path
+      if (a.kind !== 'url') {
+        const base = worktreeDir ?? config.workspace
+        const resolved = isAbsolute(path) ? path : join(base, path)
+        if (!existsSync(resolved)) {
+          log(`${taskId} 产物不存在，跳过登记：${resolved}`)
+          await safeComment(taskId, `⚠ 产物路径不存在（未登记预览）：${resolved}`)
+          return
+        }
+        path = resolved
+      }
+      const argv = ['artifact', taskId, '--by', config.role, '--kind', a.kind, '--path', path]
+      if (a.title && a.title.length > 0) argv.push('--title', a.title.slice(0, 120))
+      if (useHub) {
+        await hubPost('/api/artifact', { id: taskId, kind: a.kind, path, title: a.title ?? '', by: config.role, scope: scope })
+      } else {
+        await runTaskctl(config.scrumDir, argv)
+      }
+      activity('artifact', taskId, `产物已登记：${a.title || path}`)
+    } catch (e) {
+      log(`${taskId} 登记产物失败：${String(e)}`)
+    }
+  }
+
+  /**
+   * 流水线中间阶段自动合入：merge w/<id> → 当前分支并清理 worktree，让下一角色基于最新主分支工作。
+   * 成功返回 true；失败返回 false 且保留 worktree 与分支（改动不丢，供人工合入或重试）。
+   */
+  async function autoPromote(taskId: string, dir: string): Promise<boolean> {
     try {
       const merge = await runGit(config.repoRoot, ['merge', '--no-ff', `w/${taskId}`, '-m', `promote ${taskId}`])
       if (merge.code !== 0) {
         log(`${taskId} 自动合入失败：${(merge.err || merge.out).trim()}`)
-        return
+        return false
       }
       await runGit(config.repoRoot, ['worktree', 'remove', '--force', dir])
       await runGit(config.repoRoot, ['branch', '-D', `w/${taskId}`])
       log(`${taskId} 已自动合入主分支并清理 worktree`)
+      return true
     } catch (e) {
       log(`${taskId} 自动合入异常：${String(e)}`)
+      return false
     }
   }
 
@@ -648,7 +728,7 @@ exit 0
       '',
       ...(stage ? [`角色职责（必须遵守）：${stage.prompt}`, ''] : []),
       `工作目录：${cwd}`,
-      isolated ? `隔离模式：你在独立 git worktree（分支 w/${t.id}）中工作；不要 push（pre-push 已拦截）；改动只留在本 worktree，由将军验收后 promote 合并。` : '',
+      isolated ? `隔离模式：你在独立 git worktree（分支 w/${t.id}）中工作；不要 push（pre-push 已拦截）；改动只留在本 worktree，由将军验收后 promote 合并。若 w/${t.id} 已存在上一轮的部分改动（WIP 提交），请在其基础上继续完成，不要删除既有内容。` : '',
       `任务看板：${config.scrumDir}（taskctl 是唯一变更入口，但你不要调用它）`,
       '',
       `任务：${t.title}`,
@@ -674,8 +754,9 @@ exit 0
       '3. 改动落在工作目录内；如需更新 legion 文档一并更新。',
       '4. 禁止联网与任何 push（pre-push 已拦截 w/* 分支）；外部依赖若缺失，在证据里说明而非擅自下载。',
       '5. 最终回复只输出 JSON 报告，不要额外叙述：',
-      '   {"status":"done","summary":"一句话总结","evidence":"验证证据（命令与输出要点）","blocker":""}',
-      '   或 {"status":"blocked","summary":"已完成的部分","evidence":"","blocker":"卡在哪个文件/命令/什么报错（必须具体）"}',
+      '   {"status":"done","summary":"一句话总结","evidence":"验证证据（命令与输出要点）","blocker":"","artifact":null}',
+      '   "artifact" 可选（无产物必须为 null）：{"kind":"html|file|url","path":"产物绝对路径（工作目录内）","title":"一句话标题"}——html 会进看板 iframe 预览，file/url 变成看板链接。',
+      '   或 {"status":"blocked","summary":"已完成的部分","evidence":"","blocker":"卡在哪个文件/命令/什么报错（必须具体）","artifact":null}',
       '',
     ]
     return lines.filter(l => l.length > 0).join('\n')
@@ -734,9 +815,17 @@ exit 0
       // worktree 隔离：先提交到 w/<id> 分支再记录 diff
       if (worktreeDir !== null) await commitWorktree(t.id, worktreeDir, report.summary)
       await recordPatch(t.id, worktreeDir, report.summary)
+      if (report.artifact && report.artifact.path) await recordArtifact(t.id, report.artifact, worktreeDir)
       if (isPipeline && stage && stage.next) {
-        // 流水线中间阶段：自动合入主分支 → done → 流转下一角色
-        if (worktreeDir !== null) await autoPromote(t.id, worktreeDir)
+        // 流水线中间阶段：自动合入主分支 → done → 流转下一角色；合入失败转 in_review 等人工，不静默丢产出
+        const merged = worktreeDir !== null ? await autoPromote(t.id, worktreeDir) : true
+        if (!merged) {
+          await safeComment(t.id, `⚠ ${stage.label}完成，但自动合入主分支失败（可能冲突），改动保留在分支 w/${t.id}。请人工合入并推进：git -C ${config.repoRoot} merge --no-ff w/${t.id} 解决冲突 → git -C ${config.repoRoot} worktree remove --force ${worktreeDir} → git -C ${config.repoRoot} branch -D w/${t.id} → 将军把任务 transition 到 done`)
+          await transitionTo(t.id, 'in_review')
+          activity('blocked', t.id, `${stage.label}完成但自动合入失败，转 in_review 等待人工合入`)
+          log(`${t.id} → in_review（中间阶段自动合入失败，等待人工处理）`)
+          return
+        }
         await advanceTo(t.id, stage.role)
         await safeComment(t.id, `✓ ${stage.label}完成：${report.summary}\n证据：${report.evidence}`)
         activity('done', t.id, `${stage.label}完成：${report.summary}`)
@@ -753,7 +842,16 @@ exit 0
         log(`${t.id} → in_review（${report.summary}）`)
       }
     } else {
-      const wtHint = worktreeDir !== null ? `\n[worktree] 部分改动在 ${worktreeDir}（分支 w/${t.id}，未提交）` : ''
+      // blocked：把部分改动提交到 w/<id>（WIP），解阻/纠错续做时 prepareWorktree 复用，不丢上一轮成果
+      if (worktreeDir !== null) {
+        const status = await runGit(worktreeDir, ['status', '--porcelain'])
+        if (status.code === 0 && status.out.trim().length > 0) {
+          await commitWorktree(t.id, worktreeDir, `WIP：${report.summary}`)
+        }
+      }
+      const wtHint = worktreeDir !== null
+        ? `\n[worktree] 部分改动已提交到分支 w/${t.id}（${worktreeDir}），解阻后续做会自动复用`
+        : ''
       await safeComment(t.id, `⚠ 受阻：${report.blocker || report.summary}${wtHint}`)
       await transitionTo(t.id, 'blocked')
       activity('blocked', t.id, `受阻：${report.blocker || report.summary}`)
@@ -1045,6 +1143,12 @@ exit 0
         if (feedback.length === 0) continue
         inflight.add(t.id)
         runDetached(t.id, workReturned(t, feedback, stageOf(t)))
+      }
+      // 4. 流水线 done 补流转：将军人工合入/验收后手动 done 的中间阶段任务 → 创建下一角色任务（幂等：已有后继则跳过）
+      if (isPipeline) {
+        for (const t of tasks.filter(x => x.status === 'done' && stageOf(x) !== undefined)) {
+          await advancePipeline(t)
+        }
       }
       writeDaemonStatus(inboxIds.length)
     } finally {

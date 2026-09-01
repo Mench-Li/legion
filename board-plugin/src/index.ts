@@ -11,7 +11,7 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import { spawn } from 'node:child_process'
 import { readFile, watch, watchFile, unwatchFile } from 'node:fs'
 import { readFile as readFileP } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, normalize, sep } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
 export const name = '@dsh-external/dsh-scrum-board'
@@ -26,6 +26,8 @@ export interface Config {
   hubUrl: string
   /** hub 模式下的项目 scope（读过滤 + 写带上）。 */
   scope: string
+  /** 产物预览额外允许根（默认仅 repoRoot；非隔离 worker 产物在 workspace 时把 workspace 加进来）。 */
+  artifactRoots: string[]
 }
 
 export const Config = z.object({
@@ -33,6 +35,7 @@ export const Config = z.object({
   routePrefix: z.string().default('/scrum-board'),
   hubUrl: z.string().default(''),
   scope: z.string().default('software'),
+  artifactRoots: z.array(z.string()).default([]),
 })
 
 export function apply(ctx: Context, config: Config): void {
@@ -42,6 +45,7 @@ export function apply(ctx: Context, config: Config): void {
   const boardFile = join(scrumDir, 'board.json')
   const activityFile = join(scrumDir, 'activity.jsonl')
   const kanbanFile = join(scrumDir, 'kanban.html')
+  const consoleFile = join(scrumDir, 'console.html')
   const tasksFile = join(scrumDir, 'tasks.json')
   const patchesDir = join(scrumDir, 'patches')
   const taskctl = join(scrumDir, 'taskctl.mjs')
@@ -56,6 +60,52 @@ export function apply(ctx: Context, config: Config): void {
       return JSON.parse(await readFileP(file, 'utf8'))
     } catch {
       return null
+    }
+  }
+
+  /** 产物预览白名单：仅允许 repoRoot 与配置的额外根（防任意文件读取）。 */
+  function artifactAllowed(p: string): boolean {
+    const norm = normalize(p)
+    const roots = [repoRoot, ...config.artifactRoots].map(r => normalize(r))
+    return roots.some(r => norm === r || norm.startsWith(r + sep))
+  }
+
+  /**
+   * 产物预览（借鉴 dsh-worktable 的 widget-result.json 自动挂载）：
+   * GET /api/artifact?task=T-00X → JSON 元信息；?task=T-00X&raw=1 → 文件内容
+   * （html → text/html 供 iframe 预览，file → octet-stream 下载，url → 302 跳转）。
+   * path 一律取自 tasks.json 的 artifact 记录（不经用户查询串），并做根白名单校验。
+   */
+  async function serveArtifact(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    try {
+      const url = new URL(req.url ?? '', 'http://localhost')
+      const taskId = url.searchParams.get('task') ?? ''
+      const raw = url.searchParams.get('raw') === '1'
+      const db = (await readJson(tasksFile)) as { tasks?: Record<string, { artifacts?: { kind: string; title?: string; path: string }[] }> } | null
+      const t = db?.tasks?.[taskId]
+      const a = (t?.artifacts ?? []).slice(-1)[0]
+      if (!a) {
+        json(res, 404, { error: `任务 ${taskId} 无产物` })
+        return
+      }
+      if (a.kind === 'url') {
+        res.writeHead(302, { location: a.path })
+        res.end()
+        return
+      }
+      if (!artifactAllowed(a.path)) {
+        json(res, 403, { error: '产物路径不在允许根内' })
+        return
+      }
+      if (!raw) {
+        json(res, 200, { kind: a.kind, title: a.title ?? '', path: a.path, exists: await readFileP(a.path, 'utf8').then(() => true).catch(() => false) })
+        return
+      }
+      const data = await readFileP(a.path)
+      res.writeHead(200, { 'content-type': a.kind === 'html' ? 'text/html; charset=utf-8' : 'application/octet-stream' })
+      res.end(data)
+    } catch (e) {
+      json(res, 500, { error: e instanceof Error ? e.message : String(e) })
     }
   }
 
@@ -274,6 +324,19 @@ export function apply(ctx: Context, config: Config): void {
     })
   }
 
+  /** 服务军团总指挥部 console.html（同样的 /api/* 前缀重写）。 */
+  function serveConsole(res: ServerResponse): void {
+    readFile(consoleFile, (err, data) => {
+      if (err) {
+        json(res, 404, { error: 'console.html 不存在（scrum/console.html）' })
+        return
+      }
+      const html = data.toString('utf8').replaceAll("'/api/", `'${prefix}/api/`)
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+      res.end(html)
+    })
+  }
+
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
       const url = new URL(req.url ?? '/', 'http://x')
@@ -412,6 +475,10 @@ export function apply(ctx: Context, config: Config): void {
         json(res, 200, daemon ?? {})
         return
       }
+      if (path === '/api/artifact') {
+        await serveArtifact(req, res)
+        return
+      }
       if (path === '/api/board') {
         serveBoard(res)
         return
@@ -471,6 +538,10 @@ export function apply(ctx: Context, config: Config): void {
 
       if (path === '/' || path === '/kanban.html') {
         serveKanban(res)
+        return
+      }
+      if (path === '/console' || path === '/console.html') {
+        serveConsole(res)
         return
       }
 

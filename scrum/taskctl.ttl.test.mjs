@@ -150,3 +150,19 @@ describe('progress 进度心跳 (P3)', () => {
     assert.throws(() => ctl(['progress', t.id, '--by', 'c', '--percent', 'x']), /0-100/)
   })
 })
+
+describe('artifact 产物登记 (worktable-②)', () => {
+  it('artifact 追加并校验 kind/path', () => {
+    const t = ctl(['create', '--title', '产物任务'])
+    assert.deepEqual(t.artifacts, [])
+    const a1 = ctl(['artifact', t.id, '--by', 'coder', '--kind', 'html', '--path', 'D:/x/report.html', '--title', '验收报表'])
+    assert.equal(a1.artifacts.length, 1)
+    assert.equal(a1.artifacts[0].kind, 'html')
+    assert.equal(a1.artifacts[0].title, '验收报表')
+    assert.equal(a1.artifacts[0].path, 'D:/x/report.html')
+    const a2 = ctl(['artifact', t.id, '--by', 'coder', '--kind', 'file', '--path', 'D:/x/out.txt'])
+    assert.equal(a2.artifacts.length, 2)
+    assert.throws(() => ctl(['artifact', t.id, '--by', 'c', '--kind', 'exe', '--path', 'x']), /kind/)
+    assert.throws(() => ctl(['artifact', t.id, '--by', 'c']), /kind|path/)
+  })
+})

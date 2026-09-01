@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>🖥 军团总指挥部</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; background: #0a0d13; color: #dbe3f0; }
+  header { padding: 14px 18px; border-bottom: 1px solid #1c2740; display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px; }
+  h1 { font-size: 16px; margin: 0; color: #eef2fa; }
+  #daemon-strip { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: #9aa6bd; }
+  #daemon-strip b { color: #dbe6ff; font-weight: 600; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; background: #16203a; color: #aeb9d1; }
+  .badge.ok { background: #12331f; color: #6ee7a0; }
+  #cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; padding: 14px 18px; }
+  section h2 { font-size: 13px; margin: 0 0 8px; color: #7d8aa3; }
+  section h2 .n { color: #44506a; }
+  .cards { display: flex; flex-direction: column; gap: 8px; }
+  .card { background: #111827; border: 1px solid #1c2740; border-left: 3px solid #3b4a68; border-radius: 10px; padding: 8px 10px; }
+  .card.busy { border-left-color: #60a5fa; }
+  .card.need { border-left-color: #facc15; box-shadow: 0 0 8px rgba(250, 204, 21, .18); }
+  .card.danger { border-left-color: #f87171; box-shadow: 0 0 8px rgba(248, 113, 113, .22); }
+  .card.done { border-left-color: #4ade80; opacity: .82; }
+  .card h3 { margin: 0 0 3px; font-size: 12.5px; color: #eef2fa; }
+  .card .meta { font-size: 11px; color: #7d8aa3; display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 2px; }
+  .card .preview { margin-top: 4px; font-size: 11px; color: #8fa0bd; line-height: 1.4; max-height: 2.8em; overflow: hidden; }
+  .prog { margin-top: 5px; height: 8px; background: #1a2237; border-radius: 4px; overflow: hidden; }
+  .prog i { display: block; height: 100%; background: linear-gradient(90deg, #2563eb, #60a5fa); }
+  #activity { padding: 10px 18px 18px; }
+  #activity h2 { font-size: 12px; color: #7d8aa3; margin: 0 0 6px; }
+  #activity-feed { display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; color: #8fa0bd; }
+  #activity-feed .ev { display: flex; gap: 8px; }
+  #activity-feed .ev .t { color: #5d6a85; flex: none; }
+  #activity-feed .ev .who { color: #a5b4d0; flex: none; }
+  .empty { color: #44506a; font-size: 12px; padding: 8px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🖥 军团总指挥部</h1>
+  <div id="daemon-strip"><span class="badge" id="live-badge">● 连接中</span></div>
+</header>
+<div id="cols">
+  <section><h2>⚡ 工作中 <span class="n" id="n-busy"></span></h2><div class="cards" id="busy"></div></section>
+  <section><h2>⏳ 待你决定 <span class="n" id="n-need"></span></h2><div class="cards" id="need"></div></section>
+  <section><h2>✅ 已完成 <span class="n" id="n-done"></span></h2><div class="cards" id="done"></div></section>
+</div>
+<div id="activity"><h2>⚡ 最近动态</h2><div id="activity-feed"></div></div>
+<script>
+  const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+  const fmt = iso => { try { return new Date(iso).toLocaleString('zh-CN', { hour12: false }) } catch { return iso } }
+  const fmtDur = ms => { if (!ms || ms < 0) return '—'; const m = Math.floor(ms / 60000); if (m < 60) return m + ' 分钟'; const h = Math.floor(m / 60); return h + ' 小时 ' + (m % 60) + ' 分' }
+  const AKIND = { claim: '🚀', dispatch: '▶️', done: '✅', blocked: '⛔', released: '♻️', redispatch: '🔁', aborted: '⚠️', artifact: '📦' }
+  let daemon = {}
+  let activity = []
+
+  function renderDaemon() {
+    const el = document.getElementById('daemon-strip')
+    if (!daemon || !daemon.role) { el.innerHTML = '<span class="badge">守护未自述（daemon.json 缺失——守护重启后写入）</span>'; return }
+    const d = daemon
+    const model = d.model ? (d.model.model || '') : ''
+    const stages = d.pipeline && d.pipeline.stages ? d.pipeline.stages.map(r => r).join(' → ') : ''
+    el.innerHTML = [
+      `<span class="badge ok">● 守护 ${esc(d.role)}</span>`,
+      `<span>模型 <b>${esc(model)}</b></span>`,
+      `<span>scope <b>${esc(d.scope || '')}</b></span>`,
+      d.pipeline ? `<span>流水线 <b>${esc(d.pipeline.name || '')}</b> ${esc(stages)}</span>` : '',
+      `<span>并发 <b>${d.maxWorkers ?? '—'}</b></span>`,
+      `<span>TTL <b>${d.taskTtlMinutes ? d.taskTtlMinutes + ' 分钟' : '关'}</b></span>`,
+      `<span>隔离 <b>${d.isolate ? 'worktree' : '关'}</b></span>`,
+      `<span>inbox <b>${d.inbox ?? 0}</b></span>`,
+      `<span>运行 <b>${fmtDur(d.uptimeMs)}</b></span>`,
+      `<span>最近扫单 <b>${fmt(d.lastSweepAt)}</b></span>`,
+    ].filter(Boolean).join('')
+  }
+
+  function cardEl(c, kind) {
+    const runtime = c.claimedAt ? (Date.now() - new Date(c.claimedAt).getTime()) : null
+    return `<div class="card ${esc(kind)}">
+      <h3>${esc(c.id)} · ${esc(c.title)}</h3>
+      <div class="meta">
+        ${c.soldier ? `<span>@${esc(c.soldier)}</span>` : ''}
+        ${c.role ? `<span>⚙ ${esc(c.role)}</span>` : ''}
+        ${c.progress ? `<span>${c.progress.percent}%</span>` : ''}
+        ${runtime !== null ? `<span>已运行 ${fmtDur(runtime)}</span>` : ''}
+        <span>v${c.version}</span>
+      </div>
+      ${c.progress ? `<div class="prog"><i style="width:${Math.max(0, Math.min(100, c.progress.percent))}%"></i></div>` : ''}
+      ${c.latestComment ? `<div class="preview">${esc(c.latestComment.by)}: ${esc(c.latestComment.text)}</div>` : ''}
+    </div>`
+  }
+
+  function renderBoard(board) {
+    const all = board.columns.flatMap(col => col.cards)
+    const busy = all.filter(c => c.status === 'in_progress')
+    const need = all.filter(c => c.status === 'in_review' || c.status === 'blocked')
+    const done = all.filter(c => c.status === 'done').sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))).slice(0, 10)
+    document.getElementById('n-busy').textContent = busy.length
+    document.getElementById('n-need').textContent = need.length
+    document.getElementById('n-done').textContent = done.length
+    document.getElementById('busy').innerHTML = busy.map(c => cardEl(c, 'busy')).join('') || '<div class="empty">无进行中任务</div>'
+    document.getElementById('need').innerHTML = need.map(c => cardEl(c, c.status === 'blocked' ? 'danger' : 'need')).join('') || '<div class="empty">无待你决定的任务</div>'
+    document.getElementById('done').innerHTML = done.map(c => cardEl(c, 'done')).join('') || '<div class="empty">暂无完成</div>'
+  }
+
+  function renderActivity() {
+    const el = document.getElementById('activity-feed')
+    el.innerHTML = activity.map(ev => `<div class="ev"><span class="t">${fmt(ev.at)}</span><span>${AKIND[ev.kind] || '·'}</span><span class="who">${esc(ev.by || '')}</span><span>${esc(ev.text)}</span></div>`).join('') || '<div class="empty">暂无动态</div>'
+  }
+
+  async function loadDaemon() { try { daemon = await (await fetch('/api/daemon')).json(); renderDaemon() } catch { /* 守护未启动时保持占位 */ } }
+  async function loadActivity() { try { activity = await (await fetch('/api/activity?limit=20')).json(); renderActivity() } catch { /* 静默 */ } }
+
+  async function init() {
+    try {
+      const board = await (await fetch('/api/board')).json()
+      renderBoard(board)
+      const badge = document.getElementById('live-badge')
+      badge.textContent = '● 实时'
+      badge.className = 'badge ok'
+      const es = new EventSource('/api/board/events')
+      es.onmessage = e => { try { renderBoard(JSON.parse(e.data)) } catch { /* 忽略瞬时冲突 */ } }
+      es.onerror = () => { badge.textContent = '● 轮询中'; badge.className = 'badge'; es.close(); setInterval(async () => { try { renderBoard(await (await fetch('/api/board')).json()) } catch { /* 静默 */ } }, 5000) }
+    } catch {
+      document.getElementById('busy').innerHTML = '<div class="empty">看板数据不可用（先运行 render.mjs / 启动看板服务）</div>'
+    }
+    renderDaemon()
+    renderActivity()
+    setInterval(loadDaemon, 10000)
+    setInterval(loadActivity, 5000)
+  }
+  init()
+</script>
+</body>
+</html>

@@ -4,6 +4,7 @@
  *
  * 读接口（GET）：
  *   /                  → kanban.html（实时模式：SSE + 轮询兜底；拖拽写回）
+ *   /console.html      → 军团总指挥部（节点 + 任务实时总览，SSE + 轮询，零 Token）
  *   /board.json        → 看板数据快照
  *   /KANBAN.md         → 文本看板
  *   /api/board         → board.json 内容（轮询端点）
@@ -29,7 +30,7 @@
 import { createServer } from 'node:http'
 import { spawn } from 'node:child_process'
 import { readFile, watch, watchFile } from 'node:fs'
-import { dirname, extname, join, normalize } from 'node:path'
+import { dirname, extname, join, normalize, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -60,7 +61,7 @@ const MIME = {
 
 /** 只允许 serve scrum 目录内的白名单静态文件，杜绝目录穿越 */
 function safeStatic(pathname) {
-  const allowed = new Set(['/kanban.html', '/board.json', '/KANBAN.md', '/'])
+  const allowed = new Set(['/kanban.html', '/console.html', '/board.json', '/KANBAN.md', '/'])
   const target = pathname === '/' ? '/kanban.html' : pathname
   if (!allowed.has(target)) return null
   return join(SCRUM, normalize(target).replace(/^[/\\]+/, ''))
@@ -350,6 +351,36 @@ const server = createServer((req, res) => {
       }
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
       res.end(data)
+    })
+    return
+  }
+
+  // 产物预览：path 取自 tasks.json 的 artifact 记录（不读查询串），仅允许 repoRoot 内。
+  // ?task=T-00X → JSON 元信息；&raw=1 → 文件内容（html→iframe 预览 / file→下载 / url→302）。
+  if (url.pathname === '/api/artifact') {
+    const taskId = url.searchParams.get('task') || ''
+    const raw = url.searchParams.get('raw') === '1'
+    readFile(join(SCRUM, 'tasks.json'), 'utf8', (err, dbRaw) => {
+      if (err) { json(res, 500, { error: 'tasks.json 读取失败' }); return }
+      let t
+      try { t = JSON.parse(dbRaw).tasks?.[taskId] } catch { json(res, 500, { error: 'tasks.json 解析失败' }); return }
+      const a = (t?.artifacts ?? []).slice(-1)[0]
+      if (!a) { json(res, 404, { error: `任务 ${taskId} 无产物` }); return }
+      if (a.kind === 'url') { res.writeHead(302, { location: a.path }); res.end(); return }
+      const norm = normalize(a.path)
+      const root = normalize(ROOT)
+      if (norm !== root && !norm.startsWith(root + sep)) { json(res, 403, { error: '产物路径不在允许根内' }); return }
+      if (!raw) {
+        readFile(norm, (e2) => {
+          json(res, 200, { kind: a.kind, title: a.title ?? '', path: a.path, exists: !e2 })
+        })
+        return
+      }
+      readFile(norm, (e2, data) => {
+        if (e2) { json(res, 404, { error: '产物文件不存在' }); return }
+        res.writeHead(200, { 'content-type': a.kind === 'html' ? 'text/html; charset=utf-8' : 'application/octet-stream' })
+        res.end(data)
+      })
     })
     return
   }

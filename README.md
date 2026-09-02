@@ -54,8 +54,9 @@ node scrum\serve.mjs --port 4820 --host 0.0.0.0 --token legion-kanban-4820
 状态日志在 `<legion根>/.legion-services.log`。
 
 已登记（`~/.dsh/profiles/web/` 的 `package.json` 依赖 + `cordis.patch.yml` 的 `legion-services` 行，
-依赖经 `pnpm install` 装入 profile）。改完 `services-plugin/` 代码只需重启 Desktop 生效，无需重新 install。
-手动三件套命令保留作独立调试用（如上）。
+依赖经 `pnpm install` 装入 profile）。⚠ pnpm 对 `file:` 依赖是**复制快照**：改动
+`services-plugin/`（或其他 `file:` 插件：`plugins/`、`team-hub/src`、`board-plugin/`）源码后，需在
+`~/.dsh/profiles/web` 重跑 `pnpm install` 再重启 Desktop 才生效。手动三件套命令保留作独立调试用（如上）。
 
 ### 2.2 三分钟体验循环
 

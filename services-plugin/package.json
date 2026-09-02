@@ -1,0 +1,12 @@
+{
+  "name": "@dsh-external/dsh-legion-services",
+  "version": "0.0.1",
+  "description": "伴随 DSH Desktop 自动启停 legion 独立服务（team-hub v2 :8787 / v1 看板 :4820 / 指挥台 :5173），退出自愈重启",
+  "private": true,
+  "type": "module",
+  "main": "./index.js",
+  "files": [
+    "index.js"
+  ],
+  "license": "BSD-3-Clause"
+}

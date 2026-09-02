@@ -46,6 +46,17 @@ cd D:\project\DSH\legion
 node scrum\serve.mjs --port 4820 --host 0.0.0.0 --token legion-kanban-4820
 ```
 
+### 2.1.1 伴随 DSH Desktop 自动启停（推荐，免每次手动）
+
+`services-plugin`（`@dsh-external/dsh-legion-services`，本仓库 `services-plugin/`）把上面三件套托管进
+**DSH Desktop 的 web profile**：Desktop 启动即自动拉起 team-hub v2（:8787）/ v1 看板（:4820）/ 指挥台（:5173），
+进程异常退出会自愈重启（闪退退避），Desktop 退出时随插件回收全部子服务；某端口已被监听则跳过（不重复占用）。
+状态日志在 `<legion根>/.legion-services.log`。
+
+已登记（`~/.dsh/profiles/web/` 的 `package.json` 依赖 + `cordis.patch.yml` 的 `legion-services` 行，
+依赖经 `pnpm install` 装入 profile）。改完 `services-plugin/` 代码只需重启 Desktop 生效，无需重新 install。
+手动三件套命令保留作独立调试用（如上）。
+
 ### 2.2 三分钟体验循环
 
 1. 浏览器打开 **http://127.0.0.1:5173**（旧标签页请 `Ctrl+F5` 强刷，5173 托管构建产物）。

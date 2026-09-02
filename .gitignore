@@ -25,3 +25,4 @@ scrum/discussion/
 *.log
 .DS_Store
 Thumbs.db
+/.legion-services.log

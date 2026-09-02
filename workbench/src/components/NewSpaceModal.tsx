@@ -15,6 +15,8 @@ export function NewSpaceModal({ onClose, onCreated }: NewSpaceModalProps): React
   const [spaceId, setSpaceId] = useState('')
   const [spaceName, setSpaceName] = useState('')
   const [local, setLocal] = useState(false)
+  const [localDir, setLocalDir] = useState('')
+  const [remoteUrl, setRemoteUrl] = useState('')
   const [catalog, setCatalog] = useState<AgentCatalogItem[]>([])
   const [catalogError, setCatalogError] = useState('')
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -87,12 +89,12 @@ export function NewSpaceModal({ onClose, onCreated }: NewSpaceModalProps): React
     // 创建空间 + 选人入编
     setBusy(true)
     try {
-      await createSpace(spaceId.trim(), spaceName.trim(), local)
+      await createSpace(spaceId.trim(), spaceName.trim(), local, { localDir: localDir.trim(), remoteUrl: remoteUrl.trim() })
       const roles = [...selected]
       if (roles.length > 0) {
         await addSpaceAgents(spaceId.trim(), roles)
       }
-      toast('ok', `空间「${spaceName.trim()}」已创建${local ? '（🏠 本地/私有，不进 git 仓库）' : ''}${roles.length > 0 ? `，编入 ${roles.length} 名智能体` : '（暂未配编队，可稍后从目录选人）'}`)
+      toast('ok', `空间「${spaceName.trim()}」已创建${local ? '（🏠 本地/私有，仅本机）' : ''}${localDir.trim() ? `（本地文件夹 ${localDir.trim()}）` : ''}${roles.length > 0 ? `，编入 ${roles.length} 名智能体` : '（暂未配编队，可稍后从目录选人）'}`)
       onCreated(spaceId.trim())
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -129,8 +131,16 @@ export function NewSpaceModal({ onClose, onCreated }: NewSpaceModalProps): React
             </div>
             <label className="local-toggle">
               <input type="checkbox" checked={local} onChange={e => setLocal(e.target.checked)} />
-              <span>🏠 本地/私有空间（数据只存在本机 SQLite，不进 git 仓库）</span>
+              <span>🏠 本地/私有空间（仅在本机操作，不进共享 git 仓库）</span>
             </label>
+            <div className="field">
+              <label>本地文件夹（可选）——该空间对应的本机目录，可与默认仓库不同</label>
+              <input value={localDir} onChange={e => setLocalDir(e.target.value)} placeholder="例如：D:/project/DSH/legion（留空 = 未绑定，沿用平台默认）" />
+            </div>
+            <div className="field">
+              <label>远程仓库 URL（可选）——git 远程地址；留空 = 仅本地 / 不进共享仓库</label>
+              <input value={remoteUrl} onChange={e => setRemoteUrl(e.target.value)} placeholder="例如：https://github.com/you/repo.git" />
+            </div>
           </div>
         ) : (
           <div className="modal-body">

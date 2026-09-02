@@ -39,6 +39,8 @@ interface SidebarProps {
   onNavigate: (id: string) => void
   onSelectScope: (scope: string | null) => void
   onNewSpace: () => void
+  /** 打开某工作空间设置（仓库绑定：本地文件夹 / 远程仓库）。 */
+  onSpaceSettings?: (space: SpaceInfo) => void
   /** 当前空间持续执行编排开关。 */
   execEnabled?: boolean
   onToggleExec?: (enabled: boolean) => void
@@ -46,7 +48,7 @@ interface SidebarProps {
   execDaemonOnline?: boolean
 }
 
-export function Sidebar({ board, active, scope, hubMode, spaces, onNavigate, onSelectScope, onNewSpace, execEnabled, onToggleExec, execDaemonOnline }: SidebarProps): React.JSX.Element {
+export function Sidebar({ board, active, scope, hubMode, spaces, onNavigate, onSelectScope, onNewSpace, onSpaceSettings, execEnabled, onToggleExec, execDaemonOnline }: SidebarProps): React.JSX.Element {
   const counts = board ? statusCounts(board) : null
   const inReview = counts?.inReview ?? 0
   const inProgress = counts?.inProgress ?? 0
@@ -103,15 +105,31 @@ export function Sidebar({ board, active, scope, hubMode, spaces, onNavigate, onS
       </div>
       {workspaces.map(ws => {
         const space = ws.scope !== null ? spaces.find(s => s.id === ws.scope) : null
+        const repoTitle = space
+          ? `本地文件夹：${space.localDir || '未绑定（沿用平台默认）'}\n远程仓库：${space.remoteUrl || '仅本地 / 不进共享仓库'}`
+          : undefined
         return (
           <div
             key={ws.name}
             className={`nav-item${scope === ws.scope ? ' active' : ''}`}
+            title={repoTitle}
             onClick={() => onSelectScope(ws.scope)}
           >
             <span>🗂</span>
             <span>{ws.name}</span>
-            {space?.private && <span className="local-badge" title="本地/私有空间：数据只在本地，不进 git 仓库">🏠 本地</span>}
+            {space?.private && <span className="local-badge" title="本地/私有空间：仅在本机操作，不进共享 git 仓库">🏠 本地</span>}
+            {hubMode && space && onSpaceSettings && (
+              <span
+                className="ws-gear"
+                title="空间设置：名称 / 本地·私有 / 本地文件夹 + 远程仓库"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onSpaceSettings(space)
+                }}
+              >
+                ⚙
+              </span>
+            )}
             {hubMode && ws.scope !== null && (
               <span className="cnt" style={{ marginLeft: 'auto', background: 'transparent', color: 'var(--muted-2)' }}>
                 {space?.agentCount ?? ''}

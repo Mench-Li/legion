@@ -16,6 +16,8 @@
  *   GET  /api/board?scope=&status=&soldier=&role=   任务列表（SQLite，scope 一等字段）
  *   GET  /api/missions?scope=                       任务集聚合视图（scopeAware=true，真分区）
  *   GET  /api/scopes                                真实存在的分区（tasks+members 的 distinct scope）
+ *   GET  /api/spaces                               工作空间列表（注册名 + private + 仓库绑定 localDir/remoteUrl）
+ *   POST /api/spaces                               注册/更新工作空间（id/name/private/localDir/remoteUrl；幂等 upsert）
  *   GET  /api/activity?limit=                      最近动态（审计）
  *   GET  /api/members                              成员在线状态
  *   GET  /api/events                               SSE 事件流
@@ -106,19 +108,25 @@ db.exec(`
   )
 `)
 // 工作空间实体（scope 的注册名；未注册的既有 scope 由 GET /api/spaces 推导合并）。
+// local_dir / remote_url = 该空间绑定的「本地文件夹 + 远程仓库」——不同空间可对应不同的
+// 目录与仓库组合（如 legion 主仓 vs 业务私有空间），由军团指挥台配置、守护/派工按空间消费。
 db.exec(`
   CREATE TABLE IF NOT EXISTS spaces (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     private INTEGER DEFAULT 0,
+    local_dir TEXT DEFAULT '',
+    remote_url TEXT DEFAULT '',
     createdAt TEXT,
     updatedAt TEXT
   )
 `)
-// 迁移：为既有数据库补充 private 标记（本地/私有空间——数据只在本地，不进 git 仓库）。
+// 迁移：为既有数据库补充 private（本地/私有标记）与仓库绑定列（local_dir/remote_url）。
 {
   const spaceCols = db.prepare('PRAGMA table_info(spaces)').all().map(c => c.name)
   if (!spaceCols.includes('private')) db.exec('ALTER TABLE spaces ADD COLUMN private INTEGER DEFAULT 0')
+  if (!spaceCols.includes('local_dir')) db.exec("ALTER TABLE spaces ADD COLUMN local_dir TEXT DEFAULT ''")
+  if (!spaceCols.includes('remote_url')) db.exec("ALTER TABLE spaces ADD COLUMN remote_url TEXT DEFAULT ''")
 }
 // 空间目标（goal）：每个工作空间一个 objective，任务集围绕它推进。
 db.exec(`
@@ -930,7 +938,11 @@ async function handle(req, res) {
       const countStmt = db.prepare('SELECT COUNT(*) AS c FROM roster WHERE scope = ?')
       const spaces = ids.map(id => {
         const k = byId.get(id)
-        return { id, name: k?.name ?? id, private: !!k?.private, agentCount: countStmt.get(id).c }
+        return {
+          id, name: k?.name ?? id, private: !!k?.private,
+          localDir: k?.local_dir ?? '', remoteUrl: k?.remote_url ?? '',
+          agentCount: countStmt.get(id).c,
+        }
       })
       json(res, 200, { spaces })
       return
@@ -1094,16 +1106,24 @@ async function handle(req, res) {
     }
     // ── 工作空间 + 编队管理 ──
     if (req.method === 'POST' && path === '/api/spaces') {
+      // 注册/更新工作空间（幂等 upsert：id + name 必填）。除 private 外支持仓库绑定：
+      // localDir = 本地文件夹（该空间对应的本机目录），remoteUrl = 远程仓库 URL（空 = 仅本地/不进共享仓库）。
       await handleWrite(req, res, (body, by, scope) => {
         const id = body.id
         const name = body.name
         if (typeof id !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(id)) throw new Error('空间 id 非法：小写字母/数字开头，可含连字符，≤64 字符')
         if (typeof name !== 'string' || name.trim().length === 0) throw new Error('缺少参数 name')
-        db.prepare('INSERT INTO spaces (id, name, private, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, private=excluded.private, updatedAt=excluded.updatedAt')
-          .run(id, name.trim(), body.private ? 1 : 0, now(), now())
+        const localDir = typeof body.localDir === 'string' ? body.localDir.trim() : ''
+        const remoteUrl = typeof body.remoteUrl === 'string' ? body.remoteUrl.trim() : ''
+        if (localDir.length > 512) throw new Error('localDir 过长（≤512 字符）')
+        if (remoteUrl.length > 1024) throw new Error('remoteUrl 过长（≤1024 字符）')
+        const existed = db.prepare('SELECT id FROM spaces WHERE id = ?').get(id)
+        db.prepare(`INSERT INTO spaces (id, name, private, local_dir, remote_url, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET name=excluded.name, private=excluded.private, local_dir=excluded.local_dir, remote_url=excluded.remote_url, updatedAt=excluded.updatedAt`)
+          .run(id, name.trim(), body.private ? 1 : 0, localDir, remoteUrl, now(), now())
         const count = db.prepare('SELECT COUNT(*) AS c FROM roster WHERE scope = ?').get(id).c
-        audit(by, scope, 'space:create', null, { space: id, name: name.trim(), private: !!body.private })
-        return { id, name: name.trim(), private: !!body.private, agentCount: count }
+        audit(by, scope, existed ? 'space:update' : 'space:create', null, { space: id, name: name.trim(), private: !!body.private, localDir, remoteUrl })
+        return { id, name: name.trim(), private: !!body.private, localDir, remoteUrl, agentCount: count }
       })
       return
     }

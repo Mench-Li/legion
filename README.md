@@ -62,6 +62,9 @@ node scrum\serve.mjs --port 4820 --host 0.0.0.0 --token legion-kanban-4820
 ### 3.1 空间与专属编队
 - 左侧「工作空间」= team-hub 真实分区：**全部空间** + 各空间（software 8 软件岗 / marketing 5 市场岗 / product 5 产品岗 / ops 4 运营岗 / default 3 通用岗，`node team-hub/scripts/seed-roster.mjs` 幂等播种）。
 - 「＋ 新建空间」两步建空间 + 从全局智能体目录**选人入编**或新建智能体（`POST /api/spaces`、`/api/spaces/{id}/agents`、`/api/agents`）。
+- **每个空间可绑定自己的仓库**：空间行「⚙」→ 空间设置——`本地文件夹`（该空间对应的本机目录）与 `远程仓库 URL`
+  （git 地址；**留空 = 仅本地 / 不进共享仓库**）。绑定存 `spaces` 表 `local_dir`/`remote_url`（`GET/POST /api/spaces`），
+  守护派工/隔离按空间以该本地文件夹为仓库根（未绑定回退默认，见 `workbench/README.md`「空间仓库绑定」）。
 - 每空间只见自己的专属编队；未入编但认领了该空间任务的执行者以「⚙️ xxx · 执行中」合流展示。
 
 ### 3.2 中央视图（3D 场景 / 智能体总览）
@@ -121,7 +124,7 @@ node scrum\serve.mjs --port 4820 --host 0.0.0.0 --token legion-kanban-4820
 | 任务 | `GET /api/board?scope=` · `GET /api/task?id=` · `POST /api/create /claim /transition /advance /reassign /release-stale /comment /heartbeat` |
 | 目标 | `GET /api/goal?scope=` · `POST /api/goal`（upsert + 自动建链） |
 | 进展 | `GET /api/activity?scope=|taskId=|limit=`（审计时间线） |
-| 空间/编队 | `GET /api/spaces /api/roster?scope= /api/agents` · `POST /api/spaces /api/spaces/{id}/agents /api/agents` |
+| 空间/编队 | `GET /api/spaces`（含仓库绑定 `localDir`/`remoteUrl`） `/api/roster?scope= /api/agents` · `POST /api/spaces /api/spaces/{id}/agents /api/agents` |
 | 技能 | `GET /api/skills` · `POST /api/skills/register /review /grant` |
 | 执行编排 | `GET/POST /api/exec`（开关） · `GET /api/exec/queue`（自动队列） · `POST /api/exec/request`（手动派活） |
 | 模型配置 | `GET/POST /api/models` · `POST /api/models/clear` |

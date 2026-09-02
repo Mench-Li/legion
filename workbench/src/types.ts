@@ -195,8 +195,12 @@ export interface GoalInfo {
 export interface SpaceInfo {
   id: string
   name: string
-  /** 本地/私有空间：数据只在本地，不进 git 仓库（界面显示🏠角标）。 */
+  /** 本地/私有空间：数据只在本地，不进共享 git 仓库（界面显示🏠角标）。 */
   private?: boolean
+  /** 空间绑定的本地文件夹（该空间对应的本机目录；空 = 未绑定，沿用平台默认仓库）。 */
+  localDir?: string
+  /** 空间绑定的远程仓库 URL（空 = 仅本地 / 不进共享仓库）。 */
+  remoteUrl?: string
   agentCount: number
 }
 

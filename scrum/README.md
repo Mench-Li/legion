@@ -137,12 +137,14 @@ curl -X POST http://127.0.0.1:4820/api/resume -H "Authorization: Bearer <t>" -H 
 
 配置（改 `cordis.patch.yml` 中插件行或注入器配置）：`role`（默认 `soldier-auto`）、`intervalMs`（默认 30000）、`maxWorkers`（并发上限，默认 1）、`workerTimeoutMs`（默认 600000）、`staleMinutes`（认领租约分钟数，默认 30，超时自动释放回 todo）、`provider`（默认 `spawn`）、`scrumDir`（默认 `D:/project/dsh/legion/scrum`）、`workspace`（worker 工作目录，默认 `D:/project/dsh`）、`isolate`（worktree 隔离开关，默认 **true**）、`repoRoot`（隔离所用 git 仓库根，默认 `D:/project/dsh/legion`）、`worktreeRoot`（worktree 目录根，默认 `repoRoot/.legion-worktrees`）。
 
+**空间仓库绑定（覆盖注入默认）**：不同工作空间可能对应**不同的本地文件夹 + 远程仓库**。守护在 **hub 模式**下每轮扫单先从 team-hub `GET /api/spaces` 解析**本 scope** 的绑定（军团指挥台「空间设置」/「＋ 新建空间」里配的 `localDir`/`remoteUrl`，存 `spaces` 表 `local_dir`/`remote_url`）——命中 `localDir` 时，本空间实际仓库根 = 该本地文件夹（隔离 worktree、pre-push 守卫、`LEGION.md` 注入、worker 工作目录、自动 promote 全走它）；`remoteUrl` 作登记与派工提示（空 = 仅本地/不进共享仓库，push 纪律不变）。未绑定或 hub 不可达时回退上面的注入配置（`repoRoot`/`workspace`/`worktreeRoot`）。`daemon.json` 自述新增 `repo { root, binding, localDir, remoteUrl }`，一看便知该守护当前在哪个仓库跑。
+
 日志：`~/.dsh/super-injector/dsh-scrum-worker.log`（每轮扫单/派工/提交都落盘）。卸载：`dev_uninject_plugin`（匹配 `dsh-scrum-worker`）。
 
 ### 进度心跳（P3）与守护能力自述（P6）
 
 - **进度心跳**：士兵/守护用 `taskctl progress <id> --by <角色> --percent <0-100> --note <一句话>` 上报进度（借鉴 agent-network 的 `report_status`）。它是 **append-only 遥测**：不 bump `version`、不改 `updatedAt`，避免与状态迁移的乐观锁互相干扰。看板每张卡显示最新进度条（`board.json` 卡片带 `progress` 字段，`kanban.html` 渲染百分比 + note）。守护在 `claim` 后写 `0% 认领开工`、派工后写 `10% 已派工`（本地模式直接调 taskctl，hub 模式走 `POST /api/progress`）。
-- **守护能力自述**：守护每轮扫单结束把自身状态写入 `scrum/daemon.json`（角色/并发/隔离/超时/scope/流水线阶段/当前模型/inbox 计数/本轮时间/uptime）。看板 `GET /api/daemon` 直接返回该文件，`GET /api/config` 附带 `pipeline`（roles.json 阶段）与 `daemon`——将军/用户随时能确认"守护活着吗、在跑哪个流水线、当前用哪个模型"。新增一个守护节点 = 在 `cordis.patch.yml` 加一个 worker 插件配置（`role`/`intervalMs`/`scrumDir` 等），重启后 `daemon.json` 出现即自述成功。
+- **守护能力自述**：守护每轮扫单结束把自身状态写入 `scrum/daemon.json`（角色/并发/隔离/超时/scope/流水线阶段/当前模型/**空间仓库绑定 repo**/inbox 计数/本轮时间/uptime）。看板 `GET /api/daemon` 直接返回该文件，`GET /api/config` 附带 `pipeline`（roles.json 阶段）与 `daemon`——将军/用户随时能确认"守护活着吗、在跑哪个流水线、当前用哪个模型、在哪个仓库跑"。新增一个守护节点 = 在 `cordis.patch.yml` 加一个 worker 插件配置（`role`/`intervalMs`/`scrumDir` 等），重启后 `daemon.json` 出现即自述成功。
 
 ### 军团总指挥部 / 产物挂载 / 待决发光 / 动态预览（借鉴 dsh-worktable）
 

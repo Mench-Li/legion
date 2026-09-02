@@ -48,7 +48,7 @@ node scripts/serve.mjs --port 5173   # 独立静态服务 → http://127.0.0.1:5
   `/api/config` 增加 `paused` 字段。
 - `dsh-scrum-worker`（`plugins/src/index.ts`）每轮扫单前读取 `control.json`：
   `paused:true` 时跳过认领/派工但保留心跳（`daemon.json` 带 `paused` 字段）。
-  **守护插件已重新编译（`plugins/lib/index.js`）；正在运行的 Desktop 需重启一次才能加载新逻辑。**
+  **守护插件已重新编译（`plugins/lib/index.js`，含空间仓库绑定消费逻辑）；正在运行的 Desktop 需重启一次才能加载新逻辑。**
 - 真 scope 分区（工作空间数据隔离）由 team-hub v2（SQLite `tasks.scope`）提供；
   v1 文件模式 `scopeAware=false`，任何 `?scope=` 均返回全部任务。
 
@@ -80,7 +80,25 @@ node scripts/serve.mjs --port 5173   # 独立静态服务 → http://127.0.0.1:5
   25+ 类岗位按 role 去重、标注来源空间，支持搜索），或**内联新建智能体**（role/名称/职责/头像，`POST /api/agents` 直接写入本空间）。
 - 提交 = `POST /api/spaces` 建空间 + `POST /api/spaces/{id}/agents` 选人入编；空间名、编队人数实时显示在侧边栏；
   创建后自动切到新空间（空任务 → 编队全员待命，新建任务即入该空间）。
+- 第一步可顺便配置**仓库绑定**（可选）：`本地文件夹`（该空间对应的本机目录）与 `远程仓库 URL`
+  （git 地址；**留空 = 仅本地 / 不进共享仓库**）。没填不影响建空间，之后随时可改（见下节）。
 - 旧空间（seed/迁移）未注册中文名时由 `GET /api/spaces` 推导合并显示原始 id；`seed-roster.mjs` 会补注册名。
+
+## 空间仓库绑定（每个空间自己的本地文件夹 + 远程仓库）
+
+不同工作空间可能对应**不同的本地文件夹 + 远程仓库**组合——如软件流水线跑 `D:/project/DSH/legion` +
+`github.com/Mench-Li/legion.git`，个人业务空间（ozon/shop 之类）则只在自己的本地目录、不进共享仓库：
+
+- **入口**：侧边栏工作空间行上的「⚙」→ `SpaceSettingsModal`（新建空间第一步也可顺便配置）：编辑
+  显示名 / 🏠 本地·私有标记 / **本地文件夹**（该空间对应的本机目录；守护派工与 worktree 隔离以它为仓库根）/
+  **远程仓库 URL**（git 地址；留空 = 仅本地 / 不进共享仓库）。
+- **存储**：team-hub `spaces` 表 `local_dir` / `remote_url` 列（老库启动时自动补列）；`GET /api/spaces`
+  返回这两个字段；`POST /api/spaces` 幂等 upsert（审计记 `space:create` / `space:update`）。
+- **消费方**：`dsh-scrum-worker` 守护在 hub 模式下每轮扫单从 `/api/spaces` 解析**本 scope** 的绑定——
+  命中 `localDir` 时用它覆盖该空间的隔离仓库根与 worker 工作目录（`daemon.json` 新增
+  `repo { root, binding, localDir, remoteUrl }` 自述）；未绑定 / hub 不可达时回退注入配置
+  （`repoRoot` / `workspace` / `worktreeRoot`）。
+- **边界**：remoteUrl 为空 = 仅本地 / 不进共享仓库；push 纪律不变——`w/*` worktree 分支仍一律禁止 push。
 
 ## 技能中心（team-hub v2）
 
@@ -132,7 +150,7 @@ node scripts/serve.mjs --port 5173   # 独立静态服务 → http://127.0.0.1:5
 ```
 workbench/
   src/
-    api.ts            数据层：board/activity/config/missions + SSE 订阅 + 写接口 + team-hub 中枢（hub 探测/scopes/分区创建/exec/models/task）
+    api.ts            数据层：board/activity/config/missions + SSE 订阅 + 写接口 + team-hub 中枢（hub 探测/scopes/分区创建/exec/models/task/空间仓库配置 createSpace·updateSpaceConfig）
     missions.ts       任务集聚合视图（按角色泳道 + 状态统计，客户端兜底）
     components/
       Scene3D.tsx     中央 3D 办公场景（three + @react-three/fiber v9 + drei，懒加载 chunk；智能体可点击）
@@ -141,6 +159,7 @@ workbench/
       TaskDetailModal     任务详情（AI 执行过程 / 时间线 / 验收 / 派 AI 执行）
       AgentTasksModal     智能体任务清单（运行中/待办/已完成 + 模型徽标）
       ModelConfigModal    模型×智能体配置（按角色选默认模型）
+      SpaceSettingsModal  空间设置（名称 / 本地·私有 / 本地文件夹 + 远程仓库绑定）
       HubSchedulerModal / SchedulerModal / GoalModal / NewTaskModal / NewSpaceModal / Toast
   scripts/serve.mjs  生产静态服务（SPA 回退）
 ```

@@ -29,6 +29,7 @@ import { QuickTools } from './components/QuickTools'
 import { CommandBar } from './components/CommandBar'
 import { SkillsPanel } from './components/SkillsPanel'
 import { NewSpaceModal } from './components/NewSpaceModal'
+import { SpaceSettingsModal } from './components/SpaceSettingsModal'
 import { ToastHost, toast } from './components/Toast'
 
 type ConnState = 'connecting' | 'live' | 'error'
@@ -48,6 +49,7 @@ export default function App(): React.JSX.Element {
   const [goalInfo, setGoalInfo] = useState<GoalInfo | null>(null)
   const [execEnabled, setExecEnabled] = useState(false)
   const [showNewSpace, setShowNewSpace] = useState(false)
+  const [spaceSettings, setSpaceSettings] = useState<SpaceInfo | null>(null)
   const [, setConfig] = useState<ApiConfig | null>(null)
   const [conn, setConn] = useState<ConnState>('connecting')
   const [error, setError] = useState('')
@@ -256,6 +258,14 @@ export default function App(): React.JSX.Element {
     selectScope(spaceId)
   }, [selectScope])
 
+  /** 空间设置保存后：关闭弹窗并从 team-hub 重拉空间列表（含仓库绑定）。 */
+  const handleSpaceSaved = useCallback((): void => {
+    setSpaceSettings(null)
+    void fetchSpaces()
+      .then(spaces => setHubSpaces(spaces))
+      .catch(() => undefined)
+  }, [])
+
   /** 发布空间目标：写 team-hub 后刷新当前空间目标。 */
   const handlePublishGoal = useCallback(async (scopeValue: string, objective: string): Promise<void> => {
     await publishGoal(scopeValue, objective)
@@ -327,6 +337,7 @@ export default function App(): React.JSX.Element {
           onNavigate={setActive}
           onSelectScope={selectScope}
           onNewSpace={openNewSpace}
+          onSpaceSettings={s => setSpaceSettings(s)}
           execEnabled={hubMode && scope ? execEnabled : false}
           execDaemonOnline={false}
           onToggleExec={handleToggleExec}
@@ -360,6 +371,7 @@ export default function App(): React.JSX.Element {
         roster={hubMode ? roster : null}
       />
       {showNewSpace && <NewSpaceModal onClose={() => setShowNewSpace(false)} onCreated={handleSpaceCreated} />}
+      {spaceSettings && <SpaceSettingsModal space={spaceSettings} onClose={() => setSpaceSettings(null)} onSaved={handleSpaceSaved} />}
       <ToastHost />
     </div>
   )

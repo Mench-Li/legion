@@ -170,9 +170,36 @@ export async function fetchSpaces(): Promise<SpaceInfo[]> {
   return resp.spaces
 }
 
-/** team-hub v2：新建工作空间（幂等 upsert 名称；local=true 标记为本地/私有空间）。 */
-export function createSpace(id: string, name: string, local = false): Promise<unknown> {
-  return hubPost('/api/spaces', { id, name, private: local })
+/** team-hub v2：新建/更新工作空间（幂等 upsert）。local=true 标记为本地/私有空间；
+ *  repo.localDir/remoteUrl = 该空间绑定的本地文件夹 + 远程仓库（remoteUrl 空 = 仅本地/不进共享仓库）。 */
+export function createSpace(
+  id: string,
+  name: string,
+  local = false,
+  repo?: { localDir?: string; remoteUrl?: string },
+): Promise<unknown> {
+  return hubPost('/api/spaces', {
+    id, name, private: local,
+    localDir: repo?.localDir?.trim() ?? '',
+    remoteUrl: repo?.remoteUrl?.trim() ?? '',
+  })
+}
+
+/** team-hub v2：更新工作空间属性（名称/私有/本地文件夹/远程仓库）——与 /api/spaces 幂等 upsert 同源。 */
+export function updateSpaceConfig(input: {
+  id: string
+  name?: string
+  private?: boolean
+  localDir?: string
+  remoteUrl?: string
+}): Promise<unknown> {
+  return hubPost('/api/spaces', {
+    id: input.id,
+    name: input.name?.trim() || input.id,
+    private: input.private ?? false,
+    localDir: input.localDir?.trim() ?? '',
+    remoteUrl: input.remoteUrl?.trim() ?? '',
+  })
 }
 
 /** team-hub v2：读取指定空间目标（objective + 该空间任务进度）。 */

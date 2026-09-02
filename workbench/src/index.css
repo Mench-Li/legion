@@ -1119,6 +1119,41 @@ body {
   white-space: nowrap;
 }
 
+/* 工作空间侧栏：每空间 ⚙（打开空间设置 / 仓库绑定） */
+.ws-gear {
+  margin-left: 6px;
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0.35;
+  user-select: none;
+}
+.nav-item:hover .ws-gear {
+  opacity: 1;
+}
+
+/* 空间设置弹窗 */
+.modal-narrow {
+  width: 460px;
+  max-width: 94vw;
+}
+
+.space-repo-hint {
+  margin-top: 10px;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--muted-2);
+  border-radius: 6px;
+  background: rgba(64, 255, 160, 0.05);
+  border: 1px dashed rgba(64, 255, 160, 0.25);
+}
+.space-repo-hint code {
+  color: var(--text);
+  font-size: 10px;
+  word-break: break-all;
+  font-family: Consolas, 'Courier New', monospace;
+}
+
 .modal-wide {
   width: 640px;
   max-width: 94vw;

@@ -397,6 +397,41 @@ export function apply(ctx: AppContext, config: Config): void {
   // 项目 scope：显式配置优先，否则用 roles.json 的 name（软件流水线 = software），再否则 default。
   const scope = config.scope !== 'default' ? config.scope : (pipeline?.name ?? 'default')
 
+  // ── 空间仓库绑定：每个工作空间可配置自己的「本地文件夹 + 远程仓库」（team-hub /api/spaces，
+  //    军团指挥台「空间设置」维护）。守护在 hub 模式下每轮扫单刷新本 scope 的绑定：
+  //    命中 localDir 时用它覆盖隔离仓库根与 worker 工作目录（不同空间对应不同本地文件夹/仓库）；
+  //    remoteUrl 只作登记与提示——push 纪律不变（w/* 分支一律禁止 push，本地/私有空间 remoteUrl 为空 = 不进共享仓库）。
+  //    未绑定 / hub 不可达时全部回退注入配置（repoRoot/workspace/worktreeRoot）。
+  let spaceBinding: { localDir: string; remoteUrl: string } | null = null
+
+  async function refreshSpaceBinding(): Promise<void> {
+    if (!useHub) return
+    try {
+      const res = await fetch(`${hubUrl}/api/spaces`)
+      if (!res.ok) return
+      const data = await res.json() as { spaces?: Array<{ id: string; localDir?: string; remoteUrl?: string }> }
+      const hit = (data.spaces ?? []).find(x => x.id === scope)
+      const next = hit && typeof hit.localDir === 'string' && hit.localDir.trim() !== ''
+        ? { localDir: hit.localDir.trim(), remoteUrl: typeof hit.remoteUrl === 'string' ? hit.remoteUrl.trim() : '' }
+        : null
+      if ((next?.localDir ?? '') !== (spaceBinding?.localDir ?? '')) {
+        spaceBinding = next
+        log(next
+          ? `空间仓库绑定：scope=${scope} → 本地文件夹=${next.localDir}（远程=${next.remoteUrl || '仅本地 / 不进共享仓库'}）`
+          : `空间仓库绑定：scope=${scope} 未配置，沿用注入默认仓库（repoRoot=${config.repoRoot}）`)
+      }
+    } catch (e) {
+      log(`空间仓库绑定刷新失败（沿用注入默认）：${String(e)}`)
+    }
+  }
+
+  /** 该 scope 实际使用的隔离 git 仓库根（空间绑定优先，注入配置兜底）。 */
+  function repoRootFor(): string { return spaceBinding?.localDir || config.repoRoot }
+  /** 该 scope 实际使用的 worker 工作目录（isolate=false / worktree 不可用 / 讨论时）。 */
+  function workspaceFor(): string { return spaceBinding?.localDir || config.workspace }
+  /** 该 scope 实际使用的 worktree 目录根。 */
+  function worktreeRootFor(): string { return config.worktreeRoot || join(repoRootFor(), '.legion-worktrees') }
+
   // ── 全局暂停开关：serve.mjs 的 POST /api/pause 写 scrum/control.json {paused:true}。
   // 独立小文件而非 daemon.json 字段，避免守护每轮重写 daemon.json 与暂停写入互相覆盖。
   const controlFile = join(config.scrumDir, 'control.json')
@@ -431,6 +466,12 @@ export function apply(ctx: AppContext, config: Config): void {
         lastSweepAt: new Date().toISOString(),
         uptimeMs: Date.now() - daemonStartedAt,
         model: { provider: selection.provider, model: selection.model },
+        repo: {
+          root: repoRootFor(),
+          binding: spaceBinding ? `space:${scope}` : 'default',
+          localDir: spaceBinding?.localDir ?? '',
+          remoteUrl: spaceBinding?.remoteUrl ?? '',
+        },
       }
       mkdirSync(dirname(daemonStatusFile), { recursive: true })
       writeFileSync(daemonStatusFile, `${JSON.stringify(status, null, 2)}\n`)
@@ -543,7 +584,7 @@ export function apply(ctx: AppContext, config: Config): void {
    * worktree 被清理但分支仍在（blocked 时已提交 WIP）则从分支重新挂载。
    */
   async function prepareWorktree(taskId: string): Promise<string | null> {
-    const root = config.worktreeRoot || join(config.repoRoot, '.legion-worktrees')
+    const root = worktreeRootFor()
     const dir = join(root, taskId)
     try {
       await ensurePrePushGuard()
@@ -557,10 +598,10 @@ export function apply(ctx: AppContext, config: Config): void {
         // 残留空目录/非 worktree 壳（daemon 自有路径），清理后重建
         try { rmSync(dir, { recursive: true, force: true }) } catch { /* 清理失败继续 */ }
       }
-      const branchExists = (await runGit(config.repoRoot, ['rev-parse', '--verify', `w/${taskId}`])).code === 0
+      const branchExists = (await runGit(repoRootFor(), ['rev-parse', '--verify', `w/${taskId}`])).code === 0
       if (branchExists) {
         // 分支还在（上轮已提交 WIP/成果）：从分支挂载续做
-        const add = await runGit(config.repoRoot, ['worktree', 'add', dir, `w/${taskId}`])
+        const add = await runGit(repoRootFor(), ['worktree', 'add', dir, `w/${taskId}`])
         if (add.code !== 0) {
           log(`${taskId} 从分支 w/${taskId} 挂载 worktree 失败：${(add.err || add.out).trim()}`)
           return null
@@ -568,7 +609,7 @@ export function apply(ctx: AppContext, config: Config): void {
         activity('worktree', taskId, `复用分支 w/${taskId}：${dir}`)
         return dir
       }
-      const add = await runGit(config.repoRoot, ['worktree', 'add', '-b', `w/${taskId}`, dir, 'HEAD'])
+      const add = await runGit(repoRootFor(), ['worktree', 'add', '-b', `w/${taskId}`, dir, 'HEAD'])
       if (add.code !== 0) {
         log(`${taskId} worktree 创建失败：${(add.err || add.out).trim()}`)
         return null
@@ -586,7 +627,7 @@ export function apply(ctx: AppContext, config: Config): void {
    * 故用一个通用钩子拦截所有 w/*（worktree 分支）push，放行普通分支。幂等，不覆盖已有自定义钩子。
    */
   async function ensurePrePushGuard(): Promise<void> {
-    const hooksDir = join(config.repoRoot, '.git', 'hooks')
+    const hooksDir = join(repoRootFor(), '.git', 'hooks')
     const hook = join(hooksDir, 'pre-push')
     const marker = 'legion worktree guard'
     const script = `#!/bin/sh
@@ -624,8 +665,8 @@ exit 0
   /** 读取仓库规则（LEGION.md 优先，其次 AGENTS.md），注入派工提示词。 */
   function readRepoRules(): string {
     const candidates = [
-      join(config.repoRoot, 'LEGION.md'),
-      join(config.repoRoot, 'AGENTS.md'),
+      join(repoRootFor(), 'LEGION.md'),
+      join(repoRootFor(), 'AGENTS.md'),
       join(config.scrumDir, 'LEGION.md'),
     ]
     for (const f of candidates) {
@@ -664,7 +705,7 @@ exit 0
     try {
       let path = a.path
       if (a.kind !== 'url') {
-        const base = worktreeDir ?? config.workspace
+        const base = worktreeDir ?? workspaceFor()
         const resolved = isAbsolute(path) ? path : join(base, path)
         if (!existsSync(resolved)) {
           log(`${taskId} 产物不存在，跳过登记：${resolved}`)
@@ -692,13 +733,13 @@ exit 0
    */
   async function autoPromote(taskId: string, dir: string): Promise<boolean> {
     try {
-      const merge = await runGit(config.repoRoot, ['merge', '--no-ff', `w/${taskId}`, '-m', `promote ${taskId}`])
+      const merge = await runGit(repoRootFor(), ['merge', '--no-ff', `w/${taskId}`, '-m', `promote ${taskId}`])
       if (merge.code !== 0) {
         log(`${taskId} 自动合入失败：${(merge.err || merge.out).trim()}`)
         return false
       }
-      await runGit(config.repoRoot, ['worktree', 'remove', '--force', dir])
-      await runGit(config.repoRoot, ['branch', '-D', `w/${taskId}`])
+      await runGit(repoRootFor(), ['worktree', 'remove', '--force', dir])
+      await runGit(repoRootFor(), ['branch', '-D', `w/${taskId}`])
       log(`${taskId} 已自动合入主分支并清理 worktree`)
       return true
     } catch (e) {
@@ -775,6 +816,9 @@ exit 0
       ...(sharedSkills.length > 0
         ? ['', '团队共享技能（必须遵守，来自 team-hub）：', ...sharedSkills.map(s => `【${s.name}】${s.prompt}`)]
         : []),
+      ...(spaceBinding !== null
+        ? ['', `空间仓库绑定（本工作空间）：本地文件夹 = ${spaceBinding.localDir}${spaceBinding.remoteUrl ? `；远程仓库 = ${spaceBinding.remoteUrl}` : '（仅本地，不进共享仓库）'}`]
+        : []),
       '',
       '纪律：',
       '1. 只做实现与验证；状态迁移一律由守护负责。唯一允许调用的 taskctl 命令是 `taskctl progress <id> --by <角色> --percent <0-100> --note <一句话>`（上报进度遥测，不迁移状态）；其余 taskctl / task_* / 看板写接口一律禁止。',
@@ -792,8 +836,8 @@ exit 0
 
   /** 派一个 worker 处理任务（认领已完成或任务本身可开工）。 */
   async function runWorker(t: Task, feedback: Task['comments'], stage?: StageDef): Promise<void> {
-    // 决定工作目录：isolate 时建 worktree（分支 w/<id>），失败回退 workspace
-    let cwd = config.workspace
+    // 决定工作目录：isolate 时建 worktree（分支 w/<id>），失败回退工作目录（可能为空间绑定的本地文件夹）
+    let cwd = workspaceFor()
     let worktreeDir: string | null = null
     if (config.isolate) {
       worktreeDir = await prepareWorktree(t.id)
@@ -848,7 +892,7 @@ exit 0
         // 流水线中间阶段：自动合入主分支 → done → 流转下一角色；合入失败转 in_review 等人工，不静默丢产出
         const merged = worktreeDir !== null ? await autoPromote(t.id, worktreeDir) : true
         if (!merged) {
-          await safeComment(t.id, `⚠ ${stage.label}完成，但自动合入主分支失败（可能冲突），改动保留在分支 w/${t.id}。请人工合入并推进：git -C ${config.repoRoot} merge --no-ff w/${t.id} 解决冲突 → git -C ${config.repoRoot} worktree remove --force ${worktreeDir} → git -C ${config.repoRoot} branch -D w/${t.id} → 将军把任务 transition 到 done`)
+          await safeComment(t.id, `⚠ ${stage.label}完成，但自动合入主分支失败（可能冲突），改动保留在分支 w/${t.id}。请人工合入并推进：git -C ${repoRootFor()} merge --no-ff w/${t.id} 解决冲突 → git -C ${repoRootFor()} worktree remove --force ${worktreeDir} → git -C ${repoRootFor()} branch -D w/${t.id} → 将军把任务 transition 到 done`)
           await transitionTo(t.id, 'in_review')
           activity('blocked', t.id, `${stage.label}完成但自动合入失败，转 in_review 等待人工合入`)
           log(`${t.id} → in_review（中间阶段自动合入失败，等待人工处理）`)
@@ -863,7 +907,7 @@ exit 0
         // 最终阶段或单角色模式：进 in_review 供将军验收
         await transitionTo(t.id, 'in_review')
         const promoteHint = worktreeDir !== null
-          ? `\n[worktree] 改动在分支 w/${t.id}。验收通过后 promote：git -C ${config.repoRoot} merge --no-ff w/${t.id}；放弃：git -C ${config.repoRoot} worktree remove --force ${worktreeDir} && git -C ${config.repoRoot} branch -D w/${t.id}`
+          ? `\n[worktree] 改动在分支 w/${t.id}。验收通过后 promote：git -C ${repoRootFor()} merge --no-ff w/${t.id}；放弃：git -C ${repoRootFor()} worktree remove --force ${worktreeDir} && git -C ${repoRootFor()} branch -D w/${t.id}`
           : ''
         await safeComment(t.id, `✓ 完成并提交验收：${report.summary}\n证据：${report.evidence}${promoteHint}`)
         activity('done', t.id, `完成：${report.summary}${worktreeDir !== null ? `（worktree 分支 w/${t.id} 待 promote）` : ''}`)
@@ -1035,7 +1079,7 @@ exit 0
       return
     }
     activity('claim', t.id, '进入需求讨论群聊（将军 + 各角色士兵）')
-    const cwd = config.workspace
+    const cwd = workspaceFor()
     const docPath = join(config.scrumDir, 'discussion', `${t.id}.md`)
     mkdirSync(dirname(docPath), { recursive: true })
     let text = `# 需求讨论：${t.title}\n\n> 目标：${t.description}\n`
@@ -1119,7 +1163,9 @@ exit 0
         writeDaemonStatus(0)
         return
       }
-      await ensureForeman(config.workspace)
+      // 刷新本 scope 的空间仓库绑定（hub 模式：/api/spaces；命中 localDir → 本空间工作/隔离仓库）
+      await refreshSpaceBinding()
+      await ensureForeman(workspaceFor())
       await fetchSkills()
       let tasks: Task[]
       try {

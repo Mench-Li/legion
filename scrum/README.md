@@ -82,6 +82,49 @@ curl -X POST http://127.0.0.1:4820/api/comment -H "Authorization: Bearer <t>" -H
 
 写接口统一返回 `{"ok":true,"task":<taskctl 输出 JSON>}`；脚本可直接 `fetch` 调用（CORS 已开，含 OPTIONS 预检）。
 
+### GET /api/missions —— 服务端任务集聚合视图
+
+把 `tasks.json` 按角色（`role` → `soldier` 兜底）聚成并行的「任务集」泳道，命名优先取 `roles.json` 的 `pipeline` 中文标签，未匹配回退原始 role id。这是军团指挥台（workbench）「当前任务集」面板的服务端数据源；不含 `canceled` 任务。
+
+```bash
+curl http://127.0.0.1:4820/api/missions
+curl "http://127.0.0.1:4820/api/missions?scope=software"
+```
+
+返回：
+
+```json
+{
+  "generatedAt": "2026-09-01T10:42:44.762Z",
+  "scope": null,
+  "scopeAware": false,
+  "missions": [
+    {
+      "role": "soldier-auto",
+      "name": "soldier-auto",
+      "total": 1, "done": 0, "inProgress": 0, "inReview": 1, "blocked": 0, "waiting": 0,
+      "percent": 0, "status": "running",
+      "tasks": [{ "id": "T-004", "title": "…", "status": "in_review" }]
+    }
+  ]
+}
+```
+
+- `status`：`running` / `waiting` / `blocked` / `done`（按该顺序 + percent 降序排列）。
+- `scopeAware`：v1 文件模式恒为 `false`——`tasks.json` 无 scope 字段，任意 `?scope=` 都返回全部任务；真分区由 team-hub v2（SQLite `tasks.scope`）提供。
+
+### POST /api/pause、/api/resume —— 全局暂停 / 继续
+
+写 `scrum/control.json`（独立小文件，避免与守护每轮重写的 `daemon.json` 互相覆盖）。守护（`dsh-scrum-worker`，已重建 lib）每轮扫单前读取 `control.json`：`paused:true` 时跳过认领/派工但保留心跳（`daemon.json` 继续更新并带 `paused` 字段），并在日志记录「⏸ 全局暂停」；`false` 时恢复扫单。
+
+```bash
+curl -X POST http://127.0.0.1:4820/api/pause  -H "Authorization: Bearer <t>" -H "Content-Type: application/json" -d '{}'
+curl -X POST http://127.0.0.1:4820/api/resume -H "Authorization: Bearer <t>" -H "Content-Type: application/json" -d '{}'
+```
+
+- 返回 `{"ok":true,"paused":true|false}`；与写接口同样受 `--token` 鉴权（未带令牌 → 401）。
+- `/api/config` 响应新增 `paused` 字段，页面据此显示暂停状态（军团指挥台底部命令栏的「⏸ 全部暂停 / ▶ 全部继续」即调用这两个接口）。
+
 ## 士兵守护（自动工人，dsh-scrum-worker）
 
 `@dsh-external/dsh-scrum-worker` 是一个 daemon-loop 形态的守护插件（经 dsh-super-injector 注入 web profile）。它每 `intervalMs` 扫一次任务库，代替人类盯板：

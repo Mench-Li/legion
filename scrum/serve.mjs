@@ -11,12 +11,15 @@
  *   /api/board/events  → SSE：board.json 变化时推送完整看板数据
  *   /api/activity         → 最近动态事件（守护生命周期流，JSON 数组，?limit=N）
  *   /api/activity/events  → SSE：activity.jsonl 追加时推送新事件
- *   /api/config        → { auth, host, port } 供页面探测是否需要令牌
+ *   /api/config        → { auth, host, port, pipeline, daemon, paused } 供页面探测是否需要令牌
+ *   /api/missions      → 服务端任务集聚合视图（按角色泳道 + 进度；?scope= 在 v1 无分区恒返回全部）
  *
  * 写接口（POST，配置了 token 时要求携带令牌）：
  *   /api/create        → 新建任务（backlog）→ 自动 render + SSE 广播
  *   /api/transition    → 状态迁移（复用 taskctl 状态机/乐观锁/角色纪律）
  *   /api/comment       → 追加评论（承载退回反馈/需求变更）
+ *   /api/pause         → 全局暂停：写 scrum/control.json {paused:true}，守护每轮扫单前读取并跳过
+ *   /api/resume        → 全局继续：写 scrum/control.json {paused:false}
  *
  * 令牌携带方式（任选其一）：Authorization: Bearer <t> / x-dsh-token: <t> / ?token=<t>。
  * GET 保持开放：看板数据非机密；拖拽/下达等写操作必须带令牌。
@@ -29,7 +32,7 @@
  */
 import { createServer } from 'node:http'
 import { spawn } from 'node:child_process'
-import { readFile, watch, watchFile } from 'node:fs'
+import { readFile, readFileSync, watch, watchFile, writeFileSync } from 'node:fs'
 import { dirname, extname, join, normalize, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -40,6 +43,7 @@ const ACTIVITY_FILE = join(SCRUM, 'activity.jsonl')
 const PATCHES_DIR = join(SCRUM, 'patches')
 const TASKCTL = join(SCRUM, 'taskctl.mjs')
 const RENDER = join(SCRUM, 'render.mjs')
+const CONTROL_FILE = join(SCRUM, 'control.json')
 
 const args = process.argv.slice(2)
 
@@ -168,6 +172,23 @@ function runRender() {
   })
 }
 
+/**
+ * 全局控制开关（暂停/继续）。独立小文件（control.json）而非 daemon.json 字段：
+ * 守护每轮重写 daemon.json，若暂停状态放里面会被覆盖；control.json 只由 serve.mjs 写、
+ * 守护每轮读，双方互不覆盖。
+ */
+function readControl() {
+  try {
+    return JSON.parse(readFileSync(CONTROL_FILE, 'utf8'))
+  } catch {
+    return {}
+  }
+}
+
+function writeControl(patch) {
+  writeFileSync(CONTROL_FILE, `${JSON.stringify({ ...readControl(), ...patch }, null, 2)}\n`)
+}
+
 /** 请求是否携带合法令牌（token 未配置时恒放行） */
 function authorized(req) {
   if (!token) return true
@@ -220,6 +241,16 @@ async function handleWrite(req, res, run) {
     const status = message.includes('乐观锁') ? 409 : 400
     json(res, status, { error: message })
   }
+}
+
+/** 处理一次控制类写操作（全局暂停/继续）：校验令牌 → 写 control.json。 */
+async function handleControl(req, res, paused) {
+  if (!authorized(req)) {
+    json(res, 401, { error: '缺少或错误的令牌（--token 已启用）；用 ?token=… 或 Authorization: Bearer … 携带' })
+    return
+  }
+  writeControl({ paused })
+  json(res, 200, { ok: true, paused })
 }
 
 const server = createServer((req, res) => {
@@ -299,6 +330,69 @@ const server = createServer((req, res) => {
     return
   }
 
+  if (req.method === 'POST' && (url.pathname === '/api/pause' || url.pathname === '/api/resume')) {
+    void handleControl(req, res, url.pathname === '/api/pause')
+    return
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/missions') {
+    const scope = url.searchParams.get('scope') ?? null
+    readFile(join(SCRUM, 'tasks.json'), 'utf8', (e1, tasksRaw) => {
+      readFile(join(ROOT, 'roles.json'), 'utf8', (e2, rolesRaw) => {
+        if (e1) {
+          json(res, 200, { generatedAt: new Date().toISOString(), scope, scopeAware: false, missions: [] })
+          return
+        }
+        const labels = { unassigned: '未指派' }
+        try {
+          for (const s of JSON.parse(rolesRaw).stages ?? []) labels[s.role] = s.label
+        } catch { /* roles.json 缺失/损坏则回退原始 role 名 */ }
+        let tasks = {}
+        try { tasks = JSON.parse(tasksRaw).tasks ?? {} } catch { /* tasks.json 损坏按空处理 */ }
+        const byRole = new Map()
+        for (const t of Object.values(tasks)) {
+          if (t.status === 'canceled') continue
+          const role = t.role ?? t.soldier ?? 'unassigned'
+          const arr = byRole.get(role) ?? []
+          arr.push(t)
+          byRole.set(role, arr)
+        }
+        const missions = [...byRole.entries()].map(([role, list]) => {
+          const done = list.filter(t => t.status === 'done').length
+          const inProgress = list.filter(t => t.status === 'in_progress').length
+          const inReview = list.filter(t => t.status === 'in_review').length
+          const blocked = list.filter(t => t.status === 'blocked').length
+          const waiting = list.filter(t => t.status === 'todo' || t.status === 'backlog').length
+          const total = list.length
+          const percent = total === 0 ? 0 : Math.round((done / total) * 100)
+          let status = 'running'
+          if (blocked > 0) status = 'blocked'
+          else if (done === total) status = 'done'
+          else if (inProgress === 0 && inReview === 0) status = 'waiting'
+          return {
+            role,
+            name: labels[role] ?? role,
+            total,
+            done,
+            inProgress,
+            inReview,
+            blocked,
+            waiting,
+            percent,
+            status,
+            tasks: list.map(t => ({ id: t.id, title: t.title, status: t.status })),
+          }
+        })
+        const rank = { running: 0, waiting: 1, blocked: 2, done: 3 }
+        missions.sort((a, b) => rank[a.status] - rank[b.status] || b.percent - a.percent)
+        // v1 文件模式无 scope 字段：请求任意 scope 都返回全部任务（scopeAware=false），
+        // 真分区由 team-hub v2（SQLite tasks.scope）提供。
+        json(res, 200, { generatedAt: new Date().toISOString(), scope, scopeAware: false, missions })
+      })
+    })
+    return
+  }
+
   if (req.method === 'GET' && url.pathname === '/api/patch') {
     const patchId = url.searchParams.get('id') ?? ''
     if (!/^[A-Za-z0-9-]+$/.test(patchId)) {
@@ -326,7 +420,7 @@ const server = createServer((req, res) => {
           pipeline = { name: r.name ?? null, stages: (r.stages ?? []).map(s => ({ role: s.role ?? null, label: s.label ?? null })) }
         } catch { /* roles.json 缺失/损坏则 pipeline=null */ }
         try { daemon = JSON.parse(daemonRaw) } catch { /* daemon.json 缺失则 daemon=null */ }
-        json(res, 200, { auth: Boolean(token), host, port, pipeline, daemon })
+        json(res, 200, { auth: Boolean(token), host, port, pipeline, daemon, paused: readControl().paused === true })
       })
     })
     return

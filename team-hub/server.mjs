@@ -13,18 +13,21 @@
  *   TEAM_HUB_TOKEN 团队 token（非空时写操作需 Authorization: Bearer <token>）
  *
  * API：
- *   GET  /api/board?scope=&status=&soldier=&role=   任务列表
+ *   GET  /api/board?scope=&status=&soldier=&role=   任务列表（SQLite，scope 一等字段）
+ *   GET  /api/missions?scope=                       任务集聚合视图（scopeAware=true，真分区）
+ *   GET  /api/scopes                                真实存在的分区（tasks+members 的 distinct scope）
  *   GET  /api/activity?limit=                      最近动态（审计）
  *   GET  /api/members                              成员在线状态
  *   GET  /api/events                               SSE 事件流
- *   POST /api/create|claim|transition|advance|comment|reject|promote   写操作
- *   POST /api/heartbeat                            成员心跳（by + kind）
+ *   POST /api/create|claim|transition|advance|reassign|release-stale|comment|heartbeat   写操作（body 带 by + scope）
+ *   POST /api/skills/register|review|grant         团队共享技能（scope-owned + grant）
+ *   GET  /api/skills[?scope=&member=&id=]          技能查询（默认只返回 published）
  *
  * 状态机 + 乐观锁 + 角色纪律与 taskctl.mjs 一致；scope 是任务分区的一等字段。
  */
 import http from 'node:http'
 import { DatabaseSync } from 'node:sqlite'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -89,6 +92,75 @@ db.exec(`
     online INTEGER DEFAULT 0
   )
 `)
+// 编队（roster）：每个工作空间（scope）的专属智能体队伍——不同空间不同职业，
+// 任务分区 + 编队分区双管齐下，空间间智能体差异化、专业化。
+db.exec(`
+  CREATE TABLE IF NOT EXISTS roster (
+    scope TEXT NOT NULL,
+    role TEXT NOT NULL,
+    name TEXT NOT NULL,
+    kind TEXT DEFAULT '',
+    avatar TEXT DEFAULT '🤖',
+    sort INTEGER DEFAULT 0,
+    PRIMARY KEY (scope, role)
+  )
+`)
+// 工作空间实体（scope 的注册名；未注册的既有 scope 由 GET /api/spaces 推导合并）。
+db.exec(`
+  CREATE TABLE IF NOT EXISTS spaces (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    private INTEGER DEFAULT 0,
+    createdAt TEXT,
+    updatedAt TEXT
+  )
+`)
+// 迁移：为既有数据库补充 private 标记（本地/私有空间——数据只在本地，不进 git 仓库）。
+{
+  const spaceCols = db.prepare('PRAGMA table_info(spaces)').all().map(c => c.name)
+  if (!spaceCols.includes('private')) db.exec('ALTER TABLE spaces ADD COLUMN private INTEGER DEFAULT 0')
+}
+// 空间目标（goal）：每个工作空间一个 objective，任务集围绕它推进。
+db.exec(`
+  CREATE TABLE IF NOT EXISTS goal (
+    scope TEXT PRIMARY KEY,
+    objective TEXT NOT NULL,
+    createdAt TEXT,
+    updatedAt TEXT
+  )
+`)
+// 持续执行编排：每空间开关 + 用户点「派 AI 执行」的请求队列。
+db.exec(`
+  CREATE TABLE IF NOT EXISTS exec_state (
+    scope TEXT PRIMARY KEY,
+    enabled INTEGER DEFAULT 0,
+    updatedAt TEXT
+  )
+`)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS exec_requests (
+    taskId TEXT PRIMARY KEY,
+    scope TEXT,
+    status TEXT DEFAULT 'pending',
+    createdAt TEXT
+  )
+`)
+// 智能体默认模型配置（每空间每角色）：执行该角色任务时使用的模型，用于按任务复杂度省 token。
+db.exec(`
+  CREATE TABLE IF NOT EXISTS agent_models (
+    scope TEXT NOT NULL,
+    role TEXT NOT NULL,
+    provider TEXT,
+    model TEXT,
+    updatedAt TEXT,
+    PRIMARY KEY (scope, role)
+  )
+`)
+// 不会自动执行的任务角色（写码/审查/测试/部署等改动仓库的阶段，交给用户点「派 AI 执行」把关）。
+const NON_AUTO_ROLES = new Set([
+  'coder', 'developer', 'engineer', 'reviewer', 'tester', 'qa', 'devops', 'deploy', 'release', 'test-designer', 'implementer',
+  '编码', '实现', '审查', '测试', '部署', '发布', '运维', '工程师', '开发',
+])
 db.exec(`
   CREATE TABLE IF NOT EXISTS audit (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -146,6 +218,16 @@ function parseJson(text, fallback) {
   } catch {
     return fallback
   }
+}
+
+/** legion/roles.json 的流水线角色 → 中文标签表（任务集命名用）。 */
+function pipelineLabels() {
+  const labels = { unassigned: '未指派' }
+  try {
+    const r = JSON.parse(readFileSync(join(ROOT, 'roles.json'), 'utf8'))
+    for (const s of r.stages ?? []) labels[s.role] = s.label
+  } catch { /* roles.json 缺失/损坏则回退原始 role 名 */ }
+  return labels
 }
 
 function rowToTask(row) {
@@ -350,6 +432,43 @@ function createTask(input) {
       VALUES (?, ?, ?, ?, ?, ?, 1, NULL, NULL, NULL, ?, ?, ?, ?, '[]', '[]', '[]', '[]', '[]', ?, ?)
     `).run(t.id, t.title, t.description, JSON.stringify(t.acceptance), t.priority, t.status, t.ordersVersion, t.parent, t.role, t.scope, t.createdAt, t.updatedAt)
     return getTask(id)
+  })
+}
+
+// ── 目标自动分解：发布目标时按空间编队生成「阶段任务链」，指派给对应智能体 ──
+// 通用阶段标签（按编队 sort 顺序逐个分派；超出循环）。software 编队天然按流水线排序，
+// 故 requirement→需求讨论 / researcher→方案设计 / breaker→任务拆分 … 语义一一对应。
+const GOAL_STAGE_LABELS = ['需求讨论', '方案设计', '任务拆分', '用例设计', '代码开发', '代码审查', '测试验收', '发布部署']
+
+function createGoalChain(scope, objective) {
+  return withTx(() => {
+    const nowIso = now()
+    // 重置：取消该空间旧的「自动目标链」任务（未完成的），避免重复发布累积
+    const old = db.prepare("SELECT id FROM tasks WHERE scope = ? AND description LIKE '%[auto-goal]%' AND status NOT IN ('done','canceled')").all(scope)
+    for (const o of old) {
+      db.prepare("UPDATE tasks SET status='canceled', version=version+1, updatedAt=? WHERE id=?").run(nowIso, o.id)
+    }
+    // 按编队顺序生成本次目标的任务链，每个智能体分到一个阶段任务并串成依赖
+    const roster = db.prepare('SELECT role, name, kind, avatar FROM roster WHERE scope = ? ORDER BY sort, role').all(scope)
+    const pipe = pipelineLabels()
+    const created = []
+    let prev = null
+    roster.forEach((r, i) => {
+      // 阶段名：优先 roles.json 流水线标签（与该空间任务集泳道名一致），否则用通用阶段标签
+      const named = pipe[r.role] && pipe[r.role] !== r.role ? pipe[r.role] : null
+      const label = named ?? GOAL_STAGE_LABELS[i % GOAL_STAGE_LABELS.length]
+      const id = nextId()
+      const title = `【${label}】${objective.trim().slice(0, 40)}`
+      const description = `[auto-goal]\n目标：${objective.trim()}\n本阶段：${label}（${r.name}）`
+      db.prepare(`
+        INSERT INTO tasks (id, title, description, acceptance, priority, status, version, soldier, claimedRound, claimedAt,
+          ordersVersion, parent, role, scope, blocks, blockedBy, comments, evidence, patches, createdAt, updatedAt)
+        VALUES (?, ?, ?, '[]', 'high', 'todo', 1, ?, NULL, NULL, 1, NULL, ?, ?, '[]', ?, '[]', '[]', '[]', ?, ?)
+      `).run(id, title, description, r.role, r.role, scope, JSON.stringify(prev ? [prev] : []), nowIso, nowIso)
+      created.push({ id, role: r.role, label })
+      prev = id
+    })
+    return { count: created.length, tasks: created }
   })
 }
 
@@ -645,6 +764,91 @@ async function handle(req, res) {
       return
     }
 
+    if (req.method === 'GET' && path === '/api/exec') {
+      const scopeParam = url.searchParams.get('scope') ?? ''
+      const hit = scopeParam ? db.prepare('SELECT * FROM exec_state WHERE scope = ?').get(scopeParam) : undefined
+      json(res, 200, { scope: scopeParam, enabled: !!hit?.enabled, updatedAt: hit?.updatedAt ?? null })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/exec') {
+      await handleWrite(req, res, (body, by, scope) => {
+        const targetScope = typeof body.scope === 'string' && body.scope.trim().length > 0 ? body.scope.trim() : scope
+        const enabled = body.enabled === true
+        db.prepare('INSERT INTO exec_state (scope, enabled, updatedAt) VALUES (?, ?, ?) ON CONFLICT(scope) DO UPDATE SET enabled=excluded.enabled, updatedAt=excluded.updatedAt')
+          .run(targetScope, enabled ? 1 : 0, now())
+        audit(by, targetScope, 'exec:toggle', null, { enabled })
+        return { scope: targetScope, enabled }
+      })
+      return
+    }
+    if (req.method === 'GET' && path === '/api/exec/queue') {
+      // 应由编排自动执行的任务：自动目标链中「非写码角色」的待办/进行中任务。
+      const scopeParam = url.searchParams.get('scope') ?? undefined
+      const rows = listTasks({ scope: scopeParam }).filter(t =>
+        (t.status === 'todo' || t.status === 'in_progress') &&
+        String(t.description ?? '').includes('[auto-goal]') &&
+        !NON_AUTO_ROLES.has(t.role ?? ''),
+      )
+      const pending = new Set(db.prepare("SELECT taskId FROM exec_requests WHERE status='pending'").all().map(r => r.taskId))
+      json(res, 200, { scope: scopeParam ?? 'all', tasks: rows.filter(t => !pending.has(t.id)) })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/exec/request') {
+      // 用户点「派 AI 执行」：记录请求（含写码类任务），由执行守护消费。
+      await handleWrite(req, res, (body, by, scope) => {
+        const id = body.taskId
+        if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 taskId')
+        const t = db.prepare('SELECT scope FROM tasks WHERE id = ?').get(id)
+        if (!t) throw new Error(`未知任务 ${id}`)
+        db.prepare('INSERT INTO exec_requests (taskId, scope, status, createdAt) VALUES (?, ?, \'pending\', ?) ON CONFLICT(taskId) DO UPDATE SET status=\'pending\'')
+          .run(id, t.scope, now())
+        audit(by, t.scope, 'exec:request', id, {})
+        return { taskId: id, scope: t.scope, status: 'pending' }
+      })
+      return
+    }
+    if (req.method === 'GET' && path === '/api/exec/requests') {
+      const rows = db.prepare("SELECT * FROM exec_requests WHERE status='pending' ORDER BY createdAt").all()
+      json(res, 200, rows.map(r => ({ taskId: r.taskId, scope: r.scope, createdAt: r.createdAt })))
+      return
+    }
+
+    // 智能体默认模型配置
+    if (req.method === 'GET' && path === '/api/models') {
+      const scopeParam = url.searchParams.get('scope') ?? undefined
+      const rows = scopeParam
+        ? db.prepare('SELECT scope, role, provider, model FROM agent_models WHERE scope = ?').all(scopeParam)
+        : db.prepare('SELECT scope, role, provider, model FROM agent_models').all()
+      json(res, 200, rows)
+      return
+    }
+    if (req.method === 'POST' && path === '/api/models') {
+      await handleWrite(req, res, (body, by, scope) => {
+        const role = typeof body.role === 'string' ? body.role.trim() : ''
+        if (!role) throw new Error('缺少参数 role')
+        const targetScope = typeof body.scope === 'string' && body.scope.trim().length > 0 ? body.scope.trim() : scope
+        const provider = typeof body.provider === 'string' ? body.provider.trim() : ''
+        const model = typeof body.model === 'string' ? body.model.trim() : ''
+        if (!provider || !model) throw new Error('缺少 provider 或 model')
+        db.prepare('INSERT INTO agent_models (scope, role, provider, model, updatedAt) VALUES (?, ?, ?, ?, ?) ON CONFLICT(scope, role) DO UPDATE SET provider=excluded.provider, model=excluded.model, updatedAt=excluded.updatedAt')
+          .run(targetScope, role, provider, model, now())
+        audit(by, targetScope, 'model:set', null, { role, provider, model })
+        return { scope: targetScope, role, provider, model }
+      })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/models/clear') {
+      await handleWrite(req, res, (body, by, scope) => {
+        const role = typeof body.role === 'string' ? body.role.trim() : ''
+        if (!role) throw new Error('缺少参数 role')
+        const targetScope = typeof body.scope === 'string' && body.scope.trim().length > 0 ? body.scope.trim() : scope
+        db.prepare('DELETE FROM agent_models WHERE scope = ? AND role = ?').run(targetScope, role)
+        audit(by, targetScope, 'model:clear', null, { role })
+        return { scope: targetScope, role }
+      })
+      return
+    }
+
     // 读接口
     if (req.method === 'GET' && path === '/api/board') {
       json(res, 200, listTasks({
@@ -655,6 +859,110 @@ async function handle(req, res) {
       }))
       return
     }
+    if (req.method === 'GET' && path === '/api/task') {
+      // 单任务详情（任务详情视图数据源）。
+      const id = url.searchParams.get('id')
+      if (!id) { json(res, 400, { error: '缺少参数 id' }); return }
+      const row = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id)
+      if (!row) { json(res, 404, { error: `未知任务 ${id}` }); return }
+      json(res, 200, rowToTask(row))
+      return
+    }
+    if (req.method === 'GET' && path === '/api/missions') {
+      // 真 scope 分区：按 tasks.scope 过滤聚合（与 serve.mjs /api/missions 响应同构，scopeAware=true）。
+      const scopeParam = url.searchParams.get('scope') ?? undefined
+      const rows = listTasks({ scope: scopeParam })
+      const labels = pipelineLabels()
+      const byRole = new Map()
+      for (const t of rows) {
+        if (t.status === 'canceled') continue
+        const role = t.role ?? t.soldier ?? 'unassigned'
+        const arr = byRole.get(role) ?? []
+        arr.push(t)
+        byRole.set(role, arr)
+      }
+      const missions = [...byRole.entries()].map(([role, list]) => {
+        const done = list.filter(t => t.status === 'done').length
+        const inProgress = list.filter(t => t.status === 'in_progress').length
+        const inReview = list.filter(t => t.status === 'in_review').length
+        const blocked = list.filter(t => t.status === 'blocked').length
+        const waiting = list.filter(t => t.status === 'todo' || t.status === 'backlog').length
+        const total = list.length
+        const percent = total === 0 ? 0 : Math.round((done / total) * 100)
+        let status = 'running'
+        if (blocked > 0) status = 'blocked'
+        else if (done === total) status = 'done'
+        else if (inProgress === 0 && inReview === 0) status = 'waiting'
+        return {
+          role,
+          name: labels[role] ?? role,
+          total,
+          done,
+          inProgress,
+          inReview,
+          blocked,
+          waiting,
+          percent,
+          status,
+          tasks: list.map(t => ({ id: t.id, title: t.title, status: t.status })),
+        }
+      })
+      const rank = { running: 0, waiting: 1, blocked: 2, done: 3 }
+      missions.sort((a, b) => rank[a.status] - rank[b.status] || b.percent - a.percent)
+      json(res, 200, { generatedAt: now(), scope: scopeParam ?? null, scopeAware: true, missions })
+      return
+    }
+    if (req.method === 'GET' && path === '/api/scopes') {
+      // 真实存在的分区：任务 + 成员表中的 distinct scope。
+      const fromTasks = db.prepare("SELECT DISTINCT scope FROM tasks WHERE scope IS NOT NULL AND scope != '' ORDER BY scope").all()
+      const fromMembers = db.prepare("SELECT DISTINCT scope FROM members WHERE scope IS NOT NULL AND scope != '' ORDER BY scope").all()
+      const scopes = [...new Set([...fromTasks, ...fromMembers].map(r => r.scope))]
+      json(res, 200, { scopes })
+      return
+    }
+    if (req.method === 'GET' && path === '/api/spaces') {
+      // 工作空间列表：spaces 表注册名 + 未注册的既有 scope（roster/tasks）推导合并。
+      const known = db.prepare('SELECT * FROM spaces ORDER BY id').all()
+      const fromRoster = db.prepare("SELECT DISTINCT scope FROM roster WHERE scope != '' ORDER BY scope").all().map(r => r.scope)
+      const fromTasks = db.prepare("SELECT DISTINCT scope FROM tasks WHERE scope IS NOT NULL AND scope != '' ORDER BY scope").all().map(r => r.scope)
+      const byId = new Map(known.map(k => [k.id, k]))
+      const ids = [...new Set([...byId.keys(), ...fromRoster, ...fromTasks])]
+      const countStmt = db.prepare('SELECT COUNT(*) AS c FROM roster WHERE scope = ?')
+      const spaces = ids.map(id => {
+        const k = byId.get(id)
+        return { id, name: k?.name ?? id, private: !!k?.private, agentCount: countStmt.get(id).c }
+      })
+      json(res, 200, { spaces })
+      return
+    }
+    if (req.method === 'GET' && path === '/api/goal') {
+      // 空间目标：objective + 按该空间任务实时算进度（done / 非 canceled 总数）。
+      const scopeParam = url.searchParams.get('scope') ?? ''
+      const hit = scopeParam ? db.prepare('SELECT * FROM goal WHERE scope = ?').get(scopeParam) : undefined
+      const tasks = scopeParam ? listTasks({ scope: scopeParam }).filter(t => t.status !== 'canceled') : []
+      const done = tasks.filter(t => t.status === 'done').length
+      const total = tasks.length
+      json(res, 200, {
+        scope: scopeParam,
+        objective: hit?.objective ?? null,
+        done, total,
+        percent: total > 0 ? Math.round((done / total) * 100) : 0,
+        updatedAt: hit?.updatedAt ?? null,
+      })
+      return
+    }
+    if (req.method === 'GET' && path === '/api/agents') {
+      // 全局智能体目录：所有空间编队的并集（按 role 去重，标注来源空间），供选人入编。
+      const rows = db.prepare('SELECT scope, role, name, kind, avatar FROM roster ORDER BY role, scope').all()
+      const byRole = new Map()
+      for (const r of rows) {
+        const e = byRole.get(r.role) ?? { role: r.role, name: r.name, kind: r.kind, avatar: r.avatar, scopes: [] }
+        e.scopes.push(r.scope)
+        byRole.set(r.role, e)
+      }
+      json(res, 200, { agents: [...byRole.values()] })
+      return
+    }
     if (req.method === 'GET' && path === '/api/members') {
       const rows = db.prepare('SELECT * FROM members ORDER BY lastSeenAt DESC').all()
       json(res, 200, rows.map((r) => ({
@@ -663,9 +971,80 @@ async function handle(req, res) {
       })))
       return
     }
+    if (req.method === 'GET' && path === '/api/roster') {
+      // 工作空间专属编队：scope 的智能体队伍 + 每人当前状态/任务（按该空间任务实时投影）。
+      // 合流：编队岗位（roster.role 匹配任务的 role/soldier）之外，未入编队但认领了该空间
+      // 任务的执行者（如旧士兵名）也一并返回，避免切换空间后信息丢失。
+      // scope 缺省(或空)= 聚合全部空间（供「全部空间」视图），每个智能体带 scope 标注。
+      const scopeParam = (url.searchParams.get('scope') ?? '').trim()
+      const scopes = scopeParam
+        ? [scopeParam]
+        : [...new Set([
+            ...db.prepare("SELECT DISTINCT scope FROM roster WHERE scope != '' ORDER BY scope").all().map(r => r.scope),
+            ...db.prepare("SELECT DISTINCT scope FROM tasks WHERE scope IS NOT NULL AND scope != '' ORDER BY scope").all().map(r => r.scope),
+          ])]
+      const agents = []
+      for (const scope of scopes) {
+        const roster = db.prepare('SELECT * FROM roster WHERE scope = ? ORDER BY sort, role').all(scope)
+        const rosterRoles = new Set(roster.map(r => r.role))
+        const tasks = listTasks({ scope })
+        const bySoldier = new Map()
+        for (const t of tasks) {
+          if (t.status === 'canceled' || !t.soldier) continue
+          if (rosterRoles.has(t.soldier)) continue
+          const arr = bySoldier.get(t.soldier) ?? []
+          arr.push(t)
+          bySoldier.set(t.soldier, arr)
+        }
+        const summarize = (id, label, list, kind = '', avatar = '🤖', external = false) => {
+          const mine = list.filter(t => t.status !== 'done')
+          const done = list.filter(t => t.status === 'done').length
+          const inProgress = mine.filter(t => t.status === 'in_progress').length
+          const inReview = mine.filter(t => t.status === 'in_review').length
+          const blocked = mine.filter(t => t.status === 'blocked').length
+          let mode = 'idle'
+          if (blocked > 0) mode = 'blocked'
+          else if (inReview > 0) mode = 'review'
+          else if (inProgress > 0) mode = 'busy'
+          const chips = []
+          if (inProgress > 0) chips.push({ label: `进行中 ${inProgress}`, cls: 'green' })
+          if (inReview > 0) chips.push({ label: `待验收 ${inReview}`, cls: 'yellow' })
+          if (blocked > 0) chips.push({ label: `受阻 ${blocked}`, cls: 'red' })
+          if (mine.length === 0) {
+            // 无在办任务：有历史则「已完成 N」，否则「待命」
+            if (done > 0) chips.push({ label: `已完成 ${done}`, cls: '' })
+            else chips.push({ label: '待命', cls: '' })
+          } else if (chips.length === 0) chips.push({ label: '工作中', cls: '' })
+          return {
+            role: id, name: label, kind, avatar, mode, chips, done, total: list.length,
+            external, scope,
+            tasks: mine.map(t => ({ id: t.id, title: t.title, status: t.status })),
+          }
+        }
+        // 编队岗位优先，再追加未入编队的活跃执行者
+        for (const r of roster) {
+          const mine = tasks.filter(t => t.soldier === r.role && t.status !== 'canceled')
+          agents.push(summarize(r.role, r.name, mine, r.kind, r.avatar, false))
+        }
+        for (const [soldier, list] of bySoldier) {
+          agents.push(summarize(soldier, `${soldier} · 执行中`, list, '', '⚙️', true))
+        }
+      }
+      json(res, 200, { scope: scopeParam || 'all', agents })
+      return
+    }
     if (req.method === 'GET' && path === '/api/activity') {
       const limit = Math.min(Number(url.searchParams.get('limit') ?? 50) || 50, 500)
-      const rows = db.prepare('SELECT * FROM audit ORDER BY seq DESC LIMIT ?').all(limit)
+      const scopeParam = url.searchParams.get('scope')
+      const taskIdParam = url.searchParams.get('taskId')
+      let rows
+      if (taskIdParam) {
+        rows = db.prepare('SELECT * FROM audit WHERE taskId = ? ORDER BY seq').all(taskIdParam)
+      } else if (scopeParam) {
+        rows = db.prepare('SELECT * FROM audit WHERE scope = ? ORDER BY seq DESC LIMIT ?').all(scopeParam, limit)
+      } else {
+        rows = db.prepare('SELECT * FROM audit ORDER BY seq DESC LIMIT ?').all(limit)
+      }
       json(res, 200, rows.map((r) => ({
         seq: r.seq, ts: r.ts, member: r.member, scope: r.scope, action: r.action, taskId: r.taskId,
         detail: parseJson(r.detail, {}),
@@ -710,6 +1089,83 @@ async function handle(req, res) {
         const skill = grantSkill(id, grants.map(String))
         audit(by, scope, 'skill:grant', id, { grants: grants.map(String) })
         return skill
+      })
+      return
+    }
+    // ── 工作空间 + 编队管理 ──
+    if (req.method === 'POST' && path === '/api/spaces') {
+      await handleWrite(req, res, (body, by, scope) => {
+        const id = body.id
+        const name = body.name
+        if (typeof id !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(id)) throw new Error('空间 id 非法：小写字母/数字开头，可含连字符，≤64 字符')
+        if (typeof name !== 'string' || name.trim().length === 0) throw new Error('缺少参数 name')
+        db.prepare('INSERT INTO spaces (id, name, private, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, private=excluded.private, updatedAt=excluded.updatedAt')
+          .run(id, name.trim(), body.private ? 1 : 0, now(), now())
+        const count = db.prepare('SELECT COUNT(*) AS c FROM roster WHERE scope = ?').get(id).c
+        audit(by, scope, 'space:create', null, { space: id, name: name.trim(), private: !!body.private })
+        return { id, name: name.trim(), private: !!body.private, agentCount: count }
+      })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/goal') {
+      // 发布空间目标：每个工作空间一个 objective（upsert），并自动按编队生成阶段任务链分发给智能体。
+      await handleWrite(req, res, (body, by, scope) => {
+        const objective = body.objective
+        if (typeof objective !== 'string' || objective.trim().length === 0) throw new Error('缺少参数 objective')
+        const targetScope = typeof body.scope === 'string' && body.scope.trim().length > 0 ? body.scope.trim() : scope
+        const t = now()
+        db.prepare('INSERT INTO goal (scope, objective, createdAt, updatedAt) VALUES (?, ?, ?, ?) ON CONFLICT(scope) DO UPDATE SET objective=excluded.objective, updatedAt=excluded.updatedAt')
+          .run(targetScope, objective.trim(), t, t)
+        // 自动分解为阶段任务链（按编队指派 + 依赖串行）
+        const chain = createGoalChain(targetScope, objective.trim())
+        const tasks = listTasks({ scope: targetScope }).filter(x => x.status !== 'canceled')
+        const done = tasks.filter(x => x.status === 'done').length
+        audit(by, targetScope, 'goal:publish', null, { objective: objective.trim(), stages: chain.count })
+        return { scope: targetScope, objective: objective.trim(), done, total: tasks.length, percent: tasks.length > 0 ? Math.round((done / tasks.length) * 100) : 0, stages: chain.count }
+      })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/agents') {
+      await handleWrite(req, res, (body, by, scope) => {
+        const role = body.role
+        const name = body.name
+        if (typeof role !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(role)) throw new Error('智能体 role 非法：小写字母/数字开头，可含连字符，≤64 字符')
+        if (typeof name !== 'string' || name.trim().length === 0) throw new Error('缺少参数 name')
+        const targetScope = typeof body.scope === 'string' && body.scope.trim().length > 0 ? body.scope.trim() : scope
+        const sort = db.prepare('SELECT COALESCE(MAX(sort), -1) + 1 AS s FROM roster WHERE scope = ?').get(targetScope).s
+        db.prepare(`INSERT INTO roster (scope, role, name, kind, avatar, sort) VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(scope, role) DO UPDATE SET name=excluded.name, kind=excluded.kind, avatar=excluded.avatar`)
+          .run(targetScope, role.trim(), name.trim(),
+            typeof body.kind === 'string' ? body.kind : '',
+            typeof body.avatar === 'string' && body.avatar.trim() ? body.avatar.trim() : '🤖', sort)
+        audit(by, targetScope, 'agent:create', null, { role: role.trim(), name: name.trim() })
+        return { scope: targetScope, role: role.trim(), name: name.trim() }
+      })
+      return
+    }
+    if (req.method === 'POST' && path.startsWith('/api/spaces/') && path.endsWith('/agents')) {
+      // 选人入编：把全局目录中的若干智能体（按 role）复制进该空间编队。
+      await handleWrite(req, res, (body, by, scope) => {
+        const id = decodeURIComponent(path.slice('/api/spaces/'.length, -'/agents'.length))
+        if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(id)) throw new Error('空间 id 非法')
+        if (!Array.isArray(body.roles) || body.roles.length === 0) throw new Error('缺少参数 roles（智能体 role 数组）')
+        const roles = [...new Set(body.roles.map(String))]
+        const placeholders = roles.map(() => '?').join(',')
+        const rows = db.prepare(`SELECT role, name, kind, avatar FROM roster WHERE role IN (${placeholders})`).all(...roles)
+        const byRole = new Map()
+        for (const r of rows) if (!byRole.has(r.role)) byRole.set(r.role, r)
+        const sort = db.prepare('SELECT COALESCE(MAX(sort), -1) + 1 AS s FROM roster WHERE scope = ?').get(id).s
+        let added = 0
+        for (const role of roles) {
+          const src = byRole.get(role)
+          if (!src) continue
+          db.prepare(`INSERT INTO roster (scope, role, name, kind, avatar, sort) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(scope, role) DO UPDATE SET name=excluded.name, kind=excluded.kind, avatar=excluded.avatar`)
+            .run(id, src.role, src.name, src.kind, src.avatar, sort + added)
+          added += 1
+        }
+        audit(by, id, 'space:add-agents', null, { roles })
+        return { space: id, added, roles }
       })
       return
     }

@@ -301,6 +301,8 @@ export function apply(ctx: AppContext, config: Config): void {
   const inflight = new Set<string>()
   const controllers = new Set<AbortController>()
   let sweeping = false
+  /** 暂停提示节流：避免每轮扫单都打日志。 */
+  let lastPausedNotice = 0
 
   let hubUrl = config.hubUrl.replace(/\/+$/, '')
   let useHub = hubUrl !== ''
@@ -395,6 +397,18 @@ export function apply(ctx: AppContext, config: Config): void {
   // 项目 scope：显式配置优先，否则用 roles.json 的 name（软件流水线 = software），再否则 default。
   const scope = config.scope !== 'default' ? config.scope : (pipeline?.name ?? 'default')
 
+  // ── 全局暂停开关：serve.mjs 的 POST /api/pause 写 scrum/control.json {paused:true}。
+  // 独立小文件而非 daemon.json 字段，避免守护每轮重写 daemon.json 与暂停写入互相覆盖。
+  const controlFile = join(config.scrumDir, 'control.json')
+  function readControlPaused(): boolean {
+    try {
+      const raw = readFileSync(controlFile, 'utf8')
+      return (JSON.parse(raw) as { paused?: boolean }).paused === true
+    } catch {
+      return false
+    }
+  }
+
   // ── 守护能力自述：daemon.json 心跳（借鉴 agent-network 的宿主 daemon 能力上报）──
   const daemonStartedAt = Date.now()
   const daemonStatusFile = join(config.scrumDir, 'daemon.json')
@@ -411,6 +425,7 @@ export function apply(ctx: AppContext, config: Config): void {
         staleMinutes: config.staleMinutes,
         taskTtlMinutes: config.taskTtlMinutes,
         scope,
+        paused: readControlPaused(),
         pipeline: pipeline ? { name: pipeline.name, stages: pipeline.stages.map(s => s.role) } : null,
         inbox: inboxCount,
         lastSweepAt: new Date().toISOString(),
@@ -1095,6 +1110,15 @@ exit 0
     if (sweeping) return
     sweeping = true
     try {
+      // 全局暂停：serve.mjs POST /api/pause 置 control.json paused=true，暂停期间跳过认领/派工但保留心跳。
+      if (readControlPaused()) {
+        if (Date.now() - lastPausedNotice > Math.max(60000, config.intervalMs * 2)) {
+          lastPausedNotice = Date.now()
+          log('⏸ 全局暂停：control.json paused=true，本轮跳过扫单（serve.mjs POST /api/resume 解除）')
+        }
+        writeDaemonStatus(0)
+        return
+      }
       await ensureForeman(config.workspace)
       await fetchSkills()
       let tasks: Task[]

@@ -175,9 +175,11 @@ node scrum\serve.mjs [--port 4820] [--host 127.0.0.1] [--token <t>]
 | `/api/board/events` | SSE：board.json 变化时推全量看板 |
 | `/api/activity?limit=N` | 最近动态事件（JSON 数组） |
 | `/api/activity/events` | SSE：activity.jsonl 追加时推新事件 |
-| `/api/config` | `{ auth, host, port }` |
+| `/api/config` | `{ auth, host, port, pipeline, daemon, paused }` |
+| `/api/missions` | 服务端任务集聚合视图（按角色泳道 + 进度，`?scope=` 在 v1 恒返回全部） |
+| `/api/daemon` | 守护心跳自述（daemon.json 内容） |
 
-**写（POST，配了 token 时必须带令牌）**：`/api/create`、`/api/transition`、`/api/comment`。
+**写（POST，配了 token 时必须带令牌）**：`/api/create`、`/api/transition`、`/api/comment`、`/api/pause`、`/api/resume`。
 
 令牌携带方式（任选其一）：`Authorization: Bearer <t>` / `x-dsh-token: <t>` / `?token=<t>`。
 
@@ -491,6 +493,10 @@ node scrum\taskctl.mjs goal --title "实现一个多人实时协作白板 Web �
 | **v2 分布式** | hub 独立进程 `node team-hub/server.mjs`（`:8787`），任务池 = SQLite(WAL) + 技能 + 审计 + 在线 | 多机器，守护/看板把 `hubUrl` 指向 `http://<hub-host>:8787` |
 
 **自动探测**：守护/看板启动时按 `:8787` → `:3080/team-hub` 顺序探测 hub，探测到即自动接入（带 scope），探测不到退回本地 taskctl 模式——**无需任何 config 注入**。
+
+**v1 → v2 数据迁移**：`node team-hub/scripts/migrate-tasks.mjs [--scope software]` 把 `scrum/tasks.json` 导入 SQLite（幂等，INSERT OR IGNORE，已存在 id 跳过），v1 任务无 scope 字段、默认归入 `--scope`（默认 software）。导入后可用 `curl http://127.0.0.1:8787/api/scopes` 查看真实分区、`curl "http://127.0.0.1:8787/api/missions?scope=marketing"` 按分区查看任务集。
+
+**军团指挥台（workbench）与 v2 的对接**：工作台挂载后自动探测 `:8787`（右上角「🧭 中枢」按钮可改地址）；探测成功即进入**真分区模式**——左侧「工作空间」列出 team-hub 真实空间（`/api/spaces`，注册中文名 + 编队人数），「当前任务集」走 `/api/missions?scope=` 只显示该空间任务，新建任务写入当前分区（`/api/create` 带 `scope`）。**工作空间专属编队**（`/api/roster`）：每个空间有自己的智能体队伍（software=8 软件岗、marketing=5 市场岗、product=5 产品岗、ops=4 运营岗、default=3 通用岗，`node team-hub/scripts/seed-roster.mjs` 播种）；侧边栏「＋ 新建空间」可动态建空间并从全局智能体目录选人入编（`POST /api/spaces`、`POST /api/spaces/{id}/agents`）或新建智能体（`POST /api/agents`）。**技能中心**（`/api/skills` + register/review/grant）也已接入：注册技能 → 将军发布/驳回 → 按成员或 `scope:xxx` 授权，士兵/守护只读取已发布技能。v1 模式（无中枢）自动回退 serve.mjs 接口并提示。**注意**：守护换到 v2 后任务池是 SQLite，serve.mjs 的 `tasks.json` 看板不再自动同步——两套数据源并存期间请只写其中一个。
 
 ### 12.6 连线速查表
 

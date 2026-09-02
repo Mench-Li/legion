@@ -1,7 +1,8 @@
 # Legion Workbench —— 军团指挥台（独立 Web 应用）
 
-把 legion 的 scrum 看板数据投影为「AI Office 式」作战仪表盘。**引擎零改动**：只消费
-`serve.mjs` 的既有接口（`/api/board`、`/api/activity`、SSE、写接口），全部数据实时来自看板。
+把 legion 的看板/中枢数据投影为「AI Office 式」作战仪表盘，并承载 v2 主控操作：任务详情与 AI 执行过程、
+智能体任务清单、任务调度/验收、持续执行编排、模型×智能体配置。中枢模式（team-hub v2 :8787）下为**真分区主控台**；
+无中枢时回退 serve.mjs（:4820）只读 v1 视图。
 
 ## 快速开始
 
@@ -88,17 +89,59 @@ node scripts/serve.mjs --port 5173   # 独立静态服务 → http://127.0.0.1:5
 - 操作：`＋ 注册新技能`（id 须小写字母/数字开头，提交即 pending）、待审项可「✅ 发布 / 驳回」、已发布项可「🔑 授权」（成员 id 或 `scope:xxx`）。
 - 数据流：`GET /api/skills`、`POST /api/skills/register|review|grant`，15s 轮询 + 操作后即时刷新；士兵/守护只读取已发布技能。
 
+## 任务详情与 AI 执行过程（点击任务）
+
+- **入口**：右侧「当前任务集」任意任务行、任务调度弹窗、智能体任务清单里的任务，点击即打开**任务详情弹窗**（`TaskDetailModal`）。
+- 详情内容：
+  - **🤖 AI 执行过程**：执行该任务的 AI 智能体沉淀的过程记录 = evidence（`isEvidence:true` 评论）与评论的时间流——AI 的每一步行动/产出/汇报都在这里，是「任务详情看到 AI 工作过程」的落点；
+  - **⏱ 进展时间线**：`GET /api/activity?taskId=`（goal:publish / claim / transition / comment / evidence / reassign / model:set / exec:*），中文可读；
+  - 📋 任务描述、🎯 验收标准（空则警示）、🔗 依赖解锁提醒；
+  - **状态操作**：todo →「▶ 开工 / 🔒 认领」；in_progress →「📮 提交验收 / 归还待办」；in_review →「✓ 验收通过(general) / ↩ 打回重做」；blocked →「解阻」；另有「💬 评论/记录」「转派」「**🤖 派 AI 执行**」（写 `POST /api/exec/request`，请求执行守护认领）。
+- 数据流：`GET /api/task?id=`（team-hub 单任务接口）+ `GET /api/activity?taskId=`；状态操作与调度弹窗共用 `/api/transition|claim|reassign|comment`。
+
+## 智能体任务清单（点击智能体）
+
+- **入口**：中部「🤖 智能体」2D 总览卡、或 3D 办公场景里的智能体（点身体/名牌均可）→ 打开该智能体的「任务清单」。
+- 清单按 **🟢 运行中（进行中/待验收/受阻）/ ⚪ 待办 / ✅ 已完成** 分组（`GET /api/board?scope=` 按 `soldier=role` + `role=role` 过滤，roster 投影数据先展示后刷新）；点任务行 → 进入任务详情。
+- 头部显示该角色**默认模型徽标**（若已配置）。
+
+## 持续执行编排（侧栏「⚡」开关）
+
+- 左侧栏底部「⚡ 持续执行编排」开关（选中具体工作空间后显示）→ `POST /api/exec { scope, enabled }` 按空间持久化。
+- **语义**：开启后，**分析类阶段任务自动由 AI 智能体执行**（需求澄清/方案设计/任务拆分等「产出报告」类），过程沉淀到任务详情并自动提交待验收；**写码类阶段不自动**（coder/reviewer/tester/devops/test-designer 等会动仓库的角色），靠任务详情「🤖 派 AI 执行」按钮手动请求。
+- **执行队列**：`GET /api/exec/queue?scope=` 返回自动队列（仅 `[auto-goal]` 链上、非写码角色、todo/in_progress 且未被请求的任务）；`GET /api/exec/requests` 是用户手动派活请求。**执行守护**（将军 agent 侧）消费队列/请求：认领 → 派 AI 按角色干活 → evidence 写回 → 提交验收。
+- 后台表：`exec_state`（scope×enabled）、`exec_requests`（taskId×pending）。
+
+## 模型 × 智能体配置（底部「⚙️ 模型配置」）
+
+- 底部命令栏「⚙️ 模型配置」（选中具体工作空间后可用）→ `ModelConfigModal`：每行一个智能体（角色），下拉选该角色的**默认模型**；未配置 = 平台默认（custom-ds / deepseek-v4-flash-openai）。
+- 存储：team-hub `agent_models` 表（scope×role×provider×model），`GET/POST /api/models`、`POST /api/models/clear`（全部走审计）。
+- 候选模型 = 本机 DSH 部署真实可用模型（`~/.dsh/settings.yaml` 的 provider.models），按省 token 档位分组：
+
+  | 档位 | 模型 |
+  | --- | --- |
+  | ⚡ 轻量（省 token） | `custom-ds/deepseek-v4-flash-openai`、`zai-coding-cn/glm-5.3-flash`、`zai-coding-cn/glm-5-turbo` |
+  | 🔶 均衡 | `custom-gpt/gpt-5.6-luna`、`gpt-5.6-terra`、`zai-coding-cn/glm-5.1` |
+  | 🟣 旗舰/强推理 | `custom-ds/deepseek-v4-pro-openai`、`custom-gpt/gpt-5.6-sol`、`zai-coding-cn/glm-5.2` |
+  | 👁 视觉 | `custom-ds/deepseek-v4-flash-vision-openai`、`zai-coding-cn/glm-5v-turbo` |
+
+  典型省 token 策略：分析类（requirement/researcher/breaker）→ 轻量；写码/审查（coder/reviewer）→ 旗舰强模型；测试/运维 → 轻量或均衡。配置在 AI 执行该角色任务时被执行守护读取作为模型选择依据。
+
 ## 目录
 
 ```
 workbench/
   src/
-    api.ts            数据层：board/activity/config/missions + SSE 订阅 + 写接口 + team-hub 中枢（hub 探测/scopes/分区创建）
+    api.ts            数据层：board/activity/config/missions + SSE 订阅 + 写接口 + team-hub 中枢（hub 探测/scopes/分区创建/exec/models/task）
     missions.ts       任务集聚合视图（按角色泳道 + 状态统计，客户端兜底）
     components/
-      Scene3D.tsx     中央 3D 办公场景（three + @react-three/fiber v9 + drei，懒加载 chunk）
+      Scene3D.tsx     中央 3D 办公场景（three + @react-three/fiber v9 + drei，懒加载 chunk；智能体可点击）
       Sidebar / KpiBar / CenterPanel / MissionPanel /
-      ActivityFeed / QuickTools / CommandBar / 弹窗 / Toast
+      ActivityFeed / QuickTools / CommandBar /
+      TaskDetailModal     任务详情（AI 执行过程 / 时间线 / 验收 / 派 AI 执行）
+      AgentTasksModal     智能体任务清单（运行中/待办/已完成 + 模型徽标）
+      ModelConfigModal    模型×智能体配置（按角色选默认模型）
+      HubSchedulerModal / SchedulerModal / GoalModal / NewTaskModal / NewSpaceModal / Toast
   scripts/serve.mjs  生产静态服务（SPA 回退）
 ```
 

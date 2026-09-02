@@ -498,6 +498,17 @@ node scrum\taskctl.mjs goal --title "实现一个多人实时协作白板 Web �
 
 **军团指挥台（workbench）与 v2 的对接**：工作台挂载后自动探测 `:8787`（右上角「🧭 中枢」按钮可改地址）；探测成功即进入**真分区模式**——左侧「工作空间」列出 team-hub 真实空间（`/api/spaces`，注册中文名 + 编队人数），「当前任务集」走 `/api/missions?scope=` 只显示该空间任务，新建任务写入当前分区（`/api/create` 带 `scope`）。**工作空间专属编队**（`/api/roster`）：每个空间有自己的智能体队伍（software=8 软件岗、marketing=5 市场岗、product=5 产品岗、ops=4 运营岗、default=3 通用岗，`node team-hub/scripts/seed-roster.mjs` 播种）；侧边栏「＋ 新建空间」可动态建空间并从全局智能体目录选人入编（`POST /api/spaces`、`POST /api/spaces/{id}/agents`）或新建智能体（`POST /api/agents`）。**技能中心**（`/api/skills` + register/review/grant）也已接入：注册技能 → 将军发布/驳回 → 按成员或 `scope:xxx` 授权，士兵/守护只读取已发布技能。v1 模式（无中枢）自动回退 serve.mjs 接口并提示。**注意**：守护换到 v2 后任务池是 SQLite，serve.mjs 的 `tasks.json` 看板不再自动同步——两套数据源并存期间请只写其中一个。
 
+### 12.7 工作台主控进阶玩法（任务详情 / 智能体任务 / 执行编排 / 模型配置）
+
+| 能力 | 入口 | 说明 |
+| --- | --- | --- |
+| **任务详情 + AI 执行过程** | 任务集行/调度弹窗/任务清单点任务 | `TaskDetailModal`：🤖 AI 执行过程（evidence+评论流，AI 干活沉淀）、⏱ 进展时间线（`/api/activity?taskId=`）、描述/验收标准/依赖、状态操作（开工/认领/提交验收/验收/打回/评论/转派/派 AI 执行）。数据：`GET /api/task?id=` |
+| **智能体任务清单** | 2D 智能体卡 / 3D 场景点智能体身体或名牌 | 按 🟢运行中 / ⚪待办 / ✅完成 分组展示该角色任务（`/api/board?scope=` 过滤），可再点进任务详情 |
+| **持续执行编排** | 侧栏底部「⚡」开关（按空间） | 分析类任务（需求澄清/方案设计/任务拆分等，非 coder/reviewer/tester/devops）自动派 AI 执行并回写证据、提交验收；写码类靠任务详情「🤖 派 AI 执行」手动请求。接口：`/api/exec`（开关）、`/api/exec/queue`（自动队列）、`/api/exec/request`（手动请求）；表 `exec_state`/`exec_requests`。执行守护=将军 agent 侧消费队列 |
+| **模型 × 智能体配置** | 底部命令栏「⚙️ 模型配置」 | 每空间每角色选默认模型（`agent_models` 表，`/api/models` 读写清除）；候选 = 本机 DSH 部署真实模型（`~/.dsh/settings.yaml`，custom-ds/custom-gpt/zai-coding-cn 三 provider），按 ⚡轻量省 token / 🔶均衡 / 🟣旗舰强推理 / 👁视觉 分档；分析类用轻量、写码用旗舰可显著省 token；执行守护按角色配置选择模型。智能体任务清单头部显示模型徽标 |
+
+详细使用见 `workbench/README.md`。
+
 ### 12.6 连线速查表
 
 | # | 从 → 到 | 协议 | 方向 | 触发 |

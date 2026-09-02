@@ -1,4 +1,4 @@
-import type { ActivityEvent, AgentCatalogItem, AgentModelCfg, ApiConfig, BoardData, CardStatus, GoalInfo, HubActivity, HubTask, MissionsResponse, ModelOption, RosterResponse, SkillInfo, SpaceInfo } from './types'
+import type { ActivityEvent, AgentCatalogItem, AgentModelCfg, ApiConfig, BoardData, CardStatus, DirListing, GoalInfo, HubActivity, HubTask, MissionsResponse, ModelOption, RepoInspect, RosterResponse, SkillInfo, SpaceInfo } from './types'
 
 /**
  * 数据源地址解析：?api= 查询参数优先，其次 localStorage，最后默认 4820。
@@ -217,6 +217,26 @@ export function publishGoal(scope: string, objective: string): Promise<unknown> 
 export async function fetchAgents(): Promise<AgentCatalogItem[]> {
   const resp = await readJson<{ agents: AgentCatalogItem[] }>(await fetch(`${hubBase()}/api/agents`))
   return resp.agents
+}
+
+/** 工作台自带 /api/fs（同源，仅回环可访问）：起始目录与盘符（照搬 DSH 工作空间的选文件夹逻辑）。 */
+export async function fetchFsHome(): Promise<{ home: string; drives: Array<{ name: string; path: string }> }> {
+  return readJson(await fetch('/api/fs/home'))
+}
+
+/** 工作台自带 /api/fs：列一个目录层级（选文件夹用）。 */
+export async function fetchDirListing(path?: string): Promise<DirListing> {
+  const qs = path ? `?path=${encodeURIComponent(path)}` : ''
+  return readJson(await fetch(`/api/fs/list${qs}`))
+}
+
+/** 工作台自带 /api/fs：git 探测——选中目录是不是代码仓库、其远程仓库（remote）列表。 */
+export function inspectDirectory(path: string): Promise<RepoInspect> {
+  return fetch('/api/fs/inspect', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  }).then(res => readJson<RepoInspect>(res))
 }
 
 /** team-hub v2：新建智能体（写入指定空间编队，role 已存在则刷新名称/形象）。 */

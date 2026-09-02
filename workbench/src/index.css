@@ -1154,6 +1154,117 @@ body {
   font-family: Consolas, 'Courier New', monospace;
 }
 
+/* ── 空间仓库绑定：选择文件夹（/api/fs） ── */
+.dir-pick-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dir-path {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--muted-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-family: Consolas, 'Courier New', monospace;
+}
+.repo-detect {
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--muted-2);
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: rgba(64, 255, 160, 0.05);
+  border: 1px solid rgba(64, 255, 160, 0.2);
+  word-break: break-all;
+}
+.repo-detect.warn {
+  background: rgba(255, 213, 74, 0.05);
+  border-color: rgba(255, 213, 74, 0.25);
+}
+.folder-picker-modal .modal-body {
+  display: flex;
+  flex-direction: column;
+  max-height: 60vh;
+}
+.fs-path-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.fs-path {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: Consolas, 'Courier New', monospace;
+}
+.fs-scroll {
+  flex: 1;
+  overflow-y: auto;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 8px;
+  padding: 4px;
+  min-height: 180px;
+  max-height: 46vh;
+}
+.pick-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text);
+}
+.pick-row:hover {
+  background: rgba(64, 255, 160, 0.08);
+}
+.pick-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.repo-chip {
+  margin-left: auto;
+  font-size: 9px;
+  color: var(--yellow);
+  border: 1px solid rgba(255, 213, 74, 0.3);
+  background: rgba(255, 213, 74, 0.07);
+  border-radius: 999px;
+  padding: 0 6px;
+  white-space: nowrap;
+}
+.fs-drives {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 2px;
+}
+.fs-error {
+  color: var(--red, #ff6b6b);
+  font-size: 11px;
+  margin-bottom: 6px;
+}
+.fs-empty {
+  color: var(--muted-2);
+  font-size: 11px;
+  text-align: center;
+  padding: 22px 8px;
+}
+
 .modal-wide {
   width: 640px;
   max-width: 94vw;

@@ -232,6 +232,30 @@ export interface HubActivity {
   detail: Record<string, unknown>
 }
 
+/** 目录浏览（workbench 自带 /api/fs，同源；照搬 DSH 工作空间的选文件夹逻辑）。 */
+export interface DirEntry {
+  name: string
+  path: string
+  /** 目录内含 .git（是该目录的代码仓库）。 */
+  isRepo: boolean
+}
+
+export interface DirListing {
+  path: string
+  isRoot: boolean
+  parent: string | null
+  entries: DirEntry[]
+  drives: Array<{ name: string; path: string }>
+}
+
+/** git 仓库探测结果（选定的本地文件夹 = 该空间的代码仓库）。 */
+export interface RepoInspect {
+  isRepo: boolean
+  root: string | null
+  branch: string | null
+  remotes: Array<{ name: string; url: string }>
+}
+
 /** team-hub v2 单个任务（/api/board 返回，含角色/指派/依赖/版本/内容，供中枢调度与验收）。 */
 export interface HubTask {
   id: string

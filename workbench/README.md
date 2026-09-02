@@ -80,8 +80,8 @@ node scripts/serve.mjs --port 5173   # 独立静态服务 → http://127.0.0.1:5
   25+ 类岗位按 role 去重、标注来源空间，支持搜索），或**内联新建智能体**（role/名称/职责/头像，`POST /api/agents` 直接写入本空间）。
 - 提交 = `POST /api/spaces` 建空间 + `POST /api/spaces/{id}/agents` 选人入编；空间名、编队人数实时显示在侧边栏；
   创建后自动切到新空间（空任务 → 编队全员待命，新建任务即入该空间）。
-- 第一步可顺便配置**仓库绑定**（可选）：`本地文件夹`（该空间对应的本机目录）与 `远程仓库 URL`
-  （git 地址；**留空 = 仅本地 / 不进共享仓库**）。没填不影响建空间，之后随时可改（见下节）。
+- 第一步可顺便配置**仓库绑定**（可选）：点「📂 选择文件夹」浏览选定该空间的本地目录（选中即其代码仓库，
+  自动识别并预填远程），**远程仓库 URL 留空 = 仅本地 / 不进共享仓库**。没填不影响建空间，之后随时可改（见下节）。
 - 旧空间（seed/迁移）未注册中文名时由 `GET /api/spaces` 推导合并显示原始 id；`seed-roster.mjs` 会补注册名。
 
 ## 空间仓库绑定（每个空间自己的本地文件夹 + 远程仓库）
@@ -90,14 +90,19 @@ node scripts/serve.mjs --port 5173   # 独立静态服务 → http://127.0.0.1:5
 `github.com/Mench-Li/legion.git`，个人业务空间（ozon/shop 之类）则只在自己的本地目录、不进共享仓库：
 
 - **入口**：侧边栏工作空间行上的「⚙」→ `SpaceSettingsModal`（新建空间第一步也可顺便配置）：编辑
-  显示名 / 🏠 本地·私有标记 / **本地文件夹**（该空间对应的本机目录；守护派工与 worktree 隔离以它为仓库根）/
-  **远程仓库 URL**（git 地址；留空 = 仅本地 / 不进共享仓库）。
+  显示名 / 🏠 本地·私有标记 / **本地文件夹** / **远程仓库 URL**。
+- **本地文件夹 = 选文件夹，不手填**（与 DSH 工作空间选目录一致）：`FolderPickerField` + `FolderPickerModal`
+  导航浏览本机目录（数据源 = workbench 自带同源接口 `GET /api/fs/home|/list?path=`，仅回环地址可访问），
+  列表里带 `.git` 的目录标「⛁ 仓库」。选定后自动 git 探测（`POST /api/fs/inspect`：show-toplevel / 分支 /
+  remotes）——该文件夹即本空间的**代码仓库**：是仓库 → 显示仓库根与分支，并把 `origin`（无 origin 取首个
+  fetch remote）预填到远程仓库；不是仓库 → 提示仅本地使用（worktree 隔离不可用）；选中的是某仓库子目录时，
+  隔离仓库根自动取所属仓库根（toplevel），worker 目录仍为所选文件夹。
 - **存储**：team-hub `spaces` 表 `local_dir` / `remote_url` 列（老库启动时自动补列）；`GET /api/spaces`
   返回这两个字段；`POST /api/spaces` 幂等 upsert（审计记 `space:create` / `space:update`）。
 - **消费方**：`dsh-scrum-worker` 守护在 hub 模式下每轮扫单从 `/api/spaces` 解析**本 scope** 的绑定——
-  命中 `localDir` 时用它覆盖该空间的隔离仓库根与 worker 工作目录（`daemon.json` 新增
-  `repo { root, binding, localDir, remoteUrl }` 自述）；未绑定 / hub 不可达时回退注入配置
-  （`repoRoot` / `workspace` / `worktreeRoot`）。
+  命中 `localDir` 时用它作为该空间的 worker 工作目录，其所属仓库根作为隔离仓库根（worktree / pre-push 守卫 /
+  LEGION.md 注入 / 自动 promote 全走它）；`daemon.json` 新增 `repo { root, binding, localDir, remoteUrl }` 自述；
+  未绑定 / hub 不可达时回退注入配置（`repoRoot` / `workspace` / `worktreeRoot`）。
 - **边界**：remoteUrl 为空 = 仅本地 / 不进共享仓库；push 纪律不变——`w/*` worktree 分支仍一律禁止 push。
 
 ## 技能中心（team-hub v2）
@@ -160,8 +165,10 @@ workbench/
       AgentTasksModal     智能体任务清单（运行中/待办/已完成 + 模型徽标）
       ModelConfigModal    模型×智能体配置（按角色选默认模型）
       SpaceSettingsModal  空间设置（名称 / 本地·私有 / 本地文件夹 + 远程仓库绑定）
+      FolderPickerField   仓库绑定的「本地文件夹」字段（选文件夹 + git 探测 + 远程建议）
+      FolderPickerModal   选文件夹弹窗（/api/fs 目录浏览，照搬 DSH 工作空间选目录）
       HubSchedulerModal / SchedulerModal / GoalModal / NewTaskModal / NewSpaceModal / Toast
-  scripts/serve.mjs  生产静态服务（SPA 回退）
+  scripts/serve.mjs  生产静态服务（SPA 回退 + /hub 代理 + /api/fs 目录浏览/仓库探测，仅回环访问）
 ```
 
 ## 说明与边界

@@ -398,11 +398,13 @@ export function apply(ctx: AppContext, config: Config): void {
   const scope = config.scope !== 'default' ? config.scope : (pipeline?.name ?? 'default')
 
   // ── 空间仓库绑定：每个工作空间可配置自己的「本地文件夹 + 远程仓库」（team-hub /api/spaces，
-  //    军团指挥台「空间设置」维护）。守护在 hub 模式下每轮扫单刷新本 scope 的绑定：
-  //    命中 localDir 时用它覆盖隔离仓库根与 worker 工作目录（不同空间对应不同本地文件夹/仓库）；
+  //    军团指挥台「空间设置」维护——选文件夹而非手填，自动识别该 git 仓库的远程）。
+  //    守护在 hub 模式下每轮扫单刷新本 scope 的绑定：
+  //    命中 localDir 时，worker 工作目录 = 该文件夹；隔离仓库根（worktree/pre-push 守卫/LEGION.md/自动 promote）
+  //    = 该文件夹所属的 git 仓库根（文件夹本身就是仓库根时二者相同；子目录则向上取 toplevel）。
   //    remoteUrl 只作登记与提示——push 纪律不变（w/* 分支一律禁止 push，本地/私有空间 remoteUrl 为空 = 不进共享仓库）。
   //    未绑定 / hub 不可达时全部回退注入配置（repoRoot/workspace/worktreeRoot）。
-  let spaceBinding: { localDir: string; remoteUrl: string } | null = null
+  let spaceBinding: { localDir: string; repoRoot: string; remoteUrl: string } | null = null
 
   async function refreshSpaceBinding(): Promise<void> {
     if (!useHub) return
@@ -411,13 +413,21 @@ export function apply(ctx: AppContext, config: Config): void {
       if (!res.ok) return
       const data = await res.json() as { spaces?: Array<{ id: string; localDir?: string; remoteUrl?: string }> }
       const hit = (data.spaces ?? []).find(x => x.id === scope)
-      const next = hit && typeof hit.localDir === 'string' && hit.localDir.trim() !== ''
-        ? { localDir: hit.localDir.trim(), remoteUrl: typeof hit.remoteUrl === 'string' ? hit.remoteUrl.trim() : '' }
-        : null
-      if ((next?.localDir ?? '') !== (spaceBinding?.localDir ?? '')) {
+      let next: { localDir: string; repoRoot: string; remoteUrl: string } | null = null
+      if (hit && typeof hit.localDir === 'string' && hit.localDir.trim() !== '') {
+        const localDir = hit.localDir.trim()
+        // 选中的目录可能在某 git 仓库内部：隔离仓库根取所属仓库根（toplevel），worker 目录仍用所选目录。
+        let repoRoot = localDir
+        try {
+          const r = await runGit(localDir, ['rev-parse', '--show-toplevel'])
+          if (r.code === 0 && r.out.trim().length > 0) repoRoot = r.out.trim()
+        } catch { /* 非仓库目录沿用所选目录 */ }
+        next = { localDir, repoRoot, remoteUrl: typeof hit.remoteUrl === 'string' ? hit.remoteUrl.trim() : '' }
+      }
+      if ((next?.localDir ?? '') !== (spaceBinding?.localDir ?? '') || (next?.repoRoot ?? '') !== (spaceBinding?.repoRoot ?? '')) {
         spaceBinding = next
         log(next
-          ? `空间仓库绑定：scope=${scope} → 本地文件夹=${next.localDir}（远程=${next.remoteUrl || '仅本地 / 不进共享仓库'}）`
+          ? `空间仓库绑定：scope=${scope} → 本地文件夹=${next.localDir}（隔离仓库根=${next.repoRoot === next.localDir ? next.localDir : next.repoRoot}；远程=${next.remoteUrl || '仅本地 / 不进共享仓库'}）`
           : `空间仓库绑定：scope=${scope} 未配置，沿用注入默认仓库（repoRoot=${config.repoRoot}）`)
       }
     } catch (e) {
@@ -425,9 +435,9 @@ export function apply(ctx: AppContext, config: Config): void {
     }
   }
 
-  /** 该 scope 实际使用的隔离 git 仓库根（空间绑定优先，注入配置兜底）。 */
-  function repoRootFor(): string { return spaceBinding?.localDir || config.repoRoot }
-  /** 该 scope 实际使用的 worker 工作目录（isolate=false / worktree 不可用 / 讨论时）。 */
+  /** 该 scope 实际使用的隔离 git 仓库根（空间绑定仓库根优先，注入配置兜底）。 */
+  function repoRootFor(): string { return spaceBinding?.repoRoot || config.repoRoot }
+  /** 该 scope 实际使用的 worker 工作目录（isolate=false / worktree 不可用 / 讨论时；= 绑定的本地文件夹）。 */
   function workspaceFor(): string { return spaceBinding?.localDir || config.workspace }
   /** 该 scope 实际使用的 worktree 目录根。 */
   function worktreeRootFor(): string { return config.worktreeRoot || join(repoRootFor(), '.legion-worktrees') }

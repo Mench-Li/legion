@@ -137,7 +137,7 @@ curl -X POST http://127.0.0.1:4820/api/resume -H "Authorization: Bearer <t>" -H 
 
 配置（改 `cordis.patch.yml` 中插件行或注入器配置）：`role`（默认 `soldier-auto`）、`intervalMs`（默认 30000）、`maxWorkers`（并发上限，默认 1）、`workerTimeoutMs`（默认 600000）、`staleMinutes`（认领租约分钟数，默认 30，超时自动释放回 todo）、`provider`（默认 `spawn`）、`scrumDir`（默认 `D:/project/dsh/legion/scrum`）、`workspace`（worker 工作目录，默认 `D:/project/dsh`）、`isolate`（worktree 隔离开关，默认 **true**）、`repoRoot`（隔离所用 git 仓库根，默认 `D:/project/dsh/legion`）、`worktreeRoot`（worktree 目录根，默认 `repoRoot/.legion-worktrees`）。
 
-**空间仓库绑定（覆盖注入默认）**：不同工作空间可能对应**不同的本地文件夹 + 远程仓库**。守护在 **hub 模式**下每轮扫单先从 team-hub `GET /api/spaces` 解析**本 scope** 的绑定（军团指挥台「空间设置」/「＋ 新建空间」里配的 `localDir`/`remoteUrl`，存 `spaces` 表 `local_dir`/`remote_url`）——命中 `localDir` 时，本空间实际仓库根 = 该本地文件夹（隔离 worktree、pre-push 守卫、`LEGION.md` 注入、worker 工作目录、自动 promote 全走它）；`remoteUrl` 作登记与派工提示（空 = 仅本地/不进共享仓库，push 纪律不变）。未绑定或 hub 不可达时回退上面的注入配置（`repoRoot`/`workspace`/`worktreeRoot`）。`daemon.json` 自述新增 `repo { root, binding, localDir, remoteUrl }`，一看便知该守护当前在哪个仓库跑。
+**空间仓库绑定（覆盖注入默认）**：不同工作空间可能对应**不同的本地文件夹 + 远程仓库**。守护在 **hub 模式**下每轮扫单先从 team-hub `GET /api/spaces` 解析**本 scope** 的绑定（军团指挥台「空间设置」/「＋ 新建空间」里通过**选文件夹**配的 `localDir`/`remoteUrl`，存 `spaces` 表 `local_dir`/`remote_url`）——命中 `localDir` 时，worker 工作目录 = 该文件夹；隔离仓库根（worktree、pre-push 守卫、`LEGION.md` 注入、自动 promote）= 该文件夹所属的 git 仓库根（文件夹本身就是仓库根时相同；选了仓库子目录则向上取 toplevel）；`remoteUrl` 作登记与派工提示（空 = 仅本地/不进共享仓库，push 纪律不变）。未绑定或 hub 不可达时回退上面的注入配置（`repoRoot`/`workspace`/`worktreeRoot`）。`daemon.json` 自述新增 `repo { root, binding, localDir, remoteUrl }`，一看便知该守护当前在哪个仓库跑。
 
 日志：`~/.dsh/super-injector/dsh-scrum-worker.log`（每轮扫单/派工/提交都落盘）。卸载：`dev_uninject_plugin`（匹配 `dsh-scrum-worker`）。
 

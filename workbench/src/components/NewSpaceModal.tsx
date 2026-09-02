@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { addSpaceAgents, createAgent, createSpace, fetchAgents } from '../api'
 import type { AgentCatalogItem } from '../types'
 import { toast } from './Toast'
+import { FolderPickerField } from './FolderPickerField'
 
 interface NewSpaceModalProps {
   onClose: () => void
@@ -133,13 +134,20 @@ export function NewSpaceModal({ onClose, onCreated }: NewSpaceModalProps): React
               <input type="checkbox" checked={local} onChange={e => setLocal(e.target.checked)} />
               <span>🏠 本地/私有空间（仅在本机操作，不进共享 git 仓库）</span>
             </label>
+            <FolderPickerField
+              value={localDir}
+              onChange={(path, hint) => {
+                setLocalDir(path)
+                if (hint?.remoteUrl && !remoteUrl.trim()) setRemoteUrl(hint.remoteUrl)
+              }}
+              onClear={() => {
+                setLocalDir('')
+                setRemoteUrl('')
+              }}
+            />
             <div className="field">
-              <label>本地文件夹（可选）——该空间对应的本机目录，可与默认仓库不同</label>
-              <input value={localDir} onChange={e => setLocalDir(e.target.value)} placeholder="例如：D:/project/DSH/legion（留空 = 未绑定，沿用平台默认）" />
-            </div>
-            <div className="field">
-              <label>远程仓库 URL（可选）——git 远程地址；留空 = 仅本地 / 不进共享仓库</label>
-              <input value={remoteUrl} onChange={e => setRemoteUrl(e.target.value)} placeholder="例如：https://github.com/you/repo.git" />
+              <label>远程仓库 URL（git 远程地址；默认从所选仓库的 origin/首个 remote 自动填入，留空 = 仅本地 / 不进共享仓库）</label>
+              <input value={remoteUrl} onChange={e => setRemoteUrl(e.target.value)} placeholder="例如：https://github.com/you/repo.git（或留空）" />
             </div>
           </div>
         ) : (

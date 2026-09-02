@@ -7,24 +7,41 @@
  *   3. 军团指挥台      —— node workbench/scripts/serve.mjs     （:5173，工作台 UI + /hub 代理 + /api/fs）
  * Desktop 退出时随插件 dispose 全部回收；某端口已有服务在监听则跳过（避免重复占用）。
  *
- * 本插件零外部依赖（cordis 仅注入 ctx），legion 根目录由插件自身位置推导，也可用 config.legionDir 覆盖。
+ * 本插件零外部依赖（cordis 仅注入 ctx）。legion 根目录解析顺序：config.legionDir →
+ * 插件自身位置（源码直跑时 = 仓库根）→ 默认 'D:/project/DSH/legion'。
+ * ⚠ pnpm 对 file: 依赖是「复制快照」：运行时 import.meta.url 指向 profile 的 node_modules 副本，
+ *   靠自身位置推断会找错根目录——patch config 里应显式给 legionDir（或依赖下方硬编码默认值兜底）。
  * 状态日志追加到 <legionDir>/.legion-services.log（并 echo 到宿主 stdout）。
  */
 import { spawn } from 'node:child_process'
 import { connect } from 'node:net'
-import { appendFileSync } from 'node:fs'
+import { appendFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 export const name = '@dsh-external/dsh-legion-services'
 
 const SELF_DIR = dirname(fileURLToPath(import.meta.url))
-const LEGION_DIR = join(SELF_DIR, '..')
+const DEFAULT_LEGION_DIR = 'D:/project/DSH/legion'
+
+/** 目录看起来像 legion 仓库根（关键入口都在）。 */
+function looksLikeLegionRoot(p) {
+  try {
+    return existsSync(join(p, 'team-hub', 'server.mjs'))
+      && existsSync(join(p, 'scrum', 'serve.mjs'))
+      && existsSync(join(p, 'workbench', 'scripts', 'serve.mjs'))
+  } catch { return false }
+}
 
 export function apply(ctx, rawConfig = {}) {
   const cfg = rawConfig && typeof rawConfig === 'object' ? rawConfig : {}
-  const legionDir = typeof cfg.legionDir === 'string' && cfg.legionDir.trim() ? cfg.legionDir : LEGION_DIR
-  const logFile = join(legionDir, '.legion-services.log')
+  const cfgDir = typeof cfg.legionDir === 'string' && cfg.legionDir.trim() ? cfg.legionDir.trim() : ''
+  const selfParent = join(SELF_DIR, '..')
+  const legionDir = (cfgDir && looksLikeLegionRoot(cfgDir) && cfgDir)
+    || (looksLikeLegionRoot(selfParent) && selfParent)
+    || (looksLikeLegionRoot(DEFAULT_LEGION_DIR) && DEFAULT_LEGION_DIR)
+    || ''
+  const logFile = join(legionDir || SELF_DIR, '.legion-services.log')
   const nodeBin = process.execPath
   const baseEnv = { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
 
@@ -74,6 +91,11 @@ export function apply(ctx, rawConfig = {}) {
     const s = `[${new Date().toISOString()}] ${line}\n`
     try { appendFileSync(logFile, s) } catch { /* 日志文件不可写不影响服务 */ }
     try { process.stdout.write(s) } catch { /* ignore */ }
+  }
+
+  if (!legionDir) {
+    log('✗ 未找到 legion 仓库根（config.legionDir 无效且插件不在源码目录、默认目录不存在）→ 本次不托管任何服务')
+    return
   }
 
   /** 探测某端口是否已在监听（避免与手动实例/残留进程抢端口）。 */
@@ -158,5 +180,7 @@ export function apply(ctx, rawConfig = {}) {
     log('legion-services 已随宿主停止（全部子服务已回收）')
   })
 
-  log(`legion-services 挂载：legionDir=${legionDir}，将托管 [${services.map(s => s.label).join('，')}]`)
+  const dirSource = cfgDir && looksLikeLegionRoot(cfgDir) ? 'config.legionDir'
+    : (looksLikeLegionRoot(selfParent) ? '插件自身位置（源码直跑）' : '内置默认值')
+  log(`legion-services 挂载：legionDir=${legionDir}（来源：${dirSource}），将托管 [${services.map(s => s.label).join('，')}]`)
 }

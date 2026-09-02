@@ -31,6 +31,9 @@ workbench 军团指挥台 ──HTTP/JSON──▶ team-hub v2（:8787, team.db�
 
 ### 2.1 启动三件套
 
+> 日常使用推荐走 **§2.1.1 伴随 DSH Desktop 自动启停**（不用手动开）。下面三件套命令仅用于
+> 独立调试 / 未跑 Desktop 的场合。
+
 ```powershell
 # ① 团队中枢（必启，:8787）
 cd D:\project\DSH\legion

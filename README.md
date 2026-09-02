@@ -54,9 +54,13 @@ node scrum\serve.mjs --port 4820 --host 0.0.0.0 --token legion-kanban-4820
 状态日志在 `<legion根>/.legion-services.log`。
 
 已登记（`~/.dsh/profiles/web/` 的 `package.json` 依赖 + `cordis.patch.yml` 的 `legion-services` 行，
-依赖经 `pnpm install` 装入 profile）。⚠ pnpm 对 `file:` 依赖是**复制快照**：改动
-`services-plugin/`（或其他 `file:` 插件：`plugins/`、`team-hub/src`、`board-plugin/`）源码后，需在
-`~/.dsh/profiles/web` 重跑 `pnpm install` 再重启 Desktop 才生效。手动三件套命令保留作独立调试用（如上）。
+patch 里**必须显式给** `legionDir: 'D:/project/DSH/legion'`——pnpm 对 `file:` 依赖是**复制快照**，
+运行时插件文件在 profile 的 node_modules 副本里，靠 `import.meta.url` 自定位会找错根目录）。
+⚙ **日常改码流程**：`~/.dsh/profiles/web/node_modules/@dsh-external/dsh-legion-services` 已建成
+**junction → 本仓库 `services-plugin/`**，改代码即时生效（重启 Desktop 或等 profile 热重载即可）；
+若曾重跑 `pnpm install`（会把 junction 替换回复制快照），需按
+`Remove-Item` + `New-Item -ItemType Junction` 重建。其余 `file:` 插件（`plugins/`、`team-hub/src`、
+`board-plugin/`）同理按需处理。手动三件套命令保留作独立调试用（如上）。
 
 ### 2.2 三分钟体验循环
 

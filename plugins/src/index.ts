@@ -911,7 +911,25 @@ exit 0
     if (run === undefined) return
     activity('dispatch', t.id, 'worker 已派工，开始实现')
     await reportProgress(t.id, 10, '已派工')
-    const result = await run.result
+    // 看门狗：subagent 可能挂死且 run.result 永不结算（abort 不保证杀死子代理）。
+    // workerTimeoutMs 内未完成 → 强制结算为超时，放行 inflight/单槽，下轮自动重试（带退避）。
+    const result = await new Promise<{ stopReason: string; structured?: unknown } | null>((resolve) => {
+      const tmr = setTimeout(() => {
+        controller.abort()
+        log(`${t.id} worker 超时（>${Math.round(config.workerTimeoutMs / 60000)} 分钟），守护强制结算`)
+        resolve(null)
+      }, config.workerTimeoutMs)
+      void run.result.then(
+        r => { clearTimeout(tmr); resolve(r) },
+        () => { clearTimeout(tmr); resolve(null) },
+      )
+    })
+    if (result === null) {
+      await safeComment(t.id, '⚠ worker 超时（守护强制结算），任务保留在 in_progress，下一轮自动重试（会复用 w/<id> 的 WIP 续做）')
+      activity('aborted', t.id, 'worker 超时强制结算，保留 in_progress 待重试')
+      await run.dispose().catch(() => undefined)
+      return
+    }
     await run.dispose()
     if (result.stopReason !== 'completed' || result.structured === undefined) {
       log(`${t.id} worker 未完成（${result.stopReason}）`)
@@ -1010,7 +1028,7 @@ exit 0
     if (parent === undefined) return null
     const controller = new AbortController()
     controllers.add(controller)
-    const timer = setTimeout(() => controller.abort(), config.workerTimeoutMs)
+    // 看门狗：挂死的子代理在 workerTimeoutMs 内未结算也强制返回 null（abort 不保证杀死子代理）
     try {
       const run = await ctx.subagents.start(config.provider, {
         label,
@@ -1019,8 +1037,19 @@ exit 0
         signal: controller.signal,
         outputSchema: schema,
       })
-      const result = await run.result
-      await run.dispose()
+      const result = await new Promise<{ stopReason: string; structured?: unknown } | null>((resolve) => {
+        const tmr = setTimeout(() => {
+          controller.abort()
+          log(`${label} 超时（>${Math.round(config.workerTimeoutMs / 60000)} 分钟），强制结算为未完成`)
+          resolve(null)
+        }, config.workerTimeoutMs)
+        void run.result.then(
+          r => { clearTimeout(tmr); resolve(r) },
+          () => { clearTimeout(tmr); resolve(null) },
+        )
+      })
+      await run.dispose().catch(() => undefined)
+      if (result === null) return null
       if (result.stopReason !== 'completed' || result.structured === undefined) {
         log(`${label} 未完成（${result.stopReason}）`)
         return null
@@ -1030,7 +1059,6 @@ exit 0
       log(`${label} 派发失败：${String(e)}`)
       return null
     } finally {
-      clearTimeout(timer)
       controllers.delete(controller)
     }
   }

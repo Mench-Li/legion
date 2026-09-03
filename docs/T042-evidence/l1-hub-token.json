@@ -1,0 +1,20 @@
+[
+ {
+  "id": "TC-S1-15",
+  "name": "post-churn SSE delivery + server alive (no leak crash)",
+  "pass": true,
+  "detail": "newFrameSeq=41 health=200"
+ },
+ {
+  "id": "TC-S1-17",
+  "name": "hub token matrix 401/200",
+  "pass": true,
+  "detail": "no=401 wrong=401 ok=200 get=200"
+ },
+ {
+  "id": "P1-3-obs",
+  "name": "GET conversations w/o scope returns all scopes (P1-3 观察项)",
+  "pass": true,
+  "detail": "scopes=software,ops,product"
+ }
+]

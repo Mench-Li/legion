@@ -1,0 +1,20 @@
+[
+ {
+  "id": "TC-S4-08b",
+  "name": "rename out-of-root rejected (403 allowed)",
+  "pass": true,
+  "detail": "status=403"
+ },
+ {
+  "id": "TC-S4-14b",
+  "name": "write escape rejected no side-effect",
+  "pass": true,
+  "detail": "status=403 outside=false"
+ },
+ {
+  "id": "TC-S4-13",
+  "name": "token matrix on serve.mjs (write 401/200, read open)",
+  "pass": true,
+  "detail": "no=401 wrong=401 ok=200 read=200/200"
+ }
+]

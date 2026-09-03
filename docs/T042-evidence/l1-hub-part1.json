@@ -1,0 +1,98 @@
+[
+ {
+  "id": "TC-S1-01",
+  "name": "create conversation",
+  "pass": true,
+  "detail": "{\"id\":1,\"scope\":\"software\",\"title\":\"软件流水线讨论\",\"kind\":\"space\",\"participants\":[\"general\",\"coder\"],\"createdAt\":\"2026-09-03T06:35:33.004Z\",\"updatedAt\":\"2026-09-03T06:35:33.004Z\",\"last_message_at\":null}"
+ },
+ {
+  "id": "TC-S1-01b",
+  "name": "list contains conv & desc order",
+  "pass": true,
+  "detail": "first=2 count=2"
+ },
+ {
+  "id": "TC-S1-02",
+  "name": "scope filter positive (software list has no default/marketing)",
+  "pass": true,
+  "detail": "default count=0"
+ },
+ {
+  "id": "TC-S1-03",
+  "name": "cross-scope body write lands in conv scope",
+  "pass": true,
+  "detail": "msg scope=software"
+ },
+ {
+  "id": "TC-S1-04",
+  "name": "invalid kind rejected 400",
+  "pass": true,
+  "detail": "{\"error\":\"kind 必须 ∈ {space,direct,task}，实际收到：channel\"}"
+ },
+ {
+  "id": "TC-S1-05a",
+  "name": "missing by rejected 400",
+  "pass": true,
+  "detail": "{\"error\":\"缺少操作者身份 by\"}"
+ },
+ {
+  "id": "TC-S1-05b",
+  "name": "invalid JSON rejected not 500",
+  "pass": true,
+  "detail": "status=400"
+ },
+ {
+  "id": "TC-S1-06",
+  "name": "post message author + last_message_at",
+  "pass": false,
+  "detail": "{\"id\":2,\"convId\":2,\"scope\":\"software\",\"author\":\"coder\",\"kind\":\"text\",\"body\":\"hello world\",\"meta\":{},\"clientTs\":null,\"createdAt\":\"2026-09-03T06:35:33.124Z\"}"
+ },
+ {
+  "id": "TC-S1-06b",
+  "name": "conv last_message_at updated",
+  "pass": true,
+  "detail": "last_message_at=2026-09-03T06:35:33.124Z"
+ },
+ {
+  "id": "TC-S1-07",
+  "name": "author bound to by",
+  "pass": true,
+  "detail": "author=coder"
+ },
+ {
+  "id": "TC-S1-08",
+  "name": "pagination 10/10/5 no dup no loss asc",
+  "pass": false,
+  "detail": "pages=10/10/5"
+ },
+ {
+  "id": "TC-S1-09",
+  "name": "pagination boundaries",
+  "pass": true,
+  "detail": "empty=0 lim0=400 limNeg=400 limAbc=400"
+ },
+ {
+  "id": "TC-S1-10",
+  "name": "unknown conv rejected",
+  "pass": true,
+  "detail": "{\"error\":\"会话不存在：999999\"}"
+ },
+ {
+  "id": "TC-S1-11",
+  "name": "empty body rejected",
+  "pass": true,
+  "detail": "{\"error\":\"消息正文不能为空\"}"
+ },
+ {
+  "id": "TC-S1-12",
+  "name": "body 8000 ok / 8001 rejected",
+  "pass": true,
+  "detail": "ok8000=200 bad8001=400"
+ },
+ {
+  "id": "TC-S1-13",
+  "name": "activity contains chat:* audit",
+  "pass": false,
+  "detail": "actions sample="
+ }
+]

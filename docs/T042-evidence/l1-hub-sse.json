@@ -1,0 +1,14 @@
+[
+ {
+  "id": "TC-S1-14",
+  "name": "SSE chat:message frame within 5s",
+  "pass": true,
+  "detail": "action=chat:message member=coder scope=software detail={\"conv\":2,\"msg\":3,\"kind\":\"text\"}"
+ },
+ {
+  "id": "TC-S1-15",
+  "name": "disconnect cleanup keeps server alive",
+  "pass": true,
+  "detail": "frames=31 health=200"
+ }
+]

@@ -1,0 +1,14 @@
+[
+ {
+  "id": "TC-S3-08",
+  "name": "download raw bytes identical",
+  "pass": true,
+  "detail": "status=200 bytes=27 expect=27"
+ },
+ {
+  "id": "TC-S3-10",
+  "name": "symlink in-root allowed / out-root rejected",
+  "pass": true,
+  "detail": "linkIn=200 linkOut=403"
+ }
+]

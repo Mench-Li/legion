@@ -66,7 +66,8 @@ export function Sidebar({ board, active, scope, hubMode, spaces, onNavigate, onS
   }
 
   const clickModule = (mod: ModuleDef): void => {
-    if (mod.id === 'home' || mod.id === 'agents' || mod.id === 'skills') {
+    // 面板化模块：home/agents/skills 既有 + chat/files/browser（S2/S5/S7 三中心）
+    if (mod.id === 'home' || mod.id === 'agents' || mod.id === 'skills' || mod.id === 'chat' || mod.id === 'files' || mod.id === 'browser') {
       onNavigate(mod.id)
       return
     }
@@ -74,7 +75,8 @@ export function Sidebar({ board, active, scope, hubMode, spaces, onNavigate, onS
       openKanban()
       return
     }
-    toast('info', `模块「${mod.name}」在转型路线图后续步骤接入（当前为独立仪表盘第 1 步）`)
+    // calendar/notify：占位（G-6/TC-S8-03：给提示、非静默无响应；详见 TASK_BREAKDOWN 后续阶段）
+    toast('info', `「${mod.name}」为占位模块（P1 后续阶段接入；当前专注三中心：对话/文件/浏览器）`)
   }
 
   return (

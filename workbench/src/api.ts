@@ -1,4 +1,4 @@
-import type { ActivityEvent, AgentCatalogItem, AgentModelCfg, ApiConfig, BoardData, CardStatus, DirListing, GoalInfo, HubActivity, HubTask, MissionsResponse, ModelOption, RepoInspect, RosterResponse, SkillInfo, SpaceInfo } from './types'
+import type { ActivityEvent, AgentCatalogItem, AgentModelCfg, ApiConfig, BoardData, CardStatus, ChatConversation, ChatMessage, DirListing, FileListResponse, FilePreview, GoalInfo, HubActivity, HubAuditEvent, HubTask, MissionsResponse, ModelOption, RepoInspect, RosterResponse, SkillInfo, SpaceInfo, WebFetchResult } from './types'
 
 /**
  * 数据源地址解析：?api= 查询参数优先，其次 localStorage，最后默认 4820。
@@ -425,4 +425,143 @@ export function rejectTask(input: { id: string; by: string; reason: string }): P
 /** 打开 serve.mjs 自带的经典看板（独立页面），任务中心/浏览器的真实落点。 */
 export function openKanban(): void {
   window.open(apiBase(), '_blank', 'noopener')
+}
+// ───────────────────────── 对话中心（S2 ← S1 team-hub /api/chat/*）─────────────────────────
+
+/** team-hub v2：某空间会话列表（最新活跃在前；无 scope 时全量）。 */
+export async function fetchChatConversations(scope?: string | null): Promise<ChatConversation[]> {
+  const qs = scope ? `?scope=${encodeURIComponent(scope)}` : ''
+  const resp = await readJson<{ conversations: ChatConversation[] }>(await fetch(`${hubBase()}/api/chat/conversations${qs}`))
+  return resp.conversations
+}
+
+export interface NewConversationInput {
+  scope: string
+  title: string
+  kind?: 'space' | 'direct' | 'task'
+  participants?: string[]
+}
+
+/** team-hub v2：新建会话（写纪律：by=general 由 hubPost 注入；审计 chat:create + SSE）。 */
+export function createChatConversation(input: NewConversationInput): Promise<ChatConversation> {
+  return hubPost('/api/chat/conversations', {
+    scope: input.scope,
+    title: input.title,
+    kind: input.kind ?? 'space',
+    participants: input.participants ?? [],
+  }).then(res => (res as { task: ChatConversation }).task)
+}
+
+/** team-hub v2：会话消息（升序；before = 上一页最旧 id 游标）。 */
+export async function fetchChatMessages(conv: number, opts: { before?: number; limit?: number } = {}): Promise<ChatMessage[]> {
+  const qs = new URLSearchParams({ conv: String(conv) })
+  if (opts.limit) qs.set('limit', String(opts.limit))
+  if (opts.before) qs.set('before', String(opts.before))
+  const resp = await readJson<{ messages: ChatMessage[] }>(await fetch(`${hubBase()}/api/chat/messages?${qs.toString()}`))
+  return resp.messages
+}
+
+/** team-hub v2：发消息（body 校验在后端：kind ∈ text|markdown|system、≤8000 字符、scope=会话 scope）。 */
+export function postChatMessage(input: { conv: number; body: string; kind?: string; clientTs?: string }): Promise<ChatMessage> {
+  return hubPost('/api/chat/messages', {
+    conv: input.conv,
+    body: input.body,
+    kind: input.kind ?? 'text',
+    clientTs: input.clientTs ?? '',
+  }).then(res => (res as { task: ChatMessage }).task)
+}
+
+/** team-hub 审计 SSE：单一 /api/events（I8），订阅方按 action 过滤 chat:*。断线自动重连。 */
+export function subscribeHubAudit(onEvent: (event: HubAuditEvent) => void): () => void {
+  const es = new EventSource(`${hubBase()}/api/events`)
+  es.onmessage = (ev) => {
+    try {
+      onEvent(JSON.parse(ev.data) as HubAuditEvent)
+    } catch {
+      /* 忽略损坏帧 */
+    }
+  }
+  return () => es.close()
+}
+
+// ───────────────────────── 文件中心（S5 ← S3/S4 serve.mjs /api/files，同源）─────────────────────────
+
+async function filesGet<T>(path: string): Promise<T> {
+  const res = await fetch(path)
+  if (!res.ok) {
+    const body = await res.json().catch(() => null) as { error?: string } | null
+    throw new Error(body?.error ?? `${res.status} ${res.statusText}`)
+  }
+  return res.json() as Promise<T>
+}
+
+/** 文件中心：列出 scope 空间 local_dir 下某相对目录。path='' = 根。 */
+export function fetchFileList(scope: string, path = ''): Promise<FileListResponse> {
+  const qs = new URLSearchParams({ scope, path })
+  return filesGet<FileListResponse>(`/api/files/list?${qs.toString()}`)
+}
+
+export function fetchFilePreview(scope: string, path: string): Promise<FilePreview> {
+  const qs = new URLSearchParams({ scope, path })
+  return filesGet<FilePreview>(`/api/files/read?${qs.toString()}`)
+}
+
+export function fileDownloadUrl(scope: string, path: string): string {
+  const qs = new URLSearchParams({ scope, path })
+  return `/api/files/download?${qs.toString()}`
+}
+
+interface FilesErrorPayload {
+  error?: string
+}
+
+async function filesWrite<T>(url: string, init: RequestInit): Promise<T> {
+  const res = await fetch(url, init)
+  if (!res.ok) {
+    const body = await res.json().catch(() => null) as FilesErrorPayload | null
+    const err = new Error(body?.error ?? `${res.status} ${res.statusText}`) as Error & { status?: number }
+    err.status = res.status
+    throw err
+  }
+  return res.json() as Promise<T>
+}
+
+export interface FilesWriteOk {
+  ok: boolean
+  path?: string
+  file?: { name: string; size: number; mtime: string }
+  created?: boolean
+  deleted?: boolean
+  from?: string
+  to?: string
+}
+
+export function filesUpload(scope: string, path: string, data: Blob, overwrite = false): Promise<FilesWriteOk> {
+  const qs = new URLSearchParams({ scope, path, ...(overwrite ? { overwrite: '1' } : {}) })
+  return filesWrite<FilesWriteOk>(`/api/files/upload?${qs.toString()}`, { method: 'PUT', body: data })
+}
+
+export function filesMkdir(scope: string, path: string): Promise<FilesWriteOk> {
+  return filesWrite<FilesWriteOk>('/api/files/mkdir', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope, path }) })
+}
+
+export function filesRename(scope: string, from: string, to: string): Promise<FilesWriteOk> {
+  return filesWrite<FilesWriteOk>('/api/files/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope, from, to }) })
+}
+
+export function filesDelete(scope: string, path: string, confirm: 'yes'): Promise<FilesWriteOk> {
+  return filesWrite<FilesWriteOk>('/api/files/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope, path, confirm }) })
+}
+
+// ───────────────────────── 浏览器助手（S7 ← S6 serve.mjs /api/web/fetch，同源）─────────────────────────
+
+export async function webFetchPage(input: { url: string; maxBytes?: number; timeoutMs?: number }): Promise<WebFetchResult> {
+  const res = await fetch('/api/web/fetch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  const body = await res.json().catch(() => null) as WebFetchResult | null
+  if (body && typeof body.ok === 'boolean') return body
+  throw new Error(`浏览器助手请求失败：${res.status} ${res.statusText}`)
 }

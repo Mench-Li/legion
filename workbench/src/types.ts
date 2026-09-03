@@ -289,3 +289,87 @@ export interface HubTask {
   createdAt?: string
   updatedAt?: string
 }
+/** team-hub v2 对话（S1）：会话条目（/api/chat/conversations）。 */
+export interface ChatConversation {
+  id: number
+  scope: string
+  /** space=工作空间会话（默认）；direct=私聊；task=任务讨论。 */
+  kind: 'space' | 'direct' | 'task'
+  title: string
+  participants: string[]
+  createdAt: string
+  updatedAt: string
+  last_message_at: string | null
+}
+
+/** team-hub v2 对话：消息条目（/api/chat/messages，作者字段为 author）。 */
+export interface ChatMessage {
+  id: number
+  convId: number
+  scope: string
+  author: string
+  /** text|markdown|system；未知 kind 按纯文本兜底渲染（X-1 未勾选）。 */
+  kind: string
+  body: string
+  meta: Record<string, unknown> | null
+  clientTs: string | null
+  createdAt: string
+}
+
+/** team-hub 审计 SSE 事件（单一 /api/events；chat:* 按其 action 过滤，I8）。 */
+export interface HubAuditEvent {
+  seq: number
+  ts: string
+  member: string
+  scope: string
+  action: string
+  taskId: string | null
+  detail: Record<string, unknown>
+}
+
+/** 文件中心（S3/S4）：目录条目。 */
+export interface FileEntry {
+  name: string
+  type: 'dir' | 'file'
+  size: number
+  mtime: string
+  isRepo?: boolean
+  ext?: string
+}
+
+/** 文件中心：列表响应。 */
+export interface FileListResponse {
+  ok: boolean
+  root: string
+  path: string
+  entries: FileEntry[]
+}
+
+/** 文件中心：文本预览响应（S3 read）。 */
+export interface FilePreview {
+  ok: boolean
+  name: string
+  ext: string
+  binary: boolean
+  content?: string
+  truncated?: boolean
+  lineCount?: number
+  totalBytes?: number
+  message?: string
+  error?: string
+}
+
+/** 浏览器助手（S6）：/api/web/fetch 响应（白名单结构化字段，无原始 HTML）。 */
+export interface WebFetchResult {
+  ok: boolean
+  finalUrl?: string
+  status?: number
+  contentType?: string
+  title?: string
+  text?: string
+  excerpt?: string
+  links?: string[]
+  error?: string
+  /** ssrf_blocked | timeout | too_large | protocol_blocked | dns_error | http_4xx | empty_content | unsupported | invalid_url | fetch_error */
+  code?: string
+}

@@ -1,209 +1,241 @@
-# T-016 方案搜索与选型报告：离线优先分布式任务队列系统
+# T-044 方案搜索与选型报告：交付剩余 Legion 指挥团任务（对话中心 · 文件中心 · 浏览器助手）
 
-> 角色：researcher（方案搜索）｜阶段：方案搜索｜输入：docs/REQUIREMENTS.md（T-014 需求澄清，6 项定稿基线 + 3+1 待决点）
-> 结论一句话：**自建「原语组装型」队列——SQLite(WAL) 本地 outbox + 借用 NATS JetStream 幂等去重、CouchDB MVCC/changes-feed、etcd lease/fencing 三类成熟语义自研同步/栅栏胶水 + MQTT QoS1（或 NATS）做边缘传输 + TigerBeetle VOPR / FoundationDB flow / crashmonkey 做双 harness 验证。** 无单一成品满足合成需求；排除一切中心 broker 与 exactly-once 平台。
+> 角色：researcher（方案搜索）｜阶段：方案搜索｜执行任务：T-044（分支 w/T-044 独立 worktree）
+> 输入：T-036 需求澄清（evidence 全文，经 `GET http://127.0.0.1:8787/api/task?id=T-036` 只读读取）+ 本仓库本地代码盘点（见 §1.2 行号证据表）
+> 下游：breaker（docs/TASK_BREAKDOWN.md）→ test-designer → coder → reviewer → tester → devops
+>
+> **结论一句话**：三个占位中心全部走「**零新运行时依赖自研 + 复用既有层**」主线——① 对话中心 = team-hub v2 扩表扩 API（conversations/messages，node:sqlite 已有）+ 复用 `/api/events` SSE 推送 + 指挥台自研 React 会话面板；② 文件中心 = 扩展现有 `/api/fs`（仅回环 + git 仓库探测，已有）为 `/api/files` 文件面 + 自研目录树/文件表 + 轻量文本预览；③ 浏览器助手 v1 = 服务端 fetch 代理 + 正文抽取（零二进制，SSRF 必须防护），v2 再评估无头浏览器（Playwright/Puppeteer，受禁网安装限制）；④ 导航接线 = App.tsx 按 `active` 挂面板 + `React.lazy`（仿 SkillsPanel / Scene3D 既有先例）。所有第三方组件一律「先本地盘点可用再采纳，缺失即 blocker，不联网下载」。
 
 ## 0. 结论速览（TL;DR）
-- 存储/outbox：**SQLite（WAL，synchronous=FULL）+ UNIQUE/UPSERT**（public domain，崩溃安全，db-unique 信任根）。
-- 幂等/去重：**借用 NATS JetStream Nats-Msg-Id 去重窗口 + TigerBeetle 幂等账本语义**，自实现幂等键 + 有限去重窗口（对应 ⚖️-2 的「窗口+溢出策略」）。
-- 对等同步/版本序：**借用 CouchDB 多主复制 + MVCC 修订号 + changes feed 语义**（业务层版本序=CAS；L4 意图对账=changes feed 增量对账）；CRDT（Automerge/Yjs/Loro）仅备选。
-- 边缘传输/断点续传：**MQTT QoS1 + persistent session（Mosquitto，EPL-2.0）**，或 **NATS leaf node**（若接受中继）；仅同步通道，非中心存储。
-- lease/fencing：**借用 Chubby/etcd lease + fencing token 语义**，自实现单调 epoch + 持久 fence token；不引入 etcd 集群。
-- 验证：**TigerBeetle VOPR + FoundationDB flow 方法学（协议层确定性模拟）+ crashmonkey / kill -9 / 掉电 / ENOSPC（耐久层）**。
-- 待将军裁决：3+1 待决点给出 researcher 侧研究结论（§10），与 REQUIREMENTS.md §5 裁决口径对齐；§14 给出 7 份 ADR 建议清单。
 
-## 1. 范围与方法
-- 约束：边缘轻量、离线优先、对等（无中心 broker）、at-least-once + 幂等键 = effective-once、全网禁 exactly-once、放弃 per-key FIFO。见 REQUIREMENTS.md §2/§4。
-- 评估维度（每决策域）：**适配度 / 成熟度 / 许可证 / 维护活跃度 / 迁移成本**。
-- 候选来源：本地持久化（SQLite/LMDB/RocksDB/LevelDB/自研 append-WAL）、幂等去重（NATS JetStream/TigerBeetle/DB UNIQUE/对象存储 CAS）、对等同步（CouchDB/PouchDB/Automerge/Yjs/Loro/RxDB）、边缘传输（Mosquitto/EMQX/NATS leaf）、租约（etcd/hashicorp raft/Dragonboat）、验证（FoundationDB/TigerBeetle VOPR/crashmonkey/Jepsen/Antithesis）、对照排除（Temporal/Cadence/Hatchet/Restate/Inngest/Kafka/Pulsar/RabbitMQ/BullMQ/Asynq/Celery）。
-- 数据限制声明：本阶段禁网，许可证与活跃度为基于既有知识的定性评估；不臆造精确数字（star/commit 频率）；需联网复核项统一标注「待核」，见 §15。
+| 域 | 一等（推荐） | 备选 | 排除 |
+| --- | --- | --- | --- |
+| 对话中心·后端 | **team-hub 扩表扩 API**（conversations/messages + REST + 复用 /api/events SSE + 统一 handleWrite/审计） | 独立消息微服务（ws/Socket.IO） | Rocket.Chat / Zulip / Mattermost / Matrix(Synapse)；Stream/Sendbird 云 |
+| 对话中心·实时 | **复用 SSE**（EventSource 自动重连已有先例） | WebSocket（引入 `ws`） | 长轮询为主通道；第三方推送云 |
+| 对话中心·前端 | **自研 ChatView**（与指挥台主题一致） | chatscope/chat-ui-kit-react | stream-chat-react（绑其后端）；iframe 嵌聊天服务器 |
+| 文件中心·后端 | **扩展 workbench `/api/fs` → `/api/files`**（仅回环 + token 写 + 目录根=空间 local_dir/仓库根） | filebrowser sidecar；DSH fs 工具面代理 | Nextcloud/Seafile/云盘（WebDAV/S3） |
+| 文件中心·前端 | **自研树/表 + 文本预览**（v1 `<pre>`，需编辑时 CodeMirror 6） | Monaco Editor（@monaco-editor/react） | 整套网盘式 UI |
+| 浏览器助手·引擎 | **v1 服务端 fetch 代理 + 正文抽取**（readability/cheerio；SSRF 防护） | v2 Playwright / Puppeteer sidecar；Jina Reader 云（开关默认关） | browser-use 等 Python 框架；无头浏览器进 v1（禁网装不了浏览器二进制） |
+| 浏览器助手·前端 | **自研阅读面板**（地址栏 + markdown 预览；抓回 HTML 需 DOMPurify） | sandbox iframe 受限预览 | 直接把远程页 iframe 进主应用（X-Frame-Options/CSP 普遍禁嵌） |
+| 导航接线 | **App.tsx 按 `active` 渲染面板 + React.lazy 分 chunk** | react-router 引入 | 每模块独立 HTML 页 |
 
-## 2. 决策域 A：本地持久化 / outbox 原语
-requirement 定稿：本地 WAL/outbox 是唯一耐久根（§4.1）。候选：
+## 1. 输入、范围与方法
 
-| 候选 | 许可证 | 成熟度/维护 | 适配度 | 迁移成本 |
-|---|---|---|---|---|
-| **SQLite（WAL, synchronous=FULL）** | public domain | 极高，业界最全 crash 测试之一，持续活跃 | **高**：单文件、崩溃安全 WAL、事务（append+commit 原子）、UNIQUE/UPSERT 直接当 db-unique 信任根、单写者与「每节点本地 outbox」正好匹配 | **极低** |
-| LMDB（mmap B+树） | OpenLDAP Public License | 高，稳定 | 中：崩溃安全、单写者、mmap 快；但无 SQL 查询、无事务外 UNIQUE 语义、调试/对账可读性弱 | 中 |
-| RocksDB | Apache-2.0（或 GPL 双许可） | 高 | 低：LSM 面向 KV/批量写，无事务/UNIQUE，compaction 与队列出队语义相悖 | 中 |
-| LevelDB | BSD-3-Clause | 中（维护趋缓） | 低：同上，且单进程、生态老 | 中 |
-| 自研 append-only WAL | — | — | 中：可控但需自证崩溃安全（group commit/fsync/CRC/恢复），重复造轮子 | 高 |
+### 1.1 上游结论（T-036 需求盘点，requirement evidence 要点）
 
-**推荐：SQLite（WAL, synchronous=FULL）+ UNIQUE/UPSERT。** 理由：崩溃安全语义久经考验且零运维；ON CONFLICT 提供原子幂等插入（对应 L2 硬吸收的 B2 token 条件写落点之一）；单写者限制与「无中心 broker、每节点本地写、跨节点走复制」的架构天然对齐。取舍：LMDB 更快但不可查询、无 UNIQUE 语义（需自建索引判重）；RocksDB/LevelDB 是 KV 引擎而非「outbox + 账本」引擎，判重/对账要自建。
+1. **现状盘点**：scrum v1（:4820 遗留）/ team-hub v2（:8787 SQLite 任务池）/ workbench 军团指挥台（:5173 React）/ board-plugin / whiteboard（零依赖 CRDT 白板，测试/ADR 齐）/ mesh+workflows。
+2. **目标点名项现状**（占位区）：
+   - **对话中心(chat)缺失**：仅 Sidebar 模块项，点击 toast「后续步骤接入」，全仓无聊天 UI/后端；
+   - **文件中心(files)缺失**：Sidebar + QuickTools「DSH 文件工具」均未接线；
+   - **浏览器助手(browser)有极雏形**：QuickTools→openKanban() 只跳经典看板，非真浏览。
+3. **P0/P1/P2 清单**：P0-1 三中心需求澄清（已完成）；P0-2 对话中心=会话/消息存储与 API + 前端视图；P0-3 文件中心=文件浏览/上传/存储 + 真实 DSH 文件工具面接线；P0-4 浏览器助手=真网页抓取/浏览能力；P1-5 workbench 导航接线（files/browser/chat/calendar/notify 占位改真实路由）；P1-6 双账本收敛（v1/v2 写源统一）；P1-7 存量验收（whiteboard 起服联调、board-plugin 注入宿主验证）；P2-8 旧流水线文档归档。
+4. 蓝图参考：scrum/sidebar-mockup.html（聊天区 + 看板侧栏面板的视觉效果，非实现约束）。
 
-## 3. 决策域 B：幂等键 / 去重窗口 / CAS 原语
-requirement 定稿：at-least-once + 幂等键 = effective-once；B2 token 条件写 = 唯一硬吸收层，仅可版本化写（CAS/idempotent-key）（§4.3）。候选：
+### 1.2 盘点方法：本地代码行号证据（均可复核）
 
-| 候选 | 许可证 | 成熟度/维护 | 适配度 | 迁移成本 |
-|---|---|---|---|---|
-| **SQLite UNIQUE + UPSERT（ON CONFLICT DO NOTHING）** | public domain | 极高 | **高**：db-unique 信任根，幂等插入 = effective-once 的最小原子原语 | **极低** |
-| **NATS JetStream 去重窗口（Nats-Msg-Id + DuplicateWindow）** | Apache-2.0 | 高，活跃 | **高**：有限去重窗口 + 显式溢出策略的现成先例（直接回答 ⚖️-2「窗口+溢出」） | 中（若引入 NATS） |
-| **TigerBeetle（幂等账本/transfer）** | Apache-2.0 | 高，非常活跃 | **高（语义参考）**：幂等键 + 双相记账 + CAS 的标杆实现与测试哲学 | 中（借语义非代码） |
-| 对象存储 CAS（S3/OSS If-Match） | 平台侧 | 高 | 中：object-cas 信任根（REQUIREMENTS.md §6.2 kind），适合大 blob 副作用，不适合高频队列元数据 | 中 |
+| 证据点 | 位置（本地可核） | 含义 |
+| --- | --- | --- |
+| 侧栏 9 模块含 files/browser/chat/calendar/notify | workbench/src/components/Sidebar.tsx:13-21 | 目标点名项 = 侧栏占位模块 |
+| 占位点击行为（tasks→openKanban，其余 toast「后续步骤接入」） | Sidebar.tsx:66-77（70/74/77） | 对话/文件/浏览器点不动是「导航未接线」 |
+| 面板渲染仅 skills 有真实现 | workbench/src/App.tsx:346-350 | 新面板挂在 App 同款分支即可 |
+| 懒加载先例（Scene3D = lazy） | workbench/src/components/CenterPanel.tsx:8 | 大模块按需分 chunk 的先例 |
+| 快捷工具 DSH_TOOLS（files/browser/ocr/voice）占位 | workbench/src/components/QuickTools.tsx | 仅 browser→openKanban()，其余 toast |
+| 已有目录浏览 /api/fs（仅回环 403）与 /hub 代理 | workbench/scripts/serve.mjs:8-10, 48, 135, 139-148, 163-166 | 文件中心可直接扩展同款端点 |
+| 客户端 SSE 订阅（EventSource 自动重连）+ /api/fs 客户端 | workbench/src/api.ts:107, 119-120, 222-235 | 对话实时推送复用同款通道模式 |
+| team-hub = node:sqlite DatabaseSync + WAL + busy_timeout | team-hub/server.mjs:35, 62-64 | 后端存储/并发前提 |
+| 现成表结构 tasks/members/roster/spaces/goal/exec_*/agent_models | server.mjs:66-173 | conversations/messages 沿用同构建表 + JSON 列约定 |
+| SSE 事件流 /api/events（text/event-stream） | server.mjs:1291-1302 | 聊天事件推送挂同通道 |
+| 工作台技术栈与 Node 版本要求 | workbench/package.json（react19/vite7/three；engines >=22.5） | 新增依赖须与之兼容 |
+| 零第三方运行时依赖先例 | whiteboard/docs/DEPLOY.md:9（Node≥22.5 内置 node:sqlite） | 「零依赖自研」路线在本环境已验证可行 |
 
-**推荐：SQLite UNIQUE/UPSERT 为默认信任根（db-unique），语义参考 NATS 去重窗口 + TigerBeetle 幂等账本。** 理由：NATS 的 DuplicateWindow（可配置 TTL 窗口 + 窗口溢出即放弃去重保证）是「幂等保证有界、溢出显式」的诚实先例，正好把 ⚖️-2 的「无限递归」变成「有限窗口 + 显式降级」；TigerBeetle 证明「幂等键 + CAS + 双存储校验」可被确定性模拟覆盖（对应 ⚖️-3 oracle 住测试侧）。
+### 1.3 评估维度与引用分级
 
-## 4. 决策域 C：对等同步 / 版本序 / 意图对账
-requirement 定稿：对等同步、无中心 broker；最终一致 + 业务层版本序（§4.4）；L4 意图对账 = 条件观测，P(未检测|intent durable)=0（§4.3）。候选：
+- 每决策域按「适配度 / 成熟度 / 许可证 / 维护活跃度 / 迁移成本」评估。
+- **引用分级**：`[本地]` = 本仓库文件行号，可离线复核（上表）；`[公开·待核]` = 公开项目主页/许可证，因本环境禁网且 web_search 工具不可用（实测报 Insufficient Balance），按既有知识定性并显式标注「待核」，**不编造 star/版本号/日期**。落地前（coder/devops 或将军）按 §14 待核清单复核。
 
-| 候选 | 许可证 | 成熟度/维护 | 适配度 | 迁移成本 |
-|---|---|---|---|---|
-| **CouchDB（多主复制 + MVCC 修订号 + changes feed）** | Apache-2.0 | 极高，成熟 | **高（语义来源）**：MVCC 修订号=版本序/CAS；changes feed=L4 增量对账；多主=对等 | 中（本体偏重，借语义自实现轻量版） |
-| PouchDB | Apache-2.0 | 高，活跃 | 中：可嵌入的 CouchDB 协议实现，适合 Node/浏览器内嵌 | 中 |
-| Automerge | MIT | 高 | 中：CRDT 自动合并，但无 lease/fence/权威语义，表达 task_gate 派生/栅栏弱 | 中 |
-| Yjs | MIT | 高 | 低：协同文档 CRDT，非任务语义，无权威/租约概念 | 中 |
-| Loro | MIT/Apache（待核） | 中，新但活跃 | 中：新 CRDT，性能好，语义同 Automerge 局限 | 中 |
-| RxDB | Apache-2.0 | 高 | 中：离线优先 DB+复制插件，偏前端/文档，非队列 | 中 |
+## 2. 需求要点 → 决策域映射
 
-**推荐：自研轻量同步，语义照搬 CouchDB 的「MVCC 修订号 + changes feed + 多主冲突按业务版本序收敛」。** 理由：已定「业务层版本序」就是 MVCC 修订号的同构物；changes feed 天然支撑 L4 意图对账的「增量拉取对端变更→逐条比对 intent」；CRDT（Automerge/Yjs/Loro）解决「收敛」，但解决不了「谁持有 lease、栅栏在哪、task_gate 谁派生」这类权威问题——而 T-016 的核心难点恰恰是权威/栅栏而非收敛，故 CRDT 只作备选、不作主同步层。取舍：CouchDB 本体含集群管理/视图等边缘不需要的部件，故「借语义自实现轻量复制」优于「整机引入」。
+| 需求要点（T-036） | 决策域 | 关键取舍点 |
+| --- | --- | --- |
+| 对话中心：会话/消息存储与 API + 前端视图 | A（存储/API）/ B（实时）/ C（UI） | 数据放哪、推送通道、UI 自研还是组件库 |
+| 文件中心：浏览/上传/存储 + 真实文件工具面接线 | D（后端访问面）/ E（前端） | 端点位置、写权限、目录根语义、预览/编辑能力 |
+| 浏览器助手：真网页抓取/浏览 | F（引擎）/ G（呈现） | 无头浏览器 vs 轻量抓取、SSRF 防护、JS 渲染边界 |
+| P1-5 导航接线（5 个占位） | H（导航/模块化） | 面板挂接方式、懒加载、v1 覆盖范围 |
+| 依赖纪律（禁网，缺失即 blocker） | 横切 | 默认零新依赖；外部库先本地盘点 |
 
-## 5. 决策域 D：边缘传输 / 断点续传通道
-requirement 定稿：无中心 broker（§4.1）；但「断点续传」需要 at-least-once 通道语义。本域把传输层与队列存储层解耦：队列=本地 outbox，传输=把 outbox 变更带到对端。
+## 3. 决策域 A：对话中心 —— 存储与 API
 
-| 候选 | 许可证 | 成熟度/维护 | 适配度 | 迁移成本 |
-|---|---|---|---|---|
-| **Mosquitto（MQTT QoS1 + persistent session）** | EPL-2.0 | 极高 | **高**：QoS1=at-least-once、persistent session=断线重连续传、轻量、可嵌入/单机运行 | **低** |
-| EMQX | Apache-2.0 | 高，活跃 | 中：边缘集群更强，但更重 | 中 |
-| NATS leaf node + JetStream | Apache-2.0 | 高，非常活跃 | **高（备选）**：leaf 边缘→中心流 + 去重，与 §3 去重原语一体 | 中 |
+| 候选 | 适配度 | 成熟度/维护 | 许可证 | 迁移成本 | 优点 / 缺点与风险 |
+| --- | --- | --- | --- | --- | --- |
+| **A1（推荐）team-hub v2 扩表扩 API**：conversations/messages + REST（GET/POST `/api/chat/*`）+ 统一 handleWrite/审计 + 复用 /api/events | 高 | 极高（产线已有） | 无新增（node:sqlite 属 Node 运行时） | 极低 | 优：单库单服务零新依赖；scope 分区与 by 审计模型现成（tasks 同构，server.mjs:66-173）；消息可与任务/evidence 关联（AI 执行过程写回）；运维/迁移成本最低。缺：聊天与任务写共享 SQLite（DatabaseSync 串行写，busy_timeout=5000）；高并发聊天需节制——v1 局域网多将军单机场景完全够用，风险低 |
+| A2 独立消息服务（Node + 自有存储 + ws） | 中 | 高 | 引入 ws(MIT) | 中-高 | 优：隔离、可独立扩、协议自由。缺：重复基建（成员/空间/任务数据跨服务联查）、双服务运维、破坏「轻量单体」现状；无独立价值 |
+| A3 整机聊天平台（Rocket.Chat MIT / Zulip Apache-2.0 / Mattermost / Matrix-Synapse） | 低 | 极高 | MIT/Apache-2.0（逐项待核） | 高 | 优：频道/私信/富文本/移动端全套。缺：独立服务 + 独立认证体系，与 team-hub 任务/编队数据、审计 SSE、scope 语义完全不融合；v1 明显过度，维护面爆炸 |
+| A4 云聊天 SaaS（Stream/Sendbird 等） | 低 | 高 | 商业 | 高 | 数据出境 + 订阅成本 + 断网不可用，与本项目「本地自托管」定位冲突；排除 |
 
-**推荐：Mosquitto（MQTT QoS1 + persistent session）作默认传输；NATS leaf node 作「接受中继」场景的备选。** 理由：MQTT QoS1 + persistent session 是「离线/断点续传」最轻最成熟的现成语义；Mosquitto 可嵌入式单机运行、不强制中心集群，不违反「无中心 broker」。取舍：EMQX 需要更重边缘集群时才选；NATS 与 §3 幂等去重一体、运维统一，但引入 NATS 运行时。**关键边界：三者只作「传输/同步通道」，不承担队列状态权威——本地 outbox 仍是唯一耐久根，避免中心化复发。**
+**建议 v1 数据形态（供 breaker，非实现）：** conversations(id, scope, title, kind∈{space,direct,task}, participants JSON, created/updated, last_message_at) + messages(id, conv_id, scope, author, kind∈{text,markdown,system}, body, meta JSON, clientTs, createdAt)，JSON-in-TEXT 列与现有表同构；`POST /api/chat/messages` 走统一 handleWrite（by 必填 → 审计 + SSE 广播，机制复用 server.mjs 现状）。
 
-## 6. 决策域 E：lease / fencing / 双活窗口
-requirement 定稿：W = lease_TTL + takeover_latency + max_declared_side_effect_duration（§4.6）；lease 数值整列置空、由假死分布 × 双活代价标定（⚖️-1）。候选：
+## 4. 决策域 B：对话中心 —— 实时通道
 
-| 候选 | 许可证 | 成熟度/维护 | 适配度 | 迁移成本 |
-|---|---|---|---|---|
-| **etcd lease + fencing token（Chubby 模式，语义借用）** | Apache-2.0 | 极高 | **高（语义）**：lease=失效检测上限、fencing token=单调 epoch 写，正是 B2/B3 需要的 | 高（若整机引入集群，重） |
-| hashicorp/raft | MPL-2.0 | 高 | 中：可嵌入 Raft 强一致，但 T-016 已定「对等同步」非全 Raft | 中 |
-| Dragonboat | Apache-2.0 | 高 | 中：同上 | 中 |
+| 候选 | 适配度 | 成本 | 风险 | 结论 |
+| --- | --- | --- | --- | --- |
+| **B1 复用 Server-Sent Events（推荐）** | 高 | 零新增：EventSource 浏览器原生（[公开] WHATWG 标准，待核），服务端 text/event-stream 已实现（server.mjs:1291-1302），客户端订阅先例在 api.ts:119-120 | 低。注意 HTTP/1.1 每源连接上限约 6 条：v1 已用 board/activity 两条事件源，建议把 chat 事件并入单一 `/api/events` 流按 kind 过滤，或走 `/hub` 同源合并，避免连接数撞顶 | **一等**：单向下行天然够聊天推送；消息上行走 REST POST（与现状一致）；EventSource 自动重连免费获得 |
+| B2 WebSocket（引入 `ws` MIT） | 中 | 新增依赖 `ws`；Node 内置无 ws server（服务端需手写 upgrade 或引库） | 低-中：双向低延迟，但引入新依赖 + 新连接管理代码 | 备选：若未来需要在线状态/输入中/强双向交互再切 |
+| B3 轮询兜底 | 低 | 零 | 延迟 3-15s，聊天体感差 | 仅作 SSE 断线兜底（workbench 已有 15s board 轮询先例） |
 
-**推荐：借 Chubby/etcd 的「lease + fencing token」语义自实现：单调 epoch + 持久 fence token + lease TTL；不引入 etcd 集群。** 理由：已定「对等同步」不需要 Raft 全序，但「双活防护」必须借用 fencing 语义——「lease 到期前服务器保证不把所有权交给别人，持有者持单调 fence token 写」。对 ⚖️-1 的研究结论：**Chubby/etcd 中 lease 的量纲从来是时间（失效检测延迟上限），与磁盘预算正交**，故「存储预算反推 lease」无先例可依，成熟实现均以「假死/分区时长分布」为 lease 标定输入。取舍：整机引入 etcd 集群过重且与对等同步冲突，语义借用成本低。
+## 5. 决策域 C：对话中心 —— 前端 UI
 
-## 7. 决策域 F：验证载体（协议层模拟 + 耐久层注入）
-requirement 定稿：协议层确定性模拟 + 耐久层真实二进制 kill -9/掉电/ENOSPC，两套 harness 互相校验（§4.5）。候选：
+| 候选 | 适配度 | 许可证/维护 | 迁移成本 | 结论 |
+| --- | --- | --- | --- | --- |
+| **C1 自研轻量 ChatView（推荐）**：会话列 + 消息气泡 + 输入框 + 分页加载 | 高 | 无新依赖 | 低 | 与指挥台暗色/3D 风格完全一致；交互参照 DSH Web GUI 的 ui-conversation 范式（[本地] packages/client/ui-conversation 存在可参考，非复用代码）；消息渲染 markdown 可选 react-markdown(MIT，待核) |
+| C2 chatscope/chat-ui-kit-react | 中 | MIT（待核），维护中 | 中 | 现成气泡/输入/引用组件省时间，但样式主题需大量覆写以贴近指挥台；纯 UI 不绑后端，可作备选 |
+| C3 stream-chat-react | 低 | SDK MIT（待核），核心能力绑定其后端 | 高 | 后端/定价耦合；排除 |
+| C4 iframe 嵌现成聊天页 | 低 | 绑定 A3 | 高 | 与 A3 同排除 |
 
-| 候选 | 许可证 | 成熟度/维护 | 适配度 | 迁移成本 |
-|---|---|---|---|---|
-| **FoundationDB flow 确定性模拟** | Apache-2.0 | 极高 | **高（方法学）**：把网络/磁盘/时钟注入为可调度 actor，确定性模拟鼻祖 | 高（借方法非代码） |
-| **TigerBeetle VOPR** | Apache-2.0 | 高，非常活跃 | **高（方法学 + 幂等/CAS 测试哲学）**：真实故障注入 + 状态机比对，其幂等去重与 T-016 同构 | 中（借方法非代码） |
-| crashmonkey | MIT（待核） | 中 | 高：文件系统崩溃一致性注入（掉电/ENOSPC） | 低 |
-| Jepsen | EPL（待核） | 极高 | 中：黑盒 kill -9/分区注入，适合最终一致校验 | 中 |
-| Antithesis | 商业闭源 | 高 | 高但付费：确定性 hypervisor 故障注入 | 高（采购） |
+## 6. 决策域 D：文件中心 —— 后端文件访问面
 
-**推荐：协议层自建 VOPR 式确定性模拟（借 FoundationDB/TigerBeetle 方法学），耐久层用 crashmonkey + kill -9/掉电/ENOSPC 真实二进制注入；DSH 插件仅作协议内循环（如 requirement 已定）。** 理由：TigerBeetle 已证明「幂等键 + CAS + 双存储校验」能用 VOPR 覆盖到静默损坏；crashmonkey 专门注入文件系统崩溃一致性故障，匹配「耐久层真实二进制」。对 ⚖️-3 的研究结论：**oracle 住在模拟器/测试侧，不驻生产路径**——生产只留可检测信号（WAL CRC、fence 单调、幂等命中计数），静默损坏由「注入 ground-truth 交错 → 断言静默交错集合=∅」的可数性质覆盖。
+| 候选 | 适配度 | 成熟度/维护 | 许可证 | 迁移成本 | 优点 / 缺点与风险 |
+| --- | --- | --- | --- | --- | --- |
+| **D1（推荐）扩展 `/api/fs` → `/api/files`**（workbench serve.mjs，与 /hub 代理同源）：list(类型/大小/mtime/.git 标记)、read(文本截断+行数)、write/rename/mkdir/delete、上传(PUT raw body)、下载；目录根 = 当前空间 local_dir（未绑定回退显式配置根/仓库根）；沿用「仅回环可访问 + token 写」边界（serve.mjs:135 已有 403 先例） | 高 | 极高（目录浏览/git 探测已在产线，serve.mjs:139-148） | 无新增（node:fs/path/http 内置） | 低 | 优：零依赖；文件=空间绑定的真实仓库目录（任务证据/文档就在其中），语义自洽；只读默认、写操作要 token + 仅回环，攻击面小。缺：上传 multipart 需手写解析——用「fetch PUT raw bytes」规避（免 busboy/multer）；大文件需限尺寸与流式落盘 |
+| D2 filebrowser sidecar（Apache-2.0，待核） | 中 | 高 | Apache-2.0 | 中-高 | 优：现成网盘式管理（分享/搜索/编辑器/用户）。缺：Go 二进制整机 + 独立用户/权限模型 + 新端口进程托管（services-plugin 需扩展）；面向家目录而非「当前空间 git 仓库根」语义；v1 重 |
+| D3 DSH harness 文件工具面代理（把 DSH 的 fs 能力封装为 HTTP） | 中 | 高（宿主内） | 随 DSH | 高 | 优：复用沙箱语义。缺：DSH 文件工具是 agent 沙箱接口，浏览器直连需鉴权/路径策略 + 依赖 Desktop 插件运行时在线；定位 v2 深度接线；QuickTools「DSH 文件工具」卡片可先由 D1 目录浏览器充当真实能力面（即「接线」） |
+| D4 云盘/WebDAV/S3 | 低 | 高 | 平台侧 | 中 | 不在「本地仓库目录」语义内；v2 另议 |
 
-## 8. 对照排除（整体成品 vs 中心 broker vs 重平台）
-requirement 已排除「中心 broker / exactly-once 平台」，本节记录对照与排除理由，防止复发。
+## 7. 决策域 E：文件中心 —— 前端浏览/预览/编辑
 
-| 候选 | 类别 | 排除理由 |
-|---|---|---|
-| Temporal / Cadence | durable execution | MIT；语义标杆（workflow-id 幂等 + event-sourced WAL + at-least-once），但中心服务 + 外部 DB，与「边缘本地 WAL」冲突；仅作语义参照 |
-| Hatchet | durable execution | Apache-2.0（待核）；Postgres 中心，边缘不现实；参考其 transactional outbox |
-| Restate | durable execution | BSL 源码可得（待核，非 OSI）；内嵌合规风险 |
-| Inngest | durable execution | source-available（待核）；非自托管，排除 |
-| Kafka / Pulsar | 中心 log | Apache-2.0；JVM 重、中心 log；其 exactly-once 是「有界+事务」，与「全网禁 exactly-once」相悖 |
-| RabbitMQ | 中心 broker | MPL-2.0；at-least-once 成熟但中心化、离线队列弱 |
-| BullMQ / Asynq / Celery | Redis/中心 broker | MIT/BSD；内存优先（Redis）、断电离线弱、中心依赖 |
+| 候选 | 适配度 | 许可证/维护 | 迁移成本 | 结论 |
+| --- | --- | --- | --- | --- |
+| **E1（推荐）自研目录树 + 文件表 + 文本预览**：导航/样式复用 FolderPickerModal 的既有交互（[本地] workbench/src/components/FolderPickerModal.tsx / api.ts:222-235）；v1 预览用受控 `<pre>`（防 XSS：textContent 渲染），按扩展名出图标/行数 | 高 | 无新依赖 | 低 | 覆盖「浏览/定位/下载/上传」核心诉求；对仓库内文本查看够用 |
+| E2 CodeMirror 6（MIT，待核） | 中-高 | MIT，活跃 | 中 | 轻量（相对 Monaco），懒加载分 chunk 后可做「文本查看 + 简易编辑」；若 v1 就要编辑则推荐（先本地盘点依赖） |
+| E3 Monaco Editor / @monaco-editor/react（MIT，待核） | 中 | MIT，微软维护 | 中-高 | 完整 IDE 体验，但包体大 + worker 配置复杂（与现有 Vite 构建要专门处理）；v2「在指挥台内写代码/改配置」再引入 |
+| E4 react-arborist 等现成树组件（MIT，待核） | 中 | 中 | 中 | 可选小件；树不复杂时自研更贴合现有样式 |
 
-## 9. 选型建议（一等 + 备选 + 取舍）
+## 8. 决策域 F：浏览器助手 —— 抓取引擎
 
-### 9.1 核心判断
-**无单一现成项目同时满足「离线优先 + 对等同步 + 副作用级幂等分类 + 栅栏边界吸收 + 全网禁 exactly-once」的合成体。正确姿势是「借已验证原语、自研薄胶水」。**
+**语义**：将军在指挥台内「喂 URL → 看页面内容/快照」，替代 QuickTools「跳看板」占位；未来演进为可操作浏览。
 
-### 9.2 一等选型（分层组合）
+| 候选 | 适配度 | 成熟度/维护 | 许可证 | 迁移成本 | 优点 / 缺点与风险 |
+| --- | --- | --- | --- | --- | --- |
+| **F1（推荐 v1）服务端 fetch 代理 + 正文抽取**：workbench serve.mjs（或 team-hub）加 `POST /api/web/fetch`（url 入参）；Node 内置 fetch(undici) 拉取 → 抽取：纯 HTML→标题/文本/链接摘要（零依赖）；正文精抽取用 @mozilla/readability(Apache-2.0，待核) 或 cheerio(MIT，待核)；可选 Turndown(MIT，待核) 转 Markdown | 高（v1 阅读场景） | 高 | 零二进制新依赖 | 低 | 优：轻、快、无需浏览器二进制（禁网环境唯一可行）；响应限长/超时/Content-Type 白名单可控。缺：**不能执行 JS**——SPA/反爬/需登录页拿不到正文（v2 无头浏览器补）；**服务端外呼=SSRF 高危**：必须禁私有网段/回环/内网、URL 协议白名单 http/https、重定向链校验、限大小超时、审计日志（本地已有 loopback-only 先例 serve.mjs:48,135 可扩展为「仅允许显式外网」策略） |
+| F2 v2 无头浏览器 sidecar：Playwright（Apache-2.0）/ Puppeteer（Apache-2.0，均待核） | 中-高（未来） | 极高 | Apache-2.0 | 高 | 优：完整渲染/截图/DOM 操作，才是「浏览器助手」完全体。缺：需下载 Chromium（约 120-300MB，**禁网环境无法安装 → 实施时本地盘点即 blocker，不擅自下载**）；进程管理/内存开销；远控浏览器攻击面大；v1 不做 |
+| F3 云阅读服务（Jina AI Reader r.jina.ai 等） | 中 | 服务可用性依赖第三方 | 商业 ToS | 低 | 内容经第三方、隐私/合规不可控、断网不可用；仅作「显式开关、默认关」选项 |
+| F4 window.open / iframe 直嵌目标站 | 低 | — | — | 低 | 非通用方案：X-Frame-Options/CSP 普遍禁嵌，跨域不可读；保留 openKanban 新窗口作为「打开内部看板」快捷入口，不算浏览能力本体 |
 
-| 层 | 一等 | 借用的关键语义 | 对齐基线 |
-|---|---|---|---|
-| 本地 outbox/WAL | SQLite（WAL, synchronous=FULL, UNIQUE/UPSERT） | 崩溃安全 WAL、原子幂等插入（db-unique 信任根） | §4.1/§4.2 |
-| 幂等/去重/CAS | 自研，语义借用 NATS 去重窗口 + TigerBeetle 幂等账本 | effective-once、有限去重窗口+溢出策略、CAS 版本写 | §4.3 B2 |
-| 对等同步/版本序 | 自研，语义借用 CouchDB 多主 + MVCC 修订号 + changes feed | 版本序=CAS、L4 意图对账=增量对账 | §4.4/§4.3 L4 |
-| 边缘传输 | Mosquitto（MQTT QoS1 + persistent session） | at-least-once、断线重连续传 | §4.1（仅作通道） |
-| lease/fencing | 自研，语义借用 Chubby/etcd lease + fencing token | 单调 epoch、双活窗口 W | §4.6 |
-| 验证 | TigerBeetle VOPR + FoundationDB flow 方法学 + crashmonkey | 协议确定性模拟 + 耐久真实注入 | §4.5 |
+## 9. 决策域 G：浏览器助手 —— 前端呈现
 
-### 9.3 备选
-- **备选 1（最小自研，接受中继传输）**：NATS JetStream（leaf node + stream 去重 + KV）统一承担「传输 + 幂等去重 + KV 版本序」三层，本地仍 SQLite outbox。适用：若「非中心 broker」放宽为「非中心存储/执行」。
-- **备选 2（仅语义标尺）**：Temporal——不作为实现，仅作 durable execution 语义对齐标尺（幂等 workflow id、event-sourced、at-least-once）。
-- **备选 3（同步层）**：Automerge/Loro CRDT——若后续把「对等状态复制」单独拆出且只需收敛不需权威，可替换 CouchDB 语义。
+| 候选 | 适配度 | 结论 |
+| --- | --- | --- |
+| **G1 自研阅读面板（推荐）**：地址栏 + 请求态 + 结果视图。结果若为 Markdown → react-markdown(MIT) 渲染；若直接渲染抓回 HTML → 必须先 DOMPurify(MIT/MPL-2.0，待核) 净化（防存储型 XSS——抓取内容不可信） | 高 | 一等：默认把抓回内容转 Markdown/文本渲染，**避免把远端 HTML 直接落 DOM**，从根上收窄注入面 |
+| G2 sandbox iframe 受限预览 | 中 | 辅助：对同意被嵌的站（X-Frame-Options 放行）用 sandbox 属性只读预览 |
+| G3 DSH Web GUI 自身浏览器 | 低 | 宿主浏览器能力面（tab/窗口）与 workbench 集成属另一主题，v2 评估 |
 
-### 9.4 取舍理由
-- 排除中心 broker/平台：违反 §4.1「无中心 broker」；exactly-once 平台违反「全网禁 exactly-once」。
-- 排除整机引入 CouchDB/etcd：借语义足够，整机引入带入边缘不需要的集群/视图/权重。
-- 排除 RocksDB/LevelDB：KV 引擎无 UNIQUE/CAS/对账查询，outbox+账本语义需自建。
-- CRDT 不做主同步：解决收敛不解决权威（lease/栅栏/task_gate），与 T-016 难点错位。
+## 10. 决策域 H：导航接线与模块化（横切 P1-5）
 
-## 10. 三条待决冲突的研究映射（researcher 侧结论）
+| 候选 | 适配度 | 迁移成本 | 结论 |
+| --- | --- | --- | --- |
+| **H1（推荐）App.tsx 按 `active` 渲染面板**：仿既有 skills 分支（App.tsx:346-350）为 chat/files/browser 各挂懒加载面板（React.lazy 仿 Scene3D，CenterPanel.tsx:8 先例）；Sidebar.clickModule 把这 3 个 id 从 toast 分支移入 onNavigate 分支（Sidebar.tsx:66-77）；「任务中心」维持 openKanban 外部经典看板页；calendar/notify 维持 toast（P1 后续再接线） | 高 | 低 | 一等：改动集中在 App/Sidebar 两个文件；无路由库依赖；三个面板各自独立 chunk，首屏体积不涨 |
+| H2 引入 react-router | 中 | 中 | 备选：模块到两位数/需要 URL 深链（如 `#/chat/conv/1` 可分享）时再引入；当前 state 切换够用，避免过度工程 |
+| H3 每模块独立 HTML 入口 | 低 | 高 | 与 SPA + 弹窗 + 独立看板页现状割裂；否 |
 
-### ⚖️-1 SLO/lease 推导链
-研究结论：**Chubby/etcd 的 lease 量纲恒为时间（失效检测延迟上限 + fencing token 有效期），业界无「存储预算→lease」推导先例；lease 必须由「假死时长分布分位数 × takeover_latency × per-class 双活代价」标定。** 选型落点：借 etcd fencing 语义；用 VOPR 式确定性模拟把「假死分布」作为注入输入、lease 作为标定输出（实测回填），支持 REQUIREMENTS.md 的 lineage 门禁与「设计界 vs 实测值」两态拆分。明确否定任何「D/M/K 反推 lease」的断链结论。
+## 11. 一等选型汇总 → 直接支撑任务拆解的 v1 建议
 
-### ⚖️-2 meta 递归终止
-研究结论：结构性排除与幂等不动点**不是二选一**。业界先例（NATS DuplicateWindow）给出「有限去重窗口 + 显式溢出策略」：窗口内幂等键去重（自坍缩），窗口溢出显式降级（不假装保证）。递归终止条件 = **「有限窗口 + 吸收器自身 Class A 幂等（其幂等键由在册信任根保证）+ L4 意图对账」三者组合**。选型落点：信任根枚举映射到 REQUIREMENTS.md §6.2 kind——db-unique=SQLite UNIQUE、object-cas=S3/OSS If-Match、third-party-idempotency-key=支付/短信平台幂等键；吸收器副作用 class 必须 ≤ 所依赖信任根 class；「补偿=Class A」写为显式前置假设（声明依赖），而非可测终止证明。
+### 11.1 实施拓扑建议（供 breaker 取舍，含边界）
 
-### ⚖️-3 E[SilentDamage] 可测性
-研究结论：**oracle 住在测试/模拟侧，不驻生产路径**（FoundationDB/TigerBeetle 的一致答案）。生产只留可检测信号（WAL CRC、fence 单调、幂等命中计数）；静默损坏由「注入 ground-truth 双活交错 → 穷举断言『静默交错集合=∅、每条交错留 absorbed ∨ audited 痕迹』」的可数性质覆盖。选型落点：采纳 REQUIREMENTS.md 方案 A（CI 签「已检测集 + 审计完整性」可数性质，不签概率期望值）；耐久层用 crashmonkey + kill -9/掉电/ENOSPC 与协议层模拟互相校验。
+1. **对话中心 v1**：team-hub 新增 conversations/messages 表 + `/api/chat/conversations|messages`（scope/分页/审计）→ 复用 /api/events 推 chat 事件 → workbench 侧 ChatView（会话列/气泡/发送/markdown 可选）+ Sidebar/App 接线。不做：富文本/文件附件/已读回执/多端同步（v2）。
+2. **文件中心 v1**：serve.mjs 扩 `/api/files`（list/read/download/upload-PUT + 受限写操作，仅回环 + token）→ 目录根=当前空间 local_dir/仓库根 → workbench FilesView（树+表+预览）→ QuickTools「文件浏览」卡与侧栏 files 接线。不做：跨机器访问、权限系统、版本历史（git 已天然有）、在线编辑（v1 预览只读）。
+3. **浏览器助手 v1**：`/api/web/fetch` 代理（SSRF 防护：协议白名单 + 私网阻断 + 限长超时 + 审计）→ 正文抽取（先零依赖正则版，可后挂 readability/cheerio）→ BrowserView 阅读面板（结果以文本/markdown 呈现，HTML 必须净化）→ QuickTools「打开浏览器」卡拆为「打开内部看板」与「浏览网页」两个入口。不做：JS 渲染页、登录态、点击/表单操作（v2 无头浏览器）。
+4. **导航接线**：按 H1；calendar/notify 仍占位。
+5. **依赖纪律**：以上 v1 全部零新依赖；若采纳 E2/react-markdown/readability 等，coder 首步先本地盘点（node_modules/pnpm store/仓库缓存），缺失即 blocker，不下载（§14 风险 R1）。
 
-### ⚖️-4（schema 欠账）Class III 双窗口 Z
-研究结论（researcher 倾向，与 requirement 默认一致）：**Z 入 v1 schema**。Z = self_fence_interval + in-flight duration 是 Class C 唯一能产生不可逆静默损坏的残漏窗口，Z 不入 schema 则 E[SilentDamage] 的 C 类项无定义。选型含义：Z 不引入新库，但要求本地 outbox 记录「自栅栏发起时刻 + 动作完成时刻」两枚单调时间戳（SQLite 表字段即可），供审计与对账断言。
+### 11.2 决策闸门（G-1..G-7，请将军裁决；建议默认值即上文一等）
 
-## 11. 许可证与合规总表
+- G-1 对话数据入 team-hub 单库（默认✅，否=A2 独立服务）
+- G-2 实时通道 = 复用 SSE（默认✅，否=ws 新依赖）
+- G-3 对话 UI 自研（默认✅，否=chat-ui-kit-react）
+- G-4 文件端点放 workbench serve.mjs（默认✅，否=team-hub 或 filebrowser sidecar）；写默认只读+token
+- G-5 浏览器引擎 = v1 fetch+抽取 / v2 无头（默认✅）；JS 渲染/登录页明示为 v1 边界
+- G-6 导航 v1 范围 = chat/files/browser 三模块（默认✅；calendar/notify 仍占位）
+- G-7 新依赖引入策略 = 先本地盘点、缺失即 blocker（默认✅，全 v1 路线零新依赖即自动满足）
 
-| 候选 | 许可证 | 置信度 | 结论 |
-|---|---|---|---|
-| SQLite | public domain | 高 | 采纳 |
-| NATS / JetStream | Apache-2.0 | 高 | 语义借用（备选运行时） |
-| TigerBeetle | Apache-2.0 | 高 | 语义 + 方法学借用 |
-| CouchDB / PouchDB | Apache-2.0 | 高 | 语义借用（PouchDB 备选内嵌） |
-| Mosquitto | EPL-2.0 | 高 | 采纳（传输） |
-| EMQX | Apache-2.0 | 高 | 备选 |
-| etcd | Apache-2.0 | 高 | 语义借用 |
-| hashicorp/raft | MPL-2.0 | 高 | 备选（若需强一致） |
-| Dragonboat | Apache-2.0 | 高 | 备选 |
-| FoundationDB | Apache-2.0 | 高 | 方法学借用 |
-| crashmonkey | MIT（待核） | 中 | 耐久层工具 |
-| Jepsen | EPL（待核） | 中 | 可选黑盒 |
-| Automerge / Yjs | MIT | 高 | 备选（CRDT） |
-| Loro | MIT/Apache（待核） | 低 | 备选（待核） |
-| Temporal / Cadence | MIT | 高 | 仅语义参照 |
-| Hatchet | Apache-2.0（待核） | 中 | 仅参考 outbox |
-| Restate | BSL（待核，非 OSI） | 中 | 排除 |
-| Inngest | source-available（待核） | 中 | 排除 |
-| Kafka / Pulsar | Apache-2.0 | 高 | 排除 |
-| RabbitMQ | MPL-2.0 | 高 | 排除 |
-| BullMQ | MIT | 高 | 排除 |
-| Asynq | MIT（待核） | 中 | 排除 |
-| Celery | BSD-3-Clause | 高 | 排除 |
+## 12. 新技术 / 依赖逐项影响（许可 · 维护 · 学习成本 · 生态）
 
-风险提示：EPL-2.0（Mosquitto）为弱 copyleft，静态链接/内嵌需评估衍生作品条款，建议进程隔离或动态链接；BSL/source-available 项（Restate/Inngest）不作为依赖。带「待核」项落地前逐条复核（§15）。
+> 注：v1 一等路线**零新运行时依赖**（node:sqlite / node:http / node:fs / EventSource / 自研 React 均已在产线）。下表列的是「可选增强 / v2」候选，逐项标注影响与前置条件。
 
-## 12. 迁移成本 & 自建 vs 采用总评
-- 整体采用 Temporal/Cadence/Hatchet：语义成熟但中心服务 + 外部 DB，违反「边缘本地 WAL/无中心 broker」；排除（仅参照）。
-- 整体采用 Kafka/Pulsar/RabbitMQ/BullMQ：中心 broker/内存优先，违反定位；排除。
-- 整体采用 CouchDB/PouchDB：多主复制 + MVCC 契合，但队列权威（lease/栅栏/task_gate）不在其语义内，仍需自研，且整机引入偏重；**借语义自实现优于整机引入**。
-- **自建（SQLite outbox + 借 NATS/CouchDB/etcd 语义 + MQTT 传输 + VOPR 验证）**：每层有公开/成熟先例，自研量集中在「轻量复制协议 + fence/lease 胶水 + 确定性模拟器骨架」三块（各约数百行），锁定与合规风险最低。
-- 结论：**自建（原语组装型）**，逐域按 §9.2；3+1 待决点 researcher 倾向已给（§10），请将军按 REQUIREMENTS.md §5 裁决口径 + §14 ADR 落定后转拆解。
+| 名称 | 许可证（待核） | 维护活跃度 | 学习成本 | 生态/与本项目契合 | 用途与前置 |
+| --- | --- | --- | --- | --- | --- |
+| @mozilla/readability | Apache-2.0 | 高（Mozilla 维护，社区活跃） | 低（单函数 read()） | Node 可跑；主流正文抽取事实标准 | 浏览器助手正文抽取（v1 增强）；前置=本地可安装 |
+| cheerio | MIT | 高（长期活跃） | 低 | Node 生态最普及的 HTML 解析 | 结构化抓取/链接提取备选 |
+| Turndown | MIT | 中（成熟少动） | 低 | 常用 HTML→Markdown | 抽取结果转 Markdown 的可选项 |
+| DOMPurify | MIT 或 MPL-2.0 双许可 | 极高 | 低 | 前端净化标准库 | 抓回/用户 HTML 渲染前的必需净化（若走 HTML 渲染路径） |
+| react-markdown | MIT | 高（remark 生态活跃） | 低 | React 生态标准 markdown 渲染 | 聊天/网页摘要 markdown 渲染（可选项） |
+| CodeMirror 6 | MIT | 高 | 中（API 与现代编辑器不同） | 轻量、无 worker 包袱 | 文件中心在线查看/编辑（v2 或 v1 增强） |
+| Monaco Editor（@monaco-editor/react） | MIT | 极高（微软） | 中（体积与 worker 配置是主要成本） | VSCode 同源，能力最强 | 「在指挥台写代码」场景（v2） |
+| chatscope/chat-ui-kit-react | MIT | 中 | 中 | 纯 UI 组件 | 对话 UI 备选（不绑后端） |
+| ws | MIT | 极高 | 低 | Node WebSocket 事实标准 | 若 G-2 翻转选 ws 通道 |
+| filebrowser | Apache-2.0 | 高 | 低（整机服务） | Go 生态 | 文件中心 sidecar 备选（v2） |
+| Playwright / Puppeteer | Apache-2.0 | 极高 | 中-高（浏览器自动化心智） | 浏览器自动化事实标准 | 浏览器助手 v2 无头引擎；**前置=可下载 Chromium，禁网环境大概率 blocker** |
+| Jina AI Reader | 商业 ToS | 服务 | 极低 | 云依赖 | 开关默认关的云兜底 |
+| Rocket.Chat / Zulip / Mattermost / Matrix | MIT / Apache-2.0（逐项待核） | 高 | 高（整机运维） | 独立社区/认证生态 | 排除（数据模型与本地定位不融合） |
 
-## 13. 本阶段验收标准（researcher 自定，因原验收标准留空）
-- AC1 docs/RESEARCH.md 存在且已重写为 T-016（离线优先分布式任务队列），覆盖 6 项定稿基线 + 3+1 待决点。
-- AC2 每个决策域 ≥2 候选，逐项给适配度/成熟度/许可证/维护/迁移成本。
-- AC3 给出一等分层选型 + ≥2 备选 + 取舍理由，且与「无中心 broker、全网禁 exactly-once、放弃 per-key FIFO」基线对齐。
-- AC4 3+1 待决点各给「研究结论 → 借用先例/库 → 如何帮助闭合」映射。
-- AC5 许可证表准确，不确定项标注「待核」。
-- AC6 未下载任何外部依赖；验证为本地命令（文件写盘 + 读回 + 结构/关键词检查）。
+## 13. 许可证与合规总表
 
-## 14. ADR 建议清单（7 份，交将军）
-- ADR-1001 存储/outbox = SQLite(WAL) + UNIQUE/UPSERT（排除 LMDB/RocksDB/自研 WAL）
-- ADR-1002 幂等/去重 = 有限去重窗口 + 溢出显式降级（借 NATS/TigerBeetle 语义）
-- ADR-1003 对等同步 = CouchDB 语义（MVCC + changes feed），CRDT 仅备选
-- ADR-1004 边缘传输 = MQTT QoS1 + persistent session（Mosquitto），仅作通道非权威
-- ADR-1005 lease/fencing = Chubby/etcd 语义（单调 epoch + fence token），不引入 etcd
-- ADR-1006 验证载体 = VOPR 式确定性模拟 + crashmonkey/kill -9/掉电/ENOSPC
-- ADR-1007 trust-root registry 落地（db-unique/object-cas/third-party-idempotency-key 三类信任根）
+| 项 | 许可证 | 置信度 | 结论 |
+| --- | --- | --- | --- |
+| node:sqlite / node:http / node:fs / EventSource | Node.js MIT / 平台标准 | 高 | 采纳（已在产线） |
+| React / react-dom / Vite / TS / three / @react-three/fiber / drei | MIT（Vite 亦 MIT） | 高 | 已在用，采纳 |
+| @mozilla/readability / cheerio / Turndown / react-markdown / CodeMirror / Monaco / ws / filebrowser / Playwright / Puppeteer | 见 §12 | 中-高 | 待核后按需采纳（全部非 copyleft 类） |
+| DOMPurify | MIT 或 MPL-2.0 双许可 | 中 | 待核（MPL-2.0 为弱 copyleft，文件级） |
+| chatscope chat-ui-kit-react / stream-chat-react | MIT（后者的核心后端为商业） | 中 | 前者可采纳，后者排除 |
+| Rocket.Chat / Zulip / Mattermost / Matrix-Synapse | MIT / Apache-2.0 等 | 中 | 排除（过度） |
+| Jina Reader 等云服务 | 商业 ToS | 高 | 默认关闭选项 |
 
-## 15. 风险与未知（联网后需复核）
-- 各「待核」许可证逐条 SPDX 核对（Hatchet/Restate/Inngest/Asynq/Loro/crashmonkey/Jepsen）。
-- NATS JetStream DuplicateWindow 默认值/上限与 leaf node 去重行为。
-- Mosquitto EPL-2.0 静态链接/内嵌合规结论。
-- TigerBeetle VOPR 模拟器是否可外部复用（通常内嵌于 TB 仓库，作方法学借用）。
-- CouchDB MVCC/changes feed 无中心多主下的冲突上限与 tombstone 行为。
-- 各库 star/commit/最近 release（本阶段禁网，凭知识定性）。
+风险提示：DOMPurify 双许可含 MPL-2.0 需按文件级合规评估（若采纳选 Apache-2.0 分支即可）；Playwright/Puppeteer 引入的是浏览器二进制下载而非纯 npm 依赖，禁网环境下先盘点再决定。
+
+## 14. 风险与未知（含备选方案）
+
+- **R1（环境）禁网/禁下载**：外部库一律先本地盘点，缺失列为 blocker 不擅自安装（与 LEGION.md 纪律、白板先例一致）。v1 一等路线零新依赖即为此设计。备选：任何外部库不可得时用「零依赖自研等价物」降级（正则抽取、`<pre>` 预览等）。
+- **R2（浏览器助手）SSRF**：服务端 fetch 代理是 SSRF 高危点——协议白名单 + 私有网段/回环/链路本地阻断 + 重定向链校验 + 响应限长与超时 + 操作审计 + 默认不开（显式按钮触发）。参考已有 loopback-only 边界实现（serve.mjs:48,135）。
+- **R3（浏览器助手）JS 渲染页不可抓**：v1 明确边界（SPA/反爬/登录页只返回提示），v2 无头浏览器补；备选 = Jina Reader 云开关（默认关，隐私自负）。
+- **R4（对话中心）SQLite 写竞争**：chat 高频写与任务写共享 DatabaseSync 串行写；单机场景够用，压力上限需 breaker/test-designer 量化（如 ≤100 msg/min 冒烟 + P95 写延迟断言）；备选 = 独立消息库/表分文件。
+- **R5（实时）HTTP/1.1 连接数**：事件源建议并流（单一 /api/events 按 kind 过滤）防撞约 6 连接/源上限。
+- **R6（文件中心）越权与误删**：写默认只读 + token + 仅回环 + 路径规范化（禁越出目录根，禁符号链接逃逸）；删除/覆盖需二次确认。
+- **R7（抓回内容注入）**：远端内容不可信——默认转文本/markdown 渲染；HTML 渲染路径必须 DOMPurify（§9 G1）。
+- **R8（双账本 P1-6 / 存量验收 P1-7 / 归档 P2-8）**：属 devops/tester/requirement 后续任务，本报告仅标注依赖与顺序（文件中心建在 workbench serve.mjs 上时注意与 team-hub 双写源纪律一致——v1 只写 team-hub 或只写 v1，避免再引入第三写源）。
+- **R9（SaaS/重平台诱惑）**：云聊天/云文件/整机聊天或网盘产品均因「数据本地、认证隔离、模型不融合、运维重」排除；若未来将军要「公网多用户」，再单独立项评估（含认证/安全专题）。
+- **R10（待核清单，联网后复核）**：§12/§13 各许可证 SPDX 复核（readability/cheerio/Turndown/DOMPurify/CodeMirror/Monaco/chatscope/filebrowser/Playwright/Puppeteer/Rocket.Chat/Zulip/Mattermost/Matrix）；node:sqlite 在 Node 24 的稳定性级别；各库最近 release 与维护活跃度量化。
+
+## 15. 引用与来源清单
+
+### 15.1 [本地] 可复核（本仓库文件/接口，行号见 §1.2 证据表）
+- workbench/src/components/Sidebar.tsx:13-21,66-77（占位模块与点击行为）
+- workbench/src/components/QuickTools.tsx（DSH_TOOLS 占位卡，仅 browser→openKanban）
+- workbench/src/App.tsx:346-350（模块面板渲染分支）；CenterPanel.tsx:8（lazy 先例）
+- workbench/scripts/serve.mjs:8-10,48,135,139-148,163-166（/api/fs 与 /hub 代理，仅回环边界）
+- workbench/src/api.ts:107,119-120,222-235（SSE 订阅与 /api/fs 客户端）
+- team-hub/server.mjs:35,62-64,66-173,1291-1302（node:sqlite/WAL、表结构、/api/events SSE）
+- workbench/package.json（React19/Vite7/three；engines ≥22.5）；whiteboard/docs/DEPLOY.md:9（零第三方运行时依赖先例）
+- T-036 需求盘点 evidence：`GET http://127.0.0.1:8787/api/task?id=T-036`（只读）
+
+### 15.2 [公开·待核]（禁网不可实时抓取，URL 供联网复核；本报告未引用未核实数字）
+- SQLite 公共域声明：https://www.sqlite.org/copyright.html
+- Node.js 内置 SQLite（node:sqlite）：https://nodejs.org/api/sqlite.html
+- Server-Sent Events：https://html.spec.whatwg.org/multipage/server-sent-events.html（MDN: https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events）
+- @mozilla/readability（Apache-2.0）：https://github.com/mozilla/readability
+- cheerio（MIT）：https://cheerio.js.org ／ https://github.com/cheeriojs/cheerio
+- Turndown（MIT）：https://github.com/mixmark-io/turndown
+- DOMPurify（MIT/MPL-2.0）：https://github.com/cure53/DOMPurify
+- react-markdown（MIT）：https://github.com/remarkjs/react-markdown
+- CodeMirror（MIT）：https://codemirror.net ／ Monaco Editor（MIT）：https://microsoft.github.io/monaco-editor/
+- chatscope chat-ui-kit-react（MIT）：https://github.com/chatscope/chat-ui-kit-react
+- ws（MIT）：https://github.com/websockets/ws
+- filebrowser（Apache-2.0）：https://filebrowser.org ／ https://github.com/filebrowser/filebrowser
+- Playwright（Apache-2.0）：https://playwright.dev ／ Puppeteer（Apache-2.0）：https://pptr.dev
+- Jina AI Reader：https://jina.ai/reader
+- Rocket.Chat（MIT）：https://rocket.chat ／ Zulip（Apache-2.0）：https://zulip.com ／ Mattermost：https://mattermost.com ／ Matrix/Synapse（Apache-2.0）：https://matrix.org
+
+## 16. 本阶段验收标准（researcher 自拟，因任务 acceptance 留空）
+
+- **AC-1 方案覆盖需求要点且每决策域 ≥2 候选对比（优缺/成本/风险）**：§3-§10 共 8 个决策域，每域 2-4 候选并给适配度/成熟度/许可/迁移成本与优缺点风险列。✅ 本文档 §3-§10。
+- **AC-2 有明确推荐与理由，依据真实可查来源并注明引用**：推荐逐条锚定 [本地] 行号证据（§1.2/§15.1，可离线复核）；公开事实因本环境禁网（web_search 实测 Insufficient Balance）标注 [公开·待核] 并给规范 URL（§15.2），未编造任何数字。✅ §1.3/§15。
+- **AC-3 新引入技术/依赖逐项说明影响（许可/维护/学习/生态）**：§12 逐项表 + §13 合规总表 + §14 R10 待核清单。✅
+- **AC-4 结论可直接支撑后续任务拆解**：§11 给出 v1 实施拓扑（三中心 + 导航 + 依赖纪律）、边界（不做什么）、决策闸门 G-1..G-7 与建议默认值；breaker 可据此拆 S 系列子任务。✅
+- **边界遵守**：本阶段只产出本文件，无代码改动、未调 taskctl、未 push、未下载任何依赖；「不确定项列为风险与备选」见 §14（R1-R10）。✅

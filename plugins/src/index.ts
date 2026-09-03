@@ -112,6 +112,7 @@ interface Task {
   claimedAt: string | null
   parent: string | null
   role: string | null
+  scope?: string
   /** 将军逐任务拦截（hold=true 时本守护不得自动认领/执行）。 */
   hold?: boolean
   blockedBy: string[]
@@ -770,7 +771,14 @@ exit 0
     const nextStage = stageByRole.get(stage.next)
     if (!nextStage) return
     const all = await listTasks()
-    if (all.some(t => t.parent === doneTask.id)) return
+    // 后继已存在则跳过：advance 补建的任务以 parent 链识别，createGoalChain 预建的全链任务以
+    // 「同 scope 同 role 且 blockedBy 含已完成任务」识别（parent 为空）——两者任一存在即不重复建。
+    const isOpen = (s?: string) => !!s && s !== 'done' && s !== 'canceled'
+    const hasSuccessor = all.some(t =>
+      t.scope === scope && t.role === nextStage.role && isOpen(t.status) &&
+      (t.parent === doneTask.id || (Array.isArray(t.blockedBy) && t.blockedBy.includes(doneTask.id))),
+    )
+    if (hasSuccessor) return
     const doneSummary = doneTask.comments
       .filter(c => c.text.startsWith('✓'))
       .map(c => c.text.replace(/\n.*$/s, ''))
@@ -781,17 +789,19 @@ exit 0
       `[前序阶段] ${stage.label}（${stage.role}）已完成：${doneSummary}`,
       `[本阶段] ${nextStage.label}（${nextStage.role}）`,
     ].filter(s => s.trim().length > 0).join('\n\n')
+    // 标题沿用上一环但把「【阶段标签】」换成下一环的，避免重复建任务时标题仍旧是前序阶段
+    const title = doneTask.title.replace(/^【[^】]*】/, `【${nextStage.label}】`)
     try {
       let res: { id?: string }
       if (useHub) {
         res = await hubPost('/api/create', {
-          title: doneTask.title, description, role: nextStage.role,
+          title, description, role: nextStage.role,
           parent: doneTask.id, priority: doneTask.priority, status: 'todo',
           by: config.role, scope: scope,
         }) as { id?: string }
       } else {
         res = await runTaskctl(config.scrumDir, [
-          'create', '--title', doneTask.title, '--description', description,
+          'create', '--title', title, '--description', description,
           '--role', nextStage.role, '--parent', doneTask.id, '--priority', doneTask.priority, '--status', 'todo',
         ]) as { id?: string }
       }

@@ -1,0 +1,20 @@
+[
+ {
+  "dlHeaderMs": 202,
+  "dlTotal": 1173,
+  "bytes": 209715200,
+  "pings": [
+   20,
+   3,
+   4,
+   3,
+   4,
+   16,
+   2,
+   14
+  ]
+ },
+ {
+  "concurrentListLatencyMs": 262
+ }
+]

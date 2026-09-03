@@ -1,0 +1,80 @@
+[
+ {
+  "id": "TC-S4-01",
+  "name": "upload new file + download matches",
+  "pass": true,
+  "detail": "up=200 dlBytes=22"
+ },
+ {
+  "id": "TC-S4-03",
+  "name": "overwrite w/o flag -> 409, original intact",
+  "pass": true,
+  "detail": "status=409 content-same=true"
+ },
+ {
+  "id": "TC-S4-04",
+  "name": "overwrite=1 replaces content",
+  "pass": true,
+  "detail": "status=200 content=new content A"
+ },
+ {
+  "id": "TC-S4-05",
+  "name": "mkdir nested creates layers",
+  "pass": true,
+  "detail": "status=200"
+ },
+ {
+  "id": "TC-S4-06",
+  "name": "mkdir existing/conflict rejected",
+  "pass": true,
+  "detail": "dup=400 conflict=400"
+ },
+ {
+  "id": "TC-S4-07",
+  "name": "rename moves file w/ content",
+  "pass": true,
+  "detail": "status=200"
+ },
+ {
+  "id": "TC-S4-08",
+  "name": "rename to existing 409 / out-of-root 400",
+  "pass": false,
+  "detail": "toExisting=409 escape=403"
+ },
+ {
+  "id": "TC-S4-09",
+  "name": "delete without confirm=yes -> 400 file remains",
+  "pass": true,
+  "detail": "status=400 still=200"
+ },
+ {
+  "id": "TC-S4-10",
+  "name": "delete confirm=yes removes file",
+  "pass": true,
+  "detail": "status=200 gone=400"
+ },
+ {
+  "id": "TC-S4-11",
+  "name": "nonempty dir delete rejected + kept",
+  "pass": true,
+  "detail": "status=400 kept=1"
+ },
+ {
+  "id": "TC-S4-12",
+  "name": "empty dir delete ok",
+  "pass": true,
+  "detail": "status=200"
+ },
+ {
+  "id": "TC-S4-14",
+  "name": "write escape attempts rejected no outside side-effect",
+  "pass": false,
+  "detail": "wEsc=403 wEsc2=400"
+ },
+ {
+  "id": "TC-S4-02-pre",
+  "name": "oversize declared Content-Length precheck 413 (fast reject)",
+  "pass": true,
+  "detail": "status=413 body={\n  \"error\": \"上传超过上限 67108864 字节\"\n}"
+ }
+]

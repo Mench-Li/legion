@@ -1,0 +1,86 @@
+[
+ {
+  "id": "TC-S6-01",
+  "name": "fetch html -> title/text/excerpt/links",
+  "pass": true,
+  "detail": "{\"title\":\"测试标题 Test Title\",\"links\":2,\"ok\":true,\"st\":200}"
+ },
+ {
+  "id": "TC-S6-02",
+  "name": "chinese decode no mojibake",
+  "pass": true,
+  "detail": "中文页面标题 text=中文正文内容，正确解码无乱码。"
+ },
+ {
+  "id": "TC-S6-03",
+  "name": "SPA shell -> empty_content understandable",
+  "pass": false,
+  "detail": "code=undefined"
+ },
+ {
+  "id": "TC-S6-04",
+  "name": "protocol whitelist rejects all",
+  "pass": true,
+  "detail": "file=protocol_blocked ftp=protocol_blocked javascript=protocol_blocked data=protocol_blocked gopher=protocol_blocked"
+ },
+ {
+  "id": "TC-S6-05",
+  "name": "private/loopback matrix ssrf_blocked",
+  "pass": false,
+  "detail": "http://127.0.0.1:18787/api/con=ssrf_blocked http://127.1/=ssrf_blocked http://localhost/=ssrf_blocked http://10.0.0.1/=ssrf_blocked http://172.16.0.1/=ssrf_blocked http://172.31.255.1/=ssrf_blocked http://192.168.1.1/=ssrf_blocked http://169.254.1.1/=ssrf_blocked http://0.0.0.0/=ssrf_blocked http://[::1]/=ssrf_blocked "
+ },
+ {
+  "id": "TC-S6-06a",
+  "name": "redirect chain first-hop to private blocked (strict)",
+  "pass": true,
+  "detail": "code=ssrf_blocked"
+ },
+ {
+  "id": "TC-S6-06b",
+  "name": "redirect chain positive (public mock -> final)",
+  "pass": true,
+  "detail": "final=http://127.0.0.1:59840/zh code=undefined"
+ },
+ {
+  "id": "TC-S6-06c",
+  "name": "redirect to file:// blocked",
+  "pass": true,
+  "detail": "code=ssrf_blocked"
+ },
+ {
+  "id": "TC-S6-08",
+  "name": "maxBytes injection too_large",
+  "pass": true,
+  "detail": "code=too_large err=响应体超过上限（当前上限 1000 字节）"
+ },
+ {
+  "id": "TC-S6-09",
+  "name": "timeout injection",
+  "pass": false,
+  "detail": "slow=timeout fast=false"
+ },
+ {
+  "id": "TC-S6-10",
+  "name": "response whitelist no html passthrough",
+  "pass": true,
+  "detail": "keys=ok,finalUrl,status,contentType,title,text,excerpt,links"
+ },
+ {
+  "id": "TC-S6-11",
+  "name": "pdf non-text unsupported/notice",
+  "pass": true,
+  "detail": "code=unsupported ct=application/pdf"
+ },
+ {
+  "id": "TC-S6-12",
+  "name": "upstream 404/500 structured",
+  "pass": true,
+  "detail": "404code=http_404 500code=http_500"
+ },
+ {
+  "id": "TC-S6-15",
+  "name": "param validation structured errors (note: HTTP 200 + invalid_url)",
+  "pass": true,
+  "detail": "codes=invalid_url,invalid_url,invalid_url,invalid_url httpStatus=200"
+ }
+]

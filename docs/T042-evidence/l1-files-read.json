@@ -1,0 +1,98 @@
+[
+ {
+  "id": "TC-S3-01",
+  "name": "list root: shape dirs-first + file fields",
+  "pass": true,
+  "detail": "entries=11 names=docs,empty,nested,nonempty,a.txt,big.log,link-in,link-out"
+ },
+ {
+  "id": "TC-S3-02a",
+  "name": "empty dir entries=[]",
+  "pass": true,
+  "detail": "entries=0"
+ },
+ {
+  "id": "TC-S3-02b",
+  "name": "path '.' treated as root",
+  "pass": true,
+  "detail": "count=11"
+ },
+ {
+  "id": "TC-S3-02c",
+  "name": "path omitted -> root",
+  "pass": true,
+  "detail": "status=200"
+ },
+ {
+  "id": "TC-S3-03",
+  "name": "unbound scope -> readable 400 guidance",
+  "pass": true,
+  "detail": "{\n  \"error\": \"工作空间 noscope-xyz 未注册：请先在空间设置创建该空间\"\n}"
+ },
+ {
+  "id": "TC-S3-04a",
+  "name": "list file -> 400 不是目录",
+  "pass": true,
+  "detail": "{\n  \"error\": \"路径不是目录或不存在\"\n}"
+ },
+ {
+  "id": "TC-S3-04b",
+  "name": "list nonexistent -> 400",
+  "pass": true,
+  "detail": "{\n  \"error\": \"路径不存在\"\n}"
+ },
+ {
+  "id": "TC-S3-05",
+  "name": "read small text full + lineCount",
+  "pass": true,
+  "detail": "bytes=26 lineCount=2"
+ },
+ {
+  "id": "TC-S3-06",
+  "name": "read >MAX_READ truncated=true + counts",
+  "pass": true,
+  "detail": "trunc=true len=262144 total=340000"
+ },
+ {
+  "id": "TC-S3-07",
+  "name": "binary preview -> readable message",
+  "pass": true,
+  "detail": "{\"ok\":true,\"name\":\"pic.png\",\"ext\":\".png\",\"binary\":true,\"totalBytes\":12,\"message\":\"二进制文件不可预览\"}"
+ },
+ {
+  "id": "TC-S3-08",
+  "name": "download bytes identical + disposition",
+  "pass": true,
+  "detail": "len=19 expect=27"
+ },
+ {
+  "id": "TC-S3-09",
+  "name": "escape matrix all rejected + NUL",
+  "pass": true,
+  "detail": "../outside.txt=403 ..%2Foutside.txt=403 a/../../outside.txt=403 /abs-out=400 C:/Windows/win.ini=400 c:\\windows\\win.ini=400 ..%5Coutside.txt=403 nul=400 nestedEsc=403"
+ },
+ {
+  "id": "TC-S3-10",
+  "name": "symlink in-root allowed / out-root rejected",
+  "pass": false,
+  "detail": "linkIn=200 linkOut=403:{\n  \"error\": \"路径越界：符号链接指向目录根之外\"\n}"
+ },
+ {
+  "id": "TC-S3-12",
+  "name": ".git internal forbidden",
+  "pass": true,
+  "detail": "cfg=403:{\n  \"error\": \"禁止访问 .git 内部（防凭证/元数据外泄）\"\n}"
+ },
+ {
+  "id": "TC-S3-13",
+  "name": "unicode filename full chain",
+  "pass": true,
+  "detail": "status=200 content=中文字符内容 UTF-8 ✓\n"
+ },
+ {
+  "id": "TC-S3-14",
+  "name": "nonempty nested list stability",
+  "pass": true,
+  "detail": "nested/deep entries=1"
+ }
+]

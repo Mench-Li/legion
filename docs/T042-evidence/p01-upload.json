@@ -1,0 +1,13 @@
+{
+ "reproA": {
+  "kind": "responded",
+  "status": 400,
+  "body": "{\n  \"error\": \"Cannot call write after a stream was destroyed\"\n}"
+ },
+ "victimGoneAfterA": true,
+ "reproB": {
+  "kind": "socket-error",
+  "msg": "socket hang up"
+ },
+ "victim2StateAfterB": "exists size=1048576"
+}

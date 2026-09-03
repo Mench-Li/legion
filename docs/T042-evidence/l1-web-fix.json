@@ -1,0 +1,20 @@
+[
+ {
+  "id": "TC-S6-03",
+  "name": "SPA shell -> empty_content",
+  "pass": true,
+  "detail": "code=empty_content err=未能抽取正文：目标页可能是 SPA/纯 JS 渲染空壳（v1 服务端抓取为显式边界）"
+ },
+ {
+  "id": "TC-S6-05",
+  "name": "private/loopback matrix all ssrf_blocked",
+  "pass": false,
+  "detail": "failures=http://fc00::1/"
+ },
+ {
+  "id": "TC-S6-09",
+  "name": "timeout injection",
+  "pass": true,
+  "detail": "slow=timeout(抓取超时（已取消请求）) fast=true title=Slow page"
+ }
+]

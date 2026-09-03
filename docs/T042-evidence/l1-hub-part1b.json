@@ -1,0 +1,20 @@
+[
+ {
+  "id": "TC-S1-06",
+  "name": "post message author + convId + createdAt",
+  "pass": true,
+  "detail": "{\"id\":30,\"convId\":2,\"scope\":\"software\",\"author\":\"coder\",\"kind\":\"text\",\"body\":\"hello world via L1\",\"meta\":{},\"clientTs\":null,\"createdAt\":\"2026-09-03T06:35:56.807Z\"}"
+ },
+ {
+  "id": "TC-S1-08",
+  "name": "pagination 10/10/5 per-page asc no dup no loss contig",
+  "pass": true,
+  "detail": "pages=10/10/5 setEq=true contig=true"
+ },
+ {
+  "id": "TC-S1-13",
+  "name": "activity contains chat:create/chat:message with member/scope",
+  "pass": true,
+  "detail": "create@general/software keys=[\"conv\",\"title\",\"kind\"]"
+ }
+]

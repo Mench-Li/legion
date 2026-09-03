@@ -35,7 +35,11 @@ node scripts/serve.mjs --port 5173   # 独立静态服务 → http://127.0.0.1:5
 | 左侧模块 + 工作空间 | `Sidebar`：中枢模式下工作空间 = 全部空间 + team-hub 真实分区（`/api/scopes`），真分区切换 | ✅ |
 | 右侧「当前任务集」泳道 | `MissionPanel`：中枢模式走 `/api/missions?scope=`（scopeAware=true）；v1 回退 serve.mjs 或客户端聚合 | ✅ |
 | 右侧「实时动态」 | `ActivityFeed`：SSE 实时流 | ✅ |
-| 快捷工具 | `QuickTools`（打开浏览器→看板；其余待 DSH 工具面） | ✅/⏳ |
+| 快捷工具 | `QuickTools`：「打开内部看板」→ openKanban（经典看板新窗口）；「文件浏览/浏览网页」→ 进入文件中心/浏览器面板（`onOpenModule` 导航）；截图 OCR/语音待 DSH 工具面 | ✅/⏳ |
+| 对话中心 | `ChatPanel`：team-hub v2 `/api/chat/*` 真实接入（会话列表/新建/发送/历史，随当前空间隔离）；实时 = 中枢**单一 `/api/events`** 按 `chat:*` kind 过滤；纯文本渲染（无 raw HTML） | ✅ |
+| 文件中心 | `FilesPanel`：serve.mjs `/api/files`（同源，仅回环）——列表/逐层进入/文本预览（截断+行数）/二进制提示/下载/上传（409→覆盖确认）/新建目录/重命名/删除（confirm 二次确认）；未绑定空间 → 引导打开空间设置 | ✅ |
+| 浏览器助手 | `BrowserPanel`：serve.mjs `/api/web/fetch`（SSRF 防护代理）——地址栏（自动补 https://）+ 标题/正文/链接结构化结果 + 分错误文案与重试；`ssrf_blocked` 明确文案 | ✅ |
+| 日程日历 / 通知中心 | `Sidebar` 模块为**占位**：点击给出「P1 后续阶段接入」提示（不静默无响应，TC-S8-03） | ⏳ |
 | 技能中心 | `SkillsPanel`：team-hub v2 技能库真实接入——列表（含待审/被拒复审视角）、注册新技能（提交即 pending）、将军发布/驳回、按成员或 scope 授权；随当前空间过滤，15s 轮询刷新 | ✅ |
 | 中央智能体状态 | `CenterPanel`：**中枢模式下智能体 = 当前工作空间的专属编队**（每空间不同职业，team-hub `/api/roster`）；首页 = 3D 办公场景（编队绕会议桌、状态色实时投影），「智能体」模块 = 2D 状态总览；v1 回退看板聚合 | ✅ |
 | 底部命令栏 | 新建任务/任务调度/导出日报可用；**全部暂停/继续已真实接入**（`/api/pause`/`/api/resume`，守护扫单前读取 control.json）；安排会议待引擎 | ✅/⏳ |
@@ -43,6 +47,7 @@ node scripts/serve.mjs --port 5173   # 独立静态服务 → http://127.0.0.1:5
 
 ## 服务端配套（第 2 步，legion 引擎侧）
 
+- `serve.mjs`（`scripts/serve.mjs`）新增 `GET /api/files/list|read|download`（S3）、`PUT /api/files/upload` 与 `POST /api/files/mkdir|rename|delete`（S4，仅回环 + `--token`/`DSH_WORKBENCH_TOKEN` 写鉴权、`overwrite=1`/`confirm=yes` 语义）、`POST /api/web/fetch`（S6 SSRF 防护代理 + 零依赖正文抽取）；文件/网页接口均有 `isMain` 守卫 + 纯函数导出供契约测试（`files-api.test.mjs`/`web.test.mjs`）。
 - `serve.mjs` 新增 `GET /api/missions`（服务端任务集聚合，`?scope=`）、
   `POST /api/pause` / `POST /api/resume`（全局暂停/继续，写 `scrum/control.json`）、
   `/api/config` 增加 `paused` 字段。
@@ -104,6 +109,20 @@ node scripts/serve.mjs --port 5173   # 独立静态服务 → http://127.0.0.1:5
   LEGION.md 注入 / 自动 promote 全走它）；`daemon.json` 新增 `repo { root, binding, localDir, remoteUrl }` 自述；
   未绑定 / hub 不可达时回退注入配置（`repoRoot` / `workspace` / `worktreeRoot`）。
 - **边界**：remoteUrl 为空 = 仅本地 / 不进共享仓库；push 纪律不变——`w/*` worktree 分支仍一律禁止 push。
+
+## 三中心：对话 / 文件 / 浏览器（S1~S7）
+
+三个中心在左侧模块区与 QuickTools 双入口均可进入（`App.active` 状态一致），实现位置：
+- **对话中心** `ChatPanel.tsx`：`fetchChatConversations / createChatConversation / fetchChatMessages / postChatMessage / subscribeHubAudit`（`api.ts`）。
+  写 = team-hub `POST /api/chat/*`（统一 handleWrite，`by:'general'` 注入），审计/SSE 由服务端 DAO 留痕；前端**不再另开事件源**——订阅既有 `/hub/api/events` 并过滤 `action.startsWith('chat:')`，`detail.conv` 命中当前会话即刷新。
+  边界：需中枢可达 + 选中**具体空间**（「全部空间」给出引导）；消息 ≤8000 字符；kind 白名单外消息与任何 HTML/脚本内容都按**纯文本**渲染（无 `dangerouslySetInnerHTML`）。
+- **文件中心** `FilesPanel.tsx`：`fetchFileList / fetchFilePreview / fileDownloadUrl / filesUpload / filesMkdir / filesRename / filesDelete`。
+  同源调 serve.mjs `/api/files/*`（仅回环；写请求需令牌则 401 映射 toast）。文件根 = 当前空间 `local_dir`（team-hub `/api/spaces`）；`../`/盘符/根外 symlink/`.git` 内部等越界与仓库内路径由服务端 `resolveInsideRoot`/realpath 守卫拒绝，前端只展示服务端错误文案。
+  边界：未选空间/未绑定 → 面板引导（含「打开空间设置」跳转）；上传同名 → 409 → confirm 覆盖（带 `overwrite=1`）；删除 → confirm 后发 `confirm='yes'`。
+- **浏览器助手** `BrowserPanel.tsx`：`webFetchPage`（POST `/api/web/fetch`）。无 scheme 输入自动补 `https://`（`normalizeUrl`），非法/空输入提示不发请求；
+  结果字段 = 服务端白名单结构化（title/text/excerpt/links），正文按 `<pre>` 纯文本展示；错误码分别映射文案（`ssrf_blocked`→「已拦截：禁止访问内网地址」、timeout/too_large/http_4xx/dns_error/unsupported/empty_content 等）+「重试」。最近抓取历史 localStorage（datalist 复用）。
+
+> 测试注入口：抓本地 mock 页需 `DSH_WEB_FETCH_ALLOW_PRIVATE=1` 启动 serve.mjs（仅测试/本地演示；生产默认关闭）。
 
 ## 技能中心（team-hub v2）
 

@@ -27,6 +27,7 @@
  *       —— reassign 转派 = soldier 与 role 一并改为目标岗位（转派后守护仍按新 role 自动接管执行）；
  *          POST /api/hold {id, hold} = 将军逐任务拦截（守护不得自动认领）/放行。
  *   POST /api/skills/register|review|grant         团队共享技能（scope-owned + grant）
+ *   GET/POST /api/chat/conversations|messages       对话中心（会话/消息；scope 分区；写 by 必填 + audit/SSE，见 S1）
  *   GET  /api/skills[?scope=&member=&id=]          技能查询（默认只返回 published）
  *
  * 状态机 + 乐观锁 + 角色纪律与 taskctl.mjs 一致；scope 是任务分区的一等字段。
@@ -204,6 +205,36 @@ db.exec(`
     updatedAt TEXT
   )
 `)
+// ── 对话中心（chat）：会话 / 消息两级存储（G-1 默认：team-hub 单库；scope 分区与 by 写纪律与任务同构）──
+// 老库自动建表（CREATE TABLE IF NOT EXISTS 幂等），无需手工迁移；conversations/messages 均为
+// AUTOINCREMENT 整数主键，保证服务端生成、非空、稳定排序（分页游标按 id）。
+db.exec(`
+  CREATE TABLE IF NOT EXISTS conversations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope TEXT NOT NULL DEFAULT 'default',
+    title TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'space',
+    participants TEXT DEFAULT '[]',
+    createdAt TEXT,
+    updatedAt TEXT,
+    last_message_at TEXT
+  )
+`)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conv_id INTEGER NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'default',
+    author TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'text',
+    body TEXT NOT NULL,
+    meta TEXT DEFAULT '{}',
+    client_ts TEXT,
+    createdAt TEXT
+  )
+`)
+db.exec('CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages (conv_id, id)')
+db.exec('CREATE INDEX IF NOT EXISTS idx_conversations_scope ON conversations (scope, updatedAt)')
 // 老库迁移：skills 表先于 status/contentHash/reviewedAt 三列存在，缺列补上。
 function ensureColumn(table, column, ddl) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all()
@@ -446,6 +477,126 @@ function grantSkill(id, grants) {
     db.prepare('UPDATE skills SET grants=?, updatedAt=? WHERE id=?').run(JSON.stringify(merged), now(), id)
     return getSkill(id)
   })
+}
+
+// ── 对话中心（chat）DAO：会话 / 消息（scope 分区 + 统一写纪律）──
+// 写纪律（I3）：createConversation / postMessage 内部一律走 audit()（by 必填 + SSE 广播），
+// 与 tasks 的「路由层 audit」不同——chat 的 DAO 即写入口（含未来 AI 直写场景），把审计放进 DAO
+// 保证任何调用路径都留痕；author 恒等于 by（服务端绑定，防冒名，TC-S1-07）。
+export const CHAT_CONV_KINDS = ['space', 'direct', 'task']
+export const CHAT_MSG_KINDS = ['text', 'markdown', 'system']
+export const MAX_CHAT_BODY = 8000 // 消息正文长度上限（⚖️ 三值法断言的常量，见 TEST_CASES §3）
+
+function convToObj(row) {
+  return {
+    id: row.id,
+    scope: row.scope,
+    title: row.title,
+    kind: row.kind,
+    participants: parseJson(row.participants, []),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    last_message_at: row.last_message_at,
+  }
+}
+
+function msgToObj(row) {
+  return {
+    id: row.id,
+    convId: row.conv_id,
+    scope: row.scope,
+    author: row.author,
+    kind: row.kind,
+    body: row.body,
+    meta: parseJson(row.meta, {}),
+    clientTs: row.client_ts,
+    createdAt: row.createdAt,
+  }
+}
+
+function getConversation(id) {
+  const num = Number(id)
+  const row = Number.isInteger(num) && num > 0 ? db.prepare('SELECT * FROM conversations WHERE id = ?').get(num) : undefined
+  if (!row) throw new Error(`会话不存在：${id}`)
+  return convToObj(row)
+}
+
+/** 创建会话（scope 归一 + by 必填 + 审计）；kind ∈ {space,direct,task}。 */
+export function createConversation(input) {
+  const by = input?.by
+  if (typeof by !== 'string' || by.trim().length === 0) throw new Error('缺少操作者身份 by')
+  const scope = readScope(input ?? {})
+  const title = input?.title
+  if (typeof title !== 'string' || title.trim().length === 0) throw new Error('缺少参数 title')
+  const kind = input?.kind ?? 'space'
+  if (!CHAT_CONV_KINDS.includes(kind)) throw new Error(`kind 必须 ∈ {${CHAT_CONV_KINDS.join(',')}}，实际收到：${kind}`)
+  const participants = Array.isArray(input?.participants)
+    ? [...new Set(input.participants.map(p => typeof p === 'string' ? p.trim() : '').filter(p => p.length > 0))].slice(0, 128)
+    : []
+  if (title.trim().length > 200) throw new Error('会话标题过长（≤200 字符）')
+  return withTx(() => {
+    const t = now()
+    const r = db.prepare("INSERT INTO conversations (scope, title, kind, participants, createdAt, updatedAt, last_message_at) VALUES (?, ?, ?, ?, ?, ?, NULL)")
+      .run(scope, title.trim(), kind, JSON.stringify(participants), t, t)
+    const conv = getConversation(r.lastInsertRowid)
+    audit(by, conv.scope, 'chat:create', null, { conv: conv.id, title: conv.title, kind: conv.kind })
+    return conv
+  })
+}
+
+/** 会话列表：scope 过滤（TC-S1-01/02）；按 updatedAt desc、id desc（新建/活跃优先）。 */
+export function listConversations({ scope } = {}) {
+  const where = typeof scope === 'string' && scope.trim().length > 0 ? 'WHERE scope = ?' : ''
+  const params = typeof scope === 'string' && scope.trim().length > 0 ? [scope.trim()] : []
+  const rows = db.prepare(`SELECT * FROM conversations ${where} ORDER BY updatedAt DESC, id DESC`).all(...params)
+  return rows.map(convToObj)
+}
+
+/** 发消息（统一写纪律：by 必填 + author=by 防冒名 + 审计/SSE；消息 scope 恒等于会话 scope，跨 scope 写不串）。 */
+export function postMessage(input) {
+  const by = input?.by
+  if (typeof by !== 'string' || by.trim().length === 0) throw new Error('缺少操作者身份 by')
+  const convId = Number(input?.conv)
+  if (!Number.isInteger(convId) || convId <= 0) throw new Error('缺少参数 conv')
+  const conv = getConversation(convId)
+  const kind = input?.kind ?? 'text'
+  if (!CHAT_MSG_KINDS.includes(kind)) throw new Error(`kind 必须 ∈ {${CHAT_MSG_KINDS.join(',')}}，实际收到：${kind}`)
+  const body = input?.body
+  if (typeof body !== 'string') throw new Error('缺少参数 body')
+  if (body.trim().length === 0) throw new Error('消息正文不能为空')
+  if (body.length > MAX_CHAT_BODY) throw new Error(`消息正文超长（上限 ${MAX_CHAT_BODY} 字符）`)
+  const clientTs = typeof input?.clientTs === 'string' && input.clientTs.length > 0 ? input.clientTs.slice(0, 64) : null
+  return withTx(() => {
+    const t = now()
+    const r = db.prepare('INSERT INTO messages (conv_id, scope, author, kind, body, meta, client_ts, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(convId, conv.scope, by.trim(), kind, body, JSON.stringify(typeof input?.meta === 'object' && input.meta ? input.meta : {}), clientTs, t)
+    db.prepare('UPDATE conversations SET last_message_at = ?, updatedAt = ? WHERE id = ?').run(t, t, convId)
+    const msg = msgToObj(db.prepare('SELECT * FROM messages WHERE id = ?').get(r.lastInsertRowid))
+    audit(by, conv.scope, 'chat:message', null, { conv: convId, msg: msg.id, kind: msg.kind })
+    return msg
+  })
+}
+
+/**
+ * 消息分页（TC-S1-08/09）：返回按 id 升序；limit 默认 50；before = 上一页最旧消息 id，
+ * 取 id < before 的最新 limit 条再倒转 → 从新到旧翻页、页内升序、无重无漏。
+ */
+export function listMessages({ conv, limit = 50, before } = {}) {
+  const convId = Number(conv)
+  if (!Number.isInteger(convId) || convId <= 0) throw new Error('缺少参数 conv')
+  getConversation(convId) // 不存在 → 抛错（400）
+  const lim = Number(limit)
+  if (!Number.isInteger(lim) || lim <= 0) throw new Error('limit 必须是正整数')
+  const LIMIT_CAP = 200
+  const n = Math.min(lim, LIMIT_CAP)
+  const beforeNum = before === undefined || before === null ? null : Number(before)
+  if (beforeNum !== null && (!Number.isInteger(beforeNum) || beforeNum <= 0)) throw new Error('before 必须是消息 id 或省略')
+  const conds = ['conv_id = ?']
+  const params = [convId]
+  if (beforeNum !== null) { conds.push('id < ?'); params.push(beforeNum) }
+  const rows = db.prepare(`SELECT * FROM messages WHERE ${conds.join(' AND ')} ORDER BY id DESC LIMIT ?`).all(...params, n)
+  rows.reverse()
+  return rows.map(msgToObj)
 }
 
 // ── 写操作 ──
@@ -1180,6 +1331,42 @@ async function handle(req, res) {
       })
       return
     }
+    // ── 对话中心（chat）：会话 / 消息 REST（scope 分区 + by 写纪律；审计/SSE 在 DAO 内统一留痕）──
+    if (req.method === 'POST' && path === '/api/chat/conversations') {
+      await handleWrite(req, res, (body, by) => createConversation({ ...body, by }))
+      return
+    }
+    if (req.method === 'GET' && path === '/api/chat/conversations') {
+      try {
+        const scopeParam = url.searchParams.get('scope') ?? undefined
+        json(res, 200, { scope: scopeParam ?? null, conversations: listConversations({ scope: scopeParam }) })
+      } catch (e) {
+        json(res, 400, { error: e instanceof Error ? e.message : String(e) })
+      }
+      return
+    }
+    if (req.method === 'POST' && path === '/api/chat/messages') {
+      await handleWrite(req, res, (body, by) => postMessage({ ...body, by }))
+      return
+    }
+    if (req.method === 'GET' && path === '/api/chat/messages') {
+      try {
+        const conv = url.searchParams.get('conv')
+        if (!conv) throw new Error('缺少参数 conv')
+        const limitRaw = url.searchParams.get('limit')
+        const beforeRaw = url.searchParams.get('before')
+        const messages = listMessages({
+          conv: Number(conv),
+          limit: limitRaw === null ? 50 : Number(limitRaw),
+          before: beforeRaw === null ? undefined : Number(beforeRaw),
+        })
+        json(res, 200, { conv: Number(conv), messages })
+      } catch (e) {
+        json(res, 400, { error: e instanceof Error ? e.message : String(e) })
+      }
+      return
+    }
+
     // ── 工作空间 + 编队管理 ──
     if (req.method === 'POST' && path === '/api/spaces') {
       // 注册/更新工作空间（幂等 upsert：id + name 必填）。除 private 外支持仓库绑定：

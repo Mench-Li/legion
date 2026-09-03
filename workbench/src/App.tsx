@@ -28,6 +28,9 @@ import { ActivityFeed } from './components/ActivityFeed'
 import { QuickTools } from './components/QuickTools'
 import { CommandBar } from './components/CommandBar'
 import { SkillsPanel } from './components/SkillsPanel'
+import { ChatPanel } from './components/ChatPanel'
+import { FilesPanel } from './components/FilesPanel'
+import { BrowserPanel } from './components/BrowserPanel'
 import { NewSpaceModal } from './components/NewSpaceModal'
 import { SpaceSettingsModal } from './components/SpaceSettingsModal'
 import { ToastHost, toast } from './components/Toast'
@@ -345,6 +348,12 @@ export default function App(): React.JSX.Element {
         {board ? (
           active === 'skills' ? (
             <SkillsPanel scope={scope} hubMode={hubMode} />
+          ) : active === 'chat' ? (
+            <ChatPanel scope={scope} hubMode={hubMode} />
+          ) : active === 'files' ? (
+            <FilesPanel scope={scope} hubMode={hubMode} spaces={hubSpaces} onOpenSettings={s => setSpaceSettings(s)} />
+          ) : active === 'browser' ? (
+            <BrowserPanel />
           ) : (
             <CenterPanel board={board} labels={labels} active={active} rosterAgents={hubMode ? roster : null} scope={scope} spaces={hubSpaces} goalInfo={hubMode ? goalInfo : null} />
           )
@@ -354,7 +363,7 @@ export default function App(): React.JSX.Element {
         <div className="right-col">
           <MissionPanel missions={missionsShown} scopeAware={scopeAware} scope={scope} hubMode={hubMode} onDataChanged={() => void loadMissions(scope)} />
           <ActivityFeed events={activity} />
-          <QuickTools onRefresh={() => void refresh()} refreshing={refreshing} />
+          <QuickTools onRefresh={() => void refresh()} refreshing={refreshing} onOpenModule={setActive} />
         </div>
       </div>
       <CommandBar

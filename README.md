@@ -10,7 +10,7 @@ Legion 是一套「**将军（general）+ 编队智能体（soldier/roster）**�
 
 | 组件 | 形态 | 端口 | 角色 |
 | --- | --- | --- | --- |
-| **workbench（军团指挥台）** | React 静态应用（`legion/workbench`，构建产物托管） | `:5173` | **日常主体**：空间/编队/3D 场景/发布目标/任务详情/AI 执行过程/调度验收/持续执行编排/模型配置/技能中心 |
+| **workbench（军团指挥台）** | React 静态应用（`legion/workbench`，构建产物托管） | `:5173` | **日常主体**：空间/编队/3D 场景/发布目标/任务详情/AI 执行过程/调度验收/持续执行编排/模型配置/技能中心 ＋ **三中心**（对话中心/文件中心/浏览器助手，见 §3.8） |
 | **team-hub v2（团队中枢）** | 独立 Node 服务（`legion/team-hub/server.mjs`） | `:8787` | 数据与 API 中枢：SQLite 任务池 + 空间 + 编队 + 审计 + 目标 + 执行编排 + 模型配置 |
 | **scrum v1（看板引擎）** | 早期引擎（`serve.mjs`/`taskctl.mjs`/`tasks.json`） | `:4820` | **遗留兼容**：除调试/迁移外不再日常使用（细节见 `scrum/README.md`） |
 
@@ -130,7 +130,11 @@ patch 里**必须显式给** `legionDir: 'D:/project/DSH/legion'`——pnpm 对 
 
   典型策略：分析类（requirement/researcher/breaker）→ 轻量；写码/审查（coder/reviewer）→ 旗舰；测试/运维 → 轻量或均衡。执行守护按角色配置选模型；智能体任务清单头部显示模型徽标。
 
-### 3.8 其它
+### 3.8 三中心：对话 / 文件 / 浏览器（左侧模块，随时可用）
+- **💬 对话中心**（`ChatPanel`）：随工作空间隔离的会话（team-hub v2 `/api/chat/*`，scope 分区）。选中**具体空间**后新建会话/发消息（Enter 发送，≤8000 字符），历史经 `GET /api/chat/messages` 恢复；跨标签页/跨端实时送达走中枢**单一 `/api/events` SSE 按 `chat:*` kind 过滤**（不新增事件源）。消息按纯文本渲染（安全：不执行任何 HTML/脚本）。
+- **📁 文件中心**（`FilesPanel`）：浏览当前空间**绑定的本地文件夹**（`local_dir`；未绑定 → 面板引导到「⚙ 空间设置」绑定）。列表（目录在前/大小/时间/含 `.git` 仓库标记）→ 点目录逐层进入、点文件预览（大文本截断带行数提示、二进制提示不可预览）、下载字节一致；写操作（上传/新建目录/重命名/删除）经 serve.mjs `/api/files/*`——**仅回环 + 写需令牌**（`--token`），覆盖需二次确认（`overwrite=1` 语义）、删除需 `confirm=yes` 弹确认、`.git` 内部受保护、路径越界（`../`/盘符/符号链接出根）一律拒绝。
+- **🌐 浏览器助手**（`BrowserPanel`）：地址栏输入 → serve.mjs `/api/web/fetch` **SSRF 防护代理**抓取：协议白名单（仅 http/https）、私网/回环/混淆 IP/域名解析到内网一律 `ssrf_blocked`（界面文案「已拦截：禁止访问内网地址」）、重定向逐跳再校验、限长（默认 2MiB）与超时（默认 10s）可配；正文按结构化文本返回（title/正文/摘要/链接），SPA 空壳给明确提示不伪造正文。无 scheme 自动补 `https://`，最近地址可复用（datalist）。抓本地 mock 页做演示需以 `DSH_WEB_FETCH_ALLOW_PRIVATE=1` 启动 serve.mjs（生产默认关闭，勿在公网开启）。
+- 左侧 QuickTools「文件浏览 / 浏览网页」与侧栏模块入口指向同一面板（`active` 状态一致）；**📅 日程日历 / 🔔 通知中心仍为占位模块**（点击给提示，P1 后续阶段接入）。
 - **🧩 技能中心**：注册技能 → 将军发布/驳回 → 按成员或 `scope:xxx` 授权（士兵只读已发布技能）。
 - **右侧「实时动态」**：SSE 审计流；顶部 KPI：目标/完成/进行中/AI 员工数。
 - **底部命令栏**：⏸ 全局暂停（v1）/ 🗓 任务调度 / 🎯 发布目标 / ⚙️ 模型配置 / ＋ 新建任务 / 📤 导出日报。
@@ -152,6 +156,18 @@ patch 里**必须显式给** `legionDir: 'D:/project/DSH/legion'`——pnpm 对 
 | 技能 | `GET /api/skills` · `POST /api/skills/register /review /grant` |
 | 执行编排 | `GET/POST /api/exec`（开关） · `GET /api/exec/queue`（自动队列） · `POST /api/exec/request`（手动派活） |
 | 模型配置 | `GET/POST /api/models` · `POST /api/models/clear` |
+| 对话（S1） | `GET/POST /api/chat/conversations` · `GET/POST /api/chat/messages`（scope 分区，审计+SSE 留痕；表 `conversations`/`messages`） |
+
+---
+
+## 4.1 三中心接口（workbench 同源 / 经 /hub 代理）
+
+| 域 | 接口 | 说明 |
+| --- | --- | --- |
+| 对话 | `GET/POST /hub/api/chat/conversations`、`/hub/api/chat/messages` | 经 serve.mjs `/hub/*` 反向代理到 team-hub（:8787）；写=统一 handleWrite（by=general）+ 审计/SSE |
+| 文件（只读） | `GET /api/files/list`、`/api/files/read`、`/api/files/download`（`?scope=&path=`） | 仅回环；scope 的 `local_dir` 即根；越界/`.git` 内部 403 |
+| 文件（写） | `PUT /api/files/upload`（`overwrite=1`）· `POST /api/files/mkdir|rename|delete` | 仅回环 + 写需令牌（`--token` / `DSH_WORKBENCH_TOKEN`，无令牌=不要求）；409/413/400 语义 |
+| 浏览器 | `POST /api/web/fetch`（body `{url, maxBytes?, timeoutMs?}`） | 仅回环；SSRF 防护代理 + 正文抽取；错误 `{ok:false, error, code}` |
 
 ---
 
@@ -175,6 +191,9 @@ patch 里**必须显式给** `legionDir: 'D:/project/DSH/legion'`——pnpm 对 
 | 智能体点不出任务 | 确认中枢模式 + 该角色有任务；页面是旧产物时强刷 |
 | git push 连不上 | 全局代理指向 `127.0.0.1:7897`（可能未运行）：`git -c http.proxy= -c https.proxy= push origin main` |
 | v1 看板 401 | `serve.mjs --token` 写操作需令牌（workbench 写接口与 v2 不同源，注意别混写） |
+| 对话中心提示「需要中枢」 | team-hub 没起或被探测失败：`node team-hub\server.mjs`（:8787）后刷新；写被 401 → 右上角「🔑 令牌」填对 token |
+| 文件中心提示未绑定/400 | 该空间没绑本地文件夹 → 侧栏空间行「⚙」绑定；「越界/.git 403」= 目标在文件根之外或仓库内部，属于预期保护 |
+| 浏览器助手「已拦截：禁止访问内网地址」 | SSRF 防护默认拒绝私网/回环目标；抓本地 mock 需 `DSH_WEB_FETCH_ALLOW_PRIVATE=1` 起 serve.mjs |
 
 ---
 

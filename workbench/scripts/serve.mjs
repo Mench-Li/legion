@@ -1,6 +1,6 @@
 /**
  * Legion Workbench 独立静态服务器（生产构建后使用）。
- * 用法：pnpm build && node scripts/serve.mjs [--port 5173] [--host 127.0.0.1]
+ * 用法：pnpm build && node scripts/serve.mjs [--port 5173] [--host 127.0.0.1] [--token 写令牌]
  * SPA 回退：未知路径返回 index.html，方便深链。
  *
  * 附加 API（同源，仅回环地址可访问）：

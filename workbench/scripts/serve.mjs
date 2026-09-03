@@ -880,7 +880,7 @@ const server = createServer((req, res) => {
 const isMain = process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 if (isMain) {
   server.listen(port, host, () => {
-    console.log(`legion-workbench 已启动：http://${host}:${port}（数据源默认 http://127.0.0.1:4820）`)
+    console.log(`legion-workbench 已启动：http://${host}:${port}（中枢默认 ${process.env.DSH_HUB_UPSTREAM ?? 'http://127.0.0.1:8787'}，可用 DSH_HUB_UPSTREAM 覆盖）`)
   })
 }
 

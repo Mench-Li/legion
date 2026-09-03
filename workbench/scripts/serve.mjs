@@ -443,6 +443,264 @@ async function handleFsApi(req, res, pathname, url) {
   }
 }
 
+// ───────────────────────── 浏览器助手（S6：SSRF 防护 fetch 代理 + 零依赖正文抽取）─────────────────────────
+import { lookup } from 'node:dns/promises'
+
+function webErr(code, error) {
+  const e = new Error(error)
+  e.code = code
+  return e
+}
+
+/** 是否允许目标为非公网地址（默认否；测试/本地 mock 经 DSH_WEB_FETCH_ALLOW_PRIVATE=1 放开——见 TEST_CASES §8.1）。 */
+function privateFetchAllowed() {
+  return process.env.DSH_WEB_FETCH_ALLOW_PRIVATE === '1'
+}
+
+function isPrivateV4(a, b, c, d) {
+  if (a === 0) return true // 0.0.0.0/8
+  if (a === 10) return true
+  if (a === 100 && b >= 64 && b <= 127) return true // CGNAT 100.64/10
+  if (a === 127) return true
+  if (a === 169 && b === 254) return true
+  if (a === 172 && b >= 16 && b <= 31) return true
+  if (a === 192 && b === 168) return true
+  if (a === 198 && (b === 18 || b === 19)) return true
+  if (a >= 224) return true // 组播/保留
+  return false
+}
+
+/** 把各种 inet_aton 混淆形态归一成 4 段十进制 v4（TC-S6-05：十进制/十六进制/短点分）。无法解析返回 null。 */
+function normalizeV4Literal(host) {
+  const h = String(host).replace(/^\[(.*)\]$/, '$1')
+  if (h.includes(':')) {
+    const m = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(h)
+    if (m) return normalizeV4Literal(m[1])
+    const m2 = /^::ffff:([0-9a-fA-F]{1,4}):([0-9a-fA-F]{1,4})$/.exec(h)
+    if (m2) {
+      const a = parseInt(m2[1], 16), b = parseInt(m2[2], 16)
+      return [Math.floor(a / 256), a % 256, Math.floor(b / 256), b % 256].join('.')
+    }
+    return null
+  }
+  if (/^\d+$/.test(h)) {
+    // 单整数：0x 前缀=hex、0 前缀=octal、其余=dec；网络序转 4 段
+    let n = 0
+    if (/^0x/i.test(h)) n = parseInt(h.slice(2), 16)
+    else if (/^0/.test(h) && h.length > 1) n = parseInt(h.slice(1), 8)
+    else n = parseInt(h, 10)
+    if (!Number.isFinite(n) || n < 0 || n > 0xffffffff) return null
+    return [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join('.')
+  }
+  const parts = h.split('.').map(p => {
+    if (/^0x/i.test(p)) return parseInt(p.slice(2), 16)
+    if (/^0/.test(p) && p.length > 1) return parseInt(p.slice(1), 8)
+    return parseInt(p, 10)
+  })
+  if (parts.some(p => !Number.isInteger(p) || p < 0 || p > 255)) return null
+  if (parts.length === 1) return normalizeV4Literal(String(parts[0]))
+  if (parts.length === 2) return [parts[0], parts[1], 0, 0].join('.')
+  if (parts.length === 3) return [parts[0], parts[1], parts[2], 0].join('.')
+  if (parts.length === 4) return parts.join('.')
+  return null
+}
+
+function isPrivateV6(host) {
+  const h = String(host).toLowerCase().replace(/\[|\]/g, '')
+  if (h === '::' || h === '::1') return true
+  if (h.startsWith('::ffff:')) {
+    const v4 = h.slice(7)
+    const norm = normalizeV4Literal(v4)
+    return norm ? isPrivateV4Literal(norm) : true
+  }
+  if (h.startsWith('fc') || h.startsWith('fd')) return true
+  if (h.startsWith('fe8') || h.startsWith('fe9') || h.startsWith('fea') || h.startsWith('feb')) return true
+  return false
+}
+function isPrivateV4Literal(ip) {
+  const p = ip.split('.').map(Number)
+  if (p.length !== 4) return false
+  return isPrivateV4(p[0], p[1], p[2], p[3])
+}
+
+/** SSRF 判定：IP 字面量（含混淆）或域名 DNS 解析结果命中私网/回环/保留段 → 阻断（TC-S6-05/06/07）。 */
+export async function assertPublicTarget(url) {
+  if (privateFetchAllowed()) return { hostname: url.hostname, ip: null }
+  const hostname = url.hostname.toLowerCase()
+  const isV6 = hostname.includes(':')
+  let literal = null
+  if (isV6) {
+    if (isPrivateV6(hostname)) throw webErr('ssrf_blocked', 'SSRF 防护：禁止访问私网/回环地址（含 IPv6）')
+    return { hostname, ip: hostname }
+  }
+  if (/^\d/.test(hostname) || /^0x/i.test(hostname)) {
+    literal = normalizeV4Literal(hostname)
+    if (literal && isPrivateV4Literal(literal)) throw webErr('ssrf_blocked', 'SSRF 防护：禁止访问私网/回环地址（含 IP 混淆写法）')
+    if (literal) return { hostname, ip: literal }
+  }
+  // 域名：DNS 解析（A/AAAA）逐条校验
+  let addrs = []
+  try {
+    const r = await lookup(hostname, { all: true, verbatim: true })
+    addrs = r.map(x => x.address)
+  } catch {
+    throw webErr('dns_error', '域名解析失败，无法确认目标地址（已阻止外呼）')
+  }
+  for (const addr of addrs) {
+    if (addr.includes(':')) { if (isPrivateV6(addr)) throw webErr('ssrf_blocked', 'SSRF 防护：域名解析指向私网/回环地址') }
+    else if (isPrivateV4Literal(addr)) throw webErr('ssrf_blocked', 'SSRF 防护：域名解析指向私网/回环地址')
+  }
+  return { hostname, ip: addrs[0] ?? null }
+}
+
+function decodeHtml(buf, contentType) {
+  const ct = String(contentType ?? '').toLowerCase()
+  const mCharset = /charset\s*=\s*["']?([\w-]+)/.exec(ct)
+  let charset = mCharset ? mCharset[1] : null
+  if (!charset) {
+    const head = buf.subarray(0, 4096).toString('latin1')
+    const meta = /charset\s*=\s*["']?([\w-]+)/i.exec(head)
+    charset = meta ? meta[1] : 'utf-8'
+  }
+  try { return new TextDecoder(charset, { fatal: false }).decode(buf) } catch { return new TextDecoder('utf-8').decode(buf) }
+}
+
+function decodeEntities(s) {
+  return String(s)
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => { try { return String.fromCodePoint(parseInt(h, 16)) } catch { return '' } })
+    .replace(/&#(\d+);/g, (_, d) => { try { return String.fromCodePoint(parseInt(d, 10)) } catch { return '' } })
+    .replace(/&(amp|lt|gt|quot|apos|nbsp|ensp|emsp|mdash|ndash|hellip|copy|reg|middot|bull);/g, (_, n) => ({
+      amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', ensp: ' ', emsp: ' ', mdash: '—', ndash: '–', hellip: '…', copy: '©', reg: '®', middot: '·', bull: '•',
+    })[n] ?? `&${n};`)
+}
+
+function stripTags(s) {
+  return decodeEntities(s).replace(/<[^>]*>/g, ' ')
+}
+
+/** 零依赖 HTML→正文抽取：剥离 script/style/head/noscript/iframe/svg/template + 标签，保留段落换行。 */
+export function extractHtml(html, finalUrl) {
+  const raw = String(html ?? '')
+  const titleMatch = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(raw)
+  const title = titleMatch ? stripTags(titleMatch[1]).replace(/\s+/g, ' ').trim() : ''
+  let body = raw
+  body = body.replace(/<script\b[\s\S]*?<\/script>/gi, ' ')
+  body = body.replace(/<style\b[\s\S]*?<\/style>/gi, ' ')
+  body = body.replace(/<noscript\b[\s\S]*?<\/noscript>/gi, ' ')
+  body = body.replace(/<head\b[\s\S]*?<\/head>/gi, ' ')
+  body = body.replace(/<iframe\b[\s\S]*?<\/iframe>/gi, ' ')
+  body = body.replace(/<svg\b[\s\S]*?<\/svg>/gi, ' ')
+  body = body.replace(/<template\b[\s\S]*?<\/template>/gi, ' ')
+  body = body.replace(/<!--[\s\S]*?-->/g, ' ')
+  body = body.replace(/<(br|\/p|\/div|\/li|\/h[1-6]|\/tr|\/pre|\/blockquote)[^>]*>/gi, '\n')
+  body = body.replace(/<[^>]+>/g, ' ')
+  body = decodeEntities(body).replace(/[ \t]+/g, ' ').replace(/\n[ \t]*/g, '\n').replace(/\n{3,}/g, '\n\n').trim()
+  // 链接收集（绝对化 + 去重 + http(s) 白名单）
+  const links = []
+  const seen = new Set()
+  for (const m of raw.matchAll(/<a\b[^>]*href\s*=\s*(["'])(.*?)\1/gi)) {
+    const href = m[2]
+    try {
+      const abs = new URL(href, finalUrl).href
+      if ((abs.startsWith('http://') || abs.startsWith('https://')) && !seen.has(abs)) {
+        seen.add(abs)
+        links.push(abs)
+        if (links.length >= WEB_LIMITS.MAX_LINKS) break
+      }
+    } catch { /* 忽略畸形链接 */ }
+  }
+  const text = body.slice(0, WEB_LIMITS.MAX_TEXT)
+  const excerpt = text.replace(/\s+/g, ' ').slice(0, 240)
+  return { title, text, excerpt, links }
+}
+
+async function readBodyLimited(res, maxBytes, signal) {
+  const reader = res.body.getReader()
+  const chunks = []
+  let total = 0
+  for (;;) {
+    if (signal?.aborted) { try { await reader.cancel() } catch { /* */ } throw webErr('timeout', '抓取超时（已取消请求）') }
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value.length
+    if (total > maxBytes) { try { await reader.cancel() } catch { /* */ } throw webErr('too_large', '响应体超过上限（当前上限 ' + maxBytes + ' 字节）') }
+    chunks.push(Buffer.from(value))
+  }
+  return Buffer.concat(chunks)
+}
+
+/**
+ * v1 fetch 代理核心：协议白名单 → SSRF 逐跳校验（含重定向链）→ 限长/超时 → 仅文本类响应进入抽取。
+ * 返回结构化 JSON（无原始 HTML 透传字段，TC-S6-10）。
+ */
+export async function webFetch({ url: rawUrl, maxBytes = WEB_LIMITS.MAX_BYTES, timeoutMs = WEB_LIMITS.TIMEOUT_MS, redirects = 0 } = {}) {
+  if (typeof rawUrl !== 'string' || rawUrl.trim().length === 0) throw webErr('invalid_url', '缺少参数 url')
+  const mb = Number.isFinite(Number(maxBytes)) ? Math.max(1, Math.min(Number(maxBytes), 16 * 1024 * 1024)) : WEB_LIMITS.MAX_BYTES
+  const tm = Number.isFinite(Number(timeoutMs)) ? Math.max(1, Math.min(Number(timeoutMs), 60_000)) : WEB_LIMITS.TIMEOUT_MS
+  let target
+  try { target = new URL(String(rawUrl).trim()) } catch { throw webErr('invalid_url', 'URL 无法解析') }
+  if (target.protocol !== 'http:' && target.protocol !== 'https:') throw webErr('protocol_blocked', '协议白名单：仅支持 http/https（收到 ' + target.protocol + '）')
+  if (redirects > WEB_LIMITS.MAX_REDIRECTS) throw webErr('too_many_redirects', '重定向超过 ' + WEB_LIMITS.MAX_REDIRECTS + ' 跳，已停止')
+  await assertPublicTarget(target)
+  const ac = new AbortController()
+  const timer = setTimeout(() => ac.abort(new Error('abort')), tm)
+  try {
+    let res
+    try {
+      res = await fetch(target.href, { redirect: 'manual', signal: ac.signal, headers: { 'user-agent': 'legion-browser-assistant/1.0 (SSRF-guarded)', 'accept': 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5' } })
+    } catch (e) {
+      if (ac.signal.aborted) throw webErr('timeout', '抓取超时（已取消请求）')
+      throw webErr('fetch_error', '网络请求失败：' + (e?.message ?? e))
+    }
+    const status = res.status
+    if (status >= 300 && status < 400) {
+      const loc = res.headers.get('location')
+      if (loc) {
+        const next = new URL(loc, target.href)
+        if (next.protocol !== 'http:' && next.protocol !== 'https:') throw webErr('ssrf_blocked', '重定向目标协议不在白名单（' + next.protocol + '）')
+        const buf = Buffer.alloc(0)
+        return webFetch({ url: next.href, maxBytes: mb, timeoutMs: tm, redirects: redirects + 1 })
+      }
+    }
+    const ct = res.headers.get('content-type') ?? ''
+    if (status >= 400) {
+      const errBuf = await readBodyLimited(res, Math.min(mb, 65536), ac.signal).catch(() => Buffer.alloc(0))
+      const errText = decodeHtml(errBuf, ct).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200)
+      return { ok: false, finalUrl: target.href, status, contentType: ct, error: '上游返回 http_' + status + (errText ? '：' + errText : ''), code: 'http_' + status }
+    }
+    const isHtml = /text\/html|application\/xhtml\+xml/i.test(ct)
+    const isText = /^text\//i.test(ct) || /json|xml/i.test(ct)
+    if (!isHtml && !isText) {
+      // 非文本/HTML（pdf/zip/图片等）：不读体、明确降级
+      const errBuf = await readBodyLimited(res, 0, ac.signal).catch(() => Buffer.alloc(0))
+      return { ok: true, finalUrl: target.href, status, contentType: ct, title: '', text: '', excerpt: '', links: [], error: '目标不是可读文本/HTML（' + ct.split(';')[0].trim() + '），已跳过正文抽取', code: 'unsupported' }
+    }
+    const buf = await readBodyLimited(res, mb, ac.signal)
+    const html = decodeHtml(buf, ct)
+    const { title, text, excerpt, links } = extractHtml(html, target.href)
+    if (!title && !text) {
+      return { ok: true, finalUrl: target.href, status, contentType: ct, title: '', text: '', excerpt: '', links, error: '未能抽取正文：目标页可能是 SPA/纯 JS 渲染空壳（v1 服务端抓取为显式边界）', code: 'empty_content' }
+    }
+    return { ok: true, finalUrl: target.href, status, contentType: ct, title, text, excerpt, links }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function handleWebApi(req, res) {
+  if (!isLoopback(req)) { httpErr(res, 403, '浏览器助手接口仅限本机（127.0.0.1）访问'); return }
+  let body
+  try { body = await readBodyJson(req) } catch (e) { httpErr(res, 400, e instanceof Error ? e.message : String(e)); return }
+  try {
+    const result = await webFetch({ url: body.url, maxBytes: body.maxBytes, timeoutMs: body.timeoutMs })
+    sendJson(res, 200, { ...result })
+  } catch (e) {
+    const err = e instanceof Error ? e : new Error(String(e))
+    const code = err.code ?? 'web_error'
+    sendJson(res, 200, { ok: false, error: err.message, code })
+  }
+}
+
 // ── /api/files/* 路由（S3 只读 + S4 写；仅回环；写需 token；错误码分类见各函数注释）──
 function httpErr(res, code, message) {
   sendJson(res, code, { error: message })
@@ -584,6 +842,12 @@ const server = createServer((req, res) => {
       res.end(`hub proxy error: ${e.message}`)
     })
     req.pipe(proxyReq)
+    return
+  }
+  // 浏览器助手 /api/web/fetch（S6：SSRF 防护代理 + 抽取；仅回环）
+  if (pathname === '/api/web/fetch') {
+    if (req.method !== 'POST') { res.writeHead(405); res.end('method not allowed'); return }
+    void handleWebApi(req, res)
     return
   }
   // 文件中心 /api/files/*（S3 只读面 + S4 写面；仅回环 + 写 token；scope → 空间 local_dir 解析）

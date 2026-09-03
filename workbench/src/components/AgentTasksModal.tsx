@@ -19,6 +19,13 @@ const TASK_STATUS_TEXT: Record<string, string> = {
   backlog: '待批准', todo: '待认领', in_progress: '进行中', in_review: '待验收', blocked: '受阻', done: '已完成', canceled: '已取消',
 }
 
+/** 士兵 ❓ 提问待将军确认：最后一条评论以 ❓ 开头（守护标记待答复），将军答复后消失。 */
+function askOpen(t: HubTask): boolean {
+  const cs = t.comments ?? []
+  if (cs.length === 0) return false
+  return (cs[cs.length - 1].text ?? '').startsWith('❓')
+}
+
 export function AgentTasksModal({ agent, onClose, onOpenTask }: AgentTasksModalProps): React.JSX.Element {
   const [tasks, setTasks] = useState<HubTask[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
@@ -118,7 +125,7 @@ export function AgentTasksModal({ agent, onClose, onOpenTask }: AgentTasksModalP
                           <span className="tt">{t.title}</span>
                         </div>
                         <div className="meta">
-                          {TASK_STATUS_TEXT[t.status] ?? t.status} · v{t.version}
+                          {askOpen(t) ? '❓ 待将军确认' : (TASK_STATUS_TEXT[t.status] ?? t.status)} · v{t.version}
                           {t.blockedBy.length > 0 ? ` · 依赖 ${t.blockedBy.join(',')}` : ''}
                         </div>
                       </div>

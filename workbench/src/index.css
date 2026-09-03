@@ -760,6 +760,55 @@ body {
 .mission-task .t-status.todo { color: var(--yellow); }
 .mission-task .t-status.blocked { color: var(--red); }
 
+/* ---------- 任务详情：拆解子任务 × 派工总览 ---------- */
+
+.bd-summary { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+
+.bd-row {
+  display: grid;
+  grid-template-columns: 44px 56px minmax(120px, 1fr) 88px minmax(160px, 1.4fr) 66px;
+  gap: 8px;
+  align-items: baseline;
+  padding: 6px 10px;
+  font-size: 11.5px;
+  color: var(--text);
+  border-top: 1px dashed var(--line);
+}
+
+.bd-row:first-child { border-top: none; }
+
+.bd-row.bd-head {
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.bd-row .bd-prio { color: var(--cyan); font-weight: 600; }
+
+.bd-row .bd-id { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.bd-row .bd-content { color: var(--text); line-height: 1.5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.bd-row .bd-agent { color: var(--yellow); font-weight: 600; }
+
+.bd-row .bd-anchor { color: var(--muted); line-height: 1.5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.bd-row .bd-status { font-size: 10px; }
+
+.bd-row .bd-status.in_progress { color: var(--green); }
+
+.bd-row .bd-status.in_review { color: var(--yellow); }
+
+.bd-row .bd-status.todo { color: var(--yellow); }
+
+.bd-row .bd-status.backlog { color: var(--muted-2); }
+
+.bd-row .bd-status.blocked { color: var(--red); }
+
+.bd-row .bd-status.done { color: var(--green); }
+
 .sched-summary {
   padding: 8px 10px;
   margin-bottom: 8px;
@@ -1421,6 +1470,20 @@ body {
 .status-pill.hold {
   background: rgba(245, 158, 11, 0.16);
   color: #f59e0b;
+}
+
+/* ❓ 士兵提问待将军确认：醒目脉冲 */
+.status-pill.ask {
+  background: rgba(255, 87, 34, 0.22);
+  color: #ff9800;
+  border: 1px solid rgba(255, 152, 0, 0.55);
+  animation: ask-pulse 1.5s ease-in-out infinite;
+  font-weight: 600;
+}
+
+@keyframes ask-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 152, 0, 0.45); }
+  50% { box-shadow: 0 0 0 5px rgba(255, 152, 0, 0); }
 }
 
 .mission-bar {

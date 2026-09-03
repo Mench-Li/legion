@@ -861,6 +861,7 @@ exit 0
       '2. 完成标准 = 验收标准逐条真实满足：跑真实命令验证（typecheck / build / test），给出证据。',
       '3. 改动落在工作目录内；如需更新 legion 文档一并更新。',
       '4. 禁止联网与任何 push（pre-push 已拦截 w/* 分支）；外部依赖若缺失，在证据里说明而非擅自下载。',
+      '4b. 遇到**必须将军拍板**的疑问（关键歧义无法自行消解 / 取舍超出本角色职权 / 关键输入缺失等）：不要臆断硬做，也不要悄悄绕过——把疑问逐条写进报告 blocker（每条以「❓ 待将军确认」开头，附你的倾向与依据），走 status=blocked；任务会醒目提示将军，将军评论答复后你会带着答复继续。能自行合理决策的小问题自己定，在 evidence 里写明假设。',
       '5. 最终回复只输出 JSON 报告，不要额外叙述：',
       '   {"status":"done","summary":"一句话总结","evidence":"验证证据（命令与输出要点）","blocker":"","artifact":null}',
       '   "artifact" 可选（无产物必须为 null）：{"kind":"html|file|url","path":"产物绝对路径（工作目录内）","title":"一句话标题"}——html 会进看板 iframe 预览，file/url 变成看板链接。',
@@ -978,10 +979,10 @@ exit 0
       const wtHint = worktreeDir !== null
         ? `\n[worktree] 部分改动已提交到分支 w/${t.id}（${worktreeDir}），解阻后续做会自动复用`
         : ''
-      await safeComment(t.id, `⚠ 受阻：${report.blocker || report.summary}${wtHint}`)
+      await safeComment(t.id, `❓ 需要将军介入确认：${report.blocker || report.summary}${wtHint}\n请将军在本任务评论里给出处理意见（例如：继续的方向 / 放宽或调整要求 / 打回原因），士兵会带着答复续做；也可先 🖐 拦截或转派。`)
       await transitionTo(t.id, 'blocked')
-      activity('blocked', t.id, `受阻：${report.blocker || report.summary}`)
-      log(`${t.id} → blocked（${report.blocker || report.summary}）`)
+      activity('ask', t.id, `需要将军确认：${report.blocker || report.summary}`)
+      log(`${t.id} → blocked（❓ 待将军确认：${report.blocker || report.summary}）`)
     }
   }
 
@@ -1239,6 +1240,15 @@ exit 0
           .catch(e => log(`${taskId} 后台派工异常：${String(e)}`))
           .finally(() => inflight.delete(taskId))
       }
+      // ❓ 士兵提问待将军答复状态：最后一条 ❓（守护评论）之后还没有他人（非守护）评论 = 仍待答复。
+      // 返回 { open: 是否仍在等答复, answers: 将军/他人已给的答复评论（供重跑时带进提示词） }
+      const confirmState = (t: Task): { open: boolean; answers: Task['comments'] } => {
+        const asks = t.comments.filter(c => (c.text ?? '').startsWith('❓'))
+        if (asks.length === 0) return { open: false, answers: [] }
+        const lastAsk = asks[asks.length - 1]
+        const answers = t.comments.filter(c => c.by !== config.role && new Date(c.at).getTime() >= new Date(lastAsk.at).getTime())
+        return { open: answers.length === 0, answers }
+      }
 
       // 离线 inbox 计数：本守护名下待认领（todo/blocked 未认领）任务，每轮汇报一次（将军拦截的除外）
       const isOurInbox = (t: Task) => (isPipeline ? (t.role !== null && stageByRole.has(t.role)) : true)
@@ -1274,13 +1284,16 @@ exit 0
         const job = t.role === 'discussion' ? runDiscussion(t) : workTodo(t, stageOf(t))
         runDetached(t.id, job)
       }
-      // 2. blocked 且本角色、依赖已全部解除：解阻续做（同样遵守拦截）
+      // 2. blocked 且本角色、依赖已全部解除：解阻续做（同样遵守拦截）；
+      //    士兵「❓ 待将军答复」的疑问型 blocked 不自动重跑——醒目等将军介入，将军评论答复后下轮自动带答复续做
       for (const t of tasks.filter(t => t.status === 'blocked' && isOurs(t))) {
         if (!room() || inflight.has(t.id)) continue
         if (t.hold) continue
         if (openDeps(t)) continue
+        const cf = confirmState(t)
+        if (cf.open) continue // 待将军确认：不自动重跑，等答复
         inflight.add(t.id)
-        runDetached(t.id, workTodo(t, stageOf(t)))
+        runDetached(t.id, cf.answers.length > 0 ? workReturned(t, cf.answers, stageOf(t)) : workTodo(t, stageOf(t)))
       }
       // 3. in_progress 且本角色、认领后有他人评论：视为退回，附反馈纠错；
       //    守护自己的「worker 未完成 / 派工失败」评论也触发重试（单角色模式 self=config.role 会把它过滤掉，

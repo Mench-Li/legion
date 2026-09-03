@@ -29,6 +29,13 @@ function fmt(iso?: string | null): string {
   return new Date(iso).toLocaleString('zh-CN', { hour12: false })
 }
 
+/** 士兵 ❓ 提问待将军确认：最后一条评论以 ❓ 开头（守护标记待答复），将军答复后消失。 */
+function askOpen(t: HubTask): boolean {
+  const cs = t.comments ?? []
+  if (cs.length === 0) return false
+  return (cs[cs.length - 1].text ?? '').startsWith('❓')
+}
+
 /** 审计动作 → 进展文案（小时间线）。 */
 const ACTION_TEXT: Record<string, string> = {
   'goal:publish': '🎯 目标发布（自动建链）',
@@ -292,7 +299,7 @@ export function HubSchedulerModal({ scope, onClose }: HubSchedulerModalProps): R
                         <span className="tt">{t.title}</span>
                       </div>
                       <div className="meta">
-                        {t.hold ? '🖐 将军拦截 · ' : ''}{who(t)} · v{t.version}
+                        {askOpen(t) ? '❓ 待将军确认 · ' : ''}{t.hold ? '🖐 将军拦截 · ' : ''}{who(t)} · v{t.version}
                         {t.blockedBy.length > 0 ? ` · 依赖 ${t.blockedBy.join(',')}` : ''} · 更新 {fmt(t.updatedAt)}
                       </div>
                     </div>

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { execRequest, fetchHubActivity, fetchHubTask, hubClaim, hubComment, hubHold, hubReassign, hubTransition } from '../api'
+import { execRequest, fetchHubActivity, fetchHubTask, fetchHubTasks, hubClaim, hubComment, hubHold, hubReassign, hubTransition } from '../api'
 import type { HubActivity, HubTask } from '../types'
 import { toast } from './Toast'
 
@@ -31,20 +31,72 @@ const STATUS_CN: Record<string, string> = {
   todo: '待认领', in_progress: '进行中', in_review: '待验收', done: '已完成', blocked: '受阻', backlog: '待批准', canceled: '已取消',
 }
 
+const PRIO_LABEL: Record<string, string> = { high: 'P0', medium: 'P1', low: 'P2' }
+
+const ROLE_LABEL: Record<string, string> = {
+  requirement: '需求分析', researcher: '方案搜索', breaker: '任务拆解', 'test-designer': '测试设计',
+  coder: '编码实现', reviewer: '代码审查', tester: '测试执行', devops: '部署运维',
+}
+
 function fmt(iso?: string | null): string {
   if (!iso) return ''
   return new Date(iso).toLocaleString('zh-CN', { hour12: false })
 }
 
+/** 子任务「内容」：优先取描述首行（拆解时写的一句话），退化为标题。 */
+function childContent(c: HubTask): string {
+  if (!c.description) return c.title
+  const first = c.description.split('\n')[0].trim()
+  return first.length > 0 ? first : c.title
+}
+
+/** 子任务「完成判定锚点」：优先取验收标准首条（拆解时写的完成口径），退化为边界或一句话。 */
+function childAnchor(c: HubTask): string {
+  if (c.acceptance && c.acceptance.length > 0) return c.acceptance[0]
+  if (c.boundary?.do && c.boundary.do.length > 0) return c.boundary.do[0]
+  return c.title
+}
+
+function runAgentOf(c: HubTask): string {
+  return c.soldier ?? c.role ?? 'general'
+}
+
+/** 从描述中读取显式「波次：N」标记；若未标记，从 blockedBy 深度计算。 */
+function childWave(c: HubTask, all: HubTask[]): number {
+  const m = (c.description ?? '').match(/波次[:：]\s*(\d+)/)
+  if (m) return Number(m[1])
+  const deps = (c.blockedBy ?? []).map(b => all.find(x => x.id === b)).filter(Boolean) as HubTask[]
+  if (deps.length === 0) return 1
+  return 1 + Math.max(...deps.map(d => childWave(d, all)))
+}
+
+function childDeps(c: HubTask): string {
+  const deps = c.blockedBy ?? []
+  if (deps.length === 0) return '无'
+  return '← ' + deps.join(', ')
+}
+
 export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalProps): React.JSX.Element {
   const [task, setTask] = useState<HubTask | null>(null)
   const [timeline, setTimeline] = useState<HubActivity[]>([])
+  const [children, setChildren] = useState<HubTask[]>([])
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
   const load = useCallback(async (): Promise<void> => {
     try {
-      setTask(await fetchHubTask(taskId))
+      const t = await fetchHubTask(taskId)
+      setTask(t)
+      if (t.scope) {
+        try {
+          const all = await fetchHubTasks(t.scope)
+          setChildren(all.filter(x => x.parent === taskId))
+        } catch {
+          setChildren([])
+        }
+      } else {
+        setChildren([])
+      }
       try {
         setTimeline(await fetchHubActivity({ taskId }))
       } catch {
@@ -106,6 +158,12 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
     if (reason === null) return Promise.resolve()
     return act(() => hubTransition({ id: t.id, to: 'todo', by: bindOf(t), ifVersion: t.version }), `${t.id} 已打回`)
   }
+  // 士兵 ❓ 提问待将军确认：最后一条评论以 ❓ 开头（守护标记待答复），将军答复后自动消失
+  const askOpen = (): boolean => {
+    const cs = t.comments ?? []
+    if (cs.length === 0) return false
+    return (cs[cs.length - 1].text ?? '').startsWith('❓')
+  }
   const doStart = (): Promise<void> => act(() => hubTransition({ id: t.id, to: 'in_progress', by: bindOf(t), ifVersion: t.version }), `${t.id} 已开工`)
   const doClaim = (): Promise<void> => act(() => hubClaim(t.id, t.role ?? undefined), `${t.id} 已认领`)
   const doSubmitReview = (): Promise<void> => act(() => hubTransition({ id: t.id, to: 'in_review', by: bindOf(t), ifVersion: t.version }), `${t.id} 已提交验收`)
@@ -136,6 +194,7 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
           <div className="td-title">
             <span className={`status-pill ${t.status}`}>{STATUS_PILL[t.status] ?? t.status}</span>
             {t.hold && <span className="status-pill hold">✋ 将军拦截中</span>}
+            {askOpen() && <span className="status-pill ask">❓ 待将军确认</span>}
             <span className="td-title-text">{t.title}</span>
           </div>
           <div className="td-meta">
@@ -146,6 +205,46 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
               创建 {fmt(t.createdAt)} · 更新 {fmt(t.updatedAt)}
             </div>
           </div>
+
+          {/* 拆解子任务 × 派工总览（父任务拆解出的子任务，由真实子任务卡驱动） */}
+          {children.length > 0 && (
+            <div className="td-section">
+              <div className="td-section-title">🧩 拆解子任务 × 派工（{children.length}）</div>
+              <div className="bd-summary">
+                <div className="bd-row bd-head">
+                  <span className="bd-prio">优先</span>
+                  <span className="bd-id">子任务</span>
+                  <span className="bd-content">内容</span>
+                  <span className="bd-dep">依赖 / 波次</span>
+                  <span className="bd-agent">自动运行智能体</span>
+                  <span className="bd-anchor">完成判定锚点</span>
+                  <span className="bd-status">状态</span>
+                </div>
+                {[...children]
+                  .sort((a, b) => {
+                    const pr = (PRIO_LABEL[a.priority] ?? 'P9').localeCompare(PRIO_LABEL[b.priority] ?? 'P9')
+                    return pr !== 0 ? pr : a.id.localeCompare(b.id)
+                  })
+                  .map((c) => {
+                    const wave = childWave(c, children)
+                    return (
+                      <div className="bd-row" key={c.id}>
+                        <span className="bd-prio">{PRIO_LABEL[c.priority] ?? c.priority}</span>
+                        <span className="bd-id">{c.id}</span>
+                        <span className="bd-content" title={c.title}>{childContent(c)}</span>
+                        <span className="bd-dep">
+                          <span className="bd-wave">波{wave}</span>
+                          <span className="bd-dep-list">{childDeps(c)}</span>
+                        </span>
+                        <span className="bd-agent">{ROLE_LABEL[runAgentOf(c)] ?? runAgentOf(c)}</span>
+                        <span className="bd-anchor" title={c.acceptance?.join('\n') ?? ''}>{childAnchor(c)}</span>
+                        <span className={`bd-status ${c.status}`}>{STATUS_PILL[c.status] ?? c.status}</span>
+                      </div>
+                    )
+                  })}
+              </div>
+            </div>
+          )}
 
           {/* AI 执行过程 */}
           <div className="td-section">

@@ -172,6 +172,17 @@ export function HubSchedulerModal({ scope, onClose }: HubSchedulerModalProps): R
             <div className="detail-warn">未定义验收标准（发布时未填 acceptance）——请以任务描述与目标要求判断</div>
           )}
         </div>
+        {(t.boundary && ((t.boundary.do ?? []).length > 0 || (t.boundary.dont ?? []).length > 0)) && (
+          <div className="detail-row">
+            <b>🚧 边界（做什么 / 不做什么）</b>
+            {(t.boundary.do ?? []).map((x, i) => (
+              <div key={`bd-do-${i}`} className="bd-item do">✅ {x}</div>
+            ))}
+            {(t.boundary.dont ?? []).map((x, i) => (
+              <div key={`bd-dont-${i}`} className="bd-item dont">🚫 {x}</div>
+            ))}
+          </div>
+        )}
         <div className="detail-row">
           <b>📦 执行者产出 / 证据</b>
           {hasEvidence ? (

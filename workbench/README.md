@@ -118,8 +118,9 @@ node scripts/serve.mjs --port 5173   # 独立静态服务 → http://127.0.0.1:5
 - 详情内容：
   - **🤖 AI 执行过程**：执行该任务的 AI 智能体沉淀的过程记录 = evidence（`isEvidence:true` 评论）与评论的时间流——AI 的每一步行动/产出/汇报都在这里，是「任务详情看到 AI 工作过程」的落点；
   - **⏱ 进展时间线**：`GET /api/activity?taskId=`（goal:publish / claim / transition / comment / evidence / reassign / model:set / exec:*），中文可读；
-  - 📋 任务描述、🎯 验收标准（空则警示）、🔗 依赖解锁提醒；
+  - 📋 任务描述、🎯 验收标准、🚧 边界（做什么 ✅ / 不做什么 🚫）、🔗 依赖解锁提醒；
   - **状态操作**：todo →「▶ 开工 / 🔒 认领」；in_progress →「📮 提交验收 / 归还待办」；in_review →「✓ 验收通过(general) / ↩ 打回重做」；blocked →「解阻」；另有「💬 评论/记录」「转派」「**🤖 派 AI 执行**」（写 `POST /api/exec/request`，请求执行守护认领）。
+  - **验收标准/边界自动生成**：发布目标建链、`POST /api/create` 建任务都会**按岗位自动注入验收标准 + 边界**（模板见 `team-hub/stage-standards.mjs`；自定义 `acceptance`/`boundary` 可覆盖；历史在途 `[auto-goal]` 任务在服务启动时自动补种）；执行 worker 的提示词与验收视图同步携带——验收按清单逐条对照，不再「凭感觉」。
 - 数据流：`GET /api/task?id=`（team-hub 单任务接口）+ `GET /api/activity?taskId=`；状态操作与调度弹窗共用 `/api/transition|claim|reassign|comment`。
 
 ## 智能体任务清单（点击智能体）

@@ -129,7 +129,7 @@ curl -X POST http://127.0.0.1:4820/api/resume -H "Authorization: Bearer <t>" -H 
 
 `@dsh-external/dsh-scrum-worker` 是一个 daemon-loop 形态的守护插件（经 dsh-super-injector 注入 web profile）。它每 `intervalMs` 扫一次任务库，代替人类盯板：
 
-1. **todo 任务** → `claim` 认领（互斥由状态机保证）→ 派一次性 worker subagent（携带任务完整上下文：标题/描述/验收/评论/依赖）→ 完成 → 提交 `in_review` 并附证据评论。
+1. **todo 任务** → `claim` 认领（互斥由状态机保证）→ 派一次性 worker subagent（携带任务完整上下文：标题/描述/**验收标准/边界(做什么·不做什么)**/评论/依赖——验收标准与边界由 team-hub 在生成任务时按岗位模板自动注入，见根 README §3.4）→ 完成 → 提交 `in_review` 并附证据评论。
 2. **被退回的 in_progress 任务**（认领后出现他人评论，通常是将军把 in_review 拖回并写了原因）→ 派纠错 worker，提示词附最新退回评论，**迭代纠错重做**。
 3. **依赖解除的 blocked 任务**（属于本角色）→ 解阻认领 → 续做。
 

@@ -1154,6 +1154,17 @@ body {
   font-family: Consolas, 'Courier New', monospace;
 }
 
+/* 任务边界（做什么/不做什么） */
+.bd-item {
+  font-size: 11.5px;
+  line-height: 1.55;
+  margin: 2px 0;
+  padding-left: 2px;
+}
+.bd-item.dont {
+  opacity: 0.82;
+}
+
 /* ── 空间仓库绑定：选择文件夹（/api/fs） ── */
 .dir-pick-row {
   display: flex;

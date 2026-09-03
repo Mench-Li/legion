@@ -22,6 +22,8 @@
  *   GET  /api/members                              成员在线状态
  *   GET  /api/events                               SSE 事件流
  *   POST /api/create|claim|transition|advance|reassign|release-stale|comment|heartbeat   写操作（body 带 by + scope）
+ *       —— create/目标链生成任务时**自动注入验收标准 + 边界**（做什么/不做什么，按岗位模板，
+ *          stage-standards.mjs）；调用方可传自定义 acceptance/boundary 覆盖。
  *   POST /api/skills/register|review|grant         团队共享技能（scope-owned + grant）
  *   GET  /api/skills[?scope=&member=&id=]          技能查询（默认只返回 published）
  *
@@ -33,6 +35,7 @@ import { mkdirSync, readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { standardsFor } from './stage-standards.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const DB_FILE = process.env.TEAM_HUB_DB || join(ROOT, 'team-hub', 'team.db')
@@ -63,6 +66,7 @@ db.exec(`
     title TEXT NOT NULL,
     description TEXT DEFAULT '',
     acceptance TEXT DEFAULT '[]',
+    boundary TEXT DEFAULT '[]',
     priority TEXT DEFAULT 'medium',
     status TEXT NOT NULL DEFAULT 'backlog',
     version INTEGER NOT NULL DEFAULT 1,
@@ -209,6 +213,19 @@ ensureColumn('skills', 'reviewedAt', 'reviewedAt TEXT')
 ensureColumn('tasks', 'ttlMinutes', 'ttlMinutes INTEGER')
 ensureColumn('tasks', 'expiresAt', 'expiresAt TEXT')
 ensureColumn('tasks', 'claimRequestId', 'claimRequestId TEXT')
+// 边界列（做什么/不做什么 JSON：{"do":[],"dont":[]}）——任务生成必须带验收标准与边界
+ensureColumn('tasks', 'boundary', "boundary TEXT DEFAULT '[]'")
+// 老链回填：已生成、未完成的自动目标链任务若没有验收标准/边界，按岗位模板补种，
+// 保证"生成任务的同时必须生成验收标准与边界（做什么/不做什么）"对历史在途任务也成立。
+try {
+  const stale = db.prepare("SELECT id, role FROM tasks WHERE description LIKE '%[auto-goal]%' AND status NOT IN ('done','canceled') AND (acceptance IS NULL OR acceptance = '[]')").all()
+  for (const s of stale) {
+    const std = standardsFor(s.role ?? '')
+    db.prepare('UPDATE tasks SET acceptance=?, boundary=?, updatedAt=? WHERE id=?')
+      .run(JSON.stringify(std.acceptance), JSON.stringify({ do: std.do, dont: std.dont }), now(), s.id)
+  }
+  if (stale.length > 0) console.log(`[team-hub] 历史目标链补种验收标准/边界：${stale.length} 个任务（按岗位模板）`)
+} catch { /* 回填失败不影响启动 */ }
 
 let nextSeq = 1
 try {
@@ -225,6 +242,27 @@ function parseJson(text, fallback) {
     return JSON.parse(text)
   } catch {
     return fallback
+  }
+}
+
+/**
+ * 归一化任务的验收标准与边界：调用方没给（或给空）时按该任务 role 的岗位模板生成——
+ * "生成任务的同时，必须生成验收标准与边界（做什么/不做什么）"。
+ * acceptance 自定义则保留（boundary 仍补模板默认，边界纪律是全局的）。
+ */
+function taskStandards(role, acceptance, boundary) {
+  const std = standardsFor(role ?? '')
+  const clean = (list) => Array.isArray(list) ? list.filter(x => typeof x === 'string' && x.trim().length > 0) : []
+  const acc = clean(acceptance)
+  const b = boundary && typeof boundary === 'object' ? boundary : {}
+  const doList = clean(b.do)
+  const dontList = clean(b.dont)
+  return {
+    acceptance: acc.length > 0 ? acc : std.acceptance,
+    boundary: {
+      do: doList.length > 0 ? doList : std.do,
+      dont: dontList.length > 0 ? dontList : std.dont,
+    },
   }
 }
 
@@ -245,6 +283,7 @@ function rowToTask(row) {
     title: row.title,
     description: row.description,
     acceptance: parseJson(row.acceptance, []),
+    boundary: parseJson(row.boundary, { do: [], dont: [] }),
     priority: row.priority,
     status: row.status,
     version: row.version,
@@ -407,11 +446,13 @@ function grantSkill(id, grants) {
 function createTask(input) {
   return withTx(() => {
     const id = nextId()
+    const std = taskStandards(input.role, input.acceptance, input.boundary)
     const t = {
       id,
       title: input.title.trim(),
       description: input.description ?? '',
-      acceptance: input.acceptance ?? [],
+      acceptance: std.acceptance,
+      boundary: std.boundary,
       priority: input.priority ?? 'medium',
       status: input.status ?? 'backlog',
       version: 1,
@@ -435,10 +476,10 @@ function createTask(input) {
     if (t.status !== 'backlog' && t.status !== 'todo') throw new Error(`非法初始状态 ${t.status}`)
     if (t.parent !== null && !db.prepare('SELECT 1 FROM tasks WHERE id=?').get(t.parent)) throw new Error(`父任务 ${t.parent} 不存在`)
     db.prepare(`
-      INSERT INTO tasks (id, title, description, acceptance, priority, status, version, soldier, claimedRound, claimedAt,
+      INSERT INTO tasks (id, title, description, acceptance, boundary, priority, status, version, soldier, claimedRound, claimedAt,
         ordersVersion, parent, role, scope, blocks, blockedBy, comments, evidence, patches, createdAt, updatedAt)
-      VALUES (?, ?, ?, ?, ?, ?, 1, NULL, NULL, NULL, ?, ?, ?, ?, '[]', '[]', '[]', '[]', '[]', ?, ?)
-    `).run(t.id, t.title, t.description, JSON.stringify(t.acceptance), t.priority, t.status, t.ordersVersion, t.parent, t.role, t.scope, t.createdAt, t.updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, NULL, ?, ?, ?, ?, '[]', '[]', '[]', '[]', '[]', ?, ?)
+    `).run(t.id, t.title, t.description, JSON.stringify(t.acceptance), JSON.stringify(t.boundary), t.priority, t.status, t.ordersVersion, t.parent, t.role, t.scope, t.createdAt, t.updatedAt)
     return getTask(id)
   })
 }
@@ -468,11 +509,15 @@ function createGoalChain(scope, objective) {
       const id = nextId()
       const title = `【${label}】${objective.trim().slice(0, 40)}`
       const description = `[auto-goal]\n目标：${objective.trim()}\n本阶段：${label}（${r.name}）`
+      // 生成任务必须同时生成验收标准 + 边界（做什么/不做什么）——按该岗位模板注入
+      const s = standardsFor(r.role)
+      const acceptanceJson = JSON.stringify(s.acceptance)
+      const boundaryJson = JSON.stringify({ do: s.do, dont: s.dont })
       db.prepare(`
-        INSERT INTO tasks (id, title, description, acceptance, priority, status, version, soldier, claimedRound, claimedAt,
+        INSERT INTO tasks (id, title, description, acceptance, boundary, priority, status, version, soldier, claimedRound, claimedAt,
           ordersVersion, parent, role, scope, blocks, blockedBy, comments, evidence, patches, createdAt, updatedAt)
-        VALUES (?, ?, ?, '[]', 'high', 'todo', 1, ?, NULL, NULL, 1, NULL, ?, ?, '[]', ?, '[]', '[]', '[]', ?, ?)
-      `).run(id, title, description, r.role, r.role, scope, JSON.stringify(prev ? [prev] : []), nowIso, nowIso)
+        VALUES (?, ?, ?, ?, ?, 'high', 'todo', 1, ?, NULL, NULL, 1, NULL, ?, ?, '[]', ?, '[]', '[]', '[]', ?, ?)
+      `).run(id, title, description, acceptanceJson, boundaryJson, r.role, r.role, scope, JSON.stringify(prev ? [prev] : []), nowIso, nowIso)
       created.push({ id, role: r.role, label })
       prev = id
     })
@@ -675,7 +720,7 @@ async function handle(req, res) {
         const title = body.title
         if (typeof title !== 'string' || title.trim().length === 0) throw new Error('缺少参数 title')
         const task = createTask({
-          title: title.trim(), description: body.description, acceptance: body.acceptance,
+          title: title.trim(), description: body.description, acceptance: body.acceptance, boundary: body.boundary,
           priority: body.priority, status: body.status, parent: body.parent, role: body.role,
           scope, ordersVersion: body.ordersVersion,
         })

@@ -201,6 +201,22 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
             )}
           </div>
 
+          <div className="td-section">
+            <div className="td-section-title">🚧 边界（做什么 / 不做什么）</div>
+            {(t.boundary && ((t.boundary.do ?? []).length > 0 || (t.boundary.dont ?? []).length > 0)) ? (
+              <>
+                {(t.boundary.do ?? []).map((x, i) => (
+                  <div key={`bd-do-${i}`} className="bd-item do">✅ {x}</div>
+                ))}
+                {(t.boundary.dont ?? []).map((x, i) => (
+                  <div key={`bd-dont-${i}`} className="bd-item dont">🚫 {x}</div>
+                ))}
+              </>
+            ) : (
+              <div className="detail-warn">未定义边界——默认只做本任务范围、不越权、不 push（见描述与纪律）</div>
+            )}
+          </div>
+
           {/* 操作 */}
           <div className="td-actions">
             {t.status === 'todo' && (

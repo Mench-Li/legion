@@ -96,11 +96,12 @@ patch 里**必须显式给** `legionDir: 'D:/project/DSH/legion'`——pnpm 对 
 - **点任务行 → 任务详情弹窗**：
   - **🤖 AI 执行过程**：执行该任务的 AI 沉淀的过程记录（evidence + 评论时间流）——AI 的每一步行动/产出/汇报都在这，是「任务详情看到 AI 工作过程」的落点；
   - **⏱ 进展时间线**：goal:publish / claim / transition / comment / evidence / reassign / exec / model 等审计动作（`GET /api/activity?taskId=`）；
-  - 📋 描述、🎯 验收标准（空则警示）、🔗 依赖提示、创建/更新时间；
+  - 📋 描述、🎯 验收标准、🚧 边界（做什么 ✅ / 不做什么 🚫）、🔗 依赖提示、创建/更新时间；
   - **状态操作**（按状态出现）：todo →「▶ 开工 / 🔒 认领」；in_progress →「📮 提交验收 / 归还待办」；in_review →「✓ 验收通过（仅将军）/ ↩ 打回重做」；blocked →「解阻」；另有「💬 评论/记录」「转派」「🤖 派 AI 执行」。
 
 ### 3.4 发布目标与自动建链
 - 底部「🎯 发布目标」（选中具体空间后可用）→ `POST /api/goal`：重复发布会**取消**同空间旧的 `[auto-goal]` 未完成任务，再按编队生成新阶段链（`soldier=role`、`priority=high`、`blockedBy=前一任务`）。
+- **验收标准 + 边界必带**：拆出的每个阶段任务都**自动生成验收标准与边界**（做什么/不做什么，按岗位模板 `team-hub/stage-standards.mjs`，如编码任务=满足验收并真实跑通 typecheck/build、不 push 不越权；需求阶段=逐条覆盖诉求并写清范围外事项）。任务详情、执行提示词、调度弹窗同步注入，杜绝「没标准就干、凭感觉验收」。手动建任务（`POST /api/create`）留空同样自动注入，可传自定义 `acceptance`/`boundary` 覆盖；服务启动时会为历史在途目标链任务自动补种。
 - 目标进度（done/total/percent）显示在中央目标卡与场景进度环。
 
 ### 3.5 任务调度与验收

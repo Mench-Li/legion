@@ -256,12 +256,20 @@ export interface RepoInspect {
   remotes: Array<{ name: string; url: string }>
 }
 
+/** 任务边界（做什么/不做什么，scope in/out）。 */
+export interface TaskBoundary {
+  do: string[]
+  dont: string[]
+}
+
 /** team-hub v2 单个任务（/api/board 返回，含角色/指派/依赖/版本/内容，供中枢调度与验收）。 */
 export interface HubTask {
   id: string
   title: string
   description: string
   acceptance: string[]
+  /** 边界：做什么/不做什么（生成任务时自动带，见 team-hub/stage-standards.mjs）。 */
+  boundary?: TaskBoundary
   priority: string
   status: CardStatus
   version: number

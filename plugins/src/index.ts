@@ -103,6 +103,8 @@ interface Task {
   title: string
   description: string
   acceptance: string[]
+  /** 边界（做什么/不做什么，team-hub 生成任务时自动注入；file 模式可能缺失）。 */
+  boundary?: { do: string[]; dont: string[] }
   priority: string
   status: string
   version: number
@@ -814,6 +816,13 @@ exit 0
       t.description ? `描述：${t.description}` : '描述：（无）',
       '验收标准（必须逐条真实满足，并在证据中对应说明）：',
       ...(t.acceptance.length > 0 ? t.acceptance.map(a => `- ${a}`) : ['- （未填写，请自行判断合理的完成标准并写明）']),
+      ...(t.boundary && (t.boundary.do.length > 0 || t.boundary.dont.length > 0)
+        ? [
+            '边界（只做 / 不做，必须遵守）：',
+            ...(t.boundary.do ?? []).map(x => `- ✅ 做：${x}`),
+            ...(t.boundary.dont ?? []).map(x => `- 🚫 不做：${x}`),
+          ]
+        : []),
       t.blockedBy.length > 0 ? `依赖（应已完成）：${t.blockedBy.join(', ')}` : '',
       '',
       '历史评论（含将军的退回反馈，必须处理）：',

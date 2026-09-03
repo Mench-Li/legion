@@ -1418,6 +1418,11 @@ body {
   color: var(--green-2);
 }
 
+.status-pill.hold {
+  background: rgba(245, 158, 11, 0.16);
+  color: #f59e0b;
+}
+
 .mission-bar {
   height: 8px;
   background: var(--line-2);

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { fetchHubActivity, fetchHubTasks, hubClaim, hubComment, hubReassign, hubTransition } from '../api'
+import { fetchHubActivity, fetchHubTasks, hubClaim, hubComment, hubHold, hubReassign, hubTransition } from '../api'
 import type { CardStatus, HubActivity, HubTask } from '../types'
 import { toast } from './Toast'
 
@@ -38,6 +38,8 @@ const ACTION_TEXT: Record<string, string> = {
   comment: '💬 评论',
   evidence: '📦 提交证据',
   reassign: '🔁 转派',
+  hold: '🖐 拦截自动',
+  unhold: '🚀 放行',
   'release-stale': '⏳ 租约回收',
   'space:create': '🗂 建空间',
 }
@@ -123,6 +125,8 @@ export function HubSchedulerModal({ scope, onClose }: HubSchedulerModalProps): R
     if (soldier === null || !soldier.trim()) return Promise.resolve()
     return act(() => hubReassign(t.id, soldier.trim()), `${t.id} 已转派给 ${soldier.trim()}`)
   }
+  const holdTask = (t: HubTask): Promise<void> => act(() => hubHold(t.id, true), `${t.id} 已拦截：守护不再自动认领/执行`)
+  const unholdTask = (t: HubTask): Promise<void> => act(() => hubHold(t.id, false), `${t.id} 已放行：恢复自动交接`)
 
   const groups = GROUP_ORDER.map(status => ({
     status,
@@ -288,7 +292,7 @@ export function HubSchedulerModal({ scope, onClose }: HubSchedulerModalProps): R
                         <span className="tt">{t.title}</span>
                       </div>
                       <div className="meta">
-                        {who(t)} · v{t.version}
+                        {t.hold ? '🖐 将军拦截 · ' : ''}{who(t)} · v{t.version}
                         {t.blockedBy.length > 0 ? ` · 依赖 ${t.blockedBy.join(',')}` : ''} · 更新 {fmt(t.updatedAt)}
                       </div>
                     </div>
@@ -300,6 +304,11 @@ export function HubSchedulerModal({ scope, onClose }: HubSchedulerModalProps): R
                         {actionsFor(t)}
                         <button className="btn mini ghost" onClick={() => void comment(t)}>💬 评论</button>
                         <button className="btn mini ghost" onClick={() => void reassign(t)}>转派</button>
+                        {t.status !== 'done' && t.status !== 'canceled' && (
+                          t.hold
+                            ? <button className="btn mini primary" onClick={() => void unholdTask(t)}>🚀 放行</button>
+                            : <button className="btn mini ghost" onClick={() => void holdTask(t)}>🖐 拦截</button>
+                        )}
                       </div>
                     </>
                   )}

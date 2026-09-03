@@ -107,11 +107,14 @@ patch 里**必须显式给** `legionDir: 'D:/project/DSH/legion'`——pnpm 对 
 ### 3.5 任务调度与验收
 - 底部「🗓 任务调度」→ 中枢调度弹窗：全部任务按状态分组 + 统计条；待验收任务默认展开（打回/通过引导）；任务行可点进详情。
 
-### 3.6 持续执行编排（侧栏「⚡」开关）
-- 按空间持久化（`POST /api/exec`）。
-- **开启后自动执行分析类阶段**（需求澄清/方案设计/任务拆分等「产出报告」角色），**写码类不自动**（coder/reviewer/tester/devops/test-designer 等会动仓库的角色）——写码类在任务详情「🤖 派 AI 执行」手动请求（`POST /api/exec/request`）。
-- 自动队列：`GET /api/exec/queue?scope=`（仅 `[auto-goal]` 链上、非写码角色、todo/in_progress 且未被请求）。**执行守护 = 将军 agent 侧**消费队列/请求：认领 → 派 AI 干活 → evidence 写回 → 提交待验收。
-- 后台表：`exec_state`（scope×enabled）、`exec_requests`（taskId×pending）。
+### 3.6 自动交接（守护全自动流水线，含写码）
+- **任何 agent 环节产生的任务自动交接给对应岗位 agent 实现**：守护（scrum-worker）每 `intervalMs` 扫单，凡「角色在流水线（roles.json 8 岗）、依赖已解除、未被将军拦截、未全局暂停」的 todo/blocked 任务，即自动认领并按该岗位派 AI 执行；上一环验收 done → 下一环自动解锁、下轮自动接管，需求→方案→拆解→用例→编码→审查→测试→部署**整链无人值守自动流转**。
+- 编码类照常自动，但始终在**隔离 worktree（分支 `w/<id>`）**干活：不 push（pre-push 守卫拦截 w/*）、验收通过才自动合回主分支——每个任务完成前都会停在 🟡 待验收等你逐条对照验收，所以"自动执行"不等于"绕过你"。
+- **将军干预（任意时刻）**：
+  - 🖐 **拦截 / 🚀 放行**（任务详情与调度台，`POST /api/hold`）：拦截后守护不再认领/执行该任务，直到放行；
+  - 🔁 **转派**：任务 soldier 与 role 一并改为目标岗位（转派给流水线外岗位则成为人工托管任务）——转派后仍由对应 agent 自动接管执行；
+  - ↩ 打回重做（附原因）· ⏸ 全局暂停（CommandBar，`control.json`）· 单角色/单空间也可用模型配置区分执行强度。
+- 「⚡ 持续执行编排」与任务详情「🤖 派 AI 执行」是另一条**执行守护（将军 agent 侧）**通道（`POST /api/exec` 开关 / `POST /api/exec/request` 派活、`GET /api/exec/queue` 仅列非写码类）；与守护自动交接互不冲突。后台表：`exec_state`、`exec_requests`。
 
 ### 3.7 模型 × 智能体配置（底部「⚙️ 模型配置」）
 - 每空间每角色可选**默认模型**（`agent_models` 表，`GET/POST /api/models`、`POST /api/models/clear`，均记审计）；未配置 = 平台默认（custom-ds / deepseek-v4-flash-openai）。

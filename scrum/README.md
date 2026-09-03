@@ -130,8 +130,10 @@ curl -X POST http://127.0.0.1:4820/api/resume -H "Authorization: Bearer <t>" -H 
 `@dsh-external/dsh-scrum-worker` 是一个 daemon-loop 形态的守护插件（经 dsh-super-injector 注入 web profile）。它每 `intervalMs` 扫一次任务库，代替人类盯板：
 
 1. **todo 任务** → `claim` 认领（互斥由状态机保证）→ 派一次性 worker subagent（携带任务完整上下文：标题/描述/**验收标准/边界(做什么·不做什么)**/评论/依赖——验收标准与边界由 team-hub 在生成任务时按岗位模板自动注入，见根 README §3.4）→ 完成 → 提交 `in_review` 并附证据评论。
-2. **被退回的 in_progress 任务**（认领后出现他人评论，通常是将军把 in_review 拖回并写了原因）→ 派纠错 worker，提示词附最新退回评论，**迭代纠错重做**。
-3. **依赖解除的 blocked 任务**（属于本角色）→ 解阻认领 → 续做。
+2. **自动交接（链）**：只认领「依赖已解除、未被将军拦截（`hold`）」的 todo/blocked 任务——链上后段在上一环 done 前保持待命不空转；上一环验收 done 后下轮自动认领接管，**全岗位（含写码）自动流转**：需求→方案→拆解→用例→编码→审查→测试→部署。编码类仍在隔离 worktree（`w/<id>`）执行、验收通过才 promote 合回，w/* 永不 push。
+3. **被退回的 in_progress 任务**（认领后出现他人评论，通常是将军把 in_review 拖回并写了原因）→ 派纠错 worker，提示词附最新退回评论，**迭代纠错重做**（`hold` 的任务不自动纠错）。
+4. **依赖解除的 blocked 任务**（属于本角色）→ 解阻认领 → 续做。
+5. **将军干预**：`POST /api/hold` 拦截/放行（拦截后守护跳过该任务）；「转派」把任务 soldier 与 role 一并改为目标岗位（转派给流水线外岗位 = 人工托管，守护不认领）；CommandBar「⏸ 全部暂停」全局停。
 
 **done 永远留给人类**：守护最多把任务交到 `in_review`；是否真正完成由你在看板上把卡片拖到 Done 决定。
 

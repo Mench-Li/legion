@@ -296,6 +296,11 @@ export function execRequest(taskId: string): Promise<unknown> {
   return hubPost('/api/exec/request', { taskId })
 }
 
+/** team-hub v2：将军逐任务拦截/放行自动交接（hold=true 时守护不得自动认领执行）。 */
+export function hubHold(taskId: string, hold: boolean): Promise<unknown> {
+  return hubPost('/api/hold', { id: taskId, hold })
+}
+
 /** team-hub v2：该空间的智能体默认模型配置。 */
 export async function fetchAgentModels(scope: string | null): Promise<AgentModelCfg[]> {
   const qs = scope ? `?scope=${encodeURIComponent(scope)}` : ''

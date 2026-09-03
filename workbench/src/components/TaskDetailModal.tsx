@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { execRequest, fetchHubActivity, fetchHubTask, hubClaim, hubComment, hubReassign, hubTransition } from '../api'
+import { execRequest, fetchHubActivity, fetchHubTask, hubClaim, hubComment, hubHold, hubReassign, hubTransition } from '../api'
 import type { HubActivity, HubTask } from '../types'
 import { toast } from './Toast'
 
@@ -22,6 +22,8 @@ const ACTION_TEXT: Record<string, string> = {
   comment: '💬 评论',
   evidence: '📦 提交证据',
   reassign: '🔁 转派',
+  hold: '🖐 拦截自动',
+  unhold: '🚀 放行',
   'release-stale': '⏳ 租约回收',
 }
 
@@ -119,6 +121,8 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
     if (soldier === null || !soldier.trim()) return Promise.resolve()
     return act(() => hubReassign(t.id, soldier.trim()), `已转派`)
   }
+  const doHold = (): Promise<void> => act(() => hubHold(t.id, true), `${t.id} 已拦截：守护不再自动认领/执行`)
+  const doUnhold = (): Promise<void> => act(() => hubHold(t.id, false), `${t.id} 已放行：恢复自动交接`)
   const doAskAI = (): Promise<void> => act(() => execRequest(t.id), `${t.id} 已请求 AI 执行——执行守护将认领并干活，过程会沉淀在下方`)
 
   return (
@@ -131,10 +135,12 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
         <div className="modal-body">
           <div className="td-title">
             <span className={`status-pill ${t.status}`}>{STATUS_PILL[t.status] ?? t.status}</span>
+            {t.hold && <span className="status-pill hold">✋ 将军拦截中</span>}
             <span className="td-title-text">{t.title}</span>
           </div>
           <div className="td-meta">
             指派：<b>{bindOf(t)}</b> · 空间：{t.scope ?? '—'} · 优先级：{t.priority} · v{t.version}
+            {t.hold ? ' · 🖐 已拦截自动交接（守护跳过本任务）' : ''}
             {t.blockedBy.length > 0 ? ` · 依赖：${t.blockedBy.join('、')}` : ''}
             <div style={{ color: 'var(--muted-2)', fontSize: 10.5, marginTop: 2 }}>
               创建 {fmt(t.createdAt)} · 更新 {fmt(t.updatedAt)}
@@ -244,6 +250,17 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
               <button className="btn" disabled={busy} onClick={() => void doAskAI()} title="请求 AI 智能体认领并执行本任务（过程与产出会沉淀到下方）">
                 🤖 派 AI 执行
               </button>
+            )}
+            {t.status !== 'done' && t.status !== 'canceled' && (
+              t.hold ? (
+                <button className="btn primary" disabled={busy} onClick={() => void doUnhold()} title="恢复自动交接：守护将按岗位认领并执行">
+                  🚀 放行
+                </button>
+              ) : (
+                <button className="btn" disabled={busy} onClick={() => void doHold()} title="将军拦截：守护不再自动认领/执行本任务，直到放行">
+                  🖐 拦截自动
+                </button>
+              )
             )}
             <button className="btn ghost" disabled={busy} onClick={() => void doComment()}>💬 评论/记录</button>
             <button className="btn ghost" disabled={busy} onClick={() => void doReassign()}>转派</button>

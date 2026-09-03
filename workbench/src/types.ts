@@ -270,6 +270,8 @@ export interface HubTask {
   acceptance: string[]
   /** 边界：做什么/不做什么（生成任务时自动带，见 team-hub/stage-standards.mjs）。 */
   boundary?: TaskBoundary
+  /** 将军逐任务拦截（hold=true 时守护不得自动认领/执行，见 POST /api/hold）。 */
+  hold?: boolean
   priority: string
   status: CardStatus
   version: number

@@ -24,6 +24,8 @@
  *   POST /api/create|claim|transition|advance|reassign|release-stale|comment|heartbeat   写操作（body 带 by + scope）
  *       —— create/目标链生成任务时**自动注入验收标准 + 边界**（做什么/不做什么，按岗位模板，
  *          stage-standards.mjs）；调用方可传自定义 acceptance/boundary 覆盖。
+ *       —— reassign 转派 = soldier 与 role 一并改为目标岗位（转派后守护仍按新 role 自动接管执行）；
+ *          POST /api/hold {id, hold} = 将军逐任务拦截（守护不得自动认领）/放行。
  *   POST /api/skills/register|review|grant         团队共享技能（scope-owned + grant）
  *   GET  /api/skills[?scope=&member=&id=]          技能查询（默认只返回 published）
  *
@@ -80,6 +82,7 @@ db.exec(`
     parent TEXT,
     role TEXT,
     scope TEXT DEFAULT 'default',
+    hold INTEGER DEFAULT 0,
     blocks TEXT DEFAULT '[]',
     blockedBy TEXT DEFAULT '[]',
     comments TEXT DEFAULT '[]',
@@ -215,6 +218,8 @@ ensureColumn('tasks', 'expiresAt', 'expiresAt TEXT')
 ensureColumn('tasks', 'claimRequestId', 'claimRequestId TEXT')
 // 边界列（做什么/不做什么 JSON：{"do":[],"dont":[]}）——任务生成必须带验收标准与边界
 ensureColumn('tasks', 'boundary', "boundary TEXT DEFAULT '[]'")
+// 拦截列（将军逐任务拦截：hold=1 时守护不自动认领/执行，见 POST /api/hold）
+ensureColumn('tasks', 'hold', 'hold INTEGER DEFAULT 0')
 // 老链回填：已生成、未完成的自动目标链任务若没有验收标准/边界，按岗位模板补种，
 // 保证"生成任务的同时必须生成验收标准与边界（做什么/不做什么）"对历史在途任务也成立。
 try {
@@ -284,6 +289,7 @@ function rowToTask(row) {
     description: row.description,
     acceptance: parseJson(row.acceptance, []),
     boundary: parseJson(row.boundary, { do: [], dont: [] }),
+    hold: row.hold === 1,
     priority: row.priority,
     status: row.status,
     version: row.version,
@@ -538,6 +544,7 @@ function claimTask(id, soldier, ifVersion, force, round, requestId, ttlMinutes) 
     }
     if (t.soldier !== null && t.soldier !== soldier) throw new Error(`任务 ${t.id} 已被 ${t.soldier} 认领，不得抢占`)
     if (t.status !== 'todo' && t.status !== 'blocked') throw new Error(`无法认领：任务 ${t.id} 当前 ${t.status}`)
+    if (t.hold) throw new Error(`任务 ${t.id} 被将军拦截（hold），先在任务详情「放行」后再自动执行`)
     assertUnblocked(t, force)
     const at = now()
     const ttl = ttlMinutes !== undefined ? ttlMinutes : t.ttlMinutes
@@ -601,15 +608,18 @@ function commentTask(id, by, text, isEvidence) {
 }
 
 // ── 转派 / 租约回收 / 离线 inbox ──
+// 转派 = 把任务交给另一岗位（role）的智能体实现：soldier 与 role 一并改为目标岗位，
+// 守护按 role 认领/派工，保证「将军转派后任务仍由对应 agent 自动接管执行」；
+// 目标 role 不在流水线内（如外部协作岗）则守护跳过，成为人工托管任务。
 function reassignTask(id, soldier, by) {
   return withTx(() => {
     const t = getTask(id)
     if (t.status === 'done' || t.status === 'canceled') throw new Error(`任务 ${id} 已 ${t.status}，不可转派`)
-    if (t.soldier === soldier) throw new Error(`任务 ${id} 已由 ${soldier} 负责，无需转派`)
+    if (t.soldier === soldier && t.role === soldier) throw new Error(`任务 ${id} 已由 ${soldier} 负责，无需转派`)
     const prev = t.soldier ?? '（未分配）'
     const comments = parseJson(t.comments, [])
-    comments.push({ by, at: now(), text: `转派：${prev} → ${soldier}（由 ${by}）` })
-    db.prepare('UPDATE tasks SET soldier=?, comments=?, version=version+1, updatedAt=? WHERE id=?').run(soldier, JSON.stringify(comments), now(), id)
+    comments.push({ by, at: now(), text: `转派：${prev} → ${soldier}（由 ${by}，岗位同步为 ${soldier}）` })
+    db.prepare('UPDATE tasks SET soldier=?, role=?, comments=?, version=version+1, updatedAt=? WHERE id=?').run(soldier, soldier, JSON.stringify(comments), now(), id)
     return getTask(id)
   })
 }
@@ -772,6 +782,22 @@ async function handle(req, res) {
         const task = reassignTask(id, soldier.trim(), by)
         audit(by, scope, 'reassign', id, { soldier: soldier.trim() })
         return task
+      })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/hold') {
+      // 将军逐任务拦截/放行：hold=true 时守护不得自动认领执行（claimTask 拒绝），
+      // 将军放行后恢复自动交接。done/canceled 不可再改。
+      await handleWrite(req, res, (body, by, scope) => {
+        const id = body.id
+        if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
+        const hold = body.hold === true
+        const t = db.prepare('SELECT status FROM tasks WHERE id = ?').get(id)
+        if (!t) throw new Error(`未知任务 ${id}`)
+        if (t.status === 'done' || t.status === 'canceled') throw new Error(`任务 ${id} 已 ${t.status}，不可拦截/放行`)
+        db.prepare('UPDATE tasks SET hold=?, version=version+1, updatedAt=? WHERE id=?').run(hold ? 1 : 0, now(), id)
+        audit(by, scope, hold ? 'hold' : 'unhold', id, {})
+        return getTask(id)
       })
       return
     }

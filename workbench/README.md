@@ -119,7 +119,7 @@ node scripts/serve.mjs --port 5173   # 独立静态服务 → http://127.0.0.1:5
   - **🤖 AI 执行过程**：执行该任务的 AI 智能体沉淀的过程记录 = evidence（`isEvidence:true` 评论）与评论的时间流——AI 的每一步行动/产出/汇报都在这里，是「任务详情看到 AI 工作过程」的落点；
   - **⏱ 进展时间线**：`GET /api/activity?taskId=`（goal:publish / claim / transition / comment / evidence / reassign / model:set / exec:*），中文可读；
   - 📋 任务描述、🎯 验收标准、🚧 边界（做什么 ✅ / 不做什么 🚫）、🔗 依赖解锁提醒；
-  - **状态操作**：todo →「▶ 开工 / 🔒 认领」；in_progress →「📮 提交验收 / 归还待办」；in_review →「✓ 验收通过(general) / ↩ 打回重做」；blocked →「解阻」；另有「💬 评论/记录」「转派」「**🤖 派 AI 执行**」（写 `POST /api/exec/request`，请求执行守护认领）。
+  - **状态操作**：todo →「▶ 开工 / 🔒 认领」；in_progress →「📮 提交验收 / 归还待办」；in_review →「✓ 验收通过(general) / ↩ 打回重做」；blocked →「解阻」；另有「💬 评论/记录」「转派」「**🤖 派 AI 执行**」（写 `POST /api/exec/request`，请求执行守护认领）与「🖐 **拦截自动 / 🚀 放行**」（`POST /api/hold`，拦截后守护不再自动认领/执行）。
   - **验收标准/边界自动生成**：发布目标建链、`POST /api/create` 建任务都会**按岗位自动注入验收标准 + 边界**（模板见 `team-hub/stage-standards.mjs`；自定义 `acceptance`/`boundary` 可覆盖；历史在途 `[auto-goal]` 任务在服务启动时自动补种）；执行 worker 的提示词与验收视图同步携带——验收按清单逐条对照，不再「凭感觉」。
 - 数据流：`GET /api/task?id=`（team-hub 单任务接口）+ `GET /api/activity?taskId=`；状态操作与调度弹窗共用 `/api/transition|claim|reassign|comment`。
 
@@ -129,12 +129,11 @@ node scripts/serve.mjs --port 5173   # 独立静态服务 → http://127.0.0.1:5
 - 清单按 **🟢 运行中（进行中/待验收/受阻）/ ⚪ 待办 / ✅ 已完成** 分组（`GET /api/board?scope=` 按 `soldier=role` + `role=role` 过滤，roster 投影数据先展示后刷新）；点任务行 → 进入任务详情。
 - 头部显示该角色**默认模型徽标**（若已配置）。
 
-## 持续执行编排（侧栏「⚡」开关）
+## 自动交接与持续执行（守护全自动流水线）
 
-- 左侧栏底部「⚡ 持续执行编排」开关（选中具体工作空间后显示）→ `POST /api/exec { scope, enabled }` 按空间持久化。
-- **语义**：开启后，**分析类阶段任务自动由 AI 智能体执行**（需求澄清/方案设计/任务拆分等「产出报告」类），过程沉淀到任务详情并自动提交待验收；**写码类阶段不自动**（coder/reviewer/tester/devops/test-designer 等会动仓库的角色），靠任务详情「🤖 派 AI 执行」按钮手动请求。
-- **执行队列**：`GET /api/exec/queue?scope=` 返回自动队列（仅 `[auto-goal]` 链上、非写码角色、todo/in_progress 且未被请求的任务）；`GET /api/exec/requests` 是用户手动派活请求。**执行守护**（将军 agent 侧）消费队列/请求：认领 → 派 AI 按角色干活 → evidence 写回 → 提交验收。
-- 后台表：`exec_state`（scope×enabled）、`exec_requests`（taskId×pending）。
+- **自动交接是默认行为（含写码）**：守护（scrum-worker）扫单后自动认领「依赖已解、未被拦截」的流水线任务并按岗位派 AI 执行；上一环验收 done 自动解锁下一环——需求→方案→拆解→用例→编码→审查→测试→部署整链无人值守流转。编码在隔离 worktree（`w/<id>`，pre-push 拦 push）进行，验收通过才合回主分支；每个任务停在 🟡 待验收等你对照 🎯 验收标准 + 📦 证据验收。
+- **将军干预**：任务详情 / 调度台新增「🖐 拦截自动 / 🚀 放行」（`POST /api/hold {id, hold}`：拦截后守护不再认领/执行，直到放行）；「转派」同步 soldier 与 role 到目标岗位（流水线外岗位 = 人工托管）；↩ 打回重做附原因；CommandBar「⏸ 全部暂停」随时停。
+- 侧栏「⚡ 持续执行编排」与「🤖 派 AI 执行」是另一条**执行守护（将军 agent 侧）**通道：`POST /api/exec` 开关按空间持久化；`GET /api/exec/queue?scope=` 列自动队列（`[auto-goal]` 链、非写码角色）；`POST /api/exec/request` 手动派活；`GET /api/exec/requests` 待消费请求。后台表：`exec_state`、`exec_requests`。
 
 ## 模型 × 智能体配置（底部「⚙️ 模型配置」）
 

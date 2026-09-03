@@ -112,6 +112,8 @@ interface Task {
   claimedAt: string | null
   parent: string | null
   role: string | null
+  /** 将军逐任务拦截（hold=true 时本守护不得自动认领/执行）。 */
+  hold?: boolean
   blockedBy: string[]
   comments: Array<{ by: string; at: string; text: string }>
 }
@@ -1205,9 +1207,9 @@ exit 0
           .finally(() => inflight.delete(taskId))
       }
 
-      // 离线 inbox 计数：本守护名下待认领（todo/blocked 未认领）任务，每轮汇报一次
+      // 离线 inbox 计数：本守护名下待认领（todo/blocked 未认领）任务，每轮汇报一次（将军拦截的除外）
       const isOurInbox = (t: Task) => (isPipeline ? (t.role !== null && stageByRole.has(t.role)) : true)
-      const inboxIds = tasks.filter(t => (t.status === 'todo' || t.status === 'blocked') && (t.soldier === null || t.soldier === undefined) && isOurInbox(t))
+      const inboxIds = tasks.filter(t => (t.status === 'todo' || t.status === 'blocked') && (t.soldier === null || t.soldier === undefined) && !t.hold && isOurInbox(t))
       if (inboxIds.length > 0) log(`inbox=${inboxIds.length}（${inboxIds.map(t => t.id).join(', ')}）`)
 
       // 0. 认领租约回收：释放超过 staleMinutes 无进展（距最近 progress 起算）或过 TTL 的 in_progress 任务。
@@ -1221,22 +1223,29 @@ exit 0
         log(`release-stale 失败：${String(e)}`)
       }
 
-      // 1. todo：认领（互斥）→ 派工（流水线模式按任务角色；讨论任务走群聊）
+      // 依赖未解除（链上后段在上一环 done 前保持待命，不空转抢认领）
+      const openDeps = (t: Task): boolean =>
+        (t.blockedBy ?? []).some(depId => {
+          const dep = byId.get(depId)
+          return dep === undefined || (dep.status !== 'done' && dep.status !== 'canceled')
+        })
+
+      // 1. todo：认领（互斥）→ 派工（流水线模式按任务角色；讨论任务走群聊）。
+      //    自动交接纪律：被将军拦截（hold）的任务不认领；依赖未解除的任务待上一环 done 后由下轮认领。
       for (const t of tasks.filter(t => t.status === 'todo')) {
         if (!room() || inflight.has(t.id)) continue
         if (isPipeline && stageOf(t) === undefined && t.role !== 'discussion') continue // 流水线模式跳过无角色/未知角色任务
+        if (t.hold) continue // 将军拦截：等放行
+        if (openDeps(t)) continue // 链上后段：上一环 done 后自动交接
         inflight.add(t.id)
         const job = t.role === 'discussion' ? runDiscussion(t) : workTodo(t, stageOf(t))
         runDetached(t.id, job)
       }
-      // 2. blocked 且本角色、依赖已全部解除：解阻续做
+      // 2. blocked 且本角色、依赖已全部解除：解阻续做（同样遵守拦截）
       for (const t of tasks.filter(t => t.status === 'blocked' && isOurs(t))) {
         if (!room() || inflight.has(t.id)) continue
-        const open = t.blockedBy.filter(depId => {
-          const dep = byId.get(depId)
-          return dep === undefined || (dep.status !== 'done' && dep.status !== 'canceled')
-        })
-        if (open.length > 0) continue
+        if (t.hold) continue
+        if (openDeps(t)) continue
         inflight.add(t.id)
         runDetached(t.id, workTodo(t, stageOf(t)))
       }
@@ -1245,6 +1254,7 @@ exit 0
       //    导致中止的 worker 只能等 stale 释放），带 ≥4 个扫单周期的退避，避免故障期间热循环
       for (const t of tasks.filter(t => t.status === 'in_progress' && isOurs(t))) {
         if (!room() || inflight.has(t.id)) continue
+        if (t.hold) continue // 将军拦截进行中任务：不自动纠错续跑
         const since = t.claimedAt === null ? 0 : new Date(t.claimedAt).getTime()
         const feedback = t.comments.filter(c => new Date(c.at).getTime() > since && c.by !== self(t))
         const abortDriven = feedback.length === 0 && t.comments.some(c =>

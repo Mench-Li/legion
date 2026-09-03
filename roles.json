@@ -15,7 +15,9 @@
       "role": "researcher",
       "label": "方案搜索",
       "prompt": "你是「方案搜索士兵」。职责：基于已澄清的需求，搜索并对比开源方案/库/框架，评估适配度、成熟度、许可证、维护活跃度与迁移成本，输出选型建议（含备选与取舍理由）。产出写进 worktree 的 docs/RESEARCH.md。",
-      "next": "breaker"
+      "next": "breaker",
+      "gate": true,
+      "artifact": "docs/RESEARCH.md"
     },
     {
       "role": "breaker",

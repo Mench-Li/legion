@@ -125,6 +125,10 @@ interface StageDef {
   label: string
   prompt: string
   next: string | null
+  /** 人工闸门：完成并合入后停在 in_review，等将军验收 done 才流转下一角色（如方案搜索）。 */
+  gate?: boolean
+  /** 该阶段要求交付到 worktree 的产物文档（相对仓库根），闸门验收前必须存在。 */
+  artifact?: string
 }
 
 /** 需求讨论配置：哪些角色参与群聊 + 最多讨论几轮。 */
@@ -928,6 +932,24 @@ exit 0
           await transitionTo(t.id, 'in_review')
           activity('blocked', t.id, `${stage.label}完成但自动合入失败，转 in_review 等待人工合入`)
           log(`${t.id} → in_review（中间阶段自动合入失败，等待人工处理）`)
+          return
+        }
+        if (stage.gate) {
+          // 人工闸门阶段（如方案搜索）：方案文档必须明确存在，且等将军验收 done 后才流转下一角色。
+          // 将军验收通过（in_review → done）后，下一环（blockedBy 本任务）由守护下轮自动认领；打回则附原因自动纠错重做。
+          const gateNext = stageByRole.get(stage.next ?? '')
+          const docOk = stage.artifact === undefined || worktreeDir === null || existsSync(join(worktreeDir, stage.artifact))
+          if (!docOk) {
+            await safeComment(t.id, `⚠ ${stage.label}完成，但未找到要求交付的方案文档 ${stage.artifact}（应写入 worktree）。已停在 in_review，请人工检查：产出不完整可 ↩ 打回并说明，士兵会补全后重新提交。`)
+            await transitionTo(t.id, 'in_review')
+            activity('blocked', t.id, `${stage.label}完成但缺少产物文档 ${stage.artifact}，转 in_review`)
+            log(`${t.id} → in_review（缺少 ${stage.artifact}）`)
+            return
+          }
+          await transitionTo(t.id, 'in_review')
+          await safeComment(t.id, `✅ ${stage.label}完成，方案文档 ${stage.artifact ?? `分支 w/${t.id}`} 已合入主分支。**请将军人工验收**：通过 → 任务详情「✓ 验收通过」，守护自动流转到「${gateNext?.label ?? stage.next}（${stage.next}）」；不通过 → ↩ 打回并附原因，士兵按反馈修订重做。\n要点：${report.summary}\n证据：${report.evidence}`)
+          activity('gate', t.id, `${stage.label}完成，待将军人工验收（闸门）`)
+          log(`${t.id} → in_review（${stage.label} 人工闸门，待将军验收）`)
           return
         }
         await advanceTo(t.id, stage.role)

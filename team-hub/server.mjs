@@ -567,7 +567,8 @@ function transitionTask(id, to, by, ifVersion, force) {
     if (to === 'in_progress') {
       if (t.soldier !== null && t.soldier !== by) throw new Error(`任务 ${t.id} 已绑定 ${t.soldier}，不能由 ${by} 开工`)
       assertUnblocked(t, force)
-      if (by) db.prepare('UPDATE tasks SET soldier=? WHERE id=?').run(by, id)
+      // 开工/认领统一记 claimedAt：避免「in_progress 但无认领时间」的孤儿任务无法被租约回收
+      if (by) db.prepare('UPDATE tasks SET soldier=?, claimedAt=?, claimedRound=NULL WHERE id=?').run(by, now(), id)
     }
     if (to === 'done') {
       if (t.status !== 'in_review') throw new Error('只有 in_review 可完成；先迁移到 in_review')
@@ -624,18 +625,22 @@ function reassignTask(id, soldier, by) {
   })
 }
 
-/** 守护批量回收：认领超过 olderThan 分钟无进展、或已过 expiresAt 的 in_progress 任务释放回 todo。 */
+/** 守护批量回收：认领超过 olderThan 分钟无进展、或已过 expiresAt 的 in_progress 任务释放回 todo。
+ *  claimedAt 为空的历史孤儿（旧「开工」未记认领时间）按 updatedAt 起算，避免永久卡死。 */
 function releaseStaleTasks(olderThanMinutes, by) {
   return withTx(() => {
     const cutoff = Date.now() - olderThanMinutes * 60_000
     const nowMs = Date.now()
-    const rows = db.prepare("SELECT id, claimedAt, expiresAt FROM tasks WHERE status='in_progress' AND claimedAt IS NOT NULL").all()
+    const rows = db.prepare("SELECT id, claimedAt, expiresAt, updatedAt FROM tasks WHERE status='in_progress'").all()
     const released = []
     for (const r of rows) {
-      const staleByAge = new Date(r.claimedAt).getTime() <= cutoff
+      const base = r.claimedAt !== null && r.claimedAt !== undefined ? new Date(r.claimedAt).getTime() : new Date(r.updatedAt ?? '').getTime()
+      const staleByAge = !Number.isNaN(base) && base <= cutoff
       const staleByTtl = r.expiresAt !== null && r.expiresAt !== undefined && new Date(r.expiresAt).getTime() <= nowMs
       if (!staleByAge && !staleByTtl) continue
-      const reason = staleByTtl ? `守护检测到任务已过 TTL（expiresAt=${r.expiresAt}），自动释放回 todo` : `守护检测到认领超过 ${olderThanMinutes} 分钟无进展，自动释放回 todo`
+      const reason = staleByTtl
+        ? `守护检测到任务已过 TTL（expiresAt=${r.expiresAt}），自动释放回 todo`
+        : `守护检测到认领超过 ${olderThanMinutes} 分钟无进展，自动释放回 todo`
       const t = getTask(r.id)
       const comments = parseJson(t.comments, [])
       comments.push({ by, at: now(), text: reason })

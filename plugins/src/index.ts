@@ -771,12 +771,13 @@ exit 0
     const nextStage = stageByRole.get(stage.next)
     if (!nextStage) return
     const all = await listTasks()
-    // 后继已存在则跳过：advance 补建的任务以 parent 链识别，createGoalChain 预建的全链任务以
-    // 「同 scope 同 role 且 blockedBy 含已完成任务」识别（parent 为空）——两者任一存在即不重复建。
-    const isOpen = (s?: string) => !!s && s !== 'done' && s !== 'canceled'
+    // 后继已存在则跳过：advance 补建的任务以 parent 链识别（任意状态，含 canceled——避免将军
+    // 废弃补建任务后每轮重建的拉锯）；createGoalChain 预建的全链任务以「同 scope 同 role 且
+    // blockedBy 含已完成任务」识别（parent 为空，done 也算存在，仅 canceled 不算——真被砍掉才允许补建）。
     const hasSuccessor = all.some(t =>
-      t.scope === scope && t.role === nextStage.role && isOpen(t.status) &&
-      (t.parent === doneTask.id || (Array.isArray(t.blockedBy) && t.blockedBy.includes(doneTask.id))),
+      t.scope === scope && t.role === nextStage.role &&
+      (t.parent === doneTask.id ||
+        (t.status !== 'canceled' && Array.isArray(t.blockedBy) && t.blockedBy.includes(doneTask.id))),
     )
     if (hasSuccessor) return
     const doneSummary = doneTask.comments

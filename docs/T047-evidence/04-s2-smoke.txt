@@ -1,0 +1,16 @@
+命令：node workbench/scripts/chat-s2-smoke.mjs
+（真实起 team-hub server.mjs + workbench scripts/serve.mjs 双服务；客户端全部经 serve.mjs 的 /hub 同源代理 =
+ 浏览器 ChatView 的 hubBase() 默认路径；GUI 渲染项另见 README.md L2 清单）
+
+PASS | S2-A GET / → 200 + html（:5173 产物入口） | status=200
+PASS | S2-B GET /hub/api/config → 200（单一 /hub 源代理） | status=200
+PASS | S2-C 空库会话列表 = []（空态可建）
+PASS | S2-D POST 会话 → 200 ok:true task{id,title,kind,last_message_at:null} | conv=1
+PASS | S2-E 连发 60 条全部 200 且 id 严格升序 + 会话 last_message_at 更新 | min=1 max=60
+PASS | S2-F 分页 50+10 无重无漏、页内升序、页间连续（=ChatView 加载更早的数据面） | p1=50 p2=10
+PASS | S2-G scope 隔离：software/ops 列表各自独立互不含对方（TC-S2-05 数据面）
+PASS | S2-H 双订阅 ≤5s 收到同一 live chat:message（≤15s 实时收发的数据面等价） | msg=61
+PASS | S2-H2 事件 action 前缀 chat:（前端 filter chat:* 依据；hub 事件源仅此一个）
+
+S2 L1 冒烟汇总：9/9 断言通过
+smoke exit: 0

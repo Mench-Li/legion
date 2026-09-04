@@ -1,0 +1,15 @@
+命令：pnpm build（workbench，= tsc --noEmit && vite build）
+
+$ tsc --noEmit && vite build
+failed to load config from D:\project\DSH\legion\.legion-worktrees\T-047\workbench\vite.config.ts
+error during build:
+Error: spawn EPERM
+    at ChildProcess.spawn (node:internal/child_process:458:11)
+    at ensureServiceIsRunning (...esbuild@0.28.2.../esbuild/lib/main.js:2272:29)
+    ...
+[ELIFECYCLE] Command failed with exit code 1.
+
+要点：tsc --noEmit 环节通过（进入 vite build）；vite/esbuild 启动 Go 子服务（stdio pipe）被本沙箱拦截（spawn EPERM）——
+与 T-042 沙箱记录（TEST_REPORT.md §6.1）同因。tsc strict 零错误 + 全部 L1/L0 测试绿 + 改动仅纯前端 TS/TSX
+（无新依赖、无 import 路径变更风险），vite 打包环节需在宿主/将军环境执行（基线 2bd55a1 在 T-040/T-041/T-046
+环境曾 615 modules 全绿）。本会话无提权（approval 禁用），按纪律不绕过、如实记录。

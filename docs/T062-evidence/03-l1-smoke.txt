@@ -1,0 +1,25 @@
+=== T-062 L1 真实进程冒烟（serve.mjs --port 4843 --token tk，DSH_WORKBENCH_SPACES_JSON 注入临时空间）===
+
+-- TC-S4-13 鉴权矩阵 --
+无 token 写(upload)                -> HTTP=401  {"error":"未授权：Bearer token 无效"}
+错 token 写(upload)                -> HTTP=401
+对 token 写(upload, Bearer tk)     -> HTTP=200
+无 token 读(list)                  -> HTTP=200
+说明：写鉴权仅接受 Authorization: Bearer <token>（serve.mjs requireWriteToken）；x-dsh-token / ?token= 传送方式不被本实现支持（契约即为 Bearer-only，非缺陷）。
+
+-- S4 写契约 --
+mkdir 多层 a/b/c                 -> HTTP=200
+mkdir 已存在 a                    -> HTTP=400  {"error":"目录已存在"}
+mkdir 与文件同名 new.txt          -> HTTP=400  {"error":"目录已存在"}
+rename new.txt -> renamed.txt     -> HTTP=200
+rename 到已存在 README.md         -> HTTP=409  {"error":"目标已存在，不能覆盖（409 语义）"}
+delete 无 confirm                 -> HTTP=400  {"error":"删除需要二次确认：请带 confirm=yes"}
+delete confirm=yes (del.txt)      -> HTTP=200
+delete 非空目录 (nonempty)        -> HTTP=400  {"error":"非空目录拒绝删除：请先清空目录内容"}
+delete 空目录 (empty)             -> HTTP=200
+删除后 read del.txt               -> HTTP=400（已不存在）
+
+-- S4 写路径逃逸（TC-S4-14 抽样）--
+upload path=../out.txt          -> HTTP=403  {"error":"路径越界：禁止访问目录根之外"}
+upload path=C:/abs.txt           -> HTTP=400
+upload path=a%00.txt (NUL)       -> HTTP=400

@@ -29,6 +29,8 @@
  *          POST /api/hold {id, hold} = 将军逐任务拦截（守护不得自动认领）/放行。
  *   POST /api/skills/register|review|grant         团队共享技能（scope-owned + grant）
  *   GET/POST /api/chat/conversations|messages       对话中心（会话/消息；scope 分区；写 by 必填 + audit/SSE，见 S1）
+ *   GET/POST /api/calendar/events                 日程日历事件（scope 过滤 + 日期窗 [from,to] 闭区间；写 by 必填 + audit/SSE，见 S5）
+ *   POST /api/calendar/events/delete              删除日程事件（id + confirm=yes + scope 归属校验；audit calendar:delete）
  *   GET  /api/skills[?scope=&member=&id=]          技能查询（默认只返回 published）
  *
  * 状态机 + 乐观锁 + 角色纪律与 taskctl.mjs 一致；scope 是任务分区的一等字段。
@@ -242,6 +244,23 @@ db.exec(`
 `)
 db.exec('CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages (conv_id, id)')
 db.exec('CREATE INDEX IF NOT EXISTS idx_conversations_scope ON conversations (scope, updatedAt)')
+// ── 日程日历（calendar）：单表事件存储（R-B1 数据面；G-1 默认单库，scope 分区 + by 写纪律与 chat/tasks 同构）──
+// 老库自动建表（CREATE TABLE IF NOT EXISTS 幂等，S5 验收 1：旧库无 calendar_events 时 import 自动补建，零迁移脚本）。
+// 事件带 start/end（ISO 时间串，end 可空）+ all_day（全天标记）+ meta JSON；日期窗过滤按 start 的 YYYY-MM-DD 前缀（闭区间）。
+db.exec(`
+  CREATE TABLE IF NOT EXISTS calendar_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope TEXT NOT NULL DEFAULT 'default',
+    title TEXT NOT NULL,
+    start TEXT NOT NULL,
+    end TEXT,
+    all_day INTEGER NOT NULL DEFAULT 0,
+    meta TEXT DEFAULT '{}',
+    createdAt TEXT,
+    updatedAt TEXT
+  )
+`)
+db.exec('CREATE INDEX IF NOT EXISTS idx_calendar_scope_start ON calendar_events (scope, start, id)')
 // 老库迁移：skills 表先于 status/contentHash/reviewedAt 三列存在，缺列补上。
 function ensureColumn(table, column, ddl) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all()
@@ -621,6 +640,123 @@ export function listMessages({ conv, limit = 50, before } = {}) {
   const rows = db.prepare(`SELECT * FROM messages WHERE ${conds.join(' AND ')} ORDER BY id DESC LIMIT ?`).all(...params, n)
   rows.reverse()
   return rows.map(msgToObj)
+}
+
+// ── 日程日历（calendar）DAO：事件 CRUD + 日期窗（R-B1 数据面，S5；scope 分区 + 统一写纪律）──
+// 写纪律（同 chat I-3）：createCalendarEvent / deleteCalendarEvent 内部一律 audit()（by 必填 + SSE 广播），
+// 机制复用 audit() 与 /api/events 单一事件流（I-8）；author/member 恒等于 by（防冒名）。
+export const MAX_CALENDAR_TITLE = 100 // 事件标题长度上限（⚖️ 三值法断言的常量，见 TEST_CASES §3）
+
+// 时间入参解析：接受 YYYY-MM-DD（date-only，全天事件）或 YYYY-MM-DDTHH:mm[:ss][Z]；
+// 逐分量范围校验 + Date.UTC 回环校验（拒 2026-13-99 / 2026-02-30 / garbage 等）；
+// 返回 { raw（规范化原样存储）, date（YYYY-MM-DD 日期前缀，窗过滤用）, key（UTC 毫秒，end>=start 排序比较用）}。
+export function parseCalendarTime(raw, label = '时间') {
+  if (raw === undefined || raw === null) throw new Error(`缺少参数 ${label}`)
+  if (typeof raw !== 'string' || raw.trim().length === 0) throw new Error(`${label} 必须是合法时间字符串`)
+  const v = raw.trim()
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2}))?Z?)?$/.exec(v)
+  if (!m) throw new Error(`${label} 非法（须为 YYYY-MM-DD 或 YYYY-MM-DDTHH:mm[:ss]，实际：${v.slice(0, 40)}）`)
+  const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3])
+  const hh = m[4] === undefined ? 0 : Number(m[4])
+  const mi = m[5] === undefined ? 0 : Number(m[5])
+  const ss = m[6] === undefined ? 0 : Number(m[6])
+  if (mo < 1 || mo > 12) throw new Error(`${label} 非法：月份 ${mo} 超出 1-12`)
+  if (d < 1 || d > 31) throw new Error(`${label} 非法：日期 ${d} 超出 1-31`)
+  if (hh > 23) throw new Error(`${label} 非法：小时 ${hh} 超出 0-23`)
+  if (mi > 59) throw new Error(`${label} 非法：分钟 ${mi} 超出 0-59`)
+  if (ss > 59) throw new Error(`${label} 非法：秒 ${ss} 超出 0-59`)
+  const dt = new Date(Date.UTC(y, mo - 1, d, hh, mi, ss))
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) throw new Error(`${label} 非法：日期不存在（${m[1]}-${m[2]}-${m[3]}）`)
+  return { raw: v, date: `${m[1]}-${m[2]}-${m[3]}`, key: dt.getTime() }
+}
+
+function eventToObj(row) {
+  return {
+    id: row.id,
+    scope: row.scope,
+    title: row.title,
+    start: row.start,
+    end: row.end ?? null,
+    allDay: row.all_day === 1,
+    meta: parseJson(row.meta, {}),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  }
+}
+
+export function getCalendarEvent(id) {
+  const num = Number(id)
+  const row = Number.isInteger(num) && num > 0 ? db.prepare('SELECT * FROM calendar_events WHERE id = ?').get(num) : undefined
+  if (!row) throw new Error(`事件不存在：${id}`)
+  return eventToObj(row)
+}
+
+/** 创建事件（by + scope 必填 + 审计/SSE）；start 必填可解析、end 可选须 ≥ start、title ≤ MAX_CALENDAR_TITLE。 */
+export function createCalendarEvent(input) {
+  const by = input?.by
+  if (typeof by !== 'string' || by.trim().length === 0) throw new Error('缺少操作者身份 by')
+  const scope = input?.scope
+  if (typeof scope !== 'string' || scope.trim().length === 0) throw new Error('缺少参数 scope（日程事件须归属明确的工作空间）')
+  const title = input?.title
+  if (typeof title !== 'string' || title.trim().length === 0) throw new Error('缺少参数 title')
+  if (title.trim().length > MAX_CALENDAR_TITLE) throw new Error(`标题过长（上限 ${MAX_CALENDAR_TITLE} 字符）`)
+  const start = parseCalendarTime(input?.start, 'start')
+  const endRaw = input?.end
+  let end = null
+  if (endRaw !== undefined && endRaw !== null && String(endRaw).trim() !== '') {
+    end = parseCalendarTime(endRaw, 'end')
+    if (end.key < start.key) throw new Error('end 必须 ≥ start（事件结束不得早于开始）')
+  }
+  const allDay = input?.allDay === true
+  const meta = input?.meta !== null && typeof input?.meta === 'object' && !Array.isArray(input.meta) ? input.meta : {}
+  return withTx(() => {
+    const t = now()
+    const r = db.prepare('INSERT INTO calendar_events (scope, title, start, end, all_day, meta, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(scope.trim(), title.trim(), start.raw, end ? end.raw : null, allDay ? 1 : 0, JSON.stringify(meta), t, t)
+    const ev = getCalendarEvent(Number(r.lastInsertRowid))
+    audit(by, ev.scope, 'calendar:create', null, { event: ev.id, title: ev.title, start: ev.start, end: ev.end, allDay: ev.allDay })
+    return ev
+  })
+}
+
+/**
+ * 事件列表：scope 过滤（缺省 = 全部，与 chat listConversations 同构）+ 日期窗 [from,to]（闭区间，
+ * 按 start 的 YYYY-MM-DD 日期前缀比较，全天 date-only 事件同口径，R-16）；排序 start asc、id asc（稳定）。
+ */
+export function listCalendarEvents({ scope, from, to } = {}) {
+  const conds = []
+  const params = []
+  if (typeof scope === 'string' && scope.trim().length > 0) { conds.push('scope = ?'); params.push(scope.trim()) }
+  let f, t
+  if (from !== undefined && from !== null && String(from).trim() !== '') {
+    f = parseCalendarTime(String(from), 'from')
+    conds.push('substr(start, 1, 10) >= ?'); params.push(f.date)
+  }
+  if (to !== undefined && to !== null && String(to).trim() !== '') {
+    t = parseCalendarTime(String(to), 'to')
+    conds.push('substr(start, 1, 10) <= ?'); params.push(t.date)
+  }
+  if (f && t && f.date > t.date) throw new Error('日期窗非法：from 不得晚于 to')
+  const sql = `SELECT * FROM calendar_events${conds.length ? ' WHERE ' + conds.join(' AND ') : ''} ORDER BY start ASC, id ASC`
+  return db.prepare(sql).all(...params).map(eventToObj)
+}
+
+/** 删除事件：二次确认 confirm=yes + scope 归属校验（越权不可删他人空间事件）+ 审计 calendar:delete。 */
+export function deleteCalendarEvent(input) {
+  const by = input?.by
+  if (typeof by !== 'string' || by.trim().length === 0) throw new Error('缺少操作者身份 by')
+  const scope = input?.scope
+  if (typeof scope !== 'string' || scope.trim().length === 0) throw new Error('缺少参数 scope（删除须指明事件所属空间）')
+  const id = Number(input?.id)
+  if (!Number.isInteger(id) || id <= 0) throw new Error('缺少参数 id')
+  if (input?.confirm !== 'yes') throw new Error('缺少二次确认：confirm 必须为 yes')
+  return withTx(() => {
+    const ev = getCalendarEvent(id)
+    if (ev.scope !== scope.trim()) throw new Error(`越权：事件 ${id} 属于 scope=${ev.scope}，不能用 scope=${scope.trim()} 删除`)
+    db.prepare('DELETE FROM calendar_events WHERE id = ?').run(id)
+    audit(by, ev.scope, 'calendar:delete', null, { event: id, title: ev.title })
+    return { deleted: true, event: ev.id, scope: ev.scope, title: ev.title }
+  })
 }
 
 // ── 写操作 ──
@@ -1665,6 +1801,27 @@ async function handle(req, res) {
       return
     }
 
+    // ── 日程日历（calendar）：事件 REST（scope 必填写纪律 + audit/SSE；写走 handleWrite，见 S5/R-B1 数据面）──
+    if (req.method === 'GET' && path === '/api/calendar/events') {
+      try {
+        const scopeParam = url.searchParams.get('scope') ?? undefined
+        const from = url.searchParams.get('from') ?? undefined
+        const to = url.searchParams.get('to') ?? undefined
+        json(res, 200, { scope: scopeParam ?? null, events: listCalendarEvents({ scope: scopeParam, from, to }) })
+      } catch (e) {
+        json(res, 400, { error: e instanceof Error ? e.message : String(e) })
+      }
+      return
+    }
+    if (req.method === 'POST' && path === '/api/calendar/events') {
+      await handleWrite(req, res, (body, by) => createCalendarEvent({ ...body, by }))
+      return
+    }
+    if (req.method === 'POST' && path === '/api/calendar/events/delete') {
+      await handleWrite(req, res, (body, by) => deleteCalendarEvent({ ...body, by }))
+      return
+    }
+
     // ── 工作空间 + 编队管理 ──
     if (req.method === 'POST' && path === '/api/spaces') {
       // 注册/更新工作空间（幂等 upsert：id + name 必填）。除 private 外支持仓库绑定：
@@ -1841,4 +1998,4 @@ if (isMain) {
   })
 }
 
-export { db, registerSkill, reviewSkill, listSkills, grantSkill, getSkill }
+export { db, server, registerSkill, reviewSkill, listSkills, grantSkill, getSkill }

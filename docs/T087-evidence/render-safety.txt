@@ -1,0 +1,5 @@
+CalendarView.tsx 中 dangerouslySetInnerHTML：
+- 源码 grep：1 处命中 —— 第 13 行注释「…无 dangerouslySetInnerHTML。」（自述说明，非 JSX 属性）
+- JSX 属性使用（dangerouslySetInnerHTML\s*=）：0
+事件标题/时间渲染均为 React 文本节点（{ev.title} / {fmtStart(...)}），删除确认文案同为文本节点。
+对照：ChatView.tsx / FilesView.tsx 中命中均为同类注释，src 全量无任何 JSX 属性式使用。

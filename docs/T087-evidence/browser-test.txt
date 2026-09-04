@@ -1,0 +1,15 @@
+stub + app up
+app boot ok (hubMode 生效，空间列表可见)
+PASS S6-未选空间引导 | 📅 请先选择具体工作空间…
+PASS S6-月网格/今天高亮/标签 | {"wd":7,"wdTexts":["一","二","三","四","五","六","日"],"cells":35,"curCells":30,"todayDate":"5","hasTodayCell":true,"label":"2026年9月"}
+PASS S6-新建全天条目入网格 | 日程已创建（全天）
+PASS S6-新建带时间条目入网格 | date=2026-09-05 10:30
+PASS S6-跨月切换/回到当月 | 上月=2026年8月 当月条目恢复=true
+PASS S6-刷新持久(数据来自 GET) | ["验收评审会","技术方案评审"]
+PASS S6-删除二次确认（取消无删除/确认后消失） | 取消后仍在=true 另一条仍在=true
+PASS S6-空间切换互不串 | marketing初始=[] marketing建后=["市场发布会"] software切回=["技术方案评审"]
+PASS S6-hub不可达toast/恢复重试成功 | errToast=1 gridAlive=true
+===== SUMMARY ===== passed=9/9
+
+驱动方式：headless Chrome (--headless=new) + CDP(Runtime.evaluate) 驱动真实构建产物（:5273），
+hub = 临时 stub（按 TC-S5 契约，进程外 JSON 持久化）；Page.reload / 点击 / 表单输入 / toast 断言均为真实浏览器行为。

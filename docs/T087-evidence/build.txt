@@ -1,0 +1,9 @@
+$ node node_modules/vite/bin/vite.js build   # cwd: workbench
+vite v7.3.6 building client environment for production...
+✓ 616 modules transformed.
+dist/index.html                  0.44 kB │ gzip:  0.32 kB
+dist/assets/index-D_4dCPIl.css  36.82 kB │ gzip:  7.46 kB
+dist/assets/index-DERLQf3P.js  332.25 kB │ gzip: 101.01 kB
+dist/assets/Scene3D-BDKVq8Pe.js 923.50 kB │ gzip: 250.02 kB   (既有大 chunk 警告，与本切片无关)
+✓ built in 8.06s
+exit 0

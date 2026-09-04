@@ -31,6 +31,7 @@ import { SkillsPanel } from './components/SkillsPanel'
 import { ChatView } from './components/ChatView'
 import { FilesView } from './components/FilesView'
 import { BrowserView } from './components/BrowserView'
+import { CalendarView } from './components/CalendarView'
 import { NewSpaceModal } from './components/NewSpaceModal'
 import { SpaceSettingsModal } from './components/SpaceSettingsModal'
 import { ToastHost, toast } from './components/Toast'
@@ -354,6 +355,8 @@ export default function App(): React.JSX.Element {
             <FilesView scope={scope} hubMode={hubMode} spaces={hubSpaces} onOpenSettings={s => setSpaceSettings(s)} />
           ) : active === 'browser' ? (
             <BrowserView />
+          ) : active === 'calendar' ? (
+            <CalendarView scope={scope} hubMode={hubMode} />
           ) : (
             <CenterPanel board={board} labels={labels} active={active} rosterAgents={hubMode ? roster : null} scope={scope} spaces={hubSpaces} goalInfo={hubMode ? goalInfo : null} hubActive={hubMode} />
           )

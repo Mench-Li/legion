@@ -1,0 +1,53 @@
+{
+  "task": "T-046",
+  "role": "coder",
+  "slice": "S3 serve.mjs 扩 /api/files list/read/download（仅回环 + 路径防护）",
+  "base": "w/T-046 @ f5975ac（promote T-042，主线上 S3 实现已存在——本任务按 T-042/T-041 验收结论补齐 S3 下载端点缺陷 P0-2 并全量复验）",
+  "environment": {
+    "node": "v24.19.0",
+    "os": "Windows 沙箱",
+    "network": "禁网（零下载）",
+    "typecheckBuildDeps": "借用主 checkout workbench/node_modules（junction，REVIEW.md §0 同法）"
+  },
+  "changedFiles": [
+    "workbench/scripts/serve.mjs（+30/−4）：GET /api/files/download 路由改流式下载（openDownloadStream → createReadStream.pipe + Content-Length + stream error/客户端断连清理），修复 P0-2「整文件同步读入内存阻塞事件循环」；readFileBytes 注释改为真实语义（仅契约测试小文件载体）",
+    "workbench/scripts/files-api.test.mjs（+20）：新增 TC-S3-08b——openDownloadStream 字节一致/Content-Length/目录/.git/越界/symlink 同强度拒绝"
+  ],
+  "acceptance": [
+    {
+      "item": "① files-api.test.mjs 越界/回环用例全绿",
+      "cmd": "node --test workbench/scripts/files-api.test.mjs",
+      "result": "tests 22 / suites 9 / pass 22 / fail 0（原 21 + 新增 TC-S3-08b）。越界矩阵（../、..\\、a/../../、绝对路径、盘符 C:/ 与 c:\\、NUL、docs/../、link-out 根外 symlink、.git/config 内部）list/read/download/upload/mkdir/rename/delete 全拒；仅回环 isLoopback 假 socket 两态用例绿；link-in（根内 junction）放行"
+    },
+    {
+      "item": "② 实现满足验收标准与用例",
+      "result": "list/read/download 三端点（目录根 = scope 绑定 local_dir、未绑定可理解错误、read 截断+行数+二进制不可预览、download 原始字节+Content-Type/Disposition、仅回环 isLoopback 首行 403）在 serve.mjs 就位并逐条复验；本任务额外修复评审/测试判定的 P0-2 下载端点缺陷（数据与注释相反），改动仅 S3 文件域"
+    },
+    {
+      "item": "③ 真实跑过 typecheck/build/测试（命令+输出要点见下）",
+      "result": "tsc 0 错误；vite build 615 modules 成功（15.44s）；files-api 22/22、web 回归 10/10"
+    },
+    {
+      "item": "④ 改动仅在任务范围内；新引入依赖说明",
+      "result": "diff = 仅 workbench/scripts/serve.mjs + files-api.test.mjs（+46/−4）；零新增依赖（node 内置）；node_modules 为 junction 复用，未下载"
+    }
+  ],
+  "commands": [
+    "node --test workbench/scripts/files-api.test.mjs        → tests 22 pass 22 fail 0",
+    "node --test workbench/scripts/web.test.mjs              → tests 10 pass 10 fail 0（serve.mjs 回归）",
+    "node workbench/node_modules/typescript/bin/tsc -p workbench/tsconfig.json --noEmit → exit 0，0 错误",
+    "node workbench/node_modules/vite/bin/vite.js build（cwd workbench）→ 615 modules transformed，built in 15.44s（Scene3D chunk 923KB 为既有，非本次引入）",
+    "L1 真服务冒烟（spawn serve.mjs --port 39xxx + DSH_WORKBENCH_SPACES_JSON 注入 scope）：见 l1-smoke.json"
+  ],
+  "l1Smoke": {
+    "list": "GET /api/files/list?scope=fx → 200，entries 含 README.md(size 24,ext md) 与 big.bin(size 268435456)，11ms",
+    "read": "GET /api/files/read?path=README.md → 200 ok:true content 原样 truncated:false lineCount:2",
+    "downloadHeaders": "GET /api/files/download?path=big.bin(256MB) → 响应头 21ms（修复前同量级实测 200ms+ 阻塞）、content-length=268435456 精确、content-type application/octet-stream、Disposition attachment; filename*=UTF-8",
+    "downloadBody": "流式读全 268435456 字节 = size（字节一致）",
+    "notBlocked": "下载进行中并发 GET list → 15ms（修复前 T-042 实测 262ms，事件循环阻塞的直接反证）",
+    "abort": "下载中途客户端 abort → 150ms 后 list 仍 7ms 返回 200（服务器未卡死；res close→stream.destroy 生效）",
+    "escapeHTTP": "../secret.txt 403（越界）、..\\ 403、a/../../x 403、.git/config 403、.git/HEAD 403、/etc/passwd 400、C:/win.ini 400、c:\\ 400、NUL 400、双编码 ..%2F 400（路径不存在，不落根外）——list/read/download 三端点一致"
+  },
+  "scopeNotes": "P0-1（S4 upload 路由层覆盖+流中断破坏原文件）与 P0-3（S6 webFetch 每跳非总超时）属写面/浏览器切片文件域，非本 S3 只读切片范围，未改动；建议由对应切片任务修复（T-042 §6 排期一致）。",
+  "zeroNewDeps": true
+}

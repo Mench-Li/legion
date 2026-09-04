@@ -1,0 +1,54 @@
+{
+  "task": "T-050",
+  "role": "coder",
+  "slice": "S6 浏览器后端 · /api/web/fetch（SSRF 防护 fetch 代理 + 零依赖正文抽取）",
+  "base": "w/T-050 @ 70c5aa7（promote T-048；S6 webFetch/web.test.mjs 在基线已随 S1~S8 主线存在，本任务按验收标准补齐：修复 P0-3「webFetch 超时实为每跳非总超时」+ 固化为 web.test.mjs 回归用例并全量复验）",
+  "environment": {
+    "node": "v24.19.0",
+    "os": "Windows 沙箱（workspace-write）",
+    "network": "禁网（零下载）",
+    "deps": "借主 checkout workbench/node_modules junction（T-046/T-048 同法）"
+  },
+  "changedFiles": [
+    "workbench/scripts/serve.mjs（+11/−5）：P0-3 修复——webFetch 改为「整条链（含重定向）共享总超时」：首跳按 timeoutMs 算出绝对截止时间戳 deadline 并随重定向递归下传（新内部参数 deadline，导出签名向后兼容），每跳定时器 = Math.min(tm, deadlineTs-now)，已过截止立即判 timeout；重定向跳在递归前 clearTimeout 本跳定时器（消除 REVIEW 所指「外层 hop 定时器空转」）；删除死代码 const buf = Buffer.alloc(0)；同步 WEB_LIMITS.TIMEOUT_MS 注释与函数 JSDoc（语义对齐「总超时」承诺，不再逐跳重置计时）",
+    "workbench/scripts/web.test.mjs（+21/−0）：mock 增延迟重定向链 /c1(700ms)→/c2(700ms)→/page；新增 describe「TC-S6-09b（P0-3 回归）」2 用例：①每跳均短于总超时但整链更长 → code=timeout 且总耗时落在单次预算区间（修复前 ok:true 于 ~2× 后返回）②同链在充足总超时下正常跟随到底并抽取终页（共享 deadline 不误伤合法链）。10 条基线用例零改动保留",
+    "README.md（+1/−1）：浏览器助手功能指南「限长与超时」→「整链总超时（含重定向共享 deadline、不逐跳重置，P0-3）」",
+    "workbench/README.md（+1/−1）：BrowserPanel 说明补「timeoutMs 为整条链（含重定向）总超时——重定向递归共享同一 deadline，不逐跳重置计时（P0-3）」"
+  ],
+  "acceptance": [
+    {
+      "item": "① web.test.mjs（SSRF 段矩阵 / 限长 / 超时）全绿",
+      "cmd": "node workbench/scripts/web.test.mjs",
+      "result": "tests 12 / suites 8 / pass 12 / fail 0（基线 10 条全保留 + 新增 P0-3 回归 2 条）。逐段：SSRF 段矩阵——TC-S6-04 协议白名单（file/ftp/data/javascript/gopher→protocol_blocked；缺 url→invalid_url）、TC-S6-05 私网/回环 14 目标矩阵（127.0.0.1/127.1/localhost/10.x/172.16-31/192.168/169.254/0.0.0.0/[::1]/[fc00::1]/十进制 2130706433/0x7f000001/017700000001→全 ssrf_blocked，解析失败域名→dns_error，mock 零命中）、TC-S6-06 重定向逐跳校验（链跟随+跳数超限 too_many_redirects+重定向 file://→ssrf_blocked）；限长——TC-S6-08 maxBytes=2048 ok / 1024→too_large（三值法）；超时——TC-S6-09 慢响应 timeoutMs=200→timeout 且连接被取消/快响应同超时 ok + TC-S6-09b 整链总超时回归 2 条（本任务新增）"
+    },
+    {
+      "item": "② 实现满足验收标准与用例（P0-3 缺陷修复落地，逐条真实自测）",
+      "cmd": "P0-3 复现脚本 + L1 真进程 HTTP 冒烟",
+      "result": "修复前复现：mock 链 c1(700ms)→c2(700ms)→page，timeoutMs=1000 → 总耗时 1456ms 仍 ok:true（= REVIEW/T-042 P0-3 口径：每跳重置计时）。修复后同脚本：code=timeout，总耗时 ~1011ms。L1 真进程冒烟（serve.mjs 双实例 :18642 默认 / :18643 DSH_WEB_FETCH_ALLOW_PRIVATE=1 + mock :18641，均 POST /api/web/fetch 走真实路由）：默认实例 127.0.0.1 私网→ssrf_blocked（98ms，mock 零命中）、file://→protocol_blocked；allow 实例正常页→ok:true title=L1标题 + finalUrl、链 c1 超时→timeout（1016ms≈timeoutMs）、同链 timeoutMs=5000→ok:true 跟随到底 title=L1标题、默认实例链首跳即 ssrf_blocked（16ms）。mock HIT 日志恰 6 条 = allow 实例全部请求，默认实例零外呼 → SSRF 阻断在外呼前成立"
+    },
+    {
+      "item": "③ 真实跑过 typecheck / build / 测试",
+      "cmd": "见 commands 节",
+      "result": "tsc --noEmit exit 0（0 错误）；web.test.mjs 12/12、files-api.test.mjs 34/34（serve.mjs 共用文件回归，无破坏）；vite build 本沙箱被禁（esbuild spawn EPERM，T-042 §6 同录）——serve.mjs/web.test.mjs 均不在 vite 构建图（src/*）内，tsc 全绿 + 双契约套件 + L1 真进程冒烟已覆盖运行入口；基线 T-040/T-046/T-048 各自环境 vite build 615 modules 绿、且本任务零 package.json/构建输入改动"
+    },
+    {
+      "item": "④ 改动仅在任务范围内；新引入依赖说明",
+      "cmd": "git diff --stat / git diff --name-only",
+      "result": "4 文件（serve.mjs +11/−5、web.test.mjs +21/−0、README.md ±1、workbench/README.md ±1），合计 +34/−7；零新增依赖（无 package.json 改动，仅 node:http/dns 内置，node_modules 为 junction 复用未下载）"
+    }
+  ],
+  "commands": [
+    "node workbench/scripts/web.test.mjs → tests 12 / suites 8 / pass 12 / fail 0（duration ~3.4s）",
+    "node workbench/scripts/files-api.test.mjs → tests 34 / suites 14 / pass 34 / fail 0（S3/S4 回归，duration ~1.6s）",
+    "pnpm exec tsc --noEmit（cwd workbench）→ exit 0，0 错误",
+    "pnpm build / node node_modules/vite/bin/vite.js build（cwd workbench）→ 失败于 esbuild 子进程 spawn EPERM（Windows 沙箱禁子进程 pipe spawn，T-042 §6 同因已录）；非代码缺陷",
+    "node --test 形态：沙箱禁 test runner 子进程 spawn（EPERM -4048，TEST_CASES L0 注），直跑 node <file> 为 node:test 进程内等效执行（宿主可 node --test）",
+    "L1 真进程冒烟：Start-Process node scripts/serve.mjs --port 18642/18643 + node _mock-target.mjs(18641) → POST /api/web/fetch 六连测全部符合预期（见 acceptance ②）"
+  ],
+  "p03": {
+    "defect": "webFetch 每次重定向递归都新建 AbortController + setTimeout(tm)：timeoutMs 实际是「每跳」计时，整链最坏 ≈ (MAX_REDIRECTS+1)×tm；且外层 hop 定时器在递归期间空转（REVIEW.md P0-3 / docs/TEST_REPORT.md §5.3，T-042 p03-webchain.json：timeoutMs=2000 三跳链总耗时 4295ms 仍 ok:true）",
+    "fix": "共享整链 deadline：首跳 deadlineTs = Date.now()+tm，递归把绝对 deadlineTs 下传，每跳定时器 = Math.min(tm, deadlineTs-now)，已过截止立即 throw timeout；重定向递归前 clearTimeout 本跳定时器防空转。导出签名向后兼容（deadline=0 缺省），单跳语义不变",
+    "regressions": "web.test.mjs TC-S6-09b ×2：①2 跳延迟链每跳 700ms（< 总超时 1000ms）整链 1400ms——修复前 ok:true、修复后 code=timeout 且总耗时 ~1011ms（断言 800≤elapsed<3000，杜绝每跳×N 复辟）②同链 timeoutMs=4000 → ok:true + finalUrl=/page + title 抽取正确（不误伤合法链）；L1 真进程同场景复验 timeout 1016ms / ok 1465ms"
+  },
+  "zeroNewDeps": true
+}

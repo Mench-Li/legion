@@ -1,0 +1,40 @@
+cmd: node workbench/scripts/web.test.mjs
+
+▶ TC-S6-01/02 正文抽取（HTML + UTF-8 中文）
+  ✔ 提取 title/正文/链接，中文无乱码；返回结构无原始 HTML (86.5754ms)
+✔ TC-S6-01/02 正文抽取（HTML + UTF-8 中文） (103.8303ms)
+▶ TC-S6-03 SPA 空壳
+  ✔ JS 渲染页 → 可理解提示且不伪造正文 (12.504ms)
+✔ TC-S6-03 SPA 空壳 (13.4046ms)
+▶ TC-S6-04 协议白名单
+  ✔ file/ftp/data/javascript 等协议一律 protocol_blocked (2.1601ms)
+  ✔ 缺 url → invalid_url (0.6318ms)
+✔ TC-S6-04 协议白名单 (37.8266ms)
+▶ TC-S6-05 私网/回环矩阵（含混淆）→ ssrf_blocked，mock 零命中
+  ✔ 默认策略（无注入口）拒绝全部私网目标 (155.8891ms)
+✔ TC-S6-05 私网/回环矩阵（含混淆）→ ssrf_blocked，mock 零命中 (157.0329ms)
+▶ TC-S6-06 重定向链（逐跳校验 + 上限 + 协议再检）
+  ✔ 302 链跟随到最终页并抽取；跳数超限 → too_many_redirects；重定向到 file:// → ssrf_blocked (106.8536ms)
+✔ TC-S6-06 重定向链（逐跳校验 + 上限 + 协议再检） (107.4248ms)
+▶ TC-S6-08/09 maxBytes / timeoutMs 三值注入
+  ✔ maxBytes=2048 ok；maxBytes=1024 → too_large (31.8144ms)
+  ✔ 慢响应 timeoutMs=200 → timeout；快响应同超时 → ok（超时后连接被取消） (310.1885ms)
+✔ TC-S6-08/09 maxBytes / timeoutMs 三值注入 (342.6622ms)
+▶ TC-S6-09b（P0-3 回归）重定向链总超时 = 共享 deadline，非每跳重置
+  ✔ 每跳均短于总超时但整链更长 → code=timeout，总耗时 ≈ timeoutMs（修复前 ok:true 于 ~2× 后返回） (1011.9115ms)
+  ✔ 同链在充足总超时下正常跟随到底并抽取终页（共享 deadline 不误伤合法链） (1437.951ms)
+✔ TC-S6-09b（P0-3 回归）重定向链总超时 = 共享 deadline，非每跳重置 (2450.501ms)
+▶ TC-S6-11/12 非文本降级与上游 4xx/5xx
+  ✔ application/pdf → ok:true + code=unsupported，不读体不抽取 (16.7722ms)
+  ✔ 404/500 → ok:false + code=http_404/http_500 且可读说明 (29.8481ms)
+✔ TC-S6-11/12 非文本降级与上游 4xx/5xx (47.2492ms)
+ℹ tests 12
+ℹ suites 8
+ℹ pass 12
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 3493.5142
+
+EXIT=0

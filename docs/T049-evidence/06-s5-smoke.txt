@@ -1,0 +1,38 @@
+cmd: node workbench/scripts/files-s5-smoke.mjs
+
+PASS S5-L1 根 list 200 + ok
+PASS S5-L1 隐藏条目(.git)不进列表
+PASS S5-L1 目录在前、文件在后
+PASS S5-L1 根含 README/docs/big.log/xss 夹具
+PASS S5-L1 条目形状 name/type/size/mtime/ext
+PASS S5-L1 含 .git 的目录带 isRepo 标记
+PASS S5-L1 进入 docs 200
+PASS S5-L1 docs 含 note.md
+PASS S5-L1 返回根 200
+PASS S5-L1 README 预览 200 ok:true
+PASS S5-L1 中文内容原样 + 行数
+PASS S5-L1 big.log truncated=true + totalBytes=300KB
+PASS S5-L1 二进制 → binary:true + 不可预览提示
+PASS S5-L1 XSS 内容原样 JSON 返回（无转义篡改）
+PASS S5-L1 上传新文件 200
+PASS S5-L1 上传后 list 立即可见（无需重挂）
+PASS S5-L1 同名再传 → 409（UI 触发覆盖确认）
+PASS S5-L1 overwrite=1 → 200
+PASS S5-L1 download 200 + Content-Length + Disposition
+PASS S5-L1 下载字节 = 源字节
+PASS S5-L1 mkdir 嵌套 a/b/c 200
+PASS S5-L1 rename a/b/c→a/b/d 200
+PASS S5-L1 删除无 confirm → 400 提示 confirm=yes
+PASS S5-L1 取消删除后文件仍在
+PASS S5-L1 confirm=yes 删除 200
+PASS S5-L1 删除后 list 不再可见（刷新语义）
+PASS S5-L1 删除后 read → 400 路径不存在
+PASS S5-L1 非空目录删 → 400 拒绝
+PASS S5-L1 空目录 confirm=yes → 200
+PASS S5-L1 未绑定 scope → 400「尚未绑定本地文件夹」
+PASS S5-L1 未注册 scope → 400「未注册」
+PASS S5-L1 .git/config → 403 拒绝
+---
+S5 smoke: 32/32 passed
+
+SMOKE_EXIT=0

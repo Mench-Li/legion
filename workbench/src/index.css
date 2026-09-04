@@ -1916,9 +1916,10 @@ body {
 .chat-composer textarea { width: 100%; resize: vertical; min-height: 48px; box-sizing: border-box; }
 .chat-composer-bar { display: flex; justify-content: flex-end; align-items: center; gap: 10px; }
 
-/* 文件中心 FilesPanel */
+/* 文件中心 FilesView（S5） */
 .files-head .tag { color: var(--muted); font-size: 11px; }
-.files-actions { display: inline-flex; gap: 6px; }
+.files-actions { display: inline-flex; gap: 6px; align-items: center; }
+.files-busy { color: var(--muted); font-size: 11px; margin-right: 2px; }
 .files-breadcrumb { padding: 8px 12px; font-size: 12px; color: var(--muted); }
 .crumb { cursor: pointer; color: var(--blue, #5b8cff); }
 .crumb:hover { text-decoration: underline; }

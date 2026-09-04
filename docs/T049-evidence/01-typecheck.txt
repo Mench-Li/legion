@@ -1,0 +1,3 @@
+cmd: node workbench/node_modules/typescript/bin/tsc -p workbench/tsconfig.json --noEmit
+
+TSC_EXIT=0

@@ -1,0 +1,6 @@
+--- dangerouslySetInnerHTML across workbench/src ---
+D:\project\DSH\legion\.legion-worktrees\T-049\workbench\src\components\ChatView.tsx:34: *   全程无 dangerouslySetInnerHTML，任何 <img onerror>/<script>/[x](javascript:) 都只是文本。
+D:\project\DSH\legion\.legion-worktrees\T-049\workbench\src\components\FilesView.tsx:34: * 渲染安全（I5 / TC-S5-08）：文件名/预览内容一律 React 文本节点，无 dangerouslySetInnerHTML。
+--- innerHTML/insertAdjacentHTML/document.write in FilesView/App ---
+D:\project\DSH\legion\.legion-worktrees\T-049\workbench\src\components\FilesView.tsx:34: * 渲染安全（I5 / TC-S5-08）：文件名/预览内容一律 React 文本节点，无 dangerouslySetInnerHTML。
+(grep done)

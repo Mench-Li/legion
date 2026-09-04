@@ -29,7 +29,7 @@ import { QuickTools } from './components/QuickTools'
 import { CommandBar } from './components/CommandBar'
 import { SkillsPanel } from './components/SkillsPanel'
 import { ChatView } from './components/ChatView'
-import { FilesPanel } from './components/FilesPanel'
+import { FilesView } from './components/FilesView'
 import { BrowserPanel } from './components/BrowserPanel'
 import { NewSpaceModal } from './components/NewSpaceModal'
 import { SpaceSettingsModal } from './components/SpaceSettingsModal'
@@ -351,7 +351,7 @@ export default function App(): React.JSX.Element {
           ) : active === 'chat' ? (
             <ChatView scope={scope} hubMode={hubMode} />
           ) : active === 'files' ? (
-            <FilesPanel scope={scope} hubMode={hubMode} spaces={hubSpaces} onOpenSettings={s => setSpaceSettings(s)} />
+            <FilesView scope={scope} hubMode={hubMode} spaces={hubSpaces} onOpenSettings={s => setSpaceSettings(s)} />
           ) : active === 'browser' ? (
             <BrowserPanel />
           ) : (

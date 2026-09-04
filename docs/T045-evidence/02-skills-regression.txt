@@ -1,0 +1,30 @@
+▶ registerSkill — 提交进入 pending，幂等 + 版本
+  ✔ 新技能提交 → status=pending, version=1 (3.8787ms)
+  ✔ 同内容重复提交 → 幂等，version/status 不变 (0.4318ms)
+  ✔ 内容变化 → version+1 且回 pending（需复审） (1.0942ms)
+  ✔ 非法 id 拒绝 (0.6242ms)
+✔ registerSkill — 提交进入 pending，幂等 + 版本 (7.1984ms)
+▶ listSkills — 默认只露 published
+  ✔ 未发布时默认列表为空 (1.4319ms)
+  ✔ includePending 能看到待审 (2.6616ms)
+✔ listSkills — 默认只露 published (4.6666ms)
+▶ reviewSkill — publish/reject 门禁
+  ✔ publish 后默认列表可见 (1.6866ms)
+  ✔ 已发布后再审 → 拒绝（只有 pending 可审） (0.3052ms)
+  ✔ reject 后从默认列表消失 (1.9233ms)
+  ✔ 非法 action 拒绝 (0.2429ms)
+✔ reviewSkill — publish/reject 门禁 (4.6446ms)
+▶ grantSkill — 授权过滤不受 review 影响
+  ✔ grant 到角色 + scope 通配后按 scope/member 过滤 (2.8297ms)
+✔ grantSkill — 授权过滤不受 review 影响 (2.9415ms)
+▶ 旧库迁移 — 缺列补齐且存量行默认 pending
+  ✔ 旧 schema 的 skills 表加载后带 status/contentHash/reviewedAt (40.5313ms)
+✔ 旧库迁移 — 缺列补齐且存量行默认 pending (40.7139ms)
+ℹ tests 12
+ℹ suites 5
+ℹ pass 12
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 147.0217

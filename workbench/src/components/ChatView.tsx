@@ -26,10 +26,25 @@ function authorLabel(m: ChatMessage): string {
 }
 
 /**
+ * 会话/空间身份守卫（R-A5 / T-060-M1 / TC-S3-01..06）：判定「发起时快照」相对「当前视图身份」是否已陈旧。
+ * 每个异步写回在 await 之后、写状态（setMsgs/setDraft…）之前调用：
+ *   - scopeAtCall/convAtCall = 请求发起时读到的身份快照；
+ *   - scopeNow/convNow       = 写回时刻 scopeRef.current / activeRef.current（随每次 render 同步 prop/state）。
+ * 返回 true = 用户在请求飞行期间切走了会话或空间 → 调用方**仅**复位 loading/sending 等标志并丢弃本次合并，
+ * 绝不把旧会话/旧空间数据写进当前视图。比纯 convId 比对更严格：会话 id 全局自增跨空间可能撞号（见 scope effect 注释），
+ * 故身份取 (scope, convId) 二元组；scope 未变时退化为纯 convId 比对。 */
+function identityStale(scopeAtCall: string | null, convAtCall: number | null, scopeNow: string | null, convNow: number | null): boolean {
+  return scopeAtCall !== scopeNow || convAtCall !== convNow
+}
+
+/**
  * 对话中心（S2 ChatView + 接线）。数据/写源 = team-hub v2 /api/chat/*（统一 handleWrite + 审计 + 单一 /api/events SSE）。
  * - 实时 = 中枢**单一** /api/events 按 action chat:* 过滤（I8 / TC-S2-08）：本面板只开 1 个 hub EventSource，
  *   不新增第二个 hub 事件连接，也不影响右侧「实时动态」既有 v1 流。
  * - 分页（P1-4 / TC-S2-04）：默认加载最近 PAGE 条；顶部「加载更早」按 before=最旧 id 向前翻页，旧消息可完整回溯。
+ * - 会话/空间身份守卫（R-A5 / T-060-M1 / TC-S3-01..06）：loadOlder/send/mergeNewest/loadConvs 等异步写回在
+ *   await 返回后、写 setMsgs/setDraft 等状态前，比对「发起时快照 (scope, convId)」与 scopeRef/activeRef 当前值；
+ *   不匹配（用户已切走会话/空间）= 仅复位 loading/sending 等标志并丢弃本次合并，绝不清/改当前视图（防切会话/切空间竞态串显）。
  * - 渲染安全（S2 AC5 / I5 / TC-S2-09/11）：正文只做纯文本（white-space:pre-wrap + React 文本节点），kind 白名单外按文本兜底，
  *   全程无 dangerouslySetInnerHTML，任何 <img onerror>/<script>/[x](javascript:) 都只是文本。
  * - 失败路径（S2 AC6 / TC-S2-07/10）：中枢不可达/写失败 → toast 错误且草稿不丢；EventSource 原生自动重连 + 15s 轮询兜底。
@@ -47,16 +62,21 @@ export function ChatView({ scope, hubMode }: { scope: string | null; hubMode: bo
   const [newTitle, setNewTitle] = useState('')
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const activeRef = useRef<number | null>(null)
+  const scopeRef = useRef<string | null>(null) // 空间身份镜像（R-A5 守卫用）：render 期同步 scope prop
   const stickRef = useRef(true) // 是否贴底（新消息自动滚到底部；用户上翻读历史时不抢滚动）
   activeRef.current = activeId
+  scopeRef.current = scope
 
   const loadConvs = useCallback(async (): Promise<void> => {
+    const scopeAtCall = scope
     try {
       const list = await fetchChatConversations(scope)
+      // 空间身份守卫（R-A5）：await 期间空间已切走 → 旧空间会话列表/自动选中不回写当前视图
+      if (scopeAtCall !== scopeRef.current) return
       setConvs(list)
       setActiveId(cur => (cur !== null && list.some(c => c.id === cur) ? cur : (list[0]?.id ?? null)))
     } catch (e) {
-      toast('err', `会话列表加载失败：${e instanceof Error ? e.message : String(e)}`)
+      if (scopeAtCall === scopeRef.current) toast('err', `会话列表加载失败：${e instanceof Error ? e.message : String(e)}`)
     }
   }, [scope])
 
@@ -115,9 +135,14 @@ export function ChatView({ scope, hubMode }: { scope: string | null; hubMode: bo
   }, [hubMode, scope, loadConvs])
 
   /** 拉最新一页并**合并**进当前列表（只追加更新的消息，不冲掉已加载的更早历史）。 */
-  const mergeNewest = useCallback(async (convId: number): Promise<void> => {
+  const mergeNewest = useCallback(async (): Promise<void> => {
+    const scopeAtCall = scopeRef.current
+    const convAtCall = activeRef.current
+    if (convAtCall === null) return
     try {
-      const list = await fetchChatMessages(convId, { limit: PAGE })
+      const list = await fetchChatMessages(convAtCall, { limit: PAGE })
+      // 会话/空间身份守卫（R-A5 / TC-S3-06）：轮询/SSE 触发时身份正确、返回时已切走的「第二类竞态」同样丢弃
+      if (identityStale(scopeAtCall, convAtCall, scopeRef.current, activeRef.current)) return
       setMsgs(prev => {
         if (prev.length === 0) return list
         const maxId = prev[prev.length - 1].id
@@ -134,14 +159,15 @@ export function ChatView({ scope, hubMode }: { scope: string | null; hubMode: bo
     if (!hubMode || !scope) return
     const off = subscribeHubAudit(ev => {
       if (!String(ev.action).startsWith('chat:')) return
+      if (ev.scope !== scope) return // 空间身份守卫（R-A5）：只响应当前空间事件（跨空间会话 id 可能撞号）
       const conv = ev.detail?.conv
       const n = activeRef.current
-      if (ev.action === 'chat:message' && Number(conv) === n) void mergeNewest(n)
+      if (ev.action === 'chat:message' && Number(conv) === n) void mergeNewest()
       else if (ev.action === 'chat:create') void loadConvs()
     })
     const poll = window.setInterval(() => {
       const n = activeRef.current
-      if (n !== null) void mergeNewest(n)
+      if (n !== null) void mergeNewest()
       void loadConvs() // 刷新会话列表（last_message_at / updatedAt 排序，轻量）
     }, 15000)
     return () => {
@@ -160,11 +186,15 @@ export function ChatView({ scope, hubMode }: { scope: string | null; hubMode: bo
   const loadOlder = async (): Promise<void> => {
     const oldest = msgs[0]?.id
     if (activeId === null || oldest === undefined || loadingOlder) return
+    const scopeAtCall = scope // 发起时身份快照（R-A5 / TC-S3-02/04）
+    const convAtCall = activeId
     setLoadingOlder(true)
     const el = scrollRef.current
     const prevH = el?.scrollHeight ?? 0
     try {
-      const older = await fetchChatMessages(activeId, { before: oldest, limit: PAGE })
+      const older = await fetchChatMessages(convAtCall, { before: oldest, limit: PAGE })
+      // 会话/空间身份守卫：await 期间已切走 → 丢弃本次合并（不写 msgs/hasOlder/滚动；finally 仍复位 loadingOlder）
+      if (identityStale(scopeAtCall, convAtCall, scopeRef.current, activeRef.current)) return
       setMsgs(prev => mergeById(older, prev))
       setHasOlder(older.length === PAGE)
       // 顶部插入内容 → 滚动位置下移 = 高度增量（rAF 在渲染后执行）
@@ -173,7 +203,9 @@ export function ChatView({ scope, hubMode }: { scope: string | null; hubMode: bo
         if (now && prevH > 0) now.scrollTop += now.scrollHeight - prevH
       })
     } catch (e) {
-      toast('err', `加载更早消息失败：${e instanceof Error ? e.message : String(e)}`)
+      if (!identityStale(scopeAtCall, convAtCall, scopeRef.current, activeRef.current)) {
+        toast('err', `加载更早消息失败：${e instanceof Error ? e.message : String(e)}`)
+      }
     } finally {
       setLoadingOlder(false)
     }
@@ -218,9 +250,12 @@ export function ChatView({ scope, hubMode }: { scope: string | null; hubMode: bo
       toast('err', '请输入会话标题')
       return
     }
+    const scopeAtCall = scope
     setCreating(false)
     try {
-      const conv = await createChatConversation({ scope: scope as string, title, kind: 'space' })
+      const conv = await createChatConversation({ scope: scopeAtCall as string, title, kind: 'space' })
+      // 空间身份守卫（R-A5 / J5-A）：await 期间空间已切走 → 不把旧空间新建会话设为当前（跨空间撞号会污染新空间视图）
+      if (scopeAtCall !== scopeRef.current) return
       setActiveId(conv.id)
       void loadConvs()
       toast('ok', `会话「${conv.title}」已创建`)
@@ -240,16 +275,22 @@ export function ChatView({ scope, hubMode }: { scope: string | null; hubMode: bo
       toast('err', '请先新建/选择一个会话')
       return
     }
+    const scopeAtCall = scope // 发起时身份快照（R-A5 / TC-S3-01/03/04）
+    const convAtCall = activeId
     setSending(true)
     try {
-      const msg = await postChatMessage({ conv: activeId, body, kind: 'text', clientTs: new Date().toISOString() })
+      const msg = await postChatMessage({ conv: convAtCall, body, kind: 'text', clientTs: new Date().toISOString() })
+      // 会话/空间身份守卫：await 期间已切走 → 不清当前草稿、不合并、不刷新列表（消息已入库，切回发起会话可见）
+      if (identityStale(scopeAtCall, convAtCall, scopeRef.current, activeRef.current)) return
       setDraft('') // 成功后清草稿
       stickRef.current = true
       setMsgs(prev => mergeById(prev, [msg])) // 气泡即时出现（无整页刷新）
       void loadConvs() // 会话 last_message_at/排序即时更新（轻量）
     } catch (e) {
-      // 失败：草稿保留（TC-S2-07/10），toast 错误
-      toast('err', `发送失败：${e instanceof Error ? e.message : String(e)}`)
+      if (!identityStale(scopeAtCall, convAtCall, scopeRef.current, activeRef.current)) {
+        // 失败：草稿保留（TC-S2-07/10），toast 错误
+        toast('err', `发送失败：${e instanceof Error ? e.message : String(e)}`)
+      }
     } finally {
       setSending(false)
     }

@@ -166,7 +166,7 @@ patch 里**必须显式给** `legionDir: 'D:/project/DSH/legion'`——pnpm 对 
 | --- | --- | --- |
 | 对话 | `GET/POST /hub/api/chat/conversations`、`/hub/api/chat/messages` | 经 serve.mjs `/hub/*` 反向代理到 team-hub（:8787）；写=统一 handleWrite（by=general）+ 审计/SSE |
 | 文件（只读） | `GET /api/files/list`、`/api/files/read`、`/api/files/download`（`?scope=&path=`） | 仅回环；scope 的 `local_dir` 即根；越界/`.git` 内部 403 |
-| 文件（写） | `PUT /api/files/upload`（`overwrite=1`）· `POST /api/files/mkdir|rename|delete` | 仅回环 + 写需令牌（`--token` / `DSH_WORKBENCH_TOKEN`，无令牌=不要求）；409/413/400 语义 |
+| 文件（写） | `PUT /api/files/upload`（`overwrite=1`）· `POST /api/files/mkdir|rename|delete` | 仅回环 + 写需令牌（`--token` / `DSH_WORKBENCH_TOKEN`，无令牌=不要求）；409/413/400 语义；上传 Content-Length 预检 + 流式限长，临时文件原子发布——中断/超限不破坏原文件（P0-1） |
 | 浏览器 | `POST /api/web/fetch`（body `{url, maxBytes?, timeoutMs?}`） | 仅回环；SSRF 防护代理 + 正文抽取；错误 `{ok:false, error, code}` |
 
 ---

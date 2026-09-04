@@ -1,0 +1,54 @@
+{
+  "task": "T-048",
+  "role": "coder",
+  "slice": "S4 文件后端·写面（upload / mkdir / rename / delete + token 鉴权 + confirm）",
+  "base": "w/T-048 @ 267a145（promote T-046；S4 写面路由在基线已随 S1~S8 主线存在，本任务按验收标准补齐：修复 P0-1 数据丢失缺陷 + 将写契约/鉴权矩阵/P0-1 回归固化为 HTTP 路由层自动化用例并全量复验）",
+  "environment": {
+    "node": "v24.19.0",
+    "os": "Windows 沙箱",
+    "network": "禁网（零下载）",
+    "deps": "借主 checkout workbench/node_modules junction（T-046 同法）"
+  },
+  "changedFiles": [
+    "workbench/scripts/serve.mjs（+115/−27）：① P0-1 修复——PUT /api/files/upload 路由改「流式收体到同目录临时文件，收体完整 + 不超限后在 ws close（fd 已释放）回调中竞态二次校验 + renameSync 原子发布」；覆盖/中断/超限不再破坏原文件、不留半写/临时残留（旧实现直接 createWriteStream(abs)，超限 unlink(abs)=覆盖场景删原文件，中断留半写——T-042 p01-upload.json 复现）；② 新增导出 receiveUploadBody（流式接收器：Content-Length 预检在路由层保留 + 运行期限长 413 + 背压 + req aborted/error/close 中断兜底 + 失败删临时）；③ uploadBytes（函数级）同步改为 tmp+rename 原子语义；④ FILES_LIMITS.MAX_UPLOAD 增加 env 注入口 DSH_WORKBENCH_MAX_UPLOAD（测试用，先例 DSH_WEB_FETCH_ALLOW_PRIVATE，默认 64MB 不变）；⑤ sendJson/httpErr 对断连写错误吞掉防未处理 error 崩溃（上传中断路径必需）；⑥ 头部注释与底部 export 增加 server（供契约测试进程内监听真路由）",
+    "workbench/scripts/files-api.test.mjs（+259/−2，34 用例）",
+    "README.md（+1/−1：文件写行补「上传 Content-Length 预检 + 流式限长，临时文件原子发布——中断/超限不破坏原文件（P0-1）」）",
+    "workbench/README.md（+1/−1：同上语义并入 serve.mjs 功能清单）"
+  ],
+  "acceptance": [
+    {
+      "item": "① 写契约 + 鉴权矩阵用例全绿",
+      "cmd": "node workbench/scripts/files-api.test.mjs",
+      "result": "tests 34 / suites 14 / pass 34 / fail 0（基线 22 全保留 + 新增 12 条 HTTP 路由层用例）。逐条：TC-S4-01..12 写契约在函数级 + 真 HTTP 路由双覆盖；TC-S4-13 鉴权矩阵 HTTP 自动化（无 token 写 401 / 错 token 写 401 / 对 token 写 200 / 无 token 读 200 + mkdir 无 token 401）；TC-S4-14 逃逸矩阵（upload/mkdir/rename/delete × ../、..\\、a/../../、盘符、绝对、%2F 编码、NUL）全 400/403 且根外零副作用；TC-S4-02/15 超限（预检 413 + 流式超限 413，目标零落盘）；TC-S4-16 并发同路径无 overwrite → 恰好一个 200 其余 409、最终字节 = 二写之一完整内容"
+    },
+    {
+      "item": "② 实现满足验收标准与用例（P0-1 缺陷修复落地）",
+      "cmd": "T-042 p01-upload.json 复现场景回归",
+      "result": "覆盖上传流式超限：新实现 413（旧 400 \"Cannot call write after a stream was destroyed\"+ 原文件被删）且 victim 字节原样；中途中断：原文件保持原样、零临时残留、服务不崩（随后请求 200）。AC1..AC5 全部满足：AC1 写契约全绿；AC2 鉴权矩阵（env + CLI --token 双路径，L1 真进程冒烟 401/401/200/200）；AC3 写路径防护同 S3 强度（函数级 + HTTP 双覆盖）；AC4 Content-Length 预检 + 流式落盘（非整读内存）+ 背压；AC5 零新增依赖"
+    },
+    {
+      "item": "③ 真实跑过 typecheck/build/测试",
+      "cmd": "见 commands 节",
+      "result": "tsc exit 0；vite build exit 0（9.08s JS API，产物 index + Scene3D chunk + css + html）；files-api 34/34；web.test 回归 10/10；L1 真进程冒烟全过。注：node --test 在本沙箱 spawn 子进程被禁（EPERM -4048，TEST_CASES L0 已记录），直跑 node <file> = node:test 进程内等效执行（宿主可 node --test）"
+    },
+    {
+      "item": "④ 改动仅在任务范围内；新引入依赖说明",
+      "cmd": "git diff --stat",
+      "result": "4 文件（serve.mjs / files-api.test.mjs / README.md / workbench/README.md），+376/−31；零新增依赖（git diff 无 package.json 改动；只用 node:fs/path/http 内置；node_modules 为 junction 复用，未下载）"
+    }
+  ],
+  "commands": [
+    "node workbench/scripts/files-api.test.mjs → tests 34 / suites 14 / pass 34 / fail 0（duration ~1.2s）",
+    "node workbench/scripts/web.test.mjs → tests 10 / pass 10 / fail 0（S6 回归，serve.mjs import 路径未破坏）",
+    "node workbench/node_modules/typescript/bin/tsc -p workbench/tsconfig.json --noEmit → exit 0（0 错误）",
+    "node node_modules/vite/bin/vite.js build（cwd workbench）→ exit 0（沙箱内 stdio inherit 可跑；JS API 复跑 9.08s，日志 docs/T048-evidence/vite-build.log）",
+    "node --test workbench/scripts/files-api.test.mjs / web.test.mjs → EPERM(-4048) spawn（沙箱限制，TEST_CASES L0 注）；直跑 node <file> 等效全绿",
+    "L1 真进程冒烟（Start-Process node serve.mjs --port 53999 --token tk + DSH_WORKBENCH_SPACES_JSON）：无 token PUT=401、错 token=401、对 token=200、无 token GET read=200（内容 hello-l1-ok）、正常 overwrite=200 —— CLI --token 参数路径验证通过"
+  ],
+  "p01": {
+    "defect": "旧路由 PUT 直接 createWriteStream(abs)：流式超限时 unlink(abs)（overwrite 场景删除原文件）；中断留半写目标；写后错误 400 \"Cannot call write after a stream was destroyed\"（T-042 p01-upload.json：victimGoneAfterA=true）",
+    "fix": "receiveUploadBody：正文只写同目录随机临时文件（flags wx）；完整收体且 ≤MAX 后于 ws close（fd 释放，Windows rename 前提）做「无覆盖竞态二次校验 + renameSync 原子发布」；任何失败（流式超限 413/中断 400/写错误/竞态 409）在 ws close 统一删临时并 reject；全程不触碰目标 → 原文件永不被半写/截断/删除",
+    "regressions": "HTTP 路由层用例（cap 实例 16KB 廉价回归 + 真实 64MB 预检）：覆盖超限 413 原文件字节原样/零残留；新路径超限零落盘；覆盖中断原文件原样/零残留/服务健康；并发 TC-S4-16 [200,409] 原子发布"
+  },
+  "zeroNewDeps": true
+}

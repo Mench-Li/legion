@@ -47,7 +47,7 @@ node scripts/serve.mjs --port 5173   # 独立静态服务 → http://127.0.0.1:5
 
 ## 服务端配套（第 2 步，legion 引擎侧）
 
-- `serve.mjs`（`scripts/serve.mjs`）新增 `GET /api/files/list|read|download`（S3）、`PUT /api/files/upload` 与 `POST /api/files/mkdir|rename|delete`（S4，仅回环 + `--token`/`DSH_WORKBENCH_TOKEN` 写鉴权、`overwrite=1`/`confirm=yes` 语义）、`POST /api/web/fetch`（S6 SSRF 防护代理 + 零依赖正文抽取）；文件/网页接口均有 `isMain` 守卫 + 纯函数导出供契约测试（`files-api.test.mjs`/`web.test.mjs`）。
+- `serve.mjs`（`scripts/serve.mjs`）新增 `GET /api/files/list|read|download`（S3）、`PUT /api/files/upload` 与 `POST /api/files/mkdir|rename|delete`（S4，仅回环 + `--token`/`DSH_WORKBENCH_TOKEN` 写鉴权、`overwrite=1`/`confirm=yes` 语义；上传按 Content-Length 预检 + 流式限长（413），正文先落同目录临时文件、收体完整后原子改名发布——中断/超限不破坏原文件，P0-1）、`POST /api/web/fetch`（S6 SSRF 防护代理 + 零依赖正文抽取）；文件/网页接口均有 `isMain` 守卫 + 纯函数导出供契约测试（`files-api.test.mjs`/`web.test.mjs`）。
 - `serve.mjs` 新增 `GET /api/missions`（服务端任务集聚合，`?scope=`）、
   `POST /api/pause` / `POST /api/resume`（全局暂停/继续，写 `scrum/control.json`）、
   `/api/config` 增加 `paused` 字段。

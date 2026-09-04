@@ -402,3 +402,49 @@
 - 同目录 RESEARCH.md（T-044）、TASK_BREAKDOWN.md（T-038）、TEST_CASES.md（T-039）为同一目标族的既有产物；本批可能由下游角色在其上续写/覆盖（与 T-038/T-039 的「取代声明」模式一致，不属本次改动）。
 - 本批 P0 缺陷（F1/F2 等）的**详细复现步骤/日志**见 docs/T062-evidence/、docs/T059-evidence/ 等既有证据目录，可作下游修复与回归依据。
 - 遗留问题：本阶段（requirement）无法在沙箱内验证前端构建（vite build EPERM）与宿主注入（board-plugin）——按仓库纪律如实声明为「环境受限」，不冒充通过；交由宿主/CI 侧（R-C3 / R-B3）。
+
+---
+
+## 附录 C：本轮复核（re-dispatch）记录与证据锚定
+
+> 本轮为 T-073「需求澄清」的重新派工复核。复核结论：**既有 §1~§10 需求说明完整、准确，继续保持为其唯一权威基线**；本附录仅做增量证据锚定（append-only，未删除任何既有内容），并给出本轮复核的核对点，供将军验收与下游引用。
+
+### C.1 复核范围与方法
+
+- 复核对象：本文件 §1~§10 全部「现状/缺口」断言。
+- 复核基准：当前 worktree 分支 `w/T-073`（HEAD = `1c0172d promote T-073`），源码即仓库当前实现态。
+- 方法：逐条把「现状断言」对照**实际源码行号/命令输出**（read/grep），确认「缺口」仍存在、「已交付」仍接线，未随时间漂移。
+
+### C.2 关键断言 → 代码证据（本轮实测核对）
+
+| 断言（本文件引用） | 实测证据（当前源码） | 结论 |
+| --- | --- | --- |
+| F1：文件面 `assertNotGitInternal` 仅判首段 `.git`（§2.3 T-1 / §5 R-A1，serve.mjs:209-211） | `workbench/scripts/serve.mjs:208-212`：`if (parts[0] === '.git')` — 仅拦截相对路径**首段**为 `.git`；含 `subrepo/.git/config` 这类嵌套路径（首段为子目录名）会绕过；list/read/download/upload/mkdir/rename/delete 全走该守卫（读面 `previewTextFile`/`readFileBytes`/`openDownloadStream`、写面 `uploadBytes`/`createDir`/`renamePath`/`removePath` 均先 `assertNotGitInternal`）。 | ✅ 缺陷仍存在 |
+| F2：服务顶层 `decodeURIComponent` 未捕获（§2.3 T-2 / §5 R-A2，serve.mjs:944） | `workbench/scripts/serve.mjs:942-944`：`createServer((req,res)=>{\n const url=new URL(...); const pathname=decodeURIComponent(url.pathname)` — 无 try/catch，单请求非法 % 路径即抛 URIError 使进程退出。 | ✅ 缺陷仍存在 |
+| S6 审计留痕零实现（§2.3 T-3 / §5 R-A3，S6-AC5） | grep 全 `serve.mjs`：`console.log|console.error|audit|logger|appendFile` 仅 1 处命中 = 启动横幅 `serve.mjs:999`；`/api/web/fetch`（`handleWebApi`，`serve.mjs:964-968`）无任何日志/审计写。 | ✅ 缺陷仍存在 |
+| 三中心前端接线（§2.1，App.tsx:352/354/356） | `workbench/src/App.tsx:351-356`：`active==='chat'→<ChatView/>`、`files→<FilesView/>`、`browser→<BrowserPanel/>`（**仍为 BrowserPanel，未改名 BrowserView** → A6/S7 收口未合入 main，与 §2.2 w/T-051 一致）。 | ✅ 已接线 / A6 待收口 |
+| 日程日历/通知中心占位（§5 R-B1/R-B2，Sidebar:21/22/79） | `workbench/src/components/Sidebar.tsx:21-22`（`calendar`/`notify` 模块项）、`:79`（点击仅 `toast('info','「…」为占位模块…')`）。 | ✅ 占位待实现 |
+| QuickTools 入口（§2.1 浏览器助手，QuickTools:13/22） | `workbench/src/components/QuickTools.tsx:12-14`（`files`→文件浏览、`web`→浏览网页、`kanban`→内部看板）、`:21-23`（`files→onOpenModule('files')`、`web→'browser'`、`kanban→openKanban()`）。 | ✅ 已接线 |
+| 三中心「已接线」与「必须修改未闭合」并存 | 与源码一致：三个中心面板均在 App.tsx 接线（聊天/文件/浏览器），但 F1/F2/S6-AC5 三项「必须修改」级缺陷仍在源码中。 | ✅ 与 §2.3 结论一致 |
+
+### C.3 本轮复核确认的澄清结论（与 §8 一致，不复述）
+
+- 「剩余任务」= **三中心未闭合缺陷（P0）+ 收口/回归（P1）+ 平台剩余功能（B/C 按将军钩选）**，非从零新建三中心。
+- P0 门槛 = 安全（F1 嵌套 `.git` 泄密）+ 健壮性（F2 畸形路径崩溃进程）+ 审计（S6-AC5）；仓库「全绿才可交付」口径下三者**不顺延**。
+- 渲染安全（I-5）、SSRF（I-7）、零新依赖（I-1）为硬性不变量，本批不得弱化。
+
+### C.4 遗留/待将军拍板（与 §9 对齐，本轮重述为可验收的决策项）
+
+- **OQ-1（范围界定，最关键）**：本批「剩余任务」范围 → 建议「三中心收尾（P0/P1 必做）+ 平台剩余（B 按钩选）+ 可选（C）」三级。
+- **OQ-2（缺陷归属）**：P0/P1 缺陷（F1/F2/S6-AC5/S6-M2/S2-M1）是否统一纳入本批 → 建议纳入（作三中心收口前置）。
+- **OQ-3（calendar/notify）**：两占位模块是否本批实现 → 建议实现（若将军要「完整指挥团」），定位 P1。
+- **OQ-4（候选增强 X-1~X-5）**：是否勾选 → 建议默认全不勾选，仅标注存在性与前置（禁网盘点）。
+- **OQ-5（双账本/文档归档）**：P1-6/P2-8 是否纳入 → 建议 P2 顺带或仅标注归属。
+- **OQ-6（生产发布）**：是否本批发布 → 建议仅交付「可发布状态」+ runbook，发布由将军另行批准。
+- **OQ-7（TC-S6-15 口径）**：HTTP 200-envelope vs 顶层 HTTP 400 → 建议 200-envelope（body 用 code 区分业务错误）。
+- **OQ-8（环境受限项）**：vite build EPERM / node_modules / 宿主注入 → 建议记录 + 归 R-C3/R-B3 交宿主/CI，功能验证以 node --test + 前端评审为准。
+
+### C.5 下游可用性与阶段边界复核
+
+- 下游链路：researcher（可选重扫方案）→ breaker（据 §5 R-A*~R-C* 写「## slices」机器可读切片，未拆则沿用 TASK_BREAKDOWN S 系列补缺陷面）→ test-designer（§5 每条验收口径已为可测试语句，可直转用例）→ coder → reviewer → tester → devops。
+- 本阶段边界复核：本轮**未改任何实现代码、未做技术选型、未调 taskctl/看板写接口、未 push、未下载依赖**——仅增补本附录（文档）。技术选型与实现细节留 researcher/breaker/coder。

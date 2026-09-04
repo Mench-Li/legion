@@ -120,7 +120,7 @@ node scripts/serve.mjs --port 5173   # 独立静态服务 → http://127.0.0.1:5
   同源调 serve.mjs `/api/files/*`（仅回环；写请求需令牌则 401 映射 toast）。文件根 = 当前空间 `local_dir`（team-hub `/api/spaces`）；`../`/盘符/根外 symlink/`.git` 内部等越界与仓库内路径由服务端 `resolveInsideRoot`/realpath 守卫拒绝，前端只展示服务端错误文案。
   边界：未选空间/未绑定 → 面板引导（含「打开空间设置」跳转）；上传同名 → 409 → confirm 覆盖（带 `overwrite=1`）；删除 → confirm 后发 `confirm='yes'`。
 - **浏览器助手** `BrowserPanel.tsx`：`webFetchPage`（POST `/api/web/fetch`）。无 scheme 输入自动补 `https://`（`normalizeUrl`），非法/空输入提示不发请求；
-  结果字段 = 服务端白名单结构化（title/text/excerpt/links），正文按 `<pre>` 纯文本展示；错误码分别映射文案（`ssrf_blocked`→「已拦截：禁止访问内网地址」、timeout/too_large/http_4xx/dns_error/unsupported/empty_content 等）+「重试」。最近抓取历史 localStorage（datalist 复用）。
+  结果字段 = 服务端白名单结构化（title/text/excerpt/links），正文按 `<pre>` 纯文本展示；错误码分别映射文案（`ssrf_blocked`→「已拦截：禁止访问内网地址」、timeout/too_large/http_4xx/dns_error/unsupported/empty_content 等）+「重试」。`timeoutMs` 为整条链（含重定向）**总超时**——重定向递归共享同一 deadline，不逐跳重置计时（P0-3）；最近抓取历史 localStorage（datalist 复用）。
 
 > 测试注入口：抓本地 mock 页需 `DSH_WEB_FETCH_ALLOW_PRIVATE=1` 启动 serve.mjs（仅测试/本地演示；生产默认关闭）。
 

@@ -36,6 +36,9 @@ const mock = createServer((req, res) => {
   else if (u.pathname === '/r2') { res.writeHead(302, { location: '/page' }); res.end() }
   else if (u.pathname === '/loop') { res.writeHead(302, { location: '/loop' }); res.end() }
   else if (u.pathname === '/tofile') { res.writeHead(302, { location: 'file:///etc/passwd' }); res.end() }
+  // P0-3 回归：延迟重定向链 c1(700ms)→c2(700ms)→/page（每跳都短于总超时，整链更长）
+  else if (u.pathname === '/c1') { setTimeout(() => { res.writeHead(302, { location: '/c2' }); res.end() }, 700) }
+  else if (u.pathname === '/c2') { setTimeout(() => { res.writeHead(302, { location: '/page' }); res.end() }, 700) }
   else { res.writeHead(200, { 'content-type': 'text/html' }); res.end('ok') }
 })
 
@@ -152,6 +155,24 @@ describe('TC-S6-08/09 maxBytes / timeoutMs 三值注入', () => {
     const fast = await m.webFetch({ url: base + '/fast', timeoutMs: 2000 })
     assert.equal(fast.ok, true)
     assert.equal(fast.text, 'fast done')
+  })
+})
+
+describe('TC-S6-09b（P0-3 回归）重定向链总超时 = 共享 deadline，非每跳重置', () => {
+  it('每跳均短于总超时但整链更长 → code=timeout，总耗时 ≈ timeoutMs（修复前 ok:true 于 ~2× 后返回）', async () => {
+    process.env.DSH_WEB_FETCH_ALLOW_PRIVATE = '1'
+    const t0 = Date.now()
+    const e = await m.webFetch({ url: base + '/c1', timeoutMs: 1000 }).catch(e => e)
+    const elapsed = Date.now() - t0
+    assert.equal(e.code, 'timeout', '整链累计超时必须在总超时处截止（P0-3：此前每跳重开计时）')
+    assert.ok(elapsed >= 800 && elapsed < 3000, '总耗时落在单次预算区间而非 每跳×N（实际 ' + elapsed + 'ms）')
+  })
+  it('同链在充足总超时下正常跟随到底并抽取终页（共享 deadline 不误伤合法链）', async () => {
+    process.env.DSH_WEB_FETCH_ALLOW_PRIVATE = '1'
+    const r = await m.webFetch({ url: base + '/c1', timeoutMs: 4000 })
+    assert.equal(r.ok, true)
+    assert.equal(r.finalUrl, base + '/page')
+    assert.equal(r.title, '测试标题')
   })
 })
 

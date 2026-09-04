@@ -81,7 +81,7 @@ export const FILES_LIMITS = Object.freeze({
 })
 export const WEB_LIMITS = Object.freeze({
   MAX_BYTES: 2 * 1024 * 1024, // fetch 响应体上限（可被请求覆盖）
-  TIMEOUT_MS: 10_000, // 总超时（可被请求覆盖）
+  TIMEOUT_MS: 10_000, // 整条链（含重定向）总超时，可被请求覆盖（P0-3：非每跳独立计时）
   MAX_REDIRECTS: 5,
   MAX_LINKS: 40, // 抽取链接数上限
   MAX_TEXT: 300_000, // 抽取正文/标题文本上限
@@ -745,18 +745,24 @@ async function readBodyLimited(res, maxBytes, signal) {
 /**
  * v1 fetch 代理核心：协议白名单 → SSRF 逐跳校验（含重定向链）→ 限长/超时 → 仅文本类响应进入抽取。
  * 返回结构化 JSON（无原始 HTML 透传字段，TC-S6-10）。
+ * timeoutMs 为「整条链总超时」（P0-3 修复）：首跳据此算出绝对截止时间戳 deadline 并随重定向递归
+ * 共享下传，每跳剩余预算 = deadlineTs - now（不再每跳重置计时）；超过 5 跳上限同样受总超时约束。
  */
-export async function webFetch({ url: rawUrl, maxBytes = WEB_LIMITS.MAX_BYTES, timeoutMs = WEB_LIMITS.TIMEOUT_MS, redirects = 0 } = {}) {
+export async function webFetch({ url: rawUrl, maxBytes = WEB_LIMITS.MAX_BYTES, timeoutMs = WEB_LIMITS.TIMEOUT_MS, redirects = 0, deadline = 0 } = {}) {
   if (typeof rawUrl !== 'string' || rawUrl.trim().length === 0) throw webErr('invalid_url', '缺少参数 url')
   const mb = Number.isFinite(Number(maxBytes)) ? Math.max(1, Math.min(Number(maxBytes), 16 * 1024 * 1024)) : WEB_LIMITS.MAX_BYTES
   const tm = Number.isFinite(Number(timeoutMs)) ? Math.max(1, Math.min(Number(timeoutMs), 60_000)) : WEB_LIMITS.TIMEOUT_MS
+  // P0-3：共享整链 deadline（内部参数，仅重定向递归传递）；已过截止 → 立即判超时，绝不放行
+  const deadlineTs = Number.isFinite(deadline) && deadline > 0 ? deadline : Date.now() + tm
+  const remainMs = deadlineTs - Date.now()
+  if (remainMs <= 0) throw webErr('timeout', '抓取超时（已取消请求）')
   let target
   try { target = new URL(String(rawUrl).trim()) } catch { throw webErr('invalid_url', 'URL 无法解析') }
   if (target.protocol !== 'http:' && target.protocol !== 'https:') throw webErr('protocol_blocked', '协议白名单：仅支持 http/https（收到 ' + target.protocol + '）')
   if (redirects > WEB_LIMITS.MAX_REDIRECTS) throw webErr('too_many_redirects', '重定向超过 ' + WEB_LIMITS.MAX_REDIRECTS + ' 跳，已停止')
   await assertPublicTarget(target)
   const ac = new AbortController()
-  const timer = setTimeout(() => ac.abort(new Error('abort')), tm)
+  const timer = setTimeout(() => ac.abort(new Error('abort')), Math.min(tm, remainMs))
   try {
     let res
     try {
@@ -771,8 +777,8 @@ export async function webFetch({ url: rawUrl, maxBytes = WEB_LIMITS.MAX_BYTES, t
       if (loc) {
         const next = new URL(loc, target.href)
         if (next.protocol !== 'http:' && next.protocol !== 'https:') throw webErr('ssrf_blocked', '重定向目标协议不在白名单（' + next.protocol + '）')
-        const buf = Buffer.alloc(0)
-        return webFetch({ url: next.href, maxBytes: mb, timeoutMs: tm, redirects: redirects + 1 })
+        clearTimeout(timer) // 本跳已完成：交给下一跳按共享 deadline 计时（避免外层空转定时器，P0-3）
+        return webFetch({ url: next.href, maxBytes: mb, timeoutMs: tm, redirects: redirects + 1, deadline: deadlineTs })
       }
     }
     const ct = res.headers.get('content-type') ?? ''

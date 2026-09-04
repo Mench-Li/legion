@@ -1,0 +1,58 @@
+{
+  "task": "T-058",
+  "role": "tester",
+  "slice": "S3 serve.mjs 扩 /api/files list/read/download（仅回环 + 路径防护）——测试执行",
+  "base": "w/T-058 @ 6e01ef1（S3 实现 = d90c91d/T-046 已 promote；其后无提交再触碰 serve.mjs / files-api.test.mjs；HEAD..origin/main 亦无该两文件改动 → 被测代码 = T-054/T-056 审查基线同一状态）",
+  "environment": {
+    "node": "v24.19.0",
+    "os": "Windows 沙箱（workspace-write，禁网）",
+    "cwd": "D:/project/DSH/legion/.legion-worktrees/T-058",
+    "note": "worktree 无 node_modules → tsc/vite build 未复跑（切片仅 .mjs，不在 TS 构建图；T-046 coder 已录 tsc 0 错误/vite 615 modules 绿）"
+  },
+  "commands": [
+    "node workbench/scripts/files-api.test.mjs → tests 34 / suites 14 / pass 34 / fail 0（S3 只读 + S4 写全契约，含 TC-S3-01..12/08b/逃逸矩阵/仅回环函数级）",
+    "node workbench/scripts/web.test.mjs → tests 12 / suites 8 / pass 12 / fail 0（同文件域 S6 回归）",
+    "node --check workbench/scripts/serve.mjs → exit 0；node --check docs/T058-evidence/l1-s3-smoke.mjs、p1-path-urierror-crash.mjs → exit 0",
+    "node docs/T058-evidence/l1-s3-smoke.mjs（自建真实 serve.mjs 进程 + HTTP 断言）→ PASS=70 FAIL=3（3 失败全部 = 嵌套 .git 防护缺口）",
+    "node docs/T058-evidence/p1-path-urierror-crash.mjs（崩溃探针）→ 2 复现（exit 1 + ECONNRESET）+ 1 对照（进程存活）"
+  ],
+  "l1Smoke": {
+    "serve": "spawn serve.mjs --port 随机 --host 127.0.0.1 + DSH_WORKBENCH_SPACES_JSON 注入（scope=fx→夹具根；scope=nobind 未绑定）",
+    "fixture": "ok.txt/中文 文件.txt/docs/big.log(276KB)/pic.png(bin)/big.bin(64MB)/.git(根级)/nestedrepo/.git + vendor/sub-repo/.git(嵌套)/link-in/link-out(junction)/empty/nonempty/bulk(120 项)/outside(根外)",
+    "list": "根 200 形状正确（目录前/隐藏过滤/isRepo=true 标记）；空目录 entries=[]；指向文件/不存在 → 400；未绑定/未注册/缺 scope → 400 引导错误",
+    "read": "文本全文/行数/中文名无乱码全绿；big.log >256KiB → truncated=true content 恰 262144 字节 totalBytes=276480；pic.png → binary:true 不可预览；目录 → 400",
+    "download": "ok.txt 字节一致 + text/plain + Content-Disposition attachment + Content-Length 精确；不存在/目录 → 400",
+    "p02": "64MB：Content-Length=67108864 精确、sha256 与磁盘一致、TTFB=15ms（头先行）；下载中途断连 → 服务存活；64MB 下载挂起期间并发 list 7ms（事件循环未被整读阻塞）",
+    "escapes": "read/download/list × {..%2F, 双编码..%252F, 多层.., /绝对, C:/盘符, c:\\小写, NUL%00, ..\\} 全 400/403；根内 docs/guide.txt 不受误伤",
+    "gitInternal": "根级 .git/config read/download/list → 403 ✅；嵌套 vendor/sub-repo/.git/config read/download → 200 泄露（NESTED-LEAK-MARKER 实读）❌；list 嵌套 .git → 200 ❌",
+    "symlink": "link-in(junction 根内) 放行 200；link-out(根外) read/download → 403",
+    "coexist": "/api/fs/home 与文件面并存 200（TC-S3-15 片段）",
+    "loopback": "函数级 isLoopback：127.0.0.1/::1/::ffff:127.0.0.1=true；10.0.0.5/192.168.1.2/空=false"
+  },
+  "crashProbe": {
+    "case1": "GET /%zz → ECONNRESET，进程 exit 1（URIError: URI malformed @ serve.mjs:944 decodeURIComponent）",
+    "case2": "GET /api/files/list%zz?scope=fx → ECONNRESET，进程 exit 1（S3 只读端点路径形态同样一击崩）",
+    "control": "合法请求（list 缺 scope 400 / fs home 200）→ 进程存活",
+    "stack": "serve.mjs:944 decodeURIComponent → URIError → 未捕获 → Node v24.19.0 exit 1（stderr 实捕，见 p1-crash-stack.txt）"
+  },
+  "defects": [
+    {
+      "id": "F1",
+      "severity": "🟠 安全承诺失实",
+      "tc": "TC-S3-12（嵌套）",
+      "summary": "assertNotGitInternal 只拦首段 parts[0]==='.git'（serve.mjs:209-212），嵌套仓库 .git 可经 list/read/download 访问：read/download vendor/sub-repo/.git/config → 200 泄露凭证/元数据内容；list 嵌套 .git → 200。JSDoc『含 .git 下任意层级一律拒绝』与 TEST_CASES TC-S3-12 承诺失实。",
+      "owner": "S3 实现共用守卫（T-054 审查 R1『必须修改』未修复；测试 files-api TC-S3-12 仅覆盖根级，L1 嵌套用例补证）",
+      "fix": "parts.some(p => p === '.git')（注意 .gitignore/.github 精确匹配不受误伤——已对照 400 而非 403）+"
+    },
+    {
+      "id": "F2",
+      "severity": "🔴 单请求崩溃进程（可用性）",
+      "tc": "服务稳健性（共享 dispatcher）",
+      "summary": "serve.mjs:944 对每个请求先 decodeURIComponent(url.pathname) 未捕获 URIError：GET /%zz 或 GET /api/files/list%zz?scope=fx → ECONNRESET + 进程 exit 1（stderr 实捕 URIError: URI malformed）。S3 只读端点路径形态实测可达。",
+      "owner": "serve.mjs 顶层 dispatcher（T-056 审查 R2『必须修改』未修复；共享面，S3/S4/S6 全受影响）",
+      "fix": "decodeURIComponent 包 try/catch → 400 或 pathname 原样透传后按字面量 404"
+    }
+  ],
+  "verdict": "非全绿：功能正确性成立（S3 AC1/AC3/AC4/AC5 + P0-2 修复实测全绿、逃逸矩阵与仅回环门禁成立），但 TC-S3-12 嵌套 .git 防护失实（F1）与非法 % 路径一击崩溃（F2）两项『必须修改』级失败未达成；F1/F2 均非本测试引入，系 T-054 R1 / T-056 R2 已标记、当前代码仍存在——修复（各 <5 行 + 补回归用例）后建议回归本报告 F1/F2 两行再 promote。",
+  "regression": "同文件域（workbench/scripts）：files-api 34/34（含 S4 写面，建立在 S3 路径防护之上）+ web 12/12（S6）全绿 → S3 P0-2 流式修复未破坏 S4/S6；切片 diff（d90c91d）仅 serve.mjs/files-api.test.mjs/evidence.json 3 文件，未触 team-hub/whiteboard/tests/前端 TS → 跨域无需重跑（chat/skills/contracts/whiteboard 由各自域任务回归）；前端 tsc/vite 因 worktree 无 node_modules 未复跑（如实声明）"
+}

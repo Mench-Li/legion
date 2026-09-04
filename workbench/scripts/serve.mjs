@@ -6,7 +6,8 @@
  * 附加 API（同源，仅回环地址可访问）：
  *   ① 选文件夹/git 探测（/api/fs/*，照搬 DSH 工作空间目录浏览）：
  *      GET  /api/fs/home → { home, drives }；GET /api/fs/list?path= → 目录层级；POST /api/fs/inspect → git 探测
- *   ② 文件中心（/api/files/*，目录根 = 当前工作空间 spaces.local_dir；读写全部做根内规范化 + 符号链接逃逸防护；
+ *   ② 文件中心（/api/files/*，目录根 = 当前工作空间 spaces.local_dir；读写全部做根内规范化 + 符号链接逃逸防护，
+ *      R-A1：相对路径任一层段 .git 即拒 + realpath 复检（防嵌套仓库/符号链接绕入 .git 内部）；
  *      写操作需 token（--token 或 DSH_WORKBENCH_TOKEN，未配置放行）+ 仅回环；覆盖需 overwrite=1、删除需 confirm=yes）：
  *      GET  /api/files/list?scope=&path=                 → 目录条目（dir 在前，含 .git 仓库标记）
  *      GET  /api/files/read?scope=&path=                 → 文本预览（截断/行数/二进制拒绝）
@@ -15,6 +16,10 @@
  *      POST /api/files/mkdir|rename|delete               → 受限写操作（JSON body）
  *   ③ 浏览器助手（/api/web/fetch，S6：SSRF 防护的服务端 fetch 代理 + 零依赖正文抽取）：
  *      POST /api/web/fetch { url, maxBytes?, timeoutMs? } → { ok, finalUrl, status, contentType, title, text?, excerpt?, links?, error? }
+ *   ④ 健壮性（R-A2/I-9）：任何请求（含畸形 percent-encoding %zz、NUL、超长）都不允许击穿进程——
+ *      解码失败/非法输入显式 400，其余同步意外由顶层 try/catch 回 500，进程始终存活；
+ *      请求体未完整到达即拒绝（413 预检/流式超限）的响应带 Connection: close——防 keep-alive 错位复用
+ *      （连接仍停在「等剩余体」态时复用会把下一请求误读为体字节，挂起约 6s 后 ECONNRESET）。
  */
 import { createServer, request } from 'node:http'
 import { createReadStream, createWriteStream, existsSync, openSync, readSync, writeSync, closeSync, unlinkSync, rmdirSync, mkdirSync, readdirSync, renameSync, realpathSync, statSync, lstatSync } from 'node:fs'
@@ -90,12 +95,12 @@ export const WEB_LIMITS = Object.freeze({
 const BINARY_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.bmp', '.pdf', '.zip', '.gz', '.tar', '.7z', '.rar', '.exe', '.dll', '.so', '.bin', '.woff', '.woff2', '.ttf', '.otf', '.mp3', '.mp4', '.mov', '.avi', '.mkv', '.sqlite', '.db', '.db-wal', '.jar', '.class', '.pyc'])
 
 // ── /api/fs/* 辅助 ──
-function sendJson(res, code, data) {
+function sendJson(res, code, data, extraHeaders = {}) {
   // 客户端断连（上传/下载中断）后写响应会触发 res error——先吞掉避免未处理 error 崩溃；响应已结束则静默
   if (res.destroyed || res.writableEnded) { try { res.destroy() } catch { /* */ } return }
   res.on('error', () => { /* 断连写错误：忽略 */ })
   try {
-    res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' })
+    res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', ...extraHeaders })
     res.end(JSON.stringify(data, null, 2))
   } catch { try { res.destroy() } catch { /* */ } }
 }
@@ -205,10 +210,27 @@ export async function resolveScopeLocalDir(scope) {
   return realpathSync(dir)
 }
 
-/** .git 内部（含 .git 下任意层级）一律拒绝访问（TC-S3-12：防凭证/元数据外泄）。 */
+/** .git 内部（相对路径**任一层段** === .git，大小写不敏感——Windows 上 .GIT 同义）一律拒绝访问
+ *  （TC-S3-12 + R-A1：防嵌套/内嵌仓库（subrepo/.git/…）、submodule/worktree 指针文件、凭证/元数据外泄）。
+ *  list/read/download 与写面 upload/mkdir/rename/delete 全部共用；只拦「穿越进 .git 的请求」——
+ *  rel 不含 .git 段的父目录列表仍放行（嵌套仓库目录本身可见并可列出，界面再隐藏其 .git 子条目）。 */
 function assertNotGitInternal(rel) {
   const parts = String(rel ?? '').replace(/\\/g, '/').split('/').filter(Boolean)
-  if (parts[0] === '.git') throw new Error('禁止访问 .git 内部（防凭证/元数据外泄）')
+  for (const seg of parts) {
+    if (seg.toLowerCase() === '.git') throw new Error('禁止访问 .git 内部（防凭证/元数据外泄）')
+  }
+}
+
+/** 真实路径复检（R-A1）：real 相对目录根仍含任一层 .git 段（大小写不敏感）→ 拒绝。
+ *  词法守卫看不到符号链接目标——junction/symlink 指向 .git 内部时只能在此拦截；
+ *  写入目标的「既有祖先」为 .git 内部（如 link → root/.git 下新建文件）也在此拦下。
+ *  调用前必须先通过「根内越界」检查（顺序见 resolve* 调用点，保证既有 越界：符号链接 错误语义不变）。 */
+function assertRealNotGitInternal(rRoot, real) {
+  if (real === rRoot) return
+  const parts = real.slice(rRoot.length).replace(/\\/g, '/').split('/').filter(Boolean)
+  for (const seg of parts) {
+    if (seg.toLowerCase() === '.git') throw new Error('禁止访问 .git 内部（防凭证/元数据外泄）')
+  }
 }
 
 /**
@@ -218,6 +240,7 @@ function assertNotGitInternal(rel) {
 export function resolveInsideRoot(root, rel) {
   if (typeof rel !== 'string') throw new Error('缺少参数 path')
   if (rel.includes('\0')) throw new Error('path 含非法字符（NUL）')
+  assertNotGitInternal(rel) // R-A1：任一层段 .git 即拒（读面兜底；调用点漏网也不放行）
   const relClean = rel.replace(/\\/g, '/')
   if (relClean.startsWith('/')) throw new Error('path 必须是相对路径（不能越出目录根）')
   if (/^[a-zA-Z]:/.test(relClean)) throw new Error('path 必须是相对路径（不能越出目录根）')
@@ -230,6 +253,7 @@ export function resolveInsideRoot(root, rel) {
   let real
   try { real = realpathSync(abs) } catch (e) { throw new Error(e?.code === 'ENOENT' ? '路径不存在' : '路径不可解析（可能是断链）') }
   if (real !== rRoot && !real.startsWith(rRoot + sep)) throw new Error('路径越界：符号链接指向目录根之外')
+  assertRealNotGitInternal(rRoot, real) // R-A1：realpath 复检——符号链接指向 .git 内部 → 拒
   return abs
 }
 
@@ -237,6 +261,7 @@ export function resolveInsideRoot(root, rel) {
 export function resolveInsideRootForWrite(root, rel) {
   if (typeof rel !== 'string') throw new Error('缺少参数 path')
   if (rel.includes('\0')) throw new Error('path 含非法字符（NUL）')
+  assertNotGitInternal(rel) // R-A1：任一层段 .git 即拒（写面兜底；路由层 upload 直调本函数无漏网）
   const relClean = rel.replace(/\\/g, '/')
   if (relClean.startsWith('/')) throw new Error('path 必须是相对路径（不能越出目录根）')
   if (/^[a-zA-Z]:/.test(relClean)) throw new Error('path 必须是相对路径（不能越出目录根）')
@@ -253,6 +278,7 @@ export function resolveInsideRootForWrite(root, rel) {
     try {
       const real = realpathSync(probe)
       if (real !== rRoot && !real.startsWith(rRoot + sep)) throw new Error('路径越界：符号链接指向目录根之外')
+      assertRealNotGitInternal(rRoot, real) // R-A1：既有祖先 realpath 复检——符号链接指向 .git 内部 → 拒
       break
     } catch (e) {
       if (e?.code === 'ENOENT' || e?.code === 'ENOTDIR') {
@@ -821,11 +847,11 @@ async function handleWebApi(req, res) {
 }
 
 // ── /api/files/* 路由（S3 只读 + S4 写；仅回环；写需 token；错误码分类见各函数注释）──
-function httpErr(res, code, message) {
+function httpErr(res, code, message, extraHeaders = {}) {
   // 客户端断连（上传中断等）后写响应会触发 res error——吞掉避免未处理 error 崩溃；响应已结束则静默
   if (res.destroyed || res.writableEnded) { try { res.destroy() } catch { /* */ } return }
   res.on('error', () => { /* 断连写错误：忽略 */ })
-  try { sendJson(res, code, { error: message }) } catch { try { res.destroy() } catch { /* */ } }
+  try { sendJson(res, code, { error: message }, extraHeaders) } catch { try { res.destroy() } catch { /* */ } }
 }
 
 /** 写鉴权：配置了 token（--token / DSH_WORKBENCH_TOKEN）时写请求必须带 Bearer。读请求放行（TC-S4-13）。 */
@@ -881,7 +907,7 @@ async function handleFilesApi(req, res, pathname, url) {
       })
       stream.on('error', (e) => {
         if (!res.headersSent) httpErr(res, e?.code === 'ENOENT' ? 404 : 500, '下载失败：' + (e?.message ?? e))
-        else res.destroy(e)
+        else { try { res.destroy() } catch { /* */ } } // 头已发出：只能中断连接（res error 已在 routeRequest 顶部吞掉）
       })
       res.on('close', () => stream.destroy()) // 客户端断连 → 停止读文件（unpipe），避免继续消费磁盘 IO
       stream.pipe(res)
@@ -892,8 +918,12 @@ async function handleFilesApi(req, res, pathname, url) {
       const overwrite = url.searchParams.get('overwrite') === '1'
       const declared = Number(req.headers['content-length'] ?? 0)
       if (Number.isFinite(declared) && declared > FILES_LIMITS.MAX_UPLOAD) {
-        req.resume() // 排空请求体
-        httpErr(res, 413, '上传超过上限 ' + FILES_LIMITS.MAX_UPLOAD + ' 字节')
+        // R-A2（T-077）预检拒绝的连接处理：客户端声明的体可能根本不会到达（只声明不发/半开）。
+        // 若响应后 keep-alive 复用，服务端仍停在「等剩余体」态——同连接下一个请求会被误读为体字节，
+        // 挂起约 6s 后连接被重置（S4 预检 413 → 同连接后续 raw 请求 ECONNRESET，实测实证）。
+        // 响应带 Connection: close：该连接不再复用，后续请求落到新连接，行为正常；已到达字节排空防 RST 竞态。
+        req.resume() // 排空已到达的请求体字节
+        httpErr(res, 413, '上传超过上限 ' + FILES_LIMITS.MAX_UPLOAD + ' 字节', { connection: 'close' })
         return
       }
       const abs = resolveInsideRootForWrite(root, rel)
@@ -905,7 +935,14 @@ async function handleFilesApi(req, res, pathname, url) {
       }
       // P0-1 修复：流式收体到同目录临时文件，完整收体 + 不超限后原子改名发布；
       // 覆盖/中断/超限不再破坏原文件、不留半写目标（receiveUploadBody，TC-S4-02/15/16）
-      await receiveUploadBody(req, abs, { maxBytes: FILES_LIMITS.MAX_UPLOAD, overwrite })
+      try {
+        await receiveUploadBody(req, abs, { maxBytes: FILES_LIMITS.MAX_UPLOAD, overwrite })
+      } catch (e) {
+        // R-A2（T-077）：请求体未完整到达即失败（流式超限/中断/写错）→ 连接处于「仍等体」错位态，不能安全复用；
+        // 显式 Connection: close 弃用（否则同连接下一请求被误读为体字节 → 挂起/被 RST）。体已收全则走通用错误路径。
+        if (!req.complete) { httpErr(res, classifyFilesError(e), e instanceof Error ? e.message : String(e), { connection: 'close' }); return }
+        throw e
+      }
       const st = statSync(abs)
       sendJson(res, 200, { ok: true, file: { name: basename(abs), size: st.size, mtime: entryMtime(st.mtimeMs) } })
       return
@@ -939,9 +976,16 @@ async function handleFilesApi(req, res, pathname, url) {
   }
 }
 
-const server = createServer((req, res) => {
-  const url = new URL(req.url ?? '/', `http://${host}:${port}`)
-  const pathname = decodeURIComponent(url.pathname)
+/** 单请求路由（R-A2/I-9 加固）：畸形 percent-encoding / NUL → 显式 400 且立即返回（进程绝不死）；
+ *  其余未预期同步异常由下方 createServer 顶层 try/catch 兜底；API 分发统一挂 .catch 防未处理拒绝。 */
+function routeRequest(req, res) {
+  // 全请求期吞掉 res 写错误（断连/流中断后 writeHead/pipe/destroy 的 error 事件不再可能击穿进程）
+  res.on('error', () => { /* 断连写错误：忽略 */ })
+  let url
+  try { url = new URL(req.url ?? '/', `http://${host}:${port}`) } catch { httpErr(res, 400, 'bad request：请求行无法解析'); return }
+  let pathname
+  try { pathname = decodeURIComponent(url.pathname) } catch { httpErr(res, 400, 'bad request：路径含畸形 percent-encoding，已拒绝'); return }
+  if (pathname.includes('\0')) { httpErr(res, 400, 'bad request：路径含非法字符（NUL）'); return }
   // 同源 /hub/* 反向代理 → team-hub v2（规避浏览器跨域/CORS/localStorage 导致的中枢探测失败）
   if (pathname === '/hub' || pathname.startsWith('/hub/')) {
     const qs = url.search
@@ -950,30 +994,35 @@ const server = createServer((req, res) => {
       hostname: up.hostname, port: up.port, path: up.pathname + up.search,
       method: req.method, headers: { ...req.headers, host: up.host },
     }, (upRes) => {
-      res.writeHead(upRes.statusCode, upRes.headers)
-      upRes.pipe(res)
+      try {
+        res.writeHead(upRes.statusCode, upRes.headers)
+        upRes.pipe(res)
+      } catch { try { res.destroy() } catch { /* 断连后写入：忽略 */ } }
     })
     proxyReq.on('error', (e) => {
-      res.writeHead(502, { 'content-type': 'text/plain' })
-      res.end(`hub proxy error: ${e.message}`)
+      try {
+        if (!res.headersSent) { res.writeHead(502, { 'content-type': 'text/plain' }); res.end(`hub proxy error: ${e.message}`) }
+        else try { res.destroy() } catch { /* */ }
+      } catch { try { res.destroy() } catch { /* */ } }
     })
+    res.on('close', () => { try { proxyReq.destroy() } catch { /* */ } }) // 客户端断连 → 停上游，避免悬挂 socket
     req.pipe(proxyReq)
     return
   }
   // 浏览器助手 /api/web/fetch（S6：SSRF 防护代理 + 抽取；仅回环）
   if (pathname === '/api/web/fetch') {
     if (req.method !== 'POST') { res.writeHead(405); res.end('method not allowed'); return }
-    void handleWebApi(req, res)
+    void handleWebApi(req, res).catch((e) => { try { httpErr(res, 500, 'internal error：' + (e instanceof Error ? e.message : String(e))) } catch { /* */ } })
     return
   }
   // 文件中心 /api/files/*（S3 只读面 + S4 写面；仅回环 + 写 token；scope → 空间 local_dir 解析）
   if (pathname.startsWith('/api/files')) {
-    void handleFilesApi(req, res, pathname, url)
+    void handleFilesApi(req, res, pathname, url).catch((e) => { try { httpErr(res, 500, 'internal error：' + (e instanceof Error ? e.message : String(e))) } catch { /* */ } })
     return
   }
   // 目录浏览 / git 探测（空间仓库绑定的「选择文件夹」）
   if (pathname.startsWith('/api/fs/')) {
-    void handleFsApi(req, res, pathname, url)
+    void handleFsApi(req, res, pathname, url).catch((e) => { try { httpErr(res, 500, 'internal error：' + (e instanceof Error ? e.message : String(e))) } catch { /* */ } })
     return
   }
   let file = normalize(join(ROOT, pathname))
@@ -989,7 +1038,24 @@ const server = createServer((req, res) => {
   }
   const type = MIME[extname(file)] ?? 'application/octet-stream'
   res.writeHead(200, { 'content-type': type })
-  createReadStream(file).pipe(res)
+  const rs = createReadStream(file)
+  rs.on('error', (e) => { // 文件消失/权限等读失败：不击穿进程
+    try {
+      if (!res.headersSent) httpErr(res, 500, '读取文件失败：' + (e?.message ?? e))
+      else { try { res.destroy() } catch { /* */ } }
+    } catch { try { res.destroy() } catch { /* */ } }
+  })
+  res.on('close', () => { try { rs.destroy() } catch { /* */ } })
+  rs.pipe(res)
+}
+
+// R-A2/I-9：顶层兜底——单请求处理中的任何未预期同步异常只回 500，进程绝不被畸形输入击穿
+const server = createServer((req, res) => {
+  try {
+    routeRequest(req, res)
+  } catch (e) {
+    httpErr(res, 500, 'internal error：' + (e instanceof Error ? e.message : String(e)))
+  }
 })
 
 // 被 import（契约测试）时不监听端口（isMain 守卫，同 team-hub/server.mjs 先例）。

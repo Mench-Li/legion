@@ -1,4 +1,6 @@
 // workbench/scripts/files-api.test.mjs — 文件中心「只读面 + 写面」契约测试（对齐 docs/TEST_CASES.md TC-S3-01..15 / TC-S4-01..17）。
+// S1（T-077）追加：R-A1 嵌套/内嵌 .git 防护矩阵（任一层段 .git 即拒 + realpath 复检防符号链接绕入，读+写同强度）
+//   + R-A2 畸形 percent-encoding 注入（%zz 等 → 400/404、进程存活、≥10 并发不崩）。
 // 运行：node workbench/scripts/files-api.test.mjs（沙箱 spawn 受限时直跑等效；宿主环境可 node --test）
 // 说明：serve.mjs 以 isMain 守卫 + 纯函数导出支持 import 直测；scope→local_dir 解析经 DSH_WORKBENCH_SPACES_JSON 注入（免起中枢）。
 import { describe, it, before, after } from 'node:test'
@@ -51,6 +53,14 @@ before(() => {
   writeFileSync(join(outsideDir, 'secret.txt'), 'secret outside content')
   try { symlinkSync(outsideDir, join(root, 'link-out'), 'junction') } catch { /* 无权限则跳过 link-out 断言 */ }
   try { symlinkSync(join(root, 'docs'), join(root, 'link-in'), 'junction') } catch { /* 无权限则跳过 link-in 断言 */ }
+  // S1（T-077 R-A1）嵌套/内嵌 .git 夹具：subrepo=含独立 .git 的嵌套仓库；submod/.git=submodule/worktree 指针文件形态；
+  // link-to-git=junction 指向 root/.git 内部（realpath 复检样本，读/写面均应拒绝）
+  mkdirSync(join(root, 'subrepo', '.git', 'objects', 'pack'), { recursive: true })
+  writeFileSync(join(root, 'subrepo', '.git', 'config'), '[core]\nNESTED-LEAK-MARKER\n')
+  writeFileSync(join(root, 'subrepo', 'readme.txt'), 'subrepo readable')
+  mkdirSync(join(root, 'submod'), { recursive: true })
+  writeFileSync(join(root, 'submod', '.git'), 'gitdir: ../.git/modules/submod')
+  try { symlinkSync(join(root, '.git'), join(root, 'link-to-git'), 'junction') } catch { /* 无权限则跳过 link-to-git 断言 */ }
   process.env.DSH_WORKBENCH_SPACES_JSON = JSON.stringify([{ id: 'fx', name: '文件夹具', localDir: root }])
 })
 
@@ -520,5 +530,159 @@ describe('S4 路由层（HTTP）· TC-S4-16 并发上传同路径（无 overwrit
     assert.deepEqual(statuses, [200, 409], '至多一个 200、其余 409（实际 ' + JSON.stringify(statuses) + '）')
     const final = readFileSync(join(root, 'http', 'race.bin'), 'utf8')
     assert.ok(final === pA || final === pB, '最终内容为二写之一的完整内容')
+  })
+})
+
+// ─────────────────────── S1（T-077）R-A1 嵌套 .git 防护矩阵 + R-A2 畸形路径不崩进程 ───────────────────────
+describe('S1 R-A1 嵌套/内嵌 .git 防护（F1：任一层段 .git 即拒 + realpath 复检，读/写同强度）', () => {
+  it('函数层：嵌套仓库 subrepo/.git/…（含深层/大小写变体/顶层对照）在 list/read/download 全部拒绝', async () => {
+    const rootDir = await m.resolveScopeLocalDir('fx')
+    const gitTargets = [
+      '.git', '.git/config', // 顶层对照
+      'subrepo/.git', 'subrepo/.git/config', 'subrepo/.git/objects', 'subrepo/.git/objects/pack/x', // 嵌套仓库矩阵
+      'subrepo/.GIT/config', // Windows 大小写变体（toLowerCase 比较 → 同样拒绝）
+      'submod/.git', // submodule/worktree 指针文件形态（.git 文件）
+    ]
+    for (const rel of gitTargets) {
+      assert.throws(() => m.listDirEntries(rootDir, rel), /禁止访问 \.git/, 'list ' + rel)
+      assert.throws(() => m.previewTextFile(rootDir, rel), /禁止访问 \.git/, 'read ' + rel)
+      assert.throws(() => m.openDownloadStream(rootDir, rel), /禁止访问 \.git/, 'download ' + rel)
+    }
+    // 对照：subrepo 工作区文件本身仍可读/可列——守卫只拦 .git 内部，不误伤嵌套仓库的非 .git 内容
+    assert.equal(m.previewTextFile(rootDir, 'subrepo/readme.txt').content, 'subrepo readable')
+    const subList = m.listDirEntries(rootDir, 'subrepo')
+    assert.ok(subList.entries.length > 0 && subList.entries.every((e) => !e.name.startsWith('.')), 'subrepo 列表可见且不含隐藏 .git 子条目')
+  })
+  it('函数层：写面同强度——upload/mkdir/rename(from/to)/delete 对嵌套 .git 全部拒绝且零副作用', async () => {
+    const rootDir = await m.resolveScopeLocalDir('fx')
+    const gitTargets = ['subrepo/.git/config', 'subrepo/.git/new.txt', 'subrepo/.git/objects/pack/x']
+    for (const rel of gitTargets) {
+      assert.throws(() => m.uploadBytes(rootDir, rel, Buffer.from('x'), { overwrite: true }), /禁止访问 \.git/, 'upload ' + rel)
+      assert.throws(() => m.createDir(rootDir, rel), /禁止访问 \.git/, 'mkdir ' + rel)
+      assert.throws(() => m.renamePath(rootDir, 'README.md', rel), /禁止访问 \.git/, 'rename-to ' + rel)
+      assert.throws(() => m.renamePath(rootDir, rel, 'README.md'), /禁止访问 \.git/, 'rename-from ' + rel)
+      assert.throws(() => m.removePath(rootDir, rel, 'yes'), /禁止访问 \.git/, 'delete ' + rel)
+    }
+    assert.throws(() => m.uploadBytes(rootDir, '.git/config', Buffer.from('x'), { overwrite: true }), /禁止访问 \.git/, '顶层 .git 写对照')
+    // 零副作用：嵌套 .git/config 内容原样、无新文件落盘
+    assert.match(readFileSync(join(root, 'subrepo/.git/config'), 'utf8'), /NESTED-LEAK-MARKER/)
+    assert.equal(existsSync(join(root, 'subrepo/.git/new.txt')), false, '嵌套 .git 内无新建文件')
+  })
+  it('HTTP 路由层：subrepo/.git/config 的 list/read/download/upload/mkdir/rename/delete 七操作全部 403；顶层 .git 对照仍 403；内容零外泄', async () => {
+    const nested = 'subrepo/.git/config'
+    const q = '?scope=fx&path=' + encQ(nested)
+    const list = await httpJson(httpBases.plain, 'GET', '/api/files/list', { query: q })
+    assert.equal(list.status, 403, 'list 应 403，实际 ' + list.status)
+    const read = await httpJson(httpBases.plain, 'GET', '/api/files/read', { query: q })
+    assert.equal(read.status, 403, 'read 应 403，实际 ' + read.status)
+    assert.ok(!(read.text ?? '').includes('NESTED-LEAK-MARKER'), 'read 响应不含嵌套 .git 内容')
+    const dl = await httpJson(httpBases.plain, 'GET', '/api/files/download', { query: q })
+    assert.equal(dl.status, 403, 'download 应 403，实际 ' + dl.status)
+    const up = await httpJson(httpBases.plain, 'PUT', '/api/files/upload', { query: q + '&overwrite=1', body: 'evil' })
+    assert.equal(up.status, 403, 'upload 应 403，实际 ' + up.status)
+    const mk = await httpJson(httpBases.plain, 'POST', '/api/files/mkdir', { body: { scope: 'fx', path: 'subrepo/.git/newdir' } })
+    assert.equal(mk.status, 403, 'mkdir 应 403，实际 ' + mk.status)
+    const rnTo = await httpJson(httpBases.plain, 'POST', '/api/files/rename', { body: { scope: 'fx', from: 'README.md', to: nested } })
+    assert.equal(rnTo.status, 403, 'rename-to 应 403，实际 ' + rnTo.status)
+    const rnFrom = await httpJson(httpBases.plain, 'POST', '/api/files/rename', { body: { scope: 'fx', from: nested, to: 'subrepo/leak.txt' } })
+    assert.equal(rnFrom.status, 403, 'rename-from 应 403，实际 ' + rnFrom.status)
+    const del = await httpJson(httpBases.plain, 'POST', '/api/files/delete', { body: { scope: 'fx', path: nested, confirm: 'yes' } })
+    assert.equal(del.status, 403, 'delete 应 403，实际 ' + del.status)
+    // 顶层 .git 对照
+    const topQ = '?scope=fx&path=' + encQ('.git/config')
+    assert.equal((await httpJson(httpBases.plain, 'GET', '/api/files/read', { query: topQ })).status, 403, '顶层 .git read 对照仍 403')
+    assert.equal((await httpJson(httpBases.plain, 'GET', '/api/files/download', { query: topQ })).status, 403, '顶层 .git download 对照仍 403')
+    assert.equal((await httpJson(httpBases.plain, 'PUT', '/api/files/upload', { query: '?scope=fx&path=' + encQ('.git/hooks/evil') + '&overwrite=1', body: 'x' })).status, 403, '顶层 .git upload 对照仍 403')
+    // 零副作用 + 不误伤嵌套仓库工作区
+    assert.match(readFileSync(join(root, 'subrepo/.git/config'), 'utf8'), /NESTED-LEAK-MARKER/, '.git/config 未被改写')
+    assert.equal(existsSync(join(root, 'subrepo/.git/newdir')), false, '.git 内未建目录')
+    assert.equal(existsSync(join(root, 'subrepo/leak.txt')), false, '.git 内文件未被改名移出')
+    const sane = await httpJson(httpBases.plain, 'GET', '/api/files/read', { query: '?scope=fx&path=' + encQ('subrepo/readme.txt') })
+    assert.equal(sane.status, 200, '嵌套仓库工作区普通文件仍可读（守卫只拦 .git 内部）')
+    assert.equal(sane.json.content, 'subrepo readable')
+  })
+  it('符号链接指向 .git 内部（link-to-git → root/.git）经 realpath 复检在 list/read/download/写面全部拒绝', async () => {
+    const rootDir = await m.resolveScopeLocalDir('fx')
+    if (!existsSync(join(root, 'link-to-git'))) return // 无 junction 权限的环境跳过（同 link-in/link-out 先例）
+    // 函数层：词法上不含 .git 段，只能靠 realpath 复检拦截
+    assert.throws(() => m.listDirEntries(rootDir, 'link-to-git/config'), /禁止访问 \.git/, 'list via symlink→.git')
+    assert.throws(() => m.previewTextFile(rootDir, 'link-to-git/config'), /禁止访问 \.git/, 'read via symlink→.git')
+    assert.throws(() => m.openDownloadStream(rootDir, 'link-to-git/config'), /禁止访问 \.git/, 'download via symlink→.git')
+    assert.throws(() => m.uploadBytes(rootDir, 'link-to-git/evil.txt', Buffer.from('x'), { overwrite: true }), /禁止访问 \.git/, 'upload via symlink→.git')
+    assert.throws(() => m.createDir(rootDir, 'link-to-git/newdir'), /禁止访问 \.git/, 'mkdir via symlink→.git')
+    assert.throws(() => m.renamePath(rootDir, 'README.md', 'link-to-git/evil.txt'), /禁止访问 \.git/, 'rename-to via symlink→.git')
+    assert.throws(() => m.removePath(rootDir, 'link-to-git/config', 'yes'), /禁止访问 \.git/, 'delete via symlink→.git')
+    // HTTP 路由层（真路由 realpath 复检）
+    const rd = await httpJson(httpBases.plain, 'GET', '/api/files/read', { query: '?scope=fx&path=' + encQ('link-to-git/config') })
+    assert.equal(rd.status, 403, 'HTTP read via symlink→.git 应 403，实际 ' + rd.status)
+    const dl = await httpJson(httpBases.plain, 'GET', '/api/files/download', { query: '?scope=fx&path=' + encQ('link-to-git/config') })
+    assert.equal(dl.status, 403, 'HTTP download via symlink→.git 应 403，实际 ' + dl.status)
+    const up = await httpJson(httpBases.plain, 'PUT', '/api/files/upload', { query: '?scope=fx&path=' + encQ('link-to-git/x') + '&overwrite=1', body: 'x' })
+    assert.equal(up.status, 403, 'HTTP upload via symlink→.git 应 403，实际 ' + up.status)
+    assert.equal(existsSync(join(root, 'link-to-git/x')), false, '符号链接目标（.git 内部）无落盘')
+  })
+})
+
+describe('S1 R-A2 畸形 percent-encoding 注入不崩进程（F2：400/404 + 进程存活 + ≥10 并发）', () => {
+  // 原始请求行直发（%zz 必须原样进 req.url——fetch 会先做 URL 规范化，这里用 node:http 底走真路由）
+  function rawGet(path) {
+    return new Promise((resolve) => {
+      const rq = httpRequest({ host: '127.0.0.1', port: new URL(httpBases.plain).port, method: 'GET', path }, (res) => {
+        let t = ''
+        res.on('data', (d) => { t += d })
+        res.on('end', () => resolve({ status: res.statusCode, body: t }))
+      })
+      rq.on('error', (e) => resolve({ status: 0, error: e.message, code: e.code, name: e.name }))
+      rq.end()
+    })
+  }
+  it('单发畸形 % 注入矩阵（%zz/悬空 %/重复 %/超长 ≥1 万字符）→ 400/404；同进程随后正常请求 200（进程存活）', async () => {
+    // 前置：复现「413 预检毒化 keep-alive 连接」场景（TC-S4-02 预检同款——声明超上限 Content-Length 但一字节体都不发）。
+    // 若服务端预检 413 后仍 keep-alive：连接停在「服务端等剩余体」的错位态，node:http 客户端会把该 socket 放回连接池，
+    // 下一个 raw 请求（下方畸形样本）复用错位连接 → 被服务端误读为体字节 → 挂起约 6s 后 ECONNRESET（本轮实测实证）。
+    // 修复后预检响应带 Connection: close → 连接不回流连接池，畸形样本必须仍即时 400/404（新连接），否则本测试失败。
+    const poison = await new Promise((resolve) => {
+      const rq = httpRequest({
+        host: '127.0.0.1', port: new URL(httpBases.plain).port, method: 'PUT',
+        path: '/api/files/upload?scope=fx&path=' + encQ('ra2-poison.bin'),
+        headers: { 'content-length': String(m.FILES_LIMITS.MAX_UPLOAD + 1) },
+      }, (res) => { let t = ''; res.on('data', (d) => { t += d }); res.on('end', () => resolve({ status: res.statusCode, body: t })) })
+      rq.on('error', (e) => resolve({ status: 0, error: e.message }))
+      rq.end()
+    })
+    assert.equal(poison.status, 413, '预检探针应 413，实际 ' + JSON.stringify(poison))
+    assert.ok(String(poison.body ?? '').includes('上传超过上限'), '预检探针响应文案可读')
+    const samples = [
+      '/api/files%zz', // R-A2 验收原样样本：decodeURIComponent 抛 URIError → 400
+      '/api/files/%zz',
+      '/api/files/%',
+      '/%zz',
+      '/api%zz/files/list',
+      '/api/files/list%zz%zz',
+      '/index%zz.html',
+      '/api/files/' + '%zz'.repeat(3000), // 超长畸形（约 9k 字符）
+      '/api/files/read?scope=fx&path=' + encQ('README.md') + '%zz', // query 内混入畸形（URLSearchParams 容错 → 正常路径语义）
+    ]
+    for (const p of samples) {
+      const r = await rawGet(p)
+      assert.ok(r.status === 400 || r.status === 404, '样本 ' + JSON.stringify(p.slice(0, 40)) + ' 应 400/404，实际 ' + r.status + ' detail=' + JSON.stringify(r))
+    }
+    // 进程存活：同进程后续正常请求 200（若进程被击穿，这里连接将 000/ECONNREFUSED）
+    const health = await httpJson(httpBases.plain, 'GET', '/api/files/list', { query: '?scope=fx&path=' })
+    assert.equal(health.status, 200, '畸形注入后正常 list 仍 200（进程存活）')
+    const read = await httpJson(httpBases.plain, 'GET', '/api/files/read', { query: '?scope=fx&path=' + encQ('README.md') })
+    assert.equal(read.status, 200)
+    assert.equal(read.json.content, 'hello 世界\n第二行', '数据面不受畸形注入影响')
+  })
+  it('≥10 并发畸形请求不崩：全部 400/404、随后健康 200', async () => {
+    const pool = ['/api/files%zz', '/api/files/%zz', '/%zz%zz%zz', '/api%zz/list', '/api/files/read%zz', '/api/files/' + '%zz'.repeat(4000)]
+    const reqs = []
+    for (let i = 0; i < 12; i += 1) reqs.push(pool[i % pool.length])
+    const results = await Promise.all(reqs.map((p) => rawGet(p)))
+    for (const r of results) {
+      assert.ok(r.status === 400 || r.status === 404, '并发畸形应 400/404，实际 ' + r.status + '（' + JSON.stringify(r).slice(0, 100) + '）')
+    }
+    const health = await httpJson(httpBases.plain, 'GET', '/api/files/list', { query: '?scope=fx&path=' })
+    assert.equal(health.status, 200, '12 并发畸形请求后进程仍存活（正常请求 200）')
   })
 })

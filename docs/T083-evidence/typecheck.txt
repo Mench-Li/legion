@@ -1,0 +1,13 @@
+T-083 切片 S4 —— tsc 类型检查证据
+================================================
+命令（workbench/ 下）：pnpm exec tsc --noEmit
+结果：exit 0 —— 零诊断输出（tsc 纯 JS 无原生 spawn，沙箱内可直跑）
+
+关键被检文件：
+  - workbench/src/components/BrowserView.tsx（BrowserPanel → BrowserView 改名 + S7 收口内容）
+  - workbench/src/App.tsx（浏览器分支渲染 <BrowserView />）
+tsc 对 BrowserView 的 import（webFetchPage / WebFetchResult / toast）、isErrorResult/errorText、
+onKeyDown IME 守卫、JSX 分支均无类型错误。
+
+（完整 pnpm build = tsc --noEmit && vite build；tsc 段已在上述单独验证为 0 诊断，
+ vite 段因沙箱 spawn EPERM 受限，见 build.txt。）

@@ -1,0 +1,16 @@
+T-083 切片 S4 —— S6 浏览器抓取契约测试（主路径冒烟·无回归）证据
+=================================================================
+命令（worktree 根）：node workbench/scripts/web.test.mjs   （离线：进程内 mock HTTP + 直引 serve.mjs）
+
+结果：exit 0
+  ℹ tests 21    ℹ suites 12
+  ℹ pass 21     ℹ fail 0    ℹ skipped 0
+
+覆盖要点（与 BrowserView 错误态映射直接相关的服务端契约）：
+  - /page 正文抓取 ok（地址栏 → 正文主路径）
+  - /404 /500 → code=http_404 / http_500（BrowserView isErrorResult 的 http_* 前缀分支）
+  - 重定向循环 /loop → too_many_redirects（isErrorResult 显式列出，不再落入正文分支）
+  - /slow /stall /c1 链 → timeout（headers 未回 / body stall / 整链累计同码）
+  - /max → too_large；SSRF 守卫 /protocol 白名单错误码
+  - S2-R-A3 审计留痕、R-A3b 默认位置/容量轮转、G-11 WEB_ERR 枚举表（含 timeout/ssrf_blocked/too_large…）
+  - 与 T-079 基线一致 21/21，无回归。

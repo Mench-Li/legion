@@ -30,7 +30,7 @@ import { CommandBar } from './components/CommandBar'
 import { SkillsPanel } from './components/SkillsPanel'
 import { ChatView } from './components/ChatView'
 import { FilesView } from './components/FilesView'
-import { BrowserPanel } from './components/BrowserPanel'
+import { BrowserView } from './components/BrowserView'
 import { NewSpaceModal } from './components/NewSpaceModal'
 import { SpaceSettingsModal } from './components/SpaceSettingsModal'
 import { ToastHost, toast } from './components/Toast'
@@ -353,7 +353,7 @@ export default function App(): React.JSX.Element {
           ) : active === 'files' ? (
             <FilesView scope={scope} hubMode={hubMode} spaces={hubSpaces} onOpenSettings={s => setSpaceSettings(s)} />
           ) : active === 'browser' ? (
-            <BrowserPanel />
+            <BrowserView />
           ) : (
             <CenterPanel board={board} labels={labels} active={active} rosterAgents={hubMode ? roster : null} scope={scope} spaces={hubSpaces} goalInfo={hubMode ? goalInfo : null} hubActive={hubMode} />
           )

@@ -33,22 +33,36 @@ function normalizeUrl(input: string): string | null {
   return null
 }
 
+/** S7 AC3：服务端 webFetch 错误码 → 界面文案映射（TC-S7-04/05 要求各错误可区分、不混淆）。 */
 function errorText(r: WebFetchResult): string {
   const code = r.code ?? ''
   if (code === 'ssrf_blocked') return '🛡 已拦截：禁止访问内网地址（SSRF 防护）'
-  if (code === 'protocol_blocked') return `🛡 协议白名单外：${r.error ?? code}`
+  if (code === 'protocol_blocked') return '🛡 协议白名单外：' + (r.error ?? code)
   if (code === 'timeout') return '⏱ 抓取超时：目标响应太慢或已断开（可重试）'
-  if (code === 'too_large') return `📦 页面过大：${r.error ?? '超过大小上限'}`
-  if (code === 'dns_error') return `🌐 域名解析失败：${r.error ?? ''}`
-  if (code === 'invalid_url') return `⚠ URL 无效：${r.error ?? ''}`
-  if (code === 'fetch_error') return `🔌 网络错误：${r.error ?? ''}（请确认 serve.mjs 与目标可达）`
-  if (code && code.startsWith('http_')) return `⚠ 目标返回错误：${r.error ?? code}`
+  if (code === 'too_large') return '📦 页面过大：' + (r.error ?? '超过大小上限')
+  if (code === 'too_many_redirects') return '🔁 重定向次数过多：' + (r.error ?? '目标页跳转超过上限，已停止')
+  if (code === 'web_error') return '🔌 请求失败：' + (r.error ?? '未知错误')
+  if (code === 'dns_error') return '🌐 域名解析失败：' + (r.error ?? '')
+  if (code === 'invalid_url') return '⚠ URL 无效：' + (r.error ?? '')
+  if (code === 'fetch_error') return '🔌 网络错误：' + (r.error ?? '') + '（请确认 serve.mjs 与目标可达）'
+  if (code && code.startsWith('http_')) return '⚠ 目标返回错误：' + (r.error ?? code)
   if (code === 'unsupported') return '📄 目标不是可读网页（pdf/图片/压缩包等），仅显示结构化信息'
   if (code === 'empty_content') return '🧩 页面为 SPA/纯 JS 渲染，服务端无法抽取正文（v1 边界）'
   return r.error ?? '抓取失败，请重试'
 }
 
-export function BrowserPanel(): React.JSX.Element {
+/** S7 AC5 请求态 / AC3 错误呈现：判定该结果是否按「错误」视图渲染（否则按正文渲染）。
+ *  基线 BrowserPanel 的 errFlag 漏列 too_many_redirects/web_error，此类非 2xx 结果会落入正文分支；S7 收口修正。 */
+function isErrorResult(r: WebFetchResult): boolean {
+  const code = r.code ?? ''
+  if (!r.ok && !code) return true
+  if (code.startsWith('http_')) return true
+  return code === 'ssrf_blocked' || code === 'protocol_blocked' || code === 'timeout' || code === 'too_large'
+    || code === 'too_many_redirects' || code === 'web_error' || code === 'dns_error' || code === 'invalid_url'
+    || code === 'fetch_error'
+}
+
+export function BrowserView(): React.JSX.Element {
   const [url, setUrl] = useState('')
   const [history, setHistory] = useState<string[]>(() => loadHistory())
   const [busy, setBusy] = useState(false)
@@ -85,7 +99,7 @@ export function BrowserPanel(): React.JSX.Element {
     } catch (e) {
       setResult(null)
       setStatusText('')
-      toast('err', `浏览器助手请求失败：${e instanceof Error ? e.message : String(e)}`)
+      toast('err', '浏览器助手请求失败：' + (e instanceof Error ? e.message : String(e)))
     } finally {
       setBusy(false)
     }
@@ -97,7 +111,7 @@ export function BrowserPanel(): React.JSX.Element {
   }
 
   const code = result?.code ?? ''
-  const errFlag = result ? (code.startsWith('http_') || code === 'ssrf_blocked' || code === 'timeout' || code === 'too_large' || code === 'dns_error' || code === 'fetch_error' || code === 'protocol_blocked' || code === 'invalid_url' || (!result.ok && !result.code)) : false
+  const errFlag = result ? isErrorResult(result) : false
 
   return (
     <div className="center-col">
@@ -113,7 +127,7 @@ export function BrowserPanel(): React.JSX.Element {
           value={url}
           placeholder="输入网址，如 example.com 或 https://example.com/page"
           onChange={e => setUrl(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') submit() }}
+          onKeyDown={e => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) submit() }}
         />
         <datalist id="browser-history">
           {history.map(h => <option key={h} value={h} />)}

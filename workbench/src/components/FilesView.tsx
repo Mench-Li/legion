@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { fileDownloadUrl, filesDelete, filesMkdir, filesRename, filesUpload, fetchFileList, fetchFilePreview } from '../api'
 import type { FileEntry, FilePreview, SpaceInfo } from '../types'
 import { toast } from './Toast'
 
-interface FilesPanelProps {
+interface FilesViewProps {
   scope: string | null
   hubMode: boolean
   spaces: SpaceInfo[]
@@ -18,6 +18,7 @@ function sizeText(n: number): string {
 }
 
 function mtimeText(ts: string): string {
+  if (!ts) return '—'
   const d = new Date(ts)
   if (Number.isNaN(d.getTime())) return ts
   const p = (x: number): string => String(x).padStart(2, '0')
@@ -31,13 +32,16 @@ function joinRel(dir: string, name: string): string {
 /**
  * 文件中心（S5）。数据源 = serve.mjs /api/files（scope → 空间 local_dir；仅回环 + 写需 token）。
  * 渲染安全（I5 / TC-S5-08）：文件名/预览内容一律 React 文本节点，无 dangerouslySetInnerHTML。
+ * 大文件 read 由后端截断（MAX_READ 256KB）并回行数/总长标注，前端保留 loading 态（TC-S5-10）。
  */
-export function FilesPanel({ scope, hubMode, spaces, onOpenSettings }: FilesPanelProps): React.JSX.Element {
+export function FilesView({ scope, hubMode, spaces, onOpenSettings }: FilesViewProps): React.JSX.Element {
   const [dir, setDir] = useState('')
   const [entries, setEntries] = useState<FileEntry[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [preview, setPreview] = useState<FilePreview | null>(null)
+  /** 预览请求在途（TC-S5-10：超大文件 read 期间 UI 可见 loading，不假死）。 */
+  const [previewLoading, setPreviewLoading] = useState(false)
   const [busy, setBusy] = useState(false)
   const [creating, setCreating] = useState(false)
   const [newName, setNewName] = useState('')
@@ -47,6 +51,15 @@ export function FilesPanel({ scope, hubMode, spaces, onOpenSettings }: FilesPane
 
   const space = scope ? spaces.find(s => s.id === scope) ?? null : null
   const spaceName = space?.name ?? scope ?? ''
+  /** 预览请求序号：目录切换/再点其他文件时作废在途响应，防乱序覆盖（陈旧内容串显）。 */
+  const previewSeq = useRef(0)
+
+  /** 清空预览并作废在途读取（目录切换/根回退/重挂时调用）。 */
+  const clearPreview = useCallback((): void => {
+    previewSeq.current += 1
+    setPreviewLoading(false)
+    setPreview(null)
+  }, [])
 
   const load = useCallback(async (pathValue: string): Promise<void> => {
     if (!scope) return
@@ -63,12 +76,17 @@ export function FilesPanel({ scope, hubMode, spaces, onOpenSettings }: FilesPane
     }
   }, [scope])
 
+  // scope 或空间绑定目录（localDir）变化 → 回到根并重拉最新列表
+  // （TC-S5-07：在文件中心内经「打开空间设置」绑定目录后，关闭弹窗即自动列出根目录，无需切空间/手刷）
   useEffect(() => {
+    previewSeq.current += 1
     setDir('')
     setPreview(null)
-    if (scope) void load('')
+    setPreviewLoading(false)
+    if (scope && space?.localDir) void load('')
     else { setEntries([]); setError('') }
-  }, [scope, load])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scope, load, space?.localDir])
 
   if (!hubMode) {
     return (
@@ -115,7 +133,7 @@ export function FilesPanel({ scope, hubMode, spaces, onOpenSettings }: FilesPane
   const enter = (name: string): void => {
     const next = joinRel(dir, name)
     setDir(next)
-    setPreview(null)
+    clearPreview()
     void load(next)
   }
 
@@ -123,18 +141,24 @@ export function FilesPanel({ scope, hubMode, spaces, onOpenSettings }: FilesPane
     if (!dir) return
     const next = dir.split('/').slice(0, -1).join('/')
     setDir(next)
-    setPreview(null)
+    clearPreview()
     void load(next)
   }
 
   const openPreview = async (entry: FileEntry): Promise<void> => {
     if (entry.type === 'dir') { enter(entry.name); return }
-    setPreview({ ok: false, name: entry.name, ext: '', binary: false } as FilePreview)
+    const seq = previewSeq.current + 1
+    previewSeq.current = seq
+    setPreviewLoading(true)
     try {
       const p = await fetchFilePreview(scope as string, joinRel(dir, entry.name))
-      setPreview(p)
+      if (previewSeq.current === seq) setPreview(p)
     } catch (e) {
-      setPreview({ ok: false, name: entry.name, ext: '', binary: false, error: e instanceof Error ? e.message : String(e) } as FilePreview)
+      if (previewSeq.current === seq) {
+        setPreview({ ok: false, name: entry.name, ext: '', binary: false, error: e instanceof Error ? e.message : String(e) } as FilePreview)
+      }
+    } finally {
+      if (previewSeq.current === seq) setPreviewLoading(false)
     }
   }
 
@@ -210,7 +234,7 @@ export function FilesPanel({ scope, hubMode, spaces, onOpenSettings }: FilesPane
       try {
         await filesDelete(scope as string, joinRel(dir, entry.name), 'yes')
         toast('ok', `已删除：${entry.name}`)
-        if (preview?.name === entry.name) setPreview(null)
+        if (preview?.name === entry.name) clearPreview()
         await load(dir)
       } catch (e) {
         toast('err', `删除失败：${e instanceof Error ? e.message : String(e)}`)
@@ -231,6 +255,7 @@ export function FilesPanel({ scope, hubMode, spaces, onOpenSettings }: FilesPane
           <span style={{ color: 'var(--muted-2)', fontSize: 11 }}> · 根：{space.localDir}</span>
         </span>
         <span style={{ marginLeft: 'auto' }} className="files-actions">
+          {busy && <span className="files-busy">⏳ 处理中…</span>}
           <button className="btn" disabled={!dir || busy} onClick={goUp}>⬆ 上级</button>
           <button className="btn" disabled={busy} onClick={() => { setCreating(true); setNewName('') }}>＋ 新建目录</button>
           <button className="btn" disabled={busy} onClick={() => fileRef.current?.click()}>⇪ 上传</button>
@@ -240,10 +265,10 @@ export function FilesPanel({ scope, hubMode, spaces, onOpenSettings }: FilesPane
       </div>
 
       <div className="panel files-breadcrumb">
-        <span className="crumb" onClick={() => { setDir(''); setPreview(null); void load('') }}>📁 根目录</span>
+        <span className="crumb" onClick={() => { setDir(''); clearPreview(); void load('') }}>📁 根目录</span>
         {crumbs.map((c, i) => {
           const pathHere = crumbs.slice(0, i + 1).join('/')
-          return (<span key={pathHere} className="crumb" onClick={() => { setDir(pathHere); setPreview(null); void load(pathHere) }}> / {c}</span>)
+          return (<span key={pathHere} className="crumb" onClick={() => { setDir(pathHere); clearPreview(); void load(pathHere) }}> / {c}</span>)
         })}
       </div>
 
@@ -280,7 +305,8 @@ export function FilesPanel({ scope, hubMode, spaces, onOpenSettings }: FilesPane
         </div>
 
         <div className="panel files-preview">
-          {preview === null ? (<div className="chat-empty">点文件预览其内容；二进制文件会提示不可预览</div>)
+          {previewLoading ? (<div className="chat-empty">⏳ 正在读取预览…</div>)
+            : preview === null ? (<div className="chat-empty">点文件预览其内容；二进制文件会提示不可预览</div>)
             : preview.error ? (<div className="files-error">⚠ {preview.error}</div>)
             : preview.binary ? (<div className="chat-empty">⛔ {preview.message ?? '二进制文件不可预览'}</div>)
             : (

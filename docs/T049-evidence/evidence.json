@@ -1,0 +1,56 @@
+{
+  "task": "T-049",
+  "role": "coder",
+  "slice": "S5 文件中心前端（FilesView + Sidebar/QuickTools 接线收口）",
+  "base": "w/T-049 @ 8c5903b promote T-058（基线 S5 首版 FilesPanel 已随 23a9957 S2+S5+S7 三中心前端落库；本任务改名收口 + TC-S5 硬化 + 全量复验）",
+  "environment": {
+    "node": "v24",
+    "os": "Windows 沙箱",
+    "network": "禁网（零下载）",
+    "deps": "借主 checkout workbench/node_modules 与 dist junction（gitignore，仅验证用）",
+    "sandbox": "Node child_process named-pipe spawn → EPERM（probe 实证：pipe 抛 EPERM、inherit 可跑），vite/esbuild 服务进程受阻，无提权通道"
+  },
+  "changedFiles": [
+    "workbench/src/components/FilesView.tsx（新增：原 FilesPanel 改名 + S5 硬化：预览 loading 态 TC-S5-10、previewSeq 防乱序、localDir effect 绑定后自动列根 TC-S5-07、busy 提示、mtime 兜底）",
+    "workbench/src/components/FilesPanel.tsx（删除，改名至 FilesView.tsx）",
+    "workbench/src/App.tsx（+2/−2：import 与 files 分支改用 FilesView）",
+    "workbench/src/index.css（+3/−1：注释改名 + .files-busy）",
+    "workbench/README.md（FilesPanel→FilesView + S5 能力补述 2 处）",
+    "README.md（3.8 文件中心 FilesView + 能力补述；顺带修正 ChatPanel→ChatView 文档漂移）",
+    "workbench/scripts/files-s5-smoke.mjs（新增 L1 测试资产，零依赖）",
+    "docs/T049-evidence/*（本证据）"
+  ],
+  "acceptance": [
+    {
+      "item": "① typecheck / 回归 / S5 数据面全绿",
+      "cmd": "node workbench/node_modules/typescript/bin/tsc -p workbench/tsconfig.json --noEmit && node workbench/scripts/files-api.test.mjs && node workbench/scripts/web.test.mjs && node workbench/scripts/files-s5-smoke.mjs",
+      "result": "tsc exit 0 零错误；files-api 34/34；web.test 12/12；S5 冒烟 32/32（真实 serve.mjs HTTP 路由：根列表形状/isRepo/导航/预览文本·二进制·截断·XSS 夹具/上传即见/409 覆盖/下载字节一致/删除 confirm 语义/未绑定 400/.git 403）"
+    },
+    {
+      "item": "② 实现满足 AC1..AC5 + TC-S5-01..10",
+      "cmd": "逐条对照见 docs/T049-evidence/README.md §1.1/§1.2",
+      "result": "AC3 预览安全：grep 全 src 零 dangerouslySetInnerHTML 使用、<pre> 文本节点；AC4 未绑定引导+后端错误行内/toast；AC5 上传/删除后重拉 list；TC-S5-10 loading 态与截断标注就位"
+    },
+    {
+      "item": "③ 真实跑过 typecheck/build/测试",
+      "cmd": "见 evidence/README §3",
+      "result": "tsc 真实 exit 0；三套测试真实全绿；真进程 L1（serve.mjs 端口 53991 + 静态 dist + 夹具 local_dir）list/read/download/upload 全过且 SHA256 下载一致；vite build 沙箱 EPERM（04-build-attempt.txt 实留，环境受限），宿主补跑 cd workbench && pnpm build（junction 就位）"
+    },
+    {
+      "item": "④ 改动仅在任务范围内；新依赖说明",
+      "cmd": "git status --porcelain / git diff --stat",
+      "result": "README.md、workbench/README.md、App.tsx、index.css、FilesPanel→FilesView、files-s5-smoke.mjs、docs/T049-evidence/；零新增依赖（无 package.json 改动、L1 资产只用 node 内置）"
+    }
+  ],
+  "commands": [
+    "node workbench/node_modules/typescript/bin/tsc -p workbench/tsconfig.json --noEmit → exit 0",
+    "node workbench/scripts/files-api.test.mjs → tests 34 pass 34 fail 0（S3/S4 回归）",
+    "node workbench/scripts/web.test.mjs → tests 12 pass 12 fail 0（S6 回归）",
+    "node workbench/scripts/files-s5-smoke.mjs → 32/32 PASS exit 0",
+    "真进程 L1：Start-Process node serve.mjs --port 53991 + DSH_WORKBENCH_SPACES_JSON → / 200 html；list/read/download 200（SHA256 一致）；PUT 上传 200 后立即可见；未绑定 scope 400",
+    "pnpm build 尝试：tsc 过 → vite/esbuild spawn EPERM（沙箱 named-pipe），exit 1，04-build-attempt.txt 实留",
+    "grep dangerouslySetInnerHTML workbench/src → 仅 2 处注释，零使用（05）"
+  ],
+  "l2Checklist": "见 docs/T049-evidence/README.md §4（将军 :5173 走查：入口接线/导航/预览含 XSS 夹具纯文本/上传即见/下载字节一致/未绑定引导+绑定后自动列根/409 覆盖/删除确认/loading 态）",
+  "zeroNewDeps": true
+}

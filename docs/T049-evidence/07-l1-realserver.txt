@@ -1,0 +1,19 @@
+cmd: Start-Process node workbench/scripts/serve.mjs --port 53991 + DSH_WORKBENCH_SPACES_JSON(临时夹具) + Invoke-WebRequest/RestMethod
+
+started=True pid=5372
+index status=200 type=text/html; charset=utf-8 bytes=423
+list ok=True entries=2 hasReadme=True hasDir=True root=C:\Users\11150\AppData\Local\Temp\dsh-rVWJST\legion-s5-proc-7681f8560e7145a2bd8ac205c6722393
+read ok=True binary=False content=﻿proc-smoke hello 世界
+ lineCount=1 truncated=False
+download hashMatch=True sha=A32A85A4695F6DFE84C0D1FD0D1B3BC63891B81DD8918901FBC2E90998E8CFED
+upload status=200 body={
+  "ok": true,
+  "file": {
+    "name": "proc-upload.txt",
+    "size": 11,
+    "mtime": "2026-09-04T03:21:41.584Z"
+  }
+}
+afterUpload visible=True total=3
+unbound status=400
+proc-l1 done

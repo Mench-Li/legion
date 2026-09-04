@@ -14,10 +14,13 @@
  *      PUT  /api/files/upload?scope=&path=&overwrite=1   → raw body 上传（Content-Length 预检 + 流式落盘临时文件，收体完整后原子改名发布——覆盖/中断/超限不破坏原文件，P0-1）
  *      POST /api/files/mkdir|rename|delete               → 受限写操作（JSON body）
  *   ③ 浏览器助手（/api/web/fetch，S6：SSRF 防护的服务端 fetch 代理 + 零依赖正文抽取）：
- *      POST /api/web/fetch { url, maxBytes?, timeoutMs? } → { ok, finalUrl, status, contentType, title, text?, excerpt?, links?, error? }
+ *      POST /api/web/fetch { url, maxBytes?, timeoutMs? } → { ok, finalUrl, status, contentType, title, text?, excerpt?, links?, error?, code? }
+ *      每次抓取（成功/失败/拦截均算）在 workbench/data/web-audit.jsonl（静态 ROOT=dist 之外）留痕一行 JSONL + console：
+ *      {ts, by:'general', url, finalUrl, status, ok, code, ms}，超限按容量轮转（主文件→.1）；路径/上限可经
+ *      DSH_WEB_AUDIT_FILE / DSH_WEB_AUDIT_MAX_BYTES 覆盖。错误码统一取 WEB_ERR 枚举常量表（http_<n> 为动态码）。
  */
 import { createServer, request } from 'node:http'
-import { createReadStream, createWriteStream, existsSync, openSync, readSync, writeSync, closeSync, unlinkSync, rmdirSync, mkdirSync, readdirSync, renameSync, realpathSync, statSync, lstatSync } from 'node:fs'
+import { appendFileSync, createReadStream, createWriteStream, existsSync, openSync, readSync, writeSync, closeSync, unlinkSync, rmdirSync, mkdirSync, readdirSync, renameSync, realpathSync, statSync, lstatSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { basename, extname, join, normalize, dirname, sep, resolve } from 'node:path'
 import { homedir } from 'node:os'
@@ -85,6 +88,25 @@ export const WEB_LIMITS = Object.freeze({
   MAX_REDIRECTS: 5,
   MAX_LINKS: 40, // 抽取链接数上限
   MAX_TEXT: 300_000, // 抽取正文/标题文本上限
+})
+
+/**
+ * 浏览器抓取错误码枚举常量表（G-11/R-A4 收口）：后端 webFetch emit、web.test 断言、前端 errorText 映射
+ * 三方对齐的唯一权威取值。上游 4xx/5xx 为动态码 http_<status>（格式 /^http_\d{3}$/，不入表）。
+ */
+export const WEB_ERR = Object.freeze({
+  INVALID_URL: 'invalid_url',
+  PROTOCOL_BLOCKED: 'protocol_blocked',
+  SSRF_BLOCKED: 'ssrf_blocked',
+  DNS_ERROR: 'dns_error',
+  TOO_MANY_REDIRECTS: 'too_many_redirects',
+  TIMEOUT: 'timeout',
+  TOO_LARGE: 'too_large',
+  FETCH_ERROR: 'fetch_error',
+  UNSUPPORTED: 'unsupported',
+  EMPTY_CONTENT: 'empty_content',
+  WEB_ERROR: 'web_error',
+  OK: 'ok',
 })
 // 二进制扩展名黑名单（预览拒绝；下载不受限）
 const BINARY_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.bmp', '.pdf', '.zip', '.gz', '.tar', '.7z', '.rar', '.exe', '.dll', '.so', '.bin', '.woff', '.woff2', '.ttf', '.otf', '.mp3', '.mp4', '.mov', '.avi', '.mkv', '.sqlite', '.db', '.db-wal', '.jar', '.class', '.pyc'])
@@ -565,6 +587,55 @@ function webErr(code, error) {
   return e
 }
 
+// ── R-A3/J3-A：抓取审计（JSONL 落盘到静态 ROOT 之外 + console；容量轮转；写失败绝不影响抓取响应 / 进程）──
+const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url)) // workbench/scripts：模块 URL 恒定位，不受 cwd 影响
+export const WEB_AUDIT = Object.freeze({
+  /** 默认审计文件：<workbench>/data/web-audit.jsonl（ROOT = workbench/dist 之外；workbench/.gitignore 已含 data/） */
+  DEFAULT_FILE: join(SCRIPTS_DIR, '..', 'data', 'web-audit.jsonl'),
+  /** 轮转上限（字节）：主文件将超限 → 改名 .1（覆盖旧档）开新文件续写——主文件大小有界、历史保留一份 */
+  DEFAULT_MAX_BYTES: 5 * 1024 * 1024,
+  /** 留痕来源标识（R-A3 验收字段 by=general） */
+  BY: 'general',
+})
+
+/** 审计目标（每次写时现读 env，测试可注入）：DSH_WEB_AUDIT_FILE 覆盖路径、DSH_WEB_AUDIT_MAX_BYTES 覆盖轮转上限。 */
+function webAuditTarget() {
+  const envFile = process.env.DSH_WEB_AUDIT_FILE
+  const file = typeof envFile === 'string' && envFile.trim().length > 0 ? envFile.trim() : WEB_AUDIT.DEFAULT_FILE
+  const maxBytes = envBytes('DSH_WEB_AUDIT_MAX_BYTES', WEB_AUDIT.DEFAULT_MAX_BYTES)
+  return { file, maxBytes }
+}
+
+/** 容量轮转：主文件已存在且写入后将超限 → 主文件改名 <file>.1（先清旧档），主文件开新续写。 */
+function rotateAuditIfNeeded(file, maxBytes, lineBytes) {
+  let size = 0
+  try { size = statSync(file).size } catch { return } // 主文件尚不存在：无需轮转
+  if (size + lineBytes <= maxBytes) return
+  const archive = file + '.1'
+  try { if (existsSync(archive)) unlinkSync(archive) } catch { /* 归档清理失败不阻断 */ }
+  try { renameSync(file, archive) } catch { /* 轮转失败降级为直接追加（审计可用性优先，进程不死 I-9） */ }
+}
+
+/**
+ * R-A3：每次 /api/web/fetch 追加一行 JSONL（成功/失败/拦截都算）并 console 一行。
+ * 审计写失败只 console.error——绝不抛出、绝不影响抓取响应（I-9）。ts/by 在此补齐，entry 含其余字段。
+ */
+export function appendWebAudit(entry) {
+  let where = ''
+  try {
+    const { file, maxBytes } = webAuditTarget()
+    where = file
+    const line = JSON.stringify({ ts: new Date().toISOString(), by: WEB_AUDIT.BY, ...entry })
+    const dir = dirname(file)
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+    rotateAuditIfNeeded(file, maxBytes, Buffer.byteLength(line, 'utf8'))
+    appendFileSync(file, line + '\n')
+    console.log('[web-audit] ' + line)
+  } catch (e) {
+    console.error('[web-audit] 写入失败（不影响抓取响应）: ' + (e instanceof Error ? e.message : String(e)) + (where ? ' @ ' + where : ''))
+  }
+}
+
 /** 是否允许目标为非公网地址（默认否；测试/本地 mock 经 DSH_WEB_FETCH_ALLOW_PRIVATE=1 放开——见 TEST_CASES §8.1）。 */
 function privateFetchAllowed() {
   return process.env.DSH_WEB_FETCH_ALLOW_PRIVATE === '1'
@@ -643,12 +714,12 @@ export async function assertPublicTarget(url) {
   const isV6 = hostname.includes(':')
   let literal = null
   if (isV6) {
-    if (isPrivateV6(hostname)) throw webErr('ssrf_blocked', 'SSRF 防护：禁止访问私网/回环地址（含 IPv6）')
+    if (isPrivateV6(hostname)) throw webErr(WEB_ERR.SSRF_BLOCKED, 'SSRF 防护：禁止访问私网/回环地址（含 IPv6）')
     return { hostname, ip: hostname }
   }
   if (/^\d/.test(hostname) || /^0x/i.test(hostname)) {
     literal = normalizeV4Literal(hostname)
-    if (literal && isPrivateV4Literal(literal)) throw webErr('ssrf_blocked', 'SSRF 防护：禁止访问私网/回环地址（含 IP 混淆写法）')
+    if (literal && isPrivateV4Literal(literal)) throw webErr(WEB_ERR.SSRF_BLOCKED, 'SSRF 防护：禁止访问私网/回环地址（含 IP 混淆写法）')
     if (literal) return { hostname, ip: literal }
   }
   // 域名：DNS 解析（A/AAAA）逐条校验
@@ -657,11 +728,11 @@ export async function assertPublicTarget(url) {
     const r = await lookup(hostname, { all: true, verbatim: true })
     addrs = r.map(x => x.address)
   } catch {
-    throw webErr('dns_error', '域名解析失败，无法确认目标地址（已阻止外呼）')
+    throw webErr(WEB_ERR.DNS_ERROR, '域名解析失败，无法确认目标地址（已阻止外呼）')
   }
   for (const addr of addrs) {
-    if (addr.includes(':')) { if (isPrivateV6(addr)) throw webErr('ssrf_blocked', 'SSRF 防护：域名解析指向私网/回环地址') }
-    else if (isPrivateV4Literal(addr)) throw webErr('ssrf_blocked', 'SSRF 防护：域名解析指向私网/回环地址')
+    if (addr.includes(':')) { if (isPrivateV6(addr)) throw webErr(WEB_ERR.SSRF_BLOCKED, 'SSRF 防护：域名解析指向私网/回环地址') }
+    else if (isPrivateV4Literal(addr)) throw webErr(WEB_ERR.SSRF_BLOCKED, 'SSRF 防护：域名解析指向私网/回环地址')
   }
   return { hostname, ip: addrs[0] ?? null }
 }
@@ -731,12 +802,29 @@ async function readBodyLimited(res, maxBytes, signal) {
   const reader = res.body.getReader()
   const chunks = []
   let total = 0
+  // R-A4/J4-A：body 读取单一归类点——abort（含共享 deadline 与 body stall 触发）一律 timeout；
+  // 判据用 ac.signal.aborted 状态而非错误 message（不随 undici 文案漂移，J4-B 排除）；附真实 status 供审计行。
+  const failWith = (code, message) => {
+    const e = webErr(code, message)
+    if (res.status != null) e.status = res.status
+    return e
+  }
   for (;;) {
-    if (signal?.aborted) { try { await reader.cancel() } catch { /* */ } throw webErr('timeout', '抓取超时（已取消请求）') }
-    const { done, value } = await reader.read()
+    if (signal?.aborted) { try { await reader.cancel() } catch { /* */ } throw failWith(WEB_ERR.TIMEOUT, '抓取超时（已取消请求）') }
+    let done = false
+    let value
+    try {
+      const r = await reader.read()
+      done = r.done
+      value = r.value
+    } catch (e) {
+      // body stall：headers 已回、body 挂起时被 abort → read() 拒绝 → 同码 timeout（修复前误归类 web_error/undefined）
+      if (signal?.aborted) { try { await reader.cancel() } catch { /* */ } throw failWith(WEB_ERR.TIMEOUT, '抓取超时（已取消请求）') }
+      throw failWith(WEB_ERR.FETCH_ERROR, '读取响应体失败：' + (e?.message ?? e))
+    }
     if (done) break
     total += value.length
-    if (total > maxBytes) { try { await reader.cancel() } catch { /* */ } throw webErr('too_large', '响应体超过上限（当前上限 ' + maxBytes + ' 字节）') }
+    if (total > maxBytes) { try { await reader.cancel() } catch { /* */ } throw failWith(WEB_ERR.TOO_LARGE, '响应体超过上限（当前上限 ' + maxBytes + ' 字节）') }
     chunks.push(Buffer.from(value))
   }
   return Buffer.concat(chunks)
@@ -747,62 +835,70 @@ async function readBodyLimited(res, maxBytes, signal) {
  * 返回结构化 JSON（无原始 HTML 透传字段，TC-S6-10）。
  * timeoutMs 为「整条链总超时」（P0-3 修复）：首跳据此算出绝对截止时间戳 deadline 并随重定向递归
  * 共享下传，每跳剩余预算 = deadlineTs - now（不再每跳重置计时）；超过 5 跳上限同样受总超时约束。
+ * 错误码取 WEB_ERR 常量表（G-11）；body 读取/整链 abort 统一 timeout（R-A4/J4-A）；失败 throw 的 Error 附 .url/.status 供审计留痕定位失败一跳。
  */
 export async function webFetch({ url: rawUrl, maxBytes = WEB_LIMITS.MAX_BYTES, timeoutMs = WEB_LIMITS.TIMEOUT_MS, redirects = 0, deadline = 0 } = {}) {
-  if (typeof rawUrl !== 'string' || rawUrl.trim().length === 0) throw webErr('invalid_url', '缺少参数 url')
+  if (typeof rawUrl !== 'string' || rawUrl.trim().length === 0) throw webErr(WEB_ERR.INVALID_URL, '缺少参数 url')
+  const requestedUrl = rawUrl.trim()
   const mb = Number.isFinite(Number(maxBytes)) ? Math.max(1, Math.min(Number(maxBytes), 16 * 1024 * 1024)) : WEB_LIMITS.MAX_BYTES
   const tm = Number.isFinite(Number(timeoutMs)) ? Math.max(1, Math.min(Number(timeoutMs), 60_000)) : WEB_LIMITS.TIMEOUT_MS
-  // P0-3：共享整链 deadline（内部参数，仅重定向递归传递）；已过截止 → 立即判超时，绝不放行
-  const deadlineTs = Number.isFinite(deadline) && deadline > 0 ? deadline : Date.now() + tm
-  const remainMs = deadlineTs - Date.now()
-  if (remainMs <= 0) throw webErr('timeout', '抓取超时（已取消请求）')
-  let target
-  try { target = new URL(String(rawUrl).trim()) } catch { throw webErr('invalid_url', 'URL 无法解析') }
-  if (target.protocol !== 'http:' && target.protocol !== 'https:') throw webErr('protocol_blocked', '协议白名单：仅支持 http/https（收到 ' + target.protocol + '）')
-  if (redirects > WEB_LIMITS.MAX_REDIRECTS) throw webErr('too_many_redirects', '重定向超过 ' + WEB_LIMITS.MAX_REDIRECTS + ' 跳，已停止')
-  await assertPublicTarget(target)
-  const ac = new AbortController()
-  const timer = setTimeout(() => ac.abort(new Error('abort')), Math.min(tm, remainMs))
   try {
-    let res
+    // P0-3：共享整链 deadline（内部参数，仅重定向递归传递）；已过截止 → 立即判超时，绝不放行
+    const deadlineTs = Number.isFinite(deadline) && deadline > 0 ? deadline : Date.now() + tm
+    const remainMs = deadlineTs - Date.now()
+    if (remainMs <= 0) throw webErr(WEB_ERR.TIMEOUT, '抓取超时（已取消请求）')
+    let target
+    try { target = new URL(requestedUrl) } catch { throw webErr(WEB_ERR.INVALID_URL, 'URL 无法解析') }
+    if (target.protocol !== 'http:' && target.protocol !== 'https:') throw webErr(WEB_ERR.PROTOCOL_BLOCKED, '协议白名单：仅支持 http/https（收到 ' + target.protocol + '）')
+    if (redirects > WEB_LIMITS.MAX_REDIRECTS) throw webErr(WEB_ERR.TOO_MANY_REDIRECTS, '重定向超过 ' + WEB_LIMITS.MAX_REDIRECTS + ' 跳，已停止')
+    await assertPublicTarget(target)
+    const ac = new AbortController()
+    const timer = setTimeout(() => ac.abort(new Error('abort')), Math.min(tm, remainMs))
     try {
-      res = await fetch(target.href, { redirect: 'manual', signal: ac.signal, headers: { 'user-agent': 'legion-browser-assistant/1.0 (SSRF-guarded)', 'accept': 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5' } })
-    } catch (e) {
-      if (ac.signal.aborted) throw webErr('timeout', '抓取超时（已取消请求）')
-      throw webErr('fetch_error', '网络请求失败：' + (e?.message ?? e))
-    }
-    const status = res.status
-    if (status >= 300 && status < 400) {
-      const loc = res.headers.get('location')
-      if (loc) {
-        const next = new URL(loc, target.href)
-        if (next.protocol !== 'http:' && next.protocol !== 'https:') throw webErr('ssrf_blocked', '重定向目标协议不在白名单（' + next.protocol + '）')
-        clearTimeout(timer) // 本跳已完成：交给下一跳按共享 deadline 计时（避免外层空转定时器，P0-3）
-        return webFetch({ url: next.href, maxBytes: mb, timeoutMs: tm, redirects: redirects + 1, deadline: deadlineTs })
+      let res
+      try {
+        res = await fetch(target.href, { redirect: 'manual', signal: ac.signal, headers: { 'user-agent': 'legion-browser-assistant/1.0 (SSRF-guarded)', 'accept': 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5' } })
+      } catch (e) {
+        if (ac.signal.aborted) throw webErr(WEB_ERR.TIMEOUT, '抓取超时（已取消请求）')
+        throw webErr(WEB_ERR.FETCH_ERROR, '网络请求失败：' + (e?.message ?? e))
       }
+      const status = res.status
+      if (status >= 300 && status < 400) {
+        const loc = res.headers.get('location')
+        if (loc) {
+          const next = new URL(loc, target.href)
+          if (next.protocol !== 'http:' && next.protocol !== 'https:') throw webErr(WEB_ERR.SSRF_BLOCKED, '重定向目标协议不在白名单（' + next.protocol + '）')
+          clearTimeout(timer) // 本跳已完成：交给下一跳按共享 deadline 计时（避免外层空转定时器，P0-3）
+          return webFetch({ url: next.href, maxBytes: mb, timeoutMs: tm, redirects: redirects + 1, deadline: deadlineTs })
+        }
+      }
+      const ct = res.headers.get('content-type') ?? ''
+      if (status >= 400) {
+        const errBuf = await readBodyLimited(res, Math.min(mb, 65536), ac.signal).catch(() => Buffer.alloc(0))
+        const errText = decodeHtml(errBuf, ct).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200)
+        return { ok: false, finalUrl: target.href, status, contentType: ct, error: '上游返回 http_' + status + (errText ? '：' + errText : ''), code: 'http_' + status }
+      }
+      const isHtml = /text\/html|application\/xhtml\+xml/i.test(ct)
+      const isText = /^text\//i.test(ct) || /json|xml/i.test(ct)
+      if (!isHtml && !isText) {
+        // 非文本/HTML（pdf/zip/图片等）：不读体、明确降级
+        const errBuf = await readBodyLimited(res, 0, ac.signal).catch(() => Buffer.alloc(0))
+        return { ok: true, finalUrl: target.href, status, contentType: ct, title: '', text: '', excerpt: '', links: [], error: '目标不是可读文本/HTML（' + ct.split(';')[0].trim() + '），已跳过正文抽取', code: WEB_ERR.UNSUPPORTED }
+      }
+      const buf = await readBodyLimited(res, mb, ac.signal)
+      const html = decodeHtml(buf, ct)
+      const { title, text, excerpt, links } = extractHtml(html, target.href)
+      if (!title && !text) {
+        return { ok: true, finalUrl: target.href, status, contentType: ct, title: '', text: '', excerpt: '', links, error: '未能抽取正文：目标页可能是 SPA/纯 JS 渲染空壳（v1 服务端抓取为显式边界）', code: WEB_ERR.EMPTY_CONTENT }
+      }
+      return { ok: true, finalUrl: target.href, status, contentType: ct, title, text, excerpt, links }
+    } finally {
+      clearTimeout(timer)
     }
-    const ct = res.headers.get('content-type') ?? ''
-    if (status >= 400) {
-      const errBuf = await readBodyLimited(res, Math.min(mb, 65536), ac.signal).catch(() => Buffer.alloc(0))
-      const errText = decodeHtml(errBuf, ct).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200)
-      return { ok: false, finalUrl: target.href, status, contentType: ct, error: '上游返回 http_' + status + (errText ? '：' + errText : ''), code: 'http_' + status }
-    }
-    const isHtml = /text\/html|application\/xhtml\+xml/i.test(ct)
-    const isText = /^text\//i.test(ct) || /json|xml/i.test(ct)
-    if (!isHtml && !isText) {
-      // 非文本/HTML（pdf/zip/图片等）：不读体、明确降级
-      const errBuf = await readBodyLimited(res, 0, ac.signal).catch(() => Buffer.alloc(0))
-      return { ok: true, finalUrl: target.href, status, contentType: ct, title: '', text: '', excerpt: '', links: [], error: '目标不是可读文本/HTML（' + ct.split(';')[0].trim() + '），已跳过正文抽取', code: 'unsupported' }
-    }
-    const buf = await readBodyLimited(res, mb, ac.signal)
-    const html = decodeHtml(buf, ct)
-    const { title, text, excerpt, links } = extractHtml(html, target.href)
-    if (!title && !text) {
-      return { ok: true, finalUrl: target.href, status, contentType: ct, title: '', text: '', excerpt: '', links, error: '未能抽取正文：目标页可能是 SPA/纯 JS 渲染空壳（v1 服务端抓取为显式边界）', code: 'empty_content' }
-    }
-    return { ok: true, finalUrl: target.href, status, contentType: ct, title, text, excerpt, links }
-  } finally {
-    clearTimeout(timer)
+  } catch (e) {
+    // 审计辅助：失败统一标记「本跳请求 URL」（重定向递归由最深一跳先标，外层不覆盖）——审计行 finalUrl 可定位到失败一跳
+    if (e instanceof Error && typeof e.url !== 'string') e.url = requestedUrl
+    throw e
   }
 }
 
@@ -810,14 +906,29 @@ async function handleWebApi(req, res) {
   if (!isLoopback(req)) { httpErr(res, 403, '浏览器助手接口仅限本机（127.0.0.1）访问'); return }
   let body
   try { body = await readBodyJson(req) } catch (e) { httpErr(res, 400, e instanceof Error ? e.message : String(e)); return }
+  // R-A3：一次 /api/web/fetch = 一行审计（成功/失败/拦截都算）；ms 全程计时；审计写失败只 console、不影响响应
+  const t0 = Date.now()
+  const requested = typeof body?.url === 'string' ? body.url.trim() : ''
+  let result = null
+  let failure = null
   try {
-    const result = await webFetch({ url: body.url, maxBytes: body.maxBytes, timeoutMs: body.timeoutMs })
-    sendJson(res, 200, { ...result })
+    result = await webFetch({ url: body.url, maxBytes: body.maxBytes, timeoutMs: body.timeoutMs })
   } catch (e) {
-    const err = e instanceof Error ? e : new Error(String(e))
-    const code = err.code ?? 'web_error'
-    sendJson(res, 200, { ok: false, error: err.message, code })
+    failure = e instanceof Error ? e : new Error(String(e))
   }
+  appendWebAudit({
+    url: requested,
+    finalUrl: result ? (result.finalUrl ?? requested) : (failure.url ?? requested), // throw 路径 err.url = 失败一跳
+    status: result ? (result.status ?? null) : (failure.status ?? null),
+    ok: result ? result.ok === true : false,
+    code: result ? (result.code ?? (result.ok === true ? WEB_ERR.OK : WEB_ERR.WEB_ERROR)) : (failure.code ?? WEB_ERR.WEB_ERROR),
+    ms: Date.now() - t0,
+  })
+  if (result) {
+    sendJson(res, 200, { ...result })
+    return
+  }
+  sendJson(res, 200, { ok: false, error: failure.message, code: failure.code ?? WEB_ERR.WEB_ERROR })
 }
 
 // ── /api/files/* 路由（S3 只读 + S4 写；仅回环；写需 token；错误码分类见各函数注释）──

@@ -1,4 +1,5 @@
 // workbench/scripts/web.test.mjs — 浏览器助手 fetch 代理契约测试（对齐 docs/TEST_CASES.md TC-S6-01..16）。
+// S2（R-A3/R-A4/G-11）：文末追加 审计留痕（真实 HTTP）/容量轮转/body stall 归类/错误码枚举表收口 用例（serve.mjs data 目录）。
 // 运行：node workbench/scripts/web.test.mjs（沙箱 spawn 受限时直跑等效；宿主环境可 node --test）
 // 禁网说明：抓取目标一律用本进程内 mock HTTP 服务（127.0.0.1）；SSRF 守卫的测试注入口
 // DSH_WEB_FETCH_ALLOW_PRIVATE=1 只在本测试内使用，生产默认关闭（见 serve.mjs 注释与 TEST_CASES §8.1）。
@@ -7,6 +8,8 @@ import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
+import { readFileSync, existsSync, statSync, unlinkSync } from 'node:fs'
+import { join, dirname, sep } from 'node:path'
 
 const require = createRequire(import.meta.url)
 const serveUrl = pathToFileURL(require.resolve('./serve.mjs')).href + '?web=' + Date.now()
@@ -39,6 +42,8 @@ const mock = createServer((req, res) => {
   // P0-3 回归：延迟重定向链 c1(700ms)→c2(700ms)→/page（每跳都短于总超时，整链更长）
   else if (u.pathname === '/c1') { setTimeout(() => { res.writeHead(302, { location: '/c2' }); res.end() }, 700) }
   else if (u.pathname === '/c2') { setTimeout(() => { res.writeHead(302, { location: '/page' }); res.end() }, 700) }
+  // S2/R-A4：body stall 夹具——headers 已回（200 text/plain）、body 写一段后挂起不再 end
+  else if (u.pathname === '/stall') { res.writeHead(200, { 'content-type': 'text/plain' }); res.write('partial body, never ends') }
   else { res.writeHead(200, { 'content-type': 'text/html' }); res.end('ok') }
 })
 
@@ -49,7 +54,10 @@ before(async () => {
 })
 after(() => {
   mock.close()
+  try { if (m.server.listening) m.server.close() } catch { /* 未起/已关 */ }
   delete process.env.DSH_WEB_FETCH_ALLOW_PRIVATE
+  delete process.env.DSH_WEB_AUDIT_FILE
+  delete process.env.DSH_WEB_AUDIT_MAX_BYTES
 })
 
 describe('TC-S6-01/02 正文抽取（HTML + UTF-8 中文）', () => {
@@ -193,5 +201,196 @@ describe('TC-S6-11/12 非文本降级与上游 4xx/5xx', () => {
     const ise = await m.webFetch({ url: base + '/500' })
     assert.equal(ise.ok, false)
     assert.equal(ise.code, 'http_500')
+  })
+})
+
+// ─────────────────── S2（R-A3/R-A4/G-11）：抓取审计留痕 + body stall 归类 + 错误码枚举收口 ───────────────────
+// 说明：审计/枚举经「真实 HTTP POST /api/web/fetch」验证——serve.mjs 导出 server（isMain 守卫不占端口），
+// 测试进程内监听；审计文件与轮转上限经 DSH_WEB_AUDIT_FILE / DSH_WEB_AUDIT_MAX_BYTES 注入到临时 data 文件。
+let auditSeq = 0
+function tmpAuditFile() {
+  auditSeq += 1
+  return join(dirname(require.resolve('./serve.mjs')), '..', 'data', 'web-audit.s2.' + process.pid + '.' + auditSeq + '.jsonl')
+}
+function rmQuiet(fp) { try { if (fp) unlinkSync(fp) } catch { /* 不存在/占用忽略 */ } }
+function readAuditLines(file) {
+  return readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l))
+}
+let webBase = ''
+/** 经 serve.mjs 真实 HTTP 层发一次抓取；env（审计路径/轮转上限/私网放行）在请求处理期间生效，返回 200-envelope JSON。 */
+async function postWebFetch(payload, { auditFile = null, auditMax = null, allowPrivate = true } = {}) {
+  if (auditFile) process.env.DSH_WEB_AUDIT_FILE = auditFile
+  else delete process.env.DSH_WEB_AUDIT_FILE
+  if (auditMax) process.env.DSH_WEB_AUDIT_MAX_BYTES = String(auditMax)
+  else delete process.env.DSH_WEB_AUDIT_MAX_BYTES
+  if (allowPrivate) process.env.DSH_WEB_FETCH_ALLOW_PRIVATE = '1'
+  else delete process.env.DSH_WEB_FETCH_ALLOW_PRIVATE
+  try {
+    const resp = await fetch(webBase + '/api/web/fetch', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    return await resp.json()
+  } finally {
+    delete process.env.DSH_WEB_AUDIT_FILE
+    delete process.env.DSH_WEB_AUDIT_MAX_BYTES
+    delete process.env.DSH_WEB_FETCH_ALLOW_PRIVATE
+  }
+}
+async function startServe() {
+  if (!m.server.listening) await new Promise((resolve) => m.server.listen(0, '127.0.0.1', () => resolve()))
+  webBase = 'http://127.0.0.1:' + m.server.address().port
+}
+
+describe('S2-R-A3 抓取审计留痕（真实 HTTP /api/web/fetch 集成）', () => {
+  before(startServe)
+  after(() => { try { if (m.server.listening) m.server.close() } catch { /* */ } })
+
+  it('成功抓取留痕：追加一行含 url/finalUrl/status/耗时 ms/by=general', async () => {
+    const file = tmpAuditFile()
+    try {
+      const r = await postWebFetch({ url: base + '/page' }, { auditFile: file })
+      assert.equal(r.ok, true)
+      const lines = readAuditLines(file)
+      assert.equal(lines.length, 1, '一次抓取恰一行审计')
+      const a = lines[0]
+      assert.equal(a.by, 'general')
+      assert.equal(a.url, base + '/page')
+      assert.equal(a.finalUrl, base + '/page')
+      assert.equal(a.status, 200)
+      assert.equal(a.ok, true)
+      assert.ok(a.ms !== undefined && Number.isFinite(a.ms) && a.ms >= 0, '耗时 ms 数值：' + a.ms)
+      assert.ok(a.ts && a.ts.length > 0, '带时间戳 ts')
+    } finally { rmQuiet(file) }
+  })
+
+  it('失败留痕：http_404/http_500 各一行（url/finalUrl/status=上游码/code=http_<n>）', async () => {
+    const file = tmpAuditFile()
+    try {
+      const nf = await postWebFetch({ url: base + '/404' }, { auditFile: file })
+      assert.equal(nf.ok, false)
+      assert.equal(nf.code, 'http_404')
+      const ise = await postWebFetch({ url: base + '/500' }, { auditFile: file })
+      assert.equal(ise.code, 'http_500')
+      const lines = readAuditLines(file)
+      assert.equal(lines.length, 2)
+      assert.equal(lines[0].code, 'http_404'); assert.equal(lines[0].status, 404); assert.equal(lines[0].ok, false)
+      assert.equal(lines[0].url, base + '/404'); assert.equal(lines[0].finalUrl, base + '/404')
+      assert.equal(lines[1].code, 'http_500'); assert.equal(lines[1].status, 500)
+    } finally { rmQuiet(file) }
+  })
+
+  it('拦截亦留痕：ssrf_blocked 一行含目标 URL（ok=false, by=general）', async () => {
+    const file = tmpAuditFile()
+    try {
+      const target = 'http://10.0.0.1/private-path'
+      const r = await postWebFetch({ url: target }, { auditFile: file, allowPrivate: false })
+      assert.equal(r.ok, false)
+      assert.equal(r.code, m.WEB_ERR.SSRF_BLOCKED)
+      const a = readAuditLines(file)[0]
+      assert.equal(a.code, m.WEB_ERR.SSRF_BLOCKED)
+      assert.equal(a.url, target, 'SSRF 拦截留痕含目标 URL')
+      assert.equal(a.ok, false)
+      assert.equal(a.by, 'general')
+    } finally { rmQuiet(file) }
+  })
+
+  it('失败留痕：timeout（headers 未回 /slow）与 too_large 各一行，code 取枚举表值', async () => {
+    const file = tmpAuditFile()
+    try {
+      const slow = await postWebFetch({ url: base + '/slow', timeoutMs: 200 }, { auditFile: file })
+      assert.equal(slow.ok, false)
+      assert.equal(slow.code, m.WEB_ERR.TIMEOUT)
+      const big = await postWebFetch({ url: base + '/max', maxBytes: 1024 }, { auditFile: file })
+      assert.equal(big.code, m.WEB_ERR.TOO_LARGE)
+      const lines = readAuditLines(file)
+      assert.equal(lines.length, 2)
+      assert.equal(lines[0].code, m.WEB_ERR.TIMEOUT); assert.equal(lines[0].url, base + '/slow'); assert.equal(lines[0].status, null)
+      assert.equal(lines[1].code, m.WEB_ERR.TOO_LARGE); assert.equal(lines[1].url, base + '/max')
+    } finally { rmQuiet(file) }
+  })
+})
+
+describe('S2-R-A4 body stall 归类（headers 已回、body 挂起）与整链超时同码', () => {
+  before(startServe)
+  after(() => { try { if (m.server.listening) m.server.close() } catch { /* */ } })
+
+  it('body stall 夹具 → {ok:false, code:timeout}（非 web_error/undefined），审计同码', async () => {
+    const file = tmpAuditFile()
+    try {
+      const t0 = Date.now()
+      const r = await postWebFetch({ url: base + '/stall', timeoutMs: 500 }, { auditFile: file })
+      const elapsed = Date.now() - t0
+      assert.equal(r.ok, false)
+      assert.equal(r.code, m.WEB_ERR.TIMEOUT, 'body stall 归类 timeout（修复前误归类 web_error/code=undefined）')
+      assert.ok(elapsed >= 250 && elapsed < 5000, '在超时窗内截止（实际 ' + elapsed + 'ms）')
+      const a = readAuditLines(file)[0]
+      assert.equal(a.code, m.WEB_ERR.TIMEOUT)
+      assert.equal(a.finalUrl, base + '/stall')
+      assert.equal(a.url, base + '/stall')
+    } finally { rmQuiet(file) }
+  })
+
+  it('整链超时（重定向链累计）HTTP 层同样返回 code=timeout（同码收口）', async () => {
+    const file = tmpAuditFile()
+    try {
+      const r = await postWebFetch({ url: base + '/c1', timeoutMs: 1000 }, { auditFile: file })
+      assert.equal(r.ok, false)
+      assert.equal(r.code, m.WEB_ERR.TIMEOUT, '整链超时与 body stall 同码 timeout')
+      const a = readAuditLines(file)[0]
+      assert.equal(a.code, m.WEB_ERR.TIMEOUT)
+      assert.equal(a.finalUrl, base + '/c2', '审计 finalUrl = 失败一跳')
+      assert.ok(a.ms >= 700, 'ms 反映整链累计耗时：' + a.ms)
+    } finally { rmQuiet(file) }
+  })
+})
+
+describe('S2-R-A3b 审计文件默认位置（静态 ROOT 之外）与容量轮转；workbench/.gitignore', () => {
+  it('web-audit.jsonl 默认位于 ROOT（workbench/dist）之外，且 .gitignore 含 data/ 条目', () => {
+    const scriptsDir = dirname(require.resolve('./serve.mjs'))
+    const root = join(scriptsDir, '..', 'dist')
+    const def = m.WEB_AUDIT.DEFAULT_FILE
+    assert.equal(def, join(scriptsDir, '..', 'data', 'web-audit.jsonl'))
+    assert.ok(!(def === root || def.startsWith(root + sep)), '审计文件必须位于静态 ROOT 之外（ROOT=' + root + '，DEFAULT_FILE=' + def + '）')
+    assert.equal(m.WEB_AUDIT.BY, 'general')
+    const gi = readFileSync(join(scriptsDir, '..', '.gitignore'), 'utf8')
+    assert.ok(gi.split(/\r?\n/).some((l) => l.trim() === 'data/'), 'workbench/.gitignore 含 data/ 条目')
+  })
+
+  it('容量轮转：主文件超上限 → 归档 .1 保留历史，新行继续落到有界的主文件', async () => {
+    await startServe()
+    const file = tmpAuditFile()
+    const cap = 700
+    try {
+      for (let i = 0; i < 12; i += 1) {
+        const r = await postWebFetch({ url: base + '/page' }, { auditFile: file, auditMax: cap })
+        assert.equal(r.ok, true, '轮转期间抓取不受影响（第 ' + i + ' 次）')
+      }
+      const last = JSON.parse(readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean).pop())
+      assert.equal(last.url, base + '/page', '轮转后最新行仍落到主文件')
+      const size = statSync(file).size
+      assert.ok(size <= cap + 500, '主文件大小有界（size=' + size + '，cap=' + cap + '）')
+      assert.ok(existsSync(file + '.1'), '发生容量轮转：归档 ' + file + '.1 存在')
+      assert.ok(statSync(file + '.1').size > 0, '归档非空')
+    } finally {
+      rmQuiet(file)
+      rmQuiet(file + '.1')
+    }
+  })
+})
+
+describe('S2-G-11 错误码枚举常量表收口', () => {
+  it('WEB_ERR 枚举含 timeout/ssrf_blocked/too_large 等全部规范码；http_<n> 为动态格式不入表', async () => {
+    const values = Object.values(m.WEB_ERR)
+    for (const c of ['invalid_url', 'protocol_blocked', 'ssrf_blocked', 'dns_error', 'too_many_redirects', 'timeout', 'too_large', 'fetch_error', 'unsupported', 'empty_content', 'web_error']) {
+      assert.ok(values.includes(c), 'WEB_ERR 缺枚举码：' + c)
+    }
+    assert.equal(m.WEB_ERR.TIMEOUT, 'timeout')
+    assert.equal(m.WEB_ERR.TOO_LARGE, 'too_large')
+    assert.equal(m.WEB_ERR.SSRF_BLOCKED, 'ssrf_blocked')
+    assert.equal(m.WEB_ERR.UNSUPPORTED, 'unsupported')
+    assert.equal(m.WEB_ERR.EMPTY_CONTENT, 'empty_content')
+    assert.ok(/^http_\d{3}$/.test('http_404') && /^http_\d{3}$/.test('http_500'), 'http_<n> 动态码格式 /^http_\d{3}$/')
+    assert.ok(!values.includes('http_404'), 'http_<n> 动态不入表（表内无 http_404）')
   })
 })

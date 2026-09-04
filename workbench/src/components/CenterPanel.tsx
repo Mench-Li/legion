@@ -61,6 +61,8 @@ interface CenterPanelProps {
   spaces?: SpaceInfo[]
   /** 中枢模式：当前空间目标（team-hub /api/goal）；null = 用 board.goal（v1）。 */
   goalInfo?: GoalInfo | null
+  /** 中枢模式开关：开启时目标进度一律取 hub goal，禁止回退到 v1 board.goal 造成数字串台。 */
+  hubActive?: boolean
 }
 
 /** 编队（服务端形状）→ 面板 AgentView。chips.cls 由服务端给 'green'/'yellow'/'red'/''，补 'chip' 前缀。 */
@@ -75,8 +77,11 @@ function fromRoster(a: RosterAgent): AgentView {
   }
 }
 
-export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces, goalInfo }: CenterPanelProps): React.JSX.Element {
+export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces, goalInfo, hubActive = false }: CenterPanelProps): React.JSX.Element {
   const isRoster = rosterAgents !== null && rosterAgents !== undefined
+  // 目标进度单一来源：中枢模式下只认 team-hub /api/goal（goalInfo），未就绪显示占位，绝不回退 v1 board.goal
+  const goalPct = hubActive ? (goalInfo ? goalInfo.percent : null) : board.goal.progress.percent
+  const goalMeta = hubActive ? (goalInfo ? `${goalInfo.done}/${goalInfo.total} 完成` : '读取中…') : `${board.goal.progress.done}/${board.goal.progress.total} 完成`
   // 中核对当前空间的兜底过滤：只保留属于本空间的智能体（杜绝「全部空间」数据泄漏/窜台）
   const currentRoster = scope
     ? (rosterAgents ?? []).filter(a => !a.scope || a.scope === scope)
@@ -132,13 +137,11 @@ export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces
         </div>
         <div className="goal-bar-wrap">
           <div className="goal-bar">
-            <i style={{ width: `${goalInfo ? goalInfo.percent : goal.progress.percent}%` }} />
+            <i style={{ width: `${goalPct ?? 0}%` }} />
           </div>
           <div className="goal-bar-meta">
-            <span>
-              {goalInfo ? `${goalInfo.done}/${goalInfo.total} 完成` : `${goal.progress.done}/${goal.progress.total} 完成`}
-            </span>
-            <span>{goalInfo ? goalInfo.percent : goal.progress.percent}%</span>
+            <span>{goalMeta}</span>
+            <span>{goalPct === null ? '--' : `${goalPct}%`}</span>
           </div>
         </div>
       </div>
@@ -249,7 +252,7 @@ export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces
             <Scene3D
               key={scope ?? 'all'}
               agents={poses}
-              goalPercent={goal.progress.percent}
+              goalPercent={goalPct ?? 0}
               onAgentClick={isRoster ? openAgent : undefined}
             />
           </Suspense>

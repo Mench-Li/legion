@@ -11,6 +11,21 @@ interface MissionPanelProps {
   onDataChanged?: () => void
 }
 
+/** 单任务展示排序：进行中 → 待验收 → 受阻 → 待认领/待批准 → 已完成（组内按 id 稳定排序）。 */
+const TASK_RANK: Record<CardStatus, number> = {
+  in_progress: 0,
+  in_review: 1,
+  blocked: 2,
+  todo: 3,
+  backlog: 4,
+  done: 5,
+  canceled: 6,
+}
+
+function byStatus<T extends { status: CardStatus; id: string }>(a: T, b: T): number {
+  return (TASK_RANK[a.status] ?? 9) - (TASK_RANK[b.status] ?? 9) || a.id.localeCompare(b.id, undefined, { numeric: true })
+}
+
 const STATUS_TEXT: Record<Mission['status'], string> = {
   running: '运行中',
   waiting: '等待中',
@@ -42,8 +57,10 @@ const TASK_DOT: Record<CardStatus, string> = {
 
 export function MissionPanel({ missions, scopeAware, scope, hubMode, onDataChanged }: MissionPanelProps): React.JSX.Element {
   const [detailId, setDetailId] = useState<string | null>(null)
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const active = missions.filter(m => m.status !== 'done')
   const activeCount = active.reduce((n, m) => n + m.inProgress + m.inReview, 0)
+  const toggle = (role: string): void => setExpanded(prev => ({ ...prev, [role]: !prev[role] }))
   return (
     <div className="panel">
       <div className="panel-title">
@@ -84,21 +101,46 @@ export function MissionPanel({ missions, scopeAware, scope, hubMode, onDataChang
             </span>
             <span>{m.role}</span>
           </div>
-          {m.tasks.length > 0 && (
-            <div className="mission-tasks">
-              {m.tasks.slice(0, 3).map(t => (
-                <div key={t.id} className="mission-task clickable" onClick={() => setDetailId(t.id)} title={`查看 ${t.id} 详情 / AI 执行过程`}>
-                  <span className="st-dot" style={{ background: TASK_DOT[t.status] }} title={TASK_STATUS_TEXT[t.status]} />
-                  <span className="tid">{t.id}</span>
-                  <span className="t">{t.title}</span>
-                  <span className={`t-status ${t.status}`}>{TASK_STATUS_TEXT[t.status]}</span>
-                </div>
-              ))}
-              {m.tasks.length > 3 && (
-                <div style={{ fontSize: 10, color: 'var(--muted-2)' }}>+{m.tasks.length - 3} 更多…</div>
-              )}
-            </div>
-          )}
+          {m.tasks.length > 0 && (() => {
+            const sorted = [...m.tasks].sort(byStatus)
+            const isOpen = !!expanded[m.role]
+            const openCount = sorted.filter(t => t.status !== 'done' && t.status !== 'canceled').length
+            return (
+              <div className="mission-tasks">
+                {!isOpen && sorted.slice(0, 3).map(t => (
+                  <div key={t.id} className="mission-task clickable" onClick={() => setDetailId(t.id)} title={`查看 ${t.id} 详情 / AI 执行过程`}>
+                    <span className="st-dot" style={{ background: TASK_DOT[t.status] }} title={TASK_STATUS_TEXT[t.status]} />
+                    <span className="tid">{t.id}</span>
+                    <span className="t">{t.title}</span>
+                    <span className={`t-status ${t.status}`}>{TASK_STATUS_TEXT[t.status]}</span>
+                  </div>
+                ))}
+                {m.tasks.length > 3 && (
+                  <div
+                    className="mission-more clickable"
+                    onClick={() => toggle(m.role)}
+                    title={isOpen ? '收起任务列表' : `查看该岗位全部 ${m.tasks.length} 个任务`}
+                    style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 2px', fontSize: 10.5, color: 'var(--accent, #6ea8fe)', userSelect: 'none' }}
+                  >
+                    <span>{isOpen ? '▴ 收起' : `▾ 展开全部 ${m.tasks.length} 个任务`}</span>
+                    <span style={{ color: 'var(--muted-2)', fontSize: 10 }}>（{openCount} 未完成）</span>
+                  </div>
+                )}
+                {isOpen && (
+                  <div style={{ maxHeight: 280, overflowY: 'auto', marginTop: 2 }}>
+                    {sorted.map(t => (
+                      <div key={t.id} className="mission-task clickable" onClick={() => setDetailId(t.id)} title={`查看 ${t.id} 详情 / AI 执行过程`}>
+                        <span className="st-dot" style={{ background: TASK_DOT[t.status] }} title={TASK_STATUS_TEXT[t.status]} />
+                        <span className="tid">{t.id}</span>
+                        <span className="t">{t.title}</span>
+                        <span className={`t-status ${t.status}`}>{TASK_STATUS_TEXT[t.status]}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )
+          })()}
         </div>
       ))}
       {detailId && (

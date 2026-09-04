@@ -18,6 +18,7 @@
  *   GET  /api/scopes                                真实存在的分区（tasks+members 的 distinct scope）
  *   GET  /api/spaces                               工作空间列表（注册名 + private + 仓库绑定 localDir/remoteUrl）
  *   POST /api/spaces                               注册/更新工作空间（id/name/private/localDir/remoteUrl；幂等 upsert）
+ *   POST /api/spaces/delete                        删除工作空间及 scope 数据（body: id + confirm=`delete-space:<id>`；拒绝 software/default）
  *   GET  /api/activity?limit=                      最近动态（审计）
  *   GET  /api/members                              成员在线状态
  *   GET  /api/events                               SSE 事件流
@@ -89,6 +90,12 @@ db.exec(`
     comments TEXT DEFAULT '[]',
     evidence TEXT DEFAULT '[]',
     patches TEXT DEFAULT '[]',
+    artifacts TEXT DEFAULT '[]',
+    slice TEXT,
+    sliceIdx INTEGER,
+    fixOf TEXT,
+    fixCount INTEGER DEFAULT 0,
+    testReport TEXT,
     createdAt TEXT,
     updatedAt TEXT
   )
@@ -251,6 +258,16 @@ ensureColumn('tasks', 'claimRequestId', 'claimRequestId TEXT')
 ensureColumn('tasks', 'boundary', "boundary TEXT DEFAULT '[]'")
 // 拦截列（将军逐任务拦截：hold=1 时守护不自动认领/执行，见 POST /api/hold）
 ensureColumn('tasks', 'hold', 'hold INTEGER DEFAULT 0')
+// 切片流水线列（v3 slice 模式，见 docs/ORCHESTRATION-V3.md）：切片归属键 / fix 回炉计数 /
+// 结构化测试报告 / 产物登记。老库幂等补齐，无破坏。
+ensureColumn('tasks', 'artifacts', "artifacts TEXT DEFAULT '[]'")
+ensureColumn('tasks', 'slice', 'slice TEXT')
+ensureColumn('tasks', 'sliceIdx', 'sliceIdx INTEGER')
+ensureColumn('tasks', 'fixOf', 'fixOf TEXT')
+ensureColumn('tasks', 'fixCount', 'fixCount INTEGER DEFAULT 0')
+ensureColumn('tasks', 'testReport', 'testReport TEXT')
+// 审计批注列（L2 审计工作台）：review_notes JSON = [{ file:'*'|相对路径, verdict:'ok'|'issue', note, by, at }]
+ensureColumn('tasks', 'review_notes', "review_notes TEXT DEFAULT '[]'")
 // 老链回填：已生成、未完成的自动目标链任务若没有验收标准/边界，按岗位模板补种，
 // 保证"生成任务的同时必须生成验收标准与边界（做什么/不做什么）"对历史在途任务也成立。
 try {
@@ -336,6 +353,13 @@ function rowToTask(row) {
     comments: parseJson(row.comments, []),
     evidence: parseJson(row.evidence, []),
     patches: parseJson(row.patches, []),
+    artifacts: parseJson(row.artifacts, []),
+    slice: row.slice ?? null,
+    sliceIdx: row.sliceIdx ?? null,
+    fixOf: row.fixOf ?? null,
+    fixCount: row.fixCount ?? 0,
+    testReport: parseJson(row.testReport, null),
+    reviewNotes: parseJson(row.review_notes ?? '[]', []),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   }
@@ -621,10 +645,15 @@ function createTask(input) {
       role: input.role ?? null,
       scope: input.scope ?? 'default',
       blocks: [],
-      blockedBy: [],
+      blockedBy: Array.isArray(input.blockedBy) ? input.blockedBy.map(String).filter(Boolean) : [],
       comments: [],
       evidence: [],
       patches: [],
+      artifacts: [],
+      slice: input.slice ?? null,
+      sliceIdx: input.sliceIdx ?? null,
+      fixOf: input.fixOf ?? null,
+      fixCount: input.fixCount ?? 0,
       createdAt: now(),
       updatedAt: now(),
     }
@@ -634,9 +663,9 @@ function createTask(input) {
     if (t.parent !== null && !db.prepare('SELECT 1 FROM tasks WHERE id=?').get(t.parent)) throw new Error(`父任务 ${t.parent} 不存在`)
     db.prepare(`
       INSERT INTO tasks (id, title, description, acceptance, boundary, priority, status, version, soldier, claimedRound, claimedAt,
-        ordersVersion, parent, role, scope, blocks, blockedBy, comments, evidence, patches, createdAt, updatedAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, NULL, ?, ?, ?, ?, '[]', '[]', '[]', '[]', '[]', ?, ?)
-    `).run(t.id, t.title, t.description, JSON.stringify(t.acceptance), JSON.stringify(t.boundary), t.priority, t.status, t.ordersVersion, t.parent, t.role, t.scope, t.createdAt, t.updatedAt)
+        ordersVersion, parent, role, scope, blocks, blockedBy, comments, evidence, patches, artifacts, slice, sliceIdx, fixOf, fixCount, createdAt, updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, NULL, ?, ?, ?, ?, '[]', ?, '[]', '[]', '[]', '[]', ?, ?, ?, ?, ?, ?)
+    `).run(t.id, t.title, t.description, JSON.stringify(t.acceptance), JSON.stringify(t.boundary), t.priority, t.status, t.ordersVersion, t.parent, t.role, t.scope, JSON.stringify(t.blockedBy), t.slice, t.sliceIdx, t.fixOf, t.fixCount, t.createdAt, t.updatedAt)
     return getTask(id)
   })
 }
@@ -646,39 +675,151 @@ function createTask(input) {
 // 故 requirement→需求讨论 / researcher→方案设计 / breaker→任务拆分 … 语义一一对应。
 const GOAL_STAGE_LABELS = ['需求讨论', '方案设计', '任务拆分', '用例设计', '代码开发', '代码审查', '测试验收', '发布部署']
 
-function createGoalChain(scope, objective) {
+/** 建一个 [auto-goal] 任务行（chain / slice 展开共用）。返回新任务。 */
+function insertGoalTask({ title, description, acceptance, boundary, role, scope, blockedBy = [], status = 'todo', parent = null, slice = null, sliceIdx = null, fixOf = null, fixCount = 0, priority = 'high' }) {
+  const id = nextId()
+  db.prepare(`
+    INSERT INTO tasks (id, title, description, acceptance, boundary, priority, status, version, soldier, claimedRound, claimedAt,
+      ordersVersion, parent, role, scope, blocks, blockedBy, comments, evidence, patches, artifacts, slice, sliceIdx, fixOf, fixCount, createdAt, updatedAt)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, NULL, 1, ?, ?, ?, '[]', ?, '[]', '[]', '[]', '[]', ?, ?, ?, ?, ?, ?)
+  `).run(id, title, description, JSON.stringify(acceptance), JSON.stringify(boundary), priority, status, parent, role, scope, JSON.stringify(blockedBy), slice, sliceIdx, fixOf, fixCount, now(), now())
+  return getTask(id)
+}
+
+/**
+ * 发布目标 → 任务链。两种模式：
+ * - chain（默认，v2 现状）：按空间编队全串阶段链（blockedBy=[prev]）；
+ * - slice（v3 切片流水线）：只生成「分析前缀链」（需求→方案→拆解→用例设计，到 test-designer 为止），
+ *   并带 [slice-mode] 标记；test-designer done 后由守护解析 TASK_BREAKDOWN.md →
+ *   POST /api/goal/slices 展开「编码切片束」（coder_Si→tester_Si 微链 + devops 目标级收尾），
+ *   切片之间无依赖 → coder_Si+1 编码与 tester_Si 测试天然并行（架构见 docs/ORCHESTRATION-V3.md）。
+ */
+function createGoalChain(scope, objective, mode = 'chain') {
   return withTx(() => {
     const nowIso = now()
-    // 重置：取消该空间旧的「自动目标链」任务（未完成的），避免重复发布累积
+    // 重置：取消该空间旧的「自动目标链」任务（未完成的，含旧 slice 任务），避免重复发布累积
     const old = db.prepare("SELECT id FROM tasks WHERE scope = ? AND description LIKE '%[auto-goal]%' AND status NOT IN ('done','canceled')").all(scope)
     for (const o of old) {
       db.prepare("UPDATE tasks SET status='canceled', version=version+1, updatedAt=? WHERE id=?").run(nowIso, o.id)
     }
-    // 按编队顺序生成本次目标的任务链，每个智能体分到一个阶段任务并串成依赖
     const roster = db.prepare('SELECT role, name, kind, avatar FROM roster WHERE scope = ? ORDER BY sort, role').all(scope)
     const pipe = pipelineLabels()
+    // slice 模式前置条件：编队含分析尾（test-designer）与构建岗位（coder/tester）；缺则回退 chain
+    const tdIdx = roster.findIndex(r => r.role === 'test-designer')
+    const sliced = mode === 'slice' && tdIdx >= 0 && roster.some(r => r.role === 'coder') && roster.some(r => r.role === 'tester')
+    const build = sliced ? roster.slice(0, tdIdx + 1) : roster
     const created = []
     let prev = null
-    roster.forEach((r, i) => {
+    build.forEach((r, i) => {
       // 阶段名：优先 roles.json 流水线标签（与该空间任务集泳道名一致），否则用通用阶段标签
       const named = pipe[r.role] && pipe[r.role] !== r.role ? pipe[r.role] : null
       const label = named ?? GOAL_STAGE_LABELS[i % GOAL_STAGE_LABELS.length]
-      const id = nextId()
-      const title = `【${label}】${objective.trim().slice(0, 40)}`
-      const description = `[auto-goal]\n目标：${objective.trim()}\n本阶段：${label}（${r.name}）`
+      const description = sliced
+        ? `[auto-goal]\n[slice-mode]\n目标：${objective.trim()}\n本阶段：${label}（${r.name}）`
+        : `[auto-goal]\n目标：${objective.trim()}\n本阶段：${label}（${r.name}）`
       // 生成任务必须同时生成验收标准 + 边界（做什么/不做什么）——按该岗位模板注入
       const s = standardsFor(r.role)
-      const acceptanceJson = JSON.stringify(s.acceptance)
-      const boundaryJson = JSON.stringify({ do: s.do, dont: s.dont })
-      db.prepare(`
-        INSERT INTO tasks (id, title, description, acceptance, boundary, priority, status, version, soldier, claimedRound, claimedAt,
-          ordersVersion, parent, role, scope, blocks, blockedBy, comments, evidence, patches, createdAt, updatedAt)
-        VALUES (?, ?, ?, ?, ?, 'high', 'todo', 1, ?, NULL, NULL, 1, NULL, ?, ?, '[]', ?, '[]', '[]', '[]', ?, ?)
-      `).run(id, title, description, acceptanceJson, boundaryJson, r.role, r.role, scope, JSON.stringify(prev ? [prev] : []), nowIso, nowIso)
-      created.push({ id, role: r.role, label })
-      prev = id
+      const task = insertGoalTask({
+        title: `【${label}】${objective.trim().slice(0, 40)}`,
+        description,
+        acceptance: s.acceptance,
+        boundary: { do: s.do, dont: s.dont },
+        role: r.role,
+        scope,
+        blockedBy: prev ? [prev] : [],
+      })
+      created.push({ id: task.id, role: r.role, label })
+      prev = task.id
     })
-    return { count: created.length, tasks: created }
+    return { count: created.length, tasks: created, mode: sliced ? 'slice' : 'chain' }
+  })
+}
+
+/** 按岗位模板取切片任务的验收/边界（role 缺省模板，供切片展开时合并）。 */
+function sliceStandards(role, acceptance, extraDo = [], extraDont = []) {
+  const std = standardsFor(role)
+  const clean = (list) => Array.isArray(list) ? list.filter(x => typeof x === 'string' && x.trim().length > 0) : []
+  const acc = clean(acceptance)
+  return {
+    acceptance: acc.length > 0 ? acc : std.acceptance,
+    boundary: {
+      do: [...std.do, ...extraDo],
+      dont: [...std.dont, ...extraDont],
+    },
+  }
+}
+
+/**
+ * 切片展开（slice 模式专用，守护在 test-designer done 后调用）：
+ * 每个切片生成 coder_Si（blockedBy=test-designer 任务）→ tester_Si（blockedBy=coder_Si）微链；
+ * 全部切片注册后生成 devops 目标级收尾（blockedBy=全部 tester）。
+ * 幂等：同 testDesignerTaskId 已展开过（存在 slice 行）则直接返回既有，不重复建。
+ */
+function expandGoalSlices({ testDesignerTaskId, slices, by }) {
+  return withTx(() => {
+    const td = getTask(testDesignerTaskId)
+    if (td.role !== 'test-designer') throw new Error(`切片展开需要 test-designer 任务，实际 role=${td.role}`)
+    if (String(td.description ?? '').indexOf('[auto-goal]') === -1) throw new Error(`任务 ${td.id} 不是自动目标链任务，不可展开切片`)
+    if (td.status !== 'done') throw new Error(`分析前缀未完成（${td.id} 当前 ${td.status}）：先完成测试用例设计再展开切片`)
+    const prefix = `${td.id}:S`
+    const existing = db.prepare('SELECT id, slice FROM tasks WHERE scope = ? AND (slice LIKE ? OR slice = ?)').all(td.scope, `${prefix}%`, td.id)
+    if (existing.length > 0) return { mode: 'slice', testDesignerTaskId: td.id, created: [], existed: existing.map(x => x.id) }
+    if (!Array.isArray(slices) || slices.length === 0 || slices.length > 16) throw new Error('slices 必须是 1..16 个切片的数组')
+    const objectiveLine = String(td.description ?? '').split('\n').find(l => l.startsWith('目标：')) ?? '目标：（见分析前缀任务）'
+    const created = []
+    const testerIds = []
+    slices.forEach((sli, idx) => {
+      if (!sli || typeof sli.title !== 'string' || sli.title.trim().length === 0) throw new Error(`切片 ${idx + 1} 缺少 title`)
+      const title = sli.title.trim()
+      const files = Array.isArray(sli.files) ? sli.files.map(String).filter(Boolean) : []
+      const sAcc = Array.isArray(sli.acceptance) ? sli.acceptance.map(String).filter(Boolean) : []
+      const si = idx + 1
+      const sliceKey = `${td.id}:S${si}`
+      // coder_Si：只做本切片（文件域约束写进边界），验收 = 切片验收 / 岗位默认
+      const coderStd = sliceStandards('coder', sAcc, files.length ? [`只改动本切片文件域：${files.join(', ')}`] : [])
+      const coder = insertGoalTask({
+        title: `【切片 S${si} 编码】${title.slice(0, 36)}`,
+        description: `[auto-goal]\n[slice]\n${objectiveLine}\n切片 S${si}：${title}${files.length ? `\n文件域：${files.join(', ')}` : ''}`,
+        acceptance: coderStd.acceptance,
+        boundary: coderStd.boundary,
+        role: 'coder',
+        scope: td.scope,
+        blockedBy: [td.id],
+        slice: sliceKey,
+        sliceIdx: si,
+      })
+      // tester_Si：只测不修；验收 = 结构化 testReport（passed=true 才自动 done，D7' 机器闸门）
+      const testerStd = sliceStandards('tester', [], [], ['不得修改任何源码/测试用例（只测不修）'])
+      const tester = insertGoalTask({
+        title: `【切片 S${si} 测试】${title.slice(0, 30)}`,
+        description: `[auto-goal]\n[slice-test]\n${objectiveLine}\n切片 S${si}：${title}\n要求：运行测试用例（docs/TEST_CASES.md 覆盖本切片的部分），只测不修；结构化回报 testReport={passed, failures:[{name,log,repro}]}。`,
+        acceptance: testerStd.acceptance,
+        boundary: testerStd.boundary,
+        role: 'tester',
+        scope: td.scope,
+        blockedBy: [coder.id],
+        slice: sliceKey,
+        sliceIdx: si,
+      })
+      created.push(coder.id, tester.id)
+      testerIds.push(tester.id)
+    })
+    // devops 目标级收尾：全部 tester done 才解锁
+    const objectiveText = objectiveLine.replace(/^目标：/, '').slice(0, 36)
+    const devopsStd = sliceStandards('devops')
+    const devops = insertGoalTask({
+      title: `【发布部署】${objectiveText || '目标级收尾'}`,
+      description: `[auto-goal]\n[slice-tail]\n${objectiveLine}\n本阶段：发布部署（devops）——全部切片测试通过后执行目标级收尾。`,
+      acceptance: devopsStd.acceptance,
+      boundary: devopsStd.boundary,
+      role: 'devops',
+      scope: td.scope,
+      blockedBy: testerIds,
+      slice: td.id,
+    })
+    created.push(devops.id)
+    audit(by, td.scope, 'goal:slices', td.id, { testDesignerTaskId: td.id, slices: slices.length, created: created.length })
+    return { mode: 'slice', testDesignerTaskId: td.id, created, devops: devops.id }
   })
 }
 
@@ -889,9 +1030,127 @@ async function handle(req, res) {
           title: title.trim(), description: body.description, acceptance: body.acceptance, boundary: body.boundary,
           priority: body.priority, status: body.status, parent: body.parent, role: body.role,
           scope, ordersVersion: body.ordersVersion,
+          blockedBy: body.blockedBy, slice: body.slice, sliceIdx: body.sliceIdx, fixOf: body.fixOf, fixCount: body.fixCount,
         })
         audit(by, scope, 'create', task.id, { title: task.title })
         return task
+      })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/progress') {
+      // 守护进度心跳（v1 遗留缺口补平，见 docs/P0-CONFIRMATION.md §5）：租约保鲜 + 遥测。
+      await handleWrite(req, res, (body, by, scope) => {
+        const id = body.id
+        if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
+        const t = getTask(id)
+        if (t.status !== 'in_progress') throw new Error(`仅 in_progress 任务可上报进度（当前 ${t.status}）`)
+        db.prepare('UPDATE tasks SET claimedAt=?, updatedAt=?, version=version+1 WHERE id=?').run(now(), now(), id)
+        audit(by, t.scope, 'progress', id, { percent: Number.isFinite(Number(body.percent)) ? Number(body.percent) : 0 })
+        return getTask(id)
+      })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/patch') {
+      // hub 版 diff 登记（v1 taskctl patch 的等价物）：守护 recordPatch 在 hub 模式下调用。
+      // L1 审计：files 支持结构化数组 [{path,status,add,del}]（守护 numstat 解析）；兼容旧 string。
+      await handleWrite(req, res, (body, by, scope) => {
+        const id = body.id
+        if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
+        const t = getTask(id)
+        const diff = typeof body.diff === 'string' ? body.diff : ''
+        if (diff.length > 200000) throw new Error('diff 过大（>200KB），拒绝登记')
+        let files
+        if (Array.isArray(body.files)) {
+          files = body.files.slice(0, 200).map(f => {
+            const path = typeof f?.path === 'string' ? f.path.slice(0, 500) : ''
+            if (!path) return null
+            const status = typeof f.status === 'string' && /^[AMDRCUX]$/.test(f.status) ? f.status : 'M'
+            const add = Number.isFinite(Number(f.add)) ? Math.max(0, Number(f.add)) : 0
+            const del = Number.isFinite(Number(f.del)) ? Math.max(0, Number(f.del)) : 0
+            return { path, status, add, del }
+          }).filter(Boolean)
+        } else {
+          files = (typeof body.files === 'string' ? body.files.slice(0, 2000) : '')
+            .split(',').map(s => s.trim()).filter(Boolean)
+            .map(path => ({ path, status: 'M', add: 0, del: 0 }))
+        }
+        const list = parseJson(t.patches ?? '[]', [])
+        list.push({ by, at: now(), summary: typeof body.summary === 'string' ? body.summary.slice(0, 200) : '', files, diff })
+        if (list.length > 40) list.splice(0, list.length - 40)
+        db.prepare('UPDATE tasks SET patches=?, version=version+1, updatedAt=? WHERE id=?').run(JSON.stringify(list), now(), id)
+        audit(by, t.scope, 'patch', id, { files: files.map(f => f.path).join(',') })
+        return getTask(id)
+      })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/review-notes') {
+      // L2 审计批注：任务（或任务内某文件）的 OK/问题 标记。file='*' = 整体结论；verdict=clear 清除。
+      await handleWrite(req, res, (body, by, scope) => {
+        const id = body.id
+        if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
+        const t = getTask(id)
+        if (!t) throw new Error(`未知任务 ${id}`)
+        const file = typeof body.file === 'string' && body.file.trim() ? body.file.trim().slice(0, 500) : '*'
+        const verdict = body.verdict
+        if (verdict !== 'ok' && verdict !== 'issue' && verdict !== 'clear') throw new Error('verdict 必须是 ok|issue|clear')
+        if (typeof body.note !== 'string') throw new Error('缺少参数 note')
+        const note = body.note.trim().slice(0, 2000)
+        const list = parseJson(t.review_notes ?? '[]', [])
+        const others = list.filter(x => x.file !== file)
+        if (verdict !== 'clear') others.push({ file, verdict, note, by, at: now() })
+        db.prepare('UPDATE tasks SET review_notes=?, version=version+1, updatedAt=? WHERE id=?')
+          .run(JSON.stringify(others), now(), id)
+        audit(by, t.scope, 'review-note', id, { file, verdict, note: note.slice(0, 200) })
+        return getTask(id)
+      })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/artifact') {
+      // hub 版产物登记（html/file/url），与 v1 taskctl artifact 等价。
+      await handleWrite(req, res, (body, by, scope) => {
+        const id = body.id
+        if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
+        const t = getTask(id)
+        const kind = body.kind
+        const path = body.path
+        if (typeof kind !== 'string' || (kind !== 'html' && kind !== 'file' && kind !== 'url')) throw new Error('kind 必须是 html|file|url')
+        if (typeof path !== 'string' || path.length === 0) throw new Error('缺少产物路径 path')
+        const list = parseJson(t.artifacts ?? '[]', [])
+        list.push({ by, at: now(), kind, path, title: typeof body.title === 'string' ? body.title.slice(0, 120) : '' })
+        db.prepare('UPDATE tasks SET artifacts=?, version=version+1, updatedAt=? WHERE id=?').run(JSON.stringify(list), now(), id)
+        audit(by, t.scope, 'artifact', id, { kind, path })
+        return getTask(id)
+      })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/test-report') {
+      // tester worker 结构化报告（D7' 机器闸门的输入，见 docs/ORCHESTRATION-V3.md §4/§10）：仅 tester 任务可写。
+      await handleWrite(req, res, (body, by, scope) => {
+        const id = body.id
+        if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
+        const t = getTask(id)
+        if (t.role !== 'tester') throw new Error(`test-report 仅 tester 任务可写（role=${t.role}）`)
+        if (t.status !== 'in_progress' && t.status !== 'in_review') throw new Error(`仅 in_progress/in_review 可写报告（当前 ${t.status}）`)
+        const passed = body.passed === true
+        const failures = Array.isArray(body.failures)
+          ? body.failures.map(f => (f && typeof f === 'object')
+              ? { name: String(f.name ?? '').slice(0, 200), log: String(f.log ?? '').slice(0, 4000), repro: String(f.repro ?? '').slice(0, 2000) }
+              : { name: String(f).slice(0, 200), log: '', repro: '' }).slice(0, 200)
+          : []
+        if (!passed && failures.length === 0) throw new Error('passed=false 时必须给出 failures')
+        const report = { passed, failures, summary: typeof body.summary === 'string' ? body.summary.slice(0, 2000) : '', at: now(), by }
+        db.prepare('UPDATE tasks SET testReport=?, version=version+1, updatedAt=? WHERE id=?').run(JSON.stringify(report), now(), id)
+        audit(by, t.scope, 'test-report', id, { passed, failures: failures.length })
+        return getTask(id)
+      })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/goal/slices') {
+      // 切片展开：守护在 test-designer done 后解析 TASK_BREAKDOWN.md 并注册切片（见 ORCHESTRATION-V3）。
+      await handleWrite(req, res, (body, by, scope) => {
+        const testDesignerTaskId = body.testDesignerTaskId
+        if (typeof testDesignerTaskId !== 'string' || testDesignerTaskId.length === 0) throw new Error('缺少参数 testDesignerTaskId')
+        return expandGoalSlices({ testDesignerTaskId, slices: body.slices, by })
       })
       return
     }
@@ -1272,6 +1531,45 @@ async function handle(req, res) {
       json(res, 200, { scope: scopeParam || 'all', agents })
       return
     }
+    if (req.method === 'GET' && path === '/api/overlaps') {
+      // L3 跨任务改动重叠审计：扫描空间内所有有补丁记录的任务，按「改到同一文件」分组。
+      // 8 波次并行合入场景下，两个任务改同一文件 = 潜在冲突/语义重叠，供将军决定验收与合入顺序。
+      const scopeParam = url.searchParams.get('scope')
+      const only = url.searchParams.get('id')
+      const minTasks = Math.max(2, Number(url.searchParams.get('min') ?? 2) || 2)
+      const tasks = listTasks(scopeParam ? { scope: scopeParam } : {}).filter(t => t.status !== 'canceled')
+      const updatedAt = new Map(tasks.map(t => [t.id, t.updatedAt ?? t.createdAt ?? '']))
+      const patchFilesOf = (p) => {
+        if (!p) return []
+        if (typeof p === 'string') return [p] // 旧库：纯文件名条目
+        if (Array.isArray(p.files)) return p.files.map(f => (f && typeof f.path === 'string' ? f.path : '')).filter(Boolean)
+        if (typeof p.files === 'string') return p.files.split(',').map(s => s.trim()).filter(Boolean)
+        return []
+      }
+      const byFile = new Map()
+      for (const t of tasks) {
+        const set = new Set()
+        for (const p of t.patches ?? []) for (const f of patchFilesOf(p)) set.add(f)
+        if (set.size === 0) continue
+        for (const f of set) {
+          const arr = byFile.get(f) ?? []
+          arr.push({ id: t.id, title: t.title, status: t.status, updatedAt: updatedAt.get(t.id) ?? '' })
+          byFile.set(f, arr)
+        }
+      }
+      let groups = [...byFile].map(([file, list]) => ({
+        file,
+        tasks: list.sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true })),
+      })).filter(g => g.tasks.length >= minTasks)
+      if (only) groups = groups.filter(g => g.tasks.some(x => x.id === only))
+      groups.sort((a, b) => {
+        const ra = Math.max(...a.tasks.map(t => new Date(t.updatedAt || 0).getTime()))
+        const rb = Math.max(...b.tasks.map(t => new Date(t.updatedAt || 0).getTime()))
+        return rb - ra || a.file.localeCompare(b.file)
+      })
+      json(res, 200, { scope: scopeParam || 'all', groups })
+      return
+    }
     if (req.method === 'GET' && path === '/api/activity') {
       const limit = Math.min(Number(url.searchParams.get('limit') ?? 50) || 50, 500)
       const scopeParam = url.searchParams.get('scope')
@@ -1390,6 +1688,36 @@ async function handle(req, res) {
       })
       return
     }
+    if (req.method === 'POST' && path === '/api/spaces/delete') {
+      // 删除工作空间及其 scope 数据（tasks/goal/roster/exec_state/exec_requests/agent_models/skills）。
+      // 安全护栏：software/default 等受保护空间一律拒绝；调用方须显式 confirm=`delete-space:<id>`。
+      await handleWrite(req, res, (body, by, scope) => {
+        const id = body.id
+        if (typeof id !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(id)) throw new Error('空间 id 非法：小写字母/数字开头，可含连字符，≤64 字符')
+        if (id === 'software' || id === 'default') throw new Error(`受保护空间 ${id} 不可删除`)
+        if (body.confirm !== `delete-space:${id}`) throw new Error('缺少确认：confirm 须为 delete-space:<id>（该操作会删除该空间全部任务/目标/编队/模型/技能数据）')
+        if (by !== 'general' && body.forceGeneral !== true) throw new Error('删除空间仅允许 general 执行')
+        const existing = db.prepare('SELECT id FROM spaces WHERE id = ?').get(id)
+        if (!existing) throw new Error(`未知空间 ${id}`)
+        const removed = withTx(() => {
+          const counts = {}
+          for (const [key, sql] of [
+            ['tasks', 'DELETE FROM tasks WHERE scope = ?'],
+            ['roster', 'DELETE FROM roster WHERE scope = ?'],
+            ['agent_models', 'DELETE FROM agent_models WHERE scope = ?'],
+            ['exec_requests', 'DELETE FROM exec_requests WHERE scope = ?'],
+            ['skills', 'DELETE FROM skills WHERE scope = ?'],
+            ['goal', 'DELETE FROM goal WHERE scope = ?'],
+            ['exec_state', 'DELETE FROM exec_state WHERE scope = ?'],
+          ]) counts[key] = db.prepare(sql).run(id).changes
+          db.prepare('DELETE FROM spaces WHERE id = ?').run(id)
+          return counts
+        })
+        audit(by, id, 'space:delete', null, { space: id, removed })
+        return { id, removed }
+      })
+      return
+    }
     if (req.method === 'POST' && path === '/api/goal') {
       // 发布空间目标：每个工作空间一个 objective（upsert），并自动按编队生成阶段任务链分发给智能体。
       await handleWrite(req, res, (body, by, scope) => {
@@ -1399,12 +1727,13 @@ async function handle(req, res) {
         const t = now()
         db.prepare('INSERT INTO goal (scope, objective, createdAt, updatedAt) VALUES (?, ?, ?, ?) ON CONFLICT(scope) DO UPDATE SET objective=excluded.objective, updatedAt=excluded.updatedAt')
           .run(targetScope, objective.trim(), t, t)
-        // 自动分解为阶段任务链（按编队指派 + 依赖串行）
-        const chain = createGoalChain(targetScope, objective.trim())
+        // 自动分解为阶段任务链（chain 全串 / slice 前缀链，见 ORCHESTRATION-V3）
+        const mode = body.mode === 'slice' ? 'slice' : 'chain'
+        const chain = createGoalChain(targetScope, objective.trim(), mode)
         const tasks = listTasks({ scope: targetScope }).filter(x => x.status !== 'canceled')
         const done = tasks.filter(x => x.status === 'done').length
-        audit(by, targetScope, 'goal:publish', null, { objective: objective.trim(), stages: chain.count })
-        return { scope: targetScope, objective: objective.trim(), done, total: tasks.length, percent: tasks.length > 0 ? Math.round((done / tasks.length) * 100) : 0, stages: chain.count }
+        audit(by, targetScope, 'goal:publish', null, { objective: objective.trim(), mode: chain.mode, stages: chain.count })
+        return { scope: targetScope, objective: objective.trim(), mode: chain.mode, done, total: tasks.length, percent: tasks.length > 0 ? Math.round((done / tasks.length) * 100) : 0, stages: chain.count }
       })
       return
     }

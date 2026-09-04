@@ -355,7 +355,7 @@ export default function App(): React.JSX.Element {
           ) : active === 'browser' ? (
             <BrowserPanel />
           ) : (
-            <CenterPanel board={board} labels={labels} active={active} rosterAgents={hubMode ? roster : null} scope={scope} spaces={hubSpaces} goalInfo={hubMode ? goalInfo : null} />
+            <CenterPanel board={board} labels={labels} active={active} rosterAgents={hubMode ? roster : null} scope={scope} spaces={hubSpaces} goalInfo={hubMode ? goalInfo : null} hubActive={hubMode} />
           )
         ) : (
           <div className="center-col" />

@@ -92,12 +92,15 @@ patch 里**必须显式给** `legionDir: 'D:/project/DSH/legion'`——pnpm 对 
 - 「全部空间」视图按分区展示全部编队。
 
 ### 3.3 当前任务集（右侧）与任务详情
-- 右侧「当前任务集」= 当前空间任务按角色泳道（只显示该空间，3 条 + 「+N 更多」）。
+- 右侧「当前任务集」= 当前空间任务按角色泳道（只显示该空间）；**每岗任务列表按状态排序**（🟢 进行中 → 🟡 待验收/受阻 → ⚪ 待认领 → ✅ 已完成），默认显示前 3 条 + 「▾ 展开全部 N 个任务（M 未完成）」一键展开为该岗**全量任务**（可滚动，任意条点进详情）；折叠/展开状态按岗位记忆。
 - **点任务行 → 任务详情弹窗**：
   - **🤖 AI 执行过程**：执行该任务的 AI 沉淀的过程记录（evidence + 评论时间流）——AI 的每一步行动/产出/汇报都在这，是「任务详情看到 AI 工作过程」的落点；
-  - **⏱ 进展时间线**：goal:publish / claim / transition / comment / evidence / reassign / exec / model 等审计动作（`GET /api/activity?taskId=`）；
+  - **🧾 审计（改动 × 证据，L1/L2）**：任务收尾（🟡 待验收/✅ 已完成）时展示**改动文件清单**（A/M/D/R 徽标 + 行数 ±）→ 逐文件展开 diff、逐文件「✓ OK / ✘ 有问题」批注（存 `reviewNotes`）、整体结论一键批注；测试报告（✅/❌ + 失败用例）、产物、多轮补丁同屏；**打回自动把批注拼进原因评论交付下一轮 worker**（守护认领重跑时携带历史反馈，见 §3.9）；
+  - **⚠ 并行改动重叠（L3）**：本任务改到的文件若同时被其他任务改动（如并行波次同改一个文件），审计区顶部黄色警示列出对方任务与状态（🟢进行中=活风险）——验收/合入前先想合入顺序（见 §3.9）；
+  - **⏱ 进展时间线**：goal:publish / claim / transition / comment / patch / review-note / evidence / reassign 等审计动作（`GET /api/activity?taskId=`）；
   - 📋 描述、🎯 验收标准、🚧 边界（做什么 ✅ / 不做什么 🚫）、🔗 依赖提示、创建/更新时间；
-  - **状态操作**（按状态出现）：todo →「▶ 开工 / 🔒 认领」；in_progress →「📮 提交验收 / 归还待办」；in_review →「✓ 验收通过（仅将军）/ ↩ 打回重做」；blocked →「解阻」；另有「💬 评论/记录」「转派」「🤖 派 AI 执行」。
+  - **状态操作**（按状态出现）：todo →「▶ 开工 / 🔒 认领」；in_progress →「📮 提交验收 / 归还待办」；in_review →「✓ 验收通过（仅将军）/ ↩ 打回重做（附原因 + 审计批注）」；blocked →「解阻」；另有「💬 评论/记录」「转派」与「🤖 派 AI 执行」。
+- **进行中的任务不再误导**：已认领并派工的任务显示「🤖 AI 执行中（已派工）」禁用按钮（防重复派发），过程区文案说明 AI 正在执行、完成/异常自动沉淀——不会再出现「状态进行中却提示还没有 AI 执行」的观感错位。
 
 ### 3.4 发布目标与自动建链
 - 底部「🎯 发布目标」（选中具体空间后可用）→ `POST /api/goal`：重复发布会**取消**同空间旧的 `[auto-goal]` 未完成任务，再按编队生成新阶段链（`soldier=role`、`priority=high`、`blockedBy=前一任务`）。
@@ -139,6 +142,16 @@ patch 里**必须显式给** `legionDir: 'D:/project/DSH/legion'`——pnpm 对 
 - **右侧「实时动态」**：SSE 审计流；顶部 KPI：目标/完成/进行中/AI 员工数。
 - **底部命令栏**：⏸ 全局暂停（v1）/ 🗓 任务调度 / 🎯 发布目标 / ⚙️ 模型配置 / ＋ 新建任务 / 📤 导出日报。
 
+### 3.9 任务收尾审计（L1–L3，Codex 式改动审计）
+> 完成的任务怎么放心？Legion 把「**改了哪些文件 → 每处改了什么 → 谁和它改重了**」沉淀成任务自己的审计工作台（任务详情「🧾 审计」区），验收/打回都在同一视图内完成。
+
+- **L1 改动文件清单 + diff（结构化补丁）**：守护在合入 worktree 改动时用 `git diff --numstat/--name-status` 解析，经 `POST /api/patch` 结构化登记（`files:[{path,status,add,del}]` + 全量 diff，任务 `patches` 列，≤40 条/40 条目上限）；详情审计区逐文件展开该文件自己的 hunks，多轮补丁历史可见。
+- **L2 逐文件批注 + 打回闭环**：`POST /api/review-notes` 保存任务/文件级批注（`ok|issue|clear`，`review_notes` 列，全部留 audit）；「↩ 打回重做」自动把 issue 批注拼进原因评论 → 守护下次认领时把历史有效反馈（打回原因/批注）**带进 worker 提示词**，修复不丢上下文。
+- **L3 跨任务改动重叠**：`GET /api/overlaps?scope=&id=` 扫描空间内所有带补丁记录的任务，按「改到同一文件」分组（≥2 任务）；任务详情自动标出**并行波次同改文件**的对方任务与状态（与 in_progress/in_review 重叠 = 黄色活风险，提醒合入顺序与语义冲突）。
+- **派工即时可见**：守护派工成功即写 `🟢 已派 AI worker 开始执行（worker=…，隔离 worktree=…）` 评论——任务从认领那刻起「AI 执行过程」就有内容，不再空窗到结算。
+- **证据同屏**：结构化测试报告（`testReport`，D7' 切片闸门 ✅/❌ + 失败用例/复现）+ 产物（`artifacts`，url 可点开）与 diff、批注并列同一审计区。
+- 数据流：`POST /api/patch`（结构化登记）· `POST /api/review-notes` · `GET /api/overlaps`；UI 在 `TaskDetailModal`（审计工作台）。
+
 ---
 
 ## 4. team-hub v2 一览（:8787）
@@ -150,6 +163,7 @@ patch 里**必须显式给** `legionDir: 'D:/project/DSH/legion'`——pnpm 对 
 | 域 | 接口 |
 | --- | --- |
 | 任务 | `GET /api/board?scope=` · `GET /api/task?id=` · `POST /api/create /claim /transition /advance /reassign /release-stale /comment /heartbeat` |
+| 审计 | `POST /api/patch`（结构化：files[{path,status,add,del}]+diff）· `POST /api/review-notes`（任务/文件批注 ok/issue/clear）· `GET /api/overlaps?scope=&id=`（跨任务改动重叠，L3） |
 | 目标 | `GET /api/goal?scope=` · `POST /api/goal`（upsert + 自动建链） |
 | 进展 | `GET /api/activity?scope=|taskId=|limit=`（审计时间线） |
 | 空间/编队 | `GET /api/spaces`（含仓库绑定 `localDir`/`remoteUrl`） `/api/roster?scope= /api/agents` · `POST /api/spaces /api/spaces/{id}/agents /api/agents` |
@@ -202,6 +216,9 @@ patch 里**必须显式给** `legionDir: 'D:/project/DSH/legion'`——pnpm 对 
 **关联文档**
 - `workbench/README.md` — 军团指挥台细目（组件/数据流/各功能实现位置）
 - `scrum/README.md` — v1 看板协议与 taskctl 命令手册（遗留引擎）
+- `docs/ORCHESTRATION-V3.md` — v3 切片流水线编排（并行波次 / D7' 机器闸门 / 类型化槽位，含审计闸门设计）
+- `docs/P0-CONFIRMATION.md` — P0 关键缺陷修复确认（含 §9 现场验收记录与审计相关修复）
+- `docs/P1-LIVE-ROLLOUT.md` — P1 现场验收与真实软件空间流水线滚动记录
 - `team-hub/server.mjs` — v2 中枢源码（表结构与全部路由以代码为准）
 - `LEGION.md` — 军团规则（注入执行 agent 提示词）
 

@@ -73,6 +73,14 @@ export interface Config {
   hubToken: string
   /** 守护负责的项目 scope（默认 default；goal 发布目标时默认用 roles.json 的 name）。 */
   scope: string
+  /** 切片流水线类型化槽位：并发 coder 上限（fix 任务占 coder 槽）。 */
+  sliceCoderSlots: number
+  /** 切片流水线类型化槽位：并发 tester 上限。 */
+  sliceTesterSlots: number
+  /** 单目标进行中的切片任务（coder+tester）上限。 */
+  perGoalSliceCap: number
+  /** 单个切片的修复回炉预算（fix 任务轮数上限，超限升级将军）。 */
+  maxFixPerSlice: number
 }
 
 export const Config = z.object({
@@ -95,6 +103,10 @@ export const Config = z.object({
   hubUrl: z.string().default(''),
   hubToken: z.string().default(''),
   scope: z.string().default('default'),
+  sliceCoderSlots: z.number().min(0).max(8).default(2),
+  sliceTesterSlots: z.number().min(0).max(8).default(2),
+  perGoalSliceCap: z.number().min(0).max(16).default(4),
+  maxFixPerSlice: z.number().min(0).max(5).default(2),
 })
 
 /** 任务记录（taskctl 输出的字段子集，按需扩展）。 */
@@ -117,6 +129,16 @@ interface Task {
   hold?: boolean
   blockedBy: string[]
   comments: Array<{ by: string; at: string; text: string }>
+  /** 切片流水线归属键（v3 slice 模式）：coder/tester = `${tdId}:S${n}`；devops 尾 = tdId。 */
+  slice?: string | null
+  /** 切片序号（1 基）。 */
+  sliceIdx?: number | null
+  /** 修复任务的回炉源：指向失败的那个 tester 任务 id（语义见 ORCHESTRATION-V3 §3.2 修订）。 */
+  fixOf?: string | null
+  /** tester 的已回炉轮数（服务端记录；守护用「同 fixOf 非取消 fix 任务数」推导）。 */
+  fixCount?: number
+  /** tester 结构化报告（D7' 机器闸门输入）：{passed, failures[], summary, at, by}。 */
+  testReport?: { passed: boolean; failures?: Array<{ name: string; log: string; repro: string }>; summary?: string; at?: string; by?: string } | null
 }
 
 /** 多角色流水线中的一个阶段（角色）。 */
@@ -150,6 +172,8 @@ interface WorkerReport {
   evidence: string
   blocker: string
   artifact: WorkerArtifact | null
+  /** 仅切片测试士兵（tester，D7' 机器闸门）回报：结构化测试结果。 */
+  testReport?: { passed: boolean; summary?: string; failures?: Array<{ name: string; log: string; repro: string }> } | null
 }
 
 /** worker 产物（借鉴 dsh-worktable 的 widget-result.json 握手：html 看板 iframe 预览、file 链接、url 跳转）。 */
@@ -195,6 +219,28 @@ const WORKER_SCHEMA: ObjectJsonSchema = {
         title: { type: 'string' },
       },
       required: ['kind', 'path'],
+      additionalProperties: false,
+    },
+    testReport: {
+      type: 'object',
+      properties: {
+        passed: { type: 'boolean' },
+        summary: { type: 'string' },
+        failures: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string' },
+              log: { type: 'string' },
+              repro: { type: 'string' },
+            },
+            required: ['name'],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ['passed'],
       additionalProperties: false,
     },
   },
@@ -307,6 +353,8 @@ export function apply(ctx: AppContext, config: Config): void {
   const foremanPending = new Map<string, Promise<Agent | undefined>>()
   /** 中止类重试的退避时间戳：taskId → 上次「worker 未完成/派工失败」重试时间（防故障期热循环） */
   const abortRetryAt = new Map<string, number>()
+  /** 切片展开重试退避：tdId → 上次「TASK_BREAKDOWN.md 未就绪/注册失败」时间（防每轮空转重试） */
+  const expandRetryAt = new Map<string, number>()
   const inflight = new Set<string>()
   const controllers = new Set<AbortController>()
   let sweeping = false
@@ -405,6 +453,42 @@ export function apply(ctx: AppContext, config: Config): void {
   const isDiscussion = discussion !== undefined && discussionMembers.length > 0
   // 项目 scope：显式配置优先，否则用 roles.json 的 name（软件流水线 = software），再否则 default。
   const scope = config.scope !== 'default' ? config.scope : (pipeline?.name ?? 'default')
+
+  // ── 切片流水线（v3 slice 模式，见 docs/ORCHESTRATION-V3.md）──
+  // slice-mode 目标：分析前缀任务（…→test-designer）描述带 [slice-mode] 标记；切片束任务带 slice 键。
+  const SLICE_ANALYSIS_TAIL = 'test-designer'
+  const isSliceGoalTask = (t: Task): boolean => (t.description ?? '').includes('[slice-mode]')
+  /** slice 键 → 目标级键：'T-004:S2' → 'T-004'；devops 尾 slice=T-004 → 'T-004'。 */
+  const sliceGoalKey = (s: string | null | undefined): string | null => {
+    if (!s) return null
+    const m = /^(.+?):S\d+$/.exec(s)
+    return m ? m[1] : s
+  }
+  /** 是否为切片束任务（coder/tester/devops 且带 slice 键）。 */
+  const isSliceBeam = (t: Task): boolean => t.slice != null && t.role != null && (t.role === 'coder' || t.role === 'tester' || t.role === 'devops')
+
+  /** 解析 breaker 产出的 TASK_BREAKDOWN.md 切片清单（P1-4 机器可读格式，见 roles.json breaker 提示词）：
+   *  '## slices' 段落后逐行「- S1 | 切片标题 | a.js, b.ts | 验收1; 验收2」。 */
+  function parseSlices(text: string): Array<{ title: string; files: string[]; acceptance: string[] }> {
+    const lines = text.split(/\r?\n/)
+    const start = lines.findIndex(l => /^#{2,3}\s*(slices|切片)/i.test(l.trim()))
+    if (start === -1) return []
+    const out: Array<{ title: string; files: string[]; acceptance: string[] }> = []
+    for (const raw of lines.slice(start + 1)) {
+      const line = raw.trim()
+      if (line === '') continue
+      if (/^#{1,6}\s/.test(line)) break // 下一个标题 = 清单结束
+      const m = /^[-*]\s*S?(\d+)\s*[|:]\s*(.*)$/.exec(line)
+      if (!m) continue
+      const parts = m[2].split('|').map(x => x.trim())
+      const title = (parts[0] ?? '').trim()
+      if (title === '') continue
+      const files = (parts[1] ?? '').split(/[,，]/).map(x => x.trim()).filter(Boolean)
+      const acceptance = (parts[2] ?? '').split(/[;；]/).map(x => x.trim()).filter(Boolean)
+      out.push({ title, files, acceptance })
+    }
+    return out
+  }
 
   // ── 空间仓库绑定：每个工作空间可配置自己的「本地文件夹 + 远程仓库」（team-hub /api/spaces，
   //    军团指挥台「空间设置」维护——选文件夹而非手填，自动识别该 git 仓库的远程）。
@@ -696,20 +780,62 @@ exit 0
     return ''
   }
 
-  /** 捕获 worktree 的改动 diff 并记录到任务（taskctl patch）。非隔离模式跳过。 */
+  /** 解析 git numstat/name-status → 审计用结构化文件清单 [{path,status,add,del}]。 */
+  function parseDiffFiles(numstatText: string, nameStatusText: string): Array<{ path: string; status: string; add: number; del: number }> {
+    const stat = new Map<string, { add: number; del: number }>()
+    for (const line of numstatText.split('\n')) {
+      const parts = line.split('\t')
+      if (parts.length < 3) continue
+      const add = Number(parts[0]); const del = Number(parts[1])
+      if (!Number.isFinite(add) || !Number.isFinite(del)) continue
+      stat.set(parts[2].trim(), { add: Math.max(0, add), del: Math.max(0, del) })
+    }
+    const out: Array<{ path: string; status: string; add: number; del: number }> = []
+    const seen = new Set<string>()
+    for (const line of nameStatusText.split('\n')) {
+      const parts = line.split('\t')
+      if (parts.length < 2) continue
+      const meta = parts[0].trim()
+      const m = meta.match(/^([AMDRCUX])\d*/)
+      if (!m) continue
+      const status = m[1]
+      // 重命名/复制：两列路径，取新路径
+      const path = (parts.length > 2 ? parts[2] : parts[1]).trim()
+      if (!path || seen.has(path)) continue
+      seen.add(path)
+      const s = stat.get(path) ?? { add: 0, del: 0 }
+      out.push({ path, status, add: s.add, del: s.del })
+    }
+    // 未出现在 name-status（异常）但 numstat 有 → 兜底 M
+    for (const [path, s] of stat) {
+      if (!seen.has(path)) { seen.add(path); out.push({ path, status: 'M', add: s.add, del: s.del }) }
+    }
+    return out
+  }
+
+  /** 捕获 worktree 的改动 diff 并记录到任务（taskctl patch / hub patch）。非隔离模式跳过。 */
   async function recordPatch(taskId: string, dir: string | null, summary: string): Promise<void> {
     if (dir === null) return
     try {
       const show = await runGit(dir, ['show', '--format=', 'HEAD'])
       if (show.code !== 0 || show.out.trim().length === 0) return
-      const names = await runGit(dir, ['diff', '--name-only', 'HEAD~1', 'HEAD'])
-      const files = names.out.split('\n').map(s => s.trim()).filter(Boolean).join(',')
-      const tmp = join(dir, `.legion-${taskId}.patch`)
-      writeFileSync(tmp, show.out, 'utf8')
-      try {
-        await runTaskctl(config.scrumDir, ['patch', taskId, '--by', config.role, '--summary', summary, '--diff', tmp, '--files', files])
-      } finally {
-        try { rmSync(tmp) } catch { /* 清理失败静默 */ }
+      const numstat = await runGit(dir, ['diff', '--numstat', 'HEAD~1', 'HEAD'])
+      const nameStatus = await runGit(dir, ['diff', '--name-status', 'HEAD~1', 'HEAD'])
+      const fileStats = parseDiffFiles(numstat.code === 0 ? numstat.out : '', nameStatus.code === 0 ? nameStatus.out : '')
+      if (fileStats.length === 0) {
+        const names = await runGit(dir, ['diff', '--name-only', 'HEAD~1', 'HEAD'])
+        for (const p of names.out.split('\n').map(s => s.trim()).filter(Boolean)) fileStats.push({ path: p, status: 'M', add: 0, del: 0 })
+      }
+      if (useHub) {
+        await hubPost('/api/patch', { id: taskId, by: config.role, scope, summary, diff: show.out, files: fileStats })
+      } else {
+        const tmp = join(dir, `.legion-${taskId}.patch`)
+        writeFileSync(tmp, show.out, 'utf8')
+        try {
+          await runTaskctl(config.scrumDir, ['patch', taskId, '--by', config.role, '--summary', summary, '--diff', tmp, '--files', fileStats.map(f => f.path).join(',')])
+        } finally {
+          try { rmSync(tmp) } catch { /* 清理失败静默 */ }
+        }
       }
     } catch (e) {
       log(`${taskId} 记录 diff 失败：${String(e)}`)
@@ -770,6 +896,13 @@ exit 0
   /** 流水线流转：done 任务所属角色有 next 且尚无后继时，创建下一角色任务（todo）。 */
   async function advancePipeline(doneTask: Task): Promise<void> {
     if (pipeline === null) return
+    // 切片流水线任务不走 roles.json 的 next 流转：
+    // 切片束任务（slice≠null）的"下一环"由切片编排决定（coder→tester 已由 blockedBy 预建、
+    // tester→devops 尾同理）；fix 回炉任务合入即闭环（重测由编排重开 tester）。
+    // 分析前缀尾（test-designer）done 也不建通用 coder——切片束由 readyToExpand 注册。
+    if (doneTask.slice != null) return
+    if (doneTask.fixOf != null) return
+    if (doneTask.role === SLICE_ANALYSIS_TAIL && isSliceGoalTask(doneTask)) return
     const stage = stageByRole.get(doneTask.role ?? '')
     if (!stage || !stage.next) return
     const nextStage = stageByRole.get(stage.next)
@@ -841,6 +974,25 @@ exit 0
           ]
         : []),
       t.blockedBy.length > 0 ? `依赖（应已完成）：${t.blockedBy.join(', ')}` : '',
+      ...(stage?.role === 'tester' && t.testReport
+        ? [
+            '',
+            '上一轮测试报告（对照检查；本轮必须重新运行并输出**新的** testReport）：',
+            `- passed=${t.testReport.passed}`,
+            ...(t.testReport.failures ?? []).map(f => `- 失败用例 ${f.name}：${f.log ?? ''}${f.repro ? `（复现：${f.repro}）` : ''}`),
+            ...(t.testReport.summary ? [`- 小结：${t.testReport.summary}`] : []),
+          ]
+        : []),
+      ...(t.fixOf
+        ? [
+            '',
+            '本任务是**修复任务**（针对失败测试回炉）：按任务描述中的失败用例定位根因并修复。',
+            '修复纪律：',
+            '- 不得通过修改测试用例 / 验收预期来掩盖失败；',
+            '- 修复后必须跑真实命令回归验证（复现 → 修复 → 复测），evidence 写清命令与输出要点；',
+            '- 若修复需要改动本切片文件域之外的代码，在 evidence 说明理由。',
+          ]
+        : []),
       '',
       '历史评论（含将军的退回反馈，必须处理）：',
       ...(t.comments.length > 0
@@ -866,9 +1018,108 @@ exit 0
       '   {"status":"done","summary":"一句话总结","evidence":"验证证据（命令与输出要点）","blocker":"","artifact":null}',
       '   "artifact" 可选（无产物必须为 null）：{"kind":"html|file|url","path":"产物绝对路径（工作目录内）","title":"一句话标题"}——html 会进看板 iframe 预览，file/url 变成看板链接。',
       '   或 {"status":"blocked","summary":"已完成的部分","evidence":"","blocker":"卡在哪个文件/命令/什么报错（必须具体）","artifact":null}',
+      ...(stage?.role === 'tester' && t.slice != null && String(t.slice).includes(':S')
+        ? [
+            '',
+            '**测试士兵纪律（切片验收岗，D7\' 机器闸门）**：只测不修——绝不改动被测代码/测试用例来"通过"。',
+            '运行测试用例并给出真实证据；最终报告 JSON 必须带 testReport 字段：',
+            '   {"status":"done","summary":"一句话","evidence":"运行了什么命令、输出要点","blocker":"","artifact":null,',
+            '    "testReport":{"passed":false,"summary":"一句话小结","failures":[{"name":"用例名","log":"失败日志要点","repro":"复现命令"}]}}',
+            '   passed=true 才会自动验收 done；有任何失败必须 passed=false 并逐条列进 failures。',
+          ]
+        : []),
       '',
     ]
     return lines.filter(l => l.length > 0).join('\n')
+  }
+
+  /**
+   * D7' 机器闸门：切片测试士兵的结算（只测不修）。
+   * 报告 testReport.passed=true → 自动 done（advanceTo by=tester，服务器放行 in_review→done by 岗位）；
+   * 失败 → in_review + 登记报告 + 按预算创建 fix 回炉任务（role coder, fixOf=本 tester, blockedBy=[]，
+   *   创建由守护条件闸门而非依赖链把关，避免 openDeps 死锁）；预算用尽 → ❓ 升级将军人工处理。
+   * 切片功能依赖 hub 端点（/api/test-report、/api/create 扩展字段）；非 hub 退化为普通人工验收。
+   */
+  async function settleSliceTest(t: Task, worktreeDir: string | null, report: WorkerReport): Promise<void> {
+    if (!useHub) {
+      await transitionTo(t.id, 'in_review')
+      await safeComment(t.id, `✓ 切片测试完成（hub 不可用，机器闸门退化为人工验收）：${report.summary}\n证据：${report.evidence}`)
+      activity('done', t.id, `切片测试完成（hub 不可用）：${report.summary}`)
+      log(`${t.id} → in_review（切片测试，hub 不可用，等将军验收）`)
+      return
+    }
+    if (worktreeDir !== null) await commitWorktree(t.id, worktreeDir, report.summary) // 测试通常无改动；有则留档
+    await recordPatch(t.id, worktreeDir, report.summary)
+    if (report.artifact && report.artifact.path) await recordArtifact(t.id, report.artifact, worktreeDir)
+    const rp = report.testReport && typeof report.testReport === 'object' ? report.testReport : null
+    const passed = rp?.passed === true
+    try {
+      await hubPost('/api/test-report', {
+        id: t.id, by: 'tester', scope,
+        passed, failures: rp?.failures ?? [], summary: rp?.summary ?? report.summary,
+      })
+    } catch (e) {
+      log(`${t.id} test-report 登记失败：${String(e)}`)
+      await safeComment(t.id, `⚠ test-report 登记失败：${String(e).slice(0, 200)}`)
+    }
+    const failLines = (rp?.failures ?? []).map(f =>
+      `- ${f?.name ?? '（未命名用例）'}${f?.log ? `：${f.log}` : ''}${f?.repro ? `（复现：${f.repro}）` : ''}`)
+    const failText = failLines.length > 0 ? failLines.join('\n') : '（无失败明细）'
+    if (passed) {
+      await advanceTo(t.id, 'tester')
+      await safeComment(t.id, `✅ 切片测试通过（机器闸门自动 done）：${rp?.summary ?? report.summary}\n证据：${report.evidence}`)
+      activity('done', t.id, `切片测试通过：${report.summary}`)
+      log(`${t.id} → done（D7' 机器闸门通过）`)
+      return
+    }
+    // 失败：in_review + 修复预算裁决
+    await transitionTo(t.id, 'in_review')
+    await safeComment(t.id, `❌ 切片测试未通过（testReport 已登记）：\n${failText}\n机器闸门：修复完成、重测通过后才自动 done。`)
+    activity('test-fail', t.id, `切片测试失败：${(rp?.summary ?? report.summary).slice(0, 120)}`)
+    const all = await listTasks()
+    const fixes = all.filter(f => f.role === 'coder' && f.fixOf === t.id && f.status !== 'canceled')
+    const used = fixes.length
+    const openFix = fixes.find(f => f.status !== 'done')
+    if (openFix) {
+      log(`${t.id} 已有在途修复任务 ${openFix.id}，跳过重复创建`)
+      return
+    }
+    if (used >= config.maxFixPerSlice) {
+      await safeComment(t.id, `❓ 修复预算已用尽（maxFixPerSlice=${config.maxFixPerSlice}，已回炉 ${used} 轮仍未通过）。请将军人工介入：检查失败用例、修正验收口径或手动安排修复。`)
+      activity('escalate', t.id, `切片测试 ${used} 轮未通过，预算用尽，升级将军`)
+      log(`${t.id} fix 预算用尽（${used}/${config.maxFixPerSlice}），升级将军人工处理`)
+      return
+    }
+    const round = used + 1
+    const sliceNo = t.sliceIdx ?? ''
+    const baseTitle = (t.title ?? '').replace(/^【[^】]*】/, '').slice(0, 30)
+    try {
+      const res = await hubPost('/api/create', {
+        title: `【切片 S${sliceNo} 修复·第${round}轮】${baseTitle}`,
+        description: `[auto-goal]\n[fix]\n目标：修复「${t.id}」切片测试失败（第 ${round} 轮回炉）。\n失败用例：\n${failText}\n\n修复纪律：定位根因修复，禁止改测试预期掩盖失败；完成后跑真实命令回归并给出证据。`,
+        role: 'coder', status: 'todo', priority: 'high',
+        parent: t.id, blockedBy: [], slice: t.slice, sliceIdx: t.sliceIdx, fixOf: t.id,
+        acceptance: [
+          `复现并定位「${t.id}」报告中每个失败用例的根因`,
+          '修复根因（不得通过修改测试用例 / 验收预期掩盖失败）',
+          '跑真实命令回归（复现 → 修复 → 复测），evidence 给出命令与输出要点',
+        ],
+        boundary: {
+          do: [`只改动本切片文件域（${t.slice}）内的实现`],
+          dont: ['修改测试用例与验收预期来掩盖失败', '改动本切片文件域之外的代码（除非 evidence 说明必要理由）'],
+        },
+        by: config.role, scope,
+      }) as { id?: string }
+      const fixId = res.id ?? ''
+      if (fixId !== '') {
+        await safeComment(t.id, `🛠 已派发修复任务 ${fixId}（第 ${round} 轮，预算 ${used + 1}/${config.maxFixPerSlice}）；修复完成合入后本任务自动重开重测。`)
+        activity('fix', t.id, `派发修复任务 ${fixId}（第 ${round} 轮回炉）`)
+        log(`${t.id} → in_review，已派发修复任务 ${fixId}（第 ${round}/${config.maxFixPerSlice} 轮）`)
+      }
+    } catch (e) {
+      log(`${t.id} 修复任务创建失败：${String(e)}`)
+      await safeComment(t.id, `⚠ 修复任务创建失败：${String(e).slice(0, 200)}（请将军人工安排修复）`)
+    }
   }
 
   /** 派一个 worker 处理任务（认领已完成或任务本身可开工）。 */
@@ -910,6 +1161,8 @@ exit 0
     })()
     if (run === undefined) return
     activity('dispatch', t.id, 'worker 已派工，开始实现')
+    // 派工成功即写 hub 评论：任务详情的「AI 执行过程」立刻可见，避免「in_progress 却看不到 AI 在跑」的观感错位
+    await safeComment(t.id, `🟢 已派 AI worker 开始执行（worker=scrum:${t.id}${worktreeDir ? `，隔离 worktree=${worktreeDir}` : ''}）——进行中，完成/异常将自动更新并流转`)
     await reportProgress(t.id, 10, '已派工')
     // 看门狗：subagent 可能挂死且 run.result 永不结算（abort 不保证杀死子代理）。
     // workerTimeoutMs 内未完成 → 强制结算为超时，放行 inflight/单槽，下轮自动重试（带退避）。
@@ -938,6 +1191,11 @@ exit 0
       return
     }
     const report = result.structured as WorkerReport
+    // D7' 机器闸门：切片测试任务（tester + slice 键）走专用结算，不进入常规 advancePipeline 流转
+    if (report.status === 'done' && stage?.role === 'tester' && t.slice != null && String(t.slice).includes(':S')) {
+      await settleSliceTest(t, worktreeDir, report)
+      return
+    }
     if (report.status === 'done') {
       // worktree 隔离：先提交到 w/<id> 分支再记录 diff
       if (worktreeDir !== null) await commitWorktree(t.id, worktreeDir, report.summary)
@@ -1013,7 +1271,14 @@ exit 0
       return
     }
     activity('claim', t.id, stage ? `${stage.label}（${stage.role}）认领开工` : '认领开工')
-    await runWorker(t, [], stage)
+    // 审计/打回闭环：认领时把历史有效反馈（将军评论/打回原因/审计批注评论，排除自身系统噪音）带进提示词，
+    // 使「打回原因 → 重跑」不丢失上下文（与 in_progress 退回的 feedback 语义一致）。
+    const prior = t.comments.filter(c => {
+      if (c.by === config.role) return false
+      const txt = c.text ?? ''
+      return !(txt.startsWith('⚠ worker 未完成') || txt.startsWith('⚠ 派工失败') || txt.startsWith('🟢 已派 AI') || txt.startsWith('⏳'))
+    }).slice(-12)
+    await runWorker(t, prior, stage)
   }
 
   /** 处理被退回/解阻的任务。 */
@@ -1232,6 +1497,72 @@ exit 0
     log(`${t.id} → done（讨论收敛），流水线已启动`)
   }
 
+  /** 切片流水线编排（每轮扫单，仅 hub 模式）：
+   * ① readyToExpand：分析前缀尾（test-designer done + [slice-mode]）且切片束尚未注册 →
+   *    解析已合入主分支的 docs/TASK_BREAKDOWN.md（breaker 机器可读切片清单）→ POST /api/goal/slices 注册
+   *    （coder_Si→tester_Si 微链 + devops 目标级收尾；注册幂等，失败退避后重试）。
+   * ② readyToRetest：tester 停在 in_review 且其 fix 回炉任务已全部合入 done（预算未用尽）→
+   *    重开 tester（in_review→todo），下轮由 todo 认领重测——机器闸门闭环。
+   */
+  async function orchestrateSlices(tasks: Task[]): Promise<void> {
+    const sliced = tasks.filter(t =>
+      t.scope === scope && !t.hold && t.status !== 'canceled' &&
+      (isSliceBeam(t) || (t.role === SLICE_ANALYSIS_TAIL && isSliceGoalTask(t))))
+    if (sliced.length === 0) return
+    // ① 展开就绪
+    const tdDone = sliced.find(t => t.role === SLICE_ANALYSIS_TAIL && t.status === 'done' && isSliceGoalTask(t))
+    if (tdDone !== undefined) {
+      const beamExists = sliced.some(x => x.slice === tdDone.id || String(x.slice ?? '').startsWith(`${tdDone.id}:S`))
+      if (!beamExists && (expandRetryAt.get(tdDone.id) ?? 0) + config.intervalMs * 6 <= Date.now()) {
+        const bdPath = join(repoRootFor(), 'docs', 'TASK_BREAKDOWN.md')
+        let slices: Array<{ title: string; files: string[]; acceptance: string[] }> = []
+        try {
+          if (existsSync(bdPath)) slices = parseSlices(readFileSync(bdPath, 'utf8'))
+        } catch (e) {
+          log(`TASK_BREAKDOWN.md 读取失败：${String(e)}`)
+        }
+        if (slices.length === 0) {
+          expandRetryAt.set(tdDone.id, Date.now())
+          log(`${tdDone.id} 分析前缀完成但 TASK_BREAKDOWN.md 无切片清单（${bdPath}），等待 breaker 产出（退避重试）`)
+          return
+        }
+        try {
+          const res = await hubPost('/api/goal/slices', { testDesignerTaskId: tdDone.id, slices, by: config.role }) as { created?: string[] }
+          const n = (res.created ?? []).length
+          await safeComment(tdDone.id, `📐 已注册 ${n} 个切片（coder_Si→tester_Si 微链 + devops 目标级收尾），切片之间互不依赖，可并行派工。`)
+          activity('slices', tdDone.id, `切片展开：${n} 个任务`)
+          log(`${tdDone.id} 切片束已注册：${n} 个任务`)
+        } catch (e) {
+          expandRetryAt.set(tdDone.id, Date.now())
+          log(`${tdDone.id} 切片注册失败（退避重试）：${String(e)}`)
+        }
+      }
+    }
+    // ② 重测重开
+    for (const tester of sliced.filter(t => t.role === 'tester' && t.status === 'in_review' && String(t.slice ?? '').includes(':S'))) {
+      // 已升级将军（预算用尽）的 tester 绝不自动重开——否则 fix 全 done 后每轮都重测，形成死循环
+      if (tester.comments.some(c => (c.text ?? '').includes('预算已用尽'))) continue
+      const fixes = tasks.filter(f => f.role === 'coder' && f.fixOf === tester.id && f.status !== 'canceled')
+      if (fixes.length === 0 || fixes.length > config.maxFixPerSlice) continue
+      if (!fixes.every(f => f.status === 'done')) continue // 有在途/失败 fix 未合入，等下一轮
+      // 清掉上一轮的 tester worktree/分支：重测必须基于合入修复后的主分支，而非复用旧快照
+      // （prepareWorktree 对既有 worktree/分支默认复用续做——那是"打回纠错"语义；重测是"换基线"语义）。
+      if (config.isolate) {
+        const staleDir = join(worktreeRootFor(), tester.id)
+        if (existsSync(staleDir)) {
+          const removed = await runGit(repoRootFor(), ['worktree', 'remove', '--force', staleDir])
+          if (removed.code !== 0) log(`${tester.id} 重开前清理旧 worktree 失败（下轮 prepareWorktree 将复用旧快照）：${(removed.err || removed.out).trim()}`)
+        }
+        await runGit(repoRootFor(), ['branch', '-D', `w/${tester.id}`])
+        activity('worktree', tester.id, `重测换基线：已清理旧 worktree/分支 w/${tester.id}，将基于最新主分支重建`)
+      }
+      await transitionTo(tester.id, 'todo')
+      await safeComment(tester.id, `🔄 修复已完成（第 ${fixes.length} 轮），自动重开本切片重测（机器闸门：通过后自动 done）。`)
+      activity('retest', tester.id, `修复完成，重开重测（第 ${fixes.length} 轮）`)
+      log(`${tester.id} → todo（fix 完成，第 ${fixes.length} 轮重测）`)
+    }
+  }
+
   /** 一轮扫单：todo 认领派工；本角色的退回任务纠错；依赖解除的 blocked 续做。 */
   async function sweep(): Promise<void> {
     if (sweeping) return
@@ -1259,6 +1590,27 @@ exit 0
       }
       const byId = new Map(tasks.map(t => [t.id, t]))
       const room = () => inflight.size < config.maxWorkers
+      // 切片类型化槽位（advisory 并发上限；maxWorkers 仍是绝对上限）：
+      // coder×sliceCoderSlots（fix 任务也占 coder 槽）、tester×sliceTesterSlots、单目标进行中切片任务 ≤ perGoalSliceCap。
+      const sliceBusy = (role: string): number =>
+        tasks.filter(x => x.role === role && x.slice != null && x.status === 'in_progress').length
+      const goalBusy = new Map<string, number>()
+      for (const x of tasks) {
+        if (x.slice != null && (x.role === 'coder' || x.role === 'tester') && x.status === 'in_progress') {
+          const k = sliceGoalKey(x.slice)
+          if (k !== null) goalBusy.set(k, (goalBusy.get(k) ?? 0) + 1)
+        }
+      }
+      const sliceRoomOk = (t: Task): boolean => {
+        if (t.slice == null) return true
+        if (t.role === 'coder' && sliceBusy('coder') >= config.sliceCoderSlots) return false
+        if (t.role === 'tester' && sliceBusy('tester') >= config.sliceTesterSlots) return false
+        if (t.role === 'coder' || t.role === 'tester') {
+          const k = sliceGoalKey(t.slice)
+          if (k !== null && (goalBusy.get(k) ?? 0) >= config.perGoalSliceCap) return false
+        }
+        return true
+      }
       // 流水线模式：守护按任务角色认领/派工；单角色模式：只认 config.role 的任务
       const self = (t: Task) => (isPipeline ? (t.role ?? config.role) : config.role)
       const isOurs = (t: Task) => (isPipeline ? (t.role !== null && stageByRole.has(t.role)) : t.soldier === config.role)
@@ -1308,6 +1660,7 @@ exit 0
         if (isPipeline && stageOf(t) === undefined && t.role !== 'discussion') continue // 流水线模式跳过无角色/未知角色任务
         if (t.hold) continue // 将军拦截：等放行
         if (openDeps(t)) continue // 链上后段：上一环 done 后自动交接
+        if (!sliceRoomOk(t)) continue // 切片类型化槽位 / 目标并发预算已满：留给其他切片或下轮
         inflight.add(t.id)
         const job = t.role === 'discussion' ? runDiscussion(t) : workTodo(t, stageOf(t))
         runDetached(t.id, job)
@@ -1318,6 +1671,7 @@ exit 0
         if (!room() || inflight.has(t.id)) continue
         if (t.hold) continue
         if (openDeps(t)) continue
+        if (!sliceRoomOk(t)) continue
         const cf = confirmState(t)
         if (cf.open) continue // 待将军确认：不自动重跑，等答复
         inflight.add(t.id)
@@ -1343,6 +1697,14 @@ exit 0
       if (isPipeline) {
         for (const t of tasks.filter(x => x.status === 'done' && stageOf(x) !== undefined)) {
           await advancePipeline(t)
+        }
+      }
+      // 5. 切片流水线编排（仅 hub 模式）：readyToExpand 注册切片束 / fix 合入后重开 tester 重测
+      if (useHub) {
+        try {
+          await orchestrateSlices(tasks)
+        } catch (e) {
+          log(`切片编排失败：${String(e)}`)
         }
       }
       writeDaemonStatus(inboxIds.length)

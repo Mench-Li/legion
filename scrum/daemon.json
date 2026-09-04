@@ -1,13 +1,14 @@
 {
   "role": "soldier-auto",
   "provider": "spawn",
-  "maxWorkers": 1,
+  "maxWorkers": 2,
   "isolate": true,
   "intervalMs": 30000,
-  "workerTimeoutMs": 600000,
+  "workerTimeoutMs": 1800000,
   "staleMinutes": 30,
   "taskTtlMinutes": 0,
   "scope": "software",
+  "paused": false,
   "pipeline": {
     "name": "software",
     "stages": [
@@ -21,11 +22,17 @@
       "devops"
     ]
   },
-  "inbox": 0,
-  "lastSweepAt": "2026-09-02T09:22:51.866Z",
-  "uptimeMs": 27743626,
+  "inbox": 5,
+  "lastSweepAt": "2026-09-04T02:39:55.163Z",
+  "uptimeMs": 3394002,
   "model": {
     "provider": "custom-ds",
     "model": "deepseek-v4-flash-openai"
+  },
+  "repo": {
+    "root": "D:/project/DSH/legion",
+    "binding": "space:software",
+    "localDir": "D:\\project\\DSH\\legion",
+    "remoteUrl": "https://github.com/Mench-Li/legion.git"
   }
 }

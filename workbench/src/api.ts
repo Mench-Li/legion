@@ -1,4 +1,4 @@
-import type { ActivityEvent, AgentCatalogItem, AgentModelCfg, ApiConfig, BoardData, CardStatus, ChatConversation, ChatMessage, DirListing, FileListResponse, FilePreview, GoalInfo, HubActivity, HubAuditEvent, HubTask, MissionsResponse, ModelOption, RepoInspect, RosterResponse, SkillInfo, SpaceInfo, WebFetchResult } from './types'
+import type { ActivityEvent, AgentCatalogItem, AgentModelCfg, ApiConfig, BoardData, CardStatus, ChatConversation, ChatMessage, DirListing, FileListResponse, FilePreview, GoalInfo, HubActivity, HubAuditEvent, HubTask, MissionsResponse, ModelOption, OverlapGroup, RepoInspect, RosterResponse, SkillInfo, SpaceInfo, WebFetchResult } from './types'
 
 /**
  * 数据源地址解析：?api= 查询参数优先，其次 localStorage，最后默认 4820。
@@ -358,6 +358,21 @@ export function hubReassign(id: string, soldier: string): Promise<unknown> {
 /** team-hub v2：任务评论。 */
 export function hubComment(id: string, text: string): Promise<unknown> {
   return hubPost('/api/comment', { id, text })
+}
+
+/** team-hub v2：L3 跨任务改动重叠检测（scope 内改到同一文件的任务分组；id 过滤出涉及本任务的分组）。 */
+export async function fetchHubOverlaps(scope?: string | null, id?: string): Promise<{ scope: string; groups: OverlapGroup[] }> {
+  const qs = new URLSearchParams()
+  if (scope) qs.set('scope', scope)
+  if (id) qs.set('id', id)
+  const res = await fetch(`${hubBase()}/api/overlaps?${qs.toString()}`, { headers: authHeaders() })
+  if (!res.ok) throw new Error(`overlaps ${res.status}`)
+  return res.json()
+}
+
+/** team-hub v2：审计批注（file='*'=整体结论；verdict=ok|issue|clear 清除）。 */
+export function hubReviewNote(id: string, file: string, verdict: 'ok' | 'issue' | 'clear', note = ''): Promise<unknown> {
+  return hubPost('/api/review-notes', { id, file, verdict, note })
 }
 
 async function hubPost(path: string, body: Record<string, unknown>): Promise<unknown> {

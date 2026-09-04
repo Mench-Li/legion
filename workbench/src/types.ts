@@ -262,6 +262,30 @@ export interface TaskBoundary {
   dont: string[]
 }
 
+/** team-hub v2：审计补丁条目（/api/patch 结构化登记：文件清单 + 行数 + 全量 diff）。files 兼容旧版逗号分隔字符串。 */
+export interface AuditPatch {
+  by: string
+  at: string
+  summary: string
+  files: Array<{ path: string; status: string; add: number; del: number }> | string
+  diff: string
+}
+
+/** team-hub v2：审计批注（review-notes：file='*'=整体结论；verdict=ok|issue）。 */
+export interface ReviewNote {
+  file: string
+  verdict: 'ok' | 'issue' | 'clear'
+  note: string
+  by: string
+  at: string
+}
+
+/** team-hub v2：L3 跨任务改动重叠（多任务改到同一文件 → 并行合入风险）。 */
+export interface OverlapGroup {
+  file: string
+  tasks: Array<{ id: string; title: string; status: CardStatus; updatedAt?: string }>
+}
+
 /** team-hub v2 单个任务（/api/board 返回，含角色/指派/依赖/版本/内容，供中枢调度与验收）。 */
 export interface HubTask {
   id: string
@@ -283,7 +307,14 @@ export interface HubTask {
   comments: CardComment[]
   /** 执行者提交的产出证据（isEvidence=true 的评论：by/at/text）。 */
   evidence: Array<{ by: string; at: string; text: string }>
-  patches: string[]
+  /** 结构化补丁记录（L1 审计：改动文件 + diff）。兼容旧版字符串补丁列表。 */
+  patches: Array<AuditPatch | string>
+  /** 产物登记（html/file/url）。 */
+  artifacts?: Array<{ by: string; at: string; kind: string; path: string; title: string }>
+  /** 结构化测试报告（D7' 闸门输入）。 */
+  testReport?: { passed: boolean; failures: Array<{ name: string; log: string; repro: string }>; summary: string; at: string; by: string } | null
+  /** 审计批注（文件级 OK/问题）。 */
+  reviewNotes?: ReviewNote[]
   parent?: string | null
   claimedAt?: string | null
   createdAt?: string

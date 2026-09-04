@@ -876,6 +876,29 @@ body {
 
 .task-detail .detail-warn { color: var(--yellow); font-size: 11px; line-height: 1.6; }
 
+/* L1/L2 审计工作台：改动文件清单 / diff / 测试报告 / 产物 */
+.audit-row code { font-size: 11.5px; }
+.audit-st { font-size: 9.5px; padding: 1px 5px; border-radius: 3px; background: rgba(255,255,255,.08); color: var(--muted); flex-shrink: 0; }
+.audit-st.A { background: rgba(57,211,150,.16); color: var(--green); }
+.audit-st.M { background: rgba(110,168,254,.16); color: var(--accent, #6ea8fe); }
+.audit-st.D { background: rgba(255,107,107,.16); color: var(--red); }
+.audit-st.R { background: rgba(246,191,38,.16); color: var(--yellow); }
+.audit-diff { margin: 4px 0 8px; padding: 8px 10px; background: rgba(0,0,0,.3); border: 1px solid var(--line); border-radius: 6px; color: #b8c6d6; font-size: 10.5px; line-height: 1.55; max-height: 320px; overflow: auto; white-space: pre; }
+.task-detail .btn.mini, .task-detail-modal .btn.mini { padding: 0 7px; font-size: 10.5px; height: 20px; line-height: 1; border-radius: 4px; }
+.task-detail .btn.mini.ghost, .task-detail-modal .btn.mini.ghost { background: transparent; }
+.tr-card { border-radius: 6px; padding: 8px 10px; margin: 6px 0; font-size: 11.5px; }
+.tr-card.pass { background: rgba(57,211,150,.08); border: 1px solid rgba(57,211,150,.25); }
+.tr-card.fail { background: rgba(255,107,107,.08); border: 1px solid rgba(255,107,107,.3); }
+.tr-badge { font-weight: 700; }
+.tr-card.pass .tr-badge { color: var(--green); }
+.tr-card.fail .tr-badge { color: var(--red); }
+.tr-summary { color: var(--text); margin-top: 3px; white-space: pre-wrap; }
+.tr-fail { margin-top: 6px; padding-top: 4px; border-top: 1px dashed rgba(255,107,107,.3); color: var(--text); }
+.tr-repro { color: var(--yellow); font-size: 10.5px; margin-top: 2px; }
+.tr-log { margin: 4px 0 0; padding: 6px; background: rgba(0,0,0,.3); border-radius: 4px; font-size: 10px; max-height: 140px; overflow: auto; white-space: pre-wrap; color: #ffb3b3; }
+.tr-meta { color: var(--muted-2); font-size: 9.5px; margin-top: 5px; }
+.proc-item code { font-size: 10.5px; }
+
 .task-detail .detail-item { display: flex; flex-direction: column; gap: 1px; }
 
 .task-detail .detail-item .meta { color: var(--muted-2); font-size: 10px; }

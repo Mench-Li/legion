@@ -33,7 +33,7 @@ node scripts/serve.mjs --port 5173   # 独立静态服务 → http://127.0.0.1:5
 | --- | --- | --- |
 | 顶部 KPI（任务/完成/待处理/AI 员工/资源） | `KpiBar`，资源为客户端本机指标 | ✅ |
 | 左侧模块 + 工作空间 | `Sidebar`：中枢模式下工作空间 = 全部空间 + team-hub 真实分区（`/api/scopes`），真分区切换 | ✅ |
-| 右侧「当前任务集」泳道 | `MissionPanel`：中枢模式走 `/api/missions?scope=`（scopeAware=true）；v1 回退 serve.mjs 或客户端聚合 | ✅ |
+| 右侧「当前任务集」泳道 | `MissionPanel`：中枢模式走 `/api/missions?scope=`（scopeAware=true）；v1 回退 serve.mjs 或客户端聚合；每岗任务按状态排序（进行中→待认领→已完成）+「展开全部 N」看全量 | ✅ |
 | 右侧「实时动态」 | `ActivityFeed`：SSE 实时流 | ✅ |
 | 快捷工具 | `QuickTools`：「打开内部看板」→ openKanban（经典看板新窗口）；「文件浏览/浏览网页」→ 进入文件中心/浏览器面板（`onOpenModule` 导航）；截图 OCR/语音待 DSH 工具面 | ✅/⏳ |
 | 对话中心 | `ChatPanel`：team-hub v2 `/api/chat/*` 真实接入（会话列表/新建/发送/历史，随当前空间隔离）；实时 = 中枢**单一 `/api/events`** 按 `chat:*` kind 过滤；纯文本渲染（无 raw HTML） | ✅ |
@@ -139,8 +139,11 @@ node scripts/serve.mjs --port 5173   # 独立静态服务 → http://127.0.0.1:5
   - **⏱ 进展时间线**：`GET /api/activity?taskId=`（goal:publish / claim / transition / comment / evidence / reassign / model:set / exec:*），中文可读；
   - 📋 任务描述、🎯 验收标准、🚧 边界（做什么 ✅ / 不做什么 🚫）、🔗 依赖解锁提醒；
   - **状态操作**：todo →「▶ 开工 / 🔒 认领」；in_progress →「📮 提交验收 / 归还待办」；in_review →「✓ 验收通过(general) / ↩ 打回重做」；blocked →「解阻」；另有「💬 评论/记录」「转派」「**🤖 派 AI 执行**」（写 `POST /api/exec/request`，请求执行守护认领）与「🖐 **拦截自动 / 🚀 放行**」（`POST /api/hold`，拦截后守护不再自动认领/执行）。
+  - **派工防重**：已认领并派工的 in_progress 任务 →「🤖 AI 执行中（已派工）」禁用按钮（依 `comments/by=soldier-auto` 或 `soldier` 已绑判断），过程区文案说明 AI 正在执行——不再出现「进行中却提示还没有 AI 执行」的误导（守护派工成功即写 `🟢 已派 AI worker…` 评论，见 plugins 派工路径）。
+  - **🧾 审计工作台（L1/L2）**：任务收尾（in_review/done）在 AI 执行过程下方展示「审计：改动 × 证据」——最新轮补丁的改动文件清单（A/M/D/R 徽标 + ±行数，`POST /api/patch` 结构化 files）逐文件「▾ 查看 diff」（按文件切 hunks）/「✓ / ✘ 批注」（`POST /api/review-notes`，`review_notes` 列）；测试报告（`testReport` ✅/❌+失败用例）与产物（`artifacts`）同屏；整体结论一键批注；**打回自动把 issue 批注拼进原因评论**（下一轮 worker 认领时经守护 feedback 注入提示词，闭环）。
+  - **⚠ 并行改动重叠（L3）**：审计区顶部展示 `GET /api/overlaps?scope=&id=` 结果——本任务改到的文件同时被其他任务改动时逐文件列出对方任务/状态（黄条=含 in_progress/in_review 的活风险）。
   - **验收标准/边界自动生成**：发布目标建链、`POST /api/create` 建任务都会**按岗位自动注入验收标准 + 边界**（模板见 `team-hub/stage-standards.mjs`；自定义 `acceptance`/`boundary` 可覆盖；历史在途 `[auto-goal]` 任务在服务启动时自动补种）；执行 worker 的提示词与验收视图同步携带——验收按清单逐条对照，不再「凭感觉」。
-- 数据流：`GET /api/task?id=`（team-hub 单任务接口）+ `GET /api/activity?taskId=`；状态操作与调度弹窗共用 `/api/transition|claim|reassign|comment`。
+- 数据流：`GET /api/task?id=`（team-hub 单任务接口）+ `GET /api/activity?taskId=`；状态操作与调度弹窗共用 `/api/transition|claim|reassign|comment`；审计批注走 `/api/review-notes`、重叠走 `/api/overlaps`。
 
 ## 智能体任务清单（点击智能体）
 

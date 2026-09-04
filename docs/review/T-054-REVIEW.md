@@ -1,12 +1,9 @@
-# T-057 代码审查报告（review）——S6 serve.mjs /api/web/fetch：SSRF 防护 fetch 代理 + 零依赖正文抽取
+# T-054 代码审查报告（review）——S3 serve.mjs 扩 /api/files list/read/download（仅回环 + 路径防护）
 
-> 审查对象（本任务 = S6 浏览器后端的独立代码审查；审查基线 = 本 worktree 分支 w/T-057 @ main HEAD 6e01ef1）：
-> - 功能实现提交 **aea0743**（serve.mjs +264、web.test.mjs +176：S6 全量功能——SSRF 防护 fetch 代理 + 零依赖正文抽取 + 契约测试）；
-> - 超时修复提交 **c564237**（T-050 切片：P0-3「webFetch 超时实为每跳非总超时」→ 整条重定向链共享 deadline；serve.mjs +11/−5、web.test.mjs +21、README/证据文档）。
-> 两者均已 promote 合入主线，当前文件 = 叠加后最终态。审查对当前 S6 代码整面正读 + 独立复跑，不引用提交自述。
-> 审查方式：真读代码与关键逻辑、独立跑契约测试、以「进程内真实 HTTP 路由 + 函数级边界探针」复验语义；只给反馈，不改实现。
-> 结论分级：**必须修改**（验收 AC 未达成 / 实测行为缺陷）与**建议优化**（可排期）。严重度 🔴高 / 🟠中 / 🟡低。
-> 本报告覆盖替换先前 T-054 报告内容；T-054 历史报告见 git 历史（3bf60c1）。
+> 审查对象：本任务编码交付 = 提交 d90c91d（w/T-046 切片，经 267a145 promote 合入本线 2bd55a1；此后无提交再触碰 serve.mjs / files-api.test.mjs，审查基线 = 当前 HEAD 文件）。
+> 审查范围：diff 净增量 = 3 文件 +99/−4 —— workbench/scripts/serve.mjs（+30/−4）、workbench/scripts/files-api.test.mjs（+20）、docs/T046-evidence/evidence.json（+53）；并按切片职责对 S3 只读面三端点（list/read/download）做整面正读 + 真服务复验。
+> 审查方式：真读代码与关键逻辑、独立跑契约测试、起真实 serve.mjs 做 HTTP 断言、对可疑的 Node 流式/错误处理语义做最小复现探针；只给反馈，不改实现。
+> 结论分级：**必须修改**（安全承诺失实 / 新增逻辑实为缺陷，建议收口前修复）与**建议优化**（不影响主路径，可排期）。严重度 🔴高 / 🟠中 / 🟡低。
 
 ---
 
@@ -14,127 +11,100 @@
 
 | 验证项 | 命令/方式 | 结果 |
 | --- | --- | --- |
-| 环境 | node v24.19.0（沙箱 workspace-write，禁网） | 与提交自述一致 |
-| web fetch 契约 | `node workbench/scripts/web.test.mjs` | tests 12 / suites 8 / pass 12 / fail 0（SSRF 矩阵、限长、超时、TC-S6-09b 整链 deadline 回归全绿） |
-| 存量回归（同文件域） | `node workbench/scripts/files-api.test.mjs` | tests 34 / suites 14 / pass 34 / fail 0 |
-| HTTP 路由层探针 | 探针 import serve.mjs（?query 强制新实例）→ `server.listen` 真实端口 → fetch POST | 见 §0.1：参数/协议/SSRF 错误一律 HTTP 200 + `{ok:false,code}` envelope；GET → 405 正常 |
-| 边界语义探针 | 函数级 webFetch（env 注入口开启）+ 本地 mock | 见 §0.2：headers 已回但 body 半途停住 → 超时被分类为 `web_error/'abort'` 而非 `timeout`（M2，实测复现） |
-| 审计留痕 | 全仓 grep audit/审计/console.log（serve.mjs 全域） | 仅 999 行启动日志；webFetch/handleWebApi 无任何逐次 fetch 留痕 → AC5 未达成（M1） |
-| 改动范围核对 | `git show aea0743 / c564237 --stat`；git status | 均限 serve.mjs / web.test.mjs / 文档；未触 package.json → 零新增依赖成立 |
-| typecheck / build | `pnpm exec tsc --noEmit` / vite build | 本沙箱 worktree 无 node_modules junction 无法复跑；审查对象全为 .mjs（不在 vite 构建图 src/* 内），TS 面零改动；coder 侧已录 tsc exit 0 / vite build 绿（615 modules，T-046 同录）——如实声明未复跑 |
+| 文件中心契约 | `node workbench/scripts/files-api.test.mjs`（node v24.19.0） | tests 22 / suites 9 / pass 22 / fail 0（含新增 TC-S3-08b） |
+| 存量回归 | `node workbench/scripts/web.test.mjs` | tests 10 / pass 10 / fail 0（serve.mjs 相关回归） |
+| 真服务 HTTP 冒烟 | spawn 真实 serve.mjs（127.0.0.1:5187）+ DSH_WORKBENCH_SPACES_JSON 注入 fixture scope | 见下逐条 |
+| 范围核对 | `git show d90c91d --stat`；`git log d90c91d..HEAD -- serve.mjs files-api.test.mjs` | diff 仅 3 文件；其后无改动 → 审查对象与当前文件一致 |
+| 路由不再整读 | 全仓 grep readFileBytes 调用点 | 仅 files-api.test.mjs 测试用 + serve.mjs 定义/注释；**路由已无引用** → P0-2 闭环 |
 
-### 0.1 HTTP 路由层探针（真实路由，非函数直测）
-POST /api/web/fetch（`content-type: application/json`）：
+真服务 HTTP 断言（fixture：scope=fx → 临时 repo 根，含 .git/config、link-out junction、16MB big.bin、中文名文件）：
 
-| 请求体 | HTTP 状态 | 响应 | 备注 |
-| --- | --- | --- | --- |
-| `{"url":"not a url"}` | **200** | `{ok:false, error:"URL 无法解析", code:"invalid_url"}` | TEST_CASES TC-S6-15 写「全部 400」→ 口径打架（O4） |
-| `{}`（缺 url） | **200** | `{ok:false, error:"缺少参数 url", code:"invalid_url"}` | 同上 |
-| `{"url":"file:///etc/passwd"}` | **200** | `{ok:false, error:"协议白名单…", code:"protocol_blocked"}` | 协议白名单在外呼前生效 ✓ |
-| `{"url":"http://127.0.0.1:9/x"}` | **200** | `{ok:false, error:"SSRF 防护…", code:"ssrf_blocked"}` | 默认（无注入口）直接阻断 ✓ |
-| GET /api/web/fetch | 405 | method not allowed | 路由层 method 门禁 ✓ |
+| 请求 | 结果 |
+| --- | --- |
+| GET /api/files/list?scope=fx&path= | 200，entries 形状正确（目录在前/隐藏项过滤/isRepo 标记） |
+| GET /api/files/read?scope=fx&path=ok.txt | 200 ok:true 内容原样 |
+| GET /api/files/download?scope=fx&path=ok.txt | 200，正文 18B 与磁盘逐字节一致（中文名） |
+| download 目录 / 不存在文件 | 400（"路径不是文件"/"路径不存在"） |
+| download .git/config（根级）/ ../ / a/../../ / %2e%2e%2f 编码 / ..\\ / link-out symlink | 403（越界/.git/符号链接文案），与 list/read 同强度 |
+| download %252e%252e…（双编码） | 400 路径不存在（仅单次解码 → 字面量未落根外，无二次解码逃逸） |
+| download 缺 scope | 400 "缺少参数 scope" |
+| download big.bin 16MB | 200，content-length=16777216 精确、字节一致、TTFB 72ms（头部先于整读返回 → 流式成立） |
+| 下载中途客户端 abort（256KB 后断连） | 服务器存活；400ms 后再次下载 → 200（res close→stream.destroy 生效，无崩溃/无泄漏症状） |
 
-### 0.2 边界语义探针（函数级；env 注入口开启，目标为本地 mock）
-- headers 已回、body 停住（chunked 与声明 Content-Length 两种形态），timeoutMs=500 → 均抛原生 `Error('abort')`（无 code），elapsed≈500ms → 路由层将输出 `code:'web_error'、error:'abort'`，不是文档承诺的 `timeout`（= M2 实测复现）。
-- 大响应 maxBytes=1000 → `code:'too_large'` ✓；读体取消后服务端连接正常关闭 ✓。
+Node 语义探针（最小复现，判断下载流错误处理分支的真实行为，见 §2.1-R2）：
+- v24.19.0：`res.writeHead(200)` 后 `res.headersSent` **立即为 true**；对同一 res 二次 writeHead 抛 `ERR_HTTP_HEADERS_SENT`。
+- 流在 writeHead 之后、首字节之前 error（如 ENOENT 竞态）→ 代码走 `res.destroy(e)` 分支，客户端收 ECONNRESET；**服务进程无崩溃**（0 uncaught）。
+- 客户端中途断连（大文件流式传输中 destroy socket）→ res 'close' → 源 stream destroy → 进程存活、连接数不涨、后续请求正常。
+- Content-Length 与实际流出不一致：文件传输中被并发追加（流出 > 声明长度）→ 客户端报 `HPE_INVALID_CONSTANT`/ERR_CONTENT_LENGTH_MISMATCH，服务端不崩（详见 §2.2-P2-B）。
+
+未复跑项（如实声明）：tsc --noEmit / vite build —— 本 diff 仅改 .mjs/.test.mjs/证据 JSON，不涉 TS/前端产物；且证据文件与上一评审记录均已在宿主侧跑通（615 modules）。不影响本次 JS 面结论。
 
 ---
 
-## 1. 验收口径逐条核对（依据 = docs/TASK_BREAKDOWN.md S6 AC1–AC6 + S6 契约 + docs/TEST_CASES.md TC-S6-01..16 + REVIEW 不变量 R2/R3）
+## 1. 验收口径逐条核对（依据 = docs/TASK_BREAKDOWN.md S3 AC1–AC5 + TEST_CASES TC-S3-08..12 + T-042 判定 P0-2）
 
 | # | 口径 | 结论 | 依据 |
 | --- | --- | --- | --- |
-| S6 AC1 | web.test.mjs 全绿：抽取（HTML/UTF-8 中文）+ 空正文/JS 渲染页边界提示 | ✅ 通过 | 独立复跑 12/12；TC-S6-01/02 中文正文/title/链接绝对化正确、无原始 HTML 透传；TC-S6-03 SPA 空壳 → `empty_content` 可理解提示、不伪造正文 |
-| S6 AC2 | SSRF 硬性门禁：协议白名单（仅 http/https）；目标与**重定向链每一跳**命中私网段即 `ssrf_blocked`；file/ftp 等拒绝；DNS 解析后指向私网也拒绝 | ✅ 通过（含 1 项加固注记） | TC-S6-04/05/06 独立全绿：14 目标矩阵（127.0.0.1/127.1/localhost/10.x/172.16–31/192.168/169.254/0.0.0.0/[::1]/[fc00::1]/十进制 2130706433/0x7f000001/017700000001）全阻断且 mock 零命中；域名经 DNS 解析校验（localhost→127.0.0.1）；重定向链逐跳复检、302→file:// 阻断、6 跳超限 `too_many_redirects`。IPv6 混淆（::ffff: 内嵌 v4）与 IP 字面量混淆（octal/hex/短点分/单整型）归一化均覆盖。**残余**：lookup 与后续 fetch 各自独立解析 → DNS 重绑时间窗（O1） |
-| S6 AC3 | 限长与超时：响应超 maxBytes（默认 2MB 可注入）→ too_large；总超时（默认 10s 可注入）→ timeout | ✅ 通过（含 2 项边界注记） | TC-S6-08/09/09b 独立全绿：maxBytes 两态、单跳 timeout、整条重定向链共享 deadline 回归（修复前 ~2× 后 ok:true → 修复后 1011ms `timeout`；充足预算不误伤合法链）。**残余**：headers 已回但 body 停住 → 错误被分类为 `web_error/'abort'` 而非 `timeout`（M2 实测）；DNS 解析阶段不计入总超时预算（O2） |
-| S6 AC4 | 内容安全：返回体只含白名单结构化字段，不透传原始 HTML | ✅ 通过 | TC-S6-01 断言 JSON 无 html 字段、无 `<script>` 透传；代码侧响应对象仅含 title/text/excerpt/links/error 等结构化字段 |
-| S6 AC5 | 审计留痕：**每次 fetch 记 console/日志（url、finalUrl、status、耗时、by 默认 general）** | ❌ **未达成（M1）** | 代码零实现：webFetch/handleWebApi 无任何日志/审计写入（serve.mjs 全域仅 999 行启动日志）；TC-S6-13 无断言对象；R2「…限长/超时 + 审计」与 TEST_CASES §1 I7 亦要求审计 |
-| S6 AC6 | 零新增依赖 | ✅ 通过 | 两提交均未触 package.json；仅新增 node 内置 `node:dns/promises` import；web.test.mjs 仅 node 内置模块 |
-| 契约形状 | POST {url,maxBytes?,timeoutMs?} → {ok,finalUrl,status,contentType,title,text?,excerpt?,links?,error?}；error 枚举含 ssrf_blocked/timeout/too_large/unsupported/http_<status> | ✅ 通过（扩展枚举语义清晰） | 响应字段与枚举全部实现；另扩展 invalid_url/protocol_blocked/dns_error/empty_content/web_error（参数/协议/解析/空壳/未知类）语义自洽；**注记**：契约枚举缺 dns_error（域名解析失败必现路径），建议补进契约文档（O4 附注） |
-| 错误码 HTTP 语义 | TEST_CASES TC-S6-15：参数类错误「全部 400（参数校验），非 500」 | ⚠️ 文档与实现漂移（O4） | 实测参数/协议/SSRF 错误全部 HTTP 200 envelope；前端 api.ts:579-581 与 BrowserPanel.tsx:78-100 按 200+code 消费（兼容），但 TC-S6-15 若按 HTTP 层断言将失败 |
-| 文档同步 | 行为改动同步 README/JSDoc | ✅ 通过 | c564237 同步 README/workbench-README「整链总超时」语义 + serve.mjs WEB_LIMITS.TIMEOUT_MS 注释与 webFetch JSDoc；S6 头注释与文件头契约行 16-17 描述准确 |
-| 代码规范 | 命名/注释/常量/测试注入口 | ✅ 通过 | 常量 Object.freeze、错误枚举分类、JSDoc 完整、env 注入口沿用既有先例（DSH_WORKBENCH_MAX_UPLOAD）；**1 项风格注记**：`import { lookup }` 位于文件中部 serve.mjs:560（O7） |
+| S3 AC1 | list/read/download 契约测试全绿（list 形状、read 截断+行数、download 字节一致） | ✅ 通过 | files-api 22/22（§0）；真 HTTP read/list/download 200 与形状/字节断言成立 |
+| S3 AC2 | 越界防护用例全绿：../、绝对路径、NUL、符号链接指根外 → 400/403，normalize 后仍在根内 | ✅ 通过（含 R1 注记） | 契约矩阵 + 真 HTTP：../、a/../../、%2e%2e 编码、..\\、盘符、link-out 全部 403/400；**注记 R1**：仅首段判 .git，嵌套仓库 .git 未拦截（见 §2.1） |
+| S3 AC3 | 仅回环：非回环请求 403（复用 isLoopback） | ✅ 通过 | isLoopback 函数级两态用例绿（TC-S3-11）；handleFilesApi 首行 403（serve.mjs:739）；本机直连恒回环，按 TEST_CASES 约定以函数级+评审证据为准 |
+| S3 AC4 | 二进制与超大文件 read：扩展名/内容拒绝预览或截断，响应体受控 | ✅ 通过 | TC-S3-06/07 绿（MAX_READ 截断、BINARY_EXT+NUL 检测） |
+| S3 AC5 | 零新增依赖（node:fs/path/http） | ✅ 通过 | diff 未改 package.json；新增 createReadStream 为 node:fs 既有导入 |
+| P0-2 | 下载不再整文件同步读内存；Content-Length 精确；客户端断连清理 | ✅ 通过（代码级+实测） | 路由仅剩 openDownloadStream→pipe（serve.mjs:761-778），readFileBytes 路由零引用；16MB TTFB 72ms、256MB 证据 21ms；abort 后服务存活（§0）。**注记 R2**：错误处理分支语义失效（§2.1） |
+| 仅回环 + .git 保护（I2/TC-S3-12，防凭证外泄） | ⚠️ 部分通过（R1） | 根级 .git/config 403；**嵌套 .git 可达**：`vendor/sub-repo/.git/config` read 与 download 均 200（实测泄露内容）——与 assertNotGitInternal JSDoc「含 .git 下任意层级一律拒绝」不符 |
+| 文档同步（改行为同步更新文档） | ⚠️ 部分通过 | readFileBytes/openDownloadStream JSDoc 已改为真实语义 ✅；**TC-S3-08b 未登记 docs/TEST_CASES.md**（见 §2.2-P2-A） |
 
-**结论：S6 抓取代理功能正确、P0-3 整链总超时修复真实成立（代码 + 契约 + 探针三层一致），SSRF 防护面扎实（协议/枚举段/混淆/DNS/重定向逐跳/跳数上限均覆盖，AC2 硬性门禁全绿），无 P0 级缺陷；存在 2 项必须修改（M1 审计 AC5 未达成、M2 超时错误分类实测缺陷，均小改）与多项建议优化。**
+**结论：本切片三端点功能正确、P0-2 修复真实成立（代码 + 契约 + 真 HTTP 三层证据一致），无 P0 级缺陷；安全面有一处承诺失实（R1 嵌套 .git）与一处新增错误处理死代码（R2）。**
 
 ---
 
 ## 2. 问题清单
 
-### 2.1 必须修改（建议收口前处理；均改动量小，不阻塞主路径运行）
+### 2.1 必须修改（建议随本切片收口前修复；均不阻塞服务运行，但属安全承诺失实 / 新增逻辑缺陷）
 
-#### M1 🟠 S6 AC5「审计留痕」零实现（验收 AC 未达成 + R2 不变量缺口）
-- **位置**：workbench/scripts/serve.mjs handleWebApi（809–821 行）与 webFetch（751–807 行）——全程无日志/审计写入；TASK_BREAKDOWN.md S6 AC5（217 行）、TEST_CASES.md TC-S6-13（197 行）与 I7（46 行）均要求「每次 fetch 留痕：url、finalUrl、status、耗时、by（默认 general）」。
-- **问题**：aea0743（S6 实现）与 c564237（P0-3 修复）都未实现任何逐次 fetch 留痕；serve.mjs 全域 grep 仅启动日志。独立审查无法对 AC5 给出任何正向证据 → **验收口径 AC5 不成立**。此前 T-041/T-042 未在 S6 面落地审计（T-042 只报 P0-3），缺口随 promote 带到主线。
-- **修改建议**（约 5 行）：handleWebApi 在 webFetch 成功/失败两路径统一输出一条 `console.info('[web/fetch] by=general url=… finalUrl=… status=… ok=… code=… ms=…')`（耗时用 Date.now 差值；ssrf_blocked 等被拒场景同样留痕——拒绝即事件）。若军团审计中枢（team-hub audit 事件流）应收 /api/web/fetch 事件，则在此处同步上报并把口径写进契约文档；至少 console 留痕必须落地并补 TC-S6-13 断言（可注入 logger 直测）。
-- **说明**：若将军裁定审计由中枢层统一承担（不在本切片范围），请在看板评论拍板并登记豁免——当前代码与验收文档之间没有中间态，缺拍板即按未达成处理。
+#### R1 🟠 assertNotGitInternal 只拦首段 → 嵌套仓库 .git 可 read/download（安全承诺失实）
+- **位置**：`workbench/scripts/serve.mjs` assertNotGitInternal（196–199 行，仅 `parts[0] === '.git'`）；被本切片三端点（listDirEntries 262 / previewTextFile 288 / readFileBytes 314 / openDownloadStream 326）首行调用；测试 files-api.test.mjs TC-S3-12（175–180 行）只覆盖根级 .git。
+- **问题**：JSDoc（196 行）与 TC-S3-12 声称「.git 内部（含 .git 下任意层级）一律拒绝访问（防凭证/元数据外泄）」，但实现只查第一段。workspace local_dir 为多仓库目录（monorepo 子包、vendor、legion 的 .legion-worktrees 等嵌套 git）时，`vendor/sub-repo/.git/config`、`.git/credentials`、packed-refs 等可被直接取到。**实测**：真实 serve.mjs 上 `GET /api/files/download?scope=fx&path=vendor/sub-repo/.git/config` 与 read 均返回 **200** 并输出内容（fixture 含敏感字符串）；根级 .git/config 返回 403。该缺口继承自 T-040 读面，但本切片新增的 download 端点同样暴露，且切片验收口径（AC2/「路径防护同强度」）覆盖此面。
+- **修改建议**：把断言改为对**任意段**命中即拒（`parts.some(p => p === '.git')`，注意不影响 .gitignore/.github 等非精确匹配项），一处改动同时覆盖 list/read/download；补 TC-S3-12 嵌套用例（`sub/.git/config`、深层 `a/b/.git/HEAD`、同名 `.gitignore` 不误伤）到逃逸矩阵。改动 < 5 行。
 
-#### M2 🟠 headers 已回但 body 半途停住 → 超时被分类为 `web_error/'abort'` 而非 `timeout`（实测缺陷 + 内部错误文本外泄）
-- **位置**：serve.mjs readBodyLimited（730–743 行）——`await reader.read()`（736 行）未捕获中断异常；readBodyLimited 在 fetch 的 try/catch（768–773 行）**之外**被调用 → AbortError 裸抛至 handleWebApi（816–819 行）→ `err.code` undefined → 输出 `code:'web_error'、error:'abort'`。
-- **问题**：§0.2 实测：mock 首包（headers）即回、body 停住（chunked 与声明 Content-Length 两种形态均复现），timeoutMs=500 → 500ms 后抛原生 `Error('abort')`（无 code）。即**超时确实生效**（连接被取消、耗时守预算），但错误码/文案错乱：客户端与 S7 UI 收到 `web_error/'abort'`，不是契约承诺的 `timeout`，且内部 abort 原因字符串进入用户可见 error 字段。慢/大页面「首包已回、体慢慢吐」是常见场景；现有 /slow 用例只覆盖 headers 未回的 stall，故 12/12 全绿掩盖此分支。连带：BrowserPanel.tsx:100 的 errFlag 清单未含 web_error，UI 会把该错误当正文渲染。
-- **修改建议**：readBodyLimited 给 `reader.read()` 包 try/catch：`signal?.aborted`（或错误为 AbortError/名含 'Abort'）→ `throw webErr('timeout','抓取超时（已取消请求）')`；否则原样抛。补一条 mock（headers 立即回 + body 延迟 > timeoutMs）→ 断言 `code==='timeout'` 且 error 文案不含 'abort' 的回归用例。
+#### R2 🟠 download 路由 stream 'error' 的 `!res.headersSent → httpErr` 分支是死代码，且注释承诺的 404/500 语义永不生效
+- **位置**：`workbench/scripts/serve.mjs` GET download 分支（772–775 行）+ openDownloadStream 注释（322 行「Content-Length 由调用方回填」无误，问题在 772 行分支本身）。
+- **问题**：writeHead(200)（767 行）在 pipe 之前同步执行，Node v24 实测 writeHead 后 `res.headersSent` **立即为 true**（§0 探针）→ 此后到达的 stream 'error'（statSync 成功与 createReadStream 异步 open 之间文件被删/换/权限变的竞态，或磁盘错误）**必然**走 `res.destroy(e)` 分支；`!res.headersSent` 分支及其 404/500 干净 JSON 错误体**不可达**（死代码）。竞态发生时客户端只会得到 ECONNRESET（连接被重置），与注释/开发者意图（返回可读错误）相反；若未来运行在 headersSent 滞后为 false 的 Node 版本/路径，该分支会二次 writeHead → `ERR_HTTP_HEADERS_SENT` 在事件处理器内抛出（未捕获崩溃面）。本评审未复现崩溃（v24 下该分支不可达），但死代码 + 误导注释是本次新增代码的真实缺陷。
+- **修改建议**：二选一：①（推荐）在路由内改为「先同步确认可开」——openDownloadStream 内用 `openSync(abs,'r')` 成功后再 `createReadStream('', { fd })`（打开失败同步抛出 → 外层 catch → classifyFilesError 干净映射），彻底消除竞态窗口与死分支；② 至少删除 `!res.headersSent` 分支、错误一律 `res.destroy()` 并 console.warn，注释改为「打开后错误直接断开连接」，不再承诺 404/500。
 
-### 2.2 建议优化（可排期；按影响降序）
+### 2.2 建议优化（可排期，不改变验收结论）
 
-#### O1 🟡 DNS 重绑定时间窗（SSRF 加固残余）：lookup 校验与 fetch 建连各自独立解析
-- **位置**：serve.mjs assertPublicTarget（640–667，`lookup` at 657）→ webFetch `fetch(target.href)`（769）→ undici 二次解析 hostname。
-- **问题**：校验用 OS 解析结果判定公网后，实际 fetch 由 undici 再解析一次。两者同为 OS resolver（同缓存），正常一致；但攻击者可控域名（TTL=0 / 按查询轮换应答）可在「校验通过 → 建连」毫秒级窗口内把第二次解析指向 127.0.0.1 / 169.254.169.254（云元数据）等私网 → 绕过逐跳校验。SSRF 为硬性不变量（R2），本项属时间窗竞态而非枚举缺口；本地单用户 + 禁网环境威胁低，若 workbench 部署到带云元数据/内网环境则升高。
-- **建议**：v2 方向 = 校验与建连共用同一次解析（lookup 得 IP 后以 IP 直连 + Host/SNI 保留：http 用 node:http 显式 IP；https 用 `https.request {host: ip, servername: hostname}` 或 undici Agent connect 钩子），彻底消除双解析窗口；至少在当前注释与 README 显式声明该残余与适用边界。
+#### P2-A 🟡 TC-S3-08b 未登记 docs/TEST_CASES.md；用例标题「路由层」实为函数级直测
+- **位置**：files-api.test.mjs 114–132 行（describe/it 均自称「下载路由层」）；docs/TEST_CASES.md TC-S3-08 行（133 行）之后无 08b 行。
+- **问题**：新用例只直测导出函数 openDownloadStream（不起 HTTP），未断言路由层真实产物（content-length 头、content-disposition、错误映射、abort 清理），「路由层」题名夸大；且 TEST_CASES.md 是 TC 唯一登记册，08b 缺席 → AC→TC 追溯断链（本次审查靠 evidence.json + 代码推断出 08b 归属）。
+- **建议**：TEST_CASES.md 补 TC-S3-08b 行（注明函数级，HTTP 层由 L1 冒烟覆盖并贴 l1Smoke 证据路径）；题名改为「openDownloadStream 函数级」避免误导。
 
-#### O2 🟡 DNS 解析阶段不计入 timeoutMs 预算（P0-3 修复的剩余边界）
-- **位置**：serve.mjs webFetch——deadline/remainMs（755–758 行）在 DNS 前计算；AbortController+定时器（764–765 行）在 assertPublicTarget（763 行，内含 dns.lookup）**之后**创建；`dns.promises.lookup` 不支持 signal、不可中止。
-- **问题**：域名解析悬挂/慢解析时长不计入「整条链总超时」承诺——P0-3 修复覆盖 fetch+读体与重定向各跳，链的 DNS 前段逃逸预算；极端下总耗时 = DNS 时长 + timeoutMs。
-- **建议**：把定时器创建提前到 URL 校验后（DNS 前），或对 lookup 做剩余预算的 Promise.race 兜底；并把「DNS 阶段计入总超时」写入 JSDoc 与回归说明。
+#### P2-B 🟡 Content-Length 与实际流出竞态：下载中文件被并发追加/截短 → 客户端下载失败
+- **位置**：serve.mjs download 分支 764–777 行（length 取自 openDownloadStream 内 statSync，流式读出长度不封顶）。
+- **问题**：文件在 statSync 后被并发写入（日志/数据库常见）时，createReadStream 会读到超过声明 Content-Length 的字节 → Node 侧连接异常，**实测客户端报 HPE_INVALID_CONSTANT / ERR_CONTENT_LENGTH_MISMATCH**（§0 探针，服务端不崩）；被截短则体短于声明 → 客户端按截断错误处理。属边角竞态，但日志类文件的「下载中增长」并非罕见。
+- **建议**：createReadStream 传 `{ start: 0, end: length - 1 }` 硬性封顶到声明长度（防溢出；文件缩短时以 EOF 自然提前结束，行为与现在一致）；或对该类场景不声明 content-length（chunked）。
 
-#### O3 🟡 重定向响应体未消费/未取消 → 同源多跳链连接不回收
-- **位置**：serve.mjs webFetch 3xx 分支（775–782 行）——拿到 res 后直接 clearTimeout + 递归，未读/cancel res.body。
-- **问题**：undici 未消费的响应体使连接保持 busy（不可复用），同源重定向链每跳占一条连接直至超时/GC；MAX_REDIRECTS=5 + 单用户低频场景影响小，但 /loop 类自循环（TC-S6-06）与同源链会持续占用。
-- **建议**：递归前 `await res.body?.cancel().catch(() => {})`（或 drain 排空）释放连接供复用；不影响返回语义。
+#### P2-C 🟡 下载路径 TOCTOU：路径校验（realpath）与按路径 open 之间存在符号链接替换竞态（继承性）
+- **位置**：serve.mjs resolveInsideRoot（205–221）+ openDownloadStream 326–330（createReadStream(abs) 按校验后的**路径**再开一次）。
+- **问题**：校验通过后、open 前若目录内符号链接被同权限进程替换指向根外，可读到根外内容。与既有 read/readFileBytes 同型（非本 diff 引入）；仅回环 + 同用户目录威胁低。
+- **建议**：若采纳 R2 建议①（openSync 后基于 fd 流式读），本项一并消除——列为 R2 方案的附加收益；不单独立项。
 
-#### O4 🟡 HTTP 状态码语义文档漂移：一律 200 envelope vs TEST_CASES TC-S6-15「参数类 400」
-- **位置**：TEST_CASES.md TC-S6-15（199 行）；实现 = handleWebApi（809–821 行）对所有 webFetch 错误统一 `sendJson(res, 200, {ok:false, code, error})`；前端 api.ts:579-581 / BrowserPanel.tsx:78-100 按 200-envelope 消费。
-- **问题**：实测参数类（not a url / 缺 url）、协议类、SSRF 类错误全部 HTTP 200（§0.1）；TC-S6-15 明确「全部 400（参数校验），非 500」——按 HTTP 层执行必失败。函数级 web.test 只测 throw（绕过路由层），故全绿未暴露。前端与 200-envelope 兼容，但文档/契约/测试三层口径不一致；且契约文档 error 枚举（TASK_BREAKDOWN S6 契约 209 行）缺 dns_error。
-- **建议**：定口径二选一并同步三方：① 维持 200-envelope（推荐——前端已兼容、code 语义完整），把 TC-S6-15 改为「HTTP 200 + code=invalid_url，非 500」并补 HTTP 层断言；② 参数/协议类映射 400、SSRF/timeout 等业务类保持 200，前端相应调整。另把 dns_error 补入契约枚举文档。
+#### P2-D 🟡 错误码语义小项：不存在文件 download/read 回 400 而非 404；与 R2 注释里想映射的 404 不一致
+- **位置**：serve.mjs classifyFilesError（729–736）+ download 分支 773 行（e.code==='ENOENT'→404 的映射只存在于不可达分支）。
+- **问题**：对外「路径不存在」统一 400（与既有 read/list 一致，契约如此），但 R2 死分支注释暗示 404；代码内两处口径打架，纯语义噪音。
+- **建议**：随 R2 一起定口径（建议维持 400 语义错误，删除 404 措辞），避免后续维护困惑。
 
-#### O5 🟡 /api/web/fetch 请求体读取无大小上限、断连悬挂（继承性，新端点首个依赖）
-- **位置**：serve.mjs readBodyJson（521–530 行，S3/S4 既有）+ handleWebApi（812 行）调用。
-- **问题**：readBodyJson 对请求体无 Content-Length 预检/流式限长（`raw += d` 无限拼接）→ 本地进程可 POST 大 JSON 打内存；且未监听 req 'aborted'/'close' → 客户端半途断开时 promise 永不 settle，handleWebApi 悬挂（文件上传分支有 abort/close 兜底——见 515 行 receiveUploadBody 模式——此处没有）。仅回环 + 可信本机，威胁低。
-- **建议**：为 /api/web/fetch 请求体加上限（如 64KB，超限快速拒绝）与 aborted/close reject（复用 receiveUploadBody 的兜底模式）；或让 readBodyJson 支持可选 maxBytes。
-
-#### O6 🟡 DSH_WEB_FETCH_ALLOW_PRIVATE 全局旁路开关（安全默认值维持风险）
-- **位置**：serve.mjs privateFetchAllowed（565 行附近）；web.test.mjs 与文档已声明「仅测试用」。
-- **问题**：env=1 即全局（非 per-request）关闭 SSRF 门禁且每请求实时读取——若生产/部署环境误带该变量（例如从测试环境复制 env），防护整体静默失效、无任何警告。
-- **建议**：启动时检测到该变量打印一次醒目 `console.warn`；更严格形态 = 仅模块以测试 query 导入时生效，避免 env 残留误伤生产。
-
-#### O7 🟡 文件中部 import（ESM 合法但风格/工具链风险）
-- **位置**：serve.mjs:560 `import { lookup } from 'node:dns/promises'`（S6 功能块开头，位于 handleFsApi 之后）。
-- **问题**：ESM import 声明允许出现在模块顶层任意位置且会提升，合法可运行；但与文件头部 import 组（19–24 行）惯例不符——读者/工具链易误判作用域或误删，import/first 类 lint 会告警。
-- **建议**：移到文件顶部 import 组，功能块注释保留即可。
-
-#### O8 🟡 无并发上限/排队；TC-S6-14（P2 健壮性）无断言覆盖（注记）
-- **位置**：webFetch/handleWebApi——每个请求独立 fetch，无并发闸门。
-- **问题**：并发 N 个慢请求即 N 条并发外呼连接（与 O3 未消费连接叠加时资源占用放大）；TEST_CASES TC-S6-14（10 并发慢请求不崩/不泄漏）无实现或测试。本地单用户模型下可接受。
-- **建议**：登记 P2 后续；若加，建议简单信号量（如并发 ≤ 8，超限明确失败）并在 web.test 补 TC-S6-14。
-
-#### O9 🟡 测试覆盖注记（不阻塞）
-- **位置**：web.test.mjs（头注释自称「对齐 TC-S6-01..16」）。
-- **问题**：实际断言覆盖 TC-S6-01..06、08/09/09b、11/12；**TC-S6-07（DNS 层校验——由 TC-S6-05 localhost 用例间接覆盖）、TC-S6-10（形状白名单——并入 TC-S6-01 断言）、TC-S6-13（审计——M1 无断言对象）、TC-S6-14（并发——O8）、TC-S6-15（HTTP 层 400——O4）、TC-S6-16（零依赖核对——评审项）** 无独立用例/断言对象；头注释题名偏大。
-- **建议**：头注释改为「对齐 TC-S6-01..16（缺项见注记）」并注明归属（M1/O4/O8）；随 M2 补一条「stall-after-headers → timeout」用例（当前覆盖盲区）。
-
-### 2.3 正面确认（对照 REVIEW 不变量与 T-041 遗留）
-- P0-3 已闭环：整链共享 deadline 实现正确（755–781 行），TC-S6-09b ×2 + 本评审探针（1011ms timeout / 充足预算 ok）三层一致；clearTimeout 防外层空转、deadline 递归传参向后兼容（导出签名 deadline=0 缺省，HTTP 层不可注入）✓。
-- R3（JS 渲染/登录页显式边界）：SPA 空壳 → `empty_content` + 可理解 error，不伪造正文 ✓（TC-S6-03）。
-- TC-S6-10 内容安全：响应形状白名单实测无 HTML 透传 ✓；R2 混淆矩阵归一化逻辑经 TC-S6-05 全绿 ✓。
-- 405 / 仅回环 / 路由 method 门禁 + isLoopback 复用既有语义 ✓（探测 GET → 405）。
+### 2.3 测试/证据注记（不阻塞）
+- 本切片契约与 L1 证据分离合理（L0 函数级 + L1 真服务冒烟在 evidence.json l1Smoke，含 256MB 21ms 头延迟 / abort 后 7ms list 反证），与本评审独立复跑互相印证 ✅。
+- 未固化进仓的仍是 L1 冒烟脚本本身（evidence.json 只存结论）——与 T-041 注记同款，建议 tester 阶段把 l1Smoke 固化为可重复脚本（前例 team-hub/chat-l1-smoke.mjs）。
+- 继承性提醒：P0-1（S4 上传覆盖+流中断破坏原文件）与 P0-3（S6 webFetch 每跳超时）仍开放，不在本切片文件域，evidence.json scopeNotes 已如实声明——请将军排期对应切片修复，勿随本任务关闭。
 
 ---
 
 ## 3. 总体判定
 
-- S6 /api/web/fetch（SSRF 防护 fetch 代理 + 零依赖正文抽取）**质量良好**：AC1/AC2/AC3/AC4/AC6 全部真实成立（独立复跑 12/12 + 34/34 + HTTP 层/边界探针一致）；P0-3 整链总超时修复方向与实现正确；SSRF 防护在协议/枚举段/混淆/DNS/重定向逐跳/跳数上限维度覆盖扎实（AC2 硬性门禁全绿）；零新增依赖、JSDoc/文档同步到位。
-- **无 P0 级缺陷**。收口前建议处理 2 项必须修改，均小改且有现成路径：
-  - **M1（AC5 审计零实现，~5 行 + 断言）**——验收口径缺口，需将军就「console 留痕 vs 中枢审计」拍板或由后续任务补齐；
-  - **M2（stall-after-headers 超时错误分类，catch+归一化 ~5 行 + 1 条回归用例）**——实测行为缺陷，影响用户可见错误码契约。
-- O1（DNS 重绑窗口，安全加固）建议随 SSRF 面排期；O2–O9 为可排期优化与文档/测试注记，不改变验收结论。
+- S3 只读面（list/read/download）本切片交付**质量良好**：P0-2 修复方向与实现正确（路由零整读、Content-Length 精确、abort 清理经实测有效）；路径防护在词法/绝对/NUL/编码/symlink 矩阵上与既有读面同强度；22+10 契约全绿 + 真 HTTP 断言与证据文件互相印证；零新增依赖、diff 范围干净。
+- **无 P0 级缺陷**；promote 判定：功能正确可推进，但建议在收口前处理 **R1（嵌套 .git 防护失实，改动 <5 行 + 补用例）** 与 **R2（新增错误处理死分支，随 R1 一并小改即可）**——两者都小、都带现成修复路径，不处理也不会造成服务崩溃，但会留下安全承诺缺口与误导性代码。
+- P2 组可排期，不改变验收结论。
 
-_审查人：reviewer（T-057）· 依据：S6 代码整面正读 + 本报告 §0 独立复跑 / HTTP 层与边界探针证据 · 未修改任何实现代码（唯一改动 = 本报告 docs/REVIEW.md）_
+_审查人：reviewer（T-054）· 依据：代码真读 + 本报告 §0 独立复跑/探针证据 · 未修改任何实现代码_

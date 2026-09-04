@@ -3,16 +3,29 @@
 // 说明：serve.mjs 以 isMain 守卫 + 纯函数导出支持 import 直测；scope→local_dir 解析经 DSH_WORKBENCH_SPACES_JSON 注入（免起中枢）。
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, symlinkSync, existsSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, symlinkSync, existsSync, readFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
+import { request as httpRequest } from 'node:http'
 
 // 环境注：serve.mjs 若已在宿主进程被 import 过会复用模块缓存，这里用查询串强制新实例（与 server.mjs 测试同法）。
+// 三个实例（各自独立 module + server 对象，供进程内 HTTP 路由层用例，见文末 S4 路由层 describes）：
+//   m     —— 未配置 token（写放行，AC2 现状语义）+ 真实 MAX_UPLOAD（64MB）
+//   mTok  —— DSH_WORKBENCH_TOKEN=tk（TC-S4-13 401/200 鉴权矩阵）
+//   mCap  —— DSH_WORKBENCH_MAX_UPLOAD=16384（廉价实测流式超限/中断；env 为 serve.mjs 测试注入口，先例 DSH_WEB_FETCH_ALLOW_PRIVATE）
 const require = createRequire(import.meta.url)
 const serveUrl = pathToFileURL(require.resolve('./serve.mjs')).href + '?files=' + Date.now()
+delete process.env.DSH_WORKBENCH_TOKEN
+delete process.env.DSH_WORKBENCH_MAX_UPLOAD
 const m = await import(serveUrl)
+process.env.DSH_WORKBENCH_TOKEN = 'tk'
+const mTok = await import(serveUrl + '&tok=1')
+delete process.env.DSH_WORKBENCH_TOKEN
+process.env.DSH_WORKBENCH_MAX_UPLOAD = '16384'
+const mCap = await import(serveUrl + '&cap=1')
+delete process.env.DSH_WORKBENCH_MAX_UPLOAD
 
 const tmpRoot = mkdtempSync(join(tmpdir(), 'legion-files-'))
 const root = join(tmpRoot, 'repo')
@@ -41,8 +54,21 @@ before(() => {
   process.env.DSH_WORKBENCH_SPACES_JSON = JSON.stringify([{ id: 'fx', name: '文件夹具', localDir: root }])
 })
 
+// 进程内 HTTP 路由层用例：三个 serve.mjs 实例监听 127.0.0.1 随机端口（TC-S4-01..16 上行真路由验证）
+const httpBases = { plain: '', token: '', cap: '' }
+before(async () => {
+  const listen = (srv) => new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve))
+  await listen(m.server); httpBases.plain = 'http://127.0.0.1:' + m.server.address().port
+  await listen(mTok.server); httpBases.token = 'http://127.0.0.1:' + mTok.server.address().port
+  await listen(mCap.server); httpBases.cap = 'http://127.0.0.1:' + mCap.server.address().port
+})
+
 after(() => {
   delete process.env.DSH_WORKBENCH_SPACES_JSON
+  for (const srv of [m.server, mTok.server, mCap.server]) {
+    try { srv.closeAllConnections?.() } catch { /* 无连接/已关 */ }
+    try { srv.close() } catch { /* 已关 */ }
+  }
   rmSync(tmpRoot, { recursive: true, force: true })
 })
 
@@ -253,7 +279,7 @@ describe('TC-S4-09..12 delete confirm 语义', () => {
   })
 })
 
-describe('TC-S4-13 token 矩阵（函数级 isLoopback 语义；HTTP 401 矩阵在 evidence 冒烟）', () => {
+describe('TC-S4-13 token 矩阵（函数级 isLoopback 语义；HTTP 401/200 矩阵见文末路由层 describe）', () => {
   it('函数导出存在且 FILES_LIMITS 常量可被三值法引用', () => {
     assert.ok(m.FILES_LIMITS.MAX_READ > 0)
     assert.ok(m.FILES_LIMITS.MAX_UPLOAD > 0)
@@ -263,5 +289,236 @@ describe('TC-S4-13 token 矩阵（函数级 isLoopback 语义；HTTP 401 矩阵�
   it('TC-S3-11 仅回环：假 socket 非回环 → isLoopback=false', () => {
     assert.equal(m.isLoopback({ socket: { remoteAddress: '10.0.0.8' } }), false)
     assert.equal(m.isLoopback({ socket: { remoteAddress: '127.0.0.1' } }), true)
+  })
+})
+
+// ─────────────────────── S4 路由层 HTTP 用例（真 serve.mjs 路由 + 进程内监听；TC-S4-01..16 上行验证）───────────────────────
+const encQ = encodeURIComponent
+async function httpJson(base, method, path, { query = '', body, headers = {} } = {}) {
+  const init = { method, headers }
+  if (body !== undefined) init.body = typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body)
+  const res = await fetch(base + path + query, init)
+  const text = await res.text()
+  let json = null
+  try { json = text.length > 0 ? JSON.parse(text) : null } catch { /* 非 JSON 体 */ }
+  return { status: res.status, json, text }
+}
+async function waitFor(fn, timeoutMs = 3000) {
+  const t0 = Date.now()
+  for (;;) {
+    const v = fn()
+    if (v) return v
+    if (Date.now() - t0 > timeoutMs) throw new Error('waitFor 超时（' + timeoutMs + 'ms）')
+    await new Promise((r) => setTimeout(r, 50))
+  }
+}
+function tmpResidue(dir) {
+  return readdirSync(dir).filter((n) => n.includes('.upload-') || n.endsWith('.tmp'))
+}
+
+describe('S4 路由层（HTTP）· 写契约 e2e —— 未配置 token 时写放行（AC2 现状语义）', () => {
+  before(() => mkdirSync(join(root, 'http'), { recursive: true }))
+  it('TC-S4-01：PUT 上传（中文名+空格）→ 200；list 立即可见；download 字节一致', async () => {
+    const bytes = Buffer.from('HTTP 上传内容 αβγ')
+    const rel = 'http/上传 文件.bin'
+    const up = await httpJson(httpBases.plain, 'PUT', '/api/files/upload', { query: '?scope=fx&path=' + encQ(rel), body: bytes })
+    assert.equal(up.status, 200)
+    assert.equal(up.json.ok, true)
+    assert.equal(up.json.file.name, '上传 文件.bin')
+    assert.equal(up.json.file.size, bytes.length)
+    const list = await httpJson(httpBases.plain, 'GET', '/api/files/list', { query: '?scope=fx&path=' + encQ('http') })
+    assert.equal(list.status, 200)
+    assert.ok(list.json.entries.some((e) => e.name === '上传 文件.bin'), '上传后 list 立即可见')
+    const dl = await fetch(httpBases.plain + '/api/files/download?scope=fx&path=' + encQ(rel))
+    assert.equal(dl.status, 200)
+    assert.deepEqual(Buffer.from(await dl.arrayBuffer()), bytes, 'download 与上传字节一致')
+  })
+  it('TC-S4-03/04：覆盖两态——无 overwrite → 409 且原内容未动；overwrite=1 → 200 新内容可读回', async () => {
+    const rel = 'http/ow.txt'
+    const q = '?scope=fx&path=' + encQ(rel)
+    await httpJson(httpBases.plain, 'PUT', '/api/files/upload', { query: q, body: '第一版内容' })
+    const dup = await httpJson(httpBases.plain, 'PUT', '/api/files/upload', { query: q, body: '第二版' })
+    assert.equal(dup.status, 409)
+    assert.ok(dup.json.error.includes('overwrite=1'), '409 error 提示需 overwrite=1')
+    const rd1 = await httpJson(httpBases.plain, 'GET', '/api/files/read', { query: q })
+    assert.equal(rd1.json.content, '第一版内容', '409 后原文件内容未被改动')
+    const ov = await httpJson(httpBases.plain, 'PUT', '/api/files/upload', { query: q + '&overwrite=1', body: '覆盖后内容' })
+    assert.equal(ov.status, 200)
+    const rd2 = await httpJson(httpBases.plain, 'GET', '/api/files/read', { query: q })
+    assert.equal(rd2.json.content, '覆盖后内容')
+  })
+  it('TC-S4-05..08：mkdir 多层/重复/与文件冲突；rename 迁移/409/越界', async () => {
+    const mk = (p) => httpJson(httpBases.plain, 'POST', '/api/files/mkdir', { body: { scope: 'fx', path: p } })
+    assert.equal((await mk('http/d1/d2/d3')).status, 200, 'mkdir 一次建多层')
+    assert.equal((await mk('http/d1/d2/d3')).status, 400, '重复 mkdir 拒绝')
+    const l1 = await httpJson(httpBases.plain, 'PUT', '/api/files/upload', { query: '?scope=fx&path=' + encQ('http/rn-a.txt'), body: 'aaa' })
+    assert.equal(l1.status, 200)
+    assert.equal((await mk('http/rn-a.txt/sub')).status, 400, '目录与文件同名冲突拒绝')
+    const listD = await httpJson(httpBases.plain, 'GET', '/api/files/list', { query: '?scope=fx&path=' + encQ('http/d1/d2') })
+    assert.ok(listD.json.entries.some((e) => e.name === 'd3' && e.type === 'dir'), '嵌套多层立即可见')
+    const rn = (from, to) => httpJson(httpBases.plain, 'POST', '/api/files/rename', { body: { scope: 'fx', from, to } })
+    await httpJson(httpBases.plain, 'PUT', '/api/files/upload', { query: '?scope=fx&path=' + encQ('http/rn-b.txt'), body: 'bbb' })
+    assert.equal((await rn('http/rn-a.txt', 'http/rn-c.txt')).status, 200, 'rename 成功迁移')
+    assert.equal((await rn('http/rn-c.txt', 'http/rn-b.txt')).status, 409, 'rename 到已存在目标 → 409')
+    const rc = await httpJson(httpBases.plain, 'GET', '/api/files/read', { query: '?scope=fx&path=' + encQ('http/rn-c.txt') })
+    assert.equal(rc.json.content, 'aaa', 'rename 后内容一致')
+    const esc = await rn('http/rn-c.txt', '../out-esc.txt')
+    assert.ok([400, 403].includes(esc.status), 'rename 出根 → 400/403（实际 ' + esc.status + '）')
+    assert.equal(existsSync(join(outsideDir, 'out-esc.txt')), false, '根外零副作用')
+  })
+  it('TC-S4-09..12：delete confirm 语义（缺/错 confirm 400、confirm=yes 删文件、非空目录拒删、空目录可删）', async () => {
+    const del = (p, confirm) => httpJson(httpBases.plain, 'POST', '/api/files/delete', { body: { scope: 'fx', path: p, confirm } })
+    const rel = 'http/del.txt'
+    await httpJson(httpBases.plain, 'PUT', '/api/files/upload', { query: '?scope=fx&path=' + encQ(rel), body: 'x' })
+    const noC = await del(rel)
+    assert.equal(noC.status, 400)
+    assert.ok(noC.json.error.includes('confirm'), '缺 confirm → 提示二次确认')
+    assert.equal((await del(rel, 'nope')).status, 400, 'confirm 非 yes → 拒绝')
+    const rd1 = await httpJson(httpBases.plain, 'GET', '/api/files/read', { query: '?scope=fx&path=' + encQ(rel) })
+    assert.equal(rd1.status, 200, '拒绝后文件仍在')
+    assert.equal((await del(rel, 'yes')).status, 200)
+    const rd2 = await httpJson(httpBases.plain, 'GET', '/api/files/read', { query: '?scope=fx&path=' + encQ(rel) })
+    assert.equal(rd2.status, 400, '删除成功后 read → 400 不存在')
+    mkdirSync(join(root, 'http', 'nonempty2'), { recursive: true })
+    writeFileSync(join(root, 'http', 'nonempty2', 'keep.txt'), 'x')
+    const ne = await del('http/nonempty2', 'yes')
+    assert.equal(ne.status, 400)
+    assert.ok(ne.json.error.includes('非空目录'), '非空目录拒删并提示先清空')
+    assert.ok(existsSync(join(root, 'http', 'nonempty2', 'keep.txt')), '非空目录内容原样保留')
+    mkdirSync(join(root, 'http', 'empty2'), { recursive: true })
+    assert.equal((await del('http/empty2', 'yes')).status, 200)
+    assert.equal(existsSync(join(root, 'http', 'empty2')), false, '空目录删除后不可见')
+  })
+})
+
+describe('S4 路由层（HTTP）· TC-S4-14 写路径逃逸矩阵 + TC-S4-02 预检 413（真实 64MB 上限）', () => {
+  it('upload/mkdir/rename/delete 注入逃逸样本 → 全部 400/403，根外目录零副作用', async () => {
+    const samples = ['../esc-out.txt', 'a/../../esc3.txt', 'C:/win-esc.txt', '/abs-esc.txt', '..%2Fesc-enc.txt', 'nul\x00name.txt']
+    for (const s of samples) {
+      const qPath = /%[0-9A-Fa-f]{2}/.test(s) ? s : encQ(s) // 已含 %XX 的样本原样进 URL（服务端解码一次成 ../ 再拦截）
+      const r1 = await httpJson(httpBases.plain, 'PUT', '/api/files/upload', { query: '?scope=fx&path=' + qPath + '&overwrite=1', body: 'x' })
+      assert.ok([400, 403].includes(r1.status), 'upload escape ' + JSON.stringify(s) + ' -> ' + r1.status)
+    }
+    for (const s of ['../esc-out2.txt', '..' + BS + 'esc-bs2.txt', 'a/../../esc4.txt', 'C:/win-esc2.txt', '/abs-esc2.txt', 'nul\x00name.txt']) {
+      const mk = await httpJson(httpBases.plain, 'POST', '/api/files/mkdir', { body: { scope: 'fx', path: s } })
+      assert.ok([400, 403].includes(mk.status), 'mkdir escape ' + JSON.stringify(s) + ' -> ' + mk.status)
+      const rn = await httpJson(httpBases.plain, 'POST', '/api/files/rename', { body: { scope: 'fx', from: 'http/rn-c.txt', to: s } })
+      assert.ok([400, 403].includes(rn.status), 'rename-to escape ' + JSON.stringify(s) + ' -> ' + rn.status)
+      const del = await httpJson(httpBases.plain, 'POST', '/api/files/delete', { body: { scope: 'fx', path: s, confirm: 'yes' } })
+      assert.ok([400, 403].includes(del.status), 'delete escape ' + JSON.stringify(s) + ' -> ' + del.status)
+    }
+    assert.deepEqual(readdirSync(outsideDir).sort(), ['secret.txt', 'sub'], '根外目录零副作用')
+    assert.equal(readFileSync(join(outsideDir, 'secret.txt'), 'utf8'), 'secret outside content', '根外文件未被触碰')
+  })
+  it('TC-S4-02（预检）：声明 Content-Length 超真实 64MB 上限 → 413 快速拒绝、零落盘', async () => {
+    const res = await new Promise((resolve) => {
+      const rq = httpRequest({
+        host: '127.0.0.1', port: new URL(httpBases.plain).port, method: 'PUT',
+        path: '/api/files/upload?scope=fx&path=' + encQ('http/over-real.bin'),
+        headers: { 'content-length': String(m.FILES_LIMITS.MAX_UPLOAD + 1) },
+      }, (res) => { let t = ''; res.on('data', (d) => { t += d }); res.on('end', () => resolve({ status: res.statusCode, body: t })) })
+      rq.on('error', (e) => resolve({ status: 0, error: e.message }))
+      rq.end()
+    })
+    assert.equal(res.status, 413, '预检应 413，实际 ' + JSON.stringify(res))
+    assert.ok(res.body.includes('上传超过上限'))
+    assert.equal(existsSync(join(root, 'http', 'over-real.bin')), false, '不落任何部分文件')
+  })
+})
+
+describe('S4 路由层（HTTP）· TC-S4-13 鉴权矩阵（serve.mjs 配 token=tk）', () => {
+  before(() => mkdirSync(join(root, 'http'), { recursive: true }))
+  it('无 token 写 401 / 错 token 写 401 / 对 token 写 200；无 token 读仍放行 200', async () => {
+    const rel = 'http/tok.txt'
+    const q = '?scope=fx&path=' + encQ(rel)
+    const none = await httpJson(httpBases.token, 'PUT', '/api/files/upload', { query: q, body: 'v1' })
+    assert.equal(none.status, 401)
+    assert.ok(none.json.error.includes('Bearer token 无效'), '401 error 可读')
+    const wrong = await httpJson(httpBases.token, 'PUT', '/api/files/upload', { query: q, body: 'v1', headers: { authorization: 'Bearer nope' } })
+    assert.equal(wrong.status, 401)
+    const right = await httpJson(httpBases.token, 'PUT', '/api/files/upload', { query: q, body: 'tokenized', headers: { authorization: 'Bearer tk' } })
+    assert.equal(right.status, 200)
+    assert.equal(right.json.ok, true)
+    const rd = await httpJson(httpBases.token, 'GET', '/api/files/read', { query: q })
+    assert.equal(rd.status, 200)
+    assert.equal(rd.json.content, 'tokenized', '对 token 上传内容可读回')
+    const list = await httpJson(httpBases.token, 'GET', '/api/files/list', { query: '?scope=fx&path=' + encQ('http') })
+    assert.equal(list.status, 200, '读请求（list/read）无 token 仍放行——仅写需鉴权')
+    const mk401 = await httpJson(httpBases.token, 'POST', '/api/files/mkdir', { body: { scope: 'fx', path: 'http/x1' } })
+    assert.equal(mk401.status, 401, 'POST mkdir 无 token 同样 401')
+  })
+})
+
+describe('S4 路由层（HTTP）· P0-1 原子上传回归（cap 实例 16KB）——流式超限/中断不破坏原文件、零残留', () => {
+  const cap = mCap.FILES_LIMITS.MAX_UPLOAD // 16384（随实例 import 固化，注册期可读）
+  const capBase = () => httpBases.cap // 基址必须运行期取：before 钩子才给 httpBases 赋值
+  function rawUpload(pathQuery, { contentLength, chunkSize, total, destroyAfter } = {}) {
+    return new Promise((resolve) => {
+      const headers = {}
+      if (contentLength !== undefined) headers['content-length'] = String(contentLength)
+      const rq = httpRequest({ host: '127.0.0.1', port: new URL(capBase()).port, method: 'PUT', path: pathQuery, headers }, (res) => {
+        let t = ''; res.on('data', (d) => { t += d }); res.on('end', () => resolve({ status: res.statusCode, body: t }))
+      })
+      rq.on('error', (e) => resolve({ status: 0, error: e.message }))
+      if (chunkSize > 0 && total > 0) {
+        const chunk = Buffer.alloc(chunkSize, 90)
+        let sent = 0
+        while (sent < total) { sent += chunk.length; rq.write(chunk) }
+        rq.end()
+      } else {
+        rq.end()
+      }
+      if (destroyAfter !== undefined) setTimeout(() => { try { rq.destroy() } catch { /* */ } }, destroyAfter)
+    })
+  }
+  it('TC-S4-02/15 + P0-1：overwrite=1 流式超限 → 413（或断连），原文件字节原样、无临时残留', async () => {
+    const victim = 'p01-victim.bin'
+    const original = 'ORIGINAL-DATA-' + Date.now()
+    writeFileSync(join(root, victim), original)
+    const res = await rawUpload('/api/files/upload?scope=fx&path=' + encQ(victim) + '&overwrite=1', { chunkSize: 4096, total: cap + 4096 })
+    assert.ok(res.status === 413 || res.status === 0, '流式超限应 413 或断连，实际 ' + JSON.stringify(res))
+    await waitFor(() => tmpResidue(root).length === 0)
+    assert.equal(tmpResidue(root).length, 0, '无临时文件残留')
+    assert.equal(readFileSync(join(root, victim), 'utf8'), original, '覆盖上传失败：原文件未被破坏（P0-1 数据丢失回归）')
+  })
+  it('TC-S4-02：流式超限上传到新路径 → 目标不落盘、无残留', async () => {
+    const target = 'p01-new.bin'
+    const res = await rawUpload('/api/files/upload?scope=fx&path=' + encQ(target), { chunkSize: 2048, total: cap + 2048 })
+    assert.ok(res.status === 413 || res.status === 0)
+    await waitFor(() => tmpResidue(root).length === 0)
+    assert.equal(existsSync(join(root, target)), false, '超限目标不落任何部分文件')
+  })
+  it('P0-1：覆盖上传中途客户端中断 → 原文件保持、零残留、服务不崩', async () => {
+    const victim2 = 'p01-victim2.bin'
+    const original = 'ORIGINAL2-' + Date.now()
+    writeFileSync(join(root, victim2), original)
+    await rawUpload('/api/files/upload?scope=fx&path=' + encQ(victim2) + '&overwrite=1', { contentLength: 100000, chunkSize: 100, total: 400, destroyAfter: 120 })
+    await waitFor(() => tmpResidue(root).length === 0)
+    assert.equal(tmpResidue(root).length, 0, '无临时文件残留')
+    assert.equal(readFileSync(join(root, victim2), 'utf8'), original, '中断后原文件保持原样')
+    const health = await httpJson(capBase(), 'GET', '/api/files/list', { query: '?scope=fx&path=' })
+    assert.equal(health.status, 200, '中断/超限后服务仍健康')
+  })
+  it('上限注入口不影响正常路径：上限内上传 200 且读回一致', async () => {
+    const payload = 'x'.repeat(cap - 1)
+    const rel = 'p01-ok.bin'
+    const up = await httpJson(capBase(), 'PUT', '/api/files/upload', { query: '?scope=fx&path=' + encQ(rel), body: payload })
+    assert.equal(up.status, 200)
+    assert.equal(readFileSync(join(root, rel), 'utf8').length, cap - 1)
+    assert.equal(tmpResidue(root).length, 0)
+  })
+})
+
+describe('S4 路由层（HTTP）· TC-S4-16 并发上传同路径（无 overwrite）→ 至多一个 200', () => {
+  it('两请求并发写同一新路径：一个 200 一个 409；最终字节 = 二写之一完整内容（无半写/混合）', async () => {
+    const rel = 'http/race.bin'
+    const q = '?scope=fx&path=' + encQ(rel)
+    const pA = 'A'.repeat(8000)
+    const pB = 'B'.repeat(8000)
+    const results = await Promise.all([pA, pB].map((body) => httpJson(httpBases.plain, 'PUT', '/api/files/upload', { query: q, body })))
+    const statuses = results.map((r) => r.status).sort()
+    assert.deepEqual(statuses, [200, 409], '至多一个 200、其余 409（实际 ' + JSON.stringify(statuses) + '）')
+    const final = readFileSync(join(root, 'http', 'race.bin'), 'utf8')
+    assert.ok(final === pA || final === pB, '最终内容为二写之一的完整内容')
   })
 })

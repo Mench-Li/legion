@@ -11,7 +11,7 @@
  *      GET  /api/files/list?scope=&path=                 → 目录条目（dir 在前，含 .git 仓库标记）
  *      GET  /api/files/read?scope=&path=                 → 文本预览（截断/行数/二进制拒绝）
  *      GET  /api/files/download?scope=&path=             → 原始字节下载
- *      PUT  /api/files/upload?scope=&path=&overwrite=1   → raw body 上传（Content-Length 预检 + 流式落盘）
+ *      PUT  /api/files/upload?scope=&path=&overwrite=1   → raw body 上传（Content-Length 预检 + 流式落盘临时文件，收体完整后原子改名发布——覆盖/中断/超限不破坏原文件，P0-1）
  *      POST /api/files/mkdir|rename|delete               → 受限写操作（JSON body）
  *   ③ 浏览器助手（/api/web/fetch，S6：SSRF 防护的服务端 fetch 代理 + 零依赖正文抽取）：
  *      POST /api/web/fetch { url, maxBytes?, timeoutMs? } → { ok, finalUrl, status, contentType, title, text?, excerpt?, links?, error? }
@@ -67,9 +67,17 @@ const MIME = {
 
 // ── 写鉴权与限值（S3/S4/S6；⚖️ 导出为常量，测试用「三值法」围绕断言，见 TEST_CASES §3）──
 const writeToken = String(args.get('token') ?? process.env.DSH_WORKBENCH_TOKEN ?? '')
+/** 限值 env 覆盖（测试注入口，先例 DSH_WEB_FETCH_ALLOW_PRIVATE）：缺省/非法回退默认值。 */
+function envBytes(name, def) {
+  const raw = process.env[name]
+  if (!raw) return def
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : def
+}
+
 export const FILES_LIMITS = Object.freeze({
   MAX_READ: 256 * 1024, // 文本预览截断阈值（字节）
-  MAX_UPLOAD: 64 * 1024 * 1024, // 单文件上传上限（字节），Content-Length 预检
+  MAX_UPLOAD: envBytes('DSH_WORKBENCH_MAX_UPLOAD', 64 * 1024 * 1024), // 单文件上传上限（字节）：Content-Length 预检 + 流式限长
 })
 export const WEB_LIMITS = Object.freeze({
   MAX_BYTES: 2 * 1024 * 1024, // fetch 响应体上限（可被请求覆盖）
@@ -83,8 +91,13 @@ const BINARY_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.
 
 // ── /api/fs/* 辅助 ──
 function sendJson(res, code, data) {
-  res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' })
-  res.end(JSON.stringify(data, null, 2))
+  // 客户端断连（上传/下载中断）后写响应会触发 res error——先吞掉避免未处理 error 崩溃；响应已结束则静默
+  if (res.destroyed || res.writableEnded) { try { res.destroy() } catch { /* */ } return }
+  res.on('error', () => { /* 断连写错误：忽略 */ })
+  try {
+    res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' })
+    res.end(JSON.stringify(data, null, 2))
+  } catch { try { res.destroy() } catch { /* */ } }
 }
 
 function isLoopback(req) {
@@ -330,7 +343,11 @@ export function openDownloadStream(root, rel) {
   return { name: basename(abs), length: st.size, stream: createReadStream(abs) }
 }
 
-/** PUT 上传（TC-S4-01..04）：raw bytes；上限预检（Content-Length 在路由层）；overwrite=1 才允许覆盖。 */
+/**
+ * PUT 上传（TC-S4-01..04；P0-1 修复同款原子语义）：raw bytes；上限预检（Content-Length 在路由层）；
+ * overwrite=1 才允许覆盖。先写【同目录临时文件】再 renameSync 原子发布——中途任何失败都不会破坏
+ * 既有目标文件、不留下半写目标（与路由层 receiveUploadBody 语义一致）。
+ */
 export function uploadBytes(root, rel, data, { overwrite = false } = {}) {
   assertNotGitInternal(rel)
   if (!Buffer.isBuffer(data)) throw new Error('上传体必须是二进制字节')
@@ -342,7 +359,19 @@ export function uploadBytes(root, rel, data, { overwrite = false } = {}) {
     if (!overwrite) throw new Error('目标已存在：如需覆盖请带 overwrite=1（409 语义）')
     if (statSync(abs).isDirectory()) throw new Error('目标已存在且为目录，不能以文件覆盖')
   }
-  writeFileSyncSafe(abs, data)
+  const tmp = tmpSibling(abs)
+  try {
+    writeFileSyncSafe(tmp, data)
+    // 发布前竞态二次校验：与 rename 同处一个同步块，无 await 穿插（TC-S4-16 并发 no-overwrite）
+    if (existsSync(abs)) {
+      if (!overwrite) throw new Error('目标已存在：如需覆盖请带 overwrite=1（409 语义）')
+      if (statSync(abs).isDirectory()) throw new Error('目标已存在且为目录，不能以文件覆盖')
+    }
+    renameSync(tmp, abs)
+  } catch (e) {
+    tryUnlink(tmp)
+    throw e
+  }
   const st = statSync(abs)
   return { name: basename(abs), size: st.size, mtime: entryMtime(st.mtimeMs) }
 }
@@ -415,6 +444,78 @@ function writeFileSyncSafe(abs, data) {
       off += n
     }
   } finally { closeSync(fd) }
+}
+
+/** 同目录临时文件路径：与目标同卷保证 rename 原子性；随机后缀防并发冲突；发布成功后即不存在。 */
+function tmpSibling(abs) {
+  return abs + '.upload-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10) + '.tmp'
+}
+
+function tryUnlink(p) {
+  try { if (existsSync(p)) unlinkSync(p) } catch { /* ENOENT/占用等：忽略，不阻断主流程 */ }
+}
+
+/**
+ * 流式接收 PUT 上传体（P0-1 修复核心；TC-S4-02/15/16）：正文边收边写【同目录临时文件】，全程不触碰目标；
+ * 完整收体且不超限后，在 ws close（fd 已释放，Windows 上 rename/unlink 前必须）回调中同步完成
+ * 「竞态二次校验 + renameSync 原子发布」。任何失败（流式超限/客户端中断/写错误/竞态 409）在 ws close
+ * 时统一删除临时文件并 reject——目标文件（含 overwrite 场景的原文件）保持原样，无半写残留。
+ * 错误消息沿用 classifyFilesError 可识别文案（413/409/400）。resolve 值为最终 abs。
+ */
+export function receiveUploadBody(req, abs, { maxBytes = FILES_LIMITS.MAX_UPLOAD, overwrite = false } = {}) {
+  return new Promise((resolve, reject) => {
+    const tmp = tmpSibling(abs)
+    const abortErr = () => new Error('上传中断：客户端中止连接，原文件未受影响')
+    let settled = false
+    let bodyEnded = false
+    let wsFailed = null // 非 null = 中途失败原因（超限/中断/写错误），close 时据此清理而非发布
+    let written = 0
+    const ws = createWriteStream(tmp, { flags: 'wx' })
+    // 唯一终结点：ws close 时 fd 已释放，此时才安全 rename / unlink（Windows）
+    ws.on('close', () => {
+      if (settled) return
+      if (!bodyEnded || wsFailed) {
+        // 失败路径：未完整收体 或 写入出错 → 删临时文件后拒绝（原文件从未被触碰）
+        settled = true
+        tryUnlink(tmp)
+        reject(wsFailed ?? abortErr())
+        return
+      }
+      try {
+        // 发布路径：完整收体且写入成功 —— 竞态二次校验 + 原子改名（同同步块无 await，竞态窗口为零）
+        if (existsSync(abs)) {
+          if (!overwrite) throw new Error('目标已存在：如需覆盖请带 overwrite=1（409 语义）')
+          if (statSync(abs).isDirectory()) throw new Error('目标已存在且为目录，不能以文件覆盖')
+        }
+        renameSync(tmp, abs)
+        settled = true
+        resolve(abs)
+      } catch (e) {
+        settled = true
+        tryUnlink(tmp)
+        reject(e)
+      }
+    })
+    ws.on('error', (e) => { wsFailed = new Error('写入失败：' + (e?.message ?? e)); try { ws.destroy() } catch { /* */ } })
+    // 中断兜底：仅在尚无失败原因时记为 abort（已超限 413 等不覆盖，保留更精确的错误映射）
+    const abort = () => { if (!settled && !wsFailed) { wsFailed = abortErr(); try { ws.destroy() } catch { /* */ } } }
+    req.on('data', (d) => {
+      if (settled || wsFailed) return
+      written += d.length
+      if (written > maxBytes) {
+        req.resume() // 排空余下请求体，让客户端能读到 413
+        wsFailed = new Error('上传超过上限 ' + maxBytes + ' 字节')
+        try { ws.destroy() } catch { /* */ }
+        return
+      }
+      const okWrite = ws.write(d)
+      if (!okWrite) { req.pause(); ws.once('drain', () => req.resume()) } // 背压：大上传不做无界缓冲
+    })
+    req.on('end', () => { if (settled || wsFailed) return; bodyEnded = true; if (!ws.destroyed) ws.end() })
+    req.on('aborted', abort)
+    req.on('error', abort)
+    req.on('close', () => { if (!bodyEnded) abort() }) // 与 Node 版本无关的中断兜底（体未收完即 close）
+  })
 }
 
 function readBodyJson(req) {
@@ -715,7 +816,10 @@ async function handleWebApi(req, res) {
 
 // ── /api/files/* 路由（S3 只读 + S4 写；仅回环；写需 token；错误码分类见各函数注释）──
 function httpErr(res, code, message) {
-  sendJson(res, code, { error: message })
+  // 客户端断连（上传中断等）后写响应会触发 res error——吞掉避免未处理 error 崩溃；响应已结束则静默
+  if (res.destroyed || res.writableEnded) { try { res.destroy() } catch { /* */ } return }
+  res.on('error', () => { /* 断连写错误：忽略 */ })
+  try { sendJson(res, code, { error: message }) } catch { try { res.destroy() } catch { /* */ } }
 }
 
 /** 写鉴权：配置了 token（--token / DSH_WORKBENCH_TOKEN）时写请求必须带 Bearer。读请求放行（TC-S4-13）。 */
@@ -793,25 +897,9 @@ async function handleFilesApi(req, res, pathname, url) {
         if (!overwrite) throw new Error('目标已存在：如需覆盖请带 overwrite=1（409 语义）')
         if (statSync(abs).isDirectory()) throw new Error('目标已存在且为目录，不能以文件覆盖')
       }
-      const ws = createWriteStream(abs)
-      let written = 0
-      let oversized = false
-      const p = new Promise((resolve, reject) => {
-        ws.on('error', reject)
-        ws.on('finish', () => resolve(undefined))
-        req.on('data', (d) => {
-          written += d.length
-          if (written > FILES_LIMITS.MAX_UPLOAD) {
-            oversized = true
-            ws.destroy()
-            try { unlinkSync(abs) } catch { /* 可能尚未创建 */ }
-          } else if (!oversized) ws.write(d)
-        })
-        req.on('end', () => { if (!oversized) ws.end() })
-        req.on('error', reject)
-      })
-      await p
-      if (oversized) { httpErr(res, 413, '上传超过上限 ' + FILES_LIMITS.MAX_UPLOAD + ' 字节'); return }
+      // P0-1 修复：流式收体到同目录临时文件，完整收体 + 不超限后原子改名发布；
+      // 覆盖/中断/超限不再破坏原文件、不留半写目标（receiveUploadBody，TC-S4-02/15/16）
+      await receiveUploadBody(req, abs, { maxBytes: FILES_LIMITS.MAX_UPLOAD, overwrite })
       const st = statSync(abs)
       sendJson(res, 200, { ok: true, file: { name: basename(abs), size: st.size, mtime: entryMtime(st.mtimeMs) } })
       return
@@ -906,4 +994,4 @@ if (isMain) {
   })
 }
 
-export { isLoopback }
+export { isLoopback, server }

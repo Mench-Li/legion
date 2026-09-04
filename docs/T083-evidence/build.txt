@@ -1,0 +1,24 @@
+T-083 切片 S4 —— pnpm build EPERM 受限复现证据
+================================================
+命令（workbench/ 下）：pnpm build   （= tsc --noEmit && vite build）
+结果：tsc 段通过；vite 段失败于沙箱原生 spawn 限制 —— 复现如下：
+
+  > $ tsc --noEmit && vite build
+  failed to load config from D:\project\DSH\legion\.legion-worktrees\T-083\workbench\vite.config.ts
+  error during build:
+  Error: spawn EPERM
+      at ChildProcess.spawn (node:internal/child_process:458:11)
+      at Object.spawn (node:child_process:813:9)
+      at ensureServiceIsRunning (D:\project\DSH\legion\workbench\node_modules\.pnpm\esbuild@0.28.2\node_modules\esbuild\lib\main.js:2272:29)
+      at build (...)  at bundleConfigFile ... vite@7.3.6 ... config.js
+  [ELIFECYCLE] Command failed with exit code 1.
+
+根因：vite 加载配置/打包需 spawn esbuild 原生服务进程并经管道通信；
+本会话文件沙箱（workspace-write、无审批通道）禁止子进程管道捕获（spawn EPERM 为已记录边界），
+非代码问题。验收口径「受限时记录 EPERM 复现 + tsc 结果」按此满足：
+  - EPERM 复现：见上（esbuild ensureServiceRunning spawn EPERM，exit 1）
+  - tsc 结果：pnpm exec tsc --noEmit → exit 0 零诊断（见 typecheck.txt）
+
+对照：a524951（w/T-051）当时同内容 build 全绿；本切片对 3 个文件域文件的改动与
+w/T-051 内容逐字节一致（见 README.md 哈希核对），无新增依赖、无配置变更，
+tsc 0 诊断已覆盖类型安全面，vite 打包为纯环境限制。

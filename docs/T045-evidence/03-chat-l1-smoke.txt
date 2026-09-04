@@ -1,0 +1,26 @@
+PASS | TC-S1-01 POST 会话 → 200 ok:true（id/createdAt/updatedAt/last_message_at=null）
+PASS | TC-S1-01 列表含新会话且按 updatedAt desc 排首
+PASS | TC-S1-02 software 列表不含 default 会话（scope 正向）
+PASS | TC-S1-03 default 列表查不到 software 会话（scope 反向）
+PASS | TC-S1-04 kind 非法 → 400 且指明合法枚举
+PASS | TC-S1-05 ① 缺 by → 400「缺少操作者身份 by」
+PASS | TC-S1-05 ② body 非法 JSON → 400（非 500）
+PASS | TC-S1-05 ③ 失败写无 chat 审计留痕
+PASS | TC-S1-06 发消息 author=by、createdAt 有值、会话 last_message_at 更新
+PASS | TC-S1-07 author 冒名被服务端绑定（author=by≠other）
+PASS | TC-S1-08 分页 10/10/5：无重无漏、页内升序、页间游标连续
+PASS | TC-S1-09 空会话 → []；limit=0/abc → 400
+PASS | TC-S1-10 未知会话发消息 → 400「会话不存在」
+PASS | TC-S1-11 空正文 → 400「不能为空」
+PASS | TC-S1-12 正文 8000 恰好通过 / 8001 → 400 拒绝
+PASS | TC-S1-13 /api/activity 含 chat:create/chat:message（member/scope/detail 形状）
+PASS | TC-S1-14 订阅 /api/events 期间写入 ≤5s 收到 live chat:message（member=coder、scope、detail.msg） | {"seq":34,"ts":"2026-09-04T01:55:08.689Z","member":"coder","scope":"software","action":"chat:message","taskId":null,"detail":{"conv":1,"msg":29,"kind":"text"}}
+PASS | TC-S1-15 断开不崩服务、其余订阅端仍收到事件
+--- 服务 A（无 token）18 项 REST/审计/SSE 断言执行完 ---
+PASS | TC-S1-17 ① 无 token 写 → 401「Bearer token 无效」
+PASS | TC-S1-17 ② 错 token 写 → 401
+PASS | TC-S1-17 ③ 对 token 写 → 200
+PASS | TC-S1-17 ④ 无 token 读 → 200 放行（读与既有接口语义一致）
+--- 服务 B（token=tk）鉴权断言执行完 ---
+
+==== L1 冒烟汇总：22/22 断言通过；进程级异常 0 ====

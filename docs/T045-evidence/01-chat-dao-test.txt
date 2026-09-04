@@ -1,0 +1,31 @@
+▶ TC-S1-01/02/04/05 会话创建与 scope 列表
+  ✔ TC-S1-01 创建会话 → 含 id/createdAt/updatedAt/last_message_at=null；列表按 updatedAt desc 排首 (6.369ms)
+  ✔ TC-S1-02 scope 过滤：software 列表不含 default/marketing 会话 (2.6984ms)
+  ✔ TC-S1-04 kind 非法 → 拒绝并指明合法枚举；TC-S1-05 缺 by 被拒且无 chat 审计留痕 (0.9714ms)
+✔ TC-S1-01/02/04/05 会话创建与 scope 列表 (11.5538ms)
+▶ TC-S1-03/06/07 scope 隔离 + author 绑定
+  ✔ TC-S1-03 scope 隔离反向：default 列表查不到 software 会话；跨 scope 写不串（消息 scope = 会话 scope） (3.2525ms)
+  ✔ TC-S1-06 发消息 → author=by、createdAt 有值、会话 last_message_at 更新 (2.6385ms)
+  ✔ TC-S1-07 author 冒名被服务端绑定：传入 author:other 恒等于 by (3.4667ms)
+✔ TC-S1-03/06/07 scope 隔离 + author 绑定 (10.7264ms)
+▶ TC-S1-08/09 分页与边界
+  ✔ TC-S1-08 25 条消息 limit=10 → 三页 10/10/5，页内升序、拼接无重无漏 (33.9159ms)
+  ✔ TC-S1-09 分页边界：空会话 []、超界游标 []、缺省 limit=50、非法 limit 拒绝 (7.3635ms)
+  ✔ TC-S1-10 未知会话发消息/列消息 → 拒绝且不落任何消息行 (0.3735ms)
+  ✔ TC-S1-11 空正文被拒 (1.7985ms)
+  ✔ TC-S1-12 正文长度上限 MAX_CHAT_BODY：恰好通过、+1 拒绝且不落库 (3.3745ms)
+✔ TC-S1-08/09 分页与边界 (47.541ms)
+▶ TC-S1-13 审计留痕（chat 写统一 audit：by + scope + SSE 广播前置）
+  ✔ create + message 各产生 chat:* 审计行（member/scope/detail 形状 + seq 升序） (4.0106ms)
+✔ TC-S1-13 审计留痕（chat 写统一 audit：by + scope + SSE 广播前置） (4.2107ms)
+▶ TC-S1-16 老库迁移：无 chat 表旧库自动建表 + 存量数据无损
+  ✔ 旧 schema（tasks/skills 有数据、无 conversations/messages）import 后自动建两表且 chat 可用 (51.1214ms)
+✔ TC-S1-16 老库迁移：无 chat 表旧库自动建表 + 存量数据无损 (51.3087ms)
+ℹ tests 13
+ℹ suites 5
+ℹ pass 13
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 208.8386

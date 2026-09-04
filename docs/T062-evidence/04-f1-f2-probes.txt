@@ -1,0 +1,28 @@
+=== T-062 复现：files-api 共享面既有「必须修改」级缺陷（F1 / F2）===
+（真实 serve.mjs 进程，非 S4 引入；T-054 审查发现、T-058 复现，本次 T-062 再复现）
+
+[F2] serve.mjs:944 顶层 decodeURIComponent 未捕获 URIError —— 单请求即可令整个 serve.mjs 进程崩溃（DoS）
+复现步骤：
+  1) node serve.mjs --port 4843 --host 127.0.0.1 --token tk（后台进程）
+  2) curl.exe -s -o NUL -w '%{http_code}' "http://127.0.0.1:4843/api/files%zz"   （非法 % 编码路径）
+实际结果：
+  HTTP=000（进程死亡），随后任何请求均 HTTP=000。
+  stderr：serve.mjs:944  const pathname = decodeURIComponent(url.pathname)
+           URIError: URI malformed
+           at Server.<anonymous> (serve.mjs:944:20)
+  进程退出码=1。
+影响：任意端点（含 S4 写 upload/mkdir/rename/delete）在配对非法 % 路径的请求下即可击穿服务进程，属 DoS。
+归属：既有缺陷（T-054/T-058 已知），非 T-062 S4 实现引入。
+
+[F1] assertNotGitInternal 只拦截顶层 .git（parts[0]==='.git'），未拦截嵌套仓库 .git —— 凭证/元数据外泄
+复现步骤（空间目录含 subrepo/.git/config，内容 [core]...）：
+  1) curl.exe -s -w '%{http_code}' "http://127.0.0.1:4843/api/files/read?scope=fx&path=subrepo/.git/config"
+  2) curl.exe -s -w '%{http_code}' "http://127.0.0.1:4843/api/files/download?scope=fx&path=subrepo/.git/config"
+  3) 对照组：curl.exe -s -w '%{http_code}' ".../api/files/read?scope=fx&path=.git/config"
+实际结果：
+  read subrepo/.git/config    -> HTTP=200，返回 "[core]\n  repositoryformatversion = 0..."
+  download subrepo/.git/config-> HTTP=200，返回字节
+  read .git/config (顶层)      -> HTTP=403  {"error":"禁止访问 .git 内部（防凭证/元数据外泄）"}
+说明：嵌套仓库（子目录内含 .git）的 Git 元数据可经 read/download 读取，泄露仓库指纹/配置；
+      写路径同用 assertNotGitInternal，含 .git 的嵌套路径同样不受此守卫。
+归属：既有缺陷（T-054 R1 / T-058 F1 已知），非 T-062 S4 实现引入。

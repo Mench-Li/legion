@@ -1,0 +1,70 @@
+▶ TC-S3-01/02/03 list 形状 + 根语义 + scope 未绑定
+  ✔ TC-S3-01 目录在前、按名排序、形状完整；隐藏目录与 .git 不出现；含 .git 的目录带 isRepo (29.0584ms)
+  ✔ TC-S3-02 空目录 → entries=[]，不存在目录 → 400 语义错误 (6.2779ms)
+  ✔ TC-S3-03 未绑定/不存在的 scope → 引导错误，绝不落到任意目录 (0.8129ms)
+✔ TC-S3-01/02/03 list 形状 + 根语义 + scope 未绑定 (54.8007ms)
+▶ TC-S3-05/06/07 read 预览（文本/截断/二进制）
+  ✔ TC-S3-05 文本预览：中文原样、行数正确、不截断 (6.6782ms)
+  ✔ TC-S3-06 超过 MAX_READ → truncated=true，content 恰为上限、totalBytes 为全量 (3.6361ms)
+  ✔ TC-S3-07 二进制/目录/缺失 → 不可预览或 400 (7.201ms)
+  ✔ TC-S3-08 download 字节一致（含中文名文件） (10.6514ms)
+✔ TC-S3-05/06/07 read 预览（文本/截断/二进制） (29.3307ms)
+▶ TC-S3-08b 下载路由层 P0-2：openDownloadStream 流式（不整读内存）
+  ✔ openDownloadStream 返回 length+可读流且字节一致；目录/.git/越界/symlink 同强度拒绝 (14.492ms)
+✔ TC-S3-08b 下载路由层 P0-2：openDownloadStream 流式（不整读内存） (14.9474ms)
+▶ TC-S3-09/10 + TC-S4-14 路径逃逸矩阵（全部拒绝）
+  ✔ 词法/绝对/NUL/编码等价样本在 list/read 全被拒 (2.306ms)
+  ✔ TC-S3-10 符号链接：link-in（根内）放行；link-out（根外）越界拦截 (16.1198ms)
+  ✔ TC-S4-14 写操作逃逸样本（upload/mkdir/rename/delete）全被拒 (13.8096ms)
+  ✔ TC-S3-12 .git 内部拒绝访问（含写） (1.2514ms)
+✔ TC-S3-09/10 + TC-S4-14 路径逃逸矩阵（全部拒绝） (34.2727ms)
+▶ TC-S4-01/02 upload 成功与上限
+  ✔ TC-S4-01 上传新文件（中文名 + 嵌套目录）成功并可按字节读回 (30.6734ms)
+  ✔ TC-S4-02 MAX_UPLOAD 恰好可传；+1 拒绝且目标不落盘 (139.9533ms)
+✔ TC-S4-01/02 upload 成功与上限 (171.1234ms)
+▶ TC-S4-03/04 overwrite 两态
+  ✔ 存在文件无 overwrite → 拒绝；overwrite=1 → 覆盖成功且字节更新 (31.076ms)
+✔ TC-S4-03/04 overwrite 两态 (31.3876ms)
+▶ TC-S4-05..08 mkdir / rename
+  ✔ TC-S4-05/06 mkdir 多层成功；已存在 → 拒绝 (18.807ms)
+  ✔ TC-S4-07/08 rename 成功迁移；目标已存在/源缺失 → 拒绝 (31.3284ms)
+✔ TC-S4-05..08 mkdir / rename (50.6799ms)
+▶ TC-S4-09..12 delete confirm 语义
+  ✔ 缺 confirm / confirm 非 yes → 拒绝；confirm=yes 删除文件 (13.1902ms)
+  ✔ TC-S4-09/10/11 非空目录拒绝；空目录 confirm=yes 删除 (11.3515ms)
+  ✔ TC-S4-12 删除不存在的路径 → 400 (4.5129ms)
+✔ TC-S4-09..12 delete confirm 语义 (29.9856ms)
+▶ TC-S4-13 token 矩阵（函数级 isLoopback 语义；HTTP 401/200 矩阵见文末路由层 describe）
+  ✔ 函数导出存在且 FILES_LIMITS 常量可被三值法引用 (0.3194ms)
+  ✔ TC-S3-11 仅回环：假 socket 非回环 → isLoopback=false (0.2679ms)
+✔ TC-S4-13 token 矩阵（函数级 isLoopback 语义；HTTP 401/200 矩阵见文末路由层 describe） (1.0149ms)
+▶ S4 路由层（HTTP）· 写契约 e2e —— 未配置 token 时写放行（AC2 现状语义）
+  ✔ TC-S4-01：PUT 上传（中文名+空格）→ 200；list 立即可见；download 字节一致 (67.0668ms)
+  ✔ TC-S4-03/04：覆盖两态——无 overwrite → 409 且原内容未动；overwrite=1 → 200 新内容可读回 (75.5331ms)
+  ✔ TC-S4-05..08：mkdir 多层/重复/与文件冲突；rename 迁移/409/越界 (132.434ms)
+  ✔ TC-S4-09..12：delete confirm 语义（缺/错 confirm 400、confirm=yes 删文件、非空目录拒删、空目录可删） (96.0537ms)
+✔ S4 路由层（HTTP）· 写契约 e2e —— 未配置 token 时写放行（AC2 现状语义） (372.963ms)
+▶ S4 路由层（HTTP）· TC-S4-14 写路径逃逸矩阵 + TC-S4-02 预检 413（真实 64MB 上限）
+  ✔ upload/mkdir/rename/delete 注入逃逸样本 → 全部 400/403，根外目录零副作用 (313.852ms)
+  ✔ TC-S4-02（预检）：声明 Content-Length 超真实 64MB 上限 → 413 快速拒绝、零落盘 (8.9416ms)
+✔ S4 路由层（HTTP）· TC-S4-14 写路径逃逸矩阵 + TC-S4-02 预检 413（真实 64MB 上限） (323.2306ms)
+▶ S4 路由层（HTTP）· TC-S4-13 鉴权矩阵（serve.mjs 配 token=tk）
+  ✔ 无 token 写 401 / 错 token 写 401 / 对 token 写 200；无 token 读仍放行 200 (50.5155ms)
+✔ S4 路由层（HTTP）· TC-S4-13 鉴权矩阵（serve.mjs 配 token=tk） (51.0905ms)
+▶ S4 路由层（HTTP）· P0-1 原子上传回归（cap 实例 16KB）——流式超限/中断不破坏原文件、零残留
+  ✔ TC-S4-02/15 + P0-1：overwrite=1 流式超限 → 413（或断连），原文件字节原样、无临时残留 (13.9771ms)
+  ✔ TC-S4-02：流式超限上传到新路径 → 目标不落盘、无残留 (7.5865ms)
+  ✔ P0-1：覆盖上传中途客户端中断 → 原文件保持、零残留、服务不崩 (23.766ms)
+  ✔ 上限注入口不影响正常路径：上限内上传 200 且读回一致 (12.2062ms)
+✔ S4 路由层（HTTP）· P0-1 原子上传回归（cap 实例 16KB）——流式超限/中断不破坏原文件、零残留 (58.4786ms)
+▶ S4 路由层（HTTP）· TC-S4-16 并发上传同路径（无 overwrite）→ 至多一个 200
+  ✔ 两请求并发写同一新路径：一个 200 一个 409；最终字节 = 二写之一完整内容（无半写/混合） (16.3868ms)
+✔ S4 路由层（HTTP）· TC-S4-16 并发上传同路径（无 overwrite）→ 至多一个 200 (16.5886ms)
+ℹ tests 34
+ℹ suites 14
+ℹ pass 34
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1355.5849

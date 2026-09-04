@@ -878,9 +878,14 @@ exit 0
    */
   async function autoPromote(taskId: string, dir: string): Promise<boolean> {
     try {
+      // 防御：上一次合入失败可能遗留冲突态（MERGE_HEAD/未合并文件），会挡住后续所有 merge —— 先清一次
+      const staleAbort = await runGit(repoRootFor(), ['merge', '--abort'])
+      if (staleAbort.code === 0) log(`${taskId} 清理了上次遗留的合入冲突态（merge --abort）`)
       const merge = await runGit(repoRootFor(), ['merge', '--no-ff', `w/${taskId}`, '-m', `promote ${taskId}`])
       if (merge.code !== 0) {
         log(`${taskId} 自动合入失败：${(merge.err || merge.out).trim()}`)
+        // 关键：失败立即 abort，绝不让主仓库停在冲突态毒化后续合入；改动仍在 w/<taskId> 分支与 worktree，可人工合入或后续重试
+        await runGit(repoRootFor(), ['merge', '--abort'])
         return false
       }
       await runGit(repoRootFor(), ['worktree', 'remove', '--force', dir])

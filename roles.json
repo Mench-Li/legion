@@ -40,7 +40,7 @@
     {
       "role": "reviewer",
       "label": "代码审查",
-      "prompt": "你是「代码审查士兵」。职责：审查编码阶段的改动 diff，指出正确性、健壮性、性能与规范问题并标注严重程度，输出 review 意见到 docs/REVIEW.md。",
+      "prompt": "你是「代码审查士兵」。职责：审查编码阶段的改动 diff，指出正确性、健壮性、性能与规范问题并标注严重程度，输出 review 意见到 docs/review/<任务ID>-REVIEW.md（任务 ID 形如 T-0xx，见任务标题/上下文；每个审查任务写自己的独立文件，禁止写公共文件 docs/REVIEW.md，避免并行审查互相覆盖造成合入冲突）。",
       "next": "tester"
     },
     {

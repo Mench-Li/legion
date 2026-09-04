@@ -111,6 +111,26 @@ describe('TC-S3-05/06/07 read 预览（文本/截断/二进制）', () => {
   })
 })
 
+describe('TC-S3-08b 下载路由层 P0-2：openDownloadStream 流式（不整读内存）', () => {
+  it('openDownloadStream 返回 length+可读流且字节一致；目录/.git/越界/symlink 同强度拒绝', async () => {
+    const rootDir = await m.resolveScopeLocalDir('fx')
+    const d = m.openDownloadStream(rootDir, '中文 文件.txt')
+    assert.equal(d.name, '中文 文件.txt')
+    assert.equal(d.length, Buffer.byteLength('中文内容'))
+    const chunks = []
+    for await (const c of d.stream) chunks.push(c)
+    assert.equal(Buffer.concat(chunks).toString('utf8'), '中文内容')
+    assert.throws(() => m.openDownloadStream(rootDir, 'docs'), /不是文件/)
+    assert.throws(() => m.openDownloadStream(rootDir, '.git/config'), /禁止访问 .git/)
+    for (const s of ['../secret.txt', 'C:/Windows/win.ini', 'a/../../x']) {
+      assert.throws(() => m.openDownloadStream(rootDir, s), /越界|相对路径/, 'escape ' + s)
+    }
+    if (existsSync(join(root, 'link-out'))) {
+      assert.throws(() => m.openDownloadStream(rootDir, 'link-out/secret.txt'), /越界：符号链接/)
+    }
+  })
+})
+
 describe('TC-S3-09/10 + TC-S4-14 路径逃逸矩阵（全部拒绝）', () => {
   it('词法/绝对/NUL/编码等价样本在 list/read 全被拒', async () => {
     const rootDir = await m.resolveScopeLocalDir('fx')

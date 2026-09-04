@@ -309,13 +309,25 @@ export function previewTextFile(root, rel) {
   }
 }
 
-/** 读取原始字节（下载语义；测试用全量 Buffer，路由层用 createReadStream 流式返回）。 */
+/** 读取原始字节（仅作契约测试/小文件载体；路由层下载请用 openDownloadStream 流式返回，避免整文件同步读入内存——P0-2）。 */
 export function readFileBytes(root, rel) {
   assertNotGitInternal(rel)
   const abs = resolveInsideRoot(root, rel)
   const st = statSync(abs)
   if (!st.isFile()) throw new Error('路径不是文件')
   return { buffer: readFileSyncFull(abs), totalBytes: st.size, name: basename(abs) }
+}
+
+/**
+ * 下载流（GET /api/files/download 路由层用）：读路径防护与 readFileBytes 同强度，返回文件元数据 +
+ * createReadStream 可读流。修复 P0-2：路由层不再整文件同步读入内存，Content-Length 由调用方回填。
+ */
+export function openDownloadStream(root, rel) {
+  assertNotGitInternal(rel)
+  const abs = resolveInsideRoot(root, rel)
+  const st = statSync(abs)
+  if (!st.isFile()) throw new Error('路径不是文件')
+  return { name: basename(abs), length: st.size, stream: createReadStream(abs) }
 }
 
 /** PUT 上传（TC-S4-01..04）：raw bytes；上限预检（Content-Length 在路由层）；overwrite=1 才允许覆盖。 */
@@ -748,11 +760,21 @@ async function handleFilesApi(req, res, pathname, url) {
     }
     if (method === 'GET' && pathname === '/api/files/download') {
       const rel = url.searchParams.get('path') ?? ''
-      const { buffer, name } = readFileBytes(root, rel)
+      // P0-2 修复：流式下载（createReadStream.pipe），不再整文件同步读入内存阻塞事件循环；带 Content-Length 便于进度展示
+      const { name, length, stream } = openDownloadStream(root, rel)
       const type = MIME[extname(name).toLowerCase()] ?? 'application/octet-stream'
       const safeName = encodeURIComponent(name).replace(/['()]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase())
-      res.writeHead(200, { 'content-type': type, 'content-disposition': `attachment; filename*=UTF-8''${safeName}` })
-      res.end(buffer)
+      res.writeHead(200, {
+        'content-type': type,
+        'content-length': String(length),
+        'content-disposition': `attachment; filename*=UTF-8''${safeName}`,
+      })
+      stream.on('error', (e) => {
+        if (!res.headersSent) httpErr(res, e?.code === 'ENOENT' ? 404 : 500, '下载失败：' + (e?.message ?? e))
+        else res.destroy(e)
+      })
+      res.on('close', () => stream.destroy()) // 客户端断连 → 停止读文件（unpipe），避免继续消费磁盘 IO
+      stream.pipe(res)
       return
     }
     if (method === 'PUT' && pathname === '/api/files/upload') {

@@ -28,7 +28,7 @@ import { ActivityFeed } from './components/ActivityFeed'
 import { QuickTools } from './components/QuickTools'
 import { CommandBar } from './components/CommandBar'
 import { SkillsPanel } from './components/SkillsPanel'
-import { ChatPanel } from './components/ChatPanel'
+import { ChatView } from './components/ChatView'
 import { FilesPanel } from './components/FilesPanel'
 import { BrowserPanel } from './components/BrowserPanel'
 import { NewSpaceModal } from './components/NewSpaceModal'
@@ -349,7 +349,7 @@ export default function App(): React.JSX.Element {
           active === 'skills' ? (
             <SkillsPanel scope={scope} hubMode={hubMode} />
           ) : active === 'chat' ? (
-            <ChatPanel scope={scope} hubMode={hubMode} />
+            <ChatView scope={scope} hubMode={hubMode} />
           ) : active === 'files' ? (
             <FilesPanel scope={scope} hubMode={hubMode} spaces={hubSpaces} onOpenSettings={s => setSpaceSettings(s)} />
           ) : active === 'browser' ? (

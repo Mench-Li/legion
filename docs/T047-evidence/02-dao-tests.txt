@@ -1,0 +1,17 @@
+命令：node team-hub/chat.test.mjs
+输出尾部：
+  ℹ tests 13
+  ℹ suites 5
+  ℹ pass 13
+  ℹ fail 0
+  ℹ cancelled 0 / skipped 0 / todo 0
+  ℹ duration_ms ~155
+  chat.test exit: 0
+
+命令：node team-hub/skills.test.mjs（同一 server.mjs 回归）
+输出尾部：
+  ℹ pass 12
+  ℹ fail 0
+  skills.test exit: 0
+
+要点：对话 DAO 契约 13/13、既有技能模块回归 12/12，全绿。

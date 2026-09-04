@@ -36,7 +36,7 @@ node scripts/serve.mjs --port 5173   # 独立静态服务 → http://127.0.0.1:5
 | 右侧「当前任务集」泳道 | `MissionPanel`：中枢模式走 `/api/missions?scope=`（scopeAware=true）；v1 回退 serve.mjs 或客户端聚合；每岗任务按状态排序（进行中→待认领→已完成）+「展开全部 N」看全量 | ✅ |
 | 右侧「实时动态」 | `ActivityFeed`：SSE 实时流 | ✅ |
 | 快捷工具 | `QuickTools`：「打开内部看板」→ openKanban（经典看板新窗口）；「文件浏览/浏览网页」→ 进入文件中心/浏览器面板（`onOpenModule` 导航）；截图 OCR/语音待 DSH 工具面 | ✅/⏳ |
-| 对话中心 | `ChatPanel`：team-hub v2 `/api/chat/*` 真实接入（会话列表/新建/发送/历史，随当前空间隔离）；实时 = 中枢**单一 `/api/events`** 按 `chat:*` kind 过滤；纯文本渲染（无 raw HTML） | ✅ |
+| 对话中心 | `ChatView`：team-hub v2 `/api/chat/*` 真实接入（会话列表/新建/发送/历史分页「加载更早」，随当前空间隔离）；实时 = 中枢**单一 `/api/events`** 按 `chat:*` kind 过滤；纯文本渲染（无 raw HTML） | ✅ |
 | 文件中心 | `FilesPanel`：serve.mjs `/api/files`（同源，仅回环）——列表/逐层进入/文本预览（截断+行数）/二进制提示/下载/上传（409→覆盖确认）/新建目录/重命名/删除（confirm 二次确认）；未绑定空间 → 引导打开空间设置 | ✅ |
 | 浏览器助手 | `BrowserPanel`：serve.mjs `/api/web/fetch`（SSRF 防护代理）——地址栏（自动补 https://）+ 标题/正文/链接结构化结果 + 分错误文案与重试；`ssrf_blocked` 明确文案 | ✅ |
 | 日程日历 / 通知中心 | `Sidebar` 模块为**占位**：点击给出「P1 后续阶段接入」提示（不静默无响应，TC-S8-03） | ⏳ |
@@ -113,7 +113,8 @@ node scripts/serve.mjs --port 5173   # 独立静态服务 → http://127.0.0.1:5
 ## 三中心：对话 / 文件 / 浏览器（S1~S7）
 
 三个中心在左侧模块区与 QuickTools 双入口均可进入（`App.active` 状态一致），实现位置：
-- **对话中心** `ChatPanel.tsx`：`fetchChatConversations / createChatConversation / fetchChatMessages / postChatMessage / subscribeHubAudit`（`api.ts`）。
+- **对话中心** `ChatView.tsx`：`fetchChatConversations / createChatConversation / fetchChatMessages / postChatMessage / subscribeHubAudit`（`api.ts`）。
+  会话默认加载最近 50 条，顶部「↑ 加载更早消息」按 `before` 游标向前翻页（P1-4：旧消息可完整回溯）；实时刷新用合并追加、不冲掉已加载的更早历史。
   写 = team-hub `POST /api/chat/*`（统一 handleWrite，`by:'general'` 注入），审计/SSE 由服务端 DAO 留痕；前端**不再另开事件源**——订阅既有 `/hub/api/events` 并过滤 `action.startsWith('chat:')`，`detail.conv` 命中当前会话即刷新。
   边界：需中枢可达 + 选中**具体空间**（「全部空间」给出引导）；消息 ≤8000 字符；kind 白名单外消息与任何 HTML/脚本内容都按**纯文本**渲染（无 `dangerouslySetInnerHTML`）。
 - **文件中心** `FilesPanel.tsx`：`fetchFileList / fetchFilePreview / fileDownloadUrl / filesUpload / filesMkdir / filesRename / filesDelete`。

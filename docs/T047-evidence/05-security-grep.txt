@@ -1,0 +1,7 @@
+命令：grep dangerouslySetInnerHTML（workbench/src）
+命中（均为注释，无代码使用）：
+  components/ChatView.tsx:34   —— 注释声明（原文见 34 行注释“…无 dangerouslySetInnerHTML…”）
+  components/FilesPanel.tsx:33 —— 注释声明（他面板既有）
+
+要点：S2 AC5 / TC-S2-09 断言满足——ChatView 正文仅 React 文本节点渲染（white-space:pre-wrap），
+无 dangerouslySetInnerHTML 直插用户正文；<script>/<img onerror>/markdown 注入均按纯文本。

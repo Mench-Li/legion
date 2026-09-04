@@ -1,0 +1,7 @@
+命令：node workbench/node_modules/typescript/bin/tsc -p workbench/tsconfig.json --noEmit
+（tsconfig strict + noUnusedLocals + noUnusedParameters）
+
+输出：（无错误输出）
+tsc exit: 0
+
+要点：0 类型错误。

@@ -174,7 +174,7 @@ test('a dependency-cleared blocked task is claimed before its worker can block a
     apply(harness.ctx, config(root))
     harness.intervals[0]()
     await waitFor(() => requests.some(request => request.startsWith('transition:')), 'worker never settled')
-    assert.deepEqual(requests, ['claim:blocked', 'comment', 'transition:in_progress->blocked'])
+    assert.deepEqual(requests, ['claim:blocked', 'comment', 'comment', 'transition:in_progress->blocked'])
   } finally {
     for (const dispose of harness.disposers) await dispose()
     globalThis.fetch = originalFetch

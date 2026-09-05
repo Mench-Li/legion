@@ -46,9 +46,11 @@ interface SidebarProps {
   onToggleExec?: (enabled: boolean) => void
   /** 执行守护是否在线（编排是否真的在跑）。 */
   execDaemonOnline?: boolean
+  /** 通知未读徽标（S7 ← R-B2：真实通知未读数；>0 才显示，由 App 侧按 scope 低频刷新/面板实时上报）。 */
+  notifyUnread: number
 }
 
-export function Sidebar({ board, active, scope, hubMode, spaces, onNavigate, onSelectScope, onNewSpace, onSpaceSettings, execEnabled, onToggleExec, execDaemonOnline }: SidebarProps): React.JSX.Element {
+export function Sidebar({ board, active, scope, hubMode, spaces, onNavigate, onSelectScope, onNewSpace, onSpaceSettings, execEnabled, onToggleExec, execDaemonOnline, notifyUnread }: SidebarProps): React.JSX.Element {
   const counts = board ? statusCounts(board) : null
   const inReview = counts?.inReview ?? 0
   const inProgress = counts?.inProgress ?? 0
@@ -60,14 +62,15 @@ export function Sidebar({ board, active, scope, hubMode, spaces, onNavigate, onS
 
   const badgeFor = (id: string): number | undefined => {
     if (id === 'tasks') return inProgress + inReview
-    if (id === 'notify') return inReview
+    // 通知中心 badge = 当前空间真实未读数（audit 白名单 + 本地已读游标派生；0 不显示）
+    if (id === 'notify') return notifyUnread > 0 ? notifyUnread : undefined
     if (id === 'agents') return board?.soldiers.length
     return undefined
   }
 
   const clickModule = (mod: ModuleDef): void => {
-    // 面板化模块：home/agents/skills 既有 + chat/files/browser/calendar（S2/S5/S6/S7 多中心）
-    if (mod.id === 'home' || mod.id === 'agents' || mod.id === 'skills' || mod.id === 'chat' || mod.id === 'files' || mod.id === 'browser' || mod.id === 'calendar') {
+    // 面板化模块：home/agents/skills 既有 + chat/files/browser/calendar/notify 多中心（S2/S5/S6/S7）
+    if (mod.id === 'home' || mod.id === 'agents' || mod.id === 'skills' || mod.id === 'chat' || mod.id === 'files' || mod.id === 'browser' || mod.id === 'calendar' || mod.id === 'notify') {
       onNavigate(mod.id)
       return
     }
@@ -75,8 +78,8 @@ export function Sidebar({ board, active, scope, hubMode, spaces, onNavigate, onS
       openKanban()
       return
     }
-    // notify：占位（G-6/TC-S8-03：给提示、非静默无响应；通知中心由 S7 接入）
-    toast('info', `「${mod.name}」为占位模块（P1 后续阶段接入；当前已接入：三中心 + 日程日历）`)
+    // 兜底：尚未接入面板的模块给提示（G-6/TC-S8-03：给提示、非静默无响应）
+    toast('info', `「${mod.name}」为占位模块（尚未接入面板）`)
   }
 
   return (

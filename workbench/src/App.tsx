@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   apiBase,
+  countNotifyUnread,
   fetchActivity,
   fetchBoard,
   fetchConfig,
   fetchExec,
   fetchGoal,
+  fetchHubActivity,
   fetchHubMissions,
   fetchHubScopes,
   fetchMissions,
@@ -32,6 +34,7 @@ import { ChatView } from './components/ChatView'
 import { FilesView } from './components/FilesView'
 import { BrowserView } from './components/BrowserView'
 import { CalendarView } from './components/CalendarView'
+import { NotifyView } from './components/NotifyView'
 import { NewSpaceModal } from './components/NewSpaceModal'
 import { SpaceSettingsModal } from './components/SpaceSettingsModal'
 import { ToastHost, toast } from './components/Toast'
@@ -59,6 +62,8 @@ export default function App(): React.JSX.Element {
   const [error, setError] = useState('')
   const [active, setActive] = useState('home')
   const [refreshing, setRefreshing] = useState(false)
+  /** 通知未读徽标（S7 ← R-B2）：通知面板打开时由 NotifyView 实时上报，否则本组件低频刷新。 */
+  const [notifyUnread, setNotifyUnread] = useState(0)
   const labelsRef = useRef<Record<string, string>>({})
   const seenEvents = useRef<Set<string>>(new Set())
 
@@ -209,6 +214,32 @@ export default function App(): React.JSX.Element {
     }
   }, [hubMode, scope])
 
+  // 通知未读徽标（S7 ← R-B2 / TC-S7-01/07）：有具体空间即拉 hub audit 列表按白名单 + 本地已读游标计数
+  // （与 NotifyView 面板共用 countNotifyUnread 口径，数据源同为 GET /api/activity，无第三数据源）；
+  // 通知面板打开时由 NotifyView 实时上报未读数，本 effect 暂停自身刷新避免重复拉取
+  useEffect(() => {
+    if (!hubMode || !scope) {
+      setNotifyUnread(0)
+      return
+    }
+    if (active === 'notify') return
+    let cancelled = false
+    const refresh = (): void => {
+      fetchHubActivity({ scope, limit: 200 })
+        .then(rows => {
+          if (!cancelled) setNotifyUnread(countNotifyUnread(rows, scope))
+        })
+        .catch(() => undefined)
+    }
+    refresh()
+    const timer = window.setInterval(refresh, 20000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hubMode, scope, active])
+
   const handleToggleExec = useCallback((enabled: boolean): void => {
     if (!hubMode || !scope) return
     void setExec(scope, enabled)
@@ -345,6 +376,7 @@ export default function App(): React.JSX.Element {
           execEnabled={hubMode && scope ? execEnabled : false}
           execDaemonOnline={false}
           onToggleExec={handleToggleExec}
+          notifyUnread={notifyUnread}
         />
         {board ? (
           active === 'skills' ? (
@@ -357,6 +389,13 @@ export default function App(): React.JSX.Element {
             <BrowserView />
           ) : active === 'calendar' ? (
             <CalendarView scope={scope} hubMode={hubMode} />
+          ) : active === 'notify' ? (
+            <NotifyView
+              scope={scope}
+              hubMode={hubMode}
+              onUnreadChange={setNotifyUnread}
+              onGoHome={() => setActive('home')}
+            />
           ) : (
             <CenterPanel board={board} labels={labels} active={active} rosterAgents={hubMode ? roster : null} scope={scope} spaces={hubSpaces} goalInfo={hubMode ? goalInfo : null} hubActive={hubMode} />
           )

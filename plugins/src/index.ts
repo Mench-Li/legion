@@ -1805,7 +1805,11 @@ exit 0
         const res = useHub
           ? await hubPost('/api/release-stale', { by: config.role, scope, olderThan: config.staleMinutes }) as { released?: string[] }
           : await runTaskctl(config.scrumDir, ['release-stale', '--older-than', String(config.staleMinutes), '--by', config.role, '--scope', scope]) as { released?: string[] }
-        for (const id of res.released ?? []) activity('released', id, `距最近进展超过 ${config.staleMinutes} 分钟或过 TTL，自动释放回 todo`)
+        for (const id of res.released ?? []) {
+          activity('released', id, `距最近进展超过 ${config.staleMinutes} 分钟或过 TTL，自动释放回 todo`)
+          const t = byId.get(id)
+          if (t) { t.status = 'todo'; t.soldier = null; t.claimedAt = null }
+        }
       } catch (e) {
         log(`release-stale 失败：${String(e)}`)
       }
@@ -1829,6 +1833,10 @@ exit 0
             for (const id of res.released ?? []) {
               activity('released', id, '守护重启：孤儿 in_progress 释放回 todo，自动重新认领续做')
               log(`${id} 守护重启孤儿回收 → todo（下轮重新认领续做）`)
+              // 同步更新本轮快照：若不同步，step 3 仍按旧快照把该任务当 in_progress + 有 abort 评论 →
+              // abortDriven 重派会派「无主 worker」（workReturned 不 claim），占满 inflight 且任务仍是 todo。
+              const t = byId.get(id)
+              if (t) { t.status = 'todo'; t.soldier = null; t.claimedAt = null }
             }
           } catch (e) {
             log(`守护重启孤儿回收失败：${String(e)}`)

@@ -81,6 +81,10 @@ export interface Config {
   perGoalSliceCap: number
   /** 单个切片的修复回炉预算（fix 任务轮数上限，超限升级将军）。 */
   maxFixPerSlice: number
+  /** 实例模式：worker=派工流水线 + 本空间调解；mediator=纯公共调解（跨所有空间，不派工）。 */
+  mode: 'worker' | 'mediator'
+  /** worker 模式是否内嵌本空间合入调解（公共 mediator 部署时置 false，避免双调解）。 */
+  mediateMergeFails: boolean
 }
 
 export const Config = z.object({
@@ -107,6 +111,8 @@ export const Config = z.object({
   sliceTesterSlots: z.number().min(0).max(8).default(2),
   perGoalSliceCap: z.number().min(0).max(16).default(4),
   maxFixPerSlice: z.number().min(0).max(5).default(2),
+  mode: z.union([z.const('worker'), z.const('mediator')]).default('worker'),
+  mediateMergeFails: z.boolean().default(true),
 })
 
 /** 任务记录（taskctl 输出的字段子集，按需扩展）。 */
@@ -418,9 +424,9 @@ export function apply(ctx: AppContext, config: Config): void {
     return data.task ?? data
   }
 
-  /** hub 读任务列表（按 scope 过滤）。 */
-  async function hubList(): Promise<Task[]> {
-    const res = await fetch(`${hubUrl}/api/board?scope=${encodeURIComponent(scope)}`)
+  /** hub 读任务列表（按 scope 过滤；公共调解员模式按传入 scope 跨空间拉取）。 */
+  async function hubList(scopeFor: string = scope): Promise<Task[]> {
+    const res = await fetch(`${hubUrl}/api/board?scope=${encodeURIComponent(scopeFor)}`)
     if (!res.ok) throw new Error(`hub board 失败（${res.status}）`)
     return res.json() as Promise<Task[]>
   }
@@ -440,10 +446,10 @@ export function apply(ctx: AppContext, config: Config): void {
     } catch { /* 技能拉取失败不影响派工 */ }
   }
 
-  const listTasks = (): Promise<Task[]> => useHub ? hubList() : (runTaskctl(config.scrumDir, ['list']) as Promise<Task[]>)
-  const getTask = async (id: string): Promise<Task> => {
+  const listTasks = (scopeFor: string = scope): Promise<Task[]> => useHub ? hubList(scopeFor) : (runTaskctl(config.scrumDir, ['list']) as Promise<Task[]>)
+  const getTask = async (id: string, scopeFor: string = scope): Promise<Task> => {
     if (useHub) {
-      const t = (await hubList()).find(x => x.id === id)
+      const t = (await hubList(scopeFor)).find(x => x.id === id)
       if (t === undefined) throw new Error(`未知任务 ${id}`)
       return t
     }
@@ -557,6 +563,51 @@ export function apply(ctx: AppContext, config: Config): void {
   /** 该 scope 实际使用的 worktree 目录根。 */
   function worktreeRootFor(): string { return config.worktreeRoot || join(repoRootFor(), '.legion-worktrees') }
 
+  // ── 公共调解员（mode:'mediator'）：跨空间合入调解 ─────────────────────────
+  // 不派工、不认领，只做一件事：扫所有空间的在办合入失败任务，逐个自动合入主分支并推进 done。
+  // 空间仓库按 /api/spaces 绑定解析（每轮刷新缓存），与 worker 实例的注入 repoRoot 解耦。
+  const spaceRepos = new Map<string, { localDir: string; repoRoot: string; worktreeRoot: string }>()
+
+  async function refreshSpaceRepos(): Promise<void> {
+    if (!useHub) return
+    try {
+      const res = await fetch(`${hubUrl}/api/spaces`)
+      if (!res.ok) return
+      const data = await res.json() as { spaces?: Array<{ id: string; localDir?: string }> }
+      const next = new Map<string, { localDir: string; repoRoot: string; worktreeRoot: string }>()
+      for (const s of data.spaces ?? []) {
+        const localDir = typeof s.localDir === 'string' ? s.localDir.trim() : ''
+        if (localDir === '') continue
+        let repoRoot = localDir
+        try {
+          const r = await runGit(localDir, ['rev-parse', '--show-toplevel'])
+          if (r.code === 0 && r.out.trim().length > 0) repoRoot = r.out.trim()
+        } catch { /* 非仓库目录沿用所选目录 */ }
+        const wtRoot = config.worktreeRoot || join(repoRoot, '.legion-worktrees')
+        next.set(s.id, { localDir, repoRoot, worktreeRoot: wtRoot })
+      }
+      let changed = next.size !== spaceRepos.size
+      if (!changed) for (const [k, v] of next) {
+        const old = spaceRepos.get(k)
+        if (!old || old.repoRoot !== v.repoRoot || old.worktreeRoot !== v.worktreeRoot) { changed = true; break }
+      }
+      if (changed) {
+        for (const [k, v] of next) spaceRepos.set(k, v)
+        for (const k of [...spaceRepos.keys()]) if (!next.has(k)) spaceRepos.delete(k)
+        log(`公共调解员：空间仓库缓存刷新（${[...spaceRepos.entries()].map(([k, v]) => `${k}→${v.repoRoot}`).join('；') || '空'}）`)
+      }
+    } catch (e) {
+      log(`公共调解员：空间仓库缓存刷新失败：${String(e)}`)
+    }
+  }
+
+  /** 任务所属空间的可调解仓库上下文（无绑定返回 null，跳过该任务）。 */
+  function mediationCtxFor(taskScope: string): { root: string; wtRoot: string } | null {
+    if (config.mode !== 'mediator') return { root: repoRootFor(), wtRoot: worktreeRootFor() }
+    const hit = spaceRepos.get(taskScope)
+    return hit ? { root: hit.repoRoot, wtRoot: hit.worktreeRoot } : null
+  }
+
   // ── 全局暂停开关：serve.mjs 的 POST /api/pause 写 scrum/control.json {paused:true}。
   // 独立小文件而非 daemon.json 字段，避免守护每轮重写 daemon.json 与暂停写入互相覆盖。
   const controlFile = join(config.scrumDir, 'control.json')
@@ -570,12 +621,17 @@ export function apply(ctx: AppContext, config: Config): void {
   }
 
   // ── 守护能力自述：daemon.json 心跳（借鉴 agent-network 的宿主 daemon 能力上报）──
+  // worker 与公共调解员是同进程不同实例，各自写独立状态文件避免互相覆盖：
+  // worker → daemon.json；mediator → daemon-mediator.json（看板/健康页只认 daemon.json，调解员不冒充 worker）。
   const daemonStartedAt = Date.now()
-  const daemonStatusFile = join(config.scrumDir, 'daemon.json')
+  const daemonStatusFile = config.mode === 'mediator'
+    ? join(config.scrumDir, 'daemon-mediator.json')
+    : join(config.scrumDir, 'daemon.json')
   function writeDaemonStatus(inboxCount: number): void {
     try {
       const selection = ctx.agentDefaultModel.currentSelection()
       const status = {
+        mode: config.mode,
         role: config.role,
         provider: config.provider,
         maxWorkers: config.maxWorkers,
@@ -591,12 +647,14 @@ export function apply(ctx: AppContext, config: Config): void {
         lastSweepAt: new Date().toISOString(),
         uptimeMs: Date.now() - daemonStartedAt,
         model: { provider: selection.provider, model: selection.model },
-        repo: {
-          root: repoRootFor(),
-          binding: spaceBinding ? `space:${scope}` : 'default',
-          localDir: spaceBinding?.localDir ?? '',
-          remoteUrl: spaceBinding?.remoteUrl ?? '',
-        },
+        repo: config.mode === 'mediator'
+          ? { mode: 'mediator', spaces: [...spaceRepos.keys()].sort() }
+          : {
+            root: repoRootFor(),
+            binding: spaceBinding ? `space:${scope}` : 'default',
+            localDir: spaceBinding?.localDir ?? '',
+            remoteUrl: spaceBinding?.remoteUrl ?? '',
+          },
       }
       mkdirSync(dirname(daemonStatusFile), { recursive: true })
       writeFileSync(daemonStatusFile, `${JSON.stringify(status, null, 2)}\n`)
@@ -616,7 +674,7 @@ export function apply(ctx: AppContext, config: Config): void {
       try {
         const selection = ctx.agentDefaultModel.currentSelection()
         const handle = await ctx.agents.create({
-          sessionId: SessionId(`scrum-worker-foreman-${hashStr(cwd)}`),
+          sessionId: SessionId(`${config.mode === 'mediator' ? 'scrum-mediator' : 'scrum-worker'}-foreman-${hashStr(cwd)}`),
           meta: { cwd },
           agentOptions: { provider: selection.provider, model: selection.model },
           setup: async (agentCtx: Context) => void await ctx.agentPresets.mount(agentCtx, config.agentPreset),
@@ -639,32 +697,33 @@ export function apply(ctx: AppContext, config: Config): void {
    * 带乐观锁的状态迁移：先重读任务取最新 version。
    * by 默认取任务当前认领者（soldier）——流水线模式下认领者 = 阶段角色（如 devops），
    * in_review 提交校验要求 by === soldier，若硬编码 config.role 会在最终阶段被 taskctl 拒绝。
+   * scopeFor：跨空间操作（公共调解员）时传任务所属 scope；默认本实例 scope。
    */
-  async function transitionTo(id: string, to: string): Promise<void> {
-    const t = await getTask(id)
+  async function transitionTo(id: string, to: string, scopeFor: string = scope): Promise<void> {
+    const t = await getTask(id, scopeFor)
     const by = t.soldier ?? config.role
     if (useHub) {
-      await hubPost('/api/transition', { id, to, by, ifVersion: t.version, scope: scope })
+      await hubPost('/api/transition', { id, to, by, ifVersion: t.version, scope: scopeFor })
       return
     }
     await runTaskctl(config.scrumDir, ['transition', id, '--to', to, '--by', by, '--if-version', String(t.version)])
   }
 
   /** 流水线自动推进：in_progress/in_review → done（推进者=任务角色，将军已授权整条流水线）。 */
-  async function advanceTo(id: string, by: string): Promise<void> {
-    const t = await getTask(id)
+  async function advanceTo(id: string, by: string, scopeFor: string = scope): Promise<void> {
+    const t = await getTask(id, scopeFor)
     if (useHub) {
-      await hubPost('/api/advance', { id, by, ifVersion: t.version, scope: scope })
+      await hubPost('/api/advance', { id, by, ifVersion: t.version, scope: scopeFor })
       return
     }
     await runTaskctl(config.scrumDir, ['advance', id, '--by', by, '--if-version', String(t.version)])
   }
 
   /** 追加评论（失败不抛出，避免污染主流程）。 */
-  async function safeComment(id: string, text: string): Promise<void> {
+  async function safeComment(id: string, text: string, scopeFor: string = scope): Promise<void> {
     try {
       if (useHub) {
-        await hubPost('/api/comment', { id, by: config.role, text: text.slice(0, 800), scope: scope })
+        await hubPost('/api/comment', { id, by: config.role, text: text.slice(0, 800), scope: scopeFor })
       } else {
         await runTaskctl(config.scrumDir, ['comment', id, '--by', config.role, '--text', text.slice(0, 800)])
       }
@@ -1295,26 +1354,41 @@ exit 0
   // 背景：中间阶段任务自动合入主分支失败 → 停 in_review 等人工。将军已授权守护用「调解员」自动处理
   // 这一类机械性 + 半语义问题（脏工作区挡 merge / 内容冲突），仅在调解多次失败后才回到将军。
   // 判定：任务 in_review、评论含「自动合入主分支失败」标记、将军未 hold、切片/流水线角色。
-  const isMediatableMergeFail = (t: Task): boolean => {
+  // publicMode（mode:'mediator' 公共调解员）：不依赖本实例 roles.json，任何空间带标记的任务都可调；
+  // 人工介入 = 将军（by==='general'）在失败标记后的评论——其余都是自动化角色，不视为人。
+  const isMediatableMergeFail = (t: Task, publicMode: boolean = false): boolean => {
     if (t.status !== 'in_review' || t.hold) return false
-    if (t.role === null || !stageByRole.has(t.role)) return false
+    if (t.role === null) return false
+    if (!publicMode && !stageByRole.has(t.role)) return false
     const failIdx = t.comments.findIndex(c =>
       (c.text ?? '').includes('但自动合入主分支失败') || (c.text ?? '').includes('请人工合入并推进'))
     if (failIdx < 0) return false
-    // 已达放弃上限（守护自己发的 🛑）：重启后内存计数清空也不得再自动调解，避免无限重试
-    if (t.comments.some(c => c.by === config.role && (c.text ?? '').startsWith('🛑 调解已自动重试'))) return false
-    // 将军（或其他非守护评论者）在失败标记后已介入 → 不抢，留人工
-    const laterHuman = t.comments.slice(failIdx + 1).some(c => c.by !== config.role && !c.text.startsWith('🛠 守护调解员'))
+    // 已达放弃上限（守护/调解员自己发的 🛑，不限评论者——worker 与公共调解员可能角色不同）：
+    // 重启后内存计数清空也不得再自动调解，避免无限重试
+    if (t.comments.some(c => (c.text ?? '').startsWith('🛑 调解已自动重试'))) return false
+    // 将军（或 worker 模式下其他非守护评论者）在失败标记后已介入 → 不抢，留人工
+    const laterHuman = publicMode
+      ? t.comments.slice(failIdx + 1).some(c => c.by === 'general')
+      : t.comments.slice(failIdx + 1).some(c => c.by !== config.role && !c.text.startsWith('🛠 守护调解员'))
     return !laterHuman
   }
 
-  /** 调解员主流程：把 in_review merge-fail 任务合入主分支并推进到 done（复用 autoPromote 的 git 原语）。 */
-  async function mediateReview(t: Task): Promise<void> {
+  /** 调解员主流程：把 in_review merge-fail 任务合入其所属空间的主分支并推进到 done（复用 autoPromote 的 git 原语）。
+   *  worker 模式：taskScope 默认本实例 scope（仓库 ctx=repoRootFor）；
+   *  mediator 模式：taskScope=任务所属空间，仓库 ctx 从 spaceRepos 解析（无绑定则跳过）。
+   */
+  async function mediateReview(t: Task, taskScope: string = scope): Promise<void> {
     const id = t.id
+    const ctxRepo = mediationCtxFor(taskScope)
+    if (ctxRepo === null) {
+      log(`调解跳过：任务 ${id} 所属空间 ${taskScope} 未绑定本地仓库（公共调解员只处理已绑定仓库的空间）`)
+      return
+    }
+    const root = ctxRepo.root
+    const wtRoot = ctxRepo.wtRoot
     try {
-      await safeComment(id, '🛠 守护调解员接管：正在自动合入主分支（解决冲突后推进），将军无需操作')
-      const root = repoRootFor()
-      const dir = join(worktreeRootFor(), id)
+      await safeComment(id, '🛠 守护调解员接管：正在自动合入主分支（解决冲突后推进），将军无需操作', taskScope)
+      const dir = join(wtRoot, id)
       // 0. 防御：清上次遗留冲突态
       await runGit(root, ['merge', '--abort'])
       // 1. 若 worktree 仍绑定分支，先解除（防止 merge 冲突态被 worker 误操作）
@@ -1341,8 +1415,8 @@ exit 0
         await runGit(root, ['worktree', 'remove', '--force', dir])
         await runGit(root, ['branch', '-D', `w/${id}`])
         if (stashDone.length > 0) await runGit(root, ['stash', 'pop'])
-        await advanceTo(id, t.role ?? config.role)
-        await safeComment(id, '✅ 调解完成：无冲突干净合入主分支，任务已推进 done')
+        await advanceTo(id, t.role ?? config.role, taskScope)
+        await safeComment(id, '✅ 调解完成：无冲突干净合入主分支，任务已推进 done', taskScope)
         activity('done', id, '调解合入成功，已推进 done')
         log(`${id} → done（调解员自动合入）`)
         return
@@ -1353,16 +1427,16 @@ exit 0
         // 非内容冲突（如分支被删/不存在）→ 放弃自动处理，回退将军
         await runGit(root, ['merge', '--abort'])
         if (stashDone.length > 0) await runGit(root, ['stash', 'pop'])
-        await safeComment(id, `⚠ 调解失败：合入遇到非内容冲突（${(merge.err || merge.out).trim().slice(0, 200)}），请将军人工处理`)
+        await safeComment(id, `⚠ 调解失败：合入遇到非内容冲突（${(merge.err || merge.out).trim().slice(0, 200)}），请将军人工处理`, taskScope)
         activity('blocked', id, '调解失败：非内容冲突')
         return
       }
       // 3c. 真内容冲突 → 派调解员 subagent 解决冲突文件
-      const resolve = await dispatchMediator(id, conflictFiles)
+      const resolve = await dispatchMediator(id, conflictFiles, taskScope)
       if (!resolve) {
         await runGit(root, ['merge', '--abort'])
         if (stashDone.length > 0) await runGit(root, ['stash', 'pop'])
-        await safeComment(id, '⚠ 调解失败：冲突文件未能自动解决，已回退合并态，请将军人工处理（或稍后重试）')
+        await safeComment(id, '⚠ 调解失败：冲突文件未能自动解决，已回退合并态，请将军人工处理（或稍后重试）', taskScope)
         activity('blocked', id, '调解失败：冲突未能自动解决')
         return
       }
@@ -1371,7 +1445,7 @@ exit 0
       if (markers.length > 0) {
         await runGit(root, ['merge', '--abort'])
         if (stashDone.length > 0) await runGit(root, ['stash', 'pop'])
-        await safeComment(id, `⚠ 调解失败：仍有冲突标记未清除（${markers}），已回退，请将军人工处理`)
+        await safeComment(id, `⚠ 调解失败：仍有冲突标记未清除（${markers}），已回退，请将军人工处理`, taskScope)
         activity('blocked', id, '调解失败：冲突标记残留')
         return
       }
@@ -1380,28 +1454,33 @@ exit 0
       if (commit.code !== 0) {
         await runGit(root, ['merge', '--abort'])
         if (stashDone.length > 0) await runGit(root, ['stash', 'pop'])
-        await safeComment(id, `⚠ 调解失败：提交合入结果失败（${(commit.err || commit.out).trim().slice(0, 200)}），请将军人工处理`)
+        await safeComment(id, `⚠ 调解失败：提交合入结果失败（${(commit.err || commit.out).trim().slice(0, 200)}），请将军人工处理`, taskScope)
         activity('blocked', id, '调解失败：提交失败')
         return
       }
       await runGit(root, ['worktree', 'remove', '--force', dir])
       await runGit(root, ['branch', '-D', `w/${id}`])
       if (stashDone.length > 0) await runGit(root, ['stash', 'pop'])
-      await advanceTo(id, t.role ?? config.role)
-      await safeComment(id, `✅ 调解完成：冲突文件已由调解员解决并合入主分支，任务推进 done（解决：${conflictFiles.join(', ')}）`)
+      await advanceTo(id, t.role ?? config.role, taskScope)
+      await safeComment(id, `✅ 调解完成：冲突文件已由调解员解决并合入主分支，任务推进 done（解决：${conflictFiles.join(', ')}）`, taskScope)
       activity('done', id, '调解合入成功（冲突已解决），已推进 done')
       log(`${id} → done（调解员解决 ${conflictFiles.length} 个冲突文件后合入）`)
     } catch (e) {
       log(`${id} 调解异常：${String(e)}`)
-      await runGit(repoRootFor(), ['merge', '--abort']).catch(() => undefined)
-      await safeComment(id, `⚠ 调解异常（${String(e).slice(0, 150)}），已回退合并态，请将军人工处理`)
+      await runGit(root, ['merge', '--abort']).catch(() => undefined)
+      await safeComment(id, `⚠ 调解异常（${String(e).slice(0, 150)}），已回退合并态，请将军人工处理`, taskScope)
     }
   }
 
   /** 派调解 subagent：读取冲突文件两侧，产出正确合并（不运行 git，只改文件内容）。 */
-  async function dispatchMediator(taskId: string, conflictFiles: string[]): Promise<boolean> {
-    const t = await getTask(taskId)
-    const root = repoRootFor()
+  async function dispatchMediator(taskId: string, conflictFiles: string[], taskScope: string = scope): Promise<boolean> {
+    const t = await getTask(taskId, taskScope)
+    const ctxRepo = mediationCtxFor(taskScope)
+    if (ctxRepo === null) {
+      log(`调解跳过：任务 ${taskId} 所属空间 ${taskScope} 未绑定本地仓库`)
+      return false
+    }
+    const root = ctxRepo.root
     const prompt = [
       `你是「合入调解员」。仓库里有任务 ${taskId} 的合入冲突待解决（git merge 已停在冲突态，冲突标记在以下文件中）。`,
       `任务：${t.title}`,
@@ -1727,6 +1806,66 @@ exit 0
     }
   }
 
+  /**
+   * 公共调解员扫单（mode:'mediator'）：不派工/不认领/不编排，只做跨空间合入调解。
+   * 每轮刷新空间仓库绑定缓存 → 汇总所有已绑定空间的可调解任务 → 单飞调解一个（同一时刻只跑一次 git 合并）。
+   * 与 worker 实例解耦：worker 行通过 mediateMergeFails:false 关闭内嵌调解，避免同一任务被双调解。
+   */
+  async function sweepMediation(): Promise<void> {
+    if (config.mode !== 'mediator' || !useHub) return
+    await refreshSpaceRepos()
+    if (spaceRepos.size === 0) return // 无任何已绑定仓库的空间 → 无调解目标
+    // 汇总所有已绑定空间的可调解任务（公共判定：带 merge-fail 标记的 in_review，不依赖本实例 roles.json；
+    // 人工介入 = 将军 by==='general' 评论；空间无仓库绑定的任务天然被过滤——那些空间合入失败需将军人工处理）
+    const mediable: Task[] = []
+    for (const spaceId of spaceRepos.keys()) {
+      let spaceTasks: Task[]
+      try {
+        spaceTasks = await listTasks(spaceId)
+      } catch (e) {
+        log(`公共调解员：拉取空间 ${spaceId} 任务失败：${String(e)}`)
+        continue
+      }
+      for (const t of spaceTasks) {
+        if (t.scope == null) t.scope = spaceId
+        if (!isMediatableMergeFail(t, true) || mediating.has(t.id)) continue
+        mediable.push(t)
+      }
+    }
+    if (mediable.length === 0) return
+    mediable.sort((a, b) => a.id.localeCompare(b.id))
+    for (const t of mediable) {
+      const id = t.id
+      const attempts = mediateAttempts.get(id) ?? 0
+      if (attempts >= maxMediateAttempts) {
+        // give-up：任务留给将军人工处理；24h 哨兵只提示一次（重启后内存清空也不得再自动调解——🛑 标记已在判定里排除）
+        if ((mediateRetryAt.get(id) ?? 0) < Date.now() - 24 * 60 * 60 * 1000) {
+          mediateRetryAt.set(id, Date.now() + 24 * 60 * 60 * 1000)
+          void safeComment(id, '🛑 调解已自动重试 2 次仍未成功，任务留在 in_review 请将军人工处理', t.scope ?? scope)
+        }
+        continue
+      }
+      if (Date.now() - (mediateRetryAt.get(id) ?? 0) < config.intervalMs * 6) continue // 失败退避期内
+      mediating.add(id)
+      void (async () => {
+        try {
+          await mediateReview(t, t.scope ?? scope)
+          const after = await getTask(id, t.scope ?? scope).catch(() => undefined)
+          if (!after || after.status !== 'done') {
+            mediateAttempts.set(id, attempts + 1)
+            mediateRetryAt.set(id, Date.now())
+          } else {
+            mediateAttempts.delete(id)
+            mediateRetryAt.delete(id)
+          }
+        } finally {
+          mediating.delete(id)
+        }
+      })()
+      break // 每轮只调解一个（全局串行化 git 合并，跨空间同理）
+    }
+  }
+
   /** 一轮扫单：todo 认领派工；本角色的退回任务纠错；依赖解除的 blocked 续做。 */
   async function sweep(): Promise<void> {
     if (sweeping) return
@@ -1738,6 +1877,12 @@ exit 0
           lastPausedNotice = Date.now()
           log('⏸ 全局暂停：control.json paused=true，本轮跳过扫单（serve.mjs POST /api/resume 解除）')
         }
+        writeDaemonStatus(0)
+        return
+      }
+      // 公共调解员模式：只做跨空间合入调解，不派工。
+      if (config.mode === 'mediator') {
+        await sweepMediation()
         writeDaemonStatus(0)
         return
       }
@@ -1900,7 +2045,8 @@ exit 0
       // 4.5 合入调解（将军已授权自动处理类）：发现 in_review 且评论带「自动合入失败」标记的任务 →
       //     派调解员合入主分支并推进 done（同一时刻只调解一个，防主仓库 git 合并态互相踩踏；
       //     失败带退避重试，超过上限留将军人工；give-up 任务跳过，不挡后续任务调解）。
-      if (isPipeline && useHub) {
+      //     mediateMergeFails=false（部署公共调解员时）→ worker 不再内嵌调解，交给公共 mediator 实例跨空间处理。
+      if (isPipeline && useHub && config.mediateMergeFails) {
         const mediable = tasks
           .filter(t => isMediatableMergeFail(t) && !mediating.has(t.id))
           .sort((a, b) => a.id.localeCompare(b.id))

@@ -1891,40 +1891,41 @@ exit 0
       }
       // 4.5 合入调解（将军已授权自动处理类）：发现 in_review 且评论带「自动合入失败」标记的任务 →
       //     派调解员合入主分支并推进 done（同一时刻只调解一个，防主仓库 git 合并态互相踩踏；
-      //     失败带退避重试，超过上限留将军人工）。
+      //     失败带退避重试，超过上限留将军人工；give-up 任务跳过，不挡后续任务调解）。
       if (isPipeline && useHub) {
-        const mediable = tasks.filter(t => isMediatableMergeFail(t) && !mediating.has(t.id))
-        if (mediable.length > 0) {
-          const t = mediable.sort((a, b) => a.id.localeCompare(b.id))[0] as Task
+        const mediable = tasks
+          .filter(t => isMediatableMergeFail(t) && !mediating.has(t.id))
+          .sort((a, b) => a.id.localeCompare(b.id))
+        const giveUpComment = (id: string) => {
+          // far-future 哨兵保证「已放弃」只提示一次，不再每轮刷评论
+          if ((mediateRetryAt.get(id) ?? 0) < Date.now() - 24 * 60 * 60 * 1000) {
+            mediateRetryAt.set(id, Date.now() + 24 * 60 * 60 * 1000)
+            void safeComment(id, '🛑 调解已自动重试 2 次仍未成功，任务留在 in_review 请将军人工处理')
+          }
+        }
+        for (const t of mediable) {
           const attempts = mediateAttempts.get(t.id) ?? 0
           const lastFail = mediateRetryAt.get(t.id) ?? 0
-          if (attempts >= maxMediateAttempts) {
-            // 已达上限：留给将军。far-future 哨兵保证「已放弃」只提示一次，不再每轮刷评论。
-            if (lastFail < Date.now() - 24 * 60 * 60 * 1000) {
-              mediateRetryAt.set(t.id, Date.now() + 24 * 60 * 60 * 1000)
-              await safeComment(t.id, '🛑 调解已自动重试 2 次仍未成功，任务留在 in_review 请将军人工处理')
-            }
-          } else if (Date.now() - lastFail < config.intervalMs * 6) {
-            // 失败退避期内：跳过
-          } else {
-            inflight.add(t.id)
-            mediating.add(t.id)
-            runDetached(t.id, (async () => {
-              try {
-                await mediateReview(t)
-                const after = await getTask(t.id).catch(() => undefined)
-                if (!after || after.status !== 'done') {
-                  mediateAttempts.set(t.id, attempts + 1)
-                  mediateRetryAt.set(t.id, Date.now())
-                } else {
-                  mediateAttempts.delete(t.id)
-                  mediateRetryAt.delete(t.id)
-                }
-              } finally {
-                mediating.delete(t.id)
+          if (attempts >= maxMediateAttempts) { giveUpComment(t.id); continue }
+          if (Date.now() - lastFail < config.intervalMs * 6) continue // 失败退避期内
+          inflight.add(t.id)
+          mediating.add(t.id)
+          runDetached(t.id, (async () => {
+            try {
+              await mediateReview(t)
+              const after = await getTask(t.id).catch(() => undefined)
+              if (!after || after.status !== 'done') {
+                mediateAttempts.set(t.id, attempts + 1)
+                mediateRetryAt.set(t.id, Date.now())
+              } else {
+                mediateAttempts.delete(t.id)
+                mediateRetryAt.delete(t.id)
               }
-            })())
-          }
+            } finally {
+              mediating.delete(t.id)
+            }
+          })())
+          break // 每轮只调解一个（串行化主仓库 git 合并）
         }
       }
       // 5. 切片流水线编排（仅 hub 模式）：readyToExpand 注册切片束 / fix 合入后重开 tester 重测

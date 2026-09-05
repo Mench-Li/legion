@@ -290,7 +290,11 @@ function now() {
   return new Date().toISOString()
 }
 
+/** 解析 JSON 列：兼容「原始字符串」与「已被 rowToTask 解析过的数组/对象」两种输入。
+ *  历史上 commentTask 等对 getTask 返回（已解析的数组）再次 parseJson 会抛错回退空数组，
+ *  导致评论每次写入都整体替换（任务永远只剩最后一条评论）。幂等化后追加语义恢复。 */
 function parseJson(text, fallback) {
+  if (Array.isArray(text) || (text !== null && typeof text === 'object')) return text
   try {
     return JSON.parse(text)
   } catch {

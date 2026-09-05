@@ -1301,6 +1301,8 @@ exit 0
     const failIdx = t.comments.findIndex(c =>
       (c.text ?? '').includes('但自动合入主分支失败') || (c.text ?? '').includes('请人工合入并推进'))
     if (failIdx < 0) return false
+    // 已达放弃上限（守护自己发的 🛑）：重启后内存计数清空也不得再自动调解，避免无限重试
+    if (t.comments.some(c => c.by === config.role && (c.text ?? '').startsWith('🛑 调解已自动重试'))) return false
     // 将军（或其他非守护评论者）在失败标记后已介入 → 不抢，留人工
     const laterHuman = t.comments.slice(failIdx + 1).some(c => c.by !== config.role && !c.text.startsWith('🛠 守护调解员'))
     return !laterHuman
@@ -1322,9 +1324,10 @@ exit 0
         await runGit(root, ['worktree', 'remove', '--force', dir])
         log(`${id} 调解：已解除残留 worktree 绑定`)
       }
-      // 2. 脏工作区保护：若有未提交改动挡住 merge（git 会拒绝），先定向 stash → merge → pop
-      const dirty = (await runGit(root, ['status', '--porcelain'])).out.trim()
-      const dirtyPaths = dirty.split('\n').map(l => l.slice(3).trim()).filter(p => p.length > 0 && !p.startsWith('"'))
+      // 2. 脏工作区保护：若有已跟踪改动挡住 merge（git 会拒绝），先定向 stash → merge → pop。
+      //    只取已跟踪文件的改动（git diff HEAD），未跟踪文件不参与 merge 且会让 stash pathspec 失败。
+      const dirtyPaths = (await runGit(root, ['diff', '--name-only', 'HEAD'])).out.trim()
+        .split('\n').map(l => l.trim()).filter(p => p.length > 0 && !p.startsWith('"'))
       const stashDone: string[] = []
       if (dirtyPaths.length > 0) {
         const stash = await runGit(root, ['stash', 'push', '-m', `mediator-${id}`, '--', ...dirtyPaths])

@@ -1,7 +1,7 @@
 # T-091 切片 S8 测试报告 —— 三中心集成回归锚定（R-A7 / R-B3 仓库内可跑部分）
 
-> 角色：编码实现（coder）｜任务：T-091｜分支：w/T-091（独立 worktree；HEAD=ceb4656 "promote T-091"，工作树干净，除本报告外零改动）
-> 日期：2026-09-05（本报告为**第 2 轮复验修订**：首轮完成后任务回退重派，本轮在合并 T-094（web.test 21→24 例）后的当前 HEAD 上逐项重跑核实，见 §1.1）｜运行时：node v24.19.0、pnpm 11.7.0
+> 角色：编码实现（coder）｜任务：T-091｜分支：w/T-091（独立 worktree；HEAD=5813ae5 "promote T-091"，工作树除本报告外零改动）
+> 日期：2026-09-05（本报告为**第 3 轮复验修订**：前两轮完成后任务回退重派；本轮在**主侧已合入 T-085/T-086（日程日历后端+测试+前端 CalendarView/NotifyView 接入）与 T-087/T-089** 的合并 HEAD=5813ae5 上对全部验收项**重新实测**，并修正第 2 轮因分支基线早于日历合入而产生的两条漂移结论（calendar.test.mjs「不存在」、server.mjs SSE 行号），见 §1.1/§2.6/§4.1）｜运行时：node v24.19.0、pnpm 11.7.0
 > 取代声明：本报告取代 docs/TEST_REPORT.md 上版（T-062 S4 报告；git 历史可回溯）。
 > 文件域遵守：仅改 docs/TEST_REPORT.md 一个文件（git status 全程核实）；无 push（w/* 已被守卫拦截）。
 
@@ -11,7 +11,7 @@
 
 | 验收条目 | 判定 | 要点 |
 | --- | --- | --- |
-| ① 逐套件运行全绿（files-api / web / chat / skills / contracts / whiteboard，失败=0，记录用例数） | ✅ 全绿（含 1 项「用例文件不存在」如实说明 + 1 项沙箱命令形态受限按 R-18 记录） | files-api 40/40（suites 16）、**web 24/24（suites 13，当前 HEAD 含 T-094 新增 2 回归用例，见 §2.3）**、chat 13/13（5）、skills 12/12（5）、contracts 56/56（8）；whiteboard 67 项 0 失败（shared+server 61 + e2e 6，e2e 以 stdio-ignore 等价形态直跑，见 §2.7）；`team-hub/calendar.test.mjs` 在仓库中不存在（日程日历为占位模块，R-B1 未纳入）见 §2.6 |
+| ① 逐套件运行全绿（files-api / web / chat / skills / **calendar** / contracts / whiteboard，失败=0，记录用例数） | ✅ 全绿（7 套件全部真实运行；沙箱命令形态受限按 R-18 记录等价直跑，见 §1） | files-api **40/40**（suites 16）、web **24/24**（suites 13，含 T-094 回归用例）、chat **13/13**（5）、skills **12/12**（5）、**calendar 13/13（suites 10，T-085 合入后已存在并全绿，见 §2.6）**、contracts **56/56**（8）；whiteboard **67 项 0 失败**（shared+server 6 文件 61 + e2e 6，e2e 以 stdio-ignore 等价形态直跑，见 §2.7） |
 | ② pnpm build（workbench） | ⚠️ 受限如实记录（R-18） | `tsc --noEmit` 0 诊断 exit 0；vite 段 esbuild spawn EPERM 复现（与 T-047/T-083 同因），见 §3 |
 | ③ 三中心主路径清单走通并写入本报告 | ✅（数据面/契约 L0+L1 全部实测；GUI 渲染项静态+契约锚定，逐项标注） | 对话 ≤15s 实时（数据面 ≤5s 双订阅）、断线自动重连、纯文本渲染；文件 7 操作 + 未绑定引导 + 越界/.git 403 + overwrite/confirm；浏览器 SSRF 文案 + 5 类错误可区分 + 文本渲染不插 HTML，见 §4 |
 | ④ board-plugin 按 README 验证 | ⚠️ typecheck/build ✅ 全绿；宿主注入冒烟＝宿主不可达，记录「环境受限 + 复现步骤」（R-B3/R-6/R-18） | typecheck 0 诊断；服务端编译 → lib/；客户端 tsdown → lib/client.js（`__ModuleLoader__.load` 注入形态正确）；见 §5 |
@@ -27,15 +27,18 @@
   2. `pnpm build`（vite→esbuild 原生服务 spawn EPERM）、e2e 起服务子进程（pipe stdio EPERM）、plugins 测试（spawnSync git EPERM）、bash（WSL E_ACCESSDENIED）同属该边界，按 R-18 记录「环境受限 + 复现步骤」，不冒充通过。
 - 三中心/存量模块数据面验证依赖的 serve.mjs、team-hub server.mjs 等子进程起服脚本均以 `stdio:'ignore'` 形态执行 → 沙箱允许，结果为**真实进程级**（L1）。
 
-### 1.1 第 2 轮复验运行记录（当前 HEAD=ceb4656，含 T-094）
+### 1.1 第 3 轮复验运行记录（当前 HEAD=5813ae5 = 合并 HEAD）
 
-- 本轮在首轮完成后任务回退重派时，对**当前 HEAD 全部验收项重新实测**（非仅核对报告）。关键命令与输出：
+- 本轮在任务回退重派后，对**合并 HEAD=5813ae5（主侧已合入 T-085/T-086 日程日历、T-087/T-089 等）上全部验收项重新实测**（非仅核对报告）。关键命令与输出：
   - `node --test tests/contract/contracts.test.mjs` → `Error: spawn EPERM` exit 1（复现 §2.1 边界，R-18 属实）；
-  - 六个 L0 套件均以 `node <file>` 直跑（仓库既定等价形态）：files-api **40/40**、web **24/24**（suites 13）、chat **13/13**、skills **12/12**、contracts **56/56**、whiteboard shared+server 6 文件 **61/61**（另 `node --test --test-isolation=none` 同进程 61 pass 复现），e2e 等价副本 **6/6**（%TEMP% 下新建 `wb-e2e-sandbox-copy-T091.test.mjs`，stdio 改全 ignore + import 绝对 file URL，断言零改动）；
-  - `pnpm exec tsc --noEmit`（workbench，node_modules junction 重建后）exit 0 零诊断；`pnpm build` → vite 段 esbuild `spawn EPERM` exit 1（§3 复现）；
-  - L1 冒烟：chat-s2 **8/9**（S2-A 依赖 dist 缺 → 见 §7-②）、files-s5 **32/32**、whiteboard 真进程 `/healthz` {"ok":true} + `GET /` 200 + `/js/main.mjs` 200；
-  - board-plugin：typecheck 0 诊断、服务端编译 → lib/、tsdown → `lib/client.js` 3.74 kB（`window.__ModuleLoader__.load` 注入形态），plugins 同口径 typecheck/编译 exit 0（依赖按 build.sh link 清单自 DSH checkout junction，沙箱内等价步骤）。
-- 修正项（相对首轮报告，均为 HEAD 演进或行号漂移，非回归）：web 21/21 → **24/24**（T-094 +3 例/+1 suite，见 §2.3）；team-hub server.mjs SSE 行号 1808/1809 → **1823-1831**（§4.1）；workbench/board-plugin/plugins 的 node_modules junction 本轮重建（worktree 重建后缺失，均指向既有共享源，git 忽略）。
+  - **七个** L0 套件均以 `node <file>` 直跑（仓库既定等价形态）：files-api **40/40**、web **24/24**（suites 13）、chat **13/13**、skills **12/12**、**calendar 13/13（suites 10）**、contracts **56/56**、whiteboard shared+server 6 文件 **61/61**；e2e 等价副本 **6/6**（%TEMP% 下重建 `wb-e2e-sandbox-copy-T091.test.mjs`，stdio 改全 ignore + import/服务路径改绝对 file URL，断言零改动）；
+  - `pnpm exec tsc --noEmit`（workbench，node_modules junction 重建后）exit 0 零诊断；`pnpm build` → tsc 段过后 vite 段 esbuild `spawn EPERM` exit 1（§3 复现）；
+  - L1 冒烟：chat-l1 **22/22**（TC-S1-14 真进程 SSE ≤5s 收 live 帧、TC-S1-15 断开不崩）、chat-s2 **8/9**（S2-A 依赖 dist 缺 → 见 §7-②；S2-H 双订阅 ≤5s msg=61）、files-s5 **32/32**、whiteboard 真进程起服 `/healthz` 200 {"ok":true,"storage":"MemoryProvider"} + `GET /` 200 html（2000 B）+ `/js/main.mjs` 200（DB_PATH=:memory:）；
+  - board-plugin：typecheck 0 诊断 exit 0、服务端编译 → `lib/index.js` 24.7 kB + `lib/types/index.d.ts`、tsdown → `lib/client.js` 3.74 kB（`window.__ModuleLoader__.load` + apply + conversation.view/sidebar.footer.action 注入形态）；plugins 同口径 typecheck/编译 exit 0（plugins/src 已含主侧 T-087 演进，本轮一并复验）。
+- 修正项（相对第 2 轮报告，均为**合并基线演进**所致，非回归）：
+  1. **calendar.test.mjs「不存在」→ 已存在并 13/13 全绿**：第 2 轮分支基线（ceb4656）早于 T-085 合入；合并 HEAD 已含 team-hub/calendar.test.mjs 与日历后端（server.mjs +calendar_events/+api/calendar/events）、前端 CalendarView/NotifyView 面板。原 §2.6/§7-⑦「占位模块、R-B1 未纳入」结论作废，见 §2.6。
+  2. team-hub/server.mjs SSE 行号 1823-1831 → **1983-1992**（日历后端 +163 行推移；见 §4.1）。
+  3. web.test 用例数沿用 24/24（T-094 已含于合并 HEAD，复跑不变）。
 
 ---
 
@@ -55,7 +58,7 @@ exit code 1
 ### 2.2 `node workbench/scripts/files-api.test.mjs` —— ✅ 40/40（suites 16）exit 0
 
 ```
-ℹ tests 40  ℹ suites 16  ℹ pass 40  ℹ fail 0  ℹ duration_ms 2807
+ℹ tests 40  ℹ suites 16  ℹ pass 40  ℹ fail 0  ℹ duration_ms 1692
 ```
 输出要点（套件覆盖锚定）：
 - S3 只读面：list 形状/根语义/scope 未绑定 400 引导；read 文本预览/截断（MAX_READ）/二进制不可预览；download 字节一致 + 流式（P0-2 openDownloadStream 不整读内存）。
@@ -68,7 +71,7 @@ exit code 1
 > ⚠ 用例数相对首轮报告 21/21（suites 12）**+3 例/+1 suite**：当前 HEAD 已合入 T-094（`2bdfd0b`，修复 TC-S2-06 5xx body stall 误归类、TC-S2-10 参数级 invalid_url 不再落审计行并补回归用例）→ 实测 24/24（tests 24 / suites 13 / pass 24 / fail 0，exit 0）。
 
 ```
-ℹ tests 24  ℹ suites 13  ℹ pass 24  ℹ fail 0  ℹ duration_ms 8726
+ℹ tests 24  ℹ suites 13  ℹ pass 24  ℹ fail 0  ℹ duration_ms 8494
 ```
 输出要点：S6 抓取契约（正文抽取/中文解码/SPA 空壳 empty_content/协议白名单 file:&ftp: 拒/私网-回环-混淆 SSRF 矩阵全 ssrf_blocked/重定向逐跳+上限 too_many_redirects/共享 deadline 整链超时 timeout（P0-3））；限长 too_large / body stall 归类 timeout（R-A4）/ 非文本 unsupported（pdf 不读体）/ 上游 4xx-5xx → http_404/http_500；S2-R-A3 审计留痕（真实 HTTP 集成：成功/失败/拦截均一行 JSONL，含 `ssrf_blocked` 行）；A3b 默认位置（dist 之外）+ 容量轮转；G-11 WEB_ERR 枚举表（timeout/ssrf_blocked/too_large…）。
 
@@ -82,15 +85,23 @@ skills：ℹ tests 12  ℹ pass 12  ℹ fail 0（schema/校验/发布与授权�
 ### 2.5 `node tests/contract/contracts.test.mjs` —— ✅ 56/56（suites 8）exit 0
 
 ```
-ℹ tests 56  ℹ suites 8  ℹ pass 56  ℹ fail 0  ℹ duration_ms 66
+ℹ tests 56  ℹ suites 8  ℹ pass 56  ℹ fail 0  ℹ duration_ms 39
 ```
 输出要点：既有契约基线（56 用例，T-076 基线一致），本轮回归无破坏。
 
-### 2.6 `node team-hub/calendar.test.mjs` —— ⚠️ 用例文件不存在（如实说明，不冒充）
+### 2.6 `node team-hub/calendar.test.mjs` —— ✅ 13/13（suites 10）exit 0（第 3 轮复验，修正第 2 轮「不存在」结论）
 
-- 全仓库 glob `**/calendar*` + team-hub 递归扫描：**无任何 calendar 测试/实现文件**。
-- 现状核实：日程日历为**占位模块**——`workbench/src/components/Sidebar.tsx:21` 菜单项 + `:78` 注释「calendar/notify：占位（G-6/TC-S8-03：给提示、非静默无响应）」；`CommandBar.tsx:120` 点击 toast「日程/会议不在 legion 引擎内，随第 2 步接入 team-hub 日程表」。对应需求 R-B1「日程日历模块（当前占位）・⚠️ 待将军确认是否纳入」未实现/无数据层。
-- 结论：该验收子项指向的文件不存在；在既有仓库域内无可跑套件。归属：R-B1（未纳入，占位语义 TC-S8-03 已由 Sidebar/CommandBar 实现）。不视为本切片锚定模块的失败项，也不伪造“通过”。
+```
+ℹ tests 13  ℹ suites 10  ℹ pass 13  ℹ fail 0  ℹ duration_ms 847
+```
+
+> 修正说明：第 2 轮报告（基线 ceb4656，早于 T-085 合入）曾记「文件不存在、日历为占位模块」；**合并 HEAD=5813ae5 已含 T-085 日程日历**（team-hub/server.mjs +calendar_events 幂等建表、GET/POST /api/calendar/events 与 delete、audit calendar:create|delete、SSE 广播）及配套测试，本验收子项**已真实运行通过**。前端亦已接入 CalendarView/NotifyView 面板（Sidebar 菜单 calendar/notify 入面板列表）；CommandBar.tsx:120 的旧「日程/会议不在 legion 引擎内」快捷按钮为遗留占位入口（前端演进超出本任务文件域，如实记录、不代改）。
+
+输出要点（覆盖锚定）：
+- 非法入参：缺 by/scope/title、非法时间、title 超长 → 400 且零落库；窗参数 from 晚于 to / 非法窗 → 400。
+- 合法边界：title=100 恰好 200；end 省略=null；allDay:true 往返；end=start 允许；meta 往返。
+- 路由层真实 HTTP：POST 创建 → GET 日期窗闭区间命中 → delete → 审计 calendar:* 留痕 + SSE 广播（同 chat.test.mjs 绑定随机端口直测）。
+- DAO 级：createCalendarEvent/listCalendarEvents 校验直接可用（同 chat.test.mjs 函数级直测法）。
 
 ### 2.7 whiteboard 套件 —— ✅ 67 项断言 0 失败（等价形态直跑；默认 `node --test` 命令形态受限已记录）
 
@@ -108,7 +119,7 @@ skills：ℹ tests 12  ℹ pass 12  ℹ fail 0（schema/校验/发布与授权�
 | apps/server/test/room.test.mjs | 7（房间/sanitizeOps） | ✅ 7/7 |
 | apps/server/test/e2e.test.mjs | 6（healthz + 双端同步收敛 + 加入态恢复 + presence 互见/leave + 畸形消息不崩） | ✅ 6/6（等价形态，见下） |
 
-  e2e 等价形态说明：原始 e2e 以 `stdio:['ignore','pipe','pipe']` 起真实 `apps/server/src/index.js` 子进程；沙箱禁 pipe spawn。按沙箱边界既定做法（stdio 改 `'ignore'` + import 路径改绝对 file URL，断言与用例零改动，沿用 docs/T042-evidence/wb-e2e-sandbox-copy.test.mjs 先例）在 %TEMP% 生成等价副本执行（本轮新建 `wb-e2e-sandbox-copy-T091.test.mjs`，同 T-042 先例）：**真实服务进程 + 真实 WebSocket 客户端全过 6/6**（healthz 200、A 画 B 同步收敛 stateHash 一致、新客户端 welcome.doc 完整、presence 互见与断开 leave、畸形消息后 healthz 仍 200）。副本在 %TEMP%（非仓库文件域），可复跑。
+  e2e 等价形态说明：原始 e2e 以 `stdio:['ignore','pipe','pipe']` 起真实 `apps/server/src/index.js` 子进程；沙箱禁 pipe spawn。按沙箱边界既定做法（stdio 改 `'ignore'` + import/服务路径改绝对 file URL，断言与用例零改动，沿用 docs/T042-evidence/wb-e2e-sandbox-copy.test.mjs 先例）在 %TEMP% 生成等价副本执行（第 3 轮复验重建 `wb-e2e-sandbox-copy-T091.test.mjs` 并复跑）：**真实服务进程 + 真实 WebSocket 客户端全过 6/6**（healthz 200、A 画 B 同步收敛 stateHash 一致、新客户端 welcome.doc 完整、presence 互见与断开 leave、畸形消息后 healthz 仍 200）。副本在 %TEMP%（非仓库文件域），可复跑。
 - 合计：**61 + 6 = 67 项，0 失败**（命令形态受限已按 R-18 记录，非产品失败）。
 
 ---
@@ -139,7 +150,7 @@ $ pnpm build                        （= tsc --noEmit && vite build）
 | 承诺 | 判定 | 证据（命令/文件:行 + 输出要点） |
 | --- | --- | --- |
 | 第二标签页同空间 ≤15s 实时 | ✅ L1 | `node workbench/scripts/chat-s2-smoke.mjs` S2-H：**双订阅 ≤5s 收到同一 live chat:message**（≤15s 的数据面等价；两订阅均经 serve.mjs /hub 同源代理 = 浏览器 ChatView hubBase() 默认路径）。另 `node team-hub/chat-l1-smoke.mjs` TC-S1-14 真实服务 ≤5s 收 live 帧（seq/ts/member/scope/detail 完整）。9 项断言中 8 项 PASS（S2-A 见 §7-②） |
-| 断线自动重连 | ✅ 代码/数据面锚定 | ChatView 实时 = 单一 `/api/events` EventSource（`api.ts:491 subscribeHubAudit`，注释「断线自动重连」）；服务端 SSE 首帧 `retry: 2000`（`team-hub/server.mjs:1824`）+ `connection: keep-alive`（:1823）+ 15s `:hb` heartbeat 保活与 close 清理（:1830-1831）；ChatView 另有 **15s 轮询兜底断线窗口**（ChatView.tsx:157 注释「EventSource 原生自动重连 + 15s 轮询兜底」+ :168-172 `setInterval(…, 15000)` 轮询实现）；服务端断连韧性：chat-l1 TC-S1-15「断开不崩服务、其余订阅端仍收到事件」PASS（浏览器侧原生重连由 EventSource 规范行为承担，GUI 项见 §4.4） |
+| 断线自动重连 | ✅ 代码/数据面锚定 | ChatView 实时 = 单一 `/api/events` EventSource（`api.ts:491-492 subscribeHubAudit`，注释「断线自动重连」，api.ts:104-107 同述 EventSource 自带重连）；服务端 SSE（`team-hub/server.mjs:1983-1992`，行号随 T-085 日历合入 +163 行推移，较第 2 轮 1823-1831 更新）：首帧 `retry: 2000`（:1985）+ `connection: keep-alive`（:1984）+ 15s `:hb` heartbeat（:1991）与 req close 清理（:1992）；ChatView 另有 **15s 轮询兜底断线窗口**（ChatView.tsx:157 注释「EventSource 原生自动重连 + 15s 轮询兜底」+ :168-172 `setInterval(…, 15000)` 轮询实现）；服务端断连韧性：chat-l1 TC-S1-15「断开不崩服务、其余订阅端仍收到事件」PASS（浏览器侧原生重连由 EventSource 规范行为承担，GUI 项见 §4.4） |
 | 消息纯文本渲染（无直插 HTML） | ✅ 静态 | ChatView.tsx:359 消息体渲染为 React 文本节点 `<div className="chat-bubble …">{m.body}</div>`（white-space:pre-wrap）；`dangerouslySetInnerHTML` 在 workbench/src 仅出现在 ChatView.tsx:49 / FilesView.tsx:34 的**注释声明「全程无 dangerouslySetInnerHTML」**，代码零使用（grep 全量核实） |
 
 ### 4.2 文件中心（R-A7 AC2）
@@ -176,6 +187,7 @@ $ pnpm build                        （= tsc --noEmit && vite build）
 - **typecheck**：`<DSH checkout>/node_modules/.bin/tsc -p tsconfig.json --noEmit`（deps 已在 node_modules 就位）→ **exit 0，零诊断**。
 - **build（服务端）**：同一 tsc `-p tsconfig.json` 全量编译 → **exit 0**，产出 `lib/index.js(+map)`、`lib/types/index.d.ts`（= build.sh 的编译段；build.sh 本体需 bash，本沙箱 WSL bash E_ACCESSDENIED，按 R-18 记录，等价步骤已全绿）。
 - **build:client（宿主注入 bundle）**：`node node_modules/tsdown/dist/run.mjs` → **exit 0**，`lib/client.js` 3.74 kB（tsdown v0.22.2 / rolldown v1.1.1）；产物为宿主模块加载器形态：`window.__ModuleLoader__.load({ id: "@dsh-external/dsh-scrum-board", factory: (require) => {...} })`，尾部导出 `apply`/`inject`（conversation.view + sidebar.footer.action 槽位）——**注入形态静态核验正确**。
+- **第 3 轮复验（合并 HEAD=5813ae5）**：上列 typecheck / 服务端编译 / tsdown 全部重跑通过（typecheck 0 诊断 exit 0；lib/index.js 24.7 kB + lib/types/index.d.ts；lib/client.js 3.74 kB，banner 为 `window.__ModuleLoader__.load({`、内含 apply/`ctx.slots.inject("conversation.view")`/`sidebar.footer.action`）。
 - **宿主注入冒烟**：❌ 不可达 → **「环境受限 + 复现步骤」**（不冒充通过）：
   - 复现步骤（宿主/CI 侧）：① 设置 `DSH_CHECKOUT=D:\project\DSH\dsh\deepseek-harness` 后按 README 注入流程把本目录挂为宿主 profile 插件（如 `@dsh-external/dsh-scrum-board` junction → profile `node_modules/@dsh-external/`）；② `dev_inject_plugin <本目录>`（super-injector 环境）；③ 重启 DSH Desktop / profile 热重载 → GUI 会话视图出现「Scrum 看板」面板 + 侧栏底部常驻块，`/scrum-board/api/daemon` 心跳可达。
   - 不可达原因：宿主注入器/Desktop 运行环境与本沙箱隔离，宿主插件目录在文件域之外（本任务仅允许改 docs/TEST_REPORT.md），无审批通道可越权。
@@ -189,7 +201,7 @@ $ pnpm build                        （= tsc --noEmit && vite build）
 | whiteboard `node --test` 全绿 | ✅（等价形态；命令形态受限见 §2.7） | 6 单测文件 61/61 + e2e 6/6 = 67 项 0 失败；另按 DEPLOY.md 起服冒烟：`node apps/server/src/index.js`（PORT=18473, DB_PATH=:memory:）→ `/healthz` `{"ok":true,"storage":"MemoryProvider"}`、`GET /` 200 text/html（2000 B）、`/js/main.mjs` 200（真实进程，随后 Stop-Process 回收） |
 | `node tests/contract/contracts.test.mjs` 全绿（56 用例基线） | ✅ | 56/56 exit 0（§2.5） |
 | board-plugin typecheck/build | ✅ | §5（typecheck 0 诊断；服务端 lib/ + 客户端 lib/client.js 注入形态均绿） |
-| plugins（dsh-scrum-worker dev 副本）typecheck/build | ✅（等价步骤） | 目录无 node_modules + bash 不可用（R-18）→ 按 plugins/scripts/build.sh 的 link 清单自 DSH checkout junction 链接 14 项（cordis/cosmokit/schemastery/@deepseek-ai/*/@types/node/@standard-schema）后：typecheck `tsc -p tsconfig.json --noEmit` exit 0 零诊断；全量编译 exit 0 产出 lib/（index.js+types）。plugins/tests 需 spawnSync(git) 属沙箱 pipe 边界 + 宿主 daemon 上下文 → 宿主侧执行项（不在验收必跑列） |
+| plugins（dsh-scrum-worker dev 副本）typecheck/build | ✅（等价步骤；第 3 轮合并 HEAD 复验同绿） | 目录无 node_modules + bash 不可用（R-18）→ 按 plugins/scripts/build.sh 的 link 清单自 DSH checkout junction 链接 14 项（cordis/cosmokit/schemastery/@deepseek-ai/*/@types/node/@standard-schema）后：typecheck `tsc -p tsconfig.json --noEmit` exit 0 零诊断；全量编译 exit 0 产出 lib/（index.js 107 kB + types）。plugins/src 已含主侧 T-087 演进，本轮一并重跑通过。plugins/tests 需 spawnSync(git) 属沙箱 pipe 边界 + 宿主 daemon 上下文 → 宿主侧执行项（不在验收必跑列） |
 | board-plugin/plugins 宿主注入冒烟 | ❌ 不可达（如实记录） | §5 复现步骤；宿主侧执行（R-B3/R-6 口径） |
 
 ---
@@ -204,7 +216,6 @@ $ pnpm build                        （= tsc --noEmit && vite build）
 | ④ | e2e / plugins 子进程 pipe stdio 与 spawnSync EPERM | 原样 `node whiteboard/apps/server/test/e2e.test.mjs`（spawn pipe）→ EPERM；plugins 测试 spawnSync git → EPERM | e2e：stdio 改 ignore 的等价副本 6/6 全过（断言零改动）；plugins 测试为宿主侧项 |
 | ⑤ | WSL bash E_ACCESSDENIED（build.sh 直跑） | `bash scripts/build.sh` → CreateInstance E_ACCESSDENIED exit 1 | 以 build.sh 等价的 link+tsc/tsdown 步骤全绿（§5/§6） |
 | ⑥ | DSH 宿主注入不可达（board-plugin/plugins 注入冒烟） | 见 §5 复现步骤（宿主侧） | 客户端 bundle 注入形态静态核验（`__ModuleLoader__.load` + exports apply/inject） |
-| ⑦ | `team-hub/calendar.test.mjs` 不存在 | `node team-hub/calendar.test.mjs` → ENOENT | 日程日历为占位模块（Sidebar.tsx:21/78、CommandBar.tsx:120 toast），R-B1 未纳入；§2.6 |
 
 ---
 
@@ -216,6 +227,7 @@ node workbench/scripts/files-api.test.mjs      # 40/40
 node workbench/scripts/web.test.mjs            # 24/24（当前 HEAD 含 T-094 回归用例）
 node team-hub/chat.test.mjs                    # 13/13
 node team-hub/skills.test.mjs                  # 12/12
+node team-hub/calendar.test.mjs                # 13/13
 node tests/contract/contracts.test.mjs         # 56/56
 node whiteboard/packages/shared/test/contract.test.mjs   # 26/26（whiteboard 其余 5 文件同理直跑；e2e 见 §2.7 等价形态）
 
@@ -228,8 +240,8 @@ node workbench/scripts/files-s5-smoke.mjs      # 32/32
 cd workbench && pnpm exec tsc --noEmit         # exit 0 零诊断
 cd workbench && pnpm build                     # vite 段 EPERM（§3 记录）
 
-# 白板起服冒烟（DEPLOY.md）
-cd whiteboard && node apps/server/src/index.js # /healthz {"ok":true,…}；GET / 200 html
+# 白板起服冒烟（DEPLOY.md；DB_PATH=:memory: 免落库文件）
+cd whiteboard && node apps/server/src/index.js # PORT=18473 DB_PATH=:memory: → /healthz {"ok":true,…}；GET / 200 html
 
 # board-plugin / plugins（build.sh 等价；DSH_CHECKOUT 已指认）
 <checkout>/node_modules/.bin/tsc -p board-plugin/tsconfig.json [--noEmit]   # exit 0
@@ -240,7 +252,7 @@ cd board-plugin && node node_modules/tsdown/dist/run.mjs                    # li
 
 ## 9. 结论
 
-- 验收①逐套件真实运行：files-api 40/40、web 24/24（当前 HEAD 含 T-094 用例）、chat 13/13、skills 12/12、contracts 56/56、whiteboard 67 项 0 失败（等价形态），失败=0；`calendar.test.mjs` 不存在已如实说明（占位模块归属 R-B1）。
+- 验收①逐套件真实运行（第 3 轮，合并 HEAD=5813ae5）：files-api 40/40、web 24/24（含 T-094 用例）、chat 13/13、skills 12/12、**calendar 13/13（随 T-085 合入已存在）**、contracts 56/56、whiteboard 67 项 0 失败（等价形态），**七套件失败=0**，用例数逐套记录见 §2。
 - 验收② pnpm build：tsc 0 诊断 + vite EPERM 受限复现（R-18），与仓库历史记录同因，未冒充通过。
 - 验收③三中心主路径：数据面（L0+L1）与渲染安全（静态行级证据）全绿并写入本报告 §4；GUI 点击项在 §4.4 给出供宿主 L2 走查。
 - 验收④⑤ board-plugin：typecheck/build（服务端 lib/ + 客户端注入形态 bundle）全绿；宿主注入冒烟不可达 → 按 R-18 记录「环境受限 + 复现步骤」，不冒充通过。

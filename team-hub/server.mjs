@@ -918,14 +918,26 @@ function reassignTask(id, soldier, by) {
 }
 
 /** 守护批量回收：认领超过 olderThan 分钟无进展、或已过 expiresAt 的 in_progress 任务释放回 todo。
- *  claimedAt 为空的历史孤儿（旧「开工」未记认领时间）按 updatedAt 起算，避免永久卡死。 */
-function releaseStaleTasks(olderThanMinutes, by) {
+ *  claimedAt 为空的历史孤儿（旧「开工」未记认领时间）按 updatedAt 起算，避免永久卡死。
+ *  ids 提供时只回收列出的任务（守护重启孤儿回收专用：无视超时，立即释放）。 */
+function releaseStaleTasks(olderThanMinutes, by, ids) {
   return withTx(() => {
     const cutoff = Date.now() - olderThanMinutes * 60_000
     const nowMs = Date.now()
     const rows = db.prepare("SELECT id, claimedAt, expiresAt, updatedAt FROM tasks WHERE status='in_progress'").all()
     const released = []
     for (const r of rows) {
+      if (Array.isArray(ids)) {
+        if (!ids.includes(r.id)) continue
+        const reason = `守护重启检测到孤儿在办任务（worker 已随进程消失），自动释放回 todo 重新认领续做`
+        const t = getTask(r.id)
+        const comments = parseJson(t.comments, [])
+        comments.push({ by, at: now(), text: reason })
+        db.prepare('UPDATE tasks SET status=\'todo\', soldier=NULL, claimedAt=NULL, claimedRound=NULL, ttlMinutes=NULL, expiresAt=NULL, claimRequestId=NULL, comments=?, version=version+1, updatedAt=? WHERE id=?')
+          .run(JSON.stringify(comments), now(), r.id)
+        released.push(r.id)
+        continue
+      }
       const base = r.claimedAt !== null && r.claimedAt !== undefined ? new Date(r.claimedAt).getTime() : new Date(r.updatedAt ?? '').getTime()
       const staleByAge = !Number.isNaN(base) && base <= cutoff
       const staleByTtl = r.expiresAt !== null && r.expiresAt !== undefined && new Date(r.expiresAt).getTime() <= nowMs
@@ -1218,9 +1230,10 @@ async function handle(req, res) {
     }
     if (req.method === 'POST' && path === '/api/release-stale') {
       await handleWrite(req, res, (body, by, scope) => {
+        const ids = Array.isArray(body.ids) ? body.ids.filter(x => typeof x === 'string') : undefined
         const minutes = Number(body.olderThan ?? 60)
         if (!Number.isFinite(minutes) || minutes <= 0) throw new Error('olderThan 必须是正整数分钟数')
-        const released = releaseStaleTasks(minutes, by)
+        const released = releaseStaleTasks(minutes, by, ids)
         audit(by, scope, 'release-stale', '*', { released })
         return { released }
       })
@@ -1489,7 +1502,7 @@ async function handle(req, res) {
         const bySoldier = new Map()
         for (const t of tasks) {
           if (t.status === 'canceled' || !t.soldier) continue
-          if (rosterRoles.has(t.soldier)) continue
+          if (rosterRoles.has(t.role ?? t.soldier)) continue
           const arr = bySoldier.get(t.soldier) ?? []
           arr.push(t)
           bySoldier.set(t.soldier, arr)
@@ -1500,6 +1513,7 @@ async function handle(req, res) {
           const inProgress = mine.filter(t => t.status === 'in_progress').length
           const inReview = mine.filter(t => t.status === 'in_review').length
           const blocked = mine.filter(t => t.status === 'blocked').length
+          const waiting = mine.filter(t => t.status === 'todo' || t.status === 'backlog').length
           let mode = 'idle'
           if (blocked > 0) mode = 'blocked'
           else if (inReview > 0) mode = 'review'
@@ -1508,11 +1522,12 @@ async function handle(req, res) {
           if (inProgress > 0) chips.push({ label: `进行中 ${inProgress}`, cls: 'green' })
           if (inReview > 0) chips.push({ label: `待验收 ${inReview}`, cls: 'yellow' })
           if (blocked > 0) chips.push({ label: `受阻 ${blocked}`, cls: 'red' })
-          if (mine.length === 0) {
+          if (waiting > 0) chips.push({ label: `待命 ${waiting}`, cls: '' })
+          if (chips.length === 0) {
             // 无在办任务：有历史则「已完成 N」，否则「待命」
             if (done > 0) chips.push({ label: `已完成 ${done}`, cls: '' })
             else chips.push({ label: '待命', cls: '' })
-          } else if (chips.length === 0) chips.push({ label: '工作中', cls: '' })
+          }
           return {
             role: id, name: label, kind, avatar, mode, chips, done, total: list.length,
             external, scope,
@@ -1521,7 +1536,7 @@ async function handle(req, res) {
         }
         // 编队岗位优先，再追加未入编队的活跃执行者
         for (const r of roster) {
-          const mine = tasks.filter(t => t.soldier === r.role && t.status !== 'canceled')
+          const mine = tasks.filter(t => t.status !== 'canceled' && (t.role ?? t.soldier) === r.role)
           agents.push(summarize(r.role, r.name, mine, r.kind, r.avatar, false))
         }
         for (const [soldier, list] of bySoldier) {

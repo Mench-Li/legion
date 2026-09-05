@@ -281,6 +281,19 @@ const MODERATOR_SCHEMA: ObjectJsonSchema = {
   additionalProperties: false,
 }
 
+/** 调解员（merge 冲突合入调解）输出：status=done 表示已把冲突文件改为正确的合并结果（未运行 git）。 */
+const MEDIATOR_SCHEMA: ObjectJsonSchema = {
+  type: 'object',
+  properties: {
+    status: { type: 'string', enum: ['done', 'failed'] },
+    resolvedFiles: { type: 'array', items: { type: 'string' } },
+    summary: { type: 'string' },
+    whyFailed: { type: 'string' },
+  },
+  required: ['status', 'summary'],
+  additionalProperties: false,
+}
+
 /** 以子进程方式执行 taskctl 命令，成功解析 stdout JSON。 */
 function runTaskctl(scrumDir: string, argv: string[]): Promise<unknown> {
   return new Promise((resolve, reject) => {
@@ -357,6 +370,15 @@ export function apply(ctx: AppContext, config: Config): void {
   const expandRetryAt = new Map<string, number>()
   const inflight = new Set<string>()
   const controllers = new Set<AbortController>()
+  /** 合入调解中（in_review merge-fail 自动处理）：同一时刻只允许一个调解，避免主仓库 git 合并态互相踩踏。 */
+  const mediating = new Set<string>()
+  /** 调解重试退避：taskId → 上次调解失败时间（失败后 ≥6 个扫单周期再试，最多 maxMediateAttempts 次）。 */
+  const mediateRetryAt = new Map<string, number>()
+  /** 调解失败次数（达上限后留给将军人工处理）。 */
+  const mediateAttempts = new Map<string, number>()
+  const maxMediateAttempts = 2
+  /** 守护进程启动后第一轮扫单已做过孤儿回收（重启前进程的在办 worker 已随进程消失，需释放回 todo 重新认领）。 */
+  let bootReconciled = false
   let sweeping = false
   /** 暂停提示节流：避免每轮扫单都打日志。 */
   let lastPausedNotice = 0
@@ -1220,7 +1242,9 @@ exit 0
           // 人工闸门阶段（如方案搜索）：方案文档必须明确存在，且等将军验收 done 后才流转下一角色。
           // 将军验收通过（in_review → done）后，下一环（blockedBy 本任务）由守护下轮自动认领；打回则附原因自动纠错重做。
           const gateNext = stageByRole.get(stage.next ?? '')
-          const docOk = stage.artifact === undefined || worktreeDir === null || existsSync(join(worktreeDir, stage.artifact))
+          // autoPromote 已把 w/<id> 合入主分支并删除 worktree——在此之后查 worktree 目录必然不存在，
+          // 会误报「缺文档」并把任务错误地停在 in_review。改为检查合入后的主仓库根目录。
+          const docOk = stage.artifact === undefined || existsSync(join(repoRootFor(), stage.artifact))
           if (!docOk) {
             await safeComment(t.id, `⚠ ${stage.label}完成，但未找到要求交付的方案文档 ${stage.artifact}（应写入 worktree）。已停在 in_review，请人工检查：产出不完整可 ↩ 打回并说明，士兵会补全后重新提交。`)
             await transitionTo(t.id, 'in_review')
@@ -1265,6 +1289,138 @@ exit 0
       activity('ask', t.id, `需要将军确认：${report.blocker || report.summary}`)
       log(`${t.id} → blocked（❓ 待将军确认：${report.blocker || report.summary}）`)
     }
+  }
+
+  // ── 合入调解（in_review merge-fail 自动处理，替代将军手动 git 合入）────────────────────────
+  // 背景：中间阶段任务自动合入主分支失败 → 停 in_review 等人工。将军已授权守护用「调解员」自动处理
+  // 这一类机械性 + 半语义问题（脏工作区挡 merge / 内容冲突），仅在调解多次失败后才回到将军。
+  // 判定：任务 in_review、评论含「自动合入主分支失败」标记、将军未 hold、切片/流水线角色。
+  const isMediatableMergeFail = (t: Task): boolean => {
+    if (t.status !== 'in_review' || t.hold) return false
+    if (t.role === null || !stageByRole.has(t.role)) return false
+    const failIdx = t.comments.findIndex(c =>
+      (c.text ?? '').includes('但自动合入主分支失败') || (c.text ?? '').includes('请人工合入并推进'))
+    if (failIdx < 0) return false
+    // 将军（或其他非守护评论者）在失败标记后已介入 → 不抢，留人工
+    const laterHuman = t.comments.slice(failIdx + 1).some(c => c.by !== config.role && !c.text.startsWith('🛠 守护调解员'))
+    return !laterHuman
+  }
+
+  /** 调解员主流程：把 in_review merge-fail 任务合入主分支并推进到 done（复用 autoPromote 的 git 原语）。 */
+  async function mediateReview(t: Task): Promise<void> {
+    const id = t.id
+    try {
+      await safeComment(id, '🛠 守护调解员接管：正在自动合入主分支（解决冲突后推进），将军无需操作')
+      const root = repoRootFor()
+      const dir = join(worktreeRootFor(), id)
+      // 0. 防御：清上次遗留冲突态
+      await runGit(root, ['merge', '--abort'])
+      // 1. 若 worktree 仍绑定分支，先解除（防止 merge 冲突态被 worker 误操作）
+      const wt = (await runGit(root, ['worktree', 'list'])).out
+      const wtNeedle = `.legion-worktrees${dir.endsWith('\\' + id) || dir.endsWith('/' + id) ? '' : ''}`
+      if (wt.includes(`.legion-worktrees/${id}`) || wt.includes(`.legion-worktrees\\${id}`)) {
+        await runGit(root, ['worktree', 'remove', '--force', dir])
+        log(`${id} 调解：已解除残留 worktree 绑定`)
+      }
+      // 2. 脏工作区保护：若有未提交改动挡住 merge（git 会拒绝），先定向 stash → merge → pop
+      const dirty = (await runGit(root, ['status', '--porcelain'])).out.trim()
+      const dirtyPaths = dirty.split('\n').map(l => l.slice(3).trim()).filter(p => p.length > 0 && !p.startsWith('"'))
+      const stashDone: string[] = []
+      if (dirtyPaths.length > 0) {
+        const stash = await runGit(root, ['stash', 'push', '-m', `mediator-${id}`, '--', ...dirtyPaths])
+        if (stash.code === 0) stashDone.push(...dirtyPaths)
+        else log(`${id} 调解：脏工作区暂存失败（继续尝试合并）`)
+      }
+      // 3. 合并
+      const merge = await runGit(root, ['merge', '--no-ff', `w/${id}`, '-m', `promote ${id} (mediator)`])
+      if (merge.code === 0) {
+        // 3a. 合并干净 → 清理 worktree/分支 → 推进 done
+        await runGit(root, ['worktree', 'remove', '--force', dir])
+        await runGit(root, ['branch', '-D', `w/${id}`])
+        if (stashDone.length > 0) await runGit(root, ['stash', 'pop'])
+        await advanceTo(id, t.role ?? config.role)
+        await safeComment(id, `✅ 调解完成：自动合入主分支并推进 done（合并 ${merge.out.trim() ? '带冲突已解决' : '干净'}）`)
+        activity('done', id, '调解合入成功，已推进 done')
+        log(`${id} → done（调解员自动合入）`)
+        return
+      }
+      // 3b. 合并冲突或失败 → 检查是否内容冲突
+      const conflictFiles = (await runGit(root, ['diff', '--name-only', '--diff-filter=U'])).out.trim().split('\n').filter(Boolean)
+      if (conflictFiles.length === 0) {
+        // 非内容冲突（如分支被删/不存在）→ 放弃自动处理，回退将军
+        await runGit(root, ['merge', '--abort'])
+        if (stashDone.length > 0) await runGit(root, ['stash', 'pop'])
+        await safeComment(id, `⚠ 调解失败：合入遇到非内容冲突（${(merge.err || merge.out).trim().slice(0, 200)}），请将军人工处理`)
+        activity('blocked', id, '调解失败：非内容冲突')
+        return
+      }
+      // 3c. 真内容冲突 → 派调解员 subagent 解决冲突文件
+      const resolve = await dispatchMediator(id, conflictFiles)
+      if (!resolve) {
+        await runGit(root, ['merge', '--abort'])
+        if (stashDone.length > 0) await runGit(root, ['stash', 'pop'])
+        await safeComment(id, '⚠ 调解失败：冲突文件未能自动解决，已回退合并态，请将军人工处理（或稍后重试）')
+        activity('blocked', id, '调解失败：冲突未能自动解决')
+        return
+      }
+      // 4. 确认冲突标记已清 → 完成合入
+      const markers = (await runGit(root, ['grep', '-l', '^<<<<<<<', '--', ...conflictFiles])).out.trim()
+      if (markers.length > 0) {
+        await runGit(root, ['merge', '--abort'])
+        if (stashDone.length > 0) await runGit(root, ['stash', 'pop'])
+        await safeComment(id, `⚠ 调解失败：仍有冲突标记未清除（${markers}），已回退，请将军人工处理`)
+        activity('blocked', id, '调解失败：冲突标记残留')
+        return
+      }
+      await runGit(root, ['add', ...conflictFiles])
+      const commit = await runGit(root, ['commit', '--no-edit', '-m', `promote ${id} (mediator resolve)`])
+      if (commit.code !== 0) {
+        await runGit(root, ['merge', '--abort'])
+        if (stashDone.length > 0) await runGit(root, ['stash', 'pop'])
+        await safeComment(id, `⚠ 调解失败：提交合入结果失败（${(commit.err || commit.out).trim().slice(0, 200)}），请将军人工处理`)
+        activity('blocked', id, '调解失败：提交失败')
+        return
+      }
+      await runGit(root, ['worktree', 'remove', '--force', dir])
+      await runGit(root, ['branch', '-D', `w/${id}`])
+      if (stashDone.length > 0) await runGit(root, ['stash', 'pop'])
+      await advanceTo(id, t.role ?? config.role)
+      await safeComment(id, `✅ 调解完成：冲突文件已由调解员解决并合入主分支，任务推进 done（解决：${conflictFiles.join(', ')}）`)
+      activity('done', id, '调解合入成功（冲突已解决），已推进 done')
+      log(`${id} → done（调解员解决 ${conflictFiles.length} 个冲突文件后合入）`)
+    } catch (e) {
+      log(`${id} 调解异常：${String(e)}`)
+      await runGit(repoRootFor(), ['merge', '--abort']).catch(() => undefined)
+      await safeComment(id, `⚠ 调解异常（${String(e).slice(0, 150)}），已回退合并态，请将军人工处理`)
+    }
+  }
+
+  /** 派调解 subagent：读取冲突文件两侧，产出正确合并（不运行 git，只改文件内容）。 */
+  async function dispatchMediator(taskId: string, conflictFiles: string[]): Promise<boolean> {
+    const t = await getTask(taskId)
+    const root = repoRootFor()
+    const prompt = [
+      `你是「合入调解员」。仓库里有任务 ${taskId} 的合入冲突待解决（git merge 已停在冲突态，冲突标记在以下文件中）。`,
+      `任务：${t.title}`,
+      `冲突文件：${conflictFiles.join(', ')}`,
+      '',
+      '请逐个打开这些文件，找到 <<<<<<< HEAD … ======= … >>>>>>> w/ 冲突区，判断两侧改动意图：',
+      '- 若是同一处各自新增（文档注释等）→ 保留两侧内容合并；',
+      '- 若一侧是删除/重构、另一侧是新增 → 按任务目标决定保留谁；',
+      '- 若两侧改同一逻辑 → 融合成正确实现（不破坏任一侧的验收标准）。',
+      '',
+      '规则：只修改冲突文件，去掉所有冲突标记；不改其他文件；不运行任何 git/shell 命令；不要创建新文件。',
+      '完成后输出 status=done + resolvedFiles + summary（简述每个文件怎么合的）。',
+    ].join('\n')
+    const r = await startOneShot<{ status: string; resolvedFiles?: string[]; summary: string; whyFailed?: string }>(
+      `mediator:${taskId}`, prompt, MEDIATOR_SCHEMA, root,
+    )
+    if (r === null || r.status !== 'done') {
+      log(`${taskId} 调解员未完成：${r?.whyFailed ?? '无返回'}`)
+      return false
+    }
+    log(`${taskId} 调解员完成：${r.summary}`)
+    return true
   }
 
   /** 认领 todo 并派工（流水线模式按任务角色认领 + 用角色提示词）。 */
@@ -1651,6 +1807,32 @@ exit 0
         log(`release-stale 失败：${String(e)}`)
       }
 
+      // 0.5 守护重启孤儿回收（仅进程启动后第一轮）：重启前进程的 worker 已随进程消失，
+      //     其任务停在 in_progress 且通常无「未完成」评论——若只靠 stale 释放要等 staleMinutes（如 100 分钟）。
+      //     立即把「本守护名下、未拦截」的 in_progress 释放回 todo，下轮自动重新认领续做（复用 w/<id> WIP）。
+      if (!bootReconciled) {
+        bootReconciled = true
+        // 只回收本守护认领的任务（soldier = 守护角色或流水线阶段角色）；人类手动在办（soldier=人名）不碰。
+        const claimedByUs = (t: Task): boolean =>
+          t.soldier === config.role || (isPipeline && t.role !== null && t.soldier === t.role)
+        const orphans = tasks
+          .filter(t => t.status === 'in_progress' && claimedByUs(t) && !t.hold && !mediating.has(t.id))
+          .map(t => t.id)
+        if (orphans.length > 0) {
+          try {
+            const res = useHub
+              ? await hubPost('/api/release-stale', { by: config.role, scope, olderThan: config.staleMinutes, ids: orphans }) as { released?: string[] }
+              : await runTaskctl(config.scrumDir, ['release-stale', '--older-than', '0', '--by', config.role, '--scope', scope]) as { released?: string[] }
+            for (const id of res.released ?? []) {
+              activity('released', id, '守护重启：孤儿 in_progress 释放回 todo，自动重新认领续做')
+              log(`${id} 守护重启孤儿回收 → todo（下轮重新认领续做）`)
+            }
+          } catch (e) {
+            log(`守护重启孤儿回收失败：${String(e)}`)
+          }
+        }
+      }
+
       // 依赖未解除（链上后段在上一环 done 前保持待命，不空转抢认领）
       const openDeps = (t: Task): boolean =>
         (t.blockedBy ?? []).some(depId => {
@@ -1702,6 +1884,44 @@ exit 0
       if (isPipeline) {
         for (const t of tasks.filter(x => x.status === 'done' && stageOf(x) !== undefined)) {
           await advancePipeline(t)
+        }
+      }
+      // 4.5 合入调解（将军已授权自动处理类）：发现 in_review 且评论带「自动合入失败」标记的任务 →
+      //     派调解员合入主分支并推进 done（同一时刻只调解一个，防主仓库 git 合并态互相踩踏；
+      //     失败带退避重试，超过上限留将军人工）。
+      if (isPipeline && useHub) {
+        const mediable = tasks.filter(t => isMediatableMergeFail(t) && !mediating.has(t.id))
+        if (mediable.length > 0) {
+          const t = mediable.sort((a, b) => a.id.localeCompare(b.id))[0] as Task
+          const attempts = mediateAttempts.get(t.id) ?? 0
+          const lastFail = mediateRetryAt.get(t.id) ?? 0
+          if (attempts >= maxMediateAttempts) {
+            // 已达上限：留给将军。far-future 哨兵保证「已放弃」只提示一次，不再每轮刷评论。
+            if (lastFail < Date.now() - 24 * 60 * 60 * 1000) {
+              mediateRetryAt.set(t.id, Date.now() + 24 * 60 * 60 * 1000)
+              await safeComment(t.id, '🛑 调解已自动重试 2 次仍未成功，任务留在 in_review 请将军人工处理')
+            }
+          } else if (Date.now() - lastFail < config.intervalMs * 6) {
+            // 失败退避期内：跳过
+          } else {
+            inflight.add(t.id)
+            mediating.add(t.id)
+            runDetached(t.id, (async () => {
+              try {
+                await mediateReview(t)
+                const after = await getTask(t.id).catch(() => undefined)
+                if (!after || after.status !== 'done') {
+                  mediateAttempts.set(t.id, attempts + 1)
+                  mediateRetryAt.set(t.id, Date.now())
+                } else {
+                  mediateAttempts.delete(t.id)
+                  mediateRetryAt.delete(t.id)
+                }
+              } finally {
+                mediating.delete(t.id)
+              }
+            })())
+          }
         }
       }
       // 5. 切片流水线编排（仅 hub 模式）：readyToExpand 注册切片束 / fix 合入后重开 tester 重测

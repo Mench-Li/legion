@@ -21,6 +21,14 @@ scrum/discussion/
 .legion-worktrees/
 .worktrees/
 
+# 守护/调解员运行时状态（进程心跳每轮改写，不入库）
+scrum/daemon.json
+scrum/daemon-mediator.json
+scrum/control.json
+team-hub/.watch.mjs
+_link_deps.mjs
+workbench/scripts/serve.mjs.bak
+
 # 日志与系统文件
 *.log
 .DS_Store

@@ -97,8 +97,8 @@ patch 里**必须显式给** `legionDir: 'D:/project/DSH/legion'`——pnpm 对 
 - 右侧「当前任务集」= 当前空间任务按角色泳道（只显示该空间）；**每岗任务列表按状态排序**（🟢 进行中 → 🟡 待验收/受阻 → ⚪ 待认领 → ✅ 已完成），默认显示前 3 条 + 「▾ 展开全部 N 个任务（M 未完成）」一键展开为该岗**全量任务**（可滚动，任意条点进详情）；折叠/展开状态按岗位记忆。
 - **点任务行 → 任务详情弹窗**：
   - **🤖 AI 执行过程**：执行该任务的 AI 沉淀的过程记录（evidence + 评论时间流）——AI 的每一步行动/产出/汇报都在这，是「任务详情看到 AI 工作过程」的落点；
-  - **🧾 审计（改动 × 证据，L1/L2）**：任务收尾（🟡 待验收/✅ 已完成）时展示**改动文件清单**（A/M/D/R 徽标 + 行数 ±）→ 逐文件展开 diff、逐文件「✓ OK / ✘ 有问题」批注（存 `reviewNotes`）、整体结论一键批注；测试报告（✅/❌ + 失败用例）、产物、多轮补丁同屏；**打回自动把批注拼进原因评论交付下一轮 worker**（守护认领重跑时携带历史反馈，见 §3.9）；
-  - **⚠ 并行改动重叠（L3）**：本任务改到的文件若同时被其他任务改动（如并行波次同改一个文件），审计区顶部黄色警示列出对方任务与状态（🟢进行中=活风险）——验收/合入前先想合入顺序（见 §3.9）；
+  - **🧾 审计（改动 × 证据，L1/L2）**：任务收尾（🟡 待验收/✅ 已完成）时展示**改动文件清单**（A/M/D/R 徽标 + 行数 ±）→ 逐文件展开 diff、逐文件「✓ OK / ✘ 有问题」批注（存 `reviewNotes`）、整体结论一键批注；测试报告（✅/❌ + 失败用例）、产物、多轮补丁同屏；**打回自动把批注拼进原因评论交付下一轮 worker**（守护认领重跑时携带历史反馈，见 §3.10）；
+  - **⚠ 并行改动重叠（L3）**：本任务改到的文件若同时被其他任务改动（如并行波次同改一个文件），审计区顶部黄色警示列出对方任务与状态（🟢进行中=活风险）——验收/合入前先想合入顺序（见 §3.10）；
   - **⏱ 进展时间线**：goal:publish / claim / transition / comment / patch / review-note / evidence / reassign 等审计动作（`GET /api/activity?taskId=`）；
   - 📋 描述、🎯 验收标准、🚧 边界（做什么 ✅ / 不做什么 🚫）、🔗 依赖提示、创建/更新时间；
   - **状态操作**（按状态出现）：todo →「▶ 开工 / 🔒 认领」；in_progress →「📮 提交验收 / 归还待办」；in_review →「✓ 验收通过（仅将军）/ ↩ 打回重做（附原因 + 审计批注）」；blocked →「解阻」；另有「💬 评论/记录」「转派」与「🤖 派 AI 执行」。
@@ -121,6 +121,8 @@ patch 里**必须显式给** `legionDir: 'D:/project/DSH/legion'`——pnpm 对 
   - ↩ 打回重做（附原因）· ⏸ 全局暂停（CommandBar，`control.json`）· 单角色/单空间也可用模型配置区分执行强度。
 - **疑问自动拦截（❓ 待将军确认）**：任何环节的士兵遇到**必须将军拍板**的疑问（关键歧义/越权取舍/缺失输入）时不臆断硬做——任务转 blocked 并在界面给出醒目的「❓ 待将军确认」徽标，评论里列明问题与倾向；守护**不自动重跑**，等将军在本任务评论答复后，下一轮自动带着答复续做（也可先 🖐 拦截/转派）。
 - 「⚡ 持续执行编排」与任务详情「🤖 派 AI 执行」是另一条**执行守护（将军 agent 侧）**通道（`POST /api/exec` 开关 / `POST /api/exec/request` 派活、`GET /api/exec/queue` 仅列非写码类）；与守护自动交接互不冲突。后台表：`exec_state`、`exec_requests`。
+- **🛠 合入自动调解（merge-fail 自愈）**：中间阶段 worker 完成并把改动合入主分支失败（通常 = 与其他并行切片/主线冲突）时，任务不再干等将军手搓 git——守护（worker 内嵌）或**公共调解员**（`mode:'mediator'` 独立实例，跨所有已绑定仓库空间）自动接管：清脏工作区 → `git merge --no-ff w/<id>` → 无冲突则干净合入并推进 done；真内容冲突则派「合入调解员」subagent 打开冲突文件裁决两侧意图（保留/融合）→ 去标记 → 提交 → 推进 done。失败自动退避重试（上限后留 🛑 将军人工），重启后凭放弃标记不无限重试。worker 行 `mediateMergeFails:false` + mediator 行并行部署 = 同一任务只由公共调解员处理，避免双调解。
+- **♻️ 守护重启孤儿回收**：守护进程重启后，上一进程的在办 worker 已随进程消失——首轮扫单自动把「本守护名下、未被将军拦截」的 in_progress 释放回 todo（`/api/release-stale?ids=`），下轮复用 `w/<id>` worktree 的 WIP 重新认领续做，不等 staleMinutes（避免重启即卡数十分钟）。
 
 ### 3.7 模型 × 智能体配置（底部「⚙️ 模型配置」）
 - 每空间每角色可选**默认模型**（`agent_models` 表，`GET/POST /api/models`、`POST /api/models/clear`，均记审计）；未配置 = 平台默认（custom-ds / deepseek-v4-flash-openai）。
@@ -139,12 +141,19 @@ patch 里**必须显式给** `legionDir: 'D:/project/DSH/legion'`——pnpm 对 
 - **💬 对话中心**（`ChatView`）：随工作空间隔离的会话（team-hub v2 `/api/chat/*`，scope 分区）。选中**具体空间**后新建会话/发消息（Enter 发送，≤8000 字符），历史经 `GET /api/chat/messages` 恢复（>50 条可用「↑ 加载更早」分页回溯）；跨标签页/跨端实时送达走中枢**单一 `/api/events` SSE 按 `chat:*` kind 过滤**（不新增事件源）。消息按纯文本渲染（安全：不执行任何 HTML/脚本）。
 - **📁 文件中心**（`FilesView`）：浏览当前空间**绑定的本地文件夹**（`local_dir`；未绑定 → 面板引导到「⚙ 空间设置」绑定，绑定后自动列出根目录）。列表（目录在前/大小/时间/含 `.git` 仓库标记）→ 点目录逐层进入、点文件预览（大文本截断带行数提示、读取中可见 loading、二进制提示不可预览）、下载字节一致；写操作（上传/新建目录/重命名/删除）经 serve.mjs `/api/files/*`——**仅回环 + 写需令牌**（`--token`），覆盖需二次确认（`overwrite=1` 语义）、删除需 `confirm=yes` 弹确认、`.git` 内部受保护、路径越界（`../`/盘符/符号链接出根）一律拒绝。
 - **🌐 浏览器助手**（`BrowserPanel`）：地址栏输入 → serve.mjs `/api/web/fetch` **SSRF 防护代理**抓取：协议白名单（仅 http/https）、私网/回环/混淆 IP/域名解析到内网一律 `ssrf_blocked`（界面文案「已拦截：禁止访问内网地址」）、重定向逐跳再校验、限长（默认 2MiB）与整链总超时（默认 10s，含重定向共享 deadline、不逐跳重置，P0-3）可配；正文按结构化文本返回（title/正文/摘要/链接），SPA 空壳给明确提示不伪造正文。无 scheme 自动补 `https://`，最近地址可复用（datalist）。抓本地 mock 页做演示需以 `DSH_WEB_FETCH_ALLOW_PRIVATE=1` 启动 serve.mjs（生产默认关闭，勿在公网开启）。
-- 左侧 QuickTools「文件浏览 / 浏览网页」与侧栏模块入口指向同一面板（`active` 状态一致）；**📅 日程日历 / 🔔 通知中心仍为占位模块**（点击给提示，P1 后续阶段接入）。
+- 左侧 QuickTools「文件浏览 / 浏览网页」与侧栏模块入口指向同一面板（`active` 状态一致）；**📅 日程日历 / 🔔 通知中心**（P1 切片 S6/S7 已交付，见 §3.9 三中心扩展）随空间使用。
 - **🧩 技能中心**：注册技能 → 将军发布/驳回 → 按成员或 `scope:xxx` 授权（士兵只读已发布技能）。
 - **右侧「实时动态」**：SSE 审计流；顶部 KPI：目标/完成/进行中/AI 员工数。
 - **底部命令栏**：⏸ 全局暂停（v1）/ 🗓 任务调度 / 🎯 发布目标 / ⚙️ 模型配置 / ＋ 新建任务 / 📤 导出日报。
 
-### 3.9 任务收尾审计（L1–L3，Codex 式改动审计）
+### 3.9 三中心扩展（P1 切片 S5–S8，v3 slice 流水线交付）
+> 在 §3.8 三中心基础上，P1 目标以「切片流水线（docs/ORCHESTRATION-V3.md）」分批交付并自动测试合入，均已随军团流水线在 software 空间真实跑通并锚定（docs/TEST_REPORT.md / docs/T093-evidence/）。
+
+- **📅 日程日历（S5 后端 + S6 前端）**：team-hub 扩 `calendar_events` 表与 `/api/calendar/events`（scope 分区 + 日期窗闭区间 + 写走 handleWrite/audit/SSE 广播）；前端自研月视图 `CalendarView.tsx`（周一 7×N 网格/今天高亮/跨月切换/新建删除二次确认/事件随 scope 隔离/hub 断连 toast + 重试），无 `dangerouslySetInnerHTML`。
+- **🔔 通知中心（S7）**：audit 派生面板 `NotifyView.tsx` + 侧栏 badge + 已读游标（per-scope，不写 audit 反向零变化），单一 `/api/events` 实时单流按 kind 过滤。
+- **🧪 S8 三中心集成回归锚定**：七套件（chat/skills/calendar/files-api/web/contracts/whiteboard）225 用例 0 失败 + 三中心主路径 + board-plugin typecheck/build 全部锚定合入 main。
+
+### 3.10 任务收尾审计（L1–L3，Codex 式改动审计）
 > 完成的任务怎么放心？Legion 把「**改了哪些文件 → 每处改了什么 → 谁和它改重了**」沉淀成任务自己的审计工作台（任务详情「🧾 审计」区），验收/打回都在同一视图内完成。
 
 - **L1 改动文件清单 + diff（结构化补丁）**：守护在合入 worktree 改动时用 `git diff --numstat/--name-status` 解析，经 `POST /api/patch` 结构化登记（`files:[{path,status,add,del}]` + 全量 diff，任务 `patches` 列，≤40 条/40 条目上限）；详情审计区逐文件展开该文件自己的 hunks，多轮补丁历史可见。
@@ -219,6 +228,9 @@ patch 里**必须显式给** `legionDir: 'D:/project/DSH/legion'`——pnpm 对 
 - `workbench/README.md` — 军团指挥台细目（组件/数据流/各功能实现位置）
 - `scrum/README.md` — v1 看板协议与 taskctl 命令手册（遗留引擎）
 - `docs/ORCHESTRATION-V3.md` — v3 切片流水线编排（并行波次 / D7' 机器闸门 / 类型化槽位，含审计闸门设计）
+- `docs/DEPLOY.md` — 发布部署 runbook（环境分级 / 步骤 / 验证 / 回滚 / 变更影响；发布前 CI 门禁 `node scripts/ci/run-ci.mjs`）
+- `docs/TEST_REPORT.md` — 三中心收尾切片测试用例与逐套件锚定结果（S1–S8 全绿，含 T091/T092 验收依据）
+- `docs/T093-evidence/` — devops 目标级收尾的真实命令证据（ci-run-06480ba 六阶段全 PASS 输出）
 - `docs/P0-CONFIRMATION.md` — P0 关键缺陷修复确认（含 §9 现场验收记录与审计相关修复）
 - `docs/P1-LIVE-ROLLOUT.md` — P1 现场验收与真实软件空间流水线滚动记录
 - `team-hub/server.mjs` — v2 中枢源码（表结构与全部路由以代码为准）

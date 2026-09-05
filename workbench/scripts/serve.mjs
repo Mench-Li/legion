@@ -16,7 +16,8 @@
  *      POST /api/files/mkdir|rename|delete               → 受限写操作（JSON body）
  *   ③ 浏览器助手（/api/web/fetch，S6：SSRF 防护的服务端 fetch 代理 + 零依赖正文抽取）：
  *      POST /api/web/fetch { url, maxBytes?, timeoutMs? } → { ok, finalUrl, status, contentType, title, text?, excerpt?, links?, error?, code? }
- *      每次抓取（成功/失败/拦截均算）在 workbench/data/web-audit.jsonl（静态 ROOT=dist 之外）留痕一行 JSONL + console：
+ *      每次抓取（成功/失败/拦截均算）在 workbench/data/web-audit.jsonl（静态 ROOT=dist 之外）留痕一行 JSONL + console；
+ *      TC-S2-10：参数级失败（url 缺失/非字符串/空白/无法解析，code=invalid_url）从未发起实际抓取——不落审计行，仅回 200-envelope；
  *      {ts, by:'general', url, finalUrl, status, ok, code, ms}，超限按容量轮转（主文件→.1）；路径/上限可经
  *      DSH_WEB_AUDIT_FILE / DSH_WEB_AUDIT_MAX_BYTES 覆盖。错误码统一取 WEB_ERR 枚举常量表（http_<n> 为动态码）。
  *   ④ 健壮性（R-A2/I-9）：任何请求（含畸形 percent-encoding %zz、NUL、超长）都不允许击穿进程——
@@ -857,6 +858,20 @@ async function readBodyLimited(res, maxBytes, signal) {
 }
 
 /**
+ * R-A4/J4-A 延续：body「尽力读」——只有 abort/body-stall 判定的 TIMEOUT（含 5xx/降级分支）必须继续上抛归类 timeout
+ * （TC-S2-06 修复：此前 5xx 分支 .catch(() => Buffer.alloc(0)) 把 stall5xx 的 timeout 吞成 http_500）；
+ * 其余读失败（非中止性读错误 / 超长截断）降级为空 Buffer——不影响已按状态码/内容类型决定的响应语义。
+ */
+async function readBodyBestEffort(res, maxBytes, signal) {
+  try {
+    return await readBodyLimited(res, maxBytes, signal)
+  } catch (e) {
+    if (e?.code === WEB_ERR.TIMEOUT) throw e
+    return Buffer.alloc(0)
+  }
+}
+
+/**
  * v1 fetch 代理核心：协议白名单 → SSRF 逐跳校验（含重定向链）→ 限长/超时 → 仅文本类响应进入抽取。
  * 返回结构化 JSON（无原始 HTML 透传字段，TC-S6-10）。
  * timeoutMs 为「整条链总超时」（P0-3 修复）：首跳据此算出绝对截止时间戳 deadline 并随重定向递归
@@ -864,7 +879,8 @@ async function readBodyLimited(res, maxBytes, signal) {
  * 错误码取 WEB_ERR 常量表（G-11）；body 读取/整链 abort 统一 timeout（R-A4/J4-A）；失败 throw 的 Error 附 .url/.status 供审计留痕定位失败一跳。
  */
 export async function webFetch({ url: rawUrl, maxBytes = WEB_LIMITS.MAX_BYTES, timeoutMs = WEB_LIMITS.TIMEOUT_MS, redirects = 0, deadline = 0 } = {}) {
-  if (typeof rawUrl !== 'string' || rawUrl.trim().length === 0) throw webErr(WEB_ERR.INVALID_URL, '缺少参数 url')
+  // 参数级失败（url 缺失/非字符串/空白）：请求体未构成一次抓取，抛错标记 paramLevel → HTTP 层不落审计（TC-S2-10）
+  if (typeof rawUrl !== 'string' || rawUrl.trim().length === 0) { const e = webErr(WEB_ERR.INVALID_URL, '缺少参数 url'); e.paramLevel = true; throw e }
   const requestedUrl = rawUrl.trim()
   const mb = Number.isFinite(Number(maxBytes)) ? Math.max(1, Math.min(Number(maxBytes), 16 * 1024 * 1024)) : WEB_LIMITS.MAX_BYTES
   const tm = Number.isFinite(Number(timeoutMs)) ? Math.max(1, Math.min(Number(timeoutMs), 60_000)) : WEB_LIMITS.TIMEOUT_MS
@@ -874,7 +890,8 @@ export async function webFetch({ url: rawUrl, maxBytes = WEB_LIMITS.MAX_BYTES, t
     const remainMs = deadlineTs - Date.now()
     if (remainMs <= 0) throw webErr(WEB_ERR.TIMEOUT, '抓取超时（已取消请求）')
     let target
-    try { target = new URL(requestedUrl) } catch { throw webErr(WEB_ERR.INVALID_URL, 'URL 无法解析') }
+    // URL 无法解析同样属参数级失败（未发起抓取，TC-S2-10 含「解析失败」）：同标 paramLevel → HTTP 层不落审计
+    try { target = new URL(requestedUrl) } catch { const e = webErr(WEB_ERR.INVALID_URL, 'URL 无法解析'); e.paramLevel = true; throw e }
     if (target.protocol !== 'http:' && target.protocol !== 'https:') throw webErr(WEB_ERR.PROTOCOL_BLOCKED, '协议白名单：仅支持 http/https（收到 ' + target.protocol + '）')
     if (redirects > WEB_LIMITS.MAX_REDIRECTS) throw webErr(WEB_ERR.TOO_MANY_REDIRECTS, '重定向超过 ' + WEB_LIMITS.MAX_REDIRECTS + ' 跳，已停止')
     await assertPublicTarget(target)
@@ -900,7 +917,8 @@ export async function webFetch({ url: rawUrl, maxBytes = WEB_LIMITS.MAX_BYTES, t
       }
       const ct = res.headers.get('content-type') ?? ''
       if (status >= 400) {
-        const errBuf = await readBodyLimited(res, Math.min(mb, 65536), ac.signal).catch(() => Buffer.alloc(0))
+        // TC-S2-06：错误体读取经 best-effort——若此处 abort（stall5xx 的 timeoutMs 到点）→ TIMEOUT 上抛归类 timeout，不得吞成 http_<status>
+        const errBuf = await readBodyBestEffort(res, Math.min(mb, 65536), ac.signal)
         const errText = decodeHtml(errBuf, ct).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200)
         return { ok: false, finalUrl: target.href, status, contentType: ct, error: '上游返回 http_' + status + (errText ? '：' + errText : ''), code: 'http_' + status }
       }
@@ -908,7 +926,7 @@ export async function webFetch({ url: rawUrl, maxBytes = WEB_LIMITS.MAX_BYTES, t
       const isText = /^text\//i.test(ct) || /json|xml/i.test(ct)
       if (!isHtml && !isText) {
         // 非文本/HTML（pdf/zip/图片等）：不读体、明确降级
-        const errBuf = await readBodyLimited(res, 0, ac.signal).catch(() => Buffer.alloc(0))
+        const errBuf = await readBodyBestEffort(res, 0, ac.signal)
         return { ok: true, finalUrl: target.href, status, contentType: ct, title: '', text: '', excerpt: '', links: [], error: '目标不是可读文本/HTML（' + ct.split(';')[0].trim() + '），已跳过正文抽取', code: WEB_ERR.UNSUPPORTED }
       }
       const buf = await readBodyLimited(res, mb, ac.signal)
@@ -932,7 +950,9 @@ async function handleWebApi(req, res) {
   if (!isLoopback(req)) { httpErr(res, 403, '浏览器助手接口仅限本机（127.0.0.1）访问'); return }
   let body
   try { body = await readBodyJson(req) } catch (e) { httpErr(res, 400, e instanceof Error ? e.message : String(e)); return }
-  // R-A3：一次 /api/web/fetch = 一行审计（成功/失败/拦截都算）；ms 全程计时；审计写失败只 console、不影响响应
+  // R-A3：一次 /api/web/fetch = 一行审计（成功/失败/拦截都算）；ms 全程计时；审计写失败只 console、不影响响应。
+  // TC-S2-10：参数级失败（url 缺失/非字符串/空白 → code=invalid_url，webFetch 抛 err.paramLevel）未发起实际抓取 → 不落审计行；
+  // 与 TC-S2-02「发起后拦截须留痕」（ssrf_blocked 等，非法抓取意图也是审计对象）分界在「请求是否构成一次抓取」。
   const t0 = Date.now()
   const requested = typeof body?.url === 'string' ? body.url.trim() : ''
   let result = null
@@ -941,6 +961,10 @@ async function handleWebApi(req, res) {
     result = await webFetch({ url: body.url, maxBytes: body.maxBytes, timeoutMs: body.timeoutMs })
   } catch (e) {
     failure = e instanceof Error ? e : new Error(String(e))
+    if (failure.paramLevel === true) {
+      sendJson(res, 200, { ok: false, error: failure.message, code: failure.code ?? WEB_ERR.WEB_ERROR })
+      return
+    }
   }
   appendWebAudit({
     url: requested,

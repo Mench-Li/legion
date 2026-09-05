@@ -1,0 +1,2 @@
+{"ts":"2026-09-05T04:30:58.764Z","by":"general","url":"http://127.0.0.1:62030/stall5xx","finalUrl":"http://127.0.0.1:62030/stall5xx","status":500,"ok":false,"code":"timeout","ms":306}
+{"ts":"2026-09-05T04:30:58.813Z","by":"general","url":"http://127.0.0.1:62030/ok","finalUrl":"http://127.0.0.1:62030/ok","status":200,"ok":true,"code":"ok","ms":4}

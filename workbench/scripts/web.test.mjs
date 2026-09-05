@@ -44,6 +44,8 @@ const mock = createServer((req, res) => {
   else if (u.pathname === '/c2') { setTimeout(() => { res.writeHead(302, { location: '/page' }); res.end() }, 700) }
   // S2/R-A4：body stall 夹具——headers 已回（200 text/plain）、body 写一段后挂起不再 end
   else if (u.pathname === '/stall') { res.writeHead(200, { 'content-type': 'text/plain' }); res.write('partial body, never ends') }
+  // TC-S2-06：5xx body stall 夹具——writeHead(500) 后写 partial、永不 end（错误分类与状态码无关，body 未读完即超时 → timeout）
+  else if (u.pathname === '/stall5xx') { res.writeHead(500, { 'content-type': 'text/html' }); res.write('<p>partial 5xx body, never ends') }
   else { res.writeHead(200, { 'content-type': 'text/html' }); res.end('ok') }
 })
 
@@ -331,6 +333,23 @@ describe('S2-R-A4 body stall 归类（headers 已回、body 挂起）与整链�
     } finally { rmQuiet(file) }
   })
 
+  it('TC-S2-06：5xx body stall（/stall5xx）→ 同样 {ok:false, code:timeout}（修复前误归类 http_500），审计保留实际上游 status=500', async () => {
+    const file = tmpAuditFile()
+    try {
+      const t0 = Date.now()
+      const r = await postWebFetch({ url: base + '/stall5xx', timeoutMs: 500 }, { auditFile: file })
+      const elapsed = Date.now() - t0
+      assert.equal(r.ok, false)
+      assert.equal(r.code, m.WEB_ERR.TIMEOUT, '5xx body stall 归类 timeout（错误分类以 body 未读完即超时为唯一判据，与状态码无关）')
+      assert.ok(elapsed >= 250 && elapsed < 5000, '在超时窗内截止（实际 ' + elapsed + 'ms）')
+      const a = readAuditLines(file)[0]
+      assert.equal(a.code, m.WEB_ERR.TIMEOUT)
+      assert.equal(a.status, 500, '审计保留实际上游状态码供定位')
+      assert.equal(a.finalUrl, base + '/stall5xx')
+      assert.equal(a.url, base + '/stall5xx')
+    } finally { rmQuiet(file) }
+  })
+
   it('整链超时（重定向链累计）HTTP 层同样返回 code=timeout（同码收口）', async () => {
     const file = tmpAuditFile()
     try {
@@ -341,6 +360,43 @@ describe('S2-R-A4 body stall 归类（headers 已回、body 挂起）与整链�
       assert.equal(a.code, m.WEB_ERR.TIMEOUT)
       assert.equal(a.finalUrl, base + '/c2', '审计 finalUrl = 失败一跳')
       assert.ok(a.ms >= 700, 'ms 反映整链累计耗时：' + a.ms)
+    } finally { rmQuiet(file) }
+  })
+})
+
+describe('S2-R-A3c（TC-S2-10）参数级失败（url 缺失/非字符串/解析失败）不产生审计行', () => {
+  // 与 TC-S2-02「发起后拦截须留痕」（ssrf_blocked 等）分界：参数级失败未构成一次抓取（无 url 可请求），
+  // 不落审计行；判据「未发起实际抓取不产生审计行」（R-A3 边界；OQ-7）。
+  before(startServe)
+  after(() => { try { if (m.server.listening) m.server.close() } catch { /* */ } })
+
+  it('url="" 与 url=123 → 200-envelope {ok:false, code:invalid_url}，审计文件零新增（修复前各落一行）', async () => {
+    const file = tmpAuditFile()
+    try {
+      const empty = await postWebFetch({ url: '' }, { auditFile: file })
+      assert.equal(empty.ok, false)
+      assert.equal(empty.code, m.WEB_ERR.INVALID_URL)
+      const num = await postWebFetch({ url: 123 }, { auditFile: file })
+      assert.equal(num.ok, false)
+      assert.equal(num.code, m.WEB_ERR.INVALID_URL)
+      assert.ok(!existsSync(file), '参数级失败不产生审计行（文件不应被创建/追加）')
+    } finally { rmQuiet(file) }
+  })
+
+  it('解析失败（http://）同样不落审计行；同路径下真实抓取/拦截仍留痕（机制未被误伤）', async () => {
+    const file = tmpAuditFile()
+    try {
+      const bad = await postWebFetch({ url: 'http://' }, { auditFile: file })
+      assert.equal(bad.code, m.WEB_ERR.INVALID_URL)
+      assert.ok(!existsSync(file), '解析失败不产生审计行')
+      const ok = await postWebFetch({ url: base + '/page' }, { auditFile: file })
+      assert.equal(ok.ok, true)
+      const blocked = await postWebFetch({ url: 'http://10.1.2.3/x' }, { auditFile: file, allowPrivate: false })
+      assert.equal(blocked.code, m.WEB_ERR.SSRF_BLOCKED)
+      const lines = readAuditLines(file)
+      assert.equal(lines.length, 2, '随后真实抓取 + 拦截各留痕一行（共 2）')
+      assert.equal(lines[0].code, 'ok')
+      assert.equal(lines[1].code, m.WEB_ERR.SSRF_BLOCKED)
     } finally { rmQuiet(file) }
   })
 })

@@ -271,11 +271,12 @@ export async function fetchHubTask(id: string): Promise<HubTask> {
   return readJson<HubTask>(await fetch(`${hubBase()}/api/task?id=${encodeURIComponent(id)}`))
 }
 
-/** team-hub v2：某空间/某任务的审计时间线（进展历史）。taskId 优先，其次 scope。 */
-export async function fetchHubActivity(opts: { scope?: string | null; taskId?: string } = {}): Promise<HubActivity[]> {
+/** team-hub v2：某空间/某任务的审计时间线（进展历史）。taskId 优先，其次 scope；limit 可选（服务端上限 500）。 */
+export async function fetchHubActivity(opts: { scope?: string | null; taskId?: string; limit?: number } = {}): Promise<HubActivity[]> {
   const qs = new URLSearchParams()
   if (opts.taskId) qs.set('taskId', opts.taskId)
   else if (opts.scope) qs.set('scope', opts.scope)
+  if (opts.limit !== undefined) qs.set('limit', String(opts.limit))
   if (qs.size === 0) qs.set('limit', '100')
   return readJson<HubActivity[]>(await fetch(`${hubBase()}/api/activity?${qs.toString()}`))
 }
@@ -579,4 +580,57 @@ export async function webFetchPage(input: { url: string; maxBytes?: number; time
   const body = await res.json().catch(() => null) as WebFetchResult | null
   if (body && typeof body.ok === 'boolean') return body
   throw new Error(`浏览器助手请求失败：${res.status} ${res.statusText}`)
+}
+
+// ───────────────────────── 通知中心（S7 ← R-B2：audit 派生，零新表零新端点）─────────────────────────
+
+/**
+ * 通知 action 白名单（R-B2 / TC-S7-02/03 / R-15）：任务生命周期 + 目标/空间/模型/技能类入列。
+ * chat:* 一律默认排除（防刷屏）；progress（进度中间态）、comment（任务讨论，走对话中心）、
+ * release-stale（租约回收）、exec:*（开关回声）等高频/系统噪音不入列。
+ * 注：白名单是对动作类型的收窄；scope 过滤 + 列表拉取仍走既有 GET /api/activity（唯一列表源）。
+ */
+const NOTIFY_ACTIONS = new Set<string>([
+  'create', 'claim', 'transition', 'advance', 'reassign', 'hold', 'unhold',
+  'patch', 'evidence', 'artifact', 'review-note', 'test-report',
+  'goal:publish', 'goal:slices',
+  'space:create', 'space:update', 'space:delete', 'space:add-agents',
+  'model:set', 'model:clear',
+  'skill:submit', 'skill:review', 'skill:grant',
+])
+
+/** 是否通知白名单 action（chat:* 等一律不入列，TC-S7-03）。 */
+export function isNotifyAction(action: unknown): boolean {
+  return typeof action === 'string' && NOTIFY_ACTIONS.has(action)
+}
+
+/** 通知列表行 = 审计条目（seq 有序；time/scope/action/taskId/member/detail 即列表所需字段）。 */
+export type NotifyRow = HubActivity
+
+const notifyReadKey = (scope: string | null): string => `legion.notify.read.${scope ?? '__all__'}`
+
+/**
+ * 已读游标读取（localStorage per scope）。「已读」是纯本地语义：绝不写 audit、绝不新增写接口
+ * （TC-S7-04/05：点击已读 → 刷新保持、切空间回来仍在；反向断言服务端零新行）。
+ */
+export function notifyReadSeq(scope: string | null): number {
+  const raw = Number(localStorage.getItem(notifyReadKey(scope)) ?? 0)
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0
+}
+
+/** 已读游标推进（单调递增：只把游标推到「已点开的最后一条 seq」，只写 localStorage）。
+ *  游标仅本机有效、跨标签页/跨浏览器不同步（R-15 v1 接受；需服务端已读持久时走 J8-B）。 */
+export function setNotifyReadSeq(scope: string | null, seq: number): void {
+  const cur = notifyReadSeq(scope)
+  if (seq > cur) localStorage.setItem(notifyReadKey(scope), String(Math.floor(seq)))
+}
+
+/** 通知未读计数：白名单内且 seq 在已读游标之后（侧栏 badge 与通知面板共用同一口径）。 */
+export function countNotifyUnread(rows: NotifyRow[], scope: string | null): number {
+  const cursor = notifyReadSeq(scope)
+  let n = 0
+  for (const row of rows) {
+    if (isNotifyAction(row.action) && row.seq > cursor) n += 1
+  }
+  return n
 }

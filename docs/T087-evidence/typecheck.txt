@@ -1,0 +1,2 @@
+$ node node_modules/typescript/lib/tsc.js -p tsconfig.json --noEmit   # cwd: workbench
+exit 0 — 0 diagnostics

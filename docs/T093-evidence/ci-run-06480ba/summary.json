@@ -1,0 +1,38 @@
+{
+  "root": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-093",
+  "outDir": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-093\\docs\\T093-evidence\\ci-run-06480ba",
+  "finishedAt": "2026-09-05T12:47:04.885Z",
+  "stages": [
+    {
+      "name": "env",
+      "status": "PASS",
+      "ms": 76
+    },
+    {
+      "name": "deps",
+      "status": "PASS",
+      "ms": 2
+    },
+    {
+      "name": "build",
+      "status": "PASS",
+      "ms": 10173
+    },
+    {
+      "name": "test",
+      "status": "PASS",
+      "ms": 13565
+    },
+    {
+      "name": "smoke",
+      "status": "PASS",
+      "ms": 6690
+    },
+    {
+      "name": "stage",
+      "status": "PASS",
+      "ms": 92
+    }
+  ],
+  "failed": 0
+}

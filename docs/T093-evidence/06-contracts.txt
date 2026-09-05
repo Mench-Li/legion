@@ -1,0 +1,6 @@
+cmd: node --test tests/contract/contracts.test.mjs  (cwd: worktree root)
+exit: 0
+ℹ tests 56
+ℹ suites 8
+ℹ pass 56
+ℹ fail 0

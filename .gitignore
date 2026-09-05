@@ -26,3 +26,7 @@ scrum/discussion/
 .DS_Store
 Thumbs.db
 /.legion-services.log
+
+# T-093 目标级 CI / 发布运行时产物（可再生成，不入库）
+.ci/
+releases/

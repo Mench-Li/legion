@@ -1,0 +1,6 @@
+cmd: node --test team-hub/calendar.test.mjs  (cwd: worktree root)
+exit: 0
+ℹ tests 13
+ℹ suites 10
+ℹ pass 13
+ℹ fail 0

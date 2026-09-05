@@ -1,0 +1,6 @@
+cmd: node --test workbench/scripts/web.test.mjs  (cwd: worktree root)
+exit: 0
+ℹ tests 24
+ℹ suites 13
+ℹ pass 24
+ℹ fail 0

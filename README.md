@@ -29,6 +29,8 @@ workbench 军团指挥台 ──HTTP/JSON──▶ team-hub v2（:8787, team.db�
 
 ## 2. 快速开始
 
+> 部署 / 发布（环境分级、步骤、验证、回滚、变更影响）见 **docs/DEPLOY.md**；发布前 CI 门禁：`node scripts/ci/run-ci.mjs`（全量六阶段，证据见 docs/T093-evidence/）。
+
 ### 2.1 启动三件套
 
 > 日常使用推荐走 **§2.1.1 伴随 DSH Desktop 自动启停**（不用手动开）。下面三件套命令仅用于

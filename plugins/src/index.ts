@@ -1342,7 +1342,7 @@ exit 0
         await runGit(root, ['branch', '-D', `w/${id}`])
         if (stashDone.length > 0) await runGit(root, ['stash', 'pop'])
         await advanceTo(id, t.role ?? config.role)
-        await safeComment(id, `✅ 调解完成：自动合入主分支并推进 done（合并 ${merge.out.trim() ? '带冲突已解决' : '干净'}）`)
+        await safeComment(id, '✅ 调解完成：无冲突干净合入主分支，任务已推进 done')
         activity('done', id, '调解合入成功，已推进 done')
         log(`${id} → done（调解员自动合入）`)
         return

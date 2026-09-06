@@ -1,9 +1,13 @@
-# T-101 测试执行报告 —— 四能力批验收测试（R-1 跨空间技能 / R-2 分层规范 / R-3 移除空间 / R-4 对话 AI 回复）
+# T-107 编码实现自测报告 + S8 集成回归锚定 —— 「环节产出文档在任务详情直接打开预览」
 
-> 角色：tester（测试执行）｜执行任务：T-101（分支 w/T-101，独立 worktree）｜基线：HEAD = **dd2fbe3**（promote T-100）
-> 用例基线：本 worktree 的 docs/TEST_CASES.md 现文已被 T-106「产出文档预览」链取代；四能力批唯一用例基线 = **T-098 commit 497b2d8 版 docs/TEST_CASES.md（109 条 TC-Sx-yy）**，已自 git 恢复至 scratch/baseline/（与 T-100 审查同一 AC 基线；REQUIREMENTS-T095 / TASK_BREAKDOWN-T097 同批恢复）。
-> 范围：只执行与记录（不改实现）。被审实现 = T-099 commit 104f99a（promote a018666 → 82d610c → 95a1b35 → f1ed9eb T-100 → dd2fbe3）。
-> 证据目录：docs/T101-evidence/（16 个编号证据文件 + README，原始命令输出）。
+> 角色：编码实现（coder）｜任务：T-107｜分支：w/T-107（独立 worktree）
+> 上游：T-103 REQUIREMENTS.md（R-1~R-4 + AC-R1-1..5 / AC-R2-1..5 / AC-R3-1..7 / AC-R4-1..3 + §6 E2E）→ T-104 RESEARCH.md → T-105 TASK_BREAKDOWN.md（切片 S1~S8 机器行）→ T-106 TEST_CASES.md（82 条用例）
+> 运行时：node v24.19.0、tsc 5.9.3（宿主沙箱 workspace-write、禁网、无审批通道）
+> 取代声明：本报告取代 docs/TEST_REPORT.md 上版（T-092 三中心批报告；git 历史可回溯）。
+> 环境受限标注（R-18，仓库既定口径，不冒充通过）：沙箱边界 =「子进程经 pipe stdio 捕获输出 → spawn EPERM」，因此
+>  ① node:test 测试以仓库 L0 既定等价形态 **`node <file>` 直跑**（进程内执行、不 spawn 子进程）；
+>  ② vite build / bash scripts 属宿主侧（esbuild/WSL EPERM 与 E_ACCESSDENIED，本批复现记录于证据 10/13）；
+>  ③ worker-regression 中 2 条依赖 fixture 自身 `git init`（测试内 spawn pipe）的用例为环境受限失败（与 T-092 同因），非实现回归（其余 5 条全绿）。
 
 ## 0. 结论速览（判定：**非全绿** —— 4 项可复现 FAIL，其中 3 项 = T-100 必改 M1/M2/M3 复核确认，1 项 = 新增集成回归 F4）
 
@@ -15,98 +19,68 @@
 - ⚪ **O2 复核结论修正**：T-100 建议项 O2 声称「retryChatReply 取 .task 得 undefined → 每次重试报错」——HTTP 实测（真实 server.mjs 进程）三个 chat 写接口响应均为 {ok:true, task}，api.ts 的 .task 消费链一致、task 可取、retry 后 aiStatus 正确回 awaiting → **未复现**（另记录：POST /api/chat/replies/fail 的 task={skipped,source} 非消息本体，但唯一调用方 plugins chat-responder 不消费返回值，无用户影响）。
 - ⚠️ 环境受限项（如实登记 + 复现步骤，不冒充通过）：vite build（esbuild spawn EPERM，T-047/T-060 同因先例）；浏览器 L2（F4 修复前构建不可行，全 UI 层无法逐条勾选）；plugins worker-regression / slice-orchestration（沙箱禁 git 子进程夹具：实测 git init 失败）；宿主守护端到端（S10 真实一轮 ≤120s 回复需宿主守护+LLM 通道）。
 
-## 1. 环境
-
-| 项 | 值 |
-| --- | --- |
-| node | v24.19.0（node:sqlite 可用，team-hub 零第三方依赖直跑） |
-| 基线 | worktree w/T-101 @ dd2fbe3（promote T-100）；git status 初始干净（无 WIP 需续作） |
-| deps | plugins/workbench node_modules = 主仓库 junction（main repo 既有 install）；plugins 无 typescript 二进制 → 借 workbench 内 tsc（与 T-100 同法） |
-| plugins/lib | 由本树 TS 现场编译（noEmit exit 0 → emit exit 0，见 evidence 16） |
-| 执行纪律 | 只跑真实命令留证；不改任何实现文件；不 push；沙箱禁写共享 .git → 改动留 worktree 由守护捕获 diff |
-
-## 2. 执行记录（命令 → 结果 → 证据文件）
-
-| # | 命令（worktree 根） | 结果 | 证据 |
+| 切片 | 实现落点 | 自测判定 | 要点 |
 | --- | --- | --- | --- |
-| L0-1 | node plugins/tests/skills-fingerprint.test.mjs | ✅ 6/6 fail 0 | docs/T101-evidence/01 |
-| L0-2 | node plugins/tests/norms.test.mjs | ✅ 7/7 fail 0 | 02 |
-| L0-3 | node plugins/tests/chat-responder.test.mjs | ✅ 4/4 fail 0 | 03 |
-| L0-4 | node team-hub/skills.test.mjs | ✅ 20/20 fail 0 | 04 |
-| L0-5 | node team-hub/rules.test.mjs | ✅ 7/7 fail 0 | 05 |
-| L0-6 | node team-hub/spaces.test.mjs | ✅ 5/5 fail 0 | 06 |
-| L0-7 | node team-hub/chat.test.mjs | ✅ 23/23 fail 0 | 07 |
-| L0-8 | node team-hub/calendar.test.mjs（存量回归） | ✅ 13/13 fail 0 | 08 |
-| L1-1 | node team-hub/chat-l1-smoke.mjs（真实 HTTP 子进程 ×3 + SSE + 鉴权 + 超龄兜底） | ✅ 35/35 断言 + 进程级异常 0 | 09 |
-| R-1 | node scratch/repro/m1-merge-ghost.mjs（ChatView 合并/SSE 逻辑逐字转写推演） | ❌ 3 FAIL（A2/B1/B2） | 10 |
-| R-2 | node scratch/repro/m2-leak.mjs（server.mjs DAO 直调真实库） | ❌ 1 FAIL（草稿泄漏实证） | 11 |
-| R-3 | node scratch/repro/m3-ghost.mjs（DAO 直调；CHAT_REPLY_TIMEOUT_MS=100 注入） | ❌ 2 FAIL（M3-1 兜底漏网 / M3-2 队列饥饿）+ 对照组 PASS | 12 |
-| R-4 | node scratch/repro/o2-unwrap.mjs（真实 HTTP 服务进程） | ✅ 7/7 PASS（O2 未复现） | 13 |
-| T-1 | node workbench/node_modules/typescript/bin/tsc -p workbench/tsconfig.json --noEmit | ❌ **3 error TS1185**（App.tsx 314/328/330 冲突标记） | 14/15 |
-| T-2 | node workbench/node_modules/typescript/bin/tsc -p plugins/tsconfig.json --noEmit | ✅ exit 0（0 诊断） | 16 |
-| T-3 | node team-hub/goal.test.mjs（82d610c 新特性回归面，防 server.mjs 合并破坏） | ✅ 14/14 fail 0 | 控制台留证 |
-| B-1 | node workbench/node_modules/vite/bin/vite.js build --config workbench/vite.config.ts | ⚠️ spawn EPERM（esbuild 服务子进程；沙箱既有边界） | scratch/vite-attempt.txt |
-| B-2 | node plugins/tests/worker-regression.test.mjs | ⚠️ git init 失败（沙箱禁 git 子进程夹具；宿主专用） | 控制台留证 |
+| S1 岗位文档契约数据模型 | roles.json + plugins/src/index.ts（stageContractDocs/resolveStageDocPaths 纯函数）| ✅ 4/4 | node plugins/tests/doc-contract.test.mjs exit 0；roles.json 七文档岗 docs 契约 + 模板 {taskId} + artifact 回退 + 既有字段逐字节不动（AC-R1-1/5） |
+| S2 结算自动登记 + 缺失软门禁 | plugins/src/index.ts（registerContractDocs/contractDocSummary，done 结算在 commitWorktree 后 autoPromote 前）| ✅ 7/7 | node plugins/tests/artifact-register.test.mjs exit 0：登记相对路径/带 digest、{taskId} 展开、缺失停 in_review + 评论提示、gate 岗不回归、补全重跑、coder 无登记、幂等+变化追加（AC-R1-2..5 / AC-R2-3 / G-R2）|
+| S3 hub 内容端点 | team-hub/server.mjs（GET /api/artifact/content + resolveArtifactReadTarget）| ✅ 16/16 + L1 PASS | node team-hub/artifact-content.test.mjs exit 0（16 用例：逐字/分支态/主仓兜底/403 三类逃逸/404 vs 400/512KB 截断/二进制降级）；真实进程 HTTP 冒烟 PASS（证据 12：200 分支态内容 + digest 落库 + 400/404）（AC-R3-1..7 / K5-A / K9 / K10）|
+| S4 md 渲染器 | workbench/src/components/MarkdownDocView.tsx（React 元素直出、零 dangerouslySetInnerHTML、协议白名单集中 SAFE_PROTOCOLS）| ✅ 11/11 | node workbench/scripts/doc-render.test.mjs exit 0（结构/安全/回退/真实文档冒烟）（AC-R3-4/5 / G-R4 / K6-A）|
+| S5 任务详情直达区 | workbench TaskDetailModal.tsx（产出文档区 + 同屏 MarkdownDocView 预览 + 多轮倒序最新高亮 + 空态 + 错误文案）+ api.ts fetchHubDocContent + types.ts HubDocContent + index.css | ✅ typecheck 0 诊断 | tsc -p workbench/tsconfig.json --noEmit exit 0；vite 段沙箱 EPERM 复现（证据 10，R-18）（AC-R2-1..5）|
+| S6 经典看板逐条补齐 | scrum/render.mjs（artifactSection 逐条条目 + wireArtifacts 逐条预览接线，替换“仅最新一条”旧块）+ serve.mjs /api/artifact（i 逐条 + md/txt/html content-type + url/file 语义 + ../、.git、根外 403 + 分支态优先/主仓兜底）| ✅ 10/10 | node scrum/artifact-detail.test.mjs exit 0（新增测试文件；含两条 html 逐条、md 全文、降级提示、错误码矩阵）；node --check 通过（AC-R4-1/2/3 / K4-B / K8-A）|
+| S7 DSH board-plugin | board-plugin/src/index.ts serveArtifact 逐条化（i 缺省兼容/越界 400/未知 404/url 302/md 内容类型/分支态优先 + resolveArtifactFile 白名单）| ✅ typecheck 0 + lib 产出 | tsc -p board-plugin/tsconfig.json --noEmit exit 0 + 服务端 emit → board-plugin/lib/index.js；DSH 宿主不可达 → R-18 记录（证据 13）（AC-R4-1 DSH 面）|
+| S8 集成回归锚定 | docs/TEST_REPORT.md + docs/T107-evidence/ | ✅ 见 §3 | 全批套件真实运行记录 + E2E 口径逐条对应 |
 
-## 3. 切片 / 用例 → 结果映射（四能力批，TC 号取 T-098 基线）
+- 全批**零新增运行时依赖**（见 §4 复核）。
+- 边界红线：MarkdownDocView 与 md 预览路径零 dangerouslySetInnerHTML / 零 innerHTML（§4 grep）；渲染原始 HTML 一律按文本；javascript:/data: 协议白名单外退化纯文本。
 
-| 切片 | 能力面 | 机器可跑部分 | UI/宿主部分 | 结论 |
-| --- | --- | --- | --- | --- |
-| S1 | R-1 后端共享 | skills.test 20/20（TC-S1-01..11 落套件；P1 并发 TC-S1-13 未入套件） | — | ✅ 基本语义通过；F2 见 M2 泄漏 |
-| S2 | R-1 UI | api 形态静态核对 + grep（SkillsPanel 空间视图固定带 member=general&include=pending） | L2 浏览器清单（TC-S2-01..09）不可执行（F4） | ⚠️ F4 阻塞 |
-| S3 | R-1 缓存指纹 | skills-fingerprint 6/6 | — | ✅ |
-| S4 | R-2 后端 | rules 7/7（TC-S4-01..06） | — | ✅ |
-| S5 | R-2 注入 | norms 7/7（TC-S5-01..06/08） | — | ✅（O8 legacy 截断边界建议项仍成立） |
-| S6 | R-2 UI | RulesPanel 静态 + tsc（O5 dirty、O6 3000 硬编码建议项仍成立） | L2 不可执行（F4） | ⚠️ |
-| S7 | R-3 删除后端 | spaces 5/5（造数级联/保护矩阵/confirm/在办可删） | — | ✅ |
-| S8 | R-3 删除 UI | SpaceSettingsModal 静态 + api.deleteSpace 接线核对 | L2 不可执行（F4） | ⚠️ |
-| S9 | R-4 数据面 | chat 23/23 + L1 smoke 35/35（TC-S9-01..13 落套件） | — | ✅ 数据面正确；F3 大库窗口缺陷 |
-| S10 | R-4 守护 | chat-responder 4/4 + index.ts 扫单静态核对 | 宿主 E2E TC-S10-09 受限 | ✅ 纯函数；⚠️ 宿主 E2E；F3 涉守护无游标 |
-| S11 | R-4 UI 三态 | ChatView 三态骨架/渲染安全静态核对 | L2 不可执行 + **F1**（实时流转/失败重试） | ❌ F1（TC-S11-02/03） |
-| S12 | 集成回归收口 | 本报告 §2/§6 | — | ❌ 非全绿（F1-F4） |
+## 1. 切片执行证据（命令 + 输出要点）
 
-## 4. FAIL 明细（复现步骤 + 归属；只报告不改代码）
-
-### F1（= T-100 M1，复核确认）ChatView AI 三态/失败重试不实时流转
-- 位置：workbench/src/components/ChatView.tsx mergeNewest（159-176 行：167-172 只追加 id > 当前 maxId 的新消息，同 id 源消息不覆盖）；SSE 分支（181-198 行只消费 chat:message / chat:create）。
-- 复现（推演脚本 scratch/repro/m1-merge-ghost.mjs，合并算法与 SSE 分发逐字转写自源码）：① 视图已有源消息 id=1（meta.aiStatus=awaiting，发送后本地合并所致）；② 服务端源消息被 CAS 置 replied 并落回复 id=2；③ 触发 mergeNewest → 本地 = [id1(仍 awaiting), id2] → 源气泡 ⏳ 常驻（A2 FAIL）；④ 失败路径：服务端 chat:fail/chat:retry 帧到达 → SSE 无分支消费（B1 FAIL），15s 轮询 mergeNewest 只追加不覆盖 → failed 态永不呈现 → ❌ + 重试按钮永不出现（B2 FAIL）；⑤ 修复假设对照：整页 mergeById 合并则正确流转（C PASS）。
-- 期望：TC-S11-02/03（awaiting→replied/failed→重试实时流转）。
-- 归属：T-099 ChatView.tsx（T-100 已报 M1，复核确认未修）。
-
-### F2（= T-100 M2，复核确认）共享技能改版回 pending 期跨空间带出草稿
-- 位置：team-hub/server.mjs registerSkill 762-763 行（内容变化分支只 UPDATE 内容/status/contentHash，grants 列未动）+ listSkills 787-800 行（includePending 时 status 过滤失效，grantedByScope 仍命中）。
-- 复现（DAO 直调真实库，scratch/repro/m2-leak.mjs）：① A=software 注册 s-csharp → publish → grant [scope:marketing]；② B=marketing published-only 列表含 S（正向 PASS）；③ A 改版（prompt=v2-SECRET…）→ status=pending v2 且 grants 原样保留（根因实证 PASS）；④ B published-only 不再含 S（正确 PASS）；⑤ listSkills({scope:marketing, member:general, includePending:true})（= SkillsPanel 空间视图固定请求形态）→ **返回含 S 且 prompt=v2-SECRET 全文（FAIL）**。
-- 期望：AC-R1-7 / TC-S1-07 —— pending/rejected 草稿跨 scope 零泄漏（general 复审视图只应在归属 scope 见草稿）。
-- 归属：T-099 team-hub/server.mjs（T-100 已报 M2，复核确认未修）。
-
-### F3（= T-100 M3，复核确认）awaiting 兜底/回复队列仅覆盖窗口 → 幽灵 ⏳
-- 位置：team-hub/server.mjs markStaleAwaiting 1005 行（ORDER BY id DESC LIMIT 500 全 scope 窗口）+ listAwaitingReplies 1031 行（先 id>since ASC LIMIT min(n*4,800) 再 JS 过滤）+ plugins/src/index.ts sweepChatReplies 2219 行（GET /api/chat/replies 恒不带 sinceMsgId 游标）。
-- 复现（DAO 直调，scratch/repro/m3-ghost.mjs，注入 CHAT_REPLY_TIMEOUT_MS=100）：控制组（<80 条消息）awaiting 入队可取、超龄→failed（PASS，窗口内语义正常）；主场景 80 条普通消息 → awaiting 消息 id=82 → 再灌 500 条（总 581 条）：超时后触发兜底 → id=82 不在最新 500 窗口 → **仍 awaiting（M3-1 FAIL，应 failed）**；守护同款拉取（sinceMsgId=0&limit=20 → 只查前 80 行）→ **队列不含 id=82（M3-2 FAIL）** → 幽灵 awaiting：不进队、永不 failed、UI 永久 ⏳。对照：窗口内新 awaiting 超龄正常 failed（PASS → 差异仅在窗口边界）。
-- 期望：AC-R4-4 —— 任何超龄 awaiting 最终被标 failed 退出；队列能让守护取到全部待答 awaiting。
-- 归属：T-099 team-hub/server.mjs + plugins/src/index.ts（T-100 已报 M3，复核确认未修）。
-
-### F4（新增，T-100 未覆盖）HEAD workbench/src/App.tsx 含已提交的合并冲突标记 → 前端不可编译
-- 位置：workbench/src/App.tsx 314-330 行：314 <<<<<<< Updated upstream；328 =======；330 >>>>>>> Stashed changes（冲突两侧代码均被保留：R-3/S8 的 handleSpaceDeleted 对撞 goal 侧注释文本）。
-- 复现：node workbench/node_modules/typescript/bin/tsc -p workbench/tsconfig.json --noEmit → App.tsx(314,1)/(328,1)/(330,1): error TS1185: Merge conflict marker encountered（exit 2）。全文仅这 3 个错误 → 四能力四个 UI 组件自身 0 诊断，仅 App.tsx 壳无法通过。
-- 引入提交：82d610c（a018666→dd2fbe3 之间，消息「…合并外部 promote 残留（resolve stash-pop 冲突）」，作者 Mench-Li）。T-100 审查快照 a018666 无此问题 → T-099/T-100 各自声明的「workbench tsc 0 诊断」在各自快照成立，但 promote T-100 后 HEAD 已回归。
-- 影响：前端 tsc/build 全线失败 → S2/S6/S8/S11 的 L2 验收与发布在 HEAD 不可执行。
-- 归属：82d610c（守护/自动化侧的跨批 promote 合并把冲突标记提交入库；非 T-099 实现 diff）。
-
-## 5. 环境受限项（如实登记 + 复现步骤，不冒充通过）
-
-| 项 | 现象/复现 | 宿主预期 |
+| 证据文件 | 命令 | 输出要点 |
 | --- | --- | --- |
-| vite build | node workbench/node_modules/vite/bin/vite.js build → Error: spawn EPERM（esbuild 服务子进程；T-047/T-060 同因） | 修复 F4 后 cd workbench && pnpm build |
-| 浏览器 L2（TC-S2/S6/S8/S11 逐条勾选） | 构建不可行（F4）+ 无浏览器通道 | 修 F4 → build → 按 T-098 §7 清单勾选（F1 修复后重点验三态实时流转与重试路径） |
-| plugins worker-regression / slice-orchestration | 实测 git init 失败（沙箱禁 git 子进程夹具，T-091 同因） | 宿主跑全套件 |
-| S10 宿主端到端 | 发送 → ≤120s 收到 <scope>-assistant 回复 / 关开关零出站 / 失败注入 → failed 呈现 | 宿主守护 + LLM 通道（TC-S10-09）；本沙箱已绿数据面与纯函数 |
-| git 提交 | 沙箱禁写共享 .git（index.lock Permission denied）→ 改动留 worktree 由守护捕获（T-091 同例） | 守护 promote 时捕获 diff |
+| 01-s1-doc-contract.txt | `node plugins/tests/doc-contract.test.mjs` | exit 0；tests 4 / pass 4 / fail 0（roles.json 契约 + 纯函数 + JSON 合法 + next 闭环快照）|
+| 02-s2-artifact-register.txt | `node plugins/tests/artifact-register.test.mjs` | exit 0；tests 7 / pass 7 / fail 0（登记/缺失/回退/gate/重跑/幂等/多轮追加）|
+| 03-s3-artifact-content.txt | `node team-hub/artifact-content.test.mjs` | exit 0；tests 16 / pass 16 / fail 0（6 suites）|
+| 04-s4-doc-render.txt | `node workbench/scripts/doc-render.test.mjs` | exit 0；tests 11 / pass 11 / fail 0（4 suites）|
+| 05-s6-artifact-detail.txt | `node scrum/artifact-detail.test.mjs` | exit 0；tests 10 / pass 10 / fail 0（render.mjs 静态断言 + serve.mjs L1 真 HTTP）|
+| 06-plugins-worker-regression.txt | `node plugins/tests/worker-regression.test.mjs` | exit 1 为环境受限：5/7 全绿；2 条在 fixture `initGitRepo`（git init spawn pipe → EPERM）处失败，非本批实现回归（R-18）|
+| 07-plugins-typecheck.txt / 08-board-plugin-typecheck.txt / 09-workbench-typecheck.txt | `tsc -p <pkg>/tsconfig.json --noEmit`（三包各自） | 均为 exit 0、零诊断 |
+| 10-workbench-vite-build.txt | `pnpm build`（workbench）| tsc 段通过；vite→esbuild spawn EPERM（沙箱既有边界，复现记录；与 T-047/T-083/T-091/T-092 同因）|
+| 11-plugins-build.txt | `tsc -p plugins/tsconfig.json`（emit）| exit 0 → plugins/lib/index.js 产出（doc-contract/artifact-register import 目标）|
+| 12-hub-l1-smoke.txt | `node docs/T107-evidence/s3-l1-smoke.mjs` | RESULT: PASS —— POST 建空间/建任务/登记（带 digest）→ GET /api/artifact/content 200（分支态优先 source=worktree、mime=text/markdown、内容 BRANCH-L1）→ digest 落库 PASS → i=9 400 / 未知任务 404 |
+| 13-board-plugin-build.txt | `bash scripts/build.sh` | exit 1（沙箱无 bash/WSL E_ACCESSDENIED）；等价替代：tsc emit → board-plugin/lib/index.js + lib/types/index.d.ts（R-18）|
+| s3-l1-smoke.mjs | （冒烟脚本本体，可复跑）| 起临时 hub 进程 + 临时仓库 fixture，零外部依赖 |
 
-## 6. 回归范围与结论
+另有：`node --check scrum/serve.mjs / scrum/render.mjs / team-hub/server.mjs` 全部 exit 0（JS 语法校验）。
 
-- **回归范围**：四能力批（R-1..R-4 / S1-S12）全文件域 + 相邻集成面。已跑：team-hub 全 6 套件（含 calendar 存量、goal 新特性防 server.mjs 合并破坏）85+ 用例、plugins 纯函数 17/17 + tsc、chat L1 冒烟 35/35、XSS grep（零 dangerouslySetInnerHTML 直插服务端文本；ChatView 第 69 行仅注释声明）。未回归/待宿主：vite build、浏览器 L2、plugins git 夹具套件、宿主守护 E2E、workbench 壳 tsc（F4 阻塞）。
-- **结论**：四能力后端语义与数据面（R-1/R-2/R-3/R-4 DAO/HTTP 层）实测全部通过，与 T-100 审查一致；但**验收判定非全绿**：
-  1. T-100 三项必改（M1/M2/M3）独立复跑**全部复核确认仍在**（F1/F2/F3，附最小复现脚本 scratch/repro/；改动量均小：F1≈8 行、F2≈2-3 行 + 1 断言、F3 需 awaiting 游标/专用查询或显式登记窗口边界）。
-  2. **新增集成回归 F4**：82d610c 把合并冲突标记提交进 workbench/src/App.tsx，HEAD 前端无法 tsc/build —— 当前最优先修复项（阻塞 S2/S6/S8/S11 全部 L2 验收与发布）。
-  3. T-100 O2 建议项 HTTP 实测**未复现**（.task 消费链一致），建议降级/关闭；O1（CSS 缺失）、O3（retry 无 failed-only 前置）、O5（RulesPanel dirty）、O6（前端 3000 与后端 env 脱钩）、O7（读接口鉴权）、O8（legacy 截断边界）建议项仍成立。
-- **放行建议（供将军/宿主）**：F4 → F1+F2（集中小改、风险低）→ F3（可紧随）→ 宿主补跑 §5 清单后按 T-098 §7 完成 L2 勾选。
+## 2. 既有套件回归（本批改动相邻面）
+
+| 套件 | 命令 | 结果 |
+| --- | --- | --- |
+| team-hub skills | `node team-hub/skills.test.mjs` | ✅ 12/12 exit 0 |
+| team-hub chat | `node team-hub/chat.test.mjs` | ✅ 13/13 exit 0 |
+| team-hub calendar | `node team-hub/calendar.test.mjs` | ✅ 13/13 exit 0 |
+| plugins worker-regression | `node plugins/tests/worker-regression.test.mjs` | 5/7 ✅；2 条 git-spawn fixture 环境受限（§0）|
+| scrum/taskctl.ttl.test.mjs | `node scrum/taskctl.ttl.test.mjs` | 环境受限：fixture 需 spawn taskctl CLI（pipe → EPERM），沙箱内无法执行（与 T-092 §2.1 同因，非本批改动）|
+
+## 3. E2E 口径对应（REQUIREMENTS §6 + AC 逐条）
+
+| 口径 | 证据落点 | 判定 |
+| --- | --- | --- |
+| 主分支态逐字（AC-R3-1/E2E-1）| S3 套件「主分支态逐字一致」+「删除 worktree 后回退主仓（source=main）」| ✅ |
+| 未 promote 分支态逐字（AC-R3-2/E2E-2，K5-A 零 git CLI）| S3 套件分支态用例 + S6 serve L1（i=0 raw 读 `.legion-worktrees/<taskId>/` 内容）+ hub L1（source=worktree）| ✅ |
+| 契约登记/缺失提示（AC-R1-4/E2E-3，G-R2 软门禁）| S2 套件缺失用例：停 in_review + 评论含期望路径/已登记清单；补全重跑解阻 | ✅ |
+| 打回多轮倒序最新高亮（AC-R2-3/E2E-4）| S2 幂等/追加用例（同 path 字节未变不重复、变化追加，at 递增）+ S5 UI 按 at 倒序且首条「最新」徽标（docCandidates.sort desc + k===0 doc-newest，typecheck 锚定）| ✅ |
+| 渲染安全样例（AC-R3-5/E2E-5）| S4 套件：script/img onerror 按文本转义、javascript:/data: 拒绝、事件属性不存在、safeHref 矩阵；源码零 dangerouslySetInnerHTML | ✅ |
+| 512KB 截断/二进制降级（AC-R3-6/K9）| S3 套件：big → truncated=true 内容恰 512KB；NUL/非法 UTF-8 → previewable=false 空内容 | ✅ |
+| 存量绝对路径读取期兼容（K10/G-R8）| S3 套件 T-LEGACY（绝对路径剥前缀 + 删 worktree 回退主仓）、根外绝对 403 | ✅ |
+| S1 详情直达区（AC-R2-1..5）| S5 typecheck 0 + 组件代码走查（fetchHubDocContent 错误透传、docState loading/ok/err、路径复制、空态文案）| ✅（L2 浏览器级因 GUI 宿主不可达按 R-18 记录）|
+| S2 看板逐条（AC-R4-1..3）| S6 套件 10/10（渲染产物静态断言 + serve L1 逐条内容/降级/错误码）| ✅ |
+| S7 DSH 托管态 | board-plugin typecheck 0 + serveArtifact 语义与 serve.mjs 对齐（同契约函数级）+ 宿主注入冒烟 R-18 记录 | ⚠️ typecheck✅ 宿主冒烟受限 |
+
+## 4. 纪律复核
+
+- 零新增运行时依赖：git diff --stat 无 package.json 变更（plugins/workbench/board-plugin/team-hub 均未新增依赖；roles.json 仅加 docs 字段）。
+- innerHTML 红线：`grep dangerouslySetInnerHTML` 命中仅既有组件（CalendarView/ChatView/FilesView/NotifyView，本批未触碰）；新增 MarkdownDocView、serve/render/hub/plugins 零命中；md 预览路径用 textContent/pre/iframe（html 产物 iframe 隔离预览）。
+- 文件域：改动限于本批切片声明域（roles.json、plugins/src/index.ts、plugins/tests、team-hub/server.mjs、workbench/src/{api.ts,types.ts,index.css,components/TaskDetailModal.tsx,components/MarkdownDocView.tsx,scripts/doc-render.test.mjs}、scrum/{render.mjs,serve.mjs,artifact-detail.test.mjs}、board-plugin/src/index.ts）+ docs（TEST_REPORT.md / T107-evidence/）。taskctl.mjs 未改。
+- 未 push；改动保留在 w/T-107 worktree，由守护 promote 捕获。
+- git add/commit 尝试记录：`git add -A` / `git commit` 均 exit 128 —— `Unable to create 'D:/project/DSH/legion/.git/worktrees/T-107/index.lock': Permission denied`（沙箱禁写共享 .git，与既有批次同因，T-092 §尾注先例）。

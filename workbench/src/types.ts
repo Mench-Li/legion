@@ -338,8 +338,8 @@ export interface HubTask {
   evidence: Array<{ by: string; at: string; text: string }>
   /** 结构化补丁记录（L1 审计：改动文件 + diff）。兼容旧版字符串补丁列表。 */
   patches: Array<AuditPatch | string>
-  /** 产物登记（html/file/url）。 */
-  artifacts?: Array<{ by: string; at: string; kind: string; path: string; title: string }>
+  /** 产物登记（html/file/url）。digest 为 S2 结算登记的 sha256（幂等去重用）。 */
+  artifacts?: Array<{ by: string; at: string; kind: string; path: string; title?: string; digest?: string }>
   /** 结构化测试报告（D7' 闸门输入）。 */
   testReport?: { passed: boolean; failures: Array<{ name: string; log: string; repro: string }>; summary: string; at: string; by: string } | null
   /** 审计批注（文件级 OK/问题）。 */
@@ -349,6 +349,30 @@ export interface HubTask {
   createdAt?: string
   updatedAt?: string
 }
+/** S3 内容通道响应（GET /api/artifact/content）：预览所需元数据 + 文本内容。 */
+export interface HubDocContent {
+  taskId: string
+  /** 条目序（t.artifacts 数组原下标）。 */
+  i: number
+  /** 文件最终读取路径（展示用，可能为绝对或相对原样）。 */
+  path?: string
+  /** 相对仓库根的规范路径（斜杠分隔）。 */
+  relPath: string
+  /** 内容来源：分支态 worktree 目录或主仓库根。 */
+  source: 'worktree' | 'main'
+  size: number
+  /** 服务端截断上限（字节）。 */
+  limit?: number
+  truncated: boolean
+  /** false 表示二进制/非 UTF-8/为空，前端按不可预览提示处理。 */
+  previewable: boolean
+  /** text/markdown 或 text/plain。 */
+  mime?: string
+  /** 文本内容（previewable=false 时为空串）。 */
+  content: string
+  error?: string
+}
+
 /** team-hub v2 对话（S1）：会话条目（/api/chat/conversations）。 */
 export interface ChatConversation {
   id: number

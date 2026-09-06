@@ -9,9 +9,9 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { spawn } from 'node:child_process'
-import { readFile, watch, watchFile, unwatchFile } from 'node:fs'
+import { existsSync, readFile, watch, watchFile, unwatchFile } from 'node:fs'
 import { readFile as readFileP } from 'node:fs/promises'
-import { join, normalize, sep } from 'node:path'
+import { extname, join, normalize, sep } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
 export const name = '@dsh-external/dsh-scrum-board'
@@ -71,43 +71,86 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   /**
-   * 产物预览（借鉴 dsh-worktable 的 widget-result.json 自动挂载）：
-   * GET /api/artifact?task=T-00X → JSON 元信息；?task=T-00X&raw=1 → 文件内容
-   * （html → text/html 供 iframe 预览，file → octet-stream 下载，url → 302 跳转）。
-   * path 一律取自 tasks.json 的 artifact 记录（不经用户查询串），并做根白名单校验。
+   * 产物逐条内容服务（R-4 S2 / K4-B，对齐 serve.mjs 语义）：
+   * GET /api/artifact?task=T-00X[&i=N] → JSON 元信息（i 缺省 = 最新一条，兼容既有行为）；
+   *   &raw=1 → 文件内容：html→text/html（逐条 iframe）、md/txt→text/markdown|text/plain、其余 octet-stream；url→302 跳外链。
+   * path 一律取自 tasks.json 的 artifact 记录（不经用户查询串）；相对路径按 repoRoot/artifactRoots 白名单解析，
+   * 任一段 .. / .git（不区分大小写）拒绝；未 promote 分支态优先读 repoRoot/.legion-worktrees/<taskId>/<rel>，主仓库根兜底（K5-A）。
    */
   async function serveArtifact(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
       const url = new URL(req.url ?? '', 'http://localhost')
       const taskId = url.searchParams.get('task') ?? ''
       const raw = url.searchParams.get('raw') === '1'
-      const db = (await readJson(tasksFile)) as { tasks?: Record<string, { artifacts?: { kind: string; title?: string; path: string }[] }> } | null
+      const iRaw = url.searchParams.get('i')
+      if (!taskId) { json(res, 400, { error: '缺少参数 task' }); return }
+      const db = (await readJson(tasksFile)) as { tasks?: Record<string, { artifacts?: { by?: string; at?: string; kind: string; title?: string; path: string }[] }> } | null
       const t = db?.tasks?.[taskId]
-      const a = (t?.artifacts ?? []).slice(-1)[0]
-      if (!a) {
-        json(res, 404, { error: `任务 ${taskId} 无产物` })
-        return
+      if (!t) { json(res, 404, { error: `任务不存在：${taskId}` }); return }
+      const arts = t.artifacts ?? []
+      if (arts.length === 0) { json(res, 404, { error: `任务 ${taskId} 无产物` }); return }
+      let a: { by?: string; at?: string; kind: string; title?: string; path: string }
+      let idx: number
+      if (iRaw === null || iRaw === '') { idx = arts.length - 1; a = arts[idx] }
+      else {
+        if (!/^\d+$/.test(iRaw)) { json(res, 400, { error: '条目序号非法（应为非负整数）' }); return }
+        idx = Number(iRaw)
+        if (idx >= arts.length) { json(res, 400, { error: `条目序号越界：任务 ${taskId} 共 ${arts.length} 条产物（i=${idx}）` }); return }
+        a = arts[idx]
       }
+      const meta = { taskId, i: idx, kind: a.kind, title: a.title ?? '', path: a.path, at: a.at ?? null, by: a.by ?? null, total: arts.length }
       if (a.kind === 'url') {
-        res.writeHead(302, { location: a.path })
-        res.end()
-        return
+        if (!raw) { json(res, 200, { ...meta, url: true }); return }
+        res.writeHead(302, { location: a.path }); res.end(); return
       }
-      if (!artifactAllowed(a.path)) {
-        json(res, 403, { error: '产物路径不在允许根内' })
-        return
-      }
+      const abs = await resolveArtifactFile(taskId, a.path)
+      if (abs === null) { json(res, 403, { error: '产物路径不在允许根内' }); return }
       if (!raw) {
-        json(res, 200, { kind: a.kind, title: a.title ?? '', path: a.path, exists: await readFileP(a.path, 'utf8').then(() => true).catch(() => false) })
+        const ok = await readFileP(abs).then(() => true).catch(() => false)
+        json(res, 200, { ...meta, exists: ok })
         return
       }
-      const data = await readFileP(a.path)
-      res.writeHead(200, { 'content-type': a.kind === 'html' ? 'text/html; charset=utf-8' : 'application/octet-stream' })
+      const data = await readFileP(abs)
+      const ext = extname(abs).toLowerCase()
+      const ct = ext === '.html' ? 'text/html; charset=utf-8'
+        : ext === '.md' || ext === '.markdown' ? 'text/markdown; charset=utf-8'
+        : ext === '.txt' ? 'text/plain; charset=utf-8'
+        : 'application/octet-stream'
+      res.writeHead(200, { 'content-type': ct })
       res.end(data)
     } catch (e) {
       json(res, 500, { error: e instanceof Error ? e.message : String(e) })
     }
   }
+
+  /** 白名单文件解析：绝对路径须落在某允许根内；相对路径拒绝 ../ 与 .git 段后，
+   *  分支态（repoRoot/.legion-worktrees/<taskId>/<rel>）优先、主根（repoRoot/artifactRoots 逐个）兜底。
+   *  返回命中的绝对路径；白名单外返回 null。
+   */
+  async function resolveArtifactFile(taskId: string, p: string): Promise<string | null> {
+    const raw = String(p ?? '').trim()
+    if (raw.length === 0) return null
+    const winAbs = /^[A-Za-z]:[\\/]/.test(raw)
+    const posixAbs = raw.startsWith('/') || raw.startsWith('\\\\')
+    if (winAbs || posixAbs) {
+      const n = normalize(raw)
+      return [repoRoot, ...config.artifactRoots].some(root => { const r = normalize(root); return n === r || n.startsWith(r + sep) }) ? n : null
+    }
+    let relp = raw.replace(/\\/g, '/')
+    while (relp.startsWith('./')) relp = relp.slice(2)
+    relp = relp.replace(/^\/+/, '')
+    const segs = relp.split('/').filter(Boolean)
+    if (segs.length === 0 || segs.includes('..') || segs.some(x => x.toLowerCase() === '.git')) return null
+    const roots = [repoRoot, ...config.artifactRoots]
+    const branch = join(repoRoot, '.legion-worktrees', taskId, ...segs)
+    if (artifactAllowed(branch) && existsSync(branch)) return branch
+    for (const root of roots) {
+      const abs = join(root, ...segs)
+      if (existsSync(abs)) return abs
+    }
+    return join(repoRoot, ...segs) // 文件暂不存在也返回主根候选，供调用方做 exists 元信息
+  }
+
 
   /** 探测默认 hub（未显式配置 hubUrl 时）：同机 DSH web 端口的 /team-hub。 */
   async function detectHub(): Promise<void> {

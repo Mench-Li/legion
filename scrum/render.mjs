@@ -13,8 +13,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
-const TASKS_FILE = join(ROOT, 'scrum', 'tasks.json')
-const STATE_FILE = join(ROOT, 'state.json')
+const TASKS_FILE = process.env.LEGION_TASKS_FILE || join(ROOT, 'scrum', 'tasks.json')
+const STATE_FILE = process.env.LEGION_STATE_FILE || join(ROOT, 'state.json')
 const COLUMN_ORDER = ['backlog', 'todo', 'in_progress', 'in_review', 'blocked', 'done']
 const COLUMN_LABEL = {
   backlog: 'Backlog（未批准）',
@@ -423,6 +423,86 @@ function renderHtml(board) {
     overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove() })
   }
 
+  // ---- S6：产物逐条条目（kind 徽标+title+时间+路径；md/txt 安全预览弹层；多条 html 独立 iframe；file:// 降级提示）----
+  function pathBaseName(p) {
+    const s = String(p || '')
+    const i = Math.max(s.lastIndexOf('/'), s.lastIndexOf(String.fromCharCode(92)))
+    return i >= 0 ? s.slice(i + 1) : s
+  }
+
+  function artifactSection(c) {
+    const arts = c.artifacts || []
+    const head = '<div style="margin-top:10px;color:#9aa6bd;font-size:12px">产物（' + arts.length + ' 条，逐条可预览/打开）</div>'
+    const rows = arts.map((a, i) => {
+      const kind = a.kind || 'file'
+      const title = a.title ? esc(a.title) : esc(pathBaseName(a.path))
+      const low = String(a.path || '').toLowerCase()
+      const isText = low.endsWith('.md') || low.endsWith('.markdown') || low.endsWith('.txt')
+      let act = ''
+      if (kind === 'url') {
+        act = '<a href="' + esc(a.path) + '" target="_blank" rel="noopener" style="color:#60a5fa">打开链接 ↗</a>'
+      } else if (kind === 'html') {
+        act = '<button type="button" data-artact data-i="' + i + '" data-kind="html" data-open-label="▶ html 预览" style="margin:4px 6px 0 0;background:#1d2740;color:#e6e9f0;border:1px solid #26334e;border-radius:8px;padding:3px 10px;cursor:pointer;font-size:11px">▶ html 预览</button>'
+      } else if (isText) {
+        act = '<button type="button" data-artact data-i="' + i + '" data-kind="text" data-open-label="▶ 预览" style="margin:4px 6px 0 0;background:#1d2740;color:#e6e9f0;border:1px solid #26334e;border-radius:8px;padding:3px 10px;cursor:pointer;font-size:11px">▶ 预览</button>'
+      } else if (kind === 'file') {
+        act = LIVE
+          ? "<a href='/api/artifact?task=' + encodeURIComponent(c.id) + '&i=' + i + '&raw=1' target=\"_blank\" rel=\"noopener\" style=\"color:#60a5fa\">⬇ 下载</a>"
+          : '<span style="color:#5d6a85">file 产物 · 服务模式（serve.mjs / DSH /api）下可下载</span>'
+      }
+      return '<div class="comment">'
+        + '<span class="who">📦 [' + esc(kind) + '] ' + title + '</span>'
+        + '<span class="at">' + (a.by ? esc(String(a.by)) + ' · ' : '') + fmt(a.at) + '</span>'
+        + '<div class="text" style="word-break:break-all">' + esc(a.path) + '</div>'
+        + (act ? '<div class="art-actions">' + act + '</div>' : '')
+        + '<div class="art-box" data-artbox="' + esc(c.id) + ':' + i + '" style="display:none"></div>'
+        + '</div>'
+    }).join('')
+    return arts.length > 0 ? head + rows : ''
+  }
+
+  /** 逐条预览开关（kind=html → 独立 iframe；kind=text → fetch 后 textContent 进 <pre>，天然转义无注入）。 */
+  function wireArtifacts(overlay, taskId) {
+    overlay.querySelectorAll('[data-artact]').forEach(btn => {
+      btn.onclick = () => {
+        const idx = btn.dataset.i
+        const box = overlay.querySelector('[data-artbox="' + taskId + ':' + idx + '"]')
+        if (!box) return
+        if (box.dataset.open === '1') {
+          box.style.display = 'none'; box.dataset.open = '0'; btn.textContent = btn.dataset.openLabel
+          return
+        }
+        box.style.display = 'block'; box.dataset.open = '1'; btn.textContent = '▴ 收起'
+        if (!LIVE) {
+          box.innerHTML = '<div style="color:#7d8aa3;font-size:12px;padding:8px 0">本地双击（file://）模式无法取回文件内容——请用服务模式（serve.mjs / DSH 看板 /api/artifact）后在此预览。</div>'
+          return
+        }
+        const url = '/api/artifact?task=' + encodeURIComponent(taskId) + '&i=' + encodeURIComponent(idx) + '&raw=1'
+        if (btn.dataset.kind === 'html') {
+          box.innerHTML = '<iframe src="' + url + '" style="width:100%;height:360px;border:1px solid #26334e;border-radius:8px;background:#fff;margin-top:6px"></iframe>'
+          return
+        }
+        box.innerHTML = '<div style="color:#9aa6bd;font-size:12px;padding:4px 0">加载中…</div>'
+        fetch(url)
+          .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status + '：内容不可读（404/403/越界等）'); return r.text() })
+          .then(text => {
+            box.textContent = ''
+            const pre = document.createElement('pre')
+            pre.style.cssText = 'margin:8px 0 0;padding:10px;background:#0f1420;border:1px solid #26334e;border-radius:8px;max-height:52vh;overflow:auto;font-size:11px;line-height:1.7;color:#c6cede;white-space:pre-wrap;word-break:break-word'
+            pre.textContent = text
+            box.appendChild(pre)
+          })
+          .catch(err => {
+            box.textContent = ''
+            const d = document.createElement('div')
+            d.style.cssText = 'color:#fda4af;font-size:12px;padding:6px 0'
+            d.textContent = '预览读取失败：' + String((err && err.message) || err)
+            box.appendChild(d)
+          })
+      }
+    })
+  }
+
   function detailModal() {
     const c = detail ? findCard(detail) : null
     if (!c) return
@@ -434,7 +514,7 @@ function renderHtml(board) {
         \${c.description ? \`<div style="color:#c6cede;white-space:pre-wrap;font-size:12px">\${esc(c.description)}</div>\` : ''}
         \${c.acceptance.length ? \`<ul class="acceptance">\${c.acceptance.map(a => \`<li>\${esc(a)}\</li>\`).join('')}</ul>\` : ''}
         \${c.patches && c.patches.length ? \`<div style="margin-top:10px;color:#9aa6bd;font-size:12px">改动 diff（\${c.patches.length}）</div>\${c.patches.map(p => \`<div class="comment"><span class="who">#\${esc(p.id)}</span><span class="at">\${fmt(p.at)}</span><div class="text">\${esc(p.summary)}\${p.files && p.files.length ? '（' + esc(p.files.join(', ')) + '）' : ''}</div><button type="button" data-patch="\${esc(p.id)}" style="margin-top:4px;background:#1d2740;color:#e6e9f0;border:1px solid #26334e;border-radius:8px;padding:3px 10px;cursor:pointer;font-size:11px">查看 diff</button></div>\`).join('')}\` : ''}
-        \${c.artifacts && c.artifacts.length ? \`<div style="margin-top:10px;color:#9aa6bd;font-size:12px">产物（\${c.artifacts.length}，最新一条可在下方预览）</div>\${c.artifacts.map((a, i) => \`<div class="comment"><span class="who">📦 \${esc(a.title || a.kind)}</span><span class="at">\${fmt(a.at)}</span><div class="text">\${esc(a.path)}</div>\${i === c.artifacts.length - 1 && a.kind === 'html' ? \`<iframe src='/api/artifact?task=\${esc(c.id)}&raw=1' style="width:100%;height:300px;border:1px solid #26334e;border-radius:8px;background:#fff;margin-top:4px"></iframe>\` : ''}\${i === c.artifacts.length - 1 && a.kind === 'url' ? \`<div style="margin-top:4px"><a href="\${esc(a.path)}" target="_blank" rel="noopener" style="color:#60a5fa">打开链接 ↗</a></div>\` : ''}\${i === c.artifacts.length - 1 && a.kind === 'file' ? \`<div style="margin-top:4px"><a href='/api/artifact?task=\${esc(c.id)}&raw=1' target="_blank" rel="noopener" style="color:#60a5fa">下载文件 ⬇</a></div>\` : ''}</div>\`).join('')}\` : ''}
+        \${artifactSection(c)}
         <div style="margin-top:10px;color:#9aa6bd;font-size:12px">评论（\${c.comments.length}）</div>
         \${c.comments.map(cm => \`<div class="comment"><span class="who">@\${esc(cm.by)}</span><span class="at">\${fmt(cm.at)}</span><div class="text">\${esc(cm.text)}</div></div>\`).join('') || '<div style="color:#5d6a85;font-size:12px;padding:6px 0">暂无评论</div>'}
         <label>追加评论（\${esc(identity.get())} 身份；退回任务请写清原因）</label>
@@ -447,6 +527,7 @@ function renderHtml(board) {
         </div>
       </div>\`
     document.body.appendChild(overlay)
+    wireArtifacts(overlay, c.id)
     overlay.querySelector('[data-close]').onclick = () => { overlay.remove(); detail = null }
     overlay.addEventListener('click', e => { if (e.target === overlay) { overlay.remove(); detail = null } })
     overlay.querySelector('#cmt-send').onclick = async () => {

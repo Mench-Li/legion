@@ -1,4 +1,4 @@
-import type { ActivityEvent, AgentCatalogItem, AgentModelCfg, ApiConfig, BoardData, CardStatus, ChatConversation, ChatMessage, DirListing, FileListResponse, FilePreview, GoalInfo, GoalStatus, HubActivity, HubAuditEvent, HubTask, MissionsResponse, ModelOption, OverlapGroup, RepoInspect, RosterResponse, SkillInfo, SpaceInfo, WebFetchResult } from './types'
+import type { ActivityEvent, AgentCatalogItem, AgentModelCfg, ApiConfig, BoardData, CardStatus, ChatConversation, ChatMessage, DirListing, FileListResponse, FilePreview, GoalInfo, GoalStatus, HubActivity, HubAuditEvent, HubDocContent, HubTask, MissionsResponse, ModelOption, OverlapGroup, RepoInspect, RosterResponse, SkillInfo, SpaceInfo, WebFetchResult } from './types'
 
 /**
  * 数据源地址解析：?api= 查询参数优先，其次 localStorage，最后默认 4820。
@@ -332,6 +332,23 @@ export async function fetchHubActivity(opts: { scope?: string | null; taskId?: s
   if (opts.limit !== undefined) qs.set('limit', String(opts.limit))
   if (qs.size === 0) qs.set('limit', '100')
   return readJson<HubActivity[]>(await fetch(`${hubBase()}/api/activity?${qs.toString()}`))
+}
+
+/** team-hub v2（S3 内容通道）：取某任务某产物条目对应的文件内容（md 按 text/markdown 语义）。
+ * i 缺省取最新一条（兼容既有语义）；404/403/越界/二进制等错误由服务端 {error} 文案透传。 */
+export async function fetchHubDocContent(taskId: string, index?: number): Promise<HubDocContent> {
+  const qs = new URLSearchParams({ task: taskId })
+  if (typeof index === 'number') qs.set('i', String(index))
+  const res = await fetch(`${hubBase()}/api/artifact/content?${qs.toString()}`)
+  let body: unknown = null
+  try { body = await res.json() } catch { /* 非 JSON 响应 */ }
+  if (!res.ok) {
+    const err = (body !== null && typeof body === 'object' && 'error' in body && typeof (body as { error: unknown }).error === 'string')
+      ? (body as { error: string }).error
+      : res.statusText
+    throw new Error(`${res.status} ${err}`)
+  }
+  return body as HubDocContent
 }
 
 /** team-hub v2：持续执行编排开关状态。 */

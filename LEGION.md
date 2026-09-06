@@ -15,6 +15,11 @@
 - 验收标准逐条对应说明，不留「应该没问题」式结论。
 - 修改行为的同时更新受影响文档（README、JSDoc 注释）。
 
+## 规范分层总纲（R-2）
+
+仓库规则分层注入：空间/项目层文件族（本文件 `LEGION.md` + `AGENTS.md` + `agent.md`，按序合并）优先于全局层（team-hub `rules` 表，将军在指挥台「📜 规范中心」维护）。
+skills（技能中心，按 scope/授权注入）与 roles.json stage.prompt（岗位模板）为另两类内容载体；完整职责总纲见 `README.md` §3.8.1。
+
 ## 完成回报
 
 - 完成后只输出 JSON 报告：`{"status":"done","summary":...,"evidence":...,"blocker":""}`

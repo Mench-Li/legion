@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { createChatConversation, fetchChatConversations, fetchChatMessages, hubBase, postChatMessage, subscribeHubAudit } from '../api'
+import { createChatConversation, fetchChatConversations, fetchChatMessages, hubBase, postChatMessage, retryChatReply, subscribeHubAudit } from '../api'
 import type { ChatConversation, ChatMessage } from '../types'
 import { toast } from './Toast'
 
@@ -23,6 +23,26 @@ function mergeById(a: ChatMessage[], b: ChatMessage[]): ChatMessage[] {
 
 function authorLabel(m: ChatMessage): string {
   return m.author === 'general' ? '将军' : m.author
+}
+
+/** R-4/S11：author 身份泛化——general = 「我」，其余（含 <scope>-assistant）一律对方侧渲染（TC-S11-01/06）。 */
+function isMe(author: string): boolean {
+  return author === 'general'
+}
+
+/** 是否 AI 回复方（S9/S10 身份 <scope>-assistant 或携带 aiStatus/aiModel 元数据；旧消息兼容按普通气泡，TC-S11-07）。 */
+function isBot(m: ChatMessage): boolean {
+  const meta = (m.meta ?? null) as Record<string, unknown> | null
+  const st = meta?.aiStatus
+  const mod = meta?.aiModel
+  if (typeof st === 'string' || typeof mod === 'string') return true
+  return typeof m.author === 'string' && /-assistant$/.test(m.author)
+}
+
+function metaStr(m: ChatMessage, key: string): string | undefined {
+  const meta = (m.meta ?? null) as Record<string, unknown> | null
+  const v = meta?.[key]
+  return typeof v === 'string' && v.length > 0 ? v : undefined
 }
 
 /**
@@ -58,6 +78,7 @@ export function ChatView({ scope, hubMode }: { scope: string | null; hubMode: bo
   const [loadingOlder, setLoadingOlder] = useState(false)
   const [draft, setDraft] = useState('')
   const [sending, setSending] = useState(false)
+  const [retryingId, setRetryingId] = useState<number | null>(null) // R-4/S11：正在重试的消息 id
   const [creating, setCreating] = useState(false)
   const [newTitle, setNewTitle] = useState('')
   const scrollRef = useRef<HTMLDivElement | null>(null)
@@ -296,6 +317,27 @@ export function ChatView({ scope, hubMode }: { scope: string | null; hubMode: bo
     }
   }
 
+  /** R-4/S11：重试一条失败消息（TC-S11-03）——服务端 CAS 重置 failed→awaiting 并重新入队；
+   *  本地用返回值**原位替换**该消息（不新增气泡）。会话/空间身份守卫同其它写回。 */
+  const doRetry = async (m: ChatMessage): Promise<void> => {
+    const scopeAtCall = scope
+    const convAtCall = activeId
+    if (retryingId === m.id) return
+    setRetryingId(m.id)
+    try {
+      const updated = await retryChatReply(m.id)
+      if (identityStale(scopeAtCall, convAtCall, scopeRef.current, activeRef.current)) return
+      setMsgs(prev => prev.map(x => (x.id === updated.id ? updated : x)))
+      toast('ok', '已重新提交回复，等待 AI 回复…')
+    } catch (e) {
+      if (!identityStale(scopeAtCall, convAtCall, scopeRef.current, activeRef.current)) {
+        toast('err', `重试失败：${e instanceof Error ? e.message : String(e)}`)
+      }
+    } finally {
+      setRetryingId(null)
+    }
+  }
+
   return (
     <div className="center-col">
       <div className="panel goal-card chat-head">
@@ -353,12 +395,44 @@ export function ChatView({ scope, hubMode }: { scope: string | null; hubMode: bo
               >
                 {loadingMsgs && msgs.length === 0 && <div className="chat-empty">⏳ 加载中…</div>}
                 {!loadingMsgs && msgs.length === 0 && <div className="chat-empty">还没有消息，发第一条吧</div>}
-                {msgs.map(m => (
-                  <div key={m.id} className="chat-row">
-                    <div className={`chat-author${m.author === 'general' ? ' me' : ''}`}>{authorLabel(m)} · {fmt(m.createdAt)}</div>
-                    <div className={m.author === 'general' ? 'chat-bubble me' : 'chat-bubble'}>{m.body}</div>
-                  </div>
-                ))}
+                {msgs.map(m => {
+                  const me = isMe(m.author)
+                  const bot = isBot(m)
+                  const st = metaStr(m, 'aiStatus')
+                  const aiModel = metaStr(m, 'aiModel')
+                  const aiError = metaStr(m, 'aiError')
+                  return (
+                    <div key={m.id} className={`chat-row${me ? ' me-row' : ''}${bot ? ' bot-row' : ''}`}>
+                      <div className={`chat-author${me ? ' me' : ''}`}>
+                        {authorLabel(m)}
+                        {bot && <span className="chip" style={{ marginLeft: 4 }}>🤖</span>}
+                        {bot && aiModel && <span className="chip" style={{ marginLeft: 4 }} title="AI 回复模型">{aiModel}</span>}
+                        <span style={{ color: 'var(--muted-2)', fontSize: 11 }}> · {fmt(m.createdAt)}</span>
+                      </div>
+                      <div className={me ? 'chat-bubble me' : 'chat-bubble'}>
+                        {m.body}
+                        {me && st === 'awaiting' && (
+                          <div className="chat-ai-state" style={{ marginTop: 6, fontSize: 11, color: 'var(--muted-2)' }}>
+                            ⏳ 等待回复…（{fmt(m.createdAt)} 提交）
+                          </div>
+                        )}
+                        {me && st === 'failed' && (
+                          <div className="chat-ai-state err" style={{ marginTop: 6, fontSize: 11, color: '#ff8f8f' }}>
+                            ❌ 回复失败{aiError ? `：${aiError}` : ''}
+                            <button
+                              className="btn small"
+                              disabled={retryingId === m.id}
+                              onClick={() => void doRetry(m)}
+                              style={{ marginLeft: 8 }}
+                            >
+                              {retryingId === m.id ? '重试中…' : '重试'}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )
+                })}
               </div>
               <div className="chat-composer">
                 <textarea

@@ -30,6 +30,7 @@ import { ActivityFeed } from './components/ActivityFeed'
 import { QuickTools } from './components/QuickTools'
 import { CommandBar } from './components/CommandBar'
 import { SkillsPanel } from './components/SkillsPanel'
+import { RulesPanel } from './components/RulesPanel'
 import { ChatView } from './components/ChatView'
 import { FilesView } from './components/FilesView'
 import { BrowserView } from './components/BrowserView'
@@ -301,6 +302,18 @@ export default function App(): React.JSX.Element {
       .catch(() => undefined)
   }, [])
 
+/** 空间删除成功后（R-3/S8，TC-S8-05/06）：关闭弹窗、重拉列表；若删的是当前激活空间则切回「全部空间」（scope=null）。 */
+  const handleSpaceDeleted = useCallback((deletedId: string): void => {
+    setSpaceSettings(null)
+    void fetchSpaces()
+      .then(spaces => setHubSpaces(spaces))
+      .catch(() => undefined)
+    if (scope === deletedId) {
+      setScope(null)
+      void loadMissions(null)
+    }
+  }, [scope, loadMissions])
+
   /** 发布空间目标：写 team-hub 后刷新当前空间目标。 */
   const handlePublishGoal = useCallback(async (scopeValue: string, objective: string): Promise<void> => {
     await publishGoal(scopeValue, objective)
@@ -380,7 +393,9 @@ export default function App(): React.JSX.Element {
         />
         {board ? (
           active === 'skills' ? (
-            <SkillsPanel scope={scope} hubMode={hubMode} />
+            <SkillsPanel scope={scope} hubMode={hubMode} spaces={hubSpaces} />
+          ) : active === 'rules' ? (
+            <RulesPanel scope={scope} hubMode={hubMode} spaces={hubSpaces} onOpenFiles={() => setActive('files')} />
           ) : active === 'chat' ? (
             <ChatView scope={scope} hubMode={hubMode} />
           ) : active === 'files' ? (
@@ -422,7 +437,7 @@ export default function App(): React.JSX.Element {
         roster={hubMode ? roster : null}
       />
       {showNewSpace && <NewSpaceModal onClose={() => setShowNewSpace(false)} onCreated={handleSpaceCreated} />}
-      {spaceSettings && <SpaceSettingsModal space={spaceSettings} onClose={() => setSpaceSettings(null)} onSaved={handleSpaceSaved} />}
+      {spaceSettings && <SpaceSettingsModal space={spaceSettings} onClose={() => setSpaceSettings(null)} onSaved={handleSpaceSaved} onDeleted={handleSpaceDeleted} />}
       <ToastHost />
     </div>
   )

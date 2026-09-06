@@ -202,6 +202,47 @@ export function updateSpaceConfig(input: {
   })
 }
 
+export interface SpaceDeleteImpactCounts {
+  tasks: number
+  roster: number
+  agentModels: number
+  execRequests: number
+  skills: number
+  goal: number
+  execState: number
+  conversations: number
+  messages: number
+  calendarEvents: number
+  members: number
+}
+
+export interface SpaceDeleteImpact {
+  id: string
+  counts: SpaceDeleteImpactCounts
+  running: { tasks: Array<{ id: string; title: string; status: string }> }
+}
+
+/** team-hub v2（R-3/S7/S8）：删除预检——返回该空间将影响的数据面计数 + 在办任务（只读、不产生审计）。 */
+export async function fetchSpaceImpact(id: string): Promise<SpaceDeleteImpact> {
+  return readJson<SpaceDeleteImpact>(await fetch(`${hubBase()}/api/spaces/impact?id=${encodeURIComponent(id)}`))
+}
+
+/** team-hub v2（R-3/S8）：删除工作空间（级联 11 表 + spaces 行；confirm=delete-space:<id>；软件受保护由后端拒绝）。 */
+export function deleteSpace(id: string): Promise<unknown> {
+  return hubPost('/api/spaces/delete', { id, confirm: `delete-space:${id}` })
+}
+
+/** team-hub v2（R-2/S4）：读取全局规范层（rules；未设置返回空 content）。 */
+export async function fetchRule(scope: string): Promise<{ scope: string; content: string; updatedAt: string | null }> {
+  const resp = await readJson<{ rules: { scope: string; content: string; updatedAt: string | null } }>(await fetch(`${hubBase()}/api/rules?scope=${encodeURIComponent(scope)}`))
+  return resp.rules
+}
+
+/** team-hub v2（R-2/S4）：保存全局规范层（写纪律 by=general 由 hubPost 注入；审计 rules:update + SSE）。 */
+export function saveRule(scope: string, content: string): Promise<unknown> {
+  return hubPost('/api/rules', { scope, content })
+}
+
 /** team-hub v2：读取指定空间目标（objective + 该空间任务进度）。 */
 export async function fetchGoal(scope: string | null): Promise<GoalInfo> {
   const qs = scope ? `?scope=${encodeURIComponent(scope)}` : ''
@@ -389,10 +430,11 @@ async function hubPost(path: string, body: Record<string, unknown>): Promise<unk
   return res.json().catch(() => undefined)
 }
 
-/** team-hub v2：技能列表。includePending=true 时含待审/被拒（复审者视角）。 */
-export async function fetchSkills(opts: { scope?: string | null; includePending?: boolean } = {}): Promise<SkillInfo[]> {
+/** team-hub v2：技能列表。includePending=true 时含待审/被拒（仅 member=general 复审视角，服务端收口）。 */
+export async function fetchSkills(opts: { scope?: string | null; includePending?: boolean; member?: string } = {}): Promise<SkillInfo[]> {
   const qs = new URLSearchParams()
   if (opts.scope) qs.set('scope', opts.scope)
+  if (opts.member) qs.set('member', opts.member)
   if (opts.includePending) qs.set('include', 'pending')
   return readJson<SkillInfo[]>(await fetch(`${hubBase()}/api/skills${qs.size ? `?${qs.toString()}` : ''}`))
 }
@@ -416,6 +458,11 @@ export function reviewSkill(id: string, action: 'publish' | 'reject'): Promise<u
 /** team-hub v2：给技能授权（成员 id 或 scope:xxx）。 */
 export function grantSkill(id: string, grants: string[]): Promise<unknown> {
   return hubPost('/api/skills/grant', { id, grants })
+}
+
+/** team-hub v2：撤销技能授权（过滤式幂等写回；general 门禁由后端强制）。 */
+export function revokeSkill(id: string, targets: string[]): Promise<unknown> {
+  return hubPost('/api/skills/revoke', { id, targets })
 }
 
 export interface TransitionInput {
@@ -498,6 +545,31 @@ export function subscribeHubAudit(onEvent: (event: HubAuditEvent) => void): () =
     }
   }
   return () => es.close()
+}
+
+// ── R-4（S9/S11）对话 AI 回复：重试 + 每空间回复设置 ──
+/** team-hub v2：重试一条失败（meta.aiStatus=failed）的消息（服务端重置为 awaiting；已 replied 拒绝）。 */
+export function retryChatReply(msgId: number): Promise<ChatMessage> {
+  return hubPost('/api/chat/replies/retry', { msgId }).then(res => (res as { task: ChatMessage }).task)
+}
+
+export interface ChatReplySettings {
+  scope: string
+  enabled: boolean
+  model: string | null
+  identity: string | null
+  systemHint: string | null
+  updatedAt: string | null
+}
+
+/** team-hub v2：读取某空间 AI 回复设置（未设置默认 enabled=true）。 */
+export async function fetchChatReplySettings(scope: string): Promise<ChatReplySettings> {
+  return readJson<ChatReplySettings>(await fetch(`${hubBase()}/api/chat/reply-settings?scope=${encodeURIComponent(scope)}`))
+}
+
+/** team-hub v2：保存某空间 AI 回复设置（enabled 省略 = true）。 */
+export function saveChatReplySettings(input: { scope: string; enabled?: boolean; model?: string; identity?: string; systemHint?: string }): Promise<unknown> {
+  return hubPost('/api/chat/reply-settings', input)
 }
 
 // ───────────────────────── 文件中心（S5 ← S3/S4 serve.mjs /api/files，同源）─────────────────────────

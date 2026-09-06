@@ -1,0 +1,50 @@
+﻿commit 104f99a8be8e946add64e764843d758e4bf29ff8
+Author: Mench-Li <1115043055@qq.com>
+Date:   Sun Sep 6 14:09:49 2026 +0800
+
+    T-099：T-099 四能力切片 S1–S11 编码实现完成（R-1 跨空间共享技能闭环 / R-2 分层项目规范 / R-3 移除空间 / R-4 对话接入 AI 回复），S12 收口报告已落 docs/TEST_REPORT.md。
+    
+    后端 team-hub/server.mjs：listSkills grants 引用式跨空间可见（scope:B 省略/携带 member 两形态等价）、revokeSkill 过滤幂等、general 门禁（grant/review/revoke）、include=pending 仅 general 收口（草稿不外泄）、audit.scope=技能归属；rules 表/DAO/路由（MAX_RULES_LEN=3000 可配）；删除级联扩至 11 数据表 + GET /api/spaces/impact 只读预检 + software/default 受保护 + confirm 校验；chat_reply_settings + 消息 awaiting 打标 + GET /api/chat/replies 队列（超龄自动 failed + 上下文）+ answer/retry/fail 三条 CAS 回写路由。插件：skillsCache.ts 指纹刷新（id/version/contentHash 排序序列）、norms.ts 分层合并 + 预算截断（全局 3000/空间 4000/合计 7000 三值可配、legacy 逐字兼容）+ index.ts 派工提示词两段注入、chatResponder.ts + sweepChatReplies 扫单（无仓库工具子代理、chatBusy + 服务端 CAS 幂等、失败回写 failed+meta.error）。前端：SkillsPanel 跨空间共享（来源标注/只读/目标空间选择器授权/撤销 + pending 收口视图）、新增 RulesPanel 规范中心（全局层编辑器 + 空间层文件族指引 + 职责总纲）、SpaceSettingsModal 危险区（type-to-confirm delete-space:<id> + 影响预检 + 删除当前空间切回全部空间）、ChatView 三态 AI 气泡（身份泛化 general=我/其余对方 + awaiting/replied/failed + 重试 + 🤖/模型徽标），Sidebar「📜 规范」入口 + App 接线；api.ts 增 revokeSkill/rules/impact/deleteSpace/retryChatReply/reply-settings/fetchSkills(member)。文档：README §3.1/§3.8/§3.8.1 + LEGION.md 分层总纲 + server.mjs 头注释 API 面。
+    
+    验证（沙箱真实执行）：team-hub 5 套件 68 用例 0 失败（skills 20/20 · rules 7/7 · spaces 5/5 · chat 23/23 · calendar 13/13，均 exit 0）；插件纯函数 3 套件 17/17（skills-fingerprint 6/6 · norms 7/7 · chat-responder 4/4）；plugins tsc --noEmit exit 0 且 lib emit 成功；workbench tsc --noEmit exit 0（0 诊断）；四个前端组件 grep 无 dangerouslySetInnerHTML（唯一命中为 ChatView 头注释既有说明）。零新运行时依赖。
+
+diff --git a/plugins/src/skillsCache.ts b/plugins/src/skillsCache.ts
+new file mode 100644
+index 0000000..56e7747
+--- /dev/null
++++ b/plugins/src/skillsCache.ts
+@@ -0,0 +1,34 @@
++/**
++ * 团队共享技能缓存指纹（R-1 守护注入刷新面，S3）。
++ *
++ * 守护把 team-hub 的已发布技能注入 worker 提示词，缓存在内存并随 sweep 刷新。
++ * 刷新判据 = 指纹比较而非简单长度比较：指纹取 (id, version, contentHash) 序列（按 id 排序，
++ * 顺序变化不视为内容变化），保证：
++ *   - 同量内容改版（version+1 / contentHash 变化）→ 指纹变化 → 刷新；
++ *   - 完全相同的列表（含顺序变化）→ 指纹不变 → 不刷新（零噪音日志/零无谓注入变更）；
++ *   - 撤销（条目移除）/ 新授权（条目加入）→ 指纹变化 → 刷新；
++ *   - 拉取失败 → 调用方保留旧缓存（本模块无状态，由调用方控制）。
++ * 纯函数、无 I/O，可直接被 node --test 单测（对齐 TC-S3-01..06）。
++ */
++
++export interface SkillRef {
++  id: string
++  name: string
++  prompt: string
++  version?: number | null
++  contentHash?: string | null
++}
++
++/** 按 id 稳定排序后的指纹串：顺序变化不刷新（TC-S3-06 不崩且不噪音刷新）。 */
++export function skillsFingerprint(skills: readonly SkillRef[]): string {
++  const sorted = [...skills]
++    .filter((s) => s && typeof s.id === 'string')
++    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
++    .map((s) => `${s.id}:${s.version ?? 0}:${s.contentHash ?? ''}`)
++  return JSON.stringify(sorted)
++}
++
++/** 内容/成员是否变化（供 fetchSkills 决策是否覆盖缓存）。 */
++export function skillsChanged(prev: readonly SkillRef[], next: readonly SkillRef[]): boolean {
++  return skillsFingerprint(prev) !== skillsFingerprint(next)
++}

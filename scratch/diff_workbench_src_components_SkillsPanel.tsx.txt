@@ -1,0 +1,236 @@
+﻿commit 104f99a8be8e946add64e764843d758e4bf29ff8
+Author: Mench-Li <1115043055@qq.com>
+Date:   Sun Sep 6 14:09:49 2026 +0800
+
+    T-099：T-099 四能力切片 S1–S11 编码实现完成（R-1 跨空间共享技能闭环 / R-2 分层项目规范 / R-3 移除空间 / R-4 对话接入 AI 回复），S12 收口报告已落 docs/TEST_REPORT.md。
+    
+    后端 team-hub/server.mjs：listSkills grants 引用式跨空间可见（scope:B 省略/携带 member 两形态等价）、revokeSkill 过滤幂等、general 门禁（grant/review/revoke）、include=pending 仅 general 收口（草稿不外泄）、audit.scope=技能归属；rules 表/DAO/路由（MAX_RULES_LEN=3000 可配）；删除级联扩至 11 数据表 + GET /api/spaces/impact 只读预检 + software/default 受保护 + confirm 校验；chat_reply_settings + 消息 awaiting 打标 + GET /api/chat/replies 队列（超龄自动 failed + 上下文）+ answer/retry/fail 三条 CAS 回写路由。插件：skillsCache.ts 指纹刷新（id/version/contentHash 排序序列）、norms.ts 分层合并 + 预算截断（全局 3000/空间 4000/合计 7000 三值可配、legacy 逐字兼容）+ index.ts 派工提示词两段注入、chatResponder.ts + sweepChatReplies 扫单（无仓库工具子代理、chatBusy + 服务端 CAS 幂等、失败回写 failed+meta.error）。前端：SkillsPanel 跨空间共享（来源标注/只读/目标空间选择器授权/撤销 + pending 收口视图）、新增 RulesPanel 规范中心（全局层编辑器 + 空间层文件族指引 + 职责总纲）、SpaceSettingsModal 危险区（type-to-confirm delete-space:<id> + 影响预检 + 删除当前空间切回全部空间）、ChatView 三态 AI 气泡（身份泛化 general=我/其余对方 + awaiting/replied/failed + 重试 + 🤖/模型徽标），Sidebar「📜 规范」入口 + App 接线；api.ts 增 revokeSkill/rules/impact/deleteSpace/retryChatReply/reply-settings/fetchSkills(member)。文档：README §3.1/§3.8/§3.8.1 + LEGION.md 分层总纲 + server.mjs 头注释 API 面。
+    
+    验证（沙箱真实执行）：team-hub 5 套件 68 用例 0 失败（skills 20/20 · rules 7/7 · spaces 5/5 · chat 23/23 · calendar 13/13，均 exit 0）；插件纯函数 3 套件 17/17（skills-fingerprint 6/6 · norms 7/7 · chat-responder 4/4）；plugins tsc --noEmit exit 0 且 lib emit 成功；workbench tsc --noEmit exit 0（0 诊断）；四个前端组件 grep 无 dangerouslySetInnerHTML（唯一命中为 ChatView 头注释既有说明）。零新运行时依赖。
+
+diff --git a/workbench/src/components/SkillsPanel.tsx b/workbench/src/components/SkillsPanel.tsx
+index 3588def..49b99b9 100644
+--- a/workbench/src/components/SkillsPanel.tsx
++++ b/workbench/src/components/SkillsPanel.tsx
+@@ -1,6 +1,6 @@
+ import { useCallback, useEffect, useState } from 'react'
+-import { fetchSkills, grantSkill, hubBase, registerSkill, reviewSkill } from '../api'
+-import type { SkillInfo } from '../types'
++import { fetchSkills, grantSkill, hubBase, registerSkill, reviewSkill, revokeSkill } from '../api'
++import type { SkillInfo, SpaceInfo } from '../types'
+ import { toast } from './Toast'
+ 
+ const STATUS_TEXT: Record<SkillInfo['status'], string> = {
+@@ -12,6 +12,8 @@ const STATUS_TEXT: Record<SkillInfo['status'], string> = {
+ interface SkillsPanelProps {
+   scope: string | null
+   hubMode: boolean
++  /** 全部空间列表（供授权目标空间选择器/来源标注用；缺省时退化为文本授权）。 */
++  spaces?: SpaceInfo[]
+ }
+ 
+ interface RegisterForm {
+@@ -22,17 +24,27 @@ interface RegisterForm {
+   scope: string
+ }
+ 
+-export function SkillsPanel({ scope, hubMode }: SkillsPanelProps): React.JSX.Element {
++function splitTokens(raw: string): string[] {
++  return raw.split(/[,，\s]+/).map(s => s.trim()).filter(Boolean)
++}
++
++// 技能中心（R-1/S2）：本空间技能 + 跨空间共享。空间视图以 general 复审视角取本 scope 全状态（register→review 流程）；
++// 「全部空间」聚合视图不请求 include=pending（服务端收口，仅 published，TC-S2-02/06）。渲染安全（I-5）：纯文本节点。
++
++export function SkillsPanel({ scope, hubMode, spaces = [] }: SkillsPanelProps): React.JSX.Element {
+   const [skills, setSkills] = useState<SkillInfo[]>([])
+   const [loading, setLoading] = useState(true)
+   const [showForm, setShowForm] = useState(false)
+   const [busyId, setBusyId] = useState<string | null>(null)
+   const [showGrants, setShowGrants] = useState<string | null>(null)
+   const [grantsInput, setGrantsInput] = useState('')
++  const [grantScopes, setGrantScopes] = useState<string[]>([])
+ 
+   const load = useCallback(async (): Promise<void> => {
+     try {
+-      const list = await fetchSkills({ scope, includePending: true })
++      const list = scope
++        ? await fetchSkills({ scope, member: 'general', includePending: true })
++        : await fetchSkills({ scope: null, member: 'general' })
+       setSkills(list)
+     } catch (e) {
+       toast('err', `技能列表加载失败：${e instanceof Error ? e.message : String(e)}`)
+@@ -93,10 +105,20 @@ export function SkillsPanel({ scope, hubMode }: SkillsPanelProps): React.JSX.Ele
+     }
+   }
+ 
++  const openGrant = (s: SkillInfo): void => {
++    const scopeGrants = s.grants.filter(g => g.startsWith('scope:')).map(g => g.slice('scope:'.length))
++    const memberGrants = s.grants.filter(g => !g.startsWith('scope:'))
++    setGrantScopes(scope === null ? scopeGrants : scopeGrants.filter(x => x !== scope))
++    setGrantsInput(memberGrants.join(', '))
++    setShowGrants(s.id)
++  }
++
+   const doGrant = async (id: string): Promise<void> => {
+-    const grants = grantsInput.split(/[,，\s]+/).map(s => s.trim()).filter(Boolean)
++    const memberGrants = splitTokens(grantsInput)
++    const scopeGrants = grantScopes.map(x => `scope:${x}`)
++    const grants = [...scopeGrants, ...memberGrants]
+     if (grants.length === 0) {
+-      toast('err', '请输入授权对象（成员 id 或 scope:xxx，逗号分隔）')
++      toast('err', '请选择目标空间或输入成员 id（授权对象不能为空）')
+       return
+     }
+     setBusyId(id)
+@@ -112,29 +134,39 @@ export function SkillsPanel({ scope, hubMode }: SkillsPanelProps): React.JSX.Ele
+     }
+   }
+ 
++  const doRevoke = async (s: SkillInfo, target: string): Promise<void> => {
++    setBusyId(s.id + '|' + target)
++    try {
++      await revokeSkill(s.id, [target])
++      toast('ok', `「${s.id}」已撤销对 ${target} 的授权`)
++      void load()
++    } catch (e) {
++      toast('err', `撤销失败：${e instanceof Error ? e.message : String(e)}`)
++    } finally {
++      setBusyId(null)
++    }
++  }
++
++  const isOwn = (s: SkillInfo): boolean => scope === null || s.scope === scope
++  const isShared = (s: SkillInfo): boolean => scope !== null && s.scope !== scope
+   const pendingCount = skills.filter(s => s.status === 'pending').length
++  const grantableSpaces = spaces.filter(sp => sp.id !== scope).map(sp => sp.id)
+ 
+   return (
+     <div className="center-col">
+       <div className="panel goal-card">
+-        <span className="tag" style={{ color: 'var(--muted)', fontSize: 11 }}>
+-          🧩 团队共享技能
+-        </span>
++        <span className="tag" style={{ color: 'var(--muted)', fontSize: 11 }}>🧩 团队共享技能</span>
+         <span style={{ fontSize: 12, color: 'var(--text)' }}>
+           {scope ? `空间「${scope}」` : '全部空间'}
+           <span style={{ color: 'var(--muted-2)', fontSize: 11 }}> · 共 {skills.length} 项{pendingCount > 0 ? ` · ${pendingCount} 项待复审` : ''}</span>
+         </span>
+         <span style={{ marginLeft: 'auto' }}>
+-          <button className="btn primary" onClick={() => setShowForm(true)}>
+-            ＋ 注册新技能
+-          </button>
++          <button className="btn primary" onClick={() => setShowForm(true)}>＋ 注册新技能</button>
+         </span>
+       </div>
+ 
+       {loading ? (
+-        <div className="scene-loading" style={{ position: 'static', padding: 40 }}>
+-          ⏳ 正在同步技能库…
+-        </div>
++        <div className="scene-loading" style={{ position: 'static', padding: 40 }}>⏳ 正在同步技能库…</div>
+       ) : skills.length === 0 ? (
+         <div className="panel" style={{ padding: 32, textAlign: 'center', color: 'var(--muted-2)', fontSize: 12 }}>
+           暂无技能。注册第一个团队技能（提交后进入待复审，由将军发布）。
+@@ -153,6 +185,11 @@ export function SkillsPanel({ scope, hubMode }: SkillsPanelProps): React.JSX.Ele
+                 <span className="chip">🗂 {s.scope}</span>
+                 {s.owner && <span className="chip">👤 {s.owner}</span>}
+               </div>
++              {isShared(s) && (
++                <div style={{ fontSize: 11, color: 'var(--blue)', padding: '2px 0' }}>
++                  🤝 来自空间「{s.scope}」的共享技能（源空间维护 · 此处只读）
++                </div>
++              )}
+               {s.description && <div className="skill-desc">{s.description}</div>}
+               {s.prompt && (
+                 <details className="skill-prompt">
+@@ -161,23 +198,34 @@ export function SkillsPanel({ scope, hubMode }: SkillsPanelProps): React.JSX.Ele
+                 </details>
+               )}
+               {s.grants.length > 0 && (
+-                <div className="skill-grants">已授权：{s.grants.map(g => <code key={g}>{g}</code>)}</div>
++                <div className="skill-grants">
++                  <span style={{ color: 'var(--muted-2)', fontSize: 11 }}>已授权：</span>
++                  {s.grants.map(g => (
++                    <span key={g} className="chip">
++                      {g}
++                      {isOwn(s) && s.status === 'published' && (
++                        <button
++                          className="chip-x"
++                          title={`撤销对 ${g} 的授权`}
++                          disabled={busyId === s.id + '|' + g}
++                          onClick={() => void doRevoke(s, g)}
++                        >✕</button>
++                      )}
++                    </span>
++                  ))}
++                </div>
+               )}
+               <div className="skill-actions">
+-                {s.status === 'pending' && (
++                {isOwn(s) && s.status === 'pending' && (
+                   <>
+                     <button className="btn small ok" disabled={busyId === s.id} onClick={() => void review(s.id, 'publish')}>
+                       {busyId === s.id ? '…' : '✅ 发布'}
+                     </button>
+-                    <button className="btn small danger" disabled={busyId === s.id} onClick={() => void review(s.id, 'reject')}>
+-                      驳回
+-                    </button>
++                    <button className="btn small danger" disabled={busyId === s.id} onClick={() => void review(s.id, 'reject')}>驳回</button>
+                   </>
+                 )}
+-                {s.status === 'published' && (
+-                  <button className="btn small" disabled={busyId === s.id} onClick={() => { setShowGrants(s.id); setGrantsInput(s.grants.join(', ')) }}>
+-                    🔑 授权
+-                  </button>
++                {isOwn(s) && s.status === 'published' && (
++                  <button className="btn small" disabled={busyId === s.id} onClick={() => openGrant(s)}>🔑 授权</button>
+                 )}
+               </div>
+             </div>
+@@ -194,9 +242,25 @@ export function SkillsPanel({ scope, hubMode }: SkillsPanelProps): React.JSX.Ele
+               <span className="x" onClick={() => setShowGrants(null)}>✕</span>
+             </div>
+             <div className="modal-body">
++              {grantableSpaces.length > 0 && (
++                <div className="field">
++                  <label>授权目标空间（勾选后士兵在对应空间可直接使用）</label>
++                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
++                    {grantableSpaces.map(sp => (
++                      <label key={sp} className="chip" style={{ cursor: 'pointer', userSelect: 'none', background: grantScopes.includes(sp) ? 'var(--blue)' : undefined, color: grantScopes.includes(sp) ? '#fff' : undefined }}>
++                        <input type="checkbox" style={{ marginRight: 4, display: 'none' }}
++                          checked={grantScopes.includes(sp)}
++                          onChange={() => setGrantScopes(cur => (cur.includes(sp) ? cur.filter(x => x !== sp) : [...cur, sp]))}
++                        />
++                        🏛 {sp}
++                      </label>
++                    ))}
++                  </div>
++                </div>
++              )}
+               <div className="field">
+-                <label>授权对象（成员 id 或 scope:xxx，逗号分隔）</label>
+-                <input value={grantsInput} onChange={e => setGrantsInput(e.target.value)} placeholder="例如：soldier-a, scope:software" />
++                <label>授权成员（可选；成员 id，逗号分隔）</label>
++                <input value={grantsInput} onChange={e => setGrantsInput(e.target.value)} placeholder="例如：soldier-a, reviewer-1（或留空只授空间）" />
+               </div>
+             </div>
+             <div className="modal-foot">
+@@ -209,7 +273,7 @@ export function SkillsPanel({ scope, hubMode }: SkillsPanelProps): React.JSX.Ele
+         </div>
+       )}
+       <div style={{ fontSize: 10, color: 'var(--muted-2)', padding: '0 4px' }}>
+-        数据源：team-hub v2（{hubBase()}）· 提交后需将军复审发布，士兵/守护只读取已发布技能
++        数据源：team-hub v2（{hubBase()}）· 跨空间授权后，目标空间士兵/守护自动同步已发布技能；撤销即时生效
+       </div>
+     </div>
+   )
+@@ -226,7 +290,7 @@ function SkillForm({ scope, onSubmit, onClose }: {
+ 
+   const submit = async (): Promise<void> => {
+     if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(form.id.trim())) {
+-      toast('err', '技能 id 非法：小写字母/数字开头，可含连字符，≤64 字符')
++      toast('err', '请填写技能 id（小写字母/数字开头，可含连字符）')
+       return
+     }
+     if (!form.name.trim()) {

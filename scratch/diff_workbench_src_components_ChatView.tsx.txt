@@ -1,0 +1,135 @@
+﻿commit 104f99a8be8e946add64e764843d758e4bf29ff8
+Author: Mench-Li <1115043055@qq.com>
+Date:   Sun Sep 6 14:09:49 2026 +0800
+
+    T-099：T-099 四能力切片 S1–S11 编码实现完成（R-1 跨空间共享技能闭环 / R-2 分层项目规范 / R-3 移除空间 / R-4 对话接入 AI 回复），S12 收口报告已落 docs/TEST_REPORT.md。
+    
+    后端 team-hub/server.mjs：listSkills grants 引用式跨空间可见（scope:B 省略/携带 member 两形态等价）、revokeSkill 过滤幂等、general 门禁（grant/review/revoke）、include=pending 仅 general 收口（草稿不外泄）、audit.scope=技能归属；rules 表/DAO/路由（MAX_RULES_LEN=3000 可配）；删除级联扩至 11 数据表 + GET /api/spaces/impact 只读预检 + software/default 受保护 + confirm 校验；chat_reply_settings + 消息 awaiting 打标 + GET /api/chat/replies 队列（超龄自动 failed + 上下文）+ answer/retry/fail 三条 CAS 回写路由。插件：skillsCache.ts 指纹刷新（id/version/contentHash 排序序列）、norms.ts 分层合并 + 预算截断（全局 3000/空间 4000/合计 7000 三值可配、legacy 逐字兼容）+ index.ts 派工提示词两段注入、chatResponder.ts + sweepChatReplies 扫单（无仓库工具子代理、chatBusy + 服务端 CAS 幂等、失败回写 failed+meta.error）。前端：SkillsPanel 跨空间共享（来源标注/只读/目标空间选择器授权/撤销 + pending 收口视图）、新增 RulesPanel 规范中心（全局层编辑器 + 空间层文件族指引 + 职责总纲）、SpaceSettingsModal 危险区（type-to-confirm delete-space:<id> + 影响预检 + 删除当前空间切回全部空间）、ChatView 三态 AI 气泡（身份泛化 general=我/其余对方 + awaiting/replied/failed + 重试 + 🤖/模型徽标），Sidebar「📜 规范」入口 + App 接线；api.ts 增 revokeSkill/rules/impact/deleteSpace/retryChatReply/reply-settings/fetchSkills(member)。文档：README §3.1/§3.8/§3.8.1 + LEGION.md 分层总纲 + server.mjs 头注释 API 面。
+    
+    验证（沙箱真实执行）：team-hub 5 套件 68 用例 0 失败（skills 20/20 · rules 7/7 · spaces 5/5 · chat 23/23 · calendar 13/13，均 exit 0）；插件纯函数 3 套件 17/17（skills-fingerprint 6/6 · norms 7/7 · chat-responder 4/4）；plugins tsc --noEmit exit 0 且 lib emit 成功；workbench tsc --noEmit exit 0（0 诊断）；四个前端组件 grep 无 dangerouslySetInnerHTML（唯一命中为 ChatView 头注释既有说明）。零新运行时依赖。
+
+diff --git a/workbench/src/components/ChatView.tsx b/workbench/src/components/ChatView.tsx
+index 33fa106..5f3f360 100644
+--- a/workbench/src/components/ChatView.tsx
++++ b/workbench/src/components/ChatView.tsx
+@@ -1,5 +1,5 @@
+ import { useCallback, useEffect, useRef, useState } from 'react'
+-import { createChatConversation, fetchChatConversations, fetchChatMessages, hubBase, postChatMessage, subscribeHubAudit } from '../api'
++import { createChatConversation, fetchChatConversations, fetchChatMessages, hubBase, postChatMessage, retryChatReply, subscribeHubAudit } from '../api'
+ import type { ChatConversation, ChatMessage } from '../types'
+ import { toast } from './Toast'
+ 
+@@ -25,6 +25,26 @@ function authorLabel(m: ChatMessage): string {
+   return m.author === 'general' ? '将军' : m.author
+ }
+ 
++/** R-4/S11：author 身份泛化——general = 「我」，其余（含 <scope>-assistant）一律对方侧渲染（TC-S11-01/06）。 */
++function isMe(author: string): boolean {
++  return author === 'general'
++}
++
++/** 是否 AI 回复方（S9/S10 身份 <scope>-assistant 或携带 aiStatus/aiModel 元数据；旧消息兼容按普通气泡，TC-S11-07）。 */
++function isBot(m: ChatMessage): boolean {
++  const meta = (m.meta ?? null) as Record<string, unknown> | null
++  const st = meta?.aiStatus
++  const mod = meta?.aiModel
++  if (typeof st === 'string' || typeof mod === 'string') return true
++  return typeof m.author === 'string' && /-assistant$/.test(m.author)
++}
++
++function metaStr(m: ChatMessage, key: string): string | undefined {
++  const meta = (m.meta ?? null) as Record<string, unknown> | null
++  const v = meta?.[key]
++  return typeof v === 'string' && v.length > 0 ? v : undefined
++}
++
+ /**
+  * 会话/空间身份守卫（R-A5 / T-060-M1 / TC-S3-01..06）：判定「发起时快照」相对「当前视图身份」是否已陈旧。
+  * 每个异步写回在 await 之后、写状态（setMsgs/setDraft…）之前调用：
+@@ -58,6 +78,7 @@ export function ChatView({ scope, hubMode }: { scope: string | null; hubMode: bo
+   const [loadingOlder, setLoadingOlder] = useState(false)
+   const [draft, setDraft] = useState('')
+   const [sending, setSending] = useState(false)
++  const [retryingId, setRetryingId] = useState<number | null>(null) // R-4/S11：正在重试的消息 id
+   const [creating, setCreating] = useState(false)
+   const [newTitle, setNewTitle] = useState('')
+   const scrollRef = useRef<HTMLDivElement | null>(null)
+@@ -296,6 +317,27 @@ export function ChatView({ scope, hubMode }: { scope: string | null; hubMode: bo
+     }
+   }
+ 
++  /** R-4/S11：重试一条失败消息（TC-S11-03）——服务端 CAS 重置 failed→awaiting 并重新入队；
++   *  本地用返回值**原位替换**该消息（不新增气泡）。会话/空间身份守卫同其它写回。 */
++  const doRetry = async (m: ChatMessage): Promise<void> => {
++    const scopeAtCall = scope
++    const convAtCall = activeId
++    if (retryingId === m.id) return
++    setRetryingId(m.id)
++    try {
++      const updated = await retryChatReply(m.id)
++      if (identityStale(scopeAtCall, convAtCall, scopeRef.current, activeRef.current)) return
++      setMsgs(prev => prev.map(x => (x.id === updated.id ? updated : x)))
++      toast('ok', '已重新提交回复，等待 AI 回复…')
++    } catch (e) {
++      if (!identityStale(scopeAtCall, convAtCall, scopeRef.current, activeRef.current)) {
++        toast('err', `重试失败：${e instanceof Error ? e.message : String(e)}`)
++      }
++    } finally {
++      setRetryingId(null)
++    }
++  }
++
+   return (
+     <div className="center-col">
+       <div className="panel goal-card chat-head">
+@@ -353,12 +395,44 @@ export function ChatView({ scope, hubMode }: { scope: string | null; hubMode: bo
+               >
+                 {loadingMsgs && msgs.length === 0 && <div className="chat-empty">⏳ 加载中…</div>}
+                 {!loadingMsgs && msgs.length === 0 && <div className="chat-empty">还没有消息，发第一条吧</div>}
+-                {msgs.map(m => (
+-                  <div key={m.id} className="chat-row">
+-                    <div className={`chat-author${m.author === 'general' ? ' me' : ''}`}>{authorLabel(m)} · {fmt(m.createdAt)}</div>
+-                    <div className={m.author === 'general' ? 'chat-bubble me' : 'chat-bubble'}>{m.body}</div>
+-                  </div>
+-                ))}
++                {msgs.map(m => {
++                  const me = isMe(m.author)
++                  const bot = isBot(m)
++                  const st = metaStr(m, 'aiStatus')
++                  const aiModel = metaStr(m, 'aiModel')
++                  const aiError = metaStr(m, 'aiError')
++                  return (
++                    <div key={m.id} className={`chat-row${me ? ' me-row' : ''}${bot ? ' bot-row' : ''}`}>
++                      <div className={`chat-author${me ? ' me' : ''}`}>
++                        {authorLabel(m)}
++                        {bot && <span className="chip" style={{ marginLeft: 4 }}>🤖</span>}
++                        {bot && aiModel && <span className="chip" style={{ marginLeft: 4 }} title="AI 回复模型">{aiModel}</span>}
++                        <span style={{ color: 'var(--muted-2)', fontSize: 11 }}> · {fmt(m.createdAt)}</span>
++                      </div>
++                      <div className={me ? 'chat-bubble me' : 'chat-bubble'}>
++                        {m.body}
++                        {me && st === 'awaiting' && (
++                          <div className="chat-ai-state" style={{ marginTop: 6, fontSize: 11, color: 'var(--muted-2)' }}>
++                            ⏳ 等待回复…（{fmt(m.createdAt)} 提交）
++                          </div>
++                        )}
++                        {me && st === 'failed' && (
++                          <div className="chat-ai-state err" style={{ marginTop: 6, fontSize: 11, color: '#ff8f8f' }}>
++                            ❌ 回复失败{aiError ? `：${aiError}` : ''}
++                            <button
++                              className="btn small"
++                              disabled={retryingId === m.id}
++                              onClick={() => void doRetry(m)}
++                              style={{ marginLeft: 8 }}
++                            >
++                              {retryingId === m.id ? '重试中…' : '重试'}
++                            </button>
++                          </div>
++                        )}
++                      </div>
++                    </div>
++                  )
++                })}
+               </div>
+               <div className="chat-composer">
+                 <textarea

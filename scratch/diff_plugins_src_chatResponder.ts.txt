@@ -1,0 +1,72 @@
+﻿commit 104f99a8be8e946add64e764843d758e4bf29ff8
+Author: Mench-Li <1115043055@qq.com>
+Date:   Sun Sep 6 14:09:49 2026 +0800
+
+    T-099：T-099 四能力切片 S1–S11 编码实现完成（R-1 跨空间共享技能闭环 / R-2 分层项目规范 / R-3 移除空间 / R-4 对话接入 AI 回复），S12 收口报告已落 docs/TEST_REPORT.md。
+    
+    后端 team-hub/server.mjs：listSkills grants 引用式跨空间可见（scope:B 省略/携带 member 两形态等价）、revokeSkill 过滤幂等、general 门禁（grant/review/revoke）、include=pending 仅 general 收口（草稿不外泄）、audit.scope=技能归属；rules 表/DAO/路由（MAX_RULES_LEN=3000 可配）；删除级联扩至 11 数据表 + GET /api/spaces/impact 只读预检 + software/default 受保护 + confirm 校验；chat_reply_settings + 消息 awaiting 打标 + GET /api/chat/replies 队列（超龄自动 failed + 上下文）+ answer/retry/fail 三条 CAS 回写路由。插件：skillsCache.ts 指纹刷新（id/version/contentHash 排序序列）、norms.ts 分层合并 + 预算截断（全局 3000/空间 4000/合计 7000 三值可配、legacy 逐字兼容）+ index.ts 派工提示词两段注入、chatResponder.ts + sweepChatReplies 扫单（无仓库工具子代理、chatBusy + 服务端 CAS 幂等、失败回写 failed+meta.error）。前端：SkillsPanel 跨空间共享（来源标注/只读/目标空间选择器授权/撤销 + pending 收口视图）、新增 RulesPanel 规范中心（全局层编辑器 + 空间层文件族指引 + 职责总纲）、SpaceSettingsModal 危险区（type-to-confirm delete-space:<id> + 影响预检 + 删除当前空间切回全部空间）、ChatView 三态 AI 气泡（身份泛化 general=我/其余对方 + awaiting/replied/failed + 重试 + 🤖/模型徽标），Sidebar「📜 规范」入口 + App 接线；api.ts 增 revokeSkill/rules/impact/deleteSpace/retryChatReply/reply-settings/fetchSkills(member)。文档：README §3.1/§3.8/§3.8.1 + LEGION.md 分层总纲 + server.mjs 头注释 API 面。
+    
+    验证（沙箱真实执行）：team-hub 5 套件 68 用例 0 失败（skills 20/20 · rules 7/7 · spaces 5/5 · chat 23/23 · calendar 13/13，均 exit 0）；插件纯函数 3 套件 17/17（skills-fingerprint 6/6 · norms 7/7 · chat-responder 4/4）；plugins tsc --noEmit exit 0 且 lib emit 成功；workbench tsc --noEmit exit 0（0 诊断）；四个前端组件 grep 无 dangerouslySetInnerHTML（唯一命中为 ChatView 头注释既有说明）。零新运行时依赖。
+
+diff --git a/plugins/src/chatResponder.ts b/plugins/src/chatResponder.ts
+new file mode 100644
+index 0000000..7d9431c
+--- /dev/null
++++ b/plugins/src/chatResponder.ts
+@@ -0,0 +1,56 @@
++/**
++ * 对话 AI 回复（R-4，S10）纯函数：提示词拼装与回复方身份解析。
++ *
++ * 纪律（对齐 docs/TEST_CASES.md TC-S10-01..06 / AC-R4-1..4 / D-14/D-15）：
++ *   - 回复方身份默认 <scope>-assistant，可被空间 settings.identity 覆盖（chatIdentityFor）；
++ *   - 提示词 = 空间对话助手 + settings.systemHint + 会话历史（含提问本身，纯文本、无仓库工具）；
++ *   - 只处理作者 ≠ 回复方身份的 awaiting 消息（防自我触发死循环，防注入冒名）。
++ * 纯函数、无 I/O；node --test 直接单测。
++ */
++
++export interface ChatCtxMsg {
++  id: number
++  author: string
++  body: string
++}
++
++export interface ChatAnswerInput {
++  scope: string
++  convTitle?: string
++  /** 空间设置里的 systemHint（无则省略）。 */
++  systemHint?: string | null
++  /** 会话历史（不含提问本身之外的更早上下文由服务端聚合好）。 */
++  context: ChatCtxMsg[]
++  /** 本空间回复方身份。 */
++  identity: string
++}
++
++/** 回复方身份（D-15/G-R4-2）：默认 <scope>-assistant；settings.identity 覆盖。 */
++export function chatIdentityFor(scope: string, identityOverride?: string | null): string {
++  const sc = (scope || '').trim()
++  if (identityOverride && identityOverride.trim().length > 0) return identityOverride.trim()
++  return sc.length > 0 ? `${sc}-assistant` : 'assistant'
++}
++
++/** 拼装轻量子代理直答提示词（纯文本；不含任何工具/文件访问授权）。 */
++export function buildChatAnswerPrompt(input: ChatAnswerInput): string {
++  const roleLine = `你是工作空间「${input.scope}」的对话助手（${input.identity}）。`
++  const title = input.convTitle ? `当前会话：${input.convTitle}` : ''
++  const hint = input.systemHint && input.systemHint.trim().length > 0 ? `助手设定（空间系统提示）：
++${input.systemHint.trim()}` : ''
++  const history = input.context
++    .map((m) => `[${m.author}（消息 ${m.id}）] ${m.body}`)
++    .join('\n\n')
++  const lines: string[] = [
++    roleLine,
++    '你只负责回答用户问题，不做任何工具调用、不访问文件或网络。',
++    title.length > 0 ? title : '',
++    hint.length > 0 ? hint : '',
++    '会话历史：',
++    history.length > 0 ? history : '（无更早消息）',
++    '',
++    '请直接给出有帮助、简洁、面向该工作空间上下文的回答。回答以纯文本输出，不要用代码块包裹整篇回答，不要编造历史中没有的事实。',
++    '如果问题超出可回答范围（无关/信息不足/需更高权限操作），如实说明无法回答并简述原因。',
++  ]
++  return lines.filter((l) => l.length > 0).join('\n')
++}

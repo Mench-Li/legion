@@ -1,0 +1,8 @@
+﻿=== spawnSync EPERM 探针（taskctl.ttl.test 环境受限根因）===
+{"status":null,"error":"EPERM"}
+      at TestHook.run (node:internal/test_runner/test:1726:18)
+      at TestHook.run (node:internal/util:581:20)
+      at Test.createHook (node:internal/test_runner/test:1103:33)
+      at node:internal/test_runner/harness:426:12
+      at file:///D:/project/DSH/legion/.legion-worktrees/T-109/scrum/taskctl.ttl.test.mjs:24:1
+      at ModuleJob.run (node:internal/modules/esm/module_job:439:25)

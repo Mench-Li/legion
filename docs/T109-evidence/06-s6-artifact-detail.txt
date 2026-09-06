@@ -1,0 +1,22 @@
+﻿▶ render.mjs：产物区逐条可交互（AC-R4-1/2，K8-A）
+  ✔ fixture 任务库经 --out 生成 kanban.html：产物区代码含逐条条目生成器与预览/降级分支，旧版“只最新一条”已移除 (148.9146ms)
+✔ render.mjs：产物区逐条可交互（AC-R4-1/2，K8-A） (172.499ms)
+▶ serve.mjs /api/artifact 逐条内容服务（AC-R4-1 / K4-B）
+  ✔ i=0 元信息 + raw 返回分支态 md 全文（worktree 优先，content-type text/markdown） (34.3393ms)
+  ✔ 主仓兜底：无分支态文件时读主仓库根并返回全文 (17.7917ms)
+  ✔ 两条 html 逐条独立可预览（i=1、i=3 各自返回对应文件，text/html） (8.1779ms)
+  ✔ i 缺省兼容既有语义取最新一条（idx=total-1） (3.1716ms)
+  ✔ url 产物保留外链语义：raw 缺省返回 {url:true} 元信息 (18.2733ms)
+  ✔ 越界/非法 i → 400 可区分；未知任务 404；无产物 404 (31.1932ms)
+  ✔ 白名单安全：../ 越权、根外盘符、.git 段 → 403 可区分（AC-R3-3 v1 面） (47.8654ms)
+  ✔ 文件不存在（主仓与分支态均无）→ 404 明确文案 (15.3215ms)
+  ✔ file 产物（非 html/md/txt）raw → application/octet-stream 下载语义 (6.1705ms)
+✔ serve.mjs /api/artifact 逐条内容服务（AC-R4-1 / K4-B） (183.9295ms)
+ℹ tests 10
+ℹ suites 2
+ℹ pass 10
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 409.129

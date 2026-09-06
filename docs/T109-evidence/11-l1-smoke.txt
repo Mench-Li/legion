@@ -1,0 +1,12 @@
+﻿=== S3 hub 内容端点 L1 HTTP 冒烟 ===
+POST /api/spaces → 200 ok
+POST /api/create → 200 id=T-001
+digest 落库校验: PASS
+POST /api/artifact → 200
+GET /api/artifact/content?task=T-001&i=0 → status=200 ct=application/json; charset=utf-8
+  body={"taskId":"T-001","i":0,"path":"docs/x.md","relPath":"docs/x.md","source":"worktree","size":10,"limit":524288,"truncated":false,"previewable":true,"mime":"text/markdown","content":"BRANCH-L1\n"}
+i=9 → status=400 error=产物序号越界：i=9（共 1 条）
+未知任务 → status=404 error=未知任务 T-NOPE
+RESULT: PASS
+log written: D:\project\DSH\legion\.legion-worktrees\T-109\docs\T107-evidence\s3-l1-smoke.txt
+exit=0

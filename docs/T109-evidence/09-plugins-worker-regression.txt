@@ -1,0 +1,35 @@
+﻿=== plugins worker-regression（2 条 git-spawn EPERM 环境受限）===
+✔ a dependency-cleared blocked task is claimed before its worker can block again (55.8937ms)
+✔ the foreman mounts the configured agent preset before becoming available (27.9092ms)
+✔ a detached worker failure is contained and the task can be retried (30.8608ms)
+✔ pipeline final stage submits in_review under the stage role, not the daemon role (29.5627ms)
+✖ a failed intermediate auto-merge parks the task in in_review instead of silently advancing (3.7569ms)
+✖ unblocking reuses the previous worktree and preserves the blocked worker partial work (1.9222ms)
+✔ a single-role aborted worker is retried on the next sweep instead of stalling (16.8234ms)
+ℹ tests 7
+ℹ suites 0
+ℹ pass 5
+ℹ fail 2
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 172.9763
+
+✖ failing tests:
+
+test at plugins\tests\worker-regression.test.mjs:309:1
+✖ a failed intermediate auto-merge parks the task in in_review instead of silently advancing (3.7569ms)
+  Error: git init 失败：
+      at initGitRepo (file:///D:/project/DSH/legion/.legion-worktrees/T-109/plugins/tests/worker-regression.test.mjs:75:30)
+      at TestContext.<anonymous> (file:///D:/project/DSH/legion/.legion-worktrees/T-109/plugins/tests/worker-regression.test.mjs:318:3)
+      at async Test.run (node:internal/test_runner/test:1389:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:960:7)
+
+test at plugins\tests\worker-regression.test.mjs:386:1
+✖ unblocking reuses the previous worktree and preserves the blocked worker partial work (1.9222ms)
+  Error: git init 失败：
+      at initGitRepo (file:///D:/project/DSH/legion/.legion-worktrees/T-109/plugins/tests/worker-regression.test.mjs:75:30)
+      at TestContext.<anonymous> (file:///D:/project/DSH/legion/.legion-worktrees/T-109/plugins/tests/worker-regression.test.mjs:395:3)
+      at async Test.run (node:internal/test_runner/test:1389:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:960:7)
+exit=1

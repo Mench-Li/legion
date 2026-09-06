@@ -1,0 +1,24 @@
+﻿=== workbench/src/App.tsx 314-330（已提交冲突标记）===
+314: <<<<<<< Updated upstream
+315: /** 空间删除成功后（R-3/S8，TC-S8-05/06）：关闭弹窗、重拉列表；若删的是当前激活空间则切回「全部空间」（scope=null）。 */
+316:   const handleSpaceDeleted = useCallback((deletedId: string): void => {
+317:     setSpaceSettings(null)
+318:     void fetchSpaces()
+319:       .then(spaces => setHubSpaces(spaces))
+320:       .catch(() => undefined)
+321:     if (scope === deletedId) {
+322:       setScope(null)
+323:       void loadMissions(null)
+324:     }
+325:   }, [scope, loadMissions])
+326: 
+327:   /** 发布空间目标：写 team-hub 后刷新当前空间目标。 */
+328: =======
+329:   /** 发布目标：写 team-hub 后刷新目标列表。每次发布 = 新建一个目标（与既有目标并存，不取消旧链）。 */
+330: >>>>>>> Stashed changes
+331:   const handlePublishGoal = useCallback(async (scopeValue: string, objective: string): Promise<void> => {
+=== 引入提交（git log -S 'Updated upstream'）===
+82d610c 目标级分析文档目录（docs/<goalId>）跨目标隔离 + 合并外部 promote 残留（resolve stash-pop 冲突）
+=== T-101 报告 F4 历史登记 ===
+## 0. 结论速览（判定：**非全绿** —— 4 项可复现 FAIL，其中 3 项 = T-100 必改 M1/M2/M3 复核确认，1 项 = 新增集成回归 F4）
+- ❌ **F4（新增缺陷，T-100 未见——审查快照 a018666 早于引入提交）**：**HEAD 的 workbench/src/App.tsx 314-330 行含已提交的合并冲突标记**（<<<<<<< Updated upstream … >>>>>>> Stashed changes）→ workbench tsc --noEmit TS1185 ×3 失败 → 四能力 UI（S2/S6/S8/S11）所在前端在 HEAD **无法编译/构建**。归属：commit **82d610c**（「resolve stash-pop 冲突」把冲突标记原样提交；位于 promote T-100 链 a018666→dd2fbe3 之间；作者 Mench-Li，非 T-099 实现 diff）。

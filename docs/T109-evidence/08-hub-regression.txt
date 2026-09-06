@@ -1,0 +1,239 @@
+﻿===== goal.test.mjs =====
+[team-hub] goal 表迁移为多目标模型：1 条旧目标升级为独立目标记录（G-001…）
+[team-hub] 历史目标链回填 goalId：目标 G-001（software）挂接 2 个任务
+[team-hub] goal 表迁移为多目标模型：1 条旧目标升级为独立目标记录（G-001…）
+▶ 老库迁移：旧 goal 表（scope 主键 / 无 goalId 任务）→ 多目标模型 + 历史链回填
+  ✔ import 时自动迁移：目标升级为 G-xxx 记录，未取消 [auto-goal] 链任务回填 goalId (65.6349ms)
+✔ 老库迁移：旧 goal 表（scope 主键 / 无 goalId 任务）→ 多目标模型 + 历史链回填 (66.4933ms)
+▶ 多目标发布：并存互不取消，各自独立链
+  ✔ 连续发布两个目标 → 两条记录都 active，链任务互不干扰 (17.5822ms)
+  ✔ 进度按各自链统计：B 链全 done 只收尾 B，A 保持 active (4.1854ms)
+✔ 多目标发布：并存互不取消，各自独立链 (22.0023ms)
+▶ 目标状态生命周期与护栏
+  ✔ active ↔ paused 切换 + 版本递增 (2.5429ms)
+  ✔ 取消目标 → 只取消该目标未开工链任务，其他目标链不受影响 (1.84ms)
+  ✔ 护栏：非将军不可改状态；canceled 是终态 (2.6207ms)
+  ✔ 非法 status 拒绝 (2.0744ms)
+✔ 目标状态生命周期与护栏 (9.55ms)
+▶ 目标级上下文（goal:context，同目标共享上下文）+ 审计 goalId + 文件域
+  ✔ setGoalContext：更新 context 并递增 contextVersion，goalView 携带 (4.2219ms)
+  ✔ setGoalContext 护栏：非将军拒绝 / 缺 id / 空 text / 终态拒绝 (3.2743ms)
+  ✔ audit：goal:publish / goal:context 行带 goalId（per-goal 活动视图数据源） (1.4054ms)
+  ✔ createTask：goalId 显式透传；带 slice 键且无 goalId 时从前缀任务反查回填 (2.6527ms)
+  ✔ expandGoalSlices：coder/tester 落 fileDomain + goalId；devops 尾同目标 (5.7717ms)
+  ✔ 遗留目标（docsDir=null）切片测试仍指向根 docs/TEST_CASES.md；goalDocPathOf 双模式解析 (3.857ms)
+  ✔ 发布目标自带目标级文档目录 docsDir=docs/<goalId>；老库迁移目标 docsDir=null (55.8436ms)
+✔ 目标级上下文（goal:context，同目标共享上下文）+ 审计 goalId + 文件域 (77.6132ms)
+ℹ tests 14
+ℹ suites 4
+ℹ pass 14
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 246.973
+exit=0
+===== skills.test.mjs =====
+▶ registerSkill — 提交进入 pending，幂等 + 版本
+  ✔ 新技能提交 → status=pending, version=1 (3.4669ms)
+  ✔ 同内容重复提交 → 幂等，version/status 不变 (0.516ms)
+  ✔ 内容变化 → version+1 且回 pending（需复审） (1.1111ms)
+  ✔ 非法 id 拒绝 (0.6225ms)
+✔ registerSkill — 提交进入 pending，幂等 + 版本 (6.971ms)
+▶ listSkills — 默认只露 published
+  ✔ 未发布时默认列表为空 (1.4594ms)
+  ✔ includePending 能看到待审 (0.4195ms)
+✔ listSkills — 默认只露 published (2.1684ms)
+▶ reviewSkill — publish/reject 门禁
+  ✔ publish 后默认列表可见 (1.403ms)
+  ✔ 已发布后再审 → 拒绝（只有 pending 可审） (0.3338ms)
+  ✔ reject 后从默认列表消失 (1.9566ms)
+  ✔ 非法 action 拒绝 (0.2364ms)
+✔ reviewSkill — publish/reject 门禁 (4.3301ms)
+▶ grantSkill — 授权过滤不受 review 影响
+  ✔ grant 到角色 + scope 通配后按 scope/member 过滤 (2.7781ms)
+✔ grantSkill — 授权过滤不受 review 影响 (2.9313ms)
+▶ 旧库迁移 — 缺列补齐且存量行默认 pending
+  ✔ 旧 schema 的 skills 表加载后带 status/contentHash/reviewedAt (47.5199ms)
+✔ 旧库迁移 — 缺列补齐且存量行默认 pending (47.7561ms)
+▶ S1 TC-S1-01/02/10 跨空间共享可见性（listSkills scope:B 服务端判定）
+  ✔ grant scope:B 后 scope=B 列表含 S（member 省略与单值两形态等价）；scope=C 不含；未授权互不污染 (6.1878ms)
+✔ S1 TC-S1-01/02/10 跨空间共享可见性（listSkills scope:B 服务端判定） (6.3891ms)
+▶ S1 TC-S1-03/04 撤销：立即不可见 + 幂等
+  ✔ revoke 后 scope=B 立即空、grants 不再含 scope:B；重复 revoke/撤销未授权目标幂等不抛错；技能仍 published (3.1942ms)
+✔ S1 TC-S1-03/04 撤销：立即不可见 + 幂等 (3.3731ms)
+▶ S1 TC-S1-07/08 草稿安全：pending/rejected 对非复审查询零泄漏
+  ✔ 默认列表（含全部空间视图）不含 pending/rejected 及其 prompt；includePending 仅 general 复审视角 (3.3869ms)
+✔ S1 TC-S1-07/08 草稿安全：pending/rejected 对非复审查询零泄漏 (3.5516ms)
+▶ S1 HTTP 路由：general 门禁 + revoke 端点 + include=pending 收口 + 审计形状（listen(0)）
+  ✔ TC-S1-05 非 general 调 review/grant/revoke → 4xx + 文案含 general；general 成功；register 无门禁 (75.0032ms)
+  ✔ TC-S1-06 审计：action=skill:grant/revoke 且 detail 含 skillScope 与目标空间；scope=技能归属空间 (13.6779ms)
+  ✔ TC-S1-07 HTTP include=pending 收口：member=general 才可见 pending；非复审不带出草稿 (47.1262ms)
+  ✔ TC-S1-11 非法输入矩阵 → 4xx + 可读文案，零副作用、无 500 (108.5939ms)
+  ✔ TC-S1-09 删除源空间 → 其他空间共享视图同步移除、无悬空引用（级联） (18.187ms)
+✔ S1 HTTP 路由：general 门禁 + revoke 端点 + include=pending 收口 + 审计形状（listen(0)） (363.3409ms)
+ℹ tests 20
+ℹ suites 9
+ℹ pass 20
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 522.1162
+exit=0
+===== calendar.test.mjs =====
+▶ TC-S5-01/09 calendar_events 建表幂等 + 旧库自动建表
+  ✔ TC-S5-01 新库 import 后表与索引存在；同库二次 import 幂等不报错 (26.233ms)
+  ✔ TC-S5-09 旧库（tasks/skills/chat 存量、无 calendar 表）import 自动建表且事件可用、存量无损 (67.5153ms)
+✔ TC-S5-01/09 calendar_events 建表幂等 + 旧库自动建表 (119.6814ms)
+▶ TC-S5-02 POST 创建 → 200 字段形状 + 落库 + audit calendar:create
+  ✔ 创建合法事件 → 200 事件含 id/scope/title/start/end=null/allDay=false/createdAt/updatedAt；库中可查；audit 形状正确 (54.975ms)
+✔ TC-S5-02 POST 创建 → 200 字段形状 + 落库 + audit calendar:create (55.4597ms)
+▶ TC-S5-03 scope 过滤 + 日期窗闭区间 + 排序
+  ✔ GET /api/calendar/events?scope=&from=&to= 仅该 scope + 窗内闭区间 + start asc 稳定排序 (82.6801ms)
+  ✔ 同日同 start 的事件按 id asc 稳定排序 (32.3146ms)
+✔ TC-S5-03 scope 过滤 + 日期窗闭区间 + 排序 (115.659ms)
+▶ TC-S5-04 scope 隔离互不可见 + 跨 scope 写不串
+  ✔ 两 scope 各建事件后交叉查询互不可见；事件 scope = 请求 scope (62.516ms)
+✔ TC-S5-04 scope 隔离互不可见 + 跨 scope 写不串 (62.9473ms)
+▶ TC-S5-05 非法输入矩阵 → 400 零落库零 audit
+  ✔ 缺 by / title 空 / title 101 / start 缺 / start 非法 / end<start / scope 缺 → 全部 400 且零落库零 calendar 审计 (124.2697ms)
+✔ TC-S5-05 非法输入矩阵 → 400 零落库零 audit (124.6533ms)
+▶ TC-S5-06 日期窗边界 + allDay date-only
+  ✔ start 恰在 from/to / 前一日 / 后一日 / allDay date-only → 闭区间正确 (94.1229ms)
+✔ TC-S5-06 日期窗边界 + allDay date-only (94.4771ms)
+▶ TC-S5-07 删除契约：confirm / scope 越权 / 成功 + audit calendar:delete
+  ✔ 缺 confirm / confirm 非 yes / scope 越权 / 未知 id → 400 且事件仍在；confirm=yes + scope 匹配 → 200 且 audit (109.5544ms)
+✔ TC-S5-07 删除契约：confirm / scope 越权 / 成功 + audit calendar:delete (109.8758ms)
+▶ TC-S5-08 写走 handleWrite：audit 经 /api/activity 可查 + SSE /api/events 广播
+  ✔ 订阅 /api/events 期间 POST 创建 → ≤5s 收到 calendar:create live 帧；GET /api/activity?scope= 可查 calendar:* (61.8133ms)
+✔ TC-S5-08 写走 handleWrite：audit 经 /api/activity 可查 + SSE /api/events 广播 (62.011ms)
+▶ TC-S5-11 合法边界：title 恰 100 / end 省略 / allDay / end=start / meta
+  ✔ title=100 恰好 200；end 可省=null；allDay:true 存 1 返 true；end=start 允许；meta 往返 (66.9272ms)
+✔ TC-S5-11 合法边界：title 恰 100 / end 省略 / allDay / end=start / meta (67.29ms)
+▶ DAO 级直测（chat.test.mjs 同法：函数级 create/list/delete/解析）
+  ✔ createCalendarEvent 校验（缺 by/scope/title/非法时间/超长）与 listCalendarEvents 窗过滤直接可用 (1.2434ms)
+  ✔ listCalendarEvents 参数校验：from 晚于 to / 非法窗参数抛错 (0.5801ms)
+✔ DAO 级直测（chat.test.mjs 同法：函数级 create/list/delete/解析） (2.2439ms)
+ℹ tests 13
+ℹ suites 10
+ℹ pass 13
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 871.1277
+exit=0
+===== chat.test.mjs =====
+▶ TC-S1-01/02/04/05 会话创建与 scope 列表
+  ✔ TC-S1-01 创建会话 → 含 id/createdAt/updatedAt/last_message_at=null；列表按 updatedAt desc 排首 (4.8367ms)
+  ✔ TC-S1-02 scope 过滤：software 列表不含 default/marketing 会话 (1.8879ms)
+  ✔ TC-S1-04 kind 非法 → 拒绝并指明合法枚举；TC-S1-05 缺 by 被拒且无 chat 审计留痕 (0.6875ms)
+✔ TC-S1-01/02/04/05 会话创建与 scope 列表 (8.4145ms)
+▶ TC-S1-03/06/07 scope 隔离 + author 绑定
+  ✔ TC-S1-03 scope 隔离反向：default 列表查不到 software 会话；跨 scope 写不串（消息 scope = 会话 scope） (2.8181ms)
+  ✔ TC-S1-06 发消息 → author=by、createdAt 有值、会话 last_message_at 更新 (2.0921ms)
+  ✔ TC-S1-07 author 冒名被服务端绑定：传入 author:other 恒等于 by (1.8238ms)
+✔ TC-S1-03/06/07 scope 隔离 + author 绑定 (7.0325ms)
+▶ TC-S1-08/09 分页与边界
+  ✔ TC-S1-08 25 条消息 limit=10 → 三页 10/10/5，页内升序、拼接无重无漏 (22.8582ms)
+  ✔ TC-S1-09 分页边界：空会话 []、超界游标 []、缺省 limit=50、非法 limit 拒绝 (5.8332ms)
+  ✔ TC-S1-10 未知会话发消息/列消息 → 拒绝且不落任何消息行 (0.3262ms)
+  ✔ TC-S1-11 空正文被拒 (1.3337ms)
+  ✔ TC-S1-12 正文长度上限 MAX_CHAT_BODY：恰好通过、+1 拒绝且不落库 (2.6894ms)
+✔ TC-S1-08/09 分页与边界 (33.4527ms)
+▶ TC-S1-13 审计留痕（chat 写统一 audit：by + scope + SSE 广播前置）
+  ✔ create + message 各产生 chat:* 审计行（member/scope/detail 形状 + seq 升序） (2.764ms)
+✔ TC-S1-13 审计留痕（chat 写统一 audit：by + scope + SSE 广播前置） (2.8759ms)
+▶ TC-S1-16 老库迁移：无 chat 表旧库自动建表 + 存量数据无损
+  ✔ 旧 schema（tasks/skills 有数据、无 conversations/messages）import 后自动建两表且 chat 可用 (78.8493ms)
+✔ TC-S1-16 老库迁移：无 chat 表旧库自动建表 + 存量数据无损 (79.009ms)
+▶ S9 TC-S9-01 chat_reply_settings 建表幂等 + 旧库自动建表
+  ✔ 新库含 chat_reply_settings；旧库（无此表）import 自动建表且 chat 存量完整 (50.541ms)
+✔ S9 TC-S9-01 chat_reply_settings 建表幂等 + 旧库自动建表 (50.7438ms)
+▶ S9 TC-S9-02 回复开关：默认开 + 持久化 + per-scope 隔离
+  ✔ 未设置默认 enabled=true；POST enabled:false 持久化；software/marketing 互不影响；重启（新 import 同库）后保持 (32.1417ms)
+✔ S9 TC-S9-02 回复开关：默认开 + 持久化 + per-scope 隔离 (32.2869ms)
+▶ S9 TC-S9-03/04 awaiting 状态机：开关开标 awaiting；开关关无 awaiting 且人-人消息正常
+  ✔ 开关开（默认）发送 → meta.aiStatus=awaiting；author=general；会话更新正常 (2.6011ms)
+  ✔ 开关关（enabled:false）发送 → 无 aiStatus；不进队列；人-人消息本身正常 (2.8485ms)
+✔ S9 TC-S9-03/04 awaiting 状态机：开关开标 awaiting；开关关无 awaiting 且人-人消息正常 (5.587ms)
+▶ S9 TC-S9-05 回复方身份：默认 <scope>-assistant；identity 消息不自我触发
+  ✔ replyIdentityFor 默认 = scope+-assistant；该身份发消息 author=by 且不被再标 awaiting (2.7061ms)
+✔ S9 TC-S9-05 回复方身份：默认 <scope>-assistant；identity 消息不自我触发 (2.8296ms)
+▶ S9 TC-S9-06 回复队列：awaiting 列表含上下文 + limit + 跨空间隔离
+  ✔ 两会话 awaiting → 队列含两者（conv/msg id/body/context 最近 N 条）；limit 上限防爆；marketing 不含 software (6.0661ms)
+✔ S9 TC-S9-06 回复队列：awaiting 列表含上下文 + limit + 跨空间隔离 (6.2412ms)
+▶ S9 TC-S9-08/11 CAS 回写：awaiting→replied；重复/并发幂等不产生第二条回复
+  ✔ postAiReply 落回复消息（author=by）+ 源消息 replied + audit/SSE；第二次回写幂等 skipped (4.3156ms)
+✔ S9 TC-S9-08/11 CAS 回写：awaiting→replied；重复/并发幂等不产生第二条回复 (4.4137ms)
+▶ S9 TC-S9-07 超龄兜底：CHAT_REPLY_TIMEOUT_MS 小值注入 → failed + error，退出队列
+  ✔ awaiting 超时后被标 failed（含 timeout 语义）且不再出现在 replies (343.3381ms)
+✔ S9 TC-S9-07 超龄兜底：CHAT_REPLY_TIMEOUT_MS 小值注入 → failed + error，退出队列 (343.617ms)
+▶ S9 retry 重试 + 边界（TC-S9-10 族）
+  ✔ failed 消息重试回 awaiting；已 replied 拒绝重试；回复正文 8000 边界 (12.6303ms)
+✔ S9 retry 重试 + 边界（TC-S9-10 族） (12.9314ms)
+▶ S9 HTTP 层：settings/replies/answer 路由契约 + 非法入参 400（listen(0)）
+  ✔ GET/POST /api/chat/reply-settings 读写；GET /api/chat/replies 队列与非法入参 400 (207.5785ms)
+✔ S9 HTTP 层：settings/replies/answer 路由契约 + 非法入参 400（listen(0)） (231.4535ms)
+ℹ tests 23
+ℹ suites 14
+ℹ pass 23
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 892.0753
+exit=0
+===== spaces.test.mjs =====
+▶ TC-S7-01..04 正常删除：removed 逐表计数 + 收口断言 + audit 保留
+  ✔ 造数空间 Z 删除 → removed 计数匹配、全表零残留、列表不含 Z、audit 保留 space:delete (98.8386ms)
+✔ TC-S7-01..04 正常删除：removed 逐表计数 + 收口断言 + audit 保留 (125.0128ms)
+▶ TC-S7-05/06 护栏：受保护空间 + confirm/门禁 4xx 矩阵
+  ✔ software/default 删除被拒（400 + 受保护文案） (6.0066ms)
+  ✔ confirm 缺/错配、未知空间、非 general（无 forceGeneral）→ 4xx 且零删除 (85.2279ms)
+✔ TC-S7-05/06 护栏：受保护空间 + confirm/门禁 4xx 矩阵 (91.655ms)
+▶ TC-S7-08 在办空间允许删除（D-11）+ audit 保留 + impact 未删前可查
+  ✔ 含 in_progress 任务的空间按正确 confirm + general 可删；removed.tasks 含在办行 (50.5073ms)
+✔ TC-S7-08 在办空间允许删除（D-11）+ audit 保留 + impact 未删前可查 (50.8874ms)
+▶ TC-S7-09 级联改动不回归 chat/skills 语义
+  ✔ 删除只含 tasks 的空间不影响其他空间数据；skills 跨空间引用随源空间删除同步移除 (26.8842ms)
+✔ TC-S7-09 级联改动不回归 chat/skills 语义 (27.2208ms)
+ℹ tests 5
+ℹ suites 4
+ℹ pass 5
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 366.5188
+exit=0
+===== rules.test.mjs =====
+▶ TC-S4-01 rules 建表幂等 + 旧库自动建表
+  ✔ 新库表结构；同库二次 import 幂等 (18.6234ms)
+  ✔ 旧库（无 rules 表、有 chat/skills 存量）import 自动建表且存量无损 (43.8103ms)
+✔ TC-S4-01 rules 建表幂等 + 旧库自动建表 (81.5995ms)
+▶ TC-S4-02 GET 默认值
+  ✔ 未设置 → 200 {ok, rules:{scope, content 空串, updatedAt:null}}；预留空间层 scope 不 500 (41.5878ms)
+✔ TC-S4-02 GET 默认值 (41.9042ms)
+▶ TC-S4-03 POST 写入 → 回读一致 + audit + SSE ≤5s
+  ✔ 保存全局规范 → GET 回读逐字一致 + audit rules:update + SSE 帧 (27.5082ms)
+✔ TC-S4-03 POST 写入 → 回读一致 + audit + SSE ≤5s (27.8095ms)
+▶ TC-S4-04 非法输入矩阵 → 400 零落库零 audit
+  ✔ 缺 by / 非法 scope / content 非字符串 / 超 MAX_RULES_LEN → 400 + 可读文案，零落库 (82.4885ms)
+✔ TC-S4-04 非法输入矩阵 → 400 零落库零 audit (83.0349ms)
+▶ TC-S4-05 边界值：恰 3000 / 清空 / 覆盖更新 upsert
+  ✔ content 恰 3000 → 200；清空 → 200 且回读空串；同一 key 重复 POST → upsert 不产生重复行 (75.9993ms)
+✔ TC-S4-05 边界值：恰 3000 / 清空 / 覆盖更新 upsert (76.7919ms)
+▶ TC-S4-06 GET 无副作用 + 读写纪律
+  ✔ GET /api/rules 不产生任何 audit 行 (29.2614ms)
+✔ TC-S4-06 GET 无副作用 + 读写纪律 (29.7397ms)
+ℹ tests 7
+ℹ suites 6
+ℹ pass 7
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 391.1827
+exit=0

@@ -1,0 +1,9 @@
+﻿=== plugins tsc --noEmit ===
+plugins exit=0
+=== board-plugin tsc --noEmit ===
+board-plugin exit=0
+=== workbench tsc --noEmit ===
+src/App.tsx(314,1): error TS1185: Merge conflict marker encountered.
+src/App.tsx(328,1): error TS1185: Merge conflict marker encountered.
+src/App.tsx(330,1): error TS1185: Merge conflict marker encountered.
+workbench exit=2

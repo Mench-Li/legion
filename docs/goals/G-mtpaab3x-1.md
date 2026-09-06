@@ -13,6 +13,6 @@
 - T-105｜breaker｜done
 - T-106｜test-designer｜done
 - T-107｜coder｜done
-- T-108｜reviewer｜todo
+- T-108｜reviewer｜done
 - T-109｜tester｜todo
 - T-110｜devops｜todo

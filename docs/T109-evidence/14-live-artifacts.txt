@@ -1,0 +1,49 @@
+﻿=== live hub 产物核对 ===
+T-103 | requirement | done | artifacts: D:\project\DSH\legion\.legion-worktrees\T-103\docs\REQUIREMENTS.md
+T-104 | researcher | done | artifacts: 
+T-105 | breaker | done | artifacts: D:\project\DSH\legion\.legion-worktrees\T-105\docs\TASK_BREAKDOWN.md
+T-106 | test-designer | done | artifacts: D:\project\DSH\legion\.legion-worktrees\T-106\docs\TEST_CASES.md
+T-107 | coder | done | artifacts: D:\project\DSH\legion\.legion-worktrees\T-107\docs\TEST_REPORT.md
+T-108 | reviewer | done | artifacts: D:\project\DSH\legion\.legion-worktrees\T-108\docs\review\T-108-REVIEW.md , docs/review/T-108-REVIEW.md#189b81
+T-109 | tester | in_progress | artifacts: 
+T-110 | devops | todo | artifacts: 
+--- T-111 (docsDir goal) ---
+TASK: {
+ "id": "T-111",
+ "role": "requirement",
+ "status": "in_review",
+ "goalId": "G-mtpq729o-1",
+ "artifacts": "[{\"by\":\"soldier-auto\",\"at\":\"2026-09-06T11:36:54.064Z\",\"kind\":\"file\",\"path\":\"D:\\\\project\\\\DSH\\\\legion\\\\.legion-worktrees\\\\T-111\\\\docs\\\\G-mtpq729o-1\\\\REQUIREMENTS.md\",\"title\":\"T-111 需求说明（完整功能使用介绍文档 + 持续自动同步）\"},{\"by\":\"soldier-auto\",\"at\":\"2026-09-06T11:36:54.072Z\",\"kind\":\"file\",\"path\":\"docs/REQUIREMENTS.md\",\"title\":\"需求澄清产出文档\",\"digest\":\"10dcf3be2f2a84deffcc42e618eb693d57e7d4922fff64effcbb0ba887d3ca06\"}]"
+}
+GOALS: [
+ {
+  "id": "G-001",
+  "objective": "完成 Shop 跨境电商总项目首周上架与合规验收",
+  "docsDir": null,
+  "status": "active"
+ },
+ {
+  "id": "G-002",
+  "objective": "交付剩余Legion军团指挥团的任务，包括但不局限于对话中心，文件中心，浏览器助手等。首先盘点全项目，找出待办任务，评估优先级，设计方案，最后拆分任务，并分配给具体的智能体进行任务开发及测试验证",
+  "docsDir": null,
+  "status": "done"
+ },
+ {
+  "id": "G-mtolvlpy-1",
+  "objective": "继续完善：1.跨空间共享技能建设；2.项目规范建设（类似全局的agent.md+项目/空间层面的agent.md）；3.没有移除空间的功能；4.对话功能不可用，发送后，并没有LLM大模型或者Agent与之对话",
+  "docsDir": null,
+  "status": "done"
+ },
+ {
+  "id": "G-mtpaab3x-1",
+  "objective": "需求澄清/方案确认等所有产生文档的环节，在任务详情中要能够直接打开预览对于产生的文档，避免再去人工查找路径",
+  "docsDir": null,
+  "status": "active"
+ },
+ {
+  "id": "G-mtpq729o-1",
+  "objective": "生成一份完整的功能使用介绍文档，并作为持续性工作，每当有新功能或者功能迭代的时候，都自动更新这份文档+readme文档",
+  "docsDir": "docs/G-mtpq729o-1",
+  "status": "active"
+ }
+]

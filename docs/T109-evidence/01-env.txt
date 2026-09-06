@@ -1,0 +1,3 @@
+﻿node v24.19.0 | worktree D:\project\DSH\legion\.legion-worktrees\T-109 | branch w/T-109 HEAD 310002a (== promote T-108, 含 T-107 编码实现)
+deps: plugins/workbench/board-plugin node_modules junction <- main repo; plugins/lib 由 DSH checkout tsc 编译产出（exit 0）
+沙箱: workspace-write、禁网；node 内 spawnSync/pipe-捕获 = EPERM（R-18 环境受限面，见 10/16）

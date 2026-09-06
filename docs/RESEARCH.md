@@ -1,3 +1,313 @@
+# T-104 方案搜索与选型报告（环节产出文档在任务详情直接打开预览）
+
+> 角色：researcher（方案搜索）｜阶段：方案搜索｜任务：T-104（分支 w/T-104 独立 worktree；评估基准 = w/T-104 HEAD ba0372d（promote T-096）== main。3c8f27d（T-103 需求基线）以来仓库仅 docs/REQUIREMENTS.md、docs/RESEARCH.md 两文档变动、代码零变化（git diff --stat 实测）——本报告 [本地] 行号均在本阶段 read/grep 实测复核）
+> 输入：docs/REQUIREMENTS.md（T-103 需求澄清，本任务唯一权威需求基线；含 R-1~R-4 编号需求、AC-* 可测验收口径、D-1~D-10 待将军裁决项与默认值；其 file:line 证据本文 §1.2 已逐一复核）
+> 下游：breaker（docs/TASK_BREAKDOWN.md）→ test-designer → coder → reviewer → tester → devops
+> 替换关系：本文档**取代**同文件 T-096 报告成为当前阶段依据；T-096 报告全文（含其文末 T-074/T-044 存档）已原样移入文末「存档附录」（内容一字未删），延续 T-096 对 T-074、T-074 对 T-044 的存档惯例；经 git 亦可回溯（T-096 提交 aeb5fd0 / promote ba0372d）。
+>
+> **结论一句话**：目标能力可在既有架构内闭环，v1 推荐全部走「**零新增运行时依赖**」路线——① R-1 岗位文档契约 = **roles.json stage 新增 docs 数组字段**（兼容既有单值 artifact/gate 读法），守护在 worker done 结算时按契约**自动兜底登记**产出文档（worker 报告不填 artifact 也能登记），登记路径改存**仓库相对路径**；② R-3 内容通道 = v2 **team-hub 新增只读 GET /api/artifact/content**（路径只取任务登记记录、scope.local_dir 仓库根白名单、realpath 防逃逸、未 promote 态按「worktree 目录优先 → 主仓库兜底」解析），v1 侧 **scrum/serve.mjs 与 board-plugin 的 /api/artifact 由「仅最新一条」升级为逐条内容服务**；③ markdown 渲染 = **自研可控子集渲染器**（React 元素树直出、零依赖、不新增 dangerouslySetInnerHTML、链接协议白名单）——满足 §2.6 渲染安全红线与禁网纪律；④ R-2 S1（workbench 任务详情）新增「产出文档」直达区 + 同屏内嵌渲染视图；⑤ R-4 S2（kanban 详情）产物区逐条可交互升级。备选/升级路线 = react-markdown（unified/remark 生态）与 marked/markdown-it+DOMPurify（均需将军放行新增依赖与离线安装通道，后者另需豁免 AC-R3-5 红线），影响与条件见 K6/§13/§17。
+
+## 0. 结论速览（TL;DR）
+
+| 需求（REQUIREMENTS §5） | 一等（推荐） | 备选 | 排除 |
+| --- | --- | --- | --- |
+| R-1 岗位文档契约+自动登记（P0） | **roles.json stage.docs 数组字段**（requirement→docs/REQUIREMENTS.md；researcher→docs/RESEARCH.md；breaker→docs/TASK_BREAKDOWN.md；test-designer→docs/TEST_CASES.md；reviewer→docs/review/{taskId}-REVIEW.md；tester→docs/TEST_REPORT.md；devops→docs/DEPLOY.md）；守护结算时（commitWorktree 后、autoPromote 前）**契约逐条自动登记**，存仓库相对路径；缺失 → 明确提示并停 in_review | 守护独立配置表 docContracts（双源漂移）；契约下沉 taskctl/hub 各持一份 | 纯约定式扫描 worktree diff 登记（无法做缺失提示 AC-R1-4/动态模板，误收 evidence） |
+| R-2 S1 详情直达区（P0） | TaskDetailModal 新增「产出文档」小节：标题+岗位/时间+打开动作，点击**同屏展开内嵌渲染视图**（滚动容器/截断提示），多轮倒序、空态占位；既有 url/html/file 产物语义保留 | 独立只读新标签页（作补充动作）；在既有产物区内原位升级（语义混杂，排除） | 详情内 md 编辑器/重渲染（越界，R-2 scope out） |
+| R-3 文档内容预览（P0） | **内容通道**：v2 = hub GET /api/artifact/content（记录驱动+白名单+worktree 目录优先/主仓库兜底，见 K4/K5）；v1 = serve.mjs/board-plugin /api/artifact 逐条扩展；**渲染** = 自研子集 md→React 元素（K6 一等） | 复用文件中心 /api/files 中转（双请求+需登记校验）；react-markdown 生态线（需放行依赖，见 K6-B/G-R3） | 只读主仓库文件（不满足 AC-R3-2 未 promote 逐字一致）；任意路径读口（AC-R3-3 否决） |
+| R-4 S2 详情补齐（P1） | render.mjs 详情产物区**逐条可交互**：md/文本条目 → 预览弹层（纯文本或与 K6 同规则的安全小渲染）；html 多条逐条 iframe；url/file 语义保留；file:// 双击模式明确降级提示 | S2 仅 <pre> 纯文本预览（D-5 最低合法档，作 md 渲染子兜底） | 双倍实现 S1 同款重渲染（R-4 scope out 自担） |
+
+---
+
+## 1. 输入、范围与方法
+
+### 1.1 需求输入（T-103 REQUIREMENTS.md，唯一权威基线）
+
+- **R-1（P0）岗位文档契约**：七文档岗各一条契约、配置驱动、结算自动登记不依赖 worker 自填、动态文件名（reviewer）、缺失显式提示不静默（AC-R1-1..5）。
+- **R-2（P0）S1 详情「产出文档」直达区**：点击即读、多轮可见、路径降级辅助、既有产物语义不回退、空态占位（AC-R2-1..5）。
+- **R-3（P0）文档内容预览**：所见=真实文件内容（主分支态 + 未 promote 分支态逐字一致）、白名单读、markdown 可读渲染无脚本执行、超长/二进制明确处理（AC-R3-1..7）。
+- **R-4（P1）S2 经典看板详情补齐**：逐条可交互预览、多条 html 逐条可预览、url/file/html 不回退（AC-R4-1..3）。
+- 硬性不变量（REQUIREMENTS §4.2 + 仓库纪律）：**零新增运行时依赖优先**（禁网；先本地盘点，确需新增须将军放行并给离线安装通道）；渲染安全红线 = React 文本节点、**不新增 dangerouslySetInnerHTML**（AC-R3-5 代码审查断言）；hub 写走 handleWrite/审计/SSE 纪律（hub:1262 先例）；老库零迁移幂等；预览读限于任务归属仓库根 + 白名单（不跨空间，D-10）；本次**只产 docs/RESEARCH.md**（不改代码、不调 taskctl、不 push）。
+
+### 1.2 现状代码证据（本阶段 read/grep 实测锚点，评估基准 ba0372d，均可复核）
+
+> 行号为本阶段（w/T-104 HEAD=ba0372d）实测，与 T-103 REQUIREMENTS.md（基线 3c8f27d）引用一致（其间仅 docs/ 两文件变动）。缩写：plugins=plugins/src/index.ts；hub=team-hub/server.mjs；modal=workbench/src/components/TaskDetailModal.tsx；api=workbench/src/api.ts；render=scrum/render.mjs；serve=scrum/serve.mjs；wserve=workbench/scripts/serve.mjs；taskctl=scrum/taskctl.mjs；board=board-plugin/src/index.ts。
+
+| 主题 | 证据（本阶段实测） | 含义 |
+| --- | --- | --- |
+| 岗位文档路径契约 = prompt 文本 | roles.json:11（requirement）、:17/:19-20（researcher + gate/artifact 单条机器字段）、:25（breaker）、:31（test-designer）、:43（reviewer 动态文件名）、:49（tester）、:55（devops） | 机器契约仅 researcher 一岗一条；其余全凭提示词自觉 |
+| 守护侧 stage 定义 | plugins:151-160（StageDef；artifact?: string 单值 :159；gate?: boolean :157） | R-1 扩展点：StageDef + 契约解析 |
+| done 结算主路径 | plugins:1285-1334：commitWorktree(:1287)→recordPatch(:1288)→**仅 worker 报告自填才 recordArtifact(:1289)**→中间阶段 autoPromote(:1292)→gate 则 in_review(:1300-1318) / 否则 done+流转(:1320-1324)；末环节点 in_review+promoteHint(:1326-1334) | 自动登记缺口根因：:1289 依赖 worker 自填 |
+| gate 文档校验（仅 researcher） | plugins:1304-1315：autoPromote 后对**主仓库根** stat stage.artifact(:1306)，缺失→in_review+提示(:1307-1313)，存在→in_review+「请将军人工验收」评论(:1315) | R-1 缺失提示可据此泛化；注意校验点在 autoPromote **之后**（worktree 已删） |
+| worktree 生命周期 | plugins:770-807 prepareWorktree：目录=worktreeRoot/<taskId>（:772）、分支 w/<taskId>、复用优先；plugins:960-980 autoPromote：merge --no-ff(:965)→worktree remove --force(:972)→branch -D w/<id>(:973)；plugins:841-847 commitWorktree（git add -A + commit） | 中间阶段/门禁合入即删 worktree+分支 → 内容进主仓库；末环节点/合入失败时 worktree 与分支保留 → 内容只在分支态（AC-R3-2 场景） |
+| 产物登记实现 | plugins:930-954 recordArtifact：相对路径拼 worktree 目录/工作目录成**绝对路径**（:934-941）→ hub POST /api/artifact 或 taskctl artifact 双写（:943-949）；文件不存在跳过+评论（:936-939） | 登记存**绝对路径**，promote 删 worktree 后失效/越权面 → R-1 改相对路径表示 |
+| v2 产物数据面 | hub:95/:282（tasks.artifacts TEXT 列）、hub:1260-1276（POST /api/artifact：push 追加、无去重、audit artifact、无内容 GET）、hub:355/:379（rowToTask 返回 artifacts） | hub 侧**无任何读文件内容端点**（本阶段全路由 grep 复核）；S1 无内容通道根因之一 |
+| 空间仓库绑定 | hub:130-147 spaces 表（local_dir/remote_url 列）、hub:1570-1588 GET /api/spaces 暴露 localDir；plugins:560-564 repoRootFor/worktreeRootFor（config 或空间绑定派生） | 内容通道仓库根：v2 可用 spaces.local_dir；worktreeRoot = local_dir/.legion-worktrees 惯例 |
+| S1 详情产物区 | modal:419-434：逐条「📦 产物 + kind + title — path」**纯路径文本**；仅 url 有 <a> 外链；html/file 无动作 | R-2 升级点；同文件 :404-417 testReport 卡片为「结构化面板」既有样式先例 |
+| S1 取数 | api:264-271 fetchHubTasks/fetchHubTask（GET /api/task?id=）；api:23-33 hubBase 默认 /hub（可 ?hub=/localStorage 覆盖） | S1 文档列表/内容取数函数在此族新增 |
+| S2 产物区 | render:437：产物逐条渲染但**仅最新一条** html iframe、file=下载、url=外链 | R-4 升级点（多条 html/逐条 md 预览缺失） |
+| v1 内容服务 | serve:452-480：GET /api/artifact?task=[&raw=1]，**只取登记最后一条**（:461 slice(-1)），repoRoot 白名单（:464-466），html→text/html、其余 octet-stream（:475） | S2 服务态预览底座；升级为按条取 |
+| DSH 看板内容服务 | board:66-73 artifactAllowed（repoRoot+artifactRoots 白名单）、board:75-110 GET /api/artifact（:86 取最后一条、:104-106 raw 读） | DSH GUI 内嵌看板同 v1 语义，需同升级 |
+| taskctl 产物命令 | taskctl:572-583 artifact（push {kind,title,path,by,at}，无路径白名单——白名单在读取端） | v1 登记面 |
+| 文件安全读先例 | wserve:9-16（/api/files/* 头注释：根=spaces.local_dir、.git 段拒绝、realpath 复检）、wserve:384（download 与 readFileBytes 同强度）、wserve:1022-1032（list/read/download 路由） | 内容通道的安全实现可照抄此纪律（规范化+realpath+符号链接逃逸） |
+| 渲染安全红线 | REQUIREMENTS §2.6：React 一律文本节点、无 dangerouslySetInnerHTML（ChatView.tsx:13/:49、FilesView、ActivityFeed.tsx:72） | md 渲染不得引入新 innerHTML |
+| 现无任何 md 渲染依赖 | workbench/package.json（react 19/three 系，无 markdown/净化库；pnpm-lock 复核） | K6 决策输入：要么自研要么新增依赖 |
+
+### 1.3 评估维度与引用分级
+
+- 每决策域按「候选 ≥2 / 适配度 / 成熟度与许可证 / 成本（实现+运维+学习）/ 风险 / 结论（一等·备选·排除）」评估；推荐理由锚定 [本地] 行号（可离线复核）或 [公开·待核] URL。
+- 引用分级沿用仓库惯例：`[本地]` = 本仓库文件/行号（§1.2 实测）；`[公开·待核]` = 公开项目/规范事实。本阶段 web_search 实测 Insufficient Balance（与 T-074/T-096 记录一致），仓库纪律同时禁网；故公开事实一律标「待核」并给规范 URL，**不编造 star 数/版本号/发布日期/下载量**。
+
+---
+
+## 2. 决策域 K1（R-1）：岗位文档契约的载体与形态（AC-R1-1..3，D-1）
+
+**缺口**：机器契约仅 researcher 一岗（roles.json:19-20、plugins:158-159 单值 artifact）；其余六岗路径只在 prompt 文本（roles.json:11/:25/:31/:43/:49/:55）。
+
+- **候选 A（一等）：roles.json stage 新增数组字段 docs**（与既有 artifact/gate 同源同文件，语义 = 该岗位应产出文档的路径模板，1 岗可多条）。
+  - 形态建议：`docs?: Array<{ path: string; title?: string; required?: boolean }>`，或简化 `docs?: string[]`（路径模板串）；模板变量统一 {taskId}（reviewer 例：docs/review/{taskId}-REVIEW.md）。
+  - 优点：与 T-103 D-1 默认一致（roles.json 同源）；与提示词文本同文件易同步不易漂移；新增文档型岗位 = 加一行配置驱动生效（R-1 目标原文）；改动面最小。
+  - 缺点/成本：roles.json 是共享文件（board-plugin /api/config :464 整读、taskctl/守护 pipeline 读 roles）——结构变更需同步守护 StageDef/校验（plugins:151-160）与读 roles 的消费方；实施+回归约 1 切片。
+  - 风险：与并行链同时改 roles.json 的合入冲突——缓解：只新增字段不动既有字段语义、breaker 按行区域切、仓库已有合入调解员兜底（06480ba）。
+- **候选 B（备选）：守护独立配置段 docContracts: Record<role, string[]>**（plugins Config z.object 内，默认值内置与 roles.json 同步）。
+  - 优点：不动共享 roles.json；守护侧可程序化默认+空间级覆盖。
+  - 缺点：契约与提示词文本**双源**（改岗位职责时漏改一边即漂移）；与 D-1「与既有 stage.artifact/gate 同源」默认不一致；将军在 roles.json 看不到契约。
+- **候选 C（排除）：纯约定式扫描登记**（结算时把 worktree diff 中 docs/ 下 .md 变化文件全部登记，不建契约）：实现最简，但无法做 AC-R1-4 缺失提示（无期望路径可比）；reviewer 动态文件名/1 岗多文档无模板依据；会误收 docs/T###-evidence/*.json/.txt 等非阅读型文件（D-2 默认不登记 evidence）；worker 未写文档时照样成功流转——违背目标。仅可作兜底补充。
+
+**结论**：一等 = A（roles.json stage.docs，兼容旧 artifact：读取处 `docs = stage.docs ?? (stage.artifact ? [stage.artifact] : [])`，见 K10）；备选 B；排除 C。researcher 既有 gate/artifact 行为保持不变（AC-R1-5）。
+
+## 3. 决策域 K2（R-1/R-2）：自动登记的时机、路径表示与多轮条目（AC-R1-2/3、AC-R2-3，D-4/D-8）
+
+**缺口**：登记触发点只在 worker 报告自填 artifact（plugins:1289）；路径被解析为**绝对路径**（plugins:934-941），中间阶段/门禁 autoPromote 后 worktree 被删（plugins:972-973）→ 登记路径指向已删除目录，天然失效且构成读端越权面。
+
+- **候选 A（一等）：结算自动登记 + 仓库相对路径入库 + 多轮追加**。
+  - 时机：在 commitWorktree(:1287) 之后、autoPromote(:1292) 之前执行「契约逐条登记」：解析 {taskId} 模板 → relPath（如 docs/REQUIREMENTS.md）→ 以 worktree 目录为基准做存在性检查（文件已随 commit 落盘）→ 登记条目 { kind: file, path: relPath, title: 岗位标签 + 文档说明, by: 守护角色, at: now }（kind 沿用 file，md 渲染按扩展名识别，D-4 默认）。hub 与 v1 双写沿用 recordArtifact 既有双路径（plugins:943-949）与 handleWrite 纪律（hub:1262）。
+  - 相对路径语义：path = 相对该任务 scope 仓库根（如 docs/review/T-0xx-REVIEW.md）；读取端按 scope.local_dir/worktree 根解析（K4/K5）——promote 后仍稳定可读，天然满足「路径只取自登记 + 根白名单」（AC-R3-3）。
+  - 多轮（打回重做）：每次 settle 追加一条（时间戳即轮次），详情按时间倒序（AC-R2-3）；同轮内容未变可去重（对比上一条同 path 条目）——去重为可选优化，字节级历史默认不做（G-R6）。
+- **候选 B（备选）：维持绝对路径登记 + 读端「前缀剥除」兼容**：登记侧改动最小，但路径生命周期与 worktree 绑定（promote 后失效需兜底重映射 worktreeRoot/<id>/ → repoRoot/），读端逻辑脏；仅作存量记录读取期兼容（K10），不作新登记格式。
+- **候选 C（排除）：仅 worker 报告 artifact 登记（现状）**——AC-R1-2 自动兜底直接失败。
+
+**结论**：一等 = A。编排顺序细节：登记必须在 autoPromote 之前（否则 worktree 目录已删无法存在性检查）；gate researcher 的 docOk 检查（plugins:1304-1313）可改为复用「契约登记结果」，消除 promote 后回主仓库根 stat 的时序特例。
+
+## 4. 决策域 K3（R-1）：缺失提示与完成评论（AC-R1-4/5）
+
+- **候选 A（一等）：契约逐条存在性 = 结算软闸门**：登记阶段若某契约文档缺失 → 任务**不流转 done/不自动 advance**，停在 in_review 并写明确提示评论（含期望路径、已登记清单），将军可打回让补全；补上后下一轮结算提示消除。对 researcher gate 等价于现状 docOk 泛化（plugins:1306-1313）；对 requirement 等非 gate 岗位 = 从「无校验直接 done」变为「缺失即停」。完成评论同时给出「产出文档清单」可读摘要（泛化 :1315 仅 researcher 的提示）。
+  - 成本/风险：改变非 gate 文档岗现状「自动流转」行为 → **需将军拍板**（G-R2）：软门禁（缺才停、有照旧流转）还是全部文档岗停 in_review 等人工点验（后者吞吐下降；T-103 §6 样例按 requirement 任务进 in_review 描述，暗示将军可能想要后者，必须澄清）。
+- **候选 B（备选）：缺失仅评论提示、不阻断流转**（现状 researcher 之外行为）：实现最省，但 AC-R1-4「任务仍停 in_review（不误判为成功流转）」无法满足，除非将军降级口径（G-R2 显式说明）。
+
+**结论**：一等 = A（缺文档 → 停 in_review + 提示评论；有文档 → 按岗位 gate 语义：gate 停 in_review、非 gate 照旧自动流转）。G-R2 待将军裁决。
+
+## 5. 决策域 K4（R-3）：文档内容通道（服务端读文件端点）（AC-R3-1/3/7，形态自由留给 researcher）
+
+**需求语义**：从任务详情点击登记文档 → 服务端按「登记记录」读文件返回内容；路径不读任意查询串（AC-R3-3）；内容与真实来源逐字一致（AC-R3-1/2）；仓库根白名单（D-10 不跨空间）。宿主进程现状：S1 浏览器只连 hub（api:264-271）；S2 走 v1 serve.mjs 或 DSH board-plugin（serve:452-480、board:75-110）——三者都有 repo 文件系统访问能力与既有白名单先例。
+
+- **候选 A（一等 v2）：team-hub 新增只读端点 GET /api/artifact/content?task=<id>&i=<条目序>**：任务 ID + 条目序 → 服务端在任务记录取第 i 条 artifact.path → 归属校验 → 读文件返回 { content, truncated?, size, source: worktree|main, relPath }（md 按 text/markdown）。
+  - 解析与白名单：scope（任务自带）→ spaces.local_dir（hub:130-147 已存、:1570-1588 暴露）作仓库根；relPath 规范化后必须落在根内（.. 段拒绝 + realpath 前缀复检 + 任一层 .git 拒绝——照 wserve:9-16/:384 纪律）；分支态解析见 K5（worktree 目录优先，主仓库兜底）。
+  - 优点：单一数据源（S1 已连 hub，hubBase 可配置 api:23-33）；记录驱动天然满足 AC-R3-3；多空间按 scope 隔离（D-10）；新端点 + 一个白名单读函数即可；无新进程/新服务。
+  - 缺点/假设：hub 进程需能读空间本地目录（单机本地部署成立；跨机 hub/远程仓库不支持 → G-R7）；spaces.local_dir 需等于仓库根（现绑定语义即此，G-R7）。
+- **候选 B（一等 v1）：扩展 serve.mjs / board-plugin 的 /api/artifact**：从「仅最后一条」（serve:461 slice(-1)、board:86）升级为 ?task=&i= 逐条取 + raw 文本返回（md 按 text/markdown）；白名单沿用 repoRoot（board:66-73 已有 artifactRoots）。优点：底座已存在、改动局部；.legion-worktrees 目录天然在 repoRoot 白名单内 → 未 promote 态文件 v1 本就可读（现状白名单已放行），只需按条 + md 语义升级。缺点：与 v2 是两套实现 → breaker 分片、两处共用同一读规则（各自实现 + 测试锚定等价语义）。
+- **候选 C（备选）：复用文件中心 /api/files/read?scope=&path=（wserve）**：需先按登记记录把 path 与任务绑定校验再二次请求——多一跳、绑定绕远、文件中心根不含分支态 worktree 语义；仅可作 v1 服务态兜底。
+- **候选 D（排除）：暴露任意 git show/任意路径读口**（无记录约束）——AC-R3-3 直接否决。
+
+**结论**：一等 = A（v2 面）+ B（v1/S2 面）并行实现，共用同一读规则（记录驱动 + 根白名单 + worktree 优先解析）；C 兜底；D 排除。内容端点与渲染解耦：端点只回原始文本/字节，渲染在客户端（K6/K7/K8）。
+
+## 6. 决策域 K5（R-3）：未 promote 分支态内容解析（AC-R3-2，D-7 默认必须兼容）
+
+**事实**：中间文档岗任务完成即 autoPromote（worktree 删 + 分支删，plugins:972-973），验收时内容在主仓库；但**末环节点**（devops：plugins:1326-1334 in_review + promoteHint）与**合入失败**（plugins:966-975 保留 worktree/分支）任务在验收时刻文档只在 w/<id> 分支/隔离目录；blocked/WIP 续做期间同理。预览必须兼容两态。
+
+- **候选 A（一等）：文件系统解析「worktree 目录优先，主仓库兜底」**：resolve(scope, taskId, rel) = ① worktreeRoot/<taskId>/<rel>（worktreeRoot 惯例 = local_dir/.legion-worktrees，plugins:564）存在 → 读之（source=worktree）；② 否则 local_dir/<rel> → 读之（source=main）；皆无 → 404。
+  - 依据：worker done 时守护已 commitWorktree（plugins:1287）→ worktree 工作树内容 == w/<id> 分支内容（逐字一致）；worktree 未删（末环节点/失败态）时读目录文件即读分支文件；worktree 已删（已 promote）时读主仓库文件。
+  - 优点：**零 git CLI 依赖**、纯文件读、字节级一致、实现与测试简单（同一套白名单读函数）；与 K4 同层落地。
+  - 风险/边界：需要预览服务与 repo 同机（G-R7 同 K4）；目录存在性判定以「文件存在」为准即可，无需 .git 探测。
+- **候选 B（备选）：git show w/<taskId>:<rel>**：A 读取失败后作二次兜底（如目录被清但分支仍在）。缺点：每请求起 git 子进程、需分支存在检查与 commit 时序（worker 未提交内容读不到——done 路径必先 commit :1287）、白名单文件级约束仍需包裹；成本高收益窄 → 可选兜底（breaker 默认不做）。
+- **候选 C（排除）：只读主仓库**——AC-R3-2 直接失败（这正是将军「人工找路径/等合入」痛点，D-7 默认必须兼容）。
+
+**结论**：一等 = A；B 可选兜底；C 排除。AC-R3-1/2 测试比对口径：预览输出与 git show <分支>:<path> 逐字 diff 为空（测试期由测试脚本执行 git 比对，产品运行期不需要）。
+
+## 7. 决策域 K6（R-3）：markdown 渲染方案（S1 React 面）（AC-R3-4/5，D-5，§2.6 红线）
+
+**决策输入**：全仓零 md 渲染依赖（workbench/package.json 实测）；红线 = React 文本节点、不新增 dangerouslySetInnerHTML（AC-R3-5）；禁网/禁依赖安装（需将军放行才可新增）；本仓库文档形态实测 = 标题/段落/列表/表格/代码块/引用/链接为主（REQUIREMENTS.md、RESEARCH.md 均该子集）。
+
+- **候选 A（一等）：自研可控子集渲染器（新增 workbench 组件，如 MarkdownDocView.tsx，约 300-400 行 TSX）**。
+  - 语义：token 化支持 标题/段落/粗斜体/行内代码/围栏代码块(三反引号)/引用/有序无序列表(含嵌套)/表格/分割线/链接/图片；**原始 HTML 一律按文本显示**（不渲染不执行）；链接 href 协议白名单（http/https/mailto/相对路径/#）；输出为 React 元素树（无 innerHTML）。不支持语法（脚注/任务列表/删除线等）按 D-5 回退为文本显示并在文档注明契约。
+  - 优点：零新增依赖（禁网纪律、T-096 v1 零依赖先例一致）；不引入 innerHTML → AC-R3-5 代码审查断言直接可过；渲染安全可单测（喂 <script>/<img onerror>/javascript: 断言无执行）；实现可控、体积小；学习成本低（普通 TSX）。
+  - 缺点/成本：语法覆盖是**子集**——语法新增需自行扩展+测试；实现+单测约 0.5~1 切片；「未知语法按文本」需测试锚定以免静默劣化阅读。
+  - 风险：低估 markdown 边角（嵌套列表/表格内代码/转义）→ 缓解 = 以本仓库真实文档做渲染回归样例（REQUIREMENTS/RESEARCH/TASK_BREAKDOWN 等逐份冒烟：渲染无崩溃 + 关键文本可见）。
+- **候选 B（备选，需将军放行依赖）：react-markdown + remark-gfm（unified/remark 生态，MIT[公开·待核]）**：完整 CommonMark/GFM；默认不渲染 raw HTML、输出 React 元素（无 innerHTML 负担）；unified 生态维护活跃[公开·待核]。缺点：新增 ~15+ 传递依赖（remark-parse/micromark/mdast-util-*/hast-util-* 等，MIT[待核]）；**禁网纪律下离线安装通道需先打通**（依赖不在本地缓存则 coder 无法安装——需将军给安装方式或由 devops 预置）；体积/学习成本中等；仍需自包链接协议白名单与展示配置。
+- **候选 C（备选/受限）：marked 或 markdown-it + DOMPurify → HTML → dangerouslySetInnerHTML**：生态成熟、GFM 全；但引入 2 依赖（MIT/Apache-2.0[公开·待核]）；**突破 AC-R3-5「页面无 dangerouslySetInnerHTML 新引入」红线** → 需将军显式豁免 + e2e「含脚本 md 无执行」断言 + DOMPurify 严格配置（禁 style/事件属性、禁 raw HTML 直通）。除非将军偏好 DOM 渲染，否则不推荐。
+- **候选 D（兜底）：纯文本 <pre> 全文视图**（D-5 明确「纯文本回退也是合法最低档」）：约零成本、绝对安全；作为 A 未覆盖语法的回退与二进制/异常通道共用；不作主选。
+
+**结论**：一等 = A（自研子集，React 元素直出）+ D（文本兜底）；B 为「将军放行依赖」后的长期升级路线（G-R3）；C 排除除非豁免 AC-R3-5。v1（S2，无 React）采用与 A 同规则的小型 md→HTML 纯函数（全部输出转义、仅白名单协议、不透传原始 HTML）或直接 <pre> 文本（K8）。
+
+## 8. 决策域 K7（R-2）：S1 任务详情「产出文档」直达区与预览视图（AC-R2-1..5，D-8/D-9）
+
+- **候选 A（一等）：详情内新增「产出文档」小节 + 同屏内嵌渲染视图**。
+  - 布局：置于产物区（modal:419-434）上方；来源 = 任务记录按 R-1 登记的文档条目（叠加既有手工 artifact；kind=file 且扩展名 md/markdown/txt 判定为阅读型文档）；每条 = 标题（岗位标签）+ 时间 +「打开」钮；点击 → 同屏展开内嵌面板（渲染视图，max-height 容器内滚动 + 「新标签打开」可选，D-9 默认内嵌）；多轮倒序、最新高亮；路径降级为小字 code 可复制；空态（非文档岗/未产出）给中性占位不报错（AC-R2-4）。
+  - 内容获取：api.ts 新增 fetchHubDocContent(taskId, i) → hub GET /api/artifact/content（K4）；渲染用 K6-A 组件。
+  - 优点：将军不离开详情即可逐字阅读（goal 主诉）；数据/渲染/UI 解耦可分别验收；testReport 卡片（modal:404-417）样式可仿，CSS 成本低。
+  - 成本：modal + api.ts + types.ts + 新组件 + CSS ≈ 1 切片；风险：长文档撑爆弹窗 → max-height+滚动+截断（K9）守卫。
+- **候选 B（备选）：独立只读页/新标签（?view=doc&task=&i=）**：便于长文对照但离开详情上下文、需路由/新页脚手架；作为 A 的「新标签」动作并存（默认 A 内嵌，B 仅钮）。
+- **候选 C（排除）：在既有产物区原位堆按钮不分小节**：与通用产物（url/html/file）语义混杂，无法做「非文档岗不显示误导区」占位（AC-R2-4）。
+
+**结论**：一等 = A（内嵌主视图），B 作为 A 的可选动作，C 排除。
+
+## 9. 决策域 K8（R-4）：S2 经典看板详情升级（AC-R4-1..3，D-6）
+
+**现状**：render:437 产物区仅最新一条 html iframe / file 下载 / url 外链；v1 服务态（serve.mjs）与 DSH GUI 抽屉（board-plugin）共用该详情页。
+
+- **候选 A（一等）：render.mjs 详情产物区改「逐条条目 + 每条操作」**：每条显示 kind 徽标 + title/时间 + 路径；md/文本类（kind=file 且扩展名 md/txt）→「预览」钮 → fetch /api/artifact?task=<id>&i=<序>&raw=1（serve/board 扩展，K4-B）→ 弹层渲染（与 K6-A 同规则的小型安全渲染器或 <pre> 文本兜底）；html 多条逐条 iframe（不再 slice(-1)，serve:461/board:86 扩展）；url 外链、file 下载保留。空态/读取失败有明确文案。
+- **候选 B（备选）：S2 md 仅 <pre> 纯文本预览**：实现最小、D-5 合法；S2 非将军主验收面时够用（D-6 默认 S1 主面、S2 P1）。
+- **候选 C（范围说明）**：kanban.html **file:// 双击模式**（无服务）无法 fetch → 预览动作不可用 → 明确降级显示路径 + 提示「服务模式（serve.mjs / DSH /api）下可预览」；AC-R4 测试跑在服务态，不承诺 file 模式预览。
+
+**结论**：一等 = A（逐条 + md 预览 + 多条 html），B 为 md 渲染子兜底，C 作为 file 模式边界写明。
+
+## 10. 决策域 K9（R-3）：读取规范与边界（AC-R3-6，超长/二进制/错误码）
+
+- 大小上限：**默认 512KB**（G-R5 数值待将军确认；本仓库阶段文档实测 ≤ 数十 KB，REQUIREMENTS.md 42KB / RESEARCH.md 124KB 均在限内）；超限 → 返回「已截断：共 N 字节，显示前 M」+ 下载全文入口，渲染层同步守卫（不给渲染器喂超大串）。
+- 二进制判定：含 NUL 或非法 UTF-8 序列或高不可打印比例 → previewable:false + 「该文件为二进制/不可文本预览，可下载」，不白屏不报错（AC-R3-6）。
+- 编码：md 文档为 UTF-8（worker 写盘惯例）；解码失败走二进制/不可预览路径（不静默乱码）。
+- 错误码可区分（测试断言用）：404 任务/条目/文件不存在；403 路径越权/逃逸；400 参数非法（i 越界、无登记）；二进制/超限走 200 envelope 带标志（可区分正常与提示，AC-R3-3/6）。
+- 参照先例：wserve /api/files/read（截断+行数+二进制拒绝）；审计 diff 6000 字符截断（modal:412）——预览上限应远大于 diff 截断且提示显式。
+
+## 11. 决策域 K10（全局）：迁移、兼容与回归（AC-R1-5/R2-5/R3-7/R4-3）
+
+- roles.json 兼容：新增 stage.docs 后保留 artifact 旧字段；守护/消费方统一读法 docs ?? [artifact]；gate 语义、researcher 门禁行为不回退（plugins:1300-1318 保持不变或仅换登记结果判断）；board-plugin /api/config 整读 roles.json（board:464）无需改协议（多返回字段不破坏既有 UI）。
+- 存量记录：v1 tasks.json 与 hub tasks.artifacts 现存条目多为**绝对路径**（部分已指向已删 worktree）→ 读取期兼容（K2-B）：abs 前缀命中 worktreeRoot/<id>/ 或 local_dir 则剥前缀后按 K4/K5 解析；否则 403/提示「旧记录路径不可用」。默认**不跑迁移脚本**（G-R8），如需可加幂等小脚本（team-hub/scripts/migrate-tasks.mjs 先例）。
+- v1/v2 双写一致性：登记沿用 recordArtifact 既有双路径（plugins:943-949，useHub 时只写 hub）；S1 读 hub、S2 读 v1 → 各自独立验收（AC-R3-7/R4-3 不互相依赖）。
+- 老库迁移纪律：hub artifacts 条目字段 {kind,path,title,by,at} 已含需求所需字段 → **无需 DDL** 零迁移；渲染/UI 全在客户端新增。
+- 回归面（命令级）：workbench `pnpm build`（tsc --noEmit + vite）0 错误；web 冒烟（workbench/scripts/web.test.mjs 型）含「详情产出文档区 + 渲染安全」新断言；team-hub 契约测试（登记/内容端点/越权 403/逐字比对 AC-R3-1/2）；scrum `node scrum/render.mjs` 无错 + render/serve 冒烟；plugins tests（worker-regression/slice-orchestration：回放登记、缺失提示）；board-plugin typecheck/build（tsdown）。
+- 安全回归：全仓 grep 无新增 dangerouslySetInnerHTML（审查断言 AC-R3-5）；无透传原始 HTML 渲染路径；链接协议白名单集中一处可审计。
+
+---
+
+## 12. 一等选型汇总 → 直接支撑 breaker 拆片
+
+### 12.1 实施拓扑建议（含文件域；breaker 据此给互不重叠文件域与先后）
+
+| 决策域 | 一等落点 | 文件域 |
+| --- | --- | --- |
+| K1/K2/K3（R-1）契约+自动登记+缺失提示 | roles.json 加 stage.docs；plugins 结算登记/模板解析/相对路径/双写/评论 | roles.json；plugins/src/index.ts（StageDef :151-160、recordArtifact :930-954、done 结算 :1285-1334 同文件不同函数域——breaker 按函数域划或排先后串行） |
+| K4/K5（R-3 v2 内容通道） | hub GET /api/artifact/content + 白名单读函数 + worktree 优先解析 + legacy 兼容 | team-hub/server.mjs（新增端点 + 读函数；消费 spaces.local_dir :130-147） |
+| K6（R-3 渲染） | 自研 MarkdownDocView（React 元素直出 + 协议白名单 + <pre> 兜底） | workbench/src/components/MarkdownDocView.tsx（新）+ 样式；断言落 workbench/scripts/web.test.mjs 型套件 |
+| K7（R-2 S1 UI） | TaskDetailModal 产出文档区 + 内嵌面板 + 空态；api.ts fetchHubDocContent；types.ts | workbench/src/components/TaskDetailModal.tsx、workbench/src/api.ts、workbench/src/types.ts |
+| K4/K8（R-4 S2） | serve.mjs/board-plugin /api/artifact 逐条扩展（i 参数+md 语义）；render.mjs 详情逐条可交互 | scrum/serve.mjs、board-plugin/src/index.ts、scrum/render.mjs |
+| K10（测试/回归锚定） | 各套件新断言 + 渲染安全 + 逐字一致比对 | team-hub/*.test.mjs、workbench/scripts/*.test.mjs、plugins/tests/*.test.mjs、scrum/taskctl.ttl.test.mjs、board-plugin typecheck/build |
+
+- 依赖顺序：数据面（K1-K3 roles/plugins 契约+登记）→ 内容面（K4/K5 hub 端点，依赖登记条目）→ 渲染/UI 面（K6/K7 S1、K8 S2，依赖内容端点）。文件域互不重叠（roles.json+plugins / team-hub / workbench / scrum+board-plugin）→ breaker 可分 2~4 个并行切片 + 说明串行依赖：S1(数据层) 与 S2(team-hub 端点) 可并行；workbench 切片依赖 hub 端点（可先按接口契约 mock 并行、最后联调）；scrum+board-plugin 独立并行。
+- 联调样例（沿用 REQUIREMENTS §10.3）：T-103 自身即 requirement 型任务且 docs/REQUIREMENTS.md 已在主仓库 → R-1/R-2/R-3 天然验收样例（AC-R3-1 主分支态）；T-104 完成后 researcher gate 文档已 promote；「未 promote 态」用 devops/末环节点或合入失败样例模拟（AC-R3-2）。
+
+### 12.2 与 T-103 D 系列对照（默认值采纳情况）
+
+| D | 默认值（T-103） | 本报告采纳 |
+| --- | --- | --- |
+| D-1 契约落点 | roles.json 新增字段 | K1-A 采纳（stage.docs，兼容 artifact） |
+| D-2 七岗单文档/evidence 不默认登记 | 采纳 | K1 契约清单同；evidence 不登记（K1-C 排除理由） |
+| D-3 契约编辑 UI | 本期不要 | 采纳（roles.json/配置维护） |
+| D-4 登记 kind | file + 扩展名识别 md | K2-A 采纳（kind=file，渲染按 .md 识别） |
+| D-5 渲染基准 | 可读等价、纯文本最低档合法 | K6-A + D 兜底采纳 |
+| D-6 主验收面 | S1 P0 主面、S2 P1 | K7/K8 采纳（S2 若升 P0 则 K8-A 完整实现） |
+| D-7 未 promote 必须可预览 | 必须 | K5-A 采纳（worktree 优先/主仓兜底） |
+| D-8 多轮呈现 | 倒序 + 最新可预览 | K2-A/K7-A 采纳（条目倒序；旧条目内容=当前文件并标注已被最新轮覆盖；字节级历史需 G-R6） |
+| D-9 内嵌 vs 新标签 | 内嵌为主+可新标签 | K7-A 采纳 |
+| D-10 不跨空间 | 采纳 | K4 按 scope.local_dir 白名单；全部空间视图不读他空间仓库 |
+
+---
+
+## 13. 决策闸门（G-R1..G-R8，请将军裁决；建议默认值即上文一等）
+
+| 闸门 | 问题 | 建议默认值 |
+| --- | --- | --- |
+| G-R1 | 岗位文档契约放 roles.json（共享文件）还是守护独立配置？ | roles.json stage.docs（K1-A），与既有 artifact/gate 同源；共享文件合入冲突由文件域分片 + mediator 兜底 |
+| G-R2 | 文档缺失时的流转语义：全部文档型岗位加软门禁（缺 → 停 in_review 提示，有 → 照旧流转）？还是每个文档岗任务都停 in_review 等将军点验？（T-103 §6 样例按 requirement 进 in_review 描述） | 软门禁（缺才停）——流水线吞吐优先；若将军要每环节人工验收请明示（需扩 gate 语义，另评） |
+| G-R3 | 是否放行新增运行时依赖（K6-B react-markdown 生态 或 K6-C marked/markdown-it+DOMPurify）？放行需同时给出**离线安装通道**（禁网纪律冲突：依赖不在本地缓存则无法安装） | 默认不放行 → K6-A 自研子集（零依赖）；确需完整 GFM 再放行并先解决安装通道 |
+| G-R4 | 是否豁免「不新增 dangerouslySetInnerHTML」红线（AC-R3-5）？ | 不豁免（K6-A/C 依此裁决）；若豁免需配 e2e 脚本执行断言 + DOMPurify 严格配置 |
+| G-R5 | 文档预览大小上限与截断策略数值 | 512KB 内完整返回/渲染；超限显式截断提示 + 下载全文（K9） |
+| G-R6 | 多轮旧版**字节级**回看是否本期需要？ | 不需要（条目倒序 + 旧条目标注覆盖即可）；需要则登记时存 commit/contentHash、读端 git show 历史（成本更高，见 K2/K5 备选） |
+| G-R7 | 预览服务与仓库同机、scope.local_dir=仓库根的部署假设是否成立（跨机 hub/远程仓库不支持）？ | 成立（本产品单机本地部署）；若需跨机/多根支持则要 hub 落库 repoRoot/worktreeRoot 配置（K4 扩展点） |
+| G-R8 | 存量绝对路径产物记录：读取期兼容还是跑迁移脚本？ | 读取期兼容（不跑迁移，K10）；需要干净数据时 breaker 可加幂等迁移小脚本 |
+
+---
+
+## 14. 风险与未知（含备选方案）
+
+| # | 风险 | 说明 | 缓解 |
+| --- | --- | --- | --- |
+| R-1 | 登记仍靠 worker 自觉 → 数据面空 | 现状（plugins:1289） | K2-A 结算自动登记兜底（不依赖报告 artifact） |
+| R-2 | 预览内容与将军要验收文件不一致（分支/主仓/多轮混淆） | 时序差 + 点错条目 | K5-A 来源解析 + AC-R3-1/2 逐字比对测试 + K7 倒序/最新高亮 |
+| R-3 | 内容通道变任意文件读取口 | 记录驱动不严/路径逃逸 | 只取登记记录 + 根白名单 + realpath 复检（wserve 先例）+ AC-R3-3 |
+| R-4 | md 渲染 XSS/脚本 | 仓库红线 | K6-A React 元素直出、原始 HTML 按文本、协议白名单、无新 innerHTML、AC-R3-5 断言 |
+| R-5 | roles.json 并行链合入冲突 | 共享文件 | 只新增字段；breaker 文件域隔离；mediator 兜底 |
+| R-6 | 自研 md 子集覆盖不足劣化阅读 | 语法低估 | 以仓库真实文档做渲染回归样例；不支持语法按文本契约化 + 显式提示；升级 B 备选（G-R3） |
+| R-7 | S1/S2 双面重复/漏端 | 将军主验收面不定 | D-6 默认 S1 P0/S2 P1；K7/K8 各自独立验收 |
+| R-8 | 绝对路径存量记录失效/越权面 | promote 删 worktree | 新登记改相对路径（K2-A）；存量读取期兼容 + 前缀白名单（K10） |
+| R-9 | hub 进程读盘假设被破坏（跨机/远程仓库） | 内容通道在 hub | G-R7 确认单机部署；扩展 = 仓库根配置落库（K4） |
+| R-10 | file:// 双击模式无法预览 | S2 无服务态 | K8-C 明确降级提示，不承诺预览（AC-R4 测试走服务态） |
+| R-11 | 完成评论过长/重复刷屏 | 每轮结算追加评论 | 评论只出清单摘要（新登记路径），缺失提示仅在缺失时写 |
+
+---
+
+## 15. 引用与来源清单
+
+### 15.1 [本地] 可复核（本阶段 read/grep 实测，行号以 w/T-104 HEAD=ba0372d 为准）
+
+| 引用 | 说明 |
+| --- | --- |
+| roles.json:11/:17/:19-20/:25/:31/:43/:49/:55 | 七岗 prompt 文档路径 + researcher gate/artifact |
+| plugins/src/index.ts:151-160、:770-807、:841-847、:930-954、:960-980、:1285-1334 | StageDef/契约点、worktree 生命周期、登记、autoPromote、done 结算 |
+| team-hub/server.mjs:95/:282、:130-147、:1260-1276、:1570-1588 | artifacts 列、spaces(local_dir)、POST /api/artifact、GET /api/spaces |
+| workbench/src/components/TaskDetailModal.tsx:404-434 | testReport 卡片 + 产物纯路径文本 |
+| workbench/src/api.ts:23-33、:264-271 | hubBase、fetchHubTask(s) |
+| scrum/render.mjs:437 | S2 产物区（仅最新 html iframe） |
+| scrum/serve.mjs:452-480 | v1 /api/artifact（最后一条、repoRoot 白名单） |
+| board-plugin/src/index.ts:66-73、:75-110 | DSH /api/artifact 白名单与 raw 读 |
+| scrum/taskctl.mjs:572-583 | v1 artifact 登记命令 |
+| workbench/scripts/serve.mjs:9-16、:384、:1022-1032 | /api/files 安全读先例（.git 拒绝 + realpath） |
+| workbench/package.json；git diff --stat 3c8f27d..HEAD | 无 md 渲染依赖；代码自需求基线零变动 |
+
+### 15.2 [公开·待核]（web_search 实测 Insufficient Balance + 禁网纪律 → 无法在线复核；URL 供联网复核，本报告未引用未核实数字/日期）
+
+- CommonMark 规范：https://spec.commonmark.org/ ；GFM 规范：https://github.github.com/gfm/
+- react-markdown（unified/remark 生态；MIT[待核]）：https://github.com/remarkjs/react-markdown ；remark：https://github.com/remarkjs/remark ；unified：https://github.com/unifiedjs/unified
+- marked（MIT[待核]）：https://github.com/markedjs/marked
+- markdown-it（MIT[待核]）：https://github.com/markdown-it/markdown-it
+- DOMPurify（cure53；许可与配置以仓库 LICENSE/README 为准[待核]）：https://github.com/cure53/DOMPurify
+- sanitize-html（备选净化；MIT[待核]）：https://github.com/apostrophecms/sanitize-html
+- React dangerouslySetInnerHTML / XSS 说明：https://react.dev/reference/react-dom/components/common
+- git worktree 语义：https://git-scm.com/docs/git-worktree
+
+---
+
+## 16. 本阶段验收对照（researcher 自拟，逐条对应任务验收标准）
+
+| 任务验收条目 | 落点 |
+| --- | --- |
+| 方案覆盖需求要点，给出 ≥2 候选方案对比（优缺点/成本/风险） | §2~§11 十决策域 K1-K10，每域候选 ≥2（一等/备选/排除 + 优缺点/成本/风险），覆盖 R-1~R-4 全部 AC-* |
+| 有明确推荐与理由，依据为真实可查来源并注明引用 | §12 一等汇总 + 推荐理由锚定 §15.1 [本地] 实测行号；[公开·待核] URL 仅作规范指引，未引未核实数字 |
+| 新引入技术/依赖逐项说明影响（许可/维护/学习成本/生态） | §17（一等零新增；B/C 备选依赖逐项） |
+| 方案结论可直接支撑后续任务拆解 | §12.1 文件域与顺序建议 + §12.2 D 系列对照 → breaker 可直接切片；验收样例（T-103/T-104 自身）已给 |
+
+---
+
+## 17. 新技术/依赖逐项影响（许可 · 维护 · 学习成本 · 生态）
+
+**一等路线（K1-K10 全部推荐项）新增运行时依赖 = 0**：契约字段（roles.json JSON）、守护登记逻辑、hub 内容端点、自研 md 渲染组件、S1/S2 UI 均为仓库内代码；渲染安全与功能全部可离线单测。维护主体 = 本仓库（自研组件随文档语法演进维护，回归样例锁定）。
+
+备选依赖（若将军经 G-R3 放行，需逐项评估；事实待核）：
+
+| 依赖 | 许可[公开·待核] | 维护 | 学习成本 | 生态 | 备注 |
+| --- | --- | --- | --- | --- | --- |
+| react-markdown（含 remark-parse/remark-gfm 等 unified 族约 15 包） | MIT | unified 组织持续维护 | 中（AST 概念/插件化） | 广（npm 高周下载） | 完整 CommonMark/GFM、React 输出无 innerHTML；禁网下安装通道是前置（G-R3） |
+| marked | MIT | 活跃 | 低 | 广 | 输出 HTML → 需配净化与 innerHTML 豁免（G-R4） |
+| markdown-it | MIT | 稳定低频维护 | 中 | 广 | 同上；插件生态丰富 |
+| DOMPurify | 以仓库 LICENSE 为准（双许可传言待核） | cure53 维护 | 低 | 广 | 与 innerHTML 方案捆绑，需红线豁免 + e2e 断言 |
+| sanitize-html | MIT | 活跃 | 低 | 中 | 同上备选 |
+
+
+---
+
+# 存档附录：历史方案搜索报告（docs/RESEARCH.md 上一版全文 = T-096 报告，文末含其存档的 T-074/T-044 全文；非当前阶段依据）
+
+> 本附录为 T-104 撰写时对上一版 RESEARCH.md（T-096 报告，git HEAD: ba0372d）的逐字存档（以 git show 原字节导出、字节级追加），延续 T-096 对 T-074、T-074 对 T-044 的存档惯例，内容一字未删；该版经 git 亦可回溯（提交 aeb5fd0 / promote ba0372d）。
+
 # T-096 方案搜索与选型报告（四能力：跨空间技能共享 · 分层项目规范 · 移除空间 · 对话接入 AI 回复）
 
 > 角色：researcher（方案搜索）｜阶段：方案搜索｜任务：T-096（分支 w/T-096 独立 worktree，HEAD = 3c8f27d promote T-095；代码文件相对 REQUIREMENTS 基线 41fd406 无变化，本报告 [本地] 行号均按 w/T-096 本阶段 read/grep 实测）

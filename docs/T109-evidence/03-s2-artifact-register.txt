@@ -1,0 +1,15 @@
+﻿✔ requirement 岗 done：结算自动登记 docs/REQUIREMENTS.md（kind=file、仓库相对路径、by=守护、带 digest），worker 未填 artifact 亦登记（AC-R1-2） (58.1237ms)
+✔ reviewer 岗 done：{taskId} 解析为 docs/review/T-0xx-REVIEW.md 实际登记（AC-R1-3） (25.171ms)
+✔ 契约文档缺失 → 任务停 in_review、评论含期望路径与已登记清单提示、不流转（AC-R1-4） (22.0503ms)
+✔ gate 岗 researcher 既有行为不回归：文档存在时登记后仍走 in_review 人工验收（AC-R1-5）；缺失走缺失提示 (26.1172ms)
+✔ 文档补全后重跑登记成功、提示消除并照常流转（G-R2 软门禁缺才停） (34.5389ms)
+✔ 非文档型岗位 coder 不产生契约登记；worker 自填 artifact 既有登记路径不回退 (23.893ms)
+✔ 多轮同 path 字节未变不重复登记（幂等）；变化则追加新条目（AC-R2-3 多轮倒序数据源） (37.6288ms)
+ℹ tests 7
+ℹ suites 0
+ℹ pass 7
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 234.1797

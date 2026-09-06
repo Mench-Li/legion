@@ -1,0 +1,3 @@
+﻿=== 红线 grep dangerouslySetInnerHTML（S4/S5/S6/S7 目标文件；exit 1=零命中）===
+grep-exit=0
+=== 零新增运行时依赖（package.json diff 92cd5e1..835dc77 为空）===

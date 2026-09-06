@@ -1,0 +1,25 @@
+﻿=== M1/M2 探测输出 ===
+=== M1-A1 docDir goal, real doc only in docs/G-DIR-1/REQUIREMENTS.md ===
+requests: claim | comment | comment | transition:in_review
+artifacts: []
+missing-warning-comment: ⚠ 需求澄清完成，但契约产出文档缺失：`docs/REQUIREMENTS.md`（期望写入 worktree 相对路径，与岗位契约一致）。已停在 in_review：产出不完整可 ↩ 打回并说明；补全文档后解阻重跑会自动登记并照常流转。
+产出文档清单（1 项）：缺失产出文档：docs/REQUIREMENTS.md
+gate-comment: (none)
+A1 correct-expectation: register docs/G-DIR-1/REQUIREMENTS.md, no missing warning. Actual registered=0 missingWarn=true
+=== M1-A2 docDir goal + stale root docs/REQUIREMENTS.md present ===
+requests: claim | comment | artifact:docs/REQUIREMENTS.md:a0e6e8d4 | transition:in_review | comment
+artifacts: [{"path":"docs/REQUIREMENTS.md","digest":"a0e6e8d4"}]
+missing-warning-comment: (none)
+gate-comment: ✅ 需求澄清完成，方案文档 docs/G-DIR-1/REQUIREMENTS.md 已合入主分支。**请将军人工验收**：通过 → 任务详情「✓ 验收通过」，守护自动流转到「方案搜索（researcher）」；不通过 → ↩ 打回并附原因，士兵按反馈修订重做。
+要点：完成
+证据：见文档
+产出文档清单（1 项）：已登记
+A2 correct-expectation: register docs/G-DIR-1/REQUIREMENTS.md only. Actual paths=["docs/REQUIREMENTS.md"]
+=== M2 hub artifact POST 500 with file present ===
+requests: claim | comment | comment | transition:in_review
+artifacts: []
+missing-warning-comment: ⚠ 需求澄清完成，但契约产出文档缺失：`docs/REQUIREMENTS.md`（期望写入 worktree 相对路径，与岗位契约一致）。已停在 in_review：产出不完整可 ↩ 打回并说明；补全文档后解阻重跑会自动登记并照常流转。
+产出文档清单（1 项）：缺失产出文档：docs/REQUIREMENTS.md
+gate-comment: (none)
+B correct-expectation: no missing-warning; task continues. Actual missingWarn=true requests=claim|comment|comment|transition:in_review
+exit=0

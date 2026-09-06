@@ -1,0 +1,601 @@
+﻿commit 104f99a8be8e946add64e764843d758e4bf29ff8
+Author: Mench-Li <1115043055@qq.com>
+Date:   Sun Sep 6 14:09:49 2026 +0800
+
+    T-099：T-099 四能力切片 S1–S11 编码实现完成（R-1 跨空间共享技能闭环 / R-2 分层项目规范 / R-3 移除空间 / R-4 对话接入 AI 回复），S12 收口报告已落 docs/TEST_REPORT.md。
+    
+    后端 team-hub/server.mjs：listSkills grants 引用式跨空间可见（scope:B 省略/携带 member 两形态等价）、revokeSkill 过滤幂等、general 门禁（grant/review/revoke）、include=pending 仅 general 收口（草稿不外泄）、audit.scope=技能归属；rules 表/DAO/路由（MAX_RULES_LEN=3000 可配）；删除级联扩至 11 数据表 + GET /api/spaces/impact 只读预检 + software/default 受保护 + confirm 校验；chat_reply_settings + 消息 awaiting 打标 + GET /api/chat/replies 队列（超龄自动 failed + 上下文）+ answer/retry/fail 三条 CAS 回写路由。插件：skillsCache.ts 指纹刷新（id/version/contentHash 排序序列）、norms.ts 分层合并 + 预算截断（全局 3000/空间 4000/合计 7000 三值可配、legacy 逐字兼容）+ index.ts 派工提示词两段注入、chatResponder.ts + sweepChatReplies 扫单（无仓库工具子代理、chatBusy + 服务端 CAS 幂等、失败回写 failed+meta.error）。前端：SkillsPanel 跨空间共享（来源标注/只读/目标空间选择器授权/撤销 + pending 收口视图）、新增 RulesPanel 规范中心（全局层编辑器 + 空间层文件族指引 + 职责总纲）、SpaceSettingsModal 危险区（type-to-confirm delete-space:<id> + 影响预检 + 删除当前空间切回全部空间）、ChatView 三态 AI 气泡（身份泛化 general=我/其余对方 + awaiting/replied/failed + 重试 + 🤖/模型徽标），Sidebar「📜 规范」入口 + App 接线；api.ts 增 revokeSkill/rules/impact/deleteSpace/retryChatReply/reply-settings/fetchSkills(member)。文档：README §3.1/§3.8/§3.8.1 + LEGION.md 分层总纲 + server.mjs 头注释 API 面。
+    
+    验证（沙箱真实执行）：team-hub 5 套件 68 用例 0 失败（skills 20/20 · rules 7/7 · spaces 5/5 · chat 23/23 · calendar 13/13，均 exit 0）；插件纯函数 3 套件 17/17（skills-fingerprint 6/6 · norms 7/7 · chat-responder 4/4）；plugins tsc --noEmit exit 0 且 lib emit 成功；workbench tsc --noEmit exit 0（0 诊断）；四个前端组件 grep 无 dangerouslySetInnerHTML（唯一命中为 ChatView 头注释既有说明）。零新运行时依赖。
+
+diff --git a/team-hub/server.mjs b/team-hub/server.mjs
+index 96fdcbe..9f7295e 100644
+--- a/team-hub/server.mjs
++++ b/team-hub/server.mjs
+@@ -27,11 +27,16 @@
+  *          stage-standards.mjs）；调用方可传自定义 acceptance/boundary 覆盖。
+  *       —— reassign 转派 = soldier 与 role 一并改为目标岗位（转派后守护仍按新 role 自动接管执行）；
+  *          POST /api/hold {id, hold} = 将军逐任务拦截（守护不得自动认领）/放行。
+- *   POST /api/skills/register|review|grant         团队共享技能（scope-owned + grant）
++ *   POST /api/skills/register|review|grant|revoke   团队共享技能（scope-owned + grant/revoke；general 门禁；audit skill:* 带目标空间）
++ *   GET  /api/skills[?scope=&member=&id=&include=]   技能查询（默认 published only；include=pending 仅 member=general 复审视角，草稿不外泄）
++ *   GET/POST /api/rules[?scope=]                   分层规范-全局层（rules 表：global/space 分层 upsert；audit rules:update；S4/R-2）
++ *   GET/POST /api/chat/reply-settings             对话 AI 回复开关/模型/身份设置（per-scope；默认开；S9/R-4）
++ *   GET  /api/chat/replies[?scope=&sinceMsgId=]    对话 AI 回复队列（awaiting 消息 + 最近上下文；超龄自动 failed）
++ *   POST /api/chat/replies/answer|retry|fail       回复状态回写（CAS awaiting→replied/failed；幂等；S9/S10）
+  *   GET/POST /api/chat/conversations|messages       对话中心（会话/消息；scope 分区；写 by 必填 + audit/SSE，见 S1）
+  *   GET/POST /api/calendar/events                 日程日历事件（scope 过滤 + 日期窗 [from,to] 闭区间；写 by 必填 + audit/SSE，见 S5）
+  *   POST /api/calendar/events/delete              删除日程事件（id + confirm=yes + scope 归属校验；audit calendar:delete）
+- *   GET  /api/skills[?scope=&member=&id=]          技能查询（默认只返回 published）
++ *   GET  /api/spaces/impact?id=                   删除预检（只读计数 + 在办任务列表；S7/R-3）
+  *
+  * 状态机 + 乐观锁 + 角色纪律与 taskctl.mjs 一致；scope 是任务分区的一等字段。
+  */
+@@ -244,6 +249,18 @@ db.exec(`
+ `)
+ db.exec('CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages (conv_id, id)')
+ db.exec('CREATE INDEX IF NOT EXISTS idx_conversations_scope ON conversations (scope, updatedAt)')
++// ── 对话 AI 回复设置（R-4，S9）：每空间独立开关 + 模型/身份/systemHint 覆盖 ──
++// 老库自动建表（CREATE TABLE IF NOT EXISTS 幂等，零迁移）；默认 enabled=1（D-13 默认开）。
++db.exec(`
++  CREATE TABLE IF NOT EXISTS chat_reply_settings (
++    scope TEXT PRIMARY KEY,
++    enabled INTEGER NOT NULL DEFAULT 1,
++    model TEXT,
++    identity TEXT,
++    systemHint TEXT,
++    updatedAt TEXT
++  )
++`)
+ // ── 日程日历（calendar）：单表事件存储（R-B1 数据面；G-1 默认单库，scope 分区 + by 写纪律与 chat/tasks 同构）──
+ // 老库自动建表（CREATE TABLE IF NOT EXISTS 幂等，S5 验收 1：旧库无 calendar_events 时 import 自动补建，零迁移脚本）。
+ // 事件带 start/end（ISO 时间串，end 可空）+ all_day（全天标记）+ meta JSON；日期窗过滤按 start 的 YYYY-MM-DD 前缀（闭区间）。
+@@ -261,6 +278,17 @@ db.exec(`
+   )
+ `)
+ db.exec('CREATE INDEX IF NOT EXISTS idx_calendar_scope_start ON calendar_events (scope, start, id)')
++// ── 规范（rules）：全局规范层 + 空间层扩展点（R-2，S4；RESEARCH K3-A）──
++// 老库自动建表（CREATE TABLE IF NOT EXISTS 幂等，零迁移）。key = scope（全局层固定 'global'，空间层预留扩展点）；
++// content 为规范文本（markdown），长度受 MAX_RULES_LEN 护栏；写走统一 handleWrite（audit rules:update + SSE）。
++db.exec(`
++  CREATE TABLE IF NOT EXISTS rules (
++    key TEXT PRIMARY KEY,
++    scope TEXT NOT NULL DEFAULT 'global',
++    content TEXT NOT NULL DEFAULT '',
++    updatedAt TEXT
++  )
++`)
+ // 老库迁移：skills 表先于 status/contentHash/reviewedAt 三列存在，缺列补上。
+ function ensureColumn(table, column, ddl) {
+   const cols = db.prepare(`PRAGMA table_info(${table})`).all()
+@@ -512,25 +540,45 @@ function listSkills({ scope, member, includePending } = {}) {
+       if (includePending !== true && s.status !== 'published') return false
+       if (scope === undefined && member === undefined) return true
+       const inScope = scope !== undefined && s.scope === scope
+-      const granted = member !== undefined && (s.grants.includes(member) || (scope !== undefined && s.grants.includes(`scope:${scope}`)))
+-      return inScope || granted
++      // 跨空间共享（R-1）：scope=B 查询自动包含 grants 含 scope:B 的已发布技能（服务端判定，UI 无需传 member）；
++      // member 单值授权（如 'coder'）在 member 查询形态下同样可见（现状语义保持）。
++      const grantedByScope = scope !== undefined && s.grants.includes(`scope:${scope}`)
++      const grantedToMember = member !== undefined && s.grants.includes(member)
++      return inScope || grantedByScope || grantedToMember
+     })
+ }
+ 
+ function grantSkill(id, grants) {
+   return withTx(() => {
+     const s = getSkill(id)
+-    const merged = [...new Set([...s.grants, ...grants])]
++    const merged = [...new Set([...s.grants, ...grants.map(String)])]
+     db.prepare('UPDATE skills SET grants=?, updatedAt=? WHERE id=?').run(JSON.stringify(merged), now(), id)
+     return getSkill(id)
+   })
+ }
+ 
++/** 撤销跨空间授权（R-1 AC-R1-2）：从 grants 过滤删除目标并写回；撤销未授权目标/重复撤销幂等不抛错。 */
++function revokeSkill(id, targets) {
++  return withTx(() => {
++    const s = getSkill(id)
++    const tset = new Set(targets.map(String))
++    const remaining = s.grants.filter(g => !tset.has(g))
++    if (remaining.length !== s.grants.length) {
++      db.prepare('UPDATE skills SET grants=?, updatedAt=? WHERE id=?').run(JSON.stringify(remaining), now(), id)
++    }
++    return getSkill(id)
++  })
++}
++
+ // ── 对话中心（chat）DAO：会话 / 消息（scope 分区 + 统一写纪律）──
+ // 写纪律（I3）：createConversation / postMessage 内部一律走 audit()（by 必填 + SSE 广播），
+ // 与 tasks 的「路由层 audit」不同——chat 的 DAO 即写入口（含未来 AI 直写场景），把审计放进 DAO
+ // 保证任何调用路径都留痕；author 恒等于 by（服务端绑定，防冒名，TC-S1-07）。
+ export const CHAT_CONV_KINDS = ['space', 'direct', 'task']
++// 对话 AI 回复（R-4，S9）：超龄兜底时间窗（⚖️ env 可配，默认 120s，三值法断言）
++export const CHAT_REPLY_TIMEOUT_MS = Number(process.env.CHAT_REPLY_TIMEOUT_MS || 120000)
++// 供给回复方的同会话上下文条数（S9 队列聚合）
++export const CHAT_REPLY_CONTEXT_LIMIT = 12
+ export const CHAT_MSG_KINDS = ['text', 'markdown', 'system']
+ export const MAX_CHAT_BODY = 8000 // 消息正文长度上限（⚖️ 三值法断言的常量，见 TEST_CASES §3）
+ 
+@@ -615,8 +663,17 @@ export function postMessage(input) {
+   const clientTs = typeof input?.clientTs === 'string' && input.clientTs.length > 0 ? input.clientTs.slice(0, 64) : null
+   return withTx(() => {
+     const t = now()
++    // R-4/S9：回复开关开 + 发送者非本空间回复方身份 → meta.aiStatus=awaiting（同事务写入，零迁移 meta 扩展）。
++    // 回复方身份消息（by === <scope>-assistant）不标 awaiting，防自我触发死循环（TC-S9-05/AC-R4-2/I-12）。
++    const replySettings = getReplySettings(conv.scope)
++    const identity = replyIdentityFor(conv.scope)
++    const meta0 = (typeof input?.meta === 'object' && input.meta) ? { ...input.meta } : {}
++    if (replySettings.enabled && by.trim() !== identity && meta0.aiStatus !== 'failed' && meta0.aiStatus !== 'replied') {
++      meta0.aiStatus = 'awaiting'
++      meta0.aiStatusAt = t
++    }
+     const r = db.prepare('INSERT INTO messages (conv_id, scope, author, kind, body, meta, client_ts, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+-      .run(convId, conv.scope, by.trim(), kind, body, JSON.stringify(typeof input?.meta === 'object' && input.meta ? input.meta : {}), clientTs, t)
++      .run(convId, conv.scope, by.trim(), kind, body, JSON.stringify(meta0), clientTs, t)
+     db.prepare('UPDATE conversations SET last_message_at = ?, updatedAt = ? WHERE id = ?').run(t, t, convId)
+     const msg = msgToObj(db.prepare('SELECT * FROM messages WHERE id = ?').get(r.lastInsertRowid))
+     audit(by, conv.scope, 'chat:message', null, { conv: convId, msg: msg.id, kind: msg.kind })
+@@ -646,6 +703,187 @@ export function listMessages({ conv, limit = 50, before } = {}) {
+   return rows.map(msgToObj)
+ }
+ 
++// ── 对话 AI 回复（R-4，S9）：回复设置 / awaiting 队列 / CAS 回写 / 超龄兜底 ──
++/** 每空间回复设置（未设置 → 合理默认：enabled=true，D-13）。 */
++export function getReplySettings(scope) {
++  const sc = (typeof scope === 'string' && scope.trim().length > 0) ? scope.trim() : 'default'
++  const row = db.prepare('SELECT * FROM chat_reply_settings WHERE scope = ?').get(sc)
++  if (!row) return { scope: sc, enabled: true, model: null, identity: null, systemHint: null, updatedAt: null }
++  return {
++    scope: row.scope,
++    enabled: row.enabled === 1,
++    model: row.model ?? null,
++    identity: row.identity ?? null,
++    systemHint: row.systemHint ?? null,
++    updatedAt: row.updatedAt ?? null,
++  }
++}
++
++/** 回复方身份（D-15/G-R4-2 默认）：<scope>-assistant；可被 settings.identity 覆盖。 */
++export function replyIdentityFor(scope) {
++  const sc = (typeof scope === 'string' && scope.trim().length > 0) ? scope.trim() : 'default'
++  const row = db.prepare('SELECT identity FROM chat_reply_settings WHERE scope = ?').get(sc)
++  if (row && typeof row.identity === 'string' && row.identity.trim().length > 0) return row.identity.trim()
++  return `${sc}-assistant`
++}
++
++/** 保存回复设置（写纪律：by 必填 + audit chat:reply-settings + SSE；per-scope 隔离持久化）。 */
++export function saveReplySettings(input) {
++  const by = input?.by
++  if (typeof by !== 'string' || by.trim().length === 0) throw new Error('缺少操作者身份 by')
++  const scope = input?.scope
++  if (typeof scope !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(scope.trim())) throw new Error('scope 非法：小写字母/数字开头，可含连字符，≤64 字符')
++  const sc = scope.trim()
++  const enabled = input?.enabled !== false
++  const model = typeof input?.model === 'string' && input.model.trim().length > 0 ? input.model.trim().slice(0, 200) : null
++  const identity = typeof input?.identity === 'string' && input.identity.trim().length > 0 ? input.identity.trim().slice(0, 200) : null
++  const systemHint = typeof input?.systemHint === 'string' && input.systemHint.trim().length > 0 ? input.systemHint.trim().slice(0, 2000) : null
++  return withTx(() => {
++    const t = now()
++    db.prepare('INSERT INTO chat_reply_settings (scope, enabled, model, identity, systemHint, updatedAt) VALUES (?, ?, ?, ?, ?, ?)'
++      + ' ON CONFLICT(scope) DO UPDATE SET enabled=excluded.enabled, model=excluded.model, identity=excluded.identity, systemHint=excluded.systemHint, updatedAt=excluded.updatedAt')
++      .run(sc, enabled ? 1 : 0, model, identity, systemHint, t)
++    audit(by, sc, 'chat:reply-settings', null, { scope: sc, enabled, model, identity })
++    return getReplySettings(sc)
++  })
++}
++
++/** 把超龄（> CHAT_REPLY_TIMEOUT_MS，按 aiStatusAt 或 createdAt 起算）的 awaiting 消息兜底标记 failed（AC-R4-4 后端兜底）。 */
++function markStaleAwaiting(scope, nowMs = Date.now()) {
++  const cutoff = nowMs - CHAT_REPLY_TIMEOUT_MS
++  const rows = db.prepare('SELECT id, meta, createdAt FROM messages WHERE scope = ? ORDER BY id DESC LIMIT 500').all(scope)
++  for (const row of rows) {
++    const meta = parseJson(row.meta, {})
++    if (meta.aiStatus !== 'awaiting') continue
++    const at = meta.aiStatusAt ? new Date(meta.aiStatusAt).getTime() : new Date(row.createdAt).getTime()
++    if (at < cutoff) {
++      meta.aiStatus = 'failed'
++      meta.aiError = `回复超时（${CHAT_REPLY_TIMEOUT_MS}ms 内未收到回复方应答）`
++      db.prepare('UPDATE messages SET meta = ? WHERE id = ?').run(JSON.stringify(meta), row.id)
++    }
++  }
++}
++
++/**
++ * awaiting 回复队列：返回 scope 下 aiStatus=awaiting 的消息（id > sinceMsgId），
++ * 每条带同会话最近 CHAT_REPLY_CONTEXT_LIMIT 条消息作为应答上下文；读取前先执行超龄兜底。
++ */
++export function listAwaitingReplies({ scope, sinceMsgId = 0, limit = 20 } = {}) {
++  if (typeof scope !== 'string' || scope.trim().length === 0) throw new Error('缺少参数 scope')
++  const sc = scope.trim()
++  const since = Number(sinceMsgId)
++  if (!Number.isInteger(since) || since < 0) throw new Error('sinceMsgId 必须是 ≥0 的整数')
++  const lim = Number(limit)
++  if (!Number.isInteger(lim) || lim <= 0) throw new Error('limit 必须是正整数')
++  const n = Math.min(lim, 200)
++  markStaleAwaiting(sc)
++  const rows = db.prepare('SELECT * FROM messages WHERE scope = ? AND id > ? ORDER BY id ASC LIMIT ?').all(sc, since, Math.min(n * 4, 800))
++  const out = []
++  for (const row of rows) {
++    const meta = parseJson(row.meta, {})
++    if (meta.aiStatus !== 'awaiting') continue
++    const conv = db.prepare('SELECT title FROM conversations WHERE id = ?').get(row.conv_id)
++    const ctxRows = db.prepare('SELECT id, author, kind, body, createdAt FROM messages WHERE conv_id = ? AND id < ? ORDER BY id DESC LIMIT ?').all(row.conv_id, row.id, CHAT_REPLY_CONTEXT_LIMIT)
++    ctxRows.reverse()
++    out.push({
++      ...msgToObj(row),
++      convId: row.conv_id,
++      convTitle: conv?.title ?? '',
++      context: ctxRows.map(c => ({ id: c.id, author: c.author, kind: c.kind, body: c.body, createdAt: c.createdAt })),
++    })
++    if (out.length >= n) break
++  }
++  return out
++}
++
++/**
++ * CAS 回写（I-12）：回复方应答一条 awaiting 消息——同事务内插入回复消息（author=by，审计 chat:message + SSE）
++ * 并把源消息 meta.aiStatus awaiting→replied（meta.replyMsg=回复 id）。重复/并发回写幂等：
++ * 源已非 awaiting 时返回 { skipped:true }，不产生第二条回复、不抛未定义错误（TC-S9-11）。
++ */
++export function postAiReply(input) {
++  const by = input?.by
++  if (typeof by !== 'string' || by.trim().length === 0) throw new Error('缺少操作者身份 by')
++  const msgId = Number(input?.msgId)
++  if (!Number.isInteger(msgId) || msgId <= 0) throw new Error('缺少参数 msgId')
++  const sourceRow = db.prepare('SELECT * FROM messages WHERE id = ?').get(msgId)
++  if (!sourceRow) throw new Error(`消息不存在：${msgId}`)
++  const kind = input?.kind ?? 'text'
++  if (!CHAT_MSG_KINDS.includes(kind)) throw new Error(`kind 必须 ∈ {${CHAT_MSG_KINDS.join(',')}}，实际收到：${kind}`)
++  const body = input?.body
++  if (typeof body !== 'string') throw new Error('缺少参数 body')
++  if (body.trim().length === 0) throw new Error('回复正文不能为空')
++  if (body.length > MAX_CHAT_BODY) throw new Error(`消息正文超长（上限 ${MAX_CHAT_BODY} 字符）`)
++  const model = typeof input?.model === 'string' && input.model.trim().length > 0 ? input.model.trim().slice(0, 200) : null
++  return withTx(() => {
++    const s2 = db.prepare('SELECT * FROM messages WHERE id = ?').get(msgId)
++    const meta2 = parseJson(s2?.meta, {})
++    if (!s2 || meta2.aiStatus !== 'awaiting') {
++      return { skipped: true, reason: meta2?.aiStatus ?? 'none', source: s2 ? msgToObj(s2) : null }
++    }
++    const conv = getConversation(s2.conv_id)
++    const t = now()
++    const r = db.prepare('INSERT INTO messages (conv_id, scope, author, kind, body, meta, client_ts, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
++      .run(s2.conv_id, conv.scope, by.trim(), kind, body, JSON.stringify({ replyTo: msgId, aiModel: model }), null, t)
++    db.prepare('UPDATE conversations SET last_message_at = ?, updatedAt = ? WHERE id = ?').run(t, t, s2.conv_id)
++    meta2.aiStatus = 'replied'
++    meta2.repliedAt = t
++    meta2.replyMsg = r.lastInsertRowid
++    delete meta2.aiError
++    db.prepare('UPDATE messages SET meta = ? WHERE id = ?').run(JSON.stringify(meta2), msgId)
++    audit(by.trim(), conv.scope, 'chat:message', null, { conv: s2.conv_id, msg: r.lastInsertRowid, replyTo: msgId, ai: true, model })
++    const reply = msgToObj(db.prepare('SELECT * FROM messages WHERE id = ?').get(r.lastInsertRowid))
++    return { skipped: false, source: msgToObj(db.prepare('SELECT * FROM messages WHERE id = ?').get(msgId)), reply }
++  })
++}
++
++/** 重试（UI 失败重试）：把 failed 的 awaiting 源消息重置回 awaiting（仅开关开时；已 replied 拒绝）。 */
++export function retryAiReply(input) {
++  const by = input?.by
++  if (typeof by !== 'string' || by.trim().length === 0) throw new Error('缺少操作者身份 by')
++  const msgId = Number(input?.msgId)
++  if (!Number.isInteger(msgId) || msgId <= 0) throw new Error('缺少参数 msgId')
++  return withTx(() => {
++    const row = db.prepare('SELECT * FROM messages WHERE id = ?').get(msgId)
++    if (!row) throw new Error(`消息不存在：${msgId}`)
++    const meta = parseJson(row.meta, {})
++    if (meta.aiStatus === 'replied') throw new Error('该消息已收到回复，无需重试')
++    const settings = getReplySettings(row.scope)
++    if (!settings.enabled) throw new Error('该空间已关闭 AI 回复，无法重试')
++    meta.aiStatus = 'awaiting'
++    meta.aiStatusAt = now()
++    delete meta.aiError
++    db.prepare('UPDATE messages SET meta = ? WHERE id = ?').run(JSON.stringify(meta), msgId)
++    audit(by.trim(), row.scope, 'chat:retry', null, { msg: msgId })
++    return msgToObj(db.prepare('SELECT * FROM messages WHERE id = ?').get(msgId))
++  })
++}
++
++/**
++ * 显式失败回写（S10 守护 chat-responder 用，TC-S10-02）：CAS awaiting→failed + meta.error（≤500 字）。
++ * 幂等：源已非 awaiting（replied/failed）→ 返回 { skipped:true }，不覆盖 replied 终态、不抛未定义错误。
++ */
++export function failAiReply(input) {
++  const by = input?.by
++  if (typeof by !== 'string' || by.trim().length === 0) throw new Error('缺少操作者身份 by')
++  const msgId = Number(input?.msgId)
++  if (!Number.isInteger(msgId) || msgId <= 0) throw new Error('缺少参数 msgId')
++  const error = typeof input?.error === 'string' && input.error.trim().length > 0 ? input.error.trim().slice(0, 500) : null
++  if (error === null) throw new Error('缺少参数 error（失败原因）')
++  return withTx(() => {
++    const row = db.prepare('SELECT * FROM messages WHERE id = ?').get(msgId)
++    if (!row) throw new Error(`消息不存在：${msgId}`)
++    const meta = parseJson(row.meta, {})
++    if (meta.aiStatus !== 'awaiting') return { skipped: true, reason: meta.aiStatus ?? 'none', source: msgToObj(row) }
++    meta.aiStatus = 'failed'
++    meta.aiError = error
++    meta.failedAt = now()
++    db.prepare('UPDATE messages SET meta = ? WHERE id = ?').run(JSON.stringify(meta), msgId)
++    audit(by.trim(), row.scope, 'chat:fail', null, { msg: msgId })
++    return { skipped: false, source: msgToObj(db.prepare('SELECT * FROM messages WHERE id = ?').get(msgId)) }
++  })
++}
++
+ // ── 日程日历（calendar）DAO：事件 CRUD + 日期窗（R-B1 数据面，S5；scope 分区 + 统一写纪律）──
+ // 写纪律（同 chat I-3）：createCalendarEvent / deleteCalendarEvent 内部一律 audit()（by 必填 + SSE 广播），
+ // 机制复用 audit() 与 /api/events 单一事件流（I-8）；author/member 恒等于 by（防冒名）。
+@@ -763,6 +1001,39 @@ export function deleteCalendarEvent(input) {
+   })
+ }
+ 
++// ── 规范（rules）DAO：全局层 + 空间层扩展点（R-2，S4）──
++// 写纪律同 chat/calendar：by 必填 + audit（rules:update）+ SSE；author/scope 服务端绑定。
++export const MAX_RULES_LEN = Number(process.env.MAX_RULES_LEN || 3000) // 规范内容长度上限（⚖️ env 可配，三值法断言）
++
++/** 合法规范 scope：global（全局层）或空间/项目层 id（与 spaces id 同构，预留扩展点）。 */
++export function validRuleScope(scope) {
++  return typeof scope === 'string' && scope.trim().length > 0 && /^[a-z0-9][a-z0-9-]{0,63}$/.test(scope.trim())
++}
++
++/** 读规范：未设置 → { scope, content: '', updatedAt: null }（合理默认，不报错）。 */
++export function getRule(scope = 'global') {
++  const sc = (scope ?? 'global').trim() || 'global'
++  const row = db.prepare('SELECT scope, content, updatedAt FROM rules WHERE scope = ?').get(sc)
++  return row ?? { scope: sc, content: '', updatedAt: null }
++}
++
++/** 保存规范：幂等 upsert（key=scope）；content 须字符串且 ≤ MAX_RULES_LEN；写由路由层 audit（handleWrite 纪律）。 */
++export function saveRule({ scope = 'global', content, by }) {
++  if (typeof by !== 'string' || by.trim().length === 0) throw new Error('缺少操作者身份 by')
++  const sc = (typeof scope === 'string' && scope.trim().length > 0 ? scope.trim() : 'global')
++  if (!validRuleScope(sc)) throw new Error('scope 非法：global 或小写字母/数字开头的空间 id（≤64 字符）')
++  if (typeof content !== 'string') throw new Error('content 必须是字符串')
++  if (content.length > MAX_RULES_LEN) throw new Error(`规范内容超长（上限 ${MAX_RULES_LEN} 字符）`)
++  return withTx(() => {
++    const t = now()
++    db.prepare('INSERT INTO rules (key, scope, content, updatedAt) VALUES (?, ?, ?, ?)'
++      + ' ON CONFLICT(key) DO UPDATE SET content=excluded.content, updatedAt=excluded.updatedAt')
++      .run(sc, sc, content, t)
++    audit(by, sc, 'rules:update', null, { scope: sc, contentLength: content.length, preview: content.slice(0, 80) })
++    return { scope: sc, content, updatedAt: t }
++  })
++}
++
+ // ── 写操作 ──
+ function createTask(input) {
+   return withTx(() => {
+@@ -1744,6 +2015,22 @@ async function handle(req, res) {
+       return
+     }
+ 
++    // ── 规范（rules）：GET/POST /api/rules（全局层维护；写走 handleWrite：by 必填 + audit rules:update + SSE）──
++    if (req.method === 'GET' && path === '/api/rules') {
++      try {
++        const scopeParam = url.searchParams.get('scope') ?? 'global'
++        if (!validRuleScope(scopeParam)) throw new Error('scope 非法：global 或小写字母/数字开头的空间 id')
++        json(res, 200, { ok: true, rules: getRule(scopeParam) })
++      } catch (e) {
++        json(res, 400, { error: e instanceof Error ? e.message : String(e) })
++      }
++      return
++    }
++    if (req.method === 'POST' && path === '/api/rules') {
++      await handleWrite(req, res, (body, by) => saveRule({ scope: body.scope, content: body.content, by }))
++      return
++    }
++
+     // ── 技能（scope-owned + grant，借鉴 QM shared skills）──
+     if (req.method === 'POST' && path === '/api/skills/register') {
+       await handleWrite(req, res, (body, by, scope) => {
+@@ -1755,31 +2042,51 @@ async function handle(req, res) {
+           id: id.trim(), name: name.trim(), description: body.description,
+           prompt: body.prompt, scope: body.scope ?? scope, owner: by,
+         })
+-        audit(by, scope, 'skill:submit', id, { name: skill.name, version: skill.version })
++        // register 不设 general 门禁（任意成员可提交 pending 草稿，D-2）；审计归到技能归属空间。
++        audit(by, skill.scope, 'skill:submit', id, { name: skill.name, version: skill.version, skillScope: skill.scope })
+         return skill
+       })
+       return
+     }
+     if (req.method === 'POST' && path === '/api/skills/review') {
+       await handleWrite(req, res, (body, by, scope) => {
++        // 门禁（D-2/AC-R1-3）：复审仅 general 可执行；register 不在此列（维持现状）。
++        if (by !== 'general') throw new Error('仅允许 general 执行技能复审（skill:review）')
+         const id = body.id
+         const action = body.action
+         if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
+         if (typeof action !== 'string' || action.length === 0) throw new Error('缺少参数 action')
+         const skill = reviewSkill(id, action)
+-        audit(by, scope, 'skill:review', id, { action, status: skill.status })
++        audit(by, skill.scope, 'skill:review', id, { action, status: skill.status, skillScope: skill.scope })
+         return skill
+       })
+       return
+     }
+     if (req.method === 'POST' && path === '/api/skills/grant') {
+       await handleWrite(req, res, (body, by, scope) => {
++        // 门禁（D-2/AC-R1-3）：授权仅 general 可执行。
++        if (by !== 'general') throw new Error('仅允许 general 执行技能授权（skill:grant）')
+         const id = body.id
+         const grants = body.grants
+         if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
+         if (!Array.isArray(grants) || grants.length === 0) throw new Error('缺少参数 grants')
+         const skill = grantSkill(id, grants.map(String))
+-        audit(by, scope, 'skill:grant', id, { grants: grants.map(String) })
++        // 审计 detail 携带技能归属空间与目标空间（AC-R1-4）：audit.scope = 技能归属空间（跨空间操作不归错 scope）。
++        audit(by, skill.scope, 'skill:grant', id, { grants: grants.map(String), skillScope: skill.scope })
++        return skill
++      })
++      return
++    }
++    if (req.method === 'POST' && path === '/api/skills/revoke') {
++      await handleWrite(req, res, (body, by, scope) => {
++        // 门禁（D-2/AC-R1-3）：撤销仅 general 可执行。
++        if (by !== 'general') throw new Error('仅允许 general 执行技能授权撤销（skill:revoke）')
++        const id = body.id
++        const targets = body.targets
++        if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
++        if (!Array.isArray(targets) || targets.length === 0) throw new Error('缺少参数 targets')
++        const skill = revokeSkill(id, targets.map(String))
++        audit(by, skill.scope, 'skill:revoke', id, { targets: targets.map(String), skillScope: skill.scope })
+         return skill
+       })
+       return
+@@ -1820,6 +2127,58 @@ async function handle(req, res) {
+       return
+     }
+ 
++    // ── 对话 AI 回复（R-4，S9）：reply-settings / replies 队列 / answer CAS 回写 / retry 重试 ──
++    if (req.method === 'GET' && path === '/api/chat/reply-settings') {
++      try {
++        const scopeParam = url.searchParams.get('scope') ?? 'default'
++        if (typeof scopeParam !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(scopeParam.trim())) throw new Error('scope 非法：小写字母/数字开头的空间 id（≤64 字符）')
++        json(res, 200, getReplySettings(scopeParam.trim()))
++      } catch (e) {
++        json(res, 400, { error: e instanceof Error ? e.message : String(e) })
++      }
++      return
++    }
++    if (req.method === 'POST' && path === '/api/chat/reply-settings') {
++      await handleWrite(req, res, (body, by) => saveReplySettings({ ...body, by }))
++      return
++    }
++    if (req.method === 'GET' && path === '/api/chat/replies') {
++      try {
++        const scopeParam = url.searchParams.get('scope')
++        if (!scopeParam || scopeParam.trim().length === 0) throw new Error('缺少参数 scope')
++        const sinceRaw = url.searchParams.get('sinceMsgId')
++        const limitRaw = url.searchParams.get('limit')
++        const since = sinceRaw === null ? 0 : Number(sinceRaw)
++        if (!Number.isInteger(since) || since < 0) throw new Error('sinceMsgId 必须是 ≥0 的整数')
++        const lim = limitRaw === null ? 20 : Number(limitRaw)
++        if (!Number.isInteger(lim) || lim <= 0) throw new Error('limit 必须是正整数')
++        const convRaw = url.searchParams.get('conv')
++        const convFilter = convRaw === null ? null : Number(convRaw)
++        if (convFilter !== null && (!Number.isInteger(convFilter) || convFilter <= 0)) throw new Error('conv 必须是会话 id')
++        let messages = listAwaitingReplies({ scope: scopeParam.trim(), sinceMsgId: since, limit: lim })
++        if (convFilter !== null) messages = messages.filter(m => m.convId === convFilter)
++        json(res, 200, { scope: scopeParam.trim(), sinceMsgId: since, limit: lim, messages })
++      } catch (e) {
++        json(res, 400, { error: e instanceof Error ? e.message : String(e) })
++      }
++      return
++    }
++    if (req.method === 'POST' && path === '/api/chat/replies/answer') {
++      // 回复方应答：body { msgId, body, model?, kind? }；by 须为回复方身份（author=by 防冒名在 DAO 内绑定）。
++      await handleWrite(req, res, (body, by) => postAiReply({ ...body, by }))
++      return
++    }
++    if (req.method === 'POST' && path === '/api/chat/replies/fail') {
++      // 守护 chat-responder 显式失败回写（body: msgId + error + by；CAS awaiting→failed，幂等）。
++      await handleWrite(req, res, (body, by) => failAiReply({ ...body, by }))
++      return
++    }
++    if (req.method === 'POST' && path === '/api/chat/replies/retry') {
++      // UI 失败重试：把 failed 的 awaiting 源消息重置回 awaiting。
++      await handleWrite(req, res, (body, by) => retryAiReply({ ...body, by }))
++      return
++    }
++
+     // ── 日程日历（calendar）：事件 REST（scope 必填写纪律 + audit/SSE；写走 handleWrite，见 S5/R-B1 数据面）──
+     if (req.method === 'GET' && path === '/api/calendar/events') {
+       try {
+@@ -1864,14 +2223,43 @@ async function handle(req, res) {
+       })
+       return
+     }
++    if (req.method === 'GET' && path === '/api/spaces/impact') {
++      // 删除预检（只读，AC-R3-1）：返回该空间将影响的数据面计数 + 在办执行状态；调用不产生 audit/SSE。
++      try {
++        const id = url.searchParams.get('id') ?? ''
++        if (typeof id !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(id)) throw new Error('空间 id 非法：小写字母/数字开头，可含连字符，≤64 字符')
++        const existing = db.prepare('SELECT id FROM spaces WHERE id = ?').get(id)
++        if (!existing) throw new Error(`未知空间 ${id}`)
++        const countOf = (sql) => db.prepare(sql).get(id).c
++        const counts = {
++          tasks: countOf('SELECT COUNT(*) AS c FROM tasks WHERE scope = ?'),
++          roster: countOf('SELECT COUNT(*) AS c FROM roster WHERE scope = ?'),
++          agentModels: countOf('SELECT COUNT(*) AS c FROM agent_models WHERE scope = ?'),
++          execRequests: countOf('SELECT COUNT(*) AS c FROM exec_requests WHERE scope = ?'),
++          skills: countOf('SELECT COUNT(*) AS c FROM skills WHERE scope = ?'),
++          goal: countOf('SELECT COUNT(*) AS c FROM goal WHERE scope = ?'),
++          execState: countOf('SELECT COUNT(*) AS c FROM exec_state WHERE scope = ?'),
++          conversations: countOf('SELECT COUNT(*) AS c FROM conversations WHERE scope = ?'),
++          messages: countOf('SELECT COUNT(*) AS c FROM messages WHERE scope = ?'),
++          calendarEvents: countOf('SELECT COUNT(*) AS c FROM calendar_events WHERE scope = ?'),
++          members: countOf('SELECT COUNT(*) AS c FROM members WHERE scope = ?'),
++        }
++        const running = db.prepare("SELECT id, title, status FROM tasks WHERE scope = ? AND status IN ('in_progress','in_review','blocked') ORDER BY id").all(id)
++        json(res, 200, { id, counts, running: { tasks: running } })
++      } catch (e) {
++        json(res, 400, { error: e instanceof Error ? e.message : String(e) })
++      }
++      return
++    }
+     if (req.method === 'POST' && path === '/api/spaces/delete') {
+-      // 删除工作空间及其 scope 数据（tasks/goal/roster/exec_state/exec_requests/agent_models/skills）。
++      // 删除工作空间及其 scope 数据（级联全表：tasks/goal/roster/exec_state/exec_requests/agent_models/skills +
++      // conversations/messages/calendar_events/members——消除孤儿/幽灵分区，G-R2 硬删默认；audit 行保留供追溯）。
+       // 安全护栏：software/default 等受保护空间一律拒绝；调用方须显式 confirm=`delete-space:<id>`。
+       await handleWrite(req, res, (body, by, scope) => {
+         const id = body.id
+         if (typeof id !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(id)) throw new Error('空间 id 非法：小写字母/数字开头，可含连字符，≤64 字符')
+         if (id === 'software' || id === 'default') throw new Error(`受保护空间 ${id} 不可删除`)
+-        if (body.confirm !== `delete-space:${id}`) throw new Error('缺少确认：confirm 须为 delete-space:<id>（该操作会删除该空间全部任务/目标/编队/模型/技能数据）')
++        if (body.confirm !== `delete-space:${id}`) throw new Error('缺少确认：confirm 须为 delete-space:<id>（该操作会删除该空间全部任务/目标/编队/模型/技能/对话/日程数据）')
+         if (by !== 'general' && body.forceGeneral !== true) throw new Error('删除空间仅允许 general 执行')
+         const existing = db.prepare('SELECT id FROM spaces WHERE id = ?').get(id)
+         if (!existing) throw new Error(`未知空间 ${id}`)
+@@ -1880,11 +2268,15 @@ async function handle(req, res) {
+           for (const [key, sql] of [
+             ['tasks', 'DELETE FROM tasks WHERE scope = ?'],
+             ['roster', 'DELETE FROM roster WHERE scope = ?'],
+-            ['agent_models', 'DELETE FROM agent_models WHERE scope = ?'],
+-            ['exec_requests', 'DELETE FROM exec_requests WHERE scope = ?'],
++            ['agentModels', 'DELETE FROM agent_models WHERE scope = ?'],
++            ['execRequests', 'DELETE FROM exec_requests WHERE scope = ?'],
+             ['skills', 'DELETE FROM skills WHERE scope = ?'],
+             ['goal', 'DELETE FROM goal WHERE scope = ?'],
+-            ['exec_state', 'DELETE FROM exec_state WHERE scope = ?'],
++            ['execState', 'DELETE FROM exec_state WHERE scope = ?'],
++            ['conversations', 'DELETE FROM conversations WHERE scope = ?'],
++            ['messages', 'DELETE FROM messages WHERE scope = ?'],
++            ['calendarEvents', 'DELETE FROM calendar_events WHERE scope = ?'],
++            ['members', 'DELETE FROM members WHERE scope = ?'],
+           ]) counts[key] = db.prepare(sql).run(id).changes
+           db.prepare('DELETE FROM spaces WHERE id = ?').run(id)
+           return counts
+@@ -1958,12 +2350,16 @@ async function handle(req, res) {
+       return
+     }
+     if (req.method === 'GET' && path === '/api/skills') {
++      // include=pending 收口（AC-R1-7）：仅 member=general（复审身份）可看 pending/rejected 及其 prompt；
++      // 其余任何查询（含 scope/member 全缺省的「全部空间」视图）一律只返回 published，草稿不外泄。
++      const reviewerView = url.searchParams.get('member') === 'general'
++      const wantPending = reviewerView && url.searchParams.get('include') === 'pending'
+       const skillId = url.searchParams.get('id')
+       if (skillId) {
+         try {
+           const s = getSkill(skillId)
+           // 未发布且非复审视角 → 对普通成员按「不存在」处理，不泄露待审内容
+-          if (s.status !== 'published' && url.searchParams.get('include') !== 'pending') {
++          if (s.status !== 'published' && !wantPending) {
+             json(res, 404, { error: `skill_not_found: ${skillId}` })
+             return
+           }
+@@ -1976,7 +2372,7 @@ async function handle(req, res) {
+       json(res, 200, listSkills({
+         scope: url.searchParams.get('scope') ?? undefined,
+         member: url.searchParams.get('member') ?? undefined,
+-        includePending: url.searchParams.get('include') === 'pending',
++        includePending: wantPending,
+       }))
+       return
+     }
+@@ -2017,4 +2413,4 @@ if (isMain) {
+   })
+ }
+ 
+-export { db, server, registerSkill, reviewSkill, listSkills, grantSkill, getSkill }
++export { db, server, registerSkill, reviewSkill, listSkills, grantSkill, revokeSkill, getSkill }

@@ -1,92 +1,84 @@
-# T-095 需求说明：平台四项能力补全（跨空间共享技能 · 分层项目规范 · 移除空间 · 对话接入 AI/Agent 回复）
+# T-103 需求说明：环节产出文档在任务详情直接打开预览（免人工查找路径）
 
-> 阶段：需求澄清（requirement）｜任务：继续完善 ① 跨空间共享技能建设 ② 项目规范建设（类似全局 agent.md + 项目/空间层面 agent.md）③ 移除空间功能 ④ 对话功能（发送后没有 LLM/Agent 与之对话）
-> 上游 goal 原句（将军）：[auto-goal] 继续完善：1.跨空间共享技能建设；2.项目规范建设（类似全局的agent.md+项目/空间层面的agent.md）；3.没有移除空间的功能；4.对话功能不可用，发送后，并没有LLM大模型或者Agent与之对话
+> 阶段：需求澄清（requirement）｜任务：需求澄清/方案确认等所有产生文档的环节，在任务详情中要能够直接打开预览其所产出的文档，避免再去人工查找路径
+> 上游 goal 原句（将军）：**[auto-goal] 需求澄清/方案确认等所有产生文档的环节，在任务详情中要能够直接打开预览对于产生的文档，避免再去人工查找路径**（任务标题「【需求澄清】需求澄清/方案确认等所有产生文档的环节，在任务详情中要能够直接打开预览对于产生的文档」）
 > 标记：[auto-goal]；下游：researcher（docs/RESEARCH.md）→ breaker（docs/TASK_BREAKDOWN.md）→ test-designer → coder → reviewer → tester → devops
-> 评估基准：w/T-095 HEAD == main == `41fd406`（本文件所有 file:line 均指向该提交的仓库内容）
+> 评估基准：w/T-103 HEAD == main == `3c8f27d`（promote T-095；本文件所有 file:line 均指向该提交的仓库内容）
 
 ## 0. 文档状态与阅读说明
 
-- 本文件是 T-095「需求澄清」阶段产出，**取代**同目录旧产物 docs/REQUIREMENTS.md（T-073 三中心收尾需求说明；旧版经 git 历史可回溯——先例：T-073 文档亦取代 T-014 版本）。
-- 本文沿用仓库既定标注惯例区分三类内容：
+- 本文件是 T-103「需求澄清」阶段产出，**取代**同目录旧产物 docs/REQUIREMENTS.md（T-095 四项能力版；旧版经 git 历史可回溯——仓库既定惯例：T-095 取代 T-073 版、T-073 复核 T-014 版时同法处理）。
+- 本文沿用仓库标注惯例区分三类内容：
   - ✅ **已确认口径**：由代码/历史证据钉死、下游可直接依据的现状与边界；
-  - ⚖️ **待将军裁决**：影响范围/优先级/产品语义的关键分歧，裁决前**默认按「倾向 + 默认值」推进**，但该默认值是「假设」不是「结论」——将军可在本任务验收评论逐条答复或修正；
+  - ⚖️ **待将军裁决**：影响范围/优先级/语义的关键分歧，裁决前**默认按「倾向 + 默认值」推进**，但该默认值是「假设」不是「结论」——将军可在本任务验收评论逐条答复或修正；
   - ❓ **遗留/开放问题**：默认取值见各条，明示假设，供将军补充输入。
-- **本阶段只产出本文档**：不写实现、不做技术选型（存放位置/回复链路机制/推送方式等留给 researcher）、不改仓库实现、不调 taskctl、不 push。所有「验收口径」写成**可测语句**（行为断言/命令/判据），供 breaker 切分与 test-designer 直转用例。
+- **本阶段只产出本文档**：不写实现、不做技术选型（文档内容如何被取出/预览视图形态/渲染器选型等留给 researcher）、不改仓库实现、不调 taskctl、不 push。所有「验收口径」写成**可测语句**（行为断言/命令/判据），供 breaker 切分与 test-designer 直转用例。
 - **本阶段完成 ≠ 目标全部完成**：本文交付「明确、可验收的需求说明 + 范围边界 + 需求清单 + 风险依赖」；实现由后续阶段按流水线推进。
 
 ---
 
-## 1. 目标解读：将军四条诉求 → 可验收语义
+## 1. 目标解读：将军诉求 → 可验收语义
 
 | 原句 | 澄清后语义 | 现状定性（证据见 §2） | 对应需求 |
 | --- | --- | --- | --- |
-| ① 跨空间共享技能建设 | 让「空间 A 已发布技能」能被授权共享到空间 B，并被 B 空间的智能体/将军消费、管理、审计——**建设** = 补齐共享全链路（可见性/授权/撤销/注入/联动/测试），不是从零造技能体系 | 已有 scope-owned + grants(`member`/`scope:xxx`) 雏形，但**无跨空间消费用例、无撤销、无管理 UX、守护注入缓存陈旧、审计归属错位** | R-1 |
-| ② 项目规范建设（类似全局 agent.md + 项目/空间层 agent.md） | 建立「**全局规范层 + 项目/空间规范层**」的规范文件族，派工/执行时按明确优先级合并注入 agent；缺全局层、缺分层合并、缺维护入口 | 现状只有 readRepoRules 读**绑定仓库根单文件**（LEGION.md→AGENTS.md→scrumDir，单层、单文件、4000 字截断），无任何全局/空间分层 | R-2 |
-| ③ 没有移除空间的功能 | 用户侧（指挥台）**没有移除空间的入口与闭环**；后端已有删除端点但前端零接入、零测试、级联语义存在未决边界 | `POST /api/spaces/delete` 已存在且已合入 main（6e01ef1），workbench 无任何调用 | R-3 |
-| ④ 对话功能不可用，发送后没有 LLM 大模型或 Agent 与之对话 | 对话中心缺「**回复方**」：消息发送即终态，无人接话。目标 = 发送后由 LLM 直答或空间内 Agent 在会话中回复 | 全仓 chat 为纯人-人消息存储：无回复触发、无回复方、无 reply/role/status 数据面、UI 无 AI 侧渲染 | R-4 |
+| 「需求澄清/方案确认等**所有产生文档的环节**」 | 指流水线中**以文档为交付物**的岗位环节，含：需求澄清(requirement)、方案搜索/确认(researcher)、任务拆解(breaker)、测试用例设计(test-designer)、代码审查(reviewer)、测试执行(tester)、部署与发布(devops)等——凡角色职责里写明「产出写进 docs/…」的环节。**判定依据 = 角色 prompt/岗位契约里声明了文档产出**（roles.json），不是笼统的「聊天/评论」。 | 各岗位的**文档路径契约只以 prompt 文本形式存在**（roles.json），唯一带机器字段（`artifact`）的岗位是 researcher（roles.json:19-20）；任务记录上没有「本任务产出文档」的结构化字段 | R-1 |
+| 「在**任务详情**中」 | 将军验收任务时打开的**任务详情视图**。现存的将军可交互任务详情面共两处：**S1 = 军团指挥台（workbench）任务详情弹窗 TaskDetailModal**（中枢模式主控面，守护完成评论里「任务详情『✓ 验收通过』」即指它）；**S2 = 经典看板 scrum/kanban.html 卡片详情弹窗**（文件模式/服务模式 + DSH GUI 看板抽屉内嵌同一页面）。**S1/S2 之外的 console.html/总指挥部只做总览，无单任务详情，不算验收面** | S1：产物区只显示**路径文本**（html/file 均无打开/预览动作，仅 url 有外链），TaskDetailModal.tsx:419-434；S2：仅**最新一条 html** 产物 iframe 预览、file=下载、url=跳转，render.mjs:437 | R-2/R-4 |
+| 「能够直接打开预览…所产生的文档」 | 将军在任务详情内**点击即读**到该环节产出文档的**内容**（markdown 渲染阅读视图或同等级可读形态），而不是拿到一串路径后自己去文件中心/文件系统/编辑器里找文件打开 | 全链路现状：详情内无 md 渲染；hub 无产物内容服务端点；v1 /api/artifact 只服务「已登记」且只读最新 html；文档唯一可读通道 = 审计区**逐文件 diff**（非渲染、6000 字符截断）或**文件中心人工导航** | R-2/R-3/R-4 |
+| 「避免再去人工查找路径」 | 完成态 = 将军**不需要知道/复制文档的仓库相对路径**即可阅读该环节产出；路径只作为辅助信息展示 | 现状：产出路径散落在 worker evidence 文本/守护完成评论（如「方案文档 docs/RESEARCH.md 已合入主分支」，plugins:1315）与补丁文件清单里，将军需据此人工定位 | R-1/R-2 |
+| 「需求澄清/方案确认等**所有**」 | 能力是**通用机制**（按岗位契约注册 → 详情可预览），不是只给某两三个岗位硬编码入口；新增文档型岗位无需改代码即可生效 | 现状：机器契约只覆盖 researcher 一个岗位（stage.artifact，roles.json:20） | R-1（配置驱动） |
 
-> ⚠️ **关于 ④「对话功能不可用」的边界澄清（重要）**：经证据核实，人→人收发链路本身是可用且被测试锚定的（team-hub/chat.test.mjs 18 例 + chat-l1-smoke.mjs 22 断言全绿，含 SSE ≤5s 送达；README §3.8）。「不可用」的准确含义 = **没有 AI/Agent 回复方**（见 §2.4）。若将军实际还遇到「人-人收发也不通」（如端口/令牌/代理问题），属环境排障而非本需求范围，需另行带复现步骤报障——本需求默认按「补 AI/Agent 回复方」推进（假设 A-4）。
+> ⚠️ **关于标题/目标文字的语病（需记录，不影响语义）**：goal 原句「直接打开预览**对于产生的文档**」应为「直接打开预览**其所产生的文档**」（或「对其产生的文档直接打开预览」）。本文按「对其产生的文档直接打开预览」理解，如将军原意不同请在验收评论纠正。
 
 ---
 
 ## 2. 现状盘点与缺口判定（✅ 证据锚定）
 
-> 全部 file:line 相对仓库根。核心证据链：team-hub/server.mjs（后端）、workbench/src（前端）、plugins/src/index.ts（守护派工注入）、team-hub/*.test.mjs（测试锚定）。
+> 全部 file:line 相对仓库根（评估基准 3c8f27d）。核心证据链：roles.json（岗位→文档契约）、plugins/src/index.ts（守护结算/产物登记/完成评论）、team-hub/server.mjs（v2 任务库）、workbench/src/components/TaskDetailModal.tsx + api.ts（S1 详情）、scrum/render.mjs + serve.mjs + board-plugin/src/index.ts（S2 详情与内容服务）。
 
-### 2.1 技能体系现状（R-1 输入）
+### 2.1 「产生文档的环节」：岗位→文档路径契约（R-1 输入）
 
-**数据与接口（team-hub/server.mjs）**
-- skills 表：`id/name/description/prompt/scope(默认 'default')/owner/grants(JSON)/version/status(pending)/contentHash/reviewedAt`（:201-215，老库缺列幂等补 :264-271）。单 scope 列，无 tags、无 published 快照。
-- `registerSkill`（:469-491）：新技能一律 pending；同 (id,内容) 幂等不 bump；内容变化 version+1 并回 pending 待复审。`reviewSkill`（:493-502）：仅 pending 可 publish/reject。`grantSkill`（:520-527）：**只做并集追加，无撤销 API**。
-- `listSkills`（:504-518）过滤语义：默认只露 published；scope 过滤 = **精确相等**（:514）；授权分支要求调用方**带 member 参数**才生效（:515 `grants.includes(member) || grants.includes('scope:'+scope)`）。
-- 路由：POST register/review/grant（:1748-1786）**无 by=general/归属门禁**（对照删空间 :1875 有 general 检查）；GET /api/skills（:1960-1982）列表支持 scope/member/include=pending；?id= 单查未发布且无 include=pending → 404 防泄漏（:1966-1969）。
-- 空间删除级联 `DELETE FROM skills WHERE scope=?`（:1885）。
+- roles.json 的 software 流水线 8 岗中，**prompt 声明写文档的岗位与路径**（全部为提示词文本，非机器字段）：
+  - requirement「需求澄清」→ worktree 的 `docs/REQUIREMENTS.md`（roles.json:11）；
+  - researcher「方案搜索」→ `docs/RESEARCH.md`（roles.json:17），且是唯一带**机器契约**的岗位：`"gate": true, "artifact": "docs/RESEARCH.md"`（roles.json:19-20）；
+  - breaker「任务拆解」→ `docs/TASK_BREAKDOWN.md`（:25）；test-designer「测试用例设计」→ `docs/TEST_CASES.md`（:31）；
+  - reviewer「代码审查」→ `docs/review/<任务ID>-REVIEW.md`（:43，文件名含任务 ID 动态部分）；
+  - tester「测试执行」→ `docs/TEST_REPORT.md`（:49）；devops「部署与 CI/CD」→ `docs/DEPLOY.md`（:55）。
+- 守护结算侧：仅对 **gate 且声明 artifact 的岗位**（现只有 researcher）在完成后做「文档必须存在」校验并写完成评论（plugins:1300-1318，docOk 校验 :1306）。requirement 等岗位**没有** stage.artifact → 守护不校验、不登记、不提示——「产出 REQUIREMENTS.md」只靠角色 prompt 文本要求 worker 自觉写入，**产物数据面零记录**。
+- 结论：**「环节应产出哪些文档」目前是分散在 prompt 里的人类可读约定，缺一份机器可读、逐岗位的产物文档契约**；worker 是否把文档同步声明为任务产物，完全依赖其自选（提示词只写「artifact 可选」，plugins:1104-1106）。
 
-**消费侧（plugins/src/index.ts，dsh-scrum-worker 守护）**
-- `fetchSkills`（:436-447）：每轮扫单拉 `/api/skills?scope=<守护scope>&member=<config.role>`；**内存缓存只在数组长度变化时刷新**（:442-445）→ 同数量技能改版守护不重载；mediator 模式不拉技能。
-- 注入点 `buildWorkerPrompt`（:1090-1092）：拼「团队共享技能（必须遵守，来自 team-hub）：【name】prompt」，位于仓库规则段（:1087-1089）之后。流水线单守护处理 8 角色（:1923-1926），member 过滤用**守护级单值 config.role**，即技能注入粒度 = 守护实例/空间，非 worker 角色。
+### 2.2 任务记录上的「产物」数据面（R-1/R-2 输入）
 
-**前端（workbench）**
-- SkillsPanel.tsx：注册（表单 scope 可编辑 :268-271）、发布/驳回（:167-176）、授权（自由文本输入成员或 scope:xxx，placeholder「scope:software」:198-199）；**无空间选择器、无「共享到其他空间」入口、无被共享视图**；scope=null=「全部空间」聚合（:123-126）；15s 轮询（:47）。
-- api.ts `fetchSkills` 只传 scope/include、**从不传 member**（:393-398）→ UI 侧授权分支永不触发，将军在 B 空间看不到 A 授权来的技能。
+- v2（team-hub SQLite）：tasks 表带 `artifacts TEXT DEFAULT '[]'` 列（server.mjs:94-100、:282-287），`POST /api/artifact` 追加登记 {kind, path, title, by, at}（:1260-1273，audit 记 `artifact`）；GET /api/task 原样返回（:378-384）。**hub 侧没有任何「按登记产物返回文件内容」的 GET 端点**。
+- v1（scrum/tasks.json + taskctl）：`taskctl artifact <id> --kind --path --title` 登记（taskctl.mjs），serve.mjs 提供内容服务 `GET /api/artifact?task=<id>[&raw=1]`（serve.mjs:452-473）：path 只取 tasks.json 登记记录（不读查询串）+ repoRoot 白名单；html → iframe 预览、file → 下载、url → 302。
+- 登记的唯一触发点：worker 完成报告 JSON 里自填 `artifact` 字段 → 守护 recordArtifact（plugins:943-950 hub/taskctl 双路径，调用点 :1139/:1289）。**报告里没填 = 任务永远没有产物记录**（无任何自动兜底）。
+- 结论：**「能否在详情里看到产物/文档」目前 = 运气取决于 worker 是否自愿声明**；且 v2 登记后也没有内容预览，只有一行路径。
 
-**测试（skills.test.mjs 5 组 12 例）**：register 幂等/版本/非法 id、list 默认只 published、review 门禁、grant 按 member/scope 过滤（:89-99，**无「B 空间消费 A 授权技能」跨空间用例**）、旧库迁移补列。仓库内无跨空间共享设计文档。
+### 2.3 两处「任务详情」对产物的展示现状（R-2/R-4 输入）
 
-**结论**：跨空间共享 = **引用式共享的既定雏形（grants=`scope:xxx`）缺后半程**——目标空间不可见、不可撤销、无治理门禁、注入缓存陈旧、级联/草稿暴露面未定义（详见 §2.1 引用的 A 侧证据与 §7 风险 R-3）。
+- **S1 workbench 任务详情弹窗**（v2 中枢模式主验收面，守护评论所指的「任务详情」）：
+  - 结构：AI 执行过程（evidence+评论时间流）、🧾 审计工作台（改动文件逐文件 diff/批注 + testReport + 产物）、⏱ 时间线、描述/验收/边界、操作按钮（TaskDetailModal.tsx:333-505）。
+  - 产物区（:419-434）：逐条渲染「📦 产物 + kind + title — path」**纯路径文本**；仅 `kind==='url'` 时是 <a> 外链，**html/file 都没有打开、下载或预览动作**。审计区逐文件「▾ 查看 diff」是把该文件**变更 diff** 展开在 <pre>（:452-484，单文件 6000 字符截断）——文档类产物只能靠读 diff 间接看。
+  - 数据面：fetchHubTask → GET /api/task?id=（api.ts:270-272）；api.ts 里**没有任何取产物文件内容/预览的客户端函数**。
+- **S2 经典看板卡片详情弹窗**（v1；kanban.html 由 render.mjs 生成模板，serve.mjs/双击文件两模式）：
+  - 产物区（render.mjs:437）：仅当存在登记产物且**最新一条是 html** 时给 iframe（`/api/artifact?task=<id>&raw=1`）；file → 下载链接；url → 外链。**markdown/文本类文档没有预览**；且 html 只支持最新一条、file 只支持下载。
+- **console.html / board-plugin「总指挥部」**：守护状态 + 任务实时总览（三列卡片 + 评论预览 + 动态），无单任务详情（board-plugin/src/client/index.ts、scrum/console.html），**不承担「任务详情验收」职责**（范围排除）。
 
-### 2.2 规范注入现状（R-2 输入）
+### 2.4 文档内容的既有可读通道（人工路径 = 被投诉对象）
 
-- `readRepoRules()`（plugins/src/index.ts:849-862）：候选 = [`repoRootFor()/LEGION.md` → `repoRootFor()/AGENTS.md` → `config.scrumDir/LEGION.md`]（:852-854），**取第一个存在文件**，内容 `slice(0, 4000)`（:858）。不合并、不叠加、无分层。
-- `repoRootFor()`（:560）= 空间绑定仓库根优先（spaceBinding.repoRoot），否则注入配置 repoRoot。空间绑定由 `refreshSpaceBinding`（:530-557）每轮从 `GET /api/spaces` 刷新，localDir 上溯 git toplevel（:543-545）——**规范与「空间绑定的仓库」绑定，空间本身无规范字段**。
-- 注入时机：**每次派工实时重读磁盘**（`buildWorkerPrompt` :1039-1040，worker subagent 启动 :1231）；worker 在隔离 worktree 中只收到注入文本、看不到规范文件本身（:1048 隔离声明）→ **提示词注入是唯一通道**。
-- team-hub：spaces 表无 rules/规范列（:130-147）；skills 表是唯一「规范类内容」DB 载体（注册→pending→publish，带 version/contentHash/reviewedAt）。
-- 仓库现状：根目录**只有 LEGION.md**（自述「由守护插件在每次派工前自动读入并注入」），全仓**无 AGENTS.md / agent.md**；roles.json（岗位流水线提示词基底，守护启动时读一次 :460-472）、stage-standards.mjs（建任务自动带验收/边界模板）与规范注入相互独立、无总纲。
-- UI：无任何编辑 LEGION.md/AGENTS.md 的入口（文件中心只读预览+写文件接口；空间设置只管 localDir/remoteUrl）。
+- worker evidence/守护完成评论里的路径文本（如「✅ 方案搜索完成，方案文档 docs/RESEARCH.md 已合入主分支」，plugins:1315；evidence 自由文本）。
+- **文件中心**（workbench FilesView，serve.mjs /api/files，根 = 空间 local_dir）：可导航到仓库内 docs/*.md 并文本预览（截断+行数，非渲染）——需要将军**人工逐层导航**（workbench README §文件中心）。
+- 审计区 diff（见 2.3）——非渲染、截断、针对变更而非全文。
+- 文件系统/编辑器人工打开 worktree 路径。
+- 结论：**不存在「从任务详情一步到文档可读视图」的通道**；这正是 goal 要补的核心能力。
 
-**结论**：现状 = **单仓库根单文件（单层）**。目标 = 增加「**全局层**（对所有空间/仓库生效）+ **空间/项目层**（随空间绑定生效、可覆盖全局）」并可测合并注入、可维护。层数与优先级默认值见 R-2 与 D-7/D-8。
+### 2.5 内容与分支时序约束（预览方案必须回答的现状约束）
 
-### 2.3 空间管理现状（R-3 输入）
+- 环节任务（如 T-103 这类）在隔离 worktree（w/<id>）产出文档，提交在 w/<id> 分支（plugins:1287 commitWorktree → :1292 autoPromote / :1326-1331 末环节点留 in_review 待 promote）。
+- **验收发生在「可能尚未 promote」的时间点**：非末环节点/门禁自动合入后文档在主分支（plugins:1290-1318）；末环节点与「停 in_review 待将军验收」的任务（:1326-1331）在验收那一刻文档只存在于 w/<id> 分支或已手工 promote。→ **「任务详情可预览」必须覆盖两种内容来源状态**：主仓库已合入文件 与 仅存在于该任务 w/<id> 分支（或隔离 worktree 目录）的文件；预览内容须与该真实来源逐字一致（验收见 AC-R3-3）。
 
-- spaces 表（team-hub/server.mjs:130-147）：id/name/private/local_dir/remote_url/createdAt/updatedAt。GET /api/spaces（:1570-1588）= 注册行 ∪ roster ∪ tasks 的 distinct scope 合并，返回 agentCount（仅计 roster）。
-- **POST /api/spaces/delete 已存在且完整**（:1867-1896，由 commit 6e01ef1 引入、已合入 main；git log -L 仅此一条 diff）：护栏 = 拒绝 software/default（:1873）+ confirm 须为 `delete-space:<id>`（:1874）+ by 须 general 或 forceGeneral（:1875）+ 未知空间拒绝（:1876-1877）；事务内级联删 **7 张表** tasks/roster/agent_models/exec_requests/skills/goal/exec_state（:1880-1888）+ spaces 行（:1889）；audit 记 `space:delete` 但**历史保留**（:1892）。原用途 = 运维清理沙箱空间（docs/P0-CONFIRMATION.md 记录删 slice-verify 空间）。
-- **前端零接入**：api.ts 无 deleteSpace 客户端（仅有 fetchSpaces/createSpace/updateSpaceConfig/addSpaceAgents）；Sidebar 空间行只有切换+⚙设置；SpaceSettingsModal 只有编辑保存；App 无删除后刷新/切走逻辑。**测试零覆盖**（team-hub 三个 test.mjs 均无 spaces/delete 用例）。
-- 删除影响面未闭合（数据依赖判定）：
-  - scope 字段存在于 12 张表（tasks/roster/goal/exec_state/exec_requests/agent_models/skills/conversations/messages/calendar_events/audit/members）。
-  - **只删 7 张**；conversations/messages/calendar_events 残留为孤儿（calendar 列表无未知 scope 守卫，:730-746 仍可查）；**members 全文件无 DELETE**，而 /api/scopes 由 tasks+members 推导（:1564-1566）→ 删除后幽灵分区仍出现在 /api/scopes。
-  - 磁盘零操作：不触碰 local_dir、不回收守护按任务建的 .legion-worktrees/w/*（plugins :766-801）与在办 worker。
+### 2.6 渲染安全红线（预览实现不得破坏的既有纪律）
 
-**结论**：需求 = 「**用户面移除空间闭环 + 删除语义收口 + 测试锚定**」；后端能力已存在，**不是从零建删除能力**（本需求最关键的澄清结论之一）。
-
-### 2.4 对话现状（R-4 输入）
-
-- 数据面：conversations（:221-231）/messages（:233-244），**无 role/reply_to/assistant/状态字段**；author 恒等于 by（服务端防冒名，:618-619，TC-S1-07）；kind 白名单 text|markdown|system（:533-534）。
-- 行为面：postMessage 落库+审计 chat:message+SSE 后返回 = **发送即终态**（:603-625）；SSE 是单一 /api/events 审计流（:1983-1994），无「待回复/回答完成/流片段」语义。
-- 前端：ChatView 发送 = POST + 本地气泡合并（:267-297），无等待/typing/assistant 渲染；「自己」判定唯一条件是 author==='general'（:24-26/:358-359）；Composer 无回复对象/模型选择；hubPost 恒注入 by='general'（api.ts:379-390）。
-- 全仓检索结论：**无任何回复链路**——team-hub server 零出站模型调用；agent_models 表（:174-183）只是「每空间每角色→任务执行模型」配置，无 chat 引用；exec_state/exec_requests（:158-172）是将军 agent 侧的派活通道（仓库内无消费者，docs/P0-CONFIRMATION.md）；plugins 守护 0 处 chat；scrum/sidebar-mockup.html 的 assistant 气泡是标注「mockup 不是真实 GUI」的设计稿；mesh/ 是另一套 agent↔agent 总线，与 chat 表不相通。
-- 测试：chat.test.mjs（18 例 DAO 契约）、chat-l1-smoke.mjs（22 断言 HTTP+SSE+token）、chat-s2-smoke.mjs（/hub 主路径），**均无 AI/回复覆盖**。
-
-**结论**：到「发送后有回复」目标 = **整条链路缺失**（无触发器/回复方/数据面/UI 面），这是 R-4 的起点；「回复方 = LLM 直答 or 空间 Agent」是最大的产品口径分叉（D-12）。
+- 仓库渲染纪律：React 一律文本节点、无 dangerouslySetInnerHTML（ChatView.tsx:13/:49、FilesView 渲染安全注释、ActivityFeed :72 同）——markdown 渲染若引入 HTML/脚本通道必须满足同等级「预览不执行 HTML/脚本」红线（验收 AC-R3-5）。
 
 ---
 
@@ -94,17 +86,15 @@
 
 | 术语 | 定义（本需求采用） |
 | --- | --- |
-| 空间（scope） | team-hub 分区实体；id/name/private/local_dir/remote_url；`software`/`default` 为受保护空间不可删 |
-| 编队（roster） | 空间专属智能体岗位表（role/name/kind/avatar） |
-| 技能（skill） | skills 表记录：scope-owned + 状态机 pending→published/rejected + grants 授权（member 或 scope:xxx） |
-| 跨空间共享技能 | 空间 A 已 published 技能经授权在空间 B 可被查询/注入/管理（默认 = 引用式共享，见 D-1） |
-| 规范文件（agent.md 族） | 注入 agent 提示词的规则/规范载体（现 LEGION.md/AGENTS.md；本需求扩展出 全局/空间 两层） |
-| 规范注入 | plugins 守护派工拼装提示词时把规范文本并入（`buildWorkerPrompt`） |
-| 移除空间 | 删除空间实体及随 scope 归属的数据；不含磁盘/worktree 回收（默认，见 D-10/D-11） |
-| 回复方 | 对话中心里对用户消息产生回复消息的一方：LLM 直答或空间 Agent（D-12 裁决） |
-| AI 回复可用 | 发送 → 有回复方应答 → 会话出现回复消息（author ≠ 用户），可感知时间窗内完成或明确失败 |
-| 引用式共享 | 技能单行单源（scope=A），靠 grants=['scope:B'] 指向 B，不做复制（与复制分叉相对） |
-| 幽灵分区 | 空间删除后因 members 等残留使 /api/scopes 仍列出已删 id |
+| 任务详情 | 将军验收任务时打开的**单任务详情视图**：S1 = 军团指挥台（workbench）TaskDetailModal（中枢模式主面）；S2 = 经典看板 kanban.html 卡片详情弹窗（v1 与 DSH GUI 看板抽屉同页）。总指挥部 console 不在内 |
+| 环节（stage/岗位） | 流水线中的角色环节（roles.json stages：requirement…devops），每个任务对应一个环节 |
+| 产生文档的环节 | 角色 prompt/岗位契约声明「产出写进 docs/…」的环节（§2.1 七岗）；判定依据是岗位契约而非任务标题 |
+| 产出文档（阶段文档） | 某环节按契约应产出的交付文档，如 requirement → docs/REQUIREMENTS.md、reviewer → docs/review/<T-ID>-REVIEW.md；路径可能含任务 ID 动态段 |
+| 产物（artifact） | 任务记录里的通用产物条目 {kind: html/file/url, path, title}（v1 taskctl artifact / v2 POST /api/artifact）；产出文档是产物的一种（kind=file、path=仓库相对路径） |
+| 岗位文档契约（doc contract） | 机器可读的「环节 → 应产出文档路径模板」配置（本需求 R-1 新增；现状仅 researcher 有单条 stage.artifact） |
+| 直接打开预览 | 在任务详情内点击产出文档 → 出现可读视图（markdown 渲染阅读或明文全文），无需离开页面找文件；等于或优于「下载后在本地打开」 |
+| promote | 验收通过后把 w/<id> 分支合入主仓库分支的动作（自动 promote / 将军手工 promote） |
+| 白名单内容服务 | 只读仓库根（repoRoot，v1 另含 artifactRoots）内文件的内容读取端点；禁止任意路径读取（serve.mjs:452-473、board-plugin/src/index.ts:67-96 先例） |
 
 ---
 
@@ -112,151 +102,132 @@
 
 ### 4.1 总「做什么」（✅ 本阶段与后续阶段共同边界）
 
-- DO-1：围绕 4 条目标产出编号需求（R-1~R-4）+ 优先级 + 每条的 背景/目标/做什么/不做什么/可测验收口径（本文件）。
-- DO-2：全部现状/缺口表述以真实代码证据锚定（§2 + §10 证据索引），不把假设当结论。
+- DO-1：产出编号需求清单（R-1~R-4）+ 优先级 + 每条 背景/目标/做什么/不做什么/可测验收口径（本文件 §5）。
+- DO-2：全部现状/缺口表述以真实代码证据锚定（§2 + §9 证据索引），不把假设当结论。
 - DO-3：关键歧义显式列出（§8），各带倾向与默认值；默认值明示为假设，供将军逐条裁决。
 - DO-4：后续阶段按需求清单实现并逐条验证（breaker 分片 / test-designer 转用例 / coder / tester 锚定）。
 
 ### 4.2 总「明确不做什么」（🚫 所有阶段共同）
 
-- 🚫 不做技术选型与实现细节（规范文件存哪/回复链路机制/推送方式/缓存策略选型等 → researcher）。
+- 🚫 不做技术选型与实现细节（文档内容取用通道形态：hub 新端点 vs 复用文件中心 / 渲染器选型 / 是否新增任务列 vs 派生视图等 → researcher）。
 - 🚫 本阶段不写代码、不改仓库实现、不跑 taskctl/看板写接口、不 push、不下依赖。
-- 🚫 不把模糊点悄悄留给下游：默认值即假设，重要分叉（D-1/D-7/D-8/D-10/D-12/D-13）必须将军裁决或显式标注后才可当作需求基线。
-- 🚫 不重写既有三中心/看板/守护架构为新技术栈；不动 roles.json 岗位语义与 stage-standards 模板。
-- 🚫 不引入需要外网/新密钥才能成立的需求基线（模型来源默认本机 DSH 目录，见假设 A-5）。
+- 🚫 不把模糊点悄悄留给下游：默认值即假设，重要分叉（D-1~D-10）必须将军裁决或显式标注后才可当作需求基线。
+- 🚫 不重写既有看板/任务库/守护架构；不改变 roles.json 各岗位的职责语义（可**新增**机器字段，不改 prompt 语义，见 R-1 边界）。
+- 🚫 不做「文档编辑/在线修改」能力（本需求只管**读与预览**；写文档是 worker 在 worktree 内完成的事）。
+- 🚫 不做全文检索/文档管理库等超出「任务详情预览本任务产出」的新产品形态。
+- 🚫 默认不把「全部空间」/非本空间仓库的文件纳入预览源（沿用空间绑定仓库根 + 白名单纪律，D-10）。
 
 ---
 
 ## 5. 需求清单（编号 + 优先级 + 验收口径）
 
-> 优先级建议：R-1/R-2/R-4 = **P0**（将军明示缺失或不可用的能力）；R-3 = **P1**（后端已存在、闭环成本低、误用风险中等）。将军可在验收评论调整。
-> 验收口径均为**可测语句**；「（命令）node team-hub/xxx.test.mjs」等为仓库既有测试运行方式的引用，最终用例形态由 test-designer 落定，实现机制由 researcher/breaker 落定。
+> 优先级建议：R-1/R-2/R-3 = **P0**（缺失即目标不成立）；R-4 = **P1**（同能力在 v1 看板面的补齐，将军若日常验收都在 workbench S1 可降为 P2）。将军可在验收评论调整。
+> 验收口径均为**可测语句**；「（样例）……」中的命令形态供 test-designer 直转，具体实现机制由 researcher/breaker 落定。
 
-### R-1（P0）跨空间共享技能闭环
+### R-1（P0）岗位文档契约：环节产出文档自动进入任务记录
 
-**背景**：技能体系已具备 scope-owned + grants 雏形（server.mjs:201-527），但空间 A 的已发布技能无法被空间 B 正常消费与管理：UI 查询不带 member 导致授权分支永不触发（api.ts:393-398 vs server.mjs:515）、无撤销 API、review/grant 无 general 门禁（:1748-1786）、守护注入缓存长度比较导致改版不刷新（plugins:442-445）、B 空间无被共享视图。将军诉求 = 把「共享」做成闭环能力。
+**背景**：产出文档路径目前只写在角色 prompt 文本里（roles.json，§2.1），机器契约仅 researcher 一岗；worker 报告不自填 artifact 时，任务记录上没有任何「本环节产出了什么文档」，任务详情自然无从预览。goal 点名「需求澄清/方案确认等**所有**产生文档的环节」，需要把「环节→文档」变成通用、配置驱动的机制。
 
-**目标**：任一空间将军可将本空间已发布技能授权给其他空间（或撤销）；目标空间可见、可管理、其 worker 派工注入生效；全链路（授权/撤销/审计/级联/草稿安全）有测试锚定。
-
-**做什么（scope in）**
-1. 技能中心的跨空间可见性与管理 UX：B 空间出现「来自他空间的共享技能」视图（只读；prompt 全文可见性 = D-4 口径），A 空间可发起/撤销对 B 的授权（授权对象可来自空间列表，非仅手打文本）。
-2. 授权可撤销：新增 revoke 语义（服务端 + UI），撤销后 B 立即不可见。
-3. 权限门禁：review/grant/revoke 服务端限定 by=general（默认，D-2）；非 general 一律拒绝并返回明确错误。
-4. 审计：skill:grant / skill:revoke 审计记录携带技能 id、技能归属 scope 与目标空间（修复现跨空间操作审计归错 scope 的问题，server.mjs:1763-1786 未带目标 scope）。
-5. 守护注入刷新：注入技能按 version/contentHash 变化刷新（替代长度比较），B 空间 worker 派工提示词能拿到最新共享技能 prompt。
-6. 级联/安全：技能归属空间被删除（级联 :1885）后，其他空间的共享视图同步移除（D-6 默认：引用式消失）；pending/rejected/草稿在任何跨空间查询/「全部空间」视图中对非复审者不可见。
-7. 测试与文档：skills.test.mjs 增跨空间用例（A 授权给 B → B 按 scope+member 可见、撤销后不可见、非 general 拒绝、A 删除后 B 移除）；README 技能节更新。
-
-**明确不做什么（scope out）**
-- 🚫 不做复制式共享/技能分叉（默认引用式，D-1）。
-- 🚫 不做隐式「全局技能 scope=*」一次发布全平台（默认显式逐空间授权，D-3）。
-- 🚫 不改技能注入在提示词中的位置/职责（规范段职责划分归 R-2 总纲）。
-
-**验收口径（可测语句）**
-- AC-R1-1 服务端断言：技能 S（scope=A，published）经 `grant(S, ['scope:B'])` 后，`listSkills({ scope:'B', member:'<B空间某role>' })` 返回 S；未授权空间 C 不返回 S。
-- AC-R1-2 撤销断言：revoke 后 B 视角立即不可见（同查询为空）；重复 revoke/撤销未授权技能不报错或返回幂等结果（以实现为准，测试断言其不抛未定义错误）。
-- AC-R1-3 权限断言：非 general 调用 grant/review/revoke → 服务端 4xx + 明确错误文案；general 成功。
-- AC-R1-4 审计断言：grant/revoke 审计行包含技能 scope 与目标空间（`audit.detail` 可断言），action 前缀 `skill:`。
-- AC-R1-5 注入断言：模拟守护 fetch（同 plugins:439 请求形态）在 B 空间返回共享技能；技能内容改版（version+1 且已 publish）后，守护缓存刷新并注入新 prompt（断言缓存按 hash/version 失效的单元逻辑）。
-- AC-R1-6 级联断言：删除 A 空间后，B 空间技能查询不再包含 A 技能，无悬空引用（skills.test 新增用例）。
-- AC-R1-7 安全断言：带 `include=pending` 之外的所有查询（含全部空间视图）不得暴露任何 pending/rejected 技能的 prompt（对照现 GET include=pending 面，server.mjs:1976-1980）。
-- AC-R1-8 UI 冒烟：指挥台 B 空间技能中心可见共享技能条目与来源；A 空间可发起/撤销授权；全部走既有 /hub 代理链路（chat-s2-smoke 同型脚本可参照）。
-- AC-R1-9 回归：`node team-hub/skills.test.mjs` 全绿；plugins typecheck/build 0 诊断；workbench pnpm build 通过。
-
-### R-2（P0）分层项目规范（全局 agent.md + 空间/项目层 agent.md）
-
-**背景**：派工规范注入目前只有单一来源（repoRoot LEGION.md→AGENTS.md→scrumDir LEGION.md，取首个、单层、4000 字硬截断，plugins/src/index.ts:849-862）；**不存在**「对所有空间生效的全局规范层」与「随空间/项目独立维护并可覆盖全局的空间层」；worker 在隔离 worktree 只能收到注入文本；规范与「空间绑定仓库」耦合，两空间共仓即共享同一文件无法区分；无任何维护/预览入口。将军诉求 = 类似「全局 agent.md + 项目/空间层面 agent.md」的分层规范建设。
-
-**目标**：建立 ≥2 层的规范体系（全局层 + 空间/项目层），派工/执行提示词中按明确规则合并注入；各层有维护/预览入口与审计；冲突与预算有可测策略。
+**目标**：任何文档型岗位任务，其应产出文档在任务完成结算时被**自动登记为该任务的结构化条目**（不依赖 worker 手工声明）；任务详情据此渲染「产出文档」区。登记信息至少含：任务 ID、岗位、文档路径（仓库相对或可解析到仓库根）、标题/说明、登记时间。
 
 **做什么（scope in）**
-1. 定义规范分层与解析锚点：全局层（对所有空间/仓库生效）+ 空间/项目层（随空间绑定生效）；层内支持文件名族扩展（与既有 LEGION.md/AGENTS.md 同族，默认不破坏既有读取语义——兼容读 LEGION.md/AGENTS.md 的现状）。
-2. 合并与优先级：注入顺序稳定且可测（默认：空间/项目层 > 全局层 > 既有 LEGION/AGENTS 兜底；同主题冲突按层覆盖，默认值见 D-8）。
-3. 注入通道不变：仍经 buildWorkerPrompt 注入（隔离 worktree 不读文件）；无任何层规范时行为 = 现状降级不报错。
-4. 预算与超限：合并注入总量有上限与明确超限策略（默认：可配置上限 + 截断并提示，4000 字单文件现状提升为分层合并预算，见 D-9）。
-5. 维护与预览入口：指挥台可查看/编辑空间层规范（或明确引导到文件中心对应文件），全局层规范入口明确；改动留审计（编辑走 handleWrite 写纪律 or 文件写留审计，以方案为准）；提供「注入预览」（可选）。
-6. 职责总纲：一份简短文档/README 段说明 LEGION.md/AGENTS.md(文件) vs skills(DB) vs roles.json stage.prompt vs stage-standards 各自承载什么，避免四套载体冲突无总纲（D-9 建议：并存 + 文档化分工）。
-7. 测试：解析/合并单测 + 派工提示词冒烟断言两段规范文本都存在且顺序正确 + 预算截断用例。
+1. 定义机器可读的**岗位文档契约**：每个文档型岗位 → 文档路径模板（requirement→docs/REQUIREMENTS.md；researcher→docs/RESEARCH.md；breaker→docs/TASK_BREAKDOWN.md；test-designer→docs/TEST_CASES.md；reviewer→docs/review/<T-ID>-REVIEW.md（模板含任务 ID）；tester→docs/TEST_REPORT.md；devops→docs/DEPLOY.md），并支持 1 岗多文档（如 evidence 目录等，按将军裁决 D-2）。
+2. 契约落点建议沿用 roles.json stage 定义（新增字段），保持与既有 stage.artifact/gate 同源；**不动既有岗位 prompt 的职责语义**（D-1）。
+3. 守护在 worker 完成结算（done 报告路径，plugins:1285-1334）时，按任务 role 的契约**自动登记产出文档条目**；登记动作与现有 recordArtifact（plugins:943-950）同链路（hub：POST /api/artifact；v1：taskctl artifact），产物条目 kind 为文档（file/markdown 语义按 D-4）。
+4. 完成评论同步给出「产出文档清单」可读摘要（如「产出文档：docs/REQUIREMENTS.md」），替代/增强现「方案文档 … 已合入主分支」仅 researcher 享有的提示（plugins:1315 泛化）。
+5. 文档缺失时的显式处理：契约文档在结算时不存在 → 在任务上写明确提示（对照现 researcher docOk 校验 plugins:1306-1312 泛化到全部契约岗位），**不静默**。
 
 **明确不做什么（scope out）**
-- 🚫 不迁移/废弃既有 LEGION.md/AGENTS.md/skills/stage-standards/roles.json 语义（并存 + 总纲，D-9）。
-- 🚫 本阶段不定「全局规范存哪」（DB 新表 vs 各仓库复制 vs 宿主 profile）——机制选型留给 researcher；**语义基线**：全局层必须存在且独立于单一仓库根。
-- 🚫 不做规范内容治理（写什么内容的规范由将军/用户自行维护，平台只提供分层+注入+入口+审计机制）。
+- 🚫 不改变各岗位职责/验收模板语义（roles.json stage.standards 与 prompt 不动，仅**新增**字段）。
+- 🚫 不为「非文档型岗位」（coder 等以代码为交付物）伪造文档契约。
+- 🚫 不做契约的界面管理（将军手动编辑契约 UI 属可选后置，D-3；本期可用 roles.json/配置直接维护）。
 
 **验收口径（可测语句）**
-- AC-R2-1 分层断言：解析函数在「全局层有内容、空间层有内容」时输出两段；顺序稳定（空间层在前 or 全局层在前按 D-8 默认，测试固定断言）。
-- AC-R2-2 优先级断言：空间层与全局层同主题冲突时，注入结果 = 空间层覆盖（D-8 默认）——用两文件各写一条同主题规则做文本断言。
-- AC-R2-3 兼容回归：仓库只有 LEGION.md（现状）时，注入文本与现状一致（含「仓库规则（必须遵守，来自 LEGION.md/AGENTS.md）」段）；无任何文件时注入无此段、不报错。
-- AC-R2-4 预算断言：总长度超限时按既定策略（截断+提示或分层各自预算）生效，且不产生半截语法破坏（如截断在代码块内需说明）。
-- AC-R2-5 注入可达断言：隔离 worktree 派工提示词含全局与空间层规范文本（沿用 buildWorkerPrompt 路径，插件冒烟）。
-- AC-R2-6 UI/维护断言：指挥台存在规范维护入口（空间层可编辑或明确跳转）；保存后再次派工提示词反映新内容；操作留 audit（action 可断言）。
-- AC-R2-7 回归：plugins typecheck/build 0 诊断；既有派工/流转测试（plugins/tests 若存在）不回归；README/LEGION 相关文档同步更新。
+- AC-R1-1 契约存在性：roles.json（或等价配置）中七个文档型岗位各有一条文档契约，路径模板与 §2.1 prompt 现行约定一致（reviewer 模板含任务 ID 段）。
+- AC-R1-2 自动登记：以一条 requirement 岗位任务回放（或新建样例任务跑完 worker）→ 结算后任务记录 artifacts/产出文档区出现 `docs/REQUIREMENTS.md` 条目（by=守护、含时间），**worker 报告未填 artifact 字段也能登记**（自动兜底）。
+- AC-R1-3 reviewer 动态文件名：reviewer 任务结算后登记路径解析为 `docs/review/<该任务ID>-REVIEW.md`（模板替换正确）。
+- AC-R1-4 缺失提示：模拟「契约文档不存在」结算 → 任务评论出现明确缺失提示（含期望路径），任务仍停 in_review（不误判为成功流转）；文档补上重跑后提示消除。
+- AC-R1-5 兼容回归：researcher 既有 gate/artifact 行为不回归（现有插件测试/冒烟用例通过）；非文档型岗位不新增任何登记条目。
 
-### R-3（P1）移除空间（用户面闭环 + 语义收口）
+### R-2（P0）任务详情「产出文档」直达区：点击即打开
 
-**背景**：将军反馈「没有移除空间的功能」。代码事实：后端 `POST /api/spaces/delete` 已存在（team-hub/server.mjs:1867-1896，6e01ef1 引入、已合入 main），但指挥台无任何入口、无自动化测试、级联语义有未决边界（孤儿数据/幽灵分区/在办任务/worktree 残留，§2.3）。**需求 = 把已有删除能力接到用户面并收口语义**，而非从零实现删除。
+**背景**：即使 R-1 完成登记，S1 workbench 任务详情现有产物区也只是路径文本（TaskDetailModal.tsx:419-434），将军仍要「拿路径去找文件」——goal 的核心痛点在详情面。
 
-**目标**：将军可在指挥台安全完成「移除空间」（含确认、影响提示、删除后状态正确）；删除语义按将军裁决收口并有测试锚定；受保护空间不可误删。
+**目标**：S1 任务详情出现「产出文档」直达区（按文档型岗位任务显示），每条 = 文档标题 + 岗位/时间 + 「打开/预览」动作，**点击即可读内容**（内容视图形态与来源规则见 R-3）；同时保留/优化既有通用「产物」展示（不删除 url/html/file 既有行为）。
 
 **做什么（scope in）**
-1. 前端闭环：api.ts 增 `deleteSpace(id, confirm)` 客户端；Sidebar 空间行或 SpaceSettingsModal 提供「删除空间」入口 + 二次确认（确认内容列明将删数据面，按 D-10 口径）；删除后若删的是当前激活 scope 则切回「全部空间」并重拉列表（复用 App.tsx:288-302 刷新模式）。
-2. 受保护空间 UX：software/default 不提供删除入口或明确禁用并说明原因（对齐后端 :1873）。
-3. 后端语义收口（按将军裁决）：级联范围（是否并入 chat/calendar/members，消除孤儿与幽灵分区，D-10）；在办任务/执行中空间的删除策略（拒绝 or 强确认，D-11）；保护名单是否可配置（D-4 之保护名单子项）。
-4. 错误与确认契约：前端删除失败（confirm 错/未知空间/非 general/受保护）呈现后端明确错误文案，不静默失败。
-5. 自动化测试：team-hub 新增 spaces/delete 用例（HTTP 范式可复用 calendar.test.mjs）：正常删除（断言 7+ 表删行数与返回 removed）、confirm 错误、未知空间、受保护空间、非 general 拒绝；按 D-10 口径断言孤儿表行为。
-6. 文档：README §3.1/§4 空间管理补「移除空间」说明。
+1. S1 详情新增「产出文档」区（或在既有产物区内升级）：来源 = 任务记录中按 R-1 登记的文档条目（叠加既有手工 artifact）；按时间倒序、多文档/多轮修订可见（最新优先）。
+2. 每条文档提供明确的打开动作；路径降级为辅助信息展示（title/说明优先，路径可复制）。
+3. 预览面与详情同屏（内嵌渲染视图）或新标签可读页，两者至少其一；同屏时详情不因文档长而卡死（滚动/容器上限）。
+4. 通用产物区保留：url 外链、html 预览、file 下载等既有语义不因新能力回归（对照 S1 现状 :427-429 至少保持）。
+5. 无契约文档的任务（非文档型岗位、或 worker 未产出）不显示空区误导，给出中性占位文案（可含「该环节不要求文档」或「尚未产出」）。
 
 **明确不做什么（scope out）**
-- 🚫 不做磁盘/worktree 回收实现（.legion-worktrees/w/*、已合入分支）——若将军要求回收需另立语义（D-11 子项），本需求默认删除=纯 DB 语义并**在 UI 提示**磁盘残留由运维处理。
-- 🚫 不做批量/多选删除；不做删除恢复/回收站（默认，D-10）。
-- 🚫 不改受保护空间名单的硬编码语义（除非将军扩展，D-4 子项）。
+- 🚫 不做文档编辑；不做文档版本管理 UI（多轮修订以列表时间呈现即可）。
+- 🚫 详情区不做 markdown 编辑器/图表等重渲染能力（渲染安全与范围，D-5）。
 
 **验收口径（可测语句）**
-- AC-R3-1 前端存在「删除空间」入口；点击后出现二次确认（含空间 id 与影响说明）；确认后发起 `POST /api/spaces/delete`（body 含 id + confirm=`delete-space:<id>`）。
-- AC-R3-2 删除当前激活空间后：UI 切到「全部空间」，spaces 列表不再含该 id（api 层断言 + UI 冒烟）。
-- AC-R3-3 software/default 不可删除：UI 无入口/禁用 + 服务端测试断言拒绝（:1873）。
-- AC-R3-4 服务端用例（新增 spaces.test.mjs 或并入既有）：正常删除 removed 计数与逐表断言、confirm 错误 4xx、未知空间 4xx、非 general 4xx（by 非 general 且无 forceGeneral）。
-- AC-R3-5 按 D-10 裁决后的孤儿表断言：删除后 conversations/messages/calendar_events/members（或 /api/scopes）行为与裁决一致（测试锚定，不留二义）。
-- AC-R3-6 回归：既有 calendar/chat/skills 测试全绿；/api/spaces 正常返回；workbench build 通过。
+- AC-R2-1 可达性：打开任一 in_review 的文档型岗位任务详情 → 存在「产出文档」区且列出该任务契约文档（≥1 条），无需展开 diff、无需输入/复制任何路径。
+- AC-R2-2 打开动作：点击文档条目 → 出现可读视图（内嵌或新标签），视图中可见文档全文而非仅摘要/路径/下载按钮。
+- AC-R2-3 多轮可见：同一任务经历 打回→重做 后，多轮文档条目按时间倒序可见（最新在首），旧版不丢失。
+- AC-R2-4 无文档任务：非文档型岗位任务详情不出现「产出文档」区（或明确占位），页面不报错。
+- AC-R2-5 回归：url/html/file 既有产物语义不回退（S1 既有冒烟/用例保持通过）；workbench pnpm build 0 错误。
 
-### R-4（P0）对话接入 AI/Agent 回复
+### R-3（P0）文档内容预览：所见 = 真实文件内容（含未 promote 分支态）
 
-**背景**：chat 链路 = 纯人-人消息存储，发送即终态（server.mjs:603-625）；全仓无任何 LLM/Agent 回复方（§2.4 检索结论）。将军诉求 = 「发送后，有 LLM 大模型或 Agent 与之对话」。
+**背景**：S1 现状无任何 md/文本内容预览通道（§2.3/§2.4）；同时环节文档在验收时刻可能只在 w/<id> 分支（§2.5）。预览必须回答「内容从哪来、怎么保证与真实文件一致、怎么防任意文件读取」。
 
-**目标**：用户在对话中心发消息后，在可感知时间窗内收到回复方的回复消息（同会话可见、留审计、纯文本安全渲染）；回复方不可用时行为明确且不影响人-人收发；每空间可配置。
+**目标**：任务详情预览的文档内容 = 该任务当前产出文档的**真实文件内容**（可逐字比对）；覆盖「已合入主分支」与「仅存在于该任务 w/<id> 分支/隔离目录」两种时序态；读取受既有仓库根白名单纪律约束；markdown 以可读渲染呈现且不执行 HTML/脚本。
 
 **做什么（scope in）**
-1. 回复触发与身份：定义发送后如何触发回复、回复方身份（by=谁，不得冒充用户；服务端 author=by 纪律延续）、回复消息归属同一会话。
-2. 数据面扩展：消息模型需表达「回复方消息/待生成/失败」（新增列或 meta 扩展，保持老库零迁移——chat.test TC-S1-16 迁移锚定不回归）；回复方写入走既有 DAO 审计/SSE 通道（server.mjs:603-625 同构）。
-3. UI 面：ChatView 区分「我/回复方」气泡（现唯一判定 author==='general' 需泛化），提供等待中/失败呈现；回复方身份/模型徽标可见（默认）。
-4. 配置与护栏：每空间 AI 回复开关（默认值 D-13）；回复可用的模型来源默认本机 DSH 已部署模型目录（README §3.7 同源，避免外网依赖，假设 A-5）；单条回复超时/长度护栏；失败重试次数（默认 0-1 次）与错误呈现。
-5. 审计与通知隔离：回复方消息留 chat:* 审计 + SSE 广播（实时送达沿用）；通知中心不被每轮 AI 回复刷屏（NotifyView 对 chat:* 现默认排除，api.ts:589-602 需按口径复核）。
-6. 测试：chat 契约扩展（AI 身份消息/待生成状态/失败路径）+ 冒烟（发送→收到回复，含超时与关闭开关两条路径）+ CI 全绿。
+1. 提供从任务详情到**文档文件内容**的读取通道（形态由 researcher 定，需满足下述约束）：路径解析自任务登记（不读任意查询串——对照 serve.mjs:452-473 先例）；来源解析规则明确：主仓库已合入文件 → 该任务 w/<id> 分支/隔离目录文件（内容一致即通过，机制不限）。
+2. markdown 文档渲染阅读视图：标题/列表/表格/代码块/引用等可读；含脚本/HTML 的内容不执行（渲染安全红线，§2.6）。
+3. 大文档与截断策略明确可测（默认：常规文档（如 REQUIREMENTS.md 数百行）完整可读；超长文档有明确上限与提示，不留「静默截断不可感知」）。
+4. 二进制/非文本文档给出中性处理（下载/提示不可预览），不报错。
+5. 白名单纪律：只允许读该任务归属仓库根内文件（v2/v1 各自 repoRoot；沿用 serve.mjs/board-plugin artifact 白名单先例），**预览通道不得成为任意文件读取口**。
 
 **明确不做什么（scope out）**
-- 🚫 本阶段不定回复链路机制（LLM 直答实现细节 / 是否流式 / 用哪个模型通道）→ researcher；但**产品口径**（回复方形态、触发、开关默认、身份、保留策略）由将军在 D-12/D-13 裁决。
-- 🚫 不改 mesh 总线与任务流水线语义；默认不把 chat 回复接到任务板（除非将军选「空间 Agent 回复」路线才评估与 roster/exec 的关系，D-12）。
-- 🚫 不做语音/富媒体/多人会议等新会话形态。
+- 🚫 不规定内容通道的技术形态（hub 端点 / serve.mjs 端点 / 复用文件中心 / git show 分支内容等）→ researcher。
+- 🚫 不做跨仓库/跨空间文件预览（默认 D-10）。
+- 🚫 不承诺渲染与 GitHub/本地编辑器的像素级一致（可读等价即可，D-5）。
 
 **验收口径（可测语句）**
-- AC-R4-1 回复可达：空间开关开启时，发送一条消息后在配置时间窗（默认 ≤120s，可配置）内会话出现一条回复消息，author = 回复方身份（非用户 by），body 与提问相关（冒烟断言：同会话内新增消息、内容非空）。
-- AC-R4-2 身份安全：回复方消息 author 不可能等于用户（服务端 author=by 防冒名契约不回归，TC-S1-07 用例保持通过）。
-- AC-R4-3 开关：关闭空间 AI 回复后发送消息不产生回复；重新开启恢复；开关状态持久化（per-scope）。
-- AC-R4-4 失败路径：回复方不可用/超时 → UI 呈现明确失败（或「回复失败」消息），不影响继续发送人-人消息（可用性回归）。
-- AC-R4-5 数据与迁移：老库（无新列）加载后 chat 既有 18 例契约全绿（零迁移风格，TC-S1-16 断言不回归）。
-- AC-R4-6 审计与实时：回复方写入产生 chat:message 审计且 SSE 送达（chat-l1-smoke 扩展：≤5s 实时断言沿用）。
-- AC-R4-7 渲染安全：回复消息按纯文本渲染（不执行 HTML，README §3.8 安全红线不回归）；长度沿用 MAX_CHAT_BODY=8000（chat.test 常量断言）。
-- AC-R4-8 回归：`node team-hub/chat.test.mjs` 全绿；chat-l1-smoke 22+ 断言通过；workbench build 通过；既有 chat-s2-smoke（/hub 代理主路径）通过。
+- AC-R3-1 内容一致（主分支态）：对已 promote 的文档型任务样例，预览内容与主仓库该路径文件**逐字一致**（比对命令示例：预览接口输出与 git show main:<path> 输出 diff 为空，或等价字节/文本断言）。
+- AC-R3-2 内容一致（分支态）：模拟文档仅存在于 w/<id>（未 promote）的 in_review 任务 → 预览内容与该分支文件逐字一致（git show w/<id>:<path> 比对）。
+- AC-R3-3 路径安全：预览通道不接受任意查询串指定文件（如 ?path=… 一律拒绝/忽略）；路径逃逸（../、盘符、仓库根外符号链接）被拒；返回错误与正常预览可区分（测试断言 4xx/错误文案）。
+- AC-R3-4 markdown 可读：渲染视图对含标题/表格/代码块的样例 md 呈现正确结构（冒烟断言关键文本可见、代码块按预格式化呈现）。
+- AC-R3-5 渲染安全：预览含 <script> / <img onerror> / javascript: 链接的 md 后**无脚本执行**、无弹窗（e2e 或等价冒烟断言）；页面无 dangerouslySetInnerHTML 新引入（代码审查断言）。
+- AC-R3-6 超长/二进制：超上限文档有明确截断提示或分页；二进制文件走下载/提示路径不白屏不报错。
+- AC-R3-7 回归：既有 v1 html iframe 预览、file 下载、url 跳转（serve.mjs/api/artifact）与文件中心不受影响（相关既有测试通过）。
+
+### R-4（P1）经典看板（S2）详情预览补齐
+
+**背景**：S2 kanban.html 详情只支持「最新一条 html iframe / file 下载 / url 外链」（render.mjs:437），且前提是产物已登记；将军若在经典看板/DSH GUI 看板抽屉验收文档型任务，同样面临「不能直接预览 md 文档」。
+
+**目标**：S2 任务详情在 R-1 登记基础上获得与 R-2/R-3 对齐的产出文档预览能力（markdown 可读预览，多条目列表，不再只认最新一条 html）。
+
+**做什么（scope in）**
+1. S2 详情产物/产出文档区改为**逐条可交互**：md/文本条目提供预览（复用 R-3 内容通道语义，v1 已有 /api/artifact raw 服务可扩展）；html 条目保留 iframe 预览且支持多条（不再只最新一条）；url/file 保留跳转/下载。
+2. 与 R-1 登记的 v1 侧条目贯通（taskctl artifact 或等价登记路径）。
+3. 文档缺失/不可预览时有明确文案。
+
+**明确不做什么（scope out）**
+- 🚫 若将军确认日常验收均在 S1（workbench），本需求可整体降 P2 或砍掉（D-6）；不双倍实现。
+
+**验收口径（可测语句）**
+- AC-R4-1 在 S2 打开已登记文档型任务详情 → 产出文档条目可点击，出现可读预览（md 渲染或明文全文），内容与真实文件一致（比对同 AC-R3-1/R3-2 方法）。
+- AC-R4-2 多条 html 产物逐条可预览（v1 既有只最新一条的行为升级后有测试锚定）。
+- AC-R4-3 url/file/html 既有语义不回退；render.mjs 生成产物通过（node scrum/render.mjs 无错）。
 
 ---
 
-## 6. 关键澄清结论（给将军的速览）
+## 6. 端到端验收总口径（happy path + 关键边界，供将军快速验收）
 
-1. **④「对话不可用」= 缺 AI/Agent 回复方，不是收发坏**：人-人链路有 18+22 用例锚定可用；需求范围 = 补回复链路（R-4）。
-2. **③「没有移除空间功能」= 后端已有、前端没有**：POST /api/spaces/delete（server.mjs:1867-1896）已在 main；需求 = 用户面闭环 + 语义收口 + 测试（R-3），不是从零建删除。
-3. **①「跨空间共享技能」= 引用式共享雏形缺后半程**：grants='scope:xxx' 已预留，但目标空间不可见/不可撤销/无门禁/缓存陈旧（R-1）。
-4. **②「项目规范」= 现状单仓库根单文件单层**：无全局层、无空间层、无分层合并、无维护入口（R-2）。
-5. **四条需求的实现面高度集中在三个文件族**：team-hub/server.mjs、workbench/src、plugins/src/index.ts——breaker 分片时必须按文件域切分（R-1/R-2 同碰 plugins 注入与 team-hub server；R-3/R-4 同碰 team-hub server），见 §7 风险 R-7。
+1. **典型主路径（将军验收场景）**：T-103 这类 requirement 任务完成进入 in_review → 将军在 S1 任务详情看到「产出文档」区列出 `docs/REQUIREMENTS.md`（或打开后该文件内容正确）→ 点击直接阅读 markdown 全文（标题/表格/列表可读、无脚本执行）→ 对照验收标准在详情里「✓ 验收通过」。全程**无需**离开任务详情去文件中心/文件系统找路径。
+2. **未 promote 边界**：验收发生在文档尚在 w/<id> 分支时 → 预览仍可得且内容与分支文件一致（R-3 AC-R3-2）。
+3. **缺失边界**：worker 没产出契约文档 → 任务停在 in_review 且评论/详情明确提示缺 `docs/<约定路径>`（R-1 AC-R1-4），将军可打回让补全，不出现「任务完成却无处看文档」。
+4. **打回重做边界**：打回重做后新文档替换/新增条目，最新可见、旧版可查（R-2 AC-R2-3）。
+5. **安全边界**：预览通道读不到仓库根外的任意文件（AC-R3-3），md 预览不执行脚本（AC-R3-5）。
 
 ---
 
@@ -266,25 +237,23 @@
 
 | # | 风险 | 说明 | 缓解 |
 | --- | --- | --- | --- |
-| R-1 | 技能草稿跨空间泄漏（已存在敞口） | GET /api/skills 列表 + include=pending 与「全部空间」视图无鉴权可读全库草稿含 prompt（server.mjs:1976-1980） | R-1 AC-R1-7 在共享功能落地前/同步修复 |
-| R-2 | 空间删除误操作数据丢失 | confirm 字符串即唯一护栏；删除 7 表不可恢复 | R-3 二次确认含影响预览 + 测试锚定 + audit 保留 |
-| R-3 | 共享技能随源空间删除断供 | server.mjs:1885 级联删 skills；被引用后删除即断供 | D-6 默认引用式消失 + UI 告警文案 |
-| R-4 | 守护注入缓存陈旧 | plugins:442-445 长度比较，同数量改版不刷新 | R-1 AC-R1-5 按 hash/version 失效 |
-| R-5 | AI 回复的模型出站依赖与成本 | 每消息自动推理 = token 消耗 + 出站调用；与「禁网/本地优先」基调冲突 | 模型默认本机 DSH 目录（假设 A-5）、每空间开关、超时/失败护栏（R-4） |
-| R-6 | 上下文/提示词膨胀 | 规范分层 + 技能全量注入叠加（plugins:1087-1092 均「必须遵守」） | R-2 预算与超限策略 + 分层职责总纲 |
-| R-7 | 文件域重叠导致并行切片冲突 | R-1/R-2 同碰 plugins prompt 组装与 team-hub server；R-3/R-4 同碰 team-hub server | breaker 分片时给足独立文件域提示（本 §7 明示）；见 docs/TASK_BREAKDOWN 机器格式纪律 |
-| R-8 | 删除后幽灵分区/孤儿数据 | members 无 DELETE + /api/scopes 由 tasks+members 推导 → 已删空间复现 | D-10 裁决后测试锚定 |
-| R-9 | 前端「身份恒 general」假设被 AI 回复打破 | hubPost 恒注入 by='general'；author 渲染判定 author==='general'（ChatView:24-26） | R-4 泛化身份模型并更新 S2 smoke |
+| R-1 | 登记靠 worker 自觉 → 数据面为空 | 现状产物登记完全依赖报告 artifact 自填（plugins:1289、1104-1106） | R-1 守护按岗位契约自动兜底登记 |
+| R-2 | 预览内容与「将军实际要验收的文件」不一致（分支/主分支/旧轮次混淆） | 文档在 w/<id> 与主分支间有时序差；多轮修订时点错条目 | R-3 内容来源规则 + 逐字一致验收（AC-R3-1/2）+ 多轮按时间倒序 |
+| R-3 | 文档内容通道变成任意文件读取口 | 详情预览若按用户路径直接读文件 → 目录穿越/越权读 | 路径只取自任务登记记录 + 仓库根白名单（serve.mjs:452-473 先例）+ AC-R3-3 |
+| R-4 | markdown 渲染引入 XSS/脚本执行 | 仓库红线：React 文本节点、无 dangerouslySetInnerHTML（ChatView/FilesView/ActivityFeed 注释） | 渲染净化/白名单策略 + AC-R3-5 断言 + 审查把关 |
+| R-5 | 与 T-095 流水线（四能力）并行改 roles.json/守护结算区 | R-1 动 roles.json（新增字段）与 plugins 结算路径；若四能力链仍在跑，可能合入冲突 | 只新增字段不动语义（R-1 边界）；breaker 分片按文件域隔离（§10）；合入调解员兜底（仓库已有 mediator） |
+| R-6 | 文档型岗位清单/路径与将军认知不符 | 「所有产生文档的环节」是目标原文，具体岗位清单是本文归纳（§2.1） | D-2 将军确认/增删；契约配置驱动便于调整 |
+| R-7 | S1/S2 双面实现重复或漏一端 | 将军可能主要在某一面验收 | D-6 确认主验收面；R-4 可降级 |
 
 ### 7.2 依赖与假设（✅ 明示为假设，非结论）
 
-- A-1 本仓库（worktree w/T-095 == main 41fd406）是被完善产品的唯一代码基准；§2 全部 file:line 均基于该提交。
-- A-2 四条诉求为并列待办特性；本文件给出建议优先级（R-1/R-2/R-4=P0，R-3=P1），将军可调。
-- A-3 「agent.md」指代注入 agent 提示词的规范/规则文件族（与现 LEGION.md/AGENTS.md 同族）；具体文件命名/存放由方案阶段定，本需求只定分层语义与验收。
-- A-4 ④「对话不可用」默认解读 = 缺 AI/Agent 回复方（证据见 §2.4）；若将军实际遇到人-人也不可用，属环境排障另报（需复现步骤），不在本需求内。
-- A-5 回复方模型来源默认 = 本机 DSH 已部署模型目录（README §3.7 所述 `~/.dsh/settings.yaml` 候选），不默认引入外网/新密钥；若将军指定云端模型则属范围外追加（需批准）。
-- A-6 引用式共享、显式逐空间授权、级联消失、audit 保留等默认口径 = D 系列假设，将军裁决前按默认值推进并在文档标注。
-- A-7 技能/规范的消费面默认仅限守护派工链路（buildWorkerPrompt 注入），exec 通道与人工托管任务是否消费由将军在 D 系列补充（默认：与现状一致，不扩大）。
+- A-1 本仓库（w/T-103 == main 3c8f27d）是目标产品的唯一代码基准；§2 全部 file:line 均基于该提交。
+- A-2 任务详情 = §3 定义（S1 workbench TaskDetailModal + S2 kanban.html 详情弹窗）；总指挥部 console 不是验收面。
+- A-3 「产生文档的环节」清单 = §2.1 七岗（requirement/researcher/breaker/test-designer/reviewer/tester/devops）；文档路径契约 = 现 prompt 声明的 docs/* 路径（D-2 待将军确认增删）。
+- A-4 文档在**验收时刻可能尚未 promote**，预览必须兼容（R-3）；若将军确认「只要求在合入主分支后可见」可缩小范围（D-7）。
+- A-5 预览文件读取限于该任务归属仓库根（空间绑定仓库根，plugins repoRootFor 语义）+ 白名单；不跨空间读（D-10）。
+- A-6 渲染安全红线（无脚本执行、无新 dangerouslySetInnerHTML）延续仓库纪律，预览实现不得豁免。
+- A-7 roles.json 岗位语义不变（仅允许新增字段）；stage-standards 验收模板不动。
 
 ---
 
@@ -294,66 +263,71 @@
 
 | # | 归属 | 问题 | 倾向 / 默认值（默认按此推进） |
 | --- | --- | --- | --- |
-| D-1 | R-1 | 跨空间共享 = 引用式共享（单行单源 + grants 指向）还是复制分叉？ | **引用式共享**（现 schema grants/scope:xxx 已预留；复制会分裂 version/review 历史） |
-| D-2 | R-1 | 技能 review/grant/revoke 是否限定将军（服务端 by=general 门禁）？ | **是**（对照删空间 :1875 先例；否则单令牌即全权，跨空间无边界可言） |
-| D-3 | R-1 | 是否需要隐式「全局技能」一次发布全平台生效？ | **先不做**；显式逐空间授权更符合 per-scope 分区纪律 |
-| D-4 | R-1 | B 空间对共享技能可见到什么程度（含 prompt 全文？只读？） | 已发布技能：**B 空间只读可见含 prompt 全文**（便于判断是否采用）；草稿绝不外泄 |
-| D-5 | R-1 | 共享技能内容改版后 B 何时生效？ | 守护按 **version/contentHash 增量刷新**（轮询，不引入 SSE 推送） |
-| D-6 | R-1 | 源空间删除后共享技能行为？ | **级联消失**（B 视图同步移除，无悬空引用；快照会冻结 prompt 违背单源版本语义） |
-| D-7 | R-2 | 全局规范层放哪（各仓库复制文件 / team-hub DB / 宿主 profile）？ | **机制选型留给 researcher**；语义要求：全局层独立于单一仓库根且对所有空间生效。若将军有偏好请明示 |
-| D-8 | R-2 | 规范层级与冲突规则：需要哪几层？覆盖顺序？未绑定空间归属？ | **两层（全局 + 空间/项目），空间/项目层 > 全局层**；未绑定空间只吃全局层；解析锚点默认 = 空间绑定仓库根（沿用现 toplevel 语义，plugins:543-545） |
-| D-9 | R-2 | 与既有载体（LEGION.md/AGENTS.md/skills/stage-standards/roles.json）关系？ | **并存 + 文档化职责分工**（总纲段），不迁移不废弃；同主题重复时按 D-8 层级裁决 |
-| D-10 | R-3 | 删除级联范围：是否并入 chat/calendar/members（消孤儿与幽灵分区）？audit 保留？ | **audit 历史保留**（仓库纪律）；conversations/messages/calendar_events/members **随删**（消除孤儿与幽灵分区，/api/scopes 推导随之干净）——若将军选「保留审计追溯聊天记录」则改为保留并接受孤儿，需明示 |
-| D-11 | R-3 | 有在办任务/执行中（exec_state 开启/worker 在跑）的空间可否删除？磁盘 worktree 残留？ | 删除**允许但 UI 强提示**（列在办任务数与编排状态 + 二次确认）；磁盘 .legion-worktrees/w/* 残留**不在本需求回收**（UI 提示由运维 git worktree prune） |
-| D-12 | R-4 | 回复方形态：LLM 直答（以会话历史为上下文）还是空间内 Agent（带工具/可动文件）？ | **LLM 直答**（无工具/文件访问，安全面小、不涉任务流水线）；空间 Agent 路线作为后续扩展（牵涉 roster/exec/安全面，成本高） |
-| D-13 | R-4 | 触发与开关默认：每消息自动回复？默认开还是关？ | **每消息自动回复 + 每空间开关，默认开**（契合「发送后有人对话」诉求；成本顾虑经 A-5 本机模型缓解）；将军若顾虑 token 成本可改默认关 + 显式按钮 |
-| D-14 | R-4 | 回复绑定与模型选择粒度？ | **空间级默认**（agent_models 按 scope/role 配模型可复用）+ 会话级覆盖（可选，P1 后置） |
-| D-15 | R-4 | 回复以什么形态回到会话（异步落第二条消息 vs 流式片段）？ | **异步落第二条消息**（现有 HTTP+SSE 审计架构零侵入、测试最稳）；流式后置为可选增强 |
-| D-16 | 全局 | 各需求是否需要「按角色消费技能/规范」的细粒度（现守护注入按 config.role 单值，plugins:439）？ | 默认**维持空间粒度注入**，worker 实际角色过滤作为 R-1 优化项（可选项，将军勾选才做） |
-| D-17 | 全局 | exec（将军 agent 侧派活）与人工托管任务是否也要吃技能/规范注入？ | 默认**不扩大**（与现状一致，A-7）；将军需要则追加范围 |
+| D-1 | R-1 | 岗位文档契约放哪/怎么维护？ | **roles.json stage 新增字段（如 docs: [路径模板]）**，与现有 artifact/gate 同源同文件；不改 prompt 文本语义。若将军不想动 roles.json，备选 = 守护侧独立配置表（同 repo），由 breaker/实现选 |
+| D-2 | R-1 | 「产生文档的环节」清单与文档路径是否按 §2.1 七岗 + 每岗单文档执行？是否还要纳入 evidence 目录（docs/T###-evidence/）等附加产物？ | 默认 = **§2.1 七岗主文档各一条**；evidence 目录等**不默认登记**（内容多且非「阅读型」文档），将军如需要看 evidence 可在验收评论勾选（作为 R-1 的可选扩展，1 岗多文档契约已支持） |
+| D-3 | R-1 | 将军是否需要可视化编辑岗位文档契约？ | **本期不需要**（配置/roles.json 维护即可）；契约编辑 UI 后置为可选项 |
+| D-4 | R-1/R-2 | 产出文档登记为既有 artifact 的 kind=file 还是引入 kind=markdown（渲染语义）？ | 倾向 **登记为 file（或等价）并让预览按扩展名识别 md 渲染**——不动 v1/v2 的 kind 白名单语义（html/file/url 三种既有值不破坏）；若实现发现需显式 kind=markdown 才能安全区分渲染/下载，可在 D-4 补记后由实现方说明 |
+| D-5 | R-3 | markdown 渲染的呈现基准（渲染到哪种程度算合格）？ | **可读等价**：标题/列表/表格/代码块/引用等结构正确呈现、无脚本执行即可；不追求与 GitHub/本地编辑器像素一致（纯文本回退也是合法最低档，但默认给渲染视图） |
+| D-6 | R-4 | 将军日常验收主要在哪个面？S2（经典看板/DSH GUI 抽屉）是否必须同能力？ | 默认 **S1（workbench 任务详情）为 P0 主面**；S2 补齐为 P1——若将军主要在 S2 验收请明示（则 S2 升 P0、S1 保持 P0） |
+| D-7 | R-3 | 验收时刻文档尚未 promote（只在 w/<id>）时是否必须可预览？ | **必须**（默认）：这是将军「人工找路径」痛点的重要来源（详情里看到路径却打不开分支文件）；若将军接受「promote 后才可预览」请明示（可缩小内容通道范围） |
+| D-8 | R-3 | 文档多轮修订（打回重做）在详情如何呈现？ | **按时间倒序列表 + 最新可预览**（旧版保留条目，点开可预览或标注已被新版本取代——实现按数据可得性二选一，默认保留可预览） |
+| D-9 | R-3 | 预览的读取形态：内嵌同屏 vs 新标签独立页？ | **两者至少其一，默认内嵌同屏 + 可新标签打开**（长文档滚动手感与验收对照便利；由实现决定是否给「新标签」钮） |
+| D-10 | 全局 | 预览文件读取范围是否含「全部空间」视图（跨空间文档）？ | **不跨空间**（默认）：只读本任务归属仓库根内文件；「全部空间」视图聚合时若文档归属另一空间仓库，显示占位/跳转提示而不是去读它 |
 
 ---
 
-## 9. 下游衔接说明（供 breaker / test-designer 直接使用）
+## 9. 关键澄清结论（给将军的速览）
 
-1. **需求 → 切片文件域建议**（breaker 据此给互不重叠文件域，防并行冲突，见风险 R-7）：
-   - R-1：team-hub/server.mjs（skills 段）+ team-hub/skills.test.mjs + workbench/src/components/SkillsPanel.tsx + workbench/src/api.ts + plugins/src/index.ts（fetchSkills/注入缓存段）+ README 技能节。
-   - R-2：plugins/src/index.ts（readRepoRules→分层解析/合并/预算段）+ team-hub/server.mjs（若走 DB 承载全局层则新增表/接口 + 测试）+ workbench（规范维护 UI）+ 文档（职责总纲）。
-   - R-3：workbench/src/api.ts + components/SpaceSettingsModal.tsx|Sidebar.tsx|App.tsx + team-hub/server.mjs（删除语义收口段）+ 新增 team-hub/spaces.test.mjs（HTTP 范式参考 calendar.test.mjs）+ README。
-   - R-4：team-hub/server.mjs（chat 数据面/回复端点/开关段）+ team-hub/chat.test.mjs + chat-l1-smoke.mjs + workbench/src/components/ChatView.tsx + api.ts + plugins（若回复方走守护则新增 chat responder 段，按 D-12 裁决）。
-   - ⚠️ R-1 与 R-2 都触碰 plugins/src/index.ts 与 team-hub/server.mjs，R-3/R-4 都触碰 team-hub/server.mjs——breaker 需在同一文件内划清不同函数/路由域（如 R-1=skills DAO/路由，R-3=spaces 路由，R-4=chat DAO/路由，R-2=注入解析）或排先后串行，避免并行合入冲突。
-2. **测试面锚定**：四需求全部落在既有 7 套件 CI 面内（chat/skills/files-api/web/contracts/whiteboard + calendar），新增用例必须保持 0 失败基线；迁移一律 IF NOT EXISTS 幂等风格（老库零迁移，chat TC-S1-16 先例）。
-3. **文档联动**：README §3.1/§3.7/§3.8、workbench/README、LEGION.md（若新增分层语义）需随实现同步更新（仓库纪律）。
+1. **目标 = 通用机制而非单点功能**：「需求澄清/方案确认等**所有**产生文档的环节」→ 系统化「岗位文档契约 → 自动登记 → 详情直达预览」，新增文档型岗位不改代码即生效（R-1）。
+2. **现状最硬的缺口有两个**：(a) 文档登记完全依赖 worker 报告里自选 artifact（requirement 等岗位通常不填 → 记录上零产物，§2.2）；(b) 即便登记了，S1 详情只有**路径文本**、S2 只认**最新一条 html**——**任何一处都不能直接预览 md 文档**（§2.3）。
+3. **「任务详情」= 两处将军可交互验收面**：S1 workbench TaskDetailModal（中枢主面）、S2 经典看板详情（v1/DSH 抽屉同页）；总指挥部 console 无详情、不算验收面（§2.3 结论）。
+4. **预览必须兼容「未 promote」时序**：环节文档在验收时刻可能只在 w/<id> 分支；仅支持主分支文件会重现「人工找路径/等合入」的痛点（D-7 默认必须兼容，AC-R3-2）。
+5. **安全与渲染红线不豁免**：内容通道沿用仓库根白名单（serve.mjs:452-473 先例）；md 渲染无脚本执行（§2.6 纪律）。
+6. **给下游的三个实现自由度**：内容通道技术形态、渲染器选型、详情区 UI 布局——均留给 researcher/breaker（本文件只钉行为与验收）。
 
 ---
 
-## 10. 附录：证据索引与文档关系
+## 10. 下游衔接说明（供 breaker / test-designer 直接使用）
 
-### 10.1 核心证据（file:line，均基于 main 41fd406）
+1. **需求 → 切片文件域建议**（breaker 据此给互不重叠文件域）：
+   - R-1：roles.json（或守护配置）+ plugins/src/index.ts（settle/结算与 recordArtifact 区 :943-950/:1285-1334、契约解析）+ team-hub/server.mjs（若 hub 侧登记需扩展 POST /api/artifact 或等价，:1260-1273）。
+   - R-2：workbench/src/components/TaskDetailModal.tsx（产物区 :419-434 升级）+ workbench/src/api.ts（客户端取文档条目/内容）+ types.ts（HubTask/产物类型）。
+   - R-3：内容通道（researcher 定形态；v1 候选 = scrum/serve.mjs /api/artifact 扩展 :452-473；v2 候选 = team-hub 新端点 或 workbench 复用文件中心 /api/files）+ 渲染视图组件（含净化）。
+   - R-4：scrum/render.mjs（详情模板 :437 产物区升级）+ serve.mjs /api/artifact。
+   - ⚠️ R-1 与 R-3（v1 候选）同碰 serve.mjs/plugins 附近文件、R-1 与 R-2 跨 workbench 与 plugins——breaker 需在同一文件内划不同函数域或排先后串行，避免并行合入冲突（仓库已有 mediator 兜底）。
+2. **测试面锚定**：新用例落在既有套件面内——workbench（web.test.mjs 型冒烟）、team-hub（server 契约）、scrum（render/serve 型冒烟：node scrum/render.mjs 无错）；渲染安全断言参照 ChatView/FilesView 既有安全用例风格；迁移一律幂等（老库零迁移，chat TC-S1-16 先例）。
+3. **回放/样例数据**：本任务（T-103）本身就是 requirement 型任务、其产出 docs/REQUIREMENTS.md 可作 R-1/R-2/R-3 的天然验收样例；promote 后主分支亦存在同路径文件，便于主分支态比对（AC-R3-1）。
+
+---
+
+## 11. 附录：证据索引与文档关系
+
+### 11.1 核心证据（file:line，均基于 main 3c8f27d）
 
 | 主题 | 证据 |
 | --- | --- |
-| skills 表/schema | team-hub/server.mjs:201-215、264-271 |
-| 技能 DAO（register/review/grant/list） | team-hub/server.mjs:469-527（listSkills 授权分支 :515） |
-| 技能路由（无 general 门禁） | team-hub/server.mjs:1748-1786；GET 列表 :1960-1982（include=pending 敞口 :1976-1980） |
-| 技能级联删除 | team-hub/server.mjs:1885 |
-| 技能测试（无跨空间用例） | team-hub/skills.test.mjs（grant 组 :89-99） |
-| 技能 UI/api | workbench/src/components/SkillsPanel.tsx:123-126/:167-181/:198-199/:268-271；api.ts:393-398 |
-| 规范注入（单文件单层） | plugins/src/index.ts:849-862（readRepoRules）、:1039-1040（每派工重读）、:1087-1092（注入段） |
-| 守护拉技能（长度比较缓存） | plugins/src/index.ts:434-447、:1892 |
-| 空间绑定/仓库根 | plugins/src/index.ts:528-557（refreshSpaceBinding）、:560（repoRootFor）、:543-545（toplevel） |
-| spaces 表与路由 | team-hub/server.mjs:130-147、:1570-1588（GET）、:1845-1866（POST） |
-| spaces/delete（后端已存在） | team-hub/server.mjs:1867-1896（7 表级联 :1880-1888、护栏 :1873-1875）；引入 commit 6e01ef1 已合入 main |
-| 前端无删除入口 | workbench/src/api.ts（无 deleteSpace）、components/SpaceSettingsModal.tsx、Sidebar.tsx、App.tsx |
-| 幽灵分区根因 | team-hub/server.mjs:1564-1566（/api/scopes 由 tasks+members 推导）、members 无 DELETE |
-| chat 表与 DAO | team-hub/server.mjs:221-244（无 role/reply 字段）、:533-534（kind 白名单）、:603-625（发送即终态）、:631-647（分页） |
-| chat 路由/SSE | team-hub/server.mjs:1788-1821、:1983-1994（单一审计 SSE） |
-| chat UI（author==='general' 判定） | workbench/src/components/ChatView.tsx:24-26、:267-297（send）、:358-359；api.ts:379-390（hubPost by=general） |
-| 全仓无回复链路 | team-hub/server.mjs（零出站模型调用）；agent_models :174-183（仅任务执行用）；exec_requests :158-172（无仓库内消费者）；plugins 0 处 chat |
-| 测试锚定现状 | team-hub/chat.test.mjs（18 例）、chat-l1-smoke.mjs（22 断言）、chat-s2-smoke.mjs、skills.test.mjs（12 例） |
-| 受保护空间/写纪律先例 | team-hub/server.mjs:1873-1875（删空间 general 门禁）、:1150-1163（handleWrite by+token） |
+| 岗位→文档路径契约（prompt 文本） | roles.json:11（requirement）、:17/:19-20（researcher + gate/artifact）、:25（breaker）、:31（test-designer）、:43（reviewer 动态文件名）、:49（tester）、:55（devops） |
+| 守护 gate/artifact 校验（仅 researcher） | plugins/src/index.ts:1300-1318（docOk :1306、完成评论 :1315） |
+| 产物登记触发点（worker 报告自填） | plugins/src/index.ts:943-950（recordArtifact）、:1289（done 结算调用）、:1104-1106（提示词「artifact 可选」） |
+| v2 任务产物数据面 | team-hub/server.mjs:94-100/:282-287（artifacts 列）、:378-384（返回）、:1260-1273（POST /api/artifact，无内容 GET） |
+| S1 详情产物区（纯路径文本） | workbench/src/components/TaskDetailModal.tsx:419-434（url 外链 :427-429；file/html 无动作）；审计 diff 单文件 6000 截断 :452-484 |
+| S1 取数（无内容函数） | workbench/src/api.ts:269-272（fetchHubTask）；types.ts:290-315（HubTask.artifacts 结构） |
+| S2 详情产物区（最新 html iframe/file 下载/url） | scrum/render.mjs:437 |
+| v1 内容服务（白名单、只读登记路径） | scrum/serve.mjs:452-473（GET /api/artifact）；board-plugin/src/index.ts:67-96（artifactAllowed/根白名单） |
+| 内容时序（autoPromote vs 留 in_review 待 promote） | plugins/src/index.ts:1287-1334（commitWorktree→autoPromote :1292、末环节点 in_review :1326-1331） |
+| 渲染安全红线（无 dangerouslySetInnerHTML） | workbench/src/components/ChatView.tsx:13/:49、FilesView.tsx 渲染安全注释、ActivityFeed.tsx:72（同族注释） |
+| 人工兜底通道（文件中心导航） | workbench README §文件中心（FilesView + serve.mjs /api/files 文本预览） |
 
-### 10.2 与既有文档关系
+### 11.2 与既有文档关系
 
-- 本文件取代 docs/REQUIREMENTS.md（T-073 版本），旧版可经 git 历史回溯（仓库既有惯例：T-073 取代 T-014 版时同法处理）。
-- 关联阅读：根 README.md（平台总览/三中心/技能中心 §3.8、模型目录 §3.7）、workbench/README.md（组件细节）、docs/TEST_REPORT.md（7 套件 225 用例基线）、docs/ORCHESTRATION-V3.md（切片流水线纪律）。
+- 本文件取代 docs/REQUIREMENTS.md（T-095 四项能力版），旧版可经 git 历史回溯（仓库既定惯例：T-095 取代 T-073 版、T-073 复核 T-014 版时同法处理）。
+- 关联阅读：roles.json（岗位/流水线）、plugins/src/index.ts（守护结算与产物登记）、workbench/README.md §任务详情与 AI 执行过程、scrum/README.md §产物自动挂载/卡片动态预览、docs/ORCHESTRATION-V3.md（切片流水线纪律）。
+
+### 11.3 本阶段验收对照（需求分析四条目 → 本文件位置）
+
+| 验收条目（stage-standards requirement） | 落点 |
+| --- | --- |
+| 逐条覆盖目标核心诉求：每条需求含 背景/目标/验收口径 | §5 R-1~R-4 每条含 背景/目标/做什么/不做什么/可测验收口径（AC-*） |
+| 明确范围边界：做什么 / 明确不做什么 | §4（总纲）+ 每条 R 的 scope in/out |
+| 关键术语无歧义，成功标准可度量可测试 | §3 术语表；§5 AC 均为可测语句；§6 端到端口径 |
+| 输出下游可用需求清单（编号+优先级），并列出风险与依赖假设 | §5（R-1/2/3=P0、R-4=P1）、§7 风险与假设、§8 待将军裁决（默认值）、§10 下游衔接 |

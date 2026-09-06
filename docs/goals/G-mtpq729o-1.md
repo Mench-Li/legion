@@ -8,7 +8,7 @@
 
 ## 目标下并行任务快照（派工时刻）
 
-- T-111｜requirement｜todo
+- T-111｜requirement｜done
 - T-112｜researcher｜todo
 - T-113｜breaker｜todo
 - T-114｜test-designer｜todo

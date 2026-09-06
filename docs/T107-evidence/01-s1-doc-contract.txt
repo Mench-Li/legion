@@ -1,0 +1,12 @@
+✔ roles.json 七文档岗各含 stage.docs 且 path 与角色 prompt 现行约定一致，coder 等非文档岗无 docs（AC-R1-1） (2.2756ms)
+✔ 解析纯函数：docs 存在时按模板展开 {taskId}，docs 缺省时回退既有 stage.artifact 单值语义（researcher 等价） (0.4942ms)
+✔ roles.json JSON.parse 合法且结构可供消费方整读（board-plugin /api/config 同款读取） (0.5318ms)
+✔ roles.json 既有字段语义逐字节不变：diff 仅新增 docs（git diff --word-diff 检查交给宿主证据；此处快照锁定 role/label/prompt/next/gate/artifact 原文） (0.525ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 4
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 10.7369

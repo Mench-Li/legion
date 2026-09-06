@@ -32,14 +32,15 @@
  *   GET/POST /api/calendar/events                 日程日历事件（scope 过滤 + 日期窗 [from,to] 闭区间；写 by 必填 + audit/SSE，见 S5）
  *   POST /api/calendar/events/delete              删除日程事件（id + confirm=yes + scope 归属校验；audit calendar:delete）
  *   GET  /api/skills[?scope=&member=&id=]          技能查询（默认只返回 published）
+ *   GET  /api/artifact/content?task=&i=            任务登记产物文件内容（R-3/S3 只读：md/txt 预览 + 截断/二进制降级 + 错误码 400/403/404 可区分）
  *
  * 状态机 + 乐观锁 + 角色纪律与 taskctl.mjs 一致；scope 是任务分区的一等字段。
  */
 import http from 'node:http'
 import { DatabaseSync } from 'node:sqlite'
-import { mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, extname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { standardsFor } from './stage-standards.mjs'
 
@@ -1162,6 +1163,122 @@ async function handleWrite(req, res, run) {
   }
 }
 
+// ── R-3 内容通道（S3）：任务登记产物的只读文件内容服务 ──────────────────────────────
+// 只读「任务记录里的登记路径」+ 白名单解析（worktree 目录优先、主仓库根兜底、realpath 防逃逸）；
+// 存量绝对路径记录读取期剥前缀兼容（K10，不跑迁移脚本）；超 512KB 截断、二进制/NUL 降级 previewable=false；
+// 错误码可区分：400（参数/无登记/i 越界/非 file）、403（路径越权/逃逸）、404（任务/文件不存在）。
+const ARTIFACT_CONTENT_LIMIT = 512 * 1024
+
+/** 反斜杠统一为 /（纯字符级替换，避免正则转义）。 */
+function toPosix(p) {
+  return String(p).split(String.fromCharCode(92)).join('/')
+}
+
+/** 防逃逸白名单解析：把「登记路径记录」安全化成 root 下的可读绝对路径。
+ *  返回 { rel, source: 'worktree'|'main', abs } | { unsafe: true }（403 语义）| null（文件不存在 = 404 语义）。
+ *  记录可以是仓库相对路径（docs/x.md，S2 契约登记）或存量绝对路径（K10：命中 .legion-worktrees/<taskId>/ 或绑定根前缀剥掉）。 */
+export function resolveArtifactReadTarget(taskId, recordPath, root) {
+  const norm = toPosix(recordPath).trim()
+  if (norm.length === 0) return null
+  const rootAbs = toPosix(resolve(root)).replace(/\/+$/g, '')
+  const taskSeg = '.legion-worktrees/' + taskId
+  let rel = norm
+  // 存量绝对路径（K10 读取期兼容，不迁移）：按前缀剥成相对；根外（含其他任务 worktree）一律拒读。
+  if (/^[A-Za-z]:/.test(norm) || norm.startsWith('/') || norm.startsWith('./') || norm.startsWith('../')) {
+    const wtTask = rootAbs + '/.legion-worktrees/' + taskId
+    if (norm === wtTask || norm === rootAbs) return null
+    if (norm.startsWith(wtTask + '/')) rel = taskSeg + norm.slice(wtTask.length)
+    else if (norm.startsWith(rootAbs + '/')) rel = norm.slice(rootAbs.length + 1)
+    else return { unsafe: true }
+  }
+  if (rel.startsWith('./')) rel = rel.slice(2)
+  // 段级安全：任一层拒绝 .. / .git / 盘符；.legion-worktrees 首段必须是本任务 id（他人工作树不可越读）。
+  const segs = rel.split('/')
+  for (let k = 0; k < segs.length; k += 1) {
+    const s = segs[k]
+    if (s === '..' || s === '' || s.toLowerCase() === '.git' || /^[A-Za-z]:/.test(s)) return { unsafe: true }
+  }
+  if (segs[0] === '.legion-worktrees' && (segs[1] ?? '') !== taskId) return { unsafe: true }
+  rel = segs.join('/')
+  // 候选顺序：登记于本任务 worktree 分支态目录的文件优先（K5-A worktree 优先/主仓兜底），主仓库根兜底。
+  let wtAbs = null
+  let mainRel = rel
+  if (rel.startsWith(taskSeg + '/')) {
+    wtAbs = join(root, rel)
+    mainRel = rel.slice(taskSeg.length + 1)
+  } else {
+    wtAbs = join(root, '.legion-worktrees', taskId, rel)
+  }
+  const mainAbs = join(root, mainRel)
+  let abs = null
+  let source = 'main'
+  if (existsSafe(wtAbs)) { abs = wtAbs; source = 'worktree' }
+  else if (existsSafe(mainAbs)) { abs = mainAbs; source = 'main' }
+  else return null
+  // realpath 复检：文件真实路径必须落在 root 真实路径内（防仓库内符号链接指向根外 → 403）。
+  try {
+    const realAbs = toPosix(realpathSync(abs))
+    const realRoot = toPosix(realpathSync(resolve(root)))
+    if (realAbs !== realRoot && !realAbs.startsWith(realRoot + '/')) return { unsafe: true }
+  } catch {
+    return null // 文件/root 不存在
+  }
+  return { rel: mainRel, source, abs }
+}
+
+function existsSafe(p) {
+  try { return existsSync(p) } catch { return false }
+}
+
+/** 任务所属空间绑定的本地目录；未绑定/缺失 → hub 同仓根兜底（默认部署 local_dir=仓库根时二者等价）。 */
+function boundLocalDirFor(scopeId) {
+  try {
+    const row = db.prepare('SELECT local_dir FROM spaces WHERE id = ?').get(scopeId ?? '')
+    if (row && typeof row.local_dir === 'string' && row.local_dir.trim().length > 0) return row.local_dir.trim()
+  } catch { /* 表/查询异常按兜底处理 */ }
+  return ROOT
+}
+
+/** 读端点核心（纯函数便于单测）：给定 task + 登记序号 i，返回 {status, body}。 */
+export function artifactContent(taskId, rawI) {
+  if (typeof taskId !== 'string' || taskId.trim().length === 0) return { status: 400, body: { error: '缺少参数 task' } }
+  let t
+  try { t = getTask(taskId) } catch (e) { return { status: 404, body: { error: e instanceof Error ? e.message : String(e) } } }
+  const list = Array.isArray(t.artifacts) ? t.artifacts : []
+  if (list.length === 0) return { status: 400, body: { error: '任务 ' + taskId + ' 无登记产物' } }
+  let i = rawI === undefined || rawI === null || rawI === '' ? list.length - 1 : Number(rawI)
+  if (!Number.isFinite(i)) i = list.length - 1 // 非法 i 也按缺省取最新（兼容 v1 语义）
+  i = Math.trunc(i)
+  if (i < 0 || i >= list.length) return { status: 400, body: { error: '产物序号越界：i=' + rawI + '（共 ' + list.length + ' 条）' } }
+  const a = list[i]
+  if (a.kind !== 'file') return { status: 400, body: { error: '产物 ' + i + ' 非 file 类型（' + a.kind + '），无文件内容' } }
+  const root = boundLocalDirFor(t.scope)
+  const target = resolveArtifactReadTarget(taskId, a.path, root)
+  if (target && target.unsafe) return { status: 403, body: { error: '产物路径不在允许读取范围内：' + a.path } }
+  if (!target) return { status: 404, body: { error: '产物文件不存在：' + a.path } }
+  let buf
+  try { buf = readFileSync(target.abs) } catch { return { status: 404, body: { error: '产物文件不存在：' + a.path } } }
+  const size = buf.length
+  let previewable = true
+  let truncated = false
+  if (buf.includes(0)) previewable = false
+  if (previewable) {
+    try { new TextDecoder('utf-8', { fatal: true }).decode(buf) } catch { previewable = false }
+  }
+  let content = ''
+  if (previewable) {
+    truncated = size > ARTIFACT_CONTENT_LIMIT
+    content = buf.subarray(0, Math.min(size, ARTIFACT_CONTENT_LIMIT)).toString('utf8')
+  }
+  const ext = extname(target.rel).toLowerCase()
+  const mime = ext === '.md' || ext === '.markdown' ? 'text/markdown' : ext === '.txt' ? 'text/plain; charset=utf-8' : 'application/octet-stream'
+  const body = {
+    taskId: taskId, i: i, path: a.path, relPath: target.rel, source: target.source,
+    size: size, limit: ARTIFACT_CONTENT_LIMIT, truncated: truncated, previewable: previewable, mime: mime, content: content,
+  }
+  return { status: 200, body }
+}
+
 async function handle(req, res) {
   const url = new URL(req.url ?? '/', 'http://x')
   const path = url.pathname
@@ -1268,9 +1385,12 @@ async function handle(req, res) {
         if (typeof kind !== 'string' || (kind !== 'html' && kind !== 'file' && kind !== 'url')) throw new Error('kind 必须是 html|file|url')
         if (typeof path !== 'string' || path.length === 0) throw new Error('缺少产物路径 path')
         const list = parseJson(t.artifacts ?? '[]', [])
-        list.push({ by, at: now(), kind, path, title: typeof body.title === 'string' ? body.title.slice(0, 120) : '' })
+        const entry = { by, at: now(), kind, path, title: typeof body.title === 'string' ? body.title.slice(0, 120) : '' }
+        // S2 契约登记幂等：守护登记时带内容 sha256 digest，服务端原样落库（v1 无 digest → 读取期缺省不比对）。
+        if (typeof body.digest === 'string' && /^[0-9a-f]{16,}$/.test(body.digest)) entry.digest = body.digest
+        list.push(entry)
         db.prepare('UPDATE tasks SET artifacts=?, version=version+1, updatedAt=? WHERE id=?').run(JSON.stringify(list), now(), id)
-        audit(by, t.scope, 'artifact', id, { kind, path })
+        audit(by, t.scope, 'artifact', id, { kind, path, digest: entry.digest ? 1 : 0 })
         return getTask(id)
       })
       return
@@ -1994,6 +2114,13 @@ async function handle(req, res) {
     }
     if (req.method === 'GET' && path === '/api/config') {
       json(res, 200, { auth: TOKEN !== '', db: DB_FILE, port: PORT })
+      return
+    }
+
+    if (req.method === 'GET' && path === '/api/artifact/content') {
+      // R-3/S3 只读内容端点：任务登记产物文件内容（task + i；i 缺省取最新一条）。
+      const result = artifactContent(url.searchParams.get('task') ?? '', url.searchParams.get('i') ?? undefined)
+      json(res, result.status, result.body)
       return
     }
 

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
-import { execRequest, fetchHubActivity, fetchHubOverlaps, fetchHubTask, fetchHubTasks, hubClaim, hubComment, hubHold, hubReassign, hubReviewNote, hubTransition } from '../api'
-import type { AuditPatch, HubActivity, HubTask, OverlapGroup, ReviewNote } from '../types'
+import { execRequest, fetchHubActivity, fetchHubDocContent, fetchHubOverlaps, fetchHubTask, fetchHubTasks, hubClaim, hubComment, hubHold, hubReassign, hubReviewNote, hubTransition } from '../api'
+import type { AuditPatch, HubActivity, HubDocContent, HubTask, OverlapGroup, ReviewNote } from '../types'
+import MarkdownDocView from './MarkdownDocView'
 import { toast } from './Toast'
 
 interface TaskDetailModalProps {
@@ -44,6 +45,12 @@ const ROLE_LABEL: Record<string, string> = {
 function fmt(iso?: string | null): string {
   if (!iso) return ''
   return new Date(iso).toLocaleString('zh-CN', { hour12: false })
+}
+
+/** 从登记路径取文件名（兼容 / 与 Windows \\ 分隔）。 */
+function pathBase(p: string): string {
+  const i = Math.max(p.lastIndexOf('/'), p.lastIndexOf(String.fromCharCode(92)))
+  return i >= 0 ? p.slice(i + 1) : p
 }
 
 /** 改动类型徽标文字。 */
@@ -135,6 +142,9 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
   const [busy, setBusy] = useState(false)
   const [auditOpen, setAuditOpen] = useState<Record<string, boolean>>({})
   const [overlaps, setOverlaps] = useState<OverlapGroup[]>([])
+  // —— S5：产出文档直达区（打开中的产物条目下标 + 按条目缓存的内容状态）——
+  const [docOpen, setDocOpen] = useState<number | null>(null)
+  const [docState, setDocState] = useState<Record<number, { status: 'loading' | 'ok' | 'err'; data?: HubDocContent; message?: string }>>({})
 
   const load = useCallback(async (): Promise<void> => {
     try {
@@ -216,6 +226,14 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
   // 进行中且已有认领者（soldier 非空 = 已被某智能体/守护认领开工）→ 视为已派工在跑
   const aiRunning = t.status === 'in_progress' && (daemonInvolved || (t.soldier !== null && t.soldier !== undefined))
 
+  // —— S5：产出文档直达区（文档型登记；按时间倒序、最新在首并高亮）——
+  const docCandidates = (t.artifacts ?? [])
+    .map((a, i) => ({ a, i }))
+    .filter(({ a }) => a.kind === 'file' && /\.(md|markdown|txt)$/i.test(a.path))
+    .sort((x, y) => (x.a.at < y.a.at ? 1 : x.a.at > y.a.at ? -1 : 0))
+  const docRole = t.role !== null && t.role !== undefined && ['requirement', 'researcher', 'breaker', 'test-designer', 'reviewer', 'tester', 'devops'].includes(t.role)
+  const showDocSection = docCandidates.length > 0 || docRole
+
   // —— L1/L2 审计工作台状态 ——
   // —— L1/L2 审计工作台（patchObjs 在 t 绑定后派生；其余在渲染内按补丁计算）——
   const patchObjs = (t.patches ?? []).filter((p): p is AuditPatch => typeof p !== 'string')
@@ -266,6 +284,21 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
   const doHold = (): Promise<void> => act(() => hubHold(t.id, true), `${t.id} 已拦截：守护不再自动认领/执行`)
   const doUnhold = (): Promise<void> => act(() => hubHold(t.id, false), `${t.id} 已放行：恢复自动交接`)
   const doAskAI = (): Promise<void> => act(() => execRequest(t.id), `${t.id} 已请求 AI 执行——执行守护将认领并干活，过程会沉淀在下方`)
+  const copyDocPath = (p: string): void => {
+    void navigator.clipboard?.writeText(p).then(() => toast('ok', '已复制完整路径')).catch(() => toast('err', '复制失败'))
+  }
+  const toggleDoc = async (origIdx: number): Promise<void> => {
+    if (docOpen === origIdx) { setDocOpen(null); return }
+    if (docState[origIdx]?.status === 'ok') { setDocOpen(origIdx); return }
+    setDocOpen(origIdx)
+    setDocState(prev => ({ ...prev, [origIdx]: { status: 'loading' } }))
+    try {
+      const data = await fetchHubDocContent(t.id, origIdx)
+      setDocState(prev => ({ ...prev, [origIdx]: { status: 'ok', data } }))
+    } catch (e) {
+      setDocState(prev => ({ ...prev, [origIdx]: { status: 'err', message: e instanceof Error ? e.message : String(e) } }))
+    }
+  }
 
   return (
     <div className="modal-mask" onClick={onClose}>
@@ -366,6 +399,54 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
               </div>
             )}
           </div>
+
+          {/* 产出文档直达区（S5：标题+岗位+时间+路径可复制；点击同屏预览 MarkdownDocView 渲染全文） */}
+          {showDocSection && (
+            <div className="td-section">
+              <div className="td-section-title">📄 产出文档<span style={{ marginLeft: 8, fontSize: 10, color: 'var(--muted-2)' }}>（点击条目直接预览文档全文，无需查找路径）</span></div>
+              {docCandidates.length === 0 ? (
+                <div className="doc-empty">⏳ 暂无已登记文档——{docRole ? '文档型岗位结算完成时会自动登记（如 REQUIREMENTS.md / RESEARCH.md）' : '当前任务非文档型产出'}</div>
+              ) : (
+                <div className="doc-list">
+                  {docCandidates.map(({ a, i }, k) => (
+                    <div key={i} className={k === 0 ? 'doc-item doc-newest' : 'doc-item'}>
+                      <div className="doc-item-head">
+                        {k === 0 && <span className="doc-badge">最新</span>}
+                        <span className="doc-title" title={a.title ?? a.path}>{a.title ? a.title : pathBase(a.path)}</span>
+                        <span className="doc-by">{ROLE_LABEL[a.by] ?? a.by ?? '—'}</span>
+                        <span className="doc-at">{fmt(a.at)}</span>
+                        <button className="btn mini" disabled={busy} onClick={() => void toggleDoc(i)} title="同屏预览该文档内容">{docOpen === i ? '▴ 收起' : '▶ 预览'}</button>
+                      </div>
+                      <div className="doc-path" title="点击复制完整路径"><code onClick={() => copyDocPath(a.path)}>{a.path}</code></div>
+                      {docOpen === i && (
+                        <div className="doc-preview">
+                          {docState[i]?.status === 'loading' ? (
+                            <div className="doc-loading">加载中…</div>
+                          ) : docState[i]?.status === 'err' ? (
+                            <div className="doc-err">⚠ 内容读取失败：{docState[i]?.message}</div>
+                          ) : docState[i]?.status === 'ok' ? (
+                            (() => {
+                              const data = docState[i].data as HubDocContent
+                              if (!data || !data.previewable) return <div className="doc-err">⚠ 该文档不可预览（二进制/非文本或为空）——可点击路径复制后在本地查看</div>
+                              return (
+                                <div>
+                                  {data.mime === 'text/plain'
+                                    ? <pre className="doc-plain">{data.content}</pre>
+                                    : <MarkdownDocView content={data.content} maxHeight={440} />}
+                                  {data.truncated && <div className="doc-truncate">⚠ 文档过大已截断：仅展示前 {((data.limit ?? 512 * 1024) / 1024).toFixed(0)} KB（共 {Math.max(data.size, 0) / 1024 >= 1024 ? (data.size / 1024 / 1024).toFixed(1) + ' MB' : (data.size / 1024).toFixed(0) + ' KB'}）</div>}
+                                  {data.source === 'worktree' && <div className="doc-truncate">· 读取自本任务分支态目录（未合入主分支的最终态）</div>}
+                                </div>
+                              )
+                            })()
+                          ) : null}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* 审计工作台：改动文件 × diff × 批注 × 测试/产物证据（L1+L2，Codex 式任务收尾审计） */}
           {(patchObjs.length > 0 || (t.artifacts ?? []).length > 0 || t.testReport) && (

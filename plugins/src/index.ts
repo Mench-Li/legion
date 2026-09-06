@@ -16,6 +16,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { appendFileSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs'
 import { dirname, isAbsolute, join } from 'node:path'
 import { homedir } from 'node:os'
@@ -135,6 +136,8 @@ interface Task {
   hold?: boolean
   blockedBy: string[]
   comments: Array<{ by: string; at: string; text: string }>
+  /** 产物登记（html/file/url；契约文档自动登记 = kind=file + 仓库相对路径 + digest）。 */
+  artifacts?: Array<{ by: string; at: string; kind: string; path: string; title?: string; digest?: string }>
   /** 切片流水线归属键（v3 slice 模式）：coder/tester = `${tdId}:S${n}`；devops 尾 = tdId。 */
   slice?: string | null
   /** 切片序号（1 基）。 */
@@ -157,6 +160,9 @@ interface StageDef {
   gate?: boolean
   /** 该阶段要求交付到 worktree 的产物文档（相对仓库根），闸门验收前必须存在。 */
   artifact?: string
+  /** 岗位文档契约（R-1，S1）：该阶段产出文档的相对路径模板数组，支持 {taskId} 占位（reviewer 等按任务动态命名）；
+   *  缺省回退 artifact 单值语义。守护在 done 结算时按此逐条自动登记到任务 artifacts，详情视图据此直达预览。 */
+  docs?: string[]
 }
 
 /** 需求讨论配置：哪些角色参与群聊 + 最多讨论几轮。 */
@@ -346,6 +352,33 @@ function runGit(repoRoot: string, args: string[]): Promise<{ code: number; out: 
     proc.on('error', () => resolve({ code: -1, out, err: 'git 不可用' }))
     proc.on('close', code => resolve({ code: code ?? -1, out, err }))
   })
+}
+
+// ── 岗位文档契约纯函数（R-1/S1：roles.json stage.docs 数据模型的解析面）────────────────────
+// 只读解析、无副作用，供守护结算自动登记（S2）与单测直接 import 断言（AC-R1-1/AC-R1-5）。
+
+/** 某 stage 的契约文档相对路径模板：docs 数组字段优先（合法字符串项），缺省回退既有 artifact 单值语义（researcher 等价）；未知角色/无 docs/空数组一律返回空数组（不报错，前置兼容）。 */
+export function stageContractDocs(stage: { docs?: unknown; artifact?: string } | null | undefined): string[] {
+  if (!stage) return []
+  if (Array.isArray(stage.docs)) {
+    const list = stage.docs
+      .filter((x): x is string => typeof x === 'string')
+      .map(x => x.trim().replace(/\\/g, '/').replace(/^\.\//, ''))
+      .filter(x => x.length > 0)
+    if (list.length > 0) return list
+  }
+  const artifact = typeof stage.artifact === 'string' ? stage.artifact.trim() : ''
+  return artifact.length > 0 ? [artifact.replace(/\\/g, '/').replace(/^\.\//, '')] : []
+}
+
+/** 契约模板按任务展开：把 {taskId} 占位替换为真实任务 id（reviewer 等动态命名文档），返回规范化相对路径。 */
+export function resolveStageDocPaths(stage: { docs?: unknown; artifact?: string } | null | undefined, taskId: string): string[] {
+  return stageContractDocs(stage).map(p => p.replace(/\{taskId\}/g, taskId).replace(/\\/g, '/').replace(/^\.\//, ''))
+}
+
+/** 文件内容 sha256（契约登记幂等比对用：同 path 同字节不重复登记）。 */
+export function fileDigest(file: string): string {
+  return createHash('sha256').update(readFileSync(file)).digest('hex')
 }
 
 export function apply(ctx: AppContext, config: Config): void {
@@ -954,6 +987,54 @@ exit 0
   }
 
   /**
+   * S2 契约文档自动登记：done 结算时（commitWorktree 后、autoPromote 前）按岗位文档契约逐条登记。
+   * - 登记路径 = 仓库相对路径（可含 .legion-worktrees 分支态前缀解析交给读端）；kind=file、by=守护；
+   * - 幂等：同任务同 path 且与上一条登记条目 digest（sha256）一致 → 跳过（防打回刷屏，AC-R2-3 多轮倒序数据源）；
+   * - 双写：hub 可用 → POST /api/artifact（带 digest 供后续幂等比对）；否则走既有 taskctl artifact 路径；
+   * - 返回 {registered, missing}：missing 供软门禁判定（契约文档缺失 → 停 in_review，G-R2 缺才停）。
+   */
+  async function registerContractDocs(t: Task, stage: StageDef, worktreeDir: string | null): Promise<{ registered: string[]; missing: string[] }> {
+    const baseDir = worktreeDir ?? repoRootFor()
+    const paths = resolveStageDocPaths(stage, t.id)
+    const registered: string[] = []
+    const missing: string[] = []
+    for (const rel of paths) {
+      const abs = join(baseDir, rel)
+      let digest = ''
+      try {
+        if (!existsSync(abs)) {
+          missing.push(rel)
+          continue
+        }
+        digest = fileDigest(abs)
+        const prev = (t.artifacts ?? []).filter(a => a.kind === 'file' && typeof a.path === 'string' && a.path.split('\\').join('/') === rel).slice(-1)[0]
+        if (prev && typeof prev.digest === 'string' && prev.digest === digest) continue // 字节未变幂等跳过
+        const argv = ['artifact', t.id, '--by', config.role, '--kind', 'file', '--path', rel]
+        if (useHub) {
+          await hubPost('/api/artifact', { id: t.id, kind: 'file', path: rel, title: `${stage.label}产出文档`, digest, by: config.role, scope })
+        } else {
+          await runTaskctl(config.scrumDir, argv)
+        }
+        registered.push(rel)
+      } catch (e) {
+        log(`${t.id} 契约产物登记失败（${rel}）：${String(e)}`)
+        missing.push(rel)
+      }
+    }
+    if (registered.length > 0) activity('artifact', t.id, `契约产物登记：${registered.join('、')}`)
+    return { registered, missing }
+  }
+
+  /** 契约登记/缺失摘要（完成评论用；仅在有登记或有缺失时输出，不刷屏）。 */
+  function contractDocSummary(reg: { registered: string[]; missing: string[] } | null): string {
+    if (!reg) return ''
+    const parts: string[] = []
+    if (reg.registered.length > 0) parts.push(`已登记产出文档：${reg.registered.join('、')}`)
+    if (reg.missing.length > 0) parts.push(`缺失产出文档：${reg.missing.join('、')}`)
+    return parts.length > 0 ? `\n产出文档清单（${reg.registered.length + reg.missing.length} 项）：${parts.join('；')}` : ''
+  }
+
+  /**
    * 流水线中间阶段自动合入：merge w/<id> → 当前分支并清理 worktree，让下一角色基于最新主分支工作。
    * 成功返回 true；失败返回 false 且保留 worktree 与分支（改动不丢，供人工合入或重试）。
    */
@@ -1287,6 +1368,23 @@ exit 0
       if (worktreeDir !== null) await commitWorktree(t.id, worktreeDir, report.summary)
       await recordPatch(t.id, worktreeDir, report.summary)
       if (report.artifact && report.artifact.path) await recordArtifact(t.id, report.artifact, worktreeDir)
+      // S2 契约文档自动登记：commitWorktree 之后、autoPromote 之前（存在性以 worktree 目录为基准）。
+      // 流水线文档型岗位（roles.json stage.docs 契约）结算时逐条登记仓库相对路径条目；worker 未填 artifact 亦登记（AC-R1-2）。
+      const contractPaths = isPipeline && stage ? stageContractDocs(stage) : []
+      let contractReg: { registered: string[]; missing: string[] } | null = null
+      if (contractPaths.length > 0 && stage) {
+        contractReg = await registerContractDocs(t, stage, worktreeDir)
+        // 软门禁（G-R2 缺才停）：契约文档缺失 → 停 in_review 写明确提示评论，不 autoPromote、不误判成功流转；
+        // 文档补全后解阻重跑 → 登记成功、提示消除、照常流转。
+        if (contractReg.missing.length > 0) {
+          const missingText = contractReg.missing.map(m => '`' + m + '`').join('、')
+          await safeComment(t.id, `⚠ ${stage.label}完成，但契约产出文档缺失：${missingText}（期望写入 worktree 相对路径，与岗位契约一致）。已停在 in_review：产出不完整可 ↩ 打回并说明；补全文档后解阻重跑会自动登记并照常流转。${contractDocSummary(contractReg)}`)
+          await transitionTo(t.id, 'in_review')
+          activity('blocked', t.id, `${stage.label}完成但缺失契约文档：${contractReg.missing.join('、')}，转 in_review`)
+          log(`${t.id} → in_review（缺失契约文档 ${contractReg.missing.join('、')}）`)
+          return
+        }
+      }
       if (isPipeline && stage && stage.next) {
         // 流水线中间阶段：自动合入主分支 → done → 流转下一角色；合入失败转 in_review 等人工，不静默丢产出
         const merged = worktreeDir !== null ? await autoPromote(t.id, worktreeDir) : true
@@ -1312,13 +1410,13 @@ exit 0
             return
           }
           await transitionTo(t.id, 'in_review')
-          await safeComment(t.id, `✅ ${stage.label}完成，方案文档 ${stage.artifact ?? `分支 w/${t.id}`} 已合入主分支。**请将军人工验收**：通过 → 任务详情「✓ 验收通过」，守护自动流转到「${gateNext?.label ?? stage.next}（${stage.next}）」；不通过 → ↩ 打回并附原因，士兵按反馈修订重做。\n要点：${report.summary}\n证据：${report.evidence}`)
+          await safeComment(t.id, `✅ ${stage.label}完成，方案文档 ${stage.artifact ?? `分支 w/${t.id}`} 已合入主分支。**请将军人工验收**：通过 → 任务详情「✓ 验收通过」，守护自动流转到「${gateNext?.label ?? stage.next}（${stage.next}）」；不通过 → ↩ 打回并附原因，士兵按反馈修订重做。\n要点：${report.summary}\n证据：${report.evidence}${contractDocSummary(contractReg)}`)
           activity('gate', t.id, `${stage.label}完成，待将军人工验收（闸门）`)
           log(`${t.id} → in_review（${stage.label} 人工闸门，待将军验收）`)
           return
         }
         await advanceTo(t.id, stage.role)
-        await safeComment(t.id, `✓ ${stage.label}完成：${report.summary}\n证据：${report.evidence}`)
+        await safeComment(t.id, `✓ ${stage.label}完成：${report.summary}\n证据：${report.evidence}${contractDocSummary(contractReg)}`)
         activity('done', t.id, `${stage.label}完成：${report.summary}`)
         log(`${t.id} → done（${stage.label}），流转下一角色`)
         await advancePipeline(t)
@@ -1328,7 +1426,7 @@ exit 0
         const promoteHint = worktreeDir !== null
           ? `\n[worktree] 改动在分支 w/${t.id}。验收通过后 promote：git -C ${repoRootFor()} merge --no-ff w/${t.id}；放弃：git -C ${repoRootFor()} worktree remove --force ${worktreeDir} && git -C ${repoRootFor()} branch -D w/${t.id}`
           : ''
-        await safeComment(t.id, `✓ 完成并提交验收：${report.summary}\n证据：${report.evidence}${promoteHint}`)
+        await safeComment(t.id, `✓ 完成并提交验收：${report.summary}\n证据：${report.evidence}${contractDocSummary(contractReg)}${promoteHint}`)
         activity('done', t.id, `完成：${report.summary}${worktreeDir !== null ? `（worktree 分支 w/${t.id} 待 promote）` : ''}`)
         log(`${t.id} → in_review（${report.summary}）`)
       }

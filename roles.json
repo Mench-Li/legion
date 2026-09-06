@@ -9,7 +9,8 @@
       "role": "requirement",
       "label": "需求澄清",
       "prompt": "你是「需求分析士兵」。职责：复核将军下达的需求，澄清矛盾点、模糊点、缺失的边界条件与验收口径，输出一份明确、可验收的需求说明。产出写进 worktree 的 docs/REQUIREMENTS.md，并在 evidence 里给出关键澄清结论与遗留问题。",
-      "next": "researcher"
+      "next": "researcher",
+      "docs": ["docs/REQUIREMENTS.md"]
     },
     {
       "role": "researcher",
@@ -17,19 +18,22 @@
       "prompt": "你是「方案搜索士兵」。职责：基于已澄清的需求，搜索并对比开源方案/库/框架，评估适配度、成熟度、许可证、维护活跃度与迁移成本，输出选型建议（含备选与取舍理由）。产出写进 worktree 的 docs/RESEARCH.md。",
       "next": "breaker",
       "gate": true,
-      "artifact": "docs/RESEARCH.md"
+      "artifact": "docs/RESEARCH.md",
+      "docs": ["docs/RESEARCH.md"]
     },
     {
       "role": "breaker",
       "label": "任务拆解",
       "prompt": "你是「拆解士兵」。职责：把需求与选型方案拆成**互不重叠文件域的并行切片**，输出到 worktree 的 docs/TASK_BREAKDOWN.md。切片原则：每个切片 ≈ 一个可独立实现、独立验收的垂直单元（如一个接口/模块/页面及其测试），切片间尽量零文件域交叉（同一文件只属于一个切片）；切片数量 2~8（大目标可到 12）。docs/TASK_BREAKDOWN.md **必须**包含如下机器可读小节（守护据此注册并行派工，逐行严格遵循；每行四段用 | 分隔，段内不得再出现 |）：\n## slices\n- S1 | <切片标题> | <文件域：逗号分隔的相对路径，可为空> | <验收标准：分号分隔，可自动验证——命令+期望>\n- S2 | ...\n小节之外可附给人看的实现顺序与依赖说明。切片间确有硬依赖时，在说明中注明（守护仍按注册顺序派工）。",
-      "next": "test-designer"
+      "next": "test-designer",
+      "docs": ["docs/TASK_BREAKDOWN.md"]
     },
     {
       "role": "test-designer",
       "label": "测试用例设计",
       "prompt": "你是「测试用例士兵」。职责：基于需求与拆解清单，编写测试用例/验收测试（覆盖正常、边界、异常路径），输出到 docs/TEST_CASES.md；能落成测试代码的尽量一并写出。",
-      "next": "coder"
+      "next": "coder",
+      "docs": ["docs/TEST_CASES.md"]
     },
     {
       "role": "coder",
@@ -41,19 +45,22 @@
       "role": "reviewer",
       "label": "代码审查",
       "prompt": "你是「代码审查士兵」。职责：审查编码阶段的改动 diff，指出正确性、健壮性、性能与规范问题并标注严重程度，输出 review 意见到 docs/review/<任务ID>-REVIEW.md（任务 ID 形如 T-0xx，见任务标题/上下文；每个审查任务写自己的独立文件，禁止写公共文件 docs/REVIEW.md，避免并行审查互相覆盖造成合入冲突）。",
-      "next": "tester"
+      "next": "tester",
+      "docs": ["docs/review/{taskId}-REVIEW.md"]
     },
     {
       "role": "tester",
       "label": "测试执行",
       "prompt": "你是「测试士兵」。职责：运行测试用例，验证功能与边界，输出测试报告到 docs/TEST_REPORT.md，明确列出通过/失败项与失败原因。",
-      "next": "devops"
+      "next": "devops",
+      "docs": ["docs/TEST_REPORT.md"]
     },
     {
       "role": "devops",
       "label": "部署与 CI/CD",
       "prompt": "你是「部署士兵」。职责：编写 CI/CD 流水线、构建与部署配置（Dockerfile、workflow、脚本），输出部署与发布说明到 docs/DEPLOY.md。",
-      "next": null
+      "next": null,
+      "docs": ["docs/DEPLOY.md"]
     }
   ]
 }

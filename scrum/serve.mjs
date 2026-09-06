@@ -29,15 +29,24 @@
  *   node legion/scrum/serve.mjs [--port 4820] [--host 127.0.0.1] [--token <t>]
  * 局域网共享：--host 0.0.0.0 --token <t>，手机/其他电脑访问 http://<本机IP>:4820
  * 环境变量：DSH_KANBAN_PORT / DSH_KANBAN_HOST / DSH_KANBAN_TOKEN
+ * 测试注入口（对齐 taskctl LEGION_TASKS_FILE 先例，供 artifact-detail.test.mjs fixture）：
+ *   LEGION_SCRUM_DIR     覆盖任务库目录（tasks.json/patches 等读取位置），默认 scrum/
+ *   LEGION_ARTIFACT_ROOT 覆盖产物白名单根（/api/artifact 相对路径解析基准），默认仓库根
+ *   以 import 方式加载（非 main）时跳过 fs watch 与 listen；导出 server 供测试 listen 随机端口
  */
 import { createServer } from 'node:http'
 import { spawn } from 'node:child_process'
-import { readFile, readFileSync, watch, watchFile, writeFileSync } from 'node:fs'
+import { existsSync, readFile, readFileSync, watch, watchFile, writeFileSync } from 'node:fs'
 import { dirname, extname, join, normalize, sep } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
+const isMain = (() => {
+  try { return process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href }
+  catch { return true }
+})()
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
-const SCRUM = join(ROOT, 'scrum')
+const SCRUM = process.env.LEGION_SCRUM_DIR || join(ROOT, 'scrum')
+const ARTIFACT_ROOT = process.env.LEGION_ARTIFACT_ROOT || ROOT
 const BOARD_FILE = join(SCRUM, 'board.json')
 const ACTIVITY_FILE = join(SCRUM, 'activity.jsonl')
 const PATCHES_DIR = join(SCRUM, 'patches')
@@ -99,7 +108,7 @@ function broadcast() {
   }, 100)
 }
 
-watch(BOARD_FILE, () => broadcast())
+if (isMain) watch(BOARD_FILE, () => broadcast())
 
 /** 动态（activity）SSE 客户端集合与已广播字节偏移（activity.jsonl 只追加） */
 const activityClients = new Set()
@@ -126,10 +135,12 @@ function broadcastActivity() {
 }
 
 // activity.jsonl 由守护追加（文件可能尚未创建），用 poll watchFile 处理不存在/截断
-watchFile(ACTIVITY_FILE, { interval: 1000 }, (curr, prev) => {
-  if (curr.size < prev.size) activityOffset = 0 // 文件被截断/轮转
-  if (curr.size !== prev.size) broadcastActivity()
-})
+if (isMain) {
+  watchFile(ACTIVITY_FILE, { interval: 1000 }, (curr, prev) => {
+    if (curr.size < prev.size) activityOffset = 0 // 文件被截断/轮转
+    if (curr.size !== prev.size) broadcastActivity()
+  })
+}
 
 /**
  * 以子进程方式执行 taskctl 命令（唯一变更入口，保证状态机/乐观锁/角色纪律一致）。
@@ -251,6 +262,30 @@ async function handleControl(req, res, paused) {
   }
   writeControl({ paused })
   json(res, 200, { ok: true, paused })
+}
+
+/** 产物绝对路径白名单解析（R-4 S2 / K4-B）：
+ *  - 相对路径：按 ARTIFACT_ROOT 解析；任一路径段为 .. 或 .git（不区分大小写）一律拒绝（../ 不剥离语义逃逸）；
+ *  - 盘符/根斜杠/UNC 绝对路径（存量登记）：仅当落在 ARTIFACT_ROOT 之内才放行。
+ * 返回绝对路径（主仓库根候选）；白名单外返回 null。
+ */
+function artifactAbsPath(rel) {
+  const p = String(rel ?? '').trim()
+  if (p.length === 0) return null
+  const winAbs = /^[A-Za-z]:[\\/]/.test(p)
+  const posixAbs = p.startsWith('/') || p.startsWith('\\\\')
+  if (winAbs || posixAbs) {
+    const n = normalize(p)
+    const rootAbs = normalize(ARTIFACT_ROOT)
+    if (n === rootAbs || n.startsWith(rootAbs + sep)) return n
+    return null
+  }
+  let relp = p.replace(/\\/g, '/')
+  while (relp.startsWith('./')) relp = relp.slice(2)
+  relp = relp.replace(/^\/+/, '')
+  const segs = relp.split('/').filter(Boolean)
+  if (segs.length === 0 || segs.includes('..') || segs.some(x => x.toLowerCase() === '.git')) return null
+  return join(ARTIFACT_ROOT, ...segs)
 }
 
 const server = createServer((req, res) => {
@@ -449,30 +484,60 @@ const server = createServer((req, res) => {
     return
   }
 
-  // 产物预览：path 取自 tasks.json 的 artifact 记录（不读查询串），仅允许 repoRoot 内。
-  // ?task=T-00X → JSON 元信息；&raw=1 → 文件内容（html→iframe 预览 / file→下载 / url→302）。
+  // 产物逐条内容服务（R-4 S2，AC-R3-3 v1 面 / K4-B）：按任务 + 条目序 i 返回对应条目。
+  //   ?task=T-00X&i=N   → JSON 元信息（i 缺省 = 最新一条，兼容既有语义）
+  //   &raw=1            → 真实文件内容：html→text/html（逐条 iframe 预览）、md/txt→text/markdown|text/plain、其余 octet-stream
+  //   url 类型          → raw=1 时 302 跳外链；否则返回 url 元信息
+  //   相对路径按 ARTIFACT_ROOT 白名单解析；../ 与 .git 段、根外绝对路径拒绝（403）；未知任务 404 / 越界 400。
   if (url.pathname === '/api/artifact') {
     const taskId = url.searchParams.get('task') || ''
     const raw = url.searchParams.get('raw') === '1'
+    const iRaw = url.searchParams.get('i')
+    if (!taskId) { json(res, 400, { error: '缺少参数 task' }); return }
     readFile(join(SCRUM, 'tasks.json'), 'utf8', (err, dbRaw) => {
       if (err) { json(res, 500, { error: 'tasks.json 读取失败' }); return }
       let t
       try { t = JSON.parse(dbRaw).tasks?.[taskId] } catch { json(res, 500, { error: 'tasks.json 解析失败' }); return }
-      const a = (t?.artifacts ?? []).slice(-1)[0]
-      if (!a) { json(res, 404, { error: `任务 ${taskId} 无产物` }); return }
-      if (a.kind === 'url') { res.writeHead(302, { location: a.path }); res.end(); return }
-      const norm = normalize(a.path)
-      const root = normalize(ROOT)
-      if (norm !== root && !norm.startsWith(root + sep)) { json(res, 403, { error: '产物路径不在允许根内' }); return }
+      if (!t) { json(res, 404, { error: `任务不存在：${taskId}` }); return }
+      const arts = t.artifacts ?? []
+      if (arts.length === 0) { json(res, 404, { error: `任务 ${taskId} 无产物` }); return }
+      let a
+      let idx
+      if (iRaw === null || iRaw === '') { idx = arts.length - 1; a = arts[idx] }
+      else {
+        if (!/^\d+$/.test(iRaw)) { json(res, 400, { error: '条目序号非法（应为非负整数）' }); return }
+        idx = Number(iRaw)
+        if (idx >= arts.length) { json(res, 400, { error: `条目序号越界：任务 ${taskId} 共 ${arts.length} 条产物（i=${idx}）` }); return }
+        a = arts[idx]
+      }
+      const meta = { taskId, i: idx, kind: a.kind, title: a.title ?? '', path: a.path, at: a.at ?? null, by: a.by ?? null, total: arts.length }
+      if (a.kind === 'url') {
+        if (!raw) { json(res, 200, { ...meta, url: true }); return }
+        res.writeHead(302, { location: a.path }); res.end(); return
+      }
+      const mainAbs = artifactAbsPath(a.path)
+      if (mainAbs === null) { json(res, 403, { error: '产物路径不在允许根内' }); return }
+      // 未 promote 分支态（K5-A，v1 面）：相对路径契约登记优先读 ARTIFACT_ROOT/.legion-worktrees/<taskId>/<rel>（worktree 目录），主仓库根兜底
+      let abs = mainAbs
+      const rawRel = String(a.path ?? '').replace(/\\/g, '/').replace(/^\.\//, '')
+      if (rawRel.length > 0 && !/^[A-Za-z]:/.test(rawRel) && !rawRel.startsWith('/')) {
+        const branchAbs = join(ARTIFACT_ROOT, '.legion-worktrees', taskId, ...rawRel.split('/').filter(Boolean))
+        if (existsSync(branchAbs)) abs = branchAbs
+      }      if (abs === null) { json(res, 403, { error: '产物路径不在允许根内' }); return }
       if (!raw) {
-        readFile(norm, (e2) => {
-          json(res, 200, { kind: a.kind, title: a.title ?? '', path: a.path, exists: !e2 })
+        readFile(abs, (e2, data) => {
+          json(res, 200, { ...meta, exists: !e2, size: e2 ? 0 : data.length })
         })
         return
       }
-      readFile(norm, (e2, data) => {
+      readFile(abs, (e2, data) => {
         if (e2) { json(res, 404, { error: '产物文件不存在' }); return }
-        res.writeHead(200, { 'content-type': a.kind === 'html' ? 'text/html; charset=utf-8' : 'application/octet-stream' })
+        const ext = extname(abs).toLowerCase()
+        const ct = ext === '.html' ? 'text/html; charset=utf-8'
+          : ext === '.md' || ext === '.markdown' ? 'text/markdown; charset=utf-8'
+          : ext === '.txt' ? 'text/plain; charset=utf-8'
+          : 'application/octet-stream'
+        res.writeHead(200, { 'content-type': ct })
         res.end(data)
       })
     })
@@ -554,7 +619,11 @@ const server = createServer((req, res) => {
   })
 })
 
-server.listen(port, host, () => {
-  const auth = token ? `（写操作需令牌）` : '（无令牌）'
-  process.stdout.write(`军团看板服务已启动：http://${host}:${port}${auth}（SSE 实时推送 + 拖拽写回，Ctrl-C 停止）\n`)
-})
+if (isMain) {
+  server.listen(port, host, () => {
+    const auth = token ? `（写操作需令牌）` : '（无令牌）'
+    process.stdout.write(`军团看板服务已启动：http://${host}:${port}${auth}（SSE 实时推送 + 拖拽写回，Ctrl-C 停止）\n`)
+  })
+}
+
+export { server }

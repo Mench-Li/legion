@@ -117,7 +117,7 @@ patch 里**必须显式给** `legionDir: 'D:/project/DSH/legion'`——pnpm 对 
 ### 3.6 自动交接（守护全自动流水线，含写码）
 - **任何 agent 环节产生的任务自动交接给对应岗位 agent 实现**：守护（scrum-worker）每 `intervalMs` 扫单，凡「角色在流水线（roles.json 8 岗）、依赖已解除、未被将军拦截、未全局暂停」的 todo/blocked 任务，即自动认领并按该岗位派 AI 执行；上一环验收 done → 下一环自动解锁、下轮自动接管，需求→方案→拆解→用例→编码→审查→测试→部署自动流转。
 - **方案/设计类阶段有人工闸门**：roles.json 里配了 `gate` 的阶段（当前 = **需求澄清 requirement + 方案搜索 researcher**）完成并合入主分支后**停在 🟡 in_review**，且要求交付的产物文档（`artifact`，需求 = `docs/REQUIREMENTS.md`、方案 = `docs/RESEARCH.md`）必须存在；**将军确认后才流转**：✓ 验收通过 → 守护自动流转到下一阶段；↩ 打回附原因 → 士兵按反馈修订重做。需要其他阶段也人工把关时，在 roles.json 对应阶段加 `"gate": true`（可配 `"artifact"` 强制产物文档）。
-- **分析产物文档按目标隔离（多目标并行不互踩）**：新发布目标自带目标级文档目录 `docs/<goalId>/`，该目标的分析阶段文档（REQUIREMENTS/RESEARCH/TASK_BREAKDOWN/TEST_CASES/TEST_REPORT/DEPLOY）全部写入/读取**自己目标的目录**，不同目标各写各的目录 → 跨目标分析前缀可安全并行，不再共用根 `docs/` 固定槽位互相覆盖（守护会在派工提示词注入目标文档目录行并改写产物路径，gate 校验/切片展开/用例引用同步按目标目录解析）；`docsDir` 上线前已发布的目标（遗留链）仍沿用根 `docs/` 槽位，行为不变（详见 `docs/ORCHESTRATION-V3.md §12`）。
+- **分析产物文档按目标隔离（多目标并行不互踩）**：新发布目标自带目标级文档目录 `docs/<goalId>/`，该目标的分析阶段文档（REQUIREMENTS/RESEARCH/TASK_BREAKDOWN/TEST_CASES/TEST_REPORT/DEPLOY）全部写入/读取**自己目标的目录**，不同目标各写各的目录 → 跨目标分析前缀可安全并行，不再共用根 `docs/` 固定槽位互相覆盖（守护会在派工提示词注入目标文档目录行并改写产物路径，gate 校验/切片展开/用例引用同步按目标目录解析）；`docsDir` 上线前已发布的目标（遗留链）仍沿用根 `docs/` 槽位，行为不变。实现与设计见 `docs/ORCHESTRATION-V3.md §12`；**双目标并行实弹验收**（沙箱 scope：两目标 researcher 真并发 7 分钟、各目标目录文档并存、闸门注释带目标目录路径）见 `docs/P2-GOALDOCS-LIVE.md`；已随 `docs/P3-PROD-ROLLOUT.md` 于 2026-09-06 滚动上线生产——重启后**新发布**目标自动生效，既有/在途目标不受影响。
 - **将军干预（任意时刻）**：
   - 🖐 **拦截 / 🚀 放行**（任务详情与调度台，`POST /api/hold`）：拦截后守护不再认领/执行该任务，直到放行；
   - 🔁 **转派**：任务 soldier 与 role 一并改为目标岗位（转派给流水线外岗位则成为人工托管任务）——转派后仍由对应 agent 自动接管执行；
@@ -250,6 +250,8 @@ patch 里**必须显式给** `legionDir: 'D:/project/DSH/legion'`——pnpm 对 
 - `docs/T093-evidence/` — devops 目标级收尾的真实命令证据（ci-run-06480ba 六阶段全 PASS 输出）
 - `docs/P0-CONFIRMATION.md` — P0 关键缺陷修复确认（含 §9 现场验收记录与审计相关修复）
 - `docs/P1-LIVE-ROLLOUT.md` — P1 现场验收与真实软件空间流水线滚动记录
+- `docs/P2-GOALDOCS-LIVE.md` — 目标级分析文档目录（`docs/<goalId>/`）沙箱双目标并行实弹验收 runbook（复跑步骤 + 就绪判据）
+- `docs/P3-PROD-ROLLOUT.md` — 目标级文档目录生产滚动 runbook（重启步骤 / 核对清单 / 目标级回滚点 / 执行记录）
 - `team-hub/server.mjs` — v2 中枢源码（表结构与全部路由以代码为准）
 - `LEGION.md` — 军团规则（注入执行 agent 提示词）
 

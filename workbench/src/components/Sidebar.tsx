@@ -16,6 +16,7 @@ const MODULES: ModuleDef[] = [
   { id: 'agents', name: '智能体', icon: '🤖' },
   { id: 'files', name: '文件中心', icon: '📁' },
   { id: 'skills', name: '技能中心', icon: '🧩' },
+  { id: 'rules', name: '规范', icon: '📜' },
   { id: 'browser', name: '浏览器助手', icon: '🌐' },
   { id: 'chat', name: '对话中心', icon: '💬' },
   { id: 'calendar', name: '日程日历', icon: '📅' },
@@ -70,7 +71,7 @@ export function Sidebar({ board, active, scope, hubMode, spaces, onNavigate, onS
 
   const clickModule = (mod: ModuleDef): void => {
     // 面板化模块：home/agents/skills 既有 + chat/files/browser/calendar/notify 多中心（S2/S5/S6/S7）
-    if (mod.id === 'home' || mod.id === 'agents' || mod.id === 'skills' || mod.id === 'chat' || mod.id === 'files' || mod.id === 'browser' || mod.id === 'calendar' || mod.id === 'notify') {
+    if (mod.id === 'home' || mod.id === 'agents' || mod.id === 'skills' || mod.id === 'rules' || mod.id === 'chat' || mod.id === 'files' || mod.id === 'browser' || mod.id === 'calendar' || mod.id === 'notify') {
       onNavigate(mod.id)
       return
     }

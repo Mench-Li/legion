@@ -25,6 +25,9 @@ import type { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import type { ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import type AgentPresets from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
+import { skillsChanged, type SkillRef } from './skillsCache.js'
+import { buildNormSections, type NormFile } from './norms.js'
+import { buildChatAnswerPrompt, chatIdentityFor, type ChatCtxMsg } from './chatResponder.js'
 
 type AppContext = Context & {
   subagents: SubagentRuntime
@@ -432,18 +435,20 @@ export function apply(ctx: AppContext, config: Config): void {
   }
 
   /** 团队共享技能：从 hub 拉取本 scope + 授权给本角色的技能（缓存在内存，随 sweep 刷新）。 */
-  let sharedSkills: Array<{ id: string; name: string; prompt: string }> = []
+  /** 指纹刷新（S3/R-1）：以 (id, version, contentHash) 序列判定内容/成员变化（skillsCache.ts 纯函数）。 */
+  let sharedSkills: SkillRef[] = []
   async function fetchSkills(): Promise<void> {
     if (!useHub) return
     try {
       const res = await fetch(`${hubUrl}/api/skills?scope=${encodeURIComponent(scope)}&member=${encodeURIComponent(config.role)}`)
-      if (!res.ok) return
-      const skills = await res.json() as Array<{ id: string; name: string; prompt: string }>
-      if (sharedSkills.length !== skills.length) {
+      if (!res.ok) return // 拉取失败：保留旧缓存（TC-S3-05）
+      const skills = await res.json() as SkillRef[]
+      if (skillsChanged(sharedSkills, skills)) {
+        const prev = sharedSkills
         sharedSkills = skills
-        log(`团队技能同步：${skills.map(s => s.id).join(', ') || '（无）'}（scope=${scope}）`)
+        log(`团队技能同步：${skills.map(s => s.id).join(', ') || '（无）'}（scope=${scope}，刷新前 ${prev.length} → 刷新后 ${skills.length}）`)
       }
-    } catch { /* 技能拉取失败不影响派工 */ }
+    } catch { /* 技能拉取失败不影响派工（缓存不清，TC-S3-05） */ }
   }
 
   const listTasks = (scopeFor: string = scope): Promise<Task[]> => useHub ? hubList(scopeFor) : (runTaskctl(config.scrumDir, ['list']) as Promise<Task[]>)
@@ -846,19 +851,41 @@ exit 0
     return true
   }
 
-  /** 读取仓库规则（LEGION.md 优先，其次 AGENTS.md），注入派工提示词。 */
-  function readRepoRules(): string {
-    const candidates = [
-      join(repoRootFor(), 'LEGION.md'),
-      join(repoRootFor(), 'AGENTS.md'),
-      join(config.scrumDir, 'LEGION.md'),
-    ]
-    for (const f of candidates) {
+  // ── 分层项目规范（R-2，S5）：全局层（hub rules scope=global，缓存随 sweep 刷新）+ 空间层文件族 ──
+  /** 全局层规范文本缓存（拉取失败保留旧值 → 降级只用空间层，不阻塞派工，TC-S5-08；刷新策略与 fetchSkills 同族）。 */
+  let normsGlobalText = ''
+  async function refreshNorms(): Promise<void> {
+    if (!useHub) return
+    try {
+      const res = await fetch(`${hubUrl}/api/rules?scope=global`)
+      if (!res.ok) return // 保留旧缓存
+      const data = await res.json() as { rules?: { content?: string } }
+      normsGlobalText = typeof data.rules?.content === 'string' ? data.rules.content : ''
+    } catch { /* 拉取失败沿用旧值，不阻塞派工 */ }
+  }
+  /** 空间层文件族：repoRoot 下按固定序 LEGION.md → AGENTS.md → agent.md 读全部存在者；
+   *  根部无文件时回退 scrumDir/LEGION.md（现状语义兜底）。 */
+  const REPO_NORM_FILES = ['LEGION.md', 'AGENTS.md', 'agent.md']
+  function readRepoNormsFiles(): NormFile[] {
+    const root = repoRootFor()
+    const files: NormFile[] = []
+    for (const name of REPO_NORM_FILES) {
       try {
-        if (existsSync(f)) return readFileSync(f, 'utf8').slice(0, 4000)
-      } catch { /* 读取失败跳过 */ }
+        const p = join(root, name)
+        if (existsSync(p)) files.push({ label: name, content: readFileSync(p, 'utf8') })
+      } catch { /* 单文件读取失败跳过 */ }
     }
-    return ''
+    if (files.length === 0) {
+      try {
+        const p = join(config.scrumDir, 'LEGION.md')
+        if (existsSync(p)) files.push({ label: 'LEGION.md', content: readFileSync(p, 'utf8') })
+      } catch { /* 回退失败 */ }
+    }
+    return files
+  }
+  /** 分层合并（纯函数在 norms.ts，本处喂实时输入）：返回注入 sections（[] = 无规范段）。 */
+  function readNormsSync(): { sections: string[]; truncated: boolean } {
+    return buildNormSections({ globalText: normsGlobalText, files: readRepoNormsFiles() })
   }
 
   /** 解析 git numstat/name-status → 审计用结构化文件清单 [{path,status,add,del}]。 */
@@ -1037,7 +1064,7 @@ exit 0
   }
 
   function buildWorkerPrompt(t: Task, feedback: Task['comments'], cwd: string, isolated: boolean, stage?: StageDef): string {
-    const repoRules = readRepoRules()
+    const norms = readNormsSync() // 分层规范（R-2/S5）：全局层段 + 空间层段，顺序稳定
     const lines = [
       stage
         ? `你是军团士兵，当前角色「${stage.label}」（${stage.role}）。任务 ${t.id} 由你独立完成。`
@@ -1084,9 +1111,7 @@ exit 0
       ...(t.comments.length > 0
         ? t.comments.map(c => `- @${c.by}（${c.at}）: ${c.text}`)
         : ['- （无）']),
-      ...(repoRules !== ''
-        ? ['', '仓库规则（必须遵守，来自 LEGION.md/AGENTS.md）：', repoRules]
-        : []),
+      ...(norms.sections.length > 0 ? ['', ...norms.sections] : []),
       ...(sharedSkills.length > 0
         ? ['', '团队共享技能（必须遵守，来自 team-hub）：', ...sharedSkills.map(s => `【${s.name}】${s.prompt}`)]
         : []),
@@ -1867,6 +1892,129 @@ exit 0
   }
 
   /** 一轮扫单：todo 认领派工；本角色的退回任务纠错；依赖解除的 blocked 续做。 */
+  // ── R-4 对话 AI 回复（S10）：chat-responder 扫单 ────────────────────────────
+  // 纪律（I-7/K8-A）：team-hub 永不发起出站模型调用；回复由本守护经 ctx.subagents（DSH 模型通道）
+  // 派生轻量子代理生成，再经 hub 回写（author=回复方身份，服务器 CAS awaiting→replied）。
+  // 节拍 = intervalMs（默认 30s，位于 10-30s 区间内，TC-S10-07）；单轮至多处理 CHAT_REPLY_PER_SWEEP 条
+  // （防恢复瞬间队列爆发）；同消息去重（chatBusy）防并发重复派生（TC-S10-03 双保险：服务器 CAS 幂等）。
+  const chatBusy = new Set<number>()
+  const CHAT_REPLY_PER_SWEEP = 3
+  const CHAT_REPLY_SCHEMA: ObjectJsonSchema = { type: 'object', properties: { reply: { type: 'string' } }, required: ['reply'], additionalProperties: false }
+  interface HubChatMsg {
+    id: number
+    convId: number
+    scope: string
+    convTitle?: string
+    author: string
+    body: string
+    context?: Array<{ id: number; author: string; kind?: string; body: string }>
+  }
+  interface ReplySettingsPayload { enabled: boolean; model: string | null; identity: string | null; systemHint: string | null }
+  async function fetchJson<T>(url: string): Promise<T | null> {
+    try {
+      const res = await fetch(url)
+      if (!res.ok) return null
+      return await res.json() as T
+    } catch { return null }
+  }
+  /** 把一条 awaiting 消息标 failed（服务器 CAS，非 awaiting 幂等跳过；TC-S10-02）。 */
+  async function markChatFailed(msgId: number, scopeFor: string, identity: string, reason: string): Promise<void> {
+    try {
+      await hubPost('/api/chat/replies/fail', { msgId, by: identity, error: reason.slice(0, 500) })
+      log(`chat-responder：消息 ${msgId} 标记失败（${reason.slice(0, 120)}）`)
+    } catch (e) {
+      log(`chat-responder 标记失败 ${msgId} 未送达：${String(e)}`)
+    }
+  }
+  /** 轻量子代理直答一条 awaiting 消息（TC-S10-01..06）。 */
+  async function answerChatMessage(msg: HubChatMsg): Promise<void> {
+    try {
+      // 1) 回复设置：开关关 / 拉取失败 → 空转零出站（TC-S10-05；失败按「等下一轮」处理）
+      const settings = await fetchJson<ReplySettingsPayload>(`${hubUrl}/api/chat/reply-settings?scope=${encodeURIComponent(msg.scope)}`)
+      if (settings === null || !settings.enabled) return
+      const identity = chatIdentityFor(msg.scope, settings.identity)
+      // 2) 防自我触发：identity 消息不再次进入回答流程（TC-S10-04，服务端已不标 awaiting，双保险）
+      if (msg.author === identity) return
+      // 3) 模型解析（TC-S10-06/D-14）：settings.model ?? 该空间默认（agent_models）?? 守护当前选择
+      let fallback = { provider: config.provider, model: '' }
+      try {
+        const s = ctx.agentDefaultModel.currentSelection()
+        if (s && s.model) fallback = { provider: s.provider || config.provider, model: s.model }
+      } catch { /* 取不到默认模型则用空串，由子代理 start 失败路径兜底 */ }
+      const rows = await fetchJson<Array<{ role: string; provider?: string; model?: string }>>(`${hubUrl}/api/models?scope=${encodeURIComponent(msg.scope)}`)
+      const pick = (rows ?? []).find(r => r.role === 'assistant') ?? (rows ?? []).find(r => r.role === '') ?? (rows ?? [])[0]
+      const chosenProvider = (pick?.provider && pick.provider.trim()) || fallback.provider
+      const chosenModel = (settings.model && settings.model.trim()) || (pick?.model && pick.model.trim()) || fallback.model
+      // 4) foreman 父级（无则标记失败，不重试同一轮）
+      const parent = await ensureForeman(workspaceFor())
+      if (parent === undefined) {
+        await markChatFailed(msg.id, msg.scope, identity, '守护 foreman 不可用')
+        return
+      }
+      const budgetMs = Math.min(config.workerTimeoutMs, 120000) // 回复预算 ≤120s（TC-S10-01）
+      const prompt = buildChatAnswerPrompt({
+        scope: msg.scope,
+        convTitle: msg.convTitle,
+        systemHint: settings.systemHint,
+        identity,
+        context: [...(msg.context ?? []), { id: msg.id, author: msg.author, body: msg.body }],
+      })
+      const controller = new AbortController()
+      controllers.add(controller)
+      try {
+        const run = await ctx.subagents.start(config.provider, {
+          label: `chat:${msg.scope}:${msg.id}`,
+          prompt: [{ type: 'text', text: prompt }],
+          parent,
+          signal: controller.signal,
+          outputSchema: CHAT_REPLY_SCHEMA,
+          agentOptions: { provider: chosenProvider, model: chosenModel },
+        })
+        const result = await new Promise<{ stopReason: string; structured?: unknown } | null>((resolve) => {
+          const t = setTimeout(() => { controller.abort(); resolve(null) }, budgetMs)
+          void run.result.then(
+            r => { clearTimeout(t); resolve(r) },
+            () => { clearTimeout(t); resolve(null) },
+          )
+        })
+        await run.dispose().catch(() => undefined)
+        if (result === null || result.stopReason !== 'completed' || result.structured === undefined) {
+          await markChatFailed(msg.id, msg.scope, identity, `回复子代理未完成（${result === null ? '超时/中止' : result.stopReason}）`)
+          return
+        }
+        const answer = String((result.structured as { reply?: unknown }).reply ?? '').trim()
+        if (answer.length === 0) {
+          await markChatFailed(msg.id, msg.scope, identity, '回复子代理返回空内容')
+          return
+        }
+        // 5) 服务器 CAS 回写：awaiting→replied；并发/重复轮 skipped → 不重复回复（TC-S10-03）
+        const out = await hubPost('/api/chat/replies/answer', { msgId: msg.id, body: answer, by: identity, model: chosenModel })
+        if (out && typeof out === 'object' && (out as { skipped?: boolean }).skipped === true) return
+        log(`chat-responder：已回复消息 ${msg.id}（${identity}，model=${chosenModel}）`)
+      } finally {
+        controllers.delete(controller)
+      }
+    } catch (e) {
+      log(`chat-responder 处理消息 ${msg.id} 失败：${String(e)}`)
+      const ident = chatIdentityFor(msg.scope)
+      await markChatFailed(msg.id, msg.scope, ident, String(e).slice(0, 300)).catch(() => undefined)
+    }
+  }
+  /** 每轮扫单：拉本 scope awaiting 队列并派轻量子代理（受 chatBusy/单轮上限约束，不占任务 worker 并发槽）。 */
+  async function sweepChatReplies(): Promise<void> {
+    if (!useHub) return
+    try {
+      const queue = await fetchJson<{ messages?: HubChatMsg[] }>(`${hubUrl}/api/chat/replies?scope=${encodeURIComponent(scope)}&limit=20`)
+      const msgs = (queue?.messages ?? []).filter(m => !chatBusy.has(m.id)).slice(0, CHAT_REPLY_PER_SWEEP)
+      for (const m of msgs) {
+        chatBusy.add(m.id)
+        void answerChatMessage(m).catch(e => log(`chat-responder 消息 ${m.id} 异常：${String(e)}`)).finally(() => chatBusy.delete(m.id))
+      }
+    } catch (e) {
+      log(`chat-responder 拉队列失败：${String(e)}`)
+    }
+  }
+
   async function sweep(): Promise<void> {
     if (sweeping) return
     sweeping = true
@@ -1890,6 +2038,8 @@ exit 0
       await refreshSpaceBinding()
       await ensureForeman(workspaceFor())
       await fetchSkills()
+      await refreshNorms() // R-2/S5：刷新全局规范层缓存（失败保留旧值降级）
+      await sweepChatReplies() // R-4/S10：对话 awaiting → 轻量子代理直答回写
       let tasks: Task[]
       try {
         tasks = await listTasks()

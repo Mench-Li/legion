@@ -45,13 +45,13 @@ function post(base, path, body, token) {
 }
 
 /** 起一个真实 server.mjs：随机端口 + 独立临时库；轮询 /api/config 并以 db 路径确认真实实例。 */
-async function startServer(token) {
+async function startServer(token, extraEnv = {}) {
   for (let attempt = 0; attempt < 6; attempt += 1) {
     const port = 20000 + Math.floor(Math.random() * 20000)
     const dbFile = join(tmpRoot, 'team-' + port + '.db')
     const child = spawn(process.execPath, ['team-hub/server.mjs'], {
       cwd: process.cwd(),
-      env: { ...process.env, TEAM_HUB_DB: dbFile, TEAM_HUB_PORT: String(port), TEAM_HUB_TOKEN: token },
+      env: { ...process.env, TEAM_HUB_DB: dbFile, TEAM_HUB_PORT: String(port), TEAM_HUB_TOKEN: token, ...extraEnv },
       stdio: 'ignore',
     })
     const base = 'http://127.0.0.1:' + port
@@ -242,6 +242,69 @@ async function runServerB() {
   }
 }
 
+/** R-4/S9 L1 断言（TC-S9-13）：settings 读写 / awaiting 可见 / 开关关无队列 / 超龄 failed / SSE ≤5s。 */
+async function runServerS9() {
+  const { child, base } = await startServer('')
+  try {
+    const json = (r) => r.json()
+    // settings 默认开（D-13）
+    const def = await (await fetch(base + '/api/chat/reply-settings?scope=s9')).json()
+    check('S9-13 ① settings 默认 enabled=true（未设置）', def.enabled === true)
+    // 开关关 → 持久化 + 无队列
+    const off = await post(base, '/api/chat/reply-settings', { scope: 's9', enabled: false, by: 'general' })
+    check('S9-13 ② POST settings enabled:false → 200', off.status === 200 && (await json(off)).task.enabled === false)
+    const convOff = (await (await post(base, '/api/chat/conversations', { scope: 's9', title: 's9 关闭会话', kind: 'space', by: 'general' })).json()).task.id
+    const mOff = (await (await post(base, '/api/chat/messages', { conv: convOff, kind: 'text', body: '关闭时发送', by: 'general' })).json()).task
+    check('S9-13 ③ 开关关发送 → 无 aiStatus=awaiting', mOff.meta.aiStatus !== 'awaiting')
+    const qOff = (await (await fetch(base + '/api/chat/replies?scope=s9')).json()).messages
+    check('S9-13 ④ 开关关 → replies 队列为空', Array.isArray(qOff) && qOff.length === 0)
+    // 恢复开启 → awaiting 可见（含上下文）
+    await post(base, '/api/chat/reply-settings', { scope: 's9', enabled: true, by: 'general' })
+    const convOn = (await (await post(base, '/api/chat/conversations', { scope: 's9', title: 's9 开会话', kind: 'space', by: 'general' })).json()).task.id
+    await post(base, '/api/chat/messages', { conv: convOn, kind: 'text', body: '前置上下文', by: 'coder' })
+    const mOn = (await (await post(base, '/api/chat/messages', { conv: convOn, kind: 'text', body: '帮我总结这段', by: 'general' })).json()).task
+    check('S9-13 ⑤ 开关开发送 → meta.aiStatus=awaiting', mOn.meta.aiStatus === 'awaiting')
+    const qOn = (await (await fetch(base + '/api/chat/replies?scope=s9&sinceMsgId=0')).json()).messages
+    const hit = (qOn || []).find((x) => x.id === mOn.id)
+    check('S9-13 ⑥ awaiting 进队列且带上下文', !!hit && hit.convId === convOn && Array.isArray(hit.context) && hit.context.length >= 1)
+    // SSE ≤5s：answer → live chat:message（member=s9-assistant）
+    const liveP = waitLiveChatEvent(base, 's9-assistant')
+    await sleep(400)
+    const ans = await post(base, '/api/chat/replies/answer', { msgId: mOn.id, body: '这是 AI 回复', by: 's9-assistant', model: 'deepseek-chat' })
+    check('S9-13 ⑦ answer 200 且 reply author=by', ans.status === 200 && (await json(ans)).task.reply.author === 's9-assistant')
+    const liveEv = await liveP
+    check('S9-13 ⑧ 回复写入 ≤5s 收到 live chat:message（member=s9-assistant、detail.ai=true）',
+      !!liveEv && liveEv.action === 'chat:message' && liveEv.member === 's9-assistant' && liveEv.detail && liveEv.detail.ai === true)
+    const msgs = (await (await fetch(base + '/api/chat/messages?conv=' + convOn)).json()).messages
+    const srcAfter = msgs.find((x) => x.id === mOn.id)
+    check('S9-13 ⑨ 源消息 meta.aiStatus=replied 且不重复', srcAfter.meta.aiStatus === 'replied' && msgs.filter((x) => x.author === 's9-assistant').length === 1)
+    const qAfter = (await (await fetch(base + '/api/chat/replies?scope=s9')).json()).messages
+    check('S9-13 ⑩ replied 消息退出队列', !(qAfter || []).some((x) => x.id === mOn.id))
+    console.log('--- 服务 S9（R-4 数据面）断言执行完 ---')
+  } finally {
+    child.kill()
+  }
+}
+
+async function runServerS9Timeout() {
+  // 超龄兜底：注入 CHAT_REPLY_TIMEOUT_MS=250 → awaiting 超时标 failed + error 含 timeout 语义
+  const { child, base } = await startServer('', { CHAT_REPLY_TIMEOUT_MS: '250' })
+  try {
+    const conv = (await (await post(base, '/api/chat/conversations', { scope: 's9t', title: '超时会话', kind: 'space', by: 'general' })).json()).task.id
+    const m = (await (await post(base, '/api/chat/messages', { conv, kind: 'text', body: '会超时的提问', by: 'general' })).json()).task
+    check('S9-13 ⑪ 超时前置：awaiting 入队', m.meta.aiStatus === 'awaiting')
+    await sleep(500)
+    const q = (await (await fetch(base + '/api/chat/replies?scope=s9t')).json()).messages
+    check('S9-13 ⑫ 超龄消息退出队列（replies 为空）', Array.isArray(q) && q.length === 0)
+    const msgs = (await (await fetch(base + '/api/chat/messages?conv=' + conv)).json()).messages
+    const src = msgs.find((x) => x.id === m.id)
+    check('S9-13 ⑬ 超龄兜底：meta.aiStatus=failed + error 含超时', src.meta.aiStatus === 'failed' && /timeout|超时/i.test(src.meta.aiError || ''))
+    console.log('--- 服务 S9T（超龄兜底）断言执行完 ---')
+  } finally {
+    child.kill()
+  }
+}
+
 try {
   await runServerA()
 } catch (e) {
@@ -253,6 +316,18 @@ try {
 } catch (e) {
   hardFailures += 1
   console.log('SERVER B 异常：' + ((e && e.stack) || e))
+}
+try {
+  await runServerS9()
+} catch (e) {
+  hardFailures += 1
+  console.log('SERVER S9 异常：' + ((e && e.stack) || e))
+}
+try {
+  await runServerS9Timeout()
+} catch (e) {
+  hardFailures += 1
+  console.log('SERVER S9T 异常：' + ((e && e.stack) || e))
 }
 
 await sleep(300)

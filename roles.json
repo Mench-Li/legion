@@ -9,7 +9,9 @@
       "role": "requirement",
       "label": "需求澄清",
       "prompt": "你是「需求分析士兵」。职责：复核将军下达的需求，澄清矛盾点、模糊点、缺失的边界条件与验收口径，输出一份明确、可验收的需求说明。产出写进 worktree 的 docs/REQUIREMENTS.md，并在 evidence 里给出关键澄清结论与遗留问题。",
-      "next": "researcher"
+      "next": "researcher",
+      "gate": true,
+      "artifact": "docs/REQUIREMENTS.md"
     },
     {
       "role": "researcher",

@@ -17,11 +17,13 @@ import {
   probeHub,
   publishGoal,
   setExec,
+  setGoalContext,
+  setGoalStatus,
   subscribeActivity,
   subscribeBoard,
 } from './api'
 import { buildMissions, labelsFromPipeline } from './missions'
-import type { ActivityEvent, ApiConfig, BoardData, GoalInfo, Mission, RosterAgent, SpaceInfo } from './types'
+import type { ActivityEvent, ApiConfig, BoardData, GoalInfo, GoalStatus, Mission, RosterAgent, SpaceInfo } from './types'
 import { Sidebar } from './components/Sidebar'
 import { KpiBar } from './components/KpiBar'
 import { CenterPanel } from './components/CenterPanel'
@@ -152,9 +154,16 @@ export default function App(): React.JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // 看板/中枢/空间变化时同步刷新任务集
+  // 看板/中枢/空间变化时同步刷新任务集（顺带刷目标进度/自动收尾状态，多目标并发下随任务推进更新）
   useEffect(() => {
-    if (conn === 'live' && board) void loadMissions(scope)
+    if (conn === 'live' && board) {
+      void loadMissions(scope)
+      if (hubMode && scope) {
+        void fetchGoal(scope)
+          .then(info => setGoalInfo(info))
+          .catch(() => undefined)
+      }
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [board, scope, hubMode])
 
@@ -177,7 +186,7 @@ export default function App(): React.JSX.Element {
     }
   }, [hubMode, scope])
 
-  // 中枢模式下按空间拉当前目标（objective + 该空间任务进度）
+  // 中枢模式下按空间拉全部目标（多目标并发：每目标带 status/version + 各自链进度）
   useEffect(() => {
     if (!hubMode) {
       setGoalInfo(null)
@@ -302,6 +311,7 @@ export default function App(): React.JSX.Element {
       .catch(() => undefined)
   }, [])
 
+<<<<<<< Updated upstream
 /** 空间删除成功后（R-3/S8，TC-S8-05/06）：关闭弹窗、重拉列表；若删的是当前激活空间则切回「全部空间」（scope=null）。 */
   const handleSpaceDeleted = useCallback((deletedId: string): void => {
     setSpaceSettings(null)
@@ -315,11 +325,37 @@ export default function App(): React.JSX.Element {
   }, [scope, loadMissions])
 
   /** 发布空间目标：写 team-hub 后刷新当前空间目标。 */
+=======
+  /** 发布目标：写 team-hub 后刷新目标列表。每次发布 = 新建一个目标（与既有目标并存，不取消旧链）。 */
+>>>>>>> Stashed changes
   const handlePublishGoal = useCallback(async (scopeValue: string, objective: string): Promise<void> => {
     await publishGoal(scopeValue, objective)
     const info = await fetchGoal(scopeValue)
     setGoalInfo(info)
+    toast('ok', '🎯 已发布目标（与既有目标并存，自动生成独立任务链）')
   }, [])
+
+  /** 目标状态迁移（暂停/恢复/取消，仅将军）：成功后刷新目标列表并提示。 */
+  const handleGoalStatus = useCallback(async (goalId: string, status: GoalStatus, label: string): Promise<void> => {
+    if (!scope) return
+    try {
+      await setGoalStatus(scope, goalId, status)
+      const info = await fetchGoal(scope)
+      setGoalInfo(info)
+      toast('ok', `${label}目标成功`)
+    } catch (e) {
+      toast('err', e instanceof Error ? e.message : String(e))
+    }
+  }, [scope])
+
+  /** 保存目标共享上下文（仅将军）：bump contextVersion，守护「下一派工」按新版本对齐；成功后刷新目标列表并提示。 */
+  const handleGoalContext = useCallback(async (goalId: string, text: string): Promise<void> => {
+    if (!scope) return
+    await setGoalContext(scope, goalId, text)
+    const info = await fetchGoal(scope)
+    setGoalInfo(info)
+    toast('ok', `📄 目标上下文已保存（v${info.goals.find(g => g.id === goalId)?.contextVersion ?? '?'}），下一派工对齐`)
+  }, [scope])
 
   /** 打开新建空间弹窗；中枢不可达时先探测一次，失败则给出启动引导而非静默失败。 */
   const openNewSpace = useCallback((): void => {
@@ -412,7 +448,7 @@ export default function App(): React.JSX.Element {
               onGoHome={() => setActive('home')}
             />
           ) : (
-            <CenterPanel board={board} labels={labels} active={active} rosterAgents={hubMode ? roster : null} scope={scope} spaces={hubSpaces} goalInfo={hubMode ? goalInfo : null} hubActive={hubMode} />
+            <CenterPanel board={board} labels={labels} active={active} rosterAgents={hubMode ? roster : null} scope={scope} spaces={hubSpaces} goalInfo={hubMode ? goalInfo : null} hubActive={hubMode} onGoalStatus={hubMode ? handleGoalStatus : undefined} onSaveContext={hubMode ? handleGoalContext : undefined} />
           )
         ) : (
           <div className="center-col" />
@@ -431,7 +467,7 @@ export default function App(): React.JSX.Element {
         scope={scope}
         hubMode={hubMode}
         onPausedChange={() => void refreshConfig()}
-        currentGoal={hubMode ? goalInfo?.objective ?? null : null}
+        goalCount={hubMode ? (goalInfo?.goals.filter(g => g.status === 'active' || g.status === 'paused').length ?? 0) : 0}
         spaceName={scope ? hubSpaces.find(s => s.id === scope)?.name ?? scope : undefined}
         onPublishGoal={hubMode ? handlePublishGoal : undefined}
         roster={hubMode ? roster : null}

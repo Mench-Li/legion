@@ -215,6 +215,48 @@ maxFixPerSlice: 2
 
 ---
 
+## 11. 目标级共享上下文 + 文件域机器闸门（P4 防窜台加固，已落地）
+
+需求：**同一目标共享上下文**——按发布目标衍生的任务必须关联目标（任务行 `goalId`），防止多目标/多切片并行时任务互相窜台；另一约束手段是文件域机器校验。
+
+落地三件套（team-hub + 守护 + workbench）：
+
+| 件 | 机制 | 语义 |
+| --- | --- | --- |
+| **A 目标级上下文** | `goal.context`（markdown）+ `goal.contextVersion`（每次更新 +1）；`POST /api/goal/context`（仅将军）。守护派工前把目标上下文内联进 worker 提示词「所属目标」段（objective + context vN + 同目标并行任务快照），并把只读镜像写进 worker 工作目录 `docs/goals/<goalId>.md`（权威源 = hub；镜像供士兵按文件阅读，`docs/goals/` 为共享写域白名单） | **下一派工对齐**：版本 bump 只影响后续派工，正在跑的 worker 不打断；worker 报告可选带 `goalRef{goalId,contextVersion}`，落后版本仅提示将军核对，不自动重做 |
+| **B 文件域机器校验** | `tasks.fileDomain`（切片展开/补任务时从 breaker 切片声明落库）；守护在中间阶段自动合入（`autoPromote`）**之前**用 `git diff <main> w/<id> --name-only` 校验改动是否落在声明文件域（或其子路径）内，越域 → 打回 `in_review` + ⛔ 评论列出越域文件，分支保留等将军裁决 | 无 `fileDomain` 的任务（chain 模式、analysis、devops 尾）与手动 promote 不拦（只提示）；`docs/goals/` 全目标共享可写 |
+| **C 将军 per-goal 视图** | `audit.goalId` 双写（目标级事件 + 该目标全部任务事件）；`GET /api/activity?goalId=` 过滤；SSE 事件带 goalId；workbench 目标卡点开可见「📄 目标上下文 vN」查看/编辑 + 「📜 本目标最近动态」 | 通知白名单加 `goal:context`；活动文案字典补齐 |
+
+测试与回归：`team-hub/goal.test.mjs` 新增 context 更新/护栏/审计 goalId/切片 fileDomain 落库用例；`plugins/tests/goal-context.test.mjs` 覆盖提示词注入、镜像落盘、越域拦截与域内放行正反例；守护 16/16、team-hub 50/50 全绿。部署注意：守护改动在 `plugins/src`，需重跑 `bash scripts/build.sh`（tsc → `lib/`）并重装/重链实际运行 profile（src/lib 的更新不会热更已跑守护）。
+
+---
+
+## 12. 目标级分析文档目录（docs/<goalId>/）—— 跨目标并行彻底解耦（已落地）
+
+**问题**：分析阶段产物文档长期钉死在**仓库根固定槽位**（`docs/REQUIREMENTS.md`、`docs/RESEARCH.md`、`docs/TASK_BREAKDOWN.md`、`docs/TEST_CASES.md`、`docs/TEST_REPORT.md`、`docs/DEPLOY.md`）。
+每个目标各自 requirement→researcher→breaker→test-designer 都会改写同一批文件，多目标并行/交错时：
+后 promote 者整文件**静默取代**前一个（旧版只能靠 git 历史回溯），或同基线并发 merge 触发 git 冲突停 in_review；
+更隐蔽的是**语义错配**——某目标的 RESEARCH.md 引用的 REQUIREMENTS.md 已被另一目标的版本取代，下游读错基线而不自知（当前主分支即处于此状态）。
+
+**解法（与「目标内切片任务靠文件域隔离」同一思想）**：分析阶段文档按目标命名空间化。
+
+| 件 | 机制 | 语义 |
+| --- | --- | --- |
+| **目标目录** | `goal` 表新增 `docsDir TEXT` 列；**新发布目标**在 `publishGoalRecord` 时写入 `docsDir = docs/<goalId>`（如 `docs/G-mtpaab3x-1/`）；老库/迁移目标为 NULL | NULL = 遗留目标沿用根 `docs/` 槽位，行为零变化（旧链兼容、无需迁移在途目标）；新目标的分析文档全进自己的目录 |
+| **机器读写点目标化** | 守护统一解析 `goalDocPath(goal, legacyPath)`：gate 产物校验（`docOk`）查 `<docsDir>/<basename>`；切片展开（`orchestrateSlices`）读 `<docsDir>/TASK_BREAKDOWN.md`；完成评论展示目标化路径 | requirement/researcher 的 `artifact`（roles.json 仍声明 `docs/REQUIREMENTS.md` 等遗留路径）在校验/评论处按目标重写 |
+| **worker 提示词目标化** | `goalizePrompt`：把角色提示词里的遗留 `docs/X.md` 槽位改写成 `<docsDir>/X.md`；「所属目标」段注入一行**本目标分析文档目录**说明（阶段产物链 + 只读写本目录、禁止读写根 docs/ 或他目标同名文件） | 士兵产出/读取都落在自己目标目录，不再有「读了别家需求写了自己方案」的歧义 |
+| **team-hub 侧引用** | `expandGoalSlices` 生成的 tester 任务描述里 `TEST_CASES.md` 引用按 `goalDocPathOf(goalId, …)` 解析 | slice tester 指到自己目标目录的用例文档 |
+| **共享写域收缩** | 无（镜像 `docs/goals/<goalId>.md` 仍在 `docs/goals/` 运行期白名单内；目标目录是**可入库提交**的正式产物，不在忽略名单） | 目标目录与镜像目录共存不冲突 |
+
+**兼容与迁移边界**：
+- 已发布/在途目标（`docsDir` NULL）继续写根 `docs/` 槽位——**不追溯迁移**（在途 worker 提示词已在旧语义下生成，中途切换会让 gate 校验与新路径失配）。
+- 旧目标的根文档即历史档案；git 历史与 RESEARCH 文末存档附录惯例仍可回溯。
+- 后续「查验闭环」类目标读 gate 产物做文件中心直达时，产物路径本身就是目标目录路径，天然不串目标。
+
+测试与回归：`team-hub/goal.test.mjs`（publish 自带 docsDir / 遗留迁移 NULL / expandGoalSlices 双模式 TEST_CASES 引用 / goalDocPathOf 双模式解析）；`plugins/tests/goal-context.test.mjs` 新增 gate 目标目录校验 + 提示词改写 + 遗留回退 + 切片展开读目标目录 TASK_BREAKDOWN 用例。全量：team-hub 39/39、plugins 19/19 绿。
+
+---
+
 ## 附：术语映射（DSH ↔ Legion）
 
 | DSH 原生 | Legion 里对应 | 说明 |

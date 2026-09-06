@@ -17,11 +17,11 @@ interface CommandBarProps {
   scope: string | null
   hubMode: boolean
   onPausedChange: () => void
-  /** 中枢模式：当前空间目标描述（供发布目标弹窗预填）；无则 null。 */
-  currentGoal?: string | null
+  /** 中枢模式：当前空间推进中目标数（发布目标弹窗并存提示用）。 */
+  goalCount?: number
   /** 中枢模式：当前空间名（发布目标标题用）。 */
   spaceName?: string
-  /** 发布空间目标。 */
+  /** 发布空间目标（每次发布会新建一个目标，与既有目标并存）。 */
   onPublishGoal?: (scope: string, objective: string) => Promise<void>
   /** 中枢模式：当前空间编队（模型配置弹窗按它列角色）。 */
   roster?: RosterAgent[] | null
@@ -69,7 +69,7 @@ function exportDailyReport(board: BoardData, activity: ActivityEvent[], labels: 
   URL.revokeObjectURL(url)
 }
 
-export function CommandBar({ board, activity, labels, paused, scope, hubMode, onPausedChange, currentGoal, spaceName, onPublishGoal, roster }: CommandBarProps): React.JSX.Element {
+export function CommandBar({ board, activity, labels, paused, scope, hubMode, onPausedChange, goalCount, spaceName, onPublishGoal, roster }: CommandBarProps): React.JSX.Element {
   const [showNew, setShowNew] = useState(false)
   const [showSched, setShowSched] = useState(false)
   const [showGoal, setShowGoal] = useState(false)
@@ -114,7 +114,7 @@ export function CommandBar({ board, activity, labels, paused, scope, hubMode, on
         <button className="btn" onClick={openSched} title={hubMode && scope === null ? '需先选择具体工作空间' : '任务调度：推进/验收/归还/转派'}>
           🗓 任务调度
         </button>
-        <button className="btn" disabled={!goalReady} onClick={() => setShowGoal(true)} title={goalReady ? '发布当前空间目标' : '需中枢模式且已选具体工作空间'}>
+        <button className="btn" disabled={!goalReady} onClick={() => setShowGoal(true)} title={goalReady ? '发布目标：每次发布会新建一个目标（可与既有目标并存并发推进）' : '需中枢模式且已选具体工作空间'}>
           🎯 发布目标
         </button>
         <button className="btn" onClick={() => toast('info', '日程/会议不在 legion 引擎内，随第 2 步接入 team-hub 日程表')}>
@@ -144,7 +144,7 @@ export function CommandBar({ board, activity, labels, paused, scope, hubMode, on
       {showNew && <NewTaskModal scope={scope} hubMode={hubMode} onClose={() => setShowNew(false)} />}
       {showSched && (hubMode && scope ? <HubSchedulerModal scope={scope} onClose={() => setShowSched(false)} /> : board ? <SchedulerModal board={board} labels={labels} onClose={() => setShowSched(false)} /> : null)}
       {showGoal && scope && onPublishGoal && (
-        <GoalModal scope={scope} spaceName={spaceName ?? scope} current={currentGoal} onClose={() => setShowGoal(false)} onPublish={onPublishGoal} />
+        <GoalModal scope={scope} spaceName={spaceName ?? scope} activeCount={goalCount ?? 0} onClose={() => setShowGoal(false)} onPublish={onPublishGoal} />
       )}
       {showModel && scope && (
         <ModelConfigModal scope={scope} roster={roster ?? null} onClose={() => setShowModel(false)} />

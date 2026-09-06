@@ -393,6 +393,274 @@ body {
   margin-top: 4px;
 }
 
+/* ---------- 多目标列表（并发模型：每目标一行，带状态 + vN + 各自进度） ---------- */
+
+.goals-card {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  padding: 10px 14px;
+}
+
+.goals-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+}
+
+.goals-head .tag {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.goals-hint {
+  font-size: 10px;
+  color: var(--muted-2);
+  white-space: nowrap;
+}
+
+.goal-agg {
+  flex: 1;
+  min-width: 120px;
+  display: flex;
+}
+
+.goal-agg .goal-bar-wrap {
+  flex: 1;
+  min-width: 0;
+}
+
+.goal-agg .goal-bar {
+  height: 8px;
+}
+
+.goal-agg .goal-bar-meta {
+  margin-top: 2px;
+}
+
+.goals-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 240px;
+  overflow: auto;
+}
+
+.goal-row-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.goal-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+}
+
+.goal-row .obj {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.goal-row .obj.empty {
+  color: var(--muted);
+  font-size: 11.5px;
+  white-space: normal;
+}
+
+.g-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.g-dot.active { background: var(--green); }
+.g-dot.paused { background: var(--yellow); }
+.g-dot.done { background: var(--blue); }
+.g-dot.canceled { background: var(--muted-2); }
+
+.goal-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.goal-status {
+  font-size: 9.5px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.goal-status.active { color: var(--green); border-color: rgba(57, 211, 150, 0.35); background: rgba(57, 211, 150, 0.08); }
+.goal-status.paused { color: var(--yellow); border-color: rgba(246, 191, 38, 0.35); background: rgba(246, 191, 38, 0.08); }
+.goal-status.done { color: var(--blue); border-color: rgba(90, 160, 255, 0.35); background: rgba(90, 160, 255, 0.08); }
+.goal-status.canceled { color: var(--muted); border-color: rgba(255, 255, 255, 0.14); background: rgba(255, 255, 255, 0.05); text-decoration: line-through; }
+
+.goal-ver {
+  font-size: 9.5px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 4px;
+  padding: 1px 5px;
+  white-space: nowrap;
+}
+
+.goal-ver.slice {
+  color: var(--yellow);
+}
+
+.goal-progress {
+  font-size: 10.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.goal-actions {
+  display: flex;
+  gap: 4px;
+  flex: none;
+}
+
+.btn.icon {
+  padding: 0 7px;
+  min-width: 24px;
+  height: 22px;
+  font-size: 11px;
+  line-height: 20px;
+}
+
+.btn.icon.confirming {
+  color: var(--red);
+  border-color: rgba(255, 107, 107, 0.5);
+}
+
+.goal-minibar {
+  height: 4px;
+  background: var(--line-2);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-left: 16px;
+}
+
+.goal-minibar i {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, var(--blue), var(--green));
+}
+
+/* 目标行展开：共享上下文查看/编辑 + per-goal 最近动态 */
+.goal-expand {
+  flex: none;
+  color: var(--muted);
+  font-size: 10px;
+  padding: 2px 4px;
+  cursor: pointer;
+}
+
+.goal-row {
+  cursor: pointer;
+}
+
+.goal-detail {
+  margin: 4px 0 6px 16px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.goal-ctx-head,
+.goal-act-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+}
+
+.goal-ctx-title {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.goal-ctx-hint {
+  flex: 1;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+.goal-ver.ctx { color: var(--muted); }
+.goal-ver.ctx.has { color: var(--green); border-color: rgba(57, 211, 150, 0.3); }
+
+.goal-ctx-body {
+  margin: 0;
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  font-size: 11.5px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 180px;
+  overflow: auto;
+  color: var(--text-2);
+}
+
+.goal-ctx-edit {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-2);
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(90, 160, 255, 0.4);
+  border-radius: 6px;
+  resize: vertical;
+  min-height: 72px;
+}
+
+.goal-act-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 150px;
+  overflow: auto;
+}
+
+.goal-act-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.goal-act-time { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
+.goal-act-action { flex: none; white-space: nowrap; }
+.goal-act-who { flex: none; color: var(--muted); font-size: 10px; }
+.goal-act-txt { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
+.goal-act-empty { color: var(--muted-2); font-size: 11px; padding: 2px 0; }
+
 .agents-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));

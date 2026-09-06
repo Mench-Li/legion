@@ -1,4 +1,4 @@
-import type { ActivityEvent, AgentCatalogItem, AgentModelCfg, ApiConfig, BoardData, CardStatus, ChatConversation, ChatMessage, DirListing, FileListResponse, FilePreview, GoalInfo, HubActivity, HubAuditEvent, HubTask, MissionsResponse, ModelOption, OverlapGroup, RepoInspect, RosterResponse, SkillInfo, SpaceInfo, WebFetchResult } from './types'
+import type { ActivityEvent, AgentCatalogItem, AgentModelCfg, ApiConfig, BoardData, CardStatus, ChatConversation, ChatMessage, DirListing, FileListResponse, FilePreview, GoalInfo, GoalStatus, HubActivity, HubAuditEvent, HubTask, MissionsResponse, ModelOption, OverlapGroup, RepoInspect, RosterResponse, SkillInfo, SpaceInfo, WebFetchResult } from './types'
 
 /**
  * 数据源地址解析：?api= 查询参数优先，其次 localStorage，最后默认 4820。
@@ -244,14 +244,25 @@ export function saveRule(scope: string, content: string): Promise<unknown> {
 }
 
 /** team-hub v2：读取指定空间目标（objective + 该空间任务进度）。 */
+
 export async function fetchGoal(scope: string | null): Promise<GoalInfo> {
   const qs = scope ? `?scope=${encodeURIComponent(scope)}` : ''
   return readJson<GoalInfo>(await fetch(`${hubBase()}/api/goal${qs}`))
 }
 
-/** team-hub v2：发布空间目标（upsert 该空间 objective）。 */
-export function publishGoal(scope: string, objective: string): Promise<unknown> {
-  return hubPost('/api/goal', { scope, objective })
+/** team-hub v2：发布目标——每次**新建**一个目标并生成其独立阶段任务链；与既有目标并存，互不取消。 */
+export function publishGoal(scope: string, objective: string, mode?: 'chain' | 'slice'): Promise<unknown> {
+  return hubPost('/api/goal', mode ? { scope, objective, mode } : { scope, objective })
+}
+
+/** team-hub v2：目标状态迁移（仅将军）：active ↔ paused；done/canceled 为终态（cancel 会取消该目标未开工的链任务）。 */
+export function setGoalStatus(scope: string, goalId: string, status: GoalStatus): Promise<unknown> {
+  return hubPost('/api/goal/status', { scope, id: goalId, status })
+}
+
+/** team-hub v2：更新目标共享上下文（仅将军）。contextVersion 服务端 +1；守护下一派工按新版本对齐（在跑 worker 不打断）。 */
+export function setGoalContext(scope: string, goalId: string, text: string): Promise<unknown> {
+  return hubPost('/api/goal/context', { scope, id: goalId, text })
 }
 
 /** team-hub v2：全局智能体目录（选人入编用）。 */
@@ -313,9 +324,10 @@ export async function fetchHubTask(id: string): Promise<HubTask> {
 }
 
 /** team-hub v2：某空间/某任务的审计时间线（进展历史）。taskId 优先，其次 scope；limit 可选（服务端上限 500）。 */
-export async function fetchHubActivity(opts: { scope?: string | null; taskId?: string; limit?: number } = {}): Promise<HubActivity[]> {
+export async function fetchHubActivity(opts: { scope?: string | null; taskId?: string; goalId?: string | null; limit?: number } = {}): Promise<HubActivity[]> {
   const qs = new URLSearchParams()
   if (opts.taskId) qs.set('taskId', opts.taskId)
+  else if (opts.goalId) qs.set('goalId', opts.goalId)
   else if (opts.scope) qs.set('scope', opts.scope)
   if (opts.limit !== undefined) qs.set('limit', String(opts.limit))
   if (qs.size === 0) qs.set('limit', '100')
@@ -665,7 +677,7 @@ export async function webFetchPage(input: { url: string; maxBytes?: number; time
 const NOTIFY_ACTIONS = new Set<string>([
   'create', 'claim', 'transition', 'advance', 'reassign', 'hold', 'unhold',
   'patch', 'evidence', 'artifact', 'review-note', 'test-report',
-  'goal:publish', 'goal:slices',
+  'goal:publish', 'goal:slices', 'goal:pause', 'goal:resume', 'goal:done', 'goal:cancel', 'goal:context',
   'space:create', 'space:update', 'space:delete', 'space:add-agents',
   'model:set', 'model:clear',
   'skill:submit', 'skill:review', 'skill:grant',

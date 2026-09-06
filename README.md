@@ -105,17 +105,19 @@ patch 里**必须显式给** `legionDir: 'D:/project/DSH/legion'`——pnpm 对 
   - **状态操作**（按状态出现）：todo →「▶ 开工 / 🔒 认领」；in_progress →「📮 提交验收 / 归还待办」；in_review →「✓ 验收通过（仅将军）/ ↩ 打回重做（附原因 + 审计批注）」；blocked →「解阻」；另有「💬 评论/记录」「转派」与「🤖 派 AI 执行」。
 - **进行中的任务不再误导**：已认领并派工的任务显示「🤖 AI 执行中（已派工）」禁用按钮（防重复派发），过程区文案说明 AI 正在执行、完成/异常自动沉淀——不会再出现「状态进行中却提示还没有 AI 执行」的观感错位。
 
-### 3.4 发布目标与自动建链
-- 底部「🎯 发布目标」（选中具体空间后可用）→ `POST /api/goal`：重复发布会**取消**同空间旧的 `[auto-goal]` 未完成任务，再按编队生成新阶段链（`soldier=role`、`priority=high`、`blockedBy=前一任务`）。
+### 3.4 发布目标与自动建链（多目标并发）
+- 底部「🎯 发布目标」（选中具体空间后可用）→ `POST /api/goal`：**每次发布会新建一个目标记录（G-xxx）**并按编队为其生成独立阶段任务链（`soldier=role`、`priority=high`、`blockedBy=前一任务`）；链任务挂 `goalId`，**不会取消**该空间既有目标/旧链——同一空间可**同时推进多个目标**，各自任务链由守护并行派工，互不干扰（需要更高并行度时调大 worker 配置 `maxWorkers`）。
+- **目标与任务一样报告 版本 + 状态**：每个目标带 `status`（🟢 active 进行中 / 🟡 paused 将军暂停 / ✅ done 链任务全部验收完成自动收尾 / ✕ canceled 将军取消）与自增 `version`（乐观锁，状态每次变更 +1）；中央目标卡按目标逐行列出 objective、状态徽标、`vN` 与各自链进度（done/total/percent），行内 ⏸ 暂停 / ▶ 恢复 / ✕ 取消（`POST /api/goal/status`，仅将军；取消会同步取消该目标**未开工**的链任务，在办/待验收留给将军收尾）。
 - **验收标准 + 边界必带**：拆出的每个阶段任务都**自动生成验收标准与边界**（做什么/不做什么，按岗位模板 `team-hub/stage-standards.mjs`，如编码任务=满足验收并真实跑通 typecheck/build、不 push 不越权；需求阶段=逐条覆盖诉求并写清范围外事项）。任务详情、执行提示词、调度弹窗同步注入，杜绝「没标准就干、凭感觉验收」。手动建任务（`POST /api/create`）留空同样自动注入，可传自定义 `acceptance`/`boundary` 覆盖；服务启动时会为历史在途目标链任务自动补种。
-- 目标进度（done/total/percent）显示在中央目标卡与场景进度环。
+- 目标进度（done/total/percent）显示在中央目标卡与场景进度环（未取消目标任务合计）。
 
 ### 3.5 任务调度与验收
 - 底部「🗓 任务调度」→ 中枢调度弹窗：全部任务按状态分组 + 统计条；待验收任务默认展开（打回/通过引导）；任务行可点进详情。
 
 ### 3.6 自动交接（守护全自动流水线，含写码）
 - **任何 agent 环节产生的任务自动交接给对应岗位 agent 实现**：守护（scrum-worker）每 `intervalMs` 扫单，凡「角色在流水线（roles.json 8 岗）、依赖已解除、未被将军拦截、未全局暂停」的 todo/blocked 任务，即自动认领并按该岗位派 AI 执行；上一环验收 done → 下一环自动解锁、下轮自动接管，需求→方案→拆解→用例→编码→审查→测试→部署自动流转。
-- **方案/设计类阶段有人工闸门**：roles.json 里配了 `gate` 的阶段（当前 = **方案搜索 researcher**）完成并合入主分支后**停在 🟡 in_review**，且要求交付的产物文档（`artifact`，方案搜索 = `docs/RESEARCH.md`）必须存在；**将军确认方案后才流转**：✓ 验收通过 → 守护自动流转到「任务实施方案构建 + 任务拆解」；↩ 打回附原因 → 士兵按反馈修订重做。需要其他阶段也人工把关时，在 roles.json 对应阶段加 `"gate": true`（可配 `"artifact"` 强制产物文档）。
+- **方案/设计类阶段有人工闸门**：roles.json 里配了 `gate` 的阶段（当前 = **需求澄清 requirement + 方案搜索 researcher**）完成并合入主分支后**停在 🟡 in_review**，且要求交付的产物文档（`artifact`，需求 = `docs/REQUIREMENTS.md`、方案 = `docs/RESEARCH.md`）必须存在；**将军确认后才流转**：✓ 验收通过 → 守护自动流转到下一阶段；↩ 打回附原因 → 士兵按反馈修订重做。需要其他阶段也人工把关时，在 roles.json 对应阶段加 `"gate": true`（可配 `"artifact"` 强制产物文档）。
+- **分析产物文档按目标隔离（多目标并行不互踩）**：新发布目标自带目标级文档目录 `docs/<goalId>/`，该目标的分析阶段文档（REQUIREMENTS/RESEARCH/TASK_BREAKDOWN/TEST_CASES/TEST_REPORT/DEPLOY）全部写入/读取**自己目标的目录**，不同目标各写各的目录 → 跨目标分析前缀可安全并行，不再共用根 `docs/` 固定槽位互相覆盖（守护会在派工提示词注入目标文档目录行并改写产物路径，gate 校验/切片展开/用例引用同步按目标目录解析）；`docsDir` 上线前已发布的目标（遗留链）仍沿用根 `docs/` 槽位，行为不变（详见 `docs/ORCHESTRATION-V3.md §12`）。
 - **将军干预（任意时刻）**：
   - 🖐 **拦截 / 🚀 放行**（任务详情与调度台，`POST /api/hold`）：拦截后守护不再认领/执行该任务，直到放行；
   - 🔁 **转派**：任务 soldier 与 role 一并改为目标岗位（转派给流水线外岗位则成为人工托管任务）——转派后仍由对应 agent 自动接管执行；
@@ -190,7 +192,7 @@ patch 里**必须显式给** `legionDir: 'D:/project/DSH/legion'`——pnpm 对 
 | --- | --- |
 | 任务 | `GET /api/board?scope=` · `GET /api/task?id=` · `POST /api/create /claim /transition /advance /reassign /release-stale /comment /heartbeat` |
 | 审计 | `POST /api/patch`（结构化：files[{path,status,add,del}]+diff）· `POST /api/review-notes`（任务/文件批注 ok/issue/clear）· `GET /api/overlaps?scope=&id=`（跨任务改动重叠，L3） |
-| 目标 | `GET /api/goal?scope=` · `POST /api/goal`（upsert + 自动建链） |
+| 目标 | `GET /api/goal?scope=`（多目标列表，含 status/version/各自链进度） · `POST /api/goal`（每次新建一个目标 + 独立链） · `POST /api/goal/status`（暂停/恢复/收尾/取消，仅将军） |
 | 进展 | `GET /api/activity?scope=|taskId=|limit=`（审计时间线） |
 | 空间/编队 | `GET /api/spaces`（含仓库绑定 `localDir`/`remoteUrl`） `/api/roster?scope= /api/agents` · `POST /api/spaces /api/spaces/{id}/agents /api/agents` |
 | 技能 | `GET /api/skills` · `POST /api/skills/register /review /grant` |
@@ -226,7 +228,7 @@ patch 里**必须显式给** `legionDir: 'D:/project/DSH/legion'`——pnpm 对 
 | 页面打开但没数据 / 显示旧界面 | `:5173` 托管构建产物：改前端后需 `pnpm build` 再刷新；旧标签页 `Ctrl+F5` 强刷 |
 | 「🧭 中枢」不可达 | team-hub 没起：`node team-hub\server.mjs`（:8787）；可改/清中枢地址（存 localStorage） |
 | 发布目标没反应 | 需中枢可达 + 已选**具体**空间（不是「全部空间」） |
-| 任务不刷新 | 任务集靠 board 变化 + 15s 轮询；roster/目标/模型配置依赖空间切换刷新 |
+| 任务/目标不刷新 | 任务集与目标卡靠 board 变化 + 15s 轮询自动刷新（目标自动收尾/进度随任务推进更新）；roster/模型配置依赖空间切换刷新 |
 | 写操作报「缺少操作者身份 by」 | 直连 API 测试时漏带 `by`（workbench 会自动补 `by:'general'`） |
 | 智能体点不出任务 | 确认中枢模式 + 该角色有任务；页面是旧产物时强刷 |
 | git push 连不上 | 全局代理指向 `127.0.0.1:7897`（可能未运行）：`git -c http.proxy= -c https.proxy= push origin main` |

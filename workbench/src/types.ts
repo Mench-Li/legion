@@ -181,9 +181,36 @@ export interface RosterResponse {
   agents: RosterAgent[]
 }
 
-/** team-hub v2 工作空间目标（objective + 该空间任务进度）。 */
+/** 目标状态生命周期（与任务一致地报告 status）：active 进行中 / paused 将军暂停 / done 链完成 / canceled 将军取消。 */
+export type GoalStatus = 'active' | 'paused' | 'done' | 'canceled'
+
+/** team-hub v2 工作空间目标（多目标并发模型：一行一个目标记录）。 */
+export interface HubGoal {
+  id: string
+  scope: string
+  objective: string
+  status: GoalStatus
+  /** 目标级乐观锁版本（每次状态/内容变更 +1），界面展示 vN。 */
+  version: number
+  /** 建链模式：chain 全串阶段链 / slice 切片前缀链。 */
+  mode: string
+  /** 目标级共享上下文（markdown）：同目标衍生任务共享的"目标级订单"；更新 bump contextVersion，下一派工对齐。 */
+  context: string
+  /** 目标上下文版本（每次更新 +1）。 */
+  contextVersion: number
+  createdAt: string | null
+  updatedAt: string | null
+  endedAt: string | null
+  /** 该目标链任务实时进度（canceled 链任务不计）。 */
+  done: number
+  total: number
+  percent: number
+}
+
+/** GET /api/goal 返回：该空间全部目标 + 未取消目标的进度合计（objective 兼容字段 = 最新 active 目标）。 */
 export interface GoalInfo {
   scope: string
+  goals: HubGoal[]
   objective: string | null
   done: number
   total: number
@@ -230,6 +257,8 @@ export interface HubActivity {
   action: string
   taskId: string | null
   detail: Record<string, unknown>
+  /** 事件归属的目标 id（目标事件与带 goalId 任务事件都有；per-goal 活动分组用）。 */
+  goalId?: string | null
 }
 
 /** 目录浏览（workbench 自带 /api/fs，同源；照搬 DSH 工作空间的选文件夹逻辑）。 */

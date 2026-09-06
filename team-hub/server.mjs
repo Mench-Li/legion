@@ -19,6 +19,12 @@
  *   GET  /api/spaces                               工作空间列表（注册名 + private + 仓库绑定 localDir/remoteUrl）
  *   POST /api/spaces                               注册/更新工作空间（id/name/private/localDir/remoteUrl；幂等 upsert）
  *   POST /api/spaces/delete                        删除工作空间及 scope 数据（body: id + confirm=`delete-space:<id>`；拒绝 software/default）
+ *   GET  /api/goal?scope=                          目标列表（**多目标并发模型**：scope 全部目标，每目标含 id/objective/
+ *                                                   status(active|paused|done|canceled)/version/mode/docsDir + 按该目标链任务算的进度）
+ *                                                   docsDir = 目标级分析文档目录（docs/<goalId>；NULL = 遗留目标沿用根 docs/ 槽位）
+ *   POST /api/goal                                发布目标：每次**新建**一个目标并生成其独立阶段任务链（不取消既有目标/旧链）
+ *   POST /api/goal/status                         目标状态迁移 {id,status}（active↔paused；done/canceled 终态；仅将军）
+ *   POST /api/goal/slices                         切片展开（守护在 test-designer done 后注册切片束，幂等）
  *   GET  /api/activity?limit=                      最近动态（审计）
  *   GET  /api/members                              成员在线状态
  *   GET  /api/events                               SSE 事件流
@@ -150,15 +156,63 @@ db.exec(`
   if (!spaceCols.includes('local_dir')) db.exec("ALTER TABLE spaces ADD COLUMN local_dir TEXT DEFAULT ''")
   if (!spaceCols.includes('remote_url')) db.exec("ALTER TABLE spaces ADD COLUMN remote_url TEXT DEFAULT ''")
 }
-// 空间目标（goal）：每个工作空间一个 objective，任务集围绕它推进。
+// 空间目标（goal）：一个工作空间可**并存多个目标**（多目标并发，互不取消），任务集围绕各自目标推进。
+// 每行 = 一个目标记录：
+//   id        目标唯一标识（G-xxx）
+//   scope     所属工作空间
+//   objective 目标文案
+//   status    状态生命周期：active 进行中 / paused 将军暂停 / done 链任务全部完成(自动或将军收尾) / canceled 将军取消
+//   version   目标级乐观锁版本（每次状态/内容变更 +1），界面与任务一样报告 version + status
+//   mode      建链模式：chain 全串阶段链 / slice 切片前缀链（test-designer 后由守护展开切片束）
+//   docsDir   该目标**分析文档目录**（相对仓库根，如 'docs/G-x'）：阶段产物文档（REQUIREMENTS.md/RESEARCH.md/
+//             TASK_BREAKDOWN.md/TEST_CASES.md/TEST_REPORT.md/DEPLOY.md）的目标独立命名空间——
+//             不同目标写各自的目录，分析前缀阶段跨目标可安全并行（与切片文件域隔离同一思想）。
+//             NULL = 遗留目标（本列上线前发布）：沿用仓库根 docs/ 固定槽位，行为不变（旧链兼容）。
+//   endedAt   done/canceled 的终态时间
 db.exec(`
   CREATE TABLE IF NOT EXISTS goal (
-    scope TEXT PRIMARY KEY,
+    id TEXT PRIMARY KEY,
+    scope TEXT NOT NULL,
     objective TEXT NOT NULL,
+    status TEXT DEFAULT 'active',
+    version INTEGER NOT NULL DEFAULT 1,
+    mode TEXT DEFAULT 'chain',
     createdAt TEXT,
-    updatedAt TEXT
+    updatedAt TEXT,
+    endedAt TEXT,
+    docsDir TEXT
   )
 `)
+// 老库迁移：旧 goal 表是「scope 主键 + 单目标 upsert」，无 id/status/version。
+// 启动时若发现还是旧形状（无 id 列），重建为多目标模型：旧行逐一升级为独立目标记录（status=active）。
+{
+  const goalCols = db.prepare('PRAGMA table_info(goal)').all().map(c => c.name)
+  if (!goalCols.includes('id')) {
+    const legacy = db.prepare('SELECT scope, objective, createdAt, updatedAt FROM goal').all()
+    db.exec('DROP TABLE goal')
+    db.exec(`
+      CREATE TABLE goal (
+        id TEXT PRIMARY KEY,
+        scope TEXT NOT NULL,
+        objective TEXT NOT NULL,
+        status TEXT DEFAULT 'active',
+        version INTEGER NOT NULL DEFAULT 1,
+        mode TEXT DEFAULT 'chain',
+        createdAt TEXT,
+        updatedAt TEXT,
+        endedAt TEXT,
+        docsDir TEXT
+      )
+    `)
+    legacy.forEach((r, i) => {
+      const id = `G-${String(i + 1).padStart(3, '0')}`
+      const created = r.createdAt ?? now()
+      db.prepare('INSERT INTO goal (id, scope, objective, status, version, mode, createdAt, updatedAt, endedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(id, r.scope, r.objective, 'active', 1, 'chain', created, r.updatedAt ?? created, null)
+    })
+    if (legacy.length > 0) console.log(`[team-hub] goal 表迁移为多目标模型：${legacy.length} 条旧目标升级为独立目标记录（G-001…）`)
+  }
+}
 // 持续执行编排：每空间开关 + 用户点「派 AI 执行」的请求队列。
 db.exec(`
   CREATE TABLE IF NOT EXISTS exec_state (
@@ -315,6 +369,29 @@ ensureColumn('tasks', 'fixCount', 'fixCount INTEGER DEFAULT 0')
 ensureColumn('tasks', 'testReport', 'testReport TEXT')
 // 审计批注列（L2 审计工作台）：review_notes JSON = [{ file:'*'|相对路径, verdict:'ok'|'issue', note, by, at }]
 ensureColumn('tasks', 'review_notes', "review_notes TEXT DEFAULT '[]'")
+// 目标归属列（多目标并发）：链任务带 goalId 关联到具体目标（goal 表 id）。
+// 进度/取消按 goalId 统计——不同目标的任务链互不干扰、可并行推进。
+ensureColumn('tasks', 'goalId', 'goalId TEXT')
+// 目标级上下文（同一目标共享上下文，防任务并行"窜台"）：
+// 1) goal.context/contextVersion —— 目标上下文正文（markdown）+ 版本（更新 bump，下一派工对齐，语义同 v1 mesh orders）；
+// 2) tasks.fileDomain —— 切片文件域声明（JSON 数组，守护在 merge 前做越域机器校验，B 层防窜台）；
+// 3) audit.goalId —— 目标/任务事件的目标归属（per-goal 活动视图 /api/activity?goalId= 的数据源）。
+ensureColumn('goal', 'context', "context TEXT DEFAULT ''")
+ensureColumn('goal', 'contextVersion', 'contextVersion INTEGER DEFAULT 0')
+// 4) goal.docsDir —— 目标级分析文档命名空间（docs/<goalId>）：NULL = 遗留目标沿用根 docs/ 槽位。
+ensureColumn('goal', 'docsDir', 'docsDir TEXT')
+ensureColumn('tasks', 'fileDomain', 'fileDomain TEXT')
+ensureColumn('audit', 'goalId', 'goalId TEXT')
+// 历史链回填：老库「一空间一目标」时代的 [auto-goal] 任务没有 goalId。
+// 启动时把该空间**未取消**的自动目标链任务挂到本空间迁移后的目标记录上（老模型每空间至多一条 active 目标）。
+try {
+  const rows = db.prepare("SELECT id, scope FROM goal WHERE status != 'canceled'").all()
+  for (const g of rows) {
+    // 挂接全部未取消的自动目标链任务（含已 done——保证老链进度/自动收尾统计完整；canceled 属被替换的旧目标，不挂）
+    const updated = db.prepare("UPDATE tasks SET goalId = ? WHERE scope = ? AND goalId IS NULL AND description LIKE '%[auto-goal]%' AND status != 'canceled'").run(g.id, g.scope).changes
+    if (updated > 0) console.log(`[team-hub] 历史目标链回填 goalId：目标 ${g.id}（${g.scope}）挂接 ${updated} 个任务`)
+  }
+} catch { /* 回填失败不影响启动 */ }
 // 老链回填：已生成、未完成的自动目标链任务若没有验收标准/边界，按岗位模板补种，
 // 保证"生成任务的同时必须生成验收标准与边界（做什么/不做什么）"对历史在途任务也成立。
 try {
@@ -409,6 +486,8 @@ function rowToTask(row) {
     sliceIdx: row.sliceIdx ?? null,
     fixOf: row.fixOf ?? null,
     fixCount: row.fixCount ?? 0,
+    goalId: row.goalId ?? null,
+    fileDomain: parseJson(row.fileDomain, null),
     testReport: parseJson(row.testReport, null),
     reviewNotes: parseJson(row.review_notes ?? '[]', []),
     createdAt: row.createdAt,
@@ -434,6 +513,166 @@ function getTask(id) {
   return rowToTask(row)
 }
 
+// ── 多目标（goal）辅助：每目标独立记录 + 按 goalId 统计链进度 ──
+const GOAL_STATUSES = ['active', 'paused', 'done', 'canceled']
+/** 目标行 → API 对象。 */
+function rowToGoal(row) {
+  if (!row) return null
+  return {
+    id: row.id,
+    scope: row.scope,
+    objective: row.objective,
+    status: row.status,
+    version: row.version,
+    mode: row.mode ?? 'chain',
+    docsDir: row.docsDir ?? null,
+    context: row.context ?? '',
+    contextVersion: row.contextVersion ?? 0,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    endedAt: row.endedAt ?? null,
+  }
+}
+function getGoal(id) {
+  const row = db.prepare('SELECT * FROM goal WHERE id = ?').get(id)
+  if (!row) throw new Error(`未知目标 ${id}`)
+  return rowToGoal(row)
+}
+/** 目标的分析文档目录（相对仓库根）：有 docsDir（docs/<goalId>）用目标目录；遗留目标/未知目标返回 null（= 根 docs/ 固定槽位）。 */
+function goalDocDirOf(goalId) {
+  if (typeof goalId !== 'string' || goalId.length === 0) return null
+  try {
+    const g = getGoal(goalId)
+    return g.docsDir || null
+  } catch {
+    return null
+  }
+}
+/** 目标作用域下的阶段文档路径：docsDir 非空 → `${docsDir}/<文件>`；否则遗留 → `docs/<文件>`。 */
+function goalDocPathOf(goalId, filename) {
+  const dir = goalDocDirOf(goalId)
+  const base = String(filename).split('/').pop() || filename
+  return dir ? `${dir}/${base}` : `docs/${base}`
+}
+/** 目标链任务统计：该目标（goalId 关联）未取消任务的完成情况（canceled 链任务不计入分母）。 */
+function goalStats(goal) {
+  const rows = db.prepare("SELECT status, COUNT(*) AS c FROM tasks WHERE goalId = ? AND status != 'canceled' GROUP BY status").all(goal.id)
+  const done = rows.filter(r => r.status === 'done').reduce((a, r) => a + Number(r.c), 0)
+  const total = rows.reduce((a, r) => a + Number(r.c), 0)
+  return { done, total, percent: total > 0 ? Math.round((done / total) * 100) : 0 }
+}
+/** 目标行 + 实时统计（API 列表用）。 */
+function goalView(row) {
+  return { ...rowToGoal(row), ...goalStats(row) }
+}
+/** scope 的目标列表：active/paused 在前（新的在前），done/canceled 归档在后。 */
+function listGoals(scope) {
+  const rank = { active: 0, paused: 1, done: 2, canceled: 3 }
+  return db.prepare('SELECT * FROM goal WHERE scope = ?').all(scope)
+    .map(rowToGoal)
+    .sort((a, b) => (rank[a.status] - rank[b.status]) || String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? '')) || String(b.id).localeCompare(String(a.id)))
+}
+/** 目标自动收尾：active 目标若其链任务全部完成（total>0 且 done==total）→ done（记审计，终态时间）。 */
+function settleGoalsOfScope(scope, by = 'general') {
+  const active = listGoals(scope).filter(g => g.status === 'active')
+  let settled = 0
+  for (const g of active) {
+    const s = goalStats(g)
+    if (s.total > 0 && s.done === s.total) {
+      const at = now()
+      db.prepare("UPDATE goal SET status='done', version=version+1, updatedAt=?, endedAt=? WHERE id=? AND status='active'").run(at, at, g.id)
+      audit(by, scope, 'goal:done', g.id, { objective: g.objective }, g.id)
+      settled += 1
+    }
+  }
+  return settled
+}
+/** 目标 ID 分配：G-<毫秒时间戳36进制>-<进程内递增>，进程内/跨重启均不碰撞。 */
+let goalSeq = 0
+function nextGoalId() {
+  goalSeq += 1
+  return `G-${Date.now().toString(36)}-${goalSeq.toString(36)}`
+}
+
+/**
+ * 发布目标（多目标并发模型，POST /api/goal 的函数体）：
+ * 每次**新建**一个目标记录（active，version=1）+ 为该目标生成独立阶段任务链（链任务挂 goalId）。
+ * **不取消**该空间既有目标/旧链任务——目标并存、各自推进。返回 { goal, stages, mode, objective }。
+ * 目标级分析文档命名空间：新目标分配 docsDir = `docs/<goalId>`（阶段产物文档进目标独立目录，
+ * 跨目标分析前缀可安全并行）；本列上线前已发布的目标 docsDir=NULL，沿用根 docs/ 固定槽位（旧链兼容）。
+ */
+function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general') {
+  return withTx(() => {
+    const rawMode = mode === 'slice' ? 'slice' : 'chain'
+    const t = now()
+    const goalId = nextGoalId()
+    db.prepare('INSERT INTO goal (id, scope, objective, status, version, mode, createdAt, updatedAt, endedAt, docsDir) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(goalId, targetScope, objective.trim(), 'active', 1, rawMode, t, t, null, `docs/${goalId}`)
+    const chain = createGoalChain(goalId, targetScope, objective.trim(), rawMode)
+    // 记录实际生效的模式（slice 缺岗会回退 chain）
+    if (chain.mode !== rawMode) {
+      db.prepare('UPDATE goal SET mode=?, updatedAt=? WHERE id=?').run(chain.mode, now(), goalId)
+    }
+    audit(by, targetScope, 'goal:publish', goalId, { goal: goalId, objective: objective.trim(), mode: chain.mode, stages: chain.count }, goalId)
+    return { goal: goalView(getGoal(goalId)), stages: chain.count, mode: chain.mode, objective: objective.trim() }
+  })
+}
+
+/**
+ * 目标状态迁移（POST /api/goal/status 的函数体，仅将军）：
+ * active ↔ paused（暂停/恢复）；done / canceled 为终态（自动收尾或将军手动）。
+ * canceled 同步取消该目标**未开工**（backlog/todo/blocked）的链任务；在办/待验收留给将军收尾，不硬杀。
+ * 返回 { goal, changed, canceledTasks }。
+ */
+function setGoalState(id, to, by = 'general', forceGeneral = false) {
+  return withTx(() => {
+    if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
+    if (!GOAL_STATUSES.includes(to)) throw new Error(`status 必须是 ${GOAL_STATUSES.join('|')}`)
+    if (by !== 'general' && forceGeneral !== true) throw new Error('目标状态仅允许将军（by=general）变更')
+    const g = getGoal(id)
+    if (g.status === to) return { goal: goalView(g), changed: false, canceledTasks: 0 }
+    if (g.status === 'canceled') throw new Error(`目标 ${id} 已取消，不可再变更`)
+    if (to === 'active' && g.status !== 'paused') throw new Error(`只有 paused 的目标可恢复（当前 ${g.status}）`)
+    if (to === 'paused' && g.status !== 'active') throw new Error(`只有 active 的目标可暂停（当前 ${g.status}）`)
+    if (to === 'canceled' && g.status === 'done') throw new Error('已完成的目标无需取消（如需归档可直接忽略）')
+    const at = now()
+    const terminal = to === 'done' || to === 'canceled'
+    db.prepare('UPDATE goal SET status=?, version=version+1, updatedAt=?, endedAt=? WHERE id=?')
+      .run(to, at, terminal ? at : null, id)
+    let canceledTasks = 0
+    if (to === 'canceled') {
+      // 只取消未开工的链任务（in_progress/in_review 属于在办，交给将军收尾）
+      canceledTasks = db.prepare("UPDATE tasks SET status='canceled', version=version+1, updatedAt=? WHERE goalId=? AND status IN ('backlog','todo','blocked')").run(at, id).changes
+    }
+    const action = to === 'paused' ? 'goal:pause' : to === 'active' ? 'goal:resume' : to === 'done' ? 'goal:done' : 'goal:cancel'
+    audit(by, g.scope, action, id, { goal: id, objective: g.objective, canceledTasks }, id)
+    return { goal: goalView(getGoal(id)), changed: true, canceledTasks }
+  })
+}
+
+/**
+ * 更新目标级上下文（POST /api/goal/context 的函数体，仅将军）：
+ * 目标上下文 = 同目标所有衍生任务共享的"目标级订单"（objective 之外的设计约束/文件域地图/验收口径）。
+ * 更新 bump contextVersion（乐观锁 + 审计 + SSE）——语义 = 下一派工对齐（正在跑的 worker 不打断，
+ * 下一次派工把最新 context/版本注入提示词与镜像文件）。
+ */
+function setGoalContext(id, text, by = 'general', forceGeneral = false) {
+  return withTx(() => {
+    if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
+    if (typeof text !== 'string' || text.trim().length === 0) throw new Error('context 必须是非空字符串')
+    if (by !== 'general' && forceGeneral !== true) throw new Error('目标上下文仅允许将军（by=general）变更')
+    const g = getGoal(id)
+    if (g.status === 'done' || g.status === 'canceled') throw new Error(`目标 ${id} 已 ${g.status}，不可再更新上下文`)
+    const clean = text.trim()
+    const nextVersion = (g.contextVersion ?? 0) + 1
+    const at = now()
+    db.prepare('UPDATE goal SET context=?, contextVersion=?, updatedAt=? WHERE id=?')
+      .run(clean, nextVersion, at, id)
+    audit(by, g.scope, 'goal:context', id, { goal: id, contextVersion: nextVersion, chars: clean.length }, id)
+    return { goal: goalView(getGoal(id)), changed: true }
+  })
+}
+
 function assertUnblocked(t, force) {
   if (force) return
   const open = t.blockedBy.filter((b) => {
@@ -443,15 +682,27 @@ function assertUnblocked(t, force) {
   if (open.length > 0) throw new Error(`任务被未完成依赖阻塞：${open.join(', ')}（确认后加 force）`)
 }
 
-/** 写事务：BEGIN IMMEDIATE 串行化写 + 版本检查（乐观锁）。 */
+/** 写事务：BEGIN IMMEDIATE 串行化写 + 版本检查（乐观锁）。
+ *  支持嵌套：内层以 SAVEPOINT 实现（发布目标 publishGoalRecord 外层 + createGoalChain 内层等场景）。 */
+let txDepth = 0
 function withTx(mutate) {
-  db.exec('BEGIN IMMEDIATE')
+  const nested = txDepth > 0
+  const name = `tx_sp_${txDepth + 1}`
+  if (nested) db.exec(`SAVEPOINT ${name}`)
+  else db.exec('BEGIN IMMEDIATE')
+  txDepth += 1
   try {
     const result = mutate()
-    db.exec('COMMIT')
+    if (nested) db.exec(`RELEASE ${name}`)
+    else db.exec('COMMIT')
+    txDepth -= 1
     return result
   } catch (e) {
-    try { db.exec('ROLLBACK') } catch { /* 已回滚 */ }
+    try {
+      if (nested) { db.exec(`ROLLBACK TO ${name}`); db.exec(`RELEASE ${name}`) }
+      else db.exec('ROLLBACK')
+    } catch { /* 已回滚 */ }
+    txDepth -= 1
     throw e
   }
 }
@@ -461,11 +712,11 @@ function nextId() {
   return `T-${String((row?.c ?? 0) + 1).padStart(3, '0')}`
 }
 
-function audit(member, scope, action, taskId, detail) {
+function audit(member, scope, action, taskId, detail, goalId = null) {
   const seq = nextSeq++
-  db.prepare('INSERT INTO audit (seq, ts, member, scope, action, taskId, detail) VALUES (?, ?, ?, ?, ?, ?, ?)')
-    .run(seq, now(), member, scope, action, taskId, JSON.stringify(detail))
-  broadcastAudit({ seq, ts: now(), member, scope, action, taskId, detail })
+  db.prepare('INSERT INTO audit (seq, ts, member, scope, action, taskId, detail, goalId) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(seq, now(), member, scope, action, taskId, JSON.stringify(detail), goalId)
+  broadcastAudit({ seq, ts: now(), member, scope, action, taskId, goalId, detail })
   return seq
 }
 
@@ -1039,6 +1290,16 @@ function createTask(input) {
   return withTx(() => {
     const id = nextId()
     const std = taskStandards(input.role, input.acceptance, input.boundary)
+    // 目标归属回填：显式 goalId 优先；否则若带 slice 键（如 'T-004:S2' 或 devops 尾 'T-004'），
+    // 从切片前缀任务反查其 goalId —— 保证 fix 回炉/守护补建任务也挂到同一目标（per-goal 统计/上下文注入不漏）。
+    let goalId = typeof input.goalId === 'string' && input.goalId.length > 0 ? input.goalId : null
+    if (goalId === null && typeof input.slice === 'string' && input.slice.trim() !== '') {
+      const prefix = String(input.slice).split(':')[0].trim()
+      if (/^T-\d+$/.test(prefix)) {
+        const src = db.prepare('SELECT goalId FROM tasks WHERE id = ?').get(prefix)
+        if (src?.goalId) goalId = src.goalId
+      }
+    }
     const t = {
       id,
       title: input.title.trim(),
@@ -1065,6 +1326,8 @@ function createTask(input) {
       sliceIdx: input.sliceIdx ?? null,
       fixOf: input.fixOf ?? null,
       fixCount: input.fixCount ?? 0,
+      goalId,
+      fileDomain: Array.isArray(input.fileDomain) ? input.fileDomain.map(String).filter(Boolean) : null,
       createdAt: now(),
       updatedAt: now(),
     }
@@ -1074,9 +1337,9 @@ function createTask(input) {
     if (t.parent !== null && !db.prepare('SELECT 1 FROM tasks WHERE id=?').get(t.parent)) throw new Error(`父任务 ${t.parent} 不存在`)
     db.prepare(`
       INSERT INTO tasks (id, title, description, acceptance, boundary, priority, status, version, soldier, claimedRound, claimedAt,
-        ordersVersion, parent, role, scope, blocks, blockedBy, comments, evidence, patches, artifacts, slice, sliceIdx, fixOf, fixCount, createdAt, updatedAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, NULL, ?, ?, ?, ?, '[]', ?, '[]', '[]', '[]', '[]', ?, ?, ?, ?, ?, ?)
-    `).run(t.id, t.title, t.description, JSON.stringify(t.acceptance), JSON.stringify(t.boundary), t.priority, t.status, t.ordersVersion, t.parent, t.role, t.scope, JSON.stringify(t.blockedBy), t.slice, t.sliceIdx, t.fixOf, t.fixCount, t.createdAt, t.updatedAt)
+        ordersVersion, parent, role, scope, blocks, blockedBy, comments, evidence, patches, artifacts, slice, sliceIdx, fixOf, fixCount, goalId, fileDomain, createdAt, updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, NULL, ?, ?, ?, ?, '[]', ?, '[]', '[]', '[]', '[]', ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(t.id, t.title, t.description, JSON.stringify(t.acceptance), JSON.stringify(t.boundary), t.priority, t.status, t.ordersVersion, t.parent, t.role, t.scope, JSON.stringify(t.blockedBy), t.slice, t.sliceIdx, t.fixOf, t.fixCount, t.goalId, t.fileDomain ? JSON.stringify(t.fileDomain) : null, t.createdAt, t.updatedAt)
     return getTask(id)
   })
 }
@@ -1086,14 +1349,14 @@ function createTask(input) {
 // 故 requirement→需求讨论 / researcher→方案设计 / breaker→任务拆分 … 语义一一对应。
 const GOAL_STAGE_LABELS = ['需求讨论', '方案设计', '任务拆分', '用例设计', '代码开发', '代码审查', '测试验收', '发布部署']
 
-/** 建一个 [auto-goal] 任务行（chain / slice 展开共用）。返回新任务。 */
-function insertGoalTask({ title, description, acceptance, boundary, role, scope, blockedBy = [], status = 'todo', parent = null, slice = null, sliceIdx = null, fixOf = null, fixCount = 0, priority = 'high' }) {
+/** 建一个 [auto-goal] 任务行（chain / slice 展开共用）。goalId = 所属目标（多目标并发按目标挂接）。返回新任务。 */
+function insertGoalTask({ title, description, acceptance, boundary, role, scope, blockedBy = [], status = 'todo', parent = null, slice = null, sliceIdx = null, fixOf = null, fixCount = 0, priority = 'high', goalId = null, fileDomain = null }) {
   const id = nextId()
   db.prepare(`
     INSERT INTO tasks (id, title, description, acceptance, boundary, priority, status, version, soldier, claimedRound, claimedAt,
-      ordersVersion, parent, role, scope, blocks, blockedBy, comments, evidence, patches, artifacts, slice, sliceIdx, fixOf, fixCount, createdAt, updatedAt)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, NULL, 1, ?, ?, ?, '[]', ?, '[]', '[]', '[]', '[]', ?, ?, ?, ?, ?, ?)
-  `).run(id, title, description, JSON.stringify(acceptance), JSON.stringify(boundary), priority, status, parent, role, scope, JSON.stringify(blockedBy), slice, sliceIdx, fixOf, fixCount, now(), now())
+      ordersVersion, parent, role, scope, blocks, blockedBy, comments, evidence, patches, artifacts, slice, sliceIdx, fixOf, fixCount, goalId, fileDomain, createdAt, updatedAt)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, NULL, 1, ?, ?, ?, '[]', ?, '[]', '[]', '[]', '[]', ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, title, description, JSON.stringify(acceptance), JSON.stringify(boundary), priority, status, parent, role, scope, JSON.stringify(blockedBy), slice, sliceIdx, fixOf, fixCount, goalId, Array.isArray(fileDomain) ? JSON.stringify(fileDomain) : null, now(), now())
   return getTask(id)
 }
 
@@ -1104,15 +1367,15 @@ function insertGoalTask({ title, description, acceptance, boundary, role, scope,
  *   并带 [slice-mode] 标记；test-designer done 后由守护解析 TASK_BREAKDOWN.md →
  *   POST /api/goal/slices 展开「编码切片束」（coder_Si→tester_Si 微链 + devops 目标级收尾），
  *   切片之间无依赖 → coder_Si+1 编码与 tester_Si 测试天然并行（架构见 docs/ORCHESTRATION-V3.md）。
+ *
+ * 多目标并发：本函数**只新建**给定目标（goalId）自己的链，链任务全部挂 goalId；
+ * **不再取消**该空间其他目标/历史链的任务——目标并存、各自推进、互不干扰
+ * （将军可在指挥台按目标 暂停/恢复/取消 收尾）。
  */
-function createGoalChain(scope, objective, mode = 'chain') {
+function createGoalChain(goalId, scope, objective, mode = 'chain') {
   return withTx(() => {
-    const nowIso = now()
-    // 重置：取消该空间旧的「自动目标链」任务（未完成的，含旧 slice 任务），避免重复发布累积
-    const old = db.prepare("SELECT id FROM tasks WHERE scope = ? AND description LIKE '%[auto-goal]%' AND status NOT IN ('done','canceled')").all(scope)
-    for (const o of old) {
-      db.prepare("UPDATE tasks SET status='canceled', version=version+1, updatedAt=? WHERE id=?").run(nowIso, o.id)
-    }
+    const goal = getGoal(goalId)
+    if (goal.scope !== scope) throw new Error(`目标 ${goalId} 不属于空间 ${scope}`)
     const roster = db.prepare('SELECT role, name, kind, avatar FROM roster WHERE scope = ? ORDER BY sort, role').all(scope)
     const pipe = pipelineLabels()
     // slice 模式前置条件：编队含分析尾（test-designer）与构建岗位（coder/tester）；缺则回退 chain
@@ -1138,6 +1401,7 @@ function createGoalChain(scope, objective, mode = 'chain') {
         role: r.role,
         scope,
         blockedBy: prev ? [prev] : [],
+        goalId,
       })
       created.push({ id: task.id, role: r.role, label })
       prev = task.id
@@ -1177,6 +1441,10 @@ function expandGoalSlices({ testDesignerTaskId, slices, by }) {
     if (existing.length > 0) return { mode: 'slice', testDesignerTaskId: td.id, created: [], existed: existing.map(x => x.id) }
     if (!Array.isArray(slices) || slices.length === 0 || slices.length > 16) throw new Error('slices 必须是 1..16 个切片的数组')
     const objectiveLine = String(td.description ?? '').split('\n').find(l => l.startsWith('目标：')) ?? '目标：（见分析前缀任务）'
+    // 切片任务归属同一目标（沿用 test-designer 任务的 goalId；老链无 goalId 时为 null，不影响建链）
+    const goalId = td.goalId ?? null
+    // 测试用例文档按目标目录解析（docs/<goalId>/TEST_CASES.md；遗留目标回退根 docs/TEST_CASES.md）
+    const testCasesPath = goalDocPathOf(goalId, 'TEST_CASES.md')
     const created = []
     const testerIds = []
     slices.forEach((sli, idx) => {
@@ -1198,12 +1466,14 @@ function expandGoalSlices({ testDesignerTaskId, slices, by }) {
         blockedBy: [td.id],
         slice: sliceKey,
         sliceIdx: si,
+        goalId,
+        fileDomain: files,
       })
       // tester_Si：只测不修；验收 = 结构化 testReport（passed=true 才自动 done，D7' 机器闸门）
       const testerStd = sliceStandards('tester', [], [], ['不得修改任何源码/测试用例（只测不修）'])
       const tester = insertGoalTask({
         title: `【切片 S${si} 测试】${title.slice(0, 30)}`,
-        description: `[auto-goal]\n[slice-test]\n${objectiveLine}\n切片 S${si}：${title}\n要求：运行测试用例（docs/TEST_CASES.md 覆盖本切片的部分），只测不修；结构化回报 testReport={passed, failures:[{name,log,repro}]}。`,
+        description: `[auto-goal]\n[slice-test]\n${objectiveLine}\n切片 S${si}：${title}\n要求：运行测试用例（${testCasesPath} 覆盖本切片的部分），只测不修；结构化回报 testReport={passed, failures:[{name,log,repro}]}。`,
         acceptance: testerStd.acceptance,
         boundary: testerStd.boundary,
         role: 'tester',
@@ -1211,6 +1481,8 @@ function expandGoalSlices({ testDesignerTaskId, slices, by }) {
         blockedBy: [coder.id],
         slice: sliceKey,
         sliceIdx: si,
+        goalId,
+        fileDomain: files,
       })
       created.push(coder.id, tester.id)
       testerIds.push(tester.id)
@@ -1227,9 +1499,10 @@ function expandGoalSlices({ testDesignerTaskId, slices, by }) {
       scope: td.scope,
       blockedBy: testerIds,
       slice: td.id,
+      goalId,
     })
     created.push(devops.id)
-    audit(by, td.scope, 'goal:slices', td.id, { testDesignerTaskId: td.id, slices: slices.length, created: created.length })
+    audit(by, td.scope, 'goal:slices', td.id, { testDesignerTaskId: td.id, slices: slices.length, created: created.length }, goalId)
     return { mode: 'slice', testDesignerTaskId: td.id, created, devops: devops.id }
   })
 }
@@ -1454,8 +1727,9 @@ async function handle(req, res) {
           priority: body.priority, status: body.status, parent: body.parent, role: body.role,
           scope, ordersVersion: body.ordersVersion,
           blockedBy: body.blockedBy, slice: body.slice, sliceIdx: body.sliceIdx, fixOf: body.fixOf, fixCount: body.fixCount,
+          goalId: body.goalId, fileDomain: body.fileDomain,
         })
-        audit(by, scope, 'create', task.id, { title: task.title })
+        audit(by, scope, 'create', task.id, { title: task.title }, task.goalId)
         return task
       })
       return
@@ -1468,7 +1742,7 @@ async function handle(req, res) {
         const t = getTask(id)
         if (t.status !== 'in_progress') throw new Error(`仅 in_progress 任务可上报进度（当前 ${t.status}）`)
         db.prepare('UPDATE tasks SET claimedAt=?, updatedAt=?, version=version+1 WHERE id=?').run(now(), now(), id)
-        audit(by, t.scope, 'progress', id, { percent: Number.isFinite(Number(body.percent)) ? Number(body.percent) : 0 })
+        audit(by, t.scope, 'progress', id, { percent: Number.isFinite(Number(body.percent)) ? Number(body.percent) : 0 }, t.goalId)
         return getTask(id)
       })
       return
@@ -1501,7 +1775,7 @@ async function handle(req, res) {
         list.push({ by, at: now(), summary: typeof body.summary === 'string' ? body.summary.slice(0, 200) : '', files, diff })
         if (list.length > 40) list.splice(0, list.length - 40)
         db.prepare('UPDATE tasks SET patches=?, version=version+1, updatedAt=? WHERE id=?').run(JSON.stringify(list), now(), id)
-        audit(by, t.scope, 'patch', id, { files: files.map(f => f.path).join(',') })
+        audit(by, t.scope, 'patch', id, { files: files.map(f => f.path).join(',') }, t.goalId)
         return getTask(id)
       })
       return
@@ -1523,7 +1797,7 @@ async function handle(req, res) {
         if (verdict !== 'clear') others.push({ file, verdict, note, by, at: now() })
         db.prepare('UPDATE tasks SET review_notes=?, version=version+1, updatedAt=? WHERE id=?')
           .run(JSON.stringify(others), now(), id)
-        audit(by, t.scope, 'review-note', id, { file, verdict, note: note.slice(0, 200) })
+        audit(by, t.scope, 'review-note', id, { file, verdict, note: note.slice(0, 200) }, t.goalId)
         return getTask(id)
       })
       return
@@ -1541,7 +1815,7 @@ async function handle(req, res) {
         const list = parseJson(t.artifacts ?? '[]', [])
         list.push({ by, at: now(), kind, path, title: typeof body.title === 'string' ? body.title.slice(0, 120) : '' })
         db.prepare('UPDATE tasks SET artifacts=?, version=version+1, updatedAt=? WHERE id=?').run(JSON.stringify(list), now(), id)
-        audit(by, t.scope, 'artifact', id, { kind, path })
+        audit(by, t.scope, 'artifact', id, { kind, path }, t.goalId)
         return getTask(id)
       })
       return
@@ -1563,7 +1837,7 @@ async function handle(req, res) {
         if (!passed && failures.length === 0) throw new Error('passed=false 时必须给出 failures')
         const report = { passed, failures, summary: typeof body.summary === 'string' ? body.summary.slice(0, 2000) : '', at: now(), by }
         db.prepare('UPDATE tasks SET testReport=?, version=version+1, updatedAt=? WHERE id=?').run(JSON.stringify(report), now(), id)
-        audit(by, t.scope, 'test-report', id, { passed, failures: failures.length })
+        audit(by, t.scope, 'test-report', id, { passed, failures: failures.length }, t.goalId)
         return getTask(id)
       })
       return
@@ -1584,7 +1858,7 @@ async function handle(req, res) {
         const soldier = typeof body.soldier === 'string' && body.soldier.length > 0 ? body.soldier : by
         const ttl = typeof body.ttlMinutes === 'number' && Number.isInteger(body.ttlMinutes) && body.ttlMinutes > 0 ? body.ttlMinutes : undefined
         const task = claimTask(id, soldier, body.ifVersion, body.force === true, body.round, body.requestId, ttl)
-        audit(by, scope, 'claim', id, { soldier })
+        audit(by, scope, 'claim', id, { soldier }, task.goalId)
         return task
       })
       return
@@ -1596,7 +1870,8 @@ async function handle(req, res) {
         if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
         if (typeof to !== 'string' || to.length === 0) throw new Error('缺少参数 to')
         const task = transitionTask(id, to, by, body.ifVersion, body.force === true)
-        audit(by, scope, 'transition', id, { to })
+        audit(by, scope, 'transition', id, { to }, task.goalId)
+        if (task.goalId || task.status === 'done' || task.status === 'canceled') settleGoalsOfScope(task.scope) // 链收尾 → 目标自动 done
         return task
       })
       return
@@ -1606,7 +1881,8 @@ async function handle(req, res) {
         const id = body.id
         if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
         const task = advanceTask(id, by, body.ifVersion)
-        audit(by, scope, 'advance', id, {})
+        audit(by, scope, 'advance', id, {}, task.goalId)
+        settleGoalsOfScope(task.scope) // 推进 done → 目标自动收尾
         return task
       })
       return
@@ -1618,7 +1894,7 @@ async function handle(req, res) {
         if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
         if (typeof soldier !== 'string' || soldier.trim().length === 0) throw new Error('缺少参数 soldier')
         const task = reassignTask(id, soldier.trim(), by)
-        audit(by, scope, 'reassign', id, { soldier: soldier.trim() })
+        audit(by, scope, 'reassign', id, { soldier: soldier.trim() }, task.goalId)
         return task
       })
       return
@@ -1630,11 +1906,11 @@ async function handle(req, res) {
         const id = body.id
         if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
         const hold = body.hold === true
-        const t = db.prepare('SELECT status FROM tasks WHERE id = ?').get(id)
+        const t = db.prepare('SELECT status, goalId FROM tasks WHERE id = ?').get(id)
         if (!t) throw new Error(`未知任务 ${id}`)
         if (t.status === 'done' || t.status === 'canceled') throw new Error(`任务 ${id} 已 ${t.status}，不可拦截/放行`)
         db.prepare('UPDATE tasks SET hold=?, version=version+1, updatedAt=? WHERE id=?').run(hold ? 1 : 0, now(), id)
-        audit(by, scope, hold ? 'hold' : 'unhold', id, {})
+        audit(by, scope, hold ? 'hold' : 'unhold', id, {}, t.goalId)
         return getTask(id)
       })
       return
@@ -1669,7 +1945,7 @@ async function handle(req, res) {
         if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
         if (typeof text !== 'string' || text.trim().length === 0) throw new Error('缺少参数 text')
         const task = commentTask(id, by, text.trim(), body.isEvidence === true)
-        audit(by, scope, body.isEvidence === true ? 'evidence' : 'comment', id, {})
+        audit(by, scope, body.isEvidence === true ? 'evidence' : 'comment', id, {}, task.goalId)
         return task
       })
       return
@@ -1858,18 +2134,22 @@ async function handle(req, res) {
       return
     }
     if (req.method === 'GET' && path === '/api/goal') {
-      // 空间目标：objective + 按该空间任务实时算进度（done / 非 canceled 总数）。
+      // 目标列表（多目标并发模型）：scope 全部目标，每行 = 目标记录 + 按该目标链任务（goalId）实时算的进度。
+      // objective/done/total/percent = 汇总兼容字段（未取消目标的任务合计；objective = 最新 active 目标文案）。
       const scopeParam = url.searchParams.get('scope') ?? ''
-      const hit = scopeParam ? db.prepare('SELECT * FROM goal WHERE scope = ?').get(scopeParam) : undefined
-      const tasks = scopeParam ? listTasks({ scope: scopeParam }).filter(t => t.status !== 'canceled') : []
-      const done = tasks.filter(t => t.status === 'done').length
-      const total = tasks.length
+      if (scopeParam) settleGoalsOfScope(scopeParam) // 链全部完成 → 目标自动 done（幂等，只有状态变化才写）
+      const goals = scopeParam ? listGoals(scopeParam).map(goalView) : []
+      const counted = goals.filter(g => g.status !== 'canceled')
+      const done = counted.reduce((a, g) => a + g.done, 0)
+      const total = counted.reduce((a, g) => a + g.total, 0)
+      const latestActive = goals.find(g => g.status === 'active') ?? null
       json(res, 200, {
         scope: scopeParam,
-        objective: hit?.objective ?? null,
+        goals,
+        objective: latestActive?.objective ?? null,
         done, total,
         percent: total > 0 ? Math.round((done / total) * 100) : 0,
-        updatedAt: hit?.updatedAt ?? null,
+        updatedAt: latestActive?.updatedAt ?? null,
       })
       return
     }
@@ -2000,8 +2280,13 @@ async function handle(req, res) {
       const limit = Math.min(Number(url.searchParams.get('limit') ?? 50) || 50, 500)
       const scopeParam = url.searchParams.get('scope')
       const taskIdParam = url.searchParams.get('taskId')
+      const goalIdParam = url.searchParams.get('goalId')
       let rows
-      if (taskIdParam) {
+      if (goalIdParam) {
+        // per-goal 活动视图：goal 事件（audit.goalId）+ 该目标链任务的 task 事件（反查 tasks.goalId）。
+        rows = db.prepare(`SELECT * FROM audit WHERE goalId = ? OR (taskId IN (SELECT id FROM tasks WHERE goalId = ?)) ORDER BY seq DESC LIMIT ?`)
+          .all(goalIdParam, goalIdParam, limit)
+      } else if (taskIdParam) {
         rows = db.prepare('SELECT * FROM audit WHERE taskId = ? ORDER BY seq').all(taskIdParam)
       } else if (scopeParam) {
         rows = db.prepare('SELECT * FROM audit WHERE scope = ? ORDER BY seq DESC LIMIT ?').all(scopeParam, limit)
@@ -2010,6 +2295,7 @@ async function handle(req, res) {
       }
       json(res, 200, rows.map((r) => ({
         seq: r.seq, ts: r.ts, member: r.member, scope: r.scope, action: r.action, taskId: r.taskId,
+        goalId: r.goalId ?? null,
         detail: parseJson(r.detail, {}),
       })))
       return
@@ -2287,22 +2573,26 @@ async function handle(req, res) {
       return
     }
     if (req.method === 'POST' && path === '/api/goal') {
-      // 发布空间目标：每个工作空间一个 objective（upsert），并自动按编队生成阶段任务链分发给智能体。
+      // 发布目标（多目标并发）：每次都**新建**一个目标记录（G-xxx，status=active，version=1），
+      // 并为其生成独立阶段任务链（链任务全部挂 goalId）。**不取消**该空间既有目标/旧链任务——
+      // 多个目标可并存、各自的链由守护并行推进；将军可对单个目标 暂停/恢复/取消（/api/goal/status）。
       await handleWrite(req, res, (body, by, scope) => {
         const objective = body.objective
         if (typeof objective !== 'string' || objective.trim().length === 0) throw new Error('缺少参数 objective')
         const targetScope = typeof body.scope === 'string' && body.scope.trim().length > 0 ? body.scope.trim() : scope
-        const t = now()
-        db.prepare('INSERT INTO goal (scope, objective, createdAt, updatedAt) VALUES (?, ?, ?, ?) ON CONFLICT(scope) DO UPDATE SET objective=excluded.objective, updatedAt=excluded.updatedAt')
-          .run(targetScope, objective.trim(), t, t)
-        // 自动分解为阶段任务链（chain 全串 / slice 前缀链，见 ORCHESTRATION-V3）
-        const mode = body.mode === 'slice' ? 'slice' : 'chain'
-        const chain = createGoalChain(targetScope, objective.trim(), mode)
-        const tasks = listTasks({ scope: targetScope }).filter(x => x.status !== 'canceled')
-        const done = tasks.filter(x => x.status === 'done').length
-        audit(by, targetScope, 'goal:publish', null, { objective: objective.trim(), mode: chain.mode, stages: chain.count })
-        return { scope: targetScope, objective: objective.trim(), mode: chain.mode, done, total: tasks.length, percent: tasks.length > 0 ? Math.round((done / tasks.length) * 100) : 0, stages: chain.count }
+        return publishGoalRecord(targetScope, objective, body.mode === 'slice' ? 'slice' : 'chain', by)
       })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/goal/context') {
+      // 目标级上下文（同目标共享上下文）：仅将军；bump contextVersion；审计 + SSE。
+      // 语义 = 下一派工对齐：正在跑的 worker 不打断，下一次派工注入最新 context/版本（守护写镜像 docs/goals/<id>.md）。
+      await handleWrite(req, res, (body, by) => setGoalContext(body.id, body.text, by, body.forceGeneral === true))
+      return
+    }
+    if (req.method === 'POST' && path === '/api/goal/status') {
+      // 目标状态生命周期（仅将军）：active ↔ paused；done/canceled 终态（见 setGoalState）。
+      await handleWrite(req, res, (body, by) => setGoalState(body.id, body.status, by, body.forceGeneral === true))
       return
     }
     if (req.method === 'POST' && path === '/api/agents') {
@@ -2382,7 +2672,7 @@ async function handle(req, res) {
       eventClients.add(res)
       const recent = db.prepare('SELECT * FROM audit ORDER BY seq DESC LIMIT 30').all().reverse()
       for (const r of recent) {
-        res.write(`data: ${JSON.stringify({ seq: r.seq, ts: r.ts, member: r.member, scope: r.scope, action: r.action, taskId: r.taskId, detail: parseJson(r.detail, {}) })}\n\n`)
+        res.write(`data: ${JSON.stringify({ seq: r.seq, ts: r.ts, member: r.member, scope: r.scope, action: r.action, taskId: r.taskId, goalId: r.goalId ?? null, detail: parseJson(r.detail, {}) })}\n\n`)
       }
       const heartbeat = setInterval(() => res.write(':hb\n\n'), 15000)
       req.on('close', () => { clearInterval(heartbeat); eventClients.delete(res) })
@@ -2413,4 +2703,7 @@ if (isMain) {
   })
 }
 
-export { db, server, registerSkill, reviewSkill, listSkills, grantSkill, revokeSkill, getSkill }
+export { db, server, registerSkill, reviewSkill, listSkills, grantSkill, revokeSkill, getSkill,
+  publishGoalRecord, setGoalState, setGoalContext, listGoals, goalView, settleGoalsOfScope, createGoalChain,
+  goalDocDirOf, goalDocPathOf,
+  expandGoalSlices, createTask }

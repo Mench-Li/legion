@@ -1,0 +1,16 @@
+{
+  "queued": [
+    {
+      "id": "pending-001",
+      "title": "任务产物一键直达文件中心（查验闭环）",
+      "trigger": "G-mtolvlpy-1 当前链推进到 coder（T-099 进入 in_progress/in_review/done）后自动发布",
+      "rationale": "避免与当前链 requirement/researcher/breaker/test-designer 阶段写入 docs/REQUIREMENTS.md、docs/RESEARCH.md、docs/TASK_BREAKDOWN.md、docs/TEST_CASES.md 冲突；T-099 开工意味着这些分析文档已定稿不再被改写",
+      "scope": "software",
+      "mode": "chain",
+      "objective": "指挥台查验闭环：任务详情对阶段产物文档（需求 docs/REQUIREMENTS.md、方案 docs/RESEARCH.md 等 gate 产物）支持一键直达——点「在文件中心打开」自动切到文件中心并定位/预览该文件，取代现在只能看灰色路径文本、需手动去文件中心翻路径的体验。已知现状（代码证据，供澄清/方案参考）：① workbench/src/components/TaskDetailModal.tsx 审计区产物块只把 kind='url' 渲染成 <a>，文件类产物(path) 仅 <code> 静态文本（约 432-434 行）；② FilesView 仅在 App.tsx active==='files' 时挂载（约 418-419 行），不接收目标路径，无外部跳转入口；③ 阶段文档未登记产物：plugins/src/index.ts 的 recordArtifact 依赖 worker 报告带 artifact 字段，需考虑在 gate 阶段（requirement/researcher 完成）自动把 roles.json 的 artifact 路径登记为任务产物。验收口径（可测）：任务详情任一 gate 阶段任务（如 docs/REQUIREMENTS.md / docs/RESEARCH.md）上有可点击入口 → 点击后界面切到文件中心并直达该文件所在目录/直接预览，无需手动导航；登记产物在任务 artifacts 中可见。",
+      "decidedBy": "将军（用户确认：另立目标·串行推进）",
+      "decidedAt": "2026-09-06T04:00:00.000Z",
+      "status": "armed"
+    }
+  ]
+}

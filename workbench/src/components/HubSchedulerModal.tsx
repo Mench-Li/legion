@@ -39,6 +39,11 @@ function askOpen(t: HubTask): boolean {
 /** 审计动作 → 进展文案（小时间线）。 */
 const ACTION_TEXT: Record<string, string> = {
   'goal:publish': '🎯 目标发布（自动建链）',
+  'goal:pause': '⏸ 目标暂停',
+  'goal:resume': '▶ 目标恢复',
+  'goal:done': '✅ 目标收尾',
+  'goal:cancel': '✕ 目标取消',
+  'goal:context': '📄 目标上下文更新',
   claim: '🔒 认领开工',
   transition: '🔄 状态变更',
   advance: '⏩ 推进完成',

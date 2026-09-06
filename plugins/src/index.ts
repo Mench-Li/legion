@@ -148,6 +148,23 @@ interface Task {
   fixCount?: number
   /** tester 结构化报告（D7' 机器闸门输入）：{passed, failures[], summary, at, by}。 */
   testReport?: { passed: boolean; failures?: Array<{ name: string; log: string; repro: string }>; summary?: string; at?: string; by?: string } | null
+  /** 所属目标（多目标并发归属）：chain/slice 链任务与 fix 回炉/守护补建任务都挂（goal 表 id，如 G-xxx）。 */
+  goalId?: string | null
+  /** 切片文件域声明（JSON 数组，相对仓库根的路径/目录前缀）：merge/promote 前越域机器校验用；无声明 = 不限制。 */
+  fileDomain?: string[] | null
+}
+
+/** 目标上下文（同目标共享上下文，守护派工时注入 + 写镜像供士兵读文件）。 */
+interface GoalCtx {
+  id: string
+  scope: string
+  objective: string
+  status: string
+  mode?: string
+  /** 目标级分析文档目录（相对仓库根，如 'docs/G-x'）：NULL/缺省 = 遗留目标沿用根 docs/ 固定槽位。 */
+  docsDir?: string | null
+  context: string
+  contextVersion: number
 }
 
 /** 多角色流水线中的一个阶段（角色）。 */
@@ -183,6 +200,8 @@ interface WorkerReport {
   artifact: WorkerArtifact | null
   /** 仅切片测试士兵（tester，D7' 机器闸门）回报：结构化测试结果。 */
   testReport?: { passed: boolean; summary?: string; failures?: Array<{ name: string; log: string; repro: string }> } | null
+  /** 可选：执行时所依据的目标上下文（goalId + contextVersion，守护据此核对"下一派工对齐"语义）。 */
+  goalRef?: { goalId?: string; contextVersion?: number } | null
 }
 
 /** worker 产物（借鉴 dsh-worktable 的 widget-result.json 握手：html 看板 iframe 预览、file 链接、url 跳转）。 */
@@ -250,6 +269,14 @@ const WORKER_SCHEMA: ObjectJsonSchema = {
         },
       },
       required: ['passed'],
+      additionalProperties: false,
+    },
+    goalRef: {
+      type: 'object',
+      properties: {
+        goalId: { type: 'string' },
+        contextVersion: { type: 'number' },
+      },
       additionalProperties: false,
     },
   },
@@ -378,6 +405,31 @@ export function apply(ctx: AppContext, config: Config): void {
   /** 切片展开重试退避：tdId → 上次「TASK_BREAKDOWN.md 未就绪/注册失败」时间（防每轮空转重试） */
   const expandRetryAt = new Map<string, number>()
   const inflight = new Set<string>()
+  /** 本轮扫单的任务快照（runWorker 组装"目标下并行任务表"用；sweep 每次成功拉取后刷新）。 */
+  let lastTasks: Task[] = []
+  /** 目标级上下文缓存（每轮 sweep 从 hub /api/goal 刷新；拉取失败保留上轮）。 */
+  const goalCtxById = new Map<string, GoalCtx>()
+  /** 目标上下文镜像目录（相对仓库根）：守护派工时写入，供士兵以文件方式读取目标上下文。 */
+  const GOAL_MIRROR_DIR = 'docs/goals'
+
+  // ── 目标级分析文档命名空间（docs/<goalId>/）──
+  // 遗留惯例：各分析阶段把产物写进仓库根固定槽位（docs/REQUIREMENTS.md 等）→ 跨目标并行时互相覆盖/合入冲突。
+  // 目标化后：目标记录带 docsDir（如 'docs/G-x'），这些阶段文档改写到该目标自己的目录（与切片文件域隔离同一思想），
+  // 不同目标写不同目录 → 分析前缀阶段跨目标安全并行。docsDir 为空的遗留目标/无目标任务保持原根 docs/ 行为不变。
+  const GOAL_DOC_NAMES = ['REQUIREMENTS.md', 'RESEARCH.md', 'TASK_BREAKDOWN.md', 'TEST_CASES.md', 'TEST_REPORT.md', 'DEPLOY.md']
+  /** 把遗留槽位文档路径解析为该目标文档目录下的路径（无目标/无 docsDir → 原样遗留路径）。 */
+  const goalDocPath = (goal: GoalCtx | null | undefined, legacyPath: string | null | undefined): string => {
+    if (!legacyPath) return ''
+    const base = legacyPath.split('/').pop() || legacyPath
+    return goal?.docsDir ? `${goal.docsDir}/${base}` : legacyPath
+  }
+  /** 把角色提示词里出现的遗留 docs/X.md 槽位改写为该目标文档目录版本（无 docsDir 原样保留）。 */
+  const goalizePrompt = (text: string, goal: GoalCtx | null | undefined): string => {
+    if (!goal?.docsDir) return text
+    let out = text
+    for (const name of GOAL_DOC_NAMES) out = out.split(`docs/${name}`).join(`${goal.docsDir}/${name}`)
+    return out
+  }
   const controllers = new Set<AbortController>()
   /** 合入调解中（in_review merge-fail 自动处理）：同一时刻只允许一个调解，避免主仓库 git 合并态互相踩踏。 */
   const mediating = new Set<string>()
@@ -888,6 +940,100 @@ exit 0
     return buildNormSections({ globalText: normsGlobalText, files: readRepoNormsFiles() })
   }
 
+  /** 归一化相对路径（\\ → /，去 ./，去空白）。 */
+  const normRelPath = (p: string): string => String(p).replace(/\\/g, '/').replace(/^\.\//, '').trim()
+
+  /** 所有目标/任务都可写的"共享域"前缀（守护写目标镜像 docs/goals/；其余改动必须落在任务声明文件域内）。 */
+  const SHARED_WRITE_PREFIXES = ['docs/goals/']
+
+  /** 本轮目标缓存的并行任务行（同目标、非本任务、未取消；含切片键与文件域）。 */
+  function goalSiblingLines(goalId: string, selfId: string): string[] {
+    const out: string[] = []
+    for (const s of lastTasks) {
+      if (s.goalId !== goalId || s.id === selfId || s.status === 'canceled') continue
+      const dom = Array.isArray(s.fileDomain) && s.fileDomain.length > 0 ? `（文件域：${s.fileDomain.join(', ')}）` : ''
+      out.push(`- ${s.id}｜${s.role ?? s.soldier ?? '?'}｜${s.status}${s.slice ? `｜${s.slice}` : ''}${dom}`)
+      if (out.length >= 60) break
+    }
+    return out
+  }
+
+  /** 把 docs/goals/ 加入仓库本地忽略（.git/info/exclude）：镜像 = 运行期产物，绝不能被 worker 的 git add -A 带进提交/合入。 */
+  async function ignoreGoalMirrorDir(cwd: string): Promise<void> {
+    try {
+      const top = await runGit(cwd, ['rev-parse', '--show-toplevel'])
+      if (top.code !== 0 || top.out.trim() === '') return
+      const exclude = join(top.out.trim(), '.git', 'info', 'exclude')
+      const existing = existsSync(exclude) ? readFileSync(exclude, 'utf8') : ''
+      if (existing.includes('docs/goals/')) return
+      writeFileSync(exclude, `${existing.replace(/\s*$/, '')}\n# legion 目标上下文镜像（运行期产物，不入库）\ndocs/goals/\n`, 'utf8')
+    } catch { /* 非 git 目录或不可写：忽略失败，镜像仍写出供阅读 */ }
+  }
+
+  /** 把目标上下文镜像写入 worker 工作目录 docs/goals/<goalId>.md（权威源 = hub，此文件供士兵以文件读取，勿手改）。 */
+  async function writeGoalContextMirror(goal: GoalCtx, cwd: string): Promise<string | null> {
+    try {
+      const file = join(cwd, GOAL_MIRROR_DIR, `${goal.id}.md`)
+      const body = typeof goal.context === 'string' ? goal.context : ''
+      const sib = goalSiblingLines(goal.id, '')
+      const lines = [
+        `# 目标 ${goal.id} 共享上下文（版本 v${goal.contextVersion ?? 0}）`,
+        '',
+        `- scope：${goal.scope}`,
+        `- objective：${goal.objective}`,
+        `- status：${goal.status} · mode：${goal.mode ?? 'chain'}`,
+        '',
+        '> 本文件是守护派工时的镜像（权威源 = team-hub /api/goal）。士兵只读；将军更新上下文请走指挥台/端点，勿直接改本文件。',
+        '',
+      ]
+      if (body !== '') lines.push('## 目标上下文', '', body, '')
+      if (sib.length > 0) lines.push('## 目标下并行任务快照（派工时刻）', '', ...sib, '')
+      mkdirSync(dirname(file), { recursive: true })
+      writeFileSync(file, lines.join('\n'), 'utf8')
+      await ignoreGoalMirrorDir(cwd)
+      return file
+    } catch (e) {
+      log(`目标上下文镜像写入失败（${goal.id}）：${String(e)}`)
+      return null
+    }
+  }
+
+  /** 从 hub 拉取本 scope 的目标列表（含 context/contextVersion），刷新 goalCtxById 缓存。失败保留上轮缓存。 */
+  async function fetchGoals(): Promise<void> {
+    if (!useHub) return
+    try {
+      const res = await fetch(`${hubUrl}/api/goal?scope=${encodeURIComponent(scope)}`)
+      if (!res.ok) return
+      const data = await res.json().catch(() => null) as { goals?: GoalCtx[] } | null
+      if (!data || !Array.isArray(data.goals)) return
+      goalCtxById.clear()
+      for (const g of data.goals) goalCtxById.set(g.id, g)
+      if (goalCtxById.size > 0) log(`目标上下文同步：${[...goalCtxById.keys()].join(', ')}（${goalCtxById.size} 个）`)
+    } catch (e) {
+      log(`目标上下文拉取失败（保留上轮缓存）：${String(e)}`)
+    }
+  }
+
+  /** 任务分支 w/<id> 相对当前主分支改动的文件清单（merge 前越域校验用）。 */
+  async function changedFilesOfBranch(t: Task): Promise<string[]> {
+    const root = repoRootFor()
+    const headRef = (await runGit(root, ['rev-parse', '--abbrev-ref', 'HEAD'])).out.trim() || 'HEAD'
+    const diff = await runGit(root, ['diff', '--name-only', headRef, `w/${t.id}`])
+    return diff.out.split('\n').map(s => normRelPath(s)).filter(Boolean)
+  }
+
+  /** 越域文件判定：改动文件必须在任务声明的文件域（含其目录前缀）或共享域内。 */
+  function outsideDomainFiles(t: Task, changed: string[]): string[] {
+    const domain = (t.fileDomain ?? []).map(normRelPath).filter(Boolean)
+    if (domain.length === 0) return []
+    const allowed = new Set<string>()
+    for (const d of domain) { allowed.add(d); allowed.add(d.endsWith('/') ? d : `${d}/`) }
+    const ok = (f: string): boolean =>
+      SHARED_WRITE_PREFIXES.some(p => f === p || f.startsWith(p)) ||
+      [...allowed].some(a => f === a || f.startsWith(a))
+    return changed.filter(f => !ok(f))
+  }
+
   /** 解析 git numstat/name-status → 审计用结构化文件清单 [{path,status,add,del}]。 */
   function parseDiffFiles(numstatText: string, nameStatusText: string): Array<{ path: string; status: string; add: number; del: number }> {
     const stat = new Map<string, { add: number; del: number }>()
@@ -1049,6 +1195,7 @@ exit 0
           title, description, role: nextStage.role,
           parent: doneTask.id, priority: doneTask.priority, status: 'todo',
           by: config.role, scope: scope,
+          goalId: doneTask.goalId ?? undefined,
         }) as { id?: string }
       } else {
         res = await runTaskctl(config.scrumDir, [
@@ -1063,14 +1210,45 @@ exit 0
     }
   }
 
-  function buildWorkerPrompt(t: Task, feedback: Task['comments'], cwd: string, isolated: boolean, stage?: StageDef): string {
+  function buildWorkerPrompt(t: Task, feedback: Task['comments'], cwd: string, isolated: boolean, stage?: StageDef, goal?: GoalCtx | null, goalMirror?: string | null): string {
     const norms = readNormsSync() // 分层规范（R-2/S5）：全局层段 + 空间层段，顺序稳定
+    // 目标级共享上下文段：同目标所有衍生任务共享（objective + context vN + 并行任务快照），
+    // 语义 = 下一派工对齐（派工时刻拉取的最新版本；正在跑的 worker 不打断）。
+    const goalLines: string[] = []
+    if (goal !== null && goal !== undefined) {
+      const ctxBody = typeof goal.context === 'string' ? goal.context.trim() : ''
+      goalLines.push(
+        '',
+        `所属目标：${goal.id}（${goal.scope} · ${goal.status}${goal.mode ? ` · ${goal.mode}` : ''}）—— 本任务是该目标下的一个环节，与同目标其他任务共享下列目标上下文；不得把其他目标/其他任务的口径当作本任务的依据。`,
+        `目标（objective）：${goal.objective}`,
+        `目标上下文（contextVersion v${goal.contextVersion ?? 0}）：${ctxBody !== '' ? ctxBody.slice(0, 4000) : '（未填写）'}`,
+        `目标上下文镜像（全文按文件阅读，只读勿改）：${goalMirror ?? `docs/goals/${goal.id}.md`}`,
+      )
+      // 目标级分析文档目录：阶段产物文档按目标隔离（不同目标写各自目录，可跨目标并行）。有 docsDir 才注入。
+      if (goal.docsDir) {
+        goalLines.push(
+          `本目标分析文档目录：${goal.docsDir}/ —— 阶段产物链 REQUIREMENTS.md（需求）→ RESEARCH.md（方案）→ TASK_BREAKDOWN.md（拆解）→ TEST_CASES.md（用例）→ TEST_REPORT.md（测试报告）→ DEPLOY.md（部署），**只认本目录版本**。`,
+          '本阶段产出文档写入该目录，上游依据文档也从该目录读取；禁止读写仓库根 docs/ 或其他目标目录下的同名阶段文档（会与他人合入冲突）。REVIEW 意见不受此影响，仍写 docs/review/<任务ID>-REVIEW.md。',
+        )
+      }
+      const sib = goalSiblingLines(t.goalId ?? goal.id, t.id)
+      if (sib.length > 0) goalLines.push('目标下并行任务快照（同目标任务并行推进，只处理与本任务衔接，不越界替别人干活）：', ...sib)
+    }
+    // 文件域约束段：切片任务声明文件域，改动越域会被 merge 前机器闸门拦截（B 层防窜台）。
+    const domLines: string[] = []
+    if (t.fileDomain !== null && t.fileDomain !== undefined && t.fileDomain.length > 0) {
+      domLines.push(
+        '',
+        '文件域约束（机器校验）：只允许改动以下声明文件/目录（及其子路径），外加 docs/goals/ 镜像目录；',
+        ...t.fileDomain.map(f => `- ${f}`),
+      )
+    }
     const lines = [
       stage
         ? `你是军团士兵，当前角色「${stage.label}」（${stage.role}）。任务 ${t.id} 由你独立完成。`
         : `你是军团士兵 ${config.role}（守护循环派发的临时 worker），任务 ${t.id} 由你独立完成。`,
       '',
-      ...(stage ? [`角色职责（必须遵守）：${stage.prompt}`, ''] : []),
+      ...(stage ? [`角色职责（必须遵守）：${goalizePrompt(stage.prompt, goal)}`, ''] : []),
       `工作目录：${cwd}`,
       isolated ? `隔离模式：你在独立 git worktree（分支 w/${t.id}）中工作；不要 push（pre-push 已拦截）；改动只留在本 worktree，由将军验收后 promote 合并。若 w/${t.id} 已存在上一轮的部分改动（WIP 提交），请在其基础上继续完成，不要删除既有内容。` : '',
       `任务看板：${config.scrumDir}（taskctl 是唯一变更入口，但你不要调用它）`,
@@ -1118,6 +1296,8 @@ exit 0
       ...(spaceBinding !== null
         ? ['', `空间仓库绑定（本工作空间）：本地文件夹 = ${spaceBinding.localDir}${spaceBinding.remoteUrl ? `；远程仓库 = ${spaceBinding.remoteUrl}` : '（仅本地，不进共享仓库）'}`]
         : []),
+      ...(domLines),
+      ...(goalLines),
       '',
       '纪律：',
       '1. 只做实现与验证；状态迁移一律由守护负责。唯一允许调用的 taskctl 命令是 `taskctl progress <id> --by <角色> --percent <0-100> --note <一句话>`（上报进度遥测，不迁移状态）；其余 taskctl / task_* / 看板写接口一律禁止。',
@@ -1129,6 +1309,9 @@ exit 0
       '   {"status":"done","summary":"一句话总结","evidence":"验证证据（命令与输出要点）","blocker":"","artifact":null}',
       '   "artifact" 可选（无产物必须为 null）：{"kind":"html|file|url","path":"产物绝对路径（工作目录内）","title":"一句话标题"}——html 会进看板 iframe 预览，file/url 变成看板链接。',
       '   或 {"status":"blocked","summary":"已完成的部分","evidence":"","blocker":"卡在哪个文件/命令/什么报错（必须具体）","artifact":null}',
+      ...(goal !== null && goal !== undefined
+        ? ['   若上方含「所属目标」，报告 JSON 请再追加 "goalRef":{"goalId":"<目标ID>","contextVersion":<执行时依据的版本整数>}（仅用于版本对账，不改变报告语义）。']
+        : []),
       ...(stage?.role === 'tester' && t.slice != null && String(t.slice).includes(':S')
         ? [
             '',
@@ -1210,6 +1393,7 @@ exit 0
         description: `[auto-goal]\n[fix]\n目标：修复「${t.id}」切片测试失败（第 ${round} 轮回炉）。\n失败用例：\n${failText}\n\n修复纪律：定位根因修复，禁止改测试预期掩盖失败；完成后跑真实命令回归并给出证据。`,
         role: 'coder', status: 'todo', priority: 'high',
         parent: t.id, blockedBy: [], slice: t.slice, sliceIdx: t.sliceIdx, fixOf: t.id,
+        goalId: t.goalId ?? undefined, fileDomain: t.fileDomain ?? undefined,
         acceptance: [
           `复现并定位「${t.id}」报告中每个失败用例的根因`,
           '修复根因（不得通过修改测试用例 / 验收预期掩盖失败）',
@@ -1251,11 +1435,16 @@ exit 0
     const controller = new AbortController()
     controllers.add(controller)
     const timer = setTimeout(() => controller.abort(), config.workerTimeoutMs)
+    // 目标级上下文（同一目标共享上下文）：派工时刻取最新缓存（sweep 已刷新），
+    // 写镜像 docs/goals/<goalId>.md 到 worker 工作目录供士兵读文件，并把摘要内联进提示词。
+    const goal = t.goalId && t.goalId.length > 0 ? goalCtxById.get(t.goalId) ?? null : null
+    let goalMirror: string | null = null
+    if (goal !== null) goalMirror = await writeGoalContextMirror(goal, cwd)
     const run = await (async () => {
       try {
         return await ctx.subagents.start(config.provider, {
           label: `scrum:${t.id}`,
-          prompt: [{ type: 'text', text: buildWorkerPrompt(t, feedback, cwd, worktreeDir !== null, stage) }],
+          prompt: [{ type: 'text', text: buildWorkerPrompt(t, feedback, cwd, worktreeDir !== null, stage, goal, goalMirror) }],
           parent,
           signal: controller.signal,
           outputSchema: WORKER_SCHEMA,
@@ -1302,6 +1491,12 @@ exit 0
       return
     }
     const report = result.structured as WorkerReport
+    // 目标上下文版本对账（"下一派工对齐"语义，仅提示不阻断）：
+    // worker 声明了执行时依据的 contextVersion 但已落后 → 提醒将军本报告基于旧上下文，是否打回由将军定。
+    const goalRef = report.goalRef && typeof report.goalRef === 'object' ? report.goalRef : null
+    if (goal !== null && goalRef && goalRef.goalId === t.goalId && typeof goalRef.contextVersion === 'number' && goalRef.contextVersion < (goal.contextVersion ?? 0)) {
+      await safeComment(t.id, `ℹ️ 本报告基于目标上下文 v${goalRef.contextVersion}，目标现已更新至 v${goal.contextVersion}——如改动受旧上下文约束，请将军核对后决定是否打回重做（默认不自动重做，下一派工按新版本对齐）。`)
+    }
     // D7' 机器闸门：切片测试任务（tester + slice 键）走专用结算，不进入常规 advancePipeline 流转
     if (report.status === 'done' && stage?.role === 'tester' && t.slice != null && String(t.slice).includes(':S')) {
       await settleSliceTest(t, worktreeDir, report)
@@ -1313,6 +1508,18 @@ exit 0
       await recordPatch(t.id, worktreeDir, report.summary)
       if (report.artifact && report.artifact.path) await recordArtifact(t.id, report.artifact, worktreeDir)
       if (isPipeline && stage && stage.next) {
+        // 文件域机器闸门（B 层防窜台）：声明了文件域的切片任务，改动越出声明域 → 拦截合入转 in_review 等将军裁决。
+        if (worktreeDir !== null) {
+          const outside = outsideDomainFiles(t, await changedFilesOfBranch(t))
+          if (outside.length > 0) {
+            const domText = (t.fileDomain ?? []).join(', ') || '（未声明）'
+            await safeComment(t.id, `⛔ 文件域越界（合入被机器闸门拦截）：以下改动超出本切片声明文件域【${domText}】→ ${outside.slice(0, 30).join(', ')}${outside.length > 30 ? ` …共 ${outside.length} 个` : ''}。改动保留在分支 w/${t.id}，未合入主分支。请将军裁决：可接受 → 在评论里说明后由将军手动合入（git -C ${repoRootFor()} merge --no-ff w/${t.id}）或调整切片边界后重派；不可接受 → worktree remove --force ${worktreeDir} && git -C ${repoRootFor()} branch -D w/${t.id} 丢弃后重新派工。`)
+            await transitionTo(t.id, 'in_review')
+            activity('domain-block', t.id, `文件域越界 ${outside.length} 个文件，合入被机器闸门拦截`)
+            log(`${t.id} → in_review（文件域越界 ${outside.length} 个文件，机器闸门拦截合入）`)
+            return
+          }
+        }
         // 流水线中间阶段：自动合入主分支 → done → 流转下一角色；合入失败转 in_review 等人工，不静默丢产出
         const merged = worktreeDir !== null ? await autoPromote(t.id, worktreeDir) : true
         if (!merged) {
@@ -1328,16 +1535,18 @@ exit 0
           const gateNext = stageByRole.get(stage.next ?? '')
           // autoPromote 已把 w/<id> 合入主分支并删除 worktree——在此之后查 worktree 目录必然不存在，
           // 会误报「缺文档」并把任务错误地停在 in_review。改为检查合入后的主仓库根目录。
-          const docOk = stage.artifact === undefined || existsSync(join(repoRootFor(), stage.artifact))
+          // 目标级文档目录：有 docsDir 的目标在 <docsDir>/<artifact> 校验，遗留目标在仓库根 docs/ 校验。
+          const gateDoc = goalDocPath(goal, stage.artifact)
+          const docOk = gateDoc === '' || existsSync(join(repoRootFor(), gateDoc))
           if (!docOk) {
-            await safeComment(t.id, `⚠ ${stage.label}完成，但未找到要求交付的方案文档 ${stage.artifact}（应写入 worktree）。已停在 in_review，请人工检查：产出不完整可 ↩ 打回并说明，士兵会补全后重新提交。`)
+            await safeComment(t.id, `⚠ ${stage.label}完成，但未找到要求交付的方案文档 ${gateDoc}（应写入 worktree）。已停在 in_review，请人工检查：产出不完整可 ↩ 打回并说明，士兵会补全后重新提交。`)
             await transitionTo(t.id, 'in_review')
-            activity('blocked', t.id, `${stage.label}完成但缺少产物文档 ${stage.artifact}，转 in_review`)
-            log(`${t.id} → in_review（缺少 ${stage.artifact}）`)
+            activity('blocked', t.id, `${stage.label}完成但缺少产物文档 ${gateDoc}，转 in_review`)
+            log(`${t.id} → in_review（缺少 ${gateDoc}）`)
             return
           }
           await transitionTo(t.id, 'in_review')
-          await safeComment(t.id, `✅ ${stage.label}完成，方案文档 ${stage.artifact ?? `分支 w/${t.id}`} 已合入主分支。**请将军人工验收**：通过 → 任务详情「✓ 验收通过」，守护自动流转到「${gateNext?.label ?? stage.next}（${stage.next}）」；不通过 → ↩ 打回并附原因，士兵按反馈修订重做。\n要点：${report.summary}\n证据：${report.evidence}`)
+          await safeComment(t.id, `✅ ${stage.label}完成，方案文档 ${gateDoc || `分支 w/${t.id}`} 已合入主分支。**请将军人工验收**：通过 → 任务详情「✓ 验收通过」，守护自动流转到「${gateNext?.label ?? stage.next}（${stage.next}）」；不通过 → ↩ 打回并附原因，士兵按反馈修订重做。\n要点：${report.summary}\n证据：${report.evidence}`)
           activity('gate', t.id, `${stage.label}完成，待将军人工验收（闸门）`)
           log(`${t.id} → in_review（${stage.label} 人工闸门，待将军验收）`)
           return
@@ -1767,7 +1976,8 @@ exit 0
 
   /** 切片流水线编排（每轮扫单，仅 hub 模式）：
    * ① readyToExpand：分析前缀尾（test-designer done + [slice-mode]）且切片束尚未注册 →
-   *    解析已合入主分支的 docs/TASK_BREAKDOWN.md（breaker 机器可读切片清单）→ POST /api/goal/slices 注册
+   *    解析已合入主分支的 TASK_BREAKDOWN.md（目标目录 docs/<goalId>/ 或遗留根 docs/，breaker 机器可读切片清单）→
+   *    POST /api/goal/slices 注册
    *    （coder_Si→tester_Si 微链 + devops 目标级收尾；注册幂等，失败退避后重试）。
    * ② readyToRetest：tester 停在 in_review 且其 fix 回炉任务已全部合入 done（预算未用尽）→
    *    重开 tester（in_review→todo），下轮由 todo 认领重测——机器闸门闭环。
@@ -1782,7 +1992,9 @@ exit 0
     if (tdDone !== undefined) {
       const beamExists = sliced.some(x => x.slice === tdDone.id || String(x.slice ?? '').startsWith(`${tdDone.id}:S`))
       if (!beamExists && (expandRetryAt.get(tdDone.id) ?? 0) + config.intervalMs * 6 <= Date.now()) {
-        const bdPath = join(repoRootFor(), 'docs', 'TASK_BREAKDOWN.md')
+        // 拆解文档按目标目录解析：目标化目标在 docs/<goalId>/TASK_BREAKDOWN.md，遗留目标回退根 docs/TASK_BREAKDOWN.md。
+        const tdGoal = tdDone.goalId ? goalCtxById.get(tdDone.goalId) ?? null : null
+        const bdPath = join(repoRootFor(), goalDocPath(tdGoal, 'docs/TASK_BREAKDOWN.md'))
         let slices: Array<{ title: string; files: string[]; acceptance: string[] }> = []
         try {
           if (existsSync(bdPath)) slices = parseSlices(readFileSync(bdPath, 'utf8'))
@@ -2043,10 +2255,12 @@ exit 0
       let tasks: Task[]
       try {
         tasks = await listTasks()
+        lastTasks = tasks // 本轮任务快照：目标上下文注入的"并行任务表"数据源
       } catch (e) {
         log(`list 失败：${String(e)}`)
         return
       }
+      await fetchGoals() // 目标级上下文缓存刷新（失败保留上轮；含 context/contextVersion）
       const byId = new Map(tasks.map(t => [t.id, t]))
       const room = () => inflight.size < config.maxWorkers
       // 切片类型化槽位（advisory 并发上限；maxWorkers 仍是绝对上限）：

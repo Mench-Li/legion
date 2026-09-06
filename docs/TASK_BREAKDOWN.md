@@ -1,181 +1,160 @@
-# T-075 任务拆解：交付剩余 Legion 军团指挥团任务（第二批：三中心收尾 · 平台剩余功能）
+# T-097 任务拆解：四能力（跨空间技能共享 · 分层项目规范 · 移除空间 · 对话接入 AI 回复）
 
-> 角色：breaker（任务拆解）｜阶段：任务拆解｜执行任务：T-075（分支 w/T-075 独立 worktree，HEAD = 615465e promote T-074）
-> 上游：T-073 需求澄清（docs/REQUIREMENTS.md，唯一权威需求基线）→ T-074 方案搜索（docs/RESEARCH.md：决策域 J1~J9 一等推荐 + 新增闸门 G-8..G-14 + §11.1 按文件域切片建议）
-> 下游：test-designer（docs/TEST_CASES.md）→ 守护解析本文件「## slices」注册 coder_Si→tester_Si 微链 → 逐切片开发/测试 → devops 目标级收尾
-> 依据：LEGION.md 纪律、本任务验收标准与边界、REQUIREMENTS §4.2 不变量 I-1..I-10 / §5 需求 R-A1..R-C3、RESEARCH §11 一等选型与闸门 G-8..G-14（默认值即一等，将军未否决即按默认放行）。
+> 角色：breaker（任务拆解）｜阶段：任务拆解｜执行任务：T-097（分支 w/T-097 独立 worktree，HEAD = ba0372d promote T-096）
+> 上游：T-095 需求澄清（docs/REQUIREMENTS.md T-095 四项能力版，唯一权威需求基线）→ T-096 方案搜索（docs/RESEARCH.md 现文 = T-096 四能力方案报告，一等选型 K1-A..K10-A + 闸门 G-R1..G-R5）
+> 下游：守护解析本文件「## slices」注册 coder_Si → tester_Si 微链 → 逐切片开发/测试 → S12 集成回归锚定
+> 依据：LEGION.md 纪律、本任务验收标准与边界、T-095 REQUIREMENTS §5 R-1..R-4（AC-R1-1..9 / AC-R2-1..7 / AC-R3-1..6 / AC-R4-1..8）、§8 D-1..D-17（默认值即基线）、T-096 RESEARCH §12（11 条切片建议 + 闸门，默认值即一等，将军未否决即按默认放行）
 >
-> **取代关系**：本文档**取代**同文件 T-038 拆解（第一批「三中心从零建造」产物，其 S1~S8 已交付合入 main，仅遗留缺陷与收口在本批处理）。T-038 旧版经 git 历史回溯（`git log --follow docs/TASK_BREAKDOWN.md`）。本批范围/优先级/验收口径一律以 REQUIREMENTS.md 为准；方案细节以 RESEARCH.md 为准（本拆解不重复论证，只引用）。
+> **权威基线提醒（重要）**：工作树内 docs/REQUIREMENTS.md 已被另一 auto-goal 链（T-103「任务详情文档预览」）改写，**与本批四项能力无关，下游勿引用**；本批需求基线 = T-095 四项能力版，经 `git show 3c8f27d:docs/REQUIREMENTS.md` 可复核原文（本文 AC 编号均指向该版）。docs/RESEARCH.md 现文即 T-096 本批方案报告（含 §1.1 需求摘要与全部 [本地] 行号锚点；HEAD 代码与 3c8f27d 逐字节一致——本阶段实测 git diff 仅 docs 两文件变化）。
+>
+> **取代关系**：本文档**取代**同文件 T-075 拆解（三中心收尾批产物，其切片均已交付合入 main，仅历史留存）；旧版经 git 历史回溯（git log --follow docs/TASK_BREAKDOWN.md）。
 
-## 0. 结论速览
+## 0. 结论速览（TL;DR）
 
-- 拆解产物：**8 个切片（S1~S8）**，其中：
-  - **Part A 三中心收尾（P0/P1，必做 5 片）**：S1（serve.mjs 文件面 F1+F2）、S2（serve.mjs 浏览器后端 A3+A4）、S3（ChatView 会话守卫 A5）、S4（浏览器前端收口 A6 = 合入 w/T-051）、S8（集成回归锚定 A7/B3）。
-  - **Part B 平台剩余（P1，3 片，受闸门 G-13 = 将军 OQ-3 约束）**：S5（日程日历后端）、S6（日程日历前端）、S7（通知中心）。→ 若将军裁定 B1/B2 不纳入本批，请在验收本文档时评论说明，删除 S5/S6/S7 三行即可（守护按文件当前内容注册，S8 不受影响）。
-- 全批**零新增运行时依赖**（一等选型全部 Node 内置 / 自研 / 沿用 w/T-051）；第三方日历/通知/markdown 库一律不引入（闸门 G-14）。
-- **文件域纪律（并行合入安全的前提）**：同文件只允许 1 个切片持有；仅两处例外并靠**注册顺序 = 派工顺序（当前生产单 worker）**串行化：
-  - serve.mjs 串行链：**S1 → S2**（S2 blockedBy S1，同文件域）。
-  - 前端壳串行链：**S4 → S6 → S7**（三者均改 App.tsx，S6/S7 还改 Sidebar.tsx；S6 另需 S5 的后端 API 合入）。
-  - **禁止**在提升并发槽位后同时派工同文件域的相邻切片（详见 §2 与 §5 R-11）。
-- 决策闸门 G-8..G-14（RESEARCH §11.2）默认全部采纳：G-8 段级+realpath .git 复检且 list 默认隐藏嵌套 .git 条目；G-9 顶层整体 try/catch + URIError→400；G-10 web fetch 审计=本地 JSONL+console；G-11 错误码枚举常量表收口（三方对齐）；G-12 A6 沿用 w/T-051 合入；G-13 B1/B2 按将军 OQ-3（本拆解默认纳入并排在必做面之后）；G-14 不引入第三方库。
+- 拆解产物：**12 个切片（S1~S12）**，按需求分组：
+  - **R-1 跨空间共享技能（P0，3 片）**：S1 后端（listSkills scope:B 语义 + revokeSkill + review/grant/revoke general 门禁 + include=pending 收口 + 审计带目标空间）、S2 前端（共享视图/来源标识/授权与撤销 UI）、S3 守护缓存指纹刷新。
+  - **R-2 分层项目规范（P0，3 片）**：S4 后端（全局规范层 rules 表 + /api/rules + 审计/SSE，即 RESEARCH K3-A）、S5 解析注入（readNorms 两层合并 + agent.md 文件族 + 预算截断 + buildWorkerPrompt 双段，即 K4-A/K5-A）、S6 规范维护 UI + 职责总纲文档。
+  - **R-3 移除空间（P1，2 片）**：S7 后端（删除级联扩至 chat/calendar/members + 预检影响端点 + 测试，即 K6-A/K7-A 后端）、S8 前端（SpaceSettingsModal 危险区 type-to-confirm + 切回全部空间）。
+  - **R-4 对话 AI 回复（P0，3 片）**：S9 后端数据面（chat_reply_settings + awaiting 状态机 + 队列端点 + 超龄兜底）、S10 守护 chat-responder（扫单 → DSH 子代理 LLM 直答 → 落第二条消息，即 K8-A/K10-A）、S11 前端（ChatView 身份泛化 + AI 三态气泡）。
+  - **S12 四能力集成回归锚定**（docs/TEST_REPORT.md，收口验证，仿 T-075 S8 惯例）。
+- 全批**零新增运行时依赖**（一等选型全部 node:sqlite / node:http / Node fetch / EventSource / React / DSH 子代理通道，已在产线；禁网纪律不变）。
+- **文件域纪律（并行合入安全的前提）**：同一文件只允许 1 个切片并发持有；跨切片同文件场景全部**同文件硬串行**并以注册顺序保证（当前生产单 worker 按注册顺序派工，天然串行）：
+  - team-hub/server.mjs 链：**S1 → S4 → S7 → S9**（skills DAO/路由段 → rules 表段 → spaces 删除段 → chat 数据面段）；
+  - plugins/src/index.ts 链：**S3 → S5 → S10**（fetchSkills 段 → readNorms/buildWorkerPrompt 段 → responder 段）；
+  - workbench api.ts 与 App/Sidebar 壳链：**S2 → S6 → S8**（skills 段 → rules 段与「规范」面板接线 → deleteSpace 段与设置弹窗）。
+- **禁止**在提升并发槽位后同时派工同文件域的相邻切片（§2.2 给出可并行组合清单）。
 
-## 1. 机器可读切片清单（守护据此注册并行派工，逐行严格遵循）
+## 1. 机器可读切片清单（守护据此注册并行派工，逐行严格遵循：每行四段用 | 分隔，段内不再出现 |；第 2 段文件逗号分隔；第 4 段验收分号分隔）
 
 ## slices
-- S1 | serve.mjs 文件面加固：嵌套 .git 防护+畸形路径防崩溃（R-A1、R-A2） | workbench/scripts/serve.mjs, workbench/scripts/files-api.test.mjs | node --test workbench/scripts/files-api.test.mjs 全绿（新增嵌套 .git 矩阵：subrepo/.git/config 的 list/read/download/upload/mkdir/rename/delete 均 403 或拒绝，顶层 .git 对照仍拒绝，符号链接指向 .git 内部经 realpath 复检拒绝）;畸形 percent-encoding 注入（/api/files%zz 等）返回 400/404 且进程存活（同进程后续请求 200，≥10 并发畸形请求不崩，测试/脚本断言）;files-api.test.mjs 既有 34 例基线不回归;零新增运行时依赖（evidence 附 package.json 无新增项）
-- S2 | serve.mjs 浏览器后端：抓取审计留痕+body stall 归类（R-A3、R-A4） | workbench/scripts/serve.mjs, workbench/scripts/web.test.mjs, workbench/.gitignore | node --test workbench/scripts/web.test.mjs 全绿（既有 12 例基线不回归）;成功与失败（ssrf_blocked、timeout、too_large、http_<n>）抓取均留痕：web-audit.jsonl（静态 ROOT 之外）追加行含 url、finalUrl、status、耗时 ms、by=general;body stall 夹具（headers 已回、body 挂起）→ 响应 {ok:false, code:timeout}，整链超时同码，错误码枚举常量表收口（web.test 断言枚举含 timeout 等）;审计文件容量轮转生效且 workbench/.gitignore 含 data/ 条目;node --test workbench/scripts/files-api.test.mjs 仍全绿（serve.mjs 读面未破坏）
-- S3 | ChatView 会话/空间身份守卫（R-A5） | workbench/src/components/ChatView.tsx | pnpm build（workbench 目录）全绿（tsc --noEmit 零错误；EPERM 环境受限时记录复现步骤并附 tsc 结果）;评审+grep 证据：loadOlder/send 异步写回前比对发起时 convId 与 activeRef 当前值，不匹配仅复位 loading/sending 并丢弃合并，无无条件 setMsgs 残留;浏览器验收（serve.mjs 托管 + hub，:5173）：A/B 会话快速切换在途 loadOlder/send 不串显，切空间旧响应不回写，新建会话→发消息→第二标签 ≤15s 实时收到主路径无回归;零新增依赖（package.json 无变更）
-- S4 | 浏览器前端收口：合入 w/T-051 为 BrowserView（R-A6） | workbench/src/components/BrowserView.tsx, workbench/src/components/BrowserPanel.tsx, workbench/src/App.tsx | 合入（优先 cherry-pick a524951 或应用 git diff main...w/T-051；分支不可用按 RESEARCH §7 J6-B 重做）：BrowserView.tsx 存在、BrowserPanel.tsx 移除、App.tsx 浏览器分支渲染 BrowserView;pnpm build 全绿（受限时记录 EPERM 复现 + tsc 结果）;grep/评审：App.tsx 无 BrowserPanel 引用，BrowserView 以 isErrorResult 将 too_many_redirects/web_error/http_*/timeout 归错误态、errorText 全错误码映射、成功与失败可区分可重试;IME 中文输入中间态按 Enter 不触发抓取（评审关键行）；QuickTools「浏览网页」与侧栏「浏览器助手」进入同一面板（active=browser）;浏览器主路径冒烟（地址栏→正文/错误态）无回归
-- S5 | 日程日历后端：team-hub 扩表扩 API（R-B1 数据面，G-13 门） | team-hub/server.mjs, team-hub/calendar.test.mjs | node --test team-hub/chat.test.mjs 与 node --test team-hub/skills.test.mjs 全绿（既有模块不回归）;node --test team-hub/calendar.test.mjs 全绿（新增，临时库 import 不占端口）：calendar_events 建表幂等（旧库自动建表），GET /api/calendar/events（scope 过滤+日期窗）与 POST 创建（by 缺失 400、非法时间/超长标题拒绝、scope 隔离互不可见），写走 handleWrite 产生 audit（action=calendar:*）与 SSE 广播;curl 冒烟（临时 TEAM_HUB_DB+真端口）：POST 事件→GET 列表日期窗正确→/api/activity?scope= 可查 calendar:* 审计;零新增依赖（team-hub/package.json 无变更，仅 node:sqlite）
-- S6 | 日程日历前端：自研月视图面板+接线（R-B1 视图面，G-13 门） | workbench/src/components/CalendarView.tsx, workbench/src/App.tsx, workbench/src/components/Sidebar.tsx, workbench/src/index.css | pnpm build 全绿（受限时记录+tsc）;侧栏「日程日历」点击进入真实月视图面板（非 toast 占位）：当月 7×N 网格、今天高亮、可跨月切换，未选具体空间给引导（与对话中心一致）;最小闭环浏览器验收（:5173）：新建条目（标题+日期必填、时间可选）保存后网格出现，删除需二次确认，刷新后仍在（数据=GET /api/calendar/events，scope=当前空间）;切换空间事件随之切换互不串；hub 不可达/校验失败 toast 错误提示;条目文本纯文本渲染（grep 无 dangerouslySetInnerHTML 直插服务端数据）；chat/files/browser 面板无回归
-- S7 | 通知中心：audit 派生面板+接线（R-B2，G-13 门） | workbench/src/components/NotifyView.tsx, workbench/src/api.ts, workbench/src/App.tsx, workbench/src/components/Sidebar.tsx | pnpm build 全绿（受限时记录+tsc）;侧栏「通知中心」点击进入真实面板（非 toast 占位），badge 未读数 >0 显示，列表含时间/scope/来源 action，未读高亮、点击已读（localStorage per scope，刷新保持）;数据同源：列表=GET /api/activity（scope 过滤+action 白名单，chat:* 默认排除）+SSE /api/events 增量复用 subscribeHubAudit/既有端点，评审断言无第三数据源、无新增 hub 事件连接；已读不写 audit;任务/目标类通知点击跳转任务详情/对应面板（复用既有导航）；错误路径 toast;渲染安全（无 dangerouslySetInnerHTML 直插）+ chat/files/browser/calendar 面板无回归
-- S8 | 三中心集成回归锚定（R-A7、R-B3 仓库内可跑部分） | docs/TEST_REPORT.md | 逐套件运行并记录输出要点：node --test workbench/scripts/files-api.test.mjs、web.test.mjs、team-hub/chat.test.mjs、team-hub/skills.test.mjs、team-hub/calendar.test.mjs、tests/contract/contracts.test.mjs、whiteboard 套件全绿（失败=0，记录用例数）;pnpm build（workbench）全绿或按 R-18 记录环境受限复现步骤;三中心主路径清单走通并写入 docs/TEST_REPORT.md：对话双标签 ≤15s 实时+断线自动重连+纯文本渲染；文件 list/read/download/upload/mkdir/rename/delete 走通+未绑定空间引导+越界与 .git 403+overwrite/confirm 语义；浏览器 SSRF 拦截文案「已拦截：禁止访问内网地址」+错误可区分（限长/超时/非文本/4xx-5xx）+结果文本渲染不直插远端 HTML;board-plugin 按 README 验证（typecheck/build+宿主注入冒烟）；宿主不可达记录「环境受限+复现步骤」不冒充通过
+- S1 | R-1 后端：跨空间技能共享语义（listSkills scope:B 可见 + revokeSkill + review/grant/revoke general 门禁 + include=pending 收口 + 审计带目标空间） | team-hub/server.mjs, team-hub/skills.test.mjs | node team-hub/skills.test.mjs（node --test 同效）全绿：新增跨空间/撤销/门禁用例通过且既有 12 例不回归;已发布技能 scope=A 经 grant(S, ['scope:B']) 后 listSkills({scope:B}) 返回 S 且未授权空间 C 不返回（AC-R1-1）;revoke 后 B 视角立即不可见，重复 revoke 或撤销未授权技能幂等不抛未定义错误（AC-R1-2）;非 general 调 review/grant/revoke 走路由 → 4xx + 明确错误文案，general 成功（对照 server.mjs 删空间 :1873 先例；register 维持现状）（AC-R1-3）;grant/revoke 审计行含技能归属 scope 与目标空间且 action 前缀 skill:（AC-R1-4）;删除源空间后 B 查询不再含 A 技能、无悬空引用（级联随 :1885 现状）（AC-R1-6）;include=pending 仅 general 可读，其余查询与全部空间视图不暴露任何 pending/rejected 技能 prompt（收口 :1976-1980 敞口）（AC-R1-7）;零新增运行时依赖（server.mjs 无新增 import/依赖）
+- S2 | R-1 前端：指挥台共享技能视图（来源标识 + 只读含 prompt + 授权/撤销接线） | workbench/src/components/SkillsPanel.tsx, workbench/src/api.ts | pnpm --dir workbench build 全绿（tsc --noEmit 0 诊断；EPERM 受限时记录复现步骤并附 tsc 结果）;B 空间技能中心显示来自空间 X 的共享技能条目（来源标识 + 只读 + prompt 全文可见，published only，草稿绝不外泄），A 空间保留授权管理（目标空间选择 + 行内撤销），fetch 走既有 /hub 代理（AC-R1-8）;UI 冒烟（serve.mjs 托管 + hub，:5173）：A 授权 scope:B → B 可见；A 撤销 → B 刷新后条目消失；非 general 操作呈现后端明确错误文案;渲染安全：无 dangerouslySetInnerHTML 直插服务端文本;chat/files/calendar 面板无回归
+- S3 | R-1 守护注入缓存失效：fetchSkills 按 (id, version, contentHash) 指纹比对刷新 | plugins/src/index.ts | 插件 typecheck 0 诊断（tsc -p plugins/tsconfig.json --noEmit；本 worktree 无 node_modules 属环境受限，记录复现步骤不冒充通过）;fetchSkills（:436-447）长度比较改为指纹比较：同数量技能改版（version+1 且已 publish）→ 缓存刷新并注入新 prompt；指纹不变 → 不刷新；共享技能新增/撤销 → 下一轮反映（AC-R1-5）;指纹纯逻辑可测（同量改版刷新 / 同指纹不刷新 / 撤销后移除三断言）;既有插件回归（plugins/tests 套件，宿主环境；受限时如实记录）不回归;零新增依赖
+- S4 | R-2 后端：全局规范层（rules 表 + GET/POST /api/rules + 审计/SSE，RESEARCH K3-A） | team-hub/server.mjs, team-hub/rules.test.mjs | node team-hub/rules.test.mjs（node --test 同效）全绿（新增套件，HTTP 范式仿 calendar.test.mjs：临时 TEAM_HUB_DB + 真实随机端口）;老库 import 自动建表幂等（CREATE TABLE IF NOT EXISTS，零迁移风格）;GET /api/rules?scope=global 返回 {content, updatedAt}（未设置给空串与合理默认），POST /api/rules 写 handleWrite（by 必填、缺失 400；action=rules:update 入 audit；SSE /api/events 广播可达）（AC-R2-6 后端）;内容长度上限护栏（默认超限 4xx 或明确截断，断言其一）;skills/chat/calendar 既有套件不回归;零新增运行时依赖（仅 node:sqlite）
+- S5 | R-2 解析注入：分层规范读取合并（全局层 + 空间/项目层文件族含 agent.md）+ 预算截断 + buildWorkerPrompt 双段注入（RESEARCH K4-A/K5-A） | plugins/src/index.ts | 插件 typecheck 0 诊断（环境受限时记录复现步骤）;readRepoRules 重构为 readNorms 两层读取：空间层锚点 = 空间绑定仓库根 repoRootFor()，文件族按序读全部存在者 LEGION.md → AGENTS.md → agent.md，输出 [全局层段] + [空间层段]，顺序稳定且空间层后置并带「空间/项目层优先于全局层」声明（AC-R2-1/2）;兼容回归：仅 LEGION.md（现状）时注入文本与现状逐字一致（含「仓库规则（必须遵守，来自 LEGION.md/AGENTS.md）」段），无任何文件时不输出规范段且不报错（AC-R2-3）;预算截断纯函数（全局 ≤3000 / 空间 ≤4000 / 合计 ≤7000 可配；超限在段落边界截断并追加「规范超限截断：原文 N 字，已保留前 M 字」，不产生半截代码块）（AC-R2-4）;buildWorkerPrompt 规则小节引用 readNorms（AC-R2-5 冒烟：宿主可达时派工提示词含两段规范文本且顺序正确，不可达记录复现步骤）;既有派工/流转插件回归不回归;零新增依赖
+- S6 | R-2 前端 + 总纲：指挥台「规范」维护入口（全局层可编辑 + 空间层明确跳转）+ README/LEGION 职责总纲段 | workbench/src/components/RulesPanel.tsx, workbench/src/components/Sidebar.tsx, workbench/src/App.tsx, workbench/src/api.ts | pnpm --dir workbench build 全绿（tsc 0 诊断）;Sidebar/App 接线「规范」面板入口进入 RulesPanel（非 toast 占位）；全局规范内容可编辑保存（POST /api/rules 走既有 hub 代理 by 自动注入），成功/失败 toast 明确；空间层规范文件（LEGION.md/AGENTS.md/agent.md）给出路径与「文件中心/仓库内编辑」跳转指引（AC-R2-6）;保存后守护下一轮派工提示词反映新内容（宿主可达时冒烟；不可达记录复现步骤）;README/LEGION 新增「规范载体职责总纲」段（文件族空间层 vs rules 表全局层 vs skills vs roles.json stage.prompt 各自承载内容/维护入口/优先级，RESEARCH §16.1 矩阵落地）;渲染安全无 dangerouslySetInnerHTML 直插;chat/files/browser/calendar/skills 面板无回归（评审断言）
+- S7 | R-3 后端：删除语义收口（级联扩至 chat/calendar/members + 影响预检端点 + 测试）（RESEARCH K6-A/K7-A 后端） | team-hub/server.mjs, team-hub/spaces.test.mjs | node team-hub/spaces.test.mjs（node --test 同效）全绿（新增套件，HTTP 范式仿 calendar.test.mjs）;POST /api/spaces/delete 事务级联在现 7 表基础上追加 conversations/messages/calendar_events/members 四表（D-10 默认随删），removed 计数逐表断言、audit 历史保留（AC-R3-4/5）;confirm 缺失/错配、未知空间、software/default 受保护、非 general 均 4xx 且文案明确;新增只读 GET /api/spaces/impact?id= 返回任务/编队/成员/会话与消息/日程/技能计数与在办执行状态（供前端确认弹窗预检）;删除后 GET /api/scopes 不再含已删 id（幽灵分区收口断言）;skills/chat/calendar 既有套件全绿;零新增依赖
+- S8 | R-3 前端：SpaceSettingsModal「删除工作空间」危险区（type-to-confirm + 影响预检 + 删当前空间切回全部空间） | workbench/src/components/SpaceSettingsModal.tsx, workbench/src/App.tsx, workbench/src/api.ts | pnpm --dir workbench build 全绿;api.ts 增 deleteSpace(id, confirm)（POST /api/spaces/delete body {id, confirm: delete-space:<id>}）（AC-R3-1 后端契约前传）;SpaceSettingsModal 危险区仅对非 software/default 且 hub 模式显示：展开先调 GET /api/spaces/impact 渲染影响清单与在办任务强提示，输入 delete-space:<id> 才可点确认（AC-R3-1）;删除当前激活空间成功后切回「全部空间」并重拉列表（复用 App.tsx:288-302 刷新模式），spaces 列表不再含该 id（AC-R3-2）;software/default 无入口或禁用并说明（AC-R3-3）;失败（confirm 错/未知/受保护/非 general）呈现后端明确错误文案不静默;渲染安全与既有面板无回归
+- S9 | R-4 后端数据面：每空间回复开关 + awaiting 状态机 + 回复队列端点 + 超龄兜底（RESEARCH K9-A 数据面） | team-hub/server.mjs, team-hub/chat.test.mjs, team-hub/chat-l1-smoke.mjs | node team-hub/chat.test.mjs 全绿（新增用例且既有用例不回归；老库零迁移：不加列仅 meta 扩展，TC-S1-16 断言不回归）（AC-R4-5）;chat_reply_settings 表 CREATE TABLE IF NOT EXISTS 幂等（scope 主键、enabled 默认 1、model/identity/systemHint/updatedAt 可空），每空间开关读写持久化（AC-R4-3 后端）;postMessage 在空间开关开且 author ≠ 回复方身份时同事务写 messages.meta.aiStatus=awaiting（零迁移，回复方身份默认 <scope>-assistant）（AC-R4-1/2 后端）;GET /api/chat/replies?scope=&sinceMsgId= 返回 awaiting 消息并聚合最近上下文（limit 上限防爆）；awaiting 超龄（默认 120s）由服务端标记 failed + meta.error（AC-R4-4 兜底）;回复方写入复用既有 DAO 通道：author=by 防冒名（TC-S1-07 不回归）、audit chat:message、SSE 送达（AC-R4-2/6）;kind 仅 text 且长度 ≤ MAX_CHAT_BODY=8000（AC-R4-7 后端）;node team-hub/chat-l1-smoke.mjs 22+ 断言通过;零新增依赖
+- S10 | R-4 守护执行：chat-responder 扫单（拉 awaiting → DSH 子代理 LLM 直答 → 落第二条消息 → 状态回写）（RESEARCH K8-A/K10-A） | plugins/src/index.ts | 插件 typecheck 0 诊断（环境受限时记录复现步骤）;新增 responder 段（独立 interval 或并入 sweep，默认 10-30s）：拉 GET /api/chat/replies → 每条派生无仓库工具的轻量子代理（提示词 = 空间对话助手、基于会话历史、禁工具/文件访问；模型按 chat_reply_settings.model 或该空间默认）→ 生成文本 POST /api/chat/messages {conv, body, kind:text, by: 回复方身份}（identity 默认 <scope>-assistant，≠ general 与用户）（AC-R4-1/2）;子代理失败/超时 → 回写 meta.aiStatus=failed + meta.error（AC-R4-4）;状态机 CAS 幂等防重复回复（仅 awaiting→replied 可成功、重复拉取幂等）；只对非回复方消息触发防死循环；并发/超时护栏仿 worker 既有 config;宿主可用时冒烟（发送 → ≤120s 收到回复；关开关无回复；失败呈现），宿主不可达如实记录复现步骤不冒充通过;既有插件回归不回归;零新增依赖
+- S11 | R-4 前端：ChatView 身份泛化 + AI 回复三态气泡（等待中/失败可重试/已回复 + 模型徽标） | workbench/src/components/ChatView.tsx | pnpm --dir workbench build 全绿;author 判定泛化：general = 我，其余 author（含 <scope>-assistant 等回复方身份）一律对方侧渲染，回复方气泡带 🤖 + meta.aiModel 徽标（AC-R4-2 UI）;气泡按 messages.meta.aiStatus 呈现三态：awaiting（等待中 + 时间戳）/ failed（明确失败提示 + 重试动作将消息重新置 awaiting）/ replied（正文）（AC-R4-4 UI）;纯文本渲染不执行 HTML（无 dangerouslySetInnerHTML 直插服务端文本）（AC-R4-7）;既有会话守卫（loadOlder/send 写回前会话身份比对，R-A5）与 A/B 会话快速切换不串显不回归;宿主可用时冒烟：发送 → 等待态 → 回复到达或失败呈现，chat-s2-smoke（/hub 代理主路径）通过；不可达记录复现步骤
+- S12 | 四能力集成回归锚定（全部套件 + 端到端清单写入 TEST_REPORT.md） | docs/TEST_REPORT.md | 逐套件运行并记录输出要点：node team-hub/skills.test.mjs、chat.test.mjs、rules.test.mjs、spaces.test.mjs、calendar.test.mjs（node --test 同效）全绿 0 失败并记用例数;workbench pnpm build 全绿（tsc 0 诊断；EPERM 受限时记录复现步骤）;plugins typecheck 0 诊断（环境受限时记录复现步骤）;docs/TEST_REPORT.md 增补四能力端到端清单与结果：技能跨空间授权 → B 可见 → 撤销消失 → 守护指纹刷新注入新内容;规范全局层 + 空间层双段注入且空间层优先声明;移除空间闭环（预检 → type-to-confirm → 删除 → 切回全部空间 → 无幽灵分区）;对话发送 → 等待态 → AI 回复或明确失败呈现（宿主不可达时如实记录环境受限 + 复现步骤）;零新增运行时依赖复核（package.json 无新增项）
 
 ## 2. 依赖关系、执行顺序与并行（给人看）
 
-### 2.1 blockedBy 一览（同文件域 = 硬串行；跨域 = 可并行）
+### 2.1 blockedBy 一览（同文件域 = 硬串行；跨域 = 可并行；注册顺序 = 派工顺序）
 
-| 切片 | blockedBy（按注册序执行时） | 依赖理由 |
-| --- | --- | --- |
-| S1 | 分析前缀（G-8/G-9 默认） | serve.mjs 域链起点（P0 安全/DoS 优先） |
-| S2 | **S1**（同 serve.mjs 域，硬串行） | 与 S1 同文件叠加必冲突 |
-| S3 | 分析前缀 | 独立 ChatView.tsx 域，域不相交可并行 |
-| S4 | 分析前缀（建议排在 S1~S3 后取基线） | 前端壳链（App.tsx）起点；w/T-051 合入 |
-| S5 | 分析前缀（G-13 确认后） | team-hub 域与一切不相交，可与 S1~S4 并行 |
-| S6 | **S4**（App.tsx 域）+ **S5**（需 /api/calendar/events 合入可验） | 面板接线依赖既有 App 壳与后端 API |
-| S7 | **S6**（App.tsx/Sidebar.tsx 域串行） | 与 S6 同壳文件叠加必冲突 |
-| S8 | S1~S7 全部 done | 回归锚定必须在收口后执行 |
+| 切片 | blockedBy（注册序执行时） | 依赖理由 | 工作量 |
+| --- | --- | --- | --- |
+| S1 | 无（行内起点） | R-1 后端为共享语义根；无前置 | M |
+| S2 | S1（listSkills scope:B/revoke 后端须合入可验） | 前端共享视图依赖后端语义与端点 | M |
+| S3 | S1（服务端 listSkills 返回语义稳定后实现指纹） | 守护缓存依赖服务端响应形态；与 S2 域不相交可并行 | S |
+| S4 | S1（同 team-hub/server.mjs 硬串行） | R-2 后端与 R-1 后端同文件不同段，须串行 | M |
+| S5 | S3（同 plugins/src/index.ts 硬串行）+ S4（全局层数据源合入后可做 AC-R2-5 注入冒烟） | 分层解析与 fetchSkills 同 plugins 文件；注入验证需 /api/rules | M |
+| S6 | S2（同 workbench api.ts 链）+ S4（rules API）+ S5（保存后提示词反映新内容需注入合入） | 「规范」面板接线与 skills 前端同 api.ts/壳文件 | M |
+| S7 | S4（同 team-hub/server.mjs 硬串行） | 删除收口与 rules 段同文件不同段，须串行 | M |
+| S8 | S6（同 workbench api.ts/App 链）+ S7（预检/删除端点合入可验） | 删除入口与规范面板同壳文件；后端契约先合入 | M |
+| S9 | S7（同 team-hub/server.mjs 硬串行） | chat 数据面与 spaces 段同文件不同段，须串行 | M-L |
+| S10 | S5（同 plugins/src/index.ts 硬串行）+ S9（队列端点/状态机合入后可扫单） | responder 依赖数据面契约；与 S3/S5 同 plugins 文件 | L |
+| S11 | S9（meta 数据面合入）+ S10（实际回复执行合入做 E2E 冒烟） | 前端三态依赖数据契约与执行方 | M |
+| S12 | S1~S11 全部 done | 集成回归锚定必须在收口后执行 | M |
 
-**无循环依赖**：所有边沿「后端/服务加固 → 前端 → 集成回归」方向，且同文件域链为线性（S1→S2；S4→S6→S7），不存在回边。
+**无循环依赖**：所有边沿沿「后端/数据面 → 前端/执行 → 集成回归」方向；三条同文件链（server.mjs：S1→S4→S7→S9；plugins：S3→S5→S10；workbench 壳：S2→S6→S8）均为线性，不存在回边。
 
 ### 2.2 执行顺序与并行建议
 
-- **默认安全路径（当前生产守护 maxWorkers=1，按注册顺序单 worker 派工）**：S1→S2→S3→S4→S5→S6→S7→S8。注册顺序即派工顺序，本清单已按此排好。
-- **若将军提升并发槽位（maxWorkers≥2）**：仅允许派工**文件域两两不相交**的组合，例如 {S1, S3}、{S1, S5}、{S3, S4}、{S3, S5}、{S4, S5} 中任取（每对域不相交）。**严禁**把 S1 与 S2、或 S4/S6/S7 中任两个同时派工（同文件域并行 = 自动合入冲突 → 打回将军，违背本批零返工目标）。S8 永远最后。
-- S5（team-hub 域）与前端壳链（S4/S6/S7）互不干扰，可在后端先行后随时并行；S6 的前端验收需要 hub 带 /api/calendar/events 运行（S5 合入后）。
+- **默认安全路径（当前生产守护单 worker，按注册顺序派工）**：S1 → S2 → S3 → S4 → S5 → S6 → S7 → S8 → S9 → S10 → S11 → S12。注册顺序即派工顺序，本清单已按依赖拓扑排好。
+- **若将军提升并发槽位（maxWorkers ≥ 2）**：只允许派工**文件域两两不相交**的组合（见 §1 每行第 2 段）；**严禁**同时派工同一文件的相邻切片——S1/S4/S7/S9 互斥、S3/S5/S10 互斥、S2/S6/S8 互斥。域不相交即可并行的示例：{S2, S3}（workbench vs plugins）、{S3, S4}（plugins vs server.mjs）、{S6, S7}、{S8, S9}、{S2, S4} 等。S12 永远最后。
+- **文档级共享说明**：README.md / LEGION.md / workbench/README 不列入任何切片第 2 段文件域（文档级冲突可语义合并，仿 T-075 惯例）；各切片在实现时按需同步更新相关说明（仓库纪律「修改行为同时更新受影响文档」）。
 
-## 3. 子任务明细（每切片 = 一个士兵一轮可完成并验收；「验收」以 §1 机器行逐条为准）
+## 3. 子任务明细（每切片 = 一个士兵一轮可完成并验收；「验收」以 §1 机器行逐条为准；工作量刻度 S ≈ 0.5 轮 ｜ M ≈ 1 轮 ｜ L ≈ 1 轮满）
 
-工作量刻度：S ≈ 0.5 轮 ｜ M ≈ 1 轮 ｜ L ≈ 1 轮满。
+#### S1 R-1 后端：跨空间技能共享语义【P0 · team-hub/server.mjs 链起点】
+- **目标**：按 RESEARCH K1-A 原地补齐 grants 引用式共享后半程——listSkills 对 scope=B 自动返回 grants 含 scope:B 的已发布技能（服务端判定，UI 无需传 member）；新增 revokeSkill(id, targets)（从 grants 过滤删除并写回）；路由 review/grant/revoke 加 general 门禁（对照 :1873 先例）；审计 detail 携带技能归属 scope 与目标空间；include=pending 收口为 general-only（堵 AC-R1-7 敞口）。
+- **产出（文件域）**：team-hub/server.mjs（skills DAO/路由段 :469-527/:1748-1786/:1960-1982）、team-hub/skills.test.mjs（追加跨空间/撤销/门禁/级联用例）。
+- **依赖**：无（行内起点）。**工作量**：M。**完成 =（DoD）**：skills.test.mjs 新增用例全绿 + 既有 12 例不回归 + AC-R1-1/2/3/4/6/7 各有一断言（真实命令输出为证）= 完成；无需前端与守护改动。
+- **测试锚点（test-designer 直转）**：跨空间矩阵（B 可见/C 不可见/pending 不外泄）、撤销即时生效与幂等、非 general 4xx 文案、audit detail 形状（技能 scope + 目标空间 + action 前缀 skill:）、删源空间级联。**纪律**：只改上述两文件；路由守卫放 handleWrite run 内同款位置；零新增依赖。
 
----
+#### S2 R-1 前端：指挥台共享技能视图【P0 · workbench api.ts 链起点】
+- **目标**：按 RESEARCH §12.1 R-1 前端——B 空间技能中心出现「来自空间 X」的共享技能条目（只读 + prompt 全文可见 + 不可编辑，草稿绝不出现）；A 空间技能中心对已授权技能提供「撤销授权」行内动作与授权目标空间选择（与 grant 输入同构）；撤销/授权结果即时反映。
+- **产出（文件域）**：workbench/src/components/SkillsPanel.tsx、workbench/src/api.ts（skills 段）。
+- **依赖**：S1。**工作量**：M。**完成 =（DoD）**：pnpm --dir workbench build 全绿；UI 冒烟走通 A 授权 → B 可见 → A 撤销 → B 消失（serve.mjs + hub 宿主可用时；不可达记录复现步骤）= 完成。
+- **测试锚点**：来源标识渲染、只读（无编辑入口）、授权目标选择与撤销按钮调正确端点、错误 toast（非 general/后端 4xx 文案透传）。**纪律**：渲染纯文本不直插 HTML；只改上述两文件。
 
-#### S1 serve.mjs 文件面加固：嵌套 .git 防护 + 畸形路径防崩溃（R-A1/F1 + R-A2/F2）【P0 必做】
+#### S3 R-1 守护注入缓存失效【P0 · plugins 链起点】
+- **目标**：按 RESEARCH K2-A——fetchSkills（plugins/src/index.ts:436-447）由长度比较（:442-445）改为响应指纹比较（[id, version, contentHash] 序列化），同数量改版（version+1 已 publish）即刷新，指纹不变不刷新，撤销/新增随列表变化下一轮生效。
+- **产出（文件域）**：plugins/src/index.ts（fetchSkills/缓存段）。
+- **依赖**：S1（服务端语义稳定）。**工作量**：S。**完成 =（DoD）**：指纹逻辑抽出纯函数并可 node --test 断言三态（同量改版刷新 / 同指纹不刷新 / 撤销后移除）；plugins typecheck 0 诊断（受限时记录复现步骤）= 完成。
+- **纪律**：零新增依赖；不引入 SSE 推送（D-5 默认轮询）。
 
-- **目标**：按 RESEARCH J1-A + J2-A 修复两处「必须修改」级缺陷——① `assertNotGitInternal`（serve.mjs:209）由「仅拦首段 .git」升级为「任一层段 .git 即拒 + realpath 后复检（防符号链接绕入 .git 内部）」，list/read/download/upload/mkdir/rename/delete 9 处调用点签名不变（:274/301/327/339/352/381/390/391/407）；② createServer 回调（:942 起，含 :944 decodeURIComponent）整体 try/catch 兜底，URIError→400，任何畸形输入进程绝不死（落实 I-9）。
-- **产出（文件域）**：`workbench/scripts/serve.mjs`、`workbench/scripts/files-api.test.mjs`（追加嵌套 .git 矩阵 + 畸形路径注入 + 进程存活断言）。
-- **依赖**：分析前缀；G-8/G-9 默认。
-- **工作量**：M（1 轮）。
-- **完成 =（DoD）**：files-api.test.mjs 新增用例全绿 + 既有 34 例不回归 + 畸形并发不崩（真实命令输出为证）= 完成；无需前端。
-- **测试锚点（test-designer 直转）**：嵌套仓库路径矩阵（subrepo/.git/config、.git/objects、submodule .git 文件、符号链接→.git 内部）、顶层 .git 对照、Windows 大小写 .GIT（建议比较前 toLowerCase）、写面同强度、畸形 % 注入矩阵（%zz、超长 ≥1 万字符、重复 %）、10 并发不崩、进程存活后续 200。
-- **纪律**：只改上述两文件；如需在 README 说明守卫语义属可接受文档更新（README 不列入任何切片域，冲突仅文档级）。
+#### S4 R-2 后端：全局规范层（rules 表 + API）【P0 · RESEARCH K3-A】
+- **目标**：按 K3-A——team-hub 新增 rules 表（key 主键、scope、content、updatedAt；key=global 即全局层，scope 预留空间层扩展点）+ GET/POST /api/rules（写走 handleWrite：by 必填 + audit action=rules:update + SSE）+ 内容长度上限护栏；老库 IF NOT EXISTS 幂等建表零迁移。
+- **产出（文件域）**：team-hub/server.mjs（rules 表/路由段，与 S1/S7/S9 不同行段）、team-hub/rules.test.mjs（新增，HTTP 范式仿 calendar.test.mjs）。
+- **依赖**：S1（同文件硬串行）。**工作量**：M。**完成 =（DoD）**：rules.test.mjs 全绿（建表幂等 / GET 默认值 / POST by 必填 / audit+SSE / 长度护栏）；skills/chat 不回归 = 完成。
+- **测试锚点**：旧库 import 自动建表、action=rules:update 可经 /api/activity 查、SSE 广播可达、超限拒绝或明确截断其一。
 
-#### S2 serve.mjs 浏览器后端：抓取审计留痕 + body stall 归类（R-A3 + R-A4）【P0/P1 必做】
+#### S5 R-2 解析注入：readNorms 分层合并 + 预算 + 双段注入【P0 · RESEARCH K4-A/K5-A】
+- **目标**：readRepoRules（:850-862）重构为 readNorms——全局层来源（守护按 config 经 GET /api/rules?scope=global 拉取 + 缓存）+ 空间层来源（repoRootFor() 锚点下文件族 LEGION.md → AGENTS.md → agent.md 读**全部存在者**）合并为两段输出，空间层后置并带优先级声明；预算（全局 ≤3000 / 空间 ≤4000 / 合计 ≤7000，可配）段落边界截断 + 超限提示；buildWorkerPrompt（:1087-1089 规则段）引用新解析。仅 LEGION.md 现状兼容（AC-R2-3）；无文件不输出不报错。
+- **产出（文件域）**：plugins/src/index.ts（readNorms/buildWorkerPrompt 段 + 预算纯函数，与 S3/S10 不同行段）。
+- **依赖**：S3（同 plugins 文件硬串行）+ S4（全局层数据源，AC-R2-5 注入冒烟需要）。**工作量**：M。**完成 =（DoD）**：解析纯函数（两层合并 + 截断）可 node --test 断言（AC-R2-1/2/4）；typecheck 0 诊断（受限记录）；宿主可达时派工冒烟提示词含两段且顺序正确（AC-R2-5），不可达记录复现步骤 = 完成。
+- **纪律**：不改角色 prompt 职责语义；规范文本只读拼接与声明式优先级（不做 K4-B 分节结构化覆盖）。
 
-- **目标**：按 RESEARCH J3-A + J4-A —— ① /api/web/fetch（handleWebApi :809-821）每次抓取（成功/失败/拦截皆算）append 一行 JSONL 到**静态 ROOT（serve.mjs:26=workbench/dist）之外**的数据目录（如 `workbench/data/web-audit.jsonl`）+ console 一行，含 ts/by=general/url/finalUrl/status/code/ms；按容量轮转；workbench/.gitignore 追加 data/。② body stall（headers 已回、body 挂起超时，readBodyLimited :730-743）与整链超时统一归类 code=timeout（以 ac.signal.aborted 状态判据，不按错误 message 匹配）；错误码枚举（invalid_url/protocol_blocked/ssrf_blocked/too_many_redirects/timeout/too_large/fetch_error/http_<n>/unsupported/empty_content/web_error）抽常量表收口（顺带修 w/T-051 前端映射含后端不发出码的漂移）。
-- **产出（文件域）**：`workbench/scripts/serve.mjs`、`workbench/scripts/web.test.mjs`（追加留痕/body-stall/枚举用例）、`workbench/.gitignore`。
-- **依赖**：S1（同 serve.mjs 域硬串行）。
-- **工作量**：M（1 轮）。
-- **完成 =（DoD）**：web.test.mjs 新增用例全绿 + 既有 12 例不回归 + files-api.test.mjs 全绿 + 审计行可查（含失败/拦截留痕）= 完成。
-- **测试锚点**：留痕字段形状（url/finalUrl/status/ms/by）、ssrf_blocked/timeout/too_large/http_<n> 皆留痕、审计文件位于 ROOT 外不可被 GET、轮转生效、body-stall 夹具→code=timeout、整链超时同码、错误码枚举表与前端映射对齐。
+#### S6 R-2 前端 + 职责总纲【P0 · RESEARCH §12.1 R-2 UI + §16.1 矩阵】
+- **目标**：指挥台新增「规范」面板（RulesPanel，接线 Sidebar/App）：全局层规范内容可读可编辑保存（POST /api/rules 走 hub 代理 by 自动注入），空间层规范文件族给出明确路径与「文件中心/仓库内编辑」跳转指引；保存后守护下一轮派工提示词反映新内容；README/LEGION 增职责总纲段（四类载体分工矩阵，§16.1）。
+- **产出（文件域）**：workbench/src/components/RulesPanel.tsx（新增）、workbench/src/components/Sidebar.tsx、workbench/src/App.tsx、workbench/src/api.ts（rules 段）；文档联动 README.md/LEGION.md（不入文件域，见 §2.2）。
+- **依赖**：S2（api.ts 同文件链）+ S4（rules API）+ S5（注入反映新内容需解析合入）。**工作量**：M。**完成 =（DoD）**：pnpm --dir workbench build 全绿；RulesPanel 可达且可编辑保存（宿主冒烟：保存 → /api/activity 可见 rules:update → 下一轮派工提示词含新内容，不可达记录复现步骤）；总纲段入 README/LEGION = 完成。
+- **纪律**：保存写走既有 hub 代理与 author 注入纪律；渲染安全。
 
-#### S3 ChatView 会话/空间身份守卫（R-A5/S2-M1）【P1 必做】
+#### S7 R-3 后端：删除语义收口 + 预检【P1 · RESEARCH K6-A/K7-A 后端】
+- **目标**：POST /api/spaces/delete（已存在 :1867-1896）事务级联由 7 表扩至 conversations/messages/calendar_events/members（D-10 随删，audit 保留）；新增只读 GET /api/spaces/impact?id=（任务/编队/成员/会话与消息/日程/技能计数 + 在办执行状态）供前端预检；新增 spaces.test.mjs 全套 HTTP 断言。
+- **产出（文件域）**：team-hub/server.mjs（spaces 删除/impact 段）、team-hub/spaces.test.mjs（新增）。
+- **依赖**：S4（同文件硬串行）。**工作量**：M。**完成 =（DoD）**：spaces.test.mjs 全绿（正常删除逐表 removed 计数与孤儿断言 / confirm 错 / 未知空间 / software-default / 非 general 各 4xx / /api/scopes 干净）；calendar/chat/skills 不回归 = 完成。
+- **纪律**：不回收磁盘 worktree（D-11 默认，仅 DB 语义）；audit 保留不删。
 
-- **目标**：按 RESEARCH J5-A —— loadOlder（ChatView.tsx:160-168）与 send（:239-248）异步写回 setMsgs/setDraft 前，比对「发起时 convId/scope」与 `activeRef.current`（:49-51，既有）当前值；不匹配则仅复位 loadingOlder/sending 并丢弃合并（不污染当前视图）。复用既有 cancelled flag 模式（:71-91/:103-113）；不改变协议与数据流。
-- **产出（文件域）**：`workbench/src/components/ChatView.tsx`。
-- **依赖**：分析前缀（域独立，可并行）。
-- **工作量**：S-M（≈1 轮）。
-- **完成 =（DoD）**：守卫实现 + 构建绿 + A/B 会话快速切换/切空间浏览器验收不串显 + 主路径无回归 = 完成。
-- **测试锚点**：A/B 快速切换在途 loadOlder/send、切空间旧响应不回写、新建→发→实时收主路径、（可选）纯逻辑抽函数供 node --test（若抽新文件，请在本切片文件域内创建，勿越域）。
+#### S8 R-3 前端：删除空间危险区【P1 · RESEARCH K7-A】
+- **目标**：SpaceSettingsModal 底部「危险区」：仅非 software/default 且 hub 模式显示；展开先调 impact 预检渲染影响清单 + 在办任务强提示；type-to-confirm 输入 delete-space:<id> 才可确认；api.ts 增 deleteSpace；删除当前激活空间成功后切回「全部空间」并重拉；受保护空间禁用入口。
+- **产出（文件域）**：workbench/src/components/SpaceSettingsModal.tsx、workbench/src/App.tsx（切回/刷新模式 :288-302）、workbench/src/api.ts（deleteSpace 段）；README 空间管理节文档联动。
+- **依赖**：S6（api.ts/壳同文件链）+ S7（预检/删除端点）。**工作量**：M。**完成 =（DoD）**：pnpm --dir workbench build 全绿；冒烟：删除非激活空间 → 列表移除；删除当前激活空间 → 自动切「全部空间」且列表不再含该 id；software/default 无入口；错误路径呈现后端文案（宿主可用时；不可达记录复现步骤）= 完成。
+- **纪律**：confirm 字符串双保险（前端 type-to-confirm + 后端已有 :1873-1875 护栏）；不引入原生 confirm() 直删（K7-B 排除）。
 
-#### S4 浏览器前端收口：合入 w/T-051 为 BrowserView（R-A6/S7 收口）【P1 必做】
+#### S9 R-4 后端数据面：开关 + awaiting 状态机 + 队列【P0 · RESEARCH K9-A 数据面】
+- **目标**：chat_reply_settings 表（scope PK、enabled 默认 1、model/identity/systemHint/updatedAt，IF NOT EXISTS 幂等）；postMessage 在开关开且 author ≠ 回复方身份时同事务写 messages.meta.aiStatus=awaiting（零迁移不加列）；GET /api/chat/replies?scope=&sinceMsgId= 返回 awaiting 消息 + 聚合上下文（limit 防爆）；awaiting 超龄（默认 120s）服务端标 failed + meta.error；回复方消息写入复用既有 DAO（audit chat:message + SSE + author=by 防冒名）；kind 限 text 且 ≤ MAX_CHAT_BODY=8000。
+- **产出（文件域）**：team-hub/server.mjs（chat 表/DAO/路由段）、team-hub/chat.test.mjs（新增用例）、team-hub/chat-l1-smoke.mjs（扩展断言）。
+- **依赖**：S7（同文件硬串行）。**工作量**：M-L。**完成 =（DoD）**：chat.test.mjs 全绿（新增：settings 读写 / awaiting 写入与可见 / 开关关无 awaiting / 身份字段 / 超龄标记 / 老库零迁移 TC-S1-16 不回归）+ 既有用例不回归；chat-l1-smoke 22+ 断言通过 = 完成。
+- **纪律**：零新增列（meta 已有）；不内嵌模型调用（K8-A：team-hub 零出站纪律保持）。
 
-- **目标**：按 RESEARCH J6-A（G-12 默认）—— 合入 w/T-051 分支（提交 a524951 已验证）：BrowserPanel.tsx → BrowserView.tsx（命名对齐 ChatView/FilesView）、errorText 全错误码映射、isErrorResult 把 too_many_redirects/web_error/http_*/timeout 归错误态（不落正文分支）、IME 中文中间态 Enter 守卫、App.tsx:355-356 浏览器分支改渲染 BrowserView（import 同步）。分支不可用则按 J6-B 在 main 重做同款（验收同）。
-- **产出（文件域）**：`workbench/src/components/BrowserView.tsx`、`workbench/src/components/BrowserPanel.tsx`（移除）、`workbench/src/App.tsx`。
-- **依赖**：建议在 S1~S3 合入后执行（取稳定基线）；App.tsx 域与 S6/S7 硬串行（本片最先）。
-- **工作量**：S（≈0.5 轮：合入 + 复核，自带 evidence docs/T051-evidence/）。
-- **完成 =（DoD）**：BrowserView 生效且 App.tsx 无 BrowserPanel 引用 + build 绿 + 错误态/IME 守卫经评审与浏览器冒烟确认 = 完成。
-- **测试锚点**：错误态判定矩阵（too_many_redirects/web_error/http_*/timeout 归错误分支；成功态可重试）、IME 守卫、入口一致性（QuickTools「浏览网页」/侧栏「浏览器助手」active=browser）。
+#### S10 R-4 守护执行：chat-responder【P0 · RESEARCH K8-A/K10-A】
+- **目标**：守护新增 responder（独立 interval 或并入 sweep，默认 10-30s）：拉 GET /api/chat/replies → 每条派生**无仓库工具**的轻量子代理（提示词 = 空间对话助手、基于会话历史、禁工具/文件访问；模型按 settings.model 或该空间默认）→ 生成文本经 POST /api/chat/messages 落第二条消息（by = 回复方身份 <scope>-assistant，≠ general/用户）→ 回写源消息 meta.aiStatus=replied；失败/超时 → failed + meta.error；状态机 CAS（仅 awaiting→replied）防重复、只处理非回复方消息防死循环、并发/超时护栏仿 worker config。
+- **产出（文件域）**：plugins/src/index.ts（responder 段，与 S3/S5 不同行段）。
+- **依赖**：S5（同 plugins 文件硬串行）+ S9（队列/状态机契约）。**工作量**：L。**完成 =（DoD）**：typecheck 0 诊断（受限记录）；状态机/护栏逻辑评审或单测锚定（CAS 幂等/防循环/超时回写）；宿主可用时冒烟（发送 → ≤120s 收到回复；关开关无回复；失败呈现），不可达如实记录 = 完成。
+- **纪律**：零新凭据面（复用 DSH 既有模型通道，K10-A）；不引入任何协议代码/SDK。
 
-#### S5 日程日历后端：team-hub 扩表扩 API（R-B1 数据面）【P1 · G-13 门，将军 OQ-3 确认后派工】
+#### S11 R-4 前端：ChatView 身份泛化 + AI 三态【P0 · RESEARCH K9-A UI】
+- **目标**：author 判定由「general = 我」泛化为「general = 我，其余 author 一律对方」；回复方气泡带 🤖 + meta.aiModel 徽标；按 meta.aiStatus 呈现 awaiting（等待中 + 时间戳）/ failed（明确失败提示 + 重试动作重新置 awaiting）/ replied（正文）三态；纯文本渲染；既有会话守卫（R-A5：loadOlder/send 写回前会话身份比对）不回归。
+- **产出（文件域）**：workbench/src/components/ChatView.tsx。
+- **依赖**：S9（meta 数据契约）+ S10（实际回复执行供 E2E 冒烟）。**工作量**：M。**完成 =（DoD）**：pnpm --dir workbench build 全绿；宿主可用冒烟（发送 → 等待态 → 回复或失败呈现；author 泛化不破坏人-人收发；A/B 会话快速切换不串显），不可达记录复现步骤 = 完成。
+- **纪律**：渲染安全红线（ChatView 既有文本节点纪律不破）；api.ts 无需改动（回复经既有 postChatMessage/SSE 到达）。
 
-- **目标**：按 RESEARCH J7-A —— team-hub/server.mjs 仿既有 chat 路由（:1633-1666）与 ensureColumn 先例（:246）新增 `calendar_events(id, scope, title, start, end?, allDay?, meta JSON, createdAt, updatedAt)` 幂等建表 + `GET /api/calendar/events?scope=&from=&to=`（scope 过滤 + 日期窗）与 `POST /api/calendar/events`（写走 handleWrite：by 必填 + audit action=calendar:* + SSE /api/events 广播，机制复用 audit() :413-415 与事件流 :1807-1817）。
-- **产出（文件域）**：`team-hub/server.mjs`、`team-hub/calendar.test.mjs`（新增，仿 chat.test.mjs：临时库 import server.mjs，不占端口）。
-- **依赖**：分析前缀 + G-13（将军确认纳入）；域独立可并行。
-- **工作量**：M（1 轮）。
-- **完成 =（DoD）**：calendar.test.mjs 全绿 + chat/skills 测试不回归 + curl 冒烟（POST→GET 日期窗→audit 可查）= 完成。
-- **测试锚点**：scope 隔离互不可见、日期窗边界、by 必填 400、非法时间/超长标题拒绝、旧库自动建表幂等、audit 记录与 SSE 载荷（kind=calendar:*）。
+#### S12 四能力集成回归锚定【收口 · 仿 T-075 S8/T-091 惯例】
+- **目标**：全部受影响的套件在合并 HEAD 上逐套真实重跑并记录；端到端主路径清单走通并写入 docs/TEST_REPORT.md；宿主不可达部分如实标注环境受限 + 复现步骤，不冒充通过。
+- **产出（文件域）**：docs/TEST_REPORT.md。**依赖**：S1~S11 全部 done。**工作量**：M。**完成 =（DoD）**：§1 S12 行内清单逐项有真实输出要点 = 完成。**纪律**：只改 docs/TEST_REPORT.md；每套件给出命令与输出要点（用例数/失败数）。
 
-#### S6 日程日历前端：自研月视图面板 + 接线（R-B1 视图面）【P1 · G-13 门】
+## 4. 需求 / 方案 / 切片对照（无遗漏自检）
 
-- **目标**：按 RESEARCH J7-D —— 自研 CSS grid 月视图（7×N 周网格 + 今天高亮 + 跨月切换），复用既有 Toast/Modal/按钮样式与 index.css token；点击侧栏「日程日历」（Sidebar.tsx:21/79 现为占位 toast）进入真实面板：App.tsx:348-359 分支链加 `active==='calendar'` 分支渲染 CalendarView（active 状态为 `useState('home')`，App.tsx:59，无需改 types.ts），Sidebar.tsx clickModule（:68-80）把 calendar 加入 onNavigate 面板分支；未选具体空间引导先选（与 ChatView 语义一致）；条目渲染纯文本（I-5）；scope=当前空间经 GET /api/calendar/events 读写。
-- **产出（文件域）**：`workbench/src/components/CalendarView.tsx`（新增）、`workbench/src/App.tsx`、`workbench/src/components/Sidebar.tsx`、`workbench/src/index.css`（月视图网格样式）。
-- **依赖**：S4（App/Sidebar 域串行）+ S5（后端 API 合入后方可联调验收）。
-- **工作量**：L（1 轮满）。
-- **完成 =（DoD）**：侧栏进入真实月视图 + 创建/删除最小闭环浏览器走通 + scope 切换/空态/错误态明确 + build 绿 + 三中心无回归 = 完成。
-- **测试锚点**：月网格渲染/今天高亮/跨月、标题+日期必填校验、删除二次确认、刷新持久、scope 切换隔离、未绑定/未选空间引导、hub 不可达错误提示、渲染安全 grep。
-
-#### S7 通知中心：audit 派生面板 + 接线（R-B2）【P1 · G-13 门】
-
-- **目标**：按 RESEARCH J8-A（纯前端派生，后端零改动）—— 新面板 NotifyView：列表 = GET /api/activity（api.ts:280 fetchActivity 既有，按 scope 过滤 + action 白名单：任务 claim/transition/advance/review-note/test-report/patch/evidence/artifact、goal:publish、space:* 等；**chat:* 默认排除防刷屏**）；实时增量 = 复用 api.ts:489-500 `subscribeHubAudit`（单一 /api/events，I-8）；未读数 = 已读游标之后的新审计条数（localStorage per scope）；已读不写 audit；点击任务/目标类通知跳转任务详情（复用既有 TaskDetailModal 导航）；侧栏「通知中心」点击进真实面板 + badge 未读数（Sidebar.tsx:63 已有计数先例，改为通知未读数）；Sidebar/App 接线方式同 S6。
-- **产出（文件域）**：`workbench/src/components/NotifyView.tsx`（新增）、`workbench/src/api.ts`（如仅需白名单/游标辅助函数可加于此）、`workbench/src/App.tsx`、`workbench/src/components/Sidebar.tsx`。
-- **依赖**：S6（App/Sidebar 域硬串行）。
-- **工作量**：M-L（≈1 轮）。
-- **完成 =（DoD）**：侧栏进入真实面板 + 列表/未读/已读游标闭环 + badge + 点击跳转 + 数据同源评审通过 + build 绿 = 完成。
-- **测试锚点**：action 白名单过滤（含 chat:* 排除）、未读计数增减、已读游标 per-scope 持久、点击跳转、无第三数据源（评审）、渲染安全 grep。
-
-#### S8 三中心集成回归锚定（R-A7 + R-B3 仓库内可跑部分）【P1 收尾】
-
-- **目标**：S1~S7 全部合入后，按 REQUIREMENTS R-A7 与 R-B3 执行全量回归并沉淀 docs/TEST_REPORT.md：既有契约套件（files-api/web/team-hub chat+skills+calendar/contracts/whiteboard）全绿 + workbench pnpm build + 三中心浏览器主路径/实时/断线/隔离/渲染安全清单 + board-plugin 宿主注入（不可达按「环境受限+复现步骤」记录，不冒充通过）。
-- **产出（文件域）**：`docs/TEST_REPORT.md`（追加本批结论；本片为验证型，源码零改动）。
-- **依赖**：S1~S7 全部 done（注册序最后）。
-- **工作量**：M（tester 视角 1 轮；只测不修，失败项走 fix 回炉）。
-- **完成 =（DoD）**：全量命令输出记录齐全且失败=0（或环境受限项如实标注）+ docs/TEST_REPORT.md 结论 = 完成。
-- **测试锚点**：直接取 §1 S8 验收行与 REQUIREMENTS R-A7 验收 1~4。
-
-## 4. 需求 → 切片覆盖矩阵（无遗漏核对）
-
-| 需求（REQUIREMENTS §5 / §2.3） | 切片 | 归属说明 |
+| 需求（T-095 REQUIREMENTS §5，AC 口径） | 覆盖切片 | 一等方案落点（T-096 RESEARCH） |
 | --- | --- | --- |
-| R-A1（F1 嵌套 .git 泄密，P0） | S1 | ✅ |
-| R-A2（F2 畸形路径崩溃，P0） | S1 | ✅ |
-| R-A3（抓取审计留痕，P0） | S2 | ✅ |
-| R-A4（body stall 归类，P1） | S2 | ✅ |
-| R-A5（ChatView 串显，P1） | S3 | ✅ |
-| R-A6（浏览器前端收口，P1） | S4 | ✅ 沿用 w/T-051 |
-| R-A7（三中心主路径回归锚定，P1） | S8 | ✅ |
-| R-B1（日程日历，P1） | S5 + S6 | ⚠️ G-13 门（默认纳入，排在必做面后） |
-| R-B2（通知中心，P1） | S7 | ⚠️ G-13 门 |
-| R-B3（存量回归 R-1，P1） | S8（仓库内可跑部分） | board-plugin 宿主部分按「环境受限」记录 |
-| R-B4（双账本收敛，P2） | —（不拆 coder slice） | 架构收敛/迁移，归属 devops/将军定时机（REQUIREMENTS §9 OQ-5）；T-073 附录 A 登记，非悬空 |
-| R-B5（旧文档归档，P2） | —（不拆 coder slice） | 文档整理，随各阶段产物更新一并处理（各切片 DoD 已含受影响文档更新） |
-| R-C1（候选增强 X-1~X-5，P2） | —（默认不做） | 将军勾选才拆；前置 = 本地盘点、缺失即 blocker（G-14） |
-| R-C2（生产发布，P2） | —（devops 尾） | 发布需将军批准；本批交付「可发布状态」，由守护生成的 devops 目标级收尾承接 |
-| R-C3（环境构建链路，P2） | —（宿主/CI 侧） | vite build EPERM 等按「环境受限+复现步骤」记录，不冒充通过 |
+| R-1（P0）跨空间共享技能：AC-R1-1..9 | S1（1/2/3/4/6/7/9）、S2（8）、S3（5） | K1-A 原地演进 grants + K2-A 指纹刷新 |
+| R-2（P0）分层项目规范：AC-R2-1..7 | S4（6 后端）、S5（1/2/3/4/5/7 解析注入）、S6（6 UI/总纲） | K3-A rules 表 + K4-A 两层合并 + K5-A 预算截断 |
+| R-3（P1）移除空间：AC-R3-1..6 | S8（1/2/3）、S7（4/5/6） | K6-A 级联收口 + K7-A type-to-confirm + impact 预检 |
+| R-4（P0）对话 AI 回复：AC-R4-1..8 | S9（1/3/4/5/6/7/8 后端）、S10（1/2/4 执行）、S11（2/4/7 UI） | K8-A 守护 responder + K9-A meta 状态 + K10-A DSH 子代理通道 |
+| 全部：AC-回归项 / 零新增依赖 / 渲染安全 | S12 锚定 + 各切片纪律 | RESEARCH §12.1 11 切片建议（本拆解按文件域链重排编号 S1~S12） |
 
-## 5. 风险与假设
+**D 系列默认采纳**（T-095 §8，将军未否决即基线）：D-1 引用式共享｜D-2 review/grant/revoke general 门禁｜D-3 不做全局隐式共享｜D-4 B 只读含 prompt 全文草稿不泄｜D-5 轮询指纹刷新｜D-6 源空间删级联消失｜D-7 全局层=K3-A（闸门 G-R1 默认）｜D-8 两层空间层 > 全局层、未绑定只吃全局层｜D-9 并存 + 职责总纲｜D-10 级联随删 chat/calendar/members + audit 保留（G-R2 默认硬删无回收站）｜D-11 在办允许删但强提示、磁盘残留不回收｜D-12 LLM 直答无工具（G-R4-1 默认 K8-A）｜D-13 每消息自动回复 + 每空间开关默认开（G-R3）｜D-14 空间级模型默认｜D-15 异步落第二条消息｜D-16 维持空间粒度注入（按角色细粒度 = 可选后置，不在本批）｜D-17 不扩大 exec/托管消费面。
+**闸门默认放行**：G-R1 = K3-A（rules DB）；G-R2 = K6-A 硬删；G-R3 = 默认开；G-R4-1 = K8-A 守护执行；G-R4-2 = 回复身份 <scope>-assistant。任一闸门将军翻转 → 对应切片（S4/S7/S9/S10）按备选路线修订，本拆解默认按上述推进。
 
-- **R-11（同文件域串行纪律）**：serve.mjs 链 S1→S2、前端壳链 S4→S6→S7 靠**注册顺序**串行；若将军调高守护并发（maxWorkers/coderSlots≥2），请勿同时派工同文件域切片（见 §2.2 允许组合）。提升并发前建议先合入本文档并确认守护按序派工。
-- **R-12（G-13 门控）**：S5/S6/S7 默认纳入但依赖将军 OQ-3 裁决；若裁定不纳入，删 §1 中对应行即可（守护按文件当前内容注册）。若裁定纳入但要求减少切片数，可将 S5+S6 合成一片（calendar 后端+前端同片，工作量 L）并把 S7 顺延。
-- **R-13（错误码漂移）**：S2 的枚举常量表收口需与 w/T-051 前端映射（errorText/isErrorResult）三方对齐（含后端不发出的 dns_error 等），S4 合入时复核；测试以枚举表为准。
-- **R-14（嵌套 .git 口径）**：list 默认隐藏嵌套 .git 条目（G-8 默认）；符号链接→.git、Windows 大小写、submodule .git 文件均入 S1 用例矩阵，tester 定口径。
-- **R-15（通知噪音/游标）**：chat:* 默认排除；已读游标 localStorage per scope 跨标签不同步（v1 单浏览器可接受，README 注明）。
-- **R-16/R-17（日历扩展成本/审计安全）**：自研月视图后续拖拽/时区属 v2；JSONL 必须置于静态 ROOT 外 + 容量轮转（S2 验收含此断言）。
-- **R-18（环境受限）**：vite build EPERM / worktree 无 node_modules / board-plugin 宿主注入 —— 沿用仓库纪律：按「环境受限+复现步骤」如实记录，不冒充通过；S8 汇总。
-- **假设**：G-8..G-14 默认采纳（将军未否决）；测试运行命令以 `node --test <file>`（直跑 `node <file>` 等效）与 `pnpm build`（workbench）为准；本批全部零新增依赖。
+## 5. 边界、风险与假设（breaker 视角）
 
-## 6. 本阶段验收对照（breaker 自拟，逐条对应任务验收）
-
-- **AC-1（拆成可独立认领、独立验收的子任务）**：§1 机器行 8 切片，每片 = coder_Si→tester_Si 垂直单元，验收标准逐条可测（命令+期望）。✅
-- **AC-2（每子任务带 验收标准+依赖+工作量）**：§1 验收标准 + §2.1 blockedBy + §3 工作量/DoD。✅
-- **AC-3（完成=什么 的可测口径，不留黑盒）**：每片 DoD 均写成「命令/行为 + 可观察结果」；环境受限项显式标注，不冒充通过。✅
-- **AC-4（顺序/并行明确，无循环依赖无遗漏）**：§2 顺序/并行 + §4 覆盖矩阵（R-A1..R-B3 全覆盖，R-B4/B5/C1/C2/C3 显式标注归属与触发，不拆悬空任务）。✅
-- **边界遵守**：本阶段只产出本文档（docs/TASK_BREAKDOWN.md，取代 T-038 旧版）；未改任何实现代码、未做技术选型变更、未调 taskctl/看板写接口、未 push、未下载依赖。✅
-- **真实验证记录**：①全部 [本地] 锚点行号经 read/grep 实测（serve.mjs:209/274/730-743/809-821/942-944；ChatView:49-51/160/239；App.tsx:59/348-359；Sidebar:13-23/61-80；api.ts:280/489-500 subscribeHubAudit；team-hub ensureColumn/audit/chat 路由先例）；②w/T-051 分支与提交 a524951 存在性经 git branch/cat-file 实测；③`## slices` 解析格式对照 plugins/src/index.ts parseSlices（L472-491）与 team-hub expandGoalSlices（L758-823）逐字段核验。✅
-
----
-
-## 附录 A：与既有产物的关系
-
-- T-038 拆解（第一批 S1~S8）已交付；本文件**取代**之，旧版见 `git log --follow docs/TASK_BREAKDOWN.md`（T-038 promote 提交）。
-- 范围/验收基线 = docs/REQUIREMENTS.md（T-073）；方案/选型/闸门 = docs/RESEARCH.md（T-074，含 T-044 全文存档附录）。本批 P0 缺陷复现证据 = docs/T062-evidence/、docs/T059-evidence/ 等，供 coder 回归依据。
+- 🚫 本拆解不写实现、不改需求语义与方案结论；四能力范围以 T-095 REQUIREMENTS 为准，T-103 链「任务详情文档预览」目标不在本批。
+- 🚫 不拆出无法验收的悬空任务：每片 DoD 与 §1 机器行逐条对应 AC；无回收站/跨空间文件预览/流式/语音等 T-095 scope-out 内容。
+- ⚠️ 风险 R-7 文件域重叠已按 §1/§2 处理（三条同文件链 + 注册顺序派工）；R-1 草稿泄漏敞口由 S1 AC-R1-7 同批收口；R-6 提示词膨胀由 S5 预算 + S6 总纲缓解；R-4 回复依赖守护在线由 S9 超龄兜底（120s → failed）缓解；token 成本由每空间可关开关（S9）+ 轻量模型默认（S10）缓解。
+- ℹ️ 环境与验证事实（本阶段实测）：代码基线 ba0372d 与方案基线 3c8f27d 逐字节一致（git diff 仅 docs 两文件）；node --test 在本会话沙箱因子进程 spawn EPERM（errno -4048）不可用，按各测试文件头注释「沙箱受限直跑等效」验证——skills 12/12、chat 13/13 全绿（直接运行 exit 0）；plugins/workbench 在本 worktree 无 node_modules，typecheck/build 需宿主或安装环境，下游如实记录受限即可（仓库 R-18 惯例）。

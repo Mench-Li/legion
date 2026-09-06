@@ -62,3 +62,16 @@
 - 运行中生产调解流（T-099/T-107 等 stash/pop）与工作树：重启前若遇新冲突标记，先按
   docs/ORCHESTRATION-V3.md 惯例三方合并再重启；本次预检工作树无 tracked 改动。
 - 验收证据、复跑步骤见 P2 runbook；设计说明见 ORCHESTRATION-V3.md §12。
+
+---
+
+## 执行记录（2026-09-06）
+
+- 宿主重启：PID 13440（17:01:29 起）→ 再次启动 PID 20100（17:46:59 起，当前单实例，唯一 dsh web 进程）
+- 8787 hub `/api/config` 200；goal 表 docsDir 列在位（迁移 no-op）
+- `GET /api/goal?scope=software` 已带 docsDir 字段（新 hub 代码生效）；既有目标 docsDir=null：
+  G-mtpaab3x-1(active)、G-mtolvlpy-1(done)、G-002(done)
+- 守护日志恢复扫单（inbox=N 每 30s）；孤儿回收生效：T-108 → todo → 复用 worktree 重派（custom-ds）
+- 当前队列：T-108 reviewer in_progress、T-109 tester todo、T-110 devops todo（均属 G-mtpaab3x-1）
+- 沙箱端口 0 残留；工作树无 tracked 改动
+- 待办：首个「真实新目标」抽查（docsDir 自动赋值 + 文档落 docs/<goalId>/）——仅在将军有新需求时进行

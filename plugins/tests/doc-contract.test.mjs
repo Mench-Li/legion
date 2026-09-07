@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
-import { stageContractDocs, resolveStageDocPaths } from '../lib/index.js'
+import { stageContractDocs, resolveStageDocPaths, resolveStageDocPathsWithDocSync } from '../lib/index.js'
 
 /** 仓库根 = tests/ 上两级（plugins/tests → plugins → 仓库根）。 */
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -78,6 +78,34 @@ test('解析纯函数：docs 存在时按模板展开 {taskId}，docs 缺省时�
   assert.deepEqual(stageContractDocs({ docs: ['./docs\\x.md'] }), ['docs/x.md'])
   // 未知角色/缺 docs 不报错（前置兼容 AC-R1-5）
   assert.deepEqual(stageContractDocs({ docs: ['role-without-contract.md'], artifact: 'docs/RESEARCH.md' }), ['role-without-contract.md'])
+})
+
+test('docSync 契约路径（RC-2，AC-R4-2）：docSync=true 任务契约 = 岗位 stage 契约 + docs/FEATURES.md + README.md；非 docSync 原样', () => {
+  // coder 岗位无 stage.docs（roles.json 契约）→ docSync=true 时仅追加功能手册 + README
+  const coderStage = { role: 'coder', next: 'reviewer' }
+  assert.deepEqual(resolveStageDocPathsWithDocSync(coderStage, 'T-123', true), ['docs/FEATURES.md', 'README.md'])
+  // 非 docSync coder → 空（不背任何契约，AC-R4-2：不做文档同步也不被软门禁卡住）
+  assert.deepEqual(resolveStageDocPathsWithDocSync(coderStage, 'T-123', false), [])
+  assert.deepEqual(resolveStageDocPathsWithDocSync(coderStage, 'T-123', undefined), [])
+  assert.deepEqual(resolveStageDocPathsWithDocSync(coderStage, 'T-123', null), [])
+  // 有 stage.docs 的文档岗 + docSync → 岗位契约在前、功能手册/README 去重追加在后（顺序稳定：docs/FEATURES.md 先于 README.md）
+  const devopsStage = { role: 'devops', docs: ['docs/DEPLOY.md'], next: null }
+  assert.deepEqual(
+    resolveStageDocPathsWithDocSync(devopsStage, 'T-123', true),
+    ['docs/DEPLOY.md', 'docs/FEATURES.md', 'README.md'],
+  )
+  // 已有 docs 含 FEATURES/README 时不重复追加（去重；如 roles.json 未来把 FEATURES 列入岗位契约）
+  const stageWithFeat = { role: 'tester', docs: ['docs/FEATURES.md', 'docs/TEST_REPORT.md'] }
+  assert.deepEqual(
+    resolveStageDocPathsWithDocSync(stageWithFeat, 'T-123', true),
+    ['docs/FEATURES.md', 'docs/TEST_REPORT.md', 'README.md'],
+  )
+  // 与 resolveStageDocPaths 的 {taskId} 展开语义一致（docSync 不影响模板展开）
+  const reviewerStage = { role: 'reviewer', docs: ['docs/review/{taskId}-REVIEW.md'] }
+  assert.deepEqual(
+    resolveStageDocPathsWithDocSync(reviewerStage, 'T-456', true),
+    ['docs/review/T-456-REVIEW.md', 'docs/FEATURES.md', 'README.md'],
+  )
 })
 
 test('roles.json JSON.parse 合法且结构可供消费方整读（board-plugin /api/config 同款读取）', () => {

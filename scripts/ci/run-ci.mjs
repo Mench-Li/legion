@@ -332,9 +332,21 @@ async function stageStage() {
 async function stageDoc() {
   // 文档新鲜度校验（R-5 / S3）：调用零依赖脚本 check-docs.mjs，验证 README + docs/FEATURES.md 结构/链接/索引一致。
   const r = await exec(process.execPath, [join(ROOT, 'scripts', 'ci', 'check-docs.mjs')], { cwd: ROOT })
-  const tail = (r.out + '\n' + r.err).split('\n').filter(l => /PASS|FAIL/.test(l)).slice(-4).join(' | ')
   const ok = r.code === 0
-  return { ok, detail: 'doc: 文档新鲜度校验（check-docs.mjs）exit=' + r.code + (tail ? '\n  输出要点：' + tail : '') }
+  // RC-3 修复（T-117 实测）：原实现只保留 PASS|FAIL 过滤行，check-docs 缺失/脚本语法错等模块级错误被吞
+  // （ci.log 仅剩「doc: … exit=1」+「[doc] -> FAIL」，排障只能另跑 check-docs）。失败态改为带原始输出尾部。
+  const raw = (r.out + '\n' + r.err).trim()
+  let extra = ''
+  if (ok) {
+    const tail = raw.split('\n').filter(l => /PASS|FAIL/.test(l)).slice(-4).join(' | ')
+    if (tail) extra = '\n  输出要点：' + tail
+  } else {
+    const lines = raw.split('\n').filter(Boolean)
+    const fails = lines.filter(l => /^FAIL:/.test(l))
+    const tail = (fails.length > 0 ? fails.slice(-10) : lines.slice(-12)).join('\n  ')
+    extra = '\n  失败明细：\n  ' + tail
+  }
+  return { ok, detail: 'doc: 文档新鲜度校验（check-docs.mjs）exit=' + r.code + extra }
 }
 
 // ---------- 主流程 ----------

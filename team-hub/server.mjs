@@ -381,6 +381,12 @@ ensureColumn('goal', 'context', "context TEXT DEFAULT ''")
 ensureColumn('goal', 'contextVersion', 'contextVersion INTEGER DEFAULT 0')
 // 4) goal.docsDir —— 目标级分析文档命名空间（docs/<goalId>）：NULL = 遗留目标沿用根 docs/ 槽位。
 ensureColumn('goal', 'docsDir', 'docsDir TEXT')
+// 5) docSync（RC-2 修复，T-117 实测）——「用户可见行为变更需同步功能手册+README」声明通道。
+//    goal.docSync：目标级声明（发布时 body.docSync/feature）；tasks.docSync：任务级权威字段
+//    （守护 registerContractDocs 消费 t.docSync===true → done 结算追加 docs/FEATURES.md + README.md 契约）。
+//    发布目标时只把声明落到链上 coder 岗位任务（实现+更新文档的执行者），避免全链误伤前段分析岗。
+ensureColumn('goal', 'docSync', 'docSync INTEGER DEFAULT 0')
+ensureColumn('tasks', 'docSync', 'docSync INTEGER DEFAULT 0')
 ensureColumn('tasks', 'fileDomain', 'fileDomain TEXT')
 ensureColumn('audit', 'goalId', 'goalId TEXT')
 // 历史链回填：老库「一空间一目标」时代的 [auto-goal] 任务没有 goalId。
@@ -489,6 +495,7 @@ function rowToTask(row) {
     fixCount: row.fixCount ?? 0,
     goalId: row.goalId ?? null,
     fileDomain: parseJson(row.fileDomain, null),
+    docSync: !!row.docSync,
     testReport: parseJson(row.testReport, null),
     reviewNotes: parseJson(row.review_notes ?? '[]', []),
     createdAt: row.createdAt,
@@ -527,6 +534,9 @@ function rowToGoal(row) {
     version: row.version,
     mode: row.mode ?? 'chain',
     docsDir: row.docsDir ?? null,
+    // 幂等转换：goalView(getGoal()) 会把已转换对象二次传入 rowToGoal，
+    // 严格 ===1 对二次传入的 boolean true 恒 false（RC-2 现场）；!! 对 1/0/true/false 均正确且幂等。
+    docSync: !!row.docSync,
     context: row.context ?? '',
     contextVersion: row.contextVersion ?? 0,
     createdAt: row.createdAt,
@@ -602,13 +612,13 @@ function nextGoalId() {
  * 目标级分析文档命名空间：新目标分配 docsDir = `docs/<goalId>`（阶段产物文档进目标独立目录，
  * 跨目标分析前缀可安全并行）；本列上线前已发布的目标 docsDir=NULL，沿用根 docs/ 固定槽位（旧链兼容）。
  */
-function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general') {
+function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general', docSync = false) {
   return withTx(() => {
     const rawMode = mode === 'slice' ? 'slice' : 'chain'
     const t = now()
     const goalId = nextGoalId()
-    db.prepare('INSERT INTO goal (id, scope, objective, status, version, mode, createdAt, updatedAt, endedAt, docsDir) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(goalId, targetScope, objective.trim(), 'active', 1, rawMode, t, t, null, `docs/${goalId}`)
+    db.prepare('INSERT INTO goal (id, scope, objective, status, version, mode, createdAt, updatedAt, endedAt, docsDir, docSync) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(goalId, targetScope, objective.trim(), 'active', 1, rawMode, t, t, null, `docs/${goalId}`, docSync === true ? 1 : 0)
     const chain = createGoalChain(goalId, targetScope, objective.trim(), rawMode)
     // 记录实际生效的模式（slice 缺岗会回退 chain）
     if (chain.mode !== rawMode) {
@@ -1329,6 +1339,7 @@ function createTask(input) {
       fixCount: input.fixCount ?? 0,
       goalId,
       fileDomain: Array.isArray(input.fileDomain) ? input.fileDomain.map(String).filter(Boolean) : null,
+      docSync: input.docSync === true,
       createdAt: now(),
       updatedAt: now(),
     }
@@ -1338,9 +1349,9 @@ function createTask(input) {
     if (t.parent !== null && !db.prepare('SELECT 1 FROM tasks WHERE id=?').get(t.parent)) throw new Error(`父任务 ${t.parent} 不存在`)
     db.prepare(`
       INSERT INTO tasks (id, title, description, acceptance, boundary, priority, status, version, soldier, claimedRound, claimedAt,
-        ordersVersion, parent, role, scope, blocks, blockedBy, comments, evidence, patches, artifacts, slice, sliceIdx, fixOf, fixCount, goalId, fileDomain, createdAt, updatedAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, NULL, ?, ?, ?, ?, '[]', ?, '[]', '[]', '[]', '[]', ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(t.id, t.title, t.description, JSON.stringify(t.acceptance), JSON.stringify(t.boundary), t.priority, t.status, t.ordersVersion, t.parent, t.role, t.scope, JSON.stringify(t.blockedBy), t.slice, t.sliceIdx, t.fixOf, t.fixCount, t.goalId, t.fileDomain ? JSON.stringify(t.fileDomain) : null, t.createdAt, t.updatedAt)
+        ordersVersion, parent, role, scope, blocks, blockedBy, comments, evidence, patches, artifacts, slice, sliceIdx, fixOf, fixCount, goalId, fileDomain, docSync, createdAt, updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, NULL, ?, ?, ?, ?, '[]', ?, '[]', '[]', '[]', '[]', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(t.id, t.title, t.description, JSON.stringify(t.acceptance), JSON.stringify(t.boundary), t.priority, t.status, t.ordersVersion, t.parent, t.role, t.scope, JSON.stringify(t.blockedBy), t.slice, t.sliceIdx, t.fixOf, t.fixCount, t.goalId, t.fileDomain ? JSON.stringify(t.fileDomain) : null, t.docSync ? 1 : 0, t.createdAt, t.updatedAt)
     return getTask(id)
   })
 }
@@ -1351,13 +1362,13 @@ function createTask(input) {
 const GOAL_STAGE_LABELS = ['需求讨论', '方案设计', '任务拆分', '用例设计', '代码开发', '代码审查', '测试验收', '发布部署']
 
 /** 建一个 [auto-goal] 任务行（chain / slice 展开共用）。goalId = 所属目标（多目标并发按目标挂接）。返回新任务。 */
-function insertGoalTask({ title, description, acceptance, boundary, role, scope, blockedBy = [], status = 'todo', parent = null, slice = null, sliceIdx = null, fixOf = null, fixCount = 0, priority = 'high', goalId = null, fileDomain = null }) {
+function insertGoalTask({ title, description, acceptance, boundary, role, scope, blockedBy = [], status = 'todo', parent = null, slice = null, sliceIdx = null, fixOf = null, fixCount = 0, priority = 'high', goalId = null, fileDomain = null, docSync = false }) {
   const id = nextId()
   db.prepare(`
     INSERT INTO tasks (id, title, description, acceptance, boundary, priority, status, version, soldier, claimedRound, claimedAt,
-      ordersVersion, parent, role, scope, blocks, blockedBy, comments, evidence, patches, artifacts, slice, sliceIdx, fixOf, fixCount, goalId, fileDomain, createdAt, updatedAt)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, NULL, 1, ?, ?, ?, '[]', ?, '[]', '[]', '[]', '[]', ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(id, title, description, JSON.stringify(acceptance), JSON.stringify(boundary), priority, status, parent, role, scope, JSON.stringify(blockedBy), slice, sliceIdx, fixOf, fixCount, goalId, Array.isArray(fileDomain) ? JSON.stringify(fileDomain) : null, now(), now())
+      ordersVersion, parent, role, scope, blocks, blockedBy, comments, evidence, patches, artifacts, slice, sliceIdx, fixOf, fixCount, goalId, fileDomain, docSync, createdAt, updatedAt)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, NULL, 1, ?, ?, ?, '[]', ?, '[]', '[]', '[]', '[]', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, title, description, JSON.stringify(acceptance), JSON.stringify(boundary), priority, status, parent, role, scope, JSON.stringify(blockedBy), slice, sliceIdx, fixOf, fixCount, goalId, Array.isArray(fileDomain) ? JSON.stringify(fileDomain) : null, docSync === true ? 1 : 0, now(), now())
   return getTask(id)
 }
 
@@ -1394,6 +1405,9 @@ function createGoalChain(goalId, scope, objective, mode = 'chain') {
         : `[auto-goal]\n目标：${objective.trim()}\n本阶段：${label}（${r.name}）`
       // 生成任务必须同时生成验收标准 + 边界（做什么/不做什么）——按该岗位模板注入
       const s = standardsFor(r.role)
+      // RC-2：docSync 目标 → 落到链上 coder 岗位（实现+同步手册/README 的执行者）；
+      // 前段分析岗/测试岗/发布岗不背 docSync（避免 FEATURES 尚不存在时误停前段 in_review）。
+      const chainTaskDocSync = goal.docSync === true && r.role === 'coder'
       const task = insertGoalTask({
         title: `【${label}】${objective.trim().slice(0, 40)}`,
         description,
@@ -1403,6 +1417,7 @@ function createGoalChain(goalId, scope, objective, mode = 'chain') {
         scope,
         blockedBy: prev ? [prev] : [],
         goalId,
+        docSync: chainTaskDocSync,
       })
       created.push({ id: task.id, role: r.role, label })
       prev = task.id
@@ -1444,6 +1459,9 @@ function expandGoalSlices({ testDesignerTaskId, slices, by }) {
     const objectiveLine = String(td.description ?? '').split('\n').find(l => l.startsWith('目标：')) ?? '目标：（见分析前缀任务）'
     // 切片任务归属同一目标（沿用 test-designer 任务的 goalId；老链无 goalId 时为 null，不影响建链）
     const goalId = td.goalId ?? null
+    // RC-2：docSync 目标 → 每个 coder_Si 带 docSync（切片实现各自同步手册相关小节）
+    let goalDocSync = false
+    if (goalId) { try { goalDocSync = getGoal(goalId).docSync === true } catch { /* 目标缺失则不强制 */ } }
     // 测试用例文档按目标目录解析（docs/<goalId>/TEST_CASES.md；遗留目标回退根 docs/TEST_CASES.md）
     const testCasesPath = goalDocPathOf(goalId, 'TEST_CASES.md')
     const created = []
@@ -1469,6 +1487,7 @@ function expandGoalSlices({ testDesignerTaskId, slices, by }) {
         sliceIdx: si,
         goalId,
         fileDomain: files,
+        docSync: goalDocSync,
       })
       // tester_Si：只测不修；验收 = 结构化 testReport（passed=true 才自动 done，D7' 机器闸门）
       const testerStd = sliceStandards('tester', [], [], ['不得修改任何源码/测试用例（只测不修）'])
@@ -1844,7 +1863,7 @@ async function handle(req, res) {
           priority: body.priority, status: body.status, parent: body.parent, role: body.role,
           scope, ordersVersion: body.ordersVersion,
           blockedBy: body.blockedBy, slice: body.slice, sliceIdx: body.sliceIdx, fixOf: body.fixOf, fixCount: body.fixCount,
-          goalId: body.goalId, fileDomain: body.fileDomain,
+          goalId: body.goalId, fileDomain: body.fileDomain, docSync: body.docSync === true,
         })
         audit(by, scope, 'create', task.id, { title: task.title }, task.goalId)
         return task
@@ -2700,7 +2719,9 @@ async function handle(req, res) {
         const objective = body.objective
         if (typeof objective !== 'string' || objective.trim().length === 0) throw new Error('缺少参数 objective')
         const targetScope = typeof body.scope === 'string' && body.scope.trim().length > 0 ? body.scope.trim() : scope
-        return publishGoalRecord(targetScope, objective, body.mode === 'slice' ? 'slice' : 'chain', by)
+        // RC-2：body.docSync / body.feature=true → 目标级 docSync 声明（链上 coder 任务承接，见 createGoalChain）
+        const docSync = body.docSync === true || body.feature === true
+        return publishGoalRecord(targetScope, objective, body.mode === 'slice' ? 'slice' : 'chain', by, docSync)
       })
       return
     }

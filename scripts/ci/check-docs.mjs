@@ -63,6 +63,12 @@ let feats = ''
 let readme = ''
 try { feats = readFileSync(FEATURES, 'utf8') } catch (e) { fail(FEATURES, null, '无法读取：' + e.message) }
 try { readme = readFileSync(README, 'utf8') } catch (e) { fail(README, null, '无法读取：' + e.message) }
+// RC-1 修复（T-117 实测）：Windows core.autocrlf 下工作区文件为 CRLF，逐行 /^…$/ 解析会把 \r 留在行尾
+// （. 不匹配 \r、$ 无 m 旗标不认行中换行前位置）→ 标题集为空 → 六类/索引锚点/互链连锁假红。
+// 提交 blob 恒为 LF（仓库规范），此处仅把行尾归一化再解析，不影响行号与语义。
+const LF = (s) => s.replace(/\r\n?/g, '\n')
+feats = LF(feats)
+readme = LF(readme)
 
 // ---- 工具 ----
 const norm = (s) => s.trim()

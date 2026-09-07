@@ -26,7 +26,7 @@ import type { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import type { ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import type AgentPresets from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
-import { skillsChanged, type SkillRef } from './skillsCache.js'
+import { formatSkill, skillsChanged, type SkillRef } from './skillsCache.js'
 import { buildNormSections, type NormFile } from './norms.js'
 import { buildChatAnswerPrompt, chatIdentityFor, type ChatCtxMsg } from './chatResponder.js'
 
@@ -406,6 +406,18 @@ export function stageContractDocs(stage: { docs?: unknown; artifact?: string } |
 /** 契约模板按任务展开：把 {taskId} 占位替换为真实任务 id（reviewer 等动态命名文档），返回规范化相对路径。 */
 export function resolveStageDocPaths(stage: { docs?: unknown; artifact?: string } | null | undefined, taskId: string): string[] {
   return stageContractDocs(stage).map(p => p.replace(/\{taskId\}/g, taskId).replace(/\\/g, '/').replace(/^\.\//, ''))
+}
+
+/** R-4/D2（RC-2 修复，T-117 实测）：docSync（用户可见行为变更）任务的契约路径 = 岗位 stage 契约 + docs/FEATURES.md + README.md。
+ *  纯函数供 registerContractDocs（登记/判缺）与结算门禁（contractPaths 非空判定）共用——hub 侧 docSync 声明列上线前
+ *  这三处消费点 t.docSync 恒 undefined（断言 H-1 未满足）；本函数把「docSync=true → 追加功能手册+README」固化为可测单元。
+ *  非 docSync 任务原样返回（不改岗位既有契约）。 */
+export function resolveStageDocPathsWithDocSync(stage: { docs?: unknown; artifact?: string } | null | undefined, taskId: string, docSync: boolean | null | undefined): string[] {
+  const paths = resolveStageDocPaths(stage, taskId)
+  if (docSync === true) {
+    for (const p of ['docs/FEATURES.md', 'README.md']) if (!paths.includes(p)) paths.push(p)
+  }
+  return paths
 }
 
 /** 文件内容 sha256（契约登记幂等比对用：同 path 同字节不重复登记）。 */
@@ -1195,11 +1207,8 @@ exit 0
    */
   async function registerContractDocs(t: Task, stage: StageDef, worktreeDir: string | null, goal: GoalCtx | null | undefined): Promise<{ registered: string[]; missing: string[] }> {
     const baseDir = worktreeDir ?? repoRootFor()
-    const rawPaths = resolveStageDocPaths(stage, t.id)
-    // R-4/D2 文档同步契约：用户可见行为变更（docSync）任务，追加功能手册 + README 作为契约产出文档（仅此类任务追加，I-4）。
-    if (t.docSync === true) {
-      for (const p of ['docs/FEATURES.md', 'README.md']) if (!rawPaths.includes(p)) rawPaths.push(p)
-    }
+    // docSync 任务契约 = 岗位契约 + docs/FEATURES.md + README.md（纯函数固化，见 resolveStageDocPathsWithDocSync）
+    const rawPaths = resolveStageDocPathsWithDocSync(stage, t.id, t.docSync)
     const registered: string[] = []
     const missing: string[] = []
     for (const rawRel of rawPaths) {
@@ -1415,7 +1424,7 @@ exit 0
         : ['- （无）']),
       ...(norms.sections.length > 0 ? ['', ...norms.sections] : []),
       ...(sharedSkills.length > 0
-        ? ['', '团队共享技能（必须遵守，来自 team-hub）：', ...sharedSkills.map(s => `【${s.name}】${s.prompt}`)]
+        ? ['', '团队共享技能（必须遵守，来自 team-hub）：', ...sharedSkills.map(s => formatSkill(s))]
         : []),
       ...(spaceBinding !== null
         ? ['', `空间仓库绑定（本工作空间）：本地文件夹 = ${spaceBinding.localDir}${spaceBinding.remoteUrl ? `；远程仓库 = ${spaceBinding.remoteUrl}` : '（仅本地，不进共享仓库）'}`]
@@ -1633,11 +1642,9 @@ exit 0
       if (report.artifact && report.artifact.path) await recordArtifact(t.id, report.artifact, worktreeDir)
       // S2 契约文档自动登记：commitWorktree 之后、autoPromote 之前（存在性以 worktree 目录为基准）。
       // 流水线文档型岗位（roles.json stage.docs 契约）结算时逐条登记仓库相对路径条目；worker 未填 artifact 亦登记（AC-R1-2）。
-      const contractPaths = isPipeline && stage ? stageContractDocs(stage) : []
-      // R-4/D2 文档同步契约：docSync 任务对 coder/devops 的契约路径追加 docs/FEATURES.md + README.md（否则该任务不做文档同步也不会被软门禁卡住，AC-R4-2）。
-      if (isPipeline && stage && t.docSync === true) {
-        for (const p of ['docs/FEATURES.md', 'README.md']) if (!(contractPaths as string[]).includes(p)) contractPaths.push(p)
-      }
+      // R-4/D2 文档同步契约：docSync（用户可见行为变更）任务对 coder/devops 追加 docs/FEATURES.md + README.md，
+      // 保证外部门禁（contractPaths 非空）与 registerContractDocs 内部登记都覆盖功能手册（AC-R4-2）。
+      const contractPaths = isPipeline && stage ? resolveStageDocPathsWithDocSync(stage, t.id, t.docSync) : []
       let contractReg: { registered: string[]; missing: string[] } | null = null
       if (contractPaths.length > 0 && stage) {
         contractReg = await registerContractDocs(t, stage, worktreeDir, goal)

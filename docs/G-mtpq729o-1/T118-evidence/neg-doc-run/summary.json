@@ -1,0 +1,13 @@
+{
+  "root": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-118",
+  "outDir": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-118\\docs\\G-mtpq729o-1\\T118-evidence\\neg-doc-run",
+  "finishedAt": "2026-09-07T09:59:08.465Z",
+  "stages": [
+    {
+      "name": "doc",
+      "status": "FAIL",
+      "ms": 144
+    }
+  ],
+  "failed": 1
+}

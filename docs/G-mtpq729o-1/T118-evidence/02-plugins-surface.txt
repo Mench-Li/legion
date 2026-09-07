@@ -1,0 +1,9 @@
+== 02 机制面（S4 docSync 所在 plugins 代码面）回归 ==
+[cmd] node workbench/node_modules/typescript/lib/tsc.js -p plugins/tsconfig.json --noEmit
+exit = 0（0 诊断，干净；先做 plugins/node_modules junction 后即可解析 @types/node）
+[cmd] node workbench/node_modules/typescript/lib/tsc.js -p plugins/tsconfig.json   # 产物编译出 plugins/lib（gitignored，不入库）
+exit = 0
+[cmd] node --test plugins/tests/*.test.mjs
+exit = 0；tests 54 / pass 54 / fail 0（8 个套件）
+  含 doc-contract / artifact-register（T-107 契约登记回归）与 worker-regression / slice-orchestration
+  （T-117 新增回归：blocked 续做先 claim、失败 streak 不被打断、依赖解除 blocked 重派等）

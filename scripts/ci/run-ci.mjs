@@ -7,7 +7,7 @@
  * （06480ba，三中心 + 日程/通知 + 平台切片全部 promote 后）重新对齐并收口。
  *
  * 用法：
- *   node scripts/ci/run-ci.mjs                            # 全量门禁（env,deps,build,test,smoke,stage）
+ *   node scripts/ci/run-ci.mjs                            # 全量门禁（env,deps,build,test,smoke,stage,doc）
  *   node scripts/ci/run-ci.mjs --only build,test          # 只跑某阶段
  *   node scripts/ci/run-ci.mjs --skip smoke               # 跳过某阶段
  *   node scripts/ci/run-ci.mjs --out docs/T093-evidence/ci-run   # 证据输出目录（ci.log + summary.json）
@@ -20,6 +20,7 @@
  *          + contracts 56 + whiteboard 67（7 文件，含真实服务 e2e）
  *   smoke  L1 真实服务冒烟（仓库既有冒烟脚本直跑 + 白板真实进程探活 + v1 看板启停）
  *   stage  发布物暂存：releases/legion-<gitHead>-<date>/（dist 快照 + MANIFEST.json + SHA256SUMS.txt）
+ *   doc    文档新鲜度校验：node scripts/ci/check-docs.mjs（README + docs/FEATURES.md 结构/链接/索引一致；可 --skip doc）
  *
  * 通过标准：全部阶段 PASS，exit code 0；输出落 --out 目录（默认 .ci/<时间戳>/）。
  * 沙箱说明：本仓库既有边界 = pwsh/受限 shell 拦截子进程 pipe 捕获（spawn EPERM）；
@@ -328,6 +329,14 @@ async function stageStage() {
   }
 }
 
+async function stageDoc() {
+  // 文档新鲜度校验（R-5 / S3）：调用零依赖脚本 check-docs.mjs，验证 README + docs/FEATURES.md 结构/链接/索引一致。
+  const r = await exec(process.execPath, [join(ROOT, 'scripts', 'ci', 'check-docs.mjs')], { cwd: ROOT })
+  const tail = (r.out + '\n' + r.err).split('\n').filter(l => /PASS|FAIL/.test(l)).slice(-4).join(' | ')
+  const ok = r.code === 0
+  return { ok, detail: 'doc: 文档新鲜度校验（check-docs.mjs）exit=' + r.code + (tail ? '\n  输出要点：' + tail : '') }
+}
+
 // ---------- 主流程 ----------
 const STAGES = [
   { name: 'env', label: '环境自检', fn: stageEnv },
@@ -336,6 +345,7 @@ const STAGES = [
   { name: 'test', label: 'L0 契约/基线测试', fn: stageTest },
   { name: 'smoke', label: 'L1 真实服务冒烟', fn: stageSmoke },
   { name: 'stage', label: '发布物暂存', fn: stageStage },
+  { name: 'doc', label: '文档新鲜度校验（check-docs.mjs）', fn: stageDoc },
 ]
 
 async function main() {
@@ -344,7 +354,8 @@ async function main() {
   const wanted = STAGES.filter(s => (ONLY.length === 0 || ONLY.includes(s.name)) && !SKIP.includes(s.name))
   if (wanted.length === 0) { tee('no stages selected'); process.exit(2) }
   tee('Legion CI run: root=' + ROOT + ' node=' + process.versions.node)
-  tee('stages: ' + wanted.map(s => s.name).join(' -> ') + ' | out=' + OUT_DIR)
+  tee('all stages: ' + STAGES.map(s => s.name).join(',') + ' | out=' + OUT_DIR)
+  tee('selected: ' + wanted.map(s => s.name).join(' -> '))
   let failed = 0
   for (const s of wanted) {
     const t0 = Date.now()

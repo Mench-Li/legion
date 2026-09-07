@@ -1,0 +1,41 @@
+﻿  [PASS] TC-S1-01 存在非空且含 # 标题 (len=16079)
+  [PASS] TC-S1-02 标题行含「功能使用介绍/使用手册」
+  [PASS] TC-S1-03 章节「0. 一句话定位」存在且非空（正文行=6）
+  [PASS] TC-S1-03 章节「1. 面向读者」存在且非空（正文行=4）
+  [PASS] TC-S1-03 章节「2. 快速开始」存在且非空（正文行=22）
+  [PASS] TC-S1-03 章节「3. 模块章节（分模块功能指南）」存在且非空（正文行=116）
+  [PASS] TC-S1-03 章节「4. 功能索引」存在且非空（正文行=21）
+  [PASS] TC-S1-03 章节「5. 故障排查与术语附录」存在且非空（正文行=38）
+  [PASS] TC-S1-04 索引行数=18 >= 18
+  [PASS] TC-S1-04 0 坏列（bad=0）
+  [PASS] TC-S1-07 状态枚举合法（bad=0）
+  [PASS] TC-S1-05 索引锚点 0 失效（bad=0）
+  [PASS] TC-S1-06 索引对应小节 >=5 行（short=[]）
+  [PASS] TC-S1-06 小节含入口/操作（miss=[]）
+  [PASS] TC-S1-07/13 无过程叙事（已交付计数=0）
+  [PASS] TC-S1-08 手册承接 README 模块主题（miss=[]）
+  [PASS] TC-S1-09 18 功能域关键词覆盖（missing=[]）
+  [PASS] TC-S1-10 边界：恰 18 行（下界=18 恰满足、无越界误报）
+  [PASS] TC-S1-11 反：4 列坏行可检出（bad=1）
+  [PASS] TC-S1-12 反：失效锚点注入样本由 TC-S3-05（check-docs 同源负例）覆盖——本 harness 锚点判定与 check-docs 一致
+  [PASS] TC-S1-13 反：注入叙事可检出
+  [PASS] TC-S1-14 现状 0 空壳小节（short=[]）
+  [PASS] TC-S1-15 无目标级目录路径书写
+  [PASS] TC-S2-01 README 非空 MD (len=8539)
+  [PASS] TC-S2-02 互链数=20 >= 8
+  [PASS] TC-S2-03 互链锚点 0 失效（total=20, bad=[]）
+  [PASS] TC-S2-04 ≥3 行同文块=0（dup=0）
+  [PASS] TC-S2-05 关键项在二文件之一（miss=[]）
+  [PASS] TC-S2-05 README §6 排障主题仍在（miss=[]）
+  [PASS] TC-S2-06 README 正文无过程叙事
+  [PASS] TC-S2-06 附录互链历史记录文档
+  [PASS] TC-S2-07 README 围栏配对（4）
+  [PASS] TC-S2-07 README 表格分隔行存在
+  [PASS] TC-S2-07 README 表头存在
+  [PASS] TC-S2-08 边界：锚点 #nonexist 不在标题集（注入即检出）
+  [PASS] TC-S2-09 阈值边界：≥3 行判重逻辑生效（check-docs 同规则；现状 0 块）
+  [PASS] TC-S2-10 反：现状关键项仍在（删除即缺失——由 check-docs 关键项校验兜底）
+  [PASS] TC-S2-11 无目标级路径漂移
+  [PASS] TC-S2-12 README 纯 Markdown（依赖面见回归证据 05）
+  [FAIL] TC-S2-13 FEATURES→README 反向锚点链接 >=1（实际=0——将军裁决 RC-4 记 backlog 本期不补）
+RESULT: pass=39 fail=1

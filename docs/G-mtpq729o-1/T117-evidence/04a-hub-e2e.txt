@@ -1,0 +1,22 @@
+== T-117 round-3 S4 docSync E2E (host-run; fresh scratch DB, scope=software 8-role roster; HEAD=ca9b45c) ==
+hub: node team-hub/server.mjs TEAM_HUB_PORT=18911 TEAM_HUB_DB=scratch/t117-r3-hub/team.db (fresh create, 鉴权 off)
+
+[TC-S4-01/AC-R4-1 chain] POST /api/goal {scope:software, docSync:true}
+  -> 200 goalId=G-mtr21qbn-3 goal.docSync=true (type boolean)
+  -> chain 8 tasks docSync 分布: breaker:false coder:true devops:false requirement:false researcher:false
+     reviewer:false test-designer:false tester:false
+  判定: coder 1/1 true; non-coder true=0 (符合「docSync 落链上 coder 岗位」RC-2 口径)
+
+[默认 false] POST /api/goal (无标记) -> goal.docSync=false
+[feature 别名] POST /api/goal {feature:true} -> goal.docSync=true
+[TC-S4-04/持久化读回] GET /api/board: manual coder task {docSync:true} -> docSync=true type=boolean;
+  plain task -> docSync=false (读通, 无 undefined)
+
+[api/create 透传] POST /api/create {docSync:true} -> task.docSync=true; 无标记 -> false; 显式 false -> false
+
+[slice 模式 RC-2] POST /api/goal {mode:slice, docSync:true} -> goal docSync=true
+  前置链完成 (claim+advance requirement..test-designer done) 后 POST /api/goal/slices x2 slices
+  -> 200; created=T-031..T-035; coder_Si T-031(S1) docSync=true, T-033(S2) docSync=true,
+     tester_Si T-032/T-034 docSync=false, devops T-035 docSync=false
+  判定: coder_Si 2/2 true; tester/devops true=0
+[幂等] 重复展开 -> {created:[], existed:[T-031..T-035]} (不重复建)

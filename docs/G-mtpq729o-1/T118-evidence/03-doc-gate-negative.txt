@@ -1,0 +1,12 @@
+== 03 门禁负例注入验证（doc 阶段必须 FAIL 且报错可读；还原后全绿）==
+[准备] 向 README.md 追加坏互链行：
+  "- 临时负例行（T-118 门禁自检后即删）[坏锚点](docs/FEATURES.md#t118-no-such-anchor)"
+[cmd] node scripts/ci/check-docs.mjs
+exit = 1（期望 !=0）
+  check-docs: FAIL（1 处问题，详见上方 FAIL 行）
+  FAIL: README.md:180 — 互链锚点失效：docs/FEATURES.md#t118-no-such-anchor   <- 报错含 文件+行
+[cmd] node scripts/ci/run-ci.mjs --only doc --out .../neg-doc-run
+exit = 1（期望 !=0）；[doc] -> FAIL，失败明细含 README.md:180（RC-3 修复后明细不吞）
+[还原] 字节级还原 README.md（副本覆盖）；git diff README.md 为空
+[cmd] node scripts/ci/check-docs.mjs
+exit = 0（还原后全绿）

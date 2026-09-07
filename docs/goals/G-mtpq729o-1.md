@@ -12,7 +12,7 @@
 - T-112｜researcher｜done
 - T-113｜breaker｜done
 - T-114｜test-designer｜done
-- T-115｜coder｜in_progress
-- T-116｜reviewer｜todo
-- T-117｜tester｜todo
+- T-115｜coder｜done
+- T-116｜reviewer｜done
+- T-117｜tester｜done
 - T-118｜devops｜todo

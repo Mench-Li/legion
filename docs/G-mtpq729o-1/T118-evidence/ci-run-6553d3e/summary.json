@@ -1,0 +1,43 @@
+{
+  "root": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-118",
+  "outDir": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-118\\docs\\G-mtpq729o-1\\T118-evidence\\ci-run-6553d3e",
+  "finishedAt": "2026-09-07T09:58:08.548Z",
+  "stages": [
+    {
+      "name": "env",
+      "status": "PASS",
+      "ms": 82
+    },
+    {
+      "name": "deps",
+      "status": "PASS",
+      "ms": 2
+    },
+    {
+      "name": "build",
+      "status": "PASS",
+      "ms": 13177
+    },
+    {
+      "name": "test",
+      "status": "PASS",
+      "ms": 16185
+    },
+    {
+      "name": "smoke",
+      "status": "PASS",
+      "ms": 8422
+    },
+    {
+      "name": "stage",
+      "status": "PASS",
+      "ms": 94
+    },
+    {
+      "name": "doc",
+      "status": "PASS",
+      "ms": 100
+    }
+  ],
+  "failed": 0
+}

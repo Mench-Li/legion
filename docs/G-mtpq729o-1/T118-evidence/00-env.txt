@@ -1,0 +1,9 @@
+== T-118 devops 收尾部署：执行环境与基线 ==
+[cmd] node -v                 -> v24.19.0（run-ci 要求 >= 22.5，满足）
+[cmd] git rev-parse --short HEAD -> 6553d3e（merge(w/T-117) 复测通过报告；本 worktree HEAD）
+[cmd] git branch --show-current -> w/T-118
+工作区: D:\project\DSH\legion\.legion-worktrees\T-118（隔离 worktree，改动未 push）
+被发布批次: T-115 f0261fc（coder 实现 S1~S5）-> T-116/T-117 fixes（ca9b45c RC1-3 / a39ba9f / 8f5591b / 022b559 V-1）
+对照基线: cba1fb7（T-114 promote）
+行尾事实: core.autocrlf=true、无 .gitattributes；README/FEATURES/check-docs/run-ci blob=LF、worktree=CRLF（RC-1 归一化后 check-docs 全绿）
+依赖事实: 零新增依赖、未联网；run-ci deps 阶段自动建 junction workbench/node_modules -> 主 checkout；plugins/node_modules junction -> 主 checkout plugins/node_modules（复用既有依赖）

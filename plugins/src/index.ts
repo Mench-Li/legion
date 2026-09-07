@@ -17,7 +17,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { appendFileSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs'
+import { appendFileSync, cpSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -1752,6 +1752,39 @@ exit 0
     return !laterHuman
   }
 
+  /**
+   * 防丢文件加固：强删 worktree 前保全 worker 的未提交/未合入产出（T-116 现场：
+   * review 文档登记了产物但从未进任何 commit，调解员 force-remove worktree 时连文件带目录删除 → 内容永久丢失）。
+   * 1) 优先把 loose 改动提交到 w/<id>（后续 merge 自然带上，文档类产物最稳）；
+   * 2) commit 不可行（分支缺失 / git 写失败 / 沙箱禁写共享 .git 等）→ 整目录复制到 .legion-worktrees/.lost-<id>-<ts> 保全。
+   * 返回 {saved, via, detail}；任何失败都不抛，仅记日志（保全是尽力而为的兜底）。
+   */
+  async function preserveWorktreeLoose(root: string, dir: string, id: string): Promise<{ saved: boolean; via?: string; detail?: string }> {
+    try {
+      if (!existsSync(dir)) return { saved: false, detail: 'no worktree dir' }
+      const st = await runGit(dir, ['status', '--porcelain'])
+      const dirty = (st.out ?? '').trim()
+      if (dirty.length === 0) return { saved: false, detail: 'clean' }
+      // 1) 提交到 w/<id>：需分支存在
+      const branchOk = (await runGit(root, ['rev-parse', '--verify', `w/${id}`])).code === 0
+      if (branchOk) {
+        const add = await runGit(dir, ['add', '-A'])
+        if (add.code === 0) {
+          const commit = await runGit(dir, ['commit', '-m', `${id}：调解接管前保全未提交产物`])
+          if (commit.code === 0) return { saved: true, via: 'commit' }
+          log(`${id} 保全：w/${id} commit 失败（${(commit.err || commit.out).trim().slice(0, 120)}）→ 转目录复制`)
+        }
+      }
+      // 2) 目录复制保全
+      const lostDir = join(dirname(dir), `.lost-${id}-${Date.now()}`)
+      cpSync(dir, lostDir, { recursive: true, force: true })
+      return { saved: true, via: 'copy', detail: lostDir }
+    } catch (e) {
+      log(`${id} 保全失败：${String(e)}`)
+      return { saved: false, detail: String(e) }
+    }
+  }
+
   /** 调解员主流程：把 in_review merge-fail 任务合入其所属空间的主分支并推进到 done（复用 autoPromote 的 git 原语）。
    *  worker 模式：taskScope 默认本实例 scope（仓库 ctx=repoRootFor）；
    *  mediator 模式：taskScope=任务所属空间，仓库 ctx 从 spaceRepos 解析（无绑定则跳过）。
@@ -1770,10 +1803,12 @@ exit 0
       const dir = join(wtRoot, id)
       // 0. 防御：清上次遗留冲突态
       await runGit(root, ['merge', '--abort'])
-      // 1. 若 worktree 仍绑定分支，先解除（防止 merge 冲突态被 worker 误操作）
+      // 1. 若 worktree 仍绑定分支，先解除（防止 merge 冲突态被 worker 误操作）。
+      //    防丢文件：解除绑定=force remove，若 worker 有未提交产出，先提交/复制保全（T-116 现场教训）。
       const wt = (await runGit(root, ['worktree', 'list'])).out
-      const wtNeedle = `.legion-worktrees${dir.endsWith('\\' + id) || dir.endsWith('/' + id) ? '' : ''}`
       if (wt.includes(`.legion-worktrees/${id}`) || wt.includes(`.legion-worktrees\\${id}`)) {
+        const pres = await preserveWorktreeLoose(root, dir, id)
+        if (pres.saved) log(`${id} 调解：强删 worktree 前已保全未提交产物（${pres.via}${pres.detail ? ' → ' + pres.detail : ''}）`)
         await runGit(root, ['worktree', 'remove', '--force', dir])
         log(`${id} 调解：已解除残留 worktree 绑定`)
       }
@@ -1791,6 +1826,8 @@ exit 0
       const merge = await runGit(root, ['merge', '--no-ff', `w/${id}`, '-m', `promote ${id} (mediator)`])
       if (merge.code === 0) {
         // 3a. 合并干净 → 清理 worktree/分支 → 推进 done
+        const pres = await preserveWorktreeLoose(root, dir, id)
+        if (pres.saved) log(`${id} 调解：干净合入后 worktree 仍有未提交产物，已保全（${pres.via}${pres.detail ? ' → ' + pres.detail : ''}）`)
         await runGit(root, ['worktree', 'remove', '--force', dir])
         await runGit(root, ['branch', '-D', `w/${id}`])
         if (stashDone.length > 0) await runGit(root, ['stash', 'pop'])
@@ -1837,6 +1874,22 @@ exit 0
         activity('blocked', id, '调解失败：提交失败')
         return
       }
+      // 完整性闸门：解决冲突的提交必须真正包含 w/<id> 的全部产出。
+      // 若 commit 变成了单亲提交（丢失 w/<id> 树，T-116 现场：review 文档从未落库即被强删），
+      // HEAD 与 w/<id> 必有差异 → 保留分支 + 保全 + 警告将军，绝不静默 -D 丢弃。
+      const missing = (await runGit(root, ['diff', '--name-only', 'HEAD', `w/${id}`])).out.trim()
+      if (missing.length > 0) {
+        const pres = await preserveWorktreeLoose(root, dir, id)
+        await runGit(root, ['worktree', 'remove', '--force', dir])
+        // 分支保留（不 -D），供将军人工核查/合入；stash 还原照旧
+        if (stashDone.length > 0) await runGit(root, ['stash', 'pop'])
+        await safeComment(id, `⚠ 调解合入存在未随提交落库的产出（${missing.split('\n').slice(0, 5).join(', ')}${missing.split('\n').length > 5 ? ` …共 ${missing.split('\n').length} 个` : ''}）。分支 w/${id} 已保留未删除${pres.saved ? `，worktree 残留产物已保全（${pres.via}${pres.detail ? ' → ' + pres.detail : ''}）` : ''}，请将军核查后人工合入或转派。`, taskScope)
+        activity('blocked', id, '调解合入未完整落库，保留分支待人工')
+        log(`${id} 调解：合入后 HEAD 与 w/${id} 仍有差异（${missing.split('\n').length} 个文件），分支保留`)
+        return
+      }
+      const pres = await preserveWorktreeLoose(root, dir, id)
+      if (pres.saved) log(`${id} 调解：worktree 仍有未提交产物，已保全（${pres.via}${pres.detail ? ' → ' + pres.detail : ''}）`)
       await runGit(root, ['worktree', 'remove', '--force', dir])
       await runGit(root, ['branch', '-D', `w/${id}`])
       if (stashDone.length > 0) await runGit(root, ['stash', 'pop'])

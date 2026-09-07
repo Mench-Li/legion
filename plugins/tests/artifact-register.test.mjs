@@ -104,6 +104,7 @@ function hubMachine(holder, requests, extra = {}) {
     if (url.pathname === '/api/skills') return response([])
     if (url.pathname === '/api/spaces') return response({ spaces: [] })
     if (url.pathname === '/api/release-stale') return response({ released: [] })
+    if (url.pathname === '/api/goal') return response({ goals: Array.isArray(holder.goals) ? holder.goals : [] })
     if (url.pathname === '/api/board') return response([task])
     if (url.pathname === '/api/progress') return response({ task })
     if (extra[url.pathname]) return extra[url.pathname](body, task)
@@ -325,6 +326,34 @@ test('非文档型岗位 coder 不产生契约登记；worker 自填 artifact �
   }
 })
 
+test('worker 自填 artifact 的绝对 worktree 路径登记为仓库相对路径（T-111 现场：绝对路径在 worktree 清理后失效）', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'scrum-reg-wtabs-'))
+  const originalFetch = globalThis.fetch
+  const restoreTasks = protectTasksFile(root)
+  writeFileSync(join(root, 'roles.json'), JSON.stringify(ROLES))
+  const wtDir = join(root, '.legion-worktrees', 'T-001')
+  mkdirSync(join(wtDir, 'docs'), { recursive: true })
+  writeFileSync(join(wtDir, 'docs', 'x.md'), '# x\n')
+  const abs = join(wtDir, 'docs', 'x.md')
+  const holder = { task: baseTask('coder') }
+  const requests = []
+  globalThis.fetch = hubMachine(holder, requests)
+  const harness = fakeContext({ status: 'done', summary: '实现完成', evidence: 'ok', blocker: '', artifact: { kind: 'file', path: abs, title: '自填文档' } })
+  try {
+    apply(harness.ctx, config(root))
+    sweep(harness)
+    await waitFor(() => requests.some(r => r.startsWith('artifact:docs/x.md:file:')), '绝对 worktree 路径应规整为仓库相对路径')
+    const reg = requests.find(r => r.startsWith('artifact:'))
+    assert.match(reg, /^artifact:docs\/x\.md:file:$/, `应登记仓库相对路径（剥掉 worktree 前缀）：${reg}`)
+    assert.ok(!reg.includes('.legion-worktrees'), '不得登记含 worktree 分支态目录的绝对路径')
+  } finally {
+    for (const d of harness.disposers) await d()
+    globalThis.fetch = originalFetch
+    restoreTasks()
+    await cleanupDir(root)
+  }
+})
+
 test('多轮同 path 字节未变不重复登记（幂等）；变化则追加新条目（AC-R2-3 多轮倒序数据源）', async () => {
   const root = await mkdtemp(join(tmpdir(), 'scrum-reg-idem-'))
   const originalFetch = globalThis.fetch
@@ -355,6 +384,70 @@ test('多轮同 path 字节未变不重复登记（幂等）；变化则追加�
     assert.equal(holder.task.artifacts.length, 2, '任务记录 artifacts 应为 2 条（多轮追加）')
     const times = holder.task.artifacts.map(a => a.at)
     assert.ok(new Date(times[1]) >= new Date(times[0]), '按轮次先后追加（前端倒序展示最新在前）')
+  } finally {
+    for (const d of harness.disposers) await d()
+    globalThis.fetch = originalFetch
+    restoreTasks()
+    await cleanupDir(root)
+  }
+})
+
+test('M1 回归：docsDir 目标 requirement 契约登记解析为 docs/<goalId>/REQUIREMENTS.md，且不误停 in_review', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'scrum-reg-docdir-req-'))
+  const originalFetch = globalThis.fetch
+  const restoreTasks = protectTasksFile(root)
+  writeFileSync(join(root, 'roles.json'), JSON.stringify(ROLES))
+  // 文档产出落在目标目录（worker 按 goalizePrompt 写入 docs/G-9/），根 docs/ 无同名文件
+  mkdirSync(join(root, 'docs', 'G-9'), { recursive: true })
+  writeFileSync(join(root, 'docs', 'G-9', 'REQUIREMENTS.md'), '# 需求\n')
+  const holder = {
+    task: { ...baseTask('requirement'), goalId: 'G-9' },
+    goals: [{ id: 'G-9', scope: 'default', objective: '目标化', status: 'active', docsDir: 'docs/G-9', context: '', contextVersion: 0 }],
+  }
+  const requests = []
+  globalThis.fetch = hubMachine(holder, requests)
+  const harness = fakeContext({ status: 'done', summary: '需求已澄清', evidence: '见文档', blocker: '' })
+  try {
+    apply(harness.ctx, config(root))
+    sweep(harness)
+    await waitFor(() => requests.some(r => r.startsWith('artifact:')), 'docsDir 目标的契约产物未登记')
+    const reg = requests.find(r => r.startsWith('artifact:'))
+    assert.match(reg, /^artifact:docs\/G-9\/REQUIREMENTS\.md:file:[0-9a-f]{64}$/, `应登记目标目录路径：${reg}`)
+    assert.ok(!requests.some(r => r.startsWith('artifact:docs/REQUIREMENTS.md')), '不得登记遗留根槽位路径')
+    assert.ok(requests.includes('advance:requirement'), 'docsDir 目标应照常流转')
+    assert.ok(!requests.includes('transition:in_review'), 'docsDir 目标不应误停 in_review（文档真实存在于目标目录）')
+    const finalComment = holder.task.comments.filter(c => c.by === 'soldier-auto').slice(-1)[0]
+    assert.ok(finalComment, '应有完成评论')
+    assert.match(finalComment.text, /docs\/G-9\/REQUIREMENTS\.md/, '完成评论清单应含目标目录路径')
+  } finally {
+    for (const d of harness.disposers) await d()
+    globalThis.fetch = originalFetch
+    restoreTasks()
+    await cleanupDir(root)
+  }
+})
+
+test('M1 回归：docsDir 目标 reviewer 契约登记保持 docs/review/<T>-REVIEW.md（不被扁平化到 docs/<goalId>/）', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'scrum-reg-docdir-review-'))
+  const originalFetch = globalThis.fetch
+  const restoreTasks = protectTasksFile(root)
+  writeFileSync(join(root, 'roles.json'), JSON.stringify(ROLES))
+  mkdirSync(join(root, 'docs', 'review'), { recursive: true })
+  writeFileSync(join(root, 'docs', 'review', 'T-001-REVIEW.md'), '# review\nok\n')
+  const holder = {
+    task: { ...baseTask('reviewer'), goalId: 'G-9' },
+    goals: [{ id: 'G-9', scope: 'default', objective: '目标化', status: 'active', docsDir: 'docs/G-9', context: '', contextVersion: 0 }],
+  }
+  const requests = []
+  globalThis.fetch = hubMachine(holder, requests)
+  const harness = fakeContext({ status: 'done', summary: '审查通过', evidence: '见文档', blocker: '' })
+  try {
+    apply(harness.ctx, config(root))
+    sweep(harness)
+    await waitFor(() => requests.some(r => r.startsWith('artifact:docs/review/')), 'reviewer 契约产物未登记')
+    const reg = requests.find(r => r.startsWith('artifact:docs/review/'))
+    assert.match(reg, /^artifact:docs\/review\/T-001-REVIEW\.md:file:[0-9a-f]{64}$/, `reviewer 路径不应被扁平化：${reg}`)
+    assert.ok(requests.includes('advance:reviewer'), 'reviewer 应照常流转，不误停 in_review')
   } finally {
     for (const d of harness.disposers) await d()
     globalThis.fetch = originalFetch

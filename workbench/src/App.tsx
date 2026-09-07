@@ -311,8 +311,7 @@ export default function App(): React.JSX.Element {
       .catch(() => undefined)
   }, [])
 
-<<<<<<< Updated upstream
-/** 空间删除成功后（R-3/S8，TC-S8-05/06）：关闭弹窗、重拉列表；若删的是当前激活空间则切回「全部空间」（scope=null）。 */
+  /** 空间删除成功后（R-3/S8，TC-S8-05/06）：关闭弹窗、重拉列表；若删的是当前激活空间则切回「全部空间」（scope=null）。 */
   const handleSpaceDeleted = useCallback((deletedId: string): void => {
     setSpaceSettings(null)
     void fetchSpaces()
@@ -324,10 +323,7 @@ export default function App(): React.JSX.Element {
     }
   }, [scope, loadMissions])
 
-  /** 发布空间目标：写 team-hub 后刷新当前空间目标。 */
-=======
   /** 发布目标：写 team-hub 后刷新目标列表。每次发布 = 新建一个目标（与既有目标并存，不取消旧链）。 */
->>>>>>> Stashed changes
   const handlePublishGoal = useCallback(async (scopeValue: string, objective: string): Promise<void> => {
     await publishGoal(scopeValue, objective)
     const info = await fetchGoal(scopeValue)

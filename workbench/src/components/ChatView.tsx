@@ -155,7 +155,7 @@ export function ChatView({ scope, hubMode }: { scope: string | null; hubMode: bo
     }
   }, [hubMode, scope, loadConvs])
 
-  /** 拉最新一页并**合并**进当前列表（只追加更新的消息，不冲掉已加载的更早历史）。 */
+  /** 拉最新一页并**就地合并**进当前列表（同 id 覆盖 meta 流转、新消息追加，不冲掉已加载的更早历史）。 */
   const mergeNewest = useCallback(async (): Promise<void> => {
     const scopeAtCall = scopeRef.current
     const convAtCall = activeRef.current
@@ -166,9 +166,11 @@ export function ChatView({ scope, hubMode }: { scope: string | null; hubMode: bo
       if (identityStale(scopeAtCall, convAtCall, scopeRef.current, activeRef.current)) return
       setMsgs(prev => {
         if (prev.length === 0) return list
-        const maxId = prev[prev.length - 1].id
-        const newer = list.filter(m => m.id > maxId)
-        return newer.length > 0 ? mergeById(prev, newer) : prev
+        // 就地合并最新一页（T-100-M1 / T-101-F1 修复）：同 id 消息以最新版本覆盖、新消息追加——
+        // AI 三态（awaiting→replied/failed）是**同一条源消息的 meta 更新**，只「追加更新 id」会漏掉它，
+        // 导致气泡停在「等待回复/回复失败」不实时流转。mergeById(prev, list) 保序去重、list 覆盖同 id；
+        // prev 中早于最新一页的更早历史（loadOlder 已加载部分）原样保留。
+        return mergeById(prev, list)
       })
     } catch {
       /* 后台轮询/事件刷新失败静默（下次轮询再试） */
@@ -405,31 +407,34 @@ export function ChatView({ scope, hubMode }: { scope: string | null; hubMode: bo
                     <div key={m.id} className={`chat-row${me ? ' me-row' : ''}${bot ? ' bot-row' : ''}`}>
                       <div className={`chat-author${me ? ' me' : ''}`}>
                         {authorLabel(m)}
-                        {bot && <span className="chip" style={{ marginLeft: 4 }}>🤖</span>}
+                        {bot && <span className="chip" style={{ marginLeft: 4 }} title="AI 回复">🤖</span>}
                         {bot && aiModel && <span className="chip" style={{ marginLeft: 4 }} title="AI 回复模型">{aiModel}</span>}
                         <span style={{ color: 'var(--muted-2)', fontSize: 11 }}> · {fmt(m.createdAt)}</span>
                       </div>
                       <div className={me ? 'chat-bubble me' : 'chat-bubble'}>
                         {m.body}
-                        {me && st === 'awaiting' && (
-                          <div className="chat-ai-state" style={{ marginTop: 6, fontSize: 11, color: 'var(--muted-2)' }}>
-                            ⏳ 等待回复…（{fmt(m.createdAt)} 提交）
-                          </div>
-                        )}
-                        {me && st === 'failed' && (
-                          <div className="chat-ai-state err" style={{ marginTop: 6, fontSize: 11, color: '#ff8f8f' }}>
-                            ❌ 回复失败{aiError ? `：${aiError}` : ''}
-                            <button
-                              className="btn small"
-                              disabled={retryingId === m.id}
-                              onClick={() => void doRetry(m)}
-                              style={{ marginLeft: 8 }}
-                            >
-                              {retryingId === m.id ? '重试中…' : '重试'}
-                            </button>
-                          </div>
-                        )}
                       </div>
+                      {me && st === 'awaiting' && (
+                        <div className="chat-ai-state pending">
+                          <span className="chat-ai-spinner">◌</span> AI 正在回复…（提交于 {fmt(m.createdAt)}）
+                        </div>
+                      )}
+                      {me && st === 'replied' && (
+                        <div className="chat-ai-state done">✓ AI 已回复</div>
+                      )}
+                      {me && st === 'failed' && (
+                        <div className="chat-ai-state failed">
+                          ❌ 回复失败{aiError ? `：${aiError}` : ''}
+                          <button
+                            className="btn small"
+                            disabled={retryingId === m.id}
+                            onClick={() => void doRetry(m)}
+                            style={{ marginLeft: 8 }}
+                          >
+                            {retryingId === m.id ? '重试中…' : '↻ 重试'}
+                          </button>
+                        </div>
+                      )}
                     </div>
                   )
                 })}

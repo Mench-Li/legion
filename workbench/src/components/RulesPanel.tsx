@@ -6,6 +6,16 @@ import { toast } from './Toast'
 const MAX_RULES_LEN = 3000
 
 const REPO_NORM_FILES = ['LEGION.md', 'AGENTS.md', 'agent.md']
+const FILE_PURPOSE: Record<string, string> = {
+  'LEGION.md': '军团规章 · 仓库级制度与流程总纲（默认读取，最优先）',
+  'AGENTS.md': '智能体协同约定 · 各 agent 协作与职责规范',
+  'agent.md': 'agent 工作说明 · 具体操作与交付要求',
+}
+const FILE_PRIORITY: Record<string, string> = {
+  'LEGION.md': '① 最优先',
+  'AGENTS.md': '② 次优先',
+  'agent.md': '③ 补充',
+}
 
 interface RulesPanelProps {
   scope: string | null
@@ -128,33 +138,69 @@ export function RulesPanel({ scope, hubMode, spaces = [], onOpenFiles }: RulesPa
         </div>
         <div className="rules-file-family">
           {REPO_NORM_FILES.map(f => (
-            <div key={f} className="rules-file-row">
-              <code>{repoDir ? `${repoDir}\${f}` : f}</code>
-              <span style={{ color: 'var(--muted-2)', fontSize: 11 }}>
-                {f === 'LEGION.md' ? '军团规章（默认读取，最优先）' : f === 'AGENTS.md' ? '智能体协同约定' : 'agent 工作说明'}
-              </span>
+            <div key={f} className="rules-file-card">
+              <div className="rules-file-head">
+                <span className="rules-file-name">📄 {f}</span>
+                <span className="rules-file-priority">{FILE_PRIORITY[f]}</span>
+              </div>
+              <div className="rules-file-purpose">{FILE_PURPOSE[f]}</div>
+              <code className="rules-file-path">{repoDir ? `${repoDir}\\${f}` : f}</code>
             </div>
           ))}
         </div>
-        <div style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.8 }}>
+        {scope !== null && (!currentSpace || !repoDir) && (
+          <div className="rules-file-hint">空间「{scope}」尚未绑定本地仓库。请在空间行 ⚙ 设置中绑定「本地文件夹 + 远程仓库」，即可在该仓库根目录维护 LEGION.md / AGENTS.md / agent.md。</div>
+        )}
+        <div className="rules-file-actions">
           {scope === null ? (
-            <>在左侧选择一个具体工作空间后，这里会列出该空间绑定仓库下的规范文件路径（文件在仓库内编辑，不在本面板直改）。</>
-          ) : !currentSpace || !repoDir ? (
-            <>空间「{scope}」尚未绑定本地仓库。请在空间行 ⚙ 设置中绑定「本地文件夹 + 远程仓库」，即可在该仓库根目录维护 LEGION.md / AGENTS.md / agent.md。</>
-          ) : (
-            <>规范文件位于空间仓库根目录：<code>{repoDir}</code>。请用文件中心或仓库编辑器维护以上三文件；
-            {onOpenFiles ? (<button className="btn small" onClick={onOpenFiles}>📁 打开文件中心</button>) : '保存后守护下一轮自动读取。'}</>
-          )}
+            <span>在左侧选择一个具体工作空间后，这里会列出该空间绑定仓库下的规范文件路径（文件在仓库内编辑，不在本面板直改）。</span>
+          ) : currentSpace && repoDir ? (
+            <>
+              <span>规范文件位于空间仓库根目录 <code>{repoDir}</code>，用文件中心或仓库编辑器维护以下三文件；保存后守护下一轮自动读取。</span>
+              {onOpenFiles && (<button className="btn small" onClick={onOpenFiles}>📁 打开文件中心</button>)}
+            </>
+          ) : null}
         </div>
       </div>
 
-      <div className="panel" style={{ fontSize: 11, color: 'var(--muted-2)', lineHeight: 1.9 }}>
-        <b style={{ color: 'var(--muted)' }}>📐 规范载体职责总纲（分层 · 按优先级注入）</b>
-        <div>① 空间/项目层仓库文件族（LEGION.md / AGENTS.md / agent.md）= 仓库规则（空间专属，优先于全局）</div>
-        <div>② 全局层（rules 表，本面板维护）= 跨空间统一规范（次优先）</div>
-        <div>③ skills（技能中心）= 技能内容（士兵按 scope/授权执行任务时注入）</div>
-        <div>④ roles.json stage.prompt / stage-standards（角色配置）= 岗位职责与阶段交付模板</div>
-        <div>数据源：team-hub v2（{hubBase()}）· POST /api/rules 审计 rules:update + SSE 实时广播</div>
+      <div className="panel">
+        <div className="rules-section-head">
+          <b>📐 规范载体职责总纲（按优先级注入）</b>
+          <span style={{ color: 'var(--muted-2)', fontSize: 11 }}>空间/项目层文件族 &gt; 全局层 &gt; 技能 &gt; 角色配置</span>
+        </div>
+        <div className="rules-layers">
+          <div className="rules-layer">
+            <span className="rules-layer-rank p1">①</span>
+            <div>
+              <b>空间/项目层仓库文件族</b>（LEGION.md / AGENTS.md / agent.md）
+              <span className="rules-layer-desc">仓库规则 · 空间专属 · 优先于全局</span>
+            </div>
+          </div>
+          <div className="rules-layer">
+            <span className="rules-layer-rank p2">②</span>
+            <div>
+              <b>全局层</b>（rules 表，本面板维护）
+              <span className="rules-layer-desc">跨空间统一规范 · 次优先</span>
+            </div>
+          </div>
+          <div className="rules-layer">
+            <span className="rules-layer-rank p3">③</span>
+            <div>
+              <b>skills</b>（技能中心）
+              <span className="rules-layer-desc">技能内容 · 士兵按 scope/授权执行任务时注入</span>
+            </div>
+          </div>
+          <div className="rules-layer">
+            <span className="rules-layer-rank p4">④</span>
+            <div>
+              <b>roles.json</b>（stage.prompt / stage-standards）
+              <span className="rules-layer-desc">岗位职责与阶段交付模板</span>
+            </div>
+          </div>
+        </div>
+        <div style={{ fontSize: 10, color: 'var(--muted-2)', marginTop: 10 }}>
+          数据源：team-hub v2（{hubBase()}）· POST /api/rules 审计 rules:update + SSE 实时广播
+        </div>
       </div>
     </div>
   )

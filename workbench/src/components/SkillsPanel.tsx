@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
-import { fetchSkills, grantSkill, hubBase, registerSkill, reviewSkill, revokeSkill } from '../api'
-import type { SkillInfo, SpaceInfo } from '../types'
+import { fetchAgents, fetchSkills, grantSkill, hubBase, registerSkill, reviewSkill, revokeSkill } from '../api'
+import type { AgentCatalogItem, SkillInfo, SpaceInfo } from '../types'
 import { toast } from './Toast'
 
 const STATUS_TEXT: Record<SkillInfo['status'], string> = {
@@ -24,10 +24,6 @@ interface RegisterForm {
   scope: string
 }
 
-function splitTokens(raw: string): string[] {
-  return raw.split(/[,，\s]+/).map(s => s.trim()).filter(Boolean)
-}
-
 // 技能中心（R-1/S2）：本空间技能 + 跨空间共享。空间视图以 general 复审视角取本 scope 全状态（register→review 流程）；
 // 「全部空间」聚合视图不请求 include=pending（服务端收口，仅 published，TC-S2-02/06）。渲染安全（I-5）：纯文本节点。
 
@@ -37,7 +33,13 @@ export function SkillsPanel({ scope, hubMode, spaces = [] }: SkillsPanelProps): 
   const [showForm, setShowForm] = useState(false)
   const [busyId, setBusyId] = useState<string | null>(null)
   const [showGrants, setShowGrants] = useState<string | null>(null)
-  const [grantsInput, setGrantsInput] = useState('')
+  /** 智能体目录（/api/agents，按 role 去重；供授权智能体搜索/名称标注；失败降级为手输）。 */
+  const [catalog, setCatalog] = useState<AgentCatalogItem[] | null>(null)
+  const [catalogLoading, setCatalogLoading] = useState(true)
+  /** 本次授权新增的智能体（存 roster role，如 coder/reviewer——守护以 member=role 查询命中）。 */
+  const [newMembers, setNewMembers] = useState<string[]>([])
+  const [memberQ, setMemberQ] = useState('')
+  const [pickerOpen, setPickerOpen] = useState(false)
   const [grantScopes, setGrantScopes] = useState<string[]>([])
 
   const load = useCallback(async (): Promise<void> => {
@@ -59,6 +61,22 @@ export function SkillsPanel({ scope, hubMode, spaces = [] }: SkillsPanelProps): 
     const poll = window.setInterval(() => void load(), 15000)
     return () => window.clearInterval(poll)
   }, [load])
+
+  // 智能体目录：面板加载时拉一次（供已授权名称标注 + 授权弹窗搜索下拉；失败降级为手输 id）。
+  useEffect(() => {
+    let live = true
+    fetchAgents()
+      .then(list => {
+        if (live) setCatalog(list)
+      })
+      .catch(() => { /* 降级：授权弹窗内提示可直接输入 role/id */ })
+      .finally(() => {
+        if (live) setCatalogLoading(false)
+      })
+    return () => {
+      live = false
+    }
+  }, [])
 
   if (!hubMode) {
     return (
@@ -106,19 +124,78 @@ export function SkillsPanel({ scope, hubMode, spaces = [] }: SkillsPanelProps): 
   }
 
   const openGrant = (s: SkillInfo): void => {
-    const scopeGrants = s.grants.filter(g => g.startsWith('scope:')).map(g => g.slice('scope:'.length))
-    const memberGrants = s.grants.filter(g => !g.startsWith('scope:'))
-    setGrantScopes(scope === null ? scopeGrants : scopeGrants.filter(x => x !== scope))
-    setGrantsInput(memberGrants.join(', '))
+    // 授权弹窗只做「新增授权」：当前已授权（空间/智能体）单独只读列出，新目标从空白选择，
+    // 避免「取消勾选已授权却并未撤销」的误导。撤销统一走技能卡片上的 ✕。
+    setGrantScopes([])
+    setNewMembers([])
+    setMemberQ('')
+    setPickerOpen(false)
     setShowGrants(s.id)
   }
 
+  /** 把 grants 按「空间授权（scope:*）」「智能体授权」分组，便于区分展示与授权弹窗当前态。 */
+  const groupGrants = (s: SkillInfo): { space: string[]; member: string[] } => {
+    const space: string[] = []
+    const member: string[] = []
+    for (const g of s.grants) (g.startsWith('scope:') ? space : member).push(g)
+    return { space, member }
+  }
+
+  /** 智能体目录查找（role 精确命中；用于把 role → 名称展示）。 */
+  const agentOf = (role: string): AgentCatalogItem | undefined => catalog?.find(a => a.role === role)
+  /** 成员授权展示名：命中目录则 avatar+名称，否则原样（general/自定义 id）。 */
+  const memberLabel = (m: string): string => {
+    const a = agentOf(m)
+    return a ? `${a.avatar} ${a.name}` : m
+  }
+
+  /** 添加一个「将授权」的智能体 role（去重；与已在展示里禁选，重复提交服务端幂等）。 */
+  const addMember = (role: string): void => {
+    setNewMembers(cur => (cur.includes(role) ? cur : [...cur, role]))
+    setMemberQ('')
+    setPickerOpen(false)
+  }
+
+  /** 输入框回车：优先精确 role/名称命中 → 模糊命中第一个 → 否则作为自定义成员 id 加入。 */
+  const commitMemberQuery = (): void => {
+    const q = memberQ.trim()
+    if (!q) return
+    const gSkill = skills.find(s => s.id === showGrants) ?? null
+    const alreadyMembers = gSkill ? gSkill.grants.filter(g => !g.startsWith('scope:')) : []
+    const already = new Set([...alreadyMembers, ...newMembers])
+    if (catalog && catalog.length > 0) {
+      const exactRole = catalog.find(a => a.role === q)
+      const exactName = catalog.find(a => a.name === q)
+      const target = exactRole ?? exactName
+      if (target) {
+        if (already.has(target.role)) {
+          toast('err', `智能体「${target.name}」已在授权列表`)
+        } else {
+          addMember(target.role)
+        }
+        return
+      }
+      const ql = q.toLowerCase()
+      const fuzzy = catalog.find(a => a.name.toLowerCase().includes(ql) || a.role.toLowerCase().includes(ql) || a.kind.toLowerCase().includes(ql))
+      if (fuzzy) {
+        if (already.has(fuzzy.role)) {
+          toast('err', `智能体「${fuzzy.name}」已在授权列表`)
+        } else {
+          addMember(fuzzy.role)
+        }
+        return
+      }
+    }
+    // 无目录/无匹配：按自定义成员 id 直接加入（保留原「soldier-a」式手输能力）
+    if (!already.has(q)) addMember(q)
+    else toast('err', `「${q}」已在授权列表`)
+  }
+
   const doGrant = async (id: string): Promise<void> => {
-    const memberGrants = splitTokens(grantsInput)
     const scopeGrants = grantScopes.map(x => `scope:${x}`)
-    const grants = [...scopeGrants, ...memberGrants]
+    const grants = [...scopeGrants, ...newMembers]
     if (grants.length === 0) {
-      toast('err', '请选择目标空间或输入成员 id（授权对象不能为空）')
+      toast('err', '请选择目标空间或授权智能体（授权对象不能为空）')
       return
     }
     setBusyId(id)
@@ -150,7 +227,6 @@ export function SkillsPanel({ scope, hubMode, spaces = [] }: SkillsPanelProps): 
   const isOwn = (s: SkillInfo): boolean => scope === null || s.scope === scope
   const isShared = (s: SkillInfo): boolean => scope !== null && s.scope !== scope
   const pendingCount = skills.filter(s => s.status === 'pending').length
-  const grantableSpaces = spaces.filter(sp => sp.id !== scope).map(sp => sp.id)
 
   return (
     <div className="center-col">
@@ -174,7 +250,7 @@ export function SkillsPanel({ scope, hubMode, spaces = [] }: SkillsPanelProps): 
       ) : (
         <div className="skills-grid">
           {skills.map(s => (
-            <div key={s.id} className={`panel skill-card ${s.status}`}>
+            <div key={s.id} className={`panel skill-card ${s.status}${isShared(s) ? ' shared' : ''}`}>
               <div className="skill-head">
                 <span className="skill-name">{s.name}</span>
                 <span className={`skill-status ${s.status}`}>{STATUS_TEXT[s.status]}</span>
@@ -186,9 +262,7 @@ export function SkillsPanel({ scope, hubMode, spaces = [] }: SkillsPanelProps): 
                 {s.owner && <span className="chip">👤 {s.owner}</span>}
               </div>
               {isShared(s) && (
-                <div style={{ fontSize: 11, color: 'var(--blue)', padding: '2px 0' }}>
-                  🤝 来自空间「{s.scope}」的共享技能（源空间维护 · 此处只读）
-                </div>
+                <div className="skill-origin">🤝 来自空间「{s.scope}」的共享技能 · 源空间维护 · 此处只读</div>
               )}
               {s.description && <div className="skill-desc">{s.description}</div>}
               {s.prompt && (
@@ -199,20 +273,50 @@ export function SkillsPanel({ scope, hubMode, spaces = [] }: SkillsPanelProps): 
               )}
               {s.grants.length > 0 && (
                 <div className="skill-grants">
-                  <span style={{ color: 'var(--muted-2)', fontSize: 11 }}>已授权：</span>
-                  {s.grants.map(g => (
-                    <span key={g} className="chip">
-                      {g}
-                      {isOwn(s) && s.status === 'published' && (
-                        <button
-                          className="chip-x"
-                          title={`撤销对 ${g} 的授权`}
-                          disabled={busyId === s.id + '|' + g}
-                          onClick={() => void doRevoke(s, g)}
-                        >✕</button>
-                      )}
-                    </span>
-                  ))}
+                  <span className="skill-grant-label">已授权：</span>
+                  {(() => {
+                    const g = groupGrants(s)
+                    return (
+                      <>
+                        {g.space.length > 0 && (
+                          <span className="skill-grant-group">
+                            <span className="skill-grant-kind">空间</span>
+                            {g.space.map(raw => (
+                              <span key={raw} className="skill-grant-tag space">
+                                🏛 {raw.slice('scope:'.length)}
+                                {isOwn(s) && s.status === 'published' && (
+                                  <button
+                                    className="chip-x"
+                                    title="撤销对该空间的授权"
+                                    disabled={busyId === s.id + '|' + raw}
+                                    onClick={() => void doRevoke(s, raw)}
+                                  >✕</button>
+                                )}
+                              </span>
+                            ))}
+                          </span>
+                        )}
+                        {g.member.length > 0 && (
+                          <span className="skill-grant-group">
+                            <span className="skill-grant-kind">智能体</span>
+                            {g.member.map(m => (
+                              <span key={m} className="skill-grant-tag member" title={`成员授权：${m}`}>
+                                👤 {memberLabel(m)}
+                                {isOwn(s) && s.status === 'published' && (
+                                  <button
+                                    className="chip-x"
+                                    title="撤销对该智能体的授权"
+                                    disabled={busyId === s.id + '|' + m}
+                                    onClick={() => void doRevoke(s, m)}
+                                  >✕</button>
+                                )}
+                              </span>
+                            ))}
+                          </span>
+                        )}
+                      </>
+                    )
+                  })()}
                 </div>
               )}
               <div className="skill-actions">
@@ -234,44 +338,137 @@ export function SkillsPanel({ scope, hubMode, spaces = [] }: SkillsPanelProps): 
       )}
 
       {showForm && <SkillForm scope={scope} onSubmit={submit} onClose={() => setShowForm(false)} />}
-      {showGrants && (
-        <div className="modal-mask" onClick={() => setShowGrants(null)}>
-          <div className="modal" onClick={e => e.stopPropagation()}>
-            <div className="modal-head">
-              🔑 授权技能「{showGrants}」
-              <span className="x" onClick={() => setShowGrants(null)}>✕</span>
-            </div>
-            <div className="modal-body">
-              {grantableSpaces.length > 0 && (
-                <div className="field">
-                  <label>授权目标空间（勾选后士兵在对应空间可直接使用）</label>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                    {grantableSpaces.map(sp => (
-                      <label key={sp} className="chip" style={{ cursor: 'pointer', userSelect: 'none', background: grantScopes.includes(sp) ? 'var(--blue)' : undefined, color: grantScopes.includes(sp) ? '#fff' : undefined }}>
-                        <input type="checkbox" style={{ marginRight: 4, display: 'none' }}
-                          checked={grantScopes.includes(sp)}
-                          onChange={() => setGrantScopes(cur => (cur.includes(sp) ? cur.filter(x => x !== sp) : [...cur, sp]))}
-                        />
-                        🏛 {sp}
-                      </label>
-                    ))}
+      {showGrants && (() => {
+        const gSkill = skills.find(s => s.id === showGrants) ?? null
+        const already = gSkill ? groupGrants(gSkill) : { space: [], member: [] }
+        const alreadyScopes = already.space.map(x => x.slice('scope:'.length))
+        const grantableSpaces = spaces.filter(sp => sp.id !== scope && !alreadyScopes.includes(sp.id)).map(sp => sp.id)
+        return (
+          <div className="modal-mask" onClick={() => setShowGrants(null)}>
+            <div className="modal" onClick={e => e.stopPropagation()}>
+              <div className="modal-head">
+                🔑 授权技能「{showGrants}」
+                <span className="x" onClick={() => setShowGrants(null)}>✕</span>
+              </div>
+              {!gSkill ? null : (
+                <div className="modal-body">
+                  {(alreadyScopes.length > 0 || already.member.length > 0) && (
+                    <div className="field">
+                      <label>当前已授权（只读；撤销请到技能卡片上点 ✕）</label>
+                      <div className="skill-grant-group">
+                        {alreadyScopes.map(sc => (
+                          <span key={sc} className="skill-grant-tag space">🏛 {sc}</span>
+                        ))}
+                        {already.member.map(m => (
+                          <span key={m} className="skill-grant-tag member" title={`成员授权：${m}`}>👤 {memberLabel(m)}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {grantableSpaces.length > 0 && (
+                    <div className="field">
+                      <label>新授权目标空间（勾选后该空间的士兵可直接使用）</label>
+                      <div className="skill-grant-group">
+                        {grantableSpaces.map(sp => (
+                          <label key={sp} className={`grant-space-pill${grantScopes.includes(sp) ? ' selected' : ''}`}>
+                            <input type="checkbox" style={{ display: 'none' }}
+                              checked={grantScopes.includes(sp)}
+                              onChange={() => setGrantScopes(cur => (cur.includes(sp) ? cur.filter(x => x !== sp) : [...cur, sp]))}
+                            />
+                            🏛 {sp}
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  <div className="field">
+                    <label>授权智能体（可搜索名称/角色；多选逐个添加。如输入「代码审查」可搜到「代码审查员」）</label>
+                    {(() => {
+                      const ql = memberQ.trim().toLowerCase()
+                      const matched = !catalog
+                        ? []
+                        : catalog
+                            .filter(a => !ql || a.name.toLowerCase().includes(ql) || a.role.toLowerCase().includes(ql) || a.kind.toLowerCase().includes(ql) || a.scopes.some(s => s.toLowerCase().includes(ql)))
+                            .slice(0, 8)
+                      return (
+                        <div className="agent-picker">
+                          <input
+                            className="agent-picker-input"
+                            value={memberQ}
+                            autoComplete="off"
+                            placeholder={catalogLoading ? '正在加载智能体目录…' : '输入名称/角色搜索，回车添加；也可直接输入自定义成员 id（如 soldier-a）'}
+                            onChange={e => setMemberQ(e.target.value)}
+                            onFocus={() => setPickerOpen(true)}
+                            onBlur={() => window.setTimeout(() => setPickerOpen(false), 160)}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault()
+                                commitMemberQuery()
+                              }
+                            }}
+                          />
+                          {pickerOpen && !catalogLoading && (ql.length > 0 || (catalog !== null && catalog.length > 0)) && (
+                            <div className="agent-picker-list">
+                              {matched.length === 0 ? (
+                                <div className="agent-picker-empty">
+                                  {ql ? <>无匹配智能体。按回车可添加自定义成员 id「{ql}」</> : '暂无智能体目录'}
+                                </div>
+                              ) : (
+                                matched.map(a => {
+                                  const picked = newMembers.includes(a.role) || already.member.includes(a.role)
+                                  return (
+                                    <button
+                                      key={a.role}
+                                      type="button"
+                                      className={`agent-opt${picked ? ' picked' : ''}`}
+                                      onMouseDown={e => {
+                                        e.preventDefault() // 先于 blur 触发选择
+                                        if (!picked) addMember(a.role)
+                                      }}
+                                    >
+                                      <span className="agent-opt-main">{a.avatar} <b>{a.name}</b> <code>{a.role}</code></span>
+                                      <span className="agent-opt-sub">{a.kind}{a.scopes.length > 0 ? ` · 所在空间：${a.scopes.join('、')}` : ''}</span>
+                                      <span className="agent-opt-act">{picked ? '✓ 已选' : '＋ 添加'}</span>
+                                    </button>
+                                  )
+                                })
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })()}
+                    {newMembers.length > 0 && (
+                      <div className="skill-grant-group" style={{ marginTop: 6 }}>
+                        {newMembers.map(r => {
+                          const a = agentOf(r)
+                          return (
+                            <span key={r} className="skill-grant-tag member">
+                              👤 {a ? `${a.avatar} ${a.name}` : r}
+                              {a && <code style={{ fontSize: 9, opacity: 0.75 }}>{r}</code>}
+                              <button
+                                className="chip-x"
+                                title="移除"
+                                onClick={() => setNewMembers(cur => cur.filter(x => x !== r))}
+                              >✕</button>
+                            </span>
+                          )
+                        })}
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
-              <div className="field">
-                <label>授权成员（可选；成员 id，逗号分隔）</label>
-                <input value={grantsInput} onChange={e => setGrantsInput(e.target.value)} placeholder="例如：soldier-a, reviewer-1（或留空只授空间）" />
+              <div className="modal-foot">
+                <button className="btn ghost" onClick={() => setShowGrants(null)}>取消</button>
+                <button className="btn primary" disabled={busyId === showGrants} onClick={() => void doGrant(showGrants)}>
+                  {busyId === showGrants ? '提交中…' : '确认授权'}
+                </button>
               </div>
             </div>
-            <div className="modal-foot">
-              <button className="btn ghost" onClick={() => setShowGrants(null)}>取消</button>
-              <button className="btn primary" disabled={busyId === showGrants} onClick={() => void doGrant(showGrants)}>
-                {busyId === showGrants ? '提交中…' : '确认授权'}
-              </button>
-            </div>
           </div>
-        </div>
-      )}
+        )
+      })()}
       <div style={{ fontSize: 10, color: 'var(--muted-2)', padding: '0 4px' }}>
         数据源：team-hub v2（{hubBase()}）· 跨空间授权后，目标空间士兵/守护自动同步已发布技能；撤销即时生效
       </div>

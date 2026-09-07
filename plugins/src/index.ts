@@ -18,7 +18,7 @@ import z from '@deepseek-ai/schemastery'
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { appendFileSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs'
-import { dirname, isAbsolute, join } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -465,6 +465,15 @@ export function apply(ctx: AppContext, config: Config): void {
     for (const name of GOAL_DOC_NAMES) out = out.split(`docs/${name}`).join(`${goal.docsDir}/${name}`)
     return out
   }
+  /** 把单条契约文档路径按目标 docsDir goalize（与 goalizePrompt 同源语义：仅改写 GOAL_DOC_NAMES 槽位，
+   *  docs/review/... 等多级/其他命名路径原样保留）——登记/判缺路径必须与工人实际产出目录一致（M1）。
+   *  即有 docsDir 的目标其 `docs/REQUIREMENTS.md` → `docs/<goalId>/REQUIREMENTS.md`，其余不变。 */
+  const goalizeContractPath = (goal: GoalCtx | null | undefined, p: string): string => {
+    if (!goal?.docsDir) return p
+    let out = p
+    for (const name of GOAL_DOC_NAMES) out = out.split(`docs/${name}`).join(`${goal.docsDir}/${name}`)
+    return out
+  }
   const controllers = new Set<AbortController>()
   /** 合入调解中（in_review merge-fail 自动处理）：同一时刻只允许一个调解，避免主仓库 git 合并态互相踩踏。 */
   const mediating = new Set<string>()
@@ -473,6 +482,9 @@ export function apply(ctx: AppContext, config: Config): void {
   /** 调解失败次数（达上限后留给将军人工处理）。 */
   const mediateAttempts = new Map<string, number>()
   const maxMediateAttempts = 2
+  /** worker 连续「未完成/派工失败」重试上限：超过后置 blocked + 🛑 留将军，打断故障期热循环（镜像调解员 give-up 语义）。
+   *  仅统计同一认领（claimedAt 之后）的连续失败，将军/他人评论会重置计数。 */
+  const maxWorkerRetry = 3
   /** 守护进程启动后第一轮扫单已做过孤儿回收（重启前进程的在办 worker 已随进程消失，需释放回 todo 重新认领）。 */
   let bootReconciled = false
   let sweeping = false
@@ -1134,6 +1146,9 @@ exit 0
   /**
    * 登记 worker 产物（借鉴 dsh-worktable 的 widget-result.json 握手）：
    * html → 看板 iframe 预览；file → 看板链接；url → 跳转。相对路径按 worktree 解析；文件不存在则跳过并记录。
+   * - 存储路径统一规整为「仓库相对路径」（剥掉 repoRoot 与 .legion-worktrees/<task> 前缀）：
+   *   绝对路径在工作树合并/清理后失效、不可移植、详情里显示难懂（T-111 现场：绝对 worktree 路径已不存在）。
+   *   读端 resolveArtifactReadTarget 已支持相对路径（worktree 优先 / 主仓兜底 + 越界拒读）。
    */
   async function recordArtifact(taskId: string, a: WorkerArtifact, worktreeDir: string | null): Promise<void> {
     try {
@@ -1146,7 +1161,17 @@ exit 0
           await safeComment(taskId, `⚠ 产物路径不存在（未登记预览）：${resolved}`)
           return
         }
-        path = resolved
+        // 规整为仓库相对路径：relative(repoRoot, resolved)，再剥掉 .legion-worktrees/<task>/ 分支态前缀。
+        const repo = resolve(repoRootFor())
+        let rel = relative(repo, resolve(resolved)).replace(/\\/g, '/')
+        if (rel === '' || rel.startsWith('..')) {
+          path = resolved // 越出仓库根/根路径本身：保留绝对路径（读端 K10 兼容）
+        } else {
+          rel = rel.replace(/^\.\//, '')
+          const wtPrefix = `.legion-worktrees/${taskId}/`
+          if (rel.startsWith(wtPrefix)) rel = rel.slice(wtPrefix.length)
+          path = rel
+        }
       }
       const argv = ['artifact', taskId, '--by', config.role, '--kind', a.kind, '--path', path]
       if (a.title && a.title.length > 0) argv.push('--title', a.title.slice(0, 120))
@@ -1168,16 +1193,20 @@ exit 0
    * - 双写：hub 可用 → POST /api/artifact（带 digest 供后续幂等比对）；否则走既有 taskctl artifact 路径；
    * - 返回 {registered, missing}：missing 供软门禁判定（契约文档缺失 → 停 in_review，G-R2 缺才停）。
    */
-  async function registerContractDocs(t: Task, stage: StageDef, worktreeDir: string | null): Promise<{ registered: string[]; missing: string[] }> {
+  async function registerContractDocs(t: Task, stage: StageDef, worktreeDir: string | null, goal: GoalCtx | null | undefined): Promise<{ registered: string[]; missing: string[] }> {
     const baseDir = worktreeDir ?? repoRootFor()
-    const paths = resolveStageDocPaths(stage, t.id)
+    const rawPaths = resolveStageDocPaths(stage, t.id)
     // R-4/D2 文档同步契约：用户可见行为变更（docSync）任务，追加功能手册 + README 作为契约产出文档（仅此类任务追加，I-4）。
     if (t.docSync === true) {
-      for (const p of ['docs/FEATURES.md', 'README.md']) if (!paths.includes(p)) paths.push(p)
+      for (const p of ['docs/FEATURES.md', 'README.md']) if (!rawPaths.includes(p)) rawPaths.push(p)
     }
     const registered: string[] = []
     const missing: string[] = []
-    for (const rel of paths) {
+    for (const rawRel of rawPaths) {
+      // M1：登记/判缺路径先按目标 docsDir goalize（与 gate 校验 goalDocPath、goalizePrompt 同源语义），
+      // 否则 docsDir 目标的产出文档（docs/<goalId>/REQUIREMENTS.md 等）在根 docs/ 检不到 → 误判缺失停 in_review
+      // 且登记错根槽位路径（T-111 现场：登记 docs/REQUIREMENTS.md，详情既不正确定位也不预览目标文档）。
+      const rel = goalizeContractPath(goal, rawRel)
       const abs = join(baseDir, rel)
       let digest = ''
       try {
@@ -1196,8 +1225,10 @@ exit 0
         }
         registered.push(rel)
       } catch (e) {
+        // M2：登记「写入失败」≠ 文档缺失——绝不并入 missing。missing 是软门禁停 in_review 的依据，
+        // 写入失败并入会把「文档真实存在、仅记录条目写不进去」误判成「契约产出文档缺失」并错误停闸+错误归因。
+        // 这里记录日志：文档在库，缺的只是任务记录上的条目，后续重跑/人工可补，不影响流转。
         log(`${t.id} 契约产物登记失败（${rel}）：${String(e)}`)
-        missing.push(rel)
       }
     }
     if (registered.length > 0) activity('artifact', t.id, `契约产物登记：${registered.join('、')}`)
@@ -1609,7 +1640,7 @@ exit 0
       }
       let contractReg: { registered: string[]; missing: string[] } | null = null
       if (contractPaths.length > 0 && stage) {
-        contractReg = await registerContractDocs(t, stage, worktreeDir)
+        contractReg = await registerContractDocs(t, stage, worktreeDir, goal)
         // 软门禁（G-R2 缺才停）：契约文档缺失 → 停 in_review 写明确提示评论，不 autoPromote、不误判成功流转；
         // 文档补全后解阻重跑 → 登记成功、提示消除、照常流转。
         if (contractReg.missing.length > 0) {
@@ -1851,6 +1882,47 @@ exit 0
     }
     log(`${taskId} 调解员完成：${r.summary}`)
     return true
+  }
+
+  /** 调解员处理重派：worker 连续失败时不升级将军，由调解员诊断根因并直接在任务工作树修复（清冲突标记/修编译错误），
+   *  修复成功返回 {fixed:true, summary}，调用方据此重新派工；无法修复返回 {fixed:false}。 */
+  async function mediatorRecoverWorker(taskId: string, taskScope: string = scope): Promise<{ fixed: boolean; summary?: string; whyFailed?: string }> {
+    const t = await getTask(taskId, taskScope)
+    const ctxRepo = mediationCtxFor(taskScope)
+    if (ctxRepo === null) {
+      log(`调解处理重派跳过：任务 ${taskId} 所属空间 ${taskScope} 未绑定本地仓库`)
+      return { fixed: false, whyFailed: '无绑定仓库' }
+    }
+    const root = ctxRepo.root
+    const wtDir = join(ctxRepo.wtRoot || join(root, '.legion-worktrees'), taskId)
+    const tail = t.comments.slice(-6)
+      .map(c => `- [${c.at}] ${c.by}: ${(c.text ?? '').slice(0, 220)}`)
+      .join('\n')
+    const prompt = [
+      `你是「调解员」。军团任务 ${taskId}（${t.title}）的 worker 连续失败多次，请诊断根因并直接修复，以便重新派工。`,
+      `任务：${t.title}`,
+      `任务工作树：${wtDir}`,
+      '',
+      `worker 最近失败线索（时间逆序）：`,
+      tail || '（无）',
+      '',
+      '请打开该工作树，找到 worker 反复失败的根本原因：',
+      '- git 合并冲突标记（<<<<<<< / ======= / >>>>>>>）残留导致的编译/语法错误——保留两侧正确实现、去掉标记；',
+      '- 构建/类型错误——修复到可编译通过；',
+      '- 其他导致 worker 无法完成的根因。',
+      '',
+      '规则：只修改导致失败的少数文件；不包括无关业务代码；不新建文件；不运行任何 git/shell 命令。',
+      '完成后输出 status=done + summary（根因与修复方法）；若无法修复输出 status=failed + whyFailed。',
+    ].join('\n')
+    const r = await startOneShot<{ status: string; summary: string; whyFailed?: string }>(
+      `mediator:${taskId}`, prompt, MEDIATOR_SCHEMA, root,
+    )
+    if (r === null || r.status !== 'done') {
+      log(`${taskId} 调解员处理重派未完成：${r?.whyFailed ?? '无返回'}`)
+      return { fixed: false, summary: r?.summary, whyFailed: r?.whyFailed }
+    }
+    log(`${taskId} 调解员处理重派完成：${r.summary}`)
+    return { fixed: true, summary: r.summary }
   }
 
   /** 认领 todo 并派工（流水线模式按任务角色认领 + 用角色提示词）。 */
@@ -2416,6 +2488,32 @@ exit 0
         const answers = t.comments.filter(c => c.by !== config.role && new Date(c.at).getTime() >= new Date(lastAsk.at).getTime())
         return { open: answers.length === 0, answers }
       }
+      // worker 连续失败 give-up：任务已带 🛑 give-up 标记。仅当「将军/他人（非守护）在该标记之后新评论」才解除等待 → 将军答复后下轮自动续做；
+      // 未答复前保持停手（blocked/in_progress 均不自动重跑），避免 40 分钟 stale 释放→重新认领→再失败的无限空转。
+      const gaveUp = (t: Task): boolean => t.comments.some(c => (c.text ?? '').startsWith('🛑 已自动重试'))
+      const giveUpAwaitingGeneral = (t: Task): boolean => {
+        const lastGiveUp = [...t.comments].reverse().find(c => (c.text ?? '').startsWith('🛑 已自动重试'))
+        if (!lastGiveUp) return false
+        const ts = new Date(lastGiveUp.at).getTime()
+        return !t.comments.some(c => c.by !== config.role && new Date(c.at).getTime() >= ts)
+      }
+      // 同一认领内末尾连续的「worker 未完成/超时/派工失败」计数（将军/他人评论或非失败评论会打断并重置）。
+      // 超时也算失败：跑满 workerTimeoutMs 被强制结算同样说明这轮没产出，连续超时也是热循环（如 reviewer 大 diff 超时→重派→再超时）。
+      const workerFailStreak = (t: Task): number => {
+        const since = t.claimedAt === null ? 0 : new Date(t.claimedAt).getTime()
+        let n = 0
+        for (let i = t.comments.length - 1; i >= 0; i--) {
+          const c = t.comments[i]
+          if (new Date(c.at).getTime() < since) break
+          const txt = c.text ?? ''
+          if (txt.startsWith('⚠ worker 未完成') || txt.startsWith('⚠ worker 超时') || txt.startsWith('⚠ 派工失败')) n++
+          else break
+        }
+        return n
+      }
+      // 调解员处理重派已发生的次数（按 🤝 标记计数）：超过上限后不再自动调解，转将军（终态安全阀，防调解-再失败死循环）。
+      const medWorkerRedispatchCount = (t: Task): number =>
+        t.comments.filter(c => (c.text ?? '').startsWith('🤝 调解员处理重派')).length
 
       // 离线 inbox 计数：本守护名下待认领（todo/blocked 未认领）任务，每轮汇报一次（将军拦截的除外）
       const isOurInbox = (t: Task) => (isPipeline ? (t.role !== null && stageByRole.has(t.role)) : true)
@@ -2492,6 +2590,7 @@ exit 0
         if (!room() || inflight.has(t.id)) continue
         if (t.hold) continue
         if (openDeps(t)) continue
+        if (giveUpAwaitingGeneral(t)) continue // give-up 待将军答复：不自动续做，等将军评论后下轮带答复续做
         if (!sliceRoomOk(t)) continue
         const cf = confirmState(t)
         if (cf.open) continue // 待将军确认：不自动重跑，等答复
@@ -2504,8 +2603,33 @@ exit 0
       for (const t of tasks.filter(t => t.status === 'in_progress' && isOurs(t))) {
         if (!room() || inflight.has(t.id)) continue
         if (t.hold) continue // 将军拦截进行中任务：不自动纠错续跑
+        if (giveUpAwaitingGeneral(t)) continue // give-up 待将军答复：不自动重跑，等将军评论后下轮带答复续做
+        if (confirmState(t).open) continue // ❓ 待将军确认：不自动重跑，等将军答复（否则士兵❓后仍被错误重派，造成空转）
         const since = t.claimedAt === null ? 0 : new Date(t.claimedAt).getTime()
         const feedback = t.comments.filter(c => new Date(c.at).getTime() > since && c.by !== self(t))
+        // 3.1 连续 worker 失败 → 交调解员处理重派（默认不升级将军）：调解员诊断根因并修复工作树，成功后重新派工；
+        //     只有在「调解已尝试 ≥maxMediateAttempts 次仍失败」或「调解员无法修复根因」时才置 blocked 留将军（终态安全阀）。
+        const streak = workerFailStreak(t)
+        if (streak >= maxWorkerRetry && !gaveUp(t)) {
+          inflight.add(t.id)
+          runDetached(t.id, (async () => {
+            if (medWorkerRedispatchCount(t) >= maxMediateAttempts) {
+              await safeComment(t.id, `🛑 已自动重试 ${streak} 次、调解员处理重派 ${maxMediateAttempts} 次仍未解决，任务已置 blocked，请将军人工处理（或转派）`, t.scope ?? scope)
+              await transitionTo(t.id, 'blocked', t.scope ?? scope)
+              return
+            }
+            const rec = await mediatorRecoverWorker(t.id, t.scope ?? scope)
+            if (rec.fixed) {
+              await safeComment(t.id, `🤝 调解员处理重派：已修复根因（${(rec.summary ?? '').slice(0, 200)}），重新派工续做`, t.scope ?? scope)
+              await workReturned(t, [], stageOf(t))
+            } else {
+              await safeComment(t.id, `🛑 已自动重试 ${streak} 次且调解员未能自动修复根因（${(rec.whyFailed ?? rec.summary ?? '').slice(0, 160)}），任务已置 blocked，请将军人工处理（或转派）`, t.scope ?? scope)
+              await transitionTo(t.id, 'blocked', t.scope ?? scope)
+            }
+          })())
+          continue
+        }
+        // 3.2 存在将军 / 他人反馈 → 退回附反馈纠错；只有守护自己的「worker 未完成/派工失败」评论 → 退避重试
         const abortDriven = feedback.length === 0 && t.comments.some(c =>
           new Date(c.at).getTime() > since && (c.text.startsWith('⚠ worker 未完成') || c.text.startsWith('⚠ 派工失败')))
         if (feedback.length === 0 && !abortDriven) continue

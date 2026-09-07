@@ -521,3 +521,82 @@ test('a single-role aborted worker is retried on the next sweep instead of stall
     await cleanup(root)
   }
 })
+
+test('repeated worker failures are re-dispatched by the mediator instead of escalating to the general', async () => {
+  // D8 回归：同一认领内连续 ≥maxWorkerRetry 次「⚠ worker 未完成」→ 不升级将军，
+  // 交调解员（label=mediator:*）诊断修复根因并重新派工（label=scrum:*）；仅调解无法修复才置 blocked。
+  const root = await mkdtemp(join(tmpdir(), 'scrum-worker-mediator-redispatch-'))
+  const originalFetch = globalThis.fetch
+  const restoreTasks = protectTasksFile(root)
+  const requests = []
+  const commentTexts = []
+  let task = {
+    ...structuredClone(TASK),
+    status: 'in_progress',
+    claimedAt: new Date(Date.now() - 120_000).toISOString(),
+    comments: [1, 2, 3].map(i => ({
+      by: 'soldier-auto',
+      at: new Date(Date.now() - (120_000 - i * 10_000)).toISOString(),
+      text: '⚠ worker 未完成（error），任务保留在 in_progress，等待人工处理或下一轮重试',
+    })),
+  }
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input))
+    if (url.pathname === '/api/skills') return response([])
+    if (url.pathname === '/api/board') return response([task])
+    const body = init.body ? JSON.parse(String(init.body)) : {}
+    if (url.pathname === '/api/comment') {
+      commentTexts.push(body.text)
+      task = { ...task, comments: [...task.comments, { by: body.by, at: new Date().toISOString(), text: body.text }] }
+      return response({ task })
+    }
+    if (url.pathname === '/api/transition') {
+      requests.push(`transition:${body.to}`)
+      task = { ...task, status: body.to, version: task.version + 1 }
+      return response({ task })
+    }
+    if (url.pathname === '/api/claim') {
+      requests.push(`claim:${task.status}`)
+      return response({ task })
+    }
+    throw new Error(`unexpected request ${url.pathname}`)
+  }
+
+  let mediatorStarts = 0
+  let workerStarts = 0
+  const harness = fakeContext(
+    { status: 'done', summary: 'finished', evidence: 'ok', blocker: '' },
+    async () => {},
+    async () => {},
+    async (provider, options) => {
+      const label = String(options?.label ?? '')
+      if (label.startsWith('mediator:')) {
+        mediatorStarts += 1
+        return {
+          result: Promise.resolve({ stopReason: 'completed', structured: { status: 'done', summary: 'cleared conflict markers', resolvedFiles: ['workbench/src/App.tsx'] } }),
+          dispose: async () => {},
+        }
+      }
+      workerStarts += 1
+      return {
+        result: Promise.resolve({ stopReason: 'completed', structured: { status: 'done', summary: 'finished', evidence: 'ok', blocker: '' } }),
+        dispose: async () => {},
+      }
+    },
+  )
+  try {
+    apply(harness.ctx, config(root))
+    harness.intervals[0]()
+    await waitFor(() => mediatorStarts === 1, 'mediator was never dispatched for the failing worker')
+    await waitFor(() => commentTexts.some(t => t.startsWith('🤝 调解员处理重派')), 'mediator redispatch comment was not posted')
+    await waitFor(() => workerStarts === 1, 'worker was never re-dispatched after mediator fix')
+    await waitFor(() => requests.includes('transition:in_review'), 're-dispatched worker never completed')
+    assert.ok(!requests.includes('transition:blocked'), 'task must not be escalated to blocked when the mediator can fix the root cause')
+    assert.equal(mediatorStarts, 1, 'mediator should be dispatched exactly once here')
+  } finally {
+    for (const dispose of harness.disposers) await dispose()
+    globalThis.fetch = originalFetch
+    restoreTasks()
+    await cleanup(root)
+  }
+})

@@ -155,6 +155,8 @@ interface Task {
   goalId?: string | null
   /** 切片文件域声明（JSON 数组，相对仓库根的路径/目录前缀）：merge/promote 前越域机器校验用；无声明 = 不限制。 */
   fileDomain?: string[] | null
+  /** 文档同步标记（R-4/F1）：用户可见行为变更（feature/docSync）任务为 true；纯重构/测试不设。守护据其在契约路径追加 docs/FEATURES.md + README.md 并注入同步提示词（D2/D3）。 */
+  docSync?: boolean | null
 }
 
 /** 目标上下文（同目标共享上下文，守护派工时注入 + 写镜像供士兵读文件）。 */
@@ -1169,6 +1171,10 @@ exit 0
   async function registerContractDocs(t: Task, stage: StageDef, worktreeDir: string | null): Promise<{ registered: string[]; missing: string[] }> {
     const baseDir = worktreeDir ?? repoRootFor()
     const paths = resolveStageDocPaths(stage, t.id)
+    // R-4/D2 文档同步契约：用户可见行为变更（docSync）任务，追加功能手册 + README 作为契约产出文档（仅此类任务追加，I-4）。
+    if (t.docSync === true) {
+      for (const p of ['docs/FEATURES.md', 'README.md']) if (!paths.includes(p)) paths.push(p)
+    }
     const registered: string[] = []
     const missing: string[] = []
     for (const rel of paths) {
@@ -1343,6 +1349,12 @@ exit 0
             '边界（只做 / 不做，必须遵守）：',
             ...(t.boundary.do ?? []).map(x => `- ✅ 做：${x}`),
             ...(t.boundary.dont ?? []).map(x => `- 🚫 不做：${x}`),
+          ]
+        : []),
+      ...(t.docSync === true
+        ? [
+            '',
+            '文档同步（doc-sync，R-4/D3）**必须**：本任务是「用户可见行为变更」——请同步更新功能手册 `docs/FEATURES.md` 对应小节 + §4 功能索引（F-xx 行）+ README 引导段（模块导航互链）。若该功能手册尚无对应小节，请新增并登记进功能索引。',
           ]
         : []),
       t.blockedBy.length > 0 ? `依赖（应已完成）：${t.blockedBy.join(', ')}` : '',
@@ -1591,6 +1603,10 @@ exit 0
       // S2 契约文档自动登记：commitWorktree 之后、autoPromote 之前（存在性以 worktree 目录为基准）。
       // 流水线文档型岗位（roles.json stage.docs 契约）结算时逐条登记仓库相对路径条目；worker 未填 artifact 亦登记（AC-R1-2）。
       const contractPaths = isPipeline && stage ? stageContractDocs(stage) : []
+      // R-4/D2 文档同步契约：docSync 任务对 coder/devops 的契约路径追加 docs/FEATURES.md + README.md（否则该任务不做文档同步也不会被软门禁卡住，AC-R4-2）。
+      if (isPipeline && stage && t.docSync === true) {
+        for (const p of ['docs/FEATURES.md', 'README.md']) if (!(contractPaths as string[]).includes(p)) contractPaths.push(p)
+      }
       let contractReg: { registered: string[]; missing: string[] } | null = null
       if (contractPaths.length > 0 && stage) {
         contractReg = await registerContractDocs(t, stage, worktreeDir)

@@ -99,6 +99,7 @@ const STAGE_STANDARDS = {
       '真实跑过 typecheck / build / 测试，证据含命令与输出要点',
       '改动仅在任务范围内；新引入依赖有说明',
       '自测通过才提交验收',
+      '用户可见行为变更（feature/docSync）须同步功能手册 docs/FEATURES.md 对应小节 + 功能索引 + README 引导段；纯重构/测试可豁免',
     ],
     do: [
       '按验收标准逐条自测并在证据中对应说明',
@@ -144,6 +145,7 @@ const STAGE_STANDARDS = {
       '构建 / CI 真实跑通（命令输出为证）',
       '部署 / 发布清单含：环境、步骤、验证项、回滚方案',
       '说明变更影响与验证结果',
+      '用户可见行为变更（feature/docSync）须同步功能手册 docs/FEATURES.md 对应小节 + 功能索引 + README 引导段；纯重构可豁免',
     ],
     do: [
       '只做构建与部署类操作，并按清单留痕',

@@ -1,0 +1,21 @@
+== TC-S3-05 坏内联锚点注入 ==
+exit=1
+FAIL: D:\project\DSH\legion\.legion-worktrees\T-115\docs\FEATURES.md:3 — 内联锚点失效：#no-such-heading-xyz
+check-docs: FAIL（1 处问题，详见上方 FAIL 行）
+
+  还原后 exit=0 (check-docs: PASS（README.md + docs/FEATURES.md 结构/链接/索引一致，8 类校验项全绿）)
+
+== TC-S3-06 索引坏列注入 ==
+exit=1
+FAIL: D:\project\DSH\legion\.legion-worktrees\T-115\docs\FEATURES.md:233 — 索引行列数=4（需 5 列）：F-18 | 故障排查 | 5.1 故障排查 | 已上线
+check-docs: FAIL（1 处问题，详见上方 FAIL 行）
+
+  还原后 exit=0
+
+== TC-S3-07 README 断链注入 ==
+exit=1
+FAIL: D:\project\DSH\legion\.legion-worktrees\T-115\README.md:63 — 互链锚点失效：docs/FEATURES.md#nope-bad-anchor
+check-docs: FAIL（1 处问题，详见上方 FAIL 行）
+
+  还原后 exit=0
+

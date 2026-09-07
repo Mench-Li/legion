@@ -447,11 +447,23 @@ export function hubReviewNote(id: string, file: string, verdict: 'ok' | 'issue' 
 }
 
 async function hubPost(path: string, body: Record<string, unknown>): Promise<unknown> {
-  const res = await fetch(`${hubBase()}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({ ...body, by: body.by ?? 'general' }),
-  })
+  // 写请求带超时（20s）：防止代理/中枢无响应时界面无限"卡住"（发布目标等操作无感知失败）。
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), 20_000)
+  let res: Response
+  try {
+    res = await fetch(`${hubBase()}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ ...body, by: body.by ?? 'general' }),
+      signal: ctrl.signal,
+    })
+  } catch (e) {
+    clearTimeout(timer)
+    if (e instanceof DOMException && e.name === 'AbortError') throw new Error(`请求超时（20s）：中枢 ${hubBase()} 无响应，请确认 team-hub 已启动`)
+    throw new Error(`无法连接中枢 ${hubBase()}${path}（网络/代理错误），请检查 team-hub 状态`)
+  }
+  clearTimeout(timer)
   if (!res.ok) {
     const text = await res.text().catch(() => '')
     throw new Error(`${res.status}${text ? `：${text}` : ''}`)

@@ -326,9 +326,15 @@ export default function App(): React.JSX.Element {
 
   /** 发布目标：写 team-hub 后刷新目标列表。每次发布 = 新建一个目标（与既有目标并存，不取消旧链）。 */
   const handlePublishGoal = useCallback(async (scopeValue: string, objective: string): Promise<void> => {
+    // publishGoal 失败向上抛 → GoalModal 捕获并 toast（弹窗保留，可改后重试）
     await publishGoal(scopeValue, objective)
-    const info = await fetchGoal(scopeValue)
-    setGoalInfo(info)
+    try {
+      const info = await fetchGoal(scopeValue)
+      setGoalInfo(info)
+    } catch {
+      // 目标其实已发布，仅刷新失败：不阻塞关闭，提示手动刷新
+      toast('info', '目标已发布，但刷新目标列表失败，请手动刷新页面')
+    }
     toast('ok', '🎯 已发布目标（与既有目标并存，自动生成独立任务链）')
   }, [])
 

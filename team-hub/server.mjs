@@ -737,8 +737,12 @@ function withTx(mutate) {
 }
 
 function nextId() {
-  const row = db.prepare('SELECT COUNT(*) AS c FROM tasks').get()
-  return `T-${String((row?.c ?? 0) + 1).padStart(3, '0')}`
+  // 必须按「现有最大 T- 编号 + 1」分配，而不是 COUNT(*)+1：
+  // COUNT 在库里出现过删除（清空间/清理）产生空号后 < 最大编号，会撞上仍存在的任务
+  // （实测 115 行 / max T-118 → COUNT+1 得 T-116，命中 T-116 → UNIQUE constraint failed: tasks.id）。
+  const row = db.prepare("SELECT MAX(CAST(SUBSTR(id, 3) AS INTEGER)) AS m FROM tasks WHERE id GLOB 'T-[0-9]*'").get()
+  const m = row && Number.isFinite(row.m) ? row.m : 0
+  return `T-${String(m + 1).padStart(3, '0')}`
 }
 
 function audit(member, scope, action, taskId, detail, goalId = null) {

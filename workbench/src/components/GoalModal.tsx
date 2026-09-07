@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { toast } from './Toast'
 
 interface GoalModalProps {
   scope: string
@@ -20,6 +21,9 @@ export function GoalModal({ scope, spaceName, activeCount = 0, onClose, onPublis
     try {
       await onPublish(scope, text)
       onClose()
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      toast('err', msg.includes('401') ? '令牌无效或缺失：请在右上角「🔑 令牌」设置' : `发布失败：${msg}`)
     } finally {
       setBusy(false)
     }

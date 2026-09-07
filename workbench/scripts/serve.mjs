@@ -26,11 +26,12 @@
  *      （连接仍停在「等剩余体」态时复用会把下一请求误读为体字节，挂起约 6s 后 ECONNRESET）。
  */
 import { createServer, request } from 'node:http'
-import { appendFileSync, createReadStream, createWriteStream, existsSync, openSync, readSync, writeSync, closeSync, unlinkSync, rmdirSync, mkdirSync, readdirSync, renameSync, realpathSync, statSync, lstatSync } from 'node:fs'
+import { appendFileSync, createReadStream, createWriteStream, existsSync, openSync, readSync, writeSync, closeSync, unlinkSync, rmdirSync, mkdirSync, readdirSync, renameSync, realpathSync, statSync, lstatSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { basename, extname, join, normalize, dirname, sep, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
+import { buildGithubTarballUrl, scanSkillDirs, sanitizeSkillId } from './skillImporter.mjs'
 
 const ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', 'dist')
 
@@ -1006,6 +1007,181 @@ function classifyFilesError(e) {
   return 400
 }
 
+// ───────────────────────── 技能安装（技能仓库：本地目录 / GitHub tarball → 候选 → 导入）─────────────────────────
+const SKILL_ARCHIVE_MAX_BYTES = 200 * 1024 * 1024 // GitHub 归档下载上限
+
+/** team-hub 上游（同 registerSkillViaHub 的解析）。 */
+function hubUpstream() {
+  return (process.env.DSH_HUB_UPSTREAM ?? 'http://127.0.0.1:8787').replace(/\/+$/, '')
+}
+
+/** 拉取某空间的团队技能来源（github url + 分支）。 */
+async function fetchSkillSourceFromHub(scope) {
+  const resp = await fetch(`${hubUpstream()}/api/skill-source?scope=${encodeURIComponent(scope)}`)
+  const data = await resp.json().catch(() => null)
+  return data?.source ?? { url: '', branch: '' }
+}
+
+/** 拉取某空间的既有技能（全部状态，含待审/被拒），按 id 索引。 */
+async function fetchExistingSkills(scope) {
+  const resp = await fetch(`${hubUpstream()}/api/skills?scope=${encodeURIComponent(scope)}&include=pending`)
+  const data = await resp.json().catch(() => null)
+  const arr = Array.isArray(data) ? data : []
+  const map = new Map()
+  for (const s of arr) if (s && typeof s.id === 'string') map.set(s.id, s)
+  return map
+}
+
+/** 下载 GitHub codeload 归档到 cacheDir 并解包，返回解包后的根目录。 */
+async function downloadGithubArchive(url, cacheDir) {
+  mkdirSync(cacheDir, { recursive: true })
+  const resp = await fetch(url)
+  if (!resp.ok) throw new Error(`GitHub 归档下载失败（HTTP ${resp.status}）`)
+  const len = Number(resp.headers.get('content-length') ?? 0)
+  if (Number.isFinite(len) && len > SKILL_ARCHIVE_MAX_BYTES) throw new Error('GitHub 归档过大，已拒绝下载')
+  const buf = Buffer.from(await resp.arrayBuffer())
+  if (buf.length > SKILL_ARCHIVE_MAX_BYTES) throw new Error('GitHub 归档超过下载上限，已拒绝')
+  const tarball = join(cacheDir, 'repo.tar.gz')
+  writeFileSync(tarball, buf)
+  // 解包（Windows 10+ 自带 bsdtar；失败抛可读错误，不破坏工作区）
+  try {
+    execFileSync('tar', ['-xzf', tarball, '-C', cacheDir])
+  } catch {
+    throw new Error('归档解包失败：需要系统 tar（Windows 10+ 自带；Linux 需 tar）')
+  }
+  unlinkSync(tarball)
+  return findArchiveRoot(cacheDir)
+}
+
+/** codeload 归档解包后通常是一个 `<owner>-<repo>-<branch>` 顶层文件夹；取其唯一子目录。 */
+function findArchiveRoot(cacheDir) {
+  const names = readdirSync(cacheDir).filter(n => !n.startsWith('.'))
+  if (names.length === 1) {
+    const p = join(cacheDir, names[0])
+    if (statSync(p).isDirectory()) return p
+  }
+  return cacheDir
+}
+
+/** 把候选 bundle 注册到 team-hub（pending 待复审）。 */
+async function registerSkillViaHub(scope, c) {
+  const body = {
+    id: c.id, name: c.name, scope,
+    description: c.description ?? '',
+    main: c.main ?? '', config: c.config ?? '',
+    scripts: (c.scripts ?? []).map(s => ({ name: s.name, content: s.content })),
+    cases: (c.cases ?? []).map(s => ({ name: s.name, content: s.content })),
+    prompt: c.main ?? '', by: 'general',
+  }
+  const resp = await fetch(hubUpstream() + '/api/skills/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  const data = await resp.json().catch(() => null)
+  return { ok: resp.ok, status: resp.status, error: resp.ok ? undefined : (data?.error ?? `HTTP ${resp.status}`), skill: data }
+}
+
+/** 技能安装 API（仅回环）：scan-dir（扫本地目录）、scan-github（拉归档到受控缓存再扫）、import（注册到中枢为待审）。 */
+async function handleSkillsApi(req, res, pathname, url) {
+  if (!isLoopback(req)) {
+    httpErr(res, 403, '技能安装接口仅限本机（127.0.0.1）访问')
+    return
+  }
+  try {
+    if (req.method !== 'POST') {
+      httpErr(res, 405, '技能安装接口仅支持 POST')
+      return
+    }
+    const body = await readBodyJson(req)
+    const scope = typeof body.scope === 'string' ? body.scope.trim() : ''
+    if (!scope) throw new Error('缺少参数 scope')
+
+    if (pathname === '/api/skills/scan-dir') {
+      const root = await resolveScopeLocalDir(scope)
+      const rel = typeof body.path === 'string' ? body.path.trim() : ''
+      const abs = resolveInsideRoot(root, rel) // rel=''/'.' → 根；否则根内子目录（越界/.git 自拒）
+      sendJson(res, 200, { ok: true, candidates: scanSkillDirs(abs) })
+      return
+    }
+
+    if (pathname === '/api/skills/scan-github') {
+      const root = await resolveScopeLocalDir(scope)
+      const tarUrl = buildGithubTarballUrl(body.url) // 仅放行 GitHub 官方域名（buildGithubTarballUrl 内校验）
+      const cacheDir = join(root, '.skills-cache')
+      const slug = sanitizeSkillId(basename(new URL(tarUrl).pathname.replace(/\/$/, '')) || 'repo')
+      const dest = join(cacheDir, slug)
+      const extracted = await downloadGithubArchive(tarUrl, dest)
+      sendJson(res, 200, { ok: true, candidates: scanSkillDirs(extracted), archiveDir: dest })
+      return
+    }
+
+    if (pathname === '/api/skills/import') {
+      const items = Array.isArray(body.candidates) ? body.candidates : []
+      if (items.length === 0) throw new Error('缺少参数 candidates')
+      const results = []
+      for (const c of items) {
+        const r = await registerSkillViaHub(scope, c)
+        results.push({ id: c.id, ok: r.ok, error: r.error, version: r.skill?.version })
+      }
+      sendJson(res, 200, { ok: true, results })
+      return
+    }
+
+    if (pathname === '/api/skills/sync') {
+      const root = await resolveScopeLocalDir(scope)
+      const bodyUrl = typeof body.url === 'string' ? body.url.trim() : ''
+      const bodyBranch = typeof body.branch === 'string' ? body.branch.trim() : ''
+      const strategy = body.strategy === 'skip' ? 'skip' : 'upgrade'
+      let url = bodyUrl
+      let branch = bodyBranch
+      if (!url) {
+        const saved = await fetchSkillSourceFromHub(scope)
+        url = saved.url || ''
+        if (!branch) branch = saved.branch || ''
+      }
+      if (!url) throw new Error('未配置技能来源：请先填写 GitHub 仓库地址（或先绑定团队技能仓库）')
+      const tarUrl = buildGithubTarballUrl(url, branch || undefined)
+      const cacheDir = join(root, '.skills-cache')
+      const slug = sanitizeSkillId(basename(new URL(tarUrl).pathname.replace(/\/$/, '')) || 'repo')
+      const dest = join(cacheDir, slug)
+      const extracted = await downloadGithubArchive(tarUrl, dest)
+      const candidates = scanSkillDirs(extracted)
+      const existing = await fetchExistingSkills(scope)
+      const report = { added: [], updated: [], unchanged: [], skipped: [], foreign: [] }
+      for (const c of candidates) {
+        const ex = existing.get(c.id)
+        if (!ex) {
+          const r = await registerSkillViaHub(scope, c)
+          report.added.push({ id: c.id, name: c.name, version: r.ok ? r.skill?.version : undefined, error: r.error })
+        } else if (ex.scope !== scope) {
+          report.foreign.push({ id: c.id, name: c.name, scope: ex.scope }) // 他空间已有同名技能，避免越权覆盖
+        } else if (strategy === 'skip') {
+          report.skipped.push({ id: c.id, name: c.name, version: ex.version })
+        } else {
+          const r = await registerSkillViaHub(scope, c) // 幂等：同内容不 bump
+          if (r.ok && ex.contentHash !== r.skill?.contentHash) report.updated.push({ id: c.id, name: c.name, fromVersion: ex.version, toVersion: r.skill?.version })
+          else if (r.ok) report.unchanged.push({ id: c.id, name: c.name, version: ex.version })
+          else report.skipped.push({ id: c.id, name: c.name, error: r.error })
+        }
+      }
+      // 持久化来源（仅当本次显式给出 url；否则保留已存来源）。
+      let source = await fetchSkillSourceFromHub(scope)
+      if (bodyUrl) {
+        await fetch(`${hubUpstream()}/api/skill-source`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ scope, url: bodyUrl, branch: branch || '', by: 'general' }),
+        })
+        source = { scope, url: bodyUrl, branch: branch || '' }
+      }
+      sendJson(res, 200, { ok: true, strategy, candidates: candidates.length, report, source })
+      return
+    }
+
+    httpErr(res, 404, `not found: ${pathname}`)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    const forbidden = msg.includes('越界') || msg.includes('.git') || msg.includes('仅限') || msg.includes('仅允许') || msg.includes('官方域名') || msg.includes('https')
+    httpErr(res, forbidden ? 403 : 400, msg)
+  }
+}
+
 async function handleFilesApi(req, res, pathname, url) {
   if (!isLoopback(req)) {
     httpErr(res, 403, '文件接口仅限本机（127.0.0.1）访问')
@@ -1158,6 +1334,11 @@ function routeRequest(req, res) {
   // 目录浏览 / git 探测（空间仓库绑定的「选择文件夹」）
   if (pathname.startsWith('/api/fs/')) {
     void handleFsApi(req, res, pathname, url).catch((e) => { try { httpErr(res, 500, 'internal error：' + (e instanceof Error ? e.message : String(e))) } catch { /* */ } })
+    return
+  }
+  // 技能安装（扫描/导入；本地目录根内 + GitHub 归档到受控缓存）
+  if (pathname.startsWith('/api/skills/')) {
+    void handleSkillsApi(req, res, pathname, url).catch((e) => { try { httpErr(res, 500, 'internal error：' + (e instanceof Error ? e.message : String(e))) } catch { /* */ } })
     return
   }
   let file = normalize(join(ROOT, pathname))

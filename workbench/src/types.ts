@@ -127,11 +127,26 @@ export interface MissionsResponse {
 }
 
 /** team-hub v2 团队共享技能（scope-owned + 版本 + 复审）。 */
+/** 技能多部件（脚本/案例）：名称 + 内容正文。 */
+export interface SkillPart {
+  name: string
+  content: string
+}
+
+/** 技能「完整技能包」内容：主提示(SKILL.md) + 配置(config.yaml) + 脚本 + 案例。 */
+export interface SkillBundle {
+  main: string
+  config: string
+  scripts: SkillPart[]
+  cases: SkillPart[]
+}
+
 export interface SkillInfo {
   id: string
   name: string
   description: string
   prompt: string
+  bundle?: SkillBundle
   scope: string
   owner: string | null
   grants: string[]

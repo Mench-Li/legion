@@ -1366,6 +1366,181 @@ body {
   line-height: 1.6;
 }
 
+/* 技能多部件标记 + 表单里的 mono 文本域 + 部件编辑器 */
+.skill-parts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 4px 0 2px;
+}
+.skill-part-badge {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line-2);
+  color: var(--blue);
+  background: rgba(91, 140, 255, 0.08);
+}
+.mono {
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.part-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.part-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+.part-row .part-name {
+  width: 100%;
+  box-sizing: border-box;
+}
+.part-row .part-content {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 54px;
+  resize: vertical;
+}
+.part-row > .btn {
+  align-self: flex-end;
+}
+
+/* 技能安装弹窗（技能仓库） */
+.skill-install-mode {
+  display: flex;
+  gap: 6px;
+}
+.mode-pill {
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line-2);
+  color: var(--muted);
+  background: transparent;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.mode-pill:hover { border-color: rgba(91, 140, 255, 0.5); color: var(--blue); }
+.mode-pill.active { background: rgba(91, 140, 255, 0.18); color: #fff; border-color: rgba(91, 140, 255, 0.7); }
+.skill-install-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.skill-install-error {
+  font-size: 11px;
+  color: var(--red);
+  background: rgba(255, 90, 90, 0.08);
+  border: 1px solid rgba(255, 90, 90, 0.3);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+.skill-install-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+.skill-install-empty {
+  font-size: 11px;
+  color: var(--muted-2);
+  padding: 6px 8px;
+}
+.skill-install-item {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 9px;
+  background: var(--panel-2);
+}
+.skill-install-item .si-main {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--text);
+}
+.skill-install-item .si-main code {
+  font-size: 10px;
+  color: var(--blue);
+  background: rgba(91, 140, 255, 0.1);
+  padding: 0 5px;
+  border-radius: 4px;
+}
+.skill-install-item .si-desc {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.5;
+  margin-top: 2px;
+}
+.skill-install-item .si-parts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 4px;
+}
+
+/* 技能仓库（团队技能源）一键拉取同步 */
+.skill-repo {
+  padding: 9px 12px;
+}
+.skill-repo .sr-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.skill-repo .sr-hint {
+  font-size: 11px;
+  color: var(--muted);
+  max-width: 320px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.skill-repo .sr-select,
+.skill-repo .sr-input {
+  font-size: 12px;
+}
+.skill-repo .sr-fields {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+.skill-repo .sr-input {
+  flex: 1;
+}
+.skill-repo .sr-input.sr-branch {
+  flex: 0 0 130px;
+}
+.skill-repo .sr-report {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 11px;
+}
+.skill-repo .sr-report .sr-line {
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--muted);
+}
+.skill-repo .sr-report .sr-line.ok { color: #79c58a; border-color: rgba(121, 197, 138, 0.4); background: rgba(121, 197, 138, 0.08); }
+.skill-repo .sr-report .sr-line.warn { color: #e7b65b; border-color: rgba(231, 182, 91, 0.4); background: rgba(231, 182, 91, 0.08); }
+.skill-repo .sr-report .sr-names { color: var(--text); }
+
 .skill-prompt summary {
   font-size: 10px;
   color: var(--muted-2);
@@ -1489,6 +1664,26 @@ body {
 .grant-space-pill.selected { background: rgba(91, 140, 255, 0.2); color: #fff; border-color: rgba(91, 140, 255, 0.8); }
 
 /* 授权智能体：可搜索下拉（名称/角色） */
+.agent-space-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.agent-space-pill {
+  cursor: pointer;
+  user-select: none;
+  font-size: 10px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--line-2);
+  color: var(--muted);
+  background: transparent;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.agent-space-pill:hover { border-color: rgba(91, 140, 255, 0.5); color: var(--blue); }
+.agent-space-pill.active { background: rgba(91, 140, 255, 0.18); color: #fff; border-color: rgba(91, 140, 255, 0.7); }
+
 .agent-picker {
   position: relative;
 }
@@ -1508,6 +1703,15 @@ body {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
   max-height: 280px;
   overflow-y: auto;
+}
+.agent-picker-list.fixed {
+  position: fixed; /* 浮于弹窗之上（z-index > .modal-mask 2000），脱离 .modal{overflow:auto} 裁切 */
+  left: auto;
+  right: auto;
+  top: auto;
+  bottom: auto;
+  z-index: 3000;
+  margin: 0;
 }
 .agent-picker-empty {
   padding: 10px 12px;

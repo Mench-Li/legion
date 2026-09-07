@@ -468,12 +468,16 @@ export async function fetchSkills(opts: { scope?: string | null; includePending?
   return readJson<SkillInfo[]>(await fetch(`${hubBase()}/api/skills${qs.size ? `?${qs.toString()}` : ''}`))
 }
 
-/** team-hub v2：提交技能（新技能/内容变更 → pending 待复审，不自动发布）。 */
+/** team-hub v2：提交技能（新技能/内容变更 → pending 待复审，不自动发布）。支持多部件完整技能包。 */
 export function registerSkill(input: {
   id: string
   name: string
   description?: string
   prompt?: string
+  main?: string
+  config?: string
+  scripts?: { name: string; content: string }[]
+  cases?: { name: string; content: string }[]
   scope?: string
 }): Promise<unknown> {
   return hubPost('/api/skills/register', input)
@@ -668,6 +672,101 @@ export function filesRename(scope: string, from: string, to: string): Promise<Fi
 
 export function filesDelete(scope: string, path: string, confirm: 'yes'): Promise<FilesWriteOk> {
   return filesWrite<FilesWriteOk>('/api/files/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope, path, confirm }) })
+}
+
+// ───────────────────────── 技能安装（技能仓库：本地目录 / GitHub → 候选 → 导入；同源 /api/skills）─────────────────────────
+
+/** 扫描后得到的单枚技能候选（从目录/仓库解析出的 bundle，未注册）。 */
+export interface SkillCandidate {
+  id: string
+  name: string
+  description: string
+  main: string
+  config: string
+  scripts: { name: string; content: string }[]
+  cases: { name: string; content: string }[]
+  sourceDir?: string
+}
+
+/** 扫描本地目录（scope 工作区内的相对路径）→ 候选列表（不写入中枢）。 */
+export async function scanSkillsDir(scope: string, path: string): Promise<SkillCandidate[]> {
+  const res = await fetch('/api/skills/scan-dir', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scope, path }),
+  })
+  const body = await res.json().catch(() => null) as { candidates?: SkillCandidate[]; error?: string } | null
+  if (!res.ok || !body) throw new Error(body?.error ?? `扫描失败：${res.status} ${res.statusText}`)
+  return body.candidates ?? []
+}
+
+/** 从 GitHub 仓库拉取（归档到受控缓存再扫描）→ 候选列表（不写入中枢）。 */
+export async function scanSkillsGithub(scope: string, url: string): Promise<{ candidates: SkillCandidate[]; archiveDir?: string }> {
+  const res = await fetch('/api/skills/scan-github', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scope, url }),
+  })
+  const body = await res.json().catch(() => null) as { candidates?: SkillCandidate[]; archiveDir?: string; error?: string } | null
+  if (!res.ok || !body) throw new Error(body?.error ?? `拉取失败：${res.status} ${res.statusText}`)
+  return { candidates: body.candidates ?? [], archiveDir: body.archiveDir }
+}
+
+/** 把选中的技能候选注册到中枢（→ pending 待复审）。 */
+export async function importSkillCandidates(scope: string, candidates: SkillCandidate[]): Promise<{ results: { id: string; ok: boolean; error?: string; version?: number }[] }> {
+  const res = await fetch('/api/skills/import', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scope, candidates }),
+  })
+  const body = await res.json().catch(() => null) as ({ results: { id: string; ok: boolean; error?: string; version?: number }[]; error?: string }) | null
+  if (!res.ok || !body) throw new Error(body?.error ?? `导入失败：${res.status} ${res.statusText}`)
+  return body
+}
+
+/** 技能来源（每个空间绑定的团队技能仓库，存于 team-hub）。 */
+export interface SkillSource {
+  scope: string
+  url: string
+  branch: string
+  updatedAt?: string | null
+}
+
+/** 读取某空间的技能来源（team-hub GET /api/skill-source）。 */
+export async function getSkillSource(scope: string): Promise<SkillSource> {
+  const res = await fetch(`${hubBase()}/api/skill-source?scope=${encodeURIComponent(scope)}`)
+  const body = await res.json().catch(() => null) as { source?: SkillSource; error?: string } | null
+  if (!res.ok || !body) throw new Error(body?.error ?? `获取技能来源失败：${res.status} ${res.statusText}`)
+  return body.source ?? { scope, url: '', branch: '' }
+}
+
+/** 保存某空间的技能来源（team-hub POST /api/skill-source）。 */
+export function saveSkillSource(scope: string, url: string, branch: string): Promise<unknown> {
+  return hubPost('/api/skill-source', { scope, url, branch })
+}
+
+/** 一键拉取同步（workbench POST /api/skills/sync）：扫描来源仓库，按其返回的冲突策略注册/跳过。 */
+export interface SkillSyncReport {
+  added: { id: string; name: string; version?: number; error?: string }[]
+  updated: { id: string; name: string; fromVersion: number; toVersion?: number }[]
+  unchanged: { id: string; name: string; version: number }[]
+  skipped: { id: string; name: string; version?: number; error?: string }[]
+  foreign: { id: string; name: string; scope: string }[]
+}
+
+export interface SkillSyncResult {
+  ok: boolean
+  strategy: 'upgrade' | 'skip'
+  candidates: number
+  report: SkillSyncReport
+  source: SkillSource
+}
+
+export async function syncSkills(scope: string, url: string, branch: string, strategy: 'upgrade' | 'skip'): Promise<SkillSyncResult> {
+  const res = await fetch('/api/skills/sync', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scope, url, branch, strategy }),
+  })
+  const body = await res.json().catch(() => null) as (SkillSyncResult & { error?: string }) | null
+  if (!res.ok || !body) throw new Error(body?.error ?? `同步失败：${res.status} ${res.statusText}`)
+  return body
 }
 
 // ───────────────────────── 浏览器助手（S7 ← S6 serve.mjs /api/web/fetch，同源）─────────────────────────

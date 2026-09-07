@@ -344,6 +344,15 @@ db.exec(`
     updatedAt TEXT
   )
 `)
+// ── 技能来源（skill_sources）：每个空间绑定的团队技能仓库（github URL + 分支），供一键「拉取同步」。──
+db.exec(`
+  CREATE TABLE IF NOT EXISTS skill_sources (
+    scope TEXT PRIMARY KEY,
+    url TEXT NOT NULL DEFAULT '',
+    branch TEXT NOT NULL DEFAULT '',
+    updatedAt TEXT
+  )
+`)
 // 老库迁移：skills 表先于 status/contentHash/reviewedAt 三列存在，缺列补上。
 function ensureColumn(table, column, ddl) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all()
@@ -352,6 +361,15 @@ function ensureColumn(table, column, ddl) {
 ensureColumn('skills', 'status', "status TEXT DEFAULT 'pending'")
 ensureColumn('skills', 'contentHash', "contentHash TEXT DEFAULT ''")
 ensureColumn('skills', 'reviewedAt', 'reviewedAt TEXT')
+ensureColumn('skills', 'bundle', "bundle TEXT DEFAULT ''")
+// 老库迁移：skills 先于 bundle 列存在，旧内容只有 prompt → 生成单件 bundle（main=prompt），
+// 并按「bundle 化」新公式重算 contentHash，保证旧技能「同内容重复提交」幂等、改内容才 bump version。
+// （skillContentHash / normalizeBundle 为函数声明，已提升，可在建表后调用。）
+for (const r of db.prepare("SELECT id, name, description, prompt, scope FROM skills WHERE (bundle IS NULL OR bundle = '') AND prompt IS NOT NULL AND prompt != ''").all()) {
+  const bundle = normalizeBundle({ main: r.prompt, config: '', scripts: [], cases: [] })
+  const hash = skillContentHash({ name: r.name, description: r.description, scope: r.scope, bundle })
+  db.prepare('UPDATE skills SET bundle=?, contentHash=? WHERE id=?').run(JSON.stringify(bundle), hash, r.id)
+}
 // 任务 TTL/幂等/转派列（老 tasks 表补齐）
 ensureColumn('tasks', 'ttlMinutes', 'ttlMinutes INTEGER')
 ensureColumn('tasks', 'expiresAt', 'expiresAt TEXT')
@@ -739,16 +757,46 @@ function touchMember(member, scope, kind) {
 }
 
 // ── 技能（scope-owned + grant + 版本/review，借鉴 QM shared skills + RFC-032）──
+// 技能内容 = 多部件 bundle：主提示(SKILL.md) + 配置(config.yaml) + 脚本 + 案例。所有字段先规范化再存储/哈希。
 function skillContentHash(s) {
   return createHash('sha256').update(JSON.stringify({
-    name: s.name, description: s.description ?? '', prompt: s.prompt ?? '', scope: s.scope ?? 'default',
+    name: s.name, description: s.description ?? '', scope: s.scope ?? 'default', bundle: s.bundle,
   })).digest('hex')
+}
+
+/** 规范化部件数组（脚本/案例）：仅保留 {name, content} 且至少一项非空的对象。 */
+function normalizeParts(parts) {
+  if (!Array.isArray(parts)) return []
+  return parts
+    .map(p => (p && typeof p === 'object' ? { name: String(p.name ?? '').trim(), content: String(p.content ?? '') } : null))
+    .filter(p => p && (p.name.length > 0 || p.content.length > 0))
+}
+
+/** 由提交输入构造规范化 bundle（兼容旧的 prompt 单文本提交 → 映射为 main）。 */
+function normalizeBundle(input) {
+  const src = input ?? {}
+  return {
+    main: String(src.main ?? src.prompt ?? ''),
+    config: String(src.config ?? ''),
+    scripts: normalizeParts(src.scripts),
+    cases: normalizeParts(src.cases),
+  }
+}
+
+/** 从行读取解析 bundle；bundle 为空时回退到 prompt（旧行/未迁移兜底）。 */
+function parseBundle(row) {
+  const raw = row.bundle && String(row.bundle).trim() ? JSON.parse(row.bundle) : null
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    return normalizeBundle({ main: raw.main, config: raw.config, scripts: raw.scripts, cases: raw.cases })
+  }
+  return { main: row.prompt ?? '', config: '', scripts: [], cases: [] }
 }
 
 function getSkill(id) {
   const row = db.prepare('SELECT * FROM skills WHERE id = ?').get(id)
   if (!row) throw new Error(`未知技能 ${id}`)
-  return { ...row, grants: parseJson(row.grants, []) }
+  const bundle = parseBundle(row)
+  return { ...row, grants: parseJson(row.grants, []), bundle, prompt: bundle.main }
 }
 
 /**
@@ -763,18 +811,19 @@ function registerSkill(input) {
       throw new Error('技能 id 非法：小写字母/数字开头，可含连字符，≤64 字符')
     }
     const name = input.name
+    if (typeof name !== 'string' || name.trim().length === 0) throw new Error('技能名称为空')
     const description = input.description ?? ''
-    const prompt = input.prompt ?? ''
     const scope = input.scope ?? 'default'
-    const hash = skillContentHash({ name, description, prompt, scope })
+    const bundle = normalizeBundle(input)
+    const hash = skillContentHash({ name, description, scope, bundle })
     const existing = db.prepare('SELECT * FROM skills WHERE id = ?').get(id)
     if (existing) {
       if (existing.contentHash === hash) return getSkill(id) // 幂等：同内容重复提交不产生新版本
-      db.prepare('UPDATE skills SET name=?, description=?, prompt=?, scope=?, version=version+1, status=\'pending\', contentHash=?, reviewedAt=NULL, updatedAt=? WHERE id=?')
-        .run(name, description, prompt, scope, hash, now(), id)
+      db.prepare("UPDATE skills SET name=?, description=?, prompt=?, bundle=?, scope=?, version=version+1, status='pending', contentHash=?, reviewedAt=NULL, updatedAt=? WHERE id=?")
+        .run(name, description, bundle.main, JSON.stringify(bundle), scope, hash, now(), id)
     } else {
-      db.prepare('INSERT INTO skills (id, name, description, prompt, scope, owner, grants, version, status, contentHash, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, 1, \'pending\', ?, ?, ?)')
-        .run(id, name, description, prompt, scope, input.owner ?? null, '[]', hash, now(), now())
+      db.prepare("INSERT INTO skills (id, name, description, prompt, bundle, scope, owner, version, status, contentHash, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'pending', ?, ?, ?)")
+        .run(id, name, description, bundle.main, JSON.stringify(bundle), scope, input.owner ?? null, hash, now(), now())
     }
     return getSkill(id)
   })
@@ -791,13 +840,31 @@ function reviewSkill(id, action) {
   })
 }
 
+/** 技能来源：读取某空间绑定的团队技能仓库（github url + 分支），无则返回空占位。 */
+function getSkillSource(scope = 'default') {
+  const row = db.prepare('SELECT scope, url, branch, updatedAt FROM skill_sources WHERE scope = ?').get(scope)
+  return row ?? { scope, url: '', branch: '', updatedAt: null }
+}
+
+/** 技能来源：设置/更新某空间的团队技能仓库（upsert）。 */
+function setSkillSource({ scope = 'default', url = '', branch = '' }) {
+  const cleanUrl = String(url ?? '').trim()
+  const cleanBranch = String(branch ?? '').trim()
+  db.prepare('INSERT INTO skill_sources (scope, url, branch, updatedAt) VALUES (?, ?, ?, ?) ON CONFLICT(scope) DO UPDATE SET url=excluded.url, branch=excluded.branch, updatedAt=excluded.updatedAt')
+    .run(scope, cleanUrl, cleanBranch, now())
+  return getSkillSource(scope)
+}
+
 /**
  * 列出技能。默认只返回 published（守护/士兵只该拿到已发布的）；
  * `includePending=true` 供复审者查看待审/被拒。
  */
 function listSkills({ scope, member, includePending } = {}) {
   const rows = db.prepare('SELECT * FROM skills ORDER BY id').all()
-  return rows.map((r) => ({ ...r, grants: parseJson(r.grants, []) }))
+  return rows.map((r) => {
+    const bundle = parseBundle(r)
+    return { ...r, grants: parseJson(r.grants, []), bundle, prompt: bundle.main }
+  })
     .filter((s) => {
       if (includePending !== true && s.status !== 'published') return false
       if (scope === undefined && member === undefined) return true
@@ -2465,7 +2532,9 @@ async function handle(req, res) {
         if (typeof name !== 'string' || name.trim().length === 0) throw new Error('缺少参数 name')
         const skill = registerSkill({
           id: id.trim(), name: name.trim(), description: body.description,
-          prompt: body.prompt, scope: body.scope ?? scope, owner: by,
+          main: body.main, config: body.config, scripts: body.scripts, cases: body.cases,
+          prompt: body.prompt, // 兼容旧单文本提交（映射为 bundle.main）
+          scope: body.scope ?? scope, owner: by,
         })
         // register 不设 general 门禁（任意成员可提交 pending 草稿，D-2）；审计归到技能归属空间。
         audit(by, skill.scope, 'skill:submit', id, { name: skill.name, version: skill.version, skillScope: skill.scope })
@@ -2514,6 +2583,21 @@ async function handle(req, res) {
         audit(by, skill.scope, 'skill:revoke', id, { targets: targets.map(String), skillScope: skill.scope })
         return skill
       })
+      return
+    }
+    // ── 技能来源（skill-source）：每个空间绑定的团队技能仓库（github url + 分支，供一键拉取同步）──
+    if (req.method === 'GET' && path === '/api/skill-source') {
+      try {
+        const scopeParam = url.searchParams.get('scope') ?? 'default'
+        json(res, 200, { ok: true, source: getSkillSource(scopeParam) })
+      } catch (e) {
+        json(res, 400, { error: e instanceof Error ? e.message : String(e) })
+      }
+      return
+    }
+    if (req.method === 'POST' && path === '/api/skill-source') {
+      // 写入走统一 handleWrite（by 必填 + 审计 + SSE）；不设 general 门禁（只是 URL 配置，拉取时另行白名单校验）。
+      await handleWrite(req, res, (body, by) => setSkillSource({ scope: body.scope, url: body.url, branch: body.branch }))
       return
     }
     // ── 对话中心（chat）：会话 / 消息 REST（scope 分区 + by 写纪律；审计/SSE 在 DAO 内统一留痕）──
@@ -2852,6 +2936,7 @@ if (isMain) {
 }
 
 export { db, server, registerSkill, reviewSkill, listSkills, grantSkill, revokeSkill, getSkill,
+  getSkillSource, setSkillSource,
   publishGoalRecord, setGoalState, setGoalContext, listGoals, goalView, settleGoalsOfScope, createGoalChain,
   goalDocDirOf, goalDocPathOf,
   expandGoalSlices, createTask }

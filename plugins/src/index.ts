@@ -2559,6 +2559,9 @@ exit 0
       }
       // 同一认领内末尾连续的「worker 未完成/超时/派工失败」计数（将军/他人评论或非失败评论会打断并重置）。
       // 超时也算失败：跑满 workerTimeoutMs 被强制结算同样说明这轮没产出，连续超时也是热循环（如 reviewer 大 diff 超时→重派→再超时）。
+      // T-117 现场（fix 背景）：runWorker 每轮派工都发「🟢 已派 AI worker」评论，它在 ⚠ 失败评论之后；
+      // 旧实现从尾部倒数遇 🟢 即 break，streak 恒 0 → give-up/调解（maxWorkerRetry）永不触发 → 无限重派死循环。
+      // 修复：🟢 派工评论只标记「新一轮开始」，跳过不打断失败连续计数；将军/他人评论等仍打断。
       const workerFailStreak = (t: Task): number => {
         const since = t.claimedAt === null ? 0 : new Date(t.claimedAt).getTime()
         let n = 0
@@ -2567,6 +2570,7 @@ exit 0
           if (new Date(c.at).getTime() < since) break
           const txt = c.text ?? ''
           if (txt.startsWith('⚠ worker 未完成') || txt.startsWith('⚠ worker 超时') || txt.startsWith('⚠ 派工失败')) n++
+          else if (txt.startsWith('🟢 已派 AI')) continue
           else break
         }
         return n
@@ -2708,9 +2712,10 @@ exit 0
           })())
           continue
         }
-        // 3.2 存在将军 / 他人反馈 → 退回附反馈纠错；只有守护自己的「worker 未完成/派工失败」评论 → 退避重试
+        // 3.2 存在将军 / 他人反馈 → 退回附反馈纠错；只有守护自己的「worker 未完成/超时/派工失败」评论 → 退避重试
+        // （超时也算中止驱动：worker 跑满 workerTimeoutMs 被强制结算后任务留在 in_progress，下一轮应自动重试续做）
         const abortDriven = feedback.length === 0 && t.comments.some(c =>
-          new Date(c.at).getTime() > since && (c.text.startsWith('⚠ worker 未完成') || c.text.startsWith('⚠ 派工失败')))
+          new Date(c.at).getTime() > since && (c.text.startsWith('⚠ worker 未完成') || c.text.startsWith('⚠ worker 超时') || c.text.startsWith('⚠ 派工失败')))
         if (feedback.length === 0 && !abortDriven) continue
         if (abortDriven && (abortRetryAt.get(t.id) ?? 0) + config.intervalMs * 4 > Date.now()) continue
         if (abortDriven) abortRetryAt.set(t.id, Date.now())

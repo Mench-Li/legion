@@ -592,6 +592,89 @@ test('a single-role aborted worker is retried on the next sweep instead of stall
   }
 })
 
+test('interleaved dispatch comments do not reset the failure streak — give-up still escalates to the mediator (T-117 churn regression)', async () => {
+  // T-117 现场：runWorker 每轮派工都发「🟢 已派 AI worker」评论（在 ⚠ 之后），旧 workerFailStreak 从尾部
+  // 倒数遇 🟢 即 break → streak 恒 0 → maxWorkerRetry=3 永不达到 → 无限重派死循环（无调解、无 give-up）。
+  // 修复：🟢 派工评论跳过不打断计数。本测试模拟 ⚠/🟢 交错 3 轮失败 → 仍应触发调解员。
+  const root = await mkdtemp(join(tmpdir(), 'scrum-worker-streak-interleave-'))
+  const originalFetch = globalThis.fetch
+  const restoreTasks = protectTasksFile(root)
+  const requests = []
+  const commentTexts = []
+  const t0 = Date.now() - 300_000
+  const mk = (i, text) => ({ by: 'soldier-auto', at: new Date(t0 + i * 10_000).toISOString(), text })
+  let task = {
+    ...structuredClone(TASK),
+    status: 'in_progress',
+    claimedAt: new Date(t0 - 10_000).toISOString(),
+    // 3 轮失败，每轮 = ⚠（失败）后跟 🟢（重派）：旧代码 streak 见 🟢 即 0
+    comments: [
+      mk(1, '⚠ worker 未完成（error），任务保留在 in_progress，等待人工处理或下一轮重试'),
+      mk(2, '🟢 已派 AI worker 开始执行（worker=scrum:T-001）——进行中'),
+      mk(3, '⚠ worker 未完成（error），任务保留在 in_progress，等待人工处理或下一轮重试'),
+      mk(4, '🟢 已派 AI worker 开始执行（worker=scrum:T-001）——进行中'),
+      mk(5, '⚠ worker 未完成（error），任务保留在 in_progress，等待人工处理或下一轮重试'),
+    ],
+  }
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input))
+    if (url.pathname === '/api/skills') return response([])
+    if (url.pathname === '/api/board') return response([task])
+    const body = init.body ? JSON.parse(String(init.body)) : {}
+    if (url.pathname === '/api/comment') {
+      commentTexts.push(body.text)
+      task = { ...task, comments: [...task.comments, { by: body.by, at: new Date().toISOString(), text: body.text }] }
+      return response({ task })
+    }
+    if (url.pathname === '/api/transition') {
+      requests.push(`transition:${body.to}`)
+      task = { ...task, status: body.to, version: task.version + 1 }
+      return response({ task })
+    }
+    if (url.pathname === '/api/claim') {
+      requests.push(`claim:${task.status}`)
+      return response({ task })
+    }
+    throw new Error(`unexpected request ${url.pathname}`)
+  }
+
+  let mediatorStarts = 0
+  let workerStarts = 0
+  const harness = fakeContext(
+    { status: 'done', summary: 'finished', evidence: 'ok', blocker: '' },
+    async () => {},
+    async () => {},
+    async (provider, options) => {
+      const label = String(options?.label ?? '')
+      if (label.startsWith('mediator:')) {
+        mediatorStarts += 1
+        return {
+          result: Promise.resolve({ stopReason: 'completed', structured: { status: 'done', summary: 'cleared root cause', resolvedFiles: ['team-hub/server.mjs'] } }),
+          dispose: async () => {},
+        }
+      }
+      workerStarts += 1
+      return {
+        result: Promise.resolve({ stopReason: 'completed', structured: { status: 'done', summary: 'finished', evidence: 'ok', blocker: '' } }),
+        dispose: async () => {},
+      }
+    },
+  )
+  try {
+    apply(harness.ctx, config(root))
+    harness.intervals[0]()
+    await waitFor(() => mediatorStarts === 1, 'mediator was never dispatched despite 3 interleaved failures')
+    await waitFor(() => commentTexts.some(t => t.startsWith('🤝 调解员处理重派')), 'mediator redispatch comment was not posted')
+    assert.equal(mediatorStarts, 1, 'mediator should be dispatched exactly once here')
+    assert.ok(!commentTexts.some(t => t.startsWith('🛑 已自动重试')), 'give-up should not fire while the mediator can still fix')
+  } finally {
+    for (const dispose of harness.disposers) await dispose()
+    globalThis.fetch = originalFetch
+    restoreTasks()
+    await cleanup(root)
+  }
+})
+
 test('repeated worker failures are re-dispatched by the mediator instead of escalating to the general', async () => {
   // D8 回归：同一认领内连续 ≥maxWorkerRetry 次「⚠ worker 未完成」→ 不升级将军，
   // 交调解员（label=mediator:*）诊断修复根因并重新派工（label=scrum:*）；仅调解无法修复才置 blocked。

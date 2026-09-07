@@ -141,6 +141,76 @@ function fakeContext(report, onCreate = async () => {}, onMount = async () => {}
   }
 }
 
+test('a blocked task with answered general question is claimed before the worker is re-dispatched (T-117 regression)', async () => {
+  // T-117 现场：blocked + ❓ 问句 + 将军答复 → 旧代码走 workReturned（不认领）直接派 worker，
+  // 任务停留在 blocked → 心跳（/api/progress 仅 in_progress 可上报）与完成结算全部失败，任务卡死。
+  // 修复：带答复的 blocked 续做必须先 claim（blocked→in_progress）再派 worker。
+  const root = await mkdtemp(join(tmpdir(), 'scrum-worker-answered-question-'))
+  const originalFetch = globalThis.fetch
+  const restoreTasks = protectTasksFile(root)
+  const requests = []
+  const commentTexts = []
+  const askAt = Date.now() - 60_000
+  let task = {
+    ...structuredClone(TASK),
+    status: 'blocked',
+    soldier: 'soldier-auto',
+    claimedAt: new Date(askAt).toISOString(),
+    comments: [
+      { by: 'soldier-auto', at: new Date(askAt).toISOString(), text: '❓ 需要将军介入确认：请将军给出处理意见' },
+      { by: 'general', at: new Date(askAt + 1000).toISOString(), text: '✅ 将军答复：按脚本侧归一化修复后复测' },
+    ],
+  }
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input))
+    if (url.pathname === '/api/skills') return response([])
+    if (url.pathname === '/api/board') return response([task])
+    const body = init.body ? JSON.parse(String(init.body)) : {}
+    if (url.pathname === '/api/claim') {
+      requests.push(`claim:${task.status}`)
+      task = { ...task, status: 'in_progress', version: task.version + 1 }
+      return response({ task })
+    }
+    if (url.pathname === '/api/comment') {
+      commentTexts.push(body.text)
+      task = { ...task, comments: [...task.comments, { by: body.by, at: new Date().toISOString(), text: body.text }] }
+      return response({ task })
+    }
+    if (url.pathname === '/api/transition') {
+      requests.push(`transition:${task.status}->${body.to}`)
+      task = { ...task, status: body.to, version: task.version + 1 }
+      return response({ task })
+    }
+    throw new Error(`unexpected request ${url.pathname}`)
+  }
+
+  let workerStarts = 0
+  const harness = fakeContext(
+    { status: 'blocked', summary: 'still blocked', evidence: '', blocker: 'missing input' },
+    async () => {},
+    async () => {},
+    async (provider, options) => {
+      workerStarts += 1
+      return {
+        result: Promise.resolve({ stopReason: 'completed', structured: { status: 'blocked', summary: 'still blocked', evidence: '', blocker: 'missing input' } }),
+        dispose: async () => {},
+      }
+    },
+  )
+  try {
+    apply(harness.ctx, config(root))
+    harness.intervals[0]()
+    await waitFor(() => workerStarts === 1, 'worker was never re-dispatched after the general answered')
+    assert.equal(requests[0], 'claim:blocked', 'answered blocked task must be claimed (blocked→in_progress) BEFORE the worker is dispatched')
+    assert.ok(requests.includes('claim:blocked'), 'claim must appear in the request stream')
+  } finally {
+    for (const dispose of harness.disposers) await dispose()
+    globalThis.fetch = originalFetch
+    restoreTasks()
+    await cleanup(root)
+  }
+})
+
 test('a dependency-cleared blocked task is claimed before its worker can block again', async () => {
   const root = await mkdtemp(join(tmpdir(), 'scrum-worker-resume-'))
   const originalFetch = globalThis.fetch

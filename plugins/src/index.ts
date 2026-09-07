@@ -2654,8 +2654,27 @@ exit 0
         if (!sliceRoomOk(t)) continue
         const cf = confirmState(t)
         if (cf.open) continue // 待将军确认：不自动重跑，等答复
-        inflight.add(t.id)
-        runDetached(t.id, cf.answers.length > 0 ? workReturned(t, cf.answers, stageOf(t)) : workTodo(t, stageOf(t)))
+        // blocked 续做必须先认领（claim blocked→in_progress），否则任务停留在 blocked：
+        // worker 心跳（/api/progress 仅 in_progress 可上报）与完成结算（advanceTo）都会失败
+        // ——T-117 现场：将军答复后 workReturned 未认领，任务长时间卡 blocked、progress 被 hub 拒。
+        // workReturned 不认领（workTodo 才认领），故 answers>0（带将军答复续做）需先 claim；
+        // answers=0 保持 workTodo 原路径（其内部 claimTask 幂等，勿重复认领）。
+        const resumeStage = stageOf(t)
+        if (cf.answers.length > 0) {
+          inflight.add(t.id)
+          runDetached(t.id, (async () => {
+            try {
+              await claimTask(t.id, resumeStage ? resumeStage.role : config.role)
+            } catch (e) {
+              log(`${t.id} blocked 续做认领失败（可能已被他人认领）：${String(e)}`)
+              return
+            }
+            await workReturned(t, cf.answers, resumeStage)
+          })())
+        } else {
+          inflight.add(t.id)
+          runDetached(t.id, workTodo(t, resumeStage))
+        }
       }
       // 3. in_progress 且本角色、认领后有他人评论：视为退回，附反馈纠错；
       //    守护自己的「worker 未完成 / 派工失败」评论也触发重试（单角色模式 self=config.role 会把它过滤掉，

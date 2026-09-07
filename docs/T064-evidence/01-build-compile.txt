@@ -1,0 +1,6 @@
+﻿# tsc -p team-hub/tsconfig.json (compile src -> lib) => exit 0 (无输出 = 编译通过)
+# 构建产物 (team-hub/lib/, 均在 .gitignore):
+   team-hub/lib/index.js        21023 B
+   team-hub/lib/index.js.map    20418 B
+   team-hub/lib/types/index.d.ts  2381 B
+# 说明: tsc 成功时无 stdout; 产物存在即证编译成功.

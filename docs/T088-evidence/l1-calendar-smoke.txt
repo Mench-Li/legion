@@ -1,0 +1,30 @@
+# T-088 L1 日历契约真实进程冒烟 —— 隔离 hub :8791（临时库，非线上 8787/team.db）
+命令：node docs/T088-evidence/env/l1-calendar-smoke.mjs   （脚本含 cfg 隔离自检；真实 HTTP 断言）
+结果：passed=22/22  exit 0
+运行时间：2026-09-05（本轮）
+输出（节选自真实运行）：
+  L1-sweep: 旧残留清理完成
+  PASS L1-cfg 隔离自检：端口+临时库 | db=C:\Users\11150\AppData\Local\Temp\dsh-483eYC\t088-hub-wu6sct\hub.db
+  PASS L1-spaces 注册 software/marketing 200 | s1=200 s2=200
+  PASS L1-spaces 列表含两空间 | count=2
+  PASS L1-create 200 信封{ok,task} | status=200 body={"ok":true,"task":{"id":6,"scope":"software","title":"L1冒烟-技术评审","start":"2026-09-10T10:00",...}}
+  PASS L1-create 字段形状
+  PASS L1-get 日期窗命中 09-10 | n=1
+  PASS L1-get 窗外(10月)不含
+  PASS L1-create allDay(date-only) 200
+  PASS L1-scope 隔离反向(software 无市场)
+  PASS L1-scope 隔离反向(marketing 无软件)
+  PASS L1-bad 缺by→400 | s=400
+  PASS L1-bad 空标题→400
+  PASS L1-bad 标题101→400
+  PASS L1-bad 非法时间→400
+  PASS L1-bad end<start→400
+  PASS L1-bad 零落库(仅1条软件标题) | n=1
+  PASS L1-delete 缺confirm→400
+  PASS L1-delete scope越权→400/404 | s=400
+  PASS L1-delete confirm=yes→200
+  PASS L1-delete 后 GET 不含
+  PASS L1-audit calendar:create+delete 行 | actions=calendar:delete,calendar:create,...(calendar:* 全)
+  PASS L1-SSE /api/events 收 calendar:create ≤7s | sseOk=true
+  ===== L1 SUMMARY ===== passed=22/22
+说明：隔离自检确保 db 指向 %TEMP% t088-hub-*（绝不写线上 team.db）；空间 software/marketing 为本轮在隔离库内注册。

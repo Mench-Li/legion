@@ -1,0 +1,11 @@
+# T-088 S6 测试 · 渲染安全 grep 证据（TC-S6-09 / I-5）
+搜索范围：workbench/src（全部 .ts/.tsx）
+模式：dangerouslySetInnerHTML —— 全仓命中 4 行，均为文件头注释自述（无 JSX 属性式使用）：
+  CalendarView.tsx:13  （注释：…无 dangerouslySetInnerHTML。标题/时间一律 React 文本节点）
+  ChatView.tsx:49      （注释，对照项）
+  FilesView.tsx:34     （注释，对照项）
+  NotifyView.tsx:72    （注释，对照项）
+模式：dangerouslySetInnerHTML\s*= → 0 命中（无任何 JSX 属性直插）
+CalendarView 事件标题/时间渲染：React 文本节点（<span className="cal-chip-title">{ev.title}</span> / {fmtStart(...)}），
+删除确认文案同为文本节点；无 innerHTML / insertAdjacentHTML 使用。
+CalendarView 中 localStorage 使用：0 命中 → 事件数据不落本地存储（TC-S6-05 刷新后数据来自 GET，非 localStorage 假数据）。

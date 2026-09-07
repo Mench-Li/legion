@@ -1,0 +1,10 @@
+# T-088 S6 测试 · build 证据（workbench，TC-S6-10/TC-S8-02 口径，R-18）
+命令尝试 1：node node_modules/vite/bin/vite.js build   (cwd: workbench)
+结果：exit 1 — vite 加载 vite.config.ts 时 esbuild JS API spawn EPERM（沙箱禁 pipe-spawn 边界，R-18）
+复现输出要点：
+  error during build: Error: spawn EPERM
+    at ChildProcess.spawn ... ensureServiceIsRunning (esbuild/lib/main.js:2272)
+    at bundleConfigFile (vite/dist/node/chunks/config.js)   ← vite 用 esbuild 打包 config 即失败
+结论：vite build 在本沙箱受限（与 T-047/T-083/T-091 同因，非代码问题）；typecheck 0 诊断（见 typecheck.txt）。
+构建门替代：tsc --noEmit 0 诊断（绿）+ 原生 esbuild.exe CLI（Go 自包含、不 spawn 子进程）产出真实生产 bundle 供 L2 浏览器闭环（见 browser 证据 / README），
+        vite 产物形态差异（chunk 名/压缩细节）不影响被测功能逻辑。

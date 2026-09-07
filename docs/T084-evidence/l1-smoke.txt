@@ -1,0 +1,17 @@
+CASE ssrf_private_literal => PASS (http=200, 83ms) TC-S4-04 backend: loopback target must be blocked (ssrf_blocked) | body={"ok":false,"error":"SSRF 防护：禁止访问私网/回环地址（含 IP 混淆写法）","code":"ssrf_blocked"}
+CASE protocol_ftp => PASS (http=200, 7ms) protocol whitelist: ftp -> protocol_blocked | body={"ok":false,"error":"协议白名单：仅支持 http/https（收到 ftp:）","code":"protocol_blocked"}
+CASE invalid_url_empty => PASS (http=200, 8ms) empty url -> invalid_url | body={"ok":false,"error":"缺少参数 url","code":"invalid_url"}
+CASE dns_error_probe => PASS (http=200, 32ms) offline unresolvable host -> dns_error (env-dependent observation) | body={"ok":false,"error":"域名解析失败，无法确认目标地址（已阻止外呼）","code":"dns_error"}
+CASE ok_page_main_path => PASS (http=200, 84ms) TC-S4-08 backend: title+text extracted, scripts stripped, links whitelisted http(s) | body={"ok":true,"finalUrl":"http://127.0.0.1:4950/page","status":200,"contentType":"text/html; charset=utf-8","title":"Mock Page T-084","text":"Hello T-084\nsample content\nrel ext js ftp","excerpt":"Hello T-084 sample content rel ext js ftp","links":["http://127.0.0.1:4950/p2","https://example.com/x"]}
+CASE xss_page_safe_text => PASS (http=200, 10ms) TC-S4-09 backend: script/img-onerror never present in returned text | body={"ok":true,"finalUrl":"http://127.0.0.1:4950/xss","status":200,"contentType":"text/html","title":"XSS T-084","text":"safe para","excerpt":"safe para","links":[]}
+CASE http_404 => PASS (http=200, 30ms) TC-S4-05: 4xx -> code http_404 | body={"ok":false,"finalUrl":"http://127.0.0.1:4950/404","status":404,"contentType":"text/html","error":"上游返回 http_404：missing page","code":"http_404"}
+CASE http_500 => PASS (http=200, 16ms) TC-S4-05: 5xx -> code http_500 | body={"ok":false,"finalUrl":"http://127.0.0.1:4950/500","status":500,"contentType":"text/html","error":"上游返回 http_500：server boom","code":"http_500"}
+CASE flaky_first_500 => PASS (http=200, 20ms) flaky target first hit -> http_500 | body={"ok":false,"finalUrl":"http://127.0.0.1:4950/flaky","status":500,"contentType":"text/html","error":"上游返回 http_500：err now","code":"http_500"}
+CASE flaky_retry_ok => PASS (http=200, 28ms) TC-S4-05 tail: retry after recovery -> ok (re-fetch button path backend) | body={"ok":true,"finalUrl":"http://127.0.0.1:4950/flaky","status":200,"contentType":"text/html","title":"Flaky OK","text":"recovered","excerpt":"recovered","links":[]}
+CASE unsupported_pdf => PASS (http=200, 29ms) TC-S4-05: pdf -> ok:true code unsupported (distinct message branch) | body={"ok":true,"finalUrl":"http://127.0.0.1:4950/pdf","status":200,"contentType":"application/pdf","title":"","text":"","excerpt":"","links":[],"error":"目标不是可读文本/HTML（application/pdf），已跳过正文抽取","code":"unsupported"}
+CASE too_large => PASS (http=200, 38ms) TC-S4-05: oversize body with maxBytes=1000 -> too_large | body={"ok":false,"error":"响应体超过上限（当前上限 1000 字节）","code":"too_large"}
+CASE timeout_slow => PASS (http=200, 1220ms) TC-S4-05: never-responding target -> timeout | body={"ok":false,"error":"抓取超时（已取消请求）","code":"timeout"}
+CASE fetch_error_refused => PASS (http=200, 7ms) closed port -> fetch_error | body={"ok":false,"error":"网络请求失败：fetch failed","code":"fetch_error"}
+CASE empty_content_spa => PASS (http=200, 11ms) SPA shell with no extractable text -> ok:true code empty_content | body={"ok":true,"finalUrl":"http://127.0.0.1:4950/spa","status":200,"contentType":"text/html","title":"","text":"","excerpt":"","links":[],"error":"未能抽取正文：目标页可能是 SPA/纯 JS 渲染空壳（v1 服务端抓取为显式边界）","code":"empty_content"}
+
+SUMMARY: total=15 pass=15 fail=0

@@ -1,0 +1,4 @@
+# T-088 S6 测试 · typecheck 证据（workbench）
+命令：node node_modules/typescript/lib/tsc.js -p tsconfig.json --noEmit   (cwd: workbench)
+结果：exit 0 — 0 diagnostics（无任何 TS 错误输出）
+时间：2026-09-05（本 T-088 执行轮）

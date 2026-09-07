@@ -1,0 +1,9 @@
+=== 新增 L0 套件基线（接入门禁前独立实测；门禁内亦全绿）===
+ℹ tests 26
+ℹ suites 14
+ℹ pass 26
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 536.5149

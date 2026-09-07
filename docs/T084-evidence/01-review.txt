@@ -1,0 +1,49 @@
+T-084 切片 S4 —— 01 评审/grep 证据（TC-S4-01/03/06/07/09 + R-A6 验收 1/2/3/4）
+================================================================================
+
+执行角色：tester（只测不修）｜被测基线：本 worktree（w/T-084，HEAD=c9a8282 promote T-083，工作树干净）
+代码对象：workbench/src/components/BrowserView.tsx（187 行）、App.tsx、QuickTools.tsx、Sidebar.tsx、serve.mjs（后端枚举对照）
+
+── ① 合入一致性：与合入源 w/T-051（a524951）文件域逐字节比对（TC-S4-01 / G-12）──
+$ git rev-parse --verify w/T-051            → a52495103ae6a9fb766d2c0333492c4f024e6e55
+$ git hash-object BrowserView.tsx           → ff76acb0614ff6af73e967ebf4555d11ab19b095
+$ git rev-parse w/T-051:.../BrowserView.tsx → ff76acb0614ff6af73e967ebf4555d11ab19b095  （逐字节一致）
+$ git hash-object App.tsx                   → ccf21cf0edf354ce18001fa9f1d1fab4ec19cc3c
+$ git rev-parse w/T-051:.../App.tsx         → ccf21cf0edf354ce18001fa9f1d1fab4ec19cc3c  （逐字节一致）
+$ git rev-parse w/T-051:.../BrowserPanel.tsx→ fatal: path does not exist in w/T-051（源树已无该文件）
+$ Test-Path workbench/src/components/BrowserPanel.tsx → False（本树已删除）
+
+── ② BrowserPanel 残留引用扫描（TC-S4-01④：零残留引用含注释判据）──
+Get-ChildItem workbench/src -Recurse -File | Select-String BrowserPanel：命中 2 行，均为历史说明注释、非引用：
+  - components/BrowserView.tsx:55  * 基线 BrowserPanel 的 errFlag 漏列 too_many_redirects/web_error…（说明已修缺陷的来源注释）
+  - index.css:1941  /* 浏览器助手 BrowserPanel */（CSS 注释；该区所有选择器均为 .browser-*，无 .browser-panel 定义）
+→ App.tsx 与全 src 无 import/JSX/类型/调用级引用；注释为可读性保留（源自 w/T-051 原文，逐字节一致）。
+
+── ③ 渲染安全（TC-S4-09 / I-5）：无未净化 HTML 直插 ──
+Get-ChildItem workbench/src -Recurse | Select-String dangerouslySetInnerHTML：命中 0 处真实调用；
+仅 ChatView.tsx:49 / FilesView.tsx:34 注释声明「无 dangerouslySetInnerHTML」；BrowserView 抓取内容渲染路径：
+  title → {result.title} 文本节点（:154）；text → <pre className="browser-text">{result.text}</pre>（:157）
+  links → <a href target="_blank" rel="noopener noreferrer">（:163）；错误/提示 → 文案常量文本节点（:151/155/156）
+  服务端 extractHtml（serve.mjs:797-807）先剥 script/style/… 标签再返回 text（L1 实测 text 无 <script>/onerror）。
+
+── ④ 错误态归口 / errorText / isErrorResult（TC-S4-03 / R-A6 验收 2；机器核对见 04-alignment.txt）──
+  errorText（:37-52）覆盖：ssrf_blocked/protocol_blocked/timeout/too_large/too_many_redirects/web_error/dns_error/
+    invalid_url/fetch_error/http_*（动态前缀）/unsupported/empty_content + 兜底 → 对枚举表全集（除成功标记 ok）零漏码；
+  isErrorResult（:56-63）：http_* 前缀 + ssrf_blocked/protocol_blocked/timeout/too_large/too_many_redirects/web_error/
+    dns_error/invalid_url/fetch_error + (!ok && !code) → 错误视图 true；ok:true 的 unsupported/empty_content 不判错误（走正文/提示分支）；
+  可区分可重试：成功 → 正文 + 「↻ 重新抓取」（:168-172）；错误 → ⚠ 文案 + 「↻ 重试」（:173-177）；fetchUrl 顶层 try/catch（:99-102）。
+
+── ⑤ IME 中文合成态守卫（TC-S4-06 / R-A6 验收 3）──
+  BrowserView.tsx:130 onKeyDown={e => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) submit() }}
+  合成态（拼音候选上屏前 keyCode 229 → nativeEvent.isComposing=true）Enter 不触发 submit → 无请求无 loading；
+  候选确认上屏后再按 Enter → isComposing=false → 正常抓取；按钮 disabled={busy || !url.trim()} 兜底空输入。
+
+── ⑥ 双入口同一面板 + 地址栏聚焦（TC-S4-07 / R-A6 验收 4）──
+  QuickTools.tsx:22  if (id === 'web') { onOpenModule?.('browser') }
+  Sidebar.tsx:19  { id: 'browser', name: '浏览器助手' }；:70-71 面板化模块 → onNavigate(mod.id)
+  App.tsx:340 onNavigate={setActive}；:366 <QuickTools … onOpenModule={setActive} />；:355-357 active==='browser' ? <BrowserView />
+  → 两入口写同一 active 状态、渲染同一分支（同面板）；BrowserView useEffect（:73-76）挂载后 getElementById('browser-url-input')?.focus() 自动聚焦。
+
+── ⑦ 历史 datalist 上限（TC-S4-10，P2 观察项静态部分）──
+  HISTORY_KEY='legion.browser.history'（:6）；MAX_HISTORY=8（:7）；loadHistory slice(0,8)（:13）；
+  pushHistory 去重 + unshift + slice(0,8)（:19-23）；localStorage 读写带 try/catch。

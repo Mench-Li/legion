@@ -1,0 +1,8 @@
+
+===== setup plugins =====
+===== tsc plugins =====
+===== OK plugins =====
+
+===== setup board-plugin =====
+===== tsc board-plugin =====
+===== OK board-plugin =====

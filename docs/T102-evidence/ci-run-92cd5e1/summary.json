@@ -1,0 +1,38 @@
+{
+  "root": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-102",
+  "outDir": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-102\\docs\\T102-evidence\\ci-run-92cd5e1",
+  "finishedAt": "2026-09-06T08:03:01.873Z",
+  "stages": [
+    {
+      "name": "env",
+      "status": "PASS",
+      "ms": 76
+    },
+    {
+      "name": "deps",
+      "status": "PASS",
+      "ms": 5
+    },
+    {
+      "name": "build",
+      "status": "PASS",
+      "ms": 14739
+    },
+    {
+      "name": "test",
+      "status": "PASS",
+      "ms": 20915
+    },
+    {
+      "name": "smoke",
+      "status": "PASS",
+      "ms": 8366
+    },
+    {
+      "name": "stage",
+      "status": "PASS",
+      "ms": 89
+    }
+  ],
+  "failed": 0
+}

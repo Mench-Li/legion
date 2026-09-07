@@ -1,0 +1,11 @@
+cmd: pnpm build (env: CI=true, npm_config_confirm_modules_purge=false, npm_config_verify_deps_before_run=false)
+[36mvite v7.3.6 [32mbuilding client environment for production...[36m[39m
+transforming...
+[32m✓[39m 615 modules transformed.
+rendering chunks...
+computing gzip size...
+[2mdist/[22m[32mindex.html                  [39m[1m[2m  0.44 kB[22m[1m[22m[2m │ gzip:   0.32 kB[22m
+[2mdist/[22m[35massets/index-CRl4RhDv.css   [39m[1m[2m 34.27 kB[22m[1m[22m[2m │ gzip:   7.01 kB[22m
+[2mdist/[22m[36massets/index-CsBjNlLX.js    [39m[1m[2m322.23 kB[22m[1m[22m[2m │ gzip:  98.19 kB[22m
+[2mdist/[22m[36massets/Scene3D-zQthwzBb.js  [39m[1m[33m923.50 kB[39m[22m[2m │ gzip: 250.02 kB[22m
+[32m✓ built in 6.43s[39m

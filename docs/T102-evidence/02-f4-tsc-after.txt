@@ -1,0 +1,5 @@
+=== workbench tsc --noEmit（F4 修复后，同 CI build 阶段 tsc 命令）===
+command: node workbench/node_modules/typescript/bin/tsc -p workbench/tsconfig.json --noEmit
+exit: 0
+output: (空 = 0 诊断)
+结论：exit 0、0 诊断 → 前端可编译（修复前 T-101 实测 TS1185×3，见 docs/T101-evidence/14-workbench-tsc.txt）

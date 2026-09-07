@@ -1,0 +1,38 @@
+{
+  "root": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-043",
+  "outDir": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-043\\docs\\T043-evidence\\ci-full-1",
+  "finishedAt": "2026-09-03T07:00:53.011Z",
+  "stages": [
+    {
+      "name": "env",
+      "status": "PASS",
+      "ms": 89
+    },
+    {
+      "name": "deps",
+      "status": "PASS",
+      "ms": 2
+    },
+    {
+      "name": "build",
+      "status": "PASS",
+      "ms": 16699
+    },
+    {
+      "name": "test",
+      "status": "PASS",
+      "ms": 6938
+    },
+    {
+      "name": "smoke",
+      "status": "PASS",
+      "ms": 4620
+    },
+    {
+      "name": "stage",
+      "status": "PASS",
+      "ms": 110
+    }
+  ],
+  "failed": 0
+}

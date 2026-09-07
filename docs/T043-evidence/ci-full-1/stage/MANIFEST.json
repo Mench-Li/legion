@@ -1,0 +1,11 @@
+{
+  "name": "legion-release",
+  "version": "f5975ac",
+  "gitHead": "f5975ac",
+  "builtAt": "2026-09-03T07:00:53.010Z",
+  "node": "24.19.0",
+  "platform": "win32",
+  "ciStages": "env:PASS,deps:PASS,build:PASS,test:PASS,smoke:PASS",
+  "releaseNotes": "见 docs/DEPLOY.md（发布说明 / 已知缺陷 P0-1/P0-2/P0-3 放行门禁）",
+  "distFiles": 4
+}

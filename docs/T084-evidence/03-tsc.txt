@@ -1,0 +1,6 @@
+T-084 切片 S4 —— tsc 类型检查证据（TC-S4-02 / R-A6 验收 4）
+============================================================
+命令（workbench/，node_modules 经 junction 指向宿主）：node node_modules/typescript/bin/tsc -p tsconfig.json --noEmit
+结果：exit 0 —— 零诊断输出（strict + noUnusedLocals/noUnusedParameters）。
+被检范围：tsconfig include = src + vite.config.ts（含 BrowserView.tsx / App.tsx / 全部组件 / api.ts / types.ts）。
+（pnpm build 的 vite 段在沙箱内复现 spawn EPERM，见 03-build.txt。）

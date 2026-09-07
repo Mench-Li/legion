@@ -1,0 +1,17 @@
+# T-088 S6 测试 · CalendarView 纯函数单测（TC-S6-01/02/05/07 网格与日期计算核心，真实执行）
+命令：node docs/T088-evidence/env/grid-unit.mjs
+结果：passed=14/14  exit 0（输出要点见下，摘自真实运行）
+  PASS grid 2026-09: 7×N 共 35 格 | len=35
+  PASS grid 2026-09: 当月 30 格 + 5 格补位
+  PASS grid 2026-09: 月首对齐（9/1 在第 2 列，周一起始） | ["2026-08-31","2026-09-01","2026-09-02"]
+  PASS grid 2026-09: 补位格来自前月 8/31 与次月 10/1..
+  PASS grid 2026-09: 月末 9/30 位置正确
+  PASS grid 今天高亮：恰 1 格且为当天 2026-09-05 | [{key=2026-09-05, cur:true, today:true, d:5}]
+  PASS grid 其它月份无今天高亮
+  PASS grid 2026-01 月首对齐（lead=3）
+  PASS grid 2026-12 月首对齐 + 补位跨年 2027 | tail=2027-01-02,2027-01-03
+  PASS dayKey/daysIn 2026-09 → 30 天；PASS fmtMonth → 「2026年9月」
+  PASS isAllDay / fmtStart / MAX_TITLE=100
+  ===== GRID-UNIT SUMMARY ===== passed=14/14
+方法：以原生 esbuild.exe（Go 自包含、不 spawn 子进程）将 CalendarView.tsx 打为 node 可执行 ESM（env/calendar-view.node.mjs），
+     直接 import 导出纯函数断言（不改任何源码）。系统时钟核对 = 2026-09-05。

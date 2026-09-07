@@ -1,0 +1,16 @@
+PASS | TC-S7-02/03 白名单正向：文档列出的任务/目标/空间/模型/技能类 action 全部入列（共 23 项）
+PASS | TC-S7-03 白名单反向：chat:*（防刷屏）、comment、progress、calendar:*、exec:*、agent:*、非串/空/非字符串一律排除
+PASS | TC-S7-03 语义：chat:create/message/comment/calendar:create/progress 全被白名单过滤（原始 14 行 → 通知 9 行） | notifyRows=create,claim,transition,goal:publish,space:create,model:set,review-note,artifact,skill:submit
+PASS | TC-S7-04 初始：无游标 → notifyReadSeq(software)=0 且全部 9 条未读
+PASS | TC-S7-04 点击已读（seq=6）→ 游标=6，badge 未读由 9 减为 6（= seq>6 的 7/8/10/11/12/14） | unread=6
+PASS | TC-S7-04 点击后未读高亮的行 = seq>6（isUnread 判据同 NotifyView:274）
+PASS | TC-S7-04 刷新保持：notifyReadSeq 再次读取 = 6（localStorage per-scope 持久）
+PASS | TC-S7-04 游标单调：已读 6 后再点 seq=3 → 游标不回落到 3
+PASS | TC-S7-04 per-scope：software 已读后 marketing 游标仍 0、marketing 未读仍 2
+PASS | TC-S7-04 存储键隔离：仅写 legion.notify.read.software（无 marketing 键、无其它杂键） | legion.notify.read.software
+PASS | TC-S7-01/04 全部已读 → 未读 0（badge 不显示）
+PASS | TC-S7-04 兜底：损坏游标值 → 视为 0 不崩溃
+PASS | TC-S7-01 空 scope 游标键独立（__all__）不参与空间计数
+PASS | TC-S7-05 代码侧：游标推进/读取/未读计数全程 0 次 fetch（无任何 mark-read 写接口被调用，api.ts 亦无此类导出） | fetchCalls=0
+
+==== S7 逻辑探针汇总：14/14 断言通过 ====

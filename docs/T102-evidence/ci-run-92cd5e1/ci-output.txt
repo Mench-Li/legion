@@ -1,0 +1,70 @@
+Legion CI run: root=D:\project\DSH\legion\.legion-worktrees\T-102 node=24.19.0
+stages: env -> deps -> build -> test -> smoke -> stage | out=D:\project\DSH\legion\.legion-worktrees\T-102\docs\T102-evidence\ci-run-92cd5e1
+
+===== [env] 环境自检 =====
+env 自检：
+  root=D:\project\DSH\legion\.legion-worktrees\T-102
+  node=24.19.0（要求 >= 22.5，node:sqlite）
+  platform=win32 x64
+  git head=92cd5e1
+[env] -> PASS (77ms)
+
+===== [deps] 依赖就绪 =====
+deps: workbench/node_modules 就绪（junction → 主 checkout）
+deps: plugins/node_modules 就绪（junction → 主 checkout）
+[deps] -> PASS (5ms)
+
+===== [build] 构建（whiteboard + workbench dist） =====
+build: plugins 编译 PASS（D:\project\DSH\dsh\deepseek-harness\node_modules\typescript\bin\tsc -p tsconfig.json → plugins/lib）
+build: whiteboard PASS（node scripts/build.mjs）
+build: workbench PASS（tsc --noEmit && vite build）
+  vite 输出要点：
+    [32m✓[39m 618 modules transformed.
+    [2mdist/[22m[32mindex.html                  [39m[1m[2m  0.44 kB[22m[1m[22m[2m │ gzip:   0.31 kB[22m
+    [2mdist/[22m[35massets/index-Dw2NUhv0.css   [39m[1m[2m 40.66 kB[22m[1m[22m[2m │ gzip:   8.06 kB[22m
+    [2mdist/[22m[36massets/index-CyBwtxkX.js    [39m[1m[2m361.82 kB[22m[1m[22m[2m │ gzip: 110.26 kB[22m
+    [2mdist/[22m[36massets/Scene3D-DXGyUY5g.js  [39m[1m[33m923.50 kB[39m[22m[2m │ gzip: 250.02 kB[22m
+    [32m✓ built in 8.02s[39m
+build: dist/index.html 存在，引用 assets x2
+[build] -> PASS (14740ms)
+
+===== [test] L0 契约/基线测试 =====
+  PASS chat（对话中心契约）: exit=0 tests=23 pass=23 fail=0
+  PASS skills（共享技能回归）: exit=0 tests=20 pass=20 fail=0
+  PASS goal（目标级上下文契约，R-1/R-2）: exit=0 tests=14 pass=14 fail=0
+  PASS rules（分层规范契约，R-2）: exit=0 tests=7 pass=7 fail=0
+  PASS spaces（空间管理契约，R-3）: exit=0 tests=5 pass=5 fail=0
+  PASS calendar（日程日历契约）: exit=0 tests=13 pass=13 fail=0
+  PASS files-api（文件中心契约）: exit=0 tests=40 pass=40 fail=0
+  PASS web（浏览器助手契约）: exit=0 tests=24 pass=24 fail=0
+  PASS contracts（平台契约基线）: exit=0 tests=56 pass=56 fail=0
+  PASS whiteboard（7 文件含真实服务 e2e）: exit=0 tests=67 pass=67 fail=0
+  PASS plugins（守护插件 6 文件：四能力纯函数 + 目标级上下文 + worker 回归；依赖 build 产出 plugins/lib）: exit=0 tests=36 pass=36 fail=0
+[test] -> PASS (20916ms)
+
+===== [smoke] L1 真实服务冒烟 =====
+  [smoke] PASS chat-l1-smoke.mjs（对话 L1 22 项）（exit=0）
+    输出要点：PASS | S9-13 ① settings 默认 enabled=true（未设置） | PASS | S9-13 ② POST settings enabled:false → 200 | PASS | S9-13 ③ 开关关发送 → 无 aiStatus=awaiting | PASS | S9-13 ④ 开关关 → replies 队列为空 | PASS | S9-13 ⑤ 开关开发送 → meta.aiStatus=awaiting | PASS | S9-13 ⑥ awaiting 进队列且带上下文 | PASS | S9-13 ⑦ answer 200 且 reply author=by | PASS | S9-13 ⑧ 回复写入 ≤5s 收到 live chat:message（member=s9-assistant、detail.ai=true） | PASS | S9-13 ⑨ 源消息 meta.aiStatus=replied 且不重复 | PASS | S9-13 ⑩ replied 消息退出队列 | PASS | S9-13 ⑪ 超时前置：awaiting 入队 | PASS | S9-13 ⑫ 超龄消息退出队列（replies 为空） | PASS | S9-13 ⑬ 超龄兜底：meta.aiStatus=failed + error 含超时 | ==== L1 冒烟汇总：35/35 断言通过；进程级异常 0 ====
+  [smoke] PASS chat-s2-smoke.mjs（对话 S2 数据面 9 项）（exit=0）
+    输出要点：PASS | S2-A GET / → 200 + html（:5173 产物入口） | status=200 | PASS | S2-B GET /hub/api/config → 200（单一 /hub 源代理） | status=200 | PASS | S2-C 空库会话列表 = []（空态可建） | PASS | S2-D POST 会话 → 200 ok:true task{id,title,kind,last_message_at:null} | conv=1 | PASS | S2-E 连发 60 条全部 200 且 id 严格升序 + 会话 last_message_at 更新 | min=1 max=60 | PASS | S2-F 分页 50+10 无重无漏、页内升序、页间连续（=ChatView 加载更早的数据面） | p1=50 p2=10 | PASS | S2-G scope 隔离：software/ops 列表各自独立互不含对方（TC-S2-05 数据面） | PASS | S2-H 双订阅 ≤5s 收到同一 live chat:message（≤15s 实时收发的数据面等价） | msg=61 | PASS | S2-H2 事件 action 前缀 chat:（前端 filter chat:* 依据；hub 事件源仅此一个） | S2 L1 冒烟汇总：9/9 断言通过
+  [smoke] PASS files-s5-smoke.mjs（文件 S5 数据面 32 项）（exit=0）
+    输出要点：PASS S5-L1 下载字节 = 源字节 | PASS S5-L1 mkdir 嵌套 a/b/c 200 | PASS S5-L1 rename a/b/c→a/b/d 200 | PASS S5-L1 删除无 confirm → 400 提示 confirm=yes | PASS S5-L1 取消删除后文件仍在 | PASS S5-L1 confirm=yes 删除 200 | PASS S5-L1 删除后 list 不再可见（刷新语义） | PASS S5-L1 删除后 read → 400 路径不存在 | PASS S5-L1 非空目录删 → 400 拒绝 | PASS S5-L1 空目录 confirm=yes → 200 | PASS S5-L1 未绑定 scope → 400「尚未绑定本地文件夹」 | PASS S5-L1 未注册 scope → 400「未注册」 | PASS S5-L1 .git/config → 403 拒绝 | S5 smoke: 32/32 passed
+  [smoke] PASS whiteboard 真实进程 /healthz 200 — {"ok":true,"storage":"MemoryProvider","ts":1788681780714}
+  [smoke] PASS whiteboard GET / 200 html — bytes=1832
+  [smoke] PASS v1 看板 /api/config auth=true（--token 生效） — {"auth":true,"host":"127.0.0.1","port":18853,"pipeline":{"name":"software","stages":[{"role":"requirement","label":"需求澄清"},{"role":"researcher","label":"方案搜索"},
+  [smoke] 子进程已回收
+[smoke] -> PASS (8367ms)
+
+===== [stage] 发布物暂存 =====
+stage: 发布物暂存 -> D:\project\DSH\legion\.legion-worktrees\T-102\releases\legion-92cd5e1-2026-09-06
+{"name":"legion-release","version":"92cd5e1","gitHead":"92cd5e1","builtAt":"2026-09-06T08:03:01.868Z","node":"24.19.0","platform":"win32","ciStages":"env:PASS,deps:PASS,build:PASS,test:PASS,smoke:PASS","releaseNotes":"见 docs/DEPLOY.md（部署/发布 runbook，随 gitHead=92cd5e1 对齐）","distFiles":4}
+[stage] -> PASS (90ms)
+
+===== SUMMARY =====
+  env    PASS (76ms)
+  deps   PASS (5ms)
+  build  PASS (14739ms)
+  test   PASS (20915ms)
+  smoke  PASS (8366ms)
+  stage  PASS (89ms)
+summary.json -> D:\project\DSH\legion\.legion-worktrees\T-102\docs\T102-evidence\ci-run-92cd5e1\summary.json

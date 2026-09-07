@@ -1,0 +1,8 @@
+=== plugins tsc src→lib（DSH 检出 tsc -p tsconfig.json，cwd=plugins；compile 步骤同 CI build）===
+（exit 0；产物 plugins/lib 见 gitignore）
+
+=== plugins 6 测试文件（node --test cwd=plugins）===
+ℹ tests 36
+ℹ pass 36
+ℹ fail 0
+ℹ duration_ms 3788.2192

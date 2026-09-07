@@ -1,0 +1,73 @@
+▶ TC-S6-01/02 正文抽取（HTML + UTF-8 中文）
+  ✔ 提取 title/正文/链接，中文无乱码；返回结构无原始 HTML (31.6551ms)
+✔ TC-S6-01/02 正文抽取（HTML + UTF-8 中文） (41.125ms)
+▶ TC-S6-03 SPA 空壳
+  ✔ JS 渲染页 → 可理解提示且不伪造正文 (8.0584ms)
+✔ TC-S6-03 SPA 空壳 (8.4709ms)
+▶ TC-S6-04 协议白名单
+  ✔ file/ftp/data/javascript 等协议一律 protocol_blocked (2.1596ms)
+  ✔ 缺 url → invalid_url (0.4075ms)
+✔ TC-S6-04 协议白名单 (3.4395ms)
+▶ TC-S6-05 私网/回环矩阵（含混淆）→ ssrf_blocked，mock 零命中
+  ✔ 默认策略（无注入口）拒绝全部私网目标 (40.5906ms)
+✔ TC-S6-05 私网/回环矩阵（含混淆）→ ssrf_blocked，mock 零命中 (41.0969ms)
+▶ TC-S6-06 重定向链（逐跳校验 + 上限 + 协议再检）
+  ✔ 302 链跟随到最终页并抽取；跳数超限 → too_many_redirects；重定向到 file:// → ssrf_blocked (122.3894ms)
+✔ TC-S6-06 重定向链（逐跳校验 + 上限 + 协议再检） (123.0451ms)
+▶ TC-S6-08/09 maxBytes / timeoutMs 三值注入
+  ✔ maxBytes=2048 ok；maxBytes=1024 → too_large (31.2294ms)
+  ✔ 慢响应 timeoutMs=200 → timeout；快响应同超时 → ok（超时后连接被取消） (300.0791ms)
+✔ TC-S6-08/09 maxBytes / timeoutMs 三值注入 (331.708ms)
+▶ TC-S6-09b（P0-3 回归）重定向链总超时 = 共享 deadline，非每跳重置
+  ✔ 每跳均短于总超时但整链更长 → code=timeout，总耗时 ≈ timeoutMs（修复前 ok:true 于 ~2× 后返回） (1009.4524ms)
+  ✔ 同链在充足总超时下正常跟随到底并抽取终页（共享 deadline 不误伤合法链） (1432.5824ms)
+✔ TC-S6-09b（P0-3 回归）重定向链总超时 = 共享 deadline，非每跳重置 (2442.7368ms)
+▶ TC-S6-11/12 非文本降级与上游 4xx/5xx
+  ✔ application/pdf → ok:true + code=unsupported，不读体不抽取 (12.9489ms)
+  ✔ 404/500 → ok:false + code=http_404/http_500 且可读说明 (30.979ms)
+✔ TC-S6-11/12 非文本降级与上游 4xx/5xx (44.3448ms)
+[web-audit] {"ts":"2026-09-04T16:11:37.570Z","by":"general","url":"http://127.0.0.1:52260/page","finalUrl":"http://127.0.0.1:52260/page","status":200,"ok":true,"code":"ok","ms":10}
+▶ S2-R-A3 抓取审计留痕（真实 HTTP /api/web/fetch 集成）
+  ✔ 成功抓取留痕：追加一行含 url/finalUrl/status/耗时 ms/by=general (29.5335ms)
+[web-audit] {"ts":"2026-09-04T16:11:37.601Z","by":"general","url":"http://127.0.0.1:52260/404","finalUrl":"http://127.0.0.1:52260/404","status":404,"ok":false,"code":"http_404","ms":14}
+[web-audit] {"ts":"2026-09-04T16:11:37.633Z","by":"general","url":"http://127.0.0.1:52260/500","finalUrl":"http://127.0.0.1:52260/500","status":500,"ok":false,"code":"http_500","ms":17}
+  ✔ 失败留痕：http_404/http_500 各一行（url/finalUrl/status=上游码/code=http_<n>） (61.3481ms)
+[web-audit] {"ts":"2026-09-04T16:11:37.664Z","by":"general","url":"http://10.0.0.1/private-path","finalUrl":"http://10.0.0.1/private-path","status":null,"ok":false,"code":"ssrf_blocked","ms":0}
+  ✔ 拦截亦留痕：ssrf_blocked 一行含目标 URL（ok=false, by=general） (31.8159ms)
+[web-audit] {"ts":"2026-09-04T16:11:37.897Z","by":"general","url":"http://127.0.0.1:52260/slow","finalUrl":"http://127.0.0.1:52260/slow","status":null,"ok":false,"code":"timeout","ms":202}
+[web-audit] {"ts":"2026-09-04T16:11:37.902Z","by":"general","url":"http://127.0.0.1:52260/max","finalUrl":"http://127.0.0.1:52260/max","status":200,"ok":false,"code":"too_large","ms":0}
+  ✔ 失败留痕：timeout（headers 未回 /slow）与 too_large 各一行，code 取枚举表值 (236.876ms)
+✔ S2-R-A3 抓取审计留痕（真实 HTTP /api/web/fetch 集成） (362.476ms)
+[web-audit] {"ts":"2026-09-04T16:11:38.425Z","by":"general","url":"http://127.0.0.1:52260/stall","finalUrl":"http://127.0.0.1:52260/stall","status":200,"ok":false,"code":"timeout","ms":502}
+▶ S2-R-A4 body stall 归类（headers 已回、body 挂起）与整链超时同码
+  ✔ body stall 夹具 → {ok:false, code:timeout}（非 web_error/undefined），审计同码 (515.9393ms)
+[web-audit] {"ts":"2026-09-04T16:11:39.441Z","by":"general","url":"http://127.0.0.1:52260/c1","finalUrl":"http://127.0.0.1:52260/c2","status":null,"ok":false,"code":"timeout","ms":1004}
+  ✔ 整链超时（重定向链累计）HTTP 层同样返回 code=timeout（同码收口） (1026.3278ms)
+✔ S2-R-A4 body stall 归类（headers 已回、body 挂起）与整链超时同码 (1544.5725ms)
+▶ S2-R-A3b 审计文件默认位置（静态 ROOT 之外）与容量轮转；workbench/.gitignore
+  ✔ web-audit.jsonl 默认位于 ROOT（workbench/dist）之外，且 .gitignore 含 data/ 条目 (0.7268ms)
+[web-audit] {"ts":"2026-09-04T16:11:39.473Z","by":"general","url":"http://127.0.0.1:52260/page","finalUrl":"http://127.0.0.1:52260/page","status":200,"ok":true,"code":"ok","ms":7}
+[web-audit] {"ts":"2026-09-04T16:11:39.488Z","by":"general","url":"http://127.0.0.1:52260/page","finalUrl":"http://127.0.0.1:52260/page","status":200,"ok":true,"code":"ok","ms":13}
+[web-audit] {"ts":"2026-09-04T16:11:39.519Z","by":"general","url":"http://127.0.0.1:52260/page","finalUrl":"http://127.0.0.1:52260/page","status":200,"ok":true,"code":"ok","ms":16}
+[web-audit] {"ts":"2026-09-04T16:11:39.551Z","by":"general","url":"http://127.0.0.1:52260/page","finalUrl":"http://127.0.0.1:52260/page","status":200,"ok":true,"code":"ok","ms":16}
+[web-audit] {"ts":"2026-09-04T16:11:39.583Z","by":"general","url":"http://127.0.0.1:52260/page","finalUrl":"http://127.0.0.1:52260/page","status":200,"ok":true,"code":"ok","ms":17}
+[web-audit] {"ts":"2026-09-04T16:11:39.615Z","by":"general","url":"http://127.0.0.1:52260/page","finalUrl":"http://127.0.0.1:52260/page","status":200,"ok":true,"code":"ok","ms":17}
+[web-audit] {"ts":"2026-09-04T16:11:39.646Z","by":"general","url":"http://127.0.0.1:52260/page","finalUrl":"http://127.0.0.1:52260/page","status":200,"ok":true,"code":"ok","ms":16}
+[web-audit] {"ts":"2026-09-04T16:11:39.678Z","by":"general","url":"http://127.0.0.1:52260/page","finalUrl":"http://127.0.0.1:52260/page","status":200,"ok":true,"code":"ok","ms":16}
+[web-audit] {"ts":"2026-09-04T16:11:39.695Z","by":"general","url":"http://127.0.0.1:52260/page","finalUrl":"http://127.0.0.1:52260/page","status":200,"ok":true,"code":"ok","ms":1}
+[web-audit] {"ts":"2026-09-04T16:11:39.725Z","by":"general","url":"http://127.0.0.1:52260/page","finalUrl":"http://127.0.0.1:52260/page","status":200,"ok":true,"code":"ok","ms":15}
+[web-audit] {"ts":"2026-09-04T16:11:39.756Z","by":"general","url":"http://127.0.0.1:52260/page","finalUrl":"http://127.0.0.1:52260/page","status":200,"ok":true,"code":"ok","ms":16}
+[web-audit] {"ts":"2026-09-04T16:11:39.788Z","by":"general","url":"http://127.0.0.1:52260/page","finalUrl":"http://127.0.0.1:52260/page","status":200,"ok":true,"code":"ok","ms":16}
+  ✔ 容量轮转：主文件超上限 → 归档 .1 保留历史，新行继续落到有界的主文件 (337.8052ms)
+✔ S2-R-A3b 审计文件默认位置（静态 ROOT 之外）与容量轮转；workbench/.gitignore (338.8456ms)
+▶ S2-G-11 错误码枚举常量表收口
+  ✔ WEB_ERR 枚举含 timeout/ssrf_blocked/too_large 等全部规范码；http_<n> 为动态格式不入表 (0.497ms)
+✔ S2-G-11 错误码枚举常量表收口 (0.8611ms)
+ℹ tests 21
+ℹ suites 12
+ℹ pass 21
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 7970.8331

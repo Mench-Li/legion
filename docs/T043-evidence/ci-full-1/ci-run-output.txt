@@ -1,0 +1,72 @@
+Legion CI run: root=D:\project\DSH\legion\.legion-worktrees\T-043 node=24.19.0
+stages: env -> deps -> build -> test -> smoke -> stage | out=D:\project\DSH\legion\.legion-worktrees\T-043\docs\T043-evidence\ci-full-1
+
+===== [env] 环境自检 =====
+env 自检：
+  root=D:\project\DSH\legion\.legion-worktrees\T-043
+  node=24.19.0（要求 >= 22.5）
+  platform=win32 x64
+  git head=f5975ac
+[env] -> PASS (89ms)
+
+===== [deps] 依赖就绪 =====
+deps: workbench/node_modules 就绪（junction/符号链接（指向已安装依赖目录））
+[deps] -> PASS (2ms)
+
+===== [build] 构建（whiteboard + workbench dist） =====
+build: whiteboard PASS（node scripts/build.mjs）
+build: workbench PASS（tsc --noEmit && vite build）
+  vite 输出要点：
+    [32m✓[39m 615 modules transformed.
+    [2mdist/[22m[32mindex.html                  [39m[1m[2m  0.44 kB[22m[1m[22m[2m │ gzip:   0.32 kB[22m
+    [2mdist/[22m[35massets/index-CXZL3w_0.css   [39m[1m[2m 32.44 kB[22m[1m[22m[2m │ gzip:   6.67 kB[22m
+    [2mdist/[22m[36massets/index-lD3lDeMQ.js    [39m[1m[2m309.94 kB[22m[1m[22m[2m │ gzip:  93.68 kB[22m
+    [2mdist/[22m[36massets/Scene3D-BkkDaRWu.js  [39m[1m[33m923.50 kB[39m[22m[2m │ gzip: 250.02 kB[22m
+    [32m✓ built in 9.43s[39m
+build: dist/index.html 存在，引用 assets x2
+[build] -> PASS (16700ms)
+
+===== [test] L0 契约/基线测试 =====
+  PASS chat（S1 对话契约）: exit=0 tests=13 pass=13 fail=0
+  PASS skills（存量回归）: exit=0 tests=12 pass=12 fail=0
+  PASS files-api（S3/S4 文件契约）: exit=0 tests=21 pass=21 fail=0
+  PASS web（S6 浏览器契约）: exit=0 tests=10 pass=10 fail=0
+  PASS contracts（56 用例基线）: exit=0 tests=56 pass=56 fail=0
+  PASS whiteboard（67 用例 R-1 存量回归）: exit=0 tests=67 pass=67 fail=0
+[test] -> PASS (6939ms)
+
+===== [smoke] L1 三件套真实服务冒烟 =====
+  [smoke] PASS team-hub :18787 启动（GET /api/config）
+  [smoke] PASS team-hub /api/config 形状 — {"auth":false,"db":"D:\\project\\DSH\\legion\\.legion-worktrees\\T-043\\docs\\T043-evidence\\ci-full-1\\smoke-db\\hub-ci.db","port":18787}
+  [smoke] PASS POST /api/chat/conversations 创建会话 — {"ok":true,"task":{"id":1,"scope":"software","title":"CI 冒烟会话","kind":"space","participants":[],"createdAt":"2026-09-03T07:00:49.533Z","updatedAt":"2026-09-03T07:00:49.533Z","last_message_at":null}}
+  [smoke] PASS POST /api/chat/messages 发消息（author=by）
+  [smoke] PASS GET 会话列表含新会话
+  [smoke] PASS GET 消息列表含新消息
+  [smoke] PASS 审计含 chat:* 记录
+  [smoke] PASS SSE /api/events 收到 chat:message
+  [smoke] PASS team-hub(token) :18788 启动
+  [smoke] PASS hub token 矩阵：无 token 写 → 401 — status=401
+  [smoke] PASS hub token 矩阵：带 token 写 → 200
+  [smoke] PASS serve.mjs :18851 启动（SPA 根路径 200）
+  [smoke] PASS serve.mjs 托管构建产物（index.html 含 root 容器）
+  [smoke] PASS 注册空间 cidev（localDir=fixture）
+  [smoke] PASS GET /api/files/list 根目录条目
+  [smoke] PASS GET /api/files/read 文本预览
+  [smoke] PASS GET /api/files/download 字节一致
+  [smoke] PASS PUT /api/files/upload 上传（带 token）
+  [smoke] PASS 写鉴权：无 token 上传 → 401
+  [smoke] PASS 上传后下载字节一致
+  [smoke] PASS POST /api/files/rename（带 token）
+  [smoke] PASS POST /api/files/delete（confirm=yes）
+  [smoke] PASS 路径越界 ../ → 4xx 拒绝 — status=403
+  [smoke] PASS POST /api/web/fetch 抓取本地 mock 成功 — {"ok":true,"finalUrl":"http://127.0.0.1:18999/","status":200,"contentType":"text/html; charset=utf-8","title":"CI Mock Page","text":"Mock\nhello from ci mock","excerpt":"Mock hello from ci mock","link
+  [smoke] PASS serve.mjs(严格 SSRF) :18852 启动
+  [smoke] PASS SSRF 防护：私网/回环目标拦截（ssrf_blocked） — {"ok":false,"error":"SSRF 防护：禁止访问私网/回环地址（含 IP 混淆写法）","code":"ssrf_blocked"}
+  [smoke] PASS v1 看板 :18853 启动（GET /api/config）
+  [smoke] PASS v1 /api/config auth=true（--token 生效） — {"auth":true,"host":"127.0.0.1","port":18853,"pipeline":{"name":"software","stages":[{"role":"requirement","label":"需求澄清"},{"role":"researcher","label":"方案搜索"},{"role":"breaker","label":"任务拆解"},{"role":"test-designer","label":"测试用例设计"},{"ro
+  [smoke] 子进程已回收，临时夹具已清理
+[smoke] -> PASS (4620ms)
+
+===== [stage] 发布物暂存 =====
+stage: 发布物暂存 -> D:\project\DSH\legion\.legion-worktrees\T-043\releases\legion-f5975ac-2026-09-03
+{"name":"legion-release","version":"f5975ac","gitHead":"f5975ac","builtAt":"2026-09-03T07:00:53.010Z","node":"24.19.0","platform":"win32","ciStages":"env:PASS,deps:PASS,build:PASS,test:PASS,smoke:PASS","releaseNotes":"见 docs/DEPLOY.md（发布说明 / 已知缺陷 P0-1/P0-2/P0-3 放行门禁）","distFiles":4}

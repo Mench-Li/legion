@@ -1,0 +1,31 @@
+# Feature L0 contract tests (node --test) — T-110 devops
+
+$ node --test plugins/tests/doc-contract.test.mjs
+exit=0
+ℹ tests 4
+ℹ pass 4
+ℹ fail 0
+
+$ node --test plugins/tests/artifact-register.test.mjs
+exit=0
+ℹ tests 7
+ℹ pass 7
+ℹ fail 0
+
+$ node --test team-hub/artifact-content.test.mjs
+exit=0
+ℹ tests 16
+ℹ pass 16
+ℹ fail 0
+
+$ node --test workbench/scripts/doc-render.test.mjs
+exit=0
+ℹ tests 11
+ℹ pass 11
+ℹ fail 0
+
+$ node --test scrum/artifact-detail.test.mjs
+exit=0
+ℹ tests 10
+ℹ pass 10
+ℹ fail 0

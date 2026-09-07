@@ -1,0 +1,25 @@
+# 拓扑就绪检查（dist / chrome / node v24.19.0）
+# hub 已起: http://127.0.0.1:18873
+# 种子完成: convA=1（software: A60/B3/C60, marketing: M3）
+# 延迟代理已起 :18874 → 18873（loadOlder/send 延迟 2600ms）
+# 静态站已起 :15173
+# Chrome headless CDP :9333
+PASS | PRE-0 应用壳加载（hubMode 侧栏含「对话中心」）
+PASS | PRE-1 进入 software 空间，会话列表就绪
+PASS | PRE-2 会话名含 A/B/C（scope 隔离，无 M 会话） | ["E-会话","C-会话","B-会话","A-会话","E-会话"]
+PASS | PRE-3 A 首屏=50 条且出现「加载更早」（分页前件）
+PASS | S1(TC-S3-02) A 翻页在途切 B → B 视图零污染（无 A-msg 混入） | ["B-msg-1","B-msg-2","B-msg-3"]
+PASS | S1(TC-S3-02) B 无「加载更早」（无 A 旧页状态残留）
+PASS | S1(TC-S3-02) 切回 A 数据完整、无 B 串显
+PASS | S2(TC-S3-03) A 发送在途切 B → B 草稿未被误清 | draft="B-草稿保留"
+PASS | S2(TC-S3-03) B 无 A 消息气泡混入
+PASS | S2(TC-S3-03) 切回 A 消息气泡恰好 1 条（归属发起会话）
+PASS | S3(TC-S3-04) software 翻页在途切 marketing → marketing 零污染 | ["M-msg-1","M-msg-2","M-msg-3"]
+PASS | S3(TC-S3-04) 切回 software A 数据仍在（无跨空间串显） | names=["A-会话","E-会话","C-会话","B-会话","A-会话"]
+PASS | S5(TC-S3-05) 新建会话 → 发消息 → 气泡出现（创建主路径无回归）
+PASS | S4(TC-S3-05) 无切换时「加载更早」正常合并（正向控制，守卫不过度拦截）
+PASS | S4(TC-S3-05) 第二标签 ≤15s 实时收到新消息（SSE 无回归） | 2701ms
+PASS | S4(TC-S3-05) 刷新后历史完整（RT 消息仍在）
+PASS | S6(TC-S3-08) 恶意样本纯文本渲染（无 img 元素注入、onerror/script 未执行） | {"imgs":0,"bubbles":["<img src=x onerror=window.__xss=1><script>window.__xss=2</script>[x](javascript:alert(3))"]}
+
+==== L2 S3 E2E 汇总：17/17 通过；失败 0 ====

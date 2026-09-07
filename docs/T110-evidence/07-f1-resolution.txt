@@ -1,0 +1,40 @@
+# F1 解析说明 — T-110 (workbench/src/App.tsx 合并冲突标记)
+# 性质：构建阻断型 merge 残留（git stash-pop 冲突符），非功能性业务代码改动。
+
+## 冲突标记（HEAD 7014fec 中）：
+  314: <<<<<<< Updated upstream
+  328: =======
+  330: >>>>>>> Stashed changes
+
+## 解析方式（已保留在工作区）：
+  取「Stashed changes」侧注释（与 handlePublishGoal 实际实现/导出的 toast 文案一致：
+  「已发布目标（与既有目标并存，自动生成独立任务链）」），删除 3 行冲突符 + 被覆盖的上游 docstring。
+  两分支函数体（handleSpaceDeleted / handlePublishGoal）逐字节相同，仅 docstring 注释不同 → 零行为差异。
+
+## 解析 diff（git diff -- workbench/src/App.tsx）：
+diff --git a/workbench/src/App.tsx b/workbench/src/App.tsx
+index cf6ce4c..9ca0058 100644
+--- a/workbench/src/App.tsx
++++ b/workbench/src/App.tsx
+@@ -311,7 +311,6 @@ export default function App(): React.JSX.Element {
+       .catch(() => undefined)
+   }, [])
+ 
+-<<<<<<< Updated upstream
+ /** 空间删除成功后（R-3/S8，TC-S8-05/06）：关闭弹窗、重拉列表；若删的是当前激活空间则切回「全部空间」（scope=null）。 */
+   const handleSpaceDeleted = useCallback((deletedId: string): void => {
+     setSpaceSettings(null)
+@@ -324,10 +323,7 @@ export default function App(): React.JSX.Element {
+     }
+   }, [scope, loadMissions])
+ 
+-  /** 发布空间目标：写 team-hub 后刷新当前空间目标。 */
+-=======
+   /** 发布目标：写 team-hub 后刷新目标列表。每次发布 = 新建一个目标（与既有目标并存，不取消旧链）。 */
+->>>>>>> Stashed changes
+   const handlePublishGoal = useCallback(async (scopeValue: string, objective: string): Promise<void> => {
+     await publishGoal(scopeValue, objective)
+     const info = await fetchGoal(scopeValue)
+
+
+## 验证：workbench tsc --noEmit exit=0（见 06-workbench-tsc.txt）

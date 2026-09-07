@@ -1,0 +1,7 @@
+PASS | SSR-① 无中枢 → 渲染真实面板引导「通知中心需要 team-hub v2（中枢）」且不抛错 | <div class="center-col"><div class="panel goal-card"><span style="color:var(--yellow)">🔔 通知中心需要 team-hub v2（中枢）</span><span style="font-size:11px;color:var(--muted)">通知 = 中枢审计派生（audit）。启动 <code>node 
+PASS | SSR-② hubMode 未选空间 → 「请先选择具体工作空间」引导 | <div class="center-col"><div class="panel goal-card"><span style="color:var(--yellow)">🔔 请先选择具体工作空间</span><span style="font-size:11px;color:var(--muted)">通知按空间隔离（scope 分区，已读游标 per scope）。在左侧「工作空间」选择一个具体空间后即可查看通知</span><
+PASS | SSR-③ 面板壳：标题「通知中心」+ scope + audit 派生 + 数据源 team-hub(/hub) | class="center-col" class="panel goal-card" class="chip" class="btn ghost"
+PASS | SSR-④ 恶意 scope 文本按文本节点转义（&lt;b&gt;/&lt;img 出现、无真实 <img 元素/属性注入） | 转义样本出现=true
+PASS | SSR-⑤ 产物 HTML 无 dangerouslySetInnerHTML 直插特征
+
+==== S7 SSR 面板渲染汇总：5/5 断言通过 ====

@@ -1,0 +1,3 @@
+[tsc --noEmit] exit 0 — 0 type errors
+cmd: node workbench/node_modules/typescript/bin/tsc -p workbench/tsconfig.json --noEmit
+(node_modules junction -> D:\project\DSH\legion\workbench\node_modules)

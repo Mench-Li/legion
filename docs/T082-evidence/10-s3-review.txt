@@ -1,0 +1,26 @@
+PASS | identityStale 守卫函数存在（TC-S3-01/06 判据核心） | 行 36
+PASS | 守卫比对 (scope,convId) 二元组（跨空间撞号防护）
+PASS | scopeRef 声明并随每次 render 同步 scope | ref@65 mirror@68
+PASS | TC-S3-01 send：发起时快照先于请求标志 | snap@278
+PASS | TC-S3-01 send：identityStale 守卫位于清草稿/合并写回之前 | guard@284 < setDraft@285 < setMsgs@287
+PASS | TC-S3-01 send：快照与守卫之间无任何 setMsgs/setDraft 写回
+PASS | TC-S3-01 send：finally 无条件复位 sending（stale 不卡发送按钮） | sending(false)@295
+PASS | TC-S3-01 send：失败 toast 仅在非 stale 时发出
+PASS | TC-S3-01 loadOlder：快照 < 守卫 < 合并（stale 丢弃不写 msgs/hasOlder） | snap@189 guard@197 < merge@198
+PASS | TC-S3-01 loadOlder：finally 复位 loadingOlder | reset@210
+PASS | TC-S3-01 loadOlder：函数体内无 setDraft
+PASS | TC-S3-06 mergeNewest：无参签名、先取 (scope,conv) 快照再 await | def@138 snap@139
+PASS | TC-S3-06 mergeNewest：fetch 返回后、setMsgs 前有守卫 | guard@145 < merge@149
+PASS | TC-S3-06 mergeNewest：SSE/poll 调用点无参 | 2 处无参调用
+PASS | TC-S3-06 SSE：按 ev.scope 过滤（只响应当前空间事件） | 行 162
+PASS | TC-S3-06 SSE：chat:message 且 conv==active 才 merge；15000ms 轮询兜底
+PASS | TC-S3-06 单一 EventSource：ChatView 仅 1 处 subscribeHubAudit（I-8）
+PASS | TC-S3-04 空间守卫：loadConvs 与 doCreate 均比对 scope 快照 | 2 处
+PASS | TC-S3-04 scope 变化即清空旧空间状态（convs/msgs/activeId）
+PASS | TC-S3-01 无残留：setMsgs 异步写回均在 identityStale 或 cancelled 保护下 | []
+PASS | TC-S3-08 ChatView.tsx 无 dangerouslySetInnerHTML 实际使用（仅注释提及 = 0 命中）
+PASS | TC-S3-08 正文走 React 文本节点 {m.body}
+PASS | TC-S3-08 workbench/src 全目录 0 处 dangerouslySetInnerHTML 实际使用（I-5） | 0 命中（仅注释提及防直插纪律）
+
+==== S3 静态评审汇总：23/23 通过 ====
+[exit code: 0]

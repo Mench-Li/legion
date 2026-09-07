@@ -1,0 +1,38 @@
+{
+  "root": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-110",
+  "outDir": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-110\\scratch\\t110-build\\ci-run",
+  "finishedAt": "2026-09-06T12:05:54.736Z",
+  "stages": [
+    {
+      "name": "env",
+      "status": "PASS",
+      "ms": 85
+    },
+    {
+      "name": "deps",
+      "status": "PASS",
+      "ms": 4
+    },
+    {
+      "name": "build",
+      "status": "FAIL",
+      "ms": 2052
+    },
+    {
+      "name": "test",
+      "status": "PASS",
+      "ms": 15074
+    },
+    {
+      "name": "smoke",
+      "status": "FAIL",
+      "ms": 12093
+    },
+    {
+      "name": "stage",
+      "status": "FAIL",
+      "ms": 136
+    }
+  ],
+  "failed": 3
+}

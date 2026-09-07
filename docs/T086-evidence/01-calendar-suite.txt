@@ -1,0 +1,41 @@
+▶ TC-S5-01/09 calendar_events 建表幂等 + 旧库自动建表
+  ✔ TC-S5-01 新库 import 后表与索引存在；同库二次 import 幂等不报错 (27.0465ms)
+  ✔ TC-S5-09 旧库（tasks/skills/chat 存量、无 calendar 表）import 自动建表且事件可用、存量无损 (73.0316ms)
+✔ TC-S5-01/09 calendar_events 建表幂等 + 旧库自动建表 (125.4684ms)
+▶ TC-S5-02 POST 创建 → 200 字段形状 + 落库 + audit calendar:create
+  ✔ 创建合法事件 → 200 事件含 id/scope/title/start/end=null/allDay=false/createdAt/updatedAt；库中可查；audit 形状正确 (31.2344ms)
+✔ TC-S5-02 POST 创建 → 200 字段形状 + 落库 + audit calendar:create (31.6394ms)
+▶ TC-S5-03 scope 过滤 + 日期窗闭区间 + 排序
+  ✔ GET /api/calendar/events?scope=&from=&to= 仅该 scope + 窗内闭区间 + start asc 稳定排序 (67.4241ms)
+  ✔ 同日同 start 的事件按 id asc 稳定排序 (49.1985ms)
+✔ TC-S5-03 scope 过滤 + 日期窗闭区间 + 排序 (117.3023ms)
+▶ TC-S5-04 scope 隔离互不可见 + 跨 scope 写不串
+  ✔ 两 scope 各建事件后交叉查询互不可见；事件 scope = 请求 scope (61.8251ms)
+✔ TC-S5-04 scope 隔离互不可见 + 跨 scope 写不串 (62.2213ms)
+▶ TC-S5-05 非法输入矩阵 → 400 零落库零 audit
+  ✔ 缺 by / title 空 / title 101 / start 缺 / start 非法 / end<start / scope 缺 → 全部 400 且零落库零 calendar 审计 (126.5151ms)
+✔ TC-S5-05 非法输入矩阵 → 400 零落库零 audit (126.8674ms)
+▶ TC-S5-06 日期窗边界 + allDay date-only
+  ✔ start 恰在 from/to / 前一日 / 后一日 / allDay date-only → 闭区间正确 (79.5221ms)
+✔ TC-S5-06 日期窗边界 + allDay date-only (79.8741ms)
+▶ TC-S5-07 删除契约：confirm / scope 越权 / 成功 + audit calendar:delete
+  ✔ 缺 confirm / confirm 非 yes / scope 越权 / 未知 id → 400 且事件仍在；confirm=yes + scope 匹配 → 200 且 audit (125.4051ms)
+✔ TC-S5-07 删除契约：confirm / scope 越权 / 成功 + audit calendar:delete (125.6266ms)
+▶ TC-S5-08 写走 handleWrite：audit 经 /api/activity 可查 + SSE /api/events 广播
+  ✔ 订阅 /api/events 期间 POST 创建 → ≤5s 收到 calendar:create live 帧；GET /api/activity?scope= 可查 calendar:* (111.5293ms)
+✔ TC-S5-08 写走 handleWrite：audit 经 /api/activity 可查 + SSE /api/events 广播 (111.7386ms)
+▶ TC-S5-11 合法边界：title 恰 100 / end 省略 / allDay / end=start / meta
+  ✔ title=100 恰好 200；end 可省=null；allDay:true 存 1 返 true；end=start 允许；meta 往返 (76.6064ms)
+✔ TC-S5-11 合法边界：title 恰 100 / end 省略 / allDay / end=start / meta (76.8818ms)
+▶ DAO 级直测（chat.test.mjs 同法：函数级 create/list/delete/解析）
+  ✔ createCalendarEvent 校验（缺 by/scope/title/非法时间/超长）与 listCalendarEvents 窗过滤直接可用 (1.0387ms)
+  ✔ listCalendarEvents 参数校验：from 晚于 to / 非法窗参数抛错 (0.4299ms)
+✔ DAO 级直测（chat.test.mjs 同法：函数级 create/list/delete/解析） (1.8215ms)
+ℹ tests 13
+ℹ suites 10
+ℹ pass 13
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 916.7182

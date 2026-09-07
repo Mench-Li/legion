@@ -1,0 +1,41 @@
+### 0) probe GET /api/activity?scope=software
+[]
+
+### 1) POST /api/calendar/events {scope:software, title:评审会, start:2026-08-20T10:00, by:general}
+{   "ok": true,   "task": {     "id": 1,     "scope": "software",     "title": "评审会",     "start": "2026-08-20T10:00",     "end": null,     "allDay": false,     "meta": {},     "createdAt": "2026-09-05T05:18:11.771Z",     "updatedAt": "2026-09-05T05:18:11.771Z"   } }
+
+### 2) POST /api/calendar/events {scope:marketing, title:营销复盘, start:2026-08-25T14:00, by:general}
+{   "ok": true,   "task": {     "id": 2,     "scope": "marketing",     "title": "营销复盘",     "start": "2026-08-25T14:00",     "end": null,     "allDay": false,     "meta": {},     "createdAt": "2026-09-05T05:18:11.822Z",     "updatedAt": "2026-09-05T05:18:11.822Z"   } }
+
+### 3) GET /api/calendar/events?scope=software&from=2026-08-01&to=2026-08-31
+{   "scope": "software",   "events": [     {       "id": 1,       "scope": "software",       "title": "评审会",       "start": "2026-08-20T10:00",       "end": null,       "allDay": false,       "meta": {},       "createdAt": "2026-09-05T05:18:11.771Z",       "updatedAt": "2026-09-05T05:18:11.771Z"     }   ] }
+
+### 4) GET /api/calendar/events?scope=marketing&from=2026-08-01&to=2026-08-31
+{   "scope": "marketing",   "events": [     {       "id": 2,       "scope": "marketing",       "title": "营销复盘",       "start": "2026-08-25T14:00",       "end": null,       "allDay": false,       "meta": {},       "createdAt": "2026-09-05T05:18:11.822Z",       "updatedAt": "2026-09-05T05:18:11.822Z"     }   ] }
+
+### 5) GET /api/calendar/events?scope=marketing count = 1 (only marketing event)
+{   "scope": "marketing",   "events": [     {       "id": 2,       "scope": "marketing",       "title": "营销复盘",       "start": "2026-08-25T14:00",       "end": null,       "allDay": false,       "meta": {},       "createdAt": "2026-09-05T05:18:11.822Z",       "updatedAt": "2026-09-05T05:18:11.822Z"     }   ] }
+
+### 6) POST /api/calendar/events/delete 缺 confirm -> 期望 400
+{   "error": "缺少二次确认：confirm 必须为 yes" } [HTTP:400]
+
+### 7) POST delete scope 越权 -> 期望 400
+{   "error": "越权：事件 1 属于 scope=software，不能用 scope=marketing 删除" } [HTTP:400]
+
+### 8) POST create start=2026-13-99 非法 -> 期望 400
+{   "error": "start 非法：月份 13 超出 1-12" } [HTTP:400]
+
+### 9) POST create 缺 by -> 期望 400
+{   "error": "缺少操作者身份 by" } [HTTP:400]
+
+### 10) event 1 (software) 仍在? 拒绝零副作用确认
+{   "scope": "software",   "events": [     {       "id": 1,       "scope": "software",       "title": "评审会",       "start": "2026-08-20T10:00",       "end": null,       "allDay": false,       "meta": {},       "createdAt": "2026-09-05T05:18:11.771Z",       "updatedAt": "2026-09-05T05:18:11.771Z"     }   ] }
+
+### 11) POST delete id=2 scope=marketing confirm=yes -> 期望 200
+{   "ok": true,   "task": {     "deleted": true,     "event": 2,     "scope": "marketing",     "title": "营销复盘"   } } [HTTP:200]
+
+### 12) GET marketing window -> id=2 已删除不在列表
+{   "scope": "marketing",   "events": [] }
+
+### 13) GET /api/activity?scope=marketing -> calendar:create + calendar:delete 审计可查
+[   {     "seq": 3,     "ts": "2026-09-05T05:18:26.455Z",     "member": "general",     "scope": "marketing",     "action": "calendar:delete",     "taskId": null,     "detail": {       "event": 2,       "title": "营销复盘"     }   },   {     "seq": 2,     "ts": "2026-09-05T05:18:11.823Z",     "member": "general",     "scope": "marketing",     "action": "calendar:create",     "taskId": null,     "detail": {       "event": 2,       "title": "营销复盘",       "start": "2026-08-25T14:00",       "end": null,       "allDay": false     }   } ]

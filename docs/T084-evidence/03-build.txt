@@ -1,0 +1,29 @@
+﻿node.exe : $ tsc --noEmit && vite build
+At C:\Users\11150\AppData\Local\corepack-bin\pnpm.ps1:24 char:5
++     & "node$exe"  "D:/software/nodejs/node_modules/corepack/dist/pnpm ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ($ tsc --noEmit && vite build:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+failed to load config from D:\project\DSH\legion\.legion-worktrees\T-084\workbench\vite.config.ts
+error during build:
+Error: spawn EPERM
+    at ChildProcess.spawn (node:internal/child_process:458:11)
+    at Object.spawn (node:child_process:813:9)
+    at ensureServiceIsRunning (D:\project\DSH\legion\workbench\node_modules\.pnpm\esbuild@0.28.2\node_modules\esbuild\l
+ib\main.js:2272:29)
+    at build (D:\project\DSH\legion\workbench\node_modules\.pnpm\esbuild@0.28.2\node_modules\esbuild\lib\main.js:2170:2
+6)
+    at bundleConfigFile (file:///D:/project/DSH/legion/workbench/node_modules/.pnpm/vite@7.3.6/node_modules/vite/dist/n
+ode/chunks/config.js:35895:23)
+    at bundleAndLoadConfigFile (file:///D:/project/DSH/legion/workbench/node_modules/.pnpm/vite@7.3.6/node_modules/vite
+/dist/node/chunks/config.js:35882:24)
+    at loadConfigFromFile (file:///D:/project/DSH/legion/workbench/node_modules/.pnpm/vite@7.3.6/node_modules/vite/dist
+/node/chunks/config.js:35851:179)
+    at resolveConfig (file:///D:/project/DSH/legion/workbench/node_modules/.pnpm/vite@7.3.6/node_modules/vite/dist/node
+/chunks/config.js:35500:28)
+    at resolveConfigToBuild (file:///D:/project/DSH/legion/workbench/node_modules/.pnpm/vite@7.3.6/node_modules/vite/di
+st/node/chunks/config.js:33523:9)
+    at createBuilder (file:///D:/project/DSH/legion/workbench/node_modules/.pnpm/vite@7.3.6/node_modules/vite/dist/node
+/chunks/config.js:33955:25)
+[ELIFECYCLE] Command failed with exit code 1.

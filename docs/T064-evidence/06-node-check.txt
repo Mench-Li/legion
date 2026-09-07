@@ -1,0 +1,5 @@
+﻿node --version -> v24.19.0
+node --check team-hub/server.mjs         -> exit 0
+node --check team-hub/chat.test.mjs     -> exit 0
+node --check team-hub/skills.test.mjs   -> exit 0
+node --check team-hub/chat-l1-smoke.mjs -> exit 0

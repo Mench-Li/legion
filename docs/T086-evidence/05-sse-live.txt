@@ -1,0 +1,12 @@
+retry: 2000
+
+data: {"seq":1,"ts":"2026-09-05T05:18:11.772Z","member":"general","scope":"software","action":"calendar:create","taskId":null,"detail":{"event":1,"title":"评审会","start":"2026-08-20T10:00","end":null,"allDay":false}}
+
+data: {"seq":2,"ts":"2026-09-05T05:18:11.823Z","member":"general","scope":"marketing","action":"calendar:create","taskId":null,"detail":{"event":2,"title":"营销复盘","start":"2026-08-25T14:00","end":null,"allDay":false}}
+
+data: {"seq":3,"ts":"2026-09-05T05:18:26.455Z","member":"general","scope":"marketing","action":"calendar:delete","taskId":null,"detail":{"event":2,"title":"营销复盘"}}
+
+data: {"seq":4,"ts":"2026-09-05T05:18:36.076Z","member":"general","scope":"software","action":"calendar:create","taskId":null,"detail":{"event":3,"title":"SSE实时事件","start":"2026-08-22T09:00","end":null,"allDay":false}}
+
+data: {"seq":5,"ts":"2026-09-05T05:18:36.221Z","member":"general","scope":"software","action":"calendar:delete","taskId":null,"detail":{"event":1,"title":"评审会"}}
+

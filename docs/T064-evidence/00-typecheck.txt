@@ -1,0 +1,1 @@
+﻿tsc -p team-hub/tsconfig.json --noEmit  => exit 0 (无输出=类型检查通过)

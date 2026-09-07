@@ -1,0 +1,51 @@
+S7 静态评审证据（tester T-090，HEAD 5813ae5）
+============================================================
+
+[A] 渲染安全（TC-S7-09 / I-5）：dangerouslySetInnerHTML 检查
+  grep -n 'dangerouslySetInnerHTML' workbench/src/components/NotifyView.tsx  => 1 命中，仅 72 行注释自述
+     （「时间/scope/action/成员全部 React 文本节点，无 dangerouslySetInnerHTML」）
+  grep -n 'dangerouslySetInnerHTML' workbench/src/api.ts => 0 命中
+  NotifyView 行渲染（304-316）：actionLabel/scope/member/ts/action 均为 JSX 文本节点；无 innerHTML 直插
+  SSR 实测（s7-ssr-run.txt）：恶意 scope 字符串 <b>…</b><img src=x onerror=…> 被转义为 &lt;b&gt;/&lt;img 文本，
+     产物无真实 <img 元素、无属性注入（SSR-④ PASS）；产物无 dangerouslySetInnerHTML 特征（SSR-⑤ PASS）
+
+[B] 数据同源（TC-S7-02/03/07/09 / I-8）：无第三数据源、hub 事件连接唯一
+  NotifyView imports（NotifyView.tsx:1-5）：react + ../api(countNotifyUnread/fetchHubActivity/hubBase/isNotifyAction/
+     notifyReadSeq/setNotifyReadSeq/subscribeHubAudit) + ./Toast + ./TaskDetailModal —— 无其它数据/网络依赖
+  面板列表 = fetchHubActivity（api.ts:275 → GET {hubBase}/api/activity?scope=&limit=，只读 GET）；
+     实时增量 = subscribeHubAudit（api.ts:489-501，单一 {hubBase}/api/events）；15s 轮询兜底复用同一 fetchHubActivity
+  'new EventSource' 全仓（workbench/src）仅 3 处且全在 api.ts：:107 subscribeBoard（apiBase/board/events）、
+     :120 subscribeActivity（apiBase/activity/events，v1 数据源 SSE）、:492 subscribeHubAudit（hubBase/api/events）
+     —— hub 侧 EventSource 唯一（:492）；NotifyView 无自身 EventSource 构造（NotifView.tsx:146 复用 :492）
+  subscribeHubAudit 调用方仅 ChatView(:160) 与 NotifyView(:146)；App.tsx 中心区互斥渲染（active==='chat'|'notify'），
+     面板切换即卸载 → 运行期 hub EventSource ≤1（≤ 改造前，无第二连接，TC-S7-07 静态判据）
+  白名单（api.ts:593-605 NOTIFY_ACTIONS + isNotifyAction）：chat:* 等一律排除（TC-S7-03）——逻辑探针 14/14 实测
+
+[C] 接线（TC-S7-01/06/07）：侧栏/徽标/面板/导航
+  Sidebar.tsx:22 MODULES { id:'notify', name:'通知中心', icon:'🔔' }；:63-66 badgeFor('notify') = notifyUnread>0
+  Sidebar.tsx:72-73 clickModule 面板分支含 notify → onNavigate('notify')（同 chat/files/browser/calendar 先例）
+  App.tsx:217-239 未读徽标 effect：hubMode&&scope 时 fetchHubActivity({scope,limit:200})→countNotifyUnread，
+     active==='notify' 时暂停自身刷新（面板上报 onUnreadChange=setNotifyUnread，App.tsx:396）——同一计数口径
+  App.tsx:392-398 active==='notify' → <NotifyView scope hubMode onUnreadChange onGoHome={() => setActive('home')}/>
+  NotifyView.tsx:146-175 挂载订阅 subscribeHubAudit + 15s 轮询 + 卸载 off()（hub 恢复后自动拉回）
+  NotifyView.tsx:173-188 点击行：任务类（taskId）→ setDetailTaskId → TaskDetailModal（:323 复用既有组件，同 ChatView/
+     看板详情先例）；goal:*（无 taskId）→ onGoHome()；space/model/skill 类 → toast 去向说明；未知 action 不崩溃
+
+[D] 已读语义（TC-S7-04/05 / R-15）：localStorage 游标 per scope，已读零服务端写
+  api.ts:610 notifyReadKey(scope) = 'legion.notify.read.' + scope；:616-619 notifyReadSeq（损坏值归 0）；
+     :623-626 setNotifyReadSeq 单调推进；:629-636 countNotifyUnread = 白名单 && seq>游标
+  全仓 'legion.notify.read' 键仅 api.ts:610 一处定义；无任何 mark-read 写接口/服务端端点新增（S7 未动 team-hub）
+  逻辑探针 14/14：per-scope 键隔离/单调/损坏兜底/全读后 badge 0/全程 0 fetch（s7-logic-run.txt）
+  L1 探针：无写窗口前后 /api/activity 全量 seq 集合零变化（TC-S7-05 反向，s7-L1-notify-run.txt PASS）
+
+[E] 切片改动域与回归范围
+  git show dd33c26 --stat：promote T-089 = 仅 4 文件（App.tsx/api.ts/NotifyView.tsx/Sidebar.tsx）
+  team-hub/server.mjs 与既有面板源零改动 → 通知中心为纯前端派生（J8-A），服务端无新端点/新事件类型
+  回归：L0 六套件 158/158（files-api 40、web 24、chat 13、skills 12、calendar 13、contracts 56）+ tsc 0 诊断
+
+[F] 错误路径（TC-S7-08 / R-B2 错误路径）
+  NotifyView.tsx:118-121 load() try/catch → setLoadError + toast.error；:244-258 错误提示行带「↻ 重试」；
+     面板不白屏（列表为空且有 loadError 时显示错误行）；15s 轮询/重试在 hub 恢复后自动续拉
+  SSR-①/② 引导文案渲染实测（无中枢 / 未选空间）不抛错（s7-ssr-run.txt）
+
+锚点行号均以 HEAD 5813ae5 实测（tools.read/grep），见上各条。

@@ -1,0 +1,21 @@
+T-084 切片 S4 —— 04 错误码三方对齐机器核对（TC-S4-03 / R-13 / G-11；基线缺陷 A6 回归）
+=================================================================================================
+
+后端唯一权威枚举（serve.mjs WEB_ERR 常量表 + 动态 http_<n>）：
+  invalid_url, protocol_blocked, ssrf_blocked, dns_error, too_many_redirects, timeout, too_large, fetch_error, unsupported, empty_content, web_error, ok, general
+  （http_<status> 为动态码格式 /^http_\d{3}$/，不入表；ok 为审计成功标记，不出现在 fetch 响应体——响应 ok:true 时不带 code）
+
+前端 errorText 键集合（BrowserView.tsx:37-52）：ssrf_blocked, protocol_blocked, timeout, too_large, too_many_redirects, web_error, dns_error, invalid_url, fetch_error, unsupported, empty_content + http_* 前缀分支
+前端 isErrorResult 判真集合（:56-63）：11 键子集 + http_* + (!ok && !code)
+  isErrorResult 键：ssrf_blocked, protocol_blocked, timeout, too_large, too_many_redirects, web_error, dns_error, invalid_url, fetch_error + http_* + (!ok && !code)
+
+漏码核对（枚举非 ok 码 × errorText / isErrorResult）：
+  errorText 漏码：无（枚举全集覆盖）
+  isErrorResult 漏码：无（unsupported/empty_content 为 ok:true 业务提示，按判据不判错误）
+
+后端实际发射核对（本切片 L1 真进程 15 例 smoke，见 05-l1-smoke.txt / l1-audit-*.jsonl）：
+  发射码集（审计 15 行合并）：ssrf_blocked, protocol_blocked, invalid_url, dns_error, ok, http_404, http_500, unsupported, too_large, timeout, fetch_error, empty_content
+  发射 ⊆ 枚举 ∪ http_<n>：成立（零漂移）
+
+基线缺陷 A6 回归（main 旧 BrowserPanel 漏 too_many_redirects/web_error → 错误落入正文分支）：
+  isErrorResult 显式含 too_many_redirects + web_error（:60-61）→ 已修；对应错误走 ⚠ 错误视图 + 重试（:173-177）。

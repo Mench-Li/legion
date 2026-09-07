@@ -1,0 +1,28 @@
+# T-088 S6 测试 · L2 浏览器交互验收「环境受限」记录（R-18，不冒充通过）
+
+## 现象
+本沙箱（workspace-write、禁网、无审批通道）拒绝 Chrome/Edge 启动：
+  chrome.exe --headless=new --no-sandbox ... --remote-debugging-port=9231
+  -> mojo\public\cpp\platform\platform_channel.cc:108  Check failed: . : 拒绝访问。(0x5)
+    （crashpad 亦 OpenProcess 拒绝访问后 self-terminating）
+根因：Chromium Windows 的 mojo IPC 需创建命名管道（CreateNamedPipe），与沙箱「禁止打开命名管道 /
+Node 子进程 pipe-stdio spawn -> EPERM」为同一文件沙箱边界（R-18；工具文档明示）。试过 --single-process、
+--disable-crash-reporter、--enable-features=PlatformChannelUsesWindowsSocket 等均无法绕过；
+机器上另无 Firefox/Brave。=> 真实浏览器 GUI 走查在本会话不可行。
+
+## 复现步骤（他方环境可复验）
+1) 本 worktree 已产出 L2 可用构建产物：workbench/dist（原生 esbuild.exe 打包 + index.html），
+   及 app 服务脚本 env/start-hub.mjs（隔离 hub :8791）。
+2) 在非受限环境：node env/start-hub.mjs（先起 hub）-> node workbench/scripts/serve.mjs --port 5273
+   （DSH_HUB_UPSTREAM=http://127.0.0.1:8791）-> node docs/T088-evidence/env/browser-s6.mjs（CDP 驱动，
+   已按 TC-S6-01..09 写好断言；GATE:HUB_DOWN_REQ / GATE:HUB_UP_REQ 需外部 kill/重启 hub 配合）。
+   预期全 PASS（该驱动与 T-087 coder 轮 9/9 闭环同源同断言集）。
+
+## 本片 L2 GUI 结论的锚定方式（不虚报）
+- 交互主路径的**上轮真实浏览器锚**：T-087（本切片实现轮，同实现同 HEAD）docs/T087-evidence/browser-test.txt
+  9/9 PASS（月网格/今天高亮、新建入格 toast、跨月、刷新持久=GET、删除二次确认、空间隔离、hub 断连 toast+恢复重试）。
+- 本轮可执行重锚（非 GUI 浏览器）：纯函数单测 14/14（网格/日期/今天高亮计算，见 grid-unit.txt）+ L1 真进程 22/22
+  （同一 /api/calendar/events 契约，前端 fetch 的目标）+ tsc 0 诊断 + esbuild 生产 bundle 含 CalendarView
+  全部标记字符串 + 渲染安全 grep 0 直插。
+- 差异项：TC-S6-01~08 的“点击/弹层/toast 视觉断言”本轮因沙箱无法起浏览器而未在浏览器内复跑 —— 如实标注，
+  归属=环境受限（R-18），非产品缺陷；复验步骤见上。

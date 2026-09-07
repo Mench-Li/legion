@@ -1,0 +1,185 @@
+﻿[ci] #0 依赖接线（junction）
+[ci]   依赖接线完成
+[ci] ▸ 构建生成（tsc 编译 src→lib）
+[ci]   PASS  (构建生成（tsc 编译 src→lib）)  exit=0
+[ci] ▸ 类型检查（tsc --noEmit）
+[ci]   PASS  (类型检查（tsc --noEmit）)  exit=0
+[ci] ▸ 语法门禁（node --check server.mjs）
+[ci]   PASS  (语法门禁（node --check server.mjs）)  exit=0
+[ci] ▸ S1 对话 DAO/路由契约（chat.test.mjs）
+▶ TC-S1-01/02/04/05 会话创建与 scope 列表
+  ✔ TC-S1-01 创建会话 → 含 id/createdAt/updatedAt/last_message_at=null；列表按 updatedAt desc 排首 (13.2753ms)
+  ✔ TC-S1-02 scope 过滤：software 列表不含 default/marketing 会话 (3.5044ms)
+  ✔ TC-S1-04 kind 非法 → 拒绝并指明合法枚举；TC-S1-05 缺 by 被拒且无 chat 审计留痕 (1.5444ms)
+✔ TC-S1-01/02/04/05 会话创建与 scope 列表 (20.5107ms)
+▶ TC-S1-03/06/07 scope 隔离 + author 绑定
+  ✔ TC-S1-03 scope 隔离反向：default 列表查不到 software 会话；跨 scope 写不串（消息 scope = 会话 scope） (9.4605ms)
+  ✔ TC-S1-06 发消息 → author=by、createdAt 有值、会话 last_message_at 更新 (3.9996ms)
+  ✔ TC-S1-07 author 冒名被服务端绑定：传入 author:other 恒等于 by (3.4347ms)
+✔ TC-S1-03/06/07 scope 隔离 + author 绑定 (17.5443ms)
+▶ TC-S1-08/09 分页与边界
+  ✔ TC-S1-08 25 条消息 limit=10 → 三页 10/10/5，页内升序、拼接无重无漏 (76.4172ms)
+  ✔ TC-S1-09 分页边界：空会话 []、超界游标 []、缺省 limit=50、非法 limit 拒绝 (14.7833ms)
+  ✔ TC-S1-10 未知会话发消息/列消息 → 拒绝且不落任何消息行 (1.7645ms)
+  ✔ TC-S1-11 空正文被拒 (2.9681ms)
+  ✔ TC-S1-12 正文长度上限 MAX_CHAT_BODY：恰好通过、+1 拒绝且不落库 (7.3244ms)
+✔ TC-S1-08/09 分页与边界 (104.9158ms)
+▶ TC-S1-13 审计留痕（chat 写统一 audit：by + scope + SSE 广播前置）
+  ✔ create + message 各产生 chat:* 审计行（member/scope/detail 形状 + seq 升序） (5.467ms)
+✔ TC-S1-13 审计留痕（chat 写统一 audit：by + scope + SSE 广播前置） (5.809ms)
+▶ TC-S1-16 老库迁移：无 chat 表旧库自动建表 + 存量数据无损
+  ✔ 旧 schema（tasks/skills 有数据、无 conversations/messages）import 后自动建两表且 chat 可用 (202.9053ms)
+✔ TC-S1-16 老库迁移：无 chat 表旧库自动建表 + 存量数据无损 (203.1723ms)
+ℹ tests 13
+ℹ suites 5
+ℹ pass 13
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 498.6392
+[ci]   PASS  (S1 对话 DAO/路由契约（chat.test.mjs）)  exit=0
+[ci] ▸ 同模块技能回归（skills.test.mjs）
+▶ registerSkill — 提交进入 pending，幂等 + 版本
+  ✔ 新技能提交 → status=pending, version=1 (11.3026ms)
+  ✔ 同内容重复提交 → 幂等，version/status 不变 (0.7334ms)
+  ✔ 内容变化 → version+1 且回 pending（需复审） (1.3847ms)
+  ✔ 非法 id 拒绝 (0.8501ms)
+✔ registerSkill — 提交进入 pending，幂等 + 版本 (18.5231ms)
+▶ listSkills — 默认只露 published
+  ✔ 未发布时默认列表为空 (1.4393ms)
+  ✔ includePending 能看到待审 (0.4291ms)
+✔ listSkills — 默认只露 published (2.1829ms)
+▶ reviewSkill — publish/reject 门禁
+  ✔ publish 后默认列表可见 (7.5076ms)
+  ✔ 已发布后再审 → 拒绝（只有 pending 可审） (1.2939ms)
+  ✔ reject 后从默认列表消失 (3.2521ms)
+  ✔ 非法 action 拒绝 (0.4227ms)
+✔ reviewSkill — publish/reject 门禁 (13.2207ms)
+▶ grantSkill — 授权过滤不受 review 影响
+  ✔ grant 到角色 + scope 通配后按 scope/member 过滤 (4.2856ms)
+✔ grantSkill — 授权过滤不受 review 影响 (8.5175ms)
+▶ 旧库迁移 — 缺列补齐且存量行默认 pending
+  ✔ 旧 schema 的 skills 表加载后带 status/contentHash/reviewedAt (69.1144ms)
+✔ 旧库迁移 — 缺列补齐且存量行默认 pending (69.498ms)
+ℹ tests 12
+ℹ suites 5
+ℹ pass 12
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 317.5121
+[ci]   PASS  (同模块技能回归（skills.test.mjs）)  exit=0
+[ci] ▸ L0 契约基线（tests/contract）
+▶ validateElement — schema 契约 (S2, FR-2, ADR-0003)
+  ✔ TC-S2-01 五类元素合法样例全部通过 (1.8967ms)
+  ✔ TC-S2-01 rect/ellipse 带合法 fill 通过 (0.2902ms)
+  ✔ TC-S2-01 line 无 arrow（缺省）通过 (0.251ms)
+  ✔ TC-S2-02 边界：w/h = 0 合法（退化元素） (0.2496ms)
+  ✔ TC-S2-02 边界：负坐标合法（无限画布） (0.8386ms)
+  ✔ TC-S2-02 边界：text 空字符串合法 (0.4209ms)
+  ✔ TC-S2-02 边界：freehand 单点合法（一个点=点状笔迹） (0.3113ms)
+  ✔ TC-S2-02 边界：fill 空串（无填充）合法 (0.5014ms)
+  ✔ TC-S2-03 异常：非法 type 拒绝 (0.7292ms)
+  ✔ TC-S2-04 异常：缺失 id / geom / stroke / strokeWidth 拒绝 (0.6983ms)
+  ✔ TC-S2-04 异常：非对象元素拒绝 (0.3484ms)
+  ✔ TC-S2-05 异常：字段类型错误拒绝（NaN/Infinity/字符串坐标/负线宽） (0.3556ms)
+  ✔ TC-S2-05 异常：stroke 非十六进制拒绝 (0.2949ms)
+  ✔ TC-S2-05 异常：freehand points 非法项拒绝 (0.1857ms)
+  ✔ TC-S2-05 异常：line arrow 非布尔拒绝 (0.1311ms)
+  ✔ TC-S2-06 边界：未知字段被忽略（lenient），不使校验失败 (0.2567ms)
+  ✔ HEX_COLOR_RE 仅接受 #rgb/#rrggbb (0.1708ms)
+✔ validateElement — schema 契约 (S2, FR-2, ADR-0003) (11.2887ms)
+▶ stateHash — 确定性哈希 (S2, 收敛断言口径)
+  ✔ TC-S2-08 相同元素集、不同插入顺序 → 相同哈希 (1.317ms)
+  ✔ TC-S2-08 Map/数组/对象 三种输入同内容 → 相同哈希 (0.6807ms)
+  ✔ TC-S2-09 任一字段差异 → 哈希不同 (0.8035ms)
+  ✔ TC-S2-09 键顺序无关：geom 键乱序 → 相同哈希 (0.2799ms)
+  ✔ TC-S2-09 freehand points 顺序有意义 → 顺序不同哈希不同 (0.2238ms)
+  ✔ TC-S2-09 空集合哈希稳定（基线） (0.1973ms)
+✔ stateHash — 确定性哈希 (S2, 收敛断言口径) (4.0823ms)
+▶ hitTest — 几何命中 (S6, FR-2/FR-3)
+  ✔ TC-S6-01 rect：内部命中 / 外部未命中 / 边界含 tolerance (0.3135ms)
+  ✔ TC-S6-01 ellipse：中心命中 / bbox 角点（椭圆外）未命中 (0.1785ms)
+  ✔ TC-S6-01 ellipse：退化（w=0 或 h=0）永不命中 (0.1268ms)
+  ✔ TC-S6-03 line：线上命中 / 容差内命中 / 远处未命中 / 端点外未命中 (0.2193ms)
+  ✔ TC-S6-04 freehand：折线段附近命中 / 单点退化 (0.2001ms)
+  ✔ TC-S6-05 text：bbox 内命中（显式 measure） (0.2443ms)
+  ✔ TC-S6-06 边界：空元素集 → null；未命中 → null (0.1794ms)
+  ✔ TC-S6-07 边界：重叠元素取最上层（数组末尾） (0.0962ms)
+  ✔ TC-S6-08 边界：线宽容差恰在阈值上命中、阈值外未命中 (0.0954ms)
+  ✔ distPointSegment：线段退化（端点重合）退化为点距离 (0.0734ms)
+✔ hitTest — 几何命中 (S6, FR-2/FR-3) (2.1184ms)
+▶ viewport — 世界/屏幕坐标变换 (S8, FR-4)
+  ✔ TC-S8-01 world→screen→world 往返一致 (0.3828ms)
+  ✔ TC-S8-01 平移与缩放正确作用 (1.1435ms)
+  ✔ TC-S8-03 边界：极端缩放（0.01x / 100x）往返一致 (0.2351ms)
+  ✔ TC-S8-04 异常：非法 viewport（scale=0/负数/NaN、tx/ty 非数）抛错 (0.7359ms)
+  ✔ validateViewport 合法/非法判定 (0.0992ms)
+✔ viewport — 世界/屏幕坐标变换 (S8, FR-4) (2.8403ms)
+▶ createThrottle — 20Hz 节流 (S4, §6.2 光标节流)
+  ✔ TC-S4-03 首帧即时放行一次 (0.1957ms)
+  ✔ TC-S4-03 之后发送间隔 ≥ 50ms（20Hz） (1.3813ms)
+  ✔ TC-S4-03 首帧除外的 1s 窗口内发送 ≤20 条 (1.201ms)
+  ✔ 异常：rateHz ≤ 0 抛错 (0.6171ms)
+✔ createThrottle — 20Hz 节流 (S4, §6.2 光标节流) (4.2247ms)
+▶ createHistory — redo 并发语义 (S9, ADR-0006, §5.3)
+  ✔ TC-S9-05 默认 clear-on-remote：撤销后远端 op 落 → redo 清空 (0.6531ms)
+  ✔ TC-S9-06 keep-replay：撤销后远端 op 不干扰，redo 重放本人 op (0.1802ms)
+  ✔ TC-S9-04 边界：undo 到底后继续 undo 返回 null 且不破坏 redo (0.2256ms)
+  ✔ undo/redo 往返一致 (0.2198ms)
+  ✔ 未知 variant 抛错 (0.1545ms)
+✔ createHistory — redo 并发语义 (S9, ADR-0006, §5.3) (2.0315ms)
+▶ escapeHtml — XSS 门禁 (S5, FR-11)
+  ✔ TC-S5-02 恶意 HTML/脚本被转义为纯文本 (0.6616ms)
+  ✔ TC-S5-02 脚本标签被转义 (0.1468ms)
+  ✔ TC-S5-02 五种敏感字符全部转义 (0.1065ms)
+  ✔ TC-S5-02 正常文本不被破坏 (0.537ms)
+  ✔ TC-S5-02 非字符串输入被安全字符串化 (0.1484ms)
+✔ escapeHtml — XSS 门禁 (S5, FR-11) (4.1754ms)
+▶ createPresence — 在线列表与 TTL (S4/S11, §6.2 TTL)
+  ✔ TC-S4-04 正常断开立即移除（与 TTL 无关） (0.3656ms)
+  ✔ TC-S4-05 非正常断开：TTL 边界内保留、超过 TTL 移除 (0.2094ms)
+  ✔ TC-S4-05 心跳刷新后 TTL 重新起算 (0.1126ms)
+  ✔ TC-S4-02 多端在线列表聚合计数正确 (0.0971ms)
+✔ createPresence — 在线列表与 TTL (S4/S11, §6.2 TTL) (1.031ms)
+ℹ tests 56
+ℹ suites 8
+ℹ pass 56
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 53.95
+[ci]   PASS  (L0 契约基线（tests/contract）)  exit=0
+[ci] ▸ L1 真实进程冒烟（chat-l1-smoke.mjs）
+PASS | TC-S1-01 POST 会话 → 200 ok:true（id/createdAt/updatedAt/last_message_at=null）
+PASS | TC-S1-01 列表含新会话且按 updatedAt desc 排首
+PASS | TC-S1-02 software 列表不含 default 会话（scope 正向）
+PASS | TC-S1-03 default 列表查不到 software 会话（scope 反向）
+PASS | TC-S1-04 kind 非法 → 400 且指明合法枚举
+PASS | TC-S1-05 ① 缺 by → 400「缺少操作者身份 by」
+PASS | TC-S1-05 ② body 非法 JSON → 400（非 500）
+PASS | TC-S1-05 ③ 失败写无 chat 审计留痕
+PASS | TC-S1-06 发消息 author=by、createdAt 有值、会话 last_message_at 更新
+PASS | TC-S1-07 author 冒名被服务端绑定（author=by≠other）
+PASS | TC-S1-08 分页 10/10/5：无重无漏、页内升序、页间游标连续
+PASS | TC-S1-09 空会话 → []；limit=0/abc → 400
+PASS | TC-S1-10 未知会话发消息 → 400「会话不存在」
+PASS | TC-S1-11 空正文 → 400「不能为空」
+PASS | TC-S1-12 正文 8000 恰好通过 / 8001 → 400 拒绝
+PASS | TC-S1-13 /api/activity 含 chat:create/chat:message（member/scope/detail 形状）
+PASS | TC-S1-14 订阅 /api/events 期间写入 ≤5s 收到 live chat:message（member=coder、scope、detail.msg） | {"seq":34,"ts":"2026-09-04T04:08:44.597Z","member":"coder","scope":"software","action":"chat:message","taskId":null,"detail":{"conv":1,"msg":29,"kind":"text"}}
+PASS | TC-S1-15 断开不崩服务、其余订阅端仍收到事件
+--- 服务 A（无 token）18 项 REST/审计/SSE 断言执行完 ---
+PASS | TC-S1-17 ① 无 token 写 → 401「Bearer token 无效」
+PASS | TC-S1-17 ② 错 token 写 → 401
+PASS | TC-S1-17 ③ 对 token 写 → 200
+PASS | TC-S1-17 ④ 无 token 读 → 200 放行（读与既有接口语义一致）
+--- 服务 B（token=tk）鉴权断言执行完 ---
+
+==== L1 冒烟汇总：22/22 断言通过；进程级异常 0 ====
+[ci]   PASS  (L1 真实进程冒烟（chat-l1-smoke.mjs）)  exit=0
+
+[ci] ✅ CI 全绿：team-hub 构建 + S1 对话中心测试 + 回归基线 全部通过，可发布。

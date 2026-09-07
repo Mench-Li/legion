@@ -1,0 +1,436 @@
+**********************
+Windows PowerShell transcript start
+Start time: 20260905163205
+Username: AMENCH\11150
+RunAs User: AMENCH\11150
+Configuration Name: 
+Machine: AMENCH (Microsoft Windows NT 10.0.22631.0)
+Host Application: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoLogo -NoProfile -NonInteractive -Command [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [System.Text.UTF8Encoding]::new($false); 
+$ErrorActionPreference='Continue'
+$ev = 'D:\project\DSH\legion\.legion-worktrees\T-090\docs\T090-evidence'
+New-Item -ItemType Directory -Force -Path $ev | Out-Null
+function Run($name, $cmd) {
+  Write-Output "===== $name ====="
+  Write-Output ("$ " + $cmd)
+  try {
+    $out = & cmd /c $cmd 2>&1 | Out-String
+    Write-Output $out
+    Write-Output ("[exit=" + $LASTEXITCODE + "]")
+  } catch { Write-Output ("EXC: " + $_.Exception.Message) }
+}
+$log = Join-Path $ev 's7-L0-rerun.txt'
+Start-Transcript -Path $log -Force | Out-Null
+node --version
+Run "files-api" "node workbench/scripts/files-api.test.mjs"
+Run "web" "node workbench/scripts/web.test.mjs"
+Run "chat" "node team-hub/chat.test.mjs"
+Run "skills" "node team-hub/skills.test.mjs"
+Run "calendar" "node team-hub/calendar.test.mjs"
+Run "contracts" "node tests/contract/contracts.test.mjs"
+Run "tsc-workbench" "node node_modules/typescript/lib/tsc.js -p workbench/tsconfig.json --noEmit"
+Stop-Transcript | Out-Null
+Write-Output "DONE log=$log"
+
+Process ID: 17956
+PSVersion: 5.1.22621.6133
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.22621.6133
+BuildVersion: 10.0.22621.6133
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+
+===== files-api =====
+$ node workbench/scripts/files-api.test.mjs
+▶ TC-S3-01/02/03 list 形状 + 根语义 + scope 未绑定
+  ✔ TC-S3-01 目录在前、按名排序、形状完整；隐藏目录与 .git 不出现；含 .git 的目录带 isRepo (20.3264ms)
+  ✔ TC-S3-02 空目录 → entries=[]，不存在目录 → 400 语义错误 (8.0849ms)
+  ✔ TC-S3-03 未绑定/不存在的 scope → 引导错误，绝不落到任意目录 (0.7188ms)
+✔ TC-S3-01/02/03 list 形状 + 根语义 + scope 未绑定 (43.2161ms)
+▶ TC-S3-05/06/07 read 预览（文本/截断/二进制）
+  ✔ TC-S3-05 文本预览：中文原样、行数正确、不截断 (3.9233ms)
+  ✔ TC-S3-06 超过 MAX_READ → truncated=true，content 恰为上限、totalBytes 为全量 (2.7501ms)
+  ✔ TC-S3-07 二进制/目录/缺失 → 不可预览或 400 (5.8566ms)
+  ✔ TC-S3-08 download 字节一致（含中文名文件） (6.0379ms)
+✔ TC-S3-05/06/07 read 预览（文本/截断/二进制） (19.447ms)
+▶ TC-S3-08b 下载路由层 P0-2：openDownloadStream 流式（不整读内存）
+  ✔ openDownloadStream 返回 length+可读流且字节一致；目录/.git/越界/symlink 同强度拒绝 (10.5623ms)
+✔ TC-S3-08b 下载路由层 P0-2：openDownloadStream 流式（不整读内存） (11.009ms)
+▶ TC-S3-09/10 + TC-S4-14 路径逃逸矩阵（全部拒绝）
+  ✔ 词法/绝对/NUL/编码等价样本在 list/read 全被拒 (2.2801ms)
+  ✔ TC-S3-10 符号链接：link-in（根内）放行；link-out（根外）越界拦截 (10.4038ms)
+  ✔ TC-S4-14 写操作逃逸样本（upload/mkdir/rename/delete）全被拒 (13.0049ms)
+  ✔ TC-S3-12 .git 内部拒绝访问（含写） (1.6963ms)
+✔ TC-S3-09/10 + TC-S4-14 路径逃逸矩阵（全部拒绝） (28.1036ms)
+▶ TC-S4-01/02 upload 成功与上限
+  ✔ TC-S4-01 上传新文件（中文名 + 嵌套目录）成功并可按字节读回 (17.4572ms)
+  ✔ TC-S4-02 MAX_UPLOAD 恰好可传；+1 拒绝且目标不落盘 (119.7926ms)
+✔ TC-S4-01/02 upload 成功与上限 (140.8613ms)
+▶ TC-S4-03/04 overwrite 两态
+  ✔ 存在文件无 overwrite → 拒绝；overwrite=1 → 覆盖成功且字节更新 (18.2613ms)
+✔ TC-S4-03/04 overwrite 两态 (18.5866ms)
+▶ TC-S4-05..08 mkdir / rename
+  ✔ TC-S4-05/06 mkdir 多层成功；已存在 → 拒绝 (14.1439ms)
+  ✔ TC-S4-07/08 rename 成功迁移；目标已存在/源缺失 → 拒绝 (19.6093ms)
+✔ TC-S4-05..08 mkdir / rename (34.1911ms)
+▶ TC-S4-09..12 delete confirm 语义
+  ✔ 缺 confirm / confirm 非 yes → 拒绝；confirm=yes 删除文件 (6.1471ms)
+  ✔ TC-S4-09/10/11 非空目录拒绝；空目录 confirm=yes 删除 (5.9131ms)
+  ✔ TC-S4-12 删除不存在的路径 → 400 (3.1839ms)
+✔ TC-S4-09..12 delete confirm 语义 (15.7349ms)
+▶ TC-S4-13 token 矩阵（函数级 isLoopback 语义；HTTP 401/200 矩阵见文末路由层 describe）
+  ✔ 函数导出存在且 FILES_LIMITS 常量可被三值法引用 (0.223ms)
+  ✔ TC-S3-11 仅回环：假 socket 非回环 → isLoopback=false (0.1898ms)
+✔ TC-S4-13 token 矩阵（函数级 isLoopback 语义；HTTP 401/200 矩阵见文末路由层 describe） (0.6498ms)
+▶ S4 路由层（HTTP）· 写契约 e2e —— 未配置 token 时写放行（AC2 现状语义）
+  ✔ TC-S4-01：PUT 上传（中文名+空格）→ 200；list 立即可见；download 字节一致 (53.9577ms)
+  ✔ TC-S4-03/04：覆盖两态——无 overwrite → 409 且原内容未动；overwrite=1 → 200 新内容可读回 (78.4841ms)
+  ✔ TC-S4-05..08：mkdir 多层/重复/与文件冲突；rename 迁移/409/越界 (142.9469ms)
+  ✔ TC-S4-09..12：delete confirm 语义（缺/错 confirm 400、confirm=yes 删文件、非空目录拒删、空目录可删） (125.6775ms)
+✔ S4 路由层（HTTP）· 写契约 e2e —— 未配置 token 时写放行（AC2 现状语义） (402.2498ms)
+▶ S4 路由层（HTTP）· TC-S4-14 写路径逃逸矩阵 + TC-S4-02 预检 413（真实 64MB 上限）
+  ✔ upload/mkdir/rename/delete 注入逃逸样本 → 全部 400/403，根外目录零副作用 (344.5497ms)
+  ✔ TC-S4-02（预检）：声明 Content-Length 超真实 64MB 上限 → 413 快速拒绝、零落盘 (5.1554ms)
+✔ S4 路由层（HTTP）· TC-S4-14 写路径逃逸矩阵 + TC-S4-02 预检 413（真实 64MB 上限） (350.0575ms)
+▶ S4 路由层（HTTP）· TC-S4-13 鉴权矩阵（serve.mjs 配 token=tk）
+  ✔ 无 token 写 401 / 错 token 写 401 / 对 token 写 200；无 token 读仍放行 200 (45.1513ms)
+✔ S4 路由层（HTTP）· TC-S4-13 鉴权矩阵（serve.mjs 配 token=tk） (45.6461ms)
+▶ S4 路由层（HTTP）· P0-1 原子上传回归（cap 实例 16KB）——流式超限/中断不破坏原文件、零残留
+  ✔ TC-S4-02/15 + P0-1：overwrite=1 流式超限 → 413（或断连），原文件字节原样、无临时残留 (12.0723ms)
+  ✔ TC-S4-02：流式超限上传到新路径 → 目标不落盘、无残留 (6.1735ms)
+  ✔ P0-1：覆盖上传中途客户端中断 → 原文件保持、零残留、服务不崩 (18.6193ms)
+  ✔ 上限注入口不影响正常路径：上限内上传 200 且读回一致 (19.3045ms)
+✔ S4 路由层（HTTP）· P0-1 原子上传回归（cap 实例 16KB）——流式超限/中断不破坏原文件、零残留 (56.8273ms)
+▶ S4 路由层（HTTP）· TC-S4-16 并发上传同路径（无 overwrite）→ 至多一个 200
+  ✔ 两请求并发写同一新路径：一个 200 一个 409；最终字节 = 二写之一完整内容（无半写/混合） (25.3114ms)
+✔ S4 路由层（HTTP）· TC-S4-16 并发上传同路径（无 overwrite）→ 至多一个 200 (25.5146ms)
+▶ S1 R-A1 嵌套/内嵌 .git 防护（F1：任一层段 .git 即拒 + realpath 复检，读/写同强度）
+  ✔ 函数层：嵌套仓库 subrepo/.git/…（含深层/大小写变体/顶层对照）在 list/read/download 全部拒绝 (4.4921ms)
+  ✔ 函数层：写面同强度——upload/mkdir/rename(from/to)/delete 对嵌套 .git 全部拒绝且零副作用 (1.6645ms)
+  ✔ HTTP 路由层：subrepo/.git/config 的 list/read/download/upload/mkdir/rename/delete 七操作全部 403；顶层 .git 对照仍 403；内容零外泄 (191.4963ms)
+  ✔ 符号链接指向 .git 内部（link-to-git → root/.git）经 realpath 复检在 list/read/download/写面全部拒绝 (62.3041ms)
+✔ S1 R-A1 嵌套/内嵌 .git 防护（F1：任一层段 .git 即拒 + realpath 复检，读/写同强度） (260.4436ms)
+▶ S1 R-A2 畸形 percent-encoding 注入不崩进程（F2：400/404 + 进程存活 + ≥10 并发）
+  ✔ 单发畸形 % 注入矩阵（%zz/悬空 %/重复 %/超长 ≥1 万字符）→ 400/404；同进程随后正常请求 200（进程存活） (46.0156ms)
+  ✔ ≥10 并发畸形请求不崩：全部 400/404、随后健康 200 (17.9191ms)
+✔ S1 R-A2 畸形 percent-encoding 注入不崩进程（F2：400/404 + 进程存活 + ≥10 并发） (64.1693ms)
+ℹ tests 40
+ℹ suites 16
+ℹ pass 40
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1571.0375
+[exit=0]
+===== web =====
+$ node workbench/scripts/web.test.mjs
+▶ TC-S6-01/02 正文抽取（HTML + UTF-8 中文）
+  ✔ 提取 title/正文/链接，中文无乱码；返回结构无原始 HTML (24.2781ms)
+✔ TC-S6-01/02 正文抽取（HTML + UTF-8 中文） (32.4407ms)
+▶ TC-S6-03 SPA 空壳
+  ✔ JS 渲染页 → 可理解提示且不伪造正文 (5.221ms)
+✔ TC-S6-03 SPA 空壳 (5.5399ms)
+▶ TC-S6-04 协议白名单
+  ✔ file/ftp/data/javascript 等协议一律 protocol_blocked (1.8178ms)
+  ✔ 缺 url → invalid_url (0.3976ms)
+✔ TC-S6-04 协议白名单 (3.0174ms)
+▶ TC-S6-05 私网/回环矩阵（含混淆）→ ssrf_blocked，mock 零命中
+  ✔ 默认策略（无注入口）拒绝全部私网目标 (23.746ms)
+✔ TC-S6-05 私网/回环矩阵（含混淆）→ ssrf_blocked，mock 零命中 (24.1534ms)
+▶ TC-S6-06 重定向链（逐跳校验 + 上限 + 协议再检）
+  ✔ 302 链跟随到最终页并抽取；跳数超限 → too_many_redirects；重定向到 file:// → ssrf_blocked (139.6254ms)
+✔ TC-S6-06 重定向链（逐跳校验 + 上限 + 协议再检） (139.8987ms)
+▶ TC-S6-08/09 maxBytes / timeoutMs 三值注入
+  ✔ maxBytes=2048 ok；maxBytes=1024 → too_large (31.3959ms)
+  ✔ 慢响应 timeoutMs=200 → timeout；快响应同超时 → ok（超时后连接被取消） (300.8425ms)
+✔ TC-S6-08/09 maxBytes / timeoutMs 三值注入 (332.8653ms)
+▶ TC-S6-09b（P0-3 回归）重定向链总超时 = 共享 deadline，非每跳重置
+  ✔ 每跳均短于总超时但整链更长 → code=timeout，总耗时 ≈ timeoutMs（修复前 ok:true 于 ~2× 后返回） (1006.6197ms)
+  ✔ 同链在充足总超时下正常跟随到底并抽取终页（共享 deadline 不误伤合法链） (1416.2363ms)
+✔ TC-S6-09b（P0-3 回归）重定向链总超时 = 共享 deadline，非每跳重置 (2423.2033ms)
+▶ TC-S6-11/12 非文本降级与上游 4xx/5xx
+  ✔ application/pdf → ok:true + code=unsupported，不读体不抽取 (15.1599ms)
+  ✔ 404/500 → ok:false + code=http_404/http_500 且可读说明 (2.1725ms)
+✔ TC-S6-11/12 非文本降级与上游 4xx/5xx (17.6324ms)
+[web-audit] {"ts":"2026-09-05T08:32:10.268Z","by":"general","url":"http://127.0.0.1:55052/page","finalUrl":"http://127.0.0.1:55052/page","status":200,"ok":true,"code":"ok","ms":8}
+▶ S2-R-A3 抓取审计留痕（真实 HTTP /api/web/fetch 集成）
+  ✔ 成功抓取留痕：追加一行含 url/finalUrl/status/耗时 ms/by=general (21.5294ms)
+[web-audit] {"ts":"2026-09-05T08:32:10.284Z","by":"general","url":"http://127.0.0.1:55052/404","finalUrl":"http://127.0.0.1:55052/404","status":404,"ok":false,"code":"http_404","ms":3}
+[web-audit] {"ts":"2026-09-05T08:32:10.314Z","by":"general","url":"http://127.0.0.1:55052/500","finalUrl":"http://127.0.0.1:55052/500","status":500,"ok":false,"code":"http_500","ms":16}
+  ✔ 失败留痕：http_404/http_500 各一行（url/finalUrl/status=上游码/code=http_<n>） (46.8129ms)
+[web-audit] {"ts":"2026-09-05T08:32:10.330Z","by":"general","url":"http://10.0.0.1/private-path","finalUrl":"http://10.0.0.1/private-path","status":null,"ok":false,"code":"ssrf_blocked","ms":0}
+  ✔ 拦截亦留痕：ssrf_blocked 一行含目标 URL（ok=false, by=general） (13.5399ms)
+[web-audit] {"ts":"2026-09-05T08:32:10.548Z","by":"general","url":"http://127.0.0.1:55052/slow","finalUrl":"http://127.0.0.1:55052/slow","status":null,"ok":false,"code":"timeout","ms":209}
+[web-audit] {"ts":"2026-09-05T08:32:10.554Z","by":"general","url":"http://127.0.0.1:55052/max","finalUrl":"http://127.0.0.1:55052/max","status":200,"ok":false,"code":"too_large","ms":1}
+  ✔ 失败留痕：timeout（headers 未回 /slow）与 too_large 各一行，code 取枚举表值 (240.4401ms)
+✔ S2-R-A3 抓取审计留痕（真实 HTTP /api/web/fetch 集成） (325.7375ms)
+[web-audit] {"ts":"2026-09-05T08:32:11.100Z","by":"general","url":"http://127.0.0.1:55052/stall","finalUrl":"http://127.0.0.1:55052/stall","status":200,"ok":false,"code":"timeout","ms":515}
+▶ S2-R-A4 body stall 归类（headers 已回、body 挂起）与整链超时同码
+  ✔ body stall 夹具 → {ok:false, code:timeout}（非 web_error/undefined），审计同码 (528.578ms)
+[web-audit] {"ts":"2026-09-05T08:32:11.621Z","by":"general","url":"http://127.0.0.1:55052/stall5xx","finalUrl":"http://127.0.0.1:55052/stall5xx","status":500,"ok":false,"code":"timeout","ms":507}
+  ✔ TC-S2-06：5xx body stall（/stall5xx）→ 同样 {ok:false, code:timeout}（修复前误归类 http_500），审计保留实际上游 status=500 (521.7992ms)
+[web-audit] {"ts":"2026-09-05T08:32:12.642Z","by":"general","url":"http://127.0.0.1:55052/c1","finalUrl":"http://127.0.0.1:55052/c2","status":null,"ok":false,"code":"timeout","ms":1008}
+  ✔ 整链超时（重定向链累计）HTTP 层同样返回 code=timeout（同码收口） (1028.355ms)
+✔ S2-R-A4 body stall 归类（headers 已回、body 挂起）与整链超时同码 (2081.1911ms)
+▶ S2-R-A3c（TC-S2-10）参数级失败（url 缺失/非字符串/解析失败）不产生审计行
+  ✔ url="" 与 url=123 → 200-envelope {ok:false, code:invalid_url}，审计文件零新增（修复前各落一行） (5.8829ms)
+[web-audit] {"ts":"2026-09-05T08:32:12.706Z","by":"general","url":"http://127.0.0.1:55052/page","finalUrl":"http://127.0.0.1:55052/page","status":200,"ok":true,"code":"ok","ms":16}
+[web-audit] {"ts":"2026-09-05T08:32:12.722Z","by":"general","url":"http://10.1.2.3/x","finalUrl":"http://10.1.2.3/x","status":null,"ok":false,"code":"ssrf_blocked","ms":0}
+  ✔ 解析失败（http://）同样不落审计行；同路径下真实抓取/拦截仍留痕（机制未被误伤） (66.3508ms)
+✔ S2-R-A3c（TC-S2-10）参数级失败（url 缺失/非字符串/解析失败）不产生审计行 (73.7579ms)
+▶ S2-R-A3b 审计文件默认位置（静态 ROOT 之外）与容量轮转；workbench/.gitignore
+  ✔ web-audit.jsonl 默认位于 ROOT（workbench/dist）之外，且 .gitignore 含 data/ 条目 (0.5751ms)
+[web-audit] {"ts":"2026-09-05T08:32:12.753Z","by":"general","url":"http://127.0.0.1:55052/page","finalUrl":"http://127.0.0.1:55052/page","status":200,"ok":true,"code":"ok","ms":13}
+[web-audit] {"ts":"2026-09-05T08:32:12.769Z","by":"general","url":"http://127.0.0.1:55052/page","finalUrl":"http://127.0.0.1:55052/page","status":200,"ok":true,"code":"ok","ms":13}
+[web-audit] {"ts":"2026-09-05T08:32:12.801Z","by":"general","url":"http://127.0.0.1:55052/page","finalUrl":"http://127.0.0.1:55052/page","status":200,"ok":true,"code":"ok","ms":14}
+[web-audit] {"ts":"2026-09-05T08:32:12.832Z","by":"general","url":"http://127.0.0.1:55052/page","finalUrl":"http://127.0.0.1:55052/page","status":200,"ok":true,"code":"ok","ms":17}
+[web-audit] {"ts":"2026-09-05T08:32:12.864Z","by":"general","url":"http://127.0.0.1:55052/page","finalUrl":"http://127.0.0.1:55052/page","status":200,"ok":true,"code":"ok","ms":17}
+[web-audit] {"ts":"2026-09-05T08:32:12.896Z","by":"general","url":"http://127.0.0.1:55052/page","finalUrl":"http://127.0.0.1:55052/page","status":200,"ok":true,"code":"ok","ms":17}
+[web-audit] {"ts":"2026-09-05T08:32:12.927Z","by":"general","url":"http://127.0.0.1:55052/page","finalUrl":"http://127.0.0.1:55052/page","status":200,"ok":true,"code":"ok","ms":17}
+[web-audit] {"ts":"2026-09-05T08:32:12.958Z","by":"general","url":"http://127.0.0.1:55052/page","finalUrl":"http://127.0.0.1:55052/page","status":200,"ok":true,"code":"ok","ms":16}
+[web-audit] {"ts":"2026-09-05T08:32:12.990Z","by":"general","url":"http://127.0.0.1:55052/page","finalUrl":"http://127.0.0.1:55052/page","status":200,"ok":true,"code":"ok","ms":17}
+[web-audit] {"ts":"2026-09-05T08:32:13.022Z","by":"general","url":"http://127.0.0.1:55052/page","finalUrl":"http://127.0.0.1:55052/page","status":200,"ok":true,"code":"ok","ms":16}
+[web-audit] {"ts":"2026-09-05T08:32:13.054Z","by":"general","url":"http://127.0.0.1:55052/page","finalUrl":"http://127.0.0.1:55052/page","status":200,"ok":true,"code":"ok","ms":17}
+[web-audit] {"ts":"2026-09-05T08:32:13.085Z","by":"general","url":"http://127.0.0.1:55052/page","finalUrl":"http://127.0.0.1:55052/page","status":200,"ok":true,"code":"ok","ms":16}
+  ✔ 容量轮转：主文件超上限 → 归档 .1 保留历史，新行继续落到有界的主文件 (358.4581ms)
+✔ S2-R-A3b 审计文件默认位置（静态 ROOT 之外）与容量轮转；workbench/.gitignore (359.2686ms)
+▶ S2-G-11 错误码枚举常量表收口
+  ✔ WEB_ERR 枚举含 timeout/ssrf_blocked/too_large 等全部规范码；http_<n> 为动态格式不入表 (0.269ms)
+✔ S2-G-11 错误码枚举常量表收口 (0.3832ms)
+ℹ tests 24
+ℹ suites 13
+ℹ pass 24
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 8414.3537
+[exit=0]
+===== chat =====
+$ node team-hub/chat.test.mjs
+▶ TC-S1-01/02/04/05 会话创建与 scope 列表
+  ✔ TC-S1-01 创建会话 → 含 id/createdAt/updatedAt/last_message_at=null；列表按 updatedAt desc 排首 (5.8053ms)
+  ✔ TC-S1-02 scope 过滤：software 列表不含 default/marketing 会话 (2.7608ms)
+  ✔ TC-S1-04 kind 非法 → 拒绝并指明合法枚举；TC-S1-05 缺 by 被拒且无 chat 审计留痕 (0.7911ms)
+✔ TC-S1-01/02/04/05 会话创建与 scope 列表 (10.3139ms)
+▶ TC-S1-03/06/07 scope 隔离 + author 绑定
+  ✔ TC-S1-03 scope 隔离反向：default 列表查不到 software 会话；跨 scope 写不串（消息 scope = 会话 scope） (2.7281ms)
+  ✔ TC-S1-06 发消息 → author=by、createdAt 有值、会话 last_message_at 更新 (2.3065ms)
+  ✔ TC-S1-07 author 冒名被服务端绑定：传入 author:other 恒等于 by (2.2834ms)
+✔ TC-S1-03/06/07 scope 隔离 + author 绑定 (7.5985ms)
+▶ TC-S1-08/09 分页与边界
+  ✔ TC-S1-08 25 条消息 limit=10 → 三页 10/10/5，页内升序、拼接无重无漏 (29.9114ms)
+  ✔ TC-S1-09 分页边界：空会话 []、超界游标 []、缺省 limit=50、非法 limit 拒绝 (7.2477ms)
+  ✔ TC-S1-10 未知会话发消息/列消息 → 拒绝且不落任何消息行 (0.6468ms)
+  ✔ TC-S1-11 空正文被拒 (1.9723ms)
+  ✔ TC-S1-12 正文长度上限 MAX_CHAT_BODY：恰好通过、+1 拒绝且不落库 (2.898ms)
+✔ TC-S1-08/09 分页与边界 (43.2118ms)
+▶ TC-S1-13 审计留痕（chat 写统一 audit：by + scope + SSE 广播前置）
+  ✔ create + message 各产生 chat:* 审计行（member/scope/detail 形状 + seq 升序） (2.8132ms)
+✔ TC-S1-13 审计留痕（chat 写统一 audit：by + scope + SSE 广播前置） (2.9257ms)
+▶ TC-S1-16 老库迁移：无 chat 表旧库自动建表 + 存量数据无损
+  ✔ 旧 schema（tasks/skills 有数据、无 conversations/messages）import 后自动建两表且 chat 可用 (52.5619ms)
+✔ TC-S1-16 老库迁移：无 chat 表旧库自动建表 + 存量数据无损 (52.8473ms)
+ℹ tests 13
+ℹ suites 5
+ℹ pass 13
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 183.7658
+[exit=0]
+===== skills =====
+$ node team-hub/skills.test.mjs
+▶ registerSkill — 提交进入 pending，幂等 + 版本
+  ✔ 新技能提交 → status=pending, version=1 (3.8557ms)
+  ✔ 同内容重复提交 → 幂等，version/status 不变 (0.3417ms)
+  ✔ 内容变化 → version+1 且回 pending（需复审） (0.9697ms)
+  ✔ 非法 id 拒绝 (0.4401ms)
+✔ registerSkill — 提交进入 pending，幂等 + 版本 (6.4642ms)
+▶ listSkills — 默认只露 published
+  ✔ 未发布时默认列表为空 (0.7562ms)
+  ✔ includePending 能看到待审 (0.2132ms)
+✔ listSkills — 默认只露 published (1.1373ms)
+▶ reviewSkill — publish/reject 门禁
+  ✔ publish 后默认列表可见 (1.6423ms)
+  ✔ 已发布后再审 → 拒绝（只有 pending 可审） (0.383ms)
+  ✔ reject 后从默认列表消失 (6.2243ms)
+  ✔ 非法 action 拒绝 (0.2597ms)
+✔ reviewSkill — publish/reject 门禁 (9.0171ms)
+▶ grantSkill — 授权过滤不受 review 影响
+  ✔ grant 到角色 + scope 通配后按 scope/member 过滤 (3.951ms)
+✔ grantSkill — 授权过滤不受 review 影响 (4.0642ms)
+▶ 旧库迁移 — 缺列补齐且存量行默认 pending
+  ✔ 旧 schema 的 skills 表加载后带 status/contentHash/reviewedAt (49.5805ms)
+✔ 旧库迁移 — 缺列补齐且存量行默认 pending (49.7485ms)
+ℹ tests 12
+ℹ suites 5
+ℹ pass 12
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 141.0247
+[exit=0]
+===== calendar =====
+$ node team-hub/calendar.test.mjs
+▶ TC-S5-01/09 calendar_events 建表幂等 + 旧库自动建表
+  ✔ TC-S5-01 新库 import 后表与索引存在；同库二次 import 幂等不报错 (22.5475ms)
+  ✔ TC-S5-09 旧库（tasks/skills/chat 存量、无 calendar 表）import 自动建表且事件可用、存量无损 (61.8651ms)
+✔ TC-S5-01/09 calendar_events 建表幂等 + 旧库自动建表 (104.4836ms)
+▶ TC-S5-02 POST 创建 → 200 字段形状 + 落库 + audit calendar:create
+  ✔ 创建合法事件 → 200 事件含 id/scope/title/start/end=null/allDay=false/createdAt/updatedAt；库中可查；audit 形状正确 (28.539ms)
+✔ TC-S5-02 POST 创建 → 200 字段形状 + 落库 + audit calendar:create (28.9761ms)
+▶ TC-S5-03 scope 过滤 + 日期窗闭区间 + 排序
+  ✔ GET /api/calendar/events?scope=&from=&to= 仅该 scope + 窗内闭区间 + start asc 稳定排序 (77.1924ms)
+  ✔ 同日同 start 的事件按 id asc 稳定排序 (33.9271ms)
+✔ TC-S5-03 scope 过滤 + 日期窗闭区间 + 排序 (111.6049ms)
+▶ TC-S5-04 scope 隔离互不可见 + 跨 scope 写不串
+  ✔ 两 scope 各建事件后交叉查询互不可见；事件 scope = 请求 scope (59.6967ms)
+✔ TC-S5-04 scope 隔离互不可见 + 跨 scope 写不串 (60.1174ms)
+▶ TC-S5-05 非法输入矩阵 → 400 零落库零 audit
+  ✔ 缺 by / title 空 / title 101 / start 缺 / start 非法 / end<start / scope 缺 → 全部 400 且零落库零 calendar 审计 (140.6752ms)
+✔ TC-S5-05 非法输入矩阵 → 400 零落库零 audit (140.9552ms)
+▶ TC-S5-06 日期窗边界 + allDay date-only
+  ✔ start 恰在 from/to / 前一日 / 后一日 / allDay date-only → 闭区间正确 (64.0386ms)
+✔ TC-S5-06 日期窗边界 + allDay date-only (64.2524ms)
+▶ TC-S5-07 删除契约：confirm / scope 越权 / 成功 + audit calendar:delete
+  ✔ 缺 confirm / confirm 非 yes / scope 越权 / 未知 id → 400 且事件仍在；confirm=yes + scope 匹配 → 200 且 audit (111.1963ms)
+✔ TC-S5-07 删除契约：confirm / scope 越权 / 成功 + audit calendar:delete (111.3849ms)
+▶ TC-S5-08 写走 handleWrite：audit 经 /api/activity 可查 + SSE /api/events 广播
+  ✔ 订阅 /api/events 期间 POST 创建 → ≤5s 收到 calendar:create live 帧；GET /api/activity?scope= 可查 calendar:* (125.5466ms)
+✔ TC-S5-08 写走 handleWrite：audit 经 /api/activity 可查 + SSE /api/events 广播 (125.8083ms)
+▶ TC-S5-11 合法边界：title 恰 100 / end 省略 / allDay / end=start / meta
+  ✔ title=100 恰好 200；end 可省=null；allDay:true 存 1 返 true；end=start 允许；meta 往返 (78.429ms)
+✔ TC-S5-11 合法边界：title 恰 100 / end 省略 / allDay / end=start / meta (78.7965ms)
+▶ DAO 级直测（chat.test.mjs 同法：函数级 create/list/delete/解析）
+  ✔ createCalendarEvent 校验（缺 by/scope/title/非法时间/超长）与 listCalendarEvents 窗过滤直接可用 (1.4886ms)
+  ✔ listCalendarEvents 参数校验：from 晚于 to / 非法窗参数抛错 (0.7978ms)
+✔ DAO 级直测（chat.test.mjs 同法：函数级 create/list/delete/解析） (2.8342ms)
+ℹ tests 13
+ℹ suites 10
+ℹ pass 13
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 886.4413
+[exit=0]
+===== contracts =====
+$ node tests/contract/contracts.test.mjs
+▶ validateElement — schema 契约 (S2, FR-2, ADR-0003)
+  ✔ TC-S2-01 五类元素合法样例全部通过 (1.2079ms)
+  ✔ TC-S2-01 rect/ellipse 带合法 fill 通过 (0.1428ms)
+  ✔ TC-S2-01 line 无 arrow（缺省）通过 (0.1343ms)
+  ✔ TC-S2-02 边界：w/h = 0 合法（退化元素） (0.1327ms)
+  ✔ TC-S2-02 边界：负坐标合法（无限画布） (0.1453ms)
+  ✔ TC-S2-02 边界：text 空字符串合法 (0.1722ms)
+  ✔ TC-S2-02 边界：freehand 单点合法（一个点=点状笔迹） (0.125ms)
+  ✔ TC-S2-02 边界：fill 空串（无填充）合法 (0.1038ms)
+  ✔ TC-S2-03 异常：非法 type 拒绝 (0.207ms)
+  ✔ TC-S2-04 异常：缺失 id / geom / stroke / strokeWidth 拒绝 (0.2549ms)
+  ✔ TC-S2-04 异常：非对象元素拒绝 (0.2043ms)
+  ✔ TC-S2-05 异常：字段类型错误拒绝（NaN/Infinity/字符串坐标/负线宽） (0.1682ms)
+  ✔ TC-S2-05 异常：stroke 非十六进制拒绝 (0.1052ms)
+  ✔ TC-S2-05 异常：freehand points 非法项拒绝 (0.0774ms)
+  ✔ TC-S2-05 异常：line arrow 非布尔拒绝 (0.0682ms)
+  ✔ TC-S2-06 边界：未知字段被忽略（lenient），不使校验失败 (0.0675ms)
+  ✔ HEX_COLOR_RE 仅接受 #rgb/#rrggbb (0.0536ms)
+✔ validateElement — schema 契约 (S2, FR-2, ADR-0003) (4.947ms)
+▶ stateHash — 确定性哈希 (S2, 收敛断言口径)
+  ✔ TC-S2-08 相同元素集、不同插入顺序 → 相同哈希 (0.6861ms)
+  ✔ TC-S2-08 Map/数组/对象 三种输入同内容 → 相同哈希 (0.2241ms)
+  ✔ TC-S2-09 任一字段差异 → 哈希不同 (0.1643ms)
+  ✔ TC-S2-09 键顺序无关：geom 键乱序 → 相同哈希 (0.1312ms)
+  ✔ TC-S2-09 freehand points 顺序有意义 → 顺序不同哈希不同 (0.1238ms)
+  ✔ TC-S2-09 空集合哈希稳定（基线） (0.1064ms)
+✔ stateHash — 确定性哈希 (S2, 收敛断言口径) (1.6295ms)
+▶ hitTest — 几何命中 (S6, FR-2/FR-3)
+  ✔ TC-S6-01 rect：内部命中 / 外部未命中 / 边界含 tolerance (0.1822ms)
+  ✔ TC-S6-01 ellipse：中心命中 / bbox 角点（椭圆外）未命中 (0.1054ms)
+  ✔ TC-S6-01 ellipse：退化（w=0 或 h=0）永不命中 (0.0678ms)
+  ✔ TC-S6-03 line：线上命中 / 容差内命中 / 远处未命中 / 端点外未命中 (0.1102ms)
+  ✔ TC-S6-04 freehand：折线段附近命中 / 单点退化 (0.1014ms)
+  ✔ TC-S6-05 text：bbox 内命中（显式 measure） (0.1264ms)
+  ✔ TC-S6-06 边界：空元素集 → null；未命中 → null (0.1028ms)
+  ✔ TC-S6-07 边界：重叠元素取最上层（数组末尾） (0.0726ms)
+  ✔ TC-S6-08 边界：线宽容差恰在阈值上命中、阈值外未命中 (0.0735ms)
+  ✔ distPointSegment：线段退化（端点重合）退化为点距离 (0.0565ms)
+✔ hitTest — 几何命中 (S6, FR-2/FR-3) (1.2467ms)
+▶ viewport — 世界/屏幕坐标变换 (S8, FR-4)
+  ✔ TC-S8-01 world→screen→world 往返一致 (0.3502ms)
+  ✔ TC-S8-01 平移与缩放正确作用 (0.985ms)
+  ✔ TC-S8-03 边界：极端缩放（0.01x / 100x）往返一致 (0.1463ms)
+  ✔ TC-S8-04 异常：非法 viewport（scale=0/负数/NaN、tx/ty 非数）抛错 (0.443ms)
+  ✔ validateViewport 合法/非法判定 (0.0905ms)
+✔ viewport — 世界/屏幕坐标变换 (S8, FR-4) (2.2082ms)
+▶ createThrottle — 20Hz 节流 (S4, §6.2 光标节流)
+  ✔ TC-S4-03 首帧即时放行一次 (0.1342ms)
+  ✔ TC-S4-03 之后发送间隔 ≥ 50ms（20Hz） (0.2032ms)
+  ✔ TC-S4-03 首帧除外的 1s 窗口内发送 ≤20 条 (0.1021ms)
+  ✔ 异常：rateHz ≤ 0 抛错 (0.1161ms)
+✔ createThrottle — 20Hz 节流 (S4, §6.2 光标节流) (0.7516ms)
+▶ createHistory — redo 并发语义 (S9, ADR-0006, §5.3)
+  ✔ TC-S9-05 默认 clear-on-remote：撤销后远端 op 落 → redo 清空 (0.3202ms)
+  ✔ TC-S9-06 keep-replay：撤销后远端 op 不干扰，redo 重放本人 op (0.082ms)
+  ✔ TC-S9-04 边界：undo 到底后继续 undo 返回 null 且不破坏 redo (0.1127ms)
+  ✔ undo/redo 往返一致 (0.0982ms)
+  ✔ 未知 variant 抛错 (0.068ms)
+✔ createHistory — redo 并发语义 (S9, ADR-0006, §5.3) (0.8133ms)
+▶ escapeHtml — XSS 门禁 (S5, FR-11)
+  ✔ TC-S5-02 恶意 HTML/脚本被转义为纯文本 (0.1838ms)
+  ✔ TC-S5-02 脚本标签被转义 (0.0593ms)
+  ✔ TC-S5-02 五种敏感字符全部转义 (0.0518ms)
+  ✔ TC-S5-02 正常文本不被破坏 (0.2652ms)
+  ✔ TC-S5-02 非字符串输入被安全字符串化 (0.1062ms)
+✔ escapeHtml — XSS 门禁 (S5, FR-11) (1.7386ms)
+▶ createPresence — 在线列表与 TTL (S4/S11, §6.2 TTL)
+  ✔ TC-S4-04 正常断开立即移除（与 TTL 无关） (0.3586ms)
+  ✔ TC-S4-05 非正常断开：TTL 边界内保留、超过 TTL 移除 (0.1761ms)
+  ✔ TC-S4-05 心跳刷新后 TTL 重新起算 (0.0986ms)
+  ✔ TC-S4-02 多端在线列表聚合计数正确 (0.0963ms)
+✔ createPresence — 在线列表与 TTL (S4/S11, §6.2 TTL) (0.9033ms)
+ℹ tests 56
+ℹ suites 8
+ℹ pass 56
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 26.4211
+[exit=0]
+===== tsc-workbench =====
+$ node node_modules/typescript/lib/tsc.js -p workbench/tsconfig.json --noEmit
+cmd.exe : node:internal/modules/cjs/loader:1520
+At line:9 char:12
++     $out = & cmd /c $cmd 2>&1 | Out-String
++            ~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (node:internal/modules/cjs/loader:1520:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  throw err;
+  ^
+
+Error: Cannot find module 'D:\project\DSH\legion\.legion-worktrees\T-090\node_modules\typescript\lib\tsc.js'
+    at Module._resolveFilename (node:internal/modules/cjs/loader:1517:15)
+    at wrapResolveFilename (node:internal/modules/cjs/loader:1071:27)
+    at defaultResolveImplForCJSLoading (node:internal/modules/cjs/loader:1095:10)
+    at resolveForCJSWithHooks (node:internal/modules/cjs/loader:1122:12)
+    at Module._load (node:internal/modules/cjs/loader:1294:5)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:255:19)
+    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)
+    at node:internal/main/run_main_module:33:47 {
+  code: 'MODULE_NOT_FOUND',
+  requireStack: []
+}
+
+Node.js v24.19.0
+[exit=1]
+**********************
+Windows PowerShell transcript end
+End time: 20260905163217
+**********************

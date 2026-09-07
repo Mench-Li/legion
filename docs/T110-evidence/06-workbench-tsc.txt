@@ -1,0 +1,6 @@
+# workbench tsc --noEmit — T-110 (F1 解析后) 重测
+# 前置：F1 = workbench/src/App.tsx 残留 git 合并冲突标记（TS1185×3）已在工作区解析（见 07-f1-resolution.txt）
+
+$ cd workbench && node node_modules/typescript/bin/tsc --noEmit
+exit=0（0 诊断；stderr 为空）
+输出要点：无任何 TS error；App.tsx 314/328/330 的 TS1185 已消除。

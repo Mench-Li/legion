@@ -1,0 +1,32 @@
+**********************
+Windows PowerShell transcript start
+Start time: 20260905163845
+Username: AMENCH\11150
+RunAs User: AMENCH\11150
+Configuration Name: 
+Machine: AMENCH (Microsoft Windows NT 10.0.22631.0)
+Host Application: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoLogo -NoProfile -NonInteractive -Command [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [System.Text.UTF8Encoding]::new($false); 
+$log='D:\project\DSH\legion\.legion-worktrees\T-090\docs\T090-evidence\s7-tsc.txt'
+Start-Transcript -Path $log -Force | Out-Null
+node --version
+node node_modules/typescript/bin/tsc -p tsconfig.json --noEmit
+Write-Output ("[tsc-exit=" + $LASTEXITCODE + "]")
+Stop-Transcript | Out-Null
+
+Process ID: 5760
+PSVersion: 5.1.22621.6133
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.22621.6133
+BuildVersion: 10.0.22621.6133
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+
+
+[tsc-exit=0]
+**********************
+Windows PowerShell transcript end
+End time: 20260905163849
+**********************

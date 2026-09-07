@@ -1,0 +1,11 @@
+{"ts":"2026-09-04T16:08:46.480Z","by":"general","url":"http://127.0.0.1:4950/page","finalUrl":"http://127.0.0.1:4950/page","status":200,"ok":true,"code":"ok","ms":69}
+{"ts":"2026-09-04T16:08:46.494Z","by":"general","url":"http://127.0.0.1:4950/xss","finalUrl":"http://127.0.0.1:4950/xss","status":200,"ok":true,"code":"ok","ms":5}
+{"ts":"2026-09-04T16:08:46.526Z","by":"general","url":"http://127.0.0.1:4950/404","finalUrl":"http://127.0.0.1:4950/404","status":404,"ok":false,"code":"http_404","ms":17}
+{"ts":"2026-09-04T16:08:46.542Z","by":"general","url":"http://127.0.0.1:4950/500","finalUrl":"http://127.0.0.1:4950/500","status":500,"ok":false,"code":"http_500","ms":10}
+{"ts":"2026-09-04T16:08:46.561Z","by":"general","url":"http://127.0.0.1:4950/flaky","finalUrl":"http://127.0.0.1:4950/flaky","status":500,"ok":false,"code":"http_500","ms":4}
+{"ts":"2026-09-04T16:08:46.590Z","by":"general","url":"http://127.0.0.1:4950/flaky","finalUrl":"http://127.0.0.1:4950/flaky","status":200,"ok":true,"code":"ok","ms":17}
+{"ts":"2026-09-04T16:08:46.619Z","by":"general","url":"http://127.0.0.1:4950/pdf","finalUrl":"http://127.0.0.1:4950/pdf","status":200,"ok":true,"code":"unsupported","ms":15}
+{"ts":"2026-09-04T16:08:46.657Z","by":"general","url":"http://127.0.0.1:4950/big","finalUrl":"http://127.0.0.1:4950/big","status":200,"ok":false,"code":"too_large","ms":22}
+{"ts":"2026-09-04T16:08:47.877Z","by":"general","url":"http://127.0.0.1:4950/slow","finalUrl":"http://127.0.0.1:4950/slow","status":null,"ok":false,"code":"timeout","ms":1210}
+{"ts":"2026-09-04T16:08:47.885Z","by":"general","url":"http://127.0.0.1:4951/","finalUrl":"http://127.0.0.1:4951/","status":null,"ok":false,"code":"fetch_error","ms":3}
+{"ts":"2026-09-04T16:08:47.897Z","by":"general","url":"http://127.0.0.1:4950/spa","finalUrl":"http://127.0.0.1:4950/spa","status":200,"ok":true,"code":"empty_content","ms":5}

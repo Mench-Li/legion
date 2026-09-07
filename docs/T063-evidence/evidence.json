@@ -1,0 +1,73 @@
+{
+  "task": "T-063",
+  "role": "deployment & CI/CD (devops)",
+  "slice": "S3 serve.mjs 扩 /api/files list/read/download（仅回环 + 路径防护）——部署与 CI/CD",
+  "date": "2026-09-04",
+  "verification": [
+    {
+      "kind": "test-suite",
+      "command": "node scripts/files-api.test.mjs",
+      "cwd": "workbench",
+      "exit": 0,
+      "result": "34/34 pass, 0 fail",
+      "key_lines": [
+        "ℹ tests 34  ℹ suites 14  ℹ pass 34  ℹ fail 0  ℹ duration_ms 1548.6",
+        "TC-S3-01 list 形状 + 根语义 + scope 未绑定 — pass",
+        "TC-S3-05/06/07 read 预览（文本/截断/二进制） — pass",
+        "TC-S3-08b 下载路由层 P0-2 openDownloadStream 流式 — pass",
+        "TC-S3-09/10 + TC-S4-14 路径逃逸矩阵（全部拒绝） — pass",
+        "TC-S3-12 .git 内部拒绝访问（含写） — pass"
+      ]
+    },
+    {
+      "kind": "syntax-gate",
+      "command": "node --check scripts/serve.mjs",
+      "cwd": "workbench",
+      "exit": 0,
+      "result": "OK"
+    },
+    {
+      "kind": "deploy-smoke",
+      "command": "node docs/T063-evidence/deploy-smoke.mjs",
+      "cwd": ".",
+      "exit": 0,
+      "result": "real-process boot of node scripts/serve.mjs + live HTTP assertions all green",
+      "key_lines": [
+        "legion-workbench 已启动：http://127.0.0.1:5199",
+        "LIST_HTTP=200 entries=[docs(dir), README.md(file,19B)] .git filtered, dirs-first",
+        "READ_HTTP=200 content='hello deploy world\\n' binary=false totalBytes=19 lineCount=1",
+        "DL_HTTP=200 Disposition=attachment; filename*=UTF-8''README.md Content-Type=text/markdown; charset=utf-8",
+        "DL_BYTE_MATCH=true srcLen=19 dlLen=19",
+        "GIT_READ_HTTP=403 禁止访问 .git 内部（防凭证/元数据外泄）",
+        "NOBIND_HTTP=400 工作空间 nobind 未注册：请先在空间设置创建该空间",
+        "GHOST_HTTP=400 路径不存在",
+        "TRAVERSAL_HTTP=403 路径越界：禁止访问目录根之外"
+      ]
+    },
+    {
+      "kind": "frontend-build",
+      "command": "pnpm install --offline --frozen-lockfile",
+      "cwd": "workbench",
+      "exit": 1,
+      "result": "BLOCKED by environment (not a code defect)",
+      "key_lines": [
+        "[ERR_PNPM_NO_OFFLINE_TARBALL] A package is missing from the store but cannot download it in offline mode.",
+        "The missing package may be downloaded from https://registry.npmjs.org/@react-three/drei/-/drei-10.7.8.tgz",
+        "网络下载被仓库规则禁止（禁止联网下载依赖）；该破坏为环境/store 缺失，与 coder/tester 记录的 vite build EPERM 同因。"
+      ]
+    },
+    {
+      "kind": "frontend-build-attempt",
+      "command": "pnpm build  (tsc --noEmit && vite build)",
+      "cwd": "workbench",
+      "exit": 1,
+      "result": "fails at the dependency stage (node_modules missing) — same root cause as offline install failure",
+      "key_lines": [
+        "error TS2688: Cannot find type definition file for 'vite/client'.",
+        "[ELIFECYCLE] Command failed with exit code 2.",
+        "[WARN] Local package.json exists, but node_modules missing, did you mean to install?"
+      ]
+    }
+  ],
+  "conclusion": "S3 后端切片（serve.mjs /api/files list/read/download）构建/CI 真实跑通：契约测试 34/34、语法门禁 node --check、真实进程部署冒烟全部通过；仅前端 workbench 捆包 build 因离线环境（store 缺 tarball + 禁网）无法组装，属环境限制而非代码缺陷。"
+}

@@ -1,0 +1,4 @@
+{"ts":"2026-09-04T16:08:46.332Z","by":"general","url":"http://127.0.0.1:4950/page","finalUrl":"http://127.0.0.1:4950/page","status":null,"ok":false,"code":"ssrf_blocked","ms":2}
+{"ts":"2026-09-04T16:08:46.358Z","by":"general","url":"ftp://example.com/f","finalUrl":"ftp://example.com/f","status":null,"ok":false,"code":"protocol_blocked","ms":0}
+{"ts":"2026-09-04T16:08:46.367Z","by":"general","url":"","finalUrl":"","status":null,"ok":false,"code":"invalid_url","ms":0}
+{"ts":"2026-09-04T16:08:46.399Z","by":"general","url":"http://t084-nope.invalid/","finalUrl":"http://t084-nope.invalid/","status":null,"ok":false,"code":"dns_error","ms":27}

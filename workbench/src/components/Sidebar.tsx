@@ -1,5 +1,4 @@
 import { toast } from './Toast'
-import { openKanban } from '../api'
 import type { BoardData, SpaceInfo } from '../types'
 import { statusCounts } from '../missions'
 
@@ -70,13 +69,9 @@ export function Sidebar({ board, active, scope, hubMode, spaces, onNavigate, onS
   }
 
   const clickModule = (mod: ModuleDef): void => {
-    // 面板化模块：home/agents/skills 既有 + chat/files/browser/calendar/notify 多中心（S2/S5/S6/S7）
-    if (mod.id === 'home' || mod.id === 'agents' || mod.id === 'skills' || mod.id === 'rules' || mod.id === 'chat' || mod.id === 'files' || mod.id === 'browser' || mod.id === 'calendar' || mod.id === 'notify') {
+    // 面板化模块：任务中心（融合 Scrum 看板 + 总指挥部）与各中心面板（S2/S5/S6/S7 先例）
+    if (mod.id === 'tasks' || mod.id === 'home' || mod.id === 'agents' || mod.id === 'skills' || mod.id === 'rules' || mod.id === 'chat' || mod.id === 'files' || mod.id === 'browser' || mod.id === 'calendar' || mod.id === 'notify') {
       onNavigate(mod.id)
-      return
-    }
-    if (mod.id === 'tasks') {
-      openKanban()
       return
     }
     // 兜底：尚未接入面板的模块给提示（G-6/TC-S8-03：给提示、非静默无响应）

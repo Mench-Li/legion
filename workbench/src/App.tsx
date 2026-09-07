@@ -38,6 +38,7 @@ import { FilesView } from './components/FilesView'
 import { BrowserView } from './components/BrowserView'
 import { CalendarView } from './components/CalendarView'
 import { NotifyView } from './components/NotifyView'
+import { TaskCenterView } from './components/TaskCenterView'
 import { NewSpaceModal } from './components/NewSpaceModal'
 import { SpaceSettingsModal } from './components/SpaceSettingsModal'
 import { ToastHost, toast } from './components/Toast'
@@ -424,7 +425,15 @@ export default function App(): React.JSX.Element {
           notifyUnread={notifyUnread}
         />
         {board ? (
-          active === 'skills' ? (
+          active === 'tasks' ? (
+            <TaskCenterView
+              scope={scope}
+              hubMode={hubMode}
+              spaces={hubSpaces}
+              onSelectScope={selectScope}
+              onDataChanged={() => void loadMissions(scope)}
+            />
+          ) : active === 'skills' ? (
             <SkillsPanel scope={scope} hubMode={hubMode} spaces={hubSpaces} />
           ) : active === 'rules' ? (
             <RulesPanel scope={scope} hubMode={hubMode} spaces={hubSpaces} onOpenFiles={() => setActive('files')} />

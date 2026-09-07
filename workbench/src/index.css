@@ -2753,3 +2753,315 @@ body {
 [data-md-view] hr { border: none; border-top: 1px solid var(--line); margin: 10px 0; }
 [data-md-view] a { color: var(--accent, #5b8cff); }
 [data-md-view] a:hover { text-decoration: underline; }
+
+/* ---------- 任务中心（Scrum 看板 + 总指挥部融合，TaskCenterView）---------- */
+
+.tc-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  flex-wrap: wrap;
+}
+
+.tc-tabs {
+  display: flex;
+  gap: 4px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 3px;
+}
+
+.tc-tab {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 4px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.tc-tab.on {
+  background: var(--panel-2);
+  color: var(--text);
+  box-shadow: 0 0 0 1px var(--line-2);
+}
+
+.tc-head-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+
+.tc-scope-select,
+.tc-search {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  font-size: 12px;
+  padding: 4px 8px;
+}
+
+.tc-scope-select { max-width: 180px; }
+
+.tc-search { width: 190px; }
+
+.tc-src {
+  font-size: 10.5px;
+  color: var(--green);
+  background: rgba(34, 197, 94, 0.08);
+  border-radius: 999px;
+  padding: 2px 9px;
+  white-space: nowrap;
+}
+
+.tc-src:only-child { color: var(--yellow); background: rgba(251, 191, 36, 0.08); }
+
+/* 状态统计条 */
+.tc-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  flex-wrap: wrap;
+}
+
+.tc-sum-title { font-size: 11px; color: var(--muted); font-weight: 600; margin-right: 4px; }
+
+.tc-sum-chip {
+  font-size: 11px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 9px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.tc-sum-chip.s-progress { color: var(--green); }
+.tc-sum-chip.s-decide { color: var(--yellow); }
+.tc-sum-chip.s-todo { color: var(--accent); }
+.tc-sum-chip.s-blocked { color: var(--red); }
+.tc-sum-chip.s-done { color: var(--green-2); opacity: 0.85; }
+.tc-sum-chip.s-canceled { color: var(--muted-2); text-decoration: line-through; }
+
+.tc-sum-total { margin-left: auto; font-size: 11px; color: var(--muted-2); }
+
+/* 岗位过滤条 */
+.tc-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  flex-wrap: wrap;
+}
+
+.tc-filter-label { font-size: 11px; color: var(--muted); font-weight: 600; }
+
+.tc-pills { display: flex; gap: 5px; flex-wrap: wrap; }
+
+.tc-pill {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  border-radius: 999px;
+  font-size: 11px;
+  padding: 2px 9px;
+  cursor: pointer;
+}
+
+.tc-pill.on { color: var(--accent); border-color: rgba(91, 140, 255, 0.5); }
+
+.tc-pill-cnt { opacity: 0.6; margin-left: 2px; font-size: 10px; }
+
+.tc-filter-clear {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--red);
+  cursor: pointer;
+  user-select: none;
+}
+
+/* 指挥总览（总指挥部三列 + 待办） */
+.tc-hq {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 10px;
+  padding: 12px;
+  align-items: start;
+}
+
+.tc-lane {
+  background: rgba(255, 255, 255, 0.015);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.tc-hq-decide { border-color: rgba(251, 191, 36, 0.3); }
+.tc-hq-decide .tc-lane-head { border-bottom-color: rgba(251, 191, 36, 0.25); }
+.tc-hq-busy { border-color: rgba(96, 165, 250, 0.25); }
+.tc-hq-done { border-color: rgba(52, 211, 153, 0.2); }
+
+.tc-lane-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px 8px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--text);
+  flex: none;
+}
+
+.tc-lane-icon { font-size: 12px; }
+.tc-lane-label { font-weight: 600; }
+.tc-lane-n {
+  margin-left: auto;
+  background: var(--line-2);
+  color: var(--accent);
+  border-radius: 999px;
+  padding: 0 7px;
+  font-size: 10px;
+  line-height: 1.7;
+}
+
+/* 任务卡片区：泳道内纵向滚动（列高一致，超长不撑爆页面） */
+.tc-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+  max-height: 56vh;
+  min-height: 60px;
+  padding: 2px;
+}
+
+.tc-empty {
+  color: var(--muted-2);
+  font-size: 11px;
+  padding: 14px 6px;
+  text-align: center;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+}
+
+/* Scrum 看板（横向泳道） */
+.tc-board {
+  display: flex;
+  gap: 10px;
+  padding: 12px;
+  overflow-x: auto;
+  align-items: flex-start;
+}
+
+.tc-col {
+  flex: 0 0 264px;
+  min-width: 232px;
+  background: rgba(255, 255, 255, 0.015);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.tc-col.drop {
+  outline: 2px dashed #60a5fa;
+  background: rgba(37, 99, 235, 0.08);
+}
+
+.tc-col.busy { cursor: progress; }
+
+.tc-col-backlog .tc-lane-icon,
+.tc-col-todo .tc-lane-icon { color: var(--muted); }
+.tc-col-in_progress .tc-lane-icon { color: var(--green); }
+.tc-col-in_review .tc-lane-icon { color: var(--yellow); }
+.tc-col-blocked .tc-lane-icon { color: var(--red); }
+.tc-col-done .tc-lane-icon { color: var(--green-2); }
+
+/* 任务卡 */
+.tc-card {
+  background: var(--card);
+  border: 1px solid var(--line-2);
+  border-left: 3px solid var(--line-2);
+  border-radius: 8px;
+  padding: 7px 9px;
+  font-size: 12px;
+  user-select: none;
+}
+
+.tc-card.clickable { cursor: pointer; }
+.tc-card.clickable:hover { border-color: rgba(96, 165, 250, 0.5); background: #1d2740; }
+.tc-card[draggable='true'] { cursor: grab; }
+.tc-card[draggable='true']:active { cursor: grabbing; }
+
+.tc-card-title { display: flex; gap: 7px; align-items: baseline; min-width: 0; }
+.tc-tid { color: var(--cyan, #5b8cff); font-size: 10.5px; flex: none; font-variant-numeric: tabular-nums; }
+.tc-tt {
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.35;
+  min-width: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+.tc-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+
+.tc-chip {
+  font-size: 9.5px;
+  color: var(--muted);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0 5px;
+  line-height: 1.7;
+  white-space: nowrap;
+}
+
+.tc-chip-scope { color: var(--accent); }
+.tc-chip-goal { color: var(--purple); }
+.tc-chip-dep { color: var(--yellow); }
+.tc-chip-hold { color: var(--red); }
+.tc-chip-ask { color: var(--yellow); border-color: rgba(251, 191, 36, 0.5); }
+.tc-prio-high { color: var(--red); }
+.tc-prio-low { color: var(--green-2); }
+
+.tc-preview {
+  margin-top: 5px;
+  font-size: 10.5px;
+  color: var(--muted);
+  line-height: 1.4;
+  max-height: 2.9em;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.tc-card-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  padding-top: 5px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.tc-meta { font-size: 9.5px; color: var(--muted-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tc-time { margin-left: auto; font-size: 9.5px; color: var(--muted-2); font-variant-numeric: tabular-nums; flex: none; }
+

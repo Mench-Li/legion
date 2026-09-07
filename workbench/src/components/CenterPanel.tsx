@@ -1,10 +1,10 @@
-import { lazy, Suspense, useEffect, useState } from 'react'
-import type { BoardData, CardStatus, GoalInfo, GoalStatus, HubActivity, HubGoal, RosterAgent, SpaceInfo } from '../types'
+import { lazy, Suspense, useState } from 'react'
+import type { BoardData, CardStatus, GoalInfo, GoalStatus, RosterAgent, SpaceInfo } from '../types'
 import type { StatusCard } from '../missions'
 import type { AgentPose } from './Scene3D'
 import { AgentTasksModal } from './AgentTasksModal'
 import { TaskDetailModal } from './TaskDetailModal'
-import { fetchHubActivity } from '../api'
+import { GoalsBoard } from './GoalsBoard'
 
 const Scene3D = lazy(() => import('./Scene3D'))
 
@@ -82,186 +82,6 @@ function fromRoster(a: RosterAgent): AgentView {
   }
 }
 
-const GOAL_STATUS_TEXT: Record<GoalStatus, string> = {
-  active: '进行中',
-  paused: '已暂停',
-  done: '已完成',
-  canceled: '已取消',
-}
-
-/** 目标事件动作 → 短标签（per-goal 活动流渲染用；其余动作原样显示 action）。 */
-const GOAL_ACT_TEXT: Record<string, string> = {
-  'goal:publish': '🎯 目标发布',
-  'goal:slices': '🔪 目标拆解',
-  'goal:pause': '⏸ 目标暂停',
-  'goal:resume': '▶ 目标恢复',
-  'goal:done': '✅ 目标收尾',
-  'goal:cancel': '✕ 目标取消',
-  'goal:context': '📄 上下文更新',
-  claim: '🟢 认领',
-  'transition': '↔ 流转',
-  advance: '✅ 完成推进',
-  'test-report': '🧪 测试报告',
-  'domain-block': '⛔ 文件域拦截',
-  artifact: '📦 产物',
-  patch: '🩹 代码提交',
-  dispatch: '🚀 派工',
-  aborted: '⚠ 中断',
-  comment: '💬 评论',
-}
-
-function fmtGoalTime(ts: string): string {
-  const d = new Date(ts)
-  if (Number.isNaN(d.getTime())) return ts
-  const pad = (n: number): string => String(n).padStart(2, '0')
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}`
-}
-
-function GoalRow({ goal, busy, onPause, onResume, onCancel, onSaveContext }: {
-  goal: HubGoal
-  busy: boolean
-  onPause: () => void
-  onResume: () => void
-  onCancel: () => void
-  /** 保存目标上下文（仅将军）；缺省 = 该角色不可编辑。 */
-  onSaveContext?: (goalId: string, text: string) => Promise<void>
-}): React.JSX.Element {
-  const [confirming, setConfirming] = useState(false)
-  const [expanded, setExpanded] = useState(false)
-  const [editing, setEditing] = useState(false)
-  const [draft, setDraft] = useState(goal.context)
-  const [saving, setSaving] = useState(false)
-  const [activity, setActivity] = useState<HubActivity[] | null>(null)
-  const canAct = goal.status === 'active' || goal.status === 'paused'
-  const canEdit = canAct && onSaveContext !== undefined
-  const terminal = goal.status === 'done' || goal.status === 'canceled'
-  // 展开目标行时按目标拉最近活动（C：将军 per-goal 视图，/api/activity?goalId=）
-  useEffect(() => {
-    if (!expanded) return
-    let alive = true
-    setActivity(null)
-    fetchHubActivity({ goalId: goal.id, limit: 8 })
-      .then(rows => { if (alive) setActivity(rows) })
-      .catch(() => { if (alive) setActivity([]) })
-    return () => { alive = false }
-  }, [expanded, goal.id, goal.contextVersion])
-  const save = async (): Promise<void> => {
-    if (!onSaveContext) return
-    setSaving(true)
-    try {
-      await onSaveContext(goal.id, draft.trim())
-      setEditing(false)
-      setDraft(draft.trim())
-    } finally {
-      setSaving(false)
-    }
-  }
-  const startEdit = (): void => {
-    setDraft(goal.context ?? '')
-    setEditing(true)
-  }
-  return (
-    <div className="goal-row-wrap">
-      <div className="goal-row" role="button" tabIndex={0} onClick={() => setExpanded(x => !x)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(x => !x) } }} title="点击展开：目标上下文（同目标共享）与最近动态">
-        <span className={`g-dot ${goal.status}`} title={GOAL_STATUS_TEXT[goal.status]} />
-        <span className="obj" title={`${goal.objective}（${goal.id}）`}>
-          {goal.objective}
-        </span>
-        <span className="goal-meta">
-          <span className={`goal-status ${goal.status}`}>{GOAL_STATUS_TEXT[goal.status]}</span>
-          <span className="goal-ver" title="目标乐观锁版本">v{goal.version}</span>
-          <span className={`goal-ver ctx${goal.contextVersion > 0 ? ' has' : ''}`} title={`目标级共享上下文（版本 v${goal.contextVersion}；同目标任务派工共享，下一派工对齐）`}>
-            {goal.contextVersion > 0 ? `📄ctx v${goal.contextVersion}` : '📄ctx'}
-          </span>
-          {goal.mode === 'slice' && <span className="goal-ver slice" title="切片流水线模式">切片</span>}
-          <span className="goal-progress" title={`${goal.done}/${goal.total} 链任务完成`}>
-            {goal.done}/{goal.total} · {goal.percent}%
-          </span>
-        </span>
-        {canAct && (
-          <span className="goal-actions" onClick={e => e.stopPropagation()}>
-            {goal.status === 'active' && (
-              <button className="btn icon ghost" disabled={busy} title="暂停该目标（链任务保留，暂停推进）" onClick={onPause}>⏸</button>
-            )}
-            {goal.status === 'paused' && (
-              <button className="btn icon ghost" disabled={busy} title="恢复该目标推进" onClick={onResume}>▶</button>
-            )}
-            <button
-              className={`btn icon ghost danger ${confirming ? 'confirming' : ''}`}
-              disabled={busy}
-              title="取消该目标（未开工的链任务一并取消）"
-              onClick={() => { if (confirming) onCancel(); else setConfirming(true) }}
-            >
-              {confirming ? '✓确认取消' : '✕'}
-            </button>
-            {confirming && (
-              <button className="btn icon ghost" disabled={busy} title="不取消了" onClick={() => setConfirming(false)}>↩</button>
-            )}
-          </span>
-        )}
-        <span className="goal-expand" title={expanded ? '收起' : '展开上下文/动态'}>{expanded ? '▾' : '▸'}</span>
-      </div>
-      <div className="goal-minibar" onClick={e => e.stopPropagation()}>
-        <i style={{ width: `${goal.percent}%` }} />
-      </div>
-      {expanded && (
-        <div className="goal-detail" onClick={e => e.stopPropagation()}>
-          <div className="goal-ctx-head">
-            <span className="goal-ctx-title">📄 目标上下文 <span className="goal-ver">v{goal.contextVersion}</span></span>
-            <span className="goal-ctx-hint">
-              {terminal
-                ? '（目标已结束，上下文只读）'
-                : '同目标所有衍生任务派工时共享此上下文；保存后「下一派工」按新版本对齐，正在执行的任务不打断。'}
-            </span>
-            {canEdit && !editing && (
-              <button className="btn icon ghost" disabled={busy} title="编辑目标上下文（写 docs/goals/ 镜像只读副本由守护维护）" onClick={startEdit}>✏️ 编辑</button>
-            )}
-            {editing && (
-              <>
-                <button className="btn icon ghost" disabled={saving} title="保存并 bump 版本" onClick={() => void save()}>💾 保存</button>
-                <button className="btn icon ghost" disabled={saving} title="放弃修改" onClick={() => setEditing(false)}>↩ 放弃</button>
-              </>
-            )}
-          </div>
-          {editing ? (
-            <textarea
-              className="goal-ctx-edit"
-              value={draft}
-              onChange={e => setDraft(e.target.value)}
-              placeholder="写目标级共享上下文（markdown）：约束、口径、文件域地图、验收要点…任何同目标任务都应遵守的全局约定。留空 = 该目标暂无共享上下文。"
-              rows={5}
-            />
-          ) : (
-            <pre className="goal-ctx-body">
-              {goal.context && goal.context.trim() !== ''
-                ? goal.context
-                : '（未填写目标上下文——派工仅携带各自任务描述；在此填写后，同目标并行任务即可共享统一口径，避免窜台。）'}
-            </pre>
-          )}
-          <div className="goal-act-head">📜 本目标最近动态</div>
-          <div className="goal-act-list">
-            {activity === null && <div className="goal-act-empty">读取中…</div>}
-            {activity !== null && activity.length === 0 && <div className="goal-act-empty">暂无本目标动态</div>}
-            {activity !== null && activity.map(row => (
-              <div key={row.seq} className="goal-act-row">
-                <span className="goal-act-time">{fmtGoalTime(row.ts)}</span>
-                <span className="goal-act-action">{GOAL_ACT_TEXT[row.action] ?? row.action}</span>
-                <span className="goal-act-who">{row.member}</span>
-                <span className="goal-act-txt">
-                  {row.taskId ? `[${row.taskId}] ` : ''}
-                  {typeof row.detail === 'object' && row.detail !== null && 'summary' in row.detail
-                    ? String((row.detail as { summary?: unknown }).summary ?? row.detail)
-                    : ''}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
 export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces, goalInfo, hubActive = false, onGoalStatus, onSaveContext }: CenterPanelProps): React.JSX.Element {
   const isRoster = rosterAgents !== null && rosterAgents !== undefined
   // 多目标：进度 = 该空间未取消目标的任务合计（各目标各自链独立统计后加总）；未就绪显示占位，绝不回退 v1 board.goal
@@ -270,13 +90,6 @@ export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces
   const aggDone = countedGoals.reduce((a, g) => a + g.done, 0)
   const aggTotal = countedGoals.reduce((a, g) => a + g.total, 0)
   const aggPct = aggTotal > 0 ? Math.round((aggDone / aggTotal) * 100) : null
-  const [busyGoal, setBusyGoal] = useState<string | null>(null)
-  const goalStatus = (g: HubGoal, status: GoalStatus): void => {
-    if (!onGoalStatus) return
-    setBusyGoal(g.id)
-    const label = status === 'paused' ? '⏸ 已暂停' : status === 'active' ? '▶ 已恢复' : status === 'canceled' ? '✕ 已取消' : '✅ 已收尾'
-    void onGoalStatus(g.id, status, label).finally(() => setBusyGoal(null))
-  }
   // 中核对当前空间的兜底过滤：只保留属于本空间的智能体（杜绝「全部空间」数据泄漏/窜台）
   const currentRoster = scope
     ? (rosterAgents ?? []).filter(a => !a.scope || a.scope === scope)
@@ -342,26 +155,16 @@ export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces
             )}
             <span className="goals-hint">多个目标可并存推进，互不取消</span>
           </div>
-          {hubGoals.length === 0 ? (
-            <div className="obj empty">
-              {hubActive && goalInfo === null
-                ? '读取目标中…'
-                : `尚未发布目标（${scope ?? '该空间'}）· 点底部「🎯 发布目标」新增，可同时发布多个目标并发推进`}
-            </div>
+          {goalInfo === null ? (
+            <div className="obj empty">读取目标中…</div>
           ) : (
-            <div className="goals-list">
-              {hubGoals.map(g => (
-                <GoalRow
-                  key={g.id}
-                  goal={g}
-                  busy={busyGoal === g.id}
-                  onPause={() => goalStatus(g, 'paused')}
-                  onResume={() => goalStatus(g, 'active')}
-                  onCancel={() => goalStatus(g, 'canceled')}
-                  onSaveContext={onSaveContext}
-                />
-              ))}
-            </div>
+            <GoalsBoard
+              goals={hubGoals}
+              scope={scope}
+              onGoalStatus={onGoalStatus}
+              onSaveContext={onSaveContext}
+              onOpenTask={id => setDetailTaskId(id)}
+            />
           )}
         </div>
       ) : (

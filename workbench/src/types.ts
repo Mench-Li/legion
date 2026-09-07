@@ -335,6 +335,8 @@ export interface HubTask {
   id: string
   title: string
   description: string
+  /** 归属目标（多目标并发：链任务挂 goalId；手工任务可为 null）。 */
+  goalId?: string | null
   acceptance: string[]
   /** 边界：做什么/不做什么（生成任务时自动带，见 team-hub/stage-standards.mjs）。 */
   boundary?: TaskBoundary

@@ -1541,6 +1541,240 @@ body {
 .skill-repo .sr-report .sr-line.warn { color: #e7b65b; border-color: rgba(231, 182, 91, 0.4); background: rgba(231, 182, 91, 0.08); }
 .skill-repo .sr-report .sr-names { color: var(--text); }
 
+/* ═══════════ 目标看板（GoalsBoard）：状态分组横向滑动卡片 + 详情 ═══════════ */
+.goals-rails {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+.goals-rails .obj.empty {
+  color: var(--muted);
+  font-size: 11.5px;
+  padding: 8px 2px;
+  white-space: normal;
+}
+/* 筛选行 */
+.goals-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.gfilter-chip {
+  cursor: pointer;
+  user-select: none;
+  font-size: 11px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line-2);
+  color: var(--muted);
+  background: transparent;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.gfilter-chip:hover { border-color: rgba(91, 140, 255, 0.5); color: var(--blue); }
+.gfilter-chip.on { background: rgba(91, 140, 255, 0.2); color: #fff; border-color: rgba(91, 140, 255, 0.75); }
+.gfc-active.on { background: rgba(57, 211, 150, 0.16); border-color: rgba(57, 211, 150, 0.7); color: #fff; }
+.gfc-paused.on { background: rgba(246, 191, 38, 0.16); border-color: rgba(246, 191, 38, 0.7); color: #fff; }
+.gfc-done.on { background: rgba(90, 160, 255, 0.16); border-color: rgba(90, 160, 255, 0.7); color: #fff; }
+.gfc-canceled.on { background: rgba(255, 255, 255, 0.08); border-color: rgba(255, 255, 255, 0.35); color: var(--text-2); }
+.goals-filter-hint {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--muted-2);
+}
+/* 单条状态轨道 */
+.goal-rail { display: flex; flex-direction: column; gap: 5px; }
+.goal-rail-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.grt-name { font-weight: 600; color: var(--text); }
+.grt-count {
+  font-size: 10px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--line-2);
+  color: var(--muted);
+}
+.goal-rail-track {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 2px 2px 8px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-2) transparent;
+}
+.goal-rail-track::-webkit-scrollbar { height: 6px; }
+.goal-rail-track::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 3px; }
+/* 目标卡片 */
+.goal-tile {
+  position: relative;
+  flex: 0 0 268px;
+  width: 268px;
+  min-height: 118px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-2);
+  cursor: pointer;
+  transition: border-color 0.12s, transform 0.12s, box-shadow 0.12s;
+}
+.goal-tile::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 3px;
+  border-radius: 10px 10px 0 0;
+}
+.goal-tile:hover { border-color: rgba(91, 140, 255, 0.55); transform: translateY(-1px); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25); }
+.goal-tile.gt-active::before { background: var(--green); }
+.goal-tile.gt-paused::before { background: var(--yellow); }
+.goal-tile.gt-done::before { background: var(--blue); }
+.goal-tile.gt-canceled::before { background: var(--muted-2); }
+.goal-tile.gt-done, .goal-tile.gt-canceled { opacity: 0.78; }
+.gt-head { display: flex; align-items: center; gap: 6px; }
+.gt-status-label { font-size: 10px; font-weight: 600; }
+.goal-tile.gt-active .gt-status-label { color: var(--green); }
+.goal-tile.gt-paused .gt-status-label { color: var(--yellow); }
+.goal-tile.gt-done .gt-status-label { color: var(--blue); }
+.goal-tile.gt-canceled .gt-status-label { color: var(--muted); text-decoration: line-through; }
+.gt-obj {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  min-height: 2.1em;
+}
+.gt-meta { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.gt-chip {
+  font-size: 9.5px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 4px;
+  padding: 1px 5px;
+  white-space: nowrap;
+}
+.gt-chip.mono, .goal-ver.mono, .gt-task-id.mono, .gd-task-id.mono { font-family: Consolas, 'Courier New', monospace; }
+.gt-chip.ctx.has { color: var(--green); border: 1px solid rgba(57, 211, 150, 0.3); }
+.gt-chip.mode { color: var(--yellow); }
+.gt-prog { margin-top: auto; display: flex; flex-direction: column; gap: 4px; }
+.gt-bar { height: 5px; background: var(--line-2); border-radius: 3px; overflow: hidden; }
+.gt-bar i { display: block; height: 100%; background: linear-gradient(90deg, var(--blue), var(--green)); border-radius: 3px; }
+.gt-bar-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.gt-foot { font-size: 9.5px; color: var(--muted-2); }
+/* 已收尾 / 已取消 折叠条 */
+.goal-arch-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 11.5px;
+  color: var(--muted);
+  padding: 5px 8px;
+  border: 1px dashed var(--line-2);
+  border-radius: 8px;
+  transition: background 0.12s, border-color 0.12s;
+}
+.goal-arch-toggle:hover { background: rgba(255, 255, 255, 0.03); border-color: rgba(91, 140, 255, 0.4); }
+.goal-arch-hint { margin-left: auto; font-size: 10px; color: var(--muted-2); }
+/* ── 目标详情弹层 ── */
+.modal.goal-modal {
+  width: min(1080px, 96vw);
+  max-width: 96vw;
+}
+.gd-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 13px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.gd-head > .btn { flex: none; margin-top: 2px; }
+.gd-title-wrap { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.gd-title { font-size: 15px; font-weight: 700; line-height: 1.45; color: var(--text); word-break: break-word; }
+.gd-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.gd-actions { flex: none; display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; max-width: 240px; }
+.gd-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.gd-main, .gd-side { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.gd-block-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+.gd-block-sub { font-size: 10.5px; color: var(--muted-2); font-weight: 400; }
+.gd-agg { margin-left: auto; width: 120px; }
+.gd-agg .goal-bar { height: 6px; }
+.gd-ctx-body { max-height: 220px; }
+.gd-act-list { max-height: 200px; }
+/* 链任务分组（详情内按任务状态划分） */
+.gd-task-groups { display: flex; flex-direction: column; gap: 8px; }
+.gd-task-group { display: flex; flex-direction: column; gap: 3px; }
+.gd-task-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 2px 0;
+}
+.gd-task-group.tg-todo .gd-task-group-head { color: var(--muted); }
+.gd-task-group.tg-in_progress .gd-task-group-head { color: var(--blue); }
+.gd-task-group.tg-in_review .gd-task-group-head { color: var(--yellow); }
+.gd-task-group.tg-blocked .gd-task-group-head { color: var(--red); }
+.gd-task-group.tg-done .gd-task-group-head { color: var(--green); }
+.gd-task-group.tg-canceled .gd-task-group-head { color: var(--muted-2); }
+.gd-task-list { display: flex; flex-direction: column; gap: 3px; }
+.gd-task {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11.5px;
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+  transition: background 0.1s, border-color 0.1s;
+}
+.gd-task.clickable { cursor: pointer; }
+.gd-task.clickable:hover { background: rgba(91, 140, 255, 0.1); border-color: rgba(91, 140, 255, 0.4); }
+.gd-task-id { flex: none; font-size: 10px; color: var(--blue); }
+.gd-task-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
+.gd-task-who { flex: none; font-size: 10px; color: var(--muted); }
+@media (max-width: 980px) {
+  .gd-body { grid-template-columns: 1fr; }
+}
+
 .skill-prompt summary {
   font-size: 10px;
   color: var(--muted-2);

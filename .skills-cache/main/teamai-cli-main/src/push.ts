@@ -1,0 +1,906 @@
+import path from 'node:path';
+import YAML from 'yaml';
+import { autoDetectInit, loadStateForScope, saveStateForScope } from './config.js';
+import { assertNotReadOnly } from './read-only.js';
+import {
+  createGit, pullRepo, pushRepoBranch, checkoutMaster, generateBranchName,
+  resetToCleanMaster, isDedicatedRepoRoot, getDefaultBranch, getFileContentAtRev,
+} from './utils/git.js';
+import {
+  findPendingForItem, partiallySelectedEntries, pendingNamespaceFor, planPushGroups,
+  prunePendingPushes, recordPendingPush, toPendingItems, type PushGroup,
+} from './utils/pending-push.js';
+import { syncTeamUpdatesToLocal } from './utils/pre-push-sync.js';
+import { getProvider } from './providers/index.js';
+import { log, spinner } from './utils/logger.js';
+import { getHandler } from './resources/index.js';
+import { scanTeamRepoNamespaces } from './resources/skills.js';
+import type {
+  GlobalOptions, ResourceItem, ResourceType, LocalConfig, TeamaiConfig, State,
+} from './types.js';
+import { getDataHome, SYNC_LOCK_FILENAME } from './types.js';
+import { acquireLock, releaseLock } from './update.js';
+import { assertSafePath, assertSafeResourceName, defaultAllowedRoots } from './utils/path-safety.js';
+import { loadRolesManifest, resolveRoleResourceNamespaces } from './roles.js';
+import { askQuestion, askSelection } from './utils/prompt.js';
+import { pathExists, readFileSafe, writeFile } from './utils/fs.js';
+
+/**
+ * Synthetic toolPaths key used only to make `teamai push` scan the active tree's
+ * .teamai/{skills,rules} in single-repo mode (see pushCore). It is never written
+ * to disk and never used by pull — the leading marker keeps it from colliding
+ * with any real agent id.
+ */
+const SELF_KNOWLEDGE_SCAN_KEY = '__teamai_self_knowledge__';
+
+/**
+ * Filter a list of repo-root-relative paths (e.g. "rules/", "env/") down to
+ * those that actually exist on disk. `git add` throws `pathspec did not match
+ * any files` when any argument doesn't exist, so we guard against that when
+ * passing "sweeper" directories that may or may not be present in a given
+ * team repo (e.g. a pure-wiki team has no rules/ or env/).
+ */
+export async function filterExistingTopLevelPaths(
+  repoPath: string,
+  candidates: string[],
+): Promise<string[]> {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const candidate of candidates) {
+    if (seen.has(candidate)) continue;
+    seen.add(candidate);
+    const trimmed = candidate.replace(/\/+$/, '');
+    // Empty string (e.g. from "/" only) is nonsense; skip.
+    if (!trimmed) continue;
+    if (await pathExists(path.join(repoPath, trimmed))) {
+      result.push(candidate);
+    }
+  }
+  return result;
+}
+
+/**
+ * Resolve available skill namespaces for the current user.
+ * Returns the deduplicated list from the manifest (via role config),
+ * or falls back to [primaryRole] if no manifest exists.
+ */
+async function resolveSkillNamespaces(
+  repoPath: string,
+  primaryRole: string,
+  additionalRoles: string[],
+): Promise<string[]> {
+  try {
+    const manifest = await loadRolesManifest(repoPath);
+    const namespaces = resolveRoleResourceNamespaces({
+      manifest,
+      primaryRole,
+      additionalRoles,
+    });
+    return namespaces.skills;
+  } catch {
+    return [primaryRole];
+  }
+}
+
+/**
+ * Create a PR/MR via the configured provider with standard error handling.
+ * Returns the PR URL on success, or null if creation failed (branch is still pushed).
+ */
+async function createPrWithFallback(
+  teamConfig: { repo: string; provider?: string; reviewers?: string[] },
+  localConfig: { repo: { remote: string; localPath: string } },
+  branchName: string,
+  title: string,
+  description: string,
+): Promise<string | null> {
+  const provider = getProvider(teamConfig.provider);
+  const mrSpin = spinner('Creating Pull Request...').start();
+  try {
+    let repoInfo;
+    try {
+      repoInfo = provider.parseRepoInput(teamConfig.repo);
+    } catch {
+      repoInfo = provider.parseRepoInput(localConfig.repo.remote);
+    }
+
+    const targetBranch = await getDefaultBranch(localConfig.repo.localPath);
+    const prUrl = await provider.createPullRequest({
+      repo: `${repoInfo.owner}/${repoInfo.repo}`,
+      source: branchName,
+      target: targetBranch,
+      title,
+      description,
+      reviewers: teamConfig.reviewers?.length ? teamConfig.reviewers : undefined,
+      cwd: localConfig.repo.localPath,
+    });
+    mrSpin.succeed(`Pull Request created: ${prUrl}`);
+    return prUrl;
+  } catch (e) {
+    mrSpin.fail(`Failed to create PR: ${(e as Error).message}`);
+    log.info(`Branch ${branchName} has been pushed. You can create a PR manually.`);
+    return null;
+  }
+}
+
+export { createPrWithFallback };
+
+/**
+ * Push each selected resource into the team repo, commit it on a branch, and
+ * open (or update) the matching PR. Returns false when the push failed, after
+ * rolling back the copies so the next scan sees a clean tree.
+ */
+async function pushGroup(args: {
+  group: PushGroup;
+  teamConfig: TeamaiConfig;
+  localConfig: LocalConfig;
+  pushState: State;
+  includeTeamConfig: boolean;
+}): Promise<boolean> {
+  const { group, teamConfig, localConfig, pushState, includeTeamConfig } = args;
+  const { items, reuse } = group;
+
+  // pushItem copies files into the team repo's working tree. If any later
+  // step (refreshMarketplace, pushRepoBranch, createPullRequest) fails, we
+  // must wipe those copies + any staging so the next `teamai push` scans
+  // cleanly instead of reporting "No new resources" (BUG #2).
+  const pushSpin = spinner('Pushing resources...').start();
+  const pushedFiles: string[] = [];
+  let workingTreeDirtied = false;
+
+  try {
+    for (const item of items) {
+      const handler = getHandler(item.type);
+      await handler.pushItem(item, teamConfig, localConfig);
+      workingTreeDirtied = true;
+      pushedFiles.push(item.relativePath);
+    }
+
+    // Refresh marketplace.json if it exists and skills were pushed
+    if (items.some((i) => i.type === 'skills')) {
+      try {
+        const { refreshMarketplace } = await import('./resources/marketplace.js');
+        const updated = await refreshMarketplace(localConfig.repo.localPath);
+        if (updated) {
+          pushedFiles.push('.codebuddy-plugin/marketplace.json');
+          log.debug('Refreshed marketplace.json');
+        }
+      } catch (e) {
+        log.debug(`Marketplace refresh skipped: ${(e as Error).message}`);
+      }
+    }
+
+    // Create branch, commit, and push.
+    // Only include "sweeper" directories (rules/, env/) that actually
+    // exist — otherwise `git add 'rules/'` throws `pathspec did not match
+    // any files` and the whole push aborts (BUG #1). A team may not have
+    // rules/ or env/ yet.
+    const sweeperCandidates = ['rules/', 'env/', '.codebuddy-plugin/'];
+    const existingSweepers = await filterExistingTopLevelPaths(
+      localConfig.repo.localPath,
+      sweeperCandidates,
+    );
+    // Include teamai.yaml when the user edited it (e.g. `teamai source add`), so
+    // sources / publicSkills changes ride along in the same PR as the resources.
+    const configFiles = includeTeamConfig ? ['teamai.yaml'] : [];
+    const gitFiles = [...new Set([...pushedFiles, ...existingSweepers, ...configFiles])];
+    const branchName = reuse?.branch ?? generateBranchName(localConfig.username);
+    const commitMsg = `[teamai] Push ${items.length} resource(s) from ${localConfig.username}`;
+
+    const hasChanges = await pushRepoBranch(
+      localConfig.repo.localPath,
+      commitMsg,
+      gitFiles,
+      branchName,
+      { reuseBranch: Boolean(reuse) },
+    );
+    // pushRepoBranch committed (or deleted the branch) — working tree is
+    // clean either way from the branch's perspective.
+    workingTreeDirtied = false;
+
+    if (!hasChanges) {
+      pushSpin.succeed(
+        reuse
+          ? `No changes to push (PR already up to date: ${reuse.prUrl ?? branchName})`
+          : 'No changes to push (files already up to date)',
+      );
+      return true;
+    }
+
+    pushSpin.succeed(`Pushed branch ${branchName}`);
+
+    let prUrl: string | null;
+    if (reuse) {
+      // The PR tracks this branch, so the force-push above already updated it.
+      prUrl = reuse.prUrl;
+      log.success(`Existing PR updated: ${prUrl ?? branchName}`);
+    } else {
+      prUrl = await createPrWithFallback(
+        teamConfig,
+        localConfig,
+        branchName,
+        commitMsg,
+        `Pushed ${items.length} resource(s):\n${items.map((i) => `- [${i.type}] ${i.name}`).join('\n')}`,
+      );
+      if (!prUrl) {
+        process.exitCode = 1;
+      }
+    }
+
+    // Remember the open PR so the next run updates it instead of opening a
+    // duplicate. Recorded even when PR creation failed: the branch is on the
+    // remote, so pushing again must reuse it.
+    recordPendingPush(pushState, {
+      branch: branchName,
+      prUrl,
+      createdAt: new Date().toISOString(),
+      items: toPendingItems(items),
+    });
+
+    // Switch back to the default branch so the next group starts clean
+    await checkoutMaster(localConfig.repo.localPath);
+    return true;
+  } catch (e) {
+    pushSpin.fail(`Push failed: ${(e as Error).message}`);
+    if (workingTreeDirtied) {
+      try {
+        const git = createGit(localConfig.repo.localPath);
+        await git.reset(['--hard', 'HEAD']);
+        await git.clean('f', ['-d']);
+        log.debug('Rolled back team repo working tree after failed push');
+      } catch (cleanupErr) {
+        log.warn(
+          `Warning: team repo may be in a dirty state. Run \`git -C ${localConfig.repo.localPath} reset --hard && git clean -fd\` manually. (${(cleanupErr as Error).message})`,
+        );
+      }
+    }
+    return false;
+  }
+}
+
+export async function push(options: GlobalOptions & { all?: boolean; role?: string }): Promise<void> {
+  // Auto-detect scope: project scope if cwd has project config, else user scope
+  const { localConfig, teamConfig } = await autoDetectInit();
+  assertNotReadOnly(localConfig, 'teamai push');
+  try {
+    const configContent = await readFileSafe(path.join(localConfig.repo.localPath, 'teamai.yaml'));
+    const rawConfig = configContent === null ? null : YAML.parse(configContent);
+    if (
+      rawConfig
+      && typeof rawConfig === 'object'
+      && !Array.isArray(rawConfig)
+      && Object.prototype.hasOwnProperty.call(rawConfig, 'packages')
+    ) {
+      const { loadPackageManifest } = await import('./pkg/manifest.js');
+      await loadPackageManifest(localConfig.repo.localPath);
+    }
+  } catch (e) {
+    log.error(`Cannot push invalid package declarations: ${(e as Error).message}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  // Single-repo mode: knowledge PRs must run in an isolated worktree so the
+  // branch/commit/reset never touch the user's active tree. withKnowledgeWorktree
+  // hands pushCore a config whose localPath is the worktree's .teamai.
+  if (localConfig.repo.kind === 'self') {
+    // Self-heal an older .teamai/.gitignore that still ignores `env` (pre-beta.5).
+    // Run against the ACTIVE tree (original localConfig, projectRoot intact) BEFORE
+    // swapping into the worktree, so the fixed .gitignore lets env changes surface.
+    try {
+      const { migrateSelfModeGitignore } = await import('./init.js');
+      await migrateSelfModeGitignore(localConfig);
+    } catch { /* best-effort */ }
+
+    const { withKnowledgeWorktree, EmptyRepoError } = await import('./utils/reports-branch.js');
+    try {
+      const activeConfigPath = path.join(localConfig.repo.localPath, 'teamai.yaml');
+      const activeConfig = await readFileSafe(activeConfigPath);
+      const businessRoot = localConfig.repo.businessRepoRoot ?? localConfig.projectRoot;
+      let pendingTeamConfig: string | null = null;
+      if (activeConfig !== null && businessRoot) {
+        const relativeConfigPath = path.relative(businessRoot, activeConfigPath).split(path.sep).join('/');
+        const committed = await getFileContentAtRev(businessRoot, 'HEAD', relativeConfigPath);
+        if (committed === null || committed.toString() !== activeConfig) {
+          pendingTeamConfig = activeConfig;
+        }
+      }
+      await withKnowledgeWorktree(localConfig, async (wtConfig) => {
+        if (pendingTeamConfig !== null) {
+          await writeFile(path.join(wtConfig.repo.localPath, 'teamai.yaml'), pendingTeamConfig);
+        }
+        await pushCore(wtConfig, teamConfig, options, pendingTeamConfig);
+      });
+    } catch (e) {
+      if (e instanceof EmptyRepoError) {
+        log.error(e.message);
+      } else {
+        log.error(`Push failed: ${(e as Error).message}`);
+      }
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  // Guard the shared team clone: push resets to clean master, pulls, then
+  // branches/commits/pushes on one clone shared by all worktrees of this repo.
+  // A concurrent pull/push would corrupt it. Unlike pull, push must NOT silently
+  // skip (that would drop the user's changes), so on contention we error out.
+  const syncLock = path.join(getDataHome(localConfig), SYNC_LOCK_FILENAME);
+  const locked = await acquireLock(syncLock);
+  if (!locked) {
+    log.error('Another teamai pull/push is in progress for this project. Re-run once it finishes.');
+    process.exitCode = 1;
+    return;
+  }
+  try {
+    await pushCore(localConfig, teamConfig, options);
+  } finally {
+    await releaseLock(syncLock);
+  }
+}
+
+async function pushCore(
+  localConfig: LocalConfig,
+  teamConfig: TeamaiConfig,
+  options: GlobalOptions & { all?: boolean; role?: string },
+  initialPendingTeamConfig: string | null = null,
+): Promise<void> {
+  const selfMode = localConfig.repo.kind === 'self';
+  const scopeLabel = localConfig.scope;
+
+  // Pull latest default branch BEFORE scanning so detection runs against up-to-date repo.
+  // The team repo may be in various broken states from previous failed pushes:
+  //   - Unmerged (conflicted) files without MERGE_HEAD (incomplete merge)
+  //   - Stuck on a stale push branch instead of master
+  //   - Uncommitted changes (e.g. votes written by autoUpvote)
+  // We recover from all of these before pulling.
+  // In self mode the worktree is already a fresh detached checkout of
+  // origin/<default>, so resetToCleanMaster/pullRepo (which assume a normal
+  // clone on a branch) are neither needed nor safe — skip them.
+  // Uncommitted teamai.yaml edits (e.g. from `teamai source add`, which writes the
+  // file but does not commit) live in the team repo working tree. resetToCleanMaster
+  // below does `git reset --hard`, which would silently destroy them. Capture the
+  // working-tree content before the reset and restore it after pull, so config edits
+  // survive and get committed alongside resources (see gitFiles construction below).
+  let pendingTeamConfig: string | null = initialPendingTeamConfig;
+  if (!selfMode) {
+    const pullSpin = spinner('Pulling latest changes...').start();
+    try {
+      const repoPath = localConfig.repo.localPath;
+      const git = createGit(repoPath);
+      if (!(await isDedicatedRepoRoot(repoPath))) {
+        // repoPath is not its own git root (e.g. a project-scope team repo dir with no
+        // dedicated .git that resolves to the business repo). Every step below — reset
+        // --hard, checkout, and pushRepoBranch — would act on the enclosing business
+        // repo and wipe the user's working tree. Abort the whole push with a clear
+        // message rather than silently doing nothing or damaging their repo.
+        pullSpin.fail('Cannot push: team repo path is not a dedicated git root. '
+          + 'Run `teamai init` to re-clone the team repo before pushing.');
+        process.exitCode = 1;
+        return;
+      }
+      const yamlPath = path.join(repoPath, 'teamai.yaml');
+      const workingContent = await readFileSafe(yamlPath);
+      if (workingContent !== null) {
+        const committed = await getFileContentAtRev(repoPath, 'HEAD', 'teamai.yaml');
+        if (committed === null || committed.toString() !== workingContent) {
+          pendingTeamConfig = workingContent;
+        }
+      }
+      await resetToCleanMaster(git, repoPath);
+      await pullRepo(repoPath);
+      if (pendingTeamConfig !== null) {
+        // Re-apply the user's config edits on top of the freshly pulled default branch.
+        await writeFile(yamlPath, pendingTeamConfig);
+      }
+      pullSpin.succeed('Up to date');
+    } catch (e) {
+      pullSpin.warn(`Pull failed: ${(e as Error).message}`);
+    }
+  }
+
+  // Sync team repo updates to local tool directories before scanning.
+  // This prevents files changed by teammates from being falsely flagged as "modified".
+  try {
+    const state = await loadStateForScope(localConfig);
+    await syncTeamUpdatesToLocal(teamConfig, localConfig, state.lastPullRev);
+  } catch (e) {
+    log.debug(`Pre-push sync skipped: ${(e as Error).message}`);
+  }
+
+  const spin = spinner('Scanning local resources...').start();
+
+  // In single-repo mode the team knowledge dirs (.teamai/skills, .teamai/rules)
+  // live inside the user's own repo, so people naturally add or edit skills there
+  // directly (e.g. `cp my-skill .teamai/skills/`) instead of in an AI tool dir
+  // like ~/.claude/skills. The default scanner only treats AI tool dirs as push
+  // "sources", so a skill hand-placed under .teamai/skills would be invisible to
+  // push ("No new or modified resources"). Add the ACTIVE tree's .teamai/{skills,
+  // rules} as extra scan sources; they are diffed against the worktree checkout of
+  // origin/<default> (localConfig.repo.localPath here), so already-committed
+  // knowledge is skipped and only genuine additions/edits surface.
+  //
+  // Scan-only: we deliberately do NOT persist this into teamConfig.toolPaths — pull
+  // and pre-push sync must never target .teamai/skills (that would copy knowledge
+  // back onto itself). getHandler(type).scanLocalForPush reads toolPaths for the
+  // source list only; pushItem writes via localConfig.repo.localPath, unaffected.
+  const scanTeamConfig: TeamaiConfig = selfMode
+    ? {
+      ...teamConfig,
+      toolPaths: {
+        ...teamConfig.toolPaths,
+        [SELF_KNOWLEDGE_SCAN_KEY]: { skills: '.teamai/skills', rules: '.teamai/rules' },
+      },
+    }
+    : teamConfig;
+
+  // Scan for pushable resources first, then resolve namespace for new skills only.
+  // Modified skills already carry their namespace from scanLocalForPush.
+  const pushableTypes: ResourceType[] = ['skills', 'rules', 'env', 'agents'];
+  const allItems: ResourceItem[] = [];
+
+  for (const type of pushableTypes) {
+    const handler = getHandler(type);
+    const items = await handler.scanLocalForPush(scanTeamConfig, localConfig);
+    allItems.push(...items);
+  }
+
+  // Snapshot the full scan before --skill/--role narrow allItems. prunePendingPushes
+  // must see every pending resource that is still locally present, or narrowing to
+  // one skill would drop the other skills' open-PR records and duplicate them next run.
+  const fullScan: ResourceItem[] = [...allItems];
+
+  spin.stop();
+
+  // ── Handle --skill parameter: filter to a single specific skill ──────
+  if (options.skill) {
+    // Validate the skill name: take the basename of the input path as the
+    // resource name to defend against path traversal, URL-encoded bypasses,
+    // and other illegal characters.
+    const skillBasename = path.basename(
+      options.skill.startsWith('~')
+        ? options.skill.slice(1).replace(/^[/\\]+/, '')
+        : options.skill,
+    );
+    try {
+      assertSafeResourceName(skillBasename);
+    } catch (e) {
+      console.error(`[push] Invalid --skill argument: ${(e as Error).message}`);
+      process.exitCode = 2;
+      return;
+    }
+
+    // Normalize the input path (expand ~, resolve to absolute)
+    const os = await import('node:os');
+    const skillPath = options.skill.startsWith('~')
+      ? path.join(os.homedir(), options.skill.slice(1))
+      : path.resolve(options.skill);
+
+    // Try to find matching skill from scan results first
+    let matchedItem: ResourceItem | undefined;
+
+    for (const item of allItems) {
+      if (item.type !== 'skills') continue;
+
+      // Match by sourcePath (absolute path)
+      if (path.resolve(item.sourcePath) === skillPath) {
+        matchedItem = item;
+        break;
+      }
+
+      // Match by skill name
+      if (item.name === path.basename(skillPath)) {
+        matchedItem = item;
+        break;
+      }
+
+      // Match by partial path (e.g., "skills/namespace/skillname" in sourcePath)
+      const skillInput = options.skill.replace(/^~/, os.homedir());
+      if (item.sourcePath.endsWith(skillInput) || item.sourcePath.includes(path.sep + skillInput)) {
+        matchedItem = item;
+        break;
+      }
+    }
+
+    // If not found in scan results, force-construct a ResourceItem from the
+    // specified path. This handles cases where:
+    //   - The skill exists in both a subdirectory (with modifications) and
+    //     at the top level (pulled copy identical to team repo), causing the
+    //     scanner to see the top-level copy first and skip the modified one.
+    //   - The skill content is identical to team repo (no diff detected) but
+    //     the user explicitly wants to push it anyway.
+    if (!matchedItem) {
+      if (await pathExists(skillPath) && await pathExists(path.join(skillPath, 'SKILL.md'))) {
+        const skillName = path.basename(skillPath);
+
+        // Try to detect existing namespace from team repo
+        let namespace: string | undefined;
+        let status: 'new' | 'modified' = 'new';
+        const teamSkillsDir = path.join(localConfig.repo.localPath, 'skills');
+        if (await pathExists(teamSkillsDir)) {
+          const { listDirs } = await import('./utils/fs.js');
+          const topDirs = await listDirs(teamSkillsDir);
+          for (const dir of topDirs) {
+            const candidatePath = path.join(teamSkillsDir, dir, skillName);
+            if (await pathExists(candidatePath)) {
+              // Check if this is a namespace dir (not a direct skill)
+              const isNamespace = !await pathExists(path.join(teamSkillsDir, dir, 'SKILL.md'));
+              if (isNamespace) {
+                namespace = dir;
+              }
+              status = 'modified';
+              break;
+            }
+          }
+          // Also check flat layout
+          if (!namespace && await pathExists(path.join(teamSkillsDir, skillName))) {
+            status = 'modified';
+          }
+        }
+
+        const relPath = namespace
+          ? `skills/${namespace}/${skillName}`
+          : `skills/${skillName}`;
+
+        matchedItem = {
+          name: skillName,
+          type: 'skills',
+          sourcePath: skillPath,
+          relativePath: relPath,
+          status,
+          namespace,
+        };
+        log.debug(`Force-pushing skill from explicit path: ${skillPath}`);
+      } else {
+        const skillNames = allItems
+          .filter(i => i.type === 'skills')
+          .map(i => `  - ${i.name} (from: ${i.sourcePath})`)
+          .join('\n');
+        log.error(`Skill not found at path: ${options.skill}`);
+        if (skillNames) {
+          console.log('');
+          console.log('Available skills with changes:');
+          console.log(skillNames);
+        }
+        process.exit(1);
+      }
+    }
+
+    // Replace allItems with just this one skill
+    allItems.length = 0;
+    allItems.push(matchedItem);
+
+    // A force-constructed matchedItem (scanner returned nothing for this skill
+    // because its content matches the team repo) is absent from fullScan. Add it
+    // so prunePendingPushes still sees this skill as locally present — otherwise
+    // its own open-PR record is dropped and the next run opens a duplicate.
+    if (!fullScan.some((i) => i.type === matchedItem!.type && i.name === matchedItem!.name)) {
+      fullScan.push(matchedItem);
+    }
+  }
+
+  // An explicit --role is a destination override for every selected skill,
+  // including modified skills. Keep relativePath aligned with pushItem's
+  // destination so git stages the files that were actually copied (#331).
+  if (options.role) {
+    try {
+      assertSafeResourceName(options.role);
+      for (const item of allItems) {
+        if (item.type === 'skills') {
+          assertSafeResourceName(item.name);
+        }
+      }
+    } catch (e) {
+      log.error(`Invalid skill role or name: ${(e as Error).message}`);
+      process.exitCode = 2;
+      return;
+    }
+    for (const item of allItems) {
+      if (item.type !== 'skills') continue;
+      item.namespace = options.role;
+      item.relativePath = `skills/${options.role}/${item.name}`;
+    }
+  }
+
+  // ── Step 0: Cross-check against still-open push PRs ────────────────
+  // Resources waiting in an unmerged PR are absent from the default branch, so
+  // the scan above flags them as new every single time. Without this check each
+  // run opens another duplicate PR.
+  const pushState = await loadStateForScope(localConfig);
+  const pruned = await prunePendingPushes(
+    localConfig.repo.localPath,
+    pushState.pendingPushes,
+    fullScan,
+  );
+  pushState.pendingPushes = pruned.pending;
+  if (pruned.changed) {
+    await saveStateForScope(pushState, localConfig);
+  }
+  const pendingPushes = pushState.pendingPushes;
+
+  if (allItems.length === 0) {
+    // No resource changes, but the user may have edited teamai.yaml (sources /
+    // publicSkills) via `teamai source add`. Push that config change on its own
+    // rather than reporting "nothing to push".
+    if (pendingTeamConfig !== null) {
+      await pushTeamConfigOnly(localConfig, teamConfig, options);
+      return;
+    }
+    log.info('No new or modified resources to push');
+    return;
+  }
+
+  // ── Step 1: Display ALL scanned items with numbers ─────────────────
+  console.log('');
+  console.log(`Found ${allItems.length} resource(s) to push:`);
+  console.log('');
+  const pendingIndices = new Set<number>();
+  for (let i = 0; i < allItems.length; i++) {
+    const item = allItems[i];
+    const statusLabel = item.status === 'modified' ? ' (modified)' : ' (new)';
+    const num = `${i + 1}.`.padStart(4);
+    console.log(`  ${num} [${item.type}] ${item.name}${statusLabel}`);
+    console.log(`       from: ${item.sourcePath}`);
+    // Show destination for modified skills that already have a namespace
+    if (item.type === 'skills' && item.namespace) {
+      console.log(`       to:   skills/${item.namespace}/${item.name}`);
+    }
+    const openPrs = findPendingForItem(pendingPushes, item);
+    if (openPrs.length > 0) {
+      pendingIndices.add(i);
+      for (const entry of openPrs) {
+        console.log(`       awaiting review: ${entry.prUrl ?? `branch ${entry.branch}`}`);
+      }
+    }
+  }
+  console.log('');
+
+  if (pendingIndices.size > 0) {
+    log.info(
+      `${pendingIndices.size} resource(s) already belong to an open PR. Keeping them selected updates `
+      + 'that PR instead of opening a duplicate; deselect them to leave it untouched.',
+    );
+    console.log('');
+  }
+
+  // ── Step 2: Dry run exits after display ────────────────────────────
+  if (options.dryRun) {
+    log.info('Dry run — no changes made');
+    return;
+  }
+
+  // ── Step 3: Item selection (replaces old Y/n confirmation) ─────────
+  let selectedItems: ResourceItem[];
+  if (options.all || options.silent) {
+    selectedItems = [...allItems];
+  } else {
+    const selectionPrompt = allItems.length === 1
+      ? 'Push this resource? [1/all/none] (default: all): '
+      : `Select items to push [1-${allItems.length}, or "all"] (default: all): `;
+    const indices = await askSelection(selectionPrompt, allItems.length, true);
+    if (!indices || indices.length === 0) {
+      log.info('Cancelled');
+      return;
+    }
+    selectedItems = indices.map((i) => allItems[i]);
+  }
+
+  // ── Step 3b: Split the selection into per-PR groups ────────────────
+  // Resources that belong to an open PR are pushed by force-pushing that PR's
+  // branch, which updates it in place; everything else goes into a new PR. Both
+  // can happen in one run, so editing a resource under review updates its PR
+  // without dragging unrelated resources into that review.
+  const groups = planPushGroups(selectedItems, pendingPushes);
+  for (const group of groups) {
+    if (!group.reuse) continue;
+    log.info(
+      `Updating existing PR instead of creating a new one: ${group.reuse.prUrl ?? group.reuse.branch}`,
+    );
+    // Reuse the destination chosen when that PR was opened rather than asking
+    // again — a different answer would silently move the skill.
+    for (const item of group.items) {
+      if (item.type !== 'skills' || item.status !== 'new') continue;
+      const ns = pendingNamespaceFor(group.reuse, item);
+      if (!ns) continue;
+      item.namespace = ns;
+      item.relativePath = `skills/${ns}/${item.name}`;
+    }
+  }
+  for (const entry of partiallySelectedEntries(selectedItems, pendingPushes)) {
+    log.warn(
+      `Only part of ${entry.prUrl ?? entry.branch} is selected, so the selected resources go into a `
+      + 'new PR and will exist in both. Select all of its resources to update it in place instead.',
+    );
+  }
+
+  // ── Step 4: Resolve namespace for NEW skills only (after selection) ─
+  const newSkills = selectedItems.filter(
+    (i) => i.type === 'skills' && i.status === 'new' && !i.namespace,
+  );
+  let resolvedNamespaceForNew: string | undefined;
+
+  if (newSkills.length > 0) {
+    if (options.role) {
+      // Explicit --role flag: use as namespace directly (backward compat)
+      resolvedNamespaceForNew = options.role;
+    } else if (localConfig.primaryRole) {
+      try {
+        const skillNamespaces = await resolveSkillNamespaces(
+          localConfig.repo.localPath,
+          localConfig.primaryRole,
+          localConfig.additionalRoles ?? [],
+        );
+
+        if (skillNamespaces.length === 0) {
+          resolvedNamespaceForNew = undefined;
+        } else if (skillNamespaces.length === 1) {
+          resolvedNamespaceForNew = skillNamespaces[0];
+        } else if (options.silent) {
+          resolvedNamespaceForNew = localConfig.primaryRole;
+        } else {
+          console.log('');
+          console.log('Which namespace should new skills be pushed to?');
+          skillNamespaces.forEach((ns, index) => {
+            console.log(`  ${index + 1}. ${ns}`);
+          });
+          console.log('');
+          const answer = await askQuestion(
+            `Choose namespace [1-${skillNamespaces.length}] (default: 1 = ${skillNamespaces[0]}): `,
+          );
+          const selection = answer ? Number.parseInt(answer, 10) : 1;
+          if (Number.isNaN(selection) || selection < 1 || selection > skillNamespaces.length) {
+            log.error(`Invalid selection. Choose a number between 1 and ${skillNamespaces.length}.`);
+            return;
+          }
+          resolvedNamespaceForNew = skillNamespaces[selection - 1];
+        }
+      } catch (e) {
+        log.error((e as Error).message);
+        return;
+      }
+    } else {
+      // No role configured — auto-detect namespaces from team repo structure
+      try {
+        const detectedNamespaces = await scanTeamRepoNamespaces(localConfig.repo.localPath);
+
+        if (detectedNamespaces.length === 0) {
+          resolvedNamespaceForNew = undefined;
+        } else if (detectedNamespaces.length === 1) {
+          resolvedNamespaceForNew = detectedNamespaces[0];
+        } else if (options.silent) {
+          resolvedNamespaceForNew = detectedNamespaces[0];
+        } else {
+          console.log('');
+          console.log('Which namespace should new skills be pushed to?');
+          detectedNamespaces.forEach((ns, index) => {
+            console.log(`  ${index + 1}. ${ns}`);
+          });
+          console.log('');
+          const answer = await askQuestion(
+            `Choose namespace [1-${detectedNamespaces.length}] (default: 1 = ${detectedNamespaces[0]}): `,
+          );
+          const selection = answer ? Number.parseInt(answer, 10) : 1;
+          if (Number.isNaN(selection) || selection < 1 || selection > detectedNamespaces.length) {
+            log.error(`Invalid selection. Choose a number between 1 and ${detectedNamespaces.length}.`);
+            return;
+          }
+          resolvedNamespaceForNew = detectedNamespaces[selection - 1];
+        }
+      } catch {
+        resolvedNamespaceForNew = undefined;
+      }
+    }
+
+    // Apply namespace to new skills
+    for (const item of newSkills) {
+      if (resolvedNamespaceForNew) {
+        item.namespace = resolvedNamespaceForNew;
+        item.relativePath = `skills/${resolvedNamespaceForNew}/${item.name}`;
+      }
+    }
+  }
+
+  // ── Step 5: Push each group — one branch/PR per group ──────────────
+  // Config edits ride along with the first group so they land in a single PR.
+  let configRider = pendingTeamConfig !== null;
+  for (const group of groups) {
+    const ok = await pushGroup({
+      group,
+      teamConfig,
+      localConfig,
+      pushState,
+      includeTeamConfig: configRider,
+    });
+    if (!ok) {
+      // The branch/PR for earlier groups is already on the remote, so their
+      // records must survive this failure or the next run would duplicate them.
+      await saveStateForScope(pushState, localConfig);
+      process.exitCode = 1;
+      return;
+    }
+    configRider = false;
+  }
+
+  // Update state (pushState already carries the pendingPushes records above)
+  const state = pushState;
+  state.lastPush = new Date().toISOString();
+  for (const item of selectedItems) {
+    if (item.type === 'skills' && !state.pushedSkills.includes(item.name)) {
+      state.pushedSkills.push(item.name);
+    }
+    if (item.type === 'rules' && !state.pushedRules.includes(item.name)) {
+      state.pushedRules.push(item.name);
+    }
+    if (item.type === 'env' && !state.pushedEnvVars.includes(item.name)) {
+      state.pushedEnvVars.push(item.name);
+    }
+  }
+  await saveStateForScope(state, localConfig);
+}
+
+/**
+ * Push a teamai.yaml-only change (e.g. from `teamai source add`) to the team repo
+ * via a PR. Called when the user edited config but changed no resources, so the
+ * normal resource-push path would exit with "No new or modified resources".
+ *
+ * Precondition: the working-tree teamai.yaml already carries the user's edits
+ * (restored after pull in pushCore) and the repo is a dedicated git root.
+ */
+async function pushTeamConfigOnly(
+  localConfig: LocalConfig,
+  teamConfig: TeamaiConfig,
+  options: GlobalOptions,
+): Promise<void> {
+  console.log('');
+  console.log('Found team config change to push:');
+  console.log('  - teamai.yaml');
+  console.log('');
+
+  if (options.dryRun) {
+    log.info('Dry run — no changes made');
+    return;
+  }
+
+  const pushSpin = spinner('Pushing team config...').start();
+  const branchName = generateBranchName(localConfig.username);
+  const commitMsg = `[teamai] Update team config from ${localConfig.username}`;
+
+  try {
+    const hasChanges = await pushRepoBranch(
+      localConfig.repo.localPath,
+      commitMsg,
+      ['teamai.yaml'],
+      branchName,
+    );
+    if (!hasChanges) {
+      pushSpin.succeed('No changes to push (config already up to date)');
+      return;
+    }
+    pushSpin.succeed(`Pushed branch ${branchName}`);
+
+    const prUrl = await createPrWithFallback(
+      teamConfig,
+      localConfig,
+      branchName,
+      commitMsg,
+      'Updated team config (teamai.yaml)',
+    );
+    if (!prUrl) {
+      process.exitCode = 1;
+    }
+
+    await checkoutMaster(localConfig.repo.localPath);
+  } catch (e) {
+    pushSpin.fail(`Push failed: ${(e as Error).message}`);
+    // pushRepoBranch may have left the repo on the push branch (e.g. it threw
+    // mid-push after creating the local branch). Switch back to the default
+    // branch so the next `teamai push` starts clean instead of stranded there.
+    try {
+      await checkoutMaster(localConfig.repo.localPath);
+    } catch (cleanupErr) {
+      log.debug(`Could not switch back to default branch: ${(cleanupErr as Error).message}`);
+    }
+    process.exitCode = 1;
+    return;
+  }
+}

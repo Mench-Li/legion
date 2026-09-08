@@ -1,0 +1,15 @@
+下面这段是本次会话开始前工作区里一项**与本任务无关的未提交改动**（plugins/src/index.ts「最终阶段」行为：从「停 in_review 等将军验收」改为「自动推进 done 收官」）。
+它与用户报告的两个问题（详情产物可预览、REQUIREMENTS.md 按目标划分）无关，并使 4 条既有插件测试失败（goal-context.test.mjs / worker-regression.test.mjs 中「final stage 应停 in_review」的断言）。
+为让修复建立在与既有代码/测试一致的基础上，已将其回退为 HEAD 的「停 in_review 并提交验收」行为；若该改动是故意为之，可据此恢复。
+
+--- 被回退的改动（会随 head 恢复而消失）---
+      } else {
+        // 最终阶段（如 devops 链尾 / 单角色模式）：智能体已完成自验（门禁/证据/报告），
+        // 自动推进 done 收官，不停等将军——将军职责收敛为：需求澄清（requirement 闸门）、
+        // 方案确认（researcher 闸门）、目标发布。目标是否收官由 hub advance 的 settleGoalsOfScope 判定。
+        const finalLabel = stage?.label ?? '任务'
+        await advanceTo(t.id, stage?.role ?? config.role)
+        await safeComment(t.id, `✓ ${finalLabel}完成并收官：${report.summary}\n证据：${report.evidence}${contractDocSummary(contractReg)}`)
+        activity('done', t.id, `${finalLabel}完成并收官：${report.summary}`)
+        log(`${t.id} → done（${finalLabel} 最终阶段，智能体自验收官）`)
+      }

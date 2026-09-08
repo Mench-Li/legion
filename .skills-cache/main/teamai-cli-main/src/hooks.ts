@@ -1,0 +1,1081 @@
+import path from 'node:path';
+import { realpathSync } from 'node:fs';
+import { readJson, writeJson, expandHome, ensureDir, pathExists } from './utils/fs.js';
+import { log } from './utils/logger.js';
+import { TEAMAI_HOOK_DESCRIPTION_PREFIX, TEAMAI_CUSTOM_HOOK_PREFIX, TEAMAI_AGENT_HOOK_PREFIX, resolveHookScope, resolveLegacyProjectHookScope } from './types.js';
+import type { HookDef, TeamaiConfig, LocalConfig } from './types.js';
+import { isSelfMode } from './types.js';
+import { builtinHookDefs, applyBuiltinOverride, ensureWrapperIfShellAvailable, SHELL_DEPENDENT_TOOLS } from './builtin-hooks.js';
+import type { BuiltinHookOverride } from './builtin-hooks.js';
+import { resolveTeamHooks } from './resources/hooks.js';
+import { getUserHome } from './utils/home.js';
+
+/**
+ * Lobster-family agents (OpenClaw engine) that use HOOK.md + handler.ts instead
+ * of settings.json (issue #1, 方案二 §四).
+ *
+ * WorkBuddy is intentionally NOT here: it reads Claude-format hooks from
+ * ~/.workbuddy/settings.json (verified on 5.2.0), so it routes through the
+ * settings-based injection path like codebuddy. The remaining claw variants
+ * stay on the OpenClaw HOOK.md path pending real-device confirmation.
+ */
+export const OPENCLAW_TOOLS = new Set(['openclaw', 'qclaw', 'easyclaw', 'autoclaw']);
+
+/** Subcommands expected in each tool settings file (for `teamai doctor`). */
+export const TEAMAI_HOOK_SUBCOMMANDS = ['hook-dispatch'] as const;
+
+/** Legacy subcommands that are cleaned up during migration. */
+export const TEAMAI_LEGACY_HOOK_SUBCOMMANDS = ['pull', 'update', 'track', 'track-slash', 'dashboard-report', 'contribute-check', 'auto-recall', 'todowrite-hint', 'mr-hint'] as const;
+
+/** Claude PascalCase event → Cursor camelCase event (for tests / docs). */
+export const CLAUDE_TO_CURSOR_EVENTS: Record<string, string> = {
+  SessionStart: 'sessionStart',
+  Stop: 'stop',
+  PostToolUse: 'postToolUse',
+  UserPromptSubmit: 'beforeSubmitPrompt',
+};
+
+// ─── On-disk shapes ─────────────────────────────────────────
+
+interface HookEntry {
+  type: string;
+  command: string;
+  /** Per-hook timeout in seconds. Falls back to the tool default if omitted. */
+  timeout?: number;
+}
+
+interface HookMatcher {
+  matcher: string;
+  hooks: HookEntry[];
+  description?: string;
+}
+
+interface ClaudeSettingsJson {
+  hooks?: Record<string, HookMatcher[]>;
+  [key: string]: unknown;
+}
+
+interface CursorHookEntry {
+  command: string;
+  timeout?: number;
+  matcher?: string;
+}
+
+interface CursorHooksJson {
+  version: number;
+  hooks: Record<string, CursorHookEntry[]>;
+}
+
+interface CodexHookEntry {
+  type: string;
+  command: string;
+  timeout?: number;
+}
+
+interface CodexHookMatcher {
+  matcher?: string;
+  hooks: CodexHookEntry[];
+}
+
+interface CodexHooksJson {
+  hooks?: Record<string, CodexHookMatcher[]>;
+  [key: string]: unknown;
+}
+
+// ─── Unified reconcile engine (issue #19) ───────────────────
+//
+//  A single engine injects BOTH built-in operational hooks (source: 'builtin',
+//  from builtinHookDefs) and team-declared hooks (source: 'team', from
+//  hooks/hooks.yaml). They coexist in the same settings file, isolated by
+//  marker namespaces:
+//    - built-in:  description starts with "[teamai] " / command matches a marker
+//    - team:      description starts with "[teamai:hook:<id>]"
+//  Cursor and Codex hook files carry no description, so team hooks there are
+//  tracked via the managed-hooks manifest (see ManagedHooksManifest).
+//
+//  Reconcile is idempotent and only writes when content actually changes, so an
+//  upgraded CLI re-running over an already-injected file produces a zero-diff.
+
+type ToolFormat = 'claude' | 'cursor' | 'codex';
+export type HookStatus = 'installed' | 'missing';
+
+const CURSOR_TOOLS = new Set(['cursor']);
+const CODEX_TOOLS = new Set(['codex', 'codex-internal', 'tcodex']);
+
+function detectFormat(tool: string): ToolFormat {
+  if (CODEX_TOOLS.has(tool)) return 'codex';
+  return CURSOR_TOOLS.has(tool) ? 'cursor' : 'claude';
+}
+
+/**
+ * Tools that enforce a user trust gate on non-managed hooks. Only the public
+ * Codex (the OpenAI / ChatGPT Codex app, tool id `codex`) does: even after
+ * teamai writes `<repo>/.codex/hooks.json` or `~/.codex/hooks.json`, Codex may
+ * skip a newly added or changed hook until the user reviews/trusts it in
+ * `/hooks` or Settings → Hooks. The internal variants (`codex-internal`,
+ * `tcodex`) share the codex hooks.json *format* but not this trust gate, so
+ * they are intentionally excluded.
+ */
+const CODEX_TRUST_GATE_TOOLS = new Set(['codex']);
+
+/**
+ * True for a tool that gates hooks behind an explicit user trust step (only the
+ * public `codex`). teamai never edits Codex's `[hooks.state]` to auto-trust —
+ * the reminder is UX only. Exported so `hooks inject` / `doctor` can surface it.
+ */
+export function isCodexTrustGatedTool(tool: string): boolean {
+  return CODEX_TRUST_GATE_TOOLS.has(tool);
+}
+
+/**
+ * One-line reminder that Codex may require the user to trust newly written hooks
+ * before they run. Shared by `hooks inject` (post-write notice) and `doctor`
+ * (installed-hooks note) so the wording stays identical.
+ */
+export function codexTrustReminder(): string {
+  return 'Codex hooks written, but Codex may require you to review/trust them before they run — open /hooks or Settings → Hooks in Codex to trust them.';
+}
+
+/** Known teamai command substrings used to identify built-in / legacy hooks. */
+const TEAMAI_COMMAND_MARKERS = [
+  'teamai pull', 'teamai update', 'teamai track', 'teamai dashboard', 'teamai contribute-check',
+  'teamai auto-recall', 'teamai todowrite-hint', 'teamai mr-hint', 'teamai hook-dispatch',
+];
+
+function extractTeamaiSubcommand(command: string): string | null {
+  const match = command.match(/teamai\s+([\w-]+)/);
+  return match ? match[1] : null;
+}
+
+function isTeamaiHookCommand(command: string): boolean {
+  return /(?:^|"|\s)teamai\s/.test(command);
+}
+
+/** Filter team defs down to those that apply to the given tool. */
+function teamDefsForTool(teamDefs: HookDef[], tool: string): HookDef[] {
+  return teamDefs.filter((d) => !d.tools || d.tools.includes(tool));
+}
+
+/** Build the per-tool desired HookDef set: built-in (A) followed by team (B). */
+function desiredDefs(tool: string, teamDefs: HookDef[], builtinOverride?: BuiltinHookOverride): HookDef[] {
+  return [...applyBuiltinOverride(builtinHookDefs(tool), builtinOverride), ...teamDefsForTool(teamDefs, tool)];
+}
+
+// ─── Reconcile options & manifest ───────────────────────────
+
+export interface ReconcileHooksOptions {
+  /** Remove all teamai-managed hooks instead of injecting the desired set. */
+  removeAll?: boolean;
+  /**
+   * Path to the managed-hooks manifest (~/.teamai/managed-hooks.json). Required
+   * to track Cursor team hooks (their commands carry no teamai marker). When
+   * omitted, only built-in (A) hooks are managed — used by the legacy
+   * builtin-only public API.
+   */
+  manifestPath?: string;
+  /** §4.8 team override of built-in hooks (disabled / timeout). */
+  builtinOverride?: BuiltinHookOverride;
+  /** Project root used to gate non-self project-scope team hooks. */
+  teamHookProjectRoot?: string;
+}
+
+/** One injected team hook recorded in the manifest. */
+export interface ManagedHookRecord {
+  id: string;
+  event: string;
+  matcher?: string;
+  command: string;
+}
+
+/** ~/.teamai/managed-hooks.json — team hooks injected per tool. */
+export type ManagedHooksManifest = Record<string, ManagedHookRecord[]>;
+
+async function readManifest(manifestPath: string): Promise<ManagedHooksManifest> {
+  const data = await readJson<ManagedHooksManifest>(expandHome(manifestPath));
+  return data && typeof data === 'object' ? data : {};
+}
+
+/** Team hooks to record in the manifest for a tool (empty when removing). */
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+function canonicalProjectRoot(projectRoot: string): string {
+  try { return realpathSync.native(projectRoot); } catch { return path.resolve(projectRoot); }
+}
+
+/** Keep a project-scope team hook from firing in every project on the machine. */
+function gateTeamHookCommand(command: string, projectRoot?: string): string {
+  if (!projectRoot) return command;
+  const root = shellQuote(canonicalProjectRoot(projectRoot));
+  return `if [ "$PWD" = ${root} ] || case "$PWD" in ${root}/*) true;; *) false;; esac; then (${command}); fi`;
+}
+
+function isGatedForProject(command: string, projectRoot: string): boolean {
+  return command.startsWith(`if [ "$PWD" = ${shellQuote(canonicalProjectRoot(projectRoot))} ]`);
+}
+
+function isProjectGatedCommand(command: string): boolean {
+  return command.startsWith('if [ "$PWD" = ');
+}
+
+function scopedTeamDefs(teamDefs: HookDef[], projectRoot?: string): HookDef[] {
+  if (!projectRoot) return teamDefs;
+  return teamDefs.map((def) => ({ ...def, command: gateTeamHookCommand(def.command, projectRoot) }));
+}
+
+function manifestRecordsForTool(teamDefs: HookDef[], tool: string, removeAll: boolean, projectRoot?: string): ManagedHookRecord[] {
+  if (removeAll) return [];
+  return teamDefsForTool(scopedTeamDefs(teamDefs, projectRoot), tool).map((d) => ({
+    id: d.key,
+    event: d.event,
+    ...(d.matcher && d.matcher !== '*' ? { matcher: d.matcher } : {}),
+    command: d.command,
+  }));
+}
+
+// ─── Render helpers (HookDef → on-disk entry) ───────────────
+
+function toClaudeEntry(def: HookDef): HookMatcher {
+  return {
+    matcher: def.matcher ?? '*',
+    hooks: [
+      {
+        type: 'command',
+        command: def.command,
+        ...(def.timeout !== undefined ? { timeout: def.timeout } : {}),
+      },
+    ],
+    description: def.description,
+  };
+}
+
+function toCursorEntry(def: HookDef): CursorHookEntry {
+  const entry: CursorHookEntry = { command: def.command };
+  if (def.timeout !== undefined) entry.timeout = def.timeout;
+  if (def.matcher && def.matcher !== '*') entry.matcher = def.matcher;
+  return entry;
+}
+
+function toCodexEntry(def: HookDef): CodexHookMatcher {
+  const entry: CodexHookMatcher = {
+    hooks: [
+      {
+        type: 'command',
+        command: def.command,
+        ...(def.timeout !== undefined ? { timeout: def.timeout } : {}),
+      },
+    ],
+  };
+  if (def.matcher && def.matcher !== '*') entry.matcher = def.matcher;
+  return entry;
+}
+
+/** Ordered, de-duplicated list of events appearing in the desired defs. */
+function desiredEventOrder(defs: HookDef[], mapEvent: (e: string) => string | undefined): string[] {
+  const seen = new Set<string>();
+  const order: string[] = [];
+  for (const d of defs) {
+    const mapped = mapEvent(d.event);
+    if (!mapped || seen.has(mapped)) continue;
+    seen.add(mapped);
+    order.push(mapped);
+  }
+  return order;
+}
+
+// ─── Claude / CodeBuddy (settings.json) reconcile ───────────
+
+/** True if a settings entry is a teamai built-in (A) hook. */
+function isBuiltinClaudeEntry(entry: HookMatcher): boolean {
+  const desc = entry.description ?? '';
+  if (desc.startsWith(TEAMAI_HOOK_DESCRIPTION_PREFIX + ' ') || desc === TEAMAI_HOOK_DESCRIPTION_PREFIX) return true;
+  const cmd = entry.hooks?.[0]?.command ?? '';
+  return TEAMAI_COMMAND_MARKERS.some((marker) => cmd.includes(marker));
+}
+
+/** True if a settings entry is a teamai team (B) hook. */
+function isTeamClaudeEntry(entry: HookMatcher): boolean {
+  return (entry.description ?? '').startsWith(TEAMAI_CUSTOM_HOOK_PREFIX);
+}
+
+async function reconcileClaudeFormat(
+  settingsPath: string,
+  tool: string,
+  teamDefs: HookDef[],
+  opts: ReconcileHooksOptions,
+  teamActive: boolean,
+  desiredTeamCommands: Set<string>,
+  priorTeamCommands: Set<string>,
+): Promise<void> {
+  // Built-in management never removes team hooks; team hooks are reconciled only
+  // when a team pass is active (manifest present). This keeps the builtin-only
+  // refresh path (injectHooks / autoMigrate) non-destructive to team hooks (§5).
+  const isManaged = (e: HookMatcher): boolean => {
+    if (isBuiltinClaudeEntry(e) || (!!opts.removeAll && isAgentClaudeEntry(e))) return true;
+    if (!teamActive || !isTeamClaudeEntry(e)) return false;
+    // Project-scope hooks share HOME with other projects. Only remove entries
+    // recorded for this project (or desired by this reconcile); otherwise a
+    // project B pull must not delete project A's hooks.
+    if (opts.teamHookProjectRoot) {
+      const command = e.hooks?.[0]?.command ?? '';
+      return desiredTeamCommands.has(command) || priorTeamCommands.has(command);
+    }
+    return true;
+  };
+  const expanded = expandHome(settingsPath);
+  await ensureDir(path.dirname(expanded));
+  const settings: ClaudeSettingsJson = (await readJson<ClaudeSettingsJson>(expanded)) ?? {};
+  if (!settings.hooks) settings.hooks = {};
+
+  let changed = false;
+
+  // Clean up empty camelCase keys left by a previous incorrect injection.
+  for (const key of ['sessionStart', 'stop', 'postToolUse', 'beforeSubmitPrompt', 'userPromptSubmit']) {
+    if (settings.hooks[key] && settings.hooks[key].length === 0) {
+      delete settings.hooks[key];
+      changed = true;
+    }
+  }
+
+  const defs = opts.removeAll ? [] : desiredDefs(tool, teamDefs, opts.builtinOverride);
+  const eventOrder = desiredEventOrder(defs, (e) => e);
+  const events = [...eventOrder, ...Object.keys(settings.hooks).filter((e) => !eventOrder.includes(e))];
+
+  for (const event of events) {
+    const existing = settings.hooks[event] ?? [];
+    const untouched = existing.filter((e) => !isManaged(e));
+    const desiredEntries = defs.filter((d) => d.event === event).map(toClaudeEntry);
+    const newArr = [...untouched, ...desiredEntries];
+    if (JSON.stringify(existing) !== JSON.stringify(newArr)) {
+      settings.hooks[event] = newArr;
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    await writeJson(expanded, settings);
+    log.success(`${opts.removeAll ? 'Removed' : 'Updated'} teamai hooks in ${settingsPath}`);
+  } else {
+    log.debug(`teamai hooks already up-to-date in ${settingsPath}`);
+  }
+}
+
+// ─── Cursor (hooks.json) reconcile ──────────────────────────
+
+async function reconcileCursorFormat(
+  hooksPath: string,
+  tool: string,
+  teamDefs: HookDef[],
+  opts: ReconcileHooksOptions,
+  priorTeamCommands: Set<string>,
+): Promise<void> {
+  const expanded = expandHome(hooksPath);
+  await ensureDir(path.dirname(expanded));
+  const hooksJson: CursorHooksJson = (await readJson<CursorHooksJson>(expanded)) ?? { version: 1, hooks: {} };
+  if (!hooksJson.version) hooksJson.version = 1;
+  if (!hooksJson.hooks) hooksJson.hooks = {};
+
+  const isManaged = (entry: CursorHookEntry): boolean =>
+    isTeamaiHookCommand(entry.command) || priorTeamCommands.has(entry.command);
+
+  const defs = opts.removeAll ? [] : desiredDefs(tool, teamDefs, opts.builtinOverride);
+  const desiredByEvent: Record<string, CursorHookEntry[]> = {};
+  for (const def of defs) {
+    const cursorEvent = CLAUDE_TO_CURSOR_EVENTS[def.event];
+    if (!cursorEvent) continue; // event Cursor doesn't support → skip
+    (desiredByEvent[cursorEvent] ??= []).push(toCursorEntry(def));
+  }
+
+  let changed = false;
+
+  // Phase A: reconcile events already present in the file.
+  for (const event of Object.keys(hooksJson.hooks)) {
+    const existing = hooksJson.hooks[event];
+    const untouched = existing.filter((e) => !isManaged(e));
+    let newArr: CursorHookEntry[];
+    if (desiredByEvent[event]) {
+      newArr = [...untouched, ...desiredByEvent[event]];
+    } else if (opts.removeAll) {
+      newArr = untouched; // keep emptied desired events as [] (matches legacy remove)
+    } else {
+      // Stale teamai event key (e.g. userPromptSubmit → beforeSubmitPrompt).
+      newArr = untouched;
+      if (newArr.length === 0) {
+        if (existing.length !== 0) changed = true;
+        delete hooksJson.hooks[event];
+        continue;
+      }
+    }
+    if (JSON.stringify(existing) !== JSON.stringify(newArr)) {
+      hooksJson.hooks[event] = newArr;
+      changed = true;
+    }
+  }
+
+  // Phase B: create desired events not yet present, in canonical order.
+  for (const event of desiredEventOrder(defs, (e) => CLAUDE_TO_CURSOR_EVENTS[e])) {
+    if (hooksJson.hooks[event]) continue;
+    hooksJson.hooks[event] = desiredByEvent[event];
+    changed = true;
+  }
+
+  if (changed) {
+    await writeJson(expanded, hooksJson);
+    log.success(`${opts.removeAll ? 'Removed' : 'Updated'} teamai hooks in ${hooksPath}`);
+  } else {
+    log.debug(`teamai hooks already up-to-date in ${hooksPath}`);
+  }
+}
+
+// ─── Codex (hooks.json) reconcile ───────────────────────────
+
+async function reconcileCodexFormat(
+  hooksPath: string,
+  tool: string,
+  teamDefs: HookDef[],
+  opts: ReconcileHooksOptions,
+  priorTeamCommands: Set<string>,
+): Promise<void> {
+  const expanded = expandHome(hooksPath);
+  await ensureDir(path.dirname(expanded));
+  const hooksJson: CodexHooksJson = (await readJson<CodexHooksJson>(expanded)) ?? {};
+  if (!hooksJson.hooks) hooksJson.hooks = {};
+
+  const isManaged = (entry: CodexHookMatcher): boolean => {
+    const cmd = entry.hooks?.[0]?.command ?? '';
+    return TEAMAI_COMMAND_MARKERS.some((marker) => cmd.includes(marker)) || priorTeamCommands.has(cmd);
+  };
+
+  const defs = opts.removeAll ? [] : desiredDefs(tool, teamDefs, opts.builtinOverride);
+  const eventOrder = desiredEventOrder(defs, (e) => e);
+  const events = [...eventOrder, ...Object.keys(hooksJson.hooks).filter((e) => !eventOrder.includes(e))];
+
+  let changed = false;
+  for (const event of events) {
+    const existing = hooksJson.hooks[event] ?? [];
+    const untouched = existing.filter((e) => !isManaged(e));
+    const desiredEntries = defs.filter((d) => d.event === event).map(toCodexEntry);
+    const newArr = [...untouched, ...desiredEntries];
+    if (JSON.stringify(existing) !== JSON.stringify(newArr)) {
+      hooksJson.hooks[event] = newArr;
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    await writeJson(expanded, hooksJson);
+    log.success(`${opts.removeAll ? 'Removed' : 'Updated'} teamai hooks in ${hooksPath}`);
+  } else {
+    log.debug(`teamai hooks already up-to-date in ${hooksPath}`);
+  }
+}
+
+// ─── Agent hooks (HTTP-source, issue #238) ──────────────────
+
+/**
+ * Whitelisted hook events for HTTP-source agent hooks
+ * (Claude PascalCase, native in both claude & codex formats).
+ */
+export const AGENT_HOOK_EVENTS = new Set<string>([
+  'SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop',
+]);
+
+/** One HTTP-source agent hook to install. */
+export interface AgentHookDef {
+  slug: string;
+  event: string;
+  command: string;
+  matcher?: string;
+  timeout?: number;
+}
+
+/**
+ * Return true if the tool supports agent hooks. All tools are supported except
+ * cursor; each tool family dispatches to its own hook backend (settings.json for
+ * claude/codex, config.yaml for hermes, HOOK.md + handler.ts for openclaw-family).
+ */
+export function isAgentHookSupportedTool(tool: string): boolean {
+  return !CURSOR_TOOLS.has(tool);
+}
+
+/**
+ * Return true if the event is in the whitelisted agent hook event set.
+ */
+export function isAgentHookEvent(event: string): boolean {
+  return AGENT_HOOK_EVENTS.has(event);
+}
+
+/**
+ * Generate the description marker for an agent hook entry.
+ * Produces: `[teamai:agent-hook:<slug>]`
+ */
+export function agentHookDescription(slug: string): string {
+  return `${TEAMAI_AGENT_HOOK_PREFIX}${slug}]`;
+}
+
+/** True if the HookMatcher entry is a teamai agent hook (optionally scoped to a slug). */
+function isAgentClaudeEntry(entry: HookMatcher, slug?: string): boolean {
+  const desc = entry.description ?? '';
+  if (slug !== undefined) {
+    return desc === agentHookDescription(slug);
+  }
+  return desc.startsWith(TEAMAI_AGENT_HOOK_PREFIX);
+}
+
+/**
+ * Idempotently install or replace a single HTTP-source agent hook into a tool's
+ * settings file. Claude format uses the marker description for precise replacement;
+ * codex format uses the command for precise replacement. Only writes when content
+ * has actually changed.
+ */
+export async function applyAgentHook(
+  settingsPath: string,
+  tool: string,
+  def: AgentHookDef,
+): Promise<void> {
+  const format = detectFormat(tool);
+  const expanded = expandHome(settingsPath);
+  await ensureDir(path.dirname(expanded));
+
+  const hookDef: HookDef = {
+    source: 'team',
+    key: def.slug,
+    event: def.event,
+    matcher: def.matcher ?? '*',
+    command: def.command,
+    ...(def.timeout !== undefined ? { timeout: def.timeout } : {}),
+    description: agentHookDescription(def.slug),
+  };
+
+  // Codex entries carry no description field, so agent hooks are matched by
+  // their exact command string (and tracked in the local-agent agent-hook
+  // manifest, the authoritative record for codex teardown). Backends must use
+  // a unique command per codex agent-hook slug so replace/remove stay precise.
+  if (format === 'codex') {
+    const hooksJson: CodexHooksJson = (await readJson<CodexHooksJson>(expanded)) ?? {};
+    if (!hooksJson.hooks) hooksJson.hooks = {};
+    const existing = hooksJson.hooks[def.event] ?? [];
+    const untouched = existing.filter((e) => (e.hooks?.[0]?.command ?? '') !== def.command);
+    const newArr = [...untouched, toCodexEntry(hookDef)];
+    if (JSON.stringify(existing) !== JSON.stringify(newArr)) {
+      hooksJson.hooks[def.event] = newArr;
+      await writeJson(expanded, hooksJson);
+      log.success(`Installed agent hook [${def.slug}] in ${settingsPath}`);
+    } else {
+      log.debug(`agent hook [${def.slug}] already up-to-date in ${settingsPath}`);
+    }
+  } else {
+    const settings: ClaudeSettingsJson = (await readJson<ClaudeSettingsJson>(expanded)) ?? {};
+    if (!settings.hooks) settings.hooks = {};
+    const existing = settings.hooks[def.event] ?? [];
+    const untouched = existing.filter((e) => !isAgentClaudeEntry(e, def.slug));
+    const newArr = [...untouched, toClaudeEntry(hookDef)];
+    if (JSON.stringify(existing) !== JSON.stringify(newArr)) {
+      settings.hooks[def.event] = newArr;
+      await writeJson(expanded, settings);
+      log.success(`Installed agent hook [${def.slug}] in ${settingsPath}`);
+    } else {
+      log.debug(`agent hook [${def.slug}] already up-to-date in ${settingsPath}`);
+    }
+  }
+}
+
+/**
+ * Remove a single agent hook from a tool's settings file by slug (claude) or
+ * command (codex). Silent if the file does not exist or there is no matching entry.
+ * Only writes when content has actually changed.
+ */
+export async function removeAgentHook(
+  settingsPath: string,
+  tool: string,
+  opts: { slug: string; command?: string },
+): Promise<void> {
+  const expanded = expandHome(settingsPath);
+  if (!(await pathExists(expanded))) return;
+  const format = detectFormat(tool);
+
+  // Codex removal matches by command (no marker in the file); callers pass the
+  // command recorded in the agent-hook manifest, which is the source of truth
+  // for codex teardown.
+  if (format === 'codex') {
+    if (!opts.command) return;
+    const hooksJson: CodexHooksJson = (await readJson<CodexHooksJson>(expanded)) ?? {};
+    if (!hooksJson.hooks) return;
+    let changed = false;
+    for (const event of Object.keys(hooksJson.hooks)) {
+      const before = hooksJson.hooks[event];
+      const after = before.filter((e) => (e.hooks?.[0]?.command ?? '') !== opts.command);
+      if (after.length !== before.length) {
+        changed = true;
+        if (after.length === 0) {
+          delete hooksJson.hooks[event];
+        } else {
+          hooksJson.hooks[event] = after;
+        }
+      }
+    }
+    if (changed) {
+      await writeJson(expanded, hooksJson);
+      log.success(`Removed agent hook [${opts.slug}] from ${settingsPath}`);
+    }
+  } else {
+    const settings: ClaudeSettingsJson = (await readJson<ClaudeSettingsJson>(expanded)) ?? {};
+    if (!settings.hooks) return;
+    let changed = false;
+    for (const event of Object.keys(settings.hooks)) {
+      const before = settings.hooks[event];
+      const after = before.filter((e) => !isAgentClaudeEntry(e, opts.slug));
+      if (after.length !== before.length) {
+        changed = true;
+        if (after.length === 0) {
+          delete settings.hooks[event];
+        } else {
+          settings.hooks[event] = after;
+        }
+      }
+    }
+    if (changed) {
+      await writeJson(expanded, settings);
+      log.success(`Removed agent hook [${opts.slug}] from ${settingsPath}`);
+    }
+  }
+}
+
+// ─── Public reconcile API ───────────────────────────────────
+
+/**
+ * Reconcile a single tool settings/hooks file to the desired teamai hook set
+ * (built-in A + supplied team B defs). Idempotent; only writes on change.
+ */
+export async function reconcileHooks(
+  settingsPath: string,
+  tool: string,
+  teamDefs: HookDef[] = [],
+  opts: ReconcileHooksOptions = {},
+): Promise<void> {
+  const teamActive = !!opts.manifestPath;
+  const manifest = opts.manifestPath ? await readManifest(opts.manifestPath) : null;
+  const allPriorRecords = manifest?.[tool] ?? [];
+  const priorRecords = opts.teamHookProjectRoot
+    ? allPriorRecords.filter((r) => isGatedForProject(r.command, opts.teamHookProjectRoot!))
+    : allPriorRecords;
+  const priorTeamCommands = new Set(priorRecords.map((r) => r.command));
+  const scopedDefs = scopedTeamDefs(teamDefs, opts.teamHookProjectRoot);
+  const desiredTeamCommands = new Set(scopedDefs.filter((d) => !d.tools || d.tools.includes(tool)).map((d) => d.command));
+
+  const format = detectFormat(tool);
+  if (format === 'cursor') {
+    await reconcileCursorFormat(settingsPath, tool, scopedDefs, opts, priorTeamCommands);
+  } else if (format === 'codex') {
+    await reconcileCodexFormat(settingsPath, tool, scopedDefs, opts, priorTeamCommands);
+  } else {
+    await reconcileClaudeFormat(settingsPath, tool, scopedDefs, {
+      ...opts,
+      // In a shared HOME settings file, only remove team entries belonging to
+      // this project. User-scope installs retain the historical marker sweep.
+      teamHookProjectRoot: opts.teamHookProjectRoot,
+    }, teamActive, desiredTeamCommands, priorTeamCommands);
+  }
+
+  // Update the manifest's team-hook index for this tool (when manifest is active).
+  if (opts.manifestPath && manifest) {
+    const records = manifestRecordsForTool(teamDefs, tool, !!opts.removeAll, opts.teamHookProjectRoot);
+    const prev = manifest[tool] ?? [];
+    const retained = opts.teamHookProjectRoot
+      ? prev.filter((r) => !isGatedForProject(r.command, opts.teamHookProjectRoot!))
+      : prev.filter((r) => isProjectGatedCommand(r.command));
+    const nextRecords = [...retained, ...records];
+    const sameAsPrev = JSON.stringify(prev) === JSON.stringify(nextRecords);
+    const hadEntry = Object.prototype.hasOwnProperty.call(manifest, tool);
+    if (nextRecords.length === 0) {
+      if (hadEntry) {
+        delete manifest[tool];
+        await writeJson(expandHome(opts.manifestPath), manifest);
+      }
+    } else if (!sameAsPrev) {
+      manifest[tool] = nextRecords;
+      await writeJson(expandHome(opts.manifestPath), manifest);
+    }
+  }
+}
+
+// ─── Back-compatible public API (built-in A only) ───────────
+
+/** Inject teamai built-in hooks into a tool's settings/hooks file. */
+export async function injectHooks(settingsPath: string, tool?: string): Promise<void> {
+  await reconcileHooks(settingsPath, tool ?? 'claude', []);
+}
+
+/** Remove all teamai hooks from a tool's settings/hooks file. */
+export async function removeHooks(settingsPath: string, tool?: string): Promise<void> {
+  await reconcileHooks(settingsPath, tool ?? 'claude', [], { removeAll: true });
+}
+
+/**
+ * Report whether the current built-in (A) hook set is present in a tool settings
+ * file. Computed against the unified HookDef model: every built-in entry for the
+ * tool must already exist on disk.
+ */
+export async function getHookStatus(settingsPath: string, tool?: string): Promise<HookStatus> {
+  const toolName = tool ?? 'claude';
+  const expanded = expandHome(settingsPath);
+  const defs = builtinHookDefs(toolName);
+
+  const format = detectFormat(toolName);
+  if (format === 'cursor') {
+    const hooksJson = await readJson<CursorHooksJson>(expanded);
+    if (!hooksJson?.hooks) return 'missing';
+    const present = defs.every((def) => {
+      const cursorEvent = CLAUDE_TO_CURSOR_EVENTS[def.event];
+      if (!cursorEvent) return true;
+      const want = toCursorEntry(def);
+      const entries = hooksJson.hooks[cursorEvent] ?? [];
+      return entries.some((e) => e.command === want.command && e.matcher === want.matcher);
+    });
+    return present ? 'installed' : 'missing';
+  }
+
+  if (format === 'codex') {
+    const hooksJson = await readJson<CodexHooksJson>(expanded);
+    if (!hooksJson?.hooks) return 'missing';
+    const present = defs.every((def) => {
+      const want = toCodexEntry(def);
+      const entries = hooksJson.hooks?.[def.event] ?? [];
+      return entries.some((e) => e.matcher === want.matcher && e.hooks?.[0]?.command === want.hooks[0].command);
+    });
+    return present ? 'installed' : 'missing';
+  }
+
+  const settings = await readJson<ClaudeSettingsJson>(expanded);
+  if (!settings?.hooks) return 'missing';
+  const present = defs.every((def) => {
+    const want = toClaudeEntry(def);
+    const entries = settings.hooks?.[def.event] ?? [];
+    return entries.some((e) => e.matcher === want.matcher && e.hooks?.[0]?.command === want.hooks[0].command);
+  });
+  return present ? 'installed' : 'missing';
+}
+
+/**
+ * Report whether a tool settings/hooks file currently holds ANY teamai-managed
+ * hook entry (built-in A or team B). Unlike getHookStatus (which checks the full
+ * built-in set is present), this returns true if even one teamai entry remains.
+ * Used by `uninstall --agent` to decide whether a tool still has teamai hooks.
+ * Manifest records must still exist in the file to count — stale manifest entries
+ * (user hand-stripped the hook) are ignored.
+ */
+export async function hasTeamaiHooks(
+  settingsPath: string,
+  tool: string,
+  manifestPath?: string,
+): Promise<boolean> {
+  const manifest = manifestPath ? await readManifest(manifestPath) : null;
+  // Manifest records are only a signal when the recorded command still exists in
+  // the settings file. A stale manifest entry (user hand-stripped the hook) must
+  // NOT count as "still using teamai" — intersect manifest with actual content.
+  const priorTeamCommands = new Set((manifest?.[tool] ?? []).map((r) => r.command));
+
+  const expanded = expandHome(settingsPath);
+  const format = detectFormat(tool);
+
+  if (format === 'cursor') {
+    const j = await readJson<CursorHooksJson>(expanded);
+    if (!j?.hooks) return false;
+    return Object.values(j.hooks).some((entries) =>
+      (entries ?? []).some((e) => isTeamaiHookCommand(e.command) || priorTeamCommands.has(e.command)),
+    );
+  }
+
+  if (format === 'codex') {
+    const j = await readJson<CodexHooksJson>(expanded);
+    if (!j?.hooks) return false;
+    return Object.values(j.hooks).some((entries) =>
+      (entries ?? []).some((e) => {
+        const cmd = e.hooks?.[0]?.command ?? '';
+        return TEAMAI_COMMAND_MARKERS.some((m) => cmd.includes(m)) || priorTeamCommands.has(cmd);
+      }),
+    );
+  }
+
+  const s = await readJson<ClaudeSettingsJson>(expanded);
+  if (!s?.hooks) return false;
+  return Object.values(s.hooks).some((entries) =>
+    (entries ?? []).some((e) => {
+      if (isBuiltinClaudeEntry(e) || isTeamClaudeEntry(e)) return true;
+      const cmd = e.hooks?.[0]?.command ?? '';
+      return priorTeamCommands.has(cmd);
+    }),
+  );
+}
+
+/**
+ * Reconcile the single teamai OpenCode plugin.
+ *
+ * OpenCode auto-loads plugins from BOTH `~/.config/opencode/plugin` and
+ * `<project>/.opencode/plugin`, so a project-scope copy living next to a
+ * user-scope one makes OpenCode load two identical plugins and dispatch every
+ * event twice. teamai therefore keeps exactly one copy, in the user plugin dir —
+ * matching the settings.json hooks of every other tool, which also live in HOME
+ * and gate on the `cwd` fed to `hook-dispatch`. Any project-scope copy left by
+ * an earlier layout is deleted on the way through.
+ */
+async function reconcileOpencodePlugin(baseDir: string, removeAll = false, installedBaseDir?: string): Promise<void> {
+  const home = getUserHome();
+  const { injectOpencodeHooks, removeOpencodeHooks } = await import('./opencode-hooks.js');
+  if (path.resolve(baseDir) !== path.resolve(home)) {
+    await removeOpencodeHooks(baseDir, 'project');
+  }
+  if (removeAll) {
+    await removeOpencodeHooks(home, 'user');
+    return;
+  }
+  const homeInstalled = await pathExists(path.join(home, '.config', 'opencode'));
+  const projectInstalled = installedBaseDir
+    ? await pathExists(path.join(installedBaseDir, '.opencode'))
+    : false;
+  if (homeInstalled || projectInstalled) {
+    await injectOpencodeHooks(home, 'user');
+  }
+}
+
+/**
+ * Inject teamai built-in hooks into all AI tool settings.
+ * Only writes to tools whose root directory already exists on disk,
+ * preventing creation of config dirs for tools the user hasn't installed.
+ */
+export async function injectHooksToAllTools(toolPaths: Record<string, { settings?: string }>, baseDir?: string, filterAgents?: string[]): Promise<void> {
+  const resolvedBaseDir = baseDir ?? getUserHome();
+  const tools = Object.keys(toolPaths).filter(t => !filterAgents || filterAgents.includes(t));
+  let shellAvailable = true;
+  if (tools.some(t => SHELL_DEPENDENT_TOOLS.has(t))) {
+    shellAvailable = ensureWrapperIfShellAvailable();
+    if (!shellAvailable) {
+      log.warn(
+        'Skipping hook injection for CodeBuddy/WorkBuddy: /bin/sh is not available in this environment. ' +
+        'Hooks require a shell to execute. Other tools (Claude Code, Cursor) are not affected.',
+      );
+    }
+  }
+  for (const [tool, paths] of Object.entries(toolPaths)) {
+    if (filterAgents && !filterAgents.includes(tool)) continue;
+    if (!shellAvailable && SHELL_DEPENDENT_TOOLS.has(tool)) continue;
+    if (paths.settings) {
+      const toolRoot = path.join(resolvedBaseDir, paths.settings.split('/')[0]);
+      if (!await pathExists(toolRoot)) continue;
+      const settingsPath = path.join(resolvedBaseDir, paths.settings);
+      try {
+        await injectHooks(settingsPath, tool);
+      } catch (e) {
+        log.warn(`Failed to inject hook into ${tool}: ${(e as Error).message}`);
+      }
+    } else if (OPENCLAW_TOOLS.has(tool)) {
+      try {
+        const { injectOpenClawHooks } = await import('./openclaw-hooks.js');
+        await injectOpenClawHooks(undefined, tool);
+      } catch (e) {
+        log.warn(`Failed to inject OpenClaw hook into ${tool}: ${(e as Error).message}`);
+      }
+    } else if (tool === 'hermes') {
+      try {
+        const { injectHermesHooks } = await import('./hermes-hooks.js');
+        await injectHermesHooks();
+      } catch (e) {
+        log.warn(`Failed to inject Hermes hook: ${(e as Error).message}`);
+      }
+    } else if (tool === 'opencode') {
+      try {
+        await reconcileOpencodePlugin(resolvedBaseDir);
+      } catch (e) {
+        log.warn(`Failed to inject OpenCode hook into ${tool}: ${(e as Error).message}`);
+      }
+    }
+  }
+}
+
+/**
+ * Reconcile built-in (A) + team (B) hooks across every tool that has a settings
+ * path, using a shared managed-hooks manifest. This is the authoritative
+ * injection path used by `teamai pull` / `init` / `hooks inject`.
+ *
+ * `settingsOnly` restricts the pass to tools reconciled through their settings
+ * file, skipping Hermes and OpenCode. Those two go through global adapters that
+ * ignore `baseDir` — `removeHermesHooks()` takes none, and the OpenCode
+ * adapter's removeAll branch always targets HOME — so a caller sweeping a
+ * secondary location (the legacy `<projectRoot>` copy) must opt out, or it
+ * deletes the hooks the primary pass just installed.
+ */
+export async function reconcileHooksToAllTools(
+  toolPaths: Record<string, { settings?: string }>,
+  baseDir: string,
+  teamDefs: HookDef[],
+  manifestPath: string,
+  opts: { removeAll?: boolean; builtinOverride?: BuiltinHookOverride; filterAgents?: string[]; settingsOnly?: boolean; installedBaseDir?: string; teamHookProjectRoot?: string } = {},
+): Promise<void> {
+  const activeTools = Object.keys(toolPaths).filter(t => !opts.filterAgents || opts.filterAgents.includes(t));
+  let shellAvailable = true;
+  if (activeTools.some(t => SHELL_DEPENDENT_TOOLS.has(t))) {
+    shellAvailable = ensureWrapperIfShellAvailable();
+    if (!shellAvailable) {
+      log.warn(
+        'Skipping hook injection for CodeBuddy/WorkBuddy: /bin/sh is not available in this environment. ' +
+        'Hooks require a shell to execute. Other tools (Claude Code, Cursor) are not affected.',
+      );
+    }
+  }
+  for (const [tool, paths] of Object.entries(toolPaths)) {
+    if (opts.filterAgents && !opts.filterAgents.includes(tool)) continue;
+    if (!shellAvailable && SHELL_DEPENDENT_TOOLS.has(tool)) continue;
+    // Hermes uses config.yaml (YAML) + a script dir + allowlist instead of a
+    // JSON settings file, so it bypasses the settings-based reconcile path.
+    // Install when the .hermes home exists; removeAll clears the teamai hook.
+    if (tool === 'hermes') {
+      if (opts.settingsOnly) continue;
+      try {
+        const { getHermesHome } = await import('./hermes-home.js');
+        const hermesRoot = getHermesHome();
+        if (opts.removeAll) {
+          const { removeHermesHooks } = await import('./hermes-hooks.js');
+          await removeHermesHooks();
+        } else if (await pathExists(hermesRoot)) {
+          const { injectHermesHooks } = await import('./hermes-hooks.js');
+          await injectHermesHooks();
+        }
+      } catch (e) {
+        log.warn(`Failed to reconcile Hermes hooks: ${(e as Error).message}`);
+      }
+      continue;
+    }
+    // OpenCode has no settings.json hook list; it auto-loads JS/TS plugins from
+    // its config dirs. Route it to the plugin-file adapter instead of the
+    // settings-based path.
+    if (tool === 'opencode') {
+      if (opts.settingsOnly) continue;
+      try {
+        await reconcileOpencodePlugin(baseDir, opts.removeAll, opts.installedBaseDir);
+      } catch (e) {
+        log.warn(`Failed to reconcile OpenCode hooks: ${(e as Error).message}`);
+      }
+      continue;
+    }
+    if (!paths.settings) continue;
+    // Only reconcile hooks for tools the user actually has installed. Without
+    // this gate, `hooks inject`/`remove` would create root directories for
+    // every configured tool (e.g. ~/.tclaude, ~/.tcodex) via reconcileHooks's
+    // ensureDir — making uninstalled tools look installed and pulling skills
+    // into them on later `pull`s.
+    const toolRoot = path.join(baseDir, paths.settings.split('/')[0]);
+    const installedRoot = opts.installedBaseDir
+      ? path.join(opts.installedBaseDir, paths.settings.split('/')[0])
+      : toolRoot;
+    if (!await pathExists(toolRoot) && !await pathExists(installedRoot)) continue;
+    const settingsPath = path.join(baseDir, paths.settings);
+    try {
+      await reconcileHooks(settingsPath, tool, teamDefs, {
+        manifestPath,
+        removeAll: opts.removeAll,
+        builtinOverride: opts.builtinOverride,
+        teamHookProjectRoot: opts.teamHookProjectRoot,
+      });
+    } catch (e) {
+      log.warn(`Failed to reconcile hooks for ${tool}: ${(e as Error).message}`);
+    }
+  }
+}
+
+/**
+ * True if a trust-gated Codex tool (the public `codex`) is both configured with
+ * a settings path and actually installed on disk under baseDir.
+ *
+ * "Installed" uses the same root-directory gate as reconcileHooksToAllTools, so
+ * a true result means inject just wrote hooks that Codex may require the user to
+ * trust. Internal variants (codex-internal / tcodex) are excluded — they share
+ * the format but not the trust gate. Used to decide whether to print the
+ * reminder after inject.
+ */
+export async function hasInstalledCodexTrustGatedTool(
+  toolPaths: Record<string, { settings?: string }>,
+  baseDir: string,
+): Promise<boolean> {
+  for (const [tool, paths] of Object.entries(toolPaths)) {
+    if (!isCodexTrustGatedTool(tool) || !paths.settings) continue;
+    const toolRoot = path.join(baseDir, paths.settings.split('/')[0]);
+    if (await pathExists(toolRoot)) return true;
+  }
+  return false;
+}
+
+/**
+ * Sweep the legacy `<projectRoot>` hook copy a pre-#370 CLI wrote alongside
+ * HOME for a non-self project scope. Without it both copies stay live after an
+ * upgrade and every session start fires hook-dispatch twice (two concurrent
+ * background pulls), and the auto-migrate guard never converges.
+ *
+ * Shared by the inject path (`init`/`pull`/`bootstrap`), `hooks inject`, and
+ * `hooks remove` so all three sweep identically. Two rules this encodes:
+ *
+ * - `settingsOnly` — Hermes and OpenCode reconcile through global adapters that
+ *   ignore `baseDir` (removeHermesHooks() takes none; the OpenCode adapter's
+ *   removeAll branch always targets HOME), so letting a secondary-location
+ *   sweep reach them deletes the hooks the primary pass just installed. The
+ *   project-scope OpenCode plugin is instead removed directly below, which is
+ *   the only OpenCode copy this legacy location can own.
+ * - No `filterAgents` — cleanup of a legacy location must be unconditional. A
+ *   tool disabled today may well be the one that wrote the stale copy back when
+ *   it was enabled; filtering it out would leave that copy firing forever.
+ */
+export async function sweepLegacyProjectHooks(
+  toolPaths: Record<string, { settings?: string }>,
+  localConfig: LocalConfig,
+): Promise<void> {
+  const legacy = resolveLegacyProjectHookScope(localConfig);
+  if (!legacy) return;
+  await reconcileHooksToAllTools(toolPaths, legacy.baseDir, [], legacy.manifestPath, {
+    removeAll: true,
+    settingsOnly: true,
+  });
+  if (toolPaths.opencode) {
+    try {
+      const { removeOpencodeHooks } = await import('./opencode-hooks.js');
+      await removeOpencodeHooks(legacy.baseDir, 'project');
+    } catch (e) {
+      log.warn(`Failed to remove legacy OpenCode project plugin: ${(e as Error).message}`);
+    }
+  }
+}
+
+/**
+ * Reconcile built-in (A) + team (B) hooks for a single scope's tools.
+ * Parses the scope's hooks/hooks.yaml, resolves the scope base dir + manifest,
+ * and reconciles every tool. Returns the team defs that were applied (for
+ * logging/transparency). Used by `pull`, `init`, and `hooks inject`.
+ */
+export async function reconcileTeamHooksForConfig(
+  teamConfig: TeamaiConfig,
+  localConfig: LocalConfig,
+  opts: { removeAll?: boolean; auto?: boolean; silent?: boolean; filterAgents?: string[] } = {},
+): Promise<HookDef[]> {
+  const { defs: teamDefs, builtin } = opts.removeAll
+    ? { defs: [] as HookDef[], builtin: undefined }
+    : await resolveTeamHooks(teamConfig, localConfig.repo.localPath, { auto: opts.auto, silent: opts.silent });
+  const { baseDir, manifestPath } = resolveHookScope(localConfig);
+  let filterAgents = opts.filterAgents ?? localConfig.enabledAgents;
+  const disabled = localConfig.disabledAgents;
+  if (disabled && disabled.length > 0) {
+    // Exclusion always applies, even when there is no whitelist. When no
+    // whitelist exists, start from the full configured tool set.
+    const universe = filterAgents ?? Object.keys(teamConfig.toolPaths);
+    filterAgents = universe.filter((t) => !disabled.includes(t));
+  }
+  await reconcileHooksToAllTools(teamConfig.toolPaths, baseDir, teamDefs, manifestPath, {
+    removeAll: opts.removeAll,
+    builtinOverride: builtin,
+    filterAgents,
+    teamHookProjectRoot: localConfig.scope === 'project' && !isSelfMode(localConfig)
+      ? localConfig.projectRoot
+      : undefined,
+    installedBaseDir: localConfig.scope === 'project' ? (localConfig.projectRoot ?? baseDir) : undefined,
+  });
+  await sweepLegacyProjectHooks(teamConfig.toolPaths, localConfig);
+  return teamDefs;
+}

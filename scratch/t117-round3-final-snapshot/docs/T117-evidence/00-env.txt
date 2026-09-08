@@ -1,0 +1,49 @@
+=== T-117 round-3 (final) re-test env snapshot ===
+date: 2026-09-07T09:38:11.022Z
+2026-09-07T17:38:09.6345759+08:00
+v24.19.0
+ca9b45c7953d857e4242bc3c136b746156538886
+w/T-117
+
+i/lf    w/crlf  attr/                 	README.md
+i/lf    w/crlf  attr/                 	docs/FEATURES.md
+i/lf    w/crlf  attr/                 	docs/G-mtpq729o-1/T115-evidence/README.md
+i/lf    w/crlf  attr/                 	docs/T045-evidence/README.md
+i/lf    w/crlf  attr/                 	docs/T047-evidence/README.md
+i/lf    w/crlf  attr/                 	docs/T049-evidence/README.md
+i/lf    w/crlf  attr/                 	docs/T061-evidence/README.md
+i/lf    w/crlf  attr/                 	docs/T062-evidence/README.md
+i/lf    w/crlf  attr/                 	docs/T076-evidence/README.md
+i/lf    w/crlf  attr/                 	docs/T083-evidence/README.md
+i/lf    w/crlf  attr/                 	docs/T087-evidence/README.md
+i/lf    w/crlf  attr/                 	docs/T093-evidence/README.md
+i/lf    w/crlf  attr/                 	docs/T094-evidence/README.md
+i/lf    w/crlf  attr/                 	docs/T098-evidence/README.md
+i/lf    w/crlf  attr/                 	docs/T101-evidence/README.md
+i/lf    w/crlf  attr/                 	docs/T107-evidence/README.md
+i/lf    w/crlf  attr/                 	docs/T109-evidence/README.md
+i/lf    w/crlf  attr/                 	docs/review/README.md
+i/lf    w/crlf  attr/                 	mesh/README.md
+i/lf    w/crlf  attr/                 	mesh/mailboxes/README.md
+i/lf    w/crlf  attr/                 	plugins/README.md
+i/lf    w/crlf  attr/                 	plugins/src/index.ts
+i/lf    w/crlf  attr/                 	reports/README.md
+i/lf    w/crlf  attr/                 	scripts/ci/check-docs.mjs
+i/lf    w/crlf  attr/                 	scripts/ci/run-ci.mjs
+i/lf    w/crlf  attr/                 	scrum/README.md
+i/lf    w/crlf  attr/                 	team-hub/server.mjs
+i/lf    w/crlf  attr/                 	tests/contract/README.md
+i/lf    w/crlf  attr/                 	whiteboard/README.md
+i/lf    w/crlf  attr/                 	whiteboard/docs/adr/README.md
+i/lf    w/crlf  attr/                 	workbench/README.md
+
+
+
+true
+
+README.md crlf=177 lf=5
+docs/FEATURES.md crlf=282 lf=5
+scripts/ci/check-docs.mjs crlf=209 lf=0
+scripts/ci/run-ci.mjs crlf=397 lf=0
+team-hub/server.mjs crlf=2857 lf=1
+plugins/src/index.ts crlf=2777 lf=0

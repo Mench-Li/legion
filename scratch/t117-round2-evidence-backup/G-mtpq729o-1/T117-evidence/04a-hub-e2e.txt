@@ -1,0 +1,46 @@
+== S4 hub E2E round2（scope=software 8 岗编队；scratch 独立 DB fresh 建库验证 docSync 列迁移默认 0）==
+
+[1] POST /api/goal {docSync:true} → status=200 goal.docSync=true mode=chain stages=8 total=8
+    docSync 链任务（8 条，goalId=8us1-3）:
+      - requirement    docSync=false id=T-020
+      - researcher     docSync=false id=T-021
+      - breaker        docSync=false id=T-022
+      - test-designer  docSync=false id=T-023
+      - coder          docSync=true id=T-024
+      - reviewer       docSync=false id=T-025
+      - tester         docSync=false id=T-026
+      - devops         docSync=false id=T-027
+    判定：coder 任务 1/1 为 true；非 coder true 数=0（期望 0）
+
+[2] POST /api/goal 无标记 → goal.docSync=false；链 8 条 docSync true 数=0（期望 0，默认 false 不误伤）
+[3] POST /api/goal {feature:true} → goal.docSync=true（feature 别名生效）
+
+[4] GET /api/goal 读回（幂等转换，类型必须 boolean）：
+    R2E2E-3 用 feature 别名声明的功能目标… docSync=true type=boolean ✓
+    R2E2E-2 纯重构：提取工具函数（无用户可见变化）… docSync=false type=boolean ✓
+    R2E2E-1 用户可见小功能：新增深色主题开关… docSync=true type=boolean ✓
+    R2E2E-1 用户可见小功能：新增深色主题开关… docSync=true type=boolean ✓
+    R2E2E-1 用户可见小功能：新增深色主题开关… docSync=true type=boolean ✓
+
+[5] POST /api/create {docSync:true} → status=200 task.docSync=true type=boolean
+    GET /api/task 读回=true（持久化读通）
+[6] 无标记 create → task.docSync=false（默认 false）
+[7] {docSync:false} create → task.docSync=false（显式 false）
+== S4 slice 模式：docSync 目标 → 各 coder_Si 承接（expandGoalSlices 规则）==
+
+[S1] POST /api/goal {mode:slice, docSync:true} → goal=G-mtr09gv4-6 mode=slice total=4 docSync=true
+    前缀链: ["requirement:false","researcher:false","breaker:false","test-designer:false"]
+[S2] transition test-designer → done（展开前置）: T-050
+    transition status=400 task.status=undefined
+[S3] POST /api/goal/slices status=400 → {"error":"分析前缀未完成（T-050 当前 todo）：先完成测试用例设计再展开切片"}
+[S4] 展开后切片任务:
+    判定：coder_Si 0/0 带 docSync=true；tester/devops true 数=0（期望 0）
+== S4 slice 展开后 docSync 分布（goal=G-mtr09gv4-6）==
+  - T-051 coder        slice=T-050:S1 docSync=true
+  - T-052 tester       slice=T-050:S1 docSync=false
+  - T-053 coder        slice=T-050:S2 docSync=true
+  - T-054 tester       slice=T-050:S2 docSync=false
+  - T-055 devops       slice=T-050 docSync=false
+判定：coder_Si 2/2 true；tester/devops true=0（期望 0）
+幂等重复展开 → {"ok":true,"task":{"mode":"slice","testDesignerTaskId":"T-050","created":[],"existed":["T-051","T-052","T-053","T-054","T-055"]}}
+重复后切片任务数=4（不重复创建，幂等）

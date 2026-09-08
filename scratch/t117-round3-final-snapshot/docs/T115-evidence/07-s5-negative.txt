@@ -1,0 +1,12 @@
+== 坏链注入后 node scripts/ci/run-ci.mjs --only doc ==
+exit=1
+===== [doc] 文档新鲜度校验（check-docs.mjs） =====
+doc: 文档新鲜度校验（check-docs.mjs）exit=1
+  输出要点：check-docs: FAIL（1 处问题，详见上方 FAIL 行） | FAIL: D:\project\DSH\legion\.legion-worktrees\T-115\README.md:63 — 互链锚点失效：docs/FEATURES.md#nope-bad
+[doc] -> FAIL (87ms)
+  doc    FAIL (87ms)
+== 还原后 ==
+exit=0
+===== [doc] 文档新鲜度校验（check-docs.mjs） =====
+  输出要点：check-docs: PASS（README.md + docs/FEATURES.md 结构/链接/索引一致，8 类校验项全绿）
+[doc] -> PASS (103ms)

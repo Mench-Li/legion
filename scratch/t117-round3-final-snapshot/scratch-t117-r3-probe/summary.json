@@ -1,0 +1,13 @@
+{
+  "root": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-117",
+  "outDir": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-117\\scratch\\t117-r3-probe",
+  "finishedAt": "2026-09-07T09:34:45.657Z",
+  "stages": [
+    {
+      "name": "env",
+      "status": "FAIL",
+      "ms": 4
+    }
+  ],
+  "failed": 1
+}

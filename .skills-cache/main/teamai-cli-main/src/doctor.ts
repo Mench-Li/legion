@@ -1,0 +1,238 @@
+import path from 'node:path';
+import { detectProjectConfig, loadLocalConfig, loadTeamConfig } from './config.js';
+import { pathExists, readFileSafe } from './utils/fs.js';
+import { log } from './utils/logger.js';
+import type { GlobalOptions, Scope } from './types.js';
+import {
+  TeamaiConfigSchema,
+  TEAMAI_ENV_START,
+  resolveHookScope,
+  getDataHome,
+  type TeamaiConfig,
+} from './types.js';
+import { TEAMAI_HOOK_SUBCOMMANDS, isCodexTrustGatedTool, codexTrustReminder } from './hooks.js';
+import { getUserHome } from './utils/home.js';
+
+interface Check {
+  name: string;
+  check: () => Promise<boolean>;
+  fix?: string;
+}
+
+/**
+ * Build hook checks only for tools whose settings parent directory already
+ * exists (i.e. the tool is installed). Tools that are not installed are skipped.
+ */
+async function buildHookChecks(toolPaths: TeamaiConfig['toolPaths'], baseDir: string): Promise<Check[]> {
+  const checks: Check[] = [];
+  for (const [tool, paths] of Object.entries(toolPaths)) {
+    if (!paths.settings) continue;
+    const settingsPath = path.join(baseDir, paths.settings);
+    const parentDir = path.dirname(settingsPath);
+    if (!await pathExists(parentDir)) continue;
+    checks.push({
+      name: `teamai hooks in ${tool} settings`,
+      check: async () => {
+        if (!await pathExists(settingsPath)) return false;
+        const content = await readFileSafe(settingsPath);
+        if (!content) return false;
+
+        const missing = TEAMAI_HOOK_SUBCOMMANDS.filter(
+          (sub) => !content.includes(`teamai ${sub}`),
+        );
+        return missing.length === 0;
+      },
+      fix: 'Run `teamai hooks inject` to inject/update hooks',
+    });
+  }
+  return checks;
+}
+
+/**
+ * True if a trust-gated Codex tool (the public `codex`) already has teamai hooks
+ * installed on disk (settings file exists and contains the hook-dispatch
+ * command). Used to emit a lightweight reminder that Codex may still require the
+ * user to trust them. Read-only — never inspects or modifies Codex's
+ * [hooks.state] trust store. Internal variants are excluded (no trust gate).
+ */
+async function hasInstalledCodexHooks(toolPaths: TeamaiConfig['toolPaths'], baseDir: string): Promise<boolean> {
+  for (const [tool, paths] of Object.entries(toolPaths)) {
+    if (!isCodexTrustGatedTool(tool) || !paths.settings) continue;
+    const settingsPath = path.join(baseDir, paths.settings);
+    if (!await pathExists(settingsPath)) continue;
+    const content = await readFileSafe(settingsPath);
+    if (content?.includes('teamai hook-dispatch')) return true;
+  }
+  return false;
+}
+
+export async function doctor(options: GlobalOptions): Promise<void> {
+  log.info('Running diagnostics...\n');
+  const projectConfig = await detectProjectConfig();
+  const localConfig = projectConfig ?? (await loadLocalConfig());
+  const scope: Scope = localConfig?.scope ?? 'user';
+  const configPathLabel = projectConfig
+    ? `${projectConfig.projectRoot}/.teamai/config.yaml`
+    : '~/.teamai/config.yaml';
+
+  console.log(`  Scope: ${scope}${scope === 'project' && localConfig?.projectRoot ? ` (${localConfig.projectRoot})` : ''}\n`);
+
+  // Try to load team config for dynamic tool paths and provider
+  let teamConfig: TeamaiConfig | null = null;
+  if (localConfig) {
+    teamConfig = await loadTeamConfig(localConfig.repo.localPath);
+  }
+  // Fall back to schema defaults if team config is unavailable
+  const toolPaths = teamConfig?.toolPaths ?? TeamaiConfigSchema.shape.toolPaths.parse(undefined);
+  const providerName = teamConfig?.provider ?? 'tgit';
+  // Hook checks must look where hooks are actually injected. resolveHookScope
+  // maps a non-self project scope to HOME (#264), matching the injection path in
+  // init/pull/hooks-cmd — otherwise doctor checks <projectRoot>/.claude while the
+  // hooks live in ~/.claude and always reports them missing.
+  const baseDir = localConfig ? resolveHookScope(localConfig).baseDir : getUserHome();
+
+  const checks: Check[] = [];
+
+  // Provider-specific checks: gf CLI only needed for TGit, gh CLI for GitHub
+  if (providerName === 'tgit') {
+    // Dynamic import to avoid loading gf-cli code when not needed
+    const { isGfInstalled, gfIsAuthenticated } = await import('./providers/tgit/index.js');
+    checks.push(
+      {
+        name: 'gf CLI is installed',
+        check: async () => isGfInstalled(),
+        fix: 'Run `teamai init` to install gf CLI automatically',
+      },
+      {
+        name: 'gf CLI is authenticated',
+        check: async () => gfIsAuthenticated(),
+        fix: 'Run `teamai init` to authenticate via gf auth login',
+      },
+    );
+  } else if (providerName === 'github') {
+    // Dynamic import to avoid loading gh-cli code when not needed
+    const { isGhInstalled, ghIsAuthenticated } = await import('./providers/github/index.js');
+    checks.push(
+      {
+        name: 'gh CLI is installed',
+        check: async () => isGhInstalled(),
+        fix: 'Install from https://cli.github.com/ or run `brew install gh`',
+      },
+      {
+        name: 'gh CLI is authenticated',
+        check: async () => ghIsAuthenticated(),
+        fix: 'Run `gh auth login` to authenticate',
+      },
+    );
+  } else if (providerName === 'gitlab') {
+    // GitLab needs no CLI — only a Personal Access Token.
+    const { gitlabIsAuthenticated } = await import('./providers/gitlab/index.js');
+    checks.push({
+      name: 'GitLab token is configured',
+      check: async () => gitlabIsAuthenticated(),
+      fix: 'Export GITLAB_TOKEN (a Personal Access Token with `api` scope). '
+        + 'GITLAB_PRIVATE_TOKEN and GITLAB_PAT are accepted as aliases.',
+    });
+  } else if (providerName === 'gitcode') {
+    // GitCode needs no CLI — only a Personal Access Token (env or ~/.netrc).
+    const { gitcodeIsAuthenticated } = await import('./providers/gitcode/index.js');
+    checks.push({
+      name: 'GitCode token is configured',
+      check: async () => gitcodeIsAuthenticated(),
+      fix: 'Export GITCODE_TOKEN (a GitCode Personal Access Token), or run `teamai init` '
+        + 'to paste one interactively. GC_TOKEN is accepted as an alias.',
+    });
+  }
+
+  checks.push(
+    {
+      name: `Local config exists (${configPathLabel})`,
+      check: async () => localConfig !== null,
+      fix: 'Run `teamai init` to initialize',
+    },
+    {
+      name: 'Team repo exists locally',
+      check: async () => {
+        if (!localConfig) return false;
+        return pathExists(localConfig.repo.localPath);
+      },
+      fix: 'Run `teamai init` to clone the team repo',
+    },
+    {
+      name: 'Team config (teamai.yaml) is valid',
+      check: async () => {
+        if (!localConfig) return false;
+        const config = await loadTeamConfig(localConfig.repo.localPath);
+        return config !== null;
+      },
+      fix: 'Check teamai.yaml in team repo for syntax errors',
+    },
+    ...await buildHookChecks(toolPaths, baseDir),
+    {
+      name: 'Env variables injected in shell profile',
+      check: async () => {
+        if (teamConfig?.sharing?.env?.injectShellProfile === false) return true;
+
+        if (!localConfig) return true;
+        const envYamlPath = path.join(localConfig.repo.localPath, 'env', 'env.yaml');
+        if (!await pathExists(envYamlPath)) return true;
+
+        const home = getUserHome();
+
+        // env.sh lives under teamaiHome, which is <projectRoot>/.teamai in
+        // project scope and ~/.teamai in user scope — mirror the path that
+        // `teamai pull` actually writes to, not a hardcoded user-home path.
+        const envShPath = path.join(
+          getDataHome(localConfig),
+          'env.sh',
+        );
+        if (!await pathExists(envShPath)) return false;
+
+        const shell = process.env.SHELL ?? '';
+        const profilePath = shell.includes('zsh')
+          ? path.join(home, '.zshrc')
+          : path.join(home, '.bashrc');
+        if (!await pathExists(profilePath)) return false;
+        const content = await readFileSafe(profilePath);
+        return content?.includes(TEAMAI_ENV_START) ?? false;
+      },
+      fix: 'Run `teamai pull` to inject env variables into shell profile',
+    },
+  );
+
+  let allPassed = true;
+  for (const { name, check, fix } of checks) {
+    const ok = await check();
+    if (ok) {
+      console.log(`  ✔ ${name}`);
+    } else {
+      console.log(`  ✖ ${name}`);
+      if (fix) console.log(`    → ${fix}`);
+      allPassed = false;
+    }
+  }
+
+  if (localConfig) {
+    const { pkgDoctorReport } = await import('./pkg/commands.js');
+    const packageReport = await pkgDoctorReport(localConfig, process.cwd());
+    if (packageReport) {
+      for (const line of packageReport.lines) console.log(line);
+      if (!packageReport.allPassed) allPassed = false;
+    }
+  }
+
+  // Codex trust-gate reminder: even when hooks are installed, Codex may not run
+  // them until the user reviews/trusts them. Note only — teamai never writes
+  // [hooks.state] to auto-trust.
+  if (await hasInstalledCodexHooks(toolPaths, baseDir)) {
+    console.log('');
+    log.info(codexTrustReminder());
+  }
+
+  console.log('');
+  if (allPassed) {
+    log.success('All checks passed!');
+  } else {
+    log.warn('Some checks failed. See suggestions above.');
+  }
+}

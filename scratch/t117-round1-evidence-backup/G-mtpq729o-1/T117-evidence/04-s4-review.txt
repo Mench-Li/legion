@@ -1,0 +1,104 @@
+== S4 源码走查：plugins/src/index.ts docSync 机制 ==
+-- 158-159 接口字段 --
+  /** 文档同步标记（R-4/F1）：用户可见行为变更（feature/docSync）任务为 true；纯重构/测试不设。守护据其在契约路径追加 docs/FEATURES.md + README.md 并注入同步提示词（D2/D3）。 */
+  docSync?: boolean | null
+-- registerContractDocs：docSync 追加 + 幂等 + missing/registered + M2 catch 语义（plugins/src/index.ts:1196-1236）--
+  async function registerContractDocs(t: Task, stage: StageDef, worktreeDir: string | null, goal: GoalCtx | null | undefined): Promise<{ registered: string[]; missing: string[] }> {
+    const baseDir = worktreeDir ?? repoRootFor()
+    const rawPaths = resolveStageDocPaths(stage, t.id)
+    // R-4/D2 文档同步契约：用户可见行为变更（docSync）任务，追加功能手册 + README 作为契约产出文档（仅此类任务追加，I-4）。
+    if (t.docSync === true) {
+      for (const p of ['docs/FEATURES.md', 'README.md']) if (!rawPaths.includes(p)) rawPaths.push(p)
+    }
+    const registered: string[] = []
+    const missing: string[] = []
+    for (const rawRel of rawPaths) {
+      // M1：登记/判缺路径先按目标 docsDir goalize（与 gate 校验 goalDocPath、goalizePrompt 同源语义），
+      // 否则 docsDir 目标的产出文档（docs/<goalId>/REQUIREMENTS.md 等）在根 docs/ 检不到 → 误判缺失停 in_review
+      // 且登记错根槽位路径（T-111 现场：登记 docs/REQUIREMENTS.md，详情既不正确定位也不预览目标文档）。
+      const rel = goalizeContractPath(goal, rawRel)
+      const abs = join(baseDir, rel)
+      let digest = ''
+      try {
+        if (!existsSync(abs)) {
+          missing.push(rel)
+          continue
+        }
+        digest = fileDigest(abs)
+        const prev = (t.artifacts ?? []).filter(a => a.kind === 'file' && typeof a.path === 'string' && a.path.split('\\').join('/') === rel).slice(-1)[0]
+        if (prev && typeof prev.digest === 'string' && prev.digest === digest) continue // 字节未变幂等跳过
+        const argv = ['artifact', t.id, '--by', config.role, '--kind', 'file', '--path', rel]
+        if (useHub) {
+          await hubPost('/api/artifact', { id: t.id, kind: 'file', path: rel, title: `${stage.label}产出文档`, digest, by: config.role, scope })
+        } else {
+          await runTaskctl(config.scrumDir, argv)
+        }
+        registered.push(rel)
+      } catch (e) {
+        // M2：登记「写入失败」≠ 文档缺失——绝不并入 missing。missing 是软门禁停 in_review 的依据，
+        // 写入失败并入会把「文档真实存在、仅记录条目写不进去」误判成「契约产出文档缺失」并错误停闸+错误归因。
+        // 这里记录日志：文档在库，缺的只是任务记录上的条目，后续重跑/人工可补，不影响流转。
+        log(`${t.id} 契约产物登记失败（${rel}）：${String(e)}`)
+      }
+    }
+    if (registered.length > 0) activity('artifact', t.id, `契约产物登记：${registered.join('、')}`)
+    return { registered, missing }
+  }
+-- buildWorkerPrompt docSync 提示词注入（plugins/src/index.ts:1385-1390）--
+      ...(t.docSync === true
+        ? [
+            '',
+            '文档同步（doc-sync，R-4/D3）**必须**：本任务是「用户可见行为变更」——请同步更新功能手册 `docs/FEATURES.md` 对应小节 + §4 功能索引（F-xx 行）+ README 引导段（模块导航互链）。若该功能手册尚无对应小节，请新增并登记进功能索引。',
+          ]
+        : []),
+-- settle 契约路径追加 + missing 停 in_review 评论（plugins/src/index.ts:1636-1653）--
+      const contractPaths = isPipeline && stage ? stageContractDocs(stage) : []
+      // R-4/D2 文档同步契约：docSync 任务对 coder/devops 的契约路径追加 docs/FEATURES.md + README.md（否则该任务不做文档同步也不会被软门禁卡住，AC-R4-2）。
+      if (isPipeline && stage && t.docSync === true) {
+        for (const p of ['docs/FEATURES.md', 'README.md']) if (!(contractPaths as string[]).includes(p)) contractPaths.push(p)
+      }
+      let contractReg: { registered: string[]; missing: string[] } | null = null
+      if (contractPaths.length > 0 && stage) {
+        contractReg = await registerContractDocs(t, stage, worktreeDir, goal)
+        // 软门禁（G-R2 缺才停）：契约文档缺失 → 停 in_review 写明确提示评论，不 autoPromote、不误判成功流转；
+        // 文档补全后解阻重跑 → 登记成功、提示消除、照常流转。
+        if (contractReg.missing.length > 0) {
+          const missingText = contractReg.missing.map(m => '`' + m + '`').join('、')
+          await safeComment(t.id, `⚠ ${stage.label}完成，但契约产出文档缺失：${missingText}（期望写入 worktree 相对路径，与岗位契约一致）。已停在 in_review：产出不完整可 ↩ 打回并说明；补全文档后解阻重跑会自动登记并照常流转。${contractDocSummary(contractReg)}`)
+          await transitionTo(t.id, 'in_review')
+          activity('blocked', t.id, `${stage.label}完成但缺失契约文档：${contractReg.missing.join('、')}，转 in_review`)
+          log(`${t.id} → in_review（缺失契约文档 ${contractReg.missing.join('、')}）`)
+          return
+        }
+-- 454 GOAL_DOC_NAMES --
+  const GOAL_DOC_NAMES = ['REQUIREMENTS.md', 'RESEARCH.md', 'TASK_BREAKDOWN.md', 'TEST_CASES.md', 'TEST_REPORT.md', 'DEPLOY.md']
+-- 471-475 goalizeContractPath（仅改写 GOAL_DOC_NAMES 槽位；docs/FEATURES.md 与 README.md 不在其中 → 不会被 goalize 进目标目录，I-2/I-3 满足）--
+  const goalizeContractPath = (goal: GoalCtx | null | undefined, p: string): string => {
+    if (!goal?.docsDir) return p
+    let out = p
+    for (const name of GOAL_DOC_NAMES) out = out.split(`docs/${name}`).join(`${goal.docsDir}/${name}`)
+    return out
+  }
+
+== S4 关键缺口：docSync 声明/持久化通道缺失（实测）==
+repo-wide grep：docSync 仅出现在 plugins/src/index.ts(消费 3 处) / team-hub/stage-standards.mjs(验收项文本) / scratch sim；
+team-hub/server.mjs：无 ensureColumn tasks.docSync；createTask 不读取 body.docSync；rowToTask 不输出 docSync；goal 发布/切片展开均不带 docSync。
+
+== coder 自带复刻 sim（scratch/s4-docsync-sim.mjs，T-115 交付）复跑 ==
+(exit 0)
+RESULT: pass=7 fail=0 (AC-R4-1/4 + 幂等 + 路径命名空间)
+
+== 实测：scratch team-hub 实例 + POST /api/create {docSync:true} ==
+POST /api/create 返回任务无 docSync 字段（服务器丢弃未知字段，无列可写）；GET /api/task 同样无该键。
+feature/docSync 声明在 goal 发布（POST /api/goal {feature:true,docSync:true}）同样被丢弃；链任务（requirement…devops 8 岗）均无 docSync。
+→ t.docSync===true 三处分支（契约追加/提示词注入/缺失停闸）在 hub 真实流中不可达。fileDomain 同模式却有列有读写 → 属接线遗漏。
+
+== S4 环境受限（R-18）==
+plugins/tests/*.test.mjs import ../lib/index.js（构建产物）→ 需 plugins 先 pnpm install && build（bash scripts/build.sh）；
+worktree 无 node_modules（根与 plugins 均无）；plugins src import @deepseek-ai/* 外部包 → tsc -p plugins/tsconfig.json --noEmit 不可执行（npx ENOENT）。
+复现步骤：cd plugins && pnpm install && pnpm build && pnpm typecheck && node --test tests/*.test.mjs（宿主执行）。
+plugins/tests 现有套件（doc-contract/worker-regression/artifact-register 等 8 文件）均无 docSync 断言（grep 0 命中）→ S4 机制无自动化测试覆盖。
+
+== stage-standards（D1 验收项）==
+stage-standards.mjs:102: '用户可见行为变更（feature/docSync）须同步功能手册 docs/FEATURES.md 对应小节 + 功能索引 + README 引导段；纯重构/测试可豁免',
+stage-standards.mjs:148: '用户可见行为变更（feature/docSync）须同步功能手册 docs/FEATURES.md 对应小节 + 功能索引 + README 引导段；纯重构可豁免',

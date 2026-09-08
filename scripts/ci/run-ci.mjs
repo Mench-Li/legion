@@ -209,6 +209,17 @@ async function stageTest() {
   suites.push({ label: 'whiteboard（7 文件含真实服务 e2e）', files: wbTests, cwd: wbDir })
   const detail = []
   let allOk = true
+  const dsh = process.env.DSH_CHECKOUT
+  if (dsh && existsSync(join(dsh, 'packages'))) {
+    const ext = await exec(process.execPath, [join(ROOT, 'scripts', 'ci', 'build-external-package.mjs'), 'plugins'], { cwd: ROOT, env: { DSH_CHECKOUT: dsh } })
+    if (ext.code !== 0) {
+      return { ok: false, detail: `  FAIL plugins build（exit=${ext.code}）：${(ext.err || ext.out).slice(-1200)}` }
+    }
+    suites.push({ label: 'plugins（外部 DSH 回归）', files: readdirSync(join(ROOT, 'plugins', 'tests')).filter(f => f.endsWith('.test.mjs')).map(f => join('plugins', 'tests', f)), cwd: ROOT })
+    detail.push('  PASS plugins build（DSH_CHECKOUT=' + dsh + '）')
+  } else {
+    detail.push('  SKIP plugins（未配置可用 DSH_CHECKOUT；外部宿主测试不伪造通过）')
+  }
   for (const s of suites) {
     const cwd = s.cwd || ROOT
     const r = await runNodeTests(s.label, s.files.map(f => join(cwd, f)), cwd, s.nodeArgs || [])

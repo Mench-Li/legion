@@ -20,7 +20,7 @@
     "typescript": "^5.9.0"
   },
   "scripts": {
-    "build": "bash scripts/build.sh",
+    "build": "node ../scripts/ci/build-external-package.mjs team-hub",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "exports": {

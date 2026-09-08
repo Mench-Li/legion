@@ -342,7 +342,7 @@ node --test team-hub/*.test.mjs
 
 # 守护插件构建与测试（构建需要 DSH_CHECKOUT）
 $env:DSH_CHECKOUT = 'D:\project\DSH\dsh\deepseek-harness'
-bash plugins/scripts/build.sh
+pnpm --dir plugins build
 node --test plugins/tests/*.test.mjs
 
 # whiteboard 构建与测试

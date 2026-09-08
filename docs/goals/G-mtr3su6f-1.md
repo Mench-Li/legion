@@ -9,7 +9,7 @@
 ## 目标下并行任务快照（派工时刻）
 
 - T-119｜requirement｜done
-- T-120｜researcher｜todo
+- T-120｜researcher｜done
 - T-121｜breaker｜todo
 - T-122｜test-designer｜todo
 - T-123｜coder｜todo

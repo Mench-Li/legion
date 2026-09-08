@@ -1,0 +1,19 @@
+$ node docs/G-mtr3su6f-1/T125-evidence/repro-l2-context-injection.mjs
+--- stdout ---
+PASS | 上传 UTF-8 文本附件 → staged（id/sha 落盘引用） | {"id":1,"fileName":"fact-mtsaph22.txt","size":93,"kind":"text","status":"staged","scope":"alpha"}
+PASS | 带附件发消息 → meta.attachments 仅引用(id/fileName/size)，body 无文件正文
+PASS | 空间摘要含绑定仓库真实内容（DIGEST 标记） | {"len":106,"has":true}
+PASS | 附件内容经归属校验取回且含独有事实（FACT 标记） | {"file":"fact-mtsaph22.txt","has":true}
+PASS | 最终提示词同时注入绑定仓库事实与附件事实（E2E-2/3 的确定性代理） | {"digestIn":true,"factIn":true}
+PASS | 对照：第二条无附件消息 → attachments=[]（不泄漏第一条附件） | 0
+PASS | 对照：无附件提示词不含 FACT 独有事实 | {"factIn":false}
+PASS | 跨会话取回附件 → 占位 readError（不抛、不冒充内容） | {"id":1,"fileName":"fact-mtsaph22.txt","size":93,"content":null,"readError":"读取失败：HTTP 403 {\n  \"error\": \"附件不属于该会话（跨会话/跨空间不可读取）\"\n}"}
+PASS | 未绑定 → spaceDigest=null 且提示词含「未绑定」降级占位 | {"null":true,"ph":true}
+PASS | 真实仓库绑定 → 摘要含【顶层结构】且引用真实顶层目录（非编造） | {"len":4000,"missing":[]}
+
+==== L2 上下文注入汇总 ====
+总断言 10，PASS 10，FAIL 0
+
+--- stderr ---
+
+[exit code: 0]

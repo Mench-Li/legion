@@ -1,0 +1,30 @@
+$ D:\software\nodejs\node.exe -e 
+const {readFileSync,readdirSync,statSync}=require('node:fs');
+const {join}=require('node:path');
+const R='D:/project/DSH/legion/.legion-worktrees/T-125/';
+function walk(d,out=[]){for(const e of readdirSync(d)){const p=join(d,e);if(['node_modules','lib','dist','.git'].includes(e))continue;const s=statSync(p);if(s.isDirectory())walk(p,out);else if(/\.(ts|tsx|mjs|js)$/.test(e))out.push(p);}return out;}
+const isCode=(l)=>/^\s*[^\s\/*]/.test(l)&&!/^\s*\/\//.test(l);
+const prodFiles=[...walk(R+'plugins/src'),R+'team-hub/server.mjs',...walk(R+'workbench/src')];
+const chk=(n,c,g)=>{console.log((c?'PASS':'FAIL')+' | '+n+(g!==undefined?' | '+JSON.stringify(g):'')); if(!c)process.exitCode=1};
+const hits=[];
+for(const f of prodFiles){const t=readFileSync(f,'utf8'); if(t.split('\n').some(l=>l.includes('回复子代理未完成（error）')&&isCode(l))) hits.push(f.replace(R,''));}
+chk('生产代码路径无裸「回复子代理未完成（error）」文案（仅分类器/注释可引用）', hits.length===0, hits);
+const cls=readFileSync(R+'plugins/src/chatErrorClassifier.ts','utf8');
+chk('分类器为可行动文案且含恢复指引关键词', /重试|恢复|配置|模型/.test(cls));
+const sd=readFileSync(R+'plugins/src/spaceDigest.ts','utf8').split('\n');
+chk('spaceDigest 代码行无 child_process/spawn（头注释自述不计）', !sd.some(l=>/child_process|spawn\(/.test(l)&&isCode(l)), sd.filter(l=>/child_process|spawn/.test(l)).length);
+const sm=readFileSync(R+'team-hub/server.mjs','utf8').split('\n');
+const leak=sm.filter(l=>/att\.content|fileContent/.test(l)&&isCode(l));
+chk('server.mjs 代码行无附件全文写入消息体/meta（meta.attachments 仅引用注释自述）', leak.length===0, leak);
+console.log('static discipline done');
+
+--- stdout ---
+PASS | 生产代码路径无裸「回复子代理未完成（error）」文案（仅分类器/注释可引用） | []
+PASS | 分类器为可行动文案且含恢复指引关键词
+PASS | spaceDigest 代码行无 child_process/spawn（头注释自述不计） | 1
+PASS | server.mjs 代码行无附件全文写入消息体/meta（meta.attachments 仅引用注释自述） | []
+static discipline done
+
+--- stderr ---
+
+[exit code: 0]

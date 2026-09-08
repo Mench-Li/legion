@@ -1,0 +1,22 @@
+HEAD: d9adffb (w/T-125)  — 本批代码= T-123 coder commit 77ce2c2（promote 后经 13b87c1/2a90d90/d9adffb 到达）
+编码 diff 基线：3757151 (promote T-122) → 77ce2c2 (T-123)
+README.md                                          |   4 +-
+ docs/FEATURES.md                                   |  17 +-
+ docs/G-mtr3su6f-1/T123-evidence/verify-evidence.md |  84 +++++
+ plugins/src/chatContext.ts                         | 109 ++++++
+ plugins/src/chatErrorClassifier.ts                 |  95 +++++
+ plugins/src/chatResponder.ts                       | 170 ++++++++-
+ plugins/src/index.ts                               |  68 +++-
+ plugins/src/spaceDigest.ts                         | 155 ++++++++
+ plugins/tests/chat-error-classifier.test.mjs       |  50 +++
+ plugins/tests/chat-responder.test.mjs              |  77 ++++
+ plugins/tests/space-digest.test.mjs                | 122 +++++++
+ team-hub/chat.test.mjs                             | 402 ++++++++++++++++++++-
+ team-hub/server.mjs                                | 335 ++++++++++++++++-
+ workbench/README.md                                |   9 +-
+ workbench/src/App.tsx                              |   2 +-
+ workbench/src/api.ts                               |  33 +-
+ workbench/src/components/ChatView.tsx              | 345 +++++++++++++++++-
+ workbench/src/types.ts                             |  25 ++
+ 18 files changed, 2049 insertions(+), 53 deletions(-)
+依赖零新增：package.json / pnpm-lock 在该区间改动 = ERR: Command failed: git diff 3757151 77ce2c2 --name-only | findstr /i "package.json pnpm-lock"

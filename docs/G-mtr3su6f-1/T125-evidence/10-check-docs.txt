@@ -1,0 +1,7 @@
+$ D:\software\nodejs\node.exe scripts/ci/check-docs.mjs
+--- stdout ---
+check-docs: PASS（README.md + docs/FEATURES.md 结构/链接/索引一致，8 类校验项全绿）
+
+--- stderr ---
+
+[exit code: 0] (120 ms)

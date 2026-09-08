@@ -1,0 +1,9 @@
+node v24.19.0
+JS 代码块数量：6
+B.1 node --check PASS
+B.2 node --check PASS
+B.3 node --check PASS
+B.4 node --check PASS
+B.5 node --check PASS
+B.6 node --check PASS
+RESULT: PASS（全部 JS 骨架语法通过）

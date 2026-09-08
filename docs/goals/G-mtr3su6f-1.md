@@ -14,5 +14,5 @@
 - T-122｜test-designer｜done
 - T-123｜coder｜done
 - T-124｜reviewer｜done
-- T-125｜tester｜todo
+- T-125｜tester｜done
 - T-126｜devops｜todo

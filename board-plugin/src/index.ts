@@ -10,7 +10,7 @@ import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { spawn } from 'node:child_process'
 import { existsSync, readFile, watch, watchFile, unwatchFile } from 'node:fs'
-import { readFile as readFileP } from 'node:fs/promises'
+import { readFile as readFileP, realpath as realpathP } from 'node:fs/promises'
 import { extname, join, normalize, sep } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
@@ -110,7 +110,13 @@ export function apply(ctx: Context, config: Config): void {
         json(res, 200, { ...meta, exists: ok })
         return
       }
-      const data = await readFileP(abs)
+      let data: Buffer
+      try {
+        data = await readFileP(abs)
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') { json(res, 404, { error: '产物文件不存在' }); return }
+        throw e
+      }
       const ext = extname(abs).toLowerCase()
       const ct = ext === '.html' ? 'text/html; charset=utf-8'
         : ext === '.md' || ext === '.markdown' ? 'text/markdown; charset=utf-8'
@@ -134,7 +140,14 @@ export function apply(ctx: Context, config: Config): void {
     const posixAbs = raw.startsWith('/') || raw.startsWith('\\\\')
     if (winAbs || posixAbs) {
       const n = normalize(raw)
-      return [repoRoot, ...config.artifactRoots].some(root => { const r = normalize(root); return n === r || n.startsWith(r + sep) }) ? n : null
+      const roots = [repoRoot, ...config.artifactRoots]
+      if (!roots.some(root => { const r = normalize(root); return n === r || n.startsWith(r + sep) })) return null
+      if (!existsSync(n)) return n
+      try {
+        const real = await realpathP(n)
+        const rootsReal = await Promise.all(roots.map(async root => { try { return await realpathP(root) } catch { return normalize(root) } }))
+        return rootsReal.some(root => real === root || real.startsWith(root + sep)) ? real : null
+      } catch { return null }
     }
     let relp = raw.replace(/\\/g, '/')
     while (relp.startsWith('./')) relp = relp.slice(2)
@@ -142,11 +155,25 @@ export function apply(ctx: Context, config: Config): void {
     const segs = relp.split('/').filter(Boolean)
     if (segs.length === 0 || segs.includes('..') || segs.some(x => x.toLowerCase() === '.git')) return null
     const roots = [repoRoot, ...config.artifactRoots]
+    const rootsReal = await Promise.all(roots.map(async root => {
+      try { return await realpathP(root) } catch { return normalize(root) }
+    }))
+    const safeExisting = async (candidate: string): Promise<string | null> => {
+      if (!existsSync(candidate)) return null
+      try {
+        const real = await realpathP(candidate)
+        return rootsReal.some(root => real === root || real.startsWith(root + sep)) ? real : null
+      } catch { return null }
+    }
     const branch = join(repoRoot, '.legion-worktrees', taskId, ...segs)
-    if (artifactAllowed(branch) && existsSync(branch)) return branch
+    if (artifactAllowed(branch)) {
+      const safeBranch = await safeExisting(branch)
+      if (safeBranch) return safeBranch
+    }
     for (const root of roots) {
       const abs = join(root, ...segs)
-      if (existsSync(abs)) return abs
+      const safe = await safeExisting(abs)
+      if (safe) return safe
     }
     return join(repoRoot, ...segs) // 文件暂不存在也返回主根候选，供调用方做 exists 元信息
   }

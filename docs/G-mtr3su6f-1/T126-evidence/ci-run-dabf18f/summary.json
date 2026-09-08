@@ -1,0 +1,43 @@
+{
+  "root": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-126",
+  "outDir": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-126\\docs\\G-mtr3su6f-1\\T126-evidence\\ci-run-dabf18f",
+  "finishedAt": "2026-09-08T06:44:05.500Z",
+  "stages": [
+    {
+      "name": "env",
+      "status": "PASS",
+      "ms": 92
+    },
+    {
+      "name": "deps",
+      "status": "PASS",
+      "ms": 4
+    },
+    {
+      "name": "build",
+      "status": "PASS",
+      "ms": 23606
+    },
+    {
+      "name": "test",
+      "status": "PASS",
+      "ms": 18196
+    },
+    {
+      "name": "smoke",
+      "status": "PASS",
+      "ms": 8747
+    },
+    {
+      "name": "stage",
+      "status": "PASS",
+      "ms": 131
+    },
+    {
+      "name": "doc",
+      "status": "PASS",
+      "ms": 107
+    }
+  ],
+  "failed": 0
+}

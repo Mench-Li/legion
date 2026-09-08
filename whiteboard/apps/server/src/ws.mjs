@@ -1,7 +1,7 @@
 // ws.mjs — 零依赖 RFC6455 WebSocket 服务端（S3 / 单进程 Node/ws 的等价实现）。
 // 覆盖：HTTP Upgrade 握手、文本/二进制帧、分片、ping/pong、close。客户端帧按需解掩码。
 
-import { createHash } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
@@ -13,6 +13,15 @@ const OP_PING = 0x9;
 const OP_PONG = 0xa;
 
 export const WS_OPCODE = { CONT: OP_CONT, TEXT: OP_TEXT, BINARY: OP_BINARY, CLOSE: OP_CLOSE, PING: OP_PING, PONG: OP_PONG };
+
+export function authorizedUpgrade(req, token = '') {
+  if (!token) return true;
+  const url = new URL(req.url || '/', 'http://localhost');
+  const supplied = req.headers.authorization?.replace(/^Bearer\s+/i, '') || url.searchParams.get('token') || '';
+  const a = Buffer.from(String(supplied));
+  const b = Buffer.from(String(token));
+  return a.length === b.length && timingSafeEqual(a, b);
+}
 
 /** 计算 Sec-WebSocket-Accept */
 export function acceptKey(key) {
@@ -171,12 +180,16 @@ export class WsConnection extends EventEmitter {
 
 /** 挂在 http.Server 上，把 /ws 升级请求转为 WsConnection */
 export class WebSocketServer extends EventEmitter {
-  constructor({ server, path = '/ws', maxLen } = {}) {
+  constructor({ server, path = '/ws', maxLen, token = '' } = {}) {
     super();
     this.clients = new Set();
     server.on('upgrade', (req, socket) => {
       const url = (req.url || '').split('?')[0];
       if (url !== path) { socket.destroy(); return; }
+      if (!authorizedUpgrade(req, token)) {
+        socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+        socket.destroy(); return;
+      }
       const key = req.headers['sec-websocket-key'];
       if (!key) { socket.destroy(); return; }
       const accept = acceptKey(key);

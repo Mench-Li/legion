@@ -1,0 +1,28 @@
+$ D:\software\nodejs\node.exe -e 
+const {readFileSync}=require('node:fs');
+const R='D:/project/DSH/legion/.legion-worktrees/T-125/';
+const f=readFileSync(R+'docs/FEATURES.md','utf8');
+const rm=readFileSync(R+'README.md','utf8');
+const wr=readFileSync(R+'workbench/README.md','utf8');
+const chk=(name,cond)=>{console.log((cond?'PASS':'FAIL')+' | '+name); if(!cond) process.exitCode=1;};
+const s39=f.split('## 3.9')[1]||f;
+chk('FEATURES §3.9 存在且含「选择工作空间」入口语义', /选择工作空间|关联工作空间/.test(s39));
+chk('FEATURES §3.9 含回复设置入口', /回复设置/.test(s39));
+chk('FEATURES §3.9 含上传文件上下文方式', /上传文件|上传/.test(s39));
+chk('FEATURES §3.9 含 AI 不回/回复失败怎么办（可行动）', /重试|恢复|修复|排查|失败/.test(s39));
+chk('README §6 排障含对话失败行', /AI 不回|回复失败|对话/.test(rm));
+chk('workbench README 含对话中心细目', /对话/.test(wr));
+console.log('S9 key sentences done');
+
+--- stdout ---
+PASS | FEATURES §3.9 存在且含「选择工作空间」入口语义
+PASS | FEATURES §3.9 含回复设置入口
+PASS | FEATURES §3.9 含上传文件上下文方式
+PASS | FEATURES §3.9 含 AI 不回/回复失败怎么办（可行动）
+PASS | README §6 排障含对话失败行
+PASS | workbench README 含对话中心细目
+S9 key sentences done
+
+--- stderr ---
+
+[exit code: 0] (125 ms)

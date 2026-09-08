@@ -1,0 +1,25 @@
+$ node docs/G-mtr3su6f-1/T125-evidence/repro-health-m1m2.mjs
+--- stdout ---
+PASS | A1 空库 health?scope=alpha：online=false enabled=true model=null lastFail=null（形状） | "{\"scope\":\"alpha\",\"okAt\":\"2026-09-08T06:34:21.390Z\",\"online\":false,\"daemon\":null,\"enabled\":true,\"model\":null,\"modelResolved\":false,\"lastFail\":null,\"honestNote\":\"模型「已解析」不代表 provider 实际可用：实际可用性以最近一次 AI 回复/失败原因为准。\"}"
+FAIL | B1 M1复现 alpha 无本空间 worker：online 应=false（别空间心跳不得令 alpha 假绿） | "{\"online\":true,\"daemon\":{\"member\":\"worker@beta\",\"kind\":\"worker\",\"lastSeenAt\":\"2026-09-08T06:34:21.401Z\"}}"
+FAIL | B2 M1复现 alpha model 兜底不应取 beta 守护心跳模型（跨 scope 泄漏） | "{\"model\":{\"provider\":\"fake-prov\",\"model\":\"beta-model\",\"source\":\"daemon-heartbeat\"},\"modelResolved\":true}"
+PASS | C1 alpha 本空间心跳后 online=true 且 daemon.member=worker@alpha | "{\"online\":true,\"daemon\":{\"member\":\"worker@alpha\",\"kind\":\"worker\",\"lastSeenAt\":\"2026-09-08T06:34:21.414Z\"}}"
+PASS | C2 model 解析链 daemon-heartbeat 兜底取本 scope 行（alpha-model） | "{\"provider\":\"fake-prov\",\"model\":\"alpha-model\",\"source\":\"daemon-heartbeat\"}"
+PASS | D1 发消息 → meta.aiStatus=awaiting 入队 | "{\"aiStatus\":\"awaiting\",\"aiStatusAt\":\"2026-09-08T06:34:21.450Z\"}"
+PASS | D2 fail 回写 → aiStatus=failed，error 原文入 meta.aiError（旧笼统文案存量语义） | "{\"aiStatus\":\"failed\",\"aiStatusAt\":\"2026-09-08T06:34:21.450Z\",\"aiError\":\"回复子代理未完成（error）\",\"failedAt\":\"2026-09-08T06:34:21.461Z\"}"
+PASS | D3 后发消息 answer 成功 → 源消息 replied（replyMsg 引用回复行）+ 恰一条 assistant 回复 | "{\"meta\":{\"aiStatus\":\"replied\",\"aiStatusAt\":\"2026-09-08T06:34:21.492Z\",\"repliedAt\":\"2026-09-08T06:34:21.509Z\",\"replyMsg\":3},\"assistantReplies\":1}"
+FAIL | D4 M2复现 最近成功 replied 之后 lastFail 应消除（按四态设计绿可达）；现实现仍透出旧 failed 与旧笼统文案 | "{\"msgId\":1,\"convId\":1,\"aiError\":\"回复子代理未完成（error）\",\"failedAt\":\"2026-09-08T06:34:21.461Z\"}"
+PASS | E1 retry → 源消息回 awaiting 且重新入队 | "{\"retryStatus\":200,\"meta\":{\"aiStatus\":\"awaiting\",\"aiStatusAt\":\"2026-09-08T06:34:21.572Z\",\"failedAt\":\"2026-09-08T06:34:21.461Z\"},\"inQueue\":true}"
+PASS | E2 retry 后 answer → replied；重复 answer 幂等（skipped 不重复）；队列退出 | "{\"a1\":200,\"meta\":{\"aiStatus\":\"replied\",\"aiStatusAt\":\"2026-09-08T06:34:21.572Z\",\"failedAt\":\"2026-09-08T06:34:21.461Z\",\"repliedAt\":\"2026-09-08T06:34:21.601Z\",\"replyMsg\":4},\"inQueue\":false}"
+PASS | E3 已 replied 消息再 answer → task.skipped=true 幂等无重复 | "{\"ok\":true,\"task\":{\"skipped\":true,\"reason\":\"replied\",\"source\":{\"id\":1,\"convId\":1,\"scope\":\"alpha\",\"author\":\"general\",\"kind\":\"text\",\"body\":\"帮我总结一下\",\"meta\":{\"aiStatus\":\"replied\",\"aiStatusAt\":\"2026-09-08T06:34:21.572Z\",\"failedAt\":\"2026-09-08T06:34:21.461Z\",\"repliedAt\":\"2026-09-08T06:34:21.601Z\",\"replyMsg\":4},\"clientTs\":null,\"createdAt\":\"2026-09-08T06:34:21.450Z\"}}}"
+PASS | E4 全程 alpha-assistant 回复恰 2 条（无重复无多写） | "count=2"
+
+==== 复现汇总 ====
+总断言 13，预期成立 PASS 10，行为复现(FAIL=缺陷现形) 3
+  [复现] B1 M1复现 alpha 无本空间 worker：online 应=false（别空间心跳不得令 alpha 假绿）
+  [复现] B2 M1复现 alpha model 兜底不应取 beta 守护心跳模型（跨 scope 泄漏）
+  [复现] D4 M2复现 最近成功 replied 之后 lastFail 应消除（按四态设计绿可达）；现实现仍透出旧 failed 与旧笼统文案
+
+--- stderr ---
+
+[exit code: 0]

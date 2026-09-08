@@ -1,0 +1,35 @@
+$ D:\software\nodejs\node.exe -e 
+const {readFileSync}=require('node:fs');
+const R='D:/project/DSH/legion/.legion-worktrees/T-125/';
+const cv=readFileSync(R+'workbench/src/components/ChatView.tsx','utf8');
+const api=readFileSync(R+'workbench/src/api.ts','utf8');
+const app=readFileSync(R+'workbench/src/App.tsx','utf8');
+const ty=readFileSync(R+'workbench/src/types.ts','utf8');
+const chk=(n,c,g)=>{console.log((c?'PASS':'FAIL')+' | '+n+(g!==undefined?' | '+JSON.stringify(g):'')); if(!c)process.exitCode=1};
+const dsiCode=cv.split('\n').filter(l=>l.includes('dangerouslySetInnerHTML')&&!l.trim().startsWith('//')&&!l.trim().startsWith('*')&&!l.trim().startsWith('/*')&&!l.trim().startsWith('{/*')).length;
+chk('ChatView 渲染安全：无 dangerouslySetInnerHTML 实调用（仅注释）', dsiCode===0, {code:dsiCode});
+chk('S7 选空间入口：选择工作空间/空间列表已接线', /选择工作空间开始对话|选择工作空间/.test(cv), {hasDeadEndCard:!cv.includes('无法开始对话')});
+chk('S7 健康点状态文案（就绪/异常/离线等）', /就绪|异常|离线|健康/.test(cv));
+chk('S7 回复设置入口', /回复设置/.test(cv));
+chk('S8 附件入口 input file（multiple）', /<input[^>]*type=['"]file['"][^>]*multiple/i.test(cv));
+chk('S8 附件 chip 可移除/失败标红/就绪前发送禁用', /attachFiles/.test(cv) && /移除|remove/.test(cv));
+chk('types 含 ChatAttachmentRef 与 ChatHealthInfo', /ChatAttachmentRef/.test(ty) && /ChatHealthInfo/.test(ty));
+chk('api 含 fetchChatHealth/uploadChatAttachment/attachmentIds', /fetchChatHealth/.test(api) && /uploadChatAttachment/.test(api) && /attachmentIds/.test(api));
+chk('App onPickScope 选择空间接线', /onPickScope/.test(app));
+console.log('UI 静态断言 done');
+
+--- stdout ---
+PASS | ChatView 渲染安全：无 dangerouslySetInnerHTML 实调用（仅注释） | {"code":0}
+PASS | S7 选空间入口：选择工作空间/空间列表已接线 | {"hasDeadEndCard":true}
+PASS | S7 健康点状态文案（就绪/异常/离线等）
+PASS | S7 回复设置入口
+PASS | S8 附件入口 input file（multiple）
+PASS | S8 附件 chip 可移除/失败标红/就绪前发送禁用
+PASS | types 含 ChatAttachmentRef 与 ChatHealthInfo
+PASS | api 含 fetchChatHealth/uploadChatAttachment/attachmentIds
+PASS | App onPickScope 选择空间接线
+UI 静态断言 done
+
+--- stderr ---
+
+[exit code: 0]

@@ -1,0 +1,6 @@
+$ D:\software\nodejs\node.exe D:/project/DSH/legion/.legion-worktrees/T-125/workbench/node_modules/typescript/bin/tsc -p workbench/tsconfig.json --noEmit
+--- stdout ---
+
+--- stderr ---
+
+[exit code: 0] (5588 ms)

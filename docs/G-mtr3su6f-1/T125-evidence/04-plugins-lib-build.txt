@@ -1,0 +1,6 @@
+$ D:\software\nodejs\node.exe D:/project/DSH/dsh/deepseek-harness/node_modules/typescript/bin/tsc -p plugins/tsconfig.json
+--- stdout ---
+
+--- stderr ---
+
+[exit code: 0] (2471 ms)

@@ -90,6 +90,14 @@ node scrum\serve.mjs --port 4820 --host 0.0.0.0 --token legion-kanban-4820
 ### 3.7 自动交接与守护流水线
 守护自动认领 + 自动派工 + 人工闸门 + 将军干预 + 合入自动调解 + 重启孤儿回收。📖 详见功能手册 **[§3.7 自动交接与守护流水线](docs/FEATURES.md#37-自动交接与守护流水线)**。
 
+守护另自动运行**经验知识库闭环（沉淀 → 形态分流 → 统一检索 → 派工自动召回 → 晋升）**：
+- **沉淀**：done 结算时按摩擦（打回/验收轮/将军评语）打分，高分任务落成经验草稿 `docs/experience/drafts/<任务id>.md`；
+- **晋升（形态分流）**：草稿达线（观察窗 + 被引用 recalled ≥2 + 将军采纳 upvoted ≥1 + 置信度）后按内容形态分流——**procedure**（可步骤化）→ AI 改写为 skill 进技能中心（将军 review publish）；**declarative**（陈述性/决策经验）→ 落成 `docs/experience/learnings/<任务id>.md` 条目（带溯源 frontmatter），两出口均在草稿原件留 `promotedTo/promotedAt` 溯源；
+- **统一检索**：kb-recall 预设（`kb_build_index`/`kb_recall`）把 `docs/experience` 草稿 + learnings + `~/.dsh/skills` published skills 收进同一索引面，文件变化自动重建；
+- **派工自动召回**：守护派工时自动检索相关经验注入士兵提示词（「相关团队经验」段），注入即计一次真实 recalled 回灌晋升管线（同目标兄弟任务只注入不计数，防模板噪音）。
+
+经验产物与验收记录：`docs/experience/drafts/`（待晋升草稿）、`docs/experience/learnings/`（陈述性条目）、`docs/acceptance/P2-acceptance.md`（P2 验收方案）。
+
 ### 3.8 模型 × 智能体配置
 底部「⚙️ 模型配置」按空间/角色选默认模型，按省 token 档位分组；执行守护按配置选模型。📖 详见功能手册 **[§3.8 模型 × 智能体配置](docs/FEATURES.md#38-模型-智能体配置)**。
 
@@ -168,6 +176,9 @@ v1→v2 迁移脚本与并存警示；v1 为遗留兼容。📖 详见功能手�
 - `docs/DEPLOY.md` — 发布部署 runbook（环境分级 / 步骤 / 验证 / 回滚 / 变更影响；发布前 CI 门禁 `node scripts/ci/run-ci.mjs`）
 - `docs/TEST_REPORT.md` — 测试报告与逐套件锚定结果
 - `docs/P0-CONFIRMATION.md` / `docs/P1-LIVE-ROLLOUT.md` / `docs/P2-GOALDOCS-LIVE.md` / `docs/P3-PROD-ROLLOUT.md` — P0~P3 上线与滚动记录（历史过程记录，非正文）
+- `docs/experience/drafts/` — 经验草稿（守护 done 结算沉淀，待晋升队列）
+- `docs/experience/learnings/` — 陈述性经验条目（declarative 草稿晋升落盘，带溯源 frontmatter）
+- `docs/acceptance/P2-acceptance.md` — P2 经验知识库闭环验收方案与核对脚本（`plugins/tests/accept-p2.mjs`）
 - `team-hub/server.mjs` — v2 中枢源码（表结构与全部路由以代码为准）
 - `LEGION.md` — 军团规则（注入执行 agent 提示词）
 

@@ -43,8 +43,12 @@ export const NORMS_SPACE_MAX = envNum('NORMS_SPACE_MAX', 4000)
 export const NORMS_TOTAL_MAX = envNum('NORMS_TOTAL_MAX', 7000)
 
 export const REPO_RULES_HEADER = '仓库规则（必须遵守，来自 LEGION.md/AGENTS.md）：'
-const SPACE_PRIORITY_NOTE = '空间/项目层规范（优先于全局层，必须遵守）'
-const GLOBAL_HEADER = '全局规范（必须遵守，来自 team-hub rules 全局层）：'
+/** 空间/项目层段首文案（导出供 doctor 用 marker 所有权校验注入产物归属）。 */
+export const SPACE_PRIORITY_NOTE = '空间/项目层规范（优先于全局层，必须遵守）'
+/** 全局层段首文案（导出供 doctor 校验全局规则是否真的进了注入产物）。 */
+export const GLOBAL_HEADER = '全局规范（必须遵守，来自 team-hub rules 全局层）：'
+/** 空间层单文件来源标注前缀（真实注入产物里的 marker：docs/rule-assets doctor 按此校验逐文件所有权）。 */
+export const FILE_SOURCE_PREFIX = '【来源：仓库文件 '
 
 /** 数出文本中 ``` 围栏行的数量。 */
 function fenceLines(text: string): number {

@@ -262,6 +262,7 @@ function frontmatterOf(task: ExpTaskInput, sig: FrictionSignals, meta?: { create
     `reviewRounds: ${c.reviewRounds}`,
     `gateRounds: ${c.gateRounds}`,
     `generalNotes: ${c.generalNotes}`,
+    'kind: ',
     '---',
   ].join('\n')
 }

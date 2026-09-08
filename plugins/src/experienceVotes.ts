@@ -336,7 +336,7 @@ const PROCEDURE_MARKERS = [
 ]
 /** 陈述式 marker（出现 = 偏 declarative）。 */
 const DECLARATIVE_MARKERS = [
-  '原因', '背景', '决策', '为什么', '教训', '结论', '权衡', '上下文', '上下文', '历史', '演进', '经验',
+  '原因', '背景', '决策', '为什么', '教训', '结论', '权衡', '上下文', '历史', '演进', '经验',
   '坑', '失败', '反复', '根因', '猜测', '不一致', '遗留', '可选', '备注', '说明', '选择理由',
 ]
 
@@ -375,8 +375,8 @@ export function buildLearningPrompt(draftTaskId: string, draftBody: string): str
     `2. 背景/起因：为什么会有这条经验（一句话交代任务上下文）；`,
     `3. 结论/教训：这条经验的核心陈述（决策理由 / 坑的成因 / 事实性结论）——只写草稿里有依据的；`,
     `4. 适用场景：后续什么情况下该想起这条经验（何时参考、何时不参考）；`,
-    `5. 溯源：末尾附「源自任务 ${draftTaskId}」。`,
-    `6. 输出为一段 markdown 正文（不要 JSON，不要代码围栏包全文），按 ## 分节。`,
+    `5. 溯源：正文末尾附「源自任务 ${draftTaskId}」。`,
+    `6. 只输出正文（body）：整段 markdown，按 ## 分节（标题/背景与起因/结论与教训/适用场景/溯源）。不要输出 JSON 外壳、不要用代码围栏包全文、不要任何前后缀叙述。`,
     ``,
     `===== 草稿正文 =====`,
     ``,
@@ -409,9 +409,17 @@ export function renderLearningFile(opts: {
   return `${fm}\n\n${String(opts.body ?? '').trim()}\n`
 }
 
-/** 降级模板：子代理不可用时用草稿原文的「将军评语/evidence」段做 learning 正文（保底，溯源不断）。 */
+/** 降级模板：子代理不可用时用草稿正文提炼 learning（保底，溯源不断）。
+ *  剔除草稿 frontmatter / 标题 / 「自动生成」说明块等元信息，只留将军评语与 evidence。 */
 export function fallbackLearning(draftTaskId: string, draftBody: string): string {
-  const title = /^# 经验草稿：\S+\s+(.+)$/m.exec(draftBody)?.[1]?.trim() ?? `经验：${draftTaskId}`
-  const stripped = String(draftBody ?? '').replace(/^---\n[\s\S]*?\n---\n?/, '')
-  return `## ${title}\n\n${stripped.slice(0, 5000)}\n\n---\n\n源自任务 ${draftTaskId}（自动 promote 降级模板，待将军复核）。`
+  const title = /^# 经验草稿：\S+\s+(.+)$/m.exec(draftBody)?.[1]?.trim() ?? `任务 ${draftTaskId} 的经验`
+  let rest = String(draftBody ?? '')
+    .replace(/^---\n[\s\S]*?\n---\n?/, '')          // frontmatter
+    .replace(/^# 经验草稿：.*(?:\n|$)/m, '')          // 原草稿标题
+    .replace(/^> 自动生成.*(?:\n|$)/m, '')            // 「自动生成」说明块首行
+    .replace(/^> 未经复审。.*(?:\n|$)/m, '')          // 说明块次行
+    .replace(/^## 待晋升[\s\S]*$/m, '')              // 待晋升清单（对终态资产无意义）
+    .trim()
+  if (!rest) rest = '（草稿正文为空，详见源任务）'
+  return `## ${title}\n\n${rest.slice(0, 5000)}\n\n---\n\n源自任务 ${draftTaskId}（自动 promote 降级模板，待将军复核）。`
 }

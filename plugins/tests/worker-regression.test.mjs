@@ -327,10 +327,10 @@ test('a detached worker failure is contained and the task can be retried', async
   }
 })
 
-test('pipeline final stage submits in_review under the stage role, not the daemon role', async () => {
-  // D1 回归：流水线最终阶段（devops，next=null）worker 完成后，in_review 迁移必须以认领者
-  // （soldier=devops）提交；硬编码 config.role（soldier-auto）会被 taskctl 的
-  // 「由 X 负责，不能由 Y 提交验收」拒绝，导致任务永远卡在 in_progress。
+test('pipeline final stage autofinishes to done under the stage role, not the daemon role', async () => {
+  // D1 回归（2026-09-08 更新）：流水线最终阶段（devops，next=null）worker 完成后，
+  // 不再停 in_review 等将军验收（将军裁决「部署不需验收，直接部署」），而是自动合入 + 推进 done；
+  // 推进必须以认领者（soldier=devops）发起 /api/advance，不能硬编码 config.role（soldier-auto）。
   const root = await mkdtemp(join(tmpdir(), 'scrum-worker-final-'))
   const originalFetch = globalThis.fetch
   const restoreTasks = protectTasksFile(root)
@@ -356,6 +356,11 @@ test('pipeline final stage submits in_review under the stage role, not the daemo
       task = { ...task, status: body.to, version: task.version + 1 }
       return response({ task })
     }
+    if (url.pathname === '/api/advance') {
+      requests.push(`advance:${body.by}`)
+      task = { ...task, status: 'done', version: task.version + 1 }
+      return response({ task })
+    }
     throw new Error(`unexpected request ${url.pathname}`)
   }
 
@@ -363,10 +368,10 @@ test('pipeline final stage submits in_review under the stage role, not the daemo
   try {
     apply(harness.ctx, config(root, { rolesFile: join(root, 'roles.json') }))
     harness.intervals[0]()
-    await waitFor(() => requests.includes('transition:in_review:devops'), 'final stage never submitted in_review under devops')
+    await waitFor(() => requests.includes('advance:devops'), 'final stage never advanced to done under devops')
     assert.ok(
-      !requests.some(r => r.startsWith('transition:in_review:soldier-auto')),
-      `transition must not use the daemon role, got ${requests.join(', ')}`,
+      !requests.some(r => r.startsWith('advance:soldier-auto') || r.startsWith('transition:in_review')),
+      `final stage must autofinish via advance under the stage role (not daemon role / not in_review), got ${requests.join(', ')}`,
     )
   } finally {
     for (const dispose of harness.disposers) await dispose()

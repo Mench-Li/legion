@@ -3,12 +3,16 @@
  *
  * 每 intervalMs 扫一次任务看板（legion/scrum/tasks.json 权威库，经 taskctl 访问）：
  *   1. todo 任务 → 认领（互斥由状态机保证）→ 派一次性 worker subagent
- *      （携带任务完整上下文：标题/描述/验收/评论/依赖）→ 完成后提交 in_review。
+ *      （携带任务完整上下文：标题/描述/验收/评论/依赖）→ 完成后按岗位结算：
+ *      流水线中间阶段自动合入并推进 done；**流水线最终阶段（如 devops 链尾）自动合入并收官 done**
+ *      （部署不需将军验收，2026-09-08 T-126 现场裁决：将军已授权整条流水线，终态自检通过即放行）；
+ *      人工闸门岗（gate，如 requirement/researcher）与人工派活的非流水线单角色任务 → 停 in_review 等将军。
  *   2. in_progress 且属于本角色、认领之后有他人评论的任务 → 视为被将军退回，
  *      派纠错 worker（提示词附最新退回评论）。
  *   3. blocked 且属于本角色、依赖已全部解除的任务 → 解阻认领 → 派 worker 续做。
  *
- * done 永远由用户在拖拽中决定：本守护最多把任务提交到 in_review。
+ * done 的两种入口：将军拖拽验收（gate/单角色/异常在 in_review 的任务），
+ * 或守护自动收官（流水线中间与最终阶段，将军已授权整条流水线）。
  * worker 是一次性 subagent（spawn-in-process），父为启动时惰性创建的 foreman agent，
  * 工作目录 = 仓库根。worker 只做实现并回报 {status, summary, evidence, blocker}，
  * 状态迁移一律由守护经 taskctl 完成（taskctl 是唯一变更入口，乐观锁/角色纪律服务端强制）。
@@ -17,7 +21,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { appendFileSync, cpSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs'
+import { appendFileSync, cpSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, readdirSync, statSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -27,10 +31,26 @@ import type { ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import type AgentPresets from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { formatSkill, skillsChanged, type SkillRef } from './skillsCache.js'
+import {
+  parseSkillTombstones, planSkillSync, type PublishedSkill,
+} from './skillsBridge.js'
 import { buildNormSections, type NormFile } from './norms.js'
 import { buildChatAnswerPrompt, chatIdentityFor, type ChatCtxMsg } from './chatResponder.js'
 import { classifyChatError } from './chatErrorClassifier.js'
 import { gatherChatContext, type AttachmentRef, type ChatContextBundle } from './chatContext.js'
+import { collectSignals, shouldDraft, buildDraft, type ExpTaskInput } from './experience.js'
+import {
+  parseDraftState, renderFrontmatter, replaceFrontmatter, applyVote,
+  detectRecalledTaskIds, detectUpvotedTaskIds,
+  shouldPromote, shouldPrune, skillIdForTask, buildPromotePrompt,
+  resolveKind, buildLearningPrompt, renderLearningFile, fallbackLearning, learningIdForTask,
+} from './experienceVotes.js'
+import {
+  parseTombstones, applyTombstones, runRuleDoctor, type RuleDoctorReport,
+} from './ruleAssets.js'
+import {
+  pickRecall, renderRecallSection, countableRefs, type RecallDoc,
+} from './experienceRecall.js'
 
 type AppContext = Context & {
   subagents: SubagentRuntime
@@ -91,6 +111,8 @@ export interface Config {
   mode: 'worker' | 'mediator'
   /** worker 模式是否内嵌本空间合入调解（公共 mediator 部署时置 false，避免双调解）。 */
   mediateMergeFails: boolean
+  /** P1-4.5 技能桥目标目录（默认 ~/.dsh/skills —— DSH 原生扫描 + teamai 同步目标；空串 = 关闭桥）。 */
+  dshSkillsDir: string
 }
 
 export const Config = z.object({
@@ -119,6 +141,7 @@ export const Config = z.object({
   maxFixPerSlice: z.number().min(0).max(5).default(2),
   mode: z.union([z.const('worker'), z.const('mediator')]).default('worker'),
   mediateMergeFails: z.boolean().default(true),
+  dshSkillsDir: z.string().default(''),
 })
 
 /** 任务记录（taskctl 输出的字段子集，按需扩展）。 */
@@ -141,6 +164,8 @@ interface Task {
   hold?: boolean
   blockedBy: string[]
   comments: Array<{ by: string; at: string; text: string }>
+  /** 证据登记（与 comments 同构，separate 字段；hub 任务表 evidence JSON 列）。 */
+  evidence?: Array<{ by: string; at: string; text: string }> | null
   /** 产物登记（html/file/url；契约文档自动登记 = kind=file + 仓库相对路径 + digest）。 */
   artifacts?: Array<{ by: string; at: string; kind: string; path: string; title?: string; digest?: string }>
   /** 切片流水线归属键（v3 slice 模式）：coder/tester = `${tdId}:S${n}`；devops 尾 = tdId。 */
@@ -564,6 +589,81 @@ export function apply(ctx: AppContext, config: Config): void {
     } catch { /* 技能拉取失败不影响派工（缓存不清，TC-S3-05） */ }
   }
 
+  // ── P1-4.5 技能桥：published skills → ~/.dsh/skills（DSH 原生技能目录 = teamai 同步目标）──
+  // 方案：docs/research/teamai-cli-review.md §4.5 + §2.2 收敛协议。
+  // teamai 只向 DSH 同步 skills（toolPaths dsh.skills → ~/.dsh/skills，rank 400，DSH 源码已证），
+  // 而 Legion 沉淀的技能在 team-hub 表里、不在该目录 → 双向缺"发送端"：本桥补上。
+  // 语义：本 scope published（+授权共享，与 fetchSkills 同口径）→ planSkillSync 收敛
+  // （contentHash 未变不重写；tombstone ~/.dsh/skills/.removed 确认停用才删；非本桥目录不碰）。
+  const dshSkillsDir = (): string => {
+    const d = (config.dshSkillsDir || join(homedir(), '.dsh', 'skills')).trim()
+    return d
+  }
+  /** 读目标目录现状：<目录名> → SKILL.md 全文（缺 SKILL.md 的目录忽略）。 */
+  function readExistingDshSkills(dir: string): Map<string, string> {
+    const out = new Map<string, string>()
+    try {
+      if (!existsSync(dir)) return out
+      for (const name of readdirSync(dir)) {
+        const p = join(dir, name, 'SKILL.md')
+        try { if (existsSync(p)) out.set(name, readFileSync(p, 'utf8')) } catch { /* 单目录读取失败跳过 */ }
+      }
+    } catch { /* 目录不可读：返回空（守护会当首次同步全写） */ }
+    return out
+  }
+  /** 执行收敛计划（写/删 + tombstone 落盘），返回是否发生变化。 */
+  function applySkillPlan(dir: string, plan: { writes: Array<{ id: string; content: string }>; deletes: Array<{ id: string }> }): boolean {
+    if (plan.writes.length === 0 && plan.deletes.length === 0) return false
+    try {
+      mkdirSync(dir, { recursive: true })
+      for (const w of plan.writes) {
+        const d = join(dir, w.id)
+        mkdirSync(d, { recursive: true })
+        writeFileSync(join(d, 'SKILL.md'), w.content, 'utf8')
+      }
+      for (const del of plan.deletes) {
+        rmSync(join(dir, del.id), { recursive: true, force: true })
+      }
+      return true
+    } catch (e) {
+      log(`技能桥落盘失败：${String(e)}`)
+      return false
+    }
+  }
+  /** 每轮同步 published skills → DSH 技能目录（幂等；失败只记日志不影响派工）。 */
+  async function syncSkillsToDsh(): Promise<void> {
+    if (!useHub || config.mode === 'mediator') return // 公共调解员不写用户级技能目录（多空间归属不清）
+    const dir = dshSkillsDir()
+    if (dir === '') return
+    try {
+      const res = await fetch(`${hubUrl}/api/skills?scope=${encodeURIComponent(scope)}`)
+      if (!res.ok) return
+      const skills = await res.json() as SkillRef[]
+      const desired: PublishedSkill[] = skills
+        .filter(s => typeof s.id === 'string' && s.id.length > 0 && !s.id.includes('/') && !s.id.includes('..'))
+        .map(s => ({
+          id: s.id,
+          name: s.name ?? s.id,
+          description: s.description ?? '',
+          body: formatSkill(s),
+          contentHash: s.contentHash ?? '',
+        }))
+      // tombstone 从目标目录 .removed 读（将军/团队在目标侧停用）
+      const removedPath = join(dir, '.removed')
+      const removed = parseSkillTombstones(existsSync(removedPath) ? readFileSync(removedPath, 'utf8') : null)
+      const plan = planSkillSync(desired, readExistingDshSkills(dir), removed)
+      if (plan.changed) {
+        const applied = applySkillPlan(dir, plan)
+        if (applied) {
+          log(`技能桥：${dir} 同步 ${plan.writes.length} 写 / ${plan.deletes.length} 删（scope=${scope}，${desired.length} 个 published）`)
+          activity('skills-bridge', '*', `published skills → ${dir}：写 ${plan.writes.map(w => w.id).join('、') || '无'}${plan.deletes.length ? `，删 ${plan.deletes.map(d => d.id).join('、')}` : ''}`)
+        }
+      }
+    } catch (e) {
+      log(`技能桥同步失败：${String(e)}`)
+    }
+  }
+
   const listTasks = (scopeFor: string = scope): Promise<Task[]> => useHub ? hubList(scopeFor) : (runTaskctl(config.scrumDir, ['list']) as Promise<Task[]>)
   const getTask = async (id: string, scopeFor: string = scope): Promise<Task> => {
     if (useHub) {
@@ -752,6 +852,8 @@ export function apply(ctx: AppContext, config: Config): void {
   const daemonStatusFile = config.mode === 'mediator'
     ? join(config.scrumDir, 'daemon-mediator.json')
     : join(config.scrumDir, 'daemon.json')
+  /** P1-4.4 最近一次规则 doctor 报告（daemon.json rulesDoctor 字段数据源；声明前置避免启动 TDZ）。 */
+  let lastRuleDoctor: RuleDoctorReport | null = null
   function writeDaemonStatus(inboxCount: number): void {
     try {
       const selection = ctx.agentDefaultModel.currentSelection()
@@ -780,7 +882,20 @@ export function apply(ctx: AppContext, config: Config): void {
             localDir: spaceBinding?.localDir ?? '',
             remoteUrl: spaceBinding?.remoteUrl ?? '',
           },
+        // T-123 对话中心：daemon 运行状态（在线/心跳）透出给 UI 健康条
         chat: { ...daemonChatState },
+        // P1-4.4 规则资产 doctor：desired 规则单元 vs 实际注入产物（false = 有规则没进提示词）
+        rulesDoctor: lastRuleDoctor === null
+          ? null
+          : {
+            ok: lastRuleDoctor.ok,
+            truncated: lastRuleDoctor.truncated,
+            removedSources: lastRuleDoctor.removedSources,
+            total: lastRuleDoctor.items.length,
+            present: lastRuleDoctor.items.filter(i => i.present).length,
+            missing: lastRuleDoctor.items.filter(i => !i.present).map(i => `${i.source}#${i.title}`),
+            checkedAt: new Date().toISOString(),
+          },
       }
       mkdirSync(dirname(daemonStatusFile), { recursive: true })
       writeFileSync(daemonStatusFile, `${JSON.stringify(status, null, 2)}\n`)
@@ -789,6 +904,296 @@ export function apply(ctx: AppContext, config: Config): void {
     }
   }
   writeDaemonStatus(0)
+
+  // ── P0-2 经验沉淀：done 结算 → friction 打分 → 经验草稿落盘（docs/experience/drafts/）──
+  // 方案：docs/research/teamai-cli-review.md §4.2。将军验收 done 或带真实摩擦的任务，
+  // 由守护结算打分并把将军评语 + 关键 evidence 落成「待晋升」草稿文件。
+  // 幂等：内存 Set + 草稿文件已存在则跳过（守护重启不重复结算、打回期间重复 done 不覆盖人工修订）。
+  const expDraftDir = (): string => join(repoRootFor(), 'docs', 'experience', 'drafts')
+  /** P2-① 陈述性经验出口：docs/experience/learnings/（declarative promote 落盘，带溯源 frontmatter）。 */
+  const expLearningDir = (): string => join(repoRootFor(), 'docs', 'experience', 'learnings')
+  const expSettled = new Set<string>()
+  /** done 结算：friction 高分任务生成经验草稿。任何失败只记日志，不影响派工主流程。 */
+  async function settleExperience(t: Task): Promise<void> {
+    try {
+      if (t.status !== 'done') return
+      if (expSettled.has(t.id)) return
+      expSettled.add(t.id)
+      const file = join(expDraftDir(), `${t.id}.md`)
+      if (existsSync(file)) return // 已落盘（可能人工修订过），不覆盖
+      const input: ExpTaskInput = {
+        id: t.id, title: t.title, description: t.description,
+        role: t.role, soldier: t.soldier, goalId: t.goalId, scope: t.scope ?? scope,
+        status: t.status, comments: t.comments ?? [],
+        evidence: t.evidence ?? [], artifacts: t.artifacts ?? [],
+      }
+      const sig = collectSignals(input)
+      if (!shouldDraft(input, sig)) return
+      mkdirSync(dirname(file), { recursive: true })
+      const now = new Date().toISOString()
+      writeFileSync(file, buildDraft(input, sig, { createdAt: now }), 'utf8')
+      activity('experience', t.id, `经验草稿已生成：docs/experience/drafts/${t.id}.md（friction=${sig.score.toFixed(2)}）`)
+      log(`${t.id} → 经验草稿落盘：${file}（friction=${sig.score.toFixed(2)}，打回${sig.rework}/验收${sig.reviewRounds}/将军评语${sig.generalNotes}）`)
+    } catch (e) {
+      log(`${t.id} 经验草稿生成失败：${String(e)}`)
+    }
+  }
+
+  // ── P0-3 置信度晋升管线：草稿 votes→confidence→promote（docs/research/teamai-cli-review.md §4.3）──
+  // 守护每轮扫本 scope 任务文本，把「被后续任务引用=recalled」「将军采纳=upvoted」写进草稿
+  // frontmatter（增量、幂等：recalledBy/upvotedBy 记录已投者）；confidence 30 天衰减；草稿满足
+  // promote 四门槛（观察窗/recalled≥2/upvoted≥1/confidence≥0.5）→ AI 改写为正式 skill →
+  // team-hub skills register（pending，将军 review publish = 最终人工关）→ 草稿原件留溯源。
+  // 失败只记日志不影响派工；promote 的 AI 改写每轮至多派一个（异步），退避防热循环。
+  const expPromoting = new Set<string>()
+  const expPromoteRetryAt = new Map<string, number>()
+  /** 读单个任务的可扫文本（title/description/评论拼接，供事件检测）。 */
+  const taskScanText = (t: Task): string => [
+    t.title ?? '', t.description ?? '',
+    ...(t.comments ?? []).map(c => `${c.by ?? ''}: ${c.text ?? ''}`),
+  ].join('\n')
+  /** 扫描任务文本里的草稿引用事件：recalled（借鉴语义词+任务id）与 upvoted（将军采纳语义词+任务id）。 */
+  function collectVoteEvents(tasks: Task[]): { byTask: Map<string, string[]>; byGeneral: Map<string, string[]> } {
+    const byTask = new Map<string, string[]>()   // draftTaskId → [引用任务id]
+    const byGeneral = new Map<string, string[]>() // draftTaskId → [将军身份]
+    for (const t of tasks) {
+      const text = taskScanText(t)
+      for (const target of detectRecalledTaskIds(text)) {
+        if (target === t.id) continue // 自引用不计
+        const list = byTask.get(target) ?? []
+        if (!list.includes(t.id)) list.push(t.id)
+        byTask.set(target, list)
+      }
+      for (const target of detectUpvotedTaskIds(text)) {
+        if (target === t.id) continue
+        // upvote 只认将军（by=general / 将军）评论行
+        const byLine = t.comments?.find(c => (c.text ?? '').includes(target) && (c.by === 'general' || c.by === '将军'))
+        if (!byLine) continue
+        const list = byGeneral.get(target) ?? []
+        if (!list.includes(byLine.by)) list.push(byLine.by)
+        byGeneral.set(target, list)
+      }
+    }
+    return { byTask, byGeneral }
+  }
+  // ── P2-③ 派工自动召回：buildWorkerPrompt 前把相关经验草稿/learnings 注入士兵提示词，
+  //  并在本轮 sweep 按「注入 = 一次真实召回」给草稿记 recalled（喂回 P0-3 晋升管线）。
+  //  corpus 每轮重建（读 drafts + learnings 目录）；注入结果写入 pendingRecallRefs
+  //  （taskId→[draftTaskId]），sweepExperienceVotes 消费（applyVote 天然去重：recalledBy 已含则跳过）。
+  const pendingRecallRefs = new Map<string, string[]>()
+  let recallCorpusCache: RecallDoc[] | null = null
+  /** 每轮 sweep 构建一次召回语料（派工/结算间隙不变，避免每 worker 重读目录）。 */
+  function recallSectionCache(t: Task): string | null {
+    if (recallCorpusCache === null) recallCorpusCache = recallCorpus()
+    return recallForTask(t, recallCorpusCache)
+  }
+  /** 读经验草稿/learnings 成召回语料（drafts: docs/experience/drafts/*.md；learnings: docs/experience/learnings/*.md）。 */
+  function recallCorpus(): RecallDoc[] {
+    const docs: RecallDoc[] = []
+    try {
+      const dir = expDraftDir()
+      if (existsSync(dir)) {
+        for (const f of readdirSync(dir).filter(f => f.endsWith('.md')).sort()) {
+          try {
+            const raw = readFileSync(join(dir, f), 'utf8')
+            const st = parseDraftState(raw)
+            // stale/promoted 草稿不进召回面：promoted 的精华已晋升为 skill（sharedSkills 注入）
+            // 或 learning 资产（learnings 目录进 corpus），草稿再进会造成与正式资产重复注入。
+            if (st.status === 'stale' || st.status === 'promoted') continue
+            const titleM = /^# 经验草稿：\S+\s+(.+)$/m.exec(raw)
+            // 召回正文 = 将军评语/evidence 段（剥 frontmatter/标题/自动生成元信息/待晋升清单）
+            const body = raw
+              .replace(/^---\n[\s\S]*?\n---\n?/, '')
+              .replace(/^# 经验草稿：.*(?:\n|$)/m, '')
+              .replace(/^> 自动生成.*(?:\n|$)/m, '')
+              .replace(/^> 未经复审。.*(?:\n|$)/m, '')
+              .replace(/^## 待晋升[\s\S]*$/m, '')
+              .trim()
+              .slice(0, 4000)
+            docs.push({
+              taskId: st.taskId || f.replace(/\.md$/, ''),
+              kind: 'draft',
+              title: titleM?.[1]?.trim()?.slice(0, 60) ?? f.replace(/\.md$/, ''),
+              body,
+              goalId: st.goalId || undefined,
+            })
+          } catch { /* 单个草稿读取失败跳过 */ }
+        }
+      }
+    } catch { /* drafts 目录不可读 */ }
+    try {
+      const dir = expLearningDir()
+      if (existsSync(dir)) {
+        for (const f of readdirSync(dir).filter(f => f.endsWith('.md')).sort()) {
+          try {
+            const raw = readFileSync(join(dir, f), 'utf8')
+            const taskM = /^taskId:\s*(T-\d+)/m.exec(raw)
+            const goalM = /^goalId:\s*(\S+)/m.exec(raw)
+            const titleM = /^##\s+(.+)$/m.exec(raw.replace(/^---\n[\s\S]*?\n---\n?/, ''))
+            docs.push({
+              taskId: taskM?.[1] ?? f.replace(/\.md$/, ''),
+              kind: 'learning',
+              title: titleM?.[1]?.trim()?.slice(0, 60) ?? f.replace(/\.md$/, ''),
+              body: raw.replace(/^---\n[\s\S]*?\n---\n?/, '').trim().slice(0, 4000),
+              goalId: goalM?.[1] || undefined,
+            })
+          } catch { /* 单条 learning 读取失败跳过 */ }
+        }
+      }
+    } catch { /* learnings 目录不可读 */ }
+    return docs
+  }
+  /** 计算任务的召回注入段；若命中则登记 pendingRecallRefs（消费在 sweepExperienceVotes）。
+   *  上票纪律（P2-③ 防模板噪音）：注入段含全部命中（士兵可见参考），但 recalled 计数走
+   *  countableRefs——同目标兄弟任务只注入不计数（流水线常态，非真实跨上下文复用）。 */
+  function recallForTask(t: Task, corpus: RecallDoc[]): string | null {
+    if (corpus.length === 0) return null
+    const taskText = [t.title ?? '', t.description ?? '', ...(t.acceptance ?? [])].join('\n')
+    const picks = pickRecall(taskText, corpus)
+    if (picks.length === 0) return null
+    // 登记：countableRefs（跨目标命中）记 recalled；同目标/自引用只注入不计数
+    const refs = pendingRecallRefs.get(t.id) ?? []
+    for (const p of countableRefs(picks, t.id, t.goalId)) {
+      if (!refs.includes(p.doc.taskId)) refs.push(p.doc.taskId)
+    }
+    if (refs.length > 0) pendingRecallRefs.set(t.id, refs)
+    return renderRecallSection(picks)
+  }
+  /** 单草稿 promote 动作（P0-3 + P2-① 形态分流）：
+   *  resolveKind(草稿 frontmatter kind / 启发式) → procedure：AI 改写 skill → register（pending）；
+   *  declarative：AI 改写陈述性条目 → 落盘 docs/experience/learnings/<taskId>.md（带溯源）。
+   *  两种出口都在草稿原件记 status:promoted + promotedTo/promotedAt。失败退避下轮。 */
+  async function promoteDraft(draftTaskId: string, body: string): Promise<void> {
+    if (expPromoting.has(draftTaskId)) return
+    const lastFail = expPromoteRetryAt.get(draftTaskId) ?? 0
+    if (Date.now() - lastFail < config.intervalMs * 30) return // 退避（默认 30s×30=15min）
+    expPromoting.add(draftTaskId)
+    try {
+      const parent = await ensureForeman(workspaceFor())
+      if (parent === undefined) throw new Error('foreman 不可用，无法 AI 改写')
+      // 草稿 scope/kind/role/goalId 从文件 frontmatter 读（无则继承守护 scope / 启发式判定）
+      let draftScope = scope
+      let draftKind = '' as '' | 'procedure' | 'declarative'
+      let draftRole = ''
+      let draftGoalId = ''
+      try {
+        const file = join(expDraftDir(), `${draftTaskId}.md`)
+        if (existsSync(file)) {
+          const st = parseDraftState(readFileSync(file, 'utf8'))
+          draftScope = st.scope || scope
+          draftKind = st.kind
+          draftRole = st.role ?? ''
+          draftGoalId = st.goalId ?? ''
+        }
+      } catch { /* 读不到用守护默认 */ }
+      const kind = resolveKind({ kind: draftKind }, body)
+      const promotedTo = kind === 'declarative' ? learningIdForTask(draftTaskId) : skillIdForTask(draftTaskId)
+      const isSkill = kind === 'procedure'
+      const prompt = isSkill
+        ? buildPromotePrompt(draftTaskId, body)
+        : buildLearningPrompt(draftTaskId, body)
+      const run = await ctx.subagents.start(config.provider, {
+        label: `exp:${draftTaskId}:${isSkill ? 'skill' : 'learning'}`,
+        prompt: [{ type: 'text', text: prompt }],
+        parent,
+        signal: AbortSignal.timeout(90000),
+        outputSchema: isSkill
+          ? { type: 'object', properties: { name: { type: 'string' }, description: { type: 'string' }, main: { type: 'string' }, cases: { type: 'array', items: { type: 'string' } } }, required: ['name', 'description', 'main'], additionalProperties: false }
+          : { type: 'object', properties: { body: { type: 'string' } }, required: ['body'], additionalProperties: false },
+      })
+      const result = await run.result
+      await run.dispose().catch(() => undefined)
+      if (result?.stopReason !== 'completed' || result.structured === undefined) throw new Error(`AI 改写未完成（${result?.stopReason ?? '无结果'}）`)
+      if (isSkill) {
+        const out = result.structured as { name: string; description: string; main: string; cases?: string[] }
+        if (!out.name?.trim() || !out.main?.trim()) throw new Error('AI 改写输出缺 name/main')
+        // register 不设 general 门禁（D-2，任意成员可提交 pending）；scope 继承草稿
+        await hubPost('/api/skills/register', {
+          id: promotedTo, name: out.name.trim(), description: (out.description ?? '').trim(),
+          main: out.main, cases: Array.isArray(out.cases) ? out.cases : [],
+          scope: draftScope, by: config.role,
+        })
+      } else {
+        // P2-① declarative：不 register skill，落盘 learnings 条目（带溯源 frontmatter，进统一检索面）
+        const out = result.structured as { body?: string }
+        const mdBody = out?.body?.trim() || fallbackLearning(draftTaskId, body)
+        const file = join(expLearningDir(), `${draftTaskId}.md`)
+        mkdirSync(dirname(file), { recursive: true })
+        writeFileSync(file, renderLearningFile({
+          taskId: draftTaskId, scope: draftScope, role: draftRole, goalId: draftGoalId,
+          createdAt: new Date().toISOString(), promotedAt: new Date().toISOString(), body: mdBody,
+        }), 'utf8')
+      }
+      // 草稿溯源：status=promoted + promotedTo/promotedAt（原件不删，正文已有 source 段）
+      const file = join(expDraftDir(), `${draftTaskId}.md`)
+      if (existsSync(file)) {
+        const cur = parseDraftState(readFileSync(file, 'utf8'))
+        const promoted = { ...cur, status: 'promoted' as const, promotedTo, promotedAt: new Date().toISOString(), lastActivityAt: new Date().toISOString() }
+        writeFileSync(file, replaceFrontmatter(readFileSync(file, 'utf8'), renderFrontmatter(promoted)), 'utf8')
+      }
+      const label = isSkill ? `skill:${promotedTo}（pending，待将军 review publish）` : `learning:${promotedTo}（docs/experience/learnings/）`
+      activity('experience', draftTaskId, `经验草稿已晋升：${label}`)
+      log(`${draftTaskId} → 经验草稿晋升为 ${label}`)
+      expPromoteRetryAt.delete(draftTaskId)
+    } catch (e) {
+      expPromoteRetryAt.set(draftTaskId, Date.now())
+      log(`${draftTaskId} 经验草稿 promote 失败（${String(e).slice(0, 200)}），退避后下轮重试`)
+    } finally {
+      expPromoting.delete(draftTaskId)
+    }
+  }
+  /** P0-3 每轮扫草稿目录：更新票数/衰减状态 → promote/prune。返回本轮是否有 promote 动作在进行。 */
+  async function sweepExperienceVotes(tasks: Task[]): Promise<void> {
+    try {
+      const dir = expDraftDir()
+      if (!existsSync(dir)) return
+      const files = readdirSync(dir).filter(f => f.endsWith('.md'))
+      if (files.length === 0) return
+      const { byTask, byGeneral } = collectVoteEvents(tasks)
+      const now = new Date().toISOString()
+      // P2-③：把派工注入过相关经验的（taskId → [draftTaskId]）并入 byTask——
+      //  注入 = 一次真实召回（任务文本里可能没写「参考 T-xxx」，但经验确实被带到了士兵面前）。
+      for (const [taskId, refs] of pendingRecallRefs) {
+        for (const ref of refs) {
+          const list = byTask.get(ref) ?? []
+          if (!list.includes(taskId)) list.push(taskId)
+          byTask.set(ref, list)
+        }
+      }
+      pendingRecallRefs.clear() // 消费完即清：任务重派会重新登记，applyVote 按 recalledBy 去重
+      let promotedThisRound = 0
+      for (const f of files.sort()) {
+        const file = join(dir, f)
+        try {
+          const raw = readFileSync(file, 'utf8')
+          const cur = parseDraftState(raw)
+          if (cur.status === 'promoted' || cur.status === 'stale') continue
+          // 增量投票（幂等：recalledBy/upvotedBy 已投者跳过）
+          let next = cur
+          for (const refTask of byTask.get(cur.taskId) ?? []) next = applyVote({ state: next, recalledByTaskId: refTask, now })
+          for (const gen of byGeneral.get(cur.taskId) ?? []) next = applyVote({ state: next, upvotedBy: gen, now })
+          // prune 保守判定：从未有票且落盘 ≥90 天 → stale
+          if (shouldPrune(next, now)) next = { ...next, status: 'stale', lastActivityAt: now }
+          // frontmatter 有变化才写回（无事件不覆盖人工修订的计数）
+          if (renderFrontmatter(next) !== renderFrontmatter(cur)) {
+            writeFileSync(file, replaceFrontmatter(raw, renderFrontmatter(next)), 'utf8')
+          }
+          // promote 判定（在最新状态上）
+          if (next.status === 'draft') {
+            const gate = shouldPromote(next, now)
+            if (gate.promote && promotedThisRound === 0) {
+              promotedThisRound += 1
+              void promoteDraft(cur.taskId, raw).catch(() => undefined)
+            }
+          }
+        } catch (e) {
+          log(`经验草稿 ${f} 票务更新失败：${String(e)}`)
+        }
+      }
+    } catch (e) {
+      log(`经验票务扫单失败：${String(e)}`)
+    }
+  }
 
   /** 惰性创建 foreman agent：worker subagent 的父（按工作目录缓存；worktree 隔离时每个 worktree 一个）。 */
   async function ensureForeman(cwd: string): Promise<Agent | undefined> {
@@ -987,6 +1392,22 @@ exit 0
   /** 空间层文件族：repoRoot 下按固定序 LEGION.md → AGENTS.md → agent.md 读全部存在者；
    *  根部无文件时回退 scrumDir/LEGION.md（现状语义兜底）。 */
   const REPO_NORM_FILES = ['LEGION.md', 'AGENTS.md', 'agent.md']
+  /** 规范 tombstone 文件（P1-4.4，对齐 teamai `<type>/.removed`）：仓库根 `.legion-norms-removed`，
+   *  每行一个注入源文件名（# 注释/空行跳过）。停用某注入源 = 保留 git 文件但不再注入。 */
+  const NORMS_TOMBSTONE_FILE = '.legion-norms-removed'
+  /** tombstone 内容缓存（含 mtime 校验；文件未变不重读）。 */
+  let normsRemovedCache = { mtimeMs: -1, set: new Set<string>() }
+  function readNormsTombstones(): Set<string> {
+    try {
+      const p = join(repoRootFor(), NORMS_TOMBSTONE_FILE)
+      if (!existsSync(p)) return new Set<string>()
+      const st = statSync(p)
+      if (st.mtimeMs === normsRemovedCache.mtimeMs) return normsRemovedCache.set
+      const set = parseTombstones(readFileSync(p, 'utf8'))
+      normsRemovedCache = { mtimeMs: st.mtimeMs, set }
+      return set
+    } catch { return normsRemovedCache.set }
+  }
   function readRepoNormsFiles(): NormFile[] {
     const root = repoRootFor()
     const files: NormFile[] = []
@@ -1002,11 +1423,53 @@ exit 0
         if (existsSync(p)) files.push({ label: 'LEGION.md', content: readFileSync(p, 'utf8') })
       } catch { /* 回退失败 */ }
     }
-    return files
+    // P1-4.4 tombstone 收敛：被将军停用的注入源不进 desired-set（不注入、不误报）
+    return applyTombstones(files, readNormsTombstones())
   }
   /** 分层合并（纯函数在 norms.ts，本处喂实时输入）：返回注入 sections（[] = 无规范段）。 */
   function readNormsSync(): { sections: string[]; truncated: boolean } {
     return buildNormSections({ globalText: normsGlobalText, files: readRepoNormsFiles() })
+  }
+
+  // ── P1-4.4 规则资产 doctor：校验"将军的规则是否真的进了士兵提示词" ──
+  // 方案：docs/research/teamai-cli-review.md §4.4（首步 rules 端到端原型）。
+  // desired-set = 注入源文件族（含 tombstone 停用）+ team-hub 全局层；注入产物 =
+  // 最近一次 buildWorkerPrompt 真实拼装的 norms 文本。逐规则单元断言其内容确实在
+  // 产物里（预算截断会吞掉尾部规则 → doctor 报 missing，将军能发现"规则没进提示词"）。
+  // doctor 结果每轮写进 daemon.json（`rulesDoctor` 字段，serve.mjs /api/daemon 可见），
+  // 状态变化（ok→bad 或反之 / missing 集变化）才 log + activity，避免每轮噪音。
+  /** 每轮跑一次规则 doctor（sweep 内调用）；结果缓存供 writeDaemonStatus 附带输出。 */
+  function runRuleDoctorNow(): RuleDoctorReport {
+    const files = readRepoNormsFiles() // 已含 tombstone 过滤（不注入的源也不进 desired）
+    // 注入产物：优先最近一次真实派工产物；守护从未派工（无任务）时降级即时拼装（同一拼装函数）
+    const injected = lastInjectedNorms.text.length > 0
+      ? lastInjectedNorms
+      : { text: readNormsSync().sections.join('\n'), truncated: false }
+    const report = runRuleDoctor({
+      files,
+      globalText: normsGlobalText,
+      removed: readNormsTombstones(),
+      injectedText: injected.text,
+      truncated: injected.truncated,
+    })
+    // 状态变化检测：与上次报告比较（ok 翻转 或 missing 单元集变化）
+    const prev = lastRuleDoctor
+    const key = (r: RuleDoctorReport): string => `${r.ok}|${r.truncated}|${r.items.filter(i => !i.present).map(i => `${i.source}:${i.title}`).join(',')}|${r.removedSources.join(',')}`
+    if (prev === null || key(prev) !== key(report)) {
+      const total = report.items.length
+      const present = total - report.items.filter(i => !i.present).length
+      if (total > 0) {
+        const missing = report.items.filter(i => !i.present)
+        if (missing.length > 0) {
+          log(`【规则 doctor】${report.ok ? '恢复' : '告警'}：${present}/${total} 规则单元进了提示词；缺失 ${missing.map(m => `${m.source}#${m.title}`).join('、')}${report.truncated ? '（预算截断）' : ''}`)
+          activity('rules-doctor', '*', `规则注入缺失 ${missing.length} 条：${missing.map(m => `${m.source}#${m.title}`).join('、')}（truncated=${report.truncated}）`)
+        } else {
+          log(`【规则 doctor】${present}/${total} 规则单元全部进了提示词 ✓`)
+        }
+      }
+    }
+    lastRuleDoctor = report
+    return report
   }
 
   /** 归一化相对路径（\\ → /，去 ./，去空白）。 */
@@ -1347,8 +1810,15 @@ exit 0
     }
   }
 
+  /** P1-4.4 doctor 用：最近一次 buildWorkerPrompt 的真实注入产物（sections 拼接 + 截断标志）。
+   *  守护每轮派工至少一次 → 该缓存反映"最近一个士兵实际看到的规则文本"。 */
+  let lastInjectedNorms = { text: '', truncated: false }
   function buildWorkerPrompt(t: Task, feedback: Task['comments'], cwd: string, isolated: boolean, stage?: StageDef, goal?: GoalCtx | null, goalMirror?: string | null): string {
     const norms = readNormsSync() // 分层规范（R-2/S5）：全局层段 + 空间层段，顺序稳定
+    lastInjectedNorms = { text: norms.sections.join('\n'), truncated: norms.truncated }
+    // P2-③ 经验自动召回：相关经验草稿/learnings 段（在规范之后、共享技能之前注入；
+    // 命中即登记 pendingRecallRefs，本轮 sweep 消费为 recalled 事件）。
+    const recallSection = recallSectionCache(t)
     // 目标级共享上下文段：同目标所有衍生任务共享（objective + context vN + 并行任务快照），
     // 语义 = 下一派工对齐（派工时刻拉取的最新版本；正在跑的 worker 不打断）。
     const goalLines: string[] = []
@@ -1433,6 +1903,7 @@ exit 0
         ? t.comments.map(c => `- @${c.by}（${c.at}）: ${c.text}`)
         : ['- （无）']),
       ...(norms.sections.length > 0 ? ['', ...norms.sections] : []),
+      ...(recallSection ? ['', recallSection] : []),
       ...(sharedSkills.length > 0
         ? ['', '团队共享技能（必须遵守，来自 team-hub）：', ...sharedSkills.map(s => formatSkill(s))]
         : []),
@@ -1718,8 +2189,27 @@ exit 0
         activity('done', t.id, `${stage.label}完成：${report.summary}`)
         log(`${t.id} → done（${stage.label}），流转下一角色`)
         await advancePipeline(t)
+      } else if (isPipeline && stage) {
+        // 流水线最终阶段（如 devops 链尾，next=null）：worker 已完成自检（门禁/证据/报告全绿），
+        // 将军已授权整条流水线 → 自动合入主分支 + 推进 done 收官，不停 in_review 等将军验收。
+        // 背景（T-126 现场，2026-09-08）：devops 部署任务完成即提交 in_review，需将军逐个手动
+        // 验收 + promote；将军裁决「部署不需要验收，直接部署」——将军职责收敛为 gate 岗（requirement
+        // 需求澄清 / researcher 方案确认）与目标发布。目标是否收尾由 hub /api/advance 的
+        // settleGoalsOfScope 判定（链全部 done → 目标自动 done）。
+        const mergedFinal = worktreeDir !== null ? await autoPromote(t.id, worktreeDir) : true
+        if (!mergedFinal) {
+          await safeComment(t.id, `⚠ ${stage.label}完成，但自动合入主分支失败（可能冲突），改动保留在分支 w/${t.id}。请人工合入并推进：git -C ${repoRootFor()} merge --no-ff w/${t.id} 解决冲突 → git -C ${repoRootFor()} worktree remove --force ${worktreeDir} → git -C ${repoRootFor()} branch -D w/${t.id} → 任务 transition 到 done`)
+          await transitionTo(t.id, 'in_review')
+          activity('blocked', t.id, `${stage.label}完成但自动合入失败，转 in_review 等待人工合入`)
+          log(`${t.id} → in_review（最终阶段自动合入失败，等待人工处理）`)
+          return
+        }
+        await advanceTo(t.id, stage.role ?? config.role)
+        await safeComment(t.id, `✓ ${stage.label}完成并自动收官（部署类终态免将军验收）：${report.summary}\n证据：${report.evidence}${contractDocSummary(contractReg)}`)
+        activity('done', t.id, `${stage.label}完成并自动收官：${report.summary}`)
+        log(`${t.id} → done（${stage.label} 最终阶段，自动收官）`)
       } else {
-        // 最终阶段或单角色模式：进 in_review 供将军验收
+        // 非流水线单角色任务（人工派活）或 stage 缺失：停 in_review 等将军验收
         await transitionTo(t.id, 'in_review')
         const promoteHint = worktreeDir !== null
           ? `\n[worktree] 改动在分支 w/${t.id}。验收通过后 promote：git -C ${repoRootFor()} merge --no-ff w/${t.id}；放弃：git -C ${repoRootFor()} worktree remove --force ${worktreeDir} && git -C ${repoRootFor()} branch -D w/${t.id}`
@@ -2562,6 +3052,9 @@ exit 0
       try {
         tasks = await listTasks()
         lastTasks = tasks // 本轮任务快照：目标上下文注入的"并行任务表"数据源
+        // P2-③：新一轮 sweep 重建召回语料缓存（pendingRecallRefs 不清空——
+        // 异步派工可能在本轮尾部才登记，累积到 sweepExperienceVotes 消费后逐条删除）
+        recallCorpusCache = null
       } catch (e) {
         log(`list 失败：${String(e)}`)
         return
@@ -2788,6 +3281,22 @@ exit 0
           await advancePipeline(t)
         }
       }
+      // 4.2 经验沉淀（P0-2）：本 scope 所有 done 任务结算一次 friction 打分；
+      //     高分任务自动落盘经验草稿到 docs/experience/drafts/（将军评语 + evidence 摘录）。
+      //     幂等：已结算（内存 Set）/ 已落盘（文件存在）即跳过。失败只记日志。
+      for (const t of tasks.filter(x => x.status === 'done')) {
+        await settleExperience(t)
+      }
+      // 4.3 置信度晋升管线（P0-3）：草稿票务更新（recalled/upvoted/衰减）→ promote/prune。
+      //     在 4.2 落盘后跑，保证本轮新草稿参与事件扫描；失败只记日志。
+      await sweepExperienceVotes(tasks)
+      // 4.4 规则资产 doctor（P1）：校验"将军的规则是否真的进了士兵提示词"——
+      //     desired 规则单元（文件族 + hub 全局层）逐条对照最近真实注入产物；
+      //     预算截断/停用导致的缺失在此被将军可见（daemon.json rulesDoctor + 状态变化日志）。
+      runRuleDoctorNow()
+      // 4.5a 技能桥（P1）：本 scope published skills → ~/.dsh/skills（DSH 原生技能目录 = teamai
+      //     同步目标）。在 4.2/4.3 后跑 → 本轮新 promote 的 skill 也一并同步。幂等失败仅记日志。
+      await syncSkillsToDsh()
       // 4.5 合入调解（将军已授权自动处理类）：发现 in_review 且评论带「自动合入失败」标记的任务 →
       //     派调解员合入主分支并推进 done（同一时刻只调解一个，防主仓库 git 合并态互相踩踏；
       //     失败带退避重试，超过上限留将军人工；give-up 任务跳过，不挡后续任务调解）。

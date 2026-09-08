@@ -184,6 +184,11 @@ test('目标上下文注入：派工提示词含所属目标/objective/context v
       task.status = body.to
       return response({ task })
     }
+    if (url.pathname === '/api/advance') {
+      requests.push(`advance:${body.by}`)
+      task.status = 'done'
+      return response({ task })
+    }
     throw new Error(`unexpected request ${url.pathname}`)
   }
 
@@ -209,7 +214,7 @@ test('目标上下文注入：派工提示词含所属目标/objective/context v
     assert.ok(mirrorText.includes('目标甲：交付登录与资料页'))
     assert.ok(mirrorText.includes('不许动 team-hub 存储层'))
     assert.ok(mirrorText.includes('- T-001｜coder｜done'), '镜像应含派工时刻并行任务快照')
-    await waitFor(() => requests.includes('transition:in_review'), 'final stage task should park in_review')
+    await waitFor(() => requests.includes('advance:coder'), 'final stage task should autofinish to done under the stage role')
   } finally {
     for (const dispose of harness.disposers) await dispose()
     globalThis.fetch = originalFetch

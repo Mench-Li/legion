@@ -13,6 +13,6 @@
 - T-121｜breaker｜done
 - T-122｜test-designer｜done
 - T-123｜coder｜done
-- T-124｜reviewer｜todo
+- T-124｜reviewer｜done
 - T-125｜tester｜todo
 - T-126｜devops｜todo

@@ -10,6 +10,7 @@ import {
   fetchHubActivity,
   fetchHubMissions,
   fetchHubTasks,
+  fetchChatHealth,
   fetchMissions,
   fetchRoster,
   fetchSpaces,
@@ -60,6 +61,7 @@ export default function App(): React.JSX.Element {
   const [roster, setRoster] = useState<RosterAgent[] | null>(null)
   const [goalInfo, setGoalInfo] = useState<GoalInfo | null>(null)
   const [execEnabled, setExecEnabled] = useState(false)
+  const [execDaemonOnline, setExecDaemonOnline] = useState(false)
   const [showNewSpace, setShowNewSpace] = useState(false)
   const [spaceSettings, setSpaceSettings] = useState<SpaceInfo | null>(null)
   const [, setConfig] = useState<ApiConfig | null>(null)
@@ -222,15 +224,22 @@ export default function App(): React.JSX.Element {
   useEffect(() => {
     if (!hubMode || !scope) {
       setExecEnabled(false)
+      setExecDaemonOnline(false)
       return
     }
     let cancelled = false
-    void fetchExec(scope)
-      .then(s => {
-        if (!cancelled) setExecEnabled(s.enabled)
+    void Promise.all([fetchExec(scope), fetchChatHealth(scope)])
+      .then(([s, health]) => {
+        if (!cancelled) {
+          setExecEnabled(s.enabled)
+          setExecDaemonOnline(health.online)
+        }
       })
       .catch(() => {
-        if (!cancelled) setExecEnabled(false)
+        if (!cancelled) {
+          setExecEnabled(false)
+          setExecDaemonOnline(false)
+        }
       })
     return () => {
       cancelled = true
@@ -445,7 +454,7 @@ export default function App(): React.JSX.Element {
           onNewSpace={openNewSpace}
           onSpaceSettings={s => setSpaceSettings(s)}
           execEnabled={hubMode && scope ? execEnabled : false}
-          execDaemonOnline={false}
+          execDaemonOnline={execDaemonOnline}
           onToggleExec={handleToggleExec}
           notifyUnread={notifyUnread}
         />

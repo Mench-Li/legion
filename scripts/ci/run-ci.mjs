@@ -69,8 +69,8 @@ function exec(cmd, args, opts = {}) {
   })
 }
 
-async function runNodeTests(label, files, cwd) {
-  const r = await exec(process.execPath, ['--test', ...files], { cwd })
+async function runNodeTests(label, files, cwd, nodeArgs = []) {
+  const r = await exec(process.execPath, [...nodeArgs, '--test', ...files], { cwd })
   const all = r.out + '\n' + r.err
   const num = (re) => { const m = re.exec(all); return m ? Number(m[1]) : NaN }
   const counts = { tests: num(/\btests\s+(\d+)/), pass: num(/\bpass\s+(\d+)/), fail: num(/\bfail\s+(\d+)/) }
@@ -197,6 +197,10 @@ async function stageTest() {
     { label: 'security（监听安全配置）', files: ['team-hub/security.test.mjs'], cwd: ROOT },
     { label: 'files-api（文件中心契约）', files: ['workbench/scripts/files-api.test.mjs'], cwd: ROOT },
     { label: 'web（浏览器助手契约）', files: ['workbench/scripts/web.test.mjs'], cwd: ROOT },
+    { label: 'doc-render（文档产物契约）', files: ['workbench/scripts/doc-render.test.mjs'], cwd: ROOT },
+    { label: 'skill-importer（技能导入契约）', files: ['workbench/scripts/skill-importer.test.mjs'], cwd: ROOT },
+    { label: 'hub-board（v2 看板投影）', files: ['workbench/scripts/hub-board.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    { label: 'scrum（任务生命周期与产物）', files: ['scrum/artifact-detail.test.mjs', 'scrum/taskctl.ttl.test.mjs'], cwd: ROOT },
     { label: 'contracts（平台契约基线）', files: ['tests/contract/contracts.test.mjs'], cwd: ROOT },
   ]
   const wbDir = WHITEBOARD
@@ -207,7 +211,7 @@ async function stageTest() {
   let allOk = true
   for (const s of suites) {
     const cwd = s.cwd || ROOT
-    const r = await runNodeTests(s.label, s.files.map(f => join(cwd, f)), cwd)
+    const r = await runNodeTests(s.label, s.files.map(f => join(cwd, f)), cwd, s.nodeArgs || [])
     allOk = allOk && r.ok
     detail.push('  ' + (r.ok ? 'PASS' : 'FAIL') + ' ' + r.detail)
     if (!r.ok) detail.push('  ' + (r.raw.split('\n').filter(l => /^not ok|^✖/.test(l)).slice(0, 6).join('\n  ')))

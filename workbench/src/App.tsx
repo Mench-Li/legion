@@ -9,7 +9,7 @@ import {
   fetchGoal,
   fetchHubActivity,
   fetchHubMissions,
-  fetchHubScopes,
+  fetchHubTasks,
   fetchMissions,
   fetchRoster,
   fetchSpaces,
@@ -23,6 +23,7 @@ import {
   subscribeBoard,
 } from './api'
 import { buildMissions, labelsFromPipeline } from './missions'
+import { boardFromHubTasks } from './hubBoard'
 import type { ActivityEvent, ApiConfig, BoardData, GoalInfo, GoalStatus, Mission, RosterAgent, SpaceInfo } from './types'
 import { Sidebar } from './components/Sidebar'
 import { KpiBar } from './components/KpiBar'
@@ -70,6 +71,8 @@ export default function App(): React.JSX.Element {
   const [notifyUnread, setNotifyUnread] = useState(0)
   const labelsRef = useRef<Record<string, string>>({})
   const seenEvents = useRef<Set<string>>(new Set())
+  const hubModeRef = useRef(false)
+  hubModeRef.current = hubMode
 
   const eventKey = (ev: ActivityEvent): string => `${ev.ts}|${ev.kind}|${ev.taskId ?? ''}|${ev.text}`
 
@@ -94,6 +97,28 @@ export default function App(): React.JSX.Element {
 
     const load = async (): Promise<void> => {
       try {
+        // v2 是主数据源：只要中枢可达，首屏不再依赖 4820 v1 看板。
+        if (await probeHub()) {
+          const [tasks, spaces, hubActs] = await Promise.all([
+            fetchHubTasks(null),
+            fetchSpaces(),
+            fetchHubActivity({ limit: MAX_ACTIVITY }),
+          ])
+          if (disposed) return
+          setHubMode(true)
+          setHubSpaces(spaces)
+          // 首屏保持「全部空间」语义；用户切换空间时再按 scope 拉专属数据。
+          setScope(null)
+          setBoard(boardFromHubTasks(tasks))
+          setActivity(hubActs.map(ev => ({ ts: ev.ts, kind: ev.action, taskId: ev.taskId ?? undefined, text: `${ev.member} · ${ev.action}` })))
+          seenEvents.current = new Set()
+          setConn('live')
+          setError('')
+          const hubMissions = await fetchHubMissions(null)
+          setMissions(hubMissions.missions)
+          setScopeAware(hubMissions.scopeAware)
+          return
+        }
         const [cfg, bd, acts] = await Promise.all([fetchConfig(), fetchBoard(), fetchActivity()])
         if (disposed) return
         setConfig(cfg)
@@ -114,20 +139,6 @@ export default function App(): React.JSX.Element {
 
     void load()
 
-    // 中枢探测：team-hub v2 可达则开启真分区模式
-    void probeHub().then(ok => {
-      if (disposed || !ok) return
-      setHubMode(true)
-      void fetchHubScopes()
-        .then(() => undefined)
-        .catch(() => undefined)
-      void fetchSpaces()
-        .then(spaces => {
-          if (!disposed) setHubSpaces(spaces)
-        })
-        .catch(() => undefined)
-    })
-
     const offBoard = subscribeBoard(next => {
       setBoard(next)
       setConn('live')
@@ -141,6 +152,7 @@ export default function App(): React.JSX.Element {
 
     // 轮询兜底：SSE 断线时看板仍能刷新（低频，开销可忽略）
     const poll = window.setInterval(() => {
+      if (hubModeRef.current) return
       void fetchBoard()
         .then(bd => setBoard(bd))
         .catch(() => undefined)
@@ -264,14 +276,20 @@ export default function App(): React.JSX.Element {
   const refresh = async (): Promise<void> => {
     setRefreshing(true)
     try {
-      const [bd, acts] = await Promise.all([fetchBoard(), fetchActivity()])
-      setBoard(bd)
-      seenEvents.current = new Set(acts.map(eventKey))
-      setActivity(acts.slice(-MAX_ACTIVITY))
       if (hubMode) {
-        void fetchSpaces()
-          .then(spaces => setHubSpaces(spaces))
-          .catch(() => undefined)
+        const [tasks, acts, spaces] = await Promise.all([
+          fetchHubTasks(scope),
+          fetchHubActivity({ scope: scope ?? undefined, limit: MAX_ACTIVITY }),
+          fetchSpaces(),
+        ])
+        setBoard(boardFromHubTasks(tasks))
+        setActivity(acts.map(ev => ({ ts: ev.ts, kind: ev.action, taskId: ev.taskId ?? undefined, text: `${ev.member} · ${ev.action}` })))
+        setHubSpaces(spaces)
+      } else {
+        const [bd, acts] = await Promise.all([fetchBoard(), fetchActivity()])
+        setBoard(bd)
+        seenEvents.current = new Set(acts.map(eventKey))
+        setActivity(acts.slice(-MAX_ACTIVITY))
       }
       await loadMissions(scope)
     } catch {
@@ -409,14 +427,15 @@ export default function App(): React.JSX.Element {
   }
 
   const labels = labelsRef.current
-  const missionsShown = missions.length > 0 ? missions : board ? buildMissions(board, labels) : []
+  const displayBoard = board ?? (hubMode ? boardFromHubTasks([]) : null)
+  const missionsShown = missions.length > 0 ? missions : displayBoard ? buildMissions(displayBoard, labels) : []
 
   return (
     <div className="app">
-      <KpiBar board={board} paused={paused} hubMode={hubMode} hubBase={hubBase()} staffCount={hubMode ? (roster?.length ?? 0) : null} />
+      <KpiBar board={displayBoard} paused={paused} hubMode={hubMode} hubBase={hubBase()} staffCount={hubMode ? (roster?.length ?? 0) : null} />
       <div className="app-main">
-        <Sidebar
-          board={board}
+          <Sidebar
+          board={displayBoard}
           active={active}
           scope={scope}
           hubMode={hubMode}
@@ -430,7 +449,7 @@ export default function App(): React.JSX.Element {
           onToggleExec={handleToggleExec}
           notifyUnread={notifyUnread}
         />
-        {board ? (
+        {displayBoard ? (
           active === 'tasks' ? (
             <TaskCenterView
               scope={scope}
@@ -459,7 +478,7 @@ export default function App(): React.JSX.Element {
               onGoHome={() => setActive('home')}
             />
           ) : (
-            <CenterPanel board={board} labels={labels} active={active} rosterAgents={hubMode ? roster : null} scope={scope} spaces={hubSpaces} goalInfo={hubMode ? goalInfo : null} hubActive={hubMode} onGoalStatus={hubMode ? handleGoalStatus : undefined} onSaveContext={hubMode ? handleGoalContext : undefined} />
+            <CenterPanel board={displayBoard} labels={labels} active={active} rosterAgents={hubMode ? roster : null} scope={scope} spaces={hubSpaces} goalInfo={hubMode ? goalInfo : null} hubActive={hubMode} onGoalStatus={hubMode ? handleGoalStatus : undefined} onSaveContext={hubMode ? handleGoalContext : undefined} />
           )
         ) : (
           <div className="center-col" />
@@ -471,7 +490,7 @@ export default function App(): React.JSX.Element {
         </div>
       </div>
       <CommandBar
-        board={board}
+        board={displayBoard}
         activity={activity}
         labels={labels}
         paused={paused}

@@ -36,6 +36,9 @@
  *   POST /api/skills/register|review|grant|revoke   团队共享技能（scope-owned + grant/revoke；general 门禁；audit skill:* 带目标空间）
  *   GET  /api/skills[?scope=&member=&id=&include=]   技能查询（默认 published only；include=pending 仅 member=general 复审视角，草稿不外泄）
  *   GET/POST /api/rules[?scope=]                   分层规范-全局层（rules 表：global/space 分层 upsert；audit rules:update；S4/R-2）
+ *   GET  /api/chat/health[?scope=]                对话健康聚合（守护在线/回复开关/模型解析链/最近失败；只读；S2/R-1）
+ *   PUT  /api/chat/attachments?scope=&by=&fileName= 附件上传（raw UTF-8 文本 → staged；S3/R-3）
+ *   GET  /api/chat/attachments/content?id=&conv=&scope= 附件内容取回（按会话归属校验；S3/R-3）
  *   GET/POST /api/chat/reply-settings             对话 AI 回复开关/模型/身份设置（per-scope；默认开；S9/R-4）
  *   GET  /api/chat/replies[?scope=&sinceMsgId=]    对话 AI 回复队列（awaiting 消息 + 最近上下文；超龄自动 failed）
  *   POST /api/chat/replies/answer|retry|fail       回复状态回写（CAS awaiting→replied/failed；幂等；S9/S10）
@@ -49,7 +52,7 @@
  */
 import http from 'node:http'
 import { DatabaseSync } from 'node:sqlite'
-import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { dirname, extname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -57,6 +60,9 @@ import { standardsFor } from './stage-standards.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const DB_FILE = process.env.TEAM_HUB_DB || join(ROOT, 'team-hub', 'team.db')
+// S3/R-3（决策 E1）：聊天附件落盘目录与库同基（TEAM_HUB_DB 所在目录的 uploads/ 下）。
+// 测试临时库 → uploads 自动落在 mkdtemp 内（TC-S3-16 隔离断言）；live 库目录零写入纪律不受影响。
+const UPLOADS_ROOT = join(dirname(DB_FILE), 'uploads')
 const PORT = Number(process.env.TEAM_HUB_PORT || 8787)
 const TOKEN = process.env.TEAM_HUB_TOKEN || ''
 const HOST = process.env.TEAM_HUB_HOST || '0.0.0.0'
@@ -156,6 +162,12 @@ db.exec(`
   if (!spaceCols.includes('private')) db.exec('ALTER TABLE spaces ADD COLUMN private INTEGER DEFAULT 0')
   if (!spaceCols.includes('local_dir')) db.exec("ALTER TABLE spaces ADD COLUMN local_dir TEXT DEFAULT ''")
   if (!spaceCols.includes('remote_url')) db.exec("ALTER TABLE spaces ADD COLUMN remote_url TEXT DEFAULT ''")
+}
+// 迁移：members 补充 model 列（S2/R-1 决策 B1：守护心跳可携带当前选用模型，供 GET /api/chat/health 聚合展示；
+// 列可空，既有成员行/插入语句零影响）。
+{
+  const memberCols = db.prepare('PRAGMA table_info(members)').all().map(c => c.name)
+  if (!memberCols.includes('model')) db.exec('ALTER TABLE members ADD COLUMN model TEXT DEFAULT NULL')
 }
 // 空间目标（goal）：一个工作空间可**并存多个目标**（多目标并发，互不取消），任务集围绕各自目标推进。
 // 每行 = 一个目标记录：
@@ -316,6 +328,27 @@ db.exec(`
     updatedAt TEXT
   )
 `)
+// ── 对话附件（S3/R-3 决策 E1）：chat_attachments 行 + uploads 落盘目录（内容不入 messages 表）──
+// 状态机：staged（已上传未绑定消息，24h 孤儿清理）→ sent（随消息绑定；7 天 TTL 清理）。
+// 内容只存 uploads/<scope>/<sha1>（sha1 命名天然去重）；messages.meta.attachments 只存 [{id,fileName,size}] 引用
+// （AC-R3-1 / AC-R4-3：body/meta 不含文件全文，断言点）。
+db.exec(`
+  CREATE TABLE IF NOT EXISTS chat_attachments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope TEXT NOT NULL,
+    conv_id INTEGER,
+    msg_id INTEGER,
+    file_name TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'text',
+    sha1 TEXT NOT NULL,
+    path TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'staged',
+    createdAt TEXT
+  )
+`)
+db.exec('CREATE INDEX IF NOT EXISTS idx_chat_attachments_scope_status ON chat_attachments (scope, status, createdAt)')
+db.exec('CREATE INDEX IF NOT EXISTS idx_chat_attachments_status ON chat_attachments (status, createdAt)')
 // ── 日程日历（calendar）：单表事件存储（R-B1 数据面；G-1 默认单库，scope 分区 + by 写纪律与 chat/tasks 同构）──
 // 老库自动建表（CREATE TABLE IF NOT EXISTS 幂等，S5 验收 1：旧库无 calendar_events 时 import 自动补建，零迁移脚本）。
 // 事件带 start/end（ISO 时间串，end 可空）+ all_day（全天标记）+ meta JSON；日期窗过滤按 start 的 YYYY-MM-DD 前缀（闭区间）。
@@ -753,11 +786,11 @@ function audit(member, scope, action, taskId, detail, goalId = null) {
   return seq
 }
 
-function touchMember(member, scope, kind) {
+function touchMember(member, scope, kind, modelText) {
   db.prepare(`
-    INSERT INTO members (id, scope, kind, lastSeenAt, online) VALUES (?, ?, ?, ?, 1)
-    ON CONFLICT(id) DO UPDATE SET scope=excluded.scope, kind=excluded.kind, lastSeenAt=excluded.lastSeenAt, online=1
-  `).run(member, scope, kind, now())
+    INSERT INTO members (id, scope, kind, lastSeenAt, online, model) VALUES (?, ?, ?, ?, 1, ?)
+    ON CONFLICT(id) DO UPDATE SET scope=excluded.scope, kind=excluded.kind, lastSeenAt=excluded.lastSeenAt, online=1, model=excluded.model
+  `).run(member, scope, kind, now(), typeof modelText === 'string' && modelText.length > 0 ? modelText : null)
 }
 
 // ── 技能（scope-owned + grant + 版本/review，借鉴 QM shared skills + RFC-032）──
@@ -912,6 +945,13 @@ export const CHAT_CONV_KINDS = ['space', 'direct', 'task']
 export const CHAT_REPLY_TIMEOUT_MS = Number(process.env.CHAT_REPLY_TIMEOUT_MS || 120000)
 // 供给回复方的同会话上下文条数（S9 队列聚合）
 export const CHAT_REPLY_CONTEXT_LIMIT = 12
+// ── 对话附件护栏（S3/R-4 决策 G1，承接 REQUIREMENTS D-6 默认值；env 可覆写，CHAT_REPLY_TIMEOUT_MS 先例）──
+export const CHAT_ATTACH_MAX_BYTES = Number(process.env.CHAT_ATTACH_MAX_BYTES || 10 * 1024 * 1024) // 单附件大小上限（默认 10MB）
+export const CHAT_ATTACH_MAX_PER_MSG = Number(process.env.CHAT_ATTACH_MAX_PER_MSG || 3) // 每消息附件数量上限
+export const CHAT_ATTACH_BLACKLIST_EXT = (process.env.CHAT_ATTACH_BLACKLIST_EXT || 'exe,dll,bin,zip,rar,7z,tar,gz,png,jpg,jpeg,gif,webp,svg,ico,pdf,doc,docx,xls,xlsx')
+  .split(',').map(s => s.trim().toLowerCase()).filter(Boolean) // 扩展名黑名单（可配置；白名单 = 非黑名单 + UTF-8 校验通过）
+export const CHAT_ATTACH_STAGED_TTL_MS = Number(process.env.CHAT_ATTACH_STAGED_TTL_MS || 24 * 3600 * 1000) // staged 孤儿清理（默认 24h）
+export const CHAT_ATTACH_TTL_MS = Number(process.env.CHAT_ATTACH_TTL_MS || 7 * 24 * 3600 * 1000) // sent 过期清理（默认 7 天，生命周期文档化 D-3）
 export const CHAT_MSG_KINDS = ['text', 'markdown', 'system']
 export const MAX_CHAT_BODY = 8000 // 消息正文长度上限（⚖️ 三值法断言的常量，见 TEST_CASES §3）
 
@@ -1000,15 +1040,21 @@ export function postMessage(input) {
     // 回复方身份消息（by === <scope>-assistant）不标 awaiting，防自我触发死循环（TC-S9-05/AC-R4-2/I-12）。
     const replySettings = getReplySettings(conv.scope)
     const identity = replyIdentityFor(conv.scope)
+    // S3/R-3（决策 E1）：附件引用校验（存在/同 scope/未绑定/数量上限）先于消息插入执行；
+    // 校验失败抛错 → 事务回滚，消息与绑定零落库（AC-R3-3 / TC-S3-05/10）。
+    const attRefs = validateAttachmentRefs(conv.scope, input?.attachmentIds)
     const meta0 = (typeof input?.meta === 'object' && input.meta) ? { ...input.meta } : {}
+    if (attRefs.length > 0) meta0.attachments = attRefs // 只存 [{id,fileName,size}] 引用；内容不入 body/meta（AC-R4-3）
     if (replySettings.enabled && by.trim() !== identity && meta0.aiStatus !== 'failed' && meta0.aiStatus !== 'replied') {
       meta0.aiStatus = 'awaiting'
       meta0.aiStatusAt = t
     }
     const r = db.prepare('INSERT INTO messages (conv_id, scope, author, kind, body, meta, client_ts, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
       .run(convId, conv.scope, by.trim(), kind, body, JSON.stringify(meta0), clientTs, t)
+    const msgId = Number(r.lastInsertRowid)
+    if (attRefs.length > 0) applyAttachmentBind(conv.scope, convId, msgId, attRefs, by.trim())
     db.prepare('UPDATE conversations SET last_message_at = ?, updatedAt = ? WHERE id = ?').run(t, t, convId)
-    const msg = msgToObj(db.prepare('SELECT * FROM messages WHERE id = ?').get(r.lastInsertRowid))
+    const msg = msgToObj(db.prepare('SELECT * FROM messages WHERE id = ?').get(msgId))
     audit(by, conv.scope, 'chat:message', null, { conv: convId, msg: msg.id, kind: msg.kind })
     return msg
   })
@@ -1215,6 +1261,193 @@ export function failAiReply(input) {
     audit(by.trim(), row.scope, 'chat:fail', null, { msg: msgId })
     return { skipped: false, source: msgToObj(db.prepare('SELECT * FROM messages WHERE id = ?').get(msgId)) }
   })
+}
+
+// ── 对话附件（S3/R-3 决策 E1）：上传 / 绑定 / 取回 / 清理 DAO（服务端护栏 G1；内容不入 messages 表）──
+/** 扩展名黑名单命中 → 拒绝（可读文案；AC-R3-3 / AC-R4-2）。 */
+function rejectBlacklistedExt(fileName) {
+  const dot = fileName.lastIndexOf('.')
+  const ext = dot >= 0 ? fileName.slice(dot + 1).toLowerCase() : ''
+  if (CHAT_ATTACH_BLACKLIST_EXT.includes(ext)) {
+    throw new Error(`扩展名类型不支持作为上下文：.${ext}（仅文本类 UTF-8 文件可作回复上下文）`)
+  }
+}
+
+/** UTF-8 fatal 校验（伪装文本的二进制/非 UTF-8 → 拒绝；AC-R3-3 / AC-R4-2）。 */
+function requireUtf8Text(buf) {
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(buf)
+  } catch {
+    throw new Error('无法作为上下文（非 UTF-8 文本）：仅支持 UTF-8 文本类文件')
+  }
+}
+
+/** 上传：raw UTF-8 文本 → staged 行 + uploads/<scope>/<sha1> 落盘（sha1 命名天然去重）。返回引用形状。 */
+export function uploadChatAttachment(input) {
+  const by = input?.by
+  if (typeof by !== 'string' || by.trim().length === 0) throw new Error('缺少操作者身份 by')
+  const scope = readScope(input ?? {})
+  const fileNameRaw = input?.fileName
+  const buf = input?.content
+  if (typeof fileNameRaw !== 'string' || fileNameRaw.trim().length === 0) throw new Error('缺少参数 fileName')
+  if (fileNameRaw.length > 255) throw new Error('fileName 过长（≤255 字符）')
+  if (/[\\/\u0000-\u001f]/.test(fileNameRaw)) throw new Error('fileName 非法：不能含路径分隔符/控制符')
+  if (!Buffer.isBuffer(buf) || buf.length === 0) throw new Error('缺少上传内容（body 为空）')
+  if (buf.length > CHAT_ATTACH_MAX_BYTES) throw new Error(`附件超大小（上限 ${CHAT_ATTACH_MAX_BYTES} 字节）`)
+  if (!CHAT_SCOPE_RE.test(scope)) throw new Error('scope 非法：小写字母/数字开头的空间 id（≤64 字符）')
+  rejectBlacklistedExt(fileNameRaw.trim())
+  requireUtf8Text(buf)
+  const sha1 = createHash('sha1').update(buf).digest('hex')
+  const relPath = scope + '/' + sha1
+  const absPath = join(UPLOADS_ROOT, relPath)
+  mkdirSync(dirname(absPath), { recursive: true })
+  if (!existsSync(absPath)) {
+    const tmp = absPath + '.tmp-' + process.pid + '-' + Date.now()
+    writeFileSync(tmp, buf)
+    renameSync(tmp, absPath)
+  }
+  const t = now()
+  const r = db.prepare('INSERT INTO chat_attachments (scope, file_name, size, kind, sha1, path, status, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(scope, fileNameRaw.trim(), buf.length, 'text', sha1, relPath, 'staged', t)
+  const id = Number(r.lastInsertRowid)
+  audit(by.trim(), scope, 'chat:attachment:upload', null, { id, fileName: fileNameRaw.trim(), size: buf.length, scope })
+  return { id, fileName: fileNameRaw.trim(), size: buf.length, kind: 'text', status: 'staged', scope }
+}
+
+/**
+ * 预校验（postMessage 事务内调用，只读）：校验附件引用（存在 + 同 scope + staged 未绑定 + 数量 ≤ CHAT_ATTACH_MAX_PER_MSG），
+ * 返回 [{id,fileName,size}] 引用；悬空/跨 scope/重复绑定 → 抛错（消息事务回滚，AC-R3-3 / TC-S3-05/10）。
+ */
+function validateAttachmentRefs(scope, attachmentIds) {
+  const ids = Array.isArray(attachmentIds) ? attachmentIds : []
+  if (ids.length > CHAT_ATTACH_MAX_PER_MSG) throw new Error(`附件数量超限（每消息至多 ${CHAT_ATTACH_MAX_PER_MSG} 个）`)
+  const refs = []
+  for (const raw of ids) {
+    const id = Number(raw)
+    if (!Number.isInteger(id) || id <= 0) throw new Error('attachmentIds 必须是正整数 id 数组')
+    const row = db.prepare('SELECT * FROM chat_attachments WHERE id = ?').get(id)
+    if (!row) throw new Error(`附件不存在：${id}（悬空引用拒绝）`)
+    if (row.scope !== scope) throw new Error(`附件 ${id} 不属于该空间（跨空间引用拒绝）`)
+    if (row.status !== 'staged') throw new Error(`附件 ${id} 已被绑定，不能重复使用`)
+    refs.push({ id, fileName: row.file_name, size: row.size })
+  }
+  return refs
+}
+
+/** 绑定落库（postMessage 事务内、消息插入后调用）：行状态 → sent + conv/msg 关联 + chat:attachment:bind 审计。 */
+function applyAttachmentBind(scope, convId, msgId, refs, by) {
+  for (const ref of refs) {
+    db.prepare('UPDATE chat_attachments SET status = ?, conv_id = ?, msg_id = ? WHERE id = ?').run('sent', convId, msgId, ref.id)
+    audit(by, scope, 'chat:attachment:bind', null, { id: ref.id, fileName: ref.fileName, size: ref.size, scope, conv: convId, msg: msgId })
+  }
+}
+
+/**
+ * 取回（守护答问用）：按会话归属校验后返回 UTF-8 文本内容。
+ * 仅当附件已绑定到该会话（status=sent + conv_id 匹配）且 scope 一致才可读；跨会话/跨 scope → 403 语义（AC-R3-5 / TC-S3-08/09）。
+ */
+export function readChatAttachmentContent(input) {
+  const by = input?.by
+  if (typeof by !== 'string' || by.trim().length === 0) throw new Error('缺少操作者身份 by')
+  const id = Number(input?.id)
+  if (!Number.isInteger(id) || id <= 0) throw new Error('缺少参数 id（附件 id 正整数）')
+  const conv = Number(input?.conv)
+  if (!Number.isInteger(conv) || conv <= 0) throw new Error('缺少参数 conv（附件所属会话 id）')
+  const scope = input?.scope
+  if (typeof scope !== 'string' || scope.trim().length === 0) throw new Error('缺少参数 scope')
+  const row = db.prepare('SELECT * FROM chat_attachments WHERE id = ?').get(id)
+  if (!row) throw new Error(`附件不存在：${id}`)
+  if (row.scope !== scope.trim() || row.status !== 'sent' || row.conv_id !== conv) {
+    throw new Error('附件不属于该会话（跨会话/跨空间不可读取）')
+  }
+  const absPath = join(UPLOADS_ROOT, String(row.path))
+  // 路径自生成（scope/sha1）防逃逸复检：realpath 必须在 UPLOADS_ROOT 内
+  try {
+    const realAbs = toPosix(realpathSync(absPath))
+    const realRoot = toPosix(realpathSync(UPLOADS_ROOT))
+    if (realAbs !== realRoot && !realAbs.startsWith(realRoot + '/')) throw new Error('附件路径异常（拒绝读取）')
+  } catch (e) {
+    if (e instanceof Error && e.message.includes('附件路径异常')) throw e
+    throw new Error(`附件文件不存在：${row.file_name}`)
+  }
+  const content = readFileSync(absPath, 'utf8')
+  audit(by.trim(), scope.trim(), 'chat:attachment:read', null, { id, fileName: row.file_name, size: row.size, scope: scope.trim(), conv })
+  return { id, fileName: row.file_name, size: row.size, content }
+}
+
+/** 清理：staged 孤儿（超 STAGED_TTL）与 sent 过期（超 TTL）行 + 落盘文件；返回删除数。供测试直调与 hub 周期任务调用。 */
+export function cleanupChatAttachments({ scope, nowMs = Date.now() } = {}) {
+  const cutoffStaged = new Date(nowMs - CHAT_ATTACH_STAGED_TTL_MS).toISOString()
+  const cutoffSent = new Date(nowMs - CHAT_ATTACH_TTL_MS).toISOString()
+  const conds = []
+  const params = []
+  if (typeof scope === 'string' && scope.trim().length > 0) { conds.push('scope = ?'); params.push(scope.trim()) }
+  const rows = db.prepare(`SELECT * FROM chat_attachments WHERE ${conds.length > 0 ? conds.join(' AND ') + ' AND ' : ''} ((status = 'staged' AND createdAt < ?) OR (status = 'sent' AND createdAt < ?))`).all(...params, cutoffStaged, cutoffSent)
+  let removed = 0
+  for (const row of rows) {
+    const absPath = join(UPLOADS_ROOT, String(row.path))
+    try {
+      if (existsSync(absPath)) { rmSync(absPath, { force: true }); removed += 1 }
+    } catch { /* 文件缺失不阻塞行删除 */ }
+    db.prepare('DELETE FROM chat_attachments WHERE id = ?').run(row.id)
+  }
+  if (rows.length > 0) {
+    audit('system', (typeof scope === 'string' && scope.trim()) || 'default', 'chat:attachment:cleanup', null,
+      { removed: rows.length, staged: rows.filter(r => r.status === 'staged').length, sent: rows.filter(r => r.status === 'sent').length, filesRemoved: removed })
+  }
+  return { removed: rows.length, filesRemoved: removed }
+}
+
+// ── 对话健康（S2/R-1 决策 B1）：GET /api/chat/health 聚合（只读零写入）──
+// 聚合四输入：①守护在线（members lastSeenAt 60s 窗，优先 kind=worker；与 GET /api/members 判定口径一致）
+// ②本空间回复开关 enabled（getReplySettings）③模型解析链（settings.model → agent_models role=assistant → 守护心跳上报的当前模型）
+// ④最近一条 failed 消息的 aiError（供 UI 展示「如何恢复」）。
+// 诚实标注：模型「已解析」不代表 provider 实际可用（实际可用性以最近一次回复/失败原因为准，防假绿 RK-6）。
+export const CHAT_DAEMON_ONLINE_MS = 60000 // 成员心跳在线窗（与 GET /api/members 的 60s 判定一致）
+export const CHAT_SCOPE_RE = /^[a-z0-9][a-z0-9-]{0,63}$/
+
+export function chatHealth(rawScope) {
+  const scope = typeof rawScope === 'string' ? rawScope.trim() : ''
+  if (scope.length === 0) throw new Error('缺少参数 scope')
+  if (!CHAT_SCOPE_RE.test(scope)) throw new Error('scope 非法：小写字母/数字开头的空间 id（≤64 字符）')
+  const nowMs = Date.now()
+  const fresh = (row) => Boolean(row && row.lastSeenAt && (nowMs - new Date(row.lastSeenAt).getTime() < CHAT_DAEMON_ONLINE_MS))
+  const workerRow = db.prepare("SELECT * FROM members WHERE kind = 'worker' ORDER BY lastSeenAt DESC LIMIT 1").get()
+  const anyFreshRow = db.prepare('SELECT * FROM members ORDER BY lastSeenAt DESC LIMIT 1').get()
+  // 守护在线：kind=worker 心跳新鲜；尚无 worker 心跳历史时按「任意成员新鲜」兜底（兼容旧部署成员 kind 未标 worker）。
+  const online = fresh(workerRow) || (!workerRow && fresh(anyFreshRow))
+  // 守护当前选用模型（心跳上报，members.model JSON）
+  let daemonModel = null
+  try {
+    const m = workerRow?.model ? JSON.parse(workerRow.model) : null
+    if (m && (m.model || m.provider)) daemonModel = { provider: m.provider ?? null, model: m.model ?? null }
+  } catch { /* 坏 JSON 按无 */ }
+  const settings = getReplySettings(scope)
+  const amRow = db.prepare("SELECT scope, role, provider, model FROM agent_models WHERE scope = ? AND role = ?").get(scope, 'assistant')
+  let model = null
+  if (settings.model && settings.model.trim().length > 0) model = { provider: null, model: settings.model.trim(), source: 'reply-settings' }
+  else if (amRow?.model) model = { provider: amRow.provider ?? null, model: amRow.model, source: 'agent_models' }
+  else if (daemonModel?.model) model = { ...daemonModel, source: 'daemon-heartbeat' }
+  const failed = db.prepare("SELECT id, conv_id, meta, createdAt FROM messages WHERE scope = ? ORDER BY id DESC LIMIT 200").all(scope)
+  let lastFail = null
+  for (const row of failed) {
+    const meta = parseJson(row.meta, {})
+    if (meta.aiStatus === 'failed') {
+      lastFail = { msgId: row.id, convId: row.conv_id, aiError: meta.aiError ?? '', failedAt: meta.failedAt ?? null }
+      break
+    }
+  }
+  return {
+    scope,
+    okAt: new Date().toISOString(),
+    online,
+    daemon: online ? { member: (workerRow ?? anyFreshRow)?.id ?? null, kind: (workerRow ?? anyFreshRow)?.kind ?? null, lastSeenAt: (workerRow ?? anyFreshRow)?.lastSeenAt ?? null } : null,
+    enabled: settings.enabled,
+    model,
+    modelResolved: model !== null && typeof model.model === 'string' && model.model.length > 0,
+    lastFail,
+    honestNote: '模型「已解析」不代表 provider 实际可用：实际可用性以最近一次 AI 回复/失败原因为准。',
+  }
 }
 
 // ── 日程日历（calendar）DAO：事件 CRUD + 日期窗（R-B1 数据面，S5；scope 分区 + 统一写纪律）──
@@ -1778,6 +2011,38 @@ function requireMember(body) {
   return by.trim()
 }
 
+/** 读原始请求体（S3 上传用，PUT raw body）：超出 cap 字节 → reject（TOO_LARGE）；未超返回 Buffer。 */
+function readRawBody(req, cap) {
+  return new Promise((resolve, reject) => {
+    const cl = Number(req.headers['content-length'] ?? NaN)
+    if (Number.isFinite(cl) && cl > cap) {
+      reject(Object.assign(new Error('附件超大小'), { statusCode: 413 }))
+      return
+    }
+    const chunks = []
+    let total = 0
+    let finished = false
+    req.on('data', (d) => {
+      if (finished) return
+      total += d.length
+      if (total > cap) {
+        finished = true
+        req.removeAllListeners('data')
+        req.resume()
+        reject(Object.assign(new Error('附件超大小'), { statusCode: 413 }))
+        return
+      }
+      chunks.push(Buffer.isBuffer(d) ? d : Buffer.from(d))
+    })
+    req.on('end', () => {
+      if (finished) return
+      finished = true
+      resolve(Buffer.concat(chunks))
+    })
+    req.on('error', (e) => reject(e))
+  })
+}
+
 function readScope(body) {
   return typeof body.scope === 'string' && body.scope.trim().length > 0 ? body.scope.trim() : 'default'
 }
@@ -1918,7 +2183,7 @@ async function handle(req, res) {
   const path = url.pathname
   res.setHeader('access-control-allow-origin', '*')
   if (req.method === 'OPTIONS') {
-    res.writeHead(204, { 'access-control-allow-methods': 'GET, POST, OPTIONS', 'access-control-allow-headers': 'content-type, authorization' })
+    res.writeHead(204, { 'access-control-allow-methods': 'GET, POST, PUT, OPTIONS', 'access-control-allow-headers': 'content-type, authorization, content-length' })
     res.end()
     return
   }
@@ -2162,7 +2427,13 @@ async function handle(req, res) {
     }
     if (req.method === 'POST' && path === '/api/heartbeat') {
       await handleWrite(req, res, (body, by, scope) => {
-        touchMember(by, scope, typeof body.kind === 'string' ? body.kind : 'unknown')
+        // S2/R-1（决策 B1）：kind=worker 的心跳可附带 model {provider,model}（守护当前选用模型），
+        // 供 GET /api/chat/health 的模型解析链聚合展示（members.model 列，可空）。
+        const m = body?.model && typeof body.model === 'object' && body.model !== null ? body.model : null
+        const modelText = m && (typeof m.model === 'string' || typeof m.provider === 'string')
+          ? JSON.stringify({ provider: typeof m.provider === 'string' ? m.provider : '', model: typeof m.model === 'string' ? m.model : '' })
+          : undefined
+        touchMember(by, scope, typeof body.kind === 'string' ? body.kind : 'unknown', modelText)
         return { member: by, scope, online: true }
       })
       return
@@ -2640,6 +2911,50 @@ async function handle(req, res) {
       return
     }
 
+    // ── 对话附件（S3/R-3 决策 E1）：上传 PUT / 取回 GET（服务端护栏 + audit；内容不入 messages 表）──
+    if (req.method === 'PUT' && path === '/api/chat/attachments') {
+      try {
+        if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+        const scopeParam = (url.searchParams.get('scope') ?? '').trim()
+        const byParam = (url.searchParams.get('by') ?? '').trim()
+        const fileName = (url.searchParams.get('fileName') ?? '').trim()
+        if (!byParam) throw new Error('缺少操作者身份 by')
+        cleanupChatAttachments({ scope: scopeParam }) // 顺带孤儿/过期清理（hub 周期宿主之一）
+        const buf = await readRawBody(req, CHAT_ATTACH_MAX_BYTES)
+        const att = uploadChatAttachment({ scope: scopeParam, fileName, content: buf, by: byParam })
+        json(res, 200, att)
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e)
+        const code = e && typeof e === 'object' && 'statusCode' in e ? e.statusCode : 400
+        json(res, code >= 400 && code < 500 ? code : 400, { error: message })
+      }
+      return
+    }
+    if (req.method === 'GET' && path === '/api/chat/attachments/content') {
+      try {
+        const scopeParam = (url.searchParams.get('scope') ?? '').trim()
+        const byParam = (url.searchParams.get('by') ?? '').trim()
+        const out = readChatAttachmentContent({ id: url.searchParams.get('id'), conv: url.searchParams.get('conv'), scope: scopeParam, by: byParam })
+        json(res, 200, out)
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e)
+        const status = /不属于该会话|越权|跨会话/.test(message) ? 403 : /不存在|附件文件/.test(message) ? 404 : 400
+        json(res, status, { error: message })
+      }
+      return
+    }
+
+    // ── 对话健康（S2/R-1 决策 B1）：只读聚合（守护在线/开关/模型解析链/最近失败）──
+    if (req.method === 'GET' && path === '/api/chat/health') {
+      try {
+        const scopeParam = url.searchParams.get('scope') ?? ''
+        json(res, 200, chatHealth(scopeParam))
+      } catch (e) {
+        json(res, 400, { error: e instanceof Error ? e.message : String(e) })
+      }
+      return
+    }
+
     // ── 对话 AI 回复（R-4，S9）：reply-settings / replies 队列 / answer CAS 回写 / retry 重试 ──
     if (req.method === 'GET' && path === '/api/chat/reply-settings') {
       try {
@@ -2937,6 +3252,10 @@ if (isMain) {
   server.listen(PORT, HOST, () => {
     console.log(`[team-hub] v2 独立服务已启动：http://${HOST}:${PORT}（db=${DB_FILE}，鉴权=${TOKEN !== '' ? 'on' : 'off'}）`)
   })
+  // S3/R-3（决策 E1）：附件清理周期宿主（staged 孤儿 24h / sent 过期 7 天；另有上传时顺带清理）。
+  setInterval(() => {
+    try { cleanupChatAttachments() } catch { /* 清理失败不崩主服务，下一轮再试 */ }
+  }, 3600 * 1000).unref()
 }
 
 export { db, server, registerSkill, reviewSkill, listSkills, grantSkill, revokeSkill, getSkill,

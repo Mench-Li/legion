@@ -1,10 +1,45 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { createChatConversation, fetchChatConversations, fetchChatMessages, hubBase, postChatMessage, retryChatReply, subscribeHubAudit } from '../api'
-import type { ChatConversation, ChatMessage } from '../types'
+import { createChatConversation, fetchChatConversations, fetchChatHealth, fetchChatMessages, fetchChatReplySettings, fetchSpaces, hubBase, postChatMessage, retryChatReply, saveChatReplySettings, subscribeHubAudit, uploadChatAttachment } from '../api'
+import type { ChatAttachmentRef, ChatConversation, ChatHealthInfo, ChatMessage, SpaceInfo } from '../types'
 import { toast } from './Toast'
 
 const MAX_BODY = 8000 // 与后端 MAX_CHAT_BODY 对齐（TC-S1-12 / TC-S2-10）
 const PAGE = 50 // 每页条数（TC-S1-08 后端契约 limit≤200）；「加载更早」用 before 游标翻页（P1-4 / TC-S2-04）
+
+// ── S8（R-3/R-4 决策 F1+G1）：附件客户端护栏（与服务端 CHAT_ATTACH_* 默认值一致；服务端仍做权威校验）──
+const ATTACH_MAX_BYTES = 10 * 1024 * 1024 // ≤10MB（CHAT_ATTACH_MAX_BYTES 默认）
+const ATTACH_MAX_PER_MSG = 3 // 每消息 ≤3（CHAT_ATTACH_MAX_PER_MSG 默认）
+const ATTACH_EXT_BLACKLIST = new Set(['exe', 'dll', 'bin', 'zip', 'rar', '7z', 'tar', 'gz', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico', 'pdf', 'doc', 'docx', 'xls', 'xlsx'])
+
+/** S8：发送前待绑定的附件（file 仅持有引用，不读全文进 draft/body）。 */
+interface PendingFile {
+  fileName: string
+  size: number
+  file: File
+  /** 上传成功后服务端返回的 staged 附件 id。 */
+  id?: number
+  /** 上传失败可读原因（chip 标红，可移除；发送按钮禁用直到移除或重传成功）。 */
+  error?: string
+}
+
+function fmtSize(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0 B'
+  if (n < 1024) return n + ' B'
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB'
+  return (n / 1024 / 1024).toFixed(1) + ' MB'
+}
+
+/** S8：消息附件标识数据源（meta.attachments=[{id,fileName,size}]，纯引用）。 */
+function attOf(m: ChatMessage): ChatAttachmentRef[] {
+  const a = m.meta?.attachments
+  if (!Array.isArray(a)) return []
+  return a.filter((x): x is ChatAttachmentRef =>
+    !!x && typeof x === 'object'
+    && Number.isInteger((x as { id?: unknown }).id)
+    && typeof (x as { fileName?: unknown }).fileName === 'string'
+    && typeof (x as { size?: unknown }).size === 'number'
+  )
+}
 
 function fmt(ts: string | null): string {
   if (!ts) return ''
@@ -69,7 +104,14 @@ function identityStale(scopeAtCall: string | null, convAtCall: number | null, sc
  *   全程无 dangerouslySetInnerHTML，任何 <img onerror>/<script>/[x](javascript:) 都只是文本。
  * - 失败路径（S2 AC6 / TC-S2-07/10）：中枢不可达/写失败 → toast 错误且草稿不丢；EventSource 原生自动重连 + 15s 轮询兜底。
  */
-export function ChatView({ scope, hubMode }: { scope: string | null; hubMode: boolean }): React.JSX.Element {
+export function ChatView({ scope, hubMode, spaces, onPickScope }: {
+  scope: string | null
+  hubMode: boolean
+  /** S7（R-2）：可选空间列表（「全部空间」视图选空间入口；缺省时组件自行 fetchSpaces）。 */
+  spaces?: SpaceInfo[]
+  /** S7（R-2）：点选某工作空间后回调（App 传 selectScope）。 */
+  onPickScope?: (scopeId: string) => void
+}): React.JSX.Element {
   const [convs, setConvs] = useState<ChatConversation[]>([])
   const [activeId, setActiveId] = useState<number | null>(null)
   const [msgs, setMsgs] = useState<ChatMessage[]>([])
@@ -87,6 +129,20 @@ export function ChatView({ scope, hubMode }: { scope: string | null; hubMode: bo
   const stickRef = useRef(true) // 是否贴底（新消息自动滚到底部；用户上翻读历史时不抢滚动）
   activeRef.current = activeId
   scopeRef.current = scope
+  // S7（R-1/R-2 决策 B1）：对话健康聚合（GET /api/chat/health 30s 轮询 + 发送/重试/设置后即时刷新；灰态=端点缺失不误导）
+  const [health, setHealth] = useState<ChatHealthInfo | null>(null)
+  const [healthNote, setHealthNote] = useState<string | null>(null)
+  // S7（R-1 决策 D-4）：回复设置弹窗（每空间 AI 开关 enabled 必含；model/identity/systemHint 可选）
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [settingsSaving, setSettingsSaving] = useState(false)
+  const [settingsDraft, setSettingsDraft] = useState<{ enabled: boolean; model: string; identity: string; systemHint: string } | null>(null)
+  // S8（R-3 决策 F1 附件）：composer 附件（📎 选择 → 客户端预检 → 上传 staged → 发送携带 attachmentIds）
+  const [attachFiles, setAttachFiles] = useState<PendingFile[]>([])
+  const [attachBusy, setAttachBusy] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
+  // S7（R-2）：空间选择入口的列表兜底（props.spaces 未提供/为空时组件自行拉取）
+  const [localSpaces, setLocalSpaces] = useState<SpaceInfo[]>([])
+  const [localSpacesErr, setLocalSpacesErr] = useState('')
 
   const loadConvs = useCallback(async (): Promise<void> => {
     const scopeAtCall = scope
@@ -100,6 +156,35 @@ export function ChatView({ scope, hubMode }: { scope: string | null; hubMode: bo
       if (scopeAtCall === scopeRef.current) toast('err', `会话列表加载失败：${e instanceof Error ? e.message : String(e)}`)
     }
   }, [scope])
+
+  // S7（R-2）：「全部空间」视图拉取空间列表（props.spaces 为空时兜底；成功后缓存 localSpaces 供切换回来看）
+  useEffect(() => {
+    if (!hubMode || scope) return
+    let cancelled = false
+    if (!(spaces && spaces.length > 0) && localSpaces.length === 0 && localSpacesErr === '') {
+      setLocalSpacesErr('loading')
+      fetchSpaces()
+        .then(list => { if (!cancelled) { setLocalSpaces(list); setLocalSpacesErr('') } })
+        .catch((e: unknown) => { if (!cancelled) setLocalSpacesErr(e instanceof Error ? e.message : String(e)) })
+    }
+    return () => { cancelled = true }
+  }, [hubMode, scope, spaces, localSpaces.length, localSpacesErr])
+
+  // S7（R-1/B1）：对话健康状态拉取（空间身份守卫：await 返回后 scope 已切走 → 丢弃）
+  const loadHealth = useCallback(async (): Promise<void> => {
+    const sc = scopeRef.current
+    if (!hubMode || !sc) return
+    try {
+      const h = await fetchChatHealth(sc)
+      if (scopeRef.current !== sc) return
+      setHealth(h)
+      setHealthNote(null)
+    } catch (e) {
+      if (scopeRef.current !== sc) return
+      setHealth(null)
+      setHealthNote('健康端点不可用（不影响收发）' + (e instanceof Error ? '：' + e.message : ''))
+    }
+  }, [hubMode])
 
   // 会话切换 → 清空并拉最近 PAGE 条（TC-S2-05：不串显上一会话内容）
   useEffect(() => {
@@ -188,10 +273,12 @@ export function ChatView({ scope, hubMode }: { scope: string | null; hubMode: bo
       if (ev.action === 'chat:message' && Number(conv) === n) void mergeNewest()
       else if (ev.action === 'chat:create') void loadConvs()
     })
+    void loadHealth() // 进入空间即刷健康（守护/开关/模型/最近失败）
     const poll = window.setInterval(() => {
       const n = activeRef.current
       if (n !== null) void mergeNewest()
       void loadConvs() // 刷新会话列表（last_message_at / updatedAt 排序，轻量）
+      void loadHealth() // 健康轮询（同 15s 节拍）
     }, 15000)
     return () => {
       off()
@@ -248,13 +335,30 @@ export function ChatView({ scope, hubMode }: { scope: string | null; hubMode: bo
   }
 
   if (!scope) {
+    // S7（R-1/R-2）：死路卡 →「选择工作空间开始对话」入口（复用 /api/spaces；点选经 onPickScope → App.selectScope）
+    const spaceList = spaces && spaces.length > 0 ? spaces : localSpaces
     return (
       <div className="center-col">
-        <div className="panel goal-card">
-          <span style={{ color: 'var(--yellow)' }}>💬 请先选择具体工作空间</span>
-          <span style={{ fontSize: 11, color: 'var(--muted)' }}>
-            对话随空间隔离（scope 分区）。在左侧「工作空间」选择一个具体空间后即可会话（「全部空间」视图不可发消息）
+        <div className="panel goal-card" style={{ maxWidth: 620 }}>
+          <span style={{ color: 'var(--yellow)' }}>💬 选择工作空间开始对话</span>
+          <span style={{ fontSize: 11, color: 'var(--muted)', lineHeight: 1.8, display: 'block', marginTop: 6 }}>
+            对话随工作空间隔离：回复方会依据该空间的绑定仓库内容作答，也可随消息上传文本文件作为上下文。
+            从下方选择一个工作空间即可开始对话。
           </span>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 12 }}>
+            {spaceList.map(s => (
+              <button key={s.id} type="button" className="btn primary"
+                title={s.localDir ? '本地仓库：' + s.localDir : ''}
+                onClick={() => onPickScope ? onPickScope(s.id) : undefined}>
+                {s.name || s.id}{s.localDir ? ' 📁' : ''}
+              </button>
+            ))}
+            {spaceList.length === 0 && (
+              <span style={{ fontSize: 11, color: 'var(--muted-2)' }}>
+                {localSpacesErr && localSpacesErr !== 'loading' ? '空间列表加载失败：' + localSpacesErr : '正在加载工作空间列表…（若为空请先在左侧创建/绑定工作空间）'}
+              </span>
+            )}
+          </div>
         </div>
       </div>
     )
@@ -286,10 +390,114 @@ export function ChatView({ scope, hubMode }: { scope: string | null; hubMode: bo
       toast('err', `创建失败：${e instanceof Error ? e.message : String(e)}`)
     }
   }
+  // ── S7（R-1，B1）：健康状态呈现（灰/绿/黄/红；红态 = 最近失败可行动文案，黄态 = 前提缺失修复动作，灰态 = 端点缺失不误导）──
+  const healthView = (): { color: string; label: string; title: string } => {
+    if (healthNote) return { color: 'var(--muted-2)', label: '健康状态未知', title: healthNote }
+    if (!health) return { color: 'var(--muted-2)', label: '检测中…', title: '正在获取对话健康状态…' }
+    if (health.lastFail) {
+      return { color: 'var(--red)', label: '最近回复失败', title: '最近一条 AI 回复失败：' + health.lastFail.aiError + '。请在对应 ❌ 消息点击「↻ 重试」，或检查模型配置后重发。' }
+    }
+    const notes: string[] = []
+    if (!health.online) notes.push('守护离线：请启动守护进程（scrum-worker）后重试')
+    if (!health.enabled) notes.push('AI 回复未开启：点「⚙ 回复设置」打开开关')
+    if (!health.modelResolved) notes.push('模型未配置：在「⚙ 回复设置」或模型配置中选择 assistant 可用模型')
+    if (notes.length > 0) return { color: 'var(--yellow)', label: 'AI 回复待处理', title: notes.join('；') }
+    return { color: 'var(--green)', label: 'AI 回复就绪', title: '守护在线 · 回复已开启 · 模型已解析。已解析不代表 provider 实际可用，以最近一次回复/失败为准。' }
+  }
+  const healthDot = healthView()
+
+  // ── S7（R-1，D-4）：回复设置弹窗（enabled 必含且默认开；model/identity/systemHint 可选；保存后健康即时刷新）──
+  const openSettings = async (): Promise<void> => {
+    if (!scope) return
+    setSettingsOpen(true)
+    setSettingsDraft(null)
+    setSettingsSaving(true)
+    try {
+      const cur = await fetchChatReplySettings(scope)
+      if (scopeRef.current !== scope) return
+      setSettingsDraft({ enabled: cur.enabled, model: cur.model ?? '', identity: cur.identity ?? '', systemHint: cur.systemHint ?? '' })
+    } catch (e) {
+      if (scopeRef.current !== scope) return
+      toast('err', '回复设置读取失败：' + (e instanceof Error ? e.message : String(e)))
+    } finally {
+      if (scopeRef.current === scope) setSettingsSaving(false)
+    }
+  }
+  const saveSettings = async (): Promise<void> => {
+    if (!scope || !settingsDraft) return
+    setSettingsSaving(true)
+    try {
+      await saveChatReplySettings({
+        scope,
+        enabled: settingsDraft.enabled,
+        model: settingsDraft.model.trim() || undefined,
+        identity: settingsDraft.identity.trim() || undefined,
+        systemHint: settingsDraft.systemHint.trim() || undefined,
+      })
+      toast('ok', settingsDraft.enabled ? 'AI 回复已开启：新消息将进入回复队列' : 'AI 回复已关闭：新消息不再进入回复队列（人-人消息不受影响）')
+      setSettingsOpen(false)
+      void loadHealth()
+    } catch (e) {
+      toast('err', '回复设置保存失败：' + (e instanceof Error ? e.message : String(e)))
+    } finally {
+      setSettingsSaving(false)
+    }
+  }
+
+  // ── S8（R-3）：📎 附件（选择 → 客户端预检 → 上传 staged；内容绝不进 draft/body，仅当次回复上下文）──
+  const precheckFile = (f: File): string | null => {
+    const dot = f.name.lastIndexOf('.')
+    const ext = dot >= 0 ? f.name.slice(dot + 1).toLowerCase() : ''
+    if (ext.length === 0) return '无法识别文件类型（无扩展名）：' + f.name + '（仅文本类 UTF-8 文件可作回复上下文）'
+    if (ATTACH_EXT_BLACKLIST.has(ext)) return '扩展名类型不支持作为上下文：.' + ext + '（仅文本类 UTF-8 文件可作回复上下文）'
+    if (f.size > ATTACH_MAX_BYTES) return '附件超大小（上限 10MB）：' + f.name
+    return null
+  }
+  const pickAttachFiles = async (list: FileList | null): Promise<void> => {
+    if (!list || list.length === 0 || !scope) return
+    const scopeNow = scope
+    const files = Array.from(list)
+    const room = Math.max(0, ATTACH_MAX_PER_MSG - attachFiles.length)
+    const picked: PendingFile[] = []
+    for (const f of files.slice(0, room)) {
+      const pre = precheckFile(f)
+      if (pre) { toast('err', pre); continue }
+      picked.push({ fileName: f.name, size: f.size, file: f })
+    }
+    if (files.length > room) toast('err', '附件数量超限（每消息至多 ' + ATTACH_MAX_PER_MSG + ' 个），已忽略 ' + String(files.length - room) + ' 个')
+    if (picked.length === 0) return
+    setAttachFiles(cur => [...cur, ...picked])
+    setAttachBusy(true)
+    try {
+      const results = await Promise.all(picked.map(async (a): Promise<{ fileName: string; id?: number; error?: string }> => {
+        try {
+          const ref = await uploadChatAttachment({ scope: scopeNow, fileName: a.fileName, content: a.file })
+          return { fileName: a.fileName, id: ref.id }
+        } catch (e) {
+          return { fileName: a.fileName, error: e instanceof Error ? e.message : String(e) }
+        }
+      }))
+      if (scopeRef.current !== scopeNow) {
+        setAttachFiles([]) // 上传期间已切换空间：staged 孤儿由服务端 TTL 清理，不绑当前会话
+        toast('err', '上传期间已切换工作空间，附件已取消（可重新选择）')
+        return
+      }
+      setAttachFiles(cur => cur.map(a => {
+        const hit = results.find(r => r.fileName === a.fileName)
+        return hit ? { ...a, id: hit.id, error: hit.error } : a
+      }))
+      for (const r of results) {
+        if (r.error) toast('err', '附件「' + r.fileName + '」上传失败：' + r.error)
+      }
+    } finally {
+      setAttachBusy(false)
+    }
+  }
+  const removeAttach = (i: number): void => setAttachFiles(cur => cur.filter((_, j) => j !== i))
 
   const send = async (): Promise<void> => {
     const body = draft
-    if (!body.trim() || sending) return
+    if (!body.trim() || sending || attachBusy) return
     if (body.length > MAX_BODY) {
       toast('err', `消息超长（上限 ${MAX_BODY} 字符）`)
       return
@@ -298,20 +506,35 @@ export function ChatView({ scope, hubMode }: { scope: string | null; hubMode: bo
       toast('err', '请先新建/选择一个会话')
       return
     }
+    // S8（R-3）：附件未就绪（上传中/失败）→ 拦截并提示，不静默发送
+    const notReady = attachFiles.find(a => a.id === undefined || a.error !== undefined)
+    if (notReady) {
+      toast('err', `附件「${notReady.fileName}」${notReady.error ? '上传失败：' + notReady.error : '尚未上传完成'}，请先移除或等待上传成功后再发送`)
+      return
+    }
     const scopeAtCall = scope // 发起时身份快照（R-A5 / TC-S3-01/03/04）
     const convAtCall = activeId
+    const attachmentIds = attachFiles.map(a => a.id as number)
     setSending(true)
     try {
-      const msg = await postChatMessage({ conv: convAtCall, body, kind: 'text', clientTs: new Date().toISOString() })
+      const msg = await postChatMessage({
+        conv: convAtCall,
+        body,
+        kind: 'text',
+        clientTs: new Date().toISOString(),
+        attachmentIds: attachmentIds.length > 0 ? attachmentIds : undefined,
+      })
       // 会话/空间身份守卫：await 期间已切走 → 不清当前草稿、不合并、不刷新列表（消息已入库，切回发起会话可见）
       if (identityStale(scopeAtCall, convAtCall, scopeRef.current, activeRef.current)) return
       setDraft('') // 成功后清草稿
+      setAttachFiles([]) // S8：附件已随消息绑定，清槽
       stickRef.current = true
       setMsgs(prev => mergeById(prev, [msg])) // 气泡即时出现（无整页刷新）
       void loadConvs() // 会话 last_message_at/排序即时更新（轻量）
+      void loadHealth() // 消息入队（可能产生失败/回复）→ 健康条即时刷新
     } catch (e) {
       if (!identityStale(scopeAtCall, convAtCall, scopeRef.current, activeRef.current)) {
-        // 失败：草稿保留（TC-S2-07/10），toast 错误
+        // 失败：草稿与附件槽均保留（TC-S2-07/10 / TC-S8-07），toast 错误
         toast('err', `发送失败：${e instanceof Error ? e.message : String(e)}`)
       }
     } finally {
@@ -331,6 +554,7 @@ export function ChatView({ scope, hubMode }: { scope: string | null; hubMode: bo
       if (identityStale(scopeAtCall, convAtCall, scopeRef.current, activeRef.current)) return
       setMsgs(prev => prev.map(x => (x.id === updated.id ? updated : x)))
       toast('ok', '已重新提交回复，等待 AI 回复…')
+      void loadHealth() // 重试后健康条即时刷新（失败态→等待态）
     } catch (e) {
       if (!identityStale(scopeAtCall, convAtCall, scopeRef.current, activeRef.current)) {
         toast('err', `重试失败：${e instanceof Error ? e.message : String(e)}`)
@@ -348,7 +572,17 @@ export function ChatView({ scope, hubMode }: { scope: string | null; hubMode: bo
           {scope}
           <span style={{ color: 'var(--muted-2)', fontSize: 11 }}> · {convs.length} 个会话 · team-hub（{hubBase()}）</span>
         </span>
-        <span style={{ marginLeft: 'auto' }}>
+        <span
+          className="chat-health"
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginLeft: 10, cursor: 'pointer', flex: 'none' }}
+          title={healthDot.title}
+          onClick={() => void loadHealth()}
+        >
+          <span style={{ width: 8, height: 8, borderRadius: '50%', background: healthDot.color, display: 'inline-block', flex: 'none' }} />
+          <span style={{ fontSize: 11, color: healthDot.color }}>{healthDot.label}</span>
+        </span>
+        <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 6 }}>
+          <button className="btn ghost" title="AI 回复设置（开关/模型/身份/systemHint）" onClick={() => void openSettings()}>⚙ 回复设置</button>
           <button className="btn primary" onClick={startCreate}>＋ 新会话</button>
         </span>
       </div>
@@ -414,6 +648,15 @@ export function ChatView({ scope, hubMode }: { scope: string | null; hubMode: bo
                       <div className={me ? 'chat-bubble me' : 'chat-bubble'}>
                         {m.body}
                       </div>
+                      {attOf(m).length > 0 && (
+                        <div className="chat-att-labels" style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 2, justifyContent: me ? 'flex-end' : 'flex-start', maxWidth: '78%' }}>
+                          {attOf(m).map(a => (
+                            <span key={a.id} className="chip" title={'附件：' + a.fileName + '（' + fmtSize(a.size) + '）'} style={{ fontSize: 10, maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              📎 {a.fileName}（{fmtSize(a.size)}）
+                            </span>
+                          ))}
+                        </div>
+                      )}
                       {me && st === 'awaiting' && (
                         <div className="chat-ai-state pending">
                           <span className="chat-ai-spinner">◌</span> AI 正在回复…（提交于 {fmt(m.createdAt)}）
@@ -443,7 +686,7 @@ export function ChatView({ scope, hubMode }: { scope: string | null; hubMode: bo
                 <textarea
                   value={draft}
                   rows={3}
-                  placeholder={'输入消息（Enter 发送 / Shift+Enter 换行；上限 ' + String(MAX_BODY) + ' 字符）…'}
+                  placeholder={'输入消息（Enter 发送 / Shift+Enter 换行；上限 ' + String(MAX_BODY) + ' 字符）… 可点「📎 附件」上传文本文件作为本次回复上下文'}
                   onChange={e => setDraft(e.target.value)}
                   onKeyDown={e => {
                     if (e.key === 'Enter' && !e.shiftKey) {
@@ -452,12 +695,41 @@ export function ChatView({ scope, hubMode }: { scope: string | null; hubMode: bo
                     }
                   }}
                 />
+                {attachFiles.length > 0 && (
+                  <div className="chat-attach-row" style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', marginTop: 6 }}>
+                    {attachFiles.map((a, i) => (
+                      <span key={i} className="chip" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, maxWidth: '100%' }}>
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>📎 {a.fileName}（{fmtSize(a.size)}）</span>
+                        {a.id === undefined && a.error === undefined && <span style={{ color: 'var(--yellow)', fontSize: 10 }}>上传中…</span>}
+                        {a.id === undefined && a.error !== undefined && <span style={{ color: 'var(--red)', fontSize: 10 }} title={a.error}>⚠ 失败</span>}
+                        {a.id !== undefined && <span style={{ color: 'var(--green)', fontSize: 10 }}>✓</span>}
+                        <button type="button" className="chip-x" disabled={attachBusy} style={{ padding: '0 6px' }} title="移除附件"
+                          onClick={() => removeAttach(i)}>✕</button>
+                      </span>
+                    ))}
+                  </div>
+                )}
                 <div className="chat-composer-bar">
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    style={{ display: 'none' }}
+                    onChange={e => { void pickAttachFiles(e.target.files); e.target.value = '' }}
+                  />
+                  <button type="button" className="btn ghost" disabled={attachBusy || sending}
+                    title="添加文本文件作为本次回复上下文（≤10MB、每消息至多 3 个、仅文本类 UTF-8；黑名单类型/二进制会被拒绝）"
+                    onClick={() => fileInputRef.current?.click()}>
+                    {attachBusy ? '⏳ 上传中…' : '📎 附件'}
+                  </button>
                   <span style={{ fontSize: 10, color: draft.length > MAX_BODY ? '#ff8f8f' : 'var(--muted-2)' }}>
                     {draft.length}/{MAX_BODY}
                     {draft.length > MAX_BODY ? '（超长，发送会被拒绝）' : ''}
                   </span>
-                  <button className="btn primary" disabled={sending || draft.trim().length === 0} onClick={() => void send()}>
+                  <button className="btn primary"
+                    title={attachFiles.some(a => a.id === undefined || a.error !== undefined) ? '附件未就绪：请等待上传完成或移除失败附件' : undefined}
+                    disabled={sending || attachBusy || draft.trim().length === 0 || attachFiles.some(a => a.id === undefined || a.error !== undefined)}
+                    onClick={() => void send()}>
                     {sending ? '发送中…' : '发送 ➤'}
                   </button>
                 </div>
@@ -470,6 +742,53 @@ export function ChatView({ scope, hubMode }: { scope: string | null; hubMode: bo
           )}
         </div>
       </div>
+
+      {settingsOpen && scope && (
+        <div className="modal-mask" onClick={() => setSettingsOpen(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-head">
+              ⚙ AI 回复设置（{scope}）
+              <span className="x" onClick={() => setSettingsOpen(false)}>✕</span>
+            </div>
+            <div className="modal-body">
+              {settingsDraft === null ? (
+                <div className="chat-empty" style={{ padding: '18px 0' }}>{settingsSaving ? '⏳ 读取中…' : '设置不可用（读取失败）'}</div>
+              ) : (
+                <>
+                  <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 12, cursor: 'pointer', lineHeight: 1.6 }}>
+                    <input type="checkbox" checked={settingsDraft.enabled} style={{ marginTop: 2 }}
+                      onChange={e => setSettingsDraft(d => (d ? { ...d, enabled: e.target.checked } : d))} />
+                    <span>
+                      AI 回复{settingsDraft.enabled ? '（已开启）' : '（已关闭）'}：开启后发送消息会进入 AI 回复队列；关闭时人-人消息正常、零出站
+                    </span>
+                  </label>
+                  <div className="field">
+                    <label>模型（可选；留空 = 空间 agent_models / 守护默认）</label>
+                    <input value={settingsDraft.model} maxLength={200} placeholder="如 deepseek-chat"
+                      onChange={e => setSettingsDraft(d => (d ? { ...d, model: e.target.value } : d))} />
+                  </div>
+                  <div className="field">
+                    <label>回复身份（可选；默认 {scope}-assistant）</label>
+                    <input value={settingsDraft.identity} maxLength={200} placeholder={scope + '-assistant'}
+                      onChange={e => setSettingsDraft(d => (d ? { ...d, identity: e.target.value } : d))} />
+                  </div>
+                  <div className="field">
+                    <label>systemHint（可选；≤2000 字符，作为助手行为设定）</label>
+                    <textarea rows={3} value={settingsDraft.systemHint} maxLength={2000}
+                      onChange={e => setSettingsDraft(d => (d ? { ...d, systemHint: e.target.value } : d))} />
+                  </div>
+                </>
+              )}
+            </div>
+            <div className="modal-foot">
+              <button className="btn ghost" onClick={() => setSettingsOpen(false)}>取消</button>
+              <button className="btn primary" disabled={settingsSaving || settingsDraft === null} onClick={() => void saveSettings()}>
+                {settingsSaving ? '保存中…' : '保存'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {creating && (
         <div className="modal-mask" onClick={() => setCreating(false)}>

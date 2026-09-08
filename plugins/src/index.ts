@@ -29,6 +29,8 @@ import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { formatSkill, skillsChanged, type SkillRef } from './skillsCache.js'
 import { buildNormSections, type NormFile } from './norms.js'
 import { buildChatAnswerPrompt, chatIdentityFor, type ChatCtxMsg } from './chatResponder.js'
+import { classifyChatError } from './chatErrorClassifier.js'
+import { gatherChatContext, type AttachmentRef, type ChatContextBundle } from './chatContext.js'
 
 type AppContext = Context & {
   subagents: SubagentRuntime
@@ -740,6 +742,13 @@ export function apply(ctx: AppContext, config: Config): void {
   // worker 与公共调解员是同进程不同实例，各自写独立状态文件避免互相覆盖：
   // worker → daemon.json；mediator → daemon-mediator.json（看板/健康页只认 daemon.json，调解员不冒充 worker）。
   const daemonStartedAt = Date.now()
+  // S2/R-1（决策 B2）：chat 状态旁证（lastReplyAt/lastFailAt/lastFailReason）随 writeDaemonStatus 写出；
+  // answerChatMessage/markChatFailed 只更新本对象字段，不直接写文件（每轮 sweep 统一落盘一次）。
+  const daemonChatState: { lastReplyAt: string | null; lastFailAt: string | null; lastFailReason: string } = {
+    lastReplyAt: null,
+    lastFailAt: null,
+    lastFailReason: '',
+  }
   const daemonStatusFile = config.mode === 'mediator'
     ? join(config.scrumDir, 'daemon-mediator.json')
     : join(config.scrumDir, 'daemon.json')
@@ -771,6 +780,7 @@ export function apply(ctx: AppContext, config: Config): void {
             localDir: spaceBinding?.localDir ?? '',
             remoteUrl: spaceBinding?.remoteUrl ?? '',
           },
+        chat: { ...daemonChatState },
       }
       mkdirSync(dirname(daemonStatusFile), { recursive: true })
       writeFileSync(daemonStatusFile, `${JSON.stringify(status, null, 2)}\n`)
@@ -2366,6 +2376,8 @@ exit 0
     author: string
     body: string
     context?: Array<{ id: number; author: string; kind?: string; body: string }>
+    /** S3/E1：本条消息绑定的附件引用（内容不入消息体，答问前另行取回）。 */
+    meta?: { attachments?: AttachmentRef[] }
   }
   interface ReplySettingsPayload { enabled: boolean; model: string | null; identity: string | null; systemHint: string | null }
   async function fetchJson<T>(url: string): Promise<T | null> {
@@ -2379,6 +2391,8 @@ exit 0
   async function markChatFailed(msgId: number, scopeFor: string, identity: string, reason: string): Promise<void> {
     try {
       await hubPost('/api/chat/replies/fail', { msgId, by: identity, error: reason.slice(0, 500) })
+      daemonChatState.lastFailAt = new Date().toISOString()
+      daemonChatState.lastFailReason = reason.slice(0, 500)
       log(`chat-responder：消息 ${msgId} 标记失败（${reason.slice(0, 120)}）`)
     } catch (e) {
       log(`chat-responder 标记失败 ${msgId} 未送达：${String(e)}`)
@@ -2406,16 +2420,37 @@ exit 0
       // 4) foreman 父级（无则标记失败，不重试同一轮）
       const parent = await ensureForeman(workspaceFor())
       if (parent === undefined) {
-        await markChatFailed(msg.id, msg.scope, identity, '守护 foreman 不可用')
+        // S1（R-1/A1）：foreman-down 语义沿用（分类器文案含「守护 foreman 不可用」+ 恢复指引）
+        await markChatFailed(msg.id, msg.scope, identity, classifyChatError({ stopReason: 'error', error: 'foreman down' }).message)
         return
       }
       const budgetMs = Math.min(config.workerTimeoutMs, 120000) // 回复预算 ≤120s（TC-S10-01）
+      // S6（R-2/R-3 决策 C1/E1 接线）：外部上下文收集——绑定仓库摘要（只读 buildSpaceDigest）+ 本次消息附件内容取回。
+      // 纪律（AC-R2-4/R4-3/R4-6）：任一步失败仅降级（null/占位），绝不因上下文失败把源消息标 failed（TC-S6-03/04）；
+      // 摘要/附件内容只进入本次提示词，不写任何消息体/meta（TC-S6-09：历史消息附件不回填）。
+      let ctxBundle: ChatContextBundle = { spaceDigest: undefined, attachments: [] }
+      try {
+        const boundDir = spaceBinding && spaceBinding.localDir && spaceBinding.localDir.trim().length > 0 ? spaceBinding.localDir.trim() : null
+        ctxBundle = await gatherChatContext({
+          hubUrl,
+          scope: msg.scope,
+          convId: msg.convId,
+          by: identity,
+          attachmentRefs: msg.meta?.attachments,
+          bindingDir: boundDir,
+          bindingMeta: { name: msg.scope, remoteUrl: spaceBinding?.remoteUrl ?? undefined },
+        })
+      } catch (e) {
+        log(`chat-responder 上下文收集降级（消息 ${msg.id}）：${String(e)}`)
+      }
       const prompt = buildChatAnswerPrompt({
         scope: msg.scope,
         convTitle: msg.convTitle,
         systemHint: settings.systemHint,
         identity,
         context: [...(msg.context ?? []), { id: msg.id, author: msg.author, body: msg.body }],
+        spaceDigest: ctxBundle.spaceDigest,
+        attachments: ctxBundle.attachments,
       })
       const controller = new AbortController()
       controllers.add(controller)
@@ -2437,7 +2472,11 @@ exit 0
         })
         await run.dispose().catch(() => undefined)
         if (result === null || result.stopReason !== 'completed' || result.structured === undefined) {
-          await markChatFailed(msg.id, msg.scope, identity, `回复子代理未完成（${result === null ? '超时/中止' : result.stopReason}）`)
+          // S1（R-1/A1）：失败原因经分类器生成可行动文案回写（原笼统子代理未完成文案已废弃）
+          const why = result === null
+            ? { stopReason: 'aborted' }
+            : { stopReason: result.stopReason, error: (result as { error?: unknown }).error }
+          await markChatFailed(msg.id, msg.scope, identity, classifyChatError(why).message)
           return
         }
         const answer = String((result.structured as { reply?: unknown }).reply ?? '').trim()
@@ -2448,16 +2487,36 @@ exit 0
         // 5) 服务器 CAS 回写：awaiting→replied；并发/重复轮 skipped → 不重复回复（TC-S10-03）
         const out = await hubPost('/api/chat/replies/answer', { msgId: msg.id, body: answer, by: identity, model: chosenModel })
         if (out && typeof out === 'object' && (out as { skipped?: boolean }).skipped === true) return
-        log(`chat-responder：已回复消息 ${msg.id}（${identity}，model=${chosenModel}）`)
+        daemonChatState.lastReplyAt = new Date().toISOString()
+        log(`chat-responder：已回复消息 ${msg.id}（${identity}，provider=${chosenProvider}，model=${chosenModel}）`)
       } finally {
         controllers.delete(controller)
       }
     } catch (e) {
       log(`chat-responder 处理消息 ${msg.id} 失败：${String(e)}`)
       const ident = chatIdentityFor(msg.scope)
-      await markChatFailed(msg.id, msg.scope, ident, String(e).slice(0, 300)).catch(() => undefined)
+      // S1（R-1/A1）：catch 吞错路径同样经分类器生成可行动文案（含原文片段 ≤500 契约），不悬挂 awaiting
+      await markChatFailed(msg.id, msg.scope, ident, classifyChatError({ stopReason: 'error', error: String(e) }).message).catch(() => undefined)
     }
   }
+  /** S2/R-1（决策 B1）：守护心跳：POST /api/heartbeat kind=worker（成员在线 60s 窗由 hub 判定），
+   *  附带当前选用模型（daemon-heartbeat，供 GET /api/chat/health 模型解析链兜底展示）。失败仅日志，不阻断扫单。 */
+  async function hubHeartbeat(): Promise<void> {
+    if (!useHub || config.mode !== 'worker') return
+    try {
+      let sel: { provider?: string; model?: string } = {}
+      try { sel = ctx.agentDefaultModel.currentSelection() ?? {} } catch { /* 读不到默认模型不影响心跳 */ }
+      await hubPost('/api/heartbeat', {
+        by: `${config.role}@${scope}`,
+        scope,
+        kind: 'worker',
+        model: { provider: sel.provider || config.provider, model: sel.model || '' },
+      })
+    } catch (e) {
+      log(`chat 心跳上报失败：${String(e)}`)
+    }
+  }
+
   /** 每轮扫单：拉本 scope awaiting 队列并派轻量子代理（受 chatBusy/单轮上限约束，不占任务 worker 并发槽）。 */
   async function sweepChatReplies(): Promise<void> {
     if (!useHub) return
@@ -2494,6 +2553,7 @@ exit 0
       }
       // 刷新本 scope 的空间仓库绑定（hub 模式：/api/spaces；命中 localDir → 本空间工作/隔离仓库）
       await refreshSpaceBinding()
+      await hubHeartbeat() // S2/R-1（B1）：守护心跳（kind=worker + 当前模型），chat 健康在线数据源
       await ensureForeman(workspaceFor())
       await fetchSkills()
       await refreshNorms() // R-2/S5：刷新全局规范层缓存（失败保留旧值降级）

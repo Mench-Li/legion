@@ -11,7 +11,7 @@
 - T-119｜requirement｜done
 - T-120｜researcher｜done
 - T-121｜breaker｜done
-- T-122｜test-designer｜todo
+- T-122｜test-designer｜done
 - T-123｜coder｜todo
 - T-124｜reviewer｜todo
 - T-125｜tester｜todo

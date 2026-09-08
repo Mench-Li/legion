@@ -26,6 +26,8 @@ export interface Config {
   hubUrl: string
   /** hub 模式下的项目 scope（读过滤 + 写带上）。 */
   scope: string
+  /** team-hub 写令牌；未显式配置时继承 TEAM_HUB_TOKEN。 */
+  hubToken: string
   /** 产物预览额外允许根（默认仅 repoRoot；非隔离 worker 产物在 workspace 时把 workspace 加进来）。 */
   artifactRoots: string[]
 }
@@ -35,6 +37,7 @@ export const Config = z.object({
   routePrefix: z.string().default('/scrum-board'),
   hubUrl: z.string().default(''),
   scope: z.string().default('software'),
+  hubToken: z.string().default(''),
   artifactRoots: z.array(z.string()).default([]),
 })
 
@@ -53,6 +56,8 @@ export function apply(ctx: Context, config: Config): void {
 
   let hubUrl = config.hubUrl.replace(/\/+$/, '')
   let useHub = hubUrl !== ''
+  const hubToken = config.hubToken || process.env.TEAM_HUB_TOKEN || ''
+  const hubHeaders = (): Record<string, string> => hubToken ? { authorization: `Bearer ${hubToken}` } : {}
 
   /** 读 JSON 文件，不存在/损坏返回 null（daemon.json、roles.json 均为可缺失的旁路信息）。 */
   async function readJson(file: string): Promise<unknown> {
@@ -183,7 +188,7 @@ export function apply(ctx: Context, config: Config): void {
   async function detectHub(): Promise<void> {
     if (useHub) return
     try {
-      const res = await fetch('http://127.0.0.1:3080/team-hub/api/config', { signal: AbortSignal.timeout(2000) })
+      const res = await fetch('http://127.0.0.1:3080/team-hub/api/config', { headers: hubHeaders(), signal: AbortSignal.timeout(2000) })
       if (res.ok) {
         hubUrl = 'http://127.0.0.1:3080/team-hub'
         useHub = true
@@ -195,7 +200,7 @@ export function apply(ctx: Context, config: Config): void {
   async function hubPost(path: string, body: Record<string, unknown>): Promise<unknown> {
     const res = await fetch(`${hubUrl}${path}`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...hubHeaders() },
       body: JSON.stringify(body),
     })
     const data = await res.json().catch(() => ({})) as Record<string, unknown>
@@ -205,7 +210,7 @@ export function apply(ctx: Context, config: Config): void {
 
   /** hub 读任务列表（按 scope 过滤）。 */
   async function hubBoard(): Promise<unknown> {
-    const res = await fetch(`${hubUrl}/api/board?scope=${encodeURIComponent(config.scope)}`)
+    const res = await fetch(`${hubUrl}/api/board?scope=${encodeURIComponent(config.scope)}`, { headers: hubHeaders() })
     if (!res.ok) throw new Error(`hub board 失败（${res.status}）`)
     return res.json()
   }

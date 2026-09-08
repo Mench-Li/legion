@@ -15,7 +15,7 @@ import { serializeDoc } from '../../../packages/shared/src/crdt.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const PORT = Number(process.env.PORT || 8080);
-const HOST = process.env.HOST || '0.0.0.0';
+const HOST = process.env.HOST || '127.0.0.1';
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'data', 'whiteboard.db');
 const TTL_MS = Number(process.env.TTL_MS || 10000);
 const WEB_ROOT = path.resolve(__dirname, '..', '..', 'web', 'public');

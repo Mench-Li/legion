@@ -457,6 +457,14 @@ describe('S4 路由层（HTTP）· TC-S4-13 鉴权矩阵（serve.mjs 配 token=t
     const mk401 = await httpJson(httpBases.token, 'POST', '/api/files/mkdir', { body: { scope: 'fx', path: 'http/x1' } })
     assert.equal(mk401.status, 401, 'POST mkdir 无 token 同样 401')
   })
+
+  it('技能扫描/导入写请求同样遵守 Workbench token', async () => {
+    const none = await httpJson(httpBases.token, 'POST', '/api/skills/scan-dir', { body: { scope: 'fx', path: '' } })
+    assert.equal(none.status, 401)
+    const right = await httpJson(httpBases.token, 'POST', '/api/skills/scan-dir', { body: { scope: 'fx', path: '' }, headers: { authorization: 'Bearer tk' } })
+    assert.equal(right.status, 200)
+    assert.equal(right.json.ok, true)
+  })
 })
 
 describe('S4 路由层（HTTP）· P0-1 原子上传回归（cap 实例 16KB）——流式超限/中断不破坏原文件、零残留', () => {

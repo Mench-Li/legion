@@ -1015,16 +1015,21 @@ function hubUpstream() {
   return (process.env.DSH_HUB_UPSTREAM ?? 'http://127.0.0.1:8787').replace(/\/+$/, '')
 }
 
+function hubAuthHeaders() {
+  const token = String(process.env.TEAM_HUB_TOKEN ?? '')
+  return token ? { Authorization: `Bearer ${token}` } : {}
+}
+
 /** 拉取某空间的团队技能来源（github url + 分支）。 */
 async function fetchSkillSourceFromHub(scope) {
-  const resp = await fetch(`${hubUpstream()}/api/skill-source?scope=${encodeURIComponent(scope)}`)
+  const resp = await fetch(`${hubUpstream()}/api/skill-source?scope=${encodeURIComponent(scope)}`, { headers: hubAuthHeaders() })
   const data = await resp.json().catch(() => null)
   return data?.source ?? { url: '', branch: '' }
 }
 
 /** 拉取某空间的既有技能（全部状态，含待审/被拒），按 id 索引。 */
 async function fetchExistingSkills(scope) {
-  const resp = await fetch(`${hubUpstream()}/api/skills?scope=${encodeURIComponent(scope)}&include=pending`)
+  const resp = await fetch(`${hubUpstream()}/api/skills?scope=${encodeURIComponent(scope)}&include=pending`, { headers: hubAuthHeaders() })
   const data = await resp.json().catch(() => null)
   const arr = Array.isArray(data) ? data : []
   const map = new Map()
@@ -1073,7 +1078,7 @@ async function registerSkillViaHub(scope, c) {
     cases: (c.cases ?? []).map(s => ({ name: s.name, content: s.content })),
     prompt: c.main ?? '', by: 'general',
   }
-  const resp = await fetch(hubUpstream() + '/api/skills/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  const resp = await fetch(hubUpstream() + '/api/skills/register', { method: 'POST', headers: { 'Content-Type': 'application/json', ...hubAuthHeaders() }, body: JSON.stringify(body) })
   const data = await resp.json().catch(() => null)
   return { ok: resp.ok, status: resp.status, error: resp.ok ? undefined : (data?.error ?? `HTTP ${resp.status}`), skill: data }
 }
@@ -1089,6 +1094,7 @@ async function handleSkillsApi(req, res, pathname, url) {
       httpErr(res, 405, '技能安装接口仅支持 POST')
       return
     }
+    requireWriteToken(req)
     const body = await readBodyJson(req)
     const scope = typeof body.scope === 'string' ? body.scope.trim() : ''
     if (!scope) throw new Error('缺少参数 scope')
@@ -1165,7 +1171,7 @@ async function handleSkillsApi(req, res, pathname, url) {
       let source = await fetchSkillSourceFromHub(scope)
       if (bodyUrl) {
         await fetch(`${hubUpstream()}/api/skill-source`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          method: 'POST', headers: { 'Content-Type': 'application/json', ...hubAuthHeaders() },
           body: JSON.stringify({ scope, url: bodyUrl, branch: branch || '', by: 'general' }),
         })
         source = { scope, url: bodyUrl, branch: branch || '' }
@@ -1177,6 +1183,7 @@ async function handleSkillsApi(req, res, pathname, url) {
     httpErr(res, 404, `not found: ${pathname}`)
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
+    if (msg.includes('token 无效')) { httpErr(res, 401, msg); return }
     const forbidden = msg.includes('越界') || msg.includes('.git') || msg.includes('仅限') || msg.includes('仅允许') || msg.includes('官方域名') || msg.includes('https')
     httpErr(res, forbidden ? 403 : 400, msg)
   }

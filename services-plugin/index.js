@@ -48,6 +48,12 @@ export function apply(ctx, rawConfig = {}) {
   const num = (v, d) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : d }
 
   const teamHubPort = num(cfg.teamHubPort, 8787)
+  const teamHubHost = typeof cfg.teamHubHost === 'string' && cfg.teamHubHost.trim()
+    ? cfg.teamHubHost.trim()
+    : (typeof baseEnv.TEAM_HUB_HOST === 'string' && baseEnv.TEAM_HUB_HOST.trim() ? baseEnv.TEAM_HUB_HOST.trim() : '127.0.0.1')
+  const teamHubToken = typeof cfg.teamHubToken === 'string' && cfg.teamHubToken
+    ? cfg.teamHubToken
+    : (typeof baseEnv.TEAM_HUB_TOKEN === 'string' ? baseEnv.TEAM_HUB_TOKEN : '')
   const boardPort = num(cfg.boardPort, 4820)
   const workbenchPort = num(cfg.workbenchPort, 5173)
   const boardToken = typeof cfg.boardToken === 'string' && cfg.boardToken ? cfg.boardToken : 'legion-kanban-4820'
@@ -62,7 +68,7 @@ export function apply(ctx, rawConfig = {}) {
       port: teamHubPort,
       cwd: legionDir,
       args: [join(legionDir, 'team-hub', 'server.mjs')],
-      env: { ...baseEnv, TEAM_HUB_PORT: String(teamHubPort) },
+      env: { ...baseEnv, TEAM_HUB_PORT: String(teamHubPort), TEAM_HUB_HOST: teamHubHost, TEAM_HUB_TOKEN: teamHubToken },
     },
     {
       key: 'kanban-v1',
@@ -78,7 +84,7 @@ export function apply(ctx, rawConfig = {}) {
       port: workbenchPort,
       cwd: join(legionDir, 'workbench'),
       args: [join(legionDir, 'workbench', 'scripts', 'serve.mjs'), '--port', String(workbenchPort)],
-      env: { ...baseEnv, DSH_HUB_UPSTREAM: hubUpstream },
+      env: { ...baseEnv, DSH_HUB_UPSTREAM: hubUpstream, TEAM_HUB_TOKEN: teamHubToken },
     },
   ]
 

@@ -455,17 +455,17 @@ describe('S9 HTTP 层：settings/replies/answer 路由契约 + 非法入参 400�
 // 对齐 docs/G-mtr3su6f-1/TEST_CASES.md TC-S2-01..08
 // ─────────────────────────────────────────────────────────────
 describe('S2 TC-S2-01..08 chat/health 聚合 + 只读 + 诚实标注', () => {
-  const setMember = (id, kind, agoMs) => {
+  const setMember = (id, kind, agoMs, scope = 'default') => {
     mod.db.prepare('DELETE FROM members').run()
     mod.db.prepare('INSERT INTO members (id, scope, kind, lastSeenAt, online, model) VALUES (?, ?, ?, ?, 1, ?)')
-      .run(id, 'default', kind, new Date(Date.now() - agoMs).toISOString(), null)
+      .run(id, scope, kind, new Date(Date.now() - agoMs).toISOString(), null)
   }
   const clearMembers = () => mod.db.prepare('DELETE FROM members').run()
 
   it('TC-S2-01/05/08 形状 + 守护在线判定 + 最近失败透出 + 诚实标注', () => {
     const scope = 'health-a'
     clearMembers()
-    setMember('worker@default', 'worker', 20000)
+    setMember('worker@default', 'worker', 20000, scope)
     const conv = mod.createConversation({ scope, title: '健康会话', kind: 'space', by: 'general' })
     const src = mod.postMessage({ conv: conv.id, body: '会失败的提问', by: 'general' })
     mod.failAiReply({ msgId: src.id, by: 'health-a-assistant', error: '未配置可用模型：请在模型配置中选择 assistant 可用模型后重试' })
@@ -483,19 +483,19 @@ describe('S2 TC-S2-01..08 chat/health 聚合 + 只读 + 诚实标注', () => {
 
   it('TC-S2-02 心跳窗：59s 内在线 / 超 60s 离线 / 无 worker 行按任意成员兜底 / 无行 false', () => {
     clearMembers()
-    setMember('w1', 'worker', 59000)
+    setMember('w1', 'worker', 59000, 'health-w')
     assert.equal(mod.chatHealth('health-w').online, true, '<60s → 守护在线')
-    setMember('w1', 'worker', 61000)
+    setMember('w1', 'worker', 61000, 'health-w')
     assert.equal(mod.chatHealth('health-w').online, false, '≥60s → 离线')
     clearMembers()
     assert.equal(mod.chatHealth('health-w').online, false, '无行 → false 不误判')
     // 旧部署成员未标 worker：任意成员新鲜兜底在线；worker 历史存在但过期时不兜底
-    setMember('agent-old', 'agent', 61000)
+    setMember('agent-old', 'agent', 61000, 'health-w')
     assert.equal(mod.chatHealth('health-w').online, false, 'agent 过期 → false')
-    setMember('agent-fresh', 'agent', 20000)
+    setMember('agent-fresh', 'agent', 20000, 'health-w')
     assert.equal(mod.chatHealth('health-w').online, true, '无 worker 历史 + agent 新鲜 → 兜底在线')
     mod.db.prepare("INSERT INTO members (id, scope, kind, lastSeenAt, online, model) VALUES (?, ?, ?, ?, 1, ?)")
-      .run('w2', 'default', 'worker', new Date(Date.now() - 61000).toISOString(), null)
+      .run('w2', 'health-w', 'worker', new Date(Date.now() - 61000).toISOString(), null)
     assert.equal(mod.chatHealth('health-w').online, false, 'worker 历史过期 + agent 新鲜 → 仍离线（守护确实没心跳）')
   })
 
@@ -536,6 +536,26 @@ describe('S2 TC-S2-01..08 chat/health 聚合 + 只读 + 诚实标注', () => {
     assert.equal(h.modelResolved, false)
     assert.ok(h.honestNote && h.honestNote.length > 0)
   })
+
+  it('TC-S2-09 scope 隔离：其他空间的 worker 心跳/模型不影响当前空间，成功回复清除历史失败', () => {
+    clearMembers()
+    const now = new Date().toISOString()
+    mod.db.prepare('INSERT INTO members (id, scope, kind, lastSeenAt, online, model) VALUES (?, ?, ?, ?, 1, ?)')
+      .run('worker-other', 'other-scope', 'worker', now, JSON.stringify({ provider: 'other', model: 'other-model' }))
+    const target = 'health-isolated'
+    const conv = mod.createConversation({ scope: target, title: '隔离健康', kind: 'space', by: 'general' })
+    const failed = mod.postMessage({ conv: conv.id, body: 'first', by: 'general' })
+    mod.failAiReply({ msgId: failed.id, by: 'health-isolated-assistant', error: 'temporary' })
+    let h = mod.chatHealth(target)
+    assert.equal(h.online, false)
+    assert.equal(h.model, null)
+    assert.equal(h.lastFail.msgId, failed.id)
+
+    const later = mod.postMessage({ conv: conv.id, body: 'second', by: 'general' })
+    mod.postAiReply({ msgId: later.id, by: 'health-isolated-assistant', body: 'second ok' })
+    h = mod.chatHealth(target)
+    assert.equal(h.lastFail, null)
+  })
 })
 
 describe('S2 HTTP /api/chat/health：只读 + 非法入参 400 + 心跳 model 透出', () => {
@@ -565,7 +585,7 @@ describe('S2 HTTP /api/chat/health：只读 + 非法入参 400 + 心跳 model �
     const convBefore = mod.db.prepare('SELECT COUNT(*) AS c FROM conversations').get().c
     const msgBefore = mod.db.prepare('SELECT COUNT(*) AS c FROM messages').get().c
     mod.db.prepare('INSERT INTO members (id, scope, kind, lastSeenAt, online, model) VALUES (?, ?, ?, ?, 1, ?)')
-      .run('http-w', 'default', 'worker', new Date(Date.now() - 10000).toISOString(), null)
+      .run('http-w', 'http-health', 'worker', new Date(Date.now() - 10000).toISOString(), null)
     const h = await get('/api/chat/health?scope=http-health')
     assert.equal(h.status, 200)
     assert.equal(h.json.online, true)

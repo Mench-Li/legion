@@ -444,7 +444,7 @@ export default function App(): React.JSX.Element {
           ) : active === 'rules' ? (
             <RulesPanel scope={scope} hubMode={hubMode} spaces={hubSpaces} onOpenFiles={() => setActive('files')} />
           ) : active === 'chat' ? (
-            <ChatView scope={scope} hubMode={hubMode} />
+            <ChatView scope={scope} hubMode={hubMode} spaces={hubSpaces} onPickScope={(s) => selectScope(s)} />
           ) : active === 'files' ? (
             <FilesView scope={scope} hubMode={hubMode} spaces={hubSpaces} onOpenSettings={s => setSpaceSettings(s)} />
           ) : active === 'browser' ? (

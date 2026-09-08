@@ -1,4 +1,4 @@
-import type { ActivityEvent, AgentCatalogItem, AgentModelCfg, ApiConfig, BoardData, CardStatus, ChatConversation, ChatMessage, DirListing, FileListResponse, FilePreview, GoalInfo, GoalStatus, HubActivity, HubAuditEvent, HubDocContent, HubTask, MissionsResponse, ModelOption, OverlapGroup, RepoInspect, RosterResponse, SkillInfo, SpaceInfo, WebFetchResult } from './types'
+import type { ActivityEvent, AgentCatalogItem, AgentModelCfg, ApiConfig, BoardData, CardStatus, ChatAttachmentRef, ChatConversation, ChatHealthInfo, ChatMessage, DirListing, FileListResponse, FilePreview, GoalInfo, GoalStatus, HubActivity, HubAuditEvent, HubDocContent, HubTask, MissionsResponse, ModelOption, OverlapGroup, RepoInspect, RosterResponse, SkillInfo, SpaceInfo, WebFetchResult } from './types'
 
 /**
  * 数据源地址解析：?api= 查询参数优先，其次 localStorage，最后默认 4820。
@@ -569,14 +569,41 @@ export async function fetchChatMessages(conv: number, opts: { before?: number; l
   return resp.messages
 }
 
-/** team-hub v2：发消息（body 校验在后端：kind ∈ text|markdown|system、≤8000 字符、scope=会话 scope）。 */
-export function postChatMessage(input: { conv: number; body: string; kind?: string; clientTs?: string }): Promise<ChatMessage> {
+/** team-hub v2：发消息（body 校验在后端：kind ∈ text|markdown|system、≤8000 字符、scope=会话 scope）。
+ * S3/S8：attachmentIds 可选——先 PUT /api/chat/attachments 上传（staged）拿到 id 后随消息绑定（服务端同事务置 sent；
+ * meta.attachments=[{id,fileName,size}] 只存引用，文件全文绝不进 body/meta）。 */
+export function postChatMessage(input: { conv: number; body: string; kind?: string; clientTs?: string; attachmentIds?: number[] }): Promise<ChatMessage> {
   return hubPost('/api/chat/messages', {
     conv: input.conv,
     body: input.body,
     kind: input.kind ?? 'text',
     clientTs: input.clientTs ?? '',
+    attachmentIds: input.attachmentIds && input.attachmentIds.length > 0 ? input.attachmentIds : undefined,
   }).then(res => (res as { task: ChatMessage }).task)
+}
+
+/** team-hub v2（S3/S8）：上传对话附件（raw UTF-8 文本 → staged，服务端护栏黑名单/大小/UTF-8 fatal）。
+ * 返回 {id,fileName,size} 引用；绑定由 postChatMessage(attachmentIds) 完成。 */
+export async function uploadChatAttachment(input: { scope: string; fileName: string; content: Blob | string }): Promise<ChatAttachmentRef> {
+  const qs = new URLSearchParams({ scope: input.scope, fileName: input.fileName, by: 'general' })
+  const body = typeof input.content === 'string' ? new Blob([input.content], { type: 'text/plain;charset=utf-8' }) : input.content
+  const res = await fetch(`${hubBase()}/api/chat/attachments?${qs.toString()}`, {
+    method: 'PUT',
+    headers: authHeaders(),
+    body,
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    let errText = ''
+    try { errText = (JSON.parse(text) as { error?: string }).error ?? '' } catch { errText = text }
+    throw new Error(`${res.status}${errText ? `：${errText}` : ''}`)
+  }
+  return res.json() as Promise<ChatAttachmentRef>
+}
+
+/** team-hub v2（S2/S7）：对话健康聚合（只读：守护在线/回复开关/模型解析链/最近失败）。端点缺失 → 抛错由调用方灰态处理。 */
+export async function fetchChatHealth(scope: string): Promise<ChatHealthInfo> {
+  return readJson<ChatHealthInfo>(await fetch(`${hubBase()}/api/chat/health?scope=${encodeURIComponent(scope)}`))
 }
 
 /** team-hub 审计 SSE：单一 /api/events（I8），订阅方按 action 过滤 chat:*。断线自动重连。 */

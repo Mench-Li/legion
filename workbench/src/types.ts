@@ -417,6 +417,31 @@ export interface ChatMessage {
   createdAt: string
 }
 
+/** team-hub v2 对话（S3/S8）：消息附件引用（meta.attachments=[{id,fileName,size}]，内容不入 body/meta）。 */
+export interface ChatAttachmentRef {
+  id: number
+  fileName: string
+  size: number
+}
+
+/** team-hub v2 对话（S2/S7）：健康聚合响应（GET /api/chat/health?scope=）。 */
+export interface ChatHealthInfo {
+  scope: string
+  okAt: string
+  /** 守护在线（kind=worker 心跳 60s 窗）。 */
+  online: boolean
+  daemon: { member: string | null; kind: string | null; lastSeenAt: string | null } | null
+  /** 本空间回复开关。 */
+  enabled: boolean
+  /** 模型解析链结果（settings.model → agent_models → 守护心跳默认）。 */
+  model: { provider: string | null; model: string; source: string } | null
+  modelResolved: boolean
+  /** 最近一条 failed 消息（aiError 可行动文案；无则 null）。 */
+  lastFail: { msgId: number; convId: number; aiError: string; failedAt: string | null } | null
+  /** 诚实标注：已解析不代表 provider 实际可用。 */
+  honestNote: string
+}
+
 /** team-hub 审计 SSE 事件（单一 /api/events；chat:* 按其 action 过滤，I8）。 */
 export interface HubAuditEvent {
   seq: number

@@ -13,6 +13,7 @@ import { existsSync, readFile, watch, watchFile, unwatchFile } from 'node:fs'
 import { readFile as readFileP, realpath as realpathP } from 'node:fs/promises'
 import { extname, join, normalize, sep } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { normalizeArtifactPath } from '../../packages/shared/src/artifact-policy.mjs'
 
 export const name = '@dsh-external/dsh-scrum-board'
 export const inject = ['webServer']
@@ -143,10 +144,11 @@ export function apply(ctx: Context, config: Config): void {
     if (raw.length === 0) return null
     const winAbs = /^[A-Za-z]:[\\/]/.test(raw)
     const posixAbs = raw.startsWith('/') || raw.startsWith('\\\\')
-    if (winAbs || posixAbs) {
-      const n = normalize(raw)
-      const roots = [repoRoot, ...config.artifactRoots]
-      if (!roots.some(root => { const r = normalize(root); return n === r || n.startsWith(r + sep) })) return null
+    const roots = [repoRoot, ...config.artifactRoots]
+    const lexical = normalizeArtifactPath(raw, roots)
+    if (!lexical) return null
+    if (lexical.absolute) {
+      const n = lexical.path
       if (!existsSync(n)) return n
       try {
         const real = await realpathP(n)
@@ -154,12 +156,8 @@ export function apply(ctx: Context, config: Config): void {
         return rootsReal.some(root => real === root || real.startsWith(root + sep)) ? real : null
       } catch { return null }
     }
-    let relp = raw.replace(/\\/g, '/')
-    while (relp.startsWith('./')) relp = relp.slice(2)
-    relp = relp.replace(/^\/+/, '')
-    const segs = relp.split('/').filter(Boolean)
-    if (segs.length === 0 || segs.includes('..') || segs.some(x => x.toLowerCase() === '.git')) return null
-    const roots = [repoRoot, ...config.artifactRoots]
+    const segs = lexical.segments
+    if (!segs) return null
     const rootsReal = await Promise.all(roots.map(async root => {
       try { return await realpathP(root) } catch { return normalize(root) }
     }))

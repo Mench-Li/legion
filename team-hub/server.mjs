@@ -491,12 +491,6 @@ try {
   if (stale.length > 0) console.log(`[team-hub] 历史目标链补种验收标准/边界：${stale.length} 个任务（按岗位模板）`)
 } catch { /* 回填失败不影响启动 */ }
 
-let nextSeq = 1
-try {
-  const row = db.prepare('SELECT COALESCE(MAX(seq),0) AS m FROM audit').get()
-  nextSeq = (row?.m ?? 0) + 1
-} catch { /* 空表 */ }
-
 function now() {
   return new Date().toISOString()
 }
@@ -808,11 +802,19 @@ function nextId() {
 }
 
 function audit(member, scope, action, taskId, detail, goalId = null) {
-  const seq = nextSeq++
-  db.prepare('INSERT INTO audit (seq, ts, member, scope, action, taskId, detail, goalId) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-    .run(seq, now(), member, scope, action, taskId, JSON.stringify(detail), goalId)
-  broadcastAudit(auditEvent({ seq, ts: now(), member, scope, action, taskId, goalId, detail }))
-  return seq
+  // P1-1 第 2 步现场：audit.seq 曾用进程内内存计数器（启动读一次 MAX(seq)，此后 nextSeq++），
+  // 8787 独立进程与 3080 宿主 v2 外壳双进程写同一 team.db 时各自从同起点递增 → 撞
+  // UNIQUE constraint failed: audit.seq（写冒烟 400 实证）。改为与 INSERT 同一写事务内
+  // 读库 MAX 分配：BEGIN IMMEDIATE 由 SQLite 数据库级锁串行化（busy_timeout 5000 兜底等待），
+  // 跨进程不再撞号。withTx 支持嵌套（外层事务内调用走 SAVEPOINT，广播语义不变）。
+  return withTx(() => {
+    const row = db.prepare('SELECT COALESCE(MAX(seq),0) AS m FROM audit').get()
+    const seq = (row?.m ?? 0) + 1
+    db.prepare('INSERT INTO audit (seq, ts, member, scope, action, taskId, detail, goalId) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(seq, now(), member, scope, action, taskId, JSON.stringify(detail), goalId)
+    broadcastAudit(auditEvent({ seq, ts: now(), member, scope, action, taskId, goalId, detail }))
+    return seq
+  })
 }
 
 function touchMember(member, scope, kind, modelText) {

@@ -70,7 +70,7 @@
 
 ### P1-3 DSH 宿主真实插件注入冒烟
 
-状态：**宿主依赖**
+状态：**已完成**（2026-09-09，证据见 `docs/P1-3-evidence/verify-evidence.md`）
 
 问题：
 
@@ -79,15 +79,26 @@
 
 涉及改动：
 
-- 启动真实 DSH 宿主 fixture。
-- 加载 team-hub、board-plugin、plugins。
-- 验证 `/api/config`、`/api/board`、`/api/artifact`、SSE 和 token 矩阵。
-- 验证宿主关闭时 watcher、SSE、定时器和数据库连接正确清理。
+- 启动真实 DSH 宿主 fixture（隔离 `$DSH_HOME` + 自定义 profile + dsh-base bundle，真实
+  `apps/cli/lib/bin.js`；不触碰生产 3080 宿主/配置与真实任务库）。✅
+- 加载 team-hub、board-plugin、plugins（profile patch insert + node_modules junction，同生产形态）。✅
+- 验证 `/api/config`、`/api/board`、`/api/artifact`、SSE 和 token 矩阵。✅
+- 验证宿主关闭时 watcher、SSE、定时器和数据库连接正确清理。✅
 
 验收标准：
 
-- 真实宿主启动、访问、关闭全流程无异常。
-- token、scope、路由前缀和插件 UI 注入均通过。
+- 真实宿主启动、访问、关闭全流程无异常：✅（5 用例全绿，含 `ctx.appExit` bounded 优雅退出）。
+- token、scope、路由前缀和插件 UI 注入均通过：token/路由前缀/注入全过；
+  插件 UI（board-plugin client 半 conversation.view iframe）需真实 GUI 面验证，
+  登记边界（见 evidence「诚实边界」，P0 §3 dev_inject 曾覆盖注入链路）。
+
+顺带修复（真实宿主注入才暴露的 board-plugin 缺陷，http-contract 32/32 回归仍绿）：
+
+- 冷启动 mount 崩溃：`watch(board.json)` 文件未生成时 ENOENT → 改目录级 watch + filename 分派。
+- detectHub 硬编码 `127.0.0.1:3080` → 改探测同宿主 `ctx.webServer.port` 的 /team-hub
+  （隔离/异端口宿主部署不再错配到其他实例）。
+
+门禁：`scripts/ci/run-ci.mjs` test 阶段新增 `p13-host-injection` 套件组（无 DSH_CHECKOUT 整组 SKIP）。
 
 ## P2：接口与数据一致性
 

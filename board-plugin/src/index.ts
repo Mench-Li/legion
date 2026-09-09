@@ -11,7 +11,7 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import { spawn } from 'node:child_process'
 import { existsSync, readFile, watch, watchFile, unwatchFile } from 'node:fs'
 import { readFile as readFileP, realpath as realpathP } from 'node:fs/promises'
-import { extname, join, normalize, sep } from 'node:path'
+import { basename, extname, join, normalize, sep } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { normalizeArtifactPath } from '../../packages/shared/src/artifact-policy.mjs'
 
@@ -186,13 +186,17 @@ export function apply(ctx: Context, config: Config): void {
   }
 
 
-  /** 探测默认 hub（未显式配置 hubUrl 时）：同机 DSH web 端口的 /team-hub。 */
+  /** 探测默认 hub（未显式配置 hubUrl 时）：同宿主 webServer 的 /team-hub
+   * （P1-3 真实宿主注入修正：原硬编码 3080 会把 board 指到其他宿主/生产实例，
+   *  board 与 team-hub 同宿主挂载时探测 ctx.webServer.port 的 /team-hub 才正确）。 */
   async function detectHub(): Promise<void> {
     if (useHub) return
     try {
-      const res = await fetch('http://127.0.0.1:3080/team-hub/api/config', { headers: hubHeaders(), signal: AbortSignal.timeout(2000) })
+      const origin = `http://127.0.0.1:${ctx.webServer.port}`
+      const hub = `${origin}/team-hub`
+      const res = await fetch(`${hub}/api/config`, { headers: hubHeaders(), signal: AbortSignal.timeout(2000) })
       if (res.ok) {
-        hubUrl = 'http://127.0.0.1:3080/team-hub'
+        hubUrl = hub
         useHub = true
       }
     } catch { /* 探测失败保持本地模式 */ }
@@ -643,12 +647,18 @@ export function apply(ctx: Context, config: Config): void {
   )
 
   ctx.effect(() => {
-    const boardWatcher = watch(boardFile, () => broadcast())
-    const tasksWatcher = watch(tasksFile, () => onTasksChange())
+    // P1-3 真实宿主注入修正：原 watch(board.json) 在 board.json 尚未由 render 生成时
+    // 同步抛 ENOENT，导致插件在空任务库/冷启动宿主上 mount 失败。改为目录级 watch
+    // （scrumDir 必然存在）+ filename 分派：board.json 变化 → 广播；tasks.json 变化 →
+    // 防抖重渲染（渲染会再写 board.json，闭环不变）。
+    const dirWatcher = watch(scrumDir, (_event, filename) => {
+      const name = typeof filename === 'string' ? basename(filename) : ''
+      if (name === 'board.json') broadcast()
+      else if (name === 'tasks.json' || name === '') onTasksChange()
+    })
     watchFile(activityFile, { interval: 1000 }, onActivity)
     return () => {
-      boardWatcher.close()
-      tasksWatcher.close()
+      dirWatcher.close()
       unwatchFile(activityFile, onActivity)
       for (const res of boardClients) res.end()
       for (const res of activityClients) res.end()

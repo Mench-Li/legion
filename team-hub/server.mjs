@@ -10,7 +10,11 @@
  * 环境变量：
  *   TEAM_HUB_PORT  监听端口（默认 8787）
  *   TEAM_HUB_DB    SQLite 文件（默认 team-hub/team.db）
- *   TEAM_HUB_TOKEN 团队 token（非空时写操作需 Authorization: Bearer <token>）
+ *   TEAM_HUB_TOKEN 团队 token。token 三种携带方式（与 v1 serve.mjs 对齐）：
+ *     Authorization: Bearer <t> / x-dsh-token: <t> / ?token=<t>（?token= 供 EventSource 等无法自定 header 的读订阅）。
+ *     非空时写操作需 token；且非回环监听（TEAM_HUB_HOST ≠ 127.0.0.1/localhost/::1）时
+ *     全部读端点与 SSE 同样需 token（P2-2 读面门禁，/api/config 能力探测除外）。
+ *     本地回环开发模式读面保持开放（不回退）。
  *
  * API：
  *   GET  /api/board?scope=&status=&soldier=&role=   任务列表（SQLite，scope 一等字段）
@@ -67,9 +71,23 @@ const PORT = Number(process.env.TEAM_HUB_PORT || 8787)
 const TOKEN = process.env.TEAM_HUB_TOKEN || ''
 const HOST = process.env.TEAM_HUB_HOST || '127.0.0.1'
 
+export function isLoopbackHost(host) {
+  const normalized = String(host ?? '').trim().toLowerCase()
+  return normalized === '127.0.0.1' || normalized === 'localhost' || normalized === '::1'
+}
+
+/**
+ * 远程监听是否需要读面鉴权（P2-2）：
+ * 非回环监听 + 已配置 token → 全部 /api/* 读端点与 SSE 都必须携带 token；
+ * 本地回环（无论是否配 token）→ 读面保持开放（开发体验不回退；写面仍按 token 有无门禁）。
+ */
+export function readAuthRequired({ host = HOST, token = TOKEN } = {}) {
+  return !isLoopbackHost(host) && String(token ?? '').trim() !== ''
+}
+
 export function validateSecurityConfig({ host = HOST, token = TOKEN } = {}) {
   const normalizedHost = String(host ?? '').trim().toLowerCase()
-  const loopback = normalizedHost === '127.0.0.1' || normalizedHost === 'localhost' || normalizedHost === '::1'
+  const loopback = isLoopbackHost(normalizedHost)
   if (!loopback && String(token ?? '').trim() === '') {
     throw new Error('TEAM_HUB_TOKEN 必须配置：team-hub 非回环监听禁止空鉴权')
   }
@@ -2009,10 +2027,18 @@ function readBody(req) {
   })
 }
 
+/**
+ * token 三种携带方式（与 v1 scrum/serve.mjs 对齐）：
+ *   Authorization: Bearer <t> / x-dsh-token: <t> / ?token=<t>。
+ * ?token= 供浏览器 EventSource 等无法自定 header 的读面订阅使用（token 未配置时恒放行）。
+ */
 function authorized(req) {
   if (TOKEN === '') return true
-  const token = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '')
-  return token === TOKEN
+  const header = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '')
+  const custom = req.headers['x-dsh-token'] ?? ''
+  let query = ''
+  try { query = new URL(req.url ?? '/', 'http://x').searchParams.get('token') ?? '' } catch { /* 保持空 */ }
+  return header === TOKEN || custom === TOKEN || query === TOKEN
 }
 
 function requireMember(body) {
@@ -2193,12 +2219,19 @@ async function handle(req, res) {
   const path = url.pathname
   res.setHeader('access-control-allow-origin', '*')
   if (req.method === 'OPTIONS') {
-    res.writeHead(204, { 'access-control-allow-methods': 'GET, POST, PUT, OPTIONS', 'access-control-allow-headers': 'content-type, authorization, content-length' })
+    res.writeHead(204, { 'access-control-allow-methods': 'GET, POST, PUT, OPTIONS', 'access-control-allow-headers': 'content-type, authorization, x-dsh-token, content-length' })
     res.end()
     return
   }
 
   try {
+    // P2-2 读面鉴权门禁：远程监听（非回环）+ 已配 token 时，除能力发现 /api/config 与 OPTIONS
+    // 预检外的全部端点（读/SSE/写）都必须带 token。写路径本就在 handleWrite/上传端自我校验，
+    // 此门禁统一覆盖读端点与 SSE；未知路径在远程门禁下同样 401（不泄露端点存在性）。
+    if (readAuthRequired() && path !== '/api/config' && !authorized(req)) {
+      json(res, 401, { error: '未授权：Bearer token 无效' })
+      return
+    }
     // 写接口
     if (req.method === 'POST' && path === '/api/create') {
       await handleWrite(req, res, (body, by, scope) => {

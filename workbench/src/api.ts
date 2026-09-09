@@ -65,6 +65,20 @@ function withAuthHeaders(headers?: HeadersInit): Headers {
   return merged
 }
 
+/**
+ * hub GET 统一携带已存 token（P2-2 读面同步：远程受保护中枢的读接口/SSE 必须带 token）。
+ * 探测 /api/config 不走本函数（hubBase 可达性探测保持匿名；服务端对 config 能力发现放行）。
+ */
+function hubGet(path: string): Promise<Response> {
+  return fetch(`${hubBase()}${path}`, { headers: authHeaders() })
+}
+
+/** EventSource 无法自定 header：hub 审计订阅以 ?token= 追加（服务端 authorized 支持该携带方式）。 */
+function hubEventSourceUrl(path: string): string {
+  const token = getToken()
+  return `${hubBase()}${path}${token ? `?token=${encodeURIComponent(token)}` : ''}`
+}
+
 async function readJson<T>(res: Response): Promise<T> {
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
   return res.json() as Promise<T>
@@ -161,18 +175,18 @@ export function createTask(input: NewTaskInput): Promise<unknown> {
 /** team-hub v2：真实分区下的任务集聚合（scopeAware=true）。 */
 export async function fetchHubMissions(scope?: string | null): Promise<MissionsResponse> {
   const qs = scope ? `?scope=${encodeURIComponent(scope)}` : ''
-  return readJson<MissionsResponse>(await fetch(`${hubBase()}/api/missions${qs}`))
+  return readJson<MissionsResponse>(await hubGet(`/api/missions${qs}`))
 }
 
 /** team-hub v2：真实存在的分区列表（tasks + members 的 distinct scope）。 */
 export async function fetchHubScopes(): Promise<string[]> {
-  const resp = await readJson<{ scopes: string[] }>(await fetch(`${hubBase()}/api/scopes`))
+  const resp = await readJson<{ scopes: string[] }>(await hubGet('/api/scopes'))
   return resp.scopes
 }
 
 /** team-hub v2：工作空间列表（spaces 注册名 + 既有 scope 推导合并）。 */
 export async function fetchSpaces(): Promise<SpaceInfo[]> {
-  const resp = await readJson<{ spaces: SpaceInfo[] }>(await fetch(`${hubBase()}/api/spaces`))
+  const resp = await readJson<{ spaces: SpaceInfo[] }>(await hubGet('/api/spaces'))
   return resp.spaces
 }
 
@@ -230,7 +244,7 @@ export interface SpaceDeleteImpact {
 
 /** team-hub v2（R-3/S7/S8）：删除预检——返回该空间将影响的数据面计数 + 在办任务（只读、不产生审计）。 */
 export async function fetchSpaceImpact(id: string): Promise<SpaceDeleteImpact> {
-  return readJson<SpaceDeleteImpact>(await fetch(`${hubBase()}/api/spaces/impact?id=${encodeURIComponent(id)}`))
+  return readJson<SpaceDeleteImpact>(await hubGet(`/api/spaces/impact?id=${encodeURIComponent(id)}`))
 }
 
 /** team-hub v2（R-3/S8）：删除工作空间（级联 11 表 + spaces 行；confirm=delete-space:<id>；软件受保护由后端拒绝）。 */
@@ -240,7 +254,7 @@ export function deleteSpace(id: string): Promise<unknown> {
 
 /** team-hub v2（R-2/S4）：读取全局规范层（rules；未设置返回空 content）。 */
 export async function fetchRule(scope: string): Promise<{ scope: string; content: string; updatedAt: string | null }> {
-  const resp = await readJson<{ rules: { scope: string; content: string; updatedAt: string | null } }>(await fetch(`${hubBase()}/api/rules?scope=${encodeURIComponent(scope)}`))
+  const resp = await readJson<{ rules: { scope: string; content: string; updatedAt: string | null } }>(await hubGet(`/api/rules?scope=${encodeURIComponent(scope)}`))
   return resp.rules
 }
 
@@ -253,7 +267,7 @@ export function saveRule(scope: string, content: string): Promise<unknown> {
 
 export async function fetchGoal(scope: string | null): Promise<GoalInfo> {
   const qs = scope ? `?scope=${encodeURIComponent(scope)}` : ''
-  return readJson<GoalInfo>(await fetch(`${hubBase()}/api/goal${qs}`))
+  return readJson<GoalInfo>(await hubGet(`/api/goal${qs}`))
 }
 
 /** team-hub v2：发布目标——每次**新建**一个目标并生成其独立阶段任务链；与既有目标并存，互不取消。 */
@@ -273,7 +287,7 @@ export function setGoalContext(scope: string, goalId: string, text: string): Pro
 
 /** team-hub v2：全局智能体目录（选人入编用）。 */
 export async function fetchAgents(): Promise<AgentCatalogItem[]> {
-  const resp = await readJson<{ agents: AgentCatalogItem[] }>(await fetch(`${hubBase()}/api/agents`))
+  const resp = await readJson<{ agents: AgentCatalogItem[] }>(await hubGet('/api/agents'))
   return resp.agents
 }
 
@@ -310,7 +324,7 @@ export function addSpaceAgents(spaceId: string, roles: string[]): Promise<unknow
 /** team-hub v2：工作空间专属编队（岗位 + 状态/任务实时投影，含未入编队的活跃执行者）。 */
 export async function fetchRoster(scope?: string | null): Promise<RosterResponse> {
   const qs = scope ? `?scope=${encodeURIComponent(scope)}` : ''
-  return readJson<RosterResponse>(await fetch(`${hubBase()}/api/roster${qs}`))
+  return readJson<RosterResponse>(await hubGet(`/api/roster${qs}`))
 }
 
 /** team-hub v2：在工作台当前空间（scope）内新建任务；by 固定为 general（工作台代理身份）。 */
@@ -321,12 +335,12 @@ export async function createHubTask(input: NewTaskInput, scope?: string | null):
 /** team-hub v2：某空间的全部任务（/api/board，含角色/指派/依赖/版本），供中枢调度。 */
 export async function fetchHubTasks(scope: string | null): Promise<HubTask[]> {
   const qs = scope ? `?scope=${encodeURIComponent(scope)}` : ''
-  return readJson<HubTask[]>(await fetch(`${hubBase()}/api/board${qs}`))
+  return readJson<HubTask[]>(await hubGet(`/api/board${qs}`))
 }
 
 /** team-hub v2：单任务完整详情（任务详情视图）。 */
 export async function fetchHubTask(id: string): Promise<HubTask> {
-  return readJson<HubTask>(await fetch(`${hubBase()}/api/task?id=${encodeURIComponent(id)}`))
+  return readJson<HubTask>(await hubGet(`/api/task?id=${encodeURIComponent(id)}`))
 }
 
 /** team-hub v2：某空间/某任务的审计时间线（进展历史）。taskId 优先，其次 scope；limit 可选（服务端上限 500）。 */
@@ -337,7 +351,7 @@ export async function fetchHubActivity(opts: { scope?: string | null; taskId?: s
   else if (opts.scope) qs.set('scope', opts.scope)
   if (opts.limit !== undefined) qs.set('limit', String(opts.limit))
   if (qs.size === 0) qs.set('limit', '100')
-  return readJson<HubActivity[]>(await fetch(`${hubBase()}/api/activity?${qs.toString()}`))
+  return readJson<HubActivity[]>(await hubGet(`/api/activity?${qs.toString()}`))
 }
 
 /** team-hub v2（S3 内容通道）：取某任务某产物条目对应的文件内容（md 按 text/markdown 语义）。
@@ -345,7 +359,7 @@ export async function fetchHubActivity(opts: { scope?: string | null; taskId?: s
 export async function fetchHubDocContent(taskId: string, index?: number): Promise<HubDocContent> {
   const qs = new URLSearchParams({ task: taskId })
   if (typeof index === 'number') qs.set('i', String(index))
-  const res = await fetch(`${hubBase()}/api/artifact/content?${qs.toString()}`)
+  const res = await hubGet(`/api/artifact/content?${qs.toString()}`)
   let body: unknown = null
   try { body = await res.json() } catch { /* 非 JSON 响应 */ }
   if (!res.ok) {
@@ -360,7 +374,7 @@ export async function fetchHubDocContent(taskId: string, index?: number): Promis
 /** team-hub v2：持续执行编排开关状态。 */
 export async function fetchExec(scope: string | null): Promise<{ scope: string; enabled: boolean }> {
   const qs = scope ? `?scope=${encodeURIComponent(scope)}` : ''
-  return readJson<{ scope: string; enabled: boolean }>(await fetch(`${hubBase()}/api/exec${qs}`))
+  return readJson<{ scope: string; enabled: boolean }>(await hubGet(`/api/exec${qs}`))
 }
 
 /** team-hub v2：开/关该空间持续执行编排。 */
@@ -381,7 +395,7 @@ export function hubHold(taskId: string, hold: boolean): Promise<unknown> {
 /** team-hub v2：该空间的智能体默认模型配置。 */
 export async function fetchAgentModels(scope: string | null): Promise<AgentModelCfg[]> {
   const qs = scope ? `?scope=${encodeURIComponent(scope)}` : ''
-  return readJson<AgentModelCfg[]>(await fetch(`${hubBase()}/api/models${qs}`))
+  return readJson<AgentModelCfg[]>(await hubGet(`/api/models${qs}`))
 }
 
 /** team-hub v2：保存某角色默认模型。 */
@@ -483,7 +497,7 @@ export async function fetchSkills(opts: { scope?: string | null; includePending?
   if (opts.scope) qs.set('scope', opts.scope)
   if (opts.member) qs.set('member', opts.member)
   if (opts.includePending) qs.set('include', 'pending')
-  return readJson<SkillInfo[]>(await fetch(`${hubBase()}/api/skills${qs.size ? `?${qs.toString()}` : ''}`))
+  return readJson<SkillInfo[]>(await hubGet(`/api/skills${qs.size ? `?${qs.toString()}` : ''}`))
 }
 
 /** team-hub v2：提交技能（新技能/内容变更 → pending 待复审，不自动发布）。支持多部件完整技能包。 */
@@ -545,7 +559,7 @@ export function openKanban(): void {
 /** team-hub v2：某空间会话列表（最新活跃在前；无 scope 时全量）。 */
 export async function fetchChatConversations(scope?: string | null): Promise<ChatConversation[]> {
   const qs = scope ? `?scope=${encodeURIComponent(scope)}` : ''
-  const resp = await readJson<{ conversations: ChatConversation[] }>(await fetch(`${hubBase()}/api/chat/conversations${qs}`))
+  const resp = await readJson<{ conversations: ChatConversation[] }>(await hubGet(`/api/chat/conversations${qs}`))
   return resp.conversations
 }
 
@@ -571,7 +585,7 @@ export async function fetchChatMessages(conv: number, opts: { before?: number; l
   const qs = new URLSearchParams({ conv: String(conv) })
   if (opts.limit) qs.set('limit', String(opts.limit))
   if (opts.before) qs.set('before', String(opts.before))
-  const resp = await readJson<{ messages: ChatMessage[] }>(await fetch(`${hubBase()}/api/chat/messages?${qs.toString()}`))
+  const resp = await readJson<{ messages: ChatMessage[] }>(await hubGet(`/api/chat/messages?${qs.toString()}`))
   return resp.messages
 }
 
@@ -609,12 +623,12 @@ export async function uploadChatAttachment(input: { scope: string; fileName: str
 
 /** team-hub v2（S2/S7）：对话健康聚合（只读：守护在线/回复开关/模型解析链/最近失败）。端点缺失 → 抛错由调用方灰态处理。 */
 export async function fetchChatHealth(scope: string): Promise<ChatHealthInfo> {
-  return readJson<ChatHealthInfo>(await fetch(`${hubBase()}/api/chat/health?scope=${encodeURIComponent(scope)}`))
+  return readJson<ChatHealthInfo>(await hubGet(`/api/chat/health?scope=${encodeURIComponent(scope)}`))
 }
 
 /** team-hub 审计 SSE：单一 /api/events（I8），订阅方按 action 过滤 chat:*。断线自动重连。 */
 export function subscribeHubAudit(onEvent: (event: HubAuditEvent) => void): () => void {
-  const es = new EventSource(`${hubBase()}/api/events`)
+  const es = new EventSource(hubEventSourceUrl('/api/events'))
   es.onmessage = (ev) => {
     try {
       onEvent(JSON.parse(ev.data) as HubAuditEvent)
@@ -642,7 +656,7 @@ export interface ChatReplySettings {
 
 /** team-hub v2：读取某空间 AI 回复设置（未设置默认 enabled=true）。 */
 export async function fetchChatReplySettings(scope: string): Promise<ChatReplySettings> {
-  return readJson<ChatReplySettings>(await fetch(`${hubBase()}/api/chat/reply-settings?scope=${encodeURIComponent(scope)}`))
+  return readJson<ChatReplySettings>(await hubGet(`/api/chat/reply-settings?scope=${encodeURIComponent(scope)}`))
 }
 
 /** team-hub v2：保存某空间 AI 回复设置（enabled 省略 = true）。 */
@@ -776,7 +790,7 @@ export interface SkillSource {
 
 /** 读取某空间的技能来源（team-hub GET /api/skill-source）。 */
 export async function getSkillSource(scope: string): Promise<SkillSource> {
-  const res = await fetch(`${hubBase()}/api/skill-source?scope=${encodeURIComponent(scope)}`)
+  const res = await hubGet(`/api/skill-source?scope=${encodeURIComponent(scope)}`)
   const body = await res.json().catch(() => null) as { source?: SkillSource; error?: string } | null
   if (!res.ok || !body) throw new Error(body?.error ?? `获取技能来源失败：${res.status} ${res.statusText}`)
   return body.source ?? { scope, url: '', branch: '' }

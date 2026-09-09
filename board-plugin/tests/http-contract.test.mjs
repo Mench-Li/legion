@@ -243,8 +243,14 @@ function buildFixture() {
   return {
     base, scrumDir, outside, linksOk,
     cleanup() {
-      rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
-      rmSync(outside, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+      // Windows 上含 junction 的目录树在新建后立即递归删除会偶发 EPERM（Defender/索引器瞬时锁）。
+      // 先单独移除 junction 本身，再宽容重试删除；仍失败只遗留临时目录（系统可回收），不让套件假红。
+      for (const p of [join(base, 'link-out'), join(base, 'link-in')]) {
+        try { rmSync(p, { recursive: true, force: true }) } catch { /* junction 删除抖动，随父目录重试 */ }
+      }
+      for (const p of [base, outside]) {
+        try { rmSync(p, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 }) } catch { /* 临时目录遗留可回收 */ }
+      }
     },
   }
 }

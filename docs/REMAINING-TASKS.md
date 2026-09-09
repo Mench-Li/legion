@@ -114,25 +114,47 @@
 
 ### P2-2 team-hub 读接口权限模型统一
 
-状态：**可独立实施**
+状态：**已完成**（2026-09-09，随远程读面鉴权门禁合入）
 
-问题：
+问题与现状（改动前）：
 
-- 当前 token 主要保护写接口，部分读接口仍默认开放。
-- 非回环监听时，任务、审计、技能和聊天元数据可能被读取。
+- team-hub 的 token 只保护写接口（`handleWrite`/附件上传），约 30 个 GET/SSE 读端点
+  （`/api/board`、`/api/activity`、`/api/events`、`/api/skills`、`/api/members`、`/api/roster`、
+  `/api/chat/*` 等）在非回环监听时无需任何 token 即可读取任务/审计/技能/聊天元数据。
 
-涉及改动：
+已完成改动：
 
-- 明确本地回环与远程监听两种权限模式。
-- 远程模式统一保护 board、activity、events、audit、skills、chat 等读接口。
-- 对 scope/member 做一致性过滤。
-- 同步 Workbench、board-plugin 和 scrum 的 token 头处理。
+- `team-hub/server.mjs`：
+  - 导出 `isLoopbackHost` / `readAuthRequired`（纯函数决策）：非回环监听 + 已配 token → 读面必须鉴权；
+    本地回环（127.0.0.1/localhost/::1）无论是否配 token 读面保持开放（开发体验不回退）。
+  - `handle()` 顶部统一读面门禁：远程保护模式下除 `/api/config`（能力发现）与 OPTIONS 外，全部
+    端点（读/SSE/写）都需 token；未知路径同受门禁（不泄露端点存在性）。
+  - `authorized()` 支持三种携带方式（对齐 v1 serve.mjs）：`Authorization: Bearer` / `x-dsh-token` /
+    `?token=`（后者供 EventSource 等无法自定 header 的读订阅）。
+- 测试：`team-hub/security.test.mjs` 增加决策纯函数用例；新增 `team-hub/read-auth.test.mjs`
+  （远程模式 HTTP 矩阵：无 token/错 token 401、三种携带方式 200、config 放行、SSE 401/`?token=` 200、
+  写面 401、OPTIONS 204、未知路径 401/404）与 `team-hub/read-open-loopback.test.mjs`
+  （回环 + 已配 token：读/SSE/config 无 token 仍 200，写面仍 401、带 token 可写——不回退锁定）。
+- 消费方 token 头同步：
+  - Workbench `api.ts`：新增 `hubGet`（hub GET 统一带 Bearer）与 `hubEventSourceUrl`（hub 审计 SSE
+    以 `?token=` 追加）；~20 个 hub 读函数全部改走 `hubGet`，`subscribeHubAudit` 改走带 token URL；
+    v1（apiBase）读面本就开放不动；CalendarView 自带 token 头不动。
+  - board-plugin：hub GET/POST 早已带 Bearer（P1-2 契约套件已验证），无需改动。
+  - scrum v1 `serve.mjs`：读面按既有契约开放（零 token 看板/console），写面 token 门禁不变，无需改动。
+- 门禁接线：`scripts/ci/run-ci.mjs` test 阶段新增 `read-auth` 套件组
+  （read-auth.test.mjs + read-open-loopback.test.mjs）。
+- 顺带修复 `board-plugin/tests/http-contract.test.mjs` 清理抖动：Windows 含 junction 的临时目录
+  快速递归删除偶发 EPERM 导致套件假红（5/6 复现）——改为先删 junction + 宽容重试、失败仅遗留可回收
+  临时目录不抛（8/8 稳定 exit 0）。
 
-验收标准：
+验收标准核对：
 
-- 非回环监听无 token 时启动失败或所有敏感读写接口拒绝访问。
-- 正确 token 可读取授权 scope，错误 token 无法读取。
-- 本地回环开发体验不回退。
+- 非回环监听无 token 时拒绝启动（既有 `validateSecurityConfig`）+ 读面全门禁：✅（HTTP 矩阵验证）。
+- 正确 token 可读、错误 token 401：✅（Bearer/x-dsh-token/?token= 三路验证）。
+- 本地回环开发体验不回退：✅（回环 + token 场景锁定：读开放、写面仍门禁；team-hub 全组 137/137）。
+
+范围说明：本项覆盖 team-hub v2 读面与 Workbench/board-plugin/scrum 消费方 token 头；scope/member
+一致性过滤属既有实现（skills include=pending 收口等），不在本项新增。
 
 ### P2-3 SSE 生命周期和断线恢复统一
 
@@ -248,7 +270,7 @@
 1. P1-1：先决定 team-hub 唯一权威实现。
 2. P1-2：~~补 board-plugin 独立 HTTP 契约测试~~（已完成，见上节）。
 3. P2-1：统一 v1/v2 任务和 SSE 公共语义。
-4. P2-2：统一 team-hub 读接口权限模型。
+4. P2-2：~~统一 team-hub 读接口权限模型~~（已完成，见上节）。
 5. P1-3：在真实 DSH 宿主完成插件注入冒烟。
 6. P2-3：统一 SSE 断线恢复。
 7. P2-4～P2-8：按用户价值选择 Workbench 功能增强。

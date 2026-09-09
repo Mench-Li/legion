@@ -197,6 +197,7 @@ async function stageTest() {
     { label: 'rules（规范数据面）', files: ['team-hub/rules.test.mjs'], cwd: ROOT },
     { label: 'artifact（产物读取）', files: ['team-hub/artifact-content.test.mjs'], cwd: ROOT },
     { label: 'security（监听安全配置）', files: ['team-hub/security.test.mjs'], cwd: ROOT },
+    { label: 'read-auth（远程读面鉴权矩阵）', files: ['team-hub/read-auth.test.mjs', 'team-hub/read-open-loopback.test.mjs'], cwd: ROOT },
     { label: 'files-api（文件中心契约）', files: ['workbench/scripts/files-api.test.mjs'], cwd: ROOT },
     { label: 'web（浏览器助手契约）', files: ['workbench/scripts/web.test.mjs'], cwd: ROOT },
     { label: 'doc-render（文档产物契约）', files: ['workbench/scripts/doc-render.test.mjs'], cwd: ROOT },

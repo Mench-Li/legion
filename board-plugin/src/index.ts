@@ -173,12 +173,16 @@ export function apply(ctx: Context, config: Config): void {
       const safeBranch = await safeExisting(branch)
       if (safeBranch) return safeBranch
     }
+    let unsafeHit = false
     for (const root of roots) {
       const abs = join(root, ...segs)
       const safe = await safeExisting(abs)
       if (safe) return safe
+      // 候选路径存在但 realpath 复检未通过（仓库内符号链接/junction 指向根外，如 workbench/node_modules）：
+      // 绝不回退到该可穿透路径；全部候选均不安全时整体拒绝（403），只允许「文件暂不存在」走主根兜底。
+      if (existsSync(abs)) unsafeHit = true
     }
-    return join(repoRoot, ...segs) // 文件暂不存在也返回主根候选，供调用方做 exists 元信息
+    return unsafeHit ? null : join(repoRoot, ...segs) // 文件暂不存在也返回主根候选，供调用方做 exists 元信息
   }
 
 

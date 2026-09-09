@@ -1,0 +1,7 @@
+{
+  "name": "fixture-pipeline",
+  "stages": [
+    { "role": "requirement", "label": "需求澄清" },
+    { "role": "coder", "label": "编码实现" }
+  ]
+}

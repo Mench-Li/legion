@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="zh">
+<head><meta charset="utf-8"><title>看板 fixture</title></head>
+<body>
+<div id="board"></div>
+<script>
+// 与真实 kanban.html 相同的绝对 API 调用形态（前缀重写目标）
+const sse = new EventSource('/api/board/events')
+fetch('/api/board').then((r) => r.json())
+fetch('/api/artifact?task=T-200&i=0&raw=1')
+</script>
+</body>
+</html>

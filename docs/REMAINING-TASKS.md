@@ -43,25 +43,30 @@
 
 ### P1-2 board-plugin 宿主 HTTP 契约测试
 
-状态：**宿主依赖 / 可部分独立实施**
+状态：**已完成**（2026-09-09，随 board-plugin 宿主 HTTP 契约套件合入）
 
-问题：
+已完成内容：
 
-- board-plugin 已完成 TypeScript 构建和 artifact 路径安全修复，但缺少独立 HTTP 回归套件。
-- 当前主要依赖 DSH 宿主注入，无法自动覆盖 `/api/artifact`、`/api/board`、`/api/events` 和 hub 模式。
+- 新增 `board-plugin/tests/http-contract.test.mjs`：构造最小 fake `webServer` context，注入编译后的
+  board-plugin（`lib/index.js`）并启动临时 HTTP 服务；写入隔离的 `tasks.json`、`activity.jsonl`、
+  `board.json`、`daemon.json`、`roles.json` 与 artifact fixture（`tests/fixtures/`，含 taskctl/render
+  替身、kanban/console 页面、roles 映射）。
+- 覆盖 32 项：`/api/artifact` 逐条（raw/content-type/越界 400/未知任务 404/越权 `../` 根外盘符 `.git`
+  403/符号链接 link-out 逃逸 403 + link-in 放行/缺失 404/octet-stream）、`/api/board`、
+  `/api/activity`（limit）、`/api/config`、`/api/daemon`、`/api/patch`、kanban/console 前缀重写、
+  本地写接口（create/transition 乐观锁 409/comment/reject/promote）、SSE 初始 + 增量，以及 hub 模式
+  （fake team-hub）scope/token/错误映射（乐观锁 409、业务 400、非 JSON 500 文案）。
+- 产物 API 断言与 `scrum/artifact-detail.test.mjs`（K4-B/K5-A）同一语义组。
+- 顺带修复 board-plugin 相对产物路径白名单回退缺陷（`src/index.ts`：候选路径存在但 realpath 复检不通过
+  —— 仓库内 junction 指向根外 —— 不再回退到该可穿透路径，整体 403）。
+- 接入发布门禁：`scripts/ci/run-ci.mjs` test 阶段在配置 `DSH_CHECKOUT` 时构建 board-plugin 并跑该套件
+  （镜像 plugins 先例；无 checkout 时 SKIP 不伪造通过）。
 
-涉及改动：
+验收标准核对：
 
-- 构造最小 fake `webServer` context。
-- 注入编译后的 board-plugin 并启动临时 HTTP 服务。
-- 写入隔离的 `tasks.json`、`activity.jsonl` 和 artifact fixture。
-- 覆盖多条 artifact、raw 内容、越权路径、符号链接、404、SSE、scope 和 token。
-
-验收标准：
-
-- board-plugin 独立测试可在无完整 DSH GUI 的情况下运行。
-- 与 `scrum/artifact-detail.test.mjs` 使用同一组语义断言。
-- 真实宿主注入测试另行保留，不用 mock 结果冒充宿主验证。
+- board-plugin 独立测试可在无完整 DSH GUI 的情况下运行：✅ `node --test board-plugin/tests/http-contract.test.mjs`（32/32）。
+- 与 `scrum/artifact-detail.test.mjs` 使用同一组语义断言：✅。
+- 真实宿主注入测试另行保留，不用 mock 结果冒充宿主验证：✅（注入冒烟仍列 P1-3，本套件仅用 fixture 替身覆盖 HTTP 契约面）。
 
 ### P1-3 DSH 宿主真实插件注入冒烟
 
@@ -241,7 +246,7 @@
 ## 推荐实施顺序
 
 1. P1-1：先决定 team-hub 唯一权威实现。
-2. P1-2：补 board-plugin 独立 HTTP 契约测试。
+2. P1-2：~~补 board-plugin 独立 HTTP 契约测试~~（已完成，见上节）。
 3. P2-1：统一 v1/v2 任务和 SSE 公共语义。
 4. P2-2：统一 team-hub 读接口权限模型。
 5. P1-3：在真实 DSH 宿主完成插件注入冒烟。

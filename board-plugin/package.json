@@ -24,6 +24,7 @@
   "scripts": {
     "build": "node ../scripts/ci/build-external-package.mjs board-plugin",
     "build:client": "tsdown",
+    "test": "npm run build && node --test tests/*.test.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "exports": {

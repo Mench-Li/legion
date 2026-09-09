@@ -1,11 +1,14 @@
 /**
  * @dsh-external/dsh-legion-services — 军团独立服务伴随 DSH Desktop 自动启停。
  *
- * Desktop（web profile）启动时，本插件自动拉起三个 legion 独立服务并**自愈重启**：
+ * Desktop（web profile）启动时，本插件自动拉起 legion 独立服务并**自愈重启**：
  *   1. team-hub v2    —— node team-hub/server.mjs            （:8787，SQLite 中枢，空间/编队/目标）
- *   2. 军团 v1 看板     —— node scrum/serve.mjs --port 4820     （:4820，指挥台数据源）
- *   3. 军团指挥台      —— node workbench/scripts/serve.mjs     （:5173，工作台 UI + /hub 代理 + /api/fs）
+ *   2. 军团指挥台      —— node workbench/scripts/serve.mjs     （:5173，工作台 UI + /hub 代理 + /api/fs）
  * Desktop 退出时随插件 dispose 全部回收；某端口已有服务在监听则跳过（避免重复占用）。
+ *
+ * P1-1 第 2 步退役：v1 看板（scrum/serve.mjs :4820）不再托管——v1 文件库
+ * （scrum/tasks.json）退役，看板数据面统一走 team-hub v2。serve.mjs 文件保留
+ * （v1v2-contract 测试 import 复用 + 本地自托管），仅生产不再自动拉起。
  *
  * 本插件零外部依赖（cordis 仅注入 ctx）。legion 根目录解析顺序：config.legionDir →
  * 插件自身位置（源码直跑时 = 仓库根）→ 默认 'D:/project/DSH/legion'。
@@ -54,9 +57,7 @@ export function apply(ctx, rawConfig = {}) {
   const teamHubToken = typeof cfg.teamHubToken === 'string' && cfg.teamHubToken
     ? cfg.teamHubToken
     : (typeof baseEnv.TEAM_HUB_TOKEN === 'string' ? baseEnv.TEAM_HUB_TOKEN : '')
-  const boardPort = num(cfg.boardPort, 4820)
   const workbenchPort = num(cfg.workbenchPort, 5173)
-  const boardToken = typeof cfg.boardToken === 'string' && cfg.boardToken ? cfg.boardToken : 'legion-kanban-4820'
   const hubUpstream = typeof cfg.hubUpstream === 'string' && cfg.hubUpstream.trim()
     ? cfg.hubUpstream.trim()
     : (typeof baseEnv.DSH_HUB_UPSTREAM === 'string' && baseEnv.DSH_HUB_UPSTREAM ? baseEnv.DSH_HUB_UPSTREAM : 'http://127.0.0.1:8787')
@@ -69,14 +70,6 @@ export function apply(ctx, rawConfig = {}) {
       cwd: legionDir,
       args: [join(legionDir, 'team-hub', 'server.mjs')],
       env: { ...baseEnv, TEAM_HUB_PORT: String(teamHubPort), TEAM_HUB_HOST: teamHubHost, TEAM_HUB_TOKEN: teamHubToken },
-    },
-    {
-      key: 'kanban-v1',
-      label: `军团 v1 看板（:${boardPort}）`,
-      port: boardPort,
-      cwd: legionDir,
-      args: [join(legionDir, 'scrum', 'serve.mjs'), '--port', String(boardPort), '--host', '0.0.0.0', '--token', boardToken],
-      env: baseEnv,
     },
     {
       key: 'workbench',

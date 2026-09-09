@@ -146,7 +146,8 @@ function sseClient(base, path) {
       const deadline = Date.now() + timeoutMs
       return new Promise((resolve, reject) => {
         const tick = () => {
-          if (frames.some((f) => f.includes(needle))) return resolve(true)
+          const hit = typeof needle === 'function' ? needle(frames) : frames.some((f) => f.includes(needle))
+          if (hit) return resolve(true)
           if (Date.now() >= deadline) {
             return reject(new Error(`SSE 未收到 ${needle}；frames=${JSON.stringify(frames)}`))
           }
@@ -593,14 +594,19 @@ describe('board-plugin HTTP 契约：hub 模式（fake team-hub）', () => {
   let hub
   let hubLog
   let hubState
+  let hubSse
   let board
 
   before(async () => {
     // fake team-hub：记录全部请求，行为可按用例调整
     hubLog = []
+    hubSse = []
     hubState = {
       board: { status: 200, body: { from: 'hub', tasks: [{ id: 'H-0', title: 'hub-task', status: 'todo' }] } },
       write: { status: 200, body: { task: { id: 'H-9', title: 'hub-created', status: 'todo', version: 1 } }, raw: false },
+      activity: [
+        { seq: 1, ts: T0, scope: 'software', event: 'create', action: 'create', taskId: 'H-0', member: 'general', id: 1, payload: {}, detail: {} },
+      ],
     }
     hub = createServer((req, res) => {
       let raw = ''
@@ -612,6 +618,20 @@ describe('board-plugin HTTP 契约：hub 模式（fake team-hub）', () => {
           try { entry.body = JSON.parse(raw) } catch { entry.body = raw }
         }
         hubLog.push(entry)
+        // P1-1 第 2 步：fake hub 提供 v2 /api/events SSE（board-plugin 事件桥上游）
+        if (url.pathname === '/api/events') {
+          res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache' })
+          res.write('retry: 2000\n\n')
+          hubSse.push(res)
+          // 注意：必须监听 res 'close'（连接真正终止）而非 req 'close'——
+          // Node 17+ 的 IncomingMessage 'close' 在请求体读完即触发（SSE GET 无 body → 立即），
+          // 挂 req 会把刚建立的 SSE 连接误当断开移除。
+          res.on('close', () => {
+            const i = hubSse.indexOf(res)
+            if (i >= 0) hubSse.splice(i, 1)
+          })
+          return
+        }
         const send = (status, payload, isRaw) => {
           res.writeHead(status, { 'content-type': isRaw ? 'text/plain; charset=utf-8' : 'application/json; charset=utf-8' })
           res.end(isRaw ? payload : JSON.stringify(payload))
@@ -623,6 +643,9 @@ describe('board-plugin HTTP 契约：hub 模式（fake team-hub）', () => {
         if (url.pathname === '/api/board') {
           const b = hubState.board
           return send(b.status, b.body)
+        }
+        if (url.pathname === '/api/activity') {
+          return send(200, hubState.activity)
         }
         return send(200, { auth: true })
       })
@@ -711,5 +734,69 @@ describe('board-plugin HTTP 契约：hub 模式（fake team-hub）', () => {
     const r = await postJson(board.base, '/scrum-board/api/transition', { id: 'H-9', to: 'done' })
     assert.equal(r.status, 400)
     assert.match(r.data.error, /hub \/api\/transition 失败（500）/)
+  })
+
+  // ── P1-1 第 2 步：hub 模式 v2 化增量契约 ──
+  let hubSeq = 1000
+  function hubEmit(payload) {
+    hubSeq += 1
+    for (const res of hubSse) res.write(`id: ${hubSeq}\ndata: ${JSON.stringify(payload)}\n\n`)
+  }
+
+  it('GET /（hub 面板）：返回 v2 动态页模板（不再服务 render 静态 kanban.html）', async () => {
+    const res = await fetch(board.base + '/scrum-board/')
+    assert.equal(res.status, 200)
+    const html = await res.text()
+    assert.match(html, /<html/i)
+    assert.match(html, /v2 hub/) // hub 动态面板特征
+    assert.match(html, /EventSource/) // SSE 实时刷新
+    assert.ok(!html.includes('board.json'), 'hub 面板不应依赖本地 render 静态产物')
+  })
+
+  it('POST /api/reject / /api/promote（hub 模式）→ 501 降级指引（v1 worktree 语义退役）', async () => {
+    const rej = await postJson(board.base, '/scrum-board/api/reject', { id: 'H-9', by: 'general', reason: '重做' })
+    assert.equal(rej.status, 501)
+    assert.match(rej.data.error, /v2 hub 不支持 reject/)
+    const pro = await postJson(board.base, '/scrum-board/api/promote', { id: 'H-9', by: 'general' })
+    assert.equal(pro.status, 501)
+    assert.match(pro.data.error, /v2 hub 不支持 promote/)
+  })
+
+  it('hub 模式 GET /api/activity：走 hub /api/activity?scope= + Bearer，返回 v2 audit 数组', async () => {
+    const r = await getJson(board.base, '/scrum-board/api/activity?limit=5')
+    assert.equal(r.status, 200)
+    assert.ok(Array.isArray(r.data))
+    assert.equal(r.data[0].seq, 1)
+    const e = hubLog[hubLog.length - 1]
+    assert.equal(e.path, '/api/activity')
+    assert.match(e.search, /scope=software/)
+    assert.equal(e.auth, 'Bearer tk-hub-1')
+  })
+
+  it('hub 模式 /api/board/events：首帧 = hub /api/board 全量；hub 事件 → 泵新帧', async () => {
+    const sse = sseClient(board.base, '/scrum-board/api/board/events')
+    try {
+      // 首帧：v2 hub 数据（含 from:hub 全量 JSON 行帧）
+      await sse.waitFor((f) => f.some((x) => x.includes('"from":"hub"') || x.includes('"from": "hub"')), 4000)
+      // hub 侧改数据 + 推事件 → board-plugin 泵出新帧
+      hubState.board = { status: 200, body: { from: 'hub', tasks: [{ id: 'H-1', title: 'after-event', status: 'done' }] } }
+      hubEmit({ seq: hubSeq + 1, event: 'transition', action: 'transition', taskId: 'H-0', scope: 'software' })
+      const got = await sse.waitFor((f) => f.some((x) => x.includes('after-event')), 4000)
+      assert.ok(got, 'hub 事件应触发 board 重拉并泵帧给 /scrum-board/api/board/events 客户端')
+    } finally {
+      sse.close()
+    }
+  })
+
+  it('hub 模式 /api/activity/events：回放 v2 audit + 上游事件实时透传（data 信封）', async () => {
+    const sse = sseClient(board.base, '/scrum-board/api/activity/events')
+    try {
+      await sse.waitFor((f) => f.some((x) => x.includes('"event":"create"') && x.includes('"seq":1')), 4000)
+      hubEmit({ seq: hubSeq + 1, event: 'comment', action: 'comment', taskId: 'H-0', scope: 'software', detail: { text: 'hub-实时' } })
+      const got = await sse.waitFor((f) => f.some((x) => x.includes('hub-实时')), 4000)
+      assert.ok(got, '上游 v2 事件应实时透传给 activity/events 客户端')
+    } finally {
+      sse.close()
+    }
   })
 })

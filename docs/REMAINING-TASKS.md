@@ -16,7 +16,7 @@
 
 ### P1-1 team-hub 两套服务实现合并
 
-状态：**第 1 步完成（代码收敛），第 2 步（生产拓扑切换）另立批次** —— 决策见 `docs/P1-1-DECISION.md`；验证留痕 `docs/P1-1-evidence/verify-evidence.md`
+状态：**第 1 步完成（代码收敛）+ 第 2 步代码就绪（board hub v2 化 / v1 退役），现场切换待用户按 runbook 执行** —— 决策 `docs/P1-1-DECISION.md`；第 1 步留痕 `docs/P1-1-evidence/verify-evidence.md`；第 2 步 runbook `docs/P1-1-step2-runbook.md`
 
 问题：
 
@@ -24,22 +24,31 @@
 - `team-hub/src/index.ts` 是 DSH 宿主插件适配器，仍保留一套基于 `taskctl.mjs` 的旧任务 API 实现。
 - 两套实现的数据来源、配置入口、鉴权和接口覆盖范围不同，后续容易出现修一处、漏一处的行为漂移。
 
-涉及改动（已实施，`d47c6f5` 之后）：
+涉及改动（第 1 步已实施；第 2 步已合入代码，待现场执行）：
 
+第 1 步（`d47c6f5` 之后）：
 1. ✅ 以 `server.mjs` 作为唯一业务实现（决策 D1=选项 A：v2 唯一权威）。
-2. ✅ `server.mjs` 导出可复用 `handle(req, res, stripPrefix?)` + `disposeHub()` + `DEFAULT_DB_FILE`；`handle` 支持可选前缀剥离（独立进程不传、宿主外壳传 routePrefix）。
-3. ✅ `src/index.ts` 只做 DSH `webServer` 前缀路由注册 + env 配置转接（dbPath/teamToken/port），**删除 taskctl 子进程旧实现**（旧 16 端点 v1 API 面下线）。
-4. ✅ 统一数据池：宿主外壳缺省 `dbPath=''` → server.mjs 默认库 = 与 8787 独立进程同一 `team-hub/team.db`；显式 dbPath 隔离测试场景。
-5. ✅ 删除 `src/index.ts` 内重复的 taskctl 业务逻辑（442 行 → 外壳 ~90 行）。
-6. ✅ 新增同一 HTTP 契约测试：`tests/contract/team-hub-parity.test.mjs`（独立服务无前缀 vs 宿主 `/team-hub` 前缀外壳，同库同刻全等断言）。
+2. ✅ `server.mjs` 导出可复用 `handle(req, res, stripPrefix?)` + `disposeHub()` + `DEFAULT_DB_FILE`；`handle` 支持可选前缀剥离。
+3. ✅ `src/index.ts` 只做 DSH `webServer` 前缀路由注册 + env 配置转接，删除 taskctl 子进程旧实现。
+4. ✅ 统一数据池：宿主外壳缺省与 8787 同 `team-hub/team.db`。
+5. ✅ 删除重复 taskctl 业务逻辑（442 行 → 外壳 ~90 行）。
+6. ✅ 新增 `tests/contract/team-hub-parity.test.mjs` 双形态对拍。
+
+第 2 步（代码就绪，现场切换 = 重启宿主 + 归档 + probe）：
+7. ✅ board-plugin hub 模式 v2 化（`board-plugin/src/index.ts` + 新 `hub-panels.ts`）：hub 写后不再渲染本地 v1、`/api/board/events` SSE 桥接上游 v2 `/api/events`（事件泵）、`/api/activity(+/events)` 转发 v2 audit、hub 面板 = v2 动态页（自渲染 + SSE 刷新 + transition/comment）、`reject/promote` → 501 降级指引（D3：v1 worktree 语义退役）。本地模式（无 hub 自托管）原样保留。
+8. ✅ services-plugin 退役 `serve.mjs :4820` 托管行（v1 看板不再自动拉起；serve.mjs 文件保留供测试/本地）。
+9. ✅ `scripts/ci/archive-v1-scrum.mjs` v1 文件库归档脚本（前置检查：4820 关闭 + 无近期写者）。
+10. ✅ `scripts/live/p11-step2-verify.mjs` 现场验收 probe + `docs/P1-1-step2-runbook.md`（回滚预案）。
+11. ✅ 测试扩展：board-plugin http-contract 37 项（+5：hub 面板/501/activity 转发/SSE 桥×2）；P1-3 fixture 增 `p13-board-hub` hub 模式实例 → 6/6（含同宿主 v2 全链路）。
 
 验收标准：
 
-- ✅ 独立服务和 DSH 宿主对同一请求返回相同状态码、字段和错误语义（parity 对拍：config/404/401/409/board/comment 等）。
-- ✅ 聊天、日历、技能、空间、附件等 v2 API 在宿主模式可用（宿主只挂 v2 handle，全端点面即 v2 面；team-hub 全组 138/138 含对拍）。
-- ✅ 不再存在第二套任务状态机和鉴权实现（taskctl 子进程/文件库实现已从宿主插件删除）。
+- ✅ 独立服务和 DSH 宿主对同一请求返回相同状态码、字段和错误语义（parity 对拍）。
+- ✅ v2 API 在宿主模式可用（team-hub 全组 138/138）。
+- ✅ 不再存在第二套任务状态机和鉴权实现。
+- ✅（第 2 步代码）看板 hub 面/面板/SSE 全走 v2，reject/promote 显式 501，v1 托管与文件库退役就绪 —— **待现场**：重启 3080 宿主 + 跑归档脚本 + `p11-step2-verify.mjs` 全 PASS（runbook 第 1-3 步）。
 
-风险：~~高，需先确认 server.mjs 是否正式成为唯一权威实现~~ → 已拍板（D1=A、D2=两步走）。**剩余第 2 步（另立批次）**：board-plugin hub 目标切 v2 语义、v1 文件库 `scrum/tasks.json` 与 serve.mjs :4820 退役迁移、现场切换验收 —— 涉及生产行为变更，未实施（生产 3080/8787 拓扑保持现状）。注意：当前生产宿主 `/team-hub` 仍由旧 `src/index.ts` 编译产物（junction=源码，重启宿主后即切 v2 外壳）承载，第 2 步前不应重启带该插件的宿主，或先完成消费方（board-plugin hub 模式）兼容验证。
+风险：现场切换由用户执行（重启会中断本会话）；回滚预案见 runbook §4。现场完成后本条目可标记完全完成。
 
 ### P1-2 board-plugin 宿主 HTTP 契约测试
 

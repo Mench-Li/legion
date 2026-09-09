@@ -120,6 +120,16 @@ export function makeFixture({ port, teamToken = 'p13-fixture-token', workerInter
         hubToken: '${teamToken}'
         scope: 'software'
         artifactRoots: []
+    # P1-1 第 2 步：第二个 board 实例走 hub 模式（显式 hubUrl 指向宿主 /team-hub v2）
+    - id: p13-board-hub
+      name: '@dsh-external/dsh-scrum-board'
+      config:
+        scrumDir: '${scrumDirYaml}'
+        routePrefix: '/scrum-board-hub'
+        hubUrl: 'http://127.0.0.1:${port}/team-hub'
+        hubToken: '${teamToken}'
+        scope: 'default'
+        artifactRoots: []
     - id: p13-worker
       name: '@dsh-external/dsh-scrum-worker'
       config:

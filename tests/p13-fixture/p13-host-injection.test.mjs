@@ -230,7 +230,47 @@ describeHost('P1-3 真实 DSH 宿主注入冒烟（legion 三插件）', () => {
     assert.ok(Array.isArray(parsed.columns), 'board/events 推完整渲染快照（columns 数组）')
   })
 
-  it('⑤ 关闭清理：bounded dispose 结束 SSE、进程自然退出 exit 0', async () => {
+  it('⑤ P1-1 第 2 步：hub 模式 board（/scrum-board-hub）同宿主打 v2 /team-hub 全链路', async () => {
+    // a. hub 动态面板（不再服务 render 静态产物）
+    const page = await req(fx.base, 'GET', '/scrum-board-hub/')
+    assert.equal(page.status, 200)
+    const html = typeof page.data === 'string' ? page.data : JSON.stringify(page.data)
+    assert.match(html, /v2 hub/)
+    assert.match(html, /EventSource/)
+
+    // b. 写走 v2：create 到 default scope（v2 库），读回裸任务数组
+    const create = await req(fx.base, 'POST', '/scrum-board-hub/api/create', { title: 'hub面板契约任务', by: 'general' }, TOKEN)
+    assert.equal(create.status, 200, JSON.stringify(create.data))
+    const id = create.data.task.id
+    const board = await req(fx.base, 'GET', '/scrum-board-hub/api/board')
+    assert.equal(board.status, 200)
+    assert.ok(Array.isArray(board.data), 'hub 模式 /api/board 应返回 v2 裸数组：' + JSON.stringify(board.data).slice(0, 160))
+    assert.ok(board.data.some((t) => t.id === id), 'board 应含刚经 hub 创建的任务')
+
+    // c. 活动流走 v2 audit（/api/activity 转发）
+    const acts = await req(fx.base, 'GET', '/scrum-board-hub/api/activity?limit=10')
+    assert.equal(acts.status, 200)
+    assert.ok(Array.isArray(acts.data) && acts.data.some((a) => a.taskId === id), 'activity 应转发 v2 audit（含本次 create）')
+
+    // d. reject/promote → 501 降级指引
+    const rej = await req(fx.base, 'POST', '/scrum-board-hub/api/reject', { id, by: 'general', reason: 'x' }, TOKEN)
+    assert.equal(rej.status, 501)
+    assert.match(rej.data.error, /v2 hub 不支持 reject/)
+
+    // e. hub 事件桥：经宿主 /team-hub 直接 transition → /scrum-board-hub 板 SSE 泵新帧
+    const sse = liveSse(fx.base, '/scrum-board-hub/api/board/events')
+    try {
+      const first = await waitFrames(sse.frames, (f) => f.some((x) => x.includes(`"id": "${id}"`) || x.includes(`"id":"${id}"`)))
+      assert.ok(first, 'hub 板 SSE 首帧应含 v2 全量（含新建任务）；frames=' + JSON.stringify(sse.frames).slice(0, 300))
+      await req(fx.base, 'POST', '/team-hub/api/transition', { id, to: 'todo', by: 'general', ifVersion: create.data.task.version }, TOKEN)
+      const pumped = await waitFrames(sse.frames, (f) => f.some((x) => x.includes('"status":"todo"') || x.includes('"status": "todo"')))
+      assert.ok(pumped, '宿主 v2 事件应经桥泵给 hub 板 SSE 客户端（status→todo 帧）；frames=' + JSON.stringify(sse.frames).slice(-400))
+    } finally {
+      sse.close()
+    }
+  }, { timeout: 30000 })
+
+  it('⑥ 关闭清理：bounded dispose 结束 SSE、进程自然退出 exit 0', async () => {
     // 保持两条 SSE 连接（一条已消费增量、一条看板全量）；close promise 须在
     // shutdown 前注册（dispose 会立刻 end 连接，晚注册会错过 close 事件）
     const sse1 = liveSse(fx.base, '/team-hub/api/events')

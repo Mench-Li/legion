@@ -123,3 +123,41 @@ src/index.ts 与 serve.mjs 共用同一份 taskctl 调用封装（消除适配�
   第 2 步需为 board-plugin hub 模式（UI 有 reject/promote 动作）决定映射或降级——未实施。
 - 宿主默认 `dbPath=''` → 与 8787 同库 `team-hub/team.db`（services-plugin 托管 8787 未设 TEAM_HUB_DB）。
 - 生产 web profile 未改；**重启宿主前须先完成第 2 步消费方兼容**（junction=源码，重启即切 v2 外壳）。
+
+---
+
+## 8. 第 2 步拍板与实施记录（2026-09-09，代码合入，待现场执行）
+
+**决策**：board-depth = A（board-plugin hub 数据面 + 面板 v2 化，本地模式保留）；
+v1-retire = 授权直接操作生产退役；live-exec = 交付 runbook + probe，现场由用户执行。
+
+### 生产拓扑事实（盘点确认）
+
+- **单宿主**：PID 13816 `node apps/cli/lib/bin.js "web"` 同时承载 3080 GUI + team-hub/board/worker
+  三插件 + services-plugin 托管 8787/4820/5173 三子服务。→ 退役 4820 与 board 切 v2 都依赖**同一次
+  宿主重启**（用户执行）。
+- 生产看板现状 = board-plugin hub → 同宿主 `/team-hub`（旧 v1 适配器）→ `scrum/tasks.json` **陈年 v1 池**
+  （T-001..008，最后写 09-03；worker 生产在 8787 v2 活池）——双池不一致实锤（patch 注释自认"不同任务池"）。
+- v1 文件库 `tasks.json` 无活跃数据需迁移；serve.mjs :4820 退役 = 停托管（文件保留：v1v2-contract 测试 import 复用）。
+
+### 第 2 步代码改动（已合入验证）
+
+| 文件 | 改动 |
+|---|---|
+| `board-plugin/src/index.ts` | hub 模式 v2 化：写后跳过本地 runRender；新增 hub 事件桥（上游订阅 v2 `/api/events` → board 泵 + activity 透传，含重连/清理）；`/api/board/events` `/api/activity(+events)` hub 分支；reject/promote → 501 指引（带 status 错误透传）；hub 面板/console 动态页 |
+| `board-plugin/src/hub-panels.ts` | 新：v2 动态看板/总指挥部模板（无依赖 JS：拉 /api/board 自渲染列 + EventSource 刷新 + transition/comment 动作 + daemon/activity 总览） |
+| `services-plugin/index.js` | 退役 kanban-v1 托管行（4820 不再自动拉起；注释说明） |
+| `scripts/ci/archive-v1-scrum.mjs` | 新：v1 文件库归档（前置检查 4820 关闭/无近期写者；移动不删除） |
+| `scripts/live/p11-step2-verify.mjs` | 新：现场验收 probe（v2 config/面板/同池/4820 停/tasks 归档/写冒烟/501） |
+| `docs/P1-1-step2-runbook.md` | 新：现场切换 runbook（含回滚预案） |
+| `board-plugin/tests/http-contract.test.mjs` | +5 hub 用例（fake hub 支持 /api/events SSE + /api/activity）：面板/501/activity 转发/board SSE 泵/activity 实时透传 → 37/37 |
+| `tests/p13-fixture/*` | 增 `p13-board-hub` 实例（hub 模式同宿主打 v2）→ ⑤ 全链路用例 → 6/6 |
+
+### 门禁（第 2 步代码）
+
+- board-plugin http-contract 37/37；P1-3 真实宿主注入 6/6（含 hub 模式同宿主 v2 全链路）；run-ci test 全量。
+
+### 现场执行（用户，runbook §1-3）
+
+重启 3080 宿主 → `node scripts/ci/archive-v1-scrum.mjs` → `node scripts/live/p11-step2-verify.mjs`。
+完成后本条目闭环，REMAINING-TASKS P1-1 标完全完成。

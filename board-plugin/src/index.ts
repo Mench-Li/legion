@@ -12,8 +12,10 @@ import { spawn } from 'node:child_process'
 import { existsSync, readFile, watch, watchFile, unwatchFile } from 'node:fs'
 import { readFile as readFileP, realpath as realpathP } from 'node:fs/promises'
 import { basename, extname, join, normalize, sep } from 'node:path'
-import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { ClientRequest, IncomingMessage, ServerResponse } from 'node:http'
+import { get as httpGet } from 'node:http'
 import { normalizeArtifactPath } from '../../packages/shared/src/artifact-policy.mjs'
+import { HUB_BOARD_HTML, HUB_CONSOLE_HTML } from './hub-panels.js'
 
 export const name = '@dsh-external/dsh-scrum-board'
 export const inject = ['webServer']
@@ -201,6 +203,8 @@ export function apply(ctx: Context, config: Config): void {
       if (res.ok) {
         hubUrl = hub
         useHub = true
+        // P1-1 第 2 步：探测成功后建立上游 /api/events 订阅（事件桥）
+        if (hubEventsAlive) connectHubEvents()
       }
     } catch { /* 探测失败保持本地模式 */ }
   }
@@ -221,6 +225,13 @@ export function apply(ctx: Context, config: Config): void {
   async function hubBoard(): Promise<unknown> {
     const res = await fetch(`${hubUrl}/api/board?scope=${encodeURIComponent(config.scope)}`, { headers: hubHeaders() })
     if (!res.ok) throw new Error(`hub board 失败（${res.status}）`)
+    return res.json()
+  }
+
+  /** hub 通用 GET（v2 audit / activity 面）。 */
+  async function hubGet(path: string): Promise<unknown> {
+    const res = await fetch(`${hubUrl}${path}`, { headers: hubHeaders() })
+    if (!res.ok) throw new Error(`hub ${path} 失败（${res.status}）`)
     return res.json()
   }
 
@@ -336,6 +347,82 @@ export function apply(ctx: Context, config: Config): void {
     broadcastActivity()
   }
 
+  // ── P1-1 第 2 步：hub 模式事件桥（R9 缺口收口）──
+  // 本地模式：board.json watch → 全量帧；activity.jsonl watch → 增量行。
+  // hub 模式：订阅上游 v2 /api/events（audit 信封）→
+  //   ① board/events 客户端：防抖重拉 hub /api/board 推全量帧；
+  //   ② activity/events 客户端：把 v2 信封 data 行透传。
+  const hubBoardClients = new Set<ServerResponse>()
+  const hubActivityClients = new Set<ServerResponse>()
+  let hubPumpTimer: NodeJS.Timeout | undefined
+  let hubUpstream: { req: ClientRequest; close: () => void } | null = null
+  let hubEventsAlive = true // hub events effect 的 dispose 守卫（detectHub 晚到时不重建上游）
+
+  function sseHeaders(res: ServerResponse): void {
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive',
+    })
+  }
+
+  async function pumpHubBoard(): Promise<void> {
+    try {
+      const data = await hubBoard()
+      const payload = ssePayload(JSON.stringify(data))
+      for (const res of hubBoardClients) res.write(payload)
+    } catch { /* 上游暂不可达，保持连接，下个事件再试 */ }
+  }
+
+  function scheduleHubPump(): void {
+    clearTimeout(hubPumpTimer)
+    hubPumpTimer = setTimeout(() => { void pumpHubBoard() }, 200)
+  }
+
+  function connectHubEvents(): void {
+    if (!useHub || !hubEventsAlive || hubUpstream) return
+    // v2 /api/events：id 行 + data 信封；只有 data: JSON 需要透传
+    const req = httpGet(`${hubUrl}/api/events`, hubHeaders(), (res) => {
+      if (res.statusCode !== 200) {
+        res.resume()
+        scheduleHubRetry()
+        return
+      }
+      let buf = ''
+      res.on('data', (chunk: Buffer) => {
+        buf += chunk.toString('utf8')
+        let i
+        while ((i = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, i).trim()
+          buf = buf.slice(i + 1)
+          if (!line.startsWith('data:')) continue
+          const data = line.slice(5).trim()
+          if (data === '') continue
+          for (const ac of hubActivityClients) ac.write(`data: ${data}\n\n`)
+          scheduleHubPump()
+        }
+      })
+      res.on('end', () => scheduleHubRetry())
+      res.on('error', () => scheduleHubRetry())
+    })
+    req.on('error', () => scheduleHubRetry())
+    hubUpstream = {
+      req,
+      close: () => { try { req.destroy() } catch { /* ignore */ } },
+    }
+  }
+
+  let hubRetryTimer: NodeJS.Timeout | undefined
+  function scheduleHubRetry(): void {
+    if (!hubEventsAlive) return
+    if (hubUpstream) {
+      try { hubUpstream.close() } catch { /* ignore */ }
+      hubUpstream = null
+    }
+    clearTimeout(hubRetryTimer)
+    hubRetryTimer = setTimeout(() => connectHubEvents(), 3000)
+  }
+
   // tasks.json 变更 → 防抖重渲染（守护经 taskctl 直接改库，不经过写接口，需主动刷新看板）
   let renderTimer: NodeJS.Timeout | undefined
   function onTasksChange(): void {
@@ -354,11 +441,13 @@ export function apply(ctx: Context, config: Config): void {
     try {
       const body = await readBody(req)
       const task = await run(body)
-      await runRender()
+      if (!useHub) await runRender() // 本地模式：taskctl 改文件库 → 重渲染 board.json
       json(res, 200, { ok: true, task })
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
-      const status = message.includes('乐观锁') ? 409 : 400
+      // P1-1 第 2 步：hub 模式 v1 独有动作（reject/promote）降级 501 带指引
+      const status = (e as { status?: number }).status
+        ?? (message.includes('乐观锁') ? 409 : message.includes('不支持') ? 501 : 400)
       json(res, status, { error: message })
     }
   }
@@ -395,8 +484,15 @@ export function apply(ctx: Context, config: Config): void {
     })
   }
 
-  /** 服务 kanban.html，并把前端绝对路径 /api/* 重写为前缀下。 */
+  /** 服务 kanban.html，并把前端绝对路径 /api/* 重写为前缀下。
+   *  hub 模式（P1-1 第 2 步）：render 静态产物是 v1 columns 语义，与 v2 裸任务数组
+   *  不兼容 → 返回内联动态面板（拉 /api/board 自渲染 + SSE 刷新 + v2 动作）。 */
   function serveKanban(res: ServerResponse): void {
+    if (useHub) {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+      res.end(HUB_BOARD_HTML)
+      return
+    }
     readFile(kanbanFile, (err, data) => {
       if (err) {
         json(res, 404, { error: 'kanban.html 不存在，先运行 render.mjs' })
@@ -408,8 +504,13 @@ export function apply(ctx: Context, config: Config): void {
     })
   }
 
-  /** 服务军团总指挥部 console.html（同样的 /api/* 前缀重写）。 */
+  /** 服务军团总指挥部 console.html（同样的 /api/* 前缀重写）；hub 模式给 v2 动态页。 */
   function serveConsole(res: ServerResponse): void {
+    if (useHub) {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+      res.end(HUB_CONSOLE_HTML)
+      return
+    }
     readFile(consoleFile, (err, data) => {
       if (err) {
         json(res, 404, { error: 'console.html 不存在（scrum/console.html）' })
@@ -501,7 +602,11 @@ export function apply(ctx: Context, config: Config): void {
           if (typeof by !== 'string' || by.length === 0) throw new Error('缺少参数 by')
           if (typeof reason !== 'string' || reason.trim().length === 0) throw new Error('缺少参数 reason')
           if (useHub) {
-            return hubPost('/api/reject', { id, by, reason: reason.trim(), ifVersion: body.ifVersion, scope: config.scope })
+            // P1-1 第 2 步（D3）：reject 的 v1 worktree 回滚语义在 v2 不存在（v2 无 w/<id> 分支纪律），
+            // 将军打回请用 transition + comment；这里显式降级，避免把 body 打到 /api/reject 拿 404。
+            const err = new Error('v2 hub 不支持 reject（v1 worktree 打回已退役）：请用 transition 迁移 + comment 说明原因') as Error & { status?: number }
+            err.status = 501
+            throw err
           }
           const argv = ['reject', id, '--by', by, '--reason', reason.trim()]
           if (typeof body.ifVersion === 'number') argv.push('--if-version', String(body.ifVersion))
@@ -517,7 +622,11 @@ export function apply(ctx: Context, config: Config): void {
           if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
           if (typeof by !== 'string' || by.length === 0) throw new Error('缺少参数 by')
           if (useHub) {
-            return hubPost('/api/promote', { id, by, ifVersion: body.ifVersion, scope: config.scope })
+            // P1-1 第 2 步（D3）：promote（v1 将军合入 worktree 分支）在 v2 无对应端点；
+            // v2 的隔离分支合入由 worker/守护完成。显式 501 带指引。
+            const err = new Error('v2 hub 不支持 promote（v1 worktree 合入已退役）：v2 分支合入由 worker 完成，将军验收请用 transition done') as Error & { status?: number }
+            err.status = 501
+            throw err
           }
           const argv = ['promote', id, '--by', by]
           if (typeof body.ifVersion === 'number') argv.push('--if-version', String(body.ifVersion))
@@ -568,15 +677,21 @@ export function apply(ctx: Context, config: Config): void {
         return
       }
       if (path === '/api/board/events') {
-        res.writeHead(200, {
-          'content-type': 'text/event-stream; charset=utf-8',
-          'cache-control': 'no-cache',
-          connection: 'keep-alive',
-        })
+        sseHeaders(res)
         res.write('retry: 2000\n\n')
+        const heartbeat = setInterval(() => res.write(':hb\n\n'), 15000)
+        if (useHub) {
+          // hub 模式（P1-1 第 2 步）：连接即推一次 v2 全量，随后由上游 /api/events 泵推送
+          hubBoardClients.add(res)
+          void pumpHubBoard()
+          req.on('close', () => {
+            clearInterval(heartbeat)
+            hubBoardClients.delete(res)
+          })
+          return
+        }
         boardClients.add(res)
         sendBoard(res)
-        const heartbeat = setInterval(() => res.write(':hb\n\n'), 15000)
         req.on('close', () => {
           clearInterval(heartbeat)
           boardClients.delete(res)
@@ -584,6 +699,17 @@ export function apply(ctx: Context, config: Config): void {
         return
       }
       if (path === '/api/activity') {
+        if (useHub) {
+          const limit = Number(url.searchParams.get('limit') ?? 50)
+          const scope = config.scope
+          try {
+            const data = await hubGet(`/api/activity?scope=${encodeURIComponent(scope)}&limit=${limit}`)
+            json(res, 200, data)
+          } catch (e) {
+            json(res, 500, { error: e instanceof Error ? e.message : String(e) })
+          }
+          return
+        }
         const limit = Number(url.searchParams.get('limit') ?? 50)
         readFile(activityFile, (err, data) => {
           if (err) {
@@ -600,19 +726,31 @@ export function apply(ctx: Context, config: Config): void {
         return
       }
       if (path === '/api/activity/events') {
-        res.writeHead(200, {
-          'content-type': 'text/event-stream; charset=utf-8',
-          'cache-control': 'no-cache',
-          connection: 'keep-alive',
-        })
+        sseHeaders(res)
         res.write('retry: 2000\n\n')
+        const heartbeat = setInterval(() => res.write(':hb\n\n'), 15000)
+        if (useHub) {
+          // hub 模式：上游 v2 /api/events 的 data 信封逐条透传（不含本地 activity.jsonl）
+          hubActivityClients.add(res)
+          try {
+            const recent = await hubGet(`/api/activity?scope=${encodeURIComponent(config.scope)}&limit=30`) as unknown[]
+            for (const line of recent) {
+              const payload = typeof line === 'string' ? line : JSON.stringify(line)
+              res.write(`data: ${payload}\n\n`)
+            }
+          } catch { /* 回放失败跳过，实时流照常 */ }
+          req.on('close', () => {
+            clearInterval(heartbeat)
+            hubActivityClients.delete(res)
+          })
+          return
+        }
         activityClients.add(res)
         readFile(activityFile, (err, data) => {
           if (err) return
           const recent = data.toString('utf8').split('\n').filter((l) => l.length > 0).slice(-30)
           sendActivityLines(res, recent)
         })
-        const heartbeat = setInterval(() => res.write(':hb\n\n'), 15000)
         req.on('close', () => {
           clearInterval(heartbeat)
           activityClients.delete(res)
@@ -670,8 +808,25 @@ export function apply(ctx: Context, config: Config): void {
     }
   }, `${name}: watchers`)
 
-  // 启动即刷新一次看板（守护直接改 tasks.json 不改 board.json，需主动 render 保持新鲜）
-  // 启动即探测 hub（探测成功则读/写走 hub）+ 刷新一次看板
+  ctx.effect(() => {
+    // P1-1 第 2 步：hub 模式下订阅上游 v2 /api/events（事件桥），并把连接/泵收进 fiber 清理
+    if (useHub) connectHubEvents()
+    return () => {
+      hubEventsAlive = false
+      if (hubUpstream) {
+        try { hubUpstream.close() } catch { /* ignore */ }
+        hubUpstream = null
+      }
+      clearTimeout(hubRetryTimer)
+      clearTimeout(hubPumpTimer)
+      for (const res of hubBoardClients) res.end()
+      for (const res of hubActivityClients) res.end()
+      hubBoardClients.clear()
+      hubActivityClients.clear()
+    }
+  }, `${name}: hub events`)
+
+  // 启动即探测 hub（探测成功则读/写走 hub）+ 本地模式刷新一次看板
   void detectHub()
-  void runRender().catch(() => {})
+  if (!useHub) void runRender().catch(() => {})
 }

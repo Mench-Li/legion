@@ -21,7 +21,7 @@
  */
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { appendFileSync, readFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import http from 'node:http'
 import {
@@ -84,12 +84,12 @@ describeHost('P1-3 真实 DSH 宿主注入冒烟（legion 三插件）', () => {
   }, { timeout: 15000 })
 
   it('① 注入生命周期：三插件经真实 loader 组合 apply 成功，route prefix 各自挂载', async () => {
-    // team-hub 适配器挂在 /team-hub（taskctl 旧 API + SSE 的宿主承载）
+    // team-hub 宿主外壳 = v2 中枢（P1-1 合并后）：/team-hub 前缀由外壳挂到 v2 handle
     const th = await req(fx.base, 'GET', '/team-hub/api/config')
     assert.equal(th.status, 200, JSON.stringify(th.data))
-    assert.equal(th.data.auth, true) // teamToken 非空 → auth 开启
-    assert.equal(th.data.host, '127.0.0.1')
-    assert.equal(th.data.port, fx.port) // 读的是真实 webServer.port（宿主注入证据）
+    assert.equal(th.data.auth, true) // teamToken 非空 → v2 auth 开启
+    assert.ok(String(th.data.db).includes('p13-hub.db'), 'v2 config 应带 db 路径（隔离库）：' + JSON.stringify(th.data))
+    assert.equal(th.data.port, fx.port) // 外壳把 webServer.port 传给 v2（宿主注入证据）
 
     // board-plugin 挂在 /scrum-board（自托管看板 API）
     const bp = await req(fx.base, 'GET', '/scrum-board/api/config')
@@ -190,16 +190,24 @@ describeHost('P1-3 真实 DSH 宿主注入冒烟（legion 三插件）', () => {
     assert.ok(art.data && art.data.error)
   }, { timeout: 30000 })
 
-  it('④ SSE 宿主形态：activity.jsonl watch 增量广播 + board 连接即全量', async () => {
-    // team-hub /api/events：连接建立（retry 帧）后，外部追加 activity.jsonl →
-    // 宿主内 watchFile 捕获并广播 data 帧（增量推送闭环，activityOffset 由宿主维护）
+  it('④ SSE 宿主形态：v2 /team-hub/api/events 信封回放+增量 + board 本地全量', async () => {
+    // team-hub /api/events（P1-1 后 = v2 中枢）：连接即回放最近 audit（含 ② 的
+    // create/transition/comment 信封 id:+data:），随后一次新写触发增量帧（seq 递增、无重复）。
     const th = liveSse(fx.base, '/team-hub/api/events')
     try {
       assert.ok(await waitFrames(th.frames, (f) => f.some((x) => x.includes('retry:'))), '应收到 retry 帧')
-      appendFileSync(join(fx.scrumDir, 'activity.jsonl'), JSON.stringify({ ts: new Date().toISOString(), kind: 'create', taskId: 'T-001', text: '宿主SSE增量' }) + '\n')
+      const replayed = await waitFrames(th.frames, (f) => f.some((x) => x.includes('"event":"comment"') && x.includes('T-001')))
+      assert.ok(replayed, '连接应回放 v2 audit（信封含 event/seq/taskId）；frames=' + JSON.stringify(th.frames))
+      // 新写 → 宿主内 audit 追加 → SSE 推新 seq（信封 event=comment、seq 严格递增于回放）
+      const maxId = Math.max(0, ...th.frames.map((f) => {
+        const m = f.match(/"id":\s*(\d+)/)
+        return m ? Number(m[1]) : 0
+      }))
+      const cm = await req(fx.base, 'POST', '/team-hub/api/comment', { id: 'T-001', text: '宿主SSE增量', by: 'general' }, TOKEN)
+      assert.equal(cm.status, 200, JSON.stringify(cm.data))
       assert.ok(
-        await waitFrames(th.frames, (f) => f.some((x) => x.includes('宿主SSE增量'))),
-        'watchFile 应把外部追加行广播给已连客户端；frames=' + JSON.stringify(th.frames),
+        await waitFrames(th.frames, (f) => f.some((x) => x.includes('"event":"comment"') && new RegExp(`"id":\\s*${maxId + 1}\\b`).test(x))),
+        `新 audit（seq${maxId + 1}）应广播给已连客户端；frames=` + JSON.stringify(th.frames),
       )
     } finally {
       th.close()

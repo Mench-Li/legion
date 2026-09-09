@@ -31,6 +31,8 @@ export interface Config {
   hubToken: string
   /** 产物预览额外允许根（默认仅 repoRoot；非隔离 worker 产物在 workspace 时把 workspace 加进来）。 */
   artifactRoots: string[]
+  /** 未显式配置 hubUrl 时是否探测同宿主 /team-hub 并切换 hub 模式（P1-3 隔离 fixture 置 false）。 */
+  hubProbe: boolean
 }
 
 export const Config = z.object({
@@ -40,6 +42,7 @@ export const Config = z.object({
   scope: z.string().default('software'),
   hubToken: z.string().default(''),
   artifactRoots: z.array(z.string()).default([]),
+  hubProbe: z.boolean().default(true),
 })
 
 export function apply(ctx: Context, config: Config): void {
@@ -190,7 +193,7 @@ export function apply(ctx: Context, config: Config): void {
    * （P1-3 真实宿主注入修正：原硬编码 3080 会把 board 指到其他宿主/生产实例，
    *  board 与 team-hub 同宿主挂载时探测 ctx.webServer.port 的 /team-hub 才正确）。 */
   async function detectHub(): Promise<void> {
-    if (useHub) return
+    if (useHub || !config.hubProbe) return
     try {
       const origin = `http://127.0.0.1:${ctx.webServer.port}`
       const hub = `${origin}/team-hub`

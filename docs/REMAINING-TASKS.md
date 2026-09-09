@@ -16,7 +16,7 @@
 
 ### P1-1 team-hub 两套服务实现合并
 
-状态：**架构决策**
+状态：**第 1 步完成（代码收敛），第 2 步（生产拓扑切换）另立批次** —— 决策见 `docs/P1-1-DECISION.md`；验证留痕 `docs/P1-1-evidence/verify-evidence.md`
 
 问题：
 
@@ -24,22 +24,22 @@
 - `team-hub/src/index.ts` 是 DSH 宿主插件适配器，仍保留一套基于 `taskctl.mjs` 的旧任务 API 实现。
 - 两套实现的数据来源、配置入口、鉴权和接口覆盖范围不同，后续容易出现修一处、漏一处的行为漂移。
 
-涉及改动：
+涉及改动（已实施，`d47c6f5` 之后）：
 
-1. 以 `server.mjs` 作为唯一业务实现。
-2. 从 `server.mjs` 抽取可复用的 `handle(req, res)`。
-3. 将 `src/index.ts` 改成只负责 DSH `webServer` 路由注册和配置转接。
-4. 统一数据库路径、token、host、scope、SSE 和附件目录配置。
-5. 删除 `src/index.ts` 内重复的 taskctl 业务逻辑。
-6. 为独立服务和宿主适配器增加同一套 HTTP 契约测试。
+1. ✅ 以 `server.mjs` 作为唯一业务实现（决策 D1=选项 A：v2 唯一权威）。
+2. ✅ `server.mjs` 导出可复用 `handle(req, res, stripPrefix?)` + `disposeHub()` + `DEFAULT_DB_FILE`；`handle` 支持可选前缀剥离（独立进程不传、宿主外壳传 routePrefix）。
+3. ✅ `src/index.ts` 只做 DSH `webServer` 前缀路由注册 + env 配置转接（dbPath/teamToken/port），**删除 taskctl 子进程旧实现**（旧 16 端点 v1 API 面下线）。
+4. ✅ 统一数据池：宿主外壳缺省 `dbPath=''` → server.mjs 默认库 = 与 8787 独立进程同一 `team-hub/team.db`；显式 dbPath 隔离测试场景。
+5. ✅ 删除 `src/index.ts` 内重复的 taskctl 业务逻辑（442 行 → 外壳 ~90 行）。
+6. ✅ 新增同一 HTTP 契约测试：`tests/contract/team-hub-parity.test.mjs`（独立服务无前缀 vs 宿主 `/team-hub` 前缀外壳，同库同刻全等断言）。
 
 验收标准：
 
-- 独立服务和 DSH 宿主对同一请求返回相同状态码、字段和错误语义。
-- 聊天、日历、技能、空间、附件等 v2 API 在宿主模式可用。
-- 不再存在第二套任务状态机和鉴权实现。
+- ✅ 独立服务和 DSH 宿主对同一请求返回相同状态码、字段和错误语义（parity 对拍：config/404/401/409/board/comment 等）。
+- ✅ 聊天、日历、技能、空间、附件等 v2 API 在宿主模式可用（宿主只挂 v2 handle，全端点面即 v2 面；team-hub 全组 138/138 含对拍）。
+- ✅ 不再存在第二套任务状态机和鉴权实现（taskctl 子进程/文件库实现已从宿主插件删除）。
 
-风险：高。需要先确认 `server.mjs` 是否正式成为唯一权威实现。
+风险：~~高，需先确认 server.mjs 是否正式成为唯一权威实现~~ → 已拍板（D1=A、D2=两步走）。**剩余第 2 步（另立批次）**：board-plugin hub 目标切 v2 语义、v1 文件库 `scrum/tasks.json` 与 serve.mjs :4820 退役迁移、现场切换验收 —— 涉及生产行为变更，未实施（生产 3080/8787 拓扑保持现状）。注意：当前生产宿主 `/team-hub` 仍由旧 `src/index.ts` 编译产物（junction=源码，重启宿主后即切 v2 外壳）承载，第 2 步前不应重启带该插件的宿主，或先完成消费方（board-plugin hub 模式）兼容验证。
 
 ### P1-2 board-plugin 宿主 HTTP 契约测试
 

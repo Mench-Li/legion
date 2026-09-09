@@ -90,6 +90,7 @@ export function makeFixture({ port, teamToken = 'p13-fixture-token', workerInter
   const repoRootYaml = repoRoot.replace(/\\/g, '/')
   const controlYaml = control.replace(/\\/g, '/')
   const logFileYaml = join(home, 'p13-worker.log').replace(/\\/g, '/')
+  const hubDbYaml = join(home, 'workspace', 'p13-hub.db').replace(/\\/g, '/')
   writeFileSync(join(profileDir, 'cordis.patch.yml'), `# P1-3 fixture user patch layer (isolated host, never the 3080 web profile).
 - insert:
     - id: p13-webserver
@@ -106,17 +107,16 @@ export function makeFixture({ port, teamToken = 'p13-fixture-token', workerInter
     - id: p13-team-hub
       name: '@dsh-external/dsh-team-hub'
       config:
-        scrumDir: '${scrumDirYaml}'
         routePrefix: '/team-hub'
         teamToken: '${teamToken}'
-        members: []
-        scopes: {}
+        dbPath: '${hubDbYaml}'
     - id: p13-board
       name: '@dsh-external/dsh-scrum-board'
       config:
         scrumDir: '${scrumDirYaml}'
         routePrefix: '/scrum-board'
         hubUrl: ''
+        hubProbe: false
         hubToken: '${teamToken}'
         scope: 'software'
         artifactRoots: []

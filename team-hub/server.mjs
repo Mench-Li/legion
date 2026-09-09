@@ -64,6 +64,8 @@ import { standardsFor } from './stage-standards.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const DB_FILE = process.env.TEAM_HUB_DB || join(ROOT, 'team-hub', 'team.db')
+/** 默认库路径（P1-1：宿主插件未显式配置 dbPath 时与独立进程同库，保证单数据池）。 */
+export const DEFAULT_DB_FILE = DB_FILE
 // S3/R-3（决策 E1）：聊天附件落盘目录与库同基（TEAM_HUB_DB 所在目录的 uploads/ 下）。
 // 测试临时库 → uploads 自动落在 mkdtemp 内（TC-S3-16 隔离断言）；live 库目录零写入纪律不受影响。
 const UPLOADS_ROOT = join(dirname(DB_FILE), 'uploads')
@@ -2234,9 +2236,15 @@ export function artifactContent(taskId, rawI) {
   return { status: 200, body }
 }
 
-async function handle(req, res) {
+async function handle(req, res, stripPrefix) {
   const url = new URL(req.url ?? '/', 'http://x')
-  const path = url.pathname
+  let path = url.pathname
+  // P1-1 宿主集成：DSH webServer 把前缀路由（如 /team-hub）下所有请求交给本 handle，
+  // stripPrefix 非空时先把前缀裁掉，使 handle 与独立进程（无前缀）共享同一套路由表。
+  if (typeof stripPrefix === 'string' && stripPrefix.length > 1) {
+    if (path === stripPrefix) path = '/'
+    else if (path.startsWith(`${stripPrefix}/`)) path = path.slice(stripPrefix.length)
+  }
   res.setHeader('access-control-allow-origin', '*')
   if (req.method === 'OPTIONS') {
     res.writeHead(204, { 'access-control-allow-methods': 'GET, POST, PUT, OPTIONS', 'access-control-allow-headers': 'content-type, authorization, x-dsh-token, content-length' })
@@ -3321,6 +3329,15 @@ const server = http.createServer((req, res) => {
   void handle(req, res)
 })
 
+/**
+ * P1-1 宿主集成：dispose 当前 v2 实例的 SSE 客户端（宿主插件 teardown 时调用；
+ * 心跳 interval 随各连接 req close 自清；附件清理 interval 仅独立进程 isMain 时存在且 unref）。
+ */
+export function disposeHub() {
+  for (const res of eventClients) res.end()
+  eventClients.clear()
+}
+
 // 直接运行（node server.mjs）才监听；被 import 时（测试/复用）不占端口。
 const isMain = process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 if (isMain) {
@@ -3334,7 +3351,7 @@ if (isMain) {
   }, 3600 * 1000).unref()
 }
 
-export { db, server, registerSkill, reviewSkill, listSkills, grantSkill, revokeSkill, getSkill,
+export { db, server, handle, registerSkill, reviewSkill, listSkills, grantSkill, revokeSkill, getSkill,
   getSkillSource, setSkillSource,
   publishGoalRecord, setGoalState, setGoalContext, listGoals, goalView, settleGoalsOfScope, createGoalChain,
   goalDocDirOf, goalDocPathOf,

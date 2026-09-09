@@ -509,6 +509,8 @@ v1 和 v2 可能同时运行，但不要把两套存储当成同一个写源：
 
 ## 15. 贡献约定
 
+剩余架构、发布和产品待办见 [docs/REMAINING-TASKS.md](docs/REMAINING-TASKS.md)。
+
 - 修改行为时同步更新 `README.md`、`docs/FEATURES.md` 或对应模块文档。
 - 所有实现变更必须至少经过 typecheck、build 或 test 中与风险相称的一项；发布前运行全量 CI。
 - 不在 live `team.db` 上运行写入型测试；测试使用临时数据库和隔离服务。

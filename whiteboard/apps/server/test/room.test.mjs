@@ -67,12 +67,12 @@ describe('Room', () => {
   it('presence TTL：非正常断开超时移除；正常 leave 立即移除（TC-S4-04/05）', async () => {
     const room = new Room({ storage: new MemoryProvider(), ttlMs: 10000 });
     await room.init();
-    room.setPresence('A', { name: 'a', color: '#000', x: 0, y: 0 });
-    room.setPresence('B', { name: 'b', color: '#000', x: 0, y: 0 });
+    const t0 = Date.now();
+    room.setPresence('A', { name: 'a', color: '#000', x: 0, y: 0 }, t0);
+    room.setPresence('B', { name: 'b', color: '#000', x: 0, y: 0 }, t0);
     assert.equal(room.peers().length, 2);
     assert.equal(room.removePresence('B'), true);
     assert.equal(room.peers().length, 1);
-    const t0 = Date.now();
     assert.deepEqual(room.tick(t0 + 10000), []);
     assert.deepEqual(room.tick(t0 + 10001), ['A']);
     assert.equal(room.peers().length, 0);

@@ -48,8 +48,17 @@ run-ci test 全量 25 套件 PASS（v1v2-contract 14/14 证明 serve.mjs import 
 
 ## 3. 诚实边界
 
-1. 现场切换（重启 3080 宿主 → board 自动指 v2 → 归档 → probe 全 PASS）**未执行**——需用户操作（重启中断本会话）。
-   代码就绪但"生产行为已切换"这一事实待 runbook 执行后确认。
+0. **现场执行记录（2026-09-09）**：用户已重启宿主 + 归档 v1 文件库完成
+   （5 文件 → `scrum/archive/v1-2026-09-09T10-48-19-497Z/`，4820 无监听生效）。
+   但 probe 失败暴露部署链问题：`@dsh-external/dsh-team-hub|dsh-scrum-board` 在生产
+   node_modules 是 **陈旧复制副本（非 junction）**——宿主加载旧 lib（/team-hub config 返回
+   旧形状 `{auth,members,host,port}` 无 db；board 本地模式跑 render.mjs）。
+   已修正：副本改名备份（`.v1copy-20260909-185030`）+ 重建 junction → legion 源码目录
+   （team-hub lib 17:56 v2 外壳、board lib 18:42 hub 桥）。probe 加数组防御。
+   **待二次重启宿主后正式验收**（当前 PID 5708 仍为旧代码进程）。
+
+1. 现场切换（二次重启 → board 自动指 v2 → probe 全 PASS）**尚未完成**——需用户操作（重启中断本会话）。
+   代码与部署链就绪但"生产行为已切换"这一事实待二次重启后确认。
 2. hub 动态面板是轻量自渲染（无框架），覆盖看板主操作（迁移/评论/实时刷新）；未复刻旧 kanban.html 全部
    视觉细节（本地模式静态页不受影响）。console 总览页 v2 化为基础版（任务/守护/活动）。
 3. 归档脚本默认不动 `daemon.json`/`roles.json`（守护状态与流水线配置非 v1 任务数据，继续使用）。

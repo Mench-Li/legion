@@ -16,7 +16,7 @@
 
 ### P1-1 team-hub 两套服务实现合并
 
-状态：**第 1 步完成（代码收敛）+ 第 2 步代码就绪（board hub v2 化 / v1 退役），现场切换待用户按 runbook 执行** —— 决策 `docs/P1-1-DECISION.md`；第 1 步留痕 `docs/P1-1-evidence/verify-evidence.md`；第 2 步 runbook `docs/P1-1-step2-runbook.md`
+状态：**第 1 步完成 + 第 2 步代码就绪；现场切换进行中（首次重启后修正部署链 junction，待二次重启验收）** —— 决策 `docs/P1-1-DECISION.md`；第 1 步留痕 `docs/P1-1-evidence/verify-evidence.md`；第 2 步 runbook `docs/P1-1-step2-runbook.md`（§0b 部署链前置）
 
 问题：
 

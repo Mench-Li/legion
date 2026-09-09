@@ -25,6 +25,20 @@ DSH_CHECKOUT=D:/project/DSH/dsh/deepseek-harness node scripts/ci/build-external-
 node scripts/ci/build-external-package.mjs team-hub    # 第 1 步已 build；再跑一次无妨
 ```
 
+### 0b. ⚠ 部署链前置：@dsh-external 必须是 junction（2026-09-09 现场发现）
+
+首次重启后 probe 失败，根因：生产 `~/.dsh/profiles/web/node_modules/@dsh-external/` 里
+`dsh-team-hub` 与 `dsh-scrum-board` 是 **2026-08-26/09-01 的陈旧复制副本**（非 junction），
+宿主加载的是副本旧代码（/team-hub 旧 v1 适配器、board 本地模式），legion 侧新 lib 从未生效。
+`dsh-scrum-worker`/`dsh-legion-services` 一直是 junction，故不受影响。
+
+已修正（2026-09-09 18:50）：两陈旧副本改名备份（`dsh-team-hub.v1copy-20260909-185030` 等），
+重建 junction → `D:\project\DSH\legion\team-hub` / `board-plugin`。
+**若日后 pnpm install / profile 重建使副本回归，需按此重查**：
+```
+Get-Item ~/.dsh/profiles/web/node_modules/@dsh-external/* | Select Name,LinkType   # 应全为 Junction
+```
+
 ### 1. 重启 3080 宿主
 
 在 DSH Desktop / 宿主进程管理界面重启 web 服务（等同结束 PID 13816 并重新

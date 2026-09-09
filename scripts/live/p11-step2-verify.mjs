@@ -57,8 +57,10 @@ check('2b. 面板为 v2 动态页（v2 hub + EventSource）', page.status === 20
 
 // 3) 看板数据 = v2 活库（worker scope software 任务可见，含目标链 T-xxx）
 const board = await api('/scrum-board/api/board')
-check('3. /scrum-board/api/board 200', board.status === 200, `status=${board.status} ${String(board.data).slice(0, 120)}`)
-check('3b. board 为 v2 裸任务数组且非空（software 池）', Array.isArray(board.data) && board.data.length > 0, `len=${Array.isArray(board.data) ? board.data.length : '?'}`)
+check('3. /scrum-board/api/board 200', board.status === 200, `status=${board.status}`)
+check('3b. board 为 v2 裸任务数组且非空（software 池）', Array.isArray(board.data) && board.data.length > 0,
+  `len=${Array.isArray(board.data) ? board.data.length : typeof board.data + ':' + String(board.data).slice(0, 120)}`)
+const boardTasks = Array.isArray(board.data) ? board.data : []
 
 // 4) 与 8787 直连数据一致（同池证据）
 const hub = await api('/scrum-board/api/board') // 同宿主已走 hub
@@ -68,8 +70,8 @@ try {
   if (r.ok) direct = await r.json()
 } catch { /* 8787 未起则跳过 */ }
 if (direct) {
-  const idsA = new Set(board.data.map((t) => t.id))
-  const idsB = new Set(direct.map((t) => t.id))
+  const idsA = new Set(boardTasks.map((t) => t.id))
+  const idsB = new Set((Array.isArray(direct) ? direct : []).map((t) => t.id))
   check('4. 看板数据与 8787 v2 同池（任务 id 集合一致）', idsA.size > 0 && idsA.size === idsB.size && [...idsA].every((i) => idsB.has(i)), `board=${idsA.size} direct=${idsB.size}`)
 } else {
   check('4. 8787 直连比对', false, '8787 不可达（服务未托管？）')

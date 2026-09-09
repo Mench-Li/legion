@@ -75,14 +75,14 @@ export class Room {
   }
 
   /** 更新 presence（临态，绝不写 doc/存储） */
-  setPresence(clientId, state) {
+  setPresence(clientId, state, now = Date.now()) {
     const s = {
       name: typeof state?.name === 'string' ? state.name.slice(0, 32) : 'anonymous',
       color: typeof state?.color === 'string' ? state.color.slice(0, 16) : '#888888',
       x: Number.isFinite(state?.x) ? state.x : 0,
       y: Number.isFinite(state?.y) ? state.y : 0,
     };
-    this.presence.set(clientId, { state: s, lastSeen: Date.now() });
+    this.presence.set(clientId, { state: s, lastSeen: now });
     return s;
   }
 

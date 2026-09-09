@@ -550,7 +550,8 @@ const server = createServer((req, res) => {
   }
 
   if (url.pathname === '/api/activity') {
-    const limit = Number(url.searchParams.get('limit') ?? 50)
+    // limit 尾部语义与 v2 /api/activity 对齐：默认 50、上限 500（防文件全量读爆内存）。
+    const limit = Math.min(Number(url.searchParams.get('limit') ?? 50) || 50, 500)
     readFile(ACTIVITY_FILE, (err, data) => {
       if (err) {
         json(res, 200, []) // 尚无动态
@@ -590,14 +591,13 @@ const server = createServer((req, res) => {
 
   const file = safeStatic(url.pathname)
   if (file === null) {
-    res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' })
-    res.end('not found')
+    // 未知路径 404 统一 JSON {error}（对齐 v2/board-plugin 错误响应形态，契约 §5 R7）
+    json(res, 404, { error: `not found: ${url.pathname}` })
     return
   }
   readFile(file, (err, data) => {
     if (err) {
-      res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' })
-      res.end('not found')
+      json(res, 404, { error: `not found: ${url.pathname}` })
       return
     }
     res.writeHead(200, { 'content-type': MIME[extname(file)] ?? 'application/octet-stream' })

@@ -25,6 +25,7 @@ import {
 } from './api'
 import { buildMissions, labelsFromPipeline } from './missions'
 import { boardFromHubTasks } from './hubBoard'
+import { activityFingerprint } from './dedupe'
 import type { ActivityEvent, ApiConfig, BoardData, GoalInfo, GoalStatus, Mission, RosterAgent, SpaceInfo } from './types'
 import { Sidebar } from './components/Sidebar'
 import { KpiBar } from './components/KpiBar'
@@ -76,7 +77,8 @@ export default function App(): React.JSX.Element {
   const hubModeRef = useRef(false)
   hubModeRef.current = hubMode
 
-  const eventKey = (ev: ActivityEvent): string => `${ev.ts}|${ev.kind}|${ev.taskId ?? ''}|${ev.text}`
+  // v1 activity 事件内容指纹（P2-3 S6：实现统一在 ../dedupe.ts，供单测锁定与组件共用）
+  const eventKey = (ev: ActivityEvent): string => activityFingerprint(ev)
 
   /**
    * 任务集加载：中枢（team-hub v2，真 scope 分区）优先，否则 serve.mjs v1（无分区）。

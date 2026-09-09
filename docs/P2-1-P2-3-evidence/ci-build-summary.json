@@ -1,0 +1,18 @@
+{
+  "root": "D:\\project\\DSH\\legion",
+  "outDir": "D:\\project\\DSH\\legion\\scratch\\ci-out-bd",
+  "finishedAt": "2026-09-09T08:01:09.645Z",
+  "stages": [
+    {
+      "name": "build",
+      "status": "PASS",
+      "ms": 13667
+    },
+    {
+      "name": "doc",
+      "status": "PASS",
+      "ms": 123
+    }
+  ],
+  "failed": 0
+}

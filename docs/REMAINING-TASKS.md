@@ -93,24 +93,41 @@
 
 ### P2-1 v1/v2 任务状态、分页和 SSE 语义统一
 
-状态：**可独立实施**
+状态：**已完成**（2026-09-09，随 v1v2 契约对比测试与文档基线合入）
 
 问题：
 
 - v1 使用 `tasks.json/activity.jsonl`，v2 使用 SQLite。
 - 任务状态、分页字段、SSE 初始事件、activity 结构和错误码存在潜在差异。
 
-涉及改动：
+已完成改动：
 
-- 建立 v1/v2 统一接口契约表。
-- 对齐 `/api/board`、`/api/activity`、`/api/events`、`/api/create`、`/api/transition`、`/api/comment` 和 `/api/artifact`。
-- 使用同一 fixture 对比状态码、JSON 字段、错误语义和 SSE event。
+- **契约表入库**：`docs/CONTRACT-V1V2.md` —— v1/v2/board-plugin 三路只读盘点收敛为统一接口契约表
+  （任务公共字段子集、写接口入参、错误分类矩阵、SSE 生命周期、登记差异 R1-R10），作为后续实现与
+  测试断言锚点。
+- **v1 低风险对齐**（`scrum/serve.mjs`）：
+  - `/api/activity` limit 加 cap 500（对齐 v2 上限，消除「无上限全量读」分叉；缺省 50 不变，0/NaN 兜底）。
+  - 未知路径/静态缺失 404 由 text/plain 统一为 JSON `{error}`（对齐 v2/board-plugin 错误响应形态）。
+- **v2 事件信封统一**（`team-hub/server.mjs`）：新增 `auditEvent()`（audit 行 → 对外事件对象），
+  REST `/api/activity` 与 SSE `/api/events` 共用——既有平铺字段（seq/ts/member/scope/action/taskId/
+  goalId/detail）不变，补 `event`(=action)/`id`(=seq)/`payload`(=detail) 兼容信封字段。
+- **SSE 协议改造**（P2-3，见下条目）：id: 行 + Last-Event-ID 增量回放。
+- **共享 fixture 契约测试**：`tests/contract/v1v2-contract.test.mjs` —— 同一业务场景（create → comment →
+  transition）分别打真实 v1（serve.mjs + 临时任务库 + taskctl/render 副本 fixture）与真实 v2
+  （server.mjs + mkdtemp SQLite），断言：写响应壳 `{ok,task}`、22 个任务公共字段两端一致、错误分类
+  矩阵（缺参 400/非法迁移 400/乐观锁 409/未知路径 404 JSON）、`/api/activity` limit 尾部语义、v1
+  `/api/board`（渲染快照）与 v2 `/api/board`（任务裸数组）语义登记、v2 SSE 信封与 Last-Event-ID、
+  v1 双流既有形态锁定。
+- 门禁接线：`scripts/ci/run-ci.mjs` test 阶段新增 `v1v2-contract` 套件组。
 
-验收标准：
+验收标准核对：
 
-- 同一业务场景在 v1/v2 的公共字段和错误分类一致。
-- 保留 v1 兼容字段，但不再新增语义分叉。
-- SSE 支持统一的序号、heartbeat 和断线清理行为。
+- 同一业务场景 v1/v2 公共字段与错误分类一致：✅（写契约 describe 5 用例 + 错误矩阵）。
+- 保留 v1 兼容字段、不再新增语义分叉：✅（v1 仅对齐 cap 与 404 形态，未动字段面；差异登记 R1-R10）。
+- SSE 统一序号、heartbeat 与断线清理：✅（v2 /api/events id: 行 + Last-Event-ID + 既有 :hb/close 清理锁定；
+  v1 无全局 seq 维持回放+指纹去重，契约登记 S3）。
+
+范围说明：v1/v2 数据底座不同是架构事实（P1-1 另立）；P2-1 统一契约面（字段/错误/SSE 行为），不合并实现。
 
 ### P2-2 team-hub 读接口权限模型统一
 
@@ -158,19 +175,39 @@
 
 ### P2-3 SSE 生命周期和断线恢复统一
 
-状态：**可独立实施**
+状态：**已完成**（2026-09-09，随 v2 /api/events 信封与 Last-Event-ID 合入）
 
 问题：
 
 - v1、v2、board-plugin 各自维护 SSE 客户端集合。
 - 初始事件、增量事件、heartbeat、重连和重复事件处理方式不同。
 
-涉及改动：
+已完成改动：
 
-- 统一事件字段：`id`、`event`、`scope`、`seq`、`ts`、`payload`。
-- 支持 `Last-Event-ID`。
-- 统一 heartbeat、关闭清理和前端去重。
-- 增加断线重连和乱序事件测试。
+- **统一事件信封**（v2 /api/events + REST /api/activity 共用 `auditEvent()`）：data 帧在既有平铺字段
+  （seq/ts/member/scope/action/taskId/goalId/detail）之上补 `event`(=action)/`id`(=seq)/`payload`
+  (=detail) 兼容字段；SSE 帧加 `id: <seq>` 行（浏览器 EventSource 原生断点续传基础）。
+- **Last-Event-ID 支持**（`team-hub/server.mjs` /api/events）：读 `Last-Event-ID` 头，合法序号 → 只回放
+  `seq > N` 的增量（升序）；无/非法 → 回退最近 30 条升序回放（不报错）。
+- **heartbeat/关闭清理**：15s `:hb` 注释帧 + close 时 clearInterval + Set 删除既有同构行为，契约测试锁定。
+- **前端去重抽纯函数 + 单测**：`workbench/src/dedupe.ts`（`dedupeSeqDesc`/`mergeById`/
+  `activityFingerprint`/`dedupeByFingerprint`），NotifyView/ChatView/App 改为复用；
+  新增 `workbench/scripts/dedupe.test.mjs` 9 用例（docs/review/T-100-REVIEW.md O5 缺口收口）。
+- **断线/乱序测试**：`tests/contract/v1v2-contract.test.mjs` SSE describe —— 连接回放升序、信封字段、
+  Last-Event-ID 增量续传（seq=max+1 单条、无重复）、非法 Last-Event-ID 回退、15s 心跳实测、
+  v1 双流既有形态锁定。
+- 门禁接线：`scripts/ci/run-ci.mjs` test 阶段新增 `dedupe` 套件组。
+
+验收标准核对：
+
+- 统一事件字段 id/event/scope/seq/ts/payload：✅（v2 data 帧含全部 6 字段，payload 兼容 detail）。
+- 支持 Last-Event-ID：✅（HTTP 级续传测试）。
+- 统一 heartbeat、关闭清理和前端去重：✅（心跳/清理契约锁定；去重三口径统一纯函数 + 单测）。
+- 断线重连和乱序事件测试：✅（Last-Event-ID 断线续传 + 去重函数乱序收敛）。
+
+范围说明：v1 activity 事件无全局 seq（activity.jsonl 文件追加模型），Last-Event-ID 完整闭环在 v2/
+board-plugin-hub 成立；v1 维持「连接回放 + 内容指纹去重」（App.tsx seenEvents），契约表 S3 登记；
+board-plugin hub 模式 SSE 桥接（R9）属跨宿主改造，登记移交 P1-3/P1-1（真实宿主联调）一并验证。
 
 ## P2：Workbench 功能完善
 

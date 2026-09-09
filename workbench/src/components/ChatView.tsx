@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createChatConversation, fetchChatConversations, fetchChatHealth, fetchChatMessages, fetchChatReplySettings, fetchSpaces, hubBase, postChatMessage, retryChatReply, saveChatReplySettings, subscribeHubAudit, uploadChatAttachment } from '../api'
 import type { ChatAttachmentRef, ChatConversation, ChatHealthInfo, ChatMessage, SpaceInfo } from '../types'
+import { mergeById } from '../dedupe'
 import { toast } from './Toast'
 
 const MAX_BODY = 8000 // 与后端 MAX_CHAT_BODY 对齐（TC-S1-12 / TC-S2-10）
@@ -48,13 +49,7 @@ function fmt(ts: string | null): string {
   return d.toLocaleTimeString('zh-CN', { hour12: false })
 }
 
-/** 按 id 合并两批升序消息（去重保序；live 合并/加载更早/发送追加共用）。 */
-function mergeById(a: ChatMessage[], b: ChatMessage[]): ChatMessage[] {
-  const map = new Map<number, ChatMessage>()
-  for (const m of a) map.set(m.id, m)
-  for (const m of b) map.set(m.id, m)
-  return [...map.values()].sort((x, y) => x.id - y.id)
-}
+/** 按 id 合并两批升序消息（去重保序；live 合并/加载更早/发送追加共用）。实现见 ../dedupe.ts（P2-3 S6 抽纯函数可测）。 */
 
 function authorLabel(m: ChatMessage): string {
   return m.author === 'general' ? '将军' : m.author

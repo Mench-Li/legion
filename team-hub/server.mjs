@@ -809,7 +809,7 @@ function audit(member, scope, action, taskId, detail, goalId = null) {
   const seq = nextSeq++
   db.prepare('INSERT INTO audit (seq, ts, member, scope, action, taskId, detail, goalId) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
     .run(seq, now(), member, scope, action, taskId, JSON.stringify(detail), goalId)
-  broadcastAudit({ seq, ts: now(), member, scope, action, taskId, goalId, detail })
+  broadcastAudit(auditEvent({ seq, ts: now(), member, scope, action, taskId, goalId, detail }))
   return seq
 }
 
@@ -2005,9 +2005,29 @@ function inboxCount({ role, soldier, scope }) {
 
 // ── SSE ──
 const eventClients = new Set()
+
+/** audit 行 → 对外事件对象（REST /api/activity 与 SSE /api/events 共用，P2-3 统一信封）：
+ *  既有平铺字段（seq/ts/member/scope/action/taskId/goalId/detail）保持不变，
+ *  补 event(=action)/id(=seq)/payload(=detail) 兼容目标信封字段名（契约 CONTRACT-V1V2.md §6.3）。 */
+function auditEvent(r) {
+  const seq = r.seq
+  const ts = r.ts
+  const scope = r.scope
+  const action = r.action
+  const taskId = r.taskId
+  const goalId = r.goalId ?? null
+  const detail = parseJson(r.detail, {})
+  return { seq, ts, scope, event: action, action, taskId, member: r.member, goalId, id: seq, payload: detail, detail }
+}
+
+/** 推一条完整 SSE data 帧：id: 行（seq，供 EventSource Last-Event-ID 断线续传）+ data JSON。 */
+function writeEventFrame(res, entry) {
+  res.write(`id: ${entry.seq}\n`)
+  res.write(`data: ${JSON.stringify(entry)}\n\n`)
+}
+
 function broadcastAudit(entry) {
-  const payload = `data: ${JSON.stringify(entry)}\n\n`
-  for (const res of eventClients) res.write(payload)
+  for (const res of eventClients) writeEventFrame(res, entry)
 }
 
 // ── HTTP ──
@@ -2817,11 +2837,7 @@ async function handle(req, res) {
       } else {
         rows = db.prepare('SELECT * FROM audit ORDER BY seq DESC LIMIT ?').all(limit)
       }
-      json(res, 200, rows.map((r) => ({
-        seq: r.seq, ts: r.ts, member: r.member, scope: r.scope, action: r.action, taskId: r.taskId,
-        goalId: r.goalId ?? null,
-        detail: parseJson(r.detail, {}),
-      })))
+      json(res, 200, rows.map(auditEvent))
       return
     }
 
@@ -3267,10 +3283,16 @@ async function handle(req, res) {
       res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache', connection: 'keep-alive' })
       res.write('retry: 2000\n\n')
       eventClients.add(res)
-      const recent = db.prepare('SELECT * FROM audit ORDER BY seq DESC LIMIT 30').all().reverse()
-      for (const r of recent) {
-        res.write(`data: ${JSON.stringify({ seq: r.seq, ts: r.ts, member: r.member, scope: r.scope, action: r.action, taskId: r.taskId, goalId: r.goalId ?? null, detail: parseJson(r.detail, {}) })}\n\n`)
+      // Last-Event-ID 断线续传（P2-3 S2）：带合法序号则只回放 seq > N 的增量；
+      // 无/非法则回放最近 30 条（契约 §6.2：seq 单调，配合 id: 行 EventSource 原生续传）。
+      const lastEventId = Number.parseInt(String(req.headers['last-event-id'] ?? ''), 10)
+      let replay
+      if (Number.isFinite(lastEventId)) {
+        replay = db.prepare('SELECT * FROM audit WHERE seq > ? ORDER BY seq ASC').all(lastEventId)
+      } else {
+        replay = db.prepare('SELECT * FROM audit ORDER BY seq DESC LIMIT 30').all().reverse()
       }
+      for (const r of replay) writeEventFrame(res, auditEvent(r))
       const heartbeat = setInterval(() => res.write(':hb\n\n'), 15000)
       req.on('close', () => { clearInterval(heartbeat); eventClients.delete(res) })
       return

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { countNotifyUnread, fetchHubActivity, hubBase, isNotifyAction, notifyReadSeq, setNotifyReadSeq, subscribeHubAudit } from '../api'
 import type { NotifyRow } from '../api'
+import { dedupeSeqDesc as dedupeDesc } from '../dedupe'
 import { toast } from './Toast'
 import { TaskDetailModal } from './TaskDetailModal'
 
@@ -51,18 +52,7 @@ function fmtTime(ts: string): string {
   return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes())
 }
 
-/** 按 seq 去重并降序（服务端 scope 查询本身降序；SSE 回放/轮询合并时兜底排序）。 */
-function dedupeDesc(rows: NotifyRow[]): NotifyRow[] {
-  const seen = new Set<number>()
-  const out: NotifyRow[] = []
-  for (const r of rows) {
-    if (seen.has(r.seq)) continue
-    seen.add(r.seq)
-    out.push(r)
-  }
-  out.sort((a, b) => b.seq - a.seq)
-  return out
-}
+/** 按 seq 去重并降序（服务端 scope 查询本身降序；SSE 回放/轮询合并时兜底排序）。实现见 ../dedupe.ts（P2-3 S6 抽纯函数可测）。 */
 
 /**
  * 通知中心（S7 ← R-B2：audit 派生面板，J8-A 纯前端派生，后端零改动）。

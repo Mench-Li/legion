@@ -1,0 +1,13 @@
+{
+  "root": "D:\\project\\DSH\\legion",
+  "outDir": "D:\\project\\DSH\\legion\\scratch\\ci-out-test",
+  "finishedAt": "2026-09-09T08:00:49.919Z",
+  "stages": [
+    {
+      "name": "test",
+      "status": "PASS",
+      "ms": 50835
+    }
+  ],
+  "failed": 0
+}

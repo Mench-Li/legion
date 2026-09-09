@@ -69,6 +69,17 @@ node scripts/ci/run-ci.mjs --only test --out .ci/p2-13-test-run
 [test] -> PASS (50837ms)
 ```
 
+> 补跑（2026-09-09，配置 `DSH_CHECKOUT=D:\project\DSH\dsh\deepseek-harness` 后补齐宿主面，
+> 确认 P2-1/P2-3 改动对 board-plugin/plugins 零回归）：
+>
+> ```
+> $env:DSH_CHECKOUT='D:\project\DSH\dsh\deepseek-harness'
+> node scripts/ci/build-external-package.mjs board-plugin   # exit 0
+> node --test board-plugin/tests/http-contract.test.mjs     # 32/32 pass
+> node scripts/ci/build-external-package.mjs plugins        # exit 0
+> node --test plugins/tests/*.test.mjs                      # 135/135 pass
+> ```
+
 ### 2) run-ci build 阶段（Workbench tsc + vite 消费方改动门禁）
 
 ```
@@ -106,8 +117,9 @@ check-docs: PASS（README.md + docs/FEATURES.md 结构/链接/索引一致，8 �
 
 ## 诚实边界
 
-- 本机未配置 `DSH_CHECKOUT`，plugins/board-plugin 宿主套件按 P1-2 纪律 SKIP（不伪造通过）；
-  board-plugin 本地契约套件（32 用例）在配置了 checkout 的 CI 上仍会跑，本批未改动其代码。
+- 首跑本机未配置 `DSH_CHECKOUT`，plugins/board-plugin 宿主套件按 P1-2 纪律 SKIP（不伪造通过）；
+  随后配置 `DSH_CHECKOUT=D:\project\DSH\dsh\deepseek-harness` 补跑：board-plugin 构建 exit 0 +
+  契约套件 32/32，plugins 构建 exit 0 + 135/135（见 §1 补跑记录），确认本批改动零回归。
 - v1 activity 事件无全局 seq（activity.jsonl 追加模型）——Last-Event-ID 完整闭环在 v2/board-plugin-hub
   成立；v1 维持「连接回放 + 内容指纹去重」，契约表 S3 登记并有测试锁定行为。
 - board-plugin hub 模式 SSE 桥接（契约表 R9：数据面走 hub、SSE 播本地文件）属跨宿主改造，需真实

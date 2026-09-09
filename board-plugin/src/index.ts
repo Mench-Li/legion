@@ -193,20 +193,33 @@ export function apply(ctx: Context, config: Config): void {
 
   /** 探测默认 hub（未显式配置 hubUrl 时）：同宿主 webServer 的 /team-hub
    * （P1-3 真实宿主注入修正：原硬编码 3080 会把 board 指到其他宿主/生产实例，
-   *  board 与 team-hub 同宿主挂载时探测 ctx.webServer.port 的 /team-hub 才正确）。 */
-  async function detectHub(): Promise<void> {
+   *  board 与 team-hub 同宿主挂载时探测 ctx.webServer.port 的 /team-hub 才正确）。
+   * P1-1 第 2 步现场：探测必须带重试——宿主 boot 序列中 board 先于 team-hub
+   *  挂载时，单次探测会命中「路由尚未注册」的 404（res.ok=false），若一次即放弃
+   *  会永久停留本地模式（生产 v1 池表象的根因之一）。轮询 ≤8 次 × 750ms。 */
+  let hubDetectTimer: NodeJS.Timeout | undefined
+  function detectHub(): void {
     if (useHub || !config.hubProbe) return
-    try {
-      const origin = `http://127.0.0.1:${ctx.webServer.port}`
-      const hub = `${origin}/team-hub`
-      const res = await fetch(`${hub}/api/config`, { headers: hubHeaders(), signal: AbortSignal.timeout(2000) })
-      if (res.ok) {
-        hubUrl = hub
-        useHub = true
-        // P1-1 第 2 步：探测成功后建立上游 /api/events 订阅（事件桥）
-        if (hubEventsAlive) connectHubEvents()
-      }
-    } catch { /* 探测失败保持本地模式 */ }
+    let tries = 0
+    const attempt = (): void => {
+      void (async () => {
+        try {
+          const origin = `http://127.0.0.1:${ctx.webServer.port}`
+          const hub = `${origin}/team-hub`
+          const res = await fetch(`${hub}/api/config`, { headers: hubHeaders(), signal: AbortSignal.timeout(1500) })
+          if (res.ok) {
+            hubUrl = hub
+            useHub = true
+            // P1-1 第 2 步：探测成功后建立上游 /api/events 订阅（事件桥）
+            if (hubEventsAlive) connectHubEvents()
+            return
+          }
+        } catch { /* 未就绪/不可达，下一轮重试 */ }
+        tries += 1
+        if (tries <= 8) hubDetectTimer = setTimeout(attempt, 750)
+      })()
+    }
+    attempt()
   }
 
   /** hub 写调用（POST）。 */
@@ -826,7 +839,12 @@ export function apply(ctx: Context, config: Config): void {
     }
   }, `${name}: hub events`)
 
-  // 启动即探测 hub（探测成功则读/写走 hub）+ 本地模式刷新一次看板
-  void detectHub()
+  ctx.effect(() => {
+    // 启动即探测 hub（带重试轮询，见 detectHub）；dispose 时停掉未决探测
+    detectHub()
+    return () => { clearTimeout(hubDetectTimer) }
+  }, `${name}: hub detect`)
+
+  // 本地模式刷新一次看板（hub 模式由探测成功切走，不渲染本地 v1）
   if (!useHub) void runRender().catch(() => {})
 }

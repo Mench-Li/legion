@@ -3,7 +3,7 @@
 // HTTP 范式仿 calendar.test.mjs：临时 TEAM_HUB_DB + import server.mjs + mod.server.listen(0) + fetch。
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -69,11 +69,21 @@ function seedSpaceZ() {
   mod.db.prepare("INSERT INTO calendar_events (scope, title, start, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?)").run(Z, '日程2', '2026-08-11T10:00', t, t)
   mod.db.prepare("INSERT INTO members (id, scope, kind, lastSeenAt, online) VALUES (?, ?, ?, ?, ?)").run('m-z-1', Z, 'agent', t, 1)
   mod.db.prepare("INSERT INTO members (id, scope, kind, lastSeenAt, online) VALUES (?, ?, ?, ?, ?)").run('m-z-2', Z, 'agent', t, 0)
+  // 之前删除遗漏的 scope 数据：回复设置、附件、规则、技能来源及磁盘附件。
+  mod.db.prepare("INSERT INTO chat_reply_settings (scope, enabled, updatedAt) VALUES (?, ?, ?)").run(Z, 1, t)
+  mod.db.prepare("INSERT INTO rules (key, scope, content, updatedAt) VALUES (?, ?, ?, ?)").run(Z, Z, 'z rule', t)
+  mod.db.prepare("INSERT INTO skill_sources (scope, url, branch, updatedAt) VALUES (?, ?, ?, ?)").run(Z, 'https://example.test/z.git', 'main', t)
+  const relAttachment = Z + '/deadbeef'
+  const absAttachment = join(tmpRoot, 'uploads', relAttachment)
+  mkdirSync(join(tmpRoot, 'uploads', Z), { recursive: true })
+  writeFileSync(absAttachment, 'z attachment')
+  mod.db.prepare("INSERT INTO chat_attachments (scope, file_name, size, kind, sha1, path, status, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+    .run(Z, 'z.txt', 12, 'text', 'deadbeef', relAttachment, 'sent', t)
 }
 
 /** 各表 scope=Z 剩余计数。 */
 function leftovers() {
-  const keys = ['tasks', 'roster', 'agent_models', 'exec_requests', 'skills', 'goal', 'exec_state', 'conversations', 'messages', 'calendar_events', 'members']
+  const keys = ['tasks', 'roster', 'agent_models', 'exec_requests', 'skills', 'goal', 'exec_state', 'conversations', 'messages', 'calendar_events', 'members', 'chat_reply_settings', 'chat_attachments', 'rules', 'skill_sources']
   const out = {}
   for (const k of keys) out[k] = mod.db.prepare("SELECT COUNT(*) AS c FROM " + k + " WHERE scope = ?").get(Z).c
   out.spaces = mod.db.prepare("SELECT COUNT(*) AS c FROM spaces WHERE id = ?").get(Z).c
@@ -98,6 +108,10 @@ describe('TC-S7-01..04 正常删除：removed 逐表计数 + 收口断言 + audi
     assert.equal(c.messages, 5)
     assert.equal(c.calendarEvents, 2)
     assert.equal(c.members, 2)
+    assert.equal(c.chatReplySettings, 1)
+    assert.equal(c.chatAttachments, 1)
+    assert.equal(c.rules, 1)
+    assert.equal(c.skillSources, 1)
     assert.equal(impactBefore.json.running.tasks.length, 2, '在办任务(进行中+待验收) 2 条')
     const again = await get('/api/spaces/impact?id=' + Z)
     assert.deepEqual(again.json.counts, impactBefore.json.counts, '只读预检：两次调用间零变化')
@@ -110,6 +124,11 @@ describe('TC-S7-01..04 正常删除：removed 逐表计数 + 收口断言 + audi
     assert.equal(del.json.task.removed.messages, 5)
     assert.equal(del.json.task.removed.calendarEvents, 2)
     assert.equal(del.json.task.removed.members, 2)
+    assert.equal(del.json.task.removed.chatReplySettings, 1)
+    assert.equal(del.json.task.removed.chatAttachments, 1)
+    assert.equal(del.json.task.removed.rules, 1)
+    assert.equal(del.json.task.removed.skillSources, 1)
+    assert.equal(existsSync(join(tmpRoot, 'uploads', Z)), false, '空间附件目录已清理')
     const remain = leftovers()
     for (const k of Object.keys(remain)) assert.equal(remain[k], 0, k + ' 零残留')
     const scopes = (await get('/api/scopes')).json.scopes

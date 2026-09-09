@@ -8,6 +8,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 import { WebSocketServer } from './ws.mjs';
+import { validateSecurityConfig } from './security.mjs';
 import { Room } from './room.mjs';
 import { createStorage } from './storage.mjs';
 import { serializeDoc } from '../../../packages/shared/src/crdt.mjs';
@@ -15,10 +16,11 @@ import { serializeDoc } from '../../../packages/shared/src/crdt.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const PORT = Number(process.env.PORT || 8080);
-const HOST = process.env.HOST || '0.0.0.0';
+const HOST = process.env.HOST || '127.0.0.1';
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'data', 'whiteboard.db');
 const TTL_MS = Number(process.env.TTL_MS || 10000);
 const WEB_ROOT = path.resolve(__dirname, '..', '..', 'web', 'public');
+const WHITEBOARD_TOKEN = process.env.WHITEBOARD_TOKEN || '';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -45,6 +47,7 @@ function serveStatic(req, res) {
 }
 
 async function main() {
+  validateSecurityConfig();
   const storage = createStorage(DB_PATH);
   const room = new Room({ storage, ttlMs: TTL_MS, snapshotEveryMs: 1000 });
   await room.init();
@@ -60,7 +63,7 @@ async function main() {
     serveStatic(req, res);
   });
 
-  const wss = new WebSocketServer({ server, path: '/ws', maxLen: 1024 * 1024 });
+  const wss = new WebSocketServer({ server, path: '/ws', maxLen: 1024 * 1024, token: WHITEBOARD_TOKEN });
 
   wss.on('connection', (conn) => {
     const connId = crypto.randomUUID();

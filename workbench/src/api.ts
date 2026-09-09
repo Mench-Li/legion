@@ -59,6 +59,12 @@ function authHeaders(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {}
 }
 
+function withAuthHeaders(headers?: HeadersInit): Headers {
+  const merged = new Headers(headers)
+  for (const [key, value] of Object.entries(authHeaders())) merged.set(key, value)
+  return merged
+}
+
 async function readJson<T>(res: Response): Promise<T> {
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
   return res.json() as Promise<T>
@@ -676,7 +682,7 @@ interface FilesErrorPayload {
 }
 
 async function filesWrite<T>(url: string, init: RequestInit): Promise<T> {
-  const res = await fetch(url, init)
+  const res = await fetch(url, { ...init, headers: withAuthHeaders(init.headers) })
   if (!res.ok) {
     const body = await res.json().catch(() => null) as FilesErrorPayload | null
     const err = new Error(body?.error ?? `${res.status} ${res.statusText}`) as Error & { status?: number }
@@ -730,7 +736,7 @@ export interface SkillCandidate {
 /** 扫描本地目录（scope 工作区内的相对路径）→ 候选列表（不写入中枢）。 */
 export async function scanSkillsDir(scope: string, path: string): Promise<SkillCandidate[]> {
   const res = await fetch('/api/skills/scan-dir', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    method: 'POST', headers: withAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ scope, path }),
   })
   const body = await res.json().catch(() => null) as { candidates?: SkillCandidate[]; error?: string } | null
@@ -741,7 +747,7 @@ export async function scanSkillsDir(scope: string, path: string): Promise<SkillC
 /** 从 GitHub 仓库拉取（归档到受控缓存再扫描）→ 候选列表（不写入中枢）。 */
 export async function scanSkillsGithub(scope: string, url: string): Promise<{ candidates: SkillCandidate[]; archiveDir?: string }> {
   const res = await fetch('/api/skills/scan-github', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    method: 'POST', headers: withAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ scope, url }),
   })
   const body = await res.json().catch(() => null) as { candidates?: SkillCandidate[]; archiveDir?: string; error?: string } | null
@@ -752,7 +758,7 @@ export async function scanSkillsGithub(scope: string, url: string): Promise<{ ca
 /** 把选中的技能候选注册到中枢（→ pending 待复审）。 */
 export async function importSkillCandidates(scope: string, candidates: SkillCandidate[]): Promise<{ results: { id: string; ok: boolean; error?: string; version?: number }[] }> {
   const res = await fetch('/api/skills/import', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    method: 'POST', headers: withAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ scope, candidates }),
   })
   const body = await res.json().catch(() => null) as ({ results: { id: string; ok: boolean; error?: string; version?: number }[]; error?: string }) | null
@@ -800,7 +806,7 @@ export interface SkillSyncResult {
 
 export async function syncSkills(scope: string, url: string, branch: string, strategy: 'upgrade' | 'skip'): Promise<SkillSyncResult> {
   const res = await fetch('/api/skills/sync', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    method: 'POST', headers: withAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ scope, url, branch, strategy }),
   })
   const body = await res.json().catch(() => null) as (SkillSyncResult & { error?: string }) | null

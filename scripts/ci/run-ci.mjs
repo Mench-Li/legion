@@ -69,8 +69,8 @@ function exec(cmd, args, opts = {}) {
   })
 }
 
-async function runNodeTests(label, files, cwd) {
-  const r = await exec(process.execPath, ['--test', ...files], { cwd })
+async function runNodeTests(label, files, cwd, nodeArgs = []) {
+  const r = await exec(process.execPath, [...nodeArgs, '--test', ...files], { cwd })
   const all = r.out + '\n' + r.err
   const num = (re) => { const m = re.exec(all); return m ? Number(m[1]) : NaN }
   const counts = { tests: num(/\btests\s+(\d+)/), pass: num(/\bpass\s+(\d+)/), fail: num(/\bfail\s+(\d+)/) }
@@ -190,8 +190,18 @@ async function stageTest() {
     { label: 'chat（对话中心契约）', files: ['team-hub/chat.test.mjs'], cwd: ROOT },
     { label: 'skills（共享技能回归）', files: ['team-hub/skills.test.mjs'], cwd: ROOT },
     { label: 'calendar（日程日历契约）', files: ['team-hub/calendar.test.mjs'], cwd: ROOT },
+    { label: 'spaces（空间删除级联）', files: ['team-hub/spaces.test.mjs'], cwd: ROOT },
+    { label: 'goal（目标生命周期）', files: ['team-hub/goal.test.mjs'], cwd: ROOT },
+    { label: 'rules（规范数据面）', files: ['team-hub/rules.test.mjs'], cwd: ROOT },
+    { label: 'artifact（产物读取）', files: ['team-hub/artifact-content.test.mjs'], cwd: ROOT },
+    { label: 'security（监听安全配置）', files: ['team-hub/security.test.mjs'], cwd: ROOT },
     { label: 'files-api（文件中心契约）', files: ['workbench/scripts/files-api.test.mjs'], cwd: ROOT },
     { label: 'web（浏览器助手契约）', files: ['workbench/scripts/web.test.mjs'], cwd: ROOT },
+    { label: 'doc-render（文档产物契约）', files: ['workbench/scripts/doc-render.test.mjs'], cwd: ROOT },
+    { label: 'skill-importer（技能导入契约）', files: ['workbench/scripts/skill-importer.test.mjs'], cwd: ROOT },
+    { label: 'hub-board（v2 看板投影）', files: ['workbench/scripts/hub-board.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    { label: 'artifact-policy（共享路径策略）', files: ['packages/shared/test/artifact-policy.test.mjs'], cwd: ROOT },
+    { label: 'scrum（任务生命周期与产物）', files: ['scrum/artifact-detail.test.mjs', 'scrum/taskctl.ttl.test.mjs'], cwd: ROOT },
     { label: 'contracts（平台契约基线）', files: ['tests/contract/contracts.test.mjs'], cwd: ROOT },
   ]
   const wbDir = WHITEBOARD
@@ -200,9 +210,20 @@ async function stageTest() {
   suites.push({ label: 'whiteboard（7 文件含真实服务 e2e）', files: wbTests, cwd: wbDir })
   const detail = []
   let allOk = true
+  const dsh = process.env.DSH_CHECKOUT
+  if (dsh && existsSync(join(dsh, 'packages'))) {
+    const ext = await exec(process.execPath, [join(ROOT, 'scripts', 'ci', 'build-external-package.mjs'), 'plugins'], { cwd: ROOT, env: { DSH_CHECKOUT: dsh } })
+    if (ext.code !== 0) {
+      return { ok: false, detail: `  FAIL plugins build（exit=${ext.code}）：${(ext.err || ext.out).slice(-1200)}` }
+    }
+    suites.push({ label: 'plugins（外部 DSH 回归）', files: readdirSync(join(ROOT, 'plugins', 'tests')).filter(f => f.endsWith('.test.mjs')).map(f => join('plugins', 'tests', f)), cwd: ROOT })
+    detail.push('  PASS plugins build（DSH_CHECKOUT=' + dsh + '）')
+  } else {
+    detail.push('  SKIP plugins（未配置可用 DSH_CHECKOUT；外部宿主测试不伪造通过）')
+  }
   for (const s of suites) {
     const cwd = s.cwd || ROOT
-    const r = await runNodeTests(s.label, s.files.map(f => join(cwd, f)), cwd)
+    const r = await runNodeTests(s.label, s.files.map(f => join(cwd, f)), cwd, s.nodeArgs || [])
     allOk = allOk && r.ok
     detail.push('  ' + (r.ok ? 'PASS' : 'FAIL') + ' ' + r.detail)
     if (!r.ok) detail.push('  ' + (r.raw.split('\n').filter(l => /^not ok|^✖/.test(l)).slice(0, 6).join('\n  ')))

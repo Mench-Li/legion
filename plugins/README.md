@@ -7,6 +7,6 @@
 ## 构建与注入
 
 ```bash
-DSH_CHECKOUT=<checkout> bash scripts/build.sh
+DSH_CHECKOUT=<checkout> pnpm build
 # 注入器环境内：dev_inject_plugin <本目录>
 ```

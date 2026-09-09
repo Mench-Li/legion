@@ -10,9 +10,10 @@ import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { spawn } from 'node:child_process'
 import { existsSync, readFile, watch, watchFile, unwatchFile } from 'node:fs'
-import { readFile as readFileP } from 'node:fs/promises'
+import { readFile as readFileP, realpath as realpathP } from 'node:fs/promises'
 import { extname, join, normalize, sep } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { normalizeArtifactPath } from '../../packages/shared/src/artifact-policy.mjs'
 
 export const name = '@dsh-external/dsh-scrum-board'
 export const inject = ['webServer']
@@ -26,6 +27,8 @@ export interface Config {
   hubUrl: string
   /** hub 模式下的项目 scope（读过滤 + 写带上）。 */
   scope: string
+  /** team-hub 写令牌；未显式配置时继承 TEAM_HUB_TOKEN。 */
+  hubToken: string
   /** 产物预览额外允许根（默认仅 repoRoot；非隔离 worker 产物在 workspace 时把 workspace 加进来）。 */
   artifactRoots: string[]
 }
@@ -35,6 +38,7 @@ export const Config = z.object({
   routePrefix: z.string().default('/scrum-board'),
   hubUrl: z.string().default(''),
   scope: z.string().default('software'),
+  hubToken: z.string().default(''),
   artifactRoots: z.array(z.string()).default([]),
 })
 
@@ -53,6 +57,8 @@ export function apply(ctx: Context, config: Config): void {
 
   let hubUrl = config.hubUrl.replace(/\/+$/, '')
   let useHub = hubUrl !== ''
+  const hubToken = config.hubToken || process.env.TEAM_HUB_TOKEN || ''
+  const hubHeaders = (): Record<string, string> => hubToken ? { authorization: `Bearer ${hubToken}` } : {}
 
   /** 读 JSON 文件，不存在/损坏返回 null（daemon.json、roles.json 均为可缺失的旁路信息）。 */
   async function readJson(file: string): Promise<unknown> {
@@ -110,7 +116,13 @@ export function apply(ctx: Context, config: Config): void {
         json(res, 200, { ...meta, exists: ok })
         return
       }
-      const data = await readFileP(abs)
+      let data: Buffer
+      try {
+        data = await readFileP(abs)
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') { json(res, 404, { error: '产物文件不存在' }); return }
+        throw e
+      }
       const ext = extname(abs).toLowerCase()
       const ct = ext === '.html' ? 'text/html; charset=utf-8'
         : ext === '.md' || ext === '.markdown' ? 'text/markdown; charset=utf-8'
@@ -132,21 +144,39 @@ export function apply(ctx: Context, config: Config): void {
     if (raw.length === 0) return null
     const winAbs = /^[A-Za-z]:[\\/]/.test(raw)
     const posixAbs = raw.startsWith('/') || raw.startsWith('\\\\')
-    if (winAbs || posixAbs) {
-      const n = normalize(raw)
-      return [repoRoot, ...config.artifactRoots].some(root => { const r = normalize(root); return n === r || n.startsWith(r + sep) }) ? n : null
-    }
-    let relp = raw.replace(/\\/g, '/')
-    while (relp.startsWith('./')) relp = relp.slice(2)
-    relp = relp.replace(/^\/+/, '')
-    const segs = relp.split('/').filter(Boolean)
-    if (segs.length === 0 || segs.includes('..') || segs.some(x => x.toLowerCase() === '.git')) return null
     const roots = [repoRoot, ...config.artifactRoots]
+    const lexical = normalizeArtifactPath(raw, roots)
+    if (!lexical) return null
+    if (lexical.absolute) {
+      const n = lexical.path
+      if (!existsSync(n)) return n
+      try {
+        const real = await realpathP(n)
+        const rootsReal = await Promise.all(roots.map(async root => { try { return await realpathP(root) } catch { return normalize(root) } }))
+        return rootsReal.some(root => real === root || real.startsWith(root + sep)) ? real : null
+      } catch { return null }
+    }
+    const segs = lexical.segments
+    if (!segs) return null
+    const rootsReal = await Promise.all(roots.map(async root => {
+      try { return await realpathP(root) } catch { return normalize(root) }
+    }))
+    const safeExisting = async (candidate: string): Promise<string | null> => {
+      if (!existsSync(candidate)) return null
+      try {
+        const real = await realpathP(candidate)
+        return rootsReal.some(root => real === root || real.startsWith(root + sep)) ? real : null
+      } catch { return null }
+    }
     const branch = join(repoRoot, '.legion-worktrees', taskId, ...segs)
-    if (artifactAllowed(branch) && existsSync(branch)) return branch
+    if (artifactAllowed(branch)) {
+      const safeBranch = await safeExisting(branch)
+      if (safeBranch) return safeBranch
+    }
     for (const root of roots) {
       const abs = join(root, ...segs)
-      if (existsSync(abs)) return abs
+      const safe = await safeExisting(abs)
+      if (safe) return safe
     }
     return join(repoRoot, ...segs) // 文件暂不存在也返回主根候选，供调用方做 exists 元信息
   }
@@ -156,7 +186,7 @@ export function apply(ctx: Context, config: Config): void {
   async function detectHub(): Promise<void> {
     if (useHub) return
     try {
-      const res = await fetch('http://127.0.0.1:3080/team-hub/api/config', { signal: AbortSignal.timeout(2000) })
+      const res = await fetch('http://127.0.0.1:3080/team-hub/api/config', { headers: hubHeaders(), signal: AbortSignal.timeout(2000) })
       if (res.ok) {
         hubUrl = 'http://127.0.0.1:3080/team-hub'
         useHub = true
@@ -168,7 +198,7 @@ export function apply(ctx: Context, config: Config): void {
   async function hubPost(path: string, body: Record<string, unknown>): Promise<unknown> {
     const res = await fetch(`${hubUrl}${path}`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...hubHeaders() },
       body: JSON.stringify(body),
     })
     const data = await res.json().catch(() => ({})) as Record<string, unknown>
@@ -178,7 +208,7 @@ export function apply(ctx: Context, config: Config): void {
 
   /** hub 读任务列表（按 scope 过滤）。 */
   async function hubBoard(): Promise<unknown> {
-    const res = await fetch(`${hubUrl}/api/board?scope=${encodeURIComponent(config.scope)}`)
+    const res = await fetch(`${hubUrl}/api/board?scope=${encodeURIComponent(config.scope)}`, { headers: hubHeaders() })
     if (!res.ok) throw new Error(`hub board 失败（${res.status}）`)
     return res.json()
   }

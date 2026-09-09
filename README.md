@@ -342,7 +342,7 @@ node --test team-hub/*.test.mjs
 
 # 守护插件构建与测试（构建需要 DSH_CHECKOUT）
 $env:DSH_CHECKOUT = 'D:\project\DSH\dsh\deepseek-harness'
-bash plugins/scripts/build.sh
+node scripts/ci/build-external-package.mjs plugins
 node --test plugins/tests/*.test.mjs
 
 # whiteboard 构建与测试
@@ -501,7 +501,8 @@ v1 和 v2 可能同时运行，但不要把两套存储当成同一个写源：
 - 浏览器助手做 SSRF、重定向、超时和大小限制，但不替代完整的企业出网代理或内容安全系统。
 - 对话附件会在本地 `uploads/` 留存至 TTL 清理；上传前应确认内容可以提供给所配置的模型服务。
 - whiteboard v1 是单实例、单进程部署，不承诺横向扩展。
-- 当前对话健康聚合仍有两个已登记的中等问题：跨空间守护心跳可能让本空间误显示在线并回退到他空间模型；历史失败可能在后续成功后仍保留为 `lastFail`。它们不阻断构建和 acceptance 使用，但属于生产 go/no-go 前置修复项，详见 `docs/G-mtr3su6f-1/TEST_REPORT.md` 和同目录 `DEPLOY.md`。
+- 对话健康聚合已按 scope 隔离，且 `lastFail` 只反映最近一次终态失败；空间删除会级联清理聊天设置、附件、规范、技能来源及上传目录。
+- 非回环监听必须配置服务令牌：team-hub 使用 `TEAM_HUB_TOKEN`，whiteboard WebSocket 使用 `WHITEBOARD_TOKEN`；本地回环开发可免令牌。
 - 真实 AI 回复取决于 DSH 守护和模型 provider；自动化测试可以验证数据面、提示词和状态机，但不能把“模型已解析”冒充为外部 provider 一定可用。
 
 ---

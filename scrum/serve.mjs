@@ -35,6 +35,7 @@
  *   以 import 方式加载（非 main）时跳过 fs watch 与 listen；导出 server 供测试 listen 随机端口
  */
 import { createServer } from 'node:http'
+import { normalizeArtifactPath } from '../packages/shared/src/artifact-policy.mjs'
 import { spawn } from 'node:child_process'
 import { existsSync, readFile, readFileSync, watch, watchFile, writeFileSync } from 'node:fs'
 import { dirname, extname, join, normalize, sep } from 'node:path'
@@ -270,22 +271,7 @@ async function handleControl(req, res, paused) {
  * 返回绝对路径（主仓库根候选）；白名单外返回 null。
  */
 function artifactAbsPath(rel) {
-  const p = String(rel ?? '').trim()
-  if (p.length === 0) return null
-  const winAbs = /^[A-Za-z]:[\\/]/.test(p)
-  const posixAbs = p.startsWith('/') || p.startsWith('\\\\')
-  if (winAbs || posixAbs) {
-    const n = normalize(p)
-    const rootAbs = normalize(ARTIFACT_ROOT)
-    if (n === rootAbs || n.startsWith(rootAbs + sep)) return n
-    return null
-  }
-  let relp = p.replace(/\\/g, '/')
-  while (relp.startsWith('./')) relp = relp.slice(2)
-  relp = relp.replace(/^\/+/, '')
-  const segs = relp.split('/').filter(Boolean)
-  if (segs.length === 0 || segs.includes('..') || segs.some(x => x.toLowerCase() === '.git')) return null
-  return join(ARTIFACT_ROOT, ...segs)
+  return normalizeArtifactPath(rel, [ARTIFACT_ROOT])?.path ?? null
 }
 
 const server = createServer((req, res) => {

@@ -65,7 +65,16 @@ const DB_FILE = process.env.TEAM_HUB_DB || join(ROOT, 'team-hub', 'team.db')
 const UPLOADS_ROOT = join(dirname(DB_FILE), 'uploads')
 const PORT = Number(process.env.TEAM_HUB_PORT || 8787)
 const TOKEN = process.env.TEAM_HUB_TOKEN || ''
-const HOST = process.env.TEAM_HUB_HOST || '0.0.0.0'
+const HOST = process.env.TEAM_HUB_HOST || '127.0.0.1'
+
+export function validateSecurityConfig({ host = HOST, token = TOKEN } = {}) {
+  const normalizedHost = String(host ?? '').trim().toLowerCase()
+  const loopback = normalizedHost === '127.0.0.1' || normalizedHost === 'localhost' || normalizedHost === '::1'
+  if (!loopback && String(token ?? '').trim() === '') {
+    throw new Error('TEAM_HUB_TOKEN 必须配置：team-hub 非回环监听禁止空鉴权')
+  }
+  return { host: normalizedHost || '127.0.0.1', authenticated: String(token ?? '').trim() !== '' }
+}
 
 const STATUSES = ['backlog', 'todo', 'in_progress', 'in_review', 'blocked', 'done', 'canceled']
 const TRANSITIONS = {
@@ -1412,8 +1421,8 @@ export function chatHealth(rawScope) {
   if (!CHAT_SCOPE_RE.test(scope)) throw new Error('scope 非法：小写字母/数字开头的空间 id（≤64 字符）')
   const nowMs = Date.now()
   const fresh = (row) => Boolean(row && row.lastSeenAt && (nowMs - new Date(row.lastSeenAt).getTime() < CHAT_DAEMON_ONLINE_MS))
-  const workerRow = db.prepare("SELECT * FROM members WHERE kind = 'worker' ORDER BY lastSeenAt DESC LIMIT 1").get()
-  const anyFreshRow = db.prepare('SELECT * FROM members ORDER BY lastSeenAt DESC LIMIT 1').get()
+  const workerRow = db.prepare("SELECT * FROM members WHERE scope = ? AND kind = 'worker' ORDER BY lastSeenAt DESC LIMIT 1").get(scope)
+  const anyFreshRow = db.prepare('SELECT * FROM members WHERE scope = ? ORDER BY lastSeenAt DESC LIMIT 1').get(scope)
   // 守护在线：kind=worker 心跳新鲜；尚无 worker 心跳历史时按「任意成员新鲜」兜底（兼容旧部署成员 kind 未标 worker）。
   const online = fresh(workerRow) || (!workerRow && fresh(anyFreshRow))
   // 守护当前选用模型（心跳上报，members.model JSON）
@@ -1428,14 +1437,15 @@ export function chatHealth(rawScope) {
   if (settings.model && settings.model.trim().length > 0) model = { provider: null, model: settings.model.trim(), source: 'reply-settings' }
   else if (amRow?.model) model = { provider: amRow.provider ?? null, model: amRow.model, source: 'agent_models' }
   else if (daemonModel?.model) model = { ...daemonModel, source: 'daemon-heartbeat' }
-  const failed = db.prepare("SELECT id, conv_id, meta, createdAt FROM messages WHERE scope = ? ORDER BY id DESC LIMIT 200").all(scope)
+  const terminal = db.prepare("SELECT id, conv_id, meta, createdAt FROM messages WHERE scope = ? ORDER BY id DESC LIMIT 200").all(scope)
   let lastFail = null
-  for (const row of failed) {
+  for (const row of terminal) {
     const meta = parseJson(row.meta, {})
     if (meta.aiStatus === 'failed') {
       lastFail = { msgId: row.id, convId: row.conv_id, aiError: meta.aiError ?? '', failedAt: meta.failedAt ?? null }
       break
     }
+    if (meta.aiStatus === 'replied') break
   }
   return {
     scope,
@@ -3071,6 +3081,10 @@ async function handle(req, res) {
           messages: countOf('SELECT COUNT(*) AS c FROM messages WHERE scope = ?'),
           calendarEvents: countOf('SELECT COUNT(*) AS c FROM calendar_events WHERE scope = ?'),
           members: countOf('SELECT COUNT(*) AS c FROM members WHERE scope = ?'),
+          chatReplySettings: countOf('SELECT COUNT(*) AS c FROM chat_reply_settings WHERE scope = ?'),
+          chatAttachments: countOf('SELECT COUNT(*) AS c FROM chat_attachments WHERE scope = ?'),
+          rules: countOf('SELECT COUNT(*) AS c FROM rules WHERE scope = ?'),
+          skillSources: countOf('SELECT COUNT(*) AS c FROM skill_sources WHERE scope = ?'),
         }
         const running = db.prepare("SELECT id, title, status FROM tasks WHERE scope = ? AND status IN ('in_progress','in_review','blocked') ORDER BY id").all(id)
         json(res, 200, { id, counts, running: { tasks: running } })
@@ -3080,8 +3094,7 @@ async function handle(req, res) {
       return
     }
     if (req.method === 'POST' && path === '/api/spaces/delete') {
-      // 删除工作空间及其 scope 数据（级联全表：tasks/goal/roster/exec_state/exec_requests/agent_models/skills +
-      // conversations/messages/calendar_events/members——消除孤儿/幽灵分区，G-R2 硬删默认；audit 行保留供追溯）。
+       // 删除工作空间及其 scope 数据（级联所有 scope 表 + uploads/<scope> 文件；audit 行保留供追溯）。
       // 安全护栏：software/default 等受保护空间一律拒绝；调用方须显式 confirm=`delete-space:<id>`。
       await handleWrite(req, res, (body, by, scope) => {
         const id = body.id
@@ -3101,15 +3114,22 @@ async function handle(req, res) {
             ['skills', 'DELETE FROM skills WHERE scope = ?'],
             ['goal', 'DELETE FROM goal WHERE scope = ?'],
             ['execState', 'DELETE FROM exec_state WHERE scope = ?'],
-            ['conversations', 'DELETE FROM conversations WHERE scope = ?'],
-            ['messages', 'DELETE FROM messages WHERE scope = ?'],
-            ['calendarEvents', 'DELETE FROM calendar_events WHERE scope = ?'],
-            ['members', 'DELETE FROM members WHERE scope = ?'],
-          ]) counts[key] = db.prepare(sql).run(id).changes
-          db.prepare('DELETE FROM spaces WHERE id = ?').run(id)
-          return counts
-        })
-        audit(by, id, 'space:delete', null, { space: id, removed })
+             ['conversations', 'DELETE FROM conversations WHERE scope = ?'],
+             ['messages', 'DELETE FROM messages WHERE scope = ?'],
+             ['calendarEvents', 'DELETE FROM calendar_events WHERE scope = ?'],
+             ['members', 'DELETE FROM members WHERE scope = ?'],
+             ['chatReplySettings', 'DELETE FROM chat_reply_settings WHERE scope = ?'],
+             ['chatAttachments', 'DELETE FROM chat_attachments WHERE scope = ?'],
+             ['rules', 'DELETE FROM rules WHERE scope = ?'],
+             ['skillSources', 'DELETE FROM skill_sources WHERE scope = ?'],
+           ]) counts[key] = db.prepare(sql).run(id).changes
+           db.prepare('DELETE FROM spaces WHERE id = ?').run(id)
+           return counts
+         })
+         // scope 已通过严格正则校验；附件路径约定为 uploads/<scope>/<sha1>，删除整个空间目录以清理孤儿文件。
+         const scopeUploads = join(UPLOADS_ROOT, id)
+         try { rmSync(scopeUploads, { recursive: true, force: true }) } catch { /* 文件清理失败不回滚已完成的 DB 删除 */ }
+         audit(by, id, 'space:delete', null, { space: id, removed })
         return { id, removed }
       })
       return
@@ -3249,6 +3269,7 @@ const server = http.createServer((req, res) => {
 // 直接运行（node server.mjs）才监听；被 import 时（测试/复用）不占端口。
 const isMain = process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 if (isMain) {
+  validateSecurityConfig()
   server.listen(PORT, HOST, () => {
     console.log(`[team-hub] v2 独立服务已启动：http://${HOST}:${PORT}（db=${DB_FILE}，鉴权=${TOKEN !== '' ? 'on' : 'off'}）`)
   })

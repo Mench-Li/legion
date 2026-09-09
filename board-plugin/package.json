@@ -22,7 +22,7 @@
     "tsdown": "^0.22.14"
   },
   "scripts": {
-    "build": "bash scripts/build.sh",
+    "build": "node ../scripts/ci/build-external-package.mjs board-plugin",
     "build:client": "tsdown",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

@@ -17,7 +17,7 @@ npm start                        # 或 node apps/server/src/index.js
 # 打开 http://localhost:8080
 ```
 
-环境变量：`PORT`(8080)、`HOST`(0.0.0.0)、`DB_PATH`(apps/server/data/whiteboard.db)、
+环境变量：`PORT`(8080)、`HOST`(127.0.0.1)、`DB_PATH`(apps/server/data/whiteboard.db)、`WHITEBOARD_TOKEN`（非回环监听必填）、
 `TTL_MS`(10000)。
 
 ## Docker Compose 自托管

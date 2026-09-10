@@ -193,3 +193,23 @@ node D:\project\DSH\legion\team-hub\scripts\seed-pipeline.mjs --scope ozon --fil
 
 **为什么不能跳过 ②**：`lib/` 不在版本控制内（`team-hub/lib`、`plugins/lib`、`board-plugin/lib` 均为构建输出），
 DSH 宿主与 services-plugin 加载的都是 `lib/index.js`——只改 `src/` 不影响运行中的进程。
+
+### 8.1 本机实际激活记录（2026-09-10）
+
+| 步 | 实际动作 | 观察到的结果 |
+| --- | --- | --- |
+| ① 合入 | 分支先 `rebase main`（main 已前进到 P2-5），再 `merge --ff-only` | main 推到 `2c92f5f`；`run-ci.mjs` 的 calendar-ui 行与 pipeline 行自动合并共存 |
+| ② 重建 | `tsc -p team-hub/tsconfig.json`、`tsc -p plugins/tsconfig.json` | `plugins/lib/index.js` 中 `stagesFromHubPayload`/`refreshPipelineFromHub`/`resolveDiscussion` 均可命中 |
+| ③ 重启 hub | 结束 :8787 监听进程 | services-plugin **约 1 秒**自愈拉起（同库 `team.db`，无数据丢失） |
+| ④ 新路由 | `GET /api/pipeline?scope=software` | 200（空态指纹 `da39a3ee5e6b4b0d`）；此前旧进程为 404 |
+| ⑤ 导入 | `seed-pipeline --scope software` / `--scope ozon --runtime-enabled` | software `e7c0f44ad10d63cd`（8 环）、ozon `f474056e0fd6bd80`（6 环） |
+| ⑥ 验收 | 线上数据面 vs `roles.json` 逐字段对拍；两空间预检 | **8/8 完全一致**；software `ok=true`、ozon `ok=true` |
+
+**尚未做（有意）**：运行中的两个守护实例仍加载旧构建——它们的流水线来源在**下次重新挂载时**才切到 hub。
+两种触发方式任选：DSH Desktop 重启（全量重挂载），或改任一该行配置值（只热重载该行，秒级）。
+在此之前数据面已就绪但**无任何行为差异**（旧守护根本不读 `/api/pipeline`，且 software 的 hub 内容与文件逐字段相同）。
+
+**升级期间若 main 还有别的在写工作流**：合入前先确认「本次要改的文件」不在对方的未提交清单里（`git status --short`）。
+若重叠（本次 `scripts/ci/run-ci.mjs` 一度重叠），用 `git stash push -- <该文件>` → 快进 → `git stash pop`，
+并在动手前把对方的在写文件逐字备份到临时目录；恢复后抽检内容与备份是否等价（注意 git 可能做行尾规范化）。
+

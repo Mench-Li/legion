@@ -23,6 +23,11 @@ export const HEADER_LINES = [
 ]
 const HEADER = HEADER_LINES.join('\n') + '\n'
 
+/** 换行归一化：本仓库在 Windows 上 `core.autocrlf` 会把检出文件转成 CRLF
+ *（git 会提示 "LF will be replaced by CRLF"），因此比对必须归一化换行，
+ *  否则「工作树通过、主检出失败」这种环境相关失败会反复出现。 */
+export const normalizeEol = (text) => text.replace(/\r\n/g, '\n')
+
 export function readPair() {
   const source = existsSync(SOURCE) ? readFileSync(SOURCE, 'utf8') : null
   const targetRaw = existsSync(TARGET) ? readFileSync(TARGET, 'utf8') : null
@@ -30,9 +35,9 @@ export function readPair() {
   return { source, target, targetRaw }
 }
 
-/** 精确剥离同步头部（去掉固定行数的头，保留根文件自身的顶部注释） */
+/** 精确剥离同步头部（去掉固定行数的头，保留根文件自身的顶部注释）；CRLF 已归一化 */
 export function stripHeader(text) {
-  const lines = text.split('\n')
+  const lines = normalizeEol(text).split('\n')
   for (const [i, h] of HEADER_LINES.entries()) {
     if (lines[i] !== h) throw new Error(`副本头部第 ${i + 1} 行不符合预期：${JSON.stringify(lines[i])}`)
   }
@@ -53,7 +58,7 @@ function main() {
       console.error('sync: FAIL —— 白板副本不存在：whiteboard/packages/shared/src/config.mjs')
       process.exit(1)
     }
-    if (target !== source) {
+    if (target !== normalizeEol(source)) {
       console.error('sync: FAIL —— 白板副本与根实现不一致（运行 node scripts/config/sync.mjs 后重试）')
       process.exit(1)
     }

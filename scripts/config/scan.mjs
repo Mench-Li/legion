@@ -8,6 +8,7 @@
 // 判定口径：只把「进程启动/运行期直接读取环境变量」的点计入；测试文件默认排除
 //（测试会人为构造 env 做断言，不代表生产配置面），需要时用 --include-tests 打开。
 import { readFileSync, readdirSync, existsSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { join, relative, extname, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -75,10 +76,26 @@ export function extractEnvReads(text) {
   return { literal, dynamic, suspicious }
 }
 
+/** 取「git 跟踪文件」集合（仓库相对路径，正斜杠）。
+ *  为什么必须限制在跟踪文件：主检出里常有本地工具与构建产物（实测 `team-hub/.watch.mjs`
+ *  读 `process.env.DB`、`team-hub/lib/index.js` 是构建产物），把它们算进「配置面」会让
+ *  `scan --check` 的结果**依赖本机状态**（工作树通过、主检出失败）。git 不可用时返回 null，
+ *  调用方回退到目录遍历并在输出中标注，保证结论可解释。 */
+export function trackedFiles(root) {
+  try {
+    const out = execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
+    return new Set(out.split('\0').filter(Boolean).map((p) => p.replace(/\\/g, '/')))
+  } catch {
+    return null
+  }
+}
+
 /** 扫描单个进程；返回 { name, files, reads:Map<key, {count, files:string[]}>, dynamic:[] } */
-export function scanProcess(name, { includeTests = false } = {}) {
+export function scanProcess(name, { includeTests = false, onlyTracked = true } = {}) {
   const spec = PROCESSES[name]
   if (!spec) throw new Error(`未知进程：${name}（可选：${Object.keys(PROCESSES).join(', ')}）`)
+  const tracked = onlyTracked ? trackedFiles(ROOT) : null
+  const useGit = tracked !== null
   const files = []
   for (const d of spec.dirs) walk(join(ROOT, d), files)
   const reads = new Map()
@@ -87,6 +104,7 @@ export function scanProcess(name, { includeTests = false } = {}) {
   let scanned = 0
   for (const f of files) {
     const rel = relative(ROOT, f).split(sep).join('/')
+    if (useGit && !tracked.has(rel)) continue // 未跟踪的本地文件/产物不属于配置面
     if (!includeTests && /\.test\.|\.spec\.|smoke/.test(rel)) continue
     let text
     try { text = readFileSync(f, 'utf8') } catch { continue }
@@ -106,7 +124,7 @@ export function scanProcess(name, { includeTests = false } = {}) {
     }
     for (const d of dyn) dynamic.push({ file: rel, expr: d })
   }
-  return { name, label: spec.label, filesScanned: scanned, reads, dynamic, suspicious }
+  return { name, label: spec.label, filesScanned: scanned, reads, dynamic, suspicious, mode: useGit ? 'git-tracked' : 'walk（git 不可用：结果已包含未跟踪文件，仅作调试参考）' }
 }
 
 /** 未声明读取点（对照 schema 的 env 名单） */
@@ -120,6 +138,7 @@ async function main() {
   const json = argv.includes('--json')
   const check = argv.includes('--check')
   const includeTests = argv.includes('--include-tests')
+  const noGit = argv.includes('--no-git')
   const only = argv.find((a) => a.startsWith('--process='))?.slice('--process='.length)
   const names = only ? [only] : Object.keys(PROCESSES)
 
@@ -127,7 +146,7 @@ async function main() {
   let violations = 0
   let suspiciousCount = 0
   for (const name of names) {
-    const scan = scanProcess(name, { includeTests })
+    const scan = scanProcess(name, { includeTests, onlyTracked: !noGit })
     let declaredEnv = null
     let undeclared = []
     let undeclaredLiterals = []
@@ -165,7 +184,7 @@ async function main() {
   } else {
     for (const r of results) {
       console.log(`\n=== ${r.name}：${r.label} ===`)
-      console.log(`  扫描文件 ${r.filesScanned} 个；直接读取 env 键 ${r.reads.length} 个；疑似 env 字面量 ${r.literals.length} 个${r.dynamic.length ? `；动态访问 ${r.dynamic.length} 处` : ''}`)
+      console.log(`  扫描模式 ${r.mode}；扫描文件 ${r.filesScanned} 个；直接读取 env 键 ${r.reads.length} 个；疑似 env 字面量 ${r.literals.length} 个${r.dynamic.length ? `；动态访问 ${r.dynamic.length} 处` : ''}`)
       for (const read of r.reads) console.log(`    ${read.key.padEnd(34)} ×${String(read.count).padEnd(3)} ${read.files[0]}`)
       if (r.literals.length) {
         console.log(`    —— 疑似 env 字面量（需声明或列入 nonEnvLiterals）——`)

@@ -2254,7 +2254,8 @@ async function handleWrite(req, res, run) {
     json(res, 200, { ok: true, task: result })
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e)
-    const status = message.includes('乐观锁') ? 409 : 400
+    const status = Number(e?.statusCode) || (message.includes('乐观锁') ? 409 : 400)
+    if (e?.permission) { json(res, status, { error: message, requestId: e.permission.requestId, permission: e.permission }); return }
     json(res, status, { error: message })
   }
 }
@@ -3072,6 +3073,13 @@ async function handle(req, res, stripPrefix) {
         const grants = body.grants
         if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
         if (!Array.isArray(grants) || grants.length === 0) throw new Error('缺少参数 grants')
+        if (body.unattended === true || body.permissionRequestId) {
+          const skillForPermission = getSkill(id)
+          if (!skillForPermission) throw new Error('技能不存在')
+          const permission = checkPermission({ scope: skillForPermission.scope, actor: by, action: 'skill:grant', target: grants.map(String).sort().join(','), taskId: body.taskId, unattended: false, metadata: { unattended: body.unattended === true }, permissionRequestId: body.permissionRequestId })
+          if (permission.status === 'pending') { const err = new Error('权限审批待处理'); err.statusCode = 202; err.permission = permission; throw err }
+          if (!permission.allowed) throw new Error(`权限拒绝：${permission.reason}`)
+        }
         const skill = grantSkill(id, grants.map(String))
         // 审计 detail 携带技能归属空间与目标空间（AC-R1-4）：audit.scope = 技能归属空间（跨空间操作不归错 scope）。
         audit(by, skill.scope, 'skill:grant', id, { grants: grants.map(String), skillScope: skill.scope })

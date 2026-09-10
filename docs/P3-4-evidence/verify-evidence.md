@@ -121,14 +121,17 @@ config check: FAIL（error 6，warning 8）   ← bad 夹具：含 NORMS_GLOBAL_
 
 ```powershell
 $env:DSH_CHECKOUT='D:\project\DSH\dsh\deepseek-harness'
-node scripts/ci/run-ci.mjs --only env,test,doc --out .ci\p3-4-final
+node scripts/ci/run-ci.mjs --only env,test,doc --out .ci\p3-4-main2
 ```
 
-实测：`env` PASS（含 config scan/sync/check 三项）、`test` PASS **38 套件 / 943 用例**
-（`plugins` 185、`config` 36、`p13-host-injection` 8；上一轮基线 926 例 —— 本次 +17 例全部是新增断言，
-无既有用例被删除或放宽）、`doc` PASS（文档新鲜度 + 证据快照 banner 覆盖，55 个快照目录）。
-逐套件数字与 `docs/STATUS.md` §2 表格一致（同一份 `.ci/<run>/summary.json`）。
-本次 `test` 阶段耗时 380s（同内容的另一次运行 171s）——差异来自机器上并行的 node 任务，不是测试变慢。
+**最终结论（`main` @ `7afd642`，合并后重跑）**：`env` PASS、`test` PASS、`doc` PASS。
+`test` = **38 套件 / 943 用例**（`plugins` 185、`config` 36、`p13-host-injection` 8），耗时 165s；
+`env` 含 config `scan`/`sync`/`check(good fixture)` 三项全 PASS；`doc` 含文档新鲜度与 55 个证据快照目录的
+banner 覆盖。逐套件数字与 `docs/STATUS.md` §2 表格一致（同一份 `.ci/p3-4-main2/summary.json`）。
+
+与上一轮基线（926 例）的差异全部是**新增断言**（+17 例），无既有用例被删除或放宽。
+同内容在分支上（`.ci/p3-4-fix`，161s）与在 main 上（`.ci/p3-4-main2`，165s）各跑一次，结论一致；
+另有一次 380s 的运行，差异来自机器上并行的 node 任务，不是测试变慢。
 
 > 运行环境备注（如实登记）：在**未提交的 worktree** 上跑 `--only test` 需要 `workbench/node_modules`
 > （`doc-render` 套件依赖 `react-dom`），而该目录由 `--only deps` 阶段创建、`--only test` 会跳过。

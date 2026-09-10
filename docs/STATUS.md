@@ -5,7 +5,7 @@
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
 **最近一次全量基线**：2026-09-10　`run-ci --only env,test,doc` **全 PASS**；其中 `test` **38 套件 / 943 用例**
-（171s；同内容的另一次运行因机器上有并行 node 任务耗时 380s，结论一致）—— 以本文件所在提交为准
+（165s）—— 以本文件所在提交为准
 
 > ✅ **基线可单命令复现**（2026-09-10）：`test` 阶段此前会因 `notify-hub-smoke` 泄漏 hub 子进程
 > 而**永不结束**（零输出、永久等待），P2-7 / P2-8 / P3-1 / P3-2 之后新增或扩充的套件只能用「逐套件单跑」
@@ -61,7 +61,7 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：38 套件 / 943 用例，`--only test` 整体 PASS（171s）** —— 2026-09-10 实测
+**当前基线：38 套件 / 943 用例，`--only test` 整体 PASS（165s）** —— 2026-09-10 实测
 （P3-4 之后：`plugins` 177→185、`config` 28→36、`p13-host-injection` 7→8。
 此前 `test` 阶段会因 `notify-hub-smoke` 泄漏子进程而**永不结束**，故长期只能用「逐套件单跑」拼出基线；
 根因、修复与两处连带回归见 `docs/CI-TEST-STAGE-evidence/verify-evidence.md`）。

@@ -4,13 +4,15 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-10　`run-ci --only test` **38 套件 / 924 用例全 PASS**（160s）—— 以本文件所在提交为准
+**最近一次全量基线**：2026-09-10　`run-ci --only test` **38 套件 / 926 用例全 PASS**（164s）—— 以本文件所在提交为准
 
-> ✅ **基线已恢复为「单命令可复现」**（2026-09-10）：`test` 阶段此前会因 `notify-hub-smoke` 泄漏 hub 子进程
+> ✅ **基线可单命令复现**（2026-09-10）：`test` 阶段此前会因 `notify-hub-smoke` 泄漏 hub 子进程
 > 而**永不结束**（零输出、永久等待），P2-7 / P2-8 / P3-1 / P3-2 之后新增或扩充的套件只能用「逐套件单跑」
 > 拼基线。现已修掉根因并由全量运行验证，表中数字全部来自**同一次** `--only test` 运行。
-> 排查过程中另发现并修复两处**连带回归**（P3-2 的端口校验误拒 `0`、CI 未构建 `team-hub/lib`），
-> 详见 `docs/CI-TEST-STAGE-evidence/verify-evidence.md`。
+> 同一轮把此前未覆盖的**并发启动缺陷**也补齐了：双进程同时启动时的启动期迁移竞态、以及
+> **WAL 切换不受 `busy_timeout` 保护**——二者都会让后到进程在模块加载期崩溃（宿主侧表现为
+> `/team-hub` 路由缺失直到重启）。详见 `docs/CI-TEST-STAGE-evidence/verify-evidence.md`、
+> `docs/DUAL-WRITE-RACE-evidence/verify-evidence.md`。
 
 ---
 
@@ -54,7 +56,7 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：38 套件 / 924 用例，`--only test` 整体 PASS（160s）** —— 2026-09-10 实测
+**当前基线：38 套件 / 926 用例，`--only test` 整体 PASS（164s）** —— 2026-09-10 实测
 （此前 `test` 阶段会因 `notify-hub-smoke` 泄漏子进程而**永不结束**，故长期只能用「逐套件单跑」拼出基线；
 根因、修复与两处连带回归见 `docs/CI-TEST-STAGE-evidence/verify-evidence.md`）。
 
@@ -68,7 +70,7 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 | pipeline（SP-P0 空间流水线数据面） | 19 | chat-ui（P2-6 对话前端纯函数） | 8 |
 | goal | 14 | notify（P2-4 含真实 hub SSE 断线重连） | 15 |
 | rules | 7 | hub-event-stream（F-01 scope/游标/信封） | 5 |
-| artifact | 16 | dual-write（P1-1 双进程写同库竞态） | 2 |
+| artifact | 16 | dual-write（P1-1 双进程写同库竞态 + 迁移竞态） | 4 |
 | security | 6 | p13-host-injection（P1-3 真实宿主注入） | 7 |
 | read-auth（鉴权矩阵 + 回环开放，2 文件） | 14 | whiteboard（含 P3-1 治理端到端与前端静态契约，12 文件） | 158 |
 | files-api | 41 | plugins（含 P2-6 chat-context、SP-P0 space-pipeline） | 177 |

@@ -152,8 +152,74 @@ const PRIORITIES = ['high', 'medium', 'low']
 // ── SQLite ──
 mkdirSync(dirname(DB_FILE), { recursive: true })
 const db = new DatabaseSync(DB_FILE)
-db.exec('PRAGMA journal_mode = WAL')
+// busy_timeout 先设：普通写事务（BEGIN IMMEDIATE）靠它等待数据库锁，实测生效
+// （另一连接持锁时按预算等待后成功）。注意它**不覆盖**下面那条 journal_mode 切换——原因见 enableWal。
 db.exec('PRAGMA busy_timeout = 5000')
+enableWal()
+
+/** 同步等待，供启动期重试退避用（Atomics.wait 不忙转 CPU）。 */
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+/**
+ * 把库切到 WAL 日志模式（**并发启动安全**）。
+ *
+ * 为什么不能只靠 busy_timeout：`PRAGMA journal_mode = WAL` 在真正需要切换时要拿**排他锁**，
+ * 而该语句**不受 busy_timeout 约束** —— 实测另一个连接持锁时它 106ms 内直接抛
+ * `database is locked`（errcode 5），busy handler 根本没有参与等待
+ * （对照实测：同样的锁争用下，普通写 `BEGIN IMMEDIATE` 会按 busy_timeout 等待 2066ms 后成功）。
+ * 后果：本仓库既有部署形态是「8787 独立进程 + 3080 宿主 v2 外壳」两进程同时打开同一个库（P1-1），
+ * 新库首次切 WAL 时后到者会在**模块加载期崩溃**退出；宿主侧表现为 /team-hub 路由缺失 +
+ * 一条加载失败日志（外壳有 .catch，不会带走宿主进程），直到重启。
+ * 因此这一步必须自己等待：有界重试（默认约 6s，与 busy_timeout 同量级）。
+ * 已处于 WAL 的库是空操作，重试会立即返回。
+ */
+function enableWal({ attempts = 50, intervalMs = 120 } = {}) {
+  for (let i = 1; ; i++) {
+    try {
+      db.exec('PRAGMA journal_mode = WAL')
+      return i
+    } catch (e) {
+      if (i >= attempts) {
+        throw new Error(`无法把库切到 WAL（等待约 ${(((attempts - 1) * intervalMs) / 1000).toFixed(1)}s 后库仍被占用）：${e?.message ?? e}`)
+      }
+      sleepSync(intervalMs)
+    }
+  }
+}
+
+/**
+ * 幂等补列（启动期迁移的**唯一**入口）。
+ *
+ * 为什么不能写成 `if (!cols.includes(c)) db.exec('ALTER TABLE ...')`：
+ * 本仓库的既有部署形态就是**两进程同时打开同一个库**（8787 独立进程 + 3080 宿主 v2 外壳），
+ * 两者启动时会并发跑同一批迁移。`PRAGMA table_info` 检查与 `ALTER TABLE` 之间没有互斥，
+ * 两个进程都会读到「列不存在」，于是都执行 ALTER —— 后者拿到
+ * `SQLite error: duplicate column name: xxx`（真实复现：同时启动两个 server.mjs 指向同一新库，
+ * 其中一个在模块加载期即崩溃，进程退出；宿主侧表现为 /team-hub 路由缺失并打一条加载失败日志，直到重启）。
+ *
+ * 做法：在 BEGIN IMMEDIATE 里**重读一次**列名再决定是否 ALTER —— IMMEDIATE 直接取写锁
+ * （不走 DEFERRED 的读→升写路径，避免并发下的锁升级死锁），把「检查 + 变更」变成原子操作。
+ * 拿不到写锁时最多等待 busy_timeout，超时会抛错：这是既有语义（迁移失败不静默继续）。
+ */
+function ensureColumn(table, column, ddl) {
+  if (columnExists(table, column)) return
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    if (!columnExists(table, column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`)
+    db.exec('COMMIT')
+  } catch (e) {
+    try { db.exec('ROLLBACK') } catch { /* 已回滚 */ }
+    // 另一进程可能在等待写锁期间已完成同一列：重读确认，已存在即视为成功（迁移幂等）
+    if (columnExists(table, column)) return
+    throw e
+  }
+}
+
+function columnExists(table, column) {
+  return db.prepare(`PRAGMA table_info(${table})`).all().some(c => c.name === column)
+}
 db.exec(`
   CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
@@ -227,12 +293,10 @@ db.exec(`
   )
 `)
 // 迁移：为既有数据库补充 private（本地/私有标记）与仓库绑定列（local_dir/remote_url）。
-{
-  const spaceCols = db.prepare('PRAGMA table_info(spaces)').all().map(c => c.name)
-  if (!spaceCols.includes('private')) db.exec('ALTER TABLE spaces ADD COLUMN private INTEGER DEFAULT 0')
-  if (!spaceCols.includes('local_dir')) db.exec("ALTER TABLE spaces ADD COLUMN local_dir TEXT DEFAULT ''")
-  if (!spaceCols.includes('remote_url')) db.exec("ALTER TABLE spaces ADD COLUMN remote_url TEXT DEFAULT ''")
-}
+// 走 ensureColumn（BEGIN IMMEDIATE 内重读）——双进程同时启动时会并发跑同一批迁移，非原子写法会崩。
+ensureColumn('spaces', 'private', 'private INTEGER DEFAULT 0')
+ensureColumn('spaces', 'local_dir', "local_dir TEXT DEFAULT ''")
+ensureColumn('spaces', 'remote_url', "remote_url TEXT DEFAULT ''")
 // ── SP-P0 空间流水线：编队即流水线 ────────────────────────────────────────────
 // 背景（T-127 现场）：阶段定义原本只存在于守护宿主的 roles.json（部署面文件），与空间编队（roster，数据面）
 // 是两份必须手工对齐的数据；新增空间一旦漏配，目标链会静默停在 todo。本层把阶段定义搬进数据面：
@@ -267,11 +331,9 @@ db.exec(`
 `)
 
 // 迁移：members 补充 model 列（S2/R-1 决策 B1：守护心跳可携带当前选用模型，供 GET /api/chat/health 聚合展示；
-// 列可空，既有成员行/插入语句零影响）。
-{
-  const memberCols = db.prepare('PRAGMA table_info(members)').all().map(c => c.name)
-  if (!memberCols.includes('model')) db.exec('ALTER TABLE members ADD COLUMN model TEXT DEFAULT NULL')
-}
+// 列可空，既有成员行/插入语句零影响）。走 ensureColumn：双进程并发启动时非原子写法会崩在这里
+// （实测 `duplicate column name: model`，见 scripts/ci/dual-write-smoke.test.mjs 的并发启动用例）。
+ensureColumn('members', 'model', 'model TEXT DEFAULT NULL')
 // 空间目标（goal）：一个工作空间可**并存多个目标**（多目标并发，互不取消），任务集围绕各自目标推进。
 // 每行 = 一个目标记录：
 //   id        目标唯一标识（G-xxx）
@@ -301,32 +363,46 @@ db.exec(`
 `)
 // 老库迁移：旧 goal 表是「scope 主键 + 单目标 upsert」，无 id/status/version。
 // 启动时若发现还是旧形状（无 id 列），重建为多目标模型：旧行逐一升级为独立目标记录（status=active）。
+//
+// 这是**破坏性**迁移（DROP + CREATE + 逐行搬迁），因此整段放进单个 BEGIN IMMEDIATE：
+// 双进程同时启动时若各自读到「旧形状」，会互相 DROP 对方的表、重复搬迁旧行；
+// 取写锁 + 锁内重读形状判断，保证只有一个进程执行、另一个看到已是新形状而跳过。
+// 迁移失败即抛错（不静默继续）——避免半迁移状态被当成正常库使用。
 {
-  const goalCols = db.prepare('PRAGMA table_info(goal)').all().map(c => c.name)
-  if (!goalCols.includes('id')) {
-    const legacy = db.prepare('SELECT scope, objective, createdAt, updatedAt FROM goal').all()
-    db.exec('DROP TABLE goal')
-    db.exec(`
-      CREATE TABLE goal (
-        id TEXT PRIMARY KEY,
-        scope TEXT NOT NULL,
-        objective TEXT NOT NULL,
-        status TEXT DEFAULT 'active',
-        version INTEGER NOT NULL DEFAULT 1,
-        mode TEXT DEFAULT 'chain',
-        createdAt TEXT,
-        updatedAt TEXT,
-        endedAt TEXT,
-        docsDir TEXT
-      )
-    `)
-    legacy.forEach((r, i) => {
-      const id = `G-${String(i + 1).padStart(3, '0')}`
-      const created = r.createdAt ?? now()
-      db.prepare('INSERT INTO goal (id, scope, objective, status, version, mode, createdAt, updatedAt, endedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-        .run(id, r.scope, r.objective, 'active', 1, 'chain', created, r.updatedAt ?? created, null)
-    })
-    if (legacy.length > 0) console.log(`[team-hub] goal 表迁移为多目标模型：${legacy.length} 条旧目标升级为独立目标记录（G-001…）`)
+  const needsRebuild = () => !columnExists('goal', 'id')
+  if (needsRebuild()) {
+    db.exec('BEGIN IMMEDIATE')
+    try {
+      if (needsRebuild()) {
+        const legacy = db.prepare('SELECT scope, objective, createdAt, updatedAt FROM goal').all()
+        db.exec('DROP TABLE goal')
+        db.exec(`
+          CREATE TABLE goal (
+            id TEXT PRIMARY KEY,
+            scope TEXT NOT NULL,
+            objective TEXT NOT NULL,
+            status TEXT DEFAULT 'active',
+            version INTEGER NOT NULL DEFAULT 1,
+            mode TEXT DEFAULT 'chain',
+            createdAt TEXT,
+            updatedAt TEXT,
+            endedAt TEXT,
+            docsDir TEXT
+          )
+        `)
+        legacy.forEach((r, i) => {
+          const id = `G-${String(i + 1).padStart(3, '0')}`
+          const created = r.createdAt ?? now()
+          db.prepare('INSERT INTO goal (id, scope, objective, status, version, mode, createdAt, updatedAt, endedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+            .run(id, r.scope, r.objective, 'active', 1, 'chain', created, r.updatedAt ?? created, null)
+        })
+        if (legacy.length > 0) console.log(`[team-hub] goal 表迁移为多目标模型：${legacy.length} 条旧目标升级为独立目标记录（G-001…）`)
+      }
+      db.exec('COMMIT')
+    } catch (e) {
+      try { db.exec('ROLLBACK') } catch { /* 已回滚 */ }
+      throw e
+    }
   }
 }
 // 持续执行编排：每空间开关 + 用户点「派 AI 执行」的请求队列。
@@ -559,10 +635,7 @@ db.exec(`
   )
 `)
 // 老库迁移：skills 表先于 status/contentHash/reviewedAt 三列存在，缺列补上。
-function ensureColumn(table, column, ddl) {
-  const cols = db.prepare(`PRAGMA table_info(${table})`).all()
-  if (!cols.some(c => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`)
-}
+// （ensureColumn 定义在文件上方 SQLite 初始化处：它是启动期迁移的唯一入口，且必须是原子的。）
 ensureColumn('skills', 'status', "status TEXT DEFAULT 'pending'")
 ensureColumn('skills', 'contentHash', "contentHash TEXT DEFAULT ''")
 ensureColumn('skills', 'reviewedAt', 'reviewedAt TEXT')

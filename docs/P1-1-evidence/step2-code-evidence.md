@@ -69,12 +69,13 @@ run-ci test 全量 25 套件 PASS（v1v2-contract 14/14 证明 serve.mjs import 
 - ⑥ 写冒烟：宿主 v2 create 200（T-135 → canceled 清理）
 - ⑦ hub 模式 reject → 501 降级指引
 
-补充端到端实测（`scratch/sse-bridge-live.mjs`，仅现场留痕不入库）：
+补充端到端实测（`scripts/live/sse-bridge-live.mjs`，已入库为可复验工具）：
 连生产 `/scrum-board/api/board/events` → 经宿主 v2 create T-136 + transition → 板 SSE **泵帧 50 条且含新任务 id**（→ canceled 清理）→ 事件桥端到端 PASS。
 
 ## 4. 诚实边界
 
-1. 现场切换**已完成并全项验收通过**（上文 13/13 + SSE 桥）。残余：`scratch/` 两个现场脚本（`sse-bridge-live.mjs`、`dual-write-smoke.mjs` 的 scratch 副本）为临时留痕；正式回归工具已入库 `scripts/ci/dual-write-smoke.mjs`。
+1. 现场切换**已完成并全项验收通过**（上文 13/13 + SSE 桥）。v1 文件库退役已入库：`scrum/tasks.json` 删除（内容仍在 git 历史可追溯）、`scrum/tasks.json.archived` 占位、`scrum/archive/` 加入 .gitignore（归档含运行时产物，磁盘保留）。回归工具入库：`scripts/ci/dual-write-smoke.test.mjs`（双进程写同库竞态，已接入 run-ci `dual-write` 套件）与 `scripts/live/sse-bridge-live.mjs`（SSE 桥实测；刻意只建 backlog 任务，避免被生产 worker 守护派工）。
+2. 门禁复跑记录：切换后首次全量 test 出现 `plugins` 2 个用例失败（`B 闸门…`、`failed intermediate auto-merge…`，耗时 761s）。核查：两用例为纯 fake fetch + 临时 git 仓库、不触 server.mjs，standalone 135/135 仅 8s；v2 audit 全程仅 `release-stale`（无派工、无新 worktree）→ 判定时序 flake。**复跑全量 test 27 组全 PASS**（113s，含新增 dual-write 2/2），确认非代码回归。
 2. hub 动态面板是轻量自渲染（无框架），覆盖看板主操作（迁移/评论/实时刷新）；未复刻旧 kanban.html 全部
    视觉细节（本地模式静态页不受影响）。console 总览页 v2 化为基础版（任务/守护/活动）。
 3. 归档脚本默认不动 `daemon.json`/`roles.json`（守护状态与流水线配置非 v1 任务数据，继续使用）。

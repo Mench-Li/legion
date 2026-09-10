@@ -24,17 +24,12 @@ console.log('首帧含 data 帧 =', first.includes('data:') ? 'yes' : 'no', '| �
 const mk = await fetch(base + '/team-hub/api/create', {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
+  // 注意：保持 backlog（**不置 todo**）——置 todo 会被生产 worker 守护 sweep 抓到并派工，
+  // 干扰现场。backlog 任务同样出现在 hub /api/board?scope=software 全量帧中，足够断言。
   body: JSON.stringify({ title: 'SSE 桥实测', by: 'general', scope: 'software' }),
 }).then((r) => r.json())
 const tid = mk.task?.id
 console.log('经宿主 v2 create =', tid ?? JSON.stringify(mk).slice(0, 140))
-if (tid) {
-  await fetch(base + '/team-hub/api/transition', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ id: tid, to: 'todo', by: 'general', ifVersion: mk.task.version }),
-  })
-}
 await new Promise((r) => setTimeout(r, 1500))
 const all = frames.join('')
 const hits = (all.match(/data: /g) ?? []).length
@@ -42,12 +37,13 @@ const sawNew = tid ? all.includes(tid) : false
 console.log('桥泵帧数(data:) =', hits, '| 含新任务 id =', sawNew)
 
 if (tid) {
-  await fetch(base + '/team-hub/api/transition', {
+  // 未做 transition（保持 backlog）→ version 未变
+  const del = await fetch(base + '/team-hub/api/transition', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ id: tid, to: 'canceled', by: 'general', ifVersion: mk.task.version + 1 }),
-  })
-  console.log('已清理实测任务', tid, '→ canceled')
+    body: JSON.stringify({ id: tid, to: 'canceled', by: 'general', ifVersion: mk.task.version }),
+  }).then((r) => r.json()).catch(() => ({}))
+  console.log('已清理实测任务', tid, '→ canceled', del?.task ? '' : '(清理响应异常，请人工复核)')
 }
 ac.abort()
 await pump.catch(() => {})

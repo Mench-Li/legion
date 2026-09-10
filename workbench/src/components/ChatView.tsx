@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { createChatConversation, fetchChatConversations, fetchChatHealth, fetchChatMessages, fetchChatReplySettings, fetchSpaces, hubBase, postChatMessage, retryChatReply, saveChatReplySettings, subscribeHubAudit, uploadChatAttachment } from '../api'
 import type { ChatAttachmentRef, ChatConversation, ChatHealthInfo, ChatMessage, SpaceInfo } from '../types'
 import { mergeById } from '../dedupe'
-import { chatHealthView, chatSseLabel, replyModelOf, shouldRefillChat } from '../chatUi'
+import { aiStateView, canSend, chatHealthView, chatSseLabel, maxSeqOf, replyModelOf, sendFailText, shouldRefillChat } from '../chatUi'
 import type { ChatHealthLite, ChatMsgLite } from '../chatUi'
 import { toast } from './Toast'
 
@@ -281,9 +281,11 @@ export function ChatView({ scope, hubMode, spaces, onPickScope }: {
         if (n !== null) void mergeNewest()
         void loadConvs()
       }
-      if (Number.isFinite(ev.seq) && ev.seq > seqWatermarkRef.current) {
-        seqWatermarkRef.current = Math.floor(ev.seq)
-        setSeqWatermark(seqWatermarkRef.current)
+      // 水位推进用 chatUi.maxSeqOf 统一口径（忽略非法值；只前进不回退）
+      const nextWatermark = maxSeqOf([seqWatermarkRef.current, ev.seq])
+      if (nextWatermark !== seqWatermarkRef.current) {
+        seqWatermarkRef.current = nextWatermark
+        setSeqWatermark(nextWatermark)
       }
       if (!String(ev.action).startsWith('chat:')) return
       if (ev.scope !== scope) return // 空间身份守卫（R-A5）：只响应当前空间事件（跨空间会话 id 可能撞号）
@@ -554,7 +556,8 @@ export function ChatView({ scope, hubMode, spaces, onPickScope }: {
     } catch (e) {
       if (!identityStale(scopeAtCall, convAtCall, scopeRef.current, activeRef.current)) {
         // 失败：草稿与附件槽均保留（TC-S2-07/10 / TC-S8-07），toast 错误
-        toast('err', `发送失败：${e instanceof Error ? e.message : String(e)}`)
+        // P2-6：文案由 chatUi.sendFailText 统一产出（区分未授权/中枢不可达，并明示「草稿已保留」）
+        toast('err', sendFailText(e))
       }
     } finally {
       setSending(false)
@@ -669,7 +672,8 @@ export function ChatView({ scope, hubMode, spaces, onPickScope }: {
                   // P2-6：回复模型在**回复行**的 meta 上（服务端 postAiReply 写 {replyTo, aiModel}），
                   // 源消息 meta 只有 aiStatus/repliedAt/replyMsg → 必须回到列表按 replyMsg 找，否则永远显示不出模型。
                   const aiModel = (st === 'replied' ? replyModelOf(m as ChatMsgLite, msgs as ChatMsgLite[]) : null) ?? metaStr(m, 'aiModel')
-                  const aiError = metaStr(m, 'aiError')
+                  // P2-6：三态文案由 chatUi.aiStateView 统一产出（失败原因也走它，避免组件内联文案与单测断言漂移）
+                  const aiView = aiStateView(m as ChatMsgLite, 'general', msgs as ChatMsgLite[])
                   return (
                     <div key={m.id} className={`chat-row${me ? ' me-row' : ''}${bot ? ' bot-row' : ''}`}>
                       <div className={`chat-author${me ? ' me' : ''}`}>
@@ -690,17 +694,17 @@ export function ChatView({ scope, hubMode, spaces, onPickScope }: {
                           ))}
                         </div>
                       )}
-                      {me && st === 'awaiting' && (
+                      {aiView?.state === 'awaiting' && (
                         <div className="chat-ai-state pending">
                           <span className="chat-ai-spinner">◌</span> AI 正在回复…（提交于 {fmt(m.createdAt)}）
                         </div>
                       )}
-                      {me && st === 'replied' && (
-                        <div className="chat-ai-state done">✓ AI 已回复</div>
+                      {aiView?.state === 'replied' && (
+                        <div className="chat-ai-state done">✓ AI 已回复{aiModel ? `（${aiModel}）` : ''}</div>
                       )}
-                      {me && st === 'failed' && (
+                      {aiView?.state === 'failed' && (
                         <div className="chat-ai-state failed">
-                          ❌ 回复失败{aiError ? `：${aiError}` : ''}
+                          ❌ {aiView.text}
                           <button
                             className="btn small"
                             disabled={retryingId === m.id}
@@ -761,7 +765,7 @@ export function ChatView({ scope, hubMode, spaces, onPickScope }: {
                   </span>
                   <button className="btn primary"
                     title={attachFiles.some(a => a.id === undefined || a.error !== undefined) ? '附件未就绪：请等待上传完成或移除失败附件' : undefined}
-                    disabled={sending || attachBusy || draft.trim().length === 0 || attachFiles.some(a => a.id === undefined || a.error !== undefined)}
+                    disabled={sending || attachBusy || !canSend(draft, attachFiles.filter(a => a.id !== undefined && a.error === undefined).length) || attachFiles.some(a => a.id === undefined || a.error !== undefined)}
                     onClick={() => void send()}>
                     {sending ? '发送中…' : '发送 ➤'}
                   </button>

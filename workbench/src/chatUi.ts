@@ -8,8 +8,9 @@
  *   - 「模型不可用、超时、守护离线」的完整 UI 判定与**可行动文案**（`chatHealthView` / `aiStateView`）；
  *   - 「awaiting → replied/failed 的前端合并」（`mergeChatMessages`：同 id 覆盖，AI 三态是同一条源消息的 meta 更新）；
  *   - 「断线恢复」（`shouldRefillChat` / `chatSseLabel`：复用 P2-4 的 seq 水位缺口判据与连接状态语义）。
- */
-import { mergeById } from './dedupe.ts' // 显式扩展名：Node（--experimental-strip-types）无法解析无扩展名相对导入
+ *
+ * 导出纪律：**只导出有生产接线或明确语义价值的函数**——抽取后未接线的导出会给「测试全绿但
+ * 生产未用」的假象（本项目已明确不接受的坏味道）。
 
 /** 前端消息（后端 chat_messages 行的前端视图子集；meta 承载 AI 三态）。 */
 export interface ChatMsgLite {
@@ -129,18 +130,13 @@ export function aiStateView(
 }
 
 /**
- * 消息列表合并（P2-6 第 2 项核心）：同一 id 以**最新版本覆盖**、新消息按 id 升序追加。
+ * 消息列表合并的**对话语义**说明（实现即 `dedupe.mergeById`，ChatView 直接调用它）：
+ * 同一 id 以**最新版本覆盖**、新消息按 id 升序追加、更早历史保留在前。
  *
- * 为什么不能只「追加新 id」：AI 三态是**同一条源消息的 meta 更新**（awaiting→replied/failed），
- * 只追加新 id 会让气泡永远停在「等待回复」，这正是 P2-6 要修的问题。
- *
- * 实现委托 `dedupe.mergeById`（ChatView 实际调用的也是它）——**单一实现**，此处只给出对话语义
- * 的类型与回归锚点，避免两处合并逻辑各自演化。
+ * 为什么这是 P2-6 的关键：AI 三态是**同一条源消息的 meta 更新**（awaiting→replied/failed），
+ * 只「追加新 id」会让气泡永远停在「等待回复」。
+ * 此处不另设包装函数——单一实现，语义断言放在 chat-ui 测试里对 `mergeById` 直接锚定。
  */
-export function mergeChatMessages(prev: ChatMsgLite[], incoming: ChatMsgLite[]): ChatMsgLite[] {
-  if (incoming.length === 0) return prev
-  return mergeById(prev, incoming)
-}
 
 /**
  * 缺口判据（P2-6 第 2 项「断线恢复」，与 P2-4 通知中心同一口径）：
@@ -192,12 +188,4 @@ export function sendFailText(err: unknown): string {
   if (/\b40[13]\b/.test(m)) return '发送失败：未授权（请在设置中填写中枢 token）——草稿已保留，修好后可直接重发'
   if (/fetch|network|Failed to fetch|ECONNREFUSED|timeout/i.test(m)) return '发送失败：中枢不可达——草稿已保留，等中枢恢复后重发'
   return '发送失败：' + m + '——草稿已保留，可重发'
-}
-
-/** 健康副文本（诚实标注：源自服务端 honestNote，缺省给出同义表述）。 */
-export function healthHonestNote(health: ChatHealthLite | null): string {
-  const n = health?.honestNote
-  return typeof n === 'string' && n.trim().length > 0
-    ? n
-    : '模型「已解析」不代表 provider 实际可用：实际可用性以最近一次 AI 回复/失败原因为准。'
 }

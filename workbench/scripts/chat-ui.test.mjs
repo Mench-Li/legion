@@ -10,9 +10,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  aiStateView, aiStatusOf, canSend, chatHealthView, chatSseLabel, healthHonestNote,
-  isMine, maxSeqOf, mergeChatMessages, replyModelOf, sendFailText, shouldRefillChat,
+  aiStateView, aiStatusOf, canSend, chatHealthView, chatSseLabel,
+  isMine, maxSeqOf, replyModelOf, sendFailText, shouldRefillChat,
 } from '../src/chatUi.ts'
+// 合并语义的实现是 dedupe.mergeById（ChatView 直接调用它）——此处对**同一函数**做对话语义锚定，
+// 避免为同一语义维护两份 API。
+import { mergeById } from '../src/dedupe.ts'
 
 const msg = (id, o = {}) => ({ id, author: 'general', body: 'b' + String(id), meta: null, ...o })
 
@@ -89,31 +92,32 @@ test('健康判定：未知/加载中/最近失败/前提缺失/就绪 五级优
   assert.ok(green.title.includes('已解析不代表 provider 实际可用'))
 })
 
-test('诚实标注：优先用服务端的 honestNote，缺失时给同义兜底', () => {
-  const n = healthHonestNote({ honestNote: '自定义说明' })
-  assert.equal(n, '自定义说明')
-  assert.ok(healthHonestNote(null).includes('已解析'))
-  assert.ok(healthHonestNote({ honestNote: '   ' }).includes('已解析'), '空白视为缺失')
-})
-
-test('消息合并：同 id 覆盖（AI 三态流转）、新消息追加、保序去重、更早历史保留', () => {
+test('消息合并（dedupe.mergeById，ChatView 实际调用）：同 id 覆盖（AI 三态流转）、追加、保序去重、更早历史保留', () => {
   const a = msg(1, { meta: { aiStatus: 'awaiting' } })
   const older = msg(0)
   const prev = [older, a]
   // ② awaiting → replied：同 id 必须被覆盖（这正是「气泡停在等待回复」的根因）
-  const merged = mergeChatMessages(prev, [msg(1, { meta: { aiStatus: 'replied', aiModel: 'm' } })])
+  const merged = mergeById(prev, [msg(1, { meta: { aiStatus: 'replied', aiModel: 'm' } })])
   assert.equal(merged.length, 2)
   assert.equal(merged.find(m => m.id === 1)?.meta?.aiStatus, 'replied', '同 id 以最新版本覆盖')
   assert.equal(merged[0].id, 0, '更早历史保留在前')
   // ③ 新消息追加且整体按 id 升序（乱序输入也归位）
-  const m2 = mergeChatMessages(prev, [msg(3), msg(2)])
+  const m2 = mergeById(prev, [msg(3), msg(2)])
   assert.deepEqual(m2.map(x => x.id), [0, 1, 2, 3])
   // 去重：同一批 incoming 内重复 id 只留一条
-  const m3 = mergeChatMessages([], [msg(5), msg(5)])
+  const m3 = mergeById([], [msg(5), msg(5)])
   assert.equal(m3.length, 1)
   // 空输入边界
-  assert.deepEqual(mergeChatMessages([], []), [])
-  assert.deepEqual(mergeChatMessages(prev, []), prev, 'incoming 空 → 原样返回（不重排）')
+  assert.deepEqual(mergeById([], []), [])
+  assert.deepEqual(mergeById(prev, []), prev, 'incoming 空 → 内容等价（保序）')
+  // 与三态渲染联动：合并后再取值，模型经回复行解析可得（端到端语义闭合）
+  const source = msg(20, { meta: { aiStatus: 'awaiting' } })
+  const rows = mergeById([source], [
+    msg(20, { meta: { aiStatus: 'replied', replyMsg: 21 } }),
+    msg(21, { author: 'software-assistant', meta: { replyTo: 20, aiModel: 'm-x' } }),
+  ])
+  const finalSource = rows.find(x => x.id === 20)
+  assert.equal(aiStateView(finalSource, 'general', rows)?.text, '已回复 · m-x', '合并后的三态与模型解析一致')
 })
 
 test('断线恢复缺口判据：首帧建基线不误报，跳变即判缺口，连续不报', () => {

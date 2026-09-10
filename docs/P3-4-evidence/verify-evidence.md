@@ -31,6 +31,7 @@
 | ③ 插件族配置面可见 | `board-plugin`（`TEAM_HUB_TOKEN`）与 `services-plugin`（`TEAM_HUB_HOST`/`TEAM_HUB_TOKEN`/`DSH_HUB_UPSTREAM`）各加 schema；扫描器新增「别名环境对象」识别（`baseEnv.NAME`） | 单测断言 `baseEnv.*` 三处读取点被扫出（改造前**完全不可见**）；`scan --check` 6 个配置面全绿 |
 | ④ 跨进程规则 | 新增 `services_inject_overrides_env`（托管启动注入的端口/上游与环境解析值不一致）、`plugin_hub_token_unset`；schema 增加进程内 `rules` 与 `injects` 两个可声明块 | 单测 2 例（构造两份配置触发/不触发）；`check.mjs` 10 → 12 条跨进程规则；bad 夹具实测报出 `services_inject_overrides_env` |
 | ⑤ 门禁与文档 | CI env 阶段 scan/sync/check 自动覆盖新 schema；`docs/CONFIG.md` 新增 §3.4–3.6 与边界；`README.md` §9.2 表格修正；`STATUS.md`、`REMAINING-TASKS.md`（候选 #4 关闭）、`FEATURES.md`、`docs/review/T-124-REVIEW.md` S4 同步 | `node scripts/config/scan.mjs --check`、`sync.mjs --check`、`check.mjs --env-file=…good.env --isolated-env --strict` 三项 PASS（§3.1） |
+| ⑥ 扫描器修复（**合并到 main 后才发现**，见 §2.7） | `scan.mjs` 剥注释后再提取读取点（字符串内的 `//` 不误伤同一行读取）；未跟踪文件在输出里显式提示；`services-plugin` schema 把 `TEAM_HUB_PORT`/`DSH_WORKBENCH_PORT` 列入 `nonEnvLiterals`（注入目标名，不是读取点） | 单测新增 1 例（注释不算读取点、字符串里的 `//` 不吃掉同行读取、解构不受影响、疑似字面量仍可见）+ 断言扫描文件数 ≥10（防「空集合假绿」）；`scan --check` 在 main 上 PASS |
 
 ## 2. 关键设计决策与取舍
 
@@ -56,6 +57,13 @@
 6. **扫描器识别 `baseEnv.NAME`**：services-plugin 用 `const baseEnv = { ...process.env }` 再读 `baseEnv.TEAM_HUB_TOKEN`，
    直接扫描**完全看不到**这些读取点——与 P3-2 那批 `envBytes(name, def)` 是同一类盲区。新增规则只在接收者以 `Env`
    结尾时生效，避免误伤普通对象属性。
+7. **「在未提交的工作树上跑门禁」会给出假绿（实测教训）**：`scan.mjs` 的扫描范围是 **git 跟踪的文件**，
+   而 P3-4 的新文件（`plugins/src/config.ts` 等）在提交前是未跟踪的 → 扫描器直接跳过它们 → 本地 `scan --check`
+   与 config 套件都是绿的。合并到 main（文件已被跟踪）后立刻暴露两个真问题：① 注释里那句
+   `Number(process.env.X || 默认值)` 被当成读取点，报出根本不存在的未声明键 `X`；②
+   `services-plugin/config-schema.mjs` 里作为**注入目标名**出现的 `TEAM_HUB_PORT` / `DSH_WORKBENCH_PORT`
+   被要求「声明或排除」。两处都已修（§1 第 ⑥ 行），并把教训固化进测试：新断言要求
+   `scanProcess('plugins').filesScanned >= 10`——空集合只有在「确实扫到了文件」时才能当证据。
 
 ## 3. 复跑命令与实测输出
 
@@ -116,10 +124,10 @@ $env:DSH_CHECKOUT='D:\project\DSH\dsh\deepseek-harness'
 node scripts/ci/run-ci.mjs --only env,test,doc --out .ci\p3-4-final
 ```
 
-实测：`env` PASS（含 config scan/sync/check 三项）、`test` PASS **38 套件 / 942 用例**
-（`plugins` 185、`config` 35、`p13-host-injection` 8；上一轮基线 926 例 —— 本次 +16 例全部是新增断言，
+实测：`env` PASS（含 config scan/sync/check 三项）、`test` PASS **38 套件 / 943 用例**
+（`plugins` 185、`config` 36、`p13-host-injection` 8；上一轮基线 926 例 —— 本次 +17 例全部是新增断言，
 无既有用例被删除或放宽）、`doc` PASS（文档新鲜度 + 证据快照 banner 覆盖，55 个快照目录）。
-逐套件数字与 `docs/STATUS.md` §2 表格一致（同一份 `.ci/p3-4-final/summary.json`）。
+逐套件数字与 `docs/STATUS.md` §2 表格一致（同一份 `.ci/<run>/summary.json`）。
 本次 `test` 阶段耗时 380s（同内容的另一次运行 171s）——差异来自机器上并行的 node 任务，不是测试变慢。
 
 > 运行环境备注（如实登记）：在**未提交的 worktree** 上跑 `--only test` 需要 `workbench/node_modules`

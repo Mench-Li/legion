@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-10　`run-ci --only env,test,doc` **全 PASS**；其中 `test` **38 套件 / 942 用例**
+**最近一次全量基线**：2026-09-10　`run-ci --only env,test,doc` **全 PASS**；其中 `test` **38 套件 / 943 用例**
 （171s；同内容的另一次运行因机器上有并行 node 任务耗时 380s，结论一致）—— 以本文件所在提交为准
 
 > ✅ **基线可单命令复现**（2026-09-10）：`test` 阶段此前会因 `notify-hub-smoke` 泄漏 hub 子进程
@@ -61,8 +61,8 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：38 套件 / 942 用例，`--only test` 整体 PASS（171s）** —— 2026-09-10 实测
-（P3-4 之后：`plugins` 177→185、`config` 28→35、`p13-host-injection` 7→8。
+**当前基线：38 套件 / 943 用例，`--only test` 整体 PASS（171s）** —— 2026-09-10 实测
+（P3-4 之后：`plugins` 177→185、`config` 28→36、`p13-host-injection` 7→8。
 此前 `test` 阶段会因 `notify-hub-smoke` 泄漏子进程而**永不结束**，故长期只能用「逐套件单跑」拼出基线；
 根因、修复与两处连带回归见 `docs/CI-TEST-STAGE-evidence/verify-evidence.md`）。
 
@@ -84,7 +84,7 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 | web | 24 | static-serve（静态托管 404/SPA 回退/穿越） | 6 |
 | doc-render | 11 | board-plugin | 37 |
 | skill-importer | 4 | scrum | 25 |
-| hub-board / artifact-policy | 1 / 3 | config（P3-2 统一配置 + P3-4 插件族） | 35 |
+| hub-board / artifact-policy | 1 / 3 | config（P3-2 统一配置 + P3-4 插件族） | 36 |
 | web-history（P2-8 抓取历史） | 1 |  |  |
 
 （上表**全部**为 `--only test` 单次全量运行的实测值；不再存在「未入全量基线」的套件。）

@@ -20,7 +20,7 @@ import {
 import * as ENGINE from '../../packages/shared/src/config.mjs'
 import { runCrossChecks, isExposed } from './cross-checks.mjs'
 import { parseEnvFileDetailed } from './check.mjs'
-import { scanProcess } from './scan.mjs'
+import { scanProcess, extractEnvReads } from './scan.mjs'
 import { SCHEMA as HUB } from '../../team-hub/config-schema.mjs'
 import { SCHEMA as WB } from '../../workbench/scripts/config-schema.mjs'
 import { SCHEMA as BOARD } from '../../whiteboard/apps/server/src/config-schema.mjs'
@@ -465,8 +465,42 @@ test('一致性：三份 schema 的 process 名与登记表一致，且 secret �
 
 // ───────────────────────── ⑤ P3-4 插件配置面（plugins / board-plugin / services-plugin）─────────────────────────
 
+test('P3-4：扫描器不被注释骗到，也不会因为字符串里的 // 漏掉同一行的真实读取', () => {
+  // ① 散文注释里提到读法不算读取点。P3-4 实测：`plugins/src/config.ts` 的注释里那句
+  //    `Number(process.env.X || 默认值)` 让**主检出**（文件已被 git 跟踪）多出一个未声明键 `X`，
+  //    而当时的工作树还没提交 → 该文件未被扫描 → 本地跑是绿的。假阳性会被 `scan --check` 当成错误拦住。
+  const prose = [
+    '// 历史写法：Number(process.env.X || 默认值)',
+    '/* 说明：端口来自 process.env.TEAM_HUB_PORT */',
+    "const url = 'http://127.0.0.1:8787' // 行尾注释里也提到 process.env.IGNORED",
+  ].join('\n')
+  assert.deepEqual([...extractEnvReads(prose).literal], [], '注释里的读法不应算读取点')
+  assert.deepEqual([...extractEnvReads('/* process.env.BLOCKED */').literal], [])
+
+  // ② 但**字符串里的 `//` 不得吃掉同一行后面的真实读取**（假阴性比假阳性更危险）：
+  //    仓库里到处是 `'http://127.0.0.1:8787'`，用正则裸替换注释会把这些行整个截掉。
+  const mixed = [
+    "const u = 'http://127.0.0.1:8787'; const token = process.env.TEAM_HUB_TOKEN",
+    "const t2 = process.env['WHITEBOARD_TOKEN'] // 行尾注释",
+    'const { WB_MAX_ROOMS } = process.env',
+    '// const dead = process.env.NEVER_READ',
+  ].join('\n')
+  const reads = extractEnvReads(mixed).literal
+  assert.ok(reads.has('TEAM_HUB_TOKEN'), '字符串里的 // 不得吃掉同一行的读取：' + [...reads])
+  assert.ok(reads.has('WHITEBOARD_TOKEN'), '行尾注释不得影响本行读取：' + [...reads])
+  assert.ok(reads.has('WB_MAX_ROOMS'), '解构读取不受影响：' + [...reads])
+  assert.ok(!reads.has('NEVER_READ'), '注释掉的读取点不算：' + [...reads])
+
+  // ③ 字符串字面量本身保留（「疑似 env 字面量」规则仍要看得见 readKey('WB_MAX_CONNECTIONS')）
+  assert.ok(extractEnvReads("readKey('WB_MAX_CONNECTIONS')").suspicious.has('WB_MAX_CONNECTIONS'))
+})
+
 test('P3-4：plugins schema 覆盖插件真实读取的全部 env，且扫描器能看到别名 env 对象的读取', () => {
   const plugins = scanProcess('plugins', { includeTests: false })
+  // 先确认真的扫到了文件：`[]` 作为「没有直接读取」的证据，只有在这个前提下才有意义
+  // （P3-4 实测过反面教材：文件尚未提交时扫描器跳过未跟踪文件，空集合会给出假绿）
+  assert.ok(plugins.filesScanned >= 10, 'plugins/src 应被完整扫描，实际文件数 ' + plugins.filesScanned)
+  assert.equal(plugins.mode, 'git-tracked')
   // 插件改造后不再直接读 env（统一走 plugins/src/config.ts + 引擎）；这里的价值是「以后新增读取点必须登记」
   assert.deepEqual([...plugins.reads.keys()], [], 'plugins 不应再直接读 env：' + JSON.stringify([...plugins.reads.keys()]))
   assert.deepEqual(PLUGINS.envNames().sort(), [

@@ -397,8 +397,9 @@ export function openDownloadStream(root, rel) {
 /**
  * PUT 上传（TC-S4-01..04；P0-1 修复同款原子语义）：raw bytes；上限预检（Content-Length 在路由层）；
  * 冲突按 strategy 处理（P2-7：ask/overwrite/skip/rename；`overwrite:true` 为向后兼容别名）。
- * 先写【同目录临时文件】再 renameSync 原子发布——中途任何失败都不会破坏既有目标文件、不留下半写目标。
- * 返回含 `skipped` / `name`（rename 策略下 name 为实际落盘名，requestedName 为请求名）。
+ * 先写【同目录临时文件】再 renameSync 原子发布——中途任何失败都不会破坏既有目标文件、不留半写目标。
+ * 返回 `{ name, size, mtime, skipped, requestedName }`：skip 时 skipped=true 且**未落盘**；
+ * rename 时 name 为实际落盘名（requestedName 为请求名，便于前端提示「已重命名为 x-1.txt」）。
  */
 export function uploadBytes(root, rel, data, opts = {}) {
   const { strategy } = normalizeUploadStrategy(opts.strategy ?? (opts.overwrite === true ? 'overwrite' : undefined))
@@ -408,10 +409,11 @@ export function uploadBytes(root, rel, data, opts = {}) {
   const abs = resolveInsideRootForWrite(root, rel)
   const parent = dirname(abs)
   if (!existsSync(parent) || !statSync(parent).isDirectory()) throw new Error('目标目录不存在：' + dirname(String(rel ?? '')))
+  // 冲突预检（skip 直接返回、rename 预选新名；ask 维持 409 语义；overwrite 校验非目录）
   const pre = resolveUploadConflict(abs, strategy)
   if (pre.skipped) {
-    const stSkip = statSync(pre.target)
-    return { name: basename(pre.target), size: stSkip.size, mtime: entryMtime(stSkip.mtimeMs), skipped: true, requestedName: basename(abs) }
+    const stSkip = statSync(abs)
+    return { name: basename(abs), size: stSkip.size, mtime: entryMtime(stSkip.mtimeMs), skipped: true, requestedName: basename(abs) }
   }
   const tmp = tmpSibling(abs)
   try {
@@ -433,11 +435,11 @@ export function uploadBytes(root, rel, data, opts = {}) {
 }
 
 /**
- * 冲突决策（P2-7 单一实现：uploadBytes、receiveUploadBody、completeChunkedUpload 共用）：
- * 返回 `{ skipped: true }`（skip 策略且目标已存在）或 `{ skipped: false, target }`（应写入的绝对路径）。
- * - ask：目标已存在 → 抛 409 语义错误（前端询问后带明确策略重试）；
+ * 冲突决策（P2-7 单一实现，uploadBytes 与路由层 receiveUploadBody 共用）：
+ * 返回 `{ skipped: true }`（策略 skip 且目标已存在）或 `{ skipped: false, target }`（应写入的绝对路径）。
+ * - ask：目标已存在 → 抛 409 语义错误（前端据此弹窗询问后带明确策略重试）；
  * - overwrite：目标为目录 → 拒（不能以文件覆盖目录）；
- * - rename：目标已存在 → 取不冲突新名（`a.txt` → `a-1.txt`）。
+ * - rename：目标已存在 → 取一个不冲突的新名（`a.txt` → `a-1.txt`）。
  */
 export function resolveUploadConflict(abs, strategy) {
   if (!existsSync(abs)) return { skipped: false, target: abs }
@@ -493,42 +495,6 @@ export function removePath(root, rel, confirm) {
   return { path: String(rel ?? ''), deleted: true }
 }
 
-// ───────────────────────── P2-7 ①上传冲突策略 ─────────────────────────
-/**
- * 上传冲突策略（P2-7）：
- *   - `ask`（默认）：目标已存在 → 409 语义错误，由前端弹窗询问后带明确策略重试（既有行为）；
- *   - `overwrite`：覆盖既有文件（目标为目录仍拒）；
- *   - `skip`：目标已存在 → 跳过，返回 `{ skipped: true }` 且**不落盘**（批量上传常用）；
- *   - `rename`：目标已存在 → 自动加 `-1`/`-2`… 后缀写不冲突的新名（返回实际落盘名）。
- * 策略是**服务端权威**（前端只做选择与记忆）：未知策略一律 400，避免拼写错误被静默当成 ask。
- */
-export const UPLOAD_STRATEGIES = Object.freeze(['ask', 'overwrite', 'skip', 'rename'])
-
-/** 校验并归一策略参数（undefined/null/'' → 默认 ask）。 */
-export function normalizeUploadStrategy(raw) {
-  if (raw === undefined || raw === null || String(raw).trim() === '') return { strategy: 'ask', overwrite: false }
-  const s = String(raw).trim()
-  if (!UPLOAD_STRATEGIES.includes(s)) throw new Error('未知上传冲突策略：' + s + '（可选 ' + UPLOAD_STRATEGIES.join('/') + '）')
-  return { strategy: s, overwrite: s === 'overwrite' }
-}
-
-/**
- * rename 策略取名：`a.txt` → `a-1.txt` → `a-2.txt`…（保留扩展名）。返回**尚不存在**的绝对路径；
- * 999 次仍冲突则放弃（防病态目录长循环）。
- */
-export function pickNonConflictingPath(abs) {
-  const dir = dirname(abs)
-  const base = basename(abs)
-  const dot = base.lastIndexOf('.')
-  const stem = dot > 0 ? base.slice(0, dot) : base
-  const ext = dot > 0 ? base.slice(dot) : ''
-  for (let i = 1; i <= 999; i += 1) {
-    const candidate = join(dir, stem + '-' + String(i) + ext)
-    if (!existsSync(candidate)) return candidate
-  }
-  throw new Error('同名文件过多：自动重命名失败（已尝试 999 次）')
-}
-
 function readFileSyncFull(abs) {
   const fd = openSync(abs, 'r')
   const st = statSync(abs)
@@ -542,6 +508,42 @@ function readFileSyncFull(abs) {
     }
     return buf.subarray(0, off)
   } finally { closeSync(fd) }
+}
+
+// ───────────────────────── P2-7 ①上传冲突策略 ─────────────────────────
+/**
+ * 上传冲突策略（P2-7）：
+ *   - `ask`（默认）：目标已存在 → 409 语义错误，由前端弹窗询问后再带明确策略重试（当前既有行为）；
+ *   - `overwrite`：覆盖既有文件（目标为目录仍拒）；
+ *   - `skip`：目标已存在 → 跳过，返回 `{ skipped: true }` 且**不落盘**（批量上传时最常用）；
+ *   - `rename`：目标已存在 → 自动加 `-1`/`-2`… 后缀写入不冲突的新名（返回实际落盘名）。
+ * 说明：策略是**服务端权威**（前端只是选择与记忆），未知策略一律 400，避免拼写错误被静默当成 ask。
+ */
+export const UPLOAD_STRATEGIES = Object.freeze(['ask', 'overwrite', 'skip', 'rename'])
+
+/** 校验并归一策略参数（undefined/null/'' → 默认 ask）。 */
+export function normalizeUploadStrategy(raw) {
+  if (raw === undefined || raw === null || String(raw).trim() === '') return { strategy: 'ask', overwrite: false }
+  const s = String(raw).trim()
+  if (!UPLOAD_STRATEGIES.includes(s)) throw new Error('未知上传冲突策略：' + s + '（可选 ' + UPLOAD_STRATEGIES.join('/') + '）')
+  return { strategy: s, overwrite: s === 'overwrite' }
+}
+
+/**
+ * rename 策略取名：`a.txt` → `a-1.txt` → `a-2.txt`…（保留扩展名；目录无扩展名则整体加后缀）。
+ * 上限 999 次后放弃（防病态目录导致长循环）。返回**尚不存在**的绝对路径。
+ */
+export function pickNonConflictingPath(abs) {
+  const dir = dirname(abs)
+  const base = basename(abs)
+  const dot = base.lastIndexOf('.')
+  const stem = dot > 0 ? base.slice(0, dot) : base
+  const ext = dot > 0 ? base.slice(dot) : ''
+  for (let i = 1; i <= 999; i += 1) {
+    const candidate = join(dir, stem + '-' + String(i) + ext)
+    if (!existsSync(candidate)) return candidate
+  }
+  throw new Error('同名文件过多：自动重命名失败（已尝试 999 次）')
 }
 
 function writeFileSyncSafe(abs, data) {
@@ -644,61 +646,39 @@ function readBodyJson(req) {
   })
 }
 
-/** 读取原始请求体字节（分片上传用）：带显式上限，超限立即 413 语义失败并排空余下字节。 */
-function readBodyBuffer(req, maxBytes) {
-  return new Promise((resolve, reject) => {
-    const chunks = []
-    let total = 0
-    let failed = false
-    req.on('data', (d) => {
-      if (failed) return
-      total += d.length
-      if (total > maxBytes) {
-        failed = true
-        req.resume() // 排空余下字节，让客户端能读到响应而不是被 RST
-        reject(new Error('分片超过上限 ' + maxBytes + ' 字节'))
-        return
-      }
-      chunks.push(d)
-    })
-    req.on('end', () => { if (!failed) resolve(Buffer.concat(chunks)) })
-    req.on('error', (e) => { if (!failed) { failed = true; reject(e) } })
-  })
-}
-
 // ───────────────────────── P2-7 ②大文件分片上传与断点续传 ─────────────────────────
 /**
- * 分片上传（P2-7）：为突破单次 64MB 上限提供**顺序分片 + 断点续传**。
+ * 分片上传（P2-7）：直传 64MB 单次上限之外的**顺序分片 + 断点续传**。
  *
- * 会话状态只落**磁盘**（`<根>/.dsh-uploads/<uploadId>.json` + `.part`），进程重启后仍可续传——
- * 「已收字节」即 `.part` 的长度，不依赖任何内存表。
+ * 会话状态只存在**磁盘**（`<根>/.dsh-uploads/<uploadId>.json` + `.part`），进程重启后仍可续传——
+ * 因为「已收字节」即 `.part` 的长度，不依赖任何内存表。
  *
  * 端点：
- *   POST   /api/files/upload/init   { scope, path, size, strategy? } → { uploadId, received, chunkSize }
- *          · 目标已存在且 strategy=ask（默认）→ 409（前端询问后带明确策略重来）
- *          · skip 且目标已存在 → 直接 `{ skipped: true }`（不建会话）
- *          · 同 path+size 已有未完成会话 → 返回原 uploadId 与 received（前端据此续传）
- *   PUT    /api/files/upload/chunk?uploadId=&offset=N  （body = 该片原始字节）
- *          · offset 必须 == 当前 received（顺序语义）；不等 → 409 且回传 received 供校正
- *   POST   /api/files/upload/complete { uploadId }
- *          · 长度必须等于声明 size（否则 400 且**保留会话**可续传）；随后原子发布（冲突按 strategy）
- *   DELETE /api/files/upload/abort?uploadId=  → 丢弃会话与分片
+ *   POST /api/files/upload/init    { scope, path, size, strategy? } → { uploadId, received, chunkSize }
+ *       · 目标已存在且 strategy=ask（默认）→ 409（前端询问后带明确策略重来）
+ *       · skip 且目标已存在 → 直接 `{ skipped: true }`（不建会话）
+ *       · 续传：同一 path+size 已有会话 → 返回原 uploadId 与 received（前端从 received 续发）
+ *   PUT  /api/files/upload/chunk?uploadId=&offset=N  （body = 该片原始字节）
+ *       · offset 必须 == 当前 received（顺序语义）；不等 → 409 且回传 received 供前端校正
+ *   POST /api/files/upload/complete { uploadId }
+ *       · 长度必须等于声明 size（否则 400 且**保留**会话可续传）；随后原子发布（按 strategy 处理冲突）
+ *   DELETE /api/files/upload/abort?uploadId=  → 丢弃会话与临时文件
  *
- * 安全：uploadId 由服务端签发（`u_` + 16 字节随机 hex），请求侧只做**白名单字符校验**（`assertUploadId`），
- * 绝不把未校验字符串拼进路径；会话与分片都落在根内隐藏目录 `.dsh-uploads/`（不出现在文件列表）。
+ * 安全：uploadId 由服务端生成（`u_` + 随机 hex），请求只做**白名单字符校验**，绝不拼进路径前先过滤；
+ * 会话文件与分片文件都落在根内的 `.dsh-uploads/`（隐藏目录，不出现在列表里）。
  */
 export const UPLOAD_SESSION_DIR = '.dsh-uploads'
 export const UPLOAD_CHUNK_SIZE = envBytes('DSH_WORKBENCH_CHUNK_SIZE', 4 * 1024 * 1024) // 建议分片大小（前端据此切片）
-export const UPLOAD_MAX_SIZE = envBytes('DSH_WORKBENCH_MAX_UPLOAD_TOTAL', 1024 * 1024 * 1024) // 分片上传总上限（默认 1GB）
+export const UPLOAD_MAX_SIZE = envBytes('DSH_WORKBENCH_MAX_UPLOAD_TOTAL', 1024 * 1024 * 1024) // 分片上传总上限（1GB）
 
-/** 会话目录绝对路径（按需创建）。 */
+/** 会话目录绝对路径（不存在则按需创建）。 */
 function uploadSessionDir(root) {
   const dir = join(realpathSync(root), UPLOAD_SESSION_DIR)
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
   return dir
 }
 
-/** uploadId 白名单校验（防路径穿越）。 */
+/** uploadId 白名单校验（防路径穿越：只允许 u_ + 小写十六进制）。 */
 export function assertUploadId(id) {
   if (typeof id !== 'string' || !/^u_[0-9a-f]{16,64}$/.test(id)) throw new Error('uploadId 非法（须为服务端签发的 u_<hex>）')
   return id
@@ -734,6 +714,7 @@ export function initChunkedUpload(root, { path: rel, size, strategy }) {
   const abs = resolveInsideRootForWrite(root, rel)
   const parent = dirname(abs)
   if (!existsSync(parent) || !statSync(parent).isDirectory()) throw new Error('目标目录不存在：' + dirname(String(rel)))
+  // 冲突预检（skip 直接告知；ask 走 409 让前端询问；rename 预选新名；overwrite 校验非目录）
   const pre = resolveUploadConflict(abs, strat)
   if (pre.skipped) return { skipped: true, requestedName: basename(abs), finalName: basename(abs), received: 0, size: total }
   // 续传复用：同目标 + 同 size 的未完成会话
@@ -751,7 +732,7 @@ export function initChunkedUpload(root, { path: rel, size, strategy }) {
   const uploadId = 'u_' + randomBytes(16).toString('hex')
   const { part } = sessionPaths(root, uploadId)
   closeSync(openSync(part, 'w')) // 立即建空分片文件（received=0 有据可查）
-  writeSession(root, uploadId, { rel: String(rel), size: total, strategy: strat, createdAt: new Date().toISOString() })
+  writeSession(root, uploadId, { rel: String(rel), size: total, strategy: strat, target: basename(pre.target), createdAt: new Date().toISOString() })
   return { uploadId, received: 0, size: total, chunkSize: UPLOAD_CHUNK_SIZE, resumed: false, requestedName: basename(abs), finalName: basename(pre.target) }
 }
 
@@ -812,209 +793,6 @@ export function abortChunkedUpload(root, uploadId) {
   const existed = existsSync(meta) || existsSync(part)
   tryUnlink(part); tryUnlink(meta)
   return { uploadId, aborted: existed }
-}
-
-// ───────────────────────── P2-7 ③文件名搜索与批量操作 ─────────────────────────
-/**
- * 文件名搜索（P2-7）：大小写不敏感的子串匹配；`recursive=true` 时递归子目录。
- * 纪律：与列表同强度过滤——隐藏条目与 `.git` 不进结果；跳过 `.git` / `.dsh-uploads` 目录；
- * 递归上限 `maxResults`（默认 500）防超大仓库打爆响应体；深度上限 12 层防病态嵌套。
- */
-export function searchFiles(root, rel, query, { recursive = false, maxResults = 500, maxDepth = 12 } = {}) {
-  assertNotGitInternal(rel)
-  const q = typeof query === 'string' ? query.trim().toLowerCase() : ''
-  if (q.length === 0) throw new Error('缺少参数 q（搜索关键词）')
-  const abs = resolveInsideRoot(root, rel)
-  if (!existsSync(abs) || !statSync(abs).isDirectory()) throw new Error('路径不是目录或不存在')
-  const results = []
-  let truncated = false
-  const walk = (dir, relPath, depth) => {
-    if (truncated) return
-    let rows = []
-    try { rows = readdirSync(dir, { withFileTypes: true }) } catch { return } // 无权限目录：跳过
-    for (const d of rows) {
-      if (truncated) return
-      if (d.name.startsWith('.') || d.name === '.git') continue
-      const childRel = relPath.length > 0 ? relPath + '/' + d.name : d.name
-      const isDir = d.isDirectory()
-      if (d.name.toLowerCase().includes(q)) {
-        let size = 0
-        let mtime = null
-        try {
-          const st = statSync(join(dir, d.name))
-          size = st.size
-          mtime = entryMtime(st.mtimeMs)
-        } catch { /* 断链/权限 → 空值 */ }
-        results.push({ name: d.name, path: childRel, type: isDir ? 'dir' : 'file', size, mtime })
-        if (results.length >= maxResults) { truncated = true; return }
-      }
-      if (recursive && isDir && depth < maxDepth && d.name !== UPLOAD_SESSION_DIR) walk(join(dir, d.name), childRel, depth + 1)
-    }
-  }
-  walk(abs, String(rel ?? ''), 0)
-  results.sort((a, b) => (a.type === 'dir' ? 0 : 1) - (b.type === 'dir' ? 0 : 1) || a.path.localeCompare(b.path))
-  return { root, path: String(rel ?? ''), query: String(query), recursive, results, truncated, maxResults }
-}
-
-/**
- * 批量操作（P2-7）：对同一根内多个相对路径顺序执行一个动作，**逐项报告**成败（不因单项失败整体回滚）。
- *   - `delete`：每项 confirm 语义由路由层统一要求（body.confirm='yes'）；
- *   - `move`：每项移到 body.toDir（目录，须存在）；目标同名已存在 → 该项失败（沿用 renamePath 的 409 语义）。
- * 上限 200 项/次（防单请求打爆）；`paths` 为空或含非法项 → 400。
- * 返回 `{ action, ok, failed, items: [{ path, ok, error? , to? }] }`。
- */
-export function batchFileOp(root, { action, paths, toDir, confirm } = {}) {
-  if (action !== 'delete' && action !== 'move') throw new Error('缺少参数 action（delete|move）')
-  if (action === 'delete' && confirm !== 'yes') throw new Error('删除需要二次确认：请带 confirm=yes')
-  if (!Array.isArray(paths) || paths.length === 0) throw new Error('缺少参数 paths（非空数组）')
-  if (paths.length > 200) throw new Error('批量操作上限 200 项/次，当前 ' + paths.length)
-  for (const p of paths) if (typeof p !== 'string' || p.length === 0) throw new Error('paths 必须是相对路径字符串数组')
-  if (action === 'move') {
-    if (typeof toDir !== 'string' || toDir.trim().length === 0) throw new Error('缺少参数 toDir（目标目录）')
-    const absDir = resolveInsideRoot(root, toDir)
-    if (!existsSync(absDir) || !statSync(absDir).isDirectory()) throw new Error('目标目录不存在：' + toDir)
-  }
-  const items = []
-  for (const p of paths) {
-    try {
-      if (action === 'delete') {
-        removePath(root, p, 'yes')
-        items.push({ path: p, ok: true })
-      } else {
-        const base = basename(p.replace(/\\/g, '/'))
-        const to = toDir.replace(/\\/g, '/').replace(/\/+$/, '') + '/' + base
-        renamePath(root, p, to)
-        items.push({ path: p, ok: true, to })
-      }
-    } catch (e) {
-      items.push({ path: p, ok: false, error: e instanceof Error ? e.message : String(e) })
-    }
-  }
-  const failed = items.filter(i => !i.ok).length
-  return { action, ok: items.length - failed, failed, items }
-}
-
-// ───────────────────────── P2-7 ④git 状态与差异（只读）─────────────────────────
-/**
- * git 只读查询（P2-7）：**绝不写仓库**——只跑 `status` / `diff` / `rev-list` / `log` 这类只读子命令，
- * 不提供 stage/commit/checkout 能力（越权风险与产品定位不符）。
- *
- * `gitStatus(root)`：分支 + 领先/落后 + 逐文件状态标记（区分暂存区与工作区）+ 未跟踪文件。
- * `gitDiff(root, rel)`：单文件 unified diff（工作区 vs 索引；`staged=true` 时索引 vs HEAD）；
- *   二进制/超长 diff 由 `maxBytes` 截断并显式标注（不静默丢内容）。
- * `gitLog(root, limit)`：最近提交（hash/作者/时间/标题），供「最近提交」展示。
- *
- * 非 git 仓库 → `{ isRepo: false }`（不抛错，前端据此隐藏 git 面板）。
- */
-const GIT_TIMEOUT_MS = 8000
-
-/** 在指定目录跑只读 git 命令；非仓库/命令失败 → null（调用方降级）。 */
-function gitRead(dir, args, { maxBuffer = 8 * 1024 * 1024 } = {}) {
-  try {
-    return execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8', windowsHide: true, timeout: GIT_TIMEOUT_MS, maxBuffer }).toString()
-  } catch { return null }
-}
-
-/** `git status --porcelain=v1 -z` 解析：XY 两位分别是索引与工作区状态。 */
-export function parsePorcelainZ(raw) {
-  const out = []
-  const parts = String(raw ?? '').split('\0').filter(s => s.length > 0)
-  for (let i = 0; i < parts.length; i += 1) {
-    const line = parts[i]
-    if (line.length < 4) continue
-    const x = line[0]
-    const y = line[1]
-    const rest = line.slice(3)
-    // 重命名/复制：porcelain -z 把「旧路径」放在紧随其后的 NUL 段里
-    if (x === 'R' || x === 'C') {
-      const from = parts[i + 1] ?? ''
-      i += 1
-      out.push({ path: rest, from, index: x, worktree: y, code: 'R', staged: true, untracked: false, conflicted: false })
-      continue
-    }
-    const untracked = x === '?' && y === '?'
-    const conflicted = x === 'U' || y === 'U' || (x === 'A' && y === 'A') || (x === 'D' && y === 'D')
-    out.push({
-      path: rest,
-      index: x,
-      worktree: y,
-      code: conflicted ? 'U' : (untracked ? '??' : (x !== ' ' ? x : y)),
-      staged: x !== ' ' && x !== '?',
-      untracked,
-      conflicted,
-    })
-  }
-  return out
-}
-
-export function gitStatus(root, rel = '') {
-  assertNotGitInternal(rel)
-  const abs = resolveInsideRoot(root, rel)
-  const top = gitRead(abs, ['rev-parse', '--show-toplevel'])
-  if (top === null || top.trim().length === 0) return { isRepo: false }
-  const repoRoot = normalize(top.trim())
-  const branch = (gitRead(abs, ['branch', '--show-current']) ?? '').trim() || null
-  const porcelain = gitRead(abs, ['status', '--porcelain=v1', '-z']) ?? ''
-  const files = parsePorcelainZ(porcelain)
-  let ahead = null
-  let behind = null
-  if (branch) {
-    const counts = gitRead(abs, ['rev-list', '--left-right', '--count', 'HEAD...@{upstream}'])
-    if (counts) {
-      const m = /^(\d+)\s+(\d+)\s*$/.exec(counts.trim())
-      if (m) { ahead = Number(m[1]); behind = Number(m[2]) }
-    }
-  }
-  const summary = files.reduce((acc, f) => {
-    if (f.conflicted) acc.conflicted += 1
-    else if (f.untracked) acc.untracked += 1
-    else if (f.staged && f.worktree !== ' ') acc.both += 1
-    else if (f.staged) acc.staged += 1
-    else acc.unstaged += 1
-    return acc
-  }, { staged: 0, unstaged: 0, untracked: 0, conflicted: 0, both: 0 })
-  return { isRepo: true, repoRoot, branch, ahead, behind, files, summary, total: files.length }
-}
-
-/** 单文件 unified diff（只读）。二进制 → 显式标注；超 maxBytes → 截断并标注。 */
-export function gitDiff(root, rel, { staged = false, maxBytes = 256 * 1024 } = {}) {
-  assertNotGitInternal(rel)
-  const abs = resolveInsideRoot(root, rel)
-  const top = gitRead(abs, ['rev-parse', '--show-toplevel'])
-  if (top === null || top.trim().length === 0) return { isRepo: false }
-  const repoRoot = normalize(top.trim())
-  const absFile = resolveInsideRoot(root, rel)
-  if (!existsSync(absFile)) return { isRepo: true, path: String(rel ?? ''), diff: '', binary: false, note: '文件不存在（可能已删除）' }
-  const relInRepo = absFile.slice(repoRoot.length).replace(/\\/g, '/').replace(/^\/+/, '')
-  // --no-color + 大上下文 0：只读预览，输出稳定可缓存；未跟踪文件无 diff（前端显示「未跟踪」）
-  const args = ['diff', '--no-color', '--no-ext-diff', '-U3']
-  if (staged) args.push('--cached')
-  args.push('--', relInRepo)
-  const raw = gitRead(abs, args)
-  if (raw === null) return { isRepo: true, path: String(rel ?? ''), diff: '', binary: false, note: 'diff 读取失败（可能不是仓库内文件）' }
-  const isBinary = /^Binary files .* differ$/m.test(raw) || /^GIT binary patch$/m.test(raw)
-  const over = Buffer.byteLength(raw, 'utf8') > maxBytes
-  const diff = over ? raw.slice(0, maxBytes) : raw
-  return {
-    isRepo: true, repoRoot, path: String(rel ?? ''), relInRepo, staged,
-    diff, binary: isBinary, truncated: over,
-    note: raw.length === 0 ? '无差异（文件与' + (staged ? ' HEAD' : '索引') + '一致或未跟踪）' : (over ? 'diff 超过 ' + maxBytes + ' 字节已截断' : null),
-  }
-}
-
-/** 最近提交（只读）：`--format` 用 \x1f 分隔字段、\x1e 分隔记录，避免标题含任意字符时解析歧义。 */
-export function gitLog(root, rel = '', limit = 20) {
-  const abs = resolveInsideRoot(root, rel)
-  const top = gitRead(abs, ['rev-parse', '--show-toplevel'])
-  if (top === null || top.trim().length === 0) return { isRepo: false }
-  const n = Math.min(Math.max(Number(limit) || 20, 1), 100)
-  const raw = gitRead(abs, ['log', '-n', String(n), '--date=iso-strict', '--format=%H%x1f%an%x1f%aI%x1f%s%x1e'])
-  if (raw === null) return { isRepo: true, commits: [] }
-  const commits = raw.split('\x1e').map(s => s.trim()).filter(s => s.length > 0).map(s => {
-    const [hash, author, date, subject] = s.split('\x1f')
-    return { hash: hash ?? '', short: (hash ?? '').slice(0, 8), author: author ?? '', date: date ?? '', subject: subject ?? '' }
-  })
-  return { isRepo: true, repoRoot: normalize(top.trim()), commits }
 }
 
 async function handleFsApi(req, res, pathname, url) {
@@ -1636,8 +1414,6 @@ async function handleFilesApi(req, res, pathname, url) {
     const scopeQuery = url.searchParams.get('scope') ?? null
     const method = req.method
     const isWrite = pathname === '/api/files/upload' || pathname === '/api/files/mkdir' || pathname === '/api/files/rename' || pathname === '/api/files/delete'
-      || pathname === '/api/files/upload/init' || pathname === '/api/files/upload/chunk' || pathname === '/api/files/upload/complete' || pathname === '/api/files/upload/abort'
-      || pathname === '/api/files/batch'
     if (isWrite) requireWriteToken(req)
     // POST body 可带 scope（与 query 二选一，body 优先），POST 分支内再按 body scope 懒解析；GET/PUT 用 query scope
     const root = method === 'POST' ? null : await resolveScopeLocalDir(scopeQuery)
@@ -1645,33 +1421,6 @@ async function handleFilesApi(req, res, pathname, url) {
     if (method === 'GET' && pathname === '/api/files/list') {
       const rel = url.searchParams.get('path') ?? ''
       sendJson(res, 200, { ok: true, ...listDirEntries(root, rel) })
-      return
-    }
-    // P2-7 ③：文件名搜索（只读；scope 必填，recursive/q/limit 可选）
-    if (method === 'GET' && pathname === '/api/files/search') {
-      const rel = url.searchParams.get('path') ?? ''
-      const q = url.searchParams.get('q') ?? ''
-      const recursive = url.searchParams.get('recursive') === '1'
-      const limit = Number(url.searchParams.get('limit') ?? 500)
-      sendJson(res, 200, { ok: true, ...searchFiles(root, rel, q, { recursive, maxResults: Number.isFinite(limit) && limit > 0 ? Math.min(limit, 2000) : 500 }) })
-      return
-    }
-    // P2-7 ④：git 只读（status / diff / log）——绝不写仓库
-    if (method === 'GET' && pathname === '/api/files/git/status') {
-      const rel = url.searchParams.get('path') ?? ''
-      sendJson(res, 200, { ok: true, ...gitStatus(root, rel) })
-      return
-    }
-    if (method === 'GET' && pathname === '/api/files/git/diff') {
-      const rel = url.searchParams.get('path') ?? ''
-      const staged = url.searchParams.get('staged') === '1'
-      sendJson(res, 200, { ok: true, ...gitDiff(root, rel, { staged }) })
-      return
-    }
-    if (method === 'GET' && pathname === '/api/files/git/log') {
-      const rel = url.searchParams.get('path') ?? ''
-      const limit = Number(url.searchParams.get('limit') ?? 20)
-      sendJson(res, 200, { ok: true, ...gitLog(root, rel, limit) })
       return
     }
     if (method === 'GET' && pathname === '/api/files/read') {
@@ -1700,8 +1449,7 @@ async function handleFilesApi(req, res, pathname, url) {
     }
     if (method === 'PUT' && pathname === '/api/files/upload') {
       const rel = url.searchParams.get('path') ?? ''
-      // P2-7 ①：strategy 为权威参数；overwrite=1 保留为向后兼容别名
-      const { strategy } = normalizeUploadStrategy(url.searchParams.get('strategy') ?? (url.searchParams.get('overwrite') === '1' ? 'overwrite' : undefined))
+      const overwrite = url.searchParams.get('overwrite') === '1'
       const declared = Number(req.headers['content-length'] ?? 0)
       if (Number.isFinite(declared) && declared > FILES_LIMITS.MAX_UPLOAD) {
         // R-A2（T-077）预检拒绝的连接处理：客户端声明的体可能根本不会到达（只声明不发/半开）。
@@ -1716,30 +1464,21 @@ async function handleFilesApi(req, res, pathname, url) {
       const parent = dirname(abs)
       if (!existsSync(parent) || !statSync(parent).isDirectory()) throw new Error('目标目录不存在：' + dirname(String(rel ?? '')))
       if (existsSync(abs)) {
-        // P2-7 ①：skip 直接返回（排空请求体，保持连接可复用）；其余策略交 receiveUploadBody 统一决策
-        const pre = resolveUploadConflict(abs, strategy)
-        if (pre.skipped) {
-          req.resume()
-          const st = statSync(abs)
-          sendJson(res, 200, { ok: true, skipped: true, file: { name: basename(abs), size: st.size, mtime: entryMtime(st.mtimeMs) }, strategy })
-          return
-        }
+        if (!overwrite) throw new Error('目标已存在：如需覆盖请带 overwrite=1（409 语义）')
+        if (statSync(abs).isDirectory()) throw new Error('目标已存在且为目录，不能以文件覆盖')
       }
       // P0-1 修复：流式收体到同目录临时文件，完整收体 + 不超限后原子改名发布；
       // 覆盖/中断/超限不再破坏原文件、不留半写目标（receiveUploadBody，TC-S4-02/15/16）
-      let out = null
       try {
-        out = await receiveUploadBody(req, abs, { maxBytes: FILES_LIMITS.MAX_UPLOAD, strategy })
+        await receiveUploadBody(req, abs, { maxBytes: FILES_LIMITS.MAX_UPLOAD, overwrite })
       } catch (e) {
         // R-A2（T-077）：请求体未完整到达即失败（流式超限/中断/写错）→ 连接处于「仍等体」错位态，不能安全复用；
         // 显式 Connection: close 弃用（否则同连接下一请求被误读为体字节 → 挂起/被 RST）。体已收全则走通用错误路径。
         if (!req.complete) { httpErr(res, classifyFilesError(e), e instanceof Error ? e.message : String(e), { connection: 'close' }); return }
         throw e
       }
-      // rename 策略下实际落盘名可能已变（竞态二次决策），响应回传 finalName 供前端提示
-      const finalAbs = out.abs
-      const st = statSync(finalAbs)
-      sendJson(res, 200, { ok: true, skipped: false, strategy, file: { name: basename(finalAbs), size: st.size, mtime: entryMtime(st.mtimeMs) }, requestedName: out.requestedName })
+      const st = statSync(abs)
+      sendJson(res, 200, { ok: true, file: { name: basename(abs), size: st.size, mtime: entryMtime(st.mtimeMs) } })
       return
     }
     if (method === 'POST' && pathname === '/api/files/mkdir') {
@@ -1763,55 +1502,6 @@ async function handleFilesApi(req, res, pathname, url) {
       const scope = typeof body.scope === 'string' && body.scope.trim().length > 0 ? body.scope.trim() : scopeQuery
       if (typeof body.path !== 'string' || body.path.length === 0) throw new Error('缺少参数 path')
       sendJson(res, 200, { ok: true, ...removePath(await resolveScopeLocalDir(scope), body.path, body.confirm) })
-      return
-    }
-    // P2-7 ③：批量操作（delete/move，逐项报告；单项失败不影响其余项）
-    if (method === 'POST' && pathname === '/api/files/batch') {
-      const body = await readBodyJson(req)
-      const scope = typeof body.scope === 'string' && body.scope.trim().length > 0 ? body.scope.trim() : scopeQuery
-      sendJson(res, 200, { ok: true, ...batchFileOp(await resolveScopeLocalDir(scope), body) })
-      return
-    }
-    // P2-7 ②：分片上传会话（init 需要 scope；chunk/complete/abort 由 uploadId 定位，无需 scope）
-    if (method === 'POST' && pathname === '/api/files/upload/init') {
-      const body = await readBodyJson(req)
-      const scope = typeof body.scope === 'string' && body.scope.trim().length > 0 ? body.scope.trim() : scopeQuery
-      sendJson(res, 200, { ok: true, ...initChunkedUpload(await resolveScopeLocalDir(scope), { path: body.path, size: body.size, strategy: body.strategy }) })
-      return
-    }
-    if (method === 'PUT' && pathname === '/api/files/upload/chunk') {
-      const uploadId = url.searchParams.get('uploadId') ?? ''
-      const offsetRaw = url.searchParams.get('offset')
-      if (offsetRaw === null || offsetRaw === '') throw new Error('缺少参数 offset')
-      const target = await resolveScopeLocalDir(scopeQuery)
-      try {
-        const buf = await readBodyBuffer(req, UPLOAD_CHUNK_SIZE + 1024)
-        const out = appendUploadChunk(target, uploadId, offsetRaw, buf)
-        sendJson(res, 200, { ok: true, uploadId, received: out.received, size: out.size })
-      } catch (e) {
-        // 偏移不匹配：回传服务端 received 让前端从该处续传（409 而非 400——请求本身合法但状态冲突）
-        if (e?.code === 'OFFSET_MISMATCH') { sendJson(res, 409, { ok: false, error: e.message, received: e.received }); return }
-        throw e
-      }
-      return
-    }
-    if (method === 'POST' && pathname === '/api/files/upload/complete') {
-      const body = await readBodyJson(req)
-      const scope = typeof body.scope === 'string' && body.scope.trim().length > 0 ? body.scope.trim() : scopeQuery
-      const target = await resolveScopeLocalDir(scope)
-      try {
-        sendJson(res, 200, { ok: true, ...completeChunkedUpload(target, body.uploadId) })
-      } catch (e) {
-        // 未收齐：保留会话可续传（400 + received 供前端续发）
-        if (e?.code === 'INCOMPLETE') { sendJson(res, 400, { ok: false, error: e.message, received: e.received }); return }
-        throw e
-      }
-      return
-    }
-    if (method === 'DELETE' && pathname === '/api/files/upload/abort') {
-      const uploadId = url.searchParams.get('uploadId') ?? ''
-      const target = await resolveScopeLocalDir(scopeQuery)
-      sendJson(res, 200, { ok: true, ...abortChunkedUpload(target, uploadId) })
       return
     }
     httpErr(res, 404, 'not found: ' + pathname)

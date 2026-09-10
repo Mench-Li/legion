@@ -200,9 +200,9 @@ Desktop 启动即自动拉起 team-hub v2 / v1 看板 / 指挥台，进程异常
 ### 3.16 team-hub 数据与接口一览
 
 - **入口**：面向使用/排障的接口层（`team-hub/server.mjs`，:8787）。
-- **功能**：`team-hub/team.db`（SQLite WAL）。表：`tasks` / `members` / `roster` / `skills` / `audit` / `spaces` / `goal` / `exec_state` / `exec_requests` / `agent_models`。**写纪律**：所有 POST 经统一 `handleWrite`，`by`（操作者）必填；每次写都落 `audit` 并 SSE 广播。**状态机**：`todo → in_progress → in_review → done`（`done` 仅 `by='general'` 从 `in_review` 验收）；`blocked` 受依赖阻塞（`force` 可绕）；乐观锁 `ifVersion`。
+- **功能**：`team-hub/team.db`（SQLite WAL）。表：`tasks` / `members` / `roster` / `skills` / `audit` / `spaces` / `goal` / `exec_state` / `exec_requests` / `agent_models` / `space_stages` / `space_runtime`。**写纪律**：所有 POST 经统一 `handleWrite`，`by`（操作者）必填；每次写都落 `audit` 并 SSE 广播。**状态机**：`todo → in_progress → in_review → done`（`done` 仅 `by='general'` 从 `in_review` 验收）；`blocked` 受依赖阻塞（`force` 可绕）；乐观锁 `ifVersion`。
 - **操作步骤**：按需查询对应接口（见下方关键接口域）；直连 API 测试时记得带 `by` 操作者身份。
-- **关键接口域**：任务（board/task/create/claim/transition/advance/reassign/release-stale/comment/heartbeat）、审计（patch/review-notes/overlaps）、目标（goal/goal/status）、进展（activity）、空间/编队（spaces/roster/agents）、技能（skills）、执行编排（exec/exec/queue/exec/request）、模型配置（models/models/clear）、对话（chat/conversations、chat/messages）。
+- **关键接口域**：任务（board/task/create/claim/transition/advance/reassign/release-stale/comment/heartbeat）、审计（patch/review-notes/overlaps）、目标（goal/goal/status）、进展（activity）、空间/编队（spaces/roster/agents）、空间流水线与开通预检（pipeline、spaces/provision）、技能（skills）、执行编排（exec/exec/queue/exec/request）、模型配置（models/models/clear）、对话（chat/conversations、chat/messages）。
 - **期望结果**：据此快速定位某个数据/接口归属，辅助平台排障与使用。
 
 ### 3.17 v1 遗留与迁移
@@ -212,6 +212,18 @@ Desktop 启动即自动拉起 team-hub v2 / v1 看板 / 指挥台，进程异常
 - **操作步骤**：需要时执行迁移脚本（指定 `--scope`）；旧看板页仍可从 `:4820` 打开用于调试与历史对比。
 - **期望结果**：v1 数据迁移到 v2 后，看板流程以 SQLite 数据为准。
 - **相关设置与边界**：v1 为遗留兼容，除调试/迁移外不再日常使用；细节见 `scrum/README.md`。v1/v2 并存期间只写其中一个。
+
+### 3.18 空间流水线与开通预检（编队即流水线）
+
+- **入口**：数据面接口 `GET/POST /api/pipeline`（scope 维度）+ 预检 `GET /api/spaces/provision?id=<space>`；命令行导入 `node team-hub/scripts/seed-pipeline.mjs --scope <id> --file roles.json`。
+- **功能**：把「该空间有哪些阶段、每阶段谁干、干完交什么」从宿主部署配置（`roles.json`）搬进 team-hub 数据面（`space_stages` / `space_runtime`）。**守护每轮扫单优先读数据面**（`GET /api/pipeline?scope=&include=active`，按内容指纹 `version` 增量刷新，未变化零成本），hub 不可达或该空间未配置时自动回退部署面 `rolesFile`——既有空间零行为差异。
+- **入链规则（发布目标时生效）**：链上每一环 = **编队 ∩ 流水线启用岗位**（`enabled=false` 的岗位不入链、不派工）。编队里的非执行成员（观察员/管理员）不再被串进 `blockedBy` 链，从机制上消除「链卡在一个没人认领的阶段」。
+- **写入期校验**：role 形状与唯一性、`next` 必须可达、`gate:true` 必须带 `artifact`（否则闸门永远无法通过）、`docs` 必须是仓库相对路径且不含 `..`；仅允许 general 写入；每次写入落 `audit pipeline:update`。整批提交即权威（未提交的旧阶段被删除）。
+- **阶段命名**：目标链标题优先取流水线 `label`（如【需求调研】），不再是按位置套用的通用阶段名。
+- **开通预检**：只读清单，逐项给出 `ok / warn / error` 与修复指引——空间是否注册、编队是否为空、流水线是否配置且与编队一致、执行配置是否开启、守护实例是否在线（**这是「目标停在 todo」的最常见原因**）、工作区是否绑定且为 git 仓库、`.legion-worktrees/` 是否已忽略、待办任务是否因无守护而停滞。
+- **操作步骤**：`seed-pipeline.mjs --scope <id> --file <roles文件> [--runtime-enabled] [--dry-run]` 导入 → 观察输出里的差异/告警 → 打开 `/api/spaces/provision?id=<space>` 确认无 error（如 `daemon-offline` 就先把该空间的守护实例挂上）→ 再发布目标。
+- **期望结果**：新增空间/新编队不再需要「两份数据手工对齐」；配错时（编队与流水线无交集）发布目标直接报错并回滚，而不是静默生成一条永远不动的链。
+- **相关设置与边界**：部署面 `rolesFile` 仍是离线兜底；**当前仍是一空间一守护实例**（profile 里的 `legion-scrum-worker-<scope>` 行），预检会在缺实例时明确点名——多空间统一编排属下一阶段。
 
 ## 4. 功能索引
 
@@ -237,6 +249,7 @@ F-15 | 任务收尾审计 | 3.15 任务收尾审计 | 任务详情「🧾 审计
 F-16 | team-hub 数据与接口一览 | 3.16 team-hub 数据与接口一览 | `team-hub/server.mjs`（:8787） | 已上线
 F-17 | v1 遗留与迁移 | 3.17 v1 遗留与迁移 | scrum v1（:4820） | 遗留
 F-18 | 故障排查 | 5.1 故障排查 | 本手册 §5.1 / README §6 | 已上线
+F-19 | 空间流水线与开通预检 | 3.18 空间流水线与开通预检（编队即流水线） | `GET/POST /api/pipeline` + `/api/spaces/provision` + `seed-pipeline.mjs` | 已上线
 
 ## 5. 故障排查与术语附录
 

@@ -452,6 +452,39 @@ export function fileDigest(file: string): string {
   return createHash('sha256').update(readFileSync(file)).digest('hex')
 }
 
+/**
+ * SP-P0：hub 空间流水线载荷（GET /api/pipeline 的 stages）→ 守护消费的 StageDef[]。
+ *
+ * 纯函数、防御式：坏数据整条丢弃（返回空数组即"该空间未配置数据面流水线"→ 回退部署面 rolesFile），
+ * 绝不因远端配置缺陷让守护崩或进入半更新态。只接受守护真正消费的字段：
+ *   role（空则丢）、label（缺省回落 role）、prompt、next（空串 → null = 末环）、gate、artifact、docs。
+ */
+export function stagesFromHubPayload(raw: unknown): StageDef[] {
+  if (!Array.isArray(raw)) return []
+  const out: StageDef[] = []
+  for (const item of raw) {
+    if (item === null || typeof item !== 'object') continue
+    const s = item as Record<string, unknown>
+    const role = typeof s.role === 'string' ? s.role.trim() : ''
+    if (role === '') continue
+    const label = typeof s.label === 'string' && s.label.trim() !== '' ? s.label.trim() : role
+    const docs = Array.isArray(s.docs)
+      ? s.docs.filter((d): d is string => typeof d === 'string' && d.trim() !== '').map(d => d.trim())
+      : undefined
+    const artifact = typeof s.artifact === 'string' && s.artifact.trim() !== '' ? s.artifact.trim() : undefined
+    out.push({
+      role,
+      label,
+      prompt: typeof s.prompt === 'string' ? s.prompt : '',
+      next: typeof s.next === 'string' && s.next.trim() !== '' ? s.next.trim() : null,
+      gate: s.gate === true,
+      ...(artifact !== undefined ? { artifact } : {}),
+      ...(docs !== undefined && docs.length > 0 ? { docs } : {}),
+    })
+  }
+  return out
+}
+
 export function apply(ctx: AppContext, config: Config): void {
   const SHORT = 'dsh-scrum-worker'
   const logFile = config.logFile || join(homedir(), '.dsh', 'super-injector', SHORT + '.log')
@@ -687,18 +720,75 @@ export function apply(ctx: AppContext, config: Config): void {
       return null
     }
   }
-  const pipeline = readPipeline()
-  const stageByRole = new Map<string, StageDef>((pipeline?.stages ?? []).map(s => [s.role, s]))
-  const isPipeline = pipeline !== null
+  const filePipeline = readPipeline()
+  /**
+   * SP-P0：流水线改为**数据面优先**（hub GET /api/pipeline），部署面 roles.json 作离线兜底。
+   *
+   * 动机（T-127 现场）：阶段定义原本只存在于宿主部署配置（rolesFile），与空间编队（hub 数据面）是两份
+   * 必须手工对齐的数据；新增空间一旦漏配，目标链会静默停在 todo。搬进数据面后，配置单源 = hub，
+   * 守护每轮扫单按 version 指纹增量刷新（内容未变则零成本）。
+   */
+  type PipelineSource = 'hub' | 'file' | 'none'
+  let pipeline: PipelineDef | null = filePipeline
+  let pipelineSource: PipelineSource = filePipeline !== null ? 'file' : 'none'
+  let hubPipelineVersion = ''
+  let stageByRole = new Map<string, StageDef>((pipeline?.stages ?? []).map(s => [s.role, s]))
+  let isPipeline = pipeline !== null
   // 需求讨论群聊：讨论配置缺省时用全部流水线角色，最多 3 轮。
-  const discussion = pipeline?.discussion
-  const discussionMembers: StageDef[] = (discussion?.roles ?? (pipeline?.stages ?? []).map(s => s.role))
-    .map(r => stageByRole.get(r))
-    .filter((s): s is StageDef => s !== undefined)
-  const discussionMaxRounds = discussion?.maxRounds ?? 3
-  const isDiscussion = discussion !== undefined && discussionMembers.length > 0
-  // 项目 scope：显式配置优先，否则用 roles.json 的 name（软件流水线 = software），再否则 default。
-  const scope = config.scope !== 'default' ? config.scope : (pipeline?.name ?? 'default')
+  let discussion = pipeline?.discussion
+  let discussionMembers: StageDef[] = []
+  let discussionMaxRounds = discussion?.maxRounds ?? 3
+  let isDiscussion = false
+
+  /** 重算流水线派生状态（唯一出口：任何来源切换都必须经过这里，避免半更新态）。 */
+  function applyPipeline(next: PipelineDef | null, source: PipelineSource): void {
+    pipeline = next
+    pipelineSource = source
+    stageByRole = new Map<string, StageDef>((next?.stages ?? []).map(s => [s.role, s]))
+    isPipeline = next !== null
+    discussion = next?.discussion
+    discussionMembers = (discussion?.roles ?? (next?.stages ?? []).map(s => s.role))
+      .map(r => stageByRole.get(r))
+      .filter((s): s is StageDef => s !== undefined)
+    discussionMaxRounds = discussion?.maxRounds ?? 3
+    isDiscussion = discussion !== undefined && discussionMembers.length > 0
+  }
+  applyPipeline(filePipeline, pipelineSource)
+
+  /**
+   * hub 流水线载荷 → StageDef[]（防御式解析见模块级 stagesFromHubPayload；此处仅做调用点收敛）。
+   */
+  async function refreshPipelineFromHub(): Promise<void> {
+    if (!useHub || config.mode === 'mediator') return
+    try {
+      const res = await fetch(`${hubUrl}/api/pipeline?scope=${encodeURIComponent(scope)}&include=active`)
+      if (!res.ok) return // hub 不可达/4xx：沿用当前来源（含部署面兜底），不降级为单角色
+      const data = await res.json() as { version?: unknown; stages?: unknown }
+      const stages = stagesFromHubPayload(data.stages)
+      if (stages.length === 0) {
+        // 该空间未在数据面配置流水线 → 回退部署面 rolesFile（既有空间零影响）。
+        if (pipelineSource === 'hub') {
+          applyPipeline(filePipeline, filePipeline !== null ? 'file' : 'none')
+          hubPipelineVersion = ''
+          log(`空间流水线已清空（scope=${scope}）→ 回退${filePipeline !== null ? `部署面 ${rolesFilePath}` : '单角色模式'}`)
+        }
+        return
+      }
+      const version = typeof data.version === 'string' ? data.version : String(data.version ?? '')
+      if (pipelineSource === 'hub' && version === hubPipelineVersion) return // 内容指纹未变：零成本
+      hubPipelineVersion = version
+      const changed = pipelineSource !== 'hub' || isPipeline === false
+      applyPipeline({ name: scope, stages }, 'hub')
+      log(`空间流水线来源=hub（scope=${scope}，version=${version}，${stages.length} 环：${stages.map(s => s.role).join(' → ')}）`
+        + (changed ? '' : '（内容已更新）'))
+    } catch (e) {
+      log(`空间流水线读取失败（沿用${pipelineSource === 'hub' ? '上次数据面流水线' : '部署面 rolesFile'}）：${String(e)}`)
+    }
+  }
+
+  // 项目 scope：显式配置优先，否则用部署面 roles.json 的 name（软件流水线 = software），再否则 default。
+  // 注意：scope 在数据面流水线加载之前就需要确定（它是拉取 key），因此这里刻意只看部署面文件。
+  const scope = config.scope !== 'default' ? config.scope : (filePipeline?.name ?? 'default')
 
   // ── 切片流水线（v3 slice 模式，见 docs/ORCHESTRATION-V3.md）──
   // slice-mode 目标：分析前缀任务（…→test-designer）描述带 [slice-mode] 标记；切片束任务带 slice 键。
@@ -869,7 +959,7 @@ export function apply(ctx: AppContext, config: Config): void {
         taskTtlMinutes: config.taskTtlMinutes,
         scope,
         paused: readControlPaused(),
-        pipeline: pipeline ? { name: pipeline.name, stages: pipeline.stages.map(s => s.role) } : null,
+        pipeline: pipeline ? { name: pipeline.name, source: pipelineSource, version: hubPipelineVersion, stages: pipeline.stages.map(s => s.role) } : null,
         inbox: inboxCount,
         lastSweepAt: new Date().toISOString(),
         uptimeMs: Date.now() - daemonStartedAt,
@@ -3043,6 +3133,8 @@ exit 0
       }
       // 刷新本 scope 的空间仓库绑定（hub 模式：/api/spaces；命中 localDir → 本空间工作/隔离仓库）
       await refreshSpaceBinding()
+      // SP-P0：刷新空间流水线（hub 数据面优先；内容指纹未变 = 零成本；失败沿用当前来源）
+      await refreshPipelineFromHub()
       await hubHeartbeat() // S2/R-1（B1）：守护心跳（kind=worker + 当前模型），chat 健康在线数据源
       await ensureForeman(workspaceFor())
       await fetchSkills()

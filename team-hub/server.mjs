@@ -53,6 +53,8 @@
  *   GET  /api/calendar/conflicts                  冲突检测（start/end/allDay/excludeId；返回重叠实例，仅提示不阻断）
  *   GET  /api/calendar/events/by-link             按 taskId/goalId 查关联日程（任务详情双向展示用）
  *   GET  /api/spaces/impact?id=                   删除预检（只读计数 + 在办任务列表；S7/R-3）
+ *   GET  /api/spaces/provision?id=                开通预检（只读自检清单：流水线/编队一致性/守护在线/工作区绑定；SP-P0）
+ *   GET/POST /api/pipeline[?scope=]               空间流水线（编队即流水线：阶段契约 + 执行配置；写仅 general；SP-P0）
  *   GET  /api/artifact/content?task=&i=            任务登记产物文件内容（R-3/S3 只读：md/txt 预览 + 截断/二进制降级 + 错误码 400/403/404 可区分）
  *
  * 状态机 + 乐观锁 + 角色纪律与 taskctl.mjs 一致；scope 是任务分区的一等字段。
@@ -195,6 +197,39 @@ db.exec(`
   if (!spaceCols.includes('local_dir')) db.exec("ALTER TABLE spaces ADD COLUMN local_dir TEXT DEFAULT ''")
   if (!spaceCols.includes('remote_url')) db.exec("ALTER TABLE spaces ADD COLUMN remote_url TEXT DEFAULT ''")
 }
+// ── SP-P0 空间流水线：编队即流水线 ────────────────────────────────────────────
+// 背景（T-127 现场）：阶段定义原本只存在于守护宿主的 roles.json（部署面文件），与空间编队（roster，数据面）
+// 是两份必须手工对齐的数据；新增空间一旦漏配，目标链会静默停在 todo。本层把阶段定义搬进数据面：
+//   - space_stages：该空间的阶段/岗位契约（role 必须与 roster.role 逐字一致）；enabled=0 = 该岗位**不参与流水线**
+//     （建链与派工都跳过——从机制上消除「非执行岗入编 → blockedBy 链死锁」）；
+//   - space_runtime：该空间的执行配置（是否开通自动执行 / 并发 / 是否隔离 worktree）。
+// 守护每轮扫单按 GET /api/pipeline 读取（hub 优先，部署面 rolesFile 作离线兜底）。
+db.exec(`
+  CREATE TABLE IF NOT EXISTS space_stages (
+    scope TEXT NOT NULL,
+    role TEXT NOT NULL,
+    label TEXT NOT NULL,
+    prompt TEXT DEFAULT '',
+    next TEXT DEFAULT NULL,
+    gate INTEGER DEFAULT 0,
+    artifact TEXT DEFAULT NULL,
+    docs TEXT DEFAULT NULL,
+    sort INTEGER DEFAULT 0,
+    enabled INTEGER DEFAULT 1,
+    updatedAt TEXT,
+    PRIMARY KEY (scope, role)
+  )
+`)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS space_runtime (
+    scope TEXT PRIMARY KEY,
+    enabled INTEGER DEFAULT 0,
+    maxWorkers INTEGER DEFAULT 1,
+    isolate INTEGER DEFAULT 1,
+    updatedAt TEXT
+  )
+`)
+
 // 迁移：members 补充 model 列（S2/R-1 决策 B1：守护心跳可携带当前选用模型，供 GET /api/chat/health 聚合展示；
 // 列可空，既有成员行/插入语句零影响）。
 {
@@ -540,7 +575,7 @@ function taskStandards(role, acceptance, boundary) {
   }
 }
 
-/** legion/roles.json 的流水线角色 → 中文标签表（任务集命名用）。 */
+/** legion/roles.json 的流水线角色 → 中文标签表（任务集命名用；SP-P0 后仅作无空间流水线时的兜底）。 */
 function pipelineLabels() {
   const labels = { unassigned: '未指派' }
   try {
@@ -548,6 +583,176 @@ function pipelineLabels() {
     for (const s of r.stages ?? []) labels[s.role] = s.label
   } catch { /* roles.json 缺失/损坏则回退原始 role 名 */ }
   return labels
+}
+
+// ── SP-P0 空间流水线读写（数据面单源；守护 GET /api/pipeline 消费，POST /api/pipeline 维护）──
+const ROLE_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/
+/** 空间注册/编队管理的规范形状（POST /api/spaces、/api/agents 等写路径仍用这条）。 */
+const SCOPE_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/
+/**
+ * 分区键形状（读面用）：scope 是任务/目标/流水线的分区键，历史上与自定义实例存在
+ * 下划线等非规范 scope（如夹具 __p13fixture__、内嵌板 default）；读面若比同族接口更严，
+ * 会让这类实例静默拿不到自己的流水线。故读面放宽到「字母/数字/下划线/连字符」。
+ */
+const SCOPE_KEY_RE = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$/
+const STAGE_LIMIT = 32
+const PROMPT_LIMIT = 20000
+const DOCS_LIMIT = 16
+
+/** 单条阶段行的校验 + 归一化（写路径用；抛错即 400）。 */
+function normalizeStage(raw, index) {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) throw new Error(`stages[${index}] 必须是对象`)
+  const role = typeof raw.role === 'string' ? raw.role.trim() : ''
+  if (!ROLE_ID_RE.test(role)) throw new Error(`stages[${index}].role 非法（小写字母/数字开头，可含连字符，≤64 字符）`)
+  const label = typeof raw.label === 'string' ? raw.label.trim() : ''
+  if (label.length === 0) throw new Error(`stages[${index}]（${role}）缺少 label（岗位中文名）`)
+  if (label.length > 64) throw new Error(`stages[${index}]（${role}）label 过长（≤64 字符）`)
+  const prompt = typeof raw.prompt === 'string' ? raw.prompt : ''
+  if (prompt.length > PROMPT_LIMIT) throw new Error(`stages[${index}]（${role}）prompt 过长（≤${PROMPT_LIMIT} 字符）`)
+  const next = raw.next === null || raw.next === undefined || raw.next === '' ? null : String(raw.next).trim()
+  if (next !== null && !ROLE_ID_RE.test(next)) throw new Error(`stages[${index}]（${role}）.next 非法`)
+  const gate = raw.gate === true
+  const artifact = typeof raw.artifact === 'string' && raw.artifact.trim().length > 0 ? raw.artifact.trim() : null
+  if (artifact !== null && artifact.length > 512) throw new Error(`stages[${index}]（${role}）.artifact 过长（≤512 字符）`)
+  // 人工闸门的产物路径若为空，闸门永远无法通过（守护按 <目标docsDir>/<basename> 校验）→ 写入期即拦截。
+  if (gate && artifact === null) throw new Error(`stages[${index}]（${role}）配了 gate:true 但没有 artifact（闸门将永远无法通过）`)
+  let docs = null
+  if (raw.docs !== null && raw.docs !== undefined) {
+    if (!Array.isArray(raw.docs)) throw new Error(`stages[${index}]（${role}）.docs 必须是字符串数组`)
+    if (raw.docs.length > DOCS_LIMIT) throw new Error(`stages[${index}]（${role}）.docs 最多 ${DOCS_LIMIT} 条`)
+    const clean = []
+    for (const d of raw.docs) {
+      const p = typeof d === 'string' ? d.trim().replace(/\\/g, '/') : ''
+      if (p.length === 0) continue
+      if (p.length > 512) throw new Error(`stages[${index}]（${role}）.docs 路径过长（≤512 字符）`)
+      if (p.startsWith('/') || /^[A-Za-z]:/.test(p) || p.split('/').some(s => s === '..' || s === '')) throw new Error(`stages[${index}]（${role}）.docs 路径必须是仓库相对路径且不含 ..：${p}`)
+      clean.push(p)
+    }
+    docs = clean.length > 0 ? clean : null
+  }
+  const sort = Number.isFinite(raw.sort) ? Math.trunc(raw.sort) : index
+  const enabled = raw.enabled === false ? 0 : 1
+  return { role, label, prompt, next, gate: gate ? 1 : 0, artifact, docs, sort, enabled }
+}
+
+/** 写路径整批校验：role 唯一 + next 指向本批或存量阶段。 */
+function normalizeStages(scope, rawStages) {
+  if (!Array.isArray(rawStages) || rawStages.length === 0) throw new Error('stages 必须是非空数组')
+  if (rawStages.length > STAGE_LIMIT) throw new Error(`stages 最多 ${STAGE_LIMIT} 条`)
+  const stages = rawStages.map((s, i) => normalizeStage(s, i))
+  const seen = new Set()
+  for (const s of stages) {
+    if (seen.has(s.role)) throw new Error(`stages 中 role 重复：${s.role}`)
+    seen.add(s.role)
+  }
+  const existing = new Set(db.prepare('SELECT role FROM space_stages WHERE scope = ?').all(scope).map(r => r.role))
+  for (const s of stages) {
+    if (s.next !== null && !seen.has(s.next) && !existing.has(s.next)) throw new Error(`阶段 ${s.role} 的 next=${s.next} 既不在本次提交里，也不是该空间既有阶段`)
+  }
+  return stages
+}
+
+function normalizeRuntime(raw) {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('runtime 必须是对象')
+  const enabled = raw.enabled === true
+  const maxWorkers = raw.maxWorkers === undefined ? 1 : Number(raw.maxWorkers)
+  if (!Number.isInteger(maxWorkers) || maxWorkers < 1 || maxWorkers > 8) throw new Error('maxWorkers 必须是 1..8 的整数')
+  const isolate = raw.isolate !== false
+  return { enabled, maxWorkers, isolate }
+}
+
+/** 读该空间流水线（读路径：守护每轮 + 指挥台展示共用）。 */
+function readPipeline(scope, { includeDisabled = true } = {}) {
+  const rows = db.prepare('SELECT * FROM space_stages WHERE scope = ? ORDER BY sort, role').all(scope)
+  const stages = rows.map(r => ({
+    role: r.role,
+    label: r.label,
+    prompt: r.prompt ?? '',
+    next: r.next ?? null,
+    gate: r.gate === 1,
+    artifact: r.artifact ?? null,
+    docs: parseJson(r.docs, null),
+    sort: r.sort ?? 0,
+    enabled: r.enabled !== 0,
+    updatedAt: r.updatedAt ?? null,
+  }))
+  const rt = db.prepare('SELECT * FROM space_runtime WHERE scope = ?').get(scope)
+  const runtime = rt
+    ? { enabled: rt.enabled === 1, maxWorkers: rt.maxWorkers ?? 1, isolate: rt.isolate !== 0, updatedAt: rt.updatedAt ?? null }
+    : { enabled: false, maxWorkers: 1, isolate: true, updatedAt: null }
+  const effective = stages.filter(s => s.enabled)
+  return {
+    scope,
+    name: scope,
+    version: pipelineVersion(stages),
+    runtime,
+    stages: includeDisabled ? stages : effective,
+    activeRoles: effective.map(s => s.role),
+  }
+}
+
+/** 稳定指纹：内容变化才变（守护据此零成本判「无需重建」）。 */
+function pipelineVersion(stages) {
+  const h = createHash('sha1')
+  for (const s of stages) {
+    h.update([s.role, s.label, s.enabled ? 1 : 0, s.next ?? '', s.gate ? 1 : 0, s.artifact ?? '', (s.docs ?? []).join(','), s.prompt.length].join('\u0001'))
+    h.update('\u0002')
+  }
+  return h.digest('hex').slice(0, 16)
+}
+
+/** 该空间 stage 行（按 role），建链/校验用。 */
+function stagesByRoleOf(scope) {
+  return new Map(db.prepare('SELECT role, label, enabled FROM space_stages WHERE scope = ?').all(scope).map(r => [r.role, r]))
+}
+
+/**
+ * 编队 × 流水线 一致性告警（写路径回执与开通预检共用）。
+ * 关键一条：编队里有、流水线里没有（或 enabled=0）的成员 = 不会进链（安全）；
+ * 但**如果没有配置任何流水线**而编队非空，则建链会退回「全编队」——此时非执行岗会重新入链并造成死锁，
+ * 因此「未配置流水线」本身是 error 级告警。
+ */
+function pipelineWarnings(scope, view) {
+  const warnings = []
+  const roster = db.prepare('SELECT role, name FROM roster WHERE scope = ? ORDER BY sort, role').all(scope)
+  const rosterRoles = new Set(roster.map(r => r.role))
+  const stageRoles = new Set(view.stages.map(s => s.role))
+  const active = new Set(view.activeRoles)
+  if (view.stages.length === 0) {
+    if (roster.length > 0) {
+      warnings.push({
+        level: 'error', code: 'pipeline-missing',
+        message: `空间 ${scope} 未配置流水线（编队 ${roster.length} 人）——发布目标会按「全编队」建链，非执行岗将造成 blockedBy 链死锁`,
+        roles: roster.filter(r => !active.has(r.role)).map(r => r.role),
+      })
+    }
+    return warnings
+  }
+  const orphanRoster = roster.filter(r => !active.has(r.role)).map(r => r.role)
+  if (orphanRoster.length > 0) {
+    warnings.push({
+      level: 'warn', code: 'roster-not-in-pipeline',
+      message: `编队中 ${orphanRoster.length} 个成员不参与流水线（不会进目标链，也不会被派工）：${orphanRoster.join('、')}`,
+      roles: orphanRoster,
+    })
+  }
+  const orphanStage = view.stages.filter(s => s.enabled && !rosterRoles.has(s.role)).map(s => s.role)
+  if (orphanStage.length > 0) {
+    warnings.push({
+      level: 'warn', code: 'stage-not-in-roster',
+      message: `流水线中 ${orphanStage.length} 个岗位不在编队里（无编队成员 → 目标链不会生成该环，目前是冗余配置）：${orphanStage.join('、')}`,
+      roles: orphanStage,
+    })
+  }
+  const badGate = view.stages.filter(s => s.gate && !s.artifact).map(s => s.role)
+  if (badGate.length > 0) {
+    warnings.push({
+      level: 'error', code: 'gate-without-artifact',
+      message: `人工闸门缺少产物路径（闸门将永远无法通过）：${badGate.join('、')}`,
+      roles: badGate,
+    })
+  }
+  return warnings
 }
 
 function rowToTask(row) {
@@ -2038,15 +2243,32 @@ function createGoalChain(goalId, scope, objective, mode = 'chain') {
     if (goal.scope !== scope) throw new Error(`目标 ${goalId} 不属于空间 ${scope}`)
     const roster = db.prepare('SELECT role, name, kind, avatar FROM roster WHERE scope = ? ORDER BY sort, role').all(scope)
     const pipe = pipelineLabels()
+    // SP-P0：空间流水线（space_stages）优先——入链 = 编队 ∩ 流水线启用岗位。
+    // 这一层是「非执行岗入编导致 blockedBy 链死锁」的机制性消除：编队里没配阶段（或显式 enabled=0）的成员
+    // 不再进链，链上每一环都保证有守护认领方；编队与流水线的差异由 GET /api/spaces/provision 报给将军。
+    const spaceStages = stagesByRoleOf(scope)
+    const route = spaceStages.size > 0
+      ? roster.filter(r => {
+        const st = spaceStages.get(r.role)
+        return st !== undefined && st.enabled !== 0
+      })
+      : roster
     // slice 模式前置条件：编队含分析尾（test-designer）与构建岗位（coder/tester）；缺则回退 chain
-    const tdIdx = roster.findIndex(r => r.role === 'test-designer')
-    const sliced = mode === 'slice' && tdIdx >= 0 && roster.some(r => r.role === 'coder') && roster.some(r => r.role === 'tester')
-    const build = sliced ? roster.slice(0, tdIdx + 1) : roster
+    const tdIdx = route.findIndex(r => r.role === 'test-designer')
+    const sliced = mode === 'slice' && tdIdx >= 0 && route.some(r => r.role === 'coder') && route.some(r => r.role === 'tester')
+    const build = sliced ? route.slice(0, tdIdx + 1) : route
+    if (build.length === 0 && roster.length > 0) {
+      // 只有在「编队有人、但流水线一个都没启用」时才拦：这种情况建出的链没有任何认领方，
+      // 会永远停在 todo（T-127 现场那类静默停滞）。**编队本身为空**属于既有合法态
+      // （如通知中心冒烟/空空间先发目标后补编队）——保持 0 环建链，不改变既有行为。
+      throw new Error(`空间 ${scope} 编队与流水线没有交集（编队 ${roster.length} 人：${roster.map(r => r.role).join('、')}；流水线启用岗位 ${[...spaceStages.values()].filter(s => s.enabled !== 0).map(s => s.role).join('、') || '（无）'}）——请先为该空间配置流水线或调整编队`)
+    }
     const created = []
     let prev = null
     build.forEach((r, i) => {
-      // 阶段名：优先 roles.json 流水线标签（与该空间任务集泳道名一致），否则用通用阶段标签
-      const named = pipe[r.role] && pipe[r.role] !== r.role ? pipe[r.role] : null
+      // 阶段名：空间流水线 label > roles.json 标签 > 通用阶段标签（与任务集泳道名保持一致）
+      const stageLabel = spaceStages.get(r.role)?.label
+      const named = stageLabel && stageLabel !== r.role ? stageLabel : (pipe[r.role] && pipe[r.role] !== r.role ? pipe[r.role] : null)
       const label = named ?? GOAL_STAGE_LABELS[i % GOAL_STAGE_LABELS.length]
       const description = sliced
         ? `[auto-goal]\n[slice-mode]\n目标：${objective.trim()}\n本阶段：${label}（${r.name}）`
@@ -3019,6 +3241,15 @@ async function handle(req, res, stripPrefix) {
       })
       return
     }
+    if (req.method === 'GET' && path === '/api/pipeline') {
+      // SP-P0：空间流水线（数据面单源）。守护每轮扫单读这里（hub 优先，部署面 rolesFile 兜底）；
+      // 指挥台用它渲染岗位契约。version = 内容指纹：未变化时守护零成本跳过重建。
+      const scopeParam = (url.searchParams.get('scope') ?? '').trim()
+      if (!SCOPE_KEY_RE.test(scopeParam)) { json(res, 400, { error: 'scope 非法（字母/数字/下划线/连字符，≤64 字符）' }); return }
+      const includeDisabled = (url.searchParams.get('include') ?? '') !== 'active'
+      json(res, 200, readPipeline(scopeParam, { includeDisabled }))
+      return
+    }
     if (req.method === 'GET' && path === '/api/agents') {
       // 全局智能体目录：所有空间编队的并集（按 role 去重，标注来源空间），供选人入编。
       const rows = db.prepare('SELECT scope, role, name, kind, avatar FROM roster ORDER BY role, scope').all()
@@ -3469,6 +3700,50 @@ async function handle(req, res, stripPrefix) {
       })
       return
     }
+    if (req.method === 'POST' && path === '/api/pipeline') {
+      // SP-P0：写入空间流水线（阶段契约 + 执行配置）。整批 upsert（含删除未提交的旧阶段）。
+      // 校验在写入期完成：role 形状/唯一性、next 可达、gate 必须有 artifact、docs 必须是仓库相对路径。
+      // 编队与流水线的一致性**不在此处硬拦**（便于先配流水线后选人入编），由 GET /api/spaces/provision 报给将军。
+      await handleWrite(req, res, (body, by, scope) => {
+        const targetScope = typeof body.scope === 'string' && body.scope.trim().length > 0 ? body.scope.trim() : scope
+        if (!SCOPE_KEY_RE.test(targetScope)) throw new Error('scope 非法（字母/数字/下划线/连字符，≤64 字符）')
+        if (body.by !== 'general' && by !== 'general' && body.forceGeneral !== true) throw new Error('流水线配置仅允许 general 执行（body.by 或操作者身份须为 general）')
+        const stages = normalizeStages(targetScope, body.stages)
+        const runtime = body.runtime === undefined ? null : normalizeRuntime(body.runtime)
+        const result = withTx(() => {
+          const prevRoles = new Set(db.prepare('SELECT role FROM space_stages WHERE scope = ?').all(targetScope).map(r => r.role))
+          const upsert = db.prepare(`INSERT INTO space_stages (scope, role, label, prompt, next, gate, artifact, docs, sort, enabled, updatedAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(scope, role) DO UPDATE SET label=excluded.label, prompt=excluded.prompt, next=excluded.next,
+              gate=excluded.gate, artifact=excluded.artifact, docs=excluded.docs, sort=excluded.sort, enabled=excluded.enabled, updatedAt=excluded.updatedAt`)
+          const ts = now()
+          for (const s of stages) {
+            upsert.run(targetScope, s.role, s.label, s.prompt, s.next, s.gate, s.artifact, s.docs === null ? null : JSON.stringify(s.docs), s.sort, s.enabled, ts)
+          }
+          const keep = stages.map(s => s.role)
+          const dropped = [...prevRoles].filter(r => !keep.includes(r))
+          if (dropped.length > 0) {
+            const del = db.prepare('DELETE FROM space_stages WHERE scope = ? AND role = ?')
+            for (const r of dropped) del.run(targetScope, r)
+          }
+          if (runtime !== null) {
+            db.prepare(`INSERT INTO space_runtime (scope, enabled, maxWorkers, isolate, updatedAt) VALUES (?, ?, ?, ?, ?)
+              ON CONFLICT(scope) DO UPDATE SET enabled=excluded.enabled, maxWorkers=excluded.maxWorkers, isolate=excluded.isolate, updatedAt=excluded.updatedAt`)
+              .run(targetScope, runtime.enabled ? 1 : 0, runtime.maxWorkers, runtime.isolate ? 1 : 0, ts)
+          }
+          audit(by, targetScope, 'pipeline:update', null, {
+            stages: stages.length,
+            added: stages.filter(s => !prevRoles.has(s.role)).map(s => s.role),
+            dropped,
+            runtime,
+          })
+          return { scope: targetScope, stages: stages.length, dropped, added: stages.filter(s => !prevRoles.has(s.role)).length, runtime }
+        })
+        const view = readPipeline(targetScope)
+        return { ...result, version: view.version, activeRoles: view.activeRoles, warnings: pipelineWarnings(targetScope, view) }
+      })
+      return
+    }
     if (req.method === 'GET' && path === '/api/spaces/impact') {
       // 删除预检（只读，AC-R3-1）：返回该空间将影响的数据面计数 + 在办执行状态；调用不产生 audit/SSE。
       try {
@@ -3493,9 +3768,96 @@ async function handle(req, res, stripPrefix) {
           chatAttachments: countOf('SELECT COUNT(*) AS c FROM chat_attachments WHERE scope = ?'),
           rules: countOf('SELECT COUNT(*) AS c FROM rules WHERE scope = ?'),
           skillSources: countOf('SELECT COUNT(*) AS c FROM skill_sources WHERE scope = ?'),
+          spaceStages: countOf('SELECT COUNT(*) AS c FROM space_stages WHERE scope = ?'),
+          spaceRuntime: countOf('SELECT COUNT(*) AS c FROM space_runtime WHERE scope = ?'),
         }
         const running = db.prepare("SELECT id, title, status FROM tasks WHERE scope = ? AND status IN ('in_progress','in_review','blocked') ORDER BY id").all(id)
         json(res, 200, { id, counts, running: { tasks: running } })
+      } catch (e) {
+        json(res, 400, { error: e instanceof Error ? e.message : String(e) })
+      }
+      return
+    }
+    if (req.method === 'GET' && path === '/api/spaces/provision') {
+      // SP-P0 开通预检（只读，不产生 audit/SSE）：把「这个空间现在能不能自动循环」变成一份可执行清单。
+      // 直接对治 T-127 现场：目标发布成功、链也建对了，却因为「没有绑定的守护实例 / 编队与流水线不一致」
+      // 静默停在 todo 十几小时，而指挥台没有任何提示。
+      try {
+        const id = (url.searchParams.get('id') ?? '').trim()
+        if (!SCOPE_KEY_RE.test(id)) throw new Error('空间 id 非法（字母/数字/下划线/连字符，≤64 字符）')
+        const space = db.prepare('SELECT * FROM spaces WHERE id = ?').get(id)
+        const roster = db.prepare('SELECT role, name FROM roster WHERE scope = ? ORDER BY sort, role').all(id)
+        const view = readPipeline(id)
+        const checks = []
+        const add = (level, code, message, fix = null) => checks.push({ level, code, message, fix })
+
+        // 1) 空间注册（warn 而非 error：未注册的 scope 仍可跑通循环——夹具 __p13fixture__ 即如此；
+        //    真正的后果是「无工作区绑定 → 回落注入默认仓库」，由下面的 workspace-unbound 一并说明）
+        if (!space) add('warn', 'space-missing', `空间 ${id} 未注册（spaces 表无记录）——无工作区绑定，守护会回落到注入的默认仓库根`, `POST /api/spaces {id:"${id}", name:"…", localDir:"<仓库路径>"}`)
+
+        // 2) 编队
+        if (roster.length === 0) add('warn', 'roster-empty', '该空间编队为空——发布目标无法生成任何阶段任务', '指挥台「空间设置 → 智能体」选人入编')
+
+        // 3) 流水线（含编队一致性）
+        if (view.stages.length === 0) {
+          add('error', 'pipeline-missing', '该空间未配置流水线——守护按角色过滤时会跳过全部任务（或建链退回全编队造成死锁）',
+            `POST /api/pipeline {scope:"${id}", stages:[…]}（或 node team-hub/scripts/seed-pipeline.mjs --scope ${id} --file <roles.json>）`)
+        } else {
+          add('ok', 'pipeline-configured', `流水线 ${view.activeRoles.length} 环：${view.activeRoles.join(' → ')}（version ${view.version}）`)
+        }
+        for (const w of pipelineWarnings(id, view)) add(w.level, w.code, w.message, null)
+
+        // 4) 执行配置
+        if (!view.runtime.enabled) {
+          add('warn', 'runtime-disabled', '该空间执行配置未开启（space_runtime.enabled=false）——P1 起守护据此跳过该空间', `POST /api/pipeline {scope:"${id}", runtime:{enabled:true}}`)
+        }
+
+        // 5) 守护实例在线（当前部署形态：一个空间一个守护实例/scope）
+        const nowMs = Date.now()
+        const workers = db.prepare("SELECT id, lastSeenAt FROM members WHERE kind = 'worker' AND scope = ?").all(id)
+        const online = workers.filter(w => nowMs - new Date(w.lastSeenAt ?? 0).getTime() < 60000)
+        if (online.length === 0) {
+          add('error', 'daemon-offline', workers.length > 0
+            ? `守护实例过期心跳（最后 ${workers[0].lastSeenAt}）——目标链不会被认领`
+            : `该空间没有守护实例（无 scope=${id} 的 worker 心跳）——这是目标停在 todo 的最常见原因`,
+          `在 DSH profile 的 cordis.patch.yml 增加一行 legion-scrum-worker-${id}（scope:"${id}"、rolesFile 指向该空间流水线导出文件）`)
+        } else {
+          add('ok', 'daemon-online', `守护实例在线：${online.map(w => w.id).join('、')}`)
+        }
+
+        // 6) 工作区绑定（隔离 worktree / 合入都依赖它）
+        const localDir = space?.local_dir ?? ''
+        if (localDir.length === 0) {
+          add('warn', 'workspace-unbound', '未绑定本地文件夹（localDir）——守护会回落到注入的默认仓库根，产物可能落在错误目录', `POST /api/spaces {id:"${id}", name:"…", localDir:"<仓库路径>"}`)
+        } else if (!existsSync(localDir)) {
+          add('error', 'workspace-missing', `绑定的本地文件夹不存在：${localDir}`, '修正 localDir 或先 clone 该仓库')
+        } else if (!existsSync(join(localDir, '.git'))) {
+          add('warn', 'workspace-not-git', `绑定的文件夹不是 git 仓库：${localDir}——无法做 w/<任务ID> 隔离与自动合入`, '绑定一个 git 仓库（或使用 P2 的无仓库模式）')
+        } else {
+          let ignoreWarn = null
+          try {
+            const gi = readFileSync(join(localDir, '.gitignore'), 'utf8')
+            if (!gi.includes('.legion-worktrees')) ignoreWarn = '绑定仓库的 .gitignore 未忽略 .legion-worktrees/（隔离工作树会污染 git status）'
+          } catch { ignoreWarn = '绑定仓库没有 .gitignore（建议忽略 .legion-worktrees/）' }
+          if (ignoreWarn !== null) add('warn', 'worktree-not-ignored', ignoreWarn, '在绑定仓库 .gitignore 追加一行 .legion-worktrees/')
+          else add('ok', 'workspace-bound', `工作区绑定可用：${localDir}（git 仓库）`)
+        }
+
+        // 7) 在办任务可见性
+        const running = db.prepare("SELECT COUNT(*) AS c FROM tasks WHERE scope = ? AND status IN ('in_progress','in_review')").get(id).c
+        const todo = db.prepare("SELECT COUNT(*) AS c FROM tasks WHERE scope = ? AND status = 'todo'").get(id).c
+        if (todo > 0 && online.length === 0) add('error', 'queue-stalled', `有 ${todo} 个 todo 任务但没有在线守护——队列不会前进`)
+        else add('ok', 'queue-visible', `队列：todo ${todo} / 在办 ${running}`)
+
+        json(res, 200, {
+          id,
+          name: space?.name ?? id,
+          ok: !checks.some(c => c.level === 'error'),
+          checkedAt: now(),
+          pipeline: { version: view.version, stages: view.stages.length, activeRoles: view.activeRoles },
+          runtime: view.runtime,
+          checks,
+        })
       } catch (e) {
         json(res, 400, { error: e instanceof Error ? e.message : String(e) })
       }
@@ -3530,6 +3892,8 @@ async function handle(req, res, stripPrefix) {
              ['chatAttachments', 'DELETE FROM chat_attachments WHERE scope = ?'],
              ['rules', 'DELETE FROM rules WHERE scope = ?'],
              ['skillSources', 'DELETE FROM skill_sources WHERE scope = ?'],
+             ['spaceStages', 'DELETE FROM space_stages WHERE scope = ?'],
+             ['spaceRuntime', 'DELETE FROM space_runtime WHERE scope = ?'],
            ]) counts[key] = db.prepare(sql).run(id).changes
            db.prepare('DELETE FROM spaces WHERE id = ?').run(id)
            return counts

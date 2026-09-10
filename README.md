@@ -176,7 +176,11 @@ README 只保留入口和边界，逐步操作、预期结果及功能索引统�
 
 目标可使用传统 `chain` 模式，也可由任务拆解文档展开为 `slice` 模式：各切片形成 `coder_Si → tester_Si` 微链，多个切片并行，最后由目标级 devops 任务收尾。
 
-详见 [功能手册：发布目标与自动建链](docs/FEATURES.md#35-发布目标与自动建链)和 [编排架构 v3](docs/ORCHESTRATION-V3.md)。
+**流水线定义住在数据面**：每个空间的阶段契约（岗位、提示词、下一环、闸门、产物文档）保存在 team-hub 的 `space_stages` 表，经 `GET/POST /api/pipeline` 读写，`node team-hub/scripts/seed-pipeline.mjs` 可从 `roles.json` 一键导入。守护每轮扫单优先读数据面（按内容指纹增量刷新），hub 不可达或该空间未配置时回退部署面 `roles.json`。发布目标时**入链 = 编队 ∩ 流水线启用岗位**——编队里的观察员/管理员不会被串进任务链；两者无交集时发布会直接报错而不是生成一条永远不会动的链。
+
+开通一个新空间前可用 `GET /api/spaces/provision?id=<space>` 自检：流水线是否配置、编队是否与之一致、守护实例是否在线、工作区绑定是否可用、队列是否停滞，逐项给出修复指引。
+
+详见 [功能手册：发布目标与自动建链](docs/FEATURES.md#35-发布目标与自动建链)、[空间流水线与开通预检](docs/FEATURES.md#318-空间流水线与开通预检编队即流水线)和 [编排架构 v3](docs/ORCHESTRATION-V3.md)。
 
 ### 5.5 自动交接、闸门与人工干预
 
@@ -304,6 +308,7 @@ docs/<goalId>/
 默认数据库为 `team-hub/team.db`，附件目录与数据库同基路径保存。主要数据域包括：
 
 - 任务、成员、编队、工作空间和目标；
+- 空间流水线（`space_stages` 阶段契约 / `space_runtime` 执行配置）；
 - 审计、补丁、评审批注、执行状态和执行请求；
 - 角色模型、规范、技能及跨空间授权；
 - 对话会话、消息、回复设置和附件；
@@ -319,6 +324,7 @@ docs/<goalId>/
 | 目标 | `GET/POST /api/goal`、`POST /api/goal/status`、`POST /api/goal/slices` |
 | 审计 | `GET /api/activity`、`POST /api/patch`、`POST /api/review-notes`、`GET /api/overlaps` |
 | 空间与编队 | `GET /api/spaces|roster|agents`、`POST /api/spaces`、`POST /api/spaces/delete` |
+| 空间流水线 | `GET/POST /api/pipeline`、`GET /api/spaces/provision`（开通预检） |
 | 执行与模型 | `GET/POST /api/exec`、`GET /api/exec/queue`、`GET/POST /api/models` |
 | 对话 | `/api/chat/conversations`、`/messages`、`/replies`、`/reply-settings`、`/health`、`/attachments` |
 | 规范与技能 | `GET/POST /api/rules`、`GET /api/skills`、`POST /api/skills/register|review|grant|revoke` |
@@ -428,7 +434,8 @@ legion/
 ├─ scripts/ci/         仓库级 CI、发布暂存与文档门禁
 ├─ tests/contract/     可执行行为契约
 ├─ docs/               产品、架构、目标链、评审、证据和经验文档
-├─ roles.json          软件流水线角色、闸门和文档契约
+├─ roles.json          软件流水线角色、闸门和文档契约（可导入数据面；见 docs/SPACE-DAEMON-RUNBOOK.md）
+├─ roles-ozon.json     ozon 业务空间流水线（6 岗，与空间编队逐字对齐）
 ├─ LEGION.md           派工时自动注入的仓库纪律
 ├─ PLUGINS.md          插件族现状与路线图
 ├─ ozon/               军团产出的 Ozon 业务研究与交付物

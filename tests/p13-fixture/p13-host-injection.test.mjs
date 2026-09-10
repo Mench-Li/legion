@@ -270,7 +270,68 @@ describeHost('P1-3 真实 DSH 宿主注入冒烟（legion 三插件）', () => {
     }
   }, { timeout: 30000 })
 
-  it('⑥ 关闭清理：bounded dispose 结束 SSE、进程自然退出 exit 0', async () => {
+  it('⑥ SP-P0 数据面流水线：经宿主 POST /api/pipeline → 真实守护下一轮改从 hub 取流水线', async () => {
+    // 端到端闭环（对治 T-127 现场：流水线定义只在部署面文件里，与空间编队两份数据手工对齐）：
+    //   宿主外壳路由 → team-hub 数据面 → 真实 dsh-scrum-worker 实例按 version 刷新 → daemon.json 见证。
+    // 夹具 worker 的 rolesFile 为空且夹具工作区无 roles.json → 初始为「单角色模式」（pipeline=null）；
+    // 导入数据面流水线后必须切换到 hub 来源——这就是「用户不必再碰宿主配置文件」的证据。
+    const SCOPE = '__p13fixture__'
+    const before = await req(fx.base, 'GET', `/team-hub/api/pipeline?scope=${SCOPE}`, undefined, TOKEN)
+    assert.equal(before.status, 200, JSON.stringify(before.data))
+    assert.deepEqual(before.data.stages, [], '夹具初始无数据面流水线')
+    assert.equal(before.data.runtime.enabled, false)
+
+    // 写入期校验在宿主形态同样生效：gate 无 artifact → 400
+    const bad = await req(fx.base, 'POST', '/team-hub/api/pipeline', {
+      scope: SCOPE, by: 'general', stages: [{ role: 'r1', label: '岗1', next: null, gate: true }],
+    }, TOKEN)
+    assert.equal(bad.status, 400, '非法规格应 400：' + JSON.stringify(bad.data))
+    assert.ok(/artifact/.test(bad.data.error ?? ''), '错误文案应点明 artifact：' + JSON.stringify(bad.data))
+
+    const write = await req(fx.base, 'POST', '/team-hub/api/pipeline', {
+      scope: SCOPE, by: 'general',
+      stages: [
+        { role: 'soldier-research', label: '需求调研', prompt: '调研……', next: 'soldier-listing', docs: ['research/x/brief.md'] },
+        { role: 'soldier-listing', label: '上架准备', prompt: '上架……', next: null },
+      ],
+      runtime: { enabled: true, maxWorkers: 1 },
+    }, TOKEN)
+    assert.equal(write.status, 200, JSON.stringify(write.data))
+    const version = write.data.task.version
+    assert.ok(version, '写入应返回 version 指纹')
+
+    const after = await req(fx.base, 'GET', `/team-hub/api/pipeline?scope=${SCOPE}`, undefined, TOKEN)
+    assert.deepEqual(after.data.activeRoles, ['soldier-research', 'soldier-listing'])
+    assert.equal(after.data.runtime.enabled, true)
+
+    // 守护按 intervalMs（夹具 5s）扫单 → 下一轮重新解析流水线来源；此处轮询 daemon.json 见证切换。
+    const daemonFile = join(fx.scrumDir, 'daemon.json')
+    let daemon = null
+    const deadline = Date.now() + 30000
+    while (Date.now() < deadline) {
+      try {
+        const d = JSON.parse(readFileSync(daemonFile, 'utf8'))
+        if (d.pipeline && d.pipeline.source === 'hub') { daemon = d; break }
+      } catch { /* not yet */ }
+      await sleep(500)
+    }
+    assert.ok(daemon, '守护应在一个扫描周期内切到数据面流水线（daemon.json.pipeline.source=hub）；'
+      + '当前 daemon.json=' + (() => { try { return readFileSync(daemonFile, 'utf8') } catch { return '(缺失)' } })().slice(0, 400)
+      + '\n宿主输出：\n' + (child._p13logs.out + child._p13logs.err).slice(-800))
+    assert.deepEqual(daemon.pipeline.stages, ['soldier-research', 'soldier-listing'], '守护阶段集合 = 数据面启用岗位')
+    assert.equal(daemon.pipeline.version, version, '守护记录的内容指纹应与写入返回一致')
+    assert.equal(daemon.scope, SCOPE)
+
+    // 开工预检：此刻守护在线 + 流水线已配置 → 无 error 级项
+    const prov = await req(fx.base, 'GET', `/team-hub/api/spaces/provision?id=${SCOPE}`, undefined, TOKEN)
+    assert.equal(prov.status, 200, JSON.stringify(prov.data))
+    const errs = prov.data.checks.filter((c) => c.level === 'error').map((c) => c.code)
+    assert.deepEqual(errs, [], '守护在线 + 流水线就绪 → 不应有 error 级阻塞：' + JSON.stringify(prov.data.checks))
+    assert.ok(prov.data.checks.some((c) => c.code === 'daemon-online'), '预检应识别到该空间守护在线')
+    assert.ok(prov.data.checks.some((c) => c.code === 'pipeline-configured'), '预检应识别到流水线已配置')
+  }, { timeout: 60000 })
+
+  it('⑦ 关闭清理：bounded dispose 结束 SSE、进程自然退出 exit 0', async () => {
     // 保持两条 SSE 连接（一条已消费增量、一条看板全量）；close promise 须在
     // shutdown 前注册（dispose 会立刻 end 连接，晚注册会错过 close 事件）
     const sse1 = liveSse(fx.base, '/team-hub/api/events')

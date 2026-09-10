@@ -83,7 +83,7 @@ function seedSpaceZ() {
 
 /** 各表 scope=Z 剩余计数。 */
 function leftovers() {
-  const keys = ['tasks', 'roster', 'agent_models', 'exec_requests', 'skills', 'goal', 'exec_state', 'conversations', 'messages', 'calendar_events', 'members', 'chat_reply_settings', 'chat_attachments', 'rules', 'skill_sources']
+  const keys = ['tasks', 'roster', 'agent_models', 'exec_requests', 'skills', 'goal', 'exec_state', 'conversations', 'messages', 'calendar_events', 'members', 'chat_reply_settings', 'chat_attachments', 'rules', 'skill_sources', 'space_stages', 'space_runtime']
   const out = {}
   for (const k of keys) out[k] = mod.db.prepare("SELECT COUNT(*) AS c FROM " + k + " WHERE scope = ?").get(Z).c
   out.spaces = mod.db.prepare("SELECT COUNT(*) AS c FROM spaces WHERE id = ?").get(Z).c

@@ -61,6 +61,7 @@ export function defineSchema(spec) {
     fields: Object.freeze(norm),
     nonEnvLiterals: Object.freeze([...(spec.nonEnvLiterals ?? [])]),
     dynamicEnvReads: Object.freeze([...(spec.dynamicEnvReads ?? [])]),
+    foreignEnv: Object.freeze([...(spec.foreignEnv ?? [])]),
     notes: Object.freeze([...(spec.notes ?? [])]),
     /** 全部 env 名（供 scan --check 对照） */
     envNames() { return norm.map((f) => f.env) },
@@ -73,7 +74,10 @@ export function defineSchema(spec) {
   return Object.freeze(schema)
 }
 
-/** 解析 CLI 参数（--flag value / --flag=value / 布尔开关 --flag）；不支持位置参数语义 */
+/** 解析 CLI 参数（--flag value / --flag=value / 裸开关 --flag）
+ *  裸开关规则：下一个 token 以 `--` 开头或不存在时视为 'true'，否则**被当作它的取值**
+ *（与仓库既有 workbench/scripts/serve.mjs 的解析约定一致，避免同一命令行两套语义）。
+ *  不支持位置参数语义；非 -- 开头的 token 一律忽略。 */
 export function parseArgv(argv = []) {
   const out = new Map()
   for (let i = 0; i < argv.length; i += 1) {
@@ -172,8 +176,10 @@ export function resolveConfig(schema, { env = {}, argv = [], checkUnknownEnv = t
   const unknownEnv = []
   if (checkUnknownEnv && schema.prefixes.length) {
     const declared = new Set(schema.envNames())
+    // 本进程前缀下、但属于**其他系统**的变量（如 DSH 宿主的 DSH_WEB_URL 与 workbench 的 DSH_WEB_* 撞名）
+    const foreign = new Set(schema.foreignEnv.map((x) => (typeof x === 'string' ? x : x.name)))
     for (const name of Object.keys(env)) {
-      if (declared.has(name)) continue
+      if (declared.has(name) || foreign.has(name)) continue
       if (schema.prefixes.some((p) => name.startsWith(p))) unknownEnv.push(name)
     }
     unknownEnv.sort()
@@ -184,12 +190,17 @@ export function resolveConfig(schema, { env = {}, argv = [], checkUnknownEnv = t
   return { values, sources, errors, warnings, unknownEnv }
 }
 
-/** 生成脱敏后的可打印对象（secret 只留长度提示） */
+/** 生成脱敏后的可打印对象。
+ *  · sensitive=true → 整体掩码（只留长度提示）
+ *  · 提供 redact(v) 钩子 → 由字段自己脱敏（例如 `roomId:token:role` 这种**部分敏感**的复合值：
+ *    保留可运维的房间与角色，隐去 token）。钩子的存在是为了让「部分脱敏」也走引擎这一条路径，
+ *    而不是散落到各进程的日志代码里。 */
 export function redactConfig(schema, values) {
   const out = {}
   for (const f of schema.fields) {
     const v = values[f.key]
     if (f.sensitive) out[f.key] = maskSecret(v)
+    else if (typeof f.redact === 'function') out[f.key] = f.redact(v)
     else if (Array.isArray(v)) out[f.key] = v.join(',')
     else out[f.key] = v
   }

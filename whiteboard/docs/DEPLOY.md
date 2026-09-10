@@ -21,15 +21,22 @@ npm start                        # 或 node apps/server/src/index.js
 
 ## 环境变量
 
+> **P3-2 起**：白板的全部配置项已在 `apps/server/src/config-schema.mjs` 中**声明**，并接入仓库统一配置引擎
+> （`packages/shared/src/config.mjs` 的同步副本，白板保持零依赖独立部署）。
+> - 优先级：**CLI（`--port/--host/--token`） > 环境变量 > 默认值**；非法值**报错退出**（不再静默回退）。
+> - 启动时打印一行**脱敏**配置摘要（token 只显示 `***(N 位)`；`WHITEBOARD_ROOMS` 里的房间 token 亦被隐去）。
+> - 仓库根可校验白板配置面：`node scripts/config/check.mjs --process=whiteboard`（详见 `docs/CONFIG.md`）。
+> - 新增 env 读取必须同时补进 `config-schema.mjs`，否则仓库 CI 的 `scan --check` 会失败。
+
 ### 基础（P0）
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `PORT` | 8080 | 监听端口 |
+| `PORT` | 8080 | 监听端口（可用 `--port` 覆盖） |
 | `HOST` | 127.0.0.1 | 监听地址；**非回环必须设置 token**（否则拒绝启动） |
 | `DB_PATH` | `apps/server/data/whiteboard.db` | 兼容位：`:memory:` 时房间也走内存（bench/CI 冒烟用） |
 | `WB_IN_MEMORY` | 0 | 置 1 强制房间用内存存储（不落盘） |
-| `WHITEBOARD_TOKEN` | 空 | 全局 token（回环开发可留空）；未单独声明 token 的房间都用它 |
+| `WHITEBOARD_TOKEN` | 空 | 全局 token（回环开发可留空）；未单独声明 token 的房间都用它（可用 `--token` 覆盖） |
 | `TTL_MS` | 10000 | presence 陈旧判定（非正常断开时多久移除光标） |
 
 ### 房间与权限（P3-1）

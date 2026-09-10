@@ -492,16 +492,60 @@ git 面板只读，无暂存/提交能力；`.dsh-uploads` 会话由管理端按
 **不信任** `X-Forwarded-For`（反代大部署需在边界做真实客户端识别）；房间空闲关闭依赖 tick 心跳；
 多实例共享存储**未实现**（ADR-0008 记录了触发条件）；前端仅做判定层测试（不引入 jsdom/浏览器自动化）。
 
-### P3-2 统一配置系统
+### P3-2 统一配置系统 ✅ 已完成（2026-09-10）
 
-当前配置分散在环境变量、CLI、services-plugin、DSH 宿主和 Workbench 本地设置。
+原问题：配置分散在环境变量、CLI、services-plugin、DSH 宿主和 Workbench 本地设置。
 
-涉及改动：
+**决策（四项分叉点已确认）**：覆盖**活跃三进程**（team-hub / workbench / whiteboard）；
+`scrum` 已退役（只在 schema 登记状态、不改代码），两个 DSH 插件的配置仍由宿主 composition 管理；
+统一强度取**轻量路线**——统一 schema + 优先级 + 校验命令 + 启动脱敏摘要，**不引入新配置文件**
+（env/CLI 仍是唯一注入面，运行时语义零变更）；不做可视化配置界面（CLI + 摘要 + 文档足够）。
 
-- 统一配置 schema 和优先级。
-- 启动时输出脱敏后的最终配置摘要。
-- 统一 token、host、port、DB 路径和附件目录。
-- 增加配置校验命令。
+已完成：
+
+- ✅ **统一配置 schema 与优先级**：引擎 `packages/shared/src/config.mjs`（`defineSchema` / `resolveConfig` /
+  `coerce` / `redactConfig` / `formatSummary`），优先级 **CLI > env > 默认值**，结果带 `sources`
+  （可回答「这个值从哪来」）。三份 schema 共 **54 个字段**：team-hub 12 / workbench 21 / whiteboard 21。
+  类型校验覆盖 `int/bool/enum/csv/path`（含 min/max/choices）；**非法值报错退出，不静默回退**。
+- ✅ **启动时输出脱敏后的最终配置摘要**：三进程在监听前各打一行，secret 只显示 `***(N 位)` 或 `(未设置)`；
+  复合值走字段级脱敏（`WHITEBOARD_ROOMS=main:<token>:rw` → `main:***:rw`）。
+  摘要与 `--json` 共用同一脱敏路径。
+- ✅ **统一 token、host、port、DB 路径与附件目录**：三进程入口的核心项统一走引擎解析
+  （`team-hub/server.mjs` 的 `PORT/HOST/TOKEN/DB_FILE`、`workbench/scripts/serve.mjs` 的
+  `port/host/token/staticRoot`、`whiteboard/apps/server/src/index.js` 的 `PORT/HOST/DB_PATH/TOKEN`），
+  并新增 `--port/--host/--token` 命令行覆盖（此前只有 workbench 支持）。
+  相对路径与「显式提供即原样使用」的既有语义保持不变。
+- ✅ **配置校验命令**：`node scripts/config/check.mjs`（`--process` / `--json` / `--env-file` /
+  `--isolated-env` / `--strict` / `--show-source`）；配套
+  `scripts/config/scan.mjs --check`（每个 env 读取点必须在 schema 中声明）与
+  `scripts/config/sync.mjs --check`（白板副本与根引擎逐字节一致）。
+  10 条**跨进程一致性规则**（端口冲突、hub 上游端口不符、token 缺失/不一致/未使用、非回环无 token、
+  静态产物缺失、DB 落在房间目录内、写 token 未配）。
+
+**额外收获（不是预设计划的一部分，但更有价值）**：扫描器与单测抓出了此前**不可见的配置面**——
+
+- workbench 有 10 个经 `envBytes(name, def)` **间接**读取的环境变量（`DSH_WORKBENCH_CHUNK_SIZE`、
+  `DSH_WORKBENCH_MAX_UPLOAD_TOTAL`、`DSH_WEB_CACHE_TTL_MS`、`DSH_WEB_CACHE_MAX`、`DSH_WEB_QUOTA_*` 四项、
+  `DSH_WEB_AUDIT_MAX_BYTES`），白板有 9 个经 `env[key]` 间接读取的 `WB_*` 键：直接扫描（`process.env.X`）
+  **完全看不到**它们，只有把「间接读取」和「疑似 env 字面量」纳入识别才暴露出来。
+- `WHITEBOARD_ROOMS` 内嵌每房间 token，原本会被当普通字符串打进启动摘要（**真实泄漏**，由单测抓到），
+  现已走字段级脱敏。
+- schema 写默认值时暴露一处**认知偏差**：workbench 审计轮转默认值实际是 5MiB，而我按印象写成 4MiB；
+  「默认值漂移」单测（直接 import 三进程自己的常量比对）把它挡住了。
+
+门禁：`env` 阶段新增三项配置自检（scan / sync / check 夹具，用 `--isolated-env` 消除宿主会话变量影响），
+`test` 阶段新增 `config` 套件 **27 例**。白板 158 例与 team-hub/workbench 各套件无回归。
+
+证据：`docs/P3-2-evidence/verify-evidence.md`；参考手册：`docs/CONFIG.md`。
+
+**已知边界（诚实登记）**：只覆盖活跃三进程（`scrum` 与两个 DSH 插件不在体系内）；
+配置在启动时解析一次，**不支持热更新**；`check.mjs` 只做配置面一致性，**不发网络请求**
+（上游 hub 是否真在跑只有连上去才知道）；**单份环境无法触发 token 一致性规则**（两进程读同一个
+`TEAM_HUB_TOKEN`，只有分别在不同 shell 配置时才会不一致，该规则靠构造两份配置的单测覆盖）；
+`check.mjs` 默认读当前 shell 环境，在 DSH 会话里直接跑会把宿主的 `TEAM_HUB_PORT` / `DSH_WEB_URL`
+算进来（真实但与本机会话相关的告警，用 `--isolated-env` 复核）；
+白板副本是**本仓库特有的折衷**（Docker 构建上下文隔离所致），若白板改为以仓库根为上下文或拆为独立仓库，
+应改为直接引用并删除副本与 `sync.mjs`。
 
 ### P3-3 历史 evidence 文档治理
 

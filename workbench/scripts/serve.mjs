@@ -33,10 +33,23 @@ import { basename, extname, join, normalize, dirname, sep, resolve } from 'node:
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { buildGithubTarballUrl, scanSkillDirs, sanitizeSkillId } from './skillImporter.mjs'
+import { loadConfig } from '../../packages/shared/src/config.mjs'
+import { SCHEMA as CONFIG_SCHEMA } from './config-schema.mjs'
+
+// ── P3-2 统一配置：核心项（host/port/token/静态根/hub 上游）经统一引擎解析 ──
+// 优先级 CLI > env > 默认；类型/范围校验；非法值报错退出（不静默回退）。其余 DSH_WEB_* 限值
+// 仍由下方 envBytes() 读取（已在 config-schema.mjs 中声明，scan --check 强制）。
+const CFG = loadConfig(CONFIG_SCHEMA, { env: process.env, argv: process.argv.slice(2) })
+if (CFG.errors.length) {
+  for (const e of CFG.errors) console.error(`[config] workbench 配置错误：${e.message}`)
+  console.error('[config] 用 `node scripts/config/check.mjs --process=workbench` 查看完整配置面')
+  process.exit(1)
+}
+for (const w of CFG.warnings) console.error(`[config] workbench 配置告警：${w.message}`)
 
 // 静态根：默认 <workbench>/dist；DSH_WORKBENCH_ROOT 可覆盖（测试「产物缺失」分支用，见 web-p28 用例）
-const ROOT = process.env.DSH_WORKBENCH_ROOT
-  ? resolve(process.env.DSH_WORKBENCH_ROOT)
+const ROOT = CFG.values.staticRoot
+  ? resolve(CFG.values.staticRoot)
   : join(fileURLToPath(new URL('.', import.meta.url)), '..', 'dist')
 
 const args = new Map()
@@ -44,8 +57,12 @@ for (let i = 2; i < process.argv.length; i += 1) {
   const a = process.argv[i]
   if (a.startsWith('--')) args.set(a.slice(2), process.argv[i + 1])
 }
-const port = Number(args.get('port') ?? process.env.DSH_WORKBENCH_PORT ?? 5173)
-const host = args.get('host') ?? process.env.DSH_WORKBENCH_HOST ?? '127.0.0.1'
+const port = CFG.values.port
+const host = CFG.values.host
+/** 启动时打印的脱敏配置摘要（token 只显示是否设置）。 */
+export function configSummaryLine() {
+  return `${CFG.summary} staticRoot=${ROOT}`
+}
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -80,7 +97,7 @@ const MIME = {
 }
 
 // ── 写鉴权与限值（S3/S4/S6；⚖️ 导出为常量，测试用「三值法」围绕断言，见 TEST_CASES §3）──
-const writeToken = String(args.get('token') ?? process.env.DSH_WORKBENCH_TOKEN ?? '')
+const writeToken = String(args.get('token') ?? CFG.values.token ?? '')
 /** 限值 env 覆盖（测试注入口，先例 DSH_WEB_FETCH_ALLOW_PRIVATE）：缺省/非法回退默认值。 */
 function envBytes(name, def) {
   const raw = process.env[name]
@@ -2606,8 +2623,9 @@ const server = createServer((req, res) => {
 // 被 import（契约测试）时不监听端口（isMain 守卫，同 team-hub/server.mjs 先例）。
 const isMain = process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 if (isMain) {
+  console.log(configSummaryLine()) // P3-2：启动即打印脱敏后的最终配置
   server.listen(port, host, () => {
-    console.log(`legion-workbench 已启动：http://${host}:${port}（中枢默认 ${process.env.DSH_HUB_UPSTREAM ?? 'http://127.0.0.1:8787'}，可用 DSH_HUB_UPSTREAM 覆盖）`)
+    console.log(`legion-workbench 已启动：http://${host}:${port}（中枢默认 ${CFG.values.hubUpstream}，可用 DSH_HUB_UPSTREAM 覆盖）`)
   })
 }
 

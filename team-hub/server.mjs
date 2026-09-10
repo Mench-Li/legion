@@ -67,17 +67,38 @@ import { dirname, extname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { standardsFor } from './stage-standards.mjs'
 import { evaluatePermission, normalizeOperation } from './permission-engine.mjs'
+import { loadConfig } from '../packages/shared/src/config.mjs'
+import { SCHEMA as CONFIG_SCHEMA } from './config-schema.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
-const DB_FILE = process.env.TEAM_HUB_DB || join(ROOT, 'team-hub', 'team.db')
+
+// P3-2 统一配置：核心项（host/port/token/db）经统一引擎解析——优先级 CLI > env > 默认，
+// 类型/范围/枚举校验，非法值报错退出（不静默回退），并把脱敏摘要打出来。
+// 其余 CHAT_*/MAX_RULES_LEN 等键仍按原样读取，但**已在 schema 中声明**（scan --check 强制），
+// 其默认值由 scripts/config/config.test.mjs 做漂移比对。
+const CFG = loadConfig(CONFIG_SCHEMA, { env: process.env, argv: process.argv.slice(2) })
+if (CFG.errors.length) {
+  for (const e of CFG.errors) console.error(`[config] team-hub 配置错误：${e.message}`)
+  console.error('[config] 用 `node scripts/config/check.mjs --process=team-hub` 查看完整配置面')
+  process.exit(1)
+}
+for (const w of CFG.warnings) console.error(`[config] team-hub 配置告警：${w.message}`)
+
+// 语义与改造前一致：显式提供（env/CLI）时**按原样使用**（相对路径交由 OS 按 cwd 解析），
+// 未提供时才回退到仓库根下的默认库路径。
+const DB_FILE = CFG.sources.dbFile === 'default' ? join(ROOT, 'team-hub', 'team.db') : String(CFG.values.dbFile)
 /** 默认库路径（P1-1：宿主插件未显式配置 dbPath 时与独立进程同库，保证单数据池）。 */
 export const DEFAULT_DB_FILE = DB_FILE
 // S3/R-3（决策 E1）：聊天附件落盘目录与库同基（TEAM_HUB_DB 所在目录的 uploads/ 下）。
 // 测试临时库 → uploads 自动落在 mkdtemp 内（TC-S3-16 隔离断言）；live 库目录零写入纪律不受影响。
 const UPLOADS_ROOT = join(dirname(DB_FILE), 'uploads')
-const PORT = Number(process.env.TEAM_HUB_PORT || 8787)
-const TOKEN = process.env.TEAM_HUB_TOKEN || ''
-const HOST = process.env.TEAM_HUB_HOST || '127.0.0.1'
+const PORT = CFG.values.port
+const TOKEN = CFG.values.token
+const HOST = CFG.values.host
+/** 启动时打印的脱敏配置摘要（含实际生效的 DB 路径）；供日志与故障排查使用，绝不包含 token 原文。 */
+export function configSummaryLine() {
+  return `${CFG.summary} dbFile=${DB_FILE}`
+}
 
 export function isLoopbackHost(host) {
   const normalized = String(host ?? '').trim().toLowerCase()
@@ -4362,6 +4383,7 @@ export function disposeHub() {
 // 直接运行（node server.mjs）才监听；被 import 时（测试/复用）不占端口。
 const isMain = process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 if (isMain) {
+  console.log(configSummaryLine()) // P3-2：启动即打印脱敏后的最终配置（token 只显示是否设置）
   validateSecurityConfig()
   server.listen(PORT, HOST, () => {
     console.log(`[team-hub] v2 独立服务已启动：http://${HOST}:${PORT}（db=${DB_FILE}，鉴权=${TOKEN !== '' ? 'on' : 'off'}）`)

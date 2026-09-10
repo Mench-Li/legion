@@ -6,11 +6,14 @@
 
 **最近一次全量基线**：2026-09-10　`run-ci --only test` **29 套件 / 671 测试全 PASS**（136s）—— 以本文件所在提交为准
 
-> ⚠️ **基线滞后说明（诚实登记）**：P2-7 / P2-8 / P3-1 之后新增或扩充的套件（`files-p27`、`files-ui`、
-> `web-p28`、`browser-ui`、`static-serve`，以及扩充到 158 例的 `whiteboard`）**未纳入上面这条全量基线**——
+> ⚠️ **基线滞后说明（诚实登记）**：P2-7 / P2-8 / P3-1 / P3-2 之后新增或扩充的套件（`files-p27`、`files-ui`、
+> `web-p28`、`browser-ui`、`static-serve`、`config`，以及扩充到 158 例的 `whiteboard`）**未纳入上面这条全量基线**——
 > `test` 阶段当前会因 `notify-hub-smoke` 永久等待而无法跑完（根因与最小修法见
 > `docs/P2-7-evidence/verify-evidence.md` §7）。这些套件是**逐个单独复跑**验证的，未伪造全量基线；
 > 表中相应行的用例数已按实测更新。
+>
+> P3-2 实测：受配置改动影响的面（team-hub 15 套件 + workbench 14 套件 + `artifact-policy` + `config`）
+> 一次 `node --test` 合计 **418 例 / 131 套件全通过**，白板 **158 例 / 30 套件全通过**。
 
 ---
 
@@ -71,7 +74,7 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 | files-p27 / files-ui（P2-7，未入全量基线） | 36 / 19 | web-p28 / browser-ui（P2-8，未入全量基线） | 21 / 21 |
 | doc-render | 11 | board-plugin | 37 |
 | skill-importer | 4 | scrum | 25 |
-| hub-board / artifact-policy | 1 / 3 |  |  |
+| hub-board / artifact-policy | 1 / 3 | config（P3-2 统一配置：引擎/跨进程规则/夹具/默认值漂移） | 27 |
 
 （表中「未入全量基线」= 该套件在全量基线提交之后新增或扩充，用例数为**单独复跑**实测值。）
 
@@ -86,6 +89,7 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 | | `README.md` | 产品总览与快速上手 |
 | | `docs/FEATURES.md` | 功能操作手册 |
 | | `docs/DEPLOY.md` | 部署、验证、回滚 |
+| | `docs/CONFIG.md` | 统一配置参考（优先级、三进程字段清单、校验命令、脱敏规则、已知边界） |
 | | `docs/REMAINING-TASKS.md` | 未完成事项与优先级 |
 | | `.ci/<run>/summary.json` + `ci.log` | 最近一次机器证据 |
 | **契约（权威）** | `docs/CONTRACT-V1V2.md` | v1/v2 语义统一表（状态机、分页、SSE 信封） |
@@ -100,7 +104,12 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
    对话真实模型通道 E2E 等仍在 `docs/REMAINING-TASKS.md` 待办；浏览器助手的缓存/正文提取/截图已按 P2-8 增强）。
 2. 白板为**单实例多房间**模型（P3-1 已落地房间隔离/权限/限流/指标审计）；
    **不承诺横向扩展**，多实例共享存储未实现（ADR-0008 记录了被否理由与转 v2 触发条件）。
-3. 配置仍分散在环境变量 / CLI / services-plugin / 宿主 patch / Workbench 本地设置之间（统一配置系统待办）。
+3. 配置面已统一（P3-2）：三个活跃进程（team-hub / workbench / whiteboard）共用统一配置引擎
+   （`packages/shared/src/config.mjs`，优先级 **CLI > env > 默认值**），共 54 个已声明字段；启动打印
+   **脱敏**摘要；`node scripts/config/check.mjs` 提供校验与 10 条跨进程一致性规则，CI env 阶段跑
+   scan/sync/check 三项自检。**已知边界**：只覆盖活跃三进程（`scrum` 已退役、两个 DSH 插件仍由宿主
+   composition 管理）；配置**不支持热更新**（启动时解析一次）；`check.mjs` 只做配置面一致性、**不发网络
+   请求**；白板因 Docker 构建上下文隔离而使用根引擎的**同步副本**（逐字节校验）。详见 `docs/CONFIG.md`。
 4. board-plugin 的 hub 动态面板为轻量自渲染（覆盖看板主操作），未复刻旧静态页全部视觉细节；
    无 hub 时退回本地文件模式，此时不渲染 v1 静态产物。
 5. 通知中心（P2-4）已具备分类/优先级/批量已读/统一跳转/断线补齐；**已读状态仅存本机

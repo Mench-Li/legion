@@ -8,6 +8,17 @@
 // packages/shared/src/config.mjs（由 scripts/config/sync.mjs 与根引擎保持字节一致，CI 校验）。
 import { defineSchema } from '../../../packages/shared/src/config.mjs'
 
+/** WHITEBOARD_ROOMS 形如 `roomId:token:role,...`：摘要里保留房间与角色，隐去每房间 token。
+ *  否则启动摘要会把房间密钥写进日志（P3-2 单测抓到过这个泄漏）。 */
+function maskRoomTokens(value) {
+  if (!value) return ''
+  return String(value).split(',').map((entry) => {
+    const parts = entry.split(':')
+    if (parts.length >= 2 && parts[1]) parts[1] = '***'
+    return parts.join(':')
+  }).join(',')
+}
+
 export const SCHEMA = defineSchema({
   process: 'whiteboard',
   title: '协作白板（独立子项目，单实例多房间）',
@@ -24,7 +35,7 @@ export const SCHEMA = defineSchema({
     { key: 'auditDir', env: 'WB_AUDIT_DIR', type: 'path', default: 'apps/server/data', doc: '审计 JSONL 目录' },
     { key: 'inMemory', env: 'WB_IN_MEMORY', type: 'bool', default: false, doc: '强制房间走内存存储（不落盘；bench/CI 用）' },
     // ── 房间与权限 ──
-    { key: 'rooms', env: 'WHITEBOARD_ROOMS', type: 'string', default: '', doc: '房间声明 roomId:token:role,...' },
+    { key: 'rooms', env: 'WHITEBOARD_ROOMS', type: 'string', default: '', redact: maskRoomTokens, doc: '房间声明 roomId:token:role,...（摘要中 token 已隐去）' },
     { key: 'controlOpen', env: 'WB_CONTROL_OPEN', type: 'bool', default: false, doc: '控制面对非回环开放（默认仅回环或 Bearer）' },
     { key: 'roomIdleMs', env: 'WB_ROOM_IDLE_MS', type: 'int', default: 300000, min: 1, doc: '房间空闲关闭阈值（ms）' },
     { key: 'maxRooms', env: 'WB_MAX_ROOMS', type: 'int', default: 50, min: 1, doc: '同时打开的房间数上限' },

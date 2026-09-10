@@ -136,7 +136,28 @@ async function stageEnv() {
   lines.push('  platform=' + process.platform + ' ' + process.arch)
   const gitR = await exec('git', ['rev-parse', '--short', 'HEAD'])
   lines.push('  git head=' + (gitR.code === 0 ? gitR.out.trim() : '(git 不可用)'))
-  const ok = Number(process.versions.node.split('.')[0]) >= 22 && gitR.code === 0
+  let ok = Number(process.versions.node.split('.')[0]) >= 22 && gitR.code === 0
+
+  // P3-2 配置自检（统一配置系统）：三项都是「配置面是否仍然自洽」的机械检查——
+  //   ① scan --check   三进程的每个 env 读取点都必须在各自 schema 中声明
+  //   ② sync --check   白板副本与根配置引擎逐字节一致（防两份脱敏实现分叉）
+  //   ③ check 夹具     用 --isolated-env 消除宿主会话变量影响，good 夹具必须 PASS(strict)
+  // 注意：真实环境下的 `check.mjs`（不带夹具）会把当前 shell 的变量算进去，其结果依赖本机，
+  // 因此不作为门禁判据——门禁只认「引擎与 schema 自洽」这一确定性部分。
+  const cfgChecks = [
+    ['scan', [join('scripts', 'config', 'scan.mjs'), '--check']],
+    ['sync', [join('scripts', 'config', 'sync.mjs'), '--check']],
+    ['check(good fixture)', [join('scripts', 'config', 'check.mjs'), '--env-file=scripts/config/fixtures/good.env', '--isolated-env', '--strict', '--quiet']],
+  ]
+  for (const [label, args] of cfgChecks) {
+    const r = await exec(process.execPath, args, { cwd: ROOT })
+    const tail = (r.out.trim().split('\n').pop() || '').trim()
+    lines.push(`  config ${label}: ${r.code === 0 ? 'PASS' : 'FAIL'} ${tail}`)
+    if (r.code !== 0) {
+      ok = false
+      lines.push((r.err || r.out).trim().split('\n').slice(-6).map(l => '    ' + l).join('\n'))
+    }
+  }
   return { ok, detail: 'env 自检：\n' + lines.join('\n') }
 }
 
@@ -214,6 +235,7 @@ async function stageTest() {
     { label: 'skill-importer（技能导入契约）', files: ['workbench/scripts/skill-importer.test.mjs'], cwd: ROOT },
     { label: 'hub-board（v2 看板投影）', files: ['workbench/scripts/hub-board.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'artifact-policy（共享路径策略）', files: ['packages/shared/test/artifact-policy.test.mjs'], cwd: ROOT },
+    { label: 'config（P3-2 统一配置：引擎语义/跨进程规则/夹具端到端/默认值漂移）', files: ['scripts/config/config.test.mjs'], cwd: ROOT },
     { label: 'scrum（任务生命周期与产物）', files: ['scrum/artifact-detail.test.mjs', 'scrum/taskctl.ttl.test.mjs'], cwd: ROOT },
     { label: 'contracts（平台契约基线）', files: ['tests/contract/contracts.test.mjs'], cwd: ROOT },
     { label: 'v1v2-contract（P2-1 双服务契约对比 + P2-3 SSE 信封/续传）', files: ['tests/contract/v1v2-contract.test.mjs'], cwd: ROOT },

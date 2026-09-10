@@ -26,21 +26,42 @@ import {
 import { Metrics } from './metrics.mjs';
 import { AuditLog } from './audit.mjs';
 import { serializeDoc } from '../../../packages/shared/src/crdt.mjs';
+import { loadConfig } from '../../../packages/shared/src/config.mjs';
+import { SCHEMA as CONFIG_SCHEMA } from './config-schema.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const PORT = Number(process.env.PORT || 8080);
-const HOST = process.env.HOST || '127.0.0.1';
-const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'data', 'whiteboard.db');
-const TTL_MS = Number(process.env.TTL_MS || 10000);
+// P3-2 统一配置：核心项（host/port/token/DB 路径）经统一引擎解析（优先级 CLI > env > 默认，
+// 类型/范围校验，非法值报错退出）。其余 WB_* 限流键仍由 limits.mjs/rooms.mjs 自己读取
+//（已在 config-schema.mjs 中声明，scan --check 强制；默认值由单测做漂移比对）。
+const CFG = loadConfig(CONFIG_SCHEMA, { env: process.env, argv: process.argv.slice(2) });
+if (CFG.errors.length) {
+  for (const e of CFG.errors) console.error(`[config] whiteboard 配置错误：${e.message}`);
+  console.error('[config] 用 `node scripts/config/check.mjs --process=whiteboard` 查看完整配置面');
+  process.exit(1);
+}
+for (const w of CFG.warnings) console.error(`[config] whiteboard 配置告警：${w.message}`);
+
+const PORT = CFG.values.port;
+const HOST = CFG.values.host;
+// 语义与改造前一致：显式提供时按原样使用，未提供才回退到白板目录下的默认库路径。
+const DB_PATH = CFG.sources.dbPath === 'default'
+  ? path.join(__dirname, '..', 'data', 'whiteboard.db')
+  : String(CFG.values.dbPath);
+const TTL_MS = CFG.values.ttlMs;
 const WEB_ROOT = path.resolve(__dirname, '..', '..', 'web', 'public');
-const WHITEBOARD_TOKEN = process.env.WHITEBOARD_TOKEN || '';
+const WHITEBOARD_TOKEN = CFG.values.token;
 const ROOMS_DIR = process.env.WB_ROOMS_DIR || path.join(__dirname, '..', 'data', 'rooms');
 const AUDIT_DIR = process.env.WB_AUDIT_DIR || path.join(__dirname, '..', 'data');
 // 兼容既有部署：DB_PATH=':memory:'（bench/CI 冒烟）→ 房间也走内存，不落盘
 const IN_MEMORY_ROOMS = DB_PATH === ':memory:' || process.env.WB_IN_MEMORY === '1';
 // 指标与控制面端点默认仅回环可访问（暴露治理信息需要显式开启）
 const CONTROL_OPEN = process.env.WB_CONTROL_OPEN === '1';
+
+/** 启动时打印的脱敏配置摘要（token 只显示是否设置；路径显示实际生效值）。 */
+export function configSummaryLine() {
+  return `${CFG.summary} roomsDir=${ROOMS_DIR} auditDir=${AUDIT_DIR}`;
+}
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -421,6 +442,7 @@ export async function createApp(options = {}) {
 }
 
 async function main() {
+  console.log(configSummaryLine()); // P3-2：启动即打印脱敏后的最终配置
   const app = await createApp();
   await app.listen();
 

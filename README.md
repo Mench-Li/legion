@@ -392,10 +392,17 @@ node scripts/ci/run-ci.mjs
 
 ### 9.2 对话相关环境变量
 
+> **完整配置面（含三个活跃进程的全部字段、优先级与校验命令）见 [docs/CONFIG.md](docs/CONFIG.md)。**
+> 下表只列对话相关项。P3-2 统一配置时核对了本表，其中两行原先不准确，已按下表更正：
+> `CHAT_DAEMON_ONLINE_MS` 实际是 **team-hub 中的代码常量**（`server.mjs` 导出，**不读 env**，改名不会生效）；
+> `CHAT_CTX_BUDGET_CHARS` 由 **守护插件 `plugins/`** 读取（team-hub 不读），且同一变量在
+> `spaceDigest.ts` 与 `chatResponder.ts` 中默认值不同（4000 / 8000，已在 `docs/review/T-124-REVIEW.md` 登记）。
+
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
-| `CHAT_REPLY_TIMEOUT_MS` | `120000` | AI 回复超时 |
-| `CHAT_DAEMON_ONLINE_MS` | `60000` | 守护在线判断窗口 |
+| `CHAT_REPLY_TIMEOUT_MS` | `120000` | AI 回复超时（team-hub，env 可配） |
+| `CHAT_DAEMON_ONLINE_MS` | `60000` | 守护在线判断窗口（team-hub **代码常量**，env 不可配） |
+| `CHAT_CTX_BUDGET_CHARS` | `8000`（摘要子预算 `4000`） | 空间摘要与附件总字符预算（读 env 的是**插件**，非 team-hub） |
 | `CHAT_ATTACH_MAX_BYTES` | `10 MB` | 单附件上限 |
 | `CHAT_ATTACH_MAX_PER_MSG` | `3` | 单消息附件数量 |
 | `CHAT_CTX_BUDGET_CHARS` | `8000` | 空间摘要与附件总字符预算 |
@@ -454,6 +461,7 @@ legion/
 | [workbench/README.md](workbench/README.md) | 指挥台组件、交互和数据流细目 |
 | [docs/ORCHESTRATION-V3.md](docs/ORCHESTRATION-V3.md) | 切片流水线、机器闸门、并行隔离和目标级文档设计 |
 | [docs/DEPLOY.md](docs/DEPLOY.md) | 仓库级部署、验证、发布、回滚与已知限制 |
+| [docs/CONFIG.md](docs/CONFIG.md) | 统一配置参考：优先级（CLI > env > 默认）、三进程字段清单、校验命令、脱敏规则 |
 | [docs/TEST_REPORT.md](docs/TEST_REPORT.md) | 根文档槽位对应目标的测试报告；新目标优先看自己的目录 |
 | `docs/<goalId>/` | 某一目标的需求、研究、拆解、用例、测试和部署证据链 |
 | [scrum/README.md](scrum/README.md) | v1 任务引擎、独立看板、taskctl 和迁移兼容说明 |

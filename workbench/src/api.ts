@@ -556,6 +556,25 @@ export function revokeSkill(id: string, targets: string[]): Promise<unknown> {
   return hubPost('/api/skills/revoke', { id, targets })
 }
 
+export interface PermissionRequest {
+  requestId: string
+  scope: string
+  actor: string
+  action: string
+  target: string
+  status: string
+  operation?: Record<string, unknown>
+}
+
+export function fetchPermissionInbox(scope?: string | null): Promise<PermissionRequest[]> {
+  const qs = scope ? `?scope=${encodeURIComponent(scope)}` : ''
+  return hubGet(`/api/permissions/inbox${qs}`).then(async res => (await readJson<{ requests: PermissionRequest[] }>(res)).requests)
+}
+
+export function decidePermission(requestId: string, decision: 'approve' | 'deny', reason?: string): Promise<unknown> {
+  return hubPost('/api/permissions/decide', { requestId, decision, reason })
+}
+
 export interface TransitionInput {
   id: string
   to: CardStatus

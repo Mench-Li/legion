@@ -42,8 +42,52 @@ function walk(dir, out = []) {
   return out
 }
 
+/**
+ * 去掉注释，保留字符串与换行结构 —— 只用于「找读取点」，不改动原始文本。
+ *
+ * 为什么必须做：散文注释里写 `process.env.X`（举例/说明历史写法）会被下面的正则当成真实读取点，
+ * 于是 `scan --check` 报出一个根本不存在的 env 键（P3-4 实测：`plugins/src/config.ts` 的注释里
+ * 那句 `Number(process.env.X || 默认值)` 让主检出多出未声明键 `X`）。
+ *
+ * 为什么必须按字符状态机而不是 `text.replace(/\/\/.*$/gm,'')`：仓库里到处是 `'http://127.0.0.1:8787'`
+ * 这类字符串字面量，粗暴替换会把**同一行后面的真实读取一起吃掉**（假阴性比假阳性更危险）。
+ * 字符串内的转义与模板字面量也一并按状态处理。
+ */
+export function stripComments(text) {
+  let out = ''
+  let state = 'code'
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text[i]
+    const n = text[i + 1]
+    if (state === 'code') {
+      if (c === '/' && n === '/') { state = 'line'; i += 1; continue }
+      if (c === '/' && n === '*') { state = 'block'; i += 1; continue }
+      if (c === "'") state = 'single'
+      else if (c === '"') state = 'double'
+      else if (c === '`') state = 'template'
+      out += c
+      continue
+    }
+    if (state === 'line') {
+      if (c === '\n') { state = 'code'; out += c }
+      continue
+    }
+    if (state === 'block') {
+      if (c === '*' && n === '/') { state = 'code'; i += 1; continue }
+      if (c === '\n') out += c
+      continue
+    }
+    // 字符串字面量内部：原样保留（含 `//`），转义字符不参与收尾判断
+    if (c === '\\') { out += c + (n ?? ''); i += 1; continue }
+    if ((state === 'single' && c === "'") || (state === 'double' && c === '"') || (state === 'template' && c === '`')) state = 'code'
+    out += c
+  }
+  return out
+}
+
 /** 从源码文本里抽出 env 键读取点；动态访问（process.env[expr]）单列，必须显式登记。 */
-export function extractEnvReads(text) {
+export function extractEnvReads(source) {
+  const text = stripComments(source)
   const literal = new Set()
   const suspicious = new Set()
   const dynamic = []
@@ -133,7 +177,15 @@ export function scanProcess(name, { includeTests = false, onlyTracked = true } =
     }
     for (const d of dyn) dynamic.push({ file: rel, expr: d })
   }
-  return { name, label: spec.label, filesScanned: scanned, reads, dynamic, suspicious, mode: useGit ? 'git-tracked' : 'walk（git 不可用：结果已包含未跟踪文件，仅作调试参考）' }
+  // 未跟踪的代码文件**不纳入配置面**（理由见 trackedFiles 的说明），但这会带来一个陷阱：
+  // 在「文件已写好、尚未 git add」的工作树上，`scan --check` 会因为压根没扫到这些文件而**假绿**。
+  // 实测：P3-4 的 plugins/src/config.ts 在提交前未被扫描，提交后同一份代码立刻多出一个未声明键。
+  // 这里把「有几个文件没被扫」如实报出来，让日志读者看得见这个盲区（不判失败：未跟踪文件本就不算配置面）。
+  const untracked = useGit
+    ? files.map((f) => relative(ROOT, f).split(sep).join('/'))
+      .filter((rel) => !tracked.has(rel) && (includeTests || !/\.test\.|\.spec\.|smoke/.test(rel)))
+    : []
+  return { name, label: spec.label, filesScanned: scanned, untracked, reads, dynamic, suspicious, mode: useGit ? 'git-tracked' : 'walk（git 不可用：结果已包含未跟踪文件，仅作调试参考）' }
 }
 
 /** 未声明读取点（对照 schema 的 env 名单） */
@@ -194,6 +246,9 @@ async function main() {
     for (const r of results) {
       console.log(`\n=== ${r.name}：${r.label} ===`)
       console.log(`  扫描模式 ${r.mode}；扫描文件 ${r.filesScanned} 个；直接读取 env 键 ${r.reads.length} 个；疑似 env 字面量 ${r.literals.length} 个${r.dynamic.length ? `；动态访问 ${r.dynamic.length} 处` : ''}`)
+      if (r.untracked?.length) {
+        console.log(`    ⚠ 另有 ${r.untracked.length} 个未跟踪文件未纳入扫描（本地状态，提交后即纳入）：${r.untracked.slice(0, 3).join(', ')}${r.untracked.length > 3 ? ' …' : ''}`)
+      }
       for (const read of r.reads) console.log(`    ${read.key.padEnd(34)} ×${String(read.count).padEnd(3)} ${read.files[0]}`)
       if (r.literals.length) {
         console.log(`    —— 疑似 env 字面量（需声明或列入 nonEnvLiterals）——`)

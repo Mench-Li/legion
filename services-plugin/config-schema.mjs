@@ -32,6 +32,10 @@ export const SCHEMA = defineSchema({
       doc: '注入给 workbench 子进程的 hub 上游地址；优先级：composition 的 config.hubUpstream > 本环境变量 > 默认',
     },
   ],
+  // 本文件自己会被扫描（dirs 含整个 services-plugin/）：injects 里的 `TEAM_HUB_PORT` /
+  // `DSH_WORKBENCH_PORT` 是**注入目标的变量名**，不是本进程的读取点，故显式排除，
+  // 否则 `scan --check` 会要求把它们当成读取点登记（P3-4 实测：这正是「未处理字面量」的两项）。
+  nonEnvLiterals: ['TEAM_HUB_PORT', 'DSH_WORKBENCH_PORT'],
   injects: [
     {
       target: 'team-hub', env: 'TEAM_HUB_PORT', via: 'env', value: String(DEFAULT_TEAM_HUB_PORT), from: 'teamHubPort',

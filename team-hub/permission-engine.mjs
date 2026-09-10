@@ -25,6 +25,7 @@ export function matchRule(operationInput, rules = [], now = Date.now()) {
     .filter(rule => MODES.has(rule.mode))
     .filter(rule => !rule.expiresAt || Number(rule.expiresAt) > now)
     .filter(rule => ['scope', 'actor', 'action', 'target'].every(key => !rule[key] || String(rule[key]) === operation[key]))
+    .filter(rule => !rule.taskId || rule.taskId === operation.taskId)
     .sort((a, b) => specificity(b) - specificity(a) || Number(b.updatedAt || b.createdAt || 0) - Number(a.updatedAt || a.createdAt || 0))[0] || null
 }
 

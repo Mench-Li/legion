@@ -61,6 +61,7 @@ import { createHash } from 'node:crypto'
 import { dirname, extname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { standardsFor } from './stage-standards.mjs'
+import { evaluatePermission, normalizeOperation } from './permission-engine.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const DB_FILE = process.env.TEAM_HUB_DB || join(ROOT, 'team-hub', 'team.db')
@@ -298,6 +299,42 @@ db.exec(`
     detail TEXT
   )
 `)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS permission_rules (
+    id TEXT PRIMARY KEY,
+    scope TEXT,
+    actor TEXT,
+    action TEXT,
+    target TEXT,
+    mode TEXT NOT NULL,
+    taskId TEXT,
+    expiresAt INTEGER,
+    createdBy TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  )
+`)
+db.exec('CREATE INDEX IF NOT EXISTS idx_permission_rules_match ON permission_rules (scope, action, target)')
+db.exec(`
+  CREATE TABLE IF NOT EXISTS permission_requests (
+    requestId TEXT PRIMARY KEY,
+    scope TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    action TEXT NOT NULL,
+    target TEXT NOT NULL,
+    taskId TEXT,
+    operation TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    status TEXT NOT NULL,
+    decidedBy TEXT,
+    reason TEXT,
+    createdAt TEXT NOT NULL,
+    expiresAt INTEGER,
+    decidedAt TEXT,
+    consumedAt TEXT
+  )
+`)
+db.exec('CREATE INDEX IF NOT EXISTS idx_permission_requests_scope_status ON permission_requests (scope, status, createdAt)')
 db.exec(`
   CREATE TABLE IF NOT EXISTS skills (
     id TEXT PRIMARY KEY,
@@ -815,6 +852,88 @@ function audit(member, scope, action, taskId, detail, goalId = null) {
     broadcastAudit(auditEvent({ seq, ts: now(), member, scope, action, taskId, goalId, detail }))
     return seq
   })
+}
+
+function permissionRuleView(row) {
+  if (!row) return null
+  return { ...row }
+}
+
+export function upsertPermissionRule(input = {}) {
+  const mode = String(input.mode ?? '')
+  if (!['deny', 'ask', 'allow-once', 'allow-for-task', 'allow-by-policy'].includes(mode)) throw new Error('permission mode 非法')
+  const id = String(input.id ?? '').trim()
+  if (!id) throw new Error('缺少规则 id')
+  const scope = input.scope == null ? null : String(input.scope).trim() || null
+  const actor = input.actor == null ? null : String(input.actor).trim() || null
+  const action = input.action == null ? null : String(input.action).trim() || null
+  const target = input.target == null ? null : String(input.target).trim() || null
+  const taskId = input.taskId == null ? null : String(input.taskId).trim() || null
+  const stamp = now()
+  withTx(() => db.prepare(`INSERT INTO permission_rules (id,scope,actor,action,target,mode,taskId,expiresAt,createdBy,createdAt,updatedAt)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET scope=excluded.scope,actor=excluded.actor,action=excluded.action,target=excluded.target,mode=excluded.mode,taskId=excluded.taskId,expiresAt=excluded.expiresAt,updatedAt=excluded.updatedAt`)
+    .run(id, scope, actor, action, target, mode, taskId, input.expiresAt == null ? null : Number(input.expiresAt), String(input.by || 'general'), stamp, stamp))
+  audit(String(input.by || 'general'), scope || 'global', 'permission:rule', id, { mode, scope, actor, action, target, taskId })
+  return permissionRuleView(db.prepare('SELECT * FROM permission_rules WHERE id=?').get(id))
+}
+
+export function deletePermissionRule(id, by = 'general') {
+  const key = String(id ?? '').trim()
+  if (!key) throw new Error('缺少规则 id')
+  const result = withTx(() => db.prepare('DELETE FROM permission_rules WHERE id=?').run(key))
+  if (!result.changes) throw new Error('规则不存在')
+  audit(by, 'global', 'permission:rule-delete', key, {})
+  return { id: key, deleted: true }
+}
+
+function permissionRows() {
+  return db.prepare('SELECT * FROM permission_rules').all().map(permissionRuleView)
+}
+
+export function checkPermission(input = {}) {
+  const operation = normalizeOperation(input)
+  const requestId = input.permissionRequestId ? String(input.permissionRequestId) : null
+  if (requestId) {
+    const row = db.prepare('SELECT * FROM permission_requests WHERE requestId=?').get(requestId)
+    if (row && row.status === 'approved') {
+      if (JSON.stringify(JSON.parse(row.operation)) !== JSON.stringify(operation)) throw new Error('permission operation mismatch')
+      const consumed = withTx(() => db.prepare("UPDATE permission_requests SET status='consumed', consumedAt=? WHERE requestId=? AND status='approved'").run(now(), requestId))
+      if (consumed.changes === 1) { audit(operation.actor, operation.scope, 'permission:consume', requestId, { action: operation.action, target: operation.target }); return { allowed: true, decision: 'allow', status: 'consumed', requestId, operation } }
+    }
+  }
+  const result = evaluatePermission(operation, permissionRows(), { now: Date.now() })
+  if (result.status !== 'pending') return result
+  const existing = db.prepare("SELECT * FROM permission_requests WHERE scope=? AND actor=? AND action=? AND target=? AND status='pending'").get(operation.scope, operation.actor, operation.action, operation.target)
+  if (existing) return { ...result, requestId: existing.requestId }
+  const id = `perm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  withTx(() => db.prepare(`INSERT INTO permission_requests (requestId,scope,actor,action,target,taskId,operation,mode,status,createdAt,expiresAt) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(id, operation.scope, operation.actor, operation.action, operation.target, operation.taskId, JSON.stringify(operation), result.mode, 'pending', now(), Date.now() + 15 * 60 * 1000))
+  audit(operation.actor, operation.scope, 'permission:request', id, { action: operation.action, target: operation.target, mode: result.mode })
+  return { ...result, requestId: id }
+}
+
+export function listPermissionInbox(scope = null) {
+  const rows = scope ? db.prepare('SELECT * FROM permission_requests WHERE scope=? ORDER BY createdAt DESC').all(scope) : db.prepare('SELECT * FROM permission_requests ORDER BY createdAt DESC').all()
+  const current = Date.now()
+  return rows.map(row => ({ ...row, operation: JSON.parse(row.operation), expired: row.status === 'pending' && Number(row.expiresAt) <= current }))
+}
+
+export function decidePermission({ requestId, decision, by = 'general', reason = '' } = {}) {
+  if (by !== 'general') throw new Error('仅允许 general 决定权限审批')
+  const id = String(requestId ?? '').trim()
+  if (!id || !['approve', 'deny'].includes(decision)) throw new Error('审批参数非法')
+  const row = db.prepare('SELECT * FROM permission_requests WHERE requestId=?').get(id)
+  if (!row) throw new Error('审批请求不存在')
+  if (row.status !== 'pending') return { ...row, operation: JSON.parse(row.operation) }
+  if (Number(row.expiresAt) <= Date.now()) {
+    db.prepare("UPDATE permission_requests SET status='expired' WHERE requestId=? AND status='pending'").run(id)
+    return { ...row, status: 'expired', operation: JSON.parse(row.operation) }
+  }
+  const status = decision === 'approve' ? 'approved' : 'denied'
+  withTx(() => db.prepare('UPDATE permission_requests SET status=?, decidedBy=?, reason=?, decidedAt=? WHERE requestId=? AND status=\'pending\'').run(status, by, String(reason), now(), id))
+  const updated = db.prepare('SELECT * FROM permission_requests WHERE requestId=?').get(id)
+  audit(by, row.scope, `permission:${status}`, id, { action: row.action, target: row.target, reason: String(reason) })
+  return { ...updated, operation: JSON.parse(updated.operation) }
 }
 
 function touchMember(member, scope, kind, modelText) {
@@ -2882,6 +3001,33 @@ async function handle(req, res, stripPrefix) {
     }
     if (req.method === 'POST' && path === '/api/rules') {
       await handleWrite(req, res, (body, by) => saveRule({ scope: body.scope, content: body.content, by }))
+      return
+    }
+
+    // ── 权限治理（F-02）：策略、检查与审批箱 ──
+    if (req.method === 'POST' && path === '/api/permissions/check') {
+      await handleWrite(req, res, (body, by) => checkPermission({ ...body, actor: body.actor ?? by }))
+      return
+    }
+    if (req.method === 'GET' && path === '/api/permissions/inbox') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      json(res, 200, { ok: true, requests: listPermissionInbox(url.searchParams.get('scope') || null) })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/permissions/decide') {
+      await handleWrite(req, res, (body, by) => decidePermission({ ...body, by }))
+      return
+    }
+    if (req.method === 'POST' && path === '/api/permissions/rules') {
+      await handleWrite(req, res, (body, by) => upsertPermissionRule({ ...body, by }))
+      return
+    }
+    if (req.method === 'DELETE' && path.startsWith('/api/permissions/rules/')) {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const body = await readBody(req)
+      const by = requireMember(body)
+      try { json(res, 200, { ok: true, rule: deletePermissionRule(path.slice('/api/permissions/rules/'.length), by) }) }
+      catch (e) { json(res, 400, { error: e instanceof Error ? e.message : String(e) }) }
       return
     }
 

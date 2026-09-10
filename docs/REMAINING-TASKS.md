@@ -16,7 +16,7 @@
 
 ### P1-1 team-hub 两套服务实现合并
 
-状态：**第 1 步完成 + 第 2 步代码就绪；现场切换进行中（首次重启后修正部署链 junction，待二次重启验收）** —— 决策 `docs/P1-1-DECISION.md`；第 1 步留痕 `docs/P1-1-evidence/verify-evidence.md`；第 2 步 runbook `docs/P1-1-step2-runbook.md`（§0b 部署链前置）
+状态：**已完成**（第 1 步代码收敛 + 第 2 步 board hub v2 化 / v1 退役 / 现场切换验收 **13/13 全 PASS**） —— 决策 `docs/P1-1-DECISION.md`；evidence `docs/P1-1-evidence/verify-evidence.md`（第 1 步）、`docs/P1-1-evidence/step2-code-evidence.md`（第 2 步，含四轮现场根因表）；runbook `docs/P1-1-step2-runbook.md`（§0b 部署链 junction 检查）
 
 问题：
 
@@ -46,9 +46,9 @@
 - ✅ 独立服务和 DSH 宿主对同一请求返回相同状态码、字段和错误语义（parity 对拍）。
 - ✅ v2 API 在宿主模式可用（team-hub 全组 138/138）。
 - ✅ 不再存在第二套任务状态机和鉴权实现。
-- ✅（第 2 步代码）看板 hub 面/面板/SSE 全走 v2，reject/promote 显式 501，v1 托管与文件库退役就绪 —— **待现场**：重启 3080 宿主 + 跑归档脚本 + `p11-step2-verify.mjs` 全 PASS（runbook 第 1-3 步）。
+- ✅（第 2 步现场，2026-09-09）宿主 `/team-hub` = v2 外壳（config 含 `db=team-hub/team.db`）；board 面板 = v2 动态页、`/api/board` = v2 裸数组且与 8787 直连**同池**；`:4820` 无监听 + `scrum/tasks.json` 已归档；写冒烟 create 200；reject → 501。`p11-step2-verify.mjs` **13/13 PASS**，SSE 桥端到端实测 PASS。
 
-风险：现场切换由用户执行（重启会中断本会话）；回滚预案见 runbook §4。现场完成后本条目可标记完全完成。
+风险：~~现场切换由用户执行~~ → 已完成（四轮重启逐次暴露并修掉：陈旧副本非 junction、detectHub 单次探测竞态、audit.seq 双进程撞号）。回滚预案见 runbook §4。**遗留提醒**：若 profile 重装使 `@dsh-external` 副本回归，需重查 junction（runbook §0b）。
 
 ### P1-2 board-plugin 宿主 HTTP 契约测试
 

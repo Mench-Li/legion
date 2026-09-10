@@ -155,9 +155,20 @@ v1-retire = 授权直接操作生产退役；live-exec = 交付 runbook + probe�
 
 ### 门禁（第 2 步代码）
 
-- board-plugin http-contract 37/37；P1-3 真实宿主注入 6/6（含 hub 模式同宿主 v2 全链路）；run-ci test 全量。
+- board-plugin http-contract 37/37；P1-3 真实宿主注入 6/6（含 hub 模式同宿主 v2 全链路）；team-hub 137/137；run-ci test 全量 25 套件 PASS。
 
-### 现场执行（用户，runbook §1-3）
+### 现场执行结果（用户执行，2026-09-09 完成）
 
-重启 3080 宿主 → `node scripts/ci/archive-v1-scrum.mjs` → `node scripts/live/p11-step2-verify.mjs`。
-完成后本条目闭环，REMAINING-TASKS P1-1 标完全完成。
+经 4 次宿主重启逐次收敛（每轮均暴露真实问题，详见 `docs/P1-1-evidence/step2-code-evidence.md` §3）：
+
+1. **部署链**：生产 `@dsh-external/dsh-team-hub|dsh-scrum-board` 原为陈旧复制副本（非 junction）→ 宿主
+   从未加载 legion 新 lib。已备份改名 + 重建 junction（`cf09537`）。
+2. **探测竞态**：detectHub 单次探测命中宿主 boot 序列中 `/team-hub` 未注册的 404 即放弃 → 永久本地模式。
+   改重试轮询 ≤8×750ms（`cac163b`）。
+3. **双进程写同库**：`audit.seq` 用进程内内存计数器 → 8787 独立进程与 3080 宿主 v2 外壳撞 PK
+   （写冒烟 400 实证；修复前双进程冒烟 24 并发 12 失败 → 修复后 30/30）。改事务内 MAX+1（`d5372bd`）。
+
+**最终验收：`node scripts/live/p11-step2-verify.mjs` → 13/13 PASS**（v2 外壳 config、v2 动态面板、
+v2 同池数据、4820 退役、v1 归档、写冒烟 create 200、reject 501）+ SSE 桥端到端实测 PASS
+（宿主 v2 事件 → hub 板实时泵帧含新任务 id）。
+生产看板与 worker/workbench 现共用同一 v2 数据池 `team-hub/team.db`，双池不一致问题消除。**P1-1 闭环。**

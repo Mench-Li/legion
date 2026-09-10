@@ -46,26 +46,46 @@ run-ci test 全量 25 套件 PASS（v1v2-contract 14/14 证明 serve.mjs import 
   生产预检（4820 监听 / tasks.json 近期写）在重启前会拦下误归档。
 - `scripts/live/p11-step2-verify.mjs`：probe 项覆盖 v2 config/面板/同池/4820/tasks 归档/写冒烟/501。
 
-## 3. 诚实边界
+## 3. 现场执行记录与验收（2026-09-09，已完成）
 
-0. **现场执行记录（2026-09-09）**：用户已重启宿主 + 归档 v1 文件库完成
-   （5 文件 → `scrum/archive/v1-2026-09-09T10-48-19-497Z/`，4820 无监听生效）。
-   但 probe 失败暴露部署链问题：`@dsh-external/dsh-team-hub|dsh-scrum-board` 在生产
-   node_modules 是 **陈旧复制副本（非 junction）**——宿主加载旧 lib（/team-hub config 返回
-   旧形状 `{auth,members,host,port}` 无 db；board 本地模式跑 render.mjs）。
-   已修正：副本改名备份（`.v1copy-20260909-185030`）+ 重建 junction → legion 源码目录
-   （team-hub lib 17:56 v2 外壳、board lib 18:42 hub 桥）。probe 加数组防御。
-   **待二次重启宿主后正式验收**（当前 PID 5708 仍为旧代码进程）。
+现场共经历 4 次宿主重启，逐次暴露并修掉真实问题（全部实证留痕）：
 
-1. 现场切换（二次重启 → board 自动指 v2 → probe 全 PASS）**尚未完成**——需用户操作（重启中断本会话）。
-   代码与部署链就绪但"生产行为已切换"这一事实待二次重启后确认。
+| 轮次 | 现象 | 根因 | 处理 |
+|---|---|---|---|
+| 1 | probe 全挂；`/team-hub` config 旧形状 `{auth,members,host,port}`；board 本地模式 | 生产 `@dsh-external/dsh-team-hub\|dsh-scrum-board` 是 **2026-08-26/09-01 陈旧复制副本（非 junction）**，宿主从未加载 legion 新 lib | 副本改名备份（`.v1copy-20260909-185030`）+ 重建 junction → legion 源码（`cf09537`） |
+| 2 | `/team-hub` v2 外壳 live（config 含 db=team.db ✓），但 `/scrum-board` 仍本地模式跑 render.mjs | detectHub **单次探测**命中宿主 boot 序列中 `/team-hub` 路由未注册的 404 → 一次即放弃 → 永久本地模式（生产长期显示 v1 池的根因之一） | 探测改重试轮询 ≤8×750ms + effect 清理（`cac163b`） |
+| 3 | board 面板/数据全 v2 ✓（12/13 PASS）；写冒烟 400 `UNIQUE constraint failed: audit.seq` | v2 `audit()` 用**进程内内存计数器 nextSeq**；8787 独立进程与 3080 宿主 v2 外壳**双进程写同一 team.db**，各自从同起点递增撞 PK | `audit()` 改写事务内读库 MAX+1 分配（`d5372bd`）；双进程冒烟：修复前 24 并发 12 失败 → 修复后 30/30 全过 |
+| 4 | — | — | **probe 13/13 全 PASS** |
+
+### 最终现场验收（第 4 轮，宿主 PID 14912 / 8787 PID 11448）
+
+`node scripts/live/p11-step2-verify.mjs` → **PASS 13 / FAIL 0**：
+
+- ① `/team-hub/api/config` 200 且 v2 形状（`db=D:\project\DSH\legion\team-hub\team.db`，auth 与配置一致）
+- ② `/scrum-board/` 200 = **v2 动态面板**（"Scrum 看板（v2）"+ EventSource）
+- ③ `/scrum-board/api/board` 200 = v2 裸任务数组且非空（software 活池）
+- ④ 看板数据与 8787 直连**同池**（任务 id 集合一致）——双池问题消除
+- ⑤ `:4820` 无监听（v1 serve.mjs 退役）+ `scrum/tasks.json` 已归档（`scrum/archive/v1-2026-09-09T10-48-19-497Z/`，5 文件）
+- ⑥ 写冒烟：宿主 v2 create 200（T-135 → canceled 清理）
+- ⑦ hub 模式 reject → 501 降级指引
+
+补充端到端实测（`scratch/sse-bridge-live.mjs`，仅现场留痕不入库）：
+连生产 `/scrum-board/api/board/events` → 经宿主 v2 create T-136 + transition → 板 SSE **泵帧 50 条且含新任务 id**（→ canceled 清理）→ 事件桥端到端 PASS。
+
+## 4. 诚实边界
+
+1. 现场切换**已完成并全项验收通过**（上文 13/13 + SSE 桥）。残余：`scratch/` 两个现场脚本（`sse-bridge-live.mjs`、`dual-write-smoke.mjs` 的 scratch 副本）为临时留痕；正式回归工具已入库 `scripts/ci/dual-write-smoke.mjs`。
 2. hub 动态面板是轻量自渲染（无框架），覆盖看板主操作（迁移/评论/实时刷新）；未复刻旧 kanban.html 全部
    视觉细节（本地模式静态页不受影响）。console 总览页 v2 化为基础版（任务/守护/活动）。
 3. 归档脚本默认不动 `daemon.json`/`roles.json`（守护状态与流水线配置非 v1 任务数据，继续使用）。
-4. v2 库 `team-hub/team.db` 全程未读写（隔离 fixture/测试库验证；生产数据只读不迁移）。
+4. v2 库 `team-hub/team.db` 除现场写冒烟创建的两个探测任务（T-135/T-136，均置 canceled）外未做迁移或改动。
+5. 部署链提醒（runbook §0b）：若日后 pnpm install / profile 重建让 `@dsh-external` 副本回归，
+   需重新检查 junction——否则宿主会再次加载陈旧代码。
 
-## 4. 结论
+## 5. 结论
 
-第 2 步代码验收达成：看板 hub 面/面板/SSE 全走 v2、reject/promote 显式 501、v1 托管退役与归档工具就绪、
-门禁 25 套件全 PASS（board-plugin 37/37、P1-3 6/6、plugins 135/135、v1v2-contract 14/14、parity 1/1）。
-现场执行（runbook §1-3）后本步闭环。
+P1-1 第 2 步**闭环**：board hub 数据面/面板/SSE 全走 v2、reject/promote 显式 501、
+v1 托管（:4820）退役、v1 文件库归档、双进程 audit.seq 竞态根治；
+离线门禁 25 套件全 PASS（board-plugin 37/37、P1-3 6/6、team-hub 137/137、plugins 135/135、
+v1v2-contract 14/14、parity 1/1），现场 probe **13/13 PASS** + SSE 桥端到端实测 PASS。
+生产看板与 worker/workbench 现共用同一 v2 数据池（team-hub/team.db）。

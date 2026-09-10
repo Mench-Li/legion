@@ -142,8 +142,9 @@ async function main() {
         const mod = await import(pathToFileURL(schemaPath).href)
         declaredEnv = mod.SCHEMA.envNames()
         undeclared = undeclaredReads(scan, declaredEnv)
-        // 疑似 env 字面量：必须「是一个已声明 env 键名」或「显式列入 nonEnvLiterals」或「是本 schema 声明的 env 前缀」
-        const known = new Set([...declaredEnv, ...(mod.SCHEMA.nonEnvLiterals ?? []), ...(mod.SCHEMA.prefixes ?? [])])
+        // 疑似 env 字面量：必须「是一个已声明 env 键名」或「显式列入 nonEnvLiterals」或「属声明前缀」或「登记为 foreignEnv」
+        const foreign = (mod.SCHEMA.foreignEnv ?? []).map((x) => (typeof x === 'string' ? x : x.name))
+        const known = new Set([...declaredEnv, ...(mod.SCHEMA.nonEnvLiterals ?? []), ...(mod.SCHEMA.prefixes ?? []), ...foreign])
         undeclaredLiterals = [...scan.suspicious.keys()].filter((k) => !known.has(k)).sort()
         violations += undeclared.length + undeclaredLiterals.length
       }

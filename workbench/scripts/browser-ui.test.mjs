@@ -121,6 +121,15 @@ describe('P2-8② 抽取质量徽标', () => {
     assert.ok(!labels.some(l => l.includes('截断')), '未截断不显示截断徽标')
   })
 
+  test('短内容（低于阈值但用了语义容器）单独提示，不与截断混淆', () => {
+    const badges = qualityBadges({ strategy: 'article', score: 60, chars: 27, headings: 0, paragraphs: 1, listItems: 0, linkDensity: 0, candidates: 1, droppedBlocks: 2, markdown: false, truncated: false, shortContent: true })
+    const short = badges.find(b => b.label === '正文较短')
+    assert.ok(short, '短内容应有独立徽标：' + badges.map(b => b.label).join('|'))
+    assert.equal(short?.tone, 'muted', '短内容不是错误，用中性色')
+    assert.match(short?.title ?? '', /article\/main/)
+    assert.ok(!badges.some(b => b.label === '正文已截断'), '短内容不显示截断')
+  })
+
   test('回退策略与高链接密度给出警告色（明示「这次抽得可能不好」）', () => {
     const badges = qualityBadges({ strategy: 'body-fallback', score: 0, chars: 120, headings: 0, paragraphs: 1, listItems: 0, linkDensity: 0.8, candidates: 0, droppedBlocks: 0, markdown: false, truncated: true })
     const fb = badges.find(b => b.label.includes('整页回退'))

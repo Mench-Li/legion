@@ -529,6 +529,8 @@ export interface WebExtractQuality {
   droppedBlocks: number
   markdown: boolean
   truncated: boolean
+  /** P2-8②：正文短于候选阈值、改用页面声明的正文容器（article/main）抽取 */
+  shortContent?: boolean
 }
 
 /** P2-8① 抓取历史条目（team-hub web_fetch_history，按空间）。 */

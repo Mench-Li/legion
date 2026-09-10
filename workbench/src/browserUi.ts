@@ -101,6 +101,7 @@ export function qualityBadges(q?: WebExtractQuality): Badge[] {
   if (q.listItems > 0) out.push({ label: `列表 ${q.listItems}`, tone: 'muted', title: '保留的列表项数' })
   if (q.droppedBlocks > 0) out.push({ label: `剔除样板 ${q.droppedBlocks}`, tone: 'muted', title: '被剔除的导航/页脚/表单等样板块数量' })
   if (q.linkDensity >= 0.5) out.push({ label: '链接密度偏高', tone: 'warn', title: '链接文本占比 ' + Math.round(q.linkDensity * 100) + '%：该页可能是目录/列表页，正文可能不完整' })
+  if (q.shortContent) out.push({ label: '正文较短', tone: 'muted', title: '正文短于服务端候选阈值，已按页面声明的正文容器（article/main）抽取' })
   if (q.truncated) out.push({ label: '正文已截断', tone: 'warn', title: '正文超过服务端上限已截断' })
   if (q.markdown) out.push({ label: '含结构化标记', tone: 'ok', title: '正文含标题/列表/代码块等 Markdown 结构信号' })
   return out

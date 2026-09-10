@@ -1270,6 +1270,12 @@ function stripTags(s) {
 //   4) 返回质量元数据（选用策略/得分/字数/标题数/剔除块数/候选数/链接密度），供界面明示抽取质量。
 const BOILERPLATE_RE = /(?:^|[\s_-])(nav|navbar|menu|sidebar|side-bar|footer|header|banner|cookie|consent|breadcrumb|advert|ads?|sponsor|share|social|comment|related|promo|popup|modal|drawer|toolbar|pagination)(?:$|[\s_-])/i
 
+/** P2-8② 抽取参数（阈值集中在一处，便于说明与调整）。 */
+export const WEB_EXTRACT = Object.freeze({
+  // 低于此长度的候选块不参与「密度」评选（按钮行、面包屑残留）；但显式语义容器（article/main）不受此限
+  MIN_CANDIDATE_CHARS: 40,
+})
+
 /** 结构化渲染：把选中块的 HTML 转成可读文本（保留标题/列表/代码/引用/表格等结构信号）。 */
 function renderStructured(seg) {
   let s = String(seg ?? '')
@@ -1372,17 +1378,25 @@ export function extractReadable(html, finalUrl) {
   const title = titleMatch ? decodeEntities(stripTags(titleMatch[1])).replace(/\s+/g, ' ').trim() : ''
   const { html: cleaned, dropped } = stripBoilerplate(raw)
   const candidates = collectCandidates(cleaned)
-  let best = null
+  let best = null // 通过长度阈值的最高分候选
+  let bestShort = null // 未过阈值但**显式语义容器**（article/main）的最高分候选
   for (const c of candidates) {
     const s = scoreCandidate(c.inner)
-    if (s.chars < 40) continue // 过短块（按钮行、面包屑残留）不参与
+    if (s.chars === 0) continue
     const semanticBonus = c.semantic ? 1.35 : 1
     const score = s.chars * (1 - 2 * s.linkDensity) * semanticBonus + s.paragraphs * 20 + s.headings * 15
-    if (!best || score > best.score) best = { score, ...s, kind: c.kind, inner: c.inner }
+    const entry = { score, ...s, kind: c.kind, inner: c.inner, semantic: c.semantic }
+    if (s.chars >= WEB_EXTRACT.MIN_CANDIDATE_CHARS) {
+      if (!best || score > best.score) best = entry
+    }
+    if (c.semantic && (!bestShort || score > bestShort.score)) bestShort = entry
   }
+  // 短页面（正文 < 阈值）时，显式语义容器比整页回退更可信：<article> 是作者声明的正文区，
+  // 整页回退会把导航/侧栏一起带进来。只有连语义容器都没有（0 字节）才回退 body。
+  const chosenEntry = best ?? bestShort ?? null
   const fallbackSeg = cleaned.replace(/^[\s\S]*?<body\b[^>]*>/i, '').replace(/<\/body>[\s\S]*$/i, '')
-  const strategy = best ? (best.kind === 'article' ? 'article' : best.kind === 'main' ? 'main' : 'density') : 'body-fallback'
-  const chosen = best ? best.inner : fallbackSeg
+  const strategy = chosenEntry ? (chosenEntry.kind === 'article' ? 'article' : chosenEntry.kind === 'main' ? 'main' : 'density') : 'body-fallback'
+  const chosen = chosenEntry ? chosenEntry.inner : fallbackSeg
   const rendered = renderStructured(chosen)
   const text = rendered.slice(0, WEB_LIMITS.MAX_TEXT)
   const excerpt = text.replace(/\s+/g, ' ').slice(0, 240)
@@ -1401,16 +1415,18 @@ export function extractReadable(html, finalUrl) {
   }
   const quality = {
     strategy,
-    score: best ? Math.round(best.score) : 0,
+    score: chosenEntry ? Math.round(chosenEntry.score) : 0,
     chars: text.length,
-    headings: best?.headings ?? 0,
-    paragraphs: best?.paragraphs ?? 0,
-    listItems: best?.listItems ?? 0,
-    linkDensity: best ? Math.round(best.linkDensity * 100) / 100 : 0,
+    headings: chosenEntry?.headings ?? 0,
+    paragraphs: chosenEntry?.paragraphs ?? 0,
+    listItems: chosenEntry?.listItems ?? 0,
+    linkDensity: chosenEntry ? Math.round(chosenEntry.linkDensity * 100) / 100 : 0,
     candidates: candidates.length,
     droppedBlocks: dropped,
     markdown: /(^|\n)#{1,6} |(^|\n)- |(^|\n)```/.test(text),
     truncated: rendered.length > text.length,
+    // 采纳了「低于长度阈值」的语义容器：内容合法但偏短，界面据此提示（避免用户以为抽取失败）
+    shortContent: !!chosenEntry && chosenEntry.chars < WEB_EXTRACT.MIN_CANDIDATE_CHARS,
   }
   return { title, text, excerpt, links, quality }
 }
@@ -1776,7 +1792,9 @@ function shotEnabled() {
   return process.env.DSH_WEB_SHOT_ENABLE === '1'
 }
 function shotRoot() {
-  return process.env.DSH_WEB_SHOT_DIR || join(ROOT, '.dsh-shots')
+  // 默认放 workbench/data/shots：① 不在静态根 dist/ 内（否则截图会被当成静态资源直接暴露，
+  // 且 vite build 会清掉 dist）；② data/ 已在 workbench/.gitignore（与 web 审计同一约定）。
+  return process.env.DSH_WEB_SHOT_DIR || join(ROOT, '..', 'data', 'shots')
 }
 function shotCandidates() {
   const fromEnv = process.env.DSH_WEB_SHOT_BROWSER

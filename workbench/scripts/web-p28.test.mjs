@@ -59,6 +59,9 @@ const mock = createServer((req, res) => {
   }
   if (u.pathname === '/slow') { setTimeout(() => { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<p>慢</p>') }, 1200); return }
   if (u.pathname === '/noscript-page') { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html><body><main><p>纯文本正文内容足够长以通过候选阈值检查，用于并发测试。</p></main></body></html>'); return }
+  if (u.pathname === '/short-article') { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html><head><title>短页</title></head><body><nav><a href="/x">导航</a></nav><article><p>短正文。</p></article><footer>页脚文字</footer></body></html>'); return }
+  if (u.pathname === '/bad-json') { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"ok":true}'); return }
+  // 未知路径 404（既有的失败留痕/统计断言依赖真实 404，不能一律 200）
   res.writeHead(404, { 'content-type': 'text/html' }); res.end('<p>not found</p>')
 })
 
@@ -131,6 +134,18 @@ describe('P2-8② Readability-lite 正文抽取', () => {
     assert.ok(q.candidates >= 1, '候选块数')
     assert.equal(q.markdown, true, '标记为已结构化（含 markdown 信号）')
     assert.equal(q.truncated, false)
+    assert.equal(q.shortContent, false, '正常长文不标记短内容')
+  })
+
+  it('短页面：正文低于阈值时仍选显式语义容器（article）而非整页回退，并标记 shortContent', async () => {
+    const r = await m.webFetch({ url: base + '/short-article' })
+    assert.equal(r.ok, true)
+    assert.equal(r.quality.strategy, 'article', '显式 <article> 优先于 body-fallback')
+    assert.ok(r.text.includes('短正文'), '正文可读')
+    assert.ok(!r.text.includes('导航'), '导航仍被剔除')
+    assert.ok(!r.text.includes('页脚文字'), '页脚仍被剔除')
+    assert.equal(r.quality.shortContent, true, '低于阈值 → 标记短内容，供界面提示')
+    assert.equal(r.quality.droppedBlocks >= 2, true, 'nav/footer 计入剔除：' + r.quality.droppedBlocks)
   })
 
   it('无候选容器时回退 body，且仍返回可读文本（不抛错）', async () => {
@@ -138,6 +153,9 @@ describe('P2-8② Readability-lite 正文抽取', () => {
     assert.equal(r.ok, true)
     assert.ok(r.text.includes('纯文本正文'), '正文可读')
     assert.ok(['main', 'density', 'body-fallback'].includes(r.quality.strategy), '策略值在枚举内：' + r.quality.strategy)
+    // 该夹具 main 只有 ~28 字（低于阈值 40）→ 按语义容器抽取并标记 shortContent（判定口径见 WEB_EXTRACT）
+    assert.equal(r.quality.shortContent, true, '低于候选阈值应标记 shortContent')
+    assert.ok(r.quality.chars < m.WEB_EXTRACT.MIN_CANDIDATE_CHARS, '夹具确实短于阈值：' + r.quality.chars)
   })
 
   it('抽取结果不含原始 HTML/脚本（TC-S6-10 不回归）', async () => {

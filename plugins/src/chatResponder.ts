@@ -8,12 +8,14 @@
  *   - S5（决策 D1）：spaceDigest / attachments 注入为独立块（角色 → 行为约束 → systemHint → 摘要 → 附件 → 历史 → 提问），
  *     缺省（undefined）不产块（向后兼容 TC-S5-04）；null / 空摘要（未绑定/读取失败）产明示降级占位（AC-R2-4，TC-S5-06）；
  *     附件读取失败 → 「（附件 <name> 读取失败：原因）」占位，不含假内容（AC-R4-5，TC-S5-07）；
- *   - 预算（AC-R4-1，TC-S5-05）：合计外部上下文正文默认 ≤ CHAT_CTX_BUDGET_CHARS(8000)，
+ *   - 预算（AC-R4-1，TC-S5-05）：合计外部上下文正文默认 ≤ CHAT_CTX_BUDGET_CHARS(8000)（P3-4 起由统一配置引擎解析），
  *     单附件 ≤ CHAT_CTX_FILE_CAP_CHARS(4000)；超预算先裁摘要、后裁最旧附件、保留最新附件并带「已截断」标记；
  *   - 注入安全（TC-S5-09）：会话历史/摘要/附件/systemHint 等外部文本一律替换 '<'（防 HTML/提示词注入面）；
  *   - 只处理作者 ≠ 回复方身份的 awaiting 消息（防自我触发死循环，防注入冒名）。
  * 纯函数、无 I/O；node --test 直接单测。
  */
+
+import { pluginConfig } from './config.js'
 
 export interface ChatCtxMsg {
   id: number
@@ -55,20 +57,19 @@ export interface ChatAnswerInput {
   spaceDigest?: ChatCtxDigest | null
   /** S5：本次随消息上传的附件。 */
   attachments?: ChatCtxAttachment[]
-  /** S5：外部上下文总预算（默认读 CHAT_CTX_BUDGET_CHARS，8000）。 */
+  /** S5：外部上下文总预算（默认取统一配置 CHAT_CTX_BUDGET_CHARS，8000；显式传值优先）。 */
   contextBudgetChars?: number
 }
 
-/** 单块注入上限（默认读 CHAT_CTX_FILE_CAP_CHARS，4000；与 S4 口径一致）。 */
+/** 单块注入上限（P3-4：统一配置引擎，env CHAT_CTX_FILE_CAP_CHARS，默认 4000；与 S4 口径一致）。 */
 function fileCapChars(): number {
-  const n = Number(process.env.CHAT_CTX_FILE_CAP_CHARS || 4000)
-  return Number.isFinite(n) && n > 0 ? n : 4000
+  return pluginConfig.chatCtxFileCapChars
 }
 
+/** 外部上下文总预算（P3-4：env CHAT_CTX_BUDGET_CHARS，默认 8000）；调用方显式传值优先。 */
 function contextBudgetChars(input: ChatAnswerInput): number {
   if (Number.isFinite(input?.contextBudgetChars) && Number(input.contextBudgetChars) > 0) return Number(input.contextBudgetChars)
-  const n = Number(process.env.CHAT_CTX_BUDGET_CHARS || 8000)
-  return Number.isFinite(n) && n > 0 ? n : 8000
+  return pluginConfig.chatCtxBudgetChars
 }
 
 /** 注入文本安全化：剔除控制符并把 '<' 换成全角（防 HTML/标签注入原样进入提示词，TC-S5-09）。 */

@@ -6,7 +6,7 @@
  *     → (c) allowlist 关键文件内容（README.md/README.zh.md/LEGION.md/AGENTS.md/docs/FEATURES.md/PLUGINS.md/package.json/COMMAND.md，存在即读）；
  *   - 噪声目录（.git/node_modules/dist/build/.legion-worktrees/.turbo/coverage 等）绝不入摘要（TC-S4-02）；
  *   - 确定性：同输入两次输出完全一致（排序固定、allowlist 顺序固定，TC-S4-03）；
- *   - 预算：摘要合计 ≤ budget（默认 CHAT_CTX_BUDGET_CHARS 的摘要子预算，默认 4000），单文件片段 ≤ fileCap
+ *   - 预算：摘要合计 ≤ budget（默认 CHAT_CTX_DIGEST_BUDGET_CHARS 的摘要子预算，默认 4000），单文件片段 ≤ fileCap
  *     （默认 CHAT_CTX_FILE_CAP_CHARS=4000），截断处带「已截断」标记（AC-R4-1 / TC-S4-04/05）；
  *   - 只读纪律：仅 node:fs 读（无 child_process/spawn，TC-S4-07）；UTF-8 解码失败即跳过该文件（不崩）；
  *   - 边界：目录不存在/空目录/不可读 → 不抛，返回空 text + reason（TC-S4-06，S5 降级占位消费）。
@@ -14,6 +14,7 @@
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { pluginConfig } from './config.js'
 
 /** 顶层结构噪声（首层目录/文件名命中即跳过；allowlist 命中不受此影响）。 */
 const NOISE_DIRS = new Set(['.git', 'node_modules', 'dist', 'build', '.legion-worktrees', '.turbo', 'coverage', 'out', '.next', '.cache', '.idea', '.vscode'])
@@ -21,16 +22,14 @@ const NOISE_DIRS = new Set(['.git', 'node_modules', 'dist', 'build', '.legion-wo
 /** allowlist 关键文件（仓库根相对路径；存在即读、固定顺序；单文件 ≤ fileCap）。 */
 export const DEFAULT_ALLOWLIST = ['README.md', 'README.zh.md', 'LEGION.md', 'AGENTS.md', 'docs/FEATURES.md', 'PLUGINS.md', 'package.json', 'COMMAND.md']
 
-/** 单文件片段上限默认值（env 可覆写，与决策 G1 常量口径一致）。 */
+/** 单文件片段上限默认值（P3-4：统一配置引擎解析 env CHAT_CTX_FILE_CAP_CHARS，默认 4000）。 */
 export function defaultFileCap(): number {
-  const n = Number(process.env.CHAT_CTX_FILE_CAP_CHARS || 4000)
-  return Number.isFinite(n) && n > 0 ? n : 4000
+  return pluginConfig.chatCtxFileCapChars
 }
 
-/** 摘要子预算默认值（env 可覆写；整次回复外部上下文总预算见 S6 分配）。 */
+/** 摘要子预算默认值（P3-4：env CHAT_CTX_DIGEST_BUDGET_CHARS，默认 4000；整次回复总预算见 S6 分配）。 */
 export function defaultDigestBudget(): number {
-  const n = Number(process.env.CHAT_CTX_BUDGET_CHARS || 4000)
-  return Number.isFinite(n) && n > 0 ? n : 4000
+  return pluginConfig.chatCtxDigestBudgetChars
 }
 
 export interface ScopeMeta {

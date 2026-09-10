@@ -392,23 +392,27 @@ node scripts/ci/run-ci.mjs
 
 ### 9.2 对话相关环境变量
 
-> **完整配置面（含三个活跃进程的全部字段、优先级与校验命令）见 [docs/CONFIG.md](docs/CONFIG.md)。**
+> **完整配置面（含三个活跃进程 + 三个 DSH 插件族的全部字段、优先级与校验命令）见 [docs/CONFIG.md](docs/CONFIG.md)。**
 > 下表只列对话相关项。P3-2 统一配置时核对了本表，其中两行原先不准确，已按下表更正：
 > `CHAT_DAEMON_ONLINE_MS` 实际是 **team-hub 中的代码常量**（`server.mjs` 导出，**不读 env**，改名不会生效）；
-> `CHAT_CTX_BUDGET_CHARS` 由 **守护插件 `plugins/`** 读取（team-hub 不读），且同一变量在
-> `spaceDigest.ts` 与 `chatResponder.ts` 中默认值不同（4000 / 8000，已在 `docs/review/T-124-REVIEW.md` 登记）。
+> `CHAT_CTX_BUDGET_CHARS` 由 **守护插件 `plugins/`** 读取（team-hub 不读）。
+> **P3-4 已收口**「同一变量两种语义」：总预算是 `CHAT_CTX_BUDGET_CHARS`（8000），
+> 空间摘要子预算改用独立变量 `CHAT_CTX_DIGEST_BUDGET_CHARS`（4000），插件族的配置面已纳入统一校验
+> （`node scripts/config/check.mjs --process=plugins`）。
 
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
 | `CHAT_REPLY_TIMEOUT_MS` | `120000` | AI 回复超时（team-hub，env 可配） |
 | `CHAT_DAEMON_ONLINE_MS` | `60000` | 守护在线判断窗口（team-hub **代码常量**，env 不可配） |
-| `CHAT_CTX_BUDGET_CHARS` | `8000`（摘要子预算 `4000`） | 空间摘要与附件总字符预算（读 env 的是**插件**，非 team-hub） |
+| `CHAT_CTX_BUDGET_CHARS` | `8000` | 单次回复外部上下文**总**字符预算（读 env 的是**插件**，非 team-hub） |
+| `CHAT_CTX_DIGEST_BUDGET_CHARS` | `4000` | 空间摘要**子**预算（应 ≤ 总预算；P3-4 新增的独立变量） |
+| `CHAT_CTX_FILE_CAP_CHARS` | `4000` | 单文件/单附件注入片段上限 |
 | `CHAT_ATTACH_MAX_BYTES` | `10 MB` | 单附件上限 |
 | `CHAT_ATTACH_MAX_PER_MSG` | `3` | 单消息附件数量 |
-| `CHAT_CTX_BUDGET_CHARS` | `8000` | 空间摘要与附件总字符预算 |
 | `CHAT_ATTACH_STAGED_TTL_MS` | `24 h` | 未绑定暂存附件保留期 |
 | `CHAT_ATTACH_TTL_MS` | `7 d` | 已绑定附件保留期 |
 | `CHAT_ATTACH_BLACKLIST_EXT` | 内置黑名单 | 禁止作为文本上下文的扩展名 |
+| `NORMS_GLOBAL_MAX` / `NORMS_SPACE_MAX` / `NORMS_TOTAL_MAX` | `3000` / `4000` / `7000` | 分层规范注入预算（插件侧，S5-06 三值法） |
 
 ### 9.3 发布与回滚
 

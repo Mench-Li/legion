@@ -22,6 +22,10 @@ export const SCHEMA_FILES = Object.freeze({
   'team-hub': 'team-hub/config-schema.mjs',
   workbench: 'workbench/scripts/config-schema.mjs',
   whiteboard: 'whiteboard/apps/server/src/config-schema.mjs',
+  // P3-4：DSH 插件族（其主配置面仍是宿主 composition，这里覆盖它们从进程环境读取的项）
+  plugins: 'plugins/config-schema.mjs',
+  'board-plugin': 'board-plugin/config-schema.mjs',
+  'services-plugin': 'services-plugin/config-schema.mjs',
 })
 
 /** 解析 --env-file=path（KEY=VALUE，忽略空行与 # 注释；不展开变量引用）
@@ -117,9 +121,12 @@ async function main() {
   for (const name of names) {
     const schema = schemas[name]
     const resolved = resolveConfig(schema, { env, argv, checkUnknownEnv: true })
-    configs[name] = { schema, resolved }
-    errorCount += resolved.errors.length
-    warnCount += resolved.warnings.length
+    // P3-4：schema 自带的**进程内一致性规则**（各预算之间的包含关系等）。规则是纯函数，
+    // 只读到已解析的值；level 决定它计入 error 还是 warning。
+    const ruleViolations = (schema.rules ?? []).flatMap((rule) => rule(resolved.values))
+    configs[name] = { schema, resolved, ruleViolations }
+    errorCount += resolved.errors.length + ruleViolations.filter((v) => v.level === 'error').length
+    warnCount += resolved.warnings.length + ruleViolations.filter((v) => v.level === 'warning').length
   }
 
   let cross = []
@@ -136,6 +143,7 @@ async function main() {
       processes: Object.fromEntries(Object.entries(configs).map(([n, c]) => [n, {
         ...summaryObject(c.schema, c.resolved),
         values: redactConfig(c.schema, c.resolved.values),
+        ruleViolations: c.ruleViolations,
       }])),
       crossChecks: cross,
       fileWarnings,
@@ -158,6 +166,7 @@ async function main() {
       if (schema.notes.length) for (const n of schema.notes) console.log(`  注：${n}`)
       for (const e of resolved.errors) console.log(`  ✖ ${e.message}`)
       for (const w of resolved.warnings) console.log(`  ⚠ ${w.message}`)
+      for (const v of configs[name].ruleViolations) console.log(`  ${v.level === 'error' ? '✖' : '⚠'} [${v.code}] ${v.message}`)
     }
     if (cross.length) {
       console.log('\n=== 跨进程一致性 ===')

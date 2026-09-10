@@ -8,9 +8,11 @@
  *      （含「仓库规则（必须遵守，来自 LEGION.md/AGENTS.md）：」段首文案）。
  *   3. 无任何内容 → 空 sections（buildWorkerPrompt 不输出规范段、不报错）。
  *   4. 各层按段落边界截断到预算内（NORMS_GLOBAL_MAX=3000 / NORMS_SPACE_MAX=4000 / NORMS_TOTAL_MAX=7000
- *      可经环境变量注入）；截断处追加真实数字提示；不产生半截代码块。
- * 纯函数 + 模块级 env 预算常量，无 I/O；node --test 直接单测。
+ *      可经环境变量注入；P3-4 起统一走配置引擎 plugins/config-schema.mjs）；截断处追加真实数字提示；不产生半截代码块。
+ * 纯函数 + 模块级配置常量，无 I/O；node --test 直接单测。
  */
+
+import { pluginConfig } from './config.js'
 
 export interface NormFile {
   /** 文件名（LEGION.md / AGENTS.md / agent.md），用于来源标注与 LEGACY 判定。 */
@@ -32,15 +34,10 @@ export interface NormResult {
   truncated: boolean
 }
 
-const envNum = (key: string, fallback: number): number => {
-  const v = Number(process.env[key])
-  return Number.isFinite(v) && v > 0 ? Math.floor(v) : fallback
-}
-
-/** 各层预算（env 可配，S5-06 三值法）。 */
-export const NORMS_GLOBAL_MAX = envNum('NORMS_GLOBAL_MAX', 3000)
-export const NORMS_SPACE_MAX = envNum('NORMS_SPACE_MAX', 4000)
-export const NORMS_TOTAL_MAX = envNum('NORMS_TOTAL_MAX', 7000)
+/** 各层预算（P3-4：统一配置引擎解析 env NORMS_*，默认 3000/4000/7000，S5-06 三值法）。 */
+export const NORMS_GLOBAL_MAX = pluginConfig.normsGlobalMax
+export const NORMS_SPACE_MAX = pluginConfig.normsSpaceMax
+export const NORMS_TOTAL_MAX = pluginConfig.normsTotalMax
 
 export const REPO_RULES_HEADER = '仓库规则（必须遵守，来自 LEGION.md/AGENTS.md）：'
 /** 空间/项目层段首文案（导出供 doctor 用 marker 所有权校验注入产物归属）。 */

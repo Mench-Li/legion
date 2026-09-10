@@ -32,6 +32,13 @@ export const SCHEMA = defineSchema({
   nonEnvLiterals: [
     'COMMIT', 'ROLLBACK', 'DELETE', 'OPTIONS', 'SIGINT', 'SIGTERM', 'ENOENT',
   ],
+  // team-hub 的 CHAT_ 前缀覆盖了插件的提示词预算变量（CHAT_CTX_*）：它们是**插件**读的配置，
+  // team-hub 不读，登记为外来变量，避免误报成「拼写错误」（P3-4）。
+  foreignEnv: [
+    { name: 'CHAT_CTX_BUDGET_CHARS', owner: 'plugins（士兵守护）', reason: '提示词总预算由插件读取，team-hub 不读（P3-4）' },
+    { name: 'CHAT_CTX_DIGEST_BUDGET_CHARS', owner: 'plugins（士兵守护）', reason: '空间摘要子预算由插件读取，team-hub 不读（P3-4）' },
+    { name: 'CHAT_CTX_FILE_CAP_CHARS', owner: 'plugins（士兵守护）', reason: '单文件/单附件片段上限由插件读取，team-hub 不读（P3-4）' },
+  ],
   notes: [
     'team-hub 的 token 与 workbench 的 TEAM_HUB_TOKEN 必须一致：workbench 用它调用 hub 读接口（P2-2 权限模型）。',
   ],

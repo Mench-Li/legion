@@ -7,6 +7,11 @@ export type HubEventStreamOptions = {
   storage?: CursorStorage
   token?: string
   EventSourceCtor?: typeof EventSource
+  /**
+   * SSE 连接状态回调（P2-4 实时连接可观测性）：首次建立 open、断线重连成功 reconnected、
+   * 断开重连中 reconnecting、关闭 closed。`opens` = 成功打开次数（>1 即发生过断线重连）。
+   */
+  onStatus?: (status: { state: 'open' | 'reconnected' | 'reconnecting' | 'closed'; opens: number }) => void
 }
 
 /** Stable cursor key. `*` represents the global (unscoped) stream. */
@@ -97,6 +102,16 @@ export function subscribeHubEventStream(
   })
   const EventSourceCtor = options.EventSourceCtor ?? globalThis.EventSource
   const source = new EventSourceCtor(url)
+  // 连接状态上报（可选）：不传 onStatus 时行为与之前完全一致。
+  let opens = 0
+  source.onopen = () => {
+    opens += 1
+    try { options.onStatus?.({ state: opens > 1 ? 'reconnected' : 'open', opens }) } catch { /* 状态回调不得影响流 */ }
+  }
+  source.onerror = () => {
+    // EventSource 自带重连：已建立过连接 = 断线重连中；从未建立 = 未能连上。
+    try { options.onStatus?.({ state: opens > 0 ? 'reconnecting' : 'closed', opens }) } catch { /* 同上 */ }
+  }
   source.onmessage = (message) => {
     let parsed: unknown
     try {

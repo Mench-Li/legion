@@ -293,7 +293,20 @@ export function ChatView({ scope, hubMode, spaces, onPickScope }: {
       const n = activeRef.current
       if (ev.action === 'chat:message' && Number(conv) === n) void mergeNewest()
       else if (ev.action === 'chat:create') void loadConvs()
-    }, { scope })
+    }, {
+      scope,
+      onStatus: st => {
+        setSseStatus({ state: st.state, opens: st.opens })
+        // 重连成功即立刻补齐（断线窗口内可能漏掉多条 chat 事件与三态更新）
+        if (st.state === 'reconnected') {
+          refillCountRef.current += 1
+          setRefillCount(refillCountRef.current)
+          const n = activeRef.current
+          if (n !== null) void mergeNewest()
+          void loadConvs()
+        }
+      },
+    })
     void loadHealth() // 进入空间即刷健康（守护/开关/模型/最近失败）
     const poll = window.setInterval(() => {
       const n = activeRef.current

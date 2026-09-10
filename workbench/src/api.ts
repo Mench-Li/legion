@@ -674,12 +674,13 @@ export async function fetchChatHealth(scope: string): Promise<ChatHealthInfo> {
 /** team-hub 审计 SSE：统一信封校验、scope 过滤、持久游标与 EventSource 重连。 */
 export function subscribeHubAudit(
   onEvent: (event: HubAuditEvent) => void,
-  options: { scope?: string; storage?: Storage } = {},
+  options: { scope?: string; storage?: Storage; onStatus?: (status: HubSseStatus) => void } = {},
 ): () => void {
   return subscribeHubEventStream(`${hubBase()}/api/events`, onEvent, {
     scope: options.scope,
     storage: options.storage,
     token: getToken() || undefined,
+    onStatus: options.onStatus,
   })
 }
 

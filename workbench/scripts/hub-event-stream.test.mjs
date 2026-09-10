@@ -96,7 +96,9 @@ describe('hub consumers', () => {
     const root = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'components')
     for (const file of ['ChatView.tsx', 'NotifyView.tsx', 'TaskCenterView.tsx']) {
       const source = readFileSync(join(root, file), 'utf8')
-      assert.match(source, /subscribeHubAudit\(ev => \{[\s\S]*?\},\s*\{\s*scope(?:\s*:|\s*\})/, `${file} 未传递 scope`)
+      // 断言意图：scope 必须是订阅选项对象里的键（`{ scope }`、`{ scope, onStatus… }`、`{ scope: … }` 都算），
+      // 不锁定「选项对象里只能有 scope」——P2-4 断线恢复需要在同一对象里再传 onStatus。
+      assert.match(source, /subscribeHubAudit\(ev => \{[\s\S]*?\},\s*\{\s*scope(?:\s*:|\s*,|\s*\})/, `${file} 未传递 scope`)
     }
   })
 })

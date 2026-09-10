@@ -459,6 +459,21 @@ export function fileDigest(file: string): string {
  * 绝不因远端配置缺陷让守护崩或进入半更新态。只接受守护真正消费的字段：
  *   role（空则丢）、label（缺省回落 role）、prompt、next（空串 → null = 末环）、gate、artifact、docs。
  */
+/**
+ * SP-P0：解析「需求讨论群聊」配置来源。
+ *
+ * 数据面（`space_stages` / `POST /api/pipeline`）目前**不承载** `discussion`（属 SP-P1），
+ * 所以当活动流水线来自 hub 且未带 discussion 时，必须回落到部署面文件的配置——
+ * 否则「切到 hub 来源」会让已在文件里配好讨论的实例**静默失去讨论功能**（P0 的兼容底线：
+ * 已有空间行为零差异）。hub 若将来带上 discussion，则以数据面为准。
+ */
+export function resolveDiscussion(
+  active: { discussion?: DiscussionDef } | null,
+  filePipeline: { discussion?: DiscussionDef } | null,
+): DiscussionDef | undefined {
+  return active?.discussion ?? filePipeline?.discussion
+}
+
 export function stagesFromHubPayload(raw: unknown): StageDef[] {
   if (!Array.isArray(raw)) return []
   const out: StageDef[] = []
@@ -746,7 +761,9 @@ export function apply(ctx: AppContext, config: Config): void {
     pipelineSource = source
     stageByRole = new Map<string, StageDef>((next?.stages ?? []).map(s => [s.role, s]))
     isPipeline = next !== null
-    discussion = next?.discussion
+    // 需求讨论群聊（SP-P0）：数据面尚未承载 discussion（属 P1），故 hub 来源缺省时回落到部署面文件配置，
+    // 避免「切到 hub 流水线后讨论功能静默消失」——行为保持：文件里怎么配的，切源后照旧。
+    discussion = resolveDiscussion(next, filePipeline)
     discussionMembers = (discussion?.roles ?? (next?.stages ?? []).map(s => s.role))
       .map(r => stageByRole.get(r))
       .filter((s): s is StageDef => s !== undefined)

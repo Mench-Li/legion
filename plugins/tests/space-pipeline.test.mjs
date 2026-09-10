@@ -5,7 +5,7 @@
 // 运行：node --test plugins/tests/space-pipeline.test.mjs（需先 build：lib/index.js 为被测产物）
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { stagesFromHubPayload } from '../lib/index.js'
+import { stagesFromHubPayload, resolveDiscussion } from '../lib/index.js'
 
 describe('TC-SP-P0-D1 hub 载荷 → StageDef：正常映射', () => {
   it('逐字段映射：role/label/prompt/next/gate/artifact/docs', () => {
@@ -84,5 +84,22 @@ describe('TC-SP-P0-D2 防御式解析：坏数据整条丢弃，绝不半更新'
   it('大量阶段不截断（守护按 hub 为准，裁剪是 hub 侧职责）', () => {
     const many = Array.from({ length: 40 }, (_, i) => ({ role: 'r' + i }))
     assert.equal(stagesFromHubPayload(many).length, 40)
+  })
+})
+
+describe('TC-SP-P0-D3 discussion 来源回落：切到数据面不丢部署面已配的讨论', () => {
+  const fileDisc = { roles: ['a', 'b'], maxRounds: 4 }
+  it('hub 载荷无 discussion → 用部署面文件的（不静默丢功能）', () => {
+    assert.deepEqual(resolveDiscussion({ discussion: undefined }, { discussion: fileDisc }), fileDisc)
+  })
+
+  it('hub 载荷带 discussion → 数据面优先（P1 反向兼容）', () => {
+    const hubDisc = { roles: ['x'], maxRounds: 2 }
+    assert.deepEqual(resolveDiscussion({ discussion: hubDisc }, { discussion: fileDisc }), hubDisc)
+  })
+
+  it('两边都没有 → undefined（isDiscussion 保持 false）', () => {
+    assert.equal(resolveDiscussion(null, null), undefined)
+    assert.equal(resolveDiscussion({}, {}), undefined)
   })
 })

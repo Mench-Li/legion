@@ -254,6 +254,22 @@ describe('TC-SP-P0-07 开通预检 GET /api/spaces/provision', () => {
     assert.match(r.json.error, /id 非法/)
   })
 
+  it('预检清单不出现重复 code（pipeline-missing 只报一次，带可执行修复命令）', async () => {
+    // 回归锚：编队非空 + 流水线为空时，预检自身的检查项与 pipelineWarnings 会各报一次
+    // pipeline-missing；清单是给人照着做的，重复项会让人以为有两件事要修。
+    const S = 'space-dupcheck'
+    await post('/api/spaces', { id: S, name: '重复项检查', by: 'general' })
+    const ins = mod.db.prepare('INSERT INTO roster (scope, role, name, kind, avatar, sort) VALUES (?, ?, ?, ?, ?, ?)')
+    ins.run(S, 'requirement', '需求官', 'agent', '🤖', 0)
+    const r = await get('/api/spaces/provision?id=' + S)
+    assert.equal(r.status, 200, r.text)
+    const codes = r.json.checks.map(c => c.code)
+    assert.equal(new Set(codes).size, codes.length, '预检清单 code 必须唯一：' + codes.join(','))
+    assert.equal(codes.filter(c => c === 'pipeline-missing').length, 1)
+    const miss = r.json.checks.find(c => c.code === 'pipeline-missing')
+    assert.ok(/seed-pipeline/.test(miss.fix ?? ''), '应给出可执行的修复命令：' + JSON.stringify(miss))
+  })
+
   it('自定义分区键（含下划线）可用：读面不因非规范 scope 而拒绝', async () => {
     // 回归锚：夹具 daemon（scope=__p13fixture__）这类非规范分区键必须能读自己的流水线，
     // 否则会静默回落部署面 rolesFile（排障时极难发现）。

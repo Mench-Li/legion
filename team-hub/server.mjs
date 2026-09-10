@@ -3805,7 +3805,15 @@ async function handle(req, res, stripPrefix) {
         } else {
           add('ok', 'pipeline-configured', `流水线 ${view.activeRoles.length} 环：${view.activeRoles.join(' → ')}（version ${view.version}）`)
         }
-        for (const w of pipelineWarnings(id, view)) add(w.level, w.code, w.message, null)
+        // pipelineWarnings 会在「流水线为空且编队非空」时再报一次 pipeline-missing：
+        // 上面那条已给出可执行的修复命令（seed-pipeline），故此处按 code 去重（含前面已加入的项），
+        // 避免清单里出现两条同名阻塞项。
+        const addedCodes = new Set(checks.map(c => c.code))
+        for (const w of pipelineWarnings(id, view)) {
+          if (addedCodes.has(w.code)) continue
+          addedCodes.add(w.code)
+          add(w.level, w.code, w.message, null)
+        }
 
         // 4) 执行配置
         if (!view.runtime.enabled) {

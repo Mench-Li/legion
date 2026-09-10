@@ -17,7 +17,7 @@
  *   deps   workbench 依赖就绪（node_modules 缺失时尝试 junction 指向主 checkout；失败即 FAIL 并给指引）
  *   build  whiteboard build（静态前端装配）+ workbench build（tsc --noEmit && vite build，产物 dist/）
  *   test   L0 契约/基线（node --test）：chat 13 + skills 12 + calendar 13 + files-api 40 + web 24
- *          + contracts 56 + whiteboard 150（11 文件，含真实服务 e2e 与 P3-1 治理端到端）
+ *          + contracts 56 + whiteboard 152（11 文件，含真实服务 e2e 与 P3-1 治理端到端）
  *          配置 DSH_CHECKOUT 时另跑 plugins 与 board-plugin 外部 DSH 回归
  *          （board-plugin 宿主 HTTP 契约：/api/artifact 逐条、/api/board、/api/events、hub 模式）
  *   smoke  L1 真实服务冒烟（仓库既有冒烟脚本直跑 + 白板真实进程探活 + v1 看板启停）

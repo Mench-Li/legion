@@ -66,7 +66,7 @@
 ## 4. 复现命令与实测输出
 
 ```powershell
-# 白板全量（150 例）
+# 白板全量（152 例）
 cd whiteboard; npm test
 
 # 治理端到端（真实 ws 服务 + 真实 Upgrade 响应）
@@ -93,7 +93,11 @@ node scripts/ci/run-ci.mjs --only smoke --out .ci\p31-smoke2
 实测输出（摘录）：
 
 ```
-whiteboard 全量 : tests 150 / suites 29 / pass 150 / fail 0   （原 70 → 新增 80）
+whiteboard 全量 : tests 152 / suites 29 / pass 152 / fail 0   （原 70 → 新增 82）
+                  ※ 该总数在合并落地后、于主 checkout 上复跑确认；逐文件用例合计亦为 152
+                    （26+8+7+12+7+6+7+3+17+20+13+6+20）。建设过程中一版中间值为 150——
+                    那是补充「默认值必须容得下 50 并发承诺 / 单 IP 不得小于单房间上限」两条
+                    回归断言之前，limits 尚为 15 例时的输出，**不作最终数字**。
 governance e2e  : tests 20  / pass 20 / fail 0
 limits          : tests 17  / pass 17 / fail 0
 rooms           : tests 20  / pass 20 / fail 0

@@ -56,7 +56,7 @@ Docker：`docker compose up --build`（见 docs/DEPLOY.md）。
 
 ```bash
 node scripts/build.mjs
-npm test                                 # 150 例：共享契约 + 服务端单测 + 真实服务 e2e + 治理端到端
+npm test                                 # 152 例：共享契约 + 服务端单测 + 真实服务 e2e + 治理端到端
 node scripts/bench/bench.mjs 20 20       # gate：20 并发
 node scripts/bench/bench.mjs 50 10       # soak：50 并发
 ```

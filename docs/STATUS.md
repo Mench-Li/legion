@@ -7,7 +7,7 @@
 **最近一次全量基线**：2026-09-10　`run-ci --only test` **29 套件 / 671 测试全 PASS**（136s）—— 以本文件所在提交为准
 
 > ⚠️ **基线滞后说明（诚实登记）**：P2-7 / P2-8 / P3-1 之后新增或扩充的套件（`files-p27`、`files-ui`、
-> `web-p28`、`browser-ui`、`static-serve`，以及扩充到 150 例的 `whiteboard`）**未纳入上面这条全量基线**——
+> `web-p28`、`browser-ui`、`static-serve`，以及扩充到 152 例的 `whiteboard`）**未纳入上面这条全量基线**——
 > `test` 阶段当前会因 `notify-hub-smoke` 永久等待而无法跑完（根因与最小修法见
 > `docs/P2-7-evidence/verify-evidence.md` §7）。这些套件是**逐个单独复跑**验证的，未伪造全量基线；
 > 表中相应行的用例数已按实测更新。
@@ -65,7 +65,7 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 | rules | 7 | notify（P2-4 含真实 hub SSE 断线重连） | 15 |
 | artifact | 16 | dual-write | 2 |
 | security | 6 | p13-host-injection（P1-3 真实宿主注入） | 7 |
-| read-auth | 14 | whiteboard（含 P3-1 治理端到端，11 文件） | 150 |
+| read-auth | 14 | whiteboard（含 P3-1 治理端到端，11 文件） | 152 |
 | files-api | 41 | plugins（含 P2-6 chat-context 13、SP-P0 space-pipeline） | 159 |
 | web | 24 | static-serve（静态托管 404/SPA 回退/穿越） | 6 |
 | files-p27 / files-ui（P2-7，未入全量基线） | 36 / 19 | web-p28 / browser-ui（P2-8，未入全量基线） | 21 / 21 |

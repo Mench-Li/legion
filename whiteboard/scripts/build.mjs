@@ -10,7 +10,11 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const src = path.join(root, 'packages', 'shared', 'src');
 const dst = path.join(root, 'apps', 'web', 'public', 'shared');
 
-const EXCLUDE = new Set(['hash.mjs', 'index.mjs']);
+// node-only 模块：浏览器不引用，复制过去只会白占体积
+//   hash.mjs   —— 服务端 hash 工具（依赖 node:crypto）
+//   index.mjs  —— 汇总出口（含 node-only 成员）
+//   config.mjs —— P3-2 统一配置引擎（服务端/CLI 关注点；前端不读配置）
+const EXCLUDE = new Set(['hash.mjs', 'index.mjs', 'config.mjs']);
 
 fs.mkdirSync(dst, { recursive: true });
 const files = fs.readdirSync(src).filter((f) => f.endsWith('.mjs') && !EXCLUDE.has(f));

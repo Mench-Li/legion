@@ -72,14 +72,24 @@
 
 ### 2.3 关键配置（环境变量 / 参数）
 
+> **P3-2 起，配置面已统一并有权威参考：`docs/CONFIG.md`**（三进程全部字段、优先级 **CLI > env > 默认值**、
+> 启动脱敏摘要、校验命令与跨进程一致性规则）。下表只列部署时最关键的几项，字段全集请看 CONFIG.md。
+>
+> 部署前后建议各跑一次配置自检（不依赖服务已启动）：
+>
+> ```bash
+> node scripts/config/check.mjs                 # 按当前环境校验三进程 + 跨进程一致性
+> node scripts/config/check.mjs --show-source   # 每个值标明来自 cli / env / default
+> ```
+
 | 配置 | 载体 | 默认 | 说明 |
 | --- | --- | --- | --- |
-| TEAM_HUB_PORT / TEAM_HUB_HOST / TEAM_HUB_DB / TEAM_HUB_TOKEN | env | 8787 / 127.0.0.1 / team-hub/team.db / 空 | 中枢；非回环监听必须设置 token |
-| DSH_WORKBENCH_PORT/HOST、--token、DSH_HUB_UPSTREAM | args/env | 5173 / 127.0.0.1 / 无 token / http://127.0.0.1:8787 | 指挥台 |
+| TEAM_HUB_PORT / TEAM_HUB_HOST / TEAM_HUB_DB / TEAM_HUB_TOKEN | env（也可 `--port/--host/--token`） | 8787 / 127.0.0.1 / team-hub/team.db / 空 | 中枢；非回环监听必须设置 token |
+| DSH_WORKBENCH_PORT/HOST、--token、DSH_HUB_UPSTREAM | args/env | 5173 / 127.0.0.1 / 无 token / http://127.0.0.1:8787 | 指挥台；**DSH_HUB_UPSTREAM 端口必须等于 TEAM_HUB_PORT**，否则 `/hub/*` 代理连不上（`check.mjs` 会拦） |
 | DSH_WEB_FETCH_ALLOW_PRIVATE | env | 关 | 仅测试/本地演示开；生产默认关闭（SSRF 防护） |
 | DSH_WEB_AUDIT_FILE / DSH_WEB_AUDIT_MAX_BYTES | env | workbench/data/web-audit.jsonl | 浏览器抓取审计路径/轮转上限 |
 | DSH_KANBAN_PORT/HOST/TOKEN、--token | args/env | 4820 / 127.0.0.1 / 空 | v1 遗留 |
-| whiteboard | env | PORT 8080 / HOST 127.0.0.1 / DB_PATH / WHITEBOARD_TOKEN | 非回环监听必须设置 WHITEBOARD_TOKEN；见 whiteboard/docs/DEPLOY.md |
+| whiteboard | env（也可 `--port/--host/--token`） | PORT 8080 / HOST 127.0.0.1 / DB_PATH / WHITEBOARD_TOKEN | 非回环监听必须设置 WHITEBOARD_TOKEN；见 whiteboard/docs/DEPLOY.md |
 安全不变量（三中心与平台既有）：/api/files/*、/api/web/fetch、/api/fs/* 仅回环地址可访问；写操作 token 鉴权
 （未配置放行=仅回环保护）；SSRF 协议白名单 + 私网/回环/混淆逐跳拦截；嵌套/内嵌 .git 任意层段 + realpath 复检拒绝；
 前端全部 React 文本节点渲染（无 dangerouslySetInnerHTML）；畸形 percent-encoding/超长/NUL 请求 400/404 且进程存活。

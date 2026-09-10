@@ -258,14 +258,61 @@ board-plugin hub 模式 SSE 桥接（R9）属跨宿主改造，登记移交 P1-3
 
 ### P2-5 日程日历增强
 
+状态：**已完成**（2026-09-10）—— 数据面 `team-hub/server.mjs`（重复展开/更新/冲突/关联）；前端 `workbench/src/calendar.ts`（纯函数）+ `CalendarView.tsx`（月/周视图 + 编辑弹层）；回归 `team-hub/calendar.test.mjs`（29）+ `workbench/scripts/calendar-ui.test.mjs`（12）
+
 当前已有 team-hub 日历数据面和 Workbench 面板。
 
-待改动：
+**三项语义决策（用户拍板，2026-09-10）**：
 
-- 事件与任务/目标关联。
-- 编辑、删除、时区和时间区间完善。
-- 明确是否支持重复事件。
-- 增加冲突检测和更完整的视图。
+1. **时间 = 字面本地时间（naive local）**：`start`/`end` 原样存储、原样返回、**不做任何时区换算**
+   （既不转 UTC，也不套浏览器时区）；跨时区参与者需自行换算。依据：本地优先单机部署、
+   全天 date-only 语义天然正确、零迁移（改动前生产 `calendar_events` 为 0 条）、无 DST 陷阱。
+   代码中以 `Date.UTC` 仅作**单调比较/运算**，不表示该值被解释为 UTC 时刻。
+2. **重复 = 简单规则**（不做完整 RRULE）：`{ freq: daily|weekly|monthly, interval, until|count, exdates }`，
+   规则存列、**查询侧展开**为实例（不落多行）；删除支持「仅本次（写例外日）」与「整串」。
+3. **关联 = 双向**：事件可带 `taskId`/`goalId`（入库列 + 索引），日程 → 任务详情（复用 TaskDetailModal），
+   任务详情 → 「📅 关联日程」区块（新增反向端点）。
+
+已完成：
+
+- ✅ **事件与任务/目标关联**：`calendar_events` 新增 `taskId`/`goalId` 列（幂等 ALTER 补列 + 索引）；
+  新增 `GET /api/calendar/events/by-link?taskId|goalId[&from&to]`（带窗展开实例、无窗每条一行）；
+  前端编辑弹层可填任务号/目标号，条目显示 🔗 并点击直达；任务详情面板新增「关联日程」区块
+  （`api.ts` 新增 `fetchHubCalendarByLink`，一年窗口内展开）。
+- ✅ **编辑、删除、时区和时间区间完善**：
+  · 新增 `POST /api/calendar/events/update`（**局部更新**：只改传入字段 + scope 归属校验 + audit `calendar:update`；
+    start 单独变更时用既有 end 兜底校验，避免产生倒序区间）；
+  · 删除升级为 `mode: series|occurrence`（仅本次 = 写 `exdates`；删到最后一个实例自动整串移除）；
+  · 时间区间：表单新增**结束时间**与**全天**开关，条目悬停/弹层显示 `10:00–11:30` 区间；
+  · 时区：按决策 1 明确文档化为字面本地时间（前端弹层显式提示，不再有隐含换算假设）。
+- ✅ **明确是否支持重复事件**：按决策 2 **支持简单重复**——每天/每周/每月 + 间隔（1-99）+
+  结束条件（日期或次数，二选一）+ 例外日；`expandCalendarDates` 负责窗内展开（monthly 始终以
+  **原始 start 的日号**计算第 k 次，避免 1/31→2/28→3/28 的漂移；上限 `MAX_CALENDAR_INSTANCES=400` 防放大）。
+- ✅ **冲突检测与更完整视图**：
+  · 新增 `GET /api/calendar/conflicts?scope&start&end[&allDay&excludeId]`（左闭右开重叠判定，
+    全天按整天、非全天缺省 1 小时；同事件可返回多个实例；**仅提示、不阻断写入**）；
+    前端在编辑/新建弹层去抖 250ms 查询并以黄色提示块展示，保存仍可继续。
+  · 视图：新增**周视图**（7 列、每列列出当天全部条目、支持左右翻周、双击/＋号在该日新建），
+    与月视图一键切换；月视图保留 7×N 网格与「+N 更多」折叠。
+- 回归：
+  · `calendar`（后端契约，29 用例）：规则校验零副作用、daily/weekly/monthly 展开与 count/until 上界、
+    monthly 日钳制、exdates 与单次删除、删到空整串移除、展开上限抛错、局部更新与越权/无字段/倒序校验、
+    冲突判定（相邻不算、全天边界、excludeId、scope 隔离、不阻断写入）、by-link 正反查（无窗/带窗两种语义）、
+    字面时间语义（含 `Z` 后缀原样保留）、旧契约兼容与补列幂等。
+  · `calendar-ui`（前端纯函数，12 用例）：实例日归组、区间文本、周网格与标题（跨月/跨年）、
+    重复文案、关联跳转（任务优先）、草稿生成/校验（含 2026-13-01 与 2026-02-30 真实存在性校验）、
+    入参拼装、冲突提示文案。
+
+**已知边界（诚实登记）**：重复规则不支持「单次修改」（改某一次会改整串规则）、不支持按星期几/
+第几个工作日的复杂规则；`until`/`count` 二选一；字面时间语义下跨时区协作需人工换算。
+
+**两处审计取舍（已固定为断言，见 notify.test.mjs）**：
+
+- 「仅本次」删除记为 `calendar:update`（detail 带 `mode:'occurrence'` + `occurrenceDate`，并写 `exdates`），
+  而非 `calendar:delete`——因为**数据事实是规则被更新、事件仍存在**；若记成 delete 会让消费方
+  误判「该事件已被删除」。整串删除才是 `calendar:delete`。
+- 日历动作（`calendar:create/update/delete`）**不入通知白名单**：日程多为自己创建/修改，
+  进通知只产生自操作噪音；审计仍全量留痕，可在活动流查看。
 
 ### P2-6 对话中心真实闭环
 

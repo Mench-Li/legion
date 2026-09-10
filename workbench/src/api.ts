@@ -466,6 +466,37 @@ export function hubReviewNote(id: string, file: string, verdict: 'ok' | 'issue' 
   return hubPost('/api/review-notes', { id, file, verdict, note })
 }
 
+/** 关联日程行（P2-5 双向关联：任务详情展示用；calendar.ts 的 CalEvent 兼容子集）。 */
+export interface LinkedCalendarEvent {
+  id: number
+  scope: string
+  title: string
+  start: string
+  end?: string | null
+  allDay?: boolean
+  taskId?: string | null
+  goalId?: string | null
+  recurring?: boolean
+  occurrenceDate?: string
+}
+
+/**
+ * P2-5 双向关联：查询某任务/目标关联的日程（team-hub `/api/calendar/events/by-link`）。
+ * 带 from/to → 重复事件展开为实例；不带 → 每条事件一行（首次实例日）。
+ * 读失败时由调用方决定降级（详情面板显示「暂无关联日程」），与 fetchHubOverlaps 同风格。
+ */
+export async function fetchHubCalendarByLink(opts: { taskId?: string; goalId?: string; from?: string; to?: string }): Promise<LinkedCalendarEvent[]> {
+  const qs = new URLSearchParams()
+  if (opts.taskId) qs.set('taskId', opts.taskId)
+  if (opts.goalId) qs.set('goalId', opts.goalId)
+  if (opts.from) qs.set('from', opts.from)
+  if (opts.to) qs.set('to', opts.to)
+  const res = await fetch(`${hubBase()}/api/calendar/events/by-link?${qs.toString()}`, { headers: authHeaders() })
+  if (!res.ok) throw new Error(`calendar by-link ${res.status}`)
+  const data = (await res.json()) as { events?: LinkedCalendarEvent[] }
+  return Array.isArray(data.events) ? data.events : []
+}
+
 async function hubPost(path: string, body: Record<string, unknown>): Promise<unknown> {
   // 写请求带超时（20s）：防止代理/中枢无响应时界面无限"卡住"（发布目标等操作无感知失败）。
   const ctrl = new AbortController()

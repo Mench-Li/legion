@@ -480,7 +480,7 @@ export default function App(): React.JSX.Element {
           ) : active === 'browser' ? (
             <BrowserView />
           ) : active === 'calendar' ? (
-            <CalendarView scope={scope} hubMode={hubMode} />
+            <CalendarView scope={scope} hubMode={hubMode} onGoHome={() => setActive('home')} />
           ) : active === 'notify' ? (
             <NotifyView
               scope={scope}

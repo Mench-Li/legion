@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
-import { execRequest, fetchHubActivity, fetchHubDocContent, fetchHubOverlaps, fetchHubTask, fetchHubTasks, hubClaim, hubComment, hubHold, hubReassign, hubReviewNote, hubTransition } from '../api'
+import { execRequest, fetchHubActivity, fetchHubCalendarByLink, fetchHubDocContent, fetchHubOverlaps, fetchHubTask, fetchHubTasks, hubClaim, hubComment, hubHold, hubReassign, hubReviewNote, hubTransition } from '../api'
 import type { AuditPatch, HubActivity, HubDocContent, HubTask, OverlapGroup, ReviewNote } from '../types'
+import type { LinkedCalendarEvent } from '../api'
+import { fmtRange, occKey } from '../calendar'
 import MarkdownDocView from './MarkdownDocView'
 import { toast } from './Toast'
 
@@ -147,6 +149,8 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
   const [busy, setBusy] = useState(false)
   const [auditOpen, setAuditOpen] = useState<Record<string, boolean>>({})
   const [overlaps, setOverlaps] = useState<OverlapGroup[]>([])
+  /** P2-5 双向关联：本任务关联的日程（null = 加载中）。 */
+  const [calEvents, setCalEvents] = useState<LinkedCalendarEvent[] | null>(null)
   // —— S5：产出文档直达区（打开中的产物条目下标 + 按条目缓存的内容状态）——
   const [docOpen, setDocOpen] = useState<number | null>(null)
   const [docState, setDocState] = useState<Record<number, { status: 'loading' | 'ok' | 'err'; data?: HubDocContent; message?: string }>>({})
@@ -176,6 +180,16 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
         setOverlaps(ov.groups)
       } catch {
         setOverlaps([])
+      }
+      // P2-5 双向关联：本任务关联的日程（今天起一年窗口内展开重复实例）
+      try {
+        const from = new Date()
+        const to = new Date(from.getTime() + 365 * 24 * 60 * 60 * 1000)
+        const p = (n: number): string => String(n).padStart(2, '0')
+        const dk = (d: Date): string => String(d.getFullYear()) + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
+        setCalEvents(await fetchHubCalendarByLink({ taskId, from: dk(from), to: dk(to) }))
+      } catch {
+        setCalEvents([]) // hub 不可达/无关联 → 区块显示「暂无关联日程」，不影响详情其余部分
       }
       setErr(null)
     } catch (e) {
@@ -589,6 +603,28 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
               )}
             </div>
           )}
+
+          {/* P2-5 双向关联：本任务关联的日程（事件带 taskId；支持重复实例展开与点击跳回日程面板）*/}
+          <div className="td-section">
+            <div className="td-section-title">
+              📅 关联日程{calEvents !== null ? `（${String(calEvents.length)}）` : ''}
+              <span style={{ marginLeft: 8, fontSize: 10, color: 'var(--muted-2)' }}>（日程面板里把「任务号」填成本任务号即可建立关联）</span>
+            </div>
+            {calEvents === null ? (
+              <div style={{ fontSize: 11, color: 'var(--muted-2)' }}>加载中…</div>
+            ) : calEvents.length === 0 ? (
+              <div style={{ fontSize: 11, color: 'var(--muted-2)' }}>暂无关联日程</div>
+            ) : (
+              calEvents.map(ev => (
+                <div key={String(ev.id) + '@' + occKey(ev)} style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 11.5, lineHeight: 1.9 }}>
+                  <span style={{ color: 'var(--muted-2)', fontVariantNumeric: 'tabular-nums' }}>{occKey(ev)}</span>
+                  {ev.recurring === true && <span title="重复日程">🔁</span>}
+                  <span style={{ flex: 1, minWidth: 0, wordBreak: 'break-word' }}>{ev.title}</span>
+                  <span style={{ color: 'var(--muted-2)' }}>{ev.allDay === true ? '全天' : fmtRange(ev)}</span>
+                </div>
+              ))
+            )}
+          </div>
 
           {/* 状态时间线 */}
           {timeline.length > 0 && (

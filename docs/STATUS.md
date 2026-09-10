@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-10　`run-ci --only test` **28 套件 / 591 测试全 PASS**（158s）—— 以本文件所在提交为准
+**最近一次全量基线**：2026-09-10　`run-ci --only test` **29 套件 / 620 测试全 PASS**（129s）—— 以本文件所在提交为准
 
 ---
 
@@ -52,17 +52,17 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 | --- | --- | --- | --- |
 | chat | 42 | contracts | 56 |
 | skills | 20 | v1v2-contract | 14 |
-| calendar | 13 | team-hub-parity | 1 |
+| calendar（P2-5 含重复展开/更新/冲突/关联） | 29 | team-hub-parity | 1 |
 | spaces | 5 | dedupe | 9 |
-| goal | 14 | notify（P2-4 含真实 hub SSE 断线重连） | 15 |
-| rules | 7 | dual-write | 2 |
-| artifact | 16 | p13-host-injection | 6 |
-| security | 6 | whiteboard | 70 |
-| read-auth | 14 | plugins | 135 |
-| files-api | 41 | board-plugin | 37 |
-| web | 24 | scrum | 25 |
-| doc-render | 11 | skill-importer | 4 |
-| hub-board / artifact-policy | 1 / 3 | — | — |
+| goal | 14 | calendar-ui（P2-5 前端纯函数） | 12 |
+| rules | 7 | notify（P2-4 含真实 hub SSE 断线重连） | 15 |
+| artifact | 16 | dual-write | 2 |
+| security | 6 | p13-host-injection | 6 |
+| read-auth | 14 | whiteboard | 70 |
+| files-api | 41 | plugins | 135 |
+| web | 24 | board-plugin | 37 |
+| doc-render | 11 | scrum | 25 |
+| skill-importer | 4 | hub-board / artifact-policy | 1 / 3 |
 
 其他阶段：`--only doc`（文档新鲜度 + 历史 evidence banner 覆盖）、`--only build|smoke|env|deps|stage`。
 部署与回滚：`docs/DEPLOY.md`。现场（真实宿主）验收脚本：`scripts/live/p11-step2-verify.mjs`。
@@ -97,6 +97,9 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
    无超时关闭），浏览器行为以现场为准。
 6. 生产宿主 `/team-hub` 与 8787 双进程写同库：已通过事务内取号保证一致性，但两进程的
    `audit` 广播各自独立（事件流不跨进程合并）；消费方以 SSE 连接的那个实例为准。
+7. 日程日历（P2-5）：**时间为字面本地时间，不做时区换算**（跨时区协作需人工换算）；
+   重复仅支持简单规则（日/周/月 + 间隔 + 结束条件 + 例外日），不支持「单次修改」与按星期几的复杂规则；
+   冲突检测只提示不阻断；单窗展开上限 400 实例（超出抛错，不静默截断）。
 
 ## 5. 维护约定
 

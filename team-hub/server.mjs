@@ -48,7 +48,10 @@
  *   POST /api/chat/replies/answer|retry|fail       回复状态回写（CAS awaiting→replied/failed；幂等；S9/S10）
  *   GET/POST /api/chat/conversations|messages       对话中心（会话/消息；scope 分区；写 by 必填 + audit/SSE，见 S1）
  *   GET/POST /api/calendar/events                 日程日历事件（scope 过滤 + 日期窗 [from,to] 闭区间；写 by 必填 + audit/SSE，见 S5）
+ *   POST /api/calendar/events/update              更新日程事件（局部更新 + scope 归属校验；audit calendar:update）
  *   POST /api/calendar/events/delete              删除日程事件（id + confirm=yes + scope 归属校验；audit calendar:delete）
+ *   GET  /api/calendar/conflicts                  冲突检测（start/end/allDay/excludeId；返回重叠实例，仅提示不阻断）
+ *   GET  /api/calendar/events/by-link             按 taskId/goalId 查关联日程（任务详情双向展示用）
  *   GET  /api/spaces/impact?id=                   删除预检（只读计数 + 在办任务列表；S7/R-3）
  *   GET  /api/artifact/content?task=&i=            任务登记产物文件内容（R-3/S3 只读：md/txt 预览 + 截断/二进制降级 + 错误码 400/403/404 可区分）
  *
@@ -389,12 +392,21 @@ db.exec(`
     start TEXT NOT NULL,
     end TEXT,
     all_day INTEGER NOT NULL DEFAULT 0,
+    taskId TEXT,
+    goalId TEXT,
+    recurrence TEXT,
     meta TEXT DEFAULT '{}',
     createdAt TEXT,
     updatedAt TEXT
   )
 `)
 db.exec('CREATE INDEX IF NOT EXISTS idx_calendar_scope_start ON calendar_events (scope, start, id)')
+// P2-5 增量列（幂等，零迁移脚本）：老库自动补列；已存在则 ALTER 抛错被吞。
+for (const col of ['taskId TEXT', 'goalId TEXT', 'recurrence TEXT']) {
+  try { db.exec('ALTER TABLE calendar_events ADD COLUMN ' + col) } catch { /* 列已存在 */ }
+}
+db.exec('CREATE INDEX IF NOT EXISTS idx_calendar_task ON calendar_events (taskId, start)')
+db.exec('CREATE INDEX IF NOT EXISTS idx_calendar_goal ON calendar_events (goalId, start)')
 // ── 规范（rules）：全局规范层 + 空间层扩展点（R-2，S4；RESEARCH K3-A）──
 // 老库自动建表（CREATE TABLE IF NOT EXISTS 幂等，零迁移）。key = scope（全局层固定 'global'，空间层预留扩展点）；
 // content 为规范文本（markdown），长度受 MAX_RULES_LEN 护栏；写走统一 handleWrite（audit rules:update + SSE）。
@@ -1482,14 +1494,25 @@ export function chatHealth(rawScope) {
   }
 }
 
-// ── 日程日历（calendar）DAO：事件 CRUD + 日期窗（R-B1 数据面，S5；scope 分区 + 统一写纪律）──
-// 写纪律（同 chat I-3）：createCalendarEvent / deleteCalendarEvent 内部一律 audit()（by 必填 + SSE 广播），
+// ── 日程日历（calendar）DAO：事件 CRUD + 日期窗 + 重复展开 + 冲突检测 + 任务/目标关联（R-B1 数据面，S5/P2-5）──
+// 写纪律（同 chat I-3）：create/update/deleteCalendarEvent 内部一律 audit()（by 必填 + SSE 广播），
 // 机制复用 audit() 与 /api/events 单一事件流（I-8）；author/member 恒等于 by（防冒名）。
+//
+// P2-5 语义决策（用户拍板，见 docs/REMAINING-TASKS.md P2-5）：
+//   ① **时间语义 = 字面本地时间（naive local）**：start/end 原样存储、原样返回、不做时区换算
+//      （既不转 UTC 也不套浏览器时区）；跨时区参与者需自行换算。理由：本地优先单机部署、
+//      全天 date-only 事件语义天然正确、零迁移、无 DST 陷阱。
+//   ② **重复 = 简单规则**（daily/weekly/monthly + interval + until/count + 例外日），
+//      规则存列、**查询侧展开**成实例（不落多行），单次例外用 exdates 排除；删除支持「仅本次」与「整串」。
+//   ③ **关联 = 双向**：事件可带 taskId/goalId（入库列），并提供反向查询端点供任务详情展示关联日程。
 export const MAX_CALENDAR_TITLE = 100 // 事件标题长度上限（⚖️ 三值法断言的常量，见 TEST_CASES §3）
+export const MAX_CALENDAR_INSTANCES = 400 // 单条重复规则在查询窗内的展开上限（防失控放大）
 
 // 时间入参解析：接受 YYYY-MM-DD（date-only，全天事件）或 YYYY-MM-DDTHH:mm[:ss][Z]；
 // 逐分量范围校验 + Date.UTC 回环校验（拒 2026-13-99 / 2026-02-30 / garbage 等）；
 // 返回 { raw（规范化原样存储）, date（YYYY-MM-DD 日期前缀，窗过滤用）, key（UTC 毫秒，end>=start 排序比较用）}。
+// ⚠️ 字面语义：这里用 Date.UTC 仅作**单调比较/运算**，不表示该值被解释为 UTC 时刻；
+//    存储与返回一律用 raw 原样字符串（naive local），故 'Z' 后缀被接受但不去做时区换算。
 export function parseCalendarTime(raw, label = '时间') {
   if (raw === undefined || raw === null) throw new Error(`缺少参数 ${label}`)
   if (typeof raw !== 'string' || raw.trim().length === 0) throw new Error(`${label} 必须是合法时间字符串`)
@@ -1510,7 +1533,102 @@ export function parseCalendarTime(raw, label = '时间') {
   return { raw: v, date: `${m[1]}-${m[2]}-${m[3]}`, key: dt.getTime() }
 }
 
+// ── 重复规则（P2-5）：{ freq: 'daily'|'weekly'|'monthly', interval ≥1, until?: 'YYYY-MM-DD', count?: N, exdates?: ['YYYY-MM-DD'] } ──
+/** 规则校验与规范化（null/undefined → null = 单次事件）。 */
+export function parseRecurrence(raw, label = 'recurrence') {
+  if (raw === undefined || raw === null) return null
+  if (typeof raw !== 'object' || Array.isArray(raw)) throw new Error(`${label} 必须是对象`)
+  const freq = raw.freq
+  if (freq !== 'daily' && freq !== 'weekly' && freq !== 'monthly') throw new Error(`${label}.freq 必须是 daily/weekly/monthly`)
+  const intervalRaw = raw.interval === undefined || raw.interval === null ? 1 : Number(raw.interval)
+  if (!Number.isInteger(intervalRaw) || intervalRaw < 1 || intervalRaw > 99) throw new Error(`${label}.interval 必须是 1-99 的整数`)
+  const out = { freq, interval: intervalRaw }
+  if (raw.until !== undefined && raw.until !== null && String(raw.until).trim() !== '') {
+    out.until = parseCalendarTime(String(raw.until), `${label}.until`).date
+  }
+  if (raw.count !== undefined && raw.count !== null && String(raw.count).trim() !== '') {
+    const c = Number(raw.count)
+    if (!Number.isInteger(c) || c < 1 || c > MAX_CALENDAR_INSTANCES) throw new Error(`${label}.count 必须是 1-${MAX_CALENDAR_INSTANCES} 的整数`)
+    out.count = c
+  }
+  if (out.until && out.count) throw new Error(`${label}：until 与 count 不可同时指定（结束条件二选一）`)
+  if (raw.exdates !== undefined && raw.exdates !== null) {
+    if (!Array.isArray(raw.exdates)) throw new Error(`${label}.exdates 必须是日期数组`)
+    const dates = [...new Set(raw.exdates.map((d) => parseCalendarTime(String(d), `${label}.exdates`).date))]
+    if (dates.length > MAX_CALENDAR_INSTANCES) throw new Error(`${label}.exdates 过多（上限 ${MAX_CALENDAR_INSTANCES}）`)
+    if (dates.length > 0) out.exdates = dates.sort()
+  }
+  return out
+}
+
+/** 日期算术（纯字符串/Y-M-D 分量，避免时区参与）。 */
+function ymdParts(dateStr) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr)
+  if (!m) throw new Error(`非法日期：${dateStr}`)
+  return { y: Number(m[1]), mo: Number(m[2]), d: Number(m[3]) }
+}
+function ymdOf(dt) {
+  const p = (n) => String(n).padStart(2, '0')
+  return String(dt.getUTCFullYear()) + '-' + p(dt.getUTCMonth() + 1) + '-' + p(dt.getUTCDate())
+}
+/** 在 date-only 的 UTC 网格上加减天数（纯日期运算，无时区语义）。 */
+function addDays(dateStr, n) {
+  const { y, mo, d } = ymdParts(dateStr)
+  return ymdOf(new Date(Date.UTC(y, mo - 1, d + n)))
+}
+/** 月份推进：钳制日（1/31 每月 → 2/28、4/30），不产生"跳过整月"。 */
+function addMonthsClamped(dateStr, n) {
+  const { y, mo, d } = ymdParts(dateStr)
+  const total = (y * 12 + (mo - 1)) + n
+  const ty = Math.floor(total / 12)
+  const tm = (total % 12) + 1
+  const lastDay = new Date(Date.UTC(ty, tm, 0)).getUTCDate()
+  return ymdOf(new Date(Date.UTC(ty, tm - 1, Math.min(d, lastDay))))
+}
+
+/**
+ * 把一条（可能重复的）事件展开为 [from,to] 窗内的实例日期列表（date-only，闭区间）。
+ * 规则：从 start 日期起按 interval 步进（daily=天 / weekly=7 天 / monthly=月），
+ * 依次应用 count（计数上限，含被例外的实例）与 until（日期上界），跳过 exdates；
+ * 上限 MAX_CALENDAR_INSTANCES 防放大失控（超出即抛错，要求收窄窗或调整规则）。
+ *
+ * monthly 关键细节：**每次都以原始 start 的日号**计算第 k 次（addMonthsClamped(start, k*interval)），
+ * 而不是在钳制后的日期上继续步进——否则 1/31 → 2/28 → 3/28 会持续漂移（丢失月末语义）。
+ */
+export function expandCalendarDates(event, from, to) {
+  const startDate = String(event.start).slice(0, 10)
+  const rec = event.recurrence ?? null
+  if (rec === null) {
+    return startDate >= from && startDate <= to ? [startDate] : []
+  }
+  const exdates = new Set(rec.exdates ?? [])
+  const out = []
+  let produced = 0 // 规则自身产生的实例计数（含例外，用于 count 语义）
+  const stepDays = rec.freq === 'daily' ? 1 : rec.freq === 'weekly' ? 7 : 0
+  let guard = 0
+  for (let k = 0; ; k++) {
+    if (guard++ > MAX_CALENDAR_INSTANCES * 4) throw new Error(`重复事件展开超出上限（规则或窗过大）：事件 ${event.id}`)
+    // 第 k 个实例：monthly 始终基于 start 的日号（月内日钳制），其余按天数步进
+    const day = rec.freq === 'monthly' ? addMonthsClamped(startDate, k * rec.interval) : addDays(startDate, k * stepDays * rec.interval)
+    if (rec.until && day > rec.until) break
+    produced += 1
+    if (rec.count && produced > rec.count) break
+    if (day > to) break // 窗右侧：日期单调递增，可直接停
+    if (day >= from && !exdates.has(day)) {
+      out.push(day)
+      if (out.length > MAX_CALENDAR_INSTANCES) throw new Error(`重复事件在窗口内实例过多（上限 ${MAX_CALENDAR_INSTANCES}）：事件 ${event.id}`)
+    }
+    if (k > 0 && day <= (rec.freq === 'monthly' ? addMonthsClamped(startDate, (k - 1) * rec.interval) : addDays(startDate, (k - 1) * stepDays * rec.interval))) {
+      throw new Error(`重复规则未推进（内部错误）：事件 ${event.id}`)
+    }
+  }
+  return out
+}
+
+/** 事件对象映射（含 P2-5 新字段：taskId/goalId/recurrence）。
+ *  occurrenceDate/recurring 在单条读取时按「首次实例」给出，列表展开时按实例覆盖。 */
 function eventToObj(row) {
+  const rec = parseJson(row.recurrence, null)
   return {
     id: row.id,
     scope: row.scope,
@@ -1518,6 +1636,11 @@ function eventToObj(row) {
     start: row.start,
     end: row.end ?? null,
     allDay: row.all_day === 1,
+    taskId: row.taskId ?? null,
+    goalId: row.goalId ?? null,
+    recurrence: rec,
+    occurrenceDate: String(row.start).slice(0, 10),
+    recurring: rec !== null,
     meta: parseJson(row.meta, {}),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -1531,37 +1654,112 @@ export function getCalendarEvent(id) {
   return eventToObj(row)
 }
 
+/** 关联字段校验：任务/目标 id 为 T-xxx / G-xxx 形状或 null（空串视为未关联）。 */
+function parseCalendarLink(raw, label) {
+  if (raw === undefined || raw === null) return null
+  const v = String(raw).trim()
+  if (v.length === 0) return null
+  if (v.length > 64) throw new Error(`${label} 过长（≤64 字符）`)
+  return v
+}
+
+/** 公共入参校验（create/update 共用）：title/start/end/allDay/link/recurrence。 */
+function validateCalendarInput(input, { partial }) {
+  const out = {}
+  if (!partial || input?.title !== undefined) {
+    const title = input?.title
+    if (typeof title !== 'string' || title.trim().length === 0) throw new Error('缺少参数 title')
+    if (title.trim().length > MAX_CALENDAR_TITLE) throw new Error(`标题过长（上限 ${MAX_CALENDAR_TITLE} 字符）`)
+    out.title = title.trim()
+  }
+  let start = null
+  if (!partial || input?.start !== undefined) {
+    start = parseCalendarTime(input?.start, 'start')
+    out.start = start.raw
+  }
+  if (!partial || input?.end !== undefined) {
+    const endRaw = input?.end
+    if (endRaw === undefined || endRaw === null || String(endRaw).trim() === '') out.end = null
+    else {
+      const end = parseCalendarTime(endRaw, 'end')
+      if (start && end.key < start.key) throw new Error('end 必须 ≥ start（事件结束不得早于开始）')
+      out.end = end.raw
+      out._endKey = end.key
+    }
+  }
+  if (!partial || input?.allDay !== undefined) out.allDay = input?.allDay === true
+  if (!partial || input?.taskId !== undefined) out.taskId = parseCalendarLink(input?.taskId, 'taskId')
+  if (!partial || input?.goalId !== undefined) out.goalId = parseCalendarLink(input?.goalId, 'goalId')
+  if (!partial || input?.recurrence !== undefined) out.recurrence = parseRecurrence(input?.recurrence)
+  if (!partial || input?.meta !== undefined) {
+    out.meta = input?.meta !== null && typeof input?.meta === 'object' && !Array.isArray(input.meta) ? input.meta : {}
+  }
+  return out
+}
+
 /** 创建事件（by + scope 必填 + 审计/SSE）；start 必填可解析、end 可选须 ≥ start、title ≤ MAX_CALENDAR_TITLE。 */
 export function createCalendarEvent(input) {
   const by = input?.by
   if (typeof by !== 'string' || by.trim().length === 0) throw new Error('缺少操作者身份 by')
   const scope = input?.scope
   if (typeof scope !== 'string' || scope.trim().length === 0) throw new Error('缺少参数 scope（日程事件须归属明确的工作空间）')
-  const title = input?.title
-  if (typeof title !== 'string' || title.trim().length === 0) throw new Error('缺少参数 title')
-  if (title.trim().length > MAX_CALENDAR_TITLE) throw new Error(`标题过长（上限 ${MAX_CALENDAR_TITLE} 字符）`)
-  const start = parseCalendarTime(input?.start, 'start')
-  const endRaw = input?.end
-  let end = null
-  if (endRaw !== undefined && endRaw !== null && String(endRaw).trim() !== '') {
-    end = parseCalendarTime(endRaw, 'end')
-    if (end.key < start.key) throw new Error('end 必须 ≥ start（事件结束不得早于开始）')
-  }
-  const allDay = input?.allDay === true
-  const meta = input?.meta !== null && typeof input?.meta === 'object' && !Array.isArray(input.meta) ? input.meta : {}
+  const v = validateCalendarInput(input, { partial: false })
   return withTx(() => {
     const t = now()
-    const r = db.prepare('INSERT INTO calendar_events (scope, title, start, end, all_day, meta, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(scope.trim(), title.trim(), start.raw, end ? end.raw : null, allDay ? 1 : 0, JSON.stringify(meta), t, t)
+    const r = db.prepare('INSERT INTO calendar_events (scope, title, start, end, all_day, taskId, goalId, recurrence, meta, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(scope.trim(), v.title, v.start, v.end, v.allDay ? 1 : 0, v.taskId, v.goalId, v.recurrence ? JSON.stringify(v.recurrence) : null, JSON.stringify(v.meta), t, t)
     const ev = getCalendarEvent(Number(r.lastInsertRowid))
-    audit(by, ev.scope, 'calendar:create', null, { event: ev.id, title: ev.title, start: ev.start, end: ev.end, allDay: ev.allDay })
+    audit(by, ev.scope, 'calendar:create', null, { event: ev.id, title: ev.title, start: ev.start, end: ev.end, allDay: ev.allDay, taskId: ev.taskId, goalId: ev.goalId, recurrent: ev.recurrence !== null })
     return ev
   })
 }
 
 /**
- * 事件列表：scope 过滤（缺省 = 全部，与 chat listConversations 同构）+ 日期窗 [from,to]（闭区间，
- * 按 start 的 YYYY-MM-DD 日期前缀比较，全天 date-only 事件同口径，R-16）；排序 start asc、id asc（稳定）。
+ * 更新事件（P2-5 新增）：局部更新（仅传要改的字段）+ scope 归属校验（越权不可改）+ 审计 calendar:update。
+ * start 变更时若未同时给 end，则重新校验旧的 end ≥ 新 start（避免产生倒序区间）。
+ */
+export function updateCalendarEvent(input) {
+  const by = input?.by
+  if (typeof by !== 'string' || by.trim().length === 0) throw new Error('缺少操作者身份 by')
+  const scope = input?.scope
+  if (typeof scope !== 'string' || scope.trim().length === 0) throw new Error('缺少参数 scope（更新须指明事件所属空间）')
+  const id = Number(input?.id)
+  if (!Number.isInteger(id) || id <= 0) throw new Error('缺少参数 id')
+  return withTx(() => {
+    const ev = getCalendarEvent(id)
+    if (ev.scope !== scope.trim()) throw new Error(`越权：事件 ${id} 属于 scope=${ev.scope}，不能用 scope=${scope.trim()} 更新`)
+    const v = validateCalendarInput(input, { partial: true })
+    // start 单独变更时的 end 校验（end 未随请求给出 → 用既有 end 兜底比较）
+    if (v.start !== undefined && v.end === undefined && ev.end) {
+      const newStart = parseCalendarTime(v.start, 'start')
+      const oldEnd = parseCalendarTime(ev.end, 'end')
+      if (oldEnd.key < newStart.key) throw new Error('end 必须 ≥ start（事件结束不得早于开始）')
+    }
+    const sets = []
+    const params = []
+    const assign = (col, val) => { sets.push(col + ' = ?'); params.push(val) }
+    if (v.title !== undefined) assign('title', v.title)
+    if (v.start !== undefined) assign('start', v.start)
+    if (v.end !== undefined) assign('end', v.end)
+    if (v.allDay !== undefined) assign('all_day', v.allDay ? 1 : 0)
+    if (v.taskId !== undefined) assign('taskId', v.taskId)
+    if (v.goalId !== undefined) assign('goalId', v.goalId)
+    if (v.recurrence !== undefined) assign('recurrence', v.recurrence ? JSON.stringify(v.recurrence) : null)
+    if (v.meta !== undefined) assign('meta', JSON.stringify(v.meta))
+    if (sets.length === 0) throw new Error('没有可更新字段（title/start/end/allDay/taskId/goalId/recurrence/meta 至少一项）')
+    assign('updatedAt', now())
+    params.push(id)
+    db.prepare('UPDATE calendar_events SET ' + sets.join(', ') + ' WHERE id = ?').run(...params)
+    const next = getCalendarEvent(id)
+    audit(by, next.scope, 'calendar:update', null, { event: id, title: next.title, fields: sets.map(s => s.split(' ')[0]).filter(c => c !== 'updatedAt') })
+    return next
+  })
+}
+
+/**
+ * 事件列表：scope 过滤（缺省 = 全部，与 chat listConversations 同构）+ 日期窗 [from,to]（闭区间）。
+ * P2-5：**重复事件在窗内展开**为实例（同一 id 多个日期，`occurrenceDate` 标注实例日、`recurring:true`），
+ * 单次事件行为不变（`occurrenceDate` = 其 start 日期）。排序 occurrenceDate asc、start asc、id asc（稳定）。
  */
 export function listCalendarEvents({ scope, from, to } = {}) {
   const conds = []
@@ -1570,18 +1768,115 @@ export function listCalendarEvents({ scope, from, to } = {}) {
   let f, t
   if (from !== undefined && from !== null && String(from).trim() !== '') {
     f = parseCalendarTime(String(from), 'from')
-    conds.push('substr(start, 1, 10) >= ?'); params.push(f.date)
   }
   if (to !== undefined && to !== null && String(to).trim() !== '') {
     t = parseCalendarTime(String(to), 'to')
-    conds.push('substr(start, 1, 10) <= ?'); params.push(t.date)
   }
   if (f && t && f.date > t.date) throw new Error('日期窗非法：from 不得晚于 to')
-  const sql = `SELECT * FROM calendar_events${conds.length ? ' WHERE ' + conds.join(' AND ') : ''} ORDER BY start ASC, id ASC`
-  return db.prepare(sql).all(...params).map(eventToObj)
+  // 窗下界需前推：重复事件可能在窗之前开始（DB 层按 start 前缀过滤会漏掉），因此
+  // 有窗时只用 scope 过滤取候选，再在内存按展开结果精确过滤；无窗时退化为原语义（全部事件）。
+  const sql = `SELECT * FROM calendar_events${conds.length ? ' WHERE ' + conds.join(' AND ') : ''}`
+  const rows = db.prepare(sql).all(...params).map(eventToObj)
+  // 无窗 = 不展开（每条事件一行，occurrenceDate 为其首次实例日，避免无界重复规则被强行展开）
+  if (!f && !t) return rows.sort(compareOccurrence)
+  const winFrom = f ? f.date : '0000-01-01'
+  const winTo = t ? t.date : '9999-12-31'
+  const out = []
+  for (const ev of rows) {
+    const dates = expandCalendarDates(ev, winFrom, winTo)
+    if (dates.length === 0) continue
+    const recurring = ev.recurrence !== null
+    for (const day of dates) out.push({ ...ev, occurrenceDate: day, recurring })
+  }
+  return out.sort(compareOccurrence)
 }
 
-/** 删除事件：二次确认 confirm=yes + scope 归属校验（越权不可删他人空间事件）+ 审计 calendar:delete。 */
+/** 实例排序：实例日 → 原始 start → id（稳定）。 */
+function compareOccurrence(a, b) {
+  if (a.occurrenceDate !== b.occurrenceDate) return a.occurrenceDate < b.occurrenceDate ? -1 : 1
+  if (a.start !== b.start) return a.start < b.start ? -1 : 1
+  return a.id - b.id
+}
+
+/**
+ * 冲突检测（P2-5）：给定时间区间，返回同 space 内与之重叠的事件（展开后的实例区间）。
+ * 规则：全天事件按整天 [date, date+1) 参与比较；非全天用 [start, end)（end 缺省 = start 起 1 小时，
+ * 与前端默认时长一致）；同一事件可返回多个实例。仅作提示，**不阻断写入**。
+ */
+export function findCalendarConflicts({ scope, start, end, allDay = false, excludeId = null } = {}) {
+  const s = parseCalendarTime(start, 'start')
+  const e = end !== undefined && end !== null && String(end).trim() !== '' ? parseCalendarTime(end, 'end') : null
+  const startMs = s.key
+  const endMs = e ? e.key : s.key + 60 * 60 * 1000
+  if (endMs < startMs) throw new Error('end 必须 ≥ start')
+  const dayStart = s.date
+  const dayEndExclusive = addDays(e ? e.date : s.date, 1)
+  const winFrom = allDay ? dayStart : addDays(dayStart, -1)
+  const winTo = allDay ? addDays(dayEndExclusive, 0) : addDays(e ? e.date : s.date, 1)
+  const candidates = listCalendarEvents({ scope, from: winFrom, to: winTo })
+  const out = []
+  for (const ev of candidates) {
+    if (excludeId !== null && ev.id === Number(excludeId)) continue
+    let aStart, aEnd
+    if (ev.allDay) {
+      const d = ev.occurrenceDate
+      aStart = parseCalendarTime(d, 'start').key
+      aEnd = parseCalendarTime(addDays(d, 1), 'end').key
+    } else {
+      const day = ev.occurrenceDate
+      const timeOf = (raw, fallback) => {
+        const m = /T(\d{2}):(\d{2})(?::(\d{2}))?/.exec(String(raw))
+        if (!m) return null
+        return day + 'T' + m[1] + ':' + m[2] + (m[3] ? ':' + m[3] : '')
+      }
+      const sTxt = timeOf(ev.start)
+      if (sTxt === null) continue // date-only 但非 allDay：无时间点，不参与区间冲突
+      aStart = parseCalendarTime(sTxt, 'start').key
+      const eTxtRaw = ev.end ? timeOf(ev.end) : null
+      const eTxt = eTxtRaw === null ? null : (String(ev.end).length <= 10 ? day + 'T23:59:59' : eTxtRaw)
+      aEnd = eTxt === null ? aStart + 60 * 60 * 1000 : parseCalendarTime(eTxt, 'end').key
+      // 跨日 end（end 日期 > start 日期）：按原始差值补齐天数
+      if (ev.end && String(ev.end).length > 10 && String(ev.end).slice(0, 10) !== String(ev.start).slice(0, 10)) {
+        const sameDayDiff = parseCalendarTime(String(ev.end).slice(0, 10) + 'T00:00', 'x').key - parseCalendarTime(String(ev.start).slice(0, 10) + 'T00:00', 'x').key
+        aEnd += sameDayDiff
+      }
+    }
+    if (aStart < endMs && aEnd > startMs) {
+      out.push({ id: ev.id, title: ev.title, occurrenceDate: ev.occurrenceDate, start: ev.start, end: ev.end, allDay: ev.allDay, recurring: ev.recurring, overlapMs: Math.min(aEnd, endMs) - Math.max(aStart, startMs) })
+    }
+  }
+  return out.sort((a, b) => (a.occurrenceDate === b.occurrenceDate ? b.overlapMs - a.overlapMs : (a.occurrenceDate < b.occurrenceDate ? -1 : 1)))
+}
+
+/**
+ * 关联查询（P2-5 双向关联）：按 taskId 或 goalId 查关联日程，供任务详情面板展示「关联日程」。
+ * 语义：**带窗**（from/to）→ 重复事件展开为实例；**无窗** → 每条事件返回一行（occurrenceDate =
+ * 首次实例日），不强行展开无界规则（避免把「每天、无结束」这类规则展开爆掉）。
+ */
+export function listCalendarEventsByLink({ taskId = null, goalId = null, from, to } = {}) {
+  const t = parseCalendarLink(taskId, 'taskId')
+  const g = parseCalendarLink(goalId, 'goalId')
+  if (!t && !g) throw new Error('必须指定 taskId 或 goalId')
+  const conds = []
+  const params = []
+  if (t) { conds.push('taskId = ?'); params.push(t) }
+  if (g) { conds.push('goalId = ?'); params.push(g) }
+  const rows = db.prepare('SELECT * FROM calendar_events WHERE ' + conds.join(' OR ') + ' ORDER BY start ASC, id ASC').all(...params).map(eventToObj)
+  if (from === undefined && to === undefined) return rows.sort(compareOccurrence)
+  const winFrom = from !== undefined && from !== null && String(from).trim() !== '' ? parseCalendarTime(String(from), 'from').date : '0000-01-01'
+  const winTo = to !== undefined && to !== null && String(to).trim() !== '' ? parseCalendarTime(String(to), 'to').date : '9999-12-31'
+  const out = []
+  for (const ev of rows) {
+    for (const day of expandCalendarDates(ev, winFrom, winTo)) {
+      out.push({ ...ev, occurrenceDate: day, recurring: ev.recurrence !== null })
+    }
+  }
+  return out.sort(compareOccurrence)
+}
+
+/** 删除事件：二次确认 confirm=yes + scope 归属校验（越权不可删他人空间事件）+ 审计 calendar:delete。
+ *  P2-5 重复事件删除：`mode: 'series'`（默认，整串删除）或 `mode: 'occurrence'` + `occurrenceDate`
+ *  （仅删该实例 → 记入 recurrence.exdates，规则本身保留；已是最后实例时按整串处理并说明）。 */
 export function deleteCalendarEvent(input) {
   const by = input?.by
   if (typeof by !== 'string' || by.trim().length === 0) throw new Error('缺少操作者身份 by')
@@ -1590,12 +1885,29 @@ export function deleteCalendarEvent(input) {
   const id = Number(input?.id)
   if (!Number.isInteger(id) || id <= 0) throw new Error('缺少参数 id')
   if (input?.confirm !== 'yes') throw new Error('缺少二次确认：confirm 必须为 yes')
+  const mode = input?.mode === undefined || input?.mode === null ? 'series' : String(input.mode)
+  if (mode !== 'series' && mode !== 'occurrence') throw new Error('mode 必须是 series（整串）或 occurrence（仅本次）')
   return withTx(() => {
     const ev = getCalendarEvent(id)
     if (ev.scope !== scope.trim()) throw new Error(`越权：事件 ${id} 属于 scope=${ev.scope}，不能用 scope=${scope.trim()} 删除`)
+    if (mode === 'occurrence') {
+      if (ev.recurrence === null) throw new Error('单次事件不支持 occurrence 删除（请用 mode=series 或直接删除）')
+      const day = parseCalendarTime(input?.occurrenceDate, 'occurrenceDate').date
+      if (day < String(ev.start).slice(0, 10)) throw new Error('occurrenceDate 不得早于事件开始日')
+      const exdates = [...new Set([...(ev.recurrence.exdates ?? []), day])].sort()
+      const remaining = expandCalendarDates({ ...ev, recurrence: { ...ev.recurrence, exdates } }, '0000-01-01', '9999-12-31')
+      if (remaining.length === 0) {
+        db.prepare('DELETE FROM calendar_events WHERE id = ?').run(id)
+        audit(by, ev.scope, 'calendar:delete', null, { event: id, title: ev.title, mode: 'occurrence', occurrenceDate: day, seriesRemoved: true })
+        return { deleted: true, event: id, scope: ev.scope, title: ev.title, mode: 'occurrence', occurrenceDate: day, seriesRemoved: true }
+      }
+      db.prepare('UPDATE calendar_events SET recurrence = ?, updatedAt = ? WHERE id = ?').run(JSON.stringify({ ...ev.recurrence, exdates }), now(), id)
+      audit(by, ev.scope, 'calendar:update', null, { event: id, title: ev.title, mode: 'occurrence', occurrenceDate: day, exdates: exdates.length })
+      return { deleted: true, event: id, scope: ev.scope, title: ev.title, mode: 'occurrence', occurrenceDate: day, seriesRemoved: false, remaining: remaining.length }
+    }
     db.prepare('DELETE FROM calendar_events WHERE id = ?').run(id)
-    audit(by, ev.scope, 'calendar:delete', null, { event: id, title: ev.title })
-    return { deleted: true, event: ev.id, scope: ev.scope, title: ev.title }
+    audit(by, ev.scope, 'calendar:delete', null, { event: id, title: ev.title, mode: 'series' })
+    return { deleted: true, event: ev.id, scope: ev.scope, title: ev.title, mode: 'series' }
   })
 }
 
@@ -3077,6 +3389,8 @@ async function handle(req, res, stripPrefix) {
     }
 
     // ── 日程日历（calendar）：事件 REST（scope 必填写纪律 + audit/SSE；写走 handleWrite，见 S5/R-B1 数据面）──
+    // P2-5：+ 更新（局部）/ 冲突检测（只读提示，不阻断）/ 关联查询（taskId|goalId，供任务详情双向展示）；
+    //       列表带日期窗时对重复事件做**实例展开**（occurrenceDate/recurring）。
     if (req.method === 'GET' && path === '/api/calendar/events') {
       try {
         const scopeParam = url.searchParams.get('scope') ?? undefined
@@ -3088,8 +3402,43 @@ async function handle(req, res, stripPrefix) {
       }
       return
     }
+    if (req.method === 'GET' && path === '/api/calendar/conflicts') {
+      try {
+        const scopeParam = url.searchParams.get('scope')
+        if (!scopeParam || scopeParam.trim().length === 0) throw new Error('缺少参数 scope')
+        const conflicts = findCalendarConflicts({
+          scope: scopeParam.trim(),
+          start: url.searchParams.get('start'),
+          end: url.searchParams.get('end'),
+          allDay: url.searchParams.get('allDay') === '1' || url.searchParams.get('allDay') === 'true',
+          excludeId: url.searchParams.get('excludeId'),
+        })
+        json(res, 200, { scope: scopeParam.trim(), conflicts })
+      } catch (e) {
+        json(res, 400, { error: e instanceof Error ? e.message : String(e) })
+      }
+      return
+    }
+    if (req.method === 'GET' && path === '/api/calendar/events/by-link') {
+      try {
+        const events = listCalendarEventsByLink({
+          taskId: url.searchParams.get('taskId'),
+          goalId: url.searchParams.get('goalId'),
+          from: url.searchParams.get('from') ?? undefined,
+          to: url.searchParams.get('to') ?? undefined,
+        })
+        json(res, 200, { taskId: url.searchParams.get('taskId') ?? null, goalId: url.searchParams.get('goalId') ?? null, events })
+      } catch (e) {
+        json(res, 400, { error: e instanceof Error ? e.message : String(e) })
+      }
+      return
+    }
     if (req.method === 'POST' && path === '/api/calendar/events') {
       await handleWrite(req, res, (body, by) => createCalendarEvent({ ...body, by }))
+      return
+    }
+    if (req.method === 'POST' && path === '/api/calendar/events/update') {
+      await handleWrite(req, res, (body, by) => updateCalendarEvent({ ...body, by }))
       return
     }
     if (req.method === 'POST' && path === '/api/calendar/events/delete') {

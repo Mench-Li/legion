@@ -25,6 +25,11 @@ test('白名单：生命周期/目标/空间/模型/技能入列，chat:/progres
   for (const a of ['chat:message', 'chat:create', 'progress', 'comment', 'release-stale', 'exec:on', 'heartbeat', 42, null]) {
     assert.equal(isNotifyAction(a), false, String(a) + ' 不应入列')
   }
+  // P2-5 取舍固定：日历动作**不入通知白名单**——日程由本人创建/修改，进通知只会造成自操作噪音
+  // （审计仍有 calendar:create/update/delete 全量留痕，可在活动流查看）。若日后要放开，请先想清噪音问题。
+  for (const a of ['calendar:create', 'calendar:update', 'calendar:delete']) {
+    assert.equal(isNotifyAction(a), false, a + ' 不应入通知白名单（P2-5 取舍）')
+  }
 })
 
 test('分类：按 action 前缀落到 task/goal/space/model/skill', () => {

@@ -389,9 +389,12 @@ UI 验证采用「纯函数抽取 + 单测」形态（不引入 jsdom/react 渲�
 - 测试：`workbench/scripts/files-p27.test.mjs` 36 例（后端契约，含 HTTP 真路由与 token 门禁）+
   `workbench/scripts/files-ui.test.mjs` 19 例（前端纯判定层），两套件均已注册到 `run-ci` 的 `test` 阶段
   （test 阶段套件数 29 → 31）；`files-api` 41 例不回归。
-  **注意**：本轮**未能**跑完整 `test` 阶段获取全量基线——main 上 `notify-hub-smoke` 套件挂起
-  （非本切片引入：同套件在 `1203f52` 上 2/2 通过并退出，在 `fcbc1bd` / `3339642` 上无输出挂起，
-  期间改动来自 F-01/F-02 合并对 `team-hub/server.mjs` 的修改）。详见 `docs/P2-7-evidence/verify-evidence.md` §7。
+  **注意**：本轮**未能**跑完整 `test` 阶段获取全量基线——main 上 `notify-hub-smoke` 会让该阶段永久等待
+  （非本切片引入：同套件在 `1203f52` 上 2/2 通过并退出，在 `fcbc1bd`/`3339642` 上零输出不结束）。
+  只读诊断已定位根因：`workbench/src/api.ts` L2 `from './hubEventStream'` **缺 `.ts` 扩展名**
+  （Node ESM 解析失败 → 两个测试在 `setup()` 抛错），叠加 `setup()` 先起 hub 子进程、后动态导入且失败路径
+  不 kill 子进程 → 子进程泄漏使测试文件进程不退出，而 `node --test` 会缓冲该文件输出直到其退出。
+  最小修法（一个 token）与加固建议见 `docs/P2-7-evidence/verify-evidence.md` §7。
 - 证据：`docs/P2-7-evidence/verify-evidence.md`。
 
 **已知边界（诚实登记）**：批量下载**逐个触发，不做 zip 打包**（避免自研 zip 写入器）；

@@ -101,11 +101,43 @@ $env:DSH_CHECKOUT='D:\project\DSH\dsh\deepseek-harness'; node scripts\ci\run-ci.
    `ChatView.tsx` 另有未使用变量（`setSseStatus`）。发现方式：在本切片 worktree 里跑构建门禁时
    逐条 locale 到文件行号，并用 `git log -1 -- <file>` 确认来源提交。main 的 `94f8cad`
    （"修复 F-01 合并留下的半成品"）已修复；本次合并演练的集成态 `tsc --noEmit` **全量零错误**。
-2. **`test` 阶段永久挂起（截至本文件撰写仍未修）**：`workbench/scripts/notify-hub-smoke.test.mjs`
-   在 `fcbc1bd` / `3339642` 上运行 2 分钟以上**无任何输出**（同时有两个 hub 子进程存活），
-   而同一文件在 `1203f52`（pre-F-01）上 **2/2 通过并正常退出**（约 50s，用独立对照 worktree 复现）。
-   `git log fcbc1bd..main -- team-hub/server.mjs` 为空 → 该挂起自 `fcbc1bd` 引入后未被改动，
-   而 `1203f52..fcbc1bd` 期间对该文件的改动来自 F-01/F-02 合并。
-   后果：`run-ci --only test` 会一直等待（不是失败，而是**不结束**），全量基线无法产出；
+2. **`test` 阶段永久挂起（根因已定位；只做只读诊断，未改归属方代码）**：
+   `workbench/scripts/notify-hub-smoke.test.mjs` 在 `fcbc1bd` / `3339642` 上运行 2 分钟以上
+   **无任何输出**（同时有 hub 子进程存活），而同一文件在 `1203f52`（pre-F-01）上 **2/2 通过并正常退出**
+   （约 50s，用独立对照 worktree 复现）。`git log fcbc1bd..main -- team-hub/server.mjs` 为空
+   → 该挂起自 `fcbc1bd` 引入后未被改动，而 `1203f52..fcbc1bd` 期间对该文件的改动来自 F-01/F-02 合并。
+
+   **诊断方法（只读）**：加 `--test-force-exit` 重跑同一套件，630ms 内正常结束并打印结果：
+
+   ```
+   node --test --test-force-exit workbench/scripts/notify-hub-smoke.test.mjs
+   → ℹ tests 2 / pass 0 / fail 2
+     Error [ERR_MODULE_NOT_FOUND]: Cannot find module
+     'D:\project\DSH\legion\workbench\src\hubEventStream' imported from workbench\src\api.ts
+   ```
+
+   于是「挂起」被拆成两个彼此独立的问题：
+
+   - **真正的缺陷**：`workbench/src/api.ts` 第 2 行 `import { subscribeHubEventStream } from './hubEventStream'`
+     **缺少 `.ts` 扩展名**（该文件实际存在：`workbench/src/hubEventStream.ts`，F-01 新增）。
+     vite/tsc 走 bundler 解析能过，所以界面构建与运行完全正常；但 Node ESM
+     （`--experimental-strip-types` 直接加载 `src/*.ts` 的测试路径）**要求相对说明符带扩展名**——
+     同一文件里走 Node 解析的导入都带了（`'./notify.ts'`，P2-4 所加），只有这一行漏了。
+     两个测试因此在 `setup()` 的 `await import('../src/api.ts')` 处抛错。
+   - **为什么表现为「挂起」而非「失败」**：`setup()` **先 `boot(port, db)` 起 hub 子进程（L71），
+     再动态导入 api（L80）**；导入抛错使 `setup()` 直接 reject，测试拿不到 `ctx`，
+     `finally { cleanup(ctx) }` 无从 kill 那个子进程（`cleanup` 即 `ctx.hub.child.kill()`，L85-86）
+     → **子进程泄漏**；泄漏的子进程让测试文件进程无法退出，而 `node --test` 会**缓冲一个文件的输出
+     直到该进程退出** → CI 阶段表现为零输出、永久等待。
+
+   **最小修法建议（未实施，供 F-01/F-02 归属方）**：
+
+   1. 必修（一个 token）：`workbench/src/api.ts` L2 → `from './hubEventStream.ts'`。
+   2. 加固：`scripts/ci/run-ci.mjs` 的 test 阶段统一加 `--test-force-exit`
+      （测试已结束/已失败即强制退出，泄漏句柄不再把「失败」伪装成「永不结束」）；
+      或测试侧把 `boot()` 移到动态导入之后 / 在 `setup()` 内 try/catch 保证抛错时 kill 子进程。
+
+   后果与本次应对：`run-ci --only test` 会一直等待（不是失败，而是**不结束**），全量基线无法产出；
    本切片的 3 个套件因此改用单文件方式逐一验证（见 §5），未伪造全量基线数字。
+
 

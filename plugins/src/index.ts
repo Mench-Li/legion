@@ -113,6 +113,16 @@ export interface Config {
   mediateMergeFails: boolean
   /** P1-4.5 技能桥目标目录（默认 ~/.dsh/skills —— DSH 原生扫描 + teamai 同步目标；空串 = 关闭桥）。 */
   dshSkillsDir: string
+  /**
+   * SP-P1 多空间编排：本实例接管的 space id 列表；`'auto'` = hub 里全部**已开通执行**的空间；
+   * `'off'`（默认）= 单空间模式，行为与 P1 之前完全一致（`scope` 即唯一空间）。
+   */
+  scopes: string[] | 'auto' | 'off'
+  /**
+   * 内部字段（P1）：由监督者下发的「主 scope」= 负责维护 daemon.json 兼容文件的那个空间。
+   * 空串 = 本实例自己就是主（单空间部署与 P1 之前行为一致）。
+   */
+  primaryScope: string
 }
 
 export const Config = z.object({
@@ -142,6 +152,9 @@ export const Config = z.object({
   mode: z.union([z.const('worker'), z.const('mediator')]).default('worker'),
   mediateMergeFails: z.boolean().default(true),
   dshSkillsDir: z.string().default(''),
+  // SP-P1：多空间监督者（'off' = 单空间，行为不变）
+  scopes: z.union([z.const('auto'), z.const('off'), z.array(z.string())]).default('off'),
+  primaryScope: z.string().default(''),
 })
 
 /** 任务记录（taskctl 输出的字段子集，按需扩展）。 */
@@ -501,6 +514,24 @@ export function stagesFromHubPayload(raw: unknown): StageDef[] {
 }
 
 export function apply(ctx: AppContext, config: Config): void {
+  // SP-P1：`scopes` 非 'off' → 本实例是**多空间监督者**（自己不做派工，只为每个空间挂一个子实例）；
+  // 'off'（默认）→ 单空间工作实例（P1 之前的既有行为，逐字不变）。
+  if (isSupervisor(config)) superviseSpaces(ctx, config)
+  else spaceWorker(ctx, config)
+}
+
+/** 是否为多空间监督者实例（缺省/未校验的手工配置一律按单空间处理）。 */
+export function isSupervisor(config: Config): boolean {
+  return config.scopes !== undefined && config.scopes !== 'off'
+}
+
+/**
+ * SP-P1：单个空间的士兵守护（P1 之前 apply() 的全部行为）。
+ *
+ * 由 `apply` 直接调用（单空间），或由监督者按空间 mount（多空间）。整个函数体是**同一个空间的闭包状态**
+ * （pipeline / control / inflight / foremen / 日志…），因此「多空间 = 多个实例」而不需要把 3000 行状态改成 Map。
+ */
+function spaceWorker(ctx: AppContext, config: Config): void {
   const SHORT = 'dsh-scrum-worker'
   const logFile = config.logFile || join(homedir(), '.dsh', 'super-injector', SHORT + '.log')
   const log = (msg: string): void => {
@@ -956,9 +987,10 @@ export function apply(ctx: AppContext, config: Config): void {
     lastFailAt: null,
     lastFailReason: '',
   }
-  const daemonStatusFile = config.mode === 'mediator'
-    ? join(config.scrumDir, 'daemon-mediator.json')
-    : join(config.scrumDir, 'daemon.json')
+  // SP-P1：多空间实例各写自己的 per-scope 状态文件；主 scope 额外维护 daemon.json（看板/健康页只认它）。
+  const daemonStatusFiles = config.mode === 'mediator'
+    ? [join(config.scrumDir, 'daemon-mediator.json')]
+    : statusFileNames(config.scope, config.primaryScope).map(f => join(config.scrumDir, f))
   /** P1-4.4 最近一次规则 doctor 报告（daemon.json rulesDoctor 字段数据源；声明前置避免启动 TDZ）。 */
   let lastRuleDoctor: RuleDoctorReport | null = null
   function writeDaemonStatus(inboxCount: number): void {
@@ -1004,8 +1036,10 @@ export function apply(ctx: AppContext, config: Config): void {
             checkedAt: new Date().toISOString(),
           },
       }
-      mkdirSync(dirname(daemonStatusFile), { recursive: true })
-      writeFileSync(daemonStatusFile, `${JSON.stringify(status, null, 2)}\n`)
+      for (const file of daemonStatusFiles) {
+        mkdirSync(dirname(file), { recursive: true })
+        writeFileSync(file, `${JSON.stringify(status, null, 2)}\n`)
+      }
     } catch (e) {
       log(`daemon.json 写入失败：${String(e)}`)
     }
@@ -3476,4 +3510,190 @@ exit 0
   }, `${name}: teardown`)
 
   ctx.logger?.info?.(`[${name}] 士兵守护启动（角色=${config.role}，每 ${config.intervalMs}ms 扫单，并发=${config.maxWorkers}，看板=${config.scrumDir}）`)
+}
+
+// ─────────────────────────── SP-P1 多空间编排（监督者） ───────────────────────────
+// 目标：一个宿主插件行接管 N 个空间，新增空间不再需要改 DSH profile 配置文件。
+// 机制：空间定义与执行配置全部来自数据面（GET /api/spaces + GET /api/pipeline?include=active）；
+//      监督者按 diff 挂载/卸载子实例（ctx.plugin），每个子实例仍是完整的单空间守护（闭包状态独立）。
+// 边界：只接管「数据面已配流水线且 space_runtime.enabled=true」的空间——没有流水线的空间会退化成
+//      单角色认领（认领该 scope 下任意 todo），多空间共用一个实例时风险更大，故宁可跳过并写日志。
+
+/** 子实例日志文件：与父日志同目录、按 scope 命名（多空间共用一份日志会互相淹没）。 */
+export function childLogFile(parentLogFile: string, scope: string): string {
+  if (parentLogFile === '') return ''
+  const safe = scope.replace(/[^A-Za-z0-9_-]/g, '_')
+  return /\.log$/i.test(parentLogFile)
+    ? parentLogFile.replace(/\.log$/i, `-${safe}.log`)
+    : `${parentLogFile}-${safe}`
+}
+
+/**
+ * 守护状态文件名（相对 scrumDir）。
+ *
+ * 兼容策略：看板与健康页只认 `daemon.json`，故**主 scope**（父配置声明的 scope）继续维护它，
+ * 同时也写自己的 per-scope 文件；其余空间只写 per-scope 文件——避免多个实例抢写同一文件，
+ * 这正是 P1 要修的多实例问题之一。
+ */
+export function statusFileNames(scope: string, primaryScope?: string): string[] {
+  const safe = scope.replace(/[^A-Za-z0-9_-]/g, '_')
+  const perScope = `daemon-${safe}.json`
+  const primary = primaryScope === undefined || primaryScope === '' ? undefined : primaryScope
+  return primary === undefined || primary === scope ? ['daemon.json', perScope] : [perScope]
+}
+
+/** 数据面视图：一个空间的执行配置（space_runtime + 流水线环数）。 */
+export interface SpaceRuntimeView {
+  id: string
+  /** space_runtime.enabled —— false 表示该空间暂不由守护接管。 */
+  enabled: boolean
+  maxWorkers?: number
+  isolate?: boolean
+  /** 数据面启用流水线的环数；0 = 未配置（多空间模式下跳过）。 */
+  stages: number
+}
+
+/**
+ * 由「父配置 + 数据面空间视图」算出要挂载的子实例配置（纯函数，便于单测）。
+ *
+ * 跳过条件：不在 scopes 白名单、未开通执行、数据面无流水线。返回顺序与输入一致（稳定）。
+ *
+ * 「主 scope」归属：优先给父配置自己声明的 scope；父 scope 不在接管集合里时**交给第一个空间**——
+ * 否则当父 scope 未开通时没人再维护 `daemon.json`，看板/健康页的守护卡片会永久停留在旧数据。
+ */
+export function planSpaceRunners(parent: Config, spaces: SpaceRuntimeView[]): Config[] {
+  const want = parent.scopes
+  if (want === undefined || want === 'off') return []
+  const allowed = (id: string): boolean => want === 'auto' || want.includes(id)
+  const out: Config[] = []
+  for (const s of spaces) {
+    if (!allowed(s.id)) continue
+    if (!s.enabled) continue
+    if (s.stages <= 0) continue
+    out.push({
+      ...parent,
+      scope: s.id,
+      scopes: 'off' as const,          // 子实例只做单空间派工，不再递归监督
+      primaryScope: '',                // 下面统一指定
+      rolesFile: '',                   // 多空间共用一个 rolesFile 会串味；数据面才是唯一来源
+      logFile: childLogFile(parent.logFile, s.id),
+      ...(typeof s.maxWorkers === 'number' ? { maxWorkers: s.maxWorkers } : {}),
+      ...(typeof s.isolate === 'boolean' ? { isolate: s.isolate } : {}),
+    })
+  }
+  const primary = out.some(c => c.scope === parent.scope) ? parent.scope : (out[0]?.scope ?? '')
+  for (const c of out) c.primaryScope = primary
+  return out
+}
+
+/** 读数据面：空间清单 + 各自执行配置（hubUrl 为空 = 非 hub 模式 → 空数组）。 */
+async function fetchSpaceViews(config: Config): Promise<SpaceRuntimeView[]> {
+  const hub = config.hubUrl.replace(/\/+$/, '')
+  if (hub === '') return []
+  const headers: Record<string, string> = config.hubToken !== '' ? { authorization: `Bearer ${config.hubToken}` } : {}
+  const res = await fetch(`${hub}/api/spaces`, { headers, signal: AbortSignal.timeout(5000) })
+  if (!res.ok) throw new Error(`hub /api/spaces 失败（${res.status}）`)
+  const list = await res.json() as unknown
+  const out: SpaceRuntimeView[] = []
+  for (const item of Array.isArray(list) ? list : []) {
+    const id = typeof (item as { id?: unknown })?.id === 'string' ? (item as { id: string }).id : ''
+    if (id === '') continue
+    const view: SpaceRuntimeView = { id, enabled: false, stages: 0 }
+    try {
+      const r = await fetch(`${hub}/api/pipeline?scope=${encodeURIComponent(id)}&include=active`, { headers, signal: AbortSignal.timeout(5000) })
+      if (r.ok) {
+        const p = await r.json() as { runtime?: { enabled?: unknown; maxWorkers?: unknown; isolate?: unknown }; activeRoles?: unknown }
+        view.enabled = p.runtime?.enabled === true
+        if (typeof p.runtime?.maxWorkers === 'number') view.maxWorkers = p.runtime.maxWorkers
+        if (typeof p.runtime?.isolate === 'boolean') view.isolate = p.runtime.isolate
+        view.stages = Array.isArray(p.activeRoles) ? p.activeRoles.length : 0
+      }
+    } catch { /* 单空间读取失败 → 视为未开通（下一轮再试） */ }
+    out.push(view)
+  }
+  return out
+}
+
+/** 子实例签名：任一「启动期固化」的字段变化 → 重新挂载该空间的子实例。 */
+function runnerSignature(child: Config): string {
+  return JSON.stringify([child.maxWorkers, child.isolate, child.rolesFile, child.logFile, child.agentPreset, child.workerTimeoutMs, child.primaryScope])
+}
+
+/**
+ * 多空间监督者：周期对齐「数据面期望的空间集合」与「已挂载的子实例」，只做最小 diff。
+ *
+ * 对齐是幂等的：空间消失 / 执行关闭 / 关键配置变化 → 卸载（或重启）；新空间 → 挂载。
+ * 卸载走 fiber.dispose()：子实例的 setInterval、effect、在跑 controller 随其 Fiber 回收。
+ */
+function superviseSpaces(ctx: AppContext, config: Config): void {
+  const SHORT = 'dsh-scrum-worker'
+  const logFile = config.logFile || join(homedir(), '.dsh', 'super-injector', SHORT + '.log')
+  const log = (msg: string): void => {
+    try {
+      mkdirSync(dirname(logFile), { recursive: true })
+      appendFileSync(logFile, `[${new Date().toISOString()}] ${msg}\n`)
+    } catch { /* 日志失败静默 */ }
+  }
+
+  type MountedRunner = { dispose: () => void; signature: string }
+  const mounted = new Map<string, MountedRunner>()
+  let reconciling = false
+
+  const mountRunner = (child: Config): MountedRunner => {
+    const plugin = { name: `${name}:space:${child.scope}`, inject, apply: spaceWorker }
+    const fiber = (ctx.plugin as unknown as (p: unknown, c: unknown) => { dispose: () => void })(plugin, child)
+    return { dispose: () => fiber.dispose(), signature: runnerSignature(child) }
+  }
+
+  async function reconcile(): Promise<void> {
+    if (reconciling) return
+    reconciling = true
+    try {
+      const views = await fetchSpaceViews(config)
+      const desired = planSpaceRunners(config, views)
+      const desiredScopes = new Set(desired.map(c => c.scope))
+
+      for (const scope of [...mounted.keys()]) {
+        if (desiredScopes.has(scope)) continue
+        try { mounted.get(scope)?.dispose() } catch (e) { log(`空间 ${scope} 卸载异常：${String(e)}`) }
+        mounted.delete(scope)
+        log(`[-] 空间 ${scope} 已卸载（数据面关闭执行 / 空间已移除 / 不再配置流水线）`)
+      }
+
+      for (const child of desired) {
+        const current = mounted.get(child.scope)
+        if (current !== undefined && current.signature !== runnerSignature(child)) {
+          try { current.dispose() } catch (e) { log(`空间 ${child.scope} 重启（配置变化）异常：${String(e)}`) }
+          mounted.delete(child.scope)
+          log(`[~] 空间 ${child.scope} 配置变化 → 重新挂载（并发 ${child.maxWorkers}，隔离 ${child.isolate}）`)
+        }
+        if (mounted.has(child.scope)) continue
+        try {
+          mounted.set(child.scope, mountRunner(child))
+          log(`[+] 空间 ${child.scope} 已挂载（并发 ${child.maxWorkers}，隔离 ${child.isolate}，数据面流水线 ${views.find(v => v.id === child.scope)?.stages ?? 0} 环）`)
+        } catch (e) {
+          log(`空间 ${child.scope} 挂载失败：${String(e)}`)
+        }
+      }
+
+      const skipped = views.filter(v => !desiredScopes.has(v.id)).map(v => v.id)
+      if (skipped.length > 0) log(`未接管空间（未开通执行 / 无数据面流水线 / 不在 scopes 白名单）：${skipped.join('、')}`)
+    } finally {
+      reconciling = false
+    }
+  }
+
+  // 首个对齐立即执行（不等一个 interval）：新空间出现后尽快可派工。
+  void reconcile().catch(e => log(`多空间首次编排失败：${String(e)}`))
+  // 对齐周期不短于 15s：空间增减是低频事件，避免把 hub 当心跳打。
+  const period = Math.max(config.intervalMs, 15_000)
+  ctx.setInterval(() => { void reconcile().catch(e => log(`多空间编排异常：${String(e)}`)) }, period)
+  ctx.effect(() => () => {
+    for (const [scope, runner] of mounted) {
+      try { runner.dispose() } catch (e) { log(`空间 ${scope} 释放异常：${String(e)}`) }
+    }
+    mounted.clear()
+  }, `${name}: 多空间卸载`)
+
+  ctx.logger?.info?.(`[${name}] 多空间监督者启动（scopes=${config.scopes === 'auto' ? 'auto' : (Array.isArray(config.scopes) ? config.scopes.join(',') : String(config.scopes))}，每 ${period}ms 对齐，主 scope=${config.scope}）`)
 }

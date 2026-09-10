@@ -128,7 +128,7 @@ git -C <repo> worktree list
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
 | **SP-P0** | **编队即流水线（配置单源）**：`space_stages` / `space_runtime` 表 + `GET/POST /api/pipeline` + `GET /api/spaces/provision` 开通预检 + `seed-pipeline.mjs` 导入；守护改为每轮从 hub 取流水线（`rolesFile` 仅作离线兜底）；入链 = 编队 ∩ 流水线启用岗位；链标题取流水线 label | ✅ 已完成（分支 `w/space-pipeline`） |
-| SP-P1 | **单进程多空间编排**：一个守护实例跑 N 个空间；per-scope 状态文件/日志/暂停/并发；space_runtime 生效（enabled=false 即不接管）；修 §5 的 1/2/7 | ⏳ 待启动 |
+| SP-P1 | **单进程多空间编排**：一个守护实例跑 N 个空间；per-scope 状态文件/日志/并发；space_runtime 生效（enabled=false 即不接管）；修 §5 的 1/2/7。**P1-a 已交付**（监督者 + 子实例编排 diff、`scopes` 配置面、`space_runtime` 下发、per-scope 状态文件与日志）；**P1-b/c 待做**（per-scope 暂停、看板守护矩阵、一键开通）—— 见 [`SPACE-MULTI-RUNNER-P1.md`](./SPACE-MULTI-RUNNER-P1.md) | ✅ P1-a / ⏳ P1-b、P1-c |
 | SP-P2 | **一键开通 + 模板**：空间模板（编队/流水线/技能/工作区骨架）、空间复制、开通向导（选模板 → 绑工作区 → 点开通 = 写 space_stages+space_runtime 并自动挂载执行器）；工作区三模式（本地目录 / git 远端自动 clone / 无仓库）；指挥台「执行健康」卡 | ⏳ 待启动 |
 | SP-P3 | **执行后端可插拔 + 凭据**：`executor` 抽象（local-subagent / remote-agent / container）、secret store（模型与 git 凭据不进明文配置）、每空间预算与配额 | ⏳ 待启动 |
 

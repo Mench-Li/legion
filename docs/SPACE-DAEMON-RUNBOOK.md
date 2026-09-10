@@ -188,6 +188,13 @@ node D:\project\DSH\legion\team-hub\scripts\seed-pipeline.mjs --scope ozon --fil
 #    验证：日志出现「空间流水线来源=hub」+ daemon.json.pipeline.source=hub
 ```
 
+> ⚠️ **实测更正（2026-09-10）**：改配置值确实会触发该行**重新挂载**（`apply()` 重跑、新配置生效——
+> 实测 `intervalMs` 改动被守护读走），但**同进程内不会重新加载模块代码**：宿主用 ESM 动态 import
+> 按解析后的 URL 缓存，`lib/index.js` 路径不变 → 缓存命中 → 仍是旧代码（实测 `daemon.json` 仍写旧形状、
+> 无 `pipeline.source`、日志无「空间流水线来源=hub」）。
+> **因此：宿主侧插件的代码变更必须重启 DSH 宿主（重启该 profile）才生效**；配置文件/mount 参数变更才可热生效。
+> 重启后按 ⑥ 的判据验收。
+
 **回退**：`git -C D:\project\DSH\legion reset --hard <合并前 HEAD>` + 重复 ②③（重建旧产物并重启 hub）。
 数据面无害：旧代码根本不读 `/api/pipeline`，所以「先 seed、后换码」不会造成任何行为差异。
 
@@ -208,6 +215,10 @@ DSH 宿主与 services-plugin 加载的都是 `lib/index.js`——只改 `src/` 
 **尚未做（有意）**：运行中的两个守护实例仍加载旧构建——它们的流水线来源在**下次重新挂载时**才切到 hub。
 两种触发方式任选：DSH Desktop 重启（全量重挂载），或改任一该行配置值（只热重载该行，秒级）。
 在此之前数据面已就绪但**无任何行为差异**（旧守护根本不读 `/api/pipeline`，且 software 的 hub 内容与文件逐字段相同）。
+
+> 更正：上面的「改配置值即可切源」经实测**不成立**——热重载只重跑 `apply()`（配置生效），不重新加载模块代码，
+> 故旧守护不会开始读数据面。已实测：改 `intervalMs` 后守护确实读到新值，但 `daemon.json` 仍是旧形状、无 `pipeline.source`。
+> 结论：**要切到 hub 来源，必须重启 DSH 宿主**（重启 profile）。因此建议与下一次守护侧代码变更（SP-P1）合并为一次重启。
 
 **升级期间若 main 还有别的在写工作流**：合入前先确认「本次要改的文件」不在对方的未提交清单里（`git status --short`）。
 若重叠（本次 `scripts/ci/run-ci.mjs` 一度重叠），用 `git stash push -- <该文件>` → 快进 → `git stash pop`，

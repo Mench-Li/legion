@@ -133,21 +133,23 @@ node scripts/serve.mjs --port 5173   # 独立静态服务 → http://127.0.0.1:5
 - 操作：`＋ 注册新技能`（id 须小写字母/数字开头，提交即 pending）、待审项可「✅ 发布 / 驳回」、已发布项可「🔑 授权」（成员 id 或 `scope:xxx`）。
 - 数据流：`GET /api/skills`、`POST /api/skills/register|review|grant`，15s 轮询 + 操作后即时刷新；士兵/守护只读取已发布技能。
 
-## 任务中心（Scrum 看板 + 总指挥部融合）
+## 任务中心（Scrum 看板为主体，指挥总览语义已并入）
 
 - **入口**：左侧「📋 任务中心」→ `TaskCenterView`（不再跳外部经典看板页；面板右上角仍保留「打开经典看板 ↗」作调试/历史对比入口）。
 - **按工作空间看 scrum 任务**：中枢模式下数据 = team-hub v2 `GET /api/board?scope=`（真分区）；
   面板头部工作空间下拉与左侧栏选择联动（选「全部空间」= 跨空间聚合，卡片带 🗂 空间名徽标）；
   v1 文件模式（无中枢）回退 serve.mjs 看板数据（无分区、只读提示）。
-- **两种视图**（Tab 切换，记忆在 localStorage `legion.taskcenter.mode`）：
-  - **🖥 指挥总览**：保留总指挥部/指挥中心的状态分组 —— ⚡ 工作中（in_progress）/ ⏳ 待我决定（in_review + blocked）/ ⚪ 待办（backlog + todo）/ ✅ 已完成；
-  - **📋 Scrum 看板**：经典 Kanban 泳道（待批准 → 待认领 → 进行中 → 待验收 → 受阻 → 已完成），
-    **中枢模式支持拖拽卡片跨列迁移状态**——服务端状态机（`team-hub/server.mjs` TRANSITIONS）预检 + 特例语义：
-    in_review→done 弹确认（仅将军）、in_review→todo 填打回原因写评论、blocked→in_progress 自动 force；
-    非法迁移被拒并提示，乐观锁冲突自动刷新重试。
+- **单一视图（双 Tab 已合并）**：经典 Kanban 泳道（待批准 → 待认领 → 进行中 → 待验收 → 受阻 → 已完成）
+  **中枢模式支持拖拽卡片跨列迁移状态**——服务端状态机（`team-hub/server.mjs` TRANSITIONS）预检 + 特例语义：
+  in_review→done 弹确认（仅将军）、in_review→todo 填打回原因写评论、blocked→in_progress 自动 force；
+  非法迁移被拒并提示，乐观锁冲突自动刷新重试。
+- **将军视角过滤**（原「指挥总览」Tab 的分组语义并入泳道，记忆在 localStorage `legion.taskcenter.view`）：
+  ⚡ 工作中（in_progress）/ ⏳ 待我决定（in_review + blocked）/ ⚪ 待办（backlog + todo）/ ✅ 已完成，
+  外加「📊 全部」。点选即按该语义**筛卡片**：泳道结构与拖拽目标始终完整可见，非匹配列淡出并提示「（N 个不在当前视角）」，
+  第一个有匹配的列自动滚进视野——「待我决定」仍是一眼可点的将军待办清单。
 - **卡片交互**：点击卡片 → 打开既有任务详情 `TaskDetailModal`（验收/打回/评论/转派/拦截/派 AI，与右侧「当前任务集」同面）；
   卡片显示 id/标题/岗位或执行者/目标/依赖/优先级/🖐 拦截/❓ 待将军确认/运行时长/评论·证据·补丁计数/最近评论预览。
-- **过滤与统计**：顶部状态统计条（进行中/待我决定/待办/受阻/已完成/已取消）+ 🔍 搜 id/标题 + 岗位/执行者胶囊过滤。
+- **过滤与统计**：视角条（全部/工作中/待我决定/待办/已完成 + 待验收·受阻·已取消 明细）+ 🔍 搜 id/标题 + 岗位/执行者胶囊过滤。
 - **实时性**：hub 审计 SSE `/api/events` 按任务/目标类 action 即时刷新 + 20s 轮询兜底；状态变更后联动刷新右侧任务集。
 - **边界**：面板纯只读消费看板接口，不写库；所有状态迁移经既有 `/api/transition|comment`（写纪律 by 注入）。
 
@@ -156,6 +158,7 @@ node scripts/serve.mjs --port 5173   # 独立静态服务 → http://127.0.0.1:5
 - **入口**：右侧「当前任务集」任意任务行、任务调度弹窗、智能体任务清单里的任务，点击即打开**任务详情弹窗**（`TaskDetailModal`）。
 - 详情内容：
   - **🤖 AI 执行过程**：执行该任务的 AI 智能体沉淀的过程记录 = evidence（`isEvidence:true` 评论）与评论的时间流——AI 的每一步行动/产出/汇报都在这里，是「任务详情看到 AI 工作过程」的落点；
+  - **❓ 待将军确认 · 就地答复**：士兵提问型任务（最后一条评论以 `❓` 开头）在该条评论**正下方就地长答复框**——待确认内容与输入框同屏（提示「含 N 个待确认点」、`Ctrl+Enter` 发送），不必拉到弹窗底部、不弹二级输入框；答复经 `POST /api/comment`（`by=general`）写入，守护识别为「将军答复」后下一轮带着答复续做、`❓` 与受阻态随之解除。底部「💬 评论/记录」同样就地展开输入框（原 `window.prompt` 二级框已移除），存在 `❓` 时另给「❓ 去答复（待确认）」一键跳转；
   - **⏱ 进展时间线**：`GET /api/activity?taskId=`（goal:publish / claim / transition / comment / evidence / reassign / model:set / exec:*），中文可读；
   - 📋 任务描述、🎯 验收标准、🚧 边界（做什么 ✅ / 不做什么 🚫）、🔗 依赖解锁提醒；
   - **状态操作**：todo →「▶ 开工 / 🔒 认领」；in_progress →「📮 提交验收 / 归还待办」；in_review →「✓ 验收通过(general) / ↩ 打回重做」；blocked →「解阻」；另有「💬 评论/记录」「转派」「**🤖 派 AI 执行**」（写 `POST /api/exec/request`，请求执行守护认领）与「🖐 **拦截自动 / 🚀 放行**」（`POST /api/hold`，拦截后守护不再自动认领/执行）。
@@ -210,7 +213,7 @@ workbench/
       FolderPickerField   仓库绑定的「本地文件夹」字段（选文件夹 + git 探测 + 远程建议）
       FolderPickerModal   选文件夹弹窗（/api/fs 目录浏览，照搬 DSH 工作空间选目录）
       HubSchedulerModal / SchedulerModal / GoalModal / NewTaskModal / NewSpaceModal / Toast
-      TaskCenterView    任务中心（Scrum 看板 + 总指挥部融合：按空间查看/指挥总览分组/拖拽迁移）
+      TaskCenterView    任务中心（Scrum 泳道为主体：按空间查看/将军视角过滤/拖拽迁移/任务详情）
   scripts/serve.mjs  生产静态服务（SPA 回退 + /hub 代理 + /api/fs 目录浏览/仓库探测，仅回环访问）
 ```
 

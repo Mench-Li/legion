@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   fetchBoard,
   fetchHubTasks,
@@ -12,21 +12,23 @@ import { toast } from './Toast'
 import { TaskDetailModal } from './TaskDetailModal'
 
 /**
- * 任务中心（TaskCenterView）—— 把「Scrum 看板」与「总指挥部/指挥中心」融合进军团指挥台：
+ * 任务中心（TaskCenterView）—— 「Scrum 看板」与「总指挥部/指挥中心」已合并为**单一视图**，以 Scrum 看板为主体：
  *
+ *  - 主体 = 经典 Kanban 泳道（待批准→待认领→进行中→待验收→受阻→已完成），中枢模式支持拖拽卡片跨列迁移
+ *    状态（服务端状态机校验，非法迁移被拒并提示）。
+ *  - 「指挥总览」不再是第二个 Tab：它的将军视角分组语义（⚡ 工作中 / ⏳ 待我决定 / ⚪ 待办 / ✅ 已完成）
+ *    并进泳道顶部的**视角过滤**——点选即按该语义筛卡片，泳道结构与拖拽目标始终完整可见，
+ *    「待我决定」（in_review + blocked）仍是一眼可点的将军待办清单。
  *  - 按工作空间（scope）查看 scrum 任务：中枢模式拉 team-hub v2 `/api/board?scope=`（真分区；
  *    scope=null = 全部空间聚合，卡片带空间名）；v1 文件模式回退 serve.mjs 看板（无分区，只读）。
- *  - 两种视图（Tab）随意切换：
- *      🖥 指挥总览  保留总指挥部「⚡ 工作中 / ⏳ 待我决定 / ⚪ 待办 / ✅ 已完成」的状态分组；
- *      📋 Scrum 看板  经典 Kanban 泳道（Backlog→Todo→进行中→待验收→受阻→完成），中枢模式支持
- *                     拖拽卡片跨列迁移状态（服务端状态机校验，非法迁移被拒并提示）。
  *  - 点击卡片 → 打开既有任务详情（TaskDetailModal：验收/打回/评论/转派/拦截/派 AI），状态变更后联动刷新。
  *
  * 实时性：hub 审计 SSE（/api/events）按 action 过滤任务类事件即时刷新 + 20s 轮询兜底。
  * 数据一律来自中枢/看板只读接口，本组件不持有业务状态（UI 不写库）。
  */
 
-type TaskCenterMode = 'hq' | 'kanban'
+/** 将军视角（原「指挥总览」的分组语义，并入看板后作为泳道过滤）。 */
+type TcView = 'all' | 'busy' | 'decide' | 'todo' | 'done'
 
 interface TaskCenterViewProps {
   /** 当前工作空间（null = 全部空间）；与左侧栏选择联动，中枢模式下在面板内也可切换。 */
@@ -61,12 +63,13 @@ const KANBAN_COLUMNS: Array<{ status: CardStatus; label: string; icon: string }>
   { status: 'done', label: '已完成', icon: '✅' },
 ]
 
-/** 指挥总览的分组（总指挥部三列语义 + 待办补齐）：工作中 / 待我决定 / 待办 / 已完成。 */
-const HQ_GROUPS: Array<{ id: string; label: string; icon: string; statuses: CardStatus[]; tone: string }> = [
-  { id: 'busy', label: '工作中', icon: '⚡', statuses: ['in_progress'], tone: 'var(--blue)' },
+/** 泳道顶部的将军视角过滤（原指挥总览四组 + 全部）：只筛卡片，不改泳道结构。 */
+const TC_VIEWS: Array<{ id: TcView; label: string; icon: string; statuses: CardStatus[]; tone: string }> = [
+  { id: 'all', label: '全部', icon: '📊', statuses: [], tone: 'var(--text)' },
+  { id: 'busy', label: '工作中', icon: '⚡', statuses: ['in_progress'], tone: 'var(--green)' },
   { id: 'decide', label: '待我决定', icon: '⏳', statuses: ['in_review', 'blocked'], tone: 'var(--yellow)' },
-  { id: 'todo', label: '待办', icon: '⚪', statuses: ['backlog', 'todo'], tone: 'var(--muted)' },
-  { id: 'done', label: '已完成', icon: '✅', statuses: ['done'], tone: 'var(--green)' },
+  { id: 'todo', label: '待办', icon: '⚪', statuses: ['backlog', 'todo'], tone: 'var(--accent)' },
+  { id: 'done', label: '已完成', icon: '✅', statuses: ['done'], tone: 'var(--green-2)' },
 ]
 
 const STATUS_TEXT: Record<CardStatus, string> = {
@@ -187,9 +190,10 @@ function normId(a: string, b: string): number {
 }
 
 export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onDataChanged }: TaskCenterViewProps): React.JSX.Element {
-  const [mode, setMode] = useState<TaskCenterMode>(() => {
-    const saved = localStorage.getItem('legion.taskcenter.mode')
-    return saved === 'kanban' || saved === 'hq' ? saved : 'hq'
+  /** 将军视角过滤（原「指挥总览」分组语义并入看板；默认「全部」= 经典泳道全貌）。 */
+  const [view, setView] = useState<TcView>(() => {
+    const saved = localStorage.getItem('legion.taskcenter.view')
+    return TC_VIEWS.some(v => v.id === saved) ? (saved as TcView) : 'all'
   })
   const [rows, setRows] = useState<TcRow[] | null>(null)
   const [loadErr, setLoadErr] = useState<string | null>(null)
@@ -201,6 +205,8 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
   const [busyDrop, setBusyDrop] = useState(false)
 
   const isAll = hubMode && scope === null
+  /** 泳道容器：切视角时把「第一个有匹配的列」滚进视野（受阻/已完成 默认在横向滚动区外侧）。 */
+  const boardRef = useRef<HTMLDivElement | null>(null)
 
   const load = useCallback(async (): Promise<void> => {
     try {
@@ -252,9 +258,9 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
     }
   }, [hubMode, load, scope])
 
-  const switchMode = (next: TaskCenterMode): void => {
-    setMode(next)
-    localStorage.setItem('legion.taskcenter.mode', next)
+  const switchView = (next: TcView): void => {
+    setView(next)
+    localStorage.setItem('legion.taskcenter.view', next)
   }
 
   const spaceName = useCallback(
@@ -275,7 +281,8 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
     return [...set].sort((a, b) => a.localeCompare(b, 'zh-CN'))
   }, [rows])
 
-  const visible = useMemo(() => {
+  /** 搜索 + 岗位过滤后的任务（不含将军视角过滤）。 */
+  const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
     return (rows ?? []).filter(r => {
       if (r.status === 'canceled') return false
@@ -284,6 +291,28 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
       return true
     })
   }, [rows, roleFilter, query])
+
+  const viewStatuses = useMemo(
+    () => TC_VIEWS.find(v => v.id === view)?.statuses ?? [],
+    [view],
+  )
+
+  const loaded = rows !== null
+
+  // 切视角（含首次载入沿用上次视角）：把第一个匹配列滚进视野，省掉手动横向拖拽
+  useEffect(() => {
+    if (view === 'all' || !loaded) return
+    const first = KANBAN_COLUMNS.find(c => viewStatuses.includes(c.status))
+    if (!first) return
+    const el = boardRef.current?.querySelector(`.tc-col-${first.status}`)
+    el?.scrollIntoView({ block: 'nearest', inline: 'start' })
+  }, [view, viewStatuses, loaded])
+
+  /** 最终渲染集 = 搜索/岗位过滤 ∩ 将军视角过滤。 */
+  const visible = useMemo(
+    () => (view === 'all' ? filtered : filtered.filter(r => viewStatuses.includes(r.status))),
+    [filtered, view, viewStatuses],
+  )
 
   const reload = (): void => {
     void load()
@@ -295,6 +324,15 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
     for (const r of rows ?? []) s[r.status] += 1
     return s
   }, [rows])
+
+  /** 各视角任务数（全量口径，不受搜索/岗位过滤影响；四组之和 = 全部，不含已取消）。 */
+  const viewCounts = useMemo<Record<TcView, number>>(() => ({
+    all: summary.in_progress + summary.in_review + summary.blocked + summary.backlog + summary.todo + summary.done,
+    busy: summary.in_progress,
+    decide: summary.in_review + summary.blocked,
+    todo: summary.backlog + summary.todo,
+    done: summary.done,
+  }), [summary])
 
   /** 拖拽迁移（中枢模式）：先按服务端状态机预检，语义特例（验收/打回/解阻）走确认/填因，再写 /api/transition。 */
   const moveTo = async (item: TcRow, to: CardStatus): Promise<void> => {
@@ -372,26 +410,15 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
     if (item) void moveTo(item, status)
   }
 
+  /** 泳道 = 经典 Kanban 六列；视角过滤只减卡片，列本身始终保留（拖拽目标不消失）。 */
   const lanes = useMemo(
     () =>
-      KANBAN_COLUMNS.map(col => ({
-        ...col,
-        items: visible
-          .filter(r => r.status === col.status)
-          .sort((a, b) => normId(a.id, b.id)),
-      })),
-    [visible],
-  )
-
-  const hqGroups = useMemo(
-    () =>
-      HQ_GROUPS.map(g => ({
-        ...g,
-        items: visible
-          .filter(r => g.statuses.includes(r.status))
-          .sort((a, b) => normId(a.id, b.id)),
-      })),
-    [visible],
+      KANBAN_COLUMNS.map(col => {
+        const inCol = filtered.filter(r => r.status === col.status).sort((a, b) => normId(a.id, b.id))
+        const items = view === 'all' ? inCol : inCol.filter(r => viewStatuses.includes(r.status))
+        return { ...col, items, hidden: inCol.length - items.length }
+      }),
+    [filtered, view, viewStatuses],
   )
 
   const doneOpen = (r: TcRow): boolean => r.status !== 'done' && r.status !== 'canceled'
@@ -456,9 +483,9 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
     <div className="tc-empty">暂无任务</div>
   )
 
-  const groupHead = (label: string, icon: string, n: number, tone?: string): React.JSX.Element => (
+  const groupHead = (label: string, icon: string, n: number): React.JSX.Element => (
     <div className="tc-lane-head">
-      <span className="tc-lane-icon" style={tone ? { color: tone } : undefined}>{icon}</span>
+      <span className="tc-lane-icon">{icon}</span>
       <span className="tc-lane-label">{label}</span>
       <span className="tc-lane-n">{n}</span>
     </div>
@@ -477,24 +504,12 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
 
   return (
     <div className="center-col">
-      {/* 头部：视图 Tab + 工作空间下拉 + 数据源/入口 */}
+      {/* 头部：标题 + 工作空间下拉 + 数据源/入口（原「指挥总览 / Scrum 看板」双 Tab 已合并为单一泳道视图） */}
       <div className="panel tc-head">
-        <div className="tc-tabs" role="tablist">
-          <button
-            className={`tc-tab${mode === 'hq' ? ' on' : ''}`}
-            onClick={() => switchMode('hq')}
-            title="总指挥部风格：按「工作中 / 待我决定 / 待办 / 已完成」分组总览"
-          >
-            🖥 指挥总览
-          </button>
-          <button
-            className={`tc-tab${mode === 'kanban' ? ' on' : ''}`}
-            onClick={() => switchMode('kanban')}
-            title="Scrum 看板：按状态泳道查看任务（中枢模式可拖拽迁移）"
-          >
-            📋 Scrum 看板
-          </button>
-        </div>
+        <span className="tc-head-title">📋 任务中心</span>
+        <span className="tc-head-hint">
+          Scrum 泳道 · {hubMode ? '拖拽卡片跨列迁移状态' : 'v1 只读'} · 点卡片看详情与 AI 执行过程
+        </span>
         <div className="tc-head-right">
           {hubMode && onSelectScope && (
             <select
@@ -528,15 +543,25 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
         </div>
       </div>
 
-      {/* 状态统计条 */}
+      {/* 将军视角条（原「指挥总览」分组语义并入看板：点选即过滤泳道卡片，不改变泳道结构） */}
       <div className="panel tc-summary">
-        <span className="tc-sum-title">📊 状态</span>
-        <span className="tc-sum-chip s-progress">🟢 进行中 {summary.in_progress}</span>
-        <span className="tc-sum-chip s-decide">🟡 待我决定 {summary.in_review + summary.blocked}</span>
-        <span className="tc-sum-chip s-todo">⚪ 待办 {summary.todo + summary.backlog}</span>
-        <span className="tc-sum-chip s-blocked">🔴 受阻 {summary.blocked}</span>
-        <span className="tc-sum-chip s-done">✅ 已完成 {summary.done}</span>
-        <span className="tc-sum-chip s-canceled">⛔ 已取消 {summary.canceled}</span>
+        <span className="tc-sum-title">📊 视角</span>
+        {TC_VIEWS.map(v => (
+          <button
+            key={v.id}
+            className={`tc-sum-chip as-btn${view === v.id ? ' on' : ''}${v.id === 'decide' && viewCounts.decide > 0 ? ' alert' : ''}`}
+            style={view === v.id ? { color: v.tone } : undefined}
+            onClick={() => switchView(v.id)}
+            title={v.id === 'all'
+              ? '全部任务：完整泳道（经典看板全貌）'
+              : `只看「${v.label}」：${v.statuses.map(s => STATUS_TEXT[s]).join(' + ')}（再点一次「📊 全部」恢复）`}
+          >
+            {v.icon} {v.label} {viewCounts[v.id]}
+          </button>
+        ))}
+        <span className="tc-sum-break">
+          🟡 待验收 {summary.in_review} · 🔴 受阻 {summary.blocked} · ⛔ 已取消 {summary.canceled}
+        </span>
         <span className="tc-sum-total">共 {(rows ?? []).length} 任务{hubMode ? (isAll ? ' · 跨全部空间' : '') : ''}</span>
       </div>
 
@@ -578,41 +603,34 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
         </div>
       )}
 
-      {rows !== null && !loadErr && rows.length > 0 && mode === 'hq' && (
-        <div className="panel tc-hq">
-          {hqGroups.map(g => (
-            <section key={g.id} className={`tc-lane tc-hq-${g.id}`}>
-              {groupHead(g.label, g.icon, g.items.length, g.tone)}
-              <div className="tc-cards">
-                {g.items.length > 0 ? g.items.map(renderCard) : renderLaneEmpty()}
-              </div>
-            </section>
-          ))}
-        </div>
-      )}
-
-      {rows !== null && !loadErr && rows.length > 0 && mode === 'kanban' && (
-        <div className="panel tc-board">
+      {rows !== null && !loadErr && rows.length > 0 && (
+        <div className="panel tc-board" ref={boardRef}>
           {lanes.map(col => (
             <div
               key={col.status}
-              className={`tc-col tc-col-${col.status}${dropCol === col.status ? ' drop' : ''}${busyDrop ? ' busy' : ''}`}
+              className={`tc-col tc-col-${col.status}${dropCol === col.status ? ' drop' : ''}${busyDrop ? ' busy' : ''}${view !== 'all' && col.items.length === 0 ? ' dim' : ''}`}
               onDragOver={e => onDragOverCol(e, col.status)}
               onDragLeave={() => setDropCol(prev => (prev === col.status ? null : prev))}
               onDrop={e => onDropCol(e, col.status)}
             >
               {groupHead(col.label, col.icon, col.items.length)}
               <div className="tc-cards">
-                {col.items.length > 0 ? col.items.map(renderCard) : renderLaneEmpty()}
+                {col.items.length > 0
+                  ? col.items.map(renderCard)
+                  : col.hidden > 0
+                    ? <div className="tc-empty">（{col.hidden} 个不在当前视角）</div>
+                    : renderLaneEmpty()}
               </div>
             </div>
           ))}
         </div>
       )}
 
-      {rows !== null && !loadErr && visible.length === 0 && (query !== '' || roleFilter !== null) && (
+      {rows !== null && !loadErr && visible.length === 0 && (query !== '' || roleFilter !== null || view !== 'all') && (
         <div className="panel" style={{ padding: 16, color: 'var(--muted-2)', fontSize: 12 }}>
-          没有符合过滤条件的任务（清空搜索/过滤后查看全部）
+          没有符合当前条件的任务
+          {view !== 'all' ? `（视角：${TC_VIEWS.find(v => v.id === view)?.label ?? ''}）` : ''}
+          —— 清空搜索/岗位过滤，或点「📊 全部」恢复完整泳道
         </div>
       )}
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { execRequest, fetchHubActivity, fetchHubCalendarByLink, fetchHubDocContent, fetchHubOverlaps, fetchHubTask, fetchHubTasks, hubClaim, hubComment, hubHold, hubReassign, hubReviewNote, hubTransition } from '../api'
 import type { AuditPatch, HubActivity, HubDocContent, HubTask, OverlapGroup, ReviewNote } from '../types'
 import type { LinkedCalendarEvent } from '../api'
@@ -126,6 +126,19 @@ function runAgentOf(c: HubTask): string {
   return c.soldier ?? c.role ?? 'general'
 }
 
+/** ❓ 待将军确认：最后一条评论以 ❓ 开头（守护标记待答复；将军答复后该标记自动消失）。 */
+function pendingAskOf(t: HubTask) {
+  const cs = t.comments ?? []
+  if (cs.length === 0) return null
+  const last = cs[cs.length - 1]
+  return (last.text ?? '').startsWith('❓') ? last : null
+}
+
+/** ❓ 原文里逐条提问的点数（每条以 ❓ 开头；供答复框提示「含 N 个待确认点」）。 */
+function askPointCount(text: string): number {
+  return text.split('\n').filter(l => l.trim().startsWith('❓')).length
+}
+
 /** 从描述中读取显式「波次：N」标记；若未标记，从 blockedBy 深度计算。 */
 function childWave(c: HubTask, all: HubTask[]): number {
   const m = (c.description ?? '').match(/波次[:：]\s*(\d+)/)
@@ -154,6 +167,13 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
   // —— S5：产出文档直达区（打开中的产物条目下标 + 按条目缓存的内容状态）——
   const [docOpen, setDocOpen] = useState<number | null>(null)
   const [docState, setDocState] = useState<Record<number, { status: 'loading' | 'ok' | 'err'; data?: HubDocContent; message?: string }>>({})
+  // —— ❓ 待将军确认：就地答复草稿（在待确认那一条下方直接回复，不拉到底部、不开二级弹框）——
+  const [askDraft, setAskDraft] = useState('')
+  /** 底部「💬 评论/记录」就地展开的输入框（替代 window.prompt 二级弹框）。 */
+  const [commentOpen, setCommentOpen] = useState(false)
+  const [commentDraft, setCommentDraft] = useState('')
+  /** ❓ 答复框锚点：底部「去答复」按钮滚动定位用。 */
+  const askBoxRef = useRef<HTMLDivElement | null>(null)
 
   const load = useCallback(async (): Promise<void> => {
     try {
@@ -192,6 +212,8 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
         setCalEvents([]) // hub 不可达/无关联 → 区块显示「暂无关联日程」，不影响详情其余部分
       }
       setErr(null)
+      // ❓ 已解除（将军已答复 / 新一轮提问未到）→ 清空上一轮半截答复，避免下次提问时残留
+      if (pendingAskOf(t) === null) setAskDraft('')
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
     }
@@ -200,6 +222,13 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
   useEffect(() => {
     void load()
   }, [load])
+
+  // 同一弹层实例会被不同任务复用：切任务时清空两类草稿
+  useEffect(() => {
+    setAskDraft('')
+    setCommentDraft('')
+    setCommentOpen(false)
+  }, [taskId])
 
   const act = async (action: () => Promise<unknown>, okText: string): Promise<void> => {
     setBusy(true)
@@ -279,21 +308,45 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
       await hubTransition({ id: t.id, to: 'todo', by: bindOf(t), ifVersion: t.version })
     }, `${t.id} 已打回（批注已交付下一轮 worker）`)
   }
-  // 士兵 ❓ 提问待将军确认：最后一条评论以 ❓ 开头（守护标记待答复），将军答复后自动消失
-  const askOpen = (): boolean => {
-    const cs = t.comments ?? []
-    if (cs.length === 0) return false
-    return (cs[cs.length - 1].text ?? '').startsWith('❓')
-  }
+  // 士兵 ❓ 提问待将军确认：该条评论在「AI 执行过程」区就地长出答复框（见下方 isAsk 分支）——免拉到底部、免二级弹框
+  const askComment = pendingAskOf(t)
+  const askPoints = askComment === null ? 0 : askPointCount(askComment.text ?? '')
   const doStart = (): Promise<void> => act(() => hubTransition({ id: t.id, to: 'in_progress', by: bindOf(t), ifVersion: t.version }), `${t.id} 已开工`)
   const doClaim = (): Promise<void> => act(() => hubClaim(t.id, t.role ?? undefined), `${t.id} 已认领`)
   const doSubmitReview = (): Promise<void> => act(() => hubTransition({ id: t.id, to: 'in_review', by: bindOf(t), ifVersion: t.version }), `${t.id} 已提交验收`)
   const doReturn = (): Promise<void> => act(() => hubTransition({ id: t.id, to: 'todo', by: bindOf(t), ifVersion: t.version }), `${t.id} 已归还待办`)
   const doUnblock = (): Promise<void> => act(() => hubTransition({ id: t.id, to: 'todo', by: bindOf(t), ifVersion: t.version, force: true }), `${t.id} 已解阻`)
-  const doComment = (): Promise<void> => {
-    const text = window.prompt(`给 ${t.id} 追加评论/过程记录`)
-    if (text === null || !text.trim()) return Promise.resolve()
-    return act(() => hubComment(t.id, text.trim()), `已记录`)
+  /** 就地写评论（无二级弹框）：成功 true / 失败 toast 后 false。by=general 由 hubPost 注入（守护据此认作「将军答复」）。 */
+  const sendComment = async (text: string, okText: string): Promise<boolean> => {
+    const body = text.trim()
+    if (body.length === 0) { toast('err', '内容为空——请先填写'); return false }
+    setBusy(true)
+    try {
+      await hubComment(t.id, body)
+      toast('ok', okText)
+      await load()
+      onChanged?.()
+      return true
+    } catch (e) {
+      toast('err', e instanceof Error ? e.message : String(e))
+      return false
+    } finally {
+      setBusy(false)
+    }
+  }
+  /** ❓ 就地答复：答复即写入本任务评论，守护下一轮带答复续做、❓ 与受阻态随之解除。 */
+  const submitAskReply = async (): Promise<void> => {
+    const ok = await sendComment(askDraft, `已答复 ${t.id}——守护下一轮会带上你的答复续做`)
+    if (ok) setAskDraft('')
+  }
+  /** 底部「💬 评论/记录」就地发送（发送后收起输入框，全程留在本页）。 */
+  const submitComment = async (): Promise<void> => {
+    const ok = await sendComment(commentDraft, '已记录')
+    if (ok) { setCommentDraft(''); setCommentOpen(false) }
+  }
+  /** 从底部「❓ 去答复」跳到待确认那一条的答复框。 */
+  const focusAskBox = (): void => {
+    askBoxRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' })
   }
   const doReassign = (): Promise<void> => {
     const soldier = window.prompt(`转派给哪个智能体（role）？`, t.role ?? '')
@@ -330,7 +383,7 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
           <div className="td-title">
             <span className={`status-pill ${t.status}`}>{STATUS_PILL[t.status] ?? t.status}</span>
             {t.hold && <span className="status-pill hold">✋ 将军拦截中</span>}
-            {askOpen() && <span className="status-pill ask">❓ 待将军确认</span>}
+            {askComment !== null && <span className="status-pill ask" title="在该条评论下方可直接答复，无需拉到页面底部">❓ 待将军确认</span>}
             <span className="td-title-text">{t.title}</span>
           </div>
           <div className="td-meta">
@@ -389,13 +442,42 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
               <>
                 {[...(t.evidence ?? []), ...(t.comments ?? [])]
                   .sort((a, b) => (a.at < b.at ? -1 : 1))
-                  .map((c, i) => (
-                    <div key={i} className="proc-item">
-                      <span className="proc-who">{c.by}</span>
-                      <span className="proc-at">{fmt(c.at)}</span>
-                      <div className="proc-text">{c.text}</div>
-                    </div>
-                  ))}
+                  .map((c, i) => {
+                    // 待将军确认的那一条：就地渲染答复框（内容与输入框同屏，答完即写入评论）
+                    const isAsk = askComment !== null && c === askComment
+                    return (
+                      <div key={i} className={isAsk ? 'proc-item proc-ask' : 'proc-item'}>
+                        <span className="proc-who">{c.by}</span>
+                        <span className="proc-at">{fmt(c.at)}</span>
+                        {isAsk && <span className="proc-ask-tag">❓ 待将军确认</span>}
+                        <div className="proc-text">{c.text}</div>
+                        {isAsk && (
+                          <div className="ask-reply" ref={askBoxRef}>
+                            <div className="ask-reply-head">
+                              ↑ 待确认内容就在上方——直接在此答复
+                              {askPoints > 1 && <span className="ask-reply-count">（含 {askPoints} 个待确认点，可分行逐条回 1. 2. 3.）</span>}
+                            </div>
+                            <textarea
+                              className="ask-reply-input"
+                              rows={3}
+                              autoFocus
+                              value={askDraft}
+                              placeholder={`直接答复 ${t.id}…（Ctrl+Enter 发送）`}
+                              onChange={e => setAskDraft(e.target.value)}
+                              onKeyDown={e => {
+                                if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); void submitAskReply() }
+                              }}
+                            />
+                            <div className="ask-reply-actions">
+                              <button className="btn primary" disabled={busy || askDraft.trim().length === 0} onClick={() => void submitAskReply()}>✓ 答复并续做</button>
+                              <button className="btn ghost" disabled={busy || askDraft.length === 0} onClick={() => setAskDraft('')}>清空</button>
+                              <span className="ask-reply-note">答复写入本任务评论 → 守护下一轮带答复续做（❓ 自动解除）</span>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
                 {(t.patches ?? []).filter(p => typeof p === 'string').length > 0 && (
                   <div className="proc-patch">🔧 补丁 {(t.patches ?? []).filter(p => typeof p === 'string').join('、')}</div>
                 )}
@@ -722,9 +804,42 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
                 </button>
               )
             )}
-            <button className="btn ghost" disabled={busy} onClick={() => void doComment()}>💬 评论/记录</button>
+            {askComment !== null && (
+              <button className="btn" disabled={busy} onClick={focusAskBox} title="跳到上方 ❓ 待确认那一条，就地答复">
+                ❓ 去答复（待确认）
+              </button>
+            )}
+            <button
+              className="btn ghost"
+              disabled={busy}
+              onClick={() => setCommentOpen(v => !v)}
+              title="在本页就地追加评论/过程记录（不再弹二级框）"
+            >
+              {commentOpen ? '💬 收起输入框' : '💬 评论/记录'}
+            </button>
             <button className="btn ghost" disabled={busy} onClick={() => void doReassign()}>转派</button>
           </div>
+
+          {/* 就地评论输入框（替代 window.prompt 二级弹框；与上方「AI 执行过程」同一数据源） */}
+          {commentOpen && (
+            <div className="td-comment-box">
+              <textarea
+                className="ask-reply-input"
+                rows={3}
+                value={commentDraft}
+                placeholder={`给 ${t.id} 追加评论/过程记录…（Ctrl+Enter 发送）`}
+                onChange={e => setCommentDraft(e.target.value)}
+                onKeyDown={e => {
+                  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); void submitComment() }
+                }}
+              />
+              <div className="ask-reply-actions">
+                <button className="btn primary" disabled={busy || commentDraft.trim().length === 0} onClick={() => void submitComment()}>发送评论</button>
+                <button className="btn ghost" disabled={busy} onClick={() => { setCommentOpen(false); setCommentDraft('') }}>取消</button>
+                <span className="ask-reply-note">by general · 发送后出现在上方「AI 执行过程」，士兵/守护可读到</span>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>

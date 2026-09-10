@@ -1033,6 +1033,55 @@ body {
 
 .proc-patch { font-size: 11px; color: var(--cyan); margin-top: 4px; }
 
+/* ---------- ❓ 待将军确认：就地答复（免拉到底部、免二级弹框） ---------- */
+
+.proc-item.proc-ask {
+  border: 1px solid rgba(255, 152, 0, 0.35);
+  border-left: 2px solid #ff9800;
+  background: rgba(255, 152, 0, 0.07);
+}
+
+.proc-ask-tag {
+  margin-left: 8px;
+  font-size: 9.5px;
+  font-weight: 700;
+  color: #ff9800;
+  background: rgba(255, 152, 0, 0.16);
+  border-radius: 999px;
+  padding: 0 7px;
+  line-height: 1.7;
+}
+
+.ask-reply { margin-top: 8px; padding-top: 8px; border-top: 1px dashed rgba(255, 152, 0, 0.3); }
+
+.ask-reply-head { font-size: 10.5px; font-weight: 600; color: #ffb74d; margin-bottom: 5px; }
+
+.ask-reply-count { font-weight: 400; color: var(--muted-2); }
+
+.ask-reply-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--panel-2);
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 8px 10px;
+  font-size: 12.5px;
+  font-family: inherit;
+  line-height: 1.6;
+  outline: none;
+  resize: vertical;
+  min-height: 56px;
+}
+
+.ask-reply-input:focus { border-color: var(--blue, #5b8cff); }
+
+.ask-reply-actions { display: flex; align-items: center; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
+
+.ask-reply-note { font-size: 10px; color: var(--muted-2); }
+
+.td-comment-box { margin-top: 8px; }
+
 .td-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
 
 .mission-task .t-status {
@@ -3070,30 +3119,9 @@ body {
   flex-wrap: wrap;
 }
 
-.tc-tabs {
-  display: flex;
-  gap: 4px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 3px;
-}
+.tc-head-title { font-size: 13px; font-weight: 700; color: var(--text); white-space: nowrap; }
 
-.tc-tab {
-  border: none;
-  background: transparent;
-  color: var(--muted);
-  font-size: 12px;
-  padding: 4px 12px;
-  border-radius: 6px;
-  cursor: pointer;
-}
-
-.tc-tab.on {
-  background: var(--panel-2);
-  color: var(--text);
-  box-shadow: 0 0 0 1px var(--line-2);
-}
+.tc-head-hint { font-size: 10.5px; color: var(--muted-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .tc-head-right {
   display: flex;
@@ -3149,12 +3177,13 @@ body {
   white-space: nowrap;
 }
 
-.tc-sum-chip.s-progress { color: var(--green); }
-.tc-sum-chip.s-decide { color: var(--yellow); }
-.tc-sum-chip.s-todo { color: var(--accent); }
-.tc-sum-chip.s-blocked { color: var(--red); }
-.tc-sum-chip.s-done { color: var(--green-2); opacity: 0.85; }
-.tc-sum-chip.s-canceled { color: var(--muted-2); text-decoration: line-through; }
+/* 视角按钮（原状态统计条：点选过滤泳道卡片，「待我决定」有活时高亮） */
+.tc-sum-chip.as-btn { cursor: pointer; font-family: inherit; }
+.tc-sum-chip.as-btn:hover { border-color: var(--line-2); color: var(--text); }
+.tc-sum-chip.on { background: rgba(91, 140, 255, 0.12); border-color: rgba(91, 140, 255, 0.5); font-weight: 600; }
+.tc-sum-chip.alert:not(.on) { border-color: rgba(251, 191, 36, 0.45); }
+
+.tc-sum-break { font-size: 10.5px; color: var(--muted-2); }
 
 .tc-sum-total { margin-left: auto; font-size: 11px; color: var(--muted-2); }
 
@@ -3193,29 +3222,7 @@ body {
   user-select: none;
 }
 
-/* 指挥总览（总指挥部三列 + 待办） */
-.tc-hq {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-  gap: 10px;
-  padding: 12px;
-  align-items: start;
-}
-
-.tc-lane {
-  background: rgba(255, 255, 255, 0.015);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 8px;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.tc-hq-decide { border-color: rgba(251, 191, 36, 0.3); }
-.tc-hq-decide .tc-lane-head { border-bottom-color: rgba(251, 191, 36, 0.25); }
-.tc-hq-busy { border-color: rgba(96, 165, 250, 0.25); }
-.tc-hq-done { border-color: rgba(52, 211, 153, 0.2); }
+/* 将军视角过滤（原指挥总览分组语义并入泳道；此处已无独立「指挥总览」布局） */
 
 .tc-lane-head {
   display: flex;
@@ -3288,6 +3295,9 @@ body {
 }
 
 .tc-col.busy { cursor: progress; }
+
+/* 视角过滤下该列无匹配卡片：淡出但仍可作拖拽目标 */
+.tc-col.dim { opacity: 0.5; }
 
 .tc-col-backlog .tc-lane-icon,
 .tc-col-todo .tc-lane-icon { color: var(--muted); }

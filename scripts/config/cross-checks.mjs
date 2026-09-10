@@ -32,6 +32,8 @@ export function runCrossChecks(configs, opts = {}) {
   const hub = configs['team-hub']
   const wb = configs.workbench
   const board = configs.whiteboard
+  const boardPlugin = configs['board-plugin']
+  const services = configs['services-plugin']
 
   // ① 监听端口冲突（同 host 同 port 不可能同时监听成功）
   const listeners = [
@@ -118,6 +120,39 @@ export function runCrossChecks(configs, opts = {}) {
     push('warning', 'workbench_token_unset', 'workbench 未配置 DSH_WORKBENCH_TOKEN：文件写/删除等写操作将拒绝（预期用于只读部署）', '需要写操作时设置该变量')
   }
 
+  // ⑧ services-plugin 托管启动会**覆盖**子进程的同名 env / CLI（P3-4）
+  //    真实陷阱：托管启动的 team-hub 端口来自 composition 的 teamHubPort（缺省 8787），
+  //    该进程根本不读 TEAM_HUB_PORT 环境变量——所以「环境里改成 9000」并不会改变托管实例，
+  //    而单进程 schema 只会如实报告 9000。这里把两者摆在一起，结论才不会与现场相反。
+  if (services) {
+    for (const inj of services.schema.injects ?? []) {
+      const targetCfg = configs[inj.target]
+      if (!targetCfg || inj.value === undefined) continue
+      const viaCli = inj.via === 'cli'
+      const field = (targetCfg.schema.fields ?? []).find((f) => (viaCli ? f.cli === inj.cli : f.env === inj.env))
+      if (!field) continue
+      const envValue = String(targetCfg.resolved.values[field.key])
+      const injected = String(inj.value)
+      if (envValue === injected) continue
+      push('warning', 'services_inject_overrides_env',
+        `${inj.target} 由 services-plugin 托管启动时会注入 ${inj.env}=${injected}${viaCli ? '（命令行 --' + inj.cli + '，优先级高于环境变量）' : ''}，` +
+          `与环境解析值 ${envValue} 不一致：托管实例实际生效的是注入值`,
+        `改 ${inj.target} 侧的环境变量对托管实例无效；请改 legion-services 的 config.${inj.from ?? inj.env}（或手工启动该进程）`)
+    }
+  }
+
+  // ⑨ 看板插件从环境回落的 hub token 为空，而团队中枢已要求 token → hub 模式下写操作会 401
+  //    （composition 的 config.hubToken 可能已兜底，所以是 warning 而非 error）
+  if (boardPlugin && hub && hub.resolved.values.token && !boardPlugin.resolved.values.hubToken) {
+    push('warning', 'plugin_hub_token_unset',
+      'team-hub 已配置 token，但 board-plugin 未从环境拿到 TEAM_HUB_TOKEN（若 composition 的 config.hubToken 也没配，hub 模式下写操作会 401）',
+      '给宿主进程设置同一个 TEAM_HUB_TOKEN，或在 legion-scrum-board 的 config.hubToken 里配置')
+  }
+
+  // ⑩ 士兵守护的提示词预算之间的一致性**不在这里**：它是 plugins 自己的 schema 规则
+  //    （plugins/config-schema.mjs 的 normsAndCtxRules），单进程 check 与插件启动摘要都会报，
+  //    在这里再报一次只会得到同一条结论的副本。
+
   return out
 }
 
@@ -125,6 +160,8 @@ export const CROSS_CHECK_CODES = Object.freeze([
   'port_conflict', 'hub_upstream_unparsable', 'hub_upstream_port_mismatch',
   'hub_token_missing_in_workbench', 'hub_token_mismatch', 'hub_token_unused',
   'exposed_without_token', 'static_root_missing', 'db_inside_rooms_dir', 'workbench_token_unset',
+  // P3-4 插件族（plugins 自身的预算一致性由 plugins/config-schema.mjs 的 rules 覆盖，不在此重复）
+  'services_inject_overrides_env', 'plugin_hub_token_unset',
 ])
 
 export const LOOPBACK_HOSTS = Object.freeze(['127.0.0.1', 'localhost', '::1'])

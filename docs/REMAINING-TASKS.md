@@ -4,7 +4,9 @@
 > 当前基线：`main`（P0 hardening 已合入）
 > **状态：本清单已清空** —— P1-1～P3-3 共 14 项全部完成（最后一项 P3-2 于 2026-09-10 合入 main）。
 > 清单外的候选 #1（CI `test` 阶段挂起）已于 2026-09-10 修复，证据 `docs/CI-TEST-STAGE-evidence/verify-evidence.md`；
-> 全量基线随之恢复为单命令可复现：**38 套件 / 924 用例，`run-ci --only test` PASS（160s）**。
+> 候选 #2（`dual-write` 偶发失败）已于 2026-09-10 定性并修复，证据 `docs/DUAL-WRITE-RACE-evidence/verify-evidence.md`；
+> 候选 #4（插件配置面未统一）已于 2026-09-10 修复（**P3-4**），证据 `docs/P3-4-evidence/verify-evidence.md`。
+> 全量基线：**39 套件 / 941 用例，`run-ci --only test` PASS**（以 `docs/STATUS.md` 记录的数字为准）。
 
 本文记录当前尚未完成的产品、架构和发布工作。已完成的安全加固、CI 扩展、artifact 路径安全、插件 token 传播和白板 WebSocket 鉴权不在本文重复列出。
 
@@ -31,10 +33,13 @@
    19s 自行退出、15/15 通过。`node --test` 的逐文件输出语义与该现象相矛盾（说明是**另一个文件**没退出，
    但它只有纯函数用例、无子进程无定时器），故**未得出机制级结论**。缓解已到位：套件级超时（连后代进程
    一起清理）+ 超时现场快照 + 失败套件原始输出落盘（`.ci/<run>/suites/<套件>.log`）——**再出现时先看现场快照**。
-4. **插件配置面未统一**（P3-2 已登记边界）：`plugins/` 读取 `CHAT_CTX_BUDGET_CHARS` /
-   `CHAT_CTX_FILE_CAP_CHARS` 等，且**同一变量在 `spaceDigest.ts`（默认 4000）与 `chatResponder.ts`
-   （默认 8000）语义/默认值不同**（`docs/review/T-124-REVIEW.md` S4）。P3-2 按决策未改插件，
-   仅在 README §9.2 标注事实。把插件纳入统一配置需要一个单独切片。
+4. ~~**插件配置面未统一**~~ → **已于 2026-09-10 修复（P3-4）**：`plugins/` 的提示词预算
+   （`CHAT_CTX_*` / `NORMS_*`）纳入统一配置体系，`spaceDigest`（默认 4000）与 `chatResponder`（默认 8000）
+   **同一变量两种语义**的问题被收口——总预算仍是 `CHAT_CTX_BUDGET_CHARS`（8000），摘要子预算改用独立变量
+   `CHAT_CTX_DIGEST_BUDGET_CHARS`（4000）；同时修掉 `chatContext.ts` 硬编码 `4000` 绕过 env 的那处
+   （该路径下 `CHAT_CTX_*` 曾完全不起作用）。`board-plugin` / `services-plugin` 的环境读取面也一并纳入 schema 与
+   跨进程校验（含「services-plugin 会覆盖子进程端口」这条只有把两边摆在一起才看得出的规则）。
+   **证据**：`docs/P3-4-evidence/verify-evidence.md`；手册：`docs/CONFIG.md` §3.4–3.6。
 5. **白板多实例共享存储未实现**（P3-1 已登记）：当前是单实例多房间；ADR-0008 记录了被否方案与
    「转 v2」的触发条件（真正需要横向扩展时再启动）。
 6. **前端仍无浏览器自动化**（P3-1 边界）：房间/角色/限流相关的前端行为靠判定层测试 +

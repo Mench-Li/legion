@@ -38,6 +38,7 @@ import { buildNormSections, type NormFile } from './norms.js'
 import { buildChatAnswerPrompt, chatIdentityFor, type ChatCtxMsg } from './chatResponder.js'
 import { classifyChatError } from './chatErrorClassifier.js'
 import { gatherChatContext, type AttachmentRef, type ChatContextBundle } from './chatContext.js'
+import { pluginConfigLogLines } from './config.js'
 import { collectSignals, shouldDraft, buildDraft, type ExpTaskInput } from './experience.js'
 import {
   parseDraftState, renderFrontmatter, replaceFrontmatter, applyVote,
@@ -526,6 +527,19 @@ export function isSupervisor(config: Config): boolean {
 }
 
 /**
+ * P3-4：把生效配置写进守护日志——**每进程只写一次**。
+ *
+ * 配置是进程级的（`plugins/src/config.ts` 在模块加载期解析一次），而多空间监督者会按空间 mount 多个
+ * spaceWorker 实例；逐实例重复同一份摘要只会把日志淹掉。日志写失败由调用方的 log() 自行吞掉。
+ */
+let configSummaryLogged = false
+function logConfigOnce(log: (msg: string) => void): void {
+  if (configSummaryLogged) return
+  configSummaryLogged = true
+  for (const line of pluginConfigLogLines()) log(line)
+}
+
+/**
  * SP-P1：单个空间的士兵守护（P1 之前 apply() 的全部行为）。
  *
  * 由 `apply` 直接调用（单空间），或由监督者按空间 mount（多空间）。整个函数体是**同一个空间的闭包状态**
@@ -540,6 +554,11 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       appendFileSync(logFile, `[${new Date().toISOString()}] ${msg}\n`)
     } catch { /* 日志失败静默 */ }
   }
+
+  // P3-4：把本进程生效的配置写进守护日志（脱敏摘要 + 校验结论 + schema 规则告警）。
+  // 与三进程的启动摘要同一口径（docs/CONFIG.md）：配置非法时这里会多出「已回退默认值」的错误行，
+  // 而不是让守护带着一个它自己都不知道的预算继续跑。
+  logConfigOnce(log)
 
   /** 看板动态事件流：追加结构化事件到 scrum/activity.jsonl（serve.mjs 经 SSE 推给看板）。 */
   const activityFile = join(config.scrumDir, 'activity.jsonl')

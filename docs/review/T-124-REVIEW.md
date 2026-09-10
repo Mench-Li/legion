@@ -76,9 +76,14 @@
 - 位置：team-hub/server.mjs cleanupChatAttachments()（:1387-1391：行遍历中对每行 rmSync 文件再删行）。
 - 说明：uploads/<scope>/<sha1> 按内容去重落盘；同一内容被上传两次（两行同 path，先后绑定）时，先过期行的清理会把文件删除，后行仍引用该 path → 后续 content 读取报「附件文件不存在」（占位降级，不崩但丢内容）。建议：删除文件前先查同 path 剩余行数，>0 则跳过 rmSync（行照删），或把文件删除挪到「无任何行引用该 path」时。
 
-**S4｜低-中｜CHAT_CTX_BUDGET_CHARS 单变量双语义双默认值，chatContext 还绕过 env**
+**S4｜低-中｜CHAT_CTX_BUDGET_CHARS 单变量双语义双默认值，chatContext 还绕过 env** —— ✅ **已于 P3-4（2026-09-10）修复**
 - 位置：plugins/src/chatContext.ts:69（digestBudget ?? 4000 硬编码）；plugins/src/spaceDigest.ts:32（defaultDigestBudget 读 CHAT_CTX_BUDGET_CHARS 默认 4000 = 摘要子预算）；plugins/src/chatResponder.ts:70（同一 env 读作总预算默认 8000）；头注释 spaceDigest.ts:9 / chatResponder.ts:11-12 与 docs/FEATURES.md:141。
 - 说明：同一 env 名在 spaceDigest（默认 4000）、chatResponder（默认 8000）语义不同；正式链路里 chatContext 传字面 4000，完全不理会 env，与 TEST_CASES 假设 A-1「护栏常量同名 env 覆写」及 FEATURES「合计 ≤8000 可覆写」的契约表述存在漂移（默认值下行为正确，env 覆写时才分叉：调大总预算时摘要子预算仍锁 4000）。建议：摘要子预算与总预算拆分不同 env（如 CHAT_CTX_DIGEST_BUDGET_CHARS），chatContext 改调 spaceDigest 的 defaultDigestBudget()，统一头注释与文档口径。
+- **修复（按本建议逐条落地）**：摘要子预算拆为独立变量 `CHAT_CTX_DIGEST_BUDGET_CHARS`（默认 4000），总预算仍为
+  `CHAT_CTX_BUDGET_CHARS`（8000）；`chatContext` 不再硬编码，改为读统一配置引擎；三处头注释与
+  README §9.2 / FEATURES 口径同步；插件族纳入 `scan --check` 与 `check.mjs`。
+  回归：`plugins/tests/config.test.mjs`（默认值漂移 + env 覆盖 + 摘要长度实测）与
+  `scripts/config/config.test.mjs`（schema/规则/跨进程）。证据：`docs/P3-4-evidence/verify-evidence.md`。
 
 **S5｜低｜附件内容先全量取回、后截断（10MB 上限下每附件全量过 JSON）**
 - 位置：team-hub/server.mjs readChatAttachmentContent()（readFileSync 全量 :1373）→ chatContext.ts fetch 全量 JSON → chatResponder.ts fitContextBudget 才截到 fileCap(4000)。

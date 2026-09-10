@@ -12,6 +12,7 @@
  */
 
 import { buildSpaceDigest } from './spaceDigest.js'
+import { pluginConfig } from './config.js'
 import type { ChatCtxAttachment, ChatCtxDigest } from './chatResponder.js'
 
 export interface AttachmentRef {
@@ -34,7 +35,7 @@ export interface GatherChatContextOptions {
   bindingDir?: string | null
   /** 空间元数据（远程仓库等；可选）。 */
   bindingMeta?: { remoteUrl?: string; name?: string; id?: string } | null
-  /** 摘要子预算（默认 4000，决策 G1 子预算；总预算在提示词层二次拟合）。 */
+  /** 摘要子预算（缺省取统一配置 CHAT_CTX_DIGEST_BUDGET_CHARS，默认 4000；总预算在提示词层二次拟合）。 */
   digestBudget?: number
 }
 
@@ -66,7 +67,7 @@ export async function gatherChatContext(opts: GatherChatContextOptions): Promise
         if (opts.bindingMeta?.id) meta.id = String(opts.bindingMeta.id)
         meta.name = opts.bindingMeta?.name ? String(opts.bindingMeta.name) : scope
         if (opts.bindingMeta?.remoteUrl) meta.remoteUrl = String(opts.bindingMeta.remoteUrl)
-        const d = buildSpaceDigest({ dir, budget: opts.digestBudget ?? 4000, meta })
+        const d = buildSpaceDigest({ dir, budget: opts.digestBudget ?? pluginConfig.chatCtxDigestBudgetChars, meta })
         if (d.text.length > 0) {
           spaceDigest = { text: d.text, sourceNote: '取自绑定仓库（只读快照）', generatedAt: new Date().toISOString() }
         } else if (d.reason) {

@@ -14,11 +14,16 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..')
 
-/** 三进程的扫描范围（与 PROCESSES 一致；工作树的 worktrees 目录一律跳过） */
+/** 各进程的扫描范围（与 PROCESSES 一致；工作树的 worktrees 目录一律跳过）
+ *  P3-4 起把 DSH 插件族也纳入：插件的主配置面是宿主 composition，但它们**从进程环境读取**的
+ *  少数项（提示词预算、hub token 回落）同样属于配置面，必须可扫描、可校验。 */
 export const PROCESSES = Object.freeze({
   'team-hub': { label: 'team-hub v2（对话/日程数据面）', dirs: ['team-hub'] },
   workbench: { label: '军团指挥台（workbench 宿主与静态服务）', dirs: ['workbench/scripts', 'workbench/src'] },
   whiteboard: { label: '协作白板（独立子项目）', dirs: ['whiteboard/apps/server/src', 'whiteboard/scripts'] },
+  plugins: { label: '士兵守护插件族（plugins/：scrum-worker / mediator）', dirs: ['plugins/src'] },
+  'board-plugin': { label: 'Scrum 看板插件（宿主 iframe 面板）', dirs: ['board-plugin/src'] },
+  'services-plugin': { label: '服务托管插件（随 Desktop 启停三进程）', dirs: ['services-plugin'] },
 })
 
 const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', '.legion-worktrees', '.worktrees', 'releases', 'scratch', 'coverage', 'data', '.ci', 'vendor'])
@@ -56,6 +61,10 @@ export function extractEnvReads(text) {
   // ② 形如 `env.NAME` / `env['NAME']`（env 为独立标识符或其结尾，如 options.env.NAME）
   for (const m of text.matchAll(/(?:^|[^\w.'"])(?:\w+\.)*env\.([A-Za-z_][A-Za-z0-9_]*)/g)) literal.add(m[1])
   for (const m of text.matchAll(/(?:\w+\.)*env\[\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s*\]/g)) literal.add(m[1])
+  // ②b 别名环境对象：`const baseEnv = { ...process.env, ... }` 之后写 `baseEnv.NAME`
+  //     （P3-4 实测：services-plugin 正是这样读 TEAM_HUB_HOST/TOKEN 与 DSH_HUB_UPSTREAM——
+  //     直接扫描完全看不到这些读取点，与 P3-2 那批 `envBytes(name, def)` 间接读取是同一类盲区。）
+  for (const m of text.matchAll(/(?:^|[^\w.'"])(\w*[Ee]nv)\.([A-Z][A-Z0-9_]*)\b/g)) literal.add(m[2])
   // ③ 疑似 env 形态的大写字面量（'WB_MAX_CONNECTIONS' 这类被当 key 传进读取辅助函数的常量）
   //    启发式：可能含非 env 命中，故 --check 下要求「声明或显式列入 nonEnvLiterals」
   for (const m of text.matchAll(/['"]([A-Z][A-Z0-9_]{3,})['"]/g)) {
@@ -214,6 +223,9 @@ export function schemaModuleFor(name) {
     'team-hub': 'team-hub/config-schema.mjs',
     workbench: 'workbench/scripts/config-schema.mjs',
     whiteboard: 'whiteboard/apps/server/src/config-schema.mjs',
+    plugins: 'plugins/config-schema.mjs',
+    'board-plugin': 'board-plugin/config-schema.mjs',
+    'services-plugin': 'services-plugin/config-schema.mjs',
   }
   return join(ROOT, map[name] ?? '')
 }

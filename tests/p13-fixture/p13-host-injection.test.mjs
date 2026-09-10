@@ -120,6 +120,29 @@ describeHost('P1-3 真实 DSH 宿主注入冒烟（legion 三插件）', () => {
     assert.equal(ctl.status, 200)
   })
 
+  it('①b P3-4：真实宿主注入下，守护启动即把生效配置（脱敏摘要）写进自己的日志', async () => {
+    const logPath = join(fx.home, 'p13-worker.log')
+    let text = ''
+    const deadline = Date.now() + 15000
+    while (Date.now() < deadline) {
+      try {
+        text = readFileSync(logPath, 'utf8')
+        if (/\[config\] plugins /.test(text)) break
+      } catch { /* 日志尚未落盘 */ }
+      await sleep(200)
+    }
+    const line = text.split('\n').find((l) => l.includes('[config] plugins '))
+    assert.ok(line, '守护日志缺少 P3-4 配置摘要行（真实宿主注入路径）：' + text.slice(-600))
+    // 摘要必须包含六个已纳管字段，且未设置的走默认值（本 fixture 没有设置任何 CHAT_CTX_*/NORMS_*）
+    for (const key of ['chatCtxBudgetChars=8000', 'chatCtxDigestBudgetChars=4000', 'chatCtxFileCapChars=4000',
+      'normsGlobalMax=3000', 'normsSpaceMax=4000', 'normsTotalMax=7000']) {
+      assert.ok(line.includes(key), `摘要缺少 ${key}：${line}`)
+    }
+    assert.ok(line.includes('（全部取默认值）') || line.includes('← 覆盖：'), '摘要必须说明值与默认值的关系：' + line)
+    // 配置非法时不得静默：日志里出现错误行才算「大声降级」（本 fixture 无非法值，故不应出现）
+    assert.ok(!text.includes('配置非法（已回退默认值）'), '无非法配置时不应出现错误行：' + text.slice(-600))
+  })
+
   it('② team-hub 宿主路径 HTTP 契约 + token 矩阵（Bearer）', async () => {
     // 无 token 写 → 401；错误 token → 401
     assert.equal((await req(fx.base, 'POST', '/team-hub/api/create', { title: 'x', by: 'general' })).status, 401)

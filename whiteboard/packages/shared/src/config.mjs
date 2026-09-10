@@ -35,6 +35,9 @@ export function maskSecret(value) {
  * 定义并冻结一个进程的配置 schema。
  * 字段：key（内部名）/ env（环境变量名）/ cli（可选命令行开关）/ type / default /
  *      sensitive / choices / min / max / doc / mustExist（path 类型，仅用于校验提示）
+ * 除 fields 外还可声明：
+ *      prefixes（本进程 env 前缀，用于「疑似拼错」告警）/ nonEnvLiterals / dynamicEnvReads /
+ *      foreignEnv / notes / rules（进程内一致性规则）/ injects（本进程注入给子进程的 env）
  */
 export function defineSchema(spec) {
   const { process: proc, title, fields } = spec
@@ -63,6 +66,14 @@ export function defineSchema(spec) {
     dynamicEnvReads: Object.freeze([...(spec.dynamicEnvReads ?? [])]),
     foreignEnv: Object.freeze([...(spec.foreignEnv ?? [])]),
     notes: Object.freeze([...(spec.notes ?? [])]),
+    /** 本进程**写入**（注入给子进程）的 env —— 不是读取点。
+     *  存在的理由：服务托管插件（services-plugin）会用**自己的配置项**覆盖子进程的同名 env，
+     *  此时「环境变量解析出来的值」与「子进程实际生效的值」可能不是一回事；跨进程规则必须能看到
+     *  这份「实际注入值」，否则校验结论会与现场相反（P3-4 实测：TEAM_HUB_PORT 被托管覆盖）。 */
+    injects: Object.freeze((spec.injects ?? []).map((x) => Object.freeze({ ...x }))),
+    /** 进程内的配置一致性规则：`(values) => {level, code, message, hint?}[]`。
+     *  引擎只携带与冻结，执行在 check.mjs（CLI/CI）与插件运行时的启动摘要处。 */
+    rules: Object.freeze([...(spec.rules ?? [])]),
     /** 全部 env 名（供 scan --check 对照） */
     envNames() { return norm.map((f) => f.env) },
     /** 全部内部键名 */

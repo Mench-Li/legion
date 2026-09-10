@@ -9,7 +9,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -17,14 +17,23 @@ import { fileURLToPath } from 'node:url'
 import {
   defineSchema, resolveConfig, redactConfig, formatSummary, summaryObject, parseArgv, coerce, maskSecret, SOURCE,
 } from '../../packages/shared/src/config.mjs'
+import * as ENGINE from '../../packages/shared/src/config.mjs'
 import { runCrossChecks, isExposed } from './cross-checks.mjs'
 import { parseEnvFileDetailed } from './check.mjs'
+import { scanProcess } from './scan.mjs'
 import { SCHEMA as HUB } from '../../team-hub/config-schema.mjs'
 import { SCHEMA as WB } from '../../workbench/scripts/config-schema.mjs'
 import { SCHEMA as BOARD } from '../../whiteboard/apps/server/src/config-schema.mjs'
+import { SCHEMA as PLUGINS } from '../../plugins/config-schema.mjs'
+import { SCHEMA as BOARD_PLUGIN } from '../../board-plugin/config-schema.mjs'
+import { SCHEMA as SERVICES } from '../../services-plugin/config-schema.mjs'
 
 const ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..')
-const SCHEMAS = { 'team-hub': HUB, workbench: WB, whiteboard: BOARD }
+// 六个**配置面**：三个活跃进程 + 三个 DSH 插件族（P3-4 纳入；插件主配置面仍是宿主 composition）
+const SCHEMAS = {
+  'team-hub': HUB, workbench: WB, whiteboard: BOARD,
+  plugins: PLUGINS, 'board-plugin': BOARD_PLUGIN, 'services-plugin': SERVICES,
+}
 
 // ───────────────────────── ① 引擎语义 ─────────────────────────
 
@@ -171,11 +180,9 @@ const GOOD = {
 
 function cross(overrides = {}, opts = {}) {
   const env = { ...GOOD, ...overrides }
-  return runCrossChecks({
-    'team-hub': cfgFor('team-hub', env),
-    workbench: cfgFor('workbench', env),
-    whiteboard: cfgFor('whiteboard', env),
-  }, { existsFn: () => true, ...opts })
+  return runCrossChecks(Object.fromEntries(
+    Object.keys(SCHEMAS).map((name) => [name, cfgFor(name, env)]),
+  ), { existsFn: () => true, ...opts })
 }
 
 const codes = (list) => list.map((c) => c.code).sort()
@@ -430,9 +437,142 @@ test('安全：复合值里的内嵌 token 也必须脱敏（WHITEBOARD_ROOMS=ro
   assert.match(summary, /rooms=main:\*\*\*:rw,guest:\*\*\*:ro/)
 })
 
+test('P3-4：类型面 config.d.mts 与引擎导出集合一致（防类型文件悄悄过期）', () => {
+  // TS 消费者（plugins/src/config.ts）只能看到 .d.mts；引擎新增导出而类型面没跟上时，
+  // 编译期会报错、但**没有任何测试**会发现两者已经分叉。这里做一次集合级对齐。
+  const dts = readFileSync(join(ROOT, 'packages', 'shared', 'src', 'config.d.mts'), 'utf8')
+  const declared = new Set([...dts.matchAll(/export declare (?:function|const) (\w+)/g)].map((m) => m[1]))
+  const actual = new Set(Object.keys(ENGINE))
+  assert.deepEqual([...declared].sort(), [...actual].sort(),
+    'config.d.mts 与 config.mjs 的导出不一致：缺失=' + [...actual].filter((k) => !declared.has(k)).join(',') +
+    ' 多余=' + [...declared].filter((k) => !actual.has(k)).join(','))
+  // 类型面的关键形状必须在（供插件 TS 代码使用）
+  for (const t of ['ConfigSchema', 'ConfigResolved', 'ConfigRuleViolation', 'ConfigInject', 'ConfigField']) {
+    assert.ok(new RegExp(`export interface ${t}\\b`).test(dts), `config.d.mts 缺少 ${t}`)
+  }
+})
+
 test('一致性：三份 schema 的 process 名与登记表一致，且 secret 字段确有其数', () => {
-  assert.deepEqual(Object.keys(SCHEMAS).sort(), ['team-hub', 'whiteboard', 'workbench'])
+  assert.deepEqual(Object.keys(SCHEMAS).sort(), ['board-plugin', 'plugins', 'services-plugin', 'team-hub', 'whiteboard', 'workbench'])
   assert.deepEqual(HUB.secretKeys(), ['token'])
   assert.deepEqual(WB.secretKeys().sort(), ['teamHubToken', 'token'])
   assert.deepEqual(BOARD.secretKeys(), ['token'])
+  // P3-4 插件族：能配 token 的两个插件必须标 sensitive（摘要/--json 都走脱敏）
+  assert.deepEqual(BOARD_PLUGIN.secretKeys(), ['hubToken'])
+  assert.deepEqual(SERVICES.secretKeys(), ['teamHubToken'])
+  assert.deepEqual(PLUGINS.secretKeys(), [])
+})
+
+// ───────────────────────── ⑤ P3-4 插件配置面（plugins / board-plugin / services-plugin）─────────────────────────
+
+test('P3-4：plugins schema 覆盖插件真实读取的全部 env，且扫描器能看到别名 env 对象的读取', () => {
+  const plugins = scanProcess('plugins', { includeTests: false })
+  // 插件改造后不再直接读 env（统一走 plugins/src/config.ts + 引擎）；这里的价值是「以后新增读取点必须登记」
+  assert.deepEqual([...plugins.reads.keys()], [], 'plugins 不应再直接读 env：' + JSON.stringify([...plugins.reads.keys()]))
+  assert.deepEqual(PLUGINS.envNames().sort(), [
+    'CHAT_CTX_BUDGET_CHARS', 'CHAT_CTX_DIGEST_BUDGET_CHARS', 'CHAT_CTX_FILE_CAP_CHARS',
+    'NORMS_GLOBAL_MAX', 'NORMS_SPACE_MAX', 'NORMS_TOTAL_MAX',
+  ])
+
+  // services-plugin 读的是 `baseEnv.NAME`（别名对象）——直接扫描看不到，靠 P3-4 新增的识别规则
+  const svc = scanProcess('services-plugin', { includeTests: false })
+  for (const key of ['TEAM_HUB_HOST', 'TEAM_HUB_TOKEN', 'DSH_HUB_UPSTREAM']) {
+    assert.ok(svc.reads.has(key), `services-plugin 的 baseEnv.${key} 读取点必须被扫出来（否则配置面有盲区）`)
+  }
+  assert.deepEqual(SERVICES.envNames().sort(), ['DSH_HUB_UPSTREAM', 'TEAM_HUB_HOST', 'TEAM_HUB_TOKEN'])
+
+  // board-plugin 从环境回落的 hub token
+  const boardPlug = scanProcess('board-plugin', { includeTests: false })
+  assert.ok(boardPlug.reads.has('TEAM_HUB_TOKEN'))
+  assert.deepEqual(BOARD_PLUGIN.envNames(), ['TEAM_HUB_TOKEN'])
+})
+
+test('P3-4：plugins 的 schema 规则（预算包含关系）在 check 里以 warning 呈现，不改变取值', () => {
+  const resolved = resolveConfig(PLUGINS, {
+    env: { CHAT_CTX_BUDGET_CHARS: '1000', CHAT_CTX_DIGEST_BUDGET_CHARS: '4000' },
+    checkUnknownEnv: false,
+  })
+  const violations = PLUGINS.rules.flatMap((rule) => rule(resolved.values))
+  const byCode = Object.fromEntries(violations.map((v) => [v.code, v]))
+  assert.equal(byCode.ctx_digest_over_total.level, 'warning')
+  assert.match(byCode.ctx_digest_over_total.message, /大于总预算/)
+  assert.ok(byCode.ctx_file_cap_over_total, '单块上限 4000 > 总预算 1000 也应报出')
+  // 规则只提示，不改写取值（与「非法值回退默认」是两回事）
+  assert.equal(resolved.values.chatCtxDigestBudgetChars, 4000)
+  assert.equal(resolved.values.chatCtxBudgetChars, 1000)
+
+  // 默认配置下不得有任何规则告警（否则每次 check 都会刷屏）
+  const clean = resolveConfig(PLUGINS, { env: {}, checkUnknownEnv: false })
+  assert.deepEqual(PLUGINS.rules.flatMap((rule) => rule(clean.values)), [])
+})
+
+test('P3-4：跨进程——services-plugin 会覆盖子进程端口/CLI，与环境解析值不一致时必须报出来', () => {
+  const r = cross({ TEAM_HUB_PORT: '9000' })
+  const hit = r.find((c) => c.code === 'services_inject_overrides_env')
+  assert.ok(hit, '托管实例端口被覆盖却没有告警：' + JSON.stringify(r))
+  assert.match(hit.message, /TEAM_HUB_PORT=8787/)
+  assert.match(hit.message, /9000/)
+  // 一致时（默认 8787）不得报
+  assert.ok(!codes(cross()).includes('services_inject_overrides_env'))
+  // workbench 的 --port 覆盖同理
+  const wbPort = cross({ DSH_WORKBENCH_PORT: '6000' })
+  assert.ok(codes(wbPort).includes('services_inject_overrides_env'))
+  assert.match(wbPort.find((c) => c.code === 'services_inject_overrides_env').message, /--port/)
+})
+
+test('P3-4：跨进程——hub 配了 token 而看板插件没拿到时必须提示（否则 hub 模式写操作 401）', () => {
+  const r = cross({ TEAM_HUB_TOKEN: 'hub-secret' })
+  // 同一份环境里 board-plugin 读的是同一个变量 → 它也有值，故不报（真实陷阱出现在两份配置不同的情形）
+  assert.ok(!codes(r).includes('plugin_hub_token_unset'))
+  const twoSources = runCrossChecks({
+    'team-hub': cfgFor('team-hub', { TEAM_HUB_TOKEN: 'hub-secret' }),
+    'board-plugin': cfgFor('board-plugin', { TEAM_HUB_TOKEN: '' }),
+  }, { existsFn: () => true })
+  assert.ok(codes(twoSources).includes('plugin_hub_token_unset'))
+  // hub 没配 token 时不提示（插件空 token 也能读）
+  const open = runCrossChecks({
+    'team-hub': cfgFor('team-hub', { TEAM_HUB_TOKEN: '' }),
+    'board-plugin': cfgFor('board-plugin', { TEAM_HUB_TOKEN: '' }),
+  }, { existsFn: () => true })
+  assert.ok(!codes(open).includes('plugin_hub_token_unset'))
+})
+
+test('P3-4：夹具与 CLI —— good 夹具 strict PASS 覆盖插件字段，bad 夹具报出插件非法值，--process=plugins 可用', () => {
+  const good = runCheck(['--env-file=scripts/config/fixtures/good.env', '--isolated-env', '--strict', '--quiet'])
+  assert.equal(good.code, 0, good.out)
+  const json = runCheck(['--env-file=scripts/config/fixtures/good.env', '--isolated-env', '--json'])
+  const payload = JSON.parse(json.out)
+  assert.equal(payload.processes.plugins.values.chatCtxBudgetChars, 10000, 'good 夹具必须真的覆盖到插件字段')
+  assert.equal(payload.processes.plugins.sources.chatCtxBudgetChars, 'env')
+  assert.equal(payload.processes.plugins.values.chatCtxFileCapChars, 2000)
+  assert.equal(payload.processes['board-plugin'].values.hubToken, '***(17 位)', '看板插件 token 必须脱敏')
+
+  const bad = runCheck(['--env-file=scripts/config/fixtures/bad.env', '--isolated-env'])
+  assert.equal(bad.code, 1)
+  assert.match(bad.out, /NORMS_GLOBAL_MAX 必须是整数/)
+  assert.match(bad.out, /\[ctx_digest_over_total\]/)
+  assert.match(bad.out, /\[services_inject_overrides_env\]/)
+
+  const one = runCheck(['--process=plugins', '--isolated-env', '--quiet'])
+  assert.equal(one.code, 0, one.out)
+  assert.ok(!one.out.includes('=== team-hub'))
+  const badName = runCheck(['--process=pluginz'])
+  assert.equal(badName.code, 2)
+})
+
+test('P3-4：插件族的 schema 不接管宿主 composition 的主配置面（边界写死在 schema 里）', () => {
+  // plugins/board-plugin 的主配置（角色、轮询间隔、hubUrl、scope…）来自 cordis composition，
+  // 不是 env：schema 里不得出现这些字段，否则会诱导运维在环境变量里配它们（不生效）。
+  for (const name of ['plugins', 'board-plugin']) {
+    for (const f of SCHEMAS[name].fields) {
+      assert.ok(!/^(SCOUT_|WORKER_|LEGION_ROLE|HUB_URL$|LEGION_SCOPE)/.test(f.env), `${name}.${f.env} 疑似接管了 composition 配置项`)
+    }
+  }
+  // services-plugin 声明了它**注入**的 env/CLI（跨进程规则据此判断实际生效值）
+  const injects = SERVICES.injects
+  assert.deepEqual(injects.map((i) => `${i.target}:${i.env}`).sort(), [
+    'team-hub:TEAM_HUB_HOST', 'team-hub:TEAM_HUB_PORT', 'team-hub:TEAM_HUB_TOKEN',
+    'workbench:DSH_HUB_UPSTREAM', 'workbench:DSH_WORKBENCH_PORT', 'workbench:TEAM_HUB_TOKEN',
+  ])
+  assert.equal(injects.find((i) => i.env === 'DSH_WORKBENCH_PORT').via, 'cli')
 })

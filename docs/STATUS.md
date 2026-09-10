@@ -4,7 +4,8 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-10　`run-ci --only test` **38 套件 / 926 用例全 PASS**（164s）—— 以本文件所在提交为准
+**最近一次全量基线**：2026-09-10　`run-ci --only env,test,doc` **全 PASS**；其中 `test` **38 套件 / 942 用例**
+（171s；同内容的另一次运行因机器上有并行 node 任务耗时 380s，结论一致）—— 以本文件所在提交为准
 
 > ✅ **基线可单命令复现**（2026-09-10）：`test` 阶段此前会因 `notify-hub-smoke` 泄漏 hub 子进程
 > 而**永不结束**（零输出、永久等待），P2-7 / P2-8 / P3-1 / P3-2 之后新增或扩充的套件只能用「逐套件单跑」
@@ -43,6 +44,10 @@
   ```
 - **v1 独有动作**：`/api/reject`、`/api/promote`（v1 worktree git 语义）在 v2 hub 模式下返回 **501 降级指引**，
   请改用 `transition` + `comment`（v2 分支合入由 worker 完成）。
+- **插件配置面**：三个 DSH 插件（`plugins/` 守护、`board-plugin/` 看板、`services-plugin/` 托管）在宿主进程内运行，
+  **主配置来自宿主 composition**（`~/.dsh/profiles/web/cordis.patch.yml` 的 `config:` 块）；它们从**进程环境**
+  读取的少数项（提示词预算、hub token 回落）已纳入统一配置体系（P3-4，`docs/CONFIG.md` §3.4–3.6）。
+  改这些环境变量后需**重启宿主**才生效。
 
 ## 2. 测试基线与复跑方式
 
@@ -56,8 +61,9 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：38 套件 / 926 用例，`--only test` 整体 PASS（164s）** —— 2026-09-10 实测
-（此前 `test` 阶段会因 `notify-hub-smoke` 泄漏子进程而**永不结束**，故长期只能用「逐套件单跑」拼出基线；
+**当前基线：38 套件 / 942 用例，`--only test` 整体 PASS（171s）** —— 2026-09-10 实测
+（P3-4 之后：`plugins` 177→185、`config` 28→35、`p13-host-injection` 7→8。
+此前 `test` 阶段会因 `notify-hub-smoke` 泄漏子进程而**永不结束**，故长期只能用「逐套件单跑」拼出基线；
 根因、修复与两处连带回归见 `docs/CI-TEST-STAGE-evidence/verify-evidence.md`）。
 
 | 套件 | 用例 | 套件 | 用例 |
@@ -71,14 +77,14 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 | goal | 14 | notify（P2-4 含真实 hub SSE 断线重连） | 15 |
 | rules | 7 | hub-event-stream（F-01 scope/游标/信封） | 5 |
 | artifact | 16 | dual-write（P1-1 双进程写同库竞态 + 迁移竞态） | 4 |
-| security | 6 | p13-host-injection（P1-3 真实宿主注入） | 7 |
+| security | 6 | p13-host-injection（P1-3 真实宿主注入 + P3-4 配置摘要） | 8 |
 | read-auth（鉴权矩阵 + 回环开放，2 文件） | 14 | whiteboard（含 P3-1 治理端到端与前端静态契约，12 文件） | 158 |
-| files-api | 41 | plugins（含 P2-6 chat-context、SP-P0 space-pipeline） | 177 |
+| files-api | 41 | plugins（含 P2-6 chat-context、SP-P0 space-pipeline、P3-4 配置） | 185 |
 | files-p27 / files-ui（P2-7） | 36 / 19 | web-p28 / browser-ui（P2-8） | 21 / 21 |
 | web | 24 | static-serve（静态托管 404/SPA 回退/穿越） | 6 |
 | doc-render | 11 | board-plugin | 37 |
 | skill-importer | 4 | scrum | 25 |
-| hub-board / artifact-policy | 1 / 3 | config（P3-2 统一配置） | 28 |
+| hub-board / artifact-policy | 1 / 3 | config（P3-2 统一配置 + P3-4 插件族） | 35 |
 | web-history（P2-8 抓取历史） | 1 |  |  |
 
 （上表**全部**为 `--only test` 单次全量运行的实测值；不再存在「未入全量基线」的套件。）
@@ -109,12 +115,16 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
    对话真实模型通道 E2E 等仍在 `docs/REMAINING-TASKS.md` 待办；浏览器助手的缓存/正文提取/截图已按 P2-8 增强）。
 2. 白板为**单实例多房间**模型（P3-1 已落地房间隔离/权限/限流/指标审计）；
    **不承诺横向扩展**，多实例共享存储未实现（ADR-0008 记录了被否理由与转 v2 触发条件）。
-3. 配置面已统一（P3-2）：三个活跃进程（team-hub / workbench / whiteboard）共用统一配置引擎
-   （`packages/shared/src/config.mjs`，优先级 **CLI > env > 默认值**），共 54 个已声明字段；启动打印
-   **脱敏**摘要；`node scripts/config/check.mjs` 提供校验与 10 条跨进程一致性规则，CI env 阶段跑
-   scan/sync/check 三项自检。**已知边界**：只覆盖活跃三进程（`scrum` 已退役、两个 DSH 插件仍由宿主
-   composition 管理）；配置**不支持热更新**（启动时解析一次）；`check.mjs` 只做配置面一致性、**不发网络
-   请求**；白板因 Docker 构建上下文隔离而使用根引擎的**同步副本**（逐字节校验）。详见 `docs/CONFIG.md`。
+3. 配置面已统一（P3-2 + P3-4）：**6 个配置面**共用统一配置引擎
+   （`packages/shared/src/config.mjs`，优先级 **CLI > env > 默认值**）——三个活跃进程
+   （team-hub / workbench / whiteboard）与三个 DSH 插件族（plugins / board-plugin / services-plugin），
+   共 64 个已声明字段；启动打印**脱敏**摘要；`node scripts/config/check.mjs` 提供校验、12 条跨进程
+   一致性规则与进程内 schema 规则（含「services-plugin 会覆盖子进程端口」这类只有把两边摆在一起才看得出的结论），
+   CI env 阶段跑 scan/sync/check 三项自检。**已知边界**：插件的主配置面仍是宿主 composition
+   （`cordis.patch.yml` 的 `config:` 块，`check.mjs` 看不到）；`board-plugin` / `services-plugin` 只做声明与
+   校验、未改运行时；配置**不支持热更新**（启动时解析一次，改 env 需重启宿主）；`check.mjs` 只做配置面一致性、
+   **不发网络请求**；白板因 Docker 构建上下文隔离而使用根引擎的**同步副本**（逐字节校验）。
+   插件族的非法值走「大声降级」（回退默认 + 打印错误行），不退出宿主。详见 `docs/CONFIG.md`。
 4. board-plugin 的 hub 动态面板为轻量自渲染（覆盖看板主操作），未复刻旧静态页全部视觉细节；
    无 hub 时退回本地文件模式，此时不渲染 v1 静态产物。
 5. 通知中心（P2-4）已具备分类/优先级/批量已读/统一跳转/断线补齐；**已读状态仅存本机

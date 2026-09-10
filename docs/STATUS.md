@@ -7,7 +7,7 @@
 **最近一次全量基线**：2026-09-10　`run-ci --only test` **29 套件 / 671 测试全 PASS**（136s）—— 以本文件所在提交为准
 
 > ⚠️ **基线滞后说明（诚实登记）**：P2-7 / P2-8 / P3-1 之后新增或扩充的套件（`files-p27`、`files-ui`、
-> `web-p28`、`browser-ui`、`static-serve`，以及扩充到 152 例的 `whiteboard`）**未纳入上面这条全量基线**——
+> `web-p28`、`browser-ui`、`static-serve`，以及扩充到 158 例的 `whiteboard`）**未纳入上面这条全量基线**——
 > `test` 阶段当前会因 `notify-hub-smoke` 永久等待而无法跑完（根因与最小修法见
 > `docs/P2-7-evidence/verify-evidence.md` §7）。这些套件是**逐个单独复跑**验证的，未伪造全量基线；
 > 表中相应行的用例数已按实测更新。
@@ -65,7 +65,7 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 | rules | 7 | notify（P2-4 含真实 hub SSE 断线重连） | 15 |
 | artifact | 16 | dual-write | 2 |
 | security | 6 | p13-host-injection（P1-3 真实宿主注入） | 7 |
-| read-auth | 14 | whiteboard（含 P3-1 治理端到端，11 文件） | 152 |
+| read-auth | 14 | whiteboard（含 P3-1 治理端到端与前端静态契约，12 文件） | 158 |
 | files-api | 41 | plugins（含 P2-6 chat-context 13、SP-P0 space-pipeline） | 159 |
 | web | 24 | static-serve（静态托管 404/SPA 回退/穿越） | 6 |
 | files-p27 / files-ui（P2-7，未入全量基线） | 36 / 19 | web-p28 / browser-ui（P2-8，未入全量基线） | 21 / 21 |
@@ -128,13 +128,17 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
     空间抓取历史按空间**上限 200 条**裁剪（超出丢最旧，无分页游标），且依赖 team-hub v2 运行（否则界面明确报不可用）；
     限流默认值可用 `DSH_WEB_QUOTA_*` 调整，为**单进程**语义（无分布式限流）。
     前端验证为判定层（`workbench/scripts/browser-ui.test.mjs` 21 例）。
-11. 白板治理（P3-1）：`/metrics` 与审计为**进程内**（重启归零；审计 JSONL 按大小轮转保留 3 份，无长期归档）；
+11. 白板治理（P3-1）：`/metrics` 与审计为**进程内**（重启归零）；审计 JSONL 按大小轮转保留 3 份、无长期归档；
+    **重启后 `/api/rooms/<id>/audit` 只返回本进程产生的事件，历史仅存在于 JSONL 文件里**（接口不读历史文件）；
     角色只有 `rw`/`ro` 两档（无按元素/区域的细粒度权限，无操作级回放）；
     单 IP 连接上限为**粗粒度**防滥用且**不信任** `X-Forwarded-For`（反代 + 大量同出口用户的部署需在边界
     做真实客户端识别，否则同一出口会共享该额度）；房间空闲关闭依赖 tick 心跳；
     房间与单房间连接上限默认 50、全局 200（对齐 soak 承诺，`WB_*` 可调）；
     **多实例共享存储未实现**（ADR-0008 记录了被否理由与转 v2 触发条件）；
-    前端房间/角色逻辑为判定层测试（`whiteboard/packages/shared/test/room.test.mjs` 12 例，不引入浏览器自动化）。
+    前端房间/角色逻辑为判定层测试（`whiteboard/packages/shared/test/room.test.mjs` 12 例）+
+    前端静态契约（`whiteboard/apps/web/test/ui-contract.test.mjs` 6 例：DOM id 与共享模块接线、
+    CSS 类与只读态类名一致），**不引入浏览器自动化**——按钮禁用、房间切换、复制链接等
+    DOM 行为仍无自动断言，靠人工核对；真实文件型房间路径由临时生产路径脚本验证（18/18，未入库）。
 12. 静态托管（P2-8 后续修补）：`workbench/scripts/serve.mjs` 在产物缺失时返回 404 + 指引（不再断流），
     但**未知资源路径仍回落 SPA 入口（200 HTML）**——即缺失的 `/assets/*.js` 会返回 HTML 而非 404，
     浏览器侧表现为 MIME 报错；这是既有 SPA 回退语义，未在本轮改动（如需按扩展名区分导航与资源请求需单独立项）。

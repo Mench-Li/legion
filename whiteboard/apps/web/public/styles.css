@@ -31,6 +31,27 @@ input[type=range] { width: 80px; }
 .peers { display: flex; gap: 6px; flex-wrap: wrap; max-width: 320px; }
 .peers .peer { font-size: 12px; padding: 2px 8px; border-radius: 12px; color: #fff; }
 
+/* ---------- 房间与治理（P3-1） ---------- */
+.room-group { border-right: 1px solid #e2e5ea; padding-right: 10px; }
+.room-group input[type=text] {
+  border: 1px solid #d3d8de; border-radius: 6px; padding: 5px 7px; font-size: 13px; width: 110px;
+}
+.room-group input[type=text]:invalid { border-color: #d33; }
+.room-label {
+  font-size: 12px; color: #444; background: #eef2f8; border-radius: 10px; padding: 3px 9px;
+  font-family: ui-monospace, monospace;
+}
+.role { font-size: 12px; padding: 3px 9px; border-radius: 10px; }
+.role.rw { background: #e6f4ea; color: #1b5e20; }
+.role.ro { background: #fdecea; color: #b3261e; font-weight: 600; }
+/* 只读态：画布光标改为只读提示，工具栏禁用样式已由 :disabled 覆盖 */
+body.readonly #board { cursor: not-allowed; }
+body.readonly #toolbar .room-group { background: #fff5f5; }
+.limit {
+  font-size: 12px; color: #b3261e; background: #fdecea; border: 1px solid #f5c6c2;
+  padding: 4px 10px; border-radius: 6px; max-width: 52ch;
+}
+
 #stage { position: relative; flex: 1; overflow: hidden; }
 #board, #overlay { position: absolute; inset: 0; width: 100%; height: 100%; }
 #board { cursor: crosshair; }

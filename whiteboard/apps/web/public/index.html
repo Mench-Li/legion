@@ -9,6 +9,13 @@
 <body>
   <header id="toolbar">
     <span class="brand">协作白板</span>
+    <div class="group room-group">
+      <label>房间 <input id="room-input" type="text" value="default" size="12" spellcheck="false" /></label>
+      <button id="room-go" title="切换房间（也可以直接用 ?room=<id> 打开）">切换</button>
+      <button id="room-copy" title="复制当前房间链接（含 token，仅发给可信任的人）">复制链接</button>
+      <span id="room-label" class="room-label">default</span>
+      <span id="role" class="role rw">可编辑</span>
+    </div>
     <div class="group" id="tools">
       <button data-tool="select" class="tool active" title="选择/移动 (V)">选择</button>
       <button data-tool="rect" class="tool" title="矩形 (R)">矩形</button>
@@ -29,6 +36,7 @@
       <button id="del" title="删除 (Delete)">删除</button>
     </div>
     <div class="spacer"></div>
+    <div id="limit" class="limit" style="display:none"></div>
     <div class="group" id="status">
       <span id="conn" class="dot off"></span>
       <span id="online">在线: 0</span>

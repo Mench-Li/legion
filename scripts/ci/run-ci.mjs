@@ -28,7 +28,7 @@
  * 沙箱说明：本仓库既有边界 = pwsh/受限 shell 拦截子进程 pipe 捕获（spawn EPERM）；
  * 在普通终端或 run_code 宿主进程执行本脚本即可全量直跑（T-043 先例，命令与产物与普通终端一致）。
  */
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync, copyFileSync, statSync, rmSync, symlinkSync, appendFileSync } from 'node:fs'
 import { dirname, join, resolve, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -63,12 +63,54 @@ function exec(cmd, args, opts = {}) {
     const env = { ...process.env, CI: 'true', ...(opts.env || {}) }
     const child = spawn(cmd, args, { cwd, env, windowsHide: true, shell: opts.shell === true })
     let out = '', err = ''
+    let tree = ''
     child.stdout.on('data', d => { out += d.toString() })
     child.stderr.on('data', d => { err += d.toString() })
-    const timer = opts.timeoutMs ? setTimeout(() => { try { child.kill() } catch { /* */ } }, opts.timeoutMs) : null
-    child.on('close', (code) => { if (timer) clearTimeout(timer); resolvePromise({ code, out, err }) })
-    child.on('error', (e) => { if (timer) clearTimeout(timer); resolvePromise({ code: -2, out, err: e.message }) })
+    const timer = opts.timeoutMs ? setTimeout(() => {
+      // 超时必须连**后代进程**一起杀，并留下现场快照 —— 见 killTree 注释里的实测代价。
+      tree = describeDescendants(child.pid)
+      killTree(child.pid)
+    }, opts.timeoutMs) : null
+    child.on('close', (code) => { if (timer) clearTimeout(timer); resolvePromise({ code, out, err, tree }) })
+    child.on('error', (e) => { if (timer) clearTimeout(timer); resolvePromise({ code: -2, out, err: e.message, tree }) })
   })
+}
+
+/**
+ * 超时清理：杀掉该进程的**整棵子树**。
+ *
+ * 实测代价（2026-09-10）：只 `child.kill()` 直接子进程时，`node --test` 运行器派生的
+ * 「每文件测试进程」以及测试自己起的 hub 子进程会继续存活；它们继承了运行器的 stdout/stderr
+ * 管道，于是 `close` 事件迟迟不触发 —— 一次套件超时（预算 300s）最终让整个 test 阶段跑了
+ * **1153s**（多挂 850s），期间还有进程在写库。
+ * Windows 用 `taskkill /T /F`（POSIX 用进程组信号）才能真正收干净。
+ */
+function killTree(pid) {
+  if (!pid) return
+  if (process.platform === 'win32') {
+    try { spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' }) } catch { /* 尽力而为 */ }
+    return
+  }
+  try { process.kill(-pid, 'SIGKILL') } catch { try { process.kill(pid, 'SIGKILL') } catch { /* 尽力而为 */ } }
+}
+
+/** 超时现场快照：列出该进程仍存活的后代及其命令行（跨平台，失败即返回空串）。
+ *  没有它，「套件超时」只能得到一句「可能泄漏句柄」，无法知道到底是哪些进程没退。 */
+function describeDescendants(pid) {
+  try {
+    if (process.platform === 'win32') {
+      const r = spawnSync('powershell', ['-NoProfile', '-Command',
+        `Get-CimInstance Win32_Process -Filter "ParentProcessId=${pid}" | Select-Object ProcessId,Name,CommandLine | Format-List`],
+        { encoding: 'utf8', timeout: 8000, windowsHide: true })
+      return (r.stdout || '').trim()
+    }
+    const r = spawnSync('ps', ['-eo', 'pid,ppid,args'], { encoding: 'utf8', timeout: 8000 })
+    const pids = new Set([String(pid)])
+    const lines = (r.stdout || '').split('\n')
+    const picked = []
+    for (const line of lines) { const cols = line.trim().split(/\s+/); if (cols.length > 2 && pids.has(cols[1])) { pids.add(cols[0]); picked.push(line.trim()) } }
+    return picked.join('\n')
+  } catch { return '' }
 }
 
 /** 单个测试套件的硬上限。测试进程若泄漏句柄（子进程/定时器）会永不退出，
@@ -88,13 +130,16 @@ async function runNodeTests(label, files, cwd, nodeArgs = []) {
   const elapsed = Date.now() - t0
   const timedOut = elapsed >= TEST_SUITE_TIMEOUT_MS - 500
   const all = r.out + '\n' + r.err
+  // 超时现场快照并入 raw：没有它，「套件超时」只剩一句「可能泄漏句柄」，
+  // 无法知道到底是哪些后代进程没退（本次排查正是缺这份证据）。
+  const raw = timedOut && r.tree ? all + '\n\n[超时现场] 运行器仍存活的后代进程：\n' + r.tree + '\n' : all
   const num = (re) => { const m = re.exec(all); return m ? Number(m[1]) : NaN }
   const counts = { tests: num(/\btests\s+(\d+)/), pass: num(/\bpass\s+(\d+)/), fail: num(/\bfail\s+(\d+)/) }
   const ok = r.code === 0 && (Number.isNaN(counts.fail) || counts.fail === 0)
   const failLines = all.split('\n').filter(l => /^not ok|# fail|^✖/.test(l)).slice(0, 8).join(' | ')
   const detail = label + ': exit=' + r.code + ' tests=' + counts.tests + ' pass=' + counts.pass + ' fail=' + counts.fail
-    + (timedOut ? '（套件超过 ' + Math.round(TEST_SUITE_TIMEOUT_MS / 1000) + 's 被杀：可能存在泄漏句柄或死锁）' : '')
-  return { ok, code: r.code, detail: ok ? detail : detail + ' FAIL: ' + (failLines || '(see ci.log)'), raw: all }
+    + (timedOut ? '（套件超过 ' + Math.round(TEST_SUITE_TIMEOUT_MS / 1000) + 's 被杀（已连后代进程一起清理）：可能存在泄漏句柄或死锁）' : '')
+  return { ok, code: r.code, detail: ok ? detail : detail + ' FAIL: ' + (failLines || '(see ci.log)'), raw }
 }
 
 function sha256File(file) { return createHash('sha256').update(readFileSync(file)).digest('hex') }

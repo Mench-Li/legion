@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-10　commit `4b81c8f`　`run-ci --only test` **25 套件 / 576 测试全 PASS**（113s）
+**最近一次全量基线**：2026-09-10　`run-ci --only test` **28 套件 / 591 测试全 PASS**（158s）—— 以本文件所在提交为准
 
 ---
 
@@ -54,14 +54,15 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 | skills | 20 | v1v2-contract | 14 |
 | calendar | 13 | team-hub-parity | 1 |
 | spaces | 5 | dedupe | 9 |
-| goal | 14 | dual-write | 2 |
-| rules | 7 | p13-host-injection | 6 |
-| artifact | 16 | whiteboard | 70 |
-| security | 6 | plugins | 135 |
-| read-auth | 14 | board-plugin | 37 |
-| files-api | 41 | scrum | 25 |
-| web | 24 | skill-importer | 4 |
-| doc-render | 11 | hub-board / artifact-policy | 1 / 3 |
+| goal | 14 | notify（P2-4 含真实 hub SSE 断线重连） | 15 |
+| rules | 7 | dual-write | 2 |
+| artifact | 16 | p13-host-injection | 6 |
+| security | 6 | whiteboard | 70 |
+| read-auth | 14 | plugins | 135 |
+| files-api | 41 | board-plugin | 37 |
+| web | 24 | scrum | 25 |
+| doc-render | 11 | skill-importer | 4 |
+| hub-board / artifact-policy | 1 / 3 | — | — |
 
 其他阶段：`--only doc`（文档新鲜度 + 历史 evidence banner 覆盖）、`--only build|smoke|env|deps|stage`。
 部署与回滚：`docs/DEPLOY.md`。现场（真实宿主）验收脚本：`scripts/live/p11-step2-verify.mjs`。
@@ -90,7 +91,11 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 3. 配置仍分散在环境变量 / CLI / services-plugin / 宿主 patch / Workbench 本地设置之间（统一配置系统待办）。
 4. board-plugin 的 hub 动态面板为轻量自渲染（覆盖看板主操作），未复刻旧静态页全部视觉细节；
    无 hub 时退回本地文件模式，此时不渲染 v1 静态产物。
-5. 生产宿主 `/team-hub` 与 8787 双进程写同库：已通过事务内取号保证一致性，但两进程的
+5. 通知中心（P2-4）已具备分类/优先级/批量已读/统一跳转/断线补齐；**已读状态仅存本机
+   localStorage**（跨浏览器与跨标签页不同步，服务端已读持久化未做——按 R-15 v1 取舍）。
+   Node 侧 SSE 回归用的是最小 EventSource 实现（不覆盖浏览器全部行为：无 `retry:` 指令、
+   无超时关闭），浏览器行为以现场为准。
+6. 生产宿主 `/team-hub` 与 8787 双进程写同库：已通过事务内取号保证一致性，但两进程的
    `audit` 广播各自独立（事件流不跨进程合并）；消费方以 SSE 连接的那个实例为准。
 
 ## 5. 维护约定

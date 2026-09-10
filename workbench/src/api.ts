@@ -626,9 +626,29 @@ export async function fetchChatHealth(scope: string): Promise<ChatHealthInfo> {
   return readJson<ChatHealthInfo>(await hubGet(`/api/chat/health?scope=${encodeURIComponent(scope)}`))
 }
 
-/** team-hub 审计 SSE：单一 /api/events（I8），订阅方按 action 过滤 chat:*。断线自动重连。 */
-export function subscribeHubAudit(onEvent: (event: HubAuditEvent) => void): () => void {
+/**
+ * team-hub 审计 SSE：单一 /api/events（I8），订阅方按 action 过滤。
+ *
+ * 断线恢复（P2-4）：
+ * - 浏览器 EventSource 自动重连，且因 v2 帧带 `id:` 行会自动携带 `Last-Event-ID` 续传（P2-3 信封）；
+ * - 但续传不保证覆盖全部缺口（回放窗口有限），因此这里额外上报**连接状态与打开次数**，
+ *   由订阅方按缺口判据（notify.shouldRefill）决定是否立即重拉列表补齐。
+ */
+export function subscribeHubAudit(
+  onEvent: (event: HubAuditEvent) => void,
+  opts: { onStatus?: (status: HubSseStatus) => void } = {},
+): () => void {
   const es = new EventSource(hubEventSourceUrl('/api/events'))
+  let opens = 0
+  es.onopen = () => {
+    opens += 1
+    // opens === 1：首次连接；> 1：断线后自动重连成功（订阅方据此立即重拉补齐）
+    opts.onStatus?.({ state: opens === 1 ? 'open' : 'reconnected', opens })
+  }
+  es.onerror = () => {
+    // readyState=0(CONNECTING) 表示浏览器正在自动重连；2(CLOSED) 表示已放弃
+    opts.onStatus?.({ state: es.readyState === 2 ? 'closed' : 'reconnecting', opens })
+  }
   es.onmessage = (ev) => {
     try {
       onEvent(JSON.parse(ev.data) as HubAuditEvent)
@@ -637,6 +657,13 @@ export function subscribeHubAudit(onEvent: (event: HubAuditEvent) => void): () =
     }
   }
   return () => es.close()
+}
+
+/** SSE 订阅状态（P2-4 实时连接可观测性）。 */
+export interface HubSseStatus {
+  state: 'open' | 'reconnected' | 'reconnecting' | 'closed'
+  /** 打开次数：1 = 首次，>1 = 断线后重连成功。 */
+  opens: number
 }
 
 // ── R-4（S9/S11）对话 AI 回复：重试 + 每空间回复设置 ──
@@ -842,54 +869,98 @@ export async function webFetchPage(input: { url: string; maxBytes?: number; time
 }
 
 // ───────────────────────── 通知中心（S7 ← R-B2：audit 派生，零新表零新端点）─────────────────────────
+// P2-4：分类/优先级/来源、批量已读、跳转协议、去重与断线恢复的**定义与纯函数**已收敛到 ./notify.ts
+// （可被 node:test 直接 import）；本节只保留 localStorage IO 薄层与历史导出（向后兼容）。
+// 注：相对导入写显式 .ts 扩展名——使本文件同时可被 Node（--experimental-strip-types）直接导入，
+// 让 localStorage IO 层也进 node:test 端到端覆盖（tsconfig 已开 allowImportingTsExtensions）。
 
-/**
- * 通知 action 白名单（R-B2 / TC-S7-02/03 / R-15）：任务生命周期 + 目标/空间/模型/技能类入列。
- * chat:* 一律默认排除（防刷屏）；progress（进度中间态）、comment（任务讨论，走对话中心）、
- * release-stale（租约回收）、exec:*（开关回声）等高频/系统噪音不入列。
- * 注：白名单是对动作类型的收窄；scope 过滤 + 列表拉取仍走既有 GET /api/activity（唯一列表源）。
- */
-const NOTIFY_ACTIONS = new Set<string>([
-  'create', 'claim', 'transition', 'advance', 'reassign', 'hold', 'unhold',
-  'patch', 'evidence', 'artifact', 'review-note', 'test-report',
-  'goal:publish', 'goal:slices', 'goal:pause', 'goal:resume', 'goal:done', 'goal:cancel', 'goal:context',
-  'space:create', 'space:update', 'space:delete', 'space:add-agents',
-  'model:set', 'model:clear',
-  'skill:submit', 'skill:review', 'skill:grant',
-])
+export {
+  NOTIFY_ACTIONS, NOTIFY_ACTION_LABEL, NOTIFY_CATEGORY_LABEL, NOTIFY_PRIORITY_LABEL,
+  isNotifyAction, notifyLabel, notifyCategory, notifyPriority, jumpOf, validTaskId,
+  toNotifyItem, toNotifyItems, mergeNotifyItems, applyReadState,
+  isSeqRead, normalizeReadState, applyMarkRead, applyMarkAllRead,
+  unreadCount, categoryCounts, filterItems, highestSeq, shouldRefill,
+  notifyReadKey, notifyReadIdsKey,
+} from './notify.ts'
+export type { NotifyCategory, NotifyPriority, NotifySource, NotifyJump, NotifyItem, NotifyReadState } from './notify.ts'
 
-/** 是否通知白名单 action（chat:* 等一律不入列，TC-S7-03）。 */
-export function isNotifyAction(action: unknown): boolean {
-  return typeof action === 'string' && NOTIFY_ACTIONS.has(action)
-}
+import { EMPTY_READ_STATE, applyMarkAllRead, applyMarkRead, isNotifyAction, isSeqRead, normalizeReadState, notifyReadIdsKey, notifyReadKey, unreadCount } from './notify.ts'
+import type { NotifyItem, NotifyReadState } from './notify.ts'
 
 /** 通知列表行 = 审计条目（seq 有序；time/scope/action/taskId/member/detail 即列表所需字段）。 */
 export type NotifyRow = HubActivity
 
-const notifyReadKey = (scope: string | null): string => `legion.notify.read.${scope ?? '__all__'}`
+/**
+ * 读取已读状态（localStorage per scope）。「已读」是纯本地语义：绝不写 audit、绝不新增写接口
+ * （TC-S7-04/05：点击已读 → 刷新保持、切空间回来仍在；反向断言服务端零新行）。
+ * cursor = 连续已读游标（历史键 legion.notify.read.<scope>，旧数据继续生效）；
+ * ids   = 显式已读 seq 集合（P2-4 新增键 legion.notify.readseq.<scope>，支持非连续批量已读）。
+ */
+export function notifyReadState(scope: string | null): NotifyReadState {
+  const raw = Number(localStorage.getItem(notifyReadKey(scope)) ?? 0)
+  const cursor = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0
+  let ids: number[] = []
+  try {
+    const parsed = JSON.parse(localStorage.getItem(notifyReadIdsKey(scope)) ?? '[]') as unknown
+    if (Array.isArray(parsed)) ids = parsed.filter((x): x is number => typeof x === 'number' && Number.isFinite(x))
+  } catch {
+    ids = [] // 损坏值 → 视为无显式已读，不崩溃
+  }
+  return normalizeReadState({ cursor, ids })
+}
+
+/** 写回已读状态（只写本机 localStorage；游标单调、集合规范化）。 */
+export function saveNotifyReadState(scope: string | null, state: NotifyReadState): void {
+  const norm = normalizeReadState(state)
+  localStorage.setItem(notifyReadKey(scope), String(norm.cursor))
+  if (norm.ids.length > 0) localStorage.setItem(notifyReadIdsKey(scope), JSON.stringify(norm.ids))
+  else localStorage.removeItem(notifyReadIdsKey(scope))
+}
 
 /**
- * 已读游标读取（localStorage per scope）。「已读」是纯本地语义：绝不写 audit、绝不新增写接口
- * （TC-S7-04/05：点击已读 → 刷新保持、切空间回来仍在；反向断言服务端零新行）。
+ * 已读游标读取（历史导出，保留兼容）。
+ * 「已读」是纯本地语义：绝不写 audit、绝不新增写接口（TC-S7-04/05）。
  */
 export function notifyReadSeq(scope: string | null): number {
-  const raw = Number(localStorage.getItem(notifyReadKey(scope)) ?? 0)
-  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0
+  return notifyReadState(scope).cursor
 }
 
 /** 已读游标推进（单调递增：只把游标推到「已点开的最后一条 seq」，只写 localStorage）。
  *  游标仅本机有效、跨标签页/跨浏览器不同步（R-15 v1 接受；需服务端已读持久时走 J8-B）。 */
 export function setNotifyReadSeq(scope: string | null, seq: number): void {
-  const cur = notifyReadSeq(scope)
-  if (seq > cur) localStorage.setItem(notifyReadKey(scope), String(Math.floor(seq)))
+  saveNotifyReadState(scope, applyMarkRead(notifyReadState(scope), [seq]))
 }
 
-/** 通知未读计数：白名单内且 seq 在已读游标之后（侧栏 badge 与通知面板共用同一口径）。 */
+/** 单条/批量标记已读（P2-4：批量 = 传入多个 seq；压实游标后写回）。 */
+export function markNotifyRead(scope: string | null, seqs: number[]): NotifyReadState {
+  const next = applyMarkRead(notifyReadState(scope), seqs)
+  saveNotifyReadState(scope, next)
+  return next
+}
+
+/** 全部已读（把游标推进到给定的最大 seq；不回退）。 */
+export function markAllNotifyRead(scope: string | null, maxSeq: number): NotifyReadState {
+  const next = applyMarkAllRead(notifyReadState(scope), maxSeq)
+  saveNotifyReadState(scope, next)
+  return next
+}
+
+/** 通知未读计数：白名单内且未读（侧栏 badge 与通知面板共用同一口径）。 */
 export function countNotifyUnread(rows: NotifyRow[], scope: string | null): number {
-  const cursor = notifyReadSeq(scope)
+  const state = notifyReadState(scope)
   let n = 0
   for (const row of rows) {
-    if (isNotifyAction(row.action) && row.seq > cursor) n += 1
+    if (isNotifyAction(row.action) && !isSeqRead(row.seq, state)) n += 1
   }
   return n
+}
+
+/** 通知项未读数（列表已是 NotifyItem 时用，避免重复判定）。 */
+export function countUnreadItems(items: NotifyItem[]): number {
+  return unreadCount(items)
+}
+
+/** 测试/调试用：清空某空间的已读状态（生产代码不调用）。 */
+export function resetNotifyRead(scope: string | null): void {
+  saveNotifyReadState(scope, EMPTY_READ_STATE)
 }

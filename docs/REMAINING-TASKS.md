@@ -233,14 +233,28 @@ board-plugin hub 模式 SSE 桥接（R9）属跨宿主改造，登记移交 P1-3
 
 ### P2-4 通知中心增强
 
+状态：**已完成**（2026-09-10）—— 统一模型与纯函数 `workbench/src/notify.ts`；面板 `NotifyView.tsx`；回归 `workbench/scripts/notify.test.mjs`（13）+ `notify-hub-smoke.test.mjs`（2，真实 hub/SSE）
+
 当前已有 audit 派生通知、未读徽标和 scope 级已读游标。
 
-待改动：
+已完成：
 
-- 通知分类、优先级和来源统一。
-- 批量标记已读。
-- 任务、目标、空间跳转协议统一。
-- SSE 实时通知去重和断线恢复。
+- ✅ **分类、优先级和来源统一**：`notifyCategory`（task/goal/space/model/skill，按动作前缀）、
+  `notifyPriority`（high = 拦截/转派/测试报告/目标发布·收尾·取消 + transition 落到 blocked·in_review；
+  low = 批注/目标上下文/模型清除/空间更新；其余 normal）、`source`（当前唯一 = hub-audit，预留扩展位）；
+  文案表 `NOTIFY_ACTION_LABEL` 与白名单一同迁入 notify.ts（api.ts re-export 保持兼容）。
+- ✅ **批量标记已读**：已读状态升级为「连续游标 + 显式 seq 集合」（新增键 `legion.notify.readseq.<scope>`，
+  旧游标键继续生效），`applyMarkRead` 带压实（补满连续区间即推进游标并清理）；UI 支持行多选 +
+  「标记选中已读」+「全部已读」+「仅未读」筛选 + 分类页签（含各类未读数）。
+- ✅ **任务、目标、空间跳转协议统一**：`jumpOf` 产出 task/goal/space/model/skill/none，UI 只按 kind 分发；
+  语义统一为**动作所属域优先**（目标类动作即使带 taskId 也跳目标面板，与分类一致——P2-4 前为 taskId 优先）。
+- ✅ **SSE 实时去重和断线恢复**：seq 去重降序共用 `mergeNotifyItems`（回放/轮询/乱序同语义）；
+  `shouldRefill` 基于**未过滤全量流的 seq 水位**判缺口（audit seq 全局单调，跳变即漏帧）；
+  `subscribeHubAudit` 新增 `onStatus` 上报连接状态与打开次数 → 重连成功或检出缺口**立即重拉补齐**
+  （不再等 15s 轮询），面板显示实时连接状态与补齐次数。
+- 回归：`notify` 套件接入 run-ci（15 用例：13 纯函数 + 2 端到端）。端到端用真实 hub 进程 + 真实
+  `/api/events` 验证：chat:* 过滤有效、transition→blocked 判 high、**已读操作期间服务端 audit 零新行**、
+  kill 服务后同实例自动重连（opens≥2 → reconnected）并继续收帧。
 
 ### P2-5 日程日历增强
 

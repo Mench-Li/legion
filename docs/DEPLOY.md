@@ -68,7 +68,7 @@
 | team-hub v2 | `node team-hub/server.mjs` | 8787（TEAM_HUB_PORT） | team-hub/team.db（SQLite WAL） | 对话/日程数据与 API + 审计/SSE |
 | 军团指挥台 | `node workbench/scripts/serve.mjs --port 5173`（前置 `pnpm build`） | 5173 | 托管 workbench/dist；/hub/* 代理 :8787 | 三中心 + 日程/通知前端入口；文件/浏览器 API 宿主 |
 | v1 看板（遗留） | `node scrum/serve.mjs --port 4820 --host 0.0.0.0 --token …` | 4820 | scrum/tasks.json + board.json(运行时) | —（仅启停回归） |
-| whiteboard | `node apps/server/src/index.js`（或 Docker） | 8080 | DB_PATH（默认 apps/server/data/whiteboard.db） | 白板协作（独立子项目，见 whiteboard/docs/DEPLOY.md） |
+| whiteboard | `node apps/server/src/index.js`（或 Docker） | 8080 | DB_PATH + WB_ROOMS_DIR（每房间一个 `<id>.db`） | 白板协作（独立子项目，多房间与治理见 whiteboard/docs/DEPLOY.md、ADR-0008） |
 
 ### 2.3 关键配置（环境变量 / 参数）
 

@@ -1,5 +1,13 @@
-// index.js — 服务端入口：单进程 Node http + 自研 ws relay + 静态前端 + /healthz。
-// 部署形态（ADR-0005）：单实例、单进程，显式不承诺横向扩展。
+// index.js — 服务端入口：单进程 Node http + 自研 ws relay + 静态前端 + 治理（P3-1）。
+//
+// 部署形态（ADR-0005 / ADR-0008）：单实例、单进程，显式不承诺横向扩展。
+// P3-1 新增：多房间（每房间独立 SQLite 文件）、房间级 token/角色、连接与消息限流、
+//           /metrics 指标、/api/rooms 与 /api/rooms/:id/audit 审计、/readyz 深度探活。
+//
+// 关键不变量（与既有契约兼容）：
+//   - `/ws` 不带 `?room=` → 默认房间 `default`（既有 e2e/bench 无缝继续工作）；
+//   - `/healthz` 仍返回 200 + `{"ok":true,...}`（CI 冒烟断言 `"ok":true` 与 200）；
+//   - 房间之间**完全隔离**：文档、presence、广播、存储文件都不共享。
 
 import http from 'node:http';
 import fs from 'node:fs';
@@ -8,9 +16,15 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 import { WebSocketServer } from './ws.mjs';
-import { validateSecurityConfig } from './security.mjs';
-import { Room } from './room.mjs';
-import { createStorage } from './storage.mjs';
+import {
+  validateSecurityConfig, parseRoomConfig, authorizeRoom, extractToken, extractRoomId,
+} from './security.mjs';
+import { RoomRegistry, resolveRoomConfig, DEFAULT_ROOM_ID } from './rooms.mjs';
+import {
+  ConnectionLimiter, MessageRateLimiter, checkPayload, checkMessage, resolveLimitConfig, LIMIT_DEFAULTS,
+} from './limits.mjs';
+import { Metrics } from './metrics.mjs';
+import { AuditLog } from './audit.mjs';
 import { serializeDoc } from '../../../packages/shared/src/crdt.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -21,6 +35,12 @@ const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'data', 'white
 const TTL_MS = Number(process.env.TTL_MS || 10000);
 const WEB_ROOT = path.resolve(__dirname, '..', '..', 'web', 'public');
 const WHITEBOARD_TOKEN = process.env.WHITEBOARD_TOKEN || '';
+const ROOMS_DIR = process.env.WB_ROOMS_DIR || path.join(__dirname, '..', 'data', 'rooms');
+const AUDIT_DIR = process.env.WB_AUDIT_DIR || path.join(__dirname, '..', 'data');
+// 兼容既有部署：DB_PATH=':memory:'（bench/CI 冒烟）→ 房间也走内存，不落盘
+const IN_MEMORY_ROOMS = DB_PATH === ':memory:' || process.env.WB_IN_MEMORY === '1';
+// 指标与控制面端点默认仅回环可访问（暴露治理信息需要显式开启）
+const CONTROL_OPEN = process.env.WB_CONTROL_OPEN === '1';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -46,89 +66,381 @@ function serveStatic(req, res) {
   });
 }
 
-async function main() {
-  validateSecurityConfig();
-  const storage = createStorage(DB_PATH);
-  const room = new Room({ storage, ttlMs: TTL_MS, snapshotEveryMs: 1000 });
-  await room.init();
+function sendJson(res, status, obj) {
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.end(JSON.stringify(obj));
+}
+
+/** 远程地址归一（不信任 X-Forwarded-For：本服务默认直连回环；如需反代请自行在边界处理） */
+function clientIp(req) {
+  return req.socket?.remoteAddress || 'unknown';
+}
+
+function isLoopback(req) {
+  const ip = clientIp(req);
+  return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+}
+
+export async function createApp(options = {}) {
+  const cfg = {
+    port: PORT, host: HOST,
+    globalToken: WHITEBOARD_TOKEN,
+    roomsDir: ROOMS_DIR,
+    auditDir: AUDIT_DIR,
+    inMemoryRooms: IN_MEMORY_ROOMS,
+    controlOpen: CONTROL_OPEN,
+    ...options,
+  };
+  validateSecurityConfig({ host: cfg.host, token: cfg.globalToken });
+
+  const { rooms: roomConfig, errors: roomConfigErrors } = parseRoomConfig(cfg.roomConfigRaw ?? process.env.WHITEBOARD_ROOMS ?? '');
+  for (const err of roomConfigErrors) console.warn(`[whiteboard] 房间配置告警: ${err}`);
+
+  const limits = resolveLimitConfig(process.env, cfg.limits ?? {});
+  const roomCfg = resolveRoomConfig(process.env, { TTL_MS, ...(cfg.roomConfig ?? {}) });
+
+  const metrics = new Metrics();
+  const audit = new AuditLog({ dir: cfg.auditDir, enabled: cfg.auditEnabled !== false });
+  const registry = new RoomRegistry({
+    dir: cfg.roomsDir, inMemory: cfg.inMemoryRooms, config: roomCfg, audit, metrics,
+  });
+  const limiter = new ConnectionLimiter(limits);
+
+  // 仪表盘：实时读数（房间数、在线数、限流状态）——纯数据，供 /metrics
+  metrics.gauges = () => {
+    const rooms = registry.list();
+    return {
+      rooms: { open: registry.size(), closedTotal: registry.closedCount, detail: rooms },
+      peers: rooms.reduce((n, r) => n + r.peers, 0),
+      connections: limiter.snapshot(),
+      audit: audit.counts(),
+      limits: {
+        maxConnections: limits.MAX_CONNECTIONS,
+        maxConnectionsPerRoom: limits.MAX_CONNECTIONS_PER_ROOM,
+        maxConnectionsPerIp: limits.MAX_CONNECTIONS_PER_IP,
+        maxMessageBytes: limits.MAX_MESSAGE_BYTES,
+        maxOpsPerMessage: limits.MAX_OPS_PER_MESSAGE,
+        messageRatePerSec: limits.MESSAGE_RATE_PER_SEC,
+        messageBurst: limits.MESSAGE_BURST,
+      },
+    };
+  };
 
   const server = http.createServer((req, res) => {
-    if (req.url === '/healthz' || req.url === '/healthz/') {
-      const healthy = storage.isHealthy ? storage.isHealthy() : true;
-      const body = JSON.stringify({ ok: healthy, storage: storage.constructor.name, ts: Date.now() });
-      res.writeHead(healthy ? 200 : 503, { 'Content-Type': 'application/json' });
-      res.end(body);
+    const urlPath = (req.url || '/').split('?')[0];
+
+    if (urlPath === '/healthz' || urlPath === '/healthz/') {
+      // 浅探活：进程存活 + 存储可读（既有契约：ok/ storage / ts 字段保留）
+      const healthy = storageHealthOk();
+      sendJson(res, healthy ? 200 : 503, {
+        ok: healthy,
+        storage: cfg.inMemoryRooms ? 'MemoryProvider' : 'SqliteProvider',
+        rooms: registry.size(),
+        peers: metrics.gauges().peers,
+        uptimeMs: metrics.snapshot().uptimeMs,
+        ts: Date.now(),
+      });
       return;
     }
+
+    if (urlPath === '/readyz' || urlPath === '/readyz/') {
+      // 深探活：逐房间存储健康 + 心跳新鲜度（tick 停摆可被感知）
+      if (!controlAllowed(req, res, cfg)) return;
+      const heartbeatAgeMs = Date.now() - lastTickAt;
+      const roomHealth = registry.list().map((r) => {
+        const room = registry.get(r.id);
+        return { ...r, healthy: room?.storage?.isHealthy ? !!room.storage.isHealthy() : true };
+      });
+      const ok = roomHealth.every((r) => r.healthy) && heartbeatAgeMs < Math.max(5000, roomCfg.TTL_MS * 2);
+      sendJson(res, ok ? 200 : 503, {
+        ok,
+        heartbeatAgeMs,
+        rooms: roomHealth,
+        checkedAt: new Date().toISOString(),
+      });
+      return;
+    }
+
+    if (urlPath === '/metrics' || urlPath === '/metrics/') {
+      if (!controlAllowed(req, res, cfg)) return;
+      sendJson(res, 200, metrics.snapshot());
+      return;
+    }
+
+    if (urlPath === '/api/rooms' || urlPath === '/api/rooms/') {
+      if (!controlAllowed(req, res, cfg)) return;
+      sendJson(res, 200, {
+        ok: true,
+        rooms: registry.list(),
+        declared: [...roomConfig.entries()].map(([id, c]) => ({ id, role: c.role, protected: !!c.token })),
+        configErrors: roomConfigErrors,
+        limits,
+      });
+      return;
+    }
+
+    const auditMatch = /^\/api\/rooms\/([a-z0-9][a-z0-9_-]{0,63})\/audit\/?$/.exec(urlPath);
+    if (auditMatch) {
+      if (!controlAllowed(req, res, cfg)) return;
+      const roomId = auditMatch[1];
+      const url = new URL(req.url || '/', 'http://localhost');
+      const limit = Number(url.searchParams.get('limit') || 100);
+      const type = url.searchParams.get('type') || null;
+      sendJson(res, 200, { ok: true, room: roomId, ...audit.query({ room: roomId, type, limit }) });
+      return;
+    }
+
+    const roomMatch = /^\/api\/rooms\/([a-z0-9][a-z0-9_-]{0,63})\/?$/.exec(urlPath);
+    if (roomMatch) {
+      if (!controlAllowed(req, res, cfg)) return;
+      const roomId = roomMatch[1];
+      const room = registry.get(roomId);
+      if (!room) { sendJson(res, 404, { ok: false, error: 'room_not_open', room: roomId }); return; }
+      sendJson(res, 200, { ok: true, ...room.summary() });
+      return;
+    }
+
     serveStatic(req, res);
   });
 
-  const wss = new WebSocketServer({ server, path: '/ws', maxLen: 1024 * 1024, token: WHITEBOARD_TOKEN });
+  function storageHealthOk() {
+    try {
+      for (const r of registry.list()) {
+        const room = registry.get(r.id);
+        if (room?.storage?.isHealthy && !room.storage.isHealthy()) return false;
+      }
+      return true;
+    } catch { return false; }
+  }
 
-  wss.on('connection', (conn) => {
+  /** 控制面端点（/metrics、/readyz、/api/rooms*）：默认仅回环；非回环需 token 或显式开启 */
+  function controlAllowed(req, res, cfg) {
+    if (cfg.controlOpen || isLoopback(req)) return true;
+    const supplied = extractToken(req);
+    if (cfg.globalToken && supplied === cfg.globalToken) return true;
+    sendJson(res, 403, { ok: false, error: 'control_plane_forbidden', hint: '控制面默认仅回环可访问；远程访问需 Bearer token 或 WB_CONTROL_OPEN=1' });
+    return false;
+  }
+
+  let lastTickAt = Date.now();
+
+  const wss = new WebSocketServer({
+    server,
+    path: '/ws',
+    maxLen: Math.max(limits.MAX_MESSAGE_BYTES, 64 * 1024), // 帧上限 ≥ 应用消息上限（超限由应用层给 1009）
+    // 房间解析 → 鉴权 → 连接数准入，全部在握手前完成
+    gate: (req) => gateUpgrade(req),
+  });
+
+  function gateUpgrade(req) {
+    const roomId = extractRoomId(req);
+    const ip = clientIp(req);
+    if (roomId === null) {
+      metrics.reject('bad_room');
+      metrics.inc('upgradesBadRoom');
+      return { ok: false, status: 400, reason: 'bad_room' };
+    }
+    const auth = authorizeRoom({
+      roomId,
+      suppliedToken: extractToken(req),
+      globalToken: cfg.globalToken,
+      roomConfig,
+    });
+    if (!auth.ok) {
+      metrics.reject('unauthorized');
+      metrics.inc('upgradesUnauthorized');
+      audit.record({ type: 'deny', room: roomId, ip, reason: 'unauthorized' });
+      return { ok: false, status: 401, reason: 'unauthorized' };
+    }
+    const admit = limiter.acquire(ip, roomId);
+    if (!admit.ok) {
+      metrics.reject(admit.reason);
+      audit.record({ type: 'reject', room: roomId, ip, reason: admit.reason, connections: limiter.snapshot().total });
+      return { ok: false, status: 503, reason: admit.reason };
+    }
+    return { ok: true, roomId, role: auth.role, ip };
+  }
+
+  wss.on('connection', (conn, req) => {
+    const { roomId, role, ip } = conn.gate ?? { roomId: DEFAULT_ROOM_ID, role: 'rw', ip: clientIp(req ?? {}) };
     const connId = crypto.randomUUID();
-    const welcome = {
-      type: 'welcome',
-      clientId: connId,
-      doc: serializeDoc(room.doc),
-      peers: room.peers(),
-    };
-    conn.send(JSON.stringify(welcome));
+    conn.connId = connId;
+    conn.roomId = roomId;
+    conn.role = role;
+    conn.ip = ip;
+    conn.rate = new MessageRateLimiter(limits);
+    metrics.inc('connectionsTotal');
+    audit.record({ type: 'connect', room: roomId, clientId: connId, ip, role });
+
+    // 房间惰性打开（存储可能打不开：此时拒绝该连接而不是让它对着空房间画）
+    registry.open(roomId).then((r) => {
+      if (!r.ok) {
+        conn.send(JSON.stringify({ type: 'error', code: r.reason, message: '房间不可用' }));
+        conn.close(1011);
+        return;
+      }
+      const room = r.room;
+      room.setRole(connId, role);
+      conn.room = room;
+      room.setPresence(connId, { name: `user-${connId.slice(0, 4)}`, color: '#888888', x: 0, y: 0 });
+      conn.send(JSON.stringify({
+        type: 'welcome',
+        clientId: connId,
+        room: roomId,
+        role,
+        doc: serializeDoc(room.doc),
+        peers: room.peers(),
+        limits: {
+          maxMessageBytes: limits.MAX_MESSAGE_BYTES,
+          maxOpsPerMessage: limits.MAX_OPS_PER_MESSAGE,
+          messageRatePerSec: limits.MESSAGE_RATE_PER_SEC,
+        },
+      }));
+    }).catch(() => { conn.close(1011); });
 
     conn.on('message', (text) => {
+      registry.touch(roomId);
+      metrics.inc('messagesIn');
+      metrics.inc('bytesIn', Buffer.byteLength(text, 'utf8'));
+
+      const rate = conn.rate.allow();
+      if (!rate.ok) {
+        metrics.inc('rateLimitDrops');
+        audit.record({ type: 'rate_limit', room: roomId, clientId: connId, ip, dropCount: rate.dropCount });
+        if (rate.shouldClose) {
+          metrics.inc('rateLimitCloses');
+          conn.send(JSON.stringify({ type: 'error', code: 'rate_limited', message: '消息频率持续超限，连接将被关闭' }));
+          conn.close(1008);
+          return;
+        }
+        if (rate.warn) {
+          send(conn, { type: 'error', code: 'rate_limited', retryAfterMs: rate.retryAfterMs, message: '消息过于频繁，已丢弃本条' });
+        }
+        return;
+      }
+
+      const size = checkPayload(text, limits);
+      if (!size.ok) return policyClose(conn, size);
       let msg;
-      try { msg = JSON.parse(text); } catch { return; }
-      if (!msg || typeof msg !== 'object') return;
+      try { msg = JSON.parse(text); } catch {
+        return policyClose(conn, { code: 'malformed_message', closeCode: 1008, reason: 'JSON 解析失败' });
+      }
+      const shape = checkMessage(msg, limits);
+      if (!shape.ok) return policyClose(conn, shape);
+
       if (msg.type === 'op') {
+        const room = conn.room;
+        if (!room) return; // 房间尚未打开：丢弃（welcome 会带上完整状态）
+        // 只读角色：先拒后写（Room 内部也拒绝，这里给出明确回执与审计）
+        if (room.roleOf(connId) === 'ro') {
+          room.stats.opsDeniedReadonly += Array.isArray(msg.ops) ? msg.ops.length : 0;
+          metrics.inc('opsDeniedReadonly', Array.isArray(msg.ops) ? msg.ops.length : 0);
+          audit.record({ type: 'op_denied', room: roomId, clientId: connId, count: Array.isArray(msg.ops) ? msg.ops.length : 0 });
+          send(conn, { type: 'error', code: 'op_denied', message: '当前为只读角色，无法写入' });
+          return;
+        }
         room.applyOpsFrom(connId, msg.ops).then((accepted) => {
           if (accepted.length === 0) return;
+          metrics.inc('opsAccepted', accepted.length);
           const out = JSON.stringify({ type: 'op', ops: accepted, from: connId });
-          for (const c of wss.clients) {
-            if (c !== conn) c.send(out);
-          }
-        }).catch(() => { /* ignore persist error */ });
+          metrics.inc('messagesOut');
+          wss.broadcastToRoom(roomId, out, conn);
+        }).catch(() => { /* 落库失败不阻断其他客户端 */ });
       } else if (msg.type === 'presence') {
+        const room = conn.room;
+        if (!room) return;
         const s = room.setPresence(connId, msg.state);
+        metrics.inc('presenceUpdates');
         const out = JSON.stringify({ type: 'presence', from: connId, state: s });
-        for (const c of wss.clients) {
-          if (c !== conn) c.send(out);
-        }
+        metrics.inc('messagesOut');
+        wss.broadcastToRoom(roomId, out, conn);
+      } else if (msg.type === 'ping') {
+        send(conn, { type: 'pong', ts: Date.now() });
       }
+      // 未知 type：忽略（向后兼容既有客户端）
     });
 
     conn.on('close', () => {
-      if (room.removePresence(connId)) {
-        const out = JSON.stringify({ type: 'leave', clientId: connId });
-        for (const c of wss.clients) {
-          if (c !== conn) c.send(out);
+      limiter.release(ip, roomId);
+      const room = conn.room;
+      if (room) {
+        const had = room.removePresence(connId);
+        if (had) {
+          const out = JSON.stringify({ type: 'leave', clientId: connId });
+          metrics.inc('messagesOut');
+          wss.broadcastToRoom(roomId, out, conn);
         }
       }
+      audit.record({ type: 'disconnect', room: roomId, clientId: connId, ip });
     });
   });
 
+  function send(conn, obj) {
+    conn.send(JSON.stringify(obj));
+  }
+
+  function policyClose(conn, verdict) {
+    metrics.inc('policyCloses');
+    audit.record({ type: 'policy_close', room: conn.roomId, clientId: conn.connId, ip: conn.ip, code: verdict.code, reason: verdict.reason });
+    send(conn, { type: 'error', code: verdict.code, message: verdict.reason });
+    conn.close(verdict.closeCode ?? 1008);
+  }
+
+  // 周期维护：presence TTL + 房间空闲关闭 + 心跳；同时记录 tick 时间供 /readyz 判定
+  const tickMs = Math.min(1000, roomCfg.TTL_MS / 2);
   const tick = setInterval(() => {
-    const expired = room.tick();
-    for (const id of expired) {
-      const out = JSON.stringify({ type: 'leave', clientId: id });
-      for (const c of wss.clients) c.send(out);
-    }
+    lastTickAt = Date.now();
+    registry.tick().then(({ expired }) => {
+      for (const { roomId, clientIds } of expired) {
+        for (const id of clientIds) {
+          metrics.inc('messagesOut');
+          wss.broadcastToRoom(roomId, JSON.stringify({ type: 'leave', clientId: id }));
+        }
+      }
+    }).catch(() => {});
     for (const c of wss.clients) c.ping();
-  }, Math.min(1000, TTL_MS / 2));
+  }, tickMs);
 
-  server.listen(PORT, HOST, () => {
-    console.log(`[whiteboard] listening on http://${HOST}:${PORT} (db=${DB_PATH}, ttl=${TTL_MS}ms)`);
-  });
+  return {
+    server, wss, registry, metrics, audit, limiter, limits, roomConfig, roomConfigErrors,
+    async listen(port = cfg.port, host = cfg.host) {
+      await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(port, host, resolve);
+      });
+      console.log(`[whiteboard] listening on http://${host}:${port} (rooms=${cfg.inMemoryRooms ? ':memory:' : cfg.roomsDir}, ttl=${roomCfg.TTL_MS}ms, maxConn=${limits.MAX_CONNECTIONS})`);
+      return server.address();
+    },
+    async close() {
+      clearInterval(tick);
+      wss.close();
+      await registry.closeAll();
+      await new Promise((resolve) => server.close(resolve));
+    },
+  };
+}
 
-  const shutdown = () => {
-    clearInterval(tick);
-    wss.close();
-    room.close().finally(() => process.exit(0));
+async function main() {
+  const app = await createApp();
+  await app.listen();
+
+  let shuttingDown = false;
+  const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log('[whiteboard] shutting down…');
+    await app.close().catch(() => {});
+    process.exit(0);
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 }
 
-main().catch((e) => {
-  console.error('[whiteboard] fatal:', e);
-  process.exit(1);
-});
+// 仅在直接运行时启动（被 import 时不自动监听，便于测试进程内起服务）
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
+if (isMain) {
+  main().catch((e) => {
+    console.error('[whiteboard] fatal:', e);
+    process.exit(1);
+  });
+}

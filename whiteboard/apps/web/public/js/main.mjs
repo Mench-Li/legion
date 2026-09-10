@@ -17,6 +17,9 @@ import { validateElement, newId } from '../shared/schema.mjs';
 import { hitTestElement } from '../shared/hitTest.mjs';
 import { screenToWorld, worldToScreen } from '../shared/viewport.mjs';
 import { createThrottle } from '../shared/throttle.mjs';
+import {
+  parseRoomFromSearch, buildSwitchUrl, tokenStorageKey, canWrite, errorText, isValidRoomId, roomShareUrl, DEFAULT_ROOM_ID,
+} from '../shared/room.mjs';
 import { Renderer, selectionHandles } from './renderer.mjs';
 
 // ---------- 身份（localStorage 复用，TC-S4-07） ----------
@@ -37,6 +40,22 @@ function loadIdentity() {
 }
 const identity = loadIdentity();
 
+// ---------- 房间与角色（P3-1） ----------
+// token 优先取 URL（分享链接场景），否则从 localStorage 按房间取；URL 里的 token 会被记住，
+// 但切换房间时**不写回 URL**（避免 token 留在浏览器历史/截图里）。
+function readStoredToken(roomId) {
+  try { return localStorage.getItem(tokenStorageKey(roomId)) || ''; } catch { return ''; }
+}
+const initialRoom = parseRoomFromSearch(location.search, { storedToken: null });
+let roomId = initialRoom.roomId;
+let roomToken = initialRoom.token || readStoredToken(roomId);
+if (initialRoom.token) {
+  try { localStorage.setItem(tokenStorageKey(roomId), initialRoom.token); } catch { /* ignore */ }
+}
+let role = 'rw'; // 由 welcome 下发；ro = 只读
+let serverLimits = null;
+let notice = initialRoom.notice || '';
+
 // ---------- 状态 ----------
 let doc = createDoc();
 let um = createUndoManager(doc, identity.clientId, { variant: 'clear-on-remote' });
@@ -54,6 +73,68 @@ const renderer = new Renderer(document.getElementById('board'), document.getElem
 const connDot = document.getElementById('conn');
 const onlineEl = document.getElementById('online');
 const peersEl = document.getElementById('peers');
+const roomLabelEl = document.getElementById('room-label');
+const roleEl = document.getElementById('role');
+const limitEl = document.getElementById('limit');
+const roomInputEl = document.getElementById('room-input');
+const roomGoEl = document.getElementById('room-go');
+const roomCopyEl = document.getElementById('room-copy');
+
+// ---------- 房间/角色/治理提示的界面同步 ----------
+function setNotice(text) {
+  notice = text || '';
+  if (!limitEl) return;
+  limitEl.textContent = notice;
+  limitEl.style.display = notice ? '' : 'none';
+}
+
+function applyRoleToUi() {
+  const writable = canWrite(role);
+  document.body.classList.toggle('readonly', !writable);
+  if (roleEl) {
+    roleEl.textContent = writable ? '可编辑' : '只读';
+    roleEl.className = `role ${writable ? 'rw' : 'ro'}`;
+  }
+  for (const el of document.querySelectorAll('.tool, #undo, #redo, #del, #color, #width, #fill, #arrow')) {
+    el.disabled = !writable;
+  }
+  if (!writable) showHint('只读房间：可查看与移动光标，但无法绘制（服务端同样会拒绝写入）');
+}
+
+function showHint(text) {
+  const hintEl = document.getElementById('hint');
+  if (!hintEl) return;
+  hintEl.textContent = text;
+}
+
+function syncRoomUi() {
+  if (roomLabelEl) roomLabelEl.textContent = roomId;
+  if (roomInputEl && document.activeElement !== roomInputEl) roomInputEl.value = roomId;
+  document.title = `协作白板 · ${roomId}`;
+}
+
+/** 切换房间：改 URL（不带 token）→ 重连 → 清空本地文档态（避免把上个房间的画面留在屏上） */
+function switchRoom(nextRoomId, nextToken = null) {
+  if (!isValidRoomId(nextRoomId)) { setNotice(`房间 ID "${nextRoomId}" 非法（仅小写字母/数字/-/_）`); return; }
+  if (nextRoomId === roomId) { setNotice(''); return; }
+  if (nextToken !== null) {
+    roomToken = nextToken;
+    try { localStorage.setItem(tokenStorageKey(nextRoomId), nextToken); } catch { /* ignore */ }
+  } else {
+    roomToken = readStoredToken(nextRoomId);
+  }
+  roomId = nextRoomId;
+  history.replaceState(null, '', buildSwitchUrl(location.href, roomId));
+  doc = createDoc();
+  um = createUndoManager(doc, identity.clientId, { variant: 'clear-on-remote' });
+  selection = null;
+  peers.clear();
+  updatePeers();
+  syncRoomUi();
+  setNotice('');
+  if (ws) { try { ws.close(); } catch { /* ignore */ } }
+  connect();
+}
 
 // ---------- 样式（来自工具栏） ----------
 function readStyle() {
@@ -138,9 +219,18 @@ function send(obj) {
   }
 }
 
+/** 写入前的前端闸门（服务端另有强制）：只读角色不发 op，并给出明确提示而不是静默丢弃 */
+function sendOps(ops) {
+  if (!canWrite(role)) { setNotice(errorText('op_denied')); return false; }
+  send({ type: 'op', ops });
+  return true;
+}
+
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  const qs = new URLSearchParams({ room: roomId });
+  if (roomToken) qs.set('token', roomToken);
+  ws = new WebSocket(`${proto}://${location.host}/ws?${qs.toString()}`);
   ws.onopen = () => {
     setConn(true);
     retryDelay = 1000;
@@ -150,10 +240,14 @@ function connect() {
     try { m = JSON.parse(e.data); } catch { return; }
     handleMessage(m);
   };
-  ws.onclose = () => {
+  ws.onclose = (e) => {
     setConn(false);
     peers.clear();
     updatePeers();
+    // 1000/1001 多为服务端主动关闭（鉴权/限流/超限）；给出可行动提示，避免「莫名其妙掉线」
+    if (e && e.code === 1008) setNotice('连接被服务端关闭（消息频率或格式超限）');
+    else if (e && e.code === 1009) setNotice(errorText('message_too_large'));
+    else if (e && e.code === 1011) setNotice('连接被关闭（服务端无法打开该房间的存储）');
     setTimeout(connect, retryDelay);
     retryDelay = Math.min(retryDelay * 1.5, 10000);
   };
@@ -167,6 +261,10 @@ function handleMessage(m) {
     um = createUndoManager(doc, identity.clientId, { variant: 'clear-on-remote' });
     peers = new Map((m.peers || []).map((p) => [p.id, p]));
     selection = null;
+    role = m.role === 'ro' ? 'ro' : 'rw';
+    serverLimits = m.limits || null;
+    if (m.room && m.room !== roomId) { roomId = m.room; syncRoomUi(); }
+    applyRoleToUi();
     updatePeers();
     return;
   }
@@ -183,6 +281,10 @@ function handleMessage(m) {
   if (m.type === 'leave') {
     peers.delete(m.clientId);
     updatePeers();
+    return;
+  }
+  if (m.type === 'error') {
+    setNotice(errorText(m.code, { ...m, max: serverLimits?.maxOpsPerMessage }));
     return;
   }
 }
@@ -214,17 +316,17 @@ function patchGeom(id, value, prev) {
   const op = makePatch(doc, id, 'geom', value, prev, identity.clientId);
   applyOp(doc, op);
   um.add(op);
-  send({ type: 'op', ops: [op] });
+  sendOps([op]);
 }
 
 function undo() {
   const ops = um.undo();
-  if (ops.length) send({ type: 'op', ops });
+  if (ops.length) sendOps(ops);
 }
 
 function redo() {
   const ops = um.redo();
-  if (ops.length) send({ type: 'op', ops });
+  if (ops.length) sendOps(ops);
 }
 
 function deleteSelection() {
@@ -236,7 +338,7 @@ function deleteSelection() {
   applyOp(doc, op);
   um.add(op);
   um.commit();
-  send({ type: 'op', ops: [op] });
+  sendOps([op]);
   selection = null;
 }
 
@@ -257,7 +359,7 @@ function applyStyleToSelection() {
     um.begin();
     for (const op of ops) { applyOp(doc, op); um.add(op); }
     um.commit();
-    send({ type: 'op', ops });
+    sendOps(ops);
   }
 }
 
@@ -316,7 +418,7 @@ stage.addEventListener('mousedown', (e) => {
         applyOp(doc, op);
         um.add(op);
         um.commit();
-        send({ type: 'op', ops: [op] });
+        sendOps([op]);
       }
     }
     return;
@@ -376,7 +478,7 @@ stage.addEventListener('mouseup', () => {
         const op = makeAdd(doc, el, identity.clientId);
         applyOp(doc, op);
         um.add(op);
-        send({ type: 'op', ops: [op] });
+        sendOps([op]);
       }
     }
     draft = null;
@@ -442,8 +544,41 @@ function loop() {
 function resizeCanvas() { renderer.resize(); }
 window.addEventListener('resize', resizeCanvas);
 
+// ---------- 房间工具栏（P3-1） ----------
+function wireRoomBar() {
+  if (roomGoEl) {
+    roomGoEl.addEventListener('click', () => switchRoom((roomInputEl?.value || '').trim() || DEFAULT_ROOM_ID));
+  }
+  if (roomInputEl) {
+    roomInputEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') switchRoom((roomInputEl.value || '').trim() || DEFAULT_ROOM_ID);
+    });
+  }
+  if (roomCopyEl) {
+    roomCopyEl.addEventListener('click', async () => {
+      const url = roomShareUrl(location.href, roomId, roomToken);
+      try {
+        await navigator.clipboard.writeText(url);
+        setNotice(`已复制房间链接（房间 ${roomId}）`);
+      } catch {
+        // 剪贴板不可用（非 https / 权限拒绝）→ 退回提示，不假装成功
+        setNotice(`复制失败，请手动复制：${url}`);
+      }
+    });
+  }
+  // 浏览器前进/后退改 URL 时跟随切换
+  window.addEventListener('popstate', () => {
+    const next = parseRoomFromSearch(location.search).roomId;
+    if (next !== roomId) switchRoom(next);
+  });
+}
+
 // ---------- 启动 ----------
 wireToolbar();
+wireRoomBar();
+syncRoomUi();
+if (notice) setNotice(notice);
+applyRoleToUi();
 resizeCanvas();
 connect();
 requestAnimationFrame(loop);

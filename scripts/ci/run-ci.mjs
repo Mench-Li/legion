@@ -17,7 +17,7 @@
  *   deps   workbench 依赖就绪（node_modules 缺失时尝试 junction 指向主 checkout；失败即 FAIL 并给指引）
  *   build  whiteboard build（静态前端装配）+ workbench build（tsc --noEmit && vite build，产物 dist/）
  *   test   L0 契约/基线（node --test）：chat 13 + skills 12 + calendar 13 + files-api 40 + web 24
- *          + contracts 56 + whiteboard 67（7 文件，含真实服务 e2e）
+ *          + contracts 56 + whiteboard 150（11 文件，含真实服务 e2e 与 P3-1 治理端到端）
  *          配置 DSH_CHECKOUT 时另跑 plugins 与 board-plugin 外部 DSH 回归
  *          （board-plugin 宿主 HTTP 契约：/api/artifact 逐条、/api/board、/api/events、hub 模式）
  *   smoke  L1 真实服务冒烟（仓库既有冒烟脚本直跑 + 白板真实进程探活 + v1 看板启停）
@@ -206,6 +206,7 @@ async function stageTest() {
     { label: 'files-p27（P2-7 文件中心后端：冲突四策略/分片续传/搜索批量/git 只读）', files: ['workbench/scripts/files-p27.test.mjs'], cwd: ROOT },
     { label: 'files-ui（P2-7 文件中心前端纯函数：策略/分片进度/git 标记与 diff 分类）', files: ['workbench/scripts/files-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'web（浏览器助手契约）', files: ['workbench/scripts/web.test.mjs'], cwd: ROOT },
+    { label: 'static-serve（静态托管：产物缺失 404 而非断流 + SPA 回退/穿越防护）', files: ['workbench/scripts/static-serve.test.mjs'], cwd: ROOT },
     { label: 'web-p28（P2-8 浏览器助手增强：缓存与 304 复用 / Readability-lite 抽取 / 配额与 429 / 可选截图）', files: ['workbench/scripts/web-p28.test.mjs'], cwd: ROOT },
     { label: 'web-history（P2-8 team-hub 抓取历史：按空间持久化、累加、隔离、清理）', files: ['team-hub/web-history.test.mjs'], cwd: ROOT },
     { label: 'browser-ui（P2-8 浏览器助手前端纯函数：限流文案、缓存与质量徽标、截图三态、配额读数）', files: ['workbench/scripts/browser-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
@@ -226,7 +227,7 @@ async function stageTest() {
   const wbDir = WHITEBOARD
   const wbPkg = JSON.parse(readFileSync(join(wbDir, 'package.json'), 'utf8'))
   const wbTests = ((wbPkg.scripts && wbPkg.scripts.test) || '').split(/\s+/).filter(t => t.endsWith('.mjs'))
-  suites.push({ label: 'whiteboard（7 文件含真实服务 e2e）', files: wbTests, cwd: wbDir })
+  suites.push({ label: 'whiteboard（11 文件含真实服务 e2e 与 P3-1 治理端到端）', files: wbTests, cwd: wbDir })
   const detail = []
   let allOk = true
   const dsh = process.env.DSH_CHECKOUT

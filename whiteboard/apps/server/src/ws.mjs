@@ -178,15 +178,48 @@ export class WsConnection extends EventEmitter {
   }
 }
 
-/** 挂在 http.Server 上，把 /ws 升级请求转为 WsConnection */
+const STATUS_TEXT = {
+  400: 'Bad Request',
+  401: 'Unauthorized',
+  403: 'Forbidden',
+  429: 'Too Many Requests',
+  503: 'Service Unavailable',
+};
+
+/**
+ * 挂在 http.Server 上，把 /ws 升级请求转为 WsConnection。
+ * P3-1：新增 `gate(req)` 钩子——在握手**之前**做房间解析、鉴权与连接数准入；
+ *   返回 { ok:false, status, reason } 时以该状态码拒绝（503=连接数超限、401=未授权、400=房间 ID 非法），
+ *   请求被拒不会建立 ws 连接；成功时返回的 { ok:true, roomId, role, ip } 挂到 `conn.gate` 供上层使用。
+ * 未提供 gate 时行为与 P0 完全一致（仅按 token 判权，`authorizedUpgrade` 语义不变）。
+ */
 export class WebSocketServer extends EventEmitter {
-  constructor({ server, path = '/ws', maxLen, token = '' } = {}) {
+  constructor({ server, path = '/ws', maxLen, token = '', gate = null } = {}) {
     super();
     this.clients = new Set();
     server.on('upgrade', (req, socket) => {
       const url = (req.url || '').split('?')[0];
       if (url !== path) { socket.destroy(); return; }
-      if (!authorizedUpgrade(req, token)) {
+      let accepted = null;
+      if (gate) {
+        let verdict;
+        try { verdict = gate(req); } catch { verdict = { ok: false, status: 400, reason: 'gate_error' }; }
+        if (!verdict || verdict.ok !== true) {
+          const status = verdict?.status ?? 401;
+          const text = STATUS_TEXT[status] ?? 'Forbidden';
+          try {
+            socket.write(
+              `HTTP/1.1 ${status} ${text}\r\n` +
+              'Connection: close\r\n' +
+              'Content-Type: text/plain; charset=utf-8\r\n' +
+              `\r\n${verdict?.reason ?? 'denied'}\n`
+            );
+          } catch { /* ignore */ }
+          socket.destroy();
+          return;
+        }
+        accepted = verdict;
+      } else if (!authorizedUpgrade(req, token)) {
         socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
         socket.destroy(); return;
       }
@@ -201,10 +234,27 @@ export class WebSocketServer extends EventEmitter {
         '\r\n'
       );
       const conn = new WsConnection(socket, { maxLen });
+      if (accepted) conn.gate = accepted;
       this.clients.add(conn);
       conn.on('close', () => this.clients.delete(conn));
-      this.emit('connection', conn);
+      this.emit('connection', conn, req);
     });
+  }
+
+  /** 按房间广播（P3-1）：只发给同房间连接，可选排除一个连接。 */
+  broadcastToRoom(roomId, text, except = null) {
+    for (const c of this.clients) {
+      if (c === except) continue;
+      if (c.gate?.roomId !== roomId) continue;
+      c.send(text);
+    }
+  }
+
+  /** 某房间的在线连接数 */
+  countRoom(roomId) {
+    let n = 0;
+    for (const c of this.clients) if (c.gate?.roomId === roomId) n += 1;
+    return n;
   }
 
   broadcast(text) {

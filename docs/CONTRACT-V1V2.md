@@ -182,7 +182,17 @@ Workbench 以 `hub + scope` 为键持久化最近消费的 seq，并在重建 Ev
    心跳与 close 清理；board-plugin/event 语义复用既有 SSE 套件位置扩展。
 7. run-ci 门禁接入 + 全量回归；evidence 文档 + REMAINING-TASKS P2-1/P2-3 更新。
 
-## 9. 诚实边界
+## 9. F-02 权限治理接口
+
+v2 新增 `/api/permissions/check`、`/api/permissions/inbox`、`/api/permissions/decide`、
+`/api/permissions/rules`（及 DELETE 规则）接口。操作统一描述为
+`scope/actor/action/target/taskId/unattended`，策略支持 `deny`、`ask`、`allow-once`、
+`allow-for-task`、`allow-by-policy`。审批状态为 `pending/approved/denied/expired/consumed`，
+决定接口幂等，硬性高风险动作（文件删除、仓库 push、凭据写入或显式 irreversible）始终拒绝。
+技能授权的无人值守路径会先创建审批请求，只有批准后的 `permissionRequestId` 才能完成授权；
+未标记无人值守的既有同空间调用保持兼容。
+
+## 10. 诚实边界
 
 - v1/v2 数据底座不同（文件 vs SQLite）是架构事实；P2-1 统一的是**契约面**（字段/错误/SSE 行为），
   不是合并两套实现（P1-1 另立）。

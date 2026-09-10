@@ -6,6 +6,12 @@
 
 **最近一次全量基线**：2026-09-10　`run-ci --only test` **29 套件 / 671 测试全 PASS**（136s）—— 以本文件所在提交为准
 
+> ⚠️ **基线滞后说明（诚实登记）**：P2-7 / P2-8 / P3-1 之后新增或扩充的套件（`files-p27`、`files-ui`、
+> `web-p28`、`browser-ui`、`static-serve`，以及扩充到 150 例的 `whiteboard`）**未纳入上面这条全量基线**——
+> `test` 阶段当前会因 `notify-hub-smoke` 永久等待而无法跑完（根因与最小修法见
+> `docs/P2-7-evidence/verify-evidence.md` §7）。这些套件是**逐个单独复跑**验证的，未伪造全量基线；
+> 表中相应行的用例数已按实测更新。
+
 ---
 
 ## 1. 当前形态与拓扑
@@ -59,11 +65,15 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 | rules | 7 | notify（P2-4 含真实 hub SSE 断线重连） | 15 |
 | artifact | 16 | dual-write | 2 |
 | security | 6 | p13-host-injection（P1-3 真实宿主注入） | 7 |
-| read-auth | 14 | whiteboard | 70 |
+| read-auth | 14 | whiteboard（含 P3-1 治理端到端，11 文件） | 150 |
 | files-api | 41 | plugins（含 P2-6 chat-context 13、SP-P0 space-pipeline） | 159 |
-| web | 24 | board-plugin | 37 |
-| doc-render | 11 | scrum | 25 |
-| skill-importer | 4 | hub-board / artifact-policy | 1 / 3 |
+| web | 24 | static-serve（静态托管 404/SPA 回退/穿越） | 6 |
+| files-p27 / files-ui（P2-7，未入全量基线） | 36 / 19 | web-p28 / browser-ui（P2-8，未入全量基线） | 21 / 21 |
+| doc-render | 11 | board-plugin | 37 |
+| skill-importer | 4 | scrum | 25 |
+| hub-board / artifact-policy | 1 / 3 |  |  |
+
+（表中「未入全量基线」= 该套件在全量基线提交之后新增或扩充，用例数为**单独复跑**实测值。）
 
 其他阶段：`--only doc`（文档新鲜度 + 历史 evidence banner 覆盖）、`--only build|smoke|env|deps|stage`。
 部署与回滚：`docs/DEPLOY.md`。现场（真实宿主）验收脚本：`scripts/live/p11-step2-verify.mjs`。
@@ -88,7 +98,8 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 1. Workbench 部分面板为功能基础版（通知分类/批量已读、日历冲突检测、文件批量与续传、
    对话真实模型通道 E2E 等仍在 `docs/REMAINING-TASKS.md` 待办；浏览器助手的缓存/正文提取/截图已按 P2-8 增强）。
-2. 白板为单实例单房间模型（多房间与连接治理待办）。
+2. 白板为**单实例多房间**模型（P3-1 已落地房间隔离/权限/限流/指标审计）；
+   **不承诺横向扩展**，多实例共享存储未实现（ADR-0008 记录了被否理由与转 v2 触发条件）。
 3. 配置仍分散在环境变量 / CLI / services-plugin / 宿主 patch / Workbench 本地设置之间（统一配置系统待办）。
 4. board-plugin 的 hub 动态面板为轻量自渲染（覆盖看板主操作），未复刻旧静态页全部视觉细节；
    无 hub 时退回本地文件模式，此时不渲染 v1 静态产物。
@@ -117,6 +128,17 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
     空间抓取历史按空间**上限 200 条**裁剪（超出丢最旧，无分页游标），且依赖 team-hub v2 运行（否则界面明确报不可用）；
     限流默认值可用 `DSH_WEB_QUOTA_*` 调整，为**单进程**语义（无分布式限流）。
     前端验证为判定层（`workbench/scripts/browser-ui.test.mjs` 21 例）。
+11. 白板治理（P3-1）：`/metrics` 与审计为**进程内**（重启归零；审计 JSONL 按大小轮转保留 3 份，无长期归档）；
+    角色只有 `rw`/`ro` 两档（无按元素/区域的细粒度权限，无操作级回放）；
+    单 IP 连接上限为**粗粒度**防滥用且**不信任** `X-Forwarded-For`（反代 + 大量同出口用户的部署需在边界
+    做真实客户端识别，否则同一出口会共享该额度）；房间空闲关闭依赖 tick 心跳；
+    房间与单房间连接上限默认 50、全局 200（对齐 soak 承诺，`WB_*` 可调）；
+    **多实例共享存储未实现**（ADR-0008 记录了被否理由与转 v2 触发条件）；
+    前端房间/角色逻辑为判定层测试（`whiteboard/packages/shared/test/room.test.mjs` 12 例，不引入浏览器自动化）。
+12. 静态托管（P2-8 后续修补）：`workbench/scripts/serve.mjs` 在产物缺失时返回 404 + 指引（不再断流），
+    但**未知资源路径仍回落 SPA 入口（200 HTML）**——即缺失的 `/assets/*.js` 会返回 HTML 而非 404，
+    浏览器侧表现为 MIME 报错；这是既有 SPA 回退语义，未在本轮改动（如需按扩展名区分导航与资源请求需单独立项）。
+    静态根可用 `DSH_WORKBENCH_ROOT` 覆盖（测试用）。
 
 ## 5. 维护约定
 

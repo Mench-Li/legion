@@ -2,7 +2,11 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { createChatConversation, fetchChatConversations, fetchChatHealth, fetchChatMessages, fetchChatReplySettings, fetchSpaces, hubBase, postChatMessage, retryChatReply, saveChatReplySettings, subscribeHubAudit, uploadChatAttachment } from '../api'
 import type { ChatAttachmentRef, ChatConversation, ChatHealthInfo, ChatMessage, SpaceInfo } from '../types'
 import { mergeById } from '../dedupe'
+import { chatHealthView, chatSseLabel, replyModelOf, shouldRefillChat } from '../chatUi'
+import type { ChatHealthLite, ChatMsgLite } from '../chatUi'
 import { toast } from './Toast'
+
+export * from '../chatUi'
 
 const MAX_BODY = 8000 // 与后端 MAX_CHAT_BODY 对齐（TC-S1-12 / TC-S2-10）
 const PAGE = 50 // 每页条数（TC-S1-08 后端契约 limit≤200）；「加载更早」用 before 游标翻页（P1-4 / TC-S2-04）
@@ -138,6 +142,12 @@ export function ChatView({ scope, hubMode, spaces, onPickScope }: {
   // S7（R-2）：空间选择入口的列表兜底（props.spaces 未提供/为空时组件自行拉取）
   const [localSpaces, setLocalSpaces] = useState<SpaceInfo[]>([])
   const [localSpacesErr, setLocalSpacesErr] = useState('')
+  // P2-6：SSE 连接状态与缺口补齐计数（断线恢复可观测；缺口判据见 chatUi.shouldRefillChat）
+  const [sseStatus, setSseStatus] = useState<{ state: 'open' | 'reconnected' | 'reconnecting' | 'closed'; opens: number }>({ state: 'open', opens: 0 })
+  const [seqWatermark, setSeqWatermark] = useState(0)
+  const [refillCount, setRefillCount] = useState(0)
+  const seqWatermarkRef = useRef(0)
+  const refillCountRef = useRef(0)
 
   const loadConvs = useCallback(async (): Promise<void> => {
     const scopeAtCall = scope
@@ -258,15 +268,41 @@ export function ChatView({ scope, hubMode, spaces, onPickScope }: {
   }, [])
 
   // 单一 /api/events 按 kind 过滤（I8 / TC-S2-08）：chat:* 事件驱动本会话即时刷新；15s 轮询兜底断线窗口
+  // P2-6 增强：① 上报 SSE 连接状态（可观测）；② 用**未过滤全量事件流**的 seq 水位检出缺口 → 立即重拉补齐
+  // （audit seq 全局单调，跳变即漏帧；只靠 15s 轮询会让 AI 三态流转延迟可见）。
   useEffect(() => {
     if (!hubMode || !scope) return
     const off = subscribeHubAudit(ev => {
+      // 缺口检测必须先于 chat 过滤：seq 水位来自全量流，若只看 chat:* 会把其它 action 的丢帧判成连续
+      if (shouldRefillChat(seqWatermarkRef.current, [ev.seq])) {
+        refillCountRef.current += 1
+        setRefillCount(refillCountRef.current)
+        const n = activeRef.current
+        if (n !== null) void mergeNewest()
+        void loadConvs()
+      }
+      if (Number.isFinite(ev.seq) && ev.seq > seqWatermarkRef.current) {
+        seqWatermarkRef.current = Math.floor(ev.seq)
+        setSeqWatermark(seqWatermarkRef.current)
+      }
       if (!String(ev.action).startsWith('chat:')) return
       if (ev.scope !== scope) return // 空间身份守卫（R-A5）：只响应当前空间事件（跨空间会话 id 可能撞号）
       const conv = ev.detail?.conv
       const n = activeRef.current
       if (ev.action === 'chat:message' && Number(conv) === n) void mergeNewest()
       else if (ev.action === 'chat:create') void loadConvs()
+    }, {
+      onStatus: st => {
+        setSseStatus({ state: st.state, opens: st.opens })
+        // 重连成功即立刻补齐（断线窗口内可能漏掉多条 chat 事件与三态更新）
+        if (st.state === 'reconnected') {
+          refillCountRef.current += 1
+          setRefillCount(refillCountRef.current)
+          const n = activeRef.current
+          if (n !== null) void mergeNewest()
+          void loadConvs()
+        }
+      },
     })
     void loadHealth() // 进入空间即刷健康（守护/开关/模型/最近失败）
     const poll = window.setInterval(() => {
@@ -385,21 +421,9 @@ export function ChatView({ scope, hubMode, spaces, onPickScope }: {
       toast('err', `创建失败：${e instanceof Error ? e.message : String(e)}`)
     }
   }
-  // ── S7（R-1，B1）：健康状态呈现（灰/绿/黄/红；红态 = 最近失败可行动文案，黄态 = 前提缺失修复动作，灰态 = 端点缺失不误导）──
-  const healthView = (): { color: string; label: string; title: string } => {
-    if (healthNote) return { color: 'var(--muted-2)', label: '健康状态未知', title: healthNote }
-    if (!health) return { color: 'var(--muted-2)', label: '检测中…', title: '正在获取对话健康状态…' }
-    if (health.lastFail) {
-      return { color: 'var(--red)', label: '最近回复失败', title: '最近一条 AI 回复失败：' + health.lastFail.aiError + '。请在对应 ❌ 消息点击「↻ 重试」，或检查模型配置后重发。' }
-    }
-    const notes: string[] = []
-    if (!health.online) notes.push('守护离线：请启动守护进程（scrum-worker）后重试')
-    if (!health.enabled) notes.push('AI 回复未开启：点「⚙ 回复设置」打开开关')
-    if (!health.modelResolved) notes.push('模型未配置：在「⚙ 回复设置」或模型配置中选择 assistant 可用模型')
-    if (notes.length > 0) return { color: 'var(--yellow)', label: 'AI 回复待处理', title: notes.join('；') }
-    return { color: 'var(--green)', label: 'AI 回复就绪', title: '守护在线 · 回复已开启 · 模型已解析。已解析不代表 provider 实际可用，以最近一次回复/失败为准。' }
-  }
-  const healthDot = healthView()
+  // ── S7（R-1，B1）/ P2-6：健康状态呈现（灰/绿/黄/红；红态 = 最近失败可行动文案，黄态 = 前提缺失修复动作，灰态 = 端点缺失不误导）──
+  // 判定逻辑已抽到 chatUi.chatHealthView（可单测：模型不可用/超时/守护离线的文案与优先级），此处只取用。
+  const healthDot = chatHealthView(health as ChatHealthLite | null, healthNote ?? '')
 
   // ── S7（R-1，D-4）：回复设置弹窗（enabled 必含且默认开；model/identity/systemHint 可选；保存后健康即时刷新）──
   const openSettings = async (): Promise<void> => {
@@ -576,6 +600,18 @@ export function ChatView({ scope, hubMode, spaces, onPickScope }: {
           <span style={{ width: 8, height: 8, borderRadius: '50%', background: healthDot.color, display: 'inline-block', flex: 'none' }} />
           <span style={{ fontSize: 11, color: healthDot.color }}>{healthDot.label}</span>
         </span>
+        {/* P2-6：实时连接状态与缺口补齐计数（断线恢复可观测；断开时仍可手动刷新）*/}
+        <span
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 5, marginLeft: 8, flex: 'none', cursor: 'pointer' }}
+          title={'实时通道：' + chatSseLabel(sseStatus.state, sseStatus.opens).text + '（事件水位 seq=' + String(seqWatermark) + (refillCount > 0 ? '，已自动补齐 ' + String(refillCount) + ' 次' : '') + '）'}
+          onClick={() => { const n = activeId; if (n !== null) void mergeNewest(); void loadConvs() }}
+        >
+          <span style={{ width: 7, height: 7, borderRadius: '50%', background: chatSseLabel(sseStatus.state, sseStatus.opens).color, display: 'inline-block', flex: 'none' }} />
+          <span style={{ fontSize: 10.5, color: 'var(--muted-2)' }}>
+            {chatSseLabel(sseStatus.state, sseStatus.opens).text}
+            {refillCount > 0 ? ' · 补齐 ' + String(refillCount) : ''}
+          </span>
+        </span>
         <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 6 }}>
           <button className="btn ghost" title="AI 回复设置（开关/模型/身份/systemHint）" onClick={() => void openSettings()}>⚙ 回复设置</button>
           <button className="btn primary" onClick={startCreate}>＋ 新会话</button>
@@ -630,7 +666,9 @@ export function ChatView({ scope, hubMode, spaces, onPickScope }: {
                   const me = isMe(m.author)
                   const bot = isBot(m)
                   const st = metaStr(m, 'aiStatus')
-                  const aiModel = metaStr(m, 'aiModel')
+                  // P2-6：回复模型在**回复行**的 meta 上（服务端 postAiReply 写 {replyTo, aiModel}），
+                  // 源消息 meta 只有 aiStatus/repliedAt/replyMsg → 必须回到列表按 replyMsg 找，否则永远显示不出模型。
+                  const aiModel = (st === 'replied' ? replyModelOf(m as ChatMsgLite, msgs as ChatMsgLite[]) : null) ?? metaStr(m, 'aiModel')
                   const aiError = metaStr(m, 'aiError')
                   return (
                     <div key={m.id} className={`chat-row${me ? ' me-row' : ''}${bot ? ' bot-row' : ''}`}>

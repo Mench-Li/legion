@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-10　`run-ci --only test` **29 套件 / 620 测试全 PASS**（129s）—— 以本文件所在提交为准
+**最近一次全量基线**：2026-09-10　`run-ci --only test` **29 套件 / 671 测试全 PASS**（136s）—— 以本文件所在提交为准
 
 ---
 
@@ -46,7 +46,7 @@ $env:DSH_CHECKOUT='D:\project\DSH\dsh\deepseek-harness'   # 宿主面测试需�
 node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 ```
 
-产物：`.ci/<run-name>/ci.log`（全量输出）与 `summary.json`（阶段结论）。当前基线 25 套件：
+产物：`.ci/<run-name>/ci.log`（全量输出）与 `summary.json`（阶段结论）。当前基线 29 套件：
 
 | 套件 | 用例 | 套件 | 用例 |
 | --- | --- | --- | --- |
@@ -54,12 +54,13 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 | skills | 20 | v1v2-contract | 14 |
 | calendar（P2-5 含重复展开/更新/冲突/关联） | 29 | team-hub-parity | 1 |
 | spaces | 5 | dedupe | 9 |
-| goal | 14 | calendar-ui（P2-5 前端纯函数） | 12 |
+| pipeline（SP-P0 空间流水线数据面） | 18 | calendar-ui（P2-5 前端纯函数） | 12 |
+| goal | 14 | chat-ui（P2-6 对话前端纯函数） | 9 |
 | rules | 7 | notify（P2-4 含真实 hub SSE 断线重连） | 15 |
 | artifact | 16 | dual-write | 2 |
-| security | 6 | p13-host-injection | 6 |
+| security | 6 | p13-host-injection（P1-3 真实宿主注入） | 7 |
 | read-auth | 14 | whiteboard | 70 |
-| files-api | 41 | plugins | 135 |
+| files-api | 41 | plugins（含 P2-6 chat-context 13、SP-P0 space-pipeline） | 159 |
 | web | 24 | board-plugin | 37 |
 | doc-render | 11 | scrum | 25 |
 | skill-importer | 4 | hub-board / artifact-policy | 1 / 3 |
@@ -100,6 +101,10 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 7. 日程日历（P2-5）：**时间为字面本地时间，不做时区换算**（跨时区协作需人工换算）；
    重复仅支持简单规则（日/周/月 + 间隔 + 结束条件 + 例外日），不支持「单次修改」与按星期几的复杂规则；
    冲突检测只提示不阻断；单窗展开上限 400 实例（超出抛错，不静默截断）。
+8. 对话中心（P2-6）：`/api/events` 带 `Last-Event-ID` 时只回放增量，**不带**该头时只回放最近 30 条
+   （有界）→ 断线恢复倚赖「SSE 重连回调 + 本地 seq 水位缺口判据」两层叠加，仅靠服务端续传不保证完整；
+   标签页被挂起（定时器冻结）时补齐延后到唤醒；UI 验证为判定层（DOM 文案无自动断言）；
+   附件内容按 UTF-8 文本注入，二进制附件未支持。
 
 ## 5. 维护约定
 

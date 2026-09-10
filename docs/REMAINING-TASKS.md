@@ -316,16 +316,49 @@ board-plugin hub 模式 SSE 桥接（R9）属跨宿主改造，登记移交 P1-3
 
 ### P2-6 对话中心真实闭环
 
+状态：**已完成**（2026-09-10）—— evidence `docs/P2-6-evidence/verify-evidence.md`
+探针 `scripts/live/p26-chat-e2e.mjs`（真实守护+真实模型）、`scripts/live/p26-chat-resilience.mjs`（续传/缺口/失败路径 23 检查）
+回归 `workbench/scripts/chat-ui.test.mjs`（9）+ `plugins/tests/chat-context.test.mjs`（13）
+
 当前已有会话、消息、awaiting/replied/failed、重试、附件和 scope 隔离。
 
-待改动：
+**两项决策（用户拍板）**：真实模型 E2E 允许在生产 `software` 空间跑 1 条探针（留痕不删）；
+UI 验证采用「纯函数抽取 + 单测」形态（不引入 jsdom/react 渲染设施）。
 
-- 真实 DSH 守护与模型通道 E2E。
-- awaiting → replied/failed 的前端合并和断线恢复。
-- 模型不可用、超时、守护离线的完整 UI 验证。
-- 附件上下文生命周期和清理测试。
+已完成：
 
-依赖：真实 DSH 宿主和模型 provider。
+- ✅ **真实 DSH 守护与模型通道 E2E**：真实探针跑通全闭环——生产 8787 `software` 空间发 1 条消息 →
+  服务端标 `awaiting` 入队 → **真实守护进程**（`soldier-auto@software`）拉取 →
+  `ctx.subagents.start` 起**真实模型子代理**（`custom-ds / deepseek-v4-flash-openai`）→
+  结构化回写 → CAS 置 `replied` → **12s 内**收到 `author=software-assistant` 的真实回复，
+  meta `{replyTo, aiModel}` 完整。全程无夹具、无桩模型。
+- ✅ **awaiting → replied/failed 的前端合并和断线恢复**：
+  · 合并：三态是**同一条源消息的 meta 更新**，只追加新 id 会让气泡永停「等待回复」——
+    `chatUi.mergeChatMessages` 明确同 id 覆盖语义（委托 `dedupe.mergeById`，单一实现）并加回归锚点。
+  · 断线恢复三层：`reconnected` 回调立即重拉（不等 15s 轮询）+ `shouldRefillChat` 以**全量事件流
+    seq 水位**检出缺口即补齐（首帧建基线不误报）+ 顶栏 SSE 四态可视化（已连接/已重连第 N 次/
+    重连中/已断开，断开仍可手动刷新）。
+  · 真实链路已验证：带 `Last-Event-ID` 续传从 `watermark+1` 开始且 seq 连续；**不带**该头时服务端
+    只回放**最近 30 条**（有界）——这正是缺口层必须存在的原因，两层叠加才是完整恢复语义。
+- ✅ **模型不可用、超时、守护离线的完整 UI 验证**：判定逻辑抽到 `workbench/src/chatUi.ts` 并单测
+  （9 用例）：端点缺失/加载中灰态**不误导**、最近失败红态给「重试」可行动指引、守护离线/模型未配置/
+  开关关闭黄态各给修复动作（三项并列不互相掩盖）、全就绪绿态 + 诚实标注；发送侧 401/403 →
+  未授权 + token 指引、网络类 → 中枢不可达，**均含「草稿已保留」**；AI 三态栏位文案全覆盖。
+- ✅ **附件上下文生命周期和清理测试**：新增 `plugins/tests/chat-context.test.mjs`（13 用例；
+  此前 `gatherChatContext` **零覆盖**）。A 组：摘要四态降级、非法引用过滤、hub 不可达/404/空内容
+  均给 `readError` 且**绝不 throw**（否则上下文故障会误标源消息 failed）、请求四参契约。
+  B 组（真实 hub）：staged→sent 流转 + 消息只存引用（反向断言正文不入 `messages` 表）、
+  **staged 不可读（403）而绑定后可读**、跨会话/跨空间 403、缺 by 400、未知 id 404、
+  TTL 到期**引用留存但内容不可读**（与 gatherChatContext 降级端到端接上）、历史消息不回填、
+  重复/跨空间/超限引用被拒、孤儿 staged 按 TTL 清理。
+- 过程中修掉 4 个真实缺陷：①「已回复 · 模型」永远显示不出模型（模型在**回复行** meta，
+  须按 `replyMsg` 回查）；② 合并逻辑两份实现（改为委托）；③ 401/403 未识别为未授权；
+  ④ 空列表时同批重复 id 未去重。
+
+**已知边界（诚实登记）**：真实探针只跑 1 条消息（用户授权范围），未在生产人为制造 provider 超时/
+守护离线（故障态由隔离实例与纯函数测试覆盖）；UI 验证是**判定层而非渲染层**（DOM 文案无自动断言）；
+标签页被挂起时补齐会延后到唤醒；附件内容按 UTF-8 文本注入，二进制附件未支持；
+生产探针会话保留不删（可复查）。
 
 ### P2-7 文件中心增强
 

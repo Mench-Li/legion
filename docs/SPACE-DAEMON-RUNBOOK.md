@@ -155,3 +155,41 @@ node team-hub/scripts/seed-pipeline.mjs --scope ozon --file roles-ozon.json --ru
 
 导入后 `daemon.json` 的 `pipeline.source` 会从 `file` 变为 `hub`（`version` 为内容指纹），
 日志出现 `空间流水线来源=hub（scope=…，version=…，N 环：…）`；两者都可作为「已切到数据面」的证据。
+
+## 8. 把 SP-P0 激活到运行中的部署
+
+代码合入后，**运行中的进程不会自动换码**：hub 是常驻 node 进程（services-plugin 托管），
+守护是 DSH 宿主里的插件实例。按下面顺序激活（每一步都可独立验证，失败可单步回退）：
+
+```powershell
+# ① 合入（分支 w/space-pipeline → main；本次是快进合并）
+git -C D:\project\DSH\legion merge --ff-only w/space-pipeline
+
+# ② 重建宿主实际加载的构建产物（lib/ 是构建输出，不在版本控制里）
+$env:DSH_CHECKOUT='D:\project\DSH\dsh\deepseek-harness'
+node D:\project\DSH\legion\scripts\ci\build-external-package.mjs team-hub
+node D:\project\DSH\legion\scripts\ci\build-external-package.mjs plugins
+
+# ③ 重启 team-hub（services-plugin 对子进程异常退出会自愈拉起；~1 分钟窗口）
+$pid8787 = (Get-NetTCPConnection -LocalPort 8787 -State Listen).OwningProcess
+Stop-Process -Id $pid8787 -Force
+# 等它自己回来；30s 内没回来就用同一命令行手工拉起：
+# Start-Process node -ArgumentList 'D:\project\DSH\legion\team-hub\server.mjs' -WorkingDirectory 'D:\project\DSH\legion'
+
+# ④ 新路由自检（旧进程会 404，新进程返回空流水线）
+Invoke-RestMethod "http://127.0.0.1:8787/api/pipeline?scope=software" | Select-Object version, activeRoles
+
+# ⑤ 导入存量空间流水线（内容与既有 roles.json 逐字段一致，只换来源）
+node D:\project\DSH\legion\team-hub\scripts\seed-pipeline.mjs --scope software --file roles.json
+node D:\project\DSH\legion\team-hub\scripts\seed-pipeline.mjs --scope ozon --file roles-ozon.json --runtime-enabled
+
+# ⑥ 让守护实例重新挂载以加载新构建（改任一该行配置值即触发该行热重载；
+#    DSH Desktop 重启同样会全量重新挂载）
+#    验证：日志出现「空间流水线来源=hub」+ daemon.json.pipeline.source=hub
+```
+
+**回退**：`git -C D:\project\DSH\legion reset --hard <合并前 HEAD>` + 重复 ②③（重建旧产物并重启 hub）。
+数据面无害：旧代码根本不读 `/api/pipeline`，所以「先 seed、后换码」不会造成任何行为差异。
+
+**为什么不能跳过 ②**：`lib/` 不在版本控制内（`team-hub/lib`、`plugins/lib`、`board-plugin/lib` 均为构建输出），
+DSH 宿主与 services-plugin 加载的都是 `lib/index.js`——只改 `src/` 不影响运行中的进程。

@@ -146,7 +146,7 @@ export function NotifyView({ scope, hubMode, onUnreadChange, onGoHome }: {
         const next = dedupeDesc([ev, ...prev])
         return next.slice(0, LIST_LIMIT)
       })
-    })
+    }, { scope })
     const poll = window.setInterval(() => {
       const cur = scopeRef.current
       if (cur === null) return

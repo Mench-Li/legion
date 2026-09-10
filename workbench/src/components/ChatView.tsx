@@ -267,7 +267,7 @@ export function ChatView({ scope, hubMode, spaces, onPickScope }: {
       const n = activeRef.current
       if (ev.action === 'chat:message' && Number(conv) === n) void mergeNewest()
       else if (ev.action === 'chat:create') void loadConvs()
-    })
+    }, { scope })
     void loadHealth() // 进入空间即刷健康（守护/开关/模型/最近失败）
     const poll = window.setInterval(() => {
       const n = activeRef.current

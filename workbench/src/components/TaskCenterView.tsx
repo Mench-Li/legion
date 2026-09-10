@@ -239,7 +239,7 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
       try {
         off = subscribeHubAudit(ev => {
           if (isTaskEvent(ev.action)) reload()
-        })
+        }, { scope: scope ?? undefined })
       } catch {
         off = null
       }
@@ -250,7 +250,7 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
       off?.()
       if (poll) window.clearInterval(poll)
     }
-  }, [hubMode, load])
+  }, [hubMode, load, scope])
 
   const switchMode = (next: TaskCenterMode): void => {
     setMode(next)

@@ -450,9 +450,14 @@ export function FilesView({ scope, hubMode, spaces, onOpenSettings }: FilesViewP
   const crumbs = dir.split('/').filter(Boolean)
   const repoPrefix = git?.repoRoot && space?.localDir ? repoPrefixOf(space.localDir, git.repoRoot) : ''
   const gitFiles = git?.files ?? []
-  /** 当前展示的条目路径（搜索结果模式下是结果路径，否则是当前目录下条目）——勾选/全选的唯一口径。 */
-  const visiblePaths = hits !== null ? hits.map(h => h.path) : entries.map(e => joinRel(dir, e.name))
   const selectedList = [...selected]
+  /** 勾选项中的**文件**（目录没有可下载字节；混选时下载按钮只作用于文件，全为目录则禁用并说明原因）。 */
+  const selectedFiles = selectedList.filter(p => {
+    const e = entries.find(x => joinRel(dir, x.name) === p)
+    if (e) return e.type === 'file'
+    const h = hits?.find(x => x.path === p)
+    return h?.type === 'file'
+  })
 
   return (
     <div className="center-col">
@@ -515,8 +520,13 @@ export function FilesView({ scope, hubMode, spaces, onOpenSettings }: FilesViewP
       {/* P2-7 ③：批量操作栏（勾选后出现；移动目标由前端先校验相对路径） */}
       {selected.size > 0 && (
         <div className="panel files-batchbar">
-          <span style={{ fontSize: 12 }}>已选 {selected.size} 项</span>
-          <button className="btn small" disabled={busy} onClick={() => downloadSelected(selectedList.filter(p => !visiblePaths.includes(p) || entries.find(e => joinRel(dir, e.name) === p)?.type === 'file' || hits?.find(h => h.path === p)?.type === 'file'))}>⬇ 下载文件</button>
+          <span style={{ fontSize: 12 }}>已选 {selected.size} 项{selectedFiles.length !== selected.size ? `（其中文件 ${selectedFiles.length}）` : ''}</span>
+          <button
+            className="btn small"
+            disabled={busy || selectedFiles.length === 0}
+            title={selectedFiles.length === 0 ? '所选都是目录：下载仅作用于文件' : '逐个触发下载（不打包）'}
+            onClick={() => downloadSelected(selectedFiles)}
+          >⬇ 下载文件{selectedFiles.length > 0 ? `（${selectedFiles.length}）` : ''}</button>
           <button className="btn small" disabled={busy} onClick={() => { setMoving(true); setMoveTo('') }}>➡ 移动到…</button>
           <button className="btn small danger" disabled={busy} onClick={() => doBatch('delete', selectedList)}>🗑 批量删除</button>
           <button className="btn small ghost" onClick={() => setSelected(new Set())}>取消选择</button>

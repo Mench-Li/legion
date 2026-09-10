@@ -360,16 +360,44 @@ UI 验证采用「纯函数抽取 + 单测」形态（不引入 jsdom/react 渲�
 标签页被挂起时补齐会延后到唤醒；附件内容按 UTF-8 文本注入，二进制附件未支持；
 生产探针会话保留不删（可复查）。
 
-### P2-7 文件中心增强
+### P2-7 文件中心增强 ✅ 已完成（2026-09-10）
 
 当前已有目录、读写、上传、重命名、删除、token 和路径安全。
 
-待改动：
+四项全部落地（后端 serve.mjs `/api/files/*` + 前端 FilesView / filesUi.ts）：
 
-- 批量操作和搜索。
-- 上传冲突策略。
-- 大文件分片或断点续传。
-- 更完整的 git 状态/差异展示。
+- **批量操作和搜索**：`GET /api/files/search`（文件名大小写不敏感子串、`recursive` 递归、上限触顶
+  返回 `truncated=true` 不静默丢结果）+ `POST /api/files/batch`（delete/move，**逐项报告成败**，
+  单项失败不回滚其余项，上限 200 项/次）。前端多选 + 批量下载/移动/删除，命中高亮，移动目标先校验相对路径。
+- **上传冲突策略**：`strategy=ask|overwrite|skip|rename`（服务端权威；`overwrite=1` 保留为兼容别名）。
+  ask 为默认（409 → 前端询问后带明确策略重试）；skip 不落盘且**零副作用**；rename 自动加 `-1/-2`
+  后缀并回传实际落盘名。未知策略一律 400（不静默降级）。前端记忆选择（localStorage 不可用时降级 ask）。
+- **大文件分片与断点续传**：`POST /upload/init` + `PUT /upload/chunk` + `POST /upload/complete`
+  + `DELETE /upload/abort`。会话状态**只落磁盘**（`.dsh-uploads/<id>.json` + `.part`），「已收字节」
+  即 `.part` 长度 → 进程重启/刷新页面后仍可续传；offset 不匹配返回 409 并回传真实 `received`
+  供前端校正（不重传已成功的片）；未收齐 complete 返回 400 且**保留会话**。前端 >8MB 自动走分片，
+  带进度条、片数与取消。
+- **git 状态/差异展示（只读）**：`GET /api/files/git/status|diff|log`。状态含分支、领先/落后、
+  逐文件标记（区分暂存与工作区、R 带原路径、冲突 U）；diff 支持「工作区 vs 索引 / 已暂存 vs HEAD」
+  两态，二进制与超长显式标注；另有最近提交列表。**不提供 stage/commit/checkout**——只读端点，
+  并有「调用前后 `git status --porcelain` 逐字节一致 + 无 index.lock」的反向断言兜底。
+
+- 修掉 3 个真实缺陷：① `gitDiff` 对**文件路径**执行 `git -C` 必然失败 → isRepo 误判 false
+  （前端会因此隐藏整个 git 面板），改为按所在目录探测仓库根；② 对已删除文件抛 400 而非可读说明；
+  ③ `.dsh-uploads` 会话目录可被文件中心浏览/删除 → 一次列表操作即可静默破坏断点续传，改为与
+  `.git` 同级拒绝（403）。
+- 测试：`workbench/scripts/files-p27.test.mjs` 36 例（后端契约，含 HTTP 真路由与 token 门禁）+
+  `workbench/scripts/files-ui.test.mjs` 19 例（前端纯判定层），两套件均已注册到 `run-ci` 的 `test` 阶段
+  （test 阶段套件数 29 → 31）；`files-api` 41 例不回归。
+  **注意**：本轮**未能**跑完整 `test` 阶段获取全量基线——main 上 `notify-hub-smoke` 套件挂起
+  （非本切片引入：同套件在 `1203f52` 上 2/2 通过并退出，在 `fcbc1bd` / `3339642` 上无输出挂起，
+  期间改动来自 F-01/F-02 合并对 `team-hub/server.mjs` 的修改）。详见 `docs/P2-7-evidence/verify-evidence.md` §7。
+- 证据：`docs/P2-7-evidence/verify-evidence.md`。
+
+**已知边界（诚实登记）**：批量下载**逐个触发，不做 zip 打包**（避免自研 zip 写入器）；
+分片为**顺序**上传（offset 必须等于已收字节），不做并发分片与逐片哈希校验（仅校总长度）；
+「移动到」只支持已存在目录（沿用服务端 rename 语义）；搜索只匹配**文件名**（不做内容全文检索）；
+git 面板只读，无暂存/提交能力；`.dsh-uploads` 会话由管理端按需清理（本期未做定时回收）。
 
 ### P2-8 浏览器助手增强
 

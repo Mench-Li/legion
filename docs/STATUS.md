@@ -105,6 +105,11 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
    （有界）→ 断线恢复倚赖「SSE 重连回调 + 本地 seq 水位缺口判据」两层叠加，仅靠服务端续传不保证完整；
    标签页被挂起（定时器冻结）时补齐延后到唤醒；UI 验证为判定层（DOM 文案无自动断言）；
    附件内容按 UTF-8 文本注入，二进制附件未支持。
+9. 文件中心（P2-7）：批量下载**逐个触发不打包 zip**；分片上传为**顺序**语义（offset 必须等于服务端已收字节），
+   不做并发分片与逐片哈希（仅校总长度）；搜索只匹配**文件名**（不检索内容）；「移动到」目标目录须已存在；
+   git 面板**只读**（无 stage/commit/checkout，`ahead/behind` 依赖本地 upstream 引用，无 upstream 时为 null）；
+   `.dsh-uploads` 上传会话**无自动 TTL 回收**（完成/中止会清理，进程被强杀可能残留，需管理端按需清理）；
+   前端验证为判定层（`workbench/scripts/files-ui.test.mjs` 19 例，不引入 jsdom/react 渲染断言）。
 
 ## 5. 维护约定
 

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { webFetchPage, webHistory, webHistoryClear, webMeta, webScreenshot, webShotUrl } from '../api'
 import type { WebFetchResult, WebHistoryResponse, WebMetaResponse, WebShotResult } from '../types'
 import {
-  cacheBadge, errorText, historyItemView, historyStatsText, isErrorResult, normalizeUrl,
+  cacheBadge, errorText, historyErrorText, historyItemView, historyStatsText, isErrorResult, normalizeUrl,
   qualityBadges, quotaText, quotaTone, relativeTime, shotButtonView, shotResultText, shotStatusText, shortUrlText,
 } from '../browserUi'
 import { toast } from './Toast'
@@ -37,6 +37,7 @@ export function BrowserView({ scope = '' }: { scope?: string }): React.JSX.Eleme
   const [lastUrl, setLastUrl] = useState('')
   // P2-8：空间级历史（team-hub）/ 配额与截图状态（serve.mjs）/ 截图结果
   const [scoped, setScoped] = useState<WebHistoryResponse | null>(null)
+  const [scopedFailed, setScopedFailed] = useState(false)
   const [meta, setMeta] = useState<WebMetaResponse | null>(null)
   const [shot, setShot] = useState<WebShotResult | null>(null)
   const [shotBusy, setShotBusy] = useState(false)
@@ -55,12 +56,16 @@ export function BrowserView({ scope = '' }: { scope?: string }): React.JSX.Eleme
 
   /** 刷新空间历史与配额快照（被动读，不触发抓取）。 */
   const refreshSide = useCallback(async (): Promise<void> => {
-    const [h, m] = await Promise.all([
-      scope ? webHistory({ scope, limit: SCOPED_HISTORY_LIMIT }).catch(() => null) : Promise.resolve(null),
-      webMeta(scope || undefined),
-    ])
+    let h: WebHistoryResponse | null = null
+    let failed = false
+    if (scope) {
+      // 与「本空间还没有记录」区分：请求整体失败（后端未加载该路由 / hub 不可达）时置失败态
+      try { h = await webHistory({ scope, limit: SCOPED_HISTORY_LIMIT }) } catch { failed = true }
+    }
+    const m = await webMeta(scope || undefined)
     if (!mounted.current) return
     setScoped(h)
+    setScopedFailed(failed)
     setMeta(m)
   }, [scope])
 
@@ -242,7 +247,7 @@ export function BrowserView({ scope = '' }: { scope?: string }): React.JSX.Eleme
         <div className="panel browser-scoped">
           <div className="browser-scoped-head">
             <span className="tag">🗂 本空间抓取历史</span>
-            <span style={{ fontSize: 11, color: 'var(--muted-2)' }}>{scoped?.ok === false ? (scoped.error ?? '历史不可用') : historyStatsText(scoped?.stats)}</span>
+            <span style={{ fontSize: 11, color: 'var(--muted-2)' }}>{scopedFailed ? historyErrorText() : scoped?.ok === false ? (scoped.error ?? '历史不可用') : historyStatsText(scoped?.stats)}</span>
             <button className="btn small" style={{ marginLeft: 'auto' }} onClick={() => setShowScoped(v => !v)}>{showScoped ? '收起' : '展开'}</button>
             <button
               className="btn small"
@@ -267,6 +272,9 @@ export function BrowserView({ scope = '' }: { scope?: string }): React.JSX.Eleme
           )}
           {showScoped && scoped?.ok === false && (
             <div className="browser-scoped-err">{scoped.error ?? '抓取历史不可用'}</div>
+          )}
+          {showScoped && scopedFailed && (
+            <div className="browser-scoped-err">{historyErrorText()}</div>
           )}
         </div>
       )}

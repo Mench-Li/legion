@@ -111,9 +111,18 @@ export function qualityBadges(q?: WebExtractQuality): Badge[] {
 
 /** 配额读数：剩余 RPM / 在途并发 / 今日字节；界面据此在接近上限时提前提示。 */
 export function quotaText(s?: WebQuotaSnapshot | null): string {
-  if (!s) return '配额不可用（需 serve.mjs 与空间绑定）'
+  if (!s) return '配额不可用：后端未提供 /api/web/meta（需重启 workbench serve.mjs 加载 P2-8 路由）'
   const b = s.dailyBytes
   return `本分钟 ${s.rpm.remaining}/${s.rpm.limit} 次 · 进行中 ${s.concurrency.inflight}/${s.concurrency.limit} · 今日 ${sizeText(b.used)}/${sizeText(b.limit)}`
+}
+
+/**
+ * 历史不可用文案：注意与「本空间还没有抓取记录」区分——
+ * 后端未加载 P2-8 路由时（此时 /api/web/history 会回落到 SPA 壳，不是 JSON），
+ * 若笼统显示「还没有记录」会让用户以为抓取没生效，必须明确说明是能力未就绪。
+ */
+export function historyErrorText(): string {
+  return '抓取历史不可用：后端未提供 /api/web/history（需重启 workbench serve.mjs，并确保 team-hub v2 在运行）'
 }
 
 /** 配额紧张度：用于把读数染成提醒色（<20% 剩余或并发占满 → 警告）。 */

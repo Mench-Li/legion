@@ -4,7 +4,7 @@
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  cacheBadge, errorText, historyItemView, historyStatsText, isErrorResult, normalizeUrl,
+  cacheBadge, errorText, historyErrorText, historyItemView, historyStatsText, isErrorResult, normalizeUrl,
   qualityBadges, quotaText, quotaTone, relativeTime, retryAfterText, shotButtonView,
   shotResultText, shotStatusText, shortUrlText,
 } from '../src/browserUi.ts'
@@ -184,12 +184,22 @@ describe('P2-8③ 截图状态与结果', () => {
 describe('P2-8④ 配额读数', () => {
   const snap = { scope: 's', rpm: { limit: 30, remaining: 25, resetInMs: 1000 }, concurrency: { limit: 3, inflight: 1 }, hostRpmLimit: 30, dailyBytes: { limit: 200 * 1024 * 1024, used: 10 * 1024 * 1024, remaining: 190 * 1024 * 1024, day: '2025-01-01' } }
 
-  test('读数包含三类额度，缺数据时明说不可用', () => {
+  test('读数包含三类额度，缺数据时明说不可用（含后端未加载路由的诊断）', () => {
     const t = quotaText(snap)
     assert.match(t, /本分钟 25\/30 次/)
     assert.match(t, /进行中 1\/3/)
     assert.match(t, /今日 10\.0 MB\/200\.0 MB/)
     assert.match(quotaText(null), /配额不可用/)
+    assert.match(quotaText(null), /api\/web\/meta/, '指明缺失的接口，便于判断是否需要重启 serve.mjs')
+  })
+
+  test('历史不可用文案不得与「还没有记录」混淆', () => {
+    const err = historyErrorText()
+    assert.match(err, /抓取历史不可用/)
+    assert.match(err, /api\/web\/history/)
+    assert.match(err, /重启/)
+    assert.notEqual(err, historyStatsText(null), '不可用 ≠ 空历史')
+    assert.notEqual(err, historyStatsText({ total: 0, failed: 0, bytes: 0, shown: 0 }))
   })
 
   test('紧张度：并发占满 → danger；剩余不足 20% → warn；正常 → ok', () => {

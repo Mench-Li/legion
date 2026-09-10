@@ -18,7 +18,7 @@
  *
  * 命中失败时输出「FAIL: <文件>:<行> …」并在 exit 非 0。
  */
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -35,12 +35,14 @@ const CHECKS = [
   '关键项不丢（三件套/DSH Desktop/三分钟循环）',
   '无过程叙事（P1/P2/P3·已交付 / 切片 Sx·已交付 = 0）',
   '内联锚点链接（[t](#anchor) 的锚点必须是本文件真实标题）',
+  '当前状态入口（docs/STATUS.md 存在且含基线/CI 证据/复跑命令，README 已链接）',
+  '历史 evidence 治理（证据快照目录的顶层 md 均带历史快照 banner）',
 ]
 
 if (process.argv.includes('--help')) {
   console.log('check-docs.mjs — Legion 文档新鲜度机器校验（零第三方依赖，仅 node:fs/re/path）')
   console.log('')
-  console.log('校验对象：README.md（总览）+ docs/FEATURES.md（功能手册）')
+  console.log('校验对象：README.md（总览）+ docs/FEATURES.md（功能手册）+ docs/STATUS.md（当前状态入口）+ docs/ 证据快照 banner 覆盖')
   console.log('校验项：')
   CHECKS.forEach((c, i) => console.log('  ' + (i + 1) + '. ' + c))
   console.log('')
@@ -199,6 +201,57 @@ if (feats) {
     + (readme.match(/P1\/P2\/P3.*已交付|切片 S[0-9]+.*已交付/g) || []).length
   if (narr !== 0) fail(FEATURES, null, '出现过程叙事（P1/P2/P3 已交付 / 切片 Sx 已交付）x' + narr)
 }
+
+// ---- 9. P3-3 当前状态入口与历史 evidence 治理 ----
+// 9a. docs/STATUS.md 必须存在，并含「基线/CI 证据/复跑命令」三类关键信息。
+// 9b. README 必须链接 docs/STATUS.md（当前状态单一入口）。
+// 9c. 所有证据快照目录（docs/ 下 /^G-/ 或 /-evidence$/）的顶层 md 都必须带历史快照 banner
+//     （判定规则与 scripts/ci/evidence-banner.mjs 保持一致；此处内联以免 check-docs 依赖外部脚本）。
+const STATUS = join(ROOT, 'docs', 'STATUS.md')
+const BANNER = '<!-- evidence-banner:start -->'
+const SNAPSHOT_RE = /^(G-.+|-?.*evidence)$/
+
+try {
+  const st = LF(readFileSync(STATUS, 'utf8'))
+  for (const key of ['基线', 'run-ci', 'summary.json']) {
+    if (!st.includes(key)) fail(STATUS, null, '当前状态入口缺少关键信息：' + key)
+  }
+} catch (e) {
+  fail(STATUS, null, '无法读取（当前状态单一入口缺失）：' + e.message)
+}
+
+if (readme && !/docs\/STATUS\.md/.test(readme)) {
+  fail(README, null, '未链接当前状态入口 docs/STATUS.md')
+}
+
+/** 递归收集证据快照目录。 */
+function snapshotDirs(abs, out = []) {
+  let entries = []
+  try { entries = readdirSync(abs, { withFileTypes: true }) } catch { return out }
+  for (const e of entries) {
+    if (!e.isDirectory() || e.name === 'node_modules' || e.name.startsWith('.')) continue
+    const child = join(abs, e.name)
+    if (SNAPSHOT_RE.test(e.name)) out.push(child)
+    snapshotDirs(child, out)
+  }
+  return out
+}
+
+let snapMissing = 0
+for (const dir of snapshotDirs(join(ROOT, 'docs'))) {
+  let mds = []
+  try { mds = readdirSync(dir).filter((f) => f.toLowerCase().endsWith('.md')) } catch { continue }
+  if (mds.length === 0) { snapMissing += 1; fail(dir, null, '证据快照目录无 md（缺 banner 载体，运行 node scripts/ci/evidence-banner.mjs）'); continue }
+  for (const f of mds) {
+    let body = ''
+    try { body = readFileSync(join(dir, f), 'utf8') } catch { continue }
+    if (!body.includes(BANNER)) {
+      snapMissing += 1
+      fail(join(dir, f), null, '证据快照文档缺少历史 banner（运行 node scripts/ci/evidence-banner.mjs）')
+    }
+  }
+}
+if (snapMissing === 0) console.log('  历史 evidence banner 覆盖完整（docs/ 下证据快照目录全部标注）')
 
 if (fails === 0) {
   console.log('check-docs: PASS（README.md + docs/FEATURES.md 结构/链接/索引一致，' + CHECKS.length + ' 类校验项全绿）')

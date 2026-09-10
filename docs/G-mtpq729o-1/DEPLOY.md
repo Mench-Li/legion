@@ -1,3 +1,8 @@
+<!-- evidence-banner:start -->
+> ⚠️ **历史快照 —— 不作为当前状态依据。** 本目录文档反映 **2026-09-06**（commit `7ffa303`） 的基线，其中的测试数量、端口、命令与结论只代表当时状态。
+> 当前状态请看：[docs/STATUS.md](../STATUS.md)（状态与测试基线）· [README.md](../../README.md)（总览）· [docs/DEPLOY.md](../DEPLOY.md)（部署）· 最新 CI 证据 `.ci/<run>/summary.json`。
+<!-- evidence-banner:end -->
+
 # T-118 部署与发布说明（DEPLOY.md）——「完整功能使用介绍文档 + 功能/迭代持续自动同步」收尾发布
 
 > 阶段：部署与 CI/CD（devops）｜执行任务：T-118（[auto-goal]｜所属目标 G-mtpq729o-1 · software · chain）

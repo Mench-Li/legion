@@ -1,3 +1,8 @@
+<!-- evidence-banner:start -->
+> ⚠️ **历史快照 —— 不作为当前状态依据。** 本目录文档反映 **2026-09-05**（commit `2bdfd0b`） 的基线，其中的测试数量、端口、命令与结论只代表当时状态。
+> 当前状态请看：[docs/STATUS.md](../STATUS.md)（状态与测试基线）· [README.md](../../README.md)（总览）· [docs/DEPLOY.md](../DEPLOY.md)（部署）· 最新 CI 证据 `.ci/<run>/summary.json`。
+<!-- evidence-banner:end -->
+
 # T-094 证据 —— 【切片 S2 修复·第1轮】TC-S2-06 / TC-S2-10（serve.mjs 浏览器后端）
 
 修复任务回炉（T-080 失败切片第 1 轮）。根因修复 + 真实命令回归，未改任何测试预期掩盖失败。

@@ -1,3 +1,8 @@
+<!-- evidence-banner:start -->
+> ⚠️ **历史快照 —— 不作为当前状态依据。** 本目录文档反映 **2026-09-06**（commit `de3c49c`） 的基线，其中的测试数量、端口、命令与结论只代表当时状态。
+> 当前状态请看：[docs/STATUS.md](../STATUS.md)（状态与测试基线）· [README.md](../../README.md)（总览）· [docs/DEPLOY.md](../DEPLOY.md)（部署）· 最新 CI 证据 `.ci/<run>/summary.json`。
+<!-- evidence-banner:end -->
+
 # T-107 编码实现证据目录
 
 本目录存放 T-107「环节产出文档在任务详情直接打开预览」编码实现批的真实命令证据（每次均为实际运行输出要点）。

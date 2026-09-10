@@ -314,13 +314,24 @@ board-plugin hub 模式 SSE 桥接（R9）属跨宿主改造，登记移交 P1-3
 
 ### P3-3 历史 evidence 文档治理
 
+状态：**已完成**（2026-09-10）—— 当前状态入口 `docs/STATUS.md`；标注工具 `scripts/ci/evidence-banner.mjs`
+
 当前部分历史报告仍保留旧测试数量、旧默认 host 或旧构建命令。
 
-涉及改动：
+已完成：
 
-- 标记历史 evidence 为不可作为当前状态依据。
-- 统一当前状态入口为 README、`docs/DEPLOY.md` 和最新 CI 证据。
-- 增加生成时间和基线 commit。
+- ✅ **标记历史 evidence 不可作为当前状态依据**：`scripts/ci/evidence-banner.mjs` 为 `docs/` 下全部
+  **47 个证据快照目录**（`*-evidence/`、`G-*/`，含嵌套）的 **61 个顶层 md** 写入统一 banner
+  （`⚠️ 历史快照 —— 不作为当前状态依据`，含基线日期与 commit）；目录无 md 时自动建入口 README。
+  脚本幂等（重复运行 0 改写），`--check` 供 CI 校验，`--force` 供模板升级后重写。
+- ✅ **统一当前状态入口**：新建 `docs/STATUS.md`（形态/拓扑表、双进程同库等关键约定、25 套件
+  测试基线表、复跑命令、按可信度分层的文档地图、已知限制、维护约定）；`README.md` 顶部链接
+  STATUS 并**修正过期描述**（原文称 `scrum/` 保留 `:4820` 独立页面，实际 P1-1 第 2 步已退役托管）。
+- ✅ **增加生成时间和基线 commit**：banner 内基线取该目录**首次入库提交**（`git log --diff-filter=A`）
+  的短 hash 与日期；STATUS.md 记录最近全量基线 commit 与结果。
+- ✅ **机器校验**：`check-docs.mjs` 新增第 9/10 类校验项（STATUS 存在且含基线/CI 证据/复跑命令 +
+  README 已链接 + 证据快照 banner 覆盖完整），接入 run-ci `doc` 阶段。三项负测试（去掉 banner、
+  去掉 README 链接、去掉 STATUS 关键字段）均按预期 FAIL，恢复后 PASS。
 
 ## 推荐实施顺序
 

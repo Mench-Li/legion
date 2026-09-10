@@ -1,3 +1,8 @@
+<!-- evidence-banner:start -->
+> ⚠️ **历史快照 —— 不作为当前状态依据。** 本目录文档反映 **2026-09-07**（commit `0a58ecb`） 的基线，其中的测试数量、端口、命令与结论只代表当时状态。
+> 当前状态请看：[docs/STATUS.md](../STATUS.md)（状态与测试基线）· [README.md](../../README.md)（总览）· [docs/DEPLOY.md](../DEPLOY.md)（部署）· 最新 CI 证据 `.ci/<run>/summary.json`。
+<!-- evidence-banner:end -->
+
 # T-121 任务拆解：对话中心「可回答闭环修复 + 上下文输入（关联工作空间 / 上传文件）」
 
 > 角色：breaker（任务拆解）｜阶段：任务拆解｜执行任务：T-121（[auto-goal]｜所属目标 G-mtr3su6f-1 · software · chain）

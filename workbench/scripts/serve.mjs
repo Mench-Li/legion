@@ -34,7 +34,10 @@ import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { buildGithubTarballUrl, scanSkillDirs, sanitizeSkillId } from './skillImporter.mjs'
 
-const ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', 'dist')
+// 静态根：默认 <workbench>/dist；DSH_WORKBENCH_ROOT 可覆盖（测试「产物缺失」分支用，见 web-p28 用例）
+const ROOT = process.env.DSH_WORKBENCH_ROOT
+  ? resolve(process.env.DSH_WORKBENCH_ROOT)
+  : join(fileURLToPath(new URL('.', import.meta.url)), '..', 'dist')
 
 const args = new Map()
 for (let i = 2; i < process.argv.length; i += 1) {
@@ -2565,6 +2568,18 @@ function routeRequest(req, res) {
     const index = join(file, 'index.html')
     if (existsSync(index)) file = index
     else file = join(ROOT, 'index.html') // SPA 回退
+  }
+  // 修复：找不到文件时**先发 200 再读流**会让读失败无法再回错误头，只能 destroy()，
+  // 客户端看到的是「连接被意外关闭」而不是可读原因（新建 worktree 未跑 vite build 时的真实现象，
+  // 也是 CI smoke 的 S2-A 在无 dist 环境下给出误导性 "fetch failed" 的原因）。
+  // 因此先确认目标确实是可读文件，再写头。
+  try {
+    if (!statSync(file).isFile()) throw new Error('not a file')
+  } catch {
+    httpErr(res, 404, `未找到 ${pathname}` + (pathname === '/' || pathname === '/index.html'
+      ? '：前端产物缺失，请先在 workbench 下运行 vite build（或设置 DSH_WORKBENCH_ROOT 指向已构建目录）'
+      : ''))
+    return
   }
   const type = MIME[extname(file)] ?? 'application/octet-stream'
   res.writeHead(200, { 'content-type': type })

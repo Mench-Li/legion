@@ -178,6 +178,8 @@ cd whiteboard && npm test                     # 158 例 / 30 套件全通过
 | 11 | 单测自身两处错误（`parseArgv` 期望与仓库约定不符；`exposed_without_token` 忘了夹具里已配 token） | 修正测试并在用例名/注释里写明判定依据 |
 | 12 | 我第一版 PowerShell 汇总脚本用 `node --test <file>` 提取计数，首套件之后的数字全是假的（复用上一个值） | 改为单次 `node --test` 跑完整集合 + 末尾汇总，用 `Node` 自己输出的 `tests/pass/fail` 计数 |
 | 13 | 核对 `README.md` §9.2 时发现**既有文档漂移**（非本切片引入）：`CHAT_DAEMON_ONLINE_MS` 被列为可配 env，实际是 team-hub 的**代码常量**（`server.mjs` 导出，不读 env）；`CHAT_CTX_BUDGET_CHARS` 被列在服务端项里，实际由**插件**读取（且两处默认值不同） | 修正 README 该表（标注「代码常量，env 不可配」与「读 env 的是插件」），并交叉引用 `docs/review/T-124-REVIEW.md`；**未改插件代码、未把插件纳入 schema**（超出本切片范围，留给后续切片决策） |
+| 14 | **合并到 main 后 `sync --check` 失败**：「副本头部第 1 行不符合预期：…\r」 | 根因是 Windows 上 `core.autocrlf` 把检出文件转成 CRLF，而脚本逐字节比对 LF——**「工作树通过、主检出失败」的典型环境相关缺陷**。修复：比对前归一化换行（`normalizeEol`）；新增单测用 CRLF 变体直接验证头部剥离与归一化 |
+| 15 | **同一类问题的第二例**：合并后 `scan --check` 报 `DB` 未声明 | 主检出存在**未跟踪的本地文件**（`team-hub/.watch.mjs` 读 `process.env.DB`；`team-hub/lib/` 是构建产物），它们不属于仓库配置面，却让结果依赖本机状态。修复：扫描限制在 **git 跟踪文件**（`git ls-files`），git 不可用时回退目录遍历并在输出中标注模式；实测两种检出下三进程结论完全一致 |
 
 ## 5. 已知边界（诚实登记）
 
@@ -216,3 +218,11 @@ cd whiteboard && npm test                     # 158 例 / 30 套件全通过
   `Set-Content .git/msg.txt` 会失败；且该仓库纪律要求不用 PowerShell 写源码/文档文件。
 - **回归批次需排除 `notify-hub-smoke.test.mjs`**：该用例在 main 上会永久挂起（既有问题，非本切片引入，
   只做只读诊断、未修复）。
+- **合并/检出环境会改变结论（本切片实测两例）**：① Windows `core.autocrlf` 让副本变 CRLF
+  → 逐字节比对必须归一化换行；② 主检出里的未跟踪本地文件（`.watch.mjs`、`lib/` 产物）
+  → 扫描必须限制在 git 跟踪文件。**结论：任何「比对/扫描类」校验都要先消除环境差异**，
+  否则会出现「工作树通过、主检出失败」的假失败（或更糟：假通过）。
+- **配置面会随重构移动**：三进程入口改用统一引擎后，`PORT/HOST/TOKEN/DB` 等键不再以
+  `process.env.X` 形式出现在入口文件里（改为经 `loadConfig()`），因此扫描器的「直接读取」清单会变短
+  （如 whiteboard 由 12 项降为 7 项）——这是**预期变化**，schema 声明仍是权威；它同时说明
+  「读取点清单」只能用于发现**未声明**的键，不能当作「全部配置项清单」来读。

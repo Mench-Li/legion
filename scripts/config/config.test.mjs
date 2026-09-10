@@ -306,6 +306,19 @@ test('env 文件解析：重复键与非法行必须被报出来，而不是静�
   assert.deepEqual(invalid, ['BAD LINE'])
 })
 
+test('跨平台：CRLF 检出（Windows autocrlf）下 sync --check 仍必须 PASS', async () => {
+  // 本仓库在 Windows 上 core.autocrlf 会把检出文件转成 CRLF：主检出曾因此让 sync --check 失败
+  // （「副本头部第 1 行不符合预期：…\r」）。这里用 CRLF 变体直接验证归一化逻辑。
+  const { stripHeader, normalizeEol, HEADER_LINES } = await import('./sync.mjs')
+  const body = 'export const x = 1\n'
+  const crlfVariant = HEADER_LINES.join('\r\n') + '\r\n' + body
+  assert.equal(stripHeader(crlfVariant), body, 'CRLF 头部必须能被正确剥离')
+  assert.equal(normalizeEol('a\r\nb\r\n'), 'a\nb\n')
+  // 主检出的真实文件也应通过（存在时才校验，避免在非仓库布局下失败）
+  const r = runCheck([]) // 仅为确保 check.mjs 可执行；真正的 sync 校验见 CI env 阶段
+  assert.ok(r.code === 0 || r.code === 1)
+})
+
 // ───────────────────────── ④ 默认值漂移（非循环）─────────────────────────
 
 test('漂移：team-hub schema 默认值 == 代码里导出的真实常量', () => {

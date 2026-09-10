@@ -243,6 +243,9 @@ function assertNotGitInternal(rel) {
   const parts = String(rel ?? '').replace(/\\/g, '/').split('/').filter(Boolean)
   for (const seg of parts) {
     if (seg.toLowerCase() === '.git') throw new Error('禁止访问 .git 内部（防凭证/元数据外泄）')
+    // P2-7：分片上传会话目录是**内部状态**（`.part` 是未完成上传的暂存）。若允许经文件中心浏览/删除，
+    // 一次列表操作就能静默破坏「断点续传」（分片被删 → received 归零 / 长度校验失败），故与 .git 同级拒绝。
+    if (seg === UPLOAD_SESSION_DIR) throw new Error('禁止访问上传会话内部目录（' + UPLOAD_SESSION_DIR + '）：分片暂存由服务端管理')
   }
 }
 
@@ -947,9 +950,18 @@ export function parsePorcelainZ(raw) {
   return out
 }
 
+/** git 探测目录：`git -C` 需要**目录**——传文件路径会直接失败（曾导致 gitDiff 把文件当仓库 → isRepo 误判 false）。 */
+function gitProbeDir(abs) {
+  try {
+    return statSync(abs).isDirectory() ? abs : dirname(abs)
+  } catch {
+    return dirname(abs) // 目标不存在（已删除）：用所在目录探测，仍能拿到仓库信息
+  }
+}
+
 export function gitStatus(root, rel = '') {
   assertNotGitInternal(rel)
-  const abs = resolveInsideRoot(root, rel)
+  const abs = gitProbeDir(resolveInsideRoot(root, rel))
   const top = gitRead(abs, ['rev-parse', '--show-toplevel'])
   if (top === null || top.trim().length === 0) return { isRepo: false }
   const repoRoot = normalize(top.trim())
@@ -976,22 +988,31 @@ export function gitStatus(root, rel = '') {
   return { isRepo: true, repoRoot, branch, ahead, behind, files, summary, total: files.length }
 }
 
-/** 单文件 unified diff（只读）。二进制 → 显式标注；超 maxBytes → 截断并标注。 */
+/** 单文件 unified diff（只读）。二进制 → 显式标注；超 maxBytes → 截断并标注；文件不存在 → 明确说明而非抛错。 */
 export function gitDiff(root, rel, { staged = false, maxBytes = 256 * 1024 } = {}) {
   assertNotGitInternal(rel)
-  const abs = resolveInsideRoot(root, rel)
-  const top = gitRead(abs, ['rev-parse', '--show-toplevel'])
+  let absFile = null
+  try {
+    absFile = resolveInsideRoot(root, rel)
+  } catch (e) {
+    // 文件已被删除：退回根目录探测仓库信息，用 note 说明而非 400（前端仍要显示仓库上下文）
+    if (!/不存在/.test(e?.message ?? '')) throw e
+    const top = gitRead(root, ['rev-parse', '--show-toplevel'])
+    if (top === null || top.trim().length === 0) return { isRepo: false }
+    return { isRepo: true, path: String(rel ?? ''), diff: '', binary: false, truncated: false, note: '文件不存在（可能已删除）' }
+  }
+  const probe = gitProbeDir(absFile)
+  const top = gitRead(probe, ['rev-parse', '--show-toplevel'])
   if (top === null || top.trim().length === 0) return { isRepo: false }
   const repoRoot = normalize(top.trim())
-  const absFile = resolveInsideRoot(root, rel)
-  if (!existsSync(absFile)) return { isRepo: true, path: String(rel ?? ''), diff: '', binary: false, note: '文件不存在（可能已删除）' }
+  if (!existsSync(absFile)) return { isRepo: true, path: String(rel ?? ''), diff: '', binary: false, truncated: false, note: '文件不存在（可能已删除）' }
   const relInRepo = absFile.slice(repoRoot.length).replace(/\\/g, '/').replace(/^\/+/, '')
-  // --no-color + 大上下文 0：只读预览，输出稳定可缓存；未跟踪文件无 diff（前端显示「未跟踪」）
+  // --no-color + --no-ext-diff：只读预览，输出稳定可缓存；未跟踪文件无 diff（note 说明）
   const args = ['diff', '--no-color', '--no-ext-diff', '-U3']
   if (staged) args.push('--cached')
   args.push('--', relInRepo)
-  const raw = gitRead(abs, args)
-  if (raw === null) return { isRepo: true, path: String(rel ?? ''), diff: '', binary: false, note: 'diff 读取失败（可能不是仓库内文件）' }
+  const raw = gitRead(probe, args)
+  if (raw === null) return { isRepo: true, path: String(rel ?? ''), diff: '', binary: false, truncated: false, note: 'diff 读取失败（可能不是仓库内文件）' }
   const isBinary = /^Binary files .* differ$/m.test(raw) || /^GIT binary patch$/m.test(raw)
   const over = Buffer.byteLength(raw, 'utf8') > maxBytes
   const diff = over ? raw.slice(0, maxBytes) : raw
@@ -1004,7 +1025,7 @@ export function gitDiff(root, rel, { staged = false, maxBytes = 256 * 1024 } = {
 
 /** 最近提交（只读）：`--format` 用 \x1f 分隔字段、\x1e 分隔记录，避免标题含任意字符时解析歧义。 */
 export function gitLog(root, rel = '', limit = 20) {
-  const abs = resolveInsideRoot(root, rel)
+  const abs = gitProbeDir(resolveInsideRoot(root, rel))
   const top = gitRead(abs, ['rev-parse', '--show-toplevel'])
   if (top === null || top.trim().length === 0) return { isRepo: false }
   const n = Math.min(Math.max(Number(limit) || 20, 1), 100)
@@ -1439,7 +1460,7 @@ function requireWriteToken(req) {
 function classifyFilesError(e) {
   const msg = e instanceof Error ? e.message : String(e)
   if (msg.includes('token 无效')) return 401
-  if (msg.includes('越界') || msg.includes('.git') || msg.includes('仅限本机') || msg.includes('符号链接')) return 403
+  if (msg.includes('越界') || msg.includes('.git') || msg.includes('仅限本机') || msg.includes('符号链接') || msg.includes(UPLOAD_SESSION_DIR)) return 403
   if (msg.includes('overwrite=1') || msg.includes('目标已存在，不能覆盖') || msg.includes('目标已存在：如需覆盖')) return 409
   if (msg.includes('上传超过上限')) return 413
   return 400

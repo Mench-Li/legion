@@ -402,16 +402,50 @@ UI 验证采用「纯函数抽取 + 单测」形态（不引入 jsdom/react 渲�
 「移动到」只支持已存在目录（沿用服务端 rename 语义）；搜索只匹配**文件名**（不做内容全文检索）；
 git 面板只读，无暂存/提交能力；`.dsh-uploads` 会话由管理端按需清理（本期未做定时回收）。
 
-### P2-8 浏览器助手增强
+### P2-8 浏览器助手增强 ✅ 已完成（2026-09-10）
 
-当前已有 SSRF、私网、协议、重定向、超时和大小限制。
+当前已有 SSRF、私网、协议、重定向、超时和大小限制；四项全部落地（后端 `workbench/scripts/serve.mjs`
+`/api/web/*` + `team-hub/server.mjs` 历史表 + 前端 `BrowserView` / `browserUi.ts`）：
 
-待改动：
+- **空间级抓取历史与缓存**：team-hub 新增 `web_fetch_history` 表与 `POST/GET /api/web/history`、
+  `POST /api/web/history/clear`（读支持关键字过滤与 stats 汇总；容量默认 200/空间，超出按最旧清理并回报 `trimmed`）。
+  同 `(scope,url)` 只保留一行并累加 `hits`——逐次流水仍在 serve 侧 web 审计 JSONL，两者分工不重复。
+  serve 侧缓存为**进程内 TTL + ETag/Last-Modified 条件请求**：新鲜命中不发网络请求；过期但存校验器则带
+  `If-None-Match`/`If-Modified-Since` 重新验证，304 → 复用内容并刷新 TTL（`cached` + `revalidated`）；
+  **截断结果不入缓存**（否则调大 `maxBytes` 后会一直拿到旧截断内容）；缓存键 = **空间 + URL + maxBytes**。
+  抓取后 fire-and-forget 回写 hub（失败只 console，不影响抓取响应）。
+- **更好的正文提取**：零依赖 Readability-lite——剔除 nav/aside/footer/header/form/dialog 与 class/id 命中样板词的容器；
+  轻量标签栈扫描候选容器（`article`/`main`/`[role=main]` 与块级 `div`/`section`），按
+  `文本长度×(1−2×链接密度) + 段落/标题加权 + 语义标签加成` 打分选块；结构化渲染（标题→`#`、列表→`-`、
+  代码→围栏、引用→`>`、表格→`|`）；返回 `quality` 元数据（策略/得分/字数/标题数/段落数/列表项/链接密度/
+  候选数/剔除块数/markdown/截断/短内容）。**短页面优先用显式语义容器**而非整页回退（避免把导航带进正文）。
+  既有 `extractHtml` 契约不变（`web.test.mjs` 24 例不回归）。
+- **可选截图能力**：**不引入** Playwright/Puppeteer；探测本机已装 Edge/Chrome 并以 `--headless=new --screenshot` 截图，
+  需显式 `DSH_WEB_SHOT_ENABLE=1` 启用（**默认关闭**，因为会真实启动浏览器进程）；
+  `DSH_WEB_SHOT_BROWSER` 显式指定时**互斥**（只认它）。截图同样过协议白名单与 SSRF 校验，
+  落在 `workbench/data/shots/<scope>/`（**不在静态根 `dist/` 内**，避免被直接暴露且不被 `vite build` 清掉），
+  读取端点仅回环、仅 `.png`、防目录穿越；未启用/未找到浏览器返回 409 与开启指引（不静默失败）。
+- **更细的限流和配额**：空间级每分钟请求数（默认 30）、在途并发（默认 3）、每日字节配额（默认 200MB），
+  另有目标站点级每分钟请求数（默认 30）；超限 → **HTTP 429 + Retry-After + `code`**
+  （`rate_limited`/`concurrency_limited`/`daily_quota_exceeded`），界面按成因给可行动指引。
+  **未标注 scope 的调用（脚本/自测/运维）不限流**——配额是按空间的界面治理手段，无空间调用只落审计。
+  `GET /api/web/meta` 返回配额快照与截图能力状态，界面展示「本分钟剩余 / 进行中 / 今日已用」。
+- 修掉 5 个真实缺陷：① 缓存键原不含空间 → 跨空间串内容且**绕过配额**；② `DSH_WEB_SHOT_BROWSER` 原是候选首项
+  → 想验证「未找到浏览器」分支时会意外拉起真 Edge；③ 短页面误回退整页（把导航带进正文）；
+  ④ 截图默认目录落在静态根 `dist/` 内；⑤ 后端未加载路由时前端把「能力未就绪」误报成「本空间还没有记录」。
+- 测试：`workbench/scripts/web-p28.test.mjs` 21 例（抽取质量/缓存与 304/配额与 429/截图三态/历史降级）、
+  `workbench/scripts/browser-ui.test.mjs` 21 例（前端纯判定层）、`team-hub/web-history.test.mjs` 1 例（20+ 断言），
+  均注册到 `run-ci` 的 `test` 阶段（该阶段套件数 31 → 34）；`web.test.mjs` 24 例与 `files-api` 等既有套件不回归。
+  另有跨进程端到端脚本 `docs/P2-8-evidence/e2e-history.mjs`（真拉起 team-hub 临时实例）17/17 通过。
+  生产 :5173 已重建并验证（live `index-IsXYBz15.js` 与构建产物一致）。
+- 证据：`docs/P2-8-evidence/verify-evidence.md`。
 
-- 空间级抓取历史与缓存。
-- 更好的正文提取。
-- 可选截图能力。
-- 更细的限流和配额。
+**已知边界（诚实登记）**：缓存在**进程内**（重启即失效；TTL 默认 5 分钟）；配额计数也在**进程内**
+（重启清零，非持久账目）；截图是**尽力而为的本机浏览器截图**（不自带浏览器，未装 Edge/Chrome 则不可用，
+无 JS 交互与等待策略）；正文抽取为启发式（非第三方 Readability，无 DOM 语义理解）；
+历史按空间上限裁剪（默认 200 条，超出丢最旧）；`team-hub` 未运行时历史不可用（界面明确说明而非假装空历史）。
+**注意**：本切片同样**未能**跑完整个 `test` 阶段获取全量基线——main 上 `notify-hub-smoke` 会让该阶段永久等待
+（根因与最小修法见 `docs/P2-7-evidence/verify-evidence.md` §7），本切片按套件逐个验证，未伪造全量基线。
 
 ## P3：生产级能力
 

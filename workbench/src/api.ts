@@ -1,4 +1,4 @@
-import type { ActivityEvent, AgentCatalogItem, AgentModelCfg, ApiConfig, BoardData, CardStatus, ChatAttachmentRef, ChatConversation, ChatHealthInfo, ChatMessage, DirListing, FileListResponse, FilePreview, GoalInfo, GoalStatus, HubActivity, HubAuditEvent, HubDocContent, HubTask, MissionsResponse, ModelOption, OverlapGroup, RepoInspect, RosterResponse, SkillInfo, SpaceInfo, WebFetchResult } from './types'
+import type { ActivityEvent, AgentCatalogItem, AgentModelCfg, ApiConfig, BoardData, CardStatus, ChatAttachmentRef, ChatConversation, ChatHealthInfo, ChatMessage, DirListing, FileListResponse, FilePreview, GoalInfo, GoalStatus, HubActivity, HubAuditEvent, HubDocContent, HubTask, MissionsResponse, ModelOption, OverlapGroup, RepoInspect, RosterResponse, SkillInfo, SpaceInfo, WebFetchResult, WebHistoryResponse, WebMetaResponse, WebShotResult } from './types'
 import { subscribeHubEventStream } from './hubEventStream'
 
 /**
@@ -1013,15 +1013,74 @@ export async function syncSkills(scope: string, url: string, branch: string, str
 
 // ───────────────────────── 浏览器助手（S7 ← S6 serve.mjs /api/web/fetch，同源）─────────────────────────
 
-export async function webFetchPage(input: { url: string; maxBytes?: number; timeoutMs?: number }): Promise<WebFetchResult> {
+export async function webFetchPage(input: { url: string; maxBytes?: number; timeoutMs?: number; scope?: string }): Promise<WebFetchResult> {
   const res = await fetch('/api/web/fetch', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
   })
   const body = await res.json().catch(() => null) as WebFetchResult | null
-  if (body && typeof body.ok === 'boolean') return body
+  if (body && typeof body.ok === 'boolean') {
+    // P2-8④：限流/配额失败以 429 + { code, retryAfterSec } 返回，交由界面给可行动指引
+    if (res.status === 429 && body.retryAfterSec === undefined) {
+      const ra = Number(res.headers.get('retry-after'))
+      if (Number.isFinite(ra)) body.retryAfterSec = ra
+    }
+    return body
+  }
   throw new Error(`浏览器助手请求失败：${res.status} ${res.statusText}`)
+}
+
+/** P2-8④：配额快照 + 截图能力状态 + 缓存规模（未带 scope 时 quota 为 null）。 */
+export async function webMeta(scope?: string): Promise<WebMetaResponse | null> {
+  const qs = scope ? '?scope=' + encodeURIComponent(scope) : ''
+  try {
+    const res = await fetch('/api/web/meta' + qs)
+    const body = await res.json().catch(() => null) as WebMetaResponse | null
+    return body && typeof body.ok === 'boolean' ? body : null
+  } catch {
+    return null // fetch 自身失败（serve 未起）：界面显示「配额不可用」而不是抛错打断面板
+  }
+}
+
+/** P2-8①：按空间读抓取历史（team-hub 权威；serve.mjs 代理）。 */
+export async function webHistory(input: { scope: string; limit?: number; q?: string }): Promise<WebHistoryResponse> {
+  const qs = new URLSearchParams({ scope: input.scope })
+  if (input.limit) qs.set('limit', String(input.limit))
+  if (input.q) qs.set('q', input.q)
+  const res = await fetch('/api/web/history?' + qs.toString())
+  const body = await res.json().catch(() => null) as WebHistoryResponse | null
+  if (body) return body
+  throw new Error(`读取抓取历史失败：${res.status} ${res.statusText}`)
+}
+
+/** P2-8①：清空本空间历史（或按 id 删单条）。 */
+export async function webHistoryClear(input: { scope: string; id?: number }): Promise<{ ok: boolean; removed?: number; error?: string }> {
+  const res = await fetch('/api/web/history/clear', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  const body = await res.json().catch(() => null) as { ok?: boolean; removed?: number; error?: string } | null
+  if (body) return { ok: body.ok === true, removed: body.removed, error: body.error }
+  return { ok: false, error: `清空历史失败：${res.status} ${res.statusText}` }
+}
+
+/** P2-8③：可选截图（需 serve.mjs 以 DSH_WEB_SHOT_ENABLE=1 启动）；未启用/无浏览器时返回错误码。 */
+export async function webScreenshot(input: { url: string; scope?: string; width?: number; height?: number }): Promise<WebShotResult> {
+  const res = await fetch('/api/web/shot', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  const body = await res.json().catch(() => null) as WebShotResult | null
+  if (body && (typeof body.ok === 'boolean' || typeof body.error === 'string')) return body
+  throw new Error(`截图请求失败：${res.status} ${res.statusText}`)
+}
+
+/** P2-8③：已存截图的可访问 URL（同一 serve.mjs 读回）。 */
+export function webShotUrl(scope: string, name: string): string {
+  return '/api/web/shot?scope=' + encodeURIComponent(scope) + '&name=' + encodeURIComponent(name)
 }
 
 // ───────────────────────── 通知中心（S7 ← R-B2：audit 派生，零新表零新端点）─────────────────────────

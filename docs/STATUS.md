@@ -86,8 +86,8 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 ## 4. 已知限制（诚实登记）
 
-1. Workbench 部分面板为功能基础版（通知分类/批量已读、日历冲突检测、文件批量与续传、浏览器缓存与截图、
-   对话真实模型通道 E2E 等仍在 `docs/REMAINING-TASKS.md` 待办）。
+1. Workbench 部分面板为功能基础版（通知分类/批量已读、日历冲突检测、文件批量与续传、
+   对话真实模型通道 E2E 等仍在 `docs/REMAINING-TASKS.md` 待办；浏览器助手的缓存/正文提取/截图已按 P2-8 增强）。
 2. 白板为单实例单房间模型（多房间与连接治理待办）。
 3. 配置仍分散在环境变量 / CLI / services-plugin / 宿主 patch / Workbench 本地设置之间（统一配置系统待办）。
 4. board-plugin 的 hub 动态面板为轻量自渲染（覆盖看板主操作），未复刻旧静态页全部视觉细节；
@@ -110,6 +110,13 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
    git 面板**只读**（无 stage/commit/checkout，`ahead/behind` 依赖本地 upstream 引用，无 upstream 时为 null）；
    `.dsh-uploads` 上传会话**无自动 TTL 回收**（完成/中止会清理，进程被强杀可能残留，需管理端按需清理）；
    前端验证为判定层（`workbench/scripts/files-ui.test.mjs` 19 例，不引入 jsdom/react 渲染断言）。
+10. 浏览器助手（P2-8）：抓取**缓存与配额计数都在进程内**（重启清零，非持久账目；缓存 TTL 默认 5 分钟）；
+    截图**不自带浏览器**（探测本机 Edge/Chrome，未装则不可用；`DSH_WEB_SHOT_ENABLE=1` 才启用，默认关闭；
+    无等待元素/交互脚本，自动化测试仅用假浏览器脚本验证服务端路径，**未在 CI 产出真实 PNG**）；
+    正文抽取为**启发式**（样板词表 + 容器打分，无 DOM 语义理解，强 JS 渲染页仍只能报 `empty_content`）；
+    空间抓取历史按空间**上限 200 条**裁剪（超出丢最旧，无分页游标），且依赖 team-hub v2 运行（否则界面明确报不可用）；
+    限流默认值可用 `DSH_WEB_QUOTA_*` 调整，为**单进程**语义（无分布式限流）。
+    前端验证为判定层（`workbench/scripts/browser-ui.test.mjs` 21 例）。
 
 ## 5. 维护约定
 

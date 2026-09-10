@@ -26,8 +26,8 @@
  *      （连接仍停在「等剩余体」态时复用会把下一请求误读为体字节，挂起约 6s 后 ECONNRESET）。
  */
 import { createServer, request } from 'node:http'
-import { appendFileSync, createReadStream, createWriteStream, existsSync, openSync, readSync, writeSync, closeSync, unlinkSync, rmdirSync, mkdirSync, readdirSync, renameSync, realpathSync, statSync, lstatSync, writeFileSync } from 'node:fs'
-import { randomBytes } from 'node:crypto'
+import { appendFileSync, createReadStream, createWriteStream, existsSync, openSync, readSync, writeSync, closeSync, unlinkSync, rmdirSync, mkdirSync, readdirSync, renameSync, realpathSync, statSync, lstatSync, writeFileSync, rmSync } from 'node:fs'
+import { randomBytes, createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { basename, extname, join, normalize, dirname, sep, resolve } from 'node:path'
 import { homedir } from 'node:os'
@@ -114,6 +114,15 @@ export const WEB_ERR = Object.freeze({
   UNSUPPORTED: 'unsupported',
   EMPTY_CONTENT: 'empty_content',
   WEB_ERROR: 'web_error',
+  // P2-8④：限流与配额（空间级/单站级/每日字节）
+  RATE_LIMITED: 'rate_limited',
+  CONCURRENCY_LIMITED: 'concurrency_limited',
+  DAILY_QUOTA_EXCEEDED: 'daily_quota_exceeded',
+  // P2-8③：截图（默认关闭；未找到浏览器；并发占满；渲染失败）
+  SHOT_DISABLED: 'shot_disabled',
+  SHOT_UNAVAILABLE: 'shot_unavailable',
+  SHOT_BUSY: 'shot_busy',
+  SHOT_FAILED: 'shot_failed',
   OK: 'ok',
 })
 // 二进制扩展名黑名单（预览拒绝；下载不受限）
@@ -1250,7 +1259,185 @@ function stripTags(s) {
 }
 
 /** 零依赖 HTML→正文抽取：剥离 script/style/head/noscript/iframe/svg/template + 标签，保留段落换行。 */
+// ── P2-8②：Readability-lite 正文抽取（零依赖启发式；不改动既有 extractHtml 契约，仅替换其内部实现）──
+//
+// 与 v1 的差别：v1 是「删噪声标签 → 全文去标签」，导航/页脚/侧栏的长文本会混进正文，标题层级也丢失。
+// 这里改为「候选容器打分选块 + 结构化渲染」：
+//   1) 先剔除脚本/样式/表单与样板容器（nav/aside/footer/header/form + class/id 命中样板词），并记录剔除数；
+//   2) 用轻量标签栈扫描出 article/main/[role=main] 及 div/section 候选块，按
+//      「文本长度 ×(1−2×链接密度)」+ 语义标签加权 打分，取最高分块；没有任何候选则回退整篇 body；
+//   3) 按结构渲染为可读文本：标题 → #/##、列表 → -、代码 → 围栏、引用 → >、表格行 → | 分隔；
+//   4) 返回质量元数据（选用策略/得分/字数/标题数/剔除块数/候选数/链接密度），供界面明示抽取质量。
+const BOILERPLATE_RE = /(?:^|[\s_-])(nav|navbar|menu|sidebar|side-bar|footer|header|banner|cookie|consent|breadcrumb|advert|ads?|sponsor|share|social|comment|related|promo|popup|modal|drawer|toolbar|pagination)(?:$|[\s_-])/i
+
+/** P2-8② 抽取参数（阈值集中在一处，便于说明与调整）。 */
+export const WEB_EXTRACT = Object.freeze({
+  // 低于此长度的候选块不参与「密度」评选（按钮行、面包屑残留）；但显式语义容器（article/main）不受此限
+  MIN_CANDIDATE_CHARS: 40,
+})
+
+/** 结构化渲染：把选中块的 HTML 转成可读文本（保留标题/列表/代码/引用/表格等结构信号）。 */
+function renderStructured(seg) {
+  let s = String(seg ?? '')
+  s = s.replace(/<pre\b[^>]*>([\s\S]*?)<\/pre>/gi, (_m, code) => '\n```\n' + stripTags(code).replace(/^\n+|\n+$/g, '') + '\n```\n')
+  s = s.replace(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi, (_m, lv, inner) => '\n' + '#'.repeat(Number(lv)) + ' ' + stripTags(inner).replace(/\s+/g, ' ').trim() + '\n')
+  s = s.replace(/<blockquote\b[^>]*>([\s\S]*?)<\/blockquote>/gi, (_m, inner) => '\n' + stripTags(inner).split('\n').map(l => '> ' + l.trim()).join('\n') + '\n')
+  s = s.replace(/<li\b[^>]*>([\s\S]*?)<\/li>/gi, (_m, inner) => '\n- ' + stripTags(inner).replace(/\s+/g, ' ').trim())
+  s = s.replace(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi, (_m, row) => '\n| ' + [...row.matchAll(/<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi)].map(c => stripTags(c[1]).replace(/\s+/g, ' ').trim()).join(' | ') + ' |')
+  s = s.replace(/<hr\b[^>]*>/gi, '\n---\n')
+  s = s.replace(/<(br|\/p|\/div|\/section|\/article|\/ul|\/ol|\/table|\/h[1-6]|\/pre|\/blockquote)[^>]*>/gi, '\n')
+  s = s.replace(/<[^>]+>/g, ' ')
+  s = decodeEntities(s)
+  return s
+    .split('\n')
+    .map(l => l.replace(/[ \t\u00a0\u200b]+/g, ' ').trim())
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+/** 剔除样板容器（nav/aside/footer/header/form + 样板 class/id），返回 { html, dropped }（dropped=剔除块数）。 */
+function stripBoilerplate(html) {
+  let dropped = 0
+  let out = String(html ?? '')
+  const tagDrop = /<(nav|aside|footer|header|form|dialog)\b[^>]*>[\s\S]*?<\/\1>/gi
+  out = out.replace(tagDrop, () => { dropped += 1; return ' ' })
+  // class/id 命中样板词的同名容器（成对标签，含嵌套则多轮收敛，最多 3 轮避免病态输入）
+  for (let round = 0; round < 3; round += 1) {
+    const before = out
+    for (const tagName of ['div', 'section', 'ul', 'p', 'span']) {
+      const re = new RegExp('<' + tagName + '\\b([^>]*)>[\\s\\S]*?<\\/' + tagName + '>', 'gi')
+      out = out.replace(re, (whole, attrs) => {
+        const m = /\b(?:class|id)\s*=\s*(["'])(.*?)\1/i.exec(attrs)
+        if (m && BOILERPLATE_RE.test(m[2])) { dropped += 1; return ' ' }
+        return whole
+      })
+    }
+    if (out === before) break
+  }
+  out = out.replace(/<(script|style|noscript|template|svg|iframe|canvas|video|audio|picture)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+  out = out.replace(/<!--[\s\S]*?-->/g, ' ')
+  return { html: out, dropped }
+}
+
+/**
+ * 候选块扫描：轻量标签栈，收集语义容器（article/main/[role=main]）与块级 div/section，
+ * 每个候选记录内部文本统计；嵌套候选都保留（外层含内层时由打分自然偏向内容密集者）。
+ */
+function collectCandidates(html) {
+  const re = /<(\/?)([a-zA-Z][\w:-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)(\/?)>/g
+  const stack = []
+  const out = []
+  let m
+  while ((m = re.exec(html)) !== null) {
+    const closing = m[1] === '/'
+    const name = m[2].toLowerCase()
+    const attrs = m[3] ?? ''
+    const selfClose = m[4] === '/'
+    if (closing) {
+      for (let i = stack.length - 1; i >= 0; i -= 1) {
+        if (stack[i].name === name) {
+          const open = stack[i]
+          stack.length = i
+          if (open.candidate) {
+            const inner = html.slice(open.end, m.index)
+            out.push({ ...open, inner })
+            if (out.length >= 400) return out
+          }
+          break
+        }
+      }
+      continue
+    }
+    if (selfClose) continue
+    const attrMatch = /\b(?:class|id)\s*=\s*(["'])(.*?)\1/i.exec(attrs)
+    const attrText = (attrMatch?.[2] ?? '') + ' ' + attrs
+    const isSemantic = name === 'article' || name === 'main' || /\brole\s*=\s*(["']?)main\b/i.test(attrs)
+    const isBlock = name === 'div' || name === 'section'
+    const candidate = isSemantic || (isBlock && !BOILERPLATE_RE.test(attrText))
+    stack.push({ name, candidate, semantic: isSemantic, kind: isSemantic ? (name === 'article' ? 'article' : 'main') : name, end: re.lastIndex })
+  }
+  return out
+}
+
+/** 候选打分：文本长度为主，链接密度惩罚（导航块链接多文本少），语义标签加权。 */
+function scoreCandidate(inner) {
+  const text = decodeEntities(stripTags(inner)).replace(/\s+/g, ' ').trim()
+  const chars = text.length
+  const linkText = [...String(inner).matchAll(/<a\b[^>]*>([\s\S]*?)<\/a>/gi)].map(x => decodeEntities(stripTags(x[1])).replace(/\s+/g, ' ').trim()).join('').length
+  const linkDensity = chars > 0 ? Math.min(1, linkText / chars) : 1
+  const headings = (String(inner).match(/<h[1-6]\b/gi) ?? []).length
+  const paragraphs = (String(inner).match(/<p\b/gi) ?? []).length
+  const listItems = (String(inner).match(/<li\b/gi) ?? []).length
+  return { chars, linkDensity, headings, paragraphs, listItems, text }
+}
+
+export function extractReadable(html, finalUrl) {
+  const raw = String(html ?? '')
+  const titleMatch = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(raw)
+  const title = titleMatch ? decodeEntities(stripTags(titleMatch[1])).replace(/\s+/g, ' ').trim() : ''
+  const { html: cleaned, dropped } = stripBoilerplate(raw)
+  const candidates = collectCandidates(cleaned)
+  let best = null // 通过长度阈值的最高分候选
+  let bestShort = null // 未过阈值但**显式语义容器**（article/main）的最高分候选
+  for (const c of candidates) {
+    const s = scoreCandidate(c.inner)
+    if (s.chars === 0) continue
+    const semanticBonus = c.semantic ? 1.35 : 1
+    const score = s.chars * (1 - 2 * s.linkDensity) * semanticBonus + s.paragraphs * 20 + s.headings * 15
+    const entry = { score, ...s, kind: c.kind, inner: c.inner, semantic: c.semantic }
+    if (s.chars >= WEB_EXTRACT.MIN_CANDIDATE_CHARS) {
+      if (!best || score > best.score) best = entry
+    }
+    if (c.semantic && (!bestShort || score > bestShort.score)) bestShort = entry
+  }
+  // 短页面（正文 < 阈值）时，显式语义容器比整页回退更可信：<article> 是作者声明的正文区，
+  // 整页回退会把导航/侧栏一起带进来。只有连语义容器都没有（0 字节）才回退 body。
+  const chosenEntry = best ?? bestShort ?? null
+  const fallbackSeg = cleaned.replace(/^[\s\S]*?<body\b[^>]*>/i, '').replace(/<\/body>[\s\S]*$/i, '')
+  const strategy = chosenEntry ? (chosenEntry.kind === 'article' ? 'article' : chosenEntry.kind === 'main' ? 'main' : 'density') : 'body-fallback'
+  const chosen = chosenEntry ? chosenEntry.inner : fallbackSeg
+  const rendered = renderStructured(chosen)
+  const text = rendered.slice(0, WEB_LIMITS.MAX_TEXT)
+  const excerpt = text.replace(/\s+/g, ' ').slice(0, 240)
+  const linksRaw = raw.replace(/<base\b[^>]*>/gi, ' ')
+  const links = []
+  const seen = new Set()
+  for (const mm of linksRaw.matchAll(/<a\b[^>]*href\s*=\s*(["'])(.*?)\1/gi)) {
+    try {
+      const abs = new URL(mm[2], finalUrl).href
+      if ((abs.startsWith('http://') || abs.startsWith('https://')) && !seen.has(abs)) {
+        seen.add(abs)
+        links.push(abs)
+        if (links.length >= WEB_LIMITS.MAX_LINKS) break
+      }
+    } catch { /* 忽略畸形链接 */ }
+  }
+  const quality = {
+    strategy,
+    score: chosenEntry ? Math.round(chosenEntry.score) : 0,
+    chars: text.length,
+    headings: chosenEntry?.headings ?? 0,
+    paragraphs: chosenEntry?.paragraphs ?? 0,
+    listItems: chosenEntry?.listItems ?? 0,
+    linkDensity: chosenEntry ? Math.round(chosenEntry.linkDensity * 100) / 100 : 0,
+    candidates: candidates.length,
+    droppedBlocks: dropped,
+    markdown: /(^|\n)#{1,6} |(^|\n)- |(^|\n)```/.test(text),
+    truncated: rendered.length > text.length,
+    // 采纳了「低于长度阈值」的语义容器：内容合法但偏短，界面据此提示（避免用户以为抽取失败）
+    shortContent: !!chosenEntry && chosenEntry.chars < WEB_EXTRACT.MIN_CANDIDATE_CHARS,
+  }
+  return { title, text, excerpt, links, quality }
+}
+
 export function extractHtml(html, finalUrl) {
+  const { title, text, excerpt, links } = extractReadable(html, finalUrl)
+  return { title, text, excerpt, links }
+}
+
+/** v1 抽取实现（保留供对照/回归：extractHtml 现由 extractReadable 承担）。 */
+export function extractHtmlLegacy(html, finalUrl) {
   const raw = String(html ?? '')
   const titleMatch = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(raw)
   const title = titleMatch ? stripTags(titleMatch[1]).replace(/\s+/g, ' ').trim() : ''
@@ -1338,7 +1525,7 @@ async function readBodyBestEffort(res, maxBytes, signal) {
  * 共享下传，每跳剩余预算 = deadlineTs - now（不再每跳重置计时）；超过 5 跳上限同样受总超时约束。
  * 错误码取 WEB_ERR 常量表（G-11）；body 读取/整链 abort 统一 timeout（R-A4/J4-A）；失败 throw 的 Error 附 .url/.status 供审计留痕定位失败一跳。
  */
-export async function webFetch({ url: rawUrl, maxBytes = WEB_LIMITS.MAX_BYTES, timeoutMs = WEB_LIMITS.TIMEOUT_MS, redirects = 0, deadline = 0 } = {}) {
+export async function webFetch({ url: rawUrl, maxBytes = WEB_LIMITS.MAX_BYTES, timeoutMs = WEB_LIMITS.TIMEOUT_MS, redirects = 0, deadline = 0, conditional = null } = {}) {
   // 参数级失败（url 缺失/非字符串/空白）：请求体未构成一次抓取，抛错标记 paramLevel → HTTP 层不落审计（TC-S2-10）
   if (typeof rawUrl !== 'string' || rawUrl.trim().length === 0) { const e = webErr(WEB_ERR.INVALID_URL, '缺少参数 url'); e.paramLevel = true; throw e }
   const requestedUrl = rawUrl.trim()
@@ -1360,19 +1547,30 @@ export async function webFetch({ url: rawUrl, maxBytes = WEB_LIMITS.MAX_BYTES, t
     try {
       let res
       try {
-        res = await fetch(target.href, { redirect: 'manual', signal: ac.signal, headers: { 'user-agent': 'legion-browser-assistant/1.0 (SSRF-guarded)', 'accept': 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5' } })
+        // P2-8①：条件请求（缓存过期但存有校验器时带上，304 即复用缓存内容）
+        const reqHeaders = { 'user-agent': 'legion-browser-assistant/1.0 (SSRF-guarded)', 'accept': 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5' }
+        if (conditional && typeof conditional === 'object') {
+          if (conditional.etag) reqHeaders['if-none-match'] = String(conditional.etag)
+          if (conditional.lastModified) reqHeaders['if-modified-since'] = String(conditional.lastModified)
+        }
+        res = await fetch(target.href, { redirect: 'manual', signal: ac.signal, headers: reqHeaders })
       } catch (e) {
         if (ac.signal.aborted) throw webErr(WEB_ERR.TIMEOUT, '抓取超时（已取消请求）')
         throw webErr(WEB_ERR.FETCH_ERROR, '网络请求失败：' + (e?.message ?? e))
       }
       const status = res.status
+      // P2-8①：304 未修改 → 调用方用缓存内容（不读体）
+      if (status === 304) {
+        await readBodyBestEffort(res, 0, ac.signal)
+        return { ok: true, notModified: true, finalUrl: target.href, status, contentType: res.headers.get('content-type') ?? '', title: '', text: '', excerpt: '', links: [], bytes: 0, etag: res.headers.get('etag'), lastModified: res.headers.get('last-modified') }
+      }
       if (status >= 300 && status < 400) {
         const loc = res.headers.get('location')
         if (loc) {
           const next = new URL(loc, target.href)
           if (next.protocol !== 'http:' && next.protocol !== 'https:') throw webErr(WEB_ERR.SSRF_BLOCKED, '重定向目标协议不在白名单（' + next.protocol + '）')
           clearTimeout(timer) // 本跳已完成：交给下一跳按共享 deadline 计时（避免外层空转定时器，P0-3）
-          return webFetch({ url: next.href, maxBytes: mb, timeoutMs: tm, redirects: redirects + 1, deadline: deadlineTs })
+          return webFetch({ url: next.href, maxBytes: mb, timeoutMs: tm, redirects: redirects + 1, deadline: deadlineTs, conditional })
         }
       }
       const ct = res.headers.get('content-type') ?? ''
@@ -1387,15 +1585,16 @@ export async function webFetch({ url: rawUrl, maxBytes = WEB_LIMITS.MAX_BYTES, t
       if (!isHtml && !isText) {
         // 非文本/HTML（pdf/zip/图片等）：不读体、明确降级
         const errBuf = await readBodyBestEffort(res, 0, ac.signal)
-        return { ok: true, finalUrl: target.href, status, contentType: ct, title: '', text: '', excerpt: '', links: [], error: '目标不是可读文本/HTML（' + ct.split(';')[0].trim() + '），已跳过正文抽取', code: WEB_ERR.UNSUPPORTED }
+        return { ok: true, finalUrl: target.href, status, contentType: ct, title: '', text: '', excerpt: '', links: [], bytes: 0, etag: res.headers.get('etag'), lastModified: res.headers.get('last-modified'), error: '目标不是可读文本/HTML（' + ct.split(';')[0].trim() + '），已跳过正文抽取', code: WEB_ERR.UNSUPPORTED }
       }
       const buf = await readBodyLimited(res, mb, ac.signal)
       const html = decodeHtml(buf, ct)
-      const { title, text, excerpt, links } = extractHtml(html, target.href)
+      const { title, text, excerpt, links, quality } = extractReadable(html, target.href)
+      const transfer = { bytes: buf.length, etag: res.headers.get('etag'), lastModified: res.headers.get('last-modified') }
       if (!title && !text) {
-        return { ok: true, finalUrl: target.href, status, contentType: ct, title: '', text: '', excerpt: '', links, error: '未能抽取正文：目标页可能是 SPA/纯 JS 渲染空壳（v1 服务端抓取为显式边界）', code: WEB_ERR.EMPTY_CONTENT }
+        return { ok: true, finalUrl: target.href, status, contentType: ct, title: '', text: '', excerpt: '', links, quality, ...transfer, error: '未能抽取正文：目标页可能是 SPA/纯 JS 渲染空壳（v1 服务端抓取为显式边界）', code: WEB_ERR.EMPTY_CONTENT }
       }
-      return { ok: true, finalUrl: target.href, status, contentType: ct, title, text, excerpt, links }
+      return { ok: true, finalUrl: target.href, status, contentType: ct, title, text, excerpt, links, quality, ...transfer }
     } finally {
       clearTimeout(timer)
     }
@@ -1406,8 +1605,415 @@ export async function webFetch({ url: rawUrl, maxBytes = WEB_LIMITS.MAX_BYTES, t
   }
 }
 
-async function handleWebApi(req, res) {
+// ── P2-8①：抓取缓存（进程内 TTL + ETag/Last-Modified 条件请求）──
+//
+// 语义：命中新鲜缓存 → 直接返回且 cached=true（不发起网络请求）；
+// 过期但存有校验器 → 带 If-None-Match / If-Modified-Since 重新验证，304 则复用原结果并刷新 TTL（省流量、内容不变）；
+// 其余情况正常抓取并覆盖缓存。缓存只在**同一 (url,maxBytes) 且抽取未截断**时复用——截断结果不缓存，
+// 否则用户调大 maxBytes 后会一直拿到被截断的旧内容。
+export const WEB_CACHE_DEFAULTS = Object.freeze({
+  TTL_MS: envBytes('DSH_WEB_CACHE_TTL_MS', 5 * 60 * 1000),
+  MAX_ENTRIES: envBytes('DSH_WEB_CACHE_MAX', 200),
+})
+const webCache = new Map() // key → { result, storedAt, etag, lastModified, validators }
+
+/**
+ * 缓存键 = 空间 + URL + maxBytes。
+ * 为什么带空间：① 空间是抓取治理的单位（配额/历史都按空间），缓存若跨空间共享，
+ * 别的空间命中缓存会**完全绕过配额**；② 抓取是用户可见行为，跨空间串内容会让「我刚抓的页面」
+ * 显示成别人抓的旧版本。键含 maxBytes 的理由同前（上限不同 → 内容可能被截断不同）。
+ */
+function webCacheKey(scope, url, maxBytes) {
+  return String(scope ?? '') + '\u0000' + url + '\u0000' + String(maxBytes)
+}
+
+export function webCacheStats() {
+  return { entries: webCache.size, max: WEB_CACHE_DEFAULTS.MAX_ENTRIES, ttlMs: WEB_CACHE_DEFAULTS.TTL_MS }
+}
+
+/** 读取新鲜缓存（未过期）。返回 null 表示无可用缓存。 */
+export function webCacheGet(scope, url, maxBytes, now = Date.now()) {
+  const hit = webCache.get(webCacheKey(scope, url, maxBytes))
+  if (!hit) return null
+  if (now - hit.storedAt > WEB_CACHE_DEFAULTS.TTL_MS) return null
+  return { ...hit.result, cached: true, cacheAgeMs: now - hit.storedAt }
+}
+
+/** 读取过期缓存（仅用于条件请求复用：内容仍在，但需与上游确认）。 */
+export function webCacheGetStale(scope, url, maxBytes) {
+  return webCache.get(webCacheKey(scope, url, maxBytes)) ?? null
+}
+
+export function webCachePut(scope, url, maxBytes, result, validators = {}, now = Date.now()) {
+  if (!result || result.ok !== true) return
+  if (result.quality?.truncated === true) return // 截断结果不入缓存（避免调大上限后仍拿旧截断内容）
+  const key = webCacheKey(scope, url, maxBytes)
+  if (webCache.size >= WEB_CACHE_DEFAULTS.MAX_ENTRIES && !webCache.has(key)) {
+    // 满则淘汰最旧一条（LRU 近似：Map 插入序即时间序）
+    const oldest = webCache.keys().next().value
+    if (oldest !== undefined) webCache.delete(oldest)
+  }
+  webCache.set(key, { result, storedAt: now, etag: validators.etag ?? null, lastModified: validators.lastModified ?? null })
+}
+
+/** 复用过期缓存并刷新 TTL（304 路径）。 */
+function webCacheTouch(scope, url, maxBytes, now = Date.now()) {
+  const hit = webCache.get(webCacheKey(scope, url, maxBytes))
+  if (!hit) return null
+  hit.storedAt = now
+  return { ...hit.result, cached: true, revalidated: true, cacheAgeMs: 0 }
+}
+
+export function webCacheClear() {
+  const n = webCache.size
+  webCache.clear()
+  return n
+}
+
+// ── P2-8④：抓取限流与配额（空间 = scope，单站 = host）──
+//
+// 三档叠加：① 空间每分钟请求数 ② 空间在途并发 ③ 空间每日字节配额；另加 host 每分钟请求数（防单站风暴）。
+// 全部按滑动/固定窗口内存计数，进程重启即清零（不改用 DB：配额是运行期保护，不是账目）。
+// 超限抛 webErr(rate_limited / concurrency_limited / daily_quota_exceeded)，HTTP 层映射 429 + Retry-After。
+export const WEB_QUOTA_DEFAULTS = Object.freeze({
+  SPACE_RPM: envBytes('DSH_WEB_QUOTA_SPACE_RPM', 30),
+  SPACE_CONCURRENCY: envBytes('DSH_WEB_QUOTA_CONCURRENCY', 3),
+  HOST_RPM: envBytes('DSH_WEB_QUOTA_HOST_RPM', 30),
+  DAILY_BYTES: envBytes('DSH_WEB_QUOTA_DAILY_BYTES', 200 * 1024 * 1024),
+})
+const MINUTE_MS = 60_000
+const webQuotaBuckets = new Map() // key → { windowStart, count }
+const webQuotaBytes = new Map() // `${dayKey}|${scope}` → bytes
+const webQuotaInflight = new Map() // scope → n
+
+const dayKeyOf = (now = Date.now()) => new Date(now).toISOString().slice(0, 10)
+
+function bumpWindow(key, limit, now) {
+  const b = webQuotaBuckets.get(key)
+  if (!b || now - b.windowStart >= MINUTE_MS) {
+    webQuotaBuckets.set(key, { windowStart: now, count: 1 })
+    return { ok: true, remaining: limit - 1, resetInMs: MINUTE_MS }
+  }
+  if (b.count >= limit) {
+    return { ok: false, remaining: 0, resetInMs: Math.max(1, MINUTE_MS - (now - b.windowStart)) }
+  }
+  b.count += 1
+  return { ok: true, remaining: limit - b.count, resetInMs: Math.max(1, MINUTE_MS - (now - b.windowStart)) }
+}
+
+/**
+ * 抓取准入检查（不记账字节，只记请求数/并发）：throw 时调用方会归类为 429 并带 Retry-After。
+ * **scope 为空（命令行/脚本/运维/自测调用）时不限流**：配额是「按空间」的界面治理手段，
+ * 未标注空间的调用只落审计；界面（BrowserView）每次都带 scope，因此正常使用始终受限流保护。
+ */
+export function webQuotaBegin(scope, host, now = Date.now()) {
+  if (!scope) return { scope: '', host, unmanaged: true }
+  {
+    const inflight = webQuotaInflight.get(scope) ?? 0
+    if (inflight >= WEB_QUOTA_DEFAULTS.SPACE_CONCURRENCY) {
+      const e = webErr(WEB_ERR.CONCURRENCY_LIMITED, `空间「${scope}」同时进行的抓取已达上限（${WEB_QUOTA_DEFAULTS.SPACE_CONCURRENCY}），请稍后重试`)
+      e.retryAfterSec = 2
+      throw e
+    }
+    const space = bumpWindow('s:' + scope, WEB_QUOTA_DEFAULTS.SPACE_RPM, now)
+    if (!space.ok) {
+      const e = webErr(WEB_ERR.RATE_LIMITED, `空间「${scope}」每分钟抓取次数超限（${WEB_QUOTA_DEFAULTS.SPACE_RPM}/min）`)
+      e.retryAfterSec = Math.ceil(space.resetInMs / 1000)
+      throw e
+    }
+    const usedBytes = webQuotaBytes.get(dayKeyOf(now) + '|' + scope) ?? 0
+    if (usedBytes >= WEB_QUOTA_DEFAULTS.DAILY_BYTES) {
+      const e = webErr(WEB_ERR.DAILY_QUOTA_EXCEEDED, `空间「${scope}」今日抓取流量配额已用完（${Math.round(WEB_QUOTA_DEFAULTS.DAILY_BYTES / 1024 / 1024)} MB），明日重置`)
+      e.retryAfterSec = 3600
+      throw e
+    }
+    webQuotaInflight.set(scope, inflight + 1)
+  }
+  if (host) {
+    const h = bumpWindow('h:' + host, WEB_QUOTA_DEFAULTS.HOST_RPM, now)
+    if (!h.ok) {
+      if (scope) webQuotaEnd(scope)
+      const e = webErr(WEB_ERR.RATE_LIMITED, `目标站点「${host}」每分钟抓取次数超限（${WEB_QUOTA_DEFAULTS.HOST_RPM}/min），避免对单站高频请求`)
+      e.retryAfterSec = Math.ceil(h.resetInMs / 1000)
+      throw e
+    }
+  }
+  return { scope, host }
+}
+
+/** 结束一次抓取：释放并发占位。无论成功失败都必须调用（否则并发额度会泄漏）。 */
+export function webQuotaEnd(scope) {
+  if (!scope) return
+  const n = webQuotaInflight.get(scope) ?? 0
+  if (n <= 1) webQuotaInflight.delete(scope)
+  else webQuotaInflight.set(scope, n - 1)
+}
+
+/** 记账本次抓取的响应字节（只在成功读到 body 时计；失败不计）。 */
+export function webQuotaRecordBytes(scope, bytes, now = Date.now()) {
+  if (!scope || !Number.isFinite(Number(bytes)) || Number(bytes) <= 0) return
+  const key = dayKeyOf(now) + '|' + scope
+  webQuotaBytes.set(key, (webQuotaBytes.get(key) ?? 0) + Number(bytes))
+}
+
+/** 配额快照（界面展示剩余额度；只读，不影响计数）。 */
+export function webQuotaSnapshot(scope, now = Date.now()) {
+  const space = webQuotaBuckets.get('s:' + scope)
+  const usedToday = webQuotaBytes.get(dayKeyOf(now) + '|' + scope) ?? 0
+  const rpmRemaining = !space || now - space.windowStart >= MINUTE_MS ? WEB_QUOTA_DEFAULTS.SPACE_RPM : Math.max(0, WEB_QUOTA_DEFAULTS.SPACE_RPM - space.count)
+  return {
+    scope,
+    rpm: { limit: WEB_QUOTA_DEFAULTS.SPACE_RPM, remaining: rpmRemaining, resetInMs: space ? Math.max(0, MINUTE_MS - (now - space.windowStart)) : 0 },
+    concurrency: { limit: WEB_QUOTA_DEFAULTS.SPACE_CONCURRENCY, inflight: webQuotaInflight.get(scope) ?? 0 },
+    hostRpmLimit: WEB_QUOTA_DEFAULTS.HOST_RPM,
+    dailyBytes: { limit: WEB_QUOTA_DEFAULTS.DAILY_BYTES, used: usedToday, remaining: Math.max(0, WEB_QUOTA_DEFAULTS.DAILY_BYTES - usedToday), day: dayKeyOf(now) },
+  }
+}
+
+/** 测试/运维用：清空所有配额窗口与当日计数（返回清理的键数）。 */
+export function webQuotaReset() {
+  const n = webQuotaBuckets.size + webQuotaBytes.size + webQuotaInflight.size
+  webQuotaBuckets.clear()
+  webQuotaBytes.clear()
+  webQuotaInflight.clear()
+  return n
+}
+
+// ── P2-8③：可选截图（探测本机 Edge/Chrome headless；默认关闭）──
+//
+// 设计取舍：不引入 Playwright/Puppeteer（重依赖 + 下载浏览器）。改成「探测本机已装浏览器 → headless 截图」，
+// 由开关 DSH_WEB_SHOT_ENABLE=1 显式启用（默认关闭：截图会真实启动一个浏览器进程，属较重的操作）；
+// 未启用 / 未找到浏览器 / 启动失败都返回明确错误码与原因，绝不静默失败或假装成功。
+export const WEB_SHOT_DEFAULTS = Object.freeze({
+  WIDTH: 1280, HEIGHT: 900, TIMEOUT_MS: 30_000,
+  MAX_BYTES: 8 * 1024 * 1024, // 单张 PNG 上限
+})
+function shotEnabled() {
+  return process.env.DSH_WEB_SHOT_ENABLE === '1'
+}
+function shotRoot() {
+  // 默认放 workbench/data/shots：① 不在静态根 dist/ 内（否则截图会被当成静态资源直接暴露，
+  // 且 vite build 会清掉 dist）；② data/ 已在 workbench/.gitignore（与 web 审计同一约定）。
+  return process.env.DSH_WEB_SHOT_DIR || join(ROOT, '..', 'data', 'shots')
+}
+function shotCandidates() {
+  const fromEnv = process.env.DSH_WEB_SHOT_BROWSER
+  // 显式指定即**互斥**：只认该路径（否则测试与运维无法确定实际被拉起的是哪个浏览器，
+  // 也会在只想验证「未找到浏览器」分支时意外拉真浏览器）。
+  if (typeof fromEnv === 'string' && fromEnv.length > 0) return [fromEnv]
+  const list = [
+    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    '/usr/bin/google-chrome',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  ]
+  return list.filter(p => typeof p === 'string' && p.length > 0)
+}
+
+/** 探测可用浏览器路径（返回 null = 未找到）。探测结果不缓存：安装浏览器后无需重启服务。 */
+export function findShotBrowser() {
+  for (const p of shotCandidates()) {
+    try { if (existsSync(p)) return p } catch { /* 忽略不可访问路径 */ }
+  }
+  return null
+}
+
+export function shotStatus() {
+  const browser = findShotBrowser()
+  return {
+    enabled: shotEnabled(),
+    available: browser !== null,
+    browser: browser ? basename(browser) : null,
+    dir: shotRoot(),
+    hint: shotEnabled() ? (browser ? '' : '未找到 Edge/Chrome；可用 DSH_WEB_SHOT_BROWSER 指定可执行文件路径') : '截图默认关闭：以 DSH_WEB_SHOT_ENABLE=1 启动 serve.mjs 后可用',
+  }
+}
+
+/**
+ * 截图：先过协议与 SSRF 校验（与抓取同一套判据），再启动 headless 浏览器写 PNG。
+ * 返回 { ok, file, bytes, browser, ms }；失败抛带 code 的错误（由 HTTP 层映射）。
+ */
+export async function webScreenshot({ url: rawUrl, scope = '', width = WEB_SHOT_DEFAULTS.WIDTH, height = WEB_SHOT_DEFAULTS.HEIGHT } = {}) {
+  if (typeof rawUrl !== 'string' || rawUrl.trim().length === 0) { const e = webErr(WEB_ERR.INVALID_URL, '缺少参数 url'); e.paramLevel = true; throw e }
+  if (!shotEnabled()) {
+    const e = webErr(WEB_ERR.SHOT_DISABLED, '截图能力未启用（以 DSH_WEB_SHOT_ENABLE=1 启动 serve.mjs）')
+    e.paramLevel = true
+    throw e
+  }
+  const browser = findShotBrowser()
+  if (!browser) {
+    const e = webErr(WEB_ERR.SHOT_UNAVAILABLE, '未找到可用的 Edge/Chrome（可用 DSH_WEB_SHOT_BROWSER 指定路径）')
+    e.paramLevel = true
+    throw e
+  }
+  let target
+  try { target = new URL(rawUrl.trim()) } catch { const e = webErr(WEB_ERR.INVALID_URL, 'URL 无法解析'); e.paramLevel = true; throw e }
+  if (target.protocol !== 'http:' && target.protocol !== 'https:') throw webErr(WEB_ERR.PROTOCOL_BLOCKED, '协议白名单：仅支持 http/https（收到 ' + target.protocol + '）')
+  await assertPublicTarget(target)
+  const w = Number.isFinite(Number(width)) ? Math.max(320, Math.min(Number(width), 3840)) : WEB_SHOT_DEFAULTS.WIDTH
+  const h = Number.isFinite(Number(height)) ? Math.max(240, Math.min(Number(height), 2160)) : WEB_SHOT_DEFAULTS.HEIGHT
+  const dir = join(shotRoot(), scope || 'default')
+  mkdirSync(dir, { recursive: true })
+  const name = 'shot_' + createHash('sha1').update(target.href + '\u0000' + w + 'x' + h).digest('hex').slice(0, 16) + '.png'
+  const file = join(dir, name)
+  const t0 = Date.now()
+  const args = [
+    '--headless=new', '--disable-gpu', '--hide-scrollbars', '--no-first-run', '--no-default-browser-check',
+    '--disable-extensions', '--disable-background-networking', '--virtual-time-budget=8000',
+    `--window-size=${w},${h}`, `--screenshot=${file}`, target.href,
+  ]
+  // 注入接缝：DSH_WEB_SHOT_BROWSER 指向 .js/.mjs 时用当前 node 执行（测试与自定义渲染器用），
+  // 避免在 Windows 上用 shell 调 .cmd（会引入参数注入风险）。
+  const isScript = /\.(mjs|js|cjs)$/i.test(browser)
+  const exe = isScript ? process.execPath : browser
+  const argv = isScript ? [browser, ...args] : args
+  try {
+    execFileSync(exe, argv, { timeout: WEB_SHOT_DEFAULTS.TIMEOUT_MS, stdio: 'ignore', windowsHide: true })
+  } catch (e) {
+    // 浏览器可能已写出文件却以非 0 退出（Edge/Chrome 常见）——只要文件有效就算成功，否则才算失败
+    if (!existsSync(file)) throw webErr(WEB_ERR.SHOT_FAILED, '截图进程失败：' + (e?.message ?? e))
+  }
+  if (!existsSync(file)) throw webErr(WEB_ERR.SHOT_FAILED, '截图进程未产出文件（目标页可能需要更长时间或被浏览器拦截）')
+  const size = statSync(file).size
+  if (size <= 0) { try { rmSync(file, { force: true }) } catch { /* */ } throw webErr(WEB_ERR.SHOT_FAILED, '截图文件为空') }
+  if (size > WEB_SHOT_DEFAULTS.MAX_BYTES) {
+    try { rmSync(file, { force: true }) } catch { /* */ }
+    throw webErr(WEB_ERR.TOO_LARGE, `截图超过上限（${Math.round(WEB_SHOT_DEFAULTS.MAX_BYTES / 1024 / 1024)} MB）`)
+  }
+  webQuotaRecordBytes(scope, size)
+  return { ok: true, file: name, scope: scope || 'default', bytes: size, browser: basename(browser), width: w, height: h, ms: Date.now() - t0 }
+}
+
+/** 读取已存截图（仅限截图目录内、仅 .png；防目录穿越）。 */
+export function readShot(scope, name) {
+  const safeScope = String(scope || 'default').replace(/[^A-Za-z0-9._-]/g, '')
+  const safeName = basename(String(name ?? ''))
+  if (!/^shot_[0-9a-f]{8,32}\.png$/.test(safeName)) throw webErr(WEB_ERR.INVALID_URL, '非法的截图名')
+  const file = join(shotRoot(), safeScope, safeName)
+  if (!existsSync(file)) throw webErr(WEB_ERR.INVALID_URL, '截图不存在（可能已被清理）')
+  return { file, bytes: statSync(file).size, contentType: 'image/png' }
+}
+
+/** 截图目录清单（前端展示历史截图；只列本空间）。 */
+export function listShots(scope, limit = 30) {
+  const safeScope = String(scope || 'default').replace(/[^A-Za-z0-9._-]/g, '')
+  const dir = join(shotRoot(), safeScope)
+  if (!existsSync(dir)) return []
+  try {
+    return readdirSync(dir)
+      .filter(n => /^shot_[0-9a-f]{8,32}\.png$/.test(n))
+      .map(n => ({ name: n, bytes: statSync(join(dir, n)).size, mtime: statSync(join(dir, n)).mtime.toISOString() }))
+      .sort((a, b) => b.mtime.localeCompare(a.mtime))
+      .slice(0, Math.max(1, Math.min(Number(limit) || 30, 200)))
+  } catch { return [] }
+}
+
+// ── P2-8①：抓取历史回写（serve.mjs → team-hub；失败只 console，绝不影响抓取响应）──
+function recordWebHistory(entry) {
+  const scope = String(entry?.scope ?? '').trim()
+  if (!scope) return
+  const upstream = (process.env.DSH_HUB_UPSTREAM ?? 'http://127.0.0.1:8787').replace(/\/+$/, '')
+  const headers = { 'content-type': 'application/json', ...hubAuthHeaders() }
+  const ac = new AbortController()
+  const timer = setTimeout(() => ac.abort(), 3000)
+  fetch(upstream + '/api/web/history', { method: 'POST', headers, body: JSON.stringify(entry), signal: ac.signal })
+    .catch((e) => { console.log('[web-history] 回写失败（不影响抓取）：' + (e?.message ?? e)) })
+    .finally(() => clearTimeout(timer))
+}
+
+async function handleWebApi(req, res, pathname, url) {
   if (!isLoopback(req)) { httpErr(res, 403, '浏览器助手接口仅限本机（127.0.0.1）访问'); return }
+
+  // GET /api/web/meta（P2-8①③④）：配额快照 + 截图能力状态 + 缓存规模；不触发抓取。
+  if (pathname === '/api/web/meta') {
+    if (req.method !== 'GET') { httpErr(res, 405, 'method not allowed'); return }
+    const scope = url.searchParams.get('scope') ?? ''
+    sendJson(res, 200, { ok: true, quota: scope ? webQuotaSnapshot(scope) : null, shot: shotStatus(), cache: webCacheStats() })
+    return
+  }
+  // GET /api/web/history（P2-8①）：按空间读抓取历史（serve.mjs 代理 team-hub；hub 不在则如实说明）
+  if (pathname === '/api/web/history' && req.method === 'GET') {
+    const scope = url.searchParams.get('scope') ?? ''
+    if (!scope) { sendJson(res, 200, { ok: false, scope: '', items: [], stats: null, error: '缺少 scope 参数' }); return }
+    const qs = new URLSearchParams({ scope, limit: url.searchParams.get('limit') ?? '30' })
+    const q = url.searchParams.get('q')
+    if (q) qs.set('q', q)
+    const upstream = (process.env.DSH_HUB_UPSTREAM ?? 'http://127.0.0.1:8787').replace(/\/+$/, '')
+    try {
+      const ac = new AbortController()
+      const timer = setTimeout(() => ac.abort(), 4000)
+      const resp = await fetch(upstream + '/api/web/history?' + qs.toString(), { headers: { ...hubAuthHeaders() }, signal: ac.signal })
+        .finally(() => clearTimeout(timer))
+      const data = await resp.json()
+      sendJson(res, 200, { ok: resp.ok, scope, ...data })
+    } catch (e) {
+      // hub 未运行是常态（单跑 serve.mjs）：如实报不可用，不假装空历史
+      sendJson(res, 200, { ok: false, scope, items: [], stats: null, error: '抓取历史需要 team-hub v2（读 /api/web/history）：' + (e?.message ?? e) })
+    }
+    return
+  }
+  // POST /api/web/history/clear（P2-8①）：清空本空间历史（或单条）
+  if (pathname === '/api/web/history/clear' && req.method === 'POST') {
+    let body
+    try { body = await readBodyJson(req) } catch (e) { httpErr(res, 400, e instanceof Error ? e.message : String(e)); return }
+    const scope = typeof body?.scope === 'string' ? body.scope.trim() : ''
+    if (!scope) { httpErr(res, 400, '缺少参数 scope'); return }
+    const upstream = (process.env.DSH_HUB_UPSTREAM ?? 'http://127.0.0.1:8787').replace(/\/+$/, '')
+    try {
+      const ac = new AbortController()
+      const timer = setTimeout(() => ac.abort(), 4000)
+      const resp = await fetch(upstream + '/api/web/history/clear', {
+        method: 'POST', headers: { 'content-type': 'application/json', ...hubAuthHeaders() },
+        body: JSON.stringify(body), signal: ac.signal,
+      }).finally(() => clearTimeout(timer))
+      const data = await resp.json()
+      sendJson(res, resp.status, data)
+    } catch (e) {
+      httpErr(res, 503, '清空抓取历史需要 team-hub v2：' + (e?.message ?? e))
+    }
+    return
+  }
+  // POST /api/web/shot（P2-8③）：可选截图（需 DSH_WEB_SHOT_ENABLE=1）
+  if (pathname === '/api/web/shot' && req.method === 'POST') {
+    let shotBody
+    try { shotBody = await readBodyJson(req) } catch (e) { httpErr(res, 400, e instanceof Error ? e.message : String(e)); return }
+    const scope = typeof shotBody?.scope === 'string' ? shotBody.scope.trim() : ''
+    const t0 = Date.now()
+    try {
+      const shot = await webScreenshot({ url: shotBody?.url, scope, width: shotBody?.width, height: shotBody?.height })
+      appendWebAudit({ url: String(shotBody?.url ?? ''), finalUrl: String(shotBody?.url ?? ''), status: 200, ok: true, code: 'shot_ok', ms: Date.now() - t0, scope, kind: 'shot' })
+      sendJson(res, 200, shot)
+    } catch (e) {
+      const code = e?.code ?? WEB_ERR.SHOT_FAILED
+      appendWebAudit({ url: String(shotBody?.url ?? ''), finalUrl: String(shotBody?.url ?? ''), status: null, ok: false, code, ms: Date.now() - t0, scope, kind: 'shot' })
+      const status = code === WEB_ERR.SHOT_DISABLED || code === WEB_ERR.SHOT_UNAVAILABLE ? 409
+        : code === WEB_ERR.SSRF_BLOCKED ? 403 : code === WEB_ERR.TOO_LARGE ? 413 : 400
+      httpErr(res, status, e?.message ?? String(e))
+    }
+    return
+  }
+  // GET /api/web/shot?scope=&name=（P2-8③）：读取已存截图（仅截图目录内 .png）
+  if (pathname === '/api/web/shot' && req.method === 'GET') {
+    try {
+      const s = readShot(url.searchParams.get('scope') ?? 'default', url.searchParams.get('name') ?? '')
+      const stream = createReadStream(s.file)
+      res.writeHead(200, { 'content-type': 'image/png', 'content-length': String(s.bytes), 'cache-control': 'private, max-age=60' })
+      stream.pipe(res)
+    } catch (e) {
+      httpErr(res, 404, e?.message ?? '截图不存在')
+    }
+    return
+  }
+  if (pathname === '/api/web/shots' && req.method === 'GET') {
+    sendJson(res, 200, { ok: true, items: listShots(url.searchParams.get('scope') ?? 'default', Number(url.searchParams.get('limit') ?? 30)) })
+    return
+  }
+  if (pathname !== '/api/web/fetch') { httpErr(res, 404, '未知的浏览器助手接口：' + pathname); return }
+
   let body
   try { body = await readBodyJson(req) } catch (e) { httpErr(res, 400, e instanceof Error ? e.message : String(e)); return }
   // R-A3：一次 /api/web/fetch = 一行审计（成功/失败/拦截都算）；ms 全程计时；审计写失败只 console、不影响响应。
@@ -1415,27 +2021,81 @@ async function handleWebApi(req, res) {
   // 与 TC-S2-02「发起后拦截须留痕」（ssrf_blocked 等，非法抓取意图也是审计对象）分界在「请求是否构成一次抓取」。
   const t0 = Date.now()
   const requested = typeof body?.url === 'string' ? body.url.trim() : ''
+  const scope = typeof body?.scope === 'string' ? body.scope.trim() : ''
+  const maxBytesNorm = Number.isFinite(Number(body?.maxBytes)) ? Math.max(1, Math.min(Number(body.maxBytes), 16 * 1024 * 1024)) : WEB_LIMITS.MAX_BYTES
   let result = null
   let failure = null
+  let hitFresh = false
+  let admitted = false
+  let reqHost = ''
+  try { reqHost = requested ? new URL(requested).host : '' } catch { reqHost = '' }
   try {
-    result = await webFetch({ url: body.url, maxBytes: body.maxBytes, timeoutMs: body.timeoutMs })
+    // ①-1 新鲜缓存：不发网络请求（因此不消耗配额）；按空间隔离，避免跨空间串内容或绕过配额
+    if (requested && scope) {
+      const fresh = webCacheGet(scope, requested, maxBytesNorm)
+      if (fresh) { result = fresh; hitFresh = true }
+    }
+    if (!result) {
+      // ④ 配额准入（请求数 + 并发 + 当日字节）；未标注 scope 时仅做 host 级保护
+      webQuotaBegin(scope, reqHost)
+      admitted = true
+      const stale = requested && scope ? webCacheGetStale(scope, requested, maxBytesNorm) : null
+      const conditional = stale && (stale.etag || stale.lastModified) ? { etag: stale.etag, lastModified: stale.lastModified } : null
+      const fetched = await webFetch({ url: body.url, maxBytes: body.maxBytes, timeoutMs: body.timeoutMs, conditional })
+      if (fetched.notModified === true && stale) {
+        // ①-2 304：上游确认未变 → 复用缓存内容并刷新 TTL
+        result = webCacheTouch(scope, requested, maxBytesNorm) ?? { ...stale.result, cached: true, revalidated: true }
+      } else {
+        result = fetched
+        // ①-3 写缓存（截断结果内部会拒绝）；校验器来自响应头
+        if (requested && scope) webCachePut(scope, requested, maxBytesNorm, result, { etag: result.etag, lastModified: result.lastModified })
+      }
+    }
   } catch (e) {
     failure = e instanceof Error ? e : new Error(String(e))
     if (failure.paramLevel === true) {
       sendJson(res, 200, { ok: false, error: failure.message, code: failure.code ?? WEB_ERR.WEB_ERROR })
       return
     }
+  } finally {
+    if (admitted) webQuotaEnd(scope)
   }
+  // ④ 响应字节记账（仅成功读到体的抓取；缓存命中与 304 不重复计费）
+  if (result && !hitFresh && result.notModified !== true) webQuotaRecordBytes(scope, result.bytes)
+  const code = result ? (result.code ?? (result.ok === true ? WEB_ERR.OK : WEB_ERR.WEB_ERROR)) : (failure.code ?? WEB_ERR.WEB_ERROR)
   appendWebAudit({
     url: requested,
     finalUrl: result ? (result.finalUrl ?? requested) : (failure.url ?? requested), // throw 路径 err.url = 失败一跳
     status: result ? (result.status ?? null) : (failure.status ?? null),
     ok: result ? result.ok === true : false,
-    code: result ? (result.code ?? (result.ok === true ? WEB_ERR.OK : WEB_ERR.WEB_ERROR)) : (failure.code ?? WEB_ERR.WEB_ERROR),
+    code,
     ms: Date.now() - t0,
+    scope: scope || undefined,
+    cached: hitFresh || result?.revalidated === true ? true : undefined,
+  })
+  // ①-4 历史回写（fire-and-forget；hub 不在只 console）
+  recordWebHistory({
+    scope,
+    url: requested,
+    finalUrl: result ? (result.finalUrl ?? requested) : (failure.url ?? requested),
+    title: result?.title ?? null,
+    excerpt: result?.excerpt ?? null,
+    status: result ? (result.status ?? null) : (failure.status ?? null),
+    bytes: result?.bytes ?? null,
+    ms: Date.now() - t0,
+    errorCode: result && result.ok === true && !result.error ? null : code,
+    cached: hitFresh || result?.revalidated === true,
   })
   if (result) {
-    sendJson(res, 200, { ...result })
+    sendJson(res, 200, { ...result, cached: hitFresh || result.cached === true })
+    return
+  }
+  // ④ 限流/配额失败 → 429 + Retry-After（其余失败沿用 200 + code 语义，保持既有前端契约）
+  const rateCodes = [WEB_ERR.RATE_LIMITED, WEB_ERR.CONCURRENCY_LIMITED, WEB_ERR.DAILY_QUOTA_EXCEEDED]
+  if (rateCodes.includes(code)) {
+    const retryAfter = Number(failure.retryAfterSec) || 5
+    // 响应体带 code：前端需区分「速率限制 / 并发占满 / 当日配额用尽」三种可行动指引
+    sendJson(res, 429, { ok: false, error: failure.message, code, retryAfterSec: retryAfter }, { 'retry-after': String(retryAfter), 'x-dsh-retry-after': String(retryAfter) })
     return
   }
   sendJson(res, 200, { ok: false, error: failure.message, code: failure.code ?? WEB_ERR.WEB_ERROR })
@@ -1874,10 +2534,10 @@ function routeRequest(req, res) {
     req.pipe(proxyReq)
     return
   }
-  // 浏览器助手 /api/web/fetch（S6：SSRF 防护代理 + 抽取；仅回环）
-  if (pathname === '/api/web/fetch') {
-    if (req.method !== 'POST') { res.writeHead(405); res.end('method not allowed'); return }
-    void handleWebApi(req, res).catch((e) => { try { httpErr(res, 500, 'internal error：' + (e instanceof Error ? e.message : String(e))) } catch { /* */ } })
+  // 浏览器助手 /api/web/*（S6 抓取 + P2-8 历史/缓存/配额/截图；仅回环）
+  if (pathname.startsWith('/api/web/')) {
+    if (req.method !== 'GET' && req.method !== 'POST') { res.writeHead(405); res.end('method not allowed'); return }
+    void handleWebApi(req, res, pathname, url).catch((e) => { try { httpErr(res, 500, 'internal error：' + (e instanceof Error ? e.message : String(e))) } catch { /* */ } })
     return
   }
   // 文件中心 /api/files/*（S3 只读面 + S4 写面；仅回环 + 写 token；scope → 空间 local_dir 解析）

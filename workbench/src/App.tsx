@@ -478,7 +478,7 @@ export default function App(): React.JSX.Element {
           ) : active === 'files' ? (
             <FilesView scope={scope} hubMode={hubMode} spaces={hubSpaces} onOpenSettings={s => setSpaceSettings(s)} />
           ) : active === 'browser' ? (
-            <BrowserView />
+            <BrowserView scope={scope ?? ''} />
           ) : active === 'calendar' ? (
             <CalendarView scope={scope} hubMode={hubMode} onGoHome={() => setActive('home')} />
           ) : active === 'notify' ? (

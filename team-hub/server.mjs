@@ -337,6 +337,30 @@ db.exec(`
     detail TEXT
   )
 `)
+// P2-8①：浏览器助手按空间的抓取历史（团队级共享、可审计；serve.mjs 侧只写库、不负责保留策略）。
+// 唯一键 (scope,url)：同一 URL 重复抓取只更新最近一次结果（更新时间/状态/字节/耗时/错误码/缓存命中），
+// 避免历史里堆满同一地址的重复行；URL 计数与「最近抓了什么」都读这张表。
+db.exec(`
+  CREATE TABLE IF NOT EXISTS web_fetch_history (
+    id TEXT PRIMARY KEY,
+    scope TEXT NOT NULL,
+    url TEXT NOT NULL,
+    finalUrl TEXT,
+    host TEXT,
+    title TEXT,
+    excerpt TEXT,
+    status INTEGER,
+    bytes INTEGER,
+    ms INTEGER,
+    errorCode TEXT,
+    cached INTEGER NOT NULL DEFAULT 0,
+    hits INTEGER NOT NULL DEFAULT 1,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  )
+`)
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_web_history_scope_url ON web_fetch_history (scope, url)')
+db.exec('CREATE INDEX IF NOT EXISTS idx_web_history_scope_updated ON web_fetch_history (scope, updatedAt)')
 db.exec(`
   CREATE TABLE IF NOT EXISTS permission_rules (
     id TEXT PRIMARY KEY,
@@ -3509,6 +3533,89 @@ async function handle(req, res, stripPrefix) {
         return rb - ra || a.file.localeCompare(b.file)
       })
       json(res, 200, { scope: scopeParam || 'all', groups })
+      return
+    }
+    // P2-8①：浏览器助手抓取历史（按空间；serve.mjs 抓取后回写，前端读最近 N 条）。
+    // 语义：同 (scope,url) 只保留一行并累加 hits —— 历史是「抓过哪些地址、结果如何」，不是逐次流水
+    //（逐次审计已在 serve.mjs 的 web 审计 JSONL 里，两者分工不同，不重复记）。
+    if (req.method === 'POST' && path === '/api/web/history') {
+      const body = await readBody(req)
+      const scope = String(body.scope ?? '').trim()
+      const rawUrl = String(body.url ?? '').trim()
+      if (!scope) { json(res, 400, { error: '缺少 scope' }); return }
+      if (!rawUrl) { json(res, 400, { error: '缺少 url' }); return }
+      const now = new Date().toISOString()
+      let host = ''
+      try { host = new URL(rawUrl).host } catch { /* 非法 URL 也记：错误码本身就是历史的一部分 */ }
+      const row = db.prepare('SELECT id, hits, createdAt FROM web_fetch_history WHERE scope = ? AND url = ?').get(scope, rawUrl)
+      const errCode = body.errorCode == null ? null : String(body.errorCode)
+      const fields = {
+        finalUrl: body.finalUrl == null ? null : String(body.finalUrl),
+        host,
+        title: body.title == null ? null : String(body.title).slice(0, 300),
+        excerpt: body.excerpt == null ? null : String(body.excerpt).slice(0, 500),
+        status: Number.isFinite(Number(body.status)) ? Number(body.status) : null,
+        bytes: Number.isFinite(Number(body.bytes)) ? Number(body.bytes) : null,
+        ms: Number.isFinite(Number(body.ms)) ? Number(body.ms) : null,
+        errorCode: errCode,
+        cached: body.cached ? 1 : 0,
+      }
+      if (row) {
+        db.prepare(`UPDATE web_fetch_history SET finalUrl = ?, host = ?, title = ?, excerpt = ?, status = ?,
+                    bytes = ?, ms = ?, errorCode = ?, cached = ?, hits = hits + 1, updatedAt = ? WHERE id = ?`)
+          .run(fields.finalUrl, fields.host, fields.title, fields.excerpt, fields.status, fields.bytes, fields.ms, fields.errorCode, fields.cached, now, row.id)
+        json(res, 200, { ok: true, id: row.id, hits: row.hits + 1, updated: true })
+        return
+      }
+      const id = 'wh_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36)
+      db.prepare(`INSERT INTO web_fetch_history
+                  (id, scope, url, finalUrl, host, title, excerpt, status, bytes, ms, errorCode, cached, hits, createdAt, updatedAt)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`)
+        .run(id, scope, rawUrl, fields.finalUrl, fields.host, fields.title, fields.excerpt, fields.status, fields.bytes, fields.ms, fields.errorCode, fields.cached, now, now)
+      // 空间级容量上限：只保留每空间最近 N 条（防止长期使用把库撑大；被清理的地址下次抓取会重新入表）
+      const overflow = Number(body.maxPerScope ?? 200)
+      const cap = Number.isFinite(overflow) && overflow > 0 ? Math.min(overflow, 2000) : 200
+      const count = db.prepare('SELECT COUNT(*) AS n FROM web_fetch_history WHERE scope = ?').get(scope).n
+      let trimmed = 0
+      if (count > cap) {
+        trimmed = count - cap
+        db.prepare(`DELETE FROM web_fetch_history WHERE scope = ? AND id IN (
+                      SELECT id FROM web_fetch_history WHERE scope = ? ORDER BY updatedAt ASC LIMIT ?)`)
+          .run(scope, scope, trimmed)
+      }
+      json(res, 200, { ok: true, id, hits: 1, updated: false, trimmed })
+      return
+    }
+    if (req.method === 'GET' && path === '/api/web/history') {
+      const scope = url.searchParams.get('scope')
+      if (!scope) { json(res, 400, { error: '缺少 scope' }); return }
+      const limit = Math.min(Number(url.searchParams.get('limit') ?? 30) || 30, 200)
+      const q = (url.searchParams.get('q') ?? '').trim().toLowerCase()
+      let rows = db.prepare('SELECT * FROM web_fetch_history WHERE scope = ? ORDER BY updatedAt DESC LIMIT ?').all(scope, q ? 200 : limit)
+      if (q) rows = rows.filter(r => String(r.url).toLowerCase().includes(q) || String(r.title ?? '').toLowerCase().includes(q)).slice(0, limit)
+      const total = db.prepare('SELECT COUNT(*) AS n FROM web_fetch_history WHERE scope = ?').get(scope).n
+      const failed = db.prepare("SELECT COUNT(*) AS n FROM web_fetch_history WHERE scope = ? AND errorCode IS NOT NULL").get(scope).n
+      const bytes = db.prepare('SELECT COALESCE(SUM(bytes), 0) AS n FROM web_fetch_history WHERE scope = ?').get(scope).n
+      json(res, 200, {
+        scope,
+        items: rows.map(r => ({
+          id: r.id, url: r.url, finalUrl: r.finalUrl, host: r.host, title: r.title, excerpt: r.excerpt,
+          status: r.status, bytes: r.bytes, ms: r.ms, errorCode: r.errorCode, cached: !!r.cached,
+          hits: r.hits, createdAt: r.createdAt, updatedAt: r.updatedAt,
+        })),
+        stats: { total, failed, bytes, shown: rows.length },
+      })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/web/history/clear') {
+      const body = await readBody(req)
+      const scope = String(body.scope ?? '').trim()
+      if (!scope) { json(res, 400, { error: '缺少 scope' }); return }
+      const id = body.id == null ? '' : String(body.id).trim()
+      const removed = id
+        ? db.prepare('DELETE FROM web_fetch_history WHERE scope = ? AND id = ?').run(scope, id).changes
+        : db.prepare('DELETE FROM web_fetch_history WHERE scope = ?').run(scope).changes
+      json(res, 200, { ok: true, removed })
       return
     }
     if (req.method === 'GET' && path === '/api/activity') {

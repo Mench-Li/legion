@@ -2902,6 +2902,34 @@ body {
 .preview-head { display: flex; gap: 6px; flex-wrap: wrap; padding-bottom: 8px; }
 .preview-body { flex: 1; overflow: auto; white-space: pre-wrap; word-break: break-all; font-family: ui-monospace, Consolas, monospace; font-size: 12px; line-height: 1.7; color: var(--text); background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin: 0; }
 
+/* P2-7 文件中心增强：搜索 / 冲突策略 / 分片进度 / 批量 / git 只读 */
+.files-strategy { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); }
+.files-strategy select { font-size: 11px; padding: 2px 4px; }
+.files-search { display: flex; align-items: center; gap: 8px; padding: 6px 12px; flex-wrap: wrap; }
+.files-search-input { flex: 1; min-width: 180px; font-size: 12px; }
+.files-search mark { background: rgba(255, 214, 102, 0.28); color: inherit; border-radius: 2px; padding: 0 1px; }
+.files-progress { display: flex; align-items: center; gap: 10px; padding: 6px 12px; flex-wrap: wrap; }
+.files-progress-bar { flex: 1; min-width: 120px; height: 6px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+.files-progress-bar i { display: block; height: 100%; background: var(--blue, #5b8cff); transition: width 0.2s ease; }
+.files-batchbar { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-color: rgba(91, 140, 255, 0.5); }
+.files-gitlog { max-height: 180px; overflow: auto; padding: 6px 10px; }
+.files-gitlog-row { display: flex; align-items: center; gap: 8px; padding: 4px 2px; border-bottom: 1px solid var(--line); }
+/* git 标记：M/A/D/??/U —— 颜色区分色调，title 给出 git 原始两位状态 */
+.git-mark { font-family: ui-monospace, Consolas, monospace; font-size: 10px; padding: 1px 4px; border-radius: 4px; border: 1px solid var(--line); white-space: nowrap; }
+.git-add { color: #7ee787; border-color: rgba(126, 231, 135, 0.5); }
+.git-mod { color: var(--yellow); border-color: rgba(255, 214, 102, 0.5); }
+.git-del { color: #ff9c9c; border-color: rgba(255, 92, 92, 0.5); }
+.git-new { color: var(--muted); }
+.git-conflict { color: #ff8a65; border-color: rgba(255, 138, 101, 0.6); }
+/* 差异视图：按行类型着色（+/-/上下文/hunk/元信息） */
+.diff-body { white-space: pre; word-break: normal; overflow: auto; }
+.diff-line { font-family: ui-monospace, Consolas, monospace; font-size: 12px; line-height: 1.5; padding: 0 4px; }
+.diff-add { background: rgba(46, 160, 67, 0.18); color: #7ee787; }
+.diff-del { background: rgba(248, 81, 73, 0.16); color: #ff9c9c; }
+.diff-hunk { color: var(--blue, #5b8cff); background: rgba(91, 140, 255, 0.08); }
+.diff-meta { color: var(--muted-2); }
+.diff-ctx { color: var(--text); }
+
 /* 浏览器助手 BrowserPanel */
 .browser-head .tag { color: var(--muted); font-size: 11px; }
 .browser-bar { display: flex; gap: 8px; align-items: center; padding: 10px; }

@@ -213,6 +213,7 @@ async function stageTest() {
     { label: 'team-hub-parity（P1-1 双形态对拍：独立服务 vs 宿主前缀外壳）', files: ['tests/contract/team-hub-parity.test.mjs'], cwd: ROOT },
     { label: 'dedupe（P2-3 前端去重纯函数）', files: ['workbench/scripts/dedupe.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'notify（P2-4 通知分类/优先级/批量已读/跳转/去重补齐）', files: ['workbench/scripts/notify.test.mjs', 'workbench/scripts/notify-hub-smoke.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    { label: 'hub-event-stream（F-01 scope/游标/信封）', files: ['workbench/scripts/hub-event-stream.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'dual-write（P1-1 双进程写同库竞态：audit.seq/task id 唯一）', files: ['scripts/ci/dual-write-smoke.test.mjs'], cwd: ROOT },
     { label: 'p13-host-injection（P1-3 真实宿主插件注入冒烟）', files: ['tests/p13-fixture/p13-host-injection.test.mjs'], cwd: ROOT },
   ]

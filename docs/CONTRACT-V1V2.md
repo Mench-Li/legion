@@ -139,6 +139,21 @@ comments[], evidence[], patches[], artifacts[], createdAt, updatedAt`
 }
 ```
 
+### 6.4 F-01 第二阶段：scope 与显式游标
+
+v2 `/api/events` 额外支持以下查询参数：
+
+- `scope=<非空字符串>`：同时约束历史回放和实时广播；省略时保持全局订阅。
+- `sinceSeq=<非负安全整数>`：页面刷新后显式从 `seq > sinceSeq` 回放。
+
+游标优先级为 `Last-Event-ID`（合法时）> `sinceSeq` > 最近 30 条默认回放。显式提供但非法的
+`sinceSeq` 返回 400；非法 `Last-Event-ID` 保持兼容行为并回退到其它游标或最近 30 条。scope 过滤后
+序号允许跳号，因为 `seq` 是跨空间的全局序号。
+
+Workbench 以 `hub + scope` 为键持久化最近消费的 seq，并在重建 EventSource 时传入 `sinceSeq`；
+收到事件后仍按统一信封校验、scope 校验和单调去重。详见
+`docs/superpowers/specs/2026-09-10-f01-reliable-events-design.md`。
+
 - v1 侧不改造帧（S3 登记）；board-plugin hub 模式 SSE 桥接见 R9。
 
 ## 7. board-plugin hub 模式 SSE 实锤缺口（R9 展开）

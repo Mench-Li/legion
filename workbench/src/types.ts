@@ -444,12 +444,16 @@ export interface ChatHealthInfo {
 
 /** team-hub 审计 SSE 事件（单一 /api/events；chat:* 按其 action 过滤，I8）。 */
 export interface HubAuditEvent {
+  id: number
+  event: string
   seq: number
   ts: string
   member: string
   scope: string
   action: string
   taskId: string | null
+  goalId: string | null
+  payload: Record<string, unknown>
   detail: Record<string, unknown>
 }
 

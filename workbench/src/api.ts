@@ -1,4 +1,5 @@
 import type { ActivityEvent, AgentCatalogItem, AgentModelCfg, ApiConfig, BoardData, CardStatus, ChatAttachmentRef, ChatConversation, ChatHealthInfo, ChatMessage, DirListing, FileListResponse, FilePreview, GoalInfo, GoalStatus, HubActivity, HubAuditEvent, HubDocContent, HubTask, MissionsResponse, ModelOption, OverlapGroup, RepoInspect, RosterResponse, SkillInfo, SpaceInfo, WebFetchResult } from './types'
+import { subscribeHubEventStream } from './hubEventStream'
 
 /**
  * 数据源地址解析：?api= 查询参数优先，其次 localStorage，最后默认 4820。
@@ -71,12 +72,6 @@ function withAuthHeaders(headers?: HeadersInit): Headers {
  */
 function hubGet(path: string): Promise<Response> {
   return fetch(`${hubBase()}${path}`, { headers: authHeaders() })
-}
-
-/** EventSource 无法自定 header：hub 审计订阅以 ?token= 追加（服务端 authorized 支持该携带方式）。 */
-function hubEventSourceUrl(path: string): string {
-  const token = getToken()
-  return `${hubBase()}${path}${token ? `?token=${encodeURIComponent(token)}` : ''}`
 }
 
 async function readJson<T>(res: Response): Promise<T> {
@@ -657,37 +652,16 @@ export async function fetchChatHealth(scope: string): Promise<ChatHealthInfo> {
   return readJson<ChatHealthInfo>(await hubGet(`/api/chat/health?scope=${encodeURIComponent(scope)}`))
 }
 
-/**
- * team-hub 审计 SSE：单一 /api/events（I8），订阅方按 action 过滤。
- *
- * 断线恢复（P2-4）：
- * - 浏览器 EventSource 自动重连，且因 v2 帧带 `id:` 行会自动携带 `Last-Event-ID` 续传（P2-3 信封）；
- * - 但续传不保证覆盖全部缺口（回放窗口有限），因此这里额外上报**连接状态与打开次数**，
- *   由订阅方按缺口判据（notify.shouldRefill）决定是否立即重拉列表补齐。
- */
+/** team-hub 审计 SSE：统一信封校验、scope 过滤、持久游标与 EventSource 重连。 */
 export function subscribeHubAudit(
   onEvent: (event: HubAuditEvent) => void,
-  opts: { onStatus?: (status: HubSseStatus) => void } = {},
+  options: { scope?: string; storage?: Storage } = {},
 ): () => void {
-  const es = new EventSource(hubEventSourceUrl('/api/events'))
-  let opens = 0
-  es.onopen = () => {
-    opens += 1
-    // opens === 1：首次连接；> 1：断线后自动重连成功（订阅方据此立即重拉补齐）
-    opts.onStatus?.({ state: opens === 1 ? 'open' : 'reconnected', opens })
-  }
-  es.onerror = () => {
-    // readyState=0(CONNECTING) 表示浏览器正在自动重连；2(CLOSED) 表示已放弃
-    opts.onStatus?.({ state: es.readyState === 2 ? 'closed' : 'reconnecting', opens })
-  }
-  es.onmessage = (ev) => {
-    try {
-      onEvent(JSON.parse(ev.data) as HubAuditEvent)
-    } catch {
-      /* 忽略损坏帧 */
-    }
-  }
-  return () => es.close()
+  return subscribeHubEventStream(`${hubBase()}/api/events`, onEvent, {
+    scope: options.scope,
+    storage: options.storage,
+    token: getToken() || undefined,
+  })
 }
 
 /** SSE 订阅状态（P2-4 实时连接可观测性）。 */

@@ -154,22 +154,14 @@ export function NotifyView({ scope, hubMode, onUnreadChange, onGoHome }: {
         .catch(() => undefined)
     }
     const off = subscribeHubAudit(ev => {
-      // 缺口检测：seq > 水位+1 说明中间帧丢失（先判后更新水位）
-      if (shouldRefill(watermarkRef.current, [ev])) {
-        watermarkRef.current = Math.max(watermarkRef.current, ev.seq)
-        refill()
-      } else {
-        watermarkRef.current = Math.max(watermarkRef.current, ev.seq)
-      }
-      if (ev.scope !== scopeRef.current) return
-      setItems(prev => mergeNotifyItems(prev, toNotifyItems([ev], notifyReadState(ev.scope)), LIST_LIMIT))
-    }, {
-      onStatus: st => {
-        setSse(st)
-        // 首次之后的 open = 断线重连成功 → 立即补齐断线窗口
-        if (st.state === 'reconnected') refill()
-      },
-    })
+      if (!isNotifyAction(ev.action)) return
+      if (ev.scope !== scope) return
+      setList(prev => {
+        if (prev.some(r => r.seq === ev.seq)) return prev
+        const next = dedupeDesc([ev, ...prev])
+        return next.slice(0, LIST_LIMIT)
+      })
+    }, { scope })
     const poll = window.setInterval(() => {
       const cur = scopeRef.current
       if (cur === null) return

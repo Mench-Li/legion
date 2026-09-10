@@ -352,6 +352,57 @@ describe('v2 /api/events SSE 统一信封与断线续传（P2-3 S1/S2）', () =>
     assert.ok(c3data.length >= 1)
   })
 
+  it('sinceSeq 回放只返回更大的序号，且 Last-Event-ID 优先', async () => {
+    const initial = await req(v2Base, 'GET', '/api/activity?limit=500')
+    assert.equal(initial.status, 200)
+    const baseSeq = Math.max(0, ...initial.data.map((row) => Number(row.seq)).filter(Number.isFinite))
+    const created = await req(v2Base, 'POST', '/api/create', { title: 'F01 游标回放', by: 'general', scope: 'f01-cursor' })
+    assert.equal(created.status, 200)
+
+    const replay = await sseCollect(v2Base, `/api/events?scope=f01-cursor&sinceSeq=${baseSeq}`, { timeoutMs: 4000, idleMs: 300 })
+    const frames = replay.frames.filter((f) => f.includes('data:'))
+    assert.equal(frames.length, 1, 'sinceSeq 只回放游标后的新事件')
+    const event = JSON.parse(frames[0].split('\n').find((l) => l.startsWith('data: ')).slice(6))
+    assert.equal(event.scope, 'f01-cursor')
+    assert.ok(event.seq > baseSeq)
+
+    const headerWins = await sseCollect(v2Base, `/api/events?scope=f01-cursor&sinceSeq=0`, {
+      timeoutMs: 4000,
+      idleMs: 300,
+      headers: { 'last-event-id': String(event.seq) },
+    })
+    assert.equal(headerWins.frames.filter((f) => f.includes('data:')).length, 0, 'Last-Event-ID 优先于较旧 sinceSeq')
+  })
+
+  it('scope 过滤同时作用于历史回放和实时广播', async () => {
+    const replayA = await req(v2Base, 'POST', '/api/create', { title: 'F01 scope A 历史', by: 'general', scope: 'f01-scope-a' })
+    const replayB = await req(v2Base, 'POST', '/api/create', { title: 'F01 scope B 历史', by: 'general', scope: 'f01-scope-b' })
+    assert.equal(replayA.status, 200); assert.equal(replayB.status, 200)
+    const history = await sseCollect(v2Base, '/api/events?scope=f01-scope-a', { timeoutMs: 4000, idleMs: 300 })
+    const historyEvents = history.frames.filter((f) => f.includes('data:')).map((f) => JSON.parse(f.split('\n').find((l) => l.startsWith('data: ')).slice(6)))
+    assert.ok(historyEvents.length >= 1)
+    assert.ok(historyEvents.every((event) => event.scope === 'f01-scope-a'))
+
+    const livePromise = sseCollect(v2Base, '/api/events?scope=f01-scope-a-live', {
+      timeoutMs: 4000,
+      resolveOn: (fs) => fs.filter((f) => f.includes('data:')).length >= 1,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    await req(v2Base, 'POST', '/api/create', { title: 'F01 scope B 实时', by: 'general', scope: 'f01-scope-b-live' })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    await req(v2Base, 'POST', '/api/create', { title: 'F01 scope A 实时', by: 'general', scope: 'f01-scope-a-live' })
+    const live = await livePromise
+    const liveEvents = live.frames.filter((f) => f.includes('data:')).map((f) => JSON.parse(f.split('\n').find((l) => l.startsWith('data: ')).slice(6)))
+    assert.equal(liveEvents.length, 1)
+    assert.equal(liveEvents[0].scope, 'f01-scope-a-live')
+  })
+
+  it('显式非法 sinceSeq 返回 400', async () => {
+    const response = await fetch(v2Base + '/api/events?sinceSeq=-1')
+    assert.equal(response.status, 400)
+    await response.body?.cancel()
+  })
+
   it('heartbeat：15s 内收到 :hb 注释帧', async () => {
     const c = await sseCollect(v2Base, '/api/events', { timeoutMs: 17000, resolveOn: (fs) => fs.includes(':hb') })
     assert.ok(c.frames.some((f) => f === ':hb'), '15s 心跳帧 :hb 应出现')

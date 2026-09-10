@@ -2544,6 +2544,22 @@ function inboxCount({ role, soldier, scope }) {
 // ── SSE ──
 const eventClients = new Set()
 
+function parseEventScope(raw) {
+  if (raw === null || raw === undefined) return undefined
+  const scope = String(raw).trim()
+  if (scope.length === 0) throw new Error('scope 不能为空')
+  return scope
+}
+
+function parseSinceSeq(raw) {
+  if (raw === null || raw === undefined || raw === '') return null
+  const value = String(raw)
+  if (!/^\d+$/.test(value)) throw new Error('sinceSeq 必须是非负整数')
+  const seq = Number(value)
+  if (!Number.isSafeInteger(seq)) throw new Error('sinceSeq 超出安全整数范围')
+  return seq
+}
+
 /** audit 行 → 对外事件对象（REST /api/activity 与 SSE /api/events 共用，P2-3 统一信封）：
  *  既有平铺字段（seq/ts/member/scope/action/taskId/goalId/detail）保持不变，
  *  补 event(=action)/id(=seq)/payload(=detail) 兼容目标信封字段名（契约 CONTRACT-V1V2.md §6.3）。 */
@@ -2565,7 +2581,9 @@ function writeEventFrame(res, entry) {
 }
 
 function broadcastAudit(entry) {
-  for (const res of eventClients) writeEventFrame(res, entry)
+  for (const client of eventClients) {
+    if (client.scope === undefined || client.scope === entry.scope) writeEventFrame(client.res, entry)
+  }
 }
 
 // ── HTTP ──
@@ -4011,21 +4029,40 @@ async function handle(req, res, stripPrefix) {
       return
     }
     if (req.method === 'GET' && path === '/api/events') {
+      let eventScope
+      let sinceSeq
+      try {
+        eventScope = parseEventScope(url.searchParams.get('scope'))
+        sinceSeq = parseSinceSeq(url.searchParams.get('sinceSeq'))
+      } catch (e) {
+        json(res, 400, { error: e instanceof Error ? e.message : String(e) })
+        return
+      }
       res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache', connection: 'keep-alive' })
       res.write('retry: 2000\n\n')
-      eventClients.add(res)
+      const client = { res, scope: eventScope }
+      eventClients.add(client)
       // Last-Event-ID 断线续传（P2-3 S2）：带合法序号则只回放 seq > N 的增量；
       // 无/非法则回放最近 30 条（契约 §6.2：seq 单调，配合 id: 行 EventSource 原生续传）。
       const lastEventId = Number.parseInt(String(req.headers['last-event-id'] ?? ''), 10)
+      const cursor = Number.isFinite(lastEventId) ? lastEventId : sinceSeq
+      const where = []
+      const params = []
       let replay
-      if (Number.isFinite(lastEventId)) {
-        replay = db.prepare('SELECT * FROM audit WHERE seq > ? ORDER BY seq ASC').all(lastEventId)
+      if (eventScope !== undefined) {
+        where.push('scope = ?')
+        params.push(eventScope)
+      }
+      if (cursor !== null && cursor !== undefined) {
+        where.push('seq > ?')
+        params.push(cursor)
+        replay = db.prepare(`SELECT * FROM audit WHERE ${where.join(' AND ')} ORDER BY seq ASC`).all(...params)
       } else {
-        replay = db.prepare('SELECT * FROM audit ORDER BY seq DESC LIMIT 30').all().reverse()
+        replay = db.prepare(`SELECT * FROM audit${where.length > 0 ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY seq DESC LIMIT 30`).all(...params).reverse()
       }
       for (const r of replay) writeEventFrame(res, auditEvent(r))
       const heartbeat = setInterval(() => res.write(':hb\n\n'), 15000)
-      req.on('close', () => { clearInterval(heartbeat); eventClients.delete(res) })
+      req.on('close', () => { clearInterval(heartbeat); eventClients.delete(client) })
       return
     }
     if (req.method === 'GET' && path === '/api/config') {
@@ -4057,7 +4094,7 @@ const server = http.createServer((req, res) => {
  * 心跳 interval 随各连接 req close 自清；附件清理 interval 仅独立进程 isMain 时存在且 unref）。
  */
 export function disposeHub() {
-  for (const res of eventClients) res.end()
+  for (const client of eventClients) client.res.end()
   eventClients.clear()
 }
 

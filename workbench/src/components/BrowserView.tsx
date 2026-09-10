@@ -1,10 +1,15 @@
-import { useCallback, useEffect, useState } from 'react'
-import { webFetchPage } from '../api'
-import type { WebFetchResult } from '../types'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { webFetchPage, webHistory, webHistoryClear, webMeta, webScreenshot, webShotUrl } from '../api'
+import type { WebFetchResult, WebHistoryResponse, WebMetaResponse, WebShotResult } from '../types'
+import {
+  cacheBadge, errorText, historyItemView, historyStatsText, isErrorResult, normalizeUrl,
+  qualityBadges, quotaText, quotaTone, relativeTime, shotButtonView, shotResultText, shotStatusText, shortUrlText,
+} from '../browserUi'
 import { toast } from './Toast'
 
 const HISTORY_KEY = 'legion.browser.history'
 const MAX_HISTORY = 8
+const SCOPED_HISTORY_LIMIT = 30
 
 function loadHistory(): string[] {
   try {
@@ -22,58 +27,44 @@ function pushHistory(url: string): void {
   try { localStorage.setItem(HISTORY_KEY, JSON.stringify(arr.slice(0, MAX_HISTORY))) } catch { /* 忽略配额 */ }
 }
 
-/** 无 scheme 输入归一：example.com → https://example.com（TC-S7-08①）；明显非法 → null。 */
-function normalizeUrl(input: string): string | null {
-  const s = input.trim()
-  if (!s) return null
-  if (/^(https?:|ftp:|file:|data:|javascript:)/i.test(s)) return s
-  if (/^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1\]?)([:/]|$)/.test(s) || /^\d{1,3}(\.\d{1,3}){3}(:\d+)?($|\/)/.test(s) || /^[\w-]+(\.[\w-]+)+(:\d+)?($|\/)/.test(s)) {
-    return 'https://' + s
-  }
-  return null
-}
-
-/** S7 AC3：服务端 webFetch 错误码 → 界面文案映射（TC-S7-04/05 要求各错误可区分、不混淆）。 */
-function errorText(r: WebFetchResult): string {
-  const code = r.code ?? ''
-  if (code === 'ssrf_blocked') return '🛡 已拦截：禁止访问内网地址（SSRF 防护）'
-  if (code === 'protocol_blocked') return '🛡 协议白名单外：' + (r.error ?? code)
-  if (code === 'timeout') return '⏱ 抓取超时：目标响应太慢或已断开（可重试）'
-  if (code === 'too_large') return '📦 页面过大：' + (r.error ?? '超过大小上限')
-  if (code === 'too_many_redirects') return '🔁 重定向次数过多：' + (r.error ?? '目标页跳转超过上限，已停止')
-  if (code === 'web_error') return '🔌 请求失败：' + (r.error ?? '未知错误')
-  if (code === 'dns_error') return '🌐 域名解析失败：' + (r.error ?? '')
-  if (code === 'invalid_url') return '⚠ URL 无效：' + (r.error ?? '')
-  if (code === 'fetch_error') return '🔌 网络错误：' + (r.error ?? '') + '（请确认 serve.mjs 与目标可达）'
-  if (code && code.startsWith('http_')) return '⚠ 目标返回错误：' + (r.error ?? code)
-  if (code === 'unsupported') return '📄 目标不是可读网页（pdf/图片/压缩包等），仅显示结构化信息'
-  if (code === 'empty_content') return '🧩 页面为 SPA/纯 JS 渲染，服务端无法抽取正文（v1 边界）'
-  return r.error ?? '抓取失败，请重试'
-}
-
-/** S7 AC5 请求态 / AC3 错误呈现：判定该结果是否按「错误」视图渲染（否则按正文渲染）。
- *  基线 BrowserPanel 的 errFlag 漏列 too_many_redirects/web_error，此类非 2xx 结果会落入正文分支；S7 收口修正。 */
-function isErrorResult(r: WebFetchResult): boolean {
-  const code = r.code ?? ''
-  if (!r.ok && !code) return true
-  if (code.startsWith('http_')) return true
-  return code === 'ssrf_blocked' || code === 'protocol_blocked' || code === 'timeout' || code === 'too_large'
-    || code === 'too_many_redirects' || code === 'web_error' || code === 'dns_error' || code === 'invalid_url'
-    || code === 'fetch_error'
-}
-
-export function BrowserView(): React.JSX.Element {
+/** 浏览器助手（S6 抓取 + P2-8 增强）：服务端安全抓取；历史/缓存/配额/截图均以 serve.mjs + team-hub 为权威。 */
+export function BrowserView({ scope = '' }: { scope?: string }): React.JSX.Element {
   const [url, setUrl] = useState('')
   const [history, setHistory] = useState<string[]>(() => loadHistory())
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<WebFetchResult | null>(null)
   const [statusText, setStatusText] = useState('')
   const [lastUrl, setLastUrl] = useState('')
+  // P2-8：空间级历史（team-hub）/ 配额与截图状态（serve.mjs）/ 截图结果
+  const [scoped, setScoped] = useState<WebHistoryResponse | null>(null)
+  const [meta, setMeta] = useState<WebMetaResponse | null>(null)
+  const [shot, setShot] = useState<WebShotResult | null>(null)
+  const [shotBusy, setShotBusy] = useState(false)
+  const [showScoped, setShowScoped] = useState(true)
+  const mounted = useRef(true)
+
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false }
+  }, [])
 
   useEffect(() => {
     const el = document.getElementById('browser-url-input') as HTMLInputElement | null
     el?.focus() // TC-S7-06：进入面板即聚焦地址栏
   }, [])
+
+  /** 刷新空间历史与配额快照（被动读，不触发抓取）。 */
+  const refreshSide = useCallback(async (): Promise<void> => {
+    const [h, m] = await Promise.all([
+      scope ? webHistory({ scope, limit: SCOPED_HISTORY_LIMIT }).catch(() => null) : Promise.resolve(null),
+      webMeta(scope || undefined),
+    ])
+    if (!mounted.current) return
+    setScoped(h)
+    setMeta(m)
+  }, [scope])
+
+  useEffect(() => { void refreshSide() }, [refreshSide])
 
   const fetchUrl = useCallback(async (raw: string): Promise<void> => {
     const norm = normalizeUrl(raw)
@@ -84,8 +75,11 @@ export function BrowserView(): React.JSX.Element {
     setUrl(norm)
     setBusy(true)
     setStatusText('⏳ 正在抓取…')
+    setShot(null)
     try {
-      const res = await webFetchPage({ url: norm })
+      // P2-8：带 scope → 服务端按空间缓存/限流/记账；不带 scope 走原有不限流路径
+      const res = await webFetchPage({ url: norm, scope: scope || undefined })
+      if (!mounted.current) return
       setResult(res)
       setLastUrl(norm)
       setStatusText('')
@@ -93,25 +87,57 @@ export function BrowserView(): React.JSX.Element {
         toast('info', res.code === 'empty_content' ? '已抓取，但页面无可抽取正文' : errorText(res))
       } else if (!res.ok) {
         toast('err', errorText(res))
+      } else if (res.cached) {
+        toast('info', (res.revalidated ? '缓存已确认未变：' : '命中缓存：') + shortUrlText(res.finalUrl ?? norm))
       }
       if (res.ok) pushHistory(norm)
       setHistory(loadHistory())
     } catch (e) {
-      setResult(null)
-      setStatusText('')
-      toast('err', '浏览器助手请求失败：' + (e instanceof Error ? e.message : String(e)))
+      if (mounted.current) {
+        setResult(null)
+        setStatusText('')
+        toast('err', '浏览器助手请求失败：' + (e instanceof Error ? e.message : String(e)))
+      }
     } finally {
-      setBusy(false)
+      if (mounted.current) setBusy(false)
+      void refreshSide() // 抓取后刷新历史与配额读数
     }
-  }, [])
+  }, [refreshSide, scope])
 
   const submit = (): void => {
     if (!url.trim()) { toast('err', '请输入要浏览的网址'); return }
     void fetchUrl(url)
   }
 
+  /** P2-8③：截图当前页（默认关闭的能力；按钮在不可用时就已禁用并说明原因）。 */
+  const takeShot = useCallback(async (): Promise<void> => {
+    const target = result?.finalUrl ?? lastUrl
+    if (!target) { toast('err', '请先抓取一个页面再截图'); return }
+    setShotBusy(true)
+    try {
+      const r = await webScreenshot({ url: target, scope: scope || undefined })
+      if (!mounted.current) return
+      if (r.ok) { setShot(r); toast('info', '已生成截图：' + r.file) } else { setShot(null); toast('err', errorText(r)) }
+    } catch (e) {
+      if (mounted.current) { setShot(null); toast('err', '截图失败：' + (e instanceof Error ? e.message : String(e))) }
+    } finally {
+      if (mounted.current) setShotBusy(false)
+      void refreshSide()
+    }
+  }, [lastUrl, refreshSide, result, scope])
+
+  const clearScoped = useCallback(async (id?: number): Promise<void> => {
+    if (!scope) { toast('err', '未绑定空间：空间历史需要工作台以空间模式运行'); return }
+    const r = await webHistoryClear({ scope, id })
+    if (r.ok) { toast('info', id ? '已删除该条记录' : '已清空本空间抓取历史'); void refreshSide() }
+    else toast('err', '清空失败：' + (r.error ?? '未知原因'))
+  }, [refreshSide, scope])
+
   const code = result?.code ?? ''
   const errFlag = result ? isErrorResult(result) : false
+  const cache = result ? cacheBadge(result) : null
+  const badges = result ? qualityBadges(result.quality) : []
+  const shotView = shotButtonView(meta?.shot)
 
   return (
     <div className="center-col">
@@ -137,6 +163,24 @@ export function BrowserView(): React.JSX.Element {
         </button>
       </div>
 
+      {/* P2-8④：配额读数（剩余次数/并发/当日流量）+ ③ 截图能力状态，接近上限时染色提醒 */}
+      <div className="panel browser-side-row">
+        <span className={'chip quota-' + quotaTone(meta?.quota)} title="按空间限流：每分钟请求数、并发抓取数、每日流量配额（超限返回 429）">
+          {quotaText(meta?.quota)}
+        </span>
+        <span className="chip" title={shotView.hint}>{shotStatusText(meta?.shot)}</span>
+        <span className="chip" style={{ marginLeft: 'auto' }}>
+          <button
+            className="btn small"
+            disabled={shotView.disabled || shotBusy || busy || !(result?.ok || lastUrl)}
+            title={shotView.hint}
+            onClick={() => void takeShot()}
+          >
+            {shotBusy ? '截图…' : shotView.label}
+          </button>
+        </span>
+      </div>
+
       {busy && <div className="panel browser-loading">⏳ 正在连接并解析目标页…</div>}
       {statusText && !busy && <div className="panel browser-loading">{statusText}</div>}
 
@@ -145,7 +189,11 @@ export function BrowserView(): React.JSX.Element {
           <div className="browser-meta">
             <span className="chip">{result.status ?? '?'}</span>
             <span className="chip">{result.contentType?.split(';')[0] ?? ''}</span>
-            <span className="chip" title={result.finalUrl}>{shortUrl(result.finalUrl ?? lastUrl)}</span>
+            <span className="chip" title={result.finalUrl}>{shortUrlText(result.finalUrl ?? lastUrl)}</span>
+            {/* P2-8①：把「为什么这么快 / 为什么是这个内容」说清楚 */}
+            {cache && <span className={'chip badge-' + cache.tone} title={cache.title}>{cache.label}</span>}
+            {/* P2-8②：抽取质量徽标 */}
+            {badges.map(b => <span key={b.label} className={'chip badge-' + b.tone} title={b.title}>{b.label}</span>)}
           </div>
           {errFlag ? (
             <div className="browser-error">⚠ {errorText(result)}</div>
@@ -177,10 +225,51 @@ export function BrowserView(): React.JSX.Element {
           )}
         </div>
       )}
+
+      {/* P2-8③：截图结果（缩略图 + 元信息；读取端点仅回环 + 仅 .png） */}
+      {shot?.ok && (
+        <div className="panel browser-shot">
+          <div className="browser-shot-head">
+            <span className="chip badge-ok">{shotResultText(shot)}</span>
+            <a className="btn small" href={webShotUrl(shot.scope, shot.file)} target="_blank" rel="noopener noreferrer">↗ 新窗口打开</a>
+          </div>
+          <img className="browser-shot-img" src={webShotUrl(shot.scope, shot.file)} alt="页面截图" />
+        </div>
+      )}
+
+      {/* P2-8①：空间级抓取历史（team-hub 持久化；与本地地址栏历史互补） */}
+      {scope && (
+        <div className="panel browser-scoped">
+          <div className="browser-scoped-head">
+            <span className="tag">🗂 本空间抓取历史</span>
+            <span style={{ fontSize: 11, color: 'var(--muted-2)' }}>{scoped?.ok === false ? (scoped.error ?? '历史不可用') : historyStatsText(scoped?.stats)}</span>
+            <button className="btn small" style={{ marginLeft: 'auto' }} onClick={() => setShowScoped(v => !v)}>{showScoped ? '收起' : '展开'}</button>
+            <button
+              className="btn small"
+              disabled={!scoped?.items?.length}
+              onClick={() => { if (window.confirm('清空本空间的全部抓取历史？')) void clearScoped() }}
+            >清空</button>
+          </div>
+          {showScoped && scoped?.items && scoped.items.length > 0 && (
+            <div className="browser-scoped-list">
+              {scoped.items.map(it => {
+                const v = historyItemView(it)
+                return (
+                  <div key={it.id} className={'browser-scoped-item tone-' + v.tone}>
+                    <button className="browser-scoped-link" title={it.url} onClick={() => void fetchUrl(it.url)}>{v.title}</button>
+                    <span className="browser-scoped-meta" title={v.meta}>{v.meta}</span>
+                    <span className="browser-scoped-meta">{relativeTime(it.updatedAt)}</span>
+                    <button className="btn small" title="删除该条记录" onClick={() => void clearScoped(it.id)}>✕</button>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+          {showScoped && scoped?.ok === false && (
+            <div className="browser-scoped-err">{scoped.error ?? '抓取历史不可用'}</div>
+          )}
+        </div>
+      )}
     </div>
   )
-}
-
-function shortUrl(u: string): string {
-  try { const x = new URL(u); return x.host + x.pathname.slice(0, 40) } catch { return u.slice(0, 60) }
 }

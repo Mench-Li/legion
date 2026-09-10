@@ -2946,6 +2946,34 @@ body {
 .browser-error { color: #ffb4a8; font-size: 12.5px; line-height: 1.8; background: rgba(255, 92, 92, 0.08); border: 1px solid rgba(255, 92, 92, 0.3); border-radius: 8px; padding: 8px 12px; }
 .browser-bar-foot { display: flex; justify-content: flex-end; gap: 6px; }
 
+/* ---------- P2-8 浏览器助手增强：配额读数 / 缓存与质量徽标 / 截图 / 空间抓取历史 ---------- */
+.browser-side-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11px; }
+.browser-side-row .chip { font-size: 10.5px; }
+.quota-ok { color: var(--green-2); }
+.quota-warn { color: var(--yellow); }
+.quota-danger { color: var(--red); }
+.quota-muted { color: var(--muted-2); }
+/* 缓存与抽取质量徽标：按语义着色（ok=可放心，info=说明，warn=需注意，muted=中性） */
+.badge-ok { color: var(--green-2); }
+.badge-info { color: var(--accent); }
+.badge-warn { color: var(--yellow); }
+.badge-muted { color: var(--muted-2); }
+
+.browser-shot { display: flex; flex-direction: column; gap: 8px; }
+.browser-shot-head { display: flex; align-items: center; gap: 8px; }
+.browser-shot-img { max-width: 100%; border: 1px solid var(--line-2); border-radius: 8px; background: var(--panel-2); }
+
+.browser-scoped { display: flex; flex-direction: column; gap: 6px; }
+.browser-scoped-head { display: flex; align-items: center; gap: 8px; }
+.browser-scoped-list { display: flex; flex-direction: column; gap: 2px; max-height: 260px; overflow: auto; }
+.browser-scoped-item { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 6px; border: 1px solid transparent; }
+.browser-scoped-item:hover { background: var(--panel-2); border-color: var(--line); }
+.browser-scoped-item.tone-err .browser-scoped-link { color: #ffb4a8; }
+.browser-scoped-link { background: none; border: none; padding: 0; text-align: left; cursor: pointer; color: var(--text); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; }
+.browser-scoped-link:hover { text-decoration: underline; }
+.browser-scoped-meta { font-size: 10.5px; color: var(--muted-2); white-space: nowrap; }
+.browser-scoped-err { font-size: 11.5px; color: var(--yellow); }
+
 
 
 /* ---------- 日程日历（S6：自研月视图面板）---------- */

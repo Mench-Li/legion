@@ -500,6 +500,105 @@ export interface WebFetchResult {
   excerpt?: string
   links?: string[]
   error?: string
-  /** ssrf_blocked | timeout | too_large | protocol_blocked | dns_error | http_4xx | empty_content | unsupported | invalid_url | fetch_error */
+  /** ssrf_blocked | timeout | too_large | protocol_blocked | dns_error | http_4xx | empty_content | unsupported | invalid_url | fetch_error | rate_limited | concurrency_limited | daily_quota_exceeded */
+  code?: string
+  /** P2-8④：超限时建议的重试等待秒数（来自 Retry-After） */
+  retryAfterSec?: number
+  /** P2-8①：结果来自空间缓存（未重新请求目标站点） */
+  cached?: boolean
+  /** P2-8①：缓存过期但经 ETag/Last-Modified 条件请求确认未变后复用 */
+  revalidated?: boolean
+  /** P2-8①：缓存年龄（毫秒） */
+  cacheAgeMs?: number
+  /** P2-8①④：本次传输的响应字节数（用于配额记账展示） */
+  bytes?: number
+  /** P2-8②：正文抽取质量元数据（服务端启发式结果，界面据此明示抽取可信度） */
+  quality?: WebExtractQuality
+}
+
+/** P2-8② 正文抽取质量：说明「选了哪个容器、丢了多少样板、是否截断」。 */
+export interface WebExtractQuality {
+  strategy: 'article' | 'main' | 'density' | 'body-fallback' | string
+  score: number
+  chars: number
+  headings: number
+  paragraphs: number
+  listItems: number
+  linkDensity: number
+  candidates: number
+  droppedBlocks: number
+  markdown: boolean
+  truncated: boolean
+}
+
+/** P2-8① 抓取历史条目（team-hub web_fetch_history，按空间）。 */
+export interface WebHistoryItem {
+  id: number
+  scope: string
+  url: string
+  finalUrl: string | null
+  host: string | null
+  title: string | null
+  excerpt: string | null
+  status: number | null
+  bytes: number | null
+  ms: number | null
+  errorCode: string | null
+  cached: boolean
+  hits: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface WebHistoryStats {
+  total: number
+  failed: number
+  bytes: number
+  shown: number
+}
+
+export interface WebHistoryResponse {
+  ok: boolean
+  scope?: string
+  items: WebHistoryItem[]
+  stats?: WebHistoryStats | null
+  error?: string
+}
+
+/** P2-8④ 配额快照（serve.mjs GET /api/web/meta）。 */
+export interface WebQuotaSnapshot {
+  scope: string
+  rpm: { limit: number; remaining: number; resetInMs: number }
+  concurrency: { limit: number; inflight: number }
+  hostRpmLimit: number
+  dailyBytes: { limit: number; used: number; remaining: number; day: string }
+}
+
+/** P2-8③ 截图能力状态：默认关闭；未找到浏览器时给出明确原因与开启指引。 */
+export interface WebShotStatus {
+  enabled: boolean
+  available: boolean
+  browser: string | null
+  dir: string
+  hint: string
+}
+
+export interface WebMetaResponse {
+  ok: boolean
+  quota: WebQuotaSnapshot | null
+  shot: WebShotStatus
+  cache: { entries: number; max: number; ttlMs: number }
+}
+
+export interface WebShotResult {
+  ok: boolean
+  file: string
+  scope: string
+  bytes: number
+  browser: string
+  width: number
+  height: number
+  ms: number
+  error?: string
   code?: string
 }

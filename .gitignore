@@ -11,6 +11,10 @@ scrum/board.json
 scrum/KANBAN.md
 scrum/kanban.html
 
+# P1-1 第 2 步：v1 文件库退役归档（archive-v1-scrum.mjs 产物，含运行时产物；
+# v1 任务数据仍可从 git 历史追溯，归档目录不入库以免 228KB 日志进仓）
+scrum/archive/
+
 # 士兵改动的统一 diff 补丁（运行时产物）
 scrum/patches/
 

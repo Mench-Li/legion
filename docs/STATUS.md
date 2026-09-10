@@ -4,16 +4,13 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-10　`run-ci --only test` **29 套件 / 671 测试全 PASS**（136s）—— 以本文件所在提交为准
+**最近一次全量基线**：2026-09-10　`run-ci --only test` **38 套件 / 924 用例全 PASS**（160s）—— 以本文件所在提交为准
 
-> ⚠️ **基线滞后说明（诚实登记）**：P2-7 / P2-8 / P3-1 / P3-2 之后新增或扩充的套件（`files-p27`、`files-ui`、
-> `web-p28`、`browser-ui`、`static-serve`、`config`，以及扩充到 158 例的 `whiteboard`）**未纳入上面这条全量基线**——
-> `test` 阶段当前会因 `notify-hub-smoke` 永久等待而无法跑完（根因与最小修法见
-> `docs/P2-7-evidence/verify-evidence.md` §7）。这些套件是**逐个单独复跑**验证的，未伪造全量基线；
-> 表中相应行的用例数已按实测更新。
->
-> P3-2 实测：受配置改动影响的面（team-hub 15 套件 + workbench 14 套件 + `artifact-policy` + `config`）
-> 一次 `node --test` 合计 **418 例 / 131 套件全通过**，白板 **158 例 / 30 套件全通过**。
+> ✅ **基线已恢复为「单命令可复现」**（2026-09-10）：`test` 阶段此前会因 `notify-hub-smoke` 泄漏 hub 子进程
+> 而**永不结束**（零输出、永久等待），P2-7 / P2-8 / P3-1 / P3-2 之后新增或扩充的套件只能用「逐套件单跑」
+> 拼基线。现已修掉根因并由全量运行验证，表中数字全部来自**同一次** `--only test` 运行。
+> 排查过程中另发现并修复两处**连带回归**（P3-2 的端口校验误拒 `0`、CI 未构建 `team-hub/lib`），
+> 详见 `docs/CI-TEST-STAGE-evidence/verify-evidence.md`。
 
 ---
 
@@ -55,28 +52,34 @@ $env:DSH_CHECKOUT='D:\project\DSH\dsh\deepseek-harness'   # 宿主面测试需�
 node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 ```
 
-产物：`.ci/<run-name>/ci.log`（全量输出）与 `summary.json`（阶段结论）。当前基线 29 套件：
+产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
+
+**当前基线：38 套件 / 924 用例，`--only test` 整体 PASS（160s）** —— 2026-09-10 实测
+（此前 `test` 阶段会因 `notify-hub-smoke` 泄漏子进程而**永不结束**，故长期只能用「逐套件单跑」拼出基线；
+根因、修复与两处连带回归见 `docs/CI-TEST-STAGE-evidence/verify-evidence.md`）。
 
 | 套件 | 用例 | 套件 | 用例 |
 | --- | --- | --- | --- |
 | chat | 42 | contracts | 56 |
-| skills | 20 | v1v2-contract | 14 |
-| calendar（P2-5 含重复展开/更新/冲突/关联） | 29 | team-hub-parity | 1 |
-| spaces | 5 | dedupe | 9 |
-| pipeline（SP-P0 空间流水线数据面） | 18 | calendar-ui（P2-5 前端纯函数） | 12 |
-| goal | 14 | chat-ui（P2-6 对话前端纯函数） | 9 |
-| rules | 7 | notify（P2-4 含真实 hub SSE 断线重连） | 15 |
-| artifact | 16 | dual-write | 2 |
+| skills | 20 | v1v2-contract | 17 |
+| permissions（F-02 权限内核与审批，3 文件） | 7 | team-hub-parity | 1 |
+| calendar（P2-5 含重复展开/更新/冲突/关联） | 29 | dedupe | 9 |
+| spaces | 5 | calendar-ui（P2-5 前端纯函数） | 12 |
+| pipeline（SP-P0 空间流水线数据面） | 19 | chat-ui（P2-6 对话前端纯函数） | 8 |
+| goal | 14 | notify（P2-4 含真实 hub SSE 断线重连） | 15 |
+| rules | 7 | hub-event-stream（F-01 scope/游标/信封） | 5 |
+| artifact | 16 | dual-write（P1-1 双进程写同库竞态） | 2 |
 | security | 6 | p13-host-injection（P1-3 真实宿主注入） | 7 |
-| read-auth | 14 | whiteboard（含 P3-1 治理端到端与前端静态契约，12 文件） | 158 |
-| files-api | 41 | plugins（含 P2-6 chat-context 13、SP-P0 space-pipeline） | 159 |
+| read-auth（鉴权矩阵 + 回环开放，2 文件） | 14 | whiteboard（含 P3-1 治理端到端与前端静态契约，12 文件） | 158 |
+| files-api | 41 | plugins（含 P2-6 chat-context、SP-P0 space-pipeline） | 177 |
+| files-p27 / files-ui（P2-7） | 36 / 19 | web-p28 / browser-ui（P2-8） | 21 / 21 |
 | web | 24 | static-serve（静态托管 404/SPA 回退/穿越） | 6 |
-| files-p27 / files-ui（P2-7，未入全量基线） | 36 / 19 | web-p28 / browser-ui（P2-8，未入全量基线） | 21 / 21 |
 | doc-render | 11 | board-plugin | 37 |
 | skill-importer | 4 | scrum | 25 |
-| hub-board / artifact-policy | 1 / 3 | config（P3-2 统一配置：引擎/跨进程规则/夹具/默认值漂移） | 27 |
+| hub-board / artifact-policy | 1 / 3 | config（P3-2 统一配置） | 28 |
+| web-history（P2-8 抓取历史） | 1 |  |  |
 
-（表中「未入全量基线」= 该套件在全量基线提交之后新增或扩充，用例数为**单独复跑**实测值。）
+（上表**全部**为 `--only test` 单次全量运行的实测值；不再存在「未入全量基线」的套件。）
 
 其他阶段：`--only doc`（文档新鲜度 + 历史 evidence banner 覆盖）、`--only build|smoke|env|deps|stage`。
 部署与回滚：`docs/DEPLOY.md`。现场（真实宿主）验收脚本：`scripts/live/p11-step2-verify.mjs`。

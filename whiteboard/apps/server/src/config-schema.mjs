@@ -25,7 +25,8 @@ export const SCHEMA = defineSchema({
   prefixes: ['WB_', 'WHITEBOARD_', 'BENCH_'],
   fields: [
     // ── 监听与鉴权（P3-2 统一项：token / host / port / DB 路径）──
-    { key: 'port', env: 'PORT', cli: 'port', type: 'int', default: 8080, min: 1, max: 65535, doc: '监听端口' },
+    // 0 合法：Node listen(0) = OS 分配空闲端口（bench/冒烟起临时服务时可用）
+    { key: 'port', env: 'PORT', cli: 'port', type: 'int', default: 8080, min: 0, max: 65535, doc: '监听端口（0 = 由 OS 分配）' },
     { key: 'host', env: 'HOST', cli: 'host', type: 'string', default: '127.0.0.1', doc: '监听地址；非回环必须配 token' },
     { key: 'token', env: 'WHITEBOARD_TOKEN', cli: 'token', type: 'string', default: '', sensitive: true, doc: '全局 token（未单独声明 token 的房间都用它）' },
     { key: 'ttlMs', env: 'TTL_MS', type: 'int', default: 10000, min: 1, doc: 'presence 陈旧判定（ms）' },

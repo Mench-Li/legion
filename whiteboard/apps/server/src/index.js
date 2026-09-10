@@ -38,7 +38,11 @@ const CFG = loadConfig(CONFIG_SCHEMA, { env: process.env, argv: process.argv.sli
 if (CFG.errors.length) {
   for (const e of CFG.errors) console.error(`[config] whiteboard 配置错误：${e.message}`);
   console.error('[config] 用 `node scripts/config/check.mjs --process=whiteboard` 查看完整配置面');
-  process.exit(1);
+  // 与 team-hub / workbench 一致：仅当本模块是入口时才 exit；被 import 时抛错，
+  // 避免一处配置错误直接杀掉导入方进程（本文件底部 isMain 用同一判定）。
+  const isEntry = process.argv[1] !== undefined && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
+  if (isEntry) process.exit(1);
+  throw new Error(`whiteboard 配置无效：${CFG.errors.map((e) => e.message).join('；')}`);
 }
 for (const w of CFG.warnings) console.error(`[config] whiteboard 配置告警：${w.message}`);
 

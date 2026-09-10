@@ -43,7 +43,12 @@ const CFG = loadConfig(CONFIG_SCHEMA, { env: process.env, argv: process.argv.sli
 if (CFG.errors.length) {
   for (const e of CFG.errors) console.error(`[config] workbench 配置错误：${e.message}`)
   console.error('[config] 用 `node scripts/config/check.mjs --process=workbench` 查看完整配置面')
-  process.exit(1)
+  // 本文件既作 CLI 入口，也被测试 import（static-serve / web-p28 用 `?root=` 导入式起服）：
+  // 在 import 路径上 exit 会杀掉测试进程，调用方无法报告失败原因 → 改为抛错。判定方式沿用本文件
+  // 底部的 isMain 约定（模块 URL 恒定位）。
+  const isEntry = process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+  if (isEntry) process.exit(1)
+  throw new Error(`workbench 配置无效：${CFG.errors.map((e) => e.message).join('；')}`)
 }
 for (const w of CFG.warnings) console.error(`[config] workbench 配置告警：${w.message}`)
 

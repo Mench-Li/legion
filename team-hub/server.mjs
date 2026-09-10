@@ -77,10 +77,24 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 // 其余 CHAT_*/MAX_RULES_LEN 等键仍按原样读取，但**已在 schema 中声明**（scan --check 强制），
 // 其默认值由 scripts/config/config.test.mjs 做漂移比对。
 const CFG = loadConfig(CONFIG_SCHEMA, { env: process.env, argv: process.argv.slice(2) })
+/** 本模块是「被 node 直接运行」还是「被 import」。
+ *  为什么必须区分：本文件既作 CLI 入口，也被宿主外壳 `team-hub/src/index.ts`（L70 `import('../server.mjs')`）
+ *  与大量契约测试 import。若在 import 路径上 `process.exit(1)`，一处配置错误会**直接杀掉宿主进程/测试进程**，
+ *  调用方连报告与降级的机会都没有（P3-2 首版即如此，属真实危险）。因此：
+ *    - 入口 → 打印错误 + exit 1（CLI 语义，启动脚本能拿到非零码）
+ *    - 被 import → 抛错（调用方有栈可查、可决定降级/跳过） */
+const IS_ENTRY = (() => {
+  const entry = process.argv[1]
+  if (!entry) return false
+  const a = resolve(entry)
+  const b = fileURLToPath(import.meta.url)
+  return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b
+})()
 if (CFG.errors.length) {
   for (const e of CFG.errors) console.error(`[config] team-hub 配置错误：${e.message}`)
   console.error('[config] 用 `node scripts/config/check.mjs --process=team-hub` 查看完整配置面')
-  process.exit(1)
+  if (IS_ENTRY) process.exit(1)
+  throw new Error(`team-hub 配置无效：${CFG.errors.map((e) => e.message).join('；')}`)
 }
 for (const w of CFG.warnings) console.error(`[config] team-hub 配置告警：${w.message}`)
 

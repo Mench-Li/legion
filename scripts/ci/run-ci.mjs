@@ -30,7 +30,7 @@
  */
 import { spawn } from 'node:child_process'
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync, copyFileSync, statSync, rmSync, symlinkSync, appendFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, resolve, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 
@@ -71,14 +71,29 @@ function exec(cmd, args, opts = {}) {
   })
 }
 
+/** 单个测试套件的硬上限。测试进程若泄漏句柄（子进程/定时器）会永不退出，
+ *  而 `node --test` 只在文件进程退出后才输出结果 → CI 表现为「零输出、永久等待」，
+ *  比失败更糟（无法产出全量基线）。这里给每个套件加硬上限，把「卡死」变成「明确的 FAIL」。
+ *
+ *  注意：**不要**用 `--test-force-exit` 来兜底。实测（Windows / Node 24.19）它会触发 libuv 断言
+ *  `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), src\win\async.c line 94`，
+ *  把本来全绿的套件（本仓 workbench/scripts/static-serve.test.mjs）变成「文件级失败」
+ *  （exit=1、tests=7/pass=6/fail=1）——即用假失败换掉了假挂起。
+ *  真正该做的是让测试自己回收句柄（见 notify-hub-smoke 的泄漏自检），外加这条超时兜底。 */
+const TEST_SUITE_TIMEOUT_MS = 300000
+
 async function runNodeTests(label, files, cwd, nodeArgs = []) {
-  const r = await exec(process.execPath, [...nodeArgs, '--test', ...files], { cwd })
+  const t0 = Date.now()
+  const r = await exec(process.execPath, [...nodeArgs, '--test', ...files], { cwd, timeoutMs: TEST_SUITE_TIMEOUT_MS })
+  const elapsed = Date.now() - t0
+  const timedOut = elapsed >= TEST_SUITE_TIMEOUT_MS - 500
   const all = r.out + '\n' + r.err
   const num = (re) => { const m = re.exec(all); return m ? Number(m[1]) : NaN }
   const counts = { tests: num(/\btests\s+(\d+)/), pass: num(/\bpass\s+(\d+)/), fail: num(/\bfail\s+(\d+)/) }
   const ok = r.code === 0 && (Number.isNaN(counts.fail) || counts.fail === 0)
   const failLines = all.split('\n').filter(l => /^not ok|# fail|^✖/.test(l)).slice(0, 8).join(' | ')
   const detail = label + ': exit=' + r.code + ' tests=' + counts.tests + ' pass=' + counts.pass + ' fail=' + counts.fail
+    + (timedOut ? '（套件超过 ' + Math.round(TEST_SUITE_TIMEOUT_MS / 1000) + 's 被杀：可能存在泄漏句柄或死锁）' : '')
   return { ok, code: r.code, detail: ok ? detail : detail + ' FAIL: ' + (failLines || '(see ci.log)'), raw: all }
 }
 
@@ -254,6 +269,16 @@ async function stageTest() {
   let allOk = true
   const dsh = process.env.DSH_CHECKOUT
   if (dsh && existsSync(join(dsh, 'packages'))) {
+    // p13-host-injection 需要 `@dsh-external/dsh-team-hub` 的**构建产物**：
+    // team-hub/package.json 的 main 指向 ./lib/index.js，而 lib/ 是未跟踪产物。
+    // 此前没有任何阶段构建它 → 该套件只能在本机恰好残留 lib/ 时通过，干净检出必失败
+    // （真实表现：宿主 60s 未就绪，因为 loader 报 `Cannot find module .../team-hub/lib/index.js`）。
+    // 这里显式构建，使该套件可从零复现；同时 p13 在没有可用 DSH_CHECKOUT 时仍按纪律 SKIP。
+    const th = await exec(process.execPath, [join(ROOT, 'scripts', 'ci', 'build-external-package.mjs'), 'team-hub'], { cwd: ROOT, env: { DSH_CHECKOUT: dsh } })
+    if (th.code !== 0) {
+      return { ok: false, detail: `  FAIL team-hub build（exit=${th.code}）：${(th.err || th.out).slice(-1200)}` }
+    }
+    detail.push('  PASS team-hub build（DSH_CHECKOUT=' + dsh + '）')
     const ext = await exec(process.execPath, [join(ROOT, 'scripts', 'ci', 'build-external-package.mjs'), 'plugins'], { cwd: ROOT, env: { DSH_CHECKOUT: dsh } })
     if (ext.code !== 0) {
       return { ok: false, detail: `  FAIL plugins build（exit=${ext.code}）：${(ext.err || ext.out).slice(-1200)}` }
@@ -275,7 +300,18 @@ async function stageTest() {
     const r = await runNodeTests(s.label, s.files.map(f => join(cwd, f)), cwd, s.nodeArgs || [])
     allOk = allOk && r.ok
     detail.push('  ' + (r.ok ? 'PASS' : 'FAIL') + ' ' + r.detail)
-    if (!r.ok) detail.push('  ' + (r.raw.split('\n').filter(l => /^not ok|^✖/.test(l)).slice(0, 6).join('\n  ')))
+    if (!r.ok) {
+      // 失败套件的**原始输出**必须落盘：只留 6 行摘要曾导致事后无法定性偶发失败
+      // （实测：一次 dual-write 偶发失败只留下「文件级失败」摘要，断言原文已丢失）。
+      try {
+        const dir = join(OUT_DIR, 'suites')
+        mkdirSync(dir, { recursive: true })
+        const safe = s.label.replace(/[^\w\u4e00-\u9fa5.-]+/g, '_').slice(0, 60)
+        writeFileSync(join(dir, safe + '.log'), r.raw + '\n')
+        detail.push('       原始输出：' + relative(ROOT, join(dir, safe + '.log')).split(sep).join('/'))
+      } catch { /* 落盘失败不影响判定 */ }
+      detail.push('  ' + (r.raw.split('\n').filter(l => /^not ok|^✖/.test(l)).slice(0, 6).join('\n  ')))
+    }
   }
   return { ok: allOk, detail: detail.join('\n') }
 }

@@ -10,7 +10,7 @@
  *   ⑤ 实时：真实 /api/events SSE 帧到达 → 去重合并 + 全局水位；
  *   ⑥ 断线恢复：kill 服务 → 状态上报重连中 → 重启 → 同实例自动重连（opens=2 → reconnected）。
  */
-import { test } from 'node:test'
+import { test, after as afterAll } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -20,6 +20,36 @@ import { fileURLToPath } from 'node:url'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const SERVER = join(ROOT, 'team-hub', 'server.mjs')
+
+/** 已启动的 hub 子进程登记表。
+ *  为什么需要它：本文件会起真实服务进程，而 `node --test` 只有在**测试进程退出**后才会输出结果——
+ *  任何一个没被回收的子进程都会让整份文件「永不结束」。历史事故：`setup()` 中途抛错（模块相对
+ *  导入缺扩展名）发生在 `boot()` 之后，拿不到 ctx 却留下一个 hub 子进程，CI 于是永久挂起、
+ *  全量基线长期无法产出（见 docs/P2-7-evidence/verify-evidence.md §7）。
+ *  因此这里把「起进程」与「收进程」都集中管理，并在文件结束时做兜底自检。 */
+const LIVE_CHILDREN = new Set()
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+/** 等待子进程**真正退出**：`kill()` 只保证「信号已发出」，不代表进程已消失。
+ *  宽限期内没退出就升级 SIGKILL（Windows 上 SIGTERM 若被忽略，只有强杀能回收）。 */
+async function killChild(child, graceMs = 3000) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return true
+  const exited = new Promise((r) => child.once('exit', () => r(true)))
+  try { child.kill() } catch { /* ignore */ }
+  if (await Promise.race([exited, sleep(graceMs).then(() => false)])) return true
+  try { child.kill('SIGKILL') } catch { /* ignore */ }
+  return Boolean(await Promise.race([exited, sleep(2000).then(() => false)]))
+}
+
+/** 兜底回收：把所有仍登记的 hub 子进程杀掉，返回仍存活的数量（应恒为 0）。 */
+async function sweepChildren() {
+  let survived = 0
+  for (const child of [...LIVE_CHILDREN]) {
+    if (!(await killChild(child))) survived++
+  }
+  return survived
+}
 
 /** 内存版 localStorage（api.ts 的 IO 层依赖它）。 */
 function makeStorage() {
@@ -42,6 +72,8 @@ function boot(port, db) {
   })
   let err = ''
   child.stderr.on('data', (d) => { err += d })
+  LIVE_CHILDREN.add(child)
+  child.on('exit', () => LIVE_CHILDREN.delete(child))
   const ready = new Promise((resolve, reject) => {
     const t0 = Date.now()
     const tick = () => {
@@ -58,19 +90,21 @@ function boot(port, db) {
   return { child, ready, port }
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const jpost = (port, path, body) => fetch(`http://127.0.0.1:${port}${path}`, {
   method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
 }).then((r) => r.json())
 
-/** 准备环境：隔离库 + 绝对 hub 基址 + 内存存储，然后导入真实 api.ts / notify.ts。 */
+/** 准备环境：隔离库 + 绝对 hub 基址 + 内存存储，然后导入真实 api.ts / notify.ts。
+ *
+ *  顺序很关键：**先装载被测模块、再起服务进程**。
+ *  被 import 的模块可能因相对导入缺扩展名等原因在 Node 下加载失败——那种失败必须在起服务之前暴露，
+ *  否则 `setup()` 会在「服务已启动」之后 reject，调用方拿不到 ctx、无从回收，留下泄漏进程（历史事故）。 */
 async function setup() {
   const dir = mkdtempSync(join(tmpdir(), 'notify-smoke-'))
   const db = join(dir, 'notify.db')
   const port = 30000 + Math.floor(Math.random() * 12000)
-  const hub = boot(port, db)
-  await hub.ready
 
+  // 模块加载期就需要的内存宿主对象（api.ts 的 IO 层依赖 localStorage / window / EventSource）
   const store = makeStorage()
   globalThis.localStorage = store
   globalThis.window = { location: { search: '' } }
@@ -79,11 +113,23 @@ async function setup() {
 
   const api = await import('../src/api.ts')
   const notify = await import('../src/notify.ts')
+
+  const hub = boot(port, db)
+  try {
+    await hub.ready
+  } catch (e) {
+    await killChild(hub.child) // 起服务失败/超时同样要回收，不能把子进程留给调用方
+    throw e
+  }
   return { dir, db, port, hub, store, api, notify }
 }
 
-function cleanup(ctx) {
-  try { ctx.hub.child.kill() } catch { /* ignore */ }
+/** 收尾：回收本用例起的 hub（含重启循环里的候选进程）与隔离目录。
+ *  允许 ctx 为空——`setup()` 自身失败时也必须能安全调用（这正是历史事故的修复点）。 */
+async function cleanup(ctx) {
+  if (ctx && ctx.hub) await killChild(ctx.hub.child)
+  await sweepChildren()
+  if (!ctx) return
   // Windows：hub 进程句柄释放有延迟，rmSync 可能 EPERM。清理失败不影响断言结论
   // （隔离库在系统临时目录，由 OS 回收），故容错重试后忽略。
   try { rmSync(ctx.dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 150 }) } catch { /* ignore */ }
@@ -173,10 +219,18 @@ class MiniEventSource {
   }
 }
 
+// 文件级兜底自检：所有用例结束后，不得有任何 hub 子进程存活。
+// 泄漏会让 `node --test` 永不退出（CI 表现为零输出、永久等待），所以这里**显式失败**而不是等它卡住。
+afterAll(async () => {
+  const survived = await sweepChildren()
+  assert.equal(survived, 0, '测试结束时仍有 ' + survived + ' 个 hub 子进程未回收（会导致测试进程无法退出）')
+})
+
 test('数据面 + 分类/优先级/跳转：真实审计派生通知，chat:* 被过滤，已读 IO 零服务端写入', { timeout: 90000 }, async () => {
-  const ctx = await setup()
-  const { port, api, notify, store } = ctx
+  let ctx
   try {
+    ctx = await setup()
+    const { port, api, notify, store } = ctx
     await seed(port)
 
     // 原始审计：应含 chat:*（证明过滤确实起作用，而不是数据没产生）
@@ -232,15 +286,16 @@ test('数据面 + 分类/优先级/跳转：真实审计派生通知，chat:* �
     assert.equal(after.length, raw.length, 'audit 行数不得变化（已读不写服务端）')
     assert.equal(notify.highestSeq(after), notify.highestSeq(raw), 'audit 最大 seq 不得变化')
   } finally {
-    cleanup(ctx)
+    await cleanup(ctx)
   }
 })
 
 test('实时 + 断线恢复：SSE 帧去重合并、全局水位、kill 后同实例自动重连（opens=2 → reconnected）', { timeout: 120000 }, async () => {
-  const ctx = await setup()
-  const { port, api, notify } = ctx
-  let hub = ctx.hub
+  let ctx
   try {
+    ctx = await setup()
+    const { port, api, notify } = ctx
+    let hub = ctx.hub
     const seen = []
     const statuses = []
     const off = api.subscribeHubAudit((ev) => seen.push(ev), { onStatus: (st) => statuses.push(st) })
@@ -266,14 +321,14 @@ test('实时 + 断线恢复：SSE 帧去重合并、全局水位、kill 后同�
     assert.equal(notify.shouldRefill(wm, [{ seq: wm + 3 }]), true, '跳变即判缺口')
 
     // 断线 → 重启 → 同实例自动重连（EventSource 自动重连 + Last-Event-ID）
-    hub.child.kill()
+    await killChild(hub.child) // 等它真正退出，避免同端口重启时与新进程抢端口
     await sleep(1500)
     assert.ok(statuses.some((s) => s.state === 'reconnecting' || s.state === 'closed'), '应上报重连中/已关闭：' + JSON.stringify(statuses.slice(-3)))
 
     let restarted = null
     for (let i = 0; i < 6 && !restarted; i++) {
       const candidate = boot(port, ctx.db)
-      try { await candidate.ready; restarted = candidate } catch { try { candidate.child.kill() } catch { /* ignore */ } await sleep(500) }
+      try { await candidate.ready; restarted = candidate } catch { await killChild(candidate.child); await sleep(500) }
     }
     assert.ok(restarted, '服务应能在同端口重启（断线恢复场景）')
     hub = restarted
@@ -293,6 +348,6 @@ test('实时 + 断线恢复：SSE 帧去重合并、全局水位、kill 后同�
 
     off()
   } finally {
-    cleanup(ctx)
+    await cleanup(ctx)
   }
 })

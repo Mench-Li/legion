@@ -11,7 +11,8 @@ export const SCHEMA = defineSchema({
   prefixes: ['DSH_WORKBENCH_', 'DSH_WEB_', 'DSH_HUB_'],
   fields: [
     // ── 监听与鉴权（P3-2 统一项）──
-    { key: 'port', env: 'DSH_WORKBENCH_PORT', cli: 'port', type: 'int', default: 5173, min: 1, max: 65535, doc: '监听端口（生产实例默认 5173）' },
+    // 0 合法（Node listen(0) = OS 分配空闲端口）；契约测试有用 `?root=` + 导入式用法，勿收紧为 >= 1
+    { key: 'port', env: 'DSH_WORKBENCH_PORT', cli: 'port', type: 'int', default: 5173, min: 0, max: 65535, doc: '监听端口（生产实例默认 5173；0 = 由 OS 分配）' },
     { key: 'host', env: 'DSH_WORKBENCH_HOST', cli: 'host', type: 'string', default: '127.0.0.1', doc: '监听地址' },
     { key: 'token', env: 'DSH_WORKBENCH_TOKEN', cli: 'token', type: 'string', default: '', sensitive: true, doc: '写操作鉴权 token（文件写/删除等）' },
     { key: 'teamHubToken', env: 'TEAM_HUB_TOKEN', type: 'string', default: '', sensitive: true, doc: '调用 team-hub 读接口用的 token（须与 hub 的 TEAM_HUB_TOKEN 一致）' },

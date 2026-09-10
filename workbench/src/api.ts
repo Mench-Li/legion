@@ -749,9 +749,11 @@ interface FilesErrorPayload {
 async function filesWrite<T>(url: string, init: RequestInit): Promise<T> {
   const res = await fetch(url, { ...init, headers: withAuthHeaders(init.headers) })
   if (!res.ok) {
-    const body = await res.json().catch(() => null) as FilesErrorPayload | null
-    const err = new Error(body?.error ?? `${res.status} ${res.statusText}`) as Error & { status?: number }
+    const body = await res.json().catch(() => null) as (FilesErrorPayload & { received?: number }) | null
+    const err = new Error(body?.error ?? `${res.status} ${res.statusText}`) as Error & { status?: number; received?: number }
     err.status = res.status
+    // P2-7：分片端点在 409（offset 不匹配）/400（未收齐）时回传服务端真实进度——前端据此**续传**而非从头再传
+    if (typeof body?.received === 'number') err.received = body.received
     throw err
   }
   return res.json() as Promise<T>
@@ -765,10 +767,19 @@ export interface FilesWriteOk {
   deleted?: boolean
   from?: string
   to?: string
+  /** P2-7：跳过（策略 skip 且目标已存在）——未落盘 */
+  skipped?: boolean
+  /** P2-7：本次生效的冲突策略（服务端回传，前端据此提示） */
+  strategy?: UploadStrategy
+  /** P2-7：请求名（rename 策略下 file.name 才是实际落盘名） */
+  requestedName?: string
 }
 
-export function filesUpload(scope: string, path: string, data: Blob, overwrite = false): Promise<FilesWriteOk> {
-  const qs = new URLSearchParams({ scope, path, ...(overwrite ? { overwrite: '1' } : {}) })
+/** P2-7 上传冲突策略（与 serve.mjs UPLOAD_STRATEGIES 一致，服务端为权威）。 */
+export type UploadStrategy = 'ask' | 'overwrite' | 'skip' | 'rename'
+
+export function filesUpload(scope: string, path: string, data: Blob, strategy: UploadStrategy = 'ask'): Promise<FilesWriteOk> {
+  const qs = new URLSearchParams({ scope, path, strategy })
   return filesWrite<FilesWriteOk>(`/api/files/upload?${qs.toString()}`, { method: 'PUT', body: data })
 }
 
@@ -782,6 +793,126 @@ export function filesRename(scope: string, from: string, to: string): Promise<Fi
 
 export function filesDelete(scope: string, path: string, confirm: 'yes'): Promise<FilesWriteOk> {
   return filesWrite<FilesWriteOk>('/api/files/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope, path, confirm }) })
+}
+
+// ───────────────────────── P2-7 文件中心增强（搜索 / 批量 / 分片上传 / git 只读）─────────────────────────
+
+export interface FilesSearchHit { name: string; path: string; type: 'dir' | 'file'; size: number; mtime: string | null }
+export interface FilesSearchResponse { ok: boolean; path: string; query: string; recursive: boolean; results: FilesSearchHit[]; truncated: boolean; maxResults: number }
+
+/** 文件名搜索（大小写不敏感子串；recursive=1 递归；结果上限触顶时 truncated=true 而非静默丢结果）。 */
+export function filesSearch(scope: string, path: string, q: string, recursive = false, limit = 500): Promise<FilesSearchResponse> {
+  const qs = new URLSearchParams({ scope, path, q, ...(recursive ? { recursive: '1' } : {}), limit: String(limit) })
+  return filesGet<FilesSearchResponse>(`/api/files/search?${qs.toString()}`)
+}
+
+export interface FilesBatchItem { path: string; ok: boolean; error?: string; to?: string }
+export interface FilesBatchResponse { ok: boolean; action: 'delete' | 'move'; okCount: number; failed: number; items: FilesBatchItem[] }
+
+/** 批量操作（删除 / 移动到目录）：逐项报告成败，单项失败不整体回滚。 */
+export function filesBatch(scope: string, action: 'delete' | 'move', paths: string[], toDir?: string): Promise<FilesBatchResponse> {
+  return filesWrite<FilesBatchResponse>('/api/files/batch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scope, action, paths, ...(toDir === undefined ? {} : { toDir }), ...(action === 'delete' ? { confirm: 'yes' } : {}) }),
+  })
+}
+
+export interface ChunkUploadInit {
+  ok: boolean
+  uploadId?: string
+  received: number
+  size: number
+  chunkSize: number
+  resumed?: boolean
+  skipped?: boolean
+  requestedName?: string
+  finalName?: string
+}
+
+/** 发起（或复用）分片上传会话：同 path+size 已有未完成会话 → 返回原 uploadId 与 received（断点续传）。 */
+export function filesUploadInit(scope: string, path: string, size: number, strategy: UploadStrategy = 'ask'): Promise<ChunkUploadInit> {
+  return filesWrite<ChunkUploadInit>('/api/files/upload/init', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scope, path, size, strategy }),
+  })
+}
+
+/** 追加一片（顺序语义：offset 必须等于服务端已收字节；不匹配 → 抛错，err.received 为真实进度）。 */
+export function filesUploadChunk(scope: string, uploadId: string, offset: number, data: Blob): Promise<{ ok: boolean; received: number; size: number }> {
+  const qs = new URLSearchParams({ scope, uploadId, offset: String(offset) })
+  return filesWrite<{ ok: boolean; received: number; size: number }>(`/api/files/upload/chunk?${qs.toString()}`, { method: 'PUT', body: data })
+}
+
+/** 完成分片上传：长度须等于声明 size（未收齐 → 抛错，err.received 为已收字节，会话保留可续传）。 */
+export function filesUploadComplete(scope: string, uploadId: string): Promise<FilesWriteOk & { name?: string; size?: number; requestedName?: string }> {
+  return filesWrite<FilesWriteOk & { name?: string; size?: number; requestedName?: string }>('/api/files/upload/complete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scope, uploadId }),
+  })
+}
+
+/** 中止分片上传（丢弃会话与分片；幂等）。 */
+export function filesUploadAbort(scope: string, uploadId: string): Promise<{ ok: boolean; aborted: boolean }> {
+  const qs = new URLSearchParams({ scope, uploadId })
+  return filesWrite<{ ok: boolean; aborted: boolean }>(`/api/files/upload/abort?${qs.toString()}`, { method: 'DELETE' })
+}
+
+export interface GitFileStatus {
+  path: string
+  from?: string
+  index: string
+  worktree: string
+  code: string
+  staged: boolean
+  untracked: boolean
+  conflicted: boolean
+}
+export interface GitStatusResponse {
+  ok: boolean
+  isRepo: boolean
+  repoRoot?: string
+  branch?: string | null
+  ahead?: number | null
+  behind?: number | null
+  files?: GitFileStatus[]
+  summary?: { staged: number; unstaged: number; untracked: number; conflicted: number; both: number }
+  total?: number
+}
+
+/** git **只读**：状态（分支 / 领先落后 / 逐文件标记，区分暂存与工作区）。 */
+export function fetchGitStatus(scope: string, path = ''): Promise<GitStatusResponse> {
+  const qs = new URLSearchParams({ scope, path })
+  return filesGet<GitStatusResponse>(`/api/files/git/status?${qs.toString()}`)
+}
+
+export interface GitDiffResponse {
+  ok: boolean
+  isRepo: boolean
+  path?: string
+  relInRepo?: string
+  staged?: boolean
+  diff?: string
+  binary?: boolean
+  truncated?: boolean
+  note?: string | null
+}
+
+/** git **只读**：单文件 unified diff（staged=true 取索引 vs HEAD）。 */
+export function fetchGitDiff(scope: string, path: string, staged = false): Promise<GitDiffResponse> {
+  const qs = new URLSearchParams({ scope, path, ...(staged ? { staged: '1' } : {}) })
+  return filesGet<GitDiffResponse>(`/api/files/git/diff?${qs.toString()}`)
+}
+
+export interface GitCommit { hash: string; short: string; author: string; date: string; subject: string }
+export interface GitLogResponse { ok: boolean; isRepo: boolean; repoRoot?: string; commits?: GitCommit[] }
+
+/** git **只读**：最近提交。 */
+export function fetchGitLog(scope: string, path = '', limit = 20): Promise<GitLogResponse> {
+  const qs = new URLSearchParams({ scope, path, limit: String(limit) })
+  return filesGet<GitLogResponse>(`/api/files/git/log?${qs.toString()}`)
 }
 
 // ───────────────────────── 技能安装（技能仓库：本地目录 / GitHub → 候选 → 导入；同源 /api/skills）─────────────────────────

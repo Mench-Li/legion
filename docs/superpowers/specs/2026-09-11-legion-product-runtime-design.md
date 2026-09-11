@@ -154,6 +154,9 @@ Git 保存可审阅的代码、能力包和导出证据；不承担运行中业�
 │                    DshRuntimeAdapter                     │
 │  Subagents / Agent Loop / Tools / Session / Model Config │
 ├──────────────────────────────────────────────────────────┤
+│         Legion DSH 组合补丁层（host 平面，随产品升级）   │
+│  ToolGuard / pre-execute 策略 / approval / preset 表     │
+├──────────────────────────────────────────────────────────┤
 │  team-hub SQLite / Workspace / Git / OS Credential Store │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -313,8 +316,11 @@ Queued
 - 外部写操作使用幂等键。
 - 无法确认外部结果时进入 `UnknownOutcome`，不得伪装成功或自动重复写入。
 - 状态迁移、恢复和人工处置均写入 audit。
+- `AwaitingApproval` 期间 heartbeat 继续、lease 随 heartbeat 续期，但受审批 TTL 约束；审批 TTL 到期自动 deny，Attempt 转为 `blocked`，写入 audit 并通知用户。
 
 `AwaitingApproval` 是 Attempt/Run 级暂停态，可以由运行中的工具请求进入并在批准后回到 `Running`，也可以由验收后的交付审批进入并在批准后进入 `HandingOff` 或 `Completed`。它不直接替换 team-hub 的用户任务状态。
+
+审批等待期必须明确 lease 与 heartbeat 行为，两种退化都不可接受：停止 heartbeat 会使 lease 到期并被其他 worker 领取，从而对同一 Task 重复执行，直接违背 §15 的“已确认外部写操作的重复执行为零”；无限续期则让一个无人处理的审批永久占用 lease，与 §6.3“已有 lease 不延长为无限期”冲突。因此采用 heartbeat 继续 + 审批 TTL 的方案，TTL 是配置项，必须在配置 Schema 中声明，并与 F-02 已有的 `expired` 审批状态对齐。
 
 新旧状态映射：
 
@@ -465,7 +471,34 @@ canonical operation 明确定义：Schema 版本、domain separator、固定键�
 
 无人值守模式下，要求人工审批的操作默认拒绝或保持等待，不自动降级为允许。legacy 路径在完成 DSH 强制面接线前禁止高风险工具；“未批准高风险写操作为零”只在该门禁满足后成为发布指标。
 
-### 6.9 Product Launcher
+强制面的可用性语义与不变量固定如下：
+
+- 策略门与审批 answerer 必须自带超时，并分别覆盖连接阶段与响应阶段。DSH 会在异步门 settle 之后重新检查取消，但不会放弃挂起的 promise：team-hub 进程存活却不响应（SQLite 卡住、事件循环阻塞、请求排队）时，工具调用会无限期挂起。超时必须 fail closed——策略门 deny、answerer 返回 `unavailable`——并写入 audit。超时值属于配置 Schema。
+- team-hub 不可达时 answerer 不得“等 team-hub 恢复后再询问”，等待会突破 Run 的期限约束；该情形按 §6.3 的 Runtime 健康表处理，不把不可达伪装成待审批。
+- F-02 的 `allow-once` 是按 canonical operation 哈希的一次性决定，DSH 的 `allowed-once` 是按 `callId` 的一次性授权。answerer 命中 Legion 已批准决定时，消费必须由 team-hub 执行原子 CAS（`approved → consumed`），同一哈希只能成功一次，CAS 失败即 deny。同一 Attempt 内模型对同一目标发出参数完全相同的并发重复调用不得放行两次。
+- 可测不变量：任何已由 `tools/pre-execute` 放行且获得 `allowed-once` 的调用，不得再被 `ctx.tools.guard()` 拒绝。guard 只有降级语义、没有 allow 语义，出现“人工已批准但仍被 guard 拒绝”即视为强制面配置错误，必须能由审计定位到具体强制点。
+- `tool_calls` 必须记录决定来源（pre-execute / guard / approval / sandbox 兜底）；否则事后无法区分策略拒绝与沙箱兜底拒绝，而这两类的修复动作不同。
+
+### 6.9 DSH 强制面的归属、分发与升级
+
+§6.8 的映射要成为安全保证，前提是强制面挂载在正确的组合平面上。DSH 逐层 patch 组合：`dsh-base` bundle 打底，模式 bundle（web-app / headless）与用户 profile 层在其上覆盖；host 组合拥有 registry 本身、sandbox 与审批栈、持久化和模型路由，agent preset 则按 session 挂载。因此归属固定为：
+
+| 组件 | 所属平面 | 内容 |
+|---|---|---|
+| Legion DSH 组合补丁层 | host 组合 / profile 层 | ToolGuard hard floor、`tools/pre-execute` 策略 listener、approval answerer、Legion 自有 permission preset 表 |
+| Legion 员工 agent preset | agent 平面，按 session 挂载 | 岗位工具集、persona、提示段、skill 引用 |
+
+规则：
+
+- 静态 hard floor、策略 listener、approval answerer 与 preset 表必须位于 host 组合补丁层，不得只放在 agent preset。preset 按 session 挂载且可替换、可扩展、可被 shadow，把安全下限放在其中等于让“不可绕过的下限”取决于当前 session 恰好挂了哪个 preset。
+- agent preset 只承载岗位能力，不提供任何服务；确需提供服务时必须位于带 `isolate` realm 的 group 内，避免与其他 preset 在 root realm 撞名而被挂载期拒绝。
+- Legion 必须声明自己的 permission preset 表，不复用 DSH 默认表。默认表把 `workspace-write`↔`ask` 与 `danger-full-access`↔`never` 绑定，若按默认表实现“无人值守 = `approval/policy=never`”，沙箱会同时被降级为 `danger-full-access`，与 §10 的最小权限要求直接冲突。首版至少定义 `legion-attended`（workspace-write + ask）与 `legion-unattended`（workspace-write + never）。
+- 补丁层不得编辑或覆盖 DSH 随部署分发的 preset 安装，只能通过产品自己的 profile/补丁层注入；升级必须重新应用并验证，不得假定 patch 锚点不变。
+- 组合补丁层随 `dshVersion` 一起进入版本清单（§9.1）并纳入 DSH 升级门禁（§9.3）。DSH 升级会改变 bundle 结构与 patch 锚点，补丁层静默失效比 API 变化更隐蔽。
+- Runtime Manager 启动时校验补丁层已成功应用且强制面已生效；未生效按 `incompatible` 处理，禁止自动执行。
+- approval policy 与 preset 是按 session 可变旋钮（`setApprovalPolicy` 是唯一写路径，重放会重建覆盖）。承载某 Run 的 session 在 Run 期间禁止改写这两个旋钮；确需改写时必须写入 audit 并作为 Run 事件记录，否则 §6.8 的“在 Run 快照中冻结”无法兑现。
+
+### 6.10 Product Launcher
 
 Product Launcher 是客户唯一启动入口，管理：
 
@@ -488,7 +521,7 @@ Product Launcher 是客户唯一启动入口，管理：
 
 Launcher 不修改客户项目内容；所有进程参数和路径来自经过 Schema 校验的产品配置。
 
-### 6.10 产品配置与目录
+### 6.11 产品配置与目录
 
 运行目录按职责隔离：
 
@@ -508,7 +541,7 @@ LogDir/       可轮转日志
 
 所有环境变量必须在配置 Schema 中声明。不得把安装目录当作可写业务数据目录，也不得把密钥写入上述普通配置文件。
 
-### 6.11 审计、用量和可信交付
+### 6.12 审计、用量和可信交付
 
 每次运行至少可查询：
 
@@ -525,7 +558,7 @@ Workbench 提供从“目标 → 任务 → 员工执行 → 工具 → 证据 �
 
 除单次运行审计外，Product Runtime 还必须提供最小系统指标：队列深度、最老待办年龄、活跃 lease、租约过期率、Attempt 重试率、Dead Letter 数量、Runtime 可用率、模型错误率和升级结果。商业 Alpha 默认仅本地展示；远程心跳必须显式选择加入、只发送脱敏聚合状态，并允许用户随时关闭。
 
-### 6.12 Pack Manager
+### 6.13 Pack Manager
 
 Pack Manager 首版只负责可验证安装和 TeamPlan 编译，不负责在线市场、付费分发或远程代码执行。能力包包含：
 
@@ -538,7 +571,7 @@ Pack Manager 首版只负责可验证安装和 TeamPlan 编译，不负责在线
 
 软件交付团队作为内置首包验证协议；跨境电商团队在商业 Alpha 底座通过后接入。在线能力包市场和第三方包信任模型另行立项。
 
-### 6.13 Product API 兼容性
+### 6.14 Product API 兼容性
 
 Workbench 与 team-hub 也是长期边界。商业 Alpha 为同一安装包内精确版本组合，暂不强制把全部现有路由迁移到 `/api/v1`；team-hub 的 `/api/config` 必须返回 `productApiVersion`、`schemaVersion` 和 capabilities，Workbench 启动时进行精确主版本校验。
 
@@ -561,7 +594,7 @@ Workbench 与 team-hub 也是长期边界。商业 Alpha 为同一安装包内�
 | `task_attempts` | 每次任务执行尝试、状态、lease 和恢复信息 |
 | `agent_runs` | Runtime run、模型、时间、结果和错误 |
 | `agent_run_events` | Run 内部详细事件；不是第二条公开业务流，大体量 delta 可按保留策略压缩 |
-| `tool_calls` | 工具请求、权限决定、幂等键和结果 |
+| `tool_calls` | 工具请求、权限决定与决定来源、幂等键和结果 |
 | `usage_records` | token、费用估算和耗时 |
 | `artifacts` | 产物位置、类型、内容哈希和来源 |
 | `secret_refs` | 密钥引用、用途和元数据，不含密文 |
@@ -624,6 +657,8 @@ DSH 产生不可变 ToolExecution
 → Run 回到 Running
 ```
 
+审批等待期间 heartbeat 继续，并按 §6.4 的审批 TTL 续期；TTL 到期自动拒绝并转入人工处置。批准与消费共用同一原子 CAS，同一 canonical 哈希只能放行一次，失败即 deny。
+
 Legion 生成外部写操作幂等键，基础公式为：
 
 ```text
@@ -643,12 +678,15 @@ SHA-256("legion-tool-effect-v1" || workspaceId || taskId || attemptId || callId 
   "productVersion": "0.3.0",
   "legionVersion": "0.3.0",
   "dshVersion": "0.8.3",
+  "dshCompositionPatchVersion": 1,
   "schemaVersion": 12,
   "runtimeContractVersion": 1,
   "packProtocolVersion": 1,
   "channel": "stable"
 }
 ```
+
+`dshCompositionPatchVersion` 标识 §6.9 的 Legion DSH 组合补丁层版本。它与 `dshVersion` 强绑定：补丁层通过 patch 锚点作用于 DSH bundle，锚点随 DSH 版本变化，因此两者必须成对验证，不允许出现“DSH 已升级但补丁层仍是旧锚点”的组合。
 
 客户不能在产品内单独升级 DSH。启动时发现实际版本与清单不一致，应停止自动执行并引导修复，不带病运行。
 
@@ -675,6 +713,7 @@ DSH 新版本必须通过：
 - DSH 崩溃和产品重启恢复测试。
 - 软件交付数字团队黄金端到端流程。
 - 数据库升级、降级恢复和旧任务兼容测试。
+- §6.9 组合补丁层在目标 DSH 版本上成功应用，且强制面（ToolGuard、pre-execute、approval answerer、permission preset 表与 sandbox）回归通过；补丁锚点失效视为门禁失败。
 
 ### 9.4 客户端升级流程
 
@@ -692,6 +731,8 @@ DSH 新版本必须通过：
 ```
 
 数据库迁移优先采用向前兼容和 expand/contract 策略。若新版本已写入旧版本无法理解的数据，禁止仅回滚二进制；必须使用经过验证的数据库恢复或向前修复流程。
+
+组合补丁层随程序版本原子切换后重新应用并自检（§6.9）；补丁无法应用或强制面未生效时升级失败并保留旧程序版本，不得带病启动。
 
 商业 Alpha 支持从当前 stable 的 N-1 版本升级到 N，不承诺跨多个主版本直接升级；更旧版本先按逐级升级或离线迁移处理。升级前备份至少保留最近 3 个成功快照和 30 天，取更大者；每个 stable 候选版本必须在干净机器和真实备份副本上完成自动恢复演练，产品进入稳定运营后至少每季度抽样执行一次恢复演练。
 
@@ -722,7 +763,8 @@ legion/
 ├── runtime/
 │   ├── contracts/
 │   ├── manager/
-│   └── adapters/dsh/
+│   ├── adapters/dsh/
+│   └── dsh-composition/  # §6.9 host 平面补丁层与员工 agent preset（随 dshVersion 版本化）
 ├── orchestrator/
 │   ├── scheduler/
 │   ├── state-machine/
@@ -767,6 +809,8 @@ legion/
 - `PRT-007`：建立旧系统功能、HTTP、数据库和执行行为基线。
 - `PRT-008`：冻结 Task、Attempt、Run、Session、Lease、TeamPlan 和 Context Snapshot 术语。
 - `PRT-009`：记录黄金流程的成功率、人工介入、token、费用估算、端到端耗时和峰值资源基线。
+- `PRT-010`：记录当前 DSH 组合层、profile 层、bundle 结构与 patch 锚点基线，作为 §6.9 补丁层的对照起点。
+- `PRT-011`：确定 DSH 分发形态：内置 Node 运行时、DSH 代码与依赖树的打包方式、首次运行是否必须联网、`DSH_HOME` 位置、preset 安装位，以及升级时如何保持 shipped preset install 不被编辑。
 
 完成标准：在受控环境稳定复现一次端到端软件交付，并能对后续新路径做等价比较。
 
@@ -799,6 +843,8 @@ legion/
 - `PRT-211`：验证 DSH continuable session 的身份、权限继承、事件续接、取消和恢复边界。
 - `PRT-212`：接入最小 DSH 强制面：ToolGuard hard floor、pre-execute fail-closed 和 approval answerer。
 - `PRT-213`：探测 DSH sandbox backend、sandbox-aware executor 和实际 enforcement，不满足要求时禁止执行。
+- `PRT-214`：按 §6.9 建立 Legion DSH 组合补丁层（host 平面：ToolGuard hard floor、pre-execute 策略 listener、approval answerer、Legion 自有 preset 表）与员工 agent preset，并纳入 `dshCompositionPatchVersion`。
+- `PRT-215`：实现补丁层应用与强制面生效的启动自检；未生效时 Runtime Manager 按 `incompatible` 处理并禁止自动执行。
 
 完成标准：同一任务通过两条路径得到等价任务状态、结构化结果和产物，且敏感信息不出现在输出中。
 
@@ -810,8 +856,12 @@ legion/
 - `PRT-254`：完成 per-user 数据目录、Secret Store 最小闭环和一键启动。
 - `PRT-255`：在隔离测试空间完成安装、运行、取消、重启和诊断验证。
 - `PRT-256`：让内部设计伙伴独立完成一次真实但低风险的软件任务。
+- `PRT-257`：Launcher 负责 DSH 运行时与组合补丁层的首次安装、应用自检和修复入口（PRT-011 的分发形态在此落地）。
+- `PRT-258`：冻结本阶段产出的进程清单、per-user 目录布局、配置 Schema 和 Secret Store 接口，作为后续阶段沿用的契约。
 
 完成标准：不依赖终端和 DSH 配置知识，设计伙伴可以安装产品、配置 BYOK、启动一个受限数字员工并查看结果。未达到该标准前，不启动阶段 3 的大规模编排提取。
+
+阶段 2.5 的最小实现是最终实现的子集，不是一次性脚手架。PRT-251 与 PRT-254 的进程清单、目录布局、配置 Schema 和 Secret Store 接口即为阶段 5、阶段 7 沿用的契约，后续只做增量扩展，不重新设计，避免同一交付物做两遍。
 
 ### 阶段 3：Orchestrator Core
 
@@ -856,7 +906,7 @@ legion/
 
 - `PRT-501`：实现 ModelProfile 数据模型和 API。
 - `PRT-502`：实现岗位模型绑定和 fallback。
-- `PRT-503`：实现单次、岗位和每日预算策略。
+- `PRT-503`：实现单次运行与岗位预算策略；每日总预算与组织级账本延后（见 §6.6）。
 - `PRT-504`：实现模型连通性与能力测试。
 - `PRT-505`：实现 Windows Secret Store。
 - `PRT-506`：迁移现有非敏感模型配置。
@@ -879,11 +929,17 @@ legion/
 - `PRT-607`：接入审批箱和无人值守策略。
 - `PRT-608`：审批绑定规范化操作哈希。
 - `PRT-609`：实现字段变化后审批失效。
-- `PRT-610`：持久化工具调用、决定、结果和幂等键。
+- `PRT-610`：持久化工具调用、决定与决定来源、结果和幂等键。
 - `PRT-611`：扩展 F-02 canonical operation，替换键序敏感的 `JSON.stringify` 判等。
 - `PRT-612`：实现 Legion 权限语义到 ToolGuard、pre-execute、approval、permission preset 和 sandbox 的固定映射。
 - `PRT-613`：保证审批、UI、审计与执行看到同一不可变工具参数，禁止 pre-execute 改写。
 - `PRT-614`：在新强制面完成前禁用 legacy 高风险工具，并建立发布门禁。
+- `PRT-615`：实现审批 TTL、过期自动拒绝，以及与 lease/heartbeat 的交互（§6.4）。
+- `PRT-616`：实现 `allow-once` 的 team-hub 原子 CAS 消费，防护同一 Attempt 内相同 canonical 哈希的并发重复调用。
+- `PRT-617`：实现策略门与 approval answerer 的连接/响应双段超时、`unavailable` fail-closed 语义和决定来源审计。
+- `PRT-618`：声明 `legion-attended` 与 `legion-unattended` preset 表，禁止复用 DSH 默认表。
+- `PRT-619`：实现 Run 期间 approval policy 与 preset 的冻结，以及改写审计。
+- `PRT-620`：验证“已由 pre-execute 放行且获得 `allowed-once` 的调用不得被 ToolGuard 拒绝”的一致性不变量。
 
 完成标准：未批准高风险写操作为零；改变已批准操作的任一关键字段后无法继续执行。
 
@@ -954,7 +1010,7 @@ legion/
 | 里程碑 | 包含阶段 | 可交付结果 |
 |---|---|---|
 | M0 基线冻结 | 阶段 0 | 当前系统可重复验收和比较 |
-| M1 Runtime 边界 | 阶段 1～2 | DSH 被稳定接口隔离，新增代码不再直接依赖 DSH |
+| M1 Runtime 边界 | 阶段 1～2 | DSH 被稳定接口隔离，新增代码不再直接依赖 DSH；host 平面强制面补丁层就位并纳入版本清单 |
 | M1.5 设计伙伴切片 | 阶段 2.5 | 一键启动单个受限员工完成真实低风险任务 |
 | M2 可恢复编排 | 阶段 3～4 | 多员工编排与上下文可测试、可回放、可恢复 |
 | M3 产品配置与安全 | 阶段 5～6 | 用户可安全配置模型并控制工具权限 |
@@ -981,6 +1037,11 @@ Program 级停止条件：M1.5 评审时，如果设计伙伴仍不能在无开�
 - 取消幂等以及取消与完成竞态。
 - Product API 主版本、capabilities 和写 API Schema。
 - F-01 单一公开事件流与 F-02 决策模式回归。
+- 审批 TTL 到期自动拒绝，以及审批等待期 lease/heartbeat 行为。
+- `allow-once` 原子 CAS 消费，以及同一 Attempt 内相同 canonical 哈希并发重复调用只放行一次。
+- 策略门与 answerer 在连接超时、响应超时、team-hub 不可达三种情形下的 fail-closed 行为。
+- pre-execute 放行与 ToolGuard 拒绝的一致性不变量。
+- 强制面决定来源（pre-execute / guard / approval / sandbox）可归因。
 
 ### 14.2 新旧对拍
 
@@ -1007,6 +1068,9 @@ Program 级停止条件：M1.5 评审时，如果设计伙伴仍不能在无开�
 - 升级包损坏、迁移失败和新版本健康失败。
 - 旧 lease worker 恢复后尝试提交迟到结果。
 - in-flight 外部写工具发生断连且目标系统不支持幂等键。
+- team-hub 进程存活但不响应（SQLite 卡住、事件循环阻塞、请求排队）时，策略门与 answerer 挂起并最终超时 fail closed。
+- 审批等待期间 worker 崩溃或 lease 到期，不得导致同一 Task 被重复执行。
+- DSH 升级后组合补丁层锚点失效或强制面未生效，产品拒绝自动执行而不是带病运行。
 
 ### 14.4 安全测试
 
@@ -1016,6 +1080,9 @@ Program 级停止条件：M1.5 评审时，如果设计伙伴仍不能在无开�
 - 非回环访问未认证时被拒绝。
 - DSH sandbox 配置存在但实际 backend/enforcement 不可用时禁止执行。
 - 不可信 Context Source 不能改变权限档位、工具白名单和审批结果。
+- 无人值守 preset 不得把 sandbox 降级为 `danger-full-access`；`legion-unattended` 必须保持 workspace-write。
+- 承载 Run 的 session 在 Run 期间无法改写 approval policy 或 preset，任何改写都留下审计记录。
+- host 平面强制面缺失或未生效时，Agent 不能获得未受限的工具执行能力。
 
 ## 15. 商业 Alpha 完成标准
 

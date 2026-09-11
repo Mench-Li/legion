@@ -318,7 +318,7 @@ async function stageTest() {
   const wbTests = ((wbPkg.scripts && wbPkg.scripts.test) || '').split(/\s+/).filter(t => t.endsWith('.mjs'))
   // 文件数从 package.json 的 test 脚本**算出来**，不写死：写死的数字已经漂移过一次
   // （脚本里 15 个、标签写 12），而标签正是排障时的第一手信息。
-  suites.push({ label: 'whiteboard（' + wbTests.length + ' 文件含真实服务 e2e、P3-1 治理端到端、P4-5 审计归档跨重启与前端静态契约）', files: wbTests, cwd: wbDir })
+  suites.push({ label: 'whiteboard（' + wbTests.length + ' 文件含真实服务 e2e、P3-1 治理端到端、P4-5 审计归档跨重启、P4-6 单实例目录锁与前端静态契约）', files: wbTests, cwd: wbDir })
   const detail = []
   let allOk = true
   const dsh = process.env.DSH_CHECKOUT

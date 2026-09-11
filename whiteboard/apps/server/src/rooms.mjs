@@ -11,6 +11,7 @@ import path from 'node:path';
 
 import { Room } from './room.mjs';
 import { createStorage } from './storage.mjs';
+import { acquireDirLock, describeHolder } from './dirLock.mjs';
 
 /** 房间 ID 规则：小写字母/数字开头，其后允许小写字母、数字、`-`、`_`，长度 1..64。
  *  故意排除大写与点号——避免大小写不敏感文件系统上的歧义与路径穿越（`..`）。*/
@@ -54,8 +55,9 @@ export class RoomRegistry {
    * @param {object} opts
    * @param {string} opts.dir      房间 DB 目录（每个房间 <dir>/<roomId>.db）
    * @param {boolean} [opts.inMemory]  true 时使用内存存储（测试/压测），不落盘
+   * @param {boolean} [opts.lockDir]  文件存储时是否对目录加单实例锁（默认 true）
    */
-  constructor({ dir, inMemory = false, config = {}, audit = null, metrics = null, now = () => Date.now() } = {}) {
+  constructor({ dir, inMemory = false, config = {}, audit = null, metrics = null, now = () => Date.now(), lockDir = true, lockPort = null, lockHost = null } = {}) {
     this.cfg = { ...ROOM_DEFAULTS, ...config };
     this.dir = dir;
     this.inMemory = inMemory;
@@ -64,6 +66,38 @@ export class RoomRegistry {
     this.now = now;
     this.rooms = new Map(); // roomId -> { room, lastActive, openedAt }
     this.closedCount = 0;
+    // P4-6（候选 #5）：文件存储必须独占目录——否则两个实例会**静默**分裂数据
+    // （见 dirLock.mjs 顶部与 docs/P4-6-evidence/verify-evidence.md 的实测读数）。
+    // 内存存储不落盘，多个注册表共存无害，因此不加锁（测试与 bench 依赖这一点）。
+    this.lock = null;
+    this.lockFailure = null;
+    this.lockDisabled = !this.inMemory && !!this.dir && lockDir === false;
+    if (!this.inMemory && this.dir && !this.lockDisabled) {
+      const got = acquireDirLock(this.dir, { port: lockPort, host: lockHost, now });
+      if (got.ok) {
+        this.lock = got;
+        if (got.staleTakeover) {
+          // 接管陈旧锁**必须留痕**：上一次进程没有优雅退出（被强杀？），否则这会是个隐形的运行时事实
+          this.audit?.record({ type: 'lock_takeover', dir: this.dir, from: got.tookOverFrom ?? null });
+        }
+      } else {
+        this.lockFailure = got;
+      }
+    }
+  }
+
+  /** 单实例守卫状态（供 /healthz、/readyz 与启动诊断） */
+  lockStatus() {
+    if (this.inMemory) return { mode: 'in-memory', held: false };
+    if (this.lockDisabled) return { mode: 'disabled', held: false };
+    if (this.lock) return { mode: 'exclusive', held: true, path: this.lock.path, staleTakeover: !!this.lock.staleTakeover };
+    return {
+      mode: 'denied',
+      held: false,
+      reason: this.lockFailure?.reason ?? 'unknown',
+      holder: this.lockFailure?.holder ?? null,
+      holderAlive: !!this.lockFailure?.holderAlive,
+    };
   }
 
   /** 已打开房间的只读概况（供 /healthz、/readyz、/metrics、/api/rooms） */
@@ -102,6 +136,22 @@ export class RoomRegistry {
       return { ok: true, room: existing.room, created: false };
     }
     if (this.rooms.size >= this.cfg.MAX_ROOMS) return { ok: false, reason: 'max_rooms' };
+    // P4-6：目录被另一个**活着的**实例占着时拒绝打开，绝不「先开着试试」——
+    // 旧行为就是这样静默分裂数据的（两个实例各自一份内存 doc，且 snapshot 会删掉对方没读到的 op）。
+    if (this.lockFailure) {
+      const h = this.lockFailure.holder;
+      const why = this.lockFailure.reason === 'unwritable'
+        ? `房间目录不可用：${this.dir}（${this.lockFailure.error ?? '无法写入'}）`
+        : `房间目录已被另一个白板实例占用（${describeHolder(h)}）——`
+          + '白板是单实例设计（ADR-0008）：多实例共享同一 WB_ROOMS_DIR 会静默分裂数据。'
+          + '请先停掉那个实例，或为本实例指定独立的 WB_ROOMS_DIR。';
+      return {
+        ok: false,
+        reason: this.lockFailure.reason === 'unwritable' ? 'storage_unwritable' : 'storage_busy',
+        error: why,
+        holder: h ?? null,
+      };
+    }
 
     let storage;
     if (this.inMemory) {
@@ -165,10 +215,15 @@ export class RoomRegistry {
     return true;
   }
 
-  /** 全部关闭（进程退出） */
+  /** 全部关闭（进程退出）。**只有在这里释放目录锁**——锁必须活到进程结束：
+   *  若在「房间都空了」时释放，另一个实例就能进来，而本实例之后还会再打开房间 → 又变成双写。 */
   async closeAll() {
     for (const roomId of [...this.rooms.keys()]) {
       await this.close(roomId, 'room_idle_close').catch(() => {});
+    }
+    if (this.lock) {
+      this.lock.release();
+      this.lock = null;
     }
   }
 }

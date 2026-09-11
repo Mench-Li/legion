@@ -44,7 +44,7 @@ npm start                        # 或 node apps/server/src/index.js
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `WHITEBOARD_ROOMS` | 空 | 房间声明：`roomId:token:role`，逗号分隔，如 `main:tokA:rw,view:tokB:ro,open-room::rw`。token 留空=该房间开放；role 取 `rw`(默认)/`ro`。未声明的房间沿用全局 token 语义。**非法项会打印告警**（不静默忽略） |
-| `WB_ROOMS_DIR` | `apps/server/data/rooms` | 房间 DB 目录（每房间一个 `<roomId>.db`） |
+| `WB_ROOMS_DIR` | `apps/server/data/rooms` | 房间 DB 目录（每房间一个 `<roomId>.db`）。**该目录被单实例独占锁保护**（P4-6）：指向已被占用的目录时进程**启动即失败**并退出 |
 | `WB_ROOM_IDLE_MS` | 300000 | 房间空闲多久关闭存储（无在线用户时才关；关闭前落快照） |
 | `WB_MAX_ROOMS` | 50 | 同时打开的房间数上限；超限**拒绝新房间**而不驱逐已有房间 |
 | `WB_CONTROL_OPEN` | 0 | 置 1 时控制面（`/metrics`、`/readyz`、`/api/rooms*`）对非回环也开放；默认仅回环（或带 `Bearer <全局 token>`） |
@@ -133,3 +133,25 @@ node scripts/bench/bench.mjs 50 10     # soak：50 并发
 
 （本环境禁网，无 TypeScript/vitest/vite；typecheck 等价为 `node --check` 全源文件语法校验。）
 注意：`docker` 下 `WB_ROOMS_DIR` 必须指向挂载卷（如 `/data/rooms`），否则房间数据不持久化。
+
+## 单实例约束（P4-6，升级为可执行守卫）
+
+房间目录由独占锁 `<WB_ROOMS_DIR>/.whiteboard.lock` 保护。**不要**让两个实例指向同一目录：
+
+- 第二个实例会在打开第一个房间**之前**拒绝启动（非零退出），并打印占用者 pid/端口/起始时间与处置建议；
+- 旧行为（无守卫）不会报错，而是**静默分裂数据**——实测两个实例各自一份内存 doc、
+  视图分别停在 2 与 3 而真值已是 4，且 `snapshot()` 的 `DELETE FROM ops` 会删掉对方未读到的 op（永久丢失）。
+
+运维相关：
+
+| 情况 | 现象与处置 |
+| --- | --- |
+| 正常启动 | 日志无锁相关输出；`/healthz` 的 `dirLock` 为 `exclusive` |
+| 目录被别人占着 | 启动即失败，错误里点名占用者；停掉那个实例，或改用独立的 `WB_ROOMS_DIR` |
+| 进程被强杀后重启 | 自动接管陈旧锁，日志出现「接管了陈旧目录锁」+ 审计 `lock_takeover`（留痕，避免掩盖上一次崩溃） |
+| 确认占用者已不存在但锁仍在 | 删除 `<WB_ROOMS_DIR>/.whiteboard.lock` 后重启（仅在确认进程确实已死时才这样做） |
+| 内存房间（`DB_PATH=':memory:'`） | 不落盘、**不加锁**，多实例共存无副作用（测试与 bench 走这条路） |
+
+> 锁是**建议性**的：它防的是误操作，不是恶意规避。真正的多实例共享存储仍未实现，
+> 其被否理由与转 v2 触发条件见 `docs/adr/ADR-0008-房间治理与实例形态.md`。
+> 另注：`DB_PATH=':memory:'` 会**连带**把房间也切成内存（`index.js`），无法「主库内存 + 房间落盘」。

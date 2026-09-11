@@ -4,30 +4,45 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-11　`run-ci --only env,boundary,deps,build,test,smoke,stage,doc` **八阶段全 PASS**；其中 `test` **54 套件 / 1465 用例**
+**最近一次全量基线**：2026-09-11　`run-ci --only env,boundary,deps,build,test,smoke,stage,doc` **八阶段全 PASS**；其中 `test` **56 套件 / 1521 用例**
 （约 4.5 分钟）—— 以本文件所在提交为准；证据 `.ci/prt-phase0-1-final/`
 
-> **本轮（阶段 2 强制面 PRT-212~215）**：新增 `dsh-enforcement`（**34 例**）与
-> `dsh-composition`（**28 例**），落在新目录 `runtime/dsh-composition/`。52→**54** 套件、
-> 1403→**1465** 用例。
+> **本轮（阶段 2 完成标准 PRT-210/211）**：新增 `dsh-parity`（**36 例**）与
+> `dsh-session-boundary`（**20 例**）。54→**56** 套件、1465→**1521** 用例。
+> 阶段 2 的完成标准原文是「同一任务通过两条路径得到等价任务状态、结构化结果和产物，
+> 且敏感信息不出现在输出中」——这两套用例就是它的可执行形式。
 >
-> 这一组的断言**几乎全是「不生效」**：强制面最危险的失效方式是**看起来生效了**——
-> 组合行挂上了但没激活（等待依赖服务）、`permission` 行在但 preset 表没被覆盖、
-> 沙箱返回 `partial`（存在未被管制的路径）、`confine` **原样返回**输入 argv（没做任何包装）、
-> `denialSignatures` 为空（沙箱拒绝退化成普通失败）。五种都在返回值里长得像成功。
+> **① 对拍（PRT-210）**：旧调用在 `plugins/src/index.ts:2219`，而 Global Constraints
+> 规定阶段 3 之前不碰该文件，因此 `parity.mjs` **复刻**旧语义而非调用它。
+> **复刻会腐化，而失去意义的对拍会静默通过** —— 所以配了漂移检测，实测 `drifted = false`。
+> 差异按四类分开（violations / intended / improvements / bounded）：把有意变更混进违规
+> 会让对拍恒红、最后被人关掉；当作不存在则是自欺。实测 violations = **0**。
+> `intended` 里最典型的一条：**旧路径不做 schema 校验**，只看 `structured === undefined`，
+> 于是「模型返回字段名拼错的对象」会被当作**完成**写进交付物；新路径判 `INVALID_RESULT`
+> 是 PRT-204 的交付内容。用例把旧路径这个行为**钉住**，防止有人"顺手修好"复刻件
+> 而让对拍退化成「拿新路径和新路径比」。
 >
-> **必须说清楚的边界**：本批次交付的是**声明 + 原语 + 自检**，补丁层**尚未落盘应用**。
-> 因此这些强制点原语目前**只被自己的用例驱动，还没有任何生产调用方**。
-> 没落盘是**刻意**的：DSH 的 profile 层是 `patchReload: 'live'`，
-> 写入会**立刻改变正在运行的 harness 的强制面**（包括当前会话自己）。
-> 详见 `docs/PRT-212-evidence/verify-evidence.md` §2 与 §5。
+> **② 边界（PRT-211）**：DSH 有整套 continuable session 能力（15 条签名，逐字抄自运行中
+> 的 Inspect 注册表），但阶段 2 的适配器是**一次性**的。最危险的不是「没实现」而是
+> **看起来实现了**：契约的可选能力表里有 `session-resume`，照抄 DSH 上报能力就会对外
+> 宣称支持恢复，而 `recover()` 只会说「继续等同一个 run」——**那是等待，不是恢复**。
+> 按这个宣称实现「崩溃后接着跑」会得到**重跑**（副作用翻倍）。判据对**真实**适配器运行，
+> 不是合成的 capability 对象。
 >
-> 最有价值的一条实测：`ctx.sandbox.confine()` 返回 `enforcement: 'full' | 'partial'`，
-> 这正是 spec §6.8「仅有配置名不算生效」的**可判定落点**——判据取 `full`，`partial` 一律判未生效。
+> **证据分级**（写进了代码，不只在文档里）：接口面 `api-surface-verified`；
+> continuable session 的**运行时行为 `behavior-unverified`** —— 没跑过就是没跑过。
 >
-> 上一批（PRT 阶段 0 收口）：新增 `prt-usage`（**14 例**）与 `prt-measure`（**8 例**）；
-> `prt-golden-flow` 18→**20 例**、`prt-old-path` 25→**30 例**、`prt-gf001` 23→**30 例**。
-> 50→**52** 套件、~1385→**1403** 用例。
+> ⚠️ **`dsh-boundary` 仍是 3 文件 / 26 处**，与本批次之前完全一致。`parity.mjs` 里出现的
+> `ctx.subagents` 全是注释/报错文案/测试夹具里的**字符串**（模块 `import` 的执行面包为 **0**），
+> 一度让棘轮涨到 5 文件/33 处并因豁免前缀而**判 PASS**。已改为三段拼接并加用例自证贡献为 0：
+> 豁免一旦开始被消耗，就再没有信号能区分「适配器真多依赖了 DSH」与「有人写了句注释」。
+> `scripts/ci/dsh-boundary-baseline.json` **未被改动**。
+>
+> 上一批（阶段 2 强制面 PRT-212~215）：新增 `dsh-enforcement`（**34 例**）与
+> `dsh-composition`（**28 例**），落在 `runtime/dsh-composition/`。52→**54** 套件、
+> 1403→**1465** 用例。那一批交付的是**声明 + 原语 + 自检**，补丁层**尚未落盘应用**——
+> 因为 DSH 的 profile 层是 `patchReload: 'live'`，写入会**立刻改变正在运行的 harness
+> 的强制面**（包括当前会话自己）。详见 `docs/PRT-212-evidence/verify-evidence.md` §2 与 §5。
 >
 > ⚠️ 跑全量基线需设 `$env:DSH_CHECKOUT`，否则 `plugins`（185 例）与 `board-plugin`（37 例）
 > 两组外部宿主回归会 **SKIP**（不伪绿），套件数会少 2、用例数会少 222 —— 这是有意设计。
@@ -100,17 +115,24 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：54 套件 / 1465 用例，`--only test` 整体 PASS** —— 2026-09-11 实测
-（阶段 2 强制面：新增 `dsh-enforcement`（**34 例**：PRT-212）与 `dsh-composition`（**28 例**：PRT-213~215）。
+**当前基线：56 套件 / 1521 用例，`--only test` 整体 PASS** —— 2026-09-11 实测
+（阶段 2 完成标准：新增 `dsh-parity`（**36 例**：PRT-210）与 `dsh-session-boundary`（**20 例**：PRT-211）。
+对拍的核心不是「逐字节相同」而是**四类差异分开归因**——旧调用是复刻件，
+复刻会腐化，而**失去意义的对拍会静默通过**，故漂移检测本身就是一条受测的判据。
+边界的核心不是「没实现续接」而是**没有假装实现了**：`session-resume` 是可选能力，
+照抄 DSH 上报能力就会宣称支持恢复，而 `recover()` 只是「继续等」——按这个宣称实现
+「崩溃后接着跑」会得到**重跑**（副作用翻倍）。判据对真实适配器运行。
+`dsh-boundary` 仍是 **3 文件 / 26 处**（本批次三个新文件贡献 **0**）。
+54→**56** 套件、1465→**1521** 用例）。
+上一批（阶段 2 强制面：新增 `dsh-enforcement`（**34 例**：PRT-212）与 `dsh-composition`（**28 例**：PRT-213~215）。
 这一组的核心断言**几乎全是「不生效」**——因为强制面最危险的失效方式是
 **看起来生效了**：组合行挂上了但没激活、`permission` 行在但 preset 表没被覆盖、
 沙箱返回 `partial`（有未被管制的路径）、`confine` 原样返回输入 argv（没做任何包装）、
 `denialSignatures` 为空（沙箱拒绝退化成普通失败）。五种都在返回值里长得像成功。
 52→**54** 套件、1403→**1465** 用例。
-`runtime/dsh-composition/` 对 DSH 的依赖为 **0 处**（`dsh-boundary` 仍是 3 文件 / 26 处，
-与本批次之前完全一致——棘轮给适配器留的豁免**存在但未被使用**）。
-⚠️ 这一组交付的是**声明 + 原语 + 自检**；补丁层**尚未落盘应用**，
-因此这些原语目前只被自己的用例驱动、**还没有生产调用方**，详见 `docs/PRT-212-evidence/verify-evidence.md` §2 与 §5）。
+`runtime/dsh-composition/` 对 DSH 的依赖为 **0 处**。
+⚠️ 那一组交付的是**声明 + 原语 + 自检**；补丁层**尚未落盘应用**，
+因此那些原语目前只被自己的用例驱动、**还没有生产调用方**，详见 `docs/PRT-212-evidence/verify-evidence.md` §2 与 §5）。
 上一批收口：新增 `prt-usage`（**14 例**：PRT-009 会话用量提取——DSH 会话转录是
 **多帧拼接 zstd**，整段一次性解压只得到第一帧（会话头），工具会「成功」报出 0 token；
 用例把逐帧解码与 token 口径钉死）与 `prt-measure`（**8 例**：单价缺失时费用必须是 `null`
@@ -208,9 +230,12 @@ P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-
 | | `docs/PRT-009-evidence/verify-evidence.md` | PRT-009 成本/延迟/资源基线证据：逐项口径、结清状态、费用模型（**单价缺失返回 `null` 而非 `0`**）与未覆盖项 |
 | | `runtime/dsh-composition/` | **阶段 2 强制面**（PRT-212~215）：补丁层声明（`patch-layer.mjs` + 生成物 `legion-host.patch.yml`）、三个强制点原语与 canonical operation 哈希（`enforcement.mjs`）、沙箱实际管制探测与启动自检（`selfcheck.mjs`）。**不 import 任何 DSH 包**——对 DSH 依赖 0 处，棘轮豁免存在但未使用 |
 | | `docs/PRT-212-evidence/verify-evidence.md` | 强制面证据：从**运行中** harness 实测读到的强制点（含 `ConfinedArgv.enforcement: full\|partial` 这条判据的落点）、四类「看起来生效了」的隐蔽失效、以及**刻意未落盘**的理由（profile 层 `patchReload: live`，写入会立刻改变当前进程的强制面） |
+| | `runtime/adapters/dsh/parity.mjs` | **阶段 2 完成标准**（PRT-210）：旧调用语义复刻 + 漂移检测 + 四类差异归因（violations/intended/improvements/bounded）。不 import 任何引擎包 |
+| | `runtime/adapters/dsh/session-boundary.mjs` | PRT-211 continuable session 边界：15 条真实签名（运行中注册表）、五面归属划分、`session-resume` 未兑现能力的拦截判据、`resume-same-run` **是等待不是恢复**的归类。含 `EVIDENCE_LEVEL` 证据分级 |
+| | `docs/PRT-210-evidence/verify-evidence.md` | 阶段 2 完成标准证据：对拍的四类归因与漂移检测实测、continuable session 的接口面结论与**行为未验证**的显式声明、以及棘轮假阳性的处置 |
 | **设计规格** | `docs/superpowers/specs/2026-09-11-legion-product-runtime-design.md` | Product Runtime 设计（17 节 + **附录 A 阶段 0～1 已落地指针**）。附录只回填落地位置，不改设计 |
 | **计划与闸门** | `docs/superpowers/plans/2026-09-11-prt-phase0-1.md` | 阶段 0～1 计划与逐任务结论。含**阶段 3 评审闸门**：热点文件最近 40 个提交仅触及 1/2 次（历史峰值 9/7）→ 已降温 |
-| **历史快照（非当前依据）** | `docs/**-evidence/**`、`docs/G-*/**` | 各任务/目标的当时验证记录，顶部均有 `⚠️ 历史快照` banner（含生成日期与基线 commit）；含 `docs/PRT-005-evidence/`、`docs/PRT-009-evidence/`、`docs/PRT-212-evidence/` |
+| **历史快照（非当前依据）** | `docs/**-evidence/**`、`docs/G-*/**` | 各任务/目标的当时验证记录，顶部均有 `⚠️ 历史快照` banner（含生成日期与基线 commit）；含 `docs/PRT-005-evidence/`、`docs/PRT-009-evidence/`、`docs/PRT-210-evidence/`、`docs/PRT-212-evidence/` |
 | **历史交付文档** | `docs/TEST_REPORT.md`、`docs/TEST_CASES.md`、`docs/TASK_BREAKDOWN.md`、`docs/RESEARCH.md`、`docs/P0-CONFIRMATION.md` 等 | 立项期交付物，测试数字以本文件 §2 为准 |
 | **运维叙事（过程）** | `docs/P1-LIVE-ROLLOUT.md`、`docs/P2-GOALDOCS-LIVE.md`、`docs/P3-PROD-ROLLOUT.md`、`docs/P1-1-DECISION.md`、`docs/P1-1-step2-runbook.md` | 当时决策与现场步骤；结论已并入本文件 |
 

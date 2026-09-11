@@ -357,6 +357,23 @@ async function stageTest() {
     // 阶段 2：DshRuntimeAdapter。全部用假宿主端口，覆盖真实 DSH 无法稳定复现的故障
     // （run.result 永不结算、abort 无效、畸形结果、事件流中断）。
     { label: 'dsh-adapter（PRT-201~209：DSH 适配器契约、脱敏、看门狗与取消/恢复）', files: ['runtime/adapters/dsh/adapter.test.mjs'], cwd: ROOT },
+    // PRT-210/211：阶段 2 的**完成标准**在两处容易被读错的地方被钉死。
+    //   ① 对拍：旧调用是 `plugins/src/index.ts` 里的复刻件，不是调用的那份代码。
+    //      复刻会腐化，而**失去意义的对拍会静默通过**——所以有漂移检测守着它。
+    //   ② 边界：DSH 有整套 continuable session 能力，但阶段 2 的适配器是一次性的。
+    //      危险在"看起来实现了"：契约里有个可选能力叫 session-resume，
+    //      照抄 DSH 上报的能力就会对外宣称支持恢复，而 recover() 只会说"继续等"，
+    //      按这个宣称实现"崩溃后接着跑"得到的会是**重跑**（副作用翻倍）。
+    {
+      label: 'dsh-parity（PRT-210：新旧路径对拍 + 复刻件漂移检测 + 敏感信息不出现在输出）',
+      files: ['runtime/adapters/dsh/parity.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      label: 'dsh-session-boundary（PRT-211：continuable session 的身份/权限/续接/取消/恢复边界）',
+      files: ['runtime/adapters/dsh/session-boundary.test.mjs'],
+      cwd: ROOT,
+    },
     // 阶段 2：强制面（PRT-212~215）。本组用例的**核心断言全是「不生效」**——
     // 这类检查的危险失效方式是「看起来生效了」：行挂上了但没激活、
     // preset 行在但表没被覆盖、沙箱返回 partial、confine 原样返回输入 argv。

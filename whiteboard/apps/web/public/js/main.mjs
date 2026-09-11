@@ -18,6 +18,7 @@ import { hitTestElement } from '../shared/hitTest.mjs';
 import { screenToWorld, worldToScreen } from '../shared/viewport.mjs';
 import { createThrottle } from '../shared/throttle.mjs';
 import { createPendingOps, chunkOps } from '../shared/pendingOps.mjs';
+import { resolveNotice, NOTICE_POLICY, NOTICE_CONN } from '../shared/notice.mjs';
 import {
   parseRoomFromSearch, buildSwitchUrl, tokenStorageKey, canWrite, errorText, isValidRoomId, roomShareUrl, DEFAULT_ROOM_ID,
 } from '../shared/room.mjs';
@@ -82,8 +83,18 @@ const roomGoEl = document.getElementById('room-go');
 const roomCopyEl = document.getElementById('room-copy');
 
 // ---------- 房间/角色/治理提示的界面同步 ----------
-function setNotice(text) {
-  notice = text || '';
+// 提示条只有一条，所以要有优先级规则（纯逻辑在 shared/notice.mjs，细则见那里的注释）：
+// **治理类**（限流/只读/服务端关闭/房间非法/旧房间操作未发送）是「可行动的说明」，优先级 1；
+// **连接状态类**（暂存中/已补发）优先级 0，不得把它们顶掉。
+// 真实回归（被既有 e2e 限流用例抓到）：连接被限流关闭后，后续绘制入队，队列提示把「操作过于频繁」
+// 顶掉了 —— 用户看到的是「已暂存 2 个操作」，而真正该看到的是「你发得太快了」。
+let noticeState = { text: '', priority: 0 };
+
+function setNotice(text, priority = NOTICE_CONN) {
+  const next = resolveNotice(noticeState, text, priority);
+  if (!next.applied) return;
+  notice = next.text;
+  noticeState = { text: next.text, priority: next.priority };
   if (!limitEl) return;
   limitEl.textContent = notice;
   limitEl.style.display = notice ? '' : 'none';
@@ -116,7 +127,7 @@ function syncRoomUi() {
 
 /** 切换房间：改 URL（不带 token）→ 重连 → 清空本地文档态（避免把上个房间的画面留在屏上） */
 function switchRoom(nextRoomId, nextToken = null) {
-  if (!isValidRoomId(nextRoomId)) { setNotice(`房间 ID "${nextRoomId}" 非法（仅小写字母/数字/-/_）`); return; }
+  if (!isValidRoomId(nextRoomId)) { setNotice(`房间 ID "${nextRoomId}" 非法（仅小写字母/数字/-/_）`, NOTICE_POLICY); return; }
   if (nextRoomId === roomId) { setNotice(''); return; }
   if (nextToken !== null) {
     roomToken = nextToken;
@@ -137,7 +148,7 @@ function switchRoom(nextRoomId, nextToken = null) {
   syncRoomUi();
   setNotice(droppedFromPrevRoom > 0
     ? `已切换房间：上一个房间有 ${droppedFromPrevRoom} 个操作未能发送（该房间连接已断开）`
-    : '');
+    : '', NOTICE_POLICY);
   pendingNoticeText = '';
   if (ws) { try { ws.close(); } catch { /* ignore */ } }
   connect();
@@ -260,7 +271,7 @@ function flushPendingOps() {
   if (pending.size === 0) { clearPendingNotice(); return 0; }
   const ops = pending.drain();
   if (!canWrite(role)) {
-    setNotice(`连接恢复前的 ${ops.length} 个操作未发送（只读房间不允许写入）`);
+    setNotice(`连接恢复前的 ${ops.length} 个操作未发送（只读房间不允许写入）`, NOTICE_POLICY);
     pendingNoticeText = '';
     return 0;
   }
@@ -277,7 +288,7 @@ function flushPendingOps() {
 
 /** 写入前的前端闸门（服务端另有强制）：只读角色不发 op，并给出明确提示而不是静默丢弃 */
 function sendOps(ops) {
-  if (!canWrite(role)) { setNotice(errorText('op_denied')); return false; }
+  if (!canWrite(role)) { setNotice(errorText('op_denied'), NOTICE_POLICY); return false; }
   if (send({ type: 'op', ops })) return true;
   return queueOps(ops);
 }
@@ -301,9 +312,9 @@ function connect() {
     peers.clear();
     updatePeers();
     // 1000/1001 多为服务端主动关闭（鉴权/限流/超限）；给出可行动提示，避免「莫名其妙掉线」
-    if (e && e.code === 1008) setNotice('连接被服务端关闭（消息频率或格式超限）');
-    else if (e && e.code === 1009) setNotice(errorText('message_too_large'));
-    else if (e && e.code === 1011) setNotice('连接被关闭（服务端无法打开该房间的存储）');
+    if (e && e.code === 1008) setNotice('连接被服务端关闭（消息频率或格式超限）', NOTICE_POLICY);
+    else if (e && e.code === 1009) setNotice(errorText('message_too_large'), NOTICE_POLICY);
+    else if (e && e.code === 1011) setNotice('连接被关闭（服务端无法打开该房间的存储）', NOTICE_POLICY);
     setTimeout(connect, retryDelay);
     retryDelay = Math.min(retryDelay * 1.5, 10000);
   };
@@ -342,7 +353,7 @@ function handleMessage(m) {
     return;
   }
   if (m.type === 'error') {
-    setNotice(errorText(m.code, { ...m, max: serverLimits?.maxOpsPerMessage }));
+    setNotice(errorText(m.code, { ...m, max: serverLimits?.maxOpsPerMessage }), NOTICE_POLICY);
     return;
   }
 }
@@ -636,7 +647,9 @@ function wireRoomBar() {
 wireToolbar();
 wireRoomBar();
 syncRoomUi();
-if (notice) setNotice(notice);
+// URL 解析出的提示（房间号非法/无权限等）是可行动说明，按治理优先级占位，
+// 不会被随后「暂存中」这类连接状态提示顶掉。
+if (notice) setNotice(notice, NOTICE_POLICY);
 applyRoleToUi();
 resizeCanvas();
 connect();

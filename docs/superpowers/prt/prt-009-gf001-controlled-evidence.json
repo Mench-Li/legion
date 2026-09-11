@@ -1,0 +1,97 @@
+{
+  "$comment": "PRT-009 执行证据（由 scripts/prt/old-path-evidence.mjs --write-baseline 生成）。全部数值来自 team-hub 生产库的 audit 表，只读提取，不含任何估计值。",
+  "generatedAt": "2026-09-11T13:30:26.741Z",
+  "sourceDb": "D:/project/DSH/legion/team-hub/team.db",
+  "scope": "gf001",
+  "note": "受控空间 gf001 的**旧路径**执行证据（GF-001 黄金流程）。注意：gf001 仍由 legacy 守护（plugins/src/index.ts）执行，因此这是受控环境下的旧路径，不是新路径。本文件覆盖该空间全部 9 个任务，含两次中止的执行；跑通的那一次是 G-mtwxx7an-2（T-144/145/146），token 与验收证据见 prt-009-gf001-execution.json。",
+  "taskCount": 9,
+  "statusCounts": {
+    "canceled": 5,
+    "in_review": 1,
+    "done": 3
+  },
+  "auditRows": 372,
+  "auditRowsTaskAttributed": 43,
+  "tasksWithTrail": 5,
+  "auditScopeMismatch": {
+    "rows": 0,
+    "byScope": {}
+  },
+  "completedLatencyMs": {
+    "samples": 3,
+    "minMs": 54230,
+    "p50Ms": 104002,
+    "p90Ms": 220148,
+    "maxMs": 220148,
+    "meanMs": 126127
+  },
+  "stateSequence": {
+    "expected": [
+      "todo",
+      "in_progress",
+      "in_review",
+      "done"
+    ],
+    "completedWithTrail": 3,
+    "exactPrefixMatches": 0,
+    "matchRate": 0,
+    "tasksSkippingInReview": 3,
+    "conclusion": "in_review 在多数完成任务中并不出现：预期序列与真实观察不符，作为对拍基准需要修正"
+  },
+  "human": {
+    "total": 1,
+    "members": [
+      "general"
+    ],
+    "perTaskMean": 0.33,
+    "tasksWithHuman": 1
+  },
+  "artifacts": {
+    "total": 12,
+    "tasks": 5
+  },
+  "availability": {
+    "heartbeatAction": "release-stale",
+    "heartbeatCount": 291,
+    "firstHeartbeat": "2026-09-11T10:19:32.605Z",
+    "lastHeartbeat": "2026-09-11T13:30:15.988Z",
+    "medianIntervalMs": 14999,
+    "minGapMs": 300000,
+    "gapCount": 1,
+    "longestGapMs": 7110508,
+    "gapsByBucket": {
+      "5-30m": 0,
+      "30-60m": 0,
+      "1-2h": 1,
+      ">=2h": 0
+    },
+    "gaps": [
+      {
+        "from": "2026-09-11T10:32:18.260Z",
+        "to": "2026-09-11T12:30:48.768Z",
+        "gapMs": 7110508
+      }
+    ],
+    "recentGaps": [
+      {
+        "from": "2026-09-11T10:32:18.260Z",
+        "to": "2026-09-11T12:30:48.768Z",
+        "gapMs": 7110508
+      }
+    ]
+  },
+  "notRecorded": [
+    {
+      "key": "token-usage",
+      "why": "全库 23 张表无任何 token/cost 列（scripts/prt/schema-scan.mjs 可复核）"
+    },
+    {
+      "key": "estimated-cost",
+      "why": "依赖 token-usage；agent_models 只记 provider/model，无计价"
+    },
+    {
+      "key": "peak-resource",
+      "why": "旧路径不采样内存/CPU；全库唯一耗时列为 web_fetch_history.ms（315 行，仅网页抓取）"
+    }
+  ]
+}

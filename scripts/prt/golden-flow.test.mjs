@@ -115,7 +115,7 @@ test('验收契约全部可机器判定（无主观项）', () => {
   assert.ok(a.prompt.length > 0)
 })
 
-test('预期任务状态序列与 team-hub 迁移表一致', async () => {
+test('对拍基准：每条可接受序列要么走得通迁移表，要么是已记录的旁路', async () => {
   const { extractTransitions } = await import('./baseline-snapshot.mjs')
   const { readFileSync } = await import('node:fs')
   const { dirname, join, resolve } = await import('node:path')
@@ -124,16 +124,64 @@ test('预期任务状态序列与 team-hub 迁移表一致', async () => {
   const server = readFileSync(join(ROOT, 'team-hub', 'server.mjs'), 'utf8')
   const transitions = extractTransitions(server, 'TRANSITIONS')
 
-  const seq = GOLDEN_TASK.expectedTaskStateSequence
-  assert.ok(seq.length >= 2, '序列至少要有一跳')
-  for (let i = 1; i < seq.length; i += 1) {
-    const from = seq[i - 1]
-    const to = seq[i]
-    assert.ok(
-      (transitions[from] ?? []).includes(to),
-      `黄金流程预期序列含非法迁移 ${from} -> ${to}（team-hub 只允许 ${(transitions[from] ?? []).join('/')}）`,
-    )
+  // `advanced` 是**审计动作名**，不是任务状态：`advance` 不写 `to`，所以旧路径里
+  // 「推进到 done」在审计上表现为 `advanced`。校验合法性时必须先归一化回 `done`，
+  // 否则会把旧路径最主流的形态判成非法迁移。
+  const normalize = (s) => (s === 'advanced' ? 'done' : s)
+  const bypass = new Set(GOLDEN_TASK.transitionBypass.allows)
+
+  for (const raw of GOLDEN_TASK.acceptedTaskStateSequences) {
+    const seq = raw.map(normalize)
+    assert.ok(seq.length >= 2, `可接受序列至少要有一跳：${raw.join('→')}`)
+    for (let i = 1; i < seq.length; i += 1) {
+      const from = seq[i - 1]
+      const to = seq[i]
+      const legal = (transitions[from] ?? []).includes(to) || bypass.has(`${from}->${to}`)
+      assert.ok(
+        legal,
+        `可接受序列 ${raw.join('→')} 含无人走过的迁移 ${from} → ${to}`
+          + `（TRANSITIONS 允许 ${(transitions[from] ?? []).join('/')}；旁路 ${[...bypass].join(' ')}）`,
+      )
+    }
   }
+})
+
+test('对拍基准：`advanceTask` 确实绕过迁移表（绕过是实测出来的事实，不是推测）', async () => {
+  // 这条用例的存在理由：`acceptedTaskStateSequences` 里含 `in_progress → done`，
+  // 而 `TRANSITIONS` **不**允许这条边。若哪天有人「顺手」让 advanceTask 也查迁移表，
+  // 那么可接受集合就必须重新对拍——本用例会立刻变红提醒，而不是等着阶段 3 静默判错。
+  const { readFileSync } = await import('node:fs')
+  const { dirname, join, resolve } = await import('node:path')
+  const { fileURLToPath } = await import('node:url')
+  const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
+  const server = readFileSync(join(ROOT, 'team-hub', 'server.mjs'), 'utf8')
+
+  const body = server.slice(server.indexOf('function advanceTask('))
+  const end = body.indexOf('\n}')
+  const fn = body.slice(0, end)
+  assert.ok(fn.includes('in_progress') && fn.includes('in_review'), 'advanceTask 应同时接受 in_progress 与 in_review')
+  assert.ok(!/TRANSITIONS/.test(fn), 'advanceTask 不再绕过迁移表——可接受序列集合必须重新对拍')
+  assert.ok(!/by !== 'general'|by === 'general'/.test(fn), 'advanceTask 新增了将军限制——可接受序列集合必须重新对拍')
+})
+
+test('对拍基准：模态序列必须**在**可接受集合里，且基准不再是单条字面序列', () => {
+  const accepted = GOLDEN_TASK.acceptedTaskStateSequences.map((s) => s.join('→'))
+  const modal = GOLDEN_TASK.modalTaskStateSequence.join('→')
+  // 两个字段分头维护就会漂移：模态值改了、集合忘了改，于是「最常见的那种」
+  // 反而被判成不可接受。这条断言把两者钉在一起。
+  assert.ok(accepted.includes(modal), `模态序列 ${modal} 不在可接受集合内：${accepted.join(' | ')}`)
+
+  // 基准必须是**集合**而不是单条字面序列：单条序列已被实测推翻（76 个完成任务只有 4 个走它），
+  // 拿它当门禁会把与旧路径等价的新路径判成不等价。
+  assert.ok(accepted.length > 1, '基准应为集合；单条字面序列已被实测推翻')
+  assert.equal(GOLDEN_TASK.expectedTaskStateSequence, undefined, '旧的单条字面基准字段应已移除')
+
+  // 证据指针必须与实测数值一致，否则文档与代码会各说各话。
+  const ev = GOLDEN_TASK.stateSequenceEvidence
+  assert.equal(ev.completedWithTrail, 76)
+  assert.equal(ev.exactMatchWithLegacyExpectation, 4)
+  assert.equal(ev.skipInReview, 42)
+  assert.match(ev.source, /prt-009-execution-evidence\.json$/)
 })
 
 test('夹具初始状态确实缺少 greet（否则黄金任务无事可做）', () => {
@@ -151,6 +199,20 @@ test('夹具已有 --version / help / 未知命令三条分支（任务有真实
   assert.match(cli, /help/)
   assert.match(cli, /unknown command/)
   assert.match(FIXTURE_FILES['test/cli.test.mjs'], /node:test/)
+})
+
+test('夹具初始提交是干净的：npm test 通过且无未跟踪文件（黄金流程的起点）', async () => {
+  // 与上一条的区别：上一条只要「物化后能跑」，这一条要求「起点是一个已提交的、
+  // 自洽的仓库状态」——implementer 会在 worktree 里工作，起点若自带未提交改动，
+  // 最终 diff 就无法归因到这次执行。
+  const pkg = JSON.parse(FIXTURE_FILES['package.json'])
+  assert.equal(pkg.name, 'gf001-cli')
+  assert.equal(pkg.type, 'module')
+  assert.equal(Object.keys(FIXTURE_FILES).length, 4, '夹具应恰好 4 个文件')
+  assert.deepEqual(
+    Object.keys(FIXTURE_FILES).sort(),
+    ['README.md', 'package.json', 'src/cli.mjs', 'test/cli.test.mjs'],
+  )
 })
 
 // ------------------------------------------------- 夹具真实可执行（关键缺口）
@@ -205,16 +267,55 @@ test('夹具真实物化后 `npm test` 通过（不只是内容干净，而是�
   }
 })
 
-test('夹具初始提交是干净的：npm test 通过且无未跟踪文件（黄金流程的起点）', async () => {
-  // 与上一条的区别：上一条只要「物化后能跑」，这一条要求「起点是一个已提交的、
-  // 自洽的仓库状态」——implementer 会在 worktree 里工作，起点若自带未提交改动，
-  // 最终 diff 就无法归因到这次执行。
-  const pkg = JSON.parse(FIXTURE_FILES['package.json'])
-  assert.equal(pkg.name, 'gf001-cli')
-  assert.equal(pkg.type, 'module')
-  assert.equal(Object.keys(FIXTURE_FILES).length, 4, '夹具应恰好 4 个文件')
-  assert.deepEqual(
-    Object.keys(FIXTURE_FILES).sort(),
-    ['README.md', 'package.json', 'src/cli.mjs', 'test/cli.test.mjs'],
-  )
+// ------------------------------------------- 入口判据：真的把 CLI 当命令跑
+
+// 这一节锁的是**第一次真实执行黄金流程时才暴露**的夹具缺陷：
+//
+//   if (import.meta.url === `file://${argv[1]}`)   // Windows 上恒不成立
+//
+// `import.meta.url` 是 `file:///D:/...`（三斜杠 + 正斜杠），而手拼得到
+// `file://D:\...`（两斜杠 + 反斜杠），两者永不相等 → 脚本主体不执行，
+// `node src/cli.mjs --version` **退出码 0 且没有任何输出**。
+//
+// 为什么此前 14 条用例全绿却漏了它：它们只读字符串或直接 `import { main }` 调函数，
+// 没有一条真的执行过 `node src/cli.mjs`。这正是「输入固定 + 验收可机器判定」
+// 之外还需要「端到端真跑一次」的原因——发现它的是 planner（deepseek-v4-pro）
+// 在现状勘察里实测出的 E3 节，不是任何静态检查。
+test('夹具 CLI 作为命令运行时真的会输出（入口判据必须在 Windows 成立）', async () => {
+  const { mkdtempSync, writeFileSync, mkdirSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { runCli } = await import('./gf001-run.mjs')
+
+  const dir = mkdtempSync(join(tmpdir(), 'gf001-cli-'))
+  try {
+    materializeFixture((path, content) => {
+      const abs = join(dir, path)
+      mkdirSync(join(abs, '..'), { recursive: true })
+      writeFileSync(abs, content, 'utf8')
+    })
+
+    const version = runCli(dir, ['--version'])
+    assert.equal(version.ok, true, 'node src/cli.mjs --version 应以 0 退出')
+    assert.equal(version.out.trim(), '1.0.0', '必须真的打印版本号，而不是空输出')
+
+    const help = runCli(dir, ['help'])
+    assert.equal(help.ok, true)
+    assert.match(help.out, /Usage:/)
+
+    const unknown = runCli(dir, ['nope'])
+    assert.equal(unknown.code, 2, '未知命令应退出 2')
+    assert.match(unknown.out, /unknown command: nope/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('夹具源码不得手拼 file:// URL 做入口判据（该写法在 Windows 恒不成立）', () => {
+  // 直接对源码做形状检查，与上一条的行为检查互为补充：
+  // 行为检查证明「现在是对的」，形状检查说明「为什么不能那样写」，
+  // 避免后来者「简化」回去。
+  const cli = FIXTURE_FILES['src/cli.mjs']
+  assert.doesNotMatch(cli, /`file:\/\/\$\{/, '不得手拼 file:// URL：Windows 下斜杠数量与方向都不同')
+  assert.match(cli, /pathToFileURL/, '入口判据必须用 pathToFileURL 归一化')
 })

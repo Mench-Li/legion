@@ -1,0 +1,164 @@
+{
+  "$comment": "PRT-009 执行证据（由 scripts/prt/old-path-evidence.mjs --write-baseline 生成）。全部数值来自 team-hub 生产库的 audit 表，只读提取，不含任何估计值。",
+  "generatedAt": "2026-09-11T13:30:26.644Z",
+  "sourceDb": "D:/project/DSH/legion/team-hub/team.db",
+  "scope": "software",
+  "note": "生产空间 software 的**旧路径**执行证据：125 个任务 / 7593 条空间审计。用于 §14.2 对拍基准的实测修正、人工介入率与可用性空窗。",
+  "taskCount": 125,
+  "statusCounts": {
+    "done": 79,
+    "canceled": 46
+  },
+  "auditRows": 7625,
+  "auditRowsTaskAttributed": 1645,
+  "tasksWithTrail": 92,
+  "auditScopeMismatch": {
+    "rows": 170,
+    "byScope": {
+      "default": 77,
+      "slice-verify": 93
+    }
+  },
+  "completedLatencyMs": {
+    "samples": 76,
+    "minMs": 537396,
+    "p50Ms": 4184325,
+    "p90Ms": 68497327,
+    "maxMs": 83217740,
+    "meanMs": 21324044
+  },
+  "stateSequence": {
+    "expected": [
+      "todo",
+      "in_progress",
+      "in_review",
+      "done"
+    ],
+    "completedWithTrail": 76,
+    "exactPrefixMatches": 4,
+    "matchRate": 0.053,
+    "tasksSkippingInReview": 42,
+    "conclusion": "in_review 在多数完成任务中并不出现：预期序列与真实观察不符，作为对拍基准需要修正"
+  },
+  "human": {
+    "total": 95,
+    "members": [
+      "general"
+    ],
+    "perTaskMean": 1.2,
+    "tasksWithHuman": 46
+  },
+  "artifacts": {
+    "total": 170,
+    "tasks": 74
+  },
+  "availability": {
+    "heartbeatAction": "release-stale",
+    "heartbeatCount": 6092,
+    "firstHeartbeat": "2026-09-03T02:18:08.049Z",
+    "lastHeartbeat": "2026-09-11T13:30:26.211Z",
+    "medianIntervalMs": 30009,
+    "minGapMs": 300000,
+    "gapCount": 87,
+    "longestGapMs": 62431258,
+    "gapsByBucket": {
+      "5-30m": 53,
+      "30-60m": 14,
+      "1-2h": 6,
+      ">=2h": 14
+    },
+    "gaps": [
+      {
+        "from": "2026-09-03T07:58:31.613Z",
+        "to": "2026-09-04T01:19:02.871Z",
+        "gapMs": 62431258
+      },
+      {
+        "from": "2026-09-10T10:36:38.409Z",
+        "to": "2026-09-11T01:11:32.467Z",
+        "gapMs": 52494058
+      },
+      {
+        "from": "2026-09-07T10:54:07.194Z",
+        "to": "2026-09-08T01:24:42.793Z",
+        "gapMs": 52235599
+      },
+      {
+        "from": "2026-09-08T11:15:58.619Z",
+        "to": "2026-09-09T01:10:17.826Z",
+        "gapMs": 50059207
+      },
+      {
+        "from": "2026-09-09T11:13:56.269Z",
+        "to": "2026-09-10T01:07:54.584Z",
+        "gapMs": 50038315
+      },
+      {
+        "from": "2026-09-06T14:43:27.258Z",
+        "to": "2026-09-07T01:25:35.146Z",
+        "gapMs": 38527888
+      },
+      {
+        "from": "2026-09-04T16:19:17.022Z",
+        "to": "2026-09-05T01:52:05.527Z",
+        "gapMs": 34368505
+      },
+      {
+        "from": "2026-09-05T17:06:19.525Z",
+        "to": "2026-09-06T01:41:59.924Z",
+        "gapMs": 30940399
+      },
+      {
+        "from": "2026-09-04T04:17:28.978Z",
+        "to": "2026-09-04T09:20:33.615Z",
+        "gapMs": 18184637
+      },
+      {
+        "from": "2026-09-04T09:27:45.636Z",
+        "to": "2026-09-04T12:45:11.133Z",
+        "gapMs": 11845497
+      }
+    ],
+    "recentGaps": [
+      {
+        "from": "2026-09-10T10:36:38.409Z",
+        "to": "2026-09-11T01:11:32.467Z",
+        "gapMs": 52494058
+      },
+      {
+        "from": "2026-09-11T04:27:14.332Z",
+        "to": "2026-09-11T05:32:31.397Z",
+        "gapMs": 3917065
+      },
+      {
+        "from": "2026-09-11T08:24:53.833Z",
+        "to": "2026-09-11T08:33:29.357Z",
+        "gapMs": 515524
+      },
+      {
+        "from": "2026-09-11T09:30:38.875Z",
+        "to": "2026-09-11T09:35:56.996Z",
+        "gapMs": 318121
+      },
+      {
+        "from": "2026-09-11T10:32:09.919Z",
+        "to": "2026-09-11T12:30:54.819Z",
+        "gapMs": 7124900
+      }
+    ]
+  },
+  "notRecorded": [
+    {
+      "key": "token-usage",
+      "why": "全库 23 张表无任何 token/cost 列（scripts/prt/schema-scan.mjs 可复核）"
+    },
+    {
+      "key": "estimated-cost",
+      "why": "依赖 token-usage；agent_models 只记 provider/model，无计价"
+    },
+    {
+      "key": "peak-resource",
+      "why": "旧路径不采样内存/CPU；全库唯一耗时列为 web_fetch_history.ms（315 行，仅网页抓取）"
+    }
+  ]
+}

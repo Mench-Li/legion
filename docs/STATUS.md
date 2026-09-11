@@ -4,10 +4,26 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-11　`run-ci --only env,boundary,deps,build,test,doc` **全 PASS**；其中 `test` **48 套件 / 1315 用例**
-（约 4 分钟）—— 以本文件所在提交为准
+**最近一次全量基线**：2026-09-11　`run-ci --only env,boundary,deps,build,test,smoke,stage,doc` **八阶段全 PASS**；其中 `test` **52 套件 / 1403 用例**
+（约 4.5 分钟）—— 以本文件所在提交为准；证据 `.ci/prt-phase0-1-final/`
 
-> 说明：上句记录 **P4-6** 之后的全量运行（含 `doc` 阶段），证据 `.ci/final-main4/`。
+> 本轮（PRT 阶段 0 收口）：新增 `prt-usage`（**14 例**：PRT-009 会话用量提取——多帧 zstd
+> 解码、token 口径、岗位归属）与 `prt-measure`（**8 例**：费用口径 + 待采集清单结清状态）；
+> `prt-golden-flow` 18→**20 例**（对拍基准改为「模态序列 + 可接受集合 + 已登记旁路」）、
+> `prt-old-path` 25→**30 例**（新增可用性空窗）、`prt-gf001` 23→**30 例**（新增模型偏差对拍
+> 与「同任务两条会话只算一条」）。50→**52** 套件、~1385→**1403** 用例。
+>
+> ⚠️ 跑全量基线需设 `$env:DSH_CHECKOUT`，否则 `plugins`（185 例）与 `board-plugin`（37 例）
+> 两组外部宿主回归会 **SKIP**（不伪绿），套件数会少 2、用例数会少 222 —— 这是有意设计。
+>
+> 本轮同时把 PRT-009 的六项「待采集」结清了四项（token 用量 / 端到端耗时 / 旧路径实测状态序列 /
+> 人工介入率），靠的是**读取一次已经发生的真实执行**（受控隔离空间 `gf001`，目标 `G-mtwxx7an-2`），
+> 不是重新跑一次。证据见 `docs/PRT-005-evidence/verify-evidence.md` 与
+> `docs/PRT-009-evidence/verify-evidence.md` §3。**费用与峰值资源仍未采集，且原因已不是
+> 「需要真实执行」**——两项各有不同的阻塞原因，见上述证据文档 §4。
+
+> 说明：上句之前基线为 **P4-6** 之后的全量运行（含 `doc` 阶段），证据 `.ci/final-main4/`；
+> 彼时 `test` 为 **48 套件 / 1315 用例**。
 > 此前各基线：P4-3 之后、P4-2 之后为 **981 用例**、
 > P4-1 之后 `test` 阶段为 **39 套件 / 950 用例**，P3-4 收尾为 **38 套件 / 943 用例**（详见下方 §2 基线表）；
 > 各轮证据见 `docs/P4-6-evidence/verify-evidence.md`、`docs/P4-5-evidence/verify-evidence.md` §3、
@@ -68,8 +84,15 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：48 套件 / 1315 用例，`--only test` 整体 PASS** —— 2026-09-11 实测
-（阶段 2 起步：新增 `dsh-adapter`（**85 例**：PRT-201~209 的 DSH 适配器）。
+**当前基线：52 套件 / 1403 用例，`--only test` 整体 PASS** —— 2026-09-11 实测
+（PRT 阶段 0 收口：新增 `prt-usage`（**14 例**：PRT-009 会话用量提取——DSH 会话转录是
+**多帧拼接 zstd**，整段一次性解压只得到第一帧（会话头），工具会「成功」报出 0 token；
+用例把逐帧解码与 token 口径钉死）与 `prt-measure`（**8 例**：单价缺失时费用必须是 `null`
+而不是 `0`——`0` 会让预算检查静默失效；以及「待采集清单必须随证据结清」）。
+同时扩了三套既有套件：`prt-golden-flow` 18→**20**、`prt-old-path` 25→**30**、`prt-gf001` 23→**30**。
+50→**52** 套件、~1385→**1403** 用例。
+⚠️ 跑此基线必须设 `DSH_CHECKOUT`，否则 `plugins`（185）与 `board-plugin`（37）会 SKIP。
+上一批收口：新增 `dsh-adapter`（**85 例**：PRT-201~209 的 DSH 适配器）。
 全部用假宿主端口，覆盖真实 DSH 无法稳定复现的故障——`run.result` 永不结算、
 abort 无效、畸形结构化输出、事件流中断。47→**48** 套件、1230→**1315** 用例。
 该适配器**不 import 任何引擎包**（与 DSH 的耦合只在 `port.mjs` 的注入面），
@@ -146,15 +169,20 @@ P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-
 | | `runtime/contracts/`（`index.mjs` + `index.d.mts`） | **PRT Runtime Contract**：`RuntimeAdapter` 七方法、16 个标准错误码与重试分类、`RunRequest`/`RunEvent`（13 种）/终态契约、能力协商。**对 DSH 依赖为零**（`--only boundary` 强制）。用 `node --test runtime/contracts/*.test.mjs` 跑 |
 | | `docs/REQUIREMENTS.md`、`docs/ORCHESTRATION-V3.md` | 需求与编排设计 |
 | **迁移基线（可 diff）** | `docs/superpowers/prt/prt-007-baseline.json` | PRT-007 旧系统平台契约基线：85 路由 / 22 表 / 7 任务状态 / 20 迁移边。`node scripts/prt/baseline-snapshot.mjs --diff` 查漂移 |
-| | `docs/superpowers/prt/prt-009-baseline.json` | PRT-009 成本/延迟/资源基线。**`pending` 段无值**：token/费用/端到端耗时/峰值资源必须真实执行才能采集，工具拒绝编造 |
-| | `docs/superpowers/prt/PRT-004-golden-flow.md` | 黄金流程 GF-001 定义（固定夹具哈希 `2ad47fc4…`、3 段岗位交接、四项机器可判定验收；夹具可执行性已由 CI 看护） |
+| | `docs/superpowers/prt/prt-009-baseline.json` | PRT-009 成本/延迟/资源基线。**「已由 GF-001 真实执行采集」段的数值不在本文件里**，而是运行期从证据文件读出（抄一份进来就多一处会与源漂移的副本）。`node scripts/prt/baseline-measure.mjs --pending` 看六项各自结清状态 |
+| | `docs/superpowers/prt/PRT-004-golden-flow.md` | 黄金流程 GF-001 定义（固定夹具哈希 `9d4d958c…`、3 段岗位交接、**五项**机器可判定验收）。§5 记录**对拍基准被实测修正**：字面预期序列只被 4/76 个任务走过，现行基准是「模态序列 + 可接受集合 + 已登记旁路」 |
+| | `docs/superpowers/prt/prt-009-gf001-execution.json` | **GF-001 真实执行证据**（`node scripts/prt/gf001-run.mjs report --out=…`）：独立重算的验收结果、逐岗位 token 用量、端到端耗时，以及**模型分工未生效**的对拍偏差（声明 `pro`、实跑 `flash`） |
+| | `docs/superpowers/prt/prt-009-execution-evidence.json` | 生产空间 `software` 的旧路径执行证据：状态序列 / 耗时分布 / 人工介入 / **可用性空窗**。数值全部来自 `audit` 表只读提取 |
+| | `docs/superpowers/prt/prt-009-gf001-controlled-evidence.json` | 受控空间 `gf001` 的同一组指标（**旧路径**，含两次中止轮次），与上一行**不可互相冒充**——两者是不同总体 |
 | | `docs/superpowers/prt/PRT-001-topology-inventory.md`、`prt-001-003-inventory.json` | PRT-001/003 拓扑与配置密钥清单。**4 个 path 字段默认落在安装目录内**（越界写入，PRT-505/257 输入）；仓库内明文凭证 0 处 |
 | | `docs/superpowers/prt/PRT-010-dsh-composition-baseline.md`、`prt-010-composition-baseline.json` | PRT-008 术语冻结 + PRT-010 组合分层基线：`dsh-base` → `dsh-web-app` → 用户层，Legion 6 行 / 4 个 `file:` 依赖。`--diff` 无需 DSH_HOME |
 | | `docs/superpowers/prt/PRT-011-dsh-distribution-decision.md` | PRT-011 分发形态**已裁决：路线 C**（依赖 `@deepseek-ai/dsh` npm 包 + Launcher 装进 DataDir）；DSH 已是 MIT npm 包，当前部署是 244 个 junction 的开发布局，checkout ≈ 1845 MB |
 | | `docs/PRT-006-evidence/backup-restore-evidence.md` | PRT-006 备份/恢复验证：只复制 `.db` **静默丢 253 条 audit**；陈旧 `-wal` 混用**被重放且 integrity_check 仍 ok**。恢复步骤与发布检查单已回写 `docs/DEPLOY.md` §6.1 |
+| | `docs/PRT-005-evidence/verify-evidence.md` | PRT-005 旧路径执行状态证据：状态序列（**含「声明的状态机不是被强制执行的状态机」——`advanceTask` 绕过 `TRANSITIONS` 且不需将军**）、耗时、人工介入、**可用性空窗**（旧路径没有独立守护：两个独立空间同时断流 1.98h，无任何外部告警） |
+| | `docs/PRT-009-evidence/verify-evidence.md` | PRT-009 成本/延迟/资源基线证据：逐项口径、结清状态、费用模型（**单价缺失返回 `null` 而非 `0`**）与未覆盖项 |
 | **设计规格** | `docs/superpowers/specs/2026-09-11-legion-product-runtime-design.md` | Product Runtime 设计（17 节 + **附录 A 阶段 0～1 已落地指针**）。附录只回填落地位置，不改设计 |
 | **计划与闸门** | `docs/superpowers/plans/2026-09-11-prt-phase0-1.md` | 阶段 0～1 计划与逐任务结论。含**阶段 3 评审闸门**：热点文件最近 40 个提交仅触及 1/2 次（历史峰值 9/7）→ 已降温 |
-| **历史快照（非当前依据）** | `docs/**-evidence/**`、`docs/G-*/**` | 各任务/目标的当时验证记录，顶部均有 `⚠️ 历史快照` banner（含生成日期与基线 commit）；含 `docs/PRT-009-evidence/` |
+| **历史快照（非当前依据）** | `docs/**-evidence/**`、`docs/G-*/**` | 各任务/目标的当时验证记录，顶部均有 `⚠️ 历史快照` banner（含生成日期与基线 commit）；含 `docs/PRT-005-evidence/`、`docs/PRT-009-evidence/` |
 | **历史交付文档** | `docs/TEST_REPORT.md`、`docs/TEST_CASES.md`、`docs/TASK_BREAKDOWN.md`、`docs/RESEARCH.md`、`docs/P0-CONFIRMATION.md` 等 | 立项期交付物，测试数字以本文件 §2 为准 |
 | **运维叙事（过程）** | `docs/P1-LIVE-ROLLOUT.md`、`docs/P2-GOALDOCS-LIVE.md`、`docs/P3-PROD-ROLLOUT.md`、`docs/P1-1-DECISION.md`、`docs/P1-1-step2-runbook.md` | 当时决策与现场步骤；结论已并入本文件 |
 

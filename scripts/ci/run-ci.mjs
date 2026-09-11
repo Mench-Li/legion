@@ -323,6 +323,24 @@ async function stageTest() {
     // PRT-004：黄金流程定义。核心断言是**夹具没有漂移**——黄金流程的全部价值建立在
     // 「输入固定」上，夹具一悄悄变，阶段 3 的新旧对拍就退化成「输入不同却以为行为不同」。
     { label: 'prt-golden-flow（PRT-004 黄金流程与固定夹具冻结）', files: ['scripts/prt/golden-flow.test.mjs'], cwd: ROOT },
+    // PRT-005/009：旧路径执行证据提取。核心断言是**两个总体不混为一谈**——
+    // `audit.scope` 是动作发起者的空间视图，不是任务所属空间，
+    // 按它过滤会丢掉「将军从 default 视图推进 software 任务」这类行，
+    // 使序列截断、耗时被低估（实测 p50 从 4184s 误算成 2531s）。
+    // 这类错误不抛异常、只给出偏小的数，必须由用例守着。
+    { label: 'prt-old-path（PRT-005/009 旧路径执行证据：状态序列、耗时、人工介入）', files: ['scripts/prt/old-path-evidence.test.mjs'], cwd: ROOT },
+    // 阶段 0 完成标准：黄金流程执行台。核心断言是**验收四项独立重算**——
+    // 真跑 npm test、真读 README、真看 git diff，不采信 agent 自述。
+    // 同时钉死隔离性、流水线契约，以及「配置的岗位模型 vs 实际执行模型」的对拍
+    // （真实执行里 planner 声明 pro 却跑了 flash，必须被点名）。
+    { label: 'prt-gf001（阶段 0 黄金流程执行台：独立验收 + 配置不变量 + 模型偏差）', files: ['scripts/prt/gf001-run.test.mjs'], cwd: ROOT },
+    // PRT-009：真实执行的 token/耗时证据提取。核心断言是**多帧 zstd 必须逐帧解**——
+    // 整段一次性解压只得到第一帧（会话头），工具会「成功」报出 0 token。
+    // 这类失败不报错、只给 0，必须由用例守着。
+    { label: 'prt-usage（PRT-009 会话用量提取：多帧解码、token 口径、归属判定）', files: ['scripts/prt/dsh-session-usage.test.mjs'], cwd: ROOT },
+    // PRT-009：基线采集器的口径与「待采集清单必须随证据结清」。
+    // 清单长期不变会变成噪音；这条用例在证据文件被删/改坏时让 CI 变红。
+    { label: 'prt-measure（PRT-009 基线采集：费用口径 + 待采集清单结清状态）', files: ['scripts/prt/baseline-measure.test.mjs'], cwd: ROOT },
     // PRT-001/003：进程/数据拓扑与配置密钥清单。复用 scripts/config 的扫描器（单一权威实现），
     // 自带第二份 env 正则会让两份实现漂移，而漂移的表现是「两份都不可信」。
     { label: 'prt-topology（PRT-001 拓扑 / PRT-003 配置与密钥来源清单）', files: ['scripts/prt/topology-inventory.test.mjs'], cwd: ROOT },

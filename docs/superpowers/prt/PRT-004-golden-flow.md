@@ -58,9 +58,9 @@
 | `test/cli.test.mjs` | 3 个既有用例，覆盖上述三条分支 |
 | `README.md` | 已记录 `--version` / `help` 用法；缺 `greet` |
 
-**冻结哈希**：`2ad47fc49233d62a1ee586ea5da0a2fb422883606c8cd2e9f6cf5335251d38ea`
+**冻结哈希**：`9d4d958cd027235183a3ff67ee8cd9d10a6663ca38e127512cab384d9e628817`
 
-> **哈希变更记录（首版 → 现值）**：`package.json` 的 test 脚本由 `node --test test/`
+> **哈希变更记录一（首版 → `2ad47fc4…`）**：`package.json` 的 test 脚本由 `node --test test/`
 > 改为 `node --test`。Node 24 把 `--test` 的位置参数当作**模块路径**解析、不展开目录，
 > 于是 `node --test test/` 报 `Cannot find module '...\test'` 并以退出码 1 结束——
 > **夹具自带的 `npm test` 从来没有通过过**。夹具内 3 条用例本身正确
@@ -72,6 +72,27 @@
 >
 > 若未发现，黄金任务会带着一个「基线就是红的」测试命令开跑：implementer 被要求
 > 「让测试通过」，而它面对的失败与 `greet` 毫无关系——这次执行作为阶段 0 的证据就不成立。
+>
+> **哈希变更记录二（`2ad47fc4…` → 现值）**：`src/cli.mjs` 的入口判据由手拼
+> `` `file://${argv[1]}` `` 改为 `pathToFileURL(argv[1]).href`。
+>
+> 手拼在 Windows 上**恒不成立**：`import.meta.url` 是 `file:///D:/…`（三斜杠 + 正斜杠），
+> 手拼得到 `file://D:\…`（两斜杠 + 反斜杠），两者永不相等 → 脚本主体不执行，
+> `node src/cli.mjs --version` **退出码 0 且没有任何输出**。
+> 单元测试 `import { main }` 直接调函数，**完全看不到**这个问题。
+>
+> **发现路径值得记下**：它不是我审出来的，也不是任何静态检查报出来的，而是
+> **第一次真实执行黄金流程时，planner（`deepseek-v4-pro-openai`）在现状勘察环节
+> 实测 `node src/cli.mjs --version` 得到空输出**，写进计划书 E3 节并给出根因。
+> 这正是「阶段 0 必须真跑一次」而不是只做静态检查的价值。
+>
+> **同批加固（比修夹具本身更重要）**：验收契约原为四项
+> （`filesChanged` / `testCommand` / `testPassed` / `readmeUpdated`），
+> 而这四项**全部能被「只加函数、不接通入口」的改动满足**——也就是说
+> 改与不改这个缺陷，旧契约都会判「验收通过」。现已加上第五项
+> `cli`（把 CLI 当命令真跑：`greet` 正常路径、缺参退出码、`--version` 回归、
+> `help` 可发现性），并新增两条用例分别锁「完整解通过」与
+> 「只加函数不改 USAGE/缺参 → 必须被拦住」。
 
 `assertFixtureHash()` 会在夹具漂移时报错。**改动夹具必须同步更新该哈希并在提交信息
 中说明原因**——否则阶段 3 的对拍会退化成「两次输入不同却以为行为不同」。
@@ -99,7 +120,7 @@
 
 ## 4. 验收契约
 
-`GOLDEN_TASK.acceptance`，四项缺一不可：
+`GOLDEN_TASK.acceptance`，五项缺一不可：
 
 | 字段 | 判据 |
 | --- | --- |
@@ -107,24 +128,79 @@
 | `testCommand` | 实际执行的测试命令 |
 | `testPassed` | 该命令是否通过（布尔） |
 | `readmeUpdated` | README 是否补充了 `greet` 用法（布尔） |
+| `cli` | **把 CLI 当命令真跑**：`greet` 正常路径、缺参非 0 退出、`--version` 回归、`help` 可发现性 |
 
-验收提示：**greet 子命令可用、单元测试通过、README 已补充用法；四项缺一不可。**
+> **第五项是第一次真实执行之后补上的，不是设计时就有的。** 前四项全部能被
+> 「只加函数、不接通命令行入口」的改动满足——也就是说夹具入口判据在 Windows 上失效
+> （`node src/cli.mjs --version` 无输出）时，四项照样全绿。原因与发现路径见 §3 的哈希变更记录二。
+>
+> 这件事本身是黄金流程要检验的东西之一：**验收契约写得再齐，也可能整片漏掉一个面**。
+> 补上之后新增两条用例分别锁「完整解通过」与「只加函数不改 USAGE/缺参 → 必须被拦住」。
+
+验收提示：**greet 子命令可用、单元测试通过、README 已补充用法；验收五项缺一不可。**
 
 对应 spec §4.4「每次员工执行都有确定的输入快照、输出产物、工具记录」——黄金流程的
 验收契约本身就是这条要求的最小实例。
 
+**四项必须由执行台独立重算**（`gf001-run.mjs verify`）：真跑 `npm test`、真读 README、
+真看 git diff、真把 CLI 当命令跑。采信 worker 自己填的 `testPassed: true` 等于没有验收——
+那正是「看起来做完了」。2026-09-11 的实测结果为 `accepted: true`（4/4 CLI 用例通过），
+见 `prt-009-gf001-execution.json`。
+
 ---
 
-## 5. 旧路径任务状态序列（对拍基准）
+## 5. 任务状态序列（对拍基准）
 
-预期序列：`todo` → `in_progress` → `in_review` → `done`
+**预期序列（已被实测推翻，保留仅作对照）**：`todo` → `in_progress` → `in_review` → `done`
 
-该序列与 `team-hub/server.mjs` 的 `TRANSITIONS` 表一致（`todo → in_progress →
-in_review → done` 是合法路径，见 `prt-007-baseline.json`）。
+**实测序列（现行基准）**：`in_progress` → `advanced`
 
-**当前只有预期序列，尚无实测序列**。实测序列需跑一次真实旧路径，从 audit 表按
-`seq` 导出后与本序列对照；该采集项登记在 PRT-009 证据的待采集表中。阶段 3 对拍时，
-**新旧两条路径都必须产出实测序列**，只比预期序列等于没比。
+### 5.1 实测怎么推翻了预期
+
+`scripts/prt/old-path-evidence.mjs` 在 `software` 空间实测（2026-09-11）：
+
+| 指标 | 值 |
+| --- | --- |
+| 有轨迹的已完成任务 | 76 |
+| 与字面预期序列逐项相符 | **4**（5.3%） |
+| 不经过 `in_review` | **42**（55%） |
+
+受控空间 `gf001` 的 GF-001 三轮（T-144/145/146）**独立复现同一形态**：
+全部 `in_progress → advanced`，0 次 `in_review`。
+
+### 5.2 根因：声明的状态机不是被强制执行的状态机
+
+`advance` 不写 `to` 值，所以审计里表现为 `advanced`（这只解释**记录形态**）。
+让 `in_review` 真正消失的是：`team-hub/server.mjs` 里**两条**写 `done` 的路径，
+只有一条查迁移表。
+
+| 路径 | 位置 | 查 `TRANSITIONS` | 要求 `by === 'general'` |
+| --- | --- | --- | --- |
+| `transitionTask` | `:2682` | ✅ | ✅ |
+| `advanceTask` | `:2705` | ❌ | ❌ |
+
+**后果**：`prt-007-baseline.json` 的 20 条迁移边**只覆盖 `transitionTask`**
+（基线不完备）；「只有将军能在用户接受后把任务移到 done」这条规则可被岗位自己绕过。
+已登记为 `GOLDEN_TASK.transitionBypass`，并由两条用例守住（其中一条在
+`advanceTask` 被改动时立刻变红，提醒基准必须重新对拍）。
+**待裁决**（PRT-316 / 阶段 3）：旁路应保留还是收窄为必须经 `in_review` + 将军收尾。
+
+### 5.3 现行基准
+
+- `modalTaskStateSequence`：`['in_progress', 'advanced']`（多数路径）
+- `acceptedTaskStateSequences`：旧路径实际出现过的形态集合
+  （含 `todo → in_progress → advanced`、`in_progress → in_review → done` 等）
+- `transitionBypass`：旁路的显式登记（合法性判定要同时考虑它，否则旧路径最主流的
+  形态会被判成「非法迁移」）
+
+对拍语义由「逐字相等」改为「**落在旧路径实际出现过的形态集合内**」。
+
+**为什么非改不可**：若继续拿那个字面序列当基准，阶段 3 会把一条与旧路径**等价**的
+新路径判成「不等价」——因为旧路径自己都不走那条路。基准错了，对拍就成了反向门禁。
+
+阶段 3 对拍时，**新旧两条路径都必须产出实测序列**，只比预期序列等于没比。
+逐项口径、两个总体的区别（`audit.scope` 是动作发起者的空间视图，不是任务所属空间）
+与完整复现命令见 [PRT-005 证据](../../PRT-005-evidence/verify-evidence.md)。
 
 ---
 

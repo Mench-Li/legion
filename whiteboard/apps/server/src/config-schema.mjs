@@ -62,10 +62,13 @@ export const SCHEMA = defineSchema({
   nonEnvLiterals: [
     // 扫描器的启发式会把 SQL 语句关键字与信号名当候选，明确排除并说明
     'COMMIT', 'ROLLBACK', 'DELETE', 'SIGINT', 'SIGTERM', 'SIGKILL', 'ENOENT', 'ENOTDIR',
+    // P4-6：目录锁把 fs 的 errno 与 `e.code` 比较（`'wx'` 独占创建冲突 → EEXIST；
+    // `kill(pid, 0)` 无权限但进程存在 → EPERM）。这些是 fs 的错误码常量，不是 env 键。
+    'EEXIST', 'EPERM',
   ],
   notes: [
     '白板是独立子项目：其 packages/shared/src/config.mjs 是根 packages/shared/src/config.mjs 的同步副本（Docker 构建上下文隔离）。',
-    '单实例多房间（ADR-0008）：多实例共享存储未实现。',
+    '单实例多房间（ADR-0008）：多实例共享存储未实现；P4-6 起该约束由房间目录独占锁强制（第二个实例启动即失败）。',
   ],
 })
 

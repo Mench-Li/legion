@@ -25,6 +25,7 @@ import {
 } from './limits.mjs';
 import { Metrics } from './metrics.mjs';
 import { AuditLog, AUDIT_SOURCES } from './audit.mjs';
+import { describeHolder, lockPathFor } from './dirLock.mjs';
 import { serializeDoc } from '../../../packages/shared/src/crdt.mjs';
 import { loadConfig } from '../../../packages/shared/src/config.mjs';
 import { SCHEMA as CONFIG_SCHEMA } from './config-schema.mjs';
@@ -141,8 +142,32 @@ export async function createApp(options = {}) {
   const audit = new AuditLog({ dir: cfg.auditDir, enabled: cfg.auditEnabled !== false });
   const registry = new RoomRegistry({
     dir: cfg.roomsDir, inMemory: cfg.inMemoryRooms, config: roomCfg, audit, metrics,
+    lockPort: cfg.port, lockHost: cfg.host,
   });
   const limiter = new ConnectionLimiter(limits);
+
+  // P4-6（候选 #5）：目录锁拿不到时**启动即报**——这是本切片的核心目的：
+  // 把「两个实例共享一个房间目录 → 静默数据分裂」变成一条明确的、带处置建议的启动错误。
+  // 与配置错误的处置一致：入口时 exit(1)，被 import 时抛错（不杀导入方进程）。
+  if (registry.lockFailure) {
+    const h = registry.lockFailure.holder;
+    const msg = `[whiteboard] 房间目录已被另一个白板实例占用：${cfg.roomsDir}（占用者 ${describeHolder(h)}）\n`
+      + '  白板是单实例设计（ADR-0008 决策 1）：两个实例共享同一 WB_ROOMS_DIR 会**静默分裂数据**\n'
+      + '  （各自一份内存 doc，且落快照时会删掉对方尚未读到的 op）。\n'
+      + '  处置：① 停掉那个实例；② 或为本实例指定独立的 WB_ROOMS_DIR；'
+      + '③ 若确认那个进程已不存在，删除锁文件后重启：' + lockPathFor(cfg.roomsDir);
+    if (registry.lockFailure.reason === 'unwritable') {
+      console.error(`[whiteboard] 房间目录不可写：${cfg.roomsDir}（${registry.lockFailure.error ?? ''}）`);
+    } else {
+      console.error(msg);
+    }
+    const isEntry = process.argv[1] !== undefined && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
+    if (isEntry) process.exit(1);
+    throw new Error(msg);
+  }
+  if (registry.lock?.staleTakeover) {
+    console.error(`[whiteboard] 接管了陈旧目录锁（上一个进程未优雅退出）：${registry.lock.path ?? cfg.roomsDir}`);
+  }
 
   // 仪表盘：实时读数（房间数、在线数、限流状态）——纯数据，供 /metrics
   metrics.gauges = () => {
@@ -151,6 +176,8 @@ export async function createApp(options = {}) {
       rooms: { open: registry.size(), closedTotal: registry.closedCount, detail: rooms },
       peers: rooms.reduce((n, r) => n + r.peers, 0),
       connections: limiter.snapshot(),
+      // P4-6：把「谁独占着房间目录」暴露出来——运维查 /metrics 就能确认单实例约束当前成立
+      dirLock: registry.lockStatus(),
       audit: {
         ...audit.counts(),
         // P4-5：把「能回溯多久」一并暴露——只看 fileBytes 无法判断历史是否已被轮转掉。
@@ -178,6 +205,9 @@ export async function createApp(options = {}) {
       sendJson(res, healthy ? 200 : 503, {
         ok: healthy,
         storage: cfg.inMemoryRooms ? 'MemoryProvider' : 'SqliteProvider',
+        // P4-6：既有字段全部保留（ok/storage/ts 契约不变），只**新增** dirLock 供运维确认单实例约束。
+        // 拿不到锁时进程根本不会起来（见启动期检查），所以这里出现 denied 只可能是逃生阀场景。
+        dirLock: registry.lockStatus().mode,
         rooms: registry.size(),
         peers: metrics.gauges().peers,
         uptimeMs: metrics.snapshot().uptimeMs,
@@ -198,6 +228,8 @@ export async function createApp(options = {}) {
       sendJson(res, ok ? 200 : 503, {
         ok,
         heartbeatAgeMs,
+        // P4-6：深探活应能回答「单实例约束是否仍成立」——这是数据完整性的前提
+        dirLock: registry.lockStatus(),
         rooms: roomHealth,
         checkedAt: new Date().toISOString(),
       });

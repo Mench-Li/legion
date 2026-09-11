@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-10　`run-ci --only env,test,doc` **全 PASS**；其中 `test` **39 套件 / 1035 用例**
+**最近一次全量基线**：2026-09-10　`run-ci --only env,test,doc` **全 PASS**；其中 `test` **39 套件 / 1047 用例**
 （约 4 分钟）—— 以本文件所在提交为准
 
 > 说明：上句记录 P4-3 之后的全量运行（含 `doc` 阶段）。P4-2 之后为 **981 用例**、
@@ -66,7 +66,7 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：39 套件 / 1035 用例，`--only test` 整体 PASS** —— 2026-09-10 实测
+**当前基线：39 套件 / 1047 用例，`--only test` 整体 PASS** —— 2026-09-10 实测
 （P4-5 之后：`audit-archive.test.mjs` 新增 **14 例**（10 纯函数 + 4 真实进程：重启/写入量量级），白板 185→**199**；
 P4-4 之后：`static-serve` 6→**16 例**（新增导航/资源判定与缺失资源 404 契约）；
 P4-3 之后：`e2e-browser` 7→**10 例**（新增连接未就绪窗口/切房间补发/单连接三条用例）、`whiteboard` 158→**185 例**
@@ -93,7 +93,7 @@ P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-
 | rules | 7 | hub-event-stream（F-01 scope/游标/信封） | 5 |
 | artifact | 16 | dual-write（P1-1 双进程写同库竞态 + 迁移竞态） | 4 |
 | security | 6 | p13-host-injection（P1-3 真实宿主注入 + P3-4 配置摘要 + P4-2 导入失败诊断，2 文件） | 38 |
-| read-auth（鉴权矩阵 + 回环开放，2 文件） | 14 | whiteboard（含 P3-1 治理端到端、P4-3 待发队列/提示优先级单测、P4-5 审计归档跨重启与前端静态契约，17 文件） | 199 |
+| read-auth（鉴权矩阵 + 回环开放，2 文件） | 14 | whiteboard（含 P3-1 治理端到端、P4-3 待发队列/提示优先级单测、P4-5 审计归档跨重启、P4-6 单实例目录锁与前端静态契约，18 文件） | 211 |
 | files-api | 41 | plugins（含 P2-6 chat-context、SP-P0 space-pipeline、P3-4 配置） | 185 |
 | files-p27 / files-ui（P2-7） | 36 / 19 | web-p28 / browser-ui（P2-8） | 21 / 21 |
 | web | 24 | static-serve（静态托管 404/SPA 回退/穿越 + P4-4 导航与资源判定） | 16 |
@@ -131,6 +131,10 @@ P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-
    对话真实模型通道 E2E 等仍在 `docs/REMAINING-TASKS.md` 待办；浏览器助手的缓存/正文提取/截图已按 P2-8 增强）。
 2. 白板为**单实例多房间**模型（P3-1 已落地房间隔离/权限/限流/指标审计）；
    **不承诺横向扩展**，多实例共享存储未实现（ADR-0008 记录了被否理由与转 v2 触发条件）。
+   **P4-6 已把该约束从注释升级为可执行守卫**：房间目录独占锁 `.whiteboard.lock`，
+   第二个实例指向同一目录**启动即失败**并给出处置建议（实测旧行为是**静默数据分裂**：
+   两边视图分别停在 2 与 3 而真值 4，两侧日志无任何错误）；陈旧锁可自动接管，不会把服务锁死。
+   锁是**建议性**的（只防误操作），且不覆盖审计目录；验证见 `docs/P4-6-evidence/verify-evidence.md`。
 3. 配置面已统一（P3-2 + P3-4）：**6 个配置面**共用统一配置引擎
    （`packages/shared/src/config.mjs`，优先级 **CLI > env > 默认值**）——三个活跃进程
    （team-hub / workbench / whiteboard）与三个 DSH 插件族（plugins / board-plugin / services-plugin），
@@ -184,6 +188,7 @@ P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-
     做真实客户端识别，否则同一出口会共享该额度）；房间空闲关闭依赖 tick 心跳；
     房间与单房间连接上限默认 50、全局 200（对齐 soak 承诺，`WB_*` 可调）；
     **多实例共享存储未实现**（ADR-0008 记录了被否理由与转 v2 触发条件）；
+    **单实例约束已由目录锁强制**（P4-6，`dir-lock.test.mjs` 12 例：含真实双进程拒绝与陈旧锁接管）；
     前端房间/角色逻辑为判定层测试（`whiteboard/packages/shared/test/room.test.mjs` 12 例）+
     前端静态契约（`whiteboard/apps/web/test/ui-contract.test.mjs` 6 例：DOM id 与共享模块接线、
     CSS 类与只读态类名一致），**并有真实浏览器 DOM 端到端**（P4-1：`tests/browser/whiteboard-ui.e2e.test.mjs`

@@ -43,6 +43,17 @@ export function createPendingOps({ max = MAX_PENDING_OPS } = {}) {
       items = [];
       return out;
     },
+    /** 把**没发出去**的部分放回队列前端（保持相对顺序，下一轮再补发） */
+    unshift(ops) {
+      const list = Array.isArray(ops) ? ops : [];
+      if (list.length === 0) return { size: items.length, dropped: 0 };
+      items = [...list, ...items];
+      // 只在「drain 之后立刻 unshift」时调用，此刻队列为空，因此下面这段是**不变量保护**（不会真的丢东西）；
+      // 若将来在别处调用，这里有界截断比无界增长安全。
+      let dropped = 0;
+      while (items.length > limit && items.length > list.length) { items.pop(); dropped += 1; }
+      return { size: items.length, dropped };
+    },
     /** 丢弃全部（切房间：这些操作属于上一个房间，不可能补发），返回被丢弃的条数 */
     clear() {
       const n = items.length;
@@ -66,4 +77,34 @@ export function chunkOps(ops, maxPerMessage) {
   const out = [];
   for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size));
   return out;
+}
+
+/**
+ * 分块补发，并如实报告**哪些真的发出去了**。
+ *
+ * 为什么要有这个函数（真实竞态，不是假想）：最初的补发实现是「`drain()` 全部取出 → 逐块 `send()`，
+ * 不看返回值」。但 `welcome` 可能来自一个**已被取代**的连接（例如切房间时旧 socket 的 `onclose`
+ * 又调度了一次 `connect()`，于是同时存在两个 socket），此刻 `ws` 可能还在 `CONNECTING`：
+ * `send()` 写不进去 → 那一批 op **既不在队列也没发出去**，等于在修复里重演了本切片要消灭的静默丢失。
+ *
+ * 因此约定：**只有发送成功的部分才算发出去**，剩下的原样交回调用方重新入队。
+ *
+ * @param {unknown[]} ops
+ * @param {number} maxPerMessage
+ * @param {(part: unknown[]) => boolean} send 返回 true 表示**确实写进了 socket**
+ * @returns {{ sent: unknown[], remaining: unknown[], failedChunkSize: number }}
+ */
+export function sendInChunks(ops, maxPerMessage, send) {
+  const list = Array.isArray(ops) ? ops : [];
+  const parts = chunkOps(list, maxPerMessage);
+  let sentCount = 0;
+  for (const part of parts) {
+    let ok = false;
+    try { ok = send(part) === true; } catch { ok = false; } // 写入抛错按「没发出去」处理，绝不当成功
+    if (!ok) {
+      return { sent: list.slice(0, sentCount), remaining: list.slice(sentCount), failedChunkSize: part.length };
+    }
+    sentCount += part.length;
+  }
+  return { sent: list.slice(0, sentCount), remaining: [], failedChunkSize: 0 };
 }

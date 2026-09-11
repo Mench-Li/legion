@@ -270,9 +270,19 @@ export function publishGoal(scope: string, objective: string, mode?: 'chain' | '
   return hubPost('/api/goal', mode ? { scope, objective, mode } : { scope, objective })
 }
 
-/** team-hub v2：目标状态迁移（仅将军）：active ↔ paused；done/canceled 为终态（cancel 会取消该目标未开工的链任务）。 */
-export function setGoalStatus(scope: string, goalId: string, status: GoalStatus): Promise<unknown> {
-  return hubPost('/api/goal/status', { scope, id: goalId, status })
+/** 目标状态迁移（POST /api/goal/status）响应：canceled 时携带被留痕的在办任务 id（已自动挂 hold）。 */
+export interface GoalStatusResult {
+  changed?: boolean
+  /** 被同步硬取消的未开工链任务数。 */
+  canceledTasks?: number
+  /** 在办/待验收任务（in_progress/in_review）：不会被处决，但已追加提示评论并置 hold，等将军裁决。 */
+  strandedTasks?: string[]
+}
+
+/** team-hub v2：目标状态迁移（仅将军）：active ↔ paused；done/canceled 为终态（cancel 会取消该目标未开工的链任务，
+ *  在办/待验收任务改为留痕 + 挂 hold，见返回的 strandedTasks）。 */
+export function setGoalStatus(scope: string, goalId: string, status: GoalStatus): Promise<GoalStatusResult> {
+  return hubPost('/api/goal/status', { scope, id: goalId, status }) as Promise<GoalStatusResult>
 }
 
 /** team-hub v2：更新目标共享上下文（仅将军）。contextVersion 服务端 +1；守护下一派工按新版本对齐（在跑 worker 不打断）。 */

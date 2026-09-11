@@ -1092,16 +1092,50 @@ function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general
 /**
  * 目标状态迁移（POST /api/goal/status 的函数体，仅将军）：
  * active ↔ paused（暂停/恢复）；done / canceled 为终态（自动收尾或将军手动）。
- * canceled 同步取消该目标**未开工**（backlog/todo/blocked）的链任务；在办/待验收留给将军收尾，不硬杀。
- * 返回 { goal, changed, canceledTasks }。
+ * canceled 同步取消该目标**未开工**（backlog/todo/blocked）的链任务；在办/待验收留给将军收尾，不硬杀，
+ * 但逐条追加提示评论并置 hold（strandOpenTasksOfCanceledGoal）——否则它们会静默滞留在「待我决定」。
+ * 返回 { goal, changed, canceledTasks, strandedTasks }。
  */
+/**
+ * 目标取消后的**在办任务留痕**（setGoalState 的 to==='canceled' 分支专用）：
+ *
+ * 纪律：取消目标只硬杀未开工（backlog/todo/blocked）的链任务；in_progress / in_review 属于在办，
+ * 不静默处决（可能已有真实产出待裁决）。但"不杀"不等于"不用管"——目标一旦取消，这些任务
+ * 既没有下游流转、也没有人会再推进它，若不留痕就会静默躺在「待我决定」里直到将军偶然发现
+ * （T-141 现场：目标于 20:36 取消，任务停在 in_review 无人知，1.5 小时后将军从看板上才发现）。
+ *
+ * 因此逐条：① 追加一条显式提示评论（说明所属目标已取消 + 三条可选处置）；② 置 hold=1，
+ * 挡住守护对它的自动认领/自动流转，把裁决权收回到将军（放行/验收/取消都在任务详情里一键完成）。
+ * 返回被留痕的任务 id 列表（审计字段 strandedTasks）。
+ */
+function strandOpenTasksOfCanceledGoal(goalId, by, at) {
+  const STATUS_LABEL = { in_progress: '进行中', in_review: '待验收' }
+  const open = db.prepare("SELECT id, status FROM tasks WHERE goalId=? AND status IN ('in_progress','in_review') ORDER BY id").all(goalId)
+  const stranded = []
+  for (const row of open) {
+    const t = getTask(row.id)
+    const comments = parseJson(t.comments, [])
+    comments.push({
+      by,
+      at,
+      text: `⚠ 所属目标 ${goalId} 已取消（goal:cancel）：本任务当前停在「${STATUS_LABEL[row.status] ?? row.status}」，`
+        + '不会再有下游流转，也不会被自动推进。已自动标「将军拦截」以免守护继续认领/流转。'
+        + '请将军裁决：产出可用 → 验收通过（推进 done，如 T-141 式的历史产物）／无保留价值 → 取消／仍需交付 → 转派重做。',
+    })
+    db.prepare('UPDATE tasks SET hold=1, comments=?, version=version+1, updatedAt=? WHERE id=?')
+      .run(JSON.stringify(comments), at, row.id)
+    stranded.push(row.id)
+  }
+  return stranded
+}
+
 function setGoalState(id, to, by = 'general', forceGeneral = false) {
   return withTx(() => {
     if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
     if (!GOAL_STATUSES.includes(to)) throw new Error(`status 必须是 ${GOAL_STATUSES.join('|')}`)
     if (by !== 'general' && forceGeneral !== true) throw new Error('目标状态仅允许将军（by=general）变更')
     const g = getGoal(id)
-    if (g.status === to) return { goal: goalView(g), changed: false, canceledTasks: 0 }
+    if (g.status === to) return { goal: goalView(g), changed: false, canceledTasks: 0, strandedTasks: [] }
     if (g.status === 'canceled') throw new Error(`目标 ${id} 已取消，不可再变更`)
     if (to === 'active' && g.status !== 'paused') throw new Error(`只有 paused 的目标可恢复（当前 ${g.status}）`)
     if (to === 'paused' && g.status !== 'active') throw new Error(`只有 active 的目标可暂停（当前 ${g.status}）`)
@@ -1111,13 +1145,15 @@ function setGoalState(id, to, by = 'general', forceGeneral = false) {
     db.prepare('UPDATE goal SET status=?, version=version+1, updatedAt=?, endedAt=? WHERE id=?')
       .run(to, at, terminal ? at : null, id)
     let canceledTasks = 0
+    let strandedTasks = []
     if (to === 'canceled') {
       // 只取消未开工的链任务（in_progress/in_review 属于在办，交给将军收尾）
       canceledTasks = db.prepare("UPDATE tasks SET status='canceled', version=version+1, updatedAt=? WHERE goalId=? AND status IN ('backlog','todo','blocked')").run(at, id).changes
+      strandedTasks = strandOpenTasksOfCanceledGoal(id, by, at)
     }
     const action = to === 'paused' ? 'goal:pause' : to === 'active' ? 'goal:resume' : to === 'done' ? 'goal:done' : 'goal:cancel'
-    audit(by, g.scope, action, id, { goal: id, objective: g.objective, canceledTasks }, id)
-    return { goal: goalView(getGoal(id)), changed: true, canceledTasks }
+    audit(by, g.scope, action, id, { goal: id, objective: g.objective, canceledTasks, strandedTasks }, id)
+    return { goal: goalView(getGoal(id)), changed: true, canceledTasks, strandedTasks }
   })
 }
 

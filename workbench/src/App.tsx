@@ -367,14 +367,19 @@ export default function App(): React.JSX.Element {
     toast('ok', '🎯 已发布目标（与既有目标并存，自动生成独立任务链）')
   }, [])
 
-  /** 目标状态迁移（暂停/恢复/取消，仅将军）：成功后刷新目标列表并提示。 */
+  /** 目标状态迁移（暂停/恢复/取消，仅将军）：成功后刷新目标列表并提示。
+   *  取消目标时若该目标还有在办/待验收任务（不会被处决），服务端会逐条留痕 + 挂 hold，
+   *  这里把数量与任务号一并提示——否则这类任务会静默躺在「待我决定」里没人知道要处理。 */
   const handleGoalStatus = useCallback(async (goalId: string, status: GoalStatus, label: string): Promise<void> => {
     if (!scope) return
     try {
-      await setGoalStatus(scope, goalId, status)
+      const r = await setGoalStatus(scope, goalId, status)
       const info = await fetchGoal(scope)
       setGoalInfo(info)
-      toast('ok', `${label}目标成功`)
+      const stranded = Array.isArray(r?.strandedTasks) ? r.strandedTasks : []
+      toast('ok', stranded.length > 0
+        ? `${label}目标成功；${stranded.length} 个在办任务已留痕并挂起（${stranded.join('、')}）——请到任务详情裁决：验收 / 取消 / 转派`
+        : `${label}目标成功`)
     } catch (e) {
       toast('err', e instanceof Error ? e.message : String(e))
     }

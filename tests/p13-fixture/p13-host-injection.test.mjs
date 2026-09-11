@@ -79,8 +79,8 @@ describeHost('P1-3 真实 DSH 宿主注入冒烟（legion 三插件）', () => {
     const pre = fx.preflight()
     assert.deepEqual(pre.problems, [], '插件入口预检失败（启动前即可判定）：\n' + JSON.stringify(pre, undefined, 2))
     child = spawnHost(fx)
-    // 传 child/rows：任何启动期失败都会变成点名到插件条目的诊断，而不是「host not ready within Nms」
-    await waitReady(fx.base, { timeoutMs: 60000, child, rows: fx.rows })
+    // 传 child/rows/packageDirs：任何启动期失败都会变成点名到插件条目的诊断，而不是「host not ready within Nms」
+    await waitReady(fx.base, { timeoutMs: 60000, child, rows: fx.rows, packageDirs: fx.packageDirs })
   }, { timeout: 90000 })
 
   after(async () => {
@@ -366,7 +366,7 @@ describeHost('P1-3 真实 DSH 宿主注入冒烟（legion 三插件）', () => {
     // 反假阳性对照：诊断层是给失败现场用的，但它在**健康**日志上必须安静——
     // 否则「诊断」会变成新的噪音源。这里用真实宿主的实际日志（stdout+stderr）。
     const logText = child._p13logs.out + child._p13logs.err
-    const diag = diagnoseHostLogs({ logText, rows: fx.rows, repoRoot: REPO })
+    const diag = diagnoseHostLogs(fx.diagnoseOpts(logText))
     assert.deepEqual(diag.problems, [], '健康宿主不该被诊断出插件加载失败：' + JSON.stringify(diag.problems))
     // 组合行真值来自 fixture 写的补丁层：三个 legion 插件条目都在其中（诊断据此定位插件名）
     const names = fx.rows.map((r) => r.name)
@@ -441,7 +441,7 @@ describeHost('P4-2 宿主插件导入失败：诊断可读性（负向 · 入口
 
   it('诊断点名坏条目：id + 入口文件 + 插件自己的错误 + 处置建议（结构化 + 可读两种形态）', () => {
     const logText = child._p13logs.out + child._p13logs.err
-    const diag = diagnoseHostLogs({ logText, rows: fx.rows, repoRoot: REPO })
+    const diag = diagnoseHostLogs(fx.diagnoseOpts(logText))
     assert.equal(diag.problems.length, 1, '应恰好定位到一处问题：' + JSON.stringify(diag.problems))
     const p = diag.problems[0]
     assert.equal(p.kind, 'import_threw', '入口存在却导入失败 → import_threw，实际：' + p.kind)
@@ -516,7 +516,7 @@ describeHost('P4-2 宿主插件导入失败：诊断可读性（负向 · 入口
     let err = null
     try {
       // 宿主已退出：waitReady 必须**立刻**给出诊断（而不是等满 60s 超时）
-      await waitReady(fx.base, { child, rows: fx.rows, timeoutMs: 60000 })
+      await waitReady(fx.base, { child, rows: fx.rows, timeoutMs: 60000, packageDirs: fx.packageDirs })
     } catch (e) { err = e }
     const elapsed = Date.now() - t0
 
@@ -537,5 +537,14 @@ describeHost('P4-2 宿主插件导入失败：诊断可读性（负向 · 入口
     assert.match(logText, /plugin\(s\) failed to load|did not activate|Cannot find (module|package)|ERR_MODULE_NOT_FOUND/,
       '宿主日志里应出现真实加载失败文本；实际尾部：\n' + logText.slice(-800))
     assert.equal(child.exitCode, 1, '插件加载失败的宿主应以 exit 1 退出（旧症状：客户端只看到「60s 未就绪」）')
+
+    // 与「等进程退出」无关的独立判据：只要拿到日志，诊断就必须点名到条目。
+    // 必需，因为本场景下 /__p13/ready **可能短暂答 200**（实测两种时序都出现过：一次 waitReady
+    // 返回就绪、一次从未就绪），所以「未就绪」不能当判据 —— 可靠判据是 exit 1 + 日志诊断。
+    const diag = diagnoseHostLogs(fx.diagnoseOpts(logText))
+    const p = diag.problems.find((x) => /p13-broken-missing|dsh-p13-missing/.test(x.plugin))
+    assert.ok(p, '只凭日志也必须点名到坏条目：' + JSON.stringify(diag.problems.map((x) => x.plugin)))
+    assert.equal(p.kind, 'missing_entry')
+    assert.match(p.entry ?? '', /lib[\\/]index\.js/, '应给出缺失的入口路径：' + p.entry)
   }, { timeout: 20000 })
 })

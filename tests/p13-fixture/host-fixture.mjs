@@ -174,14 +174,18 @@ ${extraRows.length > 0 ? extraRows.map((r) => r.replace(/\n+$/, '')).join('\n') 
 
   // 组合行真值：从刚写下的补丁层解析（避免「诊断用的表」与「实际挂载的行」漂移）
   const rows = parseCompositionRows(patchYaml)
-  // fixture 额外挂的假包：绝对路径直接进预检表，这样预检也能点名它们
-  const extraPackageDirs = Object.fromEntries(Object.entries(extraPackages).map(([k, v]) => [`@dsh-external/${k}`, v]))
+  // fixture 额外挂的假包：绝对路径直接进预检/诊断表，这样两者都能点名到它们并给出入口路径
+  const packageDirs = { ...PACKAGE_DIRS, ...Object.fromEntries(Object.entries(extraPackages).map(([k, v]) => [`@dsh-external/${k}`, v])) }
 
   return {
-    home, profileDir, scrumDir, repoRoot, port, base: `http://127.0.0.1:${port}`, rows, patchYaml,
+    home, profileDir, scrumDir, repoRoot, port, base: `http://127.0.0.1:${port}`, rows, patchYaml, packageDirs,
     /** 预检：入口产物缺失时在**启动之前**就给出可读结论（P4-2）。 */
     preflight() {
-      return preflightEntries(rows, { repoRoot: REPO, packageDirs: { ...PACKAGE_DIRS, ...extraPackageDirs } })
+      return preflightEntries(rows, { repoRoot: REPO, packageDirs })
+    },
+    /** 诊断入参（rows + packageDirs + repoRoot 三件套）：调用方不必自己拼。 */
+    diagnoseOpts(logText, extra = {}) {
+      return { logText, rows, packageDirs, repoRoot: REPO, ...extra }
     },
     cleanup() {
       try { rmTree(home) } catch { /* tmp may linger; acceptable */ }
@@ -227,9 +231,10 @@ export function spawnHost(fx, { env = {}, cwd = REPO } = {}) {
  *   · 等到 deadline → 用同一套诊断解释日志，指明失败插件、入口与原始错误。
  * 传入 `child`/`rows` 才会启用诊断（保持既有调用形式可用）。
  * @param {string} base
- * @param {{ timeoutMs?: number, intervalMs?: number, child?: import('node:child_process').ChildProcess, rows?: Array<{id?:string,name:string}> }} [opts]
+ * @param {{ timeoutMs?: number, intervalMs?: number, child?: import('node:child_process').ChildProcess,
+ *           rows?: Array<{id?:string,name:string}>, packageDirs?: Record<string,string> }} [opts]
  */
-export async function waitReady(base, { timeoutMs = 45000, intervalMs = 300, child = null, rows = [] } = {}) {
+export async function waitReady(base, { timeoutMs = 45000, intervalMs = 300, child = null, rows = [], packageDirs } = {}) {
   const deadline = Date.now() + timeoutMs
   let lastErr
   const logsText = () => {
@@ -237,7 +242,7 @@ export async function waitReady(base, { timeoutMs = 45000, intervalMs = 300, chi
     return l ? l.out + l.err : ''
   }
   const fail = (headline) => hostBootError({
-    logText: logsText(), rows, repoRoot: REPO,
+    logText: logsText(), rows, repoRoot: REPO, packageDirs,
     exitCode: child && child.exitCode !== null ? child.exitCode : null,
     timeoutMs,
     headline,
@@ -265,13 +270,29 @@ export async function waitReady(base, { timeoutMs = 45000, intervalMs = 300, chi
   }
 }
 
-/** 等子进程 stdio 排空（'close' 事件），最多 `maxMs`；用于「已退出但日志未读完」的场景。 */
-export function drainLogs(child, { maxMs = 3000 } = {}) {
+/**
+ * 等子进程 stdio 排空，最多 `maxMs`；用于「已退出但日志未读完」的场景。
+ *
+ * 实测坑（P4-2）：只用 `child.once('close')` 等待时，**'close' 可能早已触发**（我们是在
+ * 发现 exitCode 之后才来等的），此时那次等待必然耗满 `maxMs`——诊断本身是对的，但每次失败
+ * 都白等 3s。改为轮询两个流的 `readableEnded`（数据交付完成的真实信号），就绪即刻返回。
+ */
+export function drainLogs(child, { maxMs = 3000, intervalMs = 25 } = {}) {
   if (!child) return Promise.resolve()
   if (child.exitCode === null && child.signalCode === null) return Promise.resolve()
+  const streamsEnded = () => {
+    const streams = [child.stdout, child.stderr].filter(Boolean)
+    if (streams.length === 0) return true
+    return streams.every((s) => s.readableEnded === true || s.destroyed === true)
+  }
+  if (streamsEnded()) return Promise.resolve()
   return new Promise((resolveDone) => {
-    const timer = setTimeout(resolveDone, maxMs)
-    child.once('close', () => { clearTimeout(timer); resolveDone() })
+    const deadline = Date.now() + maxMs
+    const tick = () => {
+      if (streamsEnded() || Date.now() >= deadline) { resolveDone(); return }
+      setTimeout(tick, intervalMs)
+    }
+    tick()
   })
 }
 

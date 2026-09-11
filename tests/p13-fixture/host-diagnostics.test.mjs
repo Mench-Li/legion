@@ -289,6 +289,40 @@ describe('diagnoseHostLogs / formatDiagnosis：结论可读且指向正确插件
     assert.match(diag.problems[0].hint, /inject/)
   })
 
+  it('packageDirs 必须能穿透到入口解析：自造包也要给出入口路径（而不只是点名）', () => {
+    // 真实踩点：夹具挂的自造包不在默认 PACKAGE_DIRS 里，诊断为「能点名、给不出入口路径」。
+    // 只点名不给路径是半条结论 —— 定位还是要人去翻配置文件。
+    const dir = mkdtempSync(join(tmpdir(), 'p13-diag-pkgs-'))
+    try {
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'dsh-p13-missing', main: './lib/index.js' }))
+      const rows = [{ id: 'p13-broken-missing', name: '@dsh-external/dsh-p13-missing' }]
+      const log = 'Error: dsh: plugin tree failed to load: failed to apply loader entry include (cordis:include): '
+        + "failed to import loader entry p13-broken-missing (@dsh-external/dsh-p13-missing): Cannot find package '" + join(dir, 'lib', 'index.js') + "' imported from " + dir
+      const without = diagnoseHostLogs({ logText: log, rows, repoRoot: dir })
+      assert.equal(without.problems[0].entry, null, '默认表里没有这个包 → 给不出入口（记录现状，便于理解为何要传 packageDirs）')
+      const withDirs = diagnoseHostLogs({ logText: log, rows, repoRoot: dir, packageDirs: { '@dsh-external/dsh-p13-missing': dir } })
+      const p = withDirs.problems[0]
+      assert.equal(p.kind, 'missing_entry')
+      assert.equal(p.entry, join(dir, 'lib', 'index.js'), '传了 packageDirs 就必须给出入口路径')
+      assert.match(p.hint, /入口文件不存在|入口产物缺失/)
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  it('hostBootError 也转发 packageDirs（waitReady 走的就是这条路）', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'p13-diag-boot-'))
+    try {
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'dsh-p13-missing', main: './lib/index.js' }))
+      const err = hostBootError({
+        logText: 'failed to import loader entry p13-x (@dsh-external/dsh-p13-missing): Cannot find package',
+        rows: [{ id: 'p13-x', name: '@dsh-external/dsh-p13-missing' }],
+        repoRoot: dir,
+        packageDirs: { '@dsh-external/dsh-p13-missing': dir },
+        exitCode: 1,
+      })
+      assert.equal(err.diagnosis.problems[0].entry, join(dir, 'lib', 'index.js'))
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+
   it('只有底层模块错误、没有条目名 → 如实说「未能定位到具体插件条目」', () => {
     const log = "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'cordis' imported from /tmp/x/lib/index.js"
     const diag = diagnoseHostLogs({ logText: log, rows: [], repoRoot })

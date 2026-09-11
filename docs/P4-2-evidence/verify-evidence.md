@@ -131,11 +131,16 @@ dsh: plugin tree failed to load: failed to apply loader entry include (cordis:in
 
 ### 3.5 全量门禁
 
-| 阶段 | 结论 |
-| --- | --- |
-| `env` | PASS |
-| `test` | 详见 §3.6（本切片只新增/扩展了 `p13-host-injection` 套件组，其余 38 套件读数与基线一致） |
-| `doc` | PASS（`check-docs.mjs` 10 类校验项全绿） |
+| 运行 | 阶段 | 结论 | 读数 |
+| --- | --- | --- | --- |
+| 分支 `w/host-diagnostics`（`.ci/p4-2-final2`） | `env` / `test` / `doc` | **全 PASS** | 1889ms / 254822ms / 314ms；**39 套件 / 978 用例** |
+| `main`（合并 `--no-ff` 后，`.ci/p4-2-main`） | `env` / `test` / `doc` | **全 PASS** | 3301ms / 254797ms / 456ms；**39 套件 / 978 用例** |
+| 两轮共同读数 | `p13-host-injection` | PASS | `exit=0 tests=36 pass=36 fail=0` |
+| `env` 阶段三项配置自检 | `scan` / `sync` / `check(good fixture)` | **全 PASS** | 见 `.ci/*/ci.log` 的 `config ...: PASS` 行 |
+
+> 注：`node scripts/config/check.mjs`（**不带夹具**）在本机会因宿主会话里的 `TEAM_HUB_PORT=3080`
+> 报 `hub_upstream_port_mismatch` —— 这是**按设计**的机器相关结果，门禁只认带 `--isolated-env` 的夹具检查
+> （`run-ci` 的既有做法，本轮未改）。
 
 ### 3.6 与基线的差异（诚实登记）
 

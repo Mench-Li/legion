@@ -67,7 +67,7 @@ DSH 侧的两条语义（摘自 base patch 的头部注释，此处不重复实�
   不放在 base 层，而是各模式 bundle 各自完整重述。
 - 行顺序**没有加载语义**（激活由服务可用性驱动），分组只为方便阅读。
 
-### 2.2 Legion 挂载面：6 行
+### 2.2 Legion 挂载面：7 行
 
 | row id | 包 | 仓库目录 | 作用 |
 | --- | --- | --- | --- |
@@ -75,11 +75,20 @@ DSH 侧的两条语义（摘自 base patch 的头部注释，此处不重复实�
 | `legion-scrum-board` | `@dsh-external/dsh-scrum-board` | `board-plugin` | 看板 UI + 写接口 + SSE，挂 `:3080/scrum-board` |
 | `legion-scrum-worker` | `@dsh-external/dsh-scrum-worker` | `plugins` | 士兵守护（`scope: software`） |
 | `legion-scrum-worker-ozon` | `@dsh-external/dsh-scrum-worker` | `plugins` | 士兵守护（`scope: ozon`） |
+| `legion-scrum-worker-gf001` | `@dsh-external/dsh-scrum-worker` | `plugins` | 士兵守护（`scope: gf001`，黄金流程 GF-001 专用，工作根为独立的 scratch 仓库） |
 | `legion-mediator` | `@dsh-external/dsh-scrum-worker` | `plugins` | 公共调解员（`scope: '*'`，不派工不认领） |
 | `legion-services` | `@dsh-external/dsh-legion-services` | `services-plugin` | 托管 team-hub `:8787` 与指挥台 `:5173` |
 
-**同一个包被挂了三次**（`dsh-scrum-worker` × 3）。这不是冗余：`scope` 是**启动期常量**，
+**同一个包被挂了四次**（`dsh-scrum-worker` × 4）。这不是冗余：`scope` 是**启动期常量**，
 一个守护实例只服务一个空间。新增空间若不补一个实例，该空间的目标链会一直停在 `todo`。
+
+> `legion-scrum-worker-gf001` 是**为了让阶段 0 能在隔离空间里真实跑一次端到端交付**而加的
+> （PRT-004 / PRT-005 / PRT-009）：它把 `workspace` / `repoRoot` / `worktreeRoot` 全部指向
+> `D:/project/DSH/gf001-scratch`（只含黄金夹具 4 个文件），因此它的执行不触碰
+> `software` / `ozon` 两个生产空间的任何任务或仓库。
+> `maxWorkers: 1` 是刻意的：这是一次被观察的受控执行，并行会污染时序证据。
+> 上一次基线记录为 6 行；本次刷新到 7 行，差异仅此一项（`diffBaselines` 报
+> `+ 组合行: legion-scrum-worker-gf001`），由 `composition-baseline.test.mjs` ④ 捕获。
 
 ### 2.3 挂载形态：`file:` 依赖（pnpm 复制快照）
 

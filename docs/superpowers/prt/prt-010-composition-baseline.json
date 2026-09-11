@@ -107,6 +107,37 @@
       ]
     },
     {
+      "id": "legion-scrum-worker-gf001",
+      "package": "@dsh-external/dsh-scrum-worker",
+      "repoDir": "plugins",
+      "configKeys": [
+        "agentPreset",
+        "denyTools",
+        "hubToken",
+        "hubUrl",
+        "intervalMs",
+        "isolate",
+        "logFile",
+        "maxWorkers",
+        "mediateMergeFails",
+        "provider",
+        "repoRoot",
+        "role",
+        "rolesFile",
+        "scope",
+        "scrumDir",
+        "staleMinutes",
+        "workerTimeoutMs",
+        "workspace",
+        "worktreeRoot"
+      ],
+      "emptyConfigKeys": [
+        "denyTools",
+        "hubToken",
+        "rolesFile"
+      ]
+    },
+    {
       "id": "legion-scrum-worker-ozon",
       "package": "@dsh-external/dsh-scrum-worker",
       "repoDir": "plugins",

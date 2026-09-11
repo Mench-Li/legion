@@ -37,7 +37,7 @@ export const FIXTURE_FILES = Object.freeze({
   "private": true,
   "type": "module",
   "bin": { "gf001": "./src/cli.mjs" },
-  "scripts": { "test": "node --test test/" }
+  "scripts": { "test": "node --test" }
 }
 `,
   'src/cli.mjs': `#!/usr/bin/env node
@@ -159,8 +159,20 @@ export function fixtureHash(files = FIXTURE_FILES) {
   return h.digest('hex')
 }
 
-/** 已冻结的夹具哈希。改动夹具内容必须同步更新此值并说明原因。 */
-export const FIXTURE_HASH = '5cab66e2a938c41e14b76e4c9c76183b4a1160cb9bd751506c0aae1b00f49bf1'
+/**
+ * 已冻结的夹具哈希。改动夹具内容必须同步更新此值并说明原因。
+ *
+ * 变更记录：
+ *   · 5cab66e2…（首版）→ 2ad47fc4…：`package.json` 的 test 脚本由
+ *     `node --test test/` 改为 `node --test`。
+ *     原因：Node 24 把 `--test` 的位置参数当作**模块路径**解析，目录不会被展开，
+ *     因此 `node --test test/` 报 `Cannot find module '...\test'` 并以退出码 1 结束——
+ *     也就是说夹具自带的 `npm test` **从来没有通过过**。
+ *     夹具内 3 条用例本身是正确的（`node --test` 自动发现时 3/3 通过）。
+ *     这个缺陷在阶段 0 冻结时未被发现，因为当时没有任何一条用例真的执行过夹具的
+ *     test 脚本；现已补上（golden-flow.test.mjs「夹具真实可执行」一节）。
+ */
+export const FIXTURE_HASH = '2ad47fc49233d62a1ee586ea5da0a2fb422883606c8cd2e9f6cf5335251d38ea'
 
 /** 校验夹具未被漂移；返回 {ok, expected, actual}。 */
 export function assertFixtureHash() {
@@ -168,7 +180,15 @@ export function assertFixtureHash() {
   return { ok: actual === FIXTURE_HASH, expected: FIXTURE_HASH, actual }
 }
 
-/** 夹具内容规范性检查：保证跨平台字节一致。 */
+/**
+ * 夹具内容规范性检查：保证跨平台字节一致。
+ *
+ * 注意这里**没有**跑 `npm test`：规范性检查是纯函数式的内容检查，跑测试要落盘、
+ * 要起进程。夹具「能不能真的跑起来」由 `golden-flow.test.mjs` 里那条
+ * 真实物化 + 真实执行 `npm test` 的用例负责——本条注释的存在，是因为
+ * 曾经只有这里、没有那条用例，于是夹具带着一条在 Node 24 上必然失败的
+ * test 脚本被冻结了下来，而没人发现。
+ */
 export function checkFixtureHygiene(files = FIXTURE_FILES) {
   const problems = []
   for (const [path, content] of Object.entries(files)) {

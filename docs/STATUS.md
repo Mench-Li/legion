@@ -147,7 +147,7 @@ P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-
 | | `docs/REQUIREMENTS.md`、`docs/ORCHESTRATION-V3.md` | 需求与编排设计 |
 | **迁移基线（可 diff）** | `docs/superpowers/prt/prt-007-baseline.json` | PRT-007 旧系统平台契约基线：85 路由 / 22 表 / 7 任务状态 / 20 迁移边。`node scripts/prt/baseline-snapshot.mjs --diff` 查漂移 |
 | | `docs/superpowers/prt/prt-009-baseline.json` | PRT-009 成本/延迟/资源基线。**`pending` 段无值**：token/费用/端到端耗时/峰值资源必须真实执行才能采集，工具拒绝编造 |
-| | `docs/superpowers/prt/PRT-004-golden-flow.md` | 黄金流程 GF-001 定义（固定夹具哈希 `5cab66e2…`、3 段岗位交接、四项机器可判定验收） |
+| | `docs/superpowers/prt/PRT-004-golden-flow.md` | 黄金流程 GF-001 定义（固定夹具哈希 `2ad47fc4…`、3 段岗位交接、四项机器可判定验收；夹具可执行性已由 CI 看护） |
 | | `docs/superpowers/prt/PRT-001-topology-inventory.md`、`prt-001-003-inventory.json` | PRT-001/003 拓扑与配置密钥清单。**4 个 path 字段默认落在安装目录内**（越界写入，PRT-505/257 输入）；仓库内明文凭证 0 处 |
 | | `docs/superpowers/prt/PRT-010-dsh-composition-baseline.md`、`prt-010-composition-baseline.json` | PRT-008 术语冻结 + PRT-010 组合分层基线：`dsh-base` → `dsh-web-app` → 用户层，Legion 6 行 / 4 个 `file:` 依赖。`--diff` 无需 DSH_HOME |
 | | `docs/superpowers/prt/PRT-011-dsh-distribution-decision.md` | PRT-011 分发形态**已裁决：路线 C**（依赖 `@deepseek-ai/dsh` npm 包 + Launcher 装进 DataDir）；DSH 已是 MIT npm 包，当前部署是 244 个 junction 的开发布局，checkout ≈ 1845 MB |

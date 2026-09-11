@@ -4,19 +4,35 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-11　`run-ci --only env,boundary,deps,build,test,smoke,stage,doc` **八阶段全 PASS**；其中 `test` **52 套件 / 1403 用例**
+**最近一次全量基线**：2026-09-11　`run-ci --only env,boundary,deps,build,test,smoke,stage,doc` **八阶段全 PASS**；其中 `test` **54 套件 / 1465 用例**
 （约 4.5 分钟）—— 以本文件所在提交为准；证据 `.ci/prt-phase0-1-final/`
 
-> 本轮（PRT 阶段 0 收口）：新增 `prt-usage`（**14 例**：PRT-009 会话用量提取——多帧 zstd
-> 解码、token 口径、岗位归属）与 `prt-measure`（**8 例**：费用口径 + 待采集清单结清状态）；
-> `prt-golden-flow` 18→**20 例**（对拍基准改为「模态序列 + 可接受集合 + 已登记旁路」）、
-> `prt-old-path` 25→**30 例**（新增可用性空窗）、`prt-gf001` 23→**30 例**（新增模型偏差对拍
-> 与「同任务两条会话只算一条」）。50→**52** 套件、~1385→**1403** 用例。
+> **本轮（阶段 2 强制面 PRT-212~215）**：新增 `dsh-enforcement`（**34 例**）与
+> `dsh-composition`（**28 例**），落在新目录 `runtime/dsh-composition/`。52→**54** 套件、
+> 1403→**1465** 用例。
+>
+> 这一组的断言**几乎全是「不生效」**：强制面最危险的失效方式是**看起来生效了**——
+> 组合行挂上了但没激活（等待依赖服务）、`permission` 行在但 preset 表没被覆盖、
+> 沙箱返回 `partial`（存在未被管制的路径）、`confine` **原样返回**输入 argv（没做任何包装）、
+> `denialSignatures` 为空（沙箱拒绝退化成普通失败）。五种都在返回值里长得像成功。
+>
+> **必须说清楚的边界**：本批次交付的是**声明 + 原语 + 自检**，补丁层**尚未落盘应用**。
+> 因此这些强制点原语目前**只被自己的用例驱动，还没有任何生产调用方**。
+> 没落盘是**刻意**的：DSH 的 profile 层是 `patchReload: 'live'`，
+> 写入会**立刻改变正在运行的 harness 的强制面**（包括当前会话自己）。
+> 详见 `docs/PRT-212-evidence/verify-evidence.md` §2 与 §5。
+>
+> 最有价值的一条实测：`ctx.sandbox.confine()` 返回 `enforcement: 'full' | 'partial'`，
+> 这正是 spec §6.8「仅有配置名不算生效」的**可判定落点**——判据取 `full`，`partial` 一律判未生效。
+>
+> 上一批（PRT 阶段 0 收口）：新增 `prt-usage`（**14 例**）与 `prt-measure`（**8 例**）；
+> `prt-golden-flow` 18→**20 例**、`prt-old-path` 25→**30 例**、`prt-gf001` 23→**30 例**。
+> 50→**52** 套件、~1385→**1403** 用例。
 >
 > ⚠️ 跑全量基线需设 `$env:DSH_CHECKOUT`，否则 `plugins`（185 例）与 `board-plugin`（37 例）
 > 两组外部宿主回归会 **SKIP**（不伪绿），套件数会少 2、用例数会少 222 —— 这是有意设计。
 >
-> 本轮同时把 PRT-009 的六项「待采集」结清了四项（token 用量 / 端到端耗时 / 旧路径实测状态序列 /
+> PRT-009 的六项「待采集」已结清四项（token 用量 / 端到端耗时 / 旧路径实测状态序列 /
 > 人工介入率），靠的是**读取一次已经发生的真实执行**（受控隔离空间 `gf001`，目标 `G-mtwxx7an-2`），
 > 不是重新跑一次。证据见 `docs/PRT-005-evidence/verify-evidence.md` 与
 > `docs/PRT-009-evidence/verify-evidence.md` §3。**费用与峰值资源仍未采集，且原因已不是
@@ -84,8 +100,18 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：52 套件 / 1403 用例，`--only test` 整体 PASS** —— 2026-09-11 实测
-（PRT 阶段 0 收口：新增 `prt-usage`（**14 例**：PRT-009 会话用量提取——DSH 会话转录是
+**当前基线：54 套件 / 1465 用例，`--only test` 整体 PASS** —— 2026-09-11 实测
+（阶段 2 强制面：新增 `dsh-enforcement`（**34 例**：PRT-212）与 `dsh-composition`（**28 例**：PRT-213~215）。
+这一组的核心断言**几乎全是「不生效」**——因为强制面最危险的失效方式是
+**看起来生效了**：组合行挂上了但没激活、`permission` 行在但 preset 表没被覆盖、
+沙箱返回 `partial`（有未被管制的路径）、`confine` 原样返回输入 argv（没做任何包装）、
+`denialSignatures` 为空（沙箱拒绝退化成普通失败）。五种都在返回值里长得像成功。
+52→**54** 套件、1403→**1465** 用例。
+`runtime/dsh-composition/` 对 DSH 的依赖为 **0 处**（`dsh-boundary` 仍是 3 文件 / 26 处，
+与本批次之前完全一致——棘轮给适配器留的豁免**存在但未被使用**）。
+⚠️ 这一组交付的是**声明 + 原语 + 自检**；补丁层**尚未落盘应用**，
+因此这些原语目前只被自己的用例驱动、**还没有生产调用方**，详见 `docs/PRT-212-evidence/verify-evidence.md` §2 与 §5）。
+上一批收口：新增 `prt-usage`（**14 例**：PRT-009 会话用量提取——DSH 会话转录是
 **多帧拼接 zstd**，整段一次性解压只得到第一帧（会话头），工具会「成功」报出 0 token；
 用例把逐帧解码与 token 口径钉死）与 `prt-measure`（**8 例**：单价缺失时费用必须是 `null`
 而不是 `0`——`0` 会让预算检查静默失效；以及「待采集清单必须随证据结清」）。
@@ -180,9 +206,11 @@ P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-
 | | `docs/PRT-006-evidence/backup-restore-evidence.md` | PRT-006 备份/恢复验证：只复制 `.db` **静默丢 253 条 audit**；陈旧 `-wal` 混用**被重放且 integrity_check 仍 ok**。恢复步骤与发布检查单已回写 `docs/DEPLOY.md` §6.1 |
 | | `docs/PRT-005-evidence/verify-evidence.md` | PRT-005 旧路径执行状态证据：状态序列（**含「声明的状态机不是被强制执行的状态机」——`advanceTask` 绕过 `TRANSITIONS` 且不需将军**）、耗时、人工介入、**可用性空窗**（旧路径没有独立守护：两个独立空间同时断流 1.98h，无任何外部告警） |
 | | `docs/PRT-009-evidence/verify-evidence.md` | PRT-009 成本/延迟/资源基线证据：逐项口径、结清状态、费用模型（**单价缺失返回 `null` 而非 `0`**）与未覆盖项 |
+| | `runtime/dsh-composition/` | **阶段 2 强制面**（PRT-212~215）：补丁层声明（`patch-layer.mjs` + 生成物 `legion-host.patch.yml`）、三个强制点原语与 canonical operation 哈希（`enforcement.mjs`）、沙箱实际管制探测与启动自检（`selfcheck.mjs`）。**不 import 任何 DSH 包**——对 DSH 依赖 0 处，棘轮豁免存在但未使用 |
+| | `docs/PRT-212-evidence/verify-evidence.md` | 强制面证据：从**运行中** harness 实测读到的强制点（含 `ConfinedArgv.enforcement: full\|partial` 这条判据的落点）、四类「看起来生效了」的隐蔽失效、以及**刻意未落盘**的理由（profile 层 `patchReload: live`，写入会立刻改变当前进程的强制面） |
 | **设计规格** | `docs/superpowers/specs/2026-09-11-legion-product-runtime-design.md` | Product Runtime 设计（17 节 + **附录 A 阶段 0～1 已落地指针**）。附录只回填落地位置，不改设计 |
 | **计划与闸门** | `docs/superpowers/plans/2026-09-11-prt-phase0-1.md` | 阶段 0～1 计划与逐任务结论。含**阶段 3 评审闸门**：热点文件最近 40 个提交仅触及 1/2 次（历史峰值 9/7）→ 已降温 |
-| **历史快照（非当前依据）** | `docs/**-evidence/**`、`docs/G-*/**` | 各任务/目标的当时验证记录，顶部均有 `⚠️ 历史快照` banner（含生成日期与基线 commit）；含 `docs/PRT-005-evidence/`、`docs/PRT-009-evidence/` |
+| **历史快照（非当前依据）** | `docs/**-evidence/**`、`docs/G-*/**` | 各任务/目标的当时验证记录，顶部均有 `⚠️ 历史快照` banner（含生成日期与基线 commit）；含 `docs/PRT-005-evidence/`、`docs/PRT-009-evidence/`、`docs/PRT-212-evidence/` |
 | **历史交付文档** | `docs/TEST_REPORT.md`、`docs/TEST_CASES.md`、`docs/TASK_BREAKDOWN.md`、`docs/RESEARCH.md`、`docs/P0-CONFIRMATION.md` 等 | 立项期交付物，测试数字以本文件 §2 为准 |
 | **运维叙事（过程）** | `docs/P1-LIVE-ROLLOUT.md`、`docs/P2-GOALDOCS-LIVE.md`、`docs/P3-PROD-ROLLOUT.md`、`docs/P1-1-DECISION.md`、`docs/P1-1-step2-runbook.md` | 当时决策与现场步骤；结论已并入本文件 |
 

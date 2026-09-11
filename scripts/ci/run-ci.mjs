@@ -357,6 +357,20 @@ async function stageTest() {
     // 阶段 2：DshRuntimeAdapter。全部用假宿主端口，覆盖真实 DSH 无法稳定复现的故障
     // （run.result 永不结算、abort 无效、畸形结果、事件流中断）。
     { label: 'dsh-adapter（PRT-201~209：DSH 适配器契约、脱敏、看门狗与取消/恢复）', files: ['runtime/adapters/dsh/adapter.test.mjs'], cwd: ROOT },
+    // 阶段 2：强制面（PRT-212~215）。本组用例的**核心断言全是「不生效」**——
+    // 这类检查的危险失效方式是「看起来生效了」：行挂上了但没激活、
+    // preset 行在但表没被覆盖、沙箱返回 partial、confine 原样返回输入 argv。
+    // 四种都在组合树/返回值里长得像成功，因此必须由用例逐一钉死。
+    {
+      label: 'dsh-enforcement（PRT-212：canonical op 哈希、hard floor、fail-closed 策略门与双段超时审批）',
+      files: ['runtime/dsh-composition/enforcement.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      label: 'dsh-composition（PRT-213~215：组合补丁层对账、沙箱实际管制探测、启动自检门禁）',
+      files: ['runtime/dsh-composition/composition.test.mjs'],
+      cwd: ROOT,
+    },
     // P4-2（候选 #9）：宿主插件导入失败诊断。host-diagnostics.test.mjs 是**纯函数**单测
     // （无 DSH 依赖，任何机器都跑）；p13-host-injection.test.mjs 内含负向用例，用真实宿主
     // 复现「入口在导入期抛错 / 入口产物缺失」两种失败并断言诊断点名到条目。

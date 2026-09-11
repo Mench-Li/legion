@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-11　`run-ci --only env,boundary,deps,build,test,doc` **全 PASS**；其中 `test` **46 套件 / 1217 用例**
+**最近一次全量基线**：2026-09-11　`run-ci --only env,boundary,deps,build,test,doc` **全 PASS**；其中 `test` **47 套件 / 1230 用例**
 （约 4 分钟）—— 以本文件所在提交为准
 
 > 说明：上句记录 **P4-6** 之后的全量运行（含 `doc` 阶段），证据 `.ci/final-main4/`。
@@ -68,9 +68,12 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：46 套件 / 1217 用例，`--only test` 整体 PASS** —— 2026-09-11 实测
-（PRT-006：新增 `prt-backup`（**14 例**：三条备份路线 / 陈旧 WAL 危害 / 活写竞态 / 源库只读）；
-45→**46** 套件、1203→**1217** 用例。
+**当前基线：47 套件 / 1230 用例，`--only test` 整体 PASS** —— 2026-09-11 实测
+（阶段 0～1 收口：新增 `prt-churn`（**13 例**：阶段 3 评审闸门的热点文件改动节奏探针，
+含一条锁定「正确写法 vs 错误写法」差异的用例——`git log -n 40 -- <file>` 会先按路径过滤
+再截断、恒返回 40，把「该开工」读成「不能开工」）；46→**47** 套件、1217→**1230** 用例。
+上一批 PRT-006：新增 `prt-backup`（**14 例**：三条备份路线 / 陈旧 WAL 危害 / 活写竞态 /
+源库只读）；45→**46** 套件、1203→**1217** 用例。
 上一批 PRT-001/003：新增 `prt-topology`（**20 例**：复用既有扫描器对账 / 越界写入判定 / 密钥聚合 /
 数据产物分类 / diff 定位）；PRT-008/010：新增 `prt-composition`（**22 例**：patch 解析 /
 失败要响 / 快照卫生 / 组合对账 / diff）；43→**45** 套件、1161→**1203** 用例（+42 = 20+22）。
@@ -142,6 +145,8 @@ P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-
 | | `docs/superpowers/prt/PRT-010-dsh-composition-baseline.md`、`prt-010-composition-baseline.json` | PRT-008 术语冻结 + PRT-010 组合分层基线：`dsh-base` → `dsh-web-app` → 用户层，Legion 6 行 / 4 个 `file:` 依赖。`--diff` 无需 DSH_HOME |
 | | `docs/superpowers/prt/PRT-011-dsh-distribution-decision.md` | PRT-011 分发形态**已裁决：路线 C**（依赖 `@deepseek-ai/dsh` npm 包 + Launcher 装进 DataDir）；DSH 已是 MIT npm 包，当前部署是 244 个 junction 的开发布局，checkout ≈ 1845 MB |
 | | `docs/PRT-006-evidence/backup-restore-evidence.md` | PRT-006 备份/恢复验证：只复制 `.db` **静默丢 253 条 audit**；陈旧 `-wal` 混用**被重放且 integrity_check 仍 ok**。恢复步骤与发布检查单已回写 `docs/DEPLOY.md` §6.1 |
+| **设计规格** | `docs/superpowers/specs/2026-09-11-legion-product-runtime-design.md` | Product Runtime 设计（17 节 + **附录 A 阶段 0～1 已落地指针**）。附录只回填落地位置，不改设计 |
+| **计划与闸门** | `docs/superpowers/plans/2026-09-11-prt-phase0-1.md` | 阶段 0～1 计划与逐任务结论。含**阶段 3 评审闸门**：热点文件最近 40 个提交仅触及 1/2 次（历史峰值 9/7）→ 已降温 |
 | **历史快照（非当前依据）** | `docs/**-evidence/**`、`docs/G-*/**` | 各任务/目标的当时验证记录，顶部均有 `⚠️ 历史快照` banner（含生成日期与基线 commit）；含 `docs/PRT-009-evidence/` |
 | **历史交付文档** | `docs/TEST_REPORT.md`、`docs/TEST_CASES.md`、`docs/TASK_BREAKDOWN.md`、`docs/RESEARCH.md`、`docs/P0-CONFIRMATION.md` 等 | 立项期交付物，测试数字以本文件 §2 为准 |
 | **运维叙事（过程）** | `docs/P1-LIVE-ROLLOUT.md`、`docs/P2-GOALDOCS-LIVE.md`、`docs/P3-PROD-ROLLOUT.md`、`docs/P1-1-DECISION.md`、`docs/P1-1-step2-runbook.md` | 当时决策与现场步骤；结论已并入本文件 |

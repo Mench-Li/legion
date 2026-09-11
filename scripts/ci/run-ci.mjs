@@ -333,6 +333,9 @@ async function stageTest() {
     // team.db，依赖它会让本套件在 CI 上永远 skip 或永远红。夹具的关键是留一个
     // 未 checkpoint 的 WAL（插入后保持连接打开），否则「只复制 .db 会丢数据」无从证明。
     { label: 'prt-backup（PRT-006 备份/恢复验证：三条路线 + 陈旧 WAL 危害）', files: ['scripts/prt/backup-restore-verify.test.mjs'], cwd: ROOT },
+    // 阶段 3 评审闸门：热点文件改动节奏。本套件直接锁定「正确写法 vs 错误写法」的差异——
+    // `git log -n 40 -- <file>` 会先按路径过滤再截断，恒返回 40，把「该开工」读成「不能开工」。
+    { label: 'prt-churn（阶段 3 评审闸门：热点文件改动节奏探针）', files: ['scripts/prt/hot-file-churn.test.mjs'], cwd: ROOT },
     // P4-2（候选 #9）：宿主插件导入失败诊断。host-diagnostics.test.mjs 是**纯函数**单测
     // （无 DSH 依赖，任何机器都跑）；p13-host-injection.test.mjs 内含负向用例，用真实宿主
     // 复现「入口在导入期抛错 / 入口产物缺失」两种失败并断言诊断点名到条目。

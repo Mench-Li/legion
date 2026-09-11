@@ -1068,3 +1068,73 @@ Legion 商业化不以脱离 DSH 为前置条件。首版采用“Legion 产品�
 - 软件交付数字团队先验证商业闭环，跨境电商能力包在公共产品底座稳定后继续建设。
 
 这一决策同时满足短期上市速度和长期可替换性：DSH 继续作为发动机，但客户购买、配置和使用的是完整的 Legion 数字团队产品。
+
+---
+
+## 附录 A：阶段 0～1 已落地指针（**回填，不改设计**）
+
+> 本节由阶段 0～1 收口时**追加**，只记录「本设计里的哪一条已经落到哪个文件」，
+> 不修改任何前述设计内容。设计如与本节冲突，**以设计为准**。
+> 采集于 2026-09-11；全量 CI `run-ci --only env,boundary,deps,build,test,doc` 六阶段 PASS，
+> `test` **46 套件 / 1217 用例**（复现见 `docs/STATUS.md`）。
+
+### A.1 已交付（阶段 0～1）
+
+| 任务 | 落地物 | 验证 |
+| --- | --- | --- |
+| `PRT-001`、`PRT-003` | `docs/superpowers/prt/PRT-001-topology-inventory.md`、`PRT-003-config-secret-inventory.md` + `prt-001-003-inventory.json` | `prt-topology`（20 例） |
+| `PRT-002`、`PRT-108` | `scripts/ci/dsh-boundary.mjs`（执行面依赖棘轮）+ `dsh-boundary-baseline.json` | `boundary` 阶段 + `dsh-boundary`（22 例） |
+| `PRT-004` | `scripts/prt/golden-flow.mjs`（GF-001）+ `PRT-004-golden-flow.md` | `prt-golden-flow`（14 例） |
+| `PRT-006` | `scripts/prt/backup-restore-verify.mjs` + `docs/PRT-006-evidence/` | `prt-backup`（14 例） |
+| `PRT-007` | `scripts/prt/baseline-snapshot.mjs` + `prt-007-baseline.json` | `prt-baseline`（16 例） |
+| `PRT-008`、`PRT-010` | `docs/superpowers/prt/PRT-010-dsh-composition-baseline.md` + `prt-010-composition-baseline.json` | `prt-composition`（22 例） |
+| `PRT-009` | `scripts/prt/baseline-measure.mjs` + `prt-009-baseline.json` | 机器测量部分；`pending` 段留空 |
+| `PRT-011` | `docs/superpowers/prt/PRT-011-dsh-distribution-decision.md` | **已裁决：路线 C** |
+| `PRT-101`～`PRT-106`、`PRT-109` | `runtime/contracts/`（`index.mjs` + `index.d.mts` + `errors` / `model` / `run` / `adapter`） | `runtime-contract`（62 例） |
+| `PRT-107` | `runtime/contracts/fake-adapter.mjs` | 同上；含六条编排路径模拟 |
+
+**§6.4「重试创建新 Attempt、不覆盖历史」已由代码固定**：终态仲裁器拒绝第二个终态，
+重试必须换 `runId`（新 Attempt → 新 Run）。见 `runtime/contracts/run.mjs`。
+
+**阶段 1 完成标准已满足**：`runtime/contracts/fake-adapter.test.mjs` 的
+`runOrchestration()` 在**不启动 DSH** 的前提下跑完正常 / 限流重试 / 取消 / 超时 /
+崩溃恢复 / 协议违规六条路径。
+
+### A.2 三条对设计有实际影响的实测结论
+
+1. **§6.10「所有环境变量必须在配置 Schema 中声明」已满足**——声明缺口为 0
+   （`scripts/config/scan.mjs --check` PASS，97 个疑似字面量全部已处理）。
+   该项不需要再排任务；单测已锁定，缺口复现即红。
+2. **数据落点越界**：4 个 path 字段的默认值落在安装目录内
+   （`TEAM_HUB_DB=team-hub/team.db` + whiteboard 三处）。安装目录会被升级覆盖 →
+   需由 `DataDir` 承接（`PRT-505` / `PRT-257` 输入）。
+   反过来说明 DSH 侧位置是对的：`$DSH_HOME/.credentials.yaml` 不在安装目录内，
+   且其 `{version, refs, records}` 结构正是 `secretRef` 所指的既有机制 →
+   **`PRT-505` 应复用它，不要另建密钥库**。
+3. **`PRT-006` 的验收口径需要修正**：`audit.seq` **允许有缺口**
+   （分配器为 `MAX(seq)+1`，回滚后作废号不回填；现场库实测 1 处）。
+   验收应为「恢复前后**缺口集合**一致」，而非「连续」。
+
+### A.3 已裁决
+
+- **`PRT-011`：路线 C** —— 依赖 `@deepseek-ai/dsh` npm 包（`0.1.5-rc.2`、MIT、
+  `bin.dsh`），由 Launcher 装进 `DataDir` 并原子切换。
+  实测当前部署是**开发布局**（`$DSH_HOME` 下 244 个 junction 指向源码 checkout），
+  checkout ≈ 1845 MB——路线 A「内置完整运行时」的代价即在此。
+  仍待回答：Legion 自身四个 `file:` 包如何分发给用户；`0.1.5-rc.2` 是否可作对外依赖。
+
+### A.4 未落地与顺延
+
+| 项 | 状态 |
+| --- | --- |
+| `PRT-005` | 未启动 |
+| `PRT-009` 的 `pending` 段 | 需一次**真实模型执行**才能采集 token / 费用 / 端到端耗时 / 峰值资源；工具拒绝编造，宁可留空 |
+| `PRT-006` 的 `uploads/` 附件备份 | **未覆盖**（附件不在 SQLite 内，`VACUUM INTO` 覆盖不到；现场无 `uploads/`，无法验证） |
+| `PRT-006` 跨版本恢复 | 顺延至 `PRT-316` 之后 |
+| `PRT-201`～`PRT-214`（阶段 2） | 未启动 |
+| `PRT-315`、`PRT-316`（阶段 3） | 未启动。评审闸门**已通过**：两个热点文件最近 40 个提交仅被触及 1 / 2 次（历史峰值 9 / 7），日更节奏已降温，可用 `scripts/prt/hot-file-churn.mjs` 复算 |
+
+### A.5 阶段 3 启动前置（提醒）
+
+- `PRT-316` 仍须排在 team-hub 启动期并发迁移加固（`0db37af`）**沉淀一个完整发布周期**之后。
+- 阶段 3 的切片每个都要能独立对拍与回滚，不允许一次性重写两个大文件。〔§2.1、§11 迁移规则 3〕

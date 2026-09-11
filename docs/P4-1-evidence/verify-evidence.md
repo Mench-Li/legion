@@ -76,19 +76,26 @@ node --test tests/browser/whiteboard-ui.e2e.test.mjs
 实测：**7/7 PASS、0 fail、0 skipped**，单次 ~28–31s（两条 describe 各自起真实白板服务进程 +
 一个真实浏览器）。连续两次运行结论一致。
 
-### 3.2 全量门禁（env + test）
+### 3.2 全量门禁（env + test，分支与 main 各一次）
 
 ```powershell
 $env:DSH_CHECKOUT='D:\project\DSH\dsh\deepseek-harness'
-node scripts/ci/run-ci.mjs --only env,test --out .ci\browser-e2e-2
+node scripts/ci/run-ci.mjs --only env,test --out .ci\browser-e2e-2      # 分支上（含自动补建产物）
+node scripts/ci/run-ci.mjs --only env,test,doc --out .ci\p4-1-final     # 分支上（含 doc 阶段）
+node scripts/ci/run-ci.mjs --only env,test,doc --out .ci\p4-1-main      # 合并到 main 之后
 ```
 
-实测（`.ci/browser-e2e-2/summary.json`）：`env` PASS（2055ms）、`test` **PASS 39 套件 / 950 用例**
-（267959ms；其中新增行 `PASS e2e-browser（P4-1 真实浏览器：白板房间/角色/只读/限流 DOM 端到端）:
-exit=0 tests=7 pass=7 fail=0`）。其余 38 个套件数字与 P3-4 基线完全一致（无既有用例被删改）。
-本次运行前 `public/shared` 被手工删除，运行后该目录存在（用例自动补建，见 §2.7）。
-耗时较 P3-4 基线的 165s 长，主因是机器上同时跑着生产服务（3080/8787/5173）与本轮其他命令，
-不是套件变慢——同一阶段在本轮另一次运行（`.ci/browser-e2e-1`）也偏慢。
+| 运行 | env | test | doc |
+| --- | --- | --- | --- |
+| `.ci/browser-e2e-2`（分支，先删 `public/shared`） | PASS 2055ms | **PASS 39 套件 / 950 用例**（267959ms） | — |
+| `.ci/p4-1-final`（分支，`env,test,doc`） | PASS 1381ms | **PASS（214206ms）** | PASS 360ms |
+| `.ci/p4-1-main`（**合并后 main**，`env,test,doc`） | PASS 4091ms | **PASS（277967ms）** | PASS 908ms |
+
+三次运行的套件明细一致，均含新增行 `PASS e2e-browser（P4-1 真实浏览器：白板房间/角色/只读/限流
+DOM 端到端）: exit=0 tests=7 pass=7 fail=0`；其余 38 个套件数字与 P3-4 基线完全一致
+（无既有用例被删改）。`test` 阶段耗时在 214–278s 之间波动，主因是机器上同时跑着生产服务
+（3080/8787/5173）与本轮其他命令，不是套件变慢。
+第一次运行（`.ci/browser-e2e-2`）前 `public/shared` 被手工删除，运行后该目录存在（用例自动补建，见 §2.7）。
 
 ### 3.3 现场读数（`node docs/P4-1-evidence/e2e-evidence.mjs`）
 
@@ -152,6 +159,8 @@ node --test --test-name-pattern='④' tests/browser/whiteboard-ui.e2e.test.mjs
 | --- | --- |
 | `node --test tests/browser/whiteboard-ui.e2e.test.mjs` | 7/7 PASS（单跑两次一致） |
 | `node scripts/ci/run-ci.mjs --only env,test --out .ci\browser-e2e-2` | env PASS + test PASS（39 套件 / 950 用例） |
+| `node scripts/ci/run-ci.mjs --only env,test,doc --out .ci\p4-1-final`（分支） | env PASS + test PASS + doc PASS |
+| `node scripts/ci/run-ci.mjs --only env,test,doc --out .ci\p4-1-main`（**合并后 main**） | env PASS + test PASS + doc PASS |
 | `node docs/P4-1-evidence/e2e-evidence.mjs` | 现场读数（§3.3），浏览器 Chrome/152.0.7977.83 |
 | `$env:DSH_E2E_BROWSER='C:\nonexistent\chrome.exe'; node --test tests/browser/whiteboard-ui.e2e.test.mjs` | 整组 SKIP，exit=0 |
 | `node --test --test-name-pattern='④' tests/browser/whiteboard-ui.e2e.test.mjs` | 单跑 PASS（顺序无关） |

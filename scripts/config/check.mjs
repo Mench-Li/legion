@@ -17,7 +17,13 @@ import { runCrossChecks } from './cross-checks.mjs'
 
 const ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..')
 
-/** 进程 → schema 模块（相对 ROOT） */
+/** 进程 → schema 模块（相对 ROOT）
+ *
+ *  **这是唯一权威映射**：`scripts/config/scan.mjs` 的 `schemaModuleFor()` 直接引用它。
+ *  在 PRT-251 之前这里有两份手写映射（scan.mjs 一份、本文件一份），
+ *  新增 `product` 进程时只更新了其中一份，于是 `topology-inventory --diff` 报出
+ *  「声明缺口：product 的 8 个 LEGION_* 键未声明」——而 `scan --check` 同时说
+ *  「全部已处理」。**两份映射必然漂移**，因此合并为一份。 */
 export const SCHEMA_FILES = Object.freeze({
   'team-hub': 'team-hub/config-schema.mjs',
   workbench: 'workbench/scripts/config-schema.mjs',
@@ -26,6 +32,8 @@ export const SCHEMA_FILES = Object.freeze({
   plugins: 'plugins/config-schema.mjs',
   'board-plugin': 'board-plugin/config-schema.mjs',
   'services-plugin': 'services-plugin/config-schema.mjs',
+  // PRT-251：产品层（Launcher）。登记在这里等于声明「它的读取面有权威 schema」。
+  product: 'product/config-schema.mjs',
 })
 
 /** 解析 --env-file=path（KEY=VALUE，忽略空行与 # 注释；不展开变量引用）

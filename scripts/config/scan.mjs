@@ -12,6 +12,8 @@ import { execFileSync } from 'node:child_process'
 import { join, relative, extname, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
+import { SCHEMA_FILES } from './check.mjs'
+
 const ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..')
 
 /** 各进程的扫描范围（与 PROCESSES 一致；工作树的 worktrees 目录一律跳过）
@@ -24,6 +26,10 @@ export const PROCESSES = Object.freeze({
   plugins: { label: '士兵守护插件族（plugins/：scrum-worker / mediator）', dirs: ['plugins/src'] },
   'board-plugin': { label: 'Scrum 看板插件（宿主 iframe 面板）', dirs: ['board-plugin/src'] },
   'services-plugin': { label: '服务托管插件（随 Desktop 启停三进程）', dirs: ['services-plugin'] },
+  // PRT-251 起纳入产品层：Launcher 是**唯一**决定「子进程拿到什么环境」的地方，
+  // 因此它的读取点必须与其余进程一样可扫描。注意它的注入面是白名单（见 product/launcher/env.mjs），
+  // 与 services-plugin 的「整份 env 打底 + 覆盖」相反。
+  product: { label: '产品层（Legion Launcher：进程清单 / 白名单注入 / 就绪判据 / 监督退避）', dirs: ['product'] },
 })
 
 const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', '.legion-worktrees', '.worktrees', 'releases', 'scratch', 'coverage', 'data', '.ci', 'vendor'])
@@ -272,17 +278,15 @@ async function main() {
   if (check) console.log(`\nscan: PASS（全部 env 读取点与疑似字面量均已处理；共 ${suspiciousCount} 个疑似字面量）`)
 }
 
-/** 进程 → schema 模块路径（相对 ROOT），供 --check 对照使用 */
+/** 进程 → schema 模块路径（相对 ROOT），供 --check 对照使用。
+ *
+ *  **委托给 `check.mjs` 的 `SCHEMA_FILES`**，不再自己维护第二份映射：
+ *  这两份曾经各自手写，PRT-251 新增 `product` 进程时只更新了其中一份，
+ *  结果是 `scan --check` 说「全部已处理」而 `topology-inventory --diff` 说
+ *  「product 的 8 个键未声明」。两份映射必然漂移，因此只留一份。 */
 export function schemaModuleFor(name) {
-  const map = {
-    'team-hub': 'team-hub/config-schema.mjs',
-    workbench: 'workbench/scripts/config-schema.mjs',
-    whiteboard: 'whiteboard/apps/server/src/config-schema.mjs',
-    plugins: 'plugins/config-schema.mjs',
-    'board-plugin': 'board-plugin/config-schema.mjs',
-    'services-plugin': 'services-plugin/config-schema.mjs',
-  }
-  return join(ROOT, map[name] ?? '')
+  const file = SCHEMA_FILES[name]
+  return file === undefined ? join(ROOT, '') : join(ROOT, file)
 }
 
 const isMain = process.argv[1] && process.argv[1].replace(/\\/g, '/').endsWith('scripts/config/scan.mjs')

@@ -30,6 +30,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { PROCESSES, scanProcess, undeclaredReads } from '../config/scan.mjs'
 import { SCHEMA_FILES } from '../config/check.mjs'
+import { DATA_PATH_ENV } from '../../product/launcher/launcher.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const OUT_PATH = join(ROOT, 'docs', 'superpowers', 'prt', 'prt-001-003-inventory.json')
@@ -77,6 +78,12 @@ const PROCESS_TOPOLOGY = Object.freeze({
     readyProbe: '不适用（自身即监管者）',
     managedBy: 'DSH 宿主；它再托管 team-hub 与 workbench',
     protocol: '进程内 + spawn 子进程',
+  },
+  product: {
+    entryPoints: ['product/launcher/cli.mjs'],
+    readyProbe: '不适用（Launcher 自身；它**判定**别的进程的就绪）',
+    managedBy: '用户/Desktop 直接启动（spec §6.10 的「客户唯一启动入口」）',
+    protocol: '进程内调度 + 按波次 spawn 五进程（PRT-251）',
   },
 })
 
@@ -161,6 +168,30 @@ async function readSchemas() {
 }
 
 /**
+ * Launcher 已接管的越界写入键（PRT-251）。
+ *
+ * **不在这里手写覆盖清单**，而是从 `product/launcher/launcher.mjs` 的
+ * `DATA_PATH_ENV` 现算：两份手写的清单必然漂移，而漂移的表现是
+ * 「清单说已由 DataDir 承接，启动路径其实没有」——这一类假绿最难发现。
+ *
+ * 这 4 个默认值**仍在各自的 config-schema 里**，但经 Launcher 启动时会被显式
+ * 指到 DataDir 下。清单若只写「默认落在安装目录内」，读者会得出「这件事还没做」；
+ * 因此两种情形在同一行里区分：
+ *   - 经 Launcher 启动 → 写 DataDir（本字段为被覆盖）
+ *   - 不经 Launcher 手跑 → 仍是安装目录内的默认值（本字段保留，仍是一个真实风险）
+ */
+function launcherOverrides() {
+  const out = {}
+  for (const [proc, map] of Object.entries(DATA_PATH_ENV)) {
+    out[proc] = {}
+    for (const [key, rel] of Object.entries(map)) out[proc][key] = `dataDir/${rel}`
+  }
+  return out
+}
+
+const LAUNCHER_OVERRIDES = launcherOverrides()
+
+/**
  * 默认写入目标是否落在安装/源码目录内。
  *
  * 这是 PRT-003 点名要找的「越界写入」：安装目录会被升级覆盖，
@@ -175,13 +206,19 @@ function analyzeDefaultPaths(process, schema) {
     const def = f.default
     if (typeof def !== 'string' || def === '') continue
     const insideRepo = !isAbsolute(def) && !def.startsWith('~') && !def.startsWith('$')
+    const key = f.env ?? f.key
+    const override = LAUNCHER_OVERRIDES[process]?.[key] ?? null
     findings.push({
       process,
-      field: f.env ?? f.key,
+      field: key,
       defaultValue: def,
       resolvesInsideInstallDir: insideRepo,
+      launcherOverride: override,
       note: insideRepo
-        ? '默认落在仓库/安装目录内 → 属 installDir 写入，应由 DataDir 承接'
+        ? (override === null
+          ? '默认落在仓库/安装目录内 → 属 installDir 写入，应由 DataDir 承接'
+          : `默认落在仓库/安装目录内；经 Launcher 启动时被显式覆盖为 ${override}（PRT-251）。`
+            + '不经 Launcher 直接手跑时该默认值仍然生效，仍是一个真实风险')
         : '默认不在安装目录内',
     })
   }

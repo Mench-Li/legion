@@ -81,6 +81,19 @@ test('② 配置面复用 scripts/config 的 Schema（单一权威实现）', ()
   }
 })
 
+test('② 每个已登记进程都在 SCHEMA_FILES 里（否则「缺口」是映射漏登记，不是真缺口）', () => {
+  // 这条断言来自一次**真实事故**（PRT-251）：新增 `product` 进程时，
+  // `scan.mjs` 与 `check.mjs` 各自有一份手写映射，只更新了其中一份。
+  // 结果是 `scan --check` 说「全部已处理」，而本清单报出
+  // 「product 的 8 个 LEGION_* 键未声明」——两份结论互相矛盾，两份都不可信。
+  // 现在映射只有一份（`check.mjs` 的 SCHEMA_FILES，`scan.mjs` 委托它），
+  // 这条断言负责保证**新增进程时必须同时给出 schema**。
+  for (const name of Object.keys(PROCESSES)) {
+    assert.ok(SCHEMA_FILES[name] !== undefined,
+      `进程 ${name} 未在 SCHEMA_FILES 登记：要么它不该出现在 PROCESSES，要么它缺 config-schema`)
+  }
+})
+
 test('② 声明缺口口径与 scan --check 一致（当前为 0）', () => {
   const inv = load()
   // P3-2 统一配置系统已收口：真实读取的 env 键全部在 Schema 中声明。

@@ -412,6 +412,28 @@ async function stageTest() {
       files: ['security/secrets/secrets.test.mjs'],
       cwd: ROOT,
     },
+    // PRT-251 / PRT-703 / PRT-704：最小 Product Launcher（启动前体检、白名单注入、
+    // 就绪判据与身份断言、退避熔断、优雅停止）。
+    // 这一组里有**真实进程**用例（真 team-hub + 真 workbench，临时端口 + 临时 DataDir），
+    // 它们不是「多余的端到端」：本批次的**两条缺陷正是它们发现的**——
+    //   ① workbench 的 hub 上游默认指 8787，于是它去代理了**别的** hub 实例，
+    //      而 `/hub/api/config` 照样返回 200（没有身份断言就会报「就绪」）；
+    //   ② 就绪期望值被字符串化后与 number 严格比较永远不成立，真实运行被误报成
+    //      `identity-mismatch`（类型问题伪装成安全问题）。
+    // 另外它们同时钉住 PRT-003 的越界写入：launcher 必须把写路径指到 DataDir，
+    // 而 team-hub/.gitignore 的 `*.db` 会让写进安装目录的库**不出现在 git status 里**。
+    {
+      label: 'product-launcher（PRT-251/703/704：启动前体检、白名单注入、就绪身份断言、退避熔断）',
+      files: [
+        'product/launcher/allowlist.test.mjs',
+        'product/launcher/ports.test.mjs',
+        'product/launcher/readiness.test.mjs',
+        'product/launcher/supervisor.test.mjs',
+        'product/launcher/launcher.test.mjs',
+        'product/launcher/cli.test.mjs',
+      ],
+      cwd: ROOT,
+    },
     // P4-2（候选 #9）：宿主插件导入失败诊断。host-diagnostics.test.mjs 是**纯函数**单测
     // （无 DSH 依赖，任何机器都跑）；p13-host-injection.test.mjs 内含负向用例，用真实宿主
     // 复现「入口在导入期抛错 / 入口产物缺失」两种失败并断言诊断点名到条目。

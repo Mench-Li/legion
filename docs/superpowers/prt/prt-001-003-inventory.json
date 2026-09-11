@@ -209,6 +209,38 @@
       "envReadCount": 3,
       "undeclaredEnvKeys": [],
       "filesScanned": 2
+    },
+    {
+      "name": "product",
+      "label": "产品层（Legion Launcher：进程清单 / 白名单注入 / 就绪判据 / 监督退避）",
+      "dirs": [
+        "product"
+      ],
+      "schemaFile": "product/config-schema.mjs",
+      "schemaOk": true,
+      "schemaReason": null,
+      "entryPoints": [
+        "product/launcher/cli.mjs"
+      ],
+      "readyProbe": "不适用（Launcher 自身；它**判定**别的进程的就绪）",
+      "managedBy": "用户/Desktop 直接启动（spec §6.10 的「客户唯一启动入口」）",
+      "protocol": "进程内调度 + 按波次 spawn 五进程（PRT-251）",
+      "ports": [],
+      "sensitiveEnv": [],
+      "declaredFieldCount": 8,
+      "envReadKeys": [
+        "LEGION_CACHE_DIR",
+        "LEGION_DATA_DIR",
+        "LEGION_HOME",
+        "LEGION_INSTALL_DIR",
+        "LEGION_LOG_DIR",
+        "LEGION_PRODUCT_CONFIG",
+        "LEGION_READINESS_TIMEOUT_MS",
+        "LEGION_WORKSPACE_DIR"
+      ],
+      "envReadCount": 8,
+      "undeclaredEnvKeys": [],
+      "filesScanned": 12
     }
   ],
   "declarationGaps": [],
@@ -240,28 +272,32 @@
       "field": "TEAM_HUB_DB",
       "defaultValue": "team-hub/team.db",
       "resolvesInsideInstallDir": true,
-      "note": "默认落在仓库/安装目录内 → 属 installDir 写入，应由 DataDir 承接"
+      "launcherOverride": "dataDir/team-hub/team.db",
+      "note": "默认落在仓库/安装目录内；经 Launcher 启动时被显式覆盖为 dataDir/team-hub/team.db（PRT-251）。不经 Launcher 直接手跑时该默认值仍然生效，仍是一个真实风险"
     },
     {
       "process": "whiteboard",
       "field": "DB_PATH",
       "defaultValue": "apps/server/data/whiteboard.db",
       "resolvesInsideInstallDir": true,
-      "note": "默认落在仓库/安装目录内 → 属 installDir 写入，应由 DataDir 承接"
+      "launcherOverride": "dataDir/whiteboard/whiteboard.db",
+      "note": "默认落在仓库/安装目录内；经 Launcher 启动时被显式覆盖为 dataDir/whiteboard/whiteboard.db（PRT-251）。不经 Launcher 直接手跑时该默认值仍然生效，仍是一个真实风险"
     },
     {
       "process": "whiteboard",
       "field": "WB_ROOMS_DIR",
       "defaultValue": "apps/server/data/rooms",
       "resolvesInsideInstallDir": true,
-      "note": "默认落在仓库/安装目录内 → 属 installDir 写入，应由 DataDir 承接"
+      "launcherOverride": "dataDir/whiteboard/rooms",
+      "note": "默认落在仓库/安装目录内；经 Launcher 启动时被显式覆盖为 dataDir/whiteboard/rooms（PRT-251）。不经 Launcher 直接手跑时该默认值仍然生效，仍是一个真实风险"
     },
     {
       "process": "whiteboard",
       "field": "WB_AUDIT_DIR",
       "defaultValue": "apps/server/data",
       "resolvesInsideInstallDir": true,
-      "note": "默认落在仓库/安装目录内 → 属 installDir 写入，应由 DataDir 承接"
+      "launcherOverride": "dataDir/whiteboard/audit",
+      "note": "默认落在仓库/安装目录内；经 Launcher 启动时被显式覆盖为 dataDir/whiteboard/audit（PRT-251）。不经 Launcher 直接手跑时该默认值仍然生效，仍是一个真实风险"
     }
   ],
   "dataTopology": {

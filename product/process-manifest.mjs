@@ -70,7 +70,18 @@ export const PROCESS_SPECS = Object.freeze([
     portKey: 'team-hub',
     defaultPort: DEFAULT_PORTS['team-hub'],
     host: '127.0.0.1',
-    readiness: Object.freeze({ kind: 'http', path: '/api/config', expectStatus: 200, timeoutMs: 30000, intervalMs: 250, verified: false }),
+    readiness: Object.freeze({
+      kind: 'http',
+      path: '/api/config',
+      expectStatus: 200,
+      // 身份断言（PRT-703）：`/api/config` 返回 { auth, db, port }（team-hub/server.mjs:4438）。
+      // 断言 `port` 与本次启动的端口一致，才能区分「我们自己的实例」与
+      // 「上一次升级前留下的旧实例 / 别的程序占了同一个端口」。
+      expectJson: Object.freeze({ port: '{port}' }),
+      timeoutMs: 30000,
+      intervalMs: 250,
+      verified: false,
+    }),
     writesRoles: Object.freeze(['data']),
     envNames: Object.freeze(['TEAM_HUB_PORT', 'TEAM_HUB_HOST', 'TEAM_HUB_TOKEN', 'TEAM_HUB_DB']),
     milestone: 'PRT-251',
@@ -87,7 +98,18 @@ export const PROCESS_SPECS = Object.freeze([
     portKey: 'workbench',
     defaultPort: DEFAULT_PORTS.workbench,
     host: '127.0.0.1',
-    readiness: Object.freeze({ kind: 'http', path: '/', expectStatus: 200, timeoutMs: 30000, intervalMs: 250, verified: false }),
+    readiness: Object.freeze({
+      kind: 'http',
+      // 走 `/hub/api/config`（serve.mjs:2540 的同源反代）而不是 `/`：
+      // 拿到 200 只证明静态服务活着；代理能取到**正确 hub** 的 config 才证明
+      // 「界面能拿到数据」。`{teamHubPort}` 由 Launcher 用清单里 team-hub 的端口展开。
+      path: '/hub/api/config',
+      expectStatus: 200,
+      expectJson: Object.freeze({ port: '{teamHubPort}' }),
+      timeoutMs: 30000,
+      intervalMs: 250,
+      verified: false,
+    }),
     writesRoles: Object.freeze(['data']),
     envNames: Object.freeze(['DSH_HUB_UPSTREAM', 'TEAM_HUB_TOKEN', 'DSH_WORKBENCH_TOKEN']),
     milestone: 'PRT-251',
@@ -138,9 +160,20 @@ export const PROCESS_SPECS = Object.freeze([
     portKey: 'whiteboard',
     defaultPort: DEFAULT_PORTS.whiteboard,
     host: '127.0.0.1',
-    readiness: Object.freeze({ kind: 'http', path: '/', expectStatus: 200, timeoutMs: 30000, intervalMs: 250, verified: false }),
+    readiness: Object.freeze({
+      kind: 'http',
+      path: '/healthz',
+      expectStatus: 200,
+      // `/healthz` 返回 { ok: true, ... }（whiteboard/apps/server/src/index.js:248）
+      expectJson: Object.freeze({ ok: true }),
+      timeoutMs: 30000,
+      intervalMs: 250,
+      verified: false,
+    }),
     writesRoles: Object.freeze(['data']),
-    envNames: Object.freeze(['WHITEBOARD_TOKEN', 'WB_PORT']),
+    // 端口与主机名的环境变量名是**通用名**（PORT / HOST，见 whiteboard config-schema.mjs:29-30）：
+    // 这正是必须以白名单注入的理由——通用名在继承全部 env 时极易被外部值覆盖。
+    envNames: Object.freeze(['WHITEBOARD_TOKEN', 'PORT', 'HOST', 'DB_PATH', 'WB_ROOMS_DIR', 'WB_AUDIT_DIR', 'WB_IN_MEMORY']),
     milestone: 'PRT-707',
   }),
 ])
@@ -369,11 +402,15 @@ export function validateProcessPlan(plan, { installRoot = null, platform = null,
       }
     }
   }
+  // 环的判据是「依赖与依赖方落在**同一启动波**」——同波意味着两者互等对方就绪。
+  // 曾经这里写成 `byKey.has(dep)`（依赖存在即报环），它几乎恒真：
+  // 任何有依赖的正常清单都会被判成有环。缺陷之所以没被发现，是因为当时
+  // 只有「真有环时必须报错」这一条断言，而没有「无环时不得报错」。
   for (const wave of startupWaves(processes)) {
     for (const key of wave) {
       for (const dep of byKey.get(key)?.dependsOn ?? []) {
-        if (byKey.has(dep)) {
-          diagnostics.push(diag('error', 'DEPENDENCY_CYCLE', key, `进程 ${key} 与其依赖 ${dep} 处在同一启动波：依赖关系存在环`))
+        if (wave.includes(dep)) {
+          diagnostics.push(diag('error', 'DEPENDENCY_CYCLE', key, `进程 ${key} 与其依赖 ${dep} 落在同一启动波：依赖关系存在环`))
         }
       }
     }

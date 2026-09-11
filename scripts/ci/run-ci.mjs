@@ -304,6 +304,10 @@ async function stageTest() {
     { label: 'notify（P2-4 通知分类/优先级/批量已读/跳转/去重补齐）', files: ['workbench/scripts/notify.test.mjs', 'workbench/scripts/notify-hub-smoke.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'hub-event-stream（F-01 scope/游标/信封）', files: ['workbench/scripts/hub-event-stream.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'dual-write（P1-1 双进程写同库竞态：audit.seq/task id 唯一）', files: ['scripts/ci/dual-write-smoke.test.mjs'], cwd: ROOT },
+    // PRT-002/PRT-108：DSH 执行面边界扫描。前 3 类覆盖记号识别、反误报与判定语义；
+    // 第 4 类在**真实仓库**上放一个真实探针文件跑真实 CLI，证明棘轮拦得住回归——
+    // 只测纯函数无法证明扫描范围（git ls-files 口径）本身是对的（该缺陷已在开发中真实出现过一次）。
+    { label: 'dsh-boundary（PRT-002 依赖清单 / PRT-108 执行面边界棘轮）', files: ['scripts/ci/dsh-boundary.test.mjs'], cwd: ROOT },
     // P4-2（候选 #9）：宿主插件导入失败诊断。host-diagnostics.test.mjs 是**纯函数**单测
     // （无 DSH 依赖，任何机器都跑）；p13-host-injection.test.mjs 内含负向用例，用真实宿主
     // 复现「入口在导入期抛错 / 入口产物缺失」两种失败并断言诊断点名到条目。
@@ -509,9 +513,33 @@ async function stageDoc() {
   return { ok, detail: 'doc: 文档新鲜度校验（check-docs.mjs）exit=' + r.code + extra }
 }
 
+// ---------- DSH 执行面边界（PRT-108 棘轮） ----------
+// Product Runtime 的边界承诺在 Orchestrator/Adapter 建成前，唯一可执行的形式是
+// **不让 DSH 执行面耦合继续增长**。dsh-boundary.mjs 用基线棘轮守住这一点：
+// 迁移期既有调用点登记为「待迁移债务」，新代码一律不得新增。
+// 放在 env 之后、其余阶段之前——它是纯静态检查（秒级），失败时应尽早失败，
+// 而不是等四分钟的 test 阶段跑完才报。
+async function stageBoundary() {
+  const r = await exec(process.execPath, [join(ROOT, 'scripts', 'ci', 'dsh-boundary.mjs'), '--check'], { cwd: ROOT })
+  const ok = r.code === 0
+  const raw = (r.out + '\n' + r.err).trim()
+  let extra = ''
+  if (ok) {
+    const line = raw.split('\n').filter(l => /dsh-boundary: PASS/.test(l)).slice(-1)[0]
+    if (line) extra = '\n  ' + line.trim()
+  } else {
+    const lines = raw.split('\n').filter(Boolean)
+    const fails = lines.filter(l => /^\s*FAIL \[/.test(l))
+    const tail = (fails.length > 0 ? fails.slice(-10) : lines.slice(-12)).join('\n  ')
+    extra = '\n  违规明细（优先移入 runtime/adapters/dsh/；确属迁移期债务才显式下移基线）：\n  ' + tail
+  }
+  return { ok, detail: 'boundary: DSH 执行面边界棘轮（dsh-boundary.mjs）exit=' + r.code + extra }
+}
+
 // ---------- 主流程 ----------
 const STAGES = [
   { name: 'env', label: '环境自检', fn: stageEnv },
+  { name: 'boundary', label: 'DSH 执行面边界（PRT-108 棘轮）', fn: stageBoundary },
   { name: 'deps', label: '依赖就绪', fn: stageDeps },
   { name: 'build', label: '构建（whiteboard + workbench dist）', fn: stageBuild },
   { name: 'test', label: 'L0 契约/基线测试', fn: stageTest },

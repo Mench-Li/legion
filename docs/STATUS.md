@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-11　`run-ci --only env,test,doc` **全 PASS**；其中 `test` **39 套件 / 1047 用例**
+**最近一次全量基线**：2026-09-11　`run-ci --only env,test,doc` **全 PASS**；其中 `test` **40 套件 / 1069 用例**
 （约 4 分钟）—— 以本文件所在提交为准
 
 > 说明：上句记录 **P4-6** 之后的全量运行（含 `doc` 阶段），证据 `.ci/final-main4/`。
@@ -68,7 +68,10 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：39 套件 / 1047 用例，`--only test` 整体 PASS** —— 2026-09-11 实测（`.ci/final-main4/`）
+**当前基线：40 套件 / 1069 用例，`--only test` 整体 PASS** —— 2026-09-11 实测
+（PRT-002/PRT-108：`dsh-boundary.test.mjs` 新增 **22 例**（记号识别 / 反误报 / 判定语义 / 棘轮真实性），
+39→**40** 套件、1047→**1069** 用例；同时 `run-ci.mjs` 新增 **`boundary` 阶段**（紧随 `env`，纯静态秒级门禁）。
+上一基线为 P4-6 之后的 `39 套件 / 1047 用例`（`.ci/final-main4/`））
 （P4-6 之后：`dir-lock.test.mjs` 新增 **12 例**（7 纯函数 + 4 注册表联动 + 1 真实双进程），白板 199→**211**；
 P4-5 之后：`audit-archive.test.mjs` 新增 **14 例**（10 纯函数 + 4 真实进程：重启/写入量量级），白板 185→**199**；
 P4-4 之后：`static-serve` 6→**16 例**（新增导航/资源判定与缺失资源 404 契约）；
@@ -107,7 +110,7 @@ P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-
 
 （上表**全部**为 `--only test` 单次全量运行的实测值；不再存在「未入全量基线」的套件。）
 
-其他阶段：`--only doc`（文档新鲜度 + 历史 evidence banner 覆盖）、`--only build|smoke|env|deps|stage`。
+其他阶段：`--only doc`（文档新鲜度 + 历史 evidence banner 覆盖）、`--only boundary`（PRT-108 DSH 执行面边界棘轮，秒级）、`--only build|smoke|env|deps|stage`。
 部署与回滚：`docs/DEPLOY.md`。现场（真实宿主）验收脚本：`scripts/live/p11-step2-verify.mjs`。
 
 ## 3. 文档地图（按可信度分层）

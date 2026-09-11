@@ -8,7 +8,27 @@
 —— 以本文件所在提交为准；证据 `.ci/prt-phase0-1-final/`
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
 （`scrum/daemon-gf001.json`，`intervalMs: 15000`）同时运行时实测 **31 分钟**（约 7 倍）。
-该守护仍在后台运行。**因此不要把耗时当回归基线**——只有套件数/用例数/通过与否可用于判定。
+**因此不要把耗时当回归基线**——只有套件数/用例数/通过与否可用于判定。
+
+> ### ⚠️ 运行期状态：所有 AI 守护已停用（2026-09-11 起）
+>
+> `$DSH_HOME/profiles/web/cordis.patch.yml` 里 4 个 `dsh-scrum-worker` 实例
+> —— `legion-scrum-worker`（scope=software）、`legion-scrum-worker-ozon`、
+> `legion-scrum-worker-gf001`、`legion-mediator` —— 均已加 `disabled: true`。
+>
+> - **影响**：没有任何空间会自动认领或派工。看板与健康页的「守护」卡片会停在最后一次
+>   sweep 的时间不再刷新 —— 这是「已停」的可见形态，**不是故障**。
+> - **动阶段 2.5 之前必须先恢复至少一个空间守护**（阶段 2.5 含「设计伙伴真实任务」，
+>   否则目标链会一直停在 `todo`）。恢复方式：去掉对应行的 `disabled`。
+> - 停用理由逐行写在该 yml 每行上方（含「software 行 repoRoot 指向主仓库且 maxWorkers=2」
+>   这一条）；改前备份 `cordis.patch.yml.bak-20260911`（该文件不在 git 下）。
+> - 顺带修掉一处**既有**缺陷：静态守护行都没声明 `primaryScope`，而 `statusFileNames()`
+>   把空值视为「我就是主 scope」，于是**每个**实例都去写 `daemon.json`
+>   （看板/健康页唯一认的状态文件）并互相覆盖 —— 实测在 `software ↔ ozon` 之间
+>   每 20~30s 跳变一次。gf001 的 15s 间隔原本最快、通常最后一个写，把这场竞争掩盖了；
+>   停用 gf001 后立刻显形。现已在这两行显式声明 `primaryScope: 'software'`。
+> - `gf001` 空间非终态任务数为 **0**；T-141 已由将军于 `14:00:32Z` 转 `canceled`
+>   （产物从 patch 记录逐字恢复为 `53d9d15`，需求已由 `G-mtwxx7an-2` 交付，无需重做）。
 
 > **本轮（阶段 2 完成标准 PRT-210/211）**：新增 `dsh-parity`（**36 例**）与
 > `dsh-session-boundary`（**20 例**）。54→**56** 套件、1465→**1521** 用例。

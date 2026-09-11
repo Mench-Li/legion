@@ -9,6 +9,7 @@
 **日期**：2026-09-11
 **分支**：`codex/prt-phase0-1`
 **数据源**：`team-hub/team.db` 的 `audit` / `tasks` 表（**只读**打开，不写入、不复制）
+**证据快照**：`generatedAt = 2026-09-11T13:30:26Z`（活库，数字随时间漂移，引用时须连时间一起引）
 **提取器**：`scripts/prt/old-path-evidence.mjs`（`--scope` 决定总体）
 **验证**：`node scripts/ci/run-ci.mjs --only env,boundary,deps,build,test,smoke,stage,doc` **八阶段全 PASS**；
 `test` **52 套件 / 1401 用例**（证据 `.ci/prt-phase0-1-final/`）
@@ -200,8 +201,14 @@ db.prepare("UPDATE tasks SET status='done', version=version+1, updatedAt=? WHERE
 
 | 总体 | 定义 | `software` | `gf001` |
 | --- | --- | --- | --- |
-| 空间视角 | `audit.scope = 本空间` | 7593 行 | 309 行 |
+| 空间视角 | `audit.scope = 本空间` | 7625 行 | 372 行 |
 | 任务视角 | 能 JOIN 到本空间任务的行 | 1645 行 | 43 行 |
+
+> ⚠️ **这些数字会随时间漂移**：`team-hub/team.db` 是**活库**，守护每 30 秒写一条心跳。
+> 上表取自证据文件的 `generatedAt = 2026-09-11T13:30:26Z`；重新运行 `--scope=software`
+> 会得到略大的行数（本次采集期间就观察到 7593 → 7625 的增长）。
+> **引数字时必须连 `generatedAt` 一起引**，否则同一条结论在不同时间点会「对不上」，
+> 而看起来像是有人算错了。
 
 两者双向不同，差异都是真实存在的：
 
@@ -222,6 +229,11 @@ db.prepare("UPDATE tasks SET status='done', version=version+1, updatedAt=? WHERE
 | `docs/superpowers/prt/prt-009-execution-evidence.json` | `software` 空间：状态序列、耗时、人工、产物、可用性 |
 | `docs/superpowers/prt/prt-009-gf001-controlled-evidence.json` | 受控空间 `gf001` 的同一组指标（**旧路径**，含两次中止轮次） |
 | `docs/superpowers/prt/prt-009-gf001-execution.json` | 跑通那一轮的验收重算 + token 用量 + 模型偏差 |
+
+> 两份 `*-evidence.json` 的 `stateSequence.expected` 字段存的是**已被推翻的字面预期**
+> （保留是为了让「实测 vs 预期」的对照可复核）。**现行对拍基准不在这里**，
+> 而在 `scripts/prt/golden-flow.mjs` 的 `modalTaskStateSequence` +
+> `acceptedTaskStateSequences`。别把 `expected` 当成当前基准。
 
 ```bash
 # 汇总（人读）

@@ -22,12 +22,68 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const SERVER = join(ROOT, 'team-hub', 'server.mjs')
 
 /** 已启动的 hub 子进程登记表。
- *  为什么需要它：本文件会起真实服务进程，而 `node --test` 只有在**测试进程退出**后才会输出结果——
- *  任何一个没被回收的子进程都会让整份文件「永不结束」。历史事故：`setup()` 中途抛错（模块相对
- *  导入缺扩展名）发生在 `boot()` 之后，拿不到 ctx 却留下一个 hub 子进程，CI 于是永久挂起、
- *  全量基线长期无法产出（见 docs/P2-7-evidence/verify-evidence.md §7）。
- *  因此这里把「起进程」与「收进程」都集中管理，并在文件结束时做兜底自检。 */
+ *  为什么需要它：本文件会起真实服务进程。`node --test` 的**实测语义**（2026-09-11 三文件哨兵实验）：
+ *  文件**并行**执行，且一个文件的结果在它的**用例跑完时**就输出——**不等**该文件进程退出。
+ *  因此「日志里已看到本文件的 2 个用例通过」**不能**推出「本文件的进程已退出」。
+ *  历史事故（P2-7）与「候选 #3：notify 曾超时一次」属于同一类：**用例全绿，但进程不退出**。
+ *  所以这里把「子进程 / SSE 订阅 / 就绪轮询」三类句柄全部登记，并在文件结束时兜底自检，
+ *  把「静默卡死」（整份套件被 300s 上限杀掉、其余套件基线一起丢掉）变成「明确失败」。 */
 const LIVE_CHILDREN = new Set()
+
+/** 已建立的 SSE 订阅登记表。MiniEventSource 断线后每 300ms **无上限**重连（对齐浏览器语义），
+ *  只要有一个没关，事件循环就永远不空 → 进程不退出。 */
+const LIVE_SUBSCRIPTIONS = new Set()
+
+/** 仍在运行的就绪轮询登记表。轮询是一个递归的 pending Timeout，同样会让进程无法退出。 */
+const LIVE_WAITS = new Set()
+
+/** 登记一个取消订阅函数，返回一个「关闭并注销」的包装（可重复调用）。 */
+function trackSubscription(off) {
+  LIVE_SUBSCRIPTIONS.add(off)
+  return () => {
+    if (!LIVE_SUBSCRIPTIONS.delete(off)) return false
+    try { off() } catch { /* 关闭失败不应影响断言结论 */ }
+    return true
+  }
+}
+
+/** 关闭全部遗留订阅，返回仍未关闭的数量（应恒为 0）。 */
+function sweepSubscriptions() {
+  for (const off of [...LIVE_SUBSCRIPTIONS]) { LIVE_SUBSCRIPTIONS.delete(off); try { off() } catch { /* ignore */ } }
+  return LIVE_SUBSCRIPTIONS.size
+}
+
+/** 有界、**可取消**的「等服务就绪」轮询。
+ *  为什么不用裸递归 setTimeout（旧实现的三个缺陷）：
+ *   ① **就绪后不停**：每个 tick 的 finally 只要没到 15s 就再排一个 tick，于是连上之后仍每 120ms
+ *      打一次 HTTP 直到期限（哨兵实测 41 次 tick），并留下一个始终 pending 的 Timeout；
+ *   ② 超时后调 `reject` 在已 resolve 的 promise 上是空操作，反而掩盖了「还在轮询」这一事实；
+ *   ③ **每次请求没有上界**：旧实现直接 `fetch(...)`，而 undici 的 `headersTimeout` 默认 **300s**——
+ *      若 hub 已 accept 却迟迟不回响应（重负载下事件循环被阻塞、或进程在错误的时刻被杀），
+ *      那个请求会挂到 ~300s，**恰好等于套件级硬上限**。它是 fire-and-forget 的后台轮询，
+ *      所以测试本身照常全绿，而进程因为还挂着一个未结请求而无法退出 —— 这正是「候选 #3」记录的症状。
+ *  新实现：就绪即 `stop()`；超时即 `stop()` 再抛；**每个请求带 `AbortSignal.timeout`**，
+ *  任何一次探测都不可能超过 `perRequestMs`；tick 计数与停止状态可被断言（见文末回归用例）。 */
+function waitForReady(url, { timeoutMs = 15000, intervalMs = 120, perRequestMs = null, label = 'hub' } = {}) {
+  const reqCap = perRequestMs ?? Math.max(1000, intervalMs * 10)
+  const t0 = Date.now()
+  let ticks = 0
+  let stopped = false
+  let lastErr = ''
+  const stop = () => { stopped = true }
+  const promise = (async () => {
+    while (!stopped) {
+      ticks += 1
+      try {
+        const r = await fetch(url, { signal: AbortSignal.timeout(reqCap) })
+        if (r.ok) { stop(); return }
+      } catch (e) { lastErr = (e && e.message) || String(e) }
+      if (Date.now() - t0 > timeoutMs) { stop(); throw new Error(label + ' boot timeout: ' + lastErr.slice(-300)) }
+      if (!stopped) await sleep(intervalMs)
+    }
+  })()
+  return { promise, stop, ticks: () => ticks, stopped: () => stopped }
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -74,20 +130,12 @@ function boot(port, db) {
   child.stderr.on('data', (d) => { err += d })
   LIVE_CHILDREN.add(child)
   child.on('exit', () => LIVE_CHILDREN.delete(child))
-  const ready = new Promise((resolve, reject) => {
-    const t0 = Date.now()
-    const tick = () => {
-      fetch(`http://127.0.0.1:${port}/api/config`)
-        .then((r) => { if (r.ok) resolve() })
-        .catch(() => {})
-        .finally(() => {
-          if (Date.now() - t0 > 15000) reject(new Error('hub boot timeout: ' + err.slice(-300)))
-          else setTimeout(tick, 120)
-        })
-    }
-    tick()
-  })
-  return { child, ready, port }
+  const wait = waitForReady(`http://127.0.0.1:${port}/api/config`, { label: 'hub' })
+  // 登记并在 settle 时注销：否则它就是一个「永远 pending 的 Timeout」，进程不会退出
+  LIVE_WAITS.add(wait)
+  const ready = wait.promise.catch((e) => { throw new Error(e.message + ' | stderr=' + err.slice(-300)) })
+  void ready.then(() => {}, () => {}).finally(() => LIVE_WAITS.delete(wait))
+  return { child, ready, port, wait }
 }
 
 const jpost = (port, path, body) => fetch(`http://127.0.0.1:${port}${path}`, {
@@ -127,7 +175,12 @@ async function setup() {
 /** 收尾：回收本用例起的 hub（含重启循环里的候选进程）与隔离目录。
  *  允许 ctx 为空——`setup()` 自身失败时也必须能安全调用（这正是历史事故的修复点）。 */
 async function cleanup(ctx) {
-  if (ctx && ctx.hub) await killChild(ctx.hub.child)
+  if (ctx && ctx.hub) {
+    // 幂等：就绪成功时轮询已自行 stop()，失败/中断路径下由这里兜底
+    try { ctx.hub.wait?.stop() } catch { /* ignore */ }
+    await killChild(ctx.hub.child)
+  }
+  sweepSubscriptions()
   await sweepChildren()
   if (!ctx) return
   // Windows：hub 进程句柄释放有延迟，rmSync 可能 EPERM。清理失败不影响断言结论
@@ -219,11 +272,70 @@ class MiniEventSource {
   }
 }
 
+test('就绪轮询：连上即停、超时即停（回归：旧实现在就绪后仍每 120ms 空转到 15s 期限）', async () => {
+  const { createServer } = await import('node:http')
+  let hits = 0
+  const srv = createServer((req, res) => { hits += 1; res.writeHead(200); res.end('ok') })
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r))
+  const livePort = srv.address().port
+  // 取一个**已关闭**的端口：fetch 会立即 ECONNREFUSED，用于测超时路径
+  const dead = createServer()
+  await new Promise((r) => dead.listen(0, '127.0.0.1', r))
+  const deadPort = dead.address().port
+  await new Promise((r) => dead.close(r))
+  try {
+    const ok = waitForReady(`http://127.0.0.1:${livePort}/api/config`, { intervalMs: 30, timeoutMs: 5000 })
+    await ok.promise
+    assert.equal(ok.ticks(), 1, '首次即成功应只轮询一次')
+    assert.equal(ok.stopped(), true, '就绪后必须停止轮询')
+    assert.equal(hits, 1, '就绪后不得再打 HTTP')
+    await sleep(300) // 若仍空转，ticks 会在此增长（旧实现正是如此）
+    assert.equal(ok.ticks(), 1, '就绪后不得再有 tick（旧实现：直到 15s 期限都在轮询，哨兵实测 41 次）')
+
+    const to = waitForReady(`http://127.0.0.1:${deadPort}/api/config`, { intervalMs: 10, timeoutMs: 200 })
+    await assert.rejects(() => to.promise, /boot timeout/)
+    assert.equal(to.stopped(), true, '超时后必须停止轮询')
+    const at = to.ticks()
+    await sleep(150)
+    assert.equal(to.ticks(), at, '超时后不得继续轮询')
+  } finally {
+    await new Promise((r) => srv.close(r))
+  }
+})
+
+test('就绪轮询：服务端 accept 后**永不出响应**时仍必须按时收敛（回归：无上界的 fetch 会挂到 undici 的 300s headersTimeout）', async () => {
+  const { createServer } = await import('node:http')
+  // 黑洞服务端：接受连接但从不回响应。旧实现直接 `fetch(...)`，会在这里挂到 undici 的
+  // headersTimeout（默认 300s）——套件级硬上限也正好是 300s，于是表现为「用例全绿却永不退出」。
+  const sockets = new Set()
+  const blackHole = createServer(() => { /* 故意不回响应 */ })
+  blackHole.on('connection', (s) => { sockets.add(s); s.on('close', () => sockets.delete(s)) })
+  await new Promise((r) => blackHole.listen(0, '127.0.0.1', r))
+  const port = blackHole.address().port
+  try {
+    const t0 = Date.now()
+    const w = waitForReady(`http://127.0.0.1:${port}/api/config`, { intervalMs: 20, perRequestMs: 150, timeoutMs: 800 })
+    await assert.rejects(() => w.promise, /boot timeout/, '永不出响应时必须靠自身的上界收敛并抛错，而不是挂到 300s')
+    const elapsed = Date.now() - t0
+    assert.ok(elapsed < 5000, '必须在自身期限内收敛（实测 ' + String(elapsed) + 'ms），不得接近 undici 的 300s 默认值')
+    assert.equal(w.stopped(), true, '收敛后必须停止轮询')
+    assert.ok(w.ticks() >= 2, '每个请求都被上界截断后应继续下一轮（ticks=' + String(w.ticks()) + '）')
+  } finally {
+    for (const s of sockets) { try { s.destroy() } catch { /* ignore */ } }
+    await new Promise((r) => blackHole.close(r))
+  }
+})
+
 // 文件级兜底自检：所有用例结束后，不得有任何 hub 子进程存活。
 // 泄漏会让 `node --test` 永不退出（CI 表现为零输出、永久等待），所以这里**显式失败**而不是等它卡住。
 afterAll(async () => {
   const survived = await sweepChildren()
   assert.equal(survived, 0, '测试结束时仍有 ' + survived + ' 个 hub 子进程未回收（会导致测试进程无法退出）')
+  // 订阅与轮询同样会吊住事件循环。二者都在上面被显式清理，这里断言「确实清干净了」——
+  // 这是把「用例全绿却卡死」变成「明确失败」的关键一道闸。
+  const subs = sweepSubscriptions()
+  assert.equal(subs, 0, '测试结束时仍有 ' + subs + ' 个 SSE 订阅未关闭（断线后无上限重连 → 进程无法退出）')
+  assert.equal(LIVE_WAITS.size, 0, '测试结束时仍有 ' + LIVE_WAITS.size + ' 个就绪轮询在运行（pending Timeout → 进程无法退出）')
 })
 
 test('数据面 + 分类/优先级/跳转：真实审计派生通知，chat:* 被过滤，已读 IO 零服务端写入', { timeout: 90000 }, async () => {
@@ -292,13 +404,14 @@ test('数据面 + 分类/优先级/跳转：真实审计派生通知，chat:* �
 
 test('实时 + 断线恢复：SSE 帧去重合并、全局水位、kill 后同实例自动重连（opens=2 → reconnected）', { timeout: 120000 }, async () => {
   let ctx
+  let off = null
   try {
     ctx = await setup()
     const { port, api, notify } = ctx
     let hub = ctx.hub
     const seen = []
     const statuses = []
-    const off = api.subscribeHubAudit((ev) => seen.push(ev), { onStatus: (st) => statuses.push(st) })
+    off = trackSubscription(api.subscribeHubAudit((ev) => seen.push(ev), { onStatus: (st) => statuses.push(st) }))
     await sleep(600)
     assert.equal(statuses[0]?.state, 'open', '首连应为 open（opens=1）')
 
@@ -346,8 +459,11 @@ test('实时 + 断线恢复：SSE 帧去重合并、全局水位、kill 后同�
     await sleep(1200)
     assert.ok(seen.length > before, '重连后应继续收到新帧')
 
-    off()
   } finally {
+    // 订阅必须在这里关：MiniEventSource 断线后每 300ms **无上限**重连，原先 `off()` 写在 try 末尾，
+    // 一旦中途断言失败就永不执行 → 事件循环永不空 → 进程不退出 → 本套件被 300s 上限杀掉。
+    // 失败必须是「干净的失败」，不能升级成「卡死」。
+    if (off) off()
     await cleanup(ctx)
   }
 })

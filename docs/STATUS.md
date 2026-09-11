@@ -4,10 +4,10 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-11　`run-ci --only env,test,doc` **全 PASS**；其中 `test` **39 套件 / 1047 用例**
+**最近一次全量基线**：2026-09-11　`run-ci --only env,test,doc` **全 PASS**；其中 `test` **39 套件 / 1049 用例**
 （约 4 分钟）—— 以本文件所在提交为准
 
-> 说明：上句记录 **P4-6** 之后的全量运行（含 `doc` 阶段），证据 `.ci/final-main4/`。
+> 说明：上句记录 **P4-7** 之后的全量运行（含 `doc` 阶段）。
 > 此前各基线：P4-3 之后、P4-2 之后为 **981 用例**、
 > P4-1 之后 `test` 阶段为 **39 套件 / 950 用例**，P3-4 收尾为 **38 套件 / 943 用例**（详见下方 §2 基线表）；
 > 各轮证据见 `docs/P4-6-evidence/verify-evidence.md`、`docs/P4-5-evidence/verify-evidence.md` §3、
@@ -68,8 +68,9 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：39 套件 / 1047 用例，`--only test` 整体 PASS** —— 2026-09-11 实测（`.ci/final-main4/`）
-（P4-6 之后：`dir-lock.test.mjs` 新增 **12 例**（7 纯函数 + 4 注册表联动 + 1 真实双进程），白板 199→**211**；
+**当前基线：39 套件 / 1049 用例，`--only test` 整体 PASS** —— 2026-09-11 实测（证据 `docs/P4-7-evidence/verify-evidence.md`）
+（P4-7 之后：`notify` 套件新增 **2 例**（就绪轮询的 2 条确定性回归），15→**17**；该套件单跑耗时 19s→**11s**；
+P4-6 之后：`dir-lock.test.mjs` 新增 **12 例**（7 纯函数 + 4 注册表联动 + 1 真实双进程），白板 199→**211**；
 P4-5 之后：`audit-archive.test.mjs` 新增 **14 例**（10 纯函数 + 4 真实进程：重启/写入量量级），白板 185→**199**；
 P4-4 之后：`static-serve` 6→**16 例**（新增导航/资源判定与缺失资源 404 契约）；
 P4-3 之后：`e2e-browser` 7→**10 例**（新增连接未就绪窗口/切房间补发/单连接三条用例）、`whiteboard` 158→**185 例**
@@ -92,7 +93,7 @@ P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-
 | calendar（P2-5 含重复展开/更新/冲突/关联） | 29 | dedupe | 9 |
 | spaces | 5 | calendar-ui（P2-5 前端纯函数） | 12 |
 | pipeline（SP-P0 空间流水线数据面） | 19 | chat-ui（P2-6 对话前端纯函数） | 8 |
-| goal | 14 | notify（P2-4 含真实 hub SSE 断线重连） | 15 |
+| goal | 14 | notify（P2-4 含真实 hub SSE 断线重连 + P4-7 句柄泄漏自检） | 17 |
 | rules | 7 | hub-event-stream（F-01 scope/游标/信封） | 5 |
 | artifact | 16 | dual-write（P1-1 双进程写同库竞态 + 迁移竞态） | 4 |
 | security | 6 | p13-host-injection（P1-3 真实宿主注入 + P3-4 配置摘要 + P4-2 导入失败诊断，2 文件） | 39 |

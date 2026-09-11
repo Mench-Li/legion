@@ -329,6 +329,7 @@ F-20 | 任务中心（Scrum 泳道） | 3.19 任务中心（Scrum 泳道） | �
 | `docs/P4-4-evidence/verify-evidence.md` | 静态托管不再把缺失资源伪装成 200 HTML 的证据（真实浏览器 A/B + 判定规则边界 + 未覆盖边界）。 |
 | `docs/P4-5-evidence/verify-evidence.md` | 白板审计归档可跨重启回溯的证据（真杀真启 A/B + 序号单调性 + `ops` 补记 + 自查抓到的热路径回归 + 未覆盖边界）。 |
 | `docs/P4-6-evidence/verify-evidence.md` | 白板房间目录单实例守卫的证据（双实例静默分裂数据实测 + 启动即拒绝 + 陈旧锁接管 + 未覆盖边界）。 |
+| `docs/P4-7-evidence/verify-evidence.md` | `notify` 套件「用例全绿却卡死」的机制定位证据（`node --test` 输出语义哨兵 + 无上界 `fetch` 300s 实测 + 泄漏隔离实验）。 |
 | `PLUGINS.md` | DSH 插件形态与接入说明。 |
 | `LEGION.md` | 军团规则（注入执行 agent 提示词）。 |
 

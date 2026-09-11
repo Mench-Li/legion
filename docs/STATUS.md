@@ -7,6 +7,10 @@
 **最近一次全量基线**：2026-09-10　`run-ci --only env,test,doc` **全 PASS**；其中 `test` **38 套件 / 943 用例**
 （165s）—— 以本文件所在提交为准
 
+> 说明：上句是**上一次含 `doc` 阶段的全量运行**记录（P3-4 收尾）。P4-1 之后的 `test` 阶段实测为
+> **39 套件 / 950 用例**（详见下方 §2 基线表）；含 `doc` 阶段的全量复跑见
+> `docs/P4-1-evidence/verify-evidence.md` §3。
+
 > ✅ **基线可单命令复现**（2026-09-10）：`test` 阶段此前会因 `notify-hub-smoke` 泄漏 hub 子进程
 > 而**永不结束**（零输出、永久等待），P2-7 / P2-8 / P3-1 / P3-2 之后新增或扩充的套件只能用「逐套件单跑」
 > 拼基线。现已修掉根因并由全量运行验证，表中数字全部来自**同一次** `--only test` 运行。
@@ -61,10 +65,13 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：38 套件 / 943 用例，`--only test` 整体 PASS（165s）** —— 2026-09-10 实测
-（P3-4 之后：`plugins` 177→185、`config` 28→36、`p13-host-injection` 7→8。
+**当前基线：39 套件 / 950 用例，`--only test` 整体 PASS** —— 2026-09-10 实测
+（P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-4 之后：`plugins` 177→185、
+`config` 28→36、`p13-host-injection` 7→8。
 此前 `test` 阶段会因 `notify-hub-smoke` 泄漏子进程而**永不结束**，故长期只能用「逐套件单跑」拼出基线；
 根因、修复与两处连带回归见 `docs/CI-TEST-STAGE-evidence/verify-evidence.md`）。
+> `e2e-browser` 需要本机 Edge/Chrome：**找不到浏览器时整组 SKIP**（打印探测路径，不失败也不伪绿），
+> 因此无浏览器的机器上它是「没跑」而不是「通过」。手册见 `docs/E2E.md`。
 
 | 套件 | 用例 | 套件 | 用例 |
 | --- | --- | --- | --- |
@@ -85,7 +92,7 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 | doc-render | 11 | board-plugin | 37 |
 | skill-importer | 4 | scrum | 25 |
 | hub-board / artifact-policy | 1 / 3 | config（P3-2 统一配置 + P3-4 插件族） | 36 |
-| web-history（P2-8 抓取历史） | 1 |  |  |
+| web-history（P2-8 抓取历史） | 1 | e2e-browser（P4-1 真实浏览器 DOM 端到端） | 7 |
 
 （上表**全部**为 `--only test` 单次全量运行的实测值；不再存在「未入全量基线」的套件。）
 
@@ -101,6 +108,7 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 | | `docs/FEATURES.md` | 功能操作手册 |
 | | `docs/DEPLOY.md` | 部署、验证、回滚 |
 | | `docs/CONFIG.md` | 统一配置参考（优先级、三进程字段清单、校验命令、脱敏规则、已知边界） |
+| | `docs/E2E.md` | 浏览器端到端手册（CDP 基座用法、写用例纪律、覆盖范围与未覆盖项） |
 | | `docs/REMAINING-TASKS.md` | 未完成事项与优先级 |
 | | `.ci/<run>/summary.json` + `ci.log` | 最近一次机器证据 |
 | **契约（权威）** | `docs/CONTRACT-V1V2.md` | v1/v2 语义统一表（状态机、分页、SSE 信封） |
@@ -161,8 +169,13 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
     **多实例共享存储未实现**（ADR-0008 记录了被否理由与转 v2 触发条件）；
     前端房间/角色逻辑为判定层测试（`whiteboard/packages/shared/test/room.test.mjs` 12 例）+
     前端静态契约（`whiteboard/apps/web/test/ui-contract.test.mjs` 6 例：DOM id 与共享模块接线、
-    CSS 类与只读态类名一致），**不引入浏览器自动化**——按钮禁用、房间切换、复制链接等
-    DOM 行为仍无自动断言，靠人工核对；真实文件型房间路径由临时生产路径脚本验证（18/18，未入库）。
+    CSS 类与只读态类名一致），**并有真实浏览器 DOM 端到端**（P4-1：`tests/browser/whiteboard-ui.e2e.test.mjs`
+    7 例——进入房间的标签/标题/角色同步、真实绘制落库 + canvas 像素、只读态 UI 降级与零写入、
+    切房间与 URL/token 语义、非法房间号提示、主路径无页面异常、限流提示）；
+    真实文件型房间路径由临时生产路径脚本验证（18/18，未入库）。
+    浏览器 E2E 的**覆盖边界**见 `docs/E2E.md` §6（workbench / board-plugin 前端、视觉回归、
+    多浏览器矩阵、网络故障注入仍无自动化）；已知未修缺陷「重连窗口内的绘制被静默丢弃」在
+    `docs/REMAINING-TASKS.md` 候选 #10（由本轮 E2E 发现并复现）。
 12. 静态托管（P2-8 后续修补）：`workbench/scripts/serve.mjs` 在产物缺失时返回 404 + 指引（不再断流），
     但**未知资源路径仍回落 SPA 入口（200 HTML）**——即缺失的 `/assets/*.js` 会返回 HTML 而非 404，
     浏览器侧表现为 MIME 报错；这是既有 SPA 回退语义，未在本轮改动（如需按扩展名区分导航与资源请求需单独立项）。

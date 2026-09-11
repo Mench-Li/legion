@@ -305,6 +305,9 @@ async function stageTest() {
     { label: 'hub-event-stream（F-01 scope/游标/信封）', files: ['workbench/scripts/hub-event-stream.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'dual-write（P1-1 双进程写同库竞态：audit.seq/task id 唯一）', files: ['scripts/ci/dual-write-smoke.test.mjs'], cwd: ROOT },
     { label: 'p13-host-injection（P1-3 真实宿主插件注入冒烟）', files: ['tests/p13-fixture/p13-host-injection.test.mjs'], cwd: ROOT },
+    // P4-1：真实浏览器 DOM 端到端（零依赖 CDP 基座，见 scripts/e2e/cdp.mjs）。
+    // 找不到 Edge/Chrome 时整组 **SKIP**（用例侧显式调用 describe.skip 并打印探测路径），不计失败、也不假绿。
+    { label: 'e2e-browser（P4-1 真实浏览器：白板房间/角色/只读/限流 DOM 端到端）', files: ['tests/browser/whiteboard-ui.e2e.test.mjs'], cwd: ROOT },
   ]
   const wbDir = WHITEBOARD
   const wbPkg = JSON.parse(readFileSync(join(wbDir, 'package.json'), 'utf8'))

@@ -323,6 +323,7 @@ F-20 | 任务中心（Scrum 泳道） | 3.19 任务中心（Scrum 泳道） | �
 | `scrum/README.md` | v1 看板协议与 taskctl 命令手册（遗留引擎）。 |
 | `docs/ORCHESTRATION-V3.md` | v3 切片流水线编排（并行波次 / D7' 机器闸门 / 类型化槽位）。 |
 | `docs/DEPLOY.md` | 发布部署 runbook（环境分级 / 步骤 / 验证 / 回滚 / 变更影响；发布前 CI 门禁 `node scripts/ci/run-ci.mjs`）。 |
+| `docs/E2E.md` | 浏览器端到端手册（零依赖 CDP 基座用法、写用例纪律、覆盖范围与未覆盖项、无浏览器时的 SKIP 语义）。 |
 | `PLUGINS.md` | DSH 插件形态与接入说明。 |
 | `LEGION.md` | 军团规则（注入执行 agent 提示词）。 |
 

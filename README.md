@@ -355,6 +355,12 @@ node --test plugins/tests/*.test.mjs
 node whiteboard/scripts/build.mjs
 node --test whiteboard/packages/shared/test/*.test.mjs whiteboard/apps/server/test/*.test.mjs
 
+# 浏览器端到端（真实 Chrome/Edge；找不到浏览器时整组 SKIP，手册见 docs/E2E.md）
+node --test tests/browser/whiteboard-ui.e2e.test.mjs
+
+# 统一配置自检（scan/sync/check，参考 docs/CONFIG.md）
+node scripts/config/scan.mjs --check; node scripts/config/sync.mjs --check; node scripts/config/check.mjs --strict
+
 # 只检查持久产品文档
 node scripts/ci/check-docs.mjs
 ```
@@ -370,7 +376,7 @@ node scripts/ci/run-ci.mjs
 1. `env`：Node、平台、仓库和 `node:sqlite` 环境；
 2. `deps`：依赖可用性与 workbench junction；
 3. `build`：whiteboard 与 workbench；
-4. `test`：对话、技能、日历、文件、浏览器、契约和白板测试；
+4. `test`：对话、技能、日历、文件、浏览器、契约、白板与真实浏览器端到端（`e2e-browser`，无浏览器时 SKIP）测试；
 5. `smoke`：真实服务进程、代理、SSE、鉴权和主要写读路径；
 6. `stage`：生成发布快照、清单和 SHA256；
 7. `doc`：README 与功能手册的结构、锚点、去重和关键入口一致性。

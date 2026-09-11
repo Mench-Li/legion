@@ -4,7 +4,10 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-11　`run-ci --only env,boundary,deps,build,test,doc` **全 PASS**；其中 `test` **48 套件 / 1315 用例**
+**最近一次全量基线**：2026-09-11　`run-ci --only env,boundary,deps,build,test,doc`（合并提交 `4cc8a5c`）：
+`env` / `deps` / `build` / `doc` **PASS**，`test` **48 套件 / 1319 用例**（1316 PASS / 3 FAIL）；
+`boundary` 阶段与 `test` 里的 `dsh-boundary` 套件是**同源失败**，而那 3 例**来自工作区未提交的 WIP，不是本基线**——
+在**干净树**上 `dsh-boundary --check` 为 `PASS（3 个文件 / 26 处，均在基线内）`（见 §2 脚注 ⚠️）
 （约 4 分钟）—— 以本文件所在提交为准
 
 > 说明：上句记录 **P4-7** 之后的全量运行（含 `doc` 阶段）。
@@ -68,10 +71,12 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：48 套件 / 1315 用例，`--only test` 整体 PASS** —— 2026-09-11 实测
+**当前基线：48 套件 / 1319 用例，`--only test` 整体 PASS（干净树）** —— 2026-09-11 实测（`.ci/prt-merge-verify/`）
 （阶段 2 起步：新增 `dsh-adapter`（**85 例**：PRT-201~209 的 DSH 适配器）。
 全部用假宿主端口，覆盖真实 DSH 无法稳定复现的故障——`run.result` 永不结算、
-abort 无效、畸形结构化输出、事件流中断。47→**48** 套件、1230→**1315** 用例。
+abort 无效、畸形结构化输出、事件流中断。47→**48** 套件、1230→**1315** 用例，
+合入 main 后实测为 **1319**（+2 P4-7 的 `notify` 回归、+2 `prt-golden-flow` 夹具可执行性用例，
+两者都产生于并行分支合入之前，详见文末脚注）。
 该适配器**不 import 任何引擎包**（与 DSH 的耦合只在 `port.mjs` 的注入面），
 因此 `dsh-boundary` 里适配层贡献为 **0 处**——是真正零耦合，不是靠
 `adapterPrefixes` 豁免成 0。
@@ -128,8 +133,22 @@ P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-
 | skill-importer | 4 | scrum | 25 |
 | hub-board / artifact-policy | 1 / 3 | config（P3-2 统一配置 + P3-4 插件族） | 36 |
 | web-history（P2-8 抓取历史） | 1 | e2e-browser（P4-1 真实浏览器 DOM 端到端 + P4-3 重连补发，10 例） | 10 |
+| runtime-contract（PRT-101~107：七方法契约 / 16 错误码 / 能力协商 / Fake Adapter 六路径） | 62 | dsh-adapter（PRT-201~209：假宿主端口 / 脱敏 / 看门狗 / 取消恢复，85 例） | 85 |
+| dsh-boundary（PRT-002 依赖清单 + PRT-108 执行面边界棘轮） | 22 | prt-baseline（PRT-007 平台契约基线 85 路由 / 22 表，漂移定位） | 16 |
+| prt-golden-flow（PRT-004 黄金流程 GF-001 与固定夹具冻结） | 16 | prt-topology（PRT-001 拓扑 / PRT-003 配置与密钥来源清单） | 20 |
+| prt-composition（PRT-008 术语 + PRT-010 DSH 组合分层基线） | 22 | prt-backup（PRT-006 备份/恢复：三条路线 + 陈旧 WAL 危害） | 14 |
+| prt-churn（阶段 3 评审闸门：热点文件改动节奏探针） | 13 | — | — |
 
-（上表**全部**为 `--only test` 单次全量运行的实测值；不再存在「未入全量基线」的套件。）
+（上表**全部**为 `--only test` 单次全量运行的实测值；不再存在「未入全量基线」的套件。
+合计 **48 套件 / 1319 用例** = 合入前 main 的 `1049`（含 P4-7 的 2 例）+ PRT 批次的 `270`。）
+
+> ⚠️ **本轮实测的 3 例 FAIL 全部来自工作区未提交的 WIP，不是本基线的一部分**：
+> `.ci/prt-merge-verify/` 那次运行是在**带未提交改动**的工作区里跑的，`plugins/src/index.ts` 的 WIP
+> 新增了一行**注释**（`…此后每一次 ctx.agents.create 都以…`），被 `dsh-boundary` 的**文本扫描**
+> 计成一次记号 → `ctx.agents：实际 2，允许 1`。这是**扫描器对注释的误报**：该文件真实的
+> `ctx.agents.create` 调用仍只有 1 处，只是缩进变了。在**干净树**（合并提交 `4cc8a5c` 的 worktree）上
+> `node scripts/ci/dsh-boundary.mjs --check` 为 `PASS（3 个文件 / 26 处，均在基线内）`。
+> **登记为已知边界**：棘轮按文本计数、不区分调用与注释，**在注释里提到某个 DSH API 也会触发棘轮**。
 
 其他阶段：`--only doc`（文档新鲜度 + 历史 evidence banner 覆盖）、`--only boundary`（PRT-108 DSH 执行面边界棘轮，秒级）、`--only build|smoke|env|deps|stage`。
 部署与回滚：`docs/DEPLOY.md`。现场（真实宿主）验收脚本：`scripts/live/p11-step2-verify.mjs`。

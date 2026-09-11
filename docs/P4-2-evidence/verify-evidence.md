@@ -14,9 +14,9 @@
 | 文件 | 作用 |
 | --- | --- |
 | `tests/p13-fixture/host-diagnostics.mjs`（新，纯函数） | 诊断层：组合行入口解析（`resolveRowEntry`）、启动前预检（`preflightEntries`）、真实宿主日志解析（`parseHostFailures`）、裸模块错误反查组合行（`attributeModuleError`）、汇总结论（`diagnoseHostLogs`）、可读渲染（`formatDiagnosis`）、诊断错误类型（`HostBootError` / `hostBootError`）、组合行 YAML 提取（`parseCompositionRows`） |
-| `tests/p13-fixture/host-diagnostics.test.mjs`（新，**22 例**） | 纯函数单测：**无 DSH 依赖**，任何机器都跑（含 CI）。用例锁的是**真实日志原文**（见 §3.1）与**真实文件系统**真值 |
+| `tests/p13-fixture/host-diagnostics.test.mjs`（新，**24 例**） | 纯函数单测：**无 DSH 依赖**，任何机器都跑（含 CI）。用例锁的是**真实日志原文**（见 §3.1）与**真实文件系统**真值 |
 | `tests/p13-fixture/broken-plugin.mjs`（新） | 负向夹具：一个在**导入期**就 `throw` 的插件（只被负向用例挂载，任何生产 profile 都不引用） |
-| `tests/p13-fixture/host-fixture.mjs`（改） | `makeFixture` 支持 `extraRows` / `extraPackages`（挂坏条目 + 假包）、`rows`（组合行真值，来自刚写下的补丁层）、`preflight()`；`waitReady` 失败时**快速失败 + 结构化诊断**（并等 stdio 排空）；新增 `drainLogs`、`routeMissDetail` |
+| `tests/p13-fixture/host-fixture.mjs`（改） | `makeFixture` 支持 `extraRows` / `extraPackages`（挂坏条目 + 假包）、`rows` 与 `packageDirs`（组合行真值 + 入口表，来自刚写下的补丁层）、`preflight()`、`diagnoseOpts()`；`waitReady` 失败时**快速失败 + 结构化诊断**（并等 stdio 排空）；新增 `drainLogs`（按 `readableEnded` 判交付完成，不白等上限）、`routeMissDetail` |
 | `tests/p13-fixture/p13-host-injection.test.mjs`（改，9 → **14 例**） | 主套件：`before` 加启动前预检 + 带诊断的 `waitReady`；路由 200 断言改带 `routeMissDetail`；新增「健康宿主零误报」对照 1 例 + **两个负向 describe（5 例）** |
 | `scripts/ci/run-ci.mjs` | `p13-host-injection` 套件组纳入 2 个文件（纯函数单测 + 真实宿主）；标签更新 |
 | `docs/REMAINING-TASKS.md` / `docs/STATUS.md` | 候选 #9 关闭；基线数字与限制同步 |
@@ -52,7 +52,18 @@ Error: dsh: plugin tree failed to load: failed to apply loader entry include (co
 
 `child.exitCode !== null` **不等于** stdout/stderr 已读完：实测进程已退出时日志还在管道里，
 诊断拿到的是**被截断的尾部**（友好错误行没了）。因此 `waitReady` 在发现进程已退出后先 `drainLogs`
-（等 `close`，上限 3s）再生成诊断。这条不写下来，下一次会再踩。
+再生成诊断。这条不写下来，下一次会再踩。
+
+`drainLogs` 自己也踩了一次：初版只 `once('close')`，而调用它时 'close' **往往早已触发** →
+每次失败白等满 3s 上限（实测 B 场景：退出于 5506ms、诊断抛出于 8695ms，差的 3.2s 全是白等）。
+改为轮询两个流的 `readableEnded`（数据交付完成的真实信号）后即刻返回。
+
+### 2.3b 入口表必须跟「谁挂的」一起传下去
+
+要给出**入口路径**就得知道「这个包名对应哪个目录」。默认表只有三个 legion 包；夹具临时挂的自造包
+不在其中 → 出现「能点名条目、但 `.entry === null`」的**半条结论**。现在
+`diagnoseHostLogs` / `hostBootError` / `waitReady` 都可传 `packageDirs`，夹具直接提供
+`fx.packageDirs` 与 `fx.diagnoseOpts(logText)`；并有 2 条回归断言（含「不传时确实给不出路径」的现状锁定）。
 
 ### 2.4 两个负向场景各自独立夹具
 
@@ -111,35 +122,54 @@ dsh: plugin tree failed to load: failed to apply loader entry include (cordis:in
 
 ### 3.3 两条失败路径的行为差异（实测）
 
-| 场景 | 宿主是否曾就绪 | 退出 | 旧症状 | 新结论 |
+| 场景 | `/__p13/ready` 是否曾答 200 | 退出 | 旧症状 | 新结论 |
 | --- | --- | --- | --- | --- |
-| A 导入期抛错 | **是**（`/__p13/ready` 一度 200，之后 audit 失败） | exit 1 | 客户端「路由缺失 / 60s 未就绪」都可能 | `import_threw` + id + 入口 + 插件错误 |
-| B 入口缺失 | **否**（树挂载期即失败） | exit 1 | 客户端干等 45–60s「未就绪」 | `missing_entry` + id + 缺失路径 + 构建建议 |
+| A 导入期抛错 | **是**（实测：ready 一度 200，之后 audit 失败） | exit 1 | 客户端「路由缺失 / 60s 未就绪」都可能 | `import_threw` + id + 入口 + 插件错误 |
+| B 入口缺失 | **不确定 —— 是竞态**（两次实测分别得到「答过 200」与「从未就绪」） | exit 1 | 客户端干等 45–60s「未就绪」 | `missing_entry` + id + 缺失路径 + 构建建议 |
 
-场景 A 的「曾就绪」是实测事实，也让本轮用例设计改了方向：对 A 断言的是**日志诊断**而不是「未就绪」，
-否则用例会因宿主短暂可用而随机红。
+**由此确定的两条判据（均已写成断言）**：
+
+1. **不要用「未就绪」当判据**。场景 B 里 `/__p13/ready` 是否短暂成功取决于
+   webserver 开始监听与「条目解析失败中止启动」的先后，实测**两种时序都出现过**；
+   因此 B 的用例先等进程退出（<30s，实测约 4.7–5.5s），再断言 `waitReady` **立即**抛出 `HostBootError`
+   （<10s，实测约 3s），不依赖这个窗口。
+2. **可靠判据是「exit 1 + 日志诊断」**。B 的用例另有一条与进程时序完全无关的断言：
+   仅凭抓到的原始日志调用 `diagnoseHostLogs`，也必须点名到 `p13-broken-missing` 并给出缺失入口路径。
+
+场景 A 的「曾就绪」同样是实测事实，也让本轮用例设计改了方向：对 A 断言的是**日志诊断**而不是「未就绪」，
+否则用例会因宿主短暂可用而随机红。补充：把「坏条目一起挂、只报第一个」的教训（§2.4）与本条合起来看，
+可知**失败时序本身不该进断言**，能进断言的只有「进程最终 exit 1」与「日志可被诊断」。
+
+> 另记一处实测修正：`drainLogs` 初版只 `once('close')`，但调用它时 'close' 往往**早已触发**，
+> 于是每次失败都白等满 3s 上限（实测 B 的诊断耗时 8695ms − 退出时刻 5506ms ≈ 3.2s 全是白等）。
+> 改为轮询两个流的 `readableEnded`（数据交付完成的真实信号）后即刻返回。
 
 ### 3.4 用例读数
 
 | 运行 | 命令 | 结果 |
 | --- | --- | --- |
-| 纯函数单测（无 DSH） | `node --test tests/p13-fixture/host-diagnostics.test.mjs` | **22/22 PASS** |
-| 主套件（含负向，真实宿主） | `node --test tests/p13-fixture/p13-host-injection.test.mjs` | **14/14 PASS**，30.6s（原 9 例约 10s） |
+| 纯函数单测（无 DSH） | `node --test tests/p13-fixture/host-diagnostics.test.mjs` | **24/24 PASS** |
+| 主套件（含负向，真实宿主） | `node --test tests/p13-fixture/p13-host-injection.test.mjs` | **14/14 PASS**，31.4s（原 9 例约 10s） |
 | 仅负向用例（独立性） | `node --test --test-name-pattern='负向' …` | **5/5 PASS**（不依赖主套件状态） |
-| CI 套件组（2 文件） | `run-ci --only env,test,doc` | `p13-host-injection: exit=0 tests=36 pass=36 fail=0` |
+| CI 套件组（2 文件） | `run-ci --only env,test,doc` | `p13-host-injection: exit=0 tests=38 pass=38 fail=0` |
 | 健康宿主零误报对照 | 主套件 ⑦ | 真实宿主全量日志 → `problems == []`；预检 6 条行 0 问题 |
 
 ### 3.5 全量门禁
 
-| 阶段 | 结论 |
-| --- | --- |
-| `env` | PASS |
-| `test` | 详见 §3.6（本切片只新增/扩展了 `p13-host-injection` 套件组，其余 38 套件读数与基线一致） |
-| `doc` | PASS（`check-docs.mjs` 10 类校验项全绿） |
+| 运行 | 阶段 | 结论 | 读数 |
+| --- | --- | --- | --- |
+| 分支 `w/host-diagnostics`（`.ci/p4-2-final3`） | `env` / `test` / `doc` | **全 PASS** | 1812ms / 237524ms / 179ms；**39 套件 / 980 用例** |
+| 分支首轮（`.ci/p4-2-final2`，细化前） | `env` / `test` / `doc` | **全 PASS** | 1889ms / 254822ms / 314ms；39 套件 / 978 用例 |
+| 两轮共同读数 | `p13-host-injection` | PASS | `exit=0 tests=38 pass=38 fail=0`（首轮 36/36） |
+| `env` 阶段三项配置自检 | `scan` / `sync` / `check(good fixture)` | **全 PASS** | 见 `.ci/*/ci.log` 的 `config ...: PASS` 行 |
+
+> 注：`node scripts/config/check.mjs`（**不带夹具**）在开发机上会因宿主会话里的 `TEAM_HUB_PORT=3080`
+> 报 `hub_upstream_port_mismatch` —— 这是**按设计**的机器相关结果，门禁只认带 `--isolated-env` 的夹具检查
+> （`run-ci` 的既有做法，本轮未改）。
 
 ### 3.6 与基线的差异（诚实登记）
 
-- `p13-host-injection`：**9 → 14 例**，并新增同组纯函数文件 **22 例** → 套件组 **36 例**；
+- `p13-host-injection`：**9 → 14 例**，并新增同组纯函数文件 **24 例** → 套件组 **38 例**；
 - 其余套件读数未变（`plugins` 185、`whiteboard` 158、`config` 36、`e2e-browser` 7 …）；
 - **成本**：主套件由约 10s 升到约 30.6s（两次真实宿主启动用于负向场景）。
   取舍：负向验证是这层的唯一护栏（诊断最容易「写得漂亮但从没跑过」），20s 换「诊断被真实复现覆盖」值得；

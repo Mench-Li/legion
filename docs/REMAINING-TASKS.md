@@ -8,7 +8,7 @@
 > 候选 #4（插件配置面未统一）已于 2026-09-10 修复（**P3-4**），证据 `docs/P3-4-evidence/verify-evidence.md`；
 > 候选 #6（前端无浏览器自动化）已于 2026-09-10 补齐（**P4-1**），证据 `docs/P4-1-evidence/verify-evidence.md`；
 > 候选 #9（宿主插件导入失败诊断）已于 2026-09-10 修复（**P4-2**），证据 `docs/P4-2-evidence/verify-evidence.md`。
-> 全量基线：**39 套件 / 978 用例，`run-ci --only test` PASS**（以 `docs/STATUS.md` 记录的数字为准）。
+> 全量基线：**39 套件 / 980 用例，`run-ci --only test` PASS**（以 `docs/STATUS.md` 记录的数字为准）。
 
 本文记录当前尚未完成的产品、架构和发布工作。已完成的安全加固、CI 扩展、artifact 路径安全、插件 token 传播和白板 WebSocket 鉴权不在本文重复列出。
 
@@ -64,7 +64,7 @@
    `HostBootError`（可读文本 + 结构化 `diagnosis`）。**验证方式**：负向夹具在真实宿主上复现
    「导入期抛错」与「入口产物缺失」两种失败各一例，断言诊断点名到条目且 <30s 出结论；
    另有「健康宿主零误报」对照（防诊断变噪音源）与 21 例纯函数单测。
-   套件 `p13-host-injection` 由 9 → **14 例**（+**22 例**同组纯函数）；**证据**：
+   套件 `p13-host-injection` 由 9 → **14 例**（+**24 例**同组纯函数）；**证据**：
    `docs/P4-2-evidence/verify-evidence.md`。
    **未覆盖（诚实登记）**：pending 的日志形状取自 harness 源码、未在真实宿主复现；裸包名条目不判存在性；
    日志匹配仍是字符串规则（harness 文案变更会失效）。

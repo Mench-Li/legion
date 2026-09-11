@@ -232,21 +232,25 @@ function rowMentioned(row, name) {
 
 /**
  * 汇总诊断：预检问题 + 日志解析 → 有序的问题清单（每条含插件、入口、原始错误、处置建议）。
- * @param {{ logText?: string, rows?: Array<{id?:string,name:string}>, repoRoot?: string, exitCode?: number|null, timeoutMs?: number }} input
+ * `packageDirs` 用于把组合行名解析到目录：默认是三个 legion 包；夹具挂的自造包（负向用例）
+ * 需要把它自己的映射传进来，否则「能点名条目、但给不出入口路径」——半条结论。
+ * @param {{ logText?: string, rows?: Array<{id?:string,name:string}>, repoRoot?: string,
+ *           packageDirs?: Record<string,string>, exitCode?: number|null, timeoutMs?: number }} input
  */
-export function diagnoseHostLogs({ logText = '', rows = [], repoRoot = process.cwd(), exitCode = null, timeoutMs = null } = {}) {
+export function diagnoseHostLogs({ logText = '', rows = [], repoRoot = process.cwd(), packageDirs = PACKAGE_DIRS, exitCode = null, timeoutMs = null } = {}) {
   const parsed = parseHostFailures(logText)
   const problems = []
   const add = (p) => { if (!problems.some((q) => q.kind === p.kind && q.plugin === p.plugin)) problems.push(p) }
   const mentionAll = (names) => (names && names.length > 0 ? names.join('、') : null)
   const label = (row) => (row?.id ? `${row.id}（${row.name}）` : String(row?.name ?? '未知条目'))
+  const resolveOpts = { repoRoot, packageDirs }
 
   // ⓪ 装载器直接点名：`failed to import|apply loader entry <id> (<specifier>)` → 按 id 精确反查组合行
   for (const f of parsed.entryFailures) {
     const row = rows.find((r) => r.id === f.id)
       ?? rows.find((r) => rowMentioned(r, f.specifier || f.id))
       ?? { id: f.id, name: f.specifier || f.id }
-    const r = resolveRowEntry(row, { repoRoot })
+    const r = resolveRowEntry(row, resolveOpts)
     const moduleErr = f.message.includes('Cannot find ') ? (specifierFromError(f.message) ?? null) : null
     const entryMissing = !r.exists
     add({
@@ -270,7 +274,7 @@ export function diagnoseHostLogs({ logText = '', rows = [], repoRoot = process.c
   // 入口缺失（日志里往往只有一句 Cannot find module，这条把「哪个插件、哪个文件」补上）
   for (const n of parsed.loaderFailedNames) {
     const row = rows.find((r) => rowMentioned(r, n)) ?? { name: n }
-    const r = resolveRowEntry(row, { repoRoot })
+    const r = resolveRowEntry(row, resolveOpts)
     add({
       kind: 'missing_entry',
       plugin: label(row),
@@ -283,7 +287,7 @@ export function diagnoseHostLogs({ logText = '', rows = [], repoRoot = process.c
 
   for (const a of parsed.activation) {
     const row = rows.find((r) => rowMentioned(r, a.name)) ?? { name: a.name }
-    const r = resolveRowEntry(row, { repoRoot })
+    const r = resolveRowEntry(row, resolveOpts)
     add({
       kind: 'activation_failed',
       plugin: label(row),
@@ -310,9 +314,9 @@ export function diagnoseHostLogs({ logText = '', rows = [], repoRoot = process.c
   // `plugin(s) failed to load:` 友好行），所以必须能反查到组合行——否则诊断只会说「未能定位」。
   for (const line of parsed.moduleErrors) {
     if (problems.some((q) => q.raw && q.raw.includes(line))) continue
-    const row = attributeModuleError(line, rows, { repoRoot })
+    const row = attributeModuleError(line, rows, resolveOpts)
     if (row) {
-      const r = resolveRowEntry(row, { repoRoot })
+      const r = resolveRowEntry(row, resolveOpts)
       add({
         kind: r.exists ? 'module_error' : 'missing_entry',
         plugin: row.id ? `${row.id}（${row.name}）` : row.name,
@@ -389,8 +393,8 @@ export class HostBootError extends Error {
 }
 
 /** 便捷封装：给定日志与组合行，直接产出可读的启动失败错误。 */
-export function hostBootError({ logText, rows, repoRoot, exitCode = null, timeoutMs = null, headline }) {
-  const diag = diagnoseHostLogs({ logText, rows, repoRoot, exitCode, timeoutMs })
+export function hostBootError({ logText, rows, repoRoot, packageDirs, exitCode = null, timeoutMs = null, headline }) {
+  const diag = diagnoseHostLogs({ logText, rows, repoRoot, packageDirs, exitCode, timeoutMs })
   const what = headline ?? (diag.problems.length > 0 ? '宿主插件加载失败' : '宿主未就绪')
   return new HostBootError(`${what}：${formatDiagnosis(diag, { logText })}`, diag)
 }

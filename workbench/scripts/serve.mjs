@@ -2587,9 +2587,17 @@ function routeRequest(req, res) {
     return
   }
   if (!existsSync(file) || statSync(file).isDirectory()) {
+    // 候选 #8：**按扩展名区分「导航」与「静态资源」**——只有导航才回退 SPA 入口。
+    // 旧行为对任何未知路径都回 `ROOT/index.html`（200 + text/html），于是缺失的 `/assets/*.js`
+    // 也拿到 200 HTML：浏览器侧表现为「MIME 类型不对」，而不是一个可诊断的 404；
+    // `fetch()` 取缺失的 JSON 资源则会变成「JSON 解析失败」，同样把「资源不存在」这件事藏起来。
+    if (staticRequestKind(req, pathname) === 'resource') {
+      httpErr(res, 404, `未找到静态资源 ${pathname}（按扩展名判定为资源请求：不做 SPA 回退，避免把缺失资源伪装成 200 HTML）`)
+      return
+    }
     const index = join(file, 'index.html')
     if (existsSync(index)) file = index
-    else file = join(ROOT, 'index.html') // SPA 回退
+    else file = join(ROOT, 'index.html') // SPA 回退（仅导航请求）
   }
   // 修复：找不到文件时**先发 200 再读流**会让读失败无法再回错误头，只能 destroy()，
   // 客户端看到的是「连接被意外关闭」而不是可读原因（新建 worktree 未跑 vite build 时的真实现象，
@@ -2614,6 +2622,35 @@ function routeRequest(req, res) {
   })
   res.on('close', () => { try { rs.destroy() } catch { /* */ } })
   rs.pipe(res)
+}
+
+// ── 静态托管：导航 vs 静态资源（候选 #8）──
+/**
+ * 判定一个静态请求该不该享受 **SPA 回退**。
+ *
+ * 背景（候选 #8，`docs/STATUS.md` 限制 #12）：旧实现对任何未知路径都回 `ROOT/index.html`，
+ * 于是缺失的 `/assets/*.js`、`/favicon.ico`、`/data/x.json` 全都得到 **200 + text/html**：
+ * 浏览器侧只看得到「MIME 类型不对」，`fetch()` 侧只看得到「JSON 解析失败」——
+ * 「这个资源根本不存在」这个最该被看见的事实被伪装掉了。
+ *
+ * 规则（两条，取并集为「导航」）：
+ *   ① **路径形态**：最后一个路径段没有扩展名（`/tasks/abc`），或扩展名是 `.html`/`.htm` → 导航候选；
+ *      其余扩展名（`.js`/`.css`/`.json`/`.png`/`.map`…）→ **静态资源**，缺失即 404。
+ *   ② **请求头**：`Accept` 显式包含 `text/html`（浏览器发起**导航**时必带）→ 按导航处理。
+ *      这条是给「带点的深链路由」留的正确性出口：真实浏览器地址栏访问 `/report.v2` 不会被兜底误伤；
+ *      而浏览器取子资源时不会声明 `text/html`（模块脚本与样式表都只声明通配或具体类型），
+ *      所以它不会把 #8 的缺陷重新藏回去。
+ *
+ * @param {{ headers?: Record<string, unknown> } | null} req
+ * @param {string} pathname
+ * @returns {'navigation' | 'resource'}
+ */
+export function staticRequestKind(req, pathname) {
+  const last = String(pathname ?? '').split('/').pop() ?? ''
+  const ext = extname(last).toLowerCase()
+  const accept = String((req && req.headers && req.headers.accept) || '')
+  if (ext === '' || ext === '.html' || ext === '.htm') return 'navigation'
+  return /text\/html/i.test(accept) ? 'navigation' : 'resource'
 }
 
 // R-A2/I-9：顶层兜底——单请求处理中的任何未预期同步异常只回 500，进程绝不被畸形输入击穿

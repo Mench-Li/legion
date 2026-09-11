@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-10　`run-ci --only env,test,doc` **全 PASS**；其中 `test` **39 套件 / 1011 用例**
+**最近一次全量基线**：2026-09-10　`run-ci --only env,test,doc` **全 PASS**；其中 `test` **39 套件 / 1021 用例**
 （约 4 分钟）—— 以本文件所在提交为准
 
 > 说明：上句记录 P4-3 之后的全量运行（含 `doc` 阶段）。P4-2 之后为 **981 用例**、
@@ -66,9 +66,11 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：39 套件 / 1011 用例，`--only test` 整体 PASS** —— 2026-09-10 实测
-（P4-3 之后：`e2e-browser` 7→**10 例**（新增连接未就绪窗口/切房间补发/单连接三条用例）、`whiteboard` 158→**185 例**
+**当前基线：39 套件 / 1021 用例，`--only test` 整体 PASS** —— 2026-09-10 实测
+（P4-4 之后：`static-serve` 6→**16 例**（新增导航/资源判定与缺失资源 404 契约）；
+P4-3 之后：`e2e-browser` 7→**10 例**（新增连接未就绪窗口/切房间补发/单连接三条用例）、`whiteboard` 158→**185 例**
 （新增 `pendingOps.test.mjs` 19 例队列/补发单测 + `notice.test.mjs` 8 例提示优先级单测）；
+P4-3 与 P4-4 的全量门禁读数见 `docs/P4-3-evidence/verify-evidence.md` §3、`docs/P4-4-evidence/verify-evidence.md` §3；
 P4-2 之后：`p13-host-injection` 9→14 例（含 5 例真实宿主负向诊断），并新增同组纯函数文件
 `host-diagnostics.test.mjs` **25 例** → 该套件组 39 例；
 P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-4 之后：`plugins` 177→185、
@@ -93,7 +95,7 @@ P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-
 | read-auth（鉴权矩阵 + 回环开放，2 文件） | 14 | whiteboard（含 P3-1 治理端到端、P4-3 待发队列/提示优先级单测与前端静态契约，16 文件） | 185 |
 | files-api | 41 | plugins（含 P2-6 chat-context、SP-P0 space-pipeline、P3-4 配置） | 185 |
 | files-p27 / files-ui（P2-7） | 36 / 19 | web-p28 / browser-ui（P2-8） | 21 / 21 |
-| web | 24 | static-serve（静态托管 404/SPA 回退/穿越） | 6 |
+| web | 24 | static-serve（静态托管 404/SPA 回退/穿越 + P4-4 导航与资源判定） | 16 |
 | doc-render | 11 | board-plugin | 37 |
 | skill-importer | 4 | scrum | 25 |
 | hub-board / artifact-policy | 1 / 3 | config（P3-2 统一配置 + P3-4 插件族） | 36 |
@@ -179,12 +181,15 @@ P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-
     切房间与 URL/token 语义、非法房间号提示、主路径无页面异常、限流提示）；
     真实文件型房间路径由临时生产路径脚本验证（18/18，未入库）。
     浏览器 E2E 的**覆盖边界**见 `docs/E2E.md` §6（workbench / board-plugin 前端、视觉回归、
-    多浏览器矩阵、网络故障注入仍无自动化）；已知未修缺陷「重连窗口内的绘制被静默丢弃」在
-    `docs/REMAINING-TASKS.md` 候选 #10（由本轮 E2E 发现并复现）。
-12. 静态托管（P2-8 后续修补）：`workbench/scripts/serve.mjs` 在产物缺失时返回 404 + 指引（不再断流），
-    但**未知资源路径仍回落 SPA 入口（200 HTML）**——即缺失的 `/assets/*.js` 会返回 HTML 而非 404，
-    浏览器侧表现为 MIME 报错；这是既有 SPA 回退语义，未在本轮改动（如需按扩展名区分导航与资源请求需单独立项）。
-    静态根可用 `DSH_WORKBENCH_ROOT` 覆盖（测试用）。
+    多浏览器矩阵、网络故障注入仍无自动化）；候选 #10「重连窗口内的绘制被静默丢弃」已于同日修复（P4-3）。
+12. 静态托管（**P4-4 已修**）：`workbench/scripts/serve.mjs` 在产物缺失时返回 404 + 指引（不再断流），
+    并且**按扩展名区分导航与静态资源**：只有导航请求（无扩展名 / `.html` / `Accept: text/html`）才回退
+    SPA 入口，缺失的 `/assets/*.js`、`/data/*.json`、`/favicon.ico` 等现在回 **404 + 可读 JSON 体**
+    （旧行为是 200 + 整页 HTML，前端只会看到「JSON 解析失败」/「MIME 类型不对」）。
+    验证与边界见 `docs/P4-4-evidence/verify-evidence.md`（含真实浏览器 A/B 读数）。
+    **已知边界**：浏览器加载缺失**模块脚本**时控制台仍报 MIME 类错误（404 体是 JSON，非 JS）——
+    可诊断性来自诚实的 404 状态码；未覆盖 `HEAD`/`Range`/条件请求；
+    `serve.mjs` 静态分支仍不分方法（与改动前一致）。静态根可用 `DSH_WORKBENCH_ROOT` 覆盖（测试用）。
 13. 宿主插件诊断（P4-2）：`p13` 夹具现在把「插件条目导入失败」翻成点名到条目的结论
     （启动前预检 + 日志解析 + 路由 404 归因，见 `docs/P4-2-evidence/verify-evidence.md`），
     **已知边界**：① 只覆盖本地包行（`@dsh-external/*` 与 `file://`），裸包名行不判入口存在性（避免假阳性）；

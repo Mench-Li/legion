@@ -123,9 +123,6 @@ dispose 时直接 `kill()`。本清单是它的**严格超集与替代契约**�
 
 ## 5. 本批次**未交付**的部分（不得当成已完成）
 
-- **Secret Store 接口**（PRT-258 的第四份契约）→ 属 `PRT-254`/`PRT-505`。
-  设计输入已经明确：复用 `$DSH_HOME/.credentials.yaml` 的 `refs → records` 引用式存储，
-  **不另建密钥库**（PRT-003 §3.2）。
 - **Launcher 本身**（真正 spawn、监督、退避、熔断、优雅关闭）→ `PRT-251` / `PRT-704`。
   本批次只交付「启动之前就能判定的事实」。
 - **就绪判据全部是声明，未经实测**。五条 `readiness` 都标了 `verified: false`：
@@ -136,6 +133,9 @@ dispose 时直接 `kill()`。本清单是它的**严格超集与替代契约**�
   未声明读取点。Launcher 落地时必须同时注册 `product` 进程与它的 config-schema，
   否则新读取点会绕过 §6.11 的声明门禁。
 - **Port 冲突检测只是清单内自检**，不含「系统里已有进程占用该端口」的探测 → `PRT-703`。
+
+> 第四份契约（Secret Store 接口）已在同一分支的后续提交中交付，见
+> [`PRT-505-secret-store.md`](./PRT-505-secret-store.md)。
 
 ---
 

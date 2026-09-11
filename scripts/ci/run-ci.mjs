@@ -399,6 +399,19 @@ async function stageTest() {
       files: ['product/paths.test.mjs', 'product/process-manifest.test.mjs'],
       cwd: ROOT,
     },
+    // 阶段 2.5 / 阶段 5：密钥库最小闭环（PRT-505，PRT-258 的第四份契约）。
+    // 这一组的断言集中在两类**不会抛异常**的失败上：
+    //   ① 元数据接口（list / toJSON / 审计 / 错误对象）把值或密文带出去——
+    //      它不会报错，只会把密钥写进日志与诊断包；
+    //   ② 受保护后端不可用时**退化**为明文，于是「密钥受保护」在配置最特殊的
+    //      那台机器上悄悄失效。
+    // 另有一条在 Windows 上跑**真实 DPAPI 往返**：只用假加解密函数只能证明
+    // 「我调用了自己的函数」，证明不了密文落盘、重启可解、换 blob 即解不开。
+    {
+      label: 'secret-store（PRT-505：引用校验、DPAPI 往返、fail-closed 与脱敏）',
+      files: ['security/secrets/secrets.test.mjs'],
+      cwd: ROOT,
+    },
     // P4-2（候选 #9）：宿主插件导入失败诊断。host-diagnostics.test.mjs 是**纯函数**单测
     // （无 DSH 依赖，任何机器都跑）；p13-host-injection.test.mjs 内含负向用例，用真实宿主
     // 复现「入口在导入期抛错 / 入口产物缺失」两种失败并断言诊断点名到条目。

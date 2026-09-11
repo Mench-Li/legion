@@ -14,7 +14,7 @@
 > ⚠️ 「有用例」不等于「已生效」。带生产调用方的任务在证据栏注明调用方；
 > 只有自己的用例驱动的原语一律标 🟡。
 
-**最近更新**：PRT-258 第一批（目录布局 / 配置优先级 / 进程清单）
+**最近更新**：PRT-505 密钥库最小闭环（PRT-258 第四份契约）
 
 ---
 
@@ -75,11 +75,11 @@
 | PRT-251 最小 Product Launcher | ⬜ | 输入已冻结：`product/process-manifest.mjs`（波次 / 就绪判据 / 启动前校验） |
 | PRT-252 Workbench 模型配置产品化校验 | ⬜ | |
 | PRT-253 单员工黄金任务迁移到 RuntimeAdapter | ⬜ | |
-| PRT-254 per-user 数据目录 + Secret Store 最小闭环 | 🟡 | **目录布局已冻结**（`product/paths.mjs`，per-user 默认 + 越界门禁）；Secret Store 与一键启动未实现 |
+| PRT-254 per-user 数据目录 + Secret Store 最小闭环 | 🟡 | **目录布局与密钥库都已冻结**（`product/paths.mjs`、`security/secrets/`）；**一键启动未实现** |
 | PRT-255 隔离测试空间安装/运行/取消/重启/诊断验证 | ⬜ | |
 | PRT-256 设计伙伴独立完成真实低风险任务 | ⏸ | 需真实外部用户 |
 | PRT-257 Launcher 负责 DSH 运行时与补丁层安装/自检/修复 | ⬜ | 分发形态路线 C 已裁决；Legion 自身四个 `file:` 包的分发方式待定 |
-| PRT-258 冻结进程清单 / 目录布局 / 配置 Schema / Secret Store 接口 | 🟡 | 前三份见 `PRT-258-product-contracts.md`；**Secret Store 接口待 PRT-254/505** |
+| PRT-258 冻结进程清单 / 目录布局 / 配置 Schema / Secret Store 接口 | ✅ | 四份契约全部有实现与用例：`PRT-258-product-contracts.md`（前三份）+ `PRT-505-secret-store.md`（第四份） |
 
 ## 阶段 3：Orchestrator Core（0/16）
 
@@ -128,11 +128,11 @@
 | PRT-502 岗位模型绑定与 fallback | ⬜ | 旧路径实测**按岗位模型未生效**（`gf001-run.mjs` 的 `modelDrift`） |
 | PRT-503 单次运行与岗位预算策略 | ⬜ | |
 | PRT-504 模型连通性与能力测试 | ⬜ | |
-| PRT-505 Windows Secret Store | ⬜ | 输入已备：复用 `$DSH_HOME/.credentials.yaml` 的 `refs → records`，不另建密钥库 |
+| PRT-505 Windows Secret Store | 🟡 | `security/secrets/`（DPAPI 往返实测 + fail-closed + 六条出口脱敏）、套件 `secret-store`；**尚无生产调用方**；与 `$DSH_HOME/.credentials.yaml` 的收敛属 PRT-257 |
 | PRT-506 迁移现有非敏感模型配置 | ⬜ | |
 | PRT-507 Workbench 模型设置页面 | ⬜ | |
 | PRT-508 配置导入导出（排除密钥） | ⬜ | |
-| PRT-509 密钥读取 / 轮换 / 删除 / 泄漏测试 | ⬜ | |
+| PRT-509 密钥读取 / 轮换 / 删除 / 泄漏测试 | 🟡 | 读取/轮换/删除的泄漏断言已入 `secret-store` 套件；**跨账户与 ACL 加固未做** |
 | PRT-510 预算原子预留、结算、取消与 Unknown Outcome 锁定 | ⬜ | |
 | PRT-511 冻结价格表版本、币种、计价单位与生效时间 | ⬜ | |
 
@@ -232,16 +232,16 @@
 | 0 冻结基线 | 10 | 1 | 0 | 0 | 11 |
 | 1 Runtime Contract | 9 | 0 | 0 | 0 | 9 |
 | 2 DshRuntimeAdapter | 10 | 5 | 0 | 0 | 15 |
-| 2.5 商业薄切片 | 0 | 2 | 5 | 1 | 8 |
+| 2.5 商业薄切片 | 1 | 1 | 5 | 1 | 8 |
 | 3 Orchestrator Core | 0 | 0 | 16 | 0 | 16 |
 | 4 上下文边界 | 0 | 0 | 13 | 0 | 13 |
-| 5 模型与密钥 | 0 | 0 | 11 | 0 | 11 |
+| 5 模型与密钥 | 0 | 2 | 9 | 0 | 11 |
 | 6 工具、权限和审批 | 1 | 3 | 16 | 0 | 20 |
 | 7 Product Launcher | 0 | 2 | 11 | 0 | 13 |
 | 8 安装、升级和回滚 | 0 | 1 | 12 | 0 | 13 |
 | 9 商业 Alpha 保障 | 0 | 0 | 9 | 1 | 10 |
 | 10 能力包协议 | 0 | 0 | 6 | 0 | 6 |
-| **合计** | **30** | **14** | **99** | **2** | **145** |
+| **合计** | **31** | **15** | **97** | **2** | **145** |
 
 > 计数口径：**部分**计入「已有交付物但完成标准未全部满足」，
 > 因此不能与「已完成」相加后宣称完成度。真实完成度按**完成标准**判定：

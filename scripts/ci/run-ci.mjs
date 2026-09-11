@@ -388,6 +388,17 @@ async function stageTest() {
       files: ['runtime/dsh-composition/composition.test.mjs'],
       cwd: ROOT,
     },
+    // 阶段 2.5：产品层契约（PRT-258 / PRT-254 目录部分）。**不启动任何进程**——
+    // 「依赖顺序错了」「两个进程抢同一端口」「声明的入口根本不存在」这三类缺陷
+    // 如果只在真机启动时暴露，表现分别是偶发 500、后启动者静默退出、任务一直没人做，
+    // 全都不是一条明确的错误。因此判据必须能在 spawn 之前跑。
+    // 另有一条用例把 MANIFEST_KNOWN_GAPS 与「对真实仓库跑出来的结果」对账：
+    // 缺口补上时用例变红，逼着文档与清单一起更新（反向漂移比漏做更难发现）。
+    {
+      label: 'product-runtime（PRT-258：目录布局不变量、配置优先级、进程清单与启动波次）',
+      files: ['product/paths.test.mjs', 'product/process-manifest.test.mjs'],
+      cwd: ROOT,
+    },
     // P4-2（候选 #9）：宿主插件导入失败诊断。host-diagnostics.test.mjs 是**纯函数**单测
     // （无 DSH 依赖，任何机器都跑）；p13-host-injection.test.mjs 内含负向用例，用真实宿主
     // 复现「入口在导入期抛错 / 入口产物缺失」两种失败并断言诊断点名到条目。

@@ -242,12 +242,54 @@ Get-Content .legion-services.log -Tail 30  # services-plugin 托管时查看启�
 | --- | --- | --- |
 | 代码回滚（发布后功能异常） | git checkout <上一发布 commit> → node scripts\ci\run-ci.mjs --only build → 重启三件套（§4.2 步骤 2/3） | 上一发布 commit = 本次 promote 前的 main 头 |
 | 前端产物回滚 | 保留上一版 workbench/dist 快照（或 releases/ 上一快照）直接换回 → 重启 serve.mjs | 5173 非热更；无需动 DB |
-| 数据回滚（team.db） | 用备份还原：停 hub → 替换 team-hub/team.db（含 -wal/-shm 同批）→ 重启 | 表结构只增不改：新代码在老库自动建表/补列（幂等），回滚旧代码时新表闲置互不破坏 |
+| 数据回滚（team.db） | 用备份还原：停 hub → **删除目标目录的 team.db-wal / team.db-shm** → 替换 team-hub/team.db → 重启 | 表结构只增不改：新代码在老库自动建表/补列（幂等），回滚旧代码时新表闲置互不破坏。**必须先删 -wal/-shm**，原因见 §6.1 |
 | 进程故障（services-plugin 托管） | 无需人工：托管自愈重启（闪退退避 ≤30s）；手动部署则重启对应进程 | .legion-services.log 记录退出码与重启 |
 | 端口被占 | 结束占用进程或用独立端口（TEAM_HUB_PORT / --port）起服 | services-plugin 探测到占用即跳过该服务 |
 
 备份建议：每次升级前 `Copy-Item team-hub\team.db* <备份目录>\`；发布物快照（releases/legion-<head>-<date>/）
 含 dist 与 SHA256SUMS，可校验文件完整性（Get-FileHash 比对）。
+
+> `team.db*` 通配**包含** `-wal` 与 `-shm`，这是必须的——见 §6.1。
+
+### 6.1 备份与恢复的三个实测要点（PRT-006）
+
+**① 只复制 `team.db` 会静默丢数据。** WAL 模式下已提交的数据可能仍只在 `-wal` 里。
+实测现场库：只复制 `.db` 的副本比真实状态**少了 253 条 audit 记录**
+（9984 → 9731），而副本自身 `integrity_check` 报 **ok**——
+**没有任何报错**，备份看起来完全正常。所以 `team.db*` 的通配不能省。
+
+**② 恢复时必须先删掉目标目录的 `-wal` / `-shm`。** 实测：把 A 时点的 `.db`
+与 B 时点的 `-wal` 放在一起，SQLite **会重放 B 的页到 A 的库上**，
+而结果库的 `integrity_check` 依然报 **ok**。也就是说这个错误
+**无法靠完整性校验发现**，只能在操作上避免：
+
+```
+停 hub
+Remove-Item team-hub\team.db-wal, team-hub\team.db-shm -ErrorAction SilentlyContinue
+Copy-Item <备份>\team.db team-hub\team.db
+重启 hub
+```
+
+**③ 备份推荐用 `VACUUM INTO` 而不是文件复制**（无需停服、只需读权限）：
+
+```powershell
+node -e "const{DatabaseSync}=require('node:sqlite');const d=new DatabaseSync('team-hub/team.db',{readOnly:true});d.exec(`VACUUM INTO '<备份目录>/team.db'`);d.close()"
+```
+
+它由 SQLite 自身产出**一致快照**，单文件即可恢复，不依赖 `-wal`。
+逐文件复制天然跨越多个时点（连做两次三件套复制在源库写入时会得到不同状态），
+因此文件复制**只应在停 hub 后**进行。
+
+验证（只读源库，全部在临时副本上做，不触碰现场文件）：
+
+```powershell
+node scripts\prt\backup-restore-verify.mjs                        # 用现场库
+node scripts\prt\backup-restore-verify.mjs --source=<路径>        # 指定库
+```
+
+它逐条核对上面三点，并对照逐表行数与 `audit.seq` 上界。
+**注意 `audit.seq` 允许有缺口**：分配器是 `MAX(seq)+1`（回滚后作废号不回填），
+现场库实测就有 1 个缺口，这**不是**缺陷。验收口径是「恢复前后缺口集合一致」。
 
 ---
 
@@ -309,7 +351,8 @@ Get-Content .legion-services.log -Tail 30  # services-plugin 托管时查看启�
 - [ ] CI 全绿：`node scripts/ci/run-ci.mjs` exit 0（evidence 归档 docs/T093-evidence/）
 - [ ] L1 三件套探活 + whiteboard /healthz（§5.2/§5.4）
 - [ ] L2 浏览器主路径走查并回填（§5.3）
-- [ ] team.db 备份完成（§6）
+- [ ] team.db 备份完成（§6；推荐 `VACUUM INTO`，见 §6.1）
+- [ ] 备份可恢复性核对完成：`node scripts\prt\backup-restore-verify.mjs --source=<备份或现场库>`（§6.1）
 - [ ] 已知缺陷状态确认（§7.1：当前无未修复 P0/P1；§7.2 记录项知悉）
 - [ ] 发布记录登记（§4.4 模板）+ 快照 MANIFEST 留档
 

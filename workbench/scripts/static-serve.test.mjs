@@ -1,4 +1,4 @@
-// static-serve.test.mjs — 静态托管契约（serve.mjs 的 SPA 入口/404 分支）。
+// static-serve.test.mjs — 静态托管契约（serve.mjs 的 SPA 入口/404 分支/资源与导航的区分）。
 //
 // 回归来源：P3-1 验证时在**新建 worktree**（未跑 vite build，无 dist/）里跑 CI smoke，
 // chat-s2-smoke 的 S2-A 报 `fetch failed`——真实原因是静态处理器**先发 200 头再读文件**，
@@ -15,6 +15,9 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
+
+// 纯判定函数直接静态导入（与下面的 `startWithRoot` 动态导入互不影响：模块级副作用只有配置解析）。
+const { staticRequestKind } = await import(pathToFileURL(join(HERE, 'serve.mjs')).href + '?kind=1')
 
 let emptyRoot = ''
 let builtRoot = ''
@@ -98,6 +101,45 @@ describe('静态托管：产物缺失时给出可读 404（回归：曾 200 后�
     assert.match(await r.text(), /id="app"/)
   })
 
+  // ── 候选 #8：未知**静态资源**必须 404，不得被 SPA 回退伪装成 200 HTML ──
+  // 旧行为：`/assets/index-missing.js` 回 200 + text/html，浏览器只报「MIME 类型不对」，
+  // `fetch()` 取缺失 JSON 时只报「解析失败」——「资源不存在」这个事实被藏起来。
+  it('有产物：缺失的静态资源按扩展名判定 → 404（不是 200 HTML）', async () => {
+    for (const p of ['/assets/index-missing.js', '/assets/app-missing.css', '/data/missing.json', '/favicon.ico', '/assets/deep/nested/missing.map']) {
+      const r = await fetch(`http://127.0.0.1:${builtPort}${p}`)
+      assert.equal(r.status, 404, `${p} 应为 404（旧行为是 200 + text/html）`)
+      const ct = r.headers.get('content-type') ?? ''
+      assert.ok(!/text\/html/.test(ct), `${p} 的 404 不得以 HTML 承载（会诱导浏览器按文档解析）：${ct}`)
+      const body = await r.text()
+      assert.match(body, /未找到静态资源/, `${p} 的错误体应说清是资源不存在：${body.slice(0, 160)}`)
+    }
+  })
+
+  it('有产物：缺失资源仍**不**影响真实资源与 SPA 深链（两边界都还在）', async () => {
+    // ① 真实存在的资源照常 200
+    const ok = await fetch(`http://127.0.0.1:${builtPort}/assets/index-abc.js`)
+    assert.equal(ok.status, 200)
+    assert.match(ok.headers.get('content-type') ?? '', /javascript/)
+    // ② 无扩展名的深链仍回 SPA 入口
+    const deep = await fetch(`http://127.0.0.1:${builtPort}/tasks/abc/def`)
+    assert.equal(deep.status, 200)
+    assert.match(deep.headers.get('content-type') ?? '', /text\/html/)
+    // ③ 带点的深链：**浏览器导航**（Accept: text/html）仍回 SPA 入口——不能被兜底误伤
+    const dottedNav = await fetch(`http://127.0.0.1:${builtPort}/report.v2`, { headers: { accept: 'text/html,application/xhtml+xml' } })
+    assert.equal(dottedNav.status, 200)
+    assert.match(await dottedNav.text(), /id="app"/)
+    // ④ 同一个带点路径，**子资源**请求（不带 text/html）→ 404，说明 #8 没有被这条出口重新藏回去
+    const dottedAsset = await fetch(`http://127.0.0.1:${builtPort}/report.v2`, { headers: { accept: '*/*' } })
+    assert.equal(dottedAsset.status, 404)
+    assert.match(await dottedAsset.text(), /未找到静态资源/)
+  })
+
+  it('有产物：目录请求（存在但无 index.html）仍回 SPA 入口，不算资源缺失', async () => {
+    const r = await fetch(`http://127.0.0.1:${builtPort}/assets`)
+    assert.equal(r.status, 200, '目录路径无扩展名 → 导航语义，仍走 SPA 回退')
+    assert.match(await r.text(), /id="app"/)
+  })
+
   it('路径穿越被拦（编码式 403；明文式由 URL 解析归一化，均不泄露根外文件）', async () => {
     // 必须用**原始请求**：fetch/undici 会在客户端把 /../ 归一化掉，测不到服务端校验。
     const raw = (rawPath) => new Promise((resolve) => {
@@ -124,5 +166,55 @@ describe('静态托管：产物缺失时给出可读 404（回归：曾 200 后�
     // ③ 双重编码（%252e）不得被二次解码成穿越
     const doubleEncoded = await raw('/%252e%252e%252f%252e%252e%252fetc/passwd')
     assert.ok(!/root:.*:0:0:/.test(doubleEncoded.body), '双重编码不得泄露根外文件')
+  })
+})
+
+// ── 候选 #8 的判定规则本身（纯函数，不需起服务；边界比端到端更快更全）──
+describe('静态托管：导航 vs 静态资源判定（staticRequestKind）', () => {
+  const withAccept = (accept) => ({ headers: accept === undefined ? {} : { accept } })
+
+  it('无扩展名的路径段 → 导航（SPA 深链照旧可用）', () => {
+    for (const p of ['/', '/tasks', '/tasks/abc/def', '/a/b/c']) {
+      assert.equal(staticRequestKind(withAccept('*/*'), p), 'navigation', p)
+    }
+  })
+
+  it('.html / .htm → 导航（显式要文档）', () => {
+    assert.equal(staticRequestKind(withAccept('*/*'), '/index.html'), 'navigation')
+    assert.equal(staticRequestKind(withAccept('*/*'), '/legacy.htm'), 'navigation')
+    assert.equal(staticRequestKind(withAccept('*/*'), '/dir/PAGE.HTML'), 'navigation', '大小写不敏感')
+  })
+
+  it('其它扩展名 + 子资源请求头 → 资源（缺失即 404）', () => {
+    for (const p of ['/assets/index-abc.js', '/a.css', '/data.json', '/favicon.ico', '/x/a.map', '/img/logo.png', '/font.woff2']) {
+      assert.equal(staticRequestKind(withAccept('*/*'), p), 'resource', p)
+    }
+    assert.equal(staticRequestKind(withAccept('text/css,*/*;q=0.1'), '/a.css'), 'resource', 'CSS 请求不带 text/html')
+    assert.equal(staticRequestKind(withAccept(undefined), '/a.js'), 'resource', '无 Accept 头时按资源处理（更安全：不伪装成 HTML）')
+  })
+
+  it('带点的路径 + 导航请求头（Accept: text/html）→ 导航（浏览器地址栏访问不被误伤）', () => {
+    assert.equal(staticRequestKind(withAccept('text/html'), '/report.v2'), 'navigation')
+    assert.equal(staticRequestKind(withAccept('text/html,application/xhtml+xml,application/xml;q=0.9'), '/a.b.c'), 'navigation')
+    assert.equal(staticRequestKind(withAccept('TEXT/HTML'), '/x.js'), 'navigation', 'Accept 匹配大小写不敏感')
+  })
+
+  it('目录形路径（尾斜杠）→ 导航', () => {
+    assert.equal(staticRequestKind(withAccept('*/*'), '/assets/'), 'navigation')
+  })
+
+  it('非法/畸形入参不抛错（顶层兜底之外的第二道保险）', () => {
+    assert.equal(staticRequestKind(null, '/a.js'), 'resource')
+    assert.equal(staticRequestKind({}, '/a.js'), 'resource')
+    assert.equal(staticRequestKind({ headers: { accept: 123 } }, '/a.js'), 'resource', '非字符串 Accept 不得抛错')
+    assert.equal(staticRequestKind(withAccept('*/*'), undefined), 'navigation')
+    assert.equal(staticRequestKind(withAccept('*/*'), ''), 'navigation')
+  })
+
+  it('**负向锚定**：静态资源判定与「旧行为」相反（旧行为一律 navigation → 200 HTML）', () => {
+    // 这条把 #8 的缺陷本身写成断言：若哪天有人把 resource 分支去掉，这里立即红。
+    const p = '/assets/index-missing.js'
+    assert.equal(staticRequestKind(withAccept('*/*'), p), 'resource',
+      '缺失的 .js 必须判为资源（旧行为是导航 → SPA 200 HTML → 只报 MIME 错，找不到真因）')
   })
 })

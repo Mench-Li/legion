@@ -376,7 +376,7 @@ export default function App(): React.JSX.Element {
       const r = await setGoalStatus(scope, goalId, status)
       const info = await fetchGoal(scope)
       setGoalInfo(info)
-      const stranded = Array.isArray(r?.strandedTasks) ? r.strandedTasks : []
+      const stranded = Array.isArray(r?.task?.strandedTasks) ? r.task.strandedTasks : []
       toast('ok', stranded.length > 0
         ? `${label}目标成功；${stranded.length} 个在办任务已留痕并挂起（${stranded.join('、')}）——请到任务详情裁决：验收 / 取消 / 转派`
         : `${label}目标成功`)

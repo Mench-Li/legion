@@ -312,14 +312,23 @@ export function diagnoseHostLogs({ logText = '', rows = [], repoRoot = process.c
 
   // 底层模块错误：真实宿主在**入口解析失败**时往往只打这一行（没有插件名、更没有
   // `plugin(s) failed to load:` 友好行），所以必须能反查到组合行——否则诊断只会说「未能定位」。
+  //
+  // 但同一条日志里 Node 的错误转储还会给出 `code: 'ERR_MODULE_NOT_FOUND'` 这类**碎片**，
+  // 它不含 specifier/路径，信息量只有「发生过模块错误」；若上面已经点出真正原因，再报一条
+  // 「（未能定位到具体插件条目）」就是**噪音**——读者会以为有两处问题（实测踩到）。
   for (const line of parsed.moduleErrors) {
     if (problems.some((q) => q.raw && q.raw.includes(line))) continue
+    const spec = specifierFromError(line)
+    const explainedAlready = spec !== null
+      && problems.some((q) => String(q.raw ?? '').includes(spec) || String(q.detail ?? '').includes(spec))
+    if (explainedAlready) continue                      // 同一条 specifier 已归因 → 不重复报
+    if (spec === null && problems.length > 0) continue  // 只剩 code 碎片 + 已有结论 → 噪音，丢弃
     const row = attributeModuleError(line, rows, resolveOpts)
     if (row) {
       const r = resolveRowEntry(row, resolveOpts)
       add({
         kind: r.exists ? 'module_error' : 'missing_entry',
-        plugin: row.id ? `${row.id}（${row.name}）` : row.name,
+        plugin: label(row),
         entry: r.entry ?? null,
         detail: r.exists ? line : `${line}（入口文件不存在：${r.entry ?? '未知路径'}）`,
         raw: line,

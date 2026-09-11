@@ -323,6 +323,37 @@ describe('diagnoseHostLogs / formatDiagnosis：结论可读且指向正确插件
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
 
+  it('不制造噪音：已归因的原因 + Node 错误转储里的 code 碎片 → 只报一条', () => {
+    // 实测形状（main 上的现场读数）：装载器那条已点名到条目，其后的 `code: 'ERR_MODULE_NOT_FOUND'`
+    // 碎片若再报一条「（未能定位到具体插件条目）」，读者会以为有两处问题。
+    const dir = mkdtempSync(join(tmpdir(), 'p13-diag-noise-'))
+    const q = String.fromCharCode(39)
+    try {
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'dsh-p13-missing', main: './lib/index.js' }))
+      const entryPath = join(dir, 'lib', 'index.js')
+      const log = [
+        'Error: dsh: plugin tree failed to load: failed to apply loader entry include (cordis:include): '
+          + `failed to import loader entry p13-broken-missing (@dsh-external/dsh-p13-missing): Cannot find package ${q}${entryPath}${q} imported from ${dir}`,
+        `Error: Cannot find package ${q}${entryPath}${q} imported from ${dir}`,
+        '    at legacyMainResolve (node:internal/modules/esm/resolve:201:26)',
+        `  code: ${q}ERR_MODULE_NOT_FOUND${q}`,
+      ].join('\n')
+      const diag = diagnoseHostLogs({
+        logText: log,
+        rows: [{ id: 'p13-broken-missing', name: '@dsh-external/dsh-p13-missing' }],
+        repoRoot: dir,
+        packageDirs: { '@dsh-external/dsh-p13-missing': dir },
+      })
+      assert.equal(diag.problems.length, 1, '只应报一条：' + JSON.stringify(diag.problems.map((p) => p.kind + '/' + p.plugin)))
+      assert.equal(diag.problems[0].kind, 'missing_entry')
+      assert.equal(diag.problems[0].entry, entryPath)
+      // 没有任何其它结论时，code 碎片仍作为弱信号保留（不丢信息）
+      const onlyFragment = diagnoseHostLogs({ logText: `  code: ${q}ERR_MODULE_NOT_FOUND${q}`, rows: [], repoRoot: dir })
+      assert.equal(onlyFragment.problems.length, 1)
+      assert.equal(onlyFragment.problems[0].kind, 'module_error')
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+
   it('只有底层模块错误、没有条目名 → 如实说「未能定位到具体插件条目」', () => {
     const log = "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'cordis' imported from /tmp/x/lib/index.js"
     const diag = diagnoseHostLogs({ logText: log, rows: [], repoRoot })

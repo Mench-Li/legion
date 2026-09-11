@@ -14,7 +14,7 @@
 | 文件 | 作用 |
 | --- | --- |
 | `tests/p13-fixture/host-diagnostics.mjs`（新，纯函数） | 诊断层：组合行入口解析（`resolveRowEntry`）、启动前预检（`preflightEntries`）、真实宿主日志解析（`parseHostFailures`）、裸模块错误反查组合行（`attributeModuleError`）、汇总结论（`diagnoseHostLogs`）、可读渲染（`formatDiagnosis`）、诊断错误类型（`HostBootError` / `hostBootError`）、组合行 YAML 提取（`parseCompositionRows`） |
-| `tests/p13-fixture/host-diagnostics.test.mjs`（新，**24 例**） | 纯函数单测：**无 DSH 依赖**，任何机器都跑（含 CI）。用例锁的是**真实日志原文**（见 §3.1）与**真实文件系统**真值 |
+| `tests/p13-fixture/host-diagnostics.test.mjs`（新，**25 例**） | 纯函数单测：**无 DSH 依赖**，任何机器都跑（含 CI）。用例锁的是**真实日志原文**（见 §3.1）与**真实文件系统**真值 |
 | `tests/p13-fixture/broken-plugin.mjs`（新） | 负向夹具：一个在**导入期**就 `throw` 的插件（只被负向用例挂载，任何生产 profile 都不引用） |
 | `tests/p13-fixture/host-fixture.mjs`（改） | `makeFixture` 支持 `extraRows` / `extraPackages`（挂坏条目 + 假包）、`rows` 与 `packageDirs`（组合行真值 + 入口表，来自刚写下的补丁层）、`preflight()`、`diagnoseOpts()`；`waitReady` 失败时**快速失败 + 结构化诊断**（并等 stdio 排空）；新增 `drainLogs`（按 `readableEnded` 判交付完成，不白等上限）、`routeMissDetail` |
 | `tests/p13-fixture/p13-host-injection.test.mjs`（改，9 → **14 例**） | 主套件：`before` 加启动前预检 + 带诊断的 `waitReady`；路由 200 断言改带 `routeMissDetail`；新增「健康宿主零误报」对照 1 例 + **两个负向 describe（5 例）** |
@@ -142,35 +142,82 @@ dsh: plugin tree failed to load: failed to apply loader entry include (cordis:in
 
 > 另记一处实测修正：`drainLogs` 初版只 `once('close')`，但调用它时 'close' 往往**早已触发**，
 > 于是每次失败都白等满 3s 上限（实测 B 的诊断耗时 8695ms − 退出时刻 5506ms ≈ 3.2s 全是白等）。
-> 改为轮询两个流的 `readableEnded`（数据交付完成的真实信号）后即刻返回。
+> 改为轮询两个流的 `readableEnded`（数据交付完成的真实信号）后即刻返回（同一场景实测 **7–14ms** 给出结论）。
+
+### 3.3b 现场读数（main 上直接跑，非测试自证）
+
+`node .ci/p4-2-field-reading.mjs`（临时脚本，跑完即删）在合并后的 `main` 上启动一个「入口产物缺失」的
+坏宿主，直接打印断言失败内容：
+
+```
+=== 启动前预检（无需启动宿主）===
+checked=6 problems=1
+  [missing_entry] p13-broken-missing（@dsh-external/dsh-p13-missing）
+    入口：C:\Users\…\demo-missing-ClmUAk\lib\index.js
+    处置：入口文件不存在：确认组合行里的 name 指向已构建的插件入口
+
+=== waitReady 抛出的内容（调用到抛出 7ms；旧行为=等满 60000ms 后报「host not ready」）===
+宿主 exitCode=1 / err.name=HostBootError
+宿主进程已退出（exit=1），未就绪：宿主插件加载失败（已定位 1 处）：
+  1. [missing_entry] p13-broken-missing（@dsh-external/dsh-p13-missing）
+     入口：C:\Users\…\demo-missing-ClmUAk\lib\index.js
+     现象：Cannot find package '…\@dsh-external\dsh-p13-missing\lib\index.js' imported from …
+     （入口文件不存在：C:\Users\…\demo-missing-ClmUAk\lib\index.js）
+     原始错误：Cannot find package '…' imported from …
+     处置：入口文件不存在：确认组合行里的 name 指向已构建的插件入口
+  --- 宿主日志尾部（原始输出，未加工） ---
+  | …（loader/Node 栈）
+```
+
+这正是本轮要消灭的症状对照：**60s 超时 → 7ms 结论**，且结论里有插件条目、入口路径、原始错误与处置建议。
+（该次读数还暴露了下面这条缺陷，修完后同一场景由 2 条问题降为 1 条。）
+
+### 3.3c 一次「诊断自己制造噪音」的缺陷（现场读数发现，已修）
+
+同一现场读数里，诊断输出了**两条**问题，第二条是：
+
+```
+  2. [module_error] （未能定位到具体插件条目）
+     现象：ERR_MODULE_NOT_FOUND'
+```
+
+它只是 Node 错误转储里的 `code: 'ERR_MODULE_NOT_FOUND'` **碎片**（不含 specifier），信息量仅
+「发生过模块错误」，而真正原因已被第一条点名 —— 读者会误以为有两处问题。这属于 §2.5 所说的
+「诊断若变成噪音源就是失败」。两条规则修掉（均有回归断言）：
+① specifier 已在某条问题的 raw/detail 里出现 → 不重复报；② 无 specifier 的碎片且已有其它结论 → 丢弃
+（仅剩碎片时仍作为弱信号保留，不丢信息）。
 
 ### 3.4 用例读数
 
 | 运行 | 命令 | 结果 |
 | --- | --- | --- |
-| 纯函数单测（无 DSH） | `node --test tests/p13-fixture/host-diagnostics.test.mjs` | **24/24 PASS** |
+| 纯函数单测（无 DSH） | `node --test tests/p13-fixture/host-diagnostics.test.mjs` | **25/25 PASS** |
 | 主套件（含负向，真实宿主） | `node --test tests/p13-fixture/p13-host-injection.test.mjs` | **14/14 PASS**，31.4s（原 9 例约 10s） |
 | 仅负向用例（独立性） | `node --test --test-name-pattern='负向' …` | **5/5 PASS**（不依赖主套件状态） |
-| CI 套件组（2 文件） | `run-ci --only env,test,doc` | `p13-host-injection: exit=0 tests=38 pass=38 fail=0` |
+| CI 套件组（2 文件） | `run-ci --only env,test,doc` | `p13-host-injection: exit=0 tests=39 pass=39 fail=0` |
 | 健康宿主零误报对照 | 主套件 ⑦ | 真实宿主全量日志 → `problems == []`；预检 6 条行 0 问题 |
 
 ### 3.5 全量门禁
 
 | 运行 | 阶段 | 结论 | 读数 |
 | --- | --- | --- | --- |
-| 分支 `w/host-diagnostics`（`.ci/p4-2-final3`，收尾修正后） | `env` / `test` / `doc` | **全 PASS** | 1812ms / 237524ms / 179ms；**39 套件 / 980 用例** |
-| 分支首轮（`.ci/p4-2-final2`，收尾修正前） | `env` / `test` / `doc` | **全 PASS** | 1889ms / 254822ms / 314ms；39 套件 / 978 用例 |
-| `main`（首次合并 `--no-ff` 后，`.ci/p4-2-main`） | `env` / `test` / `doc` | **全 PASS** | 3301ms / 254797ms / 456ms；39 套件 / 978 用例 |
-| 各轮 `p13-host-injection` | `test` | PASS | 首轮 `36/36` → 收尾后 `38/38`（`exit=0 fail=0`） |
+| 分支 `w/host-diagnostics`（`.ci/p4-2-final4`，去噪后，冻结点） | `env` / `test` / `doc` | **全 PASS** | 1290ms / 213534ms / 161ms；**39 套件 / 981 用例** |
+| `main`（`--no-ff` 合并后，`.ci/p4-2-main-final`，冻结点） | `env` / `test` / `doc` | **全 PASS** | 2566ms / 238333ms / 242ms；**39 套件 / 981 用例** |
+| 分支中途轮次（`.ci/p4-2-final3` / `.ci/p4-2-main2` 等） | `env` / `test` / `doc` | PASS | 39 套件 / 978→980 用例（数字随用例增加而变） |
+| 各轮 `p13-host-injection` | `test` | PASS | `exit=0 fail=0`：`36/36` → `38/38` → **`39/39`** |
 | `env` 阶段三项配置自检 | `scan` / `sync` / `check(good fixture)` | **全 PASS** | 见 `.ci/*/ci.log` 的 `config ...: PASS` 行 |
 
 > 注：`node scripts/config/check.mjs`（**不带夹具**）在开发机上会因宿主会话里的 `TEAM_HUB_PORT=3080`
 > 报 `hub_upstream_port_mismatch` —— 这是**按设计**的机器相关结果，门禁只认带 `--isolated-env` 的夹具检查
 > （`run-ci` 的既有做法，本轮未改）。
 
+> 纪律记录（诚实登记）：`.ci/p4-2-main2` 那一轮**不作为证据**——它运行期间我在同一棵树上改了
+> 测试文件（该轮读数已显示 39 例，即吃到了改动中的文件）。此后改为「先冻结分支→跑门禁→再合并」，
+> 上表两行均为冻结点读数。
+
 ### 3.6 与基线的差异（诚实登记）
 
-- `p13-host-injection`：**9 → 14 例**，并新增同组纯函数文件 **24 例** → 套件组 **38 例**；
+- `p13-host-injection`：**9 → 14 例**，并新增同组纯函数文件 **25 例** → 套件组 **39 例**；
 - 其余套件读数未变（`plugins` 185、`whiteboard` 158、`config` 36、`e2e-browser` 7 …）；
 - **成本**：主套件由约 10s 升到约 31s（两次真实宿主启动用于负向场景）。
   取舍：负向验证是这层的唯一护栏（诊断最容易「写得漂亮但从没跑过」），20s 换「诊断被真实复现覆盖」值得；

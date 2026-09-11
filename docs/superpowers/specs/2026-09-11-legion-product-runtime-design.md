@@ -41,6 +41,28 @@ Legion 当前已经具备 Workbench 指挥台、team-hub 权威数据源、数�
 
 team-hub 和 Workbench 已可以作为独立进程运行；缺少 DSH 时，用户仍可访问界面和数据，但无法完成自动模型执行。因此本方案不重写 DSH，而是把它从“开发宿主”转化为“随产品分发的内部执行引擎”。
 
+### 2.1 真实重构成本
+
+DSH API 的直接调用点数量有限，当前 `plugins/src/index.ts` 中五类宿主调用合计 16 处：`ctx.subagents` 6 处、`ctx.agentDefaultModel` 4 处、`ctx.plugin` 2 处、`ctx.effect` 2 处、`ctx.setInterval` 2 处。这说明 Runtime Contract 能够建立，但不代表编排提取成本很低。
+
+当前 `plugins/src/index.ts` 和 `team-hub/server.mjs` 都是超过 20 万字节、数千行的单文件。阶段 3 的任务扫描、流水线、workspace、验收和交接提取属于高风险外科式重构；team-hub 增加运行、上下文、用量等数据模型时也必须先建立模块边界。实施计划必须按小切片迁移，每个切片独立对拍和回归，不允许一次性重写两个大文件。
+
+### 2.2 与既有设计和 DSH 原生能力对齐
+
+本方案复用并扩展以下既有设计与实现：
+
+| 既有能力 | 当前事实 | Product Runtime 的处理 |
+|---|---|---|
+| F-01 可恢复事件流 | audit 全局单调 `seq`、SSE `Last-Event-ID`、`sinceSeq`、scope 过滤和客户端持久游标已经存在 | 保持 `/api/events` 为唯一公开业务实时流；运行明细不建立第二条公开事件流 |
+| F-02 权限治理 | `permission-engine.mjs`、权限规则、审批请求与 API 已存在，当前主要接入技能授权 | 扩展为 DSH 工具策略提供方，不重写五种决策模式 |
+| DSH `tools/pre-execute` | 原生异步 allow/deny/ask waterfall | 承担动态权限、人工审批和 team-hub 策略接入 |
+| DSH `ctx.tools.guard()` | 同步单调拒绝，后续 listener 不可撤销 | 承担静态 hard floor 和不可变安全禁令 |
+| DSH `ctx.approval` | 仅 `allowed-once` 放行；缺失、异常、取消或 `never` 均 fail closed | 由 Legion 注册 answerer，将审批请求路由到 team-hub 审批箱 |
+| DSH `ctx.permissionPresets` | 将 sandbox mode 与 approval policy 绑定为会话预设 | 作为 Employee/Run 权限档位的执行载体 |
+| DSH `ctx.sandbox` | 提供进程沙箱 seam 和 Windows ACL 等后端 | 启动时探测实际 backend 与 enforcement；未启用或能力不足时禁止受保护执行 |
+
+DSH 原生能力的存在不等于当前 Legion 已经受到保护。现有 Agent 执行插件尚未接入 Legion 权限引擎，Workbench 审批箱也尚未形成可用闭环；在新强制路径完成前，legacy 模式必须禁用高风险工具或使用经验证的受限 DSH 权限预设。
+
 ## 3. 产品目标
 
 ### 3.1 目标
@@ -96,7 +118,22 @@ Git 保存可审阅的代码、能力包和导出证据；不承担运行中业�
 
 ### 4.5 渐进迁移，不复制完整系统
 
-保留当前插件执行路径作为兼容基线，新路径通过 `orchestrationMode=legacy|product-runtime` 切换。模块按契约逐步提取并进行新旧对拍；达到退出条件后再删除旧路径。禁止长期双写两套任务状态。
+保留当前插件执行路径作为兼容基线，新路径通过 `orchestrationMode=legacy|product-runtime` 切换。该开关首版只允许按安装生效，后续如需按 space 生效，也必须由 team-hub 原子分配唯一调度器；禁止按任务自由切换或让两个调度器同时扫描同一空间。
+
+模块按契约逐步提取并进行新旧对拍；对拍只在隔离数据库、隔离工作区和非生产空间中执行，不对真实客户任务双跑。达到退出条件后再删除旧路径。禁止长期双写两套任务状态。
+
+### 4.6 术语
+
+| 术语 | 权威含义 |
+|---|---|
+| Task | team-hub 中可由一个岗位完成和验收的业务工作单元 |
+| Attempt | Task 的一次执行尝试；重试创建新 Attempt，历史不可覆盖 |
+| Run | Runtime 对一个 Attempt 的一次模型执行实例 |
+| Session | DSH 内部持久会话；可能承载一个或多个可继续 Run，不等同于 Task |
+| Lease | Orchestrator 对 Task 的限时执行所有权 |
+| Lease Epoch | 每次成功领取递增的 fencing token，用于拒绝旧 worker 写入 |
+| TeamPlan | 目标创建时冻结的团队、岗位、流水线和能力包组合快照 |
+| Context Snapshot | BuildingContext 完成时冻结、实际发送给 Runtime 的不可变输入 |
 
 ## 5. 目标组件图
 
@@ -108,7 +145,7 @@ Git 保存可审阅的代码、能力包和导出证据；不承担运行中业�
 │                Legion Product Services                   │
 │  Product API              Runtime Manager                │
 │  Orchestrator Core        Context Assembler              │
-│  Approval & Permission    Tool Broker                    │
+│  Approval & Permission    DSH Enforcement Bridge         │
 │  Audit & Usage            Pack Manager                   │
 ├──────────────────────────────────────────────────────────┤
 │                    Runtime Contract                      │
@@ -166,16 +203,28 @@ interface RuntimeAdapter {
 
 标准错误码至少包括：
 
-- `AUTH_FAILED`
-- `MODEL_UNAVAILABLE`
-- `RATE_LIMITED`
-- `CONTEXT_TOO_LARGE`
-- `TOOL_DENIED`
-- `TIMEOUT`
-- `CANCELLED`
-- `RUNTIME_CRASHED`
-- `OUTCOME_UNKNOWN`
-- `INVALID_RESULT`
+- `RUNTIME_UNAVAILABLE`：Runtime 未启动或健康检查失败；可在恢复健康后重试。
+- `RUNTIME_NOT_READY`：Runtime 正在启动、升级或降级；暂不认领新任务。
+- `UNSUPPORTED_CAPABILITY`：当前产品与 DSH 组合不提供请求能力；不可自动重试。
+- `SECRET_UNAVAILABLE`：系统凭证不存在、不可解密或运行账户不匹配；修复凭证后重试。
+- `AUTH_FAILED`：供应商拒绝已有凭证；用户验证或轮换凭证后重试。
+- `MODEL_UNAVAILABLE`：模型不存在或暂不可用；按显式 fallback 策略处理。
+- `RATE_LIMITED`：供应商限流；按服务端建议或指数退避重试。
+- `BUDGET_EXCEEDED`：预算预留失败或运行达到硬上限；停止运行并等待用户处理。
+- `CONTEXT_TOO_LARGE`：在既定裁剪策略后仍超出模型限制；不可盲目重试。
+- `TOOL_DENIED`：策略或人工决定拒绝；不可自动绕过或换工具重试同一意图。
+- `TIMEOUT`：运行达到期限；只有确认无未知外部副作用时才可重试。
+- `CANCELLED`：取消胜出；终态幂等。
+- `RUNTIME_CRASHED`：执行器异常退出；进入恢复判断。
+- `OUTCOME_UNKNOWN`：无法确认外部副作用或最终结果；只允许人工处置或可靠查询。
+- `INVALID_RESULT`：最终输出不符合 Schema；可按任务策略创建新 Attempt。
+- `SCHEMA_MIGRATION_FAILED`：产品数据迁移失败；停止启动并进入升级恢复。
+
+正式实现为每个标准码维护“默认可重试性、重试前置条件、用户文案和审计等级”的版本化映射；Adapter 不得自行把未知错误归类为成功或普通可重试错误。
+
+`cancel(runId)` 是幂等操作。若取消与完成并发，以 team-hub 首个成功提交的终态为准；Adapter 返回的迟到事件只能作为诊断记录，不能改写已提交终态。`execute()` 的事件流必须以一个终态事件结束；终态事件携带或引用 `RunResult`。`recover()` 返回恢复判断，不直接修改 Task 状态，由 Orchestrator 依据当前 lease epoch 和 attempt 状态提交迁移。
+
+Runtime Contract 首版使用精确主版本匹配：产品清单声明唯一支持的 `runtimeContractVersion`，Runtime Manager 决定是否兼容。次版本能力通过 `RuntimeCapabilities` 探测；任何必需能力缺失都返回 `UNSUPPORTED_CAPABILITY`，不得静默降级。
 
 Runtime Contract 必须独立于 Cordis 和 DSH 类型，能够用内存 Fake Adapter 完成全部 Orchestrator 测试。
 
@@ -205,6 +254,19 @@ Runtime Manager 管理 Adapter 的注册、健康、执行和兼容性：
 - 将 Runtime 健康状态转换成用户可理解的产品状态。
 - 不保存任务业务状态，只保存执行器注册和健康快照。
 
+Runtime 健康状态与 Orchestrator 行为固定如下：
+
+| Runtime 状态 | 产品状态 | Orchestrator 行为 |
+|---|---|---|
+| `starting` | 正在启动执行引擎 | 不认领新任务；已有 lease 不延长为无限期 |
+| `ready` | 执行引擎可用 | 正常认领和执行 |
+| `degraded` | 部分能力不可用 | 只认领其必需能力全部满足的任务 |
+| `unavailable` | 执行引擎不可用 | 停止认领；在途 Attempt 进入恢复判断 |
+| `incompatible` | 组件版本不兼容 | 禁止自动执行，提示修复或回滚 |
+| `upgrading` | 正在升级 | 停止认领，等待在途运行安全收敛 |
+
+只读 Workbench 和 team-hub 在 Runtime 不可用时继续开放，用户仍可查看、导出和处理任务，但不能伪装为数字员工在线。
+
 ### 6.4 Orchestrator Core
 
 Orchestrator Core 从当前 `plugins/src/index.ts` 中提取模型无关的团队调度语义：
@@ -228,6 +290,7 @@ Queued
   → PreparingWorkspace
   → BuildingContext
   → Running
+  ↔ AwaitingApproval
   → Validating
   → AwaitingApproval | HandingOff
   → Completed
@@ -242,11 +305,30 @@ Queued
 状态迁移要求：
 
 - 在执行下一步副作用前持久化意图或 attempt。
-- lease 有所有者、租期和 heartbeat。
+- lease 有所有者、租期、heartbeat 和单调递增的 `leaseEpoch`。
+- 领取使用 team-hub 数据库事务和 team-hub 时钟；worker 不得自报租约权威时间。
+- attempt、run、工具和任务结果的所有写入必须携带领取时的 `leaseEpoch`；team-hub 拒绝过期 epoch。
+- SQLite 使用 WAL、`busy_timeout` 和 `BEGIN IMMEDIATE` 或等价条件更新保证领取原子性；忙等待耗尽后保留任务可重试状态。
 - 重试创建新 attempt，不覆盖历史 attempt。
 - 外部写操作使用幂等键。
 - 无法确认外部结果时进入 `UnknownOutcome`，不得伪装成功或自动重复写入。
 - 状态迁移、恢复和人工处置均写入 audit。
+
+`AwaitingApproval` 是 Attempt/Run 级暂停态，可以由运行中的工具请求进入并在批准后回到 `Running`，也可以由验收后的交付审批进入并在批准后进入 `HandingOff` 或 `Completed`。它不直接替换 team-hub 的用户任务状态。
+
+新旧状态映射：
+
+| Product Runtime 状态 | team-hub Task 状态 | 说明 |
+|---|---|---|
+| `Queued` | `todo` | 尚未领取 |
+| `Leased` / `PreparingWorkspace` / `BuildingContext` / `Running` | `in_progress` | 员工持有有效 lease |
+| 工具级 `AwaitingApproval` | `in_progress` | Run 暂停，Task 仍由该 Attempt 持有 |
+| 交付级 `AwaitingApproval` / `Validating` | `in_review` | 等待验收或人工批准 |
+| `HandingOff` | `in_progress` | 当前 Task 收口并原子创建/释放下一岗位任务 |
+| `RetryableFailure` | `todo` 或 `blocked` | 有自动重试额度时回到 todo，否则 blocked |
+| `UnknownOutcome` / `DeadLetter` | `blocked` | 必须人工处置 |
+| `Cancelled` | `canceled` | 使用现有取消语义；若库内命名不同由兼容映射处理 |
+| `Completed` | `done` | 已通过所需闸门 |
 
 ### 6.5 Context Assembler
 
@@ -275,6 +357,12 @@ Compiled TeamPlan 快照
 - 发送给 Runtime 的最终文本或结构化段落。
 - 关联的目标、任务、员工和团队方案。
 
+快照在 `BuildingContext` 完成、Attempt 进入 `Running` 之前冻结，之后不可修改。运行中到达的新评论、目标上下文更新或知识变更只进入下一次 Attempt；首版不向正在运行的模型热注入。快照使用统一 canonical JSON 规则序列化后计算哈希，规则与审批哈希共享基础库，但两者使用不同的 Schema 和 domain separator，防止跨对象复用哈希。
+
+仓库文件、网页、附件、上游产物和用户输入一律标记为不可信内容。来源文本可以影响分析结论，但永远不能授予权限、修改 EmployeeManifest、改变审批策略或扩大工具范围。Prompt injection 的主要安全边界是 DSH ToolGuard、sandbox 和审批，而不是仅依靠提示词提醒。
+
+token 预算由选定 ModelProfile 的 tokenizer/限制决定；无法获得精确 tokenizer 时使用明确标记的保守估算器。Assembler 按固定优先级裁剪并记录过程，裁剪后仍超限才返回 `CONTEXT_TOO_LARGE`。不同模型的快照可以引用相同来源，但最终组合内容、token 估算和哈希分别冻结。
+
 首版检索以 scope、标签、类型、显式引用和版本为主。向量检索可以作为后续 Context Source 接入，但不得改变快照和来源追踪协议。
 
 ### 6.6 Model Configuration
@@ -298,7 +386,6 @@ EmployeeModelBinding
 - primaryProfile
 - fallbackProfiles
 - perRunBudget
-- dailyBudget
 ```
 
 支持：
@@ -310,9 +397,13 @@ EmployeeModelBinding
 - 配置导入导出；导出不包含密钥。
 - 将产品配置转换为 DSH 所需配置，但不让用户直接编辑 DSH profile。
 
+商业 Alpha 只承诺单次运行预算：运行前原子预留最大预算，运行中采集实际 usage，达到硬上限时请求取消，终态后按实际使用结算并释放余额。若取消后结果未知，预留保持锁定直到恢复或人工处置。每日并发总预算、跨模型价格优化和组织级账本延后到真实使用验证后实现。
+
+费用记录必须冻结 `priceTableVersion`、币种、模型计价单位、生效时间和运行时估算结果。后续价格表更新不得重算历史 `usage_records`。预算超限默认取消当前 Run 并将 Attempt 标为 `BUDGET_EXCEEDED`，不得在未获用户批准时自动切换到更昂贵模型。
+
 ### 6.7 Secret Store
 
-首版 Windows 使用 Windows Credential Manager 或 DPAPI 保护密钥：
+商业 Alpha 固定为 per-user 安装，Launcher、team-hub、Workbench 和 DSH Runtime 以完成安装和配置的同一 Windows 用户身份运行，不安装为 LocalSystem 或其他服务账户。首版使用 Windows Credential Manager 或当前用户作用域 DPAPI 保护密钥：
 
 - team-hub 只保存 `secretRef`，不保存明文。
 - Runtime 在获得授权后按需解析密钥。
@@ -321,17 +412,44 @@ EmployeeModelBinding
 - 新增、更新、轮换和删除密钥写入不含密文的审计记录。
 - 无法访问或解密密钥时 fail closed，并显示可操作错误。
 
-### 6.8 Tool Broker 与权限审批
+密钥轮换只影响轮换后创建的 Run；在途 Run 保持其启动时解析到进程内的短生命周期凭证，不在中途替换。未来若引入 per-machine 安装或 Windows Service，必须先增加独立服务身份、ACL、凭证迁移和恢复设计，不能直接复用 per-user `secretRef`。
 
-工具请求统一经过：
+`SECRET_UNAVAILABLE` 表示本地凭证库或账户问题，`AUTH_FAILED` 表示供应商拒绝已成功解析的凭证，两者不得混为一类。
+
+### 6.8 DSH 工具强制面与 Legion 权限策略
+
+工具执行不在 Legion 外围重造一条平行管线。Legion 负责控制面策略和审批事实，DSH 负责 Agent Loop 内不可绕过的执行强制：
 
 ```text
-Agent → Tool Request → Permission Evaluation
-      → Allow / Ask / Deny
-      → Tool Execution → Result → Audit
+Legion/team-hub 控制面
+  EmployeeManifest + TeamPlan + UserPolicy + TaskContext
+  → 生成 Run 权限档位、静态 hard floor 和动态策略
+  → DshRuntimeAdapter 安装到目标 Agent/Session
+
+DSH 执行面
+  Agent Tool Call
+  → tools/pre-execute           动态 allow / deny / ask；静态禁令提前拒绝以避免无效询问
+  → ctx.approval                仅 allowed-once 放行
+  → ctx.tools.guard()           静态、同步、最终单调拒绝
+  → ctx.sandbox                 文件/进程强制执行
+  → Tool Execution
+  → tools/result                不可变结果观察与审计投影
 ```
 
-权限由 `EmployeeManifest + TeamPlan + UserPolicy + TaskContext` 共同决定，至少覆盖：
+固定映射：
+
+| Legion 语义 | DSH 强制点 | 约束 |
+|---|---|---|
+| hard floor、禁止工具、禁止越界路径 | `tools/pre-execute` 提前拒绝 + `ctx.tools.guard()` 最终复核 | Guard 只做同步、确定性拒绝；后续流程不可撤销 |
+| allow-by-policy、allow-for-task、动态 deny | `tools/pre-execute` | 调用 F-02 纯策略；team-hub 不可达或策略异常时 deny |
+| ask、allow-once | `tools/pre-execute` → `ctx.approval` | Legion answerer 把请求写入审批箱；只有 `allowed-once` 执行 |
+| 无人值守禁止询问 | `approval/policy=never` | DSH 在 answerer waterfall 前拒绝 |
+| 会话权限档位 | `ctx.permissionPresets` | 绑定 sandbox mode 与 approval policy，并在 Run 快照中冻结 |
+| 文件和子进程约束 | `ctx.sandbox` 及 sandbox-aware executor | 必须探测实际后端和 enforcement；仅有配置名不算生效 |
+
+现有 `team-hub/permission-engine.mjs` 保持为策略核心并扩展 canonical operation 与审批哈希，不搬出 team-hub、不重复定义 F-02 的五种模式。DshRuntimeAdapter 内新增 DSH 侧策略插件和 approval answerer。
+
+权限至少覆盖：
 
 - 文件读写范围。
 - Git 和 worktree 操作。
@@ -341,7 +459,11 @@ Agent → Tool Request → Permission Evaluation
 - 外部 API 读取与写入。
 - 发布、付款、删除等高风险动作。
 
-审批绑定规范化操作内容哈希；任一关键字段变化都会使审批失效。无人值守模式下，要求人工审批的操作默认拒绝或保持等待，不自动降级为允许。
+审批绑定不可变 `ToolExecution` 参数的 canonical operation 哈希；任一授权关键字段变化都会使审批失效。DSH `tools/pre-execute` 不允许改写工具参数，因为审计、UI 和实际执行必须看到相同输入。Legion 如需改变参数，只能拒绝当前调用并要求模型或工具定义产生一个新的 Tool Call，不能在审批后静默改写。
+
+canonical operation 明确定义：Schema 版本、domain separator、固定键集合与顺序、Unicode NFC、路径绝对化与分隔符、Windows 大小写规则、数字和空值表达。授权主体包含 scope、actor、action、target、taskId、toolName、callId 和不可变工具参数；attemptId、UI 文案、时间戳等观察 metadata 不参与授权哈希。原始输入和 canonical 输入同时保存，执行只使用与哈希一致的不可变参数。
+
+无人值守模式下，要求人工审批的操作默认拒绝或保持等待，不自动降级为允许。legacy 路径在完成 DSH 强制面接线前禁止高风险工具；“未批准高风险写操作为零”只在该门禁满足后成为发布指标。
 
 ### 6.9 Product Launcher
 
@@ -401,6 +523,30 @@ LogDir/       可轮转日志
 
 Workbench 提供从“目标 → 任务 → 员工执行 → 工具 → 证据 → 差异 → 审批 → 交付”的追踪视图。
 
+除单次运行审计外，Product Runtime 还必须提供最小系统指标：队列深度、最老待办年龄、活跃 lease、租约过期率、Attempt 重试率、Dead Letter 数量、Runtime 可用率、模型错误率和升级结果。商业 Alpha 默认仅本地展示；远程心跳必须显式选择加入、只发送脱敏聚合状态，并允许用户随时关闭。
+
+### 6.12 Pack Manager
+
+Pack Manager 首版只负责可验证安装和 TeamPlan 编译，不负责在线市场、付费分发或远程代码执行。能力包包含：
+
+- `PackManifest`：包 ID、类型、语义版本、协议版本、依赖、兼容条件和内容哈希。
+- 只读内容：EmployeeManifest、流水线模板、提示词、Schema、规则、测试样本和文档。
+- 明确声明的 Runtime 能力、工具、权限和数据依赖。
+- 安装、启用、停用和升级记录。
+
+安装时验证签名/来源、内容哈希、`packProtocolVersion`、依赖和产品兼容性；解析成功后生成不可变 `CompiledTeamPlan`。运行中的目标始终使用创建时快照，能力包升级只影响之后创建的目标。能力包不得携带密钥，不得绕过 ToolGuard、权限预设和审批，也不得把 Git 文件变成运行状态事实源。
+
+软件交付团队作为内置首包验证协议；跨境电商团队在商业 Alpha 底座通过后接入。在线能力包市场和第三方包信任模型另行立项。
+
+### 6.13 Product API 兼容性
+
+Workbench 与 team-hub 也是长期边界。商业 Alpha 为同一安装包内精确版本组合，暂不强制把全部现有路由迁移到 `/api/v1`；team-hub 的 `/api/config` 必须返回 `productApiVersion`、`schemaVersion` 和 capabilities，Workbench 启动时进行精确主版本校验。
+
+- 主版本不匹配：进入只读不兼容页，不发送写请求。
+- 主版本匹配但可选 capability 缺失：隐藏或禁用对应功能并说明原因。
+- 写 API 的请求/响应 Schema 进入契约测试，禁止只依靠 TypeScript 前端类型。
+- 出现独立客户端、公开 SDK 或不同步部署需求时，再把新 API 放入显式版本前缀；不为尚未存在的外部消费者一次性迁移全部旧路由。
+
 ## 7. 数据模型增量
 
 在 team-hub 现有 SQLite 基础上增量增加或规范化以下实体：
@@ -414,7 +560,7 @@ Workbench 提供从“目标 → 任务 → 员工执行 → 工具 → 证据 �
 | `context_snapshots` | 执行上下文、来源、预算和内容哈希 |
 | `task_attempts` | 每次任务执行尝试、状态、lease 和恢复信息 |
 | `agent_runs` | Runtime run、模型、时间、结果和错误 |
-| `run_events` | 规范化执行事件；大体量 delta 可按保留策略压缩 |
+| `agent_run_events` | Run 内部详细事件；不是第二条公开业务流，大体量 delta 可按保留策略压缩 |
 | `tool_calls` | 工具请求、权限决定、幂等键和结果 |
 | `usage_records` | token、费用估算和耗时 |
 | `artifacts` | 产物位置、类型、内容哈希和来源 |
@@ -422,6 +568,15 @@ Workbench 提供从“目标 → 任务 → 员工执行 → 工具 → 证据 �
 | `schema_migrations` | 数据库迁移版本和执行结果 |
 
 已有权限、审批和 audit 表优先扩展复用；只有现有语义无法表达时才新增表。所有迁移必须幂等，旧数据库升级前自动备份。
+
+`agent_run_events` 与 audit 的边界固定如下：
+
+- `agent_run_events` 保存模型 delta、工具阶段和 Adapter 诊断等 Run 内部明细，以 `runId + seq` 排序。
+- audit 保存 Task/Attempt/审批/交付等产品状态变化及必要的 `runId`、事件范围引用。
+- `/api/events` 继续复用 audit，作为 Workbench 唯一公开实时业务流，并沿用 F-01 的 scope 与游标语义。
+- Workbench 需要查看 Run 明细时通过按 `runId` 分页的查询 API 获取，不订阅第二条 SSE。
+
+team-hub 在增加上述实体前，先把数据库初始化、运行仓储、权限仓储、审计投影和 HTTP 路由从 `server.mjs` 提取为边界清晰的模块；提取必须保持现有 API 和数据库兼容，不与新表一次性混改。
 
 ## 8. 关键执行流程
 
@@ -450,20 +605,32 @@ heartbeat 超时
 → Runtime Manager 查询 recover
 → 可确认未执行副作用：创建新 attempt 重试
 → 外部结果未知：进入人工处置
-→ 可恢复会话：继续同一 run 并追加审计
+→ 已验证可恢复且无 in-flight 未知工具：继续同一 run 并追加审计
 ```
+
+“继续同一 Run”不是首版预设承诺。阶段 2 必须用 DSH continuable session 做验证性任务，证明持久化身份、权限继承、事件续接、取消和工具边界均满足契约；验证失败则 `recover()` 只返回“新 Attempt 重试”或 `UnknownOutcome`。崩溃瞬间存在 in-flight 外部写工具时，无论会话是否可继续，都必须先查询外部结果或进入人工处置。
 
 ### 8.3 高风险工具调用
 
 ```text
-Runtime 发出 ToolRequest
-→ Tool Broker 规范化操作并计算哈希
+DSH 产生不可变 ToolExecution
+→ ToolGuard 执行静态 hard floor
+→ pre-execute 查询 F-02 策略并计算 canonical operation 哈希
 → Permission Engine 判定 ask
-→ task 进入 AwaitingApproval
-→ 用户批准同一哈希
-→ 执行工具并记录幂等键
-→ 返回结果给 Runtime
+→ Run 进入 AwaitingApproval，DSH approval answerer 等待 team-hub
+→ 用户批准同一哈希并返回 allowed-once
+→ DSH 执行原始不可变参数并记录幂等键
+→ tools/result 投影结果和审计
+→ Run 回到 Running
 ```
+
+Legion 生成外部写操作幂等键，基础公式为：
+
+```text
+SHA-256("legion-tool-effect-v1" || workspaceId || taskId || attemptId || callId || canonicalOperationHash)
+```
+
+同一 Attempt 的同一 Call 重放得到相同键；新 Attempt 得到新键。若目标外部系统不支持幂等键或可靠结果查询，发生超时、断连或崩溃后不得自动重试该写操作，只能进入 `UnknownOutcome`。
 
 ## 9. DSH 版本治理与产品升级
 
@@ -526,6 +693,10 @@ DSH 新版本必须通过：
 
 数据库迁移优先采用向前兼容和 expand/contract 策略。若新版本已写入旧版本无法理解的数据，禁止仅回滚二进制；必须使用经过验证的数据库恢复或向前修复流程。
 
+商业 Alpha 支持从当前 stable 的 N-1 版本升级到 N，不承诺跨多个主版本直接升级；更旧版本先按逐级升级或离线迁移处理。升级前备份至少保留最近 3 个成功快照和 30 天，取更大者；每个 stable 候选版本必须在干净机器和真实备份副本上完成自动恢复演练，产品进入稳定运营后至少每季度抽样执行一次恢复演练。
+
+Windows 安装采用 per-user 模式并处理文件占用、长路径、Defender 扫描延迟和 Node 子进程树退出。程序切换使用同一卷内的版本目录和原子活动指针/重命名；SQLite、日志和工作区不放入被替换的 InstallDir。无法释放文件句柄时升级应安全中止并保留旧版本，而不是部分覆盖。
+
 ## 10. 安全与商业发布要求
 
 - 默认只监听 loopback；远程访问必须启用认证和明确网络配置。
@@ -565,6 +736,10 @@ legion/
 ├── packs/
 │   └── software-delivery/
 ├── team-hub/
+│   ├── repositories/     # 数据库初始化与领域仓储（渐进提取）
+│   ├── runtime/          # Attempt、Run、lease 与恢复 API
+│   ├── permissions/      # F-02 策略、审批与 canonical operation
+│   └── events/           # audit 与 F-01 SSE 投影
 ├── workbench/
 ├── plugins/          # 迁移期保留旧执行路径
 └── services-plugin/  # 由 Product Launcher 逐步接管
@@ -590,6 +765,8 @@ legion/
 - `PRT-005`：保存旧路径的任务状态、执行事件、产物和审计证据。
 - `PRT-006`：验证当前 team-hub 数据备份与恢复。
 - `PRT-007`：建立旧系统功能、HTTP、数据库和执行行为基线。
+- `PRT-008`：冻结 Task、Attempt、Run、Session、Lease、TeamPlan 和 Context Snapshot 术语。
+- `PRT-009`：记录黄金流程的成功率、人工介入、token、费用估算、端到端耗时和峰值资源基线。
 
 完成标准：在受控环境稳定复现一次端到端软件交付，并能对后续新路径做等价比较。
 
@@ -603,6 +780,7 @@ legion/
 - `PRT-106`：建立 Runtime Contract 契约测试。
 - `PRT-107`：实现内存 FakeRuntimeAdapter。
 - `PRT-108`：增加禁止新增直接 DSH 调用的静态边界检查。
+- `PRT-109`：定义 Runtime Contract 精确主版本校验和 capabilities 协商。
 
 完成标准：不启动 DSH 即可测试正常、失败、取消、超时和恢复编排。
 
@@ -618,8 +796,22 @@ legion/
 - `PRT-208`：实现日志、异常和事件脱敏。
 - `PRT-209`：建立 DSH 版本与能力探测。
 - `PRT-210`：建立旧调用与 Adapter 路径对拍测试。
+- `PRT-211`：验证 DSH continuable session 的身份、权限继承、事件续接、取消和恢复边界。
+- `PRT-212`：接入最小 DSH 强制面：ToolGuard hard floor、pre-execute fail-closed 和 approval answerer。
+- `PRT-213`：探测 DSH sandbox backend、sandbox-aware executor 和实际 enforcement，不满足要求时禁止执行。
 
 完成标准：同一任务通过两条路径得到等价任务状态、结构化结果和产物，且敏感信息不出现在输出中。
+
+### 阶段 2.5：商业薄垂直切片
+
+- `PRT-251`：实现只管理必需进程的最小 Product Launcher。
+- `PRT-252`：复用现有 Workbench 模型配置，增加产品化校验和用户可见错误。
+- `PRT-253`：只迁移单员工、无自动交接的黄金任务到 RuntimeAdapter。
+- `PRT-254`：完成 per-user 数据目录、Secret Store 最小闭环和一键启动。
+- `PRT-255`：在隔离测试空间完成安装、运行、取消、重启和诊断验证。
+- `PRT-256`：让内部设计伙伴独立完成一次真实但低风险的软件任务。
+
+完成标准：不依赖终端和 DSH 配置知识，设计伙伴可以安装产品、配置 BYOK、启动一个受限数字员工并查看结果。未达到该标准前，不启动阶段 3 的大规模编排提取。
 
 ### 阶段 3：Orchestrator Core
 
@@ -635,10 +827,14 @@ legion/
 - `PRT-310`：实现恢复扫描和人工处置。
 - `PRT-311`：实现外部副作用幂等与 Unknown Outcome。
 - `PRT-312`：覆盖状态迁移、并发、崩溃和恢复测试。
+- `PRT-313`：为 task lease 增加 team-hub 权威时间、`leaseEpoch` 和过期 epoch 拒写。
+- `PRT-314`：验证 WAL、`busy_timeout` 和原子领取事务的多 worker 并发语义。
+- `PRT-315`：按仓储、状态机、workspace、验收和交接边界拆分 `plugins/src/index.ts`，每次只迁移一个切片。
+- `PRT-316`：先提取 team-hub 数据库初始化、运行仓储、审计投影和路由模块，再新增运行实体。
 
 完成标准：强制终止 worker 或 DSH 后，重启不会丢任务、伪装成功或重复执行已确认的外部写操作。
 
-### 阶段 4：上下文与能力包边界
+### 阶段 4：上下文边界
 
 - `PRT-401`：定义 Context Source 和 RunContextSnapshot。
 - `PRT-402`：接入 TeamPlan 和 EmployeeManifest。
@@ -650,6 +846,9 @@ legion/
 - `PRT-408`：实现脱敏、来源清单和内容哈希。
 - `PRT-409`：持久化快照并支持查看和导出。
 - `PRT-410`：建立确定性、越权、超限和回放测试。
+- `PRT-411`：定义冻结时点、运行中更新进入下一 Attempt 的规则。
+- `PRT-412`：标记不可信来源并验证其不能扩大权限或改变审批策略。
+- `PRT-413`：实现 canonical JSON、模型相关 tokenizer 和保守估算降级。
 
 完成标准：任一员工运行都能还原其实际输入、来源版本、过滤和裁剪原因。
 
@@ -664,13 +863,15 @@ legion/
 - `PRT-507`：实现 Workbench 模型设置页面。
 - `PRT-508`：实现配置导入导出但排除密钥。
 - `PRT-509`：覆盖密钥读取、轮换、删除和泄漏测试。
+- `PRT-510`：实现单次运行预算原子预留、结算、取消和 Unknown Outcome 锁定。
+- `PRT-511`：冻结价格表版本、币种、计价单位和生效时间。
 
 完成标准：用户只在 Legion 中完成 BYOK 配置，明文密钥不进入 team-hub 业务数据、日志和诊断包。
 
 ### 阶段 6：工具、权限和审批
 
 - `PRT-601`：定义工具能力描述和风险等级。
-- `PRT-602`：实现 Tool Broker 与统一 ToolRequest。
+- `PRT-602`：实现 DSH Enforcement Bridge 与统一 ToolRequest 投影。
 - `PRT-603`：接入 EmployeeManifest 工具白名单。
 - `PRT-604`：实现文件和工作目录范围限制。
 - `PRT-605`：实现命令、网络和 MCP 权限控制。
@@ -679,6 +880,10 @@ legion/
 - `PRT-608`：审批绑定规范化操作哈希。
 - `PRT-609`：实现字段变化后审批失效。
 - `PRT-610`：持久化工具调用、决定、结果和幂等键。
+- `PRT-611`：扩展 F-02 canonical operation，替换键序敏感的 `JSON.stringify` 判等。
+- `PRT-612`：实现 Legion 权限语义到 ToolGuard、pre-execute、approval、permission preset 和 sandbox 的固定映射。
+- `PRT-613`：保证审批、UI、审计与执行看到同一不可变工具参数，禁止 pre-execute 改写。
+- `PRT-614`：在新强制面完成前禁用 legacy 高风险工具，并建立发布门禁。
 
 完成标准：未批准高风险写操作为零；改变已批准操作的任一关键字段后无法继续执行。
 
@@ -694,6 +899,9 @@ legion/
 - `PRT-708`：实现系统托盘和打开 Workbench。
 - `PRT-709`：实现日志轮转和磁盘保护。
 - `PRT-710`：实现脱敏诊断包导出。
+- `PRT-711`：实现 Runtime 健康状态到产品状态和 Orchestrator 行为的映射。
+- `PRT-712`：本地展示队列、lease、重试、死信和 Runtime 可用率指标。
+- `PRT-713`：实现默认关闭、显式选择加入的脱敏健康心跳。
 
 完成标准：干净 Windows 机器不打开终端即可完成安装后启动、模型配置、运行和停止。
 
@@ -710,6 +918,8 @@ legion/
 - `PRT-809`：实现安全回滚或向前修复。
 - `PRT-810`：实现 internal、canary、stable 通道。
 - `PRT-811`：实现升级审计、发布说明和用户通知。
+- `PRT-812`：实现 N-1 升级窗口、备份保留和定期恢复演练。
+- `PRT-813`：覆盖 Windows 文件占用、Defender 延迟、长路径和子进程树退出。
 
 完成标准：模拟下载损坏、迁移失败、DSH 启动失败和健康检查失败时，系统能恢复到已知兼容状态且业务数据不丢失。
 
@@ -728,20 +938,35 @@ legion/
 
 完成标准：商业 Alpha 安装、使用、升级、恢复、诊断和卸载流程均有可重复验收证据。
 
+### 阶段 10：能力包协议
+
+- `PRT-1001`：定义 PackManifest、类型、语义版本和协议版本。
+- `PRT-1002`：实现内容哈希、签名/来源、依赖和兼容性预检。
+- `PRT-1003`：实现安装、启用、停用和升级记录。
+- `PRT-1004`：实现不可变 CompiledTeamPlan 和运行中版本固定。
+- `PRT-1005`：验证能力包不能携带密钥、扩大权限或绕过 DSH 强制面。
+- `PRT-1006`：将软件交付团队整理为首个内置能力包。
+
+完成标准：更新能力包不会改变运行中目标；不兼容、缺依赖、哈希错误或越权包在创建目标前失败。
+
 ## 13. 里程碑与优先级
 
 | 里程碑 | 包含阶段 | 可交付结果 |
 |---|---|---|
 | M0 基线冻结 | 阶段 0 | 当前系统可重复验收和比较 |
 | M1 Runtime 边界 | 阶段 1～2 | DSH 被稳定接口隔离，新增代码不再直接依赖 DSH |
-| M2 可恢复编排 | 阶段 3～4 | 编排与上下文可测试、可回放、可恢复 |
+| M1.5 设计伙伴切片 | 阶段 2.5 | 一键启动单个受限员工完成真实低风险任务 |
+| M2 可恢复编排 | 阶段 3～4 | 多员工编排与上下文可测试、可回放、可恢复 |
 | M3 产品配置与安全 | 阶段 5～6 | 用户可安全配置模型并控制工具权限 |
-| M4 一键运行 | 阶段 7 | 客户无需开发环境和终端 |
+| M4 完整一键运行 | 阶段 7 | 客户无需开发环境和终端运行完整团队 |
 | M5 可控升级 | 阶段 8 | DSH 经内部验证后可灰度、可回滚推送 |
 | M6 商业 Alpha | 阶段 9 | 首批真实用户完成可信软件交付 |
-| M7 行业扩展 | 后续能力包计划 | 接入跨境电商数字团队 |
+| M7 能力包协议 | 阶段 10 | 软件交付团队成为版本化内置包 |
+| M8 行业扩展 | 后续独立计划 | 接入跨境电商数字团队 |
 
-第一实施批次锁定在阶段 0～2。其目的不是立即改变用户界面，而是先阻止耦合继续扩散，并建立后续产品化工作的安全边界。
+第一实施批次锁定在阶段 0～2，并立即接阶段 2.5 薄垂直切片。其目的既是阻止耦合继续扩散，也是在大规模重构前获得真实用户验证。
+
+Program 级停止条件：M1.5 评审时，如果设计伙伴仍不能在无开发协助的情况下完成“安装 → BYOK → 单员工任务 → 查看结果 → 重启恢复”，则暂停阶段 3～4，不继续投入多员工编排重构；项目收缩为 Launcher、模型配置、受限单员工、诊断和升级产品化，编排提取另行立项。只有 M1.5 达标且设计伙伴确认交付具有持续使用价值，才进入 M2。
 
 ## 14. 测试策略
 
@@ -752,6 +977,10 @@ legion/
 - 上下文确定性、预算、过滤、脱敏和哈希。
 - 权限决策、审批失效和无人值守 fail closed。
 - 配置 Schema、密钥引用和日志脱敏。
+- lease epoch、过期 worker 拒写、权威时钟和 SQLite 并发领取。
+- 取消幂等以及取消与完成竞态。
+- Product API 主版本、capabilities 和写 API Schema。
+- F-01 单一公开事件流与 F-02 决策模式回归。
 
 ### 14.2 新旧对拍
 
@@ -763,6 +992,7 @@ legion/
 - 文件产物和 Git diff。
 - 交接、审批和审计。
 - 错误分类与用户提示。
+- token、费用估算、端到端延迟和资源消耗相对基线的变化。
 
 模型输出允许文本差异，但状态语义、关键字段、权限行为和交付产物必须满足同一验收契约。
 
@@ -775,6 +1005,8 @@ legion/
 - SQLite busy、磁盘空间不足和日志写入失败。
 - Launcher 重复启动和端口占用。
 - 升级包损坏、迁移失败和新版本健康失败。
+- 旧 lease worker 恢复后尝试提交迟到结果。
+- in-flight 外部写工具发生断连且目标系统不支持幂等键。
 
 ### 14.4 安全测试
 
@@ -782,6 +1014,8 @@ legion/
 - 员工无法访问 Manifest 之外的路径、工具和网络能力。
 - 未批准或审批哈希失效的高风险操作无法执行。
 - 非回环访问未认证时被拒绝。
+- DSH sandbox 配置存在但实际 backend/enforcement 不可用时禁止执行。
+- 不可信 Context Source 不能改变权限档位、工具白名单和审批结果。
 
 ## 15. 商业 Alpha 完成标准
 
@@ -827,7 +1061,7 @@ legion/
 
 Legion 商业化不以脱离 DSH 为前置条件。首版采用“Legion 产品层 + Runtime Contract + DshRuntimeAdapter + 受控 DSH Runtime”的架构：
 
-- 优先建立边界、可靠性、配置、安全、安装和升级能力。
+- 优先建立边界和薄垂直产品切片，再扩展可靠编排、配置、安全、安装和升级能力。
 - 不自研完整模型 Agent Loop。
 - 不复制整个 Legion 或建立长期双轨产品。
 - DSH 升级由内部完成兼容性和黄金流程验证后，随产品版本灰度推送。

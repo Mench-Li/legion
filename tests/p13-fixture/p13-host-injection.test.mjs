@@ -21,13 +21,15 @@
  */
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import http from 'node:http'
 import {
-  requireDshCheckout, makeFixture, spawnHost, waitReady, waitLog, waitSseClosed,
-  req, sseCollect, freePort, sleep,
+  REPO, requireDshCheckout, makeFixture, spawnHost, waitReady, waitLog, waitSseClosed,
+  req, sseCollect, freePort, sleep, routeMissDetail, drainLogs,
 } from './host-fixture.mjs'
+import { diagnoseHostLogs, formatDiagnosis, preflightEntries } from './host-diagnostics.mjs'
 
 let HAS_DSH = true
 try { requireDshCheckout() } catch { HAS_DSH = false }
@@ -72,8 +74,13 @@ describeHost('P1-3 真实 DSH 宿主注入冒烟（legion 三插件）', () => {
   before(async () => {
     const port = await freePort()
     fx = makeFixture({ port, teamToken: TOKEN })
+    // P4-2：**启动之前**先预检组合行的入口产物。这正是 CI 现场「team-hub/lib 缺失」的形状：
+    // 以前只能等 60s 超时；现在直接点名「哪个条目 / 哪个入口 / 怎么构建」。
+    const pre = fx.preflight()
+    assert.deepEqual(pre.problems, [], '插件入口预检失败（启动前即可判定）：\n' + JSON.stringify(pre, undefined, 2))
     child = spawnHost(fx)
-    await waitReady(fx.base, { timeoutMs: 60000 })
+    // 传 child/rows：任何启动期失败都会变成点名到插件条目的诊断，而不是「host not ready within Nms」
+    await waitReady(fx.base, { timeoutMs: 60000, child, rows: fx.rows })
   }, { timeout: 90000 })
 
   after(async () => {
@@ -86,14 +93,15 @@ describeHost('P1-3 真实 DSH 宿主注入冒烟（legion 三插件）', () => {
   it('① 注入生命周期：三插件经真实 loader 组合 apply 成功，route prefix 各自挂载', async () => {
     // team-hub 宿主外壳 = v2 中枢（P1-1 合并后）：/team-hub 前缀由外壳挂到 v2 handle
     const th = await req(fx.base, 'GET', '/team-hub/api/config')
-    assert.equal(th.status, 200, JSON.stringify(th.data))
+    // P4-2：状态断言失败时不再只给一个数字，而是把「该路径属于哪个插件、宿主日志怎么说」一并给出
+    assert.equal(th.status, 200, routeMissDetail({ fx, child, res: th, path: '/team-hub/api/config', plugin: 'team-hub（宿主外壳）' }))
     assert.equal(th.data.auth, true) // teamToken 非空 → v2 auth 开启
     assert.ok(String(th.data.db).includes('p13-hub.db'), 'v2 config 应带 db 路径（隔离库）：' + JSON.stringify(th.data))
     assert.equal(th.data.port, fx.port) // 外壳把 webServer.port 传给 v2（宿主注入证据）
 
     // board-plugin 挂在 /scrum-board（自托管看板 API）
     const bp = await req(fx.base, 'GET', '/scrum-board/api/config')
-    assert.equal(bp.status, 200, JSON.stringify(bp.data))
+    assert.equal(bp.status, 200, routeMissDetail({ fx, child, res: bp, path: '/scrum-board/api/config', plugin: 'board-plugin' }))
 
     // scrum-worker 无 webServer；注入面（timer/agents/subagents/agentDefaultModel/agentPresets）
     // 全 resolved 才执行 apply → apply 内同步 writeDaemonStatus(0) 写 daemon.json
@@ -354,7 +362,22 @@ describeHost('P1-3 真实 DSH 宿主注入冒烟（legion 三插件）', () => {
     assert.ok(prov.data.checks.some((c) => c.code === 'pipeline-configured'), '预检应识别到流水线已配置')
   }, { timeout: 60000 })
 
-  it('⑦ 关闭清理：bounded dispose 结束 SSE、进程自然退出 exit 0', async () => {
+  it('⑦ P4-2 诊断对照：健康宿主的日志不产生任何「插件加载失败」误报', async () => {
+    // 反假阳性对照：诊断层是给失败现场用的，但它在**健康**日志上必须安静——
+    // 否则「诊断」会变成新的噪音源。这里用真实宿主的实际日志（stdout+stderr）。
+    const logText = child._p13logs.out + child._p13logs.err
+    const diag = diagnoseHostLogs({ logText, rows: fx.rows, repoRoot: REPO })
+    assert.deepEqual(diag.problems, [], '健康宿主不该被诊断出插件加载失败：' + JSON.stringify(diag.problems))
+    // 组合行真值来自 fixture 写的补丁层：三个 legion 插件条目都在其中（诊断据此定位插件名）
+    const names = fx.rows.map((r) => r.name)
+    for (const n of ['@dsh-external/dsh-team-hub', '@dsh-external/dsh-scrum-board', '@dsh-external/dsh-scrum-worker']) {
+      assert.ok(names.includes(n), `组合行里应有 ${n}，实际：${names.join(', ')}`)
+    }
+    const pre = fx.preflight()
+    assert.ok(pre.checked >= 3, '预检应至少覆盖三个 legion 插件条目，实际 ' + pre.checked)
+  })
+
+  it('⑧ 关闭清理：bounded dispose 结束 SSE、进程自然退出 exit 0', async () => {
     // 保持两条 SSE 连接（一条已消费增量、一条看板全量）；close promise 须在
     // shutdown 前注册（dispose 会立刻 end 连接，晚注册会错过 close 事件）
     const sse1 = liveSse(fx.base, '/team-hub/api/events')
@@ -381,4 +404,138 @@ describeHost('P1-3 真实 DSH 宿主注入冒烟（legion 三插件）', () => {
     ])
     assert.equal(code, 0, '宿主应优雅退出 exit 0（实际 code=' + code + '）；stderr：\n' + (child._p13logs.err || '').slice(-1500))
   }, { timeout: 40000 })
+})
+
+/**
+ * P4-2（候选 #9）**负向**验证：把两种真实的「插件条目导入失败」交给真实宿主复现，
+ * 断言诊断**快速**给出「哪个插件、哪个入口、什么错误、怎么修」，而不是等 45–60s 报「未就绪」。
+ *
+ * 为什么必须负向验证：诊断代码最容易变成「写得很漂亮但从没跑过」。两个场景各自独立夹具，
+ * 保证失败可归因（同宿主挂两个坏条目时，宿主会在第一处失败就退出，第二处的错误可能根本不出现）：
+ *   A) `file://…/broken-plugin.mjs`：模块在**导入期**抛错；
+ *   B) `@dsh-external/dsh-p13-missing`：package.json 的 main 指向不存在的 lib/index.js
+ *      —— **复现 CI 现场**（`team-hub/lib` 缺失时宿主只报「60s 未就绪」）。
+ */
+describeHost('P4-2 宿主插件导入失败：诊断可读性（负向 · 入口文件在导入期抛错）', () => {
+  let fx, child
+
+  before(async () => {
+    const port = await freePort()
+    fx = makeFixture({
+      port,
+      extraRows: [
+        "    - id: p13-broken-file\n      name: 'file:///" + join(REPO, 'tests', 'p13-fixture', 'broken-plugin.mjs').replace(/\\/g, '/') + "'",
+      ],
+    })
+    child = spawnHost(fx)
+    // 实测：导入期抛错**不阻止**宿主把树挂起来（/__p13/ready 一度 200），随后 audit 失败 exit 1。
+    // 因此这里等的是日志里那句装载器错误，而不是「未就绪」——这正是旧诊断看不到失败的原因。
+    const seen = await waitLog(child, 'failed to import loader entry', { timeoutMs: 30000 })
+    assert.ok(seen, '宿主日志里应出现装载器的条目导入失败文本；实际尾部：\n' + (child._p13logs.out + child._p13logs.err).slice(-1200))
+  }, { timeout: 60000 })
+
+  after(async () => {
+    if (child && child.exitCode === null) { try { child.kill() } catch { /* gone */ } }
+    if (fx) fx.cleanup()
+  }, { timeout: 15000 })
+
+  it('诊断点名坏条目：id + 入口文件 + 插件自己的错误 + 处置建议（结构化 + 可读两种形态）', () => {
+    const logText = child._p13logs.out + child._p13logs.err
+    const diag = diagnoseHostLogs({ logText, rows: fx.rows, repoRoot: REPO })
+    assert.equal(diag.problems.length, 1, '应恰好定位到一处问题：' + JSON.stringify(diag.problems))
+    const p = diag.problems[0]
+    assert.equal(p.kind, 'import_threw', '入口存在却导入失败 → import_threw，实际：' + p.kind)
+    assert.match(p.plugin, /^p13-broken-file（file:\/\/\//, '应点名组合行 id：' + p.plugin)
+    assert.equal(p.entry, join(REPO, 'tests', 'p13-fixture', 'broken-plugin.mjs'), '应给出该行的入口文件')
+    assert.match(p.detail, /故意在导入期抛错/, '应带上插件自己抛出的错误')
+    assert.match(p.hint, /导入期/, '应说明失败发生在导入期')
+
+    const text = formatDiagnosis(diag, { logText })
+    assert.match(text, /宿主插件加载失败（已定位 1 处）/)
+    assert.match(text, /入口：/)
+    assert.match(text, /处置：/)
+    assert.match(text, /宿主日志尾部/)
+    // 健康条目不得被牵连
+    assert.ok(!/dsh-team-hub|dsh-scrum-board|dsh-scrum-worker/.test(p.plugin), '不得牵连健康条目')
+  })
+
+  it('真实后果：宿主确实因该条目退出 exit 1（旧表现：客户端只看到「未就绪/路由缺失」）', async () => {
+    const code = await new Promise((resolve) => {
+      if (child.exitCode !== null) return resolve(child.exitCode)
+      const timer = setTimeout(() => resolve('TIMEOUT'), 30000)
+      child.once('close', (c) => { clearTimeout(timer); resolve(c) })
+    })
+    assert.equal(code, 1, '插件导入失败的宿主应以 exit 1 退出（实际 ' + code + '）')
+    const logText = child._p13logs.out + child._p13logs.err
+    assert.match(logText, /plugin tree failed to load/, '日志应带 app-boot 的阶段标签')
+    assert.match(logText, /failed to import loader entry p13-broken-file/, '日志应带装载器点名的条目')
+  }, { timeout: 40000 })
+})
+
+describeHost('P4-2 宿主插件导入失败：诊断可读性（负向 · 入口产物缺失）', () => {
+  let fx, child, missingDir
+
+  before(async () => {
+    const port = await freePort()
+    missingDir = mkdtempSync(join(tmpdir(), 'p13-missing-pkg-'))
+    mkdirSync(join(missingDir, 'lib'), { recursive: true })
+    writeFileSync(join(missingDir, 'package.json'), JSON.stringify({ name: 'dsh-p13-missing', version: '0.0.0', main: './lib/index.js' }))
+    fx = makeFixture({
+      port,
+      extraPackages: { 'dsh-p13-missing': missingDir },
+      extraRows: ["    - id: p13-broken-missing\n      name: '@dsh-external/dsh-p13-missing'"],
+    })
+    child = spawnHost(fx)
+    // 该场景宿主**来不及**就绪：入口解析失败发生在树挂载期 → 直接从「未就绪」变成 exit 1
+    const died = await new Promise((resolve) => {
+      if (child.exitCode !== null) return resolve(true)
+      const timer = setTimeout(() => resolve(false), 30000)
+      child.once('close', () => { clearTimeout(timer); resolve(true) })
+    })
+    assert.ok(died, '入口缺失的宿主应在 30s 内退出；实际仍在运行（日志尾部：\n' + (child._p13logs.out + child._p13logs.err).slice(-800) + '）')
+    await drainLogs(child)   // 等 stdio 排空，否则诊断只能看到被截断的日志
+  }, { timeout: 60000 })
+
+  after(async () => {
+    if (child && child.exitCode === null) { try { child.kill() } catch { /* gone */ } }
+    if (fx) fx.cleanup()
+    if (missingDir) { try { rmSync(missingDir, { recursive: true, force: true }) } catch { /* tmp */ } }
+  }, { timeout: 15000 })
+
+  it('预检：入口不存在的条目在**启动之前**就被点名（含处置建议），不靠超时发现', () => {
+    const pre = fx.preflight()
+    const p = pre.problems.find((x) => x.plugin.includes('p13-broken-missing'))
+    assert.ok(p, '预检应点名 p13-broken-missing，实际：' + JSON.stringify(pre))
+    assert.match(p.entry, /lib[\\/]index\.js$/, '应给出缺失的入口路径')
+    assert.match(p.hint, /入口文件不存在|入口产物缺失/, '应给出可行动的处置建议：' + p.hint)
+    assert.ok(!pre.problems.some((x) => x.plugin.includes('p13-team-hub')), '健康条目不得误报')
+  })
+
+  it('真实宿主：入口缺失也能被反查到具体条目（真实宿主只打 `Cannot find package <路径>`）', async () => {
+    const t0 = Date.now()
+    let err = null
+    try {
+      // 宿主已退出：waitReady 必须**立刻**给出诊断（而不是等满 60s 超时）
+      await waitReady(fx.base, { child, rows: fx.rows, timeoutMs: 60000 })
+    } catch (e) { err = e }
+    const elapsed = Date.now() - t0
+
+    assert.ok(err, '宿主已退出 → 不应报「就绪」')
+    assert.equal(err.name, 'HostBootError', '应抛出 HostBootError：' + String(err?.message ?? err).slice(0, 300))
+    const msg = err.message
+    assert.match(msg, /宿主进程已退出/)
+    assert.match(msg, /p13-broken-missing|dsh-p13-missing/, '诊断必须把裸模块错误反查到组合行（否则只能报「未能定位」）')
+    assert.match(msg, /lib[\\/]index\.js/, '应给出缺失的入口路径')
+    assert.match(msg, /处置：/, '应给出处置建议')
+    assert.ok(elapsed < 10000, `进程已退出时应即时失败（实际 ${elapsed}ms）`)
+    const kinds = err.diagnosis.problems.map((p) => p.kind)
+    assert.ok(kinds.includes('missing_entry'), '问题类型应为 missing_entry，实际：' + JSON.stringify(kinds))
+  }, { timeout: 40000 })
+
+  it('解析的是真实宿主日志（不是自造文本）：日志里确有 app-boot / Node 的解析失败原文', () => {
+    const logText = child._p13logs.out + child._p13logs.err
+    assert.match(logText, /plugin\(s\) failed to load|did not activate|Cannot find (module|package)|ERR_MODULE_NOT_FOUND/,
+      '宿主日志里应出现真实加载失败文本；实际尾部：\n' + logText.slice(-800))
+    assert.equal(child.exitCode, 1, '插件加载失败的宿主应以 exit 1 退出（旧症状：客户端只看到「60s 未就绪」）')
+  }, { timeout: 20000 })
 })

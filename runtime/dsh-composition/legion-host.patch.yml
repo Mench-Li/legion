@@ -1,0 +1,41 @@
+# 由 runtime/dsh-composition/render.mjs 生成 —— 请勿手工编辑。
+# 对应运行时声明：runtime/dsh-composition/patch-layer.mjs（dshCompositionPatchVersion: 1）
+# 重新生成：node runtime/dsh-composition/render.mjs --write
+#
+# 本文件是 Legion 的 host 组合补丁层。它**不**替代 DSH 随部署分发的 preset 安装，
+# 只通过产品自己的 profile 层注入。DSH 升级会改变 bundle 结构与 patch 锚点，
+# 因此这一层必须与 dshVersion 成对验证（补丁层静默失效比 API 变化更隐蔽）。
+patch:
+  # 静态 hard floor：同步、确定性、最终单调拒绝
+  - id: legion-enforcement-hard-floor
+    insert: after:tools
+    plane: host
+  # 动态 allow / deny / ask，team-hub 不可达或策略异常时 deny（fail closed）
+  - id: legion-enforcement-pre-execute
+    insert: after:tools
+    plane: host
+  # 把审批请求写入审批箱；只有 allowed-once 执行；双段超时 fail closed
+  - id: legion-enforcement-approval-answerer
+    insert: after:approval
+    plane: host
+  # 用 Legion 自有 preset 表**替换** DSH 默认表（不合并）
+  - id: legion-enforcement-permission-presets
+    # patch-over：按 id 覆盖第 permission 行。DSH 的语义是**替换整个 config**，不是合并。
+    target: permission
+    plane: host
+
+# Legion 自有 permission preset 表：**不复用** DSH 默认表。
+# 默认表把 workspace-write↔ask 与 danger-full-access↔never 绑定；
+# 按默认表实现「无人值守 = never」会同时把沙箱降级为 danger-full-access。
+permission:
+  presets:
+    legion-attended:
+      sandbox: workspace-write
+      approval: ask
+      name: Legion · 有人值守
+      description: 在 workspace 内可写；越界写入需要人工批准。
+    legion-unattended:
+      sandbox: workspace-write
+      approval: never
+      name: Legion · 无人值守
+      description: 在 workspace 内可写；越界写入直接拒绝（无人可问，不降级为放行）。

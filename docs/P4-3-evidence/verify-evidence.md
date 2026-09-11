@@ -1,5 +1,5 @@
 <!-- evidence-banner:start -->
-> ⚠️ **历史快照 —— 不作为当前状态依据。** 本目录文档反映 **未入库**（目录尚未提交） 的基线，其中的测试数量、端口、命令与结论只代表当时状态。
+> ⚠️ **历史快照 —— 不作为当前状态依据。** 本目录文档反映 **P4-3 切片当时**的基线，其中的测试数量、端口、命令与结论只代表当时状态。
 > 当前状态请看：[docs/STATUS.md](../STATUS.md)（状态与测试基线）｜[README.md](../../README.md)（总览）｜[docs/DEPLOY.md](../DEPLOY.md)（部署）· 最新 CI 证据 `.ci/<run>/summary.json`。
 <!-- evidence-banner:end -->
 
@@ -13,13 +13,13 @@
 
 | 文件 | 作用 |
 | --- | --- |
-| `whiteboard/packages/shared/src/pendingOps.mjs`（新） | 待发队列**纯逻辑**：有界 FIFO（超限丢最旧并报数）+ `chunkOps` 按服务端单条消息上限分块 |
-| `whiteboard/packages/shared/test/pendingOps.test.mjs`（新，**11 例**） | 锁定队列语义（顺序/有界/丢弃计数/`drain` 与 `clear` 的区别/分块与非法参数退化） |
+| `whiteboard/packages/shared/src/pendingOps.mjs`（新） | 待发队列**纯逻辑**：有界 FIFO（超限丢最旧并报数）+ `chunkOps` 按服务端单条消息上限分块（**11 例**单测） |
+| `whiteboard/packages/shared/src/notice.mjs`（新） | 提示条**优先级规则**纯逻辑：治理类 > 连接状态类（**8 例**单测，见 §2.7） |
 | `whiteboard/apps/web/public/js/main.mjs`（改） | 未就绪时 **op 入队 + 可见提示**；`welcome` 后 `flushPendingOps()` 补发（分块 + 本地重放 + 只读改写提示）；切房间时丢弃旧房间暂存并**如实告知**；presence 仍不入队（瞬时状态） |
 | `tests/browser/whiteboard-ui.e2e.test.mjs`（改，7 → **9 例**） | 新增 ⑧「连接未就绪窗口内的绘制」与 ⑨「切房间后立刻绘制（原始复现路径）」，用真实浏览器+真实鼠标事件断言**服务端最终状态** |
-| `whiteboard/package.json` / `scripts/ci/run-ci.mjs` | 新单测纳入 `whiteboard` 套件；套件标签的文件数改为**从 test 脚本算出**（写死的 12 与实际的 15 已漂移过） |
+| `whiteboard/package.json` / `scripts/ci/run-ci.mjs` | 两个新单测文件纳入 `whiteboard` 套件；套件标签的文件数改为**从 test 脚本算出**（写死的 12 与实际的 15 已漂移过） |
 
-## 2. 关键决策（含被实测推翻的假设）
+## 2. 关键决策（含被实测推翻的假设与一处自造回归）
 
 ### 2.1 「窗口」必须用真实断线制造，不能靠网络仿真
 
@@ -57,8 +57,27 @@ Chrome 的网络仿真不影响**已建立**的 WebSocket。于是改为：页�
 
 `tests/browser/whiteboard-ui.e2e.test.mjs` 的 `ensureWhiteboardAssets()` 原先只检查
 `public/shared/room.mjs` 是否存在——**新增**共享模块后目录仍在、`room.mjs` 也在，
-但新模块缺失 → 页面 import 404，报错表现是「连不上/welcome 没来」，定位成本极高（本轮真实踩到）。
-现在按「main.mjs 实际 import 了哪些 shared 模块」逐个检查，缺哪个就重建。
+但新模块缺失 → 页面 import 404，报错表现是「连不上/welcome 没来」，定位成本极高（本轮真实踩到，
+CI 日志里那行 `built-missing:pendingOps.mjs` 就是它）。现在按「main.mjs 实际 import 了哪些
+shared 模块」逐个检查，缺哪个就重建。
+
+### 2.7 **本轮自己造出来的回归**：队列提示顶掉了「操作过于频繁」
+
+初版实现只顾着「别静默」，用同一个提示条 `#limit` 显示暂存状态，结果：
+
+> 被限流关闭连接 → 后续绘制入队 → 队列提示（连接状态类）**覆盖**了服务端刚下的
+> 「操作过于频繁」（治理类）→ 用户看到「已暂存 2 个操作」，而真正该看到的是「你发得太快了」。
+
+**发现方式**：首次合入 `main` 后跑全量门禁，`test` 阶段 **FAIL**——是**既有**的 P4-1 限流 e2e 用例
+（⑦）抓到的，不是我事后回想起来的。这正是「负向用例 + 既有回归网」的价值：它证明这条断言真的在干活。
+
+**修法**：提示条只有一条，因此引入**优先级规则**并抽成纯函数 `shared/notice.mjs`：
+治理类（限流/只读/服务端关闭/房间非法/旧房间操作未发送）优先级 1，连接状态类（暂存中/已补发）优先级 0，
+低优先级**不得覆盖**高优先级；空文本 = 显式清空，**总是生效**（否则提示条会永远摘不掉）。
+新增 **8 例**单测把规则逐条锁死，其中一条就是上面这条回归本身。
+
+**诚实说明**：`main` 在这段时间内处于**红状态**（`e1dc24a` 合入后 `test` FAIL），
+修复提交紧接其后合入并复跑门禁转绿；本条回归与修复均记录在案，未做「悄悄重跑」式的掩盖。
 
 ## 3. 验证证据
 
@@ -80,11 +99,13 @@ Chrome 的网络仿真不影响**已建立**的 WebSocket。于是改为：页�
 
 | 运行 | 命令 | 结果 |
 | --- | --- | --- |
-| 队列纯函数单测 | `node --test packages/shared/test/pendingOps.test.mjs` | **11/11 PASS** |
-| 单测 + 前端静态契约 | 同上 + `apps/web/test/ui-contract.test.mjs` + `contract.test.mjs` | **43/43 PASS** |
-| 浏览器端到端（全组） | `node --test tests/browser/whiteboard-ui.e2e.test.mjs` | **9/9 PASS**（41.0s；原 7 例） |
+| 队列纯函数单测 | `node --test packages/shared/test/pendingOps.test.mjs`（cwd `whiteboard/`） | **11/11 PASS** |
+| 提示优先级单测 | 同上 + `notice.test.mjs` | **19/19 PASS** |
+| 浏览器端到端（全组） | `node --test tests/browser/whiteboard-ui.e2e.test.mjs` | **9/9 PASS**（41s；原 7 例） |
 | 新增用例单独跑（独立性） | `--test-name-pattern='⑧'` / `='⑨'` | 各自 **1/1 PASS**（⑨ 不依赖 ⑧ 先跑） |
+| `whiteboard` 套件 | `node --test <package.json scripts.test 的 16 个文件>` | **177/177 PASS** |
 | **负向对照**：新用例打在**未修**代码上 | `git checkout main -- whiteboard/apps/web/public/js/main.mjs` 后跑 ⑧ | **FAIL**，且失败文本正是要消灭的症状：`连接未就绪时的绘制必须给出可读提示，而不是静默丢弃：""` |
+| **回归对照**：优先级修好前跑限流用例 | 首次合入 `main` 的全量门禁 | **FAIL**：`应给出可读的限流提示…：连接未就绪：已暂存 2 个操作` |
 
 ### 3.3 ⑧/⑨ 两条用例断言了什么
 
@@ -98,8 +119,9 @@ Chrome 的网络仿真不影响**已建立**的 WebSocket。于是改为：页�
 ### 3.4 与基线的差异（诚实登记）
 
 - `e2e-browser`：**7 → 9 例**（+2 竞态用例），单组耗时约 33s → 41s；
-- `whiteboard`：**158 → 169 例**（+11 队列单测）；套件标签的文件数改为动态计算（原来是写死的 12，实际 15）；
-- 生产代码改动仅 `main.mjs`（前端）与新增一个共享纯函数模块，**服务端零改动**。
+- `whiteboard`：**158 → 177 例**（+11 队列单测、+8 提示优先级单测）；套件标签的文件数改为动态计算
+  （原来是写死的 12，实际 16）；
+- 生产代码改动仅 `main.mjs`（前端）与两个共享纯函数模块，**服务端零改动**。
 
 ## 4. 未覆盖 / 已知边界（诚实登记）
 
@@ -113,16 +135,19 @@ Chrome 的网络仿真不影响**已建立**的 WebSocket。于是改为：页�
 4. **补发不覆盖「切换后旧连接仍有未确认 op」**：旧连接的在途 op 与「丢旧房间队列」同源，同样是 ack 问题。
 5. **`pendingOps` 上限是前端常量**：不随服务端 `WB_MAX_OPS_PER_MESSAGE` 自适应（分块已自适应，
    上限没有）——两者语义不同，未合并。
-6. **浏览器 E2E 依赖本机 Edge/Chrome**：无浏览器时整组 SKIP（不伪绿）；因此本轮结论在
+6. **提示优先级是「两类」而非完整调度**：只有治理/连接两档，且**高优先级提示会一直占位**直到
+   被同类或空文本清掉——即「已补发」这类过程信息在限流提示未清时会一直看不到。
+   这是有意的取舍（治理提示更需要被看见），但确实意味着**信息被延迟而非丢失**。
+7. **浏览器 E2E 依赖本机 Edge/Chrome**：无浏览器时整组 SKIP（不伪绿）；因此本轮结论在
    **无浏览器的机器上不会被复核**——这条限制沿用 P4-1。
-7. **⑧⑨ 的窗口由「测试主动关闭真实连接」制造**：真实网络故障（丢包/半开连接/NAT 超时）
+8. **⑧⑨ 的窗口由「测试主动关闭真实连接」制造**：真实网络故障（丢包/半开连接/NAT 超时）
    的表现可能不同（例如 TCP 半开时 `readyState` 仍是 OPEN，前端拿不到 `onclose`），未覆盖。
 
 ## 5. 复跑命令
 
 ```bash
-# 单元（纯函数，任何机器）
-node --test whiteboard/packages/shared/test/pendingOps.test.mjs
+# 单元（纯函数，任何机器；注意 cwd 是 whiteboard/）
+cd whiteboard && node --test packages/shared/test/pendingOps.test.mjs packages/shared/test/notice.test.mjs
 
 # 浏览器端到端（需要本机 Edge/Chrome；无浏览器则整组 SKIP）
 node --test tests/browser/whiteboard-ui.e2e.test.mjs

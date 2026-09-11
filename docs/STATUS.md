@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-10　`run-ci --only env,test,doc` **全 PASS**；其中 `test` **39 套件 / 994 用例**
+**最近一次全量基线**：2026-09-10　`run-ci --only env,test,doc` **全 PASS**；其中 `test` **39 套件 / 1002 用例**
 （约 4 分钟）—— 以本文件所在提交为准
 
 > 说明：上句记录 P4-3 之后的全量运行（含 `doc` 阶段）。P4-2 之后为 **981 用例**、
@@ -66,9 +66,9 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：39 套件 / 994 用例，`--only test` 整体 PASS** —— 2026-09-10 实测
-（P4-3 之后：`e2e-browser` 7→**9 例**（新增两条「连接未就绪窗口」竞态用例）、`whiteboard` 158→**169 例**
-（新增 `pendingOps.test.mjs` 11 例队列单测）；
+**当前基线：39 套件 / 1002 用例，`--only test` 整体 PASS** —— 2026-09-10 实测
+（P4-3 之后：`e2e-browser` 7→**9 例**（新增两条「连接未就绪窗口」竞态用例）、`whiteboard` 158→**177 例**
+（新增 `pendingOps.test.mjs` 11 例队列单测 + `notice.test.mjs` 8 例提示优先级单测）；
 P4-2 之后：`p13-host-injection` 9→14 例（含 5 例真实宿主负向诊断），并新增同组纯函数文件
 `host-diagnostics.test.mjs` **25 例** → 该套件组 39 例；
 P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-4 之后：`plugins` 177→185、
@@ -90,7 +90,7 @@ P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-
 | rules | 7 | hub-event-stream（F-01 scope/游标/信封） | 5 |
 | artifact | 16 | dual-write（P1-1 双进程写同库竞态 + 迁移竞态） | 4 |
 | security | 6 | p13-host-injection（P1-3 真实宿主注入 + P3-4 配置摘要 + P4-2 导入失败诊断，2 文件） | 38 |
-| read-auth（鉴权矩阵 + 回环开放，2 文件） | 14 | whiteboard（含 P3-1 治理端到端、P4-3 待发队列单测与前端静态契约，15 文件） | 169 |
+| read-auth（鉴权矩阵 + 回环开放，2 文件） | 14 | whiteboard（含 P3-1 治理端到端、P4-3 待发队列/提示优先级单测与前端静态契约，16 文件） | 177 |
 | files-api | 41 | plugins（含 P2-6 chat-context、SP-P0 space-pipeline、P3-4 配置） | 185 |
 | files-p27 / files-ui（P2-7） | 36 / 19 | web-p28 / browser-ui（P2-8） | 21 / 21 |
 | web | 24 | static-serve（静态托管 404/SPA 回退/穿越） | 6 |
@@ -197,7 +197,10 @@ P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-
     **已知边界**：① 入队 op 沿用原 stamp，并发修改按 LWW 取舍（操作送达了，冲突值可能保留对端）；
     ② 队列有界 **500** op，极端离线仍丢**最旧**（提示里报出丢弃条数）；
     ③ 「已写进 socket、未到服务端」的在途 op 仍会丢——需要 ack/重传协议才能解决，本轮不做；
-    ④ 真实网络故障（TCP 半开）下前端拿不到 `onclose`，该场景未验证（E2E 用「真实关闭连接」制造窗口）。
+    ④ 真实网络故障（TCP 半开）下前端拿不到 `onclose`，该场景未验证（E2E 用「真实关闭连接」制造窗口）；
+    ⑤ 提示条按**优先级**占用（治理类 > 连接状态类，见 `whiteboard/packages/shared/src/notice.mjs`）：
+    高优先级提示在场时，「已补发」这类过程信息不显示（信息被**延迟**，不是丢失）——
+    该规则来自本轮自造的一次回归（队列提示顶掉了「操作过于频繁」，被既有 e2e 限流用例抓到）。
 
 ## 5. 维护约定
 

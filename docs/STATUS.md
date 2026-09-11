@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-10　`run-ci --only env,test,doc` **全 PASS**；其中 `test` **39 套件 / 1021 用例**
+**最近一次全量基线**：2026-09-10　`run-ci --only env,test,doc` **全 PASS**；其中 `test` **39 套件 / 1033 用例**
 （约 4 分钟）—— 以本文件所在提交为准
 
 > 说明：上句记录 P4-3 之后的全量运行（含 `doc` 阶段）。P4-2 之后为 **981 用例**、
@@ -66,8 +66,9 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：39 套件 / 1021 用例，`--only test` 整体 PASS** —— 2026-09-10 实测
-（P4-4 之后：`static-serve` 6→**16 例**（新增导航/资源判定与缺失资源 404 契约）；
+**当前基线：39 套件 / 1033 用例，`--only test` 整体 PASS** —— 2026-09-10 实测
+（P4-5 之后：`audit-archive.test.mjs` 新增 **12 例**（10 纯函数 + 2 真实进程重启），白板 185→**197**；
+P4-4 之后：`static-serve` 6→**16 例**（新增导航/资源判定与缺失资源 404 契约）；
 P4-3 之后：`e2e-browser` 7→**10 例**（新增连接未就绪窗口/切房间补发/单连接三条用例）、`whiteboard` 158→**185 例**
 （新增 `pendingOps.test.mjs` 19 例队列/补发单测 + `notice.test.mjs` 8 例提示优先级单测）；
 P4-3 与 P4-4 的全量门禁读数见 `docs/P4-3-evidence/verify-evidence.md` §3、`docs/P4-4-evidence/verify-evidence.md` §3；
@@ -92,7 +93,7 @@ P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-
 | rules | 7 | hub-event-stream（F-01 scope/游标/信封） | 5 |
 | artifact | 16 | dual-write（P1-1 双进程写同库竞态 + 迁移竞态） | 4 |
 | security | 6 | p13-host-injection（P1-3 真实宿主注入 + P3-4 配置摘要 + P4-2 导入失败诊断，2 文件） | 38 |
-| read-auth（鉴权矩阵 + 回环开放，2 文件） | 14 | whiteboard（含 P3-1 治理端到端、P4-3 待发队列/提示优先级单测与前端静态契约，16 文件） | 185 |
+| read-auth（鉴权矩阵 + 回环开放，2 文件） | 14 | whiteboard（含 P3-1 治理端到端、P4-3 待发队列/提示优先级单测、P4-5 审计归档跨重启与前端静态契约，17 文件） | 197 |
 | files-api | 41 | plugins（含 P2-6 chat-context、SP-P0 space-pipeline、P3-4 配置） | 185 |
 | files-p27 / files-ui（P2-7） | 36 / 19 | web-p28 / browser-ui（P2-8） | 21 / 21 |
 | web | 24 | static-serve（静态托管 404/SPA 回退/穿越 + P4-4 导航与资源判定） | 16 |
@@ -167,8 +168,17 @@ P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-
     空间抓取历史按空间**上限 200 条**裁剪（超出丢最旧，无分页游标），且依赖 team-hub v2 运行（否则界面明确报不可用）；
     限流默认值可用 `DSH_WEB_QUOTA_*` 调整，为**单进程**语义（无分布式限流）。
     前端验证为判定层（`workbench/scripts/browser-ui.test.mjs` 21 例）。
-11. 白板治理（P3-1）：`/metrics` 与审计为**进程内**（重启归零）；审计 JSONL 按大小轮转保留 3 份、无长期归档；
-    **重启后 `/api/rooms/<id>/audit` 只返回本进程产生的事件，历史仅存在于 JSONL 文件里**（接口不读历史文件）；
+11. 白板治理（P3-1；**审计留存已由 P4-5 补齐**）：`/metrics` 的**运行计数器**仍为进程内（重启归零，这是刻意设计）；
+    审计 JSONL 按大小轮转保留 3 份。P4-5 起**审计归档可读、可跨重启回溯**：
+    `GET /api/rooms/<id>/audit?source=process|archive|all`（默认 `process` 保持 P3-1 语义不变），
+    每条记录带跨重启单调递增的 `auditSeq`（启动时从归档尾部播种），响应永远附 `retention`
+    （文件数/字节/**最早与最新时间**/跨重启轮转次数/`historyTruncated`），`/metrics` 同样暴露 `audit.retention`；
+    进程内为空而磁盘有历史时会给出指向 `source=archive` 的 `hint`。同时补上两处**声明了却从未写入**的审计类型
+    （`ops`、`presence`）——此前审计只记「谁来了/谁被拒」，恰恰缺「谁画了什么」，归档也不完整。
+    验证见 `docs/P4-5-evidence/verify-evidence.md`（含真实进程**真重启**后查回历史的端到端读数）。
+    **已知边界**：仍无**长期**归档（保留 3 份即滚出，`historyTruncated` 只报事实不做归档扩张）；
+    `archive` 查询返回的是**最近的** N 条并标 `truncated`（不是全档精确总数）；轮转以单文件字节为界，
+    **不按时间/天数**保留；append-only JSONL 中若半行后又被追加完整行会被拼成一行（记入 `malformed`，不可恢复）。
     角色只有 `rw`/`ro` 两档（无按元素/区域的细粒度权限，无操作级回放）；
     单 IP 连接上限为**粗粒度**防滥用且**不信任** `X-Forwarded-For`（反代 + 大量同出口用户的部署需在边界
     做真实客户端识别，否则同一出口会共享该额度）；房间空闲关闭依赖 tick 心跳；

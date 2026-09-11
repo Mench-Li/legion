@@ -327,6 +327,7 @@ F-20 | 任务中心（Scrum 泳道） | 3.19 任务中心（Scrum 泳道） | �
 | `docs/P4-2-evidence/verify-evidence.md` | 宿主插件导入失败的诊断证据（组合行真值 + 真实宿主失败原文 + 负向复现 + 未覆盖边界）。 |
 | `docs/P4-3-evidence/verify-evidence.md` | 白板「连接未就绪窗口」内的操作不再静默丢失的证据（A/B 现场读数 + 负向对照 + 未覆盖边界）。 |
 | `docs/P4-4-evidence/verify-evidence.md` | 静态托管不再把缺失资源伪装成 200 HTML 的证据（真实浏览器 A/B + 判定规则边界 + 未覆盖边界）。 |
+| `docs/P4-5-evidence/verify-evidence.md` | 白板审计归档可跨重启回溯的证据（真杀真启 A/B + 序号单调性 + `ops` 补记 + 未覆盖边界）。 |
 | `PLUGINS.md` | DSH 插件形态与接入说明。 |
 | `LEGION.md` | 军团规则（注入执行 agent 提示词）。 |
 

@@ -20,9 +20,9 @@
 
   候选 #10（白板重连窗口内的绘制被静默丢弃）已于 2026-09-10 修复（**P4-3**），证据 `docs/P4-3-evidence/verify-evidence.md`；
 
-  候选 #8（`serve.mjs` 未知资源回退 SPA 200 HTML）已于 2026-09-10 修复（**P4-4**），证据 `docs/P4-4-evidence/verify-evidence.md`。
+  候选 #8（`serve.mjs` 未知资源回退 SPA 200 HTML）已于 2026-09-10 修复（**P4-4**），证据 `docs/P4-4-evidence/verify-evidence.md`；
 
-  全量基线：**39 套件 / 1021 用例，`run-ci --only test` PASS**（以 `docs/STATUS.md` 记录的数字为准）。
+  全量基线：**39 套件 / 1033 用例，`run-ci --only test` PASS**（以 `docs/STATUS.md` 记录的数字为准）。
 
 
 
@@ -110,7 +110,21 @@
 
    **仍未覆盖**：workbench 与 board-plugin 前端、视觉回归、多浏览器矩阵、网络故障注入（见 `docs/E2E.md` §6）。
 
-7. **指标与审计为进程内**（P3-1 边界）：重启归零、无长期归档；`/api/rooms/<id /audit` 只返回当前进程事件。
+7. ~~**指标与审计为进程内**~~ → **已于 2026-09-11 修复（P4-5）**：侦察先把候选拆准——`/metrics`
+   运行计数器重启归零是**刻意设计**（跨重启累计应由审计承担，混在一起会让「当前在线」变成谎言），
+   真正的问题是 **`/api/rooms/<id>/audit` 从不读磁盘归档**：JSONL 一直在写，却没有任何代码路径读它，
+   于是进程一重启 API 就报「本房间无事件」，而磁盘上躺着完整历史（实测磁盘 345B vs API 0 条）。
+   现在：① `?source=process|archive|all`（默认 `process` 保持 P3-1 语义；非法值 400）；
+   ② 每条记录带**跨重启单调递增**的 `auditSeq`（启动时从归档尾部播种，不回绕）；
+   ③ 响应永远附 `retention`（文件数/字节/**最早与最新时间**/`historyTruncated`），`/metrics` 同样暴露；
+   ④ 进程内为空而磁盘有历史时给出指向 `source=archive` 的 `hint`；
+   ⑤ 顺手补上 `ops`/`presence` 两个**声明了却从未写入**的审计类型——此前审计只记「谁来了/谁被拒」，
+   恰恰缺「谁画了什么」（只记条数与类型分布摘要，不记元素内容）。
+   **验证**：真实进程**真杀真启** A/B；用例 **12 例**（10 纯函数 + 2 真实重启），白板全量 185 → **197**；
+   两组负向对照（未改代码导入即失败；新版 audit + 旧版 index 报 `应含 ops：connect,room_open`）。
+   **证据**：`docs/P4-5-evidence/verify-evidence.md`（含 8 条未覆盖边界）。
+   **仍未做长期归档**：轮转按单文件字节保留 3 份，超出即滚出（`historyTruncated` 只报告事实），
+   属独立产品决策且与 ADR-0008 决策 1 冲突，需将军另批。
 
 8. ~~**`serve.mjs` 对未知资源路径仍回退 SPA 200 HTML**~~ → **已于 2026-09-10 修复（P4-4）**：
 

@@ -169,7 +169,16 @@ export interface RunRequest {
   /** 冻结的上下文快照引用。 */
   readonly contextSnapshotRef: string
   readonly modelProfileRef: string
-  readonly budget?: RunBudget
+  /**
+   * 运行预算。**必填**，与 `RUN_REQUEST_REQUIRED` 一致。
+   *
+   * 允许传 `{}`——那表示「显式声明本次运行没有数值上限」，
+   * 与「忘了写」是两回事。要求显式给出字段，是为了让无预算运行
+   * 成为一个**已做出的决定**而不是一次疏忽。
+   * （此前这里标为可选，与运行期校验器矛盾：TypeScript 调用方可以合法地
+   * 省略 budget，然后在运行时被拒——声明与强制必须一致。）
+   */
+  readonly budget: RunBudget
   readonly timeoutMs: number
   readonly workdir: string
   /** 环境变量**白名单**（不是全量环境）。 */

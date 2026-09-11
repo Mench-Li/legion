@@ -336,6 +336,9 @@ async function stageTest() {
     // 阶段 3 评审闸门：热点文件改动节奏。本套件直接锁定「正确写法 vs 错误写法」的差异——
     // `git log -n 40 -- <file>` 会先按路径过滤再截断，恒返回 40，把「该开工」读成「不能开工」。
     { label: 'prt-churn（阶段 3 评审闸门：热点文件改动节奏探针）', files: ['scripts/prt/hot-file-churn.test.mjs'], cwd: ROOT },
+    // 阶段 2：DshRuntimeAdapter。全部用假宿主端口，覆盖真实 DSH 无法稳定复现的故障
+    // （run.result 永不结算、abort 无效、畸形结果、事件流中断）。
+    { label: 'dsh-adapter（PRT-201~209：DSH 适配器契约、脱敏、看门狗与取消/恢复）', files: ['runtime/adapters/dsh/adapter.test.mjs'], cwd: ROOT },
     // P4-2（候选 #9）：宿主插件导入失败诊断。host-diagnostics.test.mjs 是**纯函数**单测
     // （无 DSH 依赖，任何机器都跑）；p13-host-injection.test.mjs 内含负向用例，用真实宿主
     // 复现「入口在导入期抛错 / 入口产物缺失」两种失败并断言诊断点名到条目。

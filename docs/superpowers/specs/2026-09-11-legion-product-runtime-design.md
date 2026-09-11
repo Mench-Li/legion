@@ -1164,6 +1164,7 @@ Legion 商业化不以脱离 DSH 为前置条件。首版采用“Legion 产品�
 | `PRT-011` | `docs/superpowers/prt/PRT-011-dsh-distribution-decision.md` | **已裁决：路线 C** |
 | `PRT-101`～`PRT-106`、`PRT-109` | `runtime/contracts/`（`index.mjs` + `index.d.mts` + `errors` / `model` / `run` / `adapter`） | `runtime-contract`（62 例） |
 | `PRT-107` | `runtime/contracts/fake-adapter.mjs` | 同上；含六条编排路径模拟 |
+| `PRT-201`～`PRT-209` | `runtime/adapters/dsh/`（`port` / `errors` / `redact` / `schema` / `usage` / `events` / `probe` + `index.mjs` / `index.d.mts`） | `dsh-adapter`（85 例） |
 
 **§6.4「重试创建新 Attempt、不覆盖历史」已由代码固定**：终态仲裁器拒绝第二个终态，
 重试必须换 `runId`（新 Attempt → 新 Run）。见 `runtime/contracts/run.mjs`。
@@ -1172,7 +1173,7 @@ Legion 商业化不以脱离 DSH 为前置条件。首版采用“Legion 产品�
 `runOrchestration()` 在**不启动 DSH** 的前提下跑完正常 / 限流重试 / 取消 / 超时 /
 崩溃恢复 / 协议违规六条路径。
 
-### A.2 三条对设计有实际影响的实测结论
+### A.2 四条对设计有实际影响的实测结论
 
 1. **§6.10「所有环境变量必须在配置 Schema 中声明」已满足**——声明缺口为 0
    （`scripts/config/scan.mjs --check` PASS，97 个疑似字面量全部已处理）。
@@ -1186,6 +1187,14 @@ Legion 商业化不以脱离 DSH 为前置条件。首版采用“Legion 产品�
 3. **`PRT-006` 的验收口径需要修正**：`audit.seq` **允许有缺口**
    （分配器为 `MAX(seq)+1`，回滚后作废号不回填；现场库实测 1 处）。
    验收应为「恢复前后**缺口集合**一致」，而非「连续」。
+4. **DSH 的 `run.result` 可能永不结算，且 abort 不保证终止子代理**
+   （`plugins/src/index.ts:2241` 的现场注释即为该故障的处置）。这直接约束 §6.2
+   适配器的实现：不能 `await run.result`，必须自带看门狗强制结算。
+   由此还引出一条**设计层**结论——超时后是判 `TIMEOUT`（可自动重试）还是
+   `OUTCOME_UNKNOWN`（禁止自动重试），取决于「本次运行是否可能已有外部副作用」。
+   §6.2 原文只说了要区分二者，未给出判断依据；实现采用**只读工具白名单**
+   （认不出的工具一律按「可能写」处理），失效方向偏向「宁可少重试」。
+   这是对 §6.2 的一处补充，建议后续评审确认口径。
 
 ### A.3 已裁决
 
@@ -1213,7 +1222,7 @@ Legion 商业化不以脱离 DSH 为前置条件。首版采用“Legion 产品�
 
 | 阶段 | 任务 | 数量 |
 | --- | --- | --- |
-| 2 DshRuntimeAdapter | `PRT-201`～`PRT-215` | 15 |
+| 2 DshRuntimeAdapter | `PRT-201`～`PRT-209` **已落地**（见 A.1）；`PRT-210`～`PRT-215` 未启动 | 15 |
 | 2.5 商业薄垂直切片 | `PRT-251`～`PRT-258` | 8 |
 | 3 Orchestrator Core | `PRT-301`～`PRT-316` | 16 |
 | 4 上下文边界 | `PRT-401`～`PRT-413` | 13 |
@@ -1224,8 +1233,8 @@ Legion 商业化不以脱离 DSH 为前置条件。首版采用“Legion 产品�
 | 9 商业 Alpha 发布保障 | `PRT-901`～`PRT-910` | 10 |
 | 10 能力包协议 | `PRT-1001`～`PRT-1006` | 6 |
 
-**完成度：18 / 145 任务（约 12%）**；1 项部分（`PRT-009`）、1 项未启动（`PRT-005`）。
-里程碑达成：M0 部分（基础设施就位，端到端复现未跑）、M1 一半（阶段 1 完成，阶段 2 未开始）。
+**完成度：27 / 145 任务（约 19%）**；1 项部分（`PRT-009`）、1 项未启动（`PRT-005`）。
+里程碑达成：M0 部分（基础设施就位，端到端复现未跑）、M1 大部分（阶段 1 完成，阶段 2 的适配器主体完成、接线与对拍未做）。
 
 **本 A 节首次并入的 12 个任务均未实现**（`PRT-010`、`PRT-011` 除外，它们已由阶段 0～1 完成）：
 

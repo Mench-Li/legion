@@ -271,3 +271,59 @@ describe('P4-5 · 真实进程重启后仍能查到审计（端到端）', () =>
     }
   });
 });
+
+describe('P4-5 · 审计写入量必须与「消息数」同阶，不能与「更新次数/载荷大小」同阶', () => {
+  // 回归来源：本切片最初把 `presence` 审计写成**逐条**（每收到一条 presence 就 record 一次）。
+  // 而 presence 是前端在 mousemove 上发的高频临态，且审计写文件是**同步** appendFileSync——
+  // 治理用例「频率超限」发 260 条 presence，于是多出 249 次同步落盘，把限流告警的出现时间
+  // 从 ~12ms 拉到 ~80ms，并让本该被丢弃的消息少丢了 8 条（令牌桶 120/s 趁机回填：
+  // 实测 drops 从 19 掉到 11）。在并行门禁负载下处置更慢，drops 可归零、告警永不出现，
+  // 该用例即以 waitFor timeout 失败——**这是真实缺陷被既有用例抓到，不是用例太紧**。
+  //
+  // 因此把「审计量级」本身钉成断言：presence 按**连接**计（上界 = 连接数），
+  // ops 按**消息**计（一条消息带 200 个 op 也只记一条，摘要里体现条数）。
+  let dir2 = '';
+  before(() => { dir2 = tmpDir(); });
+  after(() => { try { fs.rmSync(dir2, { recursive: true, force: true }) } catch { /* ignore */ } });
+
+  it('presence 审计按连接计数：200 条 presence 只留 1 条（不逐条落盘）', async () => {
+    const srv = await startServer({ WB_AUDIT_DIR: dir2, WHITEBOARD_ROOMS: 'vol-r:tok:rw' });
+    try {
+      const w = await connect(srv.port, { room: 'vol-r', token: 'tok' });
+      await w.waitFor((s) => s.welcome);
+      for (let i = 0; i < 200; i++) w.send({ type: 'presence', state: { name: 'n', color: '#000', x: i, y: 0 } });
+      await new Promise((r) => setTimeout(r, 400));
+
+      const audit = await json(srv.port, '/api/rooms/vol-r/audit?limit=500');
+      const presence = audit.body.items.filter((e) => e.type === 'presence');
+      assert.equal(presence.length, 1, `200 条 presence 只应留 1 条审计（实际 ${presence.length}）——逐条写会拖慢消息热路径并撑爆归档`);
+      assert.equal(presence[0].first, true, '记的是「首次活跃」这一跃迁事实');
+      assert.equal(audit.body.items.filter((e) => e.type === 'presence').some((e) => 'x' in e || 'y' in e), false, '不得记录光标坐标（审计是治理工具，不是行为画像）');
+      w.close();
+    } finally {
+      await srv.stop();
+    }
+  });
+
+  it('ops 审计按消息计数：一条消息带 200 个 op 只记 1 条（摘要里体现条数与类型）', async () => {
+    const srv = await startServer({ WB_AUDIT_DIR: dir2, WHITEBOARD_ROOMS: 'vol-r2:tok:rw' });
+    try {
+      const w = await connect(srv.port, { room: 'vol-r2', token: 'tok' });
+      await w.waitFor((s) => s.welcome);
+      const ops = [];
+      for (let i = 0; i < 200; i++) ops.push({ t: 'add', id: `v-${i}`, el: { id: `v-${i}`, type: 'rect', geom: { x: i, y: 0, w: 1, h: 1 }, stroke: '#000', strokeWidth: 1 }, c: w.welcome.clientId, v: 1 });
+      w.send({ type: 'op', ops });
+      await new Promise((r) => setTimeout(r, 500));
+
+      const audit = await json(srv.port, '/api/rooms/vol-r2/audit?limit=500');
+      const opsEntries = audit.body.items.filter((e) => e.type === 'ops');
+      assert.equal(opsEntries.length, 1, `一条消息应只留 1 条 ops 审计（实际 ${opsEntries.length}）`);
+      assert.equal(opsEntries[0].count, 200, '摘要应体现本次的 op 条数');
+      assert.deepEqual(opsEntries[0].kinds, { add: 200 }, '摘要应体现类型分布');
+      assert.equal('el' in opsEntries[0] || 'ops' in opsEntries[0], false, '不得把元素内容写进审计');
+      w.close();
+    } finally {
+      await srv.stop();
+    }
+  });
+});

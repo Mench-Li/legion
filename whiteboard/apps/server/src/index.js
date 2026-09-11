@@ -422,9 +422,16 @@ export async function createApp(options = {}) {
         if (!room) return;
         const s = room.setPresence(connId, msg.state);
         metrics.inc('presenceUpdates');
-        // 同上：`presence` 也是声明了却未写入的类型。只记**状态是否非空**，
-        // 不记光标坐标等个人可识别细节（审计是治理工具，不是行为画像）。
-        audit.record({ type: 'presence', room: roomId, clientId: connId, ip, active: !!s });
+        // P4-5：presence 是**高频临态**（前端在 mousemove 上发，room.mjs 明确它是「绝不写 doc/存储」的临态）。
+        // 逐条写审计等于把一次鼠标移动变成一次同步 appendFileSync——而审计写文件是同步的（P3-1 的设计）。
+        // 实测后果：治理用例「频率超限」发 260 条 presence，多出的 240 次同步落盘把处置时间从
+        // 百毫秒级拉到秒级，令牌桶趁机回填（120/s），本该被丢弃的消息不再被丢 → 收不到限流告警。
+        // 因此只在**首次**（该连接第一次发 presence）记一条，条数上界 = 连接数，与鼠标移动次数无关。
+        // 取证价值仍在：能回答「这个连接在房间里活跃过」；逐次移动属于行为画像，不该进审计。
+        if (conn.presenceAudited !== true) {
+          conn.presenceAudited = true;
+          audit.record({ type: 'presence', room: roomId, clientId: connId, ip, active: true, first: true });
+        }
         const out = JSON.stringify({ type: 'presence', from: connId, state: s });
         metrics.inc('messagesOut');
         wss.broadcastToRoom(roomId, out, conn);

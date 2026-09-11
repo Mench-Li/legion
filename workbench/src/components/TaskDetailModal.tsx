@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import type { CSSProperties } from 'react'
 import { execRequest, fetchHubActivity, fetchHubCalendarByLink, fetchHubDocContent, fetchHubOverlaps, fetchHubTask, fetchHubTasks, hubClaim, hubComment, hubHold, hubReassign, hubReviewNote, hubTransition } from '../api'
 import type { AuditPatch, HubActivity, HubDocContent, HubTask, OverlapGroup, ReviewNote } from '../types'
 import type { LinkedCalendarEvent } from '../api'
 import { fmtRange, occKey } from '../calendar'
+import DocReader from './DocReader'
 import MarkdownDocView from './MarkdownDocView'
 import { toast } from './Toast'
 
@@ -167,6 +169,8 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
   // —— S5：产出文档直达区（打开中的产物条目下标 + 按条目缓存的内容状态）——
   const [docOpen, setDocOpen] = useState<number | null>(null)
   const [docState, setDocState] = useState<Record<number, { status: 'loading' | 'ok' | 'err'; data?: HubDocContent; message?: string }>>({})
+  // —— ①：放大阅读层（null = 未打开；值为产物条目原下标，内容复用 docState 缓存）——
+  const [readerIndex, setReaderIndex] = useState<number | null>(null)
   // —— ❓ 待将军确认：就地答复草稿（在待确认那一条下方直接回复，不拉到底部、不开二级弹框）——
   const [askDraft, setAskDraft] = useState('')
   /** 底部「💬 评论/记录」就地展开的输入框（替代 window.prompt 二级弹框）。 */
@@ -228,6 +232,7 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
     setAskDraft('')
     setCommentDraft('')
     setCommentOpen(false)
+    setReaderIndex(null)
   }, [taskId])
 
   const act = async (action: () => Promise<unknown>, okText: string): Promise<void> => {
@@ -371,477 +376,503 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
       setDocState(prev => ({ ...prev, [origIdx]: { status: 'err', message: e instanceof Error ? e.message : String(e) } }))
     }
   }
+  // ① 放大阅读层：内容复用已缓存的条目内容（只有 previewable 才给放大入口），无新增取数路径
+  const readerArt = readerIndex === null ? undefined : (t.artifacts ?? [])[readerIndex]
+  const readerData = readerIndex === null ? undefined : docState[readerIndex]?.data
+  const readerReady = readerArt !== undefined && readerData !== undefined && readerData.previewable
+  // 内嵌预览高度随视口走（旧的固定 440 在 1080p 上只剩一层小窗）
+  const inlineDocMax = Math.min(Math.max(380, Math.round(window.innerHeight * 0.62)), 900)
 
   return (
-    <div className="modal-mask" onClick={onClose}>
-      <div className="modal task-detail-modal" onClick={e => e.stopPropagation()}>
-        <div className="modal-head">
-          <span className="tid-big">{t.id}</span> 任务详情
-          <span className="x" onClick={onClose}>✕</span>
-        </div>
-        <div className="modal-body">
-          <div className="td-title">
-            <span className={`status-pill ${t.status}`}>{STATUS_PILL[t.status] ?? t.status}</span>
-            {t.hold && <span className="status-pill hold">✋ 将军拦截中</span>}
-            {askComment !== null && <span className="status-pill ask" title="在该条评论下方可直接答复，无需拉到页面底部">❓ 待将军确认</span>}
-            <span className="td-title-text">{t.title}</span>
+    <>
+      <div className="modal-mask" onClick={onClose}>
+        <div className="modal task-detail-modal" onClick={e => e.stopPropagation()}>
+          <div className="modal-head">
+            <span className="tid-big">{t.id}</span> 任务详情
+            <span className="x" onClick={onClose}>✕</span>
           </div>
-          <div className="td-meta">
-            指派：<b>{bindOf(t)}</b> · 空间：{t.scope ?? '—'} · 优先级：{t.priority} · v{t.version}
-            {t.hold ? ' · 🖐 已拦截自动交接（守护跳过本任务）' : ''}
-            {t.blockedBy.length > 0 ? ` · 依赖：${t.blockedBy.join('、')}` : ''}
-            <div style={{ color: 'var(--muted-2)', fontSize: 10.5, marginTop: 2 }}>
-              创建 {fmt(t.createdAt)} · 更新 {fmt(t.updatedAt)}
+          <div className="modal-body">
+            <div className="td-title">
+              <span className={`status-pill ${t.status}`}>{STATUS_PILL[t.status] ?? t.status}</span>
+              {t.hold && <span className="status-pill hold">✋ 将军拦截中</span>}
+              {askComment !== null && <span className="status-pill ask" title="在该条评论下方可直接答复，无需拉到页面底部">❓ 待将军确认</span>}
+              <span className="td-title-text">{t.title}</span>
             </div>
-          </div>
+            <div className="td-meta">
+              指派：<b>{bindOf(t)}</b> · 空间：{t.scope ?? '—'} · 优先级：{t.priority} · v{t.version}
+              {t.hold ? ' · 🖐 已拦截自动交接（守护跳过本任务）' : ''}
+              {t.blockedBy.length > 0 ? ` · 依赖：${t.blockedBy.join('、')}` : ''}
+              <div style={{ color: 'var(--muted-2)', fontSize: 10.5, marginTop: 2 }}>
+                创建 {fmt(t.createdAt)} · 更新 {fmt(t.updatedAt)}
+              </div>
+            </div>
 
-          {/* 拆解子任务 × 派工总览（父任务拆解出的子任务，由真实子任务卡驱动） */}
-          {children.length > 0 && (
-            <div className="td-section">
-              <div className="td-section-title">🧩 拆解子任务 × 派工（{children.length}）</div>
-              <div className="bd-summary">
-                <div className="bd-row bd-head">
-                  <span className="bd-prio">优先</span>
-                  <span className="bd-id">子任务</span>
-                  <span className="bd-content">内容</span>
-                  <span className="bd-dep">依赖 / 波次</span>
-                  <span className="bd-agent">自动运行智能体</span>
-                  <span className="bd-anchor">完成判定锚点</span>
-                  <span className="bd-status">状态</span>
+            {/* 拆解子任务 × 派工总览（父任务拆解出的子任务，由真实子任务卡驱动） */}
+            {children.length > 0 && (
+              <div className="td-section">
+                <div className="td-section-title">🧩 拆解子任务 × 派工（{children.length}）</div>
+                <div className="bd-summary">
+                  <div className="bd-row bd-head">
+                    <span className="bd-prio">优先</span>
+                    <span className="bd-id">子任务</span>
+                    <span className="bd-content">内容</span>
+                    <span className="bd-dep">依赖 / 波次</span>
+                    <span className="bd-agent">自动运行智能体</span>
+                    <span className="bd-anchor">完成判定锚点</span>
+                    <span className="bd-status">状态</span>
+                  </div>
+                  {[...children]
+                    .sort((a, b) => {
+                      const pr = (PRIO_LABEL[a.priority] ?? 'P9').localeCompare(PRIO_LABEL[b.priority] ?? 'P9')
+                      return pr !== 0 ? pr : a.id.localeCompare(b.id)
+                    })
+                    .map((c) => {
+                      const wave = childWave(c, children)
+                      return (
+                        <div className="bd-row" key={c.id}>
+                          <span className="bd-prio">{PRIO_LABEL[c.priority] ?? c.priority}</span>
+                          <span className="bd-id">{c.id}</span>
+                          <span className="bd-content" title={c.title}>{childContent(c)}</span>
+                          <span className="bd-dep">
+                            <span className="bd-wave">波{wave}</span>
+                            <span className="bd-dep-list">{childDeps(c)}</span>
+                          </span>
+                          <span className="bd-agent">{ROLE_LABEL[runAgentOf(c)] ?? runAgentOf(c)}</span>
+                          <span className="bd-anchor" title={c.acceptance?.join('\n') ?? ''}>{childAnchor(c)}</span>
+                          <span className={`bd-status ${c.status}`}>{STATUS_PILL[c.status] ?? c.status}</span>
+                        </div>
+                      )
+                    })}
                 </div>
-                {[...children]
-                  .sort((a, b) => {
-                    const pr = (PRIO_LABEL[a.priority] ?? 'P9').localeCompare(PRIO_LABEL[b.priority] ?? 'P9')
-                    return pr !== 0 ? pr : a.id.localeCompare(b.id)
-                  })
-                  .map((c) => {
-                    const wave = childWave(c, children)
-                    return (
-                      <div className="bd-row" key={c.id}>
-                        <span className="bd-prio">{PRIO_LABEL[c.priority] ?? c.priority}</span>
-                        <span className="bd-id">{c.id}</span>
-                        <span className="bd-content" title={c.title}>{childContent(c)}</span>
-                        <span className="bd-dep">
-                          <span className="bd-wave">波{wave}</span>
-                          <span className="bd-dep-list">{childDeps(c)}</span>
-                        </span>
-                        <span className="bd-agent">{ROLE_LABEL[runAgentOf(c)] ?? runAgentOf(c)}</span>
-                        <span className="bd-anchor" title={c.acceptance?.join('\n') ?? ''}>{childAnchor(c)}</span>
-                        <span className={`bd-status ${c.status}`}>{STATUS_PILL[c.status] ?? c.status}</span>
-                      </div>
-                    )
-                  })}
-              </div>
-            </div>
-          )}
-
-          {/* AI 执行过程 */}
-          <div className="td-section">
-            <div className="td-section-title">🤖 AI 执行过程</div>
-            {hasProcess ? (
-              <>
-                {[...(t.evidence ?? []), ...(t.comments ?? [])]
-                  .sort((a, b) => (a.at < b.at ? -1 : 1))
-                  .map((c, i) => {
-                    // 待将军确认的那一条：就地渲染答复框（内容与输入框同屏，答完即写入评论）
-                    const isAsk = askComment !== null && c === askComment
-                    return (
-                      <div key={i} className={isAsk ? 'proc-item proc-ask' : 'proc-item'}>
-                        <span className="proc-who">{c.by}</span>
-                        <span className="proc-at">{fmt(c.at)}</span>
-                        {isAsk && <span className="proc-ask-tag">❓ 待将军确认</span>}
-                        <div className="proc-text">{c.text}</div>
-                        {isAsk && (
-                          <div className="ask-reply" ref={askBoxRef}>
-                            <div className="ask-reply-head">
-                              ↑ 待确认内容就在上方——直接在此答复
-                              {askPoints > 1 && <span className="ask-reply-count">（含 {askPoints} 个待确认点，可分行逐条回 1. 2. 3.）</span>}
-                            </div>
-                            <textarea
-                              className="ask-reply-input"
-                              rows={3}
-                              autoFocus
-                              value={askDraft}
-                              placeholder={`直接答复 ${t.id}…（Ctrl+Enter 发送）`}
-                              onChange={e => setAskDraft(e.target.value)}
-                              onKeyDown={e => {
-                                if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); void submitAskReply() }
-                              }}
-                            />
-                            <div className="ask-reply-actions">
-                              <button className="btn primary" disabled={busy || askDraft.trim().length === 0} onClick={() => void submitAskReply()}>✓ 答复并续做</button>
-                              <button className="btn ghost" disabled={busy || askDraft.length === 0} onClick={() => setAskDraft('')}>清空</button>
-                              <span className="ask-reply-note">答复写入本任务评论 → 守护下一轮带答复续做（❓ 自动解除）</span>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    )
-                  })}
-                {(t.patches ?? []).filter(p => typeof p === 'string').length > 0 && (
-                  <div className="proc-patch">🔧 补丁 {(t.patches ?? []).filter(p => typeof p === 'string').join('、')}</div>
-                )}
-              </>
-            ) : t.status === 'in_progress' ? (
-              <div className="proc-empty">
-                🟢 任务已在进行中，AI worker 正在执行（通常 5–15 分钟）——每轮派工/完成/异常会实时沉淀到此处。
-                {!aiRunning && (
-                  <>
-                    <br />
-                    若该任务是手工开工、尚未派 AI，可点下方「🤖 派 AI 执行」。
-                  </>
-                )}
-              </div>
-            ) : (
-              <div className="proc-empty">
-                ⏳ 该任务还没有 AI 执行过程——目前只是状态标记。
-                <br />
-                AI 智能体认领执行后，它的每一步行动、产出与汇报会实时沉淀在这里（下方时间线 + 过程记录），完成时提交待验收。
               </div>
             )}
-          </div>
 
-          {/* 产出文档直达区（S5：标题+岗位+时间+路径可复制；点击同屏预览 MarkdownDocView 渲染全文） */}
-          {showDocSection && (
+            {/* AI 执行过程 */}
             <div className="td-section">
-              <div className="td-section-title">📄 产出文档<span style={{ marginLeft: 8, fontSize: 10, color: 'var(--muted-2)' }}>（点击条目直接预览文档全文，无需查找路径）</span></div>
-              {docCandidates.length === 0 ? (
-                <div className="doc-empty">⏳ 暂无已登记文档——{docRole ? '文档型岗位结算完成时会自动登记（如 REQUIREMENTS.md / RESEARCH.md）' : '当前任务非文档型产出'}</div>
-              ) : (
-                <div className="doc-list">
-                  {docCandidates.map(({ a, i }, k) => (
-                    <div key={i} className={k === 0 ? 'doc-item doc-newest' : 'doc-item'}>
-                      <div className="doc-item-head">
-                        {k === 0 && <span className="doc-badge">最新</span>}
-                        <span className="doc-title" title={a.title ?? a.path}>{a.title ? a.title : pathBase(a.path)}</span>
-                        <span className="doc-by">{ROLE_LABEL[a.by] ?? a.by ?? '—'}</span>
-                        <span className="doc-at">{fmt(a.at)}</span>
-                        <button className="btn mini" disabled={busy} onClick={() => void toggleDoc(i)} title="同屏预览该文档内容">{docOpen === i ? '▴ 收起' : '▶ 预览'}</button>
-                      </div>
-                      <div className="doc-path" title="点击复制完整路径"><code onClick={() => copyDocPath(a.path)}>{a.path}</code></div>
-                      {docOpen === i && (
-                        <div className="doc-preview">
-                          {docState[i]?.status === 'loading' ? (
-                            <div className="doc-loading">加载中…</div>
-                          ) : docState[i]?.status === 'err' ? (
-                            <div className="doc-err">⚠ 内容读取失败：{docState[i]?.message}</div>
-                          ) : docState[i]?.status === 'ok' ? (
-                            (() => {
-                              const data = docState[i].data as HubDocContent
-                              if (!data || !data.previewable) return <div className="doc-err">⚠ 该文档不可预览（二进制/非文本或为空）——可点击路径复制后在本地查看</div>
-                              return (
-                                <div>
-                                  {data.mime === 'text/plain'
-                                    ? <pre className="doc-plain">{data.content}</pre>
-                                    : <MarkdownDocView content={data.content} maxHeight={440} />}
-                                  {data.truncated && <div className="doc-truncate">⚠ 文档过大已截断：仅展示前 {((data.limit ?? 512 * 1024) / 1024).toFixed(0)} KB（共 {Math.max(data.size, 0) / 1024 >= 1024 ? (data.size / 1024 / 1024).toFixed(1) + ' MB' : (data.size / 1024).toFixed(0) + ' KB'}）</div>}
-                                  {data.source === 'worktree' && <div className="doc-truncate">· 读取自本任务分支态目录（未合入主分支的最终态）</div>}
-                                </div>
-                              )
-                            })()
-                          ) : null}
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* 审计工作台：改动文件 × diff × 批注 × 测试/产物证据（L1+L2，Codex 式任务收尾审计） */}
-          {(patchObjs.length > 0 || (t.artifacts ?? []).length > 0 || t.testReport) && (
-            <div className="td-section">
-              <div className="td-section-title">
-                🧾 审计：改动 × 证据
-                {canAudit && <span style={{ marginLeft: 8, fontSize: 10, color: 'var(--muted-2)' }}>（验收前逐文件过一遍，问题 ✘ 会随打回交付）</span>}
-              </div>
-
-              {/* L3：本任务文件与空间内其他任务的改动重叠（并行合入风险） */}
-              {overlaps.length > 0 && (
-                <div style={{ margin: '4px 0 8px', padding: '8px 10px', borderRadius: 6, background: 'rgba(246,191,38,.07)', border: '1px solid rgba(246,191,38,.28)' }}>
-                  <div style={{ fontSize: 10.5, fontWeight: 700, color: 'var(--yellow)', marginBottom: 4 }}>
-                    ⚠ 并行改动重叠（L3）：下列文件同时被其他任务改动——验收/合入时注意顺序与语义冲突
-                  </div>
-                  {overlaps.map(g => {
-                    const mine = g.tasks.filter(x => x.id === t.id)
-                    const others = g.tasks.filter(x => x.id !== t.id)
-                    const live = others.some(x => x.status === 'in_progress' || x.status === 'in_review')
-                    return (
-                      <div key={g.file} style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 11, lineHeight: 1.7 }}>
-                        <code style={{ flex: 1, minWidth: 0, color: live ? 'var(--yellow)' : 'var(--text)', wordBreak: 'break-all' }} title={g.file}>{g.file}</code>
-                        {mine.map(x => <span key={x.id} className="ov-chip" style={{ color: 'var(--yellow)' }}>◉ {x.id}（本任务）</span>)}
-                        {others.map(x => (
-                          <span key={x.id} className="ov-chip" style={{ whiteSpace: 'nowrap' }} title={`${x.title}\n${OVERLAP_ST[x.status] ?? x.status}`}>
-                            <span className="st-dot" style={{ background: OVERLAP_DOT[x.status] }} /> {x.id} · {OVERLAP_ST[x.status] ?? x.status}
-                          </span>
-                        ))}
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
-
-              {/* 测试报告（D7' 机器闸门 / 结构化报告） */}
-              {t.testReport && (
-                <div className={`tr-card ${t.testReport.passed ? 'pass' : 'fail'}`}>
-                  <span className="tr-badge">{t.testReport.passed ? '✅ 测试通过' : '❌ 测试失败'}</span>
-                  {t.testReport.summary && <div className="tr-summary">{t.testReport.summary}</div>}
-                  {!t.testReport.passed && (t.testReport.failures ?? []).map((f, i) => (
-                    <div key={i} className="tr-fail">
-                      <b>{f.name}</b>
-                      {f.repro && <div className="tr-repro">复现：{f.repro}</div>}
-                      {f.log && <pre className="tr-log">{f.log.slice(0, 1200)}</pre>}
-                    </div>
-                  ))}
-                  <div className="tr-meta">{t.testReport.by} · {fmt(t.testReport.at)}</div>
-                </div>
-              )}
-
-              {/* 产物 */}
-              {(t.artifacts ?? []).length > 0 && (
-                <div style={{ margin: '6px 0' }}>
-                  {(t.artifacts ?? []).map((a, i) => (
-                    <div key={i} className="proc-item" style={{ borderBottom: 'none' }}>
-                      <span className="proc-who">📦 产物</span>
-                      <span className="proc-at">{a.kind}</span>
-                      <div className="proc-text">
-                        {a.kind === 'url'
-                          ? <a href={a.path} target="_blank" rel="noreferrer">{a.title || a.path}</a>
-                          : <span>{a.title ? `${a.title} — ` : ''}<code>{a.path}</code></span>}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {/* 补丁记录（最新一轮优先；多轮补齐可见） */}
-              {[...patchObjs].reverse().map((p, idx) => {
-                const files = normPatchFiles(p)
-                const sections = p.diff ? splitDiffByFile(p.diff) : []
-                const at = idx === 0 ? '（最新）' : ''
-                return (
-                  <div key={`${p.at}-${idx}`} style={{ marginBottom: 6 }}>
-                    {patchObjs.length > 1 && (
-                      <div style={{ fontSize: 10.5, color: 'var(--muted-2)', margin: '4px 0' }}>
-                        第 {patchObjs.length - idx} 轮补丁 {at} · {p.by} · {fmt(p.at)}
-                      </div>
-                    )}
-                    {p.summary && <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 4 }}>✏️ {p.summary}</div>}
-                    {files.length === 0 && !p.diff && (
-                      <div className="detail-warn">（无结构化 diff 记录——本轮未进入隔离 worktree 或旧格式）</div>
-                    )}
-                    {files.map(f => {
-                      const note = noteOf(t.reviewNotes, f.path)
-                      const open = !!auditOpen[f.path]
-                      const sec = sections.find(s => s.file === f.path)
+              <div className="td-section-title">🤖 AI 执行过程</div>
+              {hasProcess ? (
+                <>
+                  {[...(t.evidence ?? []), ...(t.comments ?? [])]
+                    .sort((a, b) => (a.at < b.at ? -1 : 1))
+                    .map((c, i) => {
+                      // 待将军确认的那一条：就地渲染答复框（内容与输入框同屏，答完即写入评论）
+                      const isAsk = askComment !== null && c === askComment
                       return (
-                        <div key={f.path}>
-                          <div className="audit-row" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '3px 0', fontSize: 12 }}>
-                            <span className={`audit-st ${f.status}`} title={AUDIT_ST[f.status] ?? f.status}>{AUDIT_ST[f.status] ?? f.status}</span>
-                            <code style={{ flex: 1, color: 'var(--text)' }}>{f.path}</code>
-                            <span style={{ color: 'var(--muted-2)', fontSize: 10.5 }}>
-                              {f.add > 0 && <span style={{ color: 'var(--green)' }}>+{f.add}</span>}
-                              {f.del > 0 && <span style={{ color: 'var(--red)' }}> −{f.del}</span>}
-                            </span>
-                            {note && note.verdict === 'ok' && <span style={{ color: 'var(--green)', fontSize: 10.5 }}>✓ OK</span>}
-                            {note && note.verdict === 'issue' && <span style={{ color: 'var(--red)', fontSize: 10.5 }} title={note.note}>✘ 有问题{note.note ? '：' + note.note.slice(0, 80) : ''}</span>}
-                            {canAudit && (
-                              <>
-                                <button className="btn mini" onClick={() => void markAudit(f.path, 'ok')} title="审计通过该文件">✓</button>
-                                <button className="btn mini" onClick={() => void markAudit(f.path, 'issue')} title="该文件有问题（打回时交付下一轮）">✘</button>
-                                {note && <button className="btn mini ghost" onClick={() => void clearAudit(f.path)} title="清除批注">✕</button>}
-                              </>
-                            )}
-                            {sec && (
-                              <button className="btn mini ghost" onClick={() => openFile(f.path)} title="展开/收起 diff">
-                                {open ? '▴ 收起 diff' : '▾ 查看 diff'}
-                              </button>
-                            )}
-                          </div>
-                          {open && sec && (
-                            <pre className="audit-diff">{sec.text.slice(0, 6000)}{sec.text.length > 6000 ? '\n…（diff 过长已截断）' : ''}</pre>
+                        <div key={i} className={isAsk ? 'proc-item proc-ask' : 'proc-item'}>
+                          <span className="proc-who">{c.by}</span>
+                          <span className="proc-at">{fmt(c.at)}</span>
+                          {isAsk && <span className="proc-ask-tag">❓ 待将军确认</span>}
+                          <div className="proc-text">{c.text}</div>
+                          {isAsk && (
+                            <div className="ask-reply" ref={askBoxRef}>
+                              <div className="ask-reply-head">
+                                ↑ 待确认内容就在上方——直接在此答复
+                                {askPoints > 1 && <span className="ask-reply-count">（含 {askPoints} 个待确认点，可分行逐条回 1. 2. 3.）</span>}
+                              </div>
+                              <textarea
+                                className="ask-reply-input"
+                                rows={3}
+                                autoFocus
+                                value={askDraft}
+                                placeholder={`直接答复 ${t.id}…（Ctrl+Enter 发送）`}
+                                onChange={e => setAskDraft(e.target.value)}
+                                onKeyDown={e => {
+                                  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); void submitAskReply() }
+                                }}
+                              />
+                              <div className="ask-reply-actions">
+                                <button className="btn primary" disabled={busy || askDraft.trim().length === 0} onClick={() => void submitAskReply()}>✓ 答复并续做</button>
+                                <button className="btn ghost" disabled={busy || askDraft.length === 0} onClick={() => setAskDraft('')}>清空</button>
+                                <span className="ask-reply-note">答复写入本任务评论 → 守护下一轮带答复续做（❓ 自动解除）</span>
+                              </div>
+                            </div>
                           )}
                         </div>
                       )
                     })}
+                  {(t.patches ?? []).filter(p => typeof p === 'string').length > 0 && (
+                    <div className="proc-patch">🔧 补丁 {(t.patches ?? []).filter(p => typeof p === 'string').join('、')}</div>
+                  )}
+                </>
+              ) : t.status === 'in_progress' ? (
+                <div className="proc-empty">
+                  🟢 任务已在进行中，AI worker 正在执行（通常 5–15 分钟）——每轮派工/完成/异常会实时沉淀到此处。
+                  {!aiRunning && (
+                    <>
+                      <br />
+                      若该任务是手工开工、尚未派 AI，可点下方「🤖 派 AI 执行」。
+                    </>
+                  )}
+                </div>
+              ) : (
+                <div className="proc-empty">
+                  ⏳ 该任务还没有 AI 执行过程——目前只是状态标记。
+                  <br />
+                  AI 智能体认领执行后，它的每一步行动、产出与汇报会实时沉淀在这里（下方时间线 + 过程记录），完成时提交待验收。
+                </div>
+              )}
+            </div>
+
+            {/* 产出文档直达区（S5：标题+岗位+时间+路径可复制；点击同屏预览 MarkdownDocView 渲染全文） */}
+            {showDocSection && (
+              <div className="td-section">
+                <div className="td-section-title">📄 产出文档<span style={{ marginLeft: 8, fontSize: 10, color: 'var(--muted-2)' }}>（点击条目直接预览文档全文，无需查找路径）</span></div>
+                {docCandidates.length === 0 ? (
+                  <div className="doc-empty">⏳ 暂无已登记文档——{docRole ? '文档型岗位结算完成时会自动登记（如 REQUIREMENTS.md / RESEARCH.md）' : '当前任务非文档型产出'}</div>
+                ) : (
+                  <div className="doc-list">
+                    {docCandidates.map(({ a, i }, k) => (
+                      <div key={i} className={k === 0 ? 'doc-item doc-newest' : 'doc-item'}>
+                        <div className="doc-item-head">
+                          {k === 0 && <span className="doc-badge">最新</span>}
+                          <span className="doc-title" title={a.title ?? a.path}>{a.title ? a.title : pathBase(a.path)}</span>
+                          <span className="doc-by">{ROLE_LABEL[a.by] ?? a.by ?? '—'}</span>
+                          <span className="doc-at">{fmt(a.at)}</span>
+                          <button className="btn mini" disabled={busy} onClick={() => void toggleDoc(i)} title="同屏预览该文档内容">{docOpen === i ? '▴ 收起' : '▶ 预览'}</button>
+                          {docOpen === i && docState[i]?.status === 'ok' && docState[i]?.data?.previewable === true && (
+                            <button className="btn mini" disabled={busy} onClick={() => setReaderIndex(i)} title="全屏放大阅读（单页滚动、字号可调、可复制全文/下载 .md）">⤢ 放大阅读</button>
+                          )}
+                        </div>
+                        <div className="doc-path" title="点击复制完整路径"><code onClick={() => copyDocPath(a.path)}>{a.path}</code></div>
+                        {docOpen === i && (
+                          <div className="doc-preview" style={{ '--md-zoom': '1.12' } as CSSProperties}>
+                            {docState[i]?.status === 'loading' ? (
+                              <div className="doc-loading">加载中…</div>
+                            ) : docState[i]?.status === 'err' ? (
+                              <div className="doc-err">⚠ 内容读取失败：{docState[i]?.message}</div>
+                            ) : docState[i]?.status === 'ok' ? (
+                              (() => {
+                                const data = docState[i].data as HubDocContent
+                                if (!data || !data.previewable) return <div className="doc-err">⚠ 该文档不可预览（二进制/非文本或为空）——可点击路径复制后在本地查看</div>
+                                return (
+                                  <div>
+                                    {data.mime === 'text/plain'
+                                      ? <pre className="doc-plain">{data.content}</pre>
+                                      : <MarkdownDocView content={data.content} maxHeight={inlineDocMax} />}
+                                    {data.truncated && <div className="doc-truncate">⚠ 文档过大已截断：仅展示前 {((data.limit ?? 512 * 1024) / 1024).toFixed(0)} KB（共 {Math.max(data.size, 0) / 1024 >= 1024 ? (data.size / 1024 / 1024).toFixed(1) + ' MB' : (data.size / 1024).toFixed(0) + ' KB'}）</div>}
+                                    {data.source === 'worktree' && <div className="doc-truncate">· 读取自本任务分支态目录（未合入主分支的最终态）</div>}
+                                  </div>
+                                )
+                              })()
+                            ) : null}
+                          </div>
+                        )}
+                      </div>
+                    ))}
                   </div>
+                )}
+              </div>
+            )}
+
+            {/* 审计工作台：改动文件 × diff × 批注 × 测试/产物证据（L1+L2，Codex 式任务收尾审计） */}
+            {(patchObjs.length > 0 || (t.artifacts ?? []).length > 0 || t.testReport) && (
+              <div className="td-section">
+                <div className="td-section-title">
+                  🧾 审计：改动 × 证据
+                  {canAudit && <span style={{ marginLeft: 8, fontSize: 10, color: 'var(--muted-2)' }}>（验收前逐文件过一遍，问题 ✘ 会随打回交付）</span>}
+                </div>
+
+                {/* L3：本任务文件与空间内其他任务的改动重叠（并行合入风险） */}
+                {overlaps.length > 0 && (
+                  <div style={{ margin: '4px 0 8px', padding: '8px 10px', borderRadius: 6, background: 'rgba(246,191,38,.07)', border: '1px solid rgba(246,191,38,.28)' }}>
+                    <div style={{ fontSize: 10.5, fontWeight: 700, color: 'var(--yellow)', marginBottom: 4 }}>
+                      ⚠ 并行改动重叠（L3）：下列文件同时被其他任务改动——验收/合入时注意顺序与语义冲突
+                    </div>
+                    {overlaps.map(g => {
+                      const mine = g.tasks.filter(x => x.id === t.id)
+                      const others = g.tasks.filter(x => x.id !== t.id)
+                      const live = others.some(x => x.status === 'in_progress' || x.status === 'in_review')
+                      return (
+                        <div key={g.file} style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 11, lineHeight: 1.7 }}>
+                          <code style={{ flex: 1, minWidth: 0, color: live ? 'var(--yellow)' : 'var(--text)', wordBreak: 'break-all' }} title={g.file}>{g.file}</code>
+                          {mine.map(x => <span key={x.id} className="ov-chip" style={{ color: 'var(--yellow)' }}>◉ {x.id}（本任务）</span>)}
+                          {others.map(x => (
+                            <span key={x.id} className="ov-chip" style={{ whiteSpace: 'nowrap' }} title={`${x.title}\n${OVERLAP_ST[x.status] ?? x.status}`}>
+                              <span className="st-dot" style={{ background: OVERLAP_DOT[x.status] }} /> {x.id} · {OVERLAP_ST[x.status] ?? x.status}
+                            </span>
+                          ))}
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+
+                {/* 测试报告（D7' 机器闸门 / 结构化报告） */}
+                {t.testReport && (
+                  <div className={`tr-card ${t.testReport.passed ? 'pass' : 'fail'}`}>
+                    <span className="tr-badge">{t.testReport.passed ? '✅ 测试通过' : '❌ 测试失败'}</span>
+                    {t.testReport.summary && <div className="tr-summary">{t.testReport.summary}</div>}
+                    {!t.testReport.passed && (t.testReport.failures ?? []).map((f, i) => (
+                      <div key={i} className="tr-fail">
+                        <b>{f.name}</b>
+                        {f.repro && <div className="tr-repro">复现：{f.repro}</div>}
+                        {f.log && <pre className="tr-log">{f.log.slice(0, 1200)}</pre>}
+                      </div>
+                    ))}
+                    <div className="tr-meta">{t.testReport.by} · {fmt(t.testReport.at)}</div>
+                  </div>
+                )}
+
+                {/* 产物 */}
+                {(t.artifacts ?? []).length > 0 && (
+                  <div style={{ margin: '6px 0' }}>
+                    {(t.artifacts ?? []).map((a, i) => (
+                      <div key={i} className="proc-item" style={{ borderBottom: 'none' }}>
+                        <span className="proc-who">📦 产物</span>
+                        <span className="proc-at">{a.kind}</span>
+                        <div className="proc-text">
+                          {a.kind === 'url'
+                            ? <a href={a.path} target="_blank" rel="noreferrer">{a.title || a.path}</a>
+                            : <span>{a.title ? `${a.title} — ` : ''}<code>{a.path}</code></span>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* 补丁记录（最新一轮优先；多轮补齐可见） */}
+                {[...patchObjs].reverse().map((p, idx) => {
+                  const files = normPatchFiles(p)
+                  const sections = p.diff ? splitDiffByFile(p.diff) : []
+                  const at = idx === 0 ? '（最新）' : ''
+                  return (
+                    <div key={`${p.at}-${idx}`} style={{ marginBottom: 6 }}>
+                      {patchObjs.length > 1 && (
+                        <div style={{ fontSize: 10.5, color: 'var(--muted-2)', margin: '4px 0' }}>
+                          第 {patchObjs.length - idx} 轮补丁 {at} · {p.by} · {fmt(p.at)}
+                        </div>
+                      )}
+                      {p.summary && <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 4 }}>✏️ {p.summary}</div>}
+                      {files.length === 0 && !p.diff && (
+                        <div className="detail-warn">（无结构化 diff 记录——本轮未进入隔离 worktree 或旧格式）</div>
+                      )}
+                      {files.map(f => {
+                        const note = noteOf(t.reviewNotes, f.path)
+                        const open = !!auditOpen[f.path]
+                        const sec = sections.find(s => s.file === f.path)
+                        return (
+                          <div key={f.path}>
+                            <div className="audit-row" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '3px 0', fontSize: 12 }}>
+                              <span className={`audit-st ${f.status}`} title={AUDIT_ST[f.status] ?? f.status}>{AUDIT_ST[f.status] ?? f.status}</span>
+                              <code style={{ flex: 1, color: 'var(--text)' }}>{f.path}</code>
+                              <span style={{ color: 'var(--muted-2)', fontSize: 10.5 }}>
+                                {f.add > 0 && <span style={{ color: 'var(--green)' }}>+{f.add}</span>}
+                                {f.del > 0 && <span style={{ color: 'var(--red)' }}> −{f.del}</span>}
+                              </span>
+                              {note && note.verdict === 'ok' && <span style={{ color: 'var(--green)', fontSize: 10.5 }}>✓ OK</span>}
+                              {note && note.verdict === 'issue' && <span style={{ color: 'var(--red)', fontSize: 10.5 }} title={note.note}>✘ 有问题{note.note ? '：' + note.note.slice(0, 80) : ''}</span>}
+                              {canAudit && (
+                                <>
+                                  <button className="btn mini" onClick={() => void markAudit(f.path, 'ok')} title="审计通过该文件">✓</button>
+                                  <button className="btn mini" onClick={() => void markAudit(f.path, 'issue')} title="该文件有问题（打回时交付下一轮）">✘</button>
+                                  {note && <button className="btn mini ghost" onClick={() => void clearAudit(f.path)} title="清除批注">✕</button>}
+                                </>
+                              )}
+                              {sec && (
+                                <button className="btn mini ghost" onClick={() => openFile(f.path)} title="展开/收起 diff">
+                                  {open ? '▴ 收起 diff' : '▾ 查看 diff'}
+                                </button>
+                              )}
+                            </div>
+                            {open && sec && (
+                              <pre className="audit-diff">{sec.text.slice(0, 6000)}{sec.text.length > 6000 ? '\n…（diff 过长已截断）' : ''}</pre>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )
+                })}
+
+                {/* 整体结论 */}
+                {canAudit && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, paddingTop: 6, borderTop: '1px solid var(--line, rgba(255,255,255,.06))' }}>
+                    <span style={{ fontSize: 11, color: 'var(--muted)' }}>整体结论：</span>
+                    {overall && overall.verdict === 'ok' && <span style={{ color: 'var(--green)', fontSize: 11.5 }}>✓ 通过{overall.note ? `：${overall.note}` : ''}（{overall.by} · {fmt(overall.at)}）</span>}
+                    {overall && overall.verdict === 'issue' && <span style={{ color: 'var(--red)', fontSize: 11.5 }}>✘ 有问题{overall.note ? `：${overall.note}` : ''}</span>}
+                    <button className="btn mini" onClick={() => void markAudit('*', 'ok')} title="整体验收通过">✓ 验收通过</button>
+                    <button className="btn mini" onClick={() => void markAudit('*', 'issue')} title="整体有问题（打回交付说明）">✘ 有问题</button>
+                    {overall && <button className="btn mini ghost" onClick={() => void clearAudit('*')}>清除</button>}
+                  </div>
+                )}
+                {!canAudit && (t.reviewNotes ?? []).length > 0 && (
+                  <div style={{ marginTop: 6, fontSize: 10.5, color: 'var(--muted-2)' }}>已保存批注 {(t.reviewNotes ?? []).length} 条（进入待验收/完成后可继续批注）</div>
+                )}
+              </div>
+            )}
+
+            {/* P2-5 双向关联：本任务关联的日程（事件带 taskId；支持重复实例展开与点击跳回日程面板）*/}
+            <div className="td-section">
+              <div className="td-section-title">
+                📅 关联日程{calEvents !== null ? `（${String(calEvents.length)}）` : ''}
+                <span style={{ marginLeft: 8, fontSize: 10, color: 'var(--muted-2)' }}>（日程面板里把「任务号」填成本任务号即可建立关联）</span>
+              </div>
+              {calEvents === null ? (
+                <div style={{ fontSize: 11, color: 'var(--muted-2)' }}>加载中…</div>
+              ) : calEvents.length === 0 ? (
+                <div style={{ fontSize: 11, color: 'var(--muted-2)' }}>暂无关联日程</div>
+              ) : (
+                calEvents.map(ev => (
+                  <div key={String(ev.id) + '@' + occKey(ev)} style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 11.5, lineHeight: 1.9 }}>
+                    <span style={{ color: 'var(--muted-2)', fontVariantNumeric: 'tabular-nums' }}>{occKey(ev)}</span>
+                    {ev.recurring === true && <span title="重复日程">🔁</span>}
+                    <span style={{ flex: 1, minWidth: 0, wordBreak: 'break-word' }}>{ev.title}</span>
+                    <span style={{ color: 'var(--muted-2)' }}>{ev.allDay === true ? '全天' : fmtRange(ev)}</span>
+                  </div>
+                ))
+              )}
+            </div>
+
+            {/* 状态时间线 */}
+            {timeline.length > 0 && (
+              <div className="td-section">
+                <div className="td-section-title">⏱ 进展时间线</div>
+                <div className="timeline">
+                  {timeline.map(a => (
+                    <div key={a.seq} className="tl-item">
+                      <span className="tl-time">{fmt(a.ts)}</span>
+                      <span className="tl-act">
+                        {ACTION_TEXT[a.action] ?? a.action}
+                        {a.action === 'transition' && typeof a.detail?.to === 'string' ? ` → ${STATUS_CN[a.detail.to] ?? a.detail.to}` : ''}
+                      </span>
+                      <span className="tl-by">· {a.member}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {t.description && (
+              <div className="td-section">
+                <div className="td-section-title">📋 任务描述</div>
+                <div className="detail-text">{t.description}</div>
+              </div>
+            )}
+
+            <div className="td-section">
+              <div className="td-section-title">🎯 验收标准</div>
+              {(t.acceptance ?? []).length > 0 ? (
+                <ul className="detail-list">{(t.acceptance ?? []).map((a, i) => <li key={i}>{a}</li>)}</ul>
+              ) : (
+                <div className="detail-warn">未定义验收标准——以任务描述与目标要求判断</div>
+              )}
+            </div>
+
+            <div className="td-section">
+              <div className="td-section-title">🚧 边界（做什么 / 不做什么）</div>
+              {(t.boundary && ((t.boundary.do ?? []).length > 0 || (t.boundary.dont ?? []).length > 0)) ? (
+                <>
+                  {(t.boundary.do ?? []).map((x, i) => (
+                    <div key={`bd-do-${i}`} className="bd-item do">✅ {x}</div>
+                  ))}
+                  {(t.boundary.dont ?? []).map((x, i) => (
+                    <div key={`bd-dont-${i}`} className="bd-item dont">🚫 {x}</div>
+                  ))}
+                </>
+              ) : (
+                <div className="detail-warn">未定义边界——默认只做本任务范围、不越权、不 push（见描述与纪律）</div>
+              )}
+            </div>
+
+            {/* 操作 */}
+            <div className="td-actions">
+              {t.status === 'todo' && (
+                <>
+                  <button className="btn primary" disabled={busy} onClick={() => void doStart()}>▶ 开工</button>
+                  <button className="btn" disabled={busy} onClick={() => void doClaim()}>🔒 认领</button>
+                </>
+              )}
+              {t.status === 'in_progress' && (
+                <>
+                  <button className="btn primary" disabled={busy} onClick={() => void doSubmitReview()}>📮 提交验收</button>
+                  <button className="btn" disabled={busy} onClick={() => void doReturn()}>归还待办</button>
+                </>
+              )}
+              {t.status === 'in_review' && (
+                <>
+                  <button className="btn primary" disabled={busy} onClick={() => void doReview()}>✓ 验收通过</button>
+                  <button className="btn" disabled={busy} onClick={() => void doReject()}>↩ 打回重做</button>
+                </>
+              )}
+              {t.status === 'blocked' && (
+                <button className="btn primary" disabled={busy} onClick={() => void doUnblock()}>解阻</button>
+              )}
+              {(t.status === 'todo' || t.status === 'in_progress' || t.status === 'blocked') && (
+                t.status === 'in_progress' && aiRunning ? (
+                  <button className="btn ghost" disabled title="该任务已认领并派 AI 执行中——完成/异常会自动更新，无需重复派发">
+                    🤖 AI 执行中（已派工）
+                  </button>
+                ) : (
+                  <button className="btn" disabled={busy} onClick={() => void doAskAI()} title="请求 AI 智能体认领并执行本任务（过程与产出会沉淀到下方）">
+                    🤖 派 AI 执行
+                  </button>
                 )
-              })}
-
-              {/* 整体结论 */}
-              {canAudit && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, paddingTop: 6, borderTop: '1px solid var(--line, rgba(255,255,255,.06))' }}>
-                  <span style={{ fontSize: 11, color: 'var(--muted)' }}>整体结论：</span>
-                  {overall && overall.verdict === 'ok' && <span style={{ color: 'var(--green)', fontSize: 11.5 }}>✓ 通过{overall.note ? `：${overall.note}` : ''}（{overall.by} · {fmt(overall.at)}）</span>}
-                  {overall && overall.verdict === 'issue' && <span style={{ color: 'var(--red)', fontSize: 11.5 }}>✘ 有问题{overall.note ? `：${overall.note}` : ''}</span>}
-                  <button className="btn mini" onClick={() => void markAudit('*', 'ok')} title="整体验收通过">✓ 验收通过</button>
-                  <button className="btn mini" onClick={() => void markAudit('*', 'issue')} title="整体有问题（打回交付说明）">✘ 有问题</button>
-                  {overall && <button className="btn mini ghost" onClick={() => void clearAudit('*')}>清除</button>}
-                </div>
               )}
-              {!canAudit && (t.reviewNotes ?? []).length > 0 && (
-                <div style={{ marginTop: 6, fontSize: 10.5, color: 'var(--muted-2)' }}>已保存批注 {(t.reviewNotes ?? []).length} 条（进入待验收/完成后可继续批注）</div>
+              {t.status !== 'done' && t.status !== 'canceled' && (
+                t.hold ? (
+                  <button className="btn primary" disabled={busy} onClick={() => void doUnhold()} title="恢复自动交接：守护将按岗位认领并执行">
+                    🚀 放行
+                  </button>
+                ) : (
+                  <button className="btn" disabled={busy} onClick={() => void doHold()} title="将军拦截：守护不再自动认领/执行本任务，直到放行">
+                    🖐 拦截自动
+                  </button>
+                )
               )}
-            </div>
-          )}
-
-          {/* P2-5 双向关联：本任务关联的日程（事件带 taskId；支持重复实例展开与点击跳回日程面板）*/}
-          <div className="td-section">
-            <div className="td-section-title">
-              📅 关联日程{calEvents !== null ? `（${String(calEvents.length)}）` : ''}
-              <span style={{ marginLeft: 8, fontSize: 10, color: 'var(--muted-2)' }}>（日程面板里把「任务号」填成本任务号即可建立关联）</span>
-            </div>
-            {calEvents === null ? (
-              <div style={{ fontSize: 11, color: 'var(--muted-2)' }}>加载中…</div>
-            ) : calEvents.length === 0 ? (
-              <div style={{ fontSize: 11, color: 'var(--muted-2)' }}>暂无关联日程</div>
-            ) : (
-              calEvents.map(ev => (
-                <div key={String(ev.id) + '@' + occKey(ev)} style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 11.5, lineHeight: 1.9 }}>
-                  <span style={{ color: 'var(--muted-2)', fontVariantNumeric: 'tabular-nums' }}>{occKey(ev)}</span>
-                  {ev.recurring === true && <span title="重复日程">🔁</span>}
-                  <span style={{ flex: 1, minWidth: 0, wordBreak: 'break-word' }}>{ev.title}</span>
-                  <span style={{ color: 'var(--muted-2)' }}>{ev.allDay === true ? '全天' : fmtRange(ev)}</span>
-                </div>
-              ))
-            )}
-          </div>
-
-          {/* 状态时间线 */}
-          {timeline.length > 0 && (
-            <div className="td-section">
-              <div className="td-section-title">⏱ 进展时间线</div>
-              <div className="timeline">
-                {timeline.map(a => (
-                  <div key={a.seq} className="tl-item">
-                    <span className="tl-time">{fmt(a.ts)}</span>
-                    <span className="tl-act">
-                      {ACTION_TEXT[a.action] ?? a.action}
-                      {a.action === 'transition' && typeof a.detail?.to === 'string' ? ` → ${STATUS_CN[a.detail.to] ?? a.detail.to}` : ''}
-                    </span>
-                    <span className="tl-by">· {a.member}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {t.description && (
-            <div className="td-section">
-              <div className="td-section-title">📋 任务描述</div>
-              <div className="detail-text">{t.description}</div>
-            </div>
-          )}
-
-          <div className="td-section">
-            <div className="td-section-title">🎯 验收标准</div>
-            {(t.acceptance ?? []).length > 0 ? (
-              <ul className="detail-list">{(t.acceptance ?? []).map((a, i) => <li key={i}>{a}</li>)}</ul>
-            ) : (
-              <div className="detail-warn">未定义验收标准——以任务描述与目标要求判断</div>
-            )}
-          </div>
-
-          <div className="td-section">
-            <div className="td-section-title">🚧 边界（做什么 / 不做什么）</div>
-            {(t.boundary && ((t.boundary.do ?? []).length > 0 || (t.boundary.dont ?? []).length > 0)) ? (
-              <>
-                {(t.boundary.do ?? []).map((x, i) => (
-                  <div key={`bd-do-${i}`} className="bd-item do">✅ {x}</div>
-                ))}
-                {(t.boundary.dont ?? []).map((x, i) => (
-                  <div key={`bd-dont-${i}`} className="bd-item dont">🚫 {x}</div>
-                ))}
-              </>
-            ) : (
-              <div className="detail-warn">未定义边界——默认只做本任务范围、不越权、不 push（见描述与纪律）</div>
-            )}
-          </div>
-
-          {/* 操作 */}
-          <div className="td-actions">
-            {t.status === 'todo' && (
-              <>
-                <button className="btn primary" disabled={busy} onClick={() => void doStart()}>▶ 开工</button>
-                <button className="btn" disabled={busy} onClick={() => void doClaim()}>🔒 认领</button>
-              </>
-            )}
-            {t.status === 'in_progress' && (
-              <>
-                <button className="btn primary" disabled={busy} onClick={() => void doSubmitReview()}>📮 提交验收</button>
-                <button className="btn" disabled={busy} onClick={() => void doReturn()}>归还待办</button>
-              </>
-            )}
-            {t.status === 'in_review' && (
-              <>
-                <button className="btn primary" disabled={busy} onClick={() => void doReview()}>✓ 验收通过</button>
-                <button className="btn" disabled={busy} onClick={() => void doReject()}>↩ 打回重做</button>
-              </>
-            )}
-            {t.status === 'blocked' && (
-              <button className="btn primary" disabled={busy} onClick={() => void doUnblock()}>解阻</button>
-            )}
-            {(t.status === 'todo' || t.status === 'in_progress' || t.status === 'blocked') && (
-              t.status === 'in_progress' && aiRunning ? (
-                <button className="btn ghost" disabled title="该任务已认领并派 AI 执行中——完成/异常会自动更新，无需重复派发">
-                  🤖 AI 执行中（已派工）
+              {askComment !== null && (
+                <button className="btn" disabled={busy} onClick={focusAskBox} title="跳到上方 ❓ 待确认那一条，就地答复">
+                  ❓ 去答复（待确认）
                 </button>
-              ) : (
-                <button className="btn" disabled={busy} onClick={() => void doAskAI()} title="请求 AI 智能体认领并执行本任务（过程与产出会沉淀到下方）">
-                  🤖 派 AI 执行
-                </button>
-              )
-            )}
-            {t.status !== 'done' && t.status !== 'canceled' && (
-              t.hold ? (
-                <button className="btn primary" disabled={busy} onClick={() => void doUnhold()} title="恢复自动交接：守护将按岗位认领并执行">
-                  🚀 放行
-                </button>
-              ) : (
-                <button className="btn" disabled={busy} onClick={() => void doHold()} title="将军拦截：守护不再自动认领/执行本任务，直到放行">
-                  🖐 拦截自动
-                </button>
-              )
-            )}
-            {askComment !== null && (
-              <button className="btn" disabled={busy} onClick={focusAskBox} title="跳到上方 ❓ 待确认那一条，就地答复">
-                ❓ 去答复（待确认）
+              )}
+              <button
+                className="btn ghost"
+                disabled={busy}
+                onClick={() => setCommentOpen(v => !v)}
+                title="在本页就地追加评论/过程记录（不再弹二级框）"
+              >
+                {commentOpen ? '💬 收起输入框' : '💬 评论/记录'}
               </button>
-            )}
-            <button
-              className="btn ghost"
-              disabled={busy}
-              onClick={() => setCommentOpen(v => !v)}
-              title="在本页就地追加评论/过程记录（不再弹二级框）"
-            >
-              {commentOpen ? '💬 收起输入框' : '💬 评论/记录'}
-            </button>
-            <button className="btn ghost" disabled={busy} onClick={() => void doReassign()}>转派</button>
-          </div>
-
-          {/* 就地评论输入框（替代 window.prompt 二级弹框；与上方「AI 执行过程」同一数据源） */}
-          {commentOpen && (
-            <div className="td-comment-box">
-              <textarea
-                className="ask-reply-input"
-                rows={3}
-                value={commentDraft}
-                placeholder={`给 ${t.id} 追加评论/过程记录…（Ctrl+Enter 发送）`}
-                onChange={e => setCommentDraft(e.target.value)}
-                onKeyDown={e => {
-                  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); void submitComment() }
-                }}
-              />
-              <div className="ask-reply-actions">
-                <button className="btn primary" disabled={busy || commentDraft.trim().length === 0} onClick={() => void submitComment()}>发送评论</button>
-                <button className="btn ghost" disabled={busy} onClick={() => { setCommentOpen(false); setCommentDraft('') }}>取消</button>
-                <span className="ask-reply-note">by general · 发送后出现在上方「AI 执行过程」，士兵/守护可读到</span>
-              </div>
+              <button className="btn ghost" disabled={busy} onClick={() => void doReassign()}>转派</button>
             </div>
-          )}
+
+            {/* 就地评论输入框（替代 window.prompt 二级弹框；与上方「AI 执行过程」同一数据源） */}
+            {commentOpen && (
+              <div className="td-comment-box">
+                <textarea
+                  className="ask-reply-input"
+                  rows={3}
+                  value={commentDraft}
+                  placeholder={`给 ${t.id} 追加评论/过程记录…（Ctrl+Enter 发送）`}
+                  onChange={e => setCommentDraft(e.target.value)}
+                  onKeyDown={e => {
+                    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); void submitComment() }
+                  }}
+                />
+                <div className="ask-reply-actions">
+                  <button className="btn primary" disabled={busy || commentDraft.trim().length === 0} onClick={() => void submitComment()}>发送评论</button>
+                  <button className="btn ghost" disabled={busy} onClick={() => { setCommentOpen(false); setCommentDraft('') }}>取消</button>
+                  <span className="ask-reply-note">by general · 发送后出现在上方「AI 执行过程」，士兵/守护可读到</span>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
-    </div>
+      {readerReady && readerArt !== undefined && readerData !== undefined && (
+        <DocReader
+          title={readerArt.title !== undefined && readerArt.title !== '' ? readerArt.title : pathBase(readerArt.path)}
+          path={readerArt.path}
+          by={ROLE_LABEL[readerArt.by] ?? readerArt.by}
+          at={fmt(readerArt.at)}
+          content={readerData.content}
+          mime={readerData.mime}
+          truncated={readerData.truncated}
+          limit={readerData.limit}
+          size={readerData.size}
+          source={readerData.source}
+          onClose={() => setReaderIndex(null)}
+        />
+      )}
+    </>
   )
 }

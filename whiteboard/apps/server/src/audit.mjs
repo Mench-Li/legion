@@ -22,7 +22,17 @@ export const AUDIT_DEFAULTS = Object.freeze({
   RETENTION_TTL_MS: 2000, // retention() 结果缓存时长（/metrics 会被轮询）
 });
 
-/** 事件类型（固定枚举，便于检索与断言） */
+/**
+ * 事件类型（固定枚举，便于检索与断言）。
+ *
+ * **写入量纪律**（P4-5 补记，曾因此踩坑）：审计写文件是同步 append，落在消息热路径上，
+ * 所以每个类型的写入量必须与**消息数**同阶，绝不能与**更新次数**或**载荷大小**同阶：
+ *   · `presence` —— 前端在 mousemove 上发的高频临态，**只在该连接首次发时记一条**
+ *     （上界 = 连接数；逐条记会让 260 条 presence 变成 249 次同步落盘，实测把限流告警
+ *     从 ~12ms 拖到 ~80ms 并让丢弃数从 19 掉到 11，并行负载下可致告警消失）；
+ *   · `ops` —— 按**消息**记一条（一条消息带 200 个 op 也只记一条，摘要里体现 `count`/`kinds`）。
+ * 新增类型时请一并确认它的写入量上界。
+ */
 export const AUDIT_TYPES = Object.freeze([
   'connect', 'disconnect', 'deny', 'reject', // 连接生命周期
   'ops', 'op_denied', 'presence', // 写入

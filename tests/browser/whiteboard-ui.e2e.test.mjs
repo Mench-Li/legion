@@ -41,24 +41,31 @@ const describeBrowser = probe.available ? describe : describe.skip
  * 定位成本很高。所以这里显式补建一次（零依赖、幂等、只写构建产物目录）。
  */
 function ensureWhiteboardAssets() {
+  const srcDir = join(ROOT, 'whiteboard', 'packages', 'shared', 'src')
   const sharedDir = join(ROOT, 'whiteboard', 'apps', 'web', 'public', 'shared')
-  const asset = join(sharedDir, 'room.mjs')
-  // 只判断「目录里有 room.mjs」不够：**新增**一个共享模块后，旧目录仍在、room.mjs 也在，
-  // 但新模块缺失 → 页面 import 404，报错表现是「连不上/welcome 没来」，定位成本很高（真实踩到）。
-  // 所以按「main.mjs 实际 import 了哪些 shared 模块」逐个检查，缺哪个就重建。
+  // 只判断「目录里有 room.mjs」不够，**两个坑都真实踩到过**：
+  //   ① **新增**共享模块后目录仍在、room.mjs 也在，新模块缺失 → 页面 import 404；
+  //   ② 改过共享模块后**产物是旧的** → 页面 import 报「does not provide an export named ...」。
+  // 两种表现的共同点是「页面根本没跑起来」，而断言只会以「连接不上」的形式炸掉，定位成本很高。
+  // 所以按「main.mjs 实际 import 了哪些 shared 模块」逐个做**存在性 + 内容新鲜度**检查，不新鲜就重建。
   const imported = [...readFileSync(join(ROOT, 'whiteboard', 'apps', 'web', 'public', 'js', 'main.mjs'), 'utf8')
     .matchAll(/from\s+'\.\.\/shared\/([\w.-]+\.mjs)'/g)].map((m) => m[1])
-  const missing = imported.filter((f) => !existsSync(join(sharedDir, f)))
-  if (existsSync(asset) && missing.length === 0) return 'present'
+  const staleness = (f) => {
+    const built = join(sharedDir, f)
+    if (!existsSync(built)) return 'missing'
+    return readFileSync(join(srcDir, f)).equals(readFileSync(built)) ? null : 'stale'
+  }
+  const bad = imported.map((f) => [f, staleness(f)]).filter(([, why]) => why)
+  if (bad.length === 0) return 'present'
   const r = spawnSync(process.execPath, ['scripts/build.mjs'], {
     cwd: join(ROOT, 'whiteboard'), encoding: 'utf8', timeout: 60000,
   })
-  const stillMissing = imported.filter((f) => !existsSync(join(sharedDir, f)))
-  if (r.status !== 0 || !existsSync(asset) || stillMissing.length > 0) {
-    throw new Error('whiteboard 静态产物缺失且自动构建失败（缺 ' + (stillMissing.join(', ') || 'room.mjs')
+  const stillBad = imported.map((f) => [f, staleness(f)]).filter(([, why]) => why)
+  if (r.status !== 0 || stillBad.length > 0) {
+    throw new Error('whiteboard 静态产物缺失/过期且自动构建失败（' + stillBad.map(([f, w]) => f + ':' + w).join(', ')
       + '）：' + (r.stderr || r.stdout || r.error?.message || 'unknown'))
   }
-  return missing.length > 0 ? 'built-missing:' + missing.join(',') : 'built'
+  return 'built(' + bad.map(([f, w]) => f + ':' + w).join(',') + ')'
 }
 
 if (probe.available) {
@@ -166,8 +173,10 @@ describeBrowser('P4-1 白板前端 · 真实浏览器 DOM 端到端', () => {
       source: [
         '(() => {',
         '  const Original = window.WebSocket;',
+        '  window.__wsLog = [];',
         '  window.WebSocket = function (...args) {',
         '    const s = new Original(...args);',
+        '    window.__wsLog.push(s);',
         '    window.__lastWs = s;',
         '    return s;',
         '  };',
@@ -406,6 +415,40 @@ describeBrowser('P4-1 白板前端 · 真实浏览器 DOM 端到端', () => {
     assert.equal(inNew, 1, '补发必须落在**新房间**（旧行为：两个房间都没有这个元素）')
     assert.equal(await roomElements(srv.port, from), 0, '不得把新房间的绘制泄漏到旧房间')
     await shot(page, 'case9-switch-then-draw')
+  })
+
+  /**
+   * 用例 ⑩（P4-3）：**切房间不得连出两个 socket**。
+   *
+   * 这条是从用例 ⑨ 的**偶发失败**追出来的真实缺陷（不是测试写法问题）：
+   * `switchRoom()` 的顺序是「`ws.close()` → `connect()`」。旧 socket 的 `onclose` 是**异步**的，
+   * 它在 `connect()` 之后才触发，而 `onclose` 里无条件 `setTimeout(connect, retryDelay)` ——
+   * 于是同一个房间被连了**两次**，`ws` 指向后一个（可能还在 CONNECTING）。
+   * 危害：被取代那个连接的 `welcome` 触发补发时，op 写进一个还没就绪的 socket 就没了
+   * （⑨ 因此偶发失败 0 !== 1）。修法是「只有当前 socket 的事件才算数」，本用例把它钉死：
+   * 一次导航 = 一个 socket，切一次房间 = 再多一个，仅此而已。
+   */
+  it('⑩ 切房间只建立一个新连接（旧 socket 的 onclose 不得重复重连）', async () => {
+    await installWsCapture()
+    await open('?room=main&token=tok-main')
+    await ready()
+    const afterLoad = await page.evaluate(() => window.__wsLog.length)
+    assert.equal(afterLoad, 1, '首次进入应只建立一个连接，实际 ' + afterLoad)
+
+    await page.fill('#room-input', 'switch-once')
+    await page.click('#room-go')
+    await page.waitFor(() => document.getElementById('room-label')?.textContent === 'switch-once', { timeoutMs: 10000, label: '房间标签切换' })
+    await page.waitFor(() => document.getElementById('conn')?.className === 'dot on', { timeoutMs: 15000, label: '新房间连接就绪' })
+    // 旧 socket 的 onclose 若是「无条件重连」，会在 retryDelay(≥1s) 后多建一个连接。
+    await new Promise((r) => setTimeout(r, 2500))
+
+    const total = await page.evaluate(() => window.__wsLog.length)
+    const states = await page.evaluate(() => window.__wsLog.map((s) => s.readyState))
+    assert.equal(total, 2, '切一次房间应只新增一个连接（旧行为：旧 socket 的 onclose 又连出一个 → 3 个），实际 ' + total + '，状态 ' + JSON.stringify(states))
+    const openCount = await page.evaluate(() => window.__wsLog.filter((s) => s.readyState === 1).length)
+    assert.equal(openCount, 1, '同时只应有一个 OPEN 连接，实际 ' + openCount)
+    assert.equal(await page.evaluate(() => window.__lastWs === window.__wsLog[window.__wsLog.length - 1]), true, '当前连接应是最后建立的那个')
+    await shot(page, 'case10-single-socket-per-switch')
   })
 })
 

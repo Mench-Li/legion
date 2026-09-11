@@ -17,7 +17,7 @@ import { validateElement, newId } from '../shared/schema.mjs';
 import { hitTestElement } from '../shared/hitTest.mjs';
 import { screenToWorld, worldToScreen } from '../shared/viewport.mjs';
 import { createThrottle } from '../shared/throttle.mjs';
-import { createPendingOps, chunkOps } from '../shared/pendingOps.mjs';
+import { createPendingOps, chunkOps, sendInChunks } from '../shared/pendingOps.mjs';
 import { resolveNotice, NOTICE_POLICY, NOTICE_CONN } from '../shared/notice.mjs';
 import {
   parseRoomFromSearch, buildSwitchUrl, tokenStorageKey, canWrite, errorText, isValidRoomId, roomShareUrl, DEFAULT_ROOM_ID,
@@ -275,15 +275,31 @@ function flushPendingOps() {
     pendingNoticeText = '';
     return 0;
   }
-  for (const op of ops) applyOp(doc, op);
-  um.begin();
-  for (const op of ops) um.add(op);
-  um.commit();
   const maxPerMessage = serverLimits?.maxOpsPerMessage || ops.length;
-  for (const part of chunkOps(ops, maxPerMessage)) send({ type: 'op', ops: part });
+  // 关键：只把**确实写进 socket** 的部分算发出去。`welcome` 可能来自一个已被取代的连接
+  // （切房间时旧 socket 的 onclose 会再调度一次 connect），此刻 `ws` 可能还在 CONNECTING，
+  // 写不进去的必须放回队列 —— 否则就在修复里重演了本切片要消灭的静默丢失（真实踩到过）。
+  const { sent, remaining } = sendInChunks(ops, maxPerMessage, (part) => send({ type: 'op', ops: part }));
+  if (sent.length === 0) {
+    pending.unshift(remaining);
+    pendingNoticeText = `连接未就绪：已暂存 ${pending.size} 个操作，连上后自动补发`;
+    setNotice(pendingNoticeText);
+    return 0;
+  }
+  // 本地重放：welcome 刚把 doc 换成服务端文档，而服务端不回显给发送者（broadcastToRoom 带 except），
+  // 只发不重放的结果是「服务端有、屏上没有」。只重放**已发送**的部分。
+  for (const op of sent) applyOp(doc, op);
+  um.begin();
+  for (const op of sent) um.add(op);
+  um.commit();
   clearPendingNotice();
-  setNotice(`已补发连接中断期间的 ${ops.length} 个操作`);
-  return ops.length;
+  if (remaining.length > 0) {
+    pending.unshift(remaining);
+    setNotice(`已补发 ${sent.length} 个操作；另有 ${pending.size} 个仍在暂存，连上后自动补发`);
+  } else {
+    setNotice(`已补发连接中断期间的 ${sent.length} 个操作`);
+  }
+  return sent.length;
 }
 
 /** 写入前的前端闸门（服务端另有强制）：只读角色不发 op，并给出明确提示而不是静默丢弃 */
@@ -297,17 +313,26 @@ function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const qs = new URLSearchParams({ room: roomId });
   if (roomToken) qs.set('token', roomToken);
-  ws = new WebSocket(`${proto}://${location.host}/ws?${qs.toString()}`);
-  ws.onopen = () => {
+  const socket = new WebSocket(`${proto}://${location.host}/ws?${qs.toString()}`);
+  ws = socket;
+  // 陈旧连接的守卫：`switchRoom` 先 `ws.close()` 再 `connect()`，而旧 socket 的 onclose 是**异步**的，
+  // 它随后还会走一遍下面的重连调度 → 于是同时存在两个连接（一个已被取代、一个在 CONNECTING）。
+  // 真实后果（P4-3 自测抓到的偶发失败）：被取代那个连接的 welcome 触发补发，此刻 `ws` 还在
+  // CONNECTING，op 就写不出去。所以：只有**当前** socket 的事件才算数。
+  const isCurrent = () => ws === socket;
+  socket.onopen = () => {
+    if (!isCurrent()) return;
     setConn(true);
     retryDelay = 1000;
   };
-  ws.onmessage = (e) => {
+  socket.onmessage = (e) => {
+    if (!isCurrent()) return;
     let m;
     try { m = JSON.parse(e.data); } catch { return; }
     handleMessage(m);
   };
-  ws.onclose = (e) => {
+  socket.onclose = (e) => {
+    if (!isCurrent()) return; // 已被取代的连接：不置灰、不重复重连（否则会连出第二个 socket）
     setConn(false);
     peers.clear();
     updatePeers();
@@ -315,10 +340,10 @@ function connect() {
     if (e && e.code === 1008) setNotice('连接被服务端关闭（消息频率或格式超限）', NOTICE_POLICY);
     else if (e && e.code === 1009) setNotice(errorText('message_too_large'), NOTICE_POLICY);
     else if (e && e.code === 1011) setNotice('连接被关闭（服务端无法打开该房间的存储）', NOTICE_POLICY);
-    setTimeout(connect, retryDelay);
+    setTimeout(() => { if (isCurrent()) connect(); }, retryDelay);
     retryDelay = Math.min(retryDelay * 1.5, 10000);
   };
-  ws.onerror = () => { /* 交给 onclose 处理 */ };
+  socket.onerror = () => { /* 交给 onclose 处理 */ };
 }
 
 function handleMessage(m) {

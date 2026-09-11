@@ -5,7 +5,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { createPendingOps, chunkOps, MAX_PENDING_OPS } from '../src/pendingOps.mjs';
+import { createPendingOps, chunkOps, sendInChunks, MAX_PENDING_OPS } from '../src/pendingOps.mjs';
 
 describe('P4-3 · 断线窗口待发队列（纯函数）', () => {
   it('默认有界且为空队列的初始状态一致', () => {
@@ -95,5 +95,76 @@ describe('P4-3 · 补发分块（服务端单条消息上限是硬门槛）', ()
     const parts = chunkOps(ops, 2);
     parts[0].push({ id: 'injected' });
     assert.equal(ops.length, 3);
+  });
+});
+
+describe('P4-3 · 补发的成功回报与未发送部分的回队（真实竞态）', () => {
+  it('全部写成功：sent 是全部、remaining 为空', () => {
+    const ops = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
+    const chunks = [];
+    const r = sendInChunks(ops, 2, (part) => { chunks.push(part.map((o) => o.id)); return true; });
+    assert.deepEqual(chunks, [['a', 'b'], ['c']]);
+    assert.deepEqual(r.sent.map((o) => o.id), ['a', 'b', 'c']);
+    assert.deepEqual(r.remaining, []);
+    assert.equal(r.failedChunkSize, 0);
+  });
+
+  it('**第一块就写不进去**：sent 为空、remaining 是全部（调用方据此整批回队，一条都不能丢）', () => {
+    const ops = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
+    let calls = 0;
+    const r = sendInChunks(ops, 2, () => { calls += 1; return false; });
+    assert.equal(calls, 1, '第一块失败后不得继续尝试后续块');
+    assert.deepEqual(r.sent, []);
+    assert.deepEqual(r.remaining.map((o) => o.id), ['a', 'b', 'c']);
+    assert.equal(r.failedChunkSize, 2);
+  });
+
+  it('**中途失败**：已成功的前缀算发出去，剩下的原样回队（顺序不变）', () => {
+    const ops = Array.from({ length: 5 }, (_, i) => ({ id: 'op-' + i }));
+    let calls = 0;
+    const r = sendInChunks(ops, 2, () => { calls += 1; return calls <= 2; }); // 前两块成功，第三块失败
+    assert.deepEqual(r.sent.map((o) => o.id), ['op-0', 'op-1', 'op-2', 'op-3']);
+    assert.deepEqual(r.remaining.map((o) => o.id), ['op-4']);
+  });
+
+  it('写入**抛错**按「没发出去」处理（绝不能当成功而丢掉这批 op）', () => {
+    const ops = [{ id: 'a' }, { id: 'b' }];
+    const r = sendInChunks(ops, 1, () => { throw new Error('socket 已经关了'); });
+    assert.deepEqual(r.sent, []);
+    assert.deepEqual(r.remaining.map((o) => o.id), ['a', 'b']);
+  });
+
+  it('只有 `true` 算成功：返回 undefined / 真值但非 true 都不算', () => {
+    const ops = [{ id: 'a' }];
+    assert.deepEqual(sendInChunks(ops, 1, () => undefined).sent, [], 'undefined 不算成功');
+    assert.deepEqual(sendInChunks(ops, 1, () => 1).sent, [], '1 不算成功（契约是布尔）');
+    assert.deepEqual(sendInChunks(ops, 1, () => true).sent.length, 1);
+  });
+
+  it('空输入不调用 send（避免发空 op 消息把连接搞挂）', () => {
+    let calls = 0;
+    const r = sendInChunks([], 200, () => { calls += 1; return true; });
+    assert.equal(calls, 0);
+    assert.deepEqual(r, { sent: [], remaining: [], failedChunkSize: 0 });
+  });
+});
+
+describe('P4-3 · 未发送部分回队（unshift）', () => {
+  it('回队后保持相对顺序，且与后续新操作拼接顺序正确', () => {
+    const q = createPendingOps();
+    q.push([{ id: 'a' }, { id: 'b' }, { id: 'c' }]);
+    const drained = q.drain();
+    q.unshift(drained.slice(2)); // 只发出去前两个，第三个回队
+    q.push([{ id: 'd' }]);
+    assert.deepEqual(q.drain().map((o) => o.id), ['c', 'd'], '回队的老操作应在新操作之前（按用户操作顺序补发）');
+  });
+
+  it('回队空数组是 no-op；回队后有界不变量仍成立', () => {
+    const q = createPendingOps({ max: 3 });
+    q.push([{ id: 'a' }]);
+    assert.deepEqual(q.unshift([]), { size: 1, dropped: 0 });
+    const r = q.unshift([{ id: 'x' }, { id: 'y' }]);
+    assert.deepEqual(r, { size: 3, dropped: 0 });
+    assert.deepEqual(q.drain().map((o) => o.id), ['x', 'y', 'a']);
   });
 });

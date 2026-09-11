@@ -11,3 +11,4 @@ export * from './presence.mjs';
 export * from './crdt.mjs';
 export * from './undo.mjs';
 export * from './room.mjs';
+export * from './pendingOps.mjs';

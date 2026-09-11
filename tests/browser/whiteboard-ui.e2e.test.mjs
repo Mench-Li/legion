@@ -20,7 +20,7 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -41,20 +41,29 @@ const describeBrowser = probe.available ? describe : describe.skip
  * 定位成本很高。所以这里显式补建一次（零依赖、幂等、只写构建产物目录）。
  */
 function ensureWhiteboardAssets() {
-  const asset = join(ROOT, 'whiteboard', 'apps', 'web', 'public', 'shared', 'room.mjs')
-  if (existsSync(asset)) return 'present'
+  const sharedDir = join(ROOT, 'whiteboard', 'apps', 'web', 'public', 'shared')
+  const asset = join(sharedDir, 'room.mjs')
+  // 只判断「目录里有 room.mjs」不够：**新增**一个共享模块后，旧目录仍在、room.mjs 也在，
+  // 但新模块缺失 → 页面 import 404，报错表现是「连不上/welcome 没来」，定位成本很高（真实踩到）。
+  // 所以按「main.mjs 实际 import 了哪些 shared 模块」逐个检查，缺哪个就重建。
+  const imported = [...readFileSync(join(ROOT, 'whiteboard', 'apps', 'web', 'public', 'js', 'main.mjs'), 'utf8')
+    .matchAll(/from\s+'\.\.\/shared\/([\w.-]+\.mjs)'/g)].map((m) => m[1])
+  const missing = imported.filter((f) => !existsSync(join(sharedDir, f)))
+  if (existsSync(asset) && missing.length === 0) return 'present'
   const r = spawnSync(process.execPath, ['scripts/build.mjs'], {
     cwd: join(ROOT, 'whiteboard'), encoding: 'utf8', timeout: 60000,
   })
-  if (r.status !== 0 || !existsSync(asset)) {
-    throw new Error('whiteboard 静态产物缺失且自动构建失败：' + (r.stderr || r.stdout || r.error?.message || 'unknown'))
+  const stillMissing = imported.filter((f) => !existsSync(join(sharedDir, f)))
+  if (r.status !== 0 || !existsSync(asset) || stillMissing.length > 0) {
+    throw new Error('whiteboard 静态产物缺失且自动构建失败（缺 ' + (stillMissing.join(', ') || 'room.mjs')
+      + '）：' + (r.stderr || r.stdout || r.error?.message || 'unknown'))
   }
-  return 'built'
+  return missing.length > 0 ? 'built-missing:' + missing.join(',') : 'built'
 }
 
 if (probe.available) {
   const how = ensureWhiteboardAssets()
-  if (how === 'built') console.log('[e2e] 已自动执行 whiteboard build（`--only test` 会跳过 build 阶段）：whiteboard/scripts/build.mjs')
+  if (how !== 'present') console.log('[e2e] 已自动执行 whiteboard build（`--only test` 会跳过 build 阶段）：whiteboard/scripts/build.mjs（' + how + '）')
 }
 
 if (!probe.available) {
@@ -144,6 +153,32 @@ describeBrowser('P4-1 白板前端 · 真实浏览器 DOM 端到端', () => {
   const open = (qs) => page.goto(`http://127.0.0.1:${srv.port}/${qs}`)
   const ready = () => page.waitFor(READY, { timeoutMs: 10000, label: '页面连接就绪' })
 
+  /**
+   * 装一个**透明**的 WebSocket 捕获器（页面加载前注入，因此在之后每次导航都生效）。
+   * 用途：用例 ⑧/⑨ 需要「真的把连接断掉」来制造确定性的「连接未就绪窗口」——
+   * 实测 CDP 的 `Network.emulateNetworkConditions({offline:true})` **不影响已建立的 WebSocket**
+   * （op 照样送达），所以只能用这种方式。幂等：重复调用只装一次（用例之间不得互相依赖）。
+   */
+  let wsCaptureInstalled = false
+  async function installWsCapture() {
+    if (wsCaptureInstalled) return
+    await page.send('Page.addScriptToEvaluateOnNewDocument', {
+      source: [
+        '(() => {',
+        '  const Original = window.WebSocket;',
+        '  window.WebSocket = function (...args) {',
+        '    const s = new Original(...args);',
+        '    window.__lastWs = s;',
+        '    return s;',
+        '  };',
+        '  window.WebSocket.prototype = Original.prototype;',
+        '  for (const k of ["OPEN", "CLOSED", "CONNECTING", "CLOSING"]) window.WebSocket[k] = Original[k];',
+        '})();',
+      ].join('\n'),
+    })
+    wsCaptureInstalled = true
+  }
+
   it('① 进入指定房间：标题/标签/角色/连接点都由真实 welcome 驱动', async () => {
     await open('?room=main&token=tok-main')
     await ready()
@@ -221,9 +256,9 @@ describeBrowser('P4-1 白板前端 · 真实浏览器 DOM 端到端', () => {
     await page.click('#room-go')
     await page.waitFor(() => document.getElementById('room-label')?.textContent === 'switch-a', { timeoutMs: 10000, label: '房间标签切换' })
     await ready()
-    // 页内切换不触发导航：必须等新房间的连接真的建立（否则绘制会落在还没连上的连接上，静默丢失）
+    // 页内切换不触发导航：本用例主动等新房间连接真的建立，让「画的内容落在新房间」这条断言
+    // 不受时序影响（**连接未就绪时画东西**这条竞态由用例 ⑧ 专门覆盖，P4-3 修复）。
     await waitRoomOpen(srv.port, 'switch-a')
-
     const search = await page.evaluate(() => location.search)
     assert.match(search, /room=switch-a/)
     assert.ok(!search.includes('token'), '切房间不得把 token 写进 URL（会留在浏览器历史里）')
@@ -262,6 +297,115 @@ describeBrowser('P4-1 白板前端 · 真实浏览器 DOM 端到端', () => {
     await ready()
     assert.deepEqual(page.pageErrors, [], '页面出现未捕获异常：\n' + page.pageErrors.join('\n'))
     assert.deepEqual(page.consoleErrors, [], 'console.error 不应出现：\n' + page.consoleErrors.join('\n'))
+  })
+
+  /**
+   * 用例 ⑧（P4-3 / 候选 #10）：**连接未就绪窗口内画的东西不能静默丢**。
+   *
+   * 原缺陷复现路径：`main.mjs` 的 `send()` 只在 `ws.readyState === OPEN` 时发送，其余情况静默 return
+   * → 切房间/断线重连的窗口里画的东西①服务端从没收到、②welcome 把 `doc` 换成服务端文档后屏上也消失。
+   *
+   * 怎么把「窗口」变成确定性的：等 socket 就绪后再断网是没用的（实测 CDP `Network.emulateNetworkConditions`
+   * 的 offline **不影响已建立的 WebSocket**，op 照样送达）。这里改为在页面加载前注入脚本捕获 WebSocket
+   * 实例，然后在窗口内**真的关掉它** —— 之后 `onclose` 会走 `setTimeout(connect, retryDelay)`，
+   * 至少 1s 内 `readyState !== OPEN`，这就是我们要的那个窗口（也是真实用户会遇到的「网络抖一下」）。
+   */
+  it('⑧ 连接未就绪窗口内的绘制：入队 + 可见提示 + 重连后自动补发（不再静默丢失）', async () => {
+    const room = 'race-room'
+    await installWsCapture()
+    await open(`?room=${room}&token=tok-main`)
+    await ready()
+    assert.equal(await roomElements(srv.port, room), 0, '该房间应是全新的空房间')
+
+    // 真的把当前连接关掉 → 进入「连接未就绪」窗口（重连至少 1s 后才会发生）
+    const closed = await page.evaluate(() => {
+      const s = window.__lastWs
+      if (!s) return 'no-socket'
+      s.close()
+      return s.readyState
+    })
+    assert.notEqual(closed, 'no-socket', '捕获器应已拿到 WebSocket 实例（否则本用例没有测到窗口）')
+    await page.waitFor(() => document.getElementById('conn')?.className === 'dot off', { timeoutMs: 3000, label: '连接点变为断开' })
+
+    // 窗口内立刻画一个矩形（真实鼠标事件）
+    await page.click('[data-tool="rect"]')
+    const stage = await page.centerOf('#stage')
+    await page.drag({ x: stage.x - 90, y: stage.y - 50 }, { x: stage.x + 30, y: stage.y + 20 }, { steps: 5 })
+
+    // ① 必须有可见提示（旧行为：静默丢，什么都不说）
+    const notice = await page.evaluate(() => {
+      const el = document.getElementById('limit')
+      return el && el.style.display !== 'none' ? el.textContent : ''
+    })
+    assert.match(notice, /暂存|未就绪/, '连接未就绪时的绘制必须给出可读提示，而不是静默丢弃：' + JSON.stringify(notice))
+    // ② 此刻服务端还没有这个元素（证明它确实还没发出去，而不是我们测错了窗口）
+    assert.equal(await roomElements(srv.port, room), 0, '窗口内的绘制此时不应已在服务端')
+    // ③ 本地画布上看得见（用户的操作不是「没反应」）
+    const localInk = await page.waitFor(CANVAS_INK, { timeoutMs: 3000, label: '本地画布出现墨迹' })
+    assert.ok(localInk.count > 0, '窗口内的绘制应先在本地画出来')
+
+    // 重连（retryDelay 1s 起）→ welcome → 自动补发
+    await page.waitFor(() => document.getElementById('conn')?.className === 'dot on', { timeoutMs: 15000, label: '自动重连成功' })
+    const t0 = Date.now()
+    let elements = 0
+    while (Date.now() - t0 < 8000) {
+      elements = await roomElements(srv.port, room)
+      if (elements >= 1) break
+      await new Promise((r) => setTimeout(r, 100))
+    }
+    assert.equal(elements, 1, '重连后必须自动补发窗口内的绘制（旧行为：服务端永远只有 0 个元素）')
+
+    // 补发后本地也不能「屏上消失」：welcome 换过 doc，补发时已重新应用
+    const afterInk = await page.evaluate(CANVAS_INK)
+    assert.ok(afterInk.count > 0, '补发后本地画布仍应有该元素（welcome 不得把它抹掉）')
+    const afterNotice = await page.evaluate(() => {
+      const el = document.getElementById('limit')
+      return el && el.style.display !== 'none' ? el.textContent : ''
+    })
+    assert.match(afterNotice, /补发/, '补发完成后应如实告知，而不是留着「暂存中」让人以为还没发出去：' + JSON.stringify(afterNotice))
+    assert.deepEqual(page.pageErrors, [], '本路径不应产生页面异常：\n' + page.pageErrors.join('\n'))
+    await shot(page, 'case8-pending-ops-flush')
+  })
+
+  /**
+   * 用例 ⑨（P4-3）：候选 #10 登记的**原始复现路径** ——「切房间 → 在新连接就绪前立刻拖拽」。
+   * 修复前的实际结果：元素不出现在**任何**房间（旧连接已关、新连接未就绪，op 被静默丢掉）。
+   * 修复后要求：入队 → 新房间 welcome 后补发 → 落在**新房间**，且不泄漏到旧房间。
+   */
+  it('⑨ 切房间后立刻绘制（原始复现路径）：补发到新房间，且不泄漏到旧房间', async () => {
+    const from = 'main'
+    const to = 'switch-race'
+    await installWsCapture()
+    await open(`?room=${from}&token=tok-main`)
+    await ready()
+
+    await page.fill('#room-input', to)
+    await page.click('#room-go')
+    // 立刻把刚建立的连接关掉：模拟「新连接还没就绪」。房间标签已切，但连接不可用。
+    await page.waitFor(() => document.getElementById('room-label')?.textContent === 'switch-race', { timeoutMs: 10000, label: '房间标签切换' })
+    await page.evaluate(() => { window.__lastWs?.close() })
+    await page.waitFor(() => document.getElementById('conn')?.className === 'dot off', { timeoutMs: 3000, label: '新连接断开' })
+
+    await page.click('[data-tool="rect"]')
+    const stage = await page.centerOf('#stage')
+    await page.drag({ x: stage.x - 70, y: stage.y - 40 }, { x: stage.x + 40, y: stage.y + 30 }, { steps: 5 })
+    const notice = await page.evaluate(() => {
+      const el = document.getElementById('limit')
+      return el && el.style.display !== 'none' ? el.textContent : ''
+    })
+    assert.match(notice, /暂存|未就绪/, '切房间窗口内的绘制同样必须给出可读提示：' + JSON.stringify(notice))
+
+    await page.waitFor(() => document.getElementById('conn')?.className === 'dot on', { timeoutMs: 15000, label: '新房间自动重连' })
+    const t0 = Date.now()
+    let inNew = 0
+    while (Date.now() - t0 < 8000) {
+      inNew = await roomElements(srv.port, to)
+      if (inNew >= 1) break
+      await new Promise((r) => setTimeout(r, 100))
+    }
+    assert.equal(inNew, 1, '补发必须落在**新房间**（旧行为：两个房间都没有这个元素）')
+    assert.equal(await roomElements(srv.port, from), 0, '不得把新房间的绘制泄漏到旧房间')
+    await shot(page, 'case9-switch-then-draw')
   })
 })
 

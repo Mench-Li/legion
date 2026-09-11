@@ -4,12 +4,13 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-10　`run-ci --only env,test,doc` **全 PASS**；其中 `test` **39 套件 / 981 用例**
-（238s）—— 以本文件所在提交为准
+**最近一次全量基线**：2026-09-10　`run-ci --only env,test,doc` **全 PASS**；其中 `test` **39 套件 / 994 用例**
+（约 4 分钟）—— 以本文件所在提交为准
 
-> 说明：上句记录 P4-2 之后的全量运行（含 `doc` 阶段）。此前 P4-1 之后的 `test` 阶段实测为
-> **39 套件 / 950 用例**，P3-4 收尾为 **38 套件 / 943 用例**（详见下方 §2 基线表）；
-> 各轮证据见 `docs/P4-1-evidence/verify-evidence.md` §3、`docs/P4-2-evidence/verify-evidence.md` §3.5。
+> 说明：上句记录 P4-3 之后的全量运行（含 `doc` 阶段）。P4-2 之后为 **981 用例**、
+> P4-1 之后 `test` 阶段为 **39 套件 / 950 用例**，P3-4 收尾为 **38 套件 / 943 用例**（详见下方 §2 基线表）；
+> 各轮证据见 `docs/P4-3-evidence/verify-evidence.md` §3、`docs/P4-2-evidence/verify-evidence.md` §3.5、
+> `docs/P4-1-evidence/verify-evidence.md` §3。
 
 > ✅ **基线可单命令复现**（2026-09-10）：`test` 阶段此前会因 `notify-hub-smoke` 泄漏 hub 子进程
 > 而**永不结束**（零输出、永久等待），P2-7 / P2-8 / P3-1 / P3-2 之后新增或扩充的套件只能用「逐套件单跑」
@@ -65,8 +66,10 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：39 套件 / 981 用例，`--only test` 整体 PASS** —— 2026-09-10 实测
-（P4-2 之后：`p13-host-injection` 9→14 例（含 5 例真实宿主负向诊断），并新增同组纯函数文件
+**当前基线：39 套件 / 994 用例，`--only test` 整体 PASS** —— 2026-09-10 实测
+（P4-3 之后：`e2e-browser` 7→**9 例**（新增两条「连接未就绪窗口」竞态用例）、`whiteboard` 158→**169 例**
+（新增 `pendingOps.test.mjs` 11 例队列单测）；
+P4-2 之后：`p13-host-injection` 9→14 例（含 5 例真实宿主负向诊断），并新增同组纯函数文件
 `host-diagnostics.test.mjs` **25 例** → 该套件组 39 例；
 P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-4 之后：`plugins` 177→185、
 `config` 28→36、`p13-host-injection` 7→8。
@@ -87,14 +90,14 @@ P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-
 | rules | 7 | hub-event-stream（F-01 scope/游标/信封） | 5 |
 | artifact | 16 | dual-write（P1-1 双进程写同库竞态 + 迁移竞态） | 4 |
 | security | 6 | p13-host-injection（P1-3 真实宿主注入 + P3-4 配置摘要 + P4-2 导入失败诊断，2 文件） | 38 |
-| read-auth（鉴权矩阵 + 回环开放，2 文件） | 14 | whiteboard（含 P3-1 治理端到端与前端静态契约，12 文件） | 158 |
+| read-auth（鉴权矩阵 + 回环开放，2 文件） | 14 | whiteboard（含 P3-1 治理端到端、P4-3 待发队列单测与前端静态契约，15 文件） | 169 |
 | files-api | 41 | plugins（含 P2-6 chat-context、SP-P0 space-pipeline、P3-4 配置） | 185 |
 | files-p27 / files-ui（P2-7） | 36 / 19 | web-p28 / browser-ui（P2-8） | 21 / 21 |
 | web | 24 | static-serve（静态托管 404/SPA 回退/穿越） | 6 |
 | doc-render | 11 | board-plugin | 37 |
 | skill-importer | 4 | scrum | 25 |
 | hub-board / artifact-policy | 1 / 3 | config（P3-2 统一配置 + P3-4 插件族） | 36 |
-| web-history（P2-8 抓取历史） | 1 | e2e-browser（P4-1 真实浏览器 DOM 端到端） | 7 |
+| web-history（P2-8 抓取历史） | 1 | e2e-browser（P4-1 真实浏览器 DOM 端到端 + P4-3 重连补发，9 例） | 9 |
 
 （上表**全部**为 `--only test` 单次全量运行的实测值；不再存在「未入全量基线」的套件。）
 
@@ -189,6 +192,12 @@ P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-
     ③ 解析依赖 DSH `app-boot`/loader 的**文案**（`failed to import|apply loader entry <id> (<specifier>)`），
     harness 改文案会让模式失效——缓解是「健康宿主零误报」对照 + 匹配不到时如实报「未能识别」；
     ④ 诊断改善的是失败**可读性**，CI 的失败聚合方式不变。
+14. 白板断线窗口补发（P4-3）：连接未就绪时的绘制现在**入队 + 提示 + 重连后补发**
+    （`whiteboard/packages/shared/src/pendingOps.mjs`，见 `docs/P4-3-evidence/verify-evidence.md`），
+    **已知边界**：① 入队 op 沿用原 stamp，并发修改按 LWW 取舍（操作送达了，冲突值可能保留对端）；
+    ② 队列有界 **500** op，极端离线仍丢**最旧**（提示里报出丢弃条数）；
+    ③ 「已写进 socket、未到服务端」的在途 op 仍会丢——需要 ack/重传协议才能解决，本轮不做；
+    ④ 真实网络故障（TCP 半开）下前端拿不到 `onclose`，该场景未验证（E2E 用「真实关闭连接」制造窗口）。
 
 ## 5. 维护约定
 

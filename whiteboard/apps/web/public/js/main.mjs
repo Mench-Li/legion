@@ -17,6 +17,7 @@ import { validateElement, newId } from '../shared/schema.mjs';
 import { hitTestElement } from '../shared/hitTest.mjs';
 import { screenToWorld, worldToScreen } from '../shared/viewport.mjs';
 import { createThrottle } from '../shared/throttle.mjs';
+import { createPendingOps, chunkOps } from '../shared/pendingOps.mjs';
 import {
   parseRoomFromSearch, buildSwitchUrl, tokenStorageKey, canWrite, errorText, isValidRoomId, roomShareUrl, DEFAULT_ROOM_ID,
 } from '../shared/room.mjs';
@@ -125,13 +126,19 @@ function switchRoom(nextRoomId, nextToken = null) {
   }
   roomId = nextRoomId;
   history.replaceState(null, '', buildSwitchUrl(location.href, roomId));
+  // 切房间要把**上一个房间**的暂存操作一起丢掉：它们属于旧房间，不可能在新区补发。
+  // 但必须说出来 —— 「切房间后东西没了」正是候选 #10 报告的那种静默丢失。
+  const droppedFromPrevRoom = pending.clear();
   doc = createDoc();
   um = createUndoManager(doc, identity.clientId, { variant: 'clear-on-remote' });
   selection = null;
   peers.clear();
   updatePeers();
   syncRoomUi();
-  setNotice('');
+  setNotice(droppedFromPrevRoom > 0
+    ? `已切换房间：上一个房间有 ${droppedFromPrevRoom} 个操作未能发送（该房间连接已断开）`
+    : '');
+  pendingNoticeText = '';
   if (ws) { try { ws.close(); } catch { /* ignore */ } }
   connect();
 }
@@ -205,25 +212,74 @@ function draftValid(d) {
   return true;
 }
 
-// ---------- 网络（断线重连，TC-S11） ----------
+// ---------- 网络（断线重连，TC-S11；补发窗口见候选 #10 / P4-3） ----------
 let ws = null;
 let retryDelay = 1000;
+// 连接未就绪（首次加载 / 断线重连 / 切房间后的新连接尚未 welcome）时，op 不能静默丢：
+// 入队，welcome 后补发（见 flushPendingOps）。有界 + 可见提示，语义在 shared/pendingOps.mjs 里单测锁定。
+const pending = createPendingOps();
+let pendingNoticeText = '';
 
 function setConn(on) {
   connDot.className = 'dot ' + (on ? 'on' : 'off');
 }
 
+/** 真正把消息写进 socket；返回是否写成功（false = 连接未就绪，调用方需自行决定入队或丢弃） */
 function send(obj) {
   if (ws && ws.readyState === WebSocket.OPEN) {
-    try { ws.send(JSON.stringify(obj)); } catch { /* ignore */ }
+    try { ws.send(JSON.stringify(obj)); return true; } catch { return false; }
   }
+  return false;
+}
+
+/** 未就绪时的写入：入队 + 让用户看得见「还没发出去」，而不是静默丢弃。 */
+function queueOps(ops) {
+  const { size, dropped } = pending.push(ops);
+  pendingNoticeText = dropped > 0
+    ? `连接未就绪：已暂存 ${size} 个操作（超过上限，最早的 ${dropped} 个已丢弃）`
+    : `连接未就绪：已暂存 ${size} 个操作，连上后自动补发`;
+  setNotice(pendingNoticeText);
+  return false;
+}
+
+/** 清掉「暂存中」提示；只清自己写的，不覆盖限流/只读等其它提示。 */
+function clearPendingNotice() {
+  if (pendingNoticeText && notice === pendingNoticeText) setNotice('');
+  pendingNoticeText = '';
+}
+
+/**
+ * welcome 之后补发暂存的操作（P4-3）。三件事都要做，少一件仍会丢用户的东西：
+ *   1. 按 `maxOpsPerMessage` 分块发送——超限会被服务端以 1008 **关连接**（不是拒一条消息）；
+ *   2. 在本地 doc 上**重新应用**一次：welcome 刚把 doc 换成服务端文档，而服务端不会把 op
+ *      回显给发送者（index.js 的 broadcastToRoom 带 `except`），不重放就只剩服务端有、屏上没有；
+ *   3. 只读角色不发（服务端会拒），但要如实提示，而不是悄悄丢掉。
+ * @returns {number} 实际补发的 op 条数
+ */
+function flushPendingOps() {
+  if (pending.size === 0) { clearPendingNotice(); return 0; }
+  const ops = pending.drain();
+  if (!canWrite(role)) {
+    setNotice(`连接恢复前的 ${ops.length} 个操作未发送（只读房间不允许写入）`);
+    pendingNoticeText = '';
+    return 0;
+  }
+  for (const op of ops) applyOp(doc, op);
+  um.begin();
+  for (const op of ops) um.add(op);
+  um.commit();
+  const maxPerMessage = serverLimits?.maxOpsPerMessage || ops.length;
+  for (const part of chunkOps(ops, maxPerMessage)) send({ type: 'op', ops: part });
+  clearPendingNotice();
+  setNotice(`已补发连接中断期间的 ${ops.length} 个操作`);
+  return ops.length;
 }
 
 /** 写入前的前端闸门（服务端另有强制）：只读角色不发 op，并给出明确提示而不是静默丢弃 */
 function sendOps(ops) {
   if (!canWrite(role)) { setNotice(errorText('op_denied')); return false; }
-  send({ type: 'op', ops });
-  return true;
+  if (send({ type: 'op', ops })) return true;
+  return queueOps(ops);
 }
 
 function connect() {
@@ -266,6 +322,8 @@ function handleMessage(m) {
     if (m.room && m.room !== roomId) { roomId = m.room; syncRoomUi(); }
     applyRoleToUi();
     updatePeers();
+    // 房间已打开、角色/限额已下发 —— 此刻才可能补发（服务端在房间未打开时会丢弃 op）。
+    flushPendingOps();
     return;
   }
   if (m.type === 'op') {
@@ -307,6 +365,7 @@ let lastCursor = { x: 0, y: 0 };
 function sendPresence(x, y) {
   lastCursor = { x, y };
   if (presenceThrottle(Date.now())) {
+    // 光标是瞬时状态：断线期间**不入队**（重连后由下一次移动自然补上），补发队列只装 op。
     send({ type: 'presence', state: { name: identity.name, color: identity.color, x, y } });
   }
 }

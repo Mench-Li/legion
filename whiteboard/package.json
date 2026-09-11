@@ -8,7 +8,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "start": "node apps/server/src/index.js",
-    "test": "node --test packages/shared/test/contract.test.mjs packages/shared/test/crdt.test.mjs packages/shared/test/undo.test.mjs packages/shared/test/room.test.mjs apps/web/test/ui-contract.test.mjs apps/server/test/ws-codec.test.mjs apps/server/test/storage.test.mjs apps/server/test/room.test.mjs apps/server/test/security.test.mjs apps/server/test/limits.test.mjs apps/server/test/rooms.test.mjs apps/server/test/metrics-audit.test.mjs apps/server/test/e2e.test.mjs apps/server/test/governance.e2e.test.mjs",
+    "test": "node --test packages/shared/test/contract.test.mjs packages/shared/test/crdt.test.mjs packages/shared/test/undo.test.mjs packages/shared/test/room.test.mjs packages/shared/test/pendingOps.test.mjs apps/web/test/ui-contract.test.mjs apps/server/test/ws-codec.test.mjs apps/server/test/storage.test.mjs apps/server/test/room.test.mjs apps/server/test/security.test.mjs apps/server/test/limits.test.mjs apps/server/test/rooms.test.mjs apps/server/test/metrics-audit.test.mjs apps/server/test/e2e.test.mjs apps/server/test/governance.e2e.test.mjs",
     "bench": "node scripts/bench/bench.mjs"
   }
 }

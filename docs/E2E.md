@@ -86,16 +86,28 @@ await page.close(); await browser.close()             // 幂等；删除临时 p
 
 ## 6. 覆盖范围与未覆盖
 
-**当前覆盖**（`tests/browser/whiteboard-ui.e2e.test.mjs`，7 例）：白板房间进入/标题与标签同步、
+**当前覆盖**（`tests/browser/whiteboard-ui.e2e.test.mjs`，9 例）：白板房间进入/标题与标签同步、
 真实鼠标绘制 → 服务端落库 + canvas 像素、只读房间的 UI 降级与「无写入」、切换房间与 URL/token 语义、
-非法房间号的提示、主路径无页面异常、限流下的可读提示与部分丢弃。
+非法房间号的提示、主路径无页面异常、限流下的可读提示与部分丢弃、
+**连接未就绪窗口内的绘制不丢**（入队 + 可见提示 + 重连后补发，含「切房间后立刻绘制」的原始复现路径，P4-3）。
 
 **未覆盖**（诚实登记，仍在 `docs/REMAINING-TASKS.md`）：
 
 - workbench（指挥台）与 board-plugin 前端：仍为判定层 + 静态契约，**未接浏览器 E2E**；
 - 视觉回归（像素比对基线）、多浏览器矩阵（只有 Chrome/Edge）、移动端仿真、可访问性断言；
-- 网络故障注入（离线/超时/断线重连的浏览器侧行为）；
+- 真实网络故障注入（丢包/TCP 半开/NAT 超时）：P4-3 只覆盖「`onclose` 已触发」的断线重连窗口，
+  半开连接下前端拿不到 `onclose`，行为未验证；
 - 现场部署路径（真实宿主 + 真实 team-hub 数据面）——那里仍以 `scripts/live/*` 与人工走查为准。
+
+### 6.1 制造「断线窗口」的手法是确定的，别用网络仿真
+
+要测「连接未就绪时用户还能操作」这类行为，需要**确定性地**进入那个窗口。实测结论：
+CDP 的 `Network.emulateNetworkConditions({ offline: true })` **不影响已建立的 WebSocket**——
+断网后页面连接点仍是「已连接」，窗口内发的 op 照样送达服务端，用它做负向验证会得到假绿。
+可行手法（P4-3 ⑧⑨ 用的）：`Page.addScriptToEvaluateOnNewDocument` 注入一个**透明**的
+WebSocket 捕获器（记下最后实例），然后在需要的位置 `close()` 真实连接——之后客户端走真实重连路径
+（`retryDelay` 1s 起），得到一个 ≥1s 的确定性窗口。注入脚本必须保留
+`OPEN/CLOSED/CONNECTING/CLOSING` 静态量（前端会用 `ws.readyState === WebSocket.OPEN` 判断）。
 
 ## 7. CI 集成
 

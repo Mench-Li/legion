@@ -24,7 +24,7 @@ import {
   ConnectionLimiter, MessageRateLimiter, checkPayload, checkMessage, resolveLimitConfig, LIMIT_DEFAULTS,
 } from './limits.mjs';
 import { Metrics } from './metrics.mjs';
-import { AuditLog } from './audit.mjs';
+import { AuditLog, AUDIT_SOURCES } from './audit.mjs';
 import { serializeDoc } from '../../../packages/shared/src/crdt.mjs';
 import { loadConfig } from '../../../packages/shared/src/config.mjs';
 import { SCHEMA as CONFIG_SCHEMA } from './config-schema.mjs';
@@ -45,6 +45,19 @@ if (CFG.errors.length) {
   throw new Error(`whiteboard 配置无效：${CFG.errors.map((e) => e.message).join('；')}`);
 }
 for (const w of CFG.warnings) console.error(`[config] whiteboard 配置告警：${w.message}`);
+
+/**
+ * P4-5：把一批已接受的 op 压成**结构性摘要**（如 `{ add: 2, del: 1 }`），只用于审计。
+ * 刻意不记录元素内容 / 坐标 / 颜色（审计是治理工具，不是内容归档；画布内容留在房间库里）。
+ */
+function auditOpKinds(ops) {
+  const kinds = {};
+  for (const op of Array.isArray(ops) ? ops : []) {
+    const k = typeof op?.t === 'string' ? op.t : 'unknown';
+    kinds[k] = (kinds[k] ?? 0) + 1;
+  }
+  return kinds;
+}
 
 const PORT = CFG.values.port;
 const HOST = CFG.values.host;
@@ -138,7 +151,12 @@ export async function createApp(options = {}) {
       rooms: { open: registry.size(), closedTotal: registry.closedCount, detail: rooms },
       peers: rooms.reduce((n, r) => n + r.peers, 0),
       connections: limiter.snapshot(),
-      audit: audit.counts(),
+      audit: {
+        ...audit.counts(),
+        // P4-5：把「能回溯多久」一并暴露——只看 fileBytes 无法判断历史是否已被轮转掉。
+        // resource: 进程内环形缓冲（重启归零）；archive: 磁盘 JSONL（跨重启）。
+        retention: audit.retention(),
+      },
       limits: {
         maxConnections: limits.MAX_CONNECTIONS,
         maxConnectionsPerRoom: limits.MAX_CONNECTIONS_PER_ROOM,
@@ -211,7 +229,23 @@ export async function createApp(options = {}) {
       const url = new URL(req.url || '/', 'http://localhost');
       const limit = Number(url.searchParams.get('limit') || 100);
       const type = url.searchParams.get('type') || null;
-      sendJson(res, 200, { ok: true, room: roomId, ...audit.query({ room: roomId, type, limit }) });
+      // P4-5（候选 #7）：`source` 决定查哪里——process（默认，仅本进程，行为与 P3-1 一致）/ archive
+      // （磁盘 JSONL，**重启后仍可查**）/ all（合并去重）。拼错的值显式 400，不静默当成默认值
+      // （否则「我明明传了 archive 却只拿到进程内 0 条」会变成新的误导）。
+      const source = url.searchParams.get('source') || 'process';
+      if (!AUDIT_SOURCES.includes(source)) {
+        sendJson(res, 400, { ok: false, error: 'bad_source', source, allowed: [...AUDIT_SOURCES] });
+        return;
+      }
+      const result = audit.query({ room: roomId, type, limit, source });
+      const retention = audit.retention();
+      // 默认查询为空但磁盘有历史时，把「下一步该怎么做」直接写进响应里——
+      // 这正是候选 #7 的原始症状：重启后 API 说「没有事件」，而归档其实躺着完整历史。
+      const hint = result.items.length === 0 && retention.fileCount > 0 && source !== 'archive'
+        ? `进程内暂无事件；磁盘归档有 ${retention.fileCount} 个文件（最早 ${retention.oldestTs === null ? '未知' : new Date(retention.oldestTs).toISOString()}），`
+          + '用 source=archive 或 source=all 查询历史事件'
+        : null;
+      sendJson(res, 200, { ok: true, room: roomId, ...result, retention, ...(hint ? { hint } : {}) });
       return;
     }
 
@@ -367,6 +401,18 @@ export async function createApp(options = {}) {
         room.applyOpsFrom(connId, msg.ops).then((accepted) => {
           if (accepted.length === 0) return;
           metrics.inc('opsAccepted', accepted.length);
+          // P4-5：`ops` 一直是 AUDIT_TYPES 里**声明了却从未写入**的类型——于是审计只记录
+          // 「谁进来了/谁被拒了」，恰恰缺了「谁画了什么」。事后取证时这是最要紧的一条：
+          // 归档里有 connect 却没有 ops，等于只知道有人来过，不知道他改了什么。
+          // 只记**结构性事实**（条数 + 类型分布），不记画布内容（与 audit.mjs 的设计一致）。
+          audit.record({
+            type: 'ops',
+            room: roomId,
+            clientId: connId,
+            ip,
+            count: accepted.length,
+            kinds: auditOpKinds(accepted),
+          });
           const out = JSON.stringify({ type: 'op', ops: accepted, from: connId });
           metrics.inc('messagesOut');
           wss.broadcastToRoom(roomId, out, conn);
@@ -376,6 +422,9 @@ export async function createApp(options = {}) {
         if (!room) return;
         const s = room.setPresence(connId, msg.state);
         metrics.inc('presenceUpdates');
+        // 同上：`presence` 也是声明了却未写入的类型。只记**状态是否非空**，
+        // 不记光标坐标等个人可识别细节（审计是治理工具，不是行为画像）。
+        audit.record({ type: 'presence', room: roomId, clientId: connId, ip, active: !!s });
         const out = JSON.stringify({ type: 'presence', from: connId, state: s });
         metrics.inc('messagesOut');
         wss.broadcastToRoom(roomId, out, conn);

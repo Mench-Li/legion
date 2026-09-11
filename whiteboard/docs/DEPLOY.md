@@ -77,7 +77,7 @@ npm start                        # 或 node apps/server/src/index.js
 | `GET /metrics` | 指标：计数器、限流配置、房间明细、活跃连接分档、拒绝原因分布、关闭码分布 |
 | `GET /api/rooms` | 房间列表 + 声明配置 + 配置错误 + 生效限流参数 |
 | `GET /api/rooms/<id>` | 单房间概况（在线/只读/元素数/累计统计/存储健康）；未打开的房间 404 `room_not_open` |
-| `GET /api/rooms/<id>/audit?type=&limit=` | 该房间审计（默认最近 100 条，最多 500） |
+| `GET /api/rooms/<id>/audit?type=&limit=&source=` | 该房间审计。`source` 取 `process`（默认，本进程环形缓冲，行为与 P3-1 一致）/ `archive`（磁盘 JSONL，**重启后仍可查**）/ `all`（合并去重）；默认 limit 100、环形缓冲上限 500、归档上限 1000。响应永远附 `retention`（文件数/字节/最早最新时间/`historyTruncated`） |
 
 控制面默认**仅回环**；远程访问需 `Authorization: Bearer <全局 token>` 或 `WB_CONTROL_OPEN=1`。
 服务**不信任** `X-Forwarded-For`（避免伪造绕过单 IP 限制）；如需反代请在边界做真实客户端识别。
@@ -110,9 +110,13 @@ WHITEBOARD_ROOMS="review:tok-ro:ro,team-a:tok-a:rw,open-room::rw" npm start
 # 看房间与在线情况
 curl http://localhost:8080/api/rooms
 
-# 查某个房间最近的治理事件（连接/拒绝/限流/策略关闭）
+# 查某个房间最近的治理事件（连接/拒绝/限流/策略关闭/写入摘要）
 curl "http://localhost:8080/api/rooms/team-a/audit?limit=50"
 curl "http://localhost:8080/api/rooms/team-a/audit?type=op_denied"
+
+# 服务重启后回溯历史（内存环形缓冲已清空，磁盘归档仍在）
+curl "http://localhost:8080/api/rooms/team-a/audit?source=archive&limit=200"
+curl "http://localhost:8080/api/rooms/team-a/audit?source=all&limit=200"
 
 # 删掉一个房间（= 删文件；先确认无人在线）
 rm apps/server/data/rooms/team-a.db*

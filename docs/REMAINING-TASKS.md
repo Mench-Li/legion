@@ -5,8 +5,10 @@
 > **状态：本清单已清空** —— P1-1～P3-3 共 14 项全部完成（最后一项 P3-2 于 2026-09-10 合入 main）。
 > 清单外的候选 #1（CI `test` 阶段挂起）已于 2026-09-10 修复，证据 `docs/CI-TEST-STAGE-evidence/verify-evidence.md`；
 > 候选 #2（`dual-write` 偶发失败）已于 2026-09-10 定性并修复，证据 `docs/DUAL-WRITE-RACE-evidence/verify-evidence.md`；
-> 候选 #4（插件配置面未统一）已于 2026-09-10 修复（**P3-4**），证据 `docs/P3-4-evidence/verify-evidence.md`。
-> 全量基线：**39 套件 / 941 用例，`run-ci --only test` PASS**（以 `docs/STATUS.md` 记录的数字为准）。
+> 候选 #4（插件配置面未统一）已于 2026-09-10 修复（**P3-4**），证据 `docs/P3-4-evidence/verify-evidence.md`；
+> 候选 #6（前端无浏览器自动化）已于 2026-09-10 补齐（**P4-1**），证据 `docs/P4-1-evidence/verify-evidence.md`；
+> 候选 #9（宿主插件导入失败诊断）已于 2026-09-10 修复（**P4-2**），证据 `docs/P4-2-evidence/verify-evidence.md`。
+> 全量基线：**39 套件 / 978 用例，`run-ci --only test` PASS**（以 `docs/STATUS.md` 记录的数字为准）。
 
 本文记录当前尚未完成的产品、架构和发布工作。已完成的安全加固、CI 扩展、artifact 路径安全、插件 token 传播和白板 WebSocket 鉴权不在本文重复列出。
 
@@ -53,9 +55,19 @@
 7. **指标与审计为进程内**（P3-1 边界）：重启归零、无长期归档；`/api/rooms/<id>/audit` 只返回当前进程事件。
 8. **`serve.mjs` 对未知资源路径仍回退 SPA 200 HTML**（`docs/STATUS.md` 限制 #12）：既是 SPA 需要，
    也让「资源不存在」的探测更费解，属于可继续收敛的小项。
-9. **宿主插件导入失败的诊断可读性**：本次排查中，`team-hub/lib` 缺失与启动期迁移崩溃在宿主侧都表现为
-   「60s 未就绪」或「插件路由 404」之类间接症状，定位只能靠翻宿主子进程 stderr。若在 p13 fixture 层面
-   把「插件条目导入失败」直接翻成明确的断言失败，同类问题的定位会快得多。
+9. ~~**宿主插件导入失败的诊断可读性**~~ → **已于 2026-09-10 修复（P4-2）**：新增诊断层
+   `tests/p13-fixture/host-diagnostics.mjs`——把「哪个插件条目 / 哪个入口文件 / 原始错误 / 该怎么修」
+   直接从宿主输出与**组合行真值**（fixture 刚写下的 `cordis.patch.yml`）里解析出来：
+   启动前预检（入口产物缺失即点名 + 构建命令）、启动期装载失败（按装载器点名的 **组合行 id** 精确反查）、
+   裸 `Cannot find module/package` 反查条目、`pending` 服务、路由 404 归因（`routeMissDetail`）。
+   `waitReady` 失败不再抛「host not ready within Nms」：进程一退出（并等 stdio 排空）即抛
+   `HostBootError`（可读文本 + 结构化 `diagnosis`）。**验证方式**：负向夹具在真实宿主上复现
+   「导入期抛错」与「入口产物缺失」两种失败各一例，断言诊断点名到条目且 <30s 出结论；
+   另有「健康宿主零误报」对照（防诊断变噪音源）与 21 例纯函数单测。
+   套件 `p13-host-injection` 由 9 → **14 例**（+**22 例**同组纯函数）；**证据**：
+   `docs/P4-2-evidence/verify-evidence.md`。
+   **未覆盖（诚实登记）**：pending 的日志形状取自 harness 源码、未在真实宿主复现；裸包名条目不判存在性；
+   日志匹配仍是字符串规则（harness 文案变更会失效）。
 10. **白板「重连窗口内的绘制会被静默丢弃」**（P4-1 浏览器 E2E 发现，尚未修）：切换房间/断线重连时，
     `main.mjs` 的 `send()` 只在 `ws.readyState === OPEN` 时发送，其余情况**静默 return**——
    即连接尚未建立的这段时间里用户画的东西会无声消失（既无提示也不入队列）。

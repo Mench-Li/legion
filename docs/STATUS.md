@@ -4,12 +4,12 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-10　`run-ci --only env,test,doc` **全 PASS**；其中 `test` **38 套件 / 943 用例**
-（165s）—— 以本文件所在提交为准
+**最近一次全量基线**：2026-09-10　`run-ci --only env,test,doc` **全 PASS**；其中 `test` **39 套件 / 978 用例**
+（219s）—— 以本文件所在提交为准
 
-> 说明：上句是**上一次含 `doc` 阶段的全量运行**记录（P3-4 收尾）。P4-1 之后的 `test` 阶段实测为
-> **39 套件 / 950 用例**（详见下方 §2 基线表）；含 `doc` 阶段的全量复跑见
-> `docs/P4-1-evidence/verify-evidence.md` §3。
+> 说明：上句记录 P4-2 之后的全量运行（含 `doc` 阶段）。此前 P4-1 之后的 `test` 阶段实测为
+> **39 套件 / 950 用例**，P3-4 收尾为 **38 套件 / 943 用例**（详见下方 §2 基线表）；
+> 各轮证据见 `docs/P4-1-evidence/verify-evidence.md` §3、`docs/P4-2-evidence/verify-evidence.md` §3.5。
 
 > ✅ **基线可单命令复现**（2026-09-10）：`test` 阶段此前会因 `notify-hub-smoke` 泄漏 hub 子进程
 > 而**永不结束**（零输出、永久等待），P2-7 / P2-8 / P3-1 / P3-2 之后新增或扩充的套件只能用「逐套件单跑」
@@ -65,8 +65,10 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：39 套件 / 950 用例，`--only test` 整体 PASS** —— 2026-09-10 实测
-（P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-4 之后：`plugins` 177→185、
+**当前基线：39 套件 / 978 用例，`--only test` 整体 PASS** —— 2026-09-10 实测
+（P4-2 之后：`p13-host-injection` 9→14 例（含 5 例真实宿主负向诊断），并新增同组纯函数文件
+`host-diagnostics.test.mjs` **22 例** → 该套件组 36 例；
+P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-4 之后：`plugins` 177→185、
 `config` 28→36、`p13-host-injection` 7→8。
 此前 `test` 阶段会因 `notify-hub-smoke` 泄漏子进程而**永不结束**，故长期只能用「逐套件单跑」拼出基线；
 根因、修复与两处连带回归见 `docs/CI-TEST-STAGE-evidence/verify-evidence.md`）。
@@ -84,7 +86,7 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 | goal | 14 | notify（P2-4 含真实 hub SSE 断线重连） | 15 |
 | rules | 7 | hub-event-stream（F-01 scope/游标/信封） | 5 |
 | artifact | 16 | dual-write（P1-1 双进程写同库竞态 + 迁移竞态） | 4 |
-| security | 6 | p13-host-injection（P1-3 真实宿主注入 + P3-4 配置摘要） | 8 |
+| security | 6 | p13-host-injection（P1-3 真实宿主注入 + P3-4 配置摘要 + P4-2 导入失败诊断，2 文件） | 36 |
 | read-auth（鉴权矩阵 + 回环开放，2 文件） | 14 | whiteboard（含 P3-1 治理端到端与前端静态契约，12 文件） | 158 |
 | files-api | 41 | plugins（含 P2-6 chat-context、SP-P0 space-pipeline、P3-4 配置） | 185 |
 | files-p27 / files-ui（P2-7） | 36 / 19 | web-p28 / browser-ui（P2-8） | 21 / 21 |
@@ -180,6 +182,13 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
     但**未知资源路径仍回落 SPA 入口（200 HTML）**——即缺失的 `/assets/*.js` 会返回 HTML 而非 404，
     浏览器侧表现为 MIME 报错；这是既有 SPA 回退语义，未在本轮改动（如需按扩展名区分导航与资源请求需单独立项）。
     静态根可用 `DSH_WORKBENCH_ROOT` 覆盖（测试用）。
+13. 宿主插件诊断（P4-2）：`p13` 夹具现在把「插件条目导入失败」翻成点名到条目的结论
+    （启动前预检 + 日志解析 + 路由 404 归因，见 `docs/P4-2-evidence/verify-evidence.md`），
+    **已知边界**：① 只覆盖本地包行（`@dsh-external/*` 与 `file://`），裸包名行不判入口存在性（避免假阳性）；
+    ② `pending`（服务无人提供）的日志形状取自 harness 源码、**未在真实宿主复现**；
+    ③ 解析依赖 DSH `app-boot`/loader 的**文案**（`failed to import|apply loader entry <id> (<specifier>)`），
+    harness 改文案会让模式失效——缓解是「健康宿主零误报」对照 + 匹配不到时如实报「未能识别」；
+    ④ 诊断改善的是失败**可读性**，CI 的失败聚合方式不变。
 
 ## 5. 维护约定
 

@@ -323,6 +323,12 @@ async function stageTest() {
     // PRT-004：黄金流程定义。核心断言是**夹具没有漂移**——黄金流程的全部价值建立在
     // 「输入固定」上，夹具一悄悄变，阶段 3 的新旧对拍就退化成「输入不同却以为行为不同」。
     { label: 'prt-golden-flow（PRT-004 黄金流程与固定夹具冻结）', files: ['scripts/prt/golden-flow.test.mjs'], cwd: ROOT },
+    // PRT-001/003：进程/数据拓扑与配置密钥清单。复用 scripts/config 的扫描器（单一权威实现），
+    // 自带第二份 env 正则会让两份实现漂移，而漂移的表现是「两份都不可信」。
+    { label: 'prt-topology（PRT-001 拓扑 / PRT-003 配置与密钥来源清单）', files: ['scripts/prt/topology-inventory.test.mjs'], cwd: ROOT },
+    // PRT-008/010：术语冻结与 DSH 组合分层基线。无 DSH_HOME 的机器上「与现状对账」
+    // 那条用例会 skip 并说明原因，不会假装通过。
+    { label: 'prt-composition（PRT-008 术语 / PRT-010 DSH 组合分层基线）', files: ['scripts/prt/composition-baseline.test.mjs'], cwd: ROOT },
     // P4-2（候选 #9）：宿主插件导入失败诊断。host-diagnostics.test.mjs 是**纯函数**单测
     // （无 DSH 依赖，任何机器都跑）；p13-host-injection.test.mjs 内含负向用例，用真实宿主
     // 复现「入口在导入期抛错 / 入口产物缺失」两种失败并断言诊断点名到条目。

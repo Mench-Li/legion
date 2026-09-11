@@ -309,13 +309,16 @@ async function stageTest() {
     // 复现「入口在导入期抛错 / 入口产物缺失」两种失败并断言诊断点名到条目。
     { label: 'p13-host-injection（P1-3 真实宿主插件注入冒烟 + P4-2 导入失败诊断）', files: ['tests/p13-fixture/host-diagnostics.test.mjs', 'tests/p13-fixture/p13-host-injection.test.mjs'], cwd: ROOT },
     // P4-1：真实浏览器 DOM 端到端（零依赖 CDP 基座，见 scripts/e2e/cdp.mjs）。
+    // P4-3 增补两条竞态用例（⑧⑨）：连接未就绪窗口内的绘制必须入队 + 可见提示 + 重连后补发。
     // 找不到 Edge/Chrome 时整组 **SKIP**（用例侧显式调用 describe.skip 并打印探测路径），不计失败、也不假绿。
-    { label: 'e2e-browser（P4-1 真实浏览器：白板房间/角色/只读/限流 DOM 端到端）', files: ['tests/browser/whiteboard-ui.e2e.test.mjs'], cwd: ROOT },
+    { label: 'e2e-browser（P4-1 真实浏览器：白板房间/角色/只读/限流 + P4-3 重连窗口补发）', files: ['tests/browser/whiteboard-ui.e2e.test.mjs'], cwd: ROOT },
   ]
   const wbDir = WHITEBOARD
   const wbPkg = JSON.parse(readFileSync(join(wbDir, 'package.json'), 'utf8'))
   const wbTests = ((wbPkg.scripts && wbPkg.scripts.test) || '').split(/\s+/).filter(t => t.endsWith('.mjs'))
-  suites.push({ label: 'whiteboard（12 文件含真实服务 e2e、P3-1 治理端到端与前端静态契约）', files: wbTests, cwd: wbDir })
+  // 文件数从 package.json 的 test 脚本**算出来**，不写死：写死的数字已经漂移过一次
+  // （脚本里 15 个、标签写 12），而标签正是排障时的第一手信息。
+  suites.push({ label: 'whiteboard（' + wbTests.length + ' 文件含真实服务 e2e、P3-1 治理端到端与前端静态契约）', files: wbTests, cwd: wbDir })
   const detail = []
   let allOk = true
   const dsh = process.env.DSH_CHECKOUT

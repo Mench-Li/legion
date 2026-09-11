@@ -325,6 +325,7 @@ F-20 | 任务中心（Scrum 泳道） | 3.19 任务中心（Scrum 泳道） | �
 | `docs/DEPLOY.md` | 发布部署 runbook（环境分级 / 步骤 / 验证 / 回滚 / 变更影响；发布前 CI 门禁 `node scripts/ci/run-ci.mjs`）。 |
 | `docs/E2E.md` | 浏览器端到端手册（零依赖 CDP 基座用法、写用例纪律、覆盖范围与未覆盖项、无浏览器时的 SKIP 语义）。 |
 | `docs/P4-2-evidence/verify-evidence.md` | 宿主插件导入失败的诊断证据（组合行真值 + 真实宿主失败原文 + 负向复现 + 未覆盖边界）。 |
+| `docs/P4-3-evidence/verify-evidence.md` | 白板「连接未就绪窗口」内的操作不再静默丢失的证据（A/B 现场读数 + 负向对照 + 未覆盖边界）。 |
 | `PLUGINS.md` | DSH 插件形态与接入说明。 |
 | `LEGION.md` | 军团规则（注入执行 agent 提示词）。 |
 

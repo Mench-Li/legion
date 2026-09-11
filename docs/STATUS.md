@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-11　`run-ci --only env,test,doc` **全 PASS**；其中 `test` **39 套件 / 1049 用例**
+**最近一次全量基线**：2026-09-11　`run-ci --only env,boundary,deps,build,test,doc` **全 PASS**；其中 `test` **48 套件 / 1315 用例**
 （约 4 分钟）—— 以本文件所在提交为准
 
 > 说明：上句记录 **P4-7** 之后的全量运行（含 `doc` 阶段）。
@@ -68,9 +68,32 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：39 套件 / 1049 用例，`--only test` 整体 PASS** —— 2026-09-11 实测（证据 `docs/P4-7-evidence/verify-evidence.md`）
-（P4-7 之后：`notify` 套件新增 **2 例**（就绪轮询的 2 条确定性回归），15→**17**；该套件单跑耗时 19s→**11s**；
+**当前基线：48 套件 / 1315 用例，`--only test` 整体 PASS** —— 2026-09-11 实测
+（阶段 2 起步：新增 `dsh-adapter`（**85 例**：PRT-201~209 的 DSH 适配器）。
+全部用假宿主端口，覆盖真实 DSH 无法稳定复现的故障——`run.result` 永不结算、
+abort 无效、畸形结构化输出、事件流中断。47→**48** 套件、1230→**1315** 用例。
+该适配器**不 import 任何引擎包**（与 DSH 的耦合只在 `port.mjs` 的注入面），
+因此 `dsh-boundary` 里适配层贡献为 **0 处**——是真正零耦合，不是靠
+`adapterPrefixes` 豁免成 0。
+上一批收口：新增 `prt-churn`（**13 例**：阶段 3 评审闸门的热点文件改动节奏探针，
+含一条锁定「正确写法 vs 错误写法」差异的用例——`git log -n 40 -- <file>` 会先按
+路径过滤再截断、恒返回 40，把「该开工」读成「不能开工」）；46→**47** 套件、
+1217→**1230** 用例。
+上一批 PRT-006：新增 `prt-backup`（**14 例**：三条备份路线 / 陈旧 WAL 危害 / 活写竞态 /
+源库只读）；45→**46** 套件、1203→**1217** 用例。
+上一批 PRT-001/003：新增 `prt-topology`（**20 例**：复用既有扫描器对账 / 越界写入判定 / 密钥聚合 /
+数据产物分类 / diff 定位）；PRT-008/010：新增 `prt-composition`（**22 例**：patch 解析 /
+失败要响 / 快照卫生 / 组合对账 / diff）；43→**45** 套件、1161→**1203** 用例（+42 = 20+22）。
+再上一批 PRT-101~107 新增 `runtime-contract`（**62 例**）；PRT-004/007 新增 `prt-baseline`（**16 例**）
+与 `prt-golden-flow`（**14 例**）；40→43 套件、1069→1161 用例。
+本轮 PRT-002/PRT-108 交付 `dsh-boundary.test.mjs` **22 例**（记号识别 / 反误报 / 判定语义 / 棘轮真实性），
+39→40 套件、1047→1069 用例，并让 `run-ci.mjs` 新增 **`boundary` 阶段**（紧随 `env`，纯静态秒级门禁）。
+上一基线为 P4-6 之后的 `39 套件 / 1047 用例`（`.ci/final-main4/`）；
 P4-6 之后：`dir-lock.test.mjs` 新增 **12 例**（7 纯函数 + 4 注册表联动 + 1 真实双进程），白板 199→**211**；
+**并行合入说明**：main 侧 **P4-7** 与上述 PRT 批次是并行进行的，另给 `notify` 加 **2 例**
+（就绪轮询的 2 条确定性回归，15→**17**；该套件单跑 19s→**11s**，证据 `docs/P4-7-evidence/verify-evidence.md`）。
+因此上述各批次的差值（1047→1069→…→1315）**不是合入后的总数**：本表头部与 §2 表格
+均按**并行合入后的实测值**记，不沿用任一分支的推算值。）
 P4-5 之后：`audit-archive.test.mjs` 新增 **14 例**（10 纯函数 + 4 真实进程：重启/写入量量级），白板 185→**199**；
 P4-4 之后：`static-serve` 6→**16 例**（新增导航/资源判定与缺失资源 404 契约）；
 P4-3 之后：`e2e-browser` 7→**10 例**（新增连接未就绪窗口/切房间补发/单连接三条用例）、`whiteboard` 158→**185 例**
@@ -108,7 +131,7 @@ P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-
 
 （上表**全部**为 `--only test` 单次全量运行的实测值；不再存在「未入全量基线」的套件。）
 
-其他阶段：`--only doc`（文档新鲜度 + 历史 evidence banner 覆盖）、`--only build|smoke|env|deps|stage`。
+其他阶段：`--only doc`（文档新鲜度 + 历史 evidence banner 覆盖）、`--only boundary`（PRT-108 DSH 执行面边界棘轮，秒级）、`--only build|smoke|env|deps|stage`。
 部署与回滚：`docs/DEPLOY.md`。现场（真实宿主）验收脚本：`scripts/live/p11-step2-verify.mjs`。
 
 ## 3. 文档地图（按可信度分层）
@@ -124,8 +147,18 @@ P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-
 | | `docs/REMAINING-TASKS.md` | 未完成事项与优先级 |
 | | `.ci/<run>/summary.json` + `ci.log` | 最近一次机器证据 |
 | **契约（权威）** | `docs/CONTRACT-V1V2.md` | v1/v2 语义统一表（状态机、分页、SSE 信封） |
+| | `runtime/contracts/`（`index.mjs` + `index.d.mts`） | **PRT Runtime Contract**：`RuntimeAdapter` 七方法、16 个标准错误码与重试分类、`RunRequest`/`RunEvent`（13 种）/终态契约、能力协商。**对 DSH 依赖为零**（`--only boundary` 强制）。用 `node --test runtime/contracts/*.test.mjs` 跑 |
 | | `docs/REQUIREMENTS.md`、`docs/ORCHESTRATION-V3.md` | 需求与编排设计 |
-| **历史快照（非当前依据）** | `docs/**-evidence/**`、`docs/G-*/**` | 各任务/目标的当时验证记录，顶部均有 `⚠️ 历史快照` banner（含生成日期与基线 commit） |
+| **迁移基线（可 diff）** | `docs/superpowers/prt/prt-007-baseline.json` | PRT-007 旧系统平台契约基线：85 路由 / 22 表 / 7 任务状态 / 20 迁移边。`node scripts/prt/baseline-snapshot.mjs --diff` 查漂移 |
+| | `docs/superpowers/prt/prt-009-baseline.json` | PRT-009 成本/延迟/资源基线。**`pending` 段无值**：token/费用/端到端耗时/峰值资源必须真实执行才能采集，工具拒绝编造 |
+| | `docs/superpowers/prt/PRT-004-golden-flow.md` | 黄金流程 GF-001 定义（固定夹具哈希 `2ad47fc4…`、3 段岗位交接、四项机器可判定验收；夹具可执行性已由 CI 看护） |
+| | `docs/superpowers/prt/PRT-001-topology-inventory.md`、`prt-001-003-inventory.json` | PRT-001/003 拓扑与配置密钥清单。**4 个 path 字段默认落在安装目录内**（越界写入，PRT-505/257 输入）；仓库内明文凭证 0 处 |
+| | `docs/superpowers/prt/PRT-010-dsh-composition-baseline.md`、`prt-010-composition-baseline.json` | PRT-008 术语冻结 + PRT-010 组合分层基线：`dsh-base` → `dsh-web-app` → 用户层，Legion 6 行 / 4 个 `file:` 依赖。`--diff` 无需 DSH_HOME |
+| | `docs/superpowers/prt/PRT-011-dsh-distribution-decision.md` | PRT-011 分发形态**已裁决：路线 C**（依赖 `@deepseek-ai/dsh` npm 包 + Launcher 装进 DataDir）；DSH 已是 MIT npm 包，当前部署是 244 个 junction 的开发布局，checkout ≈ 1845 MB |
+| | `docs/PRT-006-evidence/backup-restore-evidence.md` | PRT-006 备份/恢复验证：只复制 `.db` **静默丢 253 条 audit**；陈旧 `-wal` 混用**被重放且 integrity_check 仍 ok**。恢复步骤与发布检查单已回写 `docs/DEPLOY.md` §6.1 |
+| **设计规格** | `docs/superpowers/specs/2026-09-11-legion-product-runtime-design.md` | Product Runtime 设计（17 节 + **附录 A 阶段 0～1 已落地指针**）。附录只回填落地位置，不改设计 |
+| **计划与闸门** | `docs/superpowers/plans/2026-09-11-prt-phase0-1.md` | 阶段 0～1 计划与逐任务结论。含**阶段 3 评审闸门**：热点文件最近 40 个提交仅触及 1/2 次（历史峰值 9/7）→ 已降温 |
+| **历史快照（非当前依据）** | `docs/**-evidence/**`、`docs/G-*/**` | 各任务/目标的当时验证记录，顶部均有 `⚠️ 历史快照` banner（含生成日期与基线 commit）；含 `docs/PRT-009-evidence/` |
 | **历史交付文档** | `docs/TEST_REPORT.md`、`docs/TEST_CASES.md`、`docs/TASK_BREAKDOWN.md`、`docs/RESEARCH.md`、`docs/P0-CONFIRMATION.md` 等 | 立项期交付物，测试数字以本文件 §2 为准 |
 | **运维叙事（过程）** | `docs/P1-LIVE-ROLLOUT.md`、`docs/P2-GOALDOCS-LIVE.md`、`docs/P3-PROD-ROLLOUT.md`、`docs/P1-1-DECISION.md`、`docs/P1-1-step2-runbook.md` | 当时决策与现场步骤；结论已并入本文件 |
 

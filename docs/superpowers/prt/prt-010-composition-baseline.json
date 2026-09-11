@@ -1,0 +1,224 @@
+{
+  "$comment": "PRT-010 DSH 组合分层与 Legion 挂载基线。由 scripts/prt/composition-baseline.mjs 生成。**不含 config 值、不含绝对路径、不含时间戳**：契约是「有哪些行、每行配了哪些键」，不是「某台机器上配了什么」。",
+  "version": 1,
+  "profile": "web",
+  "profileRootIsEmptyList": true,
+  "bundles": [
+    "@deepseek-ai/dsh-base",
+    "@deepseek-ai/dsh-web-app"
+  ],
+  "patchReload": "live",
+  "layers": [
+    {
+      "order": 1,
+      "layer": "dsh-base",
+      "source": "packages/bundle/base/cordis.patch.yml",
+      "kind": "insert"
+    },
+    {
+      "order": 2,
+      "layer": "@deepseek-ai/dsh-web-app",
+      "source": "packages/bundle/web-app/cordis.patch.yml",
+      "kind": "patch-over"
+    },
+    {
+      "order": 3,
+      "layer": "用户 profile 层",
+      "source": "profiles/<profile>/cordis.patch.yml",
+      "kind": "patch-over"
+    }
+  ],
+  "legionRows": [
+    {
+      "id": "legion-mediator",
+      "package": "@dsh-external/dsh-scrum-worker",
+      "repoDir": "plugins",
+      "configKeys": [
+        "agentPreset",
+        "denyTools",
+        "hubToken",
+        "hubUrl",
+        "intervalMs",
+        "isolate",
+        "logFile",
+        "maxWorkers",
+        "mode",
+        "provider",
+        "repoRoot",
+        "role",
+        "rolesFile",
+        "scope",
+        "scrumDir",
+        "staleMinutes",
+        "workerTimeoutMs",
+        "workspace",
+        "worktreeRoot"
+      ],
+      "emptyConfigKeys": [
+        "denyTools",
+        "hubToken",
+        "rolesFile",
+        "worktreeRoot"
+      ]
+    },
+    {
+      "id": "legion-scrum-board",
+      "package": "@dsh-external/dsh-scrum-board",
+      "repoDir": "board-plugin",
+      "configKeys": [
+        "hubUrl",
+        "routePrefix",
+        "scope",
+        "scrumDir"
+      ],
+      "emptyConfigKeys": [
+        "hubUrl"
+      ]
+    },
+    {
+      "id": "legion-scrum-worker",
+      "package": "@dsh-external/dsh-scrum-worker",
+      "repoDir": "plugins",
+      "configKeys": [
+        "agentPreset",
+        "denyTools",
+        "hubToken",
+        "hubUrl",
+        "intervalMs",
+        "isolate",
+        "logFile",
+        "maxWorkers",
+        "mediateMergeFails",
+        "provider",
+        "repoRoot",
+        "role",
+        "rolesFile",
+        "scope",
+        "scrumDir",
+        "staleMinutes",
+        "workerTimeoutMs",
+        "workspace",
+        "worktreeRoot"
+      ],
+      "emptyConfigKeys": [
+        "denyTools",
+        "hubToken",
+        "worktreeRoot"
+      ]
+    },
+    {
+      "id": "legion-scrum-worker-gf001",
+      "package": "@dsh-external/dsh-scrum-worker",
+      "repoDir": "plugins",
+      "configKeys": [
+        "agentPreset",
+        "denyTools",
+        "hubToken",
+        "hubUrl",
+        "intervalMs",
+        "isolate",
+        "logFile",
+        "maxWorkers",
+        "mediateMergeFails",
+        "provider",
+        "repoRoot",
+        "role",
+        "rolesFile",
+        "scope",
+        "scrumDir",
+        "staleMinutes",
+        "workerTimeoutMs",
+        "workspace",
+        "worktreeRoot"
+      ],
+      "emptyConfigKeys": [
+        "denyTools",
+        "hubToken",
+        "rolesFile"
+      ]
+    },
+    {
+      "id": "legion-scrum-worker-ozon",
+      "package": "@dsh-external/dsh-scrum-worker",
+      "repoDir": "plugins",
+      "configKeys": [
+        "agentPreset",
+        "denyTools",
+        "hubToken",
+        "hubUrl",
+        "intervalMs",
+        "isolate",
+        "logFile",
+        "maxWorkers",
+        "mediateMergeFails",
+        "provider",
+        "repoRoot",
+        "role",
+        "rolesFile",
+        "scope",
+        "scrumDir",
+        "staleMinutes",
+        "workerTimeoutMs",
+        "workspace",
+        "worktreeRoot"
+      ],
+      "emptyConfigKeys": [
+        "denyTools",
+        "hubToken"
+      ]
+    },
+    {
+      "id": "legion-services",
+      "package": "@dsh-external/dsh-legion-services",
+      "repoDir": "services-plugin",
+      "configKeys": [
+        "legionDir"
+      ],
+      "emptyConfigKeys": []
+    },
+    {
+      "id": "legion-team-hub",
+      "package": "@dsh-external/dsh-team-hub",
+      "repoDir": "team-hub",
+      "configKeys": [
+        "members",
+        "routePrefix",
+        "scopes",
+        "scrumDir",
+        "teamToken"
+      ],
+      "emptyConfigKeys": [
+        "members",
+        "scopes",
+        "teamToken"
+      ]
+    }
+  ],
+  "legionDeps": [
+    {
+      "name": "@dsh-external/dsh-legion-services",
+      "isFileDependency": true,
+      "repoDir": "services-plugin",
+      "pointsAtRepoDir": true
+    },
+    {
+      "name": "@dsh-external/dsh-scrum-board",
+      "isFileDependency": true,
+      "repoDir": "board-plugin",
+      "pointsAtRepoDir": true
+    },
+    {
+      "name": "@dsh-external/dsh-scrum-worker",
+      "isFileDependency": true,
+      "repoDir": "plugins",
+      "pointsAtRepoDir": true
+    },
+    {
+      "name": "@dsh-external/dsh-team-hub",
+      "isFileDependency": true,
+      "repoDir": "team-hub",
+      "pointsAtRepoDir": true
+    }
+  ],
+  "packageReadError": null
+}

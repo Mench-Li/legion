@@ -1,0 +1,502 @@
+{
+  "$comment": "PRT-001/003 拓扑与配置清单。由 scripts/prt/topology-inventory.mjs 生成；不含时间戳以便逐字节 diff。env 读取点复用 scripts/config/scan.mjs（唯一权威实现）。",
+  "version": 1,
+  "dirClasses": {
+    "InstallDir": "安装/源码目录：只读或可被升级覆盖，**不得**写入运行期数据",
+    "DataDir": "产品数据目录：数据库、附件等持久数据",
+    "Workspace": "工作区：被执行的仓库与 worktree",
+    "CacheDir": "缓存：可安全删除、可重建",
+    "LogDir": "日志：可轮转、可清理"
+  },
+  "processes": [
+    {
+      "name": "team-hub",
+      "label": "team-hub v2（对话/日程数据面）",
+      "dirs": [
+        "team-hub"
+      ],
+      "schemaFile": "team-hub/config-schema.mjs",
+      "schemaOk": true,
+      "schemaReason": null,
+      "entryPoints": [
+        "team-hub/server.mjs"
+      ],
+      "readyProbe": "tcp-connect",
+      "managedBy": "services-plugin（Desktop）或手动；端口已占用则跳过启动",
+      "protocol": "HTTP + SSE",
+      "ports": [
+        {
+          "env": "TEAM_HUB_PORT",
+          "default": 8787
+        }
+      ],
+      "sensitiveEnv": [
+        "TEAM_HUB_TOKEN"
+      ],
+      "declaredFieldCount": 12,
+      "envReadKeys": [
+        "CHAT_ATTACH_BLACKLIST_EXT",
+        "CHAT_ATTACH_MAX_BYTES",
+        "CHAT_ATTACH_MAX_PER_MSG",
+        "CHAT_ATTACH_STAGED_TTL_MS",
+        "CHAT_ATTACH_TTL_MS",
+        "CHAT_REPLY_TIMEOUT_MS",
+        "LEGION_HUB_URL",
+        "MAX_RULES_LEN",
+        "TEAM_HUB_DB",
+        "TEAM_HUB_PORT",
+        "TEAM_HUB_TOKEN"
+      ],
+      "envReadCount": 11,
+      "undeclaredEnvKeys": [],
+      "filesScanned": 10
+    },
+    {
+      "name": "workbench",
+      "label": "军团指挥台（workbench 宿主与静态服务）",
+      "dirs": [
+        "workbench/scripts",
+        "workbench/src"
+      ],
+      "schemaFile": "workbench/scripts/config-schema.mjs",
+      "schemaOk": true,
+      "schemaReason": null,
+      "entryPoints": [
+        "workbench/scripts/serve.mjs"
+      ],
+      "readyProbe": "tcp-connect",
+      "managedBy": "services-plugin（Desktop）或手动",
+      "protocol": "HTTP（静态资源 + 调用 hub 读接口）",
+      "ports": [
+        {
+          "env": "DSH_WORKBENCH_PORT",
+          "default": 5173
+        }
+      ],
+      "sensitiveEnv": [
+        "DSH_WORKBENCH_TOKEN",
+        "TEAM_HUB_TOKEN"
+      ],
+      "declaredFieldCount": 22,
+      "envReadKeys": [
+        "DSH_HUB_UPSTREAM",
+        "DSH_WEB_AUDIT_FILE",
+        "DSH_WEB_FETCH_ALLOW_PRIVATE",
+        "DSH_WEB_SHOT_BROWSER",
+        "DSH_WEB_SHOT_DIR",
+        "DSH_WEB_SHOT_ENABLE",
+        "DSH_WORKBENCH_SPACES_JSON",
+        "TEAM_HUB_TOKEN"
+      ],
+      "envReadCount": 8,
+      "undeclaredEnvKeys": [],
+      "filesScanned": 46
+    },
+    {
+      "name": "whiteboard",
+      "label": "协作白板（独立子项目）",
+      "dirs": [
+        "whiteboard/apps/server/src",
+        "whiteboard/scripts"
+      ],
+      "schemaFile": "whiteboard/apps/server/src/config-schema.mjs",
+      "schemaOk": true,
+      "schemaReason": null,
+      "entryPoints": [
+        "whiteboard/apps/server/src/index.js"
+      ],
+      "readyProbe": "tcp-connect",
+      "managedBy": "手动 / 独立子项目（services-plugin **不**托管）",
+      "protocol": "HTTP + WebSocket",
+      "ports": [
+        {
+          "env": "PORT",
+          "default": 8080
+        }
+      ],
+      "sensitiveEnv": [
+        "WHITEBOARD_TOKEN"
+      ],
+      "declaredFieldCount": 22,
+      "envReadKeys": [
+        "BENCH_CLIENTS",
+        "BENCH_OPS",
+        "WB_AUDIT_DIR",
+        "WB_CONTROL_OPEN",
+        "WB_IN_MEMORY",
+        "WB_ROOMS_DIR",
+        "WHITEBOARD_ROOMS"
+      ],
+      "envReadCount": 7,
+      "undeclaredEnvKeys": [],
+      "filesScanned": 13
+    },
+    {
+      "name": "plugins",
+      "label": "士兵守护插件族（plugins/：scrum-worker / mediator）",
+      "dirs": [
+        "plugins/src"
+      ],
+      "schemaFile": "plugins/config-schema.mjs",
+      "schemaOk": true,
+      "schemaReason": null,
+      "entryPoints": [
+        "plugins/src/index.ts（宿主 composition 挂载）"
+      ],
+      "readyProbe": "不适用（进程内插件）",
+      "managedBy": "DSH 宿主（cordis composition 行）",
+      "protocol": "进程内（无监听端口）",
+      "ports": [],
+      "sensitiveEnv": [],
+      "declaredFieldCount": 6,
+      "envReadKeys": [],
+      "envReadCount": 0,
+      "undeclaredEnvKeys": [],
+      "filesScanned": 13
+    },
+    {
+      "name": "board-plugin",
+      "label": "Scrum 看板插件（宿主 iframe 面板）",
+      "dirs": [
+        "board-plugin/src"
+      ],
+      "schemaFile": "board-plugin/config-schema.mjs",
+      "schemaOk": true,
+      "schemaReason": null,
+      "entryPoints": [
+        "board-plugin/src/index.ts（宿主 iframe 面板）"
+      ],
+      "readyProbe": "不适用（进程内插件）",
+      "managedBy": "DSH 宿主（作为 iframe 面板挂载）",
+      "protocol": "进程内（无监听端口）",
+      "ports": [],
+      "sensitiveEnv": [
+        "TEAM_HUB_TOKEN"
+      ],
+      "declaredFieldCount": 1,
+      "envReadKeys": [
+        "TEAM_HUB_TOKEN"
+      ],
+      "envReadCount": 1,
+      "undeclaredEnvKeys": [],
+      "filesScanned": 3
+    },
+    {
+      "name": "services-plugin",
+      "label": "服务托管插件（随 Desktop 启停三进程）",
+      "dirs": [
+        "services-plugin"
+      ],
+      "schemaFile": "services-plugin/config-schema.mjs",
+      "schemaOk": true,
+      "schemaReason": null,
+      "entryPoints": [
+        "services-plugin/index.js"
+      ],
+      "readyProbe": "不适用（自身即监管者）",
+      "managedBy": "DSH 宿主；它再托管 team-hub 与 workbench",
+      "protocol": "进程内 + spawn 子进程",
+      "ports": [],
+      "sensitiveEnv": [
+        "TEAM_HUB_TOKEN"
+      ],
+      "declaredFieldCount": 3,
+      "envReadKeys": [
+        "DSH_HUB_UPSTREAM",
+        "TEAM_HUB_HOST",
+        "TEAM_HUB_TOKEN"
+      ],
+      "envReadCount": 3,
+      "undeclaredEnvKeys": [],
+      "filesScanned": 2
+    }
+  ],
+  "declarationGaps": [],
+  "secrets": {
+    "$comment": "敏感配置字段的拥有者。明文不落盘：只登记键名与拥有者，不登记值。",
+    "owners": {
+      "TEAM_HUB_TOKEN": [
+        "team-hub",
+        "workbench",
+        "board-plugin",
+        "services-plugin"
+      ],
+      "DSH_WORKBENCH_TOKEN": [
+        "workbench"
+      ],
+      "WHITEBOARD_TOKEN": [
+        "whiteboard"
+      ]
+    },
+    "plaintextOnDisk": {
+      "ok": true,
+      "paths": [],
+      "fixturePaths": []
+    }
+  },
+  "defaultPaths": [
+    {
+      "process": "team-hub",
+      "field": "TEAM_HUB_DB",
+      "defaultValue": "team-hub/team.db",
+      "resolvesInsideInstallDir": true,
+      "note": "默认落在仓库/安装目录内 → 属 installDir 写入，应由 DataDir 承接"
+    },
+    {
+      "process": "whiteboard",
+      "field": "DB_PATH",
+      "defaultValue": "apps/server/data/whiteboard.db",
+      "resolvesInsideInstallDir": true,
+      "note": "默认落在仓库/安装目录内 → 属 installDir 写入，应由 DataDir 承接"
+    },
+    {
+      "process": "whiteboard",
+      "field": "WB_ROOMS_DIR",
+      "defaultValue": "apps/server/data/rooms",
+      "resolvesInsideInstallDir": true,
+      "note": "默认落在仓库/安装目录内 → 属 installDir 写入，应由 DataDir 承接"
+    },
+    {
+      "process": "whiteboard",
+      "field": "WB_AUDIT_DIR",
+      "defaultValue": "apps/server/data",
+      "resolvesInsideInstallDir": true,
+      "note": "默认落在仓库/安装目录内 → 属 installDir 写入，应由 DataDir 承接"
+    }
+  ],
+  "dataTopology": {
+    "ok": true,
+    "files": [
+      {
+        "path": ".tmp-l1db/t.db",
+        "class": "InstallDir",
+        "note": "未清理的临时目录，落在仓库根"
+      },
+      {
+        "path": ".tmp-l1db/t.db-shm",
+        "class": "InstallDir",
+        "note": "未清理的临时目录，落在仓库根"
+      },
+      {
+        "path": ".tmp-l1db/t.db-wal",
+        "class": "InstallDir",
+        "note": "未清理的临时目录，落在仓库根"
+      },
+      {
+        "path": "scratch/t117-round2-evidence-backup/scratch-t117-r2/hub-e2e/team.db",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round2-evidence-backup/scratch-t117-r2/hub-e2e/team.db-shm",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round2-evidence-backup/scratch-t117-r2/hub-e2e/team.db-wal",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round2-evidence-backup/scratch-t117-r2/hub-e2e3/team.db",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round2-evidence-backup/scratch-t117-r2/hub-e2e3/team.db-shm",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round2-evidence-backup/scratch-t117-r2/hub-e2e3/team.db-wal",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round2-evidence-backup/scratch-t117-r2/hub-slice/team.db",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round2-evidence-backup/scratch-t117-r2/hub-slice/team.db-shm",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round2-evidence-backup/scratch-t117-r2/hub-slice/team.db-wal",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round2-evidence-backup/scratch-t117-r2/hub-slice2/team.db",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round2-evidence-backup/scratch-t117-r2/hub-slice2/team.db-shm",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round2-evidence-backup/scratch-t117-r2/hub-slice2/team.db-wal",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round2-evidence-backup/scratch-t117-r2/mig-sim.db",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/hub-e2e/team.db",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/hub-e2e/team.db-shm",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/hub-e2e/team.db-wal",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/hub-e2e3/team.db",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/hub-e2e3/team.db-shm",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/hub-e2e3/team.db-wal",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/hub-slice/team.db",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/hub-slice/team.db-shm",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/hub-slice/team.db-wal",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/hub-slice2/team.db",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/hub-slice2/team.db-shm",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/hub-slice2/team.db-wal",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/mig-sim.db",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/scratch-t117-r2/hub-e2e/team.db",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/scratch-t117-r2/hub-e2e/team.db-shm",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/scratch-t117-r2/hub-e2e/team.db-wal",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/scratch-t117-r2/hub-e2e3/team.db",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/scratch-t117-r2/hub-e2e3/team.db-shm",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/scratch-t117-r2/hub-e2e3/team.db-wal",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/scratch-t117-r2/hub-slice/team.db",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/scratch-t117-r2/hub-slice/team.db-shm",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/scratch-t117-r2/hub-slice/team.db-wal",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/scratch-t117-r2/hub-slice2/team.db",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/scratch-t117-r2/hub-slice2/team.db-shm",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/scratch-t117-r2/hub-slice2/team.db-wal",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/scratch-t117-r2/mig-sim.db",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r3-hub/mig-sim.db",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r3-hub/team.db",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r3-hub/team.db-shm",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      },
+      {
+        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r3-hub/team.db-wal",
+        "class": "InstallDir",
+        "note": "测试证据/临时产物，随仓库分发"
+      }
+    ]
+  }
+}

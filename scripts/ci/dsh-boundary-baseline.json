@@ -1,0 +1,68 @@
+{
+  "$comment": "PRT-002/PRT-108：DSH 执行面依赖基线。这份基线是「待迁移债务」，只许减不许增。由 scripts/ci/dsh-boundary.mjs --update-baseline 生成；手工编辑会被下一次检查覆盖。",
+  "version": 1,
+  "rules": {
+    "executionServices": [
+      "subagents",
+      "agentDefaultModel",
+      "agents",
+      "agentPresets"
+    ],
+    "injectServices": [
+      "subagents",
+      "agentDefaultModel",
+      "agents",
+      "agentPresets"
+    ],
+    "executionPackages": [
+      "@deepseek-ai/dsh-subagent",
+      "@deepseek-ai/dsh-agent",
+      "@deepseek-ai/dsh-agent-default-model",
+      "@deepseek-ai/dsh-agent-presets",
+      "@deepseek-ai/dsh-session",
+      "@deepseek-ai/dsh-tools"
+    ],
+    "adapterPrefixes": [
+      "runtime/adapters/dsh/",
+      "runtime/dsh-composition/"
+    ],
+    "mustBeZeroPrefixes": [
+      "runtime/contracts/",
+      "runtime/manager/",
+      "orchestrator/",
+      "product/",
+      "security/"
+    ],
+    "excludedPrefixes": [
+      ".skills-cache/"
+    ],
+    "excludedFiles": [
+      "scripts/ci/dsh-boundary.mjs",
+      "scripts/ci/dsh-boundary.test.mjs"
+    ]
+  },
+  "baseline": {
+    "plugins/src/index.ts": {
+      "ctx.subagents": 6,
+      "ctx.agentDefaultModel": 4,
+      "ctx.agents": 1,
+      "ctx.agentPresets": 1,
+      "@deepseek-ai/dsh-subagent": 1,
+      "@deepseek-ai/dsh-agent": 1,
+      "@deepseek-ai/dsh-agent-default-model": 1,
+      "@deepseek-ai/dsh-agent-presets": 1,
+      "@deepseek-ai/dsh-session": 1,
+      "@deepseek-ai/dsh-tools": 1,
+      "inject.subagents": 1,
+      "inject.agentDefaultModel": 1,
+      "inject.agents": 1,
+      "inject.agentPresets": 1
+    },
+    "plugins/tests/goal-context.test.mjs": {
+      "ctx.subagents": 3
+    },
+    "scripts/live/p26-chat-e2e.mjs": {
+      "ctx.subagents": 1
+    }
+  }
+}

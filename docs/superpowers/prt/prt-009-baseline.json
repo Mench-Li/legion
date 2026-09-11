@@ -1,0 +1,97 @@
+{
+  "$comment": "PRT-009 基线。machine-measured 段可重复采集；pending 段必须在一次真实模型执行后填入，本工具不会为它们编造数值。",
+  "version": 1,
+  "node": "v24.19.0",
+  "platform": "win32",
+  "arch": "x64",
+  "machineMeasured": {
+    "sourceScale": {
+      "plugins/src/index.ts": {
+        "files": 1,
+        "bytes": 221631,
+        "lines": 3718
+      },
+      "team-hub/server.mjs": {
+        "files": 1,
+        "bytes": 259698,
+        "lines": 4488
+      },
+      "team-hub/permission-engine.mjs": {
+        "files": 1,
+        "bytes": 3561,
+        "lines": 57
+      },
+      "runtime/contracts": {
+        "files": 9,
+        "bytes": 103541
+      },
+      "scripts/ci/dsh-boundary.mjs": {
+        "files": 1,
+        "bytes": 17258,
+        "lines": 446
+      }
+    },
+    "platformContract": {
+      "httpRoutes": 85,
+      "dbTables": 22,
+      "taskStates": 7,
+      "taskTransitionEdges": 20,
+      "goalStates": 4,
+      "permissionModes": 5,
+      "sources": {
+        "team-hub/server.mjs": "7a3556d739e8b946cfa2b4302f1f5c80f7aed9960c685d616c341f92153aee32",
+        "team-hub/permission-engine.mjs": "9e60a09d971474209a92047767d78bcc155c414a3fd3fc7442ff01f59f3b4168"
+      }
+    },
+    "platformContractError": null,
+    "hubStartup": {
+      "ok": true,
+      "readyMs": 240,
+      "peakRssBytes": null,
+      "samples": 0
+    }
+  },
+  "pricing": {
+    "$comment": "每百万 token 的美元单价。填入实际供应商报价并在 evidence 中注明来源与日期。",
+    "asOf": "UNSET",
+    "currency": "USD",
+    "perMillionTokens": {
+      "example-model-x": {
+        "input": null,
+        "output": null
+      }
+    }
+  },
+  "pending": [
+    {
+      "key": "token-usage",
+      "what": "黄金任务的 token 用量（input / output）",
+      "blockedBy": "需要模型凭证（spec §6.1 SECRET_UNAVAILABLE 之外的正常路径）"
+    },
+    {
+      "key": "estimated-cost",
+      "what": "黄金任务的费用估算",
+      "blockedBy": "依赖 token-usage；且 PRICING.asOf 仍是 UNSET"
+    },
+    {
+      "key": "end-to-end-latency",
+      "what": "黄金任务端到端耗时（计划→实现→评审全流程）",
+      "blockedBy": "需要一次真实多岗位执行"
+    },
+    {
+      "key": "peak-resource",
+      "what": "峰值内存与 CPU",
+      "blockedBy": "本机跨平台采样不可靠，需在目标平台按 PRT-011 选定的分发形态采集"
+    },
+    {
+      "key": "old-path-task-state-sequence",
+      "what": "旧路径实际发生的任务状态序列（§14.2 对拍基准）",
+      "blockedBy": "需要一次真实执行（当前只有预期序列，尚无实测序列）"
+    },
+    {
+      "key": "human-intervention-rate",
+      "what": "人工介入次数与原因分布",
+      "blockedBy": "需要真实执行样本（单次运行不足以给出比率）"
+    }
+  ]
+}

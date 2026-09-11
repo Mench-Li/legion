@@ -304,6 +304,41 @@ async function stageTest() {
     { label: 'notify（P2-4 通知分类/优先级/批量已读/跳转/去重补齐 + P4-7 句柄泄漏自检）', files: ['workbench/scripts/notify.test.mjs', 'workbench/scripts/notify-hub-smoke.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'hub-event-stream（F-01 scope/游标/信封）', files: ['workbench/scripts/hub-event-stream.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'dual-write（P1-1 双进程写同库竞态：audit.seq/task id 唯一）', files: ['scripts/ci/dual-write-smoke.test.mjs'], cwd: ROOT },
+    // PRT-002/PRT-108：DSH 执行面边界扫描。前 3 类覆盖记号识别、反误报与判定语义；
+    // 第 4 类在**真实仓库**上放一个真实探针文件跑真实 CLI，证明棘轮拦得住回归——
+    // 只测纯函数无法证明扫描范围（git ls-files 口径）本身是对的（该缺陷已在开发中真实出现过一次）。
+    { label: 'dsh-boundary（PRT-002 依赖清单 / PRT-108 执行面边界棘轮）', files: ['scripts/ci/dsh-boundary.test.mjs'], cwd: ROOT },
+    // PRT-101~107：Runtime Contract 与内存 Fake Adapter。**零 DSH 依赖**（由 dsh-boundary 的
+    // must-be-zero 判定强制），因此本套件在无 DSH_CHECKOUT 的机器上也必须全绿——
+    // 这正是阶段 1 完成标准「不启动 DSH 即可测试编排」的可执行形式。
+    {
+      label: 'runtime-contract（PRT-101~107：契约、错误分类、能力协商、Fake Adapter 编排）',
+      files: ['runtime/contracts/contract.test.mjs', 'runtime/contracts/fake-adapter.test.mjs'],
+      cwd: ROOT,
+    },
+    // PRT-007：旧系统平台契约基线（HTTP/表/状态机）。第 ④ 类用例把「当前源码提取结果」
+    // 与已记录基线对账——它是**提醒**而不是迁移门禁：迁移期旧路径仍在正常演进，
+    // 做成硬门禁会让每次功能提交都红，最后被人无脑 --record 刷掉，反而失去对拍价值。
+    { label: 'prt-baseline（PRT-007 平台契约基线与漂移定位）', files: ['scripts/prt/baseline-snapshot.test.mjs'], cwd: ROOT },
+    // PRT-004：黄金流程定义。核心断言是**夹具没有漂移**——黄金流程的全部价值建立在
+    // 「输入固定」上，夹具一悄悄变，阶段 3 的新旧对拍就退化成「输入不同却以为行为不同」。
+    { label: 'prt-golden-flow（PRT-004 黄金流程与固定夹具冻结）', files: ['scripts/prt/golden-flow.test.mjs'], cwd: ROOT },
+    // PRT-001/003：进程/数据拓扑与配置密钥清单。复用 scripts/config 的扫描器（单一权威实现），
+    // 自带第二份 env 正则会让两份实现漂移，而漂移的表现是「两份都不可信」。
+    { label: 'prt-topology（PRT-001 拓扑 / PRT-003 配置与密钥来源清单）', files: ['scripts/prt/topology-inventory.test.mjs'], cwd: ROOT },
+    // PRT-008/010：术语冻结与 DSH 组合分层基线。无 DSH_HOME 的机器上「与现状对账」
+    // 那条用例会 skip 并说明原因，不会假装通过。
+    { label: 'prt-composition（PRT-008 术语 / PRT-010 DSH 组合分层基线）', files: ['scripts/prt/composition-baseline.test.mjs'], cwd: ROOT },
+    // PRT-006：备份/恢复验证。**用合成夹具**，不读现场库——CI 机器上没有产出机那份
+    // team.db，依赖它会让本套件在 CI 上永远 skip 或永远红。夹具的关键是留一个
+    // 未 checkpoint 的 WAL（插入后保持连接打开），否则「只复制 .db 会丢数据」无从证明。
+    { label: 'prt-backup（PRT-006 备份/恢复验证：三条路线 + 陈旧 WAL 危害）', files: ['scripts/prt/backup-restore-verify.test.mjs'], cwd: ROOT },
+    // 阶段 3 评审闸门：热点文件改动节奏。本套件直接锁定「正确写法 vs 错误写法」的差异——
+    // `git log -n 40 -- <file>` 会先按路径过滤再截断，恒返回 40，把「该开工」读成「不能开工」。
+    { label: 'prt-churn（阶段 3 评审闸门：热点文件改动节奏探针）', files: ['scripts/prt/hot-file-churn.test.mjs'], cwd: ROOT },
+    // 阶段 2：DshRuntimeAdapter。全部用假宿主端口，覆盖真实 DSH 无法稳定复现的故障
+    // （run.result 永不结算、abort 无效、畸形结果、事件流中断）。
+    { label: 'dsh-adapter（PRT-201~209：DSH 适配器契约、脱敏、看门狗与取消/恢复）', files: ['runtime/adapters/dsh/adapter.test.mjs'], cwd: ROOT },
     // P4-2（候选 #9）：宿主插件导入失败诊断。host-diagnostics.test.mjs 是**纯函数**单测
     // （无 DSH 依赖，任何机器都跑）；p13-host-injection.test.mjs 内含负向用例，用真实宿主
     // 复现「入口在导入期抛错 / 入口产物缺失」两种失败并断言诊断点名到条目。
@@ -509,9 +544,33 @@ async function stageDoc() {
   return { ok, detail: 'doc: 文档新鲜度校验（check-docs.mjs）exit=' + r.code + extra }
 }
 
+// ---------- DSH 执行面边界（PRT-108 棘轮） ----------
+// Product Runtime 的边界承诺在 Orchestrator/Adapter 建成前，唯一可执行的形式是
+// **不让 DSH 执行面耦合继续增长**。dsh-boundary.mjs 用基线棘轮守住这一点：
+// 迁移期既有调用点登记为「待迁移债务」，新代码一律不得新增。
+// 放在 env 之后、其余阶段之前——它是纯静态检查（秒级），失败时应尽早失败，
+// 而不是等四分钟的 test 阶段跑完才报。
+async function stageBoundary() {
+  const r = await exec(process.execPath, [join(ROOT, 'scripts', 'ci', 'dsh-boundary.mjs'), '--check'], { cwd: ROOT })
+  const ok = r.code === 0
+  const raw = (r.out + '\n' + r.err).trim()
+  let extra = ''
+  if (ok) {
+    const line = raw.split('\n').filter(l => /dsh-boundary: PASS/.test(l)).slice(-1)[0]
+    if (line) extra = '\n  ' + line.trim()
+  } else {
+    const lines = raw.split('\n').filter(Boolean)
+    const fails = lines.filter(l => /^\s*FAIL \[/.test(l))
+    const tail = (fails.length > 0 ? fails.slice(-10) : lines.slice(-12)).join('\n  ')
+    extra = '\n  违规明细（优先移入 runtime/adapters/dsh/；确属迁移期债务才显式下移基线）：\n  ' + tail
+  }
+  return { ok, detail: 'boundary: DSH 执行面边界棘轮（dsh-boundary.mjs）exit=' + r.code + extra }
+}
+
 // ---------- 主流程 ----------
 const STAGES = [
   { name: 'env', label: '环境自检', fn: stageEnv },
+  { name: 'boundary', label: 'DSH 执行面边界（PRT-108 棘轮）', fn: stageBoundary },
   { name: 'deps', label: '依赖就绪', fn: stageDeps },
   { name: 'build', label: '构建（whiteboard + workbench dist）', fn: stageBuild },
   { name: 'test', label: 'L0 契约/基线测试', fn: stageTest },

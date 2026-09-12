@@ -82,6 +82,20 @@ function compositionOk() {
  *   · `denialSignatures` 非空（空集合意味着沙箱拒绝无法被识别，
  *     拒绝会退化成普通失败）
  */
+/**
+ * 一个"**读了**组合树、而补丁层确实没生效"的观察结果。
+ *
+ * 与"没有观察结果"（`composition: {}`）是**两件事**：
+ *   · 这里：行在，但没激活 → 补丁层真的没生效 → 去重新应用补丁层
+ *   · 那里：没有人去读 → 接线缺一截 → 去把观察器接上
+ */
+function compositionNotApplied() {
+  return {
+    rows: PATCH_LAYER_ROWS.map((r) => ({ id: r.id, activated: false })),
+    permissionPresets: Object.keys(LEGION_PERMISSION_PRESETS),
+  }
+}
+
 function sandboxOk() {
   return {
     async confine(argv) {
@@ -170,7 +184,7 @@ test('② **补丁层没挂上 → 不注册端口**（这是这条闸门存在�
   resetDshRuntimeBinding()
   const r = await boot({
     // 行一个都不在：补丁层没应用
-    composition: { rows: [], permissionPresets: [] },
+    composition: compositionNotApplied(),
   })
   assert.equal(r.ok, false)
   assert.equal(r.code, BOOTSTRAP_CODES.SELF_CHECK_INCOMPATIBLE)
@@ -178,6 +192,36 @@ test('② **补丁层没挂上 → 不注册端口**（这是这条闸门存在�
   // 可能已经开始认领任务了。
   assert.equal(dshRuntimeBound(), false, '自检没过时绝不能注册端口')
   assert.match(r.message, /不注册宿主端口/)
+})
+
+test('② **没人给观察结果 → 具名码是「没观察」，不是「补丁层未生效」**', async () => {
+  // 这一条是补出来的。第一版写的是 `composition ?? {}`，于是"没人给观察结果"
+  // 会静默变成"观察结果是空" → 判 `composition-patch-layer` 未生效 →
+  // 报「补丁层未完全生效」。**那是错的诊断**：补丁层可能完全没问题，
+  // 只是没有人去读组合树。顺着那条消息排查会去重装补丁层。
+  resetDshRuntimeBinding()
+  for (const missing of [undefined, null, {}, { rows: [] }, { rows: 'nope' }]) {
+    const r = await boot({ composition: missing })
+    assert.equal(r.ok, false, `composition=${JSON.stringify(missing)} 时必须拦住执行`)
+    assert.equal(r.code, BOOTSTRAP_CODES.COMPOSITION_UNOBSERVED,
+      `composition=${JSON.stringify(missing)} 报的是 ${r.code}：` +
+      '「没接观察器」与「补丁层没生效」混成一个码会让排查方向指向错的地方')
+    assert.notEqual(r.code, BOOTSTRAP_CODES.SELF_CHECK_INCOMPATIBLE)
+    assert.equal(dshRuntimeBound(), false)
+  }
+})
+
+test('② 「没观察」与「观察了、说没生效」**报不同的码**（这是把它们分开的全部意义）', async () => {
+  resetDshRuntimeBinding()
+  const unobserved = await boot({ composition: undefined })
+  const notApplied = await boot({ composition: compositionNotApplied() })
+  assert.equal(unobserved.code, BOOTSTRAP_CODES.COMPOSITION_UNOBSERVED)
+  assert.equal(notApplied.code, BOOTSTRAP_CODES.SELF_CHECK_INCOMPATIBLE)
+  assert.notEqual(unobserved.code, notApplied.code)
+  // 两者的修复动作也必须不同——否则"分开"只分在了码上，不在行动上。
+  assert.notEqual(unobserved.repair.items[0].action, notApplied.repair.items[0].action)
+  assert.equal(unobserved.repair.items[0].action, 'connect-composition-observer')
+  assert.equal(notApplied.repair.items[0].action, 'reapply-composition-patch')
 })
 
 test('② **沙箱只做到 partial → 不注册**（partial 意味着存在不被管制的路径）', async () => {
@@ -343,7 +387,7 @@ test('③ 全通过时计划为空且 `ok: true`', () => {
 
 test('③ 拒绝结果里**一定带得回修复计划**（否则调用方只能把产品重装一遍）', async () => {
   resetDshRuntimeBinding()
-  const r = await boot({ composition: { rows: [], permissionPresets: [] } })
+  const r = await boot({ composition: compositionNotApplied() })
   assert.equal(r.ok, false)
   assert.equal(r.repair.ok, false)
   assert.ok(r.repair.items.length > 0, '拒绝时必须带回修复计划')
@@ -356,7 +400,7 @@ test('③ `REPAIR_ACTIONS` 覆盖自检的**全部**检查项（新增一项时�
   // 一个新增的检查项如果没有修法，用户看到的就又是一句"没过"。
   resetDshRuntimeBinding()
   const r = await boot({
-    composition: { rows: [], permissionPresets: [] },
+    composition: compositionNotApplied(),
     runtimeHost: { async probeRuntime() { return { version: 'x', capabilities: {} } } },
     sandbox: {},
   })

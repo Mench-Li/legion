@@ -53,6 +53,20 @@ export const BOOTSTRAP_CODES = Object.freeze({
   BAD_WIRING: 'BOOTSTRAP_BAD_WIRING',
   /** 宿主端口不完整：注册它等于注册一个用不了的东西。 */
   PORT_INCOMPLETE: 'BOOTSTRAP_PORT_INCOMPLETE',
+  /**
+   * 组合树观察结果没给（不是"给了、说没生效"）。
+   *
+   * 这两个处境**必须分开**：
+   *   · `BOOTSTRAP_COMPOSITION_UNOBSERVED` —— 没人去读组合树，**接线缺一截**；
+   *   · `BOOTSTRAP_SELF_CHECK_INCOMPATIBLE` 的 `composition-patch-layer` 项
+   *     —— 读了，补丁层确实没生效，**强制面真的不在**。
+   *
+   * 合成一个码的话，一个"观察器还没接上"的部署会显示成「补丁层未生效」——
+   * 于是排查方向变成去重装补丁层，而真因是没有人把观察结果传进来。
+   *
+   *   > 「没接」和「没做」是两个不同的问题，修法也不同。
+   */
+  COMPOSITION_UNOBSERVED: 'BOOTSTRAP_COMPOSITION_UNOBSERVED',
   /** 已经装配过。 */
   ALREADY_BOUND: 'BOOTSTRAP_ALREADY_BOUND',
 })
@@ -84,6 +98,13 @@ export const REPAIR_ACTIONS = Object.freeze({
     label: '修好沙箱后端到 full 级管制',
     why: '`partial` 的字面意思是「存在不被管制的路径」。把 partial 当可用，' +
       '等于在一个已知有漏洞的沙箱上宣称「已限制」',
+  }),
+  'composition-observation': Object.freeze({
+    action: 'connect-composition-observer',
+    label: '接上组合树观察器',
+    why: '**没有观察结果**与**观察结果是"没生效"**是两件事：前者是接线缺一截，' +
+      '后者是强制面真的不在。混成一个码会让排查方向指向重装补丁层，' +
+      '而真因是没有人把观察结果传进来',
   }),
 })
 
@@ -140,6 +161,36 @@ export async function bootstrapDshRuntime(deps = {}) {
     // 一个"默认都能读"的默认值会让一次接线遗漏变成一次静默越权。
     return refuse(BOOTSTRAP_CODES.BAD_WIRING,
       'bootstrapDshRuntime 需要 canRead：装配阶段的权限判定必须由调用方显式给出，不给默认值')
+  }
+
+  // ①a 组合树观察结果必须**真的给了**。
+  //
+  // 这一条是补出来的。第一版写的是 `composition ?? {}`，于是"没人给观察结果"
+  // 会静默变成"观察结果是空"→ 自检判 `composition-patch-layer` 未生效 →
+  // 报 `BOOTSTRAP_SELF_CHECK_INCOMPATIBLE`，消息说「补丁层未完全生效」。
+  //
+  // 那是**错的诊断**：补丁层可能完全没问题，只是没有人去读组合树。
+  // 顺着那条消息排查会去重装补丁层，而真因是接线缺一截。
+  //
+  //   > 「没接」和「没做」是两个不同的问题，修法也不同。
+  //
+  // 注意判据是 `rows` 是**非空数组**：`{}` / `{rows: []}` 都算没给——
+  // 一个空观察结果与一个"读到零行"的观察结果，在这一层的用途上是一样的，
+  // 而后者只可能来自一个还没接上的读取器。
+  const rows = composition?.rows
+  if (!Array.isArray(rows) || rows.length === 0) {
+    const got = composition === undefined || composition === null
+      ? String(composition)
+      : `rows=${Array.isArray(rows) ? '[]（空）' : typeof rows}`
+    return refuse(BOOTSTRAP_CODES.COMPOSITION_UNOBSERVED,
+      `没有拿到组合树观察结果（${got}）：**不注册**。\n` +
+      '这不是「补丁层未生效」——那是"读了、说没生效"，而这是"没有人去读"。\n' +
+      '两者都需要拦住执行（所以本模块照旧拒绝），但修法不同：\n' +
+      '前者去重新应用补丁层，后者去把观察器接上。' +
+      '混成一个码会让排查方向指向错的地方',
+      { reasons: ['composition.rows 缺失或为空'], checks: [
+        { name: 'composition-observation', ok: false, reasons: ['没有拿到组合树观察结果'] },
+      ], repair: repairPlanFor({ checks: [{ name: 'composition-observation', ok: false, reasons: ['没有拿到组合树观察结果'] }] }) })
   }
 
   // ① 运行时探测（版本 + 必需能力）。

@@ -77,6 +77,43 @@ EXECUTOR_HOST_PORT_REQUIRED: DSH 宿主端口不合法：宿主端口缺少必�
 现由 `assertHostPort`（适配器已有的函数，此前只在适配器内部用）在注册前把关，
 具名码 `BOOTSTRAP_PORT_INCOMPLETE`，消息里点名缺哪个方法。
 
+## 4.5 「没接」与「没做」是两个码
+
+上一节写完后立刻发现的真问题。第一版：
+
+```js
+const check = await run({ composition: composition ?? {}, ... })
+```
+
+于是「没有人给观察结果」会**静默变成**「观察结果是空」→ 自检判
+`composition-patch-layer` 未生效 → 报 `BOOTSTRAP_SELF_CHECK_INCOMPATIBLE`，
+消息说「补丁层未完全生效」。
+
+**那是错的诊断。** 补丁层可能完全没问题，只是没有人去读组合树。
+顺着那条消息排查会去重装补丁层，而真因是接线缺一截。
+
+> 「没接」和「没做」是两个不同的问题，修法也不同。
+
+现在分开：
+
+| 处境 | 码 | 修复动作 |
+| --- | --- | --- |
+| 没人给观察结果 | `BOOTSTRAP_COMPOSITION_UNOBSERVED` | `connect-composition-observer` |
+| 读了、确实没生效 | `BOOTSTRAP_SELF_CHECK_INCOMPATIBLE`（`composition-patch-layer` 项） | `reapply-composition-patch` |
+
+**两条修复动作也必须不同**，否则「分开」只分在了码上、不在行动上。
+套件里有一条断言正是查这个（`unobserved.repair.items[0].action !== notApplied.repair.items[0].action`）。
+
+判据是 `rows` 为**非空数组**：`{}` / `{rows: []}` / `null` / `{rows: 'nope'}` 都算没给。
+
+### 顺带修掉三条夹具
+
+原来的三条用例用 `rows: []` 表达「补丁层没挂上」——
+那正是把两个处境混在一起。现在「读了、说没生效」落成「行在、但没激活」
+（`compositionNotApplied()`）。
+
+> 这两条处境**本来就被那三条用例混着**，只是当时看不出来。
+
 ## 5. 修复入口
 
 `repairPlanFor(check)` 把失败项翻成 `{check, action, label, why, reasons}`。

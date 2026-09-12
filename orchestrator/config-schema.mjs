@@ -110,11 +110,17 @@ export const NON_ENV_LITERALS = Object.freeze([
   // 端口不全（去看组合层接线给全了没有）。
   'BOOTSTRAP_SELF_CHECK_INCOMPATIBLE', 'BOOTSTRAP_RUNTIME_PROBE_FAILED',
   'BOOTSTRAP_BAD_WIRING', 'BOOTSTRAP_PORT_INCOMPLETE', 'BOOTSTRAP_ALREADY_BOUND',
+  // 「没人给我观察结果」与「观察结果说没生效」**必须分开**：
+  // 前者是接线缺一截（去接观察器），后者是强制面真的不在（去重装补丁层）。
+  // 合成一个码会让排查方向指向错的地方。
+  'BOOTSTRAP_COMPOSITION_UNOBSERVED',
+
   // 修复入口的动作名（bootstrap.mjs 的 REPAIR_ACTIONS）。
   //
   // 它们会被 Launcher 的**界面**直接读出来当按钮用，因此是面向用户的字符串，
   // 不是内部枚举——改一个名字就是改一次 UI 契约。
   'reapply-composition-patch', 'install-supported-runtime', 'fix-sandbox-backend',
+  'connect-composition-observer',
   // 未知检查项的兜底动作。它必须存在：把没有预置修法的项**丢掉**，
   // 会让"三项没过"看起来像"修了这两项就好"。
   'inspect-manually',

@@ -24,6 +24,7 @@ import {
   SCHEMA_SCAN_DIRS,
   SCHEMA_SOURCE_FOR,
   SCHEMA_SOURCE_PATHS,
+  findOpaqueRouteGuards,
 } from './baseline-snapshot.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -210,6 +211,33 @@ test('⑤ **每个建表模块都登记进了 schema 采集**（漏登记 = 那�
     .filter((p) => SCHEMA_SCAN_DIRS.some((d) => resolve(p).startsWith(resolve(join(REPO_ROOT, d)))))
     .filter((p) => !found.includes(resolve(p)))
   assert.deepEqual(stale, [], '这些文件已登记但不再建表，请从 SCHEMA_SOURCES 里移除')
+})
+
+test('⑦ **用常量做路径守卫的路由必须被拒绝，而不是静默漏掉**', () => {
+  // 这是一次真实事故（PRT-507）。抽取正则要求路径是**字符串字面量**，而
+  // 源码里很容易写成 `path.startsWith(MODEL_PREFIX)`。当时那条新路由
+  // `/api/model-profiles/:id/probe` 就是这样写的：
+  //
+  //   * `--record` 报「125 条」，与改动前**一模一样**；
+  //   * `--check` 说「与基线一致」；
+  //   * 端到端请求完全正常。
+  //
+  // 也就是说：**一条真实的 HTTP 端点，从平台契约里彻底消失了，而所有闸门都是绿的。**
+  // 这正是本仓库记过的那条——**一道看不见某类改动的闸门，比没有闸门更危险**，
+  // 因为它给人"已经守住了"的错觉。
+  //
+  // 修法不是"记得用字面量"（那是靠人记），而是让抽取器**主动拒绝**这种写法。
+  const opaque = [
+    "const MODEL_PREFIX = '/api/model-profiles/'",
+    "if (req.method === 'POST' && path.startsWith(MODEL_PREFIX)) { }",
+  ].join('\n')
+  assert.deepEqual(findOpaqueRouteGuards(opaque), ['MODEL_PREFIX'], '必须认出常量守卫')
+  assert.throws(() => extractRoutes(opaque, { min: 0 }), /常量/, '必须抛错，而不是安静地少一条')
+
+  // 反方向也要守：字面量不该被误报（否则这条闸门会因为正确代码而红）
+  assert.deepEqual(findOpaqueRouteGuards("if (req.method === 'GET' && path.startsWith('/api/x/')) { }"), [])
+  // 普通变量的路径比较不是"路由常量"，不该被误报
+  assert.deepEqual(findOpaqueRouteGuards("if (req.method === 'GET' && path === somePath) { }"), [])
 })
 
 test('⑥ **同一条路由不得被写两次**（后写的会静默遮蔽先写的）', () => {

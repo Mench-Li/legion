@@ -648,6 +648,22 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-507：模型设置页。这一组守的是「后端加了码、前端还是笼统提示 —— 那条码就等于没加」。
+      // 其中最重要的一条：**「没探测过」（503 unavailable）不是「探测失败」**——
+      // 渲染成红色"连接失败"会让用户去查网络与供应商状态，而真相是本机密钥库的问题。
+      label: 'model-settings（PRT-507：没探测过 ≠ 探测失败 / 未知不猜 / 每个码都要可行动）',
+      files: ['workbench/scripts/model-settings.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      // PRT-507 后端：把 PRT-504 的探测接上 Workbench。
+      // 在此之前 `git grep createModelProbe` 的非测试命中**只有它自己的实现文件**：
+      // 整套实现 + 两个套件 + 文档都在，而没有任何入口能触发它。
+      label: 'probe-service（PRT-507：一个没有任何入口的功能，和一个不存在的功能，从用户角度看完全一样）',
+      files: ['team-hub/probe-service.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       label: 'run-kill-drill（PRT-312：真实进程被强杀后不丢任务、不伪装成功、不重复外部写）',
       files: ['team-hub/run-kill-drill.test.mjs'],
       cwd: ROOT,

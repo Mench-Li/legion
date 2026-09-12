@@ -99,6 +99,15 @@ export const SCHEMA = defineSchema({
     'BUDGET_REQUIRED', 'BUDGET_INVALID', 'CURRENCY_MISMATCH', 'ILLEGAL_TRANSITION',
     'ALREADY_SETTLED', 'OUTCOME_REQUIRED', 'PRICE_TABLE_GONE', 'PRICE_TABLE_INVALID',
     'PRICE_TABLE_IMMUTABLE', 'MORE_EXPENSIVE_NEEDS_APPROVAL',
+    // PRT-507 模型探测（team-hub/probe-service.mjs 的 PROBE_UNAVAILABLE_CODES）。
+    //
+    // **这三个码刻意不是"探测判定码"，而是"没有判定"的码。** 登记在这里是为了
+    // 让「这次没有探测过」这件事在协议上有一个名字——没有名字的失败，
+    // 前端只能把它塞进"探测失败"，而那正是要避免的（用户会去查网络）。
+    //   PROBE_LAYOUT_BLOCKED    — 产品目录布局没定下来，不知道密钥库在哪
+    //   PROBE_SECRETS_UNAVAILABLE — 密钥库打不开（DPAPI/损坏/平台不支持）
+    //   PROBE_NO_CREDENTIAL_REF — 没给出档案 / 档案没有 endpoint
+    'PROBE_LAYOUT_BLOCKED', 'PROBE_SECRETS_UNAVAILABLE', 'PROBE_NO_CREDENTIAL_REF',
   ],
   // team-hub 的 CHAT_ 前缀覆盖了插件的提示词预算变量（CHAT_CTX_*）：它们是**插件**读的配置，
   // team-hub 不读，登记为外来变量，避免误报成「拼写错误」（P3-4）。

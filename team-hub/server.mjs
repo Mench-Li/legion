@@ -77,6 +77,10 @@ import {
 } from './budget-ledger.mjs'
 import { createPriceTable } from '../runtime/contracts/price-table.mjs'
 import { modelConfigErrorFor, validateAgentModelSelection } from '../runtime/contracts/model-config.mjs'
+// 模型探测（PRT-504 的实现，PRT-507 的「测试连接」）。**在此之前它没有任何非测试调用方**：
+// 整套实现 + 两个套件 + 文档都在，而没有任何入口能触发它——
+// **一个没有任何入口的功能，和一个不存在的功能，从用户角度看完全一样。**
+import { createProbeService } from './probe-service.mjs'
 // 配置导入导出（PRT-508）：**导出永远不含密钥**。契约层负责"包里有没有
 // 密钥"与"这包能不能导"，路由层只负责读写与把拒绝翻成状态码。
 import {
@@ -217,6 +221,13 @@ const runStore = createRunStore({
  * 模型档案是**跨空间**的产品级配置（同一个模型可以被任何空间的岗位绑定），
  * 因此它不该被塞进某个空间的审计视图里假装属于那个空间。
  */
+// 探测服务（PRT-507）。懒构造：不点「测试连接」就不解析布局、不开密钥库。
+let probeServiceInstance = null
+function probeService() {
+  if (probeServiceInstance === null) probeServiceInstance = createProbeService({ env: process.env })
+  return probeServiceInstance
+}
+
 const modelStore = createModelStore({
   db,
   clock: () => Date.now(),
@@ -3575,6 +3586,60 @@ async function handle(req, res, stripPrefix) {
           return null
         }
       }
+      // 测试连接（PRT-507）。**位置必须在下面那批 startsWith 之前**：
+      // 否则 /api/model-profiles/p1/probe 会被当成 id = "p1/probe" 查档案，
+      // 然后以一个完全指向错误方向的 404 结束。
+      //
+      // 路径用**字面量**而不是上面那个 MODEL_PREFIX 常量：PRT-007 的路由抽取器
+      // 只认字符串字面量，用常量写会让这条路由**静默地**不进平台契约基线——
+      // 基线照样报「与已记录一致」，而它少了一条真实端点。
+      // （`baseline-snapshot.mjs` 现在会主动拒绝这种写法，见 findOpaqueRouteGuards。）
+      if (req.method === 'POST' && path.startsWith('/api/model-profiles/') && path.endsWith('/probe')) {
+        const rawId = path.slice('/api/model-profiles/'.length, path.length - '/probe'.length)
+        if (rawId === '') { json(res, 400, { ok: false, error: '缺少模型档案 id', code: 'MISSING_PARAM' }); return }
+        let probeId
+        try {
+          probeId = decodeURIComponent(rawId)
+        } catch {
+          json(res, 400, { ok: false, error: '模型档案 id 不是合法的 URL 编码', code: 'BAD_ID_ENCODING' }); return
+        }
+        if (probeId.includes('/')) {
+          // 多段路径不是 id：明确拒绝，不去猜用户想要哪一个档案。
+          json(res, 400, { ok: false, error: '模型档案 id 不能包含斜杠', code: 'BAD_ID_ENCODING' }); return
+        }
+        await handleRun(req, res, async (body) => {
+          const profile = modelStore.get(probeId)
+          if (profile === null) {
+            const hist = modelStore.resolveForHistory(probeId)
+            if (hist !== null) {
+              const err = new Error('模型档案 ' + probeId + ' 已被删除')
+              err.statusCode = 409
+              err.code = MODEL_ERRORS.PROFILE_DELETED
+              throw err
+            }
+            const err = new Error('没有这个模型档案：' + probeId)
+            err.statusCode = 404
+            err.code = MODEL_ERRORS.PROFILE_NOT_FOUND
+            throw err
+          }
+          // force 默认为 **true**：这是用户主动按下的按钮。
+          // 按钮按下去若只回一个缓存里的旧结论，用户会以为“刚才那次点击验证了现在”。
+          // 缓存的价值在于**自动**重复检查（后台巡检），不在于回应一次点击。
+          const force = body.force !== false
+          const requiredCapabilities = Array.isArray(body.requiredCapabilities) ? body.requiredCapabilities : []
+          const verdict = await probeService().probeModelProfile(profile, { requiredCapabilities, force })
+          // 「没探测过」用 **503**：它不是客户端错误（用户没做错），也不是 200
+          // （那会让前端把它当成一个判定）。503 = 现在没法提供这项服务。
+          if (verdict.unavailable === true) {
+            const err = new Error(verdict.message)
+            err.statusCode = 503
+            err.code = verdict.code
+            throw err
+          }
+          return { probe: verdict, profileId: probeId }
+        })
+        return
+      }
       if (req.method === 'GET' && path.startsWith('/api/model-profiles/')) {
         const id = modelId()
         if (id === null) { json(res, 400, { ok: false, error: '模型档案 id 不是合法的 URL 编码', code: 'BAD_ID_ENCODING' }); return }

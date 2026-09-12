@@ -45,6 +45,13 @@ export const SCHEMA = defineSchema({
   ],
   nonEnvLiterals: [
     'DELETE', 'OPTIONS', 'PATCH', 'ENOENT', 'ENOTDIR', 'INCOMPLETE', 'OFFSET_MISMATCH', 'SIGINT', 'SIGTERM',
+    // PRT-507 模型设置页（workbench/src/modelSettings.ts）。这两个是**探测判定的码**，
+    // 由 hub 的运行时契约（runtime/contracts/model-probe.mjs 的 PROBE_VERDICT_CODES）产生，
+    // workbench 只是把它们翻成界面文案：
+    //   CAPABILITY_MISSING — 连得上、鉴权也对，但缺这次运行需要的能力（黄色，不是红色）
+    //   UNCLASSIFIED       — 无法归类。**不能猜成"暂时问题"**，否则用户会反复重试
+    //                        一个永远不会好的配置错误，而重试对它毫无作用。
+    'CAPABILITY_MISSING', 'UNCLASSIFIED',
   ],
   // 前缀撞名的外部变量：DSH 宿主自己用 DSH_WEB_URL 表示「Web GUI 地址」，
   // 与 workbench 的 DSH_WEB_*（P2-8 浏览器助手配置）同名空间重叠。它不属于 workbench 的配置面，

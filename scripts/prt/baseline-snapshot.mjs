@@ -113,12 +113,65 @@ const MIN_ROUTES = 10
 const MIN_TABLES = 10
 
 /**
+ * 找出**抽取规则看不见**的路由守卫。
+ *
+ * ## 为什么需要它（这是一次真实事故）
+ *
+ * 上面四条正则都要求路径是**字符串字面量**。而源码里很容易写成：
+ *
+ *     const MODEL_PREFIX = '/api/model-profiles/'
+ *     if (req.method === 'POST' && path.startsWith(MODEL_PREFIX)) { ... }
+ *
+ * 这时抽取器**一条都提取不到**，于是：
+ *   - `--check` 说「与基线一致」；
+ *   - `--record` 把一个**漏了一条真实路由**的快照写进基线。
+ *
+ * 结果是一份**看起来正常**的平台契约，而它少了一条端点。这正是本仓库
+ * 已经记过的那条、也是最贵的一条：
+ *
+ *   **一道看不见某类改动的闸门，比没有闸门更危险**——它给人"已经守住了"的错觉。
+ *
+ * PRT-507 加 `/api/model-profiles/:id/probe` 时就真的踩了这个坑：路由加上了、
+ * 端到端能跑，而 `--record` 仍然报「125 条」，与改动前一模一样。
+ *
+ * 所以这里不再依赖"写的时候记得用字面量"，而是**主动去找**这种写法并拒绝生成基线。
+ * 修法有两种：改成字面量（与同级路由一致），或扩展抽取规则支持常量解析。
+ * 无论哪种，都必须在**这里被拦住**，而不是在几个月后被人发现契约少了一条。
+ */
+export function findOpaqueRouteGuards(source) {
+  const found = []
+  const guards = [
+    // (method, path-identifier)
+    /req\.method\s*===\s*'([A-Z]+)'\s*&&\s*path\s*(?:\.startsWith\s*\(\s*([A-Za-z_$][\w$]*)|===\s*([A-Za-z_$][\w$]*))/g,
+    // (path-identifier, method)，两种书写顺序
+    /path\s*\.startsWith\s*\(\s*([A-Za-z_$][\w$]*)\s*\)\s*&&\s*req\.method\s*===\s*'([A-Z]+)'/g,
+    /path\s*===\s*([A-Za-z_$][\w$]*)\s*&&\s*req\.method\s*===\s*'([A-Z]+)'/g,
+  ]
+  for (const re of guards) {
+    let m
+    while ((m = re.exec(source)) !== null) {
+      const name = m[2] ?? m[1]
+      // 只关心看起来像 API 路径的常量名，避免把 `path === someVar` 的普通分支也报出来
+      if (!/PREFIX|PATH|ROUTE|URL/i.test(name)) continue
+      found.push(name)
+    }
+  }
+  return [...new Set(found)]
+}
+
+/**
  * 提取 HTTP 路由。四种书写顺序都要认，否则会漏掉一半端点。
  * @param {string} source
  * @param {{min?: number}} [options] 覆盖最小路由数护栏（单测用）
  */
 export function extractRoutes(source, options = {}) {
   const min = options.min ?? MIN_ROUTES
+  // 先拒绝"抽取器看不见的路由"：漏掉一条端点却报「与基线一致」是最坏的输出。
+  const opaque = findOpaqueRouteGuards(source)
+  must(opaque.length === 0,
+    `发现 ${opaque.length} 处用**常量**做路径守卫的路由（${opaque.join('、')}）：` +
+    '抽取正则只认字符串字面量，这些路由会被静默漏掉。' +
+    '请改用字面量，或扩展抽取规则支持常量解析。')
   const routes = new Set()
   const patterns = [
     /req\.method\s*===\s*'([A-Z]+)'\s*&&\s*path\s*===\s*'([^']+)'/g,

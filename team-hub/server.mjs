@@ -68,6 +68,7 @@ import { fileURLToPath } from 'node:url'
 import { standardsFor } from './stage-standards.mjs'
 import { evaluatePermission, normalizeOperation } from './permission-engine.mjs'
 import { createRunStore, RunError } from './run-store.mjs'
+import { columnExists as columnExistsImpl, ensureColumn as ensureColumnImpl } from './schema-util.mjs'
 import { loadConfig } from '../packages/shared/src/config.mjs'
 import { SCHEMA as CONFIG_SCHEMA } from './config-schema.mjs'
 
@@ -247,22 +248,16 @@ function enableWal({ attempts = 50, intervalMs = 120 } = {}) {
  * （不走 DEFERRED 的读→升写路径，避免并发下的锁升级死锁），把「检查 + 变更」变成原子操作。
  * 拿不到写锁时最多等待 busy_timeout，超时会抛错：这是既有语义（迁移失败不静默继续）。
  */
+// 启动期迁移的原子原语已提取到 ./schema-util.mjs（PRT-314/316）：
+// 那里说明了「为什么非原子写法会让两个并发启动的进程崩掉一个」。
+// 这里保留同名薄包装只是因为本文件有 30 多处调用点，包装把 db 参数补上，
+// 实现**只有一份**。
 function ensureColumn(table, column, ddl) {
-  if (columnExists(table, column)) return
-  db.exec('BEGIN IMMEDIATE')
-  try {
-    if (!columnExists(table, column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`)
-    db.exec('COMMIT')
-  } catch (e) {
-    try { db.exec('ROLLBACK') } catch { /* 已回滚 */ }
-    // 另一进程可能在等待写锁期间已完成同一列：重读确认，已存在即视为成功（迁移幂等）
-    if (columnExists(table, column)) return
-    throw e
-  }
+  return ensureColumnImpl(db, table, column, ddl)
 }
 
 function columnExists(table, column) {
-  return db.prepare(`PRAGMA table_info(${table})`).all().some(c => c.name === column)
+  return columnExistsImpl(db, table, column)
 }
 db.exec(`
   CREATE TABLE IF NOT EXISTS tasks (

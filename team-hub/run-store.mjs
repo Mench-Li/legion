@@ -36,6 +36,7 @@ import {
   taskStatusOf,
   transitionPlan,
 } from '../orchestrator/state-machine/index.mjs'
+import { ensureColumn as ensureColumnImpl } from './schema-util.mjs'
 
 /** 默认租期。短到「崩溃后能被较快回收」，长到「一次正常执行不会被误判为死亡」。 */
 export const DEFAULT_LEASE_TTL_MS = 120000
@@ -127,17 +128,23 @@ function projectTaskStatus(attemptState, ctx = {}) {
 // ---------------------------------------------------------------- 建表
 
 /**
- * 给已存在的表补一列（幂等）。
+ * 给已存在的表补一列（幂等 + **并发安全**）。
  *
  * 为什么需要它：`CREATE TABLE IF NOT EXISTS` 对**已经存在**的表是空操作——
  * 表建好了，新列一列都不会加上。上一版（PRT-302/303/313）已经推上远程，
  * 也就是说线上可能有一个没有新列的库；只改 `CREATE TABLE` 的后果是
  * **老部署在第一条 claim 上就报 `no such column`**，而新部署一切正常。
  * 这种「新旧部署行为不同」的缺陷在单机开发里永远看不到。
+ *
+ * 为什么不是在这里自己写一遍：本仓库的部署形态是**两进程同时打开同一个库**
+ * （8787 独立进程 + 3080 宿主 v2 外壳），两者启动时都会跑到这里。
+ * 「先 PRAGMA 再 ALTER」在并发下两个进程都会读到「列不存在」，
+ * 于是都执行 ALTER，后者拿到 `duplicate column name` 并在**模块加载期**崩溃——
+ * 表现为其中一个进程起不来，与迁移毫无关系。
+ * 因此这一段的实现只有一份（`schema-util.mjs`，BEGIN IMMEDIATE 内重读）。
  */
 function ensureColumn(db, table, column, ddl) {
-  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name)
-  if (!cols.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`)
+  return ensureColumnImpl(db, table, column, ddl)
 }
 
 /**

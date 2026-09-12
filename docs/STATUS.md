@@ -4,8 +4,8 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-12　`run-ci --only test` **PASS**；其中 `test` **62 套件 / 1796 用例**
-（**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 按纪律 SKIP，计数为 60 通过 + 1 跳过 / 1574 用例）
+**最近一次全量基线**：2026-09-12　`run-ci --only test` **PASS**；其中 `test` **63 套件 / 1801 用例**
+（**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 按纪律 SKIP，计数为 61 通过 + 1 跳过 / 1579 用例）
 —— 以本文件所在提交为准；证据 `.ci/` 下最近一次运行目录
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
 （`scrum/daemon-gf001.json`，`intervalMs: 15000`）同时运行时实测 **31 分钟**（约 7 倍）。
@@ -31,7 +31,40 @@
 > - `gf001` 空间非终态任务数为 **0**；T-141 已由将军于 `14:00:32Z` 转 `canceled`
 >   （产物从 patch 记录逐字恢复为 `53d9d15`，需求已由 `G-mtwxx7an-2` 交付，无需重做）。
 
-> **本轮（PRT-309/310/311 重试退避与 Dead Letter、恢复扫描与人工处置、外部副作用幂等与 Unknown Outcome）**：
+> **本轮（PRT-314 多 worker 并发语义验证 + 原子迁移原语提取）**：
+> 新增 `team-hub/scripts/claim-probe.mjs`（**真实子进程**并发探针）与套件
+> `run-concurrency`（**5 例**），验证四件事：WAL 的**跨进程**可见性、
+> `busy_timeout` 在锁争用下按预算等待（而不是抛 SQLITE_BUSY 把并发问题伪装成随机故障）、
+> **6 个进程同时抢同一条任务恰好一个赢**（这正是"不重复执行已确认的外部写操作"在数据面上的保证）、
+> 以及两个进程并发补列不崩。并发建表/补列的原子原语提取到 `team-hub/schema-util.mjs`
+> （`BEGIN IMMEDIATE` 内重读列名再 ALTER），`server.mjs` 的 30 多处调用点改为薄包装，
+> 实现**只有一份**。62→**63** 套件、1796→**1801** 用例。阶段 3 由 9/16 进到 10/16。
+>
+> **为什么必须是真的操作系统进程**：同一进程内的两条连接共享同一份 `node:sqlite`
+> 模块实例、同一次 PRAGMA 设置、同一个事件循环——而且**两条 `BEGIN IMMEDIATE`
+> 不可能真的同时发出**（JS 是单线程）。因此「并发领取只有一个赢家」在那种测法下
+> 几乎必然成立，它证明的是"我把条件更新写对了"，而不是"两个进程抢的时候不会都赢"。
+>
+> **这一组当场抓到一个真实缺陷**：`ensureColumn` 在提取成共享模块时写成了
+> 「先 `PRAGMA table_info` 再 `ALTER TABLE`」——两个并发启动的进程都会读到「列不存在」，
+> 于是都执行 ALTER，后者拿到 `duplicate column name: idempotency_key` 并在
+> **模块加载期**崩溃。真实形态是 8787 独立进程与 3080 宿主外壳同时启动时其中一个起不来，
+> 表现为 `/team-hub` 路由缺失 + 一条加载失败日志，**看起来与数据库迁移毫无关系**。
+> 用例是把这条缺陷钉住的：先按非原子写法跑了一遍确认它会红（`duplicate column name`），
+> 再恢复原子实现确认变绿——一个无论实现对不对都通过的用例没有价值。
+>
+> 顺带修掉两处**测试脚手架自身**的缺陷（都不是产品问题，但都会伪装成故障）：
+> ① 父进程 `BEGIN IMMEDIATE` 后**同步**等子进程，两个一起等到超时——
+>    那是脚手架死锁，会把"写锁确实生效"误报成"连接失败"。改为用定时器异步放锁。
+> ② 一处断言写成「子进程应能读到父进程已建的库与表」却断言 `claimed !== null`，
+>    与注释正好相反。跨进程可见的正确判据是**子进程正常退出（code 0）**：
+>    表不可见时探针会报错退出，而"队列空"才是它看到同一个真相的证据。
+>
+> 三条门禁均绿：`scan --check` PASS（244 个疑似字面量）、`dsh-boundary` PASS（3 文件 / 26 处，未增长）、
+> `topology-inventory --diff` 无漂移；`server.mjs` 重构后刷新平台契约基线的源文件哈希
+> （**路由与数据表零变化**——diff 只有那一行哈希，正好证明这次重构没有动契约）。
+>
+> 上一批（PRT-309/310/311 重试退避与 Dead Letter、恢复扫描与人工处置、外部副作用幂等）：
 > 新增运行面路由 `POST /api/runtime/fail`（失败结算的**唯一**入口）、`GET /api/runtime/held`
 > （等人工清单）、`POST /api/runtime/resolve`（人工处置）、`GET /api/runtime/budget`（额度读数）；
 > `run-store.mjs` 新增 `failAndRetry` / `scheduleRetry` / `listHeld` / `resolveAttempt` / `retryBudgetOf`、
@@ -351,13 +384,13 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：62 套件 / 1796 用例，`--only test` 整体 PASS** —— 2026-09-12 实测（设 `DSH_CHECKOUT`）
-（PRT-309/310/311 重试退避与 Dead Letter + 人工处置 + 幂等：`run-plane` **87 例**、
-`orchestrator` **58 例**。此前一批 PRT-302/303/313 新增 `run-plane`（63 例：仓储 34 + HTTP 契约 19 + 真 team-hub 端到端 10），
-三层的分工是「各查一类只有那一层才看得见的缺陷」：仓储查并发/epoch/历史，HTTP 查具名码有没有被吞掉，
-端到端查两半各自全绿却合起来错的那种（见本轮块）。`DSH_CHECKOUT` 未设时 `plugins/board-plugin`
-按纪律 SKIP，计数为 60 通过 + 1 跳过 / 1574 用例。
-上一批基线 61 套件 / 1702 用例（PRT-301 运行状态机 + worker 入口）。
+**当前基线：63 套件 / 1801 用例，`--only test` 整体 PASS** —— 2026-09-12 实测（设 `DSH_CHECKOUT`）
+（PRT-314 多进程并发语义：新增 `run-concurrency`（**5 例**，竞争者是真的操作系统进程）
+与 `run-policy`（**14 例**：PRT-309/310/311 的重试额度、退避、Dead Letter、人工处置、幂等键）；
+`run-plane` 87→**73** 例（PRT-309/310/311 的策略用例拆到 `run-policy`，便于失败归因）。
+`DSH_CHECKOUT` 未设时 `plugins/board-plugin` 按纪律 SKIP，计数为 61 通过 + 1 跳过 / 1579 用例。
+上一批基线 62 套件 / 1796 用例（PRT-309/310/311 重试退避与 Dead Letter + 人工处置 + 幂等）。
+再上一批基线 61 套件 / 1702 用例（PRT-301 运行状态机 + worker 入口）。
 再上一批 60 套件 / 1651 用例（PRT-706 首次运行初始化 + 产品配置读取：新增 `product-config`（**27 例**：
 `config.test.mjs` 16 + `init.test.mjs` 11，全部跑真实文件系统的临时目录）。
 这一组问的是同一句话——**这件事有没有被报出来**：

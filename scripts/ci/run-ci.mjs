@@ -442,6 +442,24 @@ async function stageTest() {
       files: ['team-hub/run-store.test.mjs', 'team-hub/run-routes.test.mjs', 'team-hub/run-plane-e2e.test.mjs'],
       cwd: ROOT,
     },
+    // PRT-309/310/311：重试退避与 Dead Letter、人工处置、幂等。
+    // 这一组问的是「失败了之后会怎样」——四类都不会报错的静默失败：
+    // 无限重试、任务停在中间态、挂起的任务静默消失、重复执行已生效的外部写。
+    {
+      label: 'run-policy（PRT-309/310/311：重试额度与退避、Dead Letter、人工处置、幂等键与 Unknown Outcome）',
+      files: ['team-hub/run-store-policy.test.mjs'],
+      cwd: ROOT,
+    },
+    // PRT-314：多 worker 并发语义。竞争者是真的**操作系统进程**，
+    // 不是同一进程里的两条连接——同一事件循环里两条 BEGIN IMMEDIATE
+    // 不可能真的同时发出，因此那种测法证明不了「两个进程抢的时候不会都赢」。
+    // 这一组当场抓到过一个真实缺陷：`ensureColumn` 的非原子写法让两个并发启动的
+    // 进程各执行一次 ALTER，后者在**模块加载期**因 duplicate column name 崩溃。
+    {
+      label: 'run-concurrency（PRT-314：WAL 跨进程可见、busy_timeout 等待、真并发领取只有一个赢家、并发补列）',
+      files: ['team-hub/run-concurrency.test.mjs'],
+      cwd: ROOT,
+    },
     // 阶段 2.5 / 阶段 5：密钥库最小闭环（PRT-505，PRT-258 的第四份契约）。
     // 这一组的断言集中在两类**不会抛异常**的失败上：
     //   ① 元数据接口（list / toJSON / 审计 / 错误对象）把值或密文带出去——

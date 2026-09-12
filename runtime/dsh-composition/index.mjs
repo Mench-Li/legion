@@ -9,6 +9,7 @@
 //   patch-layer.mjs  声明「这一层由哪些行组成、判据是什么」（PRT-214）
 //   enforcement.mjs  三个强制点原语 + canonical operation 哈希（PRT-212）
 //   selfcheck.mjs    沙箱实际管制探测 + 启动自检（PRT-213 / PRT-215）
+//   bootstrap.mjs    **装配入口**：自检 + 注册宿主端口（PRT-215 落地 / PRT-257）
 //
 // ## 本目录**刻意**不含「把补丁层写进 profile」的代码
 //
@@ -51,5 +52,25 @@ export {
 } from './enforcement.mjs'
 
 export { PROBE_ARGV, SELFCHECK_STATES, probeSandbox, startupSelfCheck } from './selfcheck.mjs'
+
+// 装配入口（PRT-215 落地 / PRT-257）。
+//
+// 在这一批之前，`startupSelfCheck` / `probeSandbox` / `bindDshRuntime`
+// 三件东西**都只在自己的模块里存在，没有任何调用者**，于是
+// 「强制面未生效时禁止自动执行」这条保证**从未被行使过**。
+//
+//   > 一个宣言从没被行使过，与这个宣言不存在，在行为上完全一样。
+//
+// 需要说明的是：**本出口被调用，仍然不等于它在真实部署里被调用了。**
+// 真正的调用点在「往运行中的 profile 写入这一层」那个
+// 需要显式决策的独立步骤里（见上面那段说明），而那个步骤是 PRT-257
+// 「一键启动」的一部分，**本批没有交付**。
+// 本批交付的是：那个步骤一旦发生，它**有东西可调**，且调用的后果被用例钉住了。
+export {
+  BOOTSTRAP_CODES,
+  REPAIR_ACTIONS,
+  bootstrapDshRuntime,
+  repairPlanFor,
+} from './bootstrap.mjs'
 
 export { PATCH_YAML_PATH, renderPatchYaml } from './render.mjs'

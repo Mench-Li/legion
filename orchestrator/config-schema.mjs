@@ -102,6 +102,22 @@ export const NON_ENV_LITERALS = Object.freeze([
   // 「没接闸门」这个状态必须与「预算充足」区分得开：
   // 一个没接预算的执行与一个预算充足的执行，在结果上不该长得一样。
   'not-gated', 'bounded', 'unbounded',
+  // PRT-215/257：DSH 侧装配入口（runtime/dsh-composition/bootstrap.mjs）。
+  //
+  // 与上面几批同一条口径：这些码跨进程读取（Launcher 诊断页 → 人排查），
+  // 所以是契约不是实现细节。它们区分的是**修复动作完全不同**的处境：
+  // 自检未过（去看强制面）、探测失败（去看探测器/引擎起没起）、
+  // 端口不全（去看组合层接线给全了没有）。
+  'BOOTSTRAP_SELF_CHECK_INCOMPATIBLE', 'BOOTSTRAP_RUNTIME_PROBE_FAILED',
+  'BOOTSTRAP_BAD_WIRING', 'BOOTSTRAP_PORT_INCOMPLETE', 'BOOTSTRAP_ALREADY_BOUND',
+  // 修复入口的动作名（bootstrap.mjs 的 REPAIR_ACTIONS）。
+  //
+  // 它们会被 Launcher 的**界面**直接读出来当按钮用，因此是面向用户的字符串，
+  // 不是内部枚举——改一个名字就是改一次 UI 契约。
+  'reapply-composition-patch', 'install-supported-runtime', 'fix-sandbox-backend',
+  // 未知检查项的兜底动作。它必须存在：把没有预置修法的项**丢掉**，
+  // 会让"三项没过"看起来像"修了这两项就好"。
+  'inspect-manually',
   // 缺阶段时 worker 的状态名
   'no-stages',
   // 状态机的具名错误码（state-machine/transitions.mjs 的 TRANSITION_ERRORS 与 states.mjs）。

@@ -48,7 +48,7 @@
 | PRT-108 禁止新增直接 DSH 调用的静态边界检查 | ✅ | `dsh-boundary` 阶段（秒级门禁），基线 3 文件 / 26 处 |
 | PRT-109 精确主版本校验与 capabilities 协商 | ✅ | `runtime/contracts/adapter.mjs`（必需能力缺失 → `UNSUPPORTED_CAPABILITY`） |
 
-## 阶段 2：DshRuntimeAdapter（10/15）
+## 阶段 2：DshRuntimeAdapter（11/15）
 
 | 任务 | 状态 | 证据 / 说明 |
 | --- | --- | --- |
@@ -66,7 +66,7 @@
 | PRT-212 最小 DSH 强制面（Guard / pre-execute / answerer） | 🟡 | `runtime/dsh-composition/enforcement.mjs`（34 例）；**审批 answerer 尚未接 team-hub 审批箱**，无生产调用方 |
 | PRT-213 探测 sandbox backend 与 enforcement | ✅ | `runtime/dsh-composition/selfcheck.mjs`（`full`/`partial` 判据） |
 | PRT-214 Legion DSH 组合补丁层与员工 agent preset | 🟡 | 声明 + 生成物 `legion-host.patch.yml` 已就绪；**补丁层未落盘应用**（profile 层 `patchReload: live`，写入会立刻改变运行中的强制面） |
-| PRT-215 补丁层应用与强制面生效启动自检 | 🟡 | 自检门禁已实现（`incompatible` 判定）；因未落盘，**自检目前没有真实调用方** |
+| PRT-215 补丁层应用与强制面生效启动自检 | ✅ | **装配入口已落地**：`runtime/dsh-composition/bootstrap.mjs`（套件 `dsh-bootstrap`，20 例）把 `startupSelfCheck` / `probeSandbox` / `bindDshRuntime` 接成一条**两段式**装配——① 自检 → ② **只有①通过才注册宿主端口**——并从 `index.mjs` 出口。**在此之前三件东西都没有调用者**：worker 的 `executor` 永远是 `EXECUTOR_HOST_PORT_REQUIRED`（PRT-253 的执行引擎与 PRT-510 的预算闸门因此都不会被激活），而「强制面未生效时禁止自动执行」这条保证**从未被行使过**——*一个宣言从没被行使过，与这个宣言不存在，在行为上完全一样*。**顺序不能反**：先注册再自检会留下一个已注册的端口，而 worker 是独立进程、可能已经开始认领任务。沙箱 `partial` 一律判未生效，`confine()` 原样返回 argv 或 `denialSignatures` 为空同判。**端口不完整当场拒绝**（`BOOTSTRAP_PORT_INCOMPLETE`）。**变红 12/12。** 详见 `PRT-215-257-dsh-bootstrap.md`。⚠️ **诚实边界**：出口被调用 ≠ 在真实部署里被调用——真正的调用点在「往运行中的 profile 写入这一层」那个需显式决策的独立步骤里（DSH profile 是 `patchReload: 'live'`，一次误调用能把**当前进程**的沙箱降级），属 PRT-257「一键启动」，本批未交付 |
 
 ## 阶段 2.5：商业薄垂直切片（3/8）
 
@@ -78,7 +78,7 @@
 | PRT-254 per-user 数据目录 + Secret Store 最小闭环 | 🟡 | 目录部分由 PRT-258 的 `product/paths.mjs` 承载（五角色隔离、配置优先级、越界诊断）；**本批补上 Secret Store 最小闭环**：新增 `product/secrets.mjs` + 套件 `product-secrets`（**23 例**），`resolveLayout() → layout.secretsFile → createProductSecretStore → createSecretResolver → 启动自检`——这把连续三份文档都记为「**尚无生产调用方**」的那根线接上了（**一份没人用的密钥库等于没有密钥库**），关键断言是"解析器**真的解出了明文**并能喂给探测执行器"，而不是"函数存在"。**密钥库刻意不在 DataDir 内**（默认 `<产品家目录>/secrets/credentials.json`，与 `dataDir` 是**兄弟**）：**DataDir 是备份、恢复、诊断包导出、整目录拷贝处理的那一个目录**，密钥库落在里面会被任何"把 DataDir 打个包"的操作**顺手**带走，而 spec §3.1 要求密钥不得进入**导出证据**与**能力包**；放在外面，这类泄漏就从"需要每个人每次都记得"变成"结构上做不到"——**一道看不见某类变化的大门比没有大门更坏；反过来也成立：一道不需要人记住的大门才真的守得住**。三条 `error` 诊断把它结构化：`SECRETS_INSIDE_DATA_DIR`（备份会带走）/ `SECRETS_INSIDE_INSTALL_DIR`（升级会替换，而密钥库**机器与账户绑定**，换机器换账户都解不开）/ `SECRETS_INSIDE_CACHE_DIR`（缓存被定义为可安全删除，而删掉之后**无法找回**）；`openProductSecrets` **自己再判一次**而非只信调用方，位置不合法时**连库都不打开**。**明文后端 fail closed，但把"放开"做成一次说出来的选择**（错误文案里直接写出 `requireProtected: false` 怎么写——**一个让人猜不到怎么放开的门禁最后会被人绕过；一个写清怎么放开的门禁，至少让绕过成为一个被记录下来的决定**）；**自检返回结果而不抛**（与既有"形状错误抛出、配置问题返回值"同一条分界）；底层异常 `message` **被收敛掉**（只留 `err.name`）；本模块**不读 `process.env`**，ACL 的 `owner` 是显式入参、**不给就不加固**（**猜一个主体去授权等于把权限给错人，而猜错的失败方向是"给了别人权限"**）。**抓到的问题**：① ACL 检查不传 `owner` 而 `icacls` **不标出**所有者 → 真所有者被当成越权、干净 ACL 永远显示"越权"（fail closed 所以看起来没问题，但**一个永远在报错的警告与没有警告是同一件事**）；② **该缺陷一开始被加固路径掩盖**（判越权 → 加固 → 复验通过 → 看起来正常），补用例"**本来就干净的 ACL 不得触发加固**"钉住——通用形式：**一个"反正最后是对的"的实现，会掩盖它多做了一件不该做的事**；③ 测试自身两处错误（`assert.equal(arr, [])` 按引用比较；"加固被调用"用例加固前后返回**同一份干净 ACL**，断言是对着一次**根本没发生**的加固通过的）。**仍未做**：**Launcher 还没调用 `openProductSecrets`**（线的一端还没插上，接线位置 PRT-257）；**`owner` 没有来源**（所以默认情况下加固不会发生，只被报成"未加固"）;**密钥库无并发保护**（Launcher 与 worker 同时打开时的读-改-写竞争未处理，而多个 Runtime 并存是正常形态）；**未阻止跨机器拷贝**（DPAPI 绑定，拷过去只是 `SECRET_DECRYPT_FAILED`，没有"这台机器的库是新的"这类标记）；`LEGION_SECRETS_FILE` 可指到网络盘而无检查；`count` 用 `store.list()` 无分页无上限；**与 `$DSH_HOME/.credentials.yaml` 的对账仍未解**（spec 附录 A.2 第 2 条要求**不要另建密钥库**，而本模块恰恰是另建的那一个——张力与两条候选路线见 `PRT-509-file-acl-hardening.md` §9，**需产品决策"哪一个是权威"**）；**「一键启动」的端到端验证没做过**（安装 → 初始化 → 打开密钥库 → 录入凭证 → 探测通过）。详见 docs/superpowers/prt/PRT-254-secret-store-closure.md；**生产调用方已由 PRT-257 接上**：`product/launcher/secrets-check.mjs` 在启动前调用 `openProductSecrets`，并按"是否制造新危险"决定**阻止启动**还是**仅提醒** |
 | PRT-255 隔离测试空间安装/运行/取消/重启/诊断验证 | ⬜ | |
 | PRT-256 设计伙伴独立完成真实低风险任务 | ⏸ | 需真实外部用户 |
-| PRT-257 Launcher 负责 DSH 运行时与补丁层安装/自检/修复 | 🟡 | **本批交付「自检」的一半**：`product/launcher/secrets-check.mjs` 把 `openProductSecrets` 接到 `preflight()` 上（套件 `launcher-secrets`，17 例 + `launcher.test.mjs` 4 条接线用例）。**分界**：**阻止启动的，是"启动本身会制造新的危险"；只提醒的，是"现在就不工作"**——明文后端与密钥库落在 DataDir/InstallDir/CacheDir 是 error，打不开/ACL 过宽/ACL 查不出来/平台不支持只是 warn（该提醒却阻止会让用户**被锁在门外**，而修它的 Workbench 也在被启动的东西里）。新增 `ACL_NOT_CREATED` 与 `ACL_UNVERIFIABLE` **分开**（两者都是 ok:false，区别在"有没有东西可保护"），否则新装机器上每次启动都报一条**永远不对**的告警。**顺带修掉一截空接线**：ACL 检查在生产里从来没有 runner（`run: run ?? undefined`，无调用方传 `run`），整套 PRT-509 实现每次真实检查都只说"没查过"——**功能有了、接线也有了，而中间那一截是空的，且是安静地空的**；现由 `createSystemRunner()` 默认使用，本机真实输出 `ACL_TOO_PERMISSIVE` 并点名 `Amench\CodexSandboxUsers`。**未交付**：`owner` 无来源（**加固默认不发生**）；无并发写保护；无跨机器复制防护；`LEGION_SECRETS_FILE` 指向网络盘未检查；`count` 用无界 `store.list()`；与 `$DSH_HOME/.credentials.yaml` 的关系未定；"一键启动"端到端未验证 |
+| PRT-257 Launcher 负责 DSH 运行时与补丁层安装/自检/修复 | 🟡 | **本批再交付「应用自检 + 修复入口」的一半**：`runtime/dsh-composition/bootstrap.mjs` + 套件 `dsh-bootstrap`（**20 例**），从 `index.mjs` 出口。**补的是「三件东西都没有调用者」这个缺口**：`startupSelfCheck()`（PRT-215）、`probeSandbox()`（PRT-213）、`bindDshRuntime()`（PRT-253）此前各自孤立，后果里最重的一条是**「强制面未生效时禁止自动执行」这条保证从未被行使过**——*一个宣言从没被行使过，与这个宣言不存在，在行为上完全一样*。**装配是两段的且顺序不能反**：① 自检 → ② 只有①通过才注册端口；反过来会留下一个已注册的端口，而 worker 是**独立进程**、可能已经开始认领任务。所以最要紧的一条是**自检没过时端口到底有没有被注册**。沙箱 `partial` 一律判未生效（沿用 PRT-213）；`confine()` 原样返回 argv 或 `denialSignatures` 为空同判。**端口不完整 → 当场拒绝**（这条是补出来的、也是本轮最有价值的发现）：第一版把 `runtimeHost` 直接当端口注册，而假件只有 `probeRuntime`，于是注册「成功」了一个**用不了的端口**，失败被推迟到 worker 那里报 `缺少必需方法 startRun`——报得不算差但**层级错了**，排障会从 worker 开始找而真因在装配；*一个注册得上、却没人能用的端口，与一个没注册的端口，只在「状态显示已接线」这一点上不同——而那是更坏的一种*。**修复入口**：`repairPlanFor()` 把失败项翻成 `{check, action, label, why}`——「修不了」往往不是没有修法，是**报告只说了哪项没过、没说下一步做什么**；**预置里没有的项也要出现在计划里**（丢掉会让「三项没过」变成「修了这两项就好」），并有一条断言 `REPAIR_ACTIONS` **覆盖自检的全部检查项**。**变红 12/12**，两条第一轮没咬住且都是**瞄错层**（⑫⑨ 改了自检实现而该动探测实现；⑫⑩ 改了兜底值而那处是显式传入）——*一条瞄错层的探针给出的「没变红」，与「实现是对的」完全同形*。⚠️ **诚实边界**：出口导出了，但**出口被调用 ≠ 在真实部署里被调用**；真正的调用点在「往运行中的 profile 写入这一层」那个需显式决策的独立步骤（DSH profile 是 `patchReload: 'live'`，一次误调用能把**当前进程**的沙箱降级），属 PRT-257「一键启动」，**本批未交付**。修复计划也**只到「给出动作名」，没有真的执行修复** | 原有：**本批交付「自检」的一半**：`product/launcher/secrets-check.mjs`
 | PRT-258 冻结进程清单 / 目录布局 / 配置 Schema / Secret Store 接口 | ✅ | 四份契约全部有实现与用例：`PRT-258-product-contracts.md`（前三份）+ `PRT-505-secret-store.md`（第四份） |
 
 ## 阶段 3：Orchestrator Core（13/16）
@@ -231,7 +231,7 @@
 | --- | --- | --- | --- | --- | --- |
 | 0 冻结基线 | 10 | 1 | 0 | 0 | 11 |
 | 1 Runtime Contract | 9 | 0 | 0 | 0 | 9 |
-| 2 DshRuntimeAdapter | 10 | 5 | 0 | 0 | 15 |
+| 2 DshRuntimeAdapter | 11 | 4 | 0 | 0 | 15 |
 | 2.5 商业薄切片 | 3 | 3 | 1 | 1 | 8 |
 | 3 Orchestrator Core | 13 | 0 | 3 | 0 | 16 |
 | 4 上下文边界 | 0 | 13 | 0 | 0 | 13 |
@@ -241,7 +241,7 @@
 | 8 安装、升级和回滚 | 0 | 1 | 12 | 0 | 13 |
 | 9 商业 Alpha 保障 | 0 | 0 | 9 | 1 | 10 |
 | 10 能力包协议 | 0 | 0 | 6 | 0 | 6 |
-| **合计** | **60** | **30** | **53** | **2** | **145** |
+| **合计** | **61** | **29** | **53** | **2** | **145** |
 
 > 计数口径：**部分**计入「已有交付物但完成标准未全部满足」，
 > 因此不能与「已完成」相加后宣称完成度。真实完成度按**完成标准**判定：

@@ -765,6 +765,23 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-215 落地 + PRT-257 的「应用自检与修复入口」。
+      //
+      // `startupSelfCheck()`、`probeSandbox()`、`bindDshRuntime()` 三件东西
+      // 此前**都只在自己的模块里存在，没有任何调用者**。后果里最重的一条是：
+      //
+      //   「强制面未生效时禁止自动执行」这条保证**从未被行使过**。
+      //
+      //   > 一个宣言从没被行使过，与这个宣言不存在，在行为上完全一样。
+      //
+      // 所以最要紧的一条不是"自检算得对不对"（那有自己的套件），
+      // 而是**自检没过时端口到底有没有被注册**——注册了就代表
+      // 一个独立进程的 worker 可能已经开始认领任务了。
+      label: 'dsh-bootstrap（PRT-215/257：自检未过则不注册 / 端口不全当场拒绝 / 修复入口覆盖全部检查项）',
+      files: ['runtime/dsh-composition/bootstrap.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-510 的**运行侧**接线。
       //
       // 账本（`team-hub/budget-ledger.mjs`）早就完整实现了预留/采集/结算/锁定，

@@ -23,6 +23,8 @@ export const ENV_NAMES = Object.freeze([
   'LEGION_DATA_DIR',
   'LEGION_RUNTIME_COMMAND',
   'LEGION_WORKER_ID',
+  // PRT-306：worktree 从用户授权的项目目录检出。
+  'LEGION_WORKSPACE_DIR',
 ])
 
 /**
@@ -117,6 +119,12 @@ export const SCHEMA = defineSchema({
     {
       key: 'workerId', env: 'LEGION_WORKER_ID', type: 'string', default: '',
       doc: 'worker 标识；默认 worker-<pid>',
+    },
+    {
+      key: 'workspaceDir', env: 'LEGION_WORKSPACE_DIR', type: 'path', default: '',
+      doc: 'PRT-306：用户授权的项目目录，每次 Attempt 从它检出一份隔离的 git worktree。' +
+        '**未配置时不认领任何任务**——不自动退回原地执行：那会让两个 worker 在同一个目录里' +
+        '改同一份文件，而那种冲突不报错（表现为"改的东西莫名不见了"）',
     },
   ],
   notes: [

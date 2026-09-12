@@ -64,6 +64,15 @@ export const REQUIRED_STAGE_KEYS = Object.freeze(['prepareWorkspace', 'buildCont
  */
 export function inPlaceStages({ note = 'PRT-306/401 未交付：当前阶段为原地执行、无上下文快照' } = {}) {
   return Object.freeze({
+    /**
+     * 显式声明「没有隔离」。
+     *
+     * 没有这个声明时，`workspaceMode` 只能靠"有没有 `prepareWorkspace`"去猜，
+     * 而这个函数**有**它——于是原地执行会被写成 `enabled`。
+     * 那是这类代码里最坏的一种错：状态文件说"有隔离"，而实际上两个 worker
+     * 在同一个目录里改同一份文件，且不报错。
+     */
+    workspaceIsolation: 'none',
     prepareWorkspace: async () => ({ kind: 'in-place', note }),
     buildContext: async () => ({ kind: 'minimal', note }),
   })
@@ -126,6 +135,12 @@ export function createWorker({
   failureBackoffMs = WORKER_DEFAULTS.failureBackoffMs,
   maxConsecutiveFailures = WORKER_DEFAULTS.maxConsecutiveFailures,
   workerId = `worker-${process.pid}`,
+  // 工作区/上下文的阶段实现（PRT-306）：与 `executor` 分开，因为
+  // 「在哪里干活」不是执行引擎的事——同一套执行引擎在"有隔离"与"无隔离"
+  // 两种模式下跑的是同一份代码。合并时 `executor` 自己的实现优先
+  // （执行引擎想自己准备上下文就让它自己准备）。
+  stages = null,
+  workspaceNote = null,
   logger = () => {},
   now = () => Date.now(),
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
@@ -137,10 +152,17 @@ export function createWorker({
 
   // 阶段齐备性在**建实例时**就算清楚：等到认领之后才发现缺阶段，
   // 那条任务就已经被领走了（状态 Leased、租约在跑），只能等租约过期。
-  const missingStages = executor === null || executor === undefined
-    ? []
-    : REQUIRED_STAGE_KEYS.filter((k) => typeof executor[k] !== 'function')
-  const stagesUsable = executor !== null && executor !== undefined && missingStages.length === 0
+  //
+  // 三类来源合并成一份实现：`executor`（执行）、`stages`（工作区/上下文）。
+  // 缺哪一类就在 `missingStages` 里报出来——`Leased → Validating` 是非法迁移，
+  // 因此一个只有 `execute` 的 worker 产生不了一次合法的 Attempt，
+  // 它认领之后必然失败并把重试额度烧光。
+  const stageImpl = Object.freeze({ ...(stages ?? {}), ...(executor ?? {}) })
+  const hasAnyStage = executor !== null && executor !== undefined
+  const missingStages = hasAnyStage
+    ? REQUIRED_STAGE_KEYS.filter((k) => typeof stageImpl[k] !== 'function')
+    : []
+  const stagesUsable = hasAnyStage && missingStages.length === 0
 
   let state = 'starting'
   let running = false
@@ -172,13 +194,51 @@ export function createWorker({
     if (nextState === 'hub-unreachable' && previous !== 'hub-unreachable') {
       logger('[worker] 无法与 team-hub 通信：暂停认领并退避重试（不退出，等数据面恢复）')
     }
-    const status = {
+    const status = buildStatus(nextState, extra)
+    const written = writeStatusFile(resolvedStatusPath, status)
+    lastStatusWrite = written
+    if (written.removed.length > 0) {
+      // 剔除不等于没事：说明有人往状态里塞了凭证键，必须可见。
+      logger(`[worker] 状态文件剔除了凭证键：${written.removed.join(', ')}`)
+    }
+    if (written.ok !== true) logger(`[worker] ${written.message}`)
+    return status
+  }
+
+  /**
+   * 组装一份状态对象（**不落盘**）。
+   *
+   * 与 `publish` 分开，是为了让「状态里到底写了什么」能被直接断言，
+   * 而不必先写一个文件再读回来。上一版只能通过 `snapshot()` 看到其中一小部分字段，
+   * 于是"隔离模式有没有被如实写出来"这件事没有任何用例能问——
+   * 而它恰恰是那种**不报错**的失败：没有隔离时一切看起来都正常。
+   */
+  function buildStatus(nextState, extra = {}) {
+    return {
       workerId,
       pid: process.pid,
       state: nextState,
       hubConfigured: hub !== null,
       executorConfigured: executor !== null && executor !== undefined,
       stageMode: executor === null || executor === undefined ? 'none' : (stagesUsable ? 'full' : 'incomplete'),
+      // PRT-306：工作区隔离的状态必须是**可观测**的。
+      //
+      // 四态而不是布尔：`disabled` 带着理由（"没有隔离"本身不报错——它只在两条任务
+      // 撞上同一个文件时才显形，而那时已经晚了；运维必须先能看到它）。
+      //
+      // 判据是**提供者的显式声明** `workspaceIsolation`，不是"有没有 prepareWorkspace"：
+      // `inPlaceStages()` 同样提供那个函数。靠推断会把原地执行写成 `enabled`，
+      // 而那是这类代码里最坏的一种错——状态文件说"有隔离"。
+      workspaceMode: !stagesUsable
+        ? 'unknown'
+        : (stageImpl.workspaceIsolation === 'worktree' && workspaceNote === null
+          ? 'enabled'
+          : (stageImpl.workspaceIsolation === 'none'
+            ? 'disabled'
+            // 提供了阶段却没声明隔离模式：不假装知道。`unknown` 会让人去查，
+            // 而默认成 `enabled` 会让没人去查。
+            : 'unknown')),
+      workspaceNote,
       missingStages,
       claimed: counters.claimed,
       completed: counters.completed,
@@ -195,14 +255,6 @@ export function createWorker({
       updatedAt: new Date(now()).toISOString(),
       ...extra,
     }
-    const written = writeStatusFile(resolvedStatusPath, status)
-    lastStatusWrite = written
-    if (written.removed.length > 0) {
-      // 剔除不等于没事：说明有人往状态里塞了凭证键，必须可见。
-      logger(`[worker] 状态文件剔除了凭证键：${written.removed.join(', ')}`)
-    }
-    if (written.ok !== true) logger(`[worker] ${written.message}`)
-    return status
   }
 
   /**
@@ -321,11 +373,20 @@ export function createWorker({
        * 恢复扫描会认为它什么都没做，于是安全地重跑一遍——而它可能已经改过外部系统。
        * 顺序正确时，中途被杀留下的是 `PreparingWorkspace`/`BuildingContext`，
        * 恢复扫描据此知道「它已经越过某条边界」。
+       *
+       * 跑一步：先落状态，再干活；**把 lease 交给阶段**。
+       *
+       * 上一版这里有 `await run()` —— 不传参数。做空的 `inPlaceStages()`
+       * 不需要租约，于是没有人发现"阶段拿不到自己在给哪条任务干活"。
+       * 而真正的工作区阶段**必须**知道 `taskId`/`attemptId`：它就是靠这两个
+       * 决定在哪个槽位检出。拿不到时的表现不是报错，是
+       * `taskId 不能用作路径片段：undefined` ——一条看起来像"参数没传"的错误，
+       * 而真实原因是调用点漏了参数。
        */
       const step = async (to, run, stageName) => {
         const t = await hub.transition({ attemptId: claimed.attemptId, leaseEpoch: claimed.leaseEpoch, workerId, to })
         trace.push(to)
-        const detail = await run()
+        const detail = await run(claimed)
         return { transition: t, detail, stageName }
       }
       /**
@@ -344,10 +405,10 @@ export function createWorker({
         }
       }
 
-      await step('PreparingWorkspace', tagStage('prepareWorkspace', executor.prepareWorkspace), 'prepareWorkspace')
-      await step('BuildingContext', tagStage('buildContext', executor.buildContext), 'buildContext')
+      await step('PreparingWorkspace', tagStage('prepareWorkspace', stageImpl.prepareWorkspace), 'prepareWorkspace')
+      await step('BuildingContext', tagStage('buildContext', stageImpl.buildContext), 'buildContext')
       await step('Running', async () => null, 'running')
-      const result = await tagStage('execute', executor.execute)(claimed)
+      const result = await tagStage('execute', stageImpl.execute)(claimed)
       const outcome = result?.outcome ?? 'failed'
       if (outcome === 'completed') counters.completed += 1
       else if (outcome === 'outcome_unknown') counters.unknownOutcome += 1
@@ -484,6 +545,17 @@ export function createWorker({
     /** 求值当前状态文件（供 CLI / 诊断使用）。 */
     readStatus() {
       return readStatusFile(resolvedStatusPath)
+    },
+
+    /**
+     * 组装当前状态对象而**不落盘**。
+     *
+     * 给运维与用例一个"现在外部会看到什么"的读取点。落盘版本的字段与它完全一致
+     * （`publish` 就是调它再写文件），因此断言这里等于断言状态文件，
+     * 而不必为了读一个字段去建目录、写文件、再解析回来。
+     */
+    status(extra = {}) {
+      return Object.freeze(buildStatus(state, extra))
     },
 
     /** 读回写给外部看的状态（不落盘，供测试断言）。 */

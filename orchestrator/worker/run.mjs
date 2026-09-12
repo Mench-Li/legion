@@ -19,6 +19,7 @@ import { join } from 'node:path'
 
 import { createWorker } from './main.mjs'
 import { STATUS_RELPATH } from './status-file.mjs'
+import { planWorkspace, worktreeStages } from '../workspace/index.mjs'
 
 /** 进程外壳读取的环境变量（逐字，供 scan --check 枚举）。 */
 export const WORKER_ENV = Object.freeze({
@@ -27,6 +28,10 @@ export const WORKER_ENV = Object.freeze({
   DATA_DIR: 'LEGION_DATA_DIR',
   RUNTIME_COMMAND: 'LEGION_RUNTIME_COMMAND',
   WORKER_ID: 'LEGION_WORKER_ID',
+  // PRT-306：用户授权的项目目录，worktree 从这里检出。
+  // 缺它时**不认领**——不是"退回原地执行"，那会让两个 worker 在同一个目录里
+  // 改同一份文件，而那种冲突不报错（见 orchestrator/workspace/index.mjs 的模块说明）。
+  WORKSPACE_DIR: 'LEGION_WORKSPACE_DIR',
 })
 
 /** 从环境读 worker 配置（不做默认值猜测：hub 地址缺失是显式错误）。 */
@@ -37,6 +42,55 @@ export function readWorkerEnv(env = {}) {
     dataDir: env.LEGION_DATA_DIR ?? null,
     runtimeCommand: env.LEGION_RUNTIME_COMMAND ?? null,
     workerId: env.LEGION_WORKER_ID ?? null,
+    workspaceDir: env.LEGION_WORKSPACE_DIR ?? null,
+  })
+}
+
+/**
+ * 把工作区阶段接到执行引擎上（PRT-306）。
+ *
+ * 契约是「`executor` 提供 `execute`，工作区阶段由本函数补上」——
+ * 因为工作区**不是**执行引擎的事：同一套 DSH 执行引擎在"有隔离"与"无隔离"
+ * 两种模式下跑的是同一份代码，区别只在准备工作区那一步。
+ *
+ * 三种情形分得很清楚，**没有一种会静默降级**：
+ *   ① 没配 `workspaceDir` → 返回 `{ stages: null, reason }`，
+ *      由调用方显式铺 `inPlaceStages()`（那是一个具名的调用点，会被写进 Attempt 证据）。
+ *   ② 配了 → 返回真的 `worktreeStages`。
+ *   ③ 工作区根与仓库路径的布局有问题（嵌套、相对路径）→ `planWorkspace` 抛具名错误。
+ *      这个错**在准备阶段就暴露**，而不是等到建的时候才发现。
+ */
+export function resolveWorkspaceStages({ workspaceDir, dataDir, scope = 'default', platform = process.platform, runGit } = {}) {
+  if (typeof workspaceDir !== 'string' || workspaceDir === '') {
+    return Object.freeze({
+      stages: null,
+      reason: '未配置 LEGION_WORKSPACE_DIR：没有用户授权的项目目录可检出。' +
+        '**不自动退回原地执行**（那会让两个 worker 在同一目录里改同一份文件，且不报错）——' +
+        '调用方若确实要原地执行，请显式铺开 inPlaceStages()',
+    })
+  }
+  const worktreeBaseDir = join(dataDir, 'worktrees')
+  // **在这里就验布局**，不要等到第一次认领。
+  //
+  // 布局错误（worktree 基准落在仓库内部、路径是相对的）是**配置**错误，
+  // 而 `worktreeStages` 的 `planWorkspace` 是惰性的——不先探一次的话，
+  // 它会等到某个 worker 认领了任务、状态已经推进到 `PreparingWorkspace` 时才抛。
+  // 那时租约在跑，只能等它过期，而日志里看起来像"这次执行失败了"。
+  // 用探针 id 走一次规划：三个布局类错误（NOT_CONFIGURED / NOT_ABSOLUTE / OVERLAP）
+  // 都在这一步暴露，而探针 id 本身是安全的。
+  planWorkspace({
+    repoDir: workspaceDir,
+    worktreeBaseDir,
+    scope: 'probe',
+    taskId: 'probe',
+    attemptId: 'probe',
+    platform,
+  })
+  return Object.freeze({
+    stages: worktreeStages({ repoDir: workspaceDir, worktreeBaseDir, scope, platform, ...(runGit === undefined ? {} : { runGit }) }),
+    reason: null,
+    repoDir: workspaceDir,
+    worktreeBaseDir,
   })
 }
 
@@ -143,6 +197,10 @@ export async function runWorkerProcess({
   env = process.env,
   fetchImpl = globalThis.fetch,
   executor = null,
+  // 调用方给的执行引擎通常只实现 `execute`；工作区阶段由下面按配置补上。
+  // 传 `inPlaceStages()` 的调用方保持原样（那是显式的降级点，不是静默行为）。
+  stages = null,
+  scope = 'default',
   platform = process.platform,
   write = (line) => process.stdout.write(`${line}\n`),
   installSignalHandlers = true,
@@ -178,9 +236,28 @@ export async function runWorkerProcess({
     }
   }
 
+  // ── PRT-306：工作区阶段 ──
+  //
+  // 只有当执行引擎真的在时才有意义（`executor === null` → `no-executor`，
+  // 不认领任何任务，此时去建工作区是白建）。
+  //
+  // 显式传了 `stages` 的调用方优先：那是调用方在声明"我知道这一步是什么"。
+  // 否则按配置解析——解析不出来时返回的是一段**理由**，而不是一个沉默的原地执行。
+  let effectiveStages = stages
+  let workspaceNote = null
+  if (executor !== null && executor !== undefined && effectiveStages === null) {
+    const resolved = resolveWorkspaceStages({ workspaceDir: cfg.workspaceDir, dataDir: cfg.dataDir, scope, platform })
+    effectiveStages = resolved.stages
+    workspaceNote = resolved.reason
+    if (resolved.stages !== null) write(`[worker] 工作区隔离已启用：${resolved.repoDir} → ${resolved.worktreeBaseDir}`)
+    else write(`⚠ [worker] ${resolved.reason}`)
+  }
+
   const worker = createWorker({
     hub,
     executor,
+    stages: effectiveStages,
+    workspaceNote,
     dataDir: cfg.dataDir,
     platform,
     workerId: cfg.workerId ?? undefined,

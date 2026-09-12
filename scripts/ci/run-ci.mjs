@@ -516,6 +516,20 @@ async function stageTest() {
       files: ['team-hub/handoff-routes.test.mjs'],
       cwd: ROOT,
     },
+    // PRT-306：workspace/worktree 隔离。大部分用例跑**真 git**（临时目录里 init
+    // 一个仓库）：`git worktree` 的语义太容易记错，用假 git 测等于在测自己的想象。
+    // 重点在**拒绝**——拒绝不安全 id、拒绝嵌套布局、拒绝覆盖陌生目录、
+    // 拒绝回收脏工作区、拒绝把"git 说成功"当成"工作区可用"。
+    {
+      label: 'workspace（PRT-306：worktree 隔离、按 Attempt 分配、删除是拒绝边界）',
+      files: ['orchestrator/workspace/workspace.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      label: 'workspace-wiring（PRT-306：工作区阶段接入 worker，隔离模式可见）',
+      files: ['orchestrator/worker/workspace-wiring.test.mjs'],
+      cwd: ROOT,
+    },
     {
       label: 'run-kill-drill（PRT-312：真实进程被强杀后不丢任务、不伪装成功、不重复外部写）',
       files: ['team-hub/run-kill-drill.test.mjs'],

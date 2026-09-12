@@ -4,9 +4,9 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-12　`run-ci --only test` **PASS**；其中 `test` **72 套件 / 1901 用例**
-（**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 按纪律 SKIP，计数为 70 通过 + 1 跳过 / 1679 用例）
-—— 以本文件所在提交为准；证据 `.ci/2026-09-12T04-27-01-455Z/`
+**最近一次全量基线**：2026-09-12　`run-ci --only test` **PASS**；其中 `test` **74 套件 / 1934 用例**
+（**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 按纪律 SKIP，计数为 72 通过 + 1 跳过 / 1712 用例）
+—— 以本文件所在提交为准；证据 `.ci/2026-09-12T04-44-43-143Z/`
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
 （`scrum/daemon-gf001.json`，`intervalMs: 15000`）同时运行时实测 **31 分钟**（约 7 倍）。
 **因此不要把耗时当回归基线**——只有套件数/用例数/通过与否可用于判定。
@@ -31,7 +31,64 @@
 > - `gf001` 空间非终态任务数为 **0**；T-141 已由将军于 `14:00:32Z` 转 `canceled`
 >   （产物从 patch 记录逐字恢复为 `53d9d15`，需求已由 `G-mtwxx7an-2` 交付，无需重做）。
 
-> **本轮（PRT-305/308 岗位与流水线 + 打回与交接）**：
+> **本轮（PRT-306 workspace/worktree 隔离：真正的 `git worktree`，以及"没有隔离"必须可见）**：
+> 新增 `orchestrator/workspace/index.mjs`（真 `git worktree`：规划期拒绝、
+> 先落意图再做副作用、删除是拒绝边界）、`worktreeStages()`、
+> `LEGION_WORKSPACE_DIR`、`resolveWorkspaceStages`、worker 状态文件
+> `workspaceMode` 四态；两组套件 `workspace`（**24 例**，跑真 git）、
+> `workspace-wiring`（**9 例**）。阶段 3 由 **12/16** 到 **13/16**，
+> 余 PRT-304/315/316（提取类）。
+>
+> **在它之前"准备 workspace"是一个空函数**（`inPlaceStages()`，明记"这一步什么都没做"）。
+> 它留下的是这个局面：**两个 worker 认领同一仓库的两条任务时，在同一个目录里改文件**。
+> 由此产生的失败没有一个是报错——"我改的东西莫名不见了"、"上次改坏了这次却通过了"、
+> "崩了之后不知道它在哪个目录干过活"。三条纪律各对付一种：
+> ① **按 Attempt 分配**（不按 Task）：按 Task 时重试继承上一次的半成品改动，
+> 于是"上次改坏了"的东西这次看起来是"已经改好了"；
+> ② **先落意图再做副作用**；
+> ③ **删除是拒绝边界**。
+>
+> **worktree 不进仓库**：落在仓库内部时它会出现在主仓库的 `git status` 里，
+> 另一个 worker 的 `git add -A` 会把它整棵树提交走。本模块**拒绝**这种嵌套布局，
+> 不靠"记得加 .gitignore"来防。目录落在 `DataDir/worktrees/`（spec §6.11 把
+> `Workspace/` 定义为用户授权的项目目录，worktree 是运行面派生物）。
+>
+> **抓到两个真实缺陷**：
+> ① **Attempt id 是 `att:<taskId>:<n>`，含冒号**，而冒号在 Windows 上是非法
+> 文件名字符——"id 直接当目录名"不是"偶尔遇到脏数据"，而是**每一真实 Attempt
+> 都会**走不通。必须有显式且**单射**的编码：把冒号换成连字符会让 `att:T-1:2`
+> 与 `att-T-1-2` 撞进同一个目录（一次重试覆盖另一次的工作区且不报错）。
+> 同时拒绝路径分隔符与 `..`（不编码——它们说明调用方传的是**路径**，
+> 编码只会把错误变成"看起来正常但指向别处"）。
+> ② **worker 调 `prepareWorkspace`/`buildContext` 时是 `await run()`，不传 lease**。
+> `execute` 是单独调的、拿到了租约，而这两个阶段一直是无参调用。
+> 一直没被发现的原因很具体：**做空的 `inPlaceStages()` 不需要租约**——
+> 它的返回值是常量，跟是哪条任务毫无关系。一个恰好不需要该能力的实现，
+> 把框架的调用点缺陷藏到了下一个真正需要它的实现出现为止。
+> 修法是 `await run(claimed)`。
+>
+> **「git 说成功」≠「工作区可用」**：`createWorkspace` 建完会**重读登记表**核验，
+> 没有登记就报错——没有登记，回收与恢复都找不到这个目录，而 `git` 的退出码是 0。
+> 建失败时收拾的只限于**本次调用自己**刚造出来的残壳并 `worktree prune`；
+> 不收的话下次会报 `already exists`，这个槽位就永久坏掉，而它看起来只是"又失败了一次"。
+>
+> **`workspaceMode` 四态，判据是提供者的显式声明**而不是猜"有没有
+> `prepareWorkspace`"：`inPlaceStages()` **同样提供**那个函数，靠推断会让原地执行
+> 被写成 `enabled`——状态文件说"有隔离"，而实际没有。这是这类代码里最坏的一种错。
+> `disabled` 还带 `workspaceNote`（理由），因为结论本身不能据以行动。
+> 没有 `LEGION_WORKSPACE_DIR` 时**不自动退回原地执行**，只给理由；
+> 要原地执行必须显式铺 `inPlaceStages()`——一个具名的调用点。
+>
+> **删除是不可逆的，因此回收全是拒绝**：有未提交改动就拒绝（列出文件），
+> `force` 也不越过（一个布尔开关不该成为丢掉别人唯一一份成果的入口）；
+> 陌生目录一律拒绝覆盖；读不出改动状态也拒绝（不能假定它干净）。
+>
+> 验证过会变红：把 `REF_OVERLAP` 检查与脏检查分别换成 `if (false)`，
+> 对应用例立刻红（3 处失败），恢复后 24/24。
+> 详见 `docs/superpowers/prt/PRT-306-workspace-worktree.md`。
+> PRT-007 基线已按新 env 键重录（topology 清单 +1 键：`LEGION_WORKSPACE_DIR`）。
+>
+> 上一轮（PRT-305/308 岗位与流水线 + 打回与交接）：
 > 新增 `orchestrator/pipeline/index.mjs`（**纯函数**：岗位索引、流水线结构读法、
 > `resolveNextPost`、`buildHandoffTask`）、`run_handoffs` **只追加**表、
 > `runStore.handoff/handoffsOf`、路由 `POST /api/runtime/handoff`、
@@ -555,16 +612,18 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：72 套件 / 1901 用例，`--only test` 整体 PASS** —— 2026-09-12 实测（设 `DSH_CHECKOUT`）
-（PRT-305/308 岗位与流水线 + 交接：`prt-pipeline`（**16 例**，纯函数）、
+**当前基线：74 套件 / 1934 用例，`--only test` 整体 PASS** —— 2026-09-12 实测（设 `DSH_CHECKOUT`）
+（PRT-306 工作区隔离：`workspace`（**24 例**，跑真 git）、`workspace-wiring`（**9 例**，接线）；
+PRT-305/308 岗位与流水线 + 交接：`prt-pipeline`（**16 例**，纯函数）、
 `handoff-store`（**12 例**，事务语义）、`handoff-routes`（**8 例**，真 HTTP + 真 `createTask` 接线）；
 PRT-307 机器验收：`acceptance`（**24 例**，纯函数）、`acceptance-store`（**16 例**）、
 `acceptance-routes`（**10 例**，起真 HTTP 服务）；
 PRT-312 真实进程被强杀：`run-kill-drill`（**2 例**，真 worker 进程 + 真 team-hub + `SIGKILL`）；
 进度表自检 `prt-progress`（**12 例**）；PRT-314 多进程并发 `run-concurrency`（**5 例**）；
 `run-policy`（**14 例**：PRT-309/310/311 的重试额度、退避、Dead Letter、人工处置、幂等键）。
-`DSH_CHECKOUT` 未设时 `plugins/board-plugin` 按纪律 SKIP，计数为 70 通过 + 1 跳过 / 1679 用例。
-上一批基线 69 套件 / 1865 用例（PRT-307 机器验收）。
+`DSH_CHECKOUT` 未设时 `plugins/board-plugin` 按纪律 SKIP，计数为 72 通过 + 1 跳过 / 1712 用例。
+上一批基线 72 套件 / 1901 用例（PRT-305/308 岗位流水线与交接）。
+再上一批基线 69 套件 / 1865 用例（PRT-307 机器验收）。
 再上一批基线 66 套件 / 1815 用例（PRT-312 强杀演练 + 进度表自检）。
 再上一批基线 65 套件 / 1803 用例（PRT-312 强杀演练）。
 再上一批基线 63 套件 / 1801 用例（PRT-314 多进程并发 + 原子迁移原语）。

@@ -81,7 +81,7 @@
 | PRT-257 Launcher 负责 DSH 运行时与补丁层安装/自检/修复 | ⬜ | 分发形态路线 C 已裁决；Legion 自身四个 `file:` 包的分发方式待定 |
 | PRT-258 冻结进程清单 / 目录布局 / 配置 Schema / Secret Store 接口 | ✅ | 四份契约全部有实现与用例：`PRT-258-product-contracts.md`（前三份）+ `PRT-505-secret-store.md`（第四份） |
 
-## 阶段 3：Orchestrator Core（12/16）
+## 阶段 3：Orchestrator Core（13/16）
 
 | 任务 | 状态 | 证据 / 说明 |
 | --- | --- | --- |
@@ -90,7 +90,7 @@
 | PRT-303 attempt 与不可覆盖历史 | ✅ | `run_attempts`（`UNIQUE(task_id, attempt_no)`）+ 只追加的 `run_attempt_events`（无 `updated_at` 列，结构上无法改历史）+ `historyOf`/`eventsOf`。重试经 `RetryableFailure → Queued` 的 `createsNewAttempt` **新建**尝试，旧尝试的作用域、失败码与原因原样保留 |
 | PRT-304 提取任务扫描与认领 | ⬜ | 运行面已有 `claim` 的完整实现与 HTTP 路由；「提取 `plugins/src/index.ts` 的扫描/认领」属 PRT-315/316 的同批拆分 |
 | PRT-305 提取岗位、流水线与团队快照 | ✅ | `orchestrator/pipeline/index.mjs`（**纯函数**：`indexStages` 按 role 索引、`pipelineView` 报结构完整性、`resolveNextPost` 回答"后面还有没有岗位"、`buildHandoffTask` 拼装交接任务）+ `GET /api/runtime/next-post`；套件 `pipeline`（16 例）。**核心判据是把「链断」与「链尾」分开**：两者在数据上长得一模一样（都表现为"查不到下一岗位"），而前者是配置错误（`next` 拼错、或下一岗位被停用、或任务上记的岗位已改名）、后者是正常的。当成链尾会让任务链静默断在这里，直到整个目标停住才被发现。`next` 是**没有外键约束**的字符串，所以这件事只能靠判定兜住 |
-| PRT-306 提取 workspace/worktree 管理 | ⬜ | |
+| PRT-306 提取 workspace/worktree 管理 | ✅ | `orchestrator/workspace/index.mjs`（真 `git worktree`：`planWorkspace` 规划期拒绝、`createWorkspace` 先落意图再做副作用、`reclaimWorkspace` 删除是拒绝边界）+ `worktreeStages()` 声明 `workspaceIsolation: 'worktree'` + worker 接线（`LEGION_WORKSPACE_DIR`、`resolveWorkspaceStages`、状态文件 `workspaceMode` 四态）；套件 `workspace`（24 例，跑真 git）、`workspace-wiring`（9 例）。判据四条：① **按 Attempt 分配**（不按 Task）——按 Task 时重试会继承上一次的半成品改动，于是"上次改坏了"的东西这次看起来是"已经改好了"；② **拒绝嵌套布局**——worktree 落在仓库内部会出现在主仓库的 `git status` 里，另一个 worker 的 `git add -A` 会把它整棵树提交走，本模块不靠"记得加 .gitignore"来防；③ **删除是拒绝边界**——有未提交改动就拒绝回收，`force` 也不越过（一个布尔开关不该成为丢掉别人唯一一份成果的入口），陌生目录一律拒绝覆盖；④ **「git 说成功」≠「工作区可用」**——建完重读登记表，没有登记就报错（起了但干不了活不能看起来像成功）。**抓到两个真实缺陷**：Attempt id 是 `att:<taskId>:<n>`，**含冒号**，而冒号在 Windows 上是非法文件名字符——"id 直接当目录名"这条路根本走不通，必须有显式且**单射**的编码（`att:T-1:2` 与 `att-T-1-2` 不得撞进同一个目录）；以及 worker 调 `prepareWorkspace`/`buildContext` 时是 `await run()`，**不传 lease**——空的 `inPlaceStages()` 不需要它，于是从没人发现阶段拿不到自己在给哪条任务干活 |
 | PRT-307 提取结构化结果与机器验收 | ✅ | `orchestrator/acceptance/index.mjs`（**纯函数**：判据核验 + 结论到去向的映射）+ `run_validations` 只追加表（结论与**当时用的判据**一起落库）+ `runStore.recordValidation/validationsOf/criteriaOf` + `POST /api/runtime/validate`、`GET /api/runtime/validations`；套件 `acceptance`（24 例）、`acceptance-store`（16 例）、`acceptance-routes`（10 例）。判据有四条：① **三种结论而不是布尔**——`accepted`/`rejected`/`needs-human`，因为"没通过"的两种成因（机器确认不满足 / 机器判不了）走的路完全不同，合成一个 `false` 时选哪条都是错的；② 判据**封闭**——不在已登记种类里的一律算"判不了"而**不是**通过，新增一种必须显式加进清单；③ **散文判据 = 人工判据**（`tasks.acceptance` 由 `stage-standards.mjs` 生成的正是散文），任务只带散文判据时结论必然是 `needs-human`，这是对的——从没人说过"什么叫做完了"；④ 状态机声明的 `requiresPersist: ['attempt','validation']` **真的被核验**：一条从未被验收过的尝试进 `Completed` 会被 409 `EVIDENCE_MISSING` 拒绝（只记录不核验时那句话只是事件流里的一段 JSON，而"没人验收过"会被写成"已验收"）。**这条路抓到一个真实缺陷**：交付级审批（`Validating → AwaitingApproval`）的任务在看板上显示为 `in_progress` 而不是 `in_review`——因为投影读的是**边**的 hint 而不是刚写进那一行的 `returnTo`；审批人于是以为活还在干，任务既不在待办里也没人在跑。**执行成功不再等于交付完成**：PRT-312 那条用例留下的"成功永远停在 `Validating`"由此收口 |
 | PRT-308 提取打回、交接与完成 | ✅ | **打回**（`rejected` → 经 `scheduleRetry` 重试或 Dead Letter）、**完成**（`accepted` + `hasNextPost=false` → `Completed`）随 PRT-307 落地；**交接**随本批落地：`runStore.handoff` 在**一个事务**里建后继任务 + 记 `run_handoffs` + 收口，`createTask`/`readPipeline` 由 server 注入（运行仓储不认识那两张表的 schema，但注入的实现跑在它的事务里）。判据四条：① spec 第 333 行的「**原子**创建/释放下一岗位任务」——建任务失败时整笔回滚，不留孤儿后继（有用例撞唯一索引验证）；② **幂等**靠 `run_handoffs` 查询 + `successor_id` 上的**唯一索引**两处，且都在同一事务里——只在应用层查重时两个并发进程会各建一条（与 `ensureColumn` 那次的失败模式一样）；③ `HandingOff → Completed` 要 `handoff` 证据，**没有后继就收口会被 409 拒绝**，否则任务链静默断在这里；④ `successor_id` 建出后若 `createTask` 没返回 id 一律拒绝，不把"下一岗位已建好"写成事实。套件 `handoff-store`（12 例）、`handoff-routes`（8 例）。**这条路抓到一个真实缺陷**：`server.mjs` 与 `run-store.mjs` 各有一个 `withTx`，两个闭包各记各的 `txDepth`——`createTask` 进到运行仓储已开启的事务里时以为自己在最外层，于是又发一次 `BEGIN IMMEDIATE`，报 `cannot start a transaction within a transaction`；修法是把函数体拆成 `createTaskInTx`，由调用方声明"我已经在事务里了" |
 | PRT-309 重试、退避与 Dead Letter | ✅ | `scheduleRetry`（重试/放弃的**唯一**决策点）+ `failAndRetry` + 退避写进队列 `next_attempt_at_ms`（真的生效，不是没人调用的纯函数）+ 额度上限（默认 5 次）+ `retryDelayMs` 指数退避；`/api/runtime/fail`（失败结算的唯一入口）与 `/api/runtime/budget`。判据：额度耗尽必进 `DeadLetter`（终态），且回收路径**同样**查额度——否则"每次快失败就被杀"的任务会永远重试 |
@@ -233,7 +233,7 @@
 | 1 Runtime Contract | 9 | 0 | 0 | 0 | 9 |
 | 2 DshRuntimeAdapter | 10 | 5 | 0 | 0 | 15 |
 | 2.5 商业薄切片 | 2 | 1 | 4 | 1 | 8 |
-| 3 Orchestrator Core | 12 | 0 | 4 | 0 | 16 |
+| 3 Orchestrator Core | 13 | 0 | 3 | 0 | 16 |
 | 4 上下文边界 | 0 | 0 | 13 | 0 | 13 |
 | 5 模型与密钥 | 0 | 2 | 9 | 0 | 11 |
 | 6 工具、权限和审批 | 1 | 3 | 16 | 0 | 20 |
@@ -241,7 +241,7 @@
 | 8 安装、升级和回滚 | 0 | 1 | 12 | 0 | 13 |
 | 9 商业 Alpha 保障 | 0 | 0 | 9 | 1 | 10 |
 | 10 能力包协议 | 0 | 0 | 6 | 0 | 6 |
-| **合计** | **49** | **15** | **79** | **2** | **145** |
+| **合计** | **50** | **15** | **78** | **2** | **145** |
 
 > 计数口径：**部分**计入「已有交付物但完成标准未全部满足」，
 > 因此不能与「已完成」相加后宣称完成度。真实完成度按**完成标准**判定：

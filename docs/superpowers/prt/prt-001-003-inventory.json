@@ -49,7 +49,7 @@
       ],
       "envReadCount": 11,
       "undeclaredEnvKeys": [],
-      "filesScanned": 10
+      "filesScanned": 13
     },
     {
       "name": "workbench",
@@ -261,17 +261,18 @@
       "sensitiveEnv": [
         "TEAM_HUB_TOKEN"
       ],
-      "declaredFieldCount": 5,
+      "declaredFieldCount": 6,
       "envReadKeys": [
         "LEGION_DATA_DIR",
         "LEGION_RUNTIME_COMMAND",
         "LEGION_WORKER_ID",
+        "LEGION_WORKSPACE_DIR",
         "TEAM_HUB_TOKEN",
         "TEAM_HUB_URL"
       ],
-      "envReadCount": 5,
+      "envReadCount": 6,
       "undeclaredEnvKeys": [],
-      "filesScanned": 9
+      "filesScanned": 12
     }
   ],
   "declarationGaps": [],

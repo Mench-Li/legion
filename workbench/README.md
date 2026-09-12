@@ -47,7 +47,7 @@ node scripts/serve.mjs --port 5173   # 独立静态服务 → http://127.0.0.1:5
 
 ## 服务端配套（第 2 步，legion 引擎侧）
 
-- `serve.mjs`（`scripts/serve.mjs`）新增 `GET /api/files/list|read|download`（S3）、`PUT /api/files/upload` 与 `POST /api/files/mkdir|rename|delete`（S4，仅回环 + `--token`/`DSH_WORKBENCH_TOKEN` 写鉴权、`overwrite=1`/`confirm=yes` 语义；上传按 Content-Length 预检 + 流式限长（413），正文先落同目录临时文件、收体完整后原子改名发布——中断/超限不破坏原文件，P0-1）、`POST /api/web/fetch`（S6 SSRF 防护代理 + 零依赖正文抽取）；文件/网页接口均有 `isMain` 守卫 + 纯函数导出供契约测试（`files-api.test.mjs`/`web.test.mjs`）。
+- `serve.mjs`（`scripts/serve.mjs`）新增 `GET /api/files/list|read|download`（S3）、`PUT /api/files/upload` 与 `POST /api/files/mkdir|rename|delete`（S4，仅回环 + `--token`/`DSH_WORKBENCH_TOKEN` 写鉴权、`overwrite=1`/`confirm=yes` 语义；上传按 Content-Length 预检 + 流式限长（413），正文先落同目录临时文件、收体完整后原子改名发布——中断/超限不破坏原文件，P0-1）、`POST /api/files/reveal`（打开所在位置：空间根内解析落点 → 拉起本机文件管理器定位该文件/目录；仅回环 + 写令牌，越界/`.git`/symlink 逃逸同强度拒绝；契约测试 `reveal-open.test.mjs`）、`POST /api/web/fetch`（S6 SSRF 防护代理 + 零依赖正文抽取）；文件/网页接口均有 `isMain` 守卫 + 纯函数导出供契约测试（`files-api.test.mjs`/`web.test.mjs`）。
 - `serve.mjs` 新增 `GET /api/missions`（服务端任务集聚合，`?scope=`）、
   `POST /api/pause` / `POST /api/resume`（全局暂停/继续，写 `scrum/control.json`）、
   `/api/config` 增加 `paused` 字段。
@@ -118,8 +118,9 @@ node scripts/serve.mjs --port 5173   # 独立静态服务 → http://127.0.0.1:5
   **R-1/R-2/R-3 扩展（G-mtr3su6f-1）**：①「全部空间」视图死路卡 →「选择工作空间开始对话」空间列表（props `spaces` / 兜底 `fetchSpaces`，点选经 `onPickScope` → App `selectScope`）；②对话头部健康状态点：`fetchChatHealth`（GET /api/chat/health）绿/黄/红/灰四态 + 15s 轮询，红 = 最近失败可行动文案；③「⚙ 回复设置」弹窗：`fetch/saveChatReplySettings` 每空间 AI 开关（默认开，关后零出站）+ 可选 model/identity/systemHint；④「📎 附件」：隐藏 `<input type=file multiple>` + 客户端预检（≤10MB / ≤3 / 黑名单扩展名）→ `uploadChatAttachment`（PUT /api/chat/attachments 落 staged）→ `postChatMessage({ attachmentIds })` 绑定；消息旁渲染 `meta.attachments` 附件标识（文件名+大小），文件正文不进 draft/body；发送成功清附件槽、失败保留 + toast（对齐草稿保留语义）。
   写 = team-hub `POST /api/chat/*`（统一 handleWrite，`by:'general'` 注入），审计/SSE 由服务端 DAO 留痕；前端**不再另开事件源**——订阅既有 `/hub/api/events` 并过滤 `action.startsWith('chat:')`，`detail.conv` 命中当前会话即刷新。
   边界：需中枢可达 + 选中**具体空间**（「全部空间」视图提供可选空间入口）；消息 ≤8000 字符；附件仅文本类 UTF-8、仅当次回复上下文（staged 孤儿 24h / 已绑定 7 天 TTL 清理）；kind 白名单外消息与任何 HTML/脚本内容都按**纯文本**渲染（无 `dangerouslySetInnerHTML`）。
-- **文件中心** `FilesView.tsx`：`fetchFileList / fetchFilePreview / fileDownloadUrl / filesUpload / filesMkdir / filesRename / filesDelete`。
+- **文件中心** `FilesView.tsx`：`fetchFileList / fetchFilePreview / fileDownloadUrl / revealFileLocation / filesUpload / filesMkdir / filesRename / filesDelete`。
   同源调 serve.mjs `/api/files/*`（仅回环；写请求需令牌则 401 映射 toast）。文件根 = 当前空间 `local_dir`（team-hub `/api/spaces`）；`../`/盘符/根外 symlink/`.git` 内部等越界与仓库内路径由服务端 `resolveInsideRoot`/realpath 守卫拒绝，前端只展示服务端错误文案。
+- **打开所在位置** `RevealButton.tsx`：任意产出文件/目录（文件中心行与搜索结果、任务详情「📄 产出文档」「📦 产物」「审计改动文件」、全屏放大阅读脚注）旁的「📂 位置」→ `POST /api/files/reveal { scope, path }` → 服务端 `planReveal` + `revealInOs` 拉起本机文件管理器（Windows `explorer.exe /select,<abs>` 选中、macOS `open -R`、Linux `xdg-open` 打开所在目录）。界面只传**相对路径**，绝对路径由服务端在空间根内解析；越界/`.git`/符号链接逃逸与读面同强度拒绝，且仅回环 + 写令牌（未配 token 时放行）。目标已不存在 → 回落到根内最近既有祖先并回传 `missing:true`（前端提示「原文件已不在，已打开最近位置」），不把「产物已被回收」变成一个用户无能为力的报错。`DSH_WORKBENCH_REVEAL_DRY=1` 为演练模式（只回传将执行的 opener/args，不真的拉起；契约测试用）。
   边界：未选空间/未绑定 → 面板引导（含「打开空间设置」跳转）；上传同名 → 409 → confirm 覆盖（带 `overwrite=1`）；删除 → confirm 后发 `confirm='yes'`。
 - **浏览器助手** `BrowserPanel.tsx`：`webFetchPage`（POST `/api/web/fetch`）。无 scheme 输入自动补 `https://`（`normalizeUrl`），非法/空输入提示不发请求；
   结果字段 = 服务端白名单结构化（title/text/excerpt/links），正文按 `<pre>` 纯文本展示；错误码分别映射文案（`ssrf_blocked`→「已拦截：禁止访问内网地址」、timeout/too_large/http_4xx/dns_error/unsupported/empty_content 等）+「重试」。`timeoutMs` 为整条链（含重定向）**总超时**——重定向递归共享同一 deadline，不逐跳重置计时（P0-3）；最近抓取历史 localStorage（datalist 复用）。

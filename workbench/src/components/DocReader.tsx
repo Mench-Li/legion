@@ -6,6 +6,7 @@
 import { useEffect, useState } from 'react'
 import type { CSSProperties, ReactElement } from 'react'
 import MarkdownDocView from './MarkdownDocView'
+import { RevealButton } from './RevealButton'
 import { toast } from './Toast'
 
 const ZOOM_DEFAULT = 1.35
@@ -34,12 +35,14 @@ export interface DocReaderProps {
   size?: number
   /** worktree = 读取自分支态目录（未合入主分支的最终态）。 */
   source?: string
+  /** 所属工作空间 id（提供后脚注给「📂 打开所在位置」，一键在本机文件管理器定位该文档）。 */
+  scope?: string | null
   onClose: () => void
 }
 
 /** 全屏放大阅读层：正文列宽受限居中、单层滚动、字号可调（Esc 关闭）。 */
 export default function DocReader(props: DocReaderProps): ReactElement {
-  const { title, path, by, at, content, mime, truncated, limit, size, source, onClose } = props
+  const { title, path, by, at, content, mime, truncated, limit, size, source, scope, onClose } = props
   const [zoom, setZoom] = useState(ZOOM_DEFAULT)
 
   useEffect(() => {
@@ -98,6 +101,9 @@ export default function DocReader(props: DocReaderProps): ReactElement {
             <button className="btn mini" onClick={() => setZoom(ZOOM_DEFAULT)} title="恢复默认字号">重置</button>
             <button className="btn mini" onClick={copyAll} title="复制文档全文到剪贴板">复制全文</button>
             <button className="btn mini" onClick={download} title="下载为 .md 文件，离线阅读或打印成 PDF">下载 .md</button>
+            {scope !== undefined && scope !== null && scope !== '' && (
+              <RevealButton scope={scope} path={path} what={title} />
+            )}
             <button className="btn mini" onClick={onClose} title="关闭（Esc）">✕ 关闭</button>
           </div>
         </div>

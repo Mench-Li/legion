@@ -6,6 +6,7 @@ import type { LinkedCalendarEvent } from '../api'
 import { fmtRange, occKey } from '../calendar'
 import DocReader from './DocReader'
 import MarkdownDocView from './MarkdownDocView'
+import { RevealButton } from './RevealButton'
 import { toast } from './Toast'
 
 interface TaskDetailModalProps {
@@ -532,6 +533,7 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
                           {docOpen === i && docState[i]?.status === 'ok' && docState[i]?.data?.previewable === true && (
                             <button className="btn mini" disabled={busy} onClick={() => setReaderIndex(i)} title="全屏放大阅读（单页滚动、字号可调、可复制全文/下载 .md）">⤢ 放大阅读</button>
                           )}
+                          <RevealButton scope={t.scope} path={a.path} what={a.title ?? pathBase(a.path)} />
                         </div>
                         <div className="doc-path" title="点击复制完整路径"><code onClick={() => copyDocPath(a.path)}>{a.path}</code></div>
                         {docOpen === i && (
@@ -625,6 +627,7 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
                             ? <a href={a.path} target="_blank" rel="noreferrer">{a.title || a.path}</a>
                             : <span>{a.title ? `${a.title} — ` : ''}<code>{a.path}</code></span>}
                         </div>
+                        {a.kind !== 'url' && <RevealButton scope={t.scope} path={a.path} what={a.title ?? pathBase(a.path)} />}
                       </div>
                     ))}
                   </div>
@@ -661,6 +664,7 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
                               </span>
                               {note && note.verdict === 'ok' && <span style={{ color: 'var(--green)', fontSize: 10.5 }}>✓ OK</span>}
                               {note && note.verdict === 'issue' && <span style={{ color: 'var(--red)', fontSize: 10.5 }} title={note.note}>✘ 有问题{note.note ? '：' + note.note.slice(0, 80) : ''}</span>}
+                              {f.status !== 'D' && <RevealButton scope={t.scope} path={f.path} className="btn mini ghost" what={f.path} />}
                               {canAudit && (
                                 <>
                                   <button className="btn mini" onClick={() => void markAudit(f.path, 'ok')} title="审计通过该文件">✓</button>
@@ -870,6 +874,7 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
           limit={readerData.limit}
           size={readerData.size}
           source={readerData.source}
+          scope={t.scope}
           onClose={() => setReaderIndex(null)}
         />
       )}

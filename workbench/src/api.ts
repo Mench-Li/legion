@@ -845,6 +845,38 @@ export interface ChunkUploadInit {
   finalName?: string
 }
 
+export interface RevealResult {
+  ok: boolean
+  /** 落点类型：file（文件管理器里选中它）/ dir（直接打开该目录）。 */
+  kind?: 'file' | 'dir'
+  /** 空间根内相对路径（原样回显）。 */
+  rel?: string
+  /** 落点绝对路径（仅回环可见，供界面提示/复制）。 */
+  abs?: string
+  /** 所在目录绝对路径。 */
+  dir?: string
+  /** true = 原目标已不存在，已回落到根内最近的既有祖先目录。 */
+  missing?: boolean
+  /** 实际拉起的打开器（explorer.exe / open / xdg-open）与参数。 */
+  opener?: string
+  args?: string[]
+  spawned?: boolean
+  dryRun?: boolean
+  spawnError?: string
+}
+
+/**
+ * 「打开所在位置」：让本机文件管理器定位到该文件（Windows 资源管理器选中 / macOS Finder / Linux 打开所在目录）。
+ * scope=空间 id，path=空间根内相对路径（''= 空间根目录）；服务端做根内越界与 .git 校验，仅回环 + 写令牌。
+ */
+export function revealFileLocation(scope: string, path: string): Promise<RevealResult> {
+  return filesWrite<RevealResult>('/api/files/reveal', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scope, path }),
+  })
+}
+
 /** 发起（或复用）分片上传会话：同 path+size 已有未完成会话 → 返回原 uploadId 与 received（断点续传）。 */
 export function filesUploadInit(scope: string, path: string, size: number, strategy: UploadStrategy = 'ask'): Promise<ChunkUploadInit> {
   return filesWrite<ChunkUploadInit>('/api/files/upload/init', {

@@ -14,6 +14,8 @@
  *      GET  /api/files/download?scope=&path=             → 原始字节下载
  *      PUT  /api/files/upload?scope=&path=&overwrite=1   → raw body 上传（Content-Length 预检 + 流式落盘临时文件，收体完整后原子改名发布——覆盖/中断/超限不破坏原文件，P0-1）
  *      POST /api/files/mkdir|rename|delete               → 受限写操作（JSON body）
+ *      POST /api/files/reveal                            → 打开所在位置（OS 文件管理器定位；文件=选中，目录=打开；
+ *                                                          目标不存在→回落到根内最近既有祖先并回传 missing）
  *   ③ 浏览器助手（/api/web/fetch，S6：SSRF 防护的服务端 fetch 代理 + 零依赖正文抽取）：
  *      POST /api/web/fetch { url, maxBytes?, timeoutMs? } → { ok, finalUrl, status, contentType, title, text?, excerpt?, links?, error?, code? }
  *      每次抓取（成功/失败/拦截均算）在 workbench/data/web-audit.jsonl（静态 ROOT=dist 之外）留痕一行 JSONL + console；
@@ -28,7 +30,7 @@
 import { createServer, request } from 'node:http'
 import { appendFileSync, createReadStream, createWriteStream, existsSync, openSync, readSync, writeSync, closeSync, unlinkSync, rmdirSync, mkdirSync, readdirSync, renameSync, realpathSync, statSync, lstatSync, writeFileSync, rmSync } from 'node:fs'
 import { randomBytes, createHash } from 'node:crypto'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { basename, extname, join, normalize, dirname, sep, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -351,6 +353,63 @@ export function resolveInsideRootForWrite(root, rel) {
     }
   }
   return abs
+}
+
+// ────────────── 打开所在位置（Windows 资源管理器 / macOS Finder / Linux xdg-open）──────────────
+/**
+ * 计算「打开所在位置」的落点（纯计算，不拉起外部程序；便于单测与 dry-run 断言）。
+ * 安全面与读面同强度：复用写路径解析（允许目标尚不存在，但对根内越界 / 符号链接逃逸 / .git 内部一律拒绝）。
+ * 目标不存在时不报错——产物登记后 worktree / 临时目录被回收是常态，此时向上回落到**根内**最近的既有祖先目录，
+ * 并回传 missing:true，让前端如实提示「原文件已不在，已定位到最近的上级目录」。
+ * rel='' / '.' → 空间根目录本身（文件中心的「打开空间目录」）。
+ */
+export function planReveal(root, rel) {
+  const rRoot = realpathSync(root)
+  const raw = typeof rel === 'string' ? rel.replace(/\\/g, '/').replace(/^\.\//, '').trim() : ''
+  if (raw === '' || raw === '.') return { abs: rRoot, rel: '', kind: 'dir', missing: false }
+  let abs = resolveInsideRootForWrite(rRoot, rel)
+  let missing = false
+  while (!existsSync(abs)) {
+    const parent = dirname(abs)
+    if (parent === abs || (parent !== rRoot && !parent.startsWith(rRoot + sep))) { abs = rRoot; missing = true; break }
+    abs = parent
+    missing = true
+  }
+  const kind = statSync(abs).isDirectory() ? 'dir' : 'file'
+  return { abs, rel: raw, kind, missing }
+}
+
+/**
+ * 把落点交给操作系统文件管理器：Windows 资源管理器（文件用 /select, 选中）、macOS Finder（open -R）、
+ * Linux xdg-open（无统一「选中」入口，退化为打开所在目录）。
+ * DSH_WORKBENCH_REVEAL_DRY=1 → 只返回将要执行的命令而不拉起（测试与无声演示用；见 reveal-open.test.mjs）。
+ * 拉起失败（如 Linux 无 xdg-open）不影响响应形状：前端已拿到落点，可提示手动打开。
+ */
+export function revealInOs(plan) {
+  const dir = plan.kind === 'dir' ? plan.abs : dirname(plan.abs)
+  let opener
+  let args
+  if (process.platform === 'win32') {
+    opener = 'explorer.exe'
+    args = plan.kind === 'dir' ? [plan.abs] : ['/select,' + plan.abs]
+  } else if (process.platform === 'darwin') {
+    opener = 'open'
+    args = plan.kind === 'dir' ? [plan.abs] : ['-R', plan.abs]
+  } else {
+    opener = 'xdg-open'
+    args = [dir]
+  }
+  if (process.env.DSH_WORKBENCH_REVEAL_DRY === '1') return { ...plan, dir, opener, args, spawned: false, dryRun: true }
+  try {
+    // detached + stdio:'ignore' + unref：打开器与 workbench 生命周期解耦，也不占用 stdio 管道。
+    // 注：explorer.exe 即便成功定位也常以退出码 1 结束，故只判断 spawn 是否抛错，不判定退出码。
+    const child = spawn(opener, args, { detached: true, stdio: 'ignore' })
+    child.on('error', () => { /* 打开器缺失/被系统拒绝：静默——响应里已带落点，前端可兜底提示 */ })
+    child.unref()
+    return { ...plan, dir, opener, args, spawned: true }
+  } catch (e) {
+    return { ...plan, dir, opener, args, spawned: false, spawnError: e instanceof Error ? e.message : String(e) }
+  }
 }
 
 function entryMtime(ms) {
@@ -2342,6 +2401,7 @@ async function handleFilesApi(req, res, pathname, url) {
     const scopeQuery = url.searchParams.get('scope') ?? null
     const method = req.method
     const isWrite = pathname === '/api/files/upload' || pathname === '/api/files/mkdir' || pathname === '/api/files/rename' || pathname === '/api/files/delete'
+      || pathname === '/api/files/reveal'
       || pathname === '/api/files/upload/init' || pathname === '/api/files/upload/chunk' || pathname === '/api/files/upload/complete' || pathname === '/api/files/upload/abort'
       || pathname === '/api/files/batch'
     if (isWrite) requireWriteToken(req)
@@ -2469,6 +2529,14 @@ async function handleFilesApi(req, res, pathname, url) {
       const scope = typeof body.scope === 'string' && body.scope.trim().length > 0 ? body.scope.trim() : scopeQuery
       if (typeof body.path !== 'string' || body.path.length === 0) throw new Error('缺少参数 path')
       sendJson(res, 200, { ok: true, ...removePath(await resolveScopeLocalDir(scope), body.path, body.confirm) })
+      return
+    }
+    // 「打开所在位置」：把产出文件/目录交给 OS 文件管理器定位（仅回环 + 写令牌；落点必在空间根内）
+    if (method === 'POST' && pathname === '/api/files/reveal') {
+      const body = await readBodyJson(req)
+      const scope = typeof body.scope === 'string' && body.scope.trim().length > 0 ? body.scope.trim() : scopeQuery
+      const rel = typeof body.path === 'string' ? body.path : ''
+      sendJson(res, 200, { ok: true, ...revealInOs(planReveal(await resolveScopeLocalDir(scope), rel)) })
       return
     }
     // P2-7 ③：批量操作（delete/move，逐项报告；单项失败不影响其余项）

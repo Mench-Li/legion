@@ -31,6 +31,11 @@
 //      它们服务于不同的哈希域，**不该相等**——但 Legion 侧那份必须与指纹自检
 //      对得上（`assertOperationKeysAligned` 已经在查，这里只钉住映射层读的是
 //      Legion 侧那份，不是 DSH 侧那份）。
+//
+//      spec line 470 的 `toolName` / `callId` / 「不可变工具参数」此前**不在**
+//      Legion 侧那份里（本文件原先把这条缺口钉成"当前事实"）。本批补上：
+//      前两者直接进名单，第三者用载体字段 `argsHash`（值来自 PRT-613 的
+//      `hashToolArguments`）。所以 ④ 里的断言从"确认缺口还在"翻成了"必须含"。
 // ============================================================================
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -106,17 +111,14 @@ test('④ ★ 映射层的授权键是 Legion 侧那组，不是 DSH 侧那组',
   }))
   assert.deepEqual(produced, [...OPERATION_KEYS], 'normalizeOperation 的产出必须与 OPERATION_KEYS 一一对应')
 
-  // ⚠️ **已登记的缺口**（PRT-612 期间发现，见 PRT-612 doc §7，随后单独一批修）：
-  // spec line 470 要求授权主体含 `toolName` 与 `callId`，而 Legion 侧这份**两者都没有**——
-  // `normalizeOperation` 把它们整个丢掉，于是
+  // spec line 470 要求授权主体含 `toolName` 与 `callId`（以及"不可变工具参数"）。
+  // 它们此前**不在** `OPERATION_KEYS` 里，于是 `normalizeOperation` 把它们整个丢掉——
+  // 一次写文件的批准可以被一次删文件消费。那批已经补上，所以这里钉的从
+  // "确认缺口还在"翻成了"必须含"：
   //
-  //     operationFingerprint({...同一份 scope/actor/action/target/taskId, toolName:'file_write'})
-  //   === operationFingerprint({...同一份,                                        toolName:'file_delete'})
-  //
-  // 也就是「一次写文件的批准可以被一次删文件消费」。这不是本文件断言错了，
-  // 是被断言的那个模块目前**不合规**。所以这里把当前事实钉住（而不是写一条会红的
-  // 断言、或者干脆不提）：一旦那一批把两个键补进 `OPERATION_KEYS`，**这一条会变红**，
-  // 提示把它换成 `assert.ok(produced.includes('toolName'))`。
-  assert.ok(!produced.includes('toolName'), '缺口已修复？请把这条断言换成"必须含 toolName"')
-  assert.ok(!produced.includes('callId'), '缺口已修复？请把这条断言换成"必须含 callId"')
+  //   > 一条钉住「当前事实」的断言，与一条钉住「应该是什么」的断言，
+  //   > 在缺口被补上时是同一条会红的断言——只不过前者红得需要有人来改它。
+  assert.ok(produced.includes('toolName'), '授权主体少了 toolName：一次写文件的批准可以被一次删文件消费（spec line 470）')
+  assert.ok(produced.includes('callId'), '授权主体少了 callId：两个不同的 Tool Call 会共用一次批准（spec line 470）')
+  assert.ok(produced.includes('argsHash'), '授权主体少了"不可变工具参数"的载体 argsHash（spec line 470）')
 })

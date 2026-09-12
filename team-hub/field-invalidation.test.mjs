@@ -110,7 +110,7 @@ test('① ★★ `mutateField` 不制造空操作（把陷阱变成一声报错�
   // `mutateField` 与 `FIELD_MUTATIONS` 的分工：前者按**给定基准**造值，后者是
   // 相对 `MUTATION_BASE` 的固定表。用错后者会在换个基准时静默变成空操作——
   // 本仓库实测踩过一次。
-  const allDefault = { scope: 's', actor: 'a', action: 'x', target: 't', taskId: null, unattended: false, metadata: {} }
+  const allDefault = { scope: 's', actor: 'a', action: 'x', target: 't', taskId: null, unattended: false, metadata: {}, toolName: null, callId: null, argsHash: null }
   for (const base of [allDefault, MUTATION_BASE]) {
     for (const key of OPERATION_KEYS) {
       const mutated = mutateField(base, key)
@@ -131,7 +131,7 @@ test('① ★★ 空操作复核**可以被直接调到**（内联时它一次�
   //   > 在「它到底拦不拦得住」上是同一个东西。
   //
   // 所以这里直接喂一对"相同"的 base/mutated，验它真的会抛。
-  const base = { scope: 's', actor: 'a', action: 'x', target: 't', taskId: null, unattended: false, metadata: {} }
+  const base = { scope: 's', actor: 'a', action: 'x', target: 't', taskId: null, unattended: false, metadata: {}, toolName: null, callId: null, argsHash: null }
   assert.throws(
     () => assertMutationNotNoop({ base, mutated: { ...base }, key: 'target' }),
     /空操作/,
@@ -159,6 +159,11 @@ test('① ★ 变异基准的每个字段都是**非默认值**（否则变异�
   assert.ok(MUTATION_BASE.taskId)
   assert.ok(MUTATION_BASE.metadata && Object.keys(MUTATION_BASE.metadata).length > 0)
   assert.notEqual(MUTATION_BASE.metadata, FIELD_MUTATIONS.metadata)
+  // spec line 470 的两个键与参数载体也必须是**非默认值**：它们的默认值都是 `null`，
+  // 基准若用 `null`，变异就成了 `'mut'`——那仍然有效，但那就不是"相对非默认值"的基准了。
+  assert.notEqual(MUTATION_BASE.toolName, null)
+  assert.notEqual(MUTATION_BASE.callId, null)
+  assert.notEqual(MUTATION_BASE.argsHash, null)
 })
 
 // ---------------------------------------------------------------- ② 端到端
@@ -177,6 +182,9 @@ function baseOp() {
   return {
     scope: 'legion', actor: 'general', action, target: 'tgt-609',
     taskId: null, unattended: false, metadata: {},
+    // spec line 470 的三个字段也在名单里了，所以基准也必须带上它们——
+    // `mutateField` 对"基准里没有的字段"会抛，而那正是"新字段没人验"的形状。
+    toolName: null, callId: null, argsHash: null,
   }
 }
 

@@ -5,6 +5,9 @@ import { evaluatePermission, normalizeOperation, consumeDecision } from './permi
 test('normalizes required operation fields and rejects missing fields', () => {
   assert.deepEqual(normalizeOperation({ scope: 'alpha', actor: 'general', action: 'skill:grant', target: 'bob' }), {
     scope: 'alpha', actor: 'general', action: 'skill:grant', target: 'bob', taskId: null, unattended: false, metadata: {},
+    // PRT-611 补记：spec line 470 的 `toolName` / `callId` / 不可变工具参数
+    // 现在也是主体的字段；`skill:grant` 没有工具，于是三者都落在默认值 `null`。
+    toolName: null, callId: null, argsHash: null,
   })
   assert.throws(() => normalizeOperation({ scope: 'alpha', actor: 'general', action: 'skill:grant' }), /target required/)
 })

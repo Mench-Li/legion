@@ -33,9 +33,30 @@
 //      **在构造上**不可互换（§6.5：「两者使用不同的 Schema 和 domain separator」）；
 //   ③ 一条**加载时**自检：`OPERATION_KEYS` 必须与 `normalizeOperation` 真正产出的
 //      字段**逐个对齐**。加字段却忘了同步名单，启动就崩。
+//
+// ---------------------------------------------------------------------------
+// （补记）写下上面那段的当天，这份名单里**还没有** `toolName` / `callId`：
+// spec line 470 明说授权主体含这两个键，而 `normalizeOperation` 根本没读它们。
+// 于是"规范化丢掉的字段等于没绑定"这句话在它自己身上应验了，方向正是**放行**：
+//
+//     operationFingerprint({…同一份 scope/actor/action/target/taskId, toolName:'file_write'})
+//   === operationFingerprint({…同一份,                                        toolName:'file_delete'})
+//     → sha256:69969e47…（两个工具、同一个身份）
+//
+//   > 一个「键的名字没进名单」的字段，
+//   > 与一个「审批从来没有绑定到它」的字段，是同一个东西——
+//   > 只不过前者在代码里看起来是被规范化照顾过的。
+//
+// 所以补上三件事：`toolName` / `callId` 进名单；「不可变工具参数」用一个载体
+// 字段 `argsHash` 收进指纹。参数身份**不在这里算**——它归 PRT-613 的
+// `hashToolArguments` 所有（那个函数已经把工具名算了进去），本模块只负责搬运。
+// 自己再实现一份参数哈希，与"两个模块对同一份参数给出两个身份"是同一个东西。
 // ============================================================================
 
 import { canonicalJson, domainSeparatedHash, nfc } from '../runtime/contracts/canonical.mjs'
+// 参数身份归 PRT-613 所有，本模块**不**另算一份。`team-hub/` → `runtime/dsh-composition/`
+// 是本仓库既有的方向（同一个方向上的还有 `team-hub/tool-call-log.mjs`）。
+import { hashToolArguments } from '../runtime/dsh-composition/tool-args.mjs'
 
 const MODES = new Set(['deny', 'ask', 'allow-once', 'allow-for-task', 'allow-by-policy'])
 const REQUIRED = ['scope', 'actor', 'action', 'target']
@@ -48,11 +69,79 @@ const REQUIRED = ['scope', 'actor', 'action', 'target']
  */
 export const OPERATION_KEYS = Object.freeze([
   'scope', 'actor', 'action', 'target', 'taskId', 'unattended', 'metadata',
+  // spec line 470 的授权主体里还有这三个。它们**必须**在这里：`canonicalOperation`
+  // 只取名单里的字段，漏一个就等于那个字段是"可以随便改的"。
+  'toolName', 'callId', 'argsHash',
 ])
 
 /** 申请批准时用的 domain。与 DSH 侧的 `CANONICAL_OP_DOMAIN` **不同**。 */
 export const OPERATION_DOMAIN = 'legion.permission.operation.v1'
-export const OPERATION_SCHEMA_VERSION = 1
+
+/**
+ * canonical operation 的 schema 版本。
+ *
+ * **1 → 2**（PRT-611 补记）：授权主体新增 `toolName` / `callId` / `argsHash`，
+ * canonical 形式**变了**，所以按 `runtime/dsh-composition/enforcement.mjs:39` 那条
+ * "改变 canonical 形式必须递增它"的既有纪律递增。
+ *
+ * 递增的代价是**零**，这一点值得写下来——因为"要不要动版本号"通常会被当成一个有风险
+ * 的取舍，然后被拖着不动：
+ *
+ *   · 加字段本身就已经改变了哈希（新键进了 canonical JSON），所以在途审批
+ *     **无论递不递增都会失效**，方向是 fail-closed（重新批准），不是放行；
+ *   · 这个常量**没有被持久化、也没有被跨版本比较过**（全仓只有 `operationFingerprint`
+ *     一处消费它），所以递增不会让任何历史行变得无法解释。
+ *
+ * 不递增则会让两个**不同的** canonical 形式共用同一个版本号——而那正是版本号存在的理由：
+ *
+ *   > 一个「改了 canonical 形式却不动版本号」的实现，
+ *   > 与一个「版本号已经回答不了'这行哈希是按哪种形式算的'」的实现，
+ *   > 是同一个东西——只不过前者在代码审查里看起来是"改动最小"的那一个。
+ */
+export const OPERATION_SCHEMA_VERSION = 2
+
+/**
+ * 「不可变工具参数」在授权主体里的载体：`argsHash` 的值从哪里来。
+ *
+ * 参数身份**不是**本模块的事——它归 PRT-613 的 `hashToolArguments` 所有，
+ * 那个函数已经把 `toolName` 算进了哈希（`file_write` 与 `file_delete` 在参数
+ * 相同时是**两个**身份）。这里只做搬运。
+ *
+ *   > 一个「自己再实现一份参数哈希」的审批绑定，
+ *   > 与一个「两个模块对同一份参数给出两个身份」的绑定，是同一个东西——
+ *   > 只不过后者在任何**单侧**的用例里都是绿的。
+ */
+export function argsHashOf({ toolName, args } = {}) {
+  return hashToolArguments({ toolName, args }).canonicalHash
+}
+
+/** 参数载体自检用的样本。 */
+const SAMPLE_TOOL_ARGS = Object.freeze({
+  toolName: 'file_write',
+  args: { path: 'repo/notes.txt', mode: 'w' },
+})
+
+/**
+ * 装载时算一次，留下的是**两个算出来的值**，不是一个布尔标记。
+ *
+ * `argsHash` 就是载体字段该被填成的东西；`otherToolNameArgsHash` 是换掉工具名
+ * 之后的另一个值——"工具名确实是参数身份的一部分"这句话在本模块这边的证据。
+ * `ok: true` 是随手就能写出来的字面量，而这两个哈希要伪造就得把参数哈希再实现一遍。
+ */
+export const TOOL_ARGS_BINDING_CHECKED = Object.freeze({
+  toolName: SAMPLE_TOOL_ARGS.toolName,
+  otherToolName: 'file_delete',
+  argsHash: argsHashOf(SAMPLE_TOOL_ARGS),
+  otherToolNameArgsHash: argsHashOf({ ...SAMPLE_TOOL_ARGS, toolName: 'file_delete' }),
+})
+
+/**
+ * 工具授权主体的三个字段——**要么整套齐，要么整套不填**（见 `normalizeOperation`）。
+ *
+ * 作为一个导出常量而不是内联数组：`approval-binding.mjs` 与测试需要用**同一份**
+ * 名单去问"这个主体是不是工具主体"，各抄一份的话，下一次加字段时两边会分叉。
+ */
+export const TOOL_SUBJECT_KEYS = Object.freeze(['toolName', 'callId', 'argsHash'])
 
 export function normalizeOperation(input = {}) {
   const operation = {
@@ -63,6 +152,14 @@ export function normalizeOperation(input = {}) {
     taskId: input.taskId == null ? null : String(input.taskId).trim() || null,
     unattended: input.unattended === true,
     metadata: input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata) ? { ...input.metadata } : {},
+    // 与 `taskId` 同一套纪律：没有就是 `null`（不是空串），有就 trim 掉空白。
+    // 三个字段都是**可选**的——`skill:grant` 这类操作本来就没有工具，把它们塞进
+    // `REQUIRED` 会把一次合法的无工具操作变成一次崩溃。
+    toolName: input.toolName == null ? null : String(input.toolName).trim() || null,
+    callId: input.callId == null ? null : String(input.callId).trim() || null,
+    // 「不可变工具参数」的载体。值是 `argsHashOf` 算出来的那个字符串，
+    // 这里只搬运与规范化，**不**重算（见文件头）。
+    argsHash: input.argsHash == null ? null : String(input.argsHash).trim() || null,
   }
   for (const field of REQUIRED) if (!operation[field]) throw new Error(`${field} required`)
   return operation
@@ -84,6 +181,9 @@ export function canonicalOperation(operationInput = {}) {
   out.action = nfc(out.action)
   out.target = nfc(out.target)
   if (out.taskId !== null) out.taskId = nfc(out.taskId)
+  if (out.toolName !== null) out.toolName = nfc(out.toolName)
+  if (out.callId !== null) out.callId = nfc(out.callId)
+  if (out.argsHash !== null) out.argsHash = nfc(out.argsHash)
   return Object.freeze(out)
 }
 
@@ -156,6 +256,7 @@ export function assertOperationKeysAligned(
 const SAMPLE_OPERATION = Object.freeze({
   scope: 's', actor: 'a', action: 'act', target: 't',
   taskId: 'k', unattended: true, metadata: { z: 1 },
+  toolName: 'file_write', callId: 'call-k', argsHash: 'sha256:sample',
 })
 
 // 加载即执行，并留下**真正算出来的**证据（产出的字段名）。
@@ -201,12 +302,14 @@ export const OPERATION_KEYS_CHECKED = Object.freeze({
 export const MUTATION_BASE = Object.freeze({
   scope: 'scope-base', actor: 'actor-base', action: 'action:base', target: 'target-base',
   taskId: 'task-base', unattended: true, metadata: { probe: 'base' },
+  toolName: 'file_write', callId: 'call-base', argsHash: `sha256:${'a'.repeat(64)}`,
 })
 
 /** 每个字段的变异值。**必须覆盖 `OPERATION_KEYS` 的全部字段**（见下面的自检）。 */
 export const FIELD_MUTATIONS = Object.freeze({
   scope: 'scope-mut', actor: 'actor-mut', action: 'action:mut', target: 'target-mut',
   taskId: 'task-mut', unattended: false, metadata: { probe: 'mut' },
+  toolName: 'file_delete', callId: 'call-mut', argsHash: `sha256:${'b'.repeat(64)}`,
 })
 
 /**

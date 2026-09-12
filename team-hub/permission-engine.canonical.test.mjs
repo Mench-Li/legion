@@ -7,6 +7,11 @@
 //
 //   ① 键的书写顺序被当成操作身份 → 错的方向是**拒绝**（fail-closed，没人报 bug）
 //   ② 规范化丢掉的字段等于没绑定 → 错的方向是**放行**（危险的那个）
+//
+// ② 这一条本批在**它自己身上**应验过一次：`OPERATION_KEYS` 里当时没有 `toolName`
+// 与 `callId`，"不可变工具参数"也没有载体，而 spec line 470 三个都要。于是
+// "只看前六个字段"从一句比喻变成了一句实话——一次写文件的批准可以被一次删文件消费。
+// 下面 §② 里的那几条用例就是这件事的回归锚点（它们在修之前必然红）。
 // ============================================================================
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -16,6 +21,8 @@ import {
   OPERATION_KEYS,
   OPERATION_KEYS_CHECKED,
   OPERATION_SCHEMA_VERSION,
+  TOOL_ARGS_BINDING_CHECKED,
+  argsHashOf,
   assertOperationKeysAligned,
   canonicalOperation,
   consumeDecision,
@@ -26,6 +33,7 @@ import {
   sameOperation,
 } from './permission-engine.mjs'
 import { canonicalOperationHash, CANONICAL_OP_DOMAIN } from '../runtime/dsh-composition/enforcement.mjs'
+import { hashToolArguments } from '../runtime/dsh-composition/tool-args.mjs'
 import { domainSeparatedHash } from '../runtime/contracts/canonical.mjs'
 
 const BASE = Object.freeze({ scope: 'alpha', actor: 'general', action: 'skill:grant', target: 'bob' })
@@ -109,10 +117,72 @@ test('② ★ metadata 里**多一个字段**就不是同一个操作（多出�
   assert.equal(sameOperation({ ...BASE, metadata: { path: '/a' } }, { ...BASE, metadata: { path: '/a', force: true } }), false)
 })
 
+test('② ★★ 只差 `toolName` 时**不是**同一个操作（本批的回归锚点）', () => {
+  // 修之前，下面这一对的指纹**完全相同**（`normalizeOperation` 根本不读 `toolName`）：
+  //
+  //   > 一个「绑定到前六个字段」的审批，
+  //   > 与一个「一次写文件的批准可以被一次删文件消费」的审批，是同一个东西——
+  //   > 而它的方向是**放行**。
+  const op = { scope: 'legion', actor: 'general', action: 'file:write', target: 'repo/notes.md', taskId: 'task-1' }
+  const write = operationFingerprint({ ...op, toolName: 'file_write' })
+  const del = operationFingerprint({ ...op, toolName: 'file_delete' })
+  assert.notEqual(write, del, '工具名没有进指纹——一次写文件的批准仍然可以被一次删文件消费')
+  // 旧实现给这一对算出的那个"两个工具同一个身份"的指纹，现在一个都算不出来。
+  // 钉住它，是因为这一条在**修之前**必然红——它才是这次改动的锚点。
+  assert.notEqual(write, 'sha256:69969e4709253a5a06cb2de33f2e5e15895e756da187ed6b02333a42974bf2da')
+  assert.notEqual(del, 'sha256:69969e4709253a5a06cb2de33f2e5e15895e756da187ed6b02333a42974bf2da')
+  assert.equal(sameOperation({ ...op, toolName: 'file_write' }, { ...op, toolName: 'file_delete' }), false)
+})
+
+test('② ★★ `callId` 变了就**不是**同一个操作（两个 Tool Call 不是一次调用）', () => {
+  const op = { ...BASE, toolName: 'file_write' }
+  assert.notEqual(
+    operationFingerprint({ ...op, callId: 'call-1' }),
+    operationFingerprint({ ...op, callId: 'call-2' }),
+  )
+  assert.equal(sameOperation({ ...op, callId: 'call-1' }, { ...op, callId: 'call-2' }), false)
+})
+
+test('② ★★ `argsHash` 变了就**不是**同一个操作（不可变工具参数也必须绑定）', () => {
+  // spec line 470 要的"不可变工具参数"就是这个载体：少了它，两次参数不同的调用
+  // 只要其余字段相同就共用一张票——而"参数不同"恰恰是审批要区分的东西。
+  const op = { ...BASE, toolName: 'file_write', callId: 'call-1' }
+  const a = argsHashOf({ toolName: 'file_write', args: { path: '/w/a.txt' } })
+  const b = argsHashOf({ toolName: 'file_write', args: { path: '/w/b.txt' } })
+  assert.notEqual(a, b, '两份不同的参数得到了同一个 argsHash——这条用例什么都测不到')
+  assert.notEqual(operationFingerprint({ ...op, argsHash: a }), operationFingerprint({ ...op, argsHash: b }))
+  assert.equal(sameOperation({ ...op, argsHash: a }, { ...op, argsHash: b }), false)
+})
+
+test('② ★★ `argsHash` 来自 PRT-613 的 `hashToolArguments`（本模块不另算一份）', () => {
+  //   > 一个「自己再实现一份参数哈希」的审批绑定，
+  //   > 与一个「两个模块对同一份参数给出两个身份」的绑定，是同一个东西——
+  //   > 只不过后者在任何**单侧**的用例里都是绿的。
+  const sample = { toolName: 'file_write', args: { path: 'repo/notes.txt', mode: 'w' } }
+  assert.equal(argsHashOf(sample), hashToolArguments(sample).canonicalHash)
+  assert.match(TOOL_ARGS_BINDING_CHECKED.argsHash, /^sha256:[0-9a-f]{64}$/)
+  // 证据是装载时**算出来的两个值**，不是一个布尔标记：换掉工具名，载体必须跟着换。
+  assert.equal(TOOL_ARGS_BINDING_CHECKED.argsHash, hashToolArguments(sample).canonicalHash)
+  assert.notEqual(TOOL_ARGS_BINDING_CHECKED.argsHash, TOOL_ARGS_BINDING_CHECKED.otherToolNameArgsHash)
+})
+
+test('② ★ `toolName` / `callId` / `argsHash` 是**可选**的（没有工具的操作照样合法）', () => {
+  // `skill:grant` 这类操作本来就没有工具。把它们放进 `REQUIRED` 会让一次合法的
+  // 无工具操作直接崩——那是把"补上绑定"做成了"拒绝一切非工具操作"。
+  const n = normalizeOperation(BASE)
+  assert.equal(n.toolName, null)
+  assert.equal(n.callId, null)
+  assert.equal(n.argsHash, null)
+  // 没给 / 给了空串 / 给了纯空白，必须落到**同一个**默认值；否则 `{toolName:''}`
+  // 会成为一个与省略 `toolName` 不同的操作——那是把书写方式当成了身份。
+  assert.equal(sameOperation(BASE, { ...BASE, toolName: '', callId: '   ', argsHash: null }), true)
+  assert.equal(sameOperation(BASE, { ...BASE, toolName: 'file_write' }), false)
+})
+
 test('② ★★ 每一个 `OPERATION_KEYS` 字段单独改动都会改变指纹（逐个遍历）', () => {
   // 逐个字段试，而不是抽查几个——抽查会漏掉"后来新加的那个字段"。
-  const base = { scope: 'alpha', actor: 'general', action: 'skill:grant', target: 'bob', taskId: 't1', unattended: false, metadata: { k: 1 } }
-  const other = { scope: 'beta', actor: 'colonel', action: 'repo:push', target: 'carol', taskId: 't2', unattended: true, metadata: { k: 2 } }
+  const base = { scope: 'alpha', actor: 'general', action: 'skill:grant', target: 'bob', taskId: 't1', unattended: false, metadata: { k: 1 }, toolName: 'file_write', callId: 'call-1', argsHash: `sha256:${'a'.repeat(64)}` }
+  const other = { scope: 'beta', actor: 'colonel', action: 'repo:push', target: 'carol', taskId: 't2', unattended: true, metadata: { k: 2 }, toolName: 'file_delete', callId: 'call-2', argsHash: `sha256:${'b'.repeat(64)}` }
   for (const key of OPERATION_KEYS) {
     const fp = operationFingerprint({ ...base, [key]: other[key] })
     assert.notEqual(fp, operationFingerprint(base), `改掉 ${key} 之后指纹没变——审批没有绑定到它`)

@@ -3,7 +3,7 @@
   "version": 1,
   "sources": {
     "team-hub/server.mjs": "af663103c5fb8c32a6cf914956cd5d4bda3686868521b134183789103257720d",
-    "team-hub/permission-engine.mjs": "c06d899c146d593425adaec4da43d0be4e565ae08388c42496b5a9bc28384b12",
+    "team-hub/permission-engine.mjs": "5465aa98d87914ea157c1563edc1ce0c6e4b2c03450a7b85e99a07f911e7b7e0",
     "team-hub/run-store.mjs": "cfd40436461869ae0b34a1c2cb23a6c48dda7b76ab9166fb3ded42cb57bdf983",
     "team-hub/model-store.mjs": "1ab1a5b548740ca5f6810de6fe25658e79aea9d95fd6382ccff5facf6613d779",
     "team-hub/binding-store.mjs": "f9b2b7a50e1b33b0c571530e8439cd6784121458494d7a4590dfaabcce7db8c0",

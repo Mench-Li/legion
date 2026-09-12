@@ -324,6 +324,34 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-611 **补记**：授权主体补上 `toolName` / `callId` / `argsHash`，
+      // 并补上那个一直缺失的**生产者**。
+      //
+      // spec line 470 要求主体含 `toolName`、`callId` 和不可变工具参数，而
+      // `OPERATION_KEYS` 原来一个都没有——实测两个不同工具在其余字段相同时得到
+      // **同一个指纹**，而 `approval-binding` 的 `bindingHash` 就是这个指纹：
+      // 一次"写文件"的批准可以被一次"删文件"消费。
+      //
+      // ★ 这一套盯的是**接线**那一半，而不是引擎那一半：
+      //
+      //   > 一个「引擎已经把工具名算进授权主体」的修复，
+      //   > 与一个「送进来的主体里从来没有工具名」的修复，是同一个东西——
+      //   > 只不过前者的用例是绿的：引擎确实绑了，只是从来没人给它绑的东西。
+      //
+      // `tool-request.mjs` 的投影里本来就有 `toolName`/`callId`/`frozenBody.canonicalHash`，
+      // 缺的就是那个把它们搬进 F-02 主体的函数。桥只能建在 `team-hub/` 这一侧
+      // （`team-hub/` → `runtime/dsh-composition/` 是既有方向，反向实测 0 处）。
+      //
+      // ★ 桥里最值钱的一条是 `FROZEN_HASH_DRIFT`：投影**自带**一个哈希、同时自带
+      // 一份参数，两者对不上时抛。没有它，一张"参数被换过、哈希还是老的"投影会
+      // 安静地通过，而所有哈希比对都是绿的——因为绑的是一份没人执行过的参数。
+      // 这条检查在写用例时**当场拦住了我自己的夹具**（改了 `arguments` 忘了改
+      // `frozenHash`），那一次红是对的。
+      label: 'tool-request-bridge（PRT-611 补记：投影 → F-02 授权主体）',
+      files: ['team-hub/tool-request-bridge.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-608：审批绑定到**写下来的**规范化操作哈希。
       //
       // PRT-611 已经把"两次调用是不是同一个操作"换成了规范化指纹。但如果审批行里

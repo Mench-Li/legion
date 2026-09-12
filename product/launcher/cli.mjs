@@ -61,11 +61,38 @@ export const CLI_FLAGS = Object.freeze([
   { name: '--allow-port-in-use=<a,b>', kind: 'value', doc: '允许复用已在监听的端口的进程（显式决定，不是默认行为）' },
   { name: '--diagnostics=<dir>', kind: 'value', doc: '导出脱敏诊断包到指定目录（PRT-710）。' +
     '**这是唯一在体检/配置/布局出问题时仍然可用的入口**：诊断包最需要在产品坏掉的时候拿到' },
+  { name: '--sweep-orphans', kind: 'boolean', doc: '启动前清理上一次运行留下的进程（PRT-705）。' +
+    '**默认只报告不清理**：杀进程不可撤销。清理前会核对映像名，对不上的一律不动' },
+  { name: '--allow-unverified-sweep', kind: 'boolean', doc: '与 --sweep-orphans 同用：' +
+    '连映像名读不出来的那些也清理。**不建议**——那正是「按号码杀」的那条路' },
   { name: '--help', kind: 'boolean', doc: '打印本说明' },
 ])
 
-/** 布尔开关（无值）。列在这里而不是散在 if 里：新开关漏加会让它被当成未知参数。 */
-const BOOLEAN_FLAGS = Object.freeze(['check', 'init', 'dry-run', 'no-config', 'json', 'help'])
+// 两份名单**从 `CLI_FLAGS` 派生**，不再手工维护。
+//
+// 原来这里是 `const BOOLEAN_FLAGS = [...]` 加 `parseArgs` 里一个独立的
+// `known` 数组。那份注释甚至写着：
+//
+//   「列在这里而不是散在 if 里：新开关漏加会让它被当成未知参数。」
+//
+// 而 PRT-705 加 `--sweep-orphans` 时**照样漏了**——注释警告的正是这件事，
+// 写注释的人自己也踩了。这不是记性问题，是结构问题：
+// 一份要写两处的名单，第二处总有一天会忘。
+//
+//   > 一个必须靠人记得去同步的名单，与一个迟早会不同步的名单，
+//   > 在"新加的开关能不能用"上是同一个东西。
+//
+// 现在加一个开关只需要动 `CLI_FLAGS` 一处；它还同时是 `--help` 的正文，
+// 所以"能用的"与"文档里写的"不会再分成两件事。
+const BOOLEAN_FLAGS = Object.freeze(CLI_FLAGS
+  .filter((f) => f.kind === 'boolean' && !f.name.includes('='))
+  .map((f) => f.name.replace(/^--/, '')))
+
+/** 取值开关的键名（`--install-dir=<path>` → `install-dir`）。同样派生。 */
+const VALUE_FLAG_KEYS = Object.freeze(CLI_FLAGS
+  .filter((f) => f.kind === 'value' && f.name.includes('='))
+  .map((f) => f.name.replace(/^--/, '').split('=')[0])
+  .filter((k) => k !== 'port' && !k.startsWith('port.')))
 
 /**
  * 解析 argv。**只接受 `--k=v` 与布尔开关**，不接受位置参数：
@@ -80,7 +107,10 @@ export function parseArgs(argv) {
     }
     const eq = raw.indexOf('=')
     if (!raw.startsWith('--') || eq < 0) {
-      out.errors.push(`无法识别的参数「${raw}」：本 CLI 只接受 --key=value 形式与 --check/--json/--help`)
+      // 报错信息从名单生成：硬编码的"支持 --check/--json/--help"已经有过一次
+      // 与真实名单不一致的历史，而那句话是用户唯一能看到的线索。
+      out.errors.push(`无法识别的参数「${raw}」：本 CLI 只接受 --key=value 形式与 `
+        + BOOLEAN_FLAGS.map((f) => `--${f}`).join('/'))
       continue
     }
     const key = raw.slice(2, eq)
@@ -95,8 +125,7 @@ export function parseArgs(argv) {
       out.ports[proc] = port
       continue
     }
-    const known = ['install-dir', 'data-dir', 'workspace', 'include', 'runtime-command', 'allow-port-in-use', 'diagnostics']
-    if (!known.includes(key)) {
+    if (!VALUE_FLAG_KEYS.includes(key)) {
       out.errors.push(`未知参数「--${key}」：用 --help 查看支持的参数`)
       continue
     }
@@ -196,6 +225,11 @@ export function launcherOptionsFrom({ argv = [], env = {}, nodePath = process.ex
       // **不在这里补默认值**：补一份就多一处会漂移的副本，而"哪一份生效"
       // 在排查时会成为一个必须回答的问题。
       logPolicy: fromConfig.logPolicy ?? {},
+      // PRT-705：清理**必须显式要求**，所以这里是 === true 而不是真值判断。
+      // 一个"默认会杀进程"的启动路径，与一个会在用户没要求时动手的路径，
+      // 在"用户能不能预料到发生了什么"上是同一个东西。
+      sweepOrphansOnStart: parsed.flags['sweep-orphans'] === true,
+      allowUnverifiedSweep: parsed.flags['allow-unverified-sweep'] === true,
       // Launcher 自己的环境只作为**白名单的读取来源**传入，不会被整份复制给子进程
       baseEnv: env,
       readiness: readinessTimeout === null

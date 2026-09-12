@@ -17,13 +17,14 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { resolveLayout } from '../paths.mjs'
 import { reserveEphemeralPort } from './ports.mjs'
 import { createLauncher, expandExpectation, productStateOf } from './launcher.mjs'
+import { launcherOptionsFrom } from './cli.mjs'
 
 const REPO_ROOT = new URL('../../', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
 
@@ -443,4 +444,179 @@ test('真实进程：入口缺失（orchestrator worker 尚未创建）被如实
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+// ------------------------------------------------------------ F. PRT-705 孤儿进程
+//
+// `run-record.mjs` 自己的用例已经把"哪种 pid 不能杀"判清楚了。
+// 这一组问的是另一件事：**那个判断有没有真的接在启动路径上**，
+// 以及"默认不清理"这条纪律会不会被绕过去。
+//
+//   > 一个写在模块里、却没有任何入口会调用的安全判断，
+//   > 与没有这个判断，在"用户会不会被误伤"上是同一个答案。
+
+function orphanRoot(processes) {
+  const root = mkdtempSync(join(tmpdir(), 'legion-orphan-'))
+  const dir = join(root, 'data')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'launcher-run.json'), JSON.stringify({
+    version: 'legion/launcher-run@1', runId: 'prev', startedAt: '2026-01-01T00:00:00.000Z', processes,
+  }))
+  return { root, dir }
+}
+
+/** 起一个 Launcher，走 `--check` 那条路（不真起进程，但仍会查上一次运行）。 */
+function launcherAt(root, dir, extra = {}) {
+  const killed = []
+  const L = createLauncher({
+    layout: layoutIn(root),
+    include: [],
+    ports: {},
+    processProbe: {
+      isAlive: (pid) => extra.alive?.(pid) ?? false,
+      imageOf: async (pid) => extra.imageOf?.(pid) ?? null,
+    },
+    killTreeImpl: async (pid) => { killed.push(pid); return true },
+    // dataDir 必须与 layout 一致，记录才落在我们造的那个目录里
+    ...extra.options,
+  })
+  void dir
+  return { launcher: L, killed }
+}
+
+test('① 启动时读上一次运行的记录：残留进程**进 allDiagnostics**', async () => {
+  const { root } = orphanRoot([{ key: 'team-hub', pid: 4321, image: 'node.exe' }])
+  try {
+    const { launcher } = launcherAt(root, join(root, 'data'), {
+      alive: (pid) => pid === 4321, imageOf: () => 'node.exe',
+    })
+    await launcher.start()
+    const d = launcher.allDiagnostics().find((x) => x.code === 'ORPHANS_FOUND')
+    assert.ok(d, `记录了残留却没有诊断：${JSON.stringify(launcher.allDiagnostics().map((x) => x.code))}`)
+    assert.deepEqual(d.pids, [4321])
+    assert.ok(d.message.includes('--sweep-orphans'), '必须给出出口')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('② ★ 默认**不清理**：残留进程一个都不会被杀', async () => {
+  const { root } = orphanRoot([{ key: 'team-hub', pid: 4321, image: 'node.exe' }])
+  try {
+    const { launcher, killed } = launcherAt(root, join(root, 'data'), {
+      alive: () => true, imageOf: () => 'node.exe',
+    })
+    await launcher.start()
+    assert.deepEqual(killed, [],
+      '用户没要求清理却动了手——"默认会杀进程"的启动路径是不可接受的')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('② ★ pid 被回收时**绝不杀**，并单独报出来', async () => {
+  const { root } = orphanRoot([{ key: 'team-hub', pid: 4321, image: 'node.exe' }])
+  try {
+    // 记录里写着 node.exe，现在这个号码上是 Code.exe——用户的编辑器
+    const { launcher, killed } = launcherAt(root, join(root, 'data'), {
+      alive: () => true, imageOf: () => 'Code.exe',
+      options: { sweepOrphansOnStart: true },
+    })
+    await launcher.start()
+    assert.deepEqual(killed, [], '杀了一个不相干的程序：那是不可撤销的')
+    const d = launcher.allDiagnostics().find((x) => x.code === 'PID_RECYCLED')
+    assert.ok(d, 'pid 被回收这件事没被报出来')
+    assert.ok(d.message.includes('Code.exe'), d.message)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('③ 显式要求清理时，确认是我们的那些会被杀', async () => {
+  const { root } = orphanRoot([
+    { key: 'team-hub', pid: 111, image: 'node.exe' },
+    { key: 'workbench', pid: 222, image: 'node.exe' },
+  ])
+  try {
+    const { launcher, killed } = launcherAt(root, join(root, 'data'), {
+      alive: (pid) => pid === 111, imageOf: () => 'node.exe',
+      options: { sweepOrphansOnStart: true },
+    })
+    await launcher.start()
+    assert.deepEqual(killed, [111], '只该杀还活着且确认是我们的那一个（222 已经没了）')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('③ 映像名读不出来时，**即使要求清理也不动**它们', async () => {
+  const { root } = orphanRoot([{ key: 'team-hub', pid: 333, image: 'node.exe' }])
+  try {
+    const { launcher, killed } = launcherAt(root, join(root, 'data'), {
+      alive: () => true, imageOf: () => null,
+      options: { sweepOrphansOnStart: true },
+    })
+    await launcher.start()
+    assert.deepEqual(killed, [], '没有映像名就无法确认那号码还是不是我们的')
+    assert.ok(launcher.orphanStatus().sweep.refused.some((r) => r.reason === 'identity-unknown'))
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('④ 记录是坏的时也要报出来（不能读成「很干净」）', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'legion-orphan-'))
+  try {
+    mkdirSync(join(root, 'data'), { recursive: true })
+    writeFileSync(join(root, 'data', 'launcher-run.json'), '{ 写了一半')
+    const { launcher } = launcherAt(root, join(root, 'data'), {})
+    await launcher.start()
+    assert.ok(launcher.allDiagnostics().some((x) => x.code === 'RUN_RECORD_CORRUPT'),
+      '坏记录被当成「没有记录」了')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('④ 没有记录文件时**不报任何诊断**（这确实是干净的情况）', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'legion-orphan-'))
+  try {
+    mkdirSync(join(root, 'data'), { recursive: true })
+    const { launcher } = launcherAt(root, join(root, 'data'), {})
+    await launcher.start()
+    assert.deepEqual(launcher.orphanStatus().diagnostics.map((x) => x.code), [])
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('⑤ 正常停止之后记录被删掉（它描述的是「这次运行」，不是历史）', async () => {
+  const { root } = orphanRoot([{ key: 'team-hub', pid: 4321, image: 'node.exe' }])
+  try {
+    const { launcher } = launcherAt(root, join(root, 'data'), {})
+    await launcher.start()
+    await launcher.stop()
+    assert.equal(launcher.orphanStatus().previousRun.entries.length, 1, '已经判过的结果应当留着供查询')
+    assert.equal(existsSync(join(root, 'data', 'launcher-run.json')), false,
+      '停止之后记录还在：下次启动会重复报告同一批残留，用户会以为残留一直在长')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('⑤ 启动在体检就失败时，记录同样被删掉（否则会重复报告）', async () => {
+  const { root } = orphanRoot([{ key: 'team-hub', pid: 4321, image: 'node.exe' }])
+  try {
+    // `include: []` 是「不限定范围」，**不是**「什么都不含」——那样 plan 会成功。
+    // 要让体检确定性地失败，用密钥库自检报一个 error 级诊断（现成的那条路）。
+    const launcher = createLauncher({
+      layout: layoutIn(root),
+      include: ['team-hub'],
+      ports: { 'team-hub': await reserveEphemeralPort() },
+      processProbe: { isAlive: () => false, imageOf: async () => null },
+      killTreeImpl: async () => true,
+      exists: () => true,
+      spawnImpl: () => { throw new Error('不应被调用') },
+      secretsCheck: () => [{ severity: 'error', code: 'SECRETS_STORE_UNPROTECTED', message: '明文后端' }],
+    })
+    const r = await launcher.start()
+    assert.equal(r.ok, false, '这条用例要靠体检失败才成立')
+    assert.equal(existsSync(join(root, 'data', 'launcher-run.json')), false,
+      '早退路径没删记录：什么都没起来，这条记录只可能描述上一次运行，' +
+      '留着它下次启动会把同一批残留再报一遍')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('⑥ CLI 的两个开关**默认是关的**（不存在「忘记关」这回事）', () => {
+  const env = { LEGION_HOME: process.cwd() }
+  const off = launcherOptionsFrom({ argv: [], env })
+  assert.equal(off.options.sweepOrphansOnStart, false)
+  assert.equal(off.options.allowUnverifiedSweep, false)
+  const on = launcherOptionsFrom({ argv: ['--sweep-orphans'], env })
+  assert.equal(on.options.sweepOrphansOnStart, true)
+  assert.equal(on.options.allowUnverifiedSweep, false, '允许未验证必须单独要求')
 })

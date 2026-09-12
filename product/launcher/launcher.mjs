@@ -32,8 +32,19 @@ import { entryAbsolutePath, materializeProcessPlan, validateProcessPlan } from '
 import { buildChildEnv, isSecretLikeKey, OS_ESSENTIAL_ENV } from './allowlist.mjs'
 import { checkPorts } from './ports.mjs'
 import { readinessResultToDiagnostic, waitForReadiness } from './readiness.mjs'
-import { createSupervisor } from './supervisor.mjs'
+import { createSupervisor, defaultKillTree } from './supervisor.mjs'
 import { createLogSink } from '../logging/sink.mjs'
+import {
+  buildRunRecord,
+  classifyRecordedPids,
+  clearRunRecord,
+  createProcessProbe,
+  orphanDiagnostics,
+  readRunRecord,
+  runRecordPath,
+  sweepOrphans,
+  writeRunRecord,
+} from './run-record.mjs'
 import * as nodeFs from 'node:fs'
 
 /** 产品级状态 → 用户可见文案（spec §6.3 的「产品状态」列）。 */
@@ -164,6 +175,17 @@ export function createLauncher({
   logFs: logFsOption = null,
   /** 日志策略（PRT-709）。缺省用 `DEFAULT_LOG_POLICY`。 */
   logPolicy = {},
+  // ── PRT-705 孤儿进程清理（完整背景见 `run-record.mjs` 的文件头）──
+  //
+  // `runRecordFs` / `processProbe` / `killTreeImpl` 都可注入：这一层的判据
+  // 必须是"**会不会杀错**"，而那个判断不需要真的去杀任何东西就能验证。
+  runRecordFs = null,
+  processProbe = null,
+  killTreeImpl = null,
+  // 启动时**只报告不清理**（默认）。清理要显式要求——
+  // 杀进程是"不可撤销"的那一类动作，默认值必须是不动手。
+  sweepOrphansOnStart = false,
+  allowUnverifiedSweep = false,
   /** 轮转间隔。`0` 表示只在与停止时轮转。 */
   logRotateIntervalMs = 5 * 60 * 1000,
   /** 定时器可注入：`unref` 那条防线只有靠它才**可观测**。 */
@@ -238,8 +260,15 @@ export function createLauncher({
   /** 日志 sink（PRT-709）。`null` 表示建不起来——**不阻止启动**。 */
   let logSink = null
   const logSinkDiagnostics = []
+  // PRT-705：上一次运行残留、记录读写失败、清理结果都汇到这里。
+  const orphanDiagnosticsOut = []
+  let runId = null
   let logRotationTimer = null
   let lastRotation = null
+  // PRT-705：上一次运行的残留判成了什么样（`null` = 还没查过）。
+  let orphanReport = null
+  let sweepResult = null
+  const orphanFs = runRecordFs ?? nodeFs
 
   /**
    * 跑密钥库自检。
@@ -438,8 +467,98 @@ export function createLauncher({
   function startLogRotationTimer() {
     if (logSink === null || !Number.isFinite(logRotateIntervalMs) || logRotateIntervalMs <= 0) return
     if (logRotationTimer !== null) return
-    logRotationTimer = setIntervalImpl(() => { void finalizeLogs() }, logRotateIntervalMs)
+    logRotationTimer = setIntervalImpl(() => {
+      void finalizeLogs()
+      // 顺带刷新运行记录：进程重启过之后 pid 变了，记录要跟上。
+      // 放在这里是因为这个定时器已经在跑，且不依赖 plan 走通。
+      persistRunRecord()
+    }, logRotateIntervalMs)
     if (typeof logRotationTimer.unref === 'function') logRotationTimer.unref()
+  }
+
+  /** 记录文件路径。`layout.dataDir` 为空时是 `null`——**不猜位置**。 */
+  const recordFile = () => runRecordPath(layout?.dataDir ?? '')
+
+  /** 进程探针：真实实现要起 `tasklist` / `ps`，所以可注入。 */
+  const probe = processProbe ?? createProcessProbe({ spawnImpl })
+
+  /**
+   * 查上一次运行留下了什么。**只报告，不动手。**
+   *
+   * 清理是单独的一步（`sweepOrphansOnStart`），因为杀进程不可撤销——
+   * 而"启动时顺手杀几个 pid"正是最容易杀错的那个形状。
+   */
+  async function checkPreviousRun() {
+    const file = recordFile()
+    if (file === null) return
+    const read = readRunRecord(file, { fs: orphanFs })
+    for (const d of read.diagnostics) orphanDiagnosticsOut.push(d)
+    if (read.record === null) return
+    const entries = await classifyRecordedPids(read.record, {
+      isAlive: (pid) => probe.isAlive(pid),
+      imageOf: (pid) => probe.imageOf(pid),
+    })
+    orphanReport = Object.freeze({
+      runId: read.record.runId,
+      startedAt: read.record.startedAt,
+      entries,
+    })
+    for (const d of orphanDiagnostics(entries)) orphanDiagnosticsOut.push(d)
+
+    // 启动时的清理**必须显式要求**。默认只报告——
+    // 一个"默认会杀进程"的启动路径，与一个会在用户没要求时动手的路径，
+    // 在"用户能不能预料到发生了什么"上是同一个东西。
+    if (sweepOrphansOnStart === true) {
+      sweepResult = await sweepOrphans(entries, {
+        killTree: (pid) => killTreeOf(pid),
+        allowUnverified: allowUnverifiedSweep === true,
+      })
+      for (const d of sweepResult.diagnostics) orphanDiagnosticsOut.push(d)
+    }
+  }
+
+  /** 杀一棵进程树。Windows 上走 `taskkill /T /F`（杀树），否则 `SIGKILL`。 */
+  async function killTreeOf(pid) {
+    if (typeof killTreeImpl === 'function') return (await killTreeImpl(pid)) === true
+    return defaultKillTree({
+      pid,
+      kill: () => { try { process.kill(pid, 'SIGKILL'); return true } catch { return false } },
+    })
+  }
+
+  /**
+   * 把这次起了什么写下来。
+   *
+   * 记录里的 pid 会随重启变旧，而陈旧是**有界**的危害：旧 pid 要么已经
+   * 没了（判 `gone`），要么被系统回收给了别人（判 `recycled` → 我们拒绝
+   * 动手）。所以陈旧只会让报告变吵，**不会让我们杀错**。
+   * 这也是为什么可以在"就绪后写一次 + 每次轮转刷新"这个粒度上收手，
+   * 而不必去挂监督层的每次状态变化。
+   */
+  function persistRunRecord() {
+    const file = recordFile()
+    if (file === null) return
+    const processes = supervisor === null ? [] : supervisor.status().map((x) => ({
+      key: x.key,
+      pid: typeof x.pid === 'number' ? x.pid : null,
+      // **映像名此刻拿不到。** 它不是"省略"，是"记录下来下次只能判 unknown"，
+      // 而 unknown 的处置是"不动手"——这正是安全的那一侧。
+      image: x.image ?? null,
+    }))
+    const rec = buildRunRecord({
+      runId,
+      launcherPid: typeof process?.pid === 'number' ? process.pid : null,
+      startedAt: startedAt === null ? undefined : new Date(startedAt).toISOString(),
+      processes,
+    })
+    const w = writeRunRecord(file, rec, { fs: orphanFs })
+    if (w.ok !== true && w.diagnostic !== null) orphanDiagnosticsOut.push(w.diagnostic)
+  }
+
+  /** 正常停止之后删掉记录——它是"**这次**运行"的状态，不是历史。 */
+  function forgetRunRecord() {
+    const file = recordFile()
+    if (file !== null) clearRunRecord(file, { fs: orphanFs })
   }
 
   const launcher = {
@@ -477,8 +596,23 @@ export function createLauncher({
       const beganAt = now()
       // **第一步**：日志。早于 preflight 与 plan——启动失败时最需要它。
       ensureLogSink()
+      // **第二步**：上一次运行留下了什么。
+      //
+      // 晚于日志（日志要能记下这次查的结果），早于 preflight（端口占用检查
+      // 报「被其他进程占用」时，这条诊断是解释它的那句话）。
+      //
+      //   > 一个把"我上次没退干净"与"别人占了这个端口"说成同一句话的提示，
+      //   > 把一件产品该自己收拾的事，变成了一件要用户去猜的事。
+      await checkPreviousRun()
       const pre = await this.preflight()
       if (pre.ok !== true) {
+        // **早退路径也要删记录。** 这条是一次真正的缺陷：这一路什么都没起来，
+        // 所以记录里描述的**只可能**是上一次运行。留着它，下次启动会把同一批
+        // 残留再报一遍，用户会以为残留一直在长。
+        //
+        // 与 `stop()` 那条早退是同一个形状的问题——「什么都没起来所以不用收尾」
+        // 这个判断，两次都把该做的事漏掉了。
+        forgetRunRecord()
         return Object.freeze({ ok: false, phase: pre.phase, failures: Object.freeze([]), diagnostics: pre.diagnostics, states: Object.freeze([]), elapsedMs: now() - beganAt })
       }
 
@@ -501,6 +635,7 @@ export function createLauncher({
       })
 
       startedAt = now()
+      runId = `run-${startedAt}-${typeof process?.pid === 'number' ? process.pid : 'x'}`
       readinessDiagnostics = []
       // （定时器已在 `ensureLogSink` 里随 sink 起：它不该依赖 plan 走通。）
       const failures = []
@@ -543,6 +678,9 @@ export function createLauncher({
           elapsedMs: now() - beganAt,
         })
       }
+      // 就绪之后立刻落一条记录：此后这台机器上如果 Legion 被强杀，
+      // 下一次启动就能认出这些 pid。晚于就绪是因为 pids 到这时才齐。
+      persistRunRecord()
       return Object.freeze({
         ok: true,
         phase: null,
@@ -566,6 +704,10 @@ export function createLauncher({
         //   > 恰好把最该记的那一次排除掉了。
         if (logRotationTimer !== null) { clearIntervalImpl(logRotationTimer); logRotationTimer = null }
         const logResult = await finalizeLogs()
+        // 什么都没起来也要删记录：这条记录此刻只可能描述**上一次**运行，
+        // 而它已经被 `checkPreviousRun` 读过、报告过了。留着它会让下一次
+        // 启动把同一批残留**再报一遍**，用户会以为残留一直在长。
+        forgetRunRecord()
         return Object.freeze({ reason, results: Object.freeze([]), states: Object.freeze([]), log: logResult })
       }
       log('info', `停止：${reason}`)
@@ -585,6 +727,10 @@ export function createLauncher({
       //   > 一个遮蔽了外层函数的名字，会让那个函数在**整段**作用域里消失，
       //   > 而不只是在你写的那一行之后。
       const logResult = await finalizeLogs()
+      // **停干净了才删记录。** 顺序不能反：先删的话，如果 stopAll 中途
+      // 失败了（某些进程没杀掉），我们就失去了"还有谁活着"的唯一线索，
+      // 而那些进程正好是下一次启动需要认出来的。
+      forgetRunRecord()
       return Object.freeze({ reason, results, states, log: logResult })
     },
 
@@ -656,6 +802,21 @@ export function createLauncher({
       })
     },
 
+    /**
+     * PRT-705：上一次运行的残留判成了什么样。
+     *
+     * `entries` 逐条给出结论（`gone` / `verified` / `recycled` / `unknown`），
+     * 而不是一个"有几个残留"的数字——因为**四种结论的处置完全不同**，
+     * 而其中两种是"绝对不要动手"。
+     */
+    orphanStatus() {
+      return Object.freeze({
+        previousRun: orphanReport,
+        sweep: sweepResult,
+        diagnostics: Object.freeze([...orphanDiagnosticsOut]),
+      })
+    },
+
     /** 供用例与产品入口合并展示的全量诊断。 */
     /** 日志（PRT-709）的最终处置。停止后仍可查询。 */
     logStatus() {
@@ -669,7 +830,12 @@ export function createLauncher({
 
     allDiagnostics() {
       const status = this.status()
-      const out = [...planDiagnostics, ...status.portDiagnostics, ...status.readinessDiagnostics]
+      const out = [
+        ...planDiagnostics, ...status.portDiagnostics, ...status.readinessDiagnostics,
+        // PRT-705 的残留诊断**必须进这里**：只在 `orphanStatus()` 里的话，
+        // 一个不去调它的入口就等于没有这条提示。
+        ...orphanDiagnosticsOut,
+      ]
       for (const item of status.needsAttention) {
         out.push(Object.freeze({
           severity: 'error',

@@ -677,6 +677,21 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-705：孤儿进程清理。
+      //
+      // 这一组盯的**不是**"能不能把残留进程杀掉"，而是**会不会杀错**。
+      //
+      // 记录里写着 `pid=4321`。那个进程退出了，系统把 4321 分配给了用户的
+      // 编辑器。按号码去杀，杀掉的是编辑器——不可撤销，而且用户完全不知道
+      // 为什么。所以这里绝大多数断言问的是同一件事：**该不该动手。**
+      //
+      //   > 一个按号码去杀的清理动作，与一个随机杀进程的动作，
+      //   > 在"会不会误伤"上是同一个东西——只是前者看起来有理有据。
+      label: 'run-record（PRT-705 孤儿进程：PID 会被回收，映像名对不上的一律不动手）',
+      files: ['product/launcher/run-record.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       label: 'probe（PRT-504：探测执行器，假 transport 覆盖全部分类 + 凭证不落判定/缓存）',
       files: ['runtime/probe/probe.test.mjs'],
       cwd: ROOT,

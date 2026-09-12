@@ -116,6 +116,31 @@ export const SCHEMA = defineSchema({
     'LOG_SINK_LINE_TOO_LONG',
     'LOG_SINK_BAD_POLICY',
     'LOG_SINK_UNAVAILABLE',
+
+    // ── PRT-705 孤儿进程清理 ────────────────────────────────────────────
+    //
+    // 同样都是诊断码，不是配置键。`RUN_RECORD_*` 描述"记录本身出了什么事"，
+    // `ORPHANS_FOUND` / `PID_RECYCLED` / `SWEEP_*` 描述"判成了什么、动手了没有"。
+    'RUN_RECORD_UNREADABLE',
+    'RUN_RECORD_CORRUPT',
+    'RUN_RECORD_WRITE_FAILED',
+    'ORPHANS_FOUND',
+    'PID_RECYCLED',
+    'SWEEP_REFUSED',
+    'SWEEP_FAILED',
+    // 分类结论。它们既是 `orphanStatus()` 的输出值，也出现在诊断文案里。
+    'verified',
+    'recycled',
+    'unknown',
+    // 拒绝清理的两个理由
+    'pid-recycled',
+    'identity-unknown',
+    // 探针里用到的系统命令与 CSV 解析（非 Windows 分支）
+    'tasklist',
+    'ps',
+    // 进程探针比较的错误码：`ESRCH` = 不在了；其余（含 `EPERM`）算"在"
+    'ESRCH',
+    'EPERM',
     // 轮转 note 的具名码（不是 `LOG_CODES` 的成员，但同样只用于说明）
     'FOREIGN_FILES',
     'PROTECTED_GEN1',

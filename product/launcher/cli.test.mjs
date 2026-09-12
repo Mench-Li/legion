@@ -337,3 +337,47 @@ test('logPolicy：配置文件没写 `log.*` 时是空对象，**不是** undefi
     assert.deepEqual(options.logPolicy, {})
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
+
+// ============================================================================
+// CLI_FLAGS 与 parseArgs 的**一致性**
+//
+// 这一组守的是一个**刚刚真的踩过的**坑：`parseArgs` 里原本有两份手工维护的
+// 名单（布尔开关一份、取值开关一份），而 `--help` 的正文是第三处 `CLI_FLAGS`。
+// 加 `--sweep-orphans` 时我只改了 `CLI_FLAGS`，于是它在 `--help` 里写着、
+// 用起来却是「无法识别的参数」。
+//
+// 原来那份代码的注释甚至写着：「新开关漏加会让它被当成未知参数」——
+// 警告的正是这件事，而写注释的人（我）照样漏了。
+//
+//   > 一份要写两处的名单，第二处总有一天会忘。
+//   > 一个必须靠人记得去同步的名单，与一个迟早会不同步的名单，
+//   > 在"新加的开关能不能用"上是同一个东西。
+//
+// 现在两份名单都从 `CLI_FLAGS` 派生。下面这条断言把"派生"这件事钉住：
+// 不管实现怎么改，**声明了的就必须能用**。
+// ============================================================================
+
+test('CLI_FLAGS 里声明的每一个开关，parseArgs 都必须接受', () => {
+  for (const f of CLI_FLAGS) {
+    const isPort = f.name.startsWith('--port.')
+    if (isPort) continue
+    const argv = f.kind === 'boolean'
+      ? [f.name]
+      : [`${f.name.replace(/=<.*>$/, '')}=x`]
+    const r = parseArgs(argv)
+    assert.deepEqual(r.errors, [],
+      `${f.name} 在 --help 里写着、却用不了：${JSON.stringify(r.errors)}。` +
+      '「文档里写的」与「能用的」分成两件事，等于文档在骗人')
+  }
+})
+
+test('CLI_FLAGS 里声明的开关，报错信息里也要列全（用户唯一能看到的线索）', () => {
+  const { errors } = parseArgs(['--nonsense'])
+  assert.equal(errors.length, 1)
+  for (const f of CLI_FLAGS) {
+    if (f.kind !== 'boolean' || f.name.includes('=')) continue
+    assert.ok(errors[0].includes(f.name),
+      `报错信息里没列 ${f.name}：那句硬编码的"支持 --check/--json/--help"` +
+      '已经与真实名单不一致过一次了')
+  }
+})

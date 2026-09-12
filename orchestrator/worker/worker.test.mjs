@@ -241,7 +241,71 @@ test('② REQUIRED_STAGE_KEYS 与状态机的路径一致（三者缺一不可�
     assert.equal(a.kind, 'in-place')
     assert.equal(b.kind, 'minimal')
     assert.match(a.note, /PRT-306\/401/)
+    // PRT-411：降级时也要**可判定地**说出"没有冻结快照"，
+    // 而不是让人从 `kind` 的字符串去猜。
+    assert.equal(s.contextFrozen, false)
   })
+})
+
+test('② PRT-411：`buildContext` 的结果会被写进证据（此前它被丢掉了）', async () => {
+  // 此前 `step()` 返回的 detail **被直接丢掉**，于是无论这个阶段做没做、
+  // 做了什么，证据里都只有一条状态迁移——"没有上下文快照"与"冻结好了一份"
+  // 在记录上完全一样。这里从**终态迁移的参数**里把它捞出来。
+  const { root, dataDir } = tempDataDir()
+  try {
+    const hub = fakeHub({ tasks: [{ taskId: 't1', attemptId: 'att:t1:1', leaseEpoch: 1 }] })
+    const w = createWorker({
+      hub, dataDir, logger: () => {},
+      executor: {
+        ...inPlaceStages({ contextStage: async (lease) => ({ kind: 'frozen', attemptId: lease.attemptId, snapshotHash: 'sha256:abc', includedCount: 4, excludedCount: 1, truncationCount: 0, redactionCount: 2, tokensKind: 'conservative-estimate', tokens: 120, canReadDefaulted: false }) }),
+        execute: async () => ({ outcome: 'completed' }),
+      },
+    })
+    const r = await w.tick()
+    assert.equal(r.outcome, 'completed')
+    const last = hub.calls.transition[hub.calls.transition.length - 1]
+    assert.equal(last.context.frozen.contextFrozen, true, '冻结成功必须被记为 frozen')
+    assert.equal(last.context.frozen.snapshotHash, 'sha256:abc')
+    assert.equal(last.context.frozen.redactionCount, 2)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('② PRT-411：降级时证据里写 `not minimal`——两种情形不许同形', async () => {
+  const { root, dataDir } = tempDataDir()
+  try {
+    const hub = fakeHub({ tasks: [{ taskId: 't1', attemptId: 'att:t1:1', leaseEpoch: 1 }] })
+    const w = createWorker({
+      hub, dataDir, logger: () => {},
+      executor: { ...inPlaceStages(), execute: async () => ({ outcome: 'completed' }) },
+    })
+    await w.tick()
+    const last = hub.calls.transition[hub.calls.transition.length - 1]
+    assert.equal(last.context.frozen.contextFrozen, false, '降级时不许写成 frozen')
+    assert.equal(last.context.frozen.kind, 'minimal')
+    assert.match(last.context.frozen.note, /无上下文快照/)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('② PRT-411：阶段没跑到时证据是 `not-reached`，不是 `null`', async () => {
+  // `null` 会让"没跑到"与"跑了但没快照"混为一谈。
+  const { root, dataDir } = tempDataDir()
+  try {
+    // prepareWorkspace 抛错 → 根本走不到 buildContext
+    const hub = fakeHub({ tasks: [{ taskId: 't1', attemptId: 'att:t1:1', leaseEpoch: 1 }] })
+    const w = createWorker({
+      hub, dataDir, logger: () => {},
+      executor: {
+        ...inPlaceStages(),
+        prepareWorkspace: async () => { throw new Error('工作区建不起来') },
+        execute: async () => ({ outcome: 'completed' }),
+      },
+    })
+    await w.tick()
+    const failed = hub.calls.fail[hub.calls.fail.length - 1]
+    // 失败必须归到**真正出错的那个阶段**：归错了会得到 `runtime-unavailable`
+    // （可重试），而真实原因是"工作区没能建起来"。
+    assert.equal(failed.failureCode, 'workspace-prepare-failed', `期望工作区阶段失败，实际 ${failed.failureCode}`)
+  } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
 test('② 先落库意图再执行：阶段状态在副作用**之前**就已经写进去了', async () => {

@@ -25,6 +25,8 @@ import {
   RUN_ERRORS,
   createRunStore,
 } from './run-store.mjs'
+import { createContextStore, ensureContextSchema } from './context-store.mjs'
+import { freezeFixtureContext } from './context-fixture.mjs'
 
 /** 建一个临时库 + 最小 tasks 表。与 run-store.test.mjs 的同名工具保持一致的形状。 */
 function makeEnv({ startMs = 1_700_000_000_000, storeOptions = {} } = {}) {
@@ -44,6 +46,9 @@ function makeEnv({ startMs = 1_700_000_000_000, storeOptions = {} } = {}) {
   let clockMs = startMs
   const clock = () => clockMs
   const advance = (ms) => { clockMs += ms; return clockMs }
+  // PRT-411：进 Running 要求一份已落库的上下文快照。
+  ensureContextSchema(db)
+  const ctxStore = createContextStore({ db, clock })
   const store = createRunStore({ db, clock, ...storeOptions })
   const addTask = (id, { status = 'todo', scope = 'default', priority = 'medium', hold = 0 } = {}) => {
     db.prepare('INSERT INTO tasks (id, title, priority, status, scope, hold, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
@@ -52,7 +57,7 @@ function makeEnv({ startMs = 1_700_000_000_000, storeOptions = {} } = {}) {
   }
   const taskStatus = (id) => db.prepare('SELECT status FROM tasks WHERE id = ?').get(id)?.status ?? null
   return {
-    root, dbFile, db, store, clock, advance, addTask, taskStatus,
+    root, dbFile, db, store, ctxStore, clock, advance, addTask, taskStatus,
     cleanup() { try { db.close() } catch { /* 已关 */ } rmSync(root, { recursive: true, force: true }) },
   }
 }
@@ -71,6 +76,7 @@ function assertRunError(fn, code) {
 function claimToRunning(env, workerId = 'w1') {
   const c = env.store.claim({ workerId }).claimed
   for (const to of ['PreparingWorkspace', 'BuildingContext', 'Running']) {
+    if (to === 'Running') freezeFixtureContext({ store: env.ctxStore, attemptId: c.attemptId, frozenAtMs: env.clock(), scope: 'default' })
     env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId, to })
   }
   return c
@@ -92,6 +98,7 @@ function failUntilDeadLetter(env, workerId = 'w1') {
     env.advance((last.nextAttemptAtMs ?? env.clock()) - env.clock() + 1)
     c = env.store.claim({ workerId }).claimed
     for (const to of ['PreparingWorkspace', 'BuildingContext', 'Running']) {
+      if (to === 'Running') freezeFixtureContext({ store: env.ctxStore, attemptId: c.attemptId, frozenAtMs: env.clock(), scope: 'default' })
       env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId, to })
     }
   }
@@ -138,6 +145,7 @@ test('⑨ 退避按尝试次数递增，且有上限（指数退避不能无限�
       env.advance(r.nextAttemptAtMs - env.clock() + 1)
       c = env.store.claim({ workerId: 'w1' }).claimed
       for (const to of ['PreparingWorkspace', 'BuildingContext', 'Running']) {
+        if (to === 'Running') freezeFixtureContext({ store: env.ctxStore, attemptId: c.attemptId, frozenAtMs: env.clock(), scope: 'default' })
         env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to })
       }
     }

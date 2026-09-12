@@ -30,6 +30,14 @@ import {
   ensureRunSchema,
   mapOutcomeToState,
 } from './run-store.mjs'
+import { createContextStore, ensureContextSchema } from './context-store.mjs'
+import { readFileSync as readSrc } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+import { assembleContext } from '../runtime/context/assembler.mjs'
+import { TOKEN_ESTIMATOR_KINDS } from '../runtime/contracts/context.mjs'
 
 /** 建一个临时库 + 最小 tasks 表（与 server.mjs 的列对齐到本项目用到的部分）。 */
 function makeEnv({ startMs = 1_700_000_000_000 } = {}) {
@@ -49,6 +57,9 @@ function makeEnv({ startMs = 1_700_000_000_000 } = {}) {
   let clockMs = startMs
   const clock = () => clockMs
   const advance = (ms) => { clockMs += ms; return clockMs }
+  // PRT-411：`BuildingContext → Running` 现在**真的**要求一份已落库的上下文快照。
+  // 夹具因此必须建那张表——否则闸门在"表不存在"与"没有快照"之间分不出来。
+  ensureContextSchema(db)
   const store = createRunStore({ db, clock })
   const addTask = (id, { status = 'todo', scope = 'default', priority = 'medium', hold = 0 } = {}) => {
     db.prepare('INSERT INTO tasks (id, title, priority, status, scope, hold, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
@@ -56,8 +67,30 @@ function makeEnv({ startMs = 1_700_000_000_000 } = {}) {
     return id
   }
   const taskStatus = (id) => db.prepare('SELECT status FROM tasks WHERE id = ?').get(id)?.status ?? null
+  /**
+   * 冻结这份 Attempt 的上下文——真实 worker 在 `buildContext` 阶段做的事。
+   *
+   * 走**真实的写入路径**（assembleContext → contextStore.record）而不是手写一条
+   * INSERT：后者要把 20 个 NOT NULL 列名抄一遍，而那些列一旦增删，
+   * 这份夹具会**静默地**与真实表结构脱节（插入报错还算好的，
+   * 列名恰好还兼容时才真正难查）。用例考的是迁移闸门，不是快照写入，
+   * 所以这里要的是"用最少的、不会漂移的机制让证据存在"。
+   */
+  const ctxStore = createContextStore({ db, clock, writeAudit: () => {} })
+  const freezeContext = (attemptId, { runId = 'run-test' } = {}) => {
+    const snap = assembleContext({
+      attemptId,
+      runId,
+      frozenAtMs: clockMs,
+      candidates: [],
+      policy: { scope: 'default', canRead: () => true, maxTokens: null },
+      tokenizer: { kind: TOKEN_ESTIMATOR_KINDS.EXACT, count: () => 0 },
+    })
+    ctxStore.record(snap, { scope: 'default', actor: 'test' })
+    return attemptId
+  }
   return {
-    root, dbFile, db, store, clock, advance, addTask, taskStatus,
+    root, dbFile, db, store, clock, advance, addTask, taskStatus, freezeContext,
     cleanup() { try { db.close() } catch { /* 已关 */ } rmSync(root, { recursive: true, force: true }) },
   }
 }
@@ -266,6 +299,7 @@ test('③ 同一尝试的旧 epoch 写入被拒（epoch 是单调的，不是「
     const c = env.store.claim({ workerId: 'w1' }).claimed
     assert.equal(c.leaseEpoch, 1)
     // 用 0（=「还没被领过」）去写，必须被拒
+    env.freezeContext(c.attemptId)
     assertRunError(() => env.store.transition({ attemptId: c.attemptId, leaseEpoch: 0, workerId: 'w1', to: 'Running' }), RUN_ERRORS.LEASE_EPOCH_STALE)
     assertRunError(() => env.store.release({ attemptId: c.attemptId, leaseEpoch: 99, workerId: 'w1' }), RUN_ERRORS.LEASE_EPOCH_STALE)
   } finally { env.cleanup() }
@@ -323,6 +357,7 @@ test('④ 正常路径逐段可走，且每段落库的要求（requiresPersist�
     assert.deepEqual([...r.requiresPersist], ['attempt'])
     r = env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to: 'BuildingContext' })
     assert.deepEqual([...r.requiresPersist], ['attempt', 'workspace'])
+    env.freezeContext(c.attemptId)
     r = env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to: 'Running' })
     assert.deepEqual([...r.requiresPersist], ['attempt', 'contextSnapshot'])
     assert.equal(r.taskStatus, 'in_progress')
@@ -341,6 +376,7 @@ test('④ 幂等：重复提交同一次迁移是「已生效」，不追加事�
     const c = env.store.claim({ workerId: 'w1' }).claimed
     // 走完整段正常路径：Leased → PreparingWorkspace → BuildingContext → Running → Validating
     for (const to of ['PreparingWorkspace', 'BuildingContext', 'Running']) {
+      if (to === 'Running') env.freezeContext(c.attemptId)
       env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to })
     }
     env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', outcome: 'completed' })
@@ -359,6 +395,7 @@ test('④ UnknownOutcome 不得回到队列：仓储层同样返回具名码', (
     const c = env.store.claim({ workerId: 'w1' }).claimed
     env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to: 'PreparingWorkspace' })
     env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to: 'BuildingContext' })
+    env.freezeContext(c.attemptId)
     env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to: 'Running' })
     env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', outcome: 'outcome_unknown' })
     assert.equal(env.store.getAttempt(c.attemptId).state, 'UnknownOutcome')
@@ -461,6 +498,7 @@ test('⑥ 可能已产生外部副作用 → 挂起等人工，**绝不**自动�
     const c = env.store.claim({ workerId: 'w-dead' }).claimed
     env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w-dead', to: 'PreparingWorkspace' })
     env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w-dead', to: 'BuildingContext' })
+    env.freezeContext(c.attemptId)
     env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w-dead', to: 'Running' })
     env.advance(DEFAULT_LEASE_TTL_MS + 1)
 
@@ -525,6 +563,8 @@ test('⑦ 优雅释放回到 RetryableFailure（不是直接回队列，否则�
     const c = env.store.claim({ workerId: 'w1' }).claimed
     // 走到 Running 再释放：这才是「正在执行时收到 SIGTERM」的真实场景
     for (const to of ['PreparingWorkspace', 'BuildingContext', 'Running']) {
+      // 进 Running 前必须先冻结上下文（PRT-411）；没有快照就没有"模型当时看到了什么"。
+      if (to === 'Running') env.freezeContext(c.attemptId)
       env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to })
     }
     const r = env.store.release({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', reason: 'SIGTERM' })
@@ -689,4 +729,127 @@ test('⑧ 事务失败要完整回滚：被拒的迁移不留半个状态，也�
     assert.equal(env.store.getAttempt(c.attemptId).finishedAtMs, null)
     assert.equal(env.store.eventsOf(c.attemptId).length, eventsBefore, '被拒的迁移不得留下事件')
   } finally { env.cleanup() }
+})
+
+// ============================================================================
+// PRT-411：冻结时点真的是一道闸门
+// ============================================================================
+//
+// 状态机为 `BuildingContext → Running` 声明了 `requiresPersist: ['attempt','contextSnapshot']`。
+// 在 PRT-411 之前这条声明**没有实现**——它只是事件流里的一段 JSON，
+// 于是 Attempt 可以在没有任何上下文快照的情况下进入 `Running`，
+// 而 spec §6.5 要固定住的正是"实际发送给 Runtime 的不可变输入"。
+//
+// 「声明了一件事」与「保证了一件事」在输出上完全一样，只要没人去违反它。
+// 所以这里**去违反它**。
+
+test('⑪ **没有上下文快照就不能进 Running**（声明变成闸门，而不是一段 JSON）', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c = env.store.claim({ workerId: 'w1' }).claimed
+    env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to: 'PreparingWorkspace' })
+    env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to: 'BuildingContext' })
+    // 不冻结，直接进 Running
+    const e = assertRunError(() => env.store.transition({
+      attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to: 'Running',
+    }), 'EVIDENCE_MISSING')
+    // 必须说清**缺的是哪一项**，否则排查只能去看状态机源码
+    assert.deepEqual([...e.missing], ['contextSnapshot'])
+    // 409 而不是 400：请求本身合法，是当前状态缺前提
+    assert.equal(e.statusCode, 409)
+    // 而且它**真的没动**：被拒的迁移不得留下半个状态
+    assert.equal(env.store.getAttempt(c.attemptId).state, 'BuildingContext')
+  } finally { env.cleanup() }
+})
+
+test('⑪ 冻结之后就进得去了（闸门不是"总是拒绝"）', () => {
+  // 一个总是失败的核验比没有核验更坏：所有人都会学会绕过它。
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c = env.store.claim({ workerId: 'w1' }).claimed
+    env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to: 'PreparingWorkspace' })
+    env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to: 'BuildingContext' })
+    env.freezeContext(c.attemptId)
+    const r = env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to: 'Running' })
+    assert.equal(r.attempt.state, 'Running')
+  } finally { env.cleanup() }
+})
+
+test('⑪ 别人（别的 Attempt）的快照不算数——闸门查的是**这一次**', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c = env.store.claim({ workerId: 'w1' }).claimed
+    env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to: 'PreparingWorkspace' })
+    env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to: 'BuildingContext' })
+    // 给**另一条** Attempt 冻结快照
+    env.freezeContext('att:someone-else')
+    assertRunError(() => env.store.transition({
+      attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to: 'Running',
+    }), 'EVIDENCE_MISSING')
+  } finally { env.cleanup() }
+})
+
+test('⑪ 表不存在时报 EVIDENCE_MISSING 而不是崩成 500', () => {
+  // 「查不到快照」与「没有那张表」对这一步是**同一个事实**：没有依据。
+  // 让 db.prepare 抛出去会把它变成 500，而 500 说明"我们坏了"，
+  // 不是"这一步缺前提"——两者对运维的意义完全不同。
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c = env.store.claim({ workerId: 'w1' }).claimed
+    env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to: 'PreparingWorkspace' })
+    env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to: 'BuildingContext' })
+    env.db.exec('DROP TABLE run_context_snapshots')
+    const e = assertRunError(() => env.store.transition({
+      attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to: 'Running',
+    }), 'EVIDENCE_MISSING')
+    assert.deepEqual([...e.missing], ['contextSnapshot'])
+  } finally { env.cleanup() }
+})
+
+test('⑪ 核验清单是**总**的：状态机声明的每一项都有归宿', () => {
+  // 一条"没人实现的声明"和一条"实现了的声明"在事件流里长得一模一样。
+  // 这里把状态机声明的所有 requiresPersist 名字收齐，逐个问：
+  // 它是**已被核验**的，还是**已知未实现**的？两者都行，但必须显式归类。
+  const smSrc = readSrc(resolve(HERE, '..', 'orchestrator', 'state-machine', 'transitions.mjs'), 'utf8')
+  const src = readSrc(resolve(HERE, 'run-store.mjs'), 'utf8')
+  // **已知未实现**的清单。每一条都要有理由，因为"没实现"和"忘了实现"在这里同形。
+  //
+  // `workspace` 是**这条用例第一次跑就抓到的真实缺口**：
+  // 状态机为 `PreparingWorkspace → BuildingContext` 声明了
+  // `requiresPersist: ['attempt','workspace']`，而全仓库**没有任何工作区持久化**
+  // （没有表、没有 store）——因为 PRT-306 工作区隔离本身还没交付
+  // （`inPlaceStages` 明说"原地执行、无隔离"）。所以它此刻**不可能**被核验，
+  // 这也正是它必须显式列在这里的原因：那条声明今天是一句空话，
+  // 而空话与保证在事件流里长得一模一样。
+  // 交付 PRT-306 时必须回来把它从这份清单挪走。
+  const KNOWN_UNIMPLEMENTED = [
+    'runResult',     // PRT-312 结果提取：尚未建表
+    'approval',      // PRT-619 审批冻结：尚未建表
+    'reconciliation', // PRT-313 对账：尚未建表
+    'workspace',     // PRT-306 工作区隔离未交付，无工作区表可查（见上）
+  ]
+  const declared = new Set()
+  for (const m of smSrc.matchAll(/requiresPersist: Object\.freeze\(\[([^\]]*)\]\)/g)) {
+    for (const name of m[1].split(',')) {
+      const s = name.trim().replace(/['"]/g, '')
+      if (s) declared.add(s)
+    }
+  }
+  for (const name of declared) {
+    if (name === 'attempt' || name === 'lease') continue
+    const implemented = new RegExp(`^\\s*${name}: `, 'm').test(src)
+    const knownUnimplemented = KNOWN_UNIMPLEMENTED.includes(name)
+    assert.ok(implemented || knownUnimplemented,
+      `\`${name}\` 既没有核验实现，也不在"已知未实现"清单里——` +
+      '它是一条**看起来像保证**的声明')
+  }
+  // 反方向：清单里不该有已经实现了的（那会让清单变成过期文档）
+  for (const name of KNOWN_UNIMPLEMENTED) {
+    assert.ok(!new RegExp(`^\\s*${name}: `, 'm').test(src),
+      `\`${name}\` 已经实现了，应从"已知未实现"清单里移除`)
+  }
 })

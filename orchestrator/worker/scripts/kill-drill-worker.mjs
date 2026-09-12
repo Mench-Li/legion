@@ -35,6 +35,7 @@ import { dirname } from 'node:path'
 
 import { runWorkerProcess } from '../run.mjs'
 import { inPlaceStages } from '../main.mjs'
+import { createHubContextStage } from '../context-stage.mjs'
 
 const [blockIn = 'execute', blockMsRaw = '30000', markerArg = '-'] = process.argv.slice(2)
 const blockMs = Number(blockMsRaw)
@@ -70,9 +71,38 @@ async function block(stage) {
 }
 
 const base = inPlaceStages()
+
+/**
+ * PRT-411：`buildContext` 现在**真的会冻结一份上下文快照**——装配与持久化
+ * 都在 hub 那一侧完成（`POST /api/context-snapshots/assemble`）。
+ *
+ * 这对演练本身是必要的，不是装饰：`BuildingContext → Running` 声明了
+ * `requiresPersist: ['attempt','contextSnapshot']`，而那条声明现在是真闸门。
+ * 若这里仍用降级的空阶段，`blockIn=execute` 那一组根本走不到 `Running`，
+ * 于是"外部写边界之后被杀"这个场景**不存在了**——演练会变成在测别的东西。
+ *
+ * `block('buildContext')` 的位置刻意留在**冻结之前**：
+ * 在 buildContext 阶段被杀 = 快照还没落库 = 恢复扫描看到 `BuildingContext`，
+ * 重做是安全的。这正是这一组演练要问的问题。
+ */
+const hubContextStage = createHubContextStage({
+  post: async (path, body) => {
+    const url = `${(process.env.TEAM_HUB_URL ?? '').replace(/\/+$/, '')}${path}`
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${process.env.TEAM_HUB_TOKEN ?? ''}` },
+      body: JSON.stringify(body),
+    })
+    return { status: r.status, body: await r.json().catch(() => null) }
+  },
+  // 权限必须**显式回答**：路由不替调用方决定权限，这里也不猜。
+  canRead: () => true,
+  clock: () => Date.now(),
+})
+
 const executor = {
   prepareWorkspace: async () => { await block('prepareWorkspace'); return base.prepareWorkspace() },
-  buildContext: async () => { await block('buildContext'); return base.buildContext() },
+  buildContext: async (lease) => { await block('buildContext'); return hubContextStage(lease) },
   // execute 代表「外部写边界之后」：先记一次写、再卡住。
   // 被杀之后这条记录就是"外部写可能已经发生"的**唯一证据**，
   // 而恢复扫描必须据此拒绝自动重试。

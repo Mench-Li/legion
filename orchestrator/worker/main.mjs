@@ -61,8 +61,24 @@ export const REQUIRED_STAGE_KEYS = Object.freeze(['prepareWorkspace', 'buildCont
  *
  * 两个返回的 `kind` 会被写进 Attempt 的证据里，因此日后翻记录能看出
  * 「这次执行没有工作区隔离、没有上下文快照」——而不是让人以为它有。
+ *
+ * ## PRT-411：上下文不再是降级的
+ *
+ * 此前 `buildContext` 也在这里，和 `prepareWorkspace` 一样返回
+ * `{ kind: 'minimal' }`。但两者的处境**不同**：
+ *
+ *   · 工作区隔离（PRT-306）**真的没交付**——没有表、没有 store，
+ *     所以"原地执行"是当前唯一诚实的形态；
+ *   · 上下文快照（PRT-401~413）**已经全部交付**，装配器、来源、脱敏、
+ *     tokenizer、快照仓储各自都有套件，只是**没有生产调用方**。
+ *
+ * 于是一份空快照的原因不是"没做"，而是"没接"——后者必须修，前者只能声明。
+ * 现在 `buildContext` 只在调用方**明确给出** `contextStore` + `loadInputs` 时
+ * 才降级；给了就必须真的冻结一份快照，否则这个阶段不该存在于这个 worker 里。
+ *
+ * 不给这两个依赖时仍然返回 `kind: 'minimal'`，但**如实说明**它没有快照。
  */
-export function inPlaceStages({ note = 'PRT-306/401 未交付：当前阶段为原地执行、无上下文快照' } = {}) {
+export function inPlaceStages({ note = 'PRT-306/401 未交付：当前阶段为原地执行、无上下文快照', contextStage = null } = {}) {
   return Object.freeze({
     /**
      * 显式声明「没有隔离」。
@@ -74,7 +90,9 @@ export function inPlaceStages({ note = 'PRT-306/401 未交付：当前阶段为�
      */
     workspaceIsolation: 'none',
     prepareWorkspace: async () => ({ kind: 'in-place', note }),
-    buildContext: async () => ({ kind: 'minimal', note }),
+    buildContext: contextStage ?? (async () => ({ kind: 'minimal', note })),
+    // 有没有真的冻结快照，是**可判定的**，所以不让人从 `kind` 去猜。
+    contextFrozen: contextStage !== null,
   })
 }
 
@@ -364,6 +382,9 @@ export function createWorker({
     publish('executing')
     startHeartbeat(claimed)
     const trace = []
+    // PRT-411：`buildContext` 到底做成了什么。初值**不是** `null` 而是"还没走到"，
+    // 这样"阶段没跑到"与"阶段跑了但没冻结快照"不会被同一个 `null` 混为一谈。
+    let contextEvidence = { contextFrozen: false, kind: 'not-reached' }
     try {
       /**
        * §6.4 的流水线：**先持久化意图，再做副作用**。
@@ -406,7 +427,29 @@ export function createWorker({
       }
 
       await step('PreparingWorkspace', tagStage('prepareWorkspace', stageImpl.prepareWorkspace), 'prepareWorkspace')
-      await step('BuildingContext', tagStage('buildContext', stageImpl.buildContext), 'buildContext')
+      // PRT-411：把 buildContext 的结果**留下来**。
+      //
+      // 它此前被 `step` 返回、然后**被丢掉**。于是无论这个阶段做没做、做了什么，
+      // 证据里都只有一条状态迁移——`kind: 'minimal'`（"没有上下文快照"）
+      // 与一份真的冻结好的快照在记录上**完全一样**。
+      // 状态文件里那句"无上下文快照"因此从来没有到达过任何能被人读到的地方。
+      //
+      // 这里不做"有就存没有就跳过"：`contextFrozen` 是可判定的，
+      // 所以把两种情形分别**写进证据**，让人翻记录时一眼看出是哪一种。
+      const contextStep = await step('BuildingContext', tagStage('buildContext', stageImpl.buildContext), 'buildContext')
+      const contextDetail = contextStep.detail
+      contextEvidence = {
+        contextFrozen: stageImpl.contextFrozen === true && contextDetail?.kind === 'frozen',
+        kind: contextDetail?.kind ?? 'unknown',
+        snapshotHash: contextDetail?.snapshotHash ?? null,
+        includedCount: contextDetail?.includedCount ?? null,
+        excludedCount: contextDetail?.excludedCount ?? null,
+        truncationCount: contextDetail?.truncationCount ?? null,
+        redactionCount: contextDetail?.redactionCount ?? null,
+        tokensKind: contextDetail?.tokensKind ?? null,
+        canReadDefaulted: contextDetail?.canReadDefaulted ?? null,
+        note: contextDetail?.note ?? null,
+      }
       await step('Running', async () => null, 'running')
       const result = await tagStage('execute', stageImpl.execute)(claimed)
       const outcome = result?.outcome ?? 'failed'
@@ -424,7 +467,7 @@ export function createWorker({
         leaseEpoch: claimed.leaseEpoch,
         workerId,
         outcome,
-        context: { detail: result?.detail ?? null, trace },
+        context: { detail: result?.detail ?? null, trace, frozen: contextEvidence },
       })
       stopHeartbeat()
       currentLease = null

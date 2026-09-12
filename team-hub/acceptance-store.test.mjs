@@ -14,6 +14,8 @@ import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 
 import { createRunStore, ensureRunSchema, RUN_ERRORS } from './run-store.mjs'
+import { createContextStore, ensureContextSchema } from './context-store.mjs'
+import { freezeFixtureContext } from './context-fixture.mjs'
 
 /** 造一个带 tasks 表的最小库（列与 run-store.test.mjs 的夹具对齐到本项目用到的部分）。 */
 function makeDb() {
@@ -27,6 +29,8 @@ function makeDb() {
     )
   `)
   ensureRunSchema(db)
+  // PRT-411：进 Running 要求一份已落库的上下文快照，夹具也得建那张表。
+  ensureContextSchema(db)
   return db
 }
 
@@ -39,12 +43,15 @@ function makeEnv({ acceptance = '[]', maxAttempts = 5 } = {}) {
   const db = makeDb()
   db.prepare('INSERT INTO tasks (id, title, status, scope, hold, createdAt, updatedAt, acceptance) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
     .run('t1', '任务一', 'todo', 'default', 0, new Date(clockMs).toISOString(), new Date(clockMs).toISOString(), acceptance)
+const ctxStore = createContextStore({ db, clock })
   const store = createRunStore({ db, clock, maxAttempts })
   const claimed = store.claim({ workerId: 'w1' })
   assert.ok(claimed.claimed !== null, '夹具应当能领到任务')
   const attemptId = claimed.claimed.attemptId
   const epoch = claimed.claimed.leaseEpoch
   for (const to of ['PreparingWorkspace', 'BuildingContext', 'Running']) {
+    // PRT-411：先冻结上下文，否则这条路走不通。
+    if (to === 'Running') freezeFixtureContext({ store: ctxStore, attemptId: attemptId, frozenAtMs: clock(), scope: 'default' })
     store.transition({ attemptId, leaseEpoch: epoch, workerId: 'w1', to })
   }
   // 执行成功 → Validating（**不是** Completed：机器验收是一道独立关卡）

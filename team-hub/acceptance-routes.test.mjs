@@ -57,11 +57,29 @@ function onlyTask(id, { acceptance = '[]' } = {}) {
 }
 
 /** 领一条任务并把它推到 Validating（执行成功的落点）。 */
+/**
+ * PRT-411：进 `Running` 之前先把上下文冻结掉。
+ *
+ * `BuildingContext → Running` 声明了 `requiresPersist: ['attempt','contextSnapshot']`，
+ * 而 PRT-411 把这条声明变成了真闸门。走**真实的装配路由**而不是直接写库：
+ * 路由要求调用方显式给出权限判定，装配合持久化在同一个请求里完成，
+ * 于是"冻结在 Running 之前"在测试里也是真的走了一遍。
+ */
+async function freezeContext(attemptId, runId = 'run-fixture') {
+  const r = await call('POST', '/api/context-snapshots/assemble', {
+    attemptId, runId, frozenAtMs: Date.now(), scope: 'default',
+    canReadAll: true, candidates: [],
+  })
+  assert.equal(r.status, 200, `冻结上下文失败：${r.status} ${JSON.stringify(r.body)}`)
+  return r.body.snapshotHash
+}
+
 async function toValidating(id) {
   const claimed = await call('POST', '/api/runtime/claim', { workerId: 'w1' })
   assert.equal(claimed.body.claimed?.taskId, id, `应当领到 ${id}，实际 ${JSON.stringify(claimed.body.claimed)}`)
   const { attemptId, leaseEpoch } = claimed.body.claimed
   for (const to of ['PreparingWorkspace', 'BuildingContext', 'Running']) {
+    if (to === 'Running') await freezeContext(attemptId)
     const r = await call('POST', '/api/runtime/transition', { attemptId, leaseEpoch, workerId: 'w1', to })
     assert.equal(r.body.ok, true, `推进到 ${to} 失败：${JSON.stringify(r.body)}`)
   }

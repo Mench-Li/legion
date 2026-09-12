@@ -141,6 +141,7 @@ test('③ 提交结果：outcome 走状态机；completed 落到 Validating，�
   insertTask('rt-5')
   const c = (await call('POST', '/api/runtime/claim', { workerId: 'w5' })).body.claimed
   for (const to of ['PreparingWorkspace', 'BuildingContext', 'Running']) {
+    if (to === 'Running') await freezeContext(c.attemptId)
     const r = await call('POST', '/api/runtime/transition', {
       attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w5', to,
     })
@@ -227,6 +228,7 @@ test('④ 回收：未越过边界 → 新建尝试；越过边界 → 挂起等
   const risky = (await call('POST', '/api/runtime/claim', { workerId: 'w9' })).body.claimed
   assert.equal(risky.taskId, 'rt-10')
   for (const to of ['PreparingWorkspace', 'BuildingContext', 'Running']) {
+    if (to === 'Running') await freezeContext(risky.attemptId)
     await call('POST', '/api/runtime/transition', { attemptId: risky.attemptId, leaseEpoch: risky.leaseEpoch, workerId: 'w9', to })
   }
   // 把租约推到过期（直接改库：路由不提供「伪造时间」的入口，这正是设计意图）
@@ -297,11 +299,29 @@ test('⑥ 运行面不影响看板既有路径：/api/claim 仍然按成员语�
 // ── PRT-309/310/311 的路由契约 ──
 
 /** 领一条任务并推到 Running（外部写边界之后）。 */
+/**
+ * PRT-411：进 `Running` 之前先把上下文冻结掉。
+ *
+ * `BuildingContext → Running` 声明了 `requiresPersist: ['attempt','contextSnapshot']`，
+ * 而 PRT-411 把这条声明变成了真闸门。走**真实的装配路由**而不是直接写库：
+ * 路由要求调用方显式给出权限判定，装配合持久化在同一个请求里完成，
+ * 于是"冻结在 Running 之前"在测试里也是真的走了一遍。
+ */
+async function freezeContext(attemptId, runId = 'run-fixture') {
+  const r = await call('POST', '/api/context-snapshots/assemble', {
+    attemptId, runId, frozenAtMs: Date.now(), scope: 'default',
+    canReadAll: true, candidates: [],
+  })
+  assert.equal(r.status, 200, `冻结上下文失败：${r.status} ${JSON.stringify(r.body)}`)
+  return r.body.snapshotHash
+}
+
 async function claimToRunning(workerId, taskId) {
   onlyTask(taskId)
   const c = await call('POST', '/api/runtime/claim', { workerId, scope: 'default' })
   assert.equal(c.body.claimed.taskId, taskId)
   for (const to of ['PreparingWorkspace', 'BuildingContext', 'Running']) {
+    if (to === 'Running') await freezeContext(c.body.claimed.attemptId)
     const t = await call('POST', '/api/runtime/transition', {
       attemptId: c.body.claimed.attemptId, leaseEpoch: c.body.claimed.leaseEpoch, workerId, to,
     })
@@ -414,6 +434,7 @@ test('⑨ 额度耗尽 → Dead Letter，并且这条任务仍然能被人在清
     assert.equal(claim.body.claimed.taskId, 'rt-dead')
     c = claim.body.claimed
     for (const to of ['PreparingWorkspace', 'BuildingContext', 'Running']) {
+      if (to === 'Running') await freezeContext(c.attemptId)
       await call('POST', '/api/runtime/transition', { attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w-dead', to })
     }
   }

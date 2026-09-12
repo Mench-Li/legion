@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createHubClient } from '../orchestrator/worker/run.mjs'
+import { createHubContextStage } from '../orchestrator/worker/context-stage.mjs'
 import { createWorker, inPlaceStages } from '../orchestrator/worker/main.mjs'
 
 /**
@@ -129,6 +130,31 @@ function onlyTask(id, opts = {}) {
  * 挂住时控制台停在半路，看不到 `ℹ fail N` 那一行，
  * 于是一个断言失败被伪装成「测试卡住」。这正是本次调试踩到的坑。
  */
+
+/**
+ * PRT-411：远程 worker 的 `buildContext` —— 装配与持久化都在 hub 那一侧。
+ *
+ * 装配需要的数据都在 hub 的库里，所以让 worker 自己读意味着直连 SQLite
+ * 或把读取逻辑写第二遍。而 `/api/context-snapshots/assemble` 已经是
+ * **装配 + 持久化在同一个请求里**完成的，于是"冻结在 Running 之前"
+ * 不是一条靠人记住的约定。
+ */
+function hubContextStage() {
+  return createHubContextStage({
+    post: async (path, body) => {
+      const r = await fetch(base + path, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer e2e-token' },
+        body: JSON.stringify(body),
+      })
+      return { status: r.status, body: await r.json().catch(() => null) }
+    },
+    // 权限**必须显式回答**：路由不替调用方决定权限，这里也不猜。
+    canRead: () => true,
+    clock: () => Date.now(),
+  })
+}
+
 async function withWorker(options, fn) {
   const w = createWorker(options)
   try {
@@ -154,7 +180,7 @@ test('① worker 端到端：认领 → 执行 → 提交，看板投影到 in_r
   const executed = []
   await withWorker({
     hub,
-    executor: { ...inPlaceStages(), execute: async (lease) => { executed.push(lease.taskId); return { outcome: 'completed', detail: 'e2e' } } },
+    executor: { ...inPlaceStages({ contextStage: hubContextStage() }), execute: async (lease) => { executed.push(lease.taskId); return { outcome: 'completed', detail: 'e2e' } } },
     dataDir: dataDirOf('data-a'),
     workerId: 'w-e2e-a',
     heartbeatIntervalMs: 50,
@@ -175,7 +201,7 @@ test('① worker 端到端：认领 → 执行 → 提交，看板投影到 in_r
 test('① 队列空时 worker 如实报 idle，不谎报「执行了一条」（信封误读的原始症状）', async () => {
   await withWorker({
     hub,
-    executor: { ...inPlaceStages(), execute: async () => ({ outcome: 'completed' }) },
+    executor: { ...inPlaceStages({ contextStage: hubContextStage() }), execute: async () => ({ outcome: 'completed' }) },
     dataDir: dataDirOf('data-b'),
     workerId: 'w-e2e-b',
   }, async (w) => {
@@ -189,7 +215,7 @@ test('① 队列空时 worker 如实报 idle，不谎报「执行了一条」（
 test('① claim 缺少 attemptId 被当成协议错误，而不是空队列（任务被领走却没人做）', async () => {
   await withWorker({
     hub: { claim: async () => ({ taskId: 'ghost', leaseEpoch: 1 }) },
-    executor: { ...inPlaceStages(), execute: async () => ({ outcome: 'completed' }) },
+    executor: { ...inPlaceStages({ contextStage: hubContextStage() }), execute: async () => ({ outcome: 'completed' }) },
     dataDir: dataDirOf('data-c'),
     workerId: 'w-e2e-c',
   }, async (w) => {
@@ -221,7 +247,7 @@ test('② 心跳端到端：租约被真实续租（服务端算时间，不是 
   }
   await withWorker({
     hub: countingHub,
-    executor: { ...inPlaceStages(), execute: () => gate.then(() => ({ outcome: 'completed' })) },
+    executor: { ...inPlaceStages({ contextStage: hubContextStage() }), execute: () => gate.then(() => ({ outcome: 'completed' })) },
     dataDir: dataDirOf('data-d'),
     workerId: 'w-e2e-d',
     heartbeatIntervalMs: 40,
@@ -290,7 +316,7 @@ test('③ worker 收到 STALE 后停止心跳并如实记录（不再徒劳重�
   }
   await withWorker({
     hub: syncHub,
-    executor: { ...inPlaceStages(), execute: () => { startedExec(); return gate.then(() => ({ outcome: 'completed' })) } },
+    executor: { ...inPlaceStages({ contextStage: hubContextStage() }), execute: () => { startedExec(); return gate.then(() => ({ outcome: 'completed' })) } },
     dataDir: dataDirOf('data-e'),
     workerId: 'w-e2e-e',
     heartbeatIntervalMs: 30,
@@ -357,7 +383,7 @@ test('⑤ 优雅停止：释放真实租约，任务随后可被另一个 worker
   const started = new Promise((r) => { startedExec = r })
   const w = createWorker({
     hub,
-    executor: { ...inPlaceStages(), execute: () => { startedExec(); return gate.then(() => ({ outcome: 'completed' })) } },
+    executor: { ...inPlaceStages({ contextStage: hubContextStage() }), execute: () => { startedExec(); return gate.then(() => ({ outcome: 'completed' })) } },
     dataDir: dataDirOf('data-g'),
     workerId: 'w-e2e-g',
     heartbeatIntervalMs: 10000,
@@ -400,9 +426,27 @@ async function claimAndRun(workerId, taskId, scope = 'default') {
   const c = await hub.claim({ workerId, scope })
   assert.equal(c.taskId, taskId, `应领到 ${taskId}，实际 ${c?.taskId}`)
   for (const to of ['PreparingWorkspace', 'BuildingContext', 'Running']) {
+    // PRT-411：`→ Running` 要求一份已落库的上下文快照。走真实的装配路由——
+    // 这样"冻结在 Running 之前"在测试里也是真的被走了一遍，而不是被夹具绕过去。
+    if (to === 'Running') await freezeViaHub(c.attemptId, scope)
     await hub.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId, to })
   }
   return c
+}
+
+/** 通过真实的 hub 装配路由冻结上下文（带 worker token，不是 operator token）。 */
+async function freezeViaHub(attemptId, scope = 'default') {
+  const r = await fetch(base + '/api/context-snapshots/assemble', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer e2e-token' },
+    body: JSON.stringify({
+      attemptId, runId: `run:${attemptId}`, frozenAtMs: Date.now(), scope,
+      canReadAll: true, candidates: [],
+    }),
+  })
+  const body = await r.json().catch(() => null)
+  assert.equal(r.status, 200, `冻结上下文失败：${r.status} ${JSON.stringify(body)}`)
+  return body.snapshotHash
 }
 
 test('⑥ 真实 worker 的执行失败会被服务端结算成「重试 + 退避」，而不是停在中间态', async () => {
@@ -411,7 +455,7 @@ test('⑥ 真实 worker 的执行失败会被服务端结算成「重试 + 退�
     hub,
     executor: {
       prepareWorkspace: async () => ({ kind: 'in-place' }),
-      buildContext: async () => ({ kind: 'minimal' }),
+      buildContext: hubContextStage(),
       execute: async () => { throw new Error('执行引擎炸了') },
     },
     dataDir: dataDirOf('data-fail'),
@@ -455,6 +499,8 @@ test('⑥ 反复失败最终进 Dead Letter，并且能在等人工清单里找�
     const next = await hub.claim({ workerId })
     assert.equal(next.taskId, 'e2e-dead')
     for (const to of ['PreparingWorkspace', 'BuildingContext', 'Running']) {
+      // PRT-411：每一次新尝试同样要先冻结上下文才能进 Running。
+      if (to === 'Running') await freezeViaHub(next.attemptId, 'default')
       await hub.transition({ attemptId: next.attemptId, leaseEpoch: next.leaseEpoch, workerId, to })
     }
     c = next

@@ -333,7 +333,26 @@ const EVIDENCE_CHECKS = Object.freeze({
   // 看起来像是在保证下一岗位已经建好了。
   handoff: (db, attemptId) =>
     db.prepare('SELECT COUNT(*) AS n FROM run_handoffs WHERE attempt_id = ?').get(attemptId).n > 0,
+  // 「上下文已冻结」（PRT-411）。状态机为 `BuildingContext → Running` 声明了
+  // `requires_persist: ['attempt','contextSnapshot']`，而在本批之前**这条声明没有实现**：
+  // 它只是事件流里的一段 JSON，于是 Attempt 可以在**没有任何上下文快照**的情况下
+  // 进入 `Running` —— 而那正是 spec §6.5 要固定住的东西（"实际发送给 Runtime 的
+  // 不可变输入"）。没有它，事后无法回答"模型当时看到了什么"。
+  //
+  // 表不存在时返回 false 而不是抛错：`run_context_snapshots` 由 context-store 建，
+  // 两者都在 server 启动时装上。但一个只有 run schema 的库（例如某些用例的夹具）
+  // 里"查不到快照"与"没有那张表"是**同一个事实**——这一步没有依据。
+  // 让 `db.prepare` 抛出去会把它变成一个 500，而 500 说明的是"我们坏了"，
+  // 不是"这一步缺前提"，两者对运维的意义完全不同。
+  contextSnapshot: (db, attemptId) =>
+    tableExists(db, 'run_context_snapshots') &&
+    db.prepare('SELECT COUNT(*) AS n FROM run_context_snapshots WHERE attempt_id = ?').get(attemptId).n > 0,
 })
+
+/** 表存在吗。用于区分"查不到"与"没有那张表"——两者都算"没有依据"，但排查时要知道是哪种。 */
+function tableExists(db, name) {
+  return db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = ?").get(name).n > 0
+}
 
 /**
  * 核验一次迁移声明要落库的证据是否真的存在。
@@ -825,6 +844,14 @@ export function createRunStore({
         claimed: Object.freeze({
           attemptId: row.id,
           taskId: row.task_id,
+          // PRT-411：**scope 必须跟着认领一起发出去**。
+          //
+          // `shapeAttempt` 一直有它，但这条认领响应漏了——于是 worker 拿不到
+          // 自己在哪个空间里干活，而**权限判定正是以空间为参照的**。
+          // 缺了它，worker 只有两条路：拒绝一切（看起来像一次正常的权限结果），
+          // 或者自己猜一个默认空间（一次静默的越权）。
+          // 两条都不是"参数没传"那种能一眼看出来的错误。
+          scope: row.scope,
           attemptNo: row.attempt_no,
           leaseEpoch: row.lease_epoch,
           leaseExpiresAtMs: row.lease_expires_at_ms,

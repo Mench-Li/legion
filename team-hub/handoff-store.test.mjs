@@ -13,6 +13,8 @@ import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 
 import { createRunStore, ensureRunSchema, RUN_ERRORS } from './run-store.mjs'
+import { createContextStore, ensureContextSchema } from './context-store.mjs'
+import { freezeFixtureContext } from './context-fixture.mjs'
 
 /** 三岗位的链：analyst → coder → tester（tester 是链尾）。 */
 const CHAIN = [
@@ -33,6 +35,8 @@ function makeDb() {
     )
   `)
   ensureRunSchema(db)
+  // PRT-411：进 Running 要求一份已落库的上下文快照，夹具也得建那张表。
+  ensureContextSchema(db)
   return db
 }
 
@@ -68,12 +72,15 @@ function makeEnv({ stages = CHAIN, role = 'analyst', acceptance = JSON.stringify
     return stages
   }
 
+const ctxStore = createContextStore({ db, clock })
   const store = createRunStore({ db, clock, createTask, readPipeline })
   const claimed = store.claim({ workerId: 'w1' })
   assert.ok(claimed.claimed !== null, '夹具应当能领到任务')
   const attemptId = claimed.claimed.attemptId
   const epoch = claimed.claimed.leaseEpoch
   for (const to of ['PreparingWorkspace', 'BuildingContext', 'Running']) {
+    // PRT-411：先冻结上下文，否则这条路走不通。
+    if (to === 'Running') freezeFixtureContext({ store: ctxStore, attemptId: attemptId, frozenAtMs: clock(), scope: 'default' })
     store.transition({ attemptId, leaseEpoch: epoch, workerId: 'w1', to })
   }
   store.transition({ attemptId, leaseEpoch: epoch, workerId: 'w1', outcome: 'completed' })
@@ -212,10 +219,13 @@ test('⑤ 没接线时拒绝（`HANDOFF_NOT_WIRED`），而**不是**降级成"�
   db.prepare('INSERT INTO tasks (id, title, status, scope, role, hold, createdAt, updatedAt, acceptance) VALUES (?,?,?,?,?,?,?,?,?)')
     .run('T-1', 't', 'todo', 'default', 'analyst', 0, new Date(clockMs).toISOString(), new Date(clockMs).toISOString(), '[]')
   const store = createRunStore({ db, clock }) // 不注入 createTask / readPipeline
+  const ctxStore = createContextStore({ db, clock })
   const claimed = store.claim({ workerId: 'w1' })
   const attemptId = claimed.claimed.attemptId
   const epoch = claimed.claimed.leaseEpoch
   for (const to of ['PreparingWorkspace', 'BuildingContext', 'Running']) {
+    // PRT-411：先冻结上下文，否则这条路走不通。
+    if (to === 'Running') freezeFixtureContext({ store: ctxStore, attemptId: attemptId, frozenAtMs: clock(), scope: 'default' })
     store.transition({ attemptId, leaseEpoch: epoch, workerId: 'w1', to })
   }
   store.transition({ attemptId, leaseEpoch: epoch, workerId: 'w1', outcome: 'completed' })
@@ -280,7 +290,11 @@ test('⑥ 唯一索引挡住重复时，**连刚建出来的后继任务也一�
   assert.equal(claimed2.claimed.taskId, 'T-2')
   const a2 = claimed2.claimed.attemptId
   const e2 = claimed2.claimed.leaseEpoch
+  // PRT-411：进 Running 前先冻结上下文。用 env 里同一个 db——快照是给这条 Attempt 的，
+  // 存在哪个 store 实例上无所谓，闸门查的是库里的那一行。
+  const ctxStore2 = createContextStore({ db: env.db, clock })
   for (const to of ['PreparingWorkspace', 'BuildingContext', 'Running']) {
+    if (to === 'Running') freezeFixtureContext({ store: ctxStore2, attemptId: a2, frozenAtMs: clock(), scope: 'default' })
     env.store.transition({ attemptId: a2, leaseEpoch: e2, workerId: 'w1', to })
   }
   env.store.transition({ attemptId: a2, leaseEpoch: e2, workerId: 'w1', outcome: 'completed' })

@@ -719,6 +719,17 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-411：`buildContext` 阶段的真实实现 + 「冻结时点」真的是一道闸门。
+      //
+      // 为什么值得单独一套：`runtime/context/` 下的装配器、来源、脱敏、tokenizer、
+      // 快照仓储**全部已交付、各有套件、全绿**，却一个生产调用方都没有
+      // ——「模块写好、用例绿、没人调用」与「功能不存在」在用户看来完全一样。
+      // 这套用例守的就是那句"真的会冻结"，以及"冻结不了时会失败"。
+      label: 'context-stage（PRT-411：冻结时点 / 闸门 / canRead fail closed / 接线不靠猜）',
+      files: ['orchestrator/worker/context-stage.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-408：上下文脱敏。与日志脱敏（PRT-208）的区别不是程度，是**不可撤回性**
       // ——日志写错了还能删，发给模型就撤不回来了。守的是"**发出去的东西里没有密钥**"，
       // 所以最要紧的一条用例走完整链路断言 finalText 里没有密钥；

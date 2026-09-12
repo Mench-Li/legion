@@ -59,6 +59,18 @@ export const NON_ENV_LITERALS = Object.freeze([
   'TRANSITION_REJECTED', 'MISSING_PARAM',
   // 原地执行的阶段类型（worker/main.mjs 的 inPlaceStages，会被写进 Attempt 证据）
   'in-place', 'minimal',
+  // PRT-411：`buildContext` 阶段的具名码与结果类型（worker/context-stage.mjs）。
+  //
+  // 逐个列出而不是按前缀通配：这些码会被**跨进程**读取（worker 上报 → hub 记录 → 人排查），
+  // 因此它们是契约的一部分，不是实现细节。`CONTEXT_ASSEMBLY_FAILED` 上还会挂一个
+  // `assemblyCode`（装配器自己的码，如 `CONTEXT_TOO_LARGE`）——分清"哪个阶段失败"
+  // 与"失败成什么样"，因为前者决定看哪份日志，后者决定能不能重试。
+  'CONTEXT_INPUT_UNAVAILABLE', 'CONTEXT_ASSEMBLY_FAILED', 'CONTEXT_PERSIST_FAILED',
+  'CONTEXT_BAD_WIRING', 'frozen', 'not-reached',
+  // 装配器自己的超限码。远程路径上它从 hub 的响应体里回来，被提升为
+  // `CONTEXT_ASSEMBLY_FAILED.assemblyCode`——**两个都要认得**：
+  // 前者回答"哪个阶段失败"，后者回答"失败成什么样"（能不能靠精简输入解决）。
+  'CONTEXT_TOO_LARGE',
   // 缺阶段时 worker 的状态名
   'no-stages',
   // 状态机的具名错误码（state-machine/transitions.mjs 的 TRANSITION_ERRORS 与 states.mjs）。

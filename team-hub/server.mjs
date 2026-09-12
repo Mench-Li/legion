@@ -66,7 +66,17 @@ import { createHash } from 'node:crypto'
 import { dirname, extname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { standardsFor } from './stage-standards.mjs'
-import { evaluatePermission, normalizeOperation, sameOperation } from './permission-engine.mjs'
+import { evaluatePermission, normalizeOperation } from './permission-engine.mjs'
+import {
+  BINDING_HASH_COLUMN,
+  BINDING_CODES,
+  CONSUME_OUTCOMES,
+  computeBindingHash,
+  consumeBinding,
+  isBoundHash,
+  operationOfRow,
+  verifyBinding,
+} from './approval-binding.mjs'
 import { createRunStore, RunError } from './run-store.mjs'
 import { MODEL_ERRORS, ModelError, createModelStore, ensureModelSchema } from './model-store.mjs'
 import {
@@ -853,6 +863,33 @@ db.exec(`
   )
 `)
 db.exec('CREATE INDEX IF NOT EXISTS idx_permission_requests_scope_status ON permission_requests (scope, status, createdAt)')
+
+// PRT-608：审批绑定哈希的列。
+//
+// `CREATE TABLE IF NOT EXISTS` 不会给**已存在**的表加列，所以这里单独做一次
+// 幂等的加列。查 `PRAGMA table_info` 而不是 `try { ALTER } catch {}`：
+// 后者会把"加列失败"和"列已存在"这两种完全不同的情况吞成同一个结果，
+// 于是加列真的失败时（磁盘满、表被锁）没有任何迹象。
+{
+  const cols = db.prepare('PRAGMA table_info(permission_requests)').all().map((c) => c.name)
+  if (!cols.includes(BINDING_HASH_COLUMN)) {
+    db.exec(`ALTER TABLE permission_requests ADD COLUMN ${BINDING_HASH_COLUMN} TEXT`)
+  }
+}
+
+// PRT-608：**有意不回填**既有行的绑定哈希。
+//
+// 回填意味着"用今天的规范化规则，替一批旧行算出它们的身份"。而那些行的身份
+// 本来就是按**旧规则**定的——回填会把一次规则变更的影响静默抹平：
+// 一条旧规则下绑定的审批，会变成一条新规则下绑定的审批，而没有人知道它变过。
+//
+// 代价是迁移瞬间仍然 `pending` 的那些请求会变成"没有哈希"，于是被
+// `verifyBinding` 以 `approval-unbound` **拒绝**（fail-closed），用户需要重新发起。
+// 审批 TTL 是 15 分钟，所以受影响的窗口最多 15 分钟。
+//
+//   > 一个"给旧行补算哈希"的迁移，与一个"把旧审批的含义改写成今天的含义"的迁移，
+//   > 是同一个东西——而它的方向是**放行**。
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS skills (
     id TEXT PRIMARY KEY,
@@ -1592,24 +1629,82 @@ function permissionRows() {
   return db.prepare('SELECT * FROM permission_rules').all().map(permissionRuleView)
 }
 
-export function checkPermission(input = {}) {
+/**
+ * 权限判定入口。
+ *
+ * `deps.consume` 是一个**可注入的接缝**（默认就是 `consumeBinding`），存在的唯一
+ * 理由是让"CAS 没抢到"那条路径可以被**真的走到**：那条路径只有在并发时序恰好
+ * 落在两次调用之间时才会发生，而一个只能靠时序触发的分支，与一个不存在的分支，
+ * 在"它到底拦不拦得住"上是同一个东西。
+ *
+ * 它不可能被 HTTP 调用方利用：函数不能经 JSON 传进来，而路由只传请求体。
+ * 这与 `createLauncher` / `createWizard` / `createTray` 收依赖的方式是同一套。
+ */
+export function checkPermission(input = {}, { consume = consumeBinding } = {}) {
   const operation = normalizeOperation(input)
   const requestId = input.permissionRequestId ? String(input.permissionRequestId) : null
   if (requestId) {
     const row = db.prepare('SELECT * FROM permission_requests WHERE requestId=?').get(requestId)
-    if (row && row.status === 'approved') {
-      // PRT-611：原来这里是
-      //   `JSON.stringify(JSON.parse(row.operation)) !== JSON.stringify(operation)`
-      // 键的书写顺序（`metadata` 的键序由调用方决定）会被算进操作身份，
-      // 表现为"明明批过了，它说操作不匹配"。改成指纹比较。
-      if (!sameOperation(JSON.parse(row.operation), operation)) throw new Error('permission operation mismatch')
-      const consumed = withTx(() => db.prepare("UPDATE permission_requests SET status='consumed', consumedAt=? WHERE requestId=? AND status='approved'").run(now(), requestId))
-      if (consumed.changes === 1) { audit(operation.actor, operation.scope, 'permission:consume', requestId, { action: operation.action, target: operation.target }); return { allowed: true, decision: 'allow', status: 'consumed', requestId, operation } }
+    // PRT-608：消费走 `verifyBinding`，它**先看这一行绑了什么**，再看这次调用是不是它。
+    //
+    // 顺序是有意的。PRT-611 把这里换成了 `sameOperation(row.operation, operation)`，
+    // 那是拿"当场重算的指纹"与"当场重算的指纹"比——对一条没有绑定哈希的旧行，
+    // 它**恒等**，于是通过。而"这行绑了什么"在旧行上恰好是一个没有答案的问题。
+    //
+    //   > 一个"老的审批行没有哈希，那就跳过哈希校验"的回退，
+    //   > 与一个"任何审批都放行"的回退，是同一个东西。
+    const verdict = verifyBinding({ row, operation, nowMs: Date.now() })
+    if (!verdict.ok) {
+      // 哪些拒绝该**大声报错**、哪些该**继续走策略判定**，是一个有意的划分：
+      //
+      //   大声报错（下面的表）：调用方**声称**自己持有一次对这次调用的批准，
+      //     而那个声称不成立。静默落回策略判定会把"你拿的这张票不对"伪装成
+      //     "这次需要新的批准"，于是没有人会去看那张票为什么不对。
+      //
+      //   继续走策略（NOT_APPROVED / ALREADY_CONSUMED）：调用方只是**提起**了
+      //     一个请求，而这次调用本来就还没被批准（或那次一次性批准已经用掉了）。
+      //     落回策略判定会正常产生一条新的待批准请求——这正是"一次性"该有的样子。
+      //     把 ALREADY_CONSUMED 也改成抛错，会让"用掉之后再发起"变成一个错误，
+      //     而它其实是一次**正常的新申请**。
+      //
+      //   找不到行：同理，落回策略。
+      const LOUD = new Set([
+        BINDING_CODES.OPERATION_CHANGED,
+        BINDING_CODES.UNBOUND,
+        BINDING_CODES.EXPIRED,
+      ])
+      if (LOUD.has(verdict.code)) {
+        audit(operation.actor, operation.scope, 'permission:binding-rejected', requestId, {
+          action: operation.action, target: operation.target, code: verdict.code,
+          bindingHash: verdict.bindingHash, actualHash: verdict.actualHash ?? null,
+        })
+        throw new Error(`permission operation mismatch（${verdict.code}：${verdict.userText}）`)
+      }
+    }
+    if (verdict.ok) {
+      // PRT-608：CAS 单独导出成 `consumeBinding`，这样"没抢到"那条路径可以被
+      // 真的走到。一个只能靠并发时序才能触发的分支，与一个不存在的分支，
+      // 在"它到底拦不拦得住"上是同一个东西。
+      const taken = consume({
+        db, requestId, bindingHash: verdict.bindingHash, consumedAtText: now(),
+      })
+      if (taken.outcome === CONSUME_OUTCOMES.CONSUMED) {
+        audit(operation.actor, operation.scope, 'permission:consume', requestId, {
+          action: operation.action, target: operation.target, bindingHash: verdict.bindingHash,
+        })
+        return { allowed: true, decision: 'allow', status: 'consumed', requestId, bindingHash: verdict.bindingHash, operation }
+      }
+      // CAS 没成功：这一行在我们校验之后被别人消费掉了（或被换成了另一条绑定）。
+      // **不能**回退到"再查一次然后放行"——那就是一次批准放行两次。
+      audit(operation.actor, operation.scope, 'permission:binding-lost-race', requestId, {
+        action: operation.action, target: operation.target, bindingHash: verdict.bindingHash,
+      })
+      throw new Error(`permission operation mismatch（${BINDING_CODES.ALREADY_CONSUMED}：这条审批已被并发消费）`)
     }
   }
   const result = evaluatePermission(operation, permissionRows(), { now: Date.now() })
   if (result.status !== 'pending') return result
-  // PRT-611：去重必须用**与消费时同一个**身份判定。
+  // PRT-611/608：去重必须用**与消费时同一个**身份判定。
   //
   // 原来这里按 scope/actor/action/target 四个字段去重，而消费时按规范化后的
   // **全部**字段比对。两条不同粒度的判断放在一起，表现是：一次 `taskId` 不同的
@@ -1618,30 +1713,54 @@ export function checkPermission(input = {}) {
   //
   //   > 一个用四个字段去重的待批准表，与一个用全部字段去绑定的消费检查，
   //   > 是同一个东西——只不过它表现出来是"我明明批了，它说操作不匹配"。
+  //
+  // PRT-608 之后这一步就是**直接比哈希**：写进那一行的哈希是我们自己算的，
+  // 不需要再解析 JSON、再跑一遍规范化。
+  const wantedHash = computeBindingHash(operation)
   const existing = db
-    .prepare("SELECT * FROM permission_requests WHERE scope=? AND actor=? AND action=? AND target=? AND status='pending'")
-    .all(operation.scope, operation.actor, operation.action, operation.target)
-    .find((row) => {
-      try {
-        return sameOperation(JSON.parse(row.operation), operation)
-      } catch {
-        // 存进去的 operation 已经解析不出/规范化不了 → **不算同一个**。
-        // 认下它会让一次新的调用继承一条来路不明的待批准请求。
-        return false
-      }
-    })
-  if (existing) return { ...result, requestId: existing.requestId }
+    .prepare(`SELECT * FROM permission_requests WHERE scope=? AND actor=? AND action=? AND target=? AND status='pending' AND ${BINDING_HASH_COLUMN}=?`)
+    .get(operation.scope, operation.actor, operation.action, operation.target, wantedHash)
+  if (existing) return { ...result, requestId: existing.requestId, bindingHash: wantedHash }
   const id = `perm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-  withTx(() => db.prepare(`INSERT INTO permission_requests (requestId,scope,actor,action,target,taskId,operation,mode,status,createdAt,expiresAt) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
-    .run(id, operation.scope, operation.actor, operation.action, operation.target, operation.taskId, JSON.stringify(operation), result.mode, 'pending', now(), Date.now() + 15 * 60 * 1000))
-  audit(operation.actor, operation.scope, 'permission:request', id, { action: operation.action, target: operation.target, mode: result.mode })
-  return { ...result, requestId: id }
+  // PRT-608：**批准的那一刻**把哈希算出来并写进这一行。之后一切都以那一行为准。
+  //
+  //   > 一个"每次验证时按当前规则重算身份"的审批绑定，
+  //   > 与一个"审批的含义由你读它的那一刻的代码决定"的绑定，
+  //   > 是同一个东西——只不过前者的失效方式是**静默重绑**。
+  withTx(() => db.prepare(`INSERT INTO permission_requests (requestId,scope,actor,action,target,taskId,operation,mode,status,createdAt,expiresAt,${BINDING_HASH_COLUMN}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(id, operation.scope, operation.actor, operation.action, operation.target, operation.taskId, JSON.stringify(operation), result.mode, 'pending', now(), Date.now() + 15 * 60 * 1000, wantedHash))
+  audit(operation.actor, operation.scope, 'permission:request', id, { action: operation.action, target: operation.target, mode: result.mode, bindingHash: wantedHash })
+  return { ...result, requestId: id, bindingHash: wantedHash }
+}
+
+/** 审批行的对外视图。**不把哈希藏起来**——UI 与审计要看到同一个字符串。 */
+function permissionRequestView(row) {
+  if (row === null || row === undefined) return null
+  const operation = operationOfRow(row)
+  return {
+    ...row,
+    operation,
+    bindingHash: isBoundHash(row[BINDING_HASH_COLUMN]) ? row[BINDING_HASH_COLUMN].trim() : null,
+    expiresAtMs: Number(row.expiresAt),
+  }
 }
 
 export function listPermissionInbox(scope = null) {
   const rows = scope ? db.prepare('SELECT * FROM permission_requests WHERE scope=? ORDER BY createdAt DESC').all(scope) : db.prepare('SELECT * FROM permission_requests ORDER BY createdAt DESC').all()
   const current = Date.now()
-  return rows.map(row => ({ ...row, operation: JSON.parse(row.operation), expired: row.status === 'pending' && Number(row.expiresAt) <= current }))
+  // PRT-608：`expired` 曾经是一个**算出来的**字段，而 `status` 仍然是 `pending`
+  // ——同一件事有两个说法，而两个说法会在某个时刻不一致。
+  // 现在过期是**先写库再返回**：`status` 变成 `expired`，视图里不再有第二个真相。
+  const out = []
+  for (const row of rows) {
+    if (row.status === 'pending' && Number(row.expiresAt) <= current) {
+      db.prepare("UPDATE permission_requests SET status='expired' WHERE requestId=? AND status='pending'").run(row.requestId)
+      out.push(permissionRequestView({ ...row, status: 'expired' }))
+      continue
+    }
+    out.push(permissionRequestView(row))
+  }
+  return out
 }
 
 export function decidePermission({ requestId, decision, by = 'general', reason = '' } = {}) {
@@ -1650,16 +1769,31 @@ export function decidePermission({ requestId, decision, by = 'general', reason =
   if (!id || !['approve', 'deny'].includes(decision)) throw new Error('审批参数非法')
   const row = db.prepare('SELECT * FROM permission_requests WHERE requestId=?').get(id)
   if (!row) throw new Error('审批请求不存在')
-  if (row.status !== 'pending') return { ...row, operation: JSON.parse(row.operation) }
+  if (row.status !== 'pending') return permissionRequestView(row)
   if (Number(row.expiresAt) <= Date.now()) {
     db.prepare("UPDATE permission_requests SET status='expired' WHERE requestId=? AND status='pending'").run(id)
-    return { ...row, status: 'expired', operation: JSON.parse(row.operation) }
+    audit(by, row.scope, 'permission:expired', id, { action: row.action, target: row.target })
+    return permissionRequestView({ ...row, status: 'expired' })
+  }
+  // PRT-608：**拒绝批准一条没有绑定哈希的请求**。
+  //
+  // 如果放它过去，这一行会变成 `approved` 且哈希仍为 NULL，于是用户在界面上
+  // 看到"已批准"，执行时却拿到 `approval-unbound`。用户会以为是执行侧坏了。
+  // 一条绑不了东西的审批，不该被允许变成"已批准"——**批准这个动作本身就该失败**，
+  // 而且要告诉用户怎么办。
+  if (!isBoundHash(row[BINDING_HASH_COLUMN])) {
+    throw new Error('这条审批请求没有绑定哈希（旧版本创建），无法批准——请让发起方重新发起一次')
   }
   const status = decision === 'approve' ? 'approved' : 'denied'
   withTx(() => db.prepare('UPDATE permission_requests SET status=?, decidedBy=?, reason=?, decidedAt=? WHERE requestId=? AND status=\'pending\'').run(status, by, String(reason), now(), id))
   const updated = db.prepare('SELECT * FROM permission_requests WHERE requestId=?').get(id)
-  audit(by, row.scope, `permission:${status}`, id, { action: row.action, target: row.target, reason: String(reason) })
-  return { ...updated, operation: JSON.parse(updated.operation) }
+  // 审计里带上哈希：值班的人要能从日志直接看出"批的是哪一次调用"，
+  // 而不是去猜两个 action/target 相同、metadata 不同的请求是哪一个。
+  audit(by, row.scope, `permission:${status}`, id, {
+    action: row.action, target: row.target, reason: String(reason),
+    bindingHash: row[BINDING_HASH_COLUMN].trim(),
+  })
+  return permissionRequestView(updated)
 }
 
 function touchMember(member, scope, kind, modelText) {

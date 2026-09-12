@@ -304,6 +304,31 @@ async function stageTest() {
       files: ['team-hub/permission-engine.canonical.test.mjs'],
       cwd: ROOT,
     },
+    {
+      // PRT-608：审批绑定到**写下来的**规范化操作哈希。
+      //
+      // PRT-611 已经把"两次调用是不是同一个操作"换成了规范化指纹。但如果审批行里
+      // 只存操作 JSON、验证时再算一遍指纹，那么**审批的身份是由今天这份代码定义的**。
+      // 后果很具体：有人往 `OPERATION_KEYS` 加了一个字段（这正是 PRT-611 的加载时
+      // 自检在鼓励的事），所有还在等待的审批会在一夜之间悄悄改变含义——昨天批准的
+      // 那次调用今天可能对不上，更糟的是反过来。而整个过程没有一条日志，
+      // 因为每一次验证都在"用当前规则算一遍"。
+      //
+      //   > 一个"每次验证时按当前规则重算身份"的审批绑定，
+      //   > 与一个"审批的含义由你读它的那一刻的代码决定"的绑定，
+      //   > 是同一个东西——只不过前者的失效方式是**静默重绑**。
+      //
+      // 所以批准的那一刻算出哈希、写进那一行。另一半是迁移遗留的行（哈希为 NULL）：
+      //
+      //   > 一个"老的审批行没有哈希，那就跳过哈希校验"的回退，
+      //   > 与一个"任何审批都放行"的回退，是同一个东西。
+      //
+      // NULL 哈希是一个**独立的拒绝码**，而不是"不检查"；而且**有意不回填**——
+      // 回填等于"用今天的规则替一批旧行算出它们的身份"，那正是上面那条纪律要防的事。
+      label: 'approval-binding（PRT-608：审批绑定到写下来的哈希，没有哈希就拒绝）',
+      files: ['team-hub/approval-binding.test.mjs'],
+      cwd: ROOT,
+    },
     { label: 'calendar（日程日历契约）', files: ['team-hub/calendar.test.mjs'], cwd: ROOT },
     { label: 'calendar-ui（P2-5 日历前端纯函数：周视图/重复文案/关联跳转/表单校验）', files: ['workbench/scripts/calendar-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'chat-ui（P2-6 对话前端纯函数：健康判定/AI 三态/合并/断线补齐）', files: ['workbench/scripts/chat-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },

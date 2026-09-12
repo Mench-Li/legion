@@ -2176,7 +2176,7 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：124 套件 / 3160 用例，`--only test` 整体 PASS** —— 2026-09-12 实测（设 `DSH_CHECKOUT`）
+**当前基线：125 套件 / 3199 用例，`--only test` 整体 PASS** —— 2026-09-12 实测（设 `DSH_CHECKOUT`）
 
 （**本批新增**：`diagnostic-package`（**29 例**，PRT-710 脱敏诊断包：**结构性排除优先于文本过滤**——密钥库/凭证/业务库正文
 **根本不进包**且**从未被读过**；「没包含」与「被排除」可区分；**0 次脱敏命中 ≠ 包是干净的**；判定用**落盘后读回来的字节**，
@@ -2368,6 +2368,7 @@ P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-
 | | `docs/superpowers/prt/prt-009-execution-evidence.json` | 生产空间 `software` 的旧路径执行证据：状态序列 / 耗时分布 / 人工介入 / **可用性空窗**。数值全部来自 `audit` 表只读提取 |
 | | `docs/superpowers/prt/prt-009-gf001-controlled-evidence.json` | 受控空间 `gf001` 的同一组指标（**旧路径**，含两次中止轮次），与上一行**不可互相冒充**——两者是不同总体 |
 | | `docs/superpowers/prt/PRT-001-topology-inventory.md`、`prt-001-003-inventory.json` | PRT-001/003 拓扑与配置密钥清单。**4 个 path 字段默认落在安装目录内**（越界写入，PRT-505/257 输入）；仓库内明文凭证 0 处 |
+| | `docs/superpowers/prt/PRT-601-tool-risk-levels.md` | PRT-601 风险等级：为什么一个允许工具**把自己的等级填低**的登记表与"所有工具都是低风险"是同一个东西；两层声明、**只能往上抬**的下限；未知工具默认最严；以及自检两次"瞄不准"——断言被指向了信息上为空的路径 |
 | | `docs/superpowers/prt/PRT-304-claim-policy.md` | PRT-304 认领策略：为什么**两条候选路径各写一遍资格条件，与「被拦下的任务照样被领走」是同一个东西**；自检为什么会「只对当前恰好正确的那份输入作答」，以及一个**能被随手写成 `true` 的通过标记**为什么等于没有自检 |
 | | `docs/superpowers/prt/PRT-708-system-tray.md` | PRT-708 系统托盘：为什么**把图标藏起来、进程还在跑，与根本没有退出按钮是同一个东西**；菜单的可用性为什么必须来自**观测**而不是「我记得我启动过了」 |
 | | `docs/superpowers/prt/PRT-707-first-run-wizard.md` | PRT-707 首次运行向导：为什么**「每一步都返回成功」不等于「产品可用」**——`start()` 说的是「我发出了 spawn」，写配置说的是「我写了一条记录」；`degraded` 为什么不算通过；「大概配过了」为什么会**让用户无路可走** |

@@ -97,3 +97,67 @@ export {
 } from './repair.mjs'
 
 export { PATCH_YAML_PATH, renderPatchYaml } from './render.mjs'
+
+// PRT-607：审批策略与无人值守判定。
+//
+// 补上一次遗漏：本文件自称"下游一律从这里取符号，不直接深入子模块"，
+// 而 PRT-607 交付时没有把它加进来——于是"唯一的出口"少了一个模块，
+// 下游要么绕过去直接 import，要么以为它不存在。
+//
+//   > 一个「声称是唯一出口、但少了一个模块」的出口，
+//   > 与一条写着"请勿直接 import 子模块"的注释，是同一个东西——
+//   > 只不过后者看起来像一条已经生效的约定。
+export {
+  APPROVAL_DECISIONS,
+  APPROVAL_POLICIES,
+  APPROVAL_POLICY_CHECKED,
+  APPROVAL_POLICY_VERSION,
+  HUMAN_REQUIREMENTS,
+  POLICY_CODES,
+  SANDBOX_MODES,
+  applyApprovalOutcome,
+  approvalOutcomeSet,
+  assertKnobsFrozenDuringRun,
+  assertKnobsUnchanged,
+  assertLegionPresetsDoNotDowngradeSandbox,
+  assertNeverNeverAllows,
+  assertOnlyAllowedOnceGrants,
+  assertOutcomeCannotOverrideADenial,
+  assertPolicy,
+  assertPreset,
+  assertUnattendedHoldsRatherThanDenies,
+  assertUnknownInputsFailClosed,
+  decideApproval,
+} from './approval-policy.mjs'
+
+// PRT-612：Legion 权限语义 → DSH 强制面的**固定映射**（spec §6.6 line 445–454）。
+//
+// 与 `enforcement.mjs` 的分工：那边是**原语**（guard / pre-execute / answerer 各自怎么判），
+// 这边是**这张表**（五种模式分别落到哪几个点、由谁定案）。
+//
+// 它同时是 PRT-607 那个判定函数唯一的**生产调用方**：`mapPermissionMode` 把
+// "ask / allow-once 的结局"整体委托给 `decideApproval`，不自己再判一遍——
+//
+//   > 一个「在映射层自己再写一遍'无人值守怎么办'」的实现，
+//   > 与一个「两处对无人值守的判断迟早不一样」的实现，是同一个东西。
+//
+// 落点函数返回的 `answererInvoked` 是 spec line 452 那个"在 waterfall **前**拒绝"
+// 的落地：只有判定结果是 `ask` 时才把请求送进 answerer。
+export {
+  DSH_ENFORCEMENT_POINTS,
+  ENFORCEMENT_MAPPING,
+  ENFORCEMENT_MAPPING_CHECKED,
+  ENFORCEMENT_MAPPING_VERSION,
+  LEGION_MODES,
+  LEGION_NON_MODE_SEMANTICS,
+  MAPPING_CODES,
+  MODE_ROUTING,
+  assertMappingConsistent,
+  authorizationKeys,
+  configPoints,
+  decisionPoints,
+  enforcementPathOf,
+  mapPermissionMode,
+  presetBinding,
+  routeForMode,
+} from './enforcement-mapping.mjs'

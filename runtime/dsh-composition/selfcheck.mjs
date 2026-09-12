@@ -25,6 +25,7 @@
 // ============================================================================
 
 import { DSH_COMPOSITION_PATCH_VERSION, reconcilePatchLayer } from './patch-layer.mjs'
+import { assertMappingConsistent } from './enforcement-mapping.mjs'
 
 /** 自检结论。`enforcement-effective` 之外的一切都不允许自动执行。 */
 export const SELFCHECK_STATES = Object.freeze({
@@ -164,6 +165,35 @@ export async function startupSelfCheck(inputs = {}) {
     reasons: sandboxResult.reasons,
   })
 
+  // ④ 权限语义到强制面的固定映射是否仍然自洽（PRT-612）
+  //
+  // 这一条与 ①②③ 问的是不同的事。①②③ 问的是"强制面**挂上并生效**了吗"，
+  // 这一条问的是"**挂上的那几个点，与 spec 说的那张映射表还是同一回事吗**"。
+  // 两者可以同时为真而仍然出问题：补丁层完整生效、沙箱真的在管制，而映射表里
+  // `ask` 那一行被改成"pre-execute 直接放行"——三个点都绿，没有人会来报 bug。
+  //
+  //   > 一个「检查强制面挂上了没有」的启动自检，
+  //   > 与一个「检查挂上的强制面是不是声明的那几个」的启动自检，不是同一个东西。
+  //
+  // `probeSandbox` 必须在这里注入：`selfcheck.mjs` 是 import
+  // `enforcement-mapping.mjs` 的那一侧，反向 import 会成环。**注入而不是跳过**——
+  // 模块自己的装载期自检会把这一条记进 `unresolvedPrimitives`，到这一行才补上，
+  // 于是"全查过"这句话在两个调用点合起来才成立。
+  const mapping = assertMappingConsistent({ primitives: { 'selfcheck.mjs': { probeSandbox } } })
+  checks.push({
+    name: 'enforcement-mapping',
+    ok: mapping.ok && mapping.unresolvedPrimitives.length === 0,
+    detail: mapping.ok
+      ? `映射 v${mapping.version} 自洽：${mapping.routedModes.length} 个模式、` +
+        `${mapping.decisionPoints.length} 个决定来源、${mapping.mappingLines.length} 行 spec 对照`
+      : `映射自洽性检查未通过（${mapping.problems.length} 项）`,
+    reasons: [
+      ...mapping.problems.map((p) => `${p.code}: ${p.message}`),
+      // 还有没解析到的原语 ⇒ 这一条**没查全**，不能算通过。
+      ...mapping.unresolvedPrimitives.map((u) => `原语未验证：${u.point} → ${u.module} 的 ${u.name}（${u.why}）`),
+    ],
+  })
+
   const failed = checks.filter((c) => !c.ok)
   return {
     state: failed.length === 0 ? SELFCHECK_STATES.effective : SELFCHECK_STATES.incompatible,
@@ -174,5 +204,8 @@ export async function startupSelfCheck(inputs = {}) {
     checks,
     reasons: failed.flatMap((c) => c.reasons.map((r) => `${c.name}: ${r}`)),
     sandbox: sandboxResult,
+    // 第 ④ 项的完整结论（含它**没查到**的原语）——只给一个是/否，
+    // 调用方就没法判断"通过了"与"没查全"的区别。
+    mapping,
   }
 }

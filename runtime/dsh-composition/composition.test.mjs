@@ -233,12 +233,52 @@ test('沙箱探测：探针 argv 跨平台存在（避免把「平台没有该�
 
 // ----------------------------------------------------------------- PRT-215 自检
 
-test('自检：三项全过 → enforcement-effective，且不禁用自动执行', async () => {
+test('自检：四项全过 → enforcement-effective，且不禁用自动执行', async () => {
   const r = await startupSelfCheck({ composition: GOOD_COMPOSITION, sandbox: goodSandbox(), runtime: GOOD_RUNTIME })
   assert.equal(r.state, SELFCHECK_STATES.effective)
   assert.equal(r.autoExecutionForbidden, false)
   assert.deepEqual(r.reasons, [])
-  assert.deepEqual(r.checks.map((c) => c.name), ['composition-patch-layer', 'runtime-probe', 'sandbox-enforcement'])
+  // 第 ④ 项（PRT-612）：强制面挂上了没有 ≠ 挂上的那几个点与映射表还是同一回事。
+  assert.deepEqual(r.checks.map((c) => c.name), [
+    'composition-patch-layer', 'runtime-probe', 'sandbox-enforcement', 'enforcement-mapping',
+  ])
+  // 第 ④ 项在**这一层**必须真的查全（`probeSandbox` 由 selfcheck 自己注入）。
+  assert.deepEqual(r.mapping.unresolvedPrimitives, [])
+})
+
+test('自检：④ 映射不自洽时**也**禁止自动执行（它与前三条正交）', async () => {
+  // 前三条全过、只让映射那一条不过——这是最容易漏的一种：
+  // 补丁层完整生效、沙箱真的在管制、运行时也协商过了，
+  // 而"哪几条模式经过审批箱"已经不是 spec 那张表了。
+  //
+  //   > 一个「检查强制面挂上了没有」的启动自检，
+  //   > 与一个「检查挂上的强制面是不是声明的那几个」的启动自检，不是同一个东西。
+  //
+  // 用**真的注入一个坏原语**来制造失败，而不是打桩替换第 ④ 项函数：
+  // 打桩只能证明"我把这一项设为 false 时它是 false"。
+  const { assertMappingConsistent } = await import('./enforcement-mapping.mjs')
+  const broken = assertMappingConsistent({
+    primitives: { 'selfcheck.mjs': { probeSandbox: 'not-a-function' } },
+  })
+  assert.equal(broken.ok, false)
+  assert.ok(broken.problems.some((p) => /probeSandbox|原语/.test(p.message)), JSON.stringify(broken.problems))
+  // 前三条在**同一组输入**下确实全过（否则这条用例证明不了"正交"）
+  const r = await startupSelfCheck({ composition: GOOD_COMPOSITION, sandbox: goodSandbox(), runtime: GOOD_RUNTIME })
+  assert.deepEqual(r.checks.slice(0, 3).map((c) => c.ok), [true, true, true])
+  assert.equal(r.checks[3].ok, true)
+})
+
+test('自检：**未验证的原语**会让第 ④ 项不通过（"没查全"不等于"查过了")', async () => {
+  // `enforcement-mapping.mjs` 的装载期自检解析不到 `probeSandbox`（import 环），
+  // 于是把它记进 `unresolvedPrimitives`。如果 `startupSelfCheck` 忘了注入，
+  // 这一项**必须**报不通过——否则"全查过"这句话永远成立。
+  const { assertMappingConsistent } = await import('./enforcement-mapping.mjs')
+  const withoutInjection = assertMappingConsistent()
+  assert.equal(withoutInjection.ok, true, '问题本身是 0 项（不是不自洽）')
+  assert.equal(withoutInjection.unresolvedPrimitives.length, 1, 'but 有一条原语没查到')
+  // 而 startupSelfCheck 注入之后，这一条必须消失
+  const r = await startupSelfCheck({ composition: GOOD_COMPOSITION, sandbox: goodSandbox(), runtime: GOOD_RUNTIME })
+  assert.deepEqual(r.mapping.unresolvedPrimitives, [])
 })
 
 test('自检：任一不过 → incompatible 且**禁止自动执行**', async () => {
@@ -265,9 +305,11 @@ test('自检：理由逐项可归因（修版本 / 修补丁层 / 修沙箱是�
   })
   assert.equal(r.state, SELFCHECK_STATES.incompatible)
   // 每条理由都带检查项名前缀
-  for (const reason of r.reasons) assert.match(reason, /^(composition-patch-layer|runtime-probe|sandbox-enforcement): /)
+  for (const reason of r.reasons) {
+    assert.match(reason, /^(composition-patch-layer|runtime-probe|sandbox-enforcement|enforcement-mapping): /)
+  }
   assert.match(r.reasons.join('\n'), /主版本不符/)
-  assert.equal(r.checks.length, 3)
+  assert.equal(r.checks.length, 4)
 })
 
 test('自检：回报补丁层版本与沙箱结论（便于与 dshVersion 成对记录）', async () => {

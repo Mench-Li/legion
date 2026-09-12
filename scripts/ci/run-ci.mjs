@@ -468,6 +468,34 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-612：Legion 权限语义 → DSH 强制面的**固定映射**（spec §6.6 line 445–454）。
+      //
+      // 两组文件、两个方向：
+      //   · runtime 侧查"表本身自洽"（决定来源恰等于审计口径、config 点不在里面、
+      //     补丁行与原语真的存在、未知模式不兜底、`allow-once` 必须经过审批箱）；
+      //   · team-hub 侧查"跨层那份声明与引擎真正接受的那五个是不是同一张表"——
+      //     映射模块不能 import permission-engine（分层方向），所以它**声明**了一份，
+      //     而声明的东西不会自己保持一致。
+      //
+      //     > 一个「本模块自己声明一份模式表」的实现，
+      //     > 与一个「两份表迟早不一样」的实现，是同一个东西——
+      //     > 只不过前者在任何**单侧**的用例里都是绿的。
+      //
+      // ★ 本批最要紧的一条：`mapPermissionMode` 是 PRT-607 那个判定函数唯一的**生产
+      // 调用方**，且它把"无人值守怎么办"**整体委托**给它，不自己再判一遍——
+      // 否则就是"两处对无人值守的判断迟早不一样"。
+      //
+      // ★ 第二条：spec line 452 那个"在 waterfall **前**拒绝"字面落成
+      // `answererInvoked`——只有判定结果是 `ask` 时才把请求送进 answerer。
+      // 无人值守时仍然送进去，等于"去问一个不在场的人、然后一直等下去"。
+      label: 'enforcement-mapping（PRT-612：权限语义到强制面的固定映射）',
+      files: [
+        'runtime/dsh-composition/enforcement-mapping.test.mjs',
+        'team-hub/enforcement-mapping-binding.test.mjs',
+      ],
+      cwd: ROOT,
+    },
+    {
       // PRT-606：区分外部 API 读取与写入权限（spec line 928、§6.6 line 465/466）。
       //
       // 本模块要防的不是"权限表写错了"，而是**一串"看起来是读"的东西**：

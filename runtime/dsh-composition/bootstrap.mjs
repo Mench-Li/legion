@@ -99,6 +99,16 @@ export const REPAIR_ACTIONS = Object.freeze({
     why: '`partial` 的字面意思是「存在不被管制的路径」。把 partial 当可用，' +
       '等于在一个已知有漏洞的沙箱上宣称「已限制」',
   }),
+  'enforcement-mapping': Object.freeze({
+    action: 'fix-enforcement-mapping',
+    label: '修好权限语义到强制面的映射',
+    why: '映射不自洽时，"哪几条模式经过审批箱、由谁定案"就不是你以为的那张表了。' +
+      '它与补丁层、沙箱那两项**正交**：补丁层完整生效、沙箱真的在管制，' +
+      '而映射里 `ask` 那一行被改成"pre-execute 直接放行"——三个点都绿，没有人会来报 bug。' +
+      '先看 reasons 里的码：`enforcement-mapping-source-drift` 是决定来源与审计口径不一致，' +
+      '`enforcement-mapping-patch-row-missing` 是映射点名了一个没被挂载的行，' +
+      '`enforcement-mapping-primitive-missing` 是它点名的函数不存在',
+  }),
   'composition-observation': Object.freeze({
     action: 'connect-composition-observer',
     label: '接上组合树观察器',

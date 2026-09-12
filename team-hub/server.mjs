@@ -241,6 +241,55 @@ db.exec('PRAGMA busy_timeout = 5000')
 enableWal()
 
 /**
+ * PRT-607 审批箱：为一次进入 `AwaitingApproval` 的迁移**建出一条真的待批准请求**。
+ *
+ * 它是 `createRunStore` 的 `createApproval` 端口，会在**运行仓储的事务里**被调用
+ * （同一个连接、同一个 `BEGIN IMMEDIATE`）。因此这里**不能**再用本文件的 `withTx`
+ * ——那会把 `BEGIN IMMEDIATE` 发第二次（两个 `withTx` 各记各的账），SQLite 直接报
+ * "cannot start a transaction within a transaction"。与 `createTaskInTx` 是同一条纪律。
+ *
+ * 绑定用的操作是**合成**的：这次等待往往不是一次工具调用，而是"结果等着人工批准"，
+ * 没有调用方给的 operation。`target` 取 attemptId，让每条 Attempt 的待批准请求彼此
+ * 独立——用 taskId 会让重试后的新尝试复用上一条的审批，而那正是 PRT-615 反复强调的
+ * "审批算错了依据"。
+ *
+ * `atMs` 用运行仓储给的权威时间（不是 `Date.now()`）：TTL 的截止时刻必须与
+ * `run_attempts.updated_at_ms` 同源，否则"审批什么时候到期"会有两个说法。
+ */
+function createAwaitingApprovalInTx({ attemptId, taskId = null, scope = null, returnTo = null, atMs = null, context = {} } = {}) {
+  const operation = normalizeOperation({
+    scope: scope ?? 'default',
+    actor: 'system:awaiting-approval',
+    action: 'runtime:delivery-approval',
+    target: String(attemptId),
+    taskId: taskId ?? null,
+    unattended: false,
+    metadata: { returnTo: returnTo ?? null, reason: context?.detail ?? null },
+  })
+  // 幂等：这条 Attempt 已经有一条开放（pending/approved）的审批行时复用它，不再插第二条。
+  // 同一个 Attempt 短时间内两次进入 AwaitingApproval（重放 / 重扫）不该产生两条待办
+  // ——那会让人批准其中一条，而另一条永远挂着，Attempt 也就永远等不到收口。
+  const open = db
+    .prepare(`SELECT requestId, ${BINDING_HASH_COLUMN} AS h FROM permission_requests WHERE ${APPROVAL_ATTEMPT_COLUMN}=? AND status IN ('pending','approved') ORDER BY createdAt DESC`)
+    .get(attemptId)
+  if (open !== undefined && open !== null) {
+    return Object.freeze({ requestId: open.requestId, bindingHash: open.h, reused: true })
+  }
+  const bindingHash = computeBindingHash(operation)
+  const boundMs = Number.isFinite(Number(atMs)) ? Number(atMs) : Date.now()
+  const requestId = `perm-await-${attemptId}`
+  db.prepare(
+    `INSERT INTO permission_requests (requestId,scope,actor,action,target,taskId,operation,mode,status,createdAt,expiresAt,${BINDING_HASH_COLUMN},${APPROVAL_ATTEMPT_COLUMN})
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  ).run(
+    requestId, operation.scope, operation.actor, operation.action, operation.target,
+    operation.taskId, JSON.stringify(operation), 'ask', 'pending',
+    new Date(boundMs).toISOString(), boundMs + APPROVAL_TTL_MS, bindingHash, attemptId,
+  )
+  return Object.freeze({ requestId, bindingHash, reused: false })
+}
+
+/**
  * 运行实体仓储（PRT-302/303/313）。
  *
  * 与上面那些**看板**写操作的关键差别：这里的每一次写入都带 `leaseEpoch`，
@@ -268,6 +317,11 @@ const runStore = createRunStore({
   // 再开一个会把 `BEGIN IMMEDIATE` 发第二次（两个 `withTx` 各记各的账）。
   createTask: (payload) => createTaskInTx(payload),
   readPipeline: (scope) => readPipeline(scope).stages,
+  // PRT-607 审批箱：进入 `AwaitingApproval` 必须在同一次事务里建出一条待批准请求，
+  // 否则一条任务会停在"等待审批"而**没有任何东西可批**——界面上它是一个待办，
+  // 而人会一直等下去。`permission_requests` 的 schema 属于本文件 / approval-binding.mjs，
+  // 所以那一行由这里注入的端口写（运行仓储不认识它）。
+  createApproval: (payload) => createAwaitingApprovalInTx(payload),
 })
 
 /**
@@ -1005,9 +1059,27 @@ db.exec(`
   )
 `)
 db.exec('CREATE INDEX IF NOT EXISTS idx_calendar_scope_start ON calendar_events (scope, start, id)')
-// P2-5 增量列（幂等，零迁移脚本）：老库自动补列；已存在则 ALTER 抛错被吞。
-for (const col of ['taskId TEXT', 'goalId TEXT', 'recurrence TEXT']) {
-  try { db.exec('ALTER TABLE calendar_events ADD COLUMN ' + col) } catch { /* 列已存在 */ }
+// P2-5 增量列（幂等，零迁移脚本）：老库自动补列。
+//
+// **不能**写成 `try { db.exec('ALTER TABLE … ADD COLUMN …') } catch { /* 列已存在 */ }`。
+// 那个形状把两件完全不同的事吞成同一个结果：
+//
+//   · `duplicate column name` —— 列已经有了，**正常**；
+//   · 磁盘满 / 表被锁 / 库只读 / SQL 写错 —— 列**真的没加上**，而这里一声不响。
+//
+// 后者的后果不在启动期出现，而在几周后某个不相干的查询报 `no such column: taskId`：
+// 那时没人会想到"几个月前的一次启动时那条 ALTER 失败了"。
+//
+//   > 一个「把'加列失败'吞成'已经有了'」的迁移，
+//   > 与一个「某个查询在几周后报 no such column」的迁移，是同一个东西——
+//   > 只不过前者在启动日志里看起来一切正常。
+//
+// `ensureColumn`（本文件 655 行那个包装）在 `BEGIN IMMEDIATE` 内**重读**列名，
+// 只在"重读确认列已存在"时才把异常当作成功，其它异常照抛
+// （`schema-util.mjs` 头注释有完整理由；本文件其余 33 处补列早就走它了，
+// 这里是漏掉的一处）。
+for (const [name, ddl] of [['taskId', 'TEXT'], ['goalId', 'TEXT'], ['recurrence', 'TEXT']]) {
+  ensureColumn('calendar_events', name, ddl)
 }
 db.exec('CREATE INDEX IF NOT EXISTS idx_calendar_task ON calendar_events (taskId, start)')
 db.exec('CREATE INDEX IF NOT EXISTS idx_calendar_goal ON calendar_events (goalId, start)')

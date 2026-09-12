@@ -45,6 +45,7 @@
 // ============================================================================
 
 import { OPERATION_DOMAIN, operationFingerprint } from './permission-engine.mjs'
+import { ensureColumn } from './schema-util.mjs'
 
 /** 绑定记录的版本。它与 F-02 的操作 schema 版本**不是**一回事。 */
 export const APPROVAL_BINDING_VERSION = 'legion/approval-binding@1'
@@ -86,8 +87,28 @@ const APPROVAL_BASE_COLUMNS = Object.freeze([
  * 两份（生产一份、夹具一份），夹具手抄的列名会在增删时**静默**与真实结构脱节
  * ——插入报错还算好的，列名恰好还兼容时才真正难查。
  *
- * 每条 `ALTER` 都先查 `PRAGMA table_info` 再动手（幂等）：`try { ALTER } catch {}`
- * 会把"加列失败"（磁盘满、表被锁）与"列已存在"吞成同一个结果，于是真的失败时没有迹象。
+ * ## 补列必须走 `ensureColumn`，不能自己「先 PRAGMA 查、再 ALTER」
+ *
+ * 本模块最初是自己写这两行的：读一次 `PRAGMA table_info`，不在清单里就 `ALTER`。
+ * 单进程下它是对的，而本仓库的部署形态是**两个进程同时打开同一个库**
+ * （8787 独立进程 + 3080 宿主 v2 外壳），两者启动时并发跑同一批迁移：
+ *
+ *     进程 A: PRAGMA → 没有 bindingHash ─┐
+ *     进程 B: PRAGMA → 没有 bindingHash ─┤ 两边都读到"没有"
+ *     进程 A: ALTER  → 成功             │
+ *     进程 B: ALTER  → duplicate column ┘ 在**模块加载期**崩溃退出
+ *
+ * 而崩溃的表现与迁移毫无关系：宿主侧是 `/team-hub` 路由缺失 + 一条加载失败日志。
+ * 实测复现约 1/8 概率（`scripts/ci/dual-write-smoke.test.mjs` 的迁移竞态用例，
+ * 它正是为这条竞态立的回归锚点）。
+ *
+ *   > 一个「复制粘贴过来的、单进程下正确的」迁移写法，
+ *   > 与一个「两个进程同时启动时其中一个在加载期就死了」的写法，是同一个东西——
+ *   > 只不过前者在代码审查里看起来是幂等的。
+ *
+ * `ensureColumn`（`schema-util.mjs`）把「检查 + 变更」放进 `BEGIN IMMEDIATE`：
+ * 取到写锁后**重读**列名再决定是否 ALTER，于是第二个进程会看到列已经在了。
+ * 这也是本次修复前 `server.mjs` 里那 25 处调用点的统一做法——本模块是漏掉的一处。
  */
 export function ensureApprovalSchema(db) {
   if (db === null || typeof db !== 'object' || typeof db.exec !== 'function') {
@@ -112,9 +133,11 @@ export function ensureApprovalSchema(db) {
       consumedAt TEXT
     )
   `)
-  const cols = db.prepare(`PRAGMA table_info(${APPROVAL_TABLE})`).all().map((c) => c.name)
+  // 补列走 `ensureColumn`（`BEGIN IMMEDIATE` 内重读，跨进程原子）。
+  // 不要退回「自己读一次 PRAGMA 再 ALTER」——那是单进程下才正确的写法，
+  // 见函数头那段竞态复现。两列都在时它只做两次读、不开事务（启动期常见路径）。
   for (const name of [BINDING_HASH_COLUMN, APPROVAL_ATTEMPT_COLUMN]) {
-    if (!cols.includes(name)) db.exec(`ALTER TABLE ${APPROVAL_TABLE} ADD COLUMN ${name} TEXT`)
+    ensureColumn(db, APPROVAL_TABLE, name, 'TEXT')
   }
   db.exec(`CREATE INDEX IF NOT EXISTS idx_permission_requests_scope_status ON ${APPROVAL_TABLE} (scope, status, createdAt)`)
   // 到期扫描按 (status, expiresAt) 走。没有这条索引时扫描是**全表**，而它跑在每一次

@@ -10,11 +10,14 @@
 // ============================================================================
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { DatabaseSync } from 'node:sqlite'
 
 import {
+  APPROVAL_ATTEMPT_COLUMN,
   APPROVAL_BINDING_VERSION,
   APPROVAL_STATES,
   BINDING_CODES,
@@ -27,6 +30,7 @@ import {
   computeBindingHash,
   consumeBinding,
   createBindingRecord,
+  ensureApprovalSchema,
   isBoundHash,
   isTerminalApprovalState,
   operationOfRow,
@@ -449,6 +453,101 @@ test('⑤ ★★ 待办视图里带着绑定哈希（UI 与审计看到的是**�
   assert.equal(row.bindingHash, pending.bindingHash,
     '视图把绑定哈希藏起来了——UI 与审计看到的不再是同一个字符串')
   assert.equal(row.bindingHash, mod.db.prepare('SELECT * FROM permission_requests WHERE requestId=?').get(pending.requestId)[BINDING_HASH_COLUMN])
+})
+
+// ---------------------------------------------------------------- 迁移竞态（P1-1 回归）
+
+/**
+ * 一个**过时的 PRAGMA 视图**：模拟"另一个进程在我读完之后、我动手之前把列加上了"。
+ *
+ * 这是把一条概率性竞态变成**确定性**用例的办法。真实复现要同时启动两个 server
+ * 进程、撞上那几十毫秒的窗口（实测约 1/8，见 `scripts/ci/dual-write-smoke.test.mjs`
+ * 的迁移竞态用例）。这里让前 `staleReads` 次读取返回"还没有这两列"的**谎话**，
+ * 之后返回真实结构——那正是窗口里的视角。
+ *
+ *   > 一个「靠多跑几轮去撞」的竞态用例，
+ *   > 与一个「它红了也说不清是哪一次交错赢的」的竞态用例，是同一个东西。
+ *
+ * ★ 它能区分开两种实现：
+ *   · 旧的「读一次 PRAGMA、不在了就 ALTER」→ 拿到谎话 → ALTER → 撞上真实存在的列 →
+ *     `SQLITE_ERROR: duplicate column name: bindingHash`（生产上就是模块加载期崩溃）。
+ *   · 新的 `ensureColumn` → 进 `BEGIN IMMEDIATE` 之后**再读一次**（谎话已用完），
+ *     看到列已存在 → 不 ALTER。
+ */
+function stalePragmaDb(real, staleReads) {
+  let pragmaReads = 0
+  const hidden = [BINDING_HASH_COLUMN, APPROVAL_ATTEMPT_COLUMN]
+  return {
+    exec(sql) { return real.exec(sql) },
+    prepare(sql) {
+      if (/PRAGMA\s+table_info/i.test(sql)) {
+        pragmaReads++
+        if (pragmaReads <= staleReads) {
+          return { all: () => real.prepare(sql).all().filter((c) => !hidden.includes(c.name)) }
+        }
+      }
+      return real.prepare(sql)
+    },
+  }
+}
+
+test('⑨ ★★★ 补列在 BEGIN IMMEDIATE 内重读：并发启动不会 duplicate column', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'approval-race-'))
+  const file = join(dir, 'race.db')
+  const cols = (db) => db.prepare('PRAGMA table_info(permission_requests)').all().map((c) => c.name)
+  let real = null
+  let threw = null
+  let secondThrew = null
+  let before = null
+  let after = null
+  try {
+    real = new DatabaseSync(file)
+    // ① 先建出完整形状——此后真实表里两列都在
+    ensureApprovalSchema(real)
+    before = cols(real)
+    assert.ok(before.includes(BINDING_HASH_COLUMN), '夹具前提：bindingHash 已在真实表里')
+    assert.ok(before.includes(APPROVAL_ATTEMPT_COLUMN), '夹具前提：attempt_id 已在真实表里')
+
+    // ② 过时视图：第一次读到"没有这两列"——那个窗口的视角
+    const racing = stalePragmaDb(real, 1)
+    try { ensureApprovalSchema(racing) } catch (e) { threw = e }
+    after = cols(real)
+    // ③ 幂等：真实连接上再来一次也不该抛
+    try { ensureApprovalSchema(real) } catch (e) { secondThrew = e }
+  } finally {
+    // 连接必须在断言**之前**关掉、且清理失败不能盖住断言失败：
+    // Windows 上未关闭的句柄会让 rmSync 抛 EPERM，而那个 EPERM 会变成用例的失败原因，
+    // 于是红是红了、原因却指向临时目录——排查的人会去查清理，而不是去查迁移。
+    //
+    //   > 一个「清理失败盖住断言失败」的用例，
+    //   > 与一个「红得指向错误的地方」的用例，是同一个东西。
+    try { real?.close() } catch { /* 已关闭 */ }
+    try { rmSync(dir, { recursive: true, force: true, maxRetries: 4, retryDelay: 100 }) } catch { /* 留着也不影响断言 */ }
+  }
+
+  assert.equal(
+    threw, null,
+    '并发窗口里补列必须取到写锁后**重读**再动手，不能凭第一次读到的清单直接 ALTER；' +
+    `实际抛出：${threw?.message}`,
+  )
+  assert.equal(secondThrew, null, `幂等重跑不该抛：${secondThrew?.message}`)
+  assert.deepEqual(after, before, '补列不该改变真实结构')
+})
+
+test('⑨ ★★ 源码不变量：补列不许绕过 ensureColumn 自己写 ALTER', () => {
+  //   > 一个「靠调用方自觉的原子性」，
+  //   > 与一个「下次有人照抄那两行、于是又坏一次」的原子性，是同一个东西。
+  //
+  // 这条不变量抓的正是本批修掉的那个形状：**单进程下看起来幂等**的两行。
+  const here = dirname(fileURLToPath(import.meta.url))
+  const src = readFileSync(join(here, 'approval-binding.mjs'), 'utf8')
+  assert.match(src, /import \{[^}]*\bensureColumn\b[^}]*\} from '\.\/schema-util\.mjs'/)
+  assert.ok(src.includes('ensureColumn(db, APPROVAL_TABLE'), '补列必须走 ensureColumn')
+  // 本模块自己不该再有 exec 出去的 ALTER（注释里提到它是允许的，所以只查 exec）
+  assert.equal(
+    /db\.exec\(\s*[`'"][^`'"]*ALTER\s+TABLE/i.test(src), false,
+    'approval-binding.mjs 不应自己 db.exec ALTER TABLE——那就是竞态的写法',
+  )
 })
 
 test.after(() => { try { mod.db.close() } catch {} ; rmSync(root, { recursive: true, force: true }) })

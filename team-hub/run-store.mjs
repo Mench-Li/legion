@@ -97,6 +97,15 @@ export const RUN_ERRORS = Object.freeze({
   // 交接没有接线（缺 createTask / readPipeline）。**不降级**成"没有下一岗位"：
   // 那会让交接在静默中变成收口，任务链断在第一环而没人知道。
   HANDOFF_NOT_WIRED: 'HANDOFF_NOT_WIRED',
+  // PRT-607 审批箱：进入 `AwaitingApproval` 必须在**同一次事务**里建出一条待批准请求。
+  // 没有接线（`createApproval` 不是函数）时**大声失败**，不降级成"先进入等待、稍后再补"
+  // ——那正是本批要修的那个状态：一条停在 `AwaitingApproval` 而**没有任何东西可批**
+  // 的尝试，在界面上是一个待办，而人会一直等下去。
+  APPROVAL_NOT_WIRED: 'APPROVAL_NOT_WIRED',
+  // 端口被调用了，但那一行**并没有**落库（注入的实现静默返回 / 写错表 / 写错列）。
+  // 这是**后置条件**核验失败：把"端口被调用过"当成"审批行存在"，会让
+  // `requiresPersist: ['attempt','approval']` 这句声明在事件流里继续看起来像一句保证。
+  APPROVAL_NOT_CREATED: 'APPROVAL_NOT_CREATED',
 })
 
 /** 允许的人工处置决定。逐个列出，未登记的一律拒绝而不是猜一个默认值。 */
@@ -356,22 +365,24 @@ const EVIDENCE_CHECKS = Object.freeze({
   contextSnapshot: (db, attemptId) =>
     tableExists(db, 'run_context_snapshots') &&
     db.prepare('SELECT COUNT(*) AS n FROM run_context_snapshots WHERE attempt_id = ?').get(attemptId).n > 0,
-  // 「有一次可查的审批决定」——PRT-615 把它从"未登记"变成"已核验"。
+  // 「有一次可查的审批决定」——PRT-615 把它从"未登记"变成"已核验"，
+  // PRT-607 又把**入边**那一半补上（审批箱）。
   //
   // 两条边都声明了 `requiresPersist: ['attempt','approval']`，但它们的方向**相反**，
   // 而证据在两条边上的含义完全不同：
   //
   //   · **出边** `AwaitingApproval → RetryableFailure`（被拒 / 被 TTL 自动 deny）：
-  //     这次暂停**结束**了，所以那一行审批必须已经存在。这就是本批要核验的东西。
+  //     这次暂停**结束**了，所以那一行审批必须已经存在。这就是这里核验的东西。
   //
   //   · **入边** `X → AwaitingApproval`：那次暂停**开始**了，而"有东西可批"这件事
-  //     是由这条迁移**自己**要创建的。要求它在 UPDATE 之前就存在是循环的。
+  //     正是由这条迁移**自己**创建的。要求它在 UPDATE 之前就存在是循环的，所以这一项
+  //     在**前置**核验里返回 `EVIDENCE_NOT_APPLICABLE`（既不算核验过、也不算缺失）。
   //
-  // 所以入边返回 `EVIDENCE_NOT_APPLICABLE`（既不算核验过、也不算缺失），
-  // 而**这不是"降级成不检查"**：入边方向真正的核验应当是"进入 AwaitingApproval 的
-  // 同一次事务里创建了审批行"。acceptance 流程目前**不**创建它——那意味着一条任务
-  // 可以停在 `AwaitingApproval` 而**没有任何东西可批**，而界面上它是一个待办。
-  // 那属于 PRT-607（审批箱）的范围，见本批文档的"诚实边界"。
+  // `EVIDENCE_NOT_APPLICABLE` **不是"降级成不检查"**：入边的核验在**同一次事务**里、
+  // 在写入之后以**后置条件**的形式发生——`transition` 调用注入的 `createApproval`
+  // 端口建出那一行，然后回头查库确认它真的在（PRT-607，见下面 `approvalRowCount` 的用途）。
+  // 前置方向无事可查（那一刻还没有那一行，查它是循环的），后置方向必须查
+  // （"端口被调用过"不等于"行存在"）。两个方向合起来才是这条声明的完整含义。
   //
   //   > 一个「进了等待审批、但没有任何东西可批」的状态，
   //   > 与一个「任务卡住了」的状态，在「用户会不会一直等下去」上是同一个东西。
@@ -380,9 +391,7 @@ const EVIDENCE_CHECKS = Object.freeze({
   // 重试之后是一条新 Attempt，用 task_id 匹配会把上一条 Attempt 的审批算成本次的依据。
   approval: (db, attemptId, edge = {}) => {
     if (edge.from !== 'AwaitingApproval') return EVIDENCE_NOT_APPLICABLE
-    if (!tableExists(db, 'permission_requests')) return false
-    if (!columnExists(db, 'permission_requests', 'attempt_id')) return false
-    return db.prepare('SELECT COUNT(*) AS n FROM permission_requests WHERE attempt_id = ?').get(attemptId).n > 0
+    return approvalRowCount(db, attemptId) > 0
   },
 })
 
@@ -407,6 +416,25 @@ function columnExists(db, table, column) {
 /** 表存在吗。用于区分"查不到"与"没有那张表"——两者都算"没有依据"，但排查时要知道是哪种。 */
 function tableExists(db, name) {
   return db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = ?").get(name).n > 0
+}
+
+/**
+ * 这条 Attempt 名下的审批行数（0 表示"没有"）。
+ *
+ * 表 / 列不存在时返回 0 而不是让 `db.prepare` 抛出去：理由与 `contextSnapshot` 同源
+ * ——一个只有 run schema 的库里，"查不到"与"没有那张表"对这一步是**同一个事实**；
+ * 让 SQL 错误冒出去会把它变成 500，而 500 说的是"我们坏了"，不是"这一步缺前提"。
+ *
+ * 两个调用方必须问的是**同一个问题**（"这条 Attempt 有没有一行审批"）：
+ *   · `EVIDENCE_CHECKS.approval` 的**出边**前置核验；
+ *   · `transition` 进 `AwaitingApproval` 的**入边**后置条件（PRT-607）。
+ * 分成两份 SQL 迟早会漂移成两个答案——而"有审批"与"没有审批"漂移的那一天，
+ * 表现是任务停在等待里没人管。
+ */
+function approvalRowCount(db, attemptId) {
+  if (!tableExists(db, 'permission_requests')) return 0
+  if (!columnExists(db, 'permission_requests', 'attempt_id')) return 0
+  return db.prepare('SELECT COUNT(*) AS n FROM permission_requests WHERE attempt_id = ?').get(attemptId).n
 }
 
 /**
@@ -633,6 +661,19 @@ export function createRunStore({
   // 注入的实现会被在**本仓储的事务里**调用（同一个连接），因此三者是原子的。
   createTask = null,
   readPipeline = null,
+  // PRT-607 审批箱：进 `AwaitingApproval` 要在**同一次事务**里建出一条待批准请求，
+  // 而 `permission_requests` 的列（以及"一条合法审批长什么样"）属于 approval-binding.mjs
+  // ——本仓储不认识其他模块的 schema，所以那一行由**调用方注入**的端口去写。
+  //
+  // 端口签名刻意保持很小，**怎么填那些列由注入方决定**；本仓储只规定两件事：
+  //   createApproval({ attemptId, taskId, scope, returnTo, atMs, context }) → { requestId? }
+  //   ① `returnTo` 是刚刚落库的 `return_to`（批准后回到哪一步），不是状态机的 hint；
+  //   ② 它在**本仓储的事务里**被调用（同一个连接），所以审批行与状态迁移是原子的。
+  //
+  // 缺它而目标又是 `AwaitingApproval` 时**抛错**（`APPROVAL_NOT_WIRED`），不静默跳过：
+  // 一条停在 `AwaitingApproval` 而没有任何东西可批的尝试，与一条卡住的任务，
+  // 在"用户会不会一直等下去"上是同一个东西。
+  createApproval = null,
 } = {}) {
   if (db === undefined || db === null) throw new TypeError('createRunStore 需要 db')
   if (typeof clock !== 'function') throw new TypeError('createRunStore 的 clock 必须是函数')
@@ -1071,6 +1112,51 @@ export function createRunStore({
                 outcome = COALESCE(?, outcome), failure_code = COALESCE(?, failure_code), detail = COALESCE(?, detail)
           WHERE id = ? AND lease_epoch = ?`,
       ).run(target, atMs, finishedAtMs, returnTo, outcome, context?.failureCode ?? null, context?.detail ?? null, attemptId, epoch)
+
+      // ── PRT-607 审批箱：进入 `AwaitingApproval` 必须**真的**有东西可批 ──
+      //
+      // 上面那次 `checkEvidence` 对 `approval` 在**入边**返回
+      // `EVIDENCE_NOT_APPLICABLE`：审批行正是这次迁移要创建的东西，要求它先存在是循环的。
+      // 于是核验改在**这里**、在同一个事务里、以**后置条件**的形式发生。
+      //
+      // 那一行必须由**注入的端口**去写：`permission_requests` 的列属于
+      // approval-binding.mjs，本仓储不认识它的 schema。端口在**本事务内**被调用
+      // （同一个连接），因此"审批行存在"与"尝试进入 AwaitingApproval"要么都成立、
+      // 要么都不成立——不存在"状态改了但待办没建"的中间态。
+      if (target === 'AwaitingApproval') {
+        if (typeof createApproval !== 'function') {
+          throw fail(RUN_ERRORS.APPROVAL_NOT_WIRED,
+            '进入 AwaitingApproval 前没有接线（createApproval 不是函数）。' +
+            '**不降级**成"先进入等待、稍后再补"：一条停在 AwaitingApproval 而没有任何东西' +
+            '可批的尝试，在界面上是一个待办，而人会一直等下去' +
+            `（createApproval=${typeof createApproval}）`,
+            { attemptId, from: row.state, to: target }, 500)
+        }
+        createApproval({
+          attemptId,
+          taskId: row.task_id,
+          // `scope` 与 `returnTo` 都取**刚写进这一行的事实**，不是调用方传进来的值：
+          // 审批行与 Attempt 必须落在同一个空间、回同一个状态，两处口径不一致时
+          // 会在"用户批准之后任务跳到别的空间"这种最难查的地方表现出来。
+          scope: row.scope,
+          returnTo,
+          atMs,
+          context: context ?? {},
+        })
+        // 后置条件：端口被**调用过**不等于那一行**存在**。
+        //
+        // 注入的实现可能写错了表、写错了列，或者干脆什么都不做。只看"我调用过了"
+        // 就会留下与修复前**一模一样**的状态（尝试停在 AwaitingApproval，而没有东西可批），
+        // 而 `requiresPersist: ['attempt','approval']` 在事件流里仍然看起来像一句保证
+        // ——这正是这一批要消灭的那种"看起来像保证的声明"。
+        if (approvalRowCount(db, attemptId) < 1) {
+          throw fail(RUN_ERRORS.APPROVAL_NOT_CREATED,
+            '目标状态是 AwaitingApproval，但这次迁移结束后**没有任何**属于它的审批行。' +
+            'createApproval 端口必须在同一次事务里写出 permission_requests 的一行' +
+            '（attempt_id = 这条尝试）；什么都没写，就等于把「有东西可批」这句话留成空的',
+            { attemptId, from: row.state, to: target }, 500)
+        }
+      }
 
       const updated = rowOf(db, attemptId)
       appendEvent(db, {

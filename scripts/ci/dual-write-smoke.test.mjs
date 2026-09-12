@@ -10,7 +10,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -190,4 +190,114 @@ test('双进程启同时升级**旧形状** goal 表：只迁移一次且旧目�
     await new Promise((r) => setTimeout(r, 300))
     rmSync(dir, { recursive: true, force: true, maxRetries: 4, retryDelay: 200 })
   }
+})
+
+// ---------------------------------------------------------------------------
+// 第 3 个锚点：把「启动期补列的写法」本身钉住（**类**级不变量，不是某一个调用点）
+//
+// 上面两个用例守的是「两个进程同时启动、迁移同一新库」的行为。它们能抓住当前
+// **已知**的坏写法，但抓不住"下次有人在新文件里又照抄一遍"——本仓库已经发生过两次：
+//
+//   · 2026-09-10：`server.mjs` 启动期 25 处「读一次 PRAGMA 再 ALTER」→
+//     后到者 `duplicate column name: model`，模块加载期崩溃。修法：统一走 `ensureColumn`。
+//   · 2026-09-12（PRT-607 期间发现）：`team-hub/approval-binding.mjs` 的
+//     `ensureApprovalSchema` 把那两行**照抄**了过去（它是 9-10 之后新抽出来的文件）
+//     → 后到者 `duplicate column name: bindingHash`。同一个缺陷，第 26 处。
+//
+//   > 一个「修好了当时那 25 处」的修复，
+//   > 与一个「第 26 处是后来新写的、于是坏在同一个地方」的修复，是同一个东西——
+//   > 只不过后者在代码审查里看起来是幂等的。
+//
+// 所以这一条直接查源码，把**两种坏形状**都禁掉：
+//
+//   ① 自己 `db.exec('ALTER TABLE …')` —— 检查与变更之间有窗口，不是原子的；
+//   ② `try { ALTER } catch {}` —— 不崩，但把「加列失败」（磁盘满 / 表被锁 / 库只读 /
+//      SQL 写错）吞成「列已存在」，于是列真的没加上时一声不响，
+//      直到几周后某个不相干的查询报 `no such column`。
+//
+// 唯一允许出现 ALTER 的地方是 `schema-util.mjs` 的 `ensureColumn` 内部
+// （`BEGIN IMMEDIATE` 内重读，且只在重读确认列已存在时才吞异常）。
+// ---------------------------------------------------------------------------
+test('③ 源码不变量：启动期补列一律走 ensureColumn，不许自己写 ALTER', () => {
+  const PRODUCTION_DIRS = [join(ROOT, 'team-hub'), join(ROOT, 'orchestrator'), join(ROOT, 'runtime')]
+  // 允许自己写 ALTER 的白名单：并发原语**唯一**的实现处
+  const ALLOWED = new Set([join(ROOT, 'team-hub', 'schema-util.mjs')])
+
+  const files = []
+  const walk = (dir) => {
+    let entries
+    try { entries = readdirSync(dir, { withFileTypes: true }) } catch { return }
+    for (const e of entries) {
+      if (e.name === 'node_modules' || e.name.startsWith('.')) continue
+      const p = join(dir, e.name)
+      if (e.isDirectory()) walk(p)
+      else if (e.name.endsWith('.mjs') && !e.name.endsWith('.test.mjs')) files.push(p)
+    }
+  }
+  for (const d of PRODUCTION_DIRS) walk(d)
+
+  // 扫描面自检：不能只断言"文件数够多"（数量对不上时说不清是 walk 坏了还是仓库小了）。
+  // 直接断言几个**必须被扫到**的文件在里面——它们正是本次缺陷的现场与判据。
+  //
+  //   > 一个「数了数有 90 个文件」的自检，
+  //   > 与一个「确认那两个真正会跑迁移的文件在扫描面里」的自检，是同一个东西吗？不是。
+  for (const must of ['team-hub/server.mjs', 'team-hub/approval-binding.mjs', 'team-hub/run-store.mjs']) {
+    assert.ok(files.includes(join(ROOT, must)), `扫描面必须包含 ${must}`)
+  }
+  assert.ok(files.length > 50, `扫描面应当足够大（实际 ${files.length} 个生产 .mjs）`)
+
+  const bare = []
+  const swallowed = []
+  for (const p of files) {
+    if (ALLOWED.has(p)) continue
+    const src = readFileSync(p, 'utf8')
+    const lines = src.split(/\r?\n/)
+    let inBlockComment = false
+    lines.forEach((line, i) => {
+      // 注释里提到 ALTER 是允许的（本文件与 schema-util 的解释性注释都要提到它），
+      // 所以先剥掉行注释与块注释再判断。
+      let code = line
+      if (inBlockComment) {
+        const end = code.indexOf('*/')
+        if (end === -1) return
+        code = code.slice(end + 2)
+        inBlockComment = false
+      }
+      code = code.replace(/\/\*[\s\S]*?\*\//g, '')
+      const open = code.indexOf('/*')
+      if (open !== -1) { code = code.slice(0, open); inBlockComment = true }
+      code = code.replace(/\/\/.*$/, '')
+      if (!/ALTER\s+TABLE/i.test(code)) return
+
+      const rel = p.slice(ROOT.length + 1)
+      // ① 自己 exec 出去的 ALTER
+      if (/\.exec\s*\(/.test(code)) bare.push(`${rel}:${i + 1}: ${line.trim()}`)
+      // ② 同一条 ALTER 出现在 try/catch 的 try 分支里（吞异常）
+      const window = lines.slice(i, Math.min(i + 4, lines.length)).join('\n')
+      if (/catch\s*(\{|\()/.test(window)) swallowed.push(`${rel}:${i + 1}: ${line.trim()}`)
+    })
+  }
+
+  // ★ 两个分支**一起**报，不写成两条 assert。
+  //
+  //   一条 `assert.deepEqual(bare, [])` 先跑、失败即中止时，`swallowed` 那条
+  //   在这一次运行里**从来没被执行过**——于是"两个分支都验证过"这句话里，
+  //   有一个分支的证据其实是空的。破坏性验证时正是这样：故意注入的坏形状
+  //   同时命中两个分支，而只有第一个被报出来。
+  //
+  //   > 一个「排在后面、于是从没被跑到」的断言，
+  //   > 与一条不存在的断言，在"它到底拦住了什么"上是同一个东西。
+  const violations = [
+    ...bare.map((v) => `[自己 exec ALTER] ${v}`),
+    ...swallowed.map((v) => `[try/catch 吞掉 ALTER] ${v}`),
+  ]
+  assert.deepEqual(
+    violations, [],
+    '启动期补列一律走 ensureColumn（schema-util.mjs 的 `BEGIN IMMEDIATE` 内重读），不许自己写 ALTER：\n' +
+    '  · 自己 `db.exec(\'ALTER TABLE …\')`：检查与变更之间有窗口，两个进程同时启动时后到者 ' +
+    '`duplicate column name` 崩溃（模块加载期，表现为路由整体缺失）；\n' +
+    '  · `try { ALTER } catch {}`：不崩，但把「磁盘满 / 表被锁 / 库只读 / SQL 写错」与「列已存在」' +
+    '吞成同一个结果，列真的没加上时一声不响。\n' +
+    violations.join('\n'),
+  )
 })

@@ -15,6 +15,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { createRunStore, ensureRunSchema, RUN_ERRORS } from './run-store.mjs'
 import { createContextStore, ensureContextSchema } from './context-store.mjs'
 import { freezeFixtureContext } from './context-fixture.mjs'
+import { writeFixtureApproval } from './approval-fixture.mjs'
 
 /** 三岗位的链：analyst → coder → tester（tester 是链尾）。 */
 const CHAIN = [
@@ -218,7 +219,15 @@ test('⑤ 没接线时拒绝（`HANDOFF_NOT_WIRED`），而**不是**降级成"�
   const db = makeDb()
   db.prepare('INSERT INTO tasks (id, title, status, scope, role, hold, createdAt, updatedAt, acceptance) VALUES (?,?,?,?,?,?,?,?,?)')
     .run('T-1', 't', 'todo', 'default', 'analyst', 0, new Date(clockMs).toISOString(), new Date(clockMs).toISOString(), '[]')
-  const store = createRunStore({ db, clock }) // 不注入 createTask / readPipeline
+  const store = createRunStore({
+    db, clock, // 不注入 createTask / readPipeline
+    // PRT-607：下面那句 `recordValidation` 走的是 needs-human → `AwaitingApproval`，
+    // 而那条迁移现在必须建出一条待批准请求（否则仓储以 `APPROVAL_NOT_WIRED` 拒绝）。
+    // 本用例考的是**交接**接线，夹具照常注入审批端口，走 PRT-615 的真实写入路径。
+    createApproval: (p) => writeFixtureApproval({
+      db, attemptId: p.attemptId, status: 'pending', scope: p.scope, taskId: p.taskId, nowMs: p.atMs,
+    }),
+  })
   const ctxStore = createContextStore({ db, clock })
   const claimed = store.claim({ workerId: 'w1' })
   const attemptId = claimed.claimed.attemptId

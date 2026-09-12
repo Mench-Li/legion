@@ -443,6 +443,31 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-607（后半）：无人值守策略（spec line 929、line 472、line 495/1083、line 1084）。
+      //
+      // 一句话：**无人值守不是"没有人所以放行"，而是"没有人所以不能放行"。**
+      //
+      //   > 一个「无人值守时把需要审批的操作自动放行」的降级，
+      //   > 与一个「无人值守等于没有权限门」的实现，是同一个东西。
+      //
+      // 盯四件事：
+      //   ① `never` 在任何组合下都不放行（含"已经有过一次性批准"也不算数）
+      //   ② 现场没人时 `ask` 只**挂起**（hold），不放行、也不伪装成"人拒绝了"
+      //   ③ 审批箱的结果**不能**把一个 deny/hold 改成放行；`unavailable` 变成挂起
+      //   ④ Legion 自己的 preset 表：`legion-unattended` 必须保持 `workspace-write`，
+      //      不得因为"无人值守 = never"而顺带把沙箱升到 `danger-full-access`
+      //      （spec line 495：DSH 默认表把这两件事绑在一起，复用它就是那个坑）
+      //
+      // 第 ④ 条的沙箱降级检查在**真实表上永远为假**，所以 `assertPreset` 让表可注入，
+      // 用例传一张**被改坏的表**证明它真的会拦——否则它就是一条从不执行的检查。
+      //
+      //   > 一个「检查一个不可能出现的值」的检查，
+      //   > 与一条不存在的检查，在"它到底拦住了什么"上是同一个东西。
+      label: 'approval-policy（PRT-607：无人值守不是"没人所以放行"）',
+      files: ['runtime/dsh-composition/approval-policy.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-606：区分外部 API 读取与写入权限（spec line 928、§6.6 line 465/466）。
       //
       // 本模块要防的不是"权限表写错了"，而是**一串"看起来是读"的东西**：
@@ -535,7 +560,20 @@ async function stageTest() {
     { label: 'dedupe（P2-3 前端去重纯函数）', files: ['workbench/scripts/dedupe.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'notify（P2-4 通知分类/优先级/批量已读/跳转/去重补齐）', files: ['workbench/scripts/notify.test.mjs', 'workbench/scripts/notify-hub-smoke.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'hub-event-stream（F-01 scope/游标/信封）', files: ['workbench/scripts/hub-event-stream.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
-    { label: 'dual-write（P1-1 双进程写同库竞态：audit.seq/task id 唯一）', files: ['scripts/ci/dual-write-smoke.test.mjs'], cwd: ROOT },
+    // `dual-write-smoke` 守「两个进程同时启动、迁移同一新库」的**行为**，
+    // 并在第 3 个锚点里按**源码**禁掉两种坏写法（自己 exec ALTER / try-catch 吞掉 ALTER）。
+    // `schema-util.test.mjs` 守的是那个并发原语**自己**的两种调用形态：
+    // 顶层（自己开事务）与**已在事务里**（不能再开一个——运行面仓储的 createApproval
+    // 端口正是在它自己的 BEGIN IMMEDIATE 里调它，2026-09-12 真实炸过三条状态机用例）。
+    //
+    //   > 一个「只测了顶层调用」的原语测试，
+    //   > 与一个「调用方一旦把它放进事务、它就在完全不相关的地方炸掉」的原语，
+    //   > 是同一个东西。
+    {
+      label: 'dual-write（P1-1 双进程写同库竞态：启动期迁移原子性 / schema-util 原语）',
+      files: ['scripts/ci/dual-write-smoke.test.mjs', 'team-hub/schema-util.test.mjs'],
+      cwd: ROOT,
+    },
     // PRT-002/PRT-108：DSH 执行面边界扫描。前 3 类覆盖记号识别、反误报与判定语义；
     // 第 4 类在**真实仓库**上放一个真实探针文件跑真实 CLI，证明棘轮拦得住回归——
     // 只测纯函数无法证明扫描范围（git ls-files 口径）本身是对的（该缺陷已在开发中真实出现过一次）。
@@ -1418,6 +1456,67 @@ async function stageTest() {
     detail.push('  PASS board-plugin build（DSH_CHECKOUT=' + dsh + '）')
   } else {
     detail.push('  SKIP plugins/board-plugin（未配置可用 DSH_CHECKOUT；外部宿主测试不伪造通过）')
+  }
+  // ── 套件清单完备性（2026-09-12 加）────────────────────────────────────────
+  //
+  // `suites` 里 team-hub/ 这类目录是**逐个文件列举**的，不像 plugins/ whiteboard/
+  // 那样整目录 glob。于是新写一个 `team-hub/xxx.test.mjs` 而忘记登记，它**永远不会跑**
+  // ——而"没跑"与"跑了且通过"在 CI 摘要里长得一样（都不出现）。
+  //
+  // 这不是假设：本次 PRT-607 期间我新写的 `team-hub/schema-util.test.mjs`
+  // （守 `ensureColumn` 的事务嵌套分支）就是这样漏掉的，是**事后手写脚本**才发现的。
+  //
+  //   > 一个「写好了但没登记的测试文件」，
+  //   > 与一条不存在的断言，在"它到底拦住了什么"上是同一个东西——
+  //   > 而它比不存在的断言更糟：仓库里明明有那段代码，读代码的人会以为它被守着。
+  //
+  // 判据：`git ls-files` 里所有 `*.test.mjs`，要么被某个套件显式列出或落在某个
+  // glob 目录里，要么出现在下面的**豁免表**中（豁免必须写明理由）。
+  {
+    const EXEMPT = new Map([
+      // T042 的浏览器 e2e 采集副本：它是**证据留存**，不是本仓库的测试套件，
+      // 依赖当时沙箱的路径与产物，在 CI 里跑会伪造出"这个仓库测过它"的印象。
+      ['docs/T042-evidence/wb-e2e-sandbox-copy.test.mjs', '证据留存副本，非本仓库测试面'],
+    ])
+    // ★ 必须按每个套件**自己的 cwd** 解析，换成仓库相对路径。
+    //   第一版直接收 `s.files` 的原文，于是 whiteboard 那组（来自
+    //   whiteboard/package.json 的 test 脚本、相对 wbDir）一个都对不上，
+    //   7 个本来在跑的用例被误报成"不会被任何套件执行"。
+    //
+    //   > 一个「按文件名字符串比对」的完备性检查，
+    //   > 与一个「把 cwd 也算进去」的完备性检查，在"它报出来的缺失是真的吗"上不是同一个东西。
+    const rel = (cwd, f) => {
+      const p = join(cwd || ROOT, f)
+      return p.startsWith(ROOT) ? p.slice(ROOT.length + 1).replace(/\\/g, '/') : p.replace(/\\/g, '/')
+    }
+    const listed = new Set()
+    for (const s of suites) for (const f of s.files) listed.add(rel(s.cwd, f))
+    // ★ 两个**有条件**的套件目录：plugins/board-plugin 只在 `DSH_CHECKOUT` 可用时才 push
+    //   进 `suites`（否则整组 SKIP，见上面 `if (dsh)` 分支）。没有 DSH_CHECKOUT 时
+    //   它们不在 `listed` 里，但它们**有归属**——只是这一次不跑。
+    //
+    //   > 一个「没配 DSH_CHECKOUT 所以没跑」的套件，
+    //   > 与一个「永远没登记过」的套件，在"它有没有归属"上不是同一个东西。
+    //
+    //   本检查问的是**归属**（有没有人负责跑它），不是**这一次跑没跑**（那是 SKIP 的语义）。
+    const conditionalDirs = ['plugins/tests/', 'board-plugin/tests/']
+    const tracked = await exec('git', ['ls-files', '*.test.mjs'], { cwd: ROOT })
+    const all = tracked.out.split('\n').map((x) => x.trim()).filter(Boolean)
+    const missing = all
+      .filter((f) => !listed.has(f))
+      .filter((f) => !conditionalDirs.some((d) => f.startsWith(d)))
+      .filter((f) => !EXEMPT.has(f))
+    if (missing.length > 0) {
+      const listing = missing.map((f) => `      ${f}`).join('\n')
+      return {
+        ok: false,
+        detail: detail.join('\n') + '\n' +
+          `  FAIL 套件清单不完备：${missing.length} 个 *.test.mjs 不会被任何套件执行（等于不存在的断言）\n` +
+          listing + '\n' +
+          '      把它们加进 stageTest 的 suites（或放进某个套件的 cwd 相对路径下 / 登记到 EXEMPT 并写明理由）。',
+      }
+    }
+    detail.push(`  PASS 套件清单完备（${all.length} 个 *.test.mjs 全部有归属）`)
   }
   for (const s of suites) {
     const cwd = s.cwd || ROOT

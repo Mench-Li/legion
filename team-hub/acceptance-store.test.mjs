@@ -45,7 +45,15 @@ function makeEnv({ acceptance = '[]', maxAttempts = 5 } = {}) {
   db.prepare('INSERT INTO tasks (id, title, status, scope, hold, createdAt, updatedAt, acceptance) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
     .run('t1', '任务一', 'todo', 'default', 0, new Date(clockMs).toISOString(), new Date(clockMs).toISOString(), acceptance)
 const ctxStore = createContextStore({ db, clock })
-  const store = createRunStore({ db, clock, maxAttempts })
+  const store = createRunStore({ db, clock, maxAttempts,
+    // PRT-607：`needs-human` 会把 Attempt 送进 `AwaitingApproval`，而那条迁移现在
+    // **必须**在同一次事务里建出一条待批准请求（否则仓储会以 `APPROVAL_NOT_WIRED` 拒绝）。
+    // 夹具因此注入一个端口，走 PRT-615 的真实写入路径（`writeFixtureApproval`），
+    // 而不是手写 permission_requests 的列名。
+    createApproval: (p) => writeFixtureApproval({
+      db, attemptId: p.attemptId, status: 'pending', scope: p.scope, taskId: p.taskId, nowMs: p.atMs,
+    }),
+  })
   const claimed = store.claim({ workerId: 'w1' })
   assert.ok(claimed.claimed !== null, '夹具应当能领到任务')
   const attemptId = claimed.claimed.attemptId

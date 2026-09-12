@@ -90,6 +90,18 @@ export const SCHEMA = defineSchema({
     // 值班的人要能把"这条 Attempt 为什么被 blocked"与"哪一次审批过期"对上，
     // 而一段中文描述在按失败码统计时是查不到的。
     'APPROVAL_TTL_EXPIRED',
+    // PRT-607（审批箱那一半）：进入 `AwaitingApproval` 时**必须**真的建出一条可批的审批行。
+    //
+    //   · APPROVAL_NOT_WIRED   — 没有注入建审批行的端口。这是**配置/装配**的错，
+    //                            不是这次请求的错：整条 worker 链路都少了这个端口。
+    //   · APPROVAL_NOT_CREATED — 端口调过了，但那之后**查不到**属于这条 Attempt 的审批行。
+    //                            这是**端口实现**的错（它静默什么都没做）。
+    //
+    // 两个码分开，是因为修的地方不同。把它报成一个通用错误，值班的人会去改请求。
+    //
+    //   > 一个「把装配缺失报成请求非法」的诊断，
+    //   > 与一个「值班的人去改请求、而端口一直没接上」的诊断，是同一个东西。
+    'APPROVAL_NOT_WIRED', 'APPROVAL_NOT_CREATED',
     // PRT-307 机器验收的契约错误码（orchestrator/acceptance/index.mjs 的
     // ACCEPTANCE_ERRORS，经 run-store 转成 ContractError 抛出）
     'CRITERIA_NOT_ARRAY', 'RUN_RESULT_INVALID',

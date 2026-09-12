@@ -31,6 +31,8 @@ import {
   mapOutcomeToState,
 } from './run-store.mjs'
 import { createContextStore, ensureContextSchema } from './context-store.mjs'
+import { writeFixtureApproval } from './approval-fixture.mjs'
+import { ensureApprovalSchema } from './approval-binding.mjs'
 import { readFileSync as readSrc } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -39,8 +41,15 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 import { assembleContext } from '../runtime/context/assembler.mjs'
 import { TOKEN_ESTIMATOR_KINDS } from '../runtime/contracts/context.mjs'
 
-/** 建一个临时库 + 最小 tasks 表（与 server.mjs 的列对齐到本项目用到的部分）。 */
-function makeEnv({ startMs = 1_700_000_000_000 } = {}) {
+/**
+ * 建一个临时库 + 最小 tasks 表（与 server.mjs 的列对齐到本项目用到的部分）。
+ *
+ * `createApproval` 是 PRT-607 的注入端口**工厂**（`(db) => port`）：进入
+ * `AwaitingApproval` 的迁移必须在同一次事务里建出一条待批准请求，因此这一组里
+ * 凡是走到那一步的用例都得注入它。默认 `null` —— 现有的用例都不进 `AwaitingApproval`，
+ * 保持它们在"没有接线"这个事实下的原样。
+ */
+function makeEnv({ startMs = 1_700_000_000_000, createApproval = null } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'legion-runstore-'))
   const dbFile = join(root, 'team.db')
   const db = new DatabaseSync(dbFile)
@@ -60,7 +69,10 @@ function makeEnv({ startMs = 1_700_000_000_000 } = {}) {
   // PRT-411：`BuildingContext → Running` 现在**真的**要求一份已落库的上下文快照。
   // 夹具因此必须建那张表——否则闸门在"表不存在"与"没有快照"之间分不出来。
   ensureContextSchema(db)
-  const store = createRunStore({ db, clock })
+  const store = createRunStore({
+    db, clock,
+    createApproval: typeof createApproval === 'function' ? createApproval(db) : null,
+  })
   const addTask = (id, { status = 'todo', scope = 'default', priority = 'medium', hold = 0 } = {}) => {
     db.prepare('INSERT INTO tasks (id, title, priority, status, scope, hold, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
       .run(id, id, priority, status, scope, hold, new Date(clockMs).toISOString(), new Date(clockMs).toISOString())
@@ -104,6 +116,41 @@ function assertRunError(fn, code) {
     return e
   }
   throw new Error(`期望抛出 ${code}，但没有抛错`)
+}
+
+/**
+ * 夹具用的审批端口（PRT-607）：写下一行**真的** `permission_requests`。
+ *
+ * 走 PRT-615 的真实写入路径（`writeFixtureApproval` → `createBindingRecord`），
+ * 而不是手写那张表的列名——列名一旦增删，手抄的夹具会**静默**与真实结构脱节
+ * （插入报错还算好的；列名恰好还兼容时才真正难查）。
+ */
+function fixtureApprovalPort(db) {
+  return (p) => writeFixtureApproval({
+    db, attemptId: p.attemptId, status: 'pending', scope: p.scope, taskId: p.taskId, nowMs: p.atMs,
+  })
+}
+
+/**
+ * 把一条刚领到的 Attempt 推到 `Running`。
+ *
+ * 三段都必须走：`BuildingContext → Running` 上有 `contextSnapshot` 闸门（PRT-411），
+ * 少走一段红的是夹具、不是被测的东西。
+ */
+function advanceToRunning(env, c) {
+  env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to: 'PreparingWorkspace' })
+  env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to: 'BuildingContext' })
+  env.freezeContext(c.attemptId)
+  return env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to: 'Running' })
+}
+
+/** 再到 `AwaitingApproval`（`returnTo: 'Running'`，运行中的工具请求入口）。 */
+function advanceToAwaitingApproval(env, c) {
+  advanceToRunning(env, c)
+  return env.store.transition({
+    attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1',
+    to: 'AwaitingApproval', context: { returnTo: 'Running' },
+  })
 }
 
 // ---------------------------------------------------------------- ① 建表与领取
@@ -831,8 +878,9 @@ test('⑪ 核验清单是**总**的：状态机声明的每一项都有归宿', 
   // `EVIDENCE_CHECKS.approval`）。它在**出边**（`AwaitingApproval → …`）上核验
   // "属于这条 Attempt 的审批行存在"，在**入边**上返回「不适用」——
   // 因为"有东西可批"正是那条迁移自己要创建的东西，要求它在 UPDATE 之前存在是循环的。
-  // 入边真正的核验（进入 AwaitingApproval 的同一次事务里创建审批行）**尚未交付**，
-  // 属 PRT-607 审批箱，见 PRT-615 文档的"诚实边界"。
+  // 入边那一半由 PRT-607（审批箱）补上：迁移在**同一次事务**里调 `createApproval`
+  // 端口建出那一行，再以**后置条件**回头查库确认它真的在（见 `transition` 与
+  // `approvalRowCount`）。前置无事可查、后置必须查，两个方向合起来才是完整含义。
   const KNOWN_UNIMPLEMENTED = [
     'runResult',     // PRT-312 结果提取：尚未建表
     'reconciliation', // PRT-313 对账：尚未建表
@@ -858,4 +906,93 @@ test('⑪ 核验清单是**总**的：状态机声明的每一项都有归宿', 
     assert.ok(!new RegExp(`^\\s*${name}: `, 'm').test(src),
       `\`${name}\` 已经实现了，应从"已知未实现"清单里移除`)
   }
+})
+
+// ---------------------------------------------------------------- ⑫ 审批箱（PRT-607）
+//
+// 这一组盯的不是"端口有没有被调用"，而是**那条迁移之后库里到底有没有东西可批**。
+// `AwaitingApproval` 之前的实现只写状态、不写审批行：界面上它是一条待办，
+// 而 `permission_requests` 里没有对应的行——人会一直等下去。
+//
+//   > 一个「进了等待审批、但没有任何东西可批」的状态，
+//   > 与一个「任务卡住了」的状态，在「用户会不会一直等下去」上是同一个东西。
+
+test('⑫ 进入 AwaitingApproval 会在同一次事务里建出**恰好一条**属于这条 Attempt 的审批行', () => {
+  const env = makeEnv({ createApproval: (db) => fixtureApprovalPort(db) })
+  try {
+    env.addTask('t1')
+    const c = env.store.claim({ workerId: 'w1' }).claimed
+    const r = advanceToAwaitingApproval(env, c)
+    assert.equal(r.attempt.state, 'AwaitingApproval')
+
+    const rows = env.db.prepare('SELECT * FROM permission_requests WHERE attempt_id = ?').all(c.attemptId)
+    assert.equal(rows.length, 1,
+      '必须**恰好**一条：多了会让同一个等待出现两个待办，而人只会批其中一个，另一个永远挂着')
+    assert.equal(rows[0].status, 'pending', '刚进等待的审批必须是 pending，否则界面上没有可批准的东西')
+    assert.equal(rows[0].taskId, 't1', '审批行要能指回任务，否则看板上无从对应')
+    assert.ok(rows[0].requestId, '审批行必须有 requestId——没有它就无法批准/拒绝')
+  } finally { env.cleanup() }
+})
+
+test('⑫ 没有接线时进入 AwaitingApproval **失败**，且尝试不得停在等待状态（整笔回滚）', () => {
+  const env = makeEnv() // 不注入 createApproval
+  try {
+    env.addTask('t1')
+    const c = env.store.claim({ workerId: 'w1' }).claimed
+    advanceToRunning(env, c)
+    const e = assertRunError(() => env.store.transition({
+      attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1',
+      to: 'AwaitingApproval', context: { returnTo: 'Running' },
+    }), RUN_ERRORS.APPROVAL_NOT_WIRED)
+    assert.equal(e.statusCode, 500, '接线缺失是服务端配置问题，不是调用方的请求问题')
+    // 关键：被拒的迁移**整笔回滚**。留一个"没有东西可批"的等待状态正是本批要修的病。
+    assert.equal(env.store.getAttempt(c.attemptId).state, 'Running')
+    const events = env.db
+      .prepare("SELECT COUNT(*) AS n FROM run_attempt_events WHERE attempt_id = ? AND to_state = 'AwaitingApproval'")
+      .get(c.attemptId).n
+    assert.equal(events, 0, '事件流里留下了这条迁移，而它并没有生效——历史与事实不一致')
+  } finally { env.cleanup() }
+})
+
+test('⑫ 端口什么都不写 → 后置条件核验让迁移失败，且没有东西留在 AwaitingApproval', () => {
+  // 注入的端口可能写错表、写错列，或者干脆什么都不做。只看"我调用过了"会留下
+  // 与修复前**一模一样**的状态，而事件流里的 `requiresPersist` 仍然看起来像保证。
+  const env = makeEnv({ createApproval: () => () => ({ requestId: 'perm-lie' }) })
+  try {
+    ensureApprovalSchema(env.db) // 生产里这张表一定在；这里也让它存在，断言才问得下去
+    env.addTask('t1')
+    const c = env.store.claim({ workerId: 'w1' }).claimed
+    advanceToRunning(env, c)
+    const e = assertRunError(() => env.store.transition({
+      attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1',
+      to: 'AwaitingApproval', context: { returnTo: 'Running' },
+    }), RUN_ERRORS.APPROVAL_NOT_CREATED)
+    assert.equal(e.statusCode, 500)
+    assert.equal(env.store.getAttempt(c.attemptId).state, 'Running')
+    assert.equal(
+      env.db.prepare('SELECT COUNT(*) AS n FROM permission_requests WHERE attempt_id = ?').get(c.attemptId).n,
+      0,
+      '端口"返回了一个 requestId"但没有真的写行——它说的话被当成了事实',
+    )
+  } finally { env.cleanup() }
+})
+
+test('⑫ 目标不是 AwaitingApproval 时**不调用**审批端口，也不建审批行', () => {
+  // 端口是**这一条边**的前提，不是"每次迁移都跑一遍"的钩子：
+  // 在无关的迁移上写审批行，会让审批箱里出现一条没人等在后面的待办。
+  let calls = 0
+  const env = makeEnv({ createApproval: (db) => (p) => { calls += 1; return fixtureApprovalPort(db)(p) } })
+  try {
+    ensureApprovalSchema(env.db)
+    env.addTask('t1')
+    const c = env.store.claim({ workerId: 'w1' }).claimed
+    advanceToRunning(env, c)
+    // Running → Validating（执行成功的落点），这条边与审批无关
+    const r = env.store.transition({
+      attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', outcome: 'completed',
+    })
+    assert.equal(r.attempt.state, 'Validating')
+    assert.equal(calls, 0, '端口在一条与审批无关的迁移上被调用了')
+    assert.equal(env.db.prepare('SELECT COUNT(*) AS n FROM permission_requests').get().n, 0)
+  } finally { env.cleanup() }
 })

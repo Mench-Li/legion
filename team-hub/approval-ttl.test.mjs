@@ -241,7 +241,23 @@ const root = mkdtempSync(join(tmpdir(), 'legion-approval-ttl-'))
 process.env.TEAM_HUB_DB = join(root, 'team.db')
 const mod = await import('./server.mjs')
 const { createRunStore, RUN_ERRORS } = await import('./run-store.mjs')
-const store = createRunStore({ db: mod.db, clock: () => Date.now() })
+
+/**
+ * PRT-607：进入 `AwaitingApproval` 的迁移现在**必须**在同一次事务里建出一条待批准
+ * 请求（没有端口会被 `APPROVAL_NOT_WIRED` 拒绝）。这一组用的是自己建的仓储，
+ * 所以夹具要注入端口——走 PRT-615 的真实写入路径（`writeFixtureApproval`），
+ * 而不是手写 `permission_requests` 的列名。
+ *
+ * 注意：这与下面那些 `writeFixtureApproval(...)` 调用**不冲突**——后者构造的是
+ * "另外一条/另一种状态"的审批（例如已拒绝、已过期），本条用例考的正是它们。
+ */
+function fixtureApprovalPort(db) {
+  return (p) => writeFixtureApproval({
+    db, attemptId: p.attemptId, status: 'pending', scope: p.scope, taskId: p.taskId, nowMs: p.atMs,
+  })
+}
+
+const store = createRunStore({ db: mod.db, clock: () => Date.now(), createApproval: fixtureApprovalPort(mod.db) })
 
 const ctxStore = createContextStore({ db: mod.db, clock: () => Date.now() })
 
@@ -263,7 +279,7 @@ function advanceToAwaitingApproval({ attemptId, epoch, store: st = store }) {
 }
 
 function makeAttempt({ acceptance = '[]', maxAttempts = 5 } = {}) {
-  const st = maxAttempts === 5 ? store : createRunStore({ db: mod.db, clock: () => Date.now(), maxAttempts })
+  const st = maxAttempts === 5 ? store : createRunStore({ db: mod.db, clock: () => Date.now(), maxAttempts, createApproval: fixtureApprovalPort(mod.db) })
   const stamp = new Date().toISOString()
   const id = `t-${Math.random().toString(36).slice(2, 9)}`
   // `priority='high'` 只是**减少**被别的用例遗留任务抢先的机会，不是保证：
@@ -531,6 +547,10 @@ test('⑤ ★ 心跳拒绝续期时留痕（值班的人要知道为什么租约
 test('⑤ ★★ 证据闸门：`AwaitingApproval → RetryableFailure` 要有真的审批行', () => {
   const { attemptId, epoch } = makeAttempt()
   advanceToAwaitingApproval({ attemptId, epoch })
+  // PRT-607：进入 AwaitingApproval 的迁移会**自己**建出一条待批准行（这正是审批箱）。
+  // 闸门要拦的是"这一行不存在"的状态，所以这里先把它删掉——重建那个状态，
+  // 而不是删掉断言。
+  mod.db.prepare(`DELETE FROM permission_requests WHERE ${APPROVAL_ATTEMPT_COLUMN}=?`).run(attemptId)
   // 一条审批记录都没有 → 拒绝
   assert.throws(
     () => store.failAndRetry({ attemptId, actor: 'system', reason: 'no-approval' }),
@@ -559,6 +579,9 @@ test('⑤ ★★ 别的 Attempt 的审批不算数（闸门查的是**这一次*
   const a = makeAttempt()
   const b = makeAttempt()
   advanceToAwaitingApproval({ attemptId: b.attemptId, epoch: b.epoch })
+  // PRT-607：b 进入 AwaitingApproval 时已经自动建了一条；删掉它才能构造
+  // "b 上一条审批都没有"——本用例要证的正是**别的** Attempt 的审批不算数。
+  mod.db.prepare(`DELETE FROM permission_requests WHERE ${APPROVAL_ATTEMPT_COLUMN}=?`).run(b.attemptId)
   // 审批挂在 a 上，b 上一条都没有
   writeFixtureApproval({ db: mod.db, attemptId: a.attemptId, status: 'denied' })
   assert.throws(

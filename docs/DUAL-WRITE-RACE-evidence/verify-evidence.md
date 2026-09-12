@@ -209,3 +209,136 @@ node scripts/ci/run-ci.mjs --only test --out .ci\test-run               # 全量
    报成「启动慢」，直接导致本次排查绕路。
 3. **偶发失败必须留下原始证据**：本次的起点就是「一次失败、原文丢失」；没有那 6 行之外的输出，
    定性只能靠重建场景。`run-ci` 的失败套件落盘（`.ci/<run>/suites/*.log`）是为同类问题的直接改进。
+
+---
+
+## 10. 追加：同一竞态的**第二处**实例（2026-09-12，PRT-607 期间发现）
+
+> 本节是**对同一缺陷的新实例**的追加，不是原结论的修订。原文（§1–§9）针对 2026-09-10
+> 那次定性，保持不变。
+
+### 10.1 现象
+
+PRT-607 的全量 CI 在 `test` 阶段偶发失败，失败套件是 §3 立的那个回归锚点：
+
+```
+✖ 双进程**同时**启动迁移同一新库：双方都就绪且无 duplicate column（迁移竞态回归）
+  Error: serve 进程提前退出 exit=1：…（stderr 被截断到 400 字符）
+```
+
+`test at scripts\ci\dual-write-smoke.test.mjs:137:1`
+
+**这次与 2026-09-10 不是同一处代码**：§1 修的是 `server.mjs` 启动期那 25 处调用点，
+而这次崩在后来**从 server.mjs 抽出去**的 `team-hub/approval-binding.mjs`
+（PRT-608/615 引入的 `ensureApprovalSchema`）。
+
+### 10.2 根因（完整 stderr，8 轮复现命中 1 轮）
+
+探针：两个真实 `server.mjs` 指向同一**新**库、端口由 OS 分配、两次 spawn 紧挨着发出。
+第 7 轮命中的 stderr 原文：
+
+```
+file:///D:/project/DSH/legion/.worktrees/prt-runtime/team-hub/approval-binding.mjs:117
+    if (!cols.includes(name)) db.exec(`ALTER TABLE ${APPROVAL_TABLE} ADD COLUMN ${name} TEXT`)
+                                 ^
+
+Error: duplicate column name: bindingHash
+    at ensureApprovalSchema (file:///…/team-hub/approval-binding.mjs:117:34)
+    at file:///…/team-hub/server.mjs:939:1
+    at ModuleJob.run (node:internal/modules/esm/loader:643:5) {
+  code: 'ERR_SQLITE_ERROR',
+  errcode: 1,
+  errstr: 'SQL logic error'
+}
+```
+
+交错：
+
+```
+进程 A: PRAGMA table_info → 没有 bindingHash ─┐
+进程 B: PRAGMA table_info → 没有 bindingHash ─┤ 两边都读到"没有"
+进程 A: ALTER → 成功                          │
+进程 B: ALTER → duplicate column name         ┘ 模块加载期崩溃
+```
+
+`ensureApprovalSchema` 自己写了一段「读一次 `PRAGMA table_info`，不在清单里就 `ALTER`」
+——**正是 §1 修掉的形状**，只不过它出现在**另一个文件**里。
+
+### 10.3 为什么 §1 的修复没有覆盖它
+
+§1 把 `server.mjs` 的 25 处调用点改成了 `ensureColumn`（`schema-util.mjs`：
+`BEGIN IMMEDIATE` 内重读列名再决定是否 ALTER）。而 `ensureApprovalSchema` 是**后来**为了
+「让审批表结构与『什么算一条合法审批』同源」而抽出/新增的，抽出时把那两行**照抄**了过去：
+
+> 一个「修复时改了 25 处调用点」的修复，
+> 与一个「第 26 处是三个月后新写的、于是坏在同一个地方」的修复，是同一个东西——
+> 只不过后者在代码审查里看起来是幂等的。
+
+这也是 `schema-util.mjs` 头注释早就写过的那句：「一份微妙的并发原语存在两份实现时，
+其中一份迟早会腐烂」。
+
+### 10.4 修法
+
+`team-hub/approval-binding.mjs` 的补列改为走 `ensureColumn`：
+
+```js
+for (const name of [BINDING_HASH_COLUMN, APPROVAL_ATTEMPT_COLUMN]) {
+  ensureColumn(db, APPROVAL_TABLE, name, 'TEXT')
+}
+```
+
+两列都在时它只做两次读、**不开事务**（启动期绝大多数情况都走这条），因此没有给启动增加写锁排队。
+
+### 10.5 回归锚点（把概率性竞态变成确定性用例）
+
+这次没有只靠「多跑几轮撞」——`dual-write` 那个锚点是概率性的（约 1/8），
+红了也说不清是哪一次交错赢的。新增两条在 `team-hub/approval-binding.test.mjs`：
+
+- **⑨ ★★★ 补列在 BEGIN IMMEDIATE 内重读**：一个 `stalePragmaDb(real, 1)` 代理，
+  让**前 1 次** `PRAGMA table_info` 返回「这两列还不存在」的谎话（那正是窗口里的视角），
+  之后返回真实结构。旧实现拿到谎话就 ALTER → 撞上真实存在的列 → `duplicate column name`；
+  新实现进 `BEGIN IMMEDIATE` 后重读（谎话已用完）→ 看到列已存在 → 不 ALTER。
+  **确定性**地区分两种实现。
+- **⑨ ★★ 源码不变量**：`approval-binding.mjs` 必须 import 并用 `ensureColumn`，
+  且**不得**再有自己 `db.exec` 出去的 `ALTER TABLE`（注释里提到是允许的，所以只查 exec）。
+
+<关于这条用例自身的一个修正>：⑨ 最初写成 `assert.doesNotThrow` + `finally { rmSync }`，
+结果旧实现下它**确实红了，但报出来的原因是 `EPERM: rmSync`**（Windows 上未关闭的
+`DatabaseSync` 句柄让临时目录删不掉），真正的失败原因被盖住了。已改为：先收集抛出的错误、
+关闭连接，**再**断言，并让清理失败不影响断言。
+
+> 一个「清理失败盖住断言失败」的用例，
+> 与一个「红得指向错误的地方」的用例，是同一个东西——排查的人会去查临时目录，而不是去查迁移。
+
+### 10.6 验证读数
+
+| 项 | 结果 |
+| --- | --- |
+| 修复前：两个真实 server 同时对新库启动 | 8 轮命中 1 轮（`duplicate column name: bindingHash`） |
+| 修复后：同探针 | **8 轮 0 失败** |
+| 修复前：`node --test scripts/ci/dual-write-smoke.test.mjs` | 6 次里 1 次 `fail 1`（另在未改动的 HEAD `63c9a7c` 上复现 1/6，**证明与 PRT-607 无关**） |
+| 修复后：同套件 | **6 次全 `pass 4 / fail 0`** |
+| `node --test team-hub/approval-binding.test.mjs` | **37 例全绿** |
+| 退回旧实现再跑 | ⑨ ★★★ 与 ⑨ ★★ **双双变红**，且 ⑨ 的失败原因正是 `duplicate column name: bindingHash`（`approval-binding.mjs:141`） |
+
+### 10.7 诚实边界（本节）
+
+- **触发率未精确量化**：修复前 8 轮命中 1 轮、HEAD 上 6 次命中 1 次，样本都很小；
+  "约 1/8" 这个量级与 §7 的原估计一致，但没有做上百轮统计。
+- **只抽查了这一处**。`ensureApprovalSchema` 是本次**撞见**的那一处；
+  我没有系统扫描「还有没有别的后加文件照抄了非原子写法的 DDL」。
+  下面 §10.8 给了扫描方法，但结果未纳入本次验证。
+- **`ensureColumn` 要求调用点没有已打开的事务**（它自己发 `BEGIN IMMEDIATE`）。
+  本次核过 `ensureApprovalSchema` 的全部调用点都在事务之外
+  （`server.mjs` 模块级、`approval-fixture.mjs`、`baseline-snapshot.mjs`、各测试的夹具），
+  但这是**人工核对**，没有不变量在代码里保证它。
+
+### 10.8 未做但可做的扫描
+
+```powershell
+# 找所有「自己读 PRAGMA、随后 ALTER」的形状（应当为空）
+git grep -n "PRAGMA table_info" -- "*.mjs" | Select-String -NotMatch "schema-util.mjs"
+# 找所有自己 exec 出去的 ALTER
+git grep -n "exec(\`ALTER\|exec('ALTER\|exec(\"ALTER" -- "*.mjs"
+```
+

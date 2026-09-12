@@ -42,9 +42,40 @@ export function columnExists(db, table, column) {
  *
  * 已经是目标状态时**不开事务**——启动期绝大多数调用都属于这种情况，
  * 为一次读就取写锁会让两个进程的启动互相排队（实测能感觉到启动变慢）。
+ *
+ * ## 已经在事务里时**不能**再开一个（2026-09-12 修）
+ *
+ * 调用方可能已经打开了事务（例如运行面仓储的 `createApproval` 端口在它自己的
+ * `BEGIN IMMEDIATE` 里被调用，而端口内部又要补审批表的列）。此时再发一次
+ * `BEGIN IMMEDIATE` 会直接抛：
+ *
+ *     Error: cannot start a transaction within a transaction
+ *
+ * 而它的表现与"补列"毫无关系——三条本来就绿的状态机用例同时变红，报的却是一句
+ * SQLite 的事务错误。
+ *
+ *   > 一个「在事务里也要自己开事务的」原语，
+ *   > 与一个「调用方一旦把它放进事务、它就在完全不相关的地方炸掉」的原语，
+ *   > 是同一个东西——只不过前者在单测里（没人在事务里调它）看起来是对的。
+ *
+ * 已经在事务里时，调用方**本来就持有写锁**，所以"检查 + 变更"已经是原子的，
+ * 不需要也不应该再取一次锁。这条分支仍然做「重读确认」而不是无条件吞异常：
+ * 真失败（磁盘满 / 表被锁 / SQL 写错）照样抛，让调用方的事务回滚。
  */
 export function ensureColumn(db, table, column, ddl) {
   if (columnExists(db, table, column)) return false
+  // `isTransaction` 是 node:sqlite 的 DatabaseSync 属性；用类型判断而不是真值判断，
+  // 免得把替身（只实现 exec/prepare 的夹具）当成"在事务里"。
+  const nested = typeof db.isTransaction === 'boolean' && db.isTransaction
+  if (nested) {
+    try {
+      if (!columnExists(db, table, column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`)
+      return true
+    } catch (e) {
+      if (columnExists(db, table, column)) return false
+      throw e
+    }
+  }
   db.exec('BEGIN IMMEDIATE')
   try {
     if (!columnExists(db, table, column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`)

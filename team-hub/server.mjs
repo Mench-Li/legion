@@ -68,6 +68,10 @@ import { fileURLToPath } from 'node:url'
 import { standardsFor } from './stage-standards.mjs'
 import { evaluatePermission, normalizeOperation } from './permission-engine.mjs'
 import { createRunStore, RunError } from './run-store.mjs'
+// `/api/runtime/next-post` 用「这条任务后面还有没有岗位」这个判定。
+// 与运行仓储里用的是**同一个**函数：两处各写一遍判定，迟早会出现
+// "接口说有下一岗位、交接时却按链尾收口"这种不一致。
+import { resolveNextPost } from '../orchestrator/pipeline/index.mjs'
 import { columnExists as columnExistsImpl, ensureColumn as ensureColumnImpl } from './schema-util.mjs'
 import { loadConfig } from '../packages/shared/src/config.mjs'
 import { SCHEMA as CONFIG_SCHEMA } from './config-schema.mjs'
@@ -170,7 +174,24 @@ enableWal()
  * 领取要用 `BEGIN IMMEDIATE` 与看板任务表竞争同一把写锁，
  * 分成两个进程/两个库就不可能做到「同一条任务只被领一次」。
  */
-const runStore = createRunStore({ db })
+const runStore = createRunStore({
+  db,
+  // PRT-308 交接要**建出下一岗位的任务**并读流水线，而 `tasks`（30 个列）与
+  // `space_stages` 的 schema 属于本文件。注入而不是让运行仓储去认识它们——
+  // 但它们会在运行仓储的事务里被调用（同一个连接），因此
+  // 「建后继任务」与「本尝试收口」是**一个事务**。spec 第 333 行要的
+  // 「原子创建/释放下一岗位任务」就是这件事。
+  //
+  // `readPipeline` 返回的是一个视图对象，这里取它的 `stages`：
+  // 运行仓储只想知道"有哪些岗位、各自的 next 是谁"。
+  // 注意 `readPipeline` 默认 `includeDisabled: true`——这是**必须**的，
+  // 因为一个被停用的下一岗位必须能被识别成"链断了"，
+  // 而不是"根本查不到这个岗位"（两者都要报错，但理由不同）。
+  // `createTaskInTx` 而不是 `createTask`：交接已经在运行仓储的事务里了，
+  // 再开一个会把 `BEGIN IMMEDIATE` 发第二次（两个 `withTx` 各记各的账）。
+  createTask: (payload) => createTaskInTx(payload),
+  readPipeline: (scope) => readPipeline(scope).stages,
+})
 
 /**
  * 运行面路由的公共外壳。
@@ -2440,8 +2461,22 @@ export function saveRule({ scope = 'global', content, by }) {
 }
 
 // ── 写操作 ──
-function createTask(input) {
-  return withTx(() => {
+/**
+ * 建任务（**已在事务内**的版本）。
+ *
+ * 拆出来是因为运行仓储的交接（PRT-308）需要在**它自己的**事务里建后继任务
+ * ——spec 第 333 行要的「原子创建/释放下一岗位任务」就是这件事。
+ *
+ * 为什么不能直接调 `createTask`：本文件与 `run-store.mjs` 各自有一个 `withTx`，
+ * 两个闭包各自维护自己的 `txDepth`。server 的 `createTask` 进到
+ * run-store 已开启的事务里时，它认为自己在最外层，于是又发一次 `BEGIN IMMEDIATE`
+ * ——报 `cannot start a transaction within a transaction`，而这条错误
+ * 看起来像"夹具的问题"，实际是"两处各自记账"的必然结果。
+ *
+ * 因此把函数体单独拿出来，由调用方声明"我已经在事务里了"。
+ */
+function createTaskInTx(input) {
+  {
     const id = nextId()
     const std = taskStandards(input.role, input.acceptance, input.boundary)
     // 目标归属回填：显式 goalId 优先；否则若带 slice 键（如 'T-004:S2' 或 devops 尾 'T-004'），
@@ -2496,7 +2531,12 @@ function createTask(input) {
       VALUES (?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, NULL, ?, ?, ?, ?, '[]', ?, '[]', '[]', '[]', '[]', ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(t.id, t.title, t.description, JSON.stringify(t.acceptance), JSON.stringify(t.boundary), t.priority, t.status, t.ordersVersion, t.parent, t.role, t.scope, JSON.stringify(t.blockedBy), t.slice, t.sliceIdx, t.fixOf, t.fixCount, t.goalId, t.fileDomain ? JSON.stringify(t.fileDomain) : null, t.docSync ? 1 : 0, t.createdAt, t.updatedAt)
     return getTask(id)
-  })
+  }
+}
+
+/** 建任务的**唯一对外入口**：自己开一个事务，然后走上面那个函数体。 */
+function createTask(input) {
+  return withTx(() => createTaskInTx(input))
 }
 
 // ── 目标自动分解：发布目标时按空间编队生成「阶段任务链」，指派给对应智能体 ──
@@ -3411,6 +3451,63 @@ async function handle(req, res, stripPrefix) {
       const attemptId = url.searchParams.get('attemptId')
       if (attemptId === null || attemptId.length === 0) { json(res, 400, { ok: false, error: '缺少 attemptId', code: 'MISSING_PARAM' }); return }
       json(res, 200, { ok: true, attemptId, validations: runStore.validationsOf(attemptId), serverTimeMs: Date.now() })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/runtime/handoff') {
+      // 交接（PRT-308，spec 第 333 行）：当前 Task 收口并**原子创建**下一岗位任务。
+      //
+      // `prevSummary` 是上一阶段的收口结论（一行）；缺它时交接描述里会明说
+      // 「上一阶段未留下收口结论」，而不是省略整行——省略会让下一岗位以为
+      // 交接没发生过，于是它不会去问"上一环到底做完了什么"。
+      //
+      // 这里**不**接受调用方指定下一岗位：下一岗位由流水线决定。
+      // 让调用方指定等于让执行者自己决定流水线怎么走。
+      await handleRun(req, res, (body) => {
+        const r = runStore.handoff({
+          attemptId: requireString(body, 'attemptId'),
+          leaseEpoch: body.leaseEpoch ?? null,
+          actor: requireString(body, 'actor'),
+          prevSummary: body.prevSummary ?? null,
+          reason: body.reason ?? null,
+        })
+        try {
+          const scope = getTask(runStore.getAttempt(body.attemptId).taskId).scope
+          settleGoalsOfScope(scope)
+        } catch { /* 任务不存在时不结算 */ }
+        return r
+      })
+      return
+    }
+    if (req.method === 'GET' && path === '/api/runtime/handoffs') {
+      // 交接记录（只读）：后继是谁、谁交的、什么时候。
+      // 这条记录同时是 `HandingOff → Completed` 要的证据，因此排查
+      // 「为什么收不了口」时要能直接看到它。
+      const attemptId = url.searchParams.get('attemptId')
+      if (attemptId === null || attemptId.length === 0) { json(res, 400, { ok: false, error: '缺少 attemptId', code: 'MISSING_PARAM' }); return }
+      json(res, 200, { ok: true, attemptId, handoffs: runStore.handoffsOf(attemptId), serverTimeMs: Date.now() })
+      return
+    }
+    if (req.method === 'GET' && path === '/api/runtime/next-post') {
+      // 「这条任务后面还有没有岗位、是谁」——验收前要能先看到，
+      // 否则调用方只能靠猜来决定 `hasNextPost`。
+      // 链断/岗位不存在时返回 ok:false + 具名码，而**不是** hasNext:false。
+      const taskId = url.searchParams.get('taskId')
+      if (taskId === null || taskId.length === 0) { json(res, 400, { ok: false, error: '缺少 taskId', code: 'MISSING_PARAM' }); return }
+      // 直接查两列而不是 `getTask`：后者对不存在的任务**抛异常**，
+      // 于是"任务不存在"会变成 500，而它明明是 404（调用方给错了 id）。
+      // 用异常做正常流程控制会让状态码失去意义。
+      const task = db.prepare('SELECT id, scope, role FROM tasks WHERE id = ?').get(taskId)
+      if (task === undefined) { json(res, 404, { ok: false, error: `任务不存在：${taskId}`, code: 'TASK_NOT_FOUND' }); return }
+      const resolved = resolveNextPost({ stages: readPipeline(task.scope ?? 'default').stages, role: task.role ?? null })
+      if (resolved.ok !== true) {
+        json(res, 409, { ok: false, error: resolved.message, code: resolved.code, brokenEdge: resolved.brokenEdge ?? null, serverTimeMs: Date.now() })
+        return
+      }
+      json(res, 200, {
+        ok: true, taskId, role: task.role ?? null,
+        hasNextPost: resolved.hasNext, nextRole: resolved.nextRole, nextLabel: resolved.nextLabel,
+        reason: resolved.reason, serverTimeMs: Date.now(),
+      })
       return
     }
     if (req.method === 'GET' && path === '/api/runtime/budget') {

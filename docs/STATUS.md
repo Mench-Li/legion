@@ -4,9 +4,9 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-12　`run-ci --only test` **PASS**；其中 `test` **69 套件 / 1865 用例**
-（**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 按纪律 SKIP，计数为 67 通过 + 1 跳过 / 1643 用例）
-—— 以本文件所在提交为准；证据 `.ci/2026-09-12T04-16-25-565Z/`
+**最近一次全量基线**：2026-09-12　`run-ci --only test` **PASS**；其中 `test` **72 套件 / 1901 用例**
+（**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 按纪律 SKIP，计数为 70 通过 + 1 跳过 / 1679 用例）
+—— 以本文件所在提交为准；证据 `.ci/2026-09-12T04-27-01-455Z/`
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
 （`scrum/daemon-gf001.json`，`intervalMs: 15000`）同时运行时实测 **31 分钟**（约 7 倍）。
 **因此不要把耗时当回归基线**——只有套件数/用例数/通过与否可用于判定。
@@ -31,7 +31,63 @@
 > - `gf001` 空间非终态任务数为 **0**；T-141 已由将军于 `14:00:32Z` 转 `canceled`
 >   （产物从 patch 记录逐字恢复为 `53d9d15`，需求已由 `G-mtwxx7an-2` 交付，无需重做）。
 
-> **本轮（PRT-307 机器验收：执行成功 ≠ 交付完成）**：
+> **本轮（PRT-305/308 岗位与流水线 + 打回与交接）**：
+> 新增 `orchestrator/pipeline/index.mjs`（**纯函数**：岗位索引、流水线结构读法、
+> `resolveNextPost`、`buildHandoffTask`）、`run_handoffs` **只追加**表、
+> `runStore.handoff/handoffsOf`、路由 `POST /api/runtime/handoff`、
+> `GET /api/runtime/handoffs`、`GET /api/runtime/next-post`；三组套件
+> `prt-pipeline`（16 例）、`handoff-store`（12 例）、`handoff-routes`（8 例）。
+> 阶段 3 由 **10/16** 到 **12/16**（301/302/303/305/307/308/309/310/311/312/313/314），
+> 余 PRT-304/306/315/316（提取类）。
+>
+> **spec 第 333 行要的是「原子创建」，不是「状态走到 Completed」**：
+> `HandingOff` 的定义是「当前 Task 收口并**原子创建/释放下一岗位任务**」。
+> 两个分句各自能独立失败，而第二种最坏——上一环收口了、下一岗位的任务
+> **不存在**，库里看起来一切正常（无报错、上一环 `Completed`），
+> 而链已经断了，要等整个目标停住才被发现。
+>
+> **「链断」与「链尾」在数据上长得一模一样**——这是本批最核心的判定。
+> `space_stages.next` 是**没有外键约束**的字符串，查不到下一岗位有四种成因：
+> ① 就是链尾（正常）；② `next` 拼错一个字母（配置坏了）；③ 下一岗位被停用
+> （后果与拼错一样）；④ 任务上记的 `role` 已改名/停用。混成一个"没有下一岗位"
+> 就是**静默掐断任务链**。因此 `ok: false`（配置错误）与 `hasNext: false`（正常）
+> 刻意不复用同一个字段，`pipelineView` 也把 `tailRoles`（故意的链尾）与
+> `brokenEdges`（坏的）分开报。同理，读不出流水线时**抛错**而不当成空：
+> 当成空会让**所有**任务都被判成链尾，一次读失败静默掐断所有链。
+>
+> **幂等靠两处，且都在同一事务里**：① 先查 `run_handoffs`；② `successor_id` 上
+> 建**唯一索引**。第 ② 条不是冗余——只在应用层查重时，两个并发进程会各查一次、
+> 各建一条，这与 `ensureColumn` 那次的失败模式**一样**。重放是**正常路径**
+> （崩后重扫一定重放同一次交接），因此它必须成功并返回**同一条** `successorId`。
+> 交接的幂等键是 `parent`（上一环任务 id）：标题在交接时会被改写、
+> 创建时间在重放时必然不同，只有它是重放时不变的事实。
+>
+> **原子性的可验证形态写进了用例**：让 `createTask` 插一条真任务、再返回一个
+> **已被占用**的 `successor_id` 去撞唯一索引，断言那条刚插进去的任务
+> **也被回滚**——否则库里会留下一条没人认领的孤儿后继。
+>
+> **`run_handoffs` 同时是 `HandingOff → Completed` 要的证据**：
+> 没有交接记录就收口 → 409 `EVIDENCE_MISSING`。「交接发生了」的证据是
+> **后继任务真的被创建了**，不是调用方说"我交接了"。这条闸门上线时
+> **弄红了一条老用例**（`acceptance-store` 的用例③）：它原来断言"打完验收
+> 之后就能推进到 `Completed`"——那是**较弱的契约**。修法不是放松闸门，
+> 而是把用例改成断言"没有交接记录时会被拒绝，且状态原地不动"。
+>
+> **这条路抓到一个真实缺陷**：`server.mjs` 与 `run-store.mjs` **各有一个**
+> `withTx`，两个闭包各记各的 `txDepth`。server 的 `createTask` 进到运行仓储
+> 已开启的事务里时以为自己在最外层，于是又发一次 `BEGIN IMMEDIATE`，报
+> `cannot start a transaction within a transaction`。看起来像"夹具写错了"，
+> 实际是"两处各自记账"的必然结果——而后果不只是报错：若改成"检测到已在
+> 事务里就跳过 BEGIN"，建任务就不会被回滚，**伪原子的交接会在崩后留下孤儿后继**。
+> 修法是把函数体拆成 `createTaskInTx`，由调用方声明自己已在事务里。
+> 另两处红：`getTask` 对不存在的任务**抛异常**，于是"任务不存在"变成 **500**
+> 而它明明是 **404**（用异常做正常流程控制会让状态码失去意义）；
+> 以及我的夹具让 `claim` 抢先领走了第一次交接建出的后继。
+>
+> 详见 `docs/superpowers/prt/PRT-305-308-pipeline-handoff.md`。
+> PRT-007 基线已按新路由重录。
+>
+> 上一轮（PRT-307 机器验收：执行成功 ≠ 交付完成）：
 > 新增 `orchestrator/acceptance/index.mjs`（**纯函数**：判据核验 + 结论到去向的映射）、
 > `run_validations` **只追加**表、`runStore.recordValidation/validationsOf/criteriaOf`、
 > 路由 `POST /api/runtime/validate` 与 `GET /api/runtime/validations`；三组套件
@@ -499,14 +555,17 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：69 套件 / 1865 用例，`--only test` 整体 PASS** —— 2026-09-12 实测（设 `DSH_CHECKOUT`）
-（PRT-307 机器验收：`acceptance`（**24 例**，纯函数）、`acceptance-store`（**16 例**）、
+**当前基线：72 套件 / 1901 用例，`--only test` 整体 PASS** —— 2026-09-12 实测（设 `DSH_CHECKOUT`）
+（PRT-305/308 岗位与流水线 + 交接：`prt-pipeline`（**16 例**，纯函数）、
+`handoff-store`（**12 例**，事务语义）、`handoff-routes`（**8 例**，真 HTTP + 真 `createTask` 接线）；
+PRT-307 机器验收：`acceptance`（**24 例**，纯函数）、`acceptance-store`（**16 例**）、
 `acceptance-routes`（**10 例**，起真 HTTP 服务）；
 PRT-312 真实进程被强杀：`run-kill-drill`（**2 例**，真 worker 进程 + 真 team-hub + `SIGKILL`）；
 进度表自检 `prt-progress`（**12 例**）；PRT-314 多进程并发 `run-concurrency`（**5 例**）；
 `run-policy`（**14 例**：PRT-309/310/311 的重试额度、退避、Dead Letter、人工处置、幂等键）。
-`DSH_CHECKOUT` 未设时 `plugins/board-plugin` 按纪律 SKIP，计数为 67 通过 + 1 跳过 / 1643 用例。
-上一批基线 66 套件 / 1815 用例（PRT-312 强杀演练 + 进度表自检）。
+`DSH_CHECKOUT` 未设时 `plugins/board-plugin` 按纪律 SKIP，计数为 70 通过 + 1 跳过 / 1679 用例。
+上一批基线 69 套件 / 1865 用例（PRT-307 机器验收）。
+再上一批基线 66 套件 / 1815 用例（PRT-312 强杀演练 + 进度表自检）。
 再上一批基线 65 套件 / 1803 用例（PRT-312 强杀演练）。
 再上一批基线 63 套件 / 1801 用例（PRT-314 多进程并发 + 原子迁移原语）。
 再上一批基线 62 套件 / 1796 用例（PRT-309/310/311 重试退避与 Dead Letter + 人工处置 + 幂等）。

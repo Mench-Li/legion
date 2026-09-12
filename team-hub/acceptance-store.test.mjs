@@ -122,14 +122,18 @@ test('③ 从未被验收过的尝试**不能**进 Completed（EVIDENCE_MISSING�
   assert.equal(store.validationsOf(attemptId).length, 0)
 })
 
-test('③ 打完验收之后，同一条边就通了（闸门认的是记录，不是调用方的话）', () => {
-  const { store, attemptId, epoch } = makeEnv({ acceptance: JSON.stringify(GATE) })
+test('③ 打完验收之后，走完验收的那条边就通了（闸门认的是记录，不是调用方的话）', () => {
+  const { store, attemptId } = makeEnv({ acceptance: JSON.stringify(GATE) })
   store.recordValidation({ attemptId, leaseEpoch: 1, actor: 'w1', runResult: { outcome: 'completed' }, hasNextPost: true })
   assert.equal(store.getAttempt(attemptId).state, 'HandingOff')
-  // 同一个 epoch 继续推进到 Completed：此时已有一条 Validating 时期的验收记录
-  const r = store.transition({ attemptId, leaseEpoch: epoch, workerId: 'w1', to: 'Completed', context: { hasNextPost: false } })
-  assert.equal(r.ok, true)
-  assert.equal(store.getAttempt(attemptId).state, 'Completed')
+  // `HandingOff → Completed` 要求 `handoff` 证据（PRT-308）——直接收口会被拒。
+  // 这条断言是"闸门真的在管这一步"，不是"这条路走不通"：
+  // 没有后继却收口，等于任务链静默断在这里。
+  assert.throws(
+    () => store.transition({ attemptId, leaseEpoch: 1, workerId: 'w1', to: 'Completed', context: { hasNextPost: false } }),
+    (e) => e.code === RUN_ERRORS.EVIDENCE_MISSING,
+    '没有交接记录就收口必须被拒绝')
+  assert.equal(store.getAttempt(attemptId).state, 'HandingOff', '被拒绝后状态必须原地不动')
 })
 
 test('④ 打回：判据确认不满足 → 新建下一次尝试（走重试额度的唯一决策点）', () => {

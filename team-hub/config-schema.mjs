@@ -54,6 +54,15 @@ export const SCHEMA = defineSchema({
     //   UNKNOWN_DECISION       — 验收结论不在三种之内，不得默认去向（来自
     //                            orchestrator/acceptance/index.mjs，经 run-store 抛出）
     'EVIDENCE_MISSING', 'NOT_VALIDATING', 'BAD_ACCEPTANCE_CRITERIA', 'UNKNOWN_DECISION',
+    // PRT-307 机器验收的契约错误码（orchestrator/acceptance/index.mjs 的
+    // ACCEPTANCE_ERRORS，经 run-store 转成 ContractError 抛出）
+    'CRITERIA_NOT_ARRAY', 'RUN_RESULT_INVALID',
+    // PRT-308 交接新增：
+    //   NOT_HANDING_OFF   — 不在 HandingOff 上不能交接
+    //   HANDOFF_REJECTED  — 链断 / 岗位不存在 / 两处判断不一致
+    //   HANDOFF_NOT_WIRED — 没注入 createTask/readPipeline（500，不降级成"没有下一岗位"）
+    //   TASK_NOT_FOUND    — /api/runtime/next-post 的任务不存在（404）
+    'NOT_HANDING_OFF', 'HANDOFF_REJECTED', 'HANDOFF_NOT_WIRED', 'TASK_NOT_FOUND',
   ],
   // team-hub 的 CHAT_ 前缀覆盖了插件的提示词预算变量（CHAT_CTX_*）：它们是**插件**读的配置，
   // team-hub 不读，登记为外来变量，避免误报成「拼写错误」（P3-4）。

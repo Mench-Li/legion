@@ -67,6 +67,15 @@ export const NON_ENV_LITERALS = Object.freeze([
   'RETURN_TO_REQUIRED', 'UNKNOWN_ATTEMPT_STATE', 'RETRY_BUDGET_REQUIRED', 'APPROVAL_ORIGIN_REQUIRED',
   // 系统信号（run.mjs 的优雅停止）
   'SIGINT', 'SIGTERM',
+  // PRT-307 机器验收的具名码（orchestrator/acceptance/index.mjs）。
+  // 它们与上面那批状态机码同理：逐条登记而不是加通配前缀，
+  // 这份清单的价值在于「每一条都被看过一次」。
+  'accepted', 'rejected', 'needs-human',        // ACCEPTANCE_DECISIONS（三种结论）
+  'run-completed', 'structured-result', 'artifact', 'manual',  // CRITERION_KINDS
+  'CRITERIA_NOT_ARRAY', 'RUN_RESULT_INVALID',   // ACCEPTANCE_ERRORS
+  'UNKNOWN_DECISION',                           // acceptanceTarget 的未知结论文案
+  // PRT-305 岗位与流水线的具名码（orchestrator/pipeline/index.mjs）
+  'UNKNOWN_ROLE', 'NO_SUCH_SCOPE',
 ])
 
 export const SCHEMA = defineSchema({

@@ -492,6 +492,30 @@ async function stageTest() {
       files: ['team-hub/acceptance-routes.test.mjs'],
       cwd: ROOT,
     },
+    // PRT-305：岗位、流水线与团队快照。纯函数，因此能穷举边界：
+    // 链尾 / 链断 / 岗位被停用 / 岗位改名 / 自我循环 / 上一环没留结论。
+    // 「链断」与「链尾」在数据上长得一模一样（都表现为"查不到下一岗位"），
+    // 而前者必须报错、后者是正常的——这一组问的就是能不能把它们分开。
+    {
+      // 名字刻意不叫 `pipeline`：已经有一个同名的套件（空间流水线的 SP-P0 契约，
+      // workbench 侧）。两个同名套件会让 CI 输出里"哪个 pipeline 红了"变成一道谜题。
+      label: 'prt-pipeline（PRT-305：岗位与流水线、链断 vs 链尾、交接任务的拼装与幂等键）',
+      files: ['orchestrator/pipeline/pipeline.test.mjs'],
+      cwd: ROOT,
+    },
+    // PRT-308：交接。核心是 spec 第 333 行的「当前 Task 收口并**原子创建**
+    // 下一岗位任务」——因此用例既验"后继真的被建出来了"，也验"建任务失败时
+    // 整笔回滚"（原子性的可验证形态）。
+    {
+      label: 'handoff-store（PRT-308：交接的原子性、幂等重放、链断与环的拒绝）',
+      files: ['team-hub/handoff-store.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      label: 'handoff-routes（PRT-308：交接的 HTTP 契约，走真实的 createTask/readPipeline 接线）',
+      files: ['team-hub/handoff-routes.test.mjs'],
+      cwd: ROOT,
+    },
     {
       label: 'run-kill-drill（PRT-312：真实进程被强杀后不丢任务、不伪装成功、不重复外部写）',
       files: ['team-hub/run-kill-drill.test.mjs'],

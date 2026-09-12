@@ -38,6 +38,7 @@ import {
 } from '../orchestrator/state-machine/index.mjs'
 import { ensureColumn as ensureColumnImpl } from './schema-util.mjs'
 import { AcceptanceError, acceptanceTarget, evaluateAcceptance } from '../orchestrator/acceptance/index.mjs'
+import { buildHandoffTask, resolveNextPost } from '../orchestrator/pipeline/index.mjs'
 
 /** 默认租期。短到「崩溃后能被较快回收」，长到「一次正常执行不会被误判为死亡」。 */
 export const DEFAULT_LEASE_TTL_MS = 120000
@@ -81,6 +82,12 @@ export const RUN_ERRORS = Object.freeze({
   BAD_ACCEPTANCE_CRITERIA: 'BAD_ACCEPTANCE_CRITERIA',
   // 「这条尝试不在可验收的状态上」：验收只对 Validating 有意义。
   NOT_VALIDATING: 'NOT_VALIDATING',
+  // PRT-308 交接：只在 HandingOff 上能交接；链断/岗位不存在/两处判断不一致时拒绝。
+  NOT_HANDING_OFF: 'NOT_HANDING_OFF',
+  HANDOFF_REJECTED: 'HANDOFF_REJECTED',
+  // 交接没有接线（缺 createTask / readPipeline）。**不降级**成"没有下一岗位"：
+  // 那会让交接在静默中变成收口，任务链断在第一环而没人知道。
+  HANDOFF_NOT_WIRED: 'HANDOFF_NOT_WIRED',
 })
 
 /** 允许的人工处置决定。逐个列出，未登记的一律拒绝而不是猜一个默认值。 */
@@ -253,6 +260,33 @@ export function ensureRunSchema(db) {
     )
   `)
   db.exec('CREATE INDEX IF NOT EXISTS idx_run_validations_attempt ON run_validations(attempt_id, seq)')
+
+  // ── PRT-308 交接记录：**只追加** ──
+  //
+  // 状态机为 `HandingOff → Completed` 声明了 `requiresPersist: ['attempt','handoff']`。
+  // 这条表让那句声明真的能被核验：「交接发生了」的证据是**后继任务真的被创建了**，
+  // 而不是调用方说"我交接了"。缺它时 `HandingOff → Completed` 会被 409 拒绝。
+  //
+  // `successor_id` 同时也是幂等的依据：重放交接时先查这个表（在同一个事务里），
+  // 已有后继就直接返回，不再建第二条。
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS run_handoffs (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      attempt_id TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      successor_id TEXT NOT NULL,
+      successor_role TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      lease_epoch INTEGER,
+      reason TEXT,
+      at_ms INTEGER NOT NULL
+    )
+  `)
+  // 一个后继只能被交接一次：这条唯一约束是"同一条任务的同一个下一岗位不会出现两条"
+  // 在**数据库层面**的保证。只在应用层查重时，两个并发进程会各查一次、各建一条——
+  // 与 ensureColumn 那次的失败模式一样。
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_run_handoffs_successor ON run_handoffs(successor_id)')
+  db.exec('CREATE INDEX IF NOT EXISTS idx_run_handoffs_attempt ON run_handoffs(attempt_id, seq)')
 }
 
 // ---------------------------------------------------------------- 内部工具
@@ -293,6 +327,12 @@ function validationRows(db, attemptId) {
 const EVIDENCE_CHECKS = Object.freeze({
   attempt: (db, attemptId) => rowOf(db, attemptId) !== null,
   validation: (db, attemptId) => validationRows(db, attemptId).length > 0,
+  // 「交接发生了」= 真的有一条后继任务被创建（PRT-308）。
+  // 否则 `HandingOff → Completed` 会在**没有后继**的情况下收口：
+  // 任务链静默断在这里，而事件流里 `requires_persist: ['attempt','handoff']`
+  // 看起来像是在保证下一岗位已经建好了。
+  handoff: (db, attemptId) =>
+    db.prepare('SELECT COUNT(*) AS n FROM run_handoffs WHERE attempt_id = ?').get(attemptId).n > 0,
 })
 
 /**
@@ -492,6 +532,11 @@ export function createRunStore({
   maxAttempts = DEFAULT_MAX_ATTEMPTS,
   backoff = DEFAULT_BACKOFF,
   random,
+  // PRT-308 交接要把下一岗位的任务**建出来**，而那张表（30 个列）属于 server.mjs；
+  // 流水线同理（`space_stages`）。两者由调用方注入，本仓储不认识它们的 schema。
+  // 注入的实现会被在**本仓储的事务里**调用（同一个连接），因此三者是原子的。
+  createTask = null,
+  readPipeline = null,
 } = {}) {
   if (db === undefined || db === null) throw new TypeError('createRunStore 需要 db')
   if (typeof clock !== 'function') throw new TypeError('createRunStore 的 clock 必须是函数')
@@ -1556,6 +1601,149 @@ export function createRunStore({
     })
   }
 
+  /** 一次尝试的交接记录（只读）。 */
+  function handoffsOf(attemptId) {
+    return Object.freeze(db.prepare('SELECT * FROM run_handoffs WHERE attempt_id = ? ORDER BY seq').all(attemptId)
+      .map((r) => Object.freeze({
+        seq: Number(r.seq),
+        attemptId: r.attempt_id,
+        taskId: r.task_id,
+        successorId: r.successor_id,
+        successorRole: r.successor_role,
+        actor: r.actor,
+        leaseEpoch: r.lease_epoch === null ? null : Number(r.lease_epoch),
+        reason: r.reason,
+        atMs: Number(r.at_ms),
+      })))
+  }
+
+  /**
+   * 交接（PRT-308，spec 第 333 行）：当前 Task 收口并**原子创建**下一岗位任务。
+   *
+   * 一次事务里做完三件事：建后继任务 → 记交接记录 → 把本尝试终结为 `Completed`。
+   * 分成两步（先建任务、再改状态）在崩在中间时会留下一条孤儿后继：
+   * 本任务还在 `HandingOff`，而下一岗位已经在跑了——重扫时会**再建一条**。
+   *
+   * 幂等靠两处，且都在同一个事务里：
+   *   ① 先查 `run_handoffs` 有没有这条尝试的记录 → 有就直接返回它的 `successorId`；
+   *   ② `run_handoffs.successor_id` 上有**唯一索引**——这是数据库层面的保证。
+   * 只在应用层查重时，两个并发进程会各查一次、各建一条（与 `ensureColumn`
+   * 那次的失败模式一样）。
+   *
+   * `createTask` / `readPipeline` 由调用方注入：
+   *   - `createTask(payload) → {id}`：建任务要写 30 个列，而那张表属于 server.mjs。
+   *     注入而不是让 run-store 去认识 tasks 的 schema——但它**必须**在同一个事务里
+   *     被调用（同一个连接），否则原子性就没了。
+   *   - `readPipeline(scope) → stages`：`space_stages` 同样不属于运行仓储。
+   * 两者缺失时报具名错误（`HANDOFF_NOT_WIRED`），**不降级**成"没有下一岗位"。
+   */
+  function handoff({ attemptId, leaseEpoch = null, actor, prevSummary = null, reason = null } = {}) {
+    if (typeof actor !== 'string' || actor.length === 0) {
+      throw new ContractError(RUN_ERRORS.WORKER_REQUIRED, 'handoff 需要 actor：谁做的交接决定必须留痕')
+    }
+    if (typeof createTask !== 'function' || typeof readPipeline !== 'function') {
+      throw fail(RUN_ERRORS.HANDOFF_NOT_WIRED,
+        `交接没有接线（createTask=${typeof createTask}，readPipeline=${typeof readPipeline}）。` +
+        '**不降级**成"没有下一岗位"：那会让交接在静默中变成收口，任务链断在第一环而没人知道',
+        {}, 500)
+    }
+    return withTx(() => {
+      const atMs = clock()
+      const row = rowOf(db, attemptId)
+      if (row === null) throw new ContractError(RUN_ERRORS.ATTEMPT_NOT_FOUND, `没有这条尝试：${attemptId}`)
+      if (leaseEpoch !== null && leaseEpoch !== undefined && row.lease_epoch !== leaseEpoch) {
+        throw fail(RUN_ERRORS.LEASE_EPOCH_STALE,
+          `leaseEpoch 不符：请求 ${leaseEpoch}，实际 ${row.lease_epoch}——拒绝写入过期的交接`,
+          { currentEpoch: row.lease_epoch, currentWorkerId: row.worker_id })
+      }
+
+      // ── 幂等：已经交接过了就直接返回那条后继，不再建第二条 ──
+      // 这一句必须在最前面（在任何写之前）：崩后重扫、租约过期回收、人工重放
+      // 都会走到这里，而"同一环出现两条下一岗位的任务"会让下一环被做两遍。
+      const existing = db.prepare('SELECT * FROM run_handoffs WHERE attempt_id = ? ORDER BY seq').get(attemptId)
+      if (existing !== undefined) {
+        return Object.freeze({
+          ok: true, action: 'already-handed-off',
+          successorId: existing.successor_id, successorRole: existing.successor_role,
+          attempt: shapeAttempt(row), taskStatus: projectToTask(db, row, row.state, atMs),
+          reason: '这条尝试已经交接过了（重放是正常路径：崩后重扫会重放同一次交接）',
+          serverTimeMs: atMs,
+        })
+      }
+
+      if (row.state !== 'HandingOff') {
+        throw fail(RUN_ERRORS.NOT_HANDING_OFF,
+          `交接只对 HandingOff 上的尝试有意义，当前是 ${row.state}。` +
+          '从别处交接等于跳过"验收通过"这一步——下一岗位会在上一环还没被接受时就开始做',
+          { attemptId, state: row.state }, 409)
+      }
+
+      const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(row.task_id)
+      if (task === undefined) {
+        throw new ContractError(RUN_ERRORS.ATTEMPT_NOT_FOUND, `任务不存在：${row.task_id}`)
+      }
+
+      const stages = readPipeline(task.scope ?? 'default')
+      const resolved = resolveNextPost({ stages, role: task.role ?? null })
+      if (resolved.ok !== true) {
+        // 链断 / 岗位不存在 / 任务没记岗位。**不报成链尾**，也不自动收口：
+        // 收口会让任务链静默断在这里，直到整个目标停住才被发现。
+        throw fail(RUN_ERRORS.HANDOFF_REJECTED, resolved.message,
+          { attemptId, role: task.role ?? null, pipelineCode: resolved.code, brokenEdge: resolved.brokenEdge }, 409)
+      }
+      if (resolved.hasNext !== true) {
+        // 走到了 HandingOff，而流水线说这是链尾——**两处判断不一致**必须报出来。
+        // 自动收口成 Completed 会把这份不一致藏掉，而藏掉之后没人会去查
+        // 到底是验收时判错了，还是流水线在这中间被改过。
+        throw fail(RUN_ERRORS.HANDOFF_REJECTED,
+          `这条任务在 HandingOff，但流水线说岗位「${task.role}」是链尾（${resolved.reason}）。` +
+          '两处判断不一致：不自动收口，否则这条不一致永远不会有人看见',
+          { attemptId, role: task.role ?? null }, 409)
+      }
+
+      const { task: payload } = buildHandoffTask({
+        prevTask: { ...task, goalId: task.goalId ?? null },
+        nextStage: resolved.nextStage,
+        stages,
+        prevSummary,
+      })
+      const created = createTask(payload)
+      const successorId = created?.id
+      if (typeof successorId !== 'string' || successorId === '') {
+        // 建任务没有返回 id：此时**不能**当成功。没有 id 就没有后继可指，
+        // 而记一条空的交接等于把"下一岗位已建好"写成事实。
+        throw fail(RUN_ERRORS.HANDOFF_REJECTED,
+          `createTask 没有返回后继任务 id（收到 ${JSON.stringify(created)}）：无法确认后继真的被创建了`,
+          { attemptId }, 500)
+      }
+
+      db.prepare(
+        `INSERT INTO run_handoffs (attempt_id, task_id, successor_id, successor_role, actor, lease_epoch, reason, at_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(attemptId, row.task_id, successorId, resolved.nextRole, actor,
+        Number.isInteger(row.lease_epoch) ? row.lease_epoch : null, reason, atMs)
+
+      // 收口：`HandingOff → Completed`。这一步会过 PRT-307 的证据闸门，
+      // 而上面刚写进去的交接记录正是它要的证据——"交接发生了"的证据是
+      // **后继任务真的被创建了**，不是调用方说"我交接了"。
+      const settled = transition({
+        attemptId, leaseEpoch: Number(row.lease_epoch), workerId: actor, to: 'Completed',
+        context: { hasNextPost: false }, reason: reason ?? `handoff:${resolved.nextRole}`,
+      })
+
+      return Object.freeze({
+        ok: true,
+        action: 'handed-off',
+        successorId,
+        successorRole: resolved.nextRole,
+        attempt: settled.attempt,
+        taskStatus: settled.taskStatus,
+        requiresPersist: settled.requiresPersist,
+        serverTimeMs: atMs,
+      })
+    })
+  }
+
   function stats() {
     // 只用服务端时钟。「有多少租约已过期」是一个**判定**而不是一次查询参数：
     // 允许调用方传时间，就等于允许它把「全都过期」或「一个都没过期」说出来。
@@ -1581,6 +1769,8 @@ export function createRunStore({
     listHeld, resolveAttempt,
     // PRT-307：机器验收的唯一入口（核判据 → 落库 → 按结论推进状态）
     recordValidation, validationsOf, criteriaOf,
+    // PRT-308：交接（原子创建下一岗位任务 + 收口）
+    handoff, handoffsOf,
     getAttempt, historyOf, eventsOf, stats,
     withTx,
     /** 供测试与诊断：当前生效的默认租期。 */

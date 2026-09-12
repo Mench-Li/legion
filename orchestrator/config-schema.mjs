@@ -88,6 +88,20 @@ export const NON_ENV_LITERALS = Object.freeze([
   'EXECUTOR_CONTEXT_NOT_FROZEN', 'EXECUTOR_CONTEXT_UNVERIFIED',
   'EXECUTOR_BAD_WIRING', 'EXECUTOR_RUN_NOT_COMPLETED',
   'EXECUTOR_PROVIDER_THREW', 'EXECUTOR_PROVIDER_EMPTY',
+  // PRT-510 运行侧的预算闸门（worker/budget-gate.mjs 的 BUDGET_GATE_CODES）。
+  //
+  // 与 EXECUTOR_* 同一口径：这些码会被跨进程读取（worker 上报 → 启动结果 →
+  // Launcher 诊断页 → 人排查），所以是契约不是实现细节。
+  //
+  // 它们存在的理由也是"要说清是哪种处境"：预留失败（去看余额与预算配置）、
+  // 结算失败（预留仍占着，要去看账本）、没上限（这次花费不受任何预留约束）、
+  // 没接闸门（`not-gated`，与"预算充足"完全不同的处境）——
+  // 四者的处置动作各不相同。
+  'BUDGET_RESERVE_FAILED', 'BUDGET_UNBOUNDED', 'BUDGET_SETTLE_FAILED',
+  'BUDGET_ACTOR_REQUIRED', 'BUDGET_BAD_WIRING', 'BUDGET_OBSERVE_FAILED',
+  // 「没接闸门」这个状态必须与「预算充足」区分得开：
+  // 一个没接预算的执行与一个预算充足的执行，在结果上不该长得一样。
+  'not-gated', 'bounded', 'unbounded',
   // 缺阶段时 worker 的状态名
   'no-stages',
   // 状态机的具名错误码（state-machine/transitions.mjs 的 TRANSITION_ERRORS 与 states.mjs）。

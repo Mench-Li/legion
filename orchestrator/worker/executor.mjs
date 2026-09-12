@@ -47,6 +47,7 @@
 import { createHubContextStage } from './context-stage.mjs'
 import { createDshRuntimeAdapter } from '../../runtime/adapters/dsh/index.mjs'
 import { TERMINAL_TO_OUTCOME, isTerminalEventType, RUN_REQUEST_REQUIRED } from '../../runtime/contracts/run.mjs'
+import { createBudgetGate } from './budget-gate.mjs'
 
 /** 本模块的具名拒绝码。跨进程读取（worker 上报 → hub 记录 → 人排查），属契约。 */
 export const EXECUTOR_CODES = Object.freeze({
@@ -105,6 +106,8 @@ export async function createProductionExecutor(deps = {}) {
     post, get, host = null, selfCheck = null, canRead,
     loadSources, requestFor = null, clock = () => Date.now(),
     adapterFactory = createDshRuntimeAdapter,
+    // PRT-510 运行侧：给了 actor 才接预算闸门（见下面为什么没有默认值）。
+    budgetActor = null, currency, onBudgetNote, scope = 'default',
   } = deps
 
   if (typeof post !== 'function' || typeof get !== 'function') {
@@ -173,6 +176,26 @@ export async function createProductionExecutor(deps = {}) {
   // 探测是**一次**的事：能力协商决定了能不能要求结构化输出，
   // 而它是引擎级的结论，不随 Attempt 变。第一次执行前探一次。
   let probed = false
+
+  // ── PRT-510 运行侧：预算闸门 ──
+  //
+  // `budgetActor` 给了才建闸门。**不给默认值**：账本要求"谁结算的必须留痕"，
+  // 一个默认 actor 会让"没人签名"与"某人签了名"在账本里长得一样。
+  // 而"没接闸门"这件事在结果里是可见的（`budgetState: 'not-gated'`），
+  // 不会与"预算充足"同形。
+  const budgetGate = typeof budgetActor === 'string' && budgetActor.trim() !== ''
+    ? createBudgetGate({
+        post,
+        actor: budgetActor,
+        scope,
+        ...(currency === undefined ? {} : { currency }),
+        ...(onBudgetNote === undefined ? {} : { onNote: onBudgetNote }),
+      })
+    : null
+
+  // 运行中账本要求取消时记下**理由**。本层只记录，不自己取消——
+  // 它不知道 Run 的生命周期，而"以为取消已经发出去了"是最坏的一种错觉。
+  let cancelRequested = null
 
   /**
    * 读回**冻结下来的**正文。
@@ -250,6 +273,25 @@ export async function createProductionExecutor(deps = {}) {
         void p
       }
 
+      // ── PRT-510 运行侧：**花钱之前**把钱占住 ──
+      //
+      // 顺序是刻意的：预留必须发生在第一次真调用之前。
+      // 反过来（先跑再结算）的话，两个 Attempt 可以同时跑完、
+      // 都"没超自己的上限"，而账户里一共只有一份钱。
+      //
+      //   > 「花了多少」可以在事后回答；「还能不能花」只能在事前回答。
+      //
+      // 预算闸门是可选的（`budgetGate === null` 时整段跳过），但跳过这件事
+      // **在返回里是可见的**：`budgetState` 会是 `'not-gated'`。
+      // 一个"没接预算"的执行与一个"预算充足"的执行在结果上不该长得一样。
+      let reservation = null
+      let budgetState = 'not-gated'
+      if (budgetGate !== null) {
+        const reserved = await budgetGate.reserve(lease)
+        reservation = reserved.reservation
+        budgetState = reserved.budgetState ?? null
+      }
+
       let terminal = null
       try {
         for await (const ev of adapter.execute(request)) {
@@ -257,38 +299,53 @@ export async function createProductionExecutor(deps = {}) {
           // 用契约里的判定函数而不是在这里再写一遍那四个字符串：
           // 抄一遍就是给"新增终态时忘了一处"留门。
           if (ev !== null && typeof ev === 'object' && isTerminalEventType(ev.type)) terminal = ev
+          // 运行中的用量采集：账本可能要求取消（到了硬上限）。
+          else if (budgetGate !== null && ev !== null && typeof ev === 'object' &&
+            (ev.type === 'usage.updated' || ev.type === 'artifact.produced')) {
+            const o = await budgetGate.observe(lease, ev.usage ?? ev)
+            // 本层**不自己取消**：它不知道 Run 的生命周期，而
+            // "以为取消已经发出去了"是最坏的一种错觉。让适配器/调用方去取消。
+            if (o.cancel === true) cancelRequested = o.kind ?? 'budget-exceeded'
+          }
         }
       } catch (e) {
         // 引擎抛错 → 这次执行失败。**不吞**：吞掉会让 Attempt 停在一个
         // 没有结论的状态，而租期到期后它会被重试——一次真实的失败变成一次静默重试。
+        //
+        // 但**结算必须先走**：半途抛出时用量未知，按"结果未知"锁住余额，
+        // 而不是把预留悄悄放掉（放掉就等于宣称"这次没花钱"）。
+        const settlement = budgetGate === null
+          ? null
+          : await budgetGate.settle(lease, 'outcome_unknown', terminal)
         throw new ExecutorError(EXECUTOR_CODES.RUN_NOT_COMPLETED,
-          `执行引擎抛错：${e?.message ?? e}`, { attemptId: lease.attemptId, cause: e })
+          `执行引擎抛错：${e?.message ?? e}`,
+          { attemptId: lease.attemptId, cause: e, budgetState, settlement })
       }
 
-      if (terminal === null) {
-        // 事件流结束却没有终态。适配器自己会保证这一点，但**这一层不能假设它做到了**：
-        // 没有终态时唯一安全的结论是"结果未知"，而不是"大概成功了"。
-        return Object.freeze({
-          outcome: 'outcome_unknown',
-          detail: '执行引擎的事件流结束了，但没有给出终态事件。' +
-            '此时唯一安全的结论是结果未知——外部写是否已经发生无法判断，禁止自动重试写入',
-          contextSnapshotRef: lease.attemptId,
-        })
-      }
+      const outcome = terminal === null
+        ? 'outcome_unknown'
+        : (TERMINAL_TO_OUTCOME[terminal.type] ?? 'outcome_unknown')
 
-      const outcome = TERMINAL_TO_OUTCOME[terminal.type] ?? 'outcome_unknown'
-      if (outcome === 'completed') {
-        return Object.freeze({
-          outcome: 'completed',
-          detail: summarize(terminal),
-          contextSnapshotRef: lease.attemptId,
-        })
-      }
-      return Object.freeze({
+      // 结算：按**终态**而不是"execute 返回了"来映射。
+      // 没有终态时 outcome 是 `outcome_unknown` → 账本转 `locked`，
+      // **不写任何金额**（写入任何数字都等于宣称"算清了"）。
+      const settlement = budgetGate === null
+        ? null
+        : await budgetGate.settle(lease, outcome, terminal)
+
+      const base = {
         outcome,
-        detail: summarize(terminal),
+        detail: terminal === null
+          ? '执行引擎的事件流结束了，但没有给出终态事件。' +
+            '此时唯一安全的结论是结果未知——外部写是否已经发生无法判断，禁止自动重试写入'
+          : summarize(terminal),
         contextSnapshotRef: lease.attemptId,
-      })
+        budgetState,
+        reservation,
+        settlement,
+      }
+      if (cancelRequested !== null) base.cancelRequested = cancelRequested
+      return Object.freeze(base)
     },
   })
 

@@ -2176,7 +2176,7 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：118 套件 / 2951 用例，`--only test` 整体 PASS** —— 2026-09-12 实测（设 `DSH_CHECKOUT`）
+**当前基线：119 套件 / 2981 用例，`--only test` 整体 PASS** —— 2026-09-12 实测（设 `DSH_CHECKOUT`）
 
 （**本批新增**：`diagnostic-package`（**29 例**，PRT-710 脱敏诊断包：**结构性排除优先于文本过滤**——密钥库/凭证/业务库正文
 **根本不进包**且**从未被读过**；「没包含」与「被排除」可区分；**0 次脱敏命中 ≠ 包是干净的**；判定用**落盘后读回来的字节**，
@@ -2368,6 +2368,7 @@ P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-
 | | `docs/superpowers/prt/prt-009-execution-evidence.json` | 生产空间 `software` 的旧路径执行证据：状态序列 / 耗时分布 / 人工介入 / **可用性空窗**。数值全部来自 `audit` 表只读提取 |
 | | `docs/superpowers/prt/prt-009-gf001-controlled-evidence.json` | 受控空间 `gf001` 的同一组指标（**旧路径**，含两次中止轮次），与上一行**不可互相冒充**——两者是不同总体 |
 | | `docs/superpowers/prt/PRT-001-topology-inventory.md`、`prt-001-003-inventory.json` | PRT-001/003 拓扑与配置密钥清单。**4 个 path 字段默认落在安装目录内**（越界写入，PRT-505/257 输入）；仓库内明文凭证 0 处 |
+| | `docs/superpowers/prt/PRT-711-runtime-state-mapping.md` | PRT-711 Runtime 状态 → 产品状态 → **Orchestrator 行为**：`productStateOf` 只做了表格前两列，第三列才是它要决定的事；为什么**认不出状态时绝不默认放行**（执行花的是用户的钱）；`degraded`「不给判据」为什么不等于「判据都满足」；「产品还能用」为什么不能读成「数字员工在上班」 |
 | | `docs/superpowers/prt/PRT-705-orphan-sweep.md` | PRT-705 僵尸进程清理：**PID 会被回收**，所以按号码杀会毁掉一个不相干的程序——四条结论（`gone`/`verified`/`recycled`/`unknown`）为什么不能合成两条；「记录坏了」≠「没有记录」；为什么清理**默认关闭**；陈旧记录为什么是**有界**危害 |
 | | `docs/superpowers/prt/PRT-709-log-rotation.md` | PRT-709 日志轮转与磁盘保护：先修的是**一个会卡死子进程的 bug**（管道没人读 → 写满就阻塞 → 熔断器永远不介入）；为什么"排空不许依赖日志配置"；磁盘写满时的三条禁令（绝不删活动文件 / 绝不删代数 1 / 绝不假装成功）；「读不出来」与「没查」都不是零；为什么日志的生命周期不能绑在启动成功上 |
 | | `docs/superpowers/prt/PRT-710-redacted-diagnostic-package.md` | PRT-710 脱敏诊断包：为什么**结构性排除**优先于文本过滤、被排除的文件"从未被读过"、0 次命中为什么不等于干净、判定为什么用**落盘后读回来的字节**；落地时量出的两个真 bug；入口为什么必须排在布局/配置校验之前 |

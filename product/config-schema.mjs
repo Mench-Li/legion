@@ -141,6 +141,18 @@ export const SCHEMA = defineSchema({
     // 进程探针比较的错误码：`ESRCH` = 不在了；其余（含 `EPERM`）算"在"
     'ESRCH',
     'EPERM',
+
+    // ── PRT-711 Runtime 状态 → 产品状态 → Orchestrator 行为 ──────────────
+    //
+    // `RUNTIME_STATES` 的六个值同时也是 `productStateOf` 的输出与界面文案的键，
+    // 所以它们既是状态名也是字面量。前四个已经在别处出现过，这里补齐后两个
+    // 与三档认领范围——它们会被写进状态文件与界面。
+    'incompatible',
+    'upgrading',
+    'required-capabilities-only',
+    'recovery-judgement',
+    'drain',
+    'unchanged',
     // 轮转 note 的具名码（不是 `LOG_CODES` 的成员，但同样只用于说明）
     'FOREIGN_FILES',
     'PROTECTED_GEN1',

@@ -108,6 +108,20 @@ export const SCHEMA = defineSchema({
     //   PROBE_SECRETS_UNAVAILABLE — 密钥库打不开（DPAPI/损坏/平台不支持）
     //   PROBE_NO_CREDENTIAL_REF — 没给出档案 / 档案没有 endpoint
     'PROBE_LAYOUT_BLOCKED', 'PROBE_SECRETS_UNAVAILABLE', 'PROBE_NO_CREDENTIAL_REF',
+    // PRT-506 迁移（team-hub/model-migration.mjs 的 MIGRATION_CODES / 一处 refused 码）：
+    //   MIGRATION_OK                  — 计划可执行
+    //   MIGRATION_RUNTIME_TYPE_REQUIRED — 没给 runtimeType。老数据里没有这个字段，
+    //                                    猜它会让请求以错误的协议发出去
+    //   MIGRATION_ID_COLLISION        — 归一化后两个不同的模型落到同一个 id。
+    //                                    这是一次**静默合并**，必须拒绝整个计划
+    //   MIGRATION_SECRET_IN_SOURCE    — 源数据里出现疑似密钥。非敏感迁移不该看到密钥
+    //   MIGRATION_BAD_SOURCE          — 源不是数组
+    //   MIGRATION_PLAN_STALE          — 用户确认的计划与服务端现在算出来的不一致
+    //   MIGRATION_INVALID_PROFILE     — 构造出的档案没通过权威校验（res.right 是 errors）
+    //   MIGRATION_PARTIAL             — 执行中途失败（会带上已完成的部分）
+    'MIGRATION_OK', 'MIGRATION_RUNTIME_TYPE_REQUIRED', 'MIGRATION_ID_COLLISION',
+    'MIGRATION_SECRET_IN_SOURCE', 'MIGRATION_BAD_SOURCE', 'MIGRATION_PLAN_STALE',
+    'MIGRATION_INVALID_PROFILE', 'MIGRATION_PARTIAL',
   ],
   // team-hub 的 CHAT_ 前缀覆盖了插件的提示词预算变量（CHAT_CTX_*）：它们是**插件**读的配置，
   // team-hub 不读，登记为外来变量，避免误报成「拼写错误」（P3-4）。

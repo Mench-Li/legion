@@ -656,6 +656,14 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-506：迁移老的非敏感模型配置。这一组守的是一次迁移最危险的产物——
+      // **一份看起来可用的配置**。老数据里没有 runtimeType、endpoint、凭证，
+      // 三样都不许猜；迁移的正确产物是「确定的部分 + 待补清单」。
+      label: 'model-migration（PRT-506：迁移不猜协议/地址/凭证，产出的是待补清单而非"迁移完成"）',
+      files: ['team-hub/model-migration.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-507 后端：把 PRT-504 的探测接上 Workbench。
       // 在此之前 `git grep createModelProbe` 的非测试命中**只有它自己的实现文件**：
       // 整套实现 + 两个套件 + 文档都在，而没有任何入口能触发它。

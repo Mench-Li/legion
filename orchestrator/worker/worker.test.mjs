@@ -714,8 +714,26 @@ test('⑦ runWorkerProcess：hub 客户端建不起来时仍以 hub-unreachable 
 
 test('⑥ 真实进程：入口能起来、写状态文件；被终止后状态文件**停在那**（这正是要判定的东西）', async () => {
   const { root, dataDir } = tempDataDir()
+  // ★ 子进程必须在**所有**路径上被回收，包括断言失败的那条。
+  //
+  // 这里原先的 `try/finally` 只删了临时目录，没有杀子进程。于是一旦
+  // 第 730 行（等状态文件）之前的任何断言失败，那个进程就带着继承来的
+  // `stdout`/`stderr` 管道活了下去——**管道还开着，`node --test` 就永远
+  // 退不出来**。结果是一次真实的失败被伪装成「套件超过 300s 被杀」：
+  // 报告里只剩下一句"可能有泄漏句柄或死锁"，而真正的原因（状态文件没出现）
+  // 恰好被埋掉了。
+  //
+  //   > 一个把"测试失败了"说成"测试卡住了"的测试，
+  //   > 与一个永远不会失败的测试，在"值班的人知不知道出了什么事"上
+  //   > 是同一个东西——两者都只会看到绿灯或者一句与原因无关的话。
+  //
+  // 上面 `run-ci.mjs` 的注释（TEST_SUITE_TIMEOUT_MS 那一段）已经记过同一条
+  // 教训：超时兜底是对的，但**真正该做的是让测试自己回收句柄**。
+  // 实测依据：本套件单独复跑 4/4 全绿（各 15.8s），只有全量 CI 下才有一次
+  // 「⑥ 快速失败 + 整个套件挂到 300s 被杀」——这正是泄漏的特征。
+  let child = null
   try {
-    const child = spawn(process.execPath, [WORKER_ENTRY], {
+    child = spawn(process.execPath, [WORKER_ENTRY], {
       env: { ...process.env, LEGION_DATA_DIR: dataDir, LEGION_WORKER_ID: 'real-1' },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
@@ -743,10 +761,15 @@ test('⑥ 真实进程：入口能起来、写状态文件；被终止后状态�
 
     const exited = new Promise((resolve) => child.once('exit', (code, signal) => resolve({ code, signal })))
     child.kill('SIGTERM')
+    // 计时器必须**能取消**：原来那个 `setTimeout` 谁都不清，于是在成功路径上
+    // 也会让事件循环多挂 15 秒（对 300s 上限不致命，但它是一项没有理由的
+    // 句柄泄漏——而正是这类东西让"哪一次挂住"变得难以判断）。
+    let timer = null
     const result = await Promise.race([
       exited,
-      new Promise((r) => setTimeout(() => r({ code: 'timeout' }), 15000)),
+      new Promise((r) => { timer = setTimeout(() => r({ code: 'timeout' }), 15000) }),
     ])
+    if (timer !== null) clearTimeout(timer)
     assert.notEqual(result.code, 'timeout', `终止后 15s 未退出；输出：\n${out.join('')}`)
 
     if (process.platform === 'win32') {
@@ -768,6 +791,21 @@ test('⑥ 真实进程：入口能起来、写状态文件；被终止后状态�
       assert.equal(finalStatus.status.stopReason, 'SIGTERM')
     }
   } finally {
+    // ★ 无论前面成功、失败还是抛错，子进程都要被回收。
+    //   一个没被回收的子进程会让这个套件在**失败时挂住**，
+    //   从而把真正的原因（断言那句话）换成"套件超过 300s 被杀"。
+    if (child !== null && child.exitCode === null && child.signalCode === null) {
+      const dead = new Promise((resolve) => child.once('exit', resolve))
+      try { child.kill('SIGKILL') } catch { /* 已经死了 */ }
+      // 再给 5 秒；拿不到就放弃等待——**不要**为了等一个不肯死的进程
+      // 把整个套件搭进去（那正是这条修复要消灭的行为）。
+      let t = null
+      await Promise.race([
+        dead,
+        new Promise((r) => { t = setTimeout(r, 5000) }),
+      ])
+      if (t !== null) clearTimeout(t)
+    }
     rmSync(root, { recursive: true, force: true })
   }
 })

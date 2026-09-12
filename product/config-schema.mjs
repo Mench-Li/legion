@@ -224,6 +224,29 @@ export const SCHEMA = defineSchema({
     'automatic',
     'no-state-file',
     'done',
+
+    // ── PRT-708 系统托盘 ────────────────────────────────────────────────
+    //
+    // 八个诊断码 + 五个动作 id + `status` 这个动作名。
+    // 动作 id 同时是菜单的键与界面上的锚点，所以它们也是字面量。
+    'TRAY_UNKNOWN_ACTION',
+    'TRAY_ACTION_FAILED',
+    'TRAY_QUIT_UNCONFIRMED',
+    'TRAY_WORKBENCH_NOT_READY',
+    'TRAY_OBSERVE_FAILED',
+    'TRAY_OPEN_FAILED',
+    'TRAY_BUSY',
+    'TRAY_NOT_SUPPORTED',
+    'open-workbench',
+    'status',
+    'start',
+    'stop',
+    'quit',
+    'degraded',
+    'upgrading',
+    'starting',
+    'ready',
+    'unavailable',
     // 轮转 note 的具名码（不是 `LOG_CODES` 的成员，但同样只用于说明）
     'FOREIGN_FILES',
     'PROTECTED_GEN1',

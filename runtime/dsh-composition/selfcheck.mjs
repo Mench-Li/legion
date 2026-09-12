@@ -132,7 +132,7 @@ export async function probeSandbox(port = {}, { argv = PROBE_ARGV, mode = 'works
  * @param {{composition?: object, sandbox?: object, runtime?: {ok?: boolean, version?: string|null, reason?: string}}} inputs
  */
 export async function startupSelfCheck(inputs = {}) {
-  const { composition, sandbox, runtime } = inputs
+  const { composition, sandbox, runtime, guardProbe, availabilityProbe } = inputs
   const checks = []
 
   // ① 组合补丁层是否真的挂上并生效
@@ -203,7 +203,15 @@ export async function startupSelfCheck(inputs = {}) {
   //
   //   > 一个「每个强制点单看都是绿的」的启动自检，
   //   > 与一个「点与点之间已经矛盾了」的启动自检，不是同一个东西。
-  const guardConsistency = checkGuardApprovalConsistency()
+  // 两个探针都可注入，理由与 ①②③④ 的端口完全一样：
+  // 不能注入的检查只能在"本来就全绿"的输入上跑过，而那样的检查与一条不存在的检查
+  // 在"它到底拦住了什么"上是同一个东西。
+  const guardConsistency = (typeof guardProbe === 'function' ? guardProbe : checkGuardApprovalConsistency)({
+    // 修法表由调用方注入（`bootstrap.mjs` 有，本模块没有——反向 import 会成环）。
+    // 注不进来时 `repairAction` 为 `null`，而那本身就是一个信号：
+    // 这条违规没有对应的修复入口。
+    repairActions: inputs.repairActions ?? null,
+  })
   checks.push({
     name: 'guard-approval-consistency',
     ok: guardConsistency.ok,
@@ -212,7 +220,9 @@ export async function startupSelfCheck(inputs = {}) {
         + `探针下限 ${guardConsistency.probeFloor.executions} 个样本（guard 拦下 ${guardConsistency.consistent.guardDeniedCount} 个）`
       : `跨点不变量被违反（${guardConsistency.consistent.violations.length} 例），定位点 ${JSON.stringify(guardConsistency.consistent.points)}`,
     reasons: [
-      ...guardConsistency.consistent.violations.map((v) => `${v.code} @ ${v.point} ${v.callId ?? ''}：${v.detail}`),
+      // 理由里带上修复入口：只说"违反了点 X"，值班的人还得自己去翻该跑什么。
+      ...guardConsistency.consistent.violations.map((v) => `${v.code} @ ${v.point} ${v.callId ?? ''}`
+        + `${v.repairAction === null ? '（**没有**对应的修复入口）' : ` → ${v.repairAction}`}：${v.detail}`),
       // 反向控制没红 ⇒ 这条检查在坏输入上也不说话，等于一条不存在的检查。
       ...(guardConsistency.tamperedCaught
         ? []
@@ -226,7 +236,7 @@ export async function startupSelfCheck(inputs = {}) {
   // 前五项都是**静态**的：它们能证明"接线是对的"，不能证明"卡住的时候真的会结算"。
   // 这一项用真定时器把每一种成因跑一遍——没结算 = 工具调用会无限期挂起，
   // 而那正是 spec §6.8 line 476 描述的那个故障。
-  const availability = await probeTwoPhaseAvailability()
+  const availability = await (typeof availabilityProbe === 'function' ? availabilityProbe : probeTwoPhaseAvailability)()
   checks.push({
     name: 'enforcement-availability',
     ok: availability.ok,

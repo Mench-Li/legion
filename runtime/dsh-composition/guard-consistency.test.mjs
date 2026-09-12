@@ -200,6 +200,32 @@ test('④ ★★ 自检的输入是可注入的：换一份下限，结论跟着
   assert.equal(full.ok, true)
 })
 
+test('④ ★★★ 违规说得出去跑哪个修复入口（注入了修法表时）', async () => {
+  // spec line 479 抱怨的原话是"审计里找不到该修哪里"。点得出 `guard` 只是一半：
+  //   > 一条「说得**出点名**」的违规，
+  //   > 与一条「说得出**下一步去跑哪个入口**」的违规，对值班的人是两件不同的事。
+  const { REPAIR_ACTIONS } = await import('./bootstrap.mjs')
+  const injected = checkGuardApprovalConsistency({ repairActions: REPAIR_ACTIONS })
+  // 先断言修法表里真的有这一项：写成 `REPAIR_ACTIONS['...'].action` 的话，
+  // 表里那一项被改名时这里会先抛 `TypeError`，而那句报错说不出"是哪一项登记丢了"。
+  assert.ok(REPAIR_ACTIONS['guard-approval-consistency'] !== undefined, '修法表必须登记 guard-approval-consistency')
+  assert.equal(injected.repairable, true)
+  for (const v of injected.tampered.violations) {
+    assert.equal(v.repairAction, REPAIR_ACTIONS['guard-approval-consistency']?.action)
+    assert.equal(v.repairAction, 'fix-pre-execute-floor')
+  }
+  // 没注入时**不编一个**：`null` 就是"这条违规没有修复入口"，那本身是信号
+  const bare = checkGuardApprovalConsistency()
+  assert.equal(bare.repairable, null)
+  for (const v of bare.tampered.violations) assert.equal(v.repairAction, null)
+  assert.equal(bare.ok, true, '没注入修法表不算失败——它只是少了一半信息')
+  // 注入了一张**覆盖不到 guard 点**的表 ⇒ 不许报通过（点得出名却没有下一步）
+  const useless = { 'composition-patch-layer': { action: 'reapply-composition-patch' } }
+  const empty = checkGuardApprovalConsistency({ repairActions: useless })
+  assert.equal(empty.repairable, false)
+  assert.equal(empty.ok, false, '违规没有修复入口 ⇒ 不许读成"没问题"')
+})
+
 test('④ ★★ 与真实原语一致：pairs 里的 pre-execute 判定就是 guard 那份判定的投影', async () => {
   // 生产里这一投影由 `composePreExecuteFloor` 接在动态策略之前；
   // 这里用真 `createPreExecutePolicy` 跑一遍，证明"下限先判"确实会先于动态策略生效。

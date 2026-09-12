@@ -134,11 +134,23 @@ export function createUpgradeRecord({
   })
 }
 
-/** 落一条审计记录（按时间戳命名，追加式，不覆盖）。 */
+/**
+ * 落一条审计记录（按时间戳命名，**追加式，绝不覆盖**）。
+ *
+ * 同名文件已经存在时加一个序号后缀，而不是覆盖它。审计目录的名字只有毫秒
+ * 精度，而"同一毫秒里跑完两次升级"在测试里是常态、在真实机器上也可能发生
+ * （两次快速重试）。一个会覆盖的"追加式"审计比没有审计更糟：它留下的
+ * 唯一一条记录会让人以为只有一次升级。
+ */
 export function writeUpgradeRecord(auditDir, record, { atMs = record?.finishedAtMs ?? Date.now() } = {}) {
   mkdirSync(auditDir, { recursive: true })
-  const id = new Date(atMs).toISOString().replace(/[:.]/g, '-')
-  const file = join(auditDir, `${id}.json`)
+  const stamp = new Date(atMs).toISOString().replace(/[:.]/g, '-')
+  let file = join(auditDir, `${stamp}.json`)
+  let seq = 0
+  while (existsSync(file)) {
+    seq += 1
+    file = join(auditDir, `${stamp}-${String(seq).padStart(3, '0')}.json`)
+  }
   writeFileSync(file, JSON.stringify(record, null, 2) + '\n', 'utf8')
   return file
 }
@@ -194,17 +206,29 @@ export function upgradeResultMetric(records) {
 /**
  * 由清单与迁移集合生成发布说明的**数据形态**。
  *
- * 关键在最后两个字段：`requiresBackupRestore` 与 `mayLoseData`。
+ * 关键在这两个字段：`requiresBackupRestore` 与 `mayLoseData`。
  * 一份只写"新增了什么"的发布说明，会把"这次升级含 contract 迁移，
  * 回滚需要恢复备份"这条**用户必须提前知道**的信息留在代码里。
+ *
+ * ★ 这两个字段回答的是**两个不同的问题**，因此它们不是同一个布尔：
+ *
+ *   · `requiresBackupRestore`：回滚的**步骤**里有没有"恢复数据库"这一步。
+ *     它由回滚可达性（`rollbackSafety`）决定。
+ *   · `mayLoseData`：回到旧版本时，**升级之后写进去的数据**能不能保住。
+ *     它由迁移自己声明的 `destructive` 决定。
+ *
+ * 一次"加了新表、新列，旧版本不读它们"的 contract 迁移属于前者的例子：
+ * 回滚要走恢复备份，但备份里的数据一条不少。把它们合成一个字段的实现，
+ * 会在这种情况下喊狼来了——而喊过几次之后，真正会丢数据的那条也没人看了。
  */
 export function releaseNotes({ manifest, migrations = [], highlights = [], important = [], rollbackSafety = null } = {}) {
   if (manifest === null || typeof manifest !== 'object') {
     throw auditError('release-notes-needs-manifest', 'releaseNotes 需要 manifest')
   }
   const breaking = migrations.filter((m) => m.compatibility === 'breaking')
+  const destructive = migrations.filter((m) => m.destructive === true)
   const requiresBackupRestore = rollbackSafety === 'forward-fix-required' || rollbackSafety === 'db-restore-required'
-  const mayLoseData = rollbackSafety === 'forward-fix-required' || rollbackSafety === 'db-restore-required'
+  const mayLoseData = requiresBackupRestore && destructive.length > 0
   return Object.freeze({
     productVersion: manifest.productVersion ?? null,
     dshVersion: manifest.dshVersion ?? null,
@@ -217,11 +241,15 @@ export function releaseNotes({ manifest, migrations = [], highlights = [], impor
     migrationCount: migrations.length,
     breakingMigrationCount: breaking.length,
     breakingMigrations: Object.freeze(breaking.map((m) => m.name)),
+    destructiveMigrations: Object.freeze(destructive.map((m) => m.name)),
     rollbackSafety,
     requiresBackupRestore,
     mayLoseData,
     backupHint: requiresBackupRestore
-      ? '本次升级包含旧版本读不懂的数据变更：**回滚二进制不够**，需要从升级前的备份恢复数据库，或向前修复'
+      ? (mayLoseData
+        ? '本次升级包含旧版本读不懂的数据变更，其中含**删除/改写历史数据**的迁移：' +
+          '回滚二进制不够，从备份恢复会丢掉升级之后写入的数据'
+        : '本次升级包含旧版本读不懂的数据变更：**回滚二进制不够**，需要从升级前的备份恢复数据库，或向前修复')
       : '本次变更向前兼容：回滚二进制即可，数据库无需恢复',
   })
 }
@@ -277,7 +305,16 @@ export function upgradeNotification({ record, rollbackSafety = null } = {}) {
   }
   const from = record.fromVersion ?? '?'
   const to = record.toVersion ?? '?'
-  const needsAction = record.result === 'forward-fix-required' || rollbackSafety === 'forward-fix-required'
+  // ★ 需要用户动手的三种情形：向前修复、回滚但数据库仍需处理、以及
+  //   `rollbackSafety` 说这次回滚不是纯程序回滚。
+  //
+  //   这里**不能**只看 `rollbackSafety === 'forward-fix-required'`：一次
+  //   `db-restore-required` 的回滚同样要用户去恢复备份。漏掉它会让一条
+  //   `actionRequired: true` 的通知挂在 `info` 上——而"需要动手"与"仅供参考"
+  //   是这条通知唯一要说清楚的事。
+  const needsAction = record.result === 'forward-fix-required'
+    || rollbackSafety === 'forward-fix-required'
+    || rollbackSafety === 'db-restore-required'
 
   if (record.result === 'committed') {
     return Object.freeze({
@@ -294,7 +331,7 @@ export function upgradeNotification({ record, rollbackSafety = null } = {}) {
   if (record.result === 'rolled-back') {
     const programOnly = record.rollback?.safety === 'program-only-rollback'
     return Object.freeze({
-      level: needsAction ? 'warning' : 'info',
+      level: needsAction || !programOnly ? 'warning' : 'info',
       title: programOnly ? `更新未完成，已退回 ${from}` : `更新未完成，已退回 ${from}（数据库仍需处理）`,
       body: programOnly
         ? `新版本没有通过检查，已安全退回 ${record.rollback?.restoredVersion ?? from}，业务数据未受影响。`

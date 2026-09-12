@@ -248,6 +248,10 @@ export async function bootstrapDshRuntime(deps = {}) {
     composition: composition ?? {},
     sandbox: sandbox ?? {},
     runtime: { ok: probed.ok === true, version: probed.version ?? null, reason: probed.reason ?? null },
+    // 修法表由**这里**注入：`selfcheck.mjs` 与 `enforcement-mapping.mjs` 都
+    // import 不了 `bootstrap.mjs`（会成环）。注不进去时跨点违规说不出去跑哪个
+    // 修复入口，而那正好是 spec §6.8 line 479 抱怨的状态。
+    repairActions: REPAIR_ACTIONS,
   })
 
   if (check === null || typeof check !== 'object' || typeof check.autoExecutionForbidden !== 'boolean') {

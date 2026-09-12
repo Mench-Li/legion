@@ -733,7 +733,9 @@ export const AVAILABILITY_CHECKED = Object.freeze(availabilitySelfCheck())
  * `ok === false` 的含义是具体的：要么某个成因落到了别的码上，
  * 要么某一条**没有结算**（没结算 = 工具调用会无限期挂起）。
  */
-export async function probeTwoPhaseAvailability({ connectTimeoutMs = 10, responseTimeoutMs = 10, now = () => Date.now() } = {}) {
+export async function probeTwoPhaseAvailability({
+  connectTimeoutMs = 10, responseTimeoutMs = 10, now = () => Date.now(), scenarioSet = null,
+} = {}) {
   const budget = connectTimeoutMs + responseTimeoutMs
   // CI 机器可能很慢。判据是"有没有结算、码对不对"，不是精确耗时——
   // 用耗时当判据会造出一条在繁忙机器上偶发变红的检查。
@@ -774,7 +776,7 @@ export async function probeTwoPhaseAvailability({ connectTimeoutMs = 10, respons
     return { kind: decision?.kind ?? null, settled, code: last.code ?? null, phase: last.phase ?? null, elapsedMs: now() - started }
   }
 
-  const scenarios = [
+  const defaultScenarios = [
     {
       id: '①', what: '连接阶段：端口抛错（team-hub 不可达）',
       via: 'answerer', portsPhases: true,
@@ -824,6 +826,10 @@ export async function probeTwoPhaseAvailability({ connectTimeoutMs = 10, respons
       expect: { kind: 'deny', code: AVAILABILITY_CODES.UNREACHABLE, phase: 'connect' },
     },
   ]
+
+  // 场景集合可注入：一条只会在全绿输入上跑过的探针，与一条不存在的探针，
+  // 在"它到底拦住了什么"上是同一个东西。反向控制见表里的用例。
+  const scenarios = Array.isArray(scenarioSet) ? scenarioSet : defaultScenarios
 
   const rows = []
   for (const s of scenarios) {

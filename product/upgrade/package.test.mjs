@@ -20,6 +20,7 @@ import assert from 'node:assert/strict'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import { createPrivateKey, sign as cryptoSign } from 'node:crypto'
 
 import {
   INTEGRITY_VERDICTS,
@@ -93,10 +94,23 @@ test('① ★★ 改一个字节 → 完整性必须变红，且**指名道姓**
   const bad = r.files.find((f) => f.verdict !== 'ok' && f.path === 'app/runtime.mjs')
   assert.equal(bad.verdict, 'hash-mismatch')
   assert.equal(r.code, PACKAGE_CODES.FILE_HASH_MISMATCH)
-  // 文件级对不上时，由清单**复算**出来的内容摘要也必然与声明的那一个不同——
-  // 两条都要报出来：只报文件级会让人以为"改回去就好了"。
-  assert.ok(r.files.some((f) => f.code === PACKAGE_CODES.CONTENT_DIGEST_MISMATCH), JSON.stringify(r.files))
-  assert.notEqual(r.contentHash, r.expectedContentHash)
+  // 「清单自洽」与「字节与清单一致」是两个读数：前者复算声明，后者逐文件比对。
+  // 改了一个字节时，后者红；而前者仍然绿——这正是它们必须分开的原因：
+  // 只报前者会让排障者以为"清单说没问题"。
+  assert.equal(r.contentHash, r.expectedContentHash, '清单本身被改过，不只是字节')
+  assert.notEqual(r.observedContentHash, r.expectedContentHash, '观测到的内容摘要没有跟着变')
+})
+
+test('① ★★ 清单与声明的内容摘要对不上时，即使字节完好也必须红', () => {
+  // 这一格是"摘要没有覆盖清单"：每个文件的 sha256 都在，但它们拼不出声明的那个摘要。
+  const { pkg } = fixture()
+  const forged = Object.freeze({ ...pkg, contentHash: hashBytes(Buffer.from('forged-content')) })
+  const r = verifyIntegrity(forged, CONTENTS)
+  assert.equal(r.verdict, 'mismatch', '声明的内容摘要与清单对不上却通过了完整性校验')
+  const dig = r.files.find((f) => f.code === PACKAGE_CODES.CONTENT_DIGEST_MISMATCH)
+  assert.ok(dig, JSON.stringify(r.files))
+  assert.equal(dig.expected, forged.contentHash)
+  assert.equal(dig.observed, r.contentHash)
 })
 
 test('① ★ 缺失的文件与**多出来**的文件都要被拦（只查声明过的等于放过多出来的那个）', () => {
@@ -216,24 +230,54 @@ test('③ ★★ 签名覆盖 (productId, 清单摘要, 内容摘要) 三者，�
   )
 })
 
-test('③ ★★ 签名不能**自证**：把包里的 subject 与 value 一起换掉仍然验不过', () => {
-  // 这一条盯的是"用包里那份 subject 去验签"的写法。那样写时，
-  // 攻击者只要把 subject 改成自己的原文、再用自己的私钥签一次即可通过——
-  // 而校验器会报"签名与包内原文一致"。
+test('③ ★★ 签名不能**自证**：留档的 subject 不是验证的原文', () => {
+  // 这一条盯的是"用包里那份 subject 去验签"的写法。
+  //
+  // 那个写法的问题不是"伪造者能用别人的私钥通过"——那不可能。问题是它把
+  // **验证的原文**交给了被验证的对象：攻击者只要把 `subject` 改成一段
+  // 与他手上那份签名匹配的文本，验证就会通过，而校验器会报
+  // "签名与包内原文一致"。这条测试让"包内 subject"指向另一份内容，
+  // 而 `contentHash` 保持原样——一份**重算原文**的校验器必须发现这个矛盾。
+  //
+  //   > 一个"用包里那份 subject 去验签"的校验，
+  //   > 与一个"只要签名与它自己带来的原文一致就通过"的校验，是同一个东西。
   const { signed, keys, manifestDigest } = fixture()
   const forgedSubject = signatureSubject({
     productId: 'legion', manifestDigest, contentHash: hashBytes(Buffer.from('forged')),
   })
   const forged = Object.freeze({
     ...signed,
-    contentHash: hashBytes(Buffer.from('forged')),
     signature: Object.freeze({ ...signed.signature, subject: forgedSubject }),
   })
   const r = verifySignature(forged, { publicKeyPem: keys.publicKeyPem, manifestDigest })
   assert.equal(r.verdict, 'invalid', '包内 subject 被换掉后签名仍然通过——签名在自证')
-  // 校验器**重算**了原文：它按包**当前**的 contentHash 拼，而不是采信包里那份 subject。
-  assert.ok(r.subject.includes(forged.contentHash), r.subject)
+  assert.equal(r.code, PACKAGE_CODES.SIGNATURE_SUBJECT_MISMATCH)
+  // 校验器**重算**了原文：它按包当前的内容摘要拼，而不是采信包里那份 subject。
   assert.notEqual(r.subject, forgedSubject)
+  assert.ok(r.subject.includes(signed.contentHash), r.subject)
+})
+
+test('③ ★ 拿到私钥的人可以签任何东西——这条边界必须写清楚', () => {
+  // 上面那条不是"签名不可伪造"的证明，而是"验证原文不受被验证对象控制"的证明。
+  // 这一条把边界摆在明处：持有私钥者能把 contentHash 与 subject 一起改掉并重签，
+  // 而那会通过验签——**这是签名机制本身的边界，不是本模块的缺陷**。
+  // 真正拦住它的地方是密钥保管（PRT-803 的发布侧），不是这份校验。
+  const { signed, keys, manifestDigest } = fixture()
+  const forgedContent = hashBytes(Buffer.from('forged'))
+  const forgedSubject = signatureSubject({ productId: 'legion', manifestDigest, contentHash: forgedContent })
+  const forgedSignature = cryptoSign(null, Buffer.from(forgedSubject, 'utf8'), createPrivateKey(keys.privateKeyPem))
+  const resigned = Object.freeze({
+    ...signed,
+    contentHash: forgedContent,
+    signature: Object.freeze({
+      ...signed.signature, subject: forgedSubject, value: forgedSignature.toString('base64'),
+    }),
+  })
+  // 签名本身"有效"（自洽），但**载荷与它不符**：完整性会红。
+  assert.equal(verifySignature(resigned, { publicKeyPem: keys.publicKeyPem, manifestDigest }).verdict, 'verified')
+  const overall = verifyPackage(resigned, { files: CONTENTS, publicKeyPem: keys.publicKeyPem, manifestDigest })
+  assert.equal(overall.verdict, 'rejected', '重签过的载荷没有让整体裁决变红')
+  assert.equal(overall.integrity.verdict, 'mismatch')
 })
 
 test('③ ★ 没有可信公钥 / 没有清单摘要时是 `unsupported`，不是 `verified`', () => {
@@ -276,8 +320,10 @@ test('⑤ ★ 「先校验、后落盘」：只有清单没有字节时解包必
   const scratch = mkdtempSync(join(tmpdir(), 'legion-pkg-'))
   try {
     const { pkg } = fixture()
-    // 包里只有描述，没有字节。
-    assert.throws(() => unpackPackage(pkg, join(scratch, 'out')), (e) => {
+    // 构造一份"只有描述、没有字节"的包：把内容剥掉。
+    // 这不是空文件——"清单在而字节不在"与"文件是空的"必须被分开对待。
+    const descriptorOnly = Object.freeze({ ...pkg, contents: null })
+    assert.throws(() => unpackPackage(descriptorOnly, join(scratch, 'out')), (e) => {
       assert.equal(e.code, PACKAGE_CODES.FILE_MISSING)
       return true
     })

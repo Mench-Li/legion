@@ -42,6 +42,10 @@
 
 import { createHash } from 'node:crypto'
 
+// 版本比较复用清单模块的那一份：两处各写一个 `compareVersions` 的实现，
+// 会在某一天对"0.10.0 与 0.9.0 谁大"给出两个答案（字符串比较会给出反的）。
+import { compareVersions } from './manifest.mjs'
+
 /** 通道本体，顺序即 spec §9.2 的图示顺序（也是晋级方向）。 */
 export const RELEASE_CHANNELS = Object.freeze(['internal', 'canary', 'stable'])
 
@@ -79,10 +83,21 @@ export const CHANNEL_CODES = Object.freeze({
   CANARY_OUT_OF_BUCKET: 'channel-canary-out-of-bucket',
   /** 跳级晋级。 */
   PROMOTION_SKIP: 'channel-promotion-skip',
-  /** 停留期不够。 */
-  SOAK_INSUFFICIENT: 'channel-soak-insufficient',
   /** 晋级方向反了。 */
   PROMOTION_BACKWARD: 'channel-promotion-backward',
+  /** 晋级原地不动（来源与目标同级）——通常是配置写错了，不是方向写反了。 */
+  PROMOTION_SAME: 'channel-promotion-same',
+  /** 停留期不够。 */
+  SOAK_INSUFFICIENT: 'channel-soak-insufficient',
+  /**
+   * 查不到"进入上一级的时刻"，因此停留期算不出来。
+   *
+   * 与 `SOAK_INSUFFICIENT` 分开：前者要去翻部署记录，后者只要等。
+   * 合成一档时，"算不出来"会被当成"差几天"，于是没人去查那份缺失的记录。
+   */
+  SOAK_UNOBSERVED: 'channel-soak-unobserved',
+  /** 候选版本不比当前版本新（没有重复提供同一个版本）。 */
+  NOT_NEWER: 'channel-not-newer',
 })
 
 function channelError(code, message) {
@@ -191,25 +206,42 @@ export function isOffered({ release, ring, canaryOptIn = false, canaryPercent = 
 }
 
 /**
- * 在候选版本里选出这台机器能看到的那些，按版本**降序**。
+ * 在候选版本里选出这台机器能看到的那些，按版本**降序**（最高的排最前）。
  *
  * `rejected` 一并返回：只说"没有更新"的实现，与一个"用户明明在 canary 环
  * 却没有被放进这一批"的实现，在用户看得到的界面上是同一个东西。
+ *
+ * `selected` 是这条路尽头的那一个版本。把它单独给出来，是因为调用方几乎
+ * 总是只想要它——而让每个调用方自己 `offered[0]` 的实现，会在有人改了
+ * 排序的那一天集体静默地装错版本。
  */
-export function selectOffered(candidates, options = {}) {
+export function selectOffered(candidates, { currentVersion = null, ...options } = {}) {
   const offered = []
   const rejected = []
   for (const release of candidates ?? []) {
+    if (currentVersion !== null && compareVersions(release?.version, currentVersion) <= 0) {
+      rejected.push(Object.freeze({
+        release,
+        verdict: Object.freeze({
+          offered: false, code: CHANNEL_CODES.NOT_NEWER,
+          reason: `${release?.version} 不比当前版本 ${currentVersion} 新：不重复提供同一个或更旧的版本`,
+        }),
+      }))
+      continue
+    }
     const verdict = isOffered({ ...options, release })
     if (verdict.offered) offered.push(Object.freeze({ release, verdict }))
     else rejected.push(Object.freeze({ release, verdict }))
   }
+  // 降序：`parseVersion` 逐段比较，不用字符串比较（"0.10.0" < "0.9.0"）。
+  offered.sort((a, b) => compareVersions(b.release?.version, a.release?.version))
   return Object.freeze({
     offered: Object.freeze(offered),
     rejected: Object.freeze(rejected),
+    selected: offered.length === 0 ? null : offered[0].release,
     reason: offered.length === 0
       ? (rejected.length === 0 ? '没有候选版本' : `${rejected.length} 个候选都不适用于本机：${rejected[0].verdict.reason}`)
-      : `${offered.length} 个候选适用于本机`,
+      : `${offered.length} 个候选适用于本机，最高的是 ${offered[0].release?.version}`,
   })
 }
 
@@ -250,8 +282,17 @@ export function planPromotion({
   }
   const fromIndex = RELEASE_CHANNELS.indexOf(from)
   const toIndex = RELEASE_CHANNELS.indexOf(to)
-  if (toIndex <= fromIndex) {
-    problems.push(`晋级方向反了或原地不动（${from} → ${to}）：通道晋级是一条单向的路`)
+  if (toIndex === fromIndex) {
+    // "原地不动"与"方向反了"是两种不同的配置错误：前者多半是有人少改了一个字段，
+    // 后者多半是把目标写成了来源。给同一个码会让排障从错的地方开始。
+    return Object.freeze({
+      allowed: false, code: CHANNEL_CODES.PROMOTION_SAME,
+      soakRequiredMs: null, soakActualMs: null,
+      reason: `晋级来源与目标相同（${from} → ${to}）：这不是一次晋级`,
+    })
+  }
+  if (toIndex < fromIndex) {
+    problems.push(`晋级方向反了（${from} → ${to}）：通道晋级是一条单向的路`)
     return Object.freeze({
       allowed: false, code: CHANNEL_CODES.PROMOTION_BACKWARD,
       soakRequiredMs: null, soakActualMs: null,
@@ -271,17 +312,21 @@ export function planPromotion({
     ? promotedAtMs - enteredAtMs
     : null
   if (soakActualMs === null) {
-    problems.push('没有进入上一级的时刻，因此无法判断停留期是否满足——"算不出停留期"不等于"待够了"')
-  } else if (soakActualMs < soakRequiredMs) {
+    return Object.freeze({
+      allowed: false, code: CHANNEL_CODES.SOAK_UNOBSERVED,
+      from, to, soakRequiredMs, soakActualMs: null, soakDays: requiredDays,
+      reason: '没有进入上一级的时刻，因此无法判断停留期是否满足——' +
+        '"算不出停留期"不等于"待够了"（这一档要去翻部署记录，而不是等几天）',
+    })
+  }
+  if (soakActualMs < soakRequiredMs) {
     problems.push(
       `在 ${from} 停留了 ${(soakActualMs / 86400000).toFixed(2)} 天，少于要求的 ${requiredDays} 天`,
     )
   }
 
   const code = problems.length === 0 ? null
-    : (problems[0].includes('跳级') ? CHANNEL_CODES.PROMOTION_SKIP
-      : problems[0].includes('停留') || problems[0].includes('算不出') ? CHANNEL_CODES.SOAK_INSUFFICIENT
-        : CHANNEL_CODES.PROMOTION_BACKWARD)
+    : (problems[0].includes('跳级') ? CHANNEL_CODES.PROMOTION_SKIP : CHANNEL_CODES.SOAK_INSUFFICIENT)
 
   return Object.freeze({
     allowed: problems.length === 0,
@@ -347,21 +392,63 @@ export function selfCheckChannels() {
   })
   if (!good.allowed) problems.push(`满足条件的晋级被判为不合法：${good.reason}`)
 
+  // ⑤ 分桶是一条真门槛：0% 谁都进不去，100% 谁都进得去。
+  //    只断言"100% 能进"的实现在放量率恒为 100 时也通过，所以两头都要跑。
+  const fifty = Array.from({ length: 200 }, (_, i) => `selfcheck-seed-${i}`)
+  const hitZero = fifty.filter((s) => canaryBucket({ ringSeed: s, version: '0.9.0' }) < 0).length
+  const hitFull = fifty.filter((s) => canaryBucket({ ringSeed: s, version: '0.9.0' }) < 100).length
+  if (hitZero !== 0) problems.push(`放量 0% 时仍有 ${hitZero} 台机器落在名单里`)
+  if (hitFull !== fifty.length) problems.push(`放量 100% 时有 ${fifty.length - hitFull} 台机器不在名单里`)
+  const half = fifty.filter((s) => canaryBucket({ ringSeed: s, version: '0.9.0' }) < 50).length
+  if (half === 0 || half === fifty.length) {
+    problems.push(`放量 50% 的命中数是 ${half}：分桶没有落在 (0, 200) 之间，看起来门槛是恒真或恒假`)
+  }
+
+  // ⑥ 停留期**算不出来**与**不够**是两个码（前者的处置是去查记录，后者是等）。
+  const unobserved = planPromotion({ from: 'canary', to: 'stable' })
+  if (unobserved.allowed) problems.push('没有进入时刻的晋级被判为合法')
+  if (unobserved.code !== CHANNEL_CODES.SOAK_UNOBSERVED) {
+    problems.push(`查不到停留期时的裁决码是 ${unobserved.code}`)
+  }
+
+  // ⑦ 原地"晋级"与反向晋级分开。
+  const same = planPromotion({ from: 'canary', to: 'canary' })
+  if (same.code !== CHANNEL_CODES.PROMOTION_SAME) problems.push(`原地晋级的裁决码是 ${same.code}`)
+
+  // ⑧ `selectOffered` 真的按版本降序挑（"0.10.0" > "0.9.0"，字符串比较会给反的）。
+  const selection = selectOffered(
+    [{ version: '0.9.0', channel: 'stable' }, { version: '0.10.0', channel: 'stable' }],
+    { ring: 'stable' },
+  )
+  if (selection.selected?.version !== '0.10.0') {
+    problems.push(`降序挑选选中了 ${selection.selected?.version}，而不是 0.10.0`)
+  }
+
   return Object.freeze({
     ok: problems.length === 0,
     problems: Object.freeze(problems),
     channels: RELEASE_CHANNELS,
     rings: RINGS,
+    ringAccepts: RING_ACCEPTS,
     defaultSoakDays: DEFAULT_SOAK_DAYS,
     samples: Object.freeze({
       noOptInOffered: noOptIn.offered,
       noOptInCode: noOptIn.code,
       stableInternalOffered: stableInternal.offered,
+      stableInternalCode: stableInternal.code,
       unknownRingOffered: unknownRing.offered,
+      unknownRingCode: unknownRing.code,
       skipAllowed: skip.allowed,
       skipCode: skip.code,
       tooFastAllowed: tooFast.allowed,
+      tooFastCode: tooFast.code,
       goodAllowed: good.allowed,
+      unobservedCode: unobserved.code,
+      sameCode: same.code,
+      zeroPercentHits: hitZero,
+      fullPercentHits: hitFull,
+      halfPercentHits: half,
+      selectedVersion: selection.selected?.version ?? null,
     }),
   })
 }

@@ -201,6 +201,41 @@ test('③ ★★★ 真定时器实测：每一种成因都**结算**，且落�
   }
 })
 
+test('③ ★★★ 实测探针自己也会红：喂一个假场景，`matches` 与 `ok` 必须为 false', async () => {
+  //   > 一个「只会在全绿输入上跑过」的探针，
+  //   > 与一个「其实什么都没验」的探针，在"它到底拦住了什么"上是同一个东西。
+  const p = await probeTwoPhaseAvailability({
+    scenarioSet: [{
+      id: '✗',
+      what: '反向控制：期望 unavailable，端口却给了 rejected',
+      via: 'answerer',
+      portsPhases: true,
+      request: () => 'rejected',
+      expect: { outcome: 'unavailable', code: null, phase: null },
+    }],
+  })
+  assert.equal(p.ok, false)
+  assert.equal(p.rows.length, 1)
+  assert.equal(p.rows[0].matches, false)
+  assert.equal(p.rows[0].got.settled, true, '反向控制里它照样结算了')
+  assert.match(p.reasons[0], /得到|期望/)
+  // 而**没结算**同样必须让探针变红（那是"无限期挂起"）
+  const hung = await probeTwoPhaseAvailability({
+    connectTimeoutMs: 5,
+    responseTimeoutMs: 5,
+    scenarioSet: [{
+      id: '✗✗',
+      what: '反向控制：端口永远不结算，而场景却说它该结算',
+      via: 'policy',
+      portsPhases: false,
+      request: () => new Promise(() => {}),
+      expect: { kind: 'allow' },
+    }],
+  })
+  assert.equal(hung.ok, false)
+  assert.equal(hung.rows[0].matches, false)
+})
+
 // ============================================================ ④ 一致性判据
 
 test('④ ★★★ 一致性判据真的会红：故障记成 rejected / 决定记成 unavailable / 不结算', () => {

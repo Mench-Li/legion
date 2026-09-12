@@ -25,6 +25,9 @@ import {
 } from './patch-layer.mjs'
 import { PATCH_YAML_PATH, renderPatchYaml } from './render.mjs'
 import { PROBE_ARGV, SELFCHECK_STATES, probeSandbox, startupSelfCheck } from './selfcheck.mjs'
+// 修法表：自检里的跨点违规要**说得出**下一步去跑哪个入口，而修法表只有这里（bootstrap）
+// 有——selfcheck 与 enforcement-mapping 都 import 不了它（会成环）。
+import { REPAIR_ACTIONS } from './bootstrap.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -234,7 +237,12 @@ test('沙箱探测：探针 argv 跨平台存在（避免把「平台没有该�
 // ----------------------------------------------------------------- PRT-215 自检
 
 test('自检：六项全过 → enforcement-effective，且不禁用自动执行', async () => {
-  const r = await startupSelfCheck({ composition: GOOD_COMPOSITION, sandbox: goodSandbox(), runtime: GOOD_RUNTIME })
+  const r = await startupSelfCheck({
+    composition: GOOD_COMPOSITION,
+    sandbox: goodSandbox(),
+    runtime: GOOD_RUNTIME,
+    repairActions: REPAIR_ACTIONS,
+  })
   assert.equal(r.state, SELFCHECK_STATES.effective)
   assert.equal(r.autoExecutionForbidden, false)
   assert.deepEqual(r.reasons, [])
@@ -247,8 +255,9 @@ test('自检：六项全过 → enforcement-effective，且不禁用自动执行
   ])
   // 第 ④ 项在**这一层**必须真的查全（`probeSandbox` 由 selfcheck 自己注入）。
   assert.deepEqual(r.mapping.unresolvedPrimitives, [])
-  // 第 ⑤ 项的反向控制必须真的报出违规（否则它是一条不存在的检查）。
+  // 第 ⑤ 项的反向控制必须真的报出违规，并且说得出修复入口（否则它是一条不存在的检查）。
   assert.equal(r.guardConsistency.tamperedCaught, true)
+  assert.equal(r.guardConsistency.repairable, true, '启动自检会注入 REPAIR_ACTIONS，违规必须带得出修复入口')
   // 第 ⑥ 项：每一种成因都结算了，且码与契约一致。
   assert.equal(r.availability.ok, true)
   assert.equal(r.availability.rows.every((x) => x.got.settled === true), true)
@@ -287,6 +296,37 @@ test('自检：**未验证的原语**会让第 ④ 项不通过（"没查全"不
   // 而 startupSelfCheck 注入之后，这一条必须消失
   const r = await startupSelfCheck({ composition: GOOD_COMPOSITION, sandbox: goodSandbox(), runtime: GOOD_RUNTIME })
   assert.deepEqual(r.mapping.unresolvedPrimitives, [])
+})
+
+test('自检：⑤ 跨点不一致 → 禁止自动执行（每个点单看都对，合起来矛盾）', async () => {
+  // ⑤⑥ 的两个探针可注入，就是为了让"这一项真的会红"能被证明。
+  // 打桩只把 ok 设成 false 是证明不了任何东西的——所以这里注入的是**真实的**检查函数，
+  // 只是喂给它一份空下限（探针没内容 ⇒ 反向控制红不了 ⇒ 不许报通过）。
+  const { checkGuardApprovalConsistency } = await import('./enforcement-mapping.mjs')
+  const r = await startupSelfCheck({
+    composition: GOOD_COMPOSITION,
+    sandbox: goodSandbox(),
+    runtime: GOOD_RUNTIME,
+    guardProbe: () => checkGuardApprovalConsistency({ floor: { denyTools: [], denyPathPrefixes: [] } }),
+  })
+  assert.equal(r.state, SELFCHECK_STATES.incompatible)
+  const check = r.checks.find((c) => c.name === 'guard-approval-consistency')
+  assert.equal(check.ok, false)
+  assert.match(r.reasons.join('\n'), /^guard-approval-consistency: /m)
+  assert.match(r.reasons.join('\n'), /反向控制/)
+})
+
+test('自检：⑥ 可用性实测未过 → 禁止自动执行（没结算就是「无限期挂起」）', async () => {
+  const r = await startupSelfCheck({
+    composition: GOOD_COMPOSITION,
+    sandbox: goodSandbox(),
+    runtime: GOOD_RUNTIME,
+    availabilityProbe: async () => ({ ok: false, budgetMs: 20, rows: [], reasons: ['④ 未声明契约且一直没有回应：没有结算（会无限期挂起）'] }),
+  })
+  assert.equal(r.state, SELFCHECK_STATES.incompatible)
+  assert.equal(r.checks[5].ok, false)
+  assert.match(r.reasons.join('\n'), /^enforcement-availability: /m)
+  assert.match(r.reasons.join('\n'), /无限期挂起/)
 })
 
 test('自检：任一不过 → incompatible 且**禁止自动执行**', async () => {

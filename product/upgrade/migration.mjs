@@ -119,7 +119,9 @@ function migrationError(code, message) {
  * `forward-fix-required` 的唯一依据。默认 `false` —— 一个没写 down 的迁移
  * 与一个"down 只是抛错"的迁移，在"能不能回退"上是一样的，所以默认必须是最坏的那档。
  */
-export function defineMigration({ version, name, up, down = null, compatibility, description = null, downNote = null }) {
+export function defineMigration({
+  version, name, up, down = null, compatibility, description = null, downNote = null, destructive = false,
+}) {
   const problems = []
   if (!Number.isInteger(version) || version < 1) problems.push(`version 必须是 >= 1 的整数（收到 ${JSON.stringify(version)}）`)
   if (typeof name !== 'string' || name.trim() === '') problems.push('name 必须是非空字符串')
@@ -127,6 +129,12 @@ export function defineMigration({ version, name, up, down = null, compatibility,
   if (!COMPATIBILITY.includes(compatibility)) {
     problems.push(`compatibility 必须是 ${COMPATIBILITY.join(' / ')} 之一（收到 ${JSON.stringify(compatibility)}）——` +
       '它决定 contract 迁移之后能不能只回滚程序，只有写迁移的人知道答案，不能靠猜')
+  }
+  if (typeof destructive !== 'boolean') problems.push('destructive 必须是布尔值')
+  if (destructive === true && compatibility !== 'breaking') {
+    // "会丢掉历史数据"只可能发生在 contract 迁移里：additive 迁移不改写既有的行，
+    // 所以它上面挂一个 destructive 标记几乎肯定是标记挂错了地方。
+    problems.push('destructive 只对 breaking 迁移有意义：additive 迁移不会改写既有数据')
   }
   if (problems.length > 0) {
     throw migrationError(MIGRATION_CODES.PLAN_INVALID, `迁移声明不合法：${problems.join('；')}`)
@@ -141,6 +149,10 @@ export function defineMigration({ version, name, up, down = null, compatibility,
     down,
     hasDownMigration: typeof down === 'function',
     downNote,
+    // ★ `destructive` 与 `compatibility` 是**两个**声明：前者说"回到旧版本时
+    // 升级后写入的数据保不住"，后者说"旧程序读不懂新数据"。发布说明要的是前者，
+    // 回滚可达性要的是后者。
+    destructive,
     // 身份 = 版本 + 名字 + up 源码。改这三样里的任何一样都会被发现。
     checksum: checksumOf({ version, name: name.trim(), source }),
   })
@@ -193,7 +205,7 @@ export function validateMigrationPlan(migrations) {
  * `failOnRecord` 用来证明"记不上账时要抛"这条判据真的会拦人。
  */
 export function createMemoryMigrationStore({ rows = [], failOnRecord = false } = {}) {
-  const table = [...rows]
+  const table = rows.map((r) => Object.freeze({ ...r }))
   return Object.freeze({
     kind: 'memory',
     async listApplied() {
@@ -280,7 +292,12 @@ export async function runMigrations({ migrations, store, base = {}, now = () => 
         code: MIGRATION_CODES.CHECKSUM_DRIFT,
         applied: Object.freeze([]),
         skipped: Object.freeze(skipped),
-        failed: Object.freeze({ version: m.version, name: m.name }),
+        failed: Object.freeze({
+          version: m.version, name: m.name,
+          // ★ 校验和漂移是**没有执行任何语句**的失败：它的写入确定性为零。
+          //   有了这个显式读数，回滚裁决才不必把"没跑"和"跑了一半"当成一回事。
+          partialWrites: false,
+        }),
         targetVersion: ordered[ordered.length - 1]?.version ?? null,
         currentVersion: maxVersion(appliedRows),
         plan: planVerdict,
@@ -326,7 +343,13 @@ export async function runMigrations({ migrations, store, base = {}, now = () => 
         code: MIGRATION_CODES.UP_FAILED,
         applied: Object.freeze(applied),
         skipped: Object.freeze(skipped),
-        failed: Object.freeze({ version: m.version, name: m.name, error: String(e?.message ?? e) }),
+        failed: Object.freeze({
+          version: m.version, name: m.name, error: String(e?.message ?? e),
+          // ★ `null` = **不知道**。`up()` 里可能已经写了改了一半的语句，
+          //   而框架看不见它。把"不知道"写成 `false` 会让回滚裁决以为
+          //   数据库没有被碰过——那正是最危险的一种自信。
+          partialWrites: null,
+        }),
         targetVersion: ordered[ordered.length - 1]?.version ?? null,
         currentVersion: maxVersion(appliedRows),
         plan: planVerdict,
@@ -344,7 +367,11 @@ export async function runMigrations({ migrations, store, base = {}, now = () => 
         code: MIGRATION_CODES.RECORD_FAILED,
         applied: Object.freeze(applied),
         skipped: Object.freeze(skipped),
-        failed: Object.freeze({ version: m.version, name: m.name, error: String(e?.message ?? e) }),
+        failed: Object.freeze({
+          version: m.version, name: m.name, error: String(e?.message ?? e),
+          // `up()` **跑完了**，只是记账没成 —— 因此它的写入是完整的。
+          partialWrites: false,
+        }),
         targetVersion: ordered[ordered.length - 1]?.version ?? null,
         currentVersion: maxVersion(appliedRows),
         plan: planVerdict,
@@ -497,6 +524,9 @@ export function sampleMigrations() {
     defineMigration({
       version: 3, name: 'drop-legacy-runs-view', compatibility: 'breaking',
       up: (db) => { db.exec('DROP VIEW legacy_runs') },
+      // `destructive: true` 是**第二份**声明：视图里的行来自历史表，
+      // 重建一个空视图不等于把行拿回来，因此升级之后写入的那部分保不住。
+      destructive: true,
       downNote: 'down 会重建一个空视图，视图里的行来自历史表，**重建不等于恢复**',
     }),
   ])

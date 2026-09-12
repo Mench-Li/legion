@@ -37,7 +37,8 @@
 // 所以演练写一条 `drills/<时间戳>.json`，而 `drillStatus()` 读这些文件算过期与否。
 // ============================================================================
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { hashFile, listFiles, toPackagePath } from './package.mjs'
@@ -89,13 +90,23 @@ export function snapshotId(atMs) {
 // 备份
 // ---------------------------------------------------------------------------
 
-function copyTree(source, dest, collected) {
+/**
+ * 把一棵树拷进快照，并记录**相对快照根**的路径。
+ *
+ * `prefix` 不是装饰：`collected` 里的路径会同时被用于"复算摘要"和"恢复到哪儿"，
+ * 因此它必须是快照根的相对路径。用 `relative(source, abs)` 得到的是相对
+ * **数据目录**的路径（`team.db`），恢复时就找不到它——而失败会伪装成
+ * "快照损坏"，让人去查一份其实完好的备份。
+ */
+function copyTree(source, dest, prefix, collected) {
   for (const abs of listFiles(source)) {
     const rel = toPackagePath(source, abs)
     const target = join(dest, ...rel.split('/'))
     mkdirSync(join(target, '..'), { recursive: true })
     copyFileSync(abs, target)
-    collected.push(Object.freeze({ path: rel, sha256: hashFile(target), size: statSync(target).size }))
+    collected.push(Object.freeze({
+      path: `${prefix}/${rel}`, sha256: hashFile(target), size: statSync(target).size,
+    }))
   }
 }
 
@@ -141,7 +152,7 @@ export function createSnapshot({
   mkdirSync(root, { recursive: true })
   const files = []
   try {
-    if (hasData) copyTree(dataDir, join(root, 'data'), files)
+    if (hasData) copyTree(dataDir, join(root, 'data'), 'data', files)
     if (hasConfig) {
       const dest = join(root, 'config', 'product.config.json')
       mkdirSync(join(dest, '..'), { recursive: true })
@@ -223,7 +234,7 @@ export function listSnapshots(backupDir) {
       code: parsed.status === 'complete' ? null : BACKUP_CODES.SNAPSHOT_NOT_COMPLETE,
     }))
   }
-  return Object.freeze(out.sort((a, b) => a.createdAtMs - b.createdAtMs))
+  return Object.freeze(out.sort((a, b) => (a.createdAtMs - b.createdAtMs) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)))
 }
 
 // ---------------------------------------------------------------------------
@@ -376,6 +387,35 @@ export function restoreSnapshot(snapshotRoot, { dataDir, configPath = null, veri
   }
 
   // ② 落盘。
+  //
+  // ★ 写回 `.db` 之前必须先删掉它旁边的 `-wal` / `-shm`（PRT-006 已定的那条纪律）。
+  //
+  //   SQLite 的 WAL 是**属于那个 .db 文件**的：`-wal` 里存的是"尚未合并进主库的
+  //   提交"。把一个旧的 `.db` 拷回去、却把升级期间产生的 `-wal` 留在原地，下一次
+  //   打开数据库时 SQLite 会把那份**属于新结构的 WAL 重放到旧文件上**——结果是
+  //   一个既不是备份时刻、也不是升级之后的第三个状态，而且它**能打开**。
+  //
+  //   > 一个"只把 .db 拷回来"的恢复，
+  //   > 与一个"把两个不同时刻的数据库合并"的恢复，是同一个东西——
+  //   > 只不过前者的名字叫「恢复成功」。
+  //
+  //   删除本身也要留痕：恢复之后被删掉的那两个文件是排障时唯一能解释
+  //   "为什么升级期间的写入不见了"的证据。
+  const sidecars = []
+  for (const f of meta.files) {
+    if (!f.path.startsWith('data/')) continue
+    const rel = f.path.slice('data/'.length)
+    if (!rel.endsWith('.db')) continue
+    const dest = join(dataDir, ...rel.split('/'))
+    for (const suffix of ['-wal', '-shm']) {
+      const side = `${dest}${suffix}`
+      if (existsSync(side)) {
+        rmSync(side, { force: true })
+        sidecars.push(Object.freeze({ path: side, reason: 'WAL/shm 属于被替换掉的那个 .db，留下它就是把两个时刻合并' }))
+      }
+    }
+  }
+
   const restored = []
   try {
     mkdirSync(dataDir, { recursive: true })
@@ -395,12 +435,15 @@ export function restoreSnapshot(snapshotRoot, { dataDir, configPath = null, veri
   } catch (e) {
     return Object.freeze({
       ok: false, code: BACKUP_CODES.IO_FAILED, restored: Object.freeze(restored),
+      sidecarsRemoved: Object.freeze(sidecars),
       reason: `恢复过程中写失败：${e.message}（已经落盘的部分不是任何一个已知状态）`,
     })
   }
 
   return Object.freeze({
     ok: true, code: BACKUP_CODES.SNAPSHOT_OK, restored: Object.freeze(restored),
+    // 被删掉的 -wal/-shm。空数组与"没有检查"也是两件事，所以它是一个**存在**的读数。
+    sidecarsRemoved: Object.freeze(sidecars),
     snapshotId: meta.id, createdAtMs: meta.createdAtMs, reason: null,
   })
 }
@@ -547,3 +590,119 @@ export function drillStatus(backupDir, { nowMs = Date.now(), policy = BACKUP_POL
       : []),
   })
 }
+
+// ---------------------------------------------------------------------------
+// 装载期自检
+// ---------------------------------------------------------------------------
+
+/**
+ * 装载期自检：在一个临时目录里真的走一遍"备份 → 恢复"，并把每一格判据
+ * **两侧**都跑出来。
+ *
+ * 本模块的每一格都是一个"能不能说不"的问题，所以自检的样本也成对给：
+ *
+ *   · 源存在 → 快照 `complete`；源不存在 → 拒绝建快照（空备份不是备份）；
+ *   · 快照完好 → 恢复 `ok`；快照被改过 → `backup-snapshot-corrupt`；
+ *   · 恢复时旁边有 `-wal` → 它被删掉且被记下来；
+ *   · 保留策略不满足 → `underRetained` 为真（"没有可清理的"不是"策略满足"）；
+ *   · 只有失败的演练记录 → `stale` 为真（演练失败不算演练过）。
+ *
+ * 后两格尤其要紧：把它们的样本换成"一台闲置机器"，两条读数都会是绿的，
+ * 而绿的原因是这个样本**根本触发不到**那一格。
+ *
+ *   > 一个只在宽松样本上跑过的自检，
+ *   > 与一个把 `problems` 写死成空数组的自检，是同一个东西。
+ */
+export function selfCheckBackup() {
+  const problems = []
+  const scratch = mkdtempSync(join(tmpdir(), 'legion-backup-selfcheck-'))
+  try {
+    const dataDir = join(scratch, 'data')
+    const configPath = join(scratch, 'product.config.json')
+    const backupDir = join(scratch, 'backup')
+    mkdirSync(dataDir, { recursive: true })
+    writeFileSync(join(dataDir, 'team.db'), 'SELF-CHECK-V1', 'utf8')
+    writeFileSync(configPath, '{}', 'utf8')
+
+    const empty = createSnapshot({ backupDir, dataDir: join(scratch, '不存在'), nowMs: 0 })
+    if (empty.ok !== false) problems.push('源不存在时本该拒绝建快照（空备份不是备份）')
+
+    const made = createSnapshot({ backupDir, dataDir, configPath, nowMs: 1000 })
+    if (made.ok !== true || made.snapshot.status !== 'complete') problems.push(`自检快照没建成：${made.reason}`)
+    const snapshotRoot = join(backupDir, 'snapshots', made.snapshot.id)
+
+    // 恢复：先放一个属于**旧主库**的 -wal 在旁边。
+    writeFileSync(join(dataDir, 'team.db'), 'SELF-CHECK-V2', 'utf8')
+    writeFileSync(join(dataDir, 'team.db-wal'), 'WAL', 'utf8')
+    const restored = restoreSnapshot(snapshotRoot, { dataDir, configPath })
+    if (restored.ok !== true) problems.push(`恢复本该成功：${restored.reason}`)
+    if (readFileSync(join(dataDir, 'team.db'), 'utf8') !== 'SELF-CHECK-V1') problems.push('恢复后主库内容不是快照时刻的那一份')
+    if (existsSync(join(dataDir, 'team.db-wal'))) problems.push('恢复后 -wal 还在：它会被重放到旧主库上')
+    if (restored.sidecarsRemoved.length === 0) problems.push('删掉了 -wal 却没有把它记下来')
+
+    // 负数格：改掉快照里的一个字节，恢复必须拒绝。
+    const target = join(snapshotRoot, 'data', 'team.db')
+    const keep = readFileSync(target, 'utf8')
+    writeFileSync(target, '被改过', 'utf8')
+    const corrupt = restoreSnapshot(snapshotRoot, { dataDir, configPath })
+    writeFileSync(target, keep, 'utf8')
+    if (corrupt.ok !== false || corrupt.code !== BACKUP_CODES.SNAPSHOT_CORRUPT) {
+      problems.push(`损坏的快照本该报 ${BACKUP_CODES.SNAPSHOT_CORRUPT}，实际 ${corrupt.code}`)
+    }
+
+    // 保留：一份、且最旧的还不到 30 天 → 不足。
+    const thin = planRetention(listSnapshots(backupDir), { nowMs: 1000, policy: BACKUP_POLICY_DEFAULTS })
+    if (thin.underRetained !== true) problems.push('只有一份且不到 30 天的快照时 underRetained 本该为真')
+    // ★ 这一格必须让"窗口"与"数量"**都**满足，否则它测的只是其中一条。
+    //   最旧那份 40 天前（≥30 天窗口），一共 3 份（≥3 份下限）。
+    const DAY_MS = 24 * 60 * 60 * 1000
+    const rich = planRetention(
+      [0, 20 * DAY_MS, 39 * DAY_MS].map((t) => ({ id: `s${t}`, createdAtMs: t, status: 'complete' })),
+      { nowMs: 40 * DAY_MS, policy: BACKUP_POLICY_DEFAULTS },
+    )
+    if (rich.underRetained !== false) problems.push(`满足数量与窗口时 underRetained 本该为假：${rich.underReasons.join('；')}`)
+    if (rich.counts.retained < BACKUP_POLICY_DEFAULTS.minCount) problems.push('满足条件的样本里保留份数少于下限')
+
+    // 演练新鲜度：只有失败记录 → stale。
+    const drillDir = join(backupDir, DRILL_DIRNAME)
+    mkdirSync(drillDir, { recursive: true })
+    writeFileSync(
+      join(drillDir, '2026-01-02T03-04-05-000Z.json'),
+      JSON.stringify({ outcome: 'verify-failed', atMs: 0 }), 'utf8',
+    )
+    const stale = drillStatus(backupDir, { nowMs: 1000 })
+    if (stale.stale !== true || stale.succeededDrills !== 0) {
+      problems.push('只有失败的演练记录时本该 stale，且 succeededDrills 为 0')
+    }
+    writeFileSync(
+      join(drillDir, '2026-01-03T03-04-05-000Z.json'),
+      JSON.stringify({ outcome: 'ok', atMs: 500 }), 'utf8',
+    )
+    const fresh = drillStatus(backupDir, { nowMs: 1000 })
+    if (fresh.stale !== false || fresh.succeededDrills !== 1) {
+      problems.push('窗口内成功过一次后本该不 stale')
+    }
+
+    return Object.freeze({
+      ok: problems.length === 0,
+      problems: Object.freeze(problems),
+      samples: Object.freeze({
+        emptySnapshotOk: empty.ok,
+        emptySnapshotCode: empty.code,
+        snapshotFileCount: made.snapshot.fileCount,
+        restoredContent: readFileSync(join(dataDir, 'team.db'), 'utf8'),
+        sidecarsRemoved: restored.sidecarsRemoved.length,
+        corruptRestoreCode: corrupt.code,
+        thinUnderRetained: thin.underRetained,
+        richUnderRetained: rich.underRetained,
+        failedOnlyStale: stale.stale,
+        failedOnlySucceeded: stale.succeededDrills,
+        afterSuccessStale: fresh.stale,
+      }),
+    })
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
+  }
+}
+
+export const BACKUP_CHECKED = selfCheckBackup()

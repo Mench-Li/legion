@@ -162,8 +162,17 @@ export function checkCompatibility({
     }
   }
 
-  // 补丁层成对关系。`null`（没有结论）时**不**放行——
-  // 它落到下面的 `unknown`，而不是 `ok`。
+  // 补丁层成对关系。**只有 `'match'` 才算过**——`null`（没给绑定表）、
+  // `'unverified'`（给了绑定表但没查到这一对）以及任何认不出的值，都落到
+  // 下面的 `unknown`。
+  //
+  // ★ 这里必须写成"只有 match 才 ok"的**白名单**，而不是"mismatch 才拦"的
+  //   黑名单。黑名单版本有一个安静的空档：调用方把 manifest 那边的
+  //   `'unverified'` 原样转发过来时，它既不是 `'mismatch'` 也不是 `null`，
+  //   于是从缝里过去——而"没有验证过成对"正是最需要被拦住的那一格。
+  //
+  //   > 一个"没查到成对关系就放行"的体检，
+  //   > 与一个"锚点全失效而进程照常启动"的升级，是同一个东西。
   if (patchPair === 'mismatch') {
     reasons.push(
       `preflight-patch-pair-mismatch: 目标补丁层 ${target.dshCompositionPatchVersion} 与 DSH ${target.dshVersion} 不成对：` +
@@ -176,14 +185,17 @@ export function checkCompatibility({
       check: 'compatibility', verdict: 'blocked', code: reasons[0].split(':')[0], reasons: Object.freeze(reasons), window,
     })
   }
-  if (patchPair === null) {
+  if (patchPair !== 'match') {
     return Object.freeze({
       check: 'compatibility', verdict: 'unknown',
       code: 'preflight-patch-pair-unverified',
+      // `patchPair` 的原值进读数：把"没给绑定表"与"给了但没查到"分开，
+      // 否则两张不同的排障清单会被同一句话打发掉。
       reasons: Object.freeze([
-        '补丁层与 DSH 版本的成对关系没有结论（没有绑定表）：' +
+        `补丁层与 DSH 版本的成对关系没有结论（patchPair=${JSON.stringify(patchPair)}）：` +
         '"没有验证过成对"与"成对已验证"在本次升级里必须区分',
       ]),
+      patchPair,
       window,
     })
   }
@@ -403,3 +415,83 @@ export function runPreflight({
     }),
   })
 }
+
+// ---------------------------------------------------------------------------
+// 装载期自检
+// ---------------------------------------------------------------------------
+
+/**
+ * 装载期自检：把三项检查各自"能不能真的说不"跑一遍，留下**算出来的值**。
+ *
+ * 每一项的样本都刻意配成一对：
+ *
+ *   · 磁盘：有读数 → `ok` / 没有读数 → `unknown`；
+ *   · 在途任务：已收敛 → `ok` / 认不出的状态 → `blocked`；
+ *   · 阶段：`pre-download` 容忍磁盘未知 / `pre-switch` 不容忍。
+ *
+ * 没有这一对，一个"永远返回 ok"的实现在这套自检里也是绿的——而它的表现
+ * 恰好是升级在磁盘不够时照常开始写文件。
+ *
+ *   > 一个只在"输入齐全"时被跑过的检查，
+ *   > 与一个把 `return { ok: true }` 写在第一行的检查，是同一个东西。
+ */
+export function selfCheckPreflight() {
+  const problems = []
+  const good = { productVersion: '1.1.0', dshVersion: '0.8.2', dshCompositionPatchVersion: 1 }
+  const target = { productVersion: '2.0.0', dshVersion: '0.8.2', dshCompositionPatchVersion: 1 }
+  const pair = (current, stage, extra = {}) => runPreflight({
+    current, target, stage, patchPair: 'match', freeBytes: 10 ** 9, packageBytes: 10 ** 6, tasks: [], ...extra,
+  })
+
+  const okAtPreDownload = pair(good, 'pre-download')
+  const diskNoReading = pair(good, 'pre-download', { freeBytes: null })
+  const diskNoReadingAtSwitch = pair(good, 'pre-switch', { freeBytes: null })
+  const badWindow = pair({ ...good, productVersion: '1.2.0' }, 'pre-switch')
+  const unverifiedPair = runPreflight({
+    current: good, target, stage: 'pre-switch', patchPair: 'unverified',
+    freeBytes: 10 ** 9, packageBytes: 10 ** 6, tasks: [],
+  })
+  const badTask = pair(good, 'pre-switch', { tasks: [{ id: 'x', state: '在飞' }] })
+  const convergedTask = pair(good, 'pre-switch', { tasks: [{ id: 'x', state: 'completed' }] })
+
+  if (okAtPreDownload.ok !== true) problems.push(`齐全输入 + matching pair 本该通过：${okAtPreDownload.reasons.join('；')}`)
+  if (diskNoReading.ok !== true) problems.push('pre-download 阶段没有磁盘读数本该被容忍')
+  if (diskNoReading.checks.find((c) => c.check === 'disk').verdict !== 'unknown') {
+    problems.push('没有磁盘读数时 checkDiskSpace 没有落在 unknown 上')
+  }
+  // ★ 这一格是上面那一格的**配对**：同一个输入换个阶段就必须被拦。
+  if (diskNoReadingAtSwitch.ok !== false) problems.push('pre-switch 阶段没有磁盘读数本该被拦')
+  if (badWindow.ok !== false) problems.push('1.2.0 → 2.0.0 本该被 N-1 窗口拦住')
+  if (unverifiedPair.ok !== false) problems.push('补丁层成对关系为 unverified 时本该被拦')
+  if (badTask.ok !== false) problems.push('状态认不出的在途任务本该被拦')
+  if (convergedTask.ok !== true) problems.push('已收敛的任务本该不拦')
+  if (okAtPreDownload.remedies.disk !== null) problems.push('磁盘通过时 remedies.disk 本该是 null')
+
+  let stageGuard = false
+  try {
+    runPreflight({ current: good, target, stage: 'pre-switch-但拼错了' })
+  } catch (e) {
+    stageGuard = e?.code === 'preflight-stage-unknown'
+  }
+  if (!stageGuard) problems.push('未知阶段本该抛 preflight-stage-unknown')
+
+  return Object.freeze({
+    ok: problems.length === 0,
+    problems: Object.freeze(problems),
+    samples: Object.freeze({
+      okAtPreDownload: okAtPreDownload.ok,
+      diskNoReadingAtPreDownload: diskNoReading.ok,
+      diskNoReadingVerdict: diskNoReading.checks.find((c) => c.check === 'disk').verdict,
+      diskNoReadingAtPreSwitch: diskNoReadingAtSwitch.ok,
+      badWindowOk: badWindow.ok,
+      badWindowCode: badWindow.checks.find((c) => c.check === 'compatibility').code,
+      unverifiedPairOk: unverifiedPair.ok,
+      badTaskOk: badTask.ok,
+      convergedTaskOk: convergedTask.ok,
+      toleratesOnlyDisk: [...diskNoReading.toleratedUnknown],
+      stageGuard,
+    }),
+  })
+}
+
+export const PREFLIGHT_CHECKED = selfCheckPreflight()

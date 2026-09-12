@@ -53,7 +53,7 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { createUpgradeRecord, upgradeNotification, writeUpgradeRecord } from './audit.mjs'
+import { UPGRADE_RESULTS, createUpgradeRecord, upgradeNotification, writeUpgradeRecord } from './audit.mjs'
 import { BACKUP_POLICY_DEFAULTS, createSnapshot, planRetention, restoreSnapshot } from './backup.mjs'
 import { hashBytes, verifyPackage } from './package.mjs'
 import { runPreflight } from './preflight.mjs'
@@ -96,6 +96,8 @@ export const UPGRADE_CODES = Object.freeze({
   /** 包完整性与签名校验没通过——**在动任何东西之前**。 */
   VERIFICATION_FAILED: 'upgrade-verification-failed',
   PREFLIGHT_FAILED: 'upgrade-preflight-failed',
+  /** 下载之后、切换之前用**真实包大小**再算一次磁盘余量。 */
+  DISK_RECHECK_FAILED: 'upgrade-disk-recheck-failed',
   BACKUP_FAILED: 'upgrade-backup-failed',
   /** 迁移集合里的声明互相冲突（例如全 additive 的集合里出现 breaking）。 */
   MIGRATION_PLAN_INCOMPATIBLE: 'upgrade-migration-plan-incompatible',
@@ -105,6 +107,21 @@ export const UPGRADE_CODES = Object.freeze({
   FORWARD_FIX: 'upgrade-forward-fix-required',
   /** 编排的输入不完整。 */
   BAD_INPUT: 'upgrade-bad-input',
+})
+
+/**
+ * 编排结论 → 审计里的「升级结果」（spec §6.12 的枚举）。
+ *
+ * 这张表是**显式**的，而不是一串 `?:`：两者的区别在有人加了一个新 verdict
+ * 的那一天。用 `?:` 时新 verdict 会静默落进最后一个分支（`aborted`），
+ * 于是一次"已经是最新版本"的运行在审计里长得和"中止了"一样。
+ */
+export const RESULT_BY_VERDICT = Object.freeze({
+  'already-current': 'not-started',
+  committed: 'committed',
+  'not-started': 'not-started',
+  'rolled-back': 'rolled-back',
+  'forward-fix-required': 'forward-fix-required',
 })
 
 function upgradeError(code, message) {
@@ -157,6 +174,34 @@ export function checkMigrationPlanRollback(migrations, { allowBreaking = false }
   return Object.freeze({ ok: true, code: null, breaking: Object.freeze([]), plan, reason: null })
 }
 
+/**
+ * spec §9.1 line 689 的「补丁层与 DSH 成对」判定，输入是一张**绑定表**。
+ *
+ * 绑定表就是已知可用的 `(dshVersion, dshCompositionPatchVersion)` 组合清单。
+ * 把它作为参数而不是在这里写一个常数，是为了让三种结果各自可达：
+ *
+ *   · 没给绑定表            → `'unverified'`（"没有验证过成对"）；
+ *   · 给了、目标那对在里面  → `'match'`；
+ *   · 给了、目标那对不在里面 → `'mismatch'`。
+ *
+ * ★ 默认**不能**是 `'match'`。一个默认"成对已验证"的实现在平时完全正常，
+ * 只在补丁锚点随 DSH 变化而失效的那一刻放行——而那时的表现是进程照常启动、
+ * 强制面（ToolGuard / pre-execute / approval answerer）全都不在。
+ *
+ *   > 一个"没查过就当已配对"的判定，
+ *   > 与一个"锚点全失效而没人发现"的升级，是同一个东西。
+ */
+export function patchPairOf(target, patchBindings) {
+  if (!Array.isArray(patchBindings)) return 'unverified'
+  if (!Number.isInteger(target?.dshCompositionPatchVersion) || target.dshCompositionPatchVersion < 1) {
+    return 'mismatch'
+  }
+  const hit = patchBindings.some((b) => b !== null && typeof b === 'object'
+    && b.dshVersion === target.dshVersion
+    && b.compositionPatchVersion === target.dshCompositionPatchVersion)
+  return hit ? 'match' : 'mismatch'
+}
+
 // ---------------------------------------------------------------------------
 // 数据安全读数
 // ---------------------------------------------------------------------------
@@ -166,18 +211,40 @@ export function checkMigrationPlanRollback(migrations, { allowBreaking = false }
  *
  * 它读的是**迁移的兼容性声明**，不是"成功与否"。
  */
-export function dataSafetyOf({ appliedMigrations = [], migrations = [], backup = null, restoredFromBackup = false }) {
-  if (appliedMigrations.length === 0) {
+export function dataSafetyOf({
+  appliedMigrations = [], failedMigrations = [], migrations = [], backup = null, restoredFromBackup = false,
+}) {
+  // ★ 失败但"写到哪儿了不知道"的迁移，与已应用的迁移在**数据安全**上是同一类：
+  //   它们都可能已经改过库。只读 `appliedMigrations` 的实现会在这里报
+  //   "本次运行没有向数据库写入任何迁移"——而那是它最不该说的一句话。
+  const possiblyWritten = [...appliedMigrations, ...failedMigrations]
+
+  if (possiblyWritten.length === 0) {
     return Object.freeze({
-      businessDataIntact: true,
-      code: 'upgrade-data-untouched',
+      // ★ 从备份恢复**本身**就是一次破坏性动作：备份时刻与恢复时刻之间的写入
+      //   已经不在了。一条 `businessDataIntact: true` + `reason: '...已丢'`
+      //   的读数是自相矛盾的，而读到 `true` 的人不会去读那句 reason。
+      businessDataIntact: restoredFromBackup !== true,
+      code: restoredFromBackup ? 'upgrade-data-restored-from-backup' : 'upgrade-data-untouched',
       reason: restoredFromBackup
         ? '从备份恢复过数据库：业务数据回到备份时刻，备份之后的写入**已丢**'
         : '本次运行没有向数据库写入任何迁移：业务数据未被改动',
       backupTakenAtMs: backup?.snapshot?.createdAtMs ?? null,
     })
   }
-  const plan = planRollback({ applied: appliedMigrations, migrations })
+
+  if (appliedMigrations.length === 0 && failedMigrations.length > 0) {
+    return Object.freeze({
+      businessDataIntact: false,
+      code: 'upgrade-data-at-risk',
+      reason: `${failedMigrations.length} 份迁移执行失败，而它们是否已经写入无法确定` +
+        `（失败版本：${failedMigrations.map((m) => m?.version ?? '?').join(', ')}）：` +
+        '把"写到一半"当成"没跑过"，正是把旧程序退回一个读不懂当前库结构的版本的那一步',
+      backupTakenAtMs: backup?.snapshot?.createdAtMs ?? null,
+    })
+  }
+
+  const plan = planRollback({ applied: possiblyWritten, migrations })
   if (plan.safety === 'program-only-rollback') {
     return Object.freeze({
       businessDataIntact: true,
@@ -234,6 +301,8 @@ export function dataSafetyOf({ appliedMigrations = [], migrations = [], backup =
  * @param {() => Promise<unknown>} [args.drainInFlight]
  * @param {(op: string, ctx: object) => Promise<unknown>} [args.stageHook]
  *        故意让某个阶段失败用的注入点（`(stage) => { throw ... }`）。
+ * @param {ReadonlyArray<{dshVersion: string, compositionPatchVersion: number}>} [args.patchBindings]
+ *        已知可用的 DSH × 补丁层组合表。不给就是"没有验证过成对"，体检会拦。
  */
 export async function runUpgrade({
   paths,
@@ -260,6 +329,7 @@ export async function runUpgrade({
   backupBytes = 0,
   dataDirBytes = 0,
   tasks = null,
+  patchBindings = null,
   now = () => Date.now(),
   snapshotFactory = createSnapshot,
   retentionPolicy = BACKUP_POLICY_DEFAULTS,
@@ -281,15 +351,13 @@ export async function runUpgrade({
     const finishedAtMs = now()
     const safety = dataSafetyOf({
       appliedMigrations: args.appliedMigrations ?? [],
+      failedMigrations: args.failedMigrations ?? [],
       migrations,
       backup: args.backup ?? null,
       restoredFromBackup: args.restoredFromBackup === true,
     })
     const record = createUpgradeRecord({
-      result: args.verdict === 'committed' ? 'committed'
-        : args.verdict === 'rolled-back' ? 'rolled-back'
-          : args.verdict === 'forward-fix-required' ? 'forward-fix-required'
-            : 'aborted',
+      result: RESULT_BY_VERDICT[args.verdict] ?? 'aborted',
       fromVersion: current?.productVersion ?? null,
       toVersion: targetVersion,
       channel: target?.channel ?? null,
@@ -330,15 +398,30 @@ export async function runUpgrade({
       notification,
       auditFile,
       dataSafety: safety,
-      // 每一项都是"已知状态"，因为本模块的每条失败路径都做了收敛动作。
-      knownCompatible: args.knownCompatible !== false,
+      // ★ `knownCompatible` 说的是"当前活动版本处在**已知且兼容**的状态"，
+      //   不是"有没有升级成功"：
+      //     · 一次下载损坏于是什么都没做的运行 → 旧版本照常跑 → 兼容；
+      //     · 一次退回旧版本的回滚             → 旧版本照常跑 → 兼容；
+      //     · 一次 `forward-fix-required`       → 状态**已知**，但程序停在
+      //       一个旧版本读不懂的数据结构上，因此**不兼容**。
+      //
+      //   > 一个把"没有升级成功"一律算作"系统处于未知状态"的判定，
+      //   > 与一个"每次下载抖动都要人工介入"的流程，是同一个东西。
+      knownCompatible: args.knownCompatible !== false && args.verdict !== 'forward-fix-required',
       releaseNotes: args.releaseNotes ?? null,
     })
   }
 
+  // ★ 先 `...args` 再补默认值，而不是反过来。
+  //
+  //   逐个字段列出来的写法有一个安静的坑：某条失败路径多带了一个读数
+  //   （比如切换前那次磁盘复查的 `diskRecheck`），而这里没有列它——
+  //   于是那个读数在返回值里**根本不存在**，读它的人拿到 undefined。
+  //   把它当成"编排没有这个字段"是最省事的解释，也是最错的那个。
   const fail = (args) => finish({
+    ...args,
     verdict: args.verdict,
-    code: args.code,
+    code: args.code ?? null,
     stage: args.stage,
     reachedStage: args.stage,
     verification: args.verification ?? null,
@@ -349,6 +432,7 @@ export async function runUpgrade({
     rollback: args.rollback ?? null,
     switchover: args.switchover ?? null,
     appliedMigrations: args.appliedMigrations ?? [],
+    failedMigrations: args.failedMigrations ?? [],
     restoredFromBackup: args.restoredFromBackup ?? false,
     knownCompatible: args.knownCompatible !== false,
     notes: args.notes ?? null,
@@ -368,11 +452,18 @@ export async function runUpgrade({
     })
   }
 
-  // ── ① 体检 ─────────────────────────────────────────────────────────
+  // ── ① 体检（spec §9.4 第一步：检查兼容性与空间） ────────────────────
+  //
+  // 这一步跑在**下载之前**，所以阶段是 `pre-download`：包还没下来，解压后的
+  // 体积还不知道，因此这里传 `packageBytes: null`，磁盘读数会落在
+  // `unknown` 上——而 `pre-download` 阶段容忍它（兼容性与在途任务不容忍）。
+  //
+  // 磁盘的真正门槛在下面「切换之前」那一次体检里，用的是真实包大小。
   const preflight = runPreflight({
-    current, target, stage: 'pre-switch',
-    freeBytes, packageBytes: packageBytesForDisk ?? 0, backupBytes, dataDirBytes,
+    current, target, stage: 'pre-download',
+    freeBytes, packageBytes: null, backupBytes, dataDirBytes,
     tasks,
+    patchPair: patchPairOf(target, patchBindings),
   })
   emit('preflight', preflight.ok ? 'ok' : 'blocked', preflight.reasons.join('；'))
   if (!preflight.ok) {
@@ -471,6 +562,26 @@ export async function runUpgrade({
   }
 
   // ── ⑦⑧⑨ 原子切换 → 迁移 → 健康检查 ────────────────────────────────
+  //
+  // ★ 切换之前用**真实包大小**再算一次磁盘：`pre-download` 那次体检是在包
+  //   还没下来的时候跑的，所以它容忍"磁盘读数未知"。这里已经知道包多大、
+  //   解压后要占多少，因此一次未知读数就是一次拒动——而且此刻拒动的代价
+  //   仍然是零：活动指针还没有被碰过。
+  const diskRecheck = runPreflight({
+    current, target, stage: 'pre-switch',
+    freeBytes, packageBytes: packageBytesForDisk ?? 0, backupBytes, dataDirBytes,
+    tasks,
+    patchPair: patchPairOf(target, patchBindings),
+  })
+  emit('switch', diskRecheck.ok ? 'disk-recheck-ok' : 'disk-recheck-blocked', diskRecheck.reasons.join('；'))
+  if (!diskRecheck.ok) {
+    return fail({
+      verdict: 'not-started', code: UPGRADE_CODES.DISK_RECHECK_FAILED, stage: 'switch',
+      preflight, diskRecheck, backup, verification,
+      notes: `切换前磁盘复查未通过，活动指针未被改动：${diskRecheck.reasons.join('；')}`,
+    })
+  }
+
   const activated = activateVersion(paths.installDir, targetVersion, { nowMs: now() })
   emit('switch', activated.ok ? 'ok' : activated.code, activated.reason ?? targetVersion)
   if (!activated.ok) {
@@ -496,18 +607,50 @@ export async function runUpgrade({
   emit('migrate', migrationOutcome.outcome, migrationOutcome.reason)
 
   if (migrationOutcome.outcome === 'failed' || migrationOutcome.outcome === 'checksum-drift') {
+    // ★ 失败的那一份要按"它到底写了多少"分三档参与回滚裁决：
+    //
+    //   · `partialWrites === false` 且是**校验和漂移** → 一条语句都没跑，
+    //     它的写入确定性为零，不参与裁决；
+    //   · `partialWrites === false` 且是**记账失败** → `up()` 跑完了，
+    //     它就是一份**已应用**的迁移；
+    //   · `partialWrites === null`（不知道）→ **按已应用算**。
+    //
+    //   最后一档是这里最重要的一条：`up()` 里的多条语句写到一半抛错时，
+    //   失败的迁移不会留下 applied 记录。若回滚只看 applied，它就会得出
+    //   "没有任何迁移被应用，仅回滚程序是安全的"，然后把程序退回一个
+    //   读不懂当前库结构的旧版本上。
+    //
+    //   > 一个只看"已应用"记录的回滚裁决，
+    //   > 与一个"把写到一半的 contract 迁移当成没跑过"的裁决，是同一个东西。
+    const failedVersion = migrationOutcome.failed?.version ?? null
+    const failedDef = failedVersion === null ? null : migrations.find((m) => m.version === failedVersion) ?? null
+    const partial = migrationOutcome.failed?.partialWrites ?? null
+    const nothingWritten = partial === false && migrationOutcome.outcome === 'checksum-drift'
+    const fullyWritten = partial === false && migrationOutcome.outcome === 'failed'
+    const appliedForSafety = fullyWritten && failedDef !== null
+      ? [...(migrationOutcome.applied ?? []), { version: failedDef.version, compatibility: failedDef.compatibility }]
+      : (migrationOutcome.applied ?? [])
+    const failedMigrations = (nothingWritten || fullyWritten || failedDef === null) ? [] : [failedDef]
     const rollback = rollbackUpgrade({
       installRoot: paths.installDir,
-      appliedMigrations: migrationOutcome.applied ?? [],
+      appliedMigrations: appliedForSafety,
+      failedMigrations,
       migrations,
       nowMs: now(),
     })
     emit('finalize', rollback.verdict, rollback.reason)
     return fail({
       verdict: rollback.ok ? 'rolled-back' : 'forward-fix-required',
-      code: migrationOutcome.code ?? UPGRADE_CODES.STAGE_FAILED, stage: 'migrate',
+      // ★ 顶层 `code` 报的是**最终处置**，不是最先出错的子步骤。
+      //   一次"迁移失败 → 回滚被拒"的运行里，读者第一眼要知道的是
+      //   "需要向前修复"，而具体哪一份迁移、抛了什么，在 `migrationOutcome` 里。
+      code: rollback.ok ? (migrationOutcome.code ?? UPGRADE_CODES.STAGE_FAILED) : UPGRADE_CODES.FORWARD_FIX,
+      stage: 'migrate',
       preflight, backup, verification, migrationOutcome, rollback, switchover: activated,
-      appliedMigrations: migrationOutcome.applied ?? [],
+      // `appliedMigrations` 进的是**数据安全读数**，因此用的也是 `appliedForSafety`：
+      // 一份"跑完了但没记上账"的迁移同样改过数据库。
+      appliedMigrations: appliedForSafety,
+      failedMigrations,
       notes: `迁移失败 → ${rollback.reason}`,
     })
   }
@@ -591,7 +734,8 @@ export function rollbackWithBackupRestore({
 
   return Object.freeze({
     ok: programRollback.ok === true,
-    code: restore.code,
+    // 顶层 `code` 说的是**这次回滚做了什么**；恢复动作自己的码在 `restore.code` 里。
+    code: 'upgrade-data-restored-from-backup',
     restore,
     programRollback,
     dataSafety: Object.freeze({
@@ -602,7 +746,9 @@ export function rollbackWithBackupRestore({
       backupTakenAtMs: restore.createdAtMs,
     }),
     reason: programRollback.ok
-      ? `数据库已从备份恢复，程序退回 ${programRollback.restoredVersion}`
+      // `activateVersion` 的产物字段叫 `version`（它换的就是这个），
+      // 不是 `restoredVersion`——读错字段名会让一句"程序退回成功"印出 undefined。
+      ? `数据库已从备份恢复，程序退回 ${programRollback.version}`
       : `数据库已恢复，但程序指针退回失败：${programRollback.reason}`,
   })
 }
@@ -641,6 +787,22 @@ export function selfCheckOrchestrator() {
   if (restored.businessDataIntact !== false) {
     problems.push('从备份恢复之后仍被判为"业务数据未受影响"——备份之后的写入已经丢了')
   }
+  // ③-b 没有应用任何迁移、但恢复过备份：同样是"丢过"，不能因为
+  //     `appliedMigrations` 为空就走了"没碰过数据库"那条分支。
+  const restoredNoMigrations = dataSafetyOf({ appliedMigrations: [], migrations: [], restoredFromBackup: true })
+  if (restoredNoMigrations.businessDataIntact !== false) {
+    problems.push('没应用迁移但恢复过备份时被判为"业务数据未被改动"')
+  }
+
+  // ④ 每一个 verdict 都要有审计结果映射，且映射出来的值必须是 audit 认得的枚举。
+  //    这条检查在装载期算出来，是为了让"有人加了一个 verdict 却忘了映射"
+  //    在**装载**时暴露，而不是在那一次升级的审计记录里。
+  const unmapped = UPGRADE_VERDICTS.filter((v) => !Object.hasOwn(RESULT_BY_VERDICT, v))
+  if (unmapped.length > 0) problems.push(`这些 verdict 没有审计结果映射：${unmapped.join(' / ')}`)
+  const badResults = UPGRADE_VERDICTS
+    .map((v) => RESULT_BY_VERDICT[v])
+    .filter((r) => r !== undefined && !UPGRADE_RESULTS.includes(r))
+  if (badResults.length > 0) problems.push(`映射出了 audit 不认得的升级结果：${badResults.join(' / ')}`)
 
   return Object.freeze({
     ok: problems.length === 0,
@@ -648,6 +810,7 @@ export function selfCheckOrchestrator() {
     orchestrator: UPGRADE_ORCHESTRATOR,
     stages: UPGRADE_STAGES,
     verdicts: UPGRADE_VERDICTS,
+    resultByVerdict: RESULT_BY_VERDICT,
     samples: Object.freeze({
       breakingPlanOk: blocked.ok,
       breakingPlanCode: blocked.code,
@@ -655,6 +818,10 @@ export function selfCheckOrchestrator() {
       untouchedIntact: untouched.businessDataIntact,
       restoredIntact: restored.businessDataIntact,
       restoredCode: restored.code,
+      restoredNoMigrationsIntact: restoredNoMigrations.businessDataIntact,
+      verdictCount: UPGRADE_VERDICTS.length,
+      mappedResults: Object.freeze(UPGRADE_VERDICTS.map((v) => RESULT_BY_VERDICT[v])),
+      unmappedCount: unmapped.length,
     }),
   })
 }

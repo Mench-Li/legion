@@ -358,11 +358,22 @@ export function probeHealth({ probe, timeoutMs, label = null } = {}) {
  * @param {object} args
  * @param {string} args.installRoot
  * @param {Array<object>} [args.appliedMigrations] 本次升级应用过的迁移记录
+ * @param {Array<object>} [args.failedMigrations]  本次升级**失败**的迁移
  * @param {Array<object>} [args.migrations]       迁移定义集合（含 compatibility）
  * @param {boolean} [args.force] 显式承认"知道要丢数据"时才允许越过后端裁决
+ *
+ * ★ `failedMigrations` 不是一个可选的补充信息，而是安全裁决的必需输入。
+ *
+ *   一份迁移的 `up()` 里有多条语句时，"第一句成功、第二句抛错"是常见的失败
+ *   形态。而**失败的那一份不会留下 applied 记录**——它没有跑完。如果回滚只看
+ *   `appliedMigrations`，它就会得出结论"没有任何迁移被应用，因此仅回滚程序
+ *   是安全的"，然后把程序退回到一个读不懂当前数据库结构的旧版本上。
+ *
+ *   > 一个只看"已应用"记录的裁决，
+ *   > 与一个"把写到一半的 contract 迁移当成没跑过"的裁决，是同一个东西。
  */
 export function rollbackUpgrade({
-  installRoot, appliedMigrations = [], migrations = [], force = false, nowMs = Date.now(),
+  installRoot, appliedMigrations = [], failedMigrations = [], migrations = [], force = false, nowMs = Date.now(),
 } = {}) {
   const active = readActivePointer(installRoot)
   if (!active.ok) {
@@ -374,7 +385,9 @@ export function rollbackUpgrade({
     })
   }
 
-  const plan = planRollback({ applied: appliedMigrations, migrations })
+  // 失败的那几份与已应用的**一起**参与裁决：它们的写入可能已经发生了一半。
+  const forSafety = [...appliedMigrations, ...failedMigrations]
+  const plan = planRollback({ applied: forSafety, migrations })
   const previous = active.previousVersion ?? previousInstalledVersion(installRoot, active.version)
 
   // 数据库侧的第一问：**能不能只回滚程序**。
@@ -423,6 +436,7 @@ export function rollbackUpgrade({
     rolledBackFrom: active.version,
     appliedVersions: plan.appliedVersions,
     breakingVersions: plan.breakingVersions,
+    failedVersions: Object.freeze(failedMigrations.map((m) => m?.version ?? null)),
     // ★ 这两行是本模块对 spec line 733 的全部回答。
     restores: plan.safety === 'program-only-rollback'
       ? Object.freeze([`程序版本：${active.version} → ${previous}`, '数据库：无需恢复（本次迁移都是 additive）'])
@@ -435,7 +449,6 @@ export function rollbackUpgrade({
       : `已退回 ${previous}，但数据库**仍需**向前修复或从备份恢复：${plan.reason}`,
   })
 }
-
 function previousInstalledVersion(installRoot, currentVersion) {
   const installed = listInstalledVersions(installRoot).filter((v) => v !== currentVersion)
   return installed.length === 0 ? null : installed[installed.length - 1]
@@ -560,7 +573,10 @@ export async function runSwitchover({
       events: Object.freeze(events),
       activated, migrations: migrationOutcome, health: healthVerdict, rollback,
       restores: rollback.restores, doesNotRestore: rollback.doesNotRestore,
-      reason: `健康检查判定 ${healthVerdict.verdict}（${healthVerdict.reason}）→ 程序退回 ${rollback.restoredVersion ?? '(失败)'}`,
+      reason: `健康检查判定 ${healthVerdict.verdict}（${healthVerdict.reason}）→ 程序退回 ${rollback.restoredVersion ?? '(失败)'}。` +
+        `数据库：${rollback.safety === 'program-only-rollback'
+          ? '停留在 expand 之后的状态，旧程序读得懂'
+          : '需要向前修复或从备份恢复'}`,
     })
   }
 

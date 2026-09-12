@@ -810,21 +810,40 @@ export function guardApprovalPairs({ floor = FLOOR_PROBE_FLOOR, executions = FLO
  *
  * 违规必须**可定位到具体强制点**（line 479 的原话），所以每条违规都带
  * `point` / `auditSource`（后者取自审计口径）与 `callId`，可以直接拿去 filter
- * `tool_calls`。**修法表不在这里**：它在 `team-hub/tool-call-log.mjs` 的
- * `SOURCE_REPAIR_ACTIONS` 里，本模块不抄一份——
- * `runtime/` → `team-hub/` 在仓库里是 0 处，方向不该为一个字符串反转。
+ * `tool_calls`。**修法文案不在这里**：`runtime/` → `team-hub/` 在仓库里是 0 处，
+ * 方向不该为一个字符串反转；而本模块也 import 不了 `bootstrap.mjs`（会成环）。
+ * 于是修法表由调用方**注入**（`repairActions`）——送不进来时 `repairAction` 为
+ * `null`，而那本身就是一个信号：**这条违规没有对应的修复入口**。
  *
  * @param {Array<{callId?: string, toolName?: string, preExecute?: {kind: string},
  *                approval?: {outcome: string}|null, guard?: {decision?: string, reason?: string|null}}>} pairs
+ * @param {{repairActions?: Record<string, {action?: string}>|null}} [options]
  */
-export function checkApprovedCallsSurviveGuard(pairs = []) {
+export function checkApprovedCallsSurviveGuard(pairs = [], { repairActions = null } = {}) {
   const violations = []
   const rows = []
+  // 修法按**检查项名**取。合规点（guard）与策略门点各有自己的入口；
+  // 两者都缺时就承认"没有修法"，而不是编一个。
+  const repairOf = (point) => {
+    if (repairActions === null || typeof repairActions !== 'object') return null
+    const candidates = point === 'guard'
+      ? ['guard-approval-consistency', 'enforcement-mapping']
+      : ['guard-approval-consistency', 'composition-patch-layer']
+    for (const name of candidates) {
+      const action = repairActions[name]?.action
+      if (typeof action === 'string' && action !== '') return action
+    }
+    return null
+  }
   const push = (pair, code, point, detail) => violations.push(Object.freeze({
     code,
     point,
     // 审计口径里这个点叫什么。`tool_calls.decisionSource` 就是按它写的。
     auditSource: point,
+    // ★ 可执行的下一步。spec line 479 抱怨的是"审计里找不到该修哪里"——
+    //   一条说得**出点名**的违规，与一条说得出去跑哪个修复入口的违规，
+    //   对值班的人是两件不同的事。
+    repairAction: repairOf(point),
     callId: pair?.callId ?? null,
     toolName: pair?.toolName ?? null,
     detail,
@@ -893,18 +912,27 @@ export function checkApprovedCallsSurviveGuard(pairs = []) {
  *
  * 反向控制不能省：没有它，这条检查就只在一个"两处下限天然一致"的输入上跑过，
  * 与一条不存在的检查在"它到底拦住了什么"上是同一个东西。
+ *
+ * `repairActions` 注入进来之后，`tamperedCaught` 多一个条件：**每条违规都得说得出
+ * 修复入口**。说不出来时这条检查照样报不通过——一条"点得出名、却没有下一步"的
+ * 违规，正是 spec line 479 描述的那个状态。
  */
 export function checkGuardApprovalConsistency(deps = {}) {
   const floor = deps.floor ?? FLOOR_PROBE_FLOOR
-  const consistent = checkApprovedCallsSurviveGuard(guardApprovalPairs(deps))
+  const consistent = checkApprovedCallsSurviveGuard(guardApprovalPairs(deps), deps)
   const tampered = checkApprovedCallsSurviveGuard(
     guardApprovalPairs({ ...deps, preExecuteFloor: () => undefined }),
+    deps,
   )
+  const repairable = deps.repairActions == null
+    ? null
+    : tampered.violations.every((v) => typeof v.repairAction === 'string' && v.repairAction !== '')
   // ★ 这三条合起来才是"这条检查会红"：真实输入不误报、坏输入必须被拦、
   //   且拦下来说的是 `guard` 这个点（可定位）。
   const tamperedCaught = consistent.violations.length === 0
     && tampered.violations.length > 0
     && tampered.violations.every((v) => v.point === 'guard')
+    && repairable !== false
   return Object.freeze({
     version: ENFORCEMENT_MAPPING_VERSION,
     probeFloor: Object.freeze({
@@ -915,6 +943,8 @@ export function checkGuardApprovalConsistency(deps = {}) {
     consistent,
     tampered,
     tamperedCaught,
+    // 注入过修法表时，这里说明它是否真的覆盖了违规点（`null` = 没人注入）。
+    repairable,
     // 反向控制红不了 ⇒ **这一条不许报"通过"**：它要么是探针没内容（空下限），
     // 要么是检查本身坏了。两种都不该被读成"没问题"。
     //

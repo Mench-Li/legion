@@ -139,6 +139,8 @@ export const MANIFEST_CODES = Object.freeze({
   RANGE_MALFORMED: 'pack-manifest-range-malformed',
   /** 依赖表缺失（`?? []` 就是这里要防的兜底）。 */
   DEPENDENCY_UNDECLARED: 'pack-manifest-dependency-undeclared',
+  /** 依赖条目里出现了不认识的字段（`version:` 写成 `range:` 的兄弟）。 */
+  DEPENDENCY_FIELD_UNKNOWN: 'pack-manifest-dependency-field-unknown',
   /** 依赖自己。 */
   DEPENDENCY_SELF: 'pack-manifest-dependency-self',
   /** 同一个依赖写了两遍。 */
@@ -803,6 +805,29 @@ function installedMap(installed) {
  *
  * `dependsOn` 缺失 = **拒绝**，不是"没有依赖"（见文件头 ③）。空依赖表写成 `[]`。
  */
+export const PRERELEASE_RANGE_NOTE = '非预发布区间不匹配预发布版本'
+
+/**
+ * 依赖条目的字段（闭合）。
+ *
+ * 加这一条是因为实测撞到过：把 `range:` 写成 `version:`（一个很自然的写法）时，
+ * `dep.range` 是 `undefined`，而 `satisfiesRange(_, undefined)` 给出的码是
+ * `pack-manifest-range-unbounded`——**它确实拒绝了，但理由是错的**。
+ * 值班的人会去查"谁把范围写成了 `*`"，而真正要改的是那个字段名。
+ *
+ *   > 一个「拒绝理由指向另一个字段」的校验，
+ *   > 与一个「把值班的人引到错误的那一行」的校验，是同一个东西——
+ *   > 只不过前者在报表上是一条合法的失败。
+ */
+export const DEPENDENCY_FIELDS = Object.freeze(['packId', 'range'])
+
+/**
+ * 依赖预检。
+ *
+ * @param {object} p
+ * @param {object} p.manifest 已归一化的 manifest（`dependsOn` 为数组或 null）
+ * @param {Array<{packId: string, version: string}>} [p.installed] 宿主给的已安装清单
+ */
 export function preflightDependencies({ manifest, installed = [] } = {}) {
   const problems = []
   const fail = (code, field, message) => problems.push(Object.freeze({ code, field, message }))
@@ -835,6 +860,22 @@ export function preflightDependencies({ manifest, installed = [] } = {}) {
     const packId = nfc(String(dep.packId ?? '')).trim()
     if (packId === '') {
       fail(MANIFEST_CODES.DEPENDENCY_UNDECLARED, 'dependsOn', '依赖缺少 packId')
+      continue
+    }
+    // ★ 字段闭合放在 packId 之后：先让"缺 packId"给出它自己的码，
+    //   否则 `{ version: '^1.0.0' }` 这种写法会被报成"字段不认识"，
+    //   而它真正的问题是少了 packId。
+    const unknownFields = Object.keys(dep).filter((k) => !DEPENDENCY_FIELDS.includes(k))
+    const missingFields = DEPENDENCY_FIELDS.filter((k) => !Object.prototype.hasOwnProperty.call(dep, k))
+    if (unknownFields.length > 0 || missingFields.length > 0) {
+      fail(
+        MANIFEST_CODES.DEPENDENCY_FIELD_UNKNOWN,
+        'dependsOn',
+        `依赖 ${packId} 的字段必须恰好是 ${JSON.stringify(DEPENDENCY_FIELDS)}：` +
+        `缺 ${JSON.stringify(missingFields)}，多 ${JSON.stringify(unknownFields)}。` +
+        '不忽略——`range:` 写成 `version:` 时，范围会变成 undefined，' +
+        '而它给出的失败理由会指向"范围无界"这个完全不同的地方',
+      )
       continue
     }
     if (packId === manifest.packId) {
@@ -1275,6 +1316,29 @@ export function assertManifestSemantics({ sample = samplePack() } = {}) {
   if (noDepsVerdict.code !== MANIFEST_CODES.BAD_MANIFEST && noDepsVerdict.code !== MANIFEST_CODES.DEPENDENCY_UNDECLARED) {
     problems.push(`缺 dependsOn 的包没有被拦下（${noDepsVerdict.code}）`)
   }
+
+  // ★ 依赖条目的字段名写错时必须**指向那个字段**，而不是指向"范围无界"。
+  //
+  //   实测撞到过：把 `range:` 写成 `version:` 时 `dep.range` 是 `undefined`，
+  //   而 `satisfiesRange(_, undefined)` 给出的码是 `RANGE_UNBOUNDED`——
+  //   它确实拒绝了，但理由指向另一个字段。没有这一段，"理由指向哪里"这件事
+  //   就没有任何输入能证明它是对的。
+  const wrongDepField = preflightDependencies({
+    manifest: normalizePackManifest({ ...sample.manifest, dependsOn: [{ packId: 'legion.base', version: '^1.0.0' }] }),
+    installed: [{ packId: 'legion.base', version: '1.4.0' }],
+  })
+  samples.wrongDepFieldCode = wrongDepField.problems[0]?.code ?? null
+  samples.depDependencyFields = DEPENDENCY_FIELDS
+  if (samples.wrongDepFieldCode !== MANIFEST_CODES.DEPENDENCY_FIELD_UNKNOWN) {
+    problems.push(`依赖字段写错时得到 ${JSON.stringify(samples.wrongDepFieldCode)}，期望 ${MANIFEST_CODES.DEPENDENCY_FIELD_UNKNOWN}`)
+  }
+  // 阳性对照：写法正确时必须过（否则上面那条拒绝可能只是"什么都拒"）
+  const rightDepField = preflightDependencies({
+    manifest: normalizePackManifest({ ...sample.manifest, dependsOn: [{ packId: 'legion.base', range: '^1.0.0' }] }),
+    installed: [{ packId: 'legion.base', version: '1.4.0' }],
+  })
+  samples.rightDepFieldProblems = rightDepField.problems.length
+  if (rightDepField.problems.length !== 0) problems.push('写法正确的依赖被拒了')
 
   // 协议版本只接受相等：更高也要拒
   const futureProtocol = { ...sample.manifest, packProtocolVersion: PACK_PROTOCOL_VERSION + 1 }

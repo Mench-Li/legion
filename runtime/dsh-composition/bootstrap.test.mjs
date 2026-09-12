@@ -169,6 +169,10 @@ test('① **装配之后 worker 真的能工作**（这是"接线通了"的唯�
 test('① 注销之后又回到拒绝（一次装配对应一次注册）', async () => {
   resetDshRuntimeBinding()
   const r = await boot()
+  // 先断言装配成功：自检一旦不过，`boot()` 走的是拒绝分支（没有 `unbind`），
+  // 直接 `r.unbind()` 会以 `TypeError: r.unbind is not a function` 收场 ——
+  // 那句报错说不出"是哪一项自检没过"，而拒绝的原因本来就在 `r.reasons` 里。
+  assert.equal(r.ok, true, `默认输入下装配必须成功：${JSON.stringify(r.reasons ?? r.message)}`)
   r.unbind()
   assert.equal(dshRuntimeBound(), false)
   const provided = await productionExecutorProvider({ post: async () => ({ status: 200, body: {} }), get: async () => ({ status: 200, body: {} }) })
@@ -319,6 +323,24 @@ test('② 自检结果**形状不对**时拒绝（缺 autoExecutionForbidden 会
     assert.equal(r.code, BOOTSTRAP_CODES.BAD_WIRING)
     assert.equal(dshRuntimeBound(), false)
   }
+})
+
+test('② **自检拿到修法表**（跨点违规才说得出下一步去跑哪个入口）', async () => {
+  // spec §6.8 line 479 抱怨的是"审计里找不到该修哪里"。自检里的跨点违规要**说得出**
+  // 修复入口，而修法表（`REPAIR_ACTIONS`）只有本模块有——`selfcheck.mjs` 与
+  // `enforcement-mapping.mjs` 都 import 不了它（会成环）。所以这里必须真的传进去：
+  // 传丢了不会报错，只会让违规少一半信息。
+  resetDshRuntimeBinding()
+  let seen = null
+  const r = await boot({
+    selfCheck: async (inputs) => {
+      seen = inputs
+      return { state: 'incompatible', autoExecutionForbidden: true, reasons: [], checks: [] }
+    },
+  })
+  assert.equal(r.ok, false)
+  assert.equal(seen?.repairActions, REPAIR_ACTIONS, '装配必须把修法表交给自检')
+  assert.equal(typeof REPAIR_ACTIONS['guard-approval-consistency']?.action, 'string')
 })
 
 test('② **两次探测的结论被复用，不重新探测**（避免 worker 与 Launcher 判定不一致）', async () => {

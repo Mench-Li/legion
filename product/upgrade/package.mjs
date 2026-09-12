@@ -384,10 +384,14 @@ export function verifyIntegrity(pkg, files) {
   const failed = perFile.filter((f) => f.verdict !== 'ok')
   return Object.freeze({
     verdict: bad === 0 ? 'ok' : 'mismatch',
-    code: bad === 0 ? PACKAGE_CODES.INTEGRITY_OK : failed[0].code,
+    // `?.` 不是防御性编程的装饰：`bad` 与 `failed` 是由两处独立的写入维护的，
+    // 它们在今天的每一格上同步。取 `failed[0].code` 的写法会让某一天的一处
+    // 不同步变成一次**崩溃**，而不是一次能被读到的结果——而崩溃的排障成本
+    // 恰恰落在这条最需要给出可读结论的路径上。
+    code: bad === 0 ? PACKAGE_CODES.INTEGRITY_OK : (failed[0]?.code ?? PACKAGE_CODES.CONTENT_DIGEST_MISMATCH),
     reason: bad === 0
       ? `${declared.length} 个文件的摘要与内容摘要逐个一致`
-      : `${failed.length} 项对不上（首个：${failed[0].path} — ${failed[0].verdict}）`,
+      : `${failed.length} 项对不上（首个：${failed[0]?.path ?? '(未归类)'} — ${failed[0]?.verdict ?? 'mismatch'}）`,
     files: Object.freeze(perFile),
     // 「清单自洽」与「磁盘上的字节与清单一致」是两个读数：
     // 前者是内容摘要的复算，后者是逐文件比对。合成一个会让排障少一半信息。
@@ -463,6 +467,23 @@ export function verifySignature(pkg, { publicKeyPem, manifestDigest = null } = {
   const expectedSubject = signatureSubject({
     productId: pkg.productId, manifestDigest, contentHash: pkg.contentHash,
   })
+
+  // ★ 包里那份 `subject` 只是**留档**，不参与验证。
+  //
+  //   若拿它当原文去验，攻击者只要把 `subject` 改成自己的原文、再用自己的私钥
+  //   签一次就能通过——校验器会报"签名与包内原文一致"。
+  //
+  //   > 一个"用包里那份 subject 去验签"的校验，
+  //   > 与一个"只要签名与它自己带来的原文一致就通过"的校验，是同一个东西。
+  if (sig.subject !== expectedSubject) {
+    return Object.freeze({
+      verdict: 'invalid', code: PACKAGE_CODES.SIGNATURE_SUBJECT_MISMATCH, keyId: sig.keyId ?? null,
+      subject: expectedSubject,
+      reason: '包里留档的签名原文与按当前内容重算出来的不一致：' +
+        `留档 content=${sig.subject?.match(/content=([^\n]*)/)?.[1] ?? '(无)'}，` +
+        `当前 content=${pkg?.contentHash}`,
+    })
+  }
 
   let ok = false
   let decodeFailed = false

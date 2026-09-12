@@ -189,11 +189,18 @@ export const SECRET_DEPENDENCY_KINDS = Object.freeze(['secret', 'credentials', '
  * 它真正的风险由另一条**精确**的检查覆盖：员工申请的工具必须 ⊆ 包声明的工具
  * （`EMPLOYEE_WIDENS_PACK`）。用一条会误报的子串检查替代一条精确检查，
  * 是这里刻意避免的事。
+ *
+ * ⚠️ `Set` 去重不是洁癖：两张名单**有交集**（`approvalPolicy` / `sandbox` /
+ * `permissionPreset` 同时在两边），不去重时同一个键会被扫出两条一模一样的命中。
+ *
+ *   > 一个「同一处越权报两条」的扫描，
+ *   > 与一个「命中数这个数字没人能解释」的扫描，是同一个东西——
+ *   > 只不过前者的报表看起来更"详细"。
  */
-export const PACK_FORBIDDEN_CONTENT_KEYS = Object.freeze([
+export const PACK_FORBIDDEN_CONTENT_KEYS = Object.freeze([...new Set([
   ...FORBIDDEN_MANIFEST_FIELDS,
   ...AUTHORITY_BEARING_KEYS.filter((k) => k !== 'allowedTools'),
-])
+])])
 
 /**
  * 包内容里**不允许**出现的整串记号。
@@ -201,8 +208,10 @@ export const PACK_FORBIDDEN_CONTENT_KEYS = Object.freeze([
  * 前缀是 PRT-602 的桥端口表（`ENFORCEMENT_PORT_MAP` 的键）、补丁层行 id
  * （`PATCH_LAYER_ROWS`）以及 DSH 默认行里的确切路径——
  * 一个包在内容里写着 `ctx.tools.guard`，就是它在试图自己挂一个强制点。
+ *
+ * 同样去重：`danger-full-access` 既在字面名单里、也是 DSH 默认表的键名之一。
  */
-export const PACK_FORBIDDEN_CONTENT_TOKENS = Object.freeze([
+export const PACK_FORBIDDEN_CONTENT_TOKENS = Object.freeze([...new Set([
   ...Object.keys(ENFORCEMENT_PORT_MAP),
   ...PATCH_LAYER_ROWS.map((r) => r.id),
   // DSH 默认表里的危险沙箱档：`patch-layer.mjs` 的注释写明了 Legion **必须**覆盖它。
@@ -211,7 +220,7 @@ export const PACK_FORBIDDEN_CONTENT_TOKENS = Object.freeze([
   // 文档里提到它（"在 workspace-write 下工作"）是正常表述，不是绕越。
   'danger-full-access',
   ...Object.keys(DSH_DEFAULT_PRESETS).filter((k) => k.includes('danger')),
-])
+])])
 
 /** 允许被视为"引用而非密文"的值前缀（spec §7 的 `secret_refs` 存引用不存密文）。 */
 export const SECRET_REFERENCE_PREFIXES = Object.freeze(['env:', 'secret:', 'vault:', 'ref:', 'secretref:', 'arn:', '${', '{{'])
@@ -1114,7 +1123,10 @@ function probeArgs(pack, overrides = {}) {
   return Object.freeze({
     manifest: pack.manifest,
     files: pack.files,
-    hostSurface: overrides.hostSurface ?? sampleHostSurface(),
+    // ⚠️ 用 `=== undefined` 而不是 `??`：`null` 在这里是一个**有意义的值**
+    //    （"没有基线"），而 `??` 会把它换回默认基线，于是
+    //    `host-surface-unresolved` 这条探针永远打不中它要证明的那条判据。
+    hostSurface: overrides.hostSurface === undefined ? sampleHostSurface() : overrides.hostSurface,
     employees: overrides.employees === undefined ? runEmployeeParse(pack) : overrides.employees,
   })
 }
@@ -1526,7 +1538,7 @@ export function assertAuthoritySemantics() {
   if (samples.naiveBaseline.againstPackSelf !== null) {
     problems.push('以包自己的声明为基线时竟然拦下了越权——那说明被拦下的原因是别的')
   }
-  if (samples.naiveBaseline.againstHost !== PACK_AUTHORITY_CODES.EMPLOYEE_WIDENS_HOST) {
+  if (samples.naiveBaseline.againstHost !== PACK_AUTHORITY_CODES.CAPABILITY_WIDENS_HOST) {
     problems.push(`以宿主强制面为基线时没有拦下越权（${samples.naiveBaseline.againstHost}）`)
   }
 
@@ -1550,7 +1562,41 @@ export function assertAuthoritySemantics() {
   if (samples.secretScan.reference !== 0) problems.push('引用式密钥被误判成密文')
   if (samples.secretScan.vendorPrefix !== 1) problems.push('供应商前缀密钥没有被扫出来')
 
+  // ★ 两张禁用名单必须**没有重复项**。
+  //
+  //   不去重时同一个键会被扫出两条一模一样的命中（`approvalPolicy` 同时在
+  //   PRT-603 与 PRT-404 的名单里），于是"命中数"这个数字变成没人能解释的东西。
+  //   留的是**算出来的重复项**，不是一个"我检查过了"。
+  samples.forbiddenKeyDuplicates = duplicatesOf(PACK_FORBIDDEN_CONTENT_KEYS)
+  samples.forbiddenTokenDuplicates = duplicatesOf(PACK_FORBIDDEN_CONTENT_TOKENS)
+  samples.forbiddenKeyCount = PACK_FORBIDDEN_CONTENT_KEYS.length
+  samples.forbiddenTokenCount = PACK_FORBIDDEN_CONTENT_TOKENS.length
+  if (samples.forbiddenKeyDuplicates.length > 0) {
+    problems.push(`禁用键名表里有重复项：${JSON.stringify(samples.forbiddenKeyDuplicates)}`)
+  }
+  if (samples.forbiddenTokenDuplicates.length > 0) {
+    problems.push(`禁用记号表里有重复项：${JSON.stringify(samples.forbiddenTokenDuplicates)}`)
+  }
+  // 同一处越权只该留一条命中
+  samples.duplicateHitProbe = scanForEnforcementBypass({
+    files: [{ path: 'x.json', text: '{"approvalPolicy": "never"}' }],
+  }).length
+  if (samples.duplicateHitProbe !== 1) {
+    problems.push(`同一处越权被扫出 ${samples.duplicateHitProbe} 条命中，期望 1`)
+  }
+
   return Object.freeze({ problems: Object.freeze(problems), samples: Object.freeze(samples) })
+}
+
+/** 一张名单里的重复项（算出来的，不是"我检查过了"）。 */
+function duplicatesOf(list) {
+  const seen = new Set()
+  const dup = new Set()
+  for (const x of list ?? []) {
+    if (seen.has(x)) dup.add(x)
+    seen.add(x)
+  }
+  return Object.freeze([...dup])
 }
 
 // 装载即执行。导出的是**每一条判据被触发时的具体码**与那一对基线读数，不是一个布尔 ok。

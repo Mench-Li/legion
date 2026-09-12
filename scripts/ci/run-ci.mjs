@@ -352,6 +352,191 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // 阶段 8（PRT-801..813，spec line 979–995）：安装、升级与回滚。
+      //
+      // 覆盖：产品版本清单与精确锁定、可签名安装包、升级前兼容性/磁盘/在途任务
+      // 预检、数据库与配置备份、幂等迁移、原子程序切换与升级后健康检查、
+      // 安全回滚或向前修复、internal/canary/stable 通道、升级审计与用户通知、
+      // N-1 升级窗口与恢复演练、Windows 文件占用/长路径/子进程树退出。
+      //
+      // ★ 升级的失败方式与安装不同：安装失败是一个干净的"没装上"，
+      //   而升级失败是**一个既不是旧版也不是新版的目录**。所以这里的重点
+      //   落在"切换是否原子"与"回滚是否有一条真走通的路"上，而不是版本号比较。
+      //
+      // ⚠️ 诚实边界见 `docs/superpowers/prt/` 阶段 8 文档；本套件只保证
+      //   "判据与用例自洽"，不代表这些流程已经在真实安装上跑通过。
+      label: 'product-upgrade（阶段 8 PRT-801..813：安装包、预检、备份、迁移、原子切换与回滚）',
+      files: [
+        'product/upgrade/audit.test.mjs',
+        'product/upgrade/backup.test.mjs',
+        'product/upgrade/channels.test.mjs',
+        'product/upgrade/manifest.test.mjs',
+        'product/upgrade/migration.test.mjs',
+        'product/upgrade/package.test.mjs',
+        'product/upgrade/preflight.test.mjs',
+        'product/upgrade/switchover.test.mjs',
+        'product/upgrade/upgrade.test.mjs',
+      ],
+      cwd: ROOT,
+    },
+    {
+      // PRT-905（spec §10 line 988）：数据导出入口。
+      //
+      // 备份与恢复已由 `product/upgrade/backup.mjs`（PRT-806/812）实现；
+      // 本套件补的是**第三件事——数据导出**，而它与前两件**不是同一个东西**：
+      //
+      //   · **备份**要能原样恢复：字节保真、含 WAL 与索引、只有本产品打得开；
+      //   · **导出**要能**被别人读**：稳定 schema、通用格式、自描述。
+      //
+      //   > 一个「把数据库文件复制一份」的导出，
+      //   > 与一个「用户拿到一个打不开的 .db」的导出，是同一个东西——
+      //   > 只不过前者在"导出成功"这个返回值上是完全正确的。
+      //
+      // 所以核心判据是**导出条目必须是可移植格式**（json/ndjson/csv/text），
+      // `sqlite`/`db`/二进制是**备份**格式、不是导出格式。
+      //
+      // ★ 另外三条：**导出不得改动源**（为了导出一致快照而 checkpoint WAL，
+      //   是对运行中的产品做了一次写操作，而用户以为导出是只读的）；
+      //   **部分导出必须报**（工作区默认不导出，但静默漏掉一个类与故意排除
+      //   一个类，对用户是不一样的）；**密钥库永远不进导出包**（它是"不可能勾"，
+      //   不是"默认不勾"——导出包会被复制、上传、发给支持人员）。
+      //
+      // ★ 与 PRT-904/908 一样，导出/卸载**两张表必须覆盖同一批类**——
+      //   漏一个类，那个类的数据会无声地不出现在导出包里（自检核对）。
+      //
+      // ⚠️ 诚实边界：`planExport` 只产出计划与清单，**本仓库没有写 zip 的代码**，
+      //   也没有把导出接到任何 CLI —— 它是判据，不是"产品现在能导出了"。
+      //   `stores` 由调用方枚举，一份不完整的 `stores` 会让导出报告"导完了"。
+      label: 'data-export（PRT-905：可移植格式、只读导出、密钥永不入包、自描述清单）',
+      files: ['product/lifecycle/data-export.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      // PRT-909（spec §10 line 992；完成标准 line 995）：产品发布检查清单。
+      //
+      // 与 PRT-614 同一条纪律——**门禁先于数字**。在 PRT-614 那里它是
+      // "未批准的写操作数为 0"不能替代"门禁已满足"；在这里它是
+      // "清单上每一项都打了勾"不能替代"每一项都有**这一次**的证据"。
+      //
+      // 一份清单最容易写成的样子是一列布尔，而"我们**从来没跑过**这条流程"
+      // 与"我们跑过、它通过了"在那一列里是**同一个值**：
+      //
+      //   > 一个「证据缺失时默认算过」的发布清单，
+      //   > 与一个「所有项都过」的清单，在报表上是同一个东西。
+      //
+      // 所以判定是**四值**的：pass / fail / no-evidence / stale，
+      // 且只有 `pass` 算通过。`stale` 单独一档是因为 line 995 要的是
+      // **可重复**验收证据——三个月前那次发布会话里递过来的一份 JSON，
+      // 与这次什么都没跑，在"这次发布验证了什么"上完全等价。
+      //
+      // ★ 每一项都带 `evidenceFrom`（一份真实路径），**装载期会去核对它存在**
+      //   ——*一个「指向一份不存在的东西」的检查项，与一个「永远不会被跑」的
+      //   检查项，是同一个东西，只不过前者在清单上看起来是被覆盖的*。
+      //
+      // ⚠️ 诚实边界：清单**没有接任何证据生产者**，所以当前真实读数必然是
+      //   "每一项都没跑过"（`realReadyWithoutEvidence === false`，有用例钉住）。
+      //   这份清单绿不了，除非有人真的跑过那六条流程。
+      label: 'release-checklist（PRT-909：商业 Alpha 六流程发布清单）',
+      files: ['product/release/checklist.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      // PRT-903 / PRT-906：隐私与模型调用说明、崩溃报告的授权与脱敏。spec §10 line 743–750。
+      //
+      // **PRT-903**：隐私说明最常见的失效方式不是写错，而是**写完就旧了**——
+      // 代码里多加一条出境通道、多收一个字段，说明里一个字都不变，而它读起来
+      // 依然完整。所以说明**挂在代码自己的允许名单上**（直接读
+      // `heartbeat.ALLOWED_PAYLOAD_KEYS`、`data-classes` 台账、`CONSENT_PURPOSE_IDS`），
+      // 允许名单一变就红：
+      //
+      //   > 一个「手写的隐私说明」，
+      //   > 与一个「代码里新增了一条出境通道、而说明里一个字都没变」的说明，
+      //   > 是同一个东西——只不过前者读起来是完整的。
+      //
+      // ★ 最要紧的一句：**「心跳默认关着」不能推出「没有数据出境」**。
+      //   `DEFAULT_HEARTBEAT_POLICY.enabled === false` 很容易被读成"数据不出门"，
+      //   而模型调用是**必然**出境的（由 DSH 投递，本仓库看不到目的地）。
+      //
+      //   > 一个「心跳关闭，因此没有数据出境」的隐私说明，
+      //   > 与一个「用户的目标与代码正在被送给模型供应商」的说明，是同一个东西——
+      //   > 只不过前者在"我们自己的通道"这个范围内是完全正确的。
+      //
+      //   所以出境通道分三类且 `delegated-dsh` 必须非空。
+      //
+      // ★ 装载期自检**抓出了一个真缺口**：`model-call` 要求用户同意却没有对应
+      //   同意事项（`consentPurpose: null`）——一条"要求同意"却无处表达的通道。
+      //   已在 `crash-report.mjs` 补同名事项。这是本模块存在的理由的自我演示。
+      //
+      // **PRT-906**：授权不能集中在一个布尔上——诊断包由用户主动生成，
+      // 而崩溃报告是进程崩了、**没有人在场可以问**。三个坑：①"先存下来以后再问"
+      // 等于在没人同意过的磁盘上留着未脱敏的转储；②"没同意"与"没说"合并会让
+      // 读不出来的配置变成默认同意；③撤销只影响将来等于用户点了拒绝而那份报告
+      // 还在等着某天被上传。同意状态是**三分**的（granted/denied/unknown），
+      // 出厂默认全部 unknown。`transmit: uploadOk && captureLocal` 挡的是
+      // "只勾了上传、于是临时生成一个未脱敏的副本直接发走"。
+      // "带脱敏映射表"不算已脱敏——原文与占位符的对应关系就在包里。
+      label: 'privacy-and-consent（PRT-903/906：隐私说明与崩溃报告授权）',
+      files: [
+        'product/release/privacy.test.mjs',
+        'product/diagnostics/crash-report.test.mjs',
+      ],
+      cwd: ROOT,
+    },
+    {
+      // 阶段 10（PRT-1001..1006，spec line 997–1006）：能力包协议。
+      //
+      // 完成标准（line 1006）：更新能力包不改变运行中目标；不兼容、缺依赖、
+      // 哈希错误或越权包在**创建目标前**失败。
+      //
+      // ★ 三个最关键的破坏都变红：`planOf` 回落到最新版（运行中目标被升级改变）、
+      //   越权基线取自**包自己的声明**（"以自己为基线"永远干净）、
+      //   预检不通过仍建出目标。
+      //
+      // ⚠️ **诚实边界**：`runtime/packs/` 在整仓里**零生产调用方**——
+      // 没接 `RunContextSnapshot`（spec §6.5 line 344 要求它第一行是
+      // CompiledTeamPlan 快照）、没进 `runtime/contracts/index.mjs`。
+      // 所以 PRT-1004 的"运行中版本固定"与 line 1006 的"创建目标前失败"
+      // 是**对一个注入接缝**成立的，不是对运行中的产品成立的。
+      // 另外 PRT-1002 的"签名"是**注入 verifier 的接缝**，不是密码学实现。
+      label: 'pack-protocol（阶段 10 PRT-1001..1006：包清单与哈希预检、安装记录、不可变计划与运行中版本固定、越权与密钥、内置首包）',
+      files: [
+        'runtime/packs/manifest.test.mjs',
+        'runtime/packs/store.test.mjs',
+        'runtime/packs/compiled-plan.test.mjs',
+        'runtime/packs/authority.test.mjs',
+        'runtime/packs/builtin/software-delivery.test.mjs',
+      ],
+      cwd: ROOT,
+    },
+    {
+      // PRT-619 / PRT-620 / PRT-617：Run 期间冻结与改写审计、跨点一致性、两段超时。
+      //
+      // **PRT-619**（spec line 941）：PRT-607 只实现了**拒绝**，本批补的是
+      // 冻结**快照**与改写**审计**——没有审计，"策略在 Run 期间没变"是一句
+      // 事后无法查证的话。
+      //
+      // **PRT-620**（spec line 942 / line 479）：guard 只有**降级**语义、
+      // 没有放行语义，所以被 pre-execute + `allowed-once` 放行的调用**不可能**
+      // 被 guard 拒绝；违规必须能**定位到具体强制点**。
+      //
+      // **PRT-617**（spec line 939 / line 476–477）：两段超时（连接 + 响应）
+      // 必须**各自可观测**，且 team-hub 不可达要 `unavailable` fail closed——
+      // **不得**"等 team-hub 恢复后再询问"，也不得伪装成 rejected。
+      //
+      // ⚠️ **诚实边界**：大半新 API 没有生产调用方（记类型与不变量，不是
+      // "已经拦住了"）；`portsPhases` 默认 `false` 是刻意的——默认 `true` 会让
+      // 现有端口（都不调 `onConnected`）在 2s 后报 `CONNECT_TIMEOUT`、
+      // 改变既有行为，所以真实链路上目前只能拿到 `PHASE_UNREPORTED`；
+      // "审计可定位"≠有审计读取方（没有 `tool_calls → 检查器` 的适配器）。
+      label: 'dsh-composition 冻结/跨点/可用性（PRT-619/620/617）',
+      files: [
+        'runtime/dsh-composition/knob-freeze.test.mjs',
+        'runtime/dsh-composition/guard-consistency.test.mjs',
+        'runtime/dsh-composition/availability.test.mjs',
+      ],
+      cwd: ROOT,
+    },
+    {
       // PRT-904 / PRT-908：数据生命周期——保留策略与卸载去留。spec §10 line 748–749。
       //
       // 这两个任务共用一份**数据分类台账**（`data-classes.mjs`），因为它们是同一个

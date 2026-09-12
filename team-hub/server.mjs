@@ -76,6 +76,7 @@ import {
   BUDGET_ERRORS, BudgetError, createBudgetLedger, createPriceTableRegistry, ensureBudgetSchema,
 } from './budget-ledger.mjs'
 import { createPriceTable } from '../runtime/contracts/price-table.mjs'
+import { modelConfigErrorFor, validateAgentModelSelection } from '../runtime/contracts/model-config.mjs'
 // 配置导入导出（PRT-508）：**导出永远不含密钥**。契约层负责"包里有没有
 // 密钥"与"这包能不能导"，路由层只负责读写与把拒绝翻成状态码。
 import {
@@ -3117,7 +3118,16 @@ async function handleWrite(req, res, run) {
     const message = e instanceof Error ? e.message : String(e)
     const status = Number(e?.statusCode) || (message.includes('乐观锁') ? 409 : 400)
     if (e?.permission) { json(res, status, { error: message, requestId: e.permission.requestId, permission: e.permission }); return }
-    json(res, status, { error: message })
+    // 结构化字段**只在存在时**附加：不改变其它路由的响应形状，
+    // 但让"能落到具体输入框上的错误"可以一路走到前端。
+    // 逐个字段判断而不是展开 e，避免把 stack / 内部字段带出去。
+    const extra = {}
+    if (typeof e?.code === 'string') extra.code = e.code
+    if (typeof e?.field === 'string') extra.field = e.field
+    if (typeof e?.hint === 'string') extra.hint = e.hint
+    if (Array.isArray(e?.candidates)) extra.candidates = e.candidates
+    if (Array.isArray(e?.errors)) extra.errors = e.errors
+    json(res, status, Object.keys(extra).length > 0 ? { error: message, ...extra } : { error: message })
   }
 }
 
@@ -4342,6 +4352,14 @@ async function handle(req, res, stripPrefix) {
         const provider = typeof body.provider === 'string' ? body.provider.trim() : ''
         const model = typeof body.model === 'string' ? body.model.trim() : ''
         if (!provider || !model) throw new Error('缺少 provider 或 model')
+        // 产品化校验（PRT-252）：**配置错误必须在配置的那一刻、用用户能看懂的话说出来**。
+        // 校验不过 → 400 + 结构化字段（code/field/hint/candidates），前端据此落到具体输入框。
+        //
+        // 顺带说明为什么这里**不**降级成"只警告"：写出一个跑不起来的绑定，
+        // 代价是用户在一次真实运行失败之后才回头怀疑配置；而拒绝的代价
+        // 只是他改一下下拉框。两者不对称，所以拒绝。
+        const verdict = validateAgentModelSelection({ provider, model, profiles: modelStore.list() })
+        if (verdict.ok !== true) throw modelConfigErrorFor(verdict)
         db.prepare('INSERT INTO agent_models (scope, role, provider, model, updatedAt) VALUES (?, ?, ?, ?, ?) ON CONFLICT(scope, role) DO UPDATE SET provider=excluded.provider, model=excluded.model, updatedAt=excluded.updatedAt')
           .run(targetScope, role, provider, model, now())
         audit(by, targetScope, 'model:set', null, { role, provider, model })

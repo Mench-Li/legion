@@ -641,6 +641,13 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-252：Workbench 模型配置的产品化校验。三个**很容易被合并成一个**的区别：
+      // 「校验不了」≠「配置错了」、「一个档案都没有」≠「未知供应商」、「合法」≠「能跑」。
+      label: 'model-config（PRT-252：校验不了 ≠ 配置错了 / 合法 ≠ 能跑 / 配置错误要在配置时说出来）',
+      files: ['runtime/contracts/model-config.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       label: 'run-kill-drill（PRT-312：真实进程被强杀后不丢任务、不伪装成功、不重复外部写）',
       files: ['team-hub/run-kill-drill.test.mjs'],
       cwd: ROOT,

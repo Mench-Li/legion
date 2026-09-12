@@ -443,6 +443,21 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-606：区分外部 API 读取与写入权限（spec line 928、§6.6 line 465/466）。
+      //
+      // 本模块要防的不是"权限表写错了"，而是**一串"看起来是读"的东西**：
+      //
+      //   > 一个「只看请求行上的 method」的检查，
+      //   > 与一个「`GET /api/items/1` + `X-HTTP-Method-Override: DELETE` 真的删掉了」的检查，
+      //   > 是同一个东西——而它的方向是放行。
+      //
+      // 而且它**刻意不复用** PRT-604 的文件系统路径规范化器——URL 路径没有盘符、
+      // 永远大小写敏感，那是两件事。套件里有一条用例专门钉住这个区别。
+      label: 'external-api-scope（PRT-606：读权限的六种变写形态）',
+      files: ['runtime/dsh-composition/external-api-scope.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-605：命令、网络与 MCP 权限控制（spec line 927、§6.6 line 461–464）。
       //
       // 三条"出去做事"的通道，共同点：**被检查的是字符串，真正执行的是它被解释后的结果**。

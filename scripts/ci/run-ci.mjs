@@ -531,6 +531,19 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-501（spec §6.6/§6.7）：ModelProfile 数据模型与 API。
+      // 三组分开放：纯存储语义（CAS/墓碑/审计守卫）、HTTP 契约
+      // （状态码、响应体不含密钥）、以及合同层的密钥判据回归。
+      label: 'model-store（PRT-501：ModelProfile 仓储，CAS + 墓碑 + 审计不含密文）',
+      files: ['team-hub/model-store.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      label: 'model-routes（PRT-501：模型档案 HTTP 契约，响应体与审计均无密钥）',
+      files: ['team-hub/model-routes.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       label: 'run-kill-drill（PRT-312：真实进程被强杀后不丢任务、不伪装成功、不重复外部写）',
       files: ['team-hub/run-kill-drill.test.mjs'],
       cwd: ROOT,

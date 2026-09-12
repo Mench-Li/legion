@@ -78,6 +78,15 @@ export const NON_ENV_LITERALS = Object.freeze([
   'UNKNOWN_DECISION',                           // acceptanceTarget 的未知结论文案
   // PRT-305 岗位与流水线的具名码（orchestrator/pipeline/index.mjs）
   'UNKNOWN_ROLE', 'NO_SUCH_SCOPE',
+  // PRT-306 工作区隔离的具名码（orchestrator/workspace/index.mjs 的 WORKSPACE_ERRORS）。
+  // 每一条都是一次**拒绝**：不安全的 id、相对路径、布局重叠、未配置、
+  // 陌生槽位、git 失败、脏工作区、未知槽位。逐条登记而不是加前缀通配——
+  // 这份清单的价值在于「每一条都被看过一次」。
+  'REF_UNSAFE_ID', 'REF_NOT_ABSOLUTE', 'REF_OVERLAP', 'REF_NOT_CONFIGURED',
+  'REF_FOREIGN_SLOT', 'REF_WORKTREE_FAILED', 'REF_DIRTY', 'REF_UNKNOWN_SLOT',
+  'GIT_FAILED',
+  // 工作区槽位的种类与意图文件
+  'absent', 'empty', 'foreign', 'our-worktree', 'UNKNOWN',
 ])
 
 export const SCHEMA = defineSchema({

@@ -70,8 +70,18 @@ export function findPlaintextSecrets(value, path = '$') {
   if (typeof value === 'object') {
     for (const [k, v] of Object.entries(value)) {
       const child = `${path}.${k}`
-      // 键名像密钥载体，且不是引用形态 → 直接判定
-      if (SECRET_LIKE_KEY_RE.test(k) && v !== null && v !== undefined && v !== '') {
+      // 键名像密钥载体，且值**是字符串** → 直接判定。
+      //
+      // 「值是字符串」这个附加条件不是放宽，是修正：密钥永远是字符串，
+      // 而 `maxTokens` / `tokenLimit` / `maxOutputTokens` 这类**限额字段**
+      // 天然含 "token" 一词。此前它们一律被判成"检测到疑似明文密钥"，
+      // 于是任何带 token 限额的模型档案**根本写不进去**——
+      // 报的还是一句"检测到疑似明文密钥：$.limits.maxTokens"，
+      // 而那里一个密钥都没有。这是把正常配置报成安全事故。
+      //
+      // 递归仍在下面照常进行：键名像密钥而值是对象时（`{ token: { a: 1 } }`），
+      // 真正的字符串密钥会在更深处被键名或形态规则抓到，不需要靠这一条兜。
+      if (SECRET_LIKE_KEY_RE.test(k) && typeof v === 'string' && v !== '') {
         const isRefField = /ref$/i.test(k)
         if (!isRefField) hits.push(child)
       }

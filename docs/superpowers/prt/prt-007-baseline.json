@@ -2,10 +2,13 @@
   "$comment": "PRT-007 旧系统平台契约基线。由 scripts/prt/baseline-snapshot.mjs 生成；不含时间戳以便逐字节 diff。漂移由 sources 的 sha256 归因。",
   "version": 1,
   "sources": {
-    "team-hub/server.mjs": "2a34746b0fe70279a933d426fbeb783d9ae126fdde2521fc352b0faffae537f5",
-    "team-hub/permission-engine.mjs": "9e60a09d971474209a92047767d78bcc155c414a3fd3fc7442ff01f59f3b4168"
+    "team-hub/server.mjs": "22b4d2f471c441cedcdefb8c58b79085bb820856d098c25e630832e2f65651a9",
+    "team-hub/permission-engine.mjs": "9e60a09d971474209a92047767d78bcc155c414a3fd3fc7442ff01f59f3b4168",
+    "team-hub/run-store.mjs": "2ffab3645f3cf1969c02ff146e9759e1bfba4a6fb77f7423cdbb7e38ee4f3df1",
+    "team-hub/model-store.mjs": "1ab1a5b548740ca5f6810de6fe25658e79aea9d95fd6382ccff5facf6613d779"
   },
   "httpRoutes": [
+    "DELETE /api/model-profiles/",
     "DELETE /api/permissions/rules/",
     "GET /api/activity",
     "GET /api/agents",
@@ -29,6 +32,8 @@
     "GET /api/inbox",
     "GET /api/members",
     "GET /api/missions",
+    "GET /api/model-profiles",
+    "GET /api/model-profiles/",
     "GET /api/models",
     "GET /api/overlaps",
     "GET /api/permissions/inbox",
@@ -50,6 +55,7 @@
     "GET /api/spaces/provision",
     "GET /api/task",
     "GET /api/web/history",
+    "PATCH /api/model-profiles/",
     "POST /api/advance",
     "POST /api/agents",
     "POST /api/artifact",
@@ -73,6 +79,7 @@
     "POST /api/goal/status",
     "POST /api/heartbeat",
     "POST /api/hold",
+    "POST /api/model-profiles",
     "POST /api/models",
     "POST /api/models/clear",
     "POST /api/patch",
@@ -106,7 +113,8 @@
     "POST /api/transition",
     "POST /api/web/history",
     "POST /api/web/history/clear",
-    "PUT /api/chat/attachments"
+    "PUT /api/chat/attachments",
+    "PUT /api/model-profiles/"
   ],
   "dbTables": [
     "agent_models",
@@ -120,10 +128,15 @@
     "goal",
     "members",
     "messages",
+    "model_profiles",
     "permission_requests",
     "permission_rules",
     "roster",
     "rules",
+    "run_attempt_events",
+    "run_attempts",
+    "run_handoffs",
+    "run_validations",
     "skill_sources",
     "skills",
     "space_runtime",

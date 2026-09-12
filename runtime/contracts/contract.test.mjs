@@ -183,6 +183,26 @@ test('② 明文密钥值即使塞进合法字段也拒绝（值形态）', () =
   assert.match(res.errors.join(' '), /明文密钥/)
 })
 
+test('② 键名像密钥但值是**数字**时不得判成密钥（`limits.maxTokens` 是限额不是密钥）', () => {
+  // 这条是回归：此前的判据只看键名，于是 `maxTokens` / `tokenLimit` /
+  // `maxOutputTokens` 这类**限额字段**一律被判成"检测到疑似明文密钥"。
+  // 后果不是一个误报，而是**任何带 token 限额的模型档案根本写不进去**，
+  // 而报错说"检测到疑似明文密钥：$.limits.maxTokens"——那里一个密钥都没有。
+  // 把正常配置报成安全事故，会让人去查错的地方。
+  const res = validateProfile({ ...VALID_PROFILE, limits: { maxTokens: 4096, tokenLimit: 8192 } })
+  assert.equal(res.ok, true, res.errors.join('; '))
+  assert.deepEqual(res.value.limits, { maxTokens: 4096, tokenLimit: 8192 })
+
+  // 而不变量仍在：同样的键名装**字符串**密钥必须照旧被拒
+  for (const key of ['maxTokens', 'token', 'apiKey']) {
+    const bad = validateProfile({ ...VALID_PROFILE, limits: { [key]: 'sk-abcdefghijklmnopqrstuvwxyz' } })
+    assert.equal(bad.ok, false, `limits.${key} 装密钥必须被拒绝`)
+  }
+  // 键名像密钥、值是对象时，真正的字符串密钥在更深一层仍会被抓到
+  const nested = validateProfile({ ...VALID_PROFILE, limits: { token: { apiKey: 'sk-abcdefghijklmnopqrstuvwxyz' } } })
+  assert.equal(nested.ok, false, '嵌套的密钥必须仍被拒绝')
+})
+
 test('② endpoint 内嵌凭证被拒绝（https://user:pass@host 形态）', () => {
   const res = validateProfile({ ...VALID_PROFILE, endpoint: 'https://user:secret@api.example.com/v1' })
   assert.equal(res.ok, false)

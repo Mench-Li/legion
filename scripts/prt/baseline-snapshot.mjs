@@ -41,6 +41,28 @@ const SOURCES = {
   permissions: join(ROOT, 'team-hub', 'permission-engine.mjs'),
 }
 
+/**
+ * 声明 SQLite schema 的模块。
+ *
+ * **为什么必须列全**：`dbTables` 曾经只扫 `server.mjs`，于是
+ * `run-store.mjs`（`run_attempts` / `run_attempt_events` / `run_validations` /
+ * `run_handoffs`）与 `model-store.mjs`（`model_profiles`）建的表对基线
+ * **完全不可见**——`--check` 报告"无漂移"，而真实 schema 已经多了五张表。
+ * 一个看不见某类变更的棘轮比没有棘轮更坏：它给出"已核对过"的错觉。
+ *
+ * 逐个列名而不是 glob：glob 会漏掉新文件，而漏掉的那次同样是静默的。
+ * `SOURCES` 的每个路径都会先经 `existsSync` 检查，改名/移动会被立刻发现。
+ */
+const SCHEMA_SOURCES = [
+  'server',
+  'runStore',
+  'modelStore',
+]
+
+// 这些模块也一并纳入 sources 哈希：它们变了，基线里的表清单就可能过期。
+SOURCES.runStore = join(ROOT, 'team-hub', 'run-store.mjs')
+SOURCES.modelStore = join(ROOT, 'team-hub', 'model-store.mjs')
+
 const rel = (p) => relative(ROOT, p).split(sep).join('/')
 const sha256 = (text) => createHash('sha256').update(text, 'utf8').digest('hex')
 
@@ -151,6 +173,9 @@ export function buildSnapshot() {
   }
   const server = readFileSync(SOURCES.server, 'utf8')
   const perms = readFileSync(SOURCES.permissions, 'utf8')
+  // 表清单取自**所有**声明 schema 的模块。只读 server.mjs 会让运行面与
+  // 模型面建的表对基线不可见（见 SCHEMA_SOURCES 的说明）。
+  const schemaText = SCHEMA_SOURCES.map((name) => readFileSync(SOURCES[name], 'utf8')).join('\n')
 
   return {
     $comment:
@@ -161,7 +186,7 @@ export function buildSnapshot() {
       Object.entries(SOURCES).map(([name, p]) => [rel(p), sha256(readFileSync(p, 'utf8'))]),
     ),
     httpRoutes: extractRoutes(server),
-    dbTables: extractTables(server),
+    dbTables: extractTables(schemaText),
     taskStatuses: extractStringArray(server, 'STATUSES'),
     taskTransitions: extractTransitions(server, 'TRANSITIONS'),
     goalStatuses: extractStringArray(server, 'GOAL_STATUSES'),

@@ -68,6 +68,7 @@ import { fileURLToPath } from 'node:url'
 import { standardsFor } from './stage-standards.mjs'
 import { evaluatePermission, normalizeOperation } from './permission-engine.mjs'
 import { createRunStore, RunError } from './run-store.mjs'
+import { MODEL_ERRORS, ModelError, createModelStore, ensureModelSchema } from './model-store.mjs'
 // `/api/runtime/next-post` 用「这条任务后面还有没有岗位」这个判定。
 // 与运行仓储里用的是**同一个**函数：两处各写一遍判定，迟早会出现
 // "接口说有下一岗位、交接时却按链尾收口"这种不一致。
@@ -194,6 +195,22 @@ const runStore = createRunStore({
 })
 
 /**
+ * 模型档案仓储（PRT-501，spec §6.6）。
+ *
+ * 审计注入 `audit(...)`：`model-store.mjs` 不认识 `audit` 表 30 个列的 schema，
+ * 但它知道**审计载荷不得含密文**——那条守卫在仓储里，在调用写入器之前。
+ *
+ * `actor` 在这里被映射到 audit 的 `member`，`scope` 固定为 `'*'`：
+ * 模型档案是**跨空间**的产品级配置（同一个模型可以被任何空间的岗位绑定），
+ * 因此它不该被塞进某个空间的审计视图里假装属于那个空间。
+ */
+const modelStore = createModelStore({
+  db,
+  clock: () => Date.now(),
+  writeAudit: ({ action, id, detail, actor }) => audit(actor, '*', action, id, detail),
+})
+
+/**
  * 运行面路由的公共外壳。
  *
  * 不复用 `handleWrite`：那条路径要求 `by`（看板成员），而运行面的主体是 **worker**，
@@ -218,6 +235,9 @@ async function handleRun(req, res, run) {
       currentEpoch: e?.currentEpoch,
       currentWorkerId: e?.currentWorkerId,
       leaseExpiresAtMs: e?.leaseExpiresAtMs,
+      // PRT-501：CAS 冲突必须带上**当前版本**。不带的话调用方只能反复盲试，
+      // 而"重新读取后再改"这件事就变成了猜。
+      currentVersion: e?.currentVersion,
       serverTimeMs: Date.now(),
     })
   }
@@ -3417,6 +3437,93 @@ async function handle(req, res, stripPrefix) {
         return r
       })
       return
+    }
+    // ── 模型档案（PRT-501，spec §6.6） ──
+    //
+    // 这些路由**不接受**任何密钥字段：`validateProfile` 会拒绝未知字段与明文
+    // 密钥形态（含 endpoint 内嵌凭证）。API 层不重复校验——重复的后果不是
+    // 多一道防线，而是两处判据会漂移，而漂移的那一次就是把密钥写进库的那一次。
+    //
+    // `actor` 必填：谁改的模型配置必须留痕。审计里**只有** provider/model/
+    // 字段名清单/「引用变了没有」，没有任何值——包括引用名本身。
+    if (req.method === 'GET' && path === '/api/model-profiles') {
+      // 默认只给未删除的。要连墓碑一起看必须显式 `?includeDeleted=1`：
+      // 默认带上会让界面上出现"已经被删掉的模型"，而它其实选不了。
+      const includeDeleted = url.searchParams.get('includeDeleted') === '1'
+      json(res, 200, {
+        ok: true,
+        profiles: modelStore.list({ includeDeleted }),
+        serverTimeMs: Date.now(),
+      })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/model-profiles') {
+      await handleRun(req, res, (body) => modelStore.create(body.profile ?? body, { actor: body.actor }))
+      return
+    }
+    {
+      // `/api/model-profiles/<id>` 的三件事（读/改/删）。
+      //
+      // 写成 `req.method === '…' && path.startsWith('…')` 这个**同一行**的形态，
+      // 不是风格洁癖：`scripts/prt/baseline-snapshot.mjs` 的抽取规则只认这一种
+      // 与 `path === '…'`。把 method 判断嵌进块里（或改用正则 exec）会让这条
+      // 路由对**契约基线不可见**，于是它能不经评审地增删——平台契约里少一条，
+      // 而没有任何门禁会说话。
+      const MODEL_PREFIX = '/api/model-profiles/'
+      // 解 id；不是合法编码时回 null，空串时回 ''
+      const modelId = () => {
+        try {
+          return decodeURIComponent(path.slice(MODEL_PREFIX.length))
+        } catch {
+          return null
+        }
+      }
+      if (req.method === 'GET' && path.startsWith('/api/model-profiles/')) {
+        const id = modelId()
+        if (id === null) { json(res, 400, { ok: false, error: '模型档案 id 不是合法的 URL 编码', code: 'BAD_ID_ENCODING' }); return }
+        if (id === '') { json(res, 400, { ok: false, error: '缺少模型档案 id', code: 'MISSING_PARAM' }); return }
+        const p = modelStore.get(id)
+        if (p === null) {
+          // 墓碑与"从没存在过"分开报：混成一个 404 会让
+          // 「删掉再用同名建」看起来像一次干净的首次创建。
+          const hist = modelStore.resolveForHistory(id)
+          if (hist !== null) {
+            json(res, 409, {
+              ok: false, code: MODEL_ERRORS.PROFILE_DELETED,
+              error: `模型档案 ${id} 已被删除`,
+              deletedAtMs: hist.deletedAtMs, serverTimeMs: Date.now(),
+            })
+            return
+          }
+          json(res, 404, { ok: false, code: MODEL_ERRORS.PROFILE_NOT_FOUND, error: `没有这个模型档案：${id}` })
+          return
+        }
+        json(res, 200, { ok: true, profile: p, serverTimeMs: Date.now() })
+        return
+      }
+      if (req.method === 'PATCH' && path.startsWith('/api/model-profiles/')) {
+        const id = modelId()
+        if (id === null) { json(res, 400, { ok: false, error: '模型档案 id 不是合法的 URL 编码', code: 'BAD_ID_ENCODING' }); return }
+        if (id === '') { json(res, 400, { ok: false, error: '缺少模型档案 id', code: 'MISSING_PARAM' }); return }
+        await handleRun(req, res, (body) =>
+          modelStore.update(id, body.profile ?? body, { actor: body.actor, version: body.version }))
+        return
+      }
+      if (req.method === 'PUT' && path.startsWith('/api/model-profiles/')) {
+        const id = modelId()
+        if (id === null) { json(res, 400, { ok: false, error: '模型档案 id 不是合法的 URL 编码', code: 'BAD_ID_ENCODING' }); return }
+        if (id === '') { json(res, 400, { ok: false, error: '缺少模型档案 id', code: 'MISSING_PARAM' }); return }
+        await handleRun(req, res, (body) =>
+          modelStore.update(id, body.profile ?? body, { actor: body.actor, version: body.version }))
+        return
+      }
+      if (req.method === 'DELETE' && path.startsWith('/api/model-profiles/')) {
+        const id = modelId()
+        if (id === null) { json(res, 400, { ok: false, error: '模型档案 id 不是合法的 URL 编码', code: 'BAD_ID_ENCODING' }); return }
+        if (id === '') { json(res, 400, { ok: false, error: '缺少模型档案 id', code: 'MISSING_PARAM' }); return }
+        await handleRun(req, res, (body) => modelStore.remove(id, { actor: body.actor, version: body.version }))
+        return
+      }
     }
     if (req.method === 'POST' && path === '/api/runtime/validate') {
       // 机器验收（PRT-307）：执行成功之后的**独立关卡**。

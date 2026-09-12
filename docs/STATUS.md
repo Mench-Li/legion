@@ -4,9 +4,9 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-12　`run-ci --only test` **PASS**；其中 `test` **74 套件 / 1934 用例**
-（**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 按纪律 SKIP，计数为 72 通过 + 1 跳过 / 1712 用例）
-—— 以本文件所在提交为准；证据 `.ci/2026-09-12T04-44-43-143Z/`
+**最近一次全量基线**：2026-09-12　`run-ci --only test` **PASS**；其中 `test` **76 套件 / 1969 用例**
+（**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 按纪律 SKIP，计数为 74 通过 + 1 跳过 / 1747 用例）
+—— 以本文件所在提交为准；证据 `.ci/2026-09-12T04-57-48-486Z/`
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
 （`scrum/daemon-gf001.json`，`intervalMs: 15000`）同时运行时实测 **31 分钟**（约 7 倍）。
 **因此不要把耗时当回归基线**——只有套件数/用例数/通过与否可用于判定。
@@ -31,6 +31,56 @@
 > - `gf001` 空间非终态任务数为 **0**；T-141 已由将军于 `14:00:32Z` 转 `canceled`
 >   （产物从 patch 记录逐字恢复为 `53d9d15`，需求已由 `G-mtwxx7an-2` 交付，无需重做）。
 
+> **本轮（PRT-501 ModelProfile 数据模型与 API：模型配置的存储面与对外契约）**：
+> 新增 `team-hub/model-store.mjs`（仓储：**CAS 版本**、**墓碑删除**、
+> 审计脱敏守卫）与 6 条路由（`GET/POST /api/model-profiles`、
+> `GET/PATCH/PUT/DELETE /api/model-profiles/<id>`）；两组套件
+> `model-store`（**20 例**）、`model-routes`（**14 例**）。
+> 阶段 5 由 **0/11** 到 **1/11**。
+>
+> **四条判据**：
+> ① **校验只有一处**——写入复用 PRT-102 的 `validateProfile`，API 层不再写一遍。
+> 重复的后果不是多一道防线，而是两处判据会漂移，而漂移的那一次就是把明文
+> 密钥写进库的那一次。
+> ② **读出去的东西不含 `secretRef`**——连**引用名**都不给（只给
+> `hasCredential`）。引用名也是可枚举的攻击面，而它没有必要出现在界面上。
+> 用例在**序列化后的原始响应字节**上断言这一点：在解析出来的对象上断言是不够的，
+> `JSON.stringify` 会把 `undefined` 字段丢掉，于是一个"字段名写错所以过滤没生效"
+> 的实现也能通过。
+> ③ **更新用 `version` 做 CAS，不给就拒绝（400）**——不默认成"最后一版"。
+> 默认成最后一版时两个界面同时保存会静默覆盖而两边都显示成功，用户只会觉得
+> "我改的东西自己变回去了"；配置类的 lost update 尤其难查，因为没有任何报错
+> 指向那个方向。冲突时返回 409 **并带上 `currentVersion`**——不带的话调用方
+> 只能反复盲试，"重新读取后再改"就变成了猜。
+> ④ **删除是墓碑，不是物理删除**——一次 Run 会记着 `modelProfileRef`，硬删除会让
+> "当时用的哪个模型"永远答不上来（与 §6.6「后续价格表更新不得重算历史
+> `usage_records`」同一条纪律）。墓碑与"不存在"分开报（409 / 404）：混成一个
+> 会让「删掉再用同名建」看起来像一次干净的首次创建。
+>
+> 审计只记非敏感事实（provider / model / 字段名清单 /「引用变了没有」），
+> 并在写入器**之前**过一道守卫：含疑似明文密钥就**拒绝写**（fail closed），
+> 不脱敏后照写——脱敏逻辑漏一处就等于把密钥永久留在库里。
+>
+> **这条路抓到三个真实缺陷**：
+> ① `findPlaintextSecrets` **只看键名不看值**，于是 `limits.maxTokens` 被判成
+> "检测到疑似明文密钥"。后果不是一个误报，而是**任何带 token 限额的模型档案
+> 根本写不进去**，而报错把人送去查一个不存在的事故。`team-hub` 既有写入路径
+> 只有 provider/model 两列、从不传 `limits`，所以这个缺陷一直躺在没人走过的
+> 那条路上。修法与回归例见 `PRT-501-model-profile-api.md` §6，**验过会变红**。
+> ② **契约基线看不见运行面建的表**：`dbTables` 只扫 `server.mjs`，于是
+> `run_attempts` / `run_attempt_events` / `run_validations` / `run_handoffs` /
+> `model_profiles` **五张表对基线完全不可见**——`--check` 报"无漂移"，而真实
+> schema 已经多了五张。一个看不见某类变更的棘轮比没有棘轮更坏：它给出
+> "已核对过"的错觉。基线由 **101 路由 / 22 表** 变为 **107 路由 / 27 表**
+> （新增的 5 张表不是本次新增的，是 PRT-301/307/308 就建好的）。
+> ③ **正则形态的路由对契约基线不可见**：`extractRoutes` 只认
+> `path === '…'` 与 `path.startsWith('…')`，我最初用
+> `/^\/api\/model-profiles\/(.+)$/.exec(path)` 写的三条路由在 diff 里
+> 根本不出现，可以不经评审地增删。这一条恰好被我自己撞上（diff 只显示 2 条
+> 而不是 6 条），否则会一直躺着。
+>
+> 详见 `docs/superpowers/prt/PRT-501-model-profile-api.md`。
+>
 > **本轮（PRT-306 workspace/worktree 隔离：真正的 `git worktree`，以及"没有隔离"必须可见）**：
 > 新增 `orchestrator/workspace/index.mjs`（真 `git worktree`：规划期拒绝、
 > 先落意图再做副作用、删除是拒绝边界）、`worktreeStages()`、
@@ -612,8 +662,10 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：74 套件 / 1934 用例，`--only test` 整体 PASS** —— 2026-09-12 实测（设 `DSH_CHECKOUT`）
-（PRT-306 工作区隔离：`workspace`（**24 例**，跑真 git）、`workspace-wiring`（**9 例**，接线）；
+**当前基线：76 套件 / 1969 用例，`--only test` 整体 PASS** —— 2026-09-12 实测（设 `DSH_CHECKOUT`）
+（PRT-501 模型档案：`model-store`（**20 例**，CAS + 墓碑 + 审计守卫）、
+`model-routes`（**14 例**，真 HTTP，响应体与审计均无密钥）；
+PRT-306 工作区隔离：`workspace`（**24 例**，跑真 git）、`workspace-wiring`（**9 例**，接线）；
 PRT-305/308 岗位与流水线 + 交接：`prt-pipeline`（**16 例**，纯函数）、
 `handoff-store`（**12 例**，事务语义）、`handoff-routes`（**8 例**，真 HTTP + 真 `createTask` 接线）；
 PRT-307 机器验收：`acceptance`（**24 例**，纯函数）、`acceptance-store`（**16 例**）、
@@ -621,8 +673,9 @@ PRT-307 机器验收：`acceptance`（**24 例**，纯函数）、`acceptance-st
 PRT-312 真实进程被强杀：`run-kill-drill`（**2 例**，真 worker 进程 + 真 team-hub + `SIGKILL`）；
 进度表自检 `prt-progress`（**12 例**）；PRT-314 多进程并发 `run-concurrency`（**5 例**）；
 `run-policy`（**14 例**：PRT-309/310/311 的重试额度、退避、Dead Letter、人工处置、幂等键）。
-`DSH_CHECKOUT` 未设时 `plugins/board-plugin` 按纪律 SKIP，计数为 72 通过 + 1 跳过 / 1712 用例。
-上一批基线 72 套件 / 1901 用例（PRT-305/308 岗位流水线与交接）。
+`DSH_CHECKOUT` 未设时 `plugins/board-plugin` 按纪律 SKIP，计数为 74 通过 + 1 跳过 / 1747 用例。
+上一批基线 74 套件 / 1934 用例（PRT-306 工作区隔离）。
+再上一批基线 72 套件 / 1901 用例（PRT-305/308 岗位流水线与交接）。
 再上一批基线 69 套件 / 1865 用例（PRT-307 机器验收）。
 再上一批基线 66 套件 / 1815 用例（PRT-312 强杀演练 + 进度表自检）。
 再上一批基线 65 套件 / 1803 用例（PRT-312 强杀演练）。

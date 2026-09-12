@@ -63,6 +63,19 @@ export const SCHEMA = defineSchema({
     //   HANDOFF_NOT_WIRED — 没注入 createTask/readPipeline（500，不降级成"没有下一岗位"）
     //   TASK_NOT_FOUND    — /api/runtime/next-post 的任务不存在（404）
     'NOT_HANDING_OFF', 'HANDOFF_REJECTED', 'HANDOFF_NOT_WIRED', 'TASK_NOT_FOUND',
+    // PRT-501 模型档案（team-hub/model-store.mjs 的 MODEL_ERRORS，经路由抛出）：
+    //   INVALID_PROFILE   — 档案不合法（非法字段 / 明文密钥形态 / endpoint 内嵌凭证）
+    //   PROFILE_NOT_FOUND — 没有这个档案（404）
+    //   PROFILE_EXISTS    — 同名已存在，要改请用 update（409）
+    //   PROFILE_DELETED   — 墓碑，与"不存在"分开（409）
+    //   VERSION_CONFLICT  — CAS 版本不符，带上 currentVersion（409）
+    //   VERSION_REQUIRED  — 没给 version，不默认最后一版（400）
+    //   ACTOR_REQUIRED    — 谁改的模型配置必须留痕（400）
+    //   AUDIT_WOULD_LEAK  — 审计载荷含疑似明文密钥，拒绝写（500，fail closed）
+    'INVALID_PROFILE', 'PROFILE_NOT_FOUND', 'PROFILE_EXISTS', 'PROFILE_DELETED',
+    'VERSION_CONFLICT', 'VERSION_REQUIRED', 'ACTOR_REQUIRED', 'AUDIT_WOULD_LEAK',
+    // PRT-501 路由自有的契约错误：id 不是合法的 URL 编码（400）
+    'BAD_ID_ENCODING',
   ],
   // team-hub 的 CHAT_ 前缀覆盖了插件的提示词预算变量（CHAT_CTX_*）：它们是**插件**读的配置，
   // team-hub 不读，登记为外来变量，避免误报成「拼写错误」（P3-4）。

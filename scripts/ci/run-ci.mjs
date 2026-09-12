@@ -626,6 +626,14 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-509 事故的回归锁定：推送验证的判据。
+      // 旧判据 `-match '... ->'` **同时匹配成功与失败输出**，于是"被拒绝"被判成
+      // "推送成功"——两次拒绝之后都以为推上去了。
+      label: 'push-verify（PRT-509 事故：拒绝输出也含 `->`，判据必须是远端 tip 而非命令输出）',
+      files: ['scripts/prt/push-verify.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       label: 'run-kill-drill（PRT-312：真实进程被强杀后不丢任务、不伪装成功、不重复外部写）',
       files: ['team-hub/run-kill-drill.test.mjs'],
       cwd: ROOT,

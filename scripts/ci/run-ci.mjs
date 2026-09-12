@@ -424,6 +424,19 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-604：文件与工作目录范围限制（spec line 926、§6.6 line 449/454/460）。
+      //
+      // 盯四件事：
+      //   ① 包含判定**不能**用字符串比：边界、链接、`..`、尾点尾空格
+      //   ② 解析必须**迭代**（`exists()` 看不穿链接），且只施加在存在前缀上
+      //      —— 因为写操作恰好都是新文件
+      //   ③ Windows 的那些坑：盘符相对、无盘符、设备命名空间、设备名、UNC
+      //   ④ 范围表只能收窄；pre-execute 与 guard **两处**都查
+      label: 'path-scope（PRT-604：越界路径的字符串比较是放行）',
+      files: ['runtime/dsh-composition/path-scope.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-603：EmployeeManifest 工具白名单（spec line 925、§6.9 line 488–489）。
       //
       // 盯四件事：

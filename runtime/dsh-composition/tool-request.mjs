@@ -512,6 +512,13 @@ export function createEnforcementBridge({
    *   > 与一个「岗位清单只在策略也说不的时候才生效」的桥，是同一个东西。
    */
   whitelist = null,
+  /**
+   * PRT-604 的路径范围：`(projection) => {allowed, code, reason}`。
+   *
+   * ★ pre-execute 与 guard **两处都查**（spec §6.6 line 449）。
+   * 只在一处查的写法在"只经过一个强制点"的用例里是绿的。
+   */
+  pathScope = null,
   connectTimeoutMs = 2000,
   responseTimeoutMs = 3000,
   approvalConnectTimeoutMs = 2000,
@@ -568,6 +575,27 @@ export function createEnforcementBridge({
    * `allowed-once`），这**依然要拒绝**（hard floor 的语义是"最终单调"），
    * 但必须留下一条能定位到具体强制点的记录。
    */
+  /**
+   * 路径范围检查。**同一个函数**给 pre-execute 与 guard 两处用。
+   *
+   * 返回 `undefined`（放行）或一个理由字符串（拒绝）。返回理由时**不抛**：
+   * 与 `projectionFor` 同理，"检查本身出错"必须变成拒绝，不能把强制面炸掉。
+   */
+  function scopeGuard(projection) {
+    if (pathScope === null) return undefined
+    let verdict
+    try {
+      verdict = pathScope(projection)
+    } catch (err) {
+      return `路径范围检查本身出错（${err?.code ?? 'unknown'}）：${err?.message ?? String(err)}。按拒绝处理`
+    }
+    if (verdict === null || typeof verdict !== 'object' || verdict.allowed !== true) {
+      const code = verdict?.code ?? 'path-scope-unspecified'
+      return `路径越界（${code}）：${verdict?.reason ?? '没有给出理由'}`
+    }
+    return undefined
+  }
+
   function guard(execution) {
     const got = projectionFor(execution)
     if (!got.ok) {
@@ -577,6 +605,17 @@ export function createEnforcementBridge({
       return reason
     }
     const projection = got.projection
+    // ★ spec §6.6 line 449：越界路径既要在 pre-execute 提前拒绝，**也要**在 guard
+    // 最终复核（"Guard 只做同步、确定性拒绝；后续流程不可撤销"）。
+    //
+    //   > 一个「只在 pre-execute 查路径范围」的组合，
+    //   > 与一个「guard 那一层已经换成了另一份范围表」的组合，是同一个东西——
+    //   > 而 guard 正是"不可撤销"的那一道。
+    const scopeReason = scopeGuard(got.projection)
+    if (scopeReason !== undefined) {
+      record(projection.canonicalHash, { source: 'guard', decision: 'deny', reason: scopeReason, at: now() })
+      return scopeReason
+    }
     const reason = guarded(guardInputOf(projection))
     const hash = projection.canonicalHash
     if (reason === undefined) {
@@ -610,6 +649,11 @@ export function createEnforcementBridge({
         // 投影不了 = 拿不到这次调用的身份 = 拒绝（不是"放行但记不下来"）。
         return { kind: 'deny', reason: `无法投影这次调用（${got.code}）：${got.message}` }
       }
+      // ★ 路径范围在**白名单之前**：越界是 hard floor 的一部分（spec §6.6 line 449），
+      // 而岗位清单是"这个岗位能干哪些事"，两者拒绝的理由不同、修复动作也不同。
+      const outOfScope = scopeGuard(got.projection)
+      if (outOfScope !== undefined) return { kind: 'deny', reason: outOfScope }
+
       // ★ 岗位白名单在**策略端口之前**跑，拒绝即定案（PRT-603）。
       //
       //   > 一个「先问策略、策略说 allow 就放行」的桥，
@@ -738,6 +782,18 @@ export function createEnforcementBridge({
     ledgerHashes: () => Object.freeze([...ledger.keys()].filter((k) => k !== null)),
     contradictions: () => Object.freeze([...contradictions]),
     assertNoContradiction,
+    /**
+     * 强制面到底挂了几道。**证据是"装上了什么"，不是"配置里写了什么"**——
+     * PRT-604 的 pathScope 与 PRT-603 的 whitelist 都是可选端口，一个没接上的
+     * 端口在运行时与"从不拒绝"无法区分。
+     */
+    enforcementSurfaces: () => Object.freeze({
+      hardFloor: true,
+      pathScope: pathScope !== null,
+      whitelist: whitelist !== null,
+      policy: decide !== null,
+      approval: requestApproval !== null,
+    }),
   })
 }
 

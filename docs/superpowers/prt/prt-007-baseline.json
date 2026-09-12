@@ -2,11 +2,12 @@
   "$comment": "PRT-007 旧系统平台契约基线。由 scripts/prt/baseline-snapshot.mjs 生成；不含时间戳以便逐字节 diff。漂移由 sources 的 sha256 归因。",
   "version": 1,
   "sources": {
-    "team-hub/server.mjs": "84a05cc445be1d311552d256e5bccff1a7d1688d9909ea9ebb0b8dbe5266b1f1",
+    "team-hub/server.mjs": "298279286ab2bddb54a5a77b790d55f3072ba5b68206a59afb80bed11cce184e",
     "team-hub/permission-engine.mjs": "9e60a09d971474209a92047767d78bcc155c414a3fd3fc7442ff01f59f3b4168",
     "team-hub/run-store.mjs": "2ffab3645f3cf1969c02ff146e9759e1bfba4a6fb77f7423cdbb7e38ee4f3df1",
     "team-hub/model-store.mjs": "1ab1a5b548740ca5f6810de6fe25658e79aea9d95fd6382ccff5facf6613d779",
-    "team-hub/binding-store.mjs": "f9b2b7a50e1b33b0c571530e8439cd6784121458494d7a4590dfaabcce7db8c0"
+    "team-hub/binding-store.mjs": "f9b2b7a50e1b33b0c571530e8439cd6784121458494d7a4590dfaabcce7db8c0",
+    "team-hub/budget-ledger.mjs": "6969f9c9186bdbd7206ab800dbd5f08947468074cc091a8b3df6378fc0947d51"
   },
   "httpRoutes": [
     "DELETE /api/model-bindings/",
@@ -43,6 +44,8 @@
     "GET /api/overlaps",
     "GET /api/permissions/inbox",
     "GET /api/pipeline",
+    "GET /api/price-tables",
+    "GET /api/price-tables/",
     "GET /api/roster",
     "GET /api/rules",
     "GET /api/runtime/attempt",
@@ -50,6 +53,8 @@
     "GET /api/runtime/handoffs",
     "GET /api/runtime/held",
     "GET /api/runtime/next-post",
+    "GET /api/runtime/run-budget",
+    "GET /api/runtime/run-budget/",
     "GET /api/runtime/status",
     "GET /api/runtime/validations",
     "GET /api/scopes",
@@ -93,6 +98,7 @@
     "POST /api/permissions/decide",
     "POST /api/permissions/rules",
     "POST /api/pipeline",
+    "POST /api/price-tables",
     "POST /api/progress",
     "POST /api/reassign",
     "POST /api/release-stale",
@@ -105,6 +111,11 @@
     "POST /api/runtime/recover",
     "POST /api/runtime/release",
     "POST /api/runtime/resolve",
+    "POST /api/runtime/run-budget/may-switch-model",
+    "POST /api/runtime/run-budget/observe",
+    "POST /api/runtime/run-budget/reserve",
+    "POST /api/runtime/run-budget/resolve",
+    "POST /api/runtime/run-budget/settle",
     "POST /api/runtime/transition",
     "POST /api/runtime/validate",
     "POST /api/skill-source",
@@ -125,6 +136,7 @@
   "dbTables": [
     "agent_models",
     "audit",
+    "budget_reservations",
     "calendar_events",
     "chat_attachments",
     "chat_reply_settings",
@@ -138,6 +150,7 @@
     "model_profiles",
     "permission_requests",
     "permission_rules",
+    "price_tables",
     "roster",
     "rules",
     "run_attempt_events",
@@ -150,6 +163,7 @@
     "space_stages",
     "spaces",
     "tasks",
+    "usage_records",
     "web_fetch_history"
   ],
   "taskStatuses": [

@@ -15,12 +15,14 @@ import {
   buildSnapshot,
   diffSnapshots,
   extractPermissionModes,
+  extractRouteOccurrences,
   extractRoutes,
   extractStringArray,
   extractTables,
   extractTransitions,
   REPO_ROOT,
   SCHEMA_SCAN_DIRS,
+  SCHEMA_SOURCE_FOR,
   SCHEMA_SOURCE_PATHS,
 } from './baseline-snapshot.mjs'
 
@@ -208,6 +210,35 @@ test('⑤ **每个建表模块都登记进了 schema 采集**（漏登记 = 那�
     .filter((p) => SCHEMA_SCAN_DIRS.some((d) => resolve(p).startsWith(resolve(join(REPO_ROOT, d)))))
     .filter((p) => !found.includes(resolve(p)))
   assert.deepEqual(stale, [], '这些文件已登记但不再建表，请从 SCHEMA_SOURCES 里移除')
+})
+
+test('⑥ **同一条路由不得被写两次**（后写的会静默遮蔽先写的）', () => {
+  // 为什么这条必须单独存在：`extractRoutes` 返回的是 `Set`，重复的路由被静默
+  // 合并成一条。于是"新增了一条与既有路由同名的路由"在 `--check` 的 diff 里
+  // **完全看不出来**，而先写那条已经变成不可达的死代码。
+  //
+  // 实测（PRT-503）：费用预算账本一度也用 `GET /api/runtime/budget`，
+  // 而该路径已被 PRT-309 的**重试预算**读面占用。基线报"无漂移"，
+  // 但 `run-plane` 的"还能自动重试几次"读面已经永久返回错误结构
+  // ——它的字段从 `budget.attemptsUsed` 变成了 `reservations`。
+  const occ = extractRouteOccurrences(readFileSync(SCHEMA_SOURCE_FOR.server, 'utf8'))
+  const dupes = occ.filter((r) => r.count > 1)
+  assert.deepEqual(
+    dupes.map((d) => `${d.route} ×${d.count}`), [],
+    '这些路由被写了不止一次：后写的那条会遮蔽先写的，先写的那条成为死代码。\n' +
+    '请给新的那条换一个路径（两个不同的业务概念不应共用同一个 URL）。',
+  )
+  // 抽取器本身要能看见重复——否则这条用例会假绿
+  const synthetic = `
+    if (req.method === 'GET' && path === '/api/x') { a() }
+    if (req.method === 'GET' && path === '/api/x') { b() }
+    if (req.method === 'POST' && path === '/api/x') { c() }
+  `
+  const s = extractRouteOccurrences(synthetic)
+  assert.deepEqual(s, [
+    { route: 'GET /api/x', count: 2 },
+    { route: 'POST /api/x', count: 1 },
+  ], '抽取器必须给出真实次数（按次数降序）')
 })
 
 test('④ 基线含源文件哈希，可把漂移归因到文件', () => {  const recorded = JSON.parse(readFileSync(BASELINE, 'utf8'))

@@ -72,6 +72,10 @@ import { MODEL_ERRORS, ModelError, createModelStore, ensureModelSchema } from '.
 import {
   BINDING_STORE_ERRORS, BindingStoreError, createBindingStore, ensureBindingSchema,
 } from './binding-store.mjs'
+import {
+  BUDGET_ERRORS, BudgetError, createBudgetLedger, createPriceTableRegistry, ensureBudgetSchema,
+} from './budget-ledger.mjs'
+import { createPriceTable } from '../runtime/contracts/price-table.mjs'
 // `/api/runtime/next-post` 用「这条任务后面还有没有岗位」这个判定。
 // 与运行仓储里用的是**同一个**函数：两处各写一遍判定，迟早会出现
 // "接口说有下一岗位、交接时却按链尾收口"这种不一致。
@@ -233,6 +237,29 @@ const bindingStore = createBindingStore({
 })
 
 /**
+ * 价目表登记处与预算账本（PRT-511 / PRT-503 / PRT-510）。
+ *
+ * 顺序是**必须**的：账本的 `priceTableFor` 依赖登记处。而且这里不能用
+ * "先构造账本、再晚点接上价目表"的写法——`createBudgetLedger` 强制要求
+ * `priceTableFor`，因此一个没有价目表来源的账本根本构造不出来。
+ * 那条约束不是形式主义：没有它，结算就只能按现价重算，而 spec 明确禁止。
+ *
+ * 审计的 `taskId` 位置放 attemptId（账本的键），`scope` 放真实 scope。
+ */
+const budgetPriceTables = createPriceTableRegistry({
+  db,
+  clock: () => Date.now(),
+  writeAudit: ({ action, detail }) => audit('system', '*', action, '*', detail),
+})
+const budgetLedger = createBudgetLedger({
+  db,
+  clock: () => Date.now(),
+  priceTableFor: (version) => budgetPriceTables.get(version),
+  writeAudit: ({ action, attemptId, scope, taskId, detail }) =>
+    audit('system', scope ?? '*', action, attemptId ?? taskId ?? '*', detail),
+})
+
+/**
  * 运行面路由的公共外壳。
  *
  * 不复用 `handleWrite`：那条路径要求 `by`（看板成员），而运行面的主体是 **worker**，
@@ -260,6 +287,14 @@ async function handleRun(req, res, run) {
       // PRT-501：CAS 冲突必须带上**当前版本**。不带的话调用方只能反复盲试，
       // 而"重新读取后再改"这件事就变成了猜。
       currentVersion: e?.currentVersion,
+      // PRT-510：状态拒绝必须带上**真实当前状态**。"你的状态是 settled，不是
+      // locked"这句话本身就说明该改哪里；只给一句"状态不符"会让调用方去猜
+      // 自己现在到底是什么状态——而这正是幂等重放最常见的失败原因。
+      state: e?.state,
+      lockReason: e?.lockReason,
+      fromAmount: e?.fromAmount,
+      toAmount: e?.toAmount,
+      currency: e?.currency,
       serverTimeMs: Date.now(),
     })
   }
@@ -1299,7 +1334,15 @@ function audit(member, scope, action, taskId, detail, goalId = null) {
     const row = db.prepare('SELECT COALESCE(MAX(seq),0) AS m FROM audit').get()
     const seq = (row?.m ?? 0) + 1
     db.prepare('INSERT INTO audit (seq, ts, member, scope, action, taskId, detail, goalId) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(seq, now(), member, scope, action, taskId, JSON.stringify(detail), goalId)
+      // `detail ?? null` 不是多余的防御：`JSON.stringify(undefined)` 返回的是
+      // **`undefined`**（不是字符串），于是绑定到 SQLite 参数时抛
+      // 「Provided value cannot be bound to SQLite parameter 7」——
+      // 一个"某处少传了一个可选字段"的错误，以一条 SQLite 绑定错误的形式
+      // 出现在完全无关的层。PRT-503 实测撞到过：账本的无预算分支没传 detail。
+      //
+      // 审计字段是**诊断**，不该让真实业务操作失败；但它也不能被静默丢掉
+      // ——所以落 `null`（"没有诊断载荷"），而不是省略这一列。
+      .run(seq, now(), member, scope, action, taskId, JSON.stringify(detail ?? null), goalId)
     broadcastAudit(auditEvent({ seq, ts: now(), member, scope, action, taskId, goalId, detail }))
     return seq
   })
@@ -3633,6 +3676,188 @@ async function handle(req, res, stripPrefix) {
         return
       }
     }
+    // ── 单次运行预算账本与价目表（PRT-503 / PRT-510 / PRT-511，spec §6.6） ──
+    //
+    // 这是全仓唯一一处"花的是真钱"的接口面。它的错误都比别处贵：
+    // 预留漏了 → 超支；预留重复 → 余额被占两次；结算两次 → 余额释放两次；
+    // 锁定被结算 → 结果未知的那笔钱被当成已结清。
+    //
+    // 因此这里的原则是**宁可拒绝，不可猜**：状态码要能让调用方分辨
+    // 「参数不对（400）」「状态不符（409）」「根本没有这笔预留（404）」。
+    if (req.method === 'POST' && path === '/api/runtime/run-budget/reserve') {
+      await handleRun(req, res, (body) => {
+        // ── 参数校验**必须**排在状态检查之前 ──
+        //
+        // 顺序错了会把"你没传 attemptId"（400，改请求）报成
+        // "没有价目表版本 undefined"（409，去发布一张表）——
+        // 调用方会去修一个不存在的问题。
+        if (typeof body.attemptId !== 'string' || body.attemptId.trim() === '') {
+          json(res, 400, {
+            ok: false, code: BUDGET_ERRORS.ATTEMPT_REQUIRED,
+            error: '缺少 attemptId：账本的键是一次 Attempt，没有它无法定位预留',
+            serverTimeMs: Date.now(),
+          })
+          return
+        }
+        // 没有预算 = 显式 unbounded，此时**不需要**价目表（不预留就不用算钱）。
+        // 有预算但价目表取不到时给一条运维看得懂的错，而不是把
+        // `createPriceTable` 的开发者断言漏出去。
+        const needsPrice = body.budget !== null && body.budget !== undefined
+        const priceTable = needsPrice ? budgetPriceTables.get(body.priceTableVersion) : null
+        if (needsPrice && priceTable === null) {
+          json(res, 409, {
+            ok: false, code: BUDGET_ERRORS.PRICE_TABLE_GONE,
+            error: `没有价目表版本 ${JSON.stringify(body.priceTableVersion)}：` +
+              '有预算就必须有价目表——否则"上限"没有办法换算成钱，预留也就无从谈起',
+            serverTimeMs: Date.now(),
+          })
+          return
+        }
+        const r = budgetLedger.reserve({
+          attemptId: body.attemptId, scope: body.scope, taskId: body.taskId,
+          modelProfileId: body.modelProfileId,
+          budget: body.budget ?? null,
+          priceTable,
+          tokensIn: body.tokensIn, tokensOut: body.tokensOut,
+        })
+        return { reservation: r.reservation, budgetState: r.budgetState }
+      })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/runtime/run-budget/observe') {
+      await handleRun(req, res, (body) => {
+        const r = budgetLedger.observe({
+          attemptId: body.attemptId,
+          tokensIn: body.tokensIn, tokensOut: body.tokensOut,
+          modelProfileId: body.modelProfileId,
+        })
+        return {
+          cancel: r.cancel, kind: r.kind, used: r.used, limit: r.limit,
+          currency: r.currency, message: r.message, estimateOk: r.estimateOk,
+        }
+      })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/runtime/run-budget/settle') {
+      await handleRun(req, res, (body) => {
+        const r = budgetLedger.settle({
+          attemptId: body.attemptId, tokensIn: body.tokensIn, tokensOut: body.tokensOut,
+          outcome: body.outcome, actor: body.actor,
+          modelProfileId: body.modelProfileId, reason: body.reason,
+        })
+        return { reservation: r.reservation, locked: r.locked === true, overrun: r.overrun ?? null }
+      })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/runtime/run-budget/resolve') {
+      // 人工处置 / 恢复：解开 locked 的**唯一**出口。
+      await handleRun(req, res, (body) => budgetLedger.resolveLocked({
+        attemptId: body.attemptId,
+        disposition: body.disposition,
+        actor: body.actor,
+        tokensIn: body.tokensIn, tokensOut: body.tokensOut,
+        reason: body.reason,
+      }))
+      return
+    }
+    if (req.method === 'GET' && path === '/api/runtime/run-budget') {
+      const r = budgetLedger.list({ scope: url.searchParams.get('scope'), state: url.searchParams.get('state') })
+      json(res, 200, {
+        ok: true, reservations: r, held: budgetLedger.heldAmount(url.searchParams.get('scope')),
+        serverTimeMs: Date.now(),
+      })
+      return
+    }
+    if (req.method === 'GET' && path.startsWith('/api/runtime/run-budget/')) {
+      // `/api/runtime/run-budget/<attemptId>`：Attempt id 形如 `att:T-1:1`，
+      // 含冒号，因此必须百分号编码。这里**整段解码**（不像绑定那样按段切）——
+      // 路径里只有一段。
+      const BUDGET_PREFIX = '/api/runtime/run-budget/'
+      const rawId = path.slice(BUDGET_PREFIX.length)
+      let attemptId = null
+      try {
+        attemptId = decodeURIComponent(rawId)
+      } catch {
+        json(res, 400, { ok: false, code: 'BAD_ID_ENCODING', error: '预算路径不是合法的 URL 编码' })
+        return
+      }
+      if (attemptId.trim() === '') {
+        json(res, 400, { ok: false, code: 'MISSING_PARAM', error: '路径应为 /api/runtime/run-budget/<attemptId>' })
+        return
+      }
+      const reservation = budgetLedger.get(attemptId)
+      if (reservation === null) {
+        json(res, 404, {
+          ok: false, code: BUDGET_ERRORS.RESERVATION_NOT_FOUND,
+          error: `Attempt ${attemptId} 没有预算预留（未配置预算的运行不会留下预留——那是显式的 unbounded，不是遗漏）`,
+          serverTimeMs: Date.now(),
+        })
+        return
+      }
+      json(res, 200, { ok: true, reservation, usage: budgetLedger.usageOf(attemptId), serverTimeMs: Date.now() })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/price-tables') {
+      await handleRun(req, res, (body) => {
+        // 版本只增不改：同版本再发布是 409，不是 200 覆盖。
+        const table = createPriceTable({
+          version: body.version, currency: body.currency,
+          effectiveAtMs: body.effectiveAtMs, models: body.models ?? {},
+        })
+        const saved = budgetPriceTables.publish(table, { actor: body.actor })
+        return { priceTable: { version: saved.version, currency: saved.currency, effectiveAtMs: saved.effectiveAtMs, models: Object.keys(saved.models) } }
+      })
+      return
+    }
+    if (req.method === 'GET' && path === '/api/price-tables') {
+      json(res, 200, { ok: true, priceTables: budgetPriceTables.list(), serverTimeMs: Date.now() })
+      return
+    }
+    if (req.method === 'GET' && path.startsWith('/api/price-tables/')) {
+      const version = path.slice('/api/price-tables/'.length)
+      if (version.trim() === '') {
+        json(res, 400, { ok: false, code: 'MISSING_PARAM', error: '路径应为 /api/price-tables/<version>' })
+        return
+      }
+      const table = budgetPriceTables.get(version)
+      if (table === null) {
+        json(res, 404, { ok: false, code: BUDGET_ERRORS.PRICE_TABLE_GONE, error: `没有价目表版本 ${version}` })
+        return
+      }
+      // 只回结构与单价，**不回**任何与密钥相关的东西（价目表本来就没有，但保持同一条纪律）
+      json(res, 200, {
+        ok: true,
+        priceTable: {
+          version: table.version, currency: table.currency,
+          effectiveAtMs: table.effectiveAtMs, models: table.models,
+        },
+        serverTimeMs: Date.now(),
+      })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/runtime/run-budget/may-switch-model') {
+      await handleRun(req, res, (body) => {
+        const priceTable = budgetPriceTables.get(body.priceTableVersion)
+        if (priceTable === null) {
+          // 没有价目表就**无法比较**贵不贵，因此无法批准——这是 409 而不是 400：
+          // 请求本身没错，是缺一张表。而且绝不能因为"查不清"就放行。
+          json(res, 409, {
+            ok: false, code: BUDGET_ERRORS.PRICE_TABLE_GONE,
+            error: `没有价目表版本 ${JSON.stringify(body.priceTableVersion)}：` +
+              '不比较费用就无法判断是否更贵，而"不得在未获用户批准时自动切换到更昂贵模型"' +
+              '不能靠"查不清"来满足',
+            serverTimeMs: Date.now(),
+          })
+          return
+        }
+        const d = budgetLedger.maySwitchModel({
+          from: body.from, to: body.to, priceTable,
+          tokensIn: body.tokensIn, tokensOut: body.tokensOut, approved: body.approved === true,
+        })
+        return { allowed: d.allowed, code: d.code, fromAmount: d.fromAmount, toAmount: d.toAmount, currency: d.currency }
+      })
+      return
+    }
     if (req.method === 'POST' && path === '/api/runtime/validate') {
       // 机器验收（PRT-307）：执行成功之后的**独立关卡**。
       //
@@ -3728,6 +3953,12 @@ async function handle(req, res, stripPrefix) {
     if (req.method === 'GET' && path === '/api/runtime/budget') {
       // 重试额度读数：界面上要能回答"这条任务还能自动重试几次、下次什么时候"。
       // 答不出来时用户看到的只是"它又失败了"，而无法判断该不该干预。
+      //
+      // **注意：这条路径归"重试预算"，不归"费用预算"。** PRT-503 新增费用账本时
+      // 一度也用了 `/api/runtime/budget`，于是这条成为不可达的死代码，而
+      // `prt-007-baseline.json` 因为路由清单是 Set 去重的，**看不出任何变化**。
+      // 费用账本因此改用 `/api/runtime/run-budget`——两个"budget"在 URL 上必须分开，
+      // 否则后写的静默遮蔽先写的，而遮蔽的表现是"界面上那个读数的字段名变了"。
       const taskId = url.searchParams.get('taskId')
       if (taskId === null || taskId.length === 0) { json(res, 400, { ok: false, error: '缺少 taskId', code: 'MISSING_PARAM' }); return }
       json(res, 200, { ok: true, budget: runStore.retryBudgetOf(taskId), serverTimeMs: Date.now() })

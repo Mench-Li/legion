@@ -58,12 +58,14 @@ const SCHEMA_SOURCES = [
   'runStore',
   'modelStore',
   'bindingStore',
+  'budgetLedger',
 ]
 
 // 这些模块也一并纳入 sources 哈希：它们变了，基线里的表清单就可能过期。
 SOURCES.runStore = join(ROOT, 'team-hub', 'run-store.mjs')
 SOURCES.modelStore = join(ROOT, 'team-hub', 'model-store.mjs')
 SOURCES.bindingStore = join(ROOT, 'team-hub', 'binding-store.mjs')
+SOURCES.budgetLedger = join(ROOT, 'team-hub', 'budget-ledger.mjs')
 
 /**
  * 采集 schema 的目录。
@@ -81,6 +83,11 @@ export { SCHEMA_SOURCES }
 export const SCHEMA_SOURCE_PATHS = Object.freeze(
   SCHEMA_SOURCES.map((name) => SOURCES[name]),
 )
+
+/** 模块名 → 绝对路径。按**名字**取，不按位置取：
+ *  `SCHEMA_SOURCE_PATHS[0]` 这种写法会在列表重排时静默指向另一个模块，
+ *  而"检查 server 的路由"变成了"检查某个别的文件"——依然会绿。 */
+export const SCHEMA_SOURCE_FOR = Object.freeze({ ...SOURCES })
 
 /** 仓库根（供覆盖率检查遍历）。 */
 export const REPO_ROOT = ROOT
@@ -132,6 +139,43 @@ export function extractRoutes(source, options = {}) {
   })
   must(routes.size >= min, `HTTP 路由只提取到 ${routes.size} 条（下限 ${min}），抽取规则可能已与源码脱节`)
   return [...routes].sort()
+}
+
+/**
+ * 提取**带出现次数**的路由表，用于发现「同一条路由被写了两次」。
+ *
+ * 为什么单靠 `extractRoutes` 发现不了：它返回的是 `Set`，于是重复的路由
+ * 被静默合并成一条。而重复恰恰是最危险的一种——后写的那条会**遮蔽**先写的，
+ * 于是先写那条成为**不可达的死代码**，而路由清单看起来完全正常。
+ *
+ * 实测（PRT-503）：新增 `GET /api/runtime/budget`（费用预算）时，
+ * 该路径已被 PRT-309 的**重试预算**读面占用。基线里 `GET /api/runtime/budget`
+ * 仍然只出现一次（因为 Set 去重），`--check` 报"无漂移"，
+ * 而 `run-plane` 的"还能自动重试几次"读面已经永久返回错误结构。
+ *
+ * 返回 `[{ route, count }]`，按出现次数降序（重复的排前面）。
+ */
+export function extractRouteOccurrences(source) {
+  const counts = new Map()
+  const patterns = [
+    /req\.method\s*===\s*'([A-Z]+)'\s*&&\s*path\s*===\s*'([^']+)'/g,
+    /path\s*===\s*'([^']+)'\s*&&\s*req\.method\s*===\s*'([A-Z]+)'/g,
+    /req\.method\s*===\s*'([A-Z]+)'\s*&&\s*path\.startsWith\(\s*'([^']+)'/g,
+    /path\.startsWith\(\s*'([^']+)'\s*\)\s*&&\s*req\.method\s*===\s*'([A-Z]+)'/g,
+  ]
+  const isMethodFirst = [true, false, true, false]
+  patterns.forEach((re, i) => {
+    let m
+    while ((m = re.exec(source)) !== null) {
+      const [method, path] = isMethodFirst[i] ? [m[1], m[2]] : [m[2], m[1]]
+      if (!path.startsWith('/api/')) continue
+      const key = `${method} ${path}`
+      counts.set(key, (counts.get(key) ?? 0) + 1)
+    }
+  })
+  return [...counts.entries()]
+    .map(([route, count]) => ({ route, count }))
+    .sort((a, b) => b.count - a.count || a.route.localeCompare(b.route))
 }
 
 /**

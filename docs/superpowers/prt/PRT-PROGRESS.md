@@ -120,21 +120,21 @@
 | PRT-412 标记不可信来源并验证不能扩权 | ⬜ | |
 | PRT-413 canonical JSON、tokenizer 与保守估算降级 | ⬜ | |
 
-## 阶段 5：模型和密钥配置（2/11）
+## 阶段 5：模型和密钥配置（5/11）
 
 | 任务 | 状态 | 证据 / 说明 |
 | --- | --- | --- |
 | PRT-501 ModelProfile 数据模型与 API | ✅ | `team-hub/model-store.mjs`（仓储：**CAS 版本**、**墓碑删除**、审计脱敏守卫）+ 6 条路由（`GET/POST /api/model-profiles`、`GET/PATCH/PUT/DELETE /api/model-profiles/<id>`）+ 套件 `model-store`（20 例）、`model-routes`（14 例）。判据四条：① **校验只有一处**——写入复用 PRT-102 的 `validateProfile`，API 层不再写一遍；重复的后果不是多一道防线，而是两处判据会漂移，而漂移的那一次就是把明文密钥写进库的那一次；② **读出去的东西不含 `secretRef`**——连**引用名**都不给（只给 `hasCredential`），因为引用名也是可枚举的攻击面，而它没有必要出现在界面上；③ **更新用 `version` 做 CAS，不给就拒绝**——不默认成"最后一版"，否则两个界面同时保存会静默覆盖而两边都显示成功，用户只会觉得"我改的东西自己变回去了"（配置类 lost update 尤其难查）；冲突时带 `currentVersion`，不带的话调用方只能盲试；④ **删除是墓碑**——一次 Run 会记着 `modelProfileRef`，硬删除会让"当时用的哪个模型"永远答不上来；墓碑与"不存在"分开报（409 vs 404），混成一个会让「删掉再用同名建」看起来像一次干净的首次创建。审计只记非敏感事实（provider/model/字段名清单/「引用变了没有」），并在写入器**之前**过一道守卫：含疑似明文密钥就**拒绝写**（fail closed），不脱敏后照写——脱敏逻辑漏一处就等于把密钥永久留在库里。**这条路抓到三个真实缺陷**：① `findPlaintextSecrets` 只看键名不看值，于是 `limits.maxTokens` 被判成"检测到疑似明文密钥"——任何带 token 限额的模型档案**根本写不进去**，而报错把人送去查一个不存在的事故（`team-hub` 既有写入路径只有 provider/model 两列，从不传 limits，所以一直没人走过这条路）；② **契约基线看不见运行面建的表**：`dbTables` 只扫 `server.mjs`，于是 `run_attempts`/`run_attempt_events`/`run_validations`/`run_handoffs`/`model_profiles` **五张表对基线完全不可见**，`--check` 报"无漂移"而真实 schema 已经多了五张（基线由 101 路由/22 表 → **107 路由/27 表**——新增的 5 张不是本次新增的，是 PRT-301/307/308 就建好的）；③ **正则形态的路由对契约基线不可见**——`extractRoutes` 只认 `path === '…'` 与 `path.startsWith('…')`，我最初用 `/^\/api\/model-profiles\/(.+)$/.exec(path)` 写的三条路由在 diff 里根本不出现，可以不经评审地增删 |
 | PRT-502 岗位模型绑定与 fallback | ✅ | `orchestrator/model-binding/index.mjs`（**纯**解析：候选链 + 每一条的理由）+ `team-hub/binding-store.mjs`（`employee_model_bindings`，键是 **(scope, employee_role)**）+ 5 条路由；套件 `model-binding`（18 例）、`binding-store`（16 例）、`binding-routes`（10 例）。这个模块要回答的唯一问题是「**这条任务用的是哪个模型，为什么是它**」——它必须可回答，因为换模型会同时改变**成本、质量、以及数据去了哪**，三件都不可见时一次"用错了模型"的运行在事后完全没有痕迹（进度表原先在这一行留的「旧路径实测按岗位模型未生效 / `modelDrift`」正是这个现象被专门探针抓到的记录）。判据四条：① **主档案解析不出来 = 绑定不可用，不允许 fallback 悄悄顶替**——fallback 的意义是"主档案**运行时**连不上"，不是"配置写错了替我兜住"；悄悄顶替会让 `primaryProfile` 一直是错的，而每次运行都在用一个没人选过的模型（与 §6.6「不得在未获用户批准时自动切换到更昂贵模型」同一条纪律）。备用仍出现在链里（诊断要看得到"本来会用什么"），但 `role` 保持 `fallback`——改成 `primary` 会让"这个岗位的主档案是哪个"事后无法回答。**写入时也验**：主档案不可用直接 409，不把跑不起来的绑定存进库（等到运行时才发现，那次运行已经认领任务、烧掉一次尝试，而错误出现在**运行日志**里，不是在"保存配置"这个动作上）。② **不可用的备用是"跳过 + 理由"而不是错误**，但必须报出来——链短一位意味着真实的容错余量比看起来少一位；**"不存在"与"已下线"分开报**（前者去查是不是 id 打错，后者去找谁下线的），保留 `order` 原位置。③ **链有序且去重**：同一档案出现两次会让"重试"变成对着同一个模型重试两次——那不是容错，是把一次瞬时故障变成两次同样的失败。④ **解析结果无密钥**（连引用名都不给），在**序列化后的原始字节**上验。另有一条刻意分界：**形状错误用异常、配置问题用返回值**（binding 不是对象 / fallbackProfiles 不是数组 / profiles 类型不对 → 抛；主档案不可用 / 备用不可用 / 预算形态不对 → `ok:false` + 码）——混成一种会让真正的**代码错**被当成一条正常的配置诊断埋在日志里。`perRunBudget` 只做形态校验（执行是 PRT-503/510），但**未知字段拒绝而不是忽略**：`maxCst` 被静默忽略后配置界面看起来配了预算而实际没有上限。`chainSnapshot` 交付冻结时点（§6.7 密钥轮换只影响轮换后创建的 Run 的对应物），只存 id 与顺序、不存 provider/model 的值（那会变成两份互相矛盾的真相）。**抓到两个真实缺陷**：① 解析路由**没包在 `handleRun` 里**，于是缺 role 时 `requireKey` 抛的 `ROLE_REQUIRED` 逃到外层兜底处理器 → **500**——调用方少传一个参数被报成"服务端出错"，运维会去查服务端日志而真正要做的是补上参数（与 PRT-308 `next-post` 同一条教训：用异常表达正常的流程控制会让状态码失去意义）；② **新的建表模块又一次对契约基线不可见**——PRT-501 刚修过 `dbTables` 只扫 `server.mjs` 的问题，这次加 `binding-store.mjs` 的表后 `数据表` 仍是 27，同一个缺陷换个模块立刻又发生一次；说明"记得更新列表"这件事本身需要门禁，于是加了覆盖率检查（遍历所有可能放 schema 的目录找出建表模块，逐个断言已登记，**反向也查**登记了却不再建表的），错误信息直接说明该怎么做，并**验过会变红**。基线由 107 路由 / 27 表 → **112 路由 / 28 表** |
-| PRT-503 单次运行与岗位预算策略 | ⬜ | |
+| PRT-503 单次运行与岗位预算策略 | ✅ | `team-hub/budget-ledger.mjs` 的预算判定面：**没配预算 = 显式 `budgetState: 'unbounded'` 且不建预留**（否则"没配预算"与"预算闸门在工作"从外面看完全一样）、运行中 `observe()` 按累计用量判硬上限并**请求取消**（账本只请求，不自己取消——它不知道 Run 的生命周期）、超支**如实报出且不裁剪**（`spentAmount` 记真实值 + `overrunAmount` 记差额，而且仍然可以结算——拒绝结算只会让账本与事实脱节）、`maySwitchModel` 不得自动切到更贵模型（更便宜放行 / 更贵无批准拒绝 / **任一侧未定价也拒绝**，`approved` 不能替代定价）。套件 `budget-ledger`（**38 例**）+ `budget-routes`（**17 例**）。**未接线**：worker 与适配器尚未在 Run 开始时调 `reserve()`（见 docs/superpowers/prt/PRT-503-510-511-budget-ledger.md §10）。详见 docs/superpowers/prt/PRT-503-510-511-budget-ledger.md |
 | PRT-504 模型连通性与能力测试 | ⬜ | |
 | PRT-505 Windows Secret Store | 🟡 | `security/secrets/`（DPAPI 往返实测 + fail-closed + 六条出口脱敏）、套件 `secret-store`；**尚无生产调用方**；与 `$DSH_HOME/.credentials.yaml` 的收敛属 PRT-257 |
 | PRT-506 迁移现有非敏感模型配置 | ⬜ | |
 | PRT-507 Workbench 模型设置页面 | ⬜ | |
 | PRT-508 配置导入导出（排除密钥） | ⬜ | |
 | PRT-509 密钥读取 / 轮换 / 删除 / 泄漏测试 | 🟡 | 读取/轮换/删除的泄漏断言已入 `secret-store` 套件；**跨账户与 ACL 加固未做** |
-| PRT-510 预算原子预留、结算、取消与 Unknown Outcome 锁定 | ⬜ | |
-| PRT-511 冻结价格表版本、币种、计价单位与生效时间 | ⬜ | |
+| PRT-510 预算原子预留、结算、取消与 Unknown Outcome 锁定 | ✅ | `reserve` 用 `BEGIN IMMEDIATE` + `attempt_id` 主键，预留的是**最大预算**而不是估算值；重复预留幂等但**参数不一致拒绝 409**（上限可以被改，但必须是一次显式动作，"不能靠重新预留悄悄替换"）；`settle({outcome:'known'})` 按实际用量结算并释放，**二结算 409**（余额被释放两次是真钱）；`settle({outcome:'unknown'})` → `locked`，**不写任何实际金额**（`spentAmount` 保持 `null` 而不是 0，因为写入任何数字都等于宣称"算清了"），**余额仍被占住**，`locked` 不是终态且只能由 `resolveLocked()`（显式 `disposition: 'release'|'settle'` + `actor`）解开；状态机 `RESERVATION_TRANSITIONS` **全定义**（每个状态都有键，哪怕空数组——缺键会让 `TRANSITIONS[x]` 是 `undefined`，异常掩盖"这个状态我根本没想过"），有用例断言键集与状态集一一对应。详见 docs/superpowers/prt/PRT-503-510-511-budget-ledger.md |
+| PRT-511 冻结价格表版本、币种、计价单位与生效时间 | ✅ | `runtime/contracts/price-table.mjs`（`createPriceTable` 强制要求 version / currency / effectiveAtMs——一张没有版本、没有生效时间的价目表**构造不出来**，因此无法被冻结进记录、无法在事后被解释；`estimateCost` **未定价或 token 未知时返回 `ok:false` 而不是 0**；`canSwitchModel` 择价）+ `price_tables` 表与 `createPriceTableRegistry`：**版本为主键且发布不可覆盖**（同版本 → 409 `PRICE_TABLE_IMMUTABLE`），于是"改价"在类型上只能是"发新版本"，历史记录引用的旧版本对象**没有可改的东西**——**冻结是结构性的，不是一条纪律**。`usage_records` 追加式且每次写入都带全部五个冻结字段；结算**按预留时冻结的版本**取表，取不到就拒绝（`PRICE_TABLE_GONE`）**不回退到现价**。端到端用例：发布 v1 → 预留 → 发布 v2（涨价 100 倍）→ 结算**仍按 v1**。套件 `price-table`（**19 例**）。详见 docs/superpowers/prt/PRT-503-510-511-budget-ledger.md |
 
 ## 阶段 6：工具、权限和审批（1/20）
 
@@ -235,13 +235,13 @@
 | 2.5 商业薄切片 | 2 | 1 | 4 | 1 | 8 |
 | 3 Orchestrator Core | 13 | 0 | 3 | 0 | 16 |
 | 4 上下文边界 | 0 | 0 | 13 | 0 | 13 |
-| 5 模型与密钥 | 2 | 2 | 7 | 0 | 11 |
+| 5 模型与密钥 | 5 | 2 | 4 | 0 | 11 |
 | 6 工具、权限和审批 | 1 | 3 | 16 | 0 | 20 |
 | 7 Product Launcher | 5 | 2 | 6 | 0 | 13 |
 | 8 安装、升级和回滚 | 0 | 1 | 12 | 0 | 13 |
 | 9 商业 Alpha 保障 | 0 | 0 | 9 | 1 | 10 |
 | 10 能力包协议 | 0 | 0 | 6 | 0 | 6 |
-| **合计** | **52** | **15** | **76** | **2** | **145** |
+| **合计** | **55** | **15** | **73** | **2** | **145** |
 
 > 计数口径：**部分**计入「已有交付物但完成标准未全部满足」，
 > 因此不能与「已完成」相加后宣称完成度。真实完成度按**完成标准**判定：

@@ -87,6 +87,20 @@ export const NON_ENV_LITERALS = Object.freeze([
   'GIT_FAILED',
   // 工作区槽位的种类与意图文件
   'absent', 'empty', 'foreign', 'our-worktree', 'UNKNOWN',
+  // PRT-502 岗位模型候选链（orchestrator/model-binding/index.mjs 的
+  // BINDING_ERRORS 与 SKIP_REASONS 值）：
+  //   BINDING_NOT_OBJECT / PROFILES_NOT_ARRAY / FALLBACKS_NOT_ARRAY
+  //     — 调用方的**代码错**（用异常表达，不是配置诊断）
+  //   ROLE_REQUIRED / PRIMARY_REQUIRED / NO_USABLE_PROFILE
+  //     — 岗位或主档案缺失，绑定不可用
+  //   PRIMARY_UNRESOLVED — 主档案解析不出来 → 不降级到 fallback
+  //   BUDGET_INVALID     — perRunBudget 形态不合法（未知字段也拒绝）
+  //   PROFILE_NOT_FOUND / PROFILE_DELETED / PROFILE_DUPLICATE / PROFILE_ID_INVALID
+  //     — 一次解析里被跳过的候选原因（封闭集合 SKIP_REASONS）
+  'BINDING_NOT_OBJECT', 'PROFILES_NOT_ARRAY', 'FALLBACKS_NOT_ARRAY',
+  'ROLE_REQUIRED', 'PRIMARY_REQUIRED', 'NO_USABLE_PROFILE',
+  'PRIMARY_UNRESOLVED', 'BUDGET_INVALID',
+  'PROFILE_NOT_FOUND', 'PROFILE_DELETED', 'PROFILE_DUPLICATE', 'PROFILE_ID_INVALID',
 ])
 
 export const SCHEMA = defineSchema({

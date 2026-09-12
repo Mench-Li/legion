@@ -562,6 +562,23 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-511（spec §6.6 第 408 行）：带版本的价目表。
+      label: 'price-table（PRT-511：版本冻结、未知模型不返回 0、换模型择价）',
+      files: ['runtime/contracts/price-table.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      // PRT-503 / PRT-510：单次运行预算账本（原子预留 / 结算 / 取消 / 未知结果锁定）。
+      label: 'budget-ledger（PRT-503/510/511：预留→结算/锁定，超支不裁剪，锁定须人工处置）',
+      files: ['team-hub/budget-ledger.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      label: 'budget-routes（PRT-503/510/511：预算与价目表 HTTP 契约，真钱路径的状态码三分）',
+      files: ['team-hub/budget-routes.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       label: 'run-kill-drill（PRT-312：真实进程被强杀后不丢任务、不伪装成功、不重复外部写）',
       files: ['team-hub/run-kill-drill.test.mjs'],
       cwd: ROOT,

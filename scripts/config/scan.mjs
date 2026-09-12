@@ -154,11 +154,30 @@ export function trackedFiles(root) {
   }
 }
 
+/** 取「已写好但尚未纳入版本控制、且**不被 .gitignore 忽略**」的文件集合。
+ *
+ *  这是 `git add -A` 会带走的那一批，因此也就是「这次提交的配置面」。
+ *
+ *  与 `trackedFiles` 的差别很重要：`trackedFiles` 只知道「在不在索引里」，
+ *  因此 `team-hub/lib/index.js` 这类**被忽略的构建产物**也算「未跟踪」；
+ *  而真正危险的是「新建的源文件还没 git add」——它在索引外、也不被忽略。
+ *  `--others --exclude-standard` 恰好就给出这一批。 */
+export function pendingFiles(root) {
+  try {
+    const out = execFileSync('git', ['ls-files', '--others', '--exclude-standard', '-z'],
+      { cwd: root, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
+    return new Set(out.split('\0').filter(Boolean).map((p) => p.replace(/\\/g, '/')))
+  } catch {
+    return null
+  }
+}
+
 /** 扫描单个进程；返回 { name, files, reads:Map<key, {count, files:string[]}>, dynamic:[] } */
 export function scanProcess(name, { includeTests = false, onlyTracked = true } = {}) {
   const spec = PROCESSES[name]
   if (!spec) throw new Error(`未知进程：${name}（可选：${Object.keys(PROCESSES).join(', ')}）`)
   const tracked = onlyTracked ? trackedFiles(ROOT) : null
+  const pendingSet = onlyTracked ? pendingFiles(ROOT) : null
   const useGit = tracked !== null
   const files = []
   for (const d of spec.dirs) walk(join(ROOT, d), files)
@@ -196,7 +215,26 @@ export function scanProcess(name, { includeTests = false, onlyTracked = true } =
     ? files.map((f) => relative(ROOT, f).split(sep).join('/'))
       .filter((rel) => !tracked.has(rel) && (includeTests || !/\.test\.|\.spec\.|smoke/.test(rel)))
     : []
-  return { name, label: spec.label, filesScanned: scanned, untracked, reads, dynamic, suspicious, mode: useGit ? 'git-tracked' : 'walk（git 不可用：结果已包含未跟踪文件，仅作调试参考）' }
+
+  // ── 「假绿」的真正修法：把**将要被提交**的那批文件单独拎出来 ──
+  //
+  // 上面那条注释把陷阱说清楚了，却选择「只警告、不判失败」。这个选择本身
+  // 就是漏洞：`scan --check` 报 PASS 的含义是「配置面没问题」，
+  // 而它实际的含义只是「**已经提交的那部分**没问题」。
+  //
+  // 实测后果（PRT-502）：`orchestrator/model-binding/index.mjs` 提交前未跟踪，
+  // 门禁报 PASS（285 字面量）；提交后同一份文件立刻冒出 12 个未处理字面量。
+  // 也就是说这条门禁在**最需要它的时刻**（提交前）覆盖不到**它该管的对象**。
+  //
+  // 因此：`pending`（untracked 且未被 .gitignore 忽略）= `git add -A` 会带走的
+  // 那批文件。非空时 `--check` **判失败**，因为此时任何 PASS 都是对
+  // "将要提交的东西"的谎报。
+  const pending = useGit
+    ? files.map((f) => relative(ROOT, f).split(sep).join('/'))
+      .filter((rel) => !tracked.has(rel) && pendingSet !== null && pendingSet.has(rel) &&
+        (includeTests || !/\.test\.|\.spec\.|smoke/.test(rel)))
+    : []
+  return { name, label: spec.label, filesScanned: scanned, untracked, pending, reads, dynamic, suspicious, mode: useGit ? 'git-tracked' : 'walk（git 不可用：结果已包含未跟踪文件，仅作调试参考）' }
 }
 
 /** 未声明读取点（对照 schema 的 env 名单） */
@@ -260,6 +298,10 @@ async function main() {
       if (r.untracked?.length) {
         console.log(`    ⚠ 另有 ${r.untracked.length} 个未跟踪文件未纳入扫描（本地状态，提交后即纳入）：${r.untracked.slice(0, 3).join(', ')}${r.untracked.length > 3 ? ' …' : ''}`)
       }
+      if (r.pending?.length) {
+        console.log(`  ✖ 有 ${r.pending.length} 个文件**已写好但尚未纳入版本控制**，因此本次扫描没有覆盖它们：${r.pending.join(', ')}`)
+        console.log('     这条门禁的模式是 git-tracked。在它们被 git add 之前，任何 PASS 都只是「已提交的那部分没问题」，而不是「你要提交的东西没问题」')
+      }
       for (const read of r.reads) console.log(`    ${read.key.padEnd(34)} ×${String(read.count).padEnd(3)} ${read.files[0]}`)
       if (r.literals.length) {
         console.log(`    —— 疑似 env 字面量（需声明或列入 nonEnvLiterals）——`)
@@ -276,11 +318,22 @@ async function main() {
       }
     }
   }
+  // 假绿治理：有"将要提交但没被扫到"的文件时，PASS 是对提交内容的谎报。
+  const pendingAll = results.flatMap((r) => (r.pending ?? []).map((f) => `${r.name}:${f}`))
+  if (check && pendingAll.length > 0) {
+    console.error(`\nscan: FAIL —— ${pendingAll.length} 个文件已写好但未被扫描（未纳入版本控制且未被 .gitignore 忽略）：`)
+    for (const p of pendingAll) console.error(`  - ${p}`)
+    console.error('  git-tracked 模式下这些文件不在配置面里。请 `git add` 后重跑，')
+    console.error('  否则这条门禁报的是「已提交的部分没问题」，而不是「你要提交的东西没问题」。')
+    process.exitCode = 1
+  }
   if (check && violations > 0) {
     console.error(`\nscan: FAIL —— ${violations} 项未在 schema 中处理（补进对应进程的 config-schema，或列入 nonEnvLiterals 并写明理由）`)
     process.exit(1)
   }
-  if (check) console.log(`\nscan: PASS（全部 env 读取点与疑似字面量均已处理；共 ${suspiciousCount} 个疑似字面量）`)
+  if (check && pendingAll.length === 0) {
+    console.log(`\nscan: PASS（全部 env 读取点与疑似字面量均已处理；共 ${suspiciousCount} 个疑似字面量）`)
+  }
 }
 
 /** 进程 → schema 模块路径（相对 ROOT），供 --check 对照使用。

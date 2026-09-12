@@ -396,6 +396,20 @@ async function stageTest() {
       files: ['team-hub/tool-call-log.test.mjs'],
       cwd: ROOT,
     },
+    {
+      // PRT-613：审批、UI、审计与执行看到**同一份**不可变工具参数（spec §6.5 line 468）。
+      //
+      // 盯四件事：
+      //   ① 冻结是**递归**的（浅冻结在 `Object.isFrozen()` 上看不出来，
+      //      而"哪个文件被写"在第二层）
+      //   ② 身份是**携带**的 —— 没有任何一个观察面有机会"按自己的副本重新证明自己"；
+      //      这一步只在**序列化边界**上可观测（进程内重算与携带恒等）
+      //   ③ pre-execute **不允许改写工具参数**：只能拒绝当前调用，不能静默改写
+      //   ④ 身份必须含 `toolName`，且 UI 摘要**不参与**身份
+      label: 'tool-args（PRT-613：审批/UI/审计/执行看到同一份不可变工具参数）',
+      files: ['runtime/dsh-composition/tool-args.test.mjs'],
+      cwd: ROOT,
+    },
     { label: 'calendar（日程日历契约）', files: ['team-hub/calendar.test.mjs'], cwd: ROOT },
     { label: 'calendar-ui（P2-5 日历前端纯函数：周视图/重复文案/关联跳转/表单校验）', files: ['workbench/scripts/calendar-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'chat-ui（P2-6 对话前端纯函数：健康判定/AI 三态/合并/断线补齐）', files: ['workbench/scripts/chat-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },

@@ -110,11 +110,15 @@ export function normalizeTransportError(err) {
  *                                       返回 `{kind:'http', status:200, ...}` 表示拿到响应。
  * @param {Function} [deps.resolveSecret] `async (secretRef, profile) => credential`。
  *                                       抛异常即视为本地密钥库问题（SECRET_UNAVAILABLE）。
+ * @param {Function} [deps.credentialVersionOf] `async (profile) => string`。
+ *                                       返回**凭证版本**（密钥元数据的 `updatedAt`/`rotatedAt`），
+ *                                       进缓存指纹。轮换后判定自动重来，不需要任何人记得清缓存。
  * @param {Function} [deps.clock]
  */
 export function createModelProbe({
   transport,
   resolveSecret,
+  credentialVersionOf,
   clock = () => Date.now(),
   ttlMs = PROBE_TTL_MS,
   negativeTtlMs = NEGATIVE_PROBE_TTL_MS,
@@ -127,15 +131,41 @@ export function createModelProbe({
   if (resolveSecret !== undefined && typeof resolveSecret !== 'function') {
     throw new TypeError(`resolveSecret 必须是函数或省略（${PROBE_RAISED.RESOLVER_MISSING}）`)
   }
+  if (credentialVersionOf !== undefined && typeof credentialVersionOf !== 'function') {
+    throw new TypeError('credentialVersionOf 必须是函数或省略')
+  }
 
   /** key = `profileId\u0000fingerprint` → { verdict, probedAtMs } */
   const cache = new Map()
   /** 每次真实探测（未命中缓存）都记一条，供诊断与用例断言。 */
   const attempts = []
+  /** 版本取不到时用它制造唯一值，保证"版本未知"的两次探测**不会互相命中**。 */
+  let versionUnknownNonce = 0
 
-  function cacheKey(profile) {
+  /**
+   * 取凭证版本。**取不到时返回一个唯一值**，而不是空串或 `undefined`。
+   *
+   * 理由是两种错法的代价不对称：
+   *   - 给唯一值 → 缓存必然不命中 → 真的探一次（多花一次请求，结果正确）；
+   *   - 给空串 → "版本未知"的两次探测互相命中 → 可能拿旧钥匙的判定回答新钥匙的问题。
+   *
+   * 而且这里的失败**不中断探测**：元数据读不到通常意味着密钥库本身有问题，
+   * 那件事会由紧随其后的 `resolveSecret` 报成 `SECRET_UNAVAILABLE`
+   * ——那才是这条链路上唯一该报的错。这里只负责不让缓存骗人。
+   */
+  async function credentialVersionFor(profile) {
+    if (credentialVersionOf === undefined) return null
+    try {
+      const v = await credentialVersionOf(profile)
+      return v === null || v === undefined || v === '' ? `unknown:${versionUnknownNonce += 1}` : String(v)
+    } catch {
+      return `unknown:${versionUnknownNonce += 1}`
+    }
+  }
+
+  function cacheKey(profile, credentialVersion) {
     const id = profile !== null && typeof profile === 'object' && typeof profile.id === 'string' ? profile.id : ''
-    return `${id}\u0000${probeFingerprint(profile)}`
+    return `${id}\u0000${probeFingerprint(profile, { credentialVersion })}`
   }
 
   function remember(key, verdict) {
@@ -245,7 +275,9 @@ export function createModelProbe({
    * 命中新鲜缓存时**不发请求**：探测是要花钱的。
    */
   async function probe({ profile, requiredCapabilities = [], force = false } = {}) {
-    const key = cacheKey(profile)
+    // 取版本**必须**排在查缓存之前：它就是"这把钥匙还是不是同一把"的答案。
+    const credentialVersion = await credentialVersionFor(profile)
+    const key = cacheKey(profile, credentialVersion)
     const now = clock()
 
     if (force !== true) {

@@ -595,6 +595,12 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-505 的"生产调用方" + PRT-509 的读/轮换/删除泄漏断言。
+      label: 'secret-resolver（PRT-505/509：明文后端构造即拒、轮换自动失效探测缓存、明文不进诊断）',
+      files: ['runtime/probe/secret-resolver.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-508（spec §6.6 第 403 行）：配置导入导出，导出**永远不含密钥**。
       label: 'config-bundle（PRT-508：导出剥掉 secretRef、导入挡密钥、冲突默认不覆盖、悬空引用拦下）',
       files: ['runtime/contracts/config-bundle.test.mjs'],

@@ -368,10 +368,18 @@ export function defaultProbeMessage(code) {
  *
  * 只取**会改变连通性结果**的字段：id 不参与（同一个 id 改配置必须让缓存失效，
  * 所以配置本身进指纹；id 只用于分桶）。
- * 刻意**不含 secretRef 的值**——引用名会随轮换改变，但轮换**不应**让
- * 一次刚刚完成的探测失效（轮换后必须重新探测的判断由 PRT-509 的轮换流程负责）。
+ * 刻意**不含 secretRef 的值**——档案里本来也没有。
+ *
+ * `credentialVersion` 由调用方从**密钥元数据**取（`updatedAt`/`rotatedAt`，
+ * 见 `runtime/probe/secret-resolver.mjs`），不是密钥值。
+ *
+ * 为什么它必须进指纹：**同一个引用名下换了一把钥匙，判定就该重来。**
+ * 引用名不变、值变了，而这正是轮换的定义。少了这一项，
+ * 把一把坏钥匙换成好钥匙之后，配置页在 TTL 内仍然显示"鉴权失败"；
+ * 反过来（好钥匙被换成坏的）更糟——界面显示"通过"，
+ * 而真实的运行会失败。**一次轮换不该需要任何人记得去清缓存。**
  */
-export function probeFingerprint(profile) {
+export function probeFingerprint(profile, { credentialVersion = null } = {}) {
   if (profile === null || typeof profile !== 'object') return 'invalid'
   const parts = [
     String(profile.provider ?? ''),
@@ -382,6 +390,9 @@ export function probeFingerprint(profile) {
     // 但只有名字，没有值——值从来不在档案里。
     profile.secretRef === null || profile.secretRef === undefined ? '' : String(profile.secretRef),
     String(profile.reasoningEffort ?? ''),
+    // 凭证**版本**（元数据时间戳）。取不到时调用方必须给一个唯一值，
+    // 而不是空串——空串会让"版本未知"的两次探测互相命中缓存。
+    credentialVersion === null || credentialVersion === undefined ? '' : String(credentialVersion),
   ]
   return parts.join('\u0000')
 }

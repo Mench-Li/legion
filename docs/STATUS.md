@@ -4,9 +4,9 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-12　`run-ci --only test` **PASS**；其中 `test` **96 套件 / 2391 用例**
-（**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数为 95 套件 / 2361 用例）
-—— 以本文件所在提交为准；证据 `.ci/2026-09-12T07-52-39-114Z/`
+**最近一次全量基线**：2026-09-12　`run-ci --only test` **PASS**；其中 `test` **97 套件 / 2401 用例**
+（**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数为 96 套件 / 2391 用例）
+—— 以本文件所在提交为准；证据 `.ci/2026-09-12T08-03-04-221Z/`
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
 （`scrum/daemon-gf001.json`，`intervalMs: 15000`）同时运行时实测 **31 分钟**（约 7 倍）。
 **因此不要把耗时当回归基线**——只有套件数/用例数/通过与否可用于判定。
@@ -31,7 +31,56 @@
 > - `gf001` 空间非终态任务数为 **0**；T-141 已由将军于 `14:00:32Z` 转 `canceled`
 >   （产物从 patch 记录逐字恢复为 `53d9d15`，需求已由 `G-mtwxx7an-2` 交付，无需重做）。
 
-> **本轮（PRT-506：迁移现有非敏感模型配置）**：
+> **本轮（PRT-507 前端收尾：模型配置的客户端层，与一条断在中间的链）**：
+> 新增 `workbench/src/hub-errors.ts`（结构化错误）+ `workbench/src/api.ts` 的模型配置客户端
+> （档案 CRUD / 岗位绑定 / 探测 / 迁移 / 导入导出）+ `workbench/scripts/model-api.test.mjs`（**10 例**）。
+>
+> **缺口的形态：六个功能，零个客户端函数。** 后端把 PRT-501/502/504/506/508 都做完了
+> ——实现、套件、文档、STATUS 记录俱全——而 `workbench/src/api.ts` 里**一个客户端函数都没有**。
+> **功能在、测试在、文档在，而没有任何入口。** 与上一轮查 PRT-504 发现"没有任何非测试调用方"
+> **完全同源**；上次空的是服务端内部一截，这次空的是**界面到服务端之间的整层**。两次用例都是全绿的。
+>
+> **第二个、更隐蔽的缺口：`hubPost` 把结构吃掉了。** 它原本这样收尾：
+> `throw new Error(\`${res.status}${text ? \`：${text}\` : ''}\`)`——把响应体**压成一句字符串**。
+> 而后端（PRT-252）明明返回 `{error, code, field, hint, candidates}`。于是 `field`（该落到哪个
+> 输入框）、`hint`（下一步做什么）、`candidates`（实际存在的选项）**在到达界面之前就没了**。
+> 这比"没做"更坏一点：那几个字段**在后端有 18 条用例守着**，所以从任何局部看都像"已经做了"，
+> 唯一缺的那一环在两者之间。**后端加了码、前端还是笼统提示 —— 那条码就等于没加。**
+> 修法：新增 `HubError`（`status`/`code`/`field`/`hint`/`candidates`/`errors`/`body`），
+> 写路径抛它而不是扁平 `Error`。
+>
+> **一处必须说清的行为变化**：`HubError.message` 保留 `${status}：...` 形态，但内容有一处
+> **刻意变化**——非 JSON 响应体（HTML 错误页）与旧行为**逐字相同**；JSON 响应体则由
+> "整段 JSON 原样上屏"改为其中可读的 `error` 字段。我第一版把注释写成"与过去逐字相同"，
+> **那是错的**（JSON 分支变了）；**一句关于行为的错误描述比没有描述更坏**，故如实写出并用用例钉住
+> （断言消息里不出现 `"code"` 这类 JSON 结构）。
+>
+> **几处刻意的选择**：`probeModelProfile` 默认 `force:true`（用户主动按下的按钮，只回缓存会让人
+> 以为"刚才那次点击验证了现在"）；`applyMigration` 必须回传 `expectedDigest`（服务端重算并要求
+> 一致，不回传等于跳过对齐、执行一份用户没看过的计划）；`fetchMigrationPlan` **不把"缺 runtimeType"
+> 当异常**（服务端此时返回 200 + 一份 `ok:false` 的计划，那正是界面要渲染的第一件事）；
+> `updateModelProfile` 强制要 `version`（服务端 CAS 基线）。
+>
+> **一条不靠人记得同步的闸门**：新增的第三条用例把 `api.ts` 里的路径抽出来，与
+> `team-hub/server.mjs` **源码抽出**的路由表比对——抓的是"前端写了个不存在的端点"，
+> 这种错**不会报错，只会 404**。抽取**只认** `hubGet`/`hubPost`/`hubRequest` 三个必带字面量的
+> 入口，不认裸 `fetch(...)`：第一版那条宽松正则因多抽了一个 capture group 而把路径当成了方法，
+> 报出一串 `/api/config undefined`——**一条会给出错误结论的校验，比不校验更坏**，故收窄范围，
+> 并加了两道前提自检（条数下限 + 本轮四条新路径必须在集合里）。
+>
+> **变红验证 9 条全红**；但第一次跑时"id 不编码"那条是**绿的**，而它暴露的是**测试的漏洞**：
+> `encodeURIComponent` 出现在三处（改/删/探测），而我只对**改**那条用了带斜杠的 id，于是
+> 去掉探测那处的编码**没有任何用例变红**——**用例覆盖的是三处里的一处，而它们看起来一样**。
+> 补上探测与删除的带斜杠断言之后才真的红。
+>
+> **未交付**：React 组件仍未接（`ModelConfigModal.tsx` 依然从硬编码 `MODEL_OPTIONS` 渲染，
+> 也还没调用探测/迁移/导入——现在入口齐了，但那是独立的一步）；`MODEL_OPTIONS` 硬编码仍在；
+> 档位不在产品档案里；**`hubGet` 的失败路径没有同样处理**（经 `readJson` 抛
+> `${status} ${statusText}`，仍丢掉响应体——只要这些是读接口就仍是已知缺口）；
+> `owner` 仍无来源；hub 路由测试仍未纳入套件。详见
+> `docs/superpowers/prt/PRT-507-model-config-client-layer.md`。
+>
+> 本轮（PRT-506：迁移现有非敏感模型配置）**：
 > `team-hub/model-migration.mjs`（**30 例**）+ `GET /api/model-migration/plan`
 > + `POST /api/model-migration/apply`。
 >
@@ -1373,7 +1422,7 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：96 套件 / 2391 用例，`--only test` 整体 PASS** —— 2026-09-12 实测（设 `DSH_CHECKOUT`）
+**当前基线：97 套件 / 2401 用例，`--only test` 整体 PASS** —— 2026-09-12 实测（设 `DSH_CHECKOUT`）
 （PRT-509 事故修正：`push-verify`（**9 例**，推送判据必须是远端 tip；两条用真实输出的负样本）；
 PRT-254 Secret Store 最小闭环：`product-secrets`（**23 例**，密钥库不得在 DataDir 内 / 明文后端 fail closed / 解析器真的接上）；
 PRT-509 文件访问控制：`secret-acl`（**22 例**，真实 `icacls` 输出做夹具 / "查不出来"必须与"是安全的"分开）；

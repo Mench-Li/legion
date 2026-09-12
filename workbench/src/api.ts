@@ -1,5 +1,6 @@
 import type { ActivityEvent, AgentCatalogItem, AgentModelCfg, ApiConfig, BoardData, CardStatus, ChatAttachmentRef, ChatConversation, ChatHealthInfo, ChatMessage, DirListing, FileListResponse, FilePreview, GoalInfo, GoalStatus, HubActivity, HubAuditEvent, HubDocContent, HubTask, MissionsResponse, ModelOption, OverlapGroup, RepoInspect, RosterResponse, SkillInfo, SpaceInfo, WebFetchResult, WebHistoryResponse, WebMetaResponse, WebShotResult } from './types'
 import { subscribeHubEventStream } from './hubEventStream.ts'
+import { HubError, hubErrorFromBody } from './hub-errors.ts'
 
 /**
  * 数据源地址解析：?api= 查询参数优先，其次 localStorage，最后默认 4820。
@@ -511,14 +512,20 @@ async function hubPost(path: string, body: Record<string, unknown>): Promise<unk
   }
   clearTimeout(timer)
   if (!res.ok) {
+    // **保留结构**，不再压成一句字符串。PRT-252 返回的 `code`/`field`/`hint`/
+    // `candidates` 过去在这一行被丢掉——于是后端那些**有测试守着**的字段
+    // 在到达界面之前就没了（"后端加了码、前端还是笼统提示"）。
+    // 消息形态不变（`${status}：...`）；JSON 响应时改用可读的 `error` 字段，
+    // 不再是整段 JSON 原样上屏（见 hub-errors.ts 文件头 ①）。
     const text = await res.text().catch(() => '')
-    throw new Error(`${res.status}${text ? `：${text}` : ''}`)
+    let parsed: unknown = null
+    try { parsed = text ? JSON.parse(text) : null } catch { parsed = null }
+    throw hubErrorFromBody(res.status, text, parsed)
   }
   return res.json().catch(() => undefined)
 }
 
-/** team-hub v2：技能列表。includePending=true 时含待审/被拒（仅 member=general 复审视角，服务端收口）。 */
-export async function fetchSkills(opts: { scope?: string | null; includePending?: boolean; member?: string } = {}): Promise<SkillInfo[]> {
+/** team-hub v2：技能列表。includePending=true 时含待审/被拒（仅 member=general 复审视角，服务端收口）。 */export async function fetchSkills(opts: { scope?: string | null; includePending?: boolean; member?: string } = {}): Promise<SkillInfo[]> {
   const qs = new URLSearchParams()
   if (opts.scope) qs.set('scope', opts.scope)
   if (opts.member) qs.set('member', opts.member)
@@ -1178,4 +1185,227 @@ export function countUnreadItems(items: NotifyItem[]): number {
 /** 测试/调试用：清空某空间的已读状态（生产代码不调用）。 */
 export function resetNotifyRead(scope: string | null): void {
   saveNotifyReadState(scope, EMPTY_READ_STATE)
+}
+
+// ============================================================================
+// 模型与密钥配置的客户端（PRT-501 / 502 / 504 / 506 / 507 / 508）
+//
+// ## 这一层此前**完全不存在**
+//
+// 后端把这六件事都做完了：模型档案 CRUD、岗位绑定与 fallback、连通性探测、
+// 非敏感配置迁移、配置导入导出。而前端**一个客户端函数都没有**——
+// 也就是说这些功能从界面上**一次都调不到**。
+//
+// 这与 PRT-507 查到的"PRT-504 没有任何非测试调用方"是同一种形态：
+// **功能在、测试在、文档在，而没有任何入口。**
+//
+// ## 路径一律写成字面量
+//
+// 不是风格问题：`scripts/prt/` 有一个套件会把这里的路径拿去与平台契约基线
+// （`prt-007-baseline.json`，由源码抽取）比对。用模板拼接或常量会让**整条**
+// 路由从比对里消失——那正是 PRT-507 在服务端踩过的坑
+// （用 `MODEL_PREFIX` 常量写守卫，路由对契约基线不可见，基线照样报"一致"）。
+// ============================================================================
+
+/** 一个模型档案（对外的 descriptor 形态，**不含** secretRef 的值）。 */
+export interface HubModelProfile {
+  id: string
+  displayName: string
+  runtimeType: string
+  provider: string
+  model: string
+  endpoint: string | null
+  reasoningEffort?: string
+  limits?: Record<string, unknown>
+  /** 只暴露「有无凭证」，不暴露引用名本身。 */
+  hasCredential?: boolean
+  version?: number
+  updatedAtMs?: number
+}
+
+/** 岗位模型绑定（PRT-502）：`(scope, 岗位) → 主档案 + fallback 链`。 */
+export interface HubModelBinding {
+  scope: string
+  employeeRole: string
+  primaryProfile: string
+  fallbackProfiles: string[]
+  perRunBudget?: unknown
+}
+
+/** 一份迁移计划（PRT-506）。注意 `ok` 说的是"这份计划能不能执行"。 */
+export interface HubMigrationPlan {
+  ok: boolean
+  code: string
+  message: string | null
+  toCreate: HubModelProfile[]
+  toBind: Array<{ scope: string; employeeRole: string; primaryProfile: string; fallbackProfiles: string[] }>
+  needsAttention: Array<{ id: string; missing: string[]; why: string }>
+  skipped: Array<Record<string, unknown>>
+  refused: Array<Record<string, unknown>>
+  conflicts: Array<Record<string, unknown>>
+  empty: boolean
+  hasAttention: boolean
+  digest: string
+}
+
+/** 通用 JSON 请求。**写请求都带 20s 超时**（与 hubPost 一致：界面不能无感卡住）。 */
+async function hubRequest(method: string, path: string, body?: Record<string, unknown>): Promise<unknown> {
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), 20_000)
+  let res: Response
+  try {
+    res = await fetch(`${hubBase()}${path}`, {
+      method,
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      ...(body === undefined ? {} : { body: JSON.stringify({ ...body, by: body.by ?? 'general' }) }),
+      signal: ctrl.signal,
+    })
+  } catch (e) {
+    clearTimeout(timer)
+    if (e instanceof DOMException && e.name === 'AbortError') throw new Error(`请求超时（20s）：中枢 ${hubBase()} 无响应，请确认 team-hub 已启动`)
+    throw new Error(`无法连接中枢 ${hubBase()}${path}（网络/代理错误），请检查 team-hub 状态`)
+  }
+  clearTimeout(timer)
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    let parsed: unknown = null
+    try { parsed = text ? JSON.parse(text) : null } catch { parsed = null }
+    throw hubErrorFromBody(res.status, text, parsed)
+  }
+  return res.json().catch(() => undefined)
+}
+
+function asArray<T>(v: unknown): T[] {
+  return Array.isArray(v) ? v as T[] : []
+}
+
+// ── 模型档案（PRT-501）────────────────────────────────────────────────────
+
+/** 模型档案列表。默认**不含**墓碑：`includeDeleted` 要显式给，否则界面上会出现选不了的模型。 */
+export async function fetchModelProfiles(opts: { includeDeleted?: boolean } = {}): Promise<HubModelProfile[]> {
+  const qs = opts.includeDeleted ? '?includeDeleted=1' : ''
+  const data = await hubGet(`/api/model-profiles${qs}`).then((r) => readJson<{ profiles?: HubModelProfile[] }>(r))
+  return asArray<HubModelProfile>(data?.profiles)
+}
+
+export function createModelProfile(profile: Record<string, unknown>, actor: string): Promise<unknown> {
+  return hubPost('/api/model-profiles', { profile, actor })
+}
+
+/** 改档案。**必须给 version**——服务端用它做 CAS，不给会 400 而不是"改最后一版"。 */
+export function updateModelProfile(id: string, profile: Record<string, unknown>, version: number, actor: string): Promise<unknown> {
+  return hubRequest('PUT', `/api/model-profiles/${encodeURIComponent(id)}`, { profile, version, actor })
+}
+
+export function deleteModelProfile(id: string, version: number, actor: string): Promise<unknown> {
+  return hubRequest('DELETE', `/api/model-profiles/${encodeURIComponent(id)}`, { version, actor })
+}
+
+/**
+ * 测试连接（PRT-507）。
+ *
+ * `force` 默认 **true**：这是用户主动按下的按钮。回一个缓存里的旧结论会让用户
+ * 以为"刚才那次点击验证了现在"。缓存的价值在于**自动**重复检查，不在于回应一次点击。
+ *
+ * 失败时抛 `HubError`；其中 `status === 503` 表示**这次没有探测过**
+ * （密钥库打不开 / 布局不合法 / 没填 endpoint）——**那不是"连不上"**，
+ * 调用方必须分开渲染（见 `modelSettings.ts` 的 `probeBadge`）。
+ */
+export function probeModelProfile(
+  id: string,
+  opts: { force?: boolean; requiredCapabilities?: string[] } = {},
+): Promise<unknown> {
+  return hubPost(`/api/model-profiles/${encodeURIComponent(id)}/probe`, {
+    force: opts.force !== false,
+    requiredCapabilities: opts.requiredCapabilities ?? [],
+  })
+}
+
+// ── 岗位绑定与 fallback（PRT-502）─────────────────────────────────────────
+
+export async function fetchModelBindings(scope?: string | null): Promise<HubModelBinding[]> {
+  const qs = scope ? `?scope=${encodeURIComponent(scope)}` : ''
+  const data = await hubGet(`/api/model-bindings${qs}`).then((r) => readJson<{ bindings?: HubModelBinding[] }>(r))
+  return asArray<HubModelBinding>(data?.bindings)
+}
+
+export function saveModelBinding(input: {
+  scope: string
+  employeeRole: string
+  primaryProfile: string
+  fallbackProfiles?: string[]
+  perRunBudget?: unknown
+  actor: string
+}): Promise<unknown> {
+  return hubPost('/api/model-bindings', {
+    scope: input.scope,
+    employeeRole: input.employeeRole,
+    primaryProfile: input.primaryProfile,
+    fallbackProfiles: input.fallbackProfiles ?? [],
+    perRunBudget: input.perRunBudget ?? null,
+    actor: input.actor,
+  })
+}
+
+/** 「这个岗位现在该依次用哪些模型，为什么」。没有绑定时服务端回 404（不是空链）。 */
+export function resolveModelBinding(scope: string, role: string): Promise<unknown> {
+  return hubGet(`/api/model-bindings/resolve?scope=${encodeURIComponent(scope)}&role=${encodeURIComponent(role)}`)
+    .then((r) => readJson<unknown>(r))
+}
+
+export function deleteModelBinding(scope: string, role: string, actor: string): Promise<unknown> {
+  return hubRequest('DELETE', `/api/model-bindings/${encodeURIComponent(scope)}/${encodeURIComponent(role)}`, { actor })
+}
+
+// ── 迁移老配置（PRT-506）──────────────────────────────────────────────────
+
+/**
+ * 迁移计划。
+ *
+ * `runtimeType` 不给时服务端返回 **200 + 一份 `ok:false` 的计划**（说"必须选一种协议"），
+ * 不是 400——所以这里**不把缺参数当异常**：那正是界面要渲染的第一件事。
+ */
+export async function fetchMigrationPlan(runtimeType?: string): Promise<{
+  plan: HubMigrationPlan
+  summary: string
+  legacyRowCount: number
+}> {
+  const qs = runtimeType ? `?runtimeType=${encodeURIComponent(runtimeType)}` : ''
+  return hubGet(`/api/model-migration/plan${qs}`).then((r) =>
+    readJson<{ plan: HubMigrationPlan; summary: string; legacyRowCount: number }>(r))
+}
+
+/**
+ * 执行迁移。
+ *
+ * **必须回传用户确认过的 `expectedDigest`**：服务端会重新算一遍计划并要求两者一致，
+ * 不一致报 409（`MIGRATION_PLAN_STALE`）。不回传就等于跳过这道对齐——
+ * 服务端允许 `null`，但那意味着"执行一份用户可能没看过的计划"。
+ */
+export function applyMigration(input: {
+  runtimeType: string
+  expectedDigest: string
+  actor: string
+}): Promise<unknown> {
+  return hubPost('/api/model-migration/apply', {
+    runtimeType: input.runtimeType,
+    expectedDigest: input.expectedDigest,
+    actor: input.actor,
+  })
+}
+
+// ── 配置导入导出（PRT-508）────────────────────────────────────────────────
+
+export async function fetchConfigBundle(kind: 'full' | 'model-profiles' | 'model-bindings' = 'full'): Promise<unknown> {
+  const qs = kind === 'full' ? '' : `?kind=${encodeURIComponent(kind)}`
+  return hubGet(`/api/config-bundle${qs}`).then((r) => readJson<unknown>(r))
+}
+
+/** 计划导入。只读地算出"会发生什么"，**不写库**。 */
+export function planConfigBundle(bundle: unknown, conflictPolicy: 'fail' | 'skip' | 'overwrite', actor: string): Promise<unknown> {
+  return hubPost('/api/config-bundle/plan', { bundle, conflictPolicy, actor })
+}
+
+export function applyConfigBundle(bundle: unknown, conflictPolicy: 'fail' | 'skip' | 'overwrite', actor: string): Promise<unknown> {
+  return hubPost('/api/config-bundle/apply', { bundle, conflictPolicy, actor })
 }

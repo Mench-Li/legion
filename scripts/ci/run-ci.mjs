@@ -672,6 +672,17 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-507 前端收尾：模型配置的客户端层。
+      // 这一层此前**完全不存在**——后端把档案 CRUD / 绑定 / 探测 / 迁移 / 导入导出
+      // 都做完了，而前端一个客户端函数都没有（**功能在、测试在、文档在，没有入口**）。
+      // 三条判断：方法+路径必须与服务端逐字对上（错法只报 404 不报错）；
+      // 结构化错误必须真的到达调用方（hubPost 原本把 code/field/hint/candidates 压成一句字符串）；
+      // 每条路径都要在平台契约里真实存在（交叉校验，不靠人记得同步）。
+      label: 'model-api（PRT-507：客户端路径与服务端契约交叉校验 / 结构化错误必须到达调用方）',
+      files: ['workbench/scripts/model-api.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       label: 'run-kill-drill（PRT-312：真实进程被强杀后不丢任务、不伪装成功、不重复外部写）',
       files: ['team-hub/run-kill-drill.test.mjs'],
       cwd: ROOT,

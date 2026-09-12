@@ -399,6 +399,18 @@ async function stageTest() {
       files: ['product/paths.test.mjs', 'product/process-manifest.test.mjs'],
       cwd: ROOT,
     },
+    // PRT-253/259 + PRT-706：产品配置文件的**读取侧**与首次运行初始化。
+    // 这一组的断言全部指向配置系统特有的**静默失败**：
+    //   ① 坏 JSON / 读不出来 / 类型不对（`"8787"` 而不是 `8787`）——
+    //      退回默认值后用户以为自己的设置生效了，而端口比较其实永远不成立；
+    //   ② UTF-8 BOM——Windows 上手工编辑配置的**常态**，`JSON.parse` 会直接拒绝；
+    //   ③ 首次运行初始化会**建目录、写文件**，且这三件事不可逆：
+    //      不得写进安装目录、不得替用户创建工作区、不得覆盖已有配置。
+    {
+      label: 'product-config（PRT-253/259/706：配置分层读取、诊断、首次运行初始化）',
+      files: ['product/config.test.mjs', 'product/init.test.mjs'],
+      cwd: ROOT,
+    },
     // 阶段 2.5 / 阶段 5：密钥库最小闭环（PRT-505，PRT-258 的第四份契约）。
     // 这一组的断言集中在两类**不会抛异常**的失败上：
     //   ① 元数据接口（list / toJSON / 审计 / 错误对象）把值或密文带出去——

@@ -24,15 +24,33 @@
 // 读取点与注入点一并声明在 `product/config-schema.mjs`。
 // ============================================================================
 
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { LEGION_ENV, resolveLayout } from '../paths.mjs'
+import { launcherInputFromConfig, loadProductConfig } from '../config.mjs'
+import { initializeProductDir, isInitialized } from '../init.mjs'
 import { createLauncher, PRODUCT_STATE_TEXT } from './launcher.mjs'
 import { DEFAULT_BACKOFF } from './supervisor.mjs'
+
+/**
+ * 安装目录的默认值：**Launcher 自己所在的那棵树**。
+ *
+ * 这是 Launcher 唯一比别人多知道的一件事——它就在安装目录里。
+ * 若要求用户必须显式设置 `LEGION_INSTALL_DIR`，则「双击启动」这个最基本的用法
+ * 会在第一步就报 `INSTALL_DIR_UNRESOLVED`（本条注释的上一版就是这样，实测出来的）。
+ * 优先级仍是 显式 CLI > 环境变量 > 本默认值。
+ */
+export function defaultInstallDir(moduleUrl = import.meta.url) {
+  // product/launcher/cli.mjs → product/launcher → product → 安装根
+  return fileURLToPath(new URL('../../', moduleUrl)).replace(/[\\/]+$/, '')
+}
 
 /** 支持的 CLI 参数（也是 `--help` 的唯一来源）。 */
 export const CLI_FLAGS = Object.freeze([
   { name: '--check', kind: 'boolean', doc: '只做启动前体检（端口/入口/依赖/目录边界），不启动任何进程' },
+  { name: '--init', kind: 'boolean', doc: '首次运行初始化：建目录、写默认产品配置与产品元数据，然后退出（不启动进程）' },
+  { name: '--dry-run', kind: 'boolean', doc: '与 --init 同用：只报告将会创建什么，不落盘' },
+  { name: '--no-config', kind: 'boolean', doc: '忽略产品配置文件（只用内置默认值 + env + CLI）' },
   { name: '--json', kind: 'boolean', doc: '以 JSON 输出结果（供脚本与验收使用）' },
   { name: '--install-dir=<path>', kind: 'value', doc: `安装目录；等价于 ${LEGION_ENV.INSTALL_DIR}` },
   { name: '--data-dir=<path>', kind: 'value', doc: `数据目录；等价于 ${LEGION_ENV.DATA_DIR}` },
@@ -44,6 +62,9 @@ export const CLI_FLAGS = Object.freeze([
   { name: '--help', kind: 'boolean', doc: '打印本说明' },
 ])
 
+/** 布尔开关（无值）。列在这里而不是散在 if 里：新开关漏加会让它被当成未知参数。 */
+const BOOLEAN_FLAGS = Object.freeze(['check', 'init', 'dry-run', 'no-config', 'json', 'help'])
+
 /**
  * 解析 argv。**只接受 `--k=v` 与布尔开关**，不接受位置参数：
  * 位置参数的含义随「第几个」变化，是脚本化调用最容易出错的地方。
@@ -51,7 +72,7 @@ export const CLI_FLAGS = Object.freeze([
 export function parseArgs(argv) {
   const out = { ports: {}, flags: {}, errors: [] }
   for (const raw of argv) {
-    if (raw === '--check' || raw === '--json' || raw === '--help') {
+    if (raw.startsWith('--') && BOOLEAN_FLAGS.includes(raw.slice(2))) {
       out.flags[raw.slice(2)] = true
       continue
     }
@@ -110,16 +131,39 @@ export function readReadinessTimeoutMs(env = {}) {
 
 export const LEGION_READINESS_TIMEOUT_ENV = 'LEGION_READINESS_TIMEOUT_MS'
 
-/** 组装 Launcher 选项（把 CLI 与环境合成一份显式输入）。 */
-export function launcherOptionsFrom({ argv = [], env = {}, nodePath = process.execPath } = {}) {
+/**
+ * 组装 Launcher 选项（把 CLI、环境与产品配置文件合成**一份显式输入**）。
+ *
+ * ## 优先级（spec §6.11 + CLI 的位置）
+ *
+ * ```
+ * 内置默认值 < 产品配置 < 工作空间配置 < 用户设置 < 受控环境变量 < 命令行
+ * ```
+ *
+ * 前三层与 env 的次序就是 spec 定的（`mergeConfigLayers` 只认这一种次序）。
+ * **命令行排在最后**是这里的补充：`--port.team-hub=9000` 是「就这一次，用 9000」，
+ * 若被配置文件里的值压过去，用户没有任何办法临时改一次——只能去编辑文件再改回来。
+ *
+ * ## 为什么把配置文件诊断一起返回
+ *
+ * 配置文件的失败几乎全是静默的（键名写错、JSON 多一个逗号）。它们必须在
+ * **创建 Launcher 之前**被看见并阻塞：带着半份配置启动的结果是「用户以为设置生效了」。
+ */
+export function launcherOptionsFrom({ argv = [], env = {}, nodePath = process.execPath, configLoader = loadProductConfig, installDirDefault = defaultInstallDir } = {}) {
   const parsed = parseArgs(argv)
   const declared = readEnv(env)
   const { layout, diagnostics } = resolveLayout({
-    installDir: parsed.flags['install-dir'] ?? null,
+    installDir: parsed.flags['install-dir'] ?? declared[LEGION_ENV.INSTALL_DIR] ?? installDirDefault(),
     dataDir: parsed.flags['data-dir'] ?? null,
     workspaceDir: parsed.flags.workspace ?? null,
     env: declared,
   })
+
+  const config = parsed.flags['no-config'] === true
+    ? { ok: true, merged: null, diagnostics: [], paths: {}, layers: [] }
+    : configLoader(layout, { envValues: {} })
+  const fromConfig = launcherInputFromConfig(config.merged ?? null)
+
   const include = parsed.flags.include === undefined
     ? null
     : String(parsed.flags.include).split(',').map((s) => s.trim()).filter(Boolean)
@@ -127,20 +171,29 @@ export function launcherOptionsFrom({ argv = [], env = {}, nodePath = process.ex
     ? []
     : String(parsed.flags['allow-port-in-use']).split(',').map((s) => s.trim()).filter(Boolean)
   const readinessTimeout = readReadinessTimeoutMs(env)
+
+  // 命令行 > 配置文件。CLI 只覆盖它显式给出的键，其余仍由配置文件决定。
+  const ports = { ...fromConfig.ports, ...parsed.ports }
+  const runtimeCommand = parsed.flags['runtime-command'] ?? fromConfig.runtimeCommand ?? null
+
   return {
     parsed,
     layout,
     layoutDiagnostics: diagnostics,
+    config,
+    configDiagnostics: config.diagnostics ?? [],
     options: {
       layout,
-      ports: parsed.ports,
+      ports,
       include,
       allowPortInUse,
-      runtimeCommand: parsed.flags['runtime-command'] ?? null,
+      runtimeCommand,
       nodePath,
       // Launcher 自己的环境只作为**白名单的读取来源**传入，不会被整份复制给子进程
       baseEnv: env,
-      readiness: readinessTimeout === null ? {} : { timeoutMs: readinessTimeout },
+      readiness: readinessTimeout === null
+        ? (fromConfig.readinessTimeoutMs === undefined ? {} : { timeoutMs: fromConfig.readinessTimeoutMs })
+        : { timeoutMs: readinessTimeout },
     },
   }
 }
@@ -162,19 +215,21 @@ export async function run({ argv = process.argv.slice(2), env = process.env, wri
     return 0
   }
 
-  const { parsed, options, layoutDiagnostics } = launcherOptionsFrom({ argv, env })
+  const { parsed, options, layoutDiagnostics, config, configDiagnostics } = launcherOptionsFrom({ argv, env })
   if (parsed.errors.length > 0) {
     for (const e of parsed.errors) write(`✖ ${e}`)
     return 2
   }
 
   const json = parsed.flags.json === true
-  const launcher = createLauncher(options)
 
   // 目录布局诊断在**创建 Launcher 之前**就已经拿到（resolveLayout 的返回），
   // 而它在 createLauncher 内部还会再算一次。这里用它的原因是：
   // 「工作区未配置」这类问题必须在**任何进程启动之前**以用户能懂的话说出来。
-  if (layoutDiagnostics.some((d) => d.severity === 'error')) {
+  //
+  // `--init` 例外：初始化**就是**来修「目录还没建好」的，因此它只要求布局
+  // 没有 error（有 error 时 init 自己会拒绝并说明，一个目录都不建）。
+  if (layoutDiagnostics.some((d) => d.severity === 'error') && parsed.flags.init !== true) {
     if (json) write(JSON.stringify({ ok: false, phase: 'layout', diagnostics: layoutDiagnostics }, null, 2))
     else {
       write('✖ Legion 无法启动：目录布局未确定')
@@ -182,6 +237,40 @@ export async function run({ argv = process.argv.slice(2), env = process.env, wri
     }
     return 3
   }
+
+  // 配置文件的问题不得被静默跳过：坏 JSON 会让整份配置回到默认值，
+  // 而用户以为自己的设置生效了。这是「配置没反应」最常见的真实原因。
+  if (configDiagnostics.some((d) => d.severity === 'error')) {
+    if (json) write(JSON.stringify({ ok: false, phase: 'config', diagnostics: configDiagnostics, paths: config.paths }, null, 2))
+    else {
+      write('✖ Legion 无法启动：产品配置有问题')
+      printDiagnostics(configDiagnostics, write)
+      write('  （配置文件必须能被完整读懂；否则所有值都会悄悄退回默认值）')
+    }
+    return 6
+  }
+
+  // 首次运行初始化（PRT-706）：建目录 → 写默认配置与元数据 → 退出。
+  // 它**不启动任何进程**：初始化失败时启动会失败得更难懂（缺目录 → 各进程报自己的错）。
+  if (parsed.flags.init === true) {
+    const dryRun = parsed.flags['dry-run'] === true
+    const init = initializeProductDir(options.layout, { dryRun })
+    if (json) {
+      write(JSON.stringify({ ok: init.ok, phase: init.phase, dryRun, created: init.created, skipped: init.skipped, files: init.files, diagnostics: init.diagnostics }, null, 2))
+    } else {
+      write(dryRun ? '（dry-run：以下内容不会被真正写入）' : 'Legion 首次运行初始化')
+      for (const c of init.created) write(`  ＋ ${c.role.padEnd(12)} ${c.path}`)
+      for (const f of init.files) write(`  ✎ ${f.role.padEnd(12)} ${f.path}`)
+      for (const s of init.skipped.filter((x) => x.reason !== 'exists')) write(`  · ${s.role.padEnd(12)} ${s.path}（${s.reason}）`)
+      printDiagnostics(init.diagnostics, write)
+      write(init.ok ? `✔ 初始化完成（新建 ${init.created.length} 个目录、${init.files.length} 个文件）`
+        : `✖ 初始化未完成：${init.diagnostics.filter((d) => d.severity === 'error').length} 个阻塞问题待解决`)
+      if (init.ok && !dryRun && isInitialized(options.layout) !== true) write('  ⚠ 初始化后仍未达到「已初始化」判据，请查看上面的诊断')
+    }
+    return init.ok === true ? 0 : 7
+  }
+
+  const launcher = createLauncher(options)
 
   if (parsed.flags.check === true) {
     const pre = await launcher.preflight()
@@ -233,5 +322,12 @@ if (isMain) {
   // 退出前不调用 process.exit()：让 stdout 自然刷出（管道被提前关闭时会截断输出）
   process.exitCode = code
 }
+
+// 退出码（脚本与验收依赖它们，因此是契约的一部分）：
+//   0 = 成功；2 = 参数错误；3 = 目录布局未确定；4 = --check 未通过；
+//   5 = 启动失败；6 = 产品配置文件有 error；7 = 初始化未完成。
+export const EXIT_CODES = Object.freeze({
+  ok: 0, args: 2, layout: 3, check: 4, start: 5, config: 6, init: 7,
+})
 
 export { DEFAULT_BACKOFF }

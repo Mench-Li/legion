@@ -12,11 +12,11 @@
 // ============================================================================
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { CLI_FLAGS, parseArgs, readEnv, readReadinessTimeoutMs, run } from './cli.mjs'
+import { CLI_FLAGS, EXIT_CODES, defaultInstallDir, launcherOptionsFrom, parseArgs, readEnv, readReadinessTimeoutMs, run } from './cli.mjs'
 import { reserveEphemeralPort } from './ports.mjs'
 
 /** 收集输出的收集器。 */
@@ -158,6 +158,143 @@ test('--check --json：输出机器可读结论（供验收脚本使用）', asy
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+test('defaultInstallDir：默认安装目录就是 Launcher 自己所在的那棵树', () => {
+  // 没有这个默认值，「双击启动」的第一个动作（初始化）会因为
+  // INSTALL_DIR_UNRESOLVED 报错——而 Launcher 恰好是唯一知道答案的那一方。
+  const dir = defaultInstallDir()
+  assert.equal(existsSync(join(dir, 'product', 'launcher', 'cli.mjs')), true, dir)
+})
+
+test('--init：在真实文件系统上建目录、写默认配置与元数据，返回 0', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'legion-cli-'))
+  try {
+    const ws = join(root, 'ws')
+    mkdirSync(ws, { recursive: true })
+    const out = collector()
+    const code = await run({
+      argv: [`--workspace=${ws}`, '--init'],
+      env: { LEGION_HOME: root, LEGION_DATA_DIR: join(root, 'data') },
+      write: out.write,
+    })
+    assert.equal(code, EXIT_CODES.ok, out.text())
+    assert.match(out.text(), /初始化完成/)
+    assert.equal(existsSync(join(root, 'data', 'product.config.json')), true)
+    assert.equal(existsSync(join(root, 'data', 'product.json')), true)
+    assert.equal(existsSync(join(root, 'data', 'team-hub')), true)
+    // 写下的配置必须是**能被自己读懂**的：初始化与读取用的是同一份格式
+    assert.equal(JSON.parse(readFileSync(join(root, 'data', 'product.config.json'), 'utf8')).runtime.command, '')
+
+    // 幂等：第二次不得覆盖用户后来写进去的东西
+    writeFileSync(join(root, 'data', 'product.config.json'), JSON.stringify({ runtime: { command: 'node x.mjs' } }))
+    const out2 = collector()
+    const code2 = await run({ argv: [`--workspace=${ws}`, '--init'], env: { LEGION_HOME: root, LEGION_DATA_DIR: join(root, 'data') }, write: out2.write })
+    assert.equal(code2, 0)
+    assert.equal(JSON.parse(readFileSync(join(root, 'data', 'product.config.json'), 'utf8')).runtime.command, 'node x.mjs')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('--init --dry-run：报告将创建什么，但一个目录都不落盘', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'legion-cli-'))
+  try {
+    const ws = join(root, 'ws')
+    mkdirSync(ws, { recursive: true })
+    const out = collector()
+    const code = await run({
+      argv: [`--workspace=${ws}`, '--init', '--dry-run', '--json'],
+      env: { LEGION_HOME: root, LEGION_DATA_DIR: join(root, 'data') },
+      write: out.write,
+    })
+    assert.equal(code, EXIT_CODES.ok, out.text())
+    const parsed = JSON.parse(out.text())
+    assert.equal(parsed.dryRun, true)
+    assert.ok(parsed.created.length >= 8, 'dry-run 也要说明将会创建什么')
+    assert.deepEqual(parsed.files.map((f) => f.role).sort(), ['product-config', 'product-meta'])
+    assert.equal(existsSync(join(root, 'data')), false)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('--init：工作区不存在时返回 7，且不替用户创建（也不留半个目录树）', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'legion-cli-'))
+  try {
+    const missing = join(root, 'user-has-not-chosen-yet')
+    const out = collector()
+    const code = await run({
+      argv: [`--workspace=${missing}`, '--init'],
+      env: { LEGION_HOME: root, LEGION_DATA_DIR: join(root, 'data') },
+      write: out.write,
+    })
+    assert.equal(code, EXIT_CODES.init)
+    assert.equal(existsSync(missing), false, '不得替用户创建项目目录')
+    // DataDir 已建好：工作区是**用户要先解决的事**，不是拒绝初始化的理由
+    assert.equal(existsSync(join(root, 'data')), true)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('配置文件坏掉时返回退出码 6，并说明「否则所有值会悄悄退回默认值」', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'legion-cli-'))
+  try {
+    const ws = join(root, 'ws')
+    mkdirSync(ws, { recursive: true })
+    mkdirSync(join(root, 'data'), { recursive: true })
+    writeFileSync(join(root, 'data', 'product.config.json'), '{ "ports": { "team-hub": 8000, } }')
+    const out = collector()
+    const code = await run({ argv: [`--workspace=${ws}`, '--check'], env: envFor(root), write: out.write })
+    assert.equal(code, EXIT_CODES.config, out.text())
+    assert.match(out.text(), /产品配置有问题/)
+    assert.match(out.text(), /CONFIG_INVALID_JSON/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('配置文件提供 runtime.command 后，runtime 入口不再报 ENTRY_UNRESOLVED', () => {
+  const root = mkdtempSync(join(tmpdir(), 'legion-cli-'))
+  try {
+    const ws = join(root, 'ws')
+    mkdirSync(ws, { recursive: true })
+    mkdirSync(join(root, 'data'), { recursive: true })
+    const env = envFor(root)
+
+    const before = launcherOptionsFrom({ argv: [], env })
+    assert.equal(before.options.runtimeCommand, null)
+    assert.equal(before.config.ok, true)
+
+    writeFileSync(join(root, 'data', 'product.config.json'), JSON.stringify({ runtime: { command: 'node runtime/index.mjs' }, ports: { 'team-hub': 8123 } }))
+    const after = launcherOptionsFrom({ argv: [], env })
+    assert.equal(after.config.ok, true)
+    assert.equal(after.options.runtimeCommand, 'node runtime/index.mjs')
+    assert.equal(after.options.ports['team-hub'], 8123)
+
+    // 命令行仍然压得过配置文件（「就这一次」必须做得到）
+    const overridden = launcherOptionsFrom({ argv: ['--port.team-hub=9001', '--runtime-command=node other.mjs'], env })
+    assert.equal(overridden.options.ports['team-hub'], 9001)
+    assert.equal(overridden.options.runtimeCommand, 'node other.mjs')
+
+    // --no-config：显式忽略配置文件（排障时用来回答「是不是配置的问题」）
+    const noConfig = launcherOptionsFrom({ argv: ['--no-config'], env })
+    assert.equal(noConfig.options.ports['team-hub'], undefined)
+    assert.equal(noConfig.options.runtimeCommand, null)
+
+    // 坏配置在**创建 Launcher 之前**就被报出来，而不是启动到一半才失败
+    writeFileSync(join(root, 'data', 'product.config.json'), '{ 坏')
+    const broken = launcherOptionsFrom({ argv: [], env })
+    assert.equal(broken.config.ok, false)
+    assert.ok(broken.configDiagnostics.some((d) => d.code === 'CONFIG_INVALID_JSON'))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('EXIT_CODES：退出码是契约（0 成功 / 2 参数 / 3 布局 / 4 体检 / 5 启动 / 6 配置 / 7 初始化）', () => {
+  assert.deepEqual({ ...EXIT_CODES }, { ok: 0, args: 2, layout: 3, check: 4, start: 5, config: 6, init: 7 })
 })
 
 // 说明：这里**故意没有**「受限范围下启动真实进程并检查状态」的用例。

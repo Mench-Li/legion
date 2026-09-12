@@ -93,6 +93,9 @@ import { applyModelMigration, describeMigration, planModelMigration } from './mo
 import { createContextStore } from './context-store.mjs'
 import { assembleContext, describeAssembly } from '../runtime/context/assembler.mjs'
 import { createConservativeTokenizer, tokenizerForProfile } from '../runtime/context/tokenizer.mjs'
+// PRT-402~406：把系统里的真实对象归一成候选。**没有它，候选只能由调用方手工拼**——
+// 而"装配器能装配"与"系统里的东西真的装配得进来"是两件事。
+import { SourceError, collectCandidates } from '../runtime/context/sources.mjs'
 import { createContextSource, SOURCE_TRUST } from '../runtime/contracts/context.mjs'
 // 配置导入导出（PRT-508）：**导出永远不含密钥**。契约层负责"包里有没有
 // 密钥"与"这包能不能导"，路由层只负责读写与把拒绝翻成状态码。
@@ -3615,6 +3618,35 @@ async function handle(req, res, stripPrefix) {
     if (req.method === 'POST' && path === '/api/context-snapshots/assemble') {
       await handleRun(req, res, (body) => {
         const scope = body.scope ?? 'default'
+
+        // **先校验配置，再看状态**：缺字段是调用方写错了请求，不是运行状态的问题。
+        //
+        // 这三项此前会一路走到 `assembleContext` 才炸，结果是 `code: null` 的 400——
+        // 消息能读、但客户端**无从程序化判断**。而 `CONTEXT_PERMISSION_REQUIRED`
+        // 那条就在这里返回了带码的 400：同一个路由上两种风格并存，
+        // 调用方只能靠匹配错误文本，那是会随文案变更而碎的判据。
+        for (const [key, why] of [
+          ['attemptId', '快照以 attemptId 为主键——没有它无法回答"这是哪一次尝试的输入"'],
+          ['runId', '快照要按 run 归档，并且密钥轮换只影响轮换后创建的 Run'],
+        ]) {
+          if (typeof body[key] !== 'string' || body[key].trim() === '') {
+            json(res, 400, {
+              ok: false, code: 'CONTEXT_BAD_REQUEST',
+              error: `${key} 必须是非空字符串：${why}`,
+              serverTimeMs: Date.now(),
+            })
+            return
+          }
+        }
+        if (!Number.isInteger(body.frozenAtMs)) {
+          json(res, 400, {
+            ok: false, code: 'CONTEXT_BAD_REQUEST',
+            error: 'frozenAtMs 必须是整数毫秒：冻结时刻是快照哈希的一部分，缺了它两次装配无法判定"是不是同一份"。',
+            serverTimeMs: Date.now(),
+          })
+          return
+        }
+
         // **权限判定必须由调用方给出，路由不替它决定。**
         // 不写就默认放行，是这一段里最危险的一种默认值：一次漏传会让
         // 越权来源静默进入上下文，而快照上看不出任何异常。
@@ -3631,14 +3663,50 @@ async function handle(req, res, stripPrefix) {
         const allowed = new Set(allowIds ?? [])
         const canRead = (meta) => (allowAll ? true : allowed.has(meta.id))
 
-        if (!Array.isArray(body.candidates)) {
-          json(res, 400, { ok: false, code: 'CONTEXT_BAD_CANDIDATE', error: 'candidates 必须是数组（没有来源时给空数组）' })
+        if (!Array.isArray(body.candidates) && body.sources === undefined) {
+          json(res, 400, {
+            ok: false, code: 'CONTEXT_BAD_CANDIDATE',
+            error: '必须给出 candidates（现成的候选数组）或 sources（高层输入：teamPlan/employeeManifest/goal/task/comments/…）。'
+              + '没有来源时给 candidates: []。',
+          })
           return
         }
+        if (!Array.isArray(body.candidates) && Array.isArray(body.sources)) {
+          json(res, 400, {
+            ok: false, code: 'CONTEXT_BAD_CANDIDATE',
+            error: 'sources 是对象（各来源的输入），不是数组。数组形式请用 candidates。',
+          })
+          return
+        }
+
+        // 两条入口：
+        //   · `sources`   —— 高层输入，由 PRT-402~406 归一成候选（系统里的东西走这条）
+        //   · `candidates`—— 现成的候选（调用方自己装配，或来自别处）
+        // 两条都收敛到同一个装配器，所以形状约束与账本规则不会分叉。
+        let rawCandidates
+        if (Array.isArray(body.candidates)) {
+          rawCandidates = body.candidates
+        } else {
+          try {
+            rawCandidates = collectCandidates({
+              ...body.sources,
+              // scope 以路由上的为准：调用方不该能通过 sources.scope
+              // 把来源放进另一个空间——那正是"不可信内容改变作用域"的入口。
+              scope: body.scope,
+            })
+          } catch (e) {
+            if (e instanceof SourceError) {
+              json(res, 400, { ok: false, code: 'CONTEXT_BAD_SOURCE', error: e.message, serverTimeMs: Date.now() })
+              return
+            }
+            throw e
+          }
+        }
+
         // 用 `createContextSource` 构造来源：于是来源的**形状约束**
         //（默认不可信、不许带权威字段、未知字段拒绝）在这一层同样生效，
         // 而不是只在用例里生效。
-        const candidates = body.candidates.map((c, i) => {
+        const candidates = rawCandidates.map((c, i) => {
           if (c === null || typeof c !== 'object' || c.source === null || typeof c.source !== 'object') {
             throw Object.assign(new Error(`candidates[${i}] 必须是 { source } 形状`), { statusCode: 400, code: 'CONTEXT_BAD_CANDIDATE' })
           }

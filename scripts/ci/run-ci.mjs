@@ -719,6 +719,14 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-402~406：来源装配。守三条判断：权限是 manifest 的**内容**而不是来源上的
+      // 活字段；按**谁写的**判可信性（不是按挂在谁下面）；同一份输入必须装配出
+      // 同一个哈希（键序是数据的函数，不是读取路径的函数）。
+      label: 'context-sources（PRT-402~406：来源装配 / 不可信默认 / 确定性序列化）',
+      files: ['runtime/context/sources.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       label: 'run-kill-drill（PRT-312：真实进程被强杀后不丢任务、不伪装成功、不重复外部写）',
       files: ['team-hub/run-kill-drill.test.mjs'],
       cwd: ROOT,

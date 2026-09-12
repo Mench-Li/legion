@@ -132,9 +132,15 @@ export const SCHEMA = defineSchema({
     //   CONTEXT_PERMISSION_REQUIRED— 装配路由没被告知权限。路由不替调用方决定权限：
     //                                默认放行会让越权来源静默进入上下文
     //   CONTEXT_BAD_CANDIDATE      — candidates 不是数组 / 元素形状不对
+    //   CONTEXT_BAD_SOURCE         — `sources`（PRT-402~406 的高层输入）归一失败：
+    //                                缺版本 / 缺取得时间 / 同一类型混了不可信与可信而没声明。
+    //                                **不降级成"少一个来源"**——那会让快照看起来完整
+    //   CONTEXT_BAD_REQUEST        — 请求本身缺字段（attemptId/runId/frozenAtMs）。
+    //                                与"运行状态不允许"不同：这是调用方写错了请求。
+    //                                有码可判，客户端才不必去匹配错误文本
     'CONTEXT_ATTEMPT_REQUIRED', 'CONTEXT_NOT_FOUND', 'CONTEXT_SNAPSHOT_CONFLICT',
     'CONTEXT_SNAPSHOT_INVALID', 'CONTEXT_BAD_PAYLOAD', 'CONTEXT_PERMISSION_REQUIRED',
-    'CONTEXT_BAD_CANDIDATE',
+    'CONTEXT_BAD_CANDIDATE', 'CONTEXT_BAD_SOURCE', 'CONTEXT_BAD_REQUEST',
   ],
   // team-hub 的 CHAT_ 前缀覆盖了插件的提示词预算变量（CHAT_CTX_*）：它们是**插件**读的配置，
   // team-hub 不读，登记为外来变量，避免误报成「拼写错误」（P3-4）。

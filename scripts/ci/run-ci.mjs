@@ -218,6 +218,25 @@ async function stageEnv() {
       lines.push((r.err || r.out).trim().split('\n').slice(-6).map(l => '    ' + l).join('\n'))
     }
   }
+
+  // 源文件编码自检：**这一类损坏不会被 build/test 发现**。
+  //
+  // 起因是一次真实的教训：用 PowerShell 的 Get-Content/Set-Content 往返改写一个 UTF-8
+  // 源文件，一个多字节 CJK 字符被写成了 U+FFFD。文件仍然能被 Node 解析（被吃掉的字符
+  // 在字符串字面量**内部**），测试照样跑，只是那句错误信息悄悄变了样——而 `git diff`
+  // 对**未跟踪**的文件什么都不说，所以在新文件上它完全隐形。
+  //
+  //   > 一个「在多字节字符被吃掉之后仍然能通过语法检查」的文件，
+  //   > 与一个「看起来没变、其实信息已经变了」的文件，是同一个东西。
+  {
+    const r = await exec(process.execPath, [join('scripts', 'ci', 'encoding-check.mjs'), '--quiet'], { cwd: ROOT })
+    const tail = (r.out.trim().split('\n').pop() || '').trim()
+    lines.push(`  encoding: ${r.code === 0 ? 'PASS' : 'FAIL'} ${tail}`)
+    if (r.code !== 0) {
+      ok = false
+      lines.push((r.err || r.out).trim().split('\n').slice(-8).map(l => '    ' + l).join('\n'))
+    }
+  }
   return { ok, detail: 'env 自检：\n' + lines.join('\n') }
 }
 
@@ -421,6 +440,29 @@ async function stageTest() {
       //      必须能被审计定位到具体强制点
       label: 'tool-request（PRT-602：统一 ToolRequest 投影与 Enforcement Bridge）',
       files: ['runtime/dsh-composition/tool-request.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      // PRT-605：命令、网络与 MCP 权限控制（spec line 927、§6.6 line 461–464）。
+      //
+      // 三条"出去做事"的通道，共同点：**被检查的是字符串，真正执行的是它被解释后的结果**。
+      //
+      //   > 一个「检查字符串」的权限门，
+      //   > 与一个「检查完之后字符串才被解释成动作」的权限门，是同一个东西。
+      //
+      // 所以每条规则都是"不解释"：命令必须已分词 argv，URL 必须真解析器拆，MCP 必须成对。
+      label: 'execution-scope（PRT-605：命令/网络/MCP 的字符串匹配是放行）',
+      files: ['runtime/dsh-composition/execution-scope.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      // 编码完整性门禁自身的判据（scripts/ci/encoding-check.mjs）。
+      //
+      // 为什么它需要一个套件：这道检查保护的是**一类不会被别处发现**的损坏——
+      // U+FFFD 在字符串字面量内部时语法完全正常、测试全绿，只是信息变了。
+      // 它自己的判据（哪一类判失败、哪一类只记账、什么不可能出现）必须是被钉住的。
+      label: 'encoding-check（源文件编码完整性的判据）',
+      files: ['scripts/ci/encoding-check.test.mjs'],
       cwd: ROOT,
     },
     {

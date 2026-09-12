@@ -410,6 +410,19 @@ async function stageTest() {
       files: ['runtime/dsh-composition/tool-args.test.mjs'],
       cwd: ROOT,
     },
+    {
+      // PRT-602：统一 ToolRequest 投影 + Enforcement Bridge（spec §6.5 line 470、§6.8 line 479）。
+      //
+      // 盯四件事：
+      //   ① 授权主体就是强制面那一份键集合，观察 metadata **拒**而不是**滤**
+      //   ② 目标推导**只发生一次**，且推不出来 / 不唯一时**拒绝**（不兜底、不猜）
+      //   ③ 四个摄入适配器只摆放、不再推导 —— 报告同一个哈希与同一份参数
+      //   ④ guard 只有降级语义；同一哈希上"pre-execute 放行而 guard 拒绝"
+      //      必须能被审计定位到具体强制点
+      label: 'tool-request（PRT-602：统一 ToolRequest 投影与 Enforcement Bridge）',
+      files: ['runtime/dsh-composition/tool-request.test.mjs'],
+      cwd: ROOT,
+    },
     { label: 'calendar（日程日历契约）', files: ['team-hub/calendar.test.mjs'], cwd: ROOT },
     { label: 'calendar-ui（P2-5 日历前端纯函数：周视图/重复文案/关联跳转/表单校验）', files: ['workbench/scripts/calendar-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'chat-ui（P2-6 对话前端纯函数：健康判定/AI 三态/合并/断线补齐）', files: ['workbench/scripts/chat-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },

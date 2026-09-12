@@ -80,6 +80,12 @@ const SCHEMA_SOURCES = [
   // 把"这一次放行被用掉了"这个不可回收的安全事实放进 `permission_requests`
   // （一张会被清理/过期的表），表现是"清理跑完之后，同一操作又能被放行一次"。
   'allowOnce',
+  // PRT-610：`tool_calls`（决定 + 决定来源 + 原始/canonical 输入 + 结果 + 幂等键）。
+  //
+  // 它必须进契约基线，因为它的列就是 spec §6.8 那几条要求的落地：
+  // 少了 `decisionSource`，"策略拒绝与沙箱兜底拒绝的修复动作不同"就无从谈起；
+  // 少了 `rawInput`，事后回答不了"模型当初到底要它做什么"。
+  'toolCallLog',
 ]
 
 // 这些模块也一并纳入 sources 哈希：它们变了，基线里的表清单就可能过期。
@@ -90,6 +96,7 @@ SOURCES.budgetLedger = join(ROOT, 'team-hub', 'budget-ledger.mjs')
 SOURCES.contextStore = join(ROOT, 'team-hub', 'context-store.mjs')
 SOURCES.approvalBinding = join(ROOT, 'team-hub', 'approval-binding.mjs')
 SOURCES.allowOnce = join(ROOT, 'team-hub', 'allow-once.mjs')
+SOURCES.toolCallLog = join(ROOT, 'team-hub', 'tool-call-log.mjs')
 
 /**
  * 采集 schema 的目录。

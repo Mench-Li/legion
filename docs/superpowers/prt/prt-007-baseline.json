@@ -10,7 +10,8 @@
     "team-hub/budget-ledger.mjs": "6969f9c9186bdbd7206ab800dbd5f08947468074cc091a8b3df6378fc0947d51",
     "team-hub/context-store.mjs": "47eb676c0b1d43138282535d18687039f7a0c66780d9bc7641766854037c980a",
     "team-hub/approval-binding.mjs": "112bcec4aac9854ff11622466198eebcea8d3ee8f507268538e1da1d393ad5bb",
-    "team-hub/allow-once.mjs": "78ad3e9ef285e30e4331e4656b676741c474b876a57ed8e5593c17dcd63cca23"
+    "team-hub/allow-once.mjs": "78ad3e9ef285e30e4331e4656b676741c474b876a57ed8e5593c17dcd63cca23",
+    "team-hub/tool-call-log.mjs": "a7143bdef245663539efb832826692ff5101499b3b1371eca4a9fc9802089685"
   },
   "httpRoutes": [
     "DELETE /api/model-bindings/",
@@ -182,6 +183,7 @@
     "space_stages",
     "spaces",
     "tasks",
+    "tool_calls",
     "usage_records",
     "web_fetch_history"
   ],

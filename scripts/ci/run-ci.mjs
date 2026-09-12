@@ -383,6 +383,19 @@ async function stageTest() {
       files: ['team-hub/field-invalidation.test.mjs'],
       cwd: ROOT,
     },
+    {
+      // PRT-610：持久化工具调用、决定与**决定来源**、结果和幂等键（spec §6.8）。
+      //
+      // 来源列存在的全部意义是 §6.8 那句"否则事后无法区分策略拒绝与沙箱兜底拒绝，
+      // 而这两类的修复动作不同"。所以本套件盯四件事：
+      //   ① 来源闭合、且与强制点语义一致（guard 只有降级语义、没有 allow 语义）
+      //   ② 原始输入与 canonical 输入同时保存，且能对得起来
+      //   ③ 幂等键按 callId（§6.5：与 F-02 的哈希不是一回事），且不含观察 metadata
+      //   ④ 结果四态——`unknown`（已派发但结果未知）必须与 `none` 分开
+      label: 'tool-call-log（PRT-610：工具调用、决定来源、结果与幂等键的持久化）',
+      files: ['team-hub/tool-call-log.test.mjs'],
+      cwd: ROOT,
+    },
     { label: 'calendar（日程日历契约）', files: ['team-hub/calendar.test.mjs'], cwd: ROOT },
     { label: 'calendar-ui（P2-5 日历前端纯函数：周视图/重复文案/关联跳转/表单校验）', files: ['workbench/scripts/calendar-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'chat-ui（P2-6 对话前端纯函数：健康判定/AI 三态/合并/断线补齐）', files: ['workbench/scripts/chat-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },

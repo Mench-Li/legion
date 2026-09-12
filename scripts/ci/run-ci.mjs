@@ -642,6 +642,41 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-709：日志轮转与磁盘保护。
+      //
+      // 这一批修的**不是一个功能缺失，是一个会卡死子进程的 bug**：
+      // `product/launcher/` 里原本没有任何地方读 `child.stdout`，而子进程是按
+      // `stdio: ['ignore','pipe','pipe']` 起的。一个话多的子进程写满管道缓冲区
+      // 之后会**永久阻塞在 write 上**——不退出、不报错、也不再干活，
+      // 于是熔断器看不到失败、永远不会介入。
+      //
+      // 所以第一组的判据不是"日志好不好看"，而是：
+      //   · **不接 sink 时也必须排空**（用真实子进程写 2 MiB，
+      //     不排空它就会卡住——这是用假流测不出来的）；
+      //   · 轮转**绝不删活动文件**、**绝不删代数 1**（磁盘写满时删掉当前日志，
+      //     等于把证据和空间一起弄没了）；
+      //   · 文件被占着时**如实报失败**，不假装成功、也不转而删活动文件；
+      //   · 「读不出来」≠「目录是空的」，「没查磁盘」≠「空间充足」。
+      label: 'log-rotation（PRT-709：轮转/保留/磁盘保护——绝不删活动文件，被占用时如实报失败）',
+      files: ['product/logging/rotation.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      // PRT-709 的写入侧：按行脱敏（跨数据块的密钥也要认出来）、
+      // 巨型单行切断落盘、写入错误不抛回子进程的数据处理器。
+      label: 'log-sink（PRT-709：按行脱敏 / 巨型单行切断 / 写入错误不炸启动器）',
+      files: ['product/logging/sink.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      // PRT-709 的**接线**。这一组不可省：整个 bug 的形状就是"管道被写满后卡住"，
+      // 而假 stream 不会满——用假流验证过的排空，与真的排空，
+      // 在"子进程会不会卡住"上原本是同一个答案。
+      label: 'log-wiring（PRT-709 接线：真实子进程 2 MiB 输出不被卡死 / 停止时 flush / 定时器 unref）',
+      files: ['product/logging/log-wiring.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       label: 'probe（PRT-504：探测执行器，假 transport 覆盖全部分类 + 凭证不落判定/缓存）',
       files: ['runtime/probe/probe.test.mjs'],
       cwd: ROOT,

@@ -33,6 +33,8 @@ import { buildChildEnv, isSecretLikeKey, OS_ESSENTIAL_ENV } from './allowlist.mj
 import { checkPorts } from './ports.mjs'
 import { readinessResultToDiagnostic, waitForReadiness } from './readiness.mjs'
 import { createSupervisor } from './supervisor.mjs'
+import { createLogSink } from '../logging/sink.mjs'
+import * as nodeFs from 'node:fs'
 
 /** 产品级状态 → 用户可见文案（spec §6.3 的「产品状态」列）。 */
 export const PRODUCT_STATE_TEXT = Object.freeze({
@@ -158,6 +160,15 @@ export function createLauncher({
   exists = existsSync,
   spawnImpl = undefined,
   spawnOptions = {},
+  /** 日志 sink 用的 fs（可注入）。 */
+  logFs: logFsOption = null,
+  /** 日志策略（PRT-709）。缺省用 `DEFAULT_LOG_POLICY`。 */
+  logPolicy = {},
+  /** 轮转间隔。`0` 表示只在与停止时轮转。 */
+  logRotateIntervalMs = 5 * 60 * 1000,
+  /** 定时器可注入：`unref` 那条防线只有靠它才**可观测**。 */
+  setIntervalImpl = setInterval,
+  clearIntervalImpl = clearInterval,
   backoff = undefined,
   readiness = {},
   allowPortInUse = [],
@@ -197,6 +208,10 @@ export function createLauncher({
     // 而诊断列表是要直接展示给用户的。
     ...validateProcessPlan(plan, { installRoot, platform: layout.platform, exists }),
   ]
+  // 默认用真实 fs。刻意**不**在参数默认值里 `import`（那会让模块顶层带上 IO），
+  // 与 `secretsCheck` / `spawnImpl` 的可注入做法一致。
+  const logFs = logFsOption ?? nodeFs
+
   const planDiagnostics = Object.freeze([
     // 被范围排除的进程，其「入口不存在」类诊断降级为 warn 并换码——
     // 它不再是本次启动的阻塞项，但**仍然要被看见**：
@@ -220,6 +235,11 @@ export function createLauncher({
   let stoppedAt = null
   let portDiagnostics = []
   let secretsDiagnostics = []
+  /** 日志 sink（PRT-709）。`null` 表示建不起来——**不阻止启动**。 */
+  let logSink = null
+  const logSinkDiagnostics = []
+  let logRotationTimer = null
+  let lastRotation = null
 
   /**
    * 跑密钥库自检。
@@ -352,6 +372,76 @@ export function createLauncher({
     return { result, readiness: expected }
   }
 
+  /**
+   * 建立日志 sink（幂等）。
+   *
+   * **它在 `start()` 的`第一步`被调用，早于 preflight 与 plan。** 这不是随手放的：
+   * 启动失败时恰恰最需要日志，把 sink 建在"体检通过之后"等于在最需要它的
+   * 那一刻恰好没有日志（与 PRT-710 诊断入口排在布局校验之前是同一个理由）。
+   *
+   *   > 一个只在产品健康时才存在的日志，与一个不存在的日志，
+   *   > 在最需要它的那一刻是同一个东西。
+   *
+   * 建不起来**不阻止启动**：没有日志是遗憾，起不来是故障。但那条遗憾必须被看见。
+   */
+  function ensureLogSink() {
+    if (logSink !== null) return logSink
+    try {
+      logSink = createLogSink({
+        logDir: layout?.logDir,
+        policy: logPolicy ?? {},
+        fs: logFs,
+        onDiagnostic: (d) => logSinkDiagnostics.push(Object.freeze({
+          ...d, process: null,
+        })),
+      })
+    } catch (e) {
+      logSink = null
+      logSinkDiagnostics.push(Object.freeze({
+        severity: 'warn', code: 'LOG_SINK_UNAVAILABLE', process: null,
+        // **必须带上 `e.message`。** 只报 `e.name` 时，一个 `ReferenceError`
+        // 在界面上就只剩"ReferenceError"四个字——那等于没有信息：
+        // 排查者既不知道该改哪一行，也不知道是代码错还是环境错。
+        message: `日志 sink 建不起来（${e?.name ?? 'Error'}：${e?.message ?? '(无说明)'}）：` +
+          '子进程输出会被**排空但丢弃**（进程仍然会起来），但出了问题时没有日志可看',
+      }))
+    }
+    // 定时器跟着 sink 起，**不等 plan 走通**：启动失败的那份日志
+    // 恰恰是最该被写下来、也最该被轮转保护的一份。
+    startLogRotationTimer()
+    return logSink
+  }
+  /** 把 sink 里没成行的尾巴写下去，并做一次轮转。**不抛错。** */
+  async function finalizeLogs() {
+    if (logSink === null) return null
+    try { logSink.flush() } catch { /* 尽力而为 */ }
+    try {
+      const r = await logSink.rotate()
+      if (r !== null) lastRotation = r
+      return r
+    } catch (e) {
+      logSinkDiagnostics.push(Object.freeze({
+        severity: 'warn', code: 'LOG_ROTATE_FAILED', process: null,
+        message: `停止时轮转失败：${e?.name ?? 'Error'}（日志已写盘，只是没有轮转）`,
+      }))
+      return null
+    }
+  }
+
+  /**
+   * 周期性轮转。
+   *
+   * **`unref()` 是必须的**：一个被引用的定时器会让启动器进程永远不退出，
+   * 于是"进程起来了但命令不返回"会成为一个莫名其妙的现场。
+   * 定时器只在跑着的时候有意义，不该拦住退出。
+   */
+  function startLogRotationTimer() {
+    if (logSink === null || !Number.isFinite(logRotateIntervalMs) || logRotateIntervalMs <= 0) return
+    if (logRotationTimer !== null) return
+    logRotationTimer = setIntervalImpl(() => { void finalizeLogs() }, logRotateIntervalMs)
+    if (typeof logRotationTimer.unref === 'function') logRotationTimer.unref()
+  }
+
   const launcher = {
     plan,
     diagnostics: planDiagnostics,
@@ -385,6 +475,8 @@ export function createLauncher({
      */
     async start() {
       const beganAt = now()
+      // **第一步**：日志。早于 preflight 与 plan——启动失败时最需要它。
+      ensureLogSink()
       const pre = await this.preflight()
       if (pre.ok !== true) {
         return Object.freeze({ ok: false, phase: pre.phase, failures: Object.freeze([]), diagnostics: pre.diagnostics, states: Object.freeze([]), elapsedMs: now() - beganAt })
@@ -394,6 +486,13 @@ export function createLauncher({
         order: plan.waves.flat().filter((k) => includedKeys.has(k)),
         spawnImpl,
         spawnOptions,
+        onOutput: (key, stream, chunk) => {
+          if (logSink !== null) logSink.write(`${key}.${stream}`, chunk)
+        },
+        onOutputError: (key, e) => logSinkDiagnostics.push(Object.freeze({
+          severity: 'warn', code: 'LOG_SINK_WRITE_FAILED', process: key,
+          message: `处理 ${key} 的输出时出错：${e?.name ?? 'Error'}（日志可能缺行）`,
+        })),
         // 白名单 env 通过 envFor 注入监督层；监督层不继承宿主环境
         envFor: (spec) => envFor(plan.processes.find((p) => p.key === spec.key) ?? spec),
         backoff,
@@ -403,6 +502,7 @@ export function createLauncher({
 
       startedAt = now()
       readinessDiagnostics = []
+      // （定时器已在 `ensureLogSink` 里随 sink 起：它不该依赖 plan 走通。）
       const failures = []
 
       for (const wave of plan.waves) {
@@ -456,7 +556,17 @@ export function createLauncher({
     /** 停止（幂等）。 */
     async stop({ graceMs = 5000, reason = '主动停止' } = {}) {
       if (supervisor === null) {
-        return Object.freeze({ reason, results: Object.freeze([]), states: Object.freeze([]) })
+        // **什么都没起来时也要收尾日志。**
+        //
+        // 第一版这里直接返回了，于是"启动在 preflight 就失败"这一类最值得
+        // 留证的场景，日志既不会被 flush（最后几行丢掉）也不会被轮转
+        // （一个已经写满的文件留给下一次启动继续写）。
+        //
+        //   > 「没起来所以没什么可记的」这个判断，
+        //   > 恰好把最该记的那一次排除掉了。
+        if (logRotationTimer !== null) { clearIntervalImpl(logRotationTimer); logRotationTimer = null }
+        const logResult = await finalizeLogs()
+        return Object.freeze({ reason, results: Object.freeze([]), states: Object.freeze([]), log: logResult })
       }
       log('info', `停止：${reason}`)
       const results = await supervisor.stopAll({ graceMs })
@@ -464,7 +574,18 @@ export function createLauncher({
       supervisor.dispose()
       stoppedAt = now()
       supervisor = null
-      return Object.freeze({ reason, results, states })
+      // 停止之后**必须** flush：还没换行的尾巴是最后那几行退出信息，
+      // 而那恰恰是排查最需要的一段。轮转也在这里做一次——
+      // 下次启动前把文件规整好，比让下一个进程接着写一个已经超限的文件好。
+      if (logRotationTimer !== null) { clearIntervalImpl(logRotationTimer); logRotationTimer = null }
+      // 注意：这里**不能**把结果叫 `log`。本文件顶层有一个 `log(level, msg)`
+      // 诊断函数，在同一个作用域里用 `const log = …` 会在整个 `stop` 体内
+      // 把它遮蔽成一个 TDZ 变量——连函数开头那句 `log('info', …)` 都会抛
+      // `Cannot access 'log' before initialization`。
+      //   > 一个遮蔽了外层函数的名字，会让那个函数在**整段**作用域里消失，
+      //   > 而不只是在你写的那一行之后。
+      const logResult = await finalizeLogs()
+      return Object.freeze({ reason, results, states, log: logResult })
     },
 
     /** 熔断后的「重试」入口：重置熔断状态并重新走一次启动流程。 */
@@ -536,6 +657,16 @@ export function createLauncher({
     },
 
     /** 供用例与产品入口合并展示的全量诊断。 */
+    /** 日志（PRT-709）的最终处置。停止后仍可查询。 */
+    logStatus() {
+      return Object.freeze({
+        available: logSink !== null,
+        stats: logSink === null ? null : logSink.stats(),
+        lastRotation: lastRotation,
+        diagnostics: Object.freeze([...logSinkDiagnostics]),
+      })
+    },
+
     allDiagnostics() {
       const status = this.status()
       const out = [...planDiagnostics, ...status.portDiagnostics, ...status.readinessDiagnostics]

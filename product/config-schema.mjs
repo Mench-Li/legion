@@ -99,6 +99,31 @@ export const SCHEMA = defineSchema({
   // 不显式列出的话 `scan --check` 会要求把它们登记为读取点（P3-4 遇到过同类问题）。
   nonEnvLiterals: [
 
+    // ── PRT-709 日志轮转与磁盘保护 ──────────────────────────────────────
+    //
+    // 下面是**诊断码**，不是配置键：它们出现在 `LOG_CODES` / `SINK_CODES`、
+    // 轮转的 note、以及 launcher `logStatus()` 收上来的诊断里。
+    // 进程不"读"它们，所以列在这里而不是 `fields`。
+    'LOG_BAD_POLICY',
+    'LOG_ROTATE_FILE_IN_USE',
+    'LOG_ROTATE_FAILED',
+    'LOG_PRUNE_FAILED',
+    'LOG_STILL_OVER_BUDGET',
+    'LOG_DISK_PRESSURE',
+    'LOG_UNREADABLE',
+    'LOG_SINK_WRITE_FAILED',
+    'LOG_SINK_REDACT_FAILED',
+    'LOG_SINK_LINE_TOO_LONG',
+    'LOG_SINK_BAD_POLICY',
+    'LOG_SINK_UNAVAILABLE',
+    // 轮转 note 的具名码（不是 `LOG_CODES` 的成员，但同样只用于说明）
+    'FOREIGN_FILES',
+    'PROTECTED_GEN1',
+    'FREE_SPACE_UNKNOWN',
+    // `ETXTBSY` 是 `isInUseError` 判定"文件被占着"时比较的错误码之一
+    // （Windows 上是 EPERM/EBUSY，POSIX 上可能是 ETXTBSY）。
+    'ETXTBSY',
+
     // PRT-710 脱敏诊断包（product/diagnostics/redact-package.mjs）的具名码：
     //   DIAG_NO_LAYOUT     — 布局/目标目录未给出。**不猜默认位置**：
     //                        诊断包会离开这台机器，写到哪里必须由调用方决定；

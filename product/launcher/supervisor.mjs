@@ -31,6 +31,7 @@
 // ============================================================================
 
 import { spawn as nodeSpawn } from 'node:child_process'
+import { attachDrain } from '../logging/sink.mjs'
 
 /** 监督状态。`circuit-open` 与 `failed` 的区别：前者可以 reset 后重试，后者是已放弃。 */
 export const SUPERVISOR_STATES = Object.freeze([
@@ -78,6 +79,9 @@ export function createSupervisedProcess(spec, {
   clearTimeoutImpl = clearTimeout,
   killTree = defaultKillTree,
   onStateChange = null,
+  // 子进程输出的**消费者**。不提供时**仍然排空管道**——见下面那段说明。
+  onOutput = null,
+  onOutputError = null,
 } = {}) {
   const cfg = { ...DEFAULT_BACKOFF, ...(backoff ?? {}) }
   let state = 'pending'
@@ -87,6 +91,8 @@ export function createSupervisedProcess(spec, {
   let startedAt = null
   let lastExit = null
   let lastError = null
+  /** 当前子进程的输出排空句柄。**每次 spawn 重新接**，退出时 detach。 */
+  let drain = null
   let pendingTimer = null
   let stopping = false
   let disposed = false
@@ -124,6 +130,17 @@ export function createSupervisedProcess(spec, {
 
   function handleExit(code, signal) {
     child = null
+    // **这里刻意不 detach。**
+    //
+    // `exit` 早于流的 `close`：此刻 stdio 里可能还有没发完的缓冲数据，
+    // 立刻摘掉监听器会把进程**最后那几行输出**丢掉——而退出前的那几行
+    // 恰恰是排查最需要的一段。
+    //
+    //   > 一个"顺手清理一下"的动作，如果会让最后一段证据消失，
+    //   > 它就不是清理。
+    //
+    // 句柄在下一次 spawn 的开头被 detach（见 `attemptStart`），那时旧流
+    // 确实已经没人要了。所以这里留着它是**有意的**，不是漏了。
     if (stopping || disposed) {
       setState('stopped', `主动停止（code=${code ?? ''} signal=${signal ?? ''}）`)
       return
@@ -178,6 +195,30 @@ export function createSupervisedProcess(spec, {
     }
     startedAt = now()
     setState('starting', `pid=${child.pid ?? '?'}`)
+    // ── 排空 stdout/stderr。**这一段与"有没有配置日志"无关。** ──
+    //
+    // 在这之前，整个 `product/launcher/` 没有任何地方读 `child.stdout`，
+    // 而子进程是按 `stdio: ['ignore', 'pipe', 'pipe']` 起的。后果最重的一条
+    // 不是"看不到日志"，而是：**管道写满之后子进程会永久阻塞在 write 上**
+    // ——不退出、不报错、也不再干活，于是熔断器看不到任何失败、永远不会介入。
+    //
+    //   > 一个把子进程的输出丢掉、并且在它写满缓冲区时让它卡住的启动器，
+    //   > 与一个"进程跑着但什么也不干"的启动器，在用户眼里是同一个东西。
+    //
+    // 所以这里**无条件**接上 data 处理器并 resume。`onOutput` 为空只是
+    // "把内容丢掉"（浪费），而不是"不接管道"（卡住）。
+    // 这里**不需要**先摘掉旧句柄：每次 attemptStart 都 spawn 一个全新的 child，
+    // 监听器挂在那个新 child 的流上；上一个 child 已经死了，句柄随后被重新赋值。
+    //
+    // 破验证量过：删掉原来那句"先 detach 再 attach"，**没有任何用例变红**——
+    // 因为"往死流上累积监听器"这件事根本不会发生。
+    //
+    //   > 一句写着"防止累积"、而那个累积不会发生的代码，与不写它行为相同；
+    //   > 而它会让人以为这里有讲究，从而在真正需要判断的地方少想一层。
+    drain = attachDrain(child, {
+      onData: typeof onOutput === 'function' ? (stream, chunk) => onOutput(spec.key, stream, chunk) : null,
+      onError: typeof onOutputError === 'function' ? (e) => onOutputError(spec.key, e) : null,
+    })
     if (typeof child.once === 'function') {
       child.once('exit', (code, signal) => handleExit(code, signal))
       child.once('error', (err) => {
@@ -272,6 +313,10 @@ export function createSupervisedProcess(spec, {
         clearTimeoutImpl(pendingTimer)
         pendingTimer = null
       }
+      // 摘掉排空句柄：dispose 之后**不该再往 sink 里送数据**——
+      // 此刻调用方很可能已经 `close()` 了 sink（launcher 的 `stop()` 就是
+      // 先 dispose 再收尾日志）。继续送只会往一个已经关掉的 sink 里写。
+      if (drain !== null) { try { drain.detach() } catch { /* 尽力而为 */ } drain = null }
     },
 
     /** 只读快照。**不暴露 child**（见文件头注释）。 */

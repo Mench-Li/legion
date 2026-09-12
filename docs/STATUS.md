@@ -2176,8 +2176,11 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：111 套件 / 2779 用例，`--only test` 整体 PASS** —— 2026-09-12 实测（设 `DSH_CHECKOUT`）
+**当前基线：112 套件 / 2797 用例，`--only test` 整体 PASS** —— 2026-09-12 实测（设 `DSH_CHECKOUT`）
 
+（**本批新增**：`dsh-repair`（**18 例**，PRT-257 的修复入口**执行**一半：判决来自**重新自检**、applier 的返回值只进 `applierSaid`；
+`reapply-composition-patch` **必须显式批准**——DSH profile 是 `patchReload: 'live'`，往运行中的 profile 写入会改掉
+发起修复的进程自己的强制面；复核里找不到那一项 → `unverified` 而非 `fixed`）。
 （**本批新增**：`secret-admin`（**24 例**，spec §6.7 凭证管理的**写**一半：新增/更新/轮换/删除；`requireProtected` 写死无降级；
 响应与错误里永远没有值；`list` 是白名单投影而非透传后端整行；`describe` 只给计数不给引用名）+
 `secret-routes`（**15 例**，HTTP 契约 + 「写成功 → 探测缓存失效」这根线；`put`/`rotate` 两条失败路径都不得发失效）。
@@ -2361,6 +2364,7 @@ P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-
 | | `docs/superpowers/prt/prt-009-execution-evidence.json` | 生产空间 `software` 的旧路径执行证据：状态序列 / 耗时分布 / 人工介入 / **可用性空窗**。数值全部来自 `audit` 表只读提取 |
 | | `docs/superpowers/prt/prt-009-gf001-controlled-evidence.json` | 受控空间 `gf001` 的同一组指标（**旧路径**，含两次中止轮次），与上一行**不可互相冒充**——两者是不同总体 |
 | | `docs/superpowers/prt/PRT-001-topology-inventory.md`、`prt-001-003-inventory.json` | PRT-001/003 拓扑与配置密钥清单。**4 个 path 字段默认落在安装目录内**（越界写入，PRT-505/257 输入）；仓库内明文凭证 0 处 |
+| | `docs/superpowers/prt/PRT-257-repair-entrypoint.md` | PRT-257 修复入口的执行一半：为什么 live-reload 的补丁层动作**必须**显式批准、判据为什么是重新自检而不是 applier 的返回值、六条判决与两级顶层码 |
 | | `docs/superpowers/prt/PRT-505-secret-write-path.md` | spec §6.7 凭证管理的**写**入口（4 条动作 + 5 条路由）：此前 `put`/`rotate`/`remove` **零生产调用方**；写路径带入的权限重置问题与处置；13 条破验证探针（第一轮 6 条不咬，逐条记录原因） |
 | | `docs/superpowers/prt/PRT-010-dsh-composition-baseline.md`、`prt-010-composition-baseline.json` | PRT-008 术语冻结 + PRT-010 组合分层基线：`dsh-base` → `dsh-web-app` → 用户层，Legion 6 行 / 4 个 `file:` 依赖。`--diff` 无需 DSH_HOME |
 | | `docs/superpowers/prt/PRT-011-dsh-distribution-decision.md` | PRT-011 分发形态**已裁决：路线 C**（依赖 `@deepseek-ai/dsh` npm 包 + Launcher 装进 DataDir）；DSH 已是 MIT npm 包，当前部署是 244 个 junction 的开发布局，checkout ≈ 1845 MB |

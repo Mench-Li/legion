@@ -110,6 +110,22 @@ export const NON_ENV_LITERALS = Object.freeze([
   // 端口不全（去看组合层接线给全了没有）。
   'BOOTSTRAP_SELF_CHECK_INCOMPATIBLE', 'BOOTSTRAP_RUNTIME_PROBE_FAILED',
   'BOOTSTRAP_BAD_WIRING', 'BOOTSTRAP_PORT_INCOMPLETE', 'BOOTSTRAP_ALREADY_BOUND',
+  // PRT-257 修复执行器（runtime/dsh-composition/repair.mjs）的具名码：
+  //   REPAIR_BAD_PLAN        — 计划里没有 items 数组。**空计划不能报成功**：
+  //                            一个空计划与一份"已经没有问题了"的计划读数相同；
+  //   REPAIR_BAD_RECHECK     — 没有复核手段（"修好了没有"无从判定）；
+  //   REPAIR_RECHECK_FAILED  — 复核自己失败。**不是**"全部修好"；
+  //   REPAIR_STILL_OUTSTANDING — 还有未解决项（具体判决在 outcomes 里）；
+  //   REPAIR_NO_APPLIER      — 登记为可执行却没有注入 applier：
+  //                            这是**接线缺一截**，不是"本产品做不了"。
+  'REPAIR_BAD_PLAN', 'REPAIR_BAD_RECHECK', 'REPAIR_RECHECK_FAILED',
+  'REPAIR_STILL_OUTSTANDING', 'REPAIR_NO_APPLIER',
+  // 判决名。它们是**输出**用的大写字面量，不是配置键——但扫描规则认不出区别，
+  // 逐个登记。判决表是**总的**：没有第六条，且套件里有一条逐项核对。
+  'fixed', 'still-failing', 'unverified', 'needs-approval', 'manual', 'applier-threw',
+  // 动作处理方式：`applier` 可注入执行；`manual` 本产品做不了（**如实说做不了，
+  // 好过给一个假装能做、实际什么也没改的按钮**）。
+  'applier', 'manual',
   // 「没人给我观察结果」与「观察结果说没生效」**必须分开**：
   // 前者是接线缺一截（去接观察器），后者是强制面真的不在（去重装补丁层）。
   // 合成一个码会让排查方向指向错的地方。

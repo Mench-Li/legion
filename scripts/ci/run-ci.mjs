@@ -826,6 +826,22 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-257 的「修复入口」后半：**让修复计划真的被行使**。
+      //
+      // 在它之前 `repairPlanFor()` 的产物只被打印给人看，没有任何代码执行过
+      // 其中任何一个动作——而**一个只有计划没有执行的修复入口，与一句
+      // 「请重装产品」没有区别**（用户拿到的是同一件事）。
+      //
+      // 这一组守两条：
+      //   · 判决来自**重新自检**，applier 的返回值只进 `applierSaid`
+      //     （修复是唯一"做错了反而更糟"的操作：静默地什么都没修，比没有修复入口坏）；
+      //   · `reapply-composition-patch` **必须显式批准**——DSH profile 是
+      //     `patchReload: 'live'`，往运行中的 profile 写入会改掉发起修复的进程自己的强制面。
+      label: 'dsh-repair（PRT-257：修复计划真的被执行；判决来自重新自检；live-reload 动作必须显式批准）',
+      files: ['runtime/dsh-composition/repair.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-510 的**运行侧**接线。
       //
       // 账本（`team-hub/budget-ledger.mjs`）早就完整实现了预留/采集/结算/锁定，

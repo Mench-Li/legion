@@ -73,4 +73,27 @@ export {
   repairPlanFor,
 } from './bootstrap.mjs'
 
+// 修复入口的**执行**一半（PRT-257）。
+//
+// `repairPlanFor()` 给出计划，本出口让计划真的被行使。在它之前，那份计划的
+// 全部消费者是"打印给人看"——而**一个只有计划没有执行的修复入口，
+// 与一句"请重装产品"没有区别**：用户拿到的是同一件事。
+//
+// 两条纪律写在 `repair.mjs` 里：
+//   · `reapply-composition-patch` 明明能自动做，却**必须**显式批准——
+//     因为 DSH 的用户 profile 是 `patchReload: 'live'`，往运行中的 profile
+//     写入这一层会立刻改掉**正在跑的 harness 的强制面，包括发起修复的进程自己**
+//     （所以本模块**不含**任何写 profile 的代码，applier 一律注入）；
+//   · 判决来自**重新自检**，applier 的返回值只进 `applierSaid`。
+//     修复是唯一一种"做错了反而更糟"的操作：一个静默地什么都没修的修复入口，
+//     比没有修复入口坏得多。
+export {
+  REPAIR_CODES,
+  REPAIR_MODES,
+  REPAIR_VERDICTS,
+  approvableActions,
+  repairActionsOf,
+  repairRuntime,
+} from './repair.mjs'
+
 export { PATCH_YAML_PATH, renderPatchYaml } from './render.mjs'

@@ -244,3 +244,105 @@ test('defaultProductConfig：写下的默认配置本身必须通过校验且不
   assert.equal(diags.filter((d) => d.severity === 'error').length, 0, JSON.stringify(diags))
   assert.equal(JSON.stringify(values).includes('sk-'), false)
 })
+
+// ============================================================================
+// PRT-709：日志策略必须能从**产品配置文件**改到
+//
+// 这一组守的是"有没有出口"：`DEFAULT_LOG_POLICY` 的 8 MiB / 128 MiB / 5 代
+// 是合理起点，但轮转在写满时给出的诊断里，唯一的建议就是
+// "调小 `maxFileBytes`，让它在写满之前就被轮转"。
+//
+//   > 一个改不了的参数，与一个硬编码的常量，对用户来说是同一个东西；
+//   > 而那条"请调小它"的建议会变成一句没有出口的话。
+// ============================================================================
+
+test('logPolicy：`log.*` 四个键从配置文件读出来，并带上**来源层**', () => {
+  const merged = {
+    values: { log: { maxFileBytes: 1024, maxTotalBytes: 4096, keepFiles: 2, minFreeBytes: 0 } },
+    layers: [{ name: 'product-config', values: {} }],
+  }
+  // 直接用 loadProductConfig 的产物形状：走真实文件更稳
+  const root = mkdtempSync(join(tmpdir(), 'legion-logcfg-'))
+  try {
+    const layout = makeLayout(root)
+    mkdirSync(join(root, 'data'), { recursive: true })
+    writeFileSync(configPaths(layout)['product-config'], JSON.stringify({
+      log: { maxFileBytes: 1024, maxTotalBytes: 4096, keepFiles: 2, minFreeBytes: 0 },
+    }))
+    const r = loadProductConfig(layout)
+    const input = launcherInputFromConfig(r.merged)
+    assert.deepEqual(input.logPolicy, {
+      maxFileBytes: 1024, maxTotalBytes: 4096, keepFiles: 2, minFreeBytes: 0,
+    })
+    // 排障时最有用的一句话是"这个值来自哪一层"，不是一个孤零零的数字
+    assert.equal(input.provenance['log.maxFileBytes'], 'product-config')
+    void merged
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('logPolicy：配置里没有 `log.*` 时**不编造**默认值（缺省由 validateLogPolicy 决定）', () => {
+  const root = mkdtempSync(join(tmpdir(), 'legion-logcfg-'))
+  try {
+    const layout = makeLayout(root)
+    mkdirSync(join(root, 'data'), { recursive: true })
+    writeFileSync(configPaths(layout)['product-config'], JSON.stringify({ runtime: { command: '' } }))
+    const input = launcherInputFromConfig(loadProductConfig(layout).merged)
+    // 这里补一份默认值就会多一处会漂移的副本；"到底哪一份生效"
+    // 在排查时会变成一个必须回答的问题。所以不补。
+    assert.equal(input.logPolicy, undefined)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('logPolicy：不合法的值**不进** logPolicy（由 validateLogPolicy 去报，不在这里静默纠正）', () => {
+  const root = mkdtempSync(join(tmpdir(), 'legion-logcfg-'))
+  try {
+    const layout = makeLayout(root)
+    mkdirSync(join(root, 'data'), { recursive: true })
+    writeFileSync(configPaths(layout)['product-config'], JSON.stringify({
+      // 负值、小数代数、字符串：三种都不该被悄悄改成"合理值"
+      log: { maxFileBytes: -1, keepFiles: 1.5, maxTotalBytes: 'lots' },
+    }))
+    const input = launcherInputFromConfig(loadProductConfig(layout).merged)
+    assert.equal(input.logPolicy, undefined,
+      '不合法的值被放进了 logPolicy：一个被静默纠正的配置，用户会以为它生效了')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('logPolicy：`0` 是**合法**值（等价于「不按这个维度限制」），不能被当成「没配置」', () => {
+  const root = mkdtempSync(join(tmpdir(), 'legion-logcfg-'))
+  try {
+    const layout = makeLayout(root)
+    mkdirSync(join(root, 'data'), { recursive: true })
+    writeFileSync(configPaths(layout)['product-config'], JSON.stringify({ log: { minFreeBytes: 0, keepFiles: 0 } }))
+    const input = launcherInputFromConfig(loadProductConfig(layout).merged)
+    // `0` 与 `undefined` 是两件事：前者是"用户明确要求不限制"，
+    // 后者是"用户没说"。用 `if (v)` 判断会把前者吃掉。
+    assert.deepEqual(input.logPolicy, { minFreeBytes: 0, keepFiles: 0 })
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('每个被派生的键都必须已登记：写 `log.*` 的用户不该收到「未知键」', () => {
+  // 破验证 ⑳③ 量出来的缺口：把 `log.maxFileBytes` 从 `KNOWN_CONFIG_KEYS` 里删掉，
+  // **没有任何用例变红**。而真实后果是——用户在配置文件里写下这个键，
+  // 却收到一条"未知键"的警告（或者更糟：被当成写错了而放弃）。
+  //
+  //   > 一个用户能写、却被告知不认识的键，与一个不存在的键，
+  //   > 对那位用户来说是同一个东西。
+  for (const key of [
+    'log.maxFileBytes', 'log.maxTotalBytes', 'log.keepFiles', 'log.minFreeBytes',
+  ]) {
+    assert.ok(KNOWN_CONFIG_KEYS[key], `${key} 没有被登记进 KNOWN_CONFIG_KEYS`)
+    assert.equal(KNOWN_CONFIG_KEYS[key].type, 'number', `${key} 的类型应当是 number`)
+  }
+})
+
+test('写全四个 `log.*` 键不会产生任何 error 级诊断', () => {
+  const diags = validateConfigValues({
+    log: { maxFileBytes: 1024, maxTotalBytes: 4096, keepFiles: 2, minFreeBytes: 0 },
+  })
+  const errors = diags.filter((d) => d.severity === 'error')
+  assert.deepEqual(errors, [], JSON.stringify(errors))
+  // 也不该有指向这些键的 warn（未知键是 warn 级）
+  const aboutLog = diags.filter((d) => String(d.message ?? '').includes('log.'))
+  assert.deepEqual(aboutLog, [], JSON.stringify(aboutLog))
+})

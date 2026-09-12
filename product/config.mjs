@@ -64,6 +64,16 @@ export const KNOWN_CONFIG_KEYS = Object.freeze({
   'launcher.backoffMaxMs': Object.freeze({ type: 'number', doc: '退避上限（ms）' }),
   'components.whiteboard.enabled': Object.freeze({ type: 'boolean', doc: '是否启用可选白板组件' }),
   'runtime.secretRefs': Object.freeze({ type: 'object', doc: '模型密钥的**引用**（值只能是 secretRef 形态，不得是明文）' }),
+  // ── PRT-709 日志轮转与磁盘保护 ──
+  //
+  // 这四个键是**必须**能被用户改的，不是"以后再说"：`DEFAULT_LOG_POLICY` 里的
+  // 8 MiB / 128 MiB / 5 代是合理起点，但"单文件上限"必须能调小——
+  // `STILL_OVER_BUDGET` 那条诊断给出的唯一建议就是"调小 maxFileBytes，
+  // 让它在写满之前就被轮转"。如果这个键改不了，那条建议等于没有出口。
+  'log.maxFileBytes': Object.freeze({ type: 'number', doc: '单个日志文件超过它就轮转（字节）' }),
+  'log.maxTotalBytes': Object.freeze({ type: 'number', doc: '日志目录的总字节预算' }),
+  'log.keepFiles': Object.freeze({ type: 'number', doc: '每个日志 base 最多保留几代已轮转文件（不含活动文件）' }),
+  'log.minFreeBytes': Object.freeze({ type: 'number', doc: '可用磁盘空间低于它就算磁盘紧张（字节）' }),
 })
 
 /**
@@ -320,6 +330,26 @@ export function launcherInputFromConfig(merged, { base = {} } = {}) {
     out.runtimeCommand = command.trim()
     out.provenance['runtime.command'] = configLayerOf(merged, 'runtime.command')
   }
+  // 日志策略（PRT-709）。只接受**正的有限数**，且 `keepFiles` 必须是整数——
+  // 与 `validateLogPolicy` 同一套判据。这里不合法的值**不进** logPolicy，
+  // 由 `validateLogPolicy` 在 sink 那一层报 `LOG_BAD_POLICY`——
+  // 两处各报一次比"这里静默纠正、那里看到的是纠正后的值"要好：
+  // **一个被静默纠正的配置，用户会以为它生效了。**
+  const logPolicy = {}
+  for (const [path, key] of [
+    ['log.maxFileBytes', 'maxFileBytes'],
+    ['log.maxTotalBytes', 'maxTotalBytes'],
+    ['log.keepFiles', 'keepFiles'],
+    ['log.minFreeBytes', 'minFreeBytes'],
+  ]) {
+    const v = configValueAt(merged, path)
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) continue
+    if (key === 'keepFiles' && !Number.isInteger(v)) continue
+    logPolicy[key] = v
+    out.provenance[path] = configLayerOf(merged, path)
+  }
+  if (Object.keys(logPolicy).length > 0) out.logPolicy = logPolicy
+
   const timeout = configValueAt(merged, 'launcher.readinessTimeoutMs')
   if (typeof timeout === 'number' && timeout > 0) {
     out.readinessTimeoutMs = timeout

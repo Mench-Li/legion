@@ -301,3 +301,39 @@ test('EXIT_CODES：退出码是契约（0 成功 / 2 参数 / 3 布局 / 4 体�
 // `run()` 的启动路径会一直持有子进程直到收到信号，从用例里调用它只能靠
 // 泄漏一个 team-hub 进程来收场。受限范围的状态语义因此放在
 // `launcher.test.mjs`（直接构造 Launcher，用完显式 stop）里断言。
+
+// ============================================================================
+// PRT-709：日志策略必须从配置文件**走到 launcher 的选项里**
+//
+// 这一条守的是"接没接上"。`launcherInputFromConfig` 派生出了 `logPolicy`、
+// `createLauncher` 也接受它——但中间那一跳（CLI 组装 `options`）如果漏了，
+// 用户改了配置会发现"改了没用"，而两边各自的用例都是绿的。
+//
+//   > 「没接」与「没做」是两个不同的问题，
+//   > 而它们在"用户改了配置有没有用"上给出同一个答案。
+// ============================================================================
+
+test('logPolicy：配置文件里的 `log.*` 会出现在 launcher 选项里', () => {
+  const root = mkdtempSync(join(tmpdir(), 'legion-clilog-'))
+  try {
+    mkdirSync(join(root, 'data'), { recursive: true })
+    writeFileSync(join(root, 'data', 'product.config.json'), JSON.stringify({
+      log: { maxFileBytes: 2048, keepFiles: 3 },
+    }))
+    const { options } = launcherOptionsFrom({ argv: [], env: envFor(root) })
+    assert.deepEqual(options.logPolicy, { maxFileBytes: 2048, keepFiles: 3 },
+      '配置里的 log.* 没有走到 launcher 选项里：用户改了会发现「改了没用」')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('logPolicy：配置文件没写 `log.*` 时是空对象，**不是** undefined', () => {
+  const root = mkdtempSync(join(tmpdir(), 'legion-clilog-'))
+  try {
+    mkdirSync(join(root, 'data'), { recursive: true })
+    writeFileSync(join(root, 'data', 'product.config.json'), JSON.stringify({ runtime: { command: '' } }))
+    const { options } = launcherOptionsFrom({ argv: [], env: envFor(root) })
+    // `createLauncher` 的默认值是 `{}`，`validateLogPolicy({})` 落到 DEFAULT_LOG_POLICY。
+    // 传 undefined 也能工作，但断言 `{}` 能把"这里应当有一个对象"这件事钉住。
+    assert.deepEqual(options.logPolicy, {})
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})

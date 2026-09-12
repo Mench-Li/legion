@@ -2176,7 +2176,7 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：117 套件 / 2892 用例，`--only test` 整体 PASS** —— 2026-09-12 实测（设 `DSH_CHECKOUT`）
+**当前基线：117 套件 / 2900 用例，`--only test` 整体 PASS** —— 2026-09-12 实测（设 `DSH_CHECKOUT`）
 
 （**本批新增**：`diagnostic-package`（**29 例**，PRT-710 脱敏诊断包：**结构性排除优先于文本过滤**——密钥库/凭证/业务库正文
 **根本不进包**且**从未被读过**；「没包含」与「被排除」可区分；**0 次脱敏命中 ≠ 包是干净的**；判定用**落盘后读回来的字节**，

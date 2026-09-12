@@ -191,6 +191,11 @@ export function launcherOptionsFrom({ argv = [], env = {}, nodePath = process.ex
       allowPortInUse,
       runtimeCommand,
       nodePath,
+      // 日志策略（PRT-709）来自产品配置文件的 `log.*` 键。
+      // 缺省时是 `{}`，由 `validateLogPolicy` 落到 `DEFAULT_LOG_POLICY`。
+      // **不在这里补默认值**：补一份就多一处会漂移的副本，而"哪一份生效"
+      // 在排查时会成为一个必须回答的问题。
+      logPolicy: fromConfig.logPolicy ?? {},
       // Launcher 自己的环境只作为**白名单的读取来源**传入，不会被整份复制给子进程
       baseEnv: env,
       readiness: readinessTimeout === null

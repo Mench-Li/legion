@@ -76,6 +76,11 @@ import {
   BUDGET_ERRORS, BudgetError, createBudgetLedger, createPriceTableRegistry, ensureBudgetSchema,
 } from './budget-ledger.mjs'
 import { createPriceTable } from '../runtime/contracts/price-table.mjs'
+// 配置导入导出（PRT-508）：**导出永远不含密钥**。契约层负责"包里有没有
+// 密钥"与"这包能不能导"，路由层只负责读写与把拒绝翻成状态码。
+import {
+  BUNDLE_ERRORS, BundleError, assertApplicable, buildBundle, planImport, validateBundle,
+} from '../runtime/contracts/config-bundle.mjs'
 // `/api/runtime/next-post` 用「这条任务后面还有没有岗位」这个判定。
 // 与运行仓储里用的是**同一个**函数：两处各写一遍判定，迟早会出现
 // "接口说有下一岗位、交接时却按链尾收口"这种不一致。
@@ -271,12 +276,29 @@ async function handleRun(req, res, run) {
     if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
     const body = await readBody(req)
     const result = await run(body ?? {})
-    json(res, 200, { ok: true, ...result })
+    // **回调可能已经自己写过响应**（大量路由在校验失败时直接
+    // `json(res, 400/409, ...)` 然后 return）。这时再写一次会抛
+    // `ERR_HTTP_HEADERS_SENT`，而那个异常会被本函数自己的 catch 再写一次
+    // 响应（又抛），最后逃到外层被 `if (res.headersSent) res.end()` 静默吞掉。
+    //
+    // 结果：客户端拿到的响应是对的，但**没有任何一处记录发生过异常**——
+    // 而"错误悄悄消失"正是这个项目明确要避免的那一类。所以在这里显式
+    // 判断，不依赖外层兜底来擦屁股。
+    if (!res.headersSent) json(res, 200, { ok: true, ...result })
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e)
     const status = Number(e?.statusCode) || 400
     // 具名码原样交给调用方：worker 要靠 `LEASE_EPOCH_STALE` 决定「停手」，
     // 靠 `LEASE_EXPIRED` 决定「加快」——两者的下一步动作完全不同。
+    //
+    // 响应已经发出却还走到这里，说明**回调写过响应之后又有东西抛了**——
+    // 那永远是个缺陷（正常路径是回调自己写、然后 return）。此时错误正文
+    // 写不进去了，但绝不能什么都不留：`ERR_HTTP_HEADERS_SENT` 被静默吞掉
+    // 正是"客户端看到正常响应、服务端毫无记录"这类最难查的问题。
+    if (res.headersSent) {
+      console.error(`[team-hub] 响应已发出后 handleRun 仍捕获到异常：${message}`)
+      return
+    }
     json(res, status, {
       error: message,
       code: e?.code ?? null,
@@ -3676,6 +3698,164 @@ async function handle(req, res, stripPrefix) {
         return
       }
     }
+    // ── 配置导入导出（PRT-508，spec §6.6 第 403 行「导出不包含密钥」） ──
+    //
+    // 三条产品纪律：
+    //   ① **导出永远不含密钥，也不含 `secretRef`**（契约层强制，这里不再放宽）。
+    //      导出物带 `credentialRequired` 说明"这条档案需要凭证"，但不说
+    //      "从哪台机器的哪个槽位取"——后者跨机器没有意义。
+    //   ② 导入是**两段式**：先 `plan`（dry run，什么都不写），再 `apply`。
+    //      理由是导入会改变"哪条任务用哪个模型"，而那同时改变成本、质量与
+    //      数据去了哪。一次性静默应用意味着这三件事都在无人看到的情况下变了。
+    //   ③ `apply` 只做计划里 `create`/`update` 的那些；**不删除**包里没有的
+    //      档案。否则一份不完整的包会清空整台机器的配置，而"不完整"是常态
+    //      （比如只导出一条模型做灰度）。
+    if (req.method === 'GET' && path === '/api/config-bundle') {
+      const kind = url.searchParams.get('kind') ?? 'full'
+      try {
+        // `modelStore.list()` 给的是 descriptor（含 `hasCredential`，**不含**
+        // `secretRef`）——正好是导出需要的形态：凭证"要不要"是档案的属性，
+        // "从哪取"是本机的属性。`hasCredential` 转成 `credentialRequired`。
+        const profiles = kind === 'model-bindings' ? [] : modelStore.list().map((d) => ({
+          id: d.id,
+          displayName: d.displayName,
+          runtimeType: d.runtimeType,
+          provider: d.provider,
+          model: d.model,
+          endpoint: d.endpoint,
+          reasoningEffort: d.reasoningEffort,
+          limits: d.limits,
+          credentialRequired: d.hasCredential === true,
+        }))
+        const bindings = kind === 'model-profiles' ? [] : bindingStore.list()
+        const bundle = buildBundle({
+          profiles,
+          bindings,
+          kind,
+          exportedAtMs: Date.now(),
+          exportedBy: url.searchParams.get('actor'),
+          note: url.searchParams.get('note'),
+        })
+        json(res, 200, { ok: true, bundle })
+      } catch (e) {
+        // 出口门禁触发（配置里混进了密钥形态的东西）。这不是"服务端出错"，
+        // 而是**配置本身有问题**，所以要 400 + 一个能让人找到那条档案的码。
+        if (e instanceof BundleError) {
+          json(res, 400, { ok: false, code: e.code, error: e.message, hits: e.hits ?? null, serverTimeMs: Date.now() })
+          return
+        }
+        throw e
+      }
+      return
+    }
+    if (req.method === 'POST' && path === '/api/config-bundle/plan') {
+      await handleRun(req, res, (body) => {
+        const plan = planImport({
+          bundle: body.bundle,
+          existingProfiles: modelStore.list(),
+          existingBindings: bindingStore.list(),
+          conflictPolicy: body.conflictPolicy ?? 'fail',
+          actor: body.actor ?? null,
+        })
+        if (plan.ok !== false) {
+          // 计划本身合法时，同时告诉调用方**能不能直接应用**——
+          // 否则前端要自己重算一遍"有没有冲突/悬空引用"，而两份判定必然漂移。
+          return { plan, applicable: assertApplicable(plan) }
+        }
+        return { plan, applicable: null }
+      })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/config-bundle/apply') {
+      await handleRun(req, res, (body) => {
+        const validated = validateBundle(body.bundle)
+        if (!validated.ok) {
+          json(res, 400, {
+            ok: false,
+            code: BUNDLE_ERRORS.PROFILE_INVALID,
+            error: `导入包不合法：${validated.errors.join('；')}`,
+            errors: validated.errors,
+            serverTimeMs: Date.now(),
+          })
+          return
+        }
+        const plan = planImport({
+          bundle: body.bundle,
+          existingProfiles: modelStore.list(),
+          existingBindings: bindingStore.list(),
+          conflictPolicy: body.conflictPolicy ?? 'fail',
+          actor: body.actor ?? null,
+        })
+        const gate = assertApplicable(plan)
+        if (gate.ok !== true) {
+          // 冲突与悬空引用都是**"应用了会坏"**而不是"应用了会不完整"，
+          // 所以拒绝而不是尽力而为。409 而不是 400：请求本身没写错，
+          // 是当前状态不允许——调用方要做的是选一个冲突策略或先建档案。
+          json(res, 409, {
+            ok: false, code: gate.code, error: gate.reason,
+            plan, serverTimeMs: Date.now(),
+          })
+          return
+        }
+        if (typeof body.actor !== 'string' || body.actor.trim() === '') {
+          json(res, 400, {
+            ok: false, code: BUNDLE_ERRORS.ACTOR_REQUIRED,
+            error: '缺少 actor：导入会改变哪条任务用哪个模型，必须记下是谁做的',
+            serverTimeMs: Date.now(),
+          })
+          return
+        }
+
+        const incomingProfiles = new Map(validated.value.profiles.map((p) => [p.id, p]))
+        const incomingBindings = new Map(
+          validated.value.bindings.map((b) => [`${b.scope}\u0000${b.employeeRole}`, b]))
+
+        const written = { profiles: [], bindings: [] }
+        for (const action of plan.actions) {
+          if (action.action !== 'create' && action.action !== 'update') continue
+          if (action.kind === 'profile') {
+            const p = incomingProfiles.get(action.id)
+            if (p === undefined) continue
+            // `credentialRequired` 是导出附加字段，模型档案契约不认识它，写库前摘掉。
+            const { credentialRequired, ...profileInput } = p
+            if (action.action === 'create') {
+              modelStore.create(profileInput, { actor: body.actor })
+            } else {
+              // CAS：用计划里读到的那个版本，不用"现在最新"的版本。
+              // 中间被别人改过就应当冲突失败，而不是把别人的改动盖掉。
+              modelStore.update(action.id, profileInput, { actor: body.actor, version: action.currentVersion })
+            }
+            written.profiles.push({ id: action.id, action: action.action, credentialRequired: credentialRequired === true })
+          } else {
+            const b = incomingBindings.get(action.id.replace('/', '\u0000'))
+            if (b === undefined) continue
+            bindingStore.upsert({
+              scope: b.scope,
+              employeeRole: b.employeeRole,
+              primaryProfile: b.primaryProfile,
+              fallbackProfiles: b.fallbackProfiles,
+              perRunBudget: b.perRunBudget,
+            }, { actor: body.actor })
+            written.bindings.push({ id: action.id, action: action.action })
+          }
+        }
+
+        return {
+          applied: true,
+          written,
+          // 导入方要知道**还得去密钥库补哪些引用**：导出包里没有引用名，
+          // 所以这些档案导入后是"需要凭证但没有引用"的状态。
+          // 不说清楚的话，用户会以为导入完就能跑，然后第一次运行才失败。
+          needsCredential: written.profiles.filter((p) => p.credentialRequired).map((p) => p.id),
+          // 策略 `keep` 下"包里有、但因为内容不同而没进去"的条数。
+          // 单独报出来是因为 `keep` 会把冲突转成 `skip`，于是
+          // `conflicts` 变成 0——只报 `conflicts` 会让回执看起来是成功的，
+          // 而包里那些改动一处都没进去。
+          keptLocal: plan.summary.keptLocal,
+        }
+      })
+      return
+    }
     // ── 单次运行预算账本与价目表（PRT-503 / PRT-510 / PRT-511，spec §6.6） ──
     //
     // 这是全仓唯一一处"花的是真钱"的接口面。它的错误都比别处贵：
@@ -5232,8 +5412,13 @@ async function handle(req, res, stripPrefix) {
     json(res, 404, { error: `not found: ${path}` })
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e)
-    if (res.headersSent) res.end()
-    else json(res, 500, { error: message })
+    if (res.headersSent) {
+      // 已经发过响应的异常**不能就这么 `end()` 掉**：那会让"响应发出之后
+      // 才炸"这件事完全不留痕迹，而这正是最难查的一类问题（客户端看到
+      // 一个正常的响应，服务端没有任何记录）。至少要留下一条记录。
+      console.error(`[team-hub] 响应已发出后仍抛出异常：${message}`)
+      res.end()
+    } else json(res, 500, { error: message })
   }
 }
 

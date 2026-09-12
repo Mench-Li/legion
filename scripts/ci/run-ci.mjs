@@ -595,6 +595,17 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-508（spec §6.6 第 403 行）：配置导入导出，导出**永远不含密钥**。
+      label: 'config-bundle（PRT-508：导出剥掉 secretRef、导入挡密钥、冲突默认不覆盖、悬空引用拦下）',
+      files: ['runtime/contracts/config-bundle.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      label: 'config-bundle-routes（PRT-508：导出/计划/应用三条路由，plan 必须不写库）',
+      files: ['team-hub/config-bundle-routes.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       label: 'run-kill-drill（PRT-312：真实进程被强杀后不丢任务、不伪装成功、不重复外部写）',
       files: ['team-hub/run-kill-drill.test.mjs'],
       cwd: ROOT,

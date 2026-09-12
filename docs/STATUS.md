@@ -2176,7 +2176,7 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：120 套件 / 3015 用例，`--only test` 整体 PASS** —— 2026-09-12 实测（设 `DSH_CHECKOUT`）
+**当前基线：121 套件 / 3050 用例，`--only test` 整体 PASS** —— 2026-09-12 实测（设 `DSH_CHECKOUT`）
 
 （**本批新增**：`diagnostic-package`（**29 例**，PRT-710 脱敏诊断包：**结构性排除优先于文本过滤**——密钥库/凭证/业务库正文
 **根本不进包**且**从未被读过**；「没包含」与「被排除」可区分；**0 次脱敏命中 ≠ 包是干净的**；判定用**落盘后读回来的字节**，
@@ -2368,6 +2368,7 @@ P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-
 | | `docs/superpowers/prt/prt-009-execution-evidence.json` | 生产空间 `software` 的旧路径执行证据：状态序列 / 耗时分布 / 人工介入 / **可用性空窗**。数值全部来自 `audit` 表只读提取 |
 | | `docs/superpowers/prt/prt-009-gf001-controlled-evidence.json` | 受控空间 `gf001` 的同一组指标（**旧路径**，含两次中止轮次），与上一行**不可互相冒充**——两者是不同总体 |
 | | `docs/superpowers/prt/PRT-001-topology-inventory.md`、`prt-001-003-inventory.json` | PRT-001/003 拓扑与配置密钥清单。**4 个 path 字段默认落在安装目录内**（越界写入，PRT-505/257 输入）；仓库内明文凭证 0 处 |
+| | `docs/superpowers/prt/PRT-713-health-heartbeat.md` | PRT-713 健康心跳：为什么**「关了之后还会再发一次」与「根本没关」是同一个东西**；三道闸（策略 / 代际 / 已停掉）为什么缺一不可，以及**两次核对之间那段代码不是空的**；载荷为什么必须走**允许名单**而不是拒绝名单 |
 | | `docs/superpowers/prt/PRT-712-local-metrics.md` | PRT-712 最小系统指标：为什么**「读不出来」绝不能显示成 0**（那比显示成绿灯更糟——它看起来有读数）；`0 次失败 / 0 次尝试 ≠ 0%`；「此刻不适用」是第三种结果，以及**判据本身读不出来时替它编一个 0** 这个更隐蔽的变体 |
 | | `docs/superpowers/prt/PRT-711-runtime-state-mapping.md` | PRT-711 Runtime 状态 → 产品状态 → **Orchestrator 行为**：`productStateOf` 只做了表格前两列，第三列才是它要决定的事；为什么**认不出状态时绝不默认放行**（执行花的是用户的钱）；`degraded`「不给判据」为什么不等于「判据都满足」；「产品还能用」为什么不能读成「数字员工在上班」 |
 | | `docs/superpowers/prt/PRT-705-orphan-sweep.md` | PRT-705 僵尸进程清理：**PID 会被回收**，所以按号码杀会毁掉一个不相干的程序——四条结论（`gone`/`verified`/`recycled`/`unknown`）为什么不能合成两条；「记录坏了」≠「没有记录」；为什么清理**默认关闭**；陈旧记录为什么是**有界**危害 |

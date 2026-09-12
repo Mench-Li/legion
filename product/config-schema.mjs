@@ -177,6 +177,31 @@ export const SCHEMA = defineSchema({
     'never-run',
     'queue-empty',
     '—',
+
+    // ── PRT-713 健康心跳 ────────────────────────────────────────────────
+    //
+    // 六个诊断码（关闭 / 没端点 / 策略不合法 / 代际不符 / 没同意 /
+    // 端点非法 / 发送失败——发送失败与端点非法各算一条）、
+    // 协议版本号，以及一条历史上被手动传入的同意者标识。
+    'HEARTBEAT_SEND_FAILED',
+    'HEARTBEAT_DISABLED',
+    'HEARTBEAT_NO_ENDPOINT',
+    'HEARTBEAT_BAD_POLICY',
+    'HEARTBEAT_DROPPED_GENERATION',
+    'HEARTBEAT_NOT_OPTED_IN',
+    'HEARTBEAT_INVALID_ENDPOINT',
+    'HEARTBEAT_PAYLOAD_REJECTED',
+    'HEARTBEAT_STOPPED',
+    'legion/heartbeat@1',
+    'already-running',
+    'user',
+    'win32',
+    'darwin',
+    'linux',
+    'freebsd',
+    'openbsd',
+    'sunos',
+    'aix',
     // 轮转 note 的具名码（不是 `LOG_CODES` 的成员，但同样只用于说明）
     'FOREIGN_FILES',
     'PROTECTED_GEN1',

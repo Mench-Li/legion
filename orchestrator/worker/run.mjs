@@ -197,6 +197,8 @@ export async function runWorkerProcess({
   env = process.env,
   fetchImpl = globalThis.fetch,
   executor = null,
+  // PRT-253：生产执行引擎的提供者。给了它就以它为准（见下面的注释）。
+  executorProvider = null,
   // 调用方给的执行引擎通常只实现 `execute`；工作区阶段由下面按配置补上。
   // 传 `inPlaceStages()` 的调用方保持原样（那是显式的降级点，不是静默行为）。
   stages = null,
@@ -243,9 +245,42 @@ export async function runWorkerProcess({
   //
   // 显式传了 `stages` 的调用方优先：那是调用方在声明"我知道这一步是什么"。
   // 否则按配置解析——解析不出来时返回的是一段**理由**，而不是一个沉默的原地执行。
+  // ── PRT-253：生产执行引擎的**入口** ──
+  //
+  // `executorProvider` 是一个返回判别式联合的**异步**函数：
+  //   `{ ok: true, executor }` 或 `{ ok: false, code, message, reasons }`
+  //
+  // 为什么是"提供者"而不是直接传 executor：构造生产引擎要先做启动自检
+  // （异步、可能拒绝），而**拒绝的理由必须能传到启动结果里**。
+  // 早先只有一句 `no-executor`（"没配"），于是"自检没过"、"缺宿主端口"、
+  // "忘了配"三种完全不同的处境在 Launcher 看来一模一样——
+  // 而它们该做的修复动作完全不同。
+  let effectiveExecutor = executor
+  let executorRefusal = null
+  if (typeof executorProvider === 'function') {
+    let provided
+    try {
+      provided = await executorProvider()
+    } catch (e) {
+      provided = { ok: false, code: 'EXECUTOR_PROVIDER_THREW', message: `执行引擎的构造过程抛错：${e?.message ?? e}` }
+    }
+    if (provided !== null && typeof provided === 'object' && provided.ok === true && provided.executor != null) {
+      effectiveExecutor = provided.executor
+      // 成功也要说一句：一个静默接上的执行引擎与一个没接上的，
+      // 在启动日志里应当区分得开。
+      write(`[worker] 执行引擎已接线${provided.note === undefined ? '' : `：${provided.note}`}`)
+    } else {
+      executorRefusal = provided ?? { ok: false, code: 'EXECUTOR_PROVIDER_EMPTY', message: '执行引擎的构造没有返回结果' }
+      // 拒绝**不是**致命启动错误：worker 仍要能起来、写状态文件、如实报告
+      // 自己干不了活。否则 Launcher 只看到"进程退出"，看不到原因。
+      write(`⚠ [worker] 执行引擎未接线（${executorRefusal.code}）：${executorRefusal.message}`)
+      for (const r of executorRefusal.reasons ?? []) write(`    · ${r}`)
+    }
+  }
+
   let effectiveStages = stages
   let workspaceNote = null
-  if (executor !== null && executor !== undefined && effectiveStages === null) {
+  if (effectiveExecutor !== null && effectiveExecutor !== undefined && effectiveStages === null) {
     const resolved = resolveWorkspaceStages({ workspaceDir: cfg.workspaceDir, dataDir: cfg.dataDir, scope, platform })
     effectiveStages = resolved.stages
     workspaceNote = resolved.reason
@@ -255,7 +290,7 @@ export async function runWorkerProcess({
 
   const worker = createWorker({
     hub,
-    executor,
+    executor: effectiveExecutor,
     stages: effectiveStages,
     workspaceNote,
     dataDir: cfg.dataDir,
@@ -281,5 +316,13 @@ export async function runWorkerProcess({
     worker,
     statusPath: join(cfg.dataDir, STATUS_RELPATH),
     runPromise,
+    // 执行引擎没接上时，**这里如实说**。下游（Launcher 的诊断页）
+    // 不必去读启动日志的行文来推断——那是会随文案变更而碎的判据。
+    executorWired: effectiveExecutor !== null && effectiveExecutor !== undefined,
+    executorRefusal: executorRefusal === null ? null : Object.freeze({
+      code: executorRefusal.code ?? null,
+      message: executorRefusal.message ?? null,
+      reasons: Object.freeze([...(executorRefusal.reasons ?? [])]),
+    }),
   })
 }

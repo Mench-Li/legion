@@ -799,3 +799,123 @@ test('⑥ 陈旧状态判定：文件在但进程已死时**不得**报成在跑
   assert.equal(future.fresh, false)
   assert.match(future.reason, /时钟可能被调整过/)
 })
+
+// ============================================================ ⑧ PRT-253 执行引擎接线
+//
+// `executorProvider` 是生产执行引擎的入口。它返回**判别式联合**，
+// 而这里要守的是：拒绝的理由必须**传得出来**。
+//
+// 以前只有一句 `no-executor`（"没配"），于是三种修复动作完全不同的处境
+// 在 Launcher 看来一模一样："自检没过"（该去看强制面）、
+// "缺宿主端口"（该去看组合层接线）、"忘了配"（该去看配置）。
+//
+//   > 一句不区分处境的报错，与没有报错，在排障上的价值是一样的。
+
+test('⑧ PRT-253：提供者拒绝时 worker **照常启动**，并把码与理由带进启动结果', async () => {
+  const { root, dataDir } = tempDataDir()
+  try {
+    const lines = []
+    const startup = await runWorkerProcess({
+      env: { LEGION_DATA_DIR: dataDir },
+      write: (l) => lines.push(l),
+      installSignalHandlers: false,
+      executorProvider: async () => ({ ok: false, code: 'EXECUTOR_HOST_PORT_REQUIRED', message: '没有宿主端口', reasons: ['组合层还没把端口装进来'] }),
+    })
+    try {
+      // 拒绝**不是**致命错误：一个"起来了但干不了活"的进程
+      // 必须能起来、能写状态文件、能说清自己缺什么。
+      assert.equal(startup.ok, true, '提供者拒绝不该让 worker 起不来')
+      assert.equal(startup.executorWired, false)
+      assert.equal(startup.executorRefusal.code, 'EXECUTOR_HOST_PORT_REQUIRED')
+      assert.deepEqual([...startup.executorRefusal.reasons], ['组合层还没把端口装进来'])
+      // 理由要**打在启动输出里**：这是运维唯一能在不读代码的情况下看到原因的入口。
+      const joined = lines.join('\n')
+      assert.match(joined, /EXECUTOR_HOST_PORT_REQUIRED/)
+      assert.match(joined, /组合层还没把端口装进来/)
+    } finally {
+      // 顺序不能反：`worker.start()` 是长驻循环，**只有 stop() 之后才会结算**。
+      // 先 await runPromise 会死锁——而那个死锁在用例里表现为整个套件超时，
+      // 看起来像"跑得慢"，不像"写错了"。
+      await startup.worker.stop({ reason: 'test' }).catch(() => undefined)
+      await startup.runPromise.catch(() => undefined)
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('⑧ PRT-253：提供者**抛错**时也被接住并具名（不是让 worker 崩掉）', async () => {
+  const { root, dataDir } = tempDataDir()
+  try {
+    const startup = await runWorkerProcess({
+      env: { LEGION_DATA_DIR: dataDir },
+      write: () => {},
+      installSignalHandlers: false,
+      executorProvider: async () => { throw new Error('自检进程起不来') },
+    })
+    try {
+      assert.equal(startup.ok, true)
+      assert.equal(startup.executorWired, false)
+      assert.equal(startup.executorRefusal.code, 'EXECUTOR_PROVIDER_THREW')
+      assert.match(startup.executorRefusal.message, /自检进程起不来/)
+    } finally {
+      await startup.worker.stop({ reason: 'test' }).catch(() => undefined)
+      await startup.runPromise.catch(() => undefined)
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('⑧ PRT-253：没给提供者时 `executorWired` 明确为 false（不是缺字段）', async () => {
+  const { root, dataDir } = tempDataDir()
+  try {
+    const startup = await runWorkerProcess({
+      env: { LEGION_DATA_DIR: dataDir }, write: () => {}, installSignalHandlers: false,
+    })
+    try {
+      // 「一个字段没人断言」与「这个字段不存在」是同一件事。
+      // 所以这里断言它**存在且为 false**，而不是 `assert.ok(!startup.executorWired)`——
+      // 后者在字段整个消失时也会通过。
+      assert.equal('executorWired' in startup, true, 'executorWired 必须在启动结果里')
+      assert.equal(startup.executorWired, false)
+      assert.equal(startup.executorRefusal, null)
+    } finally {
+      await startup.worker.stop({ reason: 'test' }).catch(() => undefined)
+      await startup.runPromise.catch(() => undefined)
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('⑧ PRT-253：提供者拒绝时 worker **一次 claim 都不发**（这是拒绝真正的后果）', async () => {
+  // 前一条只验了字段。这一条验**行为**：拒绝必须落到"不认领"上。
+  //
+  // 为什么这一条不能省：`executorWired: false` 是个字段，而字段可以被正确设置、
+  // 同时执行路径完全忽视它——那时 worker 会照常 claim，把一个没人能执行的任务
+  // 领走，然后烧光它的重试额度。
+  //
+  //   > 一个功能没有入口，与一个功能不存在，在用户看来完全一样；
+  //   > 而一个"说没接线、却照样认领"的 worker，比两者都坏。
+  const { root, dataDir } = tempDataDir()
+  const calls = []
+  try {
+    const startup = await runWorkerProcess({
+      env: { LEGION_DATA_DIR: dataDir, TEAM_HUB_URL: 'http://127.0.0.1:9', TEAM_HUB_TOKEN: 't' },
+      write: () => {},
+      installSignalHandlers: false,
+      fetchImpl: async (url) => {
+        calls.push(String(url))
+        // 就算 hub 真的给了一个任务，也不该走到这一步
+        return { ok: true, status: 200, json: async () => ({ ok: true, claimed: { taskId: 't1', attemptId: 'att:t1:1' } }) }
+      },
+      executorProvider: async () => ({ ok: false, code: 'EXECUTOR_SELF_CHECK_INCOMPATIBLE', message: '强制面未生效' }),
+    })
+    try {
+      assert.equal(startup.executorWired, false)
+      await startup.worker.tick()
+      assert.equal(startup.worker.state, 'no-executor',
+        '拒绝必须落到"不认领"上，而不是只在启动结果里写个 false')
+      const claims = calls.filter((u) => u.includes('/api/runtime/claim'))
+      assert.equal(claims.length, 0, `拒绝后一次 claim 都不能发，实际发了 ${claims.length} 次`)
+    } finally {
+      await startup.worker.stop({ reason: 'test' }).catch(() => undefined)
+      await startup.runPromise.catch(() => undefined)
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})

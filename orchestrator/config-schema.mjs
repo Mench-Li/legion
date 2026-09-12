@@ -71,6 +71,23 @@ export const NON_ENV_LITERALS = Object.freeze([
   // `CONTEXT_ASSEMBLY_FAILED.assemblyCode`——**两个都要认得**：
   // 前者回答"哪个阶段失败"，后者回答"失败成什么样"（能不能靠精简输入解决）。
   'CONTEXT_TOO_LARGE',
+  // PRT-253：生产执行引擎的具名拒绝码（worker/executor.mjs 的 EXECUTOR_CODES）。
+  //
+  // 逐个列出而不是按前缀通配，理由与上面那批相同：这些码会被**跨进程**读取
+  // （worker 上报 → 启动结果 → Launcher 诊断页 → 人排查），所以它们是契约。
+  //
+  // 它们存在的理由本身就是"要说清是哪种处境"：以前无论什么原因都只有一句
+  // `no-executor`，而"自检没过"（该去看强制面）、"缺宿主端口"（该去看组合层接线）、
+  // "没配 hub"（该去看配置）三种修复动作**完全不同**。
+  //
+  //   > 一句不区分处境的报错，与没有报错，在排障上的价值是一样的。
+  //
+  // `EXECUTOR_PROVIDER_THREW` / `EXECUTOR_PROVIDER_EMPTY` 归 worker 入口所有
+  // （run.mjs 在提供者抛错或没返回时合成），其余归执行引擎本身。
+  'EXECUTOR_SELF_CHECK_INCOMPATIBLE', 'EXECUTOR_HOST_PORT_REQUIRED',
+  'EXECUTOR_CONTEXT_NOT_FROZEN', 'EXECUTOR_CONTEXT_UNVERIFIED',
+  'EXECUTOR_BAD_WIRING', 'EXECUTOR_RUN_NOT_COMPLETED',
+  'EXECUTOR_PROVIDER_THREW', 'EXECUTOR_PROVIDER_EMPTY',
   // 缺阶段时 worker 的状态名
   'no-stages',
   // 状态机的具名错误码（state-machine/transitions.mjs 的 TRANSITION_ERRORS 与 states.mjs）。

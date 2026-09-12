@@ -15,8 +15,20 @@
 // ============================================================================
 
 import { runWorkerProcess } from '../../orchestrator/worker/run.mjs'
+import { productionExecutorProviderFromEnv } from '../../orchestrator/worker/executor-binding.mjs'
 
-const startup = await runWorkerProcess()
+// PRT-253：把生产执行引擎的**提供者**交给 worker。
+//
+// 为什么是提供者而不是直接造一个 executor：构造要先做启动自检（异步、可能拒绝），
+// 而拒绝的理由必须能进启动结果——"自检没过"、"缺宿主端口"、"忘了配 hub"
+// 三种处境的修复动作完全不同，而它们以前在 Launcher 看来都是同一句 `no-executor`。
+//
+// 今天它大概会返回 `EXECUTOR_HOST_PORT_REQUIRED`：DSH 宿主端口的绑定
+// 由 `runtime/dsh-composition/` 在 DSH 进程内完成（PRT-214/215），
+// 而 worker 是独立进程。装上之后，**这个入口不需要改一行代码**就开始真的执行。
+const startup = await runWorkerProcess({
+  executorProvider: () => productionExecutorProviderFromEnv({}),
+})
 
 // 起不来时必须**以非零码退出**。
 // 上一版这里写成 `const { runPromise } = await runWorkerProcess()`，
@@ -32,6 +44,20 @@ if (startup.ok !== true) {
 // 「这个没有端口的进程现在在干什么」的入口。§10 的仅回环约束也让「去连它看看」
 // 不成立——它根本没有端口。
 process.stdout.write(`[worker] 状态文件：${startup.statusPath}\n`)
+
+// 执行引擎没接上时必须**显式说出来**，而且要带上码。
+// 以前这里只有一句"没配"——于是"自检没过"（该去看强制面）、
+// "缺宿主端口"（该去看组合层接线）、"没配 hub"（该去看配置）
+// 三种修复动作完全不同的处境，在启动输出里长得一模一样。
+//
+// 注意这**不是**致命错误：worker 仍然起来了、仍然写状态文件、
+// 仍然不认领任何任务。一个"起来了但干不了活"的进程必须能说清自己缺什么，
+// 否则运维看到的信息就只剩"进程在跑"。
+if (startup.executorWired !== true) {
+  const r = startup.executorRefusal
+  process.stdout.write(`⚠ [worker] 执行引擎未接线：${r?.code ?? '(无码)'} ${r?.message ?? ''}\n`)
+  for (const reason of r?.reasons ?? []) process.stdout.write(`    · ${reason}\n`)
+}
 
 // 长驻在这里等主循环结束。主循环只在收到停止信号并完成
 // 「停止认领 → 释放 lease → 写终态」之后才返回，因此这一行同时也是

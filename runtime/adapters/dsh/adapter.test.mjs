@@ -878,3 +878,44 @@ test('⑬ 提前 break 事件流不会泄漏活跃运行', async () => {
   await new Promise((r) => setTimeout(r, 10))
   assert.deepEqual(a._internals.activeRuns(), [], '提前退出后不得留下活跃运行')
 })
+
+// ================================================================ ⑭ 冻结上下文优先
+//
+// PRT-253：这一层必须把 `request.prompt`（冻结快照的正文）**原样**发出去。
+//
+// 这一条为什么值得单独占一组：快照被冻结、被哈希、被审计、被持久化，
+// 为的就是能回答"模型当时看到了什么"。适配器在接线之前是**自己拼**提示词的
+// （`任务：…\n目标：…`），那份拼出来的文本会静静地取代冻结的正文——
+// 而库里那份快照看起来完全正常，装配器的 22 例端到端也全绿。
+//
+//   > 一份被冻结、被哈希、被审计、然后**没有被用上**的上下文，
+//   > 与一份从未被冻结的上下文，在"模型看到了什么"这个问题上是同一个答案。
+//
+// 只看"请求里含不含正文"是不够的——拼出来的包装里也可能含正文。
+// 因此这里断言发出去的文本**等于**冻结正文。
+
+test('⑭ 给了 `prompt` 就用它原文，不加任何包装', async () => {
+  const FROZEN = '【上下文快照】\n这是装配器冻结下来的正文。'
+  const host = hostOk()
+  const a = await readyAdapter(host)
+  await collect(a, makeRequest({ prompt: FROZEN }))
+  const sent = host.calls.startRun[0].options.prompt[0].text
+  assert.equal(sent, FROZEN, '必须原样：包一层标签就改了 finalText，与快照里存的对不上')
+})
+
+test('⑭ 没给 `prompt` 时退回阶段 2 的最小包装（对拍基准，逐字不变）', async () => {
+  const host = hostOk()
+  const a = await readyAdapter(host)
+  await collect(a, makeRequest())
+  const sent = host.calls.startRun[0].options.prompt[0].text
+  assert.equal(sent, ['任务：T-1', '目标：goal-1', '员工：emp-1', '验收：ok 为 true 且无额外字段'].join('\n'))
+})
+
+test('⑭ 空字符串的 `prompt` 视为没给（不把空上下文当成一份上下文发出去）', async () => {
+  const host = hostOk()
+  const a = await readyAdapter(host)
+  await collect(a, makeRequest({ prompt: '' }))
+  const sent = host.calls.startRun[0].options.prompt[0].text
+  assert.notEqual(sent, '', '空提示词是"什么都没告诉模型"，不该被当成一次正常的执行')
+  assert.match(sent, /任务：T-1/)
+})

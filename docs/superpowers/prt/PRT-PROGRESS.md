@@ -14,7 +14,7 @@
 > ⚠️ 「有用例」不等于「已生效」。带生产调用方的任务在证据栏注明调用方；
 > 只有自己的用例驱动的原语一律标 🟡。
 
-**最近更新**：PRT-314 多进程并发语义验证（WAL 跨进程可见 / busy_timeout 等待 / 真并发领取只有一个赢家 / 并发补列）
+**最近更新**：PRT-312 真实进程被强杀的整链路演练（不丢任务 / 不伪装成功 / 不重复外部写）
 
 ---
 
@@ -81,7 +81,7 @@
 | PRT-257 Launcher 负责 DSH 运行时与补丁层安装/自检/修复 | ⬜ | 分发形态路线 C 已裁决；Legion 自身四个 `file:` 包的分发方式待定 |
 | PRT-258 冻结进程清单 / 目录布局 / 配置 Schema / Secret Store 接口 | ✅ | 四份契约全部有实现与用例：`PRT-258-product-contracts.md`（前三份）+ `PRT-505-secret-store.md`（第四份） |
 
-## 阶段 3：Orchestrator Core（10/16）
+## 阶段 3：Orchestrator Core（11/16）
 
 | 任务 | 状态 | 证据 / 说明 |
 | --- | --- | --- |
@@ -96,7 +96,7 @@
 | PRT-309 重试、退避与 Dead Letter | ✅ | `scheduleRetry`（重试/放弃的**唯一**决策点）+ `failAndRetry` + 退避写进队列 `next_attempt_at_ms`（真的生效，不是没人调用的纯函数）+ 额度上限（默认 5 次）+ `retryDelayMs` 指数退避；`/api/runtime/fail`（失败结算的唯一入口）与 `/api/runtime/budget`。判据：额度耗尽必进 `DeadLetter`（终态），且回收路径**同样**查额度——否则"每次快失败就被杀"的任务会永远重试 |
 | PRT-310 恢复扫描与人工处置 | ✅ | `recoverExpired` 两条分支 + `listHeld`（`UnknownOutcome`/`DeadLetter` 待办清单，标出 `isLatest` 避免历史条目反复出现）+ `resolveAttempt`（四种决定各自对应一个不同的事实，缺省拒绝不猜）；路由 `GET /api/runtime/held` 与 `POST /api/runtime/resolve`。判据：挂起的任务必须能从界面找到并逐个结清，否则"不会静默重跑"会变成"静默消失" |
 | PRT-311 外部副作用幂等与 Unknown Outcome | ✅ | ① **幂等键跨尝试稳定**（`idem:{taskId}`，刻意不含 `attempt_no`——含了就等于没有）；② 状态机为 `UnknownOutcome` 补 `Validating`（确认已发生 → 按成功走验收，绝不重跑）与 `RetryableFailure`（确认未发生 → 降级为普通可重试失败）两条出边，`UnknownOutcome → Queued` **仍然非法**；③ 两个守卫要求显式布尔值，缺省报 `MISSING_GUARD_INPUT`。判据：对账的两个确定结论都能被记下来——原来一个只能被当失败重做（重复付费），一个永远等人工 |
-| PRT-312 状态迁移 / 并发 / 崩溃 / 恢复测试 | 🟡 | 已有：13×13 迁移矩阵、CAS 竞态、两连接并发领取（只有单赢家）、过期 epoch 拒写、崩后回收两条分支、**「每次快失败就被杀」的回收也要查额度**、145 例运行面用例（含 13 例真 team-hub+真 worker）。**缺**：真实进程被强杀的整链路演练（Windows 上强制终止不走信号处理器，见 PRT-301 文档） |
+| PRT-312 状态迁移 / 并发 / 崩溃 / 恢复测试 | ✅ | 13×13 迁移矩阵、CAS 竞态、两连接并发领取、过期 epoch 拒写、崩后回收两条分支、**真进程被强杀**的整链路演练（`run-kill-drill` 2 例：真 worker 进程 + 真 team-hub，`SIGKILL` 后逐条验阶段 3 完成标准的三个分句「不丢任务 / 不伪装成功 / 不重复执行已确认的外部写操作」，并用 marker 文件数外部写的**次数**）+ 多进程并发（PRT-314）+ 160 例运行面用例。**这条用例抓到的第一件事**是"执行成功 ≠ `Completed`"：成功入 `Validating`（机器验收 PRT-307 未交付），若断言 `Completed` 要么永远等不到、要么诱使实现把"执行完"写成"已完成"——那正是伪装成功 |
 | PRT-313 lease 权威时间、`leaseEpoch`、过期拒写 | ✅ | `lease_epoch` 单调、每次 `claim`/`release`/回收都推进；过期写入返回 `LEASE_EPOCH_STALE` 且**带上真实 epoch**（否则 worker 只能无限重试）；`/api/config` 增加 `runPlane` 能力发现位 |
 | PRT-314 WAL / `busy_timeout` / 原子领取并发语义 | ✅ | 真**操作系统进程**并发（`team-hub/scripts/claim-probe.mjs` + `run-concurrency` 套件 5 例）：WAL 跨进程可见、`busy_timeout` 在锁争用下按预算等待而不是抛 SQLITE_BUSY、6 个进程同时抢同一条任务**恰好一个赢**（不重复执行的数据面保证）、并发补列不崩。原子原语提取到 `team-hub/schema-util.mjs`（`BEGIN IMMEDIATE` 内重读后 ALTER）。**这条用例当场抓到过真实缺陷**：非原子 `ensureColumn` 让两个并发启动的进程各执行一次 ALTER，后者在模块加载期因 `duplicate column name` 崩溃 |
 | PRT-315 拆分 `plugins/src/index.ts` | ⬜ | 阶段 3 评审闸门已过（热点文件 1/40、2/40） |
@@ -233,7 +233,7 @@
 | 1 Runtime Contract | 9 | 0 | 0 | 0 | 9 |
 | 2 DshRuntimeAdapter | 10 | 5 | 0 | 0 | 15 |
 | 2.5 商业薄切片 | 2 | 1 | 4 | 1 | 8 |
-| 3 Orchestrator Core | 7 | 3 | 6 | 0 | 16 |
+| 3 Orchestrator Core | 8 | 2 | 6 | 0 | 16 |
 | 4 上下文边界 | 0 | 0 | 13 | 0 | 13 |
 | 5 模型与密钥 | 0 | 2 | 9 | 0 | 11 |
 | 6 工具、权限和审批 | 1 | 3 | 16 | 0 | 20 |
@@ -241,7 +241,7 @@
 | 8 安装、升级和回滚 | 0 | 1 | 12 | 0 | 13 |
 | 9 商业 Alpha 保障 | 0 | 0 | 9 | 1 | 10 |
 | 10 能力包协议 | 0 | 0 | 6 | 0 | 6 |
-| **合计** | **45** | **18** | **80** | **2** | **145** |
+| **合计** | **46** | **17** | **80** | **2** | **145** |
 
 > 计数口径：**部分**计入「已有交付物但完成标准未全部满足」，
 > 因此不能与「已完成」相加后宣称完成度。真实完成度按**完成标准**判定：

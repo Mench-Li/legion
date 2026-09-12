@@ -460,6 +460,16 @@ async function stageTest() {
       files: ['team-hub/run-concurrency.test.mjs'],
       cwd: ROOT,
     },
+    // PRT-312：**强制终止** worker 的整链路演练。
+    // 这里被杀的是真的操作系统进程（orchestrator/worker/scripts/kill-drill-worker.mjs），
+    // 因此验的是「进程没了之后磁盘上留下的东西，会让回收做出正确判断」，
+    // 而不只是「回收函数写对了」。三条判据对应阶段 3 完成标准逐字：
+    // 不丢任务、不伪装成功、不重复执行已确认的外部写操作。
+    {
+      label: 'run-kill-drill（PRT-312：真实进程被强杀后不丢任务、不伪装成功、不重复外部写）',
+      files: ['team-hub/run-kill-drill.test.mjs'],
+      cwd: ROOT,
+    },
     // 阶段 2.5 / 阶段 5：密钥库最小闭环（PRT-505，PRT-258 的第四份契约）。
     // 这一组的断言集中在两类**不会抛异常**的失败上：
     //   ① 元数据接口（list / toJSON / 审计 / 错误对象）把值或密文带出去——

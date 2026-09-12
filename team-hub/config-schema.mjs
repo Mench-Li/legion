@@ -122,6 +122,19 @@ export const SCHEMA = defineSchema({
     'MIGRATION_OK', 'MIGRATION_RUNTIME_TYPE_REQUIRED', 'MIGRATION_ID_COLLISION',
     'MIGRATION_SECRET_IN_SOURCE', 'MIGRATION_BAD_SOURCE', 'MIGRATION_PLAN_STALE',
     'MIGRATION_INVALID_PROFILE', 'MIGRATION_PARTIAL',
+    // PRT-409 上下文快照（team-hub/context-store.mjs）与 PRT-407 装配路由：
+    //   CONTEXT_ATTEMPT_REQUIRED   — 快照没带 attemptId（它是主键）
+    //   CONTEXT_NOT_FOUND          — 查不到这份快照
+    //   CONTEXT_SNAPSHOT_CONFLICT  — 同一 attemptId 已有**不同**内容的快照。
+    //                                同一次运行的上下文不可能有两个版本，故拒绝而非覆盖
+    //   CONTEXT_SNAPSHOT_INVALID   — 哈希与内容不符（被改过），或写入后复读不一致
+    //   CONTEXT_BAD_PAYLOAD        — 库里的 payload 不是合法 JSON。**不当作空快照**
+    //   CONTEXT_PERMISSION_REQUIRED— 装配路由没被告知权限。路由不替调用方决定权限：
+    //                                默认放行会让越权来源静默进入上下文
+    //   CONTEXT_BAD_CANDIDATE      — candidates 不是数组 / 元素形状不对
+    'CONTEXT_ATTEMPT_REQUIRED', 'CONTEXT_NOT_FOUND', 'CONTEXT_SNAPSHOT_CONFLICT',
+    'CONTEXT_SNAPSHOT_INVALID', 'CONTEXT_BAD_PAYLOAD', 'CONTEXT_PERMISSION_REQUIRED',
+    'CONTEXT_BAD_CANDIDATE',
   ],
   // team-hub 的 CHAT_ 前缀覆盖了插件的提示词预算变量（CHAT_CTX_*）：它们是**插件**读的配置，
   // team-hub 不读，登记为外来变量，避免误报成「拼写错误」（P3-4）。

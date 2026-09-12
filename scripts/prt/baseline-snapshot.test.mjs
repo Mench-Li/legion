@@ -12,6 +12,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
+  assertSchemaCoverage,
   buildSnapshot,
   diffSnapshots,
   extractPermissionModes,
@@ -20,6 +21,7 @@ import {
   extractStringArray,
   extractTables,
   extractTransitions,
+  findSchemaCreatingFiles,
   REPO_ROOT,
   SCHEMA_SCAN_DIRS,
   SCHEMA_SOURCE_FOR,
@@ -169,48 +171,44 @@ test('④ 基线不含时间戳（否则每次 diff 都会假红）', () => {
 })
 
 test('⑤ **每个建表模块都登记进了 schema 采集**（漏登记 = 那张表对基线不可见）', () => {
-  // 这条检查把"记得更新 SCHEMA_SOURCES"变成一个**会红的门禁**。
   // 背景：`dbTables` 曾经只扫 server.mjs，于是 run-store.mjs 的四张表
   // 与 model-store.mjs 的 model_profiles 对基线完全不可见——`--check` 报
   // "无漂移"，而真实 schema 已经多了五张。一个看不见某类变更的棘轮比没有
   // 棘轮更坏：它给出"已核对过"的错觉。
   //
-  // 遍历所有会放建表语句的目录，找出含 `CREATE TABLE IF NOT EXISTS` 的
-  // **非测试** 源文件，逐个断言它们在 SCHEMA_SOURCE_PATHS 里。
-  const registered = new Set(SCHEMA_SOURCE_PATHS.map((p) => resolve(p)))
-  const found = []
-  const walk = (dir) => {
-    let entries
-    try {
-      entries = readdirSync(dir, { withFileTypes: true })
-    } catch {
-      return // 目录不存在（例如某些工作树里没有 security/）
-    }
-    for (const e of entries) {
-      if (e.name === 'node_modules' || e.name.startsWith('.')) continue
-      const full = join(dir, e.name)
-      if (e.isDirectory()) { walk(full); continue }
-      if (!e.name.endsWith('.mjs')) continue
-      // 测试文件里的建表语句是夹具，不属于产品 schema
-      if (e.name.includes('.test.')) continue
-      let text
-      try { text = readFileSync(full, 'utf8') } catch { continue }
-      if (/CREATE TABLE IF NOT EXISTS/.test(text)) found.push(resolve(full))
-    }
+  // **这条检查的实现已经搬进工具本身**（`assertSchemaCoverage`），
+  // 并由 `buildSnapshot()` 调用，所以 `--check` 与 `--record` 都会先撞上它。
+  // 原因是一次真实的双层失效：`--check` 报"无漂移"而本用例会红——
+  // 两者都对，但**人跑门禁时拿到的是绿灯**。本项目纪律是
+  // 「一道没人必须记得的闸门才是能守住的闸门」，所以这里只断言"工具确实在查"，
+  // 不再自己再实现一遍（两份实现会漂移，而那正是被检查的东西）。
+  const r = assertSchemaCoverage()
+  assert.ok(r.found >= 5, `只扫到 ${r.found} 个建表文件，扫描目录可能已与仓库结构脱节`)
+  assert.ok(r.registered >= 6, `只登记了 ${r.registered} 个 schema 源`)
+  // 六个建表模块必须都在扫到的集合里——否则"扫到了但没建表"这类错会被反向检查
+  // 当成"列表老化"，报出一个方向完全相反的结论。
+  const found = findSchemaCreatingFiles()
+  for (const p of SCHEMA_SOURCE_PATHS) {
+    assert.ok(found.includes(resolve(p)), `${p} 未被 findSchemaCreatingFiles 扫到`)
   }
-  for (const d of SCHEMA_SCAN_DIRS) walk(join(REPO_ROOT, d))
 
-  const unregistered = found.filter((p) => !registered.has(p))
-  assert.deepEqual(
-    unregistered.map((p) => p.replace(REPO_ROOT, '').replace(/\\/g, '/')), [],
-    '这些文件建表但未登记进 SCHEMA_SOURCES：它们的表对平台契约基线不可见。\n' +
-    '请在 scripts/prt/baseline-snapshot.mjs 的 SCHEMA_SOURCES 里加上它们。',
+  // **反向验证必须真的生效。**
+  // 第一版这里写的是 `SCHEMA_SOURCES.length = 0; push('server')` ——而那**什么都没改**：
+  // `SCHEMA_SOURCE_PATHS` 是模块加载时算好的快照，运行时改 `SCHEMA_SOURCES`
+  // 影响不到它。于是 `assert.throws` 拿到了"没抛"，用例红了——
+  // **是这条断言抓住了"我的变红手法没生效"**。
+  // （同族：一个没生效的变红验证，和一个通过的验证，在输出上完全一样。）
+  // 现在改成注入一个被削减的登记表，走的是同一条实现。
+  assert.throws(
+    () => assertSchemaCoverage({ registeredPaths: [SCHEMA_SOURCE_PATHS[0]] }),
+    /未登记进 SCHEMA_SOURCES/,
+    '漏登记一个建表模块时，覆盖率检查必须红',
   )
-  // 反向：登记了却不再建表的文件要报出来（列表老化会让下一个人以为它被覆盖了）
-  const stale = SCHEMA_SOURCE_PATHS
-    .filter((p) => SCHEMA_SCAN_DIRS.some((d) => resolve(p).startsWith(resolve(join(REPO_ROOT, d)))))
-    .filter((p) => !found.includes(resolve(p)))
-  assert.deepEqual(stale, [], '这些文件已登记但不再建表，请从 SCHEMA_SOURCES 里移除')
+  assert.throws(
+    () => assertSchemaCoverage({ registeredPaths: [...SCHEMA_SOURCE_PATHS, join(REPO_ROOT, 'team-hub', 'ghost.mjs')] }),
+    /不再建表/,
+    '登记了一个不建表的文件时，反向检查必须红',
+  )
 })
 
 test('⑦ **用常量做路径守卫的路由必须被拒绝，而不是静默漏掉**', () => {

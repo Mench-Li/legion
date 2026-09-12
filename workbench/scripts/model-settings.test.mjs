@@ -287,4 +287,50 @@ describe('⑦ 导入计划：拒绝优先，跳过也要说', () => {
       assert.match(v.blocked, /先选择/)
     }
   })
+
+  test('**被拒绝的行必须说出来**（否则一次静默的部分导入看起来像全成功）', () => {
+    // 后端形状：`ok: true` 与 `refused` 非空**可以同时成立**——
+    // `model-migration.mjs` 只在"源里出现密钥"时才因 refused 拒绝整个计划，
+    // 单纯的行级拒绝（不是对象、档案字段非法）会与 OK 并存。
+    // 之前 `importPlanView` 读了 `refused` 却从不使用（TS6133 指的就是这里），
+    // 于是界面会说"可以导入 · 新建 7 个"，而另外 3 行**无声消失**。
+    const v = importPlanView({
+      ok: true,
+      toCreate: ['a', 'b', 'c', 'd', 'e', 'f', 'g'],
+      refused: [
+        { index: 2, code: 'MIGRATION_BAD_SOURCE', reason: '这一行不是对象' },
+        { index: 5, code: 'MIGRATION_INVALID_PROFILE', reason: 'runtimeType 缺失' },
+      ],
+    })
+    assert.equal(v.ok, true, '整包仍然可用')
+    const refusedLines = v.lines.filter((l) => /被拒绝/.test(l))
+    assert.equal(refusedLines.length, 2, `两条拒绝各要说一次；实际：${v.lines.join(' | ')}`)
+    assert.ok(refusedLines.some((l) => /不是对象/.test(l)), '理由要带出来')
+    assert.ok(refusedLines.some((l) => /runtimeType 缺失/.test(l)))
+    assert.ok(refusedLines.every((l) => /不会导入/.test(l)), '必须说清这些行不会进去')
+    // 有拒绝行时仍然需要确认——确认框是用户看到这些硬话的最后机会
+    assert.equal(v.needsConfirm, true)
+  })
+
+  test('拒绝项是字符串（旧数据）时也能读，且空理由不产生空话', () => {
+    const v = importPlanView({ ok: true, toUpdate: ['a'], refused: ['字段非法', ''] })
+    const lines = v.lines.filter((l) => /被拒绝/.test(l))
+    assert.equal(lines.length, 2)
+    assert.ok(lines.some((l) => /字段非法/.test(l)))
+    // 没有理由时只说"有 1 行被拒绝"，而不是拼出一个冒号后面什么都没有的句子
+    assert.ok(lines.some((l) => l === '有 1 行被拒绝，不会导入'), lines.join(' | '))
+  })
+
+  test('**每一行都被拒绝时，标题不能说"没有需要变更的内容"**', () => {
+    // 这是 `refused.length` 参与 `needsConfirm` 唯一真正起作用的场景：
+    // 没有任何可导入项、但每一行都被拒绝。少算 `refused` 的话，
+    // `needsConfirm` 变成 false，界面就成了"没有变更要确认"的样子——
+    // 用户以为包是空的，而真实情况是他给的每一行都没能进来。
+    const v = importPlanView({ ok: true, toCreate: [], toUpdate: [], refused: [{ reason: '不是对象' }] })
+    assert.equal(v.ok, true)
+    assert.equal(v.needsConfirm, true, '有被拒绝的行时必须让用户确认')
+    assert.doesNotMatch(v.headline, /没有需要变更的内容/, `标题在说谎：${v.headline}`)
+    assert.match(v.headline, /被拒绝/)
+    assert.ok(v.lines.some((l) => /不是对象/.test(l)))
+  })
 })

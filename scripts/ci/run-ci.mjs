@@ -694,6 +694,31 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-407：Context Assembler。核心是**第三种状态**——"部分包含"。
+      // `sources`/`excluded` 只能表达"整个进了"/"整个没进"，而截断产出的第三种
+      // 如果不记，一份截断过的快照会声称模型看过了全文，而 spec §6.5 要的
+      // 恰恰是「还原其**实际**输入」。
+      label: 'context-assembler（PRT-407：裁剪三账本守恒 / 权限只拿元数据 / 必需来源放不下即失败）',
+      files: ['runtime/context/assembler.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      // PRT-413：token 计量。守的是一条**方向性**性质：估算器必须不低估。
+      // 低估 → 以为放得下，把超限内容发出去，在供应商侧失败而**钱已经花了**；
+      // 高估 → 提前裁一点，没有金钱代价。所以"保守"是可测的上界性质。
+      label: 'context-tokenizer（PRT-413：估算器必须是可测的上界 / 不许自称精确）',
+      files: ['runtime/context/tokenizer.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      // PRT-409：快照持久化。守"没有持久化就等于无法查看"——
+      // 在写入这张表之前，快照只存在于一次函数调用的栈上，
+      // 于是阶段 4 的完成标准无论装配器做得多对都无法达成。
+      label: 'context-store（PRT-409：快照不可变 / 落库前与读回时都验哈希）',
+      files: ['team-hub/context-store.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       label: 'run-kill-drill（PRT-312：真实进程被强杀后不丢任务、不伪装成功、不重复外部写）',
       files: ['team-hub/run-kill-drill.test.mjs'],
       cwd: ROOT,

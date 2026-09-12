@@ -2,12 +2,13 @@
   "$comment": "PRT-007 旧系统平台契约基线。由 scripts/prt/baseline-snapshot.mjs 生成；不含时间戳以便逐字节 diff。漂移由 sources 的 sha256 归因。",
   "version": 1,
   "sources": {
-    "team-hub/server.mjs": "bfc5576faabdffb9aa7dafdc216953aa57a272dc284822da85a49307b3a07aa4",
+    "team-hub/server.mjs": "a612f8d5655d5b76a44472cfa13bdce310b2f66d55f38484474a79a3769c9711",
     "team-hub/permission-engine.mjs": "9e60a09d971474209a92047767d78bcc155c414a3fd3fc7442ff01f59f3b4168",
     "team-hub/run-store.mjs": "2ffab3645f3cf1969c02ff146e9759e1bfba4a6fb77f7423cdbb7e38ee4f3df1",
     "team-hub/model-store.mjs": "1ab1a5b548740ca5f6810de6fe25658e79aea9d95fd6382ccff5facf6613d779",
     "team-hub/binding-store.mjs": "f9b2b7a50e1b33b0c571530e8439cd6784121458494d7a4590dfaabcce7db8c0",
-    "team-hub/budget-ledger.mjs": "6969f9c9186bdbd7206ab800dbd5f08947468074cc091a8b3df6378fc0947d51"
+    "team-hub/budget-ledger.mjs": "6969f9c9186bdbd7206ab800dbd5f08947468074cc091a8b3df6378fc0947d51",
+    "team-hub/context-store.mjs": "47eb676c0b1d43138282535d18687039f7a0c66780d9bc7641766854037c980a"
   },
   "httpRoutes": [
     "DELETE /api/model-bindings/",
@@ -28,6 +29,8 @@
     "GET /api/chat/reply-settings",
     "GET /api/config",
     "GET /api/config-bundle",
+    "GET /api/context-snapshots",
+    "GET /api/context-snapshots/",
     "GET /api/events",
     "GET /api/exec",
     "GET /api/exec/queue",
@@ -84,6 +87,7 @@
     "POST /api/comment",
     "POST /api/config-bundle/apply",
     "POST /api/config-bundle/plan",
+    "POST /api/context-snapshots/assemble",
     "POST /api/create",
     "POST /api/exec",
     "POST /api/exec/request",
@@ -161,6 +165,7 @@
     "rules",
     "run_attempt_events",
     "run_attempts",
+    "run_context_snapshots",
     "run_handoffs",
     "run_validations",
     "skill_sources",

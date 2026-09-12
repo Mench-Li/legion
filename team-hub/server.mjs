@@ -85,6 +85,15 @@ import { createProbeService } from './probe-service.mjs'
 // **只搬能确定的东西**：老数据里没有 runtimeType、没有 endpoint、没有凭证，
 // 三者都**不猜**——猜出来的档案会看起来可用，直到第一次运行才失败。
 import { applyModelMigration, describeMigration, planModelMigration } from './model-migration.mjs'
+// PRT-409：上下文快照的持久化与查看。
+//
+// 阶段 4 的完成标准是「任一员工运行都能还原其实际输入、来源版本、过滤和裁剪原因」。
+// 在写入这张表之前，那份快照只存在于一次函数调用的栈上——**没有持久化就无从查看**，
+// 于是完成标准无法达成，无论装配器做得多对。
+import { createContextStore } from './context-store.mjs'
+import { assembleContext, describeAssembly } from '../runtime/context/assembler.mjs'
+import { createConservativeTokenizer, tokenizerForProfile } from '../runtime/context/tokenizer.mjs'
+import { createContextSource, SOURCE_TRUST } from '../runtime/contracts/context.mjs'
 // 配置导入导出（PRT-508）：**导出永远不含密钥**。契约层负责"包里有没有
 // 密钥"与"这包能不能导"，路由层只负责读写与把拒绝翻成状态码。
 import {
@@ -230,6 +239,42 @@ let probeServiceInstance = null
 function probeService() {
   if (probeServiceInstance === null) probeServiceInstance = createProbeService({ env: process.env })
   return probeServiceInstance
+}
+
+// PRT-409：上下文快照存储。惰性建表（与 probeService 同一手法），
+// 因为模块顶层建表会让 `import` 这个文件本身就产生副作用。
+let contextStoreInstance = null
+/**
+ * 精确 tokenizer 的注册表（PRT-413）。
+ *
+ * **默认为空**，因为本项目零依赖、拿不到任何供应商的词表。空表不是缺陷，
+ * 而是如实：拿不到精确 tokenizer 时用**明确标记的**保守估算器（spec §6.5），
+ * 于是 `tokens.kind` 会如实写成 `conservative-estimate`。
+ *
+ * 有词表时在这里 `set(model, defineExactTokenizer({ ... }))` 即可——
+ * 本表的存在是为了让"精确"有一个**接入点**，而不是让默认值看起来精确。
+ */
+const TOKENIZER_REGISTRY = new Map()
+
+function contextStore() {
+  if (contextStoreInstance === null) {
+    contextStoreInstance = createContextStore({
+      db,
+      // **必须适配**：本文件的 `audit` 是**位置参数**的
+      // `audit(member, scope, action, taskId, detail, goalId)`，而 store 按
+      // `writeAudit(payload)` 的对象形态调用（与 modelStore / bindingStore 同一约定）。
+      //
+      // 第一版直接把 `audit` 函数本身传了进去，于是 `member` 收到一个对象、
+      // `scope` 收到 `undefined` → SQLite 绑定错误。它不是"审计没写成"那么轻：
+      // 异常发生在**快照已经落库之后**，所以客户端拿到 400 而库里已经有了那一行。
+      // **一次成功的写入被报成失败**——调用方会重试，而重试命中幂等分支，
+      // 于是它最终以为成功、而那次操作的审计永远缺失。
+      // （幂等分支现在也写审计，见 context-store.mjs 的说明。）
+      writeAudit: ({ action, attemptId, runId, detail, actor }) =>
+        audit(actor ?? null, runId ?? '*', action, attemptId, detail),
+    })
+  }
+  return contextStoreInstance
 }
 
 const modelStore = createModelStore({
@@ -3547,6 +3592,115 @@ async function handle(req, res, stripPrefix) {
         })
         try { settleGoalsOfScope(getTask(r.attempt.taskId).scope) } catch { /* 任务不存在时不结算 */ }
         return r
+      })
+      return
+    }
+    // ── 上下文快照（PRT-407 / PRT-409，spec §6.5）──
+    //
+    // 读面是重点：spec §6.5 要求「还原其实际输入、来源版本、过滤和裁剪原因」，
+    // 而这句话只有在**存下来并能读回来**之后才有意义。
+    if (req.method === 'GET' && path === '/api/context-snapshots') {
+      const runId = url.searchParams.get('runId')
+      const scope = url.searchParams.get('scope')
+      const limitRaw = url.searchParams.get('limit')
+      const limit = limitRaw === null ? 100 : Math.min(Math.max(Number(limitRaw) || 0, 1), 500)
+      const items = contextStore().list({ runId, scope, limit })
+      json(res, 200, { ok: true, snapshots: items, count: contextStore().count(), serverTimeMs: Date.now() })
+      return
+    }
+    // 服务端装配（PRT-407）。这条路由的存在有两层意义：
+    //   ① 装配器有了**真实调用方**（此前它只有用例）；
+    //   ② 装配与持久化在同一个请求里完成，于是"冻结在 Running 之前"
+    //      不是一条靠人记住的约定。
+    if (req.method === 'POST' && path === '/api/context-snapshots/assemble') {
+      await handleRun(req, res, (body) => {
+        const scope = body.scope ?? 'default'
+        // **权限判定必须由调用方给出，路由不替它决定。**
+        // 不写就默认放行，是这一段里最危险的一种默认值：一次漏传会让
+        // 越权来源静默进入上下文，而快照上看不出任何异常。
+        const allowAll = body.canReadAll === true
+        const allowIds = Array.isArray(body.canReadIds) ? body.canReadIds : null
+        if (!allowAll && allowIds === null) {
+          json(res, 400, {
+            ok: false, code: 'CONTEXT_PERMISSION_REQUIRED',
+            error: '必须显式给出 canReadIds（可读来源 id 列表）或 canReadAll: true。路由不替调用方决定权限——默认放行会让越权来源静默进入上下文。',
+            serverTimeMs: Date.now(),
+          })
+          return
+        }
+        const allowed = new Set(allowIds ?? [])
+        const canRead = (meta) => (allowAll ? true : allowed.has(meta.id))
+
+        if (!Array.isArray(body.candidates)) {
+          json(res, 400, { ok: false, code: 'CONTEXT_BAD_CANDIDATE', error: 'candidates 必须是数组（没有来源时给空数组）' })
+          return
+        }
+        // 用 `createContextSource` 构造来源：于是来源的**形状约束**
+        //（默认不可信、不许带权威字段、未知字段拒绝）在这一层同样生效，
+        // 而不是只在用例里生效。
+        const candidates = body.candidates.map((c, i) => {
+          if (c === null || typeof c !== 'object' || c.source === null || typeof c.source !== 'object') {
+            throw Object.assign(new Error(`candidates[${i}] 必须是 { source } 形状`), { statusCode: 400, code: 'CONTEXT_BAD_CANDIDATE' })
+          }
+          return {
+            source: createContextSource(c.source),
+            scope: c.scope ?? undefined,
+            required: c.required === true,
+            allowTruncate: c.allowTruncate === true,
+            supersededBy: c.supersededBy ?? undefined,
+            // `missing`：调用方**试着取过**但产物不在。没有这条通路时，
+            // "我取不到"唯一能做的事就是不提这个候选，而快照会看起来完整。
+            missing: c.missing === true,
+            missingReason: c.missingReason ?? undefined,
+          }
+        })
+
+        // tokenizer：能按模型找到精确的就用精确的，否则**明说**是估算。
+        // 注册表默认为空——本项目零依赖，拿不到任何供应商的词表。
+        const tokenizer = body.model === undefined
+          ? createConservativeTokenizer()
+          : tokenizerForProfile({ model: body.model }, TOKENIZER_REGISTRY)
+
+        const snapshot = assembleContext({
+          attemptId: body.attemptId,
+          runId: body.runId,
+          frozenAtMs: body.frozenAtMs ?? Date.now(),
+          associations: body.associations ?? {},
+          candidates,
+          policy: { scope, canRead, priority: body.priority, maxTokens: body.maxTokens ?? null },
+          tokenizer,
+        })
+        const rec = contextStore().record(snapshot, { scope, actor: body.actor ?? null })
+        return { recorded: rec, summary: describeAssembly(snapshot), snapshotHash: snapshot.snapshotHash }
+      })
+      return
+    }
+    if (req.method === 'GET' && path.startsWith('/api/context-snapshots/')) {
+      const PREFIX = '/api/context-snapshots/'
+      let attemptId
+      try {
+        attemptId = decodeURIComponent(path.slice(PREFIX.length))
+      } catch {
+        json(res, 400, { ok: false, code: 'BAD_ID_ENCODING', error: 'attemptId 不是合法的 URL 编码' })
+        return
+      }
+      if (attemptId === '' || attemptId.includes('/')) {
+        json(res, 400, { ok: false, code: 'MISSING_PARAM', error: '路径应为 /api/context-snapshots/<attemptId>' })
+        return
+      }
+      const found = contextStore().get(attemptId)
+      if (found === null) {
+        json(res, 404, { ok: false, code: 'CONTEXT_NOT_FOUND', error: `没有这份上下文快照：${attemptId}` })
+        return
+      }
+      // `?verify=1`：读回时**再验一次哈希**。库里的记录可能被外部改过，
+      // 而一份被改过的记录会让往后每一次"还原"都建立在假前提上。
+      const withVerify = url.searchParams.get('verify') === '1'
+      json(res, 200, {
+        ok: true,
+        ...found,
+        ...(withVerify ? { verification: contextStore().verify(attemptId) } : {}),
+        serverTimeMs: Date.now(),
       })
       return
     }

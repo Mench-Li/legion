@@ -323,6 +323,8 @@ export function createTokenMeasurement(input) {
  * @param {object} input.tokens `createTokenMeasurement` 的产物
  * @param {object} [input.budget] `{maxTokens, trimmed}` —— 裁剪是否发生过
  * @param {string|null} [input.finalText] 真正发给 Runtime 的文本
+ * @param {unknown[]} [input.segments] 最终文本的段落表（每段切回一个来源）
+ * @param {unknown[]} [input.truncations] 被截断的来源清单（**部分包含**是第三种状态）
  */
 export function freezeContextSnapshot(input) {
   if (input === null || typeof input !== 'object') throw new Error('RunContextSnapshot 必须是对象')
@@ -352,6 +354,14 @@ export function freezeContextSnapshot(input) {
     candidateCount: input.candidateCount,
     sources,
     excluded,
+    // `segments` 与 `truncations` **必须进哈希**。
+    //
+    // 第一版把它们当成"附加信息"，在 freeze 之后才拼上去——于是
+    // `verifySnapshotHash` 对**每一份**装配出来的快照都返回 false。
+    // 一个总是失败的校验函数比没有更坏：所有人都会学会忽略它。
+    // 更本质的是：截断改变了"模型实际看到了什么"，那正是这份哈希要封住的东西。
+    segments: Array.isArray(input.segments) ? input.segments : [],
+    truncations: Array.isArray(input.truncations) ? input.truncations : [],
     tokens,
     budget: { maxTokens: budget.maxTokens ?? null, trimmed: budget.trimmed === true },
     finalText: input.finalText === undefined ? null : input.finalText,

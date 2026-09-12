@@ -29,7 +29,7 @@
 //   node scripts/prt/baseline-snapshot.mjs --help
 // ============================================================================
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -59,6 +59,7 @@ const SCHEMA_SOURCES = [
   'modelStore',
   'bindingStore',
   'budgetLedger',
+  'contextStore',
 ]
 
 // 这些模块也一并纳入 sources 哈希：它们变了，基线里的表清单就可能过期。
@@ -66,6 +67,7 @@ SOURCES.runStore = join(ROOT, 'team-hub', 'run-store.mjs')
 SOURCES.modelStore = join(ROOT, 'team-hub', 'model-store.mjs')
 SOURCES.bindingStore = join(ROOT, 'team-hub', 'binding-store.mjs')
 SOURCES.budgetLedger = join(ROOT, 'team-hub', 'budget-ledger.mjs')
+SOURCES.contextStore = join(ROOT, 'team-hub', 'context-store.mjs')
 
 /**
  * 采集 schema 的目录。
@@ -285,8 +287,100 @@ export function extractPermissionModes(source) {
   return [...modes].sort()
 }
 
+/**
+ * 找出所有**会建表的非测试源文件**。
+ *
+ * 与 `SCHEMA_SOURCES` 配合构成覆盖率检查：新增一个建表模块却忘了登记时，
+ * 那张表对基线不可见，而 `--check` 会报告"无漂移"。
+ */
+export function findSchemaCreatingFiles() {
+  const found = []
+  const walk = (dir) => {
+    let entries
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch (e) {
+      // **只容忍"这个目录不存在"**（某些工作树里没有 security/ 等）。
+      //
+      // 第一版这里写的是裸 `catch { return }`——于是它把
+      // `readdirSync is not defined`（漏了 import）也一起吞了，
+      // `found` 变成空数组，覆盖率检查**静默地什么都没查**。
+      //
+      // 那次是反向检查（"登记了却不再建表"）把它撞出来的：它报了 6 个假阳性。
+      // 如果只有正向检查，`assertSchemaCoverage()` 会返回 `{found: 0}` 并**通过**
+      // ——即"一个什么都不查的闸门报绿灯"，正是这个函数被写出来要防的那种事，
+      // 只不过这次发生在它自己身上。
+      //
+      // 一个把编程错误吞成"没有发现"的 catch，比没有 catch 更坏。
+      if (e !== null && typeof e === 'object' && (e.code === 'ENOENT' || e.code === 'ENOTDIR')) return
+      throw e
+    }
+    for (const e of entries) {
+      if (e.name === 'node_modules' || e.name.startsWith('.')) continue
+      const full = join(dir, e.name)
+      if (e.isDirectory()) { walk(full); continue }
+      if (!e.name.endsWith('.mjs')) continue
+      // 测试文件里的建表语句是夹具，不属于产品 schema
+      if (e.name.includes('.test.')) continue
+      let text
+      try { text = readFileSync(full, 'utf8') } catch { continue }
+      if (/CREATE TABLE IF NOT EXISTS/.test(text)) found.push(resolve(full))
+    }
+  }
+  for (const d of SCHEMA_SCAN_DIRS) walk(join(ROOT, d))
+  return found
+}
+
+/**
+ * 覆盖率检查：**每个建表模块都必须登记进 `SCHEMA_SOURCES`**。
+ *
+ * ## 为什么这条检查在**工具里**，而不是只在测试里
+ *
+ * 它原先只在 `baseline-snapshot.test.mjs` 里。于是出现了一个真实的双层失效：
+ *
+ *   · `node scripts/prt/baseline-snapshot.mjs --check` 报 **"无漂移"**；
+ *   · 而 `run-ci` 里的那条用例会红。
+ *
+ * 两者都对，但**人跑门禁时拿到的是绿灯**。本项目的纪律是
+ * 「**一道没人必须记得的闸门才是能守住的闸门**」——把检查留在测试里，
+ * 等于要求每个人在跑 `--check` 之前先想起"还要跑测试"。所以把它搬进 `buildSnapshot()`：
+ * `--check` 与 `--record` 都会先撞上它。
+ *
+ * （这次是 `team-hub/context-store.mjs` 触发的：`run_context_snapshots` 建了表，
+ *   而基线报"无漂移"。测试红得完全正确，只是**门禁没红**。）
+ *
+ * `registeredPaths` 可注入是为了**让这条检查本身可以被反向验证**：
+ * `SCHEMA_SOURCE_PATHS` 是模块加载时算好的快照，运行时改不动它，
+ * 于是"临时把一项拿掉看它会不会红"在那个层面做不到。
+ */
+export function assertSchemaCoverage({ registeredPaths = SCHEMA_SOURCE_PATHS } = {}) {
+  const registered = new Set(registeredPaths.map((p) => resolve(p)))
+  const found = findSchemaCreatingFiles()
+  const unregistered = found.filter((p) => !registered.has(p))
+  must(
+    unregistered.length === 0,
+    '以下文件建表但未登记进 SCHEMA_SOURCES，它们的表对平台契约基线**不可见**：\n' +
+    unregistered.map((p) => `  · ${rel(p)}`).join('\n') +
+    '\n请在 scripts/prt/baseline-snapshot.mjs 的 SCHEMA_SOURCES 里加上它们。',
+  )
+  // 反向：登记了却不再建表的文件要报出来（列表老化会让下一个人以为它被覆盖了）
+  const stale = registeredPaths
+    .filter((p) => SCHEMA_SCAN_DIRS.some((d) => resolve(p).startsWith(resolve(join(ROOT, d)))))
+    .filter((p) => !found.includes(resolve(p)))
+  must(
+    stale.length === 0,
+    '以下文件已登记进 SCHEMA_SOURCES 但不再建表，请移除：\n' +
+    stale.map((p) => `  · ${rel(p)}`).join('\n'),
+  )
+  return { found: found.length, registered: registered.size }
+}
+
 /** 生成快照（确定性：不含时间戳，键序固定）。 */
 export function buildSnapshot() {
+  // **先查覆盖率，再采数。** 顺序重要：一张未登记的表的创建模块不会被读进
+  // `schemaText`，所以"先采再查"会让快照本身少一张表——而少的那张正是
+  // 检查要发现的那一张。
+  assertSchemaCoverage()
   for (const [name, p] of Object.entries(SOURCES)) {
     must(existsSync(p), `源文件不存在：${rel(p)}（${name}）`)
   }

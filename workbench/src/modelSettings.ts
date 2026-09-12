@@ -320,9 +320,29 @@ export interface ImportPlanLike {
   keptLocal?: readonly string[]
   toCreate?: readonly string[]
   toUpdate?: readonly string[]
-  refused?: readonly string[]
+  /**
+   * **被拒绝的行**（不会进入系统）。
+   *
+   * 类型是**对象**而不是字符串，因为后端实际产出的就是对象：
+   * `model-migration.mjs` 推入的是 `{index, code, reason}`。
+   *
+   * 第一版这里写的是 `readonly string[]`——类型说谎，而且 `importPlanView`
+   * 读了它**却从不使用**（TypeScript 的 `TS6133` 正是那个信号指向这里）。
+   * 那不是一个无害的死变量：`ok: true` 与 `refused` 非空**可以同时成立**
+   * （后端只在"源里出现密钥"时才因为 refused 拒绝整个计划），
+   * 于是界面会说"可以导入"而对被丢掉的那几行**一言不发**。
+   * 用户以为 10 个模型都导进来了，实际只进来 7 个。
+   */
+  refused?: readonly ImportRefusal[]
   code?: string
   message?: string
+}
+
+/** 一条被拒绝的输入。字段都可选，因为不同来源填得不一样。 */
+export interface ImportRefusal {
+  index?: number
+  code?: string
+  reason?: string
 }
 
 export interface ImportPlanView {
@@ -345,6 +365,9 @@ export function importPlanView(plan: ImportPlanLike | null | undefined): ImportP
   if (plan === null || plan === undefined || typeof plan !== 'object') {
     return { ok: false, headline: '没有导入计划', lines: [], needsConfirm: false, blocked: '先选择一个配置文件。' }
   }
+  // `refused` 与 `skipped` 不是一回事：
+  //   · skipped —— 有意不动它（已有绑定、缺 scope），**沉默是可以的**；
+  //   · refused —— 这一行**没能被处理**，用户必须知道。
   const refused = Array.isArray(plan.refused) ? plan.refused : []
   const conflicts = Array.isArray(plan.conflicts) ? plan.conflicts : []
   const keptLocal = Array.isArray(plan.keptLocal) ? plan.keptLocal : []
@@ -370,11 +393,53 @@ export function importPlanView(plan: ImportPlanLike | null | undefined): ImportP
   }
   if (conflicts.length > 0) lines.push(`与现有配置冲突 ${conflicts.length} 项`)
 
+  // **被拒绝的行必须说出来，而且是"不会导入"这种硬话。**
+  //
+  // 后端只在"源里出现密钥"时才因 `refused` 拒绝整个计划；单纯的行级拒绝
+  // （不是对象、档案字段非法）会与 `ok: true` 并存。此时若只报"新建 7 个"，
+  // 用户会以为 10 行都处理了。**一次静默的部分导入，比一次明确失败坏得多**——
+  // 它留下一个"看起来配好了"的系统，而缺的那几个岗位要到运行时才发现。
+  for (const r of refused) {
+    const reason = refusalReason(r)
+    lines.push(reason === null ? '有 1 行被拒绝，不会导入' : `有 1 行被拒绝，不会导入：${reason}`)
+  }
+
   return {
     ok: true,
-    headline: lines.length > 0 ? '可以导入' : '这个包里没有需要变更的内容',
+    headline: headlineFor(toCreate.length, toUpdate.length, refused.length),
     lines,
-    needsConfirm: toCreate.length + toUpdate.length > 0,
+    // 有被拒绝的行时**仍然需要确认**：确认框是用户看到这些硬话的最后机会。
+    // 这一项真正起作用的是「没有任何可导入项、但有被拒绝的行」那种计划——
+    // 少了 `refused.length`，`needsConfirm` 会变成 false，界面就成了
+    // 一个"没有变更要确认"的样子，而那些被拒绝的行只在 detail 里躺着。
+    needsConfirm: toCreate.length + toUpdate.length + refused.length > 0,
     blocked: null,
   }
+}
+
+/**
+ * 标题。
+ *
+ * 三种情况必须说三句不同的话，因为用户的下一步动作不同：
+ *   · 有可导入项 → "可以导入"（去点确认）；
+ *   · 没有可导入项、但有被拒绝的行 → **不能**说"没有需要变更的内容"，
+ *     那会让用户以为包是空的，而真实情况是**他给的每一行都没能进来**；
+ *   · 真的什么都没有 → "这个包里没有需要变更的内容"。
+ */
+function headlineFor(toCreate: number, toUpdate: number, refused: number): string {
+  if (toCreate + toUpdate > 0) return '可以导入'
+  if (refused > 0) return '没有可导入的内容，但有被拒绝的行'
+  return '这个包里没有需要变更的内容'
+}
+
+/** 取一条拒绝的可读理由。对象取 `reason`，字符串（旧数据）原样用。 */
+function refusalReason(r: unknown): string | null {
+  if (typeof r === 'string') return r.trim() === '' ? null : r
+  if (r !== null && typeof r === 'object') {
+    const reason = (r as ImportRefusal).reason
+    if (typeof reason === 'string' && reason.trim() !== '') return reason
+    const code = (r as ImportRefusal).code
+    if (typeof code === 'string' && code.trim() !== '') return code
+  }
+  return null
 }

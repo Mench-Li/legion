@@ -47,6 +47,13 @@ export const SCHEMA = defineSchema({
     // 回收接口的拒绝码：调用方未给出「哪些状态已越过外部写边界」时必须拒绝，
     // 这个字符串就是那条拒绝对外可见的名字（server.mjs 与 worker/run.mjs 都会用到）
     'EXTERNAL_EFFECT_UNKNOWN',
+    // PRT-307 机器验收新增：
+    //   EVIDENCE_MISSING       — 迁移声明要先落库的证据不存在（409，见 run-store）
+    //   NOT_VALIDATING         — 尝试不在可验收的状态上
+    //   BAD_ACCEPTANCE_CRITERIA— tasks.acceptance 不是合法 JSON 数组（数据问题，500）
+    //   UNKNOWN_DECISION       — 验收结论不在三种之内，不得默认去向（来自
+    //                            orchestrator/acceptance/index.mjs，经 run-store 抛出）
+    'EVIDENCE_MISSING', 'NOT_VALIDATING', 'BAD_ACCEPTANCE_CRITERIA', 'UNKNOWN_DECISION',
   ],
   // team-hub 的 CHAT_ 前缀覆盖了插件的提示词预算变量（CHAT_CTX_*）：它们是**插件**读的配置，
   // team-hub 不读，登记为外来变量，避免误报成「拼写错误」（P3-4）。

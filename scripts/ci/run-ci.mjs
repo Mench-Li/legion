@@ -470,6 +470,28 @@ async function stageTest() {
     // 因此验的是「进程没了之后磁盘上留下的东西，会让回收做出正确判断」，
     // 而不只是「回收函数写对了」。三条判据对应阶段 3 完成标准逐字：
     // 不丢任务、不伪装成功、不重复执行已确认的外部写操作。
+    // PRT-307：机器验收。执行成功之后的**独立关卡**——「执行成功了」与
+    // 「做出来的东西满足验收判据」是两件事。
+    // 三组各自的落点：判据核验（纯函数，可穷举）、结论落库与状态推进、
+    // 以及从 HTTP 进来那条路的错误码/状态码区分。
+    {
+      label: 'acceptance（PRT-307：判据核验的三种结论、散文判据=人工判据、未知判据不得当成通过）',
+      files: ['orchestrator/acceptance/acceptance.test.mjs'],
+      cwd: ROOT,
+    },
+    // PRT-307：验收接入运行面。核心判据是「一条**从未被验收过**的尝试不能进
+    // Completed」——若只记录 requiresPersist 而不核验它，那句话只是事件流里
+    // 的一段 JSON，而"没人验收过"会被写成"已验收"。
+    {
+      label: 'acceptance-store（PRT-307：验收结论落库、状态按结论推进、无验收记录不得进 Completed）',
+      files: ['team-hub/acceptance-store.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      label: 'acceptance-routes（PRT-307：机器验收的 HTTP 契约与错误码/状态码区分）',
+      files: ['team-hub/acceptance-routes.test.mjs'],
+      cwd: ROOT,
+    },
     {
       label: 'run-kill-drill（PRT-312：真实进程被强杀后不丢任务、不伪装成功、不重复外部写）',
       files: ['team-hub/run-kill-drill.test.mjs'],

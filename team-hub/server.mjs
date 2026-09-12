@@ -3378,6 +3378,41 @@ async function handle(req, res, stripPrefix) {
       })
       return
     }
+    if (req.method === 'POST' && path === '/api/runtime/validate') {
+      // 机器验收（PRT-307）：执行成功之后的**独立关卡**。
+      //
+      // `criteria` 是可选覆盖：不传时按任务契约（`tasks.acceptance`）判，
+      // 传了则以传入的为准（人工复审给出机器判据的场景）。覆盖是**显式**的，
+      // 因为"当时按什么验的"必须能从事后记录里读回来（结论与判据一起落库）。
+      //
+      // `hasNextPost` 不在这里给默认值：它决定验收通过后是 Completed 还是 HandingOff，
+      // 而这两个方向猜错的后果（静默掐断任务链 / 创建没有承接方的任务）都不报错。
+      // 状态机与仓储都会在缺它时拒绝，这里只负责**不替调用方做主**。
+      await handleRun(req, res, (body) => {
+        const r = runStore.recordValidation({
+          attemptId: requireString(body, 'attemptId'),
+          leaseEpoch: body.leaseEpoch ?? null,
+          actor: requireString(body, 'actor'),
+          runResult: body.runResult,
+          criteria: body.criteria ?? null,
+          hasNextPost: body.hasNextPost,
+          nextPost: body.nextPost ?? null,
+          reason: body.reason ?? null,
+        })
+        try { settleGoalsOfScope(getTask(runStore.getAttempt(body.attemptId).taskId).scope) } catch { /* 任务不存在时不结算 */ }
+        return r
+      })
+      return
+    }
+    if (req.method === 'GET' && path === '/api/runtime/validations') {
+      // 验收结论与**当时用的判据**一起读回来。
+      // 只回结论是不够的：判据可以被人工复审覆盖，因此"不通过"到底是
+      // 按契约判的还是按复审判的，不看判据就分不清。
+      const attemptId = url.searchParams.get('attemptId')
+      if (attemptId === null || attemptId.length === 0) { json(res, 400, { ok: false, error: '缺少 attemptId', code: 'MISSING_PARAM' }); return }
+      json(res, 200, { ok: true, attemptId, validations: runStore.validationsOf(attemptId), serverTimeMs: Date.now() })
+      return
+    }
     if (req.method === 'GET' && path === '/api/runtime/budget') {
       // 重试额度读数：界面上要能回答"这条任务还能自动重试几次、下次什么时候"。
       // 答不出来时用户看到的只是"它又失败了"，而无法判断该不该干预。

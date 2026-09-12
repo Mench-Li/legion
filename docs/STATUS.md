@@ -4,9 +4,9 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-12　`run-ci --only test` **PASS**；其中 `test` **66 套件 / 1815 用例**
-（**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 按纪律 SKIP，计数为 64 通过 + 1 跳过 / 1593 用例）
-—— 以本文件所在提交为准；证据 `.ci/2026-09-12T03-57-50-860Z/`
+**最近一次全量基线**：2026-09-12　`run-ci --only test` **PASS**；其中 `test` **69 套件 / 1865 用例**
+（**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 按纪律 SKIP，计数为 67 通过 + 1 跳过 / 1643 用例）
+—— 以本文件所在提交为准；证据 `.ci/2026-09-12T04-16-25-565Z/`
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
 （`scrum/daemon-gf001.json`，`intervalMs: 15000`）同时运行时实测 **31 分钟**（约 7 倍）。
 **因此不要把耗时当回归基线**——只有套件数/用例数/通过与否可用于判定。
@@ -31,7 +31,56 @@
 > - `gf001` 空间非终态任务数为 **0**；T-141 已由将军于 `14:00:32Z` 转 `canceled`
 >   （产物从 patch 记录逐字恢复为 `53d9d15`，需求已由 `G-mtwxx7an-2` 交付，无需重做）。
 
-> **本轮（PRT-312 真实进程被强杀的整链路演练 + 进度表派生数字自检）**：
+> **本轮（PRT-307 机器验收：执行成功 ≠ 交付完成）**：
+> 新增 `orchestrator/acceptance/index.mjs`（**纯函数**：判据核验 + 结论到去向的映射）、
+> `run_validations` **只追加**表、`runStore.recordValidation/validationsOf/criteriaOf`、
+> 路由 `POST /api/runtime/validate` 与 `GET /api/runtime/validations`；三组套件
+> `acceptance`（24 例）、`acceptance-store`（16 例）、`acceptance-routes`（10 例）。
+> 阶段 3 由 **9/16** 到 **10/16**（301/302/303/307/309/310/311/312/313/314），
+> PRT-308 记为 🟡（打回与完成已落地有用例，交接的下游任务链未交付）。
+>
+> **为什么它是一道独立关卡**：PRT-312 的强杀演练留下过一个当时只能如实记录的现象——
+> 执行成功落在 `Validating`，而**没有任何东西能把它推到 `Completed`**。当时我的断言
+> 写的是 `Completed`、它超时失败了，修的时候有个真实的诱惑：为了让用例变绿，
+> 把"执行完"直接写成"已完成"。那正是完成标准里「不伪装成功」要禁的事。
+> 本批把落点补上：「执行成功了」与「做出来的东西满足验收判据」是两件事——
+> 前者由运行面知道（`outcome: completed`），后者只能拿任务自己声明的判据去核。
+>
+> **四种结论口径**（每条都有用例，且都不是"看起来对"）：
+> ① **三种结论而不是布尔**——`accepted`/`rejected`/`needs-human`。合成一个 `false`
+> 时，"机器确认不满足"（该打回重试）与"机器判不了"（该交人工）只能走同一条路，
+> 而两条路选哪条都是错的：当失败会让本来正确的交付被反复重做（外部写已发生时
+> 就是重复副作用），当通过就是伪装成功。
+> ② **判据清单封闭**——不在已登记四种里的一律算"判不了"而**不是**通过。
+> 一个"总是通过"的核验比没有核验更糟，因为它让验收看起来是被保证的。
+> ③ **散文判据 = 人工判据**。接入运行面时才发现 `tasks.acceptance` 的真实形态：
+> 由 `stage-standards.mjs` 生成的**散文**（"每条关键结论可验证：有真实依据，不得虚构"）。
+> 机器核不了它，而它又必须被核验过才能算完成。因此字符串判据被当成一类**正当的**
+> 判据：任务只带散文判据时结论必然是 `needs-human`——这是**对的**，从没人说过
+> "什么叫做完了"。把字符串当"形状不对"也能得到同样结论，但错误信息会指向
+> "调用方传错了"，**排查方向完全相反**。
+> ④ **`requiresPersist` 从"一段 JSON"变成真的闸门**。状态机为
+> `Validating → Completed` 声明了 `requiresPersist: ['attempt','validation']`，
+> 而在此之前它只被记录、从不被核验——一条任务可以带着"从未被验收过"的事实
+> 进入 `Completed`，而事件流里那句话看起来像是在保证它。现在 409 `EVIDENCE_MISSING`。
+> 闸门放在 UPDATE **之前**：之后发现就只能回滚，而"已经写进去过"本身会留下痕迹。
+>
+> **这条路抓到一个真实缺陷**：交付级审批（`Validating → AwaitingApproval`）的任务
+> 在看板上显示为 `in_progress` 而不是 `in_review`。根因是投影读的是**边**的
+> `taskStatusHint`，而 `AwaitingApproval` 有两个入口、走不同的边；正确的事实来源是
+> 刚写进那一行的 `returnTo`。后果不是报错，而是**一条等着交付审批的任务显示为
+> "进行中"**——审批人以为活还在干，于是它既不在待办里、也没人在跑。
+> 修完把旧写法临时改回去验证过：用例立刻红（`actual: 'in_progress'`,
+> `expected: 'in_review'`），然后复原，`TEMP-REGRESSION-CHECK` 标记 0 残留。
+>
+> 错误码刻意把 4xx 与 5xx 分开：`tasks.acceptance` 那一行坏了是 **500**
+> `BAD_ACCEPTANCE_CRITERIA`（数据问题），`NOT_VALIDATING`/`EVIDENCE_MISSING` 是 409
+> （请求合法、状态不允许）。混成 400 会让运维去查调用方，而真正要修的是数据。
+>
+> 详见 `docs/superpowers/prt/PRT-307-machine-acceptance.md`。
+> PRT-007 基线已按新路由重录（diff 恰好是 2 条路由 + `server.mjs` 哈希）。
+>
+> 上一轮（PRT-312 真实进程被强杀的整链路演练 + 进度表派生数字自检）：
 > 新增 `orchestrator/worker/scripts/kill-drill-worker.mjs`（可注入"卡住阶段"的**真 worker 进程**）
 > 与套件 `run-kill-drill`（**2 例**）。它逐条验阶段 3 完成标准（spec 第 885 行）的三个分句：
 > 真 worker 进程对真 team-hub 说话、写真状态文件、写真 marker，然后被 `SIGKILL` 强杀。
@@ -450,12 +499,15 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：66 套件 / 1815 用例，`--only test` 整体 PASS** —— 2026-09-12 实测（设 `DSH_CHECKOUT`）
-（PRT-312 真实进程被强杀：`run-kill-drill`（**2 例**，真 worker 进程 + 真 team-hub + `SIGKILL`）；
+**当前基线：69 套件 / 1865 用例，`--only test` 整体 PASS** —— 2026-09-12 实测（设 `DSH_CHECKOUT`）
+（PRT-307 机器验收：`acceptance`（**24 例**，纯函数）、`acceptance-store`（**16 例**）、
+`acceptance-routes`（**10 例**，起真 HTTP 服务）；
+PRT-312 真实进程被强杀：`run-kill-drill`（**2 例**，真 worker 进程 + 真 team-hub + `SIGKILL`）；
 进度表自检 `prt-progress`（**12 例**）；PRT-314 多进程并发 `run-concurrency`（**5 例**）；
 `run-policy`（**14 例**：PRT-309/310/311 的重试额度、退避、Dead Letter、人工处置、幂等键）。
-`DSH_CHECKOUT` 未设时 `plugins/board-plugin` 按纪律 SKIP，计数为 64 通过 + 1 跳过 / 1593 用例。
-上一批基线 65 套件 / 1803 用例（PRT-312 强杀演练）。
+`DSH_CHECKOUT` 未设时 `plugins/board-plugin` 按纪律 SKIP，计数为 67 通过 + 1 跳过 / 1643 用例。
+上一批基线 66 套件 / 1815 用例（PRT-312 强杀演练 + 进度表自检）。
+再上一批基线 65 套件 / 1803 用例（PRT-312 强杀演练）。
 再上一批基线 63 套件 / 1801 用例（PRT-314 多进程并发 + 原子迁移原语）。
 再上一批基线 62 套件 / 1796 用例（PRT-309/310/311 重试退避与 Dead Letter + 人工处置 + 幂等）。
 再上一批基线 61 套件 / 1702 用例（PRT-301 运行状态机 + worker 入口）。

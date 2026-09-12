@@ -37,6 +37,7 @@ import {
   transitionPlan,
 } from '../orchestrator/state-machine/index.mjs'
 import { ensureColumn as ensureColumnImpl } from './schema-util.mjs'
+import { AcceptanceError, acceptanceTarget, evaluateAcceptance } from '../orchestrator/acceptance/index.mjs'
 
 /** 默认租期。短到「崩溃后能被较快回收」，长到「一次正常执行不会被误判为死亡」。 */
 export const DEFAULT_LEASE_TTL_MS = 120000
@@ -72,6 +73,14 @@ export const RUN_ERRORS = Object.freeze({
   // 「这条尝试当前不处于需要人工处置的状态」——与「租约不是你的」是两件事，
   // 合成一个码会让运维分不清「有人点错了按钮」与「另一个 worker 正在跑它」。
   NOT_HELD: 'NOT_HELD',
+  // 「这次迁移声明要先落库的证据不存在」。状态机为每条边声明了 `requiresPersist`，
+  // 那是契约；不核验它就只是一段 JSON——任务可以带着"从未被验收过"的事实进 Completed。
+  EVIDENCE_MISSING: 'EVIDENCE_MISSING',
+  // 任务的 acceptance 列不是合法 JSON 数组。这是**数据问题**，不是"没有判据"：
+  // 当成空判据会让它静默走人工审批，而真正的原因（那一行坏了）没人知道。
+  BAD_ACCEPTANCE_CRITERIA: 'BAD_ACCEPTANCE_CRITERIA',
+  // 「这条尝试不在可验收的状态上」：验收只对 Validating 有意义。
+  NOT_VALIDATING: 'NOT_VALIDATING',
 })
 
 /** 允许的人工处置决定。逐个列出，未登记的一律拒绝而不是猜一个默认值。 */
@@ -216,6 +225,34 @@ export function ensureRunSchema(db) {
     )
   `)
   db.exec('CREATE INDEX IF NOT EXISTS idx_run_attempt_events_attempt ON run_attempt_events(attempt_id, seq)')
+
+  // ── PRT-307 机器验收记录：**只追加** ──
+  //
+  // 为什么验收结论要落库，而不是在内存里判断完就丢掉：
+  // 状态机为 `Validating → Completed` / `Validating → HandingOff` 声明了
+  // `requiresPersist: ['attempt', 'validation']`。如果验收结论不落库，那条声明
+  // 就只是事件表里的一段 JSON——一条任务可以带着"从未被验收过"的事实进入
+  // `Completed`，而所有代码看起来都是对的。这正是"伪装成功"。
+  //
+  // 与 `run_attempt_events` 同样的纪律：只追加，不提供任何 UPDATE/DELETE 路径。
+  // 一次尝试可以被验收多次（人工复审、驳回后重验），因此主键是自增 seq 而不是 attempt_id。
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS run_validations (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      attempt_id TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      decision TEXT NOT NULL,
+      reason TEXT,
+      gate_json TEXT,
+      results_json TEXT,
+      run_json TEXT,
+      criteria_json TEXT,
+      actor TEXT NOT NULL,
+      lease_epoch INTEGER,
+      at_ms INTEGER NOT NULL
+    )
+  `)
+  db.exec('CREATE INDEX IF NOT EXISTS idx_run_validations_attempt ON run_validations(attempt_id, seq)')
 }
 
 // ---------------------------------------------------------------- 内部工具
@@ -233,6 +270,60 @@ function appendEvent(db, { attempt, from, to, actor, epoch, reason, requiresPers
     Number.isInteger(epoch) ? epoch : null, reason ?? null,
     requiresPersist === undefined || requiresPersist === null ? null : JSON.stringify(requiresPersist),
   )
+}
+
+/** 一次尝试的验收记录（按 seq 升序，只读）。 */
+function validationRows(db, attemptId) {
+  return db.prepare('SELECT * FROM run_validations WHERE attempt_id = ? ORDER BY seq').all(attemptId)
+}
+
+/**
+ * 已实现核验的「必须落库的证据」。
+ *
+ * 状态机为每条迁移边声明了 `requiresPersist`（例如 `Validating → Completed` 要求
+ * `['attempt', 'validation']`）。把那条声明**真的核验掉**，是这个映射存在的全部意义：
+ * 只记录不核验时，一条任务可以带着"从未被验收过"的事实进入 `Completed`，
+ * 而事件流里那句 `requires_persist: ["attempt","validation"]` 看起来像是在保证它。
+ *
+ * 只登记**已经能查**的证据。未登记的（`runResult` / `context` / `handoff` /
+ * `approval` / `reconciliation` …）目前既不阻塞也不假装核验过——它们各自属于
+ * 尚未交付的任务（PRT-306/308/401 等）。这里刻意**不**给未登记项一个宽松的默认实现：
+ * 一个"总是通过"的核验比没有核验更糟，因为它让上面那句话看起来是被保证的。
+ */
+const EVIDENCE_CHECKS = Object.freeze({
+  attempt: (db, attemptId) => rowOf(db, attemptId) !== null,
+  validation: (db, attemptId) => validationRows(db, attemptId).length > 0,
+})
+
+/**
+ * 核验一次迁移声明要落库的证据是否真的存在。
+ *
+ * 返回 `{ checked, missing }`。`missing` 非空时调用方必须拒绝这次迁移——
+ * 拒绝而不是"记一条警告然后继续"：一条没通过验收的任务进入 `Completed`
+ * 之后，下游依赖它的人不会知道。
+ */
+function checkEvidence(db, attemptId, requiresPersist) {
+  const names = Array.isArray(requiresPersist) ? requiresPersist : []
+  const checked = []
+  const missing = []
+  for (const name of names) {
+    const probe = EVIDENCE_CHECKS[name]
+    if (probe === undefined) continue // 尚未实现核验的证据种类：见 EVIDENCE_CHECKS 的说明
+    checked.push(name)
+    if (probe(db, attemptId) !== true) missing.push(name)
+  }
+  return Object.freeze({ checked: Object.freeze(checked), missing: Object.freeze(missing) })
+}
+
+/** 证据缺失时的统一错误。把「缺哪一项」说清楚，否则排查只能去看状态机源码。 */
+function evidenceError(attemptId, state, to, missing) {
+  // 409 而不是 400：请求本身完全合法，是**当前状态**不允许这一步
+  // （缺的是这一步的前提）。与 LEASE_EPOCH_STALE / TRANSITION_REJECTED 同一类。
+  return fail(RUN_ERRORS.EVIDENCE_MISSING,
+    `迁移 ${state} → ${to} 声明要先落库的证据不存在：${missing.join('、')}。` +
+    `这不是"数据还没写好"的时序问题，而是"这一步的结论没有依据"——` +
+    `例如一条没有验收记录的尝试进入 Completed，等于把"没人验收过"写成"已验收"`,
+    { attemptId, from: state, to, missing: Object.freeze([...missing]) }, 409)
 }
 
 /** 任务状态投影：只有「有运行尝试的任务」才被投影，避免影响纯看板任务。 */
@@ -811,6 +902,18 @@ export function createRunStore({
         })
       }
 
+      // **证据闸门**：状态机为这条边声明了 `requiresPersist`。声明必须在**落库之前**
+      // 被核验，否则它只是一段 JSON——`Validating → Completed` 声明要求
+      // `['attempt','validation']`，但只记录不核验时，一条从未被验收过的尝试
+      // 照样能进 `Completed`，而事件流里那句话看起来像是在保证它。
+      //
+      // 放在 UPDATE 之前（而不是之后）：之后发现就只能回滚，而"已经写进去过"
+      // 这件事本身会留下痕迹，回滚不掉的告警与外部副作用同理。
+      const evidence = checkEvidence(db, attemptId, plan.requiresPersist)
+      if (evidence.missing.length > 0) {
+        throw evidenceError(attemptId, row.state, target, evidence.missing)
+      }
+
       const finishedAtMs = ['Completed', 'Cancelled', 'DeadLetter'].includes(target) ? atMs : null
       const returnTo = target === 'AwaitingApproval' ? (context?.returnTo ?? 'Running') : null
       db.prepare(
@@ -826,7 +929,20 @@ export function createRunStore({
         reason: reason ?? (outcome === null ? null : `outcome:${outcome}`),
         requiresPersist: plan.requiresPersist, atMs,
       })
-      const status = projectToTask(db, updated, target, atMs, { approvalFrom: plan.taskStatusHint === 'in_review' ? 'Validating' : undefined })
+      // `approvalFrom` 必须来自**刚写进这一行的 `returnTo`**，而不是这条边的
+      // `plan.taskStatusHint`。两者含义不同：
+      //   - `returnTo` 回答「批准后回到哪一步」，同一状态有两个入口；
+      //   - `plan.taskStatusHint` 描述的是**同一条边**，而进入 `AwaitingApproval`
+      //     的两个入口（运行中的工具请求 / 验收后的交付审批）走的是**不同的边**
+      //     （`Running → AwaitingApproval` 与 `Validating → AwaitingApproval`）。
+      //
+      // 曾经这里读的是 hint，于是 `Validating → AwaitingApproval` 落成 `in_progress`：
+      // 一条**等着交付审批**的任务在看板上显示为"进行中"，审批人以为活还在干，
+      // 于是它既不在待办里也没人在跑。而这一行上明明白白写着 `return_to='Validating'`，
+      // 状态机也早就把 `AWAITING_APPROVAL_TASK_STATUS.Validating` 映射成 `in_review`
+      // ——两处口径不一致时，以**已落库的事实**为准。
+      const approvalFrom = target === 'AwaitingApproval' ? returnTo : undefined
+      const status = projectToTask(db, updated, target, atMs, { approvalFrom })
       return Object.freeze({
         ok: true,
         attempt: shapeAttempt(updated),
@@ -1252,6 +1368,194 @@ export function createRunStore({
     })
   }
 
+  /**
+   * 一条任务的**验收判据**（从看板实体读，不是从调用方拿）。
+   *
+   * 为什么由服务端读而不是让 worker 传进来：判据是任务的契约（`tasks.acceptance`），
+   * 而 spec §5 定的是「team-hub 是任务与团队状态的事实源，DSH/worker 不是」。
+   * 让 worker 报判据等于让执行者自己出考卷。
+   */
+  function criteriaOf(taskId) {
+    const row = db.prepare('SELECT acceptance FROM tasks WHERE id = ?').get(taskId)
+    const raw = row?.acceptance
+    if (raw === null || raw === undefined || raw === '') return Object.freeze([])
+    let parsed
+    try {
+      parsed = JSON.parse(raw)
+    } catch (e) {
+      // 不是"没有判据"：那一行的数据坏了。当成空判据会让它静默走人工审批，
+      // 而真正的原因（数据坏了、没人能修）永远不出现。
+      // 500 而不是 400：请求完全合法，是**库里的数据**有问题——
+      // 与「调用方传错参数」必须能区分开，否则运维会去查错地方。
+      throw fail(RUN_ERRORS.BAD_ACCEPTANCE_CRITERIA,
+        `任务 ${taskId} 的 acceptance 不是合法 JSON：${e.message}。这是数据问题而不是"没有判据"——` +
+        '当成空判据会让它静默挂到人工审批上，而没人知道那一行坏了',
+        { taskId, raw: raw.length > 200 ? `${raw.slice(0, 200)}…` : raw }, 500)
+    }
+    if (!Array.isArray(parsed)) {
+      throw fail(RUN_ERRORS.BAD_ACCEPTANCE_CRITERIA,
+        `任务 ${taskId} 的 acceptance 是 ${typeof parsed} 而不是数组：判据必须是一个列表，不得猜`,
+        { taskId, actualType: typeof parsed }, 500)
+    }
+    return Object.freeze(parsed)
+  }
+
+  /** 一次尝试的验收记录（只读，按时间升序）。 */
+  function validationsOf(attemptId) {
+    return Object.freeze(validationRows(db, attemptId).map((r) => Object.freeze({
+      seq: Number(r.seq),
+      attemptId: r.attempt_id,
+      taskId: r.task_id,
+      decision: r.decision,
+      reason: r.reason,
+      gate: r.gate_json === null ? null : JSON.parse(r.gate_json),
+      results: r.results_json === null ? Object.freeze([]) : Object.freeze(JSON.parse(r.results_json)),
+      run: r.run_json === null ? null : JSON.parse(r.run_json),
+      // 实际用过的判据必须能被读回来，否则事后无法回答"当时按什么验的"——
+      // 而人工复审覆盖过判据时，这一点尤其重要（契约里的判据与当时用的不是同一份）。
+      criteria: r.criteria_json === null ? Object.freeze([]) : Object.freeze(JSON.parse(r.criteria_json)),
+      actor: r.actor,
+      leaseEpoch: r.lease_epoch === null ? null : Number(r.lease_epoch),
+      atMs: Number(r.at_ms),
+    })))
+  }
+
+  /**
+   * 机器验收（PRT-307）：对 `Validating` 上的尝试跑一次验收，落库结论并推进状态。
+   *
+   * 这是**唯一**的验收入口。它一次做完三件必须一起发生的事：
+   *   ① 按任务声明的判据核验运行结果（`evaluateAcceptance`）；
+   *   ② 把结论落库（**先落库**，因为下面的迁移边声明了 `validation` 证据）；
+   *   ③ 按结论推进状态，并在验收通过时要求调用方明确回答 `hasNextPost`。
+   *
+   * 分三次调用（记结论 / 改状态 / 决定去向）会让"结论与状态不一致"成为可能：
+   * 崩在中间时，一条被判为 rejected 的尝试会留在 Validating，而重扫会再跑一次验收——
+   * 于是同一次运行被验收两次，第二次的结论覆盖了第一次的含义（虽然记录都在）。
+   *
+   * `criteria` 可以由调用方覆盖（人工复审用），缺省时读任务的 `acceptance`。
+   * 覆盖是显式的：**不传**时才知道用的是任务契约里的判据。
+   */
+  function recordValidation({
+    attemptId, leaseEpoch = null, actor, runResult,
+    criteria = null, hasNextPost = undefined, nextPost = null, reason = null,
+  }) {
+    if (typeof actor !== 'string' || actor.length === 0) {
+      throw new ContractError(RUN_ERRORS.WORKER_REQUIRED, 'recordValidation 需要 actor：谁做的验收决定必须留痕')
+    }
+    return withTx(() => {
+      const atMs = clock()
+      const row = rowOf(db, attemptId)
+      if (row === null) throw new ContractError(RUN_ERRORS.ATTEMPT_NOT_FOUND, `没有这条尝试：${attemptId}`)
+      // 传了 epoch 就必须对得上（过期的 worker 不得改写别人的结果）；
+      // 不传表示这是**服务端发起**的验收（人工复审），此时没有持有者可言。
+      if (leaseEpoch !== null && leaseEpoch !== undefined && row.lease_epoch !== leaseEpoch) {
+        throw fail(RUN_ERRORS.LEASE_EPOCH_STALE,
+          `leaseEpoch 不符：请求 ${leaseEpoch}，实际 ${row.lease_epoch}——拒绝写入过期的验收结论`,
+          { currentEpoch: row.lease_epoch, currentWorkerId: row.worker_id })
+      }
+      if (row.state !== 'Validating') {
+        // 409：请求合法，是**当前状态**不该被验收。
+        throw fail(RUN_ERRORS.NOT_VALIDATING,
+          `验收只对 Validating 上的尝试有意义，当前是 ${row.state}。` +
+          '在别的状态上验收等于给一个还没跑完（或已经结束）的尝试出一份结论',
+          { attemptId, state: row.state }, 409)
+      }
+
+      const effectiveCriteria = criteria ?? criteriaOf(row.task_id)
+      let verdict
+      try {
+        verdict = evaluateAcceptance({ runResult, criteria: effectiveCriteria })
+      } catch (e) {
+        if (e instanceof AcceptanceError) {
+          // 契约错误（runResult 形状不对）**不落库**：它不是一次验收结论，
+          // 而是调用方给错了东西。落一条 rejected 会让一条本来能通过的任务被打回。
+          throw new ContractError(e.code, e.message)
+        }
+        throw e
+      }
+
+      db.prepare(
+        `INSERT INTO run_validations
+           (attempt_id, task_id, decision, reason, gate_json, results_json, run_json, criteria_json, actor, lease_epoch, at_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        attemptId, row.task_id, verdict.decision, reason ?? verdict.reason,
+        JSON.stringify(verdict.gate),
+        // 只存判定所需的叶子字段：判据原文与逐条结论，不存整个 runResult
+        // （它可能含产物内容或漏脱敏的东西，而验收记录要长期保存）
+        JSON.stringify(verdict.results.map((r) => ({ criterion: r.criterion, ok: r.ok, unverifiable: r.unverifiable, reason: r.reason }))),
+        JSON.stringify(verdict.run),
+        JSON.stringify(effectiveCriteria),
+        actor, Number.isInteger(row.lease_epoch) ? row.lease_epoch : null, atMs,
+      )
+
+      const target = acceptanceTarget(verdict.decision, { hasNextPost })
+      if (target.ok !== true) {
+        // 去向定不下来时**整笔回滚**（withTx 抛出即 ROLLBACK）：验收记录也就不会被留下。
+        // 留一条没有对应状态迁移的验收记录，会让下一次调用看到"已经验收过了"
+        // 而不知道它有没有生效。
+        throw new ContractError(target.code === 'UNKNOWN_DECISION' ? RUN_ERRORS.TRANSITION_REJECTED : target.code, target.message)
+      }
+
+      // ── 打回：**不**先 transition，交给 scheduleRetry ──
+      //
+      // `scheduleRetry` 自己会把这条尝试终结为 `RetryableFailure`（再按额度决定
+      // 是新建下一次尝试还是进 DeadLetter）。若这里先 transition 到 RetryableFailure，
+      // 它会拿着已经是 RetryableFailure 的行再走一遍 `RetryableFailure → RetryableFailure`
+      // —— 而那条边在状态机里不存在。
+      //
+      // 「还有没有额度」只有 scheduleRetry 一处判断。在这里自己也判一次，迟早
+      // 会出现一处漏掉额度检查，而那种漏掉的后果是**无限重试且不报错**。
+      if (verdict.decision === 'rejected') {
+        const settled = scheduleRetry(row, {
+          atMs, actor, reason: 'validation-rejected',
+          failureCode: 'acceptance-rejected', detail: verdict.reason,
+        })
+        return Object.freeze({
+          ok: true,
+          decision: verdict.decision,
+          reason: reason ?? verdict.reason,
+          gate: verdict.gate,
+          results: verdict.results,
+          run: verdict.run,
+          criteria: effectiveCriteria,
+          // taskStatus 由 scheduleRetry 的结果决定：重试 → 回队列；额度耗尽 → blocked
+          taskStatus: projectToTask(db, rowOf(db, attemptId),
+            settled.action === 'dead-letter' ? 'DeadLetter' : 'RetryableFailure', atMs),
+          settlement: settled,
+          serverTimeMs: atMs,
+        })
+      }
+
+      // ── 通过 / 交人工：走状态机（它会核 `requiresPersist`，也就是上面刚写进去的验收记录）
+      const applied = transition({
+        attemptId,
+        // 用**行上当前的** epoch，而不是调用方传进来的那个：验收结论已经核过 epoch 了，
+        // 而状态机是唯一真正写入的路径，它必须自己再核一次（不能指望调用方替它把关）。
+        leaseEpoch: Number(row.lease_epoch),
+        workerId: actor,
+        to: target.to,
+        context: { ...target.context, hasNextPost, detail: verdict.reason },
+        reason: `validation:${verdict.decision}`,
+      })
+
+      return Object.freeze({
+        ok: true,
+        decision: verdict.decision,
+        reason: reason ?? verdict.reason,
+        gate: verdict.gate,
+        results: verdict.results,
+        run: verdict.run,
+        criteria: effectiveCriteria,
+        attempt: applied.attempt,
+        nextPost,
+        taskStatus: applied.taskStatus,
+        requiresPersist: applied.requiresPersist,
+        serverTimeMs: atMs,
+      })
+    })
+  }
+
   function stats() {
     // 只用服务端时钟。「有多少租约已过期」是一个**判定**而不是一次查询参数：
     // 允许调用方传时间，就等于允许它把「全都过期」或「一个都没过期」说出来。
@@ -1275,6 +1579,8 @@ export function createRunStore({
     failAndRetry, scheduleRetry, retryBudgetOf,
     // PRT-310/311：等人工清单与人工处置
     listHeld, resolveAttempt,
+    // PRT-307：机器验收的唯一入口（核判据 → 落库 → 按结论推进状态）
+    recordValidation, validationsOf, criteriaOf,
     getAttempt, historyOf, eventsOf, stats,
     withTx,
     /** 供测试与诊断：当前生效的默认租期。 */

@@ -86,6 +86,56 @@ export function looksLikeSuccessText(pushOutput) {
   return typeof pushOutput === 'string' && pushOutput.includes('->')
 }
 
+/**
+ * 把用户给的 ref 解析成**可比较的目标**：本地提交 + 远端的 ref 名。
+ *
+ * ## 这里曾经有一个真实的错判（本次实测撞到）
+ *
+ * 旧版本直接用 `git ls-remote origin <ref>`。当 `<ref>` 是 `HEAD` 时，
+ * `ls-remote` 返回的是**远端的 HEAD**——也就是**默认分支**（`main`），
+ * 而 `git push origin HEAD` 推的是**当前分支**（`codex/prt-runtime`）。
+ * 于是两者永远不相等，脚本报 `mismatch`，而推送其实**成功了**。
+ *
+ * 那次的表现是**假红**（说没推上去，其实推上去了）。同一个缺陷在另一种
+ * 布局下会变成**假绿**：在默认分支上工作时，`push origin HEAD` 推 `main`，
+ * `ls-remote origin HEAD` 也读 `main`，于是它看着像验证通过；
+ * 而只要推送被服务端拒绝（`main` 受保护、push protection 拦下），
+ * 远端 `main` 仍然等于本地 `HEAD`，脚本照样报 `verified`。
+ *
+ * **一个会给出错误结论的检查，比没有检查更坏**——这条判据存在的唯一理由
+ * 是"用远端的事实说话"，而它当时问的是**另一个 ref 的事实**。
+ *
+ * 所以：先把 ref 归一成远端真实存在的那个分支名，再问它。
+ *
+ * @param {object} input
+ * @param {string} input.ref 命令行给的 ref（`HEAD` / 分支名 / `refs/heads/x`）
+ * @param {(args: string[]) => string} input.gitRun 执行 git 并返回 stdout
+ * @returns {{localSha: string, remoteRef: string, branch: string}}
+ */
+export function resolvePushTarget({ ref, gitRun }) {
+  if (typeof ref !== 'string' || ref === '') {
+    throw new Error('push-verify 需要一个 ref')
+  }
+  if (ref.startsWith('refs/')) {
+    return { localSha: gitRun(['rev-parse', ref]), remoteRef: ref, branch: ref.slice('refs/heads/'.length) }
+  }
+  if (ref === 'HEAD' || ref === '@') {
+    // 归一成**当前分支名**。分离头指针时没有分支可推，直接拒绝——
+    // 猜一个名字会让"验证"变成对着一个不存在的 ref 比较。
+    const branch = gitRun(['rev-parse', '--abbrev-ref', 'HEAD'])
+    if (branch === 'HEAD') {
+      throw new Error('当前处于分离头指针状态：没有分支可推，也没有可比较的远端 ref。请先切到一个分支。')
+    }
+    return { localSha: gitRun(['rev-parse', 'HEAD']), remoteRef: `refs/heads/${branch}`, branch }
+  }
+  if (/^[0-9a-f]{7,64}$/.test(ref)) {
+    // 裸 SHA 没有对应的远端 ref 名：`push origin <sha>` 推到哪里由服务端决定，
+    // 我们无从比较。**拒绝**，而不是拿默认分支去比。
+    throw new Error(`不能只用一个 SHA 做推送验证（${ref}）：它没有对应的远端 ref 名，无从比较。请给分支名或 HEAD。`)
+  }
+  return { localSha: gitRun(['rev-parse', ref]), remoteRef: `refs/heads/${ref}`, branch: ref }
+}
+
 // ------------------------------------------------------------------ CLI
 
 function git(args, { cwd }) {
@@ -93,19 +143,23 @@ function git(args, { cwd }) {
     { encoding: 'utf8', cwd, stdio: ['ignore', 'pipe', 'pipe'] }).trim()
 }
 
-export function runPushVerify({ cwd, ref, doPush = true, log = console.log } = {}) {
-  let localSha
+export function runPushVerify({ cwd, ref, doPush = true, log = console.log, gitRun = null } = {}) {
+  const run = gitRun ?? ((args) => git(args, { cwd }))
+
+  let target
   try {
-    localSha = git(['rev-parse', 'HEAD'], { cwd })
+    target = resolvePushTarget({ ref, gitRun: run })
   } catch (e) {
-    log(`无法读取本地 HEAD：${e?.message ?? e}`)
+    // **解析不出目标就不能报成功**，也不能拿别的 ref 凑一个结论出来。
+    log(`无法确定推送目标：${e?.message ?? e}`)
     return { verdict: PUSH_VERDICTS.INVALID, ok: false }
   }
+  const localSha = target.localSha
 
   let pushOutput = ''
   if (doPush === true) {
     try {
-      pushOutput = git(['push', 'origin', ref], { cwd })
+      pushOutput = run(['push', 'origin', target.branch])
     } catch (e) {
       pushOutput = `${e.stdout ?? ''}${e.stderr ?? ''}`
     }
@@ -113,7 +167,8 @@ export function runPushVerify({ cwd, ref, doPush = true, log = console.log } = {
 
   let remote
   try {
-    remote = parseRemoteTip(git(['ls-remote', 'origin', ref], { cwd }))
+    // 问**刚推的那个分支**，而不是 `HEAD`（那会问到远端的默认分支）。
+    remote = parseRemoteTip(run(['ls-remote', 'origin', target.remoteRef]))
   } catch {
     remote = null
   }
@@ -124,6 +179,7 @@ export function runPushVerify({ cwd, ref, doPush = true, log = console.log } = {
     reachable: remote !== null,
   })
 
+  log(`branch = ${target.branch}（远端 ${target.remoteRef}）`)
   log(`local  = ${localSha}`)
   log(`remote = ${remote?.sha ?? '(unreachable)'}`)
   log(result.ok

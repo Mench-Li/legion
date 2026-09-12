@@ -292,7 +292,56 @@ const refused = Array.isArray(plan.refused) ? plan.refused : []   // ❌ 读了�
 
 ---
 
-## 9. 顺带修好的门禁缺陷：一条只在测试里、不在门禁里的检查
+## 9. 推送验证脚本自己的错判（假红与假绿）
+
+推送这一步本该由 `scripts/prt/push-verify.mjs` 用「远端 tip 等于本地 HEAD」判定。
+本批提交后它报：
+
+```
+local  = 177dd6d…
+remote = 5d49fe0…
+PUSH NOT VERIFIED ✖（mismatch）
+```
+
+而 `git ls-remote origin refs/heads/codex/prt-runtime` 明明返回 `177dd6d`——
+**推送是成功的**。
+
+原因：脚本把命令行给的 ref 原样交给 `ls-remote`。传 `HEAD` 时，
+
+| 命令 | 实际问的是 |
+| --- | --- |
+| `git push origin HEAD` | **当前分支** `codex/prt-runtime` |
+| `git ls-remote origin HEAD` | 远端的 **`HEAD`** = **默认分支** `main` |
+
+两个不同的 ref，于是永远不相等。这次的表现是**假红**；同一个缺陷在另一种
+布局下会是**假绿**：在默认分支上工作时，`push origin HEAD` 推 `main`、
+`ls-remote origin HEAD` 也读 `main`，只要远端 `main` 仍等于本地 `HEAD`——
+**即使这次推送被服务端拒绝**（分支保护、push protection 拦下）——脚本照样报
+`verified`。而 `push-verify.mjs` 整个存在的理由，正是 PRT-509 那次
+「被 push protection 拒绝却以为推上去了」。
+
+**一个会给出错误结论的检查，比没有检查更坏。**
+
+修法是把 ref **归一**成远端真实存在的分支名再问：
+
+- `HEAD` → `git rev-parse --abbrev-ref HEAD` 得到当前分支名；
+- 分离头指针 → **拒绝**（没有分支可推，也没有可比较的远端 ref；猜一个名字
+  等于对着一个不存在的 ref 比较）；
+- 裸 SHA → **拒绝**（它没有对应的远端 ref 名，无从比较）；
+- 分支名 / `refs/heads/x` → 归一。
+
+`gitRun` 可注入，于是这条路径**可测**——原来它不可测，正是缺陷存活的原因：
+套件里 16 条用例全部只覆盖 `verdictFor` / `parseRemoteTip` 这两个纯函数，
+而 CLI 的 ref 解析一行都没有。现在补了 8 条，含一条端到端假绿回归
+（推送被拒 + 远端默认分支恰好等于本地 HEAD → 必须报 mismatch，
+且**不许**出现 `ls-remote origin HEAD` 这个调用）。
+
+> 值得记一笔：这个套件**早就在 CI 里**，而且一直是绿的。
+> 「套件注册了、跑过了、通过了」和「这条路径被测试了」不是一回事。
+
+---
+
+## 10. 顺带修好的门禁缺陷：一条只在测试里、不在门禁里的检查
 
 `team-hub/context-store.mjs` 建了新表 `run_context_snapshots`，
 而 `scripts/prt/baseline-snapshot.mjs --check` 报 **「无漂移」**——
@@ -323,7 +372,7 @@ const refused = Array.isArray(plan.refused) ? plan.refused : []   // ❌ 读了�
 
 ---
 
-## 10. 变红验证：16 处，16 处红
+## 11. 变红验证：19 处，19 处红
 
 每一步都确认「补丁**真的应用了**」再看用例红不红，
 因为**没生效的变红验证和通过的验证在输出上完全一样**。
@@ -348,7 +397,7 @@ const refused = Array.isArray(plan.refused) ? plan.refused : []   // ❌ 读了�
 
 ---
 
-## 11. 用例与验收
+## 12. 用例与验收
 
 | 套件 | 用例 | 内容 |
 | --- | --- | --- |
@@ -356,6 +405,7 @@ const refused = Array.isArray(plan.refused) ? plan.refused : []   // ❌ 读了�
 | `runtime/context/tokenizer.test.mjs` | 19 | 估算器是上界（中英 emoji 混合）/ 码点 vs UTF-16 / kind 可区分 / evidence 强制 / 拿到装配器上 |
 | `team-hub/context-store.test.mjs` | 18 | 全文可读回 / 不可变 / 幂等 vs 冲突 / 两处验哈希 / 审计只记规模 / 两处缺陷回归 |
 | `workbench/scripts/model-settings.test.mjs` | 37 | 含 `refused` 必须说出来、每条各说一次、全被拒绝时标题不许说"没有变更" |
+| `scripts/prt/push-verify.test.mjs` | 16 | ref 归一（`HEAD` → 当前分支）/ 分离头指针与裸 SHA 拒绝 / **端到端假绿回归** |
 | `scripts/prt/baseline-snapshot.test.mjs` | 19 | 覆盖率检查（含两条反向验证） |
 
 装配器的 `index.mjs` 是对外出口，且有用例真的 `import` 它并**调用**函数——
@@ -363,7 +413,7 @@ PRT-401 上曾出现「字符串出现过就算接线」的假绿，这里不重
 
 ---
 
-## 12. 遗留
+## 13. 遗留
 
 - **PRT-402–406、408、410–412 未做**：来源装配的具体实现（TeamPlan / EmployeeManifest /
   目标上下文 / 任务与评论 / 上游交付）、脱敏、未授权与超限用例、冻结接线、

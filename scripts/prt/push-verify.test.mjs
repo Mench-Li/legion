@@ -12,13 +12,15 @@
 // 它们必须被判成不同的结果。少了这两条，这个模块可以退回成一条永远为真的正则，
 // 而用例全绿。
 // ============================================================================
-import { test } from 'node:test'
+import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
   PUSH_VERDICTS,
   looksLikeSuccessText,
   parseRemoteTip,
+  resolvePushTarget,
+  runPushVerify,
   verdictFor,
 } from './push-verify.mjs'
 
@@ -125,4 +127,93 @@ test('**回归锁定**：拒绝输出里点名了提交与文件，可据以定�
 test('成功输出与失败输出在"是否被拒"上可区分', () => {
   assert.ok(!PUSH_ACCEPTED.includes('remote rejected'))
   assert.ok(PUSH_REJECTED.includes('remote rejected'))
+})
+
+// ---------------------------------------------------------------------------
+// ref 解析：这一类错**纯函数用例覆盖不到**，而它正是实际发生过的错判
+// ---------------------------------------------------------------------------
+
+describe('ref 归一：必须问**刚推的那个分支**，而不是远端的 HEAD', () => {
+  /** 一个记录调用的假 git。 */
+  const fakeGit = (map) => {
+    const calls = []
+    const run = (args) => {
+      calls.push(args.join(' '))
+      const key = args.join(' ')
+      if (!(key in map)) throw new Error(`假的 git 没有这个响应：${key}`)
+      return map[key]
+    }
+    return { run, calls }
+  }
+
+  test('**`HEAD` 归一成当前分支名**（旧版把它当远端 HEAD，读到默认分支 main）', () => {
+    const g = fakeGit({
+      'rev-parse --abbrev-ref HEAD': 'codex/prt-runtime',
+      'rev-parse HEAD': SHA_LOCAL,
+    })
+    const t = resolvePushTarget({ ref: 'HEAD', gitRun: g.run })
+    assert.equal(t.branch, 'codex/prt-runtime')
+    assert.equal(t.remoteRef, 'refs/heads/codex/prt-runtime')
+    // 关键：绝不能再出现 `ls-remote origin HEAD`
+    assert.notEqual(t.remoteRef, 'HEAD')
+    assert.equal(t.localSha, SHA_LOCAL)
+  })
+
+  test('分支名 → refs/heads/<分支>', () => {
+    const g = fakeGit({ 'rev-parse main': SHA_LOCAL })
+    assert.deepEqual(resolvePushTarget({ ref: 'main', gitRun: g.run }), {
+      localSha: SHA_LOCAL, remoteRef: 'refs/heads/main', branch: 'main',
+    })
+  })
+
+  test('refs/heads/x 原样用', () => {
+    const g = fakeGit({ 'rev-parse refs/heads/dev': SHA_LOCAL })
+    const t = resolvePushTarget({ ref: 'refs/heads/dev', gitRun: g.run })
+    assert.equal(t.remoteRef, 'refs/heads/dev')
+  })
+
+  test('分离头指针 → **拒绝**，而不是猜一个分支名去比', () => {
+    const g = fakeGit({ 'rev-parse --abbrev-ref HEAD': 'HEAD' })
+    assert.throws(() => resolvePushTarget({ ref: 'HEAD', gitRun: g.run }), /分离头指针/)
+  })
+
+  test('裸 SHA → **拒绝**（它没有对应的远端 ref 名，无从比较）', () => {
+    const g = fakeGit({})
+    assert.throws(() => resolvePushTarget({ ref: SHA_LOCAL, gitRun: g.run }), /没有对应的远端 ref 名/)
+  })
+
+  test('空 ref → 拒绝', () => {
+    assert.throws(() => resolvePushTarget({ ref: '', gitRun: () => '' }), /需要一个 ref/)
+  })
+
+  test('**端到端：推送被拒但默认分支恰好等于本地 HEAD 时，不得报 verified**', () => {
+    // 这是同一个缺陷的**假绿**形态（比实际撞到的假红更危险）：
+    //   在默认分支上工作 → `push origin HEAD` 推 main 且被服务端拒绝
+    //   → `ls-remote origin HEAD` 读的也是 main，而远端 main 仍等于本地 HEAD
+    //   → 旧版报 `verified`，**而这次推送根本没有成功**。
+    // 归一之后比较的是 `refs/heads/<当前分支>`，于是"没推上去"会如实反映为 mismatch。
+    const sha = SHA_LOCAL
+    const calls = []
+    const run = (args) => {
+      calls.push(args.join(' '))
+      const key = args.join(' ')
+      if (key === 'rev-parse --abbrev-ref HEAD') return 'codex/prt-runtime'
+      if (key === 'rev-parse HEAD') return sha
+      if (key.startsWith('push origin ')) {
+        const e = new Error('push declined')
+        e.stderr = ' ! [remote rejected] codex/prt-runtime -> codex/prt-runtime (push declined)'
+        throw e
+      }
+      // 远端那个分支**落后**（本次推送被拒），虽然远端默认分支 == 本地 HEAD
+      if (key === 'ls-remote origin refs/heads/codex/prt-runtime') return `${SHA_OLD}\trefs/heads/codex/prt-runtime\n`
+      if (key === 'ls-remote origin HEAD') return `${sha}\tHEAD\n` // 旧版会读到这里 → 假绿
+      throw new Error(`意外的调用：${key}`)
+    }
+    const r = runPushVerify({ cwd: '.', ref: 'HEAD', doPush: true, log: () => {}, gitRun: run })
+    assert.equal(r.ok, false, '推送被拒却报成功，正是一个会给出错误结论的检查')
+    assert.equal(r.verdict, PUSH_VERDICTS.MISMATCH)
+    // 而且**确实**问的是分支，不是 HEAD
+    assert.ok(calls.includes('ls-remote origin refs/heads/codex/prt-runtime'))
+    assert.ok(!calls.includes('ls-remote origin HEAD'), '绝不能问远端的 HEAD')
+  })
 })

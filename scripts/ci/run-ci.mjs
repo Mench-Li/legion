@@ -612,6 +612,13 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-509 的「跨账户与 ACL 加固」。关键用例用本机 `icacls` 的真实输出，
+      // 而那份真实输出恰好是不安全的（有沙箱组与未解析 SID）。
+      label: 'secret-acl（PRT-509：文件访问控制——"查不出来"必须与"是安全的"分开）',
+      files: ['security/secrets/acl.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       label: 'run-kill-drill（PRT-312：真实进程被强杀后不丢任务、不伪装成功、不重复外部写）',
       files: ['team-hub/run-kill-drill.test.mjs'],
       cwd: ROOT,

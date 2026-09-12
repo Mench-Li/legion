@@ -46,3 +46,22 @@ export {
   memoryBackend,
   nullProtector,
 } from './store.mjs'
+
+// 文件访问控制（PRT-509「跨账户与 ACL 加固」）。
+//
+// DPAPI 保护的是**内容**，不是**文件**：另一个账户仍可复制它、看到里面
+// 有哪些引用名（`refs` 的 key 是明文的，能画出"这台机器配了哪些供应商"）。
+// 所以文件本身必须只有所有者可读。
+//
+// `UNVERIFIABLE` 与 `OK` **必须分开**——"查不出来"绝不能被当成"是安全的"，
+// 一条这样的检查比没有检查更坏（它会让人相信一件没被验证过的事）。
+export {
+  ACL_CODES,
+  POSIX_OWNER_ONLY_BITS,
+  WINDOWS_ALLOWED_PRINCIPALS,
+  accessLettersOf,
+  evaluateWindowsPrincipals,
+  hardenFileAcl,
+  inspectFileAcl,
+  parseIcacls,
+} from './acl.mjs'

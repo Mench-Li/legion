@@ -4,9 +4,9 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-12　`run-ci --only test` **PASS**；其中 `test` **88 套件 / 2214 用例**
-（**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数为 87 套件 / 2193 用例）
-—— 以本文件所在提交为准；证据 `.ci/2026-09-12T06-16-54-776Z/`
+**最近一次全量基线**：2026-09-12　`run-ci --only test` **PASS**；其中 `test` **89 套件 / 2236 用例**
+（**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数为 88 套件 / 2214 用例）
+—— 以本文件所在提交为准；证据 `.ci/2026-09-12T06-31-24-188Z/`
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
 （`scrum/daemon-gf001.json`，`intervalMs: 15000`）同时运行时实测 **31 分钟**（约 7 倍）。
 **因此不要把耗时当回归基线**——只有套件数/用例数/通过与否可用于判定。
@@ -31,7 +31,63 @@
 > - `gf001` 空间非终态任务数为 **0**；T-141 已由将军于 `14:00:32Z` 转 `canceled`
 >   （产物从 patch 记录逐字恢复为 `53d9d15`，需求已由 `G-mtwxx7an-2` 交付，无需重做）。
 
-> **本轮（PRT-505 / PRT-509 密钥库的生产调用方、轮换自动失效与泄漏断言：回答"钥匙从哪来、轮换之后判定还作不作数"）**：
+> **本轮（PRT-509 续：密钥库文件的访问控制加固——DPAPI 保护的是内容，不是文件）**：
+> 新增 `security/secrets/acl.mjs`（Windows `icacls` / POSIX `mode` 的**读与加固**）
+> 与套件 `secret-acl`（**22 例**），补上 PRT-505/509 文档 §7 里明确列为未交付的
+> 「跨账户与 ACL 加固仍未做」。
+>
+> **DPAPI 保护的是内容，不是文件。** 另一个 Windows 账户仍可：复制这个文件带走；
+> 看到里面**有哪些引用名**（`refs` 的 key 是明文的，能画出"这台机器配了哪些供应商"）；
+> 反复触发解密失败，把"某个东西存在"变成可观测信号。
+>
+> **「查不出来」必须与「查出来是安全的」分开。** DSH 自己的 `credentials-local`
+> 在这里做得很清楚，注释原文是 *Windows has no mode to inspect … so the check is
+> **skipped rather than faked***——这条纪律必须继承。但它留下一个缺口：**本产品的
+> 主平台就是 Windows**（PRT-505 的标题就是 Windows Secret Store），而"跳过"在这里
+> 等于"Windows 上从不检查"。Windows 的 ACL **是可查的**，`icacls` 就是它的机制。
+> 于是本模块把三态分开：`ACL_OK` / `ACL_TOO_PERMISSIVE`（点名是谁）/ `ACL_UNVERIFIABLE`。
+> 第三种**绝不等同于第一种**——**一条"查不出来就当通过"的检查比没有检查更坏，
+> 它会让人相信一件没被验证过的事**；代码里这条落在返回值上：没有 runner 时是
+> `ACL_NO_RUNNER` + `ok:false`，**"跳过"这个状态在本模块里根本不存在**。
+>
+> **本机真实 `icacls` 输出当场抓出两个 bug，而它本身就是一个不安全样本**：
+> 这台机器把 Modify 给了一个沙箱组 `Amench\CodexSandboxUsers` **和一个未解析的 SID**
+> （一个连名字都没解析出来的主体同样是真实主体，把它当"看不懂的行"跳过就等于漏掉
+> 一次越权）。① **按空白切 token 会切断含空格的主体名** `NT AUTHORITY\SYSTEM`；
+> ② **`grantsAccess` 把已经抽好的权限字母又抽了一遍**——`'M'` 里没有括号，
+> 于是返回空串，`/[FMRXWD]/.test('')` 永远 false，**结果是每一个主体都被跳过、
+> 检查永远通过**。这个 bug 的隐蔽之处是它**不报错**：`ok:true`、`offenders:[]`，
+> 看起来像"这个文件的 ACL 很干净"——**一个永远返回 ok:true 的实现，在所有干净样本上
+> 都是对的，只有"不安全的输入必须报不安全"这条用例能抓住它**。
+> ③ 权限串有多个括号组（`(I)(M)`、`(OI)(CI)(F)`），只取第一组会把继承标记 `I`
+> 当成权限字母，于是**每一条继承来的 ACE 都被判成授权**——而继承来的 ACE 恰恰是
+> 最需要警惕的那类：文件自己没授权、父目录给了 `Users`，**效果完全一样**。
+> **用真实输出而不是我构造的样本**，是因为构造样本时我会按"我以为的格式"写，
+> 而解析器的错法恰在格式的细节里。
+>
+> **判定与加固**：允许的主体只有所有者（由调用方传入，`icacls` **不标出**所有者）
+> + `SYSTEM` + `Administrators`——后两个不是"我们信任它们"而是**操作系统要求**它们
+> 在场，而**挡管理员不是 ACL 能做的事**（那要靠 DPAPI 的账户绑定，正是内容保护负责的
+> 部分）；`Users`/`Everyone`/`Authenticated Users` 正在拒绝之列，**它们才是"多用户
+> 机器上另一个用户能读到"的真正原因**。加固**先断继承再授权**：只加权限不删继承，
+> 父目录给的授权仍在，而"操作成功了但结果没变"最容易被误认为加固已完成；
+> 命令返回 0 **不等于**加固完成，所以每步之后**复验**，复验不通过则整体判失败。
+> 不知道所有者时**一个命令都不发**——**猜一个主体去授权等于把权限给错人**。
+>
+> **如实升级一处 spec 张力**（不擅自决定、也不假装不存在）：spec 附录 A.2 第 2 条
+> 要求「PRT-505 应**复用** `$DSH_HOME/.credentials.yaml`，**不要另建密钥库**」。
+> 本批实测核对了这条指令：支持复用的一面是 DSH 的 `CredentialKey` 语法
+> `<scope>/<id>` 与 Legion 的 `secretRef` **正好相容**，且 `credentials-local`
+> 已实现 `assertOwnerOnly`（**"复用"在这里是真的复用**）；反对直接复用的一面是
+> **它是明文的**（本机实测 `refs: { DEEPSEEK_API_KEY: sk-be96… }` 直接就是明文），
+> 而复用会把保护等级从 DPAPI 降到明文；且 Legion 有**零第三方依赖**纪律而 DSH 用
+> `yaml` 包解析它，自己写 YAML 解析器意味着**解析错一个凭证文件是安全事件**。
+> 文档给出两条候选路线（**读桥** / **一次性迁移**）并指出**两者都需要产品决策
+> "哪一个是权威"**，因此不适合由实现者单方面决定。
+>
+> 详见 `docs/superpowers/prt/PRT-509-file-acl-hardening.md`。
+>
+> 本轮（PRT-505 / PRT-509 密钥库的生产调用方、轮换自动失效与泄漏断言：回答"钥匙从哪来、轮换之后判定还作不作数"）**：
 > 新增 `runtime/probe/secret-resolver.mjs`——`security/secrets/` 的**第一个也是唯一的生产调用方**
 > （PRT-505 此前的状态正是「**尚无生产调用方**」），套件 `secret-resolver`（**21 例**）。
 > `probeFingerprint` 增加 `credentialVersion`，`createModelProbe` 增加 `credentialVersionOf`。
@@ -1010,8 +1066,9 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：88 套件 / 2214 用例，`--only test` 整体 PASS** —— 2026-09-12 实测（设 `DSH_CHECKOUT`）
-（PRT-505/509 密钥库的生产调用方：`secret-resolver`（**21 例**，明文后端构造即拒 / 轮换自动失效探测缓存 / 明文不进诊断）；
+**当前基线：89 套件 / 2236 用例，`--only test` 整体 PASS** —— 2026-09-12 实测（设 `DSH_CHECKOUT`）
+（PRT-509 文件访问控制：`secret-acl`（**22 例**，真实 `icacls` 输出做夹具 / "查不出来"必须与"是安全的"分开）；
+PRT-505/509 密钥库的生产调用方：`secret-resolver`（**21 例**，明文后端构造即拒 / 轮换自动失效探测缓存 / 明文不进诊断）；
 PRT-508 配置导入导出：`config-bundle`（**27 例**，导出剥掉 secretRef / 导入挡密钥 / 冲突默认不覆盖）+ `config-bundle-routes`（**18 例**，plan 必须不写库）；
 PRT-504 模型连通性与能力：`model-probe`（**18 例**，纯分类）、
 `probe`（**22 例**，假 transport 覆盖全部分类）、`probe-http`（**19 例**，起真 HTTP 服务）；
@@ -1029,8 +1086,9 @@ PRT-307 机器验收：`acceptance`（**24 例**，纯函数）、`acceptance-st
 PRT-312 真实进程被强杀：`run-kill-drill`（**2 例**，真 worker 进程 + 真 team-hub + `SIGKILL`）；
 进度表自检 `prt-progress`（**12 例**）；PRT-314 多进程并发 `run-concurrency`（**5 例**）；
 `run-policy`（**14 例**：PRT-309/310/311 的重试额度、退避、Dead Letter、人工处置、幂等键）。
-`DSH_CHECKOUT` 未设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数为 87 套件 / 2193 用例。
-上一批基线 85 套件 / 2148 用例（PRT-508 配置导入导出）。
+`DSH_CHECKOUT` 未设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数为 88 套件 / 2214 用例。
+上一批基线 87 套件 / 2193 用例（PRT-505/509 密钥库的生产调用方）。
+更上一批基线 85 套件 / 2148 用例（PRT-508 配置导入导出）。
 更上一批基线 83 套件 / 1926 用例（PRT-504 模型连通性与能力）。
 更上一批基线 82 套件 / 2089 用例（PRT-503/510/511 运行预算与价目表）。
 更上一批基线 79 套件 / 2014 用例（PRT-502 岗位模型绑定）。

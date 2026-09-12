@@ -173,6 +173,181 @@ export const PRE_DECISIONS = Object.freeze({
   ask: (reason) => (reason === undefined ? { kind: 'ask' } : { kind: 'ask', reason }),
 })
 
+// ------------------------------------------------------- 可用性：两个阶段（PRT-617）
+
+/**
+ * 强制点的两个阶段。
+ *
+ * **必须分开观测**：连接快而响应慢是"策略算得慢"，连接就慢是"team-hub 不健康"。
+ * 两者的处置不同，合成一个总超时会把这个区分丢掉——丢掉之后，值班的人拿到
+ * "策略门超时了"只能两边都查一遍，而其中一边根本没问题。
+ */
+export const ENFORCEMENT_PHASES = Object.freeze(['connect', 'response'])
+
+/**
+ * 不可用的分类码。**每个阶段都有自己的码**，另外还有两个"不归因"的诚实码。
+ *
+ * 闭集之外的东西不许出现：一个可以是任意字符串的 `code` 字段会退化成一句"出错了"，
+ * 而审计要回答的是"去哪一边修"。
+ */
+export const AVAILABILITY_CODES = Object.freeze({
+  /** 连接阶段：端口声明了分阶段契约，却在连接窗口内没有任何回应。 */
+  CONNECT_TIMEOUT: 'enforcement-connect-timeout',
+  /** 响应阶段：端口自报了连接建立，但响应窗口内没有答案。 */
+  RESPONSE_TIMEOUT: 'enforcement-response-timeout',
+  /** 端口抛错且**尚未**自报连接建立：team-hub 不可达（拒绝连接 / DNS / 隧道断）。 */
+  UNREACHABLE: 'enforcement-team-hub-unreachable',
+  /** 端口抛错但**已经**自报连接建立：不是不可达，是这一次请求本身失败。 */
+  PORT_ERROR: 'enforcement-port-error',
+  /** 端口返回了闭集之外的判定。 */
+  MALFORMED: 'enforcement-malformed-port-result',
+  /**
+   * 超时了，而端口**从未自报阶段边界**：无法归因到某一段。
+   *
+   *   > 一个「超时了、但归因到错的那一段」的分类，
+   *   > 与一个「把值班的人派去修另一边」的分类，是同一个东西。
+   */
+  PHASE_UNREPORTED: 'enforcement-phase-unreported',
+})
+
+/** 分类码 → 它属于哪一段（`null` = 这次分类**不归因**到任何一段，不猜）。 */
+export const AVAILABILITY_PHASE_OF = Object.freeze({
+  [AVAILABILITY_CODES.CONNECT_TIMEOUT]: 'connect',
+  [AVAILABILITY_CODES.RESPONSE_TIMEOUT]: 'response',
+  [AVAILABILITY_CODES.UNREACHABLE]: 'connect',
+  [AVAILABILITY_CODES.PORT_ERROR]: 'response',
+  [AVAILABILITY_CODES.MALFORMED]: null,
+  [AVAILABILITY_CODES.PHASE_UNREPORTED]: null,
+})
+
+/**
+ * 端口契约：`onConnected()`。
+ *
+ * 端口在**连接建立**的那一刻调用它一次；响应窗口从那一刻开始计时。
+ *
+ * ## 为什么"端口有没有自报阶段边界"必须显式声明
+ *
+ * 一个从不自报的端口，与一个"我们分不清它卡在哪一段"的端口，是同一个东西。
+ * 于是只有两条路：猜一段（把一半的故障派给错的人），或者如实说"不知道"。
+ * 本模块选后者——`PHASE_UNREPORTED` 就是那句"不知道"。
+ *
+ * 但"不知道"不能是终点：需要分段的调用方应当声明 `portsPhases: true`，
+ * 于是连接窗口成为**硬期限**，到期即 `CONNECT_TIMEOUT`。声明之后就不再有不归因
+ * 的情形，两个阶段各自可观测。**声明与否是调用方的事实，不是我们猜出来的。**
+ */
+async function runWithPhaseDeadlines(invoke, {
+  connectTimeoutMs, responseTimeoutMs, portsPhases = false, now = () => Date.now(), label,
+}) {
+  const started = now()
+  const budget = connectTimeoutMs + responseTimeoutMs
+  let timer = null
+  let settled = false
+  let connected = false
+  let rejectGate = null
+
+  const gate = new Promise((_, reject) => { rejectGate = reject })
+
+  const failWith = (code, phase, ms) => {
+    const where = phase === 'connect' ? '连接阶段' : phase === 'response' ? '响应阶段' : '阶段未自报'
+    const err = new Error(`${label}不可用（${where}，${code}，${ms}ms）`)
+    err.code = code
+    err.phase = phase
+    err.phaseDeclared = portsPhases
+    err.connected = connected
+    rejectGate(err)
+  }
+
+  // 剩余预算。连接窗口之后才开始的那一段必须是"剩下的那些"：
+  // 一个迟到的连接自报不该把总预算撑成两倍——Run 有期限约束。
+  const remaining = () => Math.max(1, budget - (now() - started))
+  const arm = (code, phase, ms) => {
+    timer = setTimeout(() => { if (!settled) failWith(code, phase, ms) }, ms)
+  }
+
+  if (portsPhases) {
+    arm(AVAILABILITY_CODES.CONNECT_TIMEOUT, 'connect', connectTimeoutMs)
+  } else {
+    timer = setTimeout(() => {
+      if (settled || connected) return
+      // 连接窗口到期但端口没自报：**不判失败**（它仍可能在总预算内给出答案），
+      // 转入剩余预算；此时超时只能报"阶段未自报"。
+      arm(AVAILABILITY_CODES.PHASE_UNREPORTED, null, remaining())
+    }, connectTimeoutMs)
+  }
+
+  const onConnected = () => {
+    if (settled || connected) return
+    connected = true
+    if (timer !== null) clearTimeout(timer)
+    arm(AVAILABILITY_CODES.RESPONSE_TIMEOUT, 'response', Math.min(responseTimeoutMs, remaining()))
+  }
+
+  try {
+    return await Promise.race([invoke(onConnected), gate])
+  } catch (err) {
+    // 端口自己抛的错：按"有没有自报连接建立"归因。一律叫"不可达"会让一次
+    // "策略请求本身失败"被读成"team-hub 挂了"，于是排查方向从一开始就是错的。
+    if (typeof err?.code === 'string' && AVAILABILITY_PHASE_OF[err.code] !== undefined) throw err
+    const code = connected ? AVAILABILITY_CODES.PORT_ERROR : AVAILABILITY_CODES.UNREACHABLE
+    const wrap = new Error(`${label}不可用（${connected ? '响应阶段' : '连接阶段'}，${code}）：${err?.message ?? String(err)}`)
+    wrap.code = code
+    wrap.phase = AVAILABILITY_PHASE_OF[code]
+    wrap.phaseDeclared = portsPhases
+    wrap.connected = connected
+    wrap.reason = err
+    throw wrap
+  } finally {
+    settled = true
+    if (timer !== null) clearTimeout(timer)
+  }
+}
+
+/**
+ * 构造一次分类（`code` 必须是闭集里的码）。供**不经过异常**的归类使用，
+ * 例如端口返回了闭集外的值——那不是抛错，是"这个端口现在不可信"。
+ */
+export function availabilityOf(code, detail, { phaseDeclared = false, connected = false } = {}) {
+  if (AVAILABILITY_PHASE_OF[code] === undefined) {
+    throw new Error(`未知的可用性分类码 ${JSON.stringify(code)}（闭集之外的东西不能进审计）`)
+  }
+  return Object.freeze({
+    unavailable: true,
+    code,
+    phase: AVAILABILITY_PHASE_OF[code] ?? null,
+    phaseDeclared,
+    connected,
+    detail,
+  })
+}
+
+/**
+ * 把一次失败归类成"哪个强制点、哪一段、什么码"。
+ *
+ * 它是 `err.code` 的唯一读法：**闭集之外一律当作"我们不知道"**。把未知错误
+ * 读成"没问题"是这一层最坏的一种兜底；读成"不可达"至少会让人去检查连接。
+ *
+ * `phaseDeclared` / `connected` 是这次归因的**依据**，一并带出去：
+ * 审计要能区分"连接阶段真的失败了"与"端口根本没自报过阶段边界"。
+ */
+export function classifyAvailability(err) {
+  const known = typeof err?.code === 'string' && AVAILABILITY_PHASE_OF[err.code] !== undefined
+  const detail = err?.message ?? String(err)
+  if (!known) {
+    return Object.freeze({
+      unavailable: true,
+      code: AVAILABILITY_CODES.UNREACHABLE,
+      phase: null,
+      phaseDeclared: err?.phaseDeclared === true,
+      connected: err?.connected === true,
+      detail,
+    })
+  }
+  return availabilityOf(err.code, detail, {
+    phaseDeclared: err?.phaseDeclared === true,
+    connected: err?.connected === true,
+  })
+}
+
 /**
  * 构造 `tools/pre-execute` 策略 listener。
  *
@@ -183,40 +358,33 @@ export const PRE_DECISIONS = Object.freeze({
  * 工具调用会**无限期挂起** —— 既不失败也不成功，整条流水线停在那里。
  * 因此超时必须自己带，且超时后返回 `deny` 而不是「不知道」。
  *
- * 连接段与响应段分开计时：连接快而响应慢是「策略算得慢」，
- * 连接就慢是「team-hub 不健康」。两者的处置不同，合成一个总超时会丢掉这个区分。
+ * 连接段与响应段分开计时（见 `runWithPhaseDeadlines`）：连接快而响应慢是
+ * 「策略算得慢」，连接就慢是「team-hub 不健康」。两者的处置不同，
+ * 合成一个总超时会丢掉这个区分——而区分就是这里唯一能给人的东西。
+ *
+ * `portsPhases: true` 表示**调用方声明**这个 `decide` 端口遵守 `onConnected` 契约。
+ * 不声明时总预算照旧封顶，但超时只报 `PHASE_UNREPORTED`（不猜哪一段）。
  */
-export function createPreExecutePolicy({ decide, connectTimeoutMs = 2000, responseTimeoutMs = 3000, now = () => Date.now(), onDecision } = {}) {
+export function createPreExecutePolicy({
+  decide, connectTimeoutMs = 2000, responseTimeoutMs = 3000, now = () => Date.now(), onDecision, portsPhases = false,
+} = {}) {
   if (typeof decide !== 'function') throw new Error('createPreExecutePolicy 需要 decide 端口')
-
-  async function withDeadline(fn, ms, label) {
-    let timer
-    try {
-      return await Promise.race([
-        fn(),
-        new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`${label} 超时（${ms}ms）`)), ms)
-          // 不 unref：这个定时器必须能把挂起的 promise 解开，unref 会让进程退出时静默丢失它。
-        }),
-      ])
-    } finally {
-      clearTimeout(timer)
-    }
-  }
 
   /** @type {import('./enforcement.mjs').PreExecuteListenerLike} */
   async function listener(execution) {
     const started = now()
     let decision
     try {
-      decision = await withDeadline(
-        () => decide(execution),
-        connectTimeoutMs + responseTimeoutMs,
-        '策略门',
+      decision = await runWithPhaseDeadlines(
+        (onConnected) => decide(execution, { onConnected }),
+        { connectTimeoutMs, responseTimeoutMs, portsPhases, now, label: '策略门' },
       )
     } catch (err) {
-      const d = PRE_DECISIONS.deny(`策略门不可用，已按 fail closed 拒绝：${err?.message ?? String(err)}`)
-      onDecision?.({ execution, decision: d, source: 'pre-execute', reason: 'unavailable', elapsedMs: now() - started })
+      // 超时与异常都按 fail closed 处理，但**归因不同**：`code` / `phase` 说的是
+      // 连不上、算得慢、还是我们根本不知道它卡在哪一段——三者的修法不同。
+      const a = classifyAvailability(err)
+      const d = PRE_DECISIONS.deny(`策略门不可用，已按 fail closed 拒绝：${a.detail}`)
+      onDecision?.({ execution, decision: d, source: 'pre-execute', reason: 'unavailable', elapsedMs: now() - started, ...a })
       return d
     }
 
@@ -224,7 +392,10 @@ export function createPreExecutePolicy({ decide, connectTimeoutMs = 2000, respon
     const kind = decision?.kind
     if (kind !== 'allow' && kind !== 'deny' && kind !== 'ask') {
       const d = PRE_DECISIONS.deny(`策略门返回了无法识别的判定 ${JSON.stringify(kind)}，已按 fail closed 拒绝`)
-      onDecision?.({ execution, decision: d, source: 'pre-execute', reason: 'malformed', elapsedMs: now() - started })
+      // 与超时那一路共用同一份分类：`reason: 'malformed'` 只说"没看懂"，
+      // 说得出"这是端口不可信、不是策略说不"才是审计要的东西。
+      const a = availabilityOf(AVAILABILITY_CODES.MALFORMED, `策略门返回了无法识别的判定 ${JSON.stringify(kind)}`, { phaseDeclared: portsPhases === true })
+      onDecision?.({ execution, decision: d, source: 'pre-execute', reason: 'malformed', elapsedMs: now() - started, ...a })
       return d
     }
     if (kind === 'deny' && (typeof decision.reason !== 'string' || decision.reason === '')) {
@@ -238,6 +409,36 @@ export function createPreExecutePolicy({ decide, connectTimeoutMs = 2000, respon
   }
 
   return listener
+}
+
+/**
+ * 把静态 hard floor 接到 `tools/pre-execute` 的**最前面**。
+ *
+ * spec §6.8 line 437：`tools/pre-execute` 负责"静态禁令提前拒绝以避免无效询问"。
+ * 这一行是 PRT-620 那条不变量成立的前提。没有它，"pre-execute 放行 + guard 拒绝"
+ * 不是配置错误，而是必然：一个注定被 guard 拒绝的调用会走进审批箱，人批了、
+ * guard 仍然拒——审计里于是出现一条"人工已批准但仍被拒绝"，而它没有修复动作。
+ *
+ *   > 一个「hard floor 只在 guard 一处生效」的接线，
+ *   > 与一个「人批了之后仍然被 guard 拒绝、而审计里找不到该修哪里」的接线，
+ *   > 是同一个东西。
+ *
+ * 下限判定与 guard **共用同一个 `createHardFloorGuard` 调用结果**，不另写一份比较：
+ * 两份"同一个下限"的实现，与一个"下限会在 pre-execute 与 guard 之间漂移"的实现，
+ * 是同一个东西——而漂移的那一天只表现为"这次怎么被拒了"。
+ */
+export function composePreExecuteFloor({ floor = DEFAULT_HARD_FLOOR, decide } = {}) {
+  if (typeof decide !== 'function') {
+    throw new Error('composePreExecuteFloor 需要 decide 端口（下限之后由谁判）')
+  }
+  const guard = createHardFloorGuard(floor)
+  return (execution, options) => {
+    const reason = guard(execution)
+    // 下限说不行就直接 `deny`，**不是** `ask`：问一个注定被拒的问题，
+    // 只会让审计里多出一条"人工已批准但仍被拒绝"。
+    if (reason !== undefined) return PRE_DECISIONS.deny(reason)
+    return decide(execution, options)
+  }
 }
 
 // ----------------------------------------------------------------- approval
@@ -301,28 +502,15 @@ export function createApprovalAnswerer({
   responseTimeoutMs = 60_000,
   now = () => Date.now(),
   onOutcome,
+  portsPhases = false,
 } = {}) {
   if (typeof request !== 'function') throw new Error('createApprovalAnswerer 需要 request 端口')
-
-  async function withDeadline(fn, ms, label) {
-    let timer
-    try {
-      return await Promise.race([
-        fn(),
-        new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`${label} 超时（${ms}ms）`)), ms)
-        }),
-      ])
-    } finally {
-      clearTimeout(timer)
-    }
-  }
 
   /** @type {import('./enforcement.mjs').ApprovalAnswererLike} */
   async function answerer(req) {
     const started = now()
-    const finish = (outcome, reason) => {
-      onOutcome?.({ req, outcome, reason, elapsedMs: now() - started })
+    const finish = (outcome, reason, availability = null) => {
+      onOutcome?.({ req, outcome, reason, elapsedMs: now() - started, ...(availability ?? {}) })
       return outcome
     }
     if (req === null || typeof req !== 'object') return finish('unavailable', 'malformed-request')
@@ -332,29 +520,337 @@ export function createApprovalAnswerer({
 
     let outcome
     try {
-      outcome = await withDeadline(
-        () => request({
+      outcome = await runWithPhaseDeadlines(
+        (onConnected) => request({
           toolName: req.toolName,
           callId: req.callId,
           reason: req.reason,
           signal: req.signal,
           connectTimeoutMs,
           responseTimeoutMs,
+          onConnected,
         }),
-        connectTimeoutMs + responseTimeoutMs,
-        '审批箱',
+        { connectTimeoutMs, responseTimeoutMs, portsPhases, now, label: '审批箱' },
       )
     } catch (err) {
-      return finish('unavailable', `不可用：${err?.message ?? String(err)}`)
+      // ★ `unavailable`，**不是** `rejected`，也**不是**"保持等待"：
+      // 前者是"问不到人"，中者是"人说不"，后者是"等 team-hub 恢复后再问"——
+      // 而 spec §6.8 line 477 明确禁止后者（等待会突破 Run 的期限约束）。
+      const a = classifyAvailability(err)
+      return finish('unavailable', `不可用：${a.detail}`, a)
     }
 
     if (!APPROVAL_OUTCOMES.includes(outcome)) {
       // 端口返回了闭集之外的值 —— 不能当作放行，也不能当作拒绝，
       // 只能当作「这个 answerer 现在不可信」。
-      return finish('unavailable', `审批箱返回了闭集外的结果 ${JSON.stringify(outcome)}`)
+      const detail = `审批箱返回了闭集外的结果 ${JSON.stringify(outcome)}`
+      return finish('unavailable', detail, availabilityOf(AVAILABILITY_CODES.MALFORMED, detail, { phaseDeclared: portsPhases === true }))
     }
     return finish(outcome, outcome === 'allowed-once' ? 'granted' : 'denied')
   }
 
   return answerer
+}
+
+// ------------------------------------------- 可用性语义的一致性（PRT-617）
+
+/**
+ * 每种成因**应当**产出什么。这张表是"分类说不说得通"的判据。
+ *
+ * `outcome` 用审批箱（answerer）那一侧的名字：它是唯一同时能把"故障"与"决定"
+ * 表达出来的闭集。策略门那一侧对应的结局是 `deny`——**同一份分类的另一种投影**，
+ * 不是另一份判定。
+ */
+export const AVAILABILITY_CONTRACT = Object.freeze({
+  ok: Object.freeze({ outcome: 'allowed-once', code: null, phase: null }),
+  cancelled: Object.freeze({ outcome: 'cancelled', code: null, phase: null }),
+  rejected: Object.freeze({ outcome: 'rejected', code: null, phase: null }),
+  'connect-timeout': Object.freeze({ outcome: 'unavailable', code: AVAILABILITY_CODES.CONNECT_TIMEOUT, phase: 'connect' }),
+  'response-timeout': Object.freeze({ outcome: 'unavailable', code: AVAILABILITY_CODES.RESPONSE_TIMEOUT, phase: 'response' }),
+  unreachable: Object.freeze({ outcome: 'unavailable', code: AVAILABILITY_CODES.UNREACHABLE, phase: 'connect' }),
+  'port-error': Object.freeze({ outcome: 'unavailable', code: AVAILABILITY_CODES.PORT_ERROR, phase: 'response' }),
+  malformed: Object.freeze({ outcome: 'unavailable', code: AVAILABILITY_CODES.MALFORMED, phase: null }),
+  'phase-unreported': Object.freeze({ outcome: 'unavailable', code: AVAILABILITY_CODES.PHASE_UNREPORTED, phase: null }),
+})
+
+export const AVAILABILITY_CHECK_CODES = Object.freeze({
+  /** 故障被记成了一次决定（`rejected` / `cancelled`）。 */
+  FAULT_AS_REJECTED: 'availability-fault-as-rejected',
+  /** 一次真实的决定被记成了 `unavailable`（反方向同样有害）。 */
+  DECISION_AS_FAULT: 'availability-decision-as-fault',
+  /** 没有结算 = 会无限期挂起。 */
+  NEVER_SETTLES: 'availability-never-settles',
+  /** 分类码 / 阶段与契约对不上。 */
+  CODE_UNKNOWN: 'availability-code-unknown',
+  /** 结局不在"故障 / 决定"两类的任何一边。 */
+  OUTCOME_UNKNOWN: 'availability-outcome-unknown',
+  /** 成因不在契约里。 */
+  CAUSE_UNKNOWN: 'availability-cause-unknown',
+})
+
+/**
+ * 一致性判据：**故障不得被记成决定，也不得永远不结算**。
+ *
+ * 三个方向都要查，因为它们各自对应一种安静的错误：
+ *   ① 故障 → `rejected`：审计里写着"用户拒绝了这次写入"，而用户从没被问过；
+ *   ② 决定 → `unavailable`：审计里写着"问不到人"，而人其实明确说了不；
+ *   ③ 不结算：工具调用无限期挂在那里（spec line 476 描述的那个故障）。
+ *
+ * 行是**注入**的。理由与前几批完全一样：真实输入下这三条永远成立，
+ * 于是它是一条从不执行的检查——
+ *
+ *   > 一个「检查一个不可能出现的值」的检查，
+ *   > 与一条不存在的检查，在"它到底拦住了什么"上是同一个东西。
+ */
+export function assertUnavailableIsNotPendingNorRejected(rows = []) {
+  const checked = []
+  const violations = []
+  const push = (row, code, detail) => violations.push(Object.freeze({
+    code, cause: row?.cause ?? null, label: row?.label ?? null, auditSource: 'approval', detail,
+  }))
+
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const expected = AVAILABILITY_CONTRACT[row?.cause]
+    checked.push(Object.freeze({
+      label: row?.label ?? null,
+      cause: row?.cause ?? null,
+      outcome: row?.outcome ?? null,
+      settled: row?.settled === true,
+      code: row?.code ?? null,
+      phase: row?.phase ?? null,
+      expected: expected ?? null,
+    }))
+    if (expected === undefined) {
+      push(row, AVAILABILITY_CHECK_CODES.CAUSE_UNKNOWN,
+        `成因 ${JSON.stringify(row?.cause)} 不在契约里：未知成因的分类无法被验证`)
+      continue
+    }
+    if (row?.settled !== true) {
+      // spec §6.8 line 477：不得"等 team-hub 恢复后再询问"。
+      push(row, AVAILABILITY_CHECK_CODES.NEVER_SETTLES,
+        '这一次没有结算——等待会突破 Run 的期限约束。'
+        + '一个「等 team-hub 恢复后再问」的实现，与一个「把不可达伪装成待审批」的实现，是同一个东西')
+    }
+    if (row?.outcome !== expected.outcome) {
+      if (expected.outcome === 'unavailable') {
+        push(row, AVAILABILITY_CHECK_CODES.FAULT_AS_REJECTED,
+          `故障被记成 ${JSON.stringify(row?.outcome)}（应当是 unavailable）：`
+          + '把故障伪装成决定，会让值班的人去追问一个从未被问过的人')
+      } else if (row?.outcome === 'unavailable') {
+        push(row, AVAILABILITY_CHECK_CODES.DECISION_AS_FAULT,
+          `一次真实的决定（${expected.outcome}）被记成 unavailable：`
+          + '反方向同样有害——人明确说了不，审计里却写着"问不到人"')
+      } else {
+        push(row, AVAILABILITY_CHECK_CODES.OUTCOME_UNKNOWN,
+          `结局 ${JSON.stringify(row?.outcome)} 与契约不一致，且不在"故障 / 决定"两类的任何一边`)
+      }
+    }
+    if ((row?.code ?? null) !== expected.code || (row?.phase ?? null) !== expected.phase) {
+      push(row, AVAILABILITY_CHECK_CODES.CODE_UNKNOWN,
+        `分类码与阶段对不上契约：得到 code=${JSON.stringify(row?.code ?? null)} phase=${JSON.stringify(row?.phase ?? null)}，`
+        + `应当是 code=${JSON.stringify(expected.code)} phase=${JSON.stringify(expected.phase)}——`
+        + '没有阶段码的故障派不到正确的那一边去修')
+    }
+  }
+
+  return Object.freeze({
+    rows: Object.freeze(checked),
+    violations: Object.freeze(violations),
+    ok: violations.length === 0,
+    // ★ 留证而不是布尔：调用方要能看出这次到底验了几行故障、几行决定。
+    faultRows: checked.filter((r) => r.expected !== null && r.expected.outcome === 'unavailable').length,
+    decisionRows: checked.filter((r) => r.expected !== null && r.expected.outcome !== 'unavailable').length,
+    violationCodes: Object.freeze([...new Set(violations.map((v) => v.code))].sort()),
+  })
+}
+
+/**
+ * 装载期自检（PRT-617）。
+ *
+ * 与所有自检同一条纪律：**留下计算值，且必须是能红的**。
+ * `tampered` 那三行是故意写坏的——它们必须被拦下，否则这条检查与一条不存在的检查，
+ * 在"它到底拦住了什么"上是同一个东西。
+ */
+export function availabilitySelfCheck() {
+  const declaredRows = Object.keys(AVAILABILITY_CONTRACT).map((cause) => Object.freeze({
+    label: cause, cause,
+    outcome: AVAILABILITY_CONTRACT[cause].outcome,
+    settled: true,
+    code: AVAILABILITY_CONTRACT[cause].code,
+    phase: AVAILABILITY_CONTRACT[cause].phase,
+  }))
+  const tamperedRows = Object.freeze([
+    Object.freeze({
+      label: '超时被记成 rejected', cause: 'connect-timeout', outcome: 'rejected',
+      settled: true, code: AVAILABILITY_CODES.CONNECT_TIMEOUT, phase: 'connect',
+    }),
+    Object.freeze({
+      label: '不可达被记成"等它恢复"', cause: 'unreachable', outcome: 'unavailable',
+      settled: false, code: AVAILABILITY_CODES.UNREACHABLE, phase: 'connect',
+    }),
+    Object.freeze({
+      label: '故障没有阶段码', cause: 'response-timeout', outcome: 'unavailable',
+      settled: true, code: null, phase: null,
+    }),
+  ])
+  const declared = assertUnavailableIsNotPendingNorRejected(declaredRows)
+  const broken = assertUnavailableIsNotPendingNorRejected(tamperedRows)
+  return Object.freeze({
+    declared: Object.freeze({ rows: declared.rows.length, violations: declared.violations.length, faultRows: declared.faultRows }),
+    tampered: Object.freeze({
+      rows: tamperedRows.length,
+      violations: broken.violations.length,
+      codes: broken.violationCodes,
+    }),
+    phases: ENFORCEMENT_PHASES,
+    // 每个阶段各自有哪些码——"一个码 per 阶段"这句话的可查形式。
+    phaseCodes: Object.freeze(ENFORCEMENT_PHASES.map((phase) => Object.freeze({
+      phase,
+      codes: Object.freeze(Object.keys(AVAILABILITY_PHASE_OF).filter((c) => AVAILABILITY_PHASE_OF[c] === phase).sort()),
+    }))),
+    // 码闭集 = 契约里出现过的那些。多出来的码就是"从没被验证过"的码。
+    codes: Object.freeze([...new Set(Object.values(AVAILABILITY_CODES))].sort()),
+    codesInContract: Object.freeze([...new Set(
+      Object.values(AVAILABILITY_CONTRACT).map((v) => v.code).filter((c) => c !== null),
+    )].sort()),
+    // ★ 能红才是价值：坏行必须被拦下，而正常行必须不误报。
+    tamperedCaught: broken.violations.length > 0 && declared.violations.length === 0,
+  })
+}
+
+/** 装载期结论（计算值，不是 `ok` 布尔）。 */
+export const AVAILABILITY_CHECKED = Object.freeze(availabilitySelfCheck())
+
+/**
+ * 用**真定时器**把每一种成因各跑一遍（PRT-617 的实测证据）。
+ *
+ * 它不读常量表：每一条都真的等一次超时，再看它落到哪个码上。
+ * 这是"两个阶段可以独立观测"唯一能被证明的方式——
+ *
+ *   > 一个「声明了两个阶段」的模块，
+ *   > 与一个「两个阶段其实共用一条总超时」的模块，是同一个东西。
+ *
+ * `ok === false` 的含义是具体的：要么某个成因落到了别的码上，
+ * 要么某一条**没有结算**（没结算 = 工具调用会无限期挂起）。
+ */
+export async function probeTwoPhaseAvailability({ connectTimeoutMs = 10, responseTimeoutMs = 10, now = () => Date.now() } = {}) {
+  const budget = connectTimeoutMs + responseTimeoutMs
+  // CI 机器可能很慢。判据是"有没有结算、码对不对"，不是精确耗时——
+  // 用耗时当判据会造出一条在繁忙机器上偶发变红的检查。
+  const slack = Math.max(150, budget * 4)
+
+  const runAnswerer = async (s) => {
+    const started = now()
+    const seen = {}
+    const answerer = createApprovalAnswerer({
+      request: s.request,
+      connectTimeoutMs,
+      responseTimeoutMs,
+      portsPhases: s.portsPhases === true,
+      now,
+      onOutcome: (o) => { Object.assign(seen, o) },
+    })
+    let outcome = null
+    let settled = true
+    try { outcome = await answerer({ toolName: 'probe', callId: 'probe' }) } catch { settled = false }
+    return { outcome, settled, code: seen.code ?? null, phase: seen.phase ?? null, elapsedMs: now() - started }
+  }
+
+  const runPolicyGate = async (s) => {
+    const started = now()
+    const seen = []
+    const listener = createPreExecutePolicy({
+      decide: s.request,
+      connectTimeoutMs,
+      responseTimeoutMs,
+      portsPhases: s.portsPhases === true,
+      now,
+      onDecision: (d) => seen.push(d),
+    })
+    let decision = null
+    let settled = true
+    try { decision = await listener({ name: 'probe' }) } catch { settled = false }
+    const last = seen[seen.length - 1] ?? {}
+    return { kind: decision?.kind ?? null, settled, code: last.code ?? null, phase: last.phase ?? null, elapsedMs: now() - started }
+  }
+
+  const scenarios = [
+    {
+      id: '①', what: '连接阶段：端口抛错（team-hub 不可达）',
+      via: 'answerer', portsPhases: true,
+      request: () => { throw new Error('ECONNREFUSED 127.0.0.1:1') },
+      expect: { outcome: 'unavailable', code: AVAILABILITY_CODES.UNREACHABLE, phase: 'connect' },
+    },
+    {
+      id: '②', what: '连接阶段：声明了分阶段契约却一直没有回应',
+      via: 'answerer', portsPhases: true,
+      request: () => new Promise(() => {}),
+      expect: { outcome: 'unavailable', code: AVAILABILITY_CODES.CONNECT_TIMEOUT, phase: 'connect' },
+    },
+    {
+      id: '③', what: '响应阶段：自报连接建立后不再回应',
+      via: 'answerer', portsPhases: true,
+      request: ({ onConnected }) => { onConnected(); return new Promise(() => {}) },
+      expect: { outcome: 'unavailable', code: AVAILABILITY_CODES.RESPONSE_TIMEOUT, phase: 'response' },
+    },
+    {
+      id: '④', what: '未声明契约且一直没有回应：**不猜**是哪一段',
+      via: 'answerer', portsPhases: false,
+      request: () => new Promise(() => {}),
+      expect: { outcome: 'unavailable', code: AVAILABILITY_CODES.PHASE_UNREPORTED, phase: null },
+    },
+    {
+      id: '⑤', what: '自报连接建立之后这一次请求本身失败',
+      via: 'answerer', portsPhases: true,
+      request: ({ onConnected }) => { onConnected(); throw new Error('boom') },
+      expect: { outcome: 'unavailable', code: AVAILABILITY_CODES.PORT_ERROR, phase: 'response' },
+    },
+    {
+      id: '⑥', what: '正常放行不被降级成故障',
+      via: 'answerer', portsPhases: true,
+      request: () => 'allowed-once',
+      expect: { outcome: 'allowed-once', code: null, phase: null },
+    },
+    {
+      id: '⑦', what: '策略门：不可用时是 deny（不是挂起，也不是放行）',
+      via: 'policy', portsPhases: false,
+      request: () => new Promise(() => {}),
+      expect: { kind: 'deny', code: AVAILABILITY_CODES.PHASE_UNREPORTED, phase: null },
+    },
+    {
+      id: '⑧', what: '策略门：端口抛错时是 deny，且归到连接阶段',
+      via: 'policy', portsPhases: true,
+      request: () => { throw new Error('ECONNREFUSED') },
+      expect: { kind: 'deny', code: AVAILABILITY_CODES.UNREACHABLE, phase: 'connect' },
+    },
+  ]
+
+  const rows = []
+  for (const s of scenarios) {
+    const got = s.via === 'policy' ? await runPolicyGate(s) : await runAnswerer(s)
+    const matches = Object.entries(s.expect).every(([k, v]) => (got[k] ?? null) === v)
+    rows.push(Object.freeze({
+      id: s.id, what: s.what, via: s.via, portsPhases: s.portsPhases === true,
+      expected: Object.freeze({ ...s.expect }),
+      got: Object.freeze({ ...got }),
+      matches,
+      withinBudget: got.elapsedMs <= budget + slack,
+    }))
+  }
+
+  const unsettled = rows.filter((r) => r.got.settled !== true)
+  const mismatched = rows.filter((r) => r.matches !== true)
+  const overBudget = rows.filter((r) => r.withinBudget !== true)
+  return Object.freeze({
+    ok: unsettled.length === 0 && mismatched.length === 0 && overBudget.length === 0,
+    connectTimeoutMs,
+    responseTimeoutMs,
+    budgetMs: budget,
+    rows: Object.freeze(rows),
+    reasons: Object.freeze([
+      ...unsettled.map((r) => `${r.id} ${r.what}：没有结算（会无限期挂起）`),
+      ...mismatched.map((r) => `${r.id} ${r.what}：得到 ${JSON.stringify(r.got)}，期望 ${JSON.stringify(r.expected)}`),
+      ...overBudget.map((r) => `${r.id} ${r.what}：耗时 ${r.got.elapsedMs}ms 超过预算 ${budget}ms`),
+    ]),
+  })
 }

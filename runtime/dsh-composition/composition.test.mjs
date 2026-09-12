@@ -233,17 +233,25 @@ test('沙箱探测：探针 argv 跨平台存在（避免把「平台没有该�
 
 // ----------------------------------------------------------------- PRT-215 自检
 
-test('自检：四项全过 → enforcement-effective，且不禁用自动执行', async () => {
+test('自检：六项全过 → enforcement-effective，且不禁用自动执行', async () => {
   const r = await startupSelfCheck({ composition: GOOD_COMPOSITION, sandbox: goodSandbox(), runtime: GOOD_RUNTIME })
   assert.equal(r.state, SELFCHECK_STATES.effective)
   assert.equal(r.autoExecutionForbidden, false)
   assert.deepEqual(r.reasons, [])
   // 第 ④ 项（PRT-612）：强制面挂上了没有 ≠ 挂上的那几个点与映射表还是同一回事。
+  // 第 ⑤ 项（PRT-620）：每个点单看都对 ≠ 两个点合起来说得通。
+  // 第 ⑥ 项（PRT-617）：接线是对的 ≠ 卡住的时候真的会结算。
   assert.deepEqual(r.checks.map((c) => c.name), [
     'composition-patch-layer', 'runtime-probe', 'sandbox-enforcement', 'enforcement-mapping',
+    'guard-approval-consistency', 'enforcement-availability',
   ])
   // 第 ④ 项在**这一层**必须真的查全（`probeSandbox` 由 selfcheck 自己注入）。
   assert.deepEqual(r.mapping.unresolvedPrimitives, [])
+  // 第 ⑤ 项的反向控制必须真的报出违规（否则它是一条不存在的检查）。
+  assert.equal(r.guardConsistency.tamperedCaught, true)
+  // 第 ⑥ 项：每一种成因都结算了，且码与契约一致。
+  assert.equal(r.availability.ok, true)
+  assert.equal(r.availability.rows.every((x) => x.got.settled === true), true)
 })
 
 test('自检：④ 映射不自洽时**也**禁止自动执行（它与前三条正交）', async () => {
@@ -306,10 +314,10 @@ test('自检：理由逐项可归因（修版本 / 修补丁层 / 修沙箱是�
   assert.equal(r.state, SELFCHECK_STATES.incompatible)
   // 每条理由都带检查项名前缀
   for (const reason of r.reasons) {
-    assert.match(reason, /^(composition-patch-layer|runtime-probe|sandbox-enforcement|enforcement-mapping): /)
+    assert.match(reason, /^(composition-patch-layer|runtime-probe|sandbox-enforcement|enforcement-mapping|guard-approval-consistency|enforcement-availability): /)
   }
   assert.match(r.reasons.join('\n'), /主版本不符/)
-  assert.equal(r.checks.length, 4)
+  assert.equal(r.checks.length, 6)
 })
 
 test('自检：回报补丁层版本与沙箱结论（便于与 dshVersion 成对记录）', async () => {

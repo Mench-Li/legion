@@ -25,7 +25,8 @@
 // ============================================================================
 
 import { DSH_COMPOSITION_PATCH_VERSION, reconcilePatchLayer } from './patch-layer.mjs'
-import { assertMappingConsistent } from './enforcement-mapping.mjs'
+import { assertMappingConsistent, checkGuardApprovalConsistency } from './enforcement-mapping.mjs'
+import { probeTwoPhaseAvailability } from './enforcement.mjs'
 
 /** 自检结论。`enforcement-effective` 之外的一切都不允许自动执行。 */
 export const SELFCHECK_STATES = Object.freeze({
@@ -194,6 +195,48 @@ export async function startupSelfCheck(inputs = {}) {
     ],
   })
 
+  // ⑤ 跨点一致性（PRT-620）：guard 只有降级语义 —— 放行过的调用不得被它拒绝。
+  //
+  // 这一条与 ④ 问的不是同一件事。④ 问"这张表自洽吗"；⑤ 问"**两个点合起来**说得通吗"：
+  // 映射表可以完全自洽，而 pre-execute 侧压根没接静态下限——于是每个点单看都对，
+  // 合起来却出现"人批了、guard 又拒了"，而那条记录在审计里没有修复动作。
+  //
+  //   > 一个「每个强制点单看都是绿的」的启动自检，
+  //   > 与一个「点与点之间已经矛盾了」的启动自检，不是同一个东西。
+  const guardConsistency = checkGuardApprovalConsistency()
+  checks.push({
+    name: 'guard-approval-consistency',
+    ok: guardConsistency.ok,
+    detail: guardConsistency.consistent.ok
+      ? `跨点不变量成立：${guardConsistency.consistent.throughCount} 次放行中 0 次被 guard 拒绝、`
+        + `探针下限 ${guardConsistency.probeFloor.executions} 个样本（guard 拦下 ${guardConsistency.consistent.guardDeniedCount} 个）`
+      : `跨点不变量被违反（${guardConsistency.consistent.violations.length} 例），定位点 ${JSON.stringify(guardConsistency.consistent.points)}`,
+    reasons: [
+      ...guardConsistency.consistent.violations.map((v) => `${v.code} @ ${v.point} ${v.callId ?? ''}：${v.detail}`),
+      // 反向控制没红 ⇒ 这条检查在坏输入上也不说话，等于一条不存在的检查。
+      ...(guardConsistency.tamperedCaught
+        ? []
+        : ['反向控制**没有**报出违规：这条检查在坏输入上也不红，等于一条不存在的检查']),
+    ],
+    guardConsistency,
+  })
+
+  // ⑥ 可用性语义（PRT-617）：两段超时可独立观测，且故障一律 fail closed、一律结算。
+  //
+  // 前五项都是**静态**的：它们能证明"接线是对的"，不能证明"卡住的时候真的会结算"。
+  // 这一项用真定时器把每一种成因跑一遍——没结算 = 工具调用会无限期挂起，
+  // 而那正是 spec §6.8 line 476 描述的那个故障。
+  const availability = await probeTwoPhaseAvailability()
+  checks.push({
+    name: 'enforcement-availability',
+    ok: availability.ok,
+    detail: availability.ok
+      ? `两段超时各自可观测（${availability.rows.length} 个成因，预算 ${availability.budgetMs}ms），故障一律 fail closed`
+      : `可用性语义实测未通过（${availability.reasons.length} 项）`,
+    reasons: availability.reasons,
+    availability,
+  })
+
   const failed = checks.filter((c) => !c.ok)
   return {
     state: failed.length === 0 ? SELFCHECK_STATES.effective : SELFCHECK_STATES.incompatible,
@@ -207,5 +250,8 @@ export async function startupSelfCheck(inputs = {}) {
     // 第 ④ 项的完整结论（含它**没查到**的原语）——只给一个是/否，
     // 调用方就没法判断"通过了"与"没查全"的区别。
     mapping,
+    // 第 ⑤⑥ 项的完整结论同理：`ok` 只说结论，计算值才说"这次到底查了什么"。
+    guardConsistency,
+    availability,
   }
 }

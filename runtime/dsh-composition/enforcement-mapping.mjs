@@ -83,6 +83,12 @@ export const MAPPING_CODES = Object.freeze({
   ALLOW_ONCE_SHORTCUT: 'enforcement-mapping-allow-once-shortcut',
   /** 映射层对"无人值守"的判断与 `decideApproval` 不一致。 */
   UNATTENDED_DRIFT: 'enforcement-mapping-unattended-drift',
+  /** ★ PRT-620：guard 拒绝了一次**已经放行**的调用（强制面配置错误）。 */
+  GUARD_DENIED_APPROVED: 'enforcement-mapping-guard-denied-approved',
+  /** guard 报出了 `allow` —— 它没有这个语义。 */
+  GUARD_HAS_ALLOW_SEMANTICS: 'enforcement-mapping-guard-has-allow-semantics',
+  /** 送进来的"判定对"本身畸形（判定不在闭集里）。 */
+  PAIR_MALFORMED: 'enforcement-mapping-pair-malformed',
 })
 
 // ---------------------------------------------------------------------------
@@ -724,3 +730,201 @@ export function presetBinding(name) {
 export function authorizationKeys() {
   return CANONICAL_OP_KEYS
 }
+
+// ---------------------------------------------------------------------------
+// PRT-620：guard 只有降级语义 —— 放行过的调用不得被它拒绝
+// ---------------------------------------------------------------------------
+
+/**
+ * 探针下限。**它不是生产下限**（生产下限来自工具目录与 manifest，而且可能是空的）。
+ *
+ * 这里用一个必然"拒绝点什么"的下限，是因为 `DEFAULT_HARD_FLOOR` 是空的：
+ * 在空下限上，"pre-execute 放行 + guard 拒绝"永远不可能出现，
+ * 那条不变量于是**永远不会被执行**——
+ *
+ *   > 一个「在不可能出错的输入上验证」的检查，
+ *   > 与一条不存在的检查，在"它到底拦住了什么"上是同一个东西。
+ *
+ * 探针样本因此必须同时包含"必被下限拦下"与"必不被拦下"两类
+ * （工具名那一类与路径前缀那一类各一，否则两条下限分支里总有一条没被走到）。
+ */
+export const FLOOR_PROBE_FLOOR = Object.freeze({
+  denyTools: Object.freeze(['shell.exec']),
+  denyPathPrefixes: Object.freeze(['C:\\Work\\secrets']),
+  cwd: 'C:\\Work',
+  platform: 'win32',
+})
+
+/**
+ * 探针样本：两个必被下限拦下，一个必不被拦下。
+ *
+ * 样本用 `name` 而不是 `toolName`：`createHardFloorGuard` 读的是 `execution.name`。
+ * 换成另一个字段名之后，"按工具名拒绝"那一类下限会**静默不生效**——
+ * 而它看起来与生效一模一样：样本全部通过、检查全绿、`throughCount` 还更大。
+ */
+export const FLOOR_PROBE_EXECUTIONS = Object.freeze([
+  Object.freeze({ callId: 'probe-floor-deny-tool', name: 'shell.exec', arguments: Object.freeze({}) }),
+  Object.freeze({ callId: 'probe-floor-deny-path', name: 'write', arguments: Object.freeze({ path: 'C:\\Work\\secrets\\k.txt' }) }),
+  Object.freeze({ callId: 'probe-floor-pass', name: 'read', arguments: Object.freeze({ path: 'C:\\Work\\a.txt' }) }),
+])
+
+/**
+ * 造出「同一次调用在两个强制点上的判定」对。
+ *
+ * `preExecuteFloor` 是 pre-execute 侧的静态下限投影，**默认就是同一个 guard 判定**。
+ * 生产里这一投影由 `composePreExecuteFloor` 接到动态策略之前（spec line 437：
+ * "静态禁令提前拒绝以避免无效询问"）；本函数只需要那份判定，因此直接复用同一个
+ * `createHardFloorGuard` —— 再写一份"同样的比较"就等于给漂移留了位置。
+ *
+ * 它可以**注入**，正是为了让"两处下限不是同一份"这种配置错误能被造出来：
+ * 注入一个缩水的投影（`() => undefined`），不变量必须立刻报出 `guard` 违规。
+ */
+export function guardApprovalPairs({ floor = FLOOR_PROBE_FLOOR, executions = FLOOR_PROBE_EXECUTIONS, preExecuteFloor } = {}) {
+  const guard = createHardFloorGuard(floor)
+  const atPreExecute = typeof preExecuteFloor === 'function' ? preExecuteFloor : guard
+  return Object.freeze(executions.map((exec) => {
+    const preReason = atPreExecute(exec)
+    const guardReason = guard(exec)
+    return Object.freeze({
+      callId: exec.callId,
+      toolName: exec.toolName ?? exec.name,
+      preExecute: preReason === undefined
+        ? Object.freeze({ kind: 'allow' })
+        : Object.freeze({ kind: 'deny', reason: preReason }),
+      // 静态下限这一路不问人：真正的 `ask` 由动态策略产生，那一路由用例送进来。
+      approval: null,
+      guard: Object.freeze({ reason: guardReason ?? null }),
+    })
+  }))
+}
+
+/**
+ * ★ PRT-620 的不变量（spec §6.8 line 479）：
+ *
+ *   **任何已由 `tools/pre-execute` 放行、并取得 `allowed-once` 的调用，
+ *     不得再被 `ctx.tools.guard()` 拒绝。**
+ *
+ * guard 只有降级语义、没有 allow 语义，所以"放行了又被 guard 拒"不是安全兜底，
+ * 而是**强制面配置错误**：要么 pre-execute 没有把静态下限提前判（调用去问了人、
+ * 人批了、guard 还是拒），要么两处的下限不是同一份。
+ *
+ * 违规必须**可定位到具体强制点**（line 479 的原话），所以每条违规都带
+ * `point` / `auditSource`（后者取自审计口径）与 `callId`，可以直接拿去 filter
+ * `tool_calls`。**修法表不在这里**：它在 `team-hub/tool-call-log.mjs` 的
+ * `SOURCE_REPAIR_ACTIONS` 里，本模块不抄一份——
+ * `runtime/` → `team-hub/` 在仓库里是 0 处，方向不该为一个字符串反转。
+ *
+ * @param {Array<{callId?: string, toolName?: string, preExecute?: {kind: string},
+ *                approval?: {outcome: string}|null, guard?: {decision?: string, reason?: string|null}}>} pairs
+ */
+export function checkApprovedCallsSurviveGuard(pairs = []) {
+  const violations = []
+  const rows = []
+  const push = (pair, code, point, detail) => violations.push(Object.freeze({
+    code,
+    point,
+    // 审计口径里这个点叫什么。`tool_calls.decisionSource` 就是按它写的。
+    auditSource: point,
+    callId: pair?.callId ?? null,
+    toolName: pair?.toolName ?? null,
+    detail,
+  }))
+
+  for (const pair of Array.isArray(pairs) ? pairs : []) {
+    const kind = pair?.preExecute?.kind
+    if (kind !== 'allow' && kind !== 'deny' && kind !== 'ask') {
+      push(pair, MAPPING_CODES.PAIR_MALFORMED, 'pre-execute',
+        `pre-execute 判定 ${JSON.stringify(kind)} 不在闭集里：判不出来的对不能当作"没问题"`)
+      rows.push(Object.freeze({ callId: pair?.callId ?? null, through: null, guard: null, pairing: 'malformed' }))
+      continue
+    }
+    const outcome = pair?.approval?.outcome ?? null
+    // 放行的两条路：pre-execute 直接 allow；或 ask 之后拿到一次 `allowed-once`。
+    const through = kind === 'allow' || (kind === 'ask' && outcome === 'allowed-once')
+    const guardDecision = pair?.guard?.decision ?? (pair?.guard?.reason == null ? 'pass' : 'deny')
+    rows.push(Object.freeze({
+      callId: pair?.callId ?? null,
+      toolName: pair?.toolName ?? null,
+      preExecute: kind,
+      approval: outcome,
+      through,
+      guard: guardDecision,
+    }))
+    if (guardDecision !== 'pass' && guardDecision !== 'deny' && guardDecision !== 'allow') {
+      push(pair, MAPPING_CODES.PAIR_MALFORMED, 'guard',
+        `guard 判定 ${JSON.stringify(guardDecision)} 不在闭集里`)
+      continue
+    }
+    // ① guard 报"allow"：它**没有**这个语义。
+    if (guardDecision === 'allow') {
+      push(pair, MAPPING_CODES.GUARD_HAS_ALLOW_SEMANTICS, 'guard',
+        'guard 返回了 allow：它只有降级语义。'
+        + '一个会放行的 guard，与一个"同步、确定性、最终单调拒绝"的 guard，不是同一个东西')
+    }
+    // ② ★ 这条不变量本身。
+    if (through && guardDecision === 'deny') {
+      push(pair, MAPPING_CODES.GUARD_DENIED_APPROVED, 'guard',
+        `guard 拒绝了一次已经放行的调用（pre-execute=${kind}${outcome === null ? '' : `，approval=${outcome}`}）：`
+        + `${pair?.guard?.reason ?? '(未给理由)'}。`
+        + '这说明 pre-execute 的静态下限与 guard 的不是同一份——'
+        + '一个「人批了之后仍然被 guard 拒绝」的强制面，'
+        + '与一个「配置错了、但每个点单看都是绿的」的强制面，是同一个东西')
+    }
+  }
+
+  return Object.freeze({
+    version: ENFORCEMENT_MAPPING_VERSION,
+    pairs: rows.length,
+    throughCount: rows.filter((r) => r.through === true).length,
+    guardDeniedCount: rows.filter((r) => r.guard === 'deny').length,
+    violations: Object.freeze(violations),
+    ok: violations.length === 0,
+    // 违规定位到的强制点（去重排序）。空数组 = 这次没有任何点出问题。
+    points: Object.freeze([...new Set(violations.map((v) => v.point))].sort()),
+    rows: Object.freeze(rows),
+  })
+}
+
+/**
+ * 一致性自检（PRT-620）。
+ *
+ * `consistent` 走真实原语与探针下限；`tampered` 把 pre-execute 的静态下限换成
+ * "什么都不拦"，违规**必须**出现，且必须点名 `guard`。
+ *
+ * 反向控制不能省：没有它，这条检查就只在一个"两处下限天然一致"的输入上跑过，
+ * 与一条不存在的检查在"它到底拦住了什么"上是同一个东西。
+ */
+export function checkGuardApprovalConsistency(deps = {}) {
+  const floor = deps.floor ?? FLOOR_PROBE_FLOOR
+  const consistent = checkApprovedCallsSurviveGuard(guardApprovalPairs(deps))
+  const tampered = checkApprovedCallsSurviveGuard(
+    guardApprovalPairs({ ...deps, preExecuteFloor: () => undefined }),
+  )
+  // ★ 这三条合起来才是"这条检查会红"：真实输入不误报、坏输入必须被拦、
+  //   且拦下来说的是 `guard` 这个点（可定位）。
+  const tamperedCaught = consistent.violations.length === 0
+    && tampered.violations.length > 0
+    && tampered.violations.every((v) => v.point === 'guard')
+  return Object.freeze({
+    version: ENFORCEMENT_MAPPING_VERSION,
+    probeFloor: Object.freeze({
+      executions: consistent.rows.length,
+      denyTools: (floor.denyTools ?? []).length,
+      denyPathPrefixes: (floor.denyPathPrefixes ?? []).length,
+    }),
+    consistent,
+    tampered,
+    tamperedCaught,
+    // 反向控制红不了 ⇒ **这一条不许报"通过"**：它要么是探针没内容（空下限），
+    // 要么是检查本身坏了。两种都不该被读成"没问题"。
+    //
+    //   > 一个「在不可能出错的输入上验证」的检查，
+    //   > 与一条不存在的检查，在"它到底拦住了什么"上是同一个东西。
+    ok: tamperedCaught,
+    // 被拦下的调用里确实有"已经放行"的那些——否则它拦的不是这条不变量。
+    tamperedThrough: tampered.throughCount,
+  })
+}
+
+/** 装载期结论（计算值，不是 `ok` 布尔）。 */
+export const GUARD_CONSISTENCY_CHECKED = Object.freeze(checkGuardApprovalConsistency())

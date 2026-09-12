@@ -109,6 +109,24 @@ export const REPAIR_ACTIONS = Object.freeze({
       '`enforcement-mapping-patch-row-missing` 是映射点名了一个没被挂载的行，' +
       '`enforcement-mapping-primitive-missing` 是它点名的函数不存在',
   }),
+  'guard-approval-consistency': Object.freeze({
+    action: 'fix-pre-execute-floor',
+    label: '把静态下限接到 pre-execute 最前面',
+    why: 'guard 只有降级语义、**没有** allow 语义（spec §6.8 line 479），所以"已经放行又被 guard 拒绝"'
+      + '不是安全兜底，是强制面配置错误：调用先去问了人、人批了、guard 还是拒。'
+      + '修法是让 pre-execute 用**同一份** floor 提前拒绝（`composePreExecuteFloor`），'
+      + '而不是去放宽 guard —— 放宽 guard 等于把不可绕过的下限拆掉',
+  }),
+  'enforcement-availability': Object.freeze({
+    action: 'fix-enforcement-timeouts',
+    label: '修好策略门与审批箱的双段超时',
+    why: '超时值不对、或端口不守 `onConnected` 契约时，工具调用会**无限期挂起**：'
+      + '既不失败也不成功，整条流水线停在那里（spec §6.8 line 476）。'
+      + '先看 reasons 里的码：`enforcement-phase-unreported` 是端口没自报阶段边界（去补端口契约），'
+      + '`enforcement-connect-timeout` / `enforcement-team-hub-unreachable` 是连不上（去修 team-hub 健康），'
+      + '`enforcement-response-timeout` 是算得慢（去修策略计算或 SQLite 排队）——'
+      + '三者的修法不同，这正是双段超时必须分开报告的理由',
+  }),
   'composition-observation': Object.freeze({
     action: 'connect-composition-observer',
     label: '接上组合树观察器',

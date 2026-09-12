@@ -23,7 +23,10 @@
 //   > 与一个「无人值守等于没有权限门」的实现，是同一个东西。
 // ============================================================================
 
+import { createHash } from 'node:crypto'
+
 import { LEGION_PERMISSION_PRESETS } from './patch-layer.mjs'
+import { canonicalJson } from '../contracts/canonical.mjs'
 
 export const APPROVAL_POLICY_VERSION = 'legion/approval-policy@1'
 
@@ -44,6 +47,12 @@ export const POLICY_CODES = Object.freeze({
   UNATTENDED_WOULD_ALLOW: 'approval-unattended-would-allow',
   FROZEN_DURING_RUN: 'approval-knob-frozen',
   SILENT_DOWNGRADE: 'approval-silent-downgrade',
+  /** PRT-619：生效旋钮的输入根本不是一份 Run 快照。 */
+  KNOB_SNAPSHOT_MALFORMED: 'approval-knob-snapshot-malformed',
+  /** PRT-619：拿别的 Run 的快照来回答"这次 Run 的旋钮是什么"。 */
+  STALE_SNAPSHOT: 'approval-stale-knob-snapshot',
+  /** PRT-619：一次改写缺少 who / when / why，或审计根本落不下来。 */
+  REWRITE_UNAUDITED: 'approval-knob-rewrite-unaudited',
 })
 
 function fail(code, message) {
@@ -354,33 +363,288 @@ export function approvalOutcomeSet() {
   return Object.freeze([...APPROVAL_OUTCOMES_SET])
 }
 
+// ------------------------------------------------- Run 快照与改写审计（PRT-619）
+
+/** 两个旋钮。**闭集**：冻结与审计都只认这两个键，多一个少一个都要在评审里说出来。 */
+export const KNOB_KEYS = Object.freeze(['approvalPolicy', 'permissionPreset'])
+
+export const KNOB_SNAPSHOT_VERSION = 'legion/knob-snapshot@1'
+export const KNOB_REWRITE_AUDIT_VERSION = 'legion/knob-rewrite-audit@1'
+/** 改写作为 Run 事件记录（spec line 499：「必须写入 audit 并作为 Run 事件记录」）。 */
+export const KNOB_REWRITE_EVENT = 'run-knobs-rewrite'
+
+function assertKnobShape(value, which) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw fail(
+      POLICY_CODES.BAD_INPUT,
+      `旋钮快照必须是一个对象（${which} 收到 ${value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value}）`,
+    )
+  }
+  return value
+}
+
+function assertRunId(runId, what) {
+  const id = typeof runId === 'string' ? runId.trim() : ''
+  if (id === '') {
+    throw fail(
+      POLICY_CODES.BAD_INPUT,
+      `${what}需要非空 runId：没有 Run 身份，"Run 期间冻结"这句话就指不到任何一次运行`,
+    )
+  }
+  return id
+}
+
+function assertAuditText(value, field, what) {
+  const text = typeof value === 'string' ? value.trim() : ''
+  if (text === '') {
+    throw fail(
+      POLICY_CODES.REWRITE_UNAUDITED,
+      `改写审计缺少 ${field}（${what}）。` +
+      '一条"改了、但不知道是谁、什么时候、为什么改的"记录，与没有记录，' +
+      '在事后追责上是同一个东西',
+    )
+  }
+  return text
+}
+
 /**
- * Run 期间旋钮冻结（spec line 1084 / PRT-619 的一半）。
+ * 两份旋钮快照之间到底变了哪几个键。
+ *
+ * **判定与审计共用这一份计算**：
+ *
+ *   > 一个「拒绝的理由说改了 A、审计里记的是 B」的实现，
+ *   > 与一个「拒绝与记录各算一遍、迟早对不上」的实现，是同一个东西。
+ */
+export function knobChanges(before, after) {
+  assertKnobShape(before, 'before')
+  assertKnobShape(after, 'after')
+  const changed = []
+  for (const key of KNOB_KEYS) {
+    if (before[key] !== after[key]) {
+      changed.push(Object.freeze({ key, before: before[key] ?? null, after: after[key] ?? null }))
+    }
+  }
+  return Object.freeze(changed)
+}
+
+/**
+ * Run 期间旋钮冻结（spec line 1084 / PRT-607 的那一半）。
  *
  * 这里只做**判定**：Run 进行中改写 approval policy 或 preset 一律拒绝。
- * 改写审计与持久化属于 PRT-619。
+ * 改写审计与"生效旋钮只来自快照"属于 PRT-619（本文件下半部分）。
  *
  *   > 一个「Run 期间可以改 approval policy」的实现，
  *   > 与一个「§6.8 的'在 Run 快照中冻结'无法兑现」的实现，是同一个东西。
  */
 export function assertKnobsUnchanged({ before, after, runActive } = {}) {
-  if (before === null || typeof before !== 'object' || after === null || typeof after !== 'object') {
-    throw fail(POLICY_CODES.BAD_INPUT, 'assertKnobsUnchanged 需要 before 与 after 两份旋钮快照')
+  const changes = knobChanges(before, after)
+  if (changes.length === 0) {
+    return Object.freeze({ changed: false, frozen: runActive === true, changes: Object.freeze([]) })
   }
-  const changed = []
-  for (const key of ['approvalPolicy', 'permissionPreset']) {
-    if (before[key] !== after[key]) changed.push({ key, before: before[key] ?? null, after: after[key] ?? null })
-  }
-  if (changed.length === 0) return Object.freeze({ changed: false, frozen: runActive === true, changes: Object.freeze([]) })
   if (runActive === true) {
     throw fail(
       POLICY_CODES.FROZEN_DURING_RUN,
-      `Run 进行中不允许改写 ${JSON.stringify(changed.map((c) => c.key))}。` +
+      `Run 进行中不允许改写 ${JSON.stringify(changes.map((c) => c.key))}。` +
       '一个「Run 期间可以改 approval policy」的实现，' +
       '与一个「在 Run 快照中冻结的旋钮其实已经变了」的实现，是同一个东西',
     )
   }
-  return Object.freeze({ changed: true, frozen: false, changes: Object.freeze(changed) })
+  return Object.freeze({ changed: true, frozen: false, changes })
+}
+
+/**
+ * ★ Run 启动时拍下的旋钮快照。
+ *
+ * spec line 453：「会话权限档位」要"在 Run 快照中冻结"；line 499：承载 Run 的
+ * session 在 Run 期间禁止改写这两个旋钮。这两句话要能兑现，前提是**存在一份
+ * 快照**：没有它，"这个 Run 用的是 `ask` 还是 `never`"就只能靠回溯日志去猜。
+ *
+ * 快照把 preset 的**绑定**（sandbox + approval）一起记下来，而不只是 preset 的名字：
+ * 名字指向一张可能被改过的表，绑定才是那次 Run 真正生效的东西。
+ *
+ * `presetTable` 可注入，理由与 `assertPreset` 那段完全相同：真实表上
+ * "无人值守不许降级沙箱"永远为真，于是它是一条从不执行的检查。
+ */
+export function snapshotRunKnobs({ approvalPolicy, permissionPreset, runId, presetTable } = {}) {
+  const run = assertRunId(runId, '旋钮快照')
+  const policy = assertPolicy(approvalPolicy)
+  const resolved = assertPreset(
+    permissionPreset,
+    presetTable === undefined ? {} : { table: presetTable },
+  )
+  const knobs = Object.freeze({ approvalPolicy: policy, permissionPreset })
+  // domain separator：快照身份与其它哈希分开，避免"不同用途、相同内容"互相碰撞。
+  const payload = `${KNOB_SNAPSHOT_VERSION}\u0000${canonicalJson(knobs)}`
+  return Object.freeze({
+    version: KNOB_SNAPSHOT_VERSION,
+    runId: run,
+    knobs,
+    approvalPolicy: policy,
+    permissionPreset,
+    binding: Object.freeze({ sandbox: resolved.sandbox, approval: resolved.policy }),
+    snapshotHash: `sha256:${createHash('sha256').update(payload, 'utf8').digest('hex')}`,
+  })
+}
+
+/**
+ * ★ 不变量：**Run 期间的生效旋钮只来自 Run 启动时拍下的那份快照。**
+ *
+ * 这条不变量是 PRT-619 的技术核心。它排除两种反方向的写法：
+ *   · 拿现场旋钮回答"这个 Run 用的是什么"（于是一次 Run 中途改写就改写了历史）；
+ *   · 拿别的 Run 的快照回答（两个 Run 的冻结内容毫无关系，而它看起来是"有快照的"）。
+ *
+ *   > 一个「用现场旋钮回答这次 Run 的权限档位」的实现，
+ *   > 与一个「Run 结束后审计里写着它用过的策略，而那个策略是它跑完之后才被设上的」
+ *   > 的实现，是同一个东西。
+ *
+ * `current` 传进来**只用于查漂移**，永远不会被采用。Run 不在跑时（`runActive` 非
+ * `true`）生效的是现场旋钮，此时不给 `current` 直接抛——把上一次的快照当成现在的
+ * 旋钮，会让一次新 Run 带着旧旋钮启动。
+ */
+export function effectiveRunKnobs({ snapshot, current = null, runId = null, runActive = true } = {}) {
+  if (snapshot === null || typeof snapshot !== 'object'
+    || typeof snapshot.snapshotHash !== 'string' || snapshot.knobs === undefined) {
+    throw fail(
+      POLICY_CODES.KNOB_SNAPSHOT_MALFORMED,
+      'effectiveRunKnobs 需要一份 snapshotRunKnobs 产出的快照。' +
+      '一个"随手写的旋钮对象"与一份"Run 启动时拍下的快照"不是同一个东西——' +
+      '而前者恰好长得与后者一模一样',
+    )
+  }
+  const snapshotRunId = assertRunId(snapshot.runId, '快照')
+  if (runId !== null) {
+    const asked = assertRunId(runId, '查询')
+    if (asked !== snapshotRunId) {
+      throw fail(
+        POLICY_CODES.STALE_SNAPSHOT,
+        `快照属于 Run ${snapshotRunId}，而问的是 ${asked}——` +
+        '用一个别的 Run 的快照，与没有快照是同一个东西',
+      )
+    }
+  }
+
+  if (runActive === true) {
+    // ★ 只查漂移，不采用 `current`。
+    if (current !== null) assertKnobsUnchanged({ before: snapshot.knobs, after: current, runActive: true })
+    return Object.freeze({
+      approvalPolicy: snapshot.knobs.approvalPolicy,
+      permissionPreset: snapshot.knobs.permissionPreset,
+      fromSnapshot: true,
+      runId: snapshotRunId,
+      snapshotHash: snapshot.snapshotHash,
+      binding: snapshot.binding ?? null,
+      changedSince: Object.freeze([]),
+    })
+  }
+
+  if (current === null) {
+    throw fail(
+      POLICY_CODES.BAD_INPUT,
+      'Run 不在跑时必须给出 current：把上一次 Run 的快照当成现在的旋钮，' +
+      '会让一次新 Run 带着旧旋钮启动',
+    )
+  }
+  assertKnobShape(current, 'current')
+  return Object.freeze({
+    approvalPolicy: assertPolicy(current.approvalPolicy),
+    permissionPreset: current.permissionPreset ?? null,
+    fromSnapshot: false,
+    runId: null,
+    snapshotHash: null,
+    binding: null,
+    // 与快照的差异一并给出：新 Run 必须重拍快照，而"差异"就是它必须重拍的理由。
+    changedSince: knobChanges(snapshot.knobs, current),
+  })
+}
+
+/**
+ * ★ 改写审计记录：before → after，加上 who / when / why。
+ *
+ * PRT-607 已经交付了**拒绝**（`assertKnobsUnchanged`）。缺的是那句话的凭据：
+ * 没有记录，"这次 Run 期间策略没有被改过"就只是一个谁也无法事后核对的断言。
+ *
+ *   > 一个「Run 期间不允许改写」的拒绝，
+ *   > 与一个「拒绝了、但没人能证明它没被改过」的拒绝，是同一个东西——
+ *   > 只不过前者的代码里有一行 `throw`。
+ *
+ * 记录本身**强制** who / when / why 齐备：缺任何一项都建不出记录，改写也就无从发生。
+ */
+export function buildKnobRewriteAudit({
+  before, after, runActive, actor, at, reason, runId, presetTable,
+} = {}) {
+  const changes = knobChanges(before, after)
+  const run = assertRunId(runId, '改写审计')
+  const who = assertAuditText(actor, 'actor', '谁改的')
+  const when = assertAuditText(at, 'at', '什么时候改的')
+  const why = assertAuditText(reason, 'reason', '为什么改')
+  // 改完之后的旋钮必须是**合法**的：把一个拼错的名字记进审计，
+  // 审计就成了一份"这是一次合法变更"的证明，而现场其实已经坏了。
+  if (changes.length > 0) {
+    assertPolicy(after.approvalPolicy)
+    assertPreset(after.permissionPreset, presetTable === undefined ? {} : { table: presetTable })
+  }
+  const refused = runActive === true && changes.length > 0
+  return Object.freeze({
+    version: KNOB_REWRITE_AUDIT_VERSION,
+    event: KNOB_REWRITE_EVENT,
+    at: when,
+    actor: who,
+    reason: why,
+    runId: run,
+    runActive: runActive === true,
+    changed: changes.length > 0,
+    changes,
+    before: Object.freeze({
+      approvalPolicy: before.approvalPolicy ?? null,
+      permissionPreset: before.permissionPreset ?? null,
+    }),
+    after: Object.freeze({
+      approvalPolicy: after.approvalPolicy ?? null,
+      permissionPreset: after.permissionPreset ?? null,
+    }),
+    // ★ 拒绝与记录来自**同一次**判定（同一份 `changes` + 同一个 `runActive`），
+    //   因此不可能出现"拒绝了、而记录里写的是已应用"。
+    decision: refused ? 'refused' : 'applied',
+    code: refused ? POLICY_CODES.FROZEN_DURING_RUN : null,
+  })
+}
+
+/**
+ * 旋钮改写的**唯一**写路径：先落审计，再决定要不要拒绝。
+ *
+ * 顺序是刻意的，也是这个方法唯一不能被重排的地方：
+ *
+ *   > 一个「先拒绝、拒绝之后才想起来要记审计」的实现，
+ *   > 与一个「拒绝真的发生了、而审计里没有」的实现，是同一个东西——
+ *   > 只不过前者的代码里写着"拒绝时必须写审计"。
+ *
+ * 被拒绝时抛出的错误上挂着 `err.audit`，调用方 catch 到的就是那份需要落库的记录。
+ * `persist` 缺失或抛错 ⇒ 改写不成立（审计落不下来就不许改）。
+ */
+export function applyKnobRewrite({
+  before, after, runActive, actor, at, reason, runId, persist, presetTable,
+} = {}) {
+  if (typeof persist !== 'function') {
+    throw fail(
+      POLICY_CODES.REWRITE_UNAUDITED,
+      'applyKnobRewrite 需要 persist（把审计记录落下来的地方）：' +
+      '一次改写的审计落不下来，就等于没有审计',
+    )
+  }
+  const record = buildKnobRewriteAudit({ before, after, runActive, actor, at, reason, runId, presetTable })
+  persist(record)
+  if (record.decision === 'refused') {
+    // 拒绝由 `assertKnobsUnchanged` **唯一**实现；这里只是把审计记录挂到那个错误上，
+    // 于是调用方 catch 到的错误里一定有它需要落库的那条记录。
+    try {
+      assertKnobsUnchanged({ before, after, runActive: true })
+    } catch (err) {
+      err.audit = record
+      throw err
+    }
+    throw fail(POLICY_CODES.FROZEN_DURING_RUN, '拒绝判定与审计记录不一致（这本身就是一个 bug）')
+  }
+  return record
 }
 
 // ---------------------------------------------------------------- 装载自检
@@ -565,6 +829,144 @@ export function assertKnobsFrozenDuringRun() {
   })
 }
 
+/** ⑧ 改写必留痕：快照 + before→after + who/when/why，且生效旋钮**只**来自快照（PRT-619）。 */
+export function assertKnobFreezeAudited() {
+  const before = { approvalPolicy: 'ask', permissionPreset: 'legion-attended' }
+  const after = { approvalPolicy: 'never', permissionPreset: 'legion-unattended' }
+  const base = {
+    before,
+    after,
+    runActive: true,
+    runId: 'run-1',
+    actor: 'operator-1',
+    at: '2026-09-13T00:00:00.000Z',
+    reason: '排障：这个 Run 需要无人值守',
+  }
+
+  const persisted = []
+  let runningCode = 'NO-THROW'
+  let runningAudit = null
+  try {
+    applyKnobRewrite({ ...base, persist: (r) => persisted.push(r) })
+  } catch (err) {
+    runningCode = err.code
+    runningAudit = err.audit ?? null
+  }
+
+  let idleCode = 'NO-THROW'
+  let idleAudit = null
+  try {
+    idleAudit = applyKnobRewrite({ ...base, runActive: false, persist: (r) => persisted.push(r) })
+  } catch (err) {
+    idleCode = err.code
+  }
+
+  // 缺 who / when / why：记录建不出来 ⇒ 改写也不许发生（`persist` 一次都不该被调用）。
+  const unaudited = ['actor', 'at', 'reason'].map((field) => {
+    const input = { ...base, runActive: false }
+    delete input[field]
+    let code = 'NO-THROW'
+    let persistedCount = 0
+    try {
+      applyKnobRewrite({ ...input, persist: () => { persistedCount += 1 } })
+    } catch (err) {
+      code = err.code
+    }
+    return Object.freeze({ field, code, persistedCount })
+  })
+
+  // 没有 `persist` 这个落点：同样不许改。
+  let noPersistCode = 'NO-THROW'
+  try {
+    applyKnobRewrite({ ...base, runActive: false })
+  } catch (err) {
+    noPersistCode = err.code
+  }
+
+  const snapshot = snapshotRunKnobs({ ...before, runId: 'run-1' })
+  let driftCode = 'NO-THROW'
+  try {
+    effectiveRunKnobs({
+      snapshot,
+      current: { approvalPolicy: 'never', permissionPreset: 'legion-attended' },
+      runId: 'run-1',
+      runActive: true,
+    })
+  } catch (err) {
+    driftCode = err.code
+  }
+  let staleCode = 'NO-THROW'
+  try {
+    effectiveRunKnobs({ snapshot, runId: 'run-2', runActive: true })
+  } catch (err) {
+    staleCode = err.code
+  }
+  const effective = effectiveRunKnobs({ snapshot, current: before, runId: 'run-1', runActive: true })
+  const idleEffective = effectiveRunKnobs({ snapshot, current: after, runId: 'run-1', runActive: false })
+
+  // ★ 注入一张**被改坏的表**，证明快照真的走了 `assertPreset`：
+  //   真实表上"无人值守不许降级沙箱"永远为真，于是那条检查在真实输入上从不执行。
+  //
+  //   > 一个「检查一个不可能出现的值」的检查，
+  //   > 与一条不存在的检查，在"它到底拦住了什么"上是同一个东西。
+  let tamperedCode = 'NO-THROW'
+  try {
+    snapshotRunKnobs({
+      approvalPolicy: 'never',
+      permissionPreset: 'legion-unattended',
+      runId: 'run-t',
+      presetTable: {
+        'legion-attended': { sandbox: 'workspace-write', approval: 'ask' },
+        'legion-unattended': { sandbox: 'danger-full-access', approval: 'never' },
+      },
+    })
+  } catch (err) {
+    tamperedCode = err.code
+  }
+
+  return Object.freeze({
+    snapshot: Object.freeze({
+      runId: snapshot.runId,
+      snapshotHash: snapshot.snapshotHash,
+      knobs: snapshot.knobs,
+      binding: snapshot.binding,
+    }),
+    // 被拒绝的那一次仍然留下了完整记录 —— 这就是 PRT-619 要补的那一半。
+    refusedDuringRun: Object.freeze({
+      code: runningCode,
+      decision: runningAudit?.decision ?? null,
+      changedKeys: Object.freeze((runningAudit?.changes ?? []).map((c) => c.key)),
+      actor: runningAudit?.actor ?? null,
+      at: runningAudit?.at ?? null,
+      reason: runningAudit?.reason ?? null,
+      event: runningAudit?.event ?? null,
+    }),
+    appliedWhenIdle: Object.freeze({ code: idleCode, decision: idleAudit?.decision ?? null }),
+    // 拒绝的与允许的都要落审计，一条不少。
+    persistedCount: persisted.length,
+    unaudited: Object.freeze(unaudited),
+    noPersistCode,
+    drift: Object.freeze({ code: driftCode }),
+    staleSnapshot: Object.freeze({ code: staleCode }),
+    // ★ "生效旋钮只来自快照"的可查形式：与快照逐字段相等。
+    effective: Object.freeze({
+      approvalPolicy: effective.approvalPolicy,
+      permissionPreset: effective.permissionPreset,
+      fromSnapshot: effective.fromSnapshot,
+      snapshotHash: effective.snapshotHash,
+    }),
+    effectiveMatchesSnapshot: effective.fromSnapshot === true
+      && effective.approvalPolicy === snapshot.knobs.approvalPolicy
+      && effective.permissionPreset === snapshot.knobs.permissionPreset,
+    // 不在跑的时候生效的是**现场**旋钮，并把差异带出来（新 Run 必须重拍快照）。
+    idleEffective: Object.freeze({
+      fromSnapshot: idleEffective.fromSnapshot,
+      changedKeys: Object.freeze(idleEffective.changedSince.map((c) => c.key)),
+    }),
+    tamperedPresetTable: tamperedCode,
+  })
+}
+
 export const APPROVAL_POLICY_CHECKED = Object.freeze({
   version: APPROVAL_POLICY_VERSION,
   policies: APPROVAL_POLICIES,
@@ -579,4 +981,5 @@ export const APPROVAL_POLICY_CHECKED = Object.freeze({
   presets: assertLegionPresetsDoNotDowngradeSandbox(),
   unknownInputs: assertUnknownInputsFailClosed(),
   knobs: assertKnobsFrozenDuringRun(),
+  knobFreezeAudit: assertKnobFreezeAudited(),
 })

@@ -53,7 +53,16 @@ export const LEGION_ENV = Object.freeze({
   CACHE_DIR: 'LEGION_CACHE_DIR',
   LOG_DIR: 'LEGION_LOG_DIR',
   PRODUCT_CONFIG: 'LEGION_PRODUCT_CONFIG',
+  SECRETS_FILE: 'LEGION_SECRETS_FILE',
 })
+
+/**
+ * 受保护密钥库的默认文件名（相对产品家目录）。
+ *
+ * **它刻意不在 DataDir 内**，见 `layoutDiagnostics` 的 `SECRETS_INSIDE_DATA_DIR`。
+ */
+export const SECRETS_DIRNAME = 'secrets'
+export const SECRETS_FILENAME = 'credentials.json'
 
 /** 配置层，数组顺序即优先级（后者覆盖前者，spec §6.11）。 */
 export const CONFIG_LAYERS = Object.freeze([
@@ -172,6 +181,7 @@ export function resolveLayout({
   logDir,
   workspaceDir,
   productConfigPath,
+  secretsFile,
   homeDir,
   appDataDir,
 } = {}) {
@@ -194,6 +204,10 @@ export function resolveLayout({
   const workspace = pick(workspaceDir, LEGION_ENV.WORKSPACE_DIR)
   const productConfig =
     pick(productConfigPath, LEGION_ENV.PRODUCT_CONFIG) ?? under(data, 'product.config.json')
+  // 受保护密钥库：**产品家目录下的兄弟目录，不在 DataDir 内**。
+  // 理由见 `layoutDiagnostics` 的 SECRETS_INSIDE_DATA_DIR 注释。
+  const secrets =
+    pick(secretsFile, LEGION_ENV.SECRETS_FILE) ?? under(home.root, `${SECRETS_DIRNAME}/${SECRETS_FILENAME}`)
 
   const layout = Object.freeze({
     platform,
@@ -205,6 +219,7 @@ export function resolveLayout({
     logDir: log,
     workspaceDir: workspace,
     productConfigPath: productConfig,
+    secretsFile: secrets,
   })
 
   return { layout, diagnostics: layoutDiagnostics(layout) }
@@ -261,6 +276,43 @@ export function layoutDiagnostics(layout) {
     if (layout.productHome !== null && (isPathInside(install, layout.productHome, platform) || samePath(install, layout.productHome, platform))) {
       add('error', 'PRODUCT_HOME_INSIDE_INSTALL_DIR', 'data',
         `产品家目录（${layout.productHome}）位于安装目录内：数据库、日志与缓存都会随之落在会被替换的目录里。`)
+    }
+    if (layout.secretsFile !== null && layout.secretsFile !== undefined &&
+        (isPathInside(install, layout.secretsFile, platform) || samePath(install, layout.secretsFile, platform))) {
+      add('error', 'SECRETS_INSIDE_INSTALL_DIR', 'data',
+        `受保护密钥库（${layout.secretsFile}）位于安装目录内：升级会替换这个目录，` +
+        '而密钥库是**机器与账户绑定**的（DPAPI），换一台机器或换一个账户都解不开，' +
+        '所以它既不该被升级覆盖、也不该被随程序一起分发。')
+    }
+  }
+
+  // ①-b 密钥库**不得位于 DataDir 内**。
+  //
+  // 这条是结构性的，不是洁癖：DataDir 是「备份、恢复、诊断包导出、整目录拷贝」
+  // 处理的那一个目录。密钥库一旦落在里面，任何将来「把 DataDir 打个包」的功能
+  // 都会**顺手**把它带出去，而 spec §3.1 明确要求密钥不得进入导出证据与能力包。
+  //
+  // 把它放在 DataDir 之外，这类泄漏就从「需要每个人每次都记得」变成
+  // 「结构上做不到」——**一道看不见某类变化的大门，比没有大门更坏**，
+  // 反过来也成立：一道不需要人记住的大门才真的守得住。
+  if (layout?.secretsFile !== null && layout?.secretsFile !== undefined &&
+      layout?.dataDir !== null && layout?.dataDir !== undefined) {
+    if (isPathInside(layout.dataDir, layout.secretsFile, platform) || samePath(layout.dataDir, layout.secretsFile, platform)) {
+      add('error', 'SECRETS_INSIDE_DATA_DIR', 'data',
+        `受保护密钥库（${layout.secretsFile}）位于数据目录（${layout.dataDir}）内：` +
+        '数据目录是备份、恢复与诊断包导出的对象，密钥库落在里面会被任何「打包 DataDir」的操作顺手带走，' +
+        '而 spec §3.1 要求密钥不得进入导出证据与能力包。请把密钥库放到数据目录之外（默认 <产品家目录>/secrets/）。')
+    }
+  }
+
+  // ①-c 密钥库不得与缓存目录重叠：缓存是「可安全删除」的，
+  //     而删掉密钥库会让所有档案变成 SECRET_UNAVAILABLE 且无法恢复。
+  if (layout?.secretsFile !== null && layout?.secretsFile !== undefined &&
+      layout?.cacheDir !== null && layout?.cacheDir !== undefined) {
+    if (isPathInside(layout.cacheDir, layout.secretsFile, platform) || samePath(layout.cacheDir, layout.secretsFile, platform)) {
+      add('error', 'SECRETS_INSIDE_CACHE_DIR', 'data',
+        `受保护密钥库（${layout.secretsFile}）位于缓存目录（${layout.cacheDir}）内：` +
+        '缓存被定义为「可安全删除」，而删掉密钥库之后已录入的密钥**无法找回**。')
     }
   }
 

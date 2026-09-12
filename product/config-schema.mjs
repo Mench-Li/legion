@@ -24,6 +24,7 @@ export const LAYOUT_ENV_NAMES = Object.freeze([
   'LEGION_CACHE_DIR',
   'LEGION_LOG_DIR',
   'LEGION_PRODUCT_CONFIG',
+  'LEGION_SECRETS_FILE',
 ])
 
 /** Launcher 自己的可调项。 */
@@ -84,6 +85,12 @@ export const SCHEMA = defineSchema({
       doc: '产品配置文件路径。缺省 <DataDir>/product.config.json',
     },
     {
+      key: 'secretsFile', env: 'LEGION_SECRETS_FILE', type: 'path', default: '',
+      doc: '受保护密钥库文件路径（DPAPI 保护，机器与账户绑定）。' +
+        '缺省 <LEGION_HOME>/secrets/credentials.json——**刻意不在 DataDir 内**：' +
+        '数据目录是备份、恢复与诊断包导出的对象，密钥库落在里面会被任何「打包 DataDir」的操作顺手带走',
+    },
+    {
       key: 'readinessTimeoutMs', env: 'LEGION_READINESS_TIMEOUT_MS', type: 'int', default: 30000, min: 1,
       doc: '单进程就绪判据超时（ms）。判据本身在进程清单里，这里只覆盖超时',
     },
@@ -112,6 +119,23 @@ export const SCHEMA = defineSchema({
     'CONFIG_PLAINTEXT_SECRET', 'CONFIG_TYPE_MISMATCH', 'CONFIG_UNKNOWN_KEY', 'CONFIG_UNREADABLE',
     'DIR_NOT_WRITABLE', 'INIT_CONFIG_WRITE_FAILED', 'INIT_META_WRITE_FAILED', 'INIT_MKDIR_FAILED',
     'INIT_REFUSED_INSTALL_DIR', 'INIT_WORKSPACE_MISSING',
+    // PRT-254（Secret Store 最小闭环）新增的字面量。
+    //
+    // `LEGION_SECRETS_FILE` 是**读取点**（在 product/paths.mjs 里按 LEGION_ENV 表读），
+    // 之所以也列在这里，是因为扫描器把它当成了"疑似 env 字面量"而非读取点——
+    // 它与 `LEGION_DATA_DIR` 走的是同一条取值路径（`pick(explicit, envKey)`），
+    // 因此两条声明的形态必须一致，否则下一次改动会让其中一个悄悄失去声明。
+    //
+    // 其余是密钥库自检的诊断码：同样是**输出**用的大写字面量，不是配置键。
+    // 它们回答的是「这台机器上的密钥库能不能用、文件权限有没有被验证过」，
+    // 而这两个答案都必须能显示给人看。
+    'LEGION_SECRETS_FILE',
+    'SECRETS_ACL_TOO_PERMISSIVE', 'SECRETS_ACL_UNVERIFIABLE', 'SECRETS_INSIDE_CACHE_DIR',
+    'SECRETS_INSIDE_DATA_DIR', 'SECRETS_INSIDE_INSTALL_DIR', 'SECRETS_LAYOUT_BLOCKED',
+    'SECRETS_OK', 'SECRETS_STORE_OPEN_FAILED', 'SECRETS_STORE_UNPROTECTED',
+    'SECRETS_STORE_UNSUPPORTED_PLATFORM',
+    // 密钥库内部码（security/secrets/errors.mjs）经 product/secrets.mjs 转成自检码时被引用。
+    'SECRET_STORE_UNPROTECTED', 'SECRET_STORE_UNSUPPORTED_PLATFORM',
     'EACCES', 'EADDRINUSE', 'ECONNREFUSED',
     'SIGINT', 'SIGKILL', 'SIGTERM',
   ],
@@ -130,7 +154,8 @@ export const SCHEMA = defineSchema({
   notes: [
     '子进程环境**不继承**宿主进程：只放行进程清单声明的键、平台必需键与 Launcher 显式给定的值（环境白名单模块 product/launcher/allowlist）。',
     '这与 services-plugin 的做法（`{ ...process.env }` 打底）相反，是 spec §6.7「密钥只注入需要它的进程」在实现层唯一能成立的形态。',
-    '`LEGION_*` 七项属于 spec §6.11 的「受控环境变量」层，优先级最高，会覆盖显式传入的参数。',
+    '`LEGION_*` 八项属于 spec §6.11 的「受控环境变量」层，优先级最高，会覆盖显式传入的参数。' +
+    '（第八项 `LEGION_SECRETS_FILE` 是 PRT-254 加入的密钥库路径，与其余七项走同一条取值路径。）',
     // 上面那句省掉了模块扩展名，原因是一条**真实的扫描器假阳性**，不是文风偏好：
     // rule ② 把「任意标识符 + `.env.` + 名字」都读成 env 读取点，因此 `./env.mjs` 里的
     // import 会被读成一个未声明 env 键 `mjs`（且它落在「直接读取」集合里，无法用

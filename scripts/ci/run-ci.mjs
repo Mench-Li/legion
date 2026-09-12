@@ -619,6 +619,13 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-254 的「Secret Store 最小闭环」：密钥库文件位置、fail closed 保护判定、
+      // 解析器真的接上、诊断不泄漏。
+      label: 'product-secrets（PRT-254：密钥库不得在 DataDir 内 / 明文后端 fail closed / 解析器真的接上）',
+      files: ['product/secrets.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       label: 'run-kill-drill（PRT-312：真实进程被强杀后不丢任务、不伪装成功、不重复外部写）',
       files: ['team-hub/run-kill-drill.test.mjs'],
       cwd: ROOT,

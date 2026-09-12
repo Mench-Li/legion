@@ -683,6 +683,17 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-401（spec §6.5）：Context Source 与 RunContextSnapshot。
+      // 守的是「任一员工运行都能还原其实际输入、来源版本、过滤和裁剪原因」——
+      // 重点是**能否区分**："没有这个来源" vs "有但被裁掉了"、
+      // "精确 token 数" vs "保守估算"、"快照哈希" vs "一次工具调用的批准哈希"。
+      // 并引入共享的 canonical JSON 基础库：审批与快照用**不同 domain separator**，
+      // 因此在构造上不可互换（原先审批侧有一份自己的实现，两份无人维持一致）。
+      label: 'context-snapshot（PRT-401：来源默认不可信 / 裁剪计数守恒 / 哈希 domain 分离）',
+      files: ['runtime/contracts/context.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       label: 'run-kill-drill（PRT-312：真实进程被强杀后不丢任务、不伪装成功、不重复外部写）',
       files: ['team-hub/run-kill-drill.test.mjs'],
       cwd: ROOT,

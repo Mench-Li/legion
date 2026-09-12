@@ -83,4 +83,22 @@ export {
   runtimeHealth,
 } from './adapter.mjs'
 
+export {
+  CONTEXT_SNAPSHOT_DOMAIN,
+  CONTEXT_SNAPSHOT_SCHEMA_VERSION,
+  CONTEXT_SOURCE_TYPES,
+  EXCLUSION_REASONS,
+  SOURCE_TRUST,
+  TOKEN_ESTIMATOR_KINDS,
+  createContextSource,
+  createExclusion,
+  createTokenMeasurement,
+  freezeContextSnapshot,
+  computeSnapshotHash,
+  verifySnapshotHash,
+  orderSources,
+  assertAccounting,
+  snapshotCanonicalJson,
+} from './context.mjs'
+export { canonicalJson, canonicalScalar, domainSeparatedHash, nfc } from './canonical.mjs'
 export { FAKE_SCENARIOS, INJECTABLE_ERROR_CODES, createFakeRuntimeAdapter } from './fake-adapter.mjs'

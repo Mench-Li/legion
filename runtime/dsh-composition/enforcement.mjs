@@ -23,6 +23,7 @@
 // ============================================================================
 
 import { createHash } from 'node:crypto'
+import { canonicalJson } from '../contracts/canonical.mjs'
 
 /** 强制点来源（§6.8 的 `tool_calls` 必须记录的字段）。 */
 export const ENFORCEMENT_SOURCES = Object.freeze(['pre-execute', 'guard', 'approval', 'sandbox'])
@@ -94,42 +95,11 @@ export function canonicalizePath(input, { cwd, platform = process.platform } = {
   return platform === 'win32' ? out.toLowerCase() : out
 }
 
-/** 数字与空值的表达：只保留一个规范的数值形式，避免 -0 / 1.0 / 1e0 三种写法。 */
-export function canonicalScalar(value) {
-  if (value === null) return null
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) throw new Error(`canonical operation 不接受非有限数值：${value}`)
-    if (Object.is(value, -0)) return 0 // -0 与 0 是同一个操作
-    return value
-  }
-  if (typeof value === 'string') return nfc(value)
-  if (typeof value === 'boolean') return value
-  return undefined
-}
-
-/**
- * 确定性 JSON 序列化：键**排序**、数组保序、只接受可无损表达的值。
- *
- * 键排序而不是依赖插入顺序：`{a,b}` 与 `{b,a}` 是同一个工具参数对象，
- * 但在 JSON 文本里不同。依赖插入顺序会让哈希取决于模型恰好怎么排的键。
- * 数组**保序**：`[1,2]` 与 `[2,1]` 是不同的操作。
- */
-export function canonicalJson(value, path = '$') {
-  const scalar = canonicalScalar(value)
-  if (scalar !== undefined) return JSON.stringify(scalar)
-  if (Array.isArray(value)) {
-    return `[${value.map((v, i) => canonicalJson(v, `${path}[${i}]`)).join(',')}]`
-  }
-  if (typeof value === 'object') {
-    // undefined 值的键**直接省略**（与 JSON.stringify 一致），
-    // 否则 `{a:undefined}` 与 `{}` 会哈希不同，而它们在 JSON 语义下相同。
-    const keys = Object.keys(value).filter((k) => value[k] !== undefined).map(nfc).sort()
-    const body = keys.map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k], `${path}.${k}`)}`)
-    return `{${body.join(',')}}`
-  }
-  throw new Error(`canonical operation 无法表达 ${path} 上的值（类型 ${typeof value}）`)
-}
-
+// canonicalJson / canonicalScalar 现在来自**共享基础库**（PRT-401/413）。
+// 原先这里有一份自己的实现：两份今天行为一致，而**没有任何东西在维持它**——
+// 只要有人改了其中一份的键排序或 -0 处理，审批与快照就会对"同样的内容"
+// 给出不同哈希，而**两边各自的用例都还是绿的**。重导出以保持既有 import 面不变。
+export { canonicalJson, canonicalScalar } from '../contracts/canonical.mjs'
 /**
  * 计算一次工具执行的 canonical operation 哈希。
  *

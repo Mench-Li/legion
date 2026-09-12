@@ -80,6 +80,13 @@ import {
   verifyBinding,
 } from './approval-binding.mjs'
 import {
+  ALLOW_ONCE_CODES,
+  CLAIM_OUTCOMES,
+  claimOnce,
+  ensureAllowOnceSchema,
+  releaseClaim,
+} from './allow-once.mjs'
+import {
   APPROVAL_TTL_DEFAULT_MS,
   EXPIRE_OUTCOMES,
   evaluateApprovalExpiry,
@@ -876,6 +883,14 @@ db.exec('CREATE INDEX IF NOT EXISTS idx_permission_rules_match ON permission_rul
 //   > 一个"生产建一份、夹具抄一份"的表结构，
 //   > 与一个"迟早只有一份是对的"的表结构，在「新加的列到底有没有生效」上是同一个东西。
 ensureApprovalSchema(db)
+
+// PRT-616：`allow-once` 的占位账本。
+//
+// 它**必须**有一张自己的表，而不是复用 `permission_requests` 的一列：账本记的是
+// "这一次放行被用掉了"这个**事实**，而审批行记的是"有人申请过"。前者是不可回收的
+// 安全事实，后者会被清理/过期。把不可回收的事实放进一张会被清理的表里，
+// 表现是"清理跑完之后，同一操作又能被放行一次"。
+ensureAllowOnceSchema(db)
 
 // PRT-608：**有意不回填**既有行的绑定哈希。
 //
@@ -1689,14 +1704,56 @@ export function checkPermission(input = {}, { consume = consumeBinding } = {}) {
       // PRT-608：CAS 单独导出成 `consumeBinding`，这样"没抢到"那条路径可以被
       // 真的走到。一个只能靠并发时序才能触发的分支，与一个不存在的分支，
       // 在"它到底拦不拦得住"上是同一个东西。
-      const taken = consume({
-        db, requestId, bindingHash: verdict.bindingHash, consumedAtText: now(),
+      //
+      // PRT-616：**行级 CAS 不够**。它保证的是"这一行只被消费一次"，而危险场景里
+      // 根本不存在"这一行"：同一个 Attempt 内两次参数完全相同的并发调用会各自
+      // 写下一条待批准行，各被批准一次，然后**各自**成功消费一次——行级 CAS
+      // 全程尽职，而同一个操作执行了两次。
+      //
+      //   > 一个「每一行都只被消费一次」的 CAS，
+      //   > 与一个「同一个操作被放行两次」的 CAS，在「它到底防住了什么」上是同一个东西。
+      //
+      // 所以再上一把按**(attemptId, bindingHash)** 的锁，两步放进**同一个事务**：
+      // 要么占位 + 消费都成立，要么都不成立。
+      const attemptId = input.attemptId == null ? null : String(input.attemptId).trim() || null
+      const callId = input.callId == null ? null : String(input.callId)
+      const claim = withTx(() => {
+        const claimed = claimOnce({
+          db, attemptId, bindingHash: verdict.bindingHash, requestId, consumedAtText: now(), callId,
+        })
+        if (claimed.outcome !== CLAIM_OUTCOMES.CLAIMED) return { stage: 'claim-lost', claimed }
+        const taken = consume({ db, requestId, bindingHash: verdict.bindingHash, consumedAtText: now() })
+        if (taken.outcome !== CONSUME_OUTCOMES.CONSUMED) {
+          // 占位成功、行级 CAS 输了 → 这一次**没有**放行，占位必须退回。
+          // 不退的话，一次竞争会把这张票**永久**废掉：用户批准了，没人执行，
+          // 而且之后无论怎么重试都是"这个操作已经用过了"。
+          releaseClaim({ db, key: claimed.key })
+          return { stage: 'row-lost', claimed }
+        }
+        return { stage: 'consumed', claimed }
       })
-      if (taken.outcome === CONSUME_OUTCOMES.CONSUMED) {
+      if (claim.stage === 'consumed') {
         audit(operation.actor, operation.scope, 'permission:consume', requestId, {
           action: operation.action, target: operation.target, bindingHash: verdict.bindingHash,
+          attemptId, attemptScoped: claim.claimed.attemptScoped, callId,
         })
-        return { allowed: true, decision: 'allow', status: 'consumed', requestId, bindingHash: verdict.bindingHash, operation }
+        return {
+          allowed: true, decision: 'allow', status: 'consumed', requestId,
+          bindingHash: verdict.bindingHash, operation,
+          attemptId, attemptScoped: claim.claimed.attemptScoped,
+        }
+      }
+      if (claim.stage === 'claim-lost') {
+        // ★ 同一 Attempt 内同一个 canonical 哈希已经被放行过一次。
+        // 这正是 spec §6.5 要挡的那件事：**不得放行两次**。
+        audit(operation.actor, operation.scope, 'permission:allow-once-duplicate', requestId, {
+          action: operation.action, target: operation.target, bindingHash: verdict.bindingHash,
+          attemptId, code: ALLOW_ONCE_CODES.ATTEMPT_DUPLICATE, callId,
+        })
+        throw new Error(
+          `permission operation mismatch（${ALLOW_ONCE_CODES.ATTEMPT_DUPLICATE}：`
+          + '同一个 Attempt 内这个操作已经放行过一次，不得重复放行）',
+        )
       }
       // CAS 没成功：这一行在我们校验之后被别人消费掉了（或被换成了另一条绑定）。
       // **不能**回退到"再查一次然后放行"——那就是一次批准放行两次。
@@ -1720,10 +1777,19 @@ export function checkPermission(input = {}, { consume = consumeBinding } = {}) {
   //
   // PRT-608 之后这一步就是**直接比哈希**：写进那一行的哈希是我们自己算的，
   // 不需要再解析 JSON、再跑一遍规范化。
+  //
+  // PRT-616 补上 `attempt_id`：**同一个**原则（去重的粒度必须等于消费的粒度）
+  // 在这里还有一处没做到。消费侧的粒度现在是 `(attemptId, bindingHash)`，
+  // 而去重侧只有哈希——于是**另一条 Attempt** 的待批准行会被本次复用。
+  // 那意味着：Attempt #2 的模型发起同一个操作时，用户看到的是 Attempt #1 的申请，
+  // 批准之后审计里挂在 Attempt #1 上，而实际执行发生在 Attempt #2。
+  // `attempt_id IS ?` 是 SQLite 的 null 安全比较：没有 Attempt 的调用只与
+  // 同样没有 Attempt 的行配对，不会去认领一条有主的。
   const wantedHash = computeBindingHash(operation)
+  const dedupAttemptId = input.attemptId == null ? null : String(input.attemptId).trim() || null
   const existing = db
-    .prepare(`SELECT * FROM permission_requests WHERE scope=? AND actor=? AND action=? AND target=? AND status='pending' AND ${BINDING_HASH_COLUMN}=?`)
-    .get(operation.scope, operation.actor, operation.action, operation.target, wantedHash)
+    .prepare(`SELECT * FROM permission_requests WHERE scope=? AND actor=? AND action=? AND target=? AND status='pending' AND ${BINDING_HASH_COLUMN}=? AND ${APPROVAL_ATTEMPT_COLUMN} IS ?`)
+    .get(operation.scope, operation.actor, operation.action, operation.target, wantedHash, dedupAttemptId)
   if (existing) return { ...result, requestId: existing.requestId, bindingHash: wantedHash }
   const id = `perm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   // PRT-615：TTL 来自配置（`LEGION_APPROVAL_TTL_MS`，schema 里声明了合法区间），

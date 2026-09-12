@@ -351,6 +351,25 @@ async function stageTest() {
       files: ['team-hub/approval-ttl.test.mjs'],
       cwd: ROOT,
     },
+    {
+      // PRT-616：`allow-once` 的原子占位（spec §6.5）。
+      //
+      // PRT-608 的行级 CAS 保证的是"**这一行**只被消费一次"。而危险场景里根本
+      // 不存在"这一行"：同一 Attempt 内两次参数完全相同的并发调用会各自写下一条
+      // 待批准行，各被批准一次，然后**各自**成功消费一次——行级 CAS 全程尽职，
+      // 而同一个操作执行了两次。
+      //
+      //   > 一个「每一行都只被消费一次」的 CAS，
+      //   > 与一个「同一个操作被放行两次」的 CAS，在「它到底防住了什么」上是同一个东西。
+      //
+      // 所以要第二把锁，它的键**不是行**，而是"这一次授权的内容"：
+      // `(attemptId, bindingHash)`，落在 `approval_consumptions` 的主键上。
+      // 键必须带无歧义的分隔符，且缺 Attempt 时不能退化成一把全局哈希锁——
+      // 那会让合法调用被**永久**拒绝。
+      label: 'allow-once（PRT-616：同一 Attempt 内同一 canonical 哈希只放行一次）',
+      files: ['team-hub/allow-once.test.mjs'],
+      cwd: ROOT,
+    },
     { label: 'calendar（日程日历契约）', files: ['team-hub/calendar.test.mjs'], cwd: ROOT },
     { label: 'calendar-ui（P2-5 日历前端纯函数：周视图/重复文案/关联跳转/表单校验）', files: ['workbench/scripts/calendar-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'chat-ui（P2-6 对话前端纯函数：健康判定/AI 三态/合并/断线补齐）', files: ['workbench/scripts/chat-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },

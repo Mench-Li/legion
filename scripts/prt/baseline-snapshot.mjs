@@ -74,6 +74,12 @@ const SCHEMA_SOURCES = [
   // 不登记的话，`permission_requests` 会对平台契约基线不可见，
   // 而 `--check` 会兴高采烈地报告"无漂移"。实测它当场就红了。
   'approvalBinding',
+  // PRT-616：`approval_consumptions`（`allow-once` 的占位账本）。
+  //
+  // 它必须是**独立一张表**、而且必须是**能挡住第二次放行**的那一张：
+  // 把"这一次放行被用掉了"这个不可回收的安全事实放进 `permission_requests`
+  // （一张会被清理/过期的表），表现是"清理跑完之后，同一操作又能被放行一次"。
+  'allowOnce',
 ]
 
 // 这些模块也一并纳入 sources 哈希：它们变了，基线里的表清单就可能过期。
@@ -83,6 +89,7 @@ SOURCES.bindingStore = join(ROOT, 'team-hub', 'binding-store.mjs')
 SOURCES.budgetLedger = join(ROOT, 'team-hub', 'budget-ledger.mjs')
 SOURCES.contextStore = join(ROOT, 'team-hub', 'context-store.mjs')
 SOURCES.approvalBinding = join(ROOT, 'team-hub', 'approval-binding.mjs')
+SOURCES.allowOnce = join(ROOT, 'team-hub', 'allow-once.mjs')
 
 /**
  * 采集 schema 的目录。

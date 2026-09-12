@@ -273,6 +273,37 @@ async function stageTest() {
     { label: 'chat（对话中心契约）', files: ['team-hub/chat.test.mjs'], cwd: ROOT },
     { label: 'skills（共享技能回归）', files: ['team-hub/skills.test.mjs'], cwd: ROOT },
     { label: 'permissions（F-02 权限内核与审批）', files: ['team-hub/permission-engine.test.mjs', 'team-hub/permissions.test.mjs', 'team-hub/skills-permission.test.mjs'], cwd: ROOT },
+    {
+      // PRT-611：F-02 canonical operation —— 键序不是操作身份。
+      //
+      // 这一组盯的**不是**指纹算得对不对，而是**审批绑定到了哪些东西**。
+      // 被替换掉的 `JSON.stringify(a) === JSON.stringify(b)` 坏在两个方向不同、
+      // 而只有一个方向会有人来报 bug 的地方：
+      //
+      //   ① 键的书写顺序被当成操作身份。`metadata` 的键序由调用方决定，
+      //      于是一次 `{path,mode}` 的批准遇到 `{mode,path}` 的再次调用就被拒。
+      //      这个方向是**拒绝**（fail-closed），不造成危险，所以没人为它报 bug
+      //      ——这才是它值得写下来的原因。
+      //
+      //        > 一个把「键的书写顺序」当成「操作的身份」的一部分的审批绑定，
+      //        > 与一个"每次执行都要重新问一遍"的审批绑定，
+      //        > 在"用户会不会觉得这个审批按钮没用"上是同一个东西。
+      //
+      //   ② 规范化**丢掉**的字段，等于审批没有绑定到它。这个方向是**放行**，
+      //      才是真正危险的那一个。
+      //
+      //        > 一个"忘了把新字段放进规范化集合"的哈希，
+      //        > 与一个"只绑定到前六个字段"的哈希，是同一个东西——
+      //        > 而它的方向是**放行**。
+      //
+      // 所以有一条**加载时自检**：`OPERATION_KEYS` 必须与 `normalizeOperation`
+      // 真正产出的字段逐个对齐——加字段却忘了同步名单，启动就崩，因为
+      //「一个必须靠人记得去同步的名单，与一个迟早会不同步的名单，
+      //   在「新加的字段能不能改变审批」上是同一个东西」。
+      label: 'canonical-operation（PRT-611：键序不是操作身份，字段必须全都绑定）',
+      files: ['team-hub/permission-engine.canonical.test.mjs'],
+      cwd: ROOT,
+    },
     { label: 'calendar（日程日历契约）', files: ['team-hub/calendar.test.mjs'], cwd: ROOT },
     { label: 'calendar-ui（P2-5 日历前端纯函数：周视图/重复文案/关联跳转/表单校验）', files: ['workbench/scripts/calendar-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'chat-ui（P2-6 对话前端纯函数：健康判定/AI 三态/合并/断线补齐）', files: ['workbench/scripts/chat-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },

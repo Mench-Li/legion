@@ -66,7 +66,7 @@ import { createHash } from 'node:crypto'
 import { dirname, extname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { standardsFor } from './stage-standards.mjs'
-import { evaluatePermission, normalizeOperation } from './permission-engine.mjs'
+import { evaluatePermission, normalizeOperation, sameOperation } from './permission-engine.mjs'
 import { createRunStore, RunError } from './run-store.mjs'
 import { MODEL_ERRORS, ModelError, createModelStore, ensureModelSchema } from './model-store.mjs'
 import {
@@ -1598,14 +1598,38 @@ export function checkPermission(input = {}) {
   if (requestId) {
     const row = db.prepare('SELECT * FROM permission_requests WHERE requestId=?').get(requestId)
     if (row && row.status === 'approved') {
-      if (JSON.stringify(JSON.parse(row.operation)) !== JSON.stringify(operation)) throw new Error('permission operation mismatch')
+      // PRT-611：原来这里是
+      //   `JSON.stringify(JSON.parse(row.operation)) !== JSON.stringify(operation)`
+      // 键的书写顺序（`metadata` 的键序由调用方决定）会被算进操作身份，
+      // 表现为"明明批过了，它说操作不匹配"。改成指纹比较。
+      if (!sameOperation(JSON.parse(row.operation), operation)) throw new Error('permission operation mismatch')
       const consumed = withTx(() => db.prepare("UPDATE permission_requests SET status='consumed', consumedAt=? WHERE requestId=? AND status='approved'").run(now(), requestId))
       if (consumed.changes === 1) { audit(operation.actor, operation.scope, 'permission:consume', requestId, { action: operation.action, target: operation.target }); return { allowed: true, decision: 'allow', status: 'consumed', requestId, operation } }
     }
   }
   const result = evaluatePermission(operation, permissionRows(), { now: Date.now() })
   if (result.status !== 'pending') return result
-  const existing = db.prepare("SELECT * FROM permission_requests WHERE scope=? AND actor=? AND action=? AND target=? AND status='pending'").get(operation.scope, operation.actor, operation.action, operation.target)
+  // PRT-611：去重必须用**与消费时同一个**身份判定。
+  //
+  // 原来这里按 scope/actor/action/target 四个字段去重，而消费时按规范化后的
+  // **全部**字段比对。两条不同粒度的判断放在一起，表现是：一次 `taskId` 不同的
+  // 调用会复用上一次的待批准请求，用户批准之后消费方却因为指纹不同而拒绝——
+  // 用户看到的是"我批了，它说操作不匹配"。
+  //
+  //   > 一个用四个字段去重的待批准表，与一个用全部字段去绑定的消费检查，
+  //   > 是同一个东西——只不过它表现出来是"我明明批了，它说操作不匹配"。
+  const existing = db
+    .prepare("SELECT * FROM permission_requests WHERE scope=? AND actor=? AND action=? AND target=? AND status='pending'")
+    .all(operation.scope, operation.actor, operation.action, operation.target)
+    .find((row) => {
+      try {
+        return sameOperation(JSON.parse(row.operation), operation)
+      } catch {
+        // 存进去的 operation 已经解析不出/规范化不了 → **不算同一个**。
+        // 认下它会让一次新的调用继承一条来路不明的待批准请求。
+        return false
+      }
+    })
   if (existing) return { ...result, requestId: existing.requestId }
   const id = `perm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   withTx(() => db.prepare(`INSERT INTO permission_requests (requestId,scope,actor,action,target,taskId,operation,mode,status,createdAt,expiresAt) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)

@@ -153,6 +153,30 @@ export const SCHEMA = defineSchema({
     'recovery-judgement',
     'drain',
     'unchanged',
+
+    // ── PRT-712 系统指标 ────────────────────────────────────────────────
+    //
+    // 九个指标键（spec §6.6 的顺序）、三种"读不出来"的原因码、
+    // 以及类别值（升级结果）与仪表盘的显示占位符。
+    // 那个占位符也是一个字面量：它出现在界面与导出里，不是随手打的字符。
+    'metric-no-data',
+    'metric-read-failed',
+    'metric-not-applicable',
+    'metric-no-observations',
+    'metric-bad-window',
+    'queue-depth',
+    'oldest-pending-age-ms',
+    'active-leases',
+    'lease-expiry-rate',
+    'attempt-retry-rate',
+    'dead-letter-count',
+    'runtime-availability',
+    'model-error-rate',
+    'upgrade-result',
+    'rolled-back',
+    'never-run',
+    'queue-empty',
+    '—',
     // 轮转 note 的具名码（不是 `LOG_CODES` 的成员，但同样只用于说明）
     'FOREIGN_FILES',
     'PROTECTED_GEN1',

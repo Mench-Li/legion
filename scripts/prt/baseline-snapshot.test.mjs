@@ -7,7 +7,7 @@
 //   ④ 当前仓库提取结果与已记录基线一致（无未记录的漂移）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -19,6 +19,9 @@ import {
   extractStringArray,
   extractTables,
   extractTransitions,
+  REPO_ROOT,
+  SCHEMA_SCAN_DIRS,
+  SCHEMA_SOURCE_PATHS,
 } from './baseline-snapshot.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -162,8 +165,52 @@ test('④ 基线不含时间戳（否则每次 diff 都会假红）', () => {
   assert.doesNotMatch(flat, /generatedAt|timestamp|\d{4}-\d{2}-\d{2}T/)
 })
 
-test('④ 基线含源文件哈希，可把漂移归因到文件', () => {
-  const recorded = JSON.parse(readFileSync(BASELINE, 'utf8'))
+test('⑤ **每个建表模块都登记进了 schema 采集**（漏登记 = 那张表对基线不可见）', () => {
+  // 这条检查把"记得更新 SCHEMA_SOURCES"变成一个**会红的门禁**。
+  // 背景：`dbTables` 曾经只扫 server.mjs，于是 run-store.mjs 的四张表
+  // 与 model-store.mjs 的 model_profiles 对基线完全不可见——`--check` 报
+  // "无漂移"，而真实 schema 已经多了五张。一个看不见某类变更的棘轮比没有
+  // 棘轮更坏：它给出"已核对过"的错觉。
+  //
+  // 遍历所有会放建表语句的目录，找出含 `CREATE TABLE IF NOT EXISTS` 的
+  // **非测试** 源文件，逐个断言它们在 SCHEMA_SOURCE_PATHS 里。
+  const registered = new Set(SCHEMA_SOURCE_PATHS.map((p) => resolve(p)))
+  const found = []
+  const walk = (dir) => {
+    let entries
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return // 目录不存在（例如某些工作树里没有 security/）
+    }
+    for (const e of entries) {
+      if (e.name === 'node_modules' || e.name.startsWith('.')) continue
+      const full = join(dir, e.name)
+      if (e.isDirectory()) { walk(full); continue }
+      if (!e.name.endsWith('.mjs')) continue
+      // 测试文件里的建表语句是夹具，不属于产品 schema
+      if (e.name.includes('.test.')) continue
+      let text
+      try { text = readFileSync(full, 'utf8') } catch { continue }
+      if (/CREATE TABLE IF NOT EXISTS/.test(text)) found.push(resolve(full))
+    }
+  }
+  for (const d of SCHEMA_SCAN_DIRS) walk(join(REPO_ROOT, d))
+
+  const unregistered = found.filter((p) => !registered.has(p))
+  assert.deepEqual(
+    unregistered.map((p) => p.replace(REPO_ROOT, '').replace(/\\/g, '/')), [],
+    '这些文件建表但未登记进 SCHEMA_SOURCES：它们的表对平台契约基线不可见。\n' +
+    '请在 scripts/prt/baseline-snapshot.mjs 的 SCHEMA_SOURCES 里加上它们。',
+  )
+  // 反向：登记了却不再建表的文件要报出来（列表老化会让下一个人以为它被覆盖了）
+  const stale = SCHEMA_SOURCE_PATHS
+    .filter((p) => SCHEMA_SCAN_DIRS.some((d) => resolve(p).startsWith(resolve(join(REPO_ROOT, d)))))
+    .filter((p) => !found.includes(resolve(p)))
+  assert.deepEqual(stale, [], '这些文件已登记但不再建表，请从 SCHEMA_SOURCES 里移除')
+})
+
+test('④ 基线含源文件哈希，可把漂移归因到文件', () => {  const recorded = JSON.parse(readFileSync(BASELINE, 'utf8'))
   assert.ok(Object.keys(recorded.sources).length >= 2)
   for (const [file, hash] of Object.entries(recorded.sources)) {
     assert.match(hash, /^[0-9a-f]{64}$/, `${file} 的哈希形态不对`)

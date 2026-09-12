@@ -76,6 +76,17 @@ export const SCHEMA = defineSchema({
     'VERSION_CONFLICT', 'VERSION_REQUIRED', 'ACTOR_REQUIRED', 'AUDIT_WOULD_LEAK',
     // PRT-501 路由自有的契约错误：id 不是合法的 URL 编码（400）
     'BAD_ID_ENCODING',
+    // PRT-502 岗位模型绑定（team-hub/binding-store.mjs 的 BINDING_STORE_ERRORS）：
+    //   BINDING_NOT_FOUND  — 这个 (scope, role) 没有绑定（404）
+    //   ROLE_REQUIRED      — 缺 employeeRole（400）
+    //   SCOPE_REQUIRED     — 缺 scope（400）
+    //   BINDING_EXISTS     — 绑定数据损坏，需要人工处置（不是"没有"）
+    //   ACTOR_REQUIRED     — 谁改的绑定必须留痕（400）
+    //   PRIMARY_UNRESOLVED — 主档案解析不出来 → 拒绝保存，不降级到 fallback（409）
+    //   UNKNOWN_PROFILE    — 引用了未知档案
+    // 路由自有的：BAD_ENCODING（绑定路径不是合法 URL 编码）
+    'BINDING_NOT_FOUND', 'ROLE_REQUIRED', 'SCOPE_REQUIRED', 'BINDING_EXISTS',
+    'ACTOR_REQUIRED', 'PRIMARY_UNRESOLVED', 'UNKNOWN_PROFILE', 'BAD_ENCODING',
   ],
   // team-hub 的 CHAT_ 前缀覆盖了插件的提示词预算变量（CHAT_CTX_*）：它们是**插件**读的配置，
   // team-hub 不读，登记为外来变量，避免误报成「拼写错误」（P3-4）。

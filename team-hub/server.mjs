@@ -69,6 +69,9 @@ import { standardsFor } from './stage-standards.mjs'
 import { evaluatePermission, normalizeOperation } from './permission-engine.mjs'
 import { createRunStore, RunError } from './run-store.mjs'
 import { MODEL_ERRORS, ModelError, createModelStore, ensureModelSchema } from './model-store.mjs'
+import {
+  BINDING_STORE_ERRORS, BindingStoreError, createBindingStore, ensureBindingSchema,
+} from './binding-store.mjs'
 // `/api/runtime/next-post` 用「这条任务后面还有没有岗位」这个判定。
 // 与运行仓储里用的是**同一个**函数：两处各写一遍判定，迟早会出现
 // "接口说有下一岗位、交接时却按链尾收口"这种不一致。
@@ -208,6 +211,25 @@ const modelStore = createModelStore({
   db,
   clock: () => Date.now(),
   writeAudit: ({ action, id, detail, actor }) => audit(actor, '*', action, id, detail),
+})
+
+/**
+ * 岗位模型绑定仓储（PRT-502，spec §6.6）。
+ *
+ * `readProfiles` 把**含墓碑**的档案喂给解析器：只有传了墓碑才能把
+ * "档案被下线了"与"档案根本不存在"分开报——两者的运维动作完全不同
+ * （前者去找谁下线的，后者去查是不是 id 打错了）。`list({includeDeleted:true})`
+ * 正好给这个形状，因此这里不用 `get`。
+ *
+ * 审计的 `taskId` 位置传的是 `scope/role`：`audit` 表的那个列是自由文本，
+ * 而"改的是哪个岗位的绑定"必须能从审计里直接读出来，不该埋在 detail 里。
+ */
+const bindingStore = createBindingStore({
+  db,
+  clock: () => Date.now(),
+  readProfiles: () => modelStore.list({ includeDeleted: true }),
+  writeAudit: ({ action, scope, employeeRole, detail, actor }) =>
+    audit(actor, scope ?? '*', action, `${scope ?? '*'}/${employeeRole}`, detail),
 })
 
 /**
@@ -3522,6 +3544,92 @@ async function handle(req, res, stripPrefix) {
         if (id === null) { json(res, 400, { ok: false, error: '模型档案 id 不是合法的 URL 编码', code: 'BAD_ID_ENCODING' }); return }
         if (id === '') { json(res, 400, { ok: false, error: '缺少模型档案 id', code: 'MISSING_PARAM' }); return }
         await handleRun(req, res, (body) => modelStore.remove(id, { actor: body.actor, version: body.version }))
+        return
+      }
+    }
+    // ── 岗位模型绑定与 fallback（PRT-502，spec §6.6） ──
+    //
+    // 键是 (scope, employee_role)：同一条流水线里编码岗与审查岗可以绑不同模型，
+    // 不同空间也可以各绑各的。
+    //
+    // **写入时就要验主档案能解析**：等到运行时才发现 `primaryProfile` 打错了，
+    // 那次运行已经认领了任务、烧掉一次尝试，而错误出现在运行日志里——
+    // 不是在"保存配置"这个动作上，后者才是真正能改的地方。
+    if (req.method === 'GET' && path === '/api/model-bindings') {
+      const scope = url.searchParams.get('scope')
+      json(res, 200, { ok: true, bindings: bindingStore.list(scope), serverTimeMs: Date.now() })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/model-bindings') {
+      await handleRun(req, res, (body) => {
+        const b = bindingStore.upsert({
+          scope: body.scope,
+          employeeRole: body.employeeRole,
+          primaryProfile: body.primaryProfile,
+          fallbackProfiles: body.fallbackProfiles ?? [],
+          perRunBudget: body.perRunBudget ?? null,
+        }, { actor: body.actor })
+        return { binding: b }
+      })
+      return
+    }
+    if (req.method === 'GET' && path === '/api/model-bindings/resolve') {
+      // 「这个岗位现在该依次用哪些模型，为什么」。
+      // 绑定不存在时 404 而不是 200 带空链：空链会被下游读成"没有可用的模型"，
+      // 而真实情况是"没有绑定"——前者要人去建档案，后者要人去建绑定。
+      const scope = url.searchParams.get('scope')
+      const role = url.searchParams.get('role')
+      // 显式验参数，**不靠异常决定状态码**：`bindingStore.resolve` 在缺 role 时
+      // 会抛 ROLE_REQUIRED，而这个分支没有包在 `handleRun` 里——异常逃到外层
+      // 兜底处理器就变成 500。于是"调用方少传一个参数"报成了"服务端出错"，
+      // 运维会去查服务端日志，而真正要做的是补上参数。
+      if (scope === null || scope.trim() === '') {
+        json(res, 400, { ok: false, code: 'MISSING_PARAM', error: '缺少 scope（绑定是 (scope, role) 二元的）' })
+        return
+      }
+      if (role === null || role.trim() === '') {
+        json(res, 400, { ok: false, code: 'ROLE_REQUIRED', error: '缺少 role：没有岗位就没有"该用哪个模型"的主语' })
+        return
+      }
+      const r = bindingStore.resolve(scope, role)
+      if (r.code === BINDING_STORE_ERRORS.BINDING_NOT_FOUND) {
+        json(res, 404, { ok: false, code: r.code, error: r.message, serverTimeMs: Date.now() })
+        return
+      }
+      json(res, 200, { ok: true, resolution: r, serverTimeMs: Date.now() })
+      return
+    }
+    if (path.startsWith('/api/model-bindings/')) {
+      const BINDING_PREFIX = '/api/model-bindings/'
+      const parts = () => {
+        // `/api/model-bindings/<scope>/<role>`：两段都允许被百分号编码，
+        // 各自单独解码（整段解码会把 scope 里的 `/` 也解出来，于是切错位置）。
+        const raw = path.slice(BINDING_PREFIX.length)
+        const segs = raw.split('/')
+        if (segs.length !== 2) return null
+        try {
+          return [decodeURIComponent(segs[0]), decodeURIComponent(segs[1])]
+        } catch {
+          return 'BAD_ENCODING'
+        }
+      }
+      if (req.method === 'GET' && path.startsWith('/api/model-bindings/')) {
+        const segs = parts()
+        if (segs === 'BAD_ENCODING') { json(res, 400, { ok: false, code: 'BAD_ID_ENCODING', error: '绑定路径不是合法的 URL 编码' }); return }
+        if (segs === null) { json(res, 400, { ok: false, code: 'MISSING_PARAM', error: '路径应为 /api/model-bindings/<scope>/<role>' }); return }
+        const b = bindingStore.get(segs[0], segs[1])
+        if (b === null) {
+          json(res, 404, { ok: false, code: BINDING_STORE_ERRORS.BINDING_NOT_FOUND, error: `没有这个岗位绑定：${segs[0]}/${segs[1]}` })
+          return
+        }
+        json(res, 200, { ok: true, binding: b, serverTimeMs: Date.now() })
+        return
+      }
+      if (req.method === 'DELETE' && path.startsWith('/api/model-bindings/')) {
+        const segs = parts()
+        if (segs === 'BAD_ENCODING') { json(res, 400, { ok: false, code: 'BAD_ID_ENCODING', error: '绑定路径不是合法的 URL 编码' }); return }
+        if (segs === null) { json(res, 400, { ok: false, code: 'MISSING_PARAM', error: '路径应为 /api/model-bindings/<scope>/<role>' }); return }
+        await handleRun(req, res, (body) => bindingStore.remove(segs[0], segs[1], { actor: body.actor }))
         return
       }
     }

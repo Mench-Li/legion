@@ -2,12 +2,14 @@
   "$comment": "PRT-007 旧系统平台契约基线。由 scripts/prt/baseline-snapshot.mjs 生成；不含时间戳以便逐字节 diff。漂移由 sources 的 sha256 归因。",
   "version": 1,
   "sources": {
-    "team-hub/server.mjs": "22b4d2f471c441cedcdefb8c58b79085bb820856d098c25e630832e2f65651a9",
+    "team-hub/server.mjs": "84a05cc445be1d311552d256e5bccff1a7d1688d9909ea9ebb0b8dbe5266b1f1",
     "team-hub/permission-engine.mjs": "9e60a09d971474209a92047767d78bcc155c414a3fd3fc7442ff01f59f3b4168",
     "team-hub/run-store.mjs": "2ffab3645f3cf1969c02ff146e9759e1bfba4a6fb77f7423cdbb7e38ee4f3df1",
-    "team-hub/model-store.mjs": "1ab1a5b548740ca5f6810de6fe25658e79aea9d95fd6382ccff5facf6613d779"
+    "team-hub/model-store.mjs": "1ab1a5b548740ca5f6810de6fe25658e79aea9d95fd6382ccff5facf6613d779",
+    "team-hub/binding-store.mjs": "f9b2b7a50e1b33b0c571530e8439cd6784121458494d7a4590dfaabcce7db8c0"
   },
   "httpRoutes": [
+    "DELETE /api/model-bindings/",
     "DELETE /api/model-profiles/",
     "DELETE /api/permissions/rules/",
     "GET /api/activity",
@@ -32,6 +34,9 @@
     "GET /api/inbox",
     "GET /api/members",
     "GET /api/missions",
+    "GET /api/model-bindings",
+    "GET /api/model-bindings/",
+    "GET /api/model-bindings/resolve",
     "GET /api/model-profiles",
     "GET /api/model-profiles/",
     "GET /api/models",
@@ -79,6 +84,7 @@
     "POST /api/goal/status",
     "POST /api/heartbeat",
     "POST /api/hold",
+    "POST /api/model-bindings",
     "POST /api/model-profiles",
     "POST /api/models",
     "POST /api/models/clear",
@@ -123,6 +129,7 @@
     "chat_attachments",
     "chat_reply_settings",
     "conversations",
+    "employee_model_bindings",
     "exec_requests",
     "exec_state",
     "goal",

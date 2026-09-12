@@ -544,6 +544,24 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-502（spec §6.6）：岗位模型绑定与 fallback。
+      // 纯解析逻辑与存储/路由分三组：排序与解释（纯函数）、
+      // 仓储特有的"坏数据不许当成没有"、以及 HTTP 契约（状态码三分 + 无密钥）。
+      label: 'model-binding（PRT-502：岗位模型候选链，主档案不可用不许降级）',
+      files: ['orchestrator/model-binding/model-binding.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      label: 'binding-store（PRT-502：绑定仓储，坏数据不许当成"没有备用"）',
+      files: ['team-hub/binding-store.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      label: 'binding-routes（PRT-502：绑定 HTTP 契约，状态码三分且无密钥）',
+      files: ['team-hub/binding-routes.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       label: 'run-kill-drill（PRT-312：真实进程被强杀后不丢任务、不伪装成功、不重复外部写）',
       files: ['team-hub/run-kill-drill.test.mjs'],
       cwd: ROOT,

@@ -57,11 +57,33 @@ const SCHEMA_SOURCES = [
   'server',
   'runStore',
   'modelStore',
+  'bindingStore',
 ]
 
 // 这些模块也一并纳入 sources 哈希：它们变了，基线里的表清单就可能过期。
 SOURCES.runStore = join(ROOT, 'team-hub', 'run-store.mjs')
 SOURCES.modelStore = join(ROOT, 'team-hub', 'model-store.mjs')
+SOURCES.bindingStore = join(ROOT, 'team-hub', 'binding-store.mjs')
+
+/**
+ * 采集 schema 的目录。
+ *
+ * 供 `SCHEMA_SOURCES` 覆盖率检查使用：**新增一个建表模块却忘了登记**时，
+ * 那张表对基线不可见，而 `--check` 会报告"无漂移"。因此这条检查是
+ * 把"记得更新列表"变成一个**会红的门禁**，而不是一条注释。
+ * `baseline-snapshot.test.mjs` 会调用它。
+ */
+export const SCHEMA_SCAN_DIRS = ['team-hub', 'orchestrator', 'runtime', 'security', 'product']
+
+export { SCHEMA_SOURCES }
+
+/** 已登记进 schema 采集的模块的绝对路径（供覆盖率检查比对）。 */
+export const SCHEMA_SOURCE_PATHS = Object.freeze(
+  SCHEMA_SOURCES.map((name) => SOURCES[name]),
+)
+
+/** 仓库根（供覆盖率检查遍历）。 */
+export const REPO_ROOT = ROOT
 
 const rel = (p) => relative(ROOT, p).split(sep).join('/')
 const sha256 = (text) => createHash('sha256').update(text, 'utf8').digest('hex')

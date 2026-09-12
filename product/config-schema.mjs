@@ -202,6 +202,28 @@ export const SCHEMA = defineSchema({
     'openbsd',
     'sunos',
     'aix',
+
+    // ── PRT-707 首次运行向导 ────────────────────────────────────────────
+    //
+    // 八个诊断码 + 进度文件名 + 进度格式版本号 + 六个步骤 id。
+    // 步骤 id 同时是界面上的锚点与进度文件里的值，所以它们也是字面量。
+    'WIZARD_STEP_FAILED',
+    'WIZARD_NEEDS_INPUT',
+    'WIZARD_PRECONDITION_UNMET',
+    'WIZARD_ALREADY_DONE',
+    'WIZARD_BAD_INPUT',
+    'WIZARD_NOT_OBSERVED',
+    'WIZARD_STATE_UNREADABLE',
+    'WIZARD_STATE_WRITE_FAILED',
+    'WIZARD_UNKNOWN_STEP',
+    'first-run-wizard.json',
+    'legion/first-run-wizard@1',
+    'configure-model',
+    'environment',
+    'initialize',
+    'automatic',
+    'no-state-file',
+    'done',
     // 轮转 note 的具名码（不是 `LOG_CODES` 的成员，但同样只用于说明）
     'FOREIGN_FILES',
     'PROTECTED_GEN1',

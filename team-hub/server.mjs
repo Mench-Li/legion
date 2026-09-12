@@ -81,6 +81,9 @@ import { modelConfigErrorFor, validateAgentModelSelection } from '../runtime/con
 // 整套实现 + 两个套件 + 文档都在，而没有任何入口能触发它——
 // **一个没有任何入口的功能，和一个不存在的功能，从用户角度看完全一样。**
 import { createProbeService } from './probe-service.mjs'
+// spec §6.7 的写一半：凭证的新增/更新/轮换/删除。读路径早已接上
+// （`runtime/probe/secret-resolver.mjs`），写路径此前**零调用方**。
+import { createSecretAdmin } from './secret-admin.mjs'
 // PRT-506：把老的非敏感模型配置（agent_models）迁到档案 + 岗位绑定。
 // **只搬能确定的东西**：老数据里没有 runtimeType、没有 endpoint、没有凭证，
 // 三者都**不猜**——猜出来的档案会看起来可用，直到第一次运行才失败。
@@ -242,6 +245,125 @@ let probeServiceInstance = null
 function probeService() {
   if (probeServiceInstance === null) probeServiceInstance = createProbeService({ env: process.env })
   return probeServiceInstance
+}
+
+// 凭证管理（spec §6.7 的写一半）。同样懒构造——不录密钥就不开密钥库。
+//
+// **`onCredentialsChanged` 就是 `invalidate()` 一直缺的那个调用方。**
+// `probe-service.mjs:39` 写着「提供一个 `invalidate()` 由轮换/修改凭证的路径调用」，
+// 而它从来没有被调用过：写路径不存在，两条线一直在互相等。
+//
+// 缓存里存的是**上一次探测的结论**，而结论是按当时那把钥匙得出的。
+// 轮换完密钥、界面点「测试连接」，若不失效就会拿到**用旧钥匙得出的旧结论**
+// ——而它看起来完全像一次新的验证。
+let secretAdminInstance = null
+function secretAdmin() {
+  if (secretAdminInstance === null) {
+    // 只传 env。**接线的默认值就是生产值**（见 `createHubSecretAdmin` 的
+    // `getProbeService`）：默认参数指向真实的懒构造访问器，而不是在这里
+    // 再写一遍 `probeService().invalidate()`——上一版正是那样写的，
+    // 结果是**接线藏在三行访问器里，而任何用例都覆盖不到那三行**。
+    secretAdminInstance = createHubSecretAdmin({ env: process.env })
+  }
+  return secretAdminInstance
+}
+
+/**
+ * 装上凭证管理面，并把**「凭证变了 → 探测缓存失效」**这条线接起来。
+ *
+ * ## 为什么它是导出的，而且默认参数就是生产值
+ *
+ * 这是本特性唯一一处"把两块各自有套件的东西接起来"的地方：
+ * `secret-admin.mjs` 负责在写成功之后喊一声，`probe-service.mjs` 负责
+ * 把缓存丢掉——而"喊"与"丢"之间那根线，属于**没有任何一块自己的套件能看见**的接缝。
+ *
+ *   > 一个没有证据的接线，与一根没接的线，在"能不能用"上是同一个答案。
+ *
+ * 所以注入点放在**探测服务实例**上，而不是放在"失效回调"上：
+ *
+ *   ✗ 上一版：`server.mjs` 传 `probeInvalidate: () => probeService().invalidate()`。
+ *     那让接线本身落在访问器里，而用例只能验一个**被整体替换掉的**回调——
+ *     把那一行改成 `null`、或者干脆删掉，全部用例照样绿。
+ *   ✓ 现在：接线写在本函数里（被用例覆盖），默认取真实探测服务；
+ *     用例只替换 `getProbeService` 返回的**那个对象**。
+ *
+ * `probeServiceInstance === null` 时**不构造**探测服务：没点过「测试连接」
+ * 就为了失效而开一次密钥库是白花代价，而"缓存本来就是空的"与"缓存被清了"
+ * 在这里是同一个结果（都没有可用结论）。
+ *
+ * @param {object} deps
+ * @param {object}   [deps.env]
+ * @param {Function} [deps.getProbeService]     探测服务访问器（默认 = 生产线）
+ * @param {Function} [deps.openSecrets]         `openProductSecrets` 的注入点（用例用）
+ * @param {Function} [deps.resolveLayoutImpl]   `resolveLayout` 的注入点（用例用）
+ * @param {Function} [deps.onAudit]             覆盖默认的审计转发
+ */
+export function createHubSecretAdmin({
+  env = process.env,
+  getProbeService = () => probeServiceInstance,
+  openSecrets = null,
+  resolveLayoutImpl = null,
+  onAudit = null,
+} = {}) {
+  const deps = {
+    env,
+    // ACL 加固的目标主体。**不猜**：猜错就是"给了别人权限"（fail open）。
+    // 与 `product/secrets.mjs` 同一条纪律——拿不到就如实报"没加固"。
+    owner: resolveSecretsOwner(env),
+    onCredentialsChanged: () => {
+      // 这里的 try 只兜**访问器自己抛**。`invalidate()` 抛出的异常**不在这里兜**：
+      // "失效失败不能把一次成功的写入报成失败"这条规则只在 `secret-admin.mjs`
+      // 里写一处。两处都写的话，两处会各自演化，而**只有一处会真的生效**
+      // （外层那个先兜住）——于是另一处变成一段永远不执行的死代码，
+      // 而它看起来像一道防线。
+      let svc
+      try {
+        svc = getProbeService()
+      } catch {
+        return 0
+      }
+      // 还没构造过探测服务 → 没有缓存可失效。**不为了失效去构造一个**。
+      if (svc === null || svc === undefined) return 0
+      return svc.invalidate()
+    },
+  }
+  if (openSecrets !== null) deps.openSecrets = openSecrets
+  if (resolveLayoutImpl !== null) deps.resolveLayoutImpl = resolveLayoutImpl
+  deps.onAudit = onAudit ?? ((event) => {
+    // 密钥库自己的审计（载荷已被白名单限死为 action/ref/at/purpose）→
+    // 汇进 hub 的审计流，于是"谁在什么时候加/换/删了哪把钥匙"进得了审计视图。
+    // **审计里没有值、也没有密文**：这条路径上不存在能带上密钥的字段。
+    try {
+      audit('system', '*',
+        `secret:${String(event?.action ?? 'unknown').replace(/^secret\./, '')}`,
+        null, { ref: event?.ref ?? null, purpose: event?.purpose ?? null })
+    } catch { /* 审计写不进去不该让一次成功的凭证操作失败 */ }
+  })
+  return createSecretAdmin(deps)
+}
+
+/**
+ * ACL 加固要授权给哪个主体。
+ *
+ * Windows 上 `icacls` 的输出**不标出**所有者，所以要显式给出。这里取
+ * `USERDOMAIN\USERNAME`——它就是当前进程的账户，也正是密钥库文件的所有者。
+ * spec §6.7 说的"Launcher / hub / Workbench / DSH 以同一个 Windows 用户运行"
+ * 正是这个前提。
+ *
+ * **不给 env 覆盖开关。** 第一版写了一个 `LEGION_SECRETS_OWNER`，删掉的理由是
+ * 它开了一条 fail-open 的路：把一个主体**别人**的名字填进去，
+ * `hardenFileAcl` 就会照着授权——而"给错人权限"是这一层唯一不可接受的失败方向。
+ * 派生自 OS 变量没有这个口子：拿不到就是拿不到。
+ *
+ * **取不到就返回 `null`**，于是 `hardenFileAcl` 如实报"不知道所有者，无法收紧"。
+ * 这不影响密钥库可用（DPAPI 保护的仍然是内容），但它**不会**看起来像已加固。
+ */
+function resolveSecretsOwner(env = process.env) {
+  const user = env.USERNAME ?? env.USER ?? null
+  const domain = env.USERDOMAIN ?? null
+  if (typeof user !== 'string' || user === '') return null
+  if (typeof domain === 'string' && domain !== '') return `${domain}\\${user}`
+  return user
 }
 
 // PRT-409：上下文快照存储。惰性建表（与 probeService 同一手法），
@@ -3791,6 +3913,125 @@ async function handle(req, res, stripPrefix) {
       })
       return
     }
+    // ── 凭证管理（spec §6.7 的**写**一半） ──
+    //
+    // 在 PRT-505 / PRT-254 之前，密钥库只有**读**被接上
+    // （`runtime/probe/secret-resolver.mjs`）；`store.put` / `rotate` / `remove`
+    // 在整个仓库里**零生产调用方**，也没有任何路由。于是：
+    //
+    //   · `secretRef` 只能指向别人（手写的文件、DSH 的凭证文件）放进去的东西；
+    //   · spec §6.7 要求的"新增/更新/轮换/删除写审计记录"——四个动作一个都发不出来。
+    //
+    //   > 一个功能没有入口，与这个功能不存在，对用户来说是同一件事。
+    //
+    // 四条纪律，逐条都能追到一次具体的失败：
+    //
+    // ① **响应里永远没有值。** 返回的是 `freezeMeta` 的产物（ref/purpose/
+    //    scheme/时间戳），不含 blob、不含明文。错误对象由 `SecretStoreError`
+    //    构造，它的上下文本身就是白名单（ref/platform/cause）——所以
+    //    "顺手把密钥塞进错误里"这条路在类型层面就不成立。
+    //
+    // ② **打不开就 fail closed，没有降级开关。** `requireProtected: true`
+    //    在 `secret-admin.mjs` 里写死。读路径上明文后端只是让人看到不该看的
+    //    东西；写路径上它会**把用户的真实密钥明文落盘**。
+    //
+    // ③ **写成功之后必须让探测缓存失效**（§6.7）。`probe-service.mjs:39`
+    //    早就写了 `invalidate()` 给"轮换/修改凭证的路径"用，而它**从来没有
+    //    被调用过**——因为写路径不存在，两条线一直在互相等。不失效的后果很具体：
+    //    轮换完密钥、界面点"测试连接"，拿到的还是**用旧钥匙得出的旧结论**，
+    //    而它看起来完全像一次新的验证。
+    //
+    // ④ **每次写完都重新核验文件权限。** 写入走 `写临时文件 + rename`，
+    //    而 Windows 上 `mode:0o600` 基本被忽略、新文件的 ACE 继承自目录——
+    //    也就是说上一次加固出来的"仅所有者可读"会被**每一次写入**重置。
+    //    详见 `team-hub/secret-admin.mjs` 的文件头。
+    //
+    // 路径一律用**字面量**（不用常量）：`scripts/prt/baseline-snapshot.mjs`
+    // 的抽取器只认字符串字面量，用常量写会让这些路由**静默地**不进平台契约基线，
+    // 而基线照样报"与已记录一致"。
+    if (req.method === 'GET' && path === '/api/secrets/status') {
+      await handleRun(req, res, async () => {
+        const s = await secretAdmin().describe()
+        // 自检形态的只读结果：**只有计数，没有引用名**。
+        // 引用名能画出"这台机器配了哪些供应商"，而这个结果会被显示与记录
+        // （与 `product/secrets.mjs` ④ 同一条纪律）。要列名请走 GET /api/secrets。
+        return { status: s }
+      })
+      return
+    }
+    if (req.method === 'GET' && path === '/api/secrets') {
+      await handleRun(req, res, async () => {
+        const r = await secretAdmin().list()
+        return { secrets: r.entries, aclVerified: r.aclVerified }
+      })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/secrets') {
+      await handleRun(req, res, async (body) => {
+        // `ref` / `value` 的缺失与形态由密钥库自己判（`assertSecretRef` 是唯一判据）。
+        // API 层不重复校验——重复的后果不是多一道防线，而是两处判据会漂移。
+        const r = await secretAdmin().put({ ref: body?.ref, value: body?.value, purpose: body?.purpose })
+        audit(body?.actor ?? body?.member ?? 'unknown', readScope(body ?? {}), 'secret:put', null,
+          { ref: r.meta?.ref ?? null, purpose: r.meta?.purpose ?? null, aclVerified: r.aclVerified })
+        // 只回元数据（ref/purpose/scheme/时间戳）。**永远没有值**。
+        // `aclVerified` 与 `aclNote` 必须一起给出：文件权限在每一次写入之后
+        // 都会被重置再加固，而"没核验过"不能看起来像"已确认安全"。
+        return {
+          secret: r.meta,
+          aclVerified: r.aclVerified,
+          acl: r.acl,
+          aclNote: r.aclNote,
+        }
+      })
+      return
+    }
+    if (req.method === 'POST' && path.startsWith('/api/secrets/') && path.endsWith('/rotate')) {
+      const rawRef = path.slice('/api/secrets/'.length, path.length - '/rotate'.length)
+      if (rawRef === '') { json(res, 400, { ok: false, error: '缺少 secretRef', code: 'MISSING_PARAM' }); return }
+      let rotateRef
+      try {
+        rotateRef = decodeURIComponent(rawRef)
+      } catch {
+        json(res, 400, { ok: false, error: 'secretRef 不是合法的 URL 编码', code: 'BAD_ID_ENCODING' }); return
+      }
+      await handleRun(req, res, async (body) => {
+        const r = await secretAdmin().rotate({ ref: rotateRef, value: body?.value, purpose: body?.purpose })
+        audit(body?.actor ?? body?.member ?? 'unknown', readScope(body ?? {}), 'secret:rotate', null,
+          { ref: r.meta?.ref ?? null, purpose: r.meta?.purpose ?? null, aclVerified: r.aclVerified })
+        // 只回元数据（ref/purpose/scheme/时间戳）。**永远没有值**。
+        // `aclVerified` 与 `aclNote` 必须一起给出：文件权限在每一次写入之后
+        // 都会被重置再加固，而"没核验过"不能看起来像"已确认安全"。
+        return {
+          secret: r.meta,
+          aclVerified: r.aclVerified,
+          acl: r.acl,
+          aclNote: r.aclNote,
+        }
+      })
+      return
+    }
+    if (req.method === 'DELETE' && path.startsWith('/api/secrets/')) {
+      const rawRef = path.slice('/api/secrets/'.length)
+      if (rawRef === '') { json(res, 400, { ok: false, error: '缺少 secretRef', code: 'MISSING_PARAM' }); return }
+      let delRef
+      try {
+        delRef = decodeURIComponent(rawRef)
+      } catch {
+        json(res, 400, { ok: false, error: 'secretRef 不是合法的 URL 编码', code: 'BAD_ID_ENCODING' }); return
+      }
+      if (delRef.includes('/')) {
+        // 多段路径不是引用名：明确拒绝，不去猜用户想要哪一个。
+        json(res, 400, { ok: false, error: 'secretRef 不能包含斜杠', code: 'BAD_ID_ENCODING' }); return
+      }
+      await handleRun(req, res, async (body) => {
+        const r = await secretAdmin().remove(delRef)
+        audit(body?.actor ?? body?.member ?? 'unknown', readScope(body ?? {}), 'secret:delete', null,
+          { ref: delRef, removed: r.removed, aclVerified: r.aclVerified })
+        return { removed: r.removed, aclVerified: r.aclVerified, acl: r.acl, aclNote: r.aclNote }
+      })
+      return
+    }
+
     // ── 模型档案（PRT-501，spec §6.6） ──
     //
     // 这些路由**不接受**任何密钥字段：`validateProfile` 会拒绝未知字段与明文

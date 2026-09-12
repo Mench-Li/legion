@@ -33,7 +33,7 @@
       "sensitiveEnv": [
         "TEAM_HUB_TOKEN"
       ],
-      "declaredFieldCount": 12,
+      "declaredFieldCount": 15,
       "envReadKeys": [
         "CHAT_ATTACH_BLACKLIST_EXT",
         "CHAT_ATTACH_MAX_BYTES",
@@ -45,11 +45,14 @@
         "MAX_RULES_LEN",
         "TEAM_HUB_DB",
         "TEAM_HUB_PORT",
-        "TEAM_HUB_TOKEN"
+        "TEAM_HUB_TOKEN",
+        "USER",
+        "USERDOMAIN",
+        "USERNAME"
       ],
-      "envReadCount": 11,
+      "envReadCount": 14,
       "undeclaredEnvKeys": [],
-      "filesScanned": 13
+      "filesScanned": 21
     },
     {
       "name": "workbench",
@@ -90,7 +93,7 @@
       ],
       "envReadCount": 8,
       "undeclaredEnvKeys": [],
-      "filesScanned": 46
+      "filesScanned": 48
     },
     {
       "name": "whiteboard",
@@ -227,7 +230,7 @@
       "protocol": "进程内调度 + 按波次 spawn 五进程（PRT-251）",
       "ports": [],
       "sensitiveEnv": [],
-      "declaredFieldCount": 8,
+      "declaredFieldCount": 9,
       "envReadKeys": [
         "LEGION_CACHE_DIR",
         "LEGION_DATA_DIR",
@@ -240,7 +243,7 @@
       ],
       "envReadCount": 8,
       "undeclaredEnvKeys": [],
-      "filesScanned": 15
+      "filesScanned": 17
     },
     {
       "name": "orchestrator",
@@ -261,7 +264,7 @@
       "sensitiveEnv": [
         "TEAM_HUB_TOKEN"
       ],
-      "declaredFieldCount": 6,
+      "declaredFieldCount": 7,
       "envReadKeys": [
         "LEGION_DATA_DIR",
         "LEGION_RUNTIME_COMMAND",
@@ -272,7 +275,7 @@
       ],
       "envReadCount": 6,
       "undeclaredEnvKeys": [],
-      "filesScanned": 12
+      "filesScanned": 18
     }
   ],
   "declarationGaps": [],

@@ -585,6 +585,30 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // spec §6.7 的**写**一半：凭证的新增/更新/轮换/删除。
+      //
+      // 在它之前，`security/secrets/store.mjs` 的 put/rotate/remove 在整个
+      // 仓库里**零生产调用方**——有实现、有套件、有文档，而没有任何入口
+      // 能触发它们。所以这一组同时守两件事：
+      //   · 管理面本身的契约（响应里永远没有值、打不开就 fail closed）；
+      //   · **写路径引入的两个新问题**（读路径上不存在，所以此前没人遇到）：
+      //     ① 写入走「临时文件 + rename」，Windows 上 mode 0o600 被忽略、
+      //        新文件的 ACE 继承自目录 ⇒ 每一次写入都会重置上一次的加固；
+      //     ② 全新安装上第一次写入**必然**发生在"文件还不存在 ⇒ 没加固过"之后。
+      label: 'secret-admin（spec §6.7 凭证管理的写一半：新增/更新/轮换/删除、fail closed、每次写完复核 ACL）',
+      files: ['team-hub/secret-admin.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      // 同一半的 HTTP 契约，外加本节最要害的那根线：
+      // **写成功之后探测缓存必须失效**（`probe-service.mjs:39` 要的调用方）。
+      // 一组分开写是因为它需要真实服务器（独立进程 + 独立库 + 独立端口），
+      // 而上一组不需要。
+      label: 'secret-routes（spec §6.7 凭证管理的 HTTP 契约；含"写成功→探测缓存失效"这根线）',
+      files: ['team-hub/secret-routes.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       label: 'probe（PRT-504：探测执行器，假 transport 覆盖全部分类 + 凭证不落判定/缓存）',
       files: ['runtime/probe/probe.test.mjs'],
       cwd: ROOT,

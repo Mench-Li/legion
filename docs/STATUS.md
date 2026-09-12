@@ -2176,7 +2176,14 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：98 套件 / 2434 用例，`--only test` 整体 PASS** —— 2026-09-12 实测（设 `DSH_CHECKOUT`）
+**当前基线：111 套件 / 2779 用例，`--only test` 整体 PASS** —— 2026-09-12 实测（设 `DSH_CHECKOUT`）
+
+（**本批新增**：`secret-admin`（**24 例**，spec §6.7 凭证管理的**写**一半：新增/更新/轮换/删除；`requireProtected` 写死无降级；
+响应与错误里永远没有值；`list` 是白名单投影而非透传后端整行；`describe` 只给计数不给引用名）+
+`secret-routes`（**15 例**，HTTP 契约 + 「写成功 → 探测缓存失效」这根线；`put`/`rotate` 两条失败路径都不得发失效）。
+写路径带入两个读路径上不存在的新问题：写入走「临时文件 + rename」、**Windows 上 `mode:0o600` 被忽略且 ACE 继承自目录**，
+⇒ **每一次写入都会重置**上一次的加固；以及全新安装上第一次写入**必然**发生在「文件还不存在 ⇒ 没加固过」之后
+——两条用同一种处置：**每次写完都重新核验**，核验没过时写入仍算成功但必须给出 `aclVerified:false`。见 `PRT-505-secret-write-path.md`。）
 （PRT-509 事故修正：`push-verify`（**9 例**，推送判据必须是远端 tip；两条用真实输出的负样本）；
 PRT-254 Secret Store 最小闭环：`product-secrets`（**23 例**，密钥库不得在 DataDir 内 / 明文后端 fail closed / 解析器真的接上）；
 PRT-509 文件访问控制：`secret-acl`（**22 例**，真实 `icacls` 输出做夹具 / "查不出来"必须与"是安全的"分开）；
@@ -2354,6 +2361,7 @@ P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-
 | | `docs/superpowers/prt/prt-009-execution-evidence.json` | 生产空间 `software` 的旧路径执行证据：状态序列 / 耗时分布 / 人工介入 / **可用性空窗**。数值全部来自 `audit` 表只读提取 |
 | | `docs/superpowers/prt/prt-009-gf001-controlled-evidence.json` | 受控空间 `gf001` 的同一组指标（**旧路径**，含两次中止轮次），与上一行**不可互相冒充**——两者是不同总体 |
 | | `docs/superpowers/prt/PRT-001-topology-inventory.md`、`prt-001-003-inventory.json` | PRT-001/003 拓扑与配置密钥清单。**4 个 path 字段默认落在安装目录内**（越界写入，PRT-505/257 输入）；仓库内明文凭证 0 处 |
+| | `docs/superpowers/prt/PRT-505-secret-write-path.md` | spec §6.7 凭证管理的**写**入口（4 条动作 + 5 条路由）：此前 `put`/`rotate`/`remove` **零生产调用方**；写路径带入的权限重置问题与处置；13 条破验证探针（第一轮 6 条不咬，逐条记录原因） |
 | | `docs/superpowers/prt/PRT-010-dsh-composition-baseline.md`、`prt-010-composition-baseline.json` | PRT-008 术语冻结 + PRT-010 组合分层基线：`dsh-base` → `dsh-web-app` → 用户层，Legion 6 行 / 4 个 `file:` 依赖。`--diff` 无需 DSH_HOME |
 | | `docs/superpowers/prt/PRT-011-dsh-distribution-decision.md` | PRT-011 分发形态**已裁决：路线 C**（依赖 `@deepseek-ai/dsh` npm 包 + Launcher 装进 DataDir）；DSH 已是 MIT npm 包，当前部署是 244 个 junction 的开发布局，checkout ≈ 1845 MB |
 | | `docs/PRT-006-evidence/backup-restore-evidence.md` | PRT-006 备份/恢复验证：只复制 `.db` **静默丢 253 条 audit**；陈旧 `-wal` 混用**被重放且 integrity_check 仍 ok**。恢复步骤与发布检查单已回写 `docs/DEPLOY.md` §6.1 |
@@ -2469,6 +2477,23 @@ P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-
     高优先级提示在场时，「已补发」这类过程信息不显示（信息被**延迟**，不是丢失）——
     该规则来自本轮自造的一次回归（队列提示顶掉了「操作过于频繁」，被既有 e2e 限流用例抓到）。
 
+<!-- 新增于 spec §6.7 凭证写入口那一批。**功能可用但没有按钮**，这两件事必须分开登记：
+     把"没有入口"写成"没做"会让人以为要重新实现，而实际上只需要接一根线。 -->
+
+**凭证管理的界面入口仍未接**（spec §6.7 的写一半，2026-09-12）：
+后端的 5 条路由（`GET /api/secrets/status`、`GET|POST /api/secrets`、
+`POST /api/secrets/<ref>/rotate`、`DELETE /api/secrets/<ref>`）已经完整可用、
+有 39 例套件覆盖、进了平台契约基线（131 → **136** 条路由）；
+但 `ModelConfigModal.tsx` 仍硬编码 `MODEL_OPTIONS`，**没有任何界面调用它们**。
+
+这是**「没接」而不是「没做」**——两者的修法完全不同：不需要重新实现密钥库，
+只需要把按钮接到已经存在且已被验证的路由上。在接上之前，
+`secretRef` 只能由手工构造的 HTTP 请求或别的工具写入。
+
+同批还留了两条更小的口子：`GET /api/secrets` 会返回 `aclVerified`，
+但**没有消费者据此拒绝操作**（文件权限复核没通过时，读写照常进行）；
+以及新装机器上不可能有 `secretRef`，而界面不会引导用户「先去录一把」
+——用户看到的会是一次不明所以的探测失败。
 ## 5. 维护约定
 
 - **状态变化**（拓扑、端口、数据池、测试基线、已知限制）→ 更新本文件，并同步 `README.md` 的必要部分。

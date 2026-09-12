@@ -28,6 +28,21 @@ export const SCHEMA = defineSchema({
     { key: 'maxRulesLen', env: 'MAX_RULES_LEN', type: 'int', default: 3000, min: 1, doc: '规范内容长度上限（字符）' },
     // ── 运维脚本 ──
     { key: 'hubUrl', env: 'LEGION_HUB_URL', type: 'string', default: 'http://127.0.0.1:8787', doc: 'seed-pipeline 脚本要写入的 hub 地址' },
+    // ── 操作系统给的"我是谁"（spec §6.7 的 ACL 加固要用）──
+    //
+    // 这三个**不是 Legion 的配置项**：没有默认值、没有可写的覆盖开关、
+    // 也不出现在 `/api/config`（那个端点只回 auth/db/port/runPlane）。
+    // 声明在这里的唯一理由是**把读取点记在账上**——扫描器的判据是
+    // "要么是已声明的读取点，要么是外来变量"，而 team-hub 现在真的读它们，
+    // 所以只能选前者。把真实读取点登记成"我不读"（foreignEnv）
+    // 等于把它从账上抹掉，那正是这份清单要防的。
+    //
+    // 用途：`hardenFileAcl` 必须显式知道"把权限收紧到哪个主体"。
+    // Windows 上 `icacls` 的输出**不标出所有者**，而复核（`evaluateWindowsPrincipals`）
+    // 是按名字比对的——`AMENCH\x` 与 `x` 不相等，所以域也要一起拼。
+    { key: 'osUserName', env: 'USERNAME', type: 'string', default: '', doc: 'Windows 上的当前账户名（OS 提供，非产品配置）' },
+    { key: 'osUser', env: 'USER', type: 'string', default: '', doc: 'POSIX 上同一件事的变量名' },
+    { key: 'osUserDomain', env: 'USERDOMAIN', type: 'string', default: '', doc: 'Windows 上的域/机器名，与账户名拼成 DOMAIN\\user' },
   ],
   nonEnvLiterals: [
     'COMMIT', 'ROLLBACK', 'DELETE', 'OPTIONS', 'SIGINT', 'SIGTERM', 'ENOENT',
@@ -141,6 +156,21 @@ export const SCHEMA = defineSchema({
     'CONTEXT_ATTEMPT_REQUIRED', 'CONTEXT_NOT_FOUND', 'CONTEXT_SNAPSHOT_CONFLICT',
     'CONTEXT_SNAPSHOT_INVALID', 'CONTEXT_BAD_PAYLOAD', 'CONTEXT_PERMISSION_REQUIRED',
     'CONTEXT_BAD_CANDIDATE', 'CONTEXT_BAD_SOURCE', 'CONTEXT_BAD_REQUEST',
+    // spec §6.7 凭证管理的**写**一半（team-hub/secret-admin.mjs）。
+    //
+    // 在它之前，`security/secrets/store.mjs` 的 put/rotate/remove 在整个仓库里
+    // **零生产调用方**——有实现、有套件、有文档，而没有任何入口能触发它们。
+    //   · STORE_UNAVAILABLE（管理面自有码）— 密钥库打不开。**不是"密钥不存在"**：
+    //     说成后者会让用户去重新录入一把其实好端端躺在本机的钥匙。
+    //     它是 503（现在没法提供这项服务），而写路径上**没有**明文降级——
+    //     读路径上明文后端只是让人看到不该看的东西，写路径上它会把真实密钥落盘。
+    //   · REF_INVALID / VALUE_EMPTY — 调用方写错了请求（400，先于状态检查）
+    //   · NOT_FOUND — 轮换/删除一个没录入过的引用（404）。
+    //     删除是例外：删一个不存在的引用是**幂等**的 false，不是 404——
+    //     删除的意图是"让它不存在"，而它已经不存在了。
+    //   · WRITE_FAILED — 本表没登记的内部码收敛到这里（503，不猜状态码）
+    'SECRET_ADMIN_STORE_UNAVAILABLE', 'SECRET_REF_INVALID', 'SECRET_VALUE_EMPTY',
+    'SECRET_NOT_FOUND', 'SECRET_STORE_WRITE_FAILED',
   ],
   // team-hub 的 CHAT_ 前缀覆盖了插件的提示词预算变量（CHAT_CTX_*）：它们是**插件**读的配置，
   // team-hub 不读，登记为外来变量，避免误报成「拼写错误」（P3-4）。

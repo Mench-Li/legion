@@ -634,6 +634,13 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-257 的「自检」+ PRT-254 的生产调用方接通：什么该**阻止启动**、
+      // 什么只该**提醒**。分界判错的两个方向都不报错，所以每一条等级都单独钉住。
+      label: 'launcher-secrets（PRT-254/257：明文后端与位置不合法阻止启动，打不开只提醒）',
+      files: ['product/launcher/secrets-check.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       label: 'run-kill-drill（PRT-312：真实进程被强杀后不丢任务、不伪装成功、不重复外部写）',
       files: ['team-hub/run-kill-drill.test.mjs'],
       cwd: ROOT,

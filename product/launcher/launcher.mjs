@@ -162,6 +162,10 @@ export function createLauncher({
   readiness = {},
   allowPortInUse = [],
   include = null,
+  secretsCheck = null,
+  secretsRun = null,
+  secretsOwner = null,
+  requireProtected = true,
 } = {}) {
   if (layout === null || typeof layout !== 'object') throw new Error('createLauncher 需要 layout（见 product/paths.mjs）')
 
@@ -215,6 +219,49 @@ export function createLauncher({
   let startedAt = null
   let stoppedAt = null
   let portDiagnostics = []
+  let secretsDiagnostics = []
+
+  /**
+   * 跑密钥库自检。
+   *
+   * `secretsCheck` 可注入是为了让"什么该阻止启动"这条分界能在**不碰真实 DPAPI**
+   * 的前提下逐条验证（本机是 Windows，但 CI 也要能跑）。
+   * 不注入时用真实实现（`product/launcher/secrets-check.mjs` 的 `runSecretsCheck`）。
+   *
+   * 这里**先查布局**：布局不合法（密钥库在 DataDir/InstallDir/CacheDir 内）是
+   * 结构性问题，连"打开"都不该发生——但它的诊断由自检给出，不在这里另判一次
+   * （同一件事有两个判定点就会有两个口径）。
+   */
+  async function collectSecretsDiagnostics() {
+    try {
+      if (typeof secretsCheck === 'function') {
+        const r = await secretsCheck({ layout, platform: layout.platform })
+        if (Array.isArray(r)) return r
+        if (r !== null && typeof r === 'object' && Array.isArray(r.diagnostics)) return r.diagnostics
+        return []
+      }
+      if (secretsCheck !== null && typeof secretsCheck === 'object' && Array.isArray(secretsCheck.diagnostics)) {
+        return secretsCheck.diagnostics
+      }
+      const { runSecretsCheck } = await import('./secrets-check.mjs')
+      const r = await runSecretsCheck({
+        layout,
+        platform: layout.platform,
+        run: secretsRun,
+        owner: secretsOwner,
+        requireProtected,
+      })
+      return r.diagnostics
+    } catch (err) {
+      // 自检自身出错只降级为一条 warn：**一个体检程序崩溃不该让产品起不来**，
+      // 但它必须被看见（不能静默）。
+      return [{
+        severity: 'warn',
+        code: 'SECRETS_CHECK_FAILED',
+        message: `密钥库自检未完成：${err?.name ?? 'Error'}（**未验证**，不等于通过）`,
+      }]
+    }
+  }
   let readinessDiagnostics = []
 
   /**
@@ -320,7 +367,16 @@ export function createLauncher({
       if (portDiagnostics.some((d) => d.severity === 'error')) {
         return Object.freeze({ ok: false, phase: 'ports', diagnostics: Object.freeze([...planDiagnostics, ...portDiagnostics]) })
       }
-      return Object.freeze({ ok: true, phase: null, diagnostics: Object.freeze([...planDiagnostics, ...portDiagnostics]) })
+      // 密钥库自检（PRT-254 / PRT-257）。排在端口之后：端口冲突是"起不来"，
+      // 而密钥库的问题里只有两类是"不许起"，其余是"起来之后某些事做不了"
+      // ——先报更硬的那个。
+      secretsDiagnostics = await collectSecretsDiagnostics()
+      const all = [...planDiagnostics, ...portDiagnostics, ...secretsDiagnostics]
+      return Object.freeze({
+        ok: !all.some((d) => d.severity === 'error'),
+        phase: null,
+        diagnostics: Object.freeze(all),
+      })
     },
 
     /**

@@ -60,6 +60,7 @@ export {
   POSIX_OWNER_ONLY_BITS,
   WINDOWS_ALLOWED_PRINCIPALS,
   accessLettersOf,
+  createSystemRunner,
   evaluateWindowsPrincipals,
   hardenFileAcl,
   inspectFileAcl,

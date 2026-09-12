@@ -134,6 +134,18 @@ export const SCHEMA = defineSchema({
     'SECRETS_INSIDE_DATA_DIR', 'SECRETS_INSIDE_INSTALL_DIR', 'SECRETS_LAYOUT_BLOCKED',
     'SECRETS_OK', 'SECRETS_STORE_OPEN_FAILED', 'SECRETS_STORE_UNPROTECTED',
     'SECRETS_STORE_UNSUPPORTED_PLATFORM',
+    // PRT-254/257 把自检接进启动流程时新增的三个字面量。
+    //
+    // `SECRETS_PLACEMENT_INVALID` / `SECRETS_CHECK_FAILED` 是启动诊断码
+    // （前者回答"该不该阻止启动"，后者是自检自己崩了时的降级码）；
+    // `ACL_TOO_PERMISSIVE` 被 `product/launcher/secrets-check.mjs` 用来**区分**
+    // 「查了，太宽」与「没查出来」——这两个必须保持不同的码，把前者塌成后者
+    // 会让"已经确认的危险"看起来像"这次没查到"。
+    'SECRETS_PLACEMENT_INVALID', 'SECRETS_CHECK_FAILED', 'ACL_TOO_PERMISSIVE',
+    // `ACL_NOT_CREATED`：密钥库文件**还没被创建**。它与 `ACL_UNVERIFIABLE`
+    // 是不同的事实，必须分开——新装机器上每次启动都会碰到它，若归成"未验证"，
+    // 那条告警会每次都出现而每次都说得不对（没有文件就没有暴露面）。
+    'ACL_NOT_CREATED',
     // 密钥库内部码（security/secrets/errors.mjs）经 product/secrets.mjs 转成自检码时被引用。
     'SECRET_STORE_UNPROTECTED', 'SECRET_STORE_UNSUPPORTED_PLATFORM',
     'EACCES', 'EADDRINUSE', 'ECONNREFUSED',

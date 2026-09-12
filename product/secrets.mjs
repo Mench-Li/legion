@@ -35,11 +35,13 @@ import {
   ACL_CODES,
   SecretStoreError,
   createProductSecretStore,
+  createSystemRunner,
   hardenFileAcl,
   inspectFileAcl,
   isSecretStoreError,
 } from '../security/secrets/index.mjs'
 import { createSecretResolver } from '../runtime/probe/secret-resolver.mjs'
+import { existsSync } from 'node:fs'
 import { isPathInside, samePath } from './paths.mjs'
 
 /** 自检结果码。`OK` 之外的每一个都带"下一步该做什么"。 */
@@ -74,6 +76,10 @@ export async function openProductSecrets({
   onAudit = null,
   hardenAcl = true,
   platform = layout?.platform ?? process.platform,
+  // 可注入的"文件是否存在"。默认用真实的 `existsSync`；
+  // 用例注入假实现，这样"文件还没创建"与"文件在但 ACL 异常"两条分支
+  // 都能被**确定性地**测到，而不需要真的去碰文件系统。
+  exists = existsSync,
 } = {}) {
   const path = layout?.secretsFile ?? null
   if (path === null || path === undefined || path === '') {
@@ -122,20 +128,31 @@ export async function openProductSecrets({
     })
   }
 
+  // `run` 默认走**真实**实现（真 `icacls` / `stat`）。
+  //
+  // 这一点很关键：`inspectFileAcl` 在没有 runner 时如实报 `ACL_NO_RUNNER`，
+  // 而如果生产代码永远不传 runner，整套 ACL 检查就**只会说"没查过"**——
+  // 功能、用例、文档都在，而每一次真实检查都是空的。
+  // 那是"尚无生产调用方"的更深一层：**线接上了，但中间那一截是空的**。
+  const aclRun = run ?? createSystemRunner()
+
   // ④ 文件访问控制。DPAPI 保护的是**内容**，不是**文件**：
   //    另一个用户仍可复制它、看到里面有哪些引用名。
   //
   // `owner` 必须传进 `inspectFileAcl`：`icacls` 的输出**不标出**哪个主体是所有者，
   // 所以不传 owner 时真所有者会被当成越权主体——那是 fail closed 方向（不会漏报），
   // 但会让一份干净的 ACL 永远显示"越权"，于是这个提示很快会被所有人忽略。
-  const aclBefore = await inspectFileAcl({ file: path, platform, run: run ?? undefined, owner })
+  const aclBefore = await inspectFileAcl({ file: path, platform, run: aclRun, owner, exists })
   let acl = aclBefore
   let hardened = null
-  if (hardenAcl === true && aclBefore.ok !== true) {
+  // `NOT_CREATED` 不触发加固：文件还不存在，没有东西可以加固，
+  // 而对着一个不存在的路径跑 `icacls /grant` 只会失败并留下一条假告警。
+  const aclApplicable = aclBefore.code !== 'ACL_NOT_CREATED'
+  if (hardenAcl === true && aclApplicable && aclBefore.ok !== true) {
     // owner 由调用方显式给出。**本模块不猜**：
     // 猜错主体去授权等于把权限给错人，而猜错的失败方向是"给了别人权限"（fail open）。
-    hardened = await hardenFileAcl({ file: path, platform, run: run ?? undefined, owner })
-    acl = await inspectFileAcl({ file: path, platform, run: run ?? undefined, owner })
+    hardened = await hardenFileAcl({ file: path, platform, run: aclRun, owner })
+    acl = await inspectFileAcl({ file: path, platform, run: aclRun, owner, exists })
   }
 
   // ⑤ 解析器——这一步才是"生产调用方"真正被接上的地方。
@@ -170,6 +187,12 @@ export async function openProductSecrets({
     hardened,
     count,
     aclVerified: acl.ok === true,
+    // 文件是否已经存在。`aclVerified: false` 有**两种**原因，调用方要能分开：
+    //   `aclExists: false` → 还没有文件，没什么可保护的（全新安装的常态）
+    //   `aclExists: true`  → 文件在，但没能确认它只有所有者可读（**这才是要提醒的**）
+    // 把两者混在一起，启动告警会在每台全新机器上永远出现——而一条永远
+    // 都不对的告警与没有告警是同一件事。
+    aclExists: acl.code !== 'ACL_NOT_CREATED',
   })
 }
 

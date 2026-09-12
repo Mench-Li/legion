@@ -33,6 +33,8 @@
 // 比没有检查更坏：它会让人相信一件没被验证过的事。
 // ============================================================================
 
+import { existsSync } from 'node:fs'
+
 /** ACL 检查的内部码。`UNVERIFIABLE` 与 `OK` 必须分开。 */
 export const ACL_CODES = Object.freeze({
   OK: 'ACL_OK',
@@ -41,6 +43,21 @@ export const ACL_CODES = Object.freeze({
   UNSUPPORTED_PLATFORM: 'ACL_UNSUPPORTED_PLATFORM',
   HARDEN_FAILED: 'ACL_HARDEN_FAILED',
   NO_RUNNER: 'ACL_NO_RUNNER',
+  /**
+   * 文件**还没被创建**。
+   *
+   * 这与 `UNVERIFIABLE`（查了，但没查出来）是**不同的事实**，必须分开：
+   * 密钥库文件要到第一次写入密钥时才存在，所以全新安装上启动自检**永远**
+   * 会碰到这个状态。如果把它归成 `UNVERIFIABLE`，那条告警就会**每次都出现、
+   * 而它每次都说得不对**——按本项目已经记过的那条：
+   *
+   *   **一条永远不对的告警，和没有告警，是同一件事。**
+   *
+   * 用户会学会忽略它，于是当文件**真的**变得可被别的账户读到时，
+   * 那一条同样被忽略。所以这里分成独立的状态：文件不存在时**没什么可保护的**，
+   * 不产生"越权"告警；而只要文件存在，判定就回到严格的那一支。
+   */
+  NOT_CREATED: 'ACL_NOT_CREATED',
 })
 
 /**
@@ -151,6 +168,53 @@ function grantsAccess(accessLetters) {
 }
 
 /**
+ * 真正去执行命令的 runner（`icacls` / `stat` / `chmod`）。
+ *
+ * ## 为什么必须有一个**真实**的默认实现
+ *
+ * `inspectFileAcl` 在没有 runner 时会报 `ACL_NO_RUNNER`——那是**正确**的
+ * （"没查过"不能说成"是安全的"）。但如果**生产代码永远不传 runner**，
+ * 结果就是：ACL 这一整套实现与用例都在，而**每一次真实检查都只说
+ * "没查过"**。那等于整个 PRT-509 是死代码，而且它还是**安静地**死掉
+ * ——界面上一句"未验证"看着很像"已检查过、没问题"。
+ *
+ * 这与本批反复出现的"尚无生产调用方"是同一个形态，只是更深一层：
+ * 功能有了、接线也有了，**而线中间那一截是空的**。
+ *
+ * 所以真实实现放在这里，由 `product/secrets.mjs` 默认使用；
+ * 用例仍然注入假 runner（不碰真实文件系统与真实 ACL）。
+ *
+ * 失败一律转成 `{status, stdout}` 而不抛：调用方的判定逻辑统一处理
+ * "命令失败"与"输出看不懂"两种情况，不需要在这里分叉。
+ */
+export function createSystemRunner({ execFile = null } = {}) {
+  return async (cmd, args) => {
+    const exec = execFile ?? (await loadExecFile())
+    return new Promise((resolve) => {
+      exec(cmd, args, { windowsHide: true, encoding: 'utf8' }, (err, stdout) => {
+        if (err) {
+          resolve({
+            status: typeof err.code === 'number' ? err.code : 1,
+            stdout: typeof stdout === 'string' && stdout !== '' ? stdout : String(err.stdout ?? ''),
+          })
+          return
+        }
+        resolve({ status: 0, stdout: typeof stdout === 'string' ? stdout : '' })
+      })
+    })
+  }
+}
+
+let _execFile = null
+async function loadExecFile() {
+  if (_execFile === null) {
+    const mod = await import('node:child_process')
+    _execFile = mod.execFile
+  }
+  return _execFile
+}
+
+/**
  * 判断一组 Windows 主体是否"只有所有者可访问"。
  *
  * @returns {{ok: boolean, offenders: string[]}}
@@ -192,9 +256,23 @@ export async function inspectFileAcl({
   platform = process.platform,
   run,
   owner = null,
+  exists = existsSync,
 } = {}) {
   if (typeof file !== 'string' || file === '') {
     return { ok: false, code: ACL_CODES.UNVERIFIABLE, message: '没有给出文件路径，无法检查访问控制', principals: [], owner: null, platform, skipped: false }
+  }
+
+  // 文件还不存在 → 没什么可保护的。**这不等于"检查通过"**，因此
+  // `ok` 仍然是 false、`code` 是独立的 `NOT_CREATED`，只是它不会被
+  // 翻成一条"越权"告警（见 ACL_CODES.NOT_CREATED 的说明）。
+  //
+  // 放在平台分派**之前**：Windows 与 POSIX 上"文件不存在"是同一件事。
+  if (exists(file) !== true) {
+    return {
+      ok: false, code: ACL_CODES.NOT_CREATED,
+      message: '密钥库文件尚未创建（首次写入密钥时创建）；此时没有可保护的内容',
+      principals: [], owner: null, platform, skipped: false, exists: false,
+    }
   }
 
   if (platform === 'win32') {
@@ -308,6 +386,7 @@ export async function hardenFileAcl({
   platform = process.platform,
   run,
   owner = null,
+  exists = existsSync,
 } = {}) {
   if (typeof run !== 'function') {
     return { ok: false, code: ACL_CODES.NO_RUNNER, message: '没有 runner，无法加固访问控制', actions: [] }
@@ -343,7 +422,7 @@ export async function hardenFileAcl({
       }
     }
     // 加固之后**重新验一遍**：只说"我设置过了"不算加固完成
-    const after = await inspectFileAcl({ file, platform, run, owner })
+    const after = await inspectFileAcl({ file, platform, run, owner, exists })
     return {
       ok: after.ok,
       code: after.ok ? ACL_CODES.OK : after.code,
@@ -364,7 +443,7 @@ export async function hardenFileAcl({
     if (res?.status !== 0) {
       return { ok: false, code: ACL_CODES.HARDEN_FAILED, message: `chmod 600 返回 ${res?.status}`, actions }
     }
-    const after = await inspectFileAcl({ file, platform, run, owner })
+    const after = await inspectFileAcl({ file, platform, run, owner, exists })
     return {
       ok: after.ok,
       code: after.ok ? ACL_CODES.OK : after.code,

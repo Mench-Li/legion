@@ -53,6 +53,114 @@ function layoutIn(root, overrides = {}) {
 
 // ------------------------------------------------------------ A. 注入式
 
+test('preflight：**密钥库自检接在启动前**，且 error 级会拦下启动（PRT-254/257 的接线）', async () => {
+  // 这一条守的是**接线本身**：把它拔掉（`secretsDiagnostics = []`）时，
+  // secrets-check 那一组仍然全绿——因为那一组只测"怎么判"，不测"有没有被判"。
+  // **一个没被调用到的判定，和一个不存在的判定，在输出上完全一样。**
+  const root = mkdtempSync(join(tmpdir(), 'legion-lz-'))
+  try {
+    let spawned = 0
+    const seen = []
+    const L = createLauncher({
+      layout: layoutIn(root),
+      // 限定范围：不限定的话其它进程的入口在临时目录里解析不出来，
+      // plan 阶段就失败，走不到密钥库那一步（实测 ENTRY_UNRESOLVED）。
+      include: ['team-hub'],
+      // 显式给一个空闲端口：默认端口在本机可能已被占用，那样 plan 阶段就会
+      // 报 PORT_IN_USE，同样走不到密钥库那一步。
+      ports: { 'team-hub': await reserveEphemeralPort() },
+      exists: () => true,
+      spawnImpl: () => { spawned += 1; throw new Error('不应被调用') },
+      secretsCheck: (args) => {
+        seen.push(args)
+        return [{ severity: 'error', code: 'SECRETS_STORE_UNPROTECTED', message: '明文后端' }]
+      },
+    })
+    const r = await L.preflight()
+    assert.equal(seen.length, 1, '自检必须被调用且只调一次')
+    assert.equal(typeof seen[0].platform, 'string', '要把平台传下去（ACL 按平台选实现）')
+    assert.equal(typeof seen[0].layout?.secretsFile, 'string', '要把布局传下去（自检要知道密钥库在哪）')
+    assert.equal(r.ok, false, 'error 级密钥库诊断必须拦下启动')
+    assert.ok(r.diagnostics.some((d) => d.code === 'SECRETS_STORE_UNPROTECTED'),
+      `诊断里必须有密钥库那条：${JSON.stringify(r.diagnostics.map((d) => d.code))}`)
+    assert.equal(spawned, 0)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('preflight：密钥库的 **warn 级不拦启动**（否则用户被锁在门外，连修的地方都进不去）', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'legion-lz-'))
+  try {
+    const L = createLauncher({
+      layout: layoutIn(root),
+      // 限定范围：不限定的话其它进程的入口在临时目录里解析不出来，
+      // plan 阶段就失败，走不到密钥库那一步（实测 ENTRY_UNRESOLVED）。
+      include: ['team-hub'],
+      ports: { 'team-hub': await reserveEphemeralPort() },
+      exists: () => true,
+      secretsCheck: () => [{ severity: 'warn', code: 'SECRETS_STORE_OPEN_FAILED', message: '打不开' }],
+    })
+    const r = await L.preflight()
+    assert.equal(r.ok, true, 'warn 不该阻止启动')
+    // 但必须**留在诊断里**：不阻塞不等于沉默
+    assert.ok(r.diagnostics.some((d) => d.code === 'SECRETS_STORE_OPEN_FAILED'),
+      'warn 必须出现在诊断中，不能被丢掉')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('preflight：密钥库自检自己抛异常也只降级为 warn（**体检程序崩溃不该让产品起不来**）', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'legion-lz-'))
+  try {
+    const L = createLauncher({
+      layout: layoutIn(root),
+      // 限定范围：不限定的话其它进程的入口在临时目录里解析不出来，
+      // plan 阶段就失败，走不到密钥库那一步（实测 ENTRY_UNRESOLVED）。
+      include: ['team-hub'],
+      ports: { 'team-hub': await reserveEphemeralPort() },
+      exists: () => true,
+      secretsCheck: () => { throw Object.assign(new Error('boom'), { name: 'SecretStoreError' }) },
+    })
+    const r = await L.preflight()
+    assert.equal(r.ok, true, '自检崩溃不该阻止启动')
+    const d = r.diagnostics.find((x) => x.code === 'SECRETS_CHECK_FAILED')
+    assert.ok(d !== undefined, '但必须被看见，不能静默')
+    assert.equal(d.severity, 'warn')
+    assert.ok(!d.message.includes('boom'), '不原样带出底层 message')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('preflight：端口冲突排在密钥库之前（先报更硬的那个）', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'legion-lz-'))
+  const { createServer } = await import('node:net')
+  const server = createServer()
+  const port = await new Promise((resolve) => server.listen({ port: 0, host: '127.0.0.1' }, () => resolve(server.address().port)))
+  try {
+    let secretsCalls = 0
+    const L = createLauncher({
+      layout: layoutIn(root),
+      // 限定范围：不限定的话其它进程的入口在临时目录里解析不出来，
+      // plan 阶段就失败，走不到密钥库那一步（实测 ENTRY_UNRESOLVED）。
+      include: ['team-hub'],
+      exists: () => true,
+      ports: { 'team-hub': port },
+      secretsCheck: () => { secretsCalls += 1; return [] },
+    })
+    const r = await L.preflight()
+    assert.equal(r.ok, false)
+    assert.equal(r.phase, 'ports')
+    // 端口已经失败了，就没必要再去开密钥库（那会白花一次 icacls / DPAPI）
+    assert.equal(secretsCalls, 0, '端口阶段失败后不该继续跑密钥库自检')
+  } finally {
+    server.close()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('preflight：清单诊断有 error 时**不启动任何进程**，并在 plan 阶段返回', async () => {
   const root = mkdtempSync(join(tmpdir(), 'legion-lz-'))
   try {

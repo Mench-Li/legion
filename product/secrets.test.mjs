@@ -29,8 +29,11 @@ import {
   SECRETS_CHECK_CODES,
   assertSecretsPlacement,
   describeSecretsCheck,
-  openProductSecrets,
+  openProductSecrets as _openProductSecrets,
 } from './secrets.mjs'
+// 用例里的路径是假的：**声明**它们存在，否则会走到「文件尚未创建」那条分支
+// （`ACL_NOT_CREATED`）。想测那条分支的用例显式传 `exists: () => false` 覆盖。
+const openProductSecrets = (args = {}) => _openProductSecrets({ exists: () => true, ...args })
 
 const SECRET = 'sk-live-abcdefghijklmnopqrstuvwxyz0123456789'
 
@@ -409,4 +412,56 @@ test('⑤ hardenAcl: false 时一次加固命令都不发（但仍然检查）',
   assert.equal(r.ok, true)
   assert.equal(r.hardened, null)
   assert.ok(calls.every((c) => !c.args.join(' ').includes('/inheritance:r')))
+})
+
+// ------------------------------------------------------------------ ⑥ 默认 ACL runner
+
+test('⑥ **不注入 runner 时，ACL 检查真的会执行**（默认走真实实现，不是"没有 runner"）', async () => {
+  // 这一条守的是一个很隐蔽的死代码形态：
+  //
+  //   `inspectFileAcl` 在没有 runner 时如实报 `ACL_NO_RUNNER`——那是**对的**。
+  //   但如果生产代码**永远不传 runner**，结果就是整套 ACL 实现与用例都在，
+  //   而每一次真实检查都只说"没查过"。功能有了、接线也有了，
+  //   **而线中间那一截是空的**——并且它是**安静地**空的：
+  //   界面上"未验证"看着很像"已检查过、没问题"。
+  //
+  // 所以这里**刻意不传 `run`**，用一个真实存在的临时文件，断言判定落在
+  // 一个**真实结果**上（而不是 NO_RUNNER）。
+  if (process.platform !== 'win32') return // 本机是 Windows；icacls 才有意义
+  const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+
+  const dir = mkdtempSync(join(tmpdir(), 'legion-defrun-'))
+  const file = join(dir, 'credentials.json')
+  try {
+    writeFileSync(file, '{"version":1}', 'utf8')
+    // **不传 run**：这是这一条用例的全部意义。
+    const r = await openProductSecrets({
+      layout: layoutFor({ secretsFile: file }),
+      storeFactory: fakeFactory(),
+      hardenAcl: false,
+      exists: () => true,
+    })
+    assert.notEqual(r.acl.code, 'ACL_NO_RUNNER',
+      '没有默认 runner → 生产里每次检查都只会说"没查过"，整套 ACL 是死代码')
+    assert.ok(['ACL_OK', 'ACL_TOO_PERMISSIVE'].includes(r.acl.code),
+      `应给出真实判定，实际 ${r.acl.code}：${r.acl.message}`)
+    assert.equal(r.aclExists, true)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('⑥ 文件不存在时 `aclExists: false`，加固**不被调用**', async () => {
+  const calls = []
+  const run = async (cmd, args) => { calls.push({ cmd, args }); return { status: 0, stdout: CLEAN_ACL } }
+  const r = await openProductSecrets({
+    layout: layoutFor(), storeFactory: fakeFactory(), run, owner: 'ALICE\\alice', exists: () => false,
+  })
+  assert.equal(r.acl.code, 'ACL_NOT_CREATED')
+  assert.equal(r.aclExists, false)
+  assert.equal(r.hardened, null, '文件还不存在就没有东西可加固')
+  assert.equal(calls.filter((c) => c.args.join(' ').includes('/inheritance:r')).length, 0,
+    '不得对着不存在的路径跑 icacls /inheritance:r')
 })

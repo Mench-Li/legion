@@ -19,10 +19,14 @@ import {
   WINDOWS_ALLOWED_PRINCIPALS,
   accessLettersOf,
   evaluateWindowsPrincipals,
-  hardenFileAcl,
-  inspectFileAcl,
+  hardenFileAcl as _hardenFileAcl,
+  inspectFileAcl as _inspectFileAcl,
   parseIcacls,
 } from './acl.mjs'
+// 用例里的路径是假的：**声明**它们存在，否则会走到「文件尚未创建」那条分支
+// （`ACL_NOT_CREATED`）。想测那条分支的用例显式传 `exists: () => false` 覆盖。
+const inspectFileAcl = (args = {}) => _inspectFileAcl({ exists: () => true, ...args })
+const hardenFileAcl = (args = {}) => _hardenFileAcl({ exists: () => true, ...args })
 
 const FILE = 'C:\\Users\\alice\\AppData\\Local\\Temp\\legion-secrets.json'
 
@@ -355,4 +359,83 @@ test('⑤ POSIX：判定与加固都用 mode，600 是上限', async () => {
   const unsupported = await hardenFileAcl({ file: '/x', platform: 'plan9', run: runner({}) })
   assert.equal(unsupported.ok, false)
   assert.equal(unsupported.code, ACL_CODES.UNSUPPORTED_PLATFORM)
+})
+
+// ------------------------------------------------------------------ ⑥ 文件还没创建
+
+test('⑥ 文件还不存在 → `ACL_NOT_CREATED`，与 `ACL_UNVERIFIABLE` **必须分开**', async () => {
+  // 这两者在调用方那里会导致**完全不同**的处理：
+  //   NOT_CREATED  → 全新安装的常态，没什么可保护的，不该报"越权"
+  //   UNVERIFIABLE → 文件在，而我们不知道它安不安全，**必须**报出来
+  //
+  // 若把前者归成后者，那条告警会在每一台新机器的每一次启动上出现，
+  // 而它每次都说得不对。按本项目已经记过的那条：
+  // **一条永远不对的告警，和没有告警，是同一件事**——用户会学会忽略它，
+  // 于是当文件**真的**变得可被别的账户读到时，那一条同样被忽略。
+  let ran = 0
+  const spy = async (cmd, args) => { ran += 1; return { status: 0, stdout: '' } }
+
+  const missing = await inspectFileAcl({
+    file: '/no/such/credentials.json', platform: 'win32', run: spy, exists: () => false,
+  })
+  assert.equal(missing.code, ACL_CODES.NOT_CREATED)
+  assert.equal(missing.ok, false, '**不等于通过**：只是"没有东西可保护"')
+  assert.equal(missing.exists, false)
+  assert.equal(ran, 0, '文件不存在时不该去跑 icacls（那只会拿到一条看不懂的输出）')
+
+  // 同一个文件，`exists` 说它在 → 必须回到严格的那一支
+  const present = await inspectFileAcl({
+    file: '/no/such/credentials.json', platform: 'win32', run: spy, exists: () => true,
+  })
+  assert.notEqual(present.code, ACL_CODES.NOT_CREATED)
+  assert.equal(ran, 1, '文件在就必须真去查')
+})
+
+test('⑥ 两平台的"文件不存在"是同一件事（判定在平台分派**之前**）', async () => {
+  for (const platform of ['win32', 'linux', 'darwin', 'plan9']) {
+    const r = await inspectFileAcl({ file: '/x/s.json', platform, run: runner({}), exists: () => false })
+    assert.equal(r.code, ACL_CODES.NOT_CREATED, `${platform} 上应同样是 NOT_CREATED`)
+  }
+})
+
+test('⑥ 文件不存在时**不加固**（对着不存在的路径跑 icacls 只会失败并留下假告警）', async () => {
+  // 加固本身仍有自己的 runner/owner 检查，但调用方不应在 NOT_CREATED 时调它；
+  // 这里锁定"不存在的路径确实不会被当成可加固对象"这个事实。
+  const r = await hardenFileAcl({
+    file: '/no/such/c.json', platform: 'win32', run: runner({}), owner: 'AMENCH\\a', exists: () => false,
+  })
+  // 复核仍会走 NOT_CREATED，因此整体**不得**被判成功。
+  assert.equal(r.ok, false, '复验看到文件不存在 → 不能报"加固成功"')
+})
+
+test('⑥ 真实文件端到端：存在时给出**真实判定**，不是"未验证"', async () => {
+  // 这一条是"文件不存在 → 安静"那个改动的**对照面**：
+  // 不能因为新安装安静了，就让"文件在、而且很宽"也一起安静。
+  const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { execFile } = await import('node:child_process')
+  if (process.platform !== 'win32') return // 本机是 Windows；icacls 才有意义
+
+  const dir = mkdtempSync(join(tmpdir(), 'legion-acl-real-'))
+  const file = join(dir, 'credentials.json')
+  try {
+    writeFileSync(file, '{"version":1}', 'utf8')
+    const run = (cmd, args) => new Promise((resolve) => {
+      execFile(cmd, args, { windowsHide: true, encoding: 'utf8' }, (err, stdout) => {
+        resolve({ status: err ? (typeof err.code === 'number' ? err.code : 1) : 0, stdout: String(stdout ?? '') })
+      })
+    })
+    const r = await inspectFileAcl({ file, platform: 'win32', run })
+    // 关键：必须落到一个**确定**的判定，而不是 NOT_CREATED / NO_RUNNER。
+    assert.ok([ACL_CODES.OK, ACL_CODES.TOO_PERMISSIVE].includes(r.code),
+      `真实文件应给出确定判定，实际 ${r.code}：${r.message}`)
+    assert.notEqual(r.code, ACL_CODES.NOT_CREATED, '文件确实存在，不得报"尚未创建"')
+    // 临时目录通常是继承来的宽 ACL；若本机恰好好，则至少不能是"未验证"
+    if (r.code === ACL_CODES.TOO_PERMISSIVE) {
+      assert.ok(Array.isArray(r.principals) && r.principals.length > 0, '越权判定必须点名是哪些主体')
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

@@ -4,9 +4,9 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-12　`run-ci --only test` **PASS**；其中 `test` **91 套件 / 2268 用例**
-（**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数为 90 套件 / 2259 用例）
-—— 以本文件所在提交为准；证据 `.ci/2026-09-12T06-51-14-059Z/`
+**最近一次全量基线**：2026-09-12　`run-ci --only test` **PASS**；其中 `test` **92 套件 / 2295 用例**
+（**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数为 91 套件 / 2268 用例）
+—— 以本文件所在提交为准；证据 `.ci/2026-09-12T07-11-33-684Z/`
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
 （`scrum/daemon-gf001.json`，`intervalMs: 15000`）同时运行时实测 **31 分钟**（约 7 倍）。
 **因此不要把耗时当回归基线**——只有套件数/用例数/通过与否可用于判定。
@@ -31,7 +31,57 @@
 > - `gf001` 空间非终态任务数为 **0**；T-141 已由将军于 `14:00:32Z` 转 `canceled`
 >   （产物从 patch 记录逐字恢复为 `53d9d15`，需求已由 `G-mtwxx7an-2` 交付，无需重做）。
 
-> **本轮（事故修正：PRT-509 的文档自身泄漏了一次真实密钥，且推送验证给了假阳性）**：
+> **本轮（PRT-257 的一半：密钥库自检接进启动流程，并补上一截**空了的**接线）**：
+> 新增 `product/launcher/secrets-check.mjs`（**17 例**）、`product/launcher/launcher.test.mjs` 增 4 条接线用例，
+> `security/secrets/acl.mjs` 增 `createSystemRunner` + `ACL_NOT_CREATED`（**26 例**），
+> `product/secrets.mjs` 增 `exists` 注入与 `aclExists`（**25 例**）。
+>
+> **① 分界：什么该阻止启动，什么只该提醒。** 两种错法的代价**不对称**：
+> 该阻止却只提醒 → 启动成功然后"静默地不安全"；该提醒却阻止 → **用户被锁在门外**
+> （他正是要打开界面去修它，而界面起不来了）。判据：**阻止启动的，是"启动本身会制造
+> 新的危险"；只提醒的，是"现在就不工作"**。于是**明文后端**与**密钥库落在
+> DataDir/InstallDir/CacheDir** 是 error（启动后每次录入都明文写盘／备份会带走它），
+> 而**打不开**、**ACL 过宽**、**ACL 查不出来**、**平台不支持**都只是 warn。
+> 自检排在端口之后（先报更硬的那个）。
+>
+> **② 新装机器上"永远不对的告警"。** 密钥库文件要到第一次写入密钥时才存在，
+> 所以全新安装上启动自检**永远**碰到"文件不存在"。第一版把它归成
+> `ACL_UNVERIFIABLE`，于是那条告警会在**每一台新机器的每一次启动**上出现，
+> 而它**说得不对**——没有文件，就没有暴露面。按本项目已记过的那条：
+> **一条永远不对的告警，和没有告警，是同一件事**（用户会学会忽略它，于是当文件
+> **真的**变得可被别的账户读到时，那一条同样被忽略）。故新增独立状态
+> `ACL_NOT_CREATED`：它与 `ACL_UNVERIFIABLE` **都是 `ok: false`**，
+> 区别只在"有没有东西可保护"，并由 `aclExists` 显式带出去
+> （`aclVerified: false` 有**两种**原因，必须能分开）。
+>
+> **③ 更严重的：整套 ACL 检查在生产里是死代码。** 接上自检后真实链路冒烟的第一条
+> 输出就是 `…没有 icacls runner…`。`inspectFileAcl` 如实报 `ACL_NO_RUNNER`
+> **是对的**，但 `product/secrets.mjs` 写的是 `run: run ?? undefined`，而
+> **没有任何生产代码会传 `run`**——于是 PRT-509 的整套实现、22 条用例、文档全都在，
+> 而**每一次真实检查都只说"没查过"**。这是"尚无生产调用方"的**更深一层**：
+> **功能有了、接线也有了，而线中间那一截是空的**；而且它是**安静地**空的——
+> 界面上"未验证"看着很像"已检查过、没问题"。修法：真实 runner 落到
+> `createSystemRunner()`，由 `product/secrets.mjs` **默认使用**。修完之后
+> 在本机真实临时目录上的输出是 `ACL_TOO_PERMISSIVE`，并点名了
+> `Amench\CodexSandboxUsers` 等主体——**这才是信号**。
+>
+> **④ 用例本身的两个坑（都表现为"密钥库那段代码没被执行到"，与 ③ 现象一模一样）：**
+> 三条新用例没限定 `include: ['team-hub']` → plan 阶段 `ENTRY_UNRESOLVED`；
+> 三条用了默认端口 8787 → `PORT_IN_USE`。**"没走到那一步"和"那一步是对的"，
+> 在输出上完全一样**——所以用例必须让前置条件成立，否则它会以"通过"的样子掩盖一个空调用。
+>
+> **变红验证 9 条全部验过**，其中最后一条的两个方向**都要红**：新装机器上安静
+> （不误报）与文件真在且很宽时出声（不漏报）是**两条相反**的断言，少了任何一条，
+> 另一个方向就会在下次改动里悄悄失守。详见
+> `docs/superpowers/prt/PRT-257-secrets-preflight.md`。
+>
+> **仍未交付**：`owner` 没有来源（**加固默认不发生**，真所有者也会被算成越权主体——
+> fail closed 但不漏报方向正确，代价是常驻噪音）；密钥库文件无并发写保护；
+> 跨机器复制无防护；`LEGION_SECRETS_FILE` 指向网络盘未检查；`count` 用无界
+> `store.list()`；与 `$DSH_HOME/.credentials.yaml` 的关系仍未定（spec A.2 要求复用，
+> 需一次产品决策）；"一键启动"端到端仍未验证（缺 `runtime.command`）。
+>
+> 本轮（事故修正：PRT-509 的文档自身泄漏了一次真实密钥，且推送验证给了假阳性）**：
 > 新增 `scripts/prt/push-verify.mjs` + 套件 `push-verify`（**9 例**，含**两条用真实输出的负样本**）。
 >
 > **发生了什么。** PRT-509 那份文档的 §9 为了论证"DSH 的 `.credentials.yaml` 是明文"，
@@ -1155,7 +1205,7 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：91 套件 / 2268 用例，`--only test` 整体 PASS** —— 2026-09-12 实测（设 `DSH_CHECKOUT`）
+**当前基线：92 套件 / 2295 用例，`--only test` 整体 PASS** —— 2026-09-12 实测（设 `DSH_CHECKOUT`）
 （PRT-509 事故修正：`push-verify`（**9 例**，推送判据必须是远端 tip；两条用真实输出的负样本）；
 PRT-254 Secret Store 最小闭环：`product-secrets`（**23 例**，密钥库不得在 DataDir 内 / 明文后端 fail closed / 解析器真的接上）；
 PRT-509 文件访问控制：`secret-acl`（**22 例**，真实 `icacls` 输出做夹具 / "查不出来"必须与"是安全的"分开）；
@@ -1177,8 +1227,9 @@ PRT-307 机器验收：`acceptance`（**24 例**，纯函数）、`acceptance-st
 PRT-312 真实进程被强杀：`run-kill-drill`（**2 例**，真 worker 进程 + 真 team-hub + `SIGKILL`）；
 进度表自检 `prt-progress`（**12 例**）；PRT-314 多进程并发 `run-concurrency`（**5 例**）；
 `run-policy`（**14 例**：PRT-309/310/311 的重试额度、退避、Dead Letter、人工处置、幂等键）。
-`DSH_CHECKOUT` 未设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数为 90 套件 / 2259 用例。
-上一批基线 89 套件 / 2236 用例（PRT-509 事故修正）。
+`DSH_CHECKOUT` 未设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数为 91 套件 / 2268 用例。
+上一批基线 90 套件 / 2259 用例（PRT-257 密钥库自检接线）。
+更上一批基线 89 套件 / 2236 用例（PRT-509 事故修正）。
 更上一批基线 88 套件 / 2214 用例（PRT-254 Secret Store 最小闭环）。
 更上一批基线 87 套件 / 2193 用例（PRT-505/509 密钥库的生产调用方）。
 更上一批基线 85 套件 / 2148 用例（PRT-508 配置导入导出）。

@@ -423,6 +423,18 @@ async function stageTest() {
       files: ['runtime/dsh-composition/tool-request.test.mjs'],
       cwd: ROOT,
     },
+    {
+      // PRT-603：EmployeeManifest 工具白名单（spec line 925、§6.9 line 488–489）。
+      //
+      // 盯四件事：
+      //   ① 清单挂在 agent 平面，**只能收窄**：越权、通配符、字段不闭合一律抛
+      //   ② 未知工具与 hard floor 动作**必须被点名**（否则空集恒真 = 全部放行）
+      //   ③ 每条规则都要真的能触发（写了但触发不了的检查 = 不存在）
+      //   ④ 与桥接线：白名单在**策略端口之前**跑，拒绝即定案且理由带规则名
+      label: 'employee-manifest（PRT-603：岗位工具白名单只能收窄）',
+      files: ['runtime/dsh-composition/employee-manifest.test.mjs'],
+      cwd: ROOT,
+    },
     { label: 'calendar（日程日历契约）', files: ['team-hub/calendar.test.mjs'], cwd: ROOT },
     { label: 'calendar-ui（P2-5 日历前端纯函数：周视图/重复文案/关联跳转/表单校验）', files: ['workbench/scripts/calendar-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'chat-ui（P2-6 对话前端纯函数：健康判定/AI 三态/合并/断线补齐）', files: ['workbench/scripts/chat-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },

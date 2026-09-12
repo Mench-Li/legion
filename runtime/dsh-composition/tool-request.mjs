@@ -503,6 +503,15 @@ export function createEnforcementBridge({
   floor = DEFAULT_HARD_FLOOR,
   decide = null,
   requestApproval = null,
+  /**
+   * PRT-603 的岗位白名单：`(projection) => {allowed, rule, reason}`。
+   *
+   * ★ 它在**策略端口之前**跑，而且拒绝即定案。反过来的话，
+   *
+   *   > 一个「先问策略、策略说 allow 就放行」的桥，
+   *   > 与一个「岗位清单只在策略也说不的时候才生效」的桥，是同一个东西。
+   */
+  whitelist = null,
   connectTimeoutMs = 2000,
   responseTimeoutMs = 3000,
   approvalConnectTimeoutMs = 2000,
@@ -600,6 +609,23 @@ export function createEnforcementBridge({
       if (!got.ok) {
         // 投影不了 = 拿不到这次调用的身份 = 拒绝（不是"放行但记不下来"）。
         return { kind: 'deny', reason: `无法投影这次调用（${got.code}）：${got.message}` }
+      }
+      // ★ 岗位白名单在**策略端口之前**跑，拒绝即定案（PRT-603）。
+      //
+      //   > 一个「先问策略、策略说 allow 就放行」的桥，
+      //   > 与一个「岗位清单只在策略也说不的时候才生效」的桥，是同一个东西。
+      //
+      // 拒绝理由里带上 `rule`：岗位清单与策略规则是**两处不同的配置**，
+      // 值班的人要能分清该改哪一个。
+      if (whitelist !== null) {
+        const verdict = whitelist(got.projection)
+        if (verdict === null || typeof verdict !== 'object' || verdict.allowed !== true) {
+          const rule = verdict?.rule ?? 'whitelist-unspecified'
+          return {
+            kind: 'deny',
+            reason: `岗位白名单拒绝（${rule}）：${verdict?.reason ?? '没有给出理由'}`,
+          }
+        }
       }
       const decision = await decide(got.projection)
       // pre-execute **不允许改写工具参数**（PRT-613 / spec §6.5 line 468）。

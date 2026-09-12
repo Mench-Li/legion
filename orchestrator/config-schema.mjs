@@ -120,6 +120,9 @@ export const NON_ENV_LITERALS = Object.freeze([
   // `null` 的含义是"确认没超"。缺的那侧用 0 补会**低估**用量，
   // 于是一次实际超支的运行被判成"未超"，而它是错的却看起来是对的。
   'token-unknown',
+  // 记账主体的兜底来源（executor-binding.mjs 的 BUDGET_ACTOR_FALLBACK_ENV）。
+  // 它同时也是 worker 身份的来源，这里登记的是"这个变量有意义"这件事。
+  'LEGION_WORKER_ID',
 
   // 修复入口的动作名（bootstrap.mjs 的 REPAIR_ACTIONS）。
   //
@@ -223,10 +226,12 @@ export const SCHEMA = defineSchema({
     {
       key: 'budgetActor', env: 'LEGION_BUDGET_ACTOR', type: 'string', default: '',
       doc: 'PRT-510：预算账本的**记账主体**（谁花的钱）。' +
-        '**未配置时不建预算闸门**——这是刻意的：账本要求"谁结算的必须留痕"，' +
-        '而给一个默认值会让"没人签名"与"某人签了名"在账本里长得一样。' +
-        '没接闸门这件事在结果里是可见的（`budgetState: "not-gated"`），' +
-        '不会与"预算充足"同形。',
+        '未配置时退回 `LEGION_WORKER_ID`（见 executor-binding.mjs 的 BUDGET_ACTOR_FALLBACK_ENV）——' +
+        '那是这个进程**已经被赋予**的身份，真实且可追溯，不是编出来的占位符。' +
+        '两个都没有时**不建闸门**，而这件事在结果里是可见的' +
+        '（`budgetState: "not-gated"`），不会与"预算充足"同形。' +
+        '**兜底这一层的代价很具体**：Launcher 还没有往 worker 环境里写这个变量，' +
+        '只认它的话闸门在真实部署里永远不会被建起来——一次预算都没预留过。',
     },
   ],
   notes: [

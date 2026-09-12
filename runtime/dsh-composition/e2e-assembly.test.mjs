@@ -409,7 +409,9 @@ test('④ 没接预算闸门时，全链路结果里 `budgetState` 是 `not-gate
   const hub = fakeHub()
   const { boot } = await assemble({ hub })
   try {
-    // 不给 LEGION_BUDGET_ACTOR → 不建闸门。
+    // 两个身份来源**都不给** → 不建闸门。
+    // （只不给 `LEGION_BUDGET_ACTOR` 是不够的：`LEGION_WORKER_ID` 会兜底，
+    //   而那正是"闸门在真实部署里真的会被建起来"所依赖的那一层。）
     const provided = await productionExecutorProvider({
       post: hub.post.bind(hub), get: hub.get.bind(hub), env: {},
     })
@@ -460,6 +462,81 @@ test('⑤ 显式入参**优先于**环境变量（调用方要能覆盖部署默
     })
     await provided.executor.execute(LEASE)
     assert.equal(hub.calls.find((c) => c.kind === 'reserve').body.actor, 'w-explicit')
+  } finally { boot.unbind?.(); resetDshRuntimeBinding() }
+})
+
+test('⑤ **没有 `LEGION_BUDGET_ACTOR` 时用 worker 自己的身份兜底**（否则闸门永不生效）', async () => {
+  // 这一条补的是一个**具体代价**：Launcher 还没有往 worker 的环境里写
+  // `LEGION_BUDGET_ACTOR`，所以如果只认那一个变量，闸门在真实部署里
+  // **永远不会被建起来**——一次预算都没预留过。
+  //
+  //   > 一个默认不生效的闸门，与一个不存在的闸门，在"有没有拦住过"上是同一个答案。
+  //
+  // 兜底用 `LEGION_WORKER_ID` 而不是编一个占位符：那是这个进程**已经被赋予**的身份，
+  // 它本来就要出现在 claim / heartbeat / transition 的每一笔记录里。
+  const hub = fakeHub()
+  const { boot } = await assemble({ hub })
+  try {
+    const provided = await productionExecutorProvider({
+      post: hub.post.bind(hub), get: hub.get.bind(hub),
+      env: { LEGION_WORKER_ID: 'worker-from-pid-4242' },
+    })
+    const result = await provided.executor.execute(LEASE)
+    assert.equal(result.budgetState, 'bounded', '有 worker 身份时闸门必须被建起来')
+    assert.equal(hub.calls.find((c) => c.kind === 'reserve').body.actor, 'worker-from-pid-4242')
+  } finally { boot.unbind?.(); resetDshRuntimeBinding() }
+})
+
+test('⑤ 身份来源的**优先级**：显式 > BUDGET_ACTOR > WORKER_ID', async () => {
+  const env = { LEGION_BUDGET_ACTOR: 'actor-env', LEGION_WORKER_ID: 'worker-id' }
+  const cases = [
+    [{ budgetActor: 'explicit' }, 'explicit'],
+    [{}, 'actor-env'],
+  ]
+  for (const [over, expected] of cases) {
+    const hub = fakeHub()
+    const { boot } = await assemble({ hub })
+    try {
+      const provided = await productionExecutorProvider({
+        post: hub.post.bind(hub), get: hub.get.bind(hub), env, ...over,
+      })
+      await provided.executor.execute(LEASE)
+      assert.equal(hub.calls.find((c) => c.kind === 'reserve').body.actor, expected)
+    } finally { boot.unbind?.(); resetDshRuntimeBinding() }
+  }
+})
+
+test('⑤ 身份两端的空白被清掉（账本里不留「  w1  」与「w1」两行）', async () => {
+  // 这条是给探针 ⑮③ 补的落点。原来那个探针（把 `clean` 的 trim 去掉）
+  // **咬不住**：executor 自己还有一道 `budgetActor.trim() !== ''` 的守卫，
+  // 于是空主体在**两层**都被挡住——这属于纵深防御，是好事情，
+  // 但它意味着"空串"这个输入区分不出实现对错。
+  //
+  // 而 `trim` 本身是**可观察**的：不清空白的话，账本里会出现
+  // 「  w1  」与「w1」两行，看上去是两个人。
+  const hub = fakeHub()
+  const { boot } = await assemble({ hub })
+  try {
+    const provided = await productionExecutorProvider({
+      post: hub.post.bind(hub), get: hub.get.bind(hub),
+      env: { LEGION_BUDGET_ACTOR: '  spaced-actor  ' },
+    })
+    await provided.executor.execute(LEASE)
+    assert.equal(hub.calls.find((c) => c.kind === 'reserve').body.actor, 'spaced-actor')
+    assert.equal(hub.calls.find((c) => c.kind === 'settle').body.actor, 'spaced-actor')
+  } finally { boot.unbind?.(); resetDshRuntimeBinding() }
+})
+
+test('⑤ **两个身份都没有 → 不建闸门**，且"没接"可见（不与"预算充足"同形）', async () => {
+  const hub = fakeHub()
+  const { boot } = await assemble({ hub })
+  try {
+    const provided = await productionExecutorProvider({
+      post: hub.post.bind(hub), get: hub.get.bind(hub), env: {},
+    })
+    const result = await provided.executor.execute(LEASE)
+    assert.equal(result.budgetState, 'not-gated')
+    assert.equal(result.settlement, null)
   } finally { boot.unbind?.(); resetDshRuntimeBinding() }
 })
 

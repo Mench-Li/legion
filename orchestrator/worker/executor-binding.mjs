@@ -150,15 +150,19 @@ export async function productionExecutorProvider(io = {}) {
   }
   const { host, selfCheck, canRead, ...rest } = currentBinding()
 
-  // 记账主体：显式入参优先，其次环境变量。
-  // **不给默认值**——账本要求"谁结算的必须留痕"，
-  // 而一个默认值会让"没人签名"与"某人签了名"在账本里长得一样。
-  // 没给就是没接闸门，而"没接"在结果里是可见的（`budgetState: 'not-gated'`）。
-  const budgetActor = typeof io.budgetActor === 'string' && io.budgetActor.trim() !== ''
-    ? io.budgetActor.trim()
-    : (typeof env?.[BUDGET_ACTOR_ENV] === 'string' && env[BUDGET_ACTOR_ENV].trim() !== ''
-        ? env[BUDGET_ACTOR_ENV].trim()
-        : null)
+  // 记账主体，按**可信度**从高到低取：
+  //   ① 调用方显式传入（部署可以点名一个非 worker 身份）
+  //   ② `LEGION_BUDGET_ACTOR`（想换成一个业务身份时用它）
+  //   ③ `LEGION_WORKER_ID`（这个进程本来就被赋予的身份，真实且可追溯）
+  //   ④ 都没有 → **不建闸门**，且 `budgetState` 会是 `'not-gated'`
+  //
+  // ①② 缺省不影响正确性，只是"谁花的钱"记得粗一点；
+  // ③ 是让闸门在真实部署里**真的会被建起来**的那一层（见上面的说明）。
+  // ④ 是"没接"，它必须可见——不与"预算充足"同形。
+  const clean = (v) => (typeof v === 'string' && v.trim() !== '' ? v.trim() : null)
+  const budgetActor = clean(io.budgetActor)
+    ?? clean(env?.[BUDGET_ACTOR_ENV])
+    ?? clean(env?.[BUDGET_ACTOR_FALLBACK_ENV])
 
   return createProductionExecutor({
     host, selfCheck, canRead, post, get, ...rest,
@@ -181,6 +185,30 @@ export async function productionExecutorProvider(io = {}) {
  * 而 `TEAM_HUB_*` 是共享变量族（见 `orchestrator/config-schema.mjs`）。
  */
 export const BUDGET_ACTOR_ENV = 'LEGION_BUDGET_ACTOR'
+
+/**
+ * 记账主体的**兜底来源**：worker 自己的身份。
+ *
+ * ## 为什么这里可以给兜底，而 `budgetActor` 本身不给默认值
+ *
+ * 这两件事不一样：
+ *
+ *   · 一个编出来的占位符（`'anonymous'`、`'system'`）会让
+ *     「没人签名」与「某人签了名」在账本里长得一样——所以不给。
+ *   · `LEGION_WORKER_ID` 是**这个进程已经被赋予的身份**，
+ *     它本来就要出现在 claim / heartbeat / transition 的每一笔记录里。
+ *     用它当记账主体，记下的是一个**真实且可追溯**的主体。
+ *
+ * 而且不给这一层兜底的代价很具体：**闸门在真实部署里永远不会被建起来**
+ * （Launcher 还没有往 worker 的环境里写 `LEGION_BUDGET_ACTOR`），
+ * 于是一次预算都没预留过——那正是 PRT-510 要修的东西。
+ *
+ *   > 一个默认不生效的闸门，与一个不存在的闸门，在"有没有拦住过"上是同一个答案。
+ *
+ * 两个都没有时仍然**不建闸门**，并且这件事在结果里是可见的
+ * （`budgetState: 'not-gated'`）。
+ */
+export const BUDGET_ACTOR_FALLBACK_ENV = 'LEGION_WORKER_ID'
 
 /**
  * 从 worker 的环境变量造出 hub 的 `post` / `get`。

@@ -39,6 +39,15 @@ import {
 import { ensureColumn as ensureColumnImpl } from './schema-util.mjs'
 import { AcceptanceError, acceptanceTarget, evaluateAcceptance } from '../orchestrator/acceptance/index.mjs'
 import { buildHandoffTask, resolveNextPost } from '../orchestrator/pipeline/index.mjs'
+// PRT-304：任务扫描与认领的**资格规则**提取成了独立模块，两条候选路径
+// 由同一份 `TASK_GATES` 生成。见 `claim-policy.mjs` 顶部那段注释：
+// 让两条 SQL 各写一遍资格条件，与"被将军拦下的任务照样会被领走"是同一个东西。
+import {
+  assertScopePlaceholder,
+  assertTaskGatesShared,
+  buildClaimableTaskSql,
+  buildQueuedCandidateSql,
+} from './claim-policy.mjs'
 
 /** 默认租期。短到「崩溃后能被较快回收」，长到「一次正常执行不会被误判为死亡」。 */
 export const DEFAULT_LEASE_TTL_MS = 120000
@@ -495,30 +504,45 @@ function resolveMaxAttempts(raw) {
  * 一个持续失败的引擎会被立刻反复重试，把配额和日志一起打满，
  * 而所有代码看起来都是对的。
  */
-const QUEUED_CANDIDATE_SQL = `
-  SELECT a.* FROM run_attempts a
-  JOIN tasks t ON t.id = a.task_id
-  WHERE a.state = 'Queued'
-    AND t.status = 'todo' AND COALESCE(t.hold, 0) = 0
-    AND (a.next_attempt_at_ms IS NULL OR a.next_attempt_at_ms <= ?)
-    AND a.attempt_no = (SELECT MAX(b.attempt_no) FROM run_attempts b WHERE b.task_id = a.task_id)
-    {scope}
-  ORDER BY a.created_at_ms ASC, a.attempt_no ASC
-  LIMIT 1
-`
+// PRT-304：这两条 SQL 现在**由 `claim-policy.mjs` 生成**，本体不再在这里。
+//
+// 上面那一整段理由（"让两条候选路径共用同一组任务级条件"）现在是**代码**而不是
+// 注释：`TASK_GATES` 只写一份，两条查询都从它拼。想改资格条件，只有一处可改。
+const QUEUED_CANDIDATE_SQL = buildQueuedCandidateSql()
+const CLAIMABLE_TASK_SQL = buildClaimableTaskSql()
 
-/** 可入队的看板任务：todo、未被将军拦截、且当前没有活跃尝试。 */
-const CLAIMABLE_TASK_SQL = `
-  SELECT t.id, t.scope FROM tasks t
-  WHERE t.status = 'todo' AND COALESCE(t.hold, 0) = 0
-    AND NOT EXISTS (
-      SELECT 1 FROM run_attempts a
-      WHERE a.task_id = t.id AND a.state NOT IN ('Completed', 'Cancelled', 'DeadLetter')
-    )
-    {scope}
-  ORDER BY CASE t.priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, t.createdAt ASC
-  LIMIT 1
-`
+/**
+ * PRT-304 自检：两条认领 SQL 确实共用了每一个任务级资格，且都留了 `{scope}`。
+ *
+ * **为什么要在加载时抛而不是等到认领时**：这两条断言拦的都是"静默失效"——
+ * 一条被将军拦下的任务会被领走、或者分空间领取退化成跨空间领取。
+ * 它们都不会报错，只会让某个 worker 在某个时刻多干了一件不该干的事。
+ * 一次启动就崩，远好过在生产里靠人去发现。
+ *
+ * **为什么把两条 SQL 做成参数**：一个只能对"当前恰好正确的那份输入"作答的校验，
+ * 与一个恒真的校验，在"它能不能发现错误"上同形。参数化之后，用例可以喂一对
+ * **故意分家**的 SQL 进来，验它真的会抛；否则这段自检本身就会变成一段
+ * "删掉也不会让任何用例变红"的判断——那与没有这段自检是同一个东西。
+ */
+export function assertClaimSqlInvariants(sqlA = QUEUED_CANDIDATE_SQL, sqlB = CLAIMABLE_TASK_SQL) {
+  for (const [label, check] of [
+    ['任务级资格未在两条路径间共用', assertTaskGatesShared(sqlA, sqlB)],
+    ['认领 SQL 缺少 {scope} 占位符', assertScopePlaceholder(sqlA, sqlB)],
+  ]) {
+    if (check.ok !== true) {
+      throw new Error(`内部错误（PRT-304）：${label} —— ${JSON.stringify(check.missing)}`)
+    }
+  }
+  return Object.freeze({ ok: true, sqlA: String(sqlA), sqlB: String(sqlB) })
+}
+
+// 加载即执行，**并把"我到底校了什么"导出去当证据**。
+//
+// 刻意不导出一个布尔"通过"标记：一个可以被人随手写成 `true` 的标记，
+// 与一个恒真的校验，在"它到底拦不拦得住"上是同一个东西——
+// 而能把它写成 `true` 的，恰恰就是那个把自检删掉的改动。
+// 这里导出的是那两条 SQL 本身的文本：想让证据成立，就得真的把它们生成出来。
+export const CLAIM_SQL_INVARIANTS_CHECKED = assertClaimSqlInvariants()
 
 /**
  * 把 `{scope}` 替换成 scope 过滤，返回 `{ sql, params }`。

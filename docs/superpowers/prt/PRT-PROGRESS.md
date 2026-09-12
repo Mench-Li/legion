@@ -109,14 +109,14 @@ applier **抛错**的项不参与复核改写（它没有成功执行过，「�
 `BOOTSTRAP_ALREADY_BOUND` 仍是定义了但没有产生它的代码 | 原有：**本批交付「自检」的一半**：`product/launcher/secrets-check.mjs`
 | PRT-258 冻结进程清单 / 目录布局 / 配置 Schema / Secret Store 接口 | ✅ | 四份契约全部有实现与用例：`PRT-258-product-contracts.md`（前三份）+ `PRT-505-secret-store.md`（第四份） |
 
-## 阶段 3：Orchestrator Core（13/16）
+## 阶段 3：Orchestrator Core（14/16）
 
 | 任务 | 状态 | 证据 / 说明 |
 | --- | --- | --- |
 | PRT-301 持久化运行状态机 | ✅ | `orchestrator/state-machine/*`（13 态、CAS 迁移、具名拒绝码、失败分类、恢复判定）+ `orchestrator/worker/*` + 入口 `product/orchestrator/worker.mjs`；套件 `orchestrator`（56 例含 1 例真实进程）。**`MANIFEST_KNOWN_GAPS` 的 ENTRY_MISSING 已随之消失**（门禁先红后改） |
 | PRT-302 task lease、租期与 heartbeat | ✅ | `team-hub/run-store.mjs`（`claim`/`heartbeat`/`release`、`lease_epoch`、到期时间与恢复扫描）+ `/api/runtime/{claim,heartbeat,release,recover,status,attempt}`；套件 `run-plane`。判据：权威时间只在服务端（客户端 `nowMs` 被忽略并回显在 `ignoredClientFields`）、同一条任务并发领取只有一个赢家、释放后**立刻**可被别的 worker 领走（不是等租期过期） |
 | PRT-303 attempt 与不可覆盖历史 | ✅ | `run_attempts`（`UNIQUE(task_id, attempt_no)`）+ 只追加的 `run_attempt_events`（无 `updated_at` 列，结构上无法改历史）+ `historyOf`/`eventsOf`。重试经 `RetryableFailure → Queued` 的 `createsNewAttempt` **新建**尝试，旧尝试的作用域、失败码与原因原样保留 |
-| PRT-304 提取任务扫描与认领 | ⬜ | 运行面已有 `claim` 的完整实现与 HTTP 路由；「提取 `plugins/src/index.ts` 的扫描/认领」属 PRT-315/316 的同批拆分 |
+| PRT-304 提取任务扫描与认领 | ✅ | 新增 `team-hub/claim-policy.mjs`（`TASK_GATES` + 两条 SQL 生成器 + 纯函数参考实现），`run-store.mjs` 改为由它生成 SQL，套件 `claim-policy`（35 例）。认领有**两条**查询路径，差别只在「从哪一侧去找这条任务」：A 从等着的尝试里挑（已有第 N 次尝试）、B 从可入队的看板任务里挑（还没有任何尝试）。**本模块唯一真正要紧的纪律：两条路径必须共用同一组任务级资格。**这件事看起来显然，但失效模式很坏——两条 SQL 各写一遍资格条件，有人给其中一条加了条件（或改了个状态名），另一条没跟着改，于是**同一个任务从一条路径领不到、从另一条领得到**；而"领得到"的后果是具体的：一条被将军拦下的任务（`hold=1`）会在操作员以为它停着的时候被执行，连带它的外部写操作。*一个「从等着的尝试里挑」与一个「从可入队的任务里挑」各写一遍资格条件的认领逻辑，与一个「被将军拦下的任务照样会被领走」的认领逻辑，是同一个东西——只是前者只在某一条路径上发生，平时看不出来。*所以 `TASK_GATES` 只写一份，两条 SQL 都由它生成（想改资格条件只有一处可改）；另有两处也单源化：`TERMINAL_ATTEMPT_STATES`（少列一个终态→那条任务**永远领不到**；多列一个→同一条任务被两个 worker 同时执行）与 `PRIORITY_ORDER_SQL`。⚠️ **`TERMINAL_ATTEMPT_STATES` 这一条值得单独说：单一来源在这里反而让错误更隐蔽**——名单漏掉一个成员时，SQL 会*忠实地跟着漏*，一致性检查全绿。故有一条用例把确切名单**钉死成字面量**，另一条把三种终态之外的状态逐个断言为「活跃」。**加载时自检**（`run-store` 模块体）检查两条 SQL 共用资格且都留 `{scope}`：这两条拦的都是"静默失效"（不会报错，只会让某个 worker 多干一件不该干的事），*一次启动就崩远好过在生产里靠人去发现*。⚠️ **自检本身踩了两次坑，都是同一类**：**第一次**它只对*当前恰好正确的那份输入*作答（读模块级完整表），削弱校验逻辑照样得到"没问题"——*一个只能对「当前恰好正确的那份输入」作答的校验，与一个恒真的校验，在「它能不能发现错误」上同形*；处置是把两条 SQL 做成**参数**。**第二次**参数化后用例能验"函数会抛"了，但**把那一行调用删掉用例照样绿**，于是导出证据；而第一版导出的是**布尔**标记，那条"自检不跑却报成功"的探针（改成 `= true`）**没咬**——因为能把它写成 `true` 的恰恰就是那个把自检删掉的改动：*一个可以被人随手写成 `true` 的「自检通过」标记，与一个恒真的校验，在「它到底拦不拦得住」上是同一个东西*；最终导出的是**证据的内容**（它校过的那两条 SQL 文本 `{ok,sqlA,sqlB}`），想让证据成立就得真的把它们生成出来。**纯函数参考实现必须与 SQL 一致**（`isTaskEligible`/`isAttemptClaimable`/`explainClaim`）：*一个说法与做法不一样的说明书，与一本印错的说明书，在「照它做会不会出事」上是同一个东西*——故有一条用例把**每个 gate 的 SQL 片段交给真的 SQLite 执行**，再与 `holds()` 在同一批任务上比对（不是"两段我手写的逻辑是否一致"，而是"参考实现与真正跑的那条 SQL 是否一致"）。拒绝理由分开：`hold`/`非 todo`/`空间不匹配`/`退避未到点`/`被更新的尝试取代`各有自己的码——把空间不匹配混进「资格不够」里，会让一次跨空间访问看起来像一次正常的「这任务还不该领」。**端到端**另有一组用真 `DatabaseSync` 的用例：被 `hold` 的任务**两条路径都领不走**（含**手工塞一条 Queued 尝试**进去，模拟"先排了队然后才被拦截"）、`done` 的同样领不走、正常任务仍领得到（没把路堵死）、退避没到点领不走而**时间推过去必须能领到**（否则「闸门」变成「永久堵死」）、只有最新那一次会被领走、跨空间领不走。**变红 22/22。**⚠️ **诚实边界**：这是**提取**，认领的实际行为与提取前一致（两条 SQL 的 `AND` 顺序变了但**参数顺序保持原样**）；`isTaskEligible` 等纯函数**目前没有生产调用方**（诊断/dry-run 的参考实现，`claimPolicySnapshot()` 也还没接进任何 `--json` 出口）；`CLAIM_REJECTIONS.ATTEMPT_ACTIVE` 只在 `explainClaim` 里产生（path A 的 `NOT EXISTS` 是子查询，没有等价的单行 gate）；**路由仍是 136 条，本次没有新增任何 HTTP 面**；PRT-315/316 未做。 |
 | PRT-305 提取岗位、流水线与团队快照 | ✅ | `orchestrator/pipeline/index.mjs`（**纯函数**：`indexStages` 按 role 索引、`pipelineView` 报结构完整性、`resolveNextPost` 回答"后面还有没有岗位"、`buildHandoffTask` 拼装交接任务）+ `GET /api/runtime/next-post`；套件 `pipeline`（16 例）。**核心判据是把「链断」与「链尾」分开**：两者在数据上长得一模一样（都表现为"查不到下一岗位"），而前者是配置错误（`next` 拼错、或下一岗位被停用、或任务上记的岗位已改名）、后者是正常的。当成链尾会让任务链静默断在这里，直到整个目标停住才被发现。`next` 是**没有外键约束**的字符串，所以这件事只能靠判定兜住 |
 | PRT-306 提取 workspace/worktree 管理 | ✅ | `orchestrator/workspace/index.mjs`（真 `git worktree`：`planWorkspace` 规划期拒绝、`createWorkspace` 先落意图再做副作用、`reclaimWorkspace` 删除是拒绝边界）+ `worktreeStages()` 声明 `workspaceIsolation: 'worktree'` + worker 接线（`LEGION_WORKSPACE_DIR`、`resolveWorkspaceStages`、状态文件 `workspaceMode` 四态）；套件 `workspace`（24 例，跑真 git）、`workspace-wiring`（9 例）。判据四条：① **按 Attempt 分配**（不按 Task）——按 Task 时重试会继承上一次的半成品改动，于是"上次改坏了"的东西这次看起来是"已经改好了"；② **拒绝嵌套布局**——worktree 落在仓库内部会出现在主仓库的 `git status` 里，另一个 worker 的 `git add -A` 会把它整棵树提交走，本模块不靠"记得加 .gitignore"来防；③ **删除是拒绝边界**——有未提交改动就拒绝回收，`force` 也不越过（一个布尔开关不该成为丢掉别人唯一一份成果的入口），陌生目录一律拒绝覆盖；④ **「git 说成功」≠「工作区可用」**——建完重读登记表，没有登记就报错（起了但干不了活不能看起来像成功）。**抓到两个真实缺陷**：Attempt id 是 `att:<taskId>:<n>`，**含冒号**，而冒号在 Windows 上是非法文件名字符——"id 直接当目录名"这条路根本走不通，必须有显式且**单射**的编码（`att:T-1:2` 与 `att-T-1-2` 不得撞进同一个目录）；以及 worker 调 `prepareWorkspace`/`buildContext` 时是 `await run()`，**不传 lease**——空的 `inPlaceStages()` 不需要它，于是从没人发现阶段拿不到自己在给哪条任务干活 |
 | PRT-307 提取结构化结果与机器验收 | ✅ | `orchestrator/acceptance/index.mjs`（**纯函数**：判据核验 + 结论到去向的映射）+ `run_validations` 只追加表（结论与**当时用的判据**一起落库）+ `runStore.recordValidation/validationsOf/criteriaOf` + `POST /api/runtime/validate`、`GET /api/runtime/validations`；套件 `acceptance`（24 例）、`acceptance-store`（16 例）、`acceptance-routes`（10 例）。判据有四条：① **三种结论而不是布尔**——`accepted`/`rejected`/`needs-human`，因为"没通过"的两种成因（机器确认不满足 / 机器判不了）走的路完全不同，合成一个 `false` 时选哪条都是错的；② 判据**封闭**——不在已登记种类里的一律算"判不了"而**不是**通过，新增一种必须显式加进清单；③ **散文判据 = 人工判据**（`tasks.acceptance` 由 `stage-standards.mjs` 生成的正是散文），任务只带散文判据时结论必然是 `needs-human`，这是对的——从没人说过"什么叫做完了"；④ 状态机声明的 `requiresPersist: ['attempt','validation']` **真的被核验**：一条从未被验收过的尝试进 `Completed` 会被 409 `EVIDENCE_MISSING` 拒绝（只记录不核验时那句话只是事件流里的一段 JSON，而"没人验收过"会被写成"已验收"）。**这条路抓到一个真实缺陷**：交付级审批（`Validating → AwaitingApproval`）的任务在看板上显示为 `in_progress` 而不是 `in_review`——因为投影读的是**边**的 hint 而不是刚写进那一行的 `returnTo`；审批人于是以为活还在干，任务既不在待办里也没人在跑。**执行成功不再等于交付完成**：PRT-312 那条用例留下的"成功永远停在 `Validating`"由此收口 |
@@ -261,7 +261,7 @@ applier **抛错**的项不参与复核改写（它没有成功执行过，「�
 | 1 Runtime Contract | 9 | 0 | 0 | 0 | 9 |
 | 2 DshRuntimeAdapter | 11 | 4 | 0 | 0 | 15 |
 | 2.5 商业薄切片 | 3 | 3 | 1 | 1 | 8 |
-| 3 Orchestrator Core | 13 | 0 | 3 | 0 | 16 |
+| 3 Orchestrator Core | 14 | 0 | 2 | 0 | 16 |
 | 4 上下文边界 | 0 | 13 | 0 | 0 | 13 |
 | 5 模型与密钥 | 9 | 2 | 0 | 0 | 11 |
 | 6 工具、权限和审批 | 1 | 3 | 16 | 0 | 20 |
@@ -269,7 +269,7 @@ applier **抛错**的项不参与复核改写（它没有成功执行过，「�
 | 8 安装、升级和回滚 | 0 | 1 | 12 | 0 | 13 |
 | 9 商业 Alpha 保障 | 0 | 0 | 9 | 1 | 10 |
 | 10 能力包协议 | 0 | 0 | 6 | 0 | 6 |
-| **合计** | **62** | **34** | **47** | **2** | **145** |
+| **合计** | **63** | **34** | **46** | **2** | **145** |
 
 > 计数口径：**部分**计入「已有交付物但完成标准未全部满足」，
 > 因此不能与「已完成」相加后宣称完成度。真实完成度按**完成标准**判定：

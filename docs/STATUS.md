@@ -4,8 +4,8 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-11　`run-ci --only test` **PASS**；其中 `test` **60 套件 / 1651 用例**
-—— 以本文件所在提交为准；证据 `.ci/prt-258/`
+**最近一次全量基线**：2026-09-12　`run-ci --only test` **PASS**；其中 `test` **62 套件 / 1765 用例**
+—— 以本文件所在提交为准；证据 `.ci/` 下最近一次运行目录
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
 （`scrum/daemon-gf001.json`，`intervalMs: 15000`）同时运行时实测 **31 分钟**（约 7 倍）。
 **因此不要把耗时当回归基线**——只有套件数/用例数/通过与否可用于判定。
@@ -30,7 +30,44 @@
 > - `gf001` 空间非终态任务数为 **0**；T-141 已由将军于 `14:00:32Z` 转 `canceled`
 >   （产物从 patch 记录逐字恢复为 `53d9d15`，需求已由 `G-mtwxx7an-2` 交付，无需重做）。
 
-> **本轮（PRT-301 持久化运行状态机 + Orchestrator worker 入口）**：新增
+> **本轮（PRT-302/303/313 运行实体落库：租约 + 权威时间 + Attempt 不可覆盖 + epoch 拒写）**：
+> 新增 `team-hub/run-store.mjs`（`run_attempts` / 只追加的 `run_attempt_events` / `claim` /
+> `heartbeat` / `transition` / `release` / `recoverExpired`）、`server.mjs` 的 7 条**运行面**路由
+> （`/api/runtime/{claim,heartbeat,transition,release,recover,status,attempt}` 与 `/api/config` 的
+> `runPlane` 能力位）、worker 接线（§6.4 四阶段「先落库意图再做副作用」+ 心跳遇 `LEASE_EPOCH_STALE` 停手）、
+> 以及套件 `run-plane`（**63 例 = 仓储 34 + HTTP 契约 19 + 真 team-hub 端到端 10**）。
+> 61→**62** 套件、1702→**1765** 用例。阶段 3 由 1/16 进到 5/16（3 完成 + 2 部分）。
+>
+> **三条判据各自的落点**（spec 第 885 行）：不丢任务 → 过期租约回收与**释放后立刻可被再领**；
+> 不伪装成功 → 执行完成落 `Validating` 并投影到看板 `in_review`（执行完成 ≠ 交付被接受）；
+> 不重复执行 → ① 过期 worker 的写入被 `LEASE_EPOCH_STALE` 拒掉（错误里带**真实** epoch）、
+> ② 可能已产生外部副作用时挂 `UnknownOutcome` 等人工而不是自动重跑、
+> ③ 并发领取下同一条任务只有一个赢家（用两条**独立 SQLite 连接**验证）。
+>
+> **端到端这一层抓到了前两层结构上看不见的缺陷**：worker 的 hub 客户端把
+> `{ok, claimed}` 信封当成 claim 对象用，于是 `taskId === undefined`——而 `undefined`
+> 恰好就是 worker 判断「没领到」的条件。结果是**任务已被服务端领走（Leased、租约在跑）而
+> worker 以为队列是空的**。仓储单测不经过 HTTP 信封、worker 单测的假 hub 已经解过包，
+> 因此两边都自洽。这类缺陷只有真 hub + 真 worker 一起跑才会现形。
+>
+> **自审改掉 4 处不报错的缺陷**：`Object.assign` 让附加数据静默覆盖错误码（拆成
+> `code` / `stateMachineCode` 两个字段）；`release` 只终结当前尝试而**不排队新尝试**，
+> 于是「让别人接」仍要等租期自然过期——而释放的全部意义就是不等；
+> 领取的 Queued 分支漏检查任务 `status`/`hold`，「将军拦截优先于队列」静默失效；
+> `openNextAttempt` 直接 `UPDATE` 终结状态，绕过状态机校验（回收是无人值守路径）。
+>
+> **两处测试脚手架教训**（都已修，写在 PRT-302 文档第 10 节）：全局 `fetch` 的 undici
+> keep-alive 连接会让 `node --test` 跑完不退出（实测卡死 90s+，产品代码不改，测试侧改用无池客户端）；
+> 更隐蔽的是**一个失败的断言会把「失败」伪装成「卡住」**——断言失败后 worker 未被停止，
+> 心跳循环每 10s 续一次、永远不停，于是进程不退出、`ℹ fail N` 永远不打印。
+> 现在起 worker 的用例一律走 `withWorker()`（`finally` 里 `stop()`）。
+>
+> 三条门禁均绿：`scan --check` PASS（**237** 个疑似字面量）、`dsh-boundary` PASS（3 文件 / 26 处，未增长）、
+> `topology-inventory --diff` 无漂移；新增 7 条路由后按 PRT-007 棘轮刷新平台契约基线
+> （`prt-007-baseline.json`，diff 恰为那 7 条路由 + `server.mjs` 哈希）。
+> 详见 `docs/superpowers/prt/PRT-302-303-313-run-entities.md`。
+>
+> 上一批（PRT-301 持久化运行状态机 + Orchestrator worker 入口）：新增
 > `orchestrator/state-machine/`（13 态、CAS 迁移、具名拒绝码、失败分类、恢复判定）、
 > `orchestrator/worker/`（循环 / 状态文件 / 进程外壳）、入口 `product/orchestrator/worker.mjs`、
 > 配置面 `orchestrator/config-schema.mjs` 与套件 `orchestrator`（**51 例**，含 **1 例真实进程**）。
@@ -267,8 +304,12 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：60 套件 / 1651 用例，`--only test` 整体 PASS** —— 2026-09-11 实测
-（PRT-706 首次运行初始化 + 产品配置读取：新增 `product-config`（**27 例**：
+**当前基线：62 套件 / 1765 用例，`--only test` 整体 PASS** —— 2026-09-12 实测
+（PRT-302/303/313 运行实体落库：新增 `run-plane`（**63 例**：仓储 34 + HTTP 契约 19 + 真 team-hub 端到端 10）。
+三层的分工是「各查一类只有那一层才看得见的缺陷」：仓储查并发/epoch/历史，HTTP 查具名码有没有被吞掉，
+端到端查两半各自全绿却合起来错的那种（见本轮块）。
+上一批基线 61 套件 / 1702 用例（PRT-301 运行状态机 + worker 入口）。
+再上一批 60 套件 / 1651 用例（PRT-706 首次运行初始化 + 产品配置读取：新增 `product-config`（**27 例**：
 `config.test.mjs` 16 + `init.test.mjs` 11，全部跑真实文件系统的临时目录）。
 这一组问的是同一句话——**这件事有没有被报出来**：
 坏 JSON、读不出来、类型写成 `"8787"`、键名拼错、明文密钥、UTF-8 BOM，

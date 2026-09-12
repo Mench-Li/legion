@@ -14,7 +14,7 @@
 > ⚠️ 「有用例」不等于「已生效」。带生产调用方的任务在证据栏注明调用方；
 > 只有自己的用例驱动的原语一律标 🟡。
 
-**最近更新**：PRT-301 持久化运行状态机 + Orchestrator worker 入口（阶段 3 启动）
+**最近更新**：PRT-302/303/313 运行实体落库（租约 + 权威时间 + Attempt 不可覆盖 + epoch 拒写）与运行面 HTTP 契约
 
 ---
 
@@ -81,26 +81,26 @@
 | PRT-257 Launcher 负责 DSH 运行时与补丁层安装/自检/修复 | ⬜ | 分发形态路线 C 已裁决；Legion 自身四个 `file:` 包的分发方式待定 |
 | PRT-258 冻结进程清单 / 目录布局 / 配置 Schema / Secret Store 接口 | ✅ | 四份契约全部有实现与用例：`PRT-258-product-contracts.md`（前三份）+ `PRT-505-secret-store.md`（第四份） |
 
-## 阶段 3：Orchestrator Core（1/16）
+## 阶段 3：Orchestrator Core（5/16）
 
 | 任务 | 状态 | 证据 / 说明 |
 | --- | --- | --- |
-| PRT-301 持久化运行状态机 | ✅ | `orchestrator/state-machine/*`（13 态、CAS 迁移、具名拒绝码、失败分类、恢复判定）+ `orchestrator/worker/*` + 入口 `product/orchestrator/worker.mjs`；套件 `orchestrator`（48 例含 1 例真实进程）。**`MANIFEST_KNOWN_GAPS` 的 ENTRY_MISSING 已随之消失**（门禁先红后改）。落库/epoch 属 PRT-302/313 |
-| PRT-302 task lease、租期与 heartbeat | ⬜ | |
-| PRT-303 attempt 与不可覆盖历史 | ⬜ | |
-| PRT-304 提取任务扫描与认领 | ⬜ | |
+| PRT-301 持久化运行状态机 | ✅ | `orchestrator/state-machine/*`（13 态、CAS 迁移、具名拒绝码、失败分类、恢复判定）+ `orchestrator/worker/*` + 入口 `product/orchestrator/worker.mjs`；套件 `orchestrator`（56 例含 1 例真实进程）。**`MANIFEST_KNOWN_GAPS` 的 ENTRY_MISSING 已随之消失**（门禁先红后改） |
+| PRT-302 task lease、租期与 heartbeat | ✅ | `team-hub/run-store.mjs`（`claim`/`heartbeat`/`release`、`lease_epoch`、到期时间与恢复扫描）+ `/api/runtime/{claim,heartbeat,release,recover,status,attempt}`；套件 `run-plane`。判据：权威时间只在服务端（客户端 `nowMs` 被忽略并回显在 `ignoredClientFields`）、同一条任务并发领取只有一个赢家、释放后**立刻**可被别的 worker 领走（不是等租期过期） |
+| PRT-303 attempt 与不可覆盖历史 | ✅ | `run_attempts`（`UNIQUE(task_id, attempt_no)`）+ 只追加的 `run_attempt_events`（无 `updated_at` 列，结构上无法改历史）+ `historyOf`/`eventsOf`。重试经 `RetryableFailure → Queued` 的 `createsNewAttempt` **新建**尝试，旧尝试的作用域、失败码与原因原样保留 |
+| PRT-304 提取任务扫描与认领 | ⬜ | 运行面已有 `claim` 的完整实现与 HTTP 路由；「提取 `plugins/src/index.ts` 的扫描/认领」属 PRT-315/316 的同批拆分 |
 | PRT-305 提取岗位、流水线与团队快照 | ⬜ | |
 | PRT-306 提取 workspace/worktree 管理 | ⬜ | |
 | PRT-307 提取结构化结果与机器验收 | ⬜ | |
 | PRT-308 提取打回、交接与完成 | ⬜ | |
-| PRT-309 重试、退避与 Dead Letter | ⬜ | |
-| PRT-310 恢复扫描与人工处置 | ⬜ | |
-| PRT-311 外部副作用幂等与 Unknown Outcome | ⬜ | |
-| PRT-312 状态迁移 / 并发 / 崩溃 / 恢复测试 | ⬜ | |
-| PRT-313 lease 权威时间、`leaseEpoch`、过期拒写 | ⬜ | |
-| PRT-314 WAL / `busy_timeout` / 原子领取并发语义 | ⬜ | |
+| PRT-309 重试、退避与 Dead Letter | 🟡 | `retryDelayMs`（指数退避 + 上限 + jitter）、`classifyFailure`（未登记错误**不**默认可重试）、worker 的连续失败慢速退避已落地；**Dead Letter 的落库与人工处置入口未做**（属 PRT-310） |
+| PRT-310 恢复扫描与人工处置 | 🟡 | `recoverExpired` 两条分支（未越过外部写边界 → 新建尝试重试；可能已有副作用 → `UnknownOutcome` 挂起等人工）+ `/api/runtime/recover` 强制要求调用方给出边界。**人工处置入口（确认后新建 attempt / 放行 DeadLetter）未做** |
+| PRT-311 外部副作用幂等与 Unknown Outcome | 🟡 | 状态机层面 `UnknownOutcome` **只有** `DeadLetter`/`Cancelled` 两条出边（回到队列被具名拒绝）；`release`/回收都推进 `lease_epoch`，迟到的写入一律 `LEASE_EPOCH_STALE`。**幂等键与外部写确认流程未做** |
+| PRT-312 状态迁移 / 并发 / 崩溃 / 恢复测试 | 🟡 | 已有：13×13 迁移矩阵、CAS 竞态、两连接并发领取（只有单赢家）、过期 epoch 拒写、崩后回收两条分支、被拒迁移的事务回滚。**缺**：真实进程被 `SIGKILL` 的整链路演练（Windows 上强制终止不走信号处理器，见 PRT-301 文档） |
+| PRT-313 lease 权威时间、`leaseEpoch`、过期拒写 | ✅ | `lease_epoch` 单调、每次 `claim`/`release`/回收都推进；过期写入返回 `LEASE_EPOCH_STALE` 且**带上真实 epoch**（否则 worker 只能无限重试）；`/api/config` 增加 `runPlane` 能力发现位 |
+| PRT-314 WAL / `busy_timeout` / 原子领取并发语义 | 🟡 | 复用既有 `withTx`（`BEGIN IMMEDIATE` + SAVEPOINT 嵌套）与 WAL/`busy_timeout`；领取用条件 UPDATE + `changes !== 1` 判胜负。**缺**：多进程（非多连接）压测与锁等待预算的实测记录 |
 | PRT-315 拆分 `plugins/src/index.ts` | ⬜ | 阶段 3 评审闸门已过（热点文件 1/40、2/40） |
-| PRT-316 team-hub 模块提取 | ⬜ | 需排在启动期并发迁移加固沉淀一个发布周期之后 |
+| PRT-316 team-hub 模块提取 | ⬜ | 需排在启动期并发迁移加固沉淀一个发布周期之后。运行面仓储已按此方向**新建在独立模块**（`team-hub/run-store.mjs`）而不是继续堆积 `server.mjs` |
 
 ## 阶段 4：上下文边界（0/13）
 
@@ -233,7 +233,7 @@
 | 1 Runtime Contract | 9 | 0 | 0 | 0 | 9 |
 | 2 DshRuntimeAdapter | 10 | 5 | 0 | 0 | 15 |
 | 2.5 商业薄切片 | 2 | 1 | 4 | 1 | 8 |
-| 3 Orchestrator Core | 1 | 0 | 15 | 0 | 16 |
+| 3 Orchestrator Core | 3 | 5 | 8 | 0 | 16 |
 | 4 上下文边界 | 0 | 0 | 13 | 0 | 13 |
 | 5 模型与密钥 | 0 | 2 | 9 | 0 | 11 |
 | 6 工具、权限和审批 | 1 | 3 | 16 | 0 | 20 |
@@ -241,7 +241,7 @@
 | 8 安装、升级和回滚 | 0 | 1 | 12 | 0 | 13 |
 | 9 商业 Alpha 保障 | 0 | 0 | 9 | 1 | 10 |
 | 10 能力包协议 | 0 | 0 | 6 | 0 | 6 |
-| **合计** | **39** | **15** | **89** | **2** | **145** |
+| **合计** | **41** | **20** | **82** | **2** | **145** |
 
 > 计数口径：**部分**计入「已有交付物但完成标准未全部满足」，
 > 因此不能与「已完成」相加后宣称完成度。真实完成度按**完成标准**判定：

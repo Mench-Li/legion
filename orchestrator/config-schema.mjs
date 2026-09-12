@@ -48,6 +48,17 @@ export const NON_ENV_LITERALS = Object.freeze([
   // 具名错误码
   'STATUS_WRITE_FAILED', 'EXTERNAL_EFFECT_UNKNOWN', 'FAILURE_CODE_REQUIRED', 'DATA_DIR_REQUIRED',
   'ATTEMPT_NO_INVALID', 'BACKOFF_BASE_INVALID', 'BACKOFF_FACTOR_INVALID',
+  // 运行面仓储的具名码（team-hub/run-store.mjs 的 RUN_ERRORS）。
+  // worker 之所以要认得 `LEASE_EPOCH_STALE`，是因为它的含义是「你已被接管」——
+  // 对应的动作是**停手**，而不是像 `LEASE_EXPIRED` 那样「加快或停手」。
+  // 两者若被压成同一个码，worker 只能靠文案猜，而文案会变。
+  'LEASE_EPOCH_STALE', 'LEASE_EXPIRED', 'LEASE_NOT_HELD', 'ATTEMPT_NOT_FOUND',
+  'WORKER_REQUIRED', 'EPOCH_REQUIRED', 'BAD_LEASE_TTL', 'UNKNOWN_OUTCOME',
+  'TRANSITION_REJECTED', 'MISSING_PARAM',
+  // 原地执行的阶段类型（worker/main.mjs 的 inPlaceStages，会被写进 Attempt 证据）
+  'in-place', 'minimal',
+  // 缺阶段时 worker 的状态名
+  'no-stages',
   // 状态机的具名错误码（state-machine/transitions.mjs 的 TRANSITION_ERRORS 与 states.mjs）。
   // 它们被逐个列出而不是用前缀通配：通配会让这个清单失去「哪些疑似项已被审阅」的意义，
   // 而这份清单的价值恰恰在于「每一条都被看过一次」。

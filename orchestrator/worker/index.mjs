@@ -14,12 +14,15 @@ export {
 } from './status-file.mjs'
 
 export {
+  REQUIRED_STAGE_KEYS,
   WORKER_DEFAULTS,
   WORKER_STATES,
   createWorker,
+  inPlaceStages,
 } from './main.mjs'
 
 export {
+  HubHttpError,
   WORKER_ENV,
   createHubClient,
   readWorkerEnv,

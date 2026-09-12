@@ -44,9 +44,34 @@ export function readWorkerEnv(env = {}) {
  * team-hub 数据面客户端。
  *
  * 只做四件事，且**每条请求都带 token**（缺 token 时明确失败，而不是发一个匿名请求
- * 然后得到 401 再让人去猜为什么）：
- * 认领、心跳、提交终态、释放。
+ * 然后得到 401 再让人去猜为什么）。
+ *
+ * ## 具名错误码必须一路传上来
+ *
+ * `LEASE_EPOCH_STALE`（我已被接管 → 停手，不要再提交）与 `LEASE_EXPIRED`
+ * （我还是持有者但超时 → 加快或停手）要求 worker 做**不同**的动作。
+ * 如果这里把它们都压成 `Error('/api/… 返回 409')`，worker 只能靠文案猜，
+ * 而文案会变。因此错误对象上带 `code` / `status` / `currentEpoch`。
+ *
+ * ## 为什么 claim 返回的是 `claimed` 而不是整个响应
+ *
+ * 服务端把结果包在 `{ ok, claimed, serverTimeMs }` 里。客户端若不拆包，
+ * 调用方会在一个信封上找 `taskId` 并得到 `undefined`——然后它认领了任务却以为
+ * 队列是空的（`taskId === undefined` 恰好就是 worker 判断「没领到」的条件），
+ * 于是**任务被领走却永远没人做**。这是本次集成测试抓到的第一个真实缺陷。
  */
+export class HubHttpError extends Error {
+  constructor(message, { status, code = null, currentEpoch = null, body = null, path = null } = {}) {
+    super(message)
+    this.name = 'HubHttpError'
+    this.status = status
+    this.code = code
+    this.currentEpoch = currentEpoch
+    this.body = body
+    this.path = path
+  }
+}
+
 export function createHubClient({ baseUrl, token, fetchImpl = globalThis.fetch, timeoutMs = 10000 } = {}) {
   if (typeof baseUrl !== 'string' || baseUrl.trim() === '') {
     throw new TypeError('createHubClient 需要 baseUrl（TEAM_HUB_URL）')
@@ -64,15 +89,36 @@ export function createHubClient({ baseUrl, token, fetchImpl = globalThis.fetch, 
       body: JSON.stringify(body),
       signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(timeoutMs) : undefined,
     })
-    if (!res.ok) throw new Error(`${path} 返回 ${res.status}`)
-    return res.json()
+    let payload = null
+    try { payload = await res.json() } catch { payload = null }
+    if (!res.ok) {
+      throw new HubHttpError(
+        `${path} 返回 ${res.status}：${payload?.error ?? '（无错误说明）'}`,
+        { status: res.status, code: payload?.code ?? null, currentEpoch: payload?.currentEpoch ?? null, body: payload, path },
+      )
+    }
+    return payload
   }
 
   return Object.freeze({
-    claim: ({ workerId }) => call('/api/runtime/claim', { workerId }),
-    heartbeat: ({ taskId, leaseEpoch, workerId }) => call('/api/runtime/heartbeat', { taskId, leaseEpoch, workerId }),
-    transition: ({ taskId, leaseEpoch, outcome, detail }) => call('/api/runtime/transition', { taskId, leaseEpoch, outcome, detail }),
-    release: ({ taskId, leaseEpoch, workerId, reason }) => call('/api/runtime/release', { taskId, leaseEpoch, workerId, reason }),
+    /** 领取。返回**解包后**的 claim 对象，或 null（队列空 / 抢输了）。 */
+    async claim({ workerId, scope = null, leaseTtlMs = null }) {
+      const r = await call('/api/runtime/claim', { workerId, scope, leaseTtlMs })
+      return r?.claimed ?? null
+    },
+    heartbeat: ({ attemptId, leaseEpoch, workerId }) => call('/api/runtime/heartbeat', { attemptId, leaseEpoch, workerId }),
+    transition: ({ attemptId, leaseEpoch, workerId, outcome, to = null, context = {}, reason = null }) =>
+      call('/api/runtime/transition', { attemptId, leaseEpoch, workerId, outcome, to, context, reason }),
+    release: ({ attemptId, leaseEpoch, workerId, reason }) => call('/api/runtime/release', { attemptId, leaseEpoch, workerId, reason }),
+    /**
+     * 回收过期租约（PRT-310 的入口）。
+     *
+     * `externalEffectPossibleStates` 必须由调用方给出——服务端拒绝猜
+     * （见 team-hub/server.mjs 的 /api/runtime/recover）。这里不提供默认值，
+     * 因为「默认认为不会重复」正是会造成重复付费的那个默认。
+     */
+    recover: ({ externalEffectPossibleStates, scope = null, limit = 50 }) =>
+      call('/api/runtime/recover', { externalEffectPossibleStates, scope, limit }),
   })
 }
 

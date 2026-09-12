@@ -31,6 +31,16 @@ export const SCHEMA = defineSchema({
   ],
   nonEnvLiterals: [
     'COMMIT', 'ROLLBACK', 'DELETE', 'OPTIONS', 'SIGINT', 'SIGTERM', 'ENOENT',
+    // 运行面（PRT-302/303/313）的具名错误码，来自 team-hub/run-store.mjs 的 RUN_ERRORS。
+    // 逐个登记而不是加前缀通配：这份清单的价值在于「每一条都被看过一次」。
+    'WORKER_REQUIRED', 'EPOCH_REQUIRED', 'BAD_LEASE_TTL', 'ATTEMPT_NOT_FOUND',
+    'LEASE_EPOCH_STALE', 'LEASE_NOT_HELD', 'LEASE_EXPIRED',
+    'UNKNOWN_OUTCOME', 'TRANSITION_REJECTED', 'ALREADY_FINISHED',
+    // 路由层参数校验码（server.mjs 的 requireString）
+    'MISSING_PARAM',
+    // 回收接口的拒绝码：调用方未给出「哪些状态已越过外部写边界」时必须拒绝，
+    // 这个字符串就是那条拒绝对外可见的名字（server.mjs 与 worker/run.mjs 都会用到）
+    'EXTERNAL_EFFECT_UNKNOWN',
   ],
   // team-hub 的 CHAT_ 前缀覆盖了插件的提示词预算变量（CHAT_CTX_*）：它们是**插件**读的配置，
   // team-hub 不读，登记为外来变量，避免误报成「拼写错误」（P3-4）。

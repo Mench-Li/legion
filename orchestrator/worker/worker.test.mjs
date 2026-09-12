@@ -20,9 +20,9 @@ import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
-import { createWorker, WORKER_DEFAULTS, WORKER_STATES } from './main.mjs'
+import { createWorker, inPlaceStages, REQUIRED_STAGE_KEYS, WORKER_DEFAULTS, WORKER_STATES } from './main.mjs'
 import { DEFAULT_STATUS_MAX_AGE_MS, FORBIDDEN_STATUS_KEYS, isStatusFresh, readStatusFile, redactStatus, STATUS_RELPATH, writeStatusFile } from './status-file.mjs'
-import { createHubClient, readWorkerEnv, runWorkerProcess, WORKER_ENV } from './run.mjs'
+import { createHubClient, HubHttpError, readWorkerEnv, runWorkerProcess, WORKER_ENV } from './run.mjs'
 
 const WORKER_ENTRY = fileURLToPath(new URL('../../product/orchestrator/worker.mjs', import.meta.url))
 
@@ -53,7 +53,7 @@ function tempDataDir() {
 test('① 没有执行引擎时**不认领任何任务**（认领会烧光重试额度）', async () => {
   const { root, dataDir } = tempDataDir()
   try {
-    const hub = fakeHub({ tasks: [{ taskId: 't1', leaseEpoch: 1 }] })
+    const hub = fakeHub({ tasks: [{ taskId: 't1', attemptId: 'att:t1:1', leaseEpoch: 1 }] })
     const logs = []
     const w = createWorker({ hub, executor: null, dataDir, logger: (l) => logs.push(l) })
     const r = await w.tick()
@@ -76,7 +76,7 @@ test('① 没有执行引擎时**不认领任何任务**（认领会烧光重试
 test('① 没有 hub 时不认领，并报 hub-unreachable', async () => {
   const { root, dataDir } = tempDataDir()
   try {
-    const w = createWorker({ hub: null, executor: { execute: async () => ({ outcome: 'completed' }) }, dataDir })
+    const w = createWorker({ hub: null, executor: { ...inPlaceStages(), execute: async () => ({ outcome: 'completed' }) }, dataDir })
     const r = await w.tick()
     assert.equal(r.reason, 'hub-not-configured')
     assert.equal(w.state, 'hub-unreachable')
@@ -89,7 +89,7 @@ test('① 认领失败不致命：记录连续失败并进入退避，不退出'
   const { root, dataDir } = tempDataDir()
   try {
     const hub = fakeHub({ failClaim: true })
-    const w = createWorker({ hub, executor: { execute: async () => ({ outcome: 'completed' }) }, dataDir })
+    const w = createWorker({ hub, executor: { ...inPlaceStages(), execute: async () => ({ outcome: 'completed' }) }, dataDir })
     const r = await w.tick()
     assert.equal(r.reason, 'claim-failed')
     assert.equal(w.counters.consecutiveFailures, 1)
@@ -109,25 +109,35 @@ test('① 认领失败不致命：记录连续失败并进入退避，不退出'
 test('② 认领 → 执行 → 提交终态：计数与状态文件同步', async () => {
   const { root, dataDir } = tempDataDir()
   try {
-    const hub = fakeHub({ tasks: [{ taskId: 't1', leaseEpoch: 7 }] })
+    const hub = fakeHub({ tasks: [{ taskId: 't1', attemptId: 'att:t1:1', leaseEpoch: 7 }] })
     const seen = []
     const w = createWorker({
       hub,
-      executor: { execute: async (lease) => { seen.push(lease); return { outcome: 'completed' } } },
+      executor: { ...inPlaceStages(), execute: async (lease) => { seen.push(lease); return { outcome: 'completed' } } },
       dataDir,
     })
     const r = await w.tick()
     assert.equal(r.outcome, 'completed')
     assert.equal(seen[0].taskId, 't1')
-    assert.equal(hub.calls.transition.length, 1)
+    // §6.4 的顺序：每个阶段**先落库意图，再做副作用**，最后才提交结果。
+    // 断言的是完整序列，因为「跳过一个阶段」正是状态机会拒绝、而这里能查出的事。
+    assert.deepEqual(hub.calls.transition.map((t) => t.to),
+      ['PreparingWorkspace', 'BuildingContext', 'Running', undefined],
+      '最后一条是结果提交（用 outcome 而不是 to）')
+    assert.deepEqual(r.trace, ['PreparingWorkspace', 'BuildingContext', 'Running'])
     // 提交终态必须携带领取时的 leaseEpoch：不带的写入会被 team-hub 拒绝（PRT-313），
     // 而如果它被静默接受，迟到的 worker 就能改写别人的结果。
-    assert.equal(hub.calls.transition[0].leaseEpoch, 7)
+    for (const t of hub.calls.transition) {
+      assert.equal(t.leaseEpoch, 7, '每一次写入都要带 epoch，包括中间阶段')
+      assert.equal(t.attemptId, 'att:t1:1', '写入按 attemptId 定位，不是 taskId')
+    }
+    assert.equal(hub.calls.transition[3].outcome, 'completed')
     assert.equal(w.counters.claimed, 1)
     assert.equal(w.counters.completed, 1)
     const status = readStatusFile(w.statusPath)
     assert.equal(status.status.completed, 1)
-    assert.equal(status.status.currentTaskId, null, '执行结束后不得残留当前任务')
+    assert.equal(status.status.currentAttemptId, null, '执行结束后不得残留当前尝试')
+    assert.equal(status.status.stageMode, 'full')
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -137,12 +147,12 @@ test('② 空队列是空闲，不是失败（连续失败计数要归零）', a
   const { root, dataDir } = tempDataDir()
   try {
     const hub = fakeHub({ failClaim: true })
-    const w = createWorker({ hub, executor: { execute: async () => ({ outcome: 'completed' }) }, dataDir })
+    const w = createWorker({ hub, executor: { ...inPlaceStages(), execute: async () => ({ outcome: 'completed' }) }, dataDir })
     await w.tick()
     assert.equal(w.counters.consecutiveFailures, 1)
     hub.calls.claim = 0
     const emptyHub = fakeHub({ tasks: [] })
-    const w2 = createWorker({ hub: emptyHub, executor: { execute: async () => ({ outcome: 'completed' }) }, dataDir })
+    const w2 = createWorker({ hub: emptyHub, executor: { ...inPlaceStages(), execute: async () => ({ outcome: 'completed' }) }, dataDir })
     const r = await w2.tick()
     assert.equal(r.reason, 'queue-empty')
     assert.equal(w2.counters.consecutiveFailures, 0)
@@ -155,10 +165,10 @@ test('② 空队列是空闲，不是失败（连续失败计数要归零）', a
 test('② 执行抛错记成 failed，不把 worker 一起带走', async () => {
   const { root, dataDir } = tempDataDir()
   try {
-    const hub = fakeHub({ tasks: [{ taskId: 't1', leaseEpoch: 1 }] })
+    const hub = fakeHub({ tasks: [{ taskId: 't1', attemptId: 'att:t1:1', leaseEpoch: 1 }] })
     const w = createWorker({
       hub,
-      executor: { execute: async () => { throw new Error('boom') } },
+      executor: { ...inPlaceStages(), execute: async () => { throw new Error('boom') } },
       dataDir,
     })
     const r = await w.tick()
@@ -174,20 +184,115 @@ test('② 执行抛错记成 failed，不把 worker 一起带走', async () => {
 test('② outcome_unknown 单独计数（它既不是成功也不是普通失败）', async () => {
   const { root, dataDir } = tempDataDir()
   try {
-    const hub = fakeHub({ tasks: [{ taskId: 't1', leaseEpoch: 3 }] })
-    const w = createWorker({ hub, executor: { execute: async () => ({ outcome: 'outcome_unknown', detail: '外部写结果不可确认' }) }, dataDir })
+    const hub = fakeHub({ tasks: [{ taskId: 't1', attemptId: 'att:t1:1', leaseEpoch: 3 }] })
+    const w = createWorker({ hub, executor: { ...inPlaceStages(), execute: async () => ({ outcome: 'outcome_unknown', detail: '外部写结果不可确认' }) }, dataDir })
     await w.tick()
     assert.equal(w.counters.unknownOutcome, 1)
     assert.equal(w.counters.completed, 0)
     assert.equal(w.counters.failed, 0)
-    assert.equal(hub.calls.transition[0].outcome, 'outcome_unknown')
+    const submit = hub.calls.transition[hub.calls.transition.length - 1]
+    assert.equal(submit.outcome, 'outcome_unknown',
+      '结果未知必须如实提交：它的去向是「等人工」，而不是被一次自动重试变成重复副作用')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('② 只有 execute 的执行引擎**不认领**（状态机不允许跳状态，它会烧光重试额度）', async () => {
+  const { root, dataDir } = tempDataDir()
+  try {
+    const hub = fakeHub({ tasks: [{ taskId: 't1', attemptId: 'att:t1:1', leaseEpoch: 1 }] })
+    const logs = []
+    const w = createWorker({ hub, executor: { execute: async () => ({ outcome: 'completed' }) }, dataDir, logger: (l) => logs.push(l) })
+    const r = await w.tick()
+    assert.equal(r.reason, 'no-stages')
+    assert.deepEqual([...r.missingStages], ['prepareWorkspace', 'buildContext'])
+    // 一次 claim 都不能发：任务已被领走却做不完，比不领更坏
+    assert.equal(hub.calls.claim, 0)
+    assert.equal(w.state, 'no-stages')
+    assert.match(logs.join('\n'), /缺少必需阶段/)
+    const status = readStatusFile(w.statusPath)
+    assert.equal(status.status.stageMode, 'incomplete')
+    assert.deepEqual([...status.status.missingStages], ['prepareWorkspace', 'buildContext'])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('② REQUIRED_STAGE_KEYS 与状态机的路径一致（三者缺一不可）', () => {
+  assert.deepEqual([...REQUIRED_STAGE_KEYS], ['prepareWorkspace', 'buildContext', 'execute'])
+  // inPlaceStages 只铺两个前置阶段：execute 必须由调用方给（它是业务本体）
+  const s = inPlaceStages()
+  assert.equal(typeof s.prepareWorkspace, 'function')
+  assert.equal(typeof s.buildContext, 'function')
+  assert.equal(s.execute, undefined)
+  // 降级阶段必须如实说明自己没做什么，否则日后翻记录会以为当时有工作区隔离
+  return Promise.all([s.prepareWorkspace({}), s.buildContext({})]).then(([a, b]) => {
+    assert.equal(a.kind, 'in-place')
+    assert.equal(b.kind, 'minimal')
+    assert.match(a.note, /PRT-306\/401/)
+  })
+})
+
+test('② 先落库意图再执行：阶段状态在副作用**之前**就已经写进去了', async () => {
+  const { root, dataDir } = tempDataDir()
+  try {
+    const hub = fakeHub({ tasks: [{ taskId: 't1', attemptId: 'att:t1:1', leaseEpoch: 1 }] })
+    const order = []
+    const originalTransition = hub.transition
+    hub.transition = async (arg) => { order.push(`persist:${arg.to ?? arg.outcome}`); return originalTransition(arg) }
+    const w = createWorker({
+      hub,
+      executor: {
+        prepareWorkspace: async () => { order.push('effect:prepare'); return { kind: 'in-place' } },
+        buildContext: async () => { order.push('effect:context'); return { kind: 'minimal' } },
+        execute: async () => { order.push('effect:execute'); return { outcome: 'completed' } },
+      },
+      dataDir,
+    })
+    await w.tick()
+    // 顺序反过来的话，进程在做事中途被杀会留下一个「看起来没开始」的 Attempt，
+    // 恢复扫描会以为可以安全重跑——而它可能已经改过外部系统。
+    assert.deepEqual(order, [
+      'persist:PreparingWorkspace', 'effect:prepare',
+      'persist:BuildingContext', 'effect:context',
+      'persist:Running', 'effect:execute',
+      'persist:completed',
+    ])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('② 阶段失败要如实上报，不能让它停在中间等租约过期', async () => {
+  const { root, dataDir } = tempDataDir()
+  try {
+    const hub2 = fakeHub({ tasks: [{ taskId: 't2', attemptId: 'att:t2:1', leaseEpoch: 2 }] })
+    const w2 = createWorker({
+      hub: hub2,
+      executor: {
+        prepareWorkspace: async () => { throw new Error('工作区建不起来') },
+        buildContext: async () => ({ kind: 'minimal' }),
+        execute: async () => ({ outcome: 'completed' }),
+      },
+      dataDir,
+    })
+    const r = await w2.tick()
+    assert.equal(r.outcome, 'failed')
+    assert.equal(r.error.stage, 'prepareWorkspace', '阶段名必须被标出来，否则失败码会误导成 runtime-unavailable')
+    assert.equal(r.reported, true)
+    const last = hub2.calls.transition[hub2.calls.transition.length - 1]
+    assert.equal(last.to, 'RetryableFailure')
+    // 我们知道它失败在哪一步，因此不该让恢复扫描去猜
+    assert.equal(last.context.failureCode, 'workspace-prepare-failed')
+    assert.match(last.context.detail, /工作区建不起来/)
+    assert.deepEqual(last.context.trace, ['PreparingWorkspace'])
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
 })
 
 // ---------------------------------------------------------------- ③ 停止
-
 test('③ 优雅停止必须释放持有的 lease（不释放会让队列看起来卡住）', async () => {
   const { root, dataDir } = tempDataDir()
   try {
@@ -195,17 +300,17 @@ test('③ 优雅停止必须释放持有的 lease（不释放会让队列看起�
     let resolveExec
     const w = createWorker({
       hub,
-      executor: { execute: () => new Promise((r) => { resolveExec = r }) },
+      executor: { ...inPlaceStages(), execute: () => new Promise((r) => { resolveExec = r }) },
       dataDir,
     })
     // 手工把 lease 放进去，模拟「正在执行中收到停止信号」
-    hub.claim = async () => ({ taskId: 't-busy', leaseEpoch: 11 })
+    hub.claim = async () => ({ taskId: 't-busy', attemptId: 'att:t-busy:1', leaseEpoch: 11 })
     const tickPromise = w.tick()
     await new Promise((r) => setImmediate(r))
     const stopped = await w.stop({ reason: 'SIGTERM' })
     assert.equal(stopped.ok, true)
     assert.equal(hub.calls.release.length, 1)
-    assert.equal(hub.calls.release[0].taskId, 't-busy')
+    assert.equal(hub.calls.release[0].attemptId, 'att:t-busy:1', '释放按 attemptId 定位')
     assert.equal(hub.calls.release[0].leaseEpoch, 11)
     assert.equal(w.state, 'stopped')
     resolveExec({ outcome: 'completed' })
@@ -220,10 +325,10 @@ test('③ 停止是幂等的；释放失败要记日志但不抛错', async () =
   try {
     const hub = fakeHub()
     hub.release = async () => { throw new Error('hub 已下线') }
-    hub.claim = async () => ({ taskId: 't1', leaseEpoch: 1 })
+    hub.claim = async () => ({ taskId: 't1', attemptId: 'att:t1:1', leaseEpoch: 1 })
     let resolveExec
     const logs = []
-    const w = createWorker({ hub, executor: { execute: () => new Promise((r) => { resolveExec = r }) }, dataDir, logger: (l) => logs.push(l) })
+    const w = createWorker({ hub, executor: { ...inPlaceStages(), execute: () => new Promise((r) => { resolveExec = r }) }, dataDir, logger: (l) => logs.push(l) })
     const tickPromise = w.tick()
     await new Promise((r) => setImmediate(r))
     const first = await w.stop({ reason: 'SIGINT' })
@@ -329,11 +434,11 @@ test('⑤ readWorkerEnv / WORKER_ENV 逐字对应，默认值来自 WORKER_DEFAU
 test('⑥ 执行期间发心跳：长任务不发心跳一定会被第二个 worker 重跑', async () => {
   const { root, dataDir } = tempDataDir()
   try {
-    const hub = fakeHub({ tasks: [{ taskId: 't-long', leaseEpoch: 5 }] })
+    const hub = fakeHub({ tasks: [{ taskId: 't-long', attemptId: 'att:t-long:1', leaseEpoch: 5 }] })
     let finishExec
     const w = createWorker({
       hub,
-      executor: { execute: () => new Promise((r) => { finishExec = r }) },
+      executor: { ...inPlaceStages(), execute: () => new Promise((r) => { finishExec = r }) },
       dataDir,
       heartbeatIntervalMs: 5,
     })
@@ -341,8 +446,8 @@ test('⑥ 执行期间发心跳：长任务不发心跳一定会被第二个 wor
     // 让心跳真的跑几轮
     await new Promise((r) => setTimeout(r, 60))
     assert.ok(hub.calls.heartbeat.length >= 2, `期望至少 2 次心跳，实际 ${hub.calls.heartbeat.length}`)
-    // 心跳必须带 leaseEpoch：不带 epoch 的心跳无法证明「我还是持有者」
-    assert.equal(hub.calls.heartbeat[0].taskId, 't-long')
+    // 心跳必须带 attemptId + leaseEpoch：不带的请求无法证明「我还是持有者」
+    assert.equal(hub.calls.heartbeat[0].attemptId, 'att:t-long:1')
     assert.equal(hub.calls.heartbeat[0].leaseEpoch, 5)
     assert.equal(w.snapshot().leaseMayBeLost, false)
     finishExec({ outcome: 'completed' })
@@ -359,13 +464,13 @@ test('⑥ 执行期间发心跳：长任务不发心跳一定会被第二个 wor
 test('⑥ 心跳失败必须可见：lease 可能已易主，结果可能被拒绝或覆盖别人的结果', async () => {
   const { root, dataDir } = tempDataDir()
   try {
-    const hub = fakeHub({ tasks: [{ taskId: 't1', leaseEpoch: 1 }] })
+    const hub = fakeHub({ tasks: [{ taskId: 't1', attemptId: 'att:t1:1', leaseEpoch: 1 }] })
     hub.heartbeat = async () => { throw new Error('hub 已重启，我的 lease 没了') }
     let finishExec
     const logs = []
     const w = createWorker({
       hub,
-      executor: { execute: () => new Promise((r) => { finishExec = r }) },
+      executor: { ...inPlaceStages(), execute: () => new Promise((r) => { finishExec = r }) },
       dataDir,
       heartbeatIntervalMs: 5,
       logger: (l) => logs.push(l),
@@ -392,11 +497,11 @@ test('⑥ 心跳失败必须可见：lease 可能已易主，结果可能被拒�
 test('⑥ heartbeatIntervalMs = 0 关闭心跳（显式关闭，不是「忘了配」）', async () => {
   const { root, dataDir } = tempDataDir()
   try {
-    const hub = fakeHub({ tasks: [{ taskId: 't1', leaseEpoch: 1 }] })
+    const hub = fakeHub({ tasks: [{ taskId: 't1', attemptId: 'att:t1:1', leaseEpoch: 1 }] })
     let finishExec
     const w = createWorker({
       hub,
-      executor: { execute: () => new Promise((r) => { finishExec = r }) },
+      executor: { ...inPlaceStages(), execute: () => new Promise((r) => { finishExec = r }) },
       dataDir,
       heartbeatIntervalMs: 0,
     })
@@ -415,18 +520,44 @@ test('⑥ heartbeatIntervalMs = 0 关闭心跳（显式关闭，不是「忘了�
 test('⑤ hub 客户端缺 token 时**不发匿名请求**（401 的文案离真因太远）', () => {
   assert.throws(() => createHubClient({ baseUrl: 'http://x', token: '' }), /需要 token/)
   assert.throws(() => createHubClient({ baseUrl: '' , token: 't' }), /需要 baseUrl/)
-  // 有 token 时构造成功，且请求带 Bearer 头
+  // 有 token 时构造成功，请求带 Bearer 头，且**解包**出 claimed
   const calls = []
   const client = createHubClient({
     baseUrl: 'http://127.0.0.1:8787/',
     token: 'secret-token',
-    fetchImpl: async (url, init) => { calls.push({ url, init }); return { ok: true, json: async () => ({ taskId: 't1' }) } },
+    fetchImpl: async (url, init) => { calls.push({ url, init }); return { ok: true, json: async () => ({ ok: true, claimed: { taskId: 't1', attemptId: 'att:t1:1' } }) } },
   })
   return client.claim({ workerId: 'w1' }).then((r) => {
+    // 解包这件事必须被断言：不解包时调用方在信封上找 taskId 会得到 undefined，
+    // 而 `undefined` 恰好就是「没领到」的判据——于是任务被领走却永远没人做。
     assert.equal(r.taskId, 't1')
+    assert.equal(r.attemptId, 'att:t1:1')
     assert.equal(calls[0].url, 'http://127.0.0.1:8787/api/runtime/claim')
     assert.equal(calls[0].init.headers.authorization, 'Bearer secret-token')
   })
+})
+
+test('⑤ hub 客户端把服务端的具名错误码传上来（否则 worker 只能靠文案猜）', async () => {
+  const client = createHubClient({
+    baseUrl: 'http://x',
+    token: 't',
+    fetchImpl: async () => ({
+      ok: false,
+      status: 409,
+      json: async () => ({ error: 'leaseEpoch 不符', code: 'LEASE_EPOCH_STALE', currentEpoch: 4 }),
+    }),
+  })
+  await assert.rejects(() => client.heartbeat({ attemptId: 'att:t1:1', leaseEpoch: 1, workerId: 'w1' }), (e) => {
+    assert.ok(e instanceof HubHttpError)
+    assert.equal(e.status, 409)
+    // 这两个字段决定 worker 做什么：STALE = 停手，EXPIRED = 加快或停手
+    assert.equal(e.code, 'LEASE_EPOCH_STALE')
+    assert.equal(e.currentEpoch, 4)
+    return true
+  })
+  // 队列空时 claim 返回 null（不是抛错）：「没事可做」不是异常
+  const empty = createHubClient({ baseUrl: 'http://x', token: 't', fetchImpl: async () => ({ ok: true, json: async () => ({ ok: true, claimed: null }) }) })
+  assert.equal(await empty.claim({ workerId: 'w1' }), null)
 })
 
 test('⑦ runWorkerProcess：缺 LEGION_DATA_DIR 时返回非零退出码**且带原因**', async () => {
@@ -449,7 +580,7 @@ test('⑦ runWorkerProcess：hub 客户端建不起来时仍以 hub-unreachable 
     const lines = []
     const startup = await runWorkerProcess({
       env: { LEGION_DATA_DIR: dataDir, TEAM_HUB_URL: 'http://127.0.0.1:1' }, // 有 URL 但没有 token
-      executor: { execute: async () => ({ outcome: 'completed' }) },
+      executor: { ...inPlaceStages(), execute: async () => ({ outcome: 'completed' }) },
       write: (l) => lines.push(l),
       installSignalHandlers: false,
     })

@@ -33,6 +33,7 @@ import { readStatusFile, STATUS_RELPATH, writeStatusFile } from './status-file.m
 export const WORKER_STATES = Object.freeze([
   'starting',
   'no-executor',
+  'no-stages',
   'hub-unreachable',
   'idle',
   'claiming',
@@ -40,6 +41,33 @@ export const WORKER_STATES = Object.freeze([
   'stopping',
   'stopped',
 ])
+
+/**
+ * 执行一次任务必须提供的三个阶段。
+ *
+ * 三者都是**必需**的，而不是「有就用、没有就跳过」。理由是状态机不允许跳状态
+ * （`Leased → Validating` 是非法迁移），因此一个只实现了 `execute` 的 worker
+ * 根本产生不了一次合法的 Attempt——它认领之后必然失败，把重试额度烧光。
+ *
+ * 「没有工作区隔离、没有上下文快照」是当前的真实状态（PRT-306 与 PRT-401 未做），
+ * 因此这里不假装它有，而是要求调用方**显式**选择降级模式：用 `inPlaceStages()`
+ * 铺开两个明确记录自己什么都没做的阶段。这样降级是一个具名的调用点，
+ * 而不是一个埋在默认值里的静默行为，日后替换它时也找得到。
+ */
+export const REQUIRED_STAGE_KEYS = Object.freeze(['prepareWorkspace', 'buildContext', 'execute'])
+
+/**
+ * 「原地执行」的降级阶段实现。
+ *
+ * 两个返回的 `kind` 会被写进 Attempt 的证据里，因此日后翻记录能看出
+ * 「这次执行没有工作区隔离、没有上下文快照」——而不是让人以为它有。
+ */
+export function inPlaceStages({ note = 'PRT-306/401 未交付：当前阶段为原地执行、无上下文快照' } = {}) {
+  return Object.freeze({
+    prepareWorkspace: async () => ({ kind: 'in-place', note }),
+    buildContext: async () => ({ kind: 'minimal', note }),
+  })
+}
 
 /** 默认节奏。全部是配置项，这里是它们的兜底值。 */
 export const WORKER_DEFAULTS = Object.freeze({
@@ -58,6 +86,22 @@ function joinPath(platform, ...parts) {
     })
     .filter((p) => p !== '')
     .join(sep)
+}
+
+/**
+ * 阶段失败 → 已登记的失败码。
+ *
+ * 映射表而不是默认值：未登记的阶段给出 `undefined`，由 `classifyFailure`
+ * 按「不认识的错误不默认可重试」处理。默认成 `retryable` 会让一个没见过的
+ * 阶段失败被无限重试。
+ */
+function classifyStageFailure(stage) {
+  switch (stage) {
+    case 'prepareWorkspace': return 'workspace-prepare-failed'
+    case 'buildContext': return 'context-build-failed'
+    case 'execute': return 'runtime-unavailable'
+    default: return undefined
+  }
 }
 
 /**
@@ -91,6 +135,13 @@ export function createWorker({
   }
   const resolvedStatusPath = statusPath ?? joinPath(platform, dataDir, STATUS_RELPATH)
 
+  // 阶段齐备性在**建实例时**就算清楚：等到认领之后才发现缺阶段，
+  // 那条任务就已经被领走了（状态 Leased、租约在跑），只能等租约过期。
+  const missingStages = executor === null || executor === undefined
+    ? []
+    : REQUIRED_STAGE_KEYS.filter((k) => typeof executor[k] !== 'function')
+  const stagesUsable = executor !== null && executor !== undefined && missingStages.length === 0
+
   let state = 'starting'
   let running = false
   let stopped = false
@@ -113,6 +164,11 @@ export function createWorker({
       logger('[worker] 未配置执行引擎：**不认领任何任务**（认领会立刻失败并把重试额度烧光，' +
         '最终表现为「任务都在跑但全都失败」）。配置执行引擎后重启即可开始工作。')
     }
+    if (nextState === 'no-stages' && previous !== 'no-stages') {
+      logger(`[worker] 执行引擎缺少必需阶段：${missingStages.join(', ')}——**不认领任何任务**。` +
+        '状态机不允许跳状态（Leased → Validating 非法），只实现了 execute 的 worker ' +
+        '产生不了一次合法的 Attempt。若确实要用原地执行，请显式铺开 inPlaceStages()。')
+    }
     if (nextState === 'hub-unreachable' && previous !== 'hub-unreachable') {
       logger('[worker] 无法与 team-hub 通信：暂停认领并退避重试（不退出，等数据面恢复）')
     }
@@ -121,7 +177,9 @@ export function createWorker({
       pid: process.pid,
       state: nextState,
       hubConfigured: hub !== null,
-      executorConfigured: executor !== null,
+      executorConfigured: executor !== null && executor !== undefined,
+      stageMode: executor === null || executor === undefined ? 'none' : (stagesUsable ? 'full' : 'incomplete'),
+      missingStages,
       claimed: counters.claimed,
       completed: counters.completed,
       failed: counters.failed,
@@ -131,6 +189,7 @@ export function createWorker({
       heartbeatFailures: counters.heartbeatFailures,
       leaseMayBeLost,
       currentLeaseEpoch: currentLease === null ? null : currentLease.leaseEpoch ?? null,
+      currentAttemptId: currentLease === null ? null : currentLease.attemptId ?? null,
       currentTaskId: currentLease === null ? null : currentLease.taskId ?? null,
       lastError,
       updatedAt: new Date(now()).toISOString(),
@@ -171,16 +230,25 @@ export function createWorker({
         await sleep(heartbeatIntervalMs)
         if (!heartbeatActive) return
         try {
-          await hub.heartbeat({ taskId: lease.taskId, leaseEpoch: lease.leaseEpoch, workerId })
+          await hub.heartbeat({ attemptId: lease.attemptId, leaseEpoch: lease.leaseEpoch, workerId })
           counters.heartbeats += 1
           leaseMayBeLost = false
         } catch (e) {
           counters.heartbeatFailures += 1
           leaseMayBeLost = true
-          logger(`[worker] 心跳失败（连续 ${counters.heartbeatFailures} 次，任务 ${lease.taskId}）：` +
+          logger(`[worker] 心跳失败（连续 ${counters.heartbeatFailures} 次，尝试 ${lease.attemptId}）：` +
             `${e?.message ?? e}。lease 可能已过期并被其他 worker 接管——` +
             '此时本次执行的结果可能被拒绝，或者（如果没有 epoch 校验）覆盖别人的结果')
           publish('executing')
+          // `LEASE_EPOCH_STALE` 的含义是「你已经被接管了」，不是「网络抖了一下」。
+          // 继续按间隔发只会持续失败，而真正该做的是**停手**：不再提交结果。
+          // （中断正在执行的 executor 需要 AbortSignal 穿到 RuntimeAdapter，属 PRT-302/311。）
+          if (e?.code === 'LEASE_EPOCH_STALE') {
+            logger(`[worker] 放弃尝试 ${lease.attemptId} 的心跳：epoch 已前进到 ${e.currentEpoch ?? '未知'}，` +
+              '本 worker 不再是持有者；本次执行的结果将被丢弃，不再提交')
+            heartbeatActive = false
+            return
+          }
         }
       }
     }
@@ -198,6 +266,11 @@ export function createWorker({
       publish('no-executor')
       return { acted: false, reason: 'no-executor' }
     }
+    if (!stagesUsable) {
+      // 同上，只是原因更具体：引擎在，但缺的阶段让它产生不了合法的 Attempt。
+      publish('no-stages')
+      return { acted: false, reason: 'no-stages', missingStages }
+    }
     if (hub === null) {
       publish('hub-unreachable')
       return { acted: false, reason: 'hub-not-configured' }
@@ -213,18 +286,68 @@ export function createWorker({
       publish('hub-unreachable')
       return { acted: false, reason: 'claim-failed', error: lastError }
     }
-    if (claimed === null || claimed === undefined || claimed.taskId === undefined) {
+    if (claimed === null || claimed === undefined) {
       counters.consecutiveFailures = 0
       publish('idle')
       return { acted: false, reason: 'queue-empty' }
+    }
+    // 拿到一个「没有 attemptId 的 claim」是**协议错误**，不是空队列。
+    // 悄悄当成空队列的后果特别坏：任务已经被服务端领走（状态 Leased、租约在跑），
+    // 而 worker 以为自己什么都没领到——于是这条任务**被领走却永远没人做**，
+    // 只能等租约过期才被回收，而回收日志里看不出是谁领的。
+    if (claimed.attemptId === undefined || claimed.attemptId === null) {
+      counters.consecutiveFailures += 1
+      lastError = {
+        stage: 'claim',
+        message: `数据面返回的 claim 缺少 attemptId（收到字段：${Object.keys(claimed).join(', ') || '（无）'}）：` +
+          '这是协议不匹配，不是空队列——任务可能已被领走',
+      }
+      logger(`[worker] ${lastError.message}`)
+      publish('idle')
+      return { acted: false, reason: 'claim-protocol-error', error: lastError }
     }
 
     counters.claimed += 1
     currentLease = claimed
     publish('executing')
     startHeartbeat(claimed)
+    const trace = []
     try {
-      const result = await executor.execute(claimed)
+      /**
+       * §6.4 的流水线：**先持久化意图，再做副作用**。
+       *
+       * 每一步都是「(1) 把状态写成『我要做这件事』(2) 才真的去做」。
+       * 顺序反过来的话，进程在做事的中途被杀就会留下一个**看起来没开始**的 Attempt：
+       * 恢复扫描会认为它什么都没做，于是安全地重跑一遍——而它可能已经改过外部系统。
+       * 顺序正确时，中途被杀留下的是 `PreparingWorkspace`/`BuildingContext`，
+       * 恢复扫描据此知道「它已经越过某条边界」。
+       */
+      const step = async (to, run, stageName) => {
+        const t = await hub.transition({ attemptId: claimed.attemptId, leaseEpoch: claimed.leaseEpoch, workerId, to })
+        trace.push(to)
+        const detail = await run()
+        return { transition: t, detail, stageName }
+      }
+      /**
+       * 给阶段抛出的异常打上阶段名。
+       *
+       * 不打的话，`prepareWorkspace` 的异常会被上报成 `stage: 'execute'`——
+       * 于是失败码变成 `runtime-unavailable`（可重试），而真实原因是
+       * 「工作区没能建起来」。两者对运维的意义完全不同，而错误分类决定了要不要重试。
+       */
+      const tagStage = (stageName, fn) => async (lease) => {
+        try {
+          return await fn(lease)
+        } catch (err) {
+          if (err !== null && typeof err === 'object' && err.stage === undefined) err.stage = stageName
+          throw err
+        }
+      }
+
+      await step('PreparingWorkspace', tagStage('prepareWorkspace', executor.prepareWorkspace), 'prepareWorkspace')
+      await step('BuildingContext', tagStage('buildContext', executor.buildContext), 'buildContext')
+      await step('Running', async () => null, 'running')
+      const result = await tagStage('execute', executor.execute)(claimed)
       const outcome = result?.outcome ?? 'failed'
       if (outcome === 'completed') counters.completed += 1
       else if (outcome === 'outcome_unknown') counters.unknownOutcome += 1
@@ -232,21 +355,47 @@ export function createWorker({
       counters.consecutiveFailures = 0
       lastError = outcome === 'completed' ? null : { stage: 'execute', message: result?.detail ?? outcome }
       // 提交终态由 hub 负责（它才知道 leaseEpoch 与事务边界）；worker 只报告结果。
-      if (typeof hub.transition === 'function') {
-        await hub.transition({ taskId: claimed.taskId, leaseEpoch: claimed.leaseEpoch, outcome, detail: result?.detail ?? null })
-      }
+      // **结果未知**时同样要提交：`outcome_unknown` 的去向是「等人工」而不是「重试」
+      // （状态机与仓储都拒绝让 UnknownOutcome 回到队列），
+      // 于是「外部写结果不可确认」这件事才不会被一次自动重试变成重复副作用。
+      await hub.transition({
+        attemptId: claimed.attemptId,
+        leaseEpoch: claimed.leaseEpoch,
+        workerId,
+        outcome,
+        context: { detail: result?.detail ?? null, trace },
+      })
       stopHeartbeat()
       currentLease = null
       publish('idle')
-      return { acted: true, outcome }
+      return { acted: true, outcome, trace }
     } catch (e) {
       counters.failed += 1
       counters.consecutiveFailures += 1
-      lastError = { stage: 'execute', message: String(e?.message ?? e) }
+      lastError = { stage: e?.stage ?? 'execute', message: String(e?.message ?? e) }
+      // 中途失败要**如实上报**，而不是让 Attempt 停在 PreparingWorkspace 等租约过期：
+      // 停在那儿的话，恢复扫描只能按「有没有可能已产生外部副作用」去猜，
+      // 而我们知道得更多——我们知道它失败在哪一步、有没有越过 Running。
       stopHeartbeat()
+      let reported = null
+      try {
+        const code = e?.code === 'LEASE_EPOCH_STALE' ? 'lease-epoch-stale' : (e?.failureCode ?? classifyStageFailure(e?.stage))
+        reported = await hub.transition({
+          attemptId: claimed.attemptId,
+          leaseEpoch: claimed.leaseEpoch,
+          workerId,
+          to: 'RetryableFailure',
+          context: { failureCode: code, detail: lastError.message, trace },
+        })
+      } catch (reportError) {
+        // 上报失败本身也要可见：最可能的原因是 epoch 已经前进（我们被接管了）。
+        lastError.reportFailed = String(reportError?.message ?? reportError)
+        logger(`[worker] 无法上报失败（${lastError.reportFailed}）：Attempt 会停在 ${trace[trace.length - 1] ?? 'Leased'}，` +
+          '由恢复扫描处置。若原因是 epoch 已前进，说明它已被别人接管——这是正确的结果')
+      }
       currentLease = null
       publish('idle')
-      return { acted: true, outcome: 'failed', error: lastError }
+      return { acted: true, outcome: 'failed', error: lastError, reported: reported !== null, trace }
     }
   }
 
@@ -306,7 +455,7 @@ export function createWorker({
       let released = null
       if (release && currentLease !== null && hub !== null && typeof hub.release === 'function') {
         try {
-          released = await hub.release({ taskId: currentLease.taskId, leaseEpoch: currentLease.leaseEpoch, workerId, reason })
+          released = await hub.release({ attemptId: currentLease.attemptId, leaseEpoch: currentLease.leaseEpoch, workerId, reason })
         } catch (e) {
           released = { ok: false, message: String(e?.message ?? e) }
           logger(`[worker] 释放 lease 失败：${released.message}（任务将等待租期自然过期）`)

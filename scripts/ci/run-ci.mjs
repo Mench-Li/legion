@@ -426,6 +426,22 @@ async function stageTest() {
       files: ['orchestrator/state-machine/state-machine.test.mjs', 'orchestrator/worker/worker.test.mjs'],
       cwd: ROOT,
     },
+    // 阶段 3：运行实体（PRT-302 租约与权威时间 / PRT-303 Attempt 与不可覆盖历史 / PRT-313 epoch 拒写）。
+    // 三层断言各自解决一类**只有那一层才看得见**的缺陷，因此三层都要有：
+    //   ① run-store：仓储语义（并发领取只能有一个赢家、过期 epoch 拒写、
+    //      回收的两条分支、历史不可覆盖）。用真实 node:sqlite + 注入时钟，
+    //      「租期到期」是确定性跨过去的，不 sleep。
+    //   ② run-routes：HTTP 契约（具名错误码有没有传到响应体里、到期时间是不是服务端算的、
+    //      回收接口有没有强制要求「哪些状态已越过外部写边界」）。错误码被路由吞掉时，
+    //      worker 只能靠文案猜，而文案会变。
+    //   ③ run-plane-e2e：真 team-hub + 真 worker 客户端。前两层各自全绿也可能合起来错：
+    //      worker 曾把 `{ok, claimed}` 信封当成 claim 对象用，于是**任务被领走却没人做**
+    //      ——这个缺陷在两层单测里都看不见（仓储不经 HTTP，worker 的假 hub 已经解过包）。
+    {
+      label: 'run-plane（PRT-302/303/313：租约与权威时间、Attempt 不可覆盖、epoch 拒写、运行面 HTTP 契约与端到端）',
+      files: ['team-hub/run-store.test.mjs', 'team-hub/run-routes.test.mjs', 'team-hub/run-plane-e2e.test.mjs'],
+      cwd: ROOT,
+    },
     // 阶段 2.5 / 阶段 5：密钥库最小闭环（PRT-505，PRT-258 的第四份契约）。
     // 这一组的断言集中在两类**不会抛异常**的失败上：
     //   ① 元数据接口（list / toJSON / 审计 / 错误对象）把值或密文带出去——

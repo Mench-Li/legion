@@ -67,6 +67,7 @@ import { dirname, extname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { standardsFor } from './stage-standards.mjs'
 import { evaluatePermission, normalizeOperation } from './permission-engine.mjs'
+import { createRunStore, RunError } from './run-store.mjs'
 import { loadConfig } from '../packages/shared/src/config.mjs'
 import { SCHEMA as CONFIG_SCHEMA } from './config-schema.mjs'
 
@@ -156,6 +157,49 @@ const db = new DatabaseSync(DB_FILE)
 // （另一连接持锁时按预算等待后成功）。注意它**不覆盖**下面那条 journal_mode 切换——原因见 enableWal。
 db.exec('PRAGMA busy_timeout = 5000')
 enableWal()
+
+/**
+ * 运行实体仓储（PRT-302/303/313）。
+ *
+ * 与上面那些**看板**写操作的关键差别：这里的每一次写入都带 `leaseEpoch`，
+ * 且时间只认本进程的时钟。看板操作是「人在指挥台点一下」，
+ * 运行操作是「一个可能已经死掉的 worker 在说话」——对后者必须能拒绝。
+ *
+ * 接在这一个文件里（而不是新建服务）是因为它必须是**同一个库、同一个事务域**：
+ * 领取要用 `BEGIN IMMEDIATE` 与看板任务表竞争同一把写锁，
+ * 分成两个进程/两个库就不可能做到「同一条任务只被领一次」。
+ */
+const runStore = createRunStore({ db })
+
+/**
+ * 运行面路由的公共外壳。
+ *
+ * 不复用 `handleWrite`：那条路径要求 `by`（看板成员），而运行面的主体是 **worker**，
+ * 不是成员。硬把 worker 塞进 `by` 会让审计日志里出现一个假的成员名，
+ * 也会让「谁的这次写入」这件事在两张表里各有一套说法。
+ */
+async function handleRun(req, res, run) {
+  try {
+    if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+    const body = await readBody(req)
+    const result = await run(body ?? {})
+    json(res, 200, { ok: true, ...result })
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e)
+    const status = Number(e?.statusCode) || 400
+    // 具名码原样交给调用方：worker 要靠 `LEASE_EPOCH_STALE` 决定「停手」，
+    // 靠 `LEASE_EXPIRED` 决定「加快」——两者的下一步动作完全不同。
+    json(res, status, {
+      error: message,
+      code: e?.code ?? null,
+      stateMachineCode: e?.stateMachineCode ?? null,
+      currentEpoch: e?.currentEpoch,
+      currentWorkerId: e?.currentWorkerId,
+      leaseExpiresAtMs: e?.leaseExpiresAtMs,
+      serverTimeMs: Date.now(),
+    })
+  }
+}
 
 /** 同步等待，供启动期重试退避用（Atomics.wait 不忙转 CPU）。 */
 function sleepSync(ms) {
@@ -2910,6 +2954,15 @@ function readScope(body) {
   return typeof body.scope === 'string' && body.scope.trim().length > 0 ? body.scope.trim() : 'default'
 }
 
+/** 运行面必填字符串参数。缺参数要报出**参数名**，否则 worker 只看到「400」。 */
+function requireString(body, field) {
+  const v = body?.[field]
+  if (typeof v !== 'string' || v.trim().length === 0) {
+    throw Object.assign(new Error(`缺少参数 ${field}`), { code: 'MISSING_PARAM', statusCode: 400 })
+  }
+  return v.trim()
+}
+
 async function handleWrite(req, res, run) {
   try {
     if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
@@ -3203,6 +3256,102 @@ async function handle(req, res, stripPrefix) {
       })
       return
     }
+    // ── 运行面（PRT-302/303/313）：带权威时间与 leaseEpoch 的领取/续租/提交/放弃 ──
+    // 与上面 /api/claim 等**看板**写操作并存而不是替换：看板操作的主体是人（成员 `by`），
+    // 运行操作的主体是 worker。两者的失败语义不同——看板冲突要提示用户重试，
+    // 运行面的 epoch 冲突要求 worker **停手**，因此不能共用一条路径。
+    if (req.method === 'POST' && path === '/api/runtime/claim') {
+      await handleRun(req, res, (body) => runStore.claim({
+        workerId: body.workerId,
+        scope: typeof body.scope === 'string' && body.scope.length > 0 ? body.scope : null,
+        leaseTtlMs: body.leaseTtlMs ?? null,
+        nowMs: body.nowMs ?? null,
+      }))
+      return
+    }
+    if (req.method === 'POST' && path === '/api/runtime/heartbeat') {
+      await handleRun(req, res, (body) => runStore.heartbeat({
+        attemptId: requireString(body, 'attemptId'),
+        leaseEpoch: body.leaseEpoch,
+        workerId: body.workerId,
+        leaseTtlMs: body.leaseTtlMs ?? null,
+        nowMs: body.nowMs ?? null,
+      }))
+      return
+    }
+    if (req.method === 'POST' && path === '/api/runtime/transition') {
+      await handleRun(req, res, (body) => {
+        const r = runStore.transition({
+          attemptId: requireString(body, 'attemptId'),
+          leaseEpoch: body.leaseEpoch,
+          workerId: body.workerId,
+          to: body.to ?? null,
+          outcome: body.outcome ?? null,
+          context: body.context ?? {},
+          reason: body.reason ?? null,
+          nowMs: body.nowMs ?? null,
+        })
+        // 状态迁移后可能收尾目标链（与看板 /api/transition 的行为对齐，
+        // 否则运行面完成的任务与看板完成的任务对目标的结算不一致）
+        try { settleGoalsOfScope(getTask(r.attempt.taskId).scope) } catch { /* 任务不存在时不结算 */ }
+        return r
+      })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/runtime/release') {
+      await handleRun(req, res, (body) => runStore.release({
+        attemptId: requireString(body, 'attemptId'),
+        leaseEpoch: body.leaseEpoch,
+        workerId: body.workerId,
+        reason: body.reason ?? 'released',
+      }))
+      return
+    }
+    if (req.method === 'POST' && path === '/api/runtime/recover') {
+      await handleRun(req, res, (body) => {
+        // 「哪些状态已越过外部写边界」必须由调用方给。给不出就拒绝回收——
+        // 猜错的方向是「把一个可能已经付过费的任务重跑一遍」。
+        const from = body.externalEffectPossibleStates
+        if (!Array.isArray(from) || from.length === 0) {
+          throw Object.assign(new Error(
+            '缺少 externalEffectPossibleStates（已越过外部写边界的尝试状态数组）。' +
+            '这一条不能猜：判成「可重试」会在已发生外部副作用时重复执行，' +
+            '判成「未知」会让本可自动恢复的任务挂起'),
+          { code: 'EXTERNAL_EFFECT_UNKNOWN', statusCode: 400 })
+        }
+        const set = new Set(from)
+        const r = runStore.recoverExpired({
+          externalEffectPossible: (attempt) => set.has(attempt.state),
+          scope: typeof body.scope === 'string' && body.scope.length > 0 ? body.scope : null,
+          limit: Number.isInteger(body.limit) && body.limit > 0 ? Math.min(body.limit, 500) : 50,
+        })
+        return { ...r, externalEffectPossibleStates: [...set] }
+      })
+      return
+    }
+    if (req.method === 'GET' && path === '/api/runtime/status') {
+      json(res, 200, { ok: true, ...runStore.stats() })
+      return
+    }
+    if (req.method === 'GET' && path === '/api/runtime/attempt') {
+      // 诊断用只读端点：一条尝试 + 它所属任务的全部历史 + 事件流。
+      // 「试过几次、每次错在哪」如果只能靠翻日志，那它实际上是不可查的。
+      const attemptId = url.searchParams.get('attemptId')
+      const taskId = url.searchParams.get('taskId')
+      if (attemptId) {
+        const attempt = runStore.getAttempt(attemptId)
+        if (attempt === null) { json(res, 404, { ok: false, error: `运行尝试不存在：${attemptId}` }); return }
+        json(res, 200, { ok: true, attempt, history: runStore.historyOf(attempt.taskId), events: runStore.eventsOf(attemptId) })
+        return
+      }
+      if (taskId) {
+        json(res, 200, { ok: true, taskId, history: runStore.historyOf(taskId) })
+        return
+      }
+      json(res, 400, { ok: false, error: '缺少参数 attemptId 或 taskId' })
+      return
+    }
+
     if (req.method === 'POST' && path === '/api/claim') {
       await handleWrite(req, res, (body, by, scope) => {
         const id = body.id
@@ -4435,7 +4584,10 @@ async function handle(req, res, stripPrefix) {
       return
     }
     if (req.method === 'GET' && path === '/api/config') {
-      json(res, 200, { auth: TOKEN !== '', db: DB_FILE, port: PORT })
+      // `runPlane: true` 是能力发现位（PRT-301 起）：worker 用它判断「这个 hub 支不支持
+      // 带 epoch 的运行面」。没有这个位时，一个升级了一半的部署（hub 还是旧的）
+      // 会让 worker 收到 404，而 404 的文案无法区分「路由不存在」与「路径拼错」。
+      json(res, 200, { auth: TOKEN !== '', db: DB_FILE, port: PORT, runPlane: true })
       return
     }
 

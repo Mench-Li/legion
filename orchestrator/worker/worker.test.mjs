@@ -27,8 +27,8 @@ import { createHubClient, HubHttpError, readWorkerEnv, runWorkerProcess, WORKER_
 const WORKER_ENTRY = fileURLToPath(new URL('../../product/orchestrator/worker.mjs', import.meta.url))
 
 /** 记录调用的假 hub。 */
-function fakeHub({ tasks = [], failClaim = false } = {}) {
-  const calls = { claim: 0, transition: [], release: [], heartbeat: [] }
+function fakeHub({ tasks = [], failClaim = false, failReport = null } = {}) {
+  const calls = { claim: 0, transition: [], release: [], heartbeat: [], fail: [] }
   const queue = [...tasks]
   return {
     calls,
@@ -40,6 +40,16 @@ function fakeHub({ tasks = [], failClaim = false } = {}) {
     async transition(arg) { calls.transition.push(arg); return { ok: true } },
     async release(arg) { calls.release.push(arg); return { ok: true } },
     async heartbeat(arg) { calls.heartbeat.push(arg); return { ok: true } },
+    /**
+     * 失败上报由**服务端**决定去向（PRT-309）。假 hub 也要如实返回那三个字段——
+     * 只返回 `{ok:true}` 的话，"worker 有没有把服务端的处置读出来"这件事就测不到，
+     * 而那正是这一层要保证的东西。
+     */
+    async fail(arg) {
+      calls.fail.push(arg)
+      if (failReport !== null) throw failReport
+      return { ok: true, action: 'retry-new-attempt', nextAttemptAtMs: 1_700_000_002_000, attemptsUsed: 1, maxAttempts: 5 }
+    },
   }
 }
 
@@ -281,18 +291,57 @@ test('② 阶段失败要如实上报，不能让它停在中间等租约过期'
     assert.equal(r.outcome, 'failed')
     assert.equal(r.error.stage, 'prepareWorkspace', '阶段名必须被标出来，否则失败码会误导成 runtime-unavailable')
     assert.equal(r.reported, true)
-    const last = hub2.calls.transition[hub2.calls.transition.length - 1]
-    assert.equal(last.to, 'RetryableFailure')
+    // 上报走 `/api/runtime/fail`（服务端单一入口），**不是** `transition({to:'RetryableFailure'})`。
+    // 后者只把尝试标成失败就结束了，"接下来怎么办"没人做，任务会永远停在中间态。
+    assert.equal(hub2.calls.fail.length, 1, '失败必须走上报入口——只有它会让服务端决定重试还是 Dead Letter')
+    assert.equal(hub2.calls.transition.length, 1, '前三个阶段之外的迁移只有 PreparingWorkspace，失败本身不再走 transition')
+    const last = hub2.calls.fail[0]
     // 我们知道它失败在哪一步，因此不该让恢复扫描去猜
-    assert.equal(last.context.failureCode, 'workspace-prepare-failed')
-    assert.match(last.context.detail, /工作区建不起来/)
-    assert.deepEqual(last.context.trace, ['PreparingWorkspace'])
+    assert.equal(last.failureCode, 'workspace-prepare-failed')
+    assert.match(last.detail, /工作区建不起来/)
+    // worker 要把服务端的处置读出来（否则界面上看不到"它还会自动重试几次"）
+    assert.equal(r.error.disposition, 'retry-new-attempt')
+    assert.equal(typeof r.error.nextAttemptAtMs, 'number')
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
 })
 
 // ---------------------------------------------------------------- ③ 停止
+
+test('② 上报失败本身失败时不得抛错：最可能的原因是「你已被接管」，那是正确结果', async () => {
+  const { root, dataDir } = tempDataDir()
+  try {
+    // 服务端在 fail 上返回 LEASE_EPOCH_STALE：别人已经接管了这条尝试。
+    const stale = new HubHttpError('被接管', { status: 409, code: 'LEASE_EPOCH_STALE', currentEpoch: 9 })
+    const hub = fakeHub({
+      tasks: [{ taskId: 't1', attemptId: 'att:t1:1', leaseEpoch: 1 }],
+      failReport: stale,
+    })
+    const w = createWorker({
+      hub,
+      executor: {
+        prepareWorkspace: async () => ({ kind: 'in-place' }),
+        buildContext: async () => ({ kind: 'minimal' }),
+        execute: async () => { throw new Error('执行炸了') },
+      },
+      dataDir,
+    })
+    const r = await w.tick()
+    // tick 不能抛：抛出去会让 worker 主循环把一次正常竞态当成崩溃处理
+    assert.equal(r.outcome, 'failed')
+    assert.equal(r.reported, false, '上报失败要如实报 false，不能假装成功')
+    assert.match(r.error.reportFailed, /被接管/)
+    // 失败原因本身仍然被保留（诊断要靠它）
+    assert.equal(r.error.stage, 'execute')
+    assert.match(r.error.message, /执行炸了/)
+    // worker 回到 idle 而不是卡死或退出
+    assert.equal(w.state, 'idle')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('③ 优雅停止必须释放持有的 lease（不释放会让队列看起来卡住）', async () => {
   const { root, dataDir } = tempDataDir()
   try {

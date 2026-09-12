@@ -61,6 +61,20 @@ function unpooledFetch(url, init = {}) {
   })
 }
 
+/** 操作员视角的 GET（带 token），返回已解析的 JSON。 */
+async function operatorGet(path) {
+  return (await unpooledFetch(`${base}${path}`, { headers: { authorization: 'Bearer e2e-token' } })).json()
+}
+
+/** 操作员视角的 POST（带 token），返回已解析的 JSON。 */
+async function operatorPost(path, body) {
+  return (await unpooledFetch(`${base}${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer e2e-token' },
+    body: JSON.stringify(body),
+  })).json()
+}
+
 const tmpRoot = mkdtempSync(join(tmpdir(), 'legion-runplane-'))
 let mod
 let base = ''
@@ -376,4 +390,113 @@ test('⑤ 认证：不带 token 的 worker 请求被拒（运行面不是匿名�
     assert.equal(e.status, 401)
     return true
   })
+})
+
+// ── PRT-309/310/311：真实 hub + 真实 worker 的完整失败链路 ──
+
+/** 认领一条任务并亲手推到 Running（跳过阶段副作用，只测协议与去向）。 */
+async function claimAndRun(workerId, taskId, scope = 'default') {
+  onlyTask(taskId, { scope })
+  const c = await hub.claim({ workerId, scope })
+  assert.equal(c.taskId, taskId, `应领到 ${taskId}，实际 ${c?.taskId}`)
+  for (const to of ['PreparingWorkspace', 'BuildingContext', 'Running']) {
+    await hub.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId, to })
+  }
+  return c
+}
+
+test('⑥ 真实 worker 的执行失败会被服务端结算成「重试 + 退避」，而不是停在中间态', async () => {
+  onlyTask('e2e-fail')
+  await withWorker({
+    hub,
+    executor: {
+      prepareWorkspace: async () => ({ kind: 'in-place' }),
+      buildContext: async () => ({ kind: 'minimal' }),
+      execute: async () => { throw new Error('执行引擎炸了') },
+    },
+    dataDir: dataDirOf('data-fail'),
+    workerId: 'w-e2e-fail',
+    heartbeatIntervalMs: 10000,
+  }, async (w) => {
+    const r = await w.tick()
+    assert.equal(r.outcome, 'failed')
+    assert.equal(r.reported, true, '失败必须被服务端结算——只上报不结算会让任务永远停在 RetryableFailure')
+    assert.equal(r.error.disposition, 'retry-new-attempt')
+    assert.equal(typeof r.error.nextAttemptAtMs, 'number')
+  })
+
+  // 服务端侧的真实结果：第 1 次尝试已终结且保留失败原因，第 2 次在队列里等退避
+  const body = await operatorGet('/api/runtime/attempt?taskId=e2e-fail')
+  assert.equal(body.history.length, 2, '重试必须新建一次尝试，而不是把同一行改回 Queued')
+  assert.equal(body.history[0].state, 'RetryableFailure')
+  assert.equal(body.history[0].failureCode, 'runtime-unavailable',
+    '失败码要如实分类：没打阶段名的话工作区失败会被记成 runtime-unavailable')
+  assert.equal(body.history[1].state, 'Queued')
+  assert.ok(body.history[0].idempotencyKey === body.history[1].idempotencyKey,
+    '两次尝试共用同一个幂等键：换了键，外部系统就无法判断「这是同一次操作的重试」')
+  // 退避闸门真的在库里
+  const budget = await operatorGet('/api/runtime/budget?taskId=e2e-fail')
+  assert.equal(budget.budget.attemptsUsed, 2)
+  assert.ok(budget.budget.nextAttemptAtMs > Date.now() - 1000, '退避时刻必须已经写进队列')
+})
+
+test('⑥ 反复失败最终进 Dead Letter，并且能在等人工清单里找到（不静默消失）', async () => {
+  const workerId = 'w-e2e-dead'
+  let c = await claimAndRun(workerId, 'e2e-dead')
+  let last = null
+  for (let i = 0; i < 12; i++) {
+    last = await hub.fail({
+      attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId,
+      failureCode: 'runtime-unavailable', detail: '一直失败',
+    })
+    if (last.action === 'dead-letter') break
+    // 把退避闸门直接清掉（真实场景里是等它到点），避免用例真 sleep 十几秒
+    mod.db.prepare('UPDATE run_attempts SET next_attempt_at_ms = NULL WHERE id = ?').run(last.nextAttempt.attemptId)
+    const next = await hub.claim({ workerId })
+    assert.equal(next.taskId, 'e2e-dead')
+    for (const to of ['PreparingWorkspace', 'BuildingContext', 'Running']) {
+      await hub.transition({ attemptId: next.attemptId, leaseEpoch: next.leaseEpoch, workerId, to })
+    }
+    c = next
+  }
+  assert.equal(last.action, 'dead-letter', '必须有终点：无限重试不会报错，它只会永远跑下去')
+  assert.match(last.reason, /重试额度已用完/)
+
+  // 关键：它必须出现在等人工清单里。只写进历史的话，从任何界面看这条任务都只是"不见了"。
+  const held = await operatorGet('/api/runtime/held?scope=default')
+  const mine = held.items.filter((i) => i.taskId === 'e2e-dead')
+  assert.equal(mine.length, 1)
+  assert.equal(mine[0].state, 'DeadLetter')
+  assert.equal(mine[0].isLatest, true)
+  // 历史完整保留：试过几次、每次错在哪
+  const hist = await operatorGet('/api/runtime/attempt?taskId=e2e-dead')
+  assert.equal(hist.history.length, 5, '上限 5 次，一次不多一次不少')
+  assert.ok(hist.history.every((a) => a.state === 'RetryableFailure' || a.state === 'DeadLetter'))
+})
+
+test('⑦ 等人工的 UnknownOutcome 不会被后续的失败上报偷偷重试（这是它存在的全部意义）', async () => {
+  const workerId = 'w-e2e-unknown'
+  const c = await claimAndRun(workerId, 'e2e-unknown')
+  // 结果不可确认 → 挂起等人工
+  const unknown = await hub.transition({
+    attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId, outcome: 'outcome_unknown',
+  })
+  assert.equal(unknown.attempt.state, 'UnknownOutcome')
+
+  // 一个不知道它已挂起的 worker 又报了一次失败。它**不能**变成一次重试。
+  const again = await hub.fail({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId, failureCode: 'runtime-unavailable' })
+  assert.equal(again.action, 'noop')
+  assert.equal(again.reason, 'awaiting-human-reconciliation')
+  const hist = await operatorGet('/api/runtime/attempt?taskId=e2e-unknown')
+  assert.equal(hist.history.length, 1, '挂起等人工的尝试绝不能因为"又报了一次失败"就重跑——那可能重复付费')
+
+  // 人工对账：确认已发生 → 按成功继续验收
+  const resolved = await operatorPost('/api/runtime/resolve', {
+    attemptId: c.attemptId, decision: 'external-effect-happened', actor: 'general', note: '对账单确认',
+  })
+  assert.equal(resolved.attempt.state, 'Validating')
+  assert.equal(resolved.attempt.externalEffect, 'confirmed')
+  // 处置后不再挂在等人工清单上（否则人会反复处理同一条）
+  const held = await operatorGet('/api/runtime/held?scope=default')
+  assert.equal(held.items.filter((i) => i.taskId === 'e2e-unknown' && i.isLatest).length, 0)
 })

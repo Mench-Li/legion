@@ -29,8 +29,10 @@
 
 import {
   ATTEMPT_STATES,
+  DEFAULT_BACKOFF,
   isKnownAttemptState,
   recoveryDecision,
+  retryDelayMs,
   taskStatusOf,
   transitionPlan,
 } from '../orchestrator/state-machine/index.mjs'
@@ -40,6 +42,16 @@ export const DEFAULT_LEASE_TTL_MS = 120000
 
 /** 租期上限：防止调用方配出一个「永远不过期」的租期，那等于没有租约。 */
 export const MAX_LEASE_TTL_MS = 3600000
+
+/**
+ * 默认最大尝试次数（含首次）。第 5 次失败即进 Dead Letter 等人工。
+ *
+ * 上限**必须存在**：没有它时「重试」就是无限循环，而这不会报任何错——
+ * 它只是安静地一直跑，把模型配额、日志量和外部系统的调用次数一起吃掉。
+ * 数字取 5 是因为典型失败（网络抖动、上游 5xx、临时锁）在前几次就会自愈，
+ * 而把额度开到很大只是在推迟「这条任务其实需要人看一眼」这个结论。
+ */
+export const DEFAULT_MAX_ATTEMPTS = 5
 
 /** 本仓储的具名错误码。笼统的「400」无法被 metrics 分类，也无法告诉调用方下一步。 */
 export const RUN_ERRORS = Object.freeze({
@@ -51,11 +63,23 @@ export const RUN_ERRORS = Object.freeze({
   EPOCH_REQUIRED: 'EPOCH_REQUIRED',
   WORKER_REQUIRED: 'WORKER_REQUIRED',
   BAD_LEASE_TTL: 'BAD_LEASE_TTL',
+  BAD_MAX_ATTEMPTS: 'BAD_MAX_ATTEMPTS',
   UNKNOWN_STATE: 'UNKNOWN_ATTEMPT_STATE',
   UNKNOWN_OUTCOME: 'UNKNOWN_OUTCOME',
   TRANSITION_REJECTED: 'TRANSITION_REJECTED',
   SCOPE_REQUIRED: 'SCOPE_REQUIRED',
+  // 「这条尝试当前不处于需要人工处置的状态」——与「租约不是你的」是两件事，
+  // 合成一个码会让运维分不清「有人点错了按钮」与「另一个 worker 正在跑它」。
+  NOT_HELD: 'NOT_HELD',
 })
+
+/** 允许的人工处置决定。逐个列出，未登记的一律拒绝而不是猜一个默认值。 */
+export const RESOLUTION_DECISIONS = Object.freeze([
+  'external-effect-happened',
+  'external-effect-absent',
+  'dead-letter',
+  'cancel',
+])
 
 /**
  * 带具名错误码的异常。
@@ -103,7 +127,21 @@ function projectTaskStatus(attemptState, ctx = {}) {
 // ---------------------------------------------------------------- 建表
 
 /**
- * 建运行实体表。幂等（`IF NOT EXISTS`），老库自动补建，不需要迁移脚本。
+ * 给已存在的表补一列（幂等）。
+ *
+ * 为什么需要它：`CREATE TABLE IF NOT EXISTS` 对**已经存在**的表是空操作——
+ * 表建好了，新列一列都不会加上。上一版（PRT-302/303/313）已经推上远程，
+ * 也就是说线上可能有一个没有新列的库；只改 `CREATE TABLE` 的后果是
+ * **老部署在第一条 claim 上就报 `no such column`**，而新部署一切正常。
+ * 这种「新旧部署行为不同」的缺陷在单机开发里永远看不到。
+ */
+function ensureColumn(db, table, column, ddl) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name)
+  if (!cols.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`)
+}
+
+/**
+ * 建运行实体表。幂等（`IF NOT EXISTS` + `ensureColumn`），老库自动补齐，不需要迁移脚本。
  *
  * 与 `tasks` 的关系：`tasks` 是**看板实体**（人看的那份），
  * `run_attempts` 是**执行实体**（一次具体的执行尝试）。二者不是同一件事：
@@ -131,10 +169,28 @@ export function ensureRunSchema(db) {
       UNIQUE (task_id, attempt_no)
     )
   `)
+  // ── PRT-309/310/311 新增列（对老库用 ALTER TABLE 补齐）──
+  // 幂等键：**跨尝试稳定**，外部系统据此去重。刻意不含 attempt_no——含了就等于没有：
+  // 每次重试都是一个新键，外部系统无法判断"这是同一次操作的重试"。
+  ensureColumn(db, 'run_attempts', 'idempotency_key', 'TEXT')
+  // 退避闸门：排队中的尝试在这个时刻之前不可被领取（PRT-309 的"退避"要真的生效，
+  // 否则 retryDelayMs 只是一段没人用的纯函数）。
+  ensureColumn(db, 'run_attempts', 'next_attempt_at_ms', 'INTEGER')
+  // 外部副作用的对账结论：null=未对账 / 'confirmed'=已发生 / 'absent'=确认未发生。
+  // 用三态而不是布尔：布尔无法区分"确认没发生"与"还没人问过"，
+  // 而这两者一个可以安全重试、一个必须继续等人工。
+  ensureColumn(db, 'run_attempts', 'external_effect', 'TEXT')
+  // 人工处置留痕：谁在什么时候以什么理由把它结掉的。
+  ensureColumn(db, 'run_attempts', 'resolved_by', 'TEXT')
+  ensureColumn(db, 'run_attempts', 'resolved_note', 'TEXT')
+
   // 领取查询走这个索引：按状态挑最早的排队尝试。
   db.exec('CREATE INDEX IF NOT EXISTS idx_run_attempts_state ON run_attempts(state, created_at_ms)')
   db.exec('CREATE INDEX IF NOT EXISTS idx_run_attempts_task ON run_attempts(task_id, attempt_no)')
   db.exec('CREATE INDEX IF NOT EXISTS idx_run_attempts_lease ON run_attempts(lease_expires_at_ms)')
+  // 退避闸门与「等人工」列表都按这两列筛。
+  db.exec('CREATE INDEX IF NOT EXISTS idx_run_attempts_ready ON run_attempts(state, next_attempt_at_ms)')
+  db.exec('CREATE INDEX IF NOT EXISTS idx_run_attempts_idem ON run_attempts(task_id, idempotency_key)')
 
   // 迁移事件流：**只追加**。本模块不提供任何 UPDATE/DELETE 这两个表的代码路径——
   // 「不可覆盖历史」如果只是文档里的约定，下一个人为了修一个显示问题就会去改它。
@@ -197,10 +253,17 @@ function shapeAttempt(row) {
     workerId: row.worker_id,
     leaseEpoch: row.lease_epoch,
     leaseExpiresAtMs: row.lease_expires_at_ms,
+    // 幂等键交给执行方，由它在外部写请求里带上（PRT-311）。
+    // 同一任务的所有尝试共用同一个键：这正是"重试不会造成第二次副作用"的实现基础。
+    idempotencyKey: row.idempotency_key ?? null,
+    nextAttemptAtMs: row.next_attempt_at_ms ?? null,
+    externalEffect: row.external_effect ?? null,
     returnTo: row.return_to,
     outcome: row.outcome,
     failureCode: row.failure_code,
     detail: row.detail,
+    resolvedBy: row.resolved_by ?? null,
+    resolvedNote: row.resolved_note ?? null,
     createdAtMs: row.created_at_ms,
     updatedAtMs: row.updated_at_ms,
     finishedAtMs: row.finished_at_ms,
@@ -239,6 +302,25 @@ function resolveTtl(rawTtlMs) {
 }
 
 /**
+ * 校验最大尝试次数。
+ *
+ * 至少要 1（只做首次、不重试是合法配置）。`0` 与负数必须拒绝而不是"当成不重试"：
+ * `0` 更像是一个占位符或算错了的值，悄悄按"不重试"执行会让一次配置错误表现为
+ * "任务全都只试一次就进 Dead Letter"，而没人会想到去查这个配置项。
+ */
+function resolveMaxAttempts(raw) {
+  if (raw === null || raw === undefined) return DEFAULT_MAX_ATTEMPTS
+  const n = Number(raw)
+  if (!Number.isInteger(n) || n < 1) {
+    throw new ContractError(RUN_ERRORS.BAD_MAX_ATTEMPTS,
+      `maxAttempts 必须是 >= 1 的整数（收到 ${JSON.stringify(raw)}）：` +
+      '它决定「第几次失败之后进 Dead Letter」。取值非法时不得默认——' +
+      '按 0 或 NaN 继续会让额度判定变成永不成立或永远成立，两种都不会报错')
+  }
+  return n
+}
+
+/**
  * 领取候选：排队中的尝试（同一任务只取编号最大的那一次，更早的都已终结）。
  *
  * 「同一任务只取最新的」是必要的：历史尝试会永久留在库里，
@@ -250,12 +332,18 @@ function resolveTtl(rawTtlMs) {
  * 就会照常被 worker 领走执行——「将军拦截优先于队列」这句话就失效了，
  * 而且失效得毫无痕迹。让两条候选路径共用同一组任务级条件，
  * 是因为它们的差别只在「从哪一侧找这条任务」，而不是「谁有资格被执行」。
+ *
+ * `next_attempt_at_ms` 是 PRT-309 的退避闸门：只有在**到点之后**才能被领取。
+ * 这一条如果漏掉，退避就只是一段没人调用的纯函数——
+ * 一个持续失败的引擎会被立刻反复重试，把配额和日志一起打满，
+ * 而所有代码看起来都是对的。
  */
 const QUEUED_CANDIDATE_SQL = `
   SELECT a.* FROM run_attempts a
   JOIN tasks t ON t.id = a.task_id
   WHERE a.state = 'Queued'
     AND t.status = 'todo' AND COALESCE(t.hold, 0) = 0
+    AND (a.next_attempt_at_ms IS NULL OR a.next_attempt_at_ms <= ?)
     AND a.attempt_no = (SELECT MAX(b.attempt_no) FROM run_attempts b WHERE b.task_id = a.task_id)
     {scope}
   ORDER BY a.created_at_ms ASC, a.attempt_no ASC
@@ -299,10 +387,19 @@ function scopedSql(sql, scope, column) {
  * `db` 必须是一个已打开的 `node:sqlite` DatabaseSync（WAL 模式由 server 负责）。
  * `clock` 返回毫秒时间戳；**所有**判定用它，调用方给的时间一律不参与判定。
  */
-export function createRunStore({ db, clock = () => Date.now(), leaseTtlMs = DEFAULT_LEASE_TTL_MS } = {}) {
+export function createRunStore({
+  db,
+  clock = () => Date.now(),
+  leaseTtlMs = DEFAULT_LEASE_TTL_MS,
+  maxAttempts = DEFAULT_MAX_ATTEMPTS,
+  backoff = DEFAULT_BACKOFF,
+  random,
+} = {}) {
   if (db === undefined || db === null) throw new TypeError('createRunStore 需要 db')
   if (typeof clock !== 'function') throw new TypeError('createRunStore 的 clock 必须是函数')
   const defaultTtl = resolveTtl(leaseTtlMs)
+  const attemptLimit = resolveMaxAttempts(maxAttempts)
+  const backoffPolicy = Object.freeze({ ...DEFAULT_BACKOFF, ...(backoff ?? {}) })
   ensureRunSchema(db)
 
   let txDepth = 0
@@ -332,18 +429,65 @@ export function createRunStore({ db, clock = () => Date.now(), leaseTtlMs = DEFA
     }
   }
 
-  /** 新建一次尝试（编号 = 同任务最大值 + 1）。这是「重试不覆盖历史」的唯一入口。 */
-  function createAttempt({ taskId, scope, state = 'Queued', atMs, actor = null, returnTo = null }) {
+  /**
+   * 新建一次尝试（编号 = 同任务最大值 + 1）。这是「重试不覆盖历史」的唯一入口。
+   *
+   * 同时决定两件跨尝试的事（PRT-309/311）：
+   *
+   * ① **幂等键跨尝试稳定**：`idem:{taskId}`（可由调用方用 `context.idempotencyKey` 覆盖）。
+   *    刻意**不含 attempt_no**——含了就等于没有幂等键：每次重试都是一个新键，
+   *    外部系统无法判断"这是同一次操作的重试"，于是重复付费/重复推送照旧发生。
+   *    这是整个「不重复执行已确认的外部写操作」里唯一需要外部系统配合的一环，
+   *    因此它必须是一个**能拿去用**的稳定值，而不是一个每次执行都变的本地编号。
+   *
+   * ② **退避闸门**：新尝试带上 `next_attempt_at_ms`，在那之前领取查询不会选中它。
+   *    没有这一条时 `retryDelayMs` 只是一段没人调用的纯函数：
+   *    一个持续失败的引擎会被立刻反复重试，把配额和日志一起打满。
+   */
+  function createAttempt({ taskId, scope, state = 'Queued', atMs, actor = null, returnTo = null, idempotencyKey = null, nextAttemptAtMs = null }) {
     const maxRow = db.prepare('SELECT COALESCE(MAX(attempt_no), 0) AS n FROM run_attempts WHERE task_id = ?').get(taskId)
     const attemptNo = Number(maxRow.n) + 1
     const id = `att:${taskId}:${attemptNo}`
+    const idem = idempotencyKey !== null && idempotencyKey !== undefined
+      ? String(idempotencyKey)
+      : `idem:${taskId}`
     db.prepare(
-      `INSERT INTO run_attempts (id, task_id, scope, attempt_no, state, worker_id, lease_epoch, lease_expires_at_ms, return_to, created_at_ms, updated_at_ms)
-       VALUES (?, ?, ?, ?, ?, NULL, 0, NULL, ?, ?, ?)`,
-    ).run(id, taskId, scope, attemptNo, state, returnTo, atMs, atMs)
+      `INSERT INTO run_attempts (id, task_id, scope, attempt_no, state, worker_id, lease_epoch, lease_expires_at_ms, return_to, idempotency_key, next_attempt_at_ms, created_at_ms, updated_at_ms)
+       VALUES (?, ?, ?, ?, ?, NULL, 0, NULL, ?, ?, ?, ?, ?)`,
+    ).run(id, taskId, scope, attemptNo, state, returnTo, idem, nextAttemptAtMs, atMs, atMs)
     const row = rowOf(db, id)
     appendEvent(db, { attempt: row, from: null, to: state, actor, epoch: 0, reason: 'attempt-created', atMs })
     return row
+  }
+
+  /**
+   * 还有没有重试额度。
+   *
+   * 用 `attempt_no` 而不是"已经失败过几次"：尝试编号是**唯一不会漂**的计数
+   * （每次重试都 +1，且历史不可覆盖），而"失败次数"要靠遍历历史去数，
+   * 一旦有人补写了一条事件就会算错。
+   */
+  function retryBudgetRemaining(attemptNo) {
+    return attemptNo < attemptLimit
+  }
+
+  /**
+   * 退避时长（第 N 次尝试失败后到下一次可领取之间的等待）。
+   *
+   * `random` 由仓储注入而不是各调用点自己取随机数：jitter 若用 `Math.random`，
+   * 测试就只能断言"大约在某个区间"，而**退避算错**这件事恰好只会表现为
+   * "重试得太快"——一个只有在生产里才看得见的缺陷。
+   */
+  function backoffFor(attemptNo) {
+    const r = retryDelayMs(attemptNo, {
+      baseMs: backoffPolicy.baseMs,
+      factor: backoffPolicy.factor,
+      maxMs: backoffPolicy.maxMs,
+      jitter: backoffPolicy.jitter,
+      random,
+    })
+    if (r.ok !== true) throw new ContractError(r.code, r.message)
+    return r.delayMs
   }
 
   /**
@@ -366,7 +510,7 @@ export function createRunStore({ db, clock = () => Date.now(), leaseTtlMs = DEFA
    * 拆成两个可分别调用的公开方法同样不行：只终结不新建 → 任务卡死没人能领；
    * 只新建不终结 → 同一任务两条活跃尝试被两个 worker 同时领走。两者都不报错。
    */
-  function openNextAttempt(row, { atMs, actor, reason, closing }) {
+  function openNextAttempt(row, { atMs, actor, reason, closing, failureCode = null, detail = null, nextAttemptAtMs = null, createNext = true, finalize = null }) {
     if (!isKnownAttemptState(closing)) {
       throw new ContractError(RUN_ERRORS.UNKNOWN_STATE, `closing「${closing}」不是已登记状态`)
     }
@@ -381,17 +525,101 @@ export function createRunStore({ db, clock = () => Date.now(), leaseTtlMs = DEFA
         { stateMachineCode: closingPlan.code, from: row.state, to: closing })
     }
     const invalidatedEpoch = Number(row.lease_epoch) + 1
-    db.prepare('UPDATE run_attempts SET state = ?, lease_epoch = ?, updated_at_ms = ?, finished_at_ms = ? WHERE id = ? AND lease_epoch = ?')
-      .run(closing, invalidatedEpoch, atMs, atMs, row.id, row.lease_epoch)
+    db.prepare(
+      `UPDATE run_attempts SET state = ?, lease_epoch = ?, updated_at_ms = ?, finished_at_ms = ?,
+         failure_code = COALESCE(?, failure_code), detail = COALESCE(?, detail)
+       WHERE id = ? AND lease_epoch = ?`,
+    ).run(closing, invalidatedEpoch, atMs, atMs, failureCode ?? null, detail ?? null, row.id, row.lease_epoch)
     const closed = rowOf(db, row.id)
     appendEvent(db, { attempt: closed, from: row.state, to: closing, actor, epoch: row.lease_epoch, reason, atMs })
     appendEvent(db, {
       attempt: closed, from: closing, to: closing, actor, epoch: invalidatedEpoch,
       reason: `${reason}:lease-invalidated`, atMs,
     })
-    const fresh = createAttempt({ taskId: row.task_id, scope: row.scope, state: 'Queued', atMs, actor })
-    appendEvent(db, { attempt: fresh, from: closing, to: 'Queued', actor, epoch: 0, reason: `${reason}:new-attempt`, atMs })
+    appendEvent(db, { attempt: closed, from: closing, to: closing, actor, epoch: invalidatedEpoch, reason: `${reason}:resolved`, atMs })
+
+    // 额度用完时还要再走一步：`RetryableFailure → DeadLetter`。
+    // 不能直接把 `Running` 之类的状态写成 `DeadLetter`——那两步之间隔着一次
+    // "它是一次失败"的判定，而 `Running → DeadLetter` 在状态机里根本不是合法边。
+    // 分两步写还有一个好处：历史里能看出「它先失败、后因额度耗尽被丢弃」。
+    if (finalize !== null && finalize !== undefined) {
+      const finalizePlan = transitionPlan(closed.state, finalize, {})
+      if (finalizePlan.ok !== true) {
+        throw fail(RUN_ERRORS.TRANSITION_REJECTED,
+          `${closed.state} → ${finalize} 被拒绝：${finalizePlan.message}`,
+          { stateMachineCode: finalizePlan.code, from: closed.state, to: finalize })
+      }
+      db.prepare('UPDATE run_attempts SET state = ?, updated_at_ms = ? WHERE id = ?')
+        .run(finalize, atMs, closed.id)
+      const finalized = rowOf(db, closed.id)
+      appendEvent(db, { attempt: finalized, from: closed.state, to: finalize, actor, epoch: invalidatedEpoch, reason: `${reason}:finalize(${finalize})`, atMs })
+    }
+
+    const settled = rowOf(db, row.id)
+    if (createNext !== true) return settled
+
+    const fresh = createAttempt({
+      taskId: row.task_id, scope: row.scope, state: 'Queued', atMs, actor,
+      idempotencyKey: row.idempotency_key ?? null,
+      nextAttemptAtMs: nextAttemptAtMs ?? null,
+    })
+    appendEvent(db, { attempt: fresh, from: settled.state, to: 'Queued', actor, epoch: 0, reason: `${reason}:new-attempt`, atMs })
     return fresh
+  }
+
+  /**
+   * 「这次失败之后该怎么办」的**唯一**决策点（PRT-309）。
+   *
+   * 三种去向，且只有这三种：
+   *   - 还有重试额度 → 终结当前尝试为 `RetryableFailure`，按退避排一次新尝试；
+   *   - 额度用完 → 终结为 **`DeadLetter`**（终态），并把它留在"等人工"列表里；
+   *   - 已越过外部写边界 → 不走这里（由调用方先判 `UnknownOutcome`）。
+   *
+   * 为什么必须合成一个函数：把「重试」与「放弃」分成两处调用时，
+   * 漏掉"额度用完"那条分支的后果是**无限重试**——而无限重试不会报错，
+   * 它只是安静地永远跑下去，把配额、日志和外部系统的调用次数一起吃掉。
+   *
+   * 退避是**真的生效**（写进 `next_attempt_at_ms`，领取查询会过滤），
+   * 不是只算一个没人用的数字。
+   */
+  function scheduleRetry(row, { atMs, actor, reason, failureCode = null, detail = null, delayMs = null }) {
+    const budget = retryBudgetRemaining(Number(row.attempt_no))
+    // `delayMs` 显式覆盖退避策略。唯一的使用者是**租约过期回收**：
+    // 那种情况下"等待"已经由租期本身（默认 120s）付过了，
+    // 再加一段退避只会推迟一条本来可能完全正常的任务。
+    // 退避策略要防的是"对已知失败的依赖快速重试"，而租约过期是**未知原因**的中断
+    // （机器重启、OOM、被强杀），它的等待已经足够长。
+    // 额度判定则必须保留——否则"每次快失败就被杀"的任务会永远重试下去。
+    const delay = delayMs === null || delayMs === undefined ? backoffFor(Number(row.attempt_no)) : Math.max(0, Number(delayMs))
+    const nextAtMs = budget && delay > 0 ? atMs + delay : null
+    const settled = openNextAttempt(row, {
+      atMs, actor,
+      // 无论有没有额度，**先**终结为 RetryableFailure（这是「它失败了一次」这个事实），
+      // 没额度时再走一步 `RetryableFailure → DeadLetter`（这是「我们决定不再重试」这个决定）。
+      closing: 'RetryableFailure',
+      finalize: budget ? null : 'DeadLetter',
+      reason: budget ? reason : `${reason}:retry-budget-exhausted(${attemptLimit})`,
+      failureCode, detail,
+      nextAttemptAtMs: nextAtMs,
+      createNext: budget,
+    })
+    if (budget) {
+      return Object.freeze({
+        action: 'retry-new-attempt',
+        attempt: shapeAttempt(settled),
+        nextAttemptAtMs: nextAtMs,
+        attemptsUsed: Number(row.attempt_no),
+        maxAttempts: attemptLimit,
+      })
+    }
+    return Object.freeze({
+      action: 'dead-letter',
+      attempt: shapeAttempt(settled),
+      nextAttemptAtMs: null,
+      attemptsUsed: Number(row.attempt_no),
+      maxAttempts: attemptLimit,
+      reason: `重试额度已用完（已尝试 ${row.attempt_no} 次，上限 ${attemptLimit}）：不再自动重试，进 Dead Letter 等人工处置`,
+    })
   }
 
   /**
@@ -409,7 +637,9 @@ export function createRunStore({ db, clock = () => Date.now(), leaseTtlMs = DEFA
     return withTx(() => {
       const atMs = clock()
       const queued = scopedSql(QUEUED_CANDIDATE_SQL, scope, 'a.scope')
-      let candidate = db.prepare(queued.sql).get(...queued.params)
+      // 第一个参数是退避闸门（服务端时钟），第二个才是可选的 scope——
+      // 顺序反了会让 scope 被当成时间比较，于是"永远领取不到任何任务"。
+      let candidate = db.prepare(queued.sql).get(atMs, ...queued.params)
 
       if (candidate === undefined || candidate === null) {
         // 没有排队尝试 → 把一个可入队的看板任务变成第 1 次尝试
@@ -691,10 +921,26 @@ export function createRunStore({ db, clock = () => Date.now(), leaseTtlMs = DEFA
         })
         if (decision.ok !== true) throw new ContractError('EXTERNAL_EFFECT_UNKNOWN', decision.message)
         if (decision.action === 'retry-new-attempt') {
-          // 安全：未越过外部写边界。终结当前尝试并排队一次新尝试（历史保留）。
-          const fresh = openNextAttempt(row, { atMs, actor: 'recovery', reason, closing: 'RetryableFailure' })
-          projectToTask(db, fresh, 'Queued', atMs)
-          recovered.push(Object.freeze({ attemptId: row.id, action: 'retry-new-attempt', newAttemptId: fresh.id, reason: decision.reason }))
+          // 安全：未越过外部写边界。终结当前尝试并按**额度 + 退避**排队下次（历史保留）。
+          //
+          // 这里必须走 scheduleRetry 而不是直接 openNextAttempt：
+          // 「每次快要失败时就被杀掉」是最难查的一种故障（没有失败上报、没有错误日志，
+          // 只有租约一次次过期）。若回收路径不查额度，这种任务会**永远重试下去**，
+          // 而正常失败路径上的额度上限完全不起作用——两条产生新尝试的路径
+          // 必须共用同一个额度判定，否则等于没有上限。
+          const outcome = scheduleRetry(row, { atMs, actor: 'recovery', reason, failureCode: 'lease-expired', delayMs: 0 })
+          const settled = rowOf(db, row.id)
+          const taskStatus = projectToTask(db, settled, settled.state, atMs, { retryBudgetRemaining: outcome.action === 'retry-new-attempt' })
+          recovered.push(Object.freeze({
+            attemptId: row.id,
+            action: outcome.action,
+            newAttemptId: outcome.attempt?.attemptId ?? null,
+            nextAttemptAtMs: outcome.nextAttemptAtMs,
+            attemptsUsed: outcome.attemptsUsed,
+            maxAttempts: outcome.maxAttempts,
+            taskStatus,
+            reason: decision.reason,
+          }))
         } else if (decision.action === 'mark-unknown-outcome') {
           // 危险：可能已经写过外部系统。挂起等人工，绝不自动重试。
           db.prepare("UPDATE run_attempts SET state = 'UnknownOutcome', updated_at_ms = ? WHERE id = ? AND lease_epoch = ?")
@@ -734,6 +980,271 @@ export function createRunStore({ db, clock = () => Date.now(), leaseTtlMs = DEFA
   }
 
   /** 运行面总览：每个状态有多少条尝试，以及有多少租约已过期。 */
+  /**
+   * 「这次执行失败了，按策略处置」——worker 报告失败时调用的**唯一**入口（PRT-309）。
+   *
+   * 为什么不让调用方自己 `transition({to:'RetryableFailure'})` 之后再单独排重试：
+   * 分成两步时，漏掉第二步的后果是**任务永远停在 RetryableFailure**——
+   * 它既没有新尝试可领（队列里没有 Queued），也不在等人工列表里（因为它不是
+   * DeadLetter/UnknownOutcome），于是从任何界面看它都只是"失败了"，
+   * 而没有任何人会去处理它。这类缺陷不会报错，只会让任务安静地停在那里。
+   *
+   * `leaseEpoch` 可选：worker 报告时必须给（否则它可能是在替别人报失败）；
+   * 系统侧（回收、对账）用自己的 CAS 语义，不给 epoch。
+   */
+  function failAndRetry({ attemptId, leaseEpoch = null, actor, failureCode = null, detail = null, reason = 'failure-reported', nowMs = null } = {}) {
+    if (typeof actor !== 'string' || actor.trim() === '') {
+      throw new ContractError(RUN_ERRORS.WORKER_REQUIRED, 'failAndRetry 需要 actor（谁报告的失败）')
+    }
+    const ignoredClientFields = []
+    if (nowMs !== null && nowMs !== undefined) ignoredClientFields.push('nowMs')
+    return withTx(() => {
+      const atMs = clock()
+      const row = rowOf(db, attemptId)
+      if (row === null) throw fail(RUN_ERRORS.ATTEMPT_NOT_FOUND, `运行尝试不存在：${attemptId}`, { attemptId }, 404)
+      if (!isKnownAttemptState(row.state)) {
+        throw fail(RUN_ERRORS.UNKNOWN_STATE, `库里的尝试状态「${row.state}」不是已登记状态之一`, { state: row.state }, 500)
+      }
+      if (leaseEpoch !== null && leaseEpoch !== undefined) {
+        const epoch = requireEpoch(leaseEpoch)
+        if (row.lease_epoch !== epoch) {
+          throw fail(RUN_ERRORS.LEASE_EPOCH_STALE,
+            `leaseEpoch 不符：请求 ${epoch}，实际 ${row.lease_epoch}——不能替别人报失败`,
+            { currentEpoch: row.lease_epoch, currentWorkerId: row.worker_id })
+        }
+      }
+      if (['Completed', 'Cancelled', 'DeadLetter'].includes(row.state)) {
+        // 已经终结的尝试不再改变去向（重复上报是正常竞态，不是错误）
+        return Object.freeze({ ok: true, alreadySettled: true, action: 'noop', attempt: shapeAttempt(row), serverTimeMs: atMs, ignoredClientFields: Object.freeze(ignoredClientFields) })
+      }
+      if (row.state === 'RetryableFailure' || row.state === 'UnknownOutcome') {
+        // 这条尝试**已经结算过**了：
+        //   · `RetryableFailure` = 它已被判为失败，而那次失败排出的新尝试已经存在；
+        //   · `UnknownOutcome`   = 它在等人工对账，绝不能因为"又报了一次失败"就重试
+        //     （那正是 Unknown Outcome 存在的全部意义）。
+        // 这里必须是 no-op。若继续往下走，`RetryableFailure` 会再触发一次
+        // `RetryableFailure → Queued`，于是**一次失败被结算两次**、产生两条排队尝试，
+        // 之后同一条任务会被两个 worker 各领一条——重复副作用，而没有任何报错。
+        return Object.freeze({
+          ok: true, alreadySettled: true, action: 'noop',
+          attempt: shapeAttempt(row),
+          reason: row.state === 'UnknownOutcome' ? 'awaiting-human-reconciliation' : 'already-settled',
+          serverTimeMs: atMs, ignoredClientFields: Object.freeze(ignoredClientFields),
+        })
+      }
+      // 先落到 `RetryableFailure`（如果还不是），再统一走重试/额度判定。
+      const toRetryable = row.state === 'RetryableFailure' ? null : 'RetryableFailure'
+      if (toRetryable !== null) {
+        const plan = transitionPlan(row.state, toRetryable, {})
+        if (plan.ok !== true) {
+          throw fail(RUN_ERRORS.TRANSITION_REJECTED, `${row.state} → RetryableFailure 被拒绝：${plan.message}`,
+            { stateMachineCode: plan.code, from: row.state, to: toRetryable })
+        }
+        db.prepare('UPDATE run_attempts SET state = ?, updated_at_ms = ? WHERE id = ?')
+          .run(toRetryable, atMs, attemptId)
+        const mid = rowOf(db, attemptId)
+        appendEvent(db, {
+          attempt: mid, from: row.state, to: toRetryable, actor, epoch: row.lease_epoch,
+          reason, requiresPersist: plan.requiresPersist, atMs,
+        })
+      }
+      const settled = rowOf(db, attemptId)
+      const outcome = scheduleRetry(settled, { atMs, actor, reason, failureCode, detail })
+      // 投影按**最终**状态算：额度用完时是 DeadLetter（任务进 blocked），
+      // 用中间态 RetryableFailure 投影会让任务短暂显示成"待办"
+      const finalRow = rowOf(db, attemptId)
+      const taskStatus = projectToTask(db, finalRow, finalRow.state, atMs, { retryBudgetRemaining: outcome.action === 'retry-new-attempt' })
+      return Object.freeze({
+        ok: true,
+        action: outcome.action,
+        attempt: shapeAttempt(finalRow),
+        nextAttempt: outcome.attempt,
+        nextAttemptAtMs: outcome.nextAttemptAtMs,
+        attemptsUsed: outcome.attemptsUsed,
+        maxAttempts: outcome.maxAttempts,
+        reason: outcome.reason ?? null,
+        taskStatus,
+        serverTimeMs: atMs,
+        ignoredClientFields: Object.freeze(ignoredClientFields),
+      })
+    })
+  }
+
+  /**
+   * 「等人工处置」清单（PRT-310）：`UnknownOutcome`（外部写结果不可确认）
+   * 与 `DeadLetter`（重试额度用完）两类。
+   *
+   * 这两类**必须**能从界面上看到并逐个结掉，否则：
+   *   - `UnknownOutcome` 挂着的任务没人知道，队列看起来只是"没有任务"；
+   *   - `DeadLetter` 只是历史里的一条记录，用户以为它还在跑。
+   * 因此这个列表是"不丢任务"在**运维意义上**的落点：状态机保证不会静默重跑，
+   * 这个列表保证不会静默消失。
+   */
+  function listHeld({ scope = null, limit = 100, nowMs = null } = {}) {
+    const ignoredClientFields = []
+    if (nowMs !== null && nowMs !== undefined) ignoredClientFields.push('nowMs')
+    const atMs = clock()
+    const cap = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 1000) : 100
+    const rows = scope === null
+      ? db.prepare(
+        `SELECT * FROM run_attempts WHERE state IN ('UnknownOutcome','DeadLetter')
+          ORDER BY updated_at_ms DESC LIMIT ?`).all(cap)
+      : db.prepare(
+        `SELECT * FROM run_attempts WHERE state IN ('UnknownOutcome','DeadLetter') AND scope = ?
+          ORDER BY updated_at_ms DESC LIMIT ?`).all(scope, cap)
+    const items = rows.map((row) => {
+      // 只看这一条任务**最新**的尝试是否就是这一条：历史里的 DeadLetter 不该继续出现在待办列表上，
+      // 否则每次重试都会让列表变长，人工要处理的清单里混进一堆早已被替代的条目。
+      const latest = db.prepare('SELECT MAX(attempt_no) AS n FROM run_attempts WHERE task_id = ?').get(row.task_id)
+      return Object.freeze({
+        ...shapeAttempt(row),
+        isLatest: Number(row.attempt_no) === Number(latest.n),
+        taskStatus: (db.prepare('SELECT status FROM tasks WHERE id = ?').get(row.task_id) ?? {}).status ?? null,
+      })
+    })
+    const actionable = items.filter((i) => i.isLatest)
+    return Object.freeze({
+      ok: true,
+      serverTimeMs: atMs,
+      total: items.length,
+      actionable: actionable.length,
+      // `actionable` 才是需要人处理的；全部历史条目一并返回供追溯
+      items: Object.freeze(items),
+      ignoredClientFields: Object.freeze(ignoredClientFields),
+    })
+  }
+
+  /**
+   * 人工处置一次「结果不可确认」或「已进 Dead Letter」的尝试（PRT-310/311）。
+   *
+   * `decision` 的四个取值各自对应一个**不同的事实**，缺一不可：
+   *
+   * | decision | 事实 | 去向 |
+   * | --- | --- | --- |
+   * | `external-effect-happened` | 对账确认外部写已生效 | UnknownOutcome → Validating（按成功走验收，**不重跑**） |
+   * | `external-effect-absent` | 对账确认外部写未生效 | UnknownOutcome → RetryableFailure → 重试/额度判定 |
+   * | `dead-letter` | 查不清 / 决定人工兜底 | → DeadLetter |
+   * | `cancel` | 决定不做 | → Cancelled |
+   *
+   * 「对账确认」这件事没有自动等价物，因此它必须由人（或一个真正做过对账的探测）
+   * 显式说出来。这里不提供"默认当成没发生"的便利入口：那正是重复付费的来源。
+   */
+  function resolveAttempt({ attemptId, decision, actor, note = null, nowMs = null } = {}) {
+    if (!RESOLUTION_DECISIONS.includes(decision)) {
+      throw new ContractError('BAD_DECISION',
+        `未知的处置决定「${decision}」。可选：${RESOLUTION_DECISIONS.join(' / ')}（缺省不做任何默认处置——` +
+        '猜错的两种结果分别是"重复执行一次已生效的外部写"与"静默丢弃一次已完成的交付"）')
+    }
+    if (typeof actor !== 'string' || actor.trim() === '') {
+      throw new ContractError(RUN_ERRORS.WORKER_REQUIRED, 'resolveAttempt 需要 actor（谁做的决定，要留痕）')
+    }
+    const ignoredClientFields = []
+    if (nowMs !== null && nowMs !== undefined) ignoredClientFields.push('nowMs')
+    return withTx(() => {
+      const atMs = clock()
+      const row = rowOf(db, attemptId)
+      if (row === null) throw fail(RUN_ERRORS.ATTEMPT_NOT_FOUND, `运行尝试不存在：${attemptId}`, { attemptId }, 404)
+      if (!isKnownAttemptState(row.state)) {
+        throw fail(RUN_ERRORS.UNKNOWN_STATE, `库里的尝试状态「${row.state}」不是已登记状态之一`, { state: row.state }, 500)
+      }
+      if (!['UnknownOutcome', 'DeadLetter', 'RetryableFailure'].includes(row.state)) {
+        throw fail(RUN_ERRORS.NOT_HELD,
+          `这条尝试的状态是 ${row.state}，不需要人工处置（只有 UnknownOutcome / DeadLetter / RetryableFailure 需要）`,
+          { state: row.state })
+      }
+
+      const setVerdict = (verdict) => {
+        db.prepare('UPDATE run_attempts SET external_effect = ?, resolved_by = ?, resolved_note = ?, updated_at_ms = ? WHERE id = ?')
+          .run(verdict, actor, note, atMs, attemptId)
+      }
+      // 状态迁移仍然过状态机：人工处置不是"绕过规则的后门"，
+      // 它只是提供了规则要求的那个输入（对账结论）。
+      const move = (to, ctx = {}) => {
+        const current = rowOf(db, attemptId)
+        const plan = transitionPlan(current.state, to, ctx)
+        if (plan.ok !== true) {
+          throw fail(RUN_ERRORS.TRANSITION_REJECTED, plan.message, { stateMachineCode: plan.code, from: current.state, to })
+        }
+        if (plan.idempotent === true) return current
+        const finishedAtMs = ['Completed', 'Cancelled', 'DeadLetter'].includes(to) ? atMs : null
+        db.prepare('UPDATE run_attempts SET state = ?, updated_at_ms = ?, finished_at_ms = COALESCE(?, finished_at_ms) WHERE id = ?')
+          .run(to, atMs, finishedAtMs, attemptId)
+        const next = rowOf(db, attemptId)
+        appendEvent(db, {
+          attempt: next, from: current.state, to, actor, epoch: current.lease_epoch,
+          reason: `human-resolution:${decision}`, requiresPersist: plan.requiresPersist, atMs,
+        })
+        return next
+      }
+
+      if (decision === 'cancel') {
+        const next = move('Cancelled')
+        projectToTask(db, next, 'Cancelled', atMs)
+        return Object.freeze({ ok: true, decision, attempt: shapeAttempt(next), action: 'cancelled', serverTimeMs: atMs, ignoredClientFields: Object.freeze(ignoredClientFields) })
+      }
+      if (decision === 'dead-letter') {
+        setVerdict(row.external_effect ?? null)
+        // `UnknownOutcome → DeadLetter` 与 `RetryableFailure → DeadLetter` 都是合法边
+        const next = move('DeadLetter')
+        projectToTask(db, next, 'DeadLetter', atMs, { retryBudgetRemaining: false })
+        return Object.freeze({ ok: true, decision, attempt: shapeAttempt(next), action: 'dead-letter', serverTimeMs: atMs, ignoredClientFields: Object.freeze(ignoredClientFields) })
+      }
+      if (decision === 'external-effect-happened') {
+        setVerdict('confirmed')
+        const next = move('Validating', { externalEffectConfirmed: true })
+        const taskStatus = projectToTask(db, next, 'Validating', atMs)
+        return Object.freeze({
+          ok: true, decision, attempt: shapeAttempt(next), action: 'continue-validation', taskStatus,
+          serverTimeMs: atMs, ignoredClientFields: Object.freeze(ignoredClientFields),
+        })
+      }
+      // external-effect-absent / retry：确认没发生 → 降级为可重试失败，再走额度判定
+      setVerdict('absent')
+      let current = row
+      if (current.state === 'UnknownOutcome') {
+        current = move('RetryableFailure', { externalEffectConfirmed: false })
+      } else if (current.state === 'DeadLetter' || current.state === 'RetryableFailure') {
+        // 已经从 DeadLetter 恢复：人工可以显式要求再试一次。
+        // 这是唯一允许离开 DeadLetter 的路径，且必然产生**新的一次尝试**（历史保留）。
+        if (current.state === 'DeadLetter') {
+          throw fail(RUN_ERRORS.NOT_HELD,
+            'DeadLetter 是终态：人工确认外部写未发生后，请新建任务或显式重新打开（不要在终态上重试）',
+            { state: current.state })
+        }
+      }
+      const outcome = scheduleRetry(current, { atMs, actor, reason: `human-resolution:${decision}`, failureCode: 'reconciled-no-external-effect', detail: note })
+      const finalRow = rowOf(db, attemptId)
+      const taskStatus = projectToTask(db, finalRow, finalRow.state, atMs, { retryBudgetRemaining: outcome.action === 'retry-new-attempt' })
+      return Object.freeze({
+        ok: true,
+        decision,
+        attempt: shapeAttempt(finalRow),
+        action: outcome.action === 'retry-new-attempt' ? 'retry-new-attempt' : 'dead-letter',
+        nextAttempt: outcome.attempt,
+        nextAttemptAtMs: outcome.nextAttemptAtMs,
+        attemptsUsed: outcome.attemptsUsed,
+        maxAttempts: outcome.maxAttempts,
+        taskStatus,
+        serverTimeMs: atMs,
+        ignoredClientFields: Object.freeze(ignoredClientFields),
+      })
+    })
+  }
+
+  /** 重试额度读数（诊断与界面用）。 */
+  function retryBudgetOf(taskId) {
+    const latest = db.prepare('SELECT * FROM run_attempts WHERE task_id = ? ORDER BY attempt_no DESC LIMIT 1').get(taskId)
+    if (latest === undefined) return Object.freeze({ taskId, attemptsUsed: 0, maxAttempts: attemptLimit, remaining: attemptLimit })
+    return Object.freeze({
+      taskId,
+      attemptsUsed: Number(latest.attempt_no),
+      maxAttempts: attemptLimit,
+      remaining: Math.max(0, attemptLimit - Number(latest.attempt_no)),
+      nextAttemptAtMs: latest.next_attempt_at_ms ?? null,
+      idempotencyKey: latest.idempotency_key ?? null,
+    })
+  }
+
   function stats() {
     // 只用服务端时钟。「有多少租约已过期」是一个**判定**而不是一次查询参数：
     // 允许调用方传时间，就等于允许它把「全都过期」或「一个都没过期」说出来。
@@ -753,10 +1264,17 @@ export function createRunStore({ db, clock = () => Date.now(), leaseTtlMs = DEFA
 
   return Object.freeze({
     claim, heartbeat, transition, release, recoverExpired,
+    // PRT-309：失败结算的唯一入口（重试 / 退避 / 额度耗尽 → Dead Letter）
+    failAndRetry, scheduleRetry, retryBudgetOf,
+    // PRT-310/311：等人工清单与人工处置
+    listHeld, resolveAttempt,
     getAttempt, historyOf, eventsOf, stats,
     withTx,
     /** 供测试与诊断：当前生效的默认租期。 */
     defaultLeaseTtlMs: defaultTtl,
+    /** 供测试与诊断：当前生效的最大尝试次数与退避策略。 */
+    maxAttempts: attemptLimit,
+    backoffPolicy,
   })
 }
 

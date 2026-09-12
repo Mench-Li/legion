@@ -111,6 +111,16 @@ export function createHubClient({ baseUrl, token, fetchImpl = globalThis.fetch, 
       call('/api/runtime/transition', { attemptId, leaseEpoch, workerId, outcome, to, context, reason }),
     release: ({ attemptId, leaseEpoch, workerId, reason }) => call('/api/runtime/release', { attemptId, leaseEpoch, workerId, reason }),
     /**
+     * 上报失败并让**服务端**决定去向（PRT-309）。
+     *
+     * 刻意不提供 `transition({to:'RetryableFailure'})` 作为替代路径：
+     * 那条路径只把尝试标成失败，"接下来怎么办"没人做，任务会永远停在中间态
+     * （既没有可领的队列，也不在等人工清单里）。让 worker 有能力绕过这个入口，
+     * 就等于让它有能力制造那个缺陷。
+     */
+    fail: ({ attemptId, leaseEpoch, workerId, failureCode = null, detail = null, reason = null }) =>
+      call('/api/runtime/fail', { attemptId, leaseEpoch, workerId, failureCode, detail, reason }),
+    /**
      * 回收过期租约（PRT-310 的入口）。
      *
      * `externalEffectPossibleStates` 必须由调用方给出——服务端拒绝猜

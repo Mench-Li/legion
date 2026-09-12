@@ -3333,6 +3333,64 @@ async function handle(req, res, stripPrefix) {
       json(res, 200, { ok: true, ...runStore.stats() })
       return
     }
+    // ── 运行面（PRT-309/310/311）：失败结算、等人工清单、人工处置 ──
+    if (req.method === 'POST' && path === '/api/runtime/fail') {
+      // worker 报告失败的**唯一**入口。为什么不让 worker 自己发
+      // `transition({to:'RetryableFailure'})` 再另外排重试：分成两步时，
+      // 漏掉第二步的后果是任务永远停在 RetryableFailure——它既没有可领的队列，
+      // 也不在等人工列表里，从任何界面看都只是"失败了"，而没有人会去处理它。
+      await handleRun(req, res, (body) => {
+        const r = runStore.failAndRetry({
+          attemptId: requireString(body, 'attemptId'),
+          leaseEpoch: body.leaseEpoch ?? null,
+          actor: requireString(body, 'workerId'),
+          failureCode: body.failureCode ?? null,
+          detail: body.detail ?? null,
+          reason: body.reason ?? 'failure-reported',
+          nowMs: body.nowMs ?? null,
+        })
+        try { settleGoalsOfScope(getTask(r.attempt.taskId).scope) } catch { /* 任务不存在时不结算 */ }
+        return r
+      })
+      return
+    }
+    if (req.method === 'GET' && path === '/api/runtime/held') {
+      // 「等人工处置」清单：UnknownOutcome（结果不可确认）与 DeadLetter（额度耗尽）。
+      // 这两类必须能从界面上看到并逐个结掉，否则状态机保证的"不会静默重跑"
+      // 会变成"静默消失"——队列看起来只是没有任务。
+      const scope = url.searchParams.get('scope')
+      const limitRaw = url.searchParams.get('limit')
+      json(res, 200, runStore.listHeld({
+        scope: scope !== null && scope.length > 0 ? scope : null,
+        limit: limitRaw === null ? 100 : Number(limitRaw),
+      }))
+      return
+    }
+    if (req.method === 'POST' && path === '/api/runtime/resolve') {
+      // 人工处置：对账结论是**输入**，不是可以默认的东西。
+      // 四个决定各自对应一个不同的事实（已发生 / 未发生 / 放弃 / 取消），
+      // 没有"默认当成没发生"这种便利入口——那正是重复付费的来源。
+      await handleRun(req, res, (body) => {
+        const r = runStore.resolveAttempt({
+          attemptId: requireString(body, 'attemptId'),
+          decision: requireString(body, 'decision'),
+          actor: requireString(body, 'actor'),
+          note: body.note ?? null,
+          nowMs: body.nowMs ?? null,
+        })
+        try { settleGoalsOfScope(getTask(r.attempt.taskId).scope) } catch { /* 任务不存在时不结算 */ }
+        return r
+      })
+      return
+    }
+    if (req.method === 'GET' && path === '/api/runtime/budget') {
+      // 重试额度读数：界面上要能回答"这条任务还能自动重试几次、下次什么时候"。
+      // 答不出来时用户看到的只是"它又失败了"，而无法判断该不该干预。
+      const taskId = url.searchParams.get('taskId')
+      if (taskId === null || taskId.length === 0) { json(res, 400, { ok: false, error: '缺少 taskId', code: 'MISSING_PARAM' }); return }
+      json(res, 200, { ok: true, budget: runStore.retryBudgetOf(taskId), serverTimeMs: Date.now() })
+      return
+    }
     if (req.method === 'GET' && path === '/api/runtime/attempt') {
       // 诊断用只读端点：一条尝试 + 它所属任务的全部历史 + 事件流。
       // 「试过几次、每次错在哪」如果只能靠翻日志，那它实际上是不可查的。

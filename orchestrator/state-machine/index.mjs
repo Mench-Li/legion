@@ -35,6 +35,7 @@ export {
 } from './transitions.mjs'
 
 export {
+  DEFAULT_BACKOFF,
   FAILURE_CLASSES,
   FAILURE_CODES,
   RECOVERY_ACTIONS,

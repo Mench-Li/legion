@@ -15,9 +15,16 @@
 //
 // ③ **`UnknownOutcome` 不得回到队列。** 这是本文件最重要的一条。
 //    外部写操作的结果无法确认时自动重试 = 可能重复付费/重复下单/重复推送。
-//    因此 `UnknownOutcome` 的出边只有 `DeadLetter` 与 `Cancelled`，
-//    且违反时返回**具名**错误码 `UNKNOWN_OUTCOME_NOT_RETRYABLE`，
-//    而不是笼统的 ILLEGAL_TRANSITION——具名才能被 metrics 单独统计与告警。
+//    因此 `UnknownOutcome → Queued` 永远非法，且违反时返回**具名**错误码
+//    `UNKNOWN_OUTCOME_NOT_RETRYABLE`，而不是笼统的 ILLEGAL_TRANSITION——
+//    具名才能被 metrics 单独统计与告警。
+//
+//    但"不许自动重试"不等于"只能放弃"。人在对账之后能得出两个确定结论，
+//    状态机必须能把它们记下来，否则：
+//      · 确认已发生 → 只能进 DeadLetter（把做好的交付当失败重做）或 Cancelled（静默丢弃）；
+//      · 确认未发生 → 只能挂在那儿，一个本可安全重试的任务永远等人工。
+//    因此另有 `Validating`（已发生）与 `RetryableFailure`（未发生）两条边，
+//    两者都要求显式的 `externalEffectConfirmed`。见 `UnknownOutcome` 的注释。
 // ============================================================================
 
 import { ATTEMPT_STATES, isKnownAttemptState, isTerminalAttemptState } from './states.mjs'
@@ -119,10 +126,37 @@ export const TRANSITIONS = Object.freeze({
     DeadLetter: Object.freeze({ requiresPersist: Object.freeze(['attempt']), createsNewAttempt: false, guard: null }),
     Cancelled: Object.freeze({ requiresPersist: Object.freeze(['attempt']), createsNewAttempt: false, guard: null }),
   }),
-  // UnknownOutcome 的出边**只有**这两条。见文件头 ③。
+  // UnknownOutcome 的出边。见文件头 ③。
+  //
+  // 原来只有 `DeadLetter`/`Cancelled`。加了这两条之后，"人工处置"才有完整的三种去向，
+  // 而且每一种都对应一个**不同的事实**：
+  //
+  //   - 外部写**确实发生了** → `Validating`：按成功继续走验收。
+  //     缺这条边时，一个已经真的交付了的结果只能进 DeadLetter（当失败重做，可能重复付费）
+  //     或 Cancelled（当没做过，交付静默消失）。两种都不报错，两种都错。
+  //   - 外部写**确认没发生** → `RetryableFailure`：它已经不是"未知"了，而是普通的可重试失败，
+  //     于是回到既有的重试/额度判定上（有额度 → 新 attempt；没额度 → DeadLetter）。
+  //     注意不是直接回 `Queued`：`UnknownOutcome → Queued` 仍然非法，
+  //     因为"未知"与"确认没发生"必须是两个状态，否则那条最关键的禁令会自己失效。
+  //   - 查不清/放弃 → `DeadLetter`：保持原样，人工兜底。
+  //
+  // 两条新边都要求调用方**显式给出** `externalEffectConfirmed` 布尔值（不给默认）：
+  // 缺省成任何一个方向都会造成损失，而两种损失（重复执行 / 静默丢弃）都不会报错。
   UnknownOutcome: Object.freeze({
-    DeadLetter: Object.freeze({ requiresPersist: Object.freeze(['attempt']), createsNewAttempt: false, guard: null }),
-    Cancelled: Object.freeze({ requiresPersist: Object.freeze(['attempt']), createsNewAttempt: false, guard: null }),
+    Validating: Object.freeze({
+      requiresPersist: Object.freeze(['attempt', 'reconciliation']),
+      createsNewAttempt: false,
+      guard: 'externalEffectHappened',
+      note: '人工/对账确认外部写已发生：按成功继续验收，**不得重跑**',
+    }),
+    RetryableFailure: Object.freeze({
+      requiresPersist: Object.freeze(['attempt', 'reconciliation']),
+      createsNewAttempt: false,
+      guard: 'externalEffectDidNotHappen',
+      note: '人工/对账确认外部写未发生：降级为普通可重试失败，走重试额度判定',
+    }),
+    DeadLetter: Object.freeze({ requiresPersist: Object.freeze(['attempt', 'reconciliation']), createsNewAttempt: false, guard: null }),
+    Cancelled: Object.freeze({ requiresPersist: Object.freeze(['attempt', 'reconciliation']), createsNewAttempt: false, guard: null }),
   }),
   Completed: Object.freeze({}),
   Cancelled: Object.freeze({}),
@@ -199,6 +233,40 @@ function evaluateGuard(guard, to, ctx) {
           }
         }
         return { ok: true }
+      }
+      return { ok: true }
+    }
+    case 'externalEffectHappened': {
+      // 确认"外部写已经发生了"。要求显式 `true`——缺省必须报错，不能默认。
+      // 默认成"发生了"会把一次没做成的交付当成功推进验收；
+      // 默认成"没发生"会重复执行一次已经生效的外部写。两种都不报错。
+      if (ctx.externalEffectConfirmed !== true) {
+        const reason = ctx.externalEffectConfirmed === false
+          ? '收到 false：外部写确认未发生时应走 UnknownOutcome → RetryableFailure（安全重试），而不是当成成功'
+          : '缺这个输入时不得默认：默认成「已发生」会把没做成的交付当成功推进验收'
+        return {
+          ok: false,
+          code: typeof ctx.externalEffectConfirmed === 'boolean'
+            ? TRANSITION_ERRORS.GUARD_FAILED
+            : TRANSITION_ERRORS.MISSING_GUARD_INPUT,
+          message: `UnknownOutcome → Validating 需要 externalEffectConfirmed === true（对账确认外部写已发生）。${reason}`,
+        }
+      }
+      return { ok: true }
+    }
+    case 'externalEffectDidNotHappen': {
+      // 确认"外部写没有发生"，于是它可以安全重试。同样要求显式 `false`。
+      if (ctx.externalEffectConfirmed !== false) {
+        return {
+          ok: false,
+          code: typeof ctx.externalEffectConfirmed === 'boolean'
+            ? TRANSITION_ERRORS.GUARD_FAILED
+            : TRANSITION_ERRORS.MISSING_GUARD_INPUT,
+          message: 'UnknownOutcome → RetryableFailure 需要 externalEffectConfirmed === false（对账确认外部写未发生）。' +
+            (ctx.externalEffectConfirmed === true
+              ? '收到 true：外部写已发生时应走 UnknownOutcome → Validating，重试会造成重复副作用（重复付费/重复推送）'
+              : '缺这个输入时不得默认：默认成「未发生」会重复执行一次可能已经生效的外部写'),
+        }
       }
       return { ok: true }
     }

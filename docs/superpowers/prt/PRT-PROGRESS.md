@@ -14,7 +14,7 @@
 > ⚠️ 「有用例」不等于「已生效」。带生产调用方的任务在证据栏注明调用方；
 > 只有自己的用例驱动的原语一律标 🟡。
 
-**最近更新**：PRT-302/303/313 运行实体落库（租约 + 权威时间 + Attempt 不可覆盖 + epoch 拒写）与运行面 HTTP 契约
+**最近更新**：PRT-309/310/311 重试退避与 Dead Letter、恢复扫描与人工处置、外部副作用幂等与 Unknown Outcome
 
 ---
 
@@ -81,7 +81,7 @@
 | PRT-257 Launcher 负责 DSH 运行时与补丁层安装/自检/修复 | ⬜ | 分发形态路线 C 已裁决；Legion 自身四个 `file:` 包的分发方式待定 |
 | PRT-258 冻结进程清单 / 目录布局 / 配置 Schema / Secret Store 接口 | ✅ | 四份契约全部有实现与用例：`PRT-258-product-contracts.md`（前三份）+ `PRT-505-secret-store.md`（第四份） |
 
-## 阶段 3：Orchestrator Core（5/16）
+## 阶段 3：Orchestrator Core（9/16）
 
 | 任务 | 状态 | 证据 / 说明 |
 | --- | --- | --- |
@@ -93,10 +93,10 @@
 | PRT-306 提取 workspace/worktree 管理 | ⬜ | |
 | PRT-307 提取结构化结果与机器验收 | ⬜ | |
 | PRT-308 提取打回、交接与完成 | ⬜ | |
-| PRT-309 重试、退避与 Dead Letter | 🟡 | `retryDelayMs`（指数退避 + 上限 + jitter）、`classifyFailure`（未登记错误**不**默认可重试）、worker 的连续失败慢速退避已落地；**Dead Letter 的落库与人工处置入口未做**（属 PRT-310） |
-| PRT-310 恢复扫描与人工处置 | 🟡 | `recoverExpired` 两条分支（未越过外部写边界 → 新建尝试重试；可能已有副作用 → `UnknownOutcome` 挂起等人工）+ `/api/runtime/recover` 强制要求调用方给出边界。**人工处置入口（确认后新建 attempt / 放行 DeadLetter）未做** |
-| PRT-311 外部副作用幂等与 Unknown Outcome | 🟡 | 状态机层面 `UnknownOutcome` **只有** `DeadLetter`/`Cancelled` 两条出边（回到队列被具名拒绝）；`release`/回收都推进 `lease_epoch`，迟到的写入一律 `LEASE_EPOCH_STALE`。**幂等键与外部写确认流程未做** |
-| PRT-312 状态迁移 / 并发 / 崩溃 / 恢复测试 | 🟡 | 已有：13×13 迁移矩阵、CAS 竞态、两连接并发领取（只有单赢家）、过期 epoch 拒写、崩后回收两条分支、被拒迁移的事务回滚。**缺**：真实进程被 `SIGKILL` 的整链路演练（Windows 上强制终止不走信号处理器，见 PRT-301 文档） |
+| PRT-309 重试、退避与 Dead Letter | ✅ | `scheduleRetry`（重试/放弃的**唯一**决策点）+ `failAndRetry` + 退避写进队列 `next_attempt_at_ms`（真的生效，不是没人调用的纯函数）+ 额度上限（默认 5 次）+ `retryDelayMs` 指数退避；`/api/runtime/fail`（失败结算的唯一入口）与 `/api/runtime/budget`。判据：额度耗尽必进 `DeadLetter`（终态），且回收路径**同样**查额度——否则"每次快失败就被杀"的任务会永远重试 |
+| PRT-310 恢复扫描与人工处置 | ✅ | `recoverExpired` 两条分支 + `listHeld`（`UnknownOutcome`/`DeadLetter` 待办清单，标出 `isLatest` 避免历史条目反复出现）+ `resolveAttempt`（四种决定各自对应一个不同的事实，缺省拒绝不猜）；路由 `GET /api/runtime/held` 与 `POST /api/runtime/resolve`。判据：挂起的任务必须能从界面找到并逐个结清，否则"不会静默重跑"会变成"静默消失" |
+| PRT-311 外部副作用幂等与 Unknown Outcome | ✅ | ① **幂等键跨尝试稳定**（`idem:{taskId}`，刻意不含 `attempt_no`——含了就等于没有）；② 状态机为 `UnknownOutcome` 补 `Validating`（确认已发生 → 按成功走验收，绝不重跑）与 `RetryableFailure`（确认未发生 → 降级为普通可重试失败）两条出边，`UnknownOutcome → Queued` **仍然非法**；③ 两个守卫要求显式布尔值，缺省报 `MISSING_GUARD_INPUT`。判据：对账的两个确定结论都能被记下来——原来一个只能被当失败重做（重复付费），一个永远等人工 |
+| PRT-312 状态迁移 / 并发 / 崩溃 / 恢复测试 | 🟡 | 已有：13×13 迁移矩阵、CAS 竞态、两连接并发领取（只有单赢家）、过期 epoch 拒写、崩后回收两条分支、**「每次快失败就被杀」的回收也要查额度**、145 例运行面用例（含 13 例真 team-hub+真 worker）。**缺**：真实进程被强杀的整链路演练（Windows 上强制终止不走信号处理器，见 PRT-301 文档） |
 | PRT-313 lease 权威时间、`leaseEpoch`、过期拒写 | ✅ | `lease_epoch` 单调、每次 `claim`/`release`/回收都推进；过期写入返回 `LEASE_EPOCH_STALE` 且**带上真实 epoch**（否则 worker 只能无限重试）；`/api/config` 增加 `runPlane` 能力发现位 |
 | PRT-314 WAL / `busy_timeout` / 原子领取并发语义 | 🟡 | 复用既有 `withTx`（`BEGIN IMMEDIATE` + SAVEPOINT 嵌套）与 WAL/`busy_timeout`；领取用条件 UPDATE + `changes !== 1` 判胜负。**缺**：多进程（非多连接）压测与锁等待预算的实测记录 |
 | PRT-315 拆分 `plugins/src/index.ts` | ⬜ | 阶段 3 评审闸门已过（热点文件 1/40、2/40） |
@@ -233,7 +233,7 @@
 | 1 Runtime Contract | 9 | 0 | 0 | 0 | 9 |
 | 2 DshRuntimeAdapter | 10 | 5 | 0 | 0 | 15 |
 | 2.5 商业薄切片 | 2 | 1 | 4 | 1 | 8 |
-| 3 Orchestrator Core | 3 | 5 | 8 | 0 | 16 |
+| 3 Orchestrator Core | 6 | 4 | 6 | 0 | 16 |
 | 4 上下文边界 | 0 | 0 | 13 | 0 | 13 |
 | 5 模型与密钥 | 0 | 2 | 9 | 0 | 11 |
 | 6 工具、权限和审批 | 1 | 3 | 16 | 0 | 20 |
@@ -241,7 +241,7 @@
 | 8 安装、升级和回滚 | 0 | 1 | 12 | 0 | 13 |
 | 9 商业 Alpha 保障 | 0 | 0 | 9 | 1 | 10 |
 | 10 能力包协议 | 0 | 0 | 6 | 0 | 6 |
-| **合计** | **41** | **20** | **82** | **2** | **145** |
+| **合计** | **44** | **19** | **80** | **2** | **145** |
 
 > 计数口径：**部分**计入「已有交付物但完成标准未全部满足」，
 > 因此不能与「已完成」相加后宣称完成度。真实完成度按**完成标准**判定：

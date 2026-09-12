@@ -36,6 +36,12 @@ export const SCHEMA = defineSchema({
     'WORKER_REQUIRED', 'EPOCH_REQUIRED', 'BAD_LEASE_TTL', 'ATTEMPT_NOT_FOUND',
     'LEASE_EPOCH_STALE', 'LEASE_NOT_HELD', 'LEASE_EXPIRED',
     'UNKNOWN_OUTCOME', 'TRANSITION_REJECTED', 'ALREADY_FINISHED',
+    'UNKNOWN_ATTEMPT_STATE',
+    // SQL 列类型名：`ALTER TABLE ... ADD COLUMN ... INTEGER` 里的 INTEGER 形如 env 键
+    // （全大写单词），但它不是配置。登记它是为了让扫描器把「真实读取点」与这类噪声分开。
+    'INTEGER', 'TEXT',
+    // PRT-309/310/311 新增：额度配置非法、处置决定非法、状态不需要处置
+    'BAD_MAX_ATTEMPTS', 'BAD_DECISION', 'NOT_HELD', 'TASK_NOT_CLAIMABLE', 'SCOPE_REQUIRED',
     // 路由层参数校验码（server.mjs 的 requireString）
     'MISSING_PARAM',
     // 回收接口的拒绝码：调用方未给出「哪些状态已越过外部写边界」时必须拒绝，

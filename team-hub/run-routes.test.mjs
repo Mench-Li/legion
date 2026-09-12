@@ -293,3 +293,137 @@ test('⑥ 运行面不影响看板既有路径：/api/claim 仍然按成员语�
   const runClaim = await call('POST', '/api/runtime/claim', { workerId: 'w-board', scope: 'default' })
   assert.notEqual(runClaim.body.claimed?.taskId, 'rt-board')
 })
+
+// ── PRT-309/310/311 的路由契约 ──
+
+/** 领一条任务并推到 Running（外部写边界之后）。 */
+async function claimToRunning(workerId, taskId) {
+  onlyTask(taskId)
+  const c = await call('POST', '/api/runtime/claim', { workerId, scope: 'default' })
+  assert.equal(c.body.claimed.taskId, taskId)
+  for (const to of ['PreparingWorkspace', 'BuildingContext', 'Running']) {
+    const t = await call('POST', '/api/runtime/transition', {
+      attemptId: c.body.claimed.attemptId, leaseEpoch: c.body.claimed.leaseEpoch, workerId, to,
+    })
+    assert.equal(t.status, 200)
+  }
+  return c.body.claimed
+}
+
+test('⑦ 失败上报走单一入口，并把重试决定一起返回（不让任务停在 RetryableFailure）', async () => {
+  const c = await claimToRunning('w-fail', 'rt-fail')
+  const r = await call('POST', '/api/runtime/fail', {
+    attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w-fail',
+    failureCode: 'runtime-unavailable', detail: '上游 502',
+  })
+  assert.equal(r.status, 200)
+  assert.equal(r.body.action, 'retry-new-attempt')
+  assert.equal(r.body.nextAttempt.attemptNo, 2)
+  // 退避时刻必须由**服务端**给出：worker 自己算会受本机时钟影响
+  assert.equal(typeof r.body.nextAttemptAtMs, 'number')
+  assert.ok(r.body.nextAttemptAtMs > r.body.serverTimeMs)
+  assert.equal(r.body.taskStatus, 'todo', '还有额度 → 回到待办等下一次')
+  // 幂等键跨尝试稳定
+  assert.equal(r.body.nextAttempt.idempotencyKey, c.idempotencyKey ?? r.body.attempt.idempotencyKey)
+})
+
+test('⑦ 失败上报缺 workerId → 400（谁报告的失败必须可归因）', async () => {
+  const c = await claimToRunning('w-attr', 'rt-attr')
+  const r = await call('POST', '/api/runtime/fail', { attemptId: c.attemptId, leaseEpoch: c.leaseEpoch })
+  assert.equal(r.status, 400)
+  assert.equal(r.body.code, 'MISSING_PARAM')
+})
+
+test('⑧ 等人工清单暴露 UnknownOutcome 与 DeadLetter，并标出哪条才是当前要处理的', async () => {
+  const c = await claimToRunning('w-hold', 'rt-hold')
+  const t = await call('POST', '/api/runtime/transition', {
+    attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w-hold', outcome: 'outcome_unknown',
+  })
+  assert.equal(t.status, 200)
+  assert.equal(t.body.attempt.state, 'UnknownOutcome')
+
+  const held = await call('GET', '/api/runtime/held?scope=default')
+  assert.equal(held.status, 200)
+  const mine = held.body.items.filter((i) => i.taskId === 'rt-hold')
+  assert.equal(mine.length, 1)
+  assert.equal(mine[0].state, 'UnknownOutcome')
+  assert.equal(mine[0].isLatest, true)
+  assert.equal(mine[0].taskStatus, 'blocked', '挂起的任务必须显示为「需要人看一眼」而不是待办')
+  assert.ok(held.body.actionable >= 1)
+})
+
+test('⑧ 人工处置：对账确认已发生 → 继续验收；决定不认识 → 400 且不改状态', async () => {
+  const held = await call('GET', '/api/runtime/held?scope=default')
+  const target = held.body.items.find((i) => i.taskId === 'rt-hold')
+  const bad = await call('POST', '/api/runtime/resolve', { attemptId: target.attemptId, decision: 'retry', actor: 'general' })
+  assert.equal(bad.status, 400)
+  assert.equal(bad.body.code, 'BAD_DECISION')
+  // 被拒的处置不得改动任何东西
+  const still = await call('GET', `/api/runtime/attempt?attemptId=${target.attemptId}`)
+  assert.equal(still.body.attempt.state, 'UnknownOutcome')
+  assert.equal(still.body.attempt.externalEffect, null)
+
+  const ok = await call('POST', '/api/runtime/resolve', {
+    attemptId: target.attemptId, decision: 'external-effect-happened', actor: 'general', note: '对账单确认已扣费',
+  })
+  assert.equal(ok.status, 200)
+  assert.equal(ok.body.attempt.state, 'Validating')
+  assert.equal(ok.body.attempt.externalEffect, 'confirmed')
+  assert.equal(ok.body.attempt.resolvedBy, 'general')
+  // 处置后不再挂在等人工清单上
+  const after = await call('GET', '/api/runtime/held?scope=default')
+  assert.equal(after.body.items.filter((i) => i.taskId === 'rt-hold' && i.isLatest).length, 0)
+})
+
+test('⑧ 人工处置必须留痕（缺 actor → 400）', async () => {
+  const c = await claimToRunning('w-trace', 'rt-trace')
+  await call('POST', '/api/runtime/transition', {
+    attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w-trace', outcome: 'outcome_unknown',
+  })
+  const r = await call('POST', '/api/runtime/resolve', { attemptId: c.attemptId, decision: 'cancel' })
+  assert.equal(r.status, 400)
+  assert.equal(r.body.code, 'MISSING_PARAM')
+})
+
+test('⑨ 重试额度读数可从界面查到（答不出「还能自动重试几次」就只能靠猜）', async () => {
+  const r = await call('GET', '/api/runtime/budget?taskId=rt-fail')
+  assert.equal(r.status, 200)
+  assert.equal(r.body.budget.attemptsUsed, 2)
+  assert.equal(typeof r.body.budget.maxAttempts, 'number')
+  assert.equal(r.body.budget.remaining, r.body.budget.maxAttempts - 2)
+  assert.equal(r.body.budget.idempotencyKey, 'idem:rt-fail')
+
+  const missing = await call('GET', '/api/runtime/budget')
+  assert.equal(missing.status, 400)
+  assert.equal(missing.body.code, 'MISSING_PARAM')
+})
+
+test('⑨ 额度耗尽 → Dead Letter，并且这条任务仍然能被人在清单里找到（不静默消失）', async () => {
+  let c = await claimToRunning('w-dead', 'rt-dead')
+  let last = null
+  for (let i = 0; i < 12; i++) {
+    const r = await call('POST', '/api/runtime/fail', {
+      attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w-dead', failureCode: 'runtime-unavailable',
+    })
+    assert.equal(r.status, 200)
+    last = r.body
+    if (r.body.action === 'dead-letter') break
+    // 等退避到点——用服务端给的时刻直接改库，避免真 sleep
+    mod.db.prepare('UPDATE run_attempts SET next_attempt_at_ms = NULL WHERE id = ?').run(r.body.nextAttempt.attemptId)
+    const claim = await call('POST', '/api/runtime/claim', { workerId: 'w-dead', scope: 'default' })
+    assert.equal(claim.body.claimed.taskId, 'rt-dead')
+    c = claim.body.claimed
+    for (const to of ['PreparingWorkspace', 'BuildingContext', 'Running']) {
+      await call('POST', '/api/runtime/transition', { attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w-dead', to })
+    }
+  }
+  assert.equal(last.action, 'dead-letter', '必须有终点：无限重试不会报错，它只是永远跑下去')
+  assert.equal(last.attempt.state, 'DeadLetter')
+  assert.match(last.reason, /重试额度已用完/)
+
+  const held = await call('GET', '/api/runtime/held?scope=default')
+  const mine = held.body.items.filter((i) => i.taskId === 'rt-dead')
+  assert.equal(mine.length, 1, 'DeadLetter 必须出现在等人工清单里，否则它只是历史里的一条记录')
+  assert.equal(mine[0].state, 'DeadLetter')
+  assert.equal(mine[0].isLatest, true)
+})

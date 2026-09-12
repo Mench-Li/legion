@@ -170,16 +170,51 @@ test('③ 终态不得离开：迟到的结果只能记进 audit', () => {
 })
 
 test('③ UnknownOutcome 不得回到队列——错误码是具名的（重复外部副作用的守卫）', () => {
-  for (const to of ['Queued', 'Leased', 'Running', 'RetryableFailure']) {
+  // 「自动重试」这条路永远封死：这几条边不存在，且报具名码而不是笼统的 ILLEGAL_TRANSITION
+  for (const to of ['Queued', 'Leased', 'Running', 'PreparingWorkspace', 'HandingOff']) {
     const plan = transitionPlan('UnknownOutcome', to)
     assert.equal(plan.ok, false)
     assert.equal(plan.code, TRANSITION_ERRORS.UNKNOWN_OUTCOME_NOT_RETRYABLE,
       `UnknownOutcome → ${to} 必须是具名的 UNKNOWN_OUTCOME_NOT_RETRYABLE，而不是笼统的 ILLEGAL_TRANSITION`)
   }
   assert.match(transitionPlan('UnknownOutcome', 'Queued').message, /重复副作用/)
-  // 允许的两条出口
+  // 放弃的两条出口
   assert.equal(transitionPlan('UnknownOutcome', 'DeadLetter').ok, true)
   assert.equal(transitionPlan('UnknownOutcome', 'Cancelled').ok, true)
+})
+
+test('③ 人工对账的两个确定结论必须能被记下来（否则一个丢了、一个永远等人工）', () => {
+  // 确认外部写**已发生** → 按成功继续验收，绝不重跑。
+  // 缺这条边时，一个真交付了的结果只能进 DeadLetter（当失败重做，可能重复付费）
+  // 或 Cancelled（当没做过，交付静默消失）。
+  assert.equal(transitionPlan('UnknownOutcome', 'Validating', { externalEffectConfirmed: true }).ok, true)
+  const wrongWay = transitionPlan('UnknownOutcome', 'Validating', { externalEffectConfirmed: false })
+  assert.equal(wrongWay.ok, false)
+  assert.equal(wrongWay.code, TRANSITION_ERRORS.GUARD_FAILED)
+  assert.match(wrongWay.message, /RetryableFailure/)
+
+  // 确认外部写**未发生** → 降级为普通可重试失败，回到既有的重试额度判定。
+  // 注意仍然不是直接回 Queued：若允许，`UnknownOutcome → Queued` 的禁令就自己失效了。
+  assert.equal(transitionPlan('UnknownOutcome', 'RetryableFailure', { externalEffectConfirmed: false }).ok, true)
+  const wrongWay2 = transitionPlan('UnknownOutcome', 'RetryableFailure', { externalEffectConfirmed: true })
+  assert.equal(wrongWay2.ok, false)
+  assert.equal(wrongWay2.code, TRANSITION_ERRORS.GUARD_FAILED)
+  assert.match(wrongWay2.message, /重复付费|重复副作用/)
+
+  // **缺省必须报错，不能默认任何一个方向**：
+  // 默认「已发生」把没做成的交付当成功推进验收；默认「未发生」重复执行一次已经生效的外部写。
+  for (const to of ['Validating', 'RetryableFailure']) {
+    const missing = transitionPlan('UnknownOutcome', to, {})
+    assert.equal(missing.ok, false)
+    assert.equal(missing.code, TRANSITION_ERRORS.MISSING_GUARD_INPUT,
+      `UnknownOutcome → ${to} 缺 externalEffectConfirmed 时必须报「缺输入」，而不是默认一个方向`)
+    assert.match(missing.message, /不得默认/)
+  }
+  // 非布尔值同样不得通过（"yes"、1 这些都不是对账结论）
+  for (const bogus of ['yes', 1, null]) {
+    assert.equal(transitionPlan('UnknownOutcome', 'Validating', { externalEffectConfirmed: bogus }).ok, false)
+    assert.equal(transitionPlan('UnknownOutcome', 'RetryableFailure', { externalEffectConfirmed: bogus }).ok, false)
+  }
 })
 
 test('③ CAS：调用方以为的状态与实际不符时拒写（过期 worker 不得改写别人的结果）', () => {

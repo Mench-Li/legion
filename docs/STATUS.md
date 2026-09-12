@@ -4,7 +4,8 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-12　`run-ci --only test` **PASS**；其中 `test` **62 套件 / 1765 用例**
+**最近一次全量基线**：2026-09-12　`run-ci --only test` **PASS**；其中 `test` **62 套件 / 1796 用例**
+（**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 按纪律 SKIP，计数为 60 通过 + 1 跳过 / 1574 用例）
 —— 以本文件所在提交为准；证据 `.ci/` 下最近一次运行目录
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
 （`scrum/daemon-gf001.json`，`intervalMs: 15000`）同时运行时实测 **31 分钟**（约 7 倍）。
@@ -30,7 +31,53 @@
 > - `gf001` 空间非终态任务数为 **0**；T-141 已由将军于 `14:00:32Z` 转 `canceled`
 >   （产物从 patch 记录逐字恢复为 `53d9d15`，需求已由 `G-mtwxx7an-2` 交付，无需重做）。
 
-> **本轮（PRT-302/303/313 运行实体落库：租约 + 权威时间 + Attempt 不可覆盖 + epoch 拒写）**：
+> **本轮（PRT-309/310/311 重试退避与 Dead Letter、恢复扫描与人工处置、外部副作用幂等与 Unknown Outcome）**：
+> 新增运行面路由 `POST /api/runtime/fail`（失败结算的**唯一**入口）、`GET /api/runtime/held`
+> （等人工清单）、`POST /api/runtime/resolve`（人工处置）、`GET /api/runtime/budget`（额度读数）；
+> `run-store.mjs` 新增 `failAndRetry` / `scheduleRetry` / `listHeld` / `resolveAttempt` / `retryBudgetOf`、
+> `run_attempts` 的 5 个新列（含**幂等键**与**退避闸门**，对老库用 `ALTER TABLE` 补齐）；状态机为
+> `UnknownOutcome` 补上 `Validating` / `RetryableFailure` 两条出边与两个新守卫。
+> 61→**62** 套件、1702→**1796** 用例（`run-plane` 63→**87**、`orchestrator` 51→**58**）。阶段 3 由 5/16 进到 9/16。
+>
+> **这一批补的是「不会报错的四类静默失败」**：
+> ① **无限重试**——没有任何上限时，一个持续失败的任务只是安静地永远跑下去，
+>    把模型配额、日志和外部系统调用次数一起吃掉。现在有额度（默认 5 次）、
+>    退避（2s 起指数上升、有上限）、以及终点 `DeadLetter`。
+> ② **任务停在中间态**——`transition({to:'RetryableFailure'})` 只把尝试标成失败就结束了，
+>    「接下来怎么办」没人做：它既没有可领的队列，也不在等人工清单里，
+>    从任何界面看都只是"失败了"，而没有人会去处理它。现在失败只有一条路径
+>    （`failAndRetry`），它必然把任务送到「重试中」或「DeadLetter」其中之一。
+> ③ **静默消失**——`DeadLetter`/`UnknownOutcome` 若只是历史里的一行记录，
+>    用户会以为它还在跑。`/api/runtime/held` 把它变成一份可结清的待办清单，
+>    并标出哪一条才是当前需要处理的（历史条目不再反复出现）。
+> ④ **重复副作用**——`UnknownOutcome` 原来只能进 `DeadLetter` 或 `Cancelled`，
+>    于是一个**真的已经交付**的结果只能被当失败重做或静默丢弃。现在对账的
+>    两个确定结论都能被记下来：确认已发生 → `Validating`（按成功走验收，绝不重跑）；
+>    确认未发生 → `RetryableFailure`（降级为普通可重试失败）。
+>    两个守卫都要求**显式**布尔值，缺省报「缺输入」而不是默认某一个方向。
+>
+> **幂等键刻意不含 `attempt_no`**：含了就等于没有——每次重试一个新键，
+> 外部系统无法判断"这是同一次操作的重试"，去重照旧失效。
+> **退避是服务端写进队列的闸门**（`next_attempt_at_ms`），不是 worker 自己 sleep：
+> 漏掉它时 `retryDelayMs` 只是一段没人调用的纯函数。
+> **租约过期回收不叠退避**（等待已由租期付过），但**照样查额度**——
+> 否则「每次快失败就被杀」的任务会永远重试下去，而这条路径上没有任何失败日志。
+>
+> **自审又抓到一处不报错的缺陷**：在一条**已经结算过**的尝试上再报一次失败，
+> 会再触发一次 `RetryableFailure → Queued`，于是一次失败被结算两次、排出两条排队尝试，
+> 之后同一条任务会被两个 worker 各领一条。现在 `RetryableFailure`/`UnknownOutcome`
+> 上的重复上报是 no-op（后者还额外返回 `awaiting-human-reconciliation`：
+> 挂起等人工的尝试绝不能因为"又报了一次失败"就重跑）。
+>
+> **计数口径**：`DSH_CHECKOUT` 未设时 `plugins/board-plugin` 按纪律 SKIP
+> （本套件不伪造通过），此时为 60 通过 + 1 跳过 / 1574 用例；上表数字是设了它的完整配置。
+>
+> 三条门禁均绿：`scan --check` PASS（**244** 个疑似字面量）、`dsh-boundary` PASS（3 文件 / 26 处，未增长）、
+> `topology-inventory --diff` 无漂移；新增 4 条路由后按 PRT-007 棘轮刷新平台契约基线
+> （diff 恰为那 4 条路由 + `server.mjs` 哈希）。
+> 详见 `docs/superpowers/prt/PRT-309-310-311-retry-and-reconciliation.md`。
+>
+> 上一批（PRT-302/303/313 运行实体落库：租约 + 权威时间 + Attempt 不可覆盖 + epoch 拒写）：
 > 新增 `team-hub/run-store.mjs`（`run_attempts` / 只追加的 `run_attempt_events` / `claim` /
 > `heartbeat` / `transition` / `release` / `recoverExpired`）、`server.mjs` 的 7 条**运行面**路由
 > （`/api/runtime/{claim,heartbeat,transition,release,recover,status,attempt}` 与 `/api/config` 的
@@ -304,10 +351,12 @@ node scripts/ci/run-ci.mjs --only test --out .ci\<run-name>
 
 产物：`.ci/<run-name>/ci.log`（全量输出）、`summary.json`（阶段结论）、`suites/<套件>.log`（失败套件的原始输出）。
 
-**当前基线：62 套件 / 1765 用例，`--only test` 整体 PASS** —— 2026-09-12 实测
-（PRT-302/303/313 运行实体落库：新增 `run-plane`（**63 例**：仓储 34 + HTTP 契约 19 + 真 team-hub 端到端 10）。
+**当前基线：62 套件 / 1796 用例，`--only test` 整体 PASS** —— 2026-09-12 实测（设 `DSH_CHECKOUT`）
+（PRT-309/310/311 重试退避与 Dead Letter + 人工处置 + 幂等：`run-plane` **87 例**、
+`orchestrator` **58 例**。此前一批 PRT-302/303/313 新增 `run-plane`（63 例：仓储 34 + HTTP 契约 19 + 真 team-hub 端到端 10），
 三层的分工是「各查一类只有那一层才看得见的缺陷」：仓储查并发/epoch/历史，HTTP 查具名码有没有被吞掉，
-端到端查两半各自全绿却合起来错的那种（见本轮块）。
+端到端查两半各自全绿却合起来错的那种（见本轮块）。`DSH_CHECKOUT` 未设时 `plugins/board-plugin`
+按纪律 SKIP，计数为 60 通过 + 1 跳过 / 1574 用例。
 上一批基线 61 套件 / 1702 用例（PRT-301 运行状态机 + worker 入口）。
 再上一批 60 套件 / 1651 用例（PRT-706 首次运行初始化 + 产品配置读取：新增 `product-config`（**27 例**：
 `config.test.mjs` 16 + `init.test.mjs` 11，全部跑真实文件系统的临时目录）。

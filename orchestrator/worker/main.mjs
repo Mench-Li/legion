@@ -380,13 +380,25 @@ export function createWorker({
       let reported = null
       try {
         const code = e?.code === 'LEASE_EPOCH_STALE' ? 'lease-epoch-stale' : (e?.failureCode ?? classifyStageFailure(e?.stage))
-        reported = await hub.transition({
+        // 走 `fail`（服务端单一入口），而不是 `transition({to:'RetryableFailure'})`。
+        //
+        // 差别是**实质**的，不是风格：`transition` 只把这次尝试标成失败就结束了，
+        // 而"接下来怎么办"（还有额度就排新尝试、额度用完就进 Dead Letter）没人做。
+        // 结果是任务永远停在 `RetryableFailure`——既没有可领的队列，也不在等人工清单里
+        // （它不是 DeadLetter/UnknownOutcome），从任何界面看都只是"失败了"，
+        // 而没有任何人会去处理它。这类缺陷不会报错，只会让任务安静地停在那里。
+        //
+        // `fail` 还负责算退避并写进队列（`next_attempt_at_ms`），
+        // 因此 worker 不需要自己 sleep 一个退避时间再试——退避是**服务端**的队列闸门。
+        reported = await hub.fail({
           attemptId: claimed.attemptId,
           leaseEpoch: claimed.leaseEpoch,
           workerId,
-          to: 'RetryableFailure',
-          context: { failureCode: code, detail: lastError.message, trace },
+          failureCode: code,
+          detail: lastError.message,
         })
+        lastError.disposition = reported?.action ?? null
+        lastError.nextAttemptAtMs = reported?.nextAttemptAtMs ?? null
       } catch (reportError) {
         // 上报失败本身也要可见：最可能的原因是 epoch 已经前进（我们被接管了）。
         lastError.reportFailed = String(reportError?.message ?? reportError)

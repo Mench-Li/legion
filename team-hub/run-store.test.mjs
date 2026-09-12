@@ -690,3 +690,328 @@ test('⑧ 事务失败要完整回滚：被拒的迁移不留半个状态，也�
     assert.equal(env.store.eventsOf(c.attemptId).length, eventsBefore, '被拒的迁移不得留下事件')
   } finally { env.cleanup() }
 })
+
+// ================================================================
+// ⑨ PRT-309 重试、退避与 Dead Letter
+// ⑩ PRT-310 恢复扫描与人工处置
+// ⑪ PRT-311 外部副作用幂等与 Unknown Outcome
+// ================================================================
+
+/** 把一次认领推到 `Running`（外部写边界就在这一步之后）。 */
+function claimToRunning(env, workerId = 'w1') {
+  const c = env.store.claim({ workerId }).claimed
+  for (const to of ['PreparingWorkspace', 'BuildingContext', 'Running']) {
+    env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId, to })
+  }
+  return c
+}
+
+test('⑨ 重试真的会退避（退避写进队列，而不只是一个没人用的返回值）', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c = claimToRunning(env)
+    const r = env.store.failAndRetry({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, actor: 'w1', failureCode: 'runtime-unavailable' })
+    assert.equal(r.action, 'retry-new-attempt')
+    assert.ok(r.nextAttemptAtMs > env.clock(), '退避必须是一个未来的时刻')
+    assert.equal(r.nextAttemptAtMs, env.clock() + env.store.backoffPolicy.baseMs,
+      '第 1 次失败的退避 = baseMs（默认 2000）')
+
+    // 关键：在退避到期之前，这条尝试**领不到**。
+    // 漏掉这道闸门时 retryDelayMs 只是一段纯函数，「退避」这个词在系统里不成立：
+    // 一个持续失败的引擎会被立刻反复重试，把配额和日志一起打满。
+    assert.equal(env.store.claim({ workerId: 'w2' }).claimed, null,
+      '还在退避窗口内的尝试不得被领取')
+    assert.equal(env.store.claim({ workerId: 'w2' }).reason, 'queue-empty')
+
+    // 到点之后可以领
+    env.advance(env.store.backoffPolicy.baseMs + 1)
+    const next = env.store.claim({ workerId: 'w2' }).claimed
+    assert.equal(next.attemptNo, 2, '退避结束后领到的是新建的那次尝试')
+  } finally { env.cleanup() }
+})
+
+test('⑨ 退避按尝试次数递增，且有上限（指数退避不能无限增长）', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const policy = env.store.backoffPolicy
+    const seen = []
+    let c = claimToRunning(env)
+    for (let i = 0; i < 4; i++) {
+      const r = env.store.failAndRetry({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, actor: 'w1', failureCode: 'runtime-unavailable' })
+      assert.equal(r.action, 'retry-new-attempt', `第 ${i + 1} 次应仍在额度内`)
+      seen.push(r.nextAttemptAtMs - env.clock())
+      env.advance(r.nextAttemptAtMs - env.clock() + 1)
+      c = env.store.claim({ workerId: 'w1' }).claimed
+      for (const to of ['PreparingWorkspace', 'BuildingContext', 'Running']) {
+        env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to })
+      }
+    }
+    assert.deepEqual(seen, [2000, 4000, 8000, 16000], `退避应为 base×factor^(n-1)：${seen}`)
+    assert.ok(Math.max(...seen) <= policy.maxMs, '任何一次退避都不得超过上限')
+  } finally { env.cleanup() }
+})
+
+test('⑨ 额度用完进 Dead Letter——**不是无限重试**（而无限重试不会报任何错）', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const max = env.store.maxAttempts
+    let last = null
+    let c = claimToRunning(env)
+    for (let i = 0; i < max; i++) {
+      last = env.store.failAndRetry({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, actor: 'w1', failureCode: 'runtime-unavailable' })
+      if (last.action === 'dead-letter') break
+      env.advance((last.nextAttemptAtMs ?? env.clock()) - env.clock() + 1)
+      c = env.store.claim({ workerId: 'w1' }).claimed
+      for (const to of ['PreparingWorkspace', 'BuildingContext', 'Running']) {
+        env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to })
+      }
+    }
+    assert.equal(last.action, 'dead-letter', `第 ${max} 次失败必须进 Dead Letter，否则就是无限重试`)
+    assert.match(last.reason, /重试额度已用完/)
+    assert.equal(last.attemptsUsed, max)
+    assert.equal(last.maxAttempts, max)
+
+    // 走到 DeadLetter 而不是停在 RetryableFailure：停在中间态的话，
+    // 这条任务既没有可领的队列、也不在等人工列表里，从任何界面看都只是"失败了"，
+    // 而没有任何人会去处理它。
+    const dead = env.store.getAttempt(c.attemptId)
+    assert.equal(dead.state, 'DeadLetter')
+    assert.equal(dead.finishedAtMs, env.clock())
+    // 事件流里能看出「先失败、后因额度耗尽被丢弃」两步
+    const reasons = env.store.eventsOf(c.attemptId).map((e) => e.reason)
+    assert.ok(reasons.some((r) => r !== null && r.includes('retry-budget-exhausted')), `事件流缺额度耗尽记录：${JSON.stringify(reasons)}`)
+    // 不再有可领取的尝试
+    assert.equal(env.store.claim({ workerId: 'w9' }).claimed, null)
+    // 任务投影为 blocked（需要人看一眼），不是 todo
+    assert.equal(env.taskStatus('t1'), 'blocked')
+  } finally { env.cleanup() }
+})
+
+test('⑨ maxAttempts 非法时拒绝，而不是当成「不重试」静默执行', () => {
+  const env = makeEnv()
+  try {
+    for (const bad of [0, -1, 1.5, 'many']) {
+      assert.throws(() => createRunStore({ db: env.db, clock: env.clock, maxAttempts: bad }),
+        (e) => e.code === RUN_ERRORS.BAD_MAX_ATTEMPTS,
+        `maxAttempts=${JSON.stringify(bad)} 必须拒绝：悄悄按「不重试」执行会让配置错误表现为「任务全都只试一次就进 Dead Letter」`)
+    }
+    // 1 是合法配置（只做首次、不重试）
+    const s = createRunStore({ db: env.db, clock: env.clock, maxAttempts: 1 })
+    assert.equal(s.maxAttempts, 1)
+  } finally { env.cleanup() }
+})
+
+test('⑨ 失败上报必须走完备路径：不允许任务停在 RetryableFailure（没人会处理它）', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c = claimToRunning(env)
+    const r = env.store.failAndRetry({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, actor: 'w1', failureCode: 'runtime-unavailable', detail: '上游 502' })
+    assert.equal(r.action, 'retry-new-attempt')
+    // 旧尝试保留失败原因（不可覆盖）
+    const old = env.store.getAttempt(c.attemptId)
+    assert.equal(old.state, 'RetryableFailure')
+    assert.equal(old.failureCode, 'runtime-unavailable')
+    assert.equal(old.detail, '上游 502')
+    // 新尝试已经在队列里，且**共享同一个幂等键**
+    assert.equal(r.nextAttempt.taskId, 't1')
+    assert.equal(r.nextAttempt.attemptNo, 2)
+    assert.equal(r.nextAttempt.idempotencyKey, old.idempotencyKey,
+      '重试必须复用同一个幂等键：换了键，外部系统就无法判断「这是同一次操作的重试」，去重失效')
+    assert.equal(r.nextAttempt.state, 'Queued')
+  } finally { env.cleanup() }
+})
+
+test('⑨ 重复上报同一个失败不会重复排队（崩溃后重放是正常路径）', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c = claimToRunning(env)
+    const first = env.store.failAndRetry({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, actor: 'w1', failureCode: 'runtime-unavailable' })
+    assert.equal(first.action, 'retry-new-attempt')
+    // 同一个 worker 因为崩溃重放又报了一次：此时它的 epoch 已经过期
+    const replay = assertRunError(() => env.store.failAndRetry({
+      attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, actor: 'w1', failureCode: 'runtime-unavailable',
+    }), RUN_ERRORS.LEASE_EPOCH_STALE)
+    assert.match(replay.message, /不能替别人报失败/)
+    // 不带 epoch 的系统侧重放是 no-op，不产生第三次尝试。
+    // 这一条是**必须**的：`RetryableFailure` 已经结算过了，若继续处理会再触发一次
+    // `RetryableFailure → Queued`，于是一次失败被结算两次、排出两条排队尝试，
+    // 之后同一条任务会被两个 worker 各领一条——重复副作用，而没有任何报错。
+    const again = env.store.failAndRetry({ attemptId: c.attemptId, actor: 'system' })
+    assert.equal(again.alreadySettled, true)
+    assert.equal(again.action, 'noop')
+    assert.equal(again.reason, 'already-settled')
+    assert.equal(env.store.historyOf('t1').length, 2, '重放不得产生第三次尝试')
+  } finally { env.cleanup() }
+})
+
+test('⑩ 等人工清单：只列 UnknownOutcome 与 DeadLetter，且标出哪一条才是当前需要处理的', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    env.addTask('t2')
+    env.addTask('t3')
+    // t1：外部写结果不可确认
+    const c1 = claimToRunning(env)
+    env.store.transition({ attemptId: c1.attemptId, leaseEpoch: c1.leaseEpoch, workerId: 'w1', outcome: 'outcome_unknown' })
+    // t2：额度耗尽进 DeadLetter
+    let c2 = claimToRunning(env)
+    let last = null
+    for (let i = 0; i < env.store.maxAttempts; i++) {
+      last = env.store.failAndRetry({ attemptId: c2.attemptId, leaseEpoch: c2.leaseEpoch, actor: 'w1', failureCode: 'x' })
+      if (last.action === 'dead-letter') break
+      env.advance((last.nextAttemptAtMs ?? env.clock()) - env.clock() + 1)
+      c2 = env.store.claim({ workerId: 'w1' }).claimed
+      for (const to of ['PreparingWorkspace', 'BuildingContext', 'Running']) {
+        env.store.transition({ attemptId: c2.attemptId, leaseEpoch: c2.leaseEpoch, workerId: 'w1', to })
+      }
+    }
+    assert.equal(last.action, 'dead-letter')
+    // t3：正常失败一次（还在重试中），不该出现在等人工清单里
+    const c3 = claimToRunning(env)
+    env.store.failAndRetry({ attemptId: c3.attemptId, leaseEpoch: c3.leaseEpoch, actor: 'w1', failureCode: 'x' })
+
+    const held = env.store.listHeld()
+    const states = held.items.map((i) => i.state).sort()
+    assert.deepEqual(states, ['DeadLetter', 'UnknownOutcome'])
+    assert.equal(held.actionable, 2, '两条都是各自任务的最新尝试，都需要人处理')
+    // t2 的历史里有 5 条尝试，但只有最新的那条进列表——
+    // 否则每次重试都会让待办清单变长，人工要在一堆早已被替代的条目里找活的那些
+    assert.equal(env.store.historyOf('t2').length, env.store.maxAttempts)
+    assert.equal(held.items.filter((i) => i.taskId === 't2').length, 1)
+    assert.equal(held.items.find((i) => i.taskId === 't1').taskStatus, 'blocked')
+  } finally { env.cleanup() }
+})
+
+test('⑪ 对账确认「外部写已发生」→ 按成功继续验收，**绝不重跑**', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c = claimToRunning(env)
+    env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', outcome: 'outcome_unknown' })
+    assert.equal(env.store.getAttempt(c.attemptId).state, 'UnknownOutcome')
+
+    const r = env.store.resolveAttempt({ attemptId: c.attemptId, decision: 'external-effect-happened', actor: 'general', note: '对账单显示已扣费' })
+    assert.equal(r.action, 'continue-validation')
+    assert.equal(r.attempt.state, 'Validating')
+    assert.equal(r.attempt.externalEffect, 'confirmed')
+    assert.equal(r.attempt.resolvedBy, 'general')
+    assert.equal(r.attempt.resolvedNote, '对账单显示已扣费')
+    // 不产生新尝试——重跑一个已生效的外部写就是重复副作用
+    assert.equal(env.store.historyOf('t1').length, 1)
+    assert.equal(env.store.listHeld().items.length, 0, '处置后不再挂在等人工清单上')
+  } finally { env.cleanup() }
+})
+
+test('⑪ 对账确认「外部写未发生」→ 降级为可重试失败，不直接回队列', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c = claimToRunning(env)
+    env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', outcome: 'outcome_unknown' })
+
+    const r = env.store.resolveAttempt({ attemptId: c.attemptId, decision: 'external-effect-absent', actor: 'general' })
+    assert.equal(r.action, 'retry-new-attempt')
+    assert.equal(r.attempt.externalEffect, 'absent')
+    // 旧尝试记下"未知"这件事本身的结局：它就是失败
+    assert.equal(r.attempt.state, 'RetryableFailure')
+    assert.equal(r.nextAttempt.attemptNo, 2)
+    // 仍然不是直接回 Queued：那会让 UnknownOutcome → Queued 的禁令自己失效
+    assert.equal(env.store.getAttempt(c.attemptId).state, 'RetryableFailure')
+  } finally { env.cleanup() }
+})
+
+test('⑪ 处置决定不认识时拒绝，且**不做任何默认**', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c = claimToRunning(env)
+    env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', outcome: 'outcome_unknown' })
+    for (const bad of ['retry', 'yes', '', undefined, null]) {
+      assert.throws(() => env.store.resolveAttempt({ attemptId: c.attemptId, decision: bad, actor: 'general' }),
+        (e) => e.code === 'BAD_DECISION',
+        `决定「${bad}」必须被拒绝：猜错的两种结果分别是重复执行一次已生效的外部写、静默丢弃一次已完成的交付`)
+    }
+    // 状态没被改动
+    assert.equal(env.store.getAttempt(c.attemptId).state, 'UnknownOutcome')
+    assert.equal(env.store.getAttempt(c.attemptId).externalEffect, null)
+    // 处置必须留痕：谁做的决定
+    assert.throws(() => env.store.resolveAttempt({ attemptId: c.attemptId, decision: 'cancel' }),
+      (e) => e.code === RUN_ERRORS.WORKER_REQUIRED)
+  } finally { env.cleanup() }
+})
+
+test('⑪ 不需要处置的状态拒绝处置（「有人点错按钮」与「租约不是你的」是两件事）', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c = env.store.claim({ workerId: 'w1' }).claimed
+    const e = assertRunError(() => env.store.resolveAttempt({ attemptId: c.attemptId, decision: 'cancel', actor: 'general' }),
+      RUN_ERRORS.NOT_HELD)
+    assert.match(e.message, /不需要人工处置/)
+    assert.equal(env.store.getAttempt(c.attemptId).state, 'Leased', '被拒的处置不得改动状态')
+  } finally { env.cleanup() }
+})
+
+test('⑪ 处置仍然过状态机：DeadLetter 是终态，不能从它那里"重试"', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c = claimToRunning(env)
+    env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', outcome: 'outcome_unknown' })
+    env.store.resolveAttempt({ attemptId: c.attemptId, decision: 'dead-letter', actor: 'general' })
+    assert.equal(env.store.getAttempt(c.attemptId).state, 'DeadLetter')
+    // 人工处置不是绕过规则的后门：终态上不能凭空再试一次
+    const e = assertRunError(() => env.store.resolveAttempt({ attemptId: c.attemptId, decision: 'external-effect-absent', actor: 'general' }),
+      RUN_ERRORS.NOT_HELD)
+    assert.match(e.message, /终态/)
+  } finally { env.cleanup() }
+})
+
+test('⑨ 租约过期回收也要查额度——「每次快失败就被杀」的任务不得永远重试', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const max = env.store.maxAttempts
+    let deadLettered = null
+    for (let i = 0; i < max + 2; i++) {
+      const c = env.store.claim({ workerId: 'w1' }).claimed
+      if (c === null) break
+      // 每次都被强杀：没有任何失败上报，只有租约一次次过期
+      env.advance(DEFAULT_LEASE_TTL_MS + 1)
+      const rec = env.store.recoverExpired({ externalEffectPossible: false })
+      const entry = rec.recovered[0]
+      if (entry !== undefined && entry.action === 'dead-letter') { deadLettered = entry; break }
+      // 回收后没有退避等待：租期本身就是那段等待
+      assert.equal(entry.nextAttemptAtMs, null, '租约过期的回收不应再叠一段退避——等待已经由租期付过了')
+    }
+    assert.ok(deadLettered !== null, `「每次都被杀」的任务必须最终进 Dead Letter，否则它会永远重试下去`)
+    assert.equal(deadLettered.attemptsUsed, max)
+    assert.equal(env.store.listHeld().items.length, 1)
+  } finally { env.cleanup() }
+})
+
+test('⑪ 幂等键跨尝试稳定（含 attempt_no 就等于没有幂等键）', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c = claimToRunning(env)
+    const first = env.store.getAttempt(c.attemptId)
+    assert.equal(first.idempotencyKey, 'idem:t1')
+    // 幂等键里不得出现尝试编号：出现了就是每次重试一个新键
+    assert.equal(/att|attempt|:\d+$/.test(first.idempotencyKey.replace('idem:t1', '')), false)
+    const r = env.store.failAndRetry({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, actor: 'w1', failureCode: 'x' })
+    assert.equal(r.nextAttempt.idempotencyKey, 'idem:t1')
+    // 跨任务必须是不同的键，否则两个任务的外部写会互相去重掉。
+    // 用另一个 scope 隔离，避免 t1 的待领尝试干扰这次领取。
+    env.addTask('t2', { scope: 'other' })
+    const c2 = env.store.claim({ workerId: 'w2', scope: 'other' }).claimed
+    assert.equal(c2.taskId, 't2')
+    assert.equal(env.store.getAttempt(c2.attemptId).idempotencyKey, 'idem:t2')
+    assert.equal(env.store.retryBudgetOf('t1').idempotencyKey, 'idem:t1')
+  } finally { env.cleanup() }
+})

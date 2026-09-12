@@ -240,7 +240,38 @@
       ],
       "envReadCount": 8,
       "undeclaredEnvKeys": [],
-      "filesScanned": 12
+      "filesScanned": 15
+    },
+    {
+      "name": "orchestrator",
+      "label": "Legion Orchestrator worker（扫单 / 认领 / 派工；PRT-301 起）",
+      "dirs": [
+        "orchestrator"
+      ],
+      "schemaFile": "orchestrator/config-schema.mjs",
+      "schemaOk": true,
+      "schemaReason": null,
+      "entryPoints": [
+        "product/orchestrator/worker.mjs"
+      ],
+      "readyProbe": "不适用（worker，无监听端口）；观测量是 DataDir/orchestrator/worker.status.json",
+      "managedBy": "Product Launcher（清单第 4 个进程，dependsOn: team-hub, runtime）",
+      "protocol": "子进程长驻；对 team-hub 发 HTTP（扫单 / 认领 / 提交终态）",
+      "ports": [],
+      "sensitiveEnv": [
+        "TEAM_HUB_TOKEN"
+      ],
+      "declaredFieldCount": 5,
+      "envReadKeys": [
+        "LEGION_DATA_DIR",
+        "LEGION_RUNTIME_COMMAND",
+        "LEGION_WORKER_ID",
+        "TEAM_HUB_TOKEN",
+        "TEAM_HUB_URL"
+      ],
+      "envReadCount": 5,
+      "undeclaredEnvKeys": [],
+      "filesScanned": 9
     }
   ],
   "declarationGaps": [],
@@ -251,7 +282,8 @@
         "team-hub",
         "workbench",
         "board-plugin",
-        "services-plugin"
+        "services-plugin",
+        "orchestrator"
       ],
       "DSH_WORKBENCH_TOKEN": [
         "workbench"

@@ -190,13 +190,14 @@ export const PROCESS_KEYS = Object.freeze(PROCESS_SPECS.map((s) => s.key))
 /**
  * 当前**已知缺口**：声明了但真实入口还不存在 / 还没被解析出来的条目。
  * 这不是「待办列表」，而是「清单现在还不是完整可用的东西」这一事实的机器可读形式。
+ *
+ * 变化史（每一次都对应一次**门禁变红**，这是它存在的意义）：
+ *   - PRT-258 建立时有两项：`ENTRY_MISSING:orchestrator`、`ENTRY_UNRESOLVED:runtime`。
+ *   - PRT-301 创建了 `product/orchestrator/worker.mjs`，前一项随之消失。
+ *     这就是「缺口补上时用例变红」的设计：不能只改代码不改清单，
+ *     否则清单会继续宣称一个已经不存在的缺口，而读者会以为编排进程还没落地。
  */
 export const MANIFEST_KNOWN_GAPS = Object.freeze([
-  Object.freeze({
-    code: 'ENTRY_MISSING',
-    process: 'orchestrator',
-    detail: 'product/orchestrator/worker.mjs 尚未创建（属 PRT-301）；在此之前 Launcher 不得把 orchestrator 报成「已就绪」。',
-  }),
   Object.freeze({
     code: 'ENTRY_UNRESOLVED',
     process: 'runtime',

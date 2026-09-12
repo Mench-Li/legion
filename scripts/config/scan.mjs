@@ -30,6 +30,11 @@ export const PROCESSES = Object.freeze({
   // 因此它的读取点必须与其余进程一样可扫描。注意它的注入面是白名单（见 product/launcher/env.mjs），
   // 与 services-plugin 的「整份 env 打底 + 覆盖」相反。
   product: { label: '产品层（Legion Launcher：进程清单 / 白名单注入 / 就绪判据 / 监督退避）', dirs: ['product'] },
+  // PRT-301 起：Orchestrator worker 是独立常驻进程（清单里 `dependsOn: [team-hub, runtime]`），
+  // 它有自己的读取面（TEAM_HUB_URL / TEAM_HUB_TOKEN / LEGION_*），因此单独登记。
+  // 入口在 `product/orchestrator/worker.mjs`（清单冻结的路径），实现住在这里——
+  // 两侧都会读 env，因此**两边都必须被扫描到**，否则「入口读了什么」会漏登记。
+  orchestrator: { label: 'Legion Orchestrator worker（扫单 / 认领 / 派工；PRT-301 起）', dirs: ['orchestrator'] },
 })
 
 const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', '.legion-worktrees', '.worktrees', 'releases', 'scratch', 'coverage', 'data', '.ci', 'vendor'])

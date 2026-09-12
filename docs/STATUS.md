@@ -30,7 +30,66 @@
 > - `gf001` 空间非终态任务数为 **0**；T-141 已由将军于 `14:00:32Z` 转 `canceled`
 >   （产物从 patch 记录逐字恢复为 `53d9d15`，需求已由 `G-mtwxx7an-2` 交付，无需重做）。
 
-> **本轮（PRT-706 首次运行初始化 + 产品配置读取）**：新增 `product/config.mjs`、
+> **本轮（PRT-301 持久化运行状态机 + Orchestrator worker 入口）**：新增
+> `orchestrator/state-machine/`（13 态、CAS 迁移、具名拒绝码、失败分类、恢复判定）、
+> `orchestrator/worker/`（循环 / 状态文件 / 进程外壳）、入口 `product/orchestrator/worker.mjs`、
+> 配置面 `orchestrator/config-schema.mjs` 与套件 `orchestrator`（**51 例**，含 **1 例真实进程**）。
+> 60→**61** 套件、1651→**1702** 用例。阶段 3 启动。
+>
+> **清单里最后一个入口缺口关掉了，而且是门禁先变红再改文档**：
+> 新建 `product/orchestrator/worker.mjs` 后，`MANIFEST_KNOWN_GAPS` 的对账用例立刻失败，
+> 报出 `actual: [ENTRY_UNRESOLVED:runtime]` / `expected: [ENTRY_MISSING:orchestrator, …]`。
+> 这正是它在 PRT-258 被设计出来要做的事——缺口补上时必须有人回头改清单，
+> 否则清单会继续宣称一个已经不存在的缺口。现在 `--check` 只剩 `runtime` 一条。
+>
+> 三条判断：
+> **① 状态机的价值全在「拒绝」上。** 30 条用例里 19 条断言的是拒绝。
+> 因为状态机最危险的失效方式不是「写错一个状态」，而是「本该拒绝的迁移被接受了」——
+> 被接受之后没有异常、没有日志，只有很晚才被发现的现象：用户看到「已完成」变回「进行中」、
+> 任务链在某处静静断掉、或者**外部写操作被执行两次**。因此每条拒绝都返回**具名**错误码：
+> `UnknownOutcome → Queued` 报 `UNKNOWN_OUTCOME_NOT_RETRYABLE` 而不是笼统的 `ILLEGAL_TRANSITION`，
+> 具名才能被单独统计与告警。
+> **② 未登记的失败码不默认可重试。** 对一个我们还不认识的错误自动重试，
+> 最好的情况是浪费一次额度，最坏的情况是重复付费/重复推送。同理，
+> 崩溃恢复时「lease 过期」必须显式回答「外部副作用是否可能已发生」，
+> 缺这个输入就**拒绝判定**（`EXTERNAL_EFFECT_UNKNOWN`）——判错的代价不对称。
+> **③ worker 不认领自己执行不了的任务。** 没有执行引擎时一次 `claim` 都不发。
+> 一个「积极」的 worker 会照常认领然后立刻失败，把重试额度烧光，
+> 外部表现是「任务在跑但全都失败了」，而真因只是「没配执行引擎」。
+>
+> **自查改掉了四处不会报错的问题**，最值得记住的是第 ② 条——
+> 入口原写成 `const { runPromise } = await runWorkerProcess()`，而起不来时它返回数字 `8`：
+> 解构得到 `undefined`，`await undefined` 通过，退出码被设成 0，
+> **Launcher 会认为「worker 起来了」，而它什么都没做**。已改为判别式联合，
+> 从类型上让这种写法不可能再出现。另三处：`heartbeatIntervalMs` 被接收却从未使用
+> （缺心跳不会让任何用例失败，只会让长任务在租期后被**第二个 worker 重跑**——
+> 对已调用过外部写的步骤就是重复副作用，已实现执行期心跳）、
+> `isMainModule()` 只有自己的用例在用、`stop()` 里一个空 `if` 块。
+> 心跳之所以不是「保活优化」而是「不重复执行」的前提，见 PRT-301 文档第 6 节。
+>
+> **一条实测出来的平台事实**：真实进程用例断言 `child.kill('SIGTERM')` → 状态写 `stopped` → 退出码 0，
+> 实测得到 `{ code: null, signal: 'SIGTERM' }`——**信号处理器一次都没被调用**。
+> Windows 上「终止」是无条件终止（Node 文档明确写了），因此：
+> 优雅停止在 Windows 上可能一次都不执行，**释放 lease 不能依赖 worker 自己走完收尾**；
+> 状态文件会停在最后一刻的值，于是「文件存在」与「worker 还活着」必须分开判定
+> （新增 `isStatusFresh`：过期/缺时间戳/时间戳在未来一律报「不新鲜」——
+> 宁可说「不确定」，也不要把可能已死的 worker 报成在跑，后者的代价是任务永远没人认领）。
+> 用例按平台分支断言，并把这条结论写成注释：哪天 Windows 上真的出现了 `stopped`，
+> 这条结论就需要重新验证，用例会立刻告诉我们。
+>
+> ⚠️ **未交付**：lease 的**落库**实现（`leaseEpoch` / team-hub 权威时间 / 过期 epoch 拒写，
+> 属 PRT-302/313，目前只有语义与判定；心跳能发现「lease 可能已易主」，
+> 但**还不能中断正在执行的 executor**——那需要把 `AbortSignal` 穿到 RuntimeAdapter）、
+> attempt 仓储（PRT-303）、
+> 从 `plugins/src/index.ts` 的提取（PRT-304~308）、重试队列与恢复扫描（PRT-309/310）、
+> **worker 尚未接上 RuntimeAdapter**（`executor` 注入点就绪但生产路径传 `null`，
+> 因此真实运行时它报 `no-executor` 且不认领——这是**如实上报**，不是缺陷）、
+> **数据面路由 `/api/runtime/*` 不存在**（team-hub 侧未实现，
+> 因此即使是配置完整的 worker 也还认领不到任务）、
+> 状态文件尚未被 Launcher 消费（`readiness` 仍是 `kind: 'none'`，接线属 PRT-711）。
+> 详见 `docs/superpowers/prt/PRT-301-run-state-machine.md`。
+>
+> 上一批（PRT-706 首次运行初始化 + 产品配置读取）：新增 `product/config.mjs`、
 > `product/init.mjs` 与套件 `product-config`（**27 例**，全部跑真实文件系统的临时目录）；
 > CLI 新增 `--init` / `--dry-run` / `--no-config`。59→**60** 套件、1617→**1651** 用例。
 > 阶段 7 由 4 完成 → **6 完成**。
@@ -57,11 +116,10 @@
 > 不覆盖已有配置（用户在向导里填的东西会无声消失）。
 > 顺带删掉一个**不可达**的分支：同一件事判两次就会有两个口径，两处不一致时两份都不可信。
 >
-> ⚠️ **未交付**：首次运行**向导界面**（`--init --dry-run` 是它的地基）、
-> 日志轮转与磁盘保护（`directorySize()` 已提供前置读数）、配置的原子写入（向导改配置时需要）。
+> ⚠️ 上一批未交付（仍然成立）：首次运行**向导界面**（`--init --dry-run` 是它的地基）、
+> 日志轮转与磁盘保护（`directorySize()` 已提供前置读数）、配置的原子写入。
 > **`services-plugin` 仍未替换**——配置与初始化都接在**新** Launcher 上，接线属 PRT-252。
-> 填好 `runtime.command` 后 `--check` 只剩 `orchestrator` 入口缺失（PRT-301），
-> 这说明配置 → Launcher 的接线是通的。详见 `docs/superpowers/prt/PRT-706-config-init.md`。
+> 详见 `docs/superpowers/prt/PRT-706-config-init.md`。
 >
 > 上一批（阶段 7 Product Launcher：PRT-251 / 701~704）：新增 `product/launcher/`
 > （`launcher.mjs` / `supervisor.mjs` / `readiness.mjs` / `ports.mjs` / `allowlist.mjs` /

@@ -85,6 +85,12 @@ const PROCESS_TOPOLOGY = Object.freeze({
     managedBy: '用户/Desktop 直接启动（spec §6.10 的「客户唯一启动入口」）',
     protocol: '进程内调度 + 按波次 spawn 五进程（PRT-251）',
   },
+  orchestrator: {
+    entryPoints: ['product/orchestrator/worker.mjs'],
+    readyProbe: '不适用（worker，无监听端口）；观测量是 DataDir/orchestrator/worker.status.json',
+    managedBy: 'Product Launcher（清单第 4 个进程，dependsOn: team-hub, runtime）',
+    protocol: '子进程长驻；对 team-hub 发 HTTP（扫单 / 认领 / 提交终态）',
+  },
 })
 
 /** 产品目录分类（PRT-003 要求的五类归属）。 */

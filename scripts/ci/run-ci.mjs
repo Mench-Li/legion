@@ -411,6 +411,21 @@ async function stageTest() {
       files: ['product/config.test.mjs', 'product/init.test.mjs'],
       cwd: ROOT,
     },
+    // PRT-301：持久化运行状态机 + Orchestrator worker 入口。
+    // 这一组的断言几乎全是**拒绝**，因为状态机最危险的失效方式不是「写错一个状态」，
+    // 而是「本该拒绝的迁移被接受了」：接受了之后没有异常、没有日志，
+    // 只有用户看到「已完成」变回「进行中」，或者任务链在某处静静断掉。
+    // 三条各自对应一种不可逆后果：UnknownOutcome 自动重试 = 重复外部副作用；
+    // 过期 worker 写入 = 覆盖别人的结果；无可重试的未知错误码默认重试 = 烧光队列。
+    // worker 侧的核心断言是「**不认领自己执行不了的任务**」：
+    // 一个「积极」的 worker 会照常认领然后立刻失败，把重试额度烧光。
+    // 另有真实进程用例证明入口能被拉起来、会写状态文件；
+    // 它同时也记录了一条平台事实——Windows 上「终止」不走信号处理器。
+    {
+      label: 'orchestrator（PRT-301：运行状态机、失败分类与恢复判定、worker 生命周期）',
+      files: ['orchestrator/state-machine/state-machine.test.mjs', 'orchestrator/worker/worker.test.mjs'],
+      cwd: ROOT,
+    },
     // 阶段 2.5 / 阶段 5：密钥库最小闭环（PRT-505，PRT-258 的第四份契约）。
     // 这一组的断言集中在两类**不会抛异常**的失败上：
     //   ① 元数据接口（list / toJSON / 审计 / 错误对象）把值或密文带出去——

@@ -34,6 +34,8 @@ export const SCHEMA_FILES = Object.freeze({
   'services-plugin': 'services-plugin/config-schema.mjs',
   // PRT-251：产品层（Launcher）。登记在这里等于声明「它的读取面有权威 schema」。
   product: 'product/config-schema.mjs',
+  // PRT-301：Orchestrator worker（常驻进程，有独立的读取面）。
+  orchestrator: 'orchestrator/config-schema.mjs',
 })
 
 /** 解析 --env-file=path（KEY=VALUE，忽略空行与 # 注释；不展开变量引用）

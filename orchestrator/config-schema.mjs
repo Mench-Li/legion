@@ -114,6 +114,12 @@ export const NON_ENV_LITERALS = Object.freeze([
   // 前者是接线缺一截（去接观察器），后者是强制面真的不在（去重装补丁层）。
   // 合成一个码会让排查方向指向错的地方。
   'BOOTSTRAP_COMPOSITION_UNOBSERVED',
+  // token 用量不完整时的预算违规种类（usage.mjs 的 `checkBudget`）。
+  //
+  // 与 `cost-unknown` 同一条口径：**无法判定时不得返回 `null`**——
+  // `null` 的含义是"确认没超"。缺的那侧用 0 补会**低估**用量，
+  // 于是一次实际超支的运行被判成"未超"，而它是错的却看起来是对的。
+  'token-unknown',
 
   // 修复入口的动作名（bootstrap.mjs 的 REPAIR_ACTIONS）。
   //
@@ -213,6 +219,14 @@ export const SCHEMA = defineSchema({
       doc: 'PRT-306：用户授权的项目目录，每次 Attempt 从它检出一份隔离的 git worktree。' +
         '**未配置时不认领任何任务**——不自动退回原地执行：那会让两个 worker 在同一个目录里' +
         '改同一份文件，而那种冲突不报错（表现为"改的东西莫名不见了"）',
+    },
+    {
+      key: 'budgetActor', env: 'LEGION_BUDGET_ACTOR', type: 'string', default: '',
+      doc: 'PRT-510：预算账本的**记账主体**（谁花的钱）。' +
+        '**未配置时不建预算闸门**——这是刻意的：账本要求"谁结算的必须留痕"，' +
+        '而给一个默认值会让"没人签名"与"某人签了名"在账本里长得一样。' +
+        '没接闸门这件事在结果里是可见的（`budgetState: "not-gated"`），' +
+        '不会与"预算充足"同形。',
     },
   ],
   notes: [

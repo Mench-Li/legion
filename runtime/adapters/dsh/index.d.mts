@@ -162,7 +162,7 @@ export declare function validateExpectedOutput(expectedOutput: unknown): { ok: b
 
 export declare const PRICING: Readonly<{ asOf: string; currency: string; models: Readonly<Record<string, { inPerMTok: number; outPerMTok: number }>> }>
 export declare const USAGE_FIELD_ALIASES: Readonly<Record<string, readonly string[]>>
-export declare function collectUsage(result: unknown, options?: { pricing?: object; model?: string | null }): { tokensIn: number; tokensOut: number; estimatedCostUsd: number | null } | null
+export declare function collectUsage(result: unknown, options?: { pricing?: object; model?: string | null }): { tokensIn: number | null; tokensOut: number | null; estimatedCostUsd: number | null } | null
 export declare function estimateCostUsd(input: { model?: string | null; tokensIn?: number; tokensOut?: number; pricing?: object }): number | null
 export declare function createDurationTracker(now?: () => number): {
   start(key: string): number

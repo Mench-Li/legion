@@ -765,6 +765,26 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // 装配链的**端到端**验证：最近四批各自交付、各自全绿，而
+      // **没有任何一条用例把它们接起来跑过一次**。
+      //
+      //   > 「注册了、跑了、过了」≠「这条路被测过」。
+      //
+      // 接缝上的错恰恰是每一块的套件都看不见的：它们各自的假件补上了对方那一半。
+      // 这一组只用最外层的假件（DSH 引擎 + hub 的 HTTP），中间四块全用真实现，
+      // 从"组合树观察结果"一路走到"账本已结算"。
+      //
+      // 写它的时候当场抓到两个真 bug（都已修）：
+      //   · `productionExecutorProvider` 根本没有 `budgetActor` 的来源——
+      //     PRT-510 的套件把它直接传给 `createProductionExecutor`，
+      //     而**生产路径不经过那一步**，于是闸门永远不会被建起来；
+      //   · 引擎故障的正确行为是**分类成有名字的终态**而不是抛，
+      //     第一版断言写成 `assert.rejects`，那是在要求实现做它刻意不做的事。
+      label: 'e2e-assembly（装配链端到端：观察 → 自检 → 注册 → 预留 → 执行 → 结算）',
+      files: ['runtime/dsh-composition/e2e-assembly.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-215 落地 + PRT-257 的「应用自检与修复入口」。
       //
       // `startupSelfCheck()`、`probeSandbox()`、`bindDshRuntime()` 三件东西

@@ -39,14 +39,43 @@
 
 import { createProductionExecutor, EXECUTOR_CODES } from './executor.mjs'
 
-/** 已注册的绑定（进程内单例）。一台机器同时只会有一个 DSH 运行时。 */
-let binding = null
+/**
+ * 已注册的绑定。**一个栈，不是一个槽。**
+ *
+ * ## 为什么不能用"当前值 + previous 链"
+ *
+ * 前两版都是单槽 + `previous` 链，两次都错在同一个地方：
+ *
+ * ```js
+ * binding = mine
+ * return () => { if (binding === mine) binding = previous }
+ * ```
+ *
+ * 问题出在**注销顺序**上。装配 A、再装配 B，然后注销 A：
+ * `binding` 是 B、不等于 A 的 `mine`，所以什么都不做——看起来对。
+ * 但 A 的注销**没有留下任何痕迹**。等 B 被注销时，它把 `binding` 写回
+ * `previous`，也就是 A——**于是一份已经被自己主人注销掉的绑定复活了**。
+ *
+ * 具体后果：`productionExecutorProvider()` 会返回 `ok: true` 与 A 的宿主端口，
+ * 而 A 的主人已经拆掉了它那一侧。这正是"拒绝、却仍然递给 worker 一个能用的引擎"
+ * 那一类里最坏的一种——**没有东西会报错**。
+ *
+ * 一个栈没有这个问题：注销是"把自己从活跃集合里删掉"，
+ * 与顺序无关、幂等、且不会复活任何东西。
+ */
+let bindingStack = []
+
+/** 当前生效的绑定（栈顶）。 */
+function currentBinding() {
+  return bindingStack.length === 0 ? null : bindingStack[bindingStack.length - 1]
+}
 
 /**
  * 由 DSH 侧那一层调用，把宿主端口与自检装进来。
  *
  * 返回一个**注销函数**：绑定是进程级的副作用，而"装上了但卸载不掉"
  * 会让同一个进程里的第二次启动带着上一次的残留状态跑。
+ * 注销函数**幂等**，且与调用顺序无关。
  *
  * @param {object} input
  * @param {object} input.host DSH 宿主端口（`startRun` / `probeRuntime`）。
@@ -66,27 +95,27 @@ export function bindDshRuntime(input = {}) {
   if (typeof input.canRead !== 'function') {
     throw new TypeError('bindDshRuntime 需要 canRead：权限判定由调用方显式给出，不猜')
   }
-  const previous = binding
-  // 记住**自己装上的那一份**（按引用比较），而不是拿 `previous` 去比：
-  // 第一版写成 `binding === previous`，于是"从没绑定过 → 绑定 → 注销"
-  // 这条最常见的路径反而注销不掉（`obj === null` 为假），
-  // 而它在下一次绑定时表现为"上一个绑定没清干净"——一个只在特定顺序下出现的脏状态。
   const mine = Object.freeze({ ...input })
-  binding = mine
+  bindingStack = [...bindingStack, mine]
   return function unbind() {
-    // 只撤销自己装上的那一份：后装的那一份不该被先装的那份的注销函数抹掉。
-    if (binding === mine) binding = previous
+    // 按引用删掉自己那一份。**只删自己**，于是：
+    //   · 后装的那一份不会被先装的那份抹掉；
+    //   · 先装的那一份的注销也不会在栈里留下一个"稍后复活"的洞；
+    //   · 重复调用是 no-op（幂等）。
+    const i = bindingStack.indexOf(mine)
+    if (i === -1) return
+    bindingStack = [...bindingStack.slice(0, i), ...bindingStack.slice(i + 1)]
   }
 }
 
 /** 当前是否已绑定。诊断用——"没绑定"与"绑定了但端口坏了"是两件事。 */
 export function dshRuntimeBound() {
-  return binding !== null
+  return currentBinding() !== null
 }
 
 /** 仅供用例：清空绑定，避免用例之间互相污染。 */
 export function resetDshRuntimeBinding() {
-  binding = null
+  bindingStack = []
 }
 
 /**
@@ -101,7 +130,7 @@ export function resetDshRuntimeBinding() {
  */
 export async function productionExecutorProvider(io = {}) {
   const { post, get, env = process.env } = io
-  if (binding === null) {
+  if (currentBinding() === null) {
     return Object.freeze({
       ok: false,
       code: EXECUTOR_CODES.HOST_PORT_REQUIRED,
@@ -119,10 +148,39 @@ export async function productionExecutorProvider(io = {}) {
       reasons: Object.freeze([]),
     })
   }
-  const { host, selfCheck, canRead, ...rest } = binding
-  void env
-  return createProductionExecutor({ host, selfCheck, canRead, post, get, ...rest })
+  const { host, selfCheck, canRead, ...rest } = currentBinding()
+
+  // 记账主体：显式入参优先，其次环境变量。
+  // **不给默认值**——账本要求"谁结算的必须留痕"，
+  // 而一个默认值会让"没人签名"与"某人签了名"在账本里长得一样。
+  // 没给就是没接闸门，而"没接"在结果里是可见的（`budgetState: 'not-gated'`）。
+  const budgetActor = typeof io.budgetActor === 'string' && io.budgetActor.trim() !== ''
+    ? io.budgetActor.trim()
+    : (typeof env?.[BUDGET_ACTOR_ENV] === 'string' && env[BUDGET_ACTOR_ENV].trim() !== ''
+        ? env[BUDGET_ACTOR_ENV].trim()
+        : null)
+
+  return createProductionExecutor({
+    host, selfCheck, canRead, post, get, ...rest,
+    ...(budgetActor === null ? {} : { budgetActor }),
+  })
 }
+
+/**
+ * 预算账本的**记账主体**（谁花的钱）来自这个环境变量。
+ *
+ * 这是接缝上补出来的一个真问题：PRT-510 的套件把 `budgetActor` 直接传给
+ * `createProductionExecutor`，而**生产路径根本不经过那一步**——
+ * `productionExecutorProvider` 只从 binding 里取 `{host, selfCheck, canRead}`，
+ * `budgetActor` 没有来源。于是：闸门代码是对的、套件是全绿的、
+ * 而**通过生产路径它永远不会被建起来**。
+ *
+ *   > 「注册了、跑了、过了」≠「这条路被测过」。
+ *
+ * 名字用 `LEGION_` 前缀：这是 Legion 自己的配置面，
+ * 而 `TEAM_HUB_*` 是共享变量族（见 `orchestrator/config-schema.mjs`）。
+ */
+export const BUDGET_ACTOR_ENV = 'LEGION_BUDGET_ACTOR'
 
 /**
  * 从 worker 的环境变量造出 hub 的 `post` / `get`。

@@ -39,7 +39,13 @@ function pick(obj, names) {
   if (obj === null || typeof obj !== 'object') return undefined
   for (const n of names) {
     const v = obj[n]
-    if (typeof v === 'number' && Number.isFinite(v)) return v
+    // **必须是合法的计数**：非负、有限、安全整数。
+    //
+    // 第一版只查了 `Number.isFinite`，于是**负数被当成合法用量**：
+    // `pick({ tokensOut: -3 })` 返回 `-3`，调用方据此认为"至少拿到了一个字段"，
+    // 于是不再返回 `null`——**一个全是垃圾的 usage 被当成了有效读数**。
+    // 负数 token 不是"少"，是一个不可能的值，只可能来自解析错误。
+    if (typeof v === 'number' && Number.isFinite(v) && Number.isSafeInteger(v) && v >= 0) return v
   }
   return undefined
 }
@@ -50,6 +56,21 @@ function pick(obj, names) {
  * 返回 `null` 表示**没有可用的用量信息**（而不是「用量为 0」）——
  * 这两个状态在预算与审计里的含义完全不同：前者要显式记录"缺失"，
  * 后者会被当成一次零成本运行累加进总账。
+ *
+ * ## 一侧未知时，另一侧**不能补 0**
+ *
+ * 第一版是 `const inTok = tokensIn ?? 0`。看起来无害，实际是在
+ * **替引擎宣布一个它没报告的读数**：
+ *
+ *   · 引擎报了输入、没报输出 → 记成 `tokensOut: 0`
+ *   · 而 `0` 是一个**测量结论**（"一个输出 token 都没花"），不是"不知道"
+ *
+ * 这个 0 会一路流进预算账本与审计；事后对账时它是一个
+ * **看起来专业的错误数字**，而没有任何东西提示它是编出来的。
+ *
+ *   > 缺一个数就写 0，等于把一个未知数记成了一个已知的零。
+ *
+ * 所以未知的一侧是 `null`。
  */
 export function collectUsage(result, options = {}) {
   const { pricing = PRICING, model = null } = options
@@ -59,10 +80,11 @@ export function collectUsage(result, options = {}) {
   const tokensIn = pick(usageNode, USAGE_FIELD_ALIASES.tokensIn)
   const tokensOut = pick(usageNode, USAGE_FIELD_ALIASES.tokensOut)
 
+  // 两侧都拿不到 → 没有可用用量。**不返回全 0 的对象**。
   if (tokensIn === undefined && tokensOut === undefined) return null
 
-  const inTok = tokensIn ?? 0
-  const outTok = tokensOut ?? 0
+  const inTok = tokensIn ?? null
+  const outTok = tokensOut ?? null
   return {
     tokensIn: inTok,
     tokensOut: outTok,
@@ -121,12 +143,35 @@ export function createDurationTracker(now = () => Date.now()) {
   }
 }
 
-/** 预算检查：超出即返回违规原因（`null` 表示未超）。缺任一输入即无法判定 → 返回 `null` 而非放行。 */
+/**
+ * 预算检查：超出即返回违规原因（`null` 表示未超）。
+ *
+ * **无法判定时返回一个说明"无法判定"的违规，而不是 `null`。**
+ *
+ * `null` 的含义是"确认没超"。所以在**数据不足**时返回 `null`
+ * 等于把"不知道"当成"没超"——与下面费用那一条的判据一致。
+ *
+ * `token-unknown` 这一条是补出来的：第一版写的是
+ * `(usage.tokensIn ?? 0) + (usage.tokensOut ?? 0)`，于是引擎只报了一侧时，
+ * 另一侧被补成 0，`used` 会**小于真实用量**——一次实际上超支的运行
+ * 会被判成"未超"。**低估用量比不知道用量更危险**，因为它是错的却看起来是对的。
+ */
 export function checkBudget({ budget, usage }) {
   if (!budget || typeof budget !== 'object') return null
   if (!usage) return null
   if (typeof budget.maxTokens === 'number') {
-    const used = (usage.tokensIn ?? 0) + (usage.tokensOut ?? 0)
+    const inTok = usage.tokensIn
+    const outTok = usage.tokensOut
+    // 一侧缺失 → 总量不可知。不得用 0 补上，也不得据此宣称未超。
+    if (typeof inTok !== 'number' || typeof outTok !== 'number') {
+      return {
+        kind: 'token-unknown',
+        limit: budget.maxTokens,
+        used: null,
+        message: 'token 用量不完整（缺 tokensIn 或 tokensOut），无法确认是否超出预算（不得视为未超）',
+      }
+    }
+    const used = inTok + outTok
     if (used > budget.maxTokens) {
       return { kind: 'tokens', limit: budget.maxTokens, used, message: `用量 ${used} 超出预算 ${budget.maxTokens} token` }
     }

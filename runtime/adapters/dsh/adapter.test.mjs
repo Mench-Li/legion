@@ -699,12 +699,48 @@ test('⑩ 无用量信息返回 null（不是「零用量」）', () => {
   assert.equal(collectUsage(null), null)
 })
 
-test('⑩ 用量字段别名兼容，双取缺失侧补 0', () => {
+test('⑩ 用量字段别名兼容；**缺失的一侧是 `null`，不是 0**', () => {
   assert.equal(collectUsage({ usage: { input_tokens: 5, output_tokens: 7 } }).tokensIn, 5)
-  assert.equal(collectUsage({ usage: { promptTokens: 5 } }).tokensOut, 0)
+  // 这条原来写的是 `assert.equal(..., 0)`，标题是「双取缺失侧补 0」——
+  // 也就是说**它把这个 bug 当成了规格**。
+  //
+  // 补 0 是在替引擎宣布一个它没报告的读数：`0` 是「一个输出 token 都没花」
+  // 这个**测量结论**，不是"不知道"。那个 0 会一路流进预算账本与审计，
+  // 事后对账时它是一个看起来专业的错误数字。
+  //
+  //   > 一条把 bug 断言成规格的用例，与一份错误的规格完全同形。
+  assert.equal(collectUsage({ usage: { promptTokens: 5 } }).tokensOut, null,
+    '引擎没报输出 token 时是"不知道"，不是"零"')
+  assert.equal(collectUsage({ usage: { promptTokens: 5 } }).tokensIn, 5)
+  assert.equal(collectUsage({ usage: { completionTokens: 7 } }).tokensIn, null)
   const u = collectUsage({ usage: { tokensIn: 1, tokensOut: 2 } })
   assert.equal(u.tokensIn, 1)
   assert.equal(u.tokensOut, 2)
+})
+
+test('⑩ **负数与小数不是合法用量**（垃圾读数不得被当成有效读数）', () => {
+  // 第一版的 `pick` 只查了 `Number.isFinite`，于是 `-3` 被当成合法值：
+  // 调用方据此认为"至少拿到了一个字段"，于是不再返回 null——
+  // 一个全是垃圾的 usage 被当成了有效读数。
+  assert.equal(collectUsage({ usage: { tokensIn: -3, tokensOut: 5 } }).tokensIn, null,
+    '负数 token 不是"少"，是一个不可能的值')
+  assert.equal(collectUsage({ usage: { tokensIn: 1.5, tokensOut: 5 } }).tokensIn, null, 'token 计数是整数')
+  assert.equal(collectUsage({ usage: { tokensIn: Number.NaN, tokensOut: 5 } }).tokensIn, null)
+  assert.equal(collectUsage({ usage: { tokensIn: Number.POSITIVE_INFINITY, tokensOut: 5 } }).tokensIn, null)
+  // 全是垃圾 → 整个 usage 视为不可用
+  assert.equal(collectUsage({ usage: { tokensIn: -1, tokensOut: -2 } }), null)
+  // 0 是合法读数（确实一个都没花），与"不知道"不同
+  assert.equal(collectUsage({ usage: { tokensIn: 0, tokensOut: 0 } }).tokensIn, 0)
+})
+
+test('⑩ **token 用量不完整时不得判为「未超预算」**（缺的那侧不能用 0 补）', () => {
+  // 低估用量比不知道用量更危险：它是错的，却看起来是对的。
+  const unknown = checkBudget({ budget: { maxTokens: 10 }, usage: { tokensIn: 8, tokensOut: null } })
+  assert.equal(unknown.kind, 'token-unknown')
+  assert.equal(unknown.used, null)
+  // 两侧都有才判
+  assert.equal(checkBudget({ budget: { maxTokens: 100 }, usage: { tokensIn: 8, tokensOut: 8 } }), null)
+  assert.equal(checkBudget({ budget: { maxTokens: 10 }, usage: { tokensIn: 8, tokensOut: 8 } }).kind, 'tokens')
 })
 
 test('⑩ 价格表未生效或模型无价 → 费用为 null', () => {

@@ -86,6 +86,46 @@ test('② 表数量过少抛错而不是记录空基线', () => {
   assert.deepEqual(extractTables('CREATE TABLE IF NOT EXISTS tasks (id TEXT)', { min: 1 }), ['tasks'])
 })
 
+test('② ★★ 表名写成字符串常量时要**解析出来**（PRT-615 的真实回归）', () => {
+  // PRT-615 把 `permission_requests` 的 DDL 从 `server.mjs` 搬进
+  // `approval-binding.mjs`，并改用 `const APPROVAL_TABLE = 'permission_requests'`。
+  // 当时的抽取规则只认字面量，于是那张表**静默消失**：32 张变 31 张，
+  // 而报出来的漂移是"表被移除了"——如果同时新增一张表，它根本不会出现在漂移里。
+  //
+  //   > 一个"认不出来的建表语句就当它没建表"的抽取，
+  //   > 与一个"可以被无声地绕过的契约门禁"，是同一个东西。
+  const src = `
+    const APPROVAL_TABLE = 'permission_requests'
+    db.exec(\`CREATE TABLE IF NOT EXISTS \${APPROVAL_TABLE} (requestId TEXT PRIMARY KEY)\`)
+  `
+  assert.deepEqual(extractTables(src, { min: 1 }), ['permission_requests'])
+})
+
+test('② ★★ 解析不出来的常量引用要**抛错**，不是静默跳过', () => {
+  // 「跳过」的后果是那张表对基线不可见，而门禁报"无漂移"——正是上面那条的形状。
+  // 宁可它报"抽取规则已与源码脱节"（人一看就知道去改抽取器），
+  // 也不要它报"无漂移"（人不会去看）。
+  assert.throws(
+    () => extractTables('CREATE TABLE IF NOT EXISTS ${MYSTERY_TABLE} (id TEXT)', { min: 1 }),
+    /找不到 `const MYSTERY_TABLE/,
+    '认不出来的表名引用被静默跳过了——那张表会对契约基线不可见',
+  )
+  // 常量存在但值不是纯标识符时同样要拒绝（例如拼出来的名字）
+  assert.throws(
+    () => extractTables("const T = 'a' + 'b'\nCREATE TABLE IF NOT EXISTS ${T} (id TEXT)", { min: 1 }),
+    /找不到 `const T/,
+  )
+})
+
+test('② 两种写法可以混用', () => {
+  const src = `
+    const OTHER = 'other_table'
+    CREATE TABLE IF NOT EXISTS literal_table (id TEXT)
+    CREATE TABLE IF NOT EXISTS \${OTHER} (id TEXT)
+  `
+  assert.deepEqual(extractTables(src, { min: 1 }), ['literal_table', 'other_table'])
+})
+
 test('② 找不到目标字面量时抛错', () => {
   assert.throws(() => extractStringArray('const OTHER = []', 'STATUSES'), /找不到 STATUSES/)
   assert.throws(() => extractTransitions('const OTHER = {', 'TRANSITIONS'), /找不到 TRANSITIONS/)

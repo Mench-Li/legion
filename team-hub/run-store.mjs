@@ -356,7 +356,53 @@ const EVIDENCE_CHECKS = Object.freeze({
   contextSnapshot: (db, attemptId) =>
     tableExists(db, 'run_context_snapshots') &&
     db.prepare('SELECT COUNT(*) AS n FROM run_context_snapshots WHERE attempt_id = ?').get(attemptId).n > 0,
+  // 「有一次可查的审批决定」——PRT-615 把它从"未登记"变成"已核验"。
+  //
+  // 两条边都声明了 `requiresPersist: ['attempt','approval']`，但它们的方向**相反**，
+  // 而证据在两条边上的含义完全不同：
+  //
+  //   · **出边** `AwaitingApproval → RetryableFailure`（被拒 / 被 TTL 自动 deny）：
+  //     这次暂停**结束**了，所以那一行审批必须已经存在。这就是本批要核验的东西。
+  //
+  //   · **入边** `X → AwaitingApproval`：那次暂停**开始**了，而"有东西可批"这件事
+  //     是由这条迁移**自己**要创建的。要求它在 UPDATE 之前就存在是循环的。
+  //
+  // 所以入边返回 `EVIDENCE_NOT_APPLICABLE`（既不算核验过、也不算缺失），
+  // 而**这不是"降级成不检查"**：入边方向真正的核验应当是"进入 AwaitingApproval 的
+  // 同一次事务里创建了审批行"。acceptance 流程目前**不**创建它——那意味着一条任务
+  // 可以停在 `AwaitingApproval` 而**没有任何东西可批**，而界面上它是一个待办。
+  // 那属于 PRT-607（审批箱）的范围，见本批文档的"诚实边界"。
+  //
+  //   > 一个「进了等待审批、但没有任何东西可批」的状态，
+  //   > 与一个「任务卡住了」的状态，在「用户会不会一直等下去」上是同一个东西。
+  //
+  // 只认**属于这条 Attempt** 的审批行（`attempt_id` 而不是 `task_id`）：同一个任务
+  // 重试之后是一条新 Attempt，用 task_id 匹配会把上一条 Attempt 的审批算成本次的依据。
+  approval: (db, attemptId, edge = {}) => {
+    if (edge.from !== 'AwaitingApproval') return EVIDENCE_NOT_APPLICABLE
+    if (!tableExists(db, 'permission_requests')) return false
+    if (!columnExists(db, 'permission_requests', 'attempt_id')) return false
+    return db.prepare('SELECT COUNT(*) AS n FROM permission_requests WHERE attempt_id = ?').get(attemptId).n > 0
+  },
 })
+
+/**
+ * 「这一项在这次迁移上不适用」。
+ *
+ * 刻意与 `true` 区分：`true` 的意思是"我核验过了，它没问题"，而这条边根本没有
+ * 那样东西可核验。混成 `true` 会让 `checked` 列表把没查过的东西说成查过了——
+ * 那正是「证据闸门」最容易退化成的样子。
+ */
+const EVIDENCE_NOT_APPLICABLE = Symbol('evidence-not-applicable')
+
+/** 列存在吗。与 `tableExists` 同源：区分"查不到"与"这张表还没这一列"。 */
+function columnExists(db, table, column) {
+  try {
+    return db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column)
+  } catch {
+    return false
+  }
+}
 
 /** 表存在吗。用于区分"查不到"与"没有那张表"——两者都算"没有依据"，但排查时要知道是哪种。 */
 function tableExists(db, name) {
@@ -370,17 +416,24 @@ function tableExists(db, name) {
  * 拒绝而不是"记一条警告然后继续"：一条没通过验收的任务进入 `Completed`
  * 之后，下游依赖它的人不会知道。
  */
-function checkEvidence(db, attemptId, requiresPersist) {
+function checkEvidence(db, attemptId, requiresPersist, edge = {}) {
   const names = Array.isArray(requiresPersist) ? requiresPersist : []
   const checked = []
   const missing = []
+  const notApplicable = []
   for (const name of names) {
     const probe = EVIDENCE_CHECKS[name]
     if (probe === undefined) continue // 尚未实现核验的证据种类：见 EVIDENCE_CHECKS 的说明
+    const verdict = probe(db, attemptId, edge)
+    if (verdict === EVIDENCE_NOT_APPLICABLE) { notApplicable.push(name); continue }
     checked.push(name)
-    if (probe(db, attemptId) !== true) missing.push(name)
+    if (verdict !== true) missing.push(name)
   }
-  return Object.freeze({ checked: Object.freeze(checked), missing: Object.freeze(missing) })
+  return Object.freeze({
+    checked: Object.freeze(checked),
+    missing: Object.freeze(missing),
+    notApplicable: Object.freeze(notApplicable),
+  })
 }
 
 /** 证据缺失时的统一错误。把「缺哪一项」说清楚，否则排查只能去看状态机源码。 */
@@ -1005,7 +1058,7 @@ export function createRunStore({
       //
       // 放在 UPDATE 之前（而不是之后）：之后发现就只能回滚，而"已经写进去过"
       // 这件事本身会留下痕迹，回滚不掉的告警与外部副作用同理。
-      const evidence = checkEvidence(db, attemptId, plan.requiresPersist)
+      const evidence = checkEvidence(db, attemptId, plan.requiresPersist, { from: row.state, to: target })
       if (evidence.missing.length > 0) {
         throw evidenceError(attemptId, row.state, target, evidence.missing)
       }
@@ -1254,10 +1307,35 @@ export function createRunStore({
       // 先落到 `RetryableFailure`（如果还不是），再统一走重试/额度判定。
       const toRetryable = row.state === 'RetryableFailure' ? null : 'RetryableFailure'
       if (toRetryable !== null) {
-        const plan = transitionPlan(row.state, toRetryable, {})
+        // PRT-615：`returnTo` 必须从**这一行**读出来传给守卫。
+        //
+        // 原来这里传的是 `{}`。后果不只是"少个参数"：`AwaitingApproval → RetryableFailure`
+        // 这条边用的是 `approvalOrigin` 守卫，而它**要求** `returnTo` 存在——
+        // 于是"审批被拒或被 TTL 自动 deny"这条边在 `failAndRetry` 上**从来走不通**，
+        // 每次都在守卫处被拒。而状态机的原话恰恰是「审批被拒或被 TTL 自动 deny」：
+        //
+        //   > 一条在状态机里写着"被拒或被 TTL 自动 deny 时走这条边"、
+        //   > 而实现上每次都被守卫拒掉的边，
+        //   > 与一条"只存在于文档里"的边，是同一个东西。
+        //
+        // 这是 PRT-615 实测撞到的：TTL 到期扫描调用 `failAndRetry` 时它抛
+        // TRANSITION_REJECTED，而扫描把失败吞进了 `permission:ttl-release-failed` 审计
+        // ——审批过期了，而 Attempt 还停在 `AwaitingApproval`，正是本函数要防的那个状态。
+        const plan = transitionPlan(row.state, toRetryable, { returnTo: row.return_to ?? undefined })
         if (plan.ok !== true) {
           throw fail(RUN_ERRORS.TRANSITION_REJECTED, `${row.state} → RetryableFailure 被拒绝：${plan.message}`,
             { stateMachineCode: plan.code, from: row.state, to: toRetryable })
+        }
+        // PRT-615：中间态也要过证据闸门。
+        //
+        // 原来这里只 `transitionPlan` 就 UPDATE，从不核验 `plan.requiresPersist`——
+        // 于是 `AwaitingApproval → RetryableFailure`（要求 `['attempt','approval']`）
+        // 可以在**一张审批记录都没有**的情况下被写进历史，"审批被拒或被 TTL 自动 deny"
+        // 这句话就成了纯文案。注意这一条**只对 AwaitingApproval 生效**：
+        // 从 `Running` 来的失败只要 `['attempt']`，所以正常失败路径不受影响。
+        const midEvidence = checkEvidence(db, attemptId, plan.requiresPersist, { from: row.state, to: toRetryable })
+        if (midEvidence.missing.length > 0) {
+          throw evidenceError(attemptId, row.state, toRetryable, midEvidence.missing)
         }
         db.prepare('UPDATE run_attempts SET state = ?, updated_at_ms = ? WHERE id = ?')
           .run(toRetryable, atMs, attemptId)

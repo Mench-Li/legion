@@ -329,6 +329,28 @@ async function stageTest() {
       files: ['team-hub/approval-binding.test.mjs'],
       cwd: ROOT,
     },
+    {
+      // PRT-615：审批 TTL（spec §6.4）。
+      //
+      // `AwaitingApproval` 期间 heartbeat 继续续租，但**绝不超过审批截止时刻**。
+      // 这一条不是"过期了就清掉"那么轻：审批过期而 Attempt 还停在 `AwaitingApproval`，
+      // 表现是任务安静地停在那里——界面上它是一条待审批的待办，而审批已经过期，
+      // 于是它既不会被批准、也不进等人工列表。
+      //
+      //   > 一个「审批已过期、而 Attempt 还在等这份审批」的状态，
+      //   > 与一个「任务永远停在那里、谁也不管」的状态，是同一个东西。
+      //
+      // 另一半是租约的上界：越过截止时刻后**拒绝续期**，而不是续一个很短的租约——
+      // 续短租约会让租约先于自动拒绝到期，另一个 worker 领走同一条任务并重复执行
+      // 它正在等审批的那个外部写操作，直接违背 §15。
+      //
+      //   > 一个「在审批到期的前一刻把任务让给别人重做」的暂停，
+      //   > 与一个「把同一件已经做过一半的外部写操作再交给第二个人做一遍」的暂停，
+      //   > 是同一个东西。
+      label: 'approval-ttl（PRT-615：审批 TTL 到期自动拒绝，租约不得越过截止时刻）',
+      files: ['team-hub/approval-ttl.test.mjs'],
+      cwd: ROOT,
+    },
     { label: 'calendar（日程日历契约）', files: ['team-hub/calendar.test.mjs'], cwd: ROOT },
     { label: 'calendar-ui（P2-5 日历前端纯函数：周视图/重复文案/关联跳转/表单校验）', files: ['workbench/scripts/calendar-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'chat-ui（P2-6 对话前端纯函数：健康判定/AI 三态/合并/断线补齐）', files: ['workbench/scripts/chat-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },

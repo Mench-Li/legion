@@ -68,15 +68,26 @@ import { fileURLToPath } from 'node:url'
 import { standardsFor } from './stage-standards.mjs'
 import { evaluatePermission, normalizeOperation } from './permission-engine.mjs'
 import {
+  APPROVAL_ATTEMPT_COLUMN,
   BINDING_HASH_COLUMN,
   BINDING_CODES,
   CONSUME_OUTCOMES,
   computeBindingHash,
   consumeBinding,
+  ensureApprovalSchema,
   isBoundHash,
   operationOfRow,
   verifyBinding,
 } from './approval-binding.mjs'
+import {
+  APPROVAL_TTL_DEFAULT_MS,
+  EXPIRE_OUTCOMES,
+  evaluateApprovalExpiry,
+  evaluateApprovalHeartbeat,
+  leaseRenewalBoundMs,
+  markApprovalExpired,
+  resolveApprovalTtlMs,
+} from './approval-ttl.mjs'
 import { createRunStore, RunError } from './run-store.mjs'
 import { MODEL_ERRORS, ModelError, createModelStore, ensureModelSchema } from './model-store.mjs'
 import {
@@ -130,6 +141,18 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 // 其余 CHAT_*/MAX_RULES_LEN 等键仍按原样读取，但**已在 schema 中声明**（scan --check 强制），
 // 其默认值由 scripts/config/config.test.mjs 做漂移比对。
 const CFG = loadConfig(CONFIG_SCHEMA, { env: process.env, argv: process.argv.slice(2) })
+
+/**
+ * PRT-615：审批 TTL（spec §6.4）。
+ *
+ * 配置值非法时**装载时抛错**，不静默回落默认值——一条写错的
+ * `LEGION_APPROVAL_TTL_MS` 如果被静默换回默认值，表现是"配置改了但没生效"，
+ * 而这类问题的排查方向完全错误（运维会去看配置有没有被加载，而不是看那个值本身）。
+ *
+ *   > 一个「配置写错了就用默认值继续」的解析，
+ *   > 与一个「配置项根本没接线」的解析，在「改了到底有没有用」上是同一个东西。
+ */
+const APPROVAL_TTL_MS = resolveApprovalTtlMs(CFG.approvalTtlMs)
 /** 本模块是「被 node 直接运行」还是「被 import」。
  *  为什么必须区分：本文件既作 CLI 入口，也被宿主外壳 `team-hub/src/index.ts`（L70 `import('../server.mjs')`）
  *  与大量契约测试 import。若在 import 路径上 `process.exit(1)`，一处配置错误会**直接杀掉宿主进程/测试进程**，
@@ -843,39 +866,16 @@ db.exec(`
   )
 `)
 db.exec('CREATE INDEX IF NOT EXISTS idx_permission_rules_match ON permission_rules (scope, action, target)')
-db.exec(`
-  CREATE TABLE IF NOT EXISTS permission_requests (
-    requestId TEXT PRIMARY KEY,
-    scope TEXT NOT NULL,
-    actor TEXT NOT NULL,
-    action TEXT NOT NULL,
-    target TEXT NOT NULL,
-    taskId TEXT,
-    operation TEXT NOT NULL,
-    mode TEXT NOT NULL,
-    status TEXT NOT NULL,
-    decidedBy TEXT,
-    reason TEXT,
-    createdAt TEXT NOT NULL,
-    expiresAt INTEGER,
-    decidedAt TEXT,
-    consumedAt TEXT
-  )
-`)
-db.exec('CREATE INDEX IF NOT EXISTS idx_permission_requests_scope_status ON permission_requests (scope, status, createdAt)')
 
-// PRT-608：审批绑定哈希的列。
+// PRT-608/615：审批表的结构由 `approval-binding.mjs` 拥有。
 //
-// `CREATE TABLE IF NOT EXISTS` 不会给**已存在**的表加列，所以这里单独做一次
-// 幂等的加列。查 `PRAGMA table_info` 而不是 `try { ALTER } catch {}`：
-// 后者会把"加列失败"和"列已存在"这两种完全不同的情况吞成同一个结果，
-// 于是加列真的失败时（磁盘满、表被锁）没有任何迹象。
-{
-  const cols = db.prepare('PRAGMA table_info(permission_requests)').all().map((c) => c.name)
-  if (!cols.includes(BINDING_HASH_COLUMN)) {
-    db.exec(`ALTER TABLE permission_requests ADD COLUMN ${BINDING_HASH_COLUMN} TEXT`)
-  }
-}
+// 搬到那里去的理由与 PRT-411 把 `run_context_snapshots` 交给 context-store 一样：
+// 表结构与"什么算一条合法审批"是同一份知识。分裂成两份（生产一份、夹具一份）时，
+// 夹具手抄的列名会在增删时**静默**与真实结构脱节——插入报错还算好的。
+//
+//   > 一个"生产建一份、夹具抄一份"的表结构，
+//   > 与一个"迟早只有一份是对的"的表结构，在「新加的列到底有没有生效」上是同一个东西。
+ensureApprovalSchema(db)
 
 // PRT-608：**有意不回填**既有行的绑定哈希。
 //
@@ -1641,6 +1641,10 @@ function permissionRows() {
  * 这与 `createLauncher` / `createWizard` / `createTray` 收依赖的方式是同一套。
  */
 export function checkPermission(input = {}, { consume = consumeBinding } = {}) {
+  // PRT-615：先让到期的审批结清，再判这一次。
+  // 不先扫的话，一次已经越过 TTL 的 `pending` 行会被当成"还在等"——
+  // 于是自动拒绝永远只在**下一次**有人问起时才发生（如果还有人问的话）。
+  sweepApprovalsLazily()
   const operation = normalizeOperation(input)
   const requestId = input.permissionRequestId ? String(input.permissionRequestId) : null
   if (requestId) {
@@ -1722,15 +1726,27 @@ export function checkPermission(input = {}, { consume = consumeBinding } = {}) {
     .get(operation.scope, operation.actor, operation.action, operation.target, wantedHash)
   if (existing) return { ...result, requestId: existing.requestId, bindingHash: wantedHash }
   const id = `perm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  // PRT-615：TTL 来自配置（`LEGION_APPROVAL_TTL_MS`，schema 里声明了合法区间），
+  // 不再是写死的 15 分钟。写错的配置值在**装载时**就抛（`resolveApprovalTtlMs`），
+  // 而不是静默换回默认值——那会表现成"配置改了但没生效"，排查方向完全错误。
+  const ttlMs = APPROVAL_TTL_MS
+  const attemptId = input.attemptId == null ? null : String(input.attemptId).trim() || null
   // PRT-608：**批准的那一刻**把哈希算出来并写进这一行。之后一切都以那一行为准。
   //
   //   > 一个"每次验证时按当前规则重算身份"的审批绑定，
   //   > 与一个"审批的含义由你读它的那一刻的代码决定"的绑定，
   //   > 是同一个东西——只不过前者的失效方式是**静默重绑**。
-  withTx(() => db.prepare(`INSERT INTO permission_requests (requestId,scope,actor,action,target,taskId,operation,mode,status,createdAt,expiresAt,${BINDING_HASH_COLUMN}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
-    .run(id, operation.scope, operation.actor, operation.action, operation.target, operation.taskId, JSON.stringify(operation), result.mode, 'pending', now(), Date.now() + 15 * 60 * 1000, wantedHash))
-  audit(operation.actor, operation.scope, 'permission:request', id, { action: operation.action, target: operation.target, mode: result.mode, bindingHash: wantedHash })
-  return { ...result, requestId: id, bindingHash: wantedHash }
+  //
+  // PRT-615：同时写下 `attemptId`——"哪一个 Attempt 在等这份审批"。
+  // 它与 `taskId` 不是一回事：任务重试之后是一条新 Attempt 而 taskId 不变，
+  // 用 taskId 匹配会把上一条 Attempt 的审批算成本次的依据。
+  withTx(() => db.prepare(`INSERT INTO permission_requests (requestId,scope,actor,action,target,taskId,operation,mode,status,createdAt,expiresAt,${BINDING_HASH_COLUMN},${APPROVAL_ATTEMPT_COLUMN}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(id, operation.scope, operation.actor, operation.action, operation.target, operation.taskId, JSON.stringify(operation), result.mode, 'pending', now(), Date.now() + ttlMs, wantedHash, attemptId))
+  audit(operation.actor, operation.scope, 'permission:request', id, {
+    action: operation.action, target: operation.target, mode: result.mode,
+    bindingHash: wantedHash, attemptId, ttlMs,
+  })
+  return { ...result, requestId: id, bindingHash: wantedHash, expiresAtMs: Date.now() + ttlMs, attemptId }
 }
 
 /** 审批行的对外视图。**不把哈希藏起来**——UI 与审计要看到同一个字符串。 */
@@ -1746,6 +1762,7 @@ function permissionRequestView(row) {
 }
 
 export function listPermissionInbox(scope = null) {
+  sweepApprovalsLazily()
   const rows = scope ? db.prepare('SELECT * FROM permission_requests WHERE scope=? ORDER BY createdAt DESC').all(scope) : db.prepare('SELECT * FROM permission_requests ORDER BY createdAt DESC').all()
   const current = Date.now()
   // PRT-608：`expired` 曾经是一个**算出来的**字段，而 `status` 仍然是 `pending`
@@ -1765,6 +1782,10 @@ export function listPermissionInbox(scope = null) {
 
 export function decidePermission({ requestId, decision, by = 'general', reason = '' } = {}) {
   if (by !== 'general') throw new Error('仅允许 general 决定权限审批')
+  // PRT-615：用户点批准之前先结清到期的。否则一条**已经越过 TTL** 的请求
+  // 会先被"用户批准"这一步接受（只要没人先扫过），把"自动拒绝"变成一句空话——
+  // 而用户看到的是"我批成功了"，实际上它早就该被拒了。
+  sweepApprovalsLazily()
   const id = String(requestId ?? '').trim()
   if (!id || !['approve', 'deny'].includes(decision)) throw new Error('审批参数非法')
   const row = db.prepare('SELECT * FROM permission_requests WHERE requestId=?').get(id)
@@ -1794,6 +1815,194 @@ export function decidePermission({ requestId, decision, by = 'general', reason =
     bindingHash: row[BINDING_HASH_COLUMN].trim(),
   })
   return permissionRequestView(updated)
+}
+
+/**
+ * PRT-615：审批 TTL 到期 → 自动拒绝 → Attempt 转为 `blocked`。
+ *
+ * spec §6.4：「`AwaitingApproval` 期间 heartbeat 继续、lease 随 heartbeat 续期，
+ * 但受审批 TTL 约束；审批 TTL 到期自动 deny，Attempt 转为 `blocked`，
+ * 写入 audit 并通知用户。」
+ *
+ * ## 为什么这里必须**同时**做两件事，而不是只改审批行的状态
+ *
+ * 只把审批行标成 `expired` 的话，Attempt 会**继续停在 `AwaitingApproval`**：
+ * 界面上它是一条"等待审批"的待办，而审批已经过期了——于是它既不会被批准，
+ * 也不会进入待人工处置列表，任务安静地停在那里。
+ *
+ *   > 一个「审批已过期、而 Attempt 还在等这份审批」的状态，
+ *   > 与一个「任务永远停在那里、谁也不管」的状态，是同一个东西。
+ *
+ * ## 为什么用 `failAndRetry` 而不是直接改状态
+ *
+ * `AwaitingApproval → RetryableFailure` 只是**中间态**。停在那里的话，任务既没有
+ * 新尝试可领（队列里没有 Queued），也不在等人工列表里（它不是 DeadLetter），
+ * 表现是"失败了，但没人会去处理它"。`failAndRetry` 是「失败了按策略处置」的**唯一**
+ * 入口，它会把重试额度判定也走完：有额度 → 新 attempt（任务回 todo）；
+ * 没额度 → DeadLetter（任务进 **blocked**，正是 spec 要的那个终局）。
+ *
+ * ## `attemptId` 为空的行怎么办
+ *
+ * 老行（PRT-615 之前创建的）没有 `attemptId`。它们**照样**要过期和写审计，
+ * 但**不动**任何 Attempt——无从判断该动哪一条。凭 `taskId` 猜一条是错的：
+ * 同一个任务可能已经重试到第 5 条 Attempt，把第 1 条判成 blocked 会改错历史。
+ * 所以这类行进单独的结果桶，并在审计里标明它没有被联动。
+ */
+/**
+ * PRT-615：到期扫描的**唯一**入口，带重入保护。
+ *
+ * 为什么需要重入保护：这个函数会被 `checkPermission` / `listPermissionInbox` /
+ * `decidePermission` 在**入口处**懒调用（见下面 `sweepApprovalsLazily`）。
+ * 没有保护时，一次扫描里对每一条到期的审批都会走到 `runStore.failAndRetry`，
+ * 而那条路径上的任何一次权限判定都会**再触发一次扫描** —— 递归。
+ *
+ * 重入时**直接返回上一次的结果**而不是空结果：调用方拿到的应当是"这一轮扫描的
+ * 真实结论"，而一个空结果会被读成"扫描过了，没有到期的"——那是假的。
+ */
+let sweepInFlight = false
+let lastSweepResult = null
+export function sweepApprovalsOnce({ nowMs = Date.now(), actor = 'system:approval-ttl', store = runStore } = {}) {
+  // ⚠️ 这里必须用一个**布尔标记**，不能靠 `sweepInFlight !== null`：
+  // `sweepInFlight = sweepExpiredApprovals(...)` 的赋值是在函数**返回之后**才发生的，
+  // 所以执行期间 `sweepInFlight` 仍然是 null —— 那个写法看起来有保护，其实一次都拦不住。
+  //
+  //   > 一个「看起来有重入保护、其实拦不住任何一次重入」的保护，
+  //   > 与一个没有重入保护的保护，是同一个东西。
+  if (sweepInFlight) return lastSweepResult
+  sweepInFlight = true
+  try {
+    lastSweepResult = sweepExpiredApprovals({ nowMs, actor, store })
+    return lastSweepResult
+  } finally {
+    sweepInFlight = false
+  }
+}
+
+/**
+ * 懒扫描：在权限面的**每个**读/写入口调一次。
+ *
+ * 为什么不只靠 `isMain` 下那个 `setInterval`：team-hub 既作独立进程运行，也被
+ * 宿主外壳 `team-hub/src/index.ts` **import**（那条路径下 `isMain === false`，
+ * 于是定时器根本不会装）。
+ *
+ *   > 一个「只在独立进程模式下才跑」的到期扫描，
+ *   > 与一个「在宿主外壳模式下永远不跑」的到期扫描，是同一个东西——
+ *   > 只不过它的表现是「有的人的审批会过期，有的人的不会」。
+ *
+ * 懒扫描让**正确性不再依赖启动模式**；定时器只是把"没人来问"的那段时间也覆盖到。
+ * 扫描本身失败必须**吞掉并继续**：一个清理动作把正常的权限判定变成 500，
+ * 比它没跑更糟。
+ */
+export function sweepApprovalsLazily(nowMs = Date.now()) {
+  try {
+    return sweepApprovalsOnce({ nowMs })
+  } catch (e) {
+    try {
+      audit('system:approval-ttl', 'global', 'permission:ttl-sweep-failed', null, {
+        message: String(e?.message ?? e),
+      })
+    } catch { /* 审计也失败时不掩盖原始错误 */ }
+    return null
+  }
+}
+
+export function sweepExpiredApprovals({ nowMs = Date.now(), actor = 'system:approval-ttl', store = runStore } = {}) {
+  const atMs = Number(nowMs)
+  if (!Number.isFinite(atMs)) throw new Error(`审批到期扫描需要合法时点，收到 ${JSON.stringify(nowMs)}`)
+  const candidates = db.prepare(
+    `SELECT * FROM permission_requests WHERE status IN ('pending','approved') ORDER BY expiresAt ASC`,
+  ).all()
+  const expired = []
+  const released = []
+  const orphaned = []
+  for (const row of candidates) {
+    const verdict = evaluateApprovalExpiry({ row, nowMs: atMs, ttlMs: APPROVAL_TTL_MS })
+    if (!verdict.expired) continue
+    // CAS：只把**仍然是开放状态**的那一行改成 expired（`markApprovalExpired`）。
+    // 不带状态条件时，一次与用户点击批准并发的扫描会把"用户批准了"改写成"过期了"
+    // ——两条都进终态，但用户在界面上看到的原因不同。
+    const updated = withTx(() => markApprovalExpired({ db, requestId: row.requestId, reason: verdict.reason }))
+    if (updated.outcome !== EXPIRE_OUTCOMES.EXPIRED) continue
+    expired.push(row.requestId)
+    audit(actor, row.scope, 'permission:ttl-expired', row.requestId, {
+      action: row.action, target: row.target, reason: verdict.reason,
+      deadlineMs: verdict.deadlineMs, attemptId: row[APPROVAL_ATTEMPT_COLUMN] ?? null,
+      bindingHash: isBoundHash(row[BINDING_HASH_COLUMN]) ? row[BINDING_HASH_COLUMN].trim() : null,
+    })
+    const attemptId = row[APPROVAL_ATTEMPT_COLUMN] == null ? null : String(row[APPROVAL_ATTEMPT_COLUMN])
+    if (attemptId === null || attemptId === '') {
+      orphaned.push(row.requestId)
+      audit(actor, row.scope, 'permission:ttl-expired-unlinked', row.requestId, {
+        note: '这一行没有 attemptId（PRT-615 之前创建），无法判断该动哪一条 Attempt——不动任何 Attempt',
+      })
+      continue
+    }
+    try {
+      // 系统侧不带 epoch：`failAndRetry` 在没有 epoch 时用自己的 CAS 语义。
+      // 这里**不能**拿库里的 epoch 传进去——那等于"替当前持有者做决定"，
+      // 而扫描本来就该能回收一条连心跳都停了的尝试。
+      //
+      // `store` 可注入（默认就是生产的 `runStore`）：唯一的用途是让
+      // "重试额度用完 → 任务进 blocked"这条结局可以被**真的走到**——
+      // 额度是 store 级的构造参数，注入不了就只能靠反复失败去耗尽它。
+      // 与 `checkPermission` 的 `consume`、`createLauncher` 收依赖是同一套做法：
+      // 函数不能经 JSON 传进来，HTTP 调用方无法利用。
+      store.failAndRetry({
+        attemptId, actor, failureCode: 'APPROVAL_TTL_EXPIRED',
+        detail: `审批 ${row.requestId} 在 TTL 到期后自动拒绝（${verdict.reason}）`,
+        reason: 'approval-ttl-expired',
+      })
+      const after = db.prepare('SELECT state FROM run_attempts WHERE id=?').get(attemptId)
+      released.push({ requestId: row.requestId, attemptId, attemptState: after?.state ?? null })
+    } catch (e) {
+      // 联动失败**不能**吞掉：审批已经过期了，而 Attempt 还停在 AwaitingApproval，
+      // 那正是本函数开头说的"任务安静地停在那里"。留一条能被查到的痕迹。
+      audit(actor, row.scope, 'permission:ttl-release-failed', row.requestId, {
+        attemptId, code: e?.code ?? null, message: String(e?.message ?? e),
+      })
+      released.push({ requestId: row.requestId, attemptId, attemptState: null, error: e?.code ?? 'ERROR' })
+    }
+  }
+  return Object.freeze({
+    nowMs: atMs, scanned: candidates.length,
+    expired: Object.freeze(expired),
+    released: Object.freeze(released),
+    orphaned: Object.freeze(orphaned),
+  })
+}
+
+/**
+ * PRT-615：`AwaitingApproval` 期间的心跳续租。
+ *
+ * 续到审批截止时刻，**绝不超过它**（`evaluateApprovalHeartbeat` 是唯一的事实来源）。
+ * 越过截止时刻后**拒绝续期**——而不是续一个很短的租约：续短租约会让 lease 先于
+ * 自动拒绝到期，于是另一个 worker 领走同一条任务并**重复执行**它正在等审批的那个
+ * 外部写操作，直接违背 §15。
+ *
+ *   > 一个「在审批到期的前一刻把任务让给别人重做」的暂停，
+ *   > 与一个「把同一件已经做过一半的外部写操作再交给第二个人做一遍」的暂停，
+ *   > 是同一个东西。
+ */
+export function heartbeatAwaitingApproval({ requestId, nowMs = Date.now(), requestedTtlMs = null } = {}) {
+  const id = String(requestId ?? '').trim()
+  if (!id) throw new Error('缺少 requestId')
+  const row = db.prepare('SELECT * FROM permission_requests WHERE requestId=?').get(id)
+  if (row === null || row === undefined) throw new Error('审批请求不存在')
+  const atMs = Number(nowMs)
+  const beat = evaluateApprovalHeartbeat({ row, nowMs: atMs, ttlMs: APPROVAL_TTL_MS, requestedTtlMs })
+  if (beat.action === 'expire') {
+    audit(row.actor, row.scope, 'permission:heartbeat-refused', id, {
+      action: row.action, target: row.target, reason: beat.reason, deadlineMs: beat.deadlineMs,
+    })
+    return Object.freeze({
+      ok: false, action: 'expire', reason: beat.reason, deadlineMs: beat.deadlineMs,
+      requestId: id, expiresAtMs: null,
+    })
+  }
+  return Object.freeze({
+    ok: true, action: 'renew', reason: null, deadlineMs: beat.deadlineMs,
+    requestId: id, expiresAtMs: beat.expiresAtMs, boundMs: beat.boundMs,
+  })
 }
 
 function touchMember(member, scope, kind, modelText) {
@@ -6229,6 +6438,15 @@ if (isMain) {
   setInterval(() => {
     try { cleanupChatAttachments() } catch { /* 清理失败不崩主服务，下一轮再试 */ }
   }, 3600 * 1000).unref()
+  // PRT-615：审批到期扫描的加速器。
+  //
+  // **正确性不靠它**——权限面的每个入口都会懒扫一次（`sweepApprovalsLazily`），
+  // 所以宿主外壳模式（`isMain === false`）下也一样会过期。这个定时器只覆盖
+  // 「审批过期了，但没有任何人来问任何事」的那段时间。
+  //
+  // `unref()`：一个会阻止进程退出的定时器，与一个**关不掉的**后台任务，是同一个东西
+  // （测试进程会因此永远不结束——PRT-708 那次"测试卡住"就是这么来的）。
+  setInterval(() => { sweepApprovalsLazily() }, Math.max(5000, Math.floor(APPROVAL_TTL_MS / 5))).unref()
 }
 
 export { db, server, handle, registerSkill, reviewSkill, listSkills, grantSkill, revokeSkill, getSkill,

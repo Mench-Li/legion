@@ -60,6 +60,20 @@ const SCHEMA_SOURCES = [
   'bindingStore',
   'budgetLedger',
   'contextStore',
+  // PRT-615：`permission_requests` 的建表 DDL 从 `server.mjs` 搬到了
+  // `approval-binding.mjs`（`ensureApprovalSchema`）。
+  //
+  // 搬家的理由不是整洁，而是**只有一份是对的**：此前 `permission_requests` 在
+  // `server.mjs` 里建、又被测试夹具手抄一份列清单，两份迟早会不一致，
+  // 而 `attempt_id` 这种后加的列恰恰是"不一致时静默失效"的那种。
+  //
+  //   > 一个"生产建一份、夹具抄一份"的表结构，
+  //   > 与一个"迟早只有一份是对的"的表结构，在「新加的列到底有没有生效」上是同一个东西。
+  //
+  // 代价是必须同步登记到这里——**这条门禁就是在替我记得这件事**：
+  // 不登记的话，`permission_requests` 会对平台契约基线不可见，
+  // 而 `--check` 会兴高采烈地报告"无漂移"。实测它当场就红了。
+  'approvalBinding',
 ]
 
 // 这些模块也一并纳入 sources 哈希：它们变了，基线里的表清单就可能过期。
@@ -68,6 +82,7 @@ SOURCES.modelStore = join(ROOT, 'team-hub', 'model-store.mjs')
 SOURCES.bindingStore = join(ROOT, 'team-hub', 'binding-store.mjs')
 SOURCES.budgetLedger = join(ROOT, 'team-hub', 'budget-ledger.mjs')
 SOURCES.contextStore = join(ROOT, 'team-hub', 'context-store.mjs')
+SOURCES.approvalBinding = join(ROOT, 'team-hub', 'approval-binding.mjs')
 
 /**
  * 采集 schema 的目录。
@@ -238,12 +253,54 @@ export function extractRouteOccurrences(source) {
  * @param {string} source
  * @param {{min?: number}} [options]
  */
+/**
+ * 提取 SQLite 表名。
+ *
+ * 支持两种写法：
+ *   · `CREATE TABLE IF NOT EXISTS audit (`          —— 字面量
+ *   · `CREATE TABLE IF NOT EXISTS ${APPROVAL_TABLE} (` —— 同一文件里的字符串常量
+ *
+ * 第二种不是可有可无的。PRT-615 把 `permission_requests` 的 DDL 从 `server.mjs`
+ * 搬进 `approval-binding.mjs` 时改用了常量，于是表名抽取**静默返回空**：
+ * 那张表对平台契约基线**不可见**，而 `--check` 报的是"表被移除了"——
+ * 真正的危险在于，如果同时新增一张表，它会**根本不出现在漂移里**。
+ *
+ *   > 一个"认不出来的建表语句就当它没建表"的抽取，
+ *   > 与一个"可以被无声地绕过"的契约门禁，是同一个东西。
+ *
+ * 所以：认不出来的引用**直接抛错**，而不是跳过。宁可门禁报"抽取规则已与源码脱节"，
+ * 也不要它报"无漂移"。
+ */
 export function extractTables(source, options = {}) {
   const min = options.min ?? MIN_TABLES
   const tables = new Set()
-  const re = /CREATE TABLE IF NOT EXISTS\s+([A-Za-z_][A-Za-z0-9_]*)/g
+  // 先收同文件里的字符串常量（`const APPROVAL_TABLE = 'permission_requests'`），
+  // 用于解析 `${IDENT}` 形式的表名。
+  //
+  // ⚠️ 必须要求整条赋值**就是**那个字符串。宽松写成 `=\s*'([A-Za-z_]*)'` 时，
+  // `const T = 'a' + 'b'` 会被认成 `T = 'a'` —— 于是拼出来的表名被"解析"成了
+  // 一个**恰好是前缀**的名字，而这个名字在库里根本不存在。
+  // 它不会报错（抽取"成功"了），只会让基线里多一张不存在的表。
+  const consts = new Map()
+  for (const m of source.matchAll(/const\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*'([A-Za-z_][A-Za-z0-9_]*)'\s*;?[ \t]*(?:\r?\n|$)/g)) {
+    consts.set(m[1], m[2])
+  }
+  const re = /CREATE TABLE IF NOT EXISTS\s+(?:\$\{([A-Za-z_][A-Za-z0-9_]*)\}|'?([A-Za-z_][A-Za-z0-9_]*)'?)/g
   let m
-  while ((m = re.exec(source)) !== null) tables.add(m[1])
+  while ((m = re.exec(source)) !== null) {
+    if (m[2] !== undefined) {
+      tables.add(m[2])
+      continue
+    }
+    const resolved = consts.get(m[1])
+    must(
+      resolved !== undefined,
+      `建表语句用了 \`\${${m[1]}}\`，但在同一文件里找不到 \`const ${m[1]} = '...'\`。`
+      + '抽取规则认不出来的表会**对平台契约基线不可见**——'
+      + '请把它写成字符串常量，或改用字面量，不要把这条门禁变成"报无漂移"。',
+    )
+    tables.add(resolved)
+  }
   must(tables.size >= min, `SQLite 表只提取到 ${tables.size} 张（下限 ${min}），抽取规则可能已与源码脱节`)
   return [...tables].sort()
 }

@@ -25,6 +25,22 @@ export const SCHEMA = defineSchema({
     { key: 'attachTtlMs', env: 'CHAT_ATTACH_TTL_MS', type: 'int', default: 7 * 24 * 3600 * 1000, min: 1, doc: 'sent 附件过期清理阈值（ms）' },
     // ── 对话行为 ──
     { key: 'replyTimeoutMs', env: 'CHAT_REPLY_TIMEOUT_MS', type: 'int', default: 120000, min: 1, doc: 'AI 回复等待超时（ms），超时标记 failed' },
+    // ── PRT-615 审批 TTL（spec §6.4）──
+    //
+    // `AwaitingApproval` 期间 heartbeat **继续**、lease 随 heartbeat 续期，但受本 TTL 约束。
+    // 两种退化都不接受：停止 heartbeat 会让 lease 到期并被别的 worker 领走（同一 Task
+    // 重复执行，违背 §15）；无限续期会让一个无人处理的审批永久占用 lease（违背 §6.3）。
+    //
+    // 上下界与 `team-hub/approval-ttl.mjs` 的 `APPROVAL_TTL_MIN_MS`/`APPROVAL_TTL_MAX_MS`
+    // **必须一致**：下界 1s（比一次往返还短的 TTL 与「所有审批都立即过期」同形）、
+    // 上界 24h（以「天」为单位的等待不是审批而是搁置，那种情况该取消任务而不是继续占租约）。
+    // 两侧由用例断言"写在这里的 min/max 等于模块里的两个常量"——一个必须靠人记得同步的
+    // 上下界，与一个迟早会不同步的上下界，在「配置校验到底拦不拦得住」上是同一个东西。
+    {
+      key: 'approvalTtlMs', env: 'LEGION_APPROVAL_TTL_MS', type: 'int',
+      default: 15 * 60 * 1000, min: 1000, max: 24 * 60 * 60 * 1000,
+      doc: '审批 TTL（ms）：AwaitingApproval 期间 lease 续期的上界，到期自动 deny 并把 Attempt 判为 blocked（§6.4）',
+    },
     { key: 'maxRulesLen', env: 'MAX_RULES_LEN', type: 'int', default: 3000, min: 1, doc: '规范内容长度上限（字符）' },
     // ── 运维脚本 ──
     { key: 'hubUrl', env: 'LEGION_HUB_URL', type: 'string', default: 'http://127.0.0.1:8787', doc: 'seed-pipeline 脚本要写入的 hub 地址' },
@@ -69,6 +85,11 @@ export const SCHEMA = defineSchema({
     //   UNKNOWN_DECISION       — 验收结论不在三种之内，不得默认去向（来自
     //                            orchestrator/acceptance/index.mjs，经 run-store 抛出）
     'EVIDENCE_MISSING', 'NOT_VALIDATING', 'BAD_ACCEPTANCE_CRITERIA', 'UNKNOWN_DECISION',
+    // PRT-615 审批 TTL 到期自动拒绝时的失败码（`sweepExpiredApprovals` →
+    // run-store.failAndRetry）。它必须是一个**可检索的字面量**而不是自由文本：
+    // 值班的人要能把"这条 Attempt 为什么被 blocked"与"哪一次审批过期"对上，
+    // 而一段中文描述在按失败码统计时是查不到的。
+    'APPROVAL_TTL_EXPIRED',
     // PRT-307 机器验收的契约错误码（orchestrator/acceptance/index.mjs 的
     // ACCEPTANCE_ERRORS，经 run-store 转成 ContractError 抛出）
     'CRITERIA_NOT_ARRAY', 'RUN_RESULT_INVALID',

@@ -164,7 +164,7 @@ applier **抛错**的项不参与复核改写（它没有成功执行过，「�
 | PRT-510 预算原子预留、结算、取消与 Unknown Outcome 锁定 | ✅ | **运行侧接线（本轮补）**：`orchestrator/worker/budget-gate.mjs` + 套件 `budget-gate`（**23 例**），把预留/采集/结算接进 `executor.mjs`。**账本早就完整实现、有套件、有 HTTP 路由，而执行路径上一次都没调用过它**——与 PRT-253 同一个形状的缺口。**要害是三条**：① 预留发生在**花钱之前**（顺序，不是存在性——先跑再预留也能让"调用过预留"成立，而那时并发已经把钱花重了）；② 预留与结算**永远成对**，**包括引擎抛错那条路径**；③ **失败的方向永远是"钱还占着"**（结算失败返回 `settled:false` 且**不抛**——抛了调用方就丢掉 outcome、不知道该不该重试）。只靠事后的 `checkBudget` 不够：它能回答"这次花超了吗"，**回答不了"这笔钱现在还在不在"**——两个 Attempt 各 $5 上限、账户一共 $5，事后判定会让两次都跑完、都"没超自己上限"、一共花 $10。**「没上限」（`unbounded`）与「没接闸门」（`not-gated`）都必须在结果里可见**，否则它们与"预算充足"同形；`actor` 不给默认值。**变红验证 16/16**，其中一条暴露了真问题：探针改掉 `executor.execute` 里"抛错也结算"的分支却**没有用例会红**——因为**没有用例进得去**（适配器刻意把引擎故障分类成终态、不往外抛）。*一条没人走过的分支与一条不存在的分支，在"用例全绿"这个读数上完全一样*；用已有的 `adapterFactory` 注入点补上用例后 16/16。同批修掉一个夹具缺陷：假宿主少 `currentModelSelection` 导致整次执行 `MODEL_UNAVAILABLE`，而断言只看 `budgetState` 没看 outcome，**全流程失败时依然通过**。⚠️ 要等 PRT-257 把端口装进来才会真正开始拦人 | 原有细节：`reserve` 用 `BEGIN IMMEDIATE` + `attempt_id` 主键，预留的是**最大预算**而不是估算值；重复预留幂等但**参数不一致拒绝 409**（上限可以被改，但必须是一次显式动作，"不能靠重新预留悄悄替换"）；`settle({outcome:'known'})` 按实际用量结算并释放，**二结算 409**（余额被释放两次是真钱）；`settle({outcome:'unknown'})` → `locked`，**不写任何实际金额**（`spentAmount` 保持 `null` 而不是 0，因为写入任何数字都等于宣称"算清了"），**余额仍被占住**，`locked` 不是终态且只能由 `resolveLocked()`（显式 `disposition: 'release'|'settle'` + `actor`）解开；状态机 `RESERVATION_TRANSITIONS` **全定义**（每个状态都有键，哪怕空数组——缺键会让 `TRANSITIONS[x]` 是 `undefined`，异常掩盖"这个状态我根本没想过"），有用例断言键集与状态集一一对应。详见 docs/superpowers/prt/PRT-503-510-511-budget-ledger.md。**端到端暴露的真 bug（本轮）**：用量读数把**「不知道」记成了「零」，两层都在犯**。`runtime/adapters/dsh/usage.mjs` 的 `pick` 只查 `Number.isFinite`，于是**负数被当成合法用量**（`-3` 通过），调用方据此认为"至少拿到了一个字段"、不再返回 `null`——*一个全是垃圾的 usage 被当成了有效读数*；更常走的是 `collectUsage` 里的 `tokensIn ?? 0`，引擎只报一侧时另一侧被**替引擎宣布**为一个它没报告的读数，而 `0` 是「一个输出 token 都没花」这个**测量结论**，不是"不知道"——*缺一个数就写 0，等于把一个未知数记成了一个已知的零*；而 `checkBudget` 的 `?? 0` 又把它变成**低估**——一次实际超支的运行被判成"未超"，*低估比不知道更危险，因为它是错的却看起来是对的*。现新增 `token-unknown` 违规：**无法判定时返回一个说明"无法判定"的违规，而不是 `null`**（`null` 的含义是"确认没超"），与相邻的 `cost-unknown` 本来是同一条口径、只是 token 这一侧漏了。**这三处之前都"有测试"**：`adapter.test.mjs` 里那条的标题就叫「双取缺失侧补 0」，**它把这个 bug 断言成了规格**——*一条把 bug 断言成规格的用例，与一份错误的规格完全同形*。另：`productionExecutorProvider` **没有 `budgetActor` 的来源**，于是闸门通过生产路径**永远建不起来**（该批套件把它直接传给 `createProductionExecutor`，而生产路径不经过那一步）——*「注册了、跑了、过了」≠「这条路被测过」*；现由 `LEGION_BUDGET_ACTOR` 接入（显式入参优先） |
 | PRT-511 冻结价格表版本、币种、计价单位与生效时间 | ✅ | `runtime/contracts/price-table.mjs`（`createPriceTable` 强制要求 version / currency / effectiveAtMs——一张没有版本、没有生效时间的价目表**构造不出来**，因此无法被冻结进记录、无法在事后被解释；`estimateCost` **未定价或 token 未知时返回 `ok:false` 而不是 0**；`canSwitchModel` 择价）+ `price_tables` 表与 `createPriceTableRegistry`：**版本为主键且发布不可覆盖**（同版本 → 409 `PRICE_TABLE_IMMUTABLE`），于是"改价"在类型上只能是"发新版本"，历史记录引用的旧版本对象**没有可改的东西**——**冻结是结构性的，不是一条纪律**。`usage_records` 追加式且每次写入都带全部五个冻结字段；结算**按预留时冻结的版本**取表，取不到就拒绝（`PRICE_TABLE_GONE`）**不回退到现价**。端到端用例：发布 v1 → 预留 → 发布 v2（涨价 100 倍）→ 结算**仍按 v1**。套件 `price-table`（**19 例**）。详见 docs/superpowers/prt/PRT-503-510-511-budget-ledger.md |
 
-## 阶段 6：工具、权限和审批（4/20）
+## 阶段 6：工具、权限和审批（5/20）
 
 | 任务 | 状态 | 证据 / 说明 |
 | --- | --- | --- |
@@ -182,7 +182,7 @@ applier **抛错**的项不参与复核改写（它没有成功执行过，「�
 | PRT-612 Legion 权限语义到强制面的固定映射 | 🟡 | 映射表与 preset 声明已在 `runtime/dsh-composition/`；**无生产调用方** |
 | PRT-613 审批/UI/审计/执行看到同一不可变参数 | ⬜ | |
 | PRT-614 新强制面前禁用 legacy 高风险工具 + 发布门禁 | ⬜ | |
-| PRT-615 审批 TTL 与 lease/heartbeat 交互 | ⬜ | |
+| PRT-615 审批 TTL 与 lease/heartbeat 交互 | ✅ | 新增 `team-hub/approval-ttl.mjs`（`resolveApprovalTtlMs` / `approvalDeadlineMs` / `evaluateApprovalHeartbeat` / `evaluateApprovalExpiry` / `markApprovalExpired` / `assertDeadlineShared`）与 `team-hub/approval-fixture.mjs`；`server.mjs` 加 `sweepExpiredApprovals`（到期→CAS 标 expired→审计→`failAndRetry` 联动 Attempt）/ `heartbeatAwaitingApproval` / 三个权限面入口的懒扫描 `sweepApprovalsLazily` + 重入保护；`config-schema.mjs` 加 `approvalTtlMs`（`LEGION_APPROVAL_TTL_MS`）；`permission_requests` 建表 DDL 从 `server.mjs` 搬进 `approval-binding.mjs` 的 `ensureApprovalSchema`。套件 `approval-ttl`（40 例）。**实测撞到三个真缺陷**：**① `failAndRetry` 用空 context 调 `transitionPlan`，而 `AwaitingApproval → RetryableFailure` 用 `approvalOrigin` 守卫要求 `returnTo`** —— 于是"审批被拒或 TTL 自动 deny"这条边**从来走不通**，扫描把失败吞进 `permission:ttl-release-failed`，Attempt 原地停在 `AwaitingApproval`。*一条在状态机里写着"被拒或 TTL 自动 deny 时走这条边"、而实现上每次都被守卫拒掉的边，与一条"只存在于文档里"的边，是同一个东西。* **② 自检自称检查"两份时钟"，真正的比较却用从 row 重算的第三方 deadline** —— 伪造一个 `deadlineMs` 就能架空它（break 探针 ㉜㉘）。*一个「自称在检查两份时钟是否一致、而真正的比较用的是第三方时钟」的校验，与一个「从不检查时钟一致性」的校验，是同一个东西。* **③ 搬家顺带撞出门禁缺陷**：新 DDL 用 `CREATE TABLE IF NOT EXISTS ${APPROVAL_TABLE}`，而 `baseline-snapshot.mjs` 的抽取规则只认字面量 → 表名抽取**静默返回空**，`permission_requests` 从基线消失（32→31），报出的漂移是"表被移除了"；**若同时新增一张表，它根本不会出现在漂移里**。*一个"认不出来的建表语句就当它没建表"的抽取，与一个"可以被无声地绕过的契约门禁"，是同一个东西。* 修法是解析同文件字符串常量 + **认不出来就抛错**。破坏性验证 **27/27 全红**（㉜①–㉜㉘，含一处"语义等价 no-op"探针的删除说明）。契约不变：136/32/7-20/4/5 |
 | PRT-616 `allow-once` 原子 CAS 消费 | ⬜ | |
 | PRT-617 策略门与 answerer 双段超时 + `unavailable` + 决定来源审计 | 🟡 | 双段超时与 fail-closed 原语已实现（`enforcement.mjs` + 34 例）；**未接真实 team-hub** |
 | PRT-618 声明 `legion-attended` / `legion-unattended` preset 表 | ✅ | `runtime/dsh-composition/patch-layer.mjs`（`legion-unattended` 锁死 `workspace-write`） |
@@ -264,12 +264,12 @@ applier **抛错**的项不参与复核改写（它没有成功执行过，「�
 | 3 Orchestrator Core | 14 | 0 | 2 | 0 | 16 |
 | 4 上下文边界 | 0 | 13 | 0 | 0 | 13 |
 | 5 模型与密钥 | 9 | 2 | 0 | 0 | 11 |
-| 6 工具、权限和审批 | 4 | 3 | 13 | 0 | 20 |
+| 6 工具、权限和审批 | 5 | 3 | 12 | 0 | 20 |
 | 7 Product Launcher | 6 | 7 | 0 | 0 | 13 |
 | 8 安装、升级和回滚 | 0 | 1 | 12 | 0 | 13 |
 | 9 商业 Alpha 保障 | 0 | 0 | 9 | 1 | 10 |
 | 10 能力包协议 | 0 | 0 | 6 | 0 | 6 |
-| **合计** | **66** | **34** | **43** | **2** | **145** |
+| **合计** | **67** | **34** | **42** | **2** | **145** |
 
 > 计数口径：**部分**计入「已有交付物但完成标准未全部满足」，
 > 因此不能与「已完成」相加后宣称完成度。真实完成度按**完成标准**判定：

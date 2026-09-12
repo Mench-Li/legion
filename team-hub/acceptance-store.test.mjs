@@ -16,6 +16,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { createRunStore, ensureRunSchema, RUN_ERRORS } from './run-store.mjs'
 import { createContextStore, ensureContextSchema } from './context-store.mjs'
 import { freezeFixtureContext } from './context-fixture.mjs'
+import { writeFixtureApproval } from './approval-fixture.mjs'
 
 /** 造一个带 tasks 表的最小库（列与 run-store.test.mjs 的夹具对齐到本项目用到的部分）。 */
 function makeDb() {
@@ -285,7 +286,7 @@ test('⑦ 同一尝试可以被验收多次（记录只追加，不覆盖）', (
   // 构造"同一尝试被验两次"需要一个能重新进入 Validating 的路径：
   // 这里是**人工复审**——`needs-human` 把它送进 AwaitingApproval（returnTo=Validating），
   // 人工批准后回到 Validating，于是可以再验一次。这条路径本身也值得走一遍。
-  const { store, attemptId } = makeEnv({ acceptance: '["产出与本阶段职责一致"]' })
+  const { db, store, attemptId } = makeEnv({ acceptance: '["产出与本阶段职责一致"]' })
   const first = store.recordValidation({
     attemptId, leaseEpoch: 1, actor: 'w1', runResult: { outcome: 'completed' }, hasNextPost: false,
   })
@@ -293,6 +294,11 @@ test('⑦ 同一尝试可以被验收多次（记录只追加，不覆盖）', (
   assert.equal(store.getAttempt(attemptId).state, 'AwaitingApproval')
 
   // 人工批准 → 回到 Validating（`approvalOrigin` 用 return_to 决定回哪）
+  //
+  // PRT-615：`AwaitingApproval → Validating` 声明了 `requiresPersist: ['attempt','approval']`，
+  // 而这条声明现在**是真的闸门**。所以夹具必须真的有一条审批记录——
+  // 否则它走的是一条走不通的路，红的是夹具、不是闸门。
+  writeFixtureApproval({ db, attemptId, status: 'approved' })
   store.transition({
     attemptId, leaseEpoch: 1, workerId: 'reviewer:alice', to: 'Validating',
     context: { returnTo: 'Validating' }, reason: 'approval:approved',

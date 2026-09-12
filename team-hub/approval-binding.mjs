@@ -61,6 +61,73 @@ export const TERMINAL_APPROVAL_STATES = Object.freeze(['denied', 'consumed', 'ex
 /** `permission_requests` 上承载绑定哈希的列名。 */
 export const BINDING_HASH_COLUMN = 'bindingHash'
 
+/** 审批表名。 */
+export const APPROVAL_TABLE = 'permission_requests'
+
+/**
+ * `permission_requests` 上承载「哪一个 Attempt 在等这份审批」的列名（PRT-615）。
+ *
+ * 它与 `taskId` **不是**一回事，也别合成一个：任务重试之后是一条**新** Attempt，
+ * 而 `taskId` 不变。用 `taskId` 匹配会把上一条 Attempt 的审批算成本次的依据——
+ * 那正是"审批证据闸门"要防的事。
+ */
+export const APPROVAL_ATTEMPT_COLUMN = 'attempt_id'
+
+const APPROVAL_BASE_COLUMNS = Object.freeze([
+  'requestId', 'scope', 'actor', 'action', 'target', 'taskId', 'operation',
+  'mode', 'status', 'decidedBy', 'reason', 'createdAt', 'expiresAt', 'decidedAt', 'consumedAt',
+])
+
+/**
+ * 建/补审批表。
+ *
+ * **从 `server.mjs` 搬到这里**，理由与 PRT-411 把 `run_context_snapshots` 交给
+ * context-store 是同一个：表结构与"什么算一条合法审批"是同一份知识，而它一旦分裂成
+ * 两份（生产一份、夹具一份），夹具手抄的列名会在增删时**静默**与真实结构脱节
+ * ——插入报错还算好的，列名恰好还兼容时才真正难查。
+ *
+ * 每条 `ALTER` 都先查 `PRAGMA table_info` 再动手（幂等）：`try { ALTER } catch {}`
+ * 会把"加列失败"（磁盘满、表被锁）与"列已存在"吞成同一个结果，于是真的失败时没有迹象。
+ */
+export function ensureApprovalSchema(db) {
+  if (db === null || typeof db !== 'object' || typeof db.exec !== 'function') {
+    throw new TypeError('ensureApprovalSchema 需要 db（且必须有 exec）')
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ${APPROVAL_TABLE} (
+      requestId TEXT PRIMARY KEY,
+      scope TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      action TEXT NOT NULL,
+      target TEXT NOT NULL,
+      taskId TEXT,
+      operation TEXT NOT NULL,
+      mode TEXT NOT NULL,
+      status TEXT NOT NULL,
+      decidedBy TEXT,
+      reason TEXT,
+      createdAt TEXT NOT NULL,
+      expiresAt INTEGER,
+      decidedAt TEXT,
+      consumedAt TEXT
+    )
+  `)
+  const cols = db.prepare(`PRAGMA table_info(${APPROVAL_TABLE})`).all().map((c) => c.name)
+  for (const name of [BINDING_HASH_COLUMN, APPROVAL_ATTEMPT_COLUMN]) {
+    if (!cols.includes(name)) db.exec(`ALTER TABLE ${APPROVAL_TABLE} ADD COLUMN ${name} TEXT`)
+  }
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_permission_requests_scope_status ON ${APPROVAL_TABLE} (scope, status, createdAt)`)
+  // 到期扫描按 (status, expiresAt) 走。没有这条索引时扫描是**全表**，而它跑在每一次
+  // 请求之间——一个随审批历史增长而变慢的扫描，与一个最终会拖垮服务端的扫描，
+  // 是同一个东西。
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_permission_requests_status_expires ON ${APPROVAL_TABLE} (status, expiresAt)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_permission_requests_attempt ON ${APPROVAL_TABLE} (${APPROVAL_ATTEMPT_COLUMN})`)
+  return Object.freeze({
+    table: APPROVAL_TABLE,
+    columns: Object.freeze([...APPROVAL_BASE_COLUMNS, BINDING_HASH_COLUMN, APPROVAL_ATTEMPT_COLUMN]),
+  })
+}
+
 /** 校验拒绝码。**每一个都是一件不同的事**，不许合并。 */
 export const BINDING_CODES = Object.freeze({
   NOT_FOUND: 'approval-not-found',

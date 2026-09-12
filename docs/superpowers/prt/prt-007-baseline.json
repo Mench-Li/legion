@@ -2,7 +2,7 @@
   "$comment": "PRT-007 旧系统平台契约基线。由 scripts/prt/baseline-snapshot.mjs 生成；不含时间戳以便逐字节 diff。漂移由 sources 的 sha256 归因。",
   "version": 1,
   "sources": {
-    "team-hub/server.mjs": "5805f581c4d32d4b1795ce8f9e896b64c8ff2571264f1ee0e2def924780d2284",
+    "team-hub/server.mjs": "2dd565de21785be7caf73bc0946b5d3496a70e4d53b3729c03d8cdd18983395a",
     "team-hub/permission-engine.mjs": "9e60a09d971474209a92047767d78bcc155c414a3fd3fc7442ff01f59f3b4168",
     "team-hub/run-store.mjs": "89dd850e66f53afe667cda222201e55a5fe6822b7ecb48f3042505c5ef6beb9e",
     "team-hub/model-store.mjs": "1ab1a5b548740ca5f6810de6fe25658e79aea9d95fd6382ccff5facf6613d779",

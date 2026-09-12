@@ -3706,12 +3706,31 @@ async function handle(req, res, stripPrefix) {
         // 用 `createContextSource` 构造来源：于是来源的**形状约束**
         //（默认不可信、不许带权威字段、未知字段拒绝）在这一层同样生效，
         // 而不是只在用例里生效。
+        //
+        // **这里必须自己接住并给具名码。** `createContextSource` 抛的是普通
+        // `Error`（没有 `code`），而 `handleRun` 对没有码的异常一律发
+        // `code: null` 的 400。于是这条路由上**最要紧的一次拒绝**——
+        // "不可信内容想携带 `grants`" ——与"别的什么 400"在响应里长得一模一样，
+        // 调用方只能去匹配错误文案，而文案会随措辞变更而碎。
+        //
+        // 与 `CONTEXT_PERMISSION_REQUIRED` 同一条口径：拒绝必须是**可程序化判断**的。
+        // 复用 `CONTEXT_BAD_SOURCE` 而不是新造一个码，让"来源本身不合法"
+        // 在这条路由上只有一个名字，不管它来自 `collectCandidates` 还是这里。
         const candidates = rawCandidates.map((c, i) => {
           if (c === null || typeof c !== 'object' || c.source === null || typeof c.source !== 'object') {
             throw Object.assign(new Error(`candidates[${i}] 必须是 { source } 形状`), { statusCode: 400, code: 'CONTEXT_BAD_CANDIDATE' })
           }
+          let source
+          try {
+            source = createContextSource(c.source)
+          } catch (e) {
+            throw Object.assign(
+              new Error(`candidates[${i}].source 被拒绝：${e.message}`),
+              { statusCode: 400, code: 'CONTEXT_BAD_SOURCE' },
+            )
+          }
           return {
-            source: createContextSource(c.source),
+            source,
             scope: c.scope ?? undefined,
             required: c.required === true,
             allowTruncate: c.allowTruncate === true,

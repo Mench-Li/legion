@@ -132,16 +132,16 @@ async function spawnAndKill({ taskId, blockIn, blockMs = 30000, markerName, read
   const dataDir = join(tmpRoot, `data-${markerName}`)
   const marker = join(tmpRoot, `${markerName}.jsonl`)
   mkdirp(dataDir)
-  const child = spawn(process.execPath, [DRILL_WORKER], {
+  const child = spawn(process.execPath, [DRILL_WORKER, blockIn, String(blockMs), marker], {
     cwd: ROOT,
     env: {
       ...process.env,
+      // 只有 worker 的**真实配置**走环境变量（三者都是已声明的产品环境变量）。
+      // 钻探参数走 argv——理由见 kill-drill-worker.mjs 文件头：
+      // 夹具专用参数不该变成产品的配置面，也不该逼出"不用声明"的例外。
       LEGION_DATA_DIR: dataDir,
       TEAM_HUB_URL: base,
       TEAM_HUB_TOKEN: TOKEN,
-      DRILL_MARKER: marker,
-      DRILL_BLOCK_IN: blockIn,
-      DRILL_BLOCK_MS: String(blockMs),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -289,12 +289,11 @@ test('① 在外部写边界**之前**强杀 worker：任务不丢，回收后�
   const marker2 = join(tmpRoot, 'before-resume.jsonl')
   const dataDir2 = join(tmpRoot, 'data-before-resume')
   mkdirp(dataDir2)
-  const child = spawn(process.execPath, [DRILL_WORKER], {
+  const child = spawn(process.execPath, [DRILL_WORKER, 'none', '0', marker2], {
     cwd: ROOT,
     env: {
       ...process.env,
       LEGION_DATA_DIR: dataDir2, TEAM_HUB_URL: base, TEAM_HUB_TOKEN: TOKEN,
-      DRILL_MARKER: marker2, DRILL_BLOCK_IN: 'none', DRILL_BLOCK_MS: '0',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -382,12 +381,11 @@ test('③ 在外部写边界**之后**强杀 worker：回收进 UnknownOutcome �
   const kids = [0, 1].map((i) => {
     const dataDir = join(tmpRoot, `data-after-idle-${i}`)
     mkdirp(dataDir)
-    const child = spawn(process.execPath, [DRILL_WORKER], {
+    const child = spawn(process.execPath, [DRILL_WORKER, 'none', '0', marker2], {
       cwd: ROOT,
       env: {
         ...process.env,
         LEGION_DATA_DIR: dataDir, TEAM_HUB_URL: base, TEAM_HUB_TOKEN: TOKEN,
-        DRILL_MARKER: marker2, DRILL_BLOCK_IN: 'none', DRILL_BLOCK_MS: '0',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     })

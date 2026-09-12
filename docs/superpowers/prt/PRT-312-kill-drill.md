@@ -33,13 +33,17 @@
 
 ## 2. 夹具：`kill-drill-worker.mjs`
 
-一个真实的 worker 进程，通过环境变量注入一个会在指定阶段**卡住**的执行引擎：
+一个真实的 worker 进程，通过 **argv** 注入一个会在指定阶段**卡住**的执行引擎：
 
-| 变量 | 作用 |
+```
+node kill-drill-worker.mjs <blockIn> <blockMs> <markerFile|->
+```
+
+| 参数 | 作用 |
 | --- | --- |
-| `DRILL_BLOCK_IN` | 在哪个阶段卡住：`prepareWorkspace` / `buildContext` / `execute` / `none` |
-| `DRILL_BLOCK_MS` | 卡多久（要足够长，让父进程来得及强杀） |
-| `DRILL_MARKER` | 调用记录文件（每行一条 JSON），父进程在被杀之后读它 |
+| `blockIn` | 在哪个阶段卡住：`prepareWorkspace` / `buildContext` / `execute` / `none` |
+| `blockMs` | 卡多久（要足够长，让父进程来得及强杀） |
+| `markerFile` | 调用记录文件（每行一条 JSON），父进程在被杀之后读它；`-` 表示不记录 |
 
 它调用的是**产品的** `runWorkerProcess({ executor })`，因此演练覆盖真实的
 worker 主循环、心跳、失败上报与状态文件写入——只有"执行引擎"是假的。
@@ -48,9 +52,29 @@ worker 主循环、心跳、失败上报与状态文件写入——只有"执行
 那条记录是"外部写可能已经发生"的**唯一证据**，恢复扫描必须据此拒绝自动重试。
 父进程在被杀之后数它的行数——这是"不重复执行已确认的外部写操作"唯一可数的判据。
 
-启动这个夹具的环境里**不能**设 `LEGION_WORKER_HEARTBEAT_MS`（那个变量并不存在）。
-真实的心跳间隔是 10 秒（`WORKER_DEFAULTS.heartbeatIntervalMs`），
-而演练在几秒内就完成强杀——因此被杀时 lease 仍然有效。这一点是被**显式验证**的（见 §3）。
+### 为什么钻探参数走 argv，而不是环境变量
+
+最初这三个参数是环境变量（`DRILL_BLOCK_IN` / `DRILL_BLOCK_MS` / `DRILL_MARKER`）。
+`scan --check` 与 `topology-inventory --diff` **同时**红了：
+
+```
+✖ orchestrator.undeclaredEnvKeys: DRILL_BLOCK_IN / DRILL_BLOCK_MS / DRILL_MARKER
+```
+
+这两条门禁是对的，两条路都不该走：
+
+- 把它们声明进 `orchestrator/config-schema.mjs`：产品的配置面里出现三个
+  **只属于测试夹具**的键，运维会以为它们可以设置。
+- 给它们开一个"夹具不用声明"的例外：那条门禁的全部价值就在于
+  「任何被读取的 env 键都有人认领」，开口子比多三个键更糟。
+
+走 argv 则两者都不需要——夹具自己的参数留在夹具的命令行上。
+环境变量只留给 worker 的**真实配置**（`LEGION_DATA_DIR` / `TEAM_HUB_URL` /
+`TEAM_HUB_TOKEN`，三者本来就已声明）。
+
+顺带：参数不合法时夹具**以非零码退出**（未知的 `blockIn`、非数字的 `blockMs`）。
+不校验的话，一个"卡在未知阶段"的夹具会让演练等不到它该等的东西，
+而失败信息会指向超时，与真正的原因（参数拼错）毫无关系。
 
 ---
 
@@ -100,6 +124,13 @@ worker 卡在 `execute`（且已写过一次 marker）时被杀。此时 Attempt
 在两个用例里，`recover` 都调了两次：**租约还有效时一次**（必须一无所获），
 **过期后一次**（必须做出判定）。少了第一次，这个演练对"抢占活着的持有者"
 这一类缺陷是完全瞎的——而被抢的执行会真的被两个 worker 各跑一遍。
+
+第一次调用之所以有意义，是因为**被杀时租约确实还有效**：
+worker 的心跳间隔是 10 秒（`WORKER_DEFAULTS.heartbeatIntervalMs`），
+而演练在几秒内就完成强杀，因此 lease 远未过期。
+（这一点曾经很危险地依赖于一个**不存在**的环境变量 `LEGION_WORKER_HEARTBEAT_MS`：
+写它不会报错，只会被忽略——worker 仍按 10 秒心跳，用例照样过。
+参数改成 argv 时顺手把它删掉了。）
 
 ### ② "租约过期"是**直接摆好**的前提，不是等出来的
 

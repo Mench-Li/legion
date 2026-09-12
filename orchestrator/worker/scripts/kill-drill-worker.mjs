@@ -12,13 +12,19 @@
 // 而且 Windows 上 `child.kill('SIGTERM')` 会**无条件终止**目标进程，
 // 信号处理器根本不会被调用；只有真进程 + 真强杀才能验到这条平台事实。
 //
-// 用法（全部走环境变量，因为要跨进程传）：
-//   LEGION_DATA_DIR        状态文件落点（worker 必需）
-//   TEAM_HUB_URL / TEAM_HUB_TOKEN  数据面
-//   DRILL_MARKER           外部写/阶段调用的记录文件（每行一次调用）
-//   DRILL_BLOCK_IN         在哪个阶段卡住：prepareWorkspace | buildContext | execute
-//   DRILL_BLOCK_MS         卡住多久（要足够长，让父进程来得及强杀）
-//   DRILL_WRITE_AT         'execute' 时先记一次"外部写"再卡住（默认：execute 阶段都记）
+// 用法（钻探参数走 **argv**，进程配置走环境变量）：
+//   node kill-drill-worker.mjs <blockIn> <blockMs> <markerFile|->
+//
+//   LEGION_DATA_DIR / TEAM_HUB_URL / TEAM_HUB_TOKEN  worker 的真实配置（已声明的产品环境变量）
+//   blockIn     在哪个阶段卡住：prepareWorkspace | buildContext | execute | none
+//   blockMs     卡住多久（要足够长，让父进程来得及强杀）
+//   markerFile  调用记录文件（`-` 表示不记录）
+//
+// **为什么钻探参数走 argv 而不是环境变量**：环境变量在本仓库是**产品配置面**，
+// 而门禁（scripts/config/scan.mjs）要求任何被读取的 env 键都必须在对应进程的
+// config-schema 里声明。给一个测试夹具加三个只属于它的环境变量，要么逼着产品
+// schema 里出现三个测试专用的键（污染真实配置面），要么就得给它们开一个
+// "不用声明"的例外（削弱那条门禁本身）。走 argv 则两者都不需要。
 //
 // 这个文件不是产品代码：产品里的 worker 入口是 `product/orchestrator/worker.mjs`，
 // 它不注入任何执行引擎（PRT-253 才接线）。这里是**唯一**给真实进程注入慢速
@@ -30,9 +36,20 @@ import { dirname } from 'node:path'
 import { runWorkerProcess } from '../run.mjs'
 import { inPlaceStages } from '../main.mjs'
 
-const blockIn = process.env.DRILL_BLOCK_IN ?? 'execute'
-const blockMs = Number(process.env.DRILL_BLOCK_MS ?? '30000')
-const marker = process.env.DRILL_MARKER ?? null
+const [blockIn = 'execute', blockMsRaw = '30000', markerArg = '-'] = process.argv.slice(2)
+const blockMs = Number(blockMsRaw)
+const marker = markerArg === '-' ? null : markerArg
+
+// 参数不合法就**以非零码退出**：一个"卡在未知阶段"的夹具会让演练等不到它该等的东西，
+// 而失败信息会指向超时，与真正的原因（参数拼错）毫无关系。
+if (!['prepareWorkspace', 'buildContext', 'execute', 'none'].includes(blockIn)) {
+  process.stderr.write(`✖ 未知的 blockIn：${blockIn}（应为 prepareWorkspace | buildContext | execute | none）\n`)
+  process.exit(2)
+}
+if (!Number.isFinite(blockMs) || blockMs < 0) {
+  process.stderr.write(`✖ blockMs 不是非负数字：${blockMsRaw}\n`)
+  process.exit(2)
+}
 
 /** 记一次调用。用 append 而不是写整个文件：父进程要在被杀之后读到"写到哪一行"。 */
 function mark(stage, kind) {

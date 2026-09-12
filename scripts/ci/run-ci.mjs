@@ -320,6 +320,11 @@ async function stageTest() {
     // 与已记录基线对账——它是**提醒**而不是迁移门禁：迁移期旧路径仍在正常演进，
     // 做成硬门禁会让每次功能提交都红，最后被人无脑 --record 刷掉，反而失去对拍价值。
     { label: 'prt-baseline（PRT-007 平台契约基线与漂移定位）', files: ['scripts/prt/baseline-snapshot.test.mjs'], cwd: ROOT },
+    // PRT 进度表的派生数字自检。这张表的汇总区是人手维护的，而数字由明细推导；
+    // 两者不一致时读者看汇总得到一个"还剩多少"，看明细得到另一个答案——
+    // 而汇总在文件末尾、明细在中部，几乎没人会去核对。
+    // 这个脚本的作者自己就把阶段 3 的计数写错过两次，所以它被自动化了。
+    { label: 'prt-progress（进度表派生数字自检：阶段标题、汇总各列、合计行都必须等于明细）', files: ['scripts/prt/progress-check.test.mjs'], cwd: ROOT },
     // PRT-004：黄金流程定义。核心断言是**夹具没有漂移**——黄金流程的全部价值建立在
     // 「输入固定」上，夹具一悄悄变，阶段 3 的新旧对拍就退化成「输入不同却以为行为不同」。
     { label: 'prt-golden-flow（PRT-004 黄金流程与固定夹具冻结）', files: ['scripts/prt/golden-flow.test.mjs'], cwd: ROOT },

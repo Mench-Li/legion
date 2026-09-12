@@ -98,7 +98,24 @@ export const SCHEMA = defineSchema({
   // 子进程的 env 键名 + 平台必需键名：都是「变量名」，不是本进程的读取点。
   // 不显式列出的话 `scan --check` 会要求把它们登记为读取点（P3-4 遇到过同类问题）。
   nonEnvLiterals: [
-    ...CHILD_ENV_NAMES,
+
+    // PRT-710 脱敏诊断包（product/diagnostics/redact-package.mjs）的具名码：
+    //   DIAG_NO_LAYOUT     — 布局/目标目录未给出。**不猜默认位置**：
+    //                        诊断包会离开这台机器，写到哪里必须由调用方决定；
+    //   DIAG_PACKAGE_EXISTS— 目标目录已存在，**不覆盖**（诊断包的价值在于它是当时的证据）；
+    //   DIAG_LEAK_DETECTED — 落盘后复检发现残留密钥，包已**作废并删除**；
+    //   DIAG_WRITE_FAILED  — 写不进 / 无法读回复检；
+    //   DIAG_EMPTY_PACKAGE — 一个候选都没有：空包与"没什么好收的"长得一样，
+    //                        所以不生成空包而是如实报错。
+    'DIAG_NO_LAYOUT', 'DIAG_PACKAGE_EXISTS', 'DIAG_LEAK_DETECTED',
+    'DIAG_WRITE_FAILED', 'DIAG_EMPTY_PACKAGE',
+    // 逐候选的去向（诊断包清单的契约，四种，没有第五种）：
+    'included', 'excluded', 'skipped', 'oversized',
+    // 结构性排除规则的 id。它们是**排除理由的分类名**，不是配置键；
+    // 每个 id 都必须在清单里可读地说明白"为什么排除"，否则收件人会当成漏收。
+    'secret-store', 'credentials-yaml', 'raw-key', 'auth-json', 'business-db', 'env-file',
+    // 清单 schema 名与复检方法名。写进包里的契约标识，同样不是配置键。
+    'legion.diagnostic-package/1', 'read-back-after-write',    ...CHILD_ENV_NAMES,
     ...OS_ONLY_ENV_NAMES,
     // 诊断码、errno、信号名：都是**输出**用的大写字面量，不是配置键。
     // 它们被规则 ③（`'[A-Z][A-Z0-9_]{3,}'`）误认成疑似 env 键。

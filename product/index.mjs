@@ -52,3 +52,24 @@ export {
   startupWaves,
   validateProcessPlan,
 } from './process-manifest.mjs'
+
+// 脱敏诊断包（PRT-710）。spec §6.7 把「诊断包」与提示词、日志、异常、审计、
+// 能力包并列，作为**密钥不得出现的地方**。
+//
+// 这里导出的是**产品级能力**（Launcher / 界面调它），不是密钥库的访问口——
+// 本模块刻意只依赖脱敏模式表，`security/secrets/*` 一行都不 import：
+// 一个只负责"把东西带出去"的模块，没有任何理由持有打开密钥库的能力。
+export {
+  DEFAULT_LIMITS,
+  DIAG_CODES,
+  DIAG_STATUSES,
+  HITS_CAVEAT,
+  STRUCTURAL_EXCLUSIONS,
+  buildManifest,
+  defaultCandidates,
+  exportDiagnosticPackage,
+  flattenName,
+  planPackage,
+  structuralExclusionFor,
+  verifyWrittenFiles,
+} from './diagnostics/redact-package.mjs'

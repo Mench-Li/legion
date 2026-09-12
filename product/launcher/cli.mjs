@@ -59,6 +59,8 @@ export const CLI_FLAGS = Object.freeze([
   { name: '--include=<a,b>', kind: 'value', doc: '只启动列出的进程（受限范围；产品状态不会被报成「已就绪」）' },
   { name: '--runtime-command=<cmd>', kind: 'value', doc: 'DSH Runtime 的启动命令行（PRT-011 路线 C：Launcher 把 npm 包装进 DataDir）' },
   { name: '--allow-port-in-use=<a,b>', kind: 'value', doc: '允许复用已在监听的端口的进程（显式决定，不是默认行为）' },
+  { name: '--diagnostics=<dir>', kind: 'value', doc: '导出脱敏诊断包到指定目录（PRT-710）。' +
+    '**这是唯一在体检/配置/布局出问题时仍然可用的入口**：诊断包最需要在产品坏掉的时候拿到' },
   { name: '--help', kind: 'boolean', doc: '打印本说明' },
 ])
 
@@ -93,7 +95,7 @@ export function parseArgs(argv) {
       out.ports[proc] = port
       continue
     }
-    const known = ['install-dir', 'data-dir', 'workspace', 'include', 'runtime-command', 'allow-port-in-use']
+    const known = ['install-dir', 'data-dir', 'workspace', 'include', 'runtime-command', 'allow-port-in-use', 'diagnostics']
     if (!known.includes(key)) {
       out.errors.push(`未知参数「--${key}」：用 --help 查看支持的参数`)
       continue
@@ -222,6 +224,41 @@ export async function run({ argv = process.argv.slice(2), env = process.env, wri
   }
 
   const json = parsed.flags.json === true
+
+  // ── 诊断包导出（PRT-710）─────────────────────────────────────────────
+  //
+  // **位置是这段代码的全部要点**：它排在布局校验与配置校验**之前**。
+  //
+  // 诊断包最需要在什么时候拿到？**产品坏掉的时候。** 把它挂在一个"配置能解析、
+  // 布局合法才往下走"的流程后面，等于在最需要它的时候恰好用不了：
+  //
+  //   > 一个只在产品健康时才可用的诊断入口，与一个不存在的诊断入口，
+  //   > 在最需要它的那一刻是同一个东西。
+  //
+  // 所以这里**不**调 preflight、**不**创建 Launcher、**不**要求配置合法——
+  // 它只要布局对象（拿得到目录在哪就够）与一个目标目录。
+  if (typeof parsed.flags.diagnostics === 'string' && parsed.flags.diagnostics !== '') {
+    const { exportDiagnosticPackage, DIAG_CODES } = await import('../diagnostics/redact-package.mjs')
+    const r = await exportDiagnosticPackage({ layout: options.layout, outDir: parsed.flags.diagnostics })
+    if (json) {
+      write(JSON.stringify({ ok: r.ok, code: r.code ?? null, path: r.path ?? null, message: r.message, manifest: r.manifest ?? null, offenders: r.offenders ?? null }, null, 2))
+    } else if (r.ok === true) {
+      write(`✔ ${r.message}`)
+      write(`  ${r.path}`)
+      // 排除项**必须打出来**：一份说不清自己排除了什么的诊断包，
+      // 与一份漏收了文件的诊断包，对排查者是同一个东西。
+      for (const e of r.manifest.excluded) write(`  ⊘ 已排除 ${e.id}（${e.rule}）：${e.why}`)
+      for (const x of r.manifest.skipped) write(`  · 未收 ${x.id}：${x.reason}`)
+      for (const x of r.manifest.oversized) write(`  · 未收 ${x.id}：${x.why}`)
+    } else {
+      write(`✖ ${r.message}`)
+    }
+    // 退出码刻意把**泄漏**与**其它失败**分开：
+    //   8 = 复检发现残留、包已作废（安全事件，必须一眼看得出与普通失败不同）；
+    //   9 = 其它导出失败（包括"不覆盖已有目录"）。
+    if (r.ok === true) return 0
+    return r.code === DIAG_CODES.LEAK_DETECTED ? 8 : 9
+  }
 
   // 目录布局诊断在**创建 Launcher 之前**就已经拿到（resolveLayout 的返回），
   // 而它在 createLauncher 内部还会再算一次。这里用它的原因是：

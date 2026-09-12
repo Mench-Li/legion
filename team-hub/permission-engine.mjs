@@ -160,11 +160,206 @@ const SAMPLE_OPERATION = Object.freeze({
 
 // 加载即执行，并留下**真正算出来的**证据（产出的字段名）。
 // 不导出一个布尔"通过"标记：`ok: true` 是随手就能写出来的字面量，
-// 而能把它写成 true 的，恰恰就是那个把自检删掉的改动。
+// 而能把它写成 true 的，恰恰就是那个把自检删掉的证据。
 export const OPERATION_KEYS_CHECKED = Object.freeze({
   ...assertOperationKeysAligned(),
   producedKeys: Object.freeze(Object.keys(normalizeOperation(SAMPLE_OPERATION))),
 })
+
+// ============================================================================
+// PRT-609：字段变化必须让审批失效
+//
+// spec §6.5：「审批绑定不可变 `ToolExecution` 参数的 canonical operation 哈希；
+//            **任一授权关键字段变化都会使审批失效**。」
+// 完成标准（阶段 6）：「改变已批准操作的**任一**关键字段后无法继续执行。」
+//
+// `assertOperationKeysAligned` 只比**字段名**：名单里有的、`normalizeOperation`
+// 产出的，两边对齐就通过。它拦不住下面这一类：
+//
+//   `canonicalOperation` 里写了 `if (key === 'taskId') continue`
+//   —— 名字对齐仍然通过，`taskId` 也确实在名单里，**但它不再进入指纹**。
+//   于是改了 `taskId` 的调用会命中同一张审批票，而"任一关键字段变化都会使审批失效"
+//   这句话在 `taskId` 上变成了一句空话。
+//
+//   > 一个「名单里有、但值根本不进指纹」的字段，
+//   > 与一个「不在名单里」的字段，是同一个东西——
+//   > 只不过前者看起来是被保护着的。
+//
+// 所以这里的判据是**构造性的**：对名单里的**每一个**字段，造一个**确实不同**的值，
+// 验指纹**必须**改变。这是把一句全称命题（"任一字段"）变成逐个字段的实测。
+//
+// 两个读数都要，而且它们证明的是**不同**的事：
+//   · `mutatedCanonicalDiffers` —— 这个变异不是空操作（否则下面那条恒真，测不到东西）
+//   · `affectsFingerprint`    —— 这个字段真的进了指纹
+// 只有后者会让人以为前者也成立：
+//
+//   > 一个「变异本身就是空操作」的逐字段测试，
+//   > 与一个「每个字段都能影响指纹」的测试，在读数上完全一样。
+// ============================================================================
+
+/** 逐字段变异自检的基准操作：**每个字段都是非默认值**，否则变异可能被规范化吃掉。 */
+export const MUTATION_BASE = Object.freeze({
+  scope: 'scope-base', actor: 'actor-base', action: 'action:base', target: 'target-base',
+  taskId: 'task-base', unattended: true, metadata: { probe: 'base' },
+})
+
+/** 每个字段的变异值。**必须覆盖 `OPERATION_KEYS` 的全部字段**（见下面的自检）。 */
+export const FIELD_MUTATIONS = Object.freeze({
+  scope: 'scope-mut', actor: 'actor-mut', action: 'action:mut', target: 'target-mut',
+  taskId: 'task-mut', unattended: false, metadata: { probe: 'mut' },
+})
+
+/**
+ * 相对**任意**基准造一个确实不同的值。
+ *
+ * ⚠️ 为什么不能到处复用 `FIELD_MUTATIONS`：那张表是相对 `MUTATION_BASE`
+ * （`unattended: true`）定义的。拿它去变异一个 `unattended: false` 的基准，
+ * `false → false` 就是一次**空操作**——而空操作对应的"指纹变了"这条读数恒为真，
+ * 测不到任何东西。这正是下面这个函数存在的理由：
+ *
+ *   > 一张「相对于某个基准定义」的变异表，
+ *   > 与一张「换个基准就变成空操作」的变异表，是同一个东西——
+ *   > 只不过后者不会报错，只会让用例绿得毫无意义。
+ *
+ * 本仓库在 PRT-609 的端到端用例里**实测踩到过**这一次：基准的
+ * `unattended: false` 配上表里的 `unattended: false`，于是那个字段"通过了"
+ * 逐字段检查，而它其实一次都没被改过。
+ *
+ * 变异后立即复核一次，变了才返回：把空操作这个陷阱变成一声明确的报错，
+ * 而不是一个安静通过的读数。复核本身见下面的 `assertMutationNotNoop`。
+ */
+export function mutateField(base, key) {
+  if (!Object.prototype.hasOwnProperty.call(base, key)) {
+    throw new Error(`内部错误（PRT-609）：基准里没有字段 \`${key}\``)
+  }
+  const value = base[key]
+  let next
+  if (key === 'unattended') {
+    next = !(value === true)
+  } else if (key === 'metadata') {
+    const m = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+    next = { ...m, __mutationProbe: `${String(m.__mutationProbe ?? '')}x` }
+  } else if (value === null || value === undefined) {
+    next = 'mut'
+  } else {
+    // `~` 能挺过 `nfc` 与 `trim`，所以拼接出来的值与原来的**必然**不同。
+    next = `${value}~`
+  }
+  const mutated = { ...base, [key]: next }
+  assertMutationNotNoop({ base, mutated, key })
+  return mutated
+}
+
+/**
+ * 复核一次变异**确实**改变了规范化文本。
+ *
+ * 单独导出，而不是留在 `mutateField` 里当一个内联的 `if` —— 理由是本仓库
+ * **实测**出来的：`mutateField` 自己构造的变异**永远**有效（每个分支都附了一个
+ * 挺得过 `nfc`/`trim` 的后缀），所以那个内联判断在自己的调用路径上**永远不触发**。
+ * 破坏性验证把内联判断改成 `if (false)` 时，一处都没变红。
+ *
+ *   > 一个永远不会触发的复核，与没有复核，
+ *   > 在「它到底拦不拦得住」上是同一个东西。
+ *
+ * 所以它必须**可以被直接调用**：用例喂一对相同的 base/mutated 进来，验它真的会抛。
+ * 这样它对 `mutateField` 未来被改成"查表式"的写法也仍然有效——而那正是这次
+ * 假绿发生过的形状。
+ */
+export function assertMutationNotNoop({ base, mutated, key = null, canonicalTextOf = operationCanonicalText } = {}) {
+  if (canonicalTextOf(mutated) === canonicalTextOf(base)) {
+    const where = key === null ? '这次' : `对 \`${key}\` 的`
+    throw new Error(
+      `内部错误（PRT-609）：${where}变异没有改变规范化文本——这是一次空操作，`
+      + '"指纹变了"那条读数对它恒为真，测不到任何东西',
+    )
+  }
+  return true
+}
+
+/**
+ * 逐字段验：名单里的每个字段，改了它指纹就必须变。
+ *
+ * `keys` / `mutations` / `fingerprintOf` 可注入，理由与前几处一样：
+ * 正确实现下"某个字段不影响指纹"**永远为假**，那段断言永远不触发——
+ *
+ *   > 一段永远不会触发的断言，与一段不存在的断言，
+ *   > 在「它到底拦不拦得住」上是同一个东西。
+ *
+ * 注入一个**忽略某个字段**的 `fingerprintOf`，就能验这道比较是活的。
+ */
+export function assertEveryKeyAffectsFingerprint({
+  keys = OPERATION_KEYS,
+  mutations = FIELD_MUTATIONS,
+  base = MUTATION_BASE,
+  fingerprintOf = operationFingerprint,
+  canonicalTextOf = operationCanonicalText,
+} = {}) {
+  const declared = [...keys]
+  // 名单里有、但没给变异值的字段会被**静默跳过** —— 那正是本自检要防的形状
+  // 在它自己身上复发（新增一个字段，于是那个字段没人验）。
+  const unmutable = declared.filter((k) => !Object.prototype.hasOwnProperty.call(mutations, k))
+  const baseFp = fingerprintOf(base)
+  const baseText = canonicalTextOf(base)
+  const perKey = []
+  const insensitive = []
+  const noopMutations = []
+  for (const key of declared) {
+    if (unmutable.includes(key)) continue
+    const mutated = { ...base, [key]: mutations[key] }
+    const mutatedText = canonicalTextOf(mutated)
+    const mutatedCanonicalDiffers = mutatedText !== baseText
+    const fp = fingerprintOf(mutated)
+    const affectsFingerprint = fp !== baseFp
+    perKey.push(Object.freeze({
+      key, mutatedCanonicalDiffers, affectsFingerprint,
+      baseFingerprint: baseFp, mutatedFingerprint: fp,
+    }))
+    // 变异是空操作 → 这条读数不能证明任何事，必须单独报出来（否则读数会被误读）
+    if (!mutatedCanonicalDiffers) noopMutations.push(key)
+    if (!affectsFingerprint) insensitive.push(key)
+  }
+  return Object.freeze({
+    keysChecked: Object.freeze(declared.filter((k) => !unmutable.includes(k))),
+    unmutable: Object.freeze(unmutable),
+    noopMutations: Object.freeze(noopMutations),
+    insensitive: Object.freeze(insensitive),
+    perKey: Object.freeze(perKey),
+  })
+}
+
+/**
+ * 装载时执行，**并留下一份会抛错的证据**。
+ *
+ * 三个失败条件各自对应一个不同的、都很安静的缺陷：
+ *   · `unmutable`       —— 加了字段却没给它变异值 → 那个字段没人验
+ *   · `noopMutations`   —— 变异被规范化吃掉 → 这条读数恒真，等于没测
+ *   · `insensitive`     —— **字段在名单里但不进指纹** → 改它审批照样通过（危险方向）
+ */
+export function assertFieldSensitivity(evidence = assertEveryKeyAffectsFingerprint()) {
+  if (evidence.unmutable.length > 0) {
+    throw new Error(
+      `内部错误（PRT-609）：\`${evidence.unmutable.join('、')}\` 在 OPERATION_KEYS 里但没有变异值——`
+      + '逐字段自检会**静默跳过**它们，而"跳过"与"验过了"在这份证据上长得一模一样',
+    )
+  }
+  if (evidence.noopMutations.length > 0) {
+    throw new Error(
+      `内部错误（PRT-609）：对 \`${evidence.noopMutations.join('、')}\` 的变异没有改变规范化文本——`
+      + '这是一次空操作，它对应的读数恒为真，测不到任何东西',
+    )
+  }
+  if (evidence.insensitive.length > 0) {
+    throw new Error(
+      `内部错误（PRT-609）：\`${evidence.insensitive.join('、')}\` 在 OPERATION_KEYS 里，`
+      + '但**改变它的值不会改变指纹**——审批绑定不到这个字段，'
+      + '于是"任一关键字段变化都会使审批失效"在这几个字段上是一句空话（spec §6.5）',
+    )
+  }
+  return evidence
+}
+
+// 加载即执行。导出的是**逐个字段算出来的那一对指纹**，不是一个 ok 标记。
+export const FIELD_SENSITIVITY_CHECKED = Object.freeze(assertFieldSensitivity())
 
 function specificity(rule) {
   return ['scope', 'actor', 'action', 'target'].reduce((n, key) => n + (rule[key] ? 1 : 0), 0)

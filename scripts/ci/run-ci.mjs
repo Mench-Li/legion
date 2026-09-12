@@ -370,6 +370,19 @@ async function stageTest() {
       files: ['team-hub/allow-once.test.mjs'],
       cwd: ROOT,
     },
+    {
+      // PRT-609：字段变化必须让审批失效（spec §6.5，阶段 6 完成标准）。
+      //
+      // 「**任一**授权关键字段变化都会使审批失效」是一句**全称命题**，
+      // 不能用"我试了三个字段"来交付——一个覆盖了 6/7 个字段的测试，
+      // 与一个 0/7 的测试，在"剩下那个字段改了会怎样"上是同一个东西：没有答案。
+      //
+      // PRT-611 的 `assertOperationKeysAligned` 只比**字段名**，它拦不住
+      // "字段在名单里、但值根本不进指纹"——那正是本套件逐字段构造性验证的对象。
+      label: 'field-invalidation（PRT-609：改变已批准操作的任一关键字段后无法继续执行）',
+      files: ['team-hub/field-invalidation.test.mjs'],
+      cwd: ROOT,
+    },
     { label: 'calendar（日程日历契约）', files: ['team-hub/calendar.test.mjs'], cwd: ROOT },
     { label: 'calendar-ui（P2-5 日历前端纯函数：周视图/重复文案/关联跳转/表单校验）', files: ['workbench/scripts/calendar-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'chat-ui（P2-6 对话前端纯函数：健康判定/AI 三态/合并/断线补齐）', files: ['workbench/scripts/chat-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },

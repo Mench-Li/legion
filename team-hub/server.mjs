@@ -3732,7 +3732,7 @@ async function handle(req, res, stripPrefix) {
         const snapshot = assembleContext({
           attemptId: body.attemptId,
           runId: body.runId,
-          frozenAtMs: body.frozenAtMs ?? Date.now(),
+          frozenAtMs: body.frozenAtMs,
           associations: body.associations ?? {},
           candidates,
           policy: { scope, canRead, priority: body.priority, maxTokens: body.maxTokens ?? null },

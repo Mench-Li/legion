@@ -325,6 +325,8 @@ export function createTokenMeasurement(input) {
  * @param {string|null} [input.finalText] 真正发给 Runtime 的文本
  * @param {unknown[]} [input.segments] 最终文本的段落表（每段切回一个来源）
  * @param {unknown[]} [input.truncations] 被截断的来源清单（**部分包含**是第三种状态）
+ * @param {unknown[]} [input.redactions] 脱敏记录（`{sourceId, at, why}`，**不含原值**）
+ * @param {string|null} [input.redactionSchema] 脱敏规则版本（进哈希）
  */
 export function freezeContextSnapshot(input) {
   if (input === null || typeof input !== 'object') throw new Error('RunContextSnapshot 必须是对象')
@@ -362,6 +364,12 @@ export function freezeContextSnapshot(input) {
     // 更本质的是：截断改变了"模型实际看到了什么"，那正是这份哈希要封住的东西。
     segments: Array.isArray(input.segments) ? input.segments : [],
     truncations: Array.isArray(input.truncations) ? input.truncations : [],
+    // PRT-408：脱敏结果同样进哈希。脱敏改变了模型实际看到的正文，
+    // 那正是这份哈希要封住的东西；而 `redactionSchema` 也进哈希，
+    // 因为**脱敏规则变了**之后同一份输入就该是两个不同的快照——
+    // 否则回放会给出与当初不同的结果，而哈希说它们是同一份。
+    redactions: Array.isArray(input.redactions) ? input.redactions : [],
+    redactionSchema: input.redactionSchema ?? null,
     tokens,
     budget: { maxTokens: budget.maxTokens ?? null, trimmed: budget.trimmed === true },
     finalText: input.finalText === undefined ? null : input.finalText,

@@ -48,6 +48,7 @@ import {
   freezeContextSnapshot,
 } from '../contracts/context.mjs'
 import { domainSeparatedHash } from '../contracts/canonical.mjs'
+import { redactSource, REDACTION_SCHEMA } from './redaction.mjs'
 
 /** 装配失败码。**装配失败没有快照**——半成品的快照比没有更坏。 */
 export const ASSEMBLY_CODES = Object.freeze({
@@ -308,10 +309,28 @@ export function assembleContext(input) {
     pending.push({ candidate: c, source })
   }
 
-  // ④ 按固定优先级排出确定顺序：同一批输入在任何路径下都得到同样的顺序与哈希。
+  // ④ 脱敏（PRT-408）。**必须在预算裁剪之前**——反过来的话，脱敏会作用在一段
+  // 已经被裁过的文本上，于是 `preRedactionChars` 记的是截断后的长度，
+  // 那个数字会被误读成"原文长度"。
+  //
+  // 脱敏是**内容变换**，不是排除：被脱敏的来源仍然在 `sources[]` 里，
+  // 只是正文的一部分变成了标记。整条排除会丢掉"我看过这份文档"这个事实。
+  //
+  // spec §6.5 要的"脱敏结果"就是这里的 `redactions[]`：只记路径与命中说明，
+  // **不记原值**——把原值写进快照等于把泄漏从正文搬家到审计。
+  const redactions = []
+  for (const p of pending) {
+    const r = redactSource(p.source)
+    if (r.redactions.length > 0) {
+      p.source = r.source
+      redactions.push(...r.redactions)
+    }
+  }
+
+  // ⑤ 按固定优先级排出确定顺序：同一批输入在任何路径下都得到同样的顺序与哈希。
   pending.sort((a, b) => compareForAssembly(a.source, b.source, priorityIndex))
 
-  // ⑤ 预算裁剪。
+  // ⑥ 预算裁剪。
   let usedTokens = 0
   const requiredDropped = []
   for (const { candidate, source } of pending) {
@@ -358,7 +377,7 @@ export function assembleContext(input) {
     }))
   }
 
-  // ⑥ 必需来源放不下 → 失败。一份"看起来正常但缺了前提"的快照比失败坏得多。
+  // ⑦ 必需来源放不下 → 失败。一份"看起来正常但缺了前提"的快照比失败坏得多。
   if (requiredDropped.length > 0) {
     throw new AssemblyError(
       ASSEMBLY_CODES.CONTEXT_TOO_LARGE,
@@ -413,6 +432,11 @@ export function assembleContext(input) {
     // 用于回答"模型看到的第 N 个字符来自哪里"。
     segments,
     truncations,
+    // PRT-408：脱敏结果进哈希。**形态本身也进**——脱敏规则变了，
+    // 同一份输入就该是两个不同的快照，否则"回放"会给出与当初不同的结果
+    // 而哈希说它们是同一份。
+    redactions,
+    redactionSchema: REDACTION_SCHEMA,
   })
 
   return snapshot
@@ -424,6 +448,13 @@ export function describeAssembly(snapshot) {
   const parts = [`包含 ${snapshot.sources.length} 个来源（约 ${snapshot.tokens.tokens} token`]
   parts.push(snapshot.tokens.kind === TOKEN_ESTIMATOR_KINDS.CONSERVATIVE_ESTIMATE ? '，保守估算）' : '）')
   if (snapshot.truncations.length > 0) parts.push(`，其中 ${snapshot.truncations.length} 个被截断`)
+  // 脱敏**不是**排除：被脱敏的来源仍在 `sources[]` 里，所以这里先于排除说它。
+  // 说成"排除"会让用户以为那份文档没进去——而它进去了，只是正文变了。
+  const redactedIds = new Set((snapshot.redactions ?? []).map((r) => r.sourceId))
+  if (redactedIds.size > 0) {
+    const whys = [...new Set((snapshot.redactions ?? []).map((r) => r.why))]
+    parts.push(`，其中 ${redactedIds.size} 个已脱敏（${whys.join(' / ')}）`)
+  }
   if (snapshot.excluded.length > 0) {
     const byReason = new Map()
     for (const e of snapshot.excluded) byReason.set(e.reason, (byReason.get(e.reason) ?? 0) + 1)

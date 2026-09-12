@@ -1,56 +1,19 @@
 // runtime/adapters/dsh/redact.mjs
 // ============================================================================
-// 日志 / 异常 / 事件脱敏（PRT-208）
+// 模式表已提取到 `runtime/contracts/redact-patterns.mjs`（PRT-408）。
 //
-// 脱敏是**结构性**的，不是「把已知密钥值替换掉」。
-// 后者依赖「我们知道密钥长什么样」，而真实泄漏往往来自我们没预料到的形态
-// （用户把 key 拼进 URL、模型把它回显在输出里、错误消息带上 Authorization 头）。
-// 因此这里做两件事：
+// 上下文脱敏（PRT-408）要认的"什么算密钥"与这里**是同一件事**，只是目的不同：
+// 这里是"别写进日志"，那里是"别发给模型"。两份表会漂移，而漂移的那一次
+// 就是漏掉一种新密钥形态的那一次——所以只留一份。
 //
-//   ① 按键名脱敏：`token`/`secret`/`password`/`apiKey`/`authorization`/`credential`…
-//      不论值长什么样一律替换。这条覆盖「新形态的密钥」——只要它挂在正确的键名下。
-//   ② 按值形态脱敏：常见密钥前缀（`sk-`、`ghp_`、`AKIA`…）、`Bearer <x>`、
-//      URL 内嵌凭证（`https://user:pass@host`）、以及超长的无空格高熵串。
-//
-// ## 输出的是「路径」不是「值」
-//
-// `redacted` 数组里放的是被替换字段的**路径**（如 `headers.authorization`），
-// 不是它的值。审计记录「这里发生过脱敏」就够了；把原值写进审计
-// 等于把泄漏从日志搬家到审计，问题一点没少。
+// 下面这些导出保留原有的名字与形状（`redactText` 等仍从这里出去），
+// 于是既有调用方一行都不用改。
 // ============================================================================
 
-/** 命中即整值替换的键名（大小写不敏感，允许 `_`/`-` 分隔）。 */
-export const SENSITIVE_KEY_RE =
-  /(^|[_-])(token|secret|password|passwd|pwd|apikey|api[_-]?key|authorization|auth|credential|credentials|cookie|session[_-]?key|private[_-]?key|access[_-]?key)([_-]|$)/i
+export { SENSITIVE_KEY_RE, SECRET_VALUE_PATTERNS, REDACTED, redactText } from '../../contracts/redact-patterns.mjs'
 
-/** 值形态：常见供应商密钥前缀。 */
-export const SECRET_VALUE_PATTERNS = Object.freeze([
-  { re: /\bsk-[A-Za-z0-9_-]{12,}\b/g, why: 'OpenAI 风格密钥' },
-  { re: /\bghp_[A-Za-z0-9]{20,}\b/g, why: 'GitHub PAT' },
-  { re: /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, why: 'GitHub 细粒度 PAT' },
-  { re: /\bAKIA[0-9A-Z]{16}\b/g, why: 'AWS Access Key ID' },
-  { re: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, why: 'Slack token' },
-  { re: /\bBearer\s+[A-Za-z0-9._~+/-]{10,}=*/gi, why: 'Bearer 凭证' },
-  // URL 内嵌凭证：把 user:pass 换成脱敏标记，保留主机名（排查还需要它）
-  { re: /([a-z][a-z0-9+.-]*:\/\/)[^/@\s:]+:[^/@\s]+@/gi, why: 'URL 内嵌凭证', replace: '$1[已脱敏]@' },
-  { re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, why: '私钥块' },
-])
+import { REDACTED, SENSITIVE_KEY_RE, redactText } from '../../contracts/redact-patterns.mjs'
 
-export const REDACTED = '[已脱敏]'
-
-/** 单个值里替换所有已知密钥形态。 */
-export function redactText(text) {
-  let out = String(text)
-  const hits = []
-  for (const p of SECRET_VALUE_PATTERNS) {
-    if (!p.re.test(out)) continue
-    // 正则带 g 标志，test() 会推进 lastIndex → 重置后再 replace
-    p.re.lastIndex = 0
-    out = out.replace(p.re, p.replace ?? REDACTED)
-    hits.push(p.why)
-  }
-  return { text: out, hits }
-}
 
 /**
  * 递归脱敏任意 JSON 可序列化值。

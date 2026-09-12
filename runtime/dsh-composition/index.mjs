@@ -130,6 +130,24 @@ export {
   decideApproval,
 } from './approval-policy.mjs'
 
+// PRT-614：新强制面完成前的 legacy 高风险工具禁用 + 发布门禁（spec line 936 / §6.6 line 472）。
+//
+// 本模块的核心不是"门禁"，而是**指标不可以说谎**：
+// 门禁未满足时，"未批准高风险写操作为零"这个读数返回 `not-a-metric-yet`，不是 `pass`。
+export {
+  EXECUTION_PATHS,
+  GATE_CODES,
+  HIGH_RISK_FLOOR,
+  METRIC_VERDICTS,
+  READINESS_ITEMS,
+  RELEASE_GATE_CHECKED,
+  RELEASE_GATE_VERSION,
+  evaluateReadiness,
+  evaluateReleaseMetric,
+  isHighRisk,
+  legacyHighRiskPolicy,
+} from './release-gate.mjs'
+
 // PRT-612：Legion 权限语义 → DSH 强制面的**固定映射**（spec §6.6 line 445–454）。
 //
 // 与 `enforcement.mjs` 的分工：那边是**原语**（guard / pre-execute / answerer 各自怎么判），

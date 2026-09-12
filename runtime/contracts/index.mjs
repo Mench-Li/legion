@@ -34,6 +34,26 @@ export {
 } from './model.mjs'
 
 export {
+  MODEL_CAPABILITIES,
+  NEGATIVE_PROBE_TTL_MS,
+  PROBE_CLASSES,
+  PROBE_CODES,
+  PROBE_CODE_CLASS,
+  PROBE_TTL_MS,
+  PROBE_VERDICT_CODES,
+  classifyFailure,
+  classifyHttpStatus,
+  defaultProbeMessage,
+  evaluateProbe,
+  isProbeFresh,
+  normalizeCapabilities,
+  probeClassOf,
+  probeFingerprint,
+  ttlForVerdict,
+  validateRequiredCapabilities,
+} from './model-probe.mjs'
+
+export {
   RUN_EVENT_TYPES,
   RUN_REQUEST_REQUIRED,
   TERMINAL_EVENT_TYPES,

@@ -579,6 +579,22 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-504（spec §6.6 第 402 行）：连通性 / 可用性 / 能力验证。
+      label: 'model-probe（PRT-504：失败分类必须分对——SECRET_UNAVAILABLE ≠ AUTH_FAILED）',
+      files: ['runtime/contracts/model-probe.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      label: 'probe（PRT-504：探测执行器，假 transport 覆盖全部分类 + 凭证不落判定/缓存）',
+      files: ['runtime/probe/probe.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      label: 'probe-http（PRT-504：真实 HTTP transport 对真服务，能力只报有证据的）',
+      files: ['runtime/probe/http.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       label: 'run-kill-drill（PRT-312：真实进程被强杀后不丢任务、不伪装成功、不重复外部写）',
       files: ['team-hub/run-kill-drill.test.mjs'],
       cwd: ROOT,

@@ -119,6 +119,86 @@ export declare function validationResult(input: {
   capabilities?: Record<string, unknown> | null
 }): ValidationResult
 
+// ------------------------------------------------- 模型连通性与能力探测（PRT-504）
+
+/** 探测失败码。`UNCLASSIFIED` 的存在是刻意的：分不出来就要说出来。 */
+export type ProbeCode =
+  | 'SECRET_UNAVAILABLE'
+  | 'SECRET_REF_MISSING'
+  | 'AUTH_FAILED'
+  | 'ENDPOINT_UNREACHABLE'
+  | 'TLS_FAILED'
+  | 'RATE_LIMITED'
+  | 'MODEL_NOT_FOUND'
+  | 'PROVIDER_ERROR'
+  | 'BAD_RESPONSE'
+  | 'TIMEOUT'
+  | 'CAPABILITY_MISSING'
+  | 'UNCLASSIFIED'
+
+/** 失败**处置类别**——调用方的下一动作由它决定，而不是由具体码决定。 */
+export type ProbeClass = 'fail-closed' | 'config' | 'transient' | 'unknown'
+
+/** 能力项，封闭集合。 */
+export type ModelCapability = 'chat' | 'tools' | 'vision' | 'json' | 'long-context' | 'reasoning'
+
+/** 传输层事实（由 transport 或执行器归一化后给出）。 */
+export type ProbeFailureKind = 'http' | 'connect' | 'tls' | 'timeout' | 'parse' | 'abort' | 'unknown'
+
+export interface ProbeObserved {
+  readonly ok: boolean
+  /** 失败时的码。 */
+  readonly code?: ProbeCode
+  readonly message?: string
+  readonly latencyMs?: number | null
+  readonly capabilities?: Partial<Record<ModelCapability, unknown>>
+}
+
+export interface ProbeVerdict {
+  readonly ok: boolean
+  readonly code: ProbeCode | 'OK'
+  readonly class: ProbeClass | null
+  readonly message: string
+  readonly missingCapabilities: readonly ModelCapability[]
+  readonly capabilities: Partial<Record<ModelCapability, true>>
+  readonly latencyMs: number | null
+  /** 由执行器附加：这次判定是否来自缓存。 */
+  readonly cached?: boolean
+  /** 由执行器附加：这次探测是否被主动取消（取消不是失败码）。 */
+  readonly cancelled?: boolean
+  readonly ageMs?: number
+}
+
+export declare const PROBE_CODES: readonly ProbeCode[]
+export declare const PROBE_CLASSES: readonly ProbeClass[]
+export declare const PROBE_VERDICT_CODES: readonly (ProbeCode | 'OK')[]
+export declare const PROBE_CODE_CLASS: Readonly<Record<ProbeCode, ProbeClass>>
+export declare const MODEL_CAPABILITIES: readonly ModelCapability[]
+export declare const PROBE_TTL_MS: number
+export declare const NEGATIVE_PROBE_TTL_MS: number
+
+export declare function classifyHttpStatus(status: unknown): ProbeCode
+/** `kind: 'abort'` 返回 `null`——主动取消需要单独的表达，不是失败分类。 */
+export declare function classifyFailure(input?: { kind?: ProbeFailureKind; status?: number }): ProbeCode | null
+export declare function probeClassOf(code: unknown): ProbeClass
+export declare function defaultProbeMessage(code: ProbeCode | string): string
+export declare function normalizeCapabilities(raw: unknown): Partial<Record<ModelCapability, true>>
+export declare function validateRequiredCapabilities(required?: unknown): {
+  ok: boolean
+  errors: string[]
+  value: readonly ModelCapability[] | null
+}
+export declare function evaluateProbe(input?: {
+  observed?: ProbeObserved | null
+  required?: readonly ModelCapability[] | null
+}): ProbeVerdict
+export declare function probeFingerprint(profile: unknown): string
+export declare function isProbeFresh(input?: { entry?: unknown; nowMs?: number; ttlMs?: number }): boolean
+export declare function ttlForVerdict(
+  verdict: unknown,
+  opts?: { ttlMs?: number; negativeTtlMs?: number },
+): number
+
 // ---------------------------------------------------------------- run
 
 export type RunEventType =

@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-13　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **168 套件 / 4531 用例 / 0 fail**（证据 `.ci/prt-214e/`）
+**最近一次全量基线**：2026-09-13　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **168 套件 / 4548 用例 / 0 fail**（证据 `.ci/prt-257e/`）
 （**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数会少）
 —— 以本文件所在提交为准；证据 `.ci/prt-901/`（PRT-901/902 第三方组件清单、SBOM 与商业分发条件那一批）
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
@@ -3457,6 +3457,95 @@
 > `docs/DUAL-WRITE-RACE-evidence/verify-evidence.md`。
 
 ---
+
+## 2026-09-13　PRT-257（续）：把强制面**真的**交给 DSH Runtime —— `--patch` 覆盖层接线
+
+> `legion-host.patch.yml` 早就有了、也早就被证明"DSH 读得懂"（`patch-loadable`
+> 叠在真 base bundle 上零警告、`permission` 表被真的替换）。但**没有任何东西把它
+> 交给一个 DSH 进程**：Launcher 拼 runtime 命令行时只用 `runtime.command`
+> （`argsTemplate: []`），而 `materializeProcessPlan` 的 `extraArgs` 口子
+> **存在却没人往里放东西**。于是那份补丁层的实际作用范围是**零个部署**。
+>
+> > 一个"写好了、也验证过能被加载"的补丁层，
+> > 与一个"从未被交给任何进程"的补丁层，在运行的部署上是同一个东西——
+> > 只不过前者的用例是绿的。
+
+### 交付
+
+- **`product/launcher/dsh-overlay.mjs`（新增）**：`resolveDshOverlay()` /
+  `overlayArgsFor()` / `overlayRelpathOf()`。
+- **`product/launcher/dsh-overlay.test.mjs`（新增，17 例）**，并入既有
+  `product-launcher` 组（17 条里只有 2 条需要 DSH_CHECKOUT）。
+- `product/launcher/launcher.mjs`（经 `extraArgs` 交给 runtime；诊断并入 `planDiagnostics`）、
+  `product/launcher/cli.mjs`、`product/config.mjs`（新键 `runtime.enforcementOverlay`）、
+  `product/config-schema.mjs`（4 个诊断码）、`product/launcher/index.mjs`。
+
+启动路径：`loadProductConfig → launcherInputFromConfig → cli.mjs → createLauncher
+→ resolveDshOverlay → materializeProcessPlan(extraArgs)` →
+`dsh <用户配的> --patch <安装目录>/runtime/dsh-composition/legion-host.patch.yml`。
+
+### ★ 为什么是 `--patch`，不是 profile 自己的 `cordis.patch.yml`
+
+DSH 的组合顺序是 bundle → profile 的 `cordis.patch.yml` → `--patch`（最高优先级；
+profile 根的 `cordis.yml` 文件头与 `args.ts` 都这么写）。profile 那份**属于用户**，
+是他 `dsh plugin add` 之后手改的、也是升级时最不该覆盖的。
+
+> 一个"能被用户在同一次编辑里删掉"的强制面，
+> 与一个"根本没有强制面"的部署，在事故复盘里是同一个东西——
+> 只不过前者的配置文件里曾经写着它。
+
+### ★ 三条判据
+
+① **默认装上**（`runtime.enforcementOverlay` 缺省 `true`），关掉不被禁止但留下一条
+`warn`、且文案直接写出怎么开回来——与 `product/secrets.mjs` 的
+`requireProtected: false` 同一条取舍（*一个让人猜不到怎么关掉的门禁最后会被人绕过*）。
+② **打开但文件不在 → 阻塞启动**（唯一会拦的分支），且**不给 `--patch`**：给了的话
+DSH 会自己报一个不提"补丁层"的错，排障会从 Runtime 开始找。
+③ **判序**：关掉时**不**报"文件不在"——否则真因是用户自己关掉，而诊断会让人去查安装完整性
+（*一个错的诊断，比没有诊断更坏*）。
+
+### 验证
+
+**真 DSH CLI 吃下了 Launcher 拼出的 argv**——这是"接上了"的唯一直接证据。
+用**隔离的 `DSH_HOME`**（绝不碰用户在跑的 `web` profile），`--dump-config` 打印组合树：
+`legion-enforcement-hard-floor` 在树里，相对模块名被 `anchorInsertedPluginNames`
+锚定成 `file:///…/plugins/hard-floor.mjs`。**对照组**：不带 `--patch` 时树里没有 Legion 行；
+路径指向不存在的文件时 DSH **自己报错、退出码非 0**——没有这个对照，"exit 0"什么也证明不了。
+
+**断验证 9/9，逐字节还原。** 探针 ④ 第一版把 `io.exists` 改成恒 false，红了 5 条**别的**
+用例而"判序"那一条**没红**：
+
+> 一个"把很多东西一起弄坏"的探针，与一个"真的咬住了那一条判据"的探针，
+> 在 `fail > 0` 这个读数上是同一个东西——只不过前者证明了任何事。
+
+改成精确地改判序后**只红那一条**。探针 ①（接线断掉）红 2 条，含真 DSH 那条。
+
+顺带被 `scan` 抓出 4 个未登记的诊断码（`DSH_OVERLAY_*`）——**是 scan 抓的，不是我事先想到的**。
+
+### 验证读数
+
+七道门禁全 PASS；全量 CI **9 阶段全 PASS**，`test` **168 套件 / 4548 用例 / 0 fail**
+（`.ci/prt-257e/`；`product-launcher` 82 → 99 条）。
+
+### ⚠️ 诚实边界
+
+① **补丁层进了组合树，但没证明"生效到能拦住一次工具调用"**——那需要一个真的跑起来、
+带模型与工具调用的部署。
+> 一个"组合树里有这一行"的读数，与一个"这一行真的拦住了东西"的读数，
+> 在 `--dump-config` 的输出里是同一个东西——只不过前者会在某次真实执行里，
+> 第一次发现自己没生效。
+② **补丁层仍不完整，启动自检仍会拒绝**：`pre-execute` 与 `approval-answerer` 两行
+仍是 `module: null`，而且**只能**是——本批实测确认这两个模块的 `default` 都是
+`undefined`（刻意的，它们需要运行期配置），所以**不能**作为补丁行加载。
+它们只能由 `assembleEnforcement()` 在进程内挂载，而那个函数**仍无生产调用方**。
+③ **`bootstrapDshRuntime()` 仍无生产调用方**：本批接的是"补丁层 → DSH 进程"，
+不是"自检 → 注册端口"。因此"强制面未生效时禁止自动执行"**仍未被行使过**。
+④ **没在真实部署上验证**：那次真 DSH 调用用的是隔离 `DSH_HOME` + 空 bundle 的临时
+profile；用户实际在跑的 `web` profile **没被碰过**。
+⑤ `runtime.enforcementOverlay: false` 的部署会安静地少一层强制面——有 warn，但 warn 不是门禁。
+
+**PRT-257 仍是 🟡**：本批把"补丁层从未被交给任何进程"从清单上划掉了，剩下 ②③⑤
+需要**掌控 DSH 进程的启动**，那是 Launcher 与用户配置的边界，不是再加一个模块能解决的。
 
 ## 2026-09-13　PRT-214（五）：员工 agent preset —— agent 平面那一半
 

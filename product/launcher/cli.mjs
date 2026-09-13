@@ -275,6 +275,11 @@ export function launcherOptionsFrom({ argv = [], env = {}, nodePath = process.ex
       // **不在这里补默认值**：补一份就多一处会漂移的副本，而"哪一份生效"
       // 在排查时会成为一个必须回答的问题。
       logPolicy: fromConfig.logPolicy ?? {},
+      // PRT-257：DSH 强制面覆盖层。`undefined` = 配置里没写 → 由
+      // `resolveDshOverlay` 的默认参数落到 `true`（**默认装上**）。
+      // 这里刻意写 `?? true` 而不是留 `undefined`：`createLauncher` 的默认值是
+      // `true`，但把这份默认值显式写在一个地方，读代码的人不必去翻两层默认值。
+      enforcementOverlay: fromConfig.enforcementOverlay ?? true,
       // PRT-705：清理**必须显式要求**，所以这里是 === true 而不是真值判断。
       // 一个"默认会杀进程"的启动路径，与一个会在用户没要求时动手的路径，
       // 在"用户能不能预料到发生了什么"上是同一个东西。

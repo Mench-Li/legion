@@ -115,6 +115,20 @@ export const SCHEMA = defineSchema({
   ],
   nonEnvLiterals: [
 
+    // ── PRT-257 DSH 强制面覆盖层的诊断码 ────────────────────────────────
+    //
+    // 它们是 `product/launcher/dsh-overlay.mjs` 的 `DSH_OVERLAY_CODES` 的值，
+    // 不是配置键：进程不"读"它们，而是把它们放进诊断给用户看。
+    //
+    // ★ 与 PRT-907 那两个不同，这一组**没有**第二道交叉核对
+    //   （runbook 那种"登记表里的码还存不存在"的检查）。所以它们只能靠这里，
+    //   而"漏登记"正是 scan 存在的唯一理由——这四条是被 scan 抓出来的，
+    //   不是我事先想到的。
+    'DSH_OVERLAY_PATCH_FILE_MISSING',
+    'DSH_OVERLAY_PATCH_FILE_NOT_A_FILE',
+    'DSH_OVERLAY_NO_INSTALL_DIR',
+    'DSH_OVERLAY_DISABLED_BY_CONFIG',
+
     // ── PRT-907 支持手册引用的**具名错误码** ────────────────────────────
     //
     // `product/support/runbook.mjs` 的手册正文里引用了这两个错误码，用来把

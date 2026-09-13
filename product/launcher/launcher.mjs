@@ -29,6 +29,11 @@ import { existsSync } from 'node:fs'
 
 import { hasBlockingDiagnostic, layoutDiagnostics } from '../paths.mjs'
 import { entryAbsolutePath, materializeProcessPlan, validateProcessPlan } from '../process-manifest.mjs'
+import {
+  DSH_OVERLAY_PROCESS_KEY,
+  overlayArgsFor,
+  resolveDshOverlay,
+} from './dsh-overlay.mjs'
 import { buildChildEnv, isSecretLikeKey, OS_ESSENTIAL_ENV } from './allowlist.mjs'
 import { checkPorts } from './ports.mjs'
 import { readinessResultToDiagnostic, waitForReadiness } from './readiness.mjs'
@@ -173,6 +178,13 @@ export function createLauncher({
   spawnOptions = {},
   /** 日志 sink 用的 fs（可注入）。 */
   logFs: logFsOption = null,
+  /**
+   * 强制面覆盖层是否装上（PRT-257）。缺省 `true`——见 `config.mjs` 的
+   * `runtime.enforcementOverlay` 与 `dsh-overlay.mjs` 的文件头。
+   */
+  enforcementOverlay = true,
+  /** 覆盖层探测用的 fs（可注入）。`null` = 真实 fs。 */
+  overlayFs: overlayFsOption = null,
   /** 日志策略（PRT-709）。缺省用 `DEFAULT_LOG_POLICY`。 */
   logPolicy = {},
   // ── PRT-705 孤儿进程清理（完整背景见 `run-record.mjs` 的文件头）──
@@ -206,7 +218,26 @@ export function createLauncher({
     if (typeof logger === 'function') logger({ level, message, at: now() })
   }
 
-  const plan = materializeProcessPlan({ layout, ports, runtimeCommand, nodePath })
+  // ── DSH 强制面覆盖层（PRT-257 / PRT-214）─────────────────────────────
+  //
+  // 在 `materializeProcessPlan` **之前**算，因为它的产物要进 `extraArgs`。
+  // 这是补丁层第一次真的被交给一个 DSH 进程——此前那份 YAML 的实际作用范围
+  // 是零个部署（详见 `dsh-overlay.mjs` 的文件头）。
+  //
+  // fs 可注入：判据是"该拦谁、该放谁"，不需要真的读磁盘就能逐条验证。
+  const overlay = resolveDshOverlay({
+    installDir: layout.installDir ?? null,
+    enabled: enforcementOverlay,
+    fs: overlayFsOption ?? null,
+  })
+
+  const plan = materializeProcessPlan({
+    layout, ports, runtimeCommand, nodePath,
+    // `extraArgs` 的语义是"追加在 `runtime.command` 之后"。
+    // `enabled === false` 时 `overlay.args` 是空数组，这里就等价于没接这一层——
+    // 而那件事由 `overlay.diagnostics` 里那条 warn 记着。
+    extraArgs: { [DSH_OVERLAY_PROCESS_KEY]: overlayArgsFor(overlay) },
+  })
 
   /**
    * 受限范围（`include`）。
@@ -225,6 +256,11 @@ export function createLauncher({
 
   const rawPlanDiagnostics = [
     ...layoutDiagnostics(layout),
+    // 强制面覆盖层（PRT-257）。它带 `process: 'runtime'`，于是**自动**参与下面
+    // 那段"被范围排除的进程降级为 warn"的处理：`--include` 不拉 runtime 时，
+    // "没装上强制面"不该阻塞一次本来就不启动 runtime 的启动。
+    // 这一条是白拿的，但前提是诊断里带对了 process。
+    ...overlay.diagnostics,
     // `validateProcessPlan` 已经并入 `plan.diagnostics`，此处**不再**重复拼接：
     // 重复的同一诊断会让「同一问题出现两次」看起来像两个问题，
     // 而诊断列表是要直接展示给用户的。
@@ -564,6 +600,14 @@ export function createLauncher({
   const launcher = {
     plan,
     diagnostics: planDiagnostics,
+    /**
+     * 强制面覆盖层的解析结果（PRT-257）。
+     *
+     * 暴露出来是为了让"到底有没有把 `--patch` 接上"这件事**可被观测**——
+     * 只看 `plan.processes` 里 runtime 的 argv 也能看出来，但那个读数
+     * 混在 `runtime.command` 自己的参数里；分开一份，排查时不必去数逗号。
+     */
+    enforcementOverlay: overlay,
 
     /** 只做检查，不启动任何东西。产品入口在真正启动前调用它。 */
     async preflight() {

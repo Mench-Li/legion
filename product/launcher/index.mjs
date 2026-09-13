@@ -38,3 +38,16 @@ export {
   productStateOf,
   startResultIsBlocking,
 } from './launcher.mjs'
+
+// PRT-257：DSH 强制面覆盖层。`resolveDshOverlay` 是"该不该把 `--patch` 交给
+// runtime"的唯一判定点——运维脚本要单独问这个问题时走这里，不要自己拼路径。
+export {
+  DSH_OVERLAY_CODES,
+  DSH_OVERLAY_FLAG,
+  DSH_OVERLAY_PROCESS_KEY,
+  DSH_OVERLAY_RELPATH,
+  DSH_OVERLAY_VERSION,
+  overlayArgsFor,
+  overlayRelpathOf,
+  resolveDshOverlay,
+} from './dsh-overlay.mjs'

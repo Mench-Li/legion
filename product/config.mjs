@@ -64,6 +64,17 @@ export const KNOWN_CONFIG_KEYS = Object.freeze({
   'launcher.backoffMaxMs': Object.freeze({ type: 'number', doc: '退避上限（ms）' }),
   'components.whiteboard.enabled': Object.freeze({ type: 'boolean', doc: '是否启用可选白板组件' }),
   'runtime.secretRefs': Object.freeze({ type: 'object', doc: '模型密钥的**引用**（值只能是 secretRef 形态，不得是明文）' }),
+  // ── PRT-257 / PRT-214：DSH 强制面覆盖层 ──
+  //
+  // 默认 `true` —— 这一层是**默认必须装上**的，关掉要显式写出来。
+  // 为什么默认是 `true` 而不是 `false`：强制面是产品的**承诺**，
+  // 默认关掉等于"默认承诺不成立"，而我们不会去给每一次启动都加一句
+  // "记得打开强制面"。反过来，关掉是一次决定，决定会被 `warn` 记下来。
+  'runtime.enforcementOverlay': Object.freeze({
+    type: 'boolean',
+    doc: '是否把 Legion 的 DSH 强制面覆盖层（hard floor + permission preset 表）'
+      + '作为 `--patch` 交给 DSH Runtime。默认 true；设为 false 会留下一条 warn 诊断',
+  }),
   // ── PRT-709 日志轮转与磁盘保护 ──
   //
   // 这四个键是**必须**能被用户改的，不是"以后再说"：`DEFAULT_LOG_POLICY` 里的
@@ -354,6 +365,18 @@ export function launcherInputFromConfig(merged, { base = {} } = {}) {
   if (typeof timeout === 'number' && timeout > 0) {
     out.readinessTimeoutMs = timeout
     out.provenance['launcher.readinessTimeoutMs'] = configLayerOf(merged, 'launcher.readinessTimeoutMs')
+  }
+
+  // DSH 强制面覆盖层（PRT-257）。**缺省即 true**——所以这里只在
+  // "配置里明确写了布尔值"时才把它放进 `out`；没写时 `out` 里**没有**这个键，
+  // 由 `resolveDshOverlay` 的默认参数落地。
+  //
+  // 为什么不让这里补一个 `true`：补了就有两份默认值，而"哪一份生效"
+  // 在排查时会成为一个必须回答的问题（同 `logPolicy` 的理由）。
+  const overlay = configValueAt(merged, 'runtime.enforcementOverlay')
+  if (typeof overlay === 'boolean') {
+    out.enforcementOverlay = overlay
+    out.provenance['runtime.enforcementOverlay'] = configLayerOf(merged, 'runtime.enforcementOverlay')
   }
   return out
 }

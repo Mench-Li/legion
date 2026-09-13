@@ -38,6 +38,38 @@
 // ============================================================================
 
 import { createProductionExecutor, EXECUTOR_CODES } from './executor.mjs'
+import { createHubSourceLoader } from './sources-loader.mjs'
+
+/**
+ * 把 hub 的 `get`（`{status, body}` 形状）适配成来源装配器要的 `read`。
+ *
+ * ## 为什么非要有这一层适配，而不是让装配器直接用 `get`
+ *
+ * `createHubSourceLoader` 的 `read` 契约是「**成功返回正文，失败抛错并带上
+ * status**」。而 `get` 是「**总是返回 `{status, body}`**」——它把失败也
+ * 当成一个正常返回值。
+ *
+ * 这个差别看起来只是形状问题，其实是**本装配器唯一要紧的那条纪律的落点**：
+ * 读失败（500/超时）与"真的没有"（404）必须分开。`get` 把两者都变成
+ * 一个带 status 的对象，于是"忘了检查 status"就等价于"把 500 当成 404"——
+ * 而后者会让这次运行静默地少掉一部分世界观。
+ *
+ * 把它收在一个函数里，是为了让"哪里可能把失败当成功"只有一处可查。
+ * 这里**主动抛错**：抛错是"读失败"，返回 `null` 才是"没有"。
+ */
+function readFromGet(get) {
+  return async function read(path) {
+    const res = await get(path)
+    const status = res?.status ?? 0
+    if (status !== 200) {
+      // 带上 `status`：装配器靠它区分 404（问过了，它说没有）与别的失败（没问到）。
+      throw Object.assign(new Error(`${path} 返回 ${status}`), {
+        status, code: res?.body?.code ?? null, path,
+      })
+    }
+    return res?.body ?? null
+  }
+}
 
 /**
  * 已注册的绑定。**一个栈，不是一个槽。**
@@ -164,8 +196,33 @@ export async function productionExecutorProvider(io = {}) {
     ?? clean(env?.[BUDGET_ACTOR_ENV])
     ?? clean(env?.[BUDGET_ACTOR_FALLBACK_ENV])
 
+  // ── ★ 来源装配的数据面（PRT-402~406 / PRT-411）────────────────────────
+  //
+  // 这是**与上面 `budgetActor` 完全同一类**的接缝缺陷，而且它更安静：
+  //
+  //   `createHubContextStage` 的 `loadSources` 默认是 `async () => ({})`，
+  //   而生产路径此前**从不传它**。于是每一次生产运行都会冻结出一份
+  //   **完全合法**的空快照——"这次运行看了 0 个来源"在账本上与
+  //   "我们忘了接线"是同一种记录，而模型会照着一份空上下文跑完。
+  //
+  //     > 一个"零来源"的运行与一个"来源齐备"的运行，
+  //     > 在快照账本上都写着"已冻结"——
+  //     > 只不过前者的模型是在一个我们没告诉它任何事的世界里动手。
+  //
+  // 为什么**无条件**装上（而不是给个开关）：装配器读不到东西时会**抛错**
+  // （见 sources-loader.mjs 的 `READ_FAILED`），而那正是我们要的——
+  // 一次读失败必须让这次 Attempt 失败，而不是静默降级成"上下文更少的运行"。
+  // 用开关关掉它，就等于把那个降级重新变成一个可选项。
+  const sourceLoader = createHubSourceLoader({
+    hub: { read: readFromGet(get) },
+    // 以 lease 上的 scope 为准；这里不给兜底值，缺了会让装配器明确拒绝
+    // （来源放进哪个空间无从判断，而放错空间就是一次越权）。
+    scope: null,
+  })
+
   return createProductionExecutor({
     host, selfCheck, canRead, post, get, ...rest,
+    loadSources: sourceLoader.loadSources,
     ...(budgetActor === null ? {} : { budgetActor }),
   })
 }

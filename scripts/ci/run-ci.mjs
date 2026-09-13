@@ -1562,6 +1562,49 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-411（收尾）：**生产路径**真的把来源装配接上了。
+      //
+      // `createHubContextStage` 的 `loadSources` 默认是 `async () => ({})`，
+      // `createProductionExecutor` 会把它透传下去——但**生产路径从不传它**：
+      //
+      //   > 一个"零来源"的运行与一个"来源齐备"的运行，
+      //   > 在快照账本上都写着"已冻结"——
+      //   > 只不过前者的模型是在一个我们没告诉它任何事的世界里动手。
+      //
+      // 这与 `budgetActor` 是**同一类**接缝缺陷（那一个的教训就写在
+      // executor-binding.mjs 里）。所以判据不是"参数传下去了没有"——
+      // 参数传下去而没人用，与没传，在结果上是一样的：
+      //
+      //   判据是**经过生产入口之后，冻结出来的快照里到底有没有真来源**。
+      //
+      // 因此这一套起**真的 hub**（判据是"库里真的多了一条来源"，
+      // 假 hub 只能测"我们发出了一个形状正确的请求"），并绑定一个最小的
+      // DSH 宿主端口，让 `productionExecutorProvider` 真的把引擎造出来。
+      //
+      // ★ 本组抓到一个**真缺陷**：hub 的 `rowToTask` 给的是 ISO 的
+      //   `createdAt`/`updatedAt`，而 `sources.mjs` 认的是
+      //   `createdAtMs`/`updatedAtMs`——**字段名错配**（`acquiredAt` 其实
+      //   能解析 ISO，错的是键名）。后果不是少一个字段而是整条装配 **400**。
+      //   直到本批，`taskSource`/`goalContextSource`/`publishedSources`
+      //   才第一次被喂真实 hub 对象；在那之前它们只有用例里手搓的输入，
+      //   而那些输入恰好都用了 `*Ms` 的名字。
+      //
+      //     > 一个"用例里一直用对字段名"的模块，
+      //     > 与一个"只认自己发明的时间字段名"的模块，是同一个东西——
+      //     > 只不过前者的用例全绿，而它一接上真实数据就 400。
+      //
+      //   修法是在**边界**换名字（`withEpochMs`），不去放松
+      //   `acquiredAt` 那条"不拿现在当默认值"的拒绝——那条拒绝是对的。
+      //
+      // ⚠️ 诚实边界：生产路径仍要求 DSH 宿主端口已绑定
+      //   （`bindDshRuntime`，PRT-214/215）；没有绑定时照旧
+      //   `EXECUTOR_HOST_PORT_REQUIRED` 且不认领——本批没有放松那条拒绝。
+      //   所以这套用例是**自己绑一个最小端口**来驱动那条路的。
+      label: 'executor-binding-sources（PRT-411 收尾：生产路径接上真来源，而非零来源快照）',
+      files: ['orchestrator/worker/executor-binding-sources.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-713：默认关闭、显式选择加入的脱敏健康心跳。
       //
       // 这一组盯的**不是**"加密了没有"，而是**关了之后还会不会再发一次**。

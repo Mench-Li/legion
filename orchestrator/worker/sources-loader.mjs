@@ -137,6 +137,66 @@ export function epochMsOf(v) {
   return undefined
 }
 
+/**
+ * ★ 把 hub 的时间字段名补成 `sources.mjs` 要的 `*Ms` 名字。
+ *
+ * ## 这是一个**接线才暴露出来的**字段名错配
+ *
+ * `sources.mjs` 的契约是整数毫秒、字段名叫 `createdAtMs` / `updatedAtMs`：
+ *
+ * ```js
+ * acquiredAtMs: acquiredAt(task.updatedAtMs ?? task.createdAtMs, 'Task', nowMs)
+ * ```
+ *
+ * 而 hub 的 `rowToTask` 给的是 `createdAt` / `updatedAt`（ISO 字符串）。
+ * 两边单独看都对——`acquiredAt` 甚至**能**解析 ISO 字符串
+ * （它内部会 `Date.parse`）——错的是**字段名**：`updatedAtMs` 与 `updatedAt`
+ * 是两个不同的键。
+ *
+ * 后果不是"少一个字段"，而是整个装配 **400 失败**：
+ *
+ * ```
+ * Task 缺少取得时间（acquiredAtMs/createdAtMs/updatedAtMs 都不是整数毫秒）。
+ * ```
+ *
+ * 而 `acquiredAt` 拒绝兜底成"现在"是**对的**（那会让同一份输入产生两个
+ * 快照哈希，回放就没法验），所以正确的做法是在**边界**上换名字，
+ * 而不是去放松那条拒绝。
+ *
+ * ## 为什么以前没人发现
+ *
+ * `taskSource` / `goalContextSource` / `publishedSources` 直到本批才第一次
+ * 被喂真实 hub 对象——在那之前它们只有用例里手搓的输入，而那些输入
+ * 恰好都用了 `*Ms` 的名字。
+ *
+ *   > 一个"用例里一直用对字段名"的模块，
+ *   > 与一个"只认自己发明的时间字段名"的模块，是同一个东西——
+ *   > 只不过前者的用例全绿，而它一接上真实数据就 400。
+ *
+ * 只补**缺的**键：调用方已经给了 `*Ms` 时不动它（用例手搓的输入走这条）。
+ */
+export function withEpochMs(obj) {
+  if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) return obj
+  const out = { ...obj }
+  const pick = (...candidates) => {
+    for (const c of candidates) {
+      const t = epochMsOf(c)
+      if (t !== undefined) return t
+    }
+    return undefined
+  }
+  const created = pick(out.createdAtMs, out.createdAt, out.created_at)
+  const updated = pick(out.updatedAtMs, out.updatedAt, out.updated_at)
+  if (created !== undefined) out.createdAtMs = created
+  if (updated !== undefined) out.updatedAtMs = updated
+  return out
+}
+
+/** 数组版的 `withEpochMs`（技能/文档/产物是一整批）。 */
+function mapEpochMs(list) {
+  return Array.isArray(list) ? list.map((x) => withEpochMs(x)) : []
+}
+
 class SourceLoaderError extends Error {
   constructor(code, message, extra = {}) {
     super(message)
@@ -283,8 +343,11 @@ export function createHubSourceLoader({
         // 一条 `missing` 候选（而不是**少一项**）。见 UNSERVED_SOURCE_FAMILIES。
         teamPlan: null,
         employeeManifest: null,
-        goal,
-        task,
+        // ★ 一律过一遍 `withEpochMs`：hub 给的是 ISO 的 `createdAt`/`updatedAt`，
+        // 而 `sources.mjs` 认的是 `createdAtMs`/`updatedAtMs`。见那个函数的说明——
+        // 这是本批**接线才暴露出来**的一处字段名错配，不补会整条装配 400。
+        goal: goal === null ? null : withEpochMs(goal),
+        task: task === null ? null : withEpochMs(task),
         // 兄弟任务不在这里取：它们属于"当前任务之外的东西"，
         // 该由调用方显式决定要不要，而不是由装配器顺手全带上。
         tasks: [],
@@ -292,8 +355,8 @@ export function createHubSourceLoader({
         userFeedback: [],
         upstreamDeliveries: [],
         // 产物**只给引用**（PRT-405）：正文是一个预算决定。
-        artifacts: Array.isArray(task?.artifacts) ? task.artifacts : [],
-        skills,
+        artifacts: mapEpochMs(task?.artifacts),
+        skills: mapEpochMs(skills),
         documents: [],
         workspaceState: null,
       }

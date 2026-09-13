@@ -56,9 +56,12 @@ async function driveToInput(w, value = { apiKey: 'sk-x' }) {
 }
 // ── 步骤定义 ────────────────────────────────────────────────────────────────
 
-test('① 六个步骤顺序固定，且依赖顺序即数组顺序', () => {
+test('① 七个步骤顺序固定，且依赖顺序即数组顺序', () => {
   assert.deepEqual([...WIZARD_STEP_IDS],
-    ['environment', 'initialize', 'start', 'configure-model', 'verify', 'done'])
+    // PRT-707 收尾：`heartbeat-consent` 排在 `verify` **之后**。
+    // 它排在前面的话，用户会以为"要回答完这个才算配好"——
+    // 而这一步与"产品能不能用"毫无关系。
+    ['environment', 'initialize', 'start', 'configure-model', 'verify', 'heartbeat-consent', 'done'])
   assert.equal(Object.isFrozen(WIZARD_STEP_IDS), true)
 })
 

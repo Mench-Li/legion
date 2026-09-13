@@ -46,7 +46,14 @@
 
 /** 六个步骤。**顺序即依赖顺序**：后一步的前提是前一步真的过了。 */
 export const WIZARD_STEP_IDS = Object.freeze([
-  'environment', 'initialize', 'start', 'configure-model', 'verify', 'done',
+  'environment', 'initialize', 'start', 'configure-model', 'verify',
+  // PRT-707 收尾：可选步骤排在 `verify` **之后**。
+  //
+  //   理由：`verify` 的结论是"产品可用了"，而这一步与"产品能不能用"
+  //   毫无关系（心跳默认关闭，与模型、目录、端口都无关）。
+  //   排在它前面的话，用户会以为"要回答完这个才算配好"。
+  'heartbeat-consent',
+  'done',
 ])
 
 /** 向导的诊断码。 */
@@ -61,6 +68,15 @@ export const WIZARD_CODES = Object.freeze({
   STATE_UNREADABLE: 'WIZARD_STATE_UNREADABLE',
   STATE_WRITE_FAILED: 'WIZARD_STATE_WRITE_FAILED',
   UNKNOWN_STEP: 'WIZARD_UNKNOWN_STEP',
+  /**
+   * 可选步骤没拿到回答，按默认继续（PRT-707 收尾）。
+   *
+   * **这是 `info` 级，不是错误**：对可选功能来说，"没回答"是完全正常的。
+   * 把正常的事报成错误，用户会以为自己做错了什么——
+   * 这正是 `configure-model` 的 `needsInputReason` 注释里已经写过的那条道理，
+   * 可选步骤只是它更容易被忘记的位置。
+   */
+  OPT_IN_UNANSWERED: 'WIZARD_OPT_IN_UNANSWERED',
 })
 
 /** 步骤类型。`input` 类必须停下来等用户。 */
@@ -68,6 +84,23 @@ export const STEP_KINDS = Object.freeze({
   AUTOMATIC: 'automatic',
   INPUT: 'input',
   VERIFY: 'verify',
+  /**
+   * 可选项（PRT-707 收尾）。
+   *
+   * 与 `INPUT` 的**唯一**区别是：没拿到回答时它**不阻塞**，而是按默认值继续。
+   *
+   * 为什么必须区分这两种：一个"可选"的能力如果用 `INPUT` 表达，
+   * 用户没回答时向导就会停在那里——于是**默认关闭的东西变成了必须先回答
+   * 才能继续的东西**。而"不回答"恰恰是绝大多数用户对可选功能的回答。
+   *
+   *   > 一个把"可选项"实现成"必答题"的向导，
+   *   > 与一个把可选项默认打开的向导，在用户被推着走这件事上是同一个东西——
+   *   > 只不过前者的用户会以为自己在选择。
+   *
+   * 另一半同样重要：不阻塞**不等于**"当作用户选了不要"。
+   * 没回答与答了"不要"是两件不同的事，见 `heartbeat-consent` 那一步的说明。
+   */
+  OPT_IN: 'opt-in',
 })
 
 /**
@@ -93,10 +126,45 @@ export const WIZARD_STEP_DEFS = Object.freeze({
     // 把它说成错误，用户会以为自己做错了什么。
     needsInputReason: '需要你提供一个模型密钥（它会被存进密钥库，不会写进配置文件）',
     blockingReason: '还没有配置模型：没有模型就无法运行任务',
+    // ★ 逐步的输入判据（PRT-707 收尾）。
+    //
+    // 原来这条判据**写死在 `submit()` 里**（`value.apiKey` 那一句）。
+    // 于是"当前步骤要什么"这件事有两个住处：步骤定义（标题、等待说明）
+    // 与 `submit()` 里的一个分叉。第二个输入步骤出现时，
+    // `submit()` 会拿**第一个步骤**的判据去校验它。
+    //
+    //   > 一条写死在"提交"函数里的输入判据，
+    //   > 与一条写在步骤定义里的输入判据，在一个输入步骤的时候是同一个东西——
+    //   > 只不过前者会在第二个步骤接进来的那天，拿错的判据去拒绝正确的输入。
+    validate: (v) => (typeof v?.apiKey === 'string' && v.apiKey !== '' ? null : '缺少模型密钥'),
   }),
   verify: Object.freeze({
     id: 'verify', kind: STEP_KINDS.VERIFY, title: '确认产品真的可用',
     blockingReason: '产品没有通过实测：现在说"完成"是不诚实的',
+  }),
+  // ── PRT-707 收尾：可选步骤 ────────────────────────────────────────────
+  'heartbeat-consent': Object.freeze({
+    id: 'heartbeat-consent', kind: STEP_KINDS.OPT_IN, title: '健康心跳（可选）',
+    needsInputReason:
+      '如果愿意发送脱敏的运行状态（队列深度、错误率、可用率），请给出你的署名；'
+      + '**不回答也不影响使用**——心跳默认关闭',
+    // 不问时说清"默认是什么"，否则用户会以为自己在等一个答案。
+    unansweredNote:
+      '这一项**没有被问到**：心跳保持**关闭**，不会有任何数据发出去，'
+      + '也不会留下任何同意记录（"没问过"与"用户拒绝了"是两件事）',
+    // 可选步骤**永远不阻塞**，所以这里说的不是"为什么卡着"，而是它的性质。
+    blockingReason: '健康心跳是可选项，不影响产品是否可用',
+    // ★ 判据只在**要开通**时要求署名。
+    //
+    //   拒绝**不需要**署名。要求了的话，"不接受"就比"接受"多一道门槛——
+    //   而那道门槛推着用户往同意那边走。
+    //
+    //     > 一个"拒绝也要先填表"的可选项，
+    //     > 与一个默认打开的可选项，在"用户最后同意了没有"上是同一个结果——
+    //     > 只不过前者的同意看起来像是他自己选的。
+    validate: (v) => (v?.enabled === true
+      ? (typeof v?.who === 'string' && v.who.trim() !== '' ? null : '开通心跳需要署名')
+      : null),
   }),
   done: Object.freeze({
     id: 'done', kind: STEP_KINDS.AUTOMATIC, title: '完成',
@@ -129,6 +197,41 @@ export function createWizard({
   start = null,
   // 需要输入的那一步：拿到 {apiKey, model, baseUrl?} 之后写进密钥库/模型库
   submitModelConfig = null,
+  // ── 可选步骤的动作（PRT-707 收尾）────────────────────────────────────────
+  //
+  // `{ [stepId]: async (value) => ({ok, message}) }`。
+  //
+  // 与 `submitModelConfig` 分开而不是塞进它：那一个的参数形状是"模型密钥"，
+  // 而这一个可能是"同意记录"。把它们合成一个回调，回调里就要按当前步骤
+  // 分叉——而那正是 `submit()` 曾经犯过的错（见那里的说明）。
+  stepActions = {},
+  /**
+   * 要不要**问**那个可选项（PRT-707 收尾）。默认 `false` = 不问。
+   *
+   * ★ 为什么需要这个开关，而不是"可选项永远不阻塞"：
+   *   一个永不阻塞的步骤**永远收不到回答**——`run()` 会一路推进到完成，
+   *   没有地方能 `submit`。
+   *
+   *     > 一个"不阻塞的可选步骤"，与一个"根本不存在这一步"，
+   *     > 在"用户有没有被问过"上是同一个答案——
+   *     > 只不过前者看起来是把选择权交出去了。
+   *
+   *   默认 `false` 是因为：一个**默认去问**的向导会把每次运行都变成
+   *   一次需要人坐在旁边的操作，而大多数运行是重跑、脚本化或无人值守的。
+   *   要问的界面（图形向导、带 `--wizard-consent` 的 CLI）显式打开它。
+   */
+  askOptIn = false,
+  /**
+   * 对可选项的**预先回答**（PRT-707 收尾）。
+   *
+   * `{ [stepId]: value }`。有这一条时，那一步按"问过了、答过了"处理——
+   * 与当场 `submit` 走**完全同一条**路（同样的判据、同样的动作）。
+   *
+   * 存在的理由：CLI 的 `--wizard-consent=<who>` 与图形界面都要能回答它，
+   * 而它们一个在跑之前就知道答案、一个要在界面上停下来。
+   * 两种都归到"一次回答"，只是**谁来答**不同。
+   */
+  presetOptIn = {},
   // "模型是不是**已经**配好了"的核对。**只在返回恰好 `true` 时**才允许跳过输入。
   isModelConfigured = null,
   // **独立观测**：返回 {runtimeState, modelResolved, detail?}
@@ -172,6 +275,13 @@ export function createWizard({
   let current = WIZARD_STEP_IDS[0]
   let finished = false
   const pendingInput = { value: null }
+  /**
+   * 可选步骤的**回答记录**（PRT-707 收尾）。
+   *
+   * 只记"回答过没有、以及选了什么"，不记"默认当成了什么"——
+   * 因为"没回答"本身就是一个必须能被读到的状态，见 `stepOnce` 里那一段。
+   */
+  const optInResults = {}
 
   function note(severity, code, message) {
     const d = Object.freeze({ severity, code, message, at: now() })
@@ -357,6 +467,90 @@ export function createWizard({
       return Object.freeze({ step: current, ok: false, message: '未知步骤' })
     }
 
+    // ── 可选步骤（PRT-707 收尾）─────────────────────────────────────────
+    //
+    // ★ **默认不问，也不阻塞。**
+    //
+    //   这不是偷懒，是一条被量出来的结论：`run()` 会一路推进到完成，
+    //   所以一个**永不阻塞**的步骤**永远收不到回答**——
+    //   没有地方能 `submit`，因为向导从来不停在它上面。
+    //
+    //     > 一个"不阻塞的可选步骤"，与一个"根本不存在这一步"，
+    //     > 在"用户有没有被问过"上是同一个答案——
+    //     > 只不过前者看起来是把选择权交出去了。
+    //
+    //   所以这一步有两种模式，由调用方选：
+    //     · `askOptIn !== true`（默认）⇒ **不问**，直接过去，记 `{asked:false}`
+    //     · `askOptIn === true`      ⇒ 像 INPUT 一样**停下等回答**，
+    //                                  答完记 `{asked:true, answered:true, enabled}`
+    //
+    //   而无论哪一种，**"没问过"都必须是一个能读到的状态**——
+    //   它与"问过了、用户选了不要"是两件不同的事，要修的地方也不同。
+    //
+    //     > 一个把"没问"记成"用户拒绝"的界面，
+    //     > 会让一次界面缺陷看起来像一次用户选择。
+    //
+    //   回答分两种，且**拒绝也是一种回答**（`enabled: false`）：
+    //   拒绝不写任何记录；只有 `enabled: true` 才写同意。
+    if (def.kind === STEP_KINDS.OPT_IN) {
+      // 预先回答（`presetOptIn[stepId]`）与当场回答走**同一条**路：
+      // 它同样是一次"问过了、答过了"。区别只在"谁替用户答的"，
+      // 而那个区别由**调用方**（CLI 的 `--wizard-consent`）在它自己的说明里交代。
+      const preset = Object.prototype.hasOwnProperty.call(presetOptIn, current)
+        ? presetOptIn[current]
+        : null
+      const v = pendingInput.value ?? preset
+      if (v === null || v === undefined) {
+        if (askOptIn !== true) {
+          optInResults[current] = Object.freeze({ asked: false })
+          note('info', WIZARD_CODES.OPT_IN_UNANSWERED, def.unansweredNote)
+          return Object.freeze({
+            step: current, ok: true, skipped: true, asked: false,
+            message: def.unansweredNote,
+          })
+        }
+        // 被要求问了，那就**停下等回答**——此时它等价于 INPUT。
+        note('info', WIZARD_CODES.NEEDS_INPUT, def.needsInputReason)
+        return Object.freeze({
+          step: current, ok: false, needsInput: true,
+          message: def.needsInputReason,
+        })
+      }
+      // 预先回答也要过**同一道**判据：一条没署名的"预先同意"与
+      // 一条没署名的当场同意，在"事后能不能查证"上是同一个东西。
+      const problem = typeof def.validate === 'function' ? def.validate(v) : null
+      if (problem !== null) {
+        const m = `${def.title}：${problem}`
+        note('error', WIZARD_CODES.BAD_INPUT, m)
+        return Object.freeze({ step: current, ok: false, message: m })
+      }
+      const action = stepActions?.[current]
+      if (typeof action !== 'function') {
+        // 拿到回答却没有动作：说成功就等于**谎称问过了**。
+        const m = `${def.title}：这一步没有配置动作`
+        note('error', WIZARD_CODES.STEP_FAILED, m)
+        return Object.freeze({ step: current, ok: false, message: m })
+      }
+      let r = null
+      try {
+        r = await action(v)
+      } catch (e) {
+        const m = `${def.title}没有写成：${String(e?.message ?? e)}`
+        note('error', WIZARD_CODES.STEP_FAILED, m)
+        return Object.freeze({ step: current, ok: false, message: m })
+      }
+      if (r === null || r?.ok !== true) {
+        const m = `${def.title}没有成功：${r?.message ?? '提交动作没有给出正面结论'}`
+        note('error', WIZARD_CODES.STEP_FAILED, m)
+        return Object.freeze({ step: current, ok: false, message: m })
+      }
+      pendingInput.value = null
+      optInResults[current] = Object.freeze({
+        asked: true, answered: true, enabled: v?.enabled === true,
+      })
+      return Object.freeze({ step: current, ok: true, asked: true, answered: true, message: r.message ?? def.title })
+    }
+
     if (def.kind === STEP_KINDS.INPUT) {
       const v = pendingInput.value
       if (v === null || v === undefined) {
@@ -531,10 +725,20 @@ export function createWizard({
      *
      * 只在当前步骤**确实**需要输入时接受——否则会在错误的步骤上静默吞掉
      * 用户的输入，而用户以为自己已经配好了。
+     *
+     * ★ 判据来自**步骤定义**的 `validate`（PRT-707 收尾），不再写死在这里。
+     *
+     *   原来这里硬编码着 `value.apiKey` 那一句。一个步骤的时候看不出问题；
+     *   接进第二个输入步骤（`heartbeat-consent`）的那一天，它会拿
+     *   "缺少模型密钥"去拒绝一个完全正确的同意署名——
+     *   而且被拒绝的人正在做一件**可选**的事，所以他多半会直接放弃。
+     *
+     *     > 一条写死在"提交"函数里的输入判据，
+     *     > 会在第二个输入步骤接进来的那天，拿错的判据去拒绝正确的输入。
      */
     submit(value) {
       const def = WIZARD_STEP_DEFS[current]
-      if (def === undefined || def.kind !== STEP_KINDS.INPUT) {
+      if (def === undefined || (def.kind !== STEP_KINDS.INPUT && def.kind !== STEP_KINDS.OPT_IN)) {
         const m = `当前步骤「${def?.title ?? current}」不需要输入`
         note('error', WIZARD_CODES.BAD_INPUT, m)
         return Object.freeze({ accepted: false, message: m })
@@ -542,8 +746,12 @@ export function createWizard({
       if (value === null || value === undefined) {
         return Object.freeze({ accepted: false, message: '输入为空' })
       }
-      if (typeof value === 'object' && (value.apiKey === null || value.apiKey === undefined || value.apiKey === '')) {
-        return Object.freeze({ accepted: false, message: '缺少模型密钥' })
+      const problem = typeof def.validate === 'function' ? def.validate(value) : null
+      if (problem !== null) {
+        // 判据说不行就**不收下**。收下的话，下一步会以一个看起来配好了、
+        // 其实缺东西的状态往下走，而错误会在更远的地方以另一个面孔出现。
+        note('error', WIZARD_CODES.BAD_INPUT, problem)
+        return Object.freeze({ accepted: false, message: problem, code: WIZARD_CODES.BAD_INPUT })
       }
       pendingInput.value = value
       return Object.freeze({ accepted: true, step: current })
@@ -561,6 +769,10 @@ export function createWizard({
           WIZARD_STEP_IDS.slice(0, Math.max(0, WIZARD_STEP_IDS.indexOf(current))),
         ),
         // 等待输入时给的是"需要什么"，其余情况给的是"为什么还卡着"。
+        //
+        // ★ 可选步骤**不进这一支**：它不会挡住任何东西，
+        //   所以它的 `awaiting` 永远是 `null`。一个把可选步骤也报成
+        //   "在等待"的界面，会让用户以为不回答就走不下去。
         awaiting: def?.kind === STEP_KINDS.INPUT && pendingInput.value === null
           ? def.needsInputReason
           : null,
@@ -568,6 +780,10 @@ export function createWizard({
         // 前提不成立是**第一步之前**的状态，与"卡在第三步"不是一回事，
         // 所以单独报，不混进 `blockingReason`。
         preconditions: lastPrecondition,
+        // ★ 可选步骤的回答情况（PRT-707 收尾）。
+        //   界面要能说"问过了、用户选了不要"与"根本没问过"的区别，
+        //   否则一次界面缺陷会看起来像一次用户选择。
+        optIn: Object.freeze({ ...optInResults }),
         results: Object.freeze([...results]),
       })
     },

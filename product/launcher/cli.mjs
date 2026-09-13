@@ -78,6 +78,12 @@ export const CLI_FLAGS = Object.freeze([
   { name: '--set-log-policy=<k=v,...>', kind: 'value', doc: '改日志策略并写入产品配置文件（PRT-709）。' +
     '键：maxFileBytes / maxTotalBytes / keepFiles / minFreeBytes。' +
     '**先校验再写**；配置坏了则拒绝改写（那会把用户原来的内容永久弄没）' },
+  { name: '--wizard', kind: 'boolean', doc: '跑一次首次运行向导（PRT-707）：环境 → 目录 → 启动 → 配模型 → 实测 →（可选）心跳 → 完成。' +
+    '**只有实测通过才报完成**；最后一步「健康心跳」是**可选项**，不回答也照样走完' },
+  { name: '--wizard-consent=<who>', kind: 'value', doc: '（PRT-707）在向导里**预先**回答「愿意发送健康心跳」，署名为 <who>。' +
+    '不给这个参数 = 没有回答这一项 = 心跳保持关闭，且**不会写下任何同意记录**' },
+  { name: '--wizard-reset', kind: 'boolean', doc: '（PRT-707）丢掉向导的断点进度，从头开始。**不删除任何产品数据**。' +
+    '结论（"某一步已经过了"）本来就不会被恢复，重置的只是位置' },
   { name: '--sweep-orphans', kind: 'boolean', doc: '启动前清理上一次运行留下的进程（PRT-705）。' +
     '**默认只报告不清理**：杀进程不可撤销。清理前会核对映像名，对不上的一律不动' },
   { name: '--allow-unverified-sweep', kind: 'boolean', doc: '与 --sweep-orphans 同用：' +
@@ -341,6 +347,10 @@ function printDiagnostics(diagnostics, write = console.log) {
   }
 }
 
+/** 向导写模型密钥用的引用名。**只有名字，没有值。** */
+const MODEL_KEY_REF = 'model/api-key'
+const MODEL_NAME_REF = 'model/name'
+
 /** 主流程。返回进程退出码（0 成功）。 */
 export async function run({
   argv = process.argv.slice(2), env = process.env, write = console.log, waitForSignal = true,
@@ -385,6 +395,144 @@ export async function run({
   //   是一个**没有任何效果的参数**，而一个没有效果的参数比没有这个参数更坏——
   //   它会让读命令行的人以为"这件事是要显式打开的"。
   const autoDiagnostics = parsed.flags['no-auto-diagnostics'] !== true
+
+  // ── 首次运行向导（PRT-707 收尾）──────────────────────────────────────
+  //
+  // 这一支存在的理由是 PRT-707 正文里那条**最大**的诚实边界：
+  // 「向导是状态机……但**没有任何 UI 或 CLI 子命令在用它**」。
+  //
+  // 接上之后那句话要改写成："**CLI 是终端，所以"不打开终端"这个完成标准
+  // 仍然没有达成**"——但"零调用方"这件事结束了。
+  // 一个只有测试会调用的状态机，它的每一次改动都只能靠读代码来确认。
+  //
+  // ★ 密钥**不从 argv 读**。
+  //   `--wizard-model-key=sk-xxx` 会进 shell 历史、会出现在 `ps` 的输出里、
+  //   会被 CI 的日志系统抄走。所以只从 stdin 读，且**不提供** argv 变体——
+  //   因为那种变体一定会被用，而用它的那一刻泄漏看起来像是用户自己选的。
+  //
+  // ★ `--wizard-consent=<who>` 是 argv 参数，这是**刻意**的：
+  //   它是个署名（"张三"），不是秘密；而把它也塞进 stdin
+  //   会让"我想开通心跳"这件事在脚本化时变得没法表达。
+  if (parsed.flags.wizard === true) {
+    const { runWizardCli, createStdinReader, heartbeatConsentAction, wizardOptionsFrom } =
+      await import('./wizard-cli.mjs')
+    const { createLauncher } = await import('./launcher.mjs')
+
+    const consentWho = typeof parsed.flags['wizard-consent'] === 'string'
+      ? parsed.flags['wizard-consent']
+      : null
+    const lines = []
+    const writeLine = (m) => { lines.push(String(m)); if (!json) write(String(m)) }
+
+    // 先把"预先回答"喂进那一步。**只有给了 `--wizard-consent` 才算回答过。**
+    //
+    //   这条区分是这一支最要紧的地方：不给参数**不等于**"用户选了不要"，
+    //   它是"没有回答这一项"。两者都不写同意记录，但只有后者会被记成
+    //   "问过了"——而"心跳没开"到底是"用户拒绝"还是"向导没问"，
+    //   要修的地方完全不同。
+    //
+    //   ★ 翻译逻辑在 `wizardOptionsFrom` 里，且由用例**直接断言它的产出**。
+    //     写在这里的话，用例只能拿正则匹配源码文本——而把整段删掉、
+    //     只要那几个词还留在注释里，那种断言照样绿。
+    const wizardOptions = wizardOptionsFrom({
+      consentWho, flags: parsed.flags, layout: options.layout,
+    })
+    const stepActions = {
+      'heartbeat-consent': heartbeatConsentAction({ layout: options.layout }),
+    }
+
+    let result = null
+    try {
+      result = await runWizardCli({
+        layout: options.layout,
+        write: writeLine,
+        // 没有 tty 时 `readLine` 会返回 `null`（读不到），而不是空字符串。
+        readLine: createStdinReader(),
+        stepActions,
+        askOptIn: wizardOptions.askOptIn,
+        presetOptIn: wizardOptions.presetOptIn,
+        reset: wizardOptions.reset,
+        wizardDeps: {
+          // 生产依赖：全部指向真实模块，界面不替它造默认值。
+          checkEnvironment: async () => {
+            const { layoutDiagnostics, hasBlockingDiagnostic } = await import('../paths.mjs')
+            const diags = layoutDiagnostics(options.layout)
+            return hasBlockingDiagnostic(diags) === true
+              ? { ok: false, message: `目录布局不满足要求：${diags.filter((d) => d.severity === 'error').map((d) => d.message).join('；')}` }
+              : { ok: true, message: '运行环境满足要求' }
+          },
+          initialize: async () => {
+            // 目录由 `resolveLayout` 解析出来，实际创建由 Launcher 的启动路径负责；
+            // 这一步只确认"写进去不会被拒"。
+            const { assertLayoutUsable } = await import('../paths.mjs')
+            try {
+              assertLayoutUsable(options.layout)
+              return { ok: true, message: '产品目录可用' }
+            } catch (e) {
+              return { ok: false, message: `产品目录不可用：${e instanceof Error ? e.message : e}` }
+            }
+          },
+          start: async () => {
+            const l = createLauncher(options)
+            const r = await l.start()
+            if (r?.ok !== true) {
+              const codes = (r?.diagnostics ?? []).filter((d) => d.severity === 'error').map((d) => d.code)
+              // ★ 不在这里加"启动没有成功：" 这句前缀——向导自己会加
+              //   （`${def.title}没有成功：…`），加两次会变成
+              //   "启动组件没有成功：启动没有成功：ENTRY_UNRESOLVED"。
+              //   一句话里同一个意思出现两遍，读的人会以为发生了两件事。
+              return { ok: false, message: codes.join('；') || '没有给出原因' }
+            }
+            return { ok: true, message: '组件已启动并就绪' }
+          },
+          // 模型密钥的落地：写进**密钥库**（不写配置文件）。
+          submitModelConfig: async (v) => {
+            if (typeof v?.apiKey !== 'string' || v.apiKey === '') {
+              return { ok: false, message: '缺少模型密钥' }
+            }
+            const { openProductSecrets } = await import('../secrets.mjs')
+            // ★ 向导里**必须**要求受保护后端：一个"配好了"却存在明文里的密钥，
+            //   是这一整条流程最坏的结果——用户以为安全，而它只是没报错。
+            const opened = await openProductSecrets({ layout: options.layout, requireProtected: true })
+            if (opened?.ok !== true) {
+              return { ok: false, message: `密钥库不可用：${opened?.message ?? '未知原因'}` }
+            }
+            try {
+              // 引用名不带任何供应商信息之外的东西；**值不进诊断**。
+              await opened.store.put(MODEL_KEY_REF, v.apiKey, { purpose: 'model' })
+              if (typeof v.model === 'string' && v.model !== '') {
+                await opened.store.put(MODEL_NAME_REF, v.model, { purpose: 'model' })
+              }
+            } catch (e) {
+              return { ok: false, message: `密钥没有写进密钥库：${e instanceof Error ? e.message : e}` }
+            }
+            return { ok: true, message: '模型密钥已存进密钥库（没有写进配置文件）' }
+          },
+          isModelConfigured: async () => {
+            const { openProductSecrets } = await import('../secrets.mjs')
+            let opened = null
+            try { opened = await openProductSecrets({ layout: options.layout, requireProtected: true }) } catch { return false }
+            if (opened?.ok !== true) return false
+            try { return opened.store.has(MODEL_KEY_REF) === true } catch { return false }
+          },
+        },
+      })
+    } catch (e) {
+      writeLine(`✖ 向导抛错：${e instanceof Error ? e.message : e}`)
+      return 9
+    }
+
+    if (json) {
+      write(JSON.stringify({
+        ok: result.ok === true, code: result.code ?? null,
+        step: result.result?.blockedStep ?? result.result?.step ?? null,
+        done: result.result?.done === true,
+        message: result.result?.message ?? null,
+        lines,
+      }, null, 2))
+    }
+    return result.ok === true ? 0 : 9
+  }
 
   // ── 日志策略：查看 / 修改（PRT-709 收尾）──────────────────────────────
   //

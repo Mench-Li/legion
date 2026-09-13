@@ -374,6 +374,16 @@ export const SCHEMA = defineSchema({
     // 查看器里那条诊断的**兜底标签**：诊断一般自带 `code`（如 `CONFIG_INVALID_JSON`），
     // 万一没有就用它。不是配置键，也不是环境变量。
     'CONFIG_DIAGNOSTIC',
+    // PRT-707 收尾：**向导的 CLI 层**（product/launcher/wizard-cli.mjs）的具名码。
+    // 同样是**输出**用的码，且必须分开：
+    // `NOT_INTERACTIVE`（读不到输入，停下来）与 `BAD_INPUT`（读到了但不合法）
+    // 是两件不同的事——把它们合成一个，一个没有终端的运行会被报成"输入不合法"。
+    'WIZARDCLI_NOT_INTERACTIVE', 'WIZARDCLI_BAD_INPUT', 'WIZARDCLI_STEP_FAILED',
+    'WIZARDCLI_PRECONDITION_UNMET', 'WIZARDCLI_ALREADY_DONE',
+    // 向导里"可选项没有被问到"这一条。**是 info 级，不是错误**：
+    // 对可选功能来说"没回答"完全正常，而把正常的事报成错误
+    // 会让用户以为自己做错了什么。
+    'WIZARD_OPT_IN_UNANSWERED',
     // 逐候选的去向（诊断包清单的契约，四种，没有第五种）：
     'included', 'excluded', 'skipped', 'oversized',
     // 结构性排除规则的 id。它们是**排除理由的分类名**，不是配置键；

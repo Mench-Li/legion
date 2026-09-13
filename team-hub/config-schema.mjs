@@ -41,6 +41,19 @@ export const SCHEMA = defineSchema({
       default: 15 * 60 * 1000, min: 1000, max: 24 * 60 * 60 * 1000,
       doc: '审批 TTL（ms）：AwaitingApproval 期间 lease 续期的上界，到期自动 deny 并把 Attempt 判为 blocked（§6.4）',
     },
+    // ── PRT-413：精确 tokenizer 的产物目录 ──
+    //
+    // 默认空串 = **没有配置** = 用保守估算器（`kind: conservative-estimate`）。
+    // 这与"配置了一个读不到的目录"是两件事：后者会让装载失败并抛错，
+    // 因为"配了但没用上"与"没配"在快照里长得一样，而前者是运维以为它生效了。
+    //
+    //   > 一个"配置写错了就静默回落到空词表"的装载，
+    //   > 与一个"配置项根本没接线"的装载，在「配置改了有没有用」上是同一个东西——
+    //   > 只不过前者会把一次拼错的路径，记成"这个模型没有精确 tokenizer"。
+    {
+      key: 'tokenizerDir', env: 'LEGION_TOKENIZER_DIR', type: 'path', default: '',
+      doc: 'tokenizer 产物目录（*.tokenizer.json）；留空 = 用保守估算器（§6.5）',
+    },
     { key: 'maxRulesLen', env: 'MAX_RULES_LEN', type: 'int', default: 3000, min: 1, doc: '规范内容长度上限（字符）' },
     // ── 运维脚本 ──
     { key: 'hubUrl', env: 'LEGION_HUB_URL', type: 'string', default: 'http://127.0.0.1:8787', doc: 'seed-pipeline 脚本要写入的 hub 地址' },

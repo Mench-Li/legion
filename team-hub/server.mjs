@@ -144,6 +144,7 @@ import {
 import { planSnapshotRetention } from './context-retention.mjs'
 import { assembleContext, describeAssembly } from '../runtime/context/assembler.mjs'
 import { createConservativeTokenizer, tokenizerForProfile } from '../runtime/context/tokenizer.mjs'
+import { createLazyTokenizerRegistry } from '../runtime/context/tokenizer-registry.mjs'
 // PRT-402~406：把系统里的真实对象归一成候选。**没有它，候选只能由调用方手工拼**——
 // 而"装配器能装配"与"系统里的东西真的装配得进来"是两件事。
 import { SourceError, collectCandidates } from '../runtime/context/sources.mjs'
@@ -178,8 +179,22 @@ const CFG = loadConfig(CONFIG_SCHEMA, { env: process.env, argv: process.argv.sli
  *
  *   > 一个「配置写错了就用默认值继续」的解析，
  *   > 与一个「配置项根本没接线」的解析，在「改了到底有没有用」上是同一个东西。
+ *
+ * ★ PRT-413 修正：这里原本读的是 `CFG.approvalTtlMs`，而解析后的值在
+ *   **`CFG.values`** 下面（`loadConfig` 返回 `{values, sources, errors, ...}`）。
+ *   于是 `CFG.approvalTtlMs` 恒为 `undefined`，而 `resolveApprovalTtlMs`
+ *   把 `undefined` 当成"用默认值"——**这条配置从来没有生效过**。
+ *
+ *   这正是上面那段注释所警告的那种失败，而它偏偏发生在写那段注释的同一个地方：
+ *   `values.dbFile` / `values.port` / `values.token` / `values.host` 都是对的，
+ *   只有这一处漏了 `.values`——**一个在四行正确代码里错了一行的解析**。
+ *
+ *   > 一个"配置声明了、校验了、文档写了、但取值时少了一层"的接线，
+ *   > 与一个"配置完全没接线"的实现，在用户改了配置之后是同一个东西——
+ *   > 只不过前者会让那条配置**看起来是支持的**（它有 schema、有区间校验、
+ *   > 有 `/api/config` 之外的文档），于是没人会去怀疑它。
  */
-const APPROVAL_TTL_MS = resolveApprovalTtlMs(CFG.approvalTtlMs)
+const APPROVAL_TTL_MS = resolveApprovalTtlMs(CFG.values.approvalTtlMs)
 /** 本模块是「被 node 直接运行」还是「被 import」。
  *  为什么必须区分：本文件既作 CLI 入口，也被宿主外壳 `team-hub/src/index.ts`（L70 `import('../server.mjs')`）
  *  与大量契约测试 import。若在 import 路径上 `process.exit(1)`，一处配置错误会**直接杀掉宿主进程/测试进程**，
@@ -486,14 +501,33 @@ let contextStoreInstance = null
 /**
  * 精确 tokenizer 的注册表（PRT-413）。
  *
- * **默认为空**，因为本项目零依赖、拿不到任何供应商的词表。空表不是缺陷，
- * 而是如实：拿不到精确 tokenizer 时用**明确标记的**保守估算器（spec §6.5），
- * 于是 `tokens.kind` 会如实写成 `conservative-estimate`。
+ * 在此之前这里是一个硬编码的空 `Map`，注释写着"有词表时在这里
+ * `set(model, defineExactTokenizer({ ... }))` 即可"——那句话把"精确"永远挂在
+ * **别人来改这段代码**上。
  *
- * 有词表时在这里 `set(model, defineExactTokenizer({ ... }))` 即可——
- * 本表的存在是为了让"精确"有一个**接入点**，而不是让默认值看起来精确。
+ *   > 一个"留了接入点、但没有任何东西能走进去"的注册表，
+ *   > 与一个"根本没有注册表"的实现，在没人提供词表的时候是同一个东西——
+ *   > 只不过前者会让"精确 tokenizer 这条路径"看起来是**通的**。
+ *
+ * 现在它是一个**惰性装载器**：`LEGION_TOKENIZER_DIR` 下的 `*.tokenizer.json`
+ * 在第一次真正需要时读盘、校验、算 sha256 并按 `model` 注册。
+ * 词表仍然必须由使用者提供（零依赖 + 数据许可），但"提供"到"用上"之间
+ * **不再需要改代码**。
+ *
+ * ★ 坏产物**让装载失败而不是被跳过**（见 tokenizer-registry.mjs）。
+ *   跳过会让运维把"这个模型的预算是精确的"当成事实，而它其实在用保守估算。
+ *
+ * ★ 这里**不吞掉**装载异常：`get()` 会把它抛出去，于是那次请求失败、
+ *   栈里有文件路径与原因。一个"读不到词表就悄悄用估算"的实现，
+ *   会让 `tokens.kind` 这一个字段承担全部告知责任——而没人会去看它，
+ *   除非已经超限了。
  */
-const TOKENIZER_REGISTRY = new Map()
+const TOKENIZER_REGISTRY = createLazyTokenizerRegistry(() => CFG.values.tokenizerDir || null)
+
+/** 诊断用：本进程的 tokenizer 注册表状态（`/api/config` 的 runPlane 之外单独一栏）。 */
+function tokenizerRegistryStatus() {
+  return TOKENIZER_REGISTRY.status()
+}
 
 // PRT-402：TeamPlan / EmployeeManifest 的存储。**延迟构造**，与 contextStore 同形——
 // 这样只跑只读路由的进程不会因为建表而写库。
@@ -7146,7 +7180,16 @@ async function handle(req, res, stripPrefix) {
       // `runPlane: true` 是能力发现位（PRT-301 起）：worker 用它判断「这个 hub 支不支持
       // 带 epoch 的运行面」。没有这个位时，一个升级了一半的部署（hub 还是旧的）
       // 会让 worker 收到 404，而 404 的文案无法区分「路由不存在」与「路径拼错」。
-      json(res, 200, { auth: TOKEN !== '', db: DB_FILE, port: PORT, runPlane: true })
+      //
+      // PRT-413 加一栏 `tokenizer`：**"配了目录"与"真的用上了"是两件事**，
+      // 而它们只在 `tokens.kind` 里分得开——那个字段没人会去看，除非已经超限。
+      // 这里把它变成可探测的。★ `status()` **不读盘、不抛错**，
+      // 所以这个免鉴权的探测端点不会因为一个坏词表目录而变慢或 500
+      // （真正的读盘发生在第一次需要 tokenizer 时，失败会在那次请求上抛出）。
+      json(res, 200, {
+        auth: TOKEN !== '', db: DB_FILE, port: PORT, runPlane: true,
+        tokenizer: tokenizerRegistryStatus(),
+      })
       return
     }
 

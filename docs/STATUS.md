@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-13　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **169 套件 / 4683 用例 / 0 fail**（证据 `.ci/prt-408/`）
+**最近一次全量基线**：2026-09-13　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **171 套件 / 4718 用例 / 0 fail**（证据 `.ci/prt-413/`）
 （**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数会少）
 —— 以本文件所在提交为准；证据 `.ci/prt-901/`（PRT-901/902 第三方组件清单、SBOM 与商业分发条件那一批）
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
@@ -3455,6 +3455,170 @@
 > **WAL 切换不受 `busy_timeout` 保护**——二者都会让后到进程在模块加载期崩溃（宿主侧表现为
 > `/team-hub` 路由缺失直到重启）。详见 `docs/CI-TEST-STAGE-evidence/verify-evidence.md`、
 > `docs/DUAL-WRITE-RACE-evidence/verify-evidence.md`。
+
+---
+
+## 2026-09-13　PRT-413 收尾：精确 tokenizer —— 让"接入点"真的能走进去（🟡 → ✅）
+
+> `team-hub/server.mjs` 里有一个 `TOKENIZER_REGISTRY`，注释写着：
+>
+> > **默认为空**……有词表时在这里 `set(model, defineExactTokenizer({ ... }))` 即可——
+> > 本表的存在是为了让"精确"有一个**接入点**。
+>
+> 前半段是对的（零依赖 + 数据许可，词表不能打进仓库），但后半段只有一半：
+>
+>   > 一个"留了接入点、但没有任何东西能走进去"的注册表，
+>   > 与一个"根本没有注册表"的实现，在没人提供词表的时候是同一个东西——
+>   > 只不过前者会让"精确 tokenizer 这条路径"看起来是**通的**。
+>
+> 本批把"走进去"那一段补上，并挖出**四个真缺陷**。
+
+### 交付
+
+- `runtime/context/bpe.mjs`（NEW）：字节级 BPE 编码器——`BPE_ARTIFACT_FIELDS`、
+  `bytesToUnicode`、`toByteLevel`/`fromByteLevel`、`parseTokenizerArtifact`、
+  `createBpeTokenizer`、`exactTokenizerFromArtifact`。
+- `runtime/context/tokenizer-registry.mjs`（NEW）：从 `*.tokenizer.json` 产物装载，
+  `loadTokenizerRegistry(dir)` + `createLazyTokenizerRegistry(getDir)`。
+- `LEGION_TOKENIZER_DIR`（`team-hub/config-schema.mjs`，`type: 'path'`，默认 `''`）。
+- `TOKENIZER_REGISTRY`：**硬编码空 Map** → **惰性装载器**。
+- `GET /api/config` 增 `tokenizer` 一栏（可探测"配了到底生效没有"）。
+- `runtime/context/index.mjs` 导出上述全部；`run-ci.mjs` 注册 2 个新套件。
+- 文档：`docs/superpowers/prt/PRT-413-tokenizer-registry.md`。
+
+### ★ 算法与数据分离（这是"零依赖也能算对"的原因）
+
+字节 ↔ 可打印字符的映射（`bytesToUnicode`）是**算法**，不含任何模型常量，
+所以 `decode(encode(x)) === x` 在零依赖下可测（含 emoji 与控制字符）。
+**词表与 merges 是数据**，必须由使用者提供。因此本仓库**一个 `.tokenizer.json` 都不带**——
+这不是没做完，是零依赖与数据许可共同决定的。
+
+### ★ 切分是**手算可验**的
+
+用例用一份手写小词表钉住 `hello` → `hell` + `o` = **2 个 token**
+（`h e l l o` → 按 rank 合 `h e` → `l l` → `he ll`），并钉住
+**merge 优先级由次序决定**（不是"能合就合"）。
+
+> 一个"用假数据喂出来的 BPE 已验证"，
+> 与一个"从来没验证过切分"的实现，在用例只断言"不抛错""返回正数"时
+> 是同一个东西——只不过前者会让 `count = () => 1` 一路绿到生产。
+
+### 四个真缺陷
+
+**① 未覆盖时必须给上界。** 落在词表外的片段真正的 tokenizer 只会拆得更碎，
+所以"查不到就不计"是**低估**方向，而低估的代价是
+**以为放得下 → 发出去 → 在供应商那一侧失败，而钱已经花了**。
+
+**② `status()` 有副作用，且"失败"被报成"已加载"。** 第一版读盘失败时写
+`loaded = new Map()`，于是 `status().loaded` 报 `true`：
+
+> 一个"失败后把状态标成已加载"的惰性装载器，
+> 与一个"加载成功但词表恰好为空"的装载器，
+> 在 `status()` 这一个读数上是同一个东西——
+> 只不过前者会让"配置写错了"看起来像"这个模型没有精确 tokenizer"。
+
+第一版还把 `getDir()` 放进了 `status()`——一个"报告状态的函数会顺手读一次配置"的实现，
+**会让排障这件事本身产生副作用**。现 `attempted`/`loaded` 分开、失败粘住不重试、`getDir()` 只调一次。
+
+**③ 配置取值少了一层 `.values`（三条里最严重的一条）。** `PRT-615` 的
+`LEGION_APPROVAL_TTL_MS` 读的是 `CFG.approvalTtlMs`，而解析后的值在 **`CFG.values`** 下面——
+恒为 `undefined`，`resolveApprovalTtlMs` 把它当"用默认值"，**这条配置从来没有生效过**。
+而这正是它**自己上方那段注释**所警告的失败：
+
+> 一个"配置声明了、校验了、文档写了、但取值时少了一层"的接线，
+> 与一个"配置完全没接线"的实现，在用户改了配置之后是同一个东西——
+> 只不过前者会让那条配置**看起来是支持的**（有 schema、有区间校验、有文档），
+> 于是没人会去怀疑它。
+
+`values.dbFile`/`values.port`/`values.token`/`values.host` 都是对的，只有这一处漏了。
+
+**④ 精确计数在人看的那句话里写着"约"。** `describeAssembly` 原本对**任何** kind 都写"约"：
+
+> 一个"对精确值也说约"的摘要，
+> 会让 `tokens.kind` 这个**唯一用来区分两者的字段**失去作用，
+> 因为它从来不出现在那句给人看的话里。
+
+现两种 kind 各带名字（`约 N，保守估算` vs `N，精确`），新用例断言精确的那条
+**不含"约"**且**含"精确"**。
+
+### ★ 坏产物一律拒绝，不跳过
+
+`parseTokenizerArtifact` 校验 name / model / evidence / vocab / merges / pattern，
+**失败即抛错**；`pattern` 在**加载期**编译一次。
+**没配置目录**（→ 保守估算，如实）与**配了但读不到**（→ 抛错）是两件事。
+`exactTokenizerFromArtifact` 必须路由过 `defineExactTokenizer`，
+所以"精确需要依据"这条约束无法绕过。
+
+> 一个"坏产物就静默跳过"的装载器，
+> 会让一个**拼错的词表文件名**变成"这个模型没有精确 tokenizer"。
+
+### ★ 顺带修一条**误报的安全规则**
+
+`config.test.mjs` 的「凡 env 名含 TOKEN/SECRET/KEY 必须 sensitive」把
+`LEGION_TOKENIZER_DIR`（词表**目录**，不是凭证）拦下。**没有改宽那条正则**，
+而是登记一条**写明理由**的豁免，并额外断言"进了豁免表就不能同时标 sensitive"：
+
+> 一个"可以随手往里加名字"的豁免表，
+> 与一条"凡含 TOKEN 就必须 sensitive"的规则，在没人往里加东西的时候
+> 是同一个东西——只不过前者会让规则每一次失效都留下一条**写明理由**的记录。
+
+### 验证读数
+
+- `context-bpe` **27 例**、`context-tokenizer-wiring` **8 例**，全绿。
+- 接线用例起**真的 team-hub**、走**真的 HTTP 路由**：同一个
+  `POST /api/context-snapshots/assemble`，`model` 命中注册表 → `kind: exact`
+  且 `tokens = 2`；不命中 → `conservative-estimate`；两者的 `snapshotHash` **不同**；
+  坏目录实测 → 400 `TOKENIZER_BAD_ARTIFACT`。
+- 断验证 **69/69 咬住**（本批新增 16 个：⑥⑤~⑥⑳），0 无效，0 没咬住，源码逐字节还原。
+
+### ★★ 断验证自己崩过一次，而崩法比结果更有价值
+
+给 harness 追加探针时，`prt402-breakverify.mjs` 的**运行段被截掉了**（我写的
+"回退上一次追加"脚本把这个标记之后的全部内容丢掉，而运行段正在其后）。脚本照常退出 0，
+harness 变成"只定义探针、不跑"——跑起来**零输出、退出码 0**：
+
+> 一个"被截掉了运行段、于是什么都不跑"的断验证工具，
+> 与一个"全部探针都咬住"的断验证工具，在只看退出码的时候是同一个东西——
+> 只不过前者**永远绿**。
+
+修法：探针段与运行段**各自独立成文件**，重建是 `head + probes + runner` 三段拼接，
+并断言 runner 段存在；另加 sha256 启动基线校验（不匹配即 `exit 2`，拒绝在残骸上继续）。
+
+同一天里第二次遇到同形的"静默失败"：给 `PRT-PROGRESS.md` 的 PRT-413 行追加说明时，
+脚本先删掉行尾的 ` | | |`、再 `replace(/ \|$/, ...)`——**那时行尾已经没有 `|`**，
+`.replace` 静默什么都没做，脚本却打印"已更新"，整段说明**从来不存在**：
+
+> 一个"没匹配上就什么都不做"的字符串追加，
+> 与一个"确实追加成功了"的追加，在目测的时候是同一个东西——
+> 只不过前者会让一段写好的说明**从来不存在**，而脚本还报成功。
+
+修法是**先断言匹配、再断言结果**；并把这类损伤变成可测的——
+`scripts/prt/progress-check.mjs` 新增 `ROW_NOT_CLOSED` 判据（表格行必须以 `|` 结尾，
+因为 markdown 容忍它、任何门禁都不会拦）。加这条判据时又踩到同形的坑：第一版把
+`problems.push(...)` 写在 `parseProgress` 里，而该变量不在那个作用域，
+于是它**只在真的要报错时**才抛 `ReferenceError`：
+
+> 一个"只在出错时才崩"的校验器，
+> 与一个"能正常报出错误"的校验器，在文件一直没问题的时候是同一个东西——
+> 只不过前者会把"文件坏了"这件事，报成"校验器坏了"。
+
+已改为 `parseProgress` 收集、`checkProgress` 合并，并实测负向有效
+（去掉结尾 `|` → `ROW_NOT_CLOSED` + `exit 1`；补回 → `PASS`）。同时补回
+此前遗留的另外 3 行缺结尾 `|` 的表格行（PRT-214 / PRT-257 / PRT-707）。
+
+### ⚠️ 诚实边界
+
+① 词表**仍必须由使用者提供**——本批做的是"从提供到用上不再需要改代码"，**不是**"自带词表"；
+② **pre-tokenize 正则要由产物给**，`pattern` 缺省时整段按一个 piece 处理，**切分与真实模型不同**；
+③ **BOM 会让产物被拒**（PS 5.1 `Set-Content -Encoding UTF8` 带 BOM），刻意不做兼容：
+不兼容的代价是一条清晰报错，兼容的代价是一类"看起来加载了"的静默差异；
+④ `encode` 对未覆盖片段给 `id: -1` 占位，`ids` 只用于计数与诊断，**不能拿去喂模型**；
+⑤ **注册表没有热重载**（运行中换词表不会被察觉）；
+⑥ **`LEGION_APPROVAL_TTL_MS` 的修正没有新增直接断言**——既有用例走 `resolveApprovalTtlMs`
+而不是走 `CFG`，所以"配置真能改到那个值"这件事**仍未被测到**（本批最该补而未补的一处）；
+⑦ `/api/config` 新增一栏属**平台契约变化**（`baseline-snapshot` 已 `--record` 刷新），
+且该端点免鉴权（P2-2），`tokenizer.dir` 在远程监听时同样可读——
+与既有 `db` 路径同等暴露，口径一致，但确实是一处信息面。
 
 ---
 

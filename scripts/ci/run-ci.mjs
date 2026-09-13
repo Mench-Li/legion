@@ -1907,6 +1907,28 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-413 收尾：字节级 BPE 与产物装载。
+      //
+      // 这一组守的是"**精确**必须真的是精确的"。本仓库拿不到任何供应商词表，
+      // 所以用一份**自己手算得出来**的极小词表验证算法本身：
+      // `hello` → `hell` + `o` = 2 个 token。如果这里只用"不抛错""返回正数"，
+      // 那么这份实现与一个 `count = () => 1` 的桩在用例上是分不开的。
+      label: 'context-bpe（PRT-413：BPE 切分与手算一致 / 未覆盖时给上界 / 坏产物一律拒绝）',
+      files: ['runtime/context/bpe.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      // PRT-413 收尾：**接线**。前一组证明编码器算得对，这一组证明它接上了。
+      //
+      // 「模块写好、用例全绿、没人调用」与「功能不存在」在用户看来完全一样
+      // （本项目在 PRT-504 上栽过一次）。所以这里起一个**真的 team-hub**，
+      // 走真的 HTTP 路由，并在 import 前设 `LEGION_TOKENIZER_DIR` 观察差别：
+      // 没配 → 估算；配了 → **同一个路由**给出 `kind: exact` 且 token 数是那份词表算的。
+      label: 'context-tokenizer-wiring（PRT-413：配了词表就真的用上 / 精确值不许在摘要里说"约"）',
+      files: ['runtime/context/tokenizer-registry-wiring.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-402：TeamPlan 与 EmployeeManifest 的数据面。
       //
       // 它守的是"那两条来源到底存不存在"这件事本身——在此之前的实情是：

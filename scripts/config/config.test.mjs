@@ -415,10 +415,35 @@ test('漂移：三进程的监听/鉴权默认值与代码一致（host/port 语
   assert.equal(BOARD.field('host').default, '127.0.0.1')
 })
 
+/**
+ * 名字里含 TOKEN 但**不是**密钥的字段，逐条登记。
+ *
+ * 为什么不直接把规则改宽（比如排除 TOKENIZER）：那会让规则下一次
+ * 再撞上同类误报时**没有任何记录**，于是下一个人要么再改一次规则、
+ * 要么就把一个真密钥标成 sensitive 了事。
+ *
+ *   > 一个"可以随手往里加名字"的豁免表，
+ *   > 与一条"凡含 TOKEN 就必须 sensitive"的规则，在没人往里加东西的时候
+ *   > 是同一个东西——只不过前者会让规则每一次失效都留下一条**写明理由**的记录。
+ */
+const NOT_SECRET_BY_NAME = new Set([
+  // PRT-413：tokenizer 产物（词表）的**目录**。它是零依赖项目里
+  // 「精确 token 数」的接入点，里面是模型词表，不是任何形式的凭证。
+  // 标成 sensitive 会让它从 `/api/config` 里被抹掉——而运维排查
+  // "我配了词表目录，到底生效了没有"时正是要看它。
+  'team-hub.LEGION_TOKENIZER_DIR',
+])
+
 test('安全：凡 env 名含 TOKEN/SECRET/KEY 的字段都必须标记 sensitive', () => {
   for (const [name, schema] of Object.entries(SCHEMAS)) {
     for (const f of schema.fields) {
       if (/TOKEN|SECRET|PASSWORD|_KEY$/.test(f.env)) {
+        if (NOT_SECRET_BY_NAME.has(`${name}.${f.env}`)) {
+          // 例外必须是**真的不需要脱敏**：标了 sensitive 又进豁免表是自相矛盾的。
+          assert.notEqual(f.sensitive, true,
+            `${name}.${f.env} 同时出现在豁免表里并被标成 sensitive——两者只能有一个`)
+          continue
+        }
         assert.equal(f.sensitive, true, `${name}.${f.env} 看起来是密钥但未标记 sensitive（会明文进摘要）`)
       }
     }

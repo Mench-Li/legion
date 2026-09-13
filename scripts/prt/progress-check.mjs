@@ -45,6 +45,17 @@ export const STATUS_MARKS = Object.freeze([
 export function parseProgress(text) {
   const lines = text.split(/\r?\n/)
   const phases = []
+  // ★ 行形状问题**在这里收集、由调用方合并**——不能直接往 `checkProgress`
+  //   里的 `problems` 推：那个变量不在本函数的词法作用域里。
+  //
+  //   第一版就是这么写的（`problems.push(...)`），于是它**只在真的要报错时**
+  //   才抛 `ReferenceError: problems is not defined`——文件正常时那条分支
+  //   根本不执行，所以自检一直是绿的，直到有人第一次真的写坏一行表格。
+  //
+  //     > 一个"只在出错时才崩"的校验器，
+  //     > 与一个"能正常报出错误"的校验器，在文件一直没问题的时候是同一个东西——
+  //     > 只不过前者会把"文件坏了"这件事，报成"校验器坏了"。
+  const rowProblems = []
   let current = null
   let inSummary = false
 
@@ -74,6 +85,30 @@ export function parseProgress(text) {
 
     // 任务行：`| PRT-xxx 标题 | 状态 | 证据 |`
     if (!line.startsWith('|')) continue
+
+    // ★ 表格行必须**闭合**（以 `|` 结尾）。
+    //
+    //   markdown 容忍缺结尾竖线的行，所以这种损伤不会被任何渲染器报错，
+    //   而它意味着这一行的**最后一格边界**与别的行不同。一旦有人按 `|` 切分
+    //   读这张表（本函数就是），最后一格就会被读成"后面还有内容"。
+    //
+    //   > 一个"少了结尾竖线"的表格行，
+    //   > 与一个"内容确实少了一格"的表格行，在没有校验器的时候是同一个东西——
+    //   > 只不过前者会在有人写解析器的那一天，把最后一格的边界读错。
+    //
+    //   这条判据是被一次真实事故加上的：给 PRT-413 追加说明的脚本先把行尾的
+    //   ` | | |` 当成"旧尾句"删掉，再 `replace(/ \|$/, ADD + ' |')`——
+    //   而那时行尾已经没有 `|`，`.replace` **静默什么都没做**，脚本却打印了
+    //   "已更新"。整段写好的说明**从来不存在**，而文件通过了当时所有门禁。
+    if (!line.endsWith('|')) {
+      rowProblems.push({
+        kind: 'ROW_NOT_CLOSED',
+        message: `第 ${i + 1} 行的表格行没有以 \`|\` 结尾（最后一格的边界与别的行不同，`
+          + '任何按 `|` 切分的读取都会读错它）',
+        line: i + 1,
+      })
+    }
+
     const cells = line.split('|').map((c) => c.trim())
     // cells[0] 是首个 `|` 之前的部分（空串），因此字段从 1 开始
     const idCell = cells[1] ?? ''
@@ -92,7 +127,7 @@ export function parseProgress(text) {
     })
   }
 
-  return { phases, lines }
+  return { phases, lines, rowProblems }
 }
 
 /**
@@ -136,9 +171,9 @@ export function tally(phase) {
 
 /** 跑一次自检，返回问题清单（空数组 = 一致）。 */
 export function checkProgress(text) {
-  const { phases, lines } = parseProgress(text)
+  const { phases, lines, rowProblems } = parseProgress(text)
   const summary = parseSummary(lines)
-  const problems = []
+  const problems = [...rowProblems]
 
   if (phases.length === 0) problems.push({ kind: 'NO_PHASES', message: '没有解析到任何阶段小节：文件结构可能变了，自检失去意义' })
 

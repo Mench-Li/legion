@@ -16,3 +16,28 @@ export {
   assembleContext,
   describeAssembly,
 } from './assembler.mjs'
+
+// PRT-408：来源清单
+export {
+  INVENTORY_OUTCOMES,
+  createSourceInventory,
+  createSourceInventoryEntry,
+} from '../contracts/context.mjs'
+
+// PRT-413：精确 tokenizer 的**接入点**（词表由使用者提供，见 tokenizer-registry.mjs）
+export {
+  BPE_ARTIFACT_FIELDS,
+  bytesToUnicode,
+  createBpeTokenizer,
+  exactTokenizerFromArtifact,
+  fromByteLevel,
+  parseTokenizerArtifact,
+  toByteLevel,
+} from './bpe.mjs'
+export {
+  TOKENIZER_ARTIFACT_SUFFIX,
+  TOKENIZER_LOAD_ERRORS,
+  TokenizerLoadError,
+  createLazyTokenizerRegistry,
+  loadTokenizerRegistry,
+} from './tokenizer-registry.mjs'

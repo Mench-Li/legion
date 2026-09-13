@@ -499,8 +499,23 @@ export function assembleContext(input) {
 /** 装配结果的摘要（给界面/审计用，只读）。 */
 export function describeAssembly(snapshot) {
   if (snapshot === null || typeof snapshot !== 'object') throw new TypeError('describeAssembly 需要快照')
-  const parts = [`包含 ${snapshot.sources.length} 个来源（约 ${snapshot.tokens.tokens} token`]
-  parts.push(snapshot.tokens.kind === TOKEN_ESTIMATOR_KINDS.CONSERVATIVE_ESTIMATE ? '，保守估算）' : '）')
+  // ★ "约"只该在**估算**时出现。
+  //
+  //   在此之前这一句对**任何** kind 都写"约"（`（约 2 token）`），
+  //   于是接入精确 tokenizer（PRT-413）之后，一个精确计数在用户唯一会读到的那句话里
+  //   仍然是"约"。
+  //
+  //   > 一个"对精确值也说约"的摘要，
+  //   > 与一个"对估算值也说约"的摘要，在两者都写着约的时候是同一个东西——
+  //   > 只不过前者会让 `tokens.kind` 这个**唯一用来区分两者的字段**失去作用，
+  //   > 因为它从来不出现在那句给人看的话里。
+  //
+  //   两种 kind 各自带上自己的名字，于是这句话本身就说清了可信度。
+  const estimated = snapshot.tokens.kind === TOKEN_ESTIMATOR_KINDS.CONSERVATIVE_ESTIMATE
+  const parts = [
+    `包含 ${snapshot.sources.length} 个来源（${estimated ? '约 ' : ''}${snapshot.tokens.tokens} token`,
+  ]
+  parts.push(estimated ? '，保守估算）' : '，精确）')
   if (snapshot.truncations.length > 0) parts.push(`，其中 ${snapshot.truncations.length} 个被截断`)
   // 脱敏**不是**排除：被脱敏的来源仍在 `sources[]` 里，所以这里先于排除说它。
   // 说成"排除"会让用户以为那份文档没进去——而它进去了，只是正文变了。

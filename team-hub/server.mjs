@@ -126,6 +126,8 @@ import { createContextStore } from './context-store.mjs'
 import {
   buildSnapshotExport, verifySnapshotExport, ContextExportError, CONTEXT_EXPORT_CODES,
 } from './context-export.mjs'
+// PRT-409 收尾：快照保留策略（时间/容量判据 + 墓碑）。
+import { planSnapshotRetention } from './context-retention.mjs'
 import { assembleContext, describeAssembly } from '../runtime/context/assembler.mjs'
 import { createConservativeTokenizer, tokenizerForProfile } from '../runtime/context/tokenizer.mjs'
 // PRT-402~406：把系统里的真实对象归一成候选。**没有它，候选只能由调用方手工拼**——
@@ -4242,6 +4244,142 @@ async function handle(req, res, stripPrefix) {
       json(res, 200, { ok: true, snapshots: items, count: contextStore().count(), serverTimeMs: Date.now() })
       return
     }
+    // ── 快照保留策略：**先看计划，再决定清不清**（PRT-409 收尾，spec line 748） ──
+    //
+    // 这条是**只读**的：它算一份计划，什么都不删。
+    // 把"看计划"与"执行"拆成两条路由，是因为清理证据是不可撤回的，
+    // 而一个"调用即删除"的接口没有让人反悔的地方。
+    if (req.method === 'GET' && path === '/api/context-snapshots/retention') {
+      const q = url.searchParams
+      // 两个参数都**必须显式给**（值可以是 `null` 表示不设上限）。
+      // 不给就用默认值会让"我这次想不设上限"与"我忘了传"变成同一个请求。
+      const ageRaw = q.get('maxAgeDays')
+      const bytesRaw = q.get('maxBytes')
+      if (ageRaw === null || bytesRaw === null) {
+        json(res, 400, {
+          ok: false, code: 'RETENTION_POLICY_REQUIRED',
+          error: '必须显式给出 maxAgeDays 与 maxBytes（不设上限写 null）：'
+            + '"这次不设上限"与"我忘了传"必须能区分——后者会让一次查询悄悄变成一次全清',
+          serverTimeMs: Date.now(),
+        })
+        return
+      }
+      const policy = {
+        maxAgeDays: ageRaw === 'null' ? null : Number(ageRaw),
+        maxBytes: bytesRaw === 'null' ? null : Number(bytesRaw),
+      }
+      if ((policy.maxAgeDays !== null && !(Number.isInteger(policy.maxAgeDays) && policy.maxAgeDays > 0))
+        || (policy.maxBytes !== null && !(Number.isInteger(policy.maxBytes) && policy.maxBytes > 0))) {
+        json(res, 400, {
+          ok: false, code: 'RETENTION_POLICY_INVALID',
+          error: `maxAgeDays/maxBytes 只能是正整数或 null，收到 ${JSON.stringify(policy)}`,
+          serverTimeMs: Date.now(),
+        })
+        return
+      }
+      // 仍在跑的 Run 的 id 由调用方给：hub 的 **Run 状态**是 run-store 的事，
+      // 快照账本不知道"谁还在跑"。这里不猜、不高估——猜错的方向是删掉活着的证据。
+      const activeRunIds = q.getAll('activeRunId')
+      const plan = planSnapshotRetention({
+        rows: contextStore().retentionRows(), policy, nowMs: Date.now(), activeRunIds,
+      })
+      json(res, 200, {
+        ok: true,
+        // 只回计划，不回正文：预览一份计划不需要看到证据内容。
+        policy,
+        usage: plan.usage,
+        cap: plan.cap,
+        purge: plan.purge,
+        findings: plan.findings,
+        keepCount: plan.keep.length,
+        versions: { retention: plan.version },
+        serverTimeMs: Date.now(),
+      })
+      return
+    }
+    // ── 执行清理。**必须显式 `dryRun:false`**，且必须给 actor 与 reason ──
+    //
+    // 校验失败一律**抛**（带 statusCode + code），不是 `return {ok:false}`：
+    // `handleRun` 会把回调的返回值展开成 **HTTP 200**，
+    // 于是"缺 actor"会变成一次成功的响应——调用方以为清理发生了。
+    if (req.method === 'POST' && path === '/api/context-snapshots/purge') {
+      await handleRun(req, res, (body) => {
+        const bad = (code, message) => Object.assign(new Error(message), { statusCode: 400, code })
+        // `dryRun` 没有默认值。一个"没传就真的删了"的清理接口，
+        // 与一个"手滑就删掉审计证据"的清理接口，是同一个东西——
+        // 而 `dryRun` 默认 `true` 也好不到哪去：它会让调用方以为自己删了，
+        // 于是真正该删的时候删不掉，而报错里没有一个字解释为什么。
+        if (typeof body.dryRun !== 'boolean') {
+          throw bad('RETENTION_DRYRUN_REQUIRED',
+            '必须显式给出布尔 dryRun。不给默认值：'
+            + '"没传就是预演"会让真的清理静默失效，"没传就是执行"会让一次查询删掉证据')
+        }
+        if (typeof body.actor !== 'string' || body.actor.trim() === '') {
+          throw bad('RETENTION_ACTOR_REQUIRED', '必须给出 actor：清掉审计证据必须能定位到人')
+        }
+        if (typeof body.reason !== 'string' || body.reason.trim() === '') {
+          throw bad('RETENTION_REASON_REQUIRED', '必须给出 reason：墓碑要能回答"以什么理由清的"')
+        }
+        const policy = body.policy ?? {}
+        if (!Object.hasOwn(policy, 'maxAgeDays') || !Object.hasOwn(policy, 'maxBytes')) {
+          throw bad('RETENTION_POLICY_REQUIRED',
+            '策略必须显式给出 maxAgeDays 与 maxBytes（不设上限写 null）')
+        }
+        const nowMs = Number.isInteger(body.nowMs) ? body.nowMs : Date.now()
+        const plan = planSnapshotRetention({
+          rows: contextStore().retentionRows(),
+          policy,
+          nowMs,
+          activeRunIds: Array.isArray(body.activeRunIds) ? body.activeRunIds : [],
+        })
+        if (body.dryRun === true) {
+          // 预演**什么都不做**，包括不写墓碑——预演不是一次"差点发生的事故"。
+          return {
+            dryRun: true,
+            wouldPurge: plan.purge.length,
+            wouldFreeBytes: plan.usage.purgeBytes,
+            purge: plan.purge,
+            findings: plan.findings,
+            usage: plan.usage,
+            cap: plan.cap,
+          }
+        }
+        if (plan.purge.length === 0) {
+          return { dryRun: false, purged: 0, note: '没有可清理的快照', findings: plan.findings }
+        }
+        // 一次一个 attemptId，各自一个事务。**不做一次大事务**：
+        // 中途失败时要能说清"已经清了哪几份"，而一个回滚掉的大事务
+        // 会把"清了一半"与"什么都没清"变成同一个结果。
+        const purged = []
+        for (const e of plan.purge) {
+          const r = contextStore().purge(e.attemptId, {
+            reason: body.reason.trim(), actor: body.actor.trim(), nowMs,
+          })
+          purged.push({ attemptId: e.attemptId, bytes: e.bytes, alreadyPurged: r.alreadyPurged })
+        }
+        return {
+          dryRun: false,
+          purged: purged.length,
+          freedBytes: purged.reduce((a, e) => a + e.bytes, 0),
+          attempted: plan.purge.length,
+          findings: plan.findings,
+          counts: contextStore().counts(),
+        }
+      })
+      return
+    }
+    // ── 墓碑清单（"丢过什么、谁清的、为什么"） ──
+    if (req.method === 'GET' && path === '/api/context-snapshots/tombstones') {
+      const limitRaw = url.searchParams.get('limit')
+      const limit = limitRaw === null ? 100 : Math.min(Math.max(Number(limitRaw) || 0, 1), 500)
+      json(res, 200, {
+        ok: true,
+        tombstones: contextStore().listTombstones({ limit }),
+        counts: contextStore().counts(),
+        serverTimeMs: Date.now(),
+      })
+      return
+    }
     // 服务端装配（PRT-407）。这条路由的存在有两层意义：
     //   ① 装配器有了**真实调用方**（此前它只有用例）；
     //   ② 装配与持久化在同一个请求里完成，于是"冻结在 Running 之前"
@@ -4494,6 +4632,31 @@ async function handle(req, res, stripPrefix) {
       }
       const found = contextStore().get(attemptId)
       if (found === null) {
+        // ★ 三种状态，不是两种。
+        //
+        //   `get()` 的 `null` 把两件完全不同的事压成了同一个：
+        //   "从来没存在过"与"被保留策略清掉了"。
+        //
+        //     > 一份"被策略清掉"的快照，与一份"从来没有过"的快照，
+        //     > 在只看 `get()` 的代码里是同一个 `null`——
+        //     > 只不过前者意味着"这次的输入我们已经丢掉了"，
+        //     > 而后者意味着"你查错了 id"。
+        //
+        //   对一个以"可还原"为卖点的产品，这两件事的差别就是全部意义。
+        //   所以这里给 **410 Gone**（它曾经在，现在不在了）而不是 404，
+        //   并把墓碑一并返回——审计要说得出"丢了什么、谁清的、为什么"。
+        const spot = contextStore().locate(attemptId)
+        if (spot.kind === 'purged') {
+          json(res, 410, {
+            ok: false,
+            code: 'CONTEXT_SNAPSHOT_PURGED',
+            error: `快照 ${attemptId} 存在过，已被保留策略清理（${spot.tombstone.reason}）——`
+              + '正文没有了，但这次运行确实发生过',
+            tombstone: spot.tombstone,
+            serverTimeMs: Date.now(),
+          })
+          return
+        }
         json(res, 404, { ok: false, code: 'CONTEXT_NOT_FOUND', error: `没有这份上下文快照：${attemptId}` })
         return
       }

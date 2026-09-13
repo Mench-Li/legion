@@ -138,8 +138,47 @@ describe('② 不可变：同一次运行的上下文不可能有两个版本', 
     assert.equal(store.count(), 1)
   })
 
-  test('没有 update/delete 这类入口（不可变不只是"我们不会去改"）', () => {
-    assert.deepEqual(Object.keys(store).sort(), ['count', 'get', 'list', 'record', 'verify'])
+  test('没有 update 这类入口；唯一的删除必须**留下墓碑**', () => {
+    // ★ 这条用例的分类在 PRT-409 收尾时被**收紧**了，而不是被放宽。
+    //
+    //   原文是 `deepEqual(Object.keys(store), ['count','get','list','record','verify'])`，
+    //   钉的是"整个 store 里没有任何删除入口"。加保留策略时它**变红了**——
+    //   它在做自己该做的事。但"把它加进白名单"是最坏的一种应对：
+    //
+    //      > 一条"凡是新加的入口都补进白名单"的检查，
+    //      > 与一条"从来没有检查过"的检查，在源码上长得一模一样——
+    //      > 只不过前者的白名单看起来是有人维护的。
+    //
+    //   所以这里不是放宽，是把原来的**一个笼统断言**拆成三条更锋利的：
+    //     ① 读面与写面照旧逐一列出——新加一个入口必须有人来这里决定它属于哪一类；
+    //     ② **没有 update**：任何入口都不能就地改写一份已存在的快照的内容；
+    //     ③ 唯一的删除是 `purge`，而它**必须留墓碑**——
+    //        否则"删掉"就退化成"从来没存在过"，那正是全模块在防的事。
+    const readOnly = ['count', 'counts', 'get', 'list', 'listTombstones', 'locate',
+      'retentionRows', 'tombstone', 'verify']
+    const writers = ['record']
+    const removers = ['purge']
+    assert.deepEqual(Object.keys(store).sort(), [...readOnly, ...writers, ...removers].sort(),
+      '新增入口必须在这里被归类——不做分类就等于没有检查')
+
+    // ② 没有任何名字暗示"就地改写"。这一条是**形状**上的：
+    //    `update`/`set`/`patch`/`replace`/`overwrite` 一个都不许有。
+    //    `record` 是唯一写面，而它对同一 attemptId 的**不同**内容给 409（上面那条用例钉着）。
+    for (const name of Object.keys(store)) {
+      assert.doesNotMatch(name, /^(update|set|patch|replace|overwrite|put|edit|modify)$/i,
+        `store 不该有就地改写的入口：${name}`)
+    }
+
+    // ③ 唯一的删除入口必须留痕。这里用一个**行为**断言而不是再读一遍名单：
+    //    删掉之后，`locate` 必须还能说出"它存在过"。
+    const s = snap()
+    store.record(s, { scope: 'default' })
+    assert.equal(store.locate('att-1').kind, 'live')
+    store.purge('att-1', { reason: '不可变性用例', actor: 'tester', nowMs: Date.now() })
+    assert.equal(store.locate('att-1').kind, 'purged',
+      '★ 唯一的删除入口必须留下墓碑——'
+      + '一个"删了就查不到"的实现与一个"从来没存在过"的实现在读面上一模一样')
+    assert.notEqual(store.tombstone('att-1'), null)
   })
 
   test('**幂等重写也要写审计**（否则那次运行的痕迹永远缺失）', () => {

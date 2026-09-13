@@ -212,6 +212,25 @@ export const SCHEMA = defineSchema({
     'CONTEXT_EXPORT_MALFORMED_DOC', 'CONTEXT_EXPORT_SNAPSHOT_TAMPERED',
     'CONTEXT_EXPORT_ENVELOPE_TAMPERED', 'CONTEXT_EXPORT_STORE_HASH_MISMATCH',
     'EXPORT_BY_REQUIRED', 'EXPORT_AT_REQUIRED',
+    // PRT-409 收尾：快照**保留策略**与墓碑（team-hub/context-retention.mjs + 清理路由）。
+    //
+    //   · CONTEXT_SNAPSHOT_PURGED —— 这份快照**存在过**，被保留策略清掉了。
+    //     **不是** CONTEXT_NOT_FOUND：后者是"你查错了 id"。
+    //     一个借用 404 的实现会让一次静默的数据丢失伪装成一次输错。
+    //     它是 410 Gone（它曾经在，现在不在了），并带上墓碑。
+    //   · CONTEXT_PURGE_BAD_REQUEST —— 清理请求本身不合法（store 层）。
+    //   · RETENTION_POLICY_REQUIRED / _INVALID —— 路由层的策略校验。
+    //     两个码分开：前者是"你没给"，后者是"你给的不对"，
+    //     而调用方对这两件事的下一步动作完全不同（补参数 vs 改参数）。
+    //     `maxAgeDays`/`maxBytes` 必须**显式**给出（不设上限写 null）：
+    //     默认一个值会让"我这次想不设上限"与"我忘了传"变成同一个请求。
+    //   · RETENTION_DRYRUN_REQUIRED —— 没有默认值。默认 true 会让真的清理
+    //     静默失效（调用方以为删了），默认 false 会让一次查询删掉审计证据。
+    //   · RETENTION_ACTOR_REQUIRED / RETENTION_REASON_REQUIRED —— 清掉审计证据
+    //     必须能定位到人、说得出理由。两者分开，理由同 POLICY_REQUIRED/_INVALID。
+    'CONTEXT_SNAPSHOT_PURGED', 'CONTEXT_PURGE_BAD_REQUEST',
+    'RETENTION_POLICY_REQUIRED', 'RETENTION_POLICY_INVALID',
+    'RETENTION_DRYRUN_REQUIRED', 'RETENTION_ACTOR_REQUIRED', 'RETENTION_REASON_REQUIRED',
     // spec §6.7 凭证管理的**写**一半（team-hub/secret-admin.mjs）。
     //
     // 在它之前，`security/secrets/store.mjs` 的 put/rotate/remove 在整个仓库里

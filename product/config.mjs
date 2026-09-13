@@ -361,6 +361,45 @@ export function launcherInputFromConfig(merged, { base = {} } = {}) {
   }
   if (Object.keys(logPolicy).length > 0) out.logPolicy = logPolicy
 
+  // 健康心跳（PRT-713 收尾）。用户此前**无法通过配置文件开启心跳**——
+  // `heartbeat.*` 在仓库里一个键都没有，于是那条任务唯一对外可见的入口
+  // 是一行代码注释。
+  //
+  // ★ 这里**不补默认值**（与 `enforcementOverlay` 同一条理由）：
+  //   补了就有两份默认值（`DEFAULT_HEARTBEAT_POLICY` 与这里），
+  //   而"哪一份生效"会成为一个必须回答的排查问题。
+  //   没写 → `out` 里没有这个键 → 由 `DEFAULT_HEARTBEAT_POLICY` 落地（enabled:false）。
+  //
+  // ★ `consent` **刻意不从配置文件读**：同意是"谁在什么时候同意了"这件事的
+  //   **记录**，它必须来自用户在某一个具体时刻做的一个动作，而不是一份
+  //   可以随手编辑、可以随配置文件一起被复制到别人机器上的 YAML。
+  //   一个"跟着配置文件走的同意"，在一台台机器上会变成"这台机器也同意了"，
+  //   而**没有人在那台机器上同意过**。
+  const hb = {}
+  const hbEnabled = configValueAt(merged, 'heartbeat.enabled')
+  if (typeof hbEnabled === 'boolean') {
+    hb.enabled = hbEnabled
+    out.provenance['heartbeat.enabled'] = configLayerOf(merged, 'heartbeat.enabled')
+  }
+  const hbEndpoint = configValueAt(merged, 'heartbeat.endpoint')
+  if (typeof hbEndpoint === 'string' && hbEndpoint.trim() !== '') {
+    hb.endpoint = hbEndpoint.trim()
+    out.provenance['heartbeat.endpoint'] = configLayerOf(merged, 'heartbeat.endpoint')
+  }
+  for (const [path, key] of [
+    ['heartbeat.intervalMs', 'intervalMs'],
+    ['heartbeat.timeoutMs', 'timeoutMs'],
+  ]) {
+    const v = configValueAt(merged, path)
+    // 与 `validateHeartbeatPolicy` 同一套判据（正整数）。不合法的值**不进**
+    // hb，由策略校验去报 `HEARTBEAT_BAD_POLICY`——两处各报一次比
+    // "这里静默纠正、那里看到的是纠正后的值"要好。
+    if (!Number.isInteger(v) || v <= 0) continue
+    hb[key] = v
+    out.provenance[path] = configLayerOf(merged, path)
+  }
+  if (Object.keys(hb).length > 0) out.heartbeatPolicy = hb
+
   const timeout = configValueAt(merged, 'launcher.readinessTimeoutMs')
   if (typeof timeout === 'number' && timeout > 0) {
     out.readinessTimeoutMs = timeout

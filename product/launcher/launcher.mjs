@@ -39,6 +39,7 @@ import { checkPorts } from './ports.mjs'
 import { readinessResultToDiagnostic, waitForReadiness } from './readiness.mjs'
 import { createSupervisor, defaultKillTree } from './supervisor.mjs'
 import { createLogSink } from '../logging/sink.mjs'
+import { createLauncherHeartbeat } from './heartbeat-wiring.mjs'
 import {
   buildRunRecord,
   classifyRecordedPids,
@@ -187,6 +188,19 @@ export function createLauncher({
   overlayFs: overlayFsOption = null,
   /** 日志策略（PRT-709）。缺省用 `DEFAULT_LOG_POLICY`。 */
   logPolicy = {},
+  // ── PRT-713 收尾：健康心跳 ──
+  //
+  // 默认 `{}` → `enabled` 不是 true → 不装配、不排定时器、不建 transport。
+  // **默认关**这件事在两处各判一次（这里与 `wireHeartbeat`），
+  // 但两处的判据是同一条：`enabled !== true`。
+  heartbeatPolicy = {},
+  /** 装配心跳的注入点。默认走 `createLauncherHeartbeat`（真实的 https 通道）。 */
+  heartbeatFactory = null,
+  /** 心跳配置里的 `consent` 必须是**这台机器上的同意记录**，不是配置项。 */
+  heartbeatConsentReader = null,
+  /** 心跳定时器可注入（与 `logRotateIntervalMs` 同一个理由：`unref` 要可观测）。 */
+  heartbeatSetTimer = undefined,
+  heartbeatClearTimer = undefined,
   // ── PRT-705 孤儿进程清理（完整背景见 `run-record.mjs` 的文件头）──
   //
   // `runRecordFs` / `processProbe` / `killTreeImpl` 都可注入：这一层的判据
@@ -296,6 +310,16 @@ export function createLauncher({
   /** 日志 sink（PRT-709）。`null` 表示建不起来——**不阻止启动**。 */
   let logSink = null
   const logSinkDiagnostics = []
+  /**
+   * 健康心跳（PRT-713 收尾）。`null` = 没装配（默认），
+   * 或装配失败（那时 `heartbeatCode` 说明为什么）。
+   *
+   * ★ 与 `logSink` 同一条纪律：**心跳的任何失败都不阻止启动**。
+   *   它是附加能力，坏了不该让产品起不来——但也不该静默，
+   *   所以每一种失败都进 `heartbeatDiagnostics`。
+   */
+  let heartbeatHandle = null
+  let heartbeatDiagnostics = []
   // PRT-705：上一次运行残留、记录读写失败、清理结果都汇到这里。
   const orphanDiagnosticsOut = []
   let runId = null
@@ -597,6 +621,72 @@ export function createLauncher({
     if (file !== null) clearRunRecord(file, { fs: orphanFs })
   }
 
+  /**
+   * 装配健康心跳（PRT-713 收尾）。
+   *
+   * ★ 与 `ensureLogSink` 一样的定位：**绝不阻止启动**，但绝不静默。
+   *
+   * 它**不**在这里 `start()`——排在定时器上的那一刻应当是"产品已经起来了"，
+   * 而不是"我们打算起"。一个在产品其实没起来时就开始发心跳的实现，
+   * 会向服务端报告一个不存在的运行实例。
+   */
+  function ensureHeartbeat() {
+    const factory = heartbeatFactory ?? createLauncherHeartbeat
+    try {
+      heartbeatHandle = factory({
+        layout,
+        policy: heartbeatPolicy,
+        logger: (m) => log('info', m),
+        ...(heartbeatConsentReader === null ? {} : { consentReader: heartbeatConsentReader }),
+        ...(heartbeatSetTimer === undefined ? {} : { setTimer: heartbeatSetTimer }),
+        ...(heartbeatClearTimer === undefined ? {} : { clearTimer: heartbeatClearTimer }),
+      })
+      heartbeatDiagnostics = [...(heartbeatHandle?.diagnosticsList?.() ?? heartbeatHandle?.diagnostics ?? [])]
+    } catch (e) {
+      heartbeatHandle = null
+      heartbeatDiagnostics = [Object.freeze({
+        severity: 'warn', code: 'HEARTBEAT_WIRING_FAILED',
+        message: `装配心跳时抛错（不影响启动）：${e?.message ?? e}`,
+      })]
+    }
+  }
+
+  /** 停掉心跳（幂等，不抛）。 */
+  function stopHeartbeat() {
+    if (heartbeatHandle === null) return
+    try {
+      heartbeatHandle.stop()
+      heartbeatDiagnostics = [...(heartbeatHandle.diagnosticsList?.() ?? heartbeatDiagnostics)]
+    } catch (e) {
+      heartbeatDiagnostics = [...heartbeatDiagnostics, Object.freeze({
+        severity: 'warn', code: 'HEARTBEAT_WIRING_FAILED',
+        message: `停止心跳时抛错：${e?.message ?? e}`,
+      })]
+    }
+  }
+
+  /**
+   * 心跳的可查状态（PRT-713 收尾）。
+   *
+   * `wired` = **能用**（不是"有个句柄挂着"）；`enabled` = 配置要求开着。
+   * 这两者不一致，就是"用户开了心跳但它其实发不出去"那一幕，
+   * 而它必须是一个**能被读到的差**，不能只活在日志里。
+   *
+   * `wired`/`enabled` 由本函数**无条件给出**，不从被接上来的对象那里转发：
+   * 一个不完整的实现（或一个替身）漏报这个键时，调用方读到的是
+   * `undefined`——而"没有这个字段"与"没接上"看起来是同一个东西。
+   */
+  function heartbeatStatus() {
+    let inner = {}
+    try { inner = heartbeatHandle?.status?.() ?? {} } catch { inner = {} }
+    return Object.freeze({
+      ...inner,
+      wired: heartbeatHandle !== null && inner.wired === true,
+      enabled: heartbeatPolicy?.enabled === true,
+      ...(heartbeatHandle === null || inner.wired === true ? {} : { code: inner.code ?? null, message: inner.message ?? '' }),
+    })
+  }
+
   const launcher = {
     plan,
     diagnostics: planDiagnostics,
@@ -725,6 +815,16 @@ export function createLauncher({
       // 就绪之后立刻落一条记录：此后这台机器上如果 Legion 被强杀，
       // 下一次启动就能认出这些 pid。晚于就绪是因为 pids 到这时才齐。
       persistRunRecord()
+      // ★ PRT-713 收尾：**产品真的起来了**，这时才装配并起心跳。
+      //
+      //   排在就绪之后、而不是 `start()` 的第一步：一个在产品其实没起来时
+      //   就开始发心跳的实现，会向服务端报告一个**不存在的运行实例**——
+      //   而那种假信号比没有信号更坏，因为它会让远端以为一切正常。
+      if (heartbeatPolicy?.enabled === true) {
+        ensureHeartbeat()
+        heartbeatHandle?.start?.()
+        heartbeatDiagnostics = [...(heartbeatHandle?.diagnosticsList?.() ?? heartbeatDiagnostics)]
+      }
       return Object.freeze({
         ok: true,
         phase: null,
@@ -752,6 +852,10 @@ export function createLauncher({
         // 而它已经被 `checkPreviousRun` 读过、报告过了。留着它会让下一次
         // 启动把同一批残留**再报一遍**，用户会以为残留一直在长。
         forgetRunRecord()
+        // 心跳同样要停：`start()` 在**成功之后**才装配它，所以这里通常
+        // 本来就是空的；但"通常"不是"一定"——一次中途失败的启动
+        // 可能已经装配过。停止路径不该依赖"另一条路径应该没走到那一步"。
+        stopHeartbeat()
         return Object.freeze({ reason, results: Object.freeze([]), states: Object.freeze([]), log: logResult })
       }
       log('info', `停止：${reason}`)
@@ -775,6 +879,14 @@ export function createLauncher({
       // 失败了（某些进程没杀掉），我们就失去了"还有谁活着"的唯一线索，
       // 而那些进程正好是下一次启动需要认出来的。
       forgetRunRecord()
+      // ★ PRT-713 收尾：心跳与进程一起停。
+      //
+      //   一个"产品已经关掉了、心跳还在发"的实现，
+      //   与一个关不掉的心跳，在"用户点了关闭之后数据还会不会出去"上是同一个东西。
+      //
+      //   放在**最后**（进程都停干净之后）：反过来的话，一次卡住的
+      //   心跳停止会拖住我们对进程的清理，而进程清理才是 stop 的主职。
+      stopHeartbeat()
       return Object.freeze({ reason, results, states, log: logResult })
     },
 
@@ -843,6 +955,22 @@ export function createLauncher({
         needsAttention: Object.freeze([...needsAttention]),
         portDiagnostics: Object.freeze([...portDiagnostics]),
         readinessDiagnostics: Object.freeze([...readinessDiagnostics]),
+        // PRT-713 收尾：心跳的状态要能查。
+        //
+        // 为什么放进 `status()` 而不是只留日志：心跳是**唯一**一个
+        // "产品在往外发数据"的能力，而"它到底发了没有"必须是用户
+        // 一眼能看到的读数——一个只能从日志里推断"有没有外发"的产品，
+        // 与一个不告诉用户的产品，在用户想知道的时候是同一个东西。
+        // ★ `wired` 的含义是**"心跳真的装上了、能用"**，不是"有个对象挂在那里"。
+        //
+        //   `ensureHeartbeat()` 在装配失败时也会留下一个句柄（它的 `start()`
+        //   会拒绝并说明原因），所以"句柄非 null"与"心跳能用"是两件事。
+        //   把后者报成前者，正好会把本批最要紧的那一幕盖住：
+        //   **用户开了心跳，但它其实发不出去。**
+        //
+        //   装配失败时 `wired: false` 且 `code` 给出具体原因，
+        //   同时 `allDiagnostics()` 里有对应的一条——三处都能看到，且互不矛盾。
+        heartbeat: heartbeatStatus(),
       })
     },
 
@@ -879,6 +1007,9 @@ export function createLauncher({
         // PRT-705 的残留诊断**必须进这里**：只在 `orphanStatus()` 里的话，
         // 一个不去调它的入口就等于没有这条提示。
         ...orphanDiagnosticsOut,
+        // PRT-713 收尾：心跳的诊断同理——一个"用户开了心跳但它其实没发出去"
+        // 的配置，如果只在 `status().heartbeat` 里，那就只有专门去查的人看得到。
+        ...heartbeatDiagnostics,
       ]
       for (const item of status.needsAttention) {
         out.push(Object.freeze({

@@ -67,6 +67,11 @@ export const CLI_FLAGS = Object.freeze([
     '而它的全部价值就在于"用户没想起来的时候它也在"。给这一条留一个显式退出' },
   { name: '--auto-diagnostics-keep=<n>', kind: 'value', doc: '自动导出的保留份数（默认 3，最小 1）。' +
     '自动写盘意味着**失败循环里自动写盘**，这个数字就是磁盘上界' },
+  { name: '--heartbeat-consent=<who>', kind: 'value', doc: '记录"谁同意了发送健康心跳"（PRT-713）。' +
+    '**这是产品里唯一能产生同意这个值的入口**；同意写在本机 `<产品家目录>/heartbeat-consent.json`，' +
+    '**不放在配置文件里**——跟着配置走的同意会被复制到别的机器上，而那里没人同意过' },
+  { name: '--heartbeat-revoke-consent', kind: 'boolean', doc: '撤回心跳同意（与 --heartbeat-consent=<who> 同用）。' +
+    '撤回**不删记录**，而是写下一条撤回：一份被删掉的同意与一份从来没有过的同意，事后是同一个东西' },
   { name: '--sweep-orphans', kind: 'boolean', doc: '启动前清理上一次运行留下的进程（PRT-705）。' +
     '**默认只报告不清理**：杀进程不可撤销。清理前会核对映像名，对不上的一律不动' },
   { name: '--allow-unverified-sweep', kind: 'boolean', doc: '与 --sweep-orphans 同用：' +
@@ -296,6 +301,13 @@ export function launcherOptionsFrom({ argv = [], env = {}, nodePath = process.ex
       // **不在这里补默认值**：补一份就多一处会漂移的副本，而"哪一份生效"
       // 在排查时会成为一个必须回答的问题。
       logPolicy: fromConfig.logPolicy ?? {},
+      // 健康心跳（PRT-713 收尾）来自产品配置文件的 `heartbeat.*` 键。
+      // 缺省 `{}` → `enabled !== true` → **不装配、不建 transport、不发任何东西**。
+      //
+      // ★ 配置里**没有** `heartbeat.consent`：同意必须来自这台机器上的
+      //   同意记录文件（见 `heartbeat-consent.mjs` 的文件头），
+      //   由 Launcher 自己去读。配置文件里给不出一个可信的同意。
+      heartbeatPolicy: fromConfig.heartbeatPolicy ?? {},
       // PRT-257：DSH 强制面覆盖层。`undefined` = 配置里没写 → 由
       // `resolveDshOverlay` 的默认参数落到 `true`（**默认装上**）。
       // 这里刻意写 `?? true` 而不是留 `undefined`：`createLauncher` 的默认值是
@@ -367,6 +379,45 @@ export async function run({
   //   是一个**没有任何效果的参数**，而一个没有效果的参数比没有这个参数更坏——
   //   它会让读命令行的人以为"这件事是要显式打开的"。
   const autoDiagnostics = parsed.flags['no-auto-diagnostics'] !== true
+
+  // ── 健康心跳的同意（PRT-713 收尾）────────────────────────────────────
+  //
+  // 这是产品里**唯一**一个能产生"同意"这个值的入口。在此之前 `consent`
+  // 只有测试与假设能提供，于是"没有同意就不发"那道闸的实际效果是**永久关闭**
+  // ——那恰好是安全的，所以没人会发现它是坏的。
+  //
+  //   > 一道"因为没有人能提供那个值、所以永远拦着"的闸，
+  //   > 与一道"真的拦得住"的闸，在用例里是同一个读数——
+  //   > 只不过前者会在有人**终于**接上同意流程的那一天，
+  //   > 变成"接上就直接开始发"。
+  //
+  // 它排在布局校验**之前**：撤回同意是一个安全动作，而"配置坏了所以撤不回"
+  // 会让用户被困在一个他不想继续的选择里。
+  {
+    const grant = parsed.flags['heartbeat-consent']
+    const revoke = parsed.flags['heartbeat-revoke-consent']
+    if (typeof grant === 'string' || revoke === true) {
+      const { writeConsent, readConsent, CONSENT_CODES } = await import('../heartbeat-consent.mjs')
+      if (revoke === true && typeof grant !== 'string') {
+        // 撤回也要署名：一条没有署名的撤回，与一次误删文件在记录上无法区分。
+        if (json) write(JSON.stringify({ ok: false, code: 'CONSENT_NEEDS_WHO' }, null, 2))
+        else write('✖ 撤回同意也要说清是谁撤的：--heartbeat-revoke-consent --heartbeat-consent=<你的名字>')
+        return 2
+      }
+      const r = writeConsent(options.layout, { who: grant, revoke: revoke === true })
+      if (json) {
+        write(JSON.stringify({ ok: r.ok, path: r.path ?? null, message: r.message, record: r.record ?? null }, null, 2))
+      } else {
+        write(r.ok === true ? `✔ ${r.message}` : `✖ ${r.message}`)
+        if (r.ok === true && r.path !== null) write(`  ${r.path}`)
+        // 撤回之后顺手把当前状态说一遍：用户刚做的事有没有生效，
+        // 不该只能靠"没报错"来推断。
+        const after = readConsent(options.layout)
+        if (json !== true) write(`  当前同意状态：${after.consented === true ? '有效' : `无效（${after.code ?? '未知'}）`}——${after.message}`)
+      }
+      return r.ok === true ? 0 : 9
+    }
+  }
 
   // ── 诊断包导出（PRT-710）─────────────────────────────────────────────
   //

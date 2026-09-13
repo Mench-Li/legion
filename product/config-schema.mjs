@@ -348,6 +348,23 @@ export const SCHEMA = defineSchema({
     //                         调用方必须**原样保留**启动失败的原因，
     //                         不能把它换成这条。
     'AUTO_NO_BASE_DIR', 'AUTO_DISABLED', 'AUTO_BASE_DIR_FAILED', 'AUTO_EXPORT_FAILED',
+    // PRT-713 收尾：**同意记录**（product/heartbeat-consent.mjs）的具名码。
+    // 同样是**输出**用的码。它们要分开的原因是本条任务的要点：
+    // 从未同意 / 撤回了 / 读不出来 / 不合法，**四种处置完全不同**
+    // （要问用户 / 记着别烦他 / 查记录损坏 / 查记录格式）。
+    'CONSENT_NEVER', 'CONSENT_REVOKED', 'CONSENT_UNREADABLE', 'CONSENT_INVALID',
+    // 撤回也要署名：一条没有署名的撤回，与一次误删文件在记录上无法区分。
+    'CONSENT_NEEDS_WHO',
+    // PRT-713 收尾：**心跳接线**（product/launcher/heartbeat-wiring.mjs）的具名码。
+    // DISABLED 是默认路径（**不是错误**），其余每一条都对应一种
+    // "配置说开着、但它其实没发出去"的具体原因——必须能被区分出来，
+    // 否则用户只会看到"心跳开着却没动静"。
+    'HEARTBEAT_WIRING_DISABLED', 'HEARTBEAT_WIRING_NO_CONSENT',
+    'HEARTBEAT_WIRING_CONSENT_REVOKED', 'HEARTBEAT_WIRING_CONSENT_UNREADABLE',
+    'HEARTBEAT_WIRING_BAD_POLICY', 'HEARTBEAT_WIRING_BAD_ENDPOINT',
+    'HEARTBEAT_WIRING_FAILED', 'HEARTBEAT_WIRING_READY',
+    // 心跳开始/停止的**信息级**码：它们是运行状态读数，不是配置键。
+    'HEARTBEAT_WIRING_STARTED', 'HEARTBEAT_WIRING_STOPPED',
     // 逐候选的去向（诊断包清单的契约，四种，没有第五种）：
     'included', 'excluded', 'skipped', 'oversized',
     // 结构性排除规则的 id。它们是**排除理由的分类名**，不是配置键；

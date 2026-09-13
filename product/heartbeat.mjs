@@ -338,9 +338,24 @@ export function createHeartbeat({
       sent.push(Object.freeze({ attempt: myAttempt, at: now(), keys: Object.freeze(Object.keys(body)) }))
       return Object.freeze({ sent: true, attempt: myAttempt, payload: body })
     } catch (e) {
-      note('warn', HEARTBEAT_CODES.SEND_FAILED,
+      // ★ PRT-713 收尾：**保留 transport 给出的具体码**，不一律压成 SEND_FAILED。
+      //
+      //   原来这里写死 SEND_FAILED，于是 `HEARTBEAT_INVALID_ENDPOINT` 与
+      //   `HEARTBEAT_PAYLOAD_REJECTED` 即使有了调用方，也会在到达用户之前
+      //   被抹成同一句话。而这三个原因的**处置完全不同**：
+      //
+      //     · INVALID_ENDPOINT —— 配置错了，用户改一次就好，重试永远没用；
+      //     · PAYLOAD_REJECTED —— 代码错了（允许名单被加宽），要开发者动手；
+      //     · SEND_FAILED      —— 网络/服务端的事，下一个周期再说。
+      //
+      //   > 一个把"你配错了"和"我们发不出去"报成同一句话的上报通道，
+      //   > 会让用户反复检查自己那份没有问题的配置。
+      const known = typeof e?.code === 'string'
+        && Object.values(HEARTBEAT_CODES).includes(e.code)
+      const code = known ? e.code : HEARTBEAT_CODES.SEND_FAILED
+      note('warn', code,
         `心跳发送失败（不会重试，等下一个周期）：${String(e?.message ?? e)}`)
-      return Object.freeze({ sent: false, reason: HEARTBEAT_CODES.SEND_FAILED, attempt: myAttempt })
+      return Object.freeze({ sent: false, reason: code, attempt: myAttempt })
     }
   }
 

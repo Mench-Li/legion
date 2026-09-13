@@ -880,6 +880,140 @@ test('⑧ PRT-253：提供者拒绝时 worker **照常启动**，并把码与理
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
+test('⑨ PRT-711：runWorkerProcess 把闸门接到 worker 上，并如实报告"接没接上"', async () => {
+  const { root, dataDir } = tempDataDir()
+  try {
+    const lines = []
+    const asked = []
+    const startup = await runWorkerProcess({
+      // hub 也要配（否则 tick 在闸门之前就以 hub-not-configured 返回）；
+      // 引擎必须是**阶段齐备**的（否则在闸门之前就以 no-stages 返回）。
+      // 这两条不是测试的装饰：它们正好说明闸门排在"我干得了吗"之后。
+      env: { LEGION_DATA_DIR: dataDir, TEAM_HUB_URL: 'http://127.0.0.1:1/', TEAM_HUB_TOKEN: 'test-token' },
+      fetchImpl: async () => ({ ok: true, status: 200, json: async () => null, text: async () => '' }),
+      write: (l) => lines.push(l),
+      installSignalHandlers: false,
+      executorProvider: async () => ({ ok: true, executor: { ...inPlaceStages(), execute: async () => ({ outcome: 'completed' }) }, note: '测试引擎' }),
+      claimGateFromExecutor: (status) => {
+        asked.push(status)
+        return () => ({ claim: false, state: 'upgrading', reason: '测试：正在升级' })
+      },
+    })
+    try {
+      // ① 闸门工厂拿到的是**执行引擎的真实状态**，不是猜的
+      assert.equal(asked.length, 1, '闸门工厂必须被调用一次')
+      assert.equal(asked[0].wired, true, '引擎接上了，闸门必须看到 wired=true')
+      assert.equal(asked[0].refusal, null)
+
+      // ② 接上了就要如实说（运维要能一眼看到，而不是去读启动日志的行文）
+      assert.equal(startup.claimGateInstalled, true)
+      assert.equal(startup.claimGateNote, null)
+
+      // ③ 闸门真的生效：引擎在、阶段齐，但产品说"正在升级" → 不认领
+      const r = await startup.worker.tick()
+      assert.equal(r.reason, 'claim-blocked', '产品状态为 upgrading 时必须停止认领')
+      assert.equal(startup.worker.status().claimGate.state, 'upgrading')
+      assert.equal(startup.worker.status().claimGateMode, 'installed')
+    } finally {
+      await startup.worker.stop({ reason: 'test' }).catch(() => undefined)
+      await startup.runPromise.catch(() => undefined)
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('⑨ PRT-711：调用方**根本没要闸门**时保持原样，但"没有闸门"是可见的', async () => {
+  // ★ 这一条是一次真实回归的产物。
+  //
+  // 本文件（`run.mjs`）是**通用外壳**，除了产品入口还有别的正当调用方
+  // （`scripts/kill-drill-worker.mjs` 的强杀演练、各类用例）。
+  // 曾把"没给 claimGateFromExecutor"也兜底成"恒不认领"，
+  // 结果是那些调用方**静默地什么都不认领了**——强杀演练卡到 300 秒被杀。
+  //
+  //   > 一个"因为没接线所以什么都不干"的兜底，
+  //   > 与一个"接线漏了但看不出来"的兜底，是同一个东西——
+  //   > 只不过前者的表现是产品静默地不工作，而后者是产品静默地工作太多。
+  //
+  // 所以纪律拆成两半：**"产品不许没有闸门"由产品入口负责**（下一条用例钉住），
+  // **"要了闸门就得真的有"由 run.mjs 负责**（闸门构造失败那条）。
+  // 这里只要求：不装闸门这件事**看得见**。
+  const { root, dataDir } = tempDataDir()
+  try {
+    const startup = await runWorkerProcess({
+      env: { LEGION_DATA_DIR: dataDir, TEAM_HUB_URL: 'http://127.0.0.1:1/', TEAM_HUB_TOKEN: 'test-token' },
+      fetchImpl: async () => ({ ok: true, status: 200, json: async () => null, text: async () => '' }),
+      write: () => {},
+      installSignalHandlers: false,
+      // 故意不给 claimGateFromExecutor
+      executor: { ...inPlaceStages(), execute: async () => ({ outcome: 'completed' }) },
+    })
+    try {
+      assert.equal(startup.claimGateInstalled, false, '没给工厂就必须报告"没装上"')
+      assert.match(String(startup.claimGateNote), /没有提供 claimGateFromExecutor/)
+      // 行为保持原样：通用外壳不该因为"调用方没要闸门"就自己停手
+      const r = await startup.worker.tick()
+      assert.notEqual(r.reason, 'claim-blocked', '没要闸门的调用方不该被静默停手')
+      // 但这件事必须能从盘上读出来，而不是只能靠猜
+      assert.equal(startup.worker.status().claimGateMode, 'not-installed')
+    } finally {
+      await startup.worker.stop({ reason: 'test' }).catch(() => undefined)
+      await startup.runPromise.catch(() => undefined)
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('⑨ PRT-711：**要了闸门却造不出来**时退回"不认领"（坏掉的判据不是通行证）', async () => {
+  const { root, dataDir } = tempDataDir()
+  try {
+    for (const factory of [
+      () => { throw new Error('闸门工厂炸了') },
+      () => ({ claim: true }), // 返回的不是函数
+    ]) {
+      const lines = []
+      const startup = await runWorkerProcess({
+        env: { LEGION_DATA_DIR: dataDir, TEAM_HUB_URL: 'http://127.0.0.1:1/', TEAM_HUB_TOKEN: 'test-token' },
+        fetchImpl: async () => ({ ok: true, status: 200, json: async () => null, text: async () => '' }),
+        write: (l) => lines.push(l),
+        installSignalHandlers: false,
+        executor: { ...inPlaceStages(), execute: async () => ({ outcome: 'completed' }) },
+        claimGateFromExecutor: factory,
+      })
+      try {
+        assert.equal(startup.claimGateInstalled, false)
+        assert.match(lines.join('\n'), /认领闸门构造失败/)
+        // ★ 调用方的意图是"要判定"；一个造不出来的判定绝不能变成放行。
+        const r = await startup.worker.tick()
+        assert.equal(r.reason, 'claim-blocked', '闸门构造失败时必须不认领')
+        assert.equal(startup.worker.status().claimGate.claim, false)
+      } finally {
+        await startup.worker.stop({ reason: 'test' }).catch(() => undefined)
+        await startup.runPromise.catch(() => undefined)
+      }
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('⑨ PRT-711：★ 产品入口**装上了**闸门（"产品不许没有闸门"这条纪律的落点）', () => {
+  // 上一条把"没要闸门就保持原样"给了通用外壳，于是"产品不许没有闸门"
+  // 就**只能**由产品入口负责。这条纪律必须被钉住，否则整批接线可以被
+  // 静默删掉而没有任何断言变红——那时 PRT-711 又退回"判据完整但没有调用方"。
+  //
+  // 产品入口是进程入口（import 就会跑主循环），不能直接 import，
+  // 所以这里读源码断言那个调用点。它是**结构性断言**，故意写得窄：
+  // 只认"同一个对象字面量里既传 executorProvider 又传 claimGateFromExecutor"。
+  //
+  // ★ **必须先把注释剥掉**：否则把参数注释掉（`// claimGateFromExecutor,`）
+  //   这种"看起来删了、其实没删"的改法照样能通过——因为那几个字**还在注释里**。
+  //   这是本条用例第一次写出来时的真实漏洞，由破坏性验证 61⑨ 直接 fail=0 抓到。
+  const raw = readFileSync(WORKER_ENTRY, 'utf8')
+  // 整行注释与行尾注释都剥掉。`(^|\s)` 这个前缀是为了不误伤 `http://` 里的 `//`。
+  const src = raw.replace(/(^|\s)\/\/[^\n]*$/gm, '')
+  assert.match(src, /import\s*\{[^}]*claimGateFromExecutor[^}]*\}\s*from\s*'\.\/claim-gate\.mjs'/,
+    '产品入口必须从 ./claim-gate.mjs 引入闸门工厂')
+  assert.match(src, /runWorkerProcess\(\{[\s\S]{0,600}?executorProvider[\s\S]{0,600}?claimGateFromExecutor[\s\S]{0,200}?\}\)/,
+    '产品入口必须把 claimGateFromExecutor 交给 runWorkerProcess——'
+    + '否则"正在升级"与"Runtime 不可用"都拦不住这个 worker（注释掉这行同样算没接）')
+})
+
 test('⑧ PRT-253：提供者**抛错**时也被接住并具名（不是让 worker 崩掉）', async () => {
   const { root, dataDir } = tempDataDir()
   try {

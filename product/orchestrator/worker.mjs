@@ -16,6 +16,7 @@
 
 import { runWorkerProcess } from '../../orchestrator/worker/run.mjs'
 import { productionExecutorProviderFromEnv } from '../../orchestrator/worker/executor-binding.mjs'
+import { claimGateFromExecutor } from './claim-gate.mjs'
 
 // PRT-253：把生产执行引擎的**提供者**交给 worker。
 //
@@ -28,6 +29,9 @@ import { productionExecutorProviderFromEnv } from '../../orchestrator/worker/exe
 // 而 worker 是独立进程。装上之后，**这个入口不需要改一行代码**就开始真的执行。
 const startup = await runWorkerProcess({
   executorProvider: () => productionExecutorProviderFromEnv({}),
+  // PRT-711：认领闸门。**这是 `mayClaimTasks()` 的生产调用点**——
+  // 没有它，"正在升级"与"Runtime 不可用"都不会阻止 worker 领走任务。
+  claimGateFromExecutor,
 })
 
 // 起不来时必须**以非零码退出**。

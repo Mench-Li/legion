@@ -199,6 +199,18 @@ export async function runWorkerProcess({
   executor = null,
   // PRT-253：生产执行引擎的提供者。给了它就以它为准（见下面的注释）。
   executorProvider = null,
+  // PRT-711：认领闸门。形状 `(executorStatus) => claimGate | null`，
+  // 其中 `executorStatus = { wired, refusal }`。
+  //
+  // 为什么是"从执行引擎状态推出闸门"的**函数**，而不是直接给一个 claimGate：
+  // 闸门要依据"执行引擎到底接上没有、自检过没过"来定档，而这两件事
+  // **要等 `executorProvider()` 跑完才知道**——直接传一个 claimGate 的话，
+  // 调用方就不得不在自己那一侧把这段异步过程重做一遍。
+  //
+  // 产品侧的映射（执行引擎状态 → 产品状态 → mayClaimTasks）住在
+  // `product/orchestrator/worker.mjs`：那是 `product/` 的职责，
+  // 而本文件只管把线插上。
+  claimGateFromExecutor = null,
   // 调用方给的执行引擎通常只实现 `execute`；工作区阶段由下面按配置补上。
   // 传 `inPlaceStages()` 的调用方保持原样（那是显式的降级点，不是静默行为）。
   stages = null,
@@ -288,6 +300,67 @@ export async function runWorkerProcess({
     else write(`⚠ [worker] ${resolved.reason}`)
   }
 
+  // ── 认领闸门（PRT-711）────────────────────────────────────────────────
+  //
+  // **在拿到执行引擎状态之后**才构造：闸门的第一档就是"强制面到底生效了没有"，
+  // 而那正是 `executorProvider` 刚刚回答的问题。
+  //
+  // 闸门构造失败**不是致命错误**，但必须是"不认领"：把构造失败吞掉、
+  // 退化成"照常认领"，等于让一个坏掉的判据变成一张通行证。
+  let claimGate = null
+  let claimGateNote = null
+  if (typeof claimGateFromExecutor === 'function') {
+    try {
+      claimGate = claimGateFromExecutor({
+        wired: effectiveExecutor !== null && effectiveExecutor !== undefined,
+        refusal: executorRefusal,
+      })
+    } catch (e) {
+      claimGateNote = `闸门构造抛错：${e?.message ?? e}`
+    }
+    if (claimGate !== null && typeof claimGate !== 'function') {
+      claimGateNote = '闸门构造返回的不是函数'
+      claimGate = null
+    }
+  } else {
+    claimGateNote = '调用方没有提供 claimGateFromExecutor'
+  }
+
+  //   ── 两种"没有闸门"必须分开处理，这是本段唯一要紧的地方 ──
+  //
+  //   ① **调用方要了闸门，但闸门没造出来**（抛错 / 返回的不是函数）：
+  //      退回**恒不认领**。调用方的意图就是"要判定"，而一个造不出来的判定
+  //      绝不能变成放行——*坏掉的判据不是通行证*。
+  //
+  //   ② **调用方根本没要闸门**（没有提供 `claimGateFromExecutor`）：
+  //      **保持原样（不装闸门）**，只把它记成可见的 `not-installed`。
+  //
+  //   第 ② 条是被一次真实的回归逼出来的：本文件是**通用外壳**，
+  //   除了产品入口，还有别的正当调用方（`scripts/kill-drill-worker.mjs`
+  //   的强杀演练、各类用例）。曾把这个兜底写成"没接线就不认领"，
+  //   结果是**那些调用方静默地什么都不认领了**——强杀演练直接卡到 300 秒被杀。
+  //
+  //   > 一个"因为没接线所以什么都不干"的兜底，
+  //   > 与一个"接线漏了但看不出来"的兜底，是同一个东西——
+  //   > 只不过前者的表现是产品静默地不工作，而后者是产品静默地工作太多。
+  //
+  //   所以纪律分成两半，各自落在能负责的那一层：
+  //   **"产品不许没有闸门"由产品入口 `product/orchestrator/worker.mjs` 负责**
+  //   （它总是装一个，且有用例钉住这件事）；
+  //   **"要了闸门就得真的有"由本文件负责**（上面第 ① 条）。
+  //   `kill-drill-worker.mjs` 这类调用方走 ② 时，状态文件里
+  //   `claimGateMode=not-installed` 会让"它没有闸门"变成一件看得见的事。
+  if (typeof claimGateFromExecutor === 'function' && claimGate === null) {
+    const why = claimGateNote ?? '闸门构造没有返回函数'
+    claimGate = () => ({
+      claim: false,
+      state: null,
+      reason: `认领闸门构造失败（${why}）：一个造不出来的判定按"不认领"处理。`
+        + '**坏掉的判据不是通行证。**',
+    })
+    write(`⚠ [worker] 认领闸门构造失败：${why}——已按"不认领"处理（不会领走任何任务）`)
+  }
+
   const worker = createWorker({
     hub,
     executor: effectiveExecutor,
@@ -296,6 +369,7 @@ export async function runWorkerProcess({
     dataDir: cfg.dataDir,
     platform,
     workerId: cfg.workerId ?? undefined,
+    claimGate,
     logger: write,
   })
 
@@ -319,6 +393,10 @@ export async function runWorkerProcess({
     // 执行引擎没接上时，**这里如实说**。下游（Launcher 的诊断页）
     // 不必去读启动日志的行文来推断——那是会随文案变更而碎的判据。
     executorWired: effectiveExecutor !== null && effectiveExecutor !== undefined,
+    // PRT-711：闸门接没接上也要如实说。它决定"升级中 / Runtime 不可用"能不能
+    // 拦住认领，因此它是运维必须能一眼看到的一个事实，而不是启动日志的行文。
+    claimGateInstalled: typeof claimGateFromExecutor === 'function' && claimGateNote === null,
+    claimGateNote,
     executorRefusal: executorRefusal === null ? null : Object.freeze({
       code: executorRefusal.code ?? null,
       message: executorRefusal.message ?? null,

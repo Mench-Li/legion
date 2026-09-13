@@ -159,6 +159,26 @@ export function createWorker({
   // （执行引擎想自己准备上下文就让它自己准备）。
   stages = null,
   workspaceNote = null,
+  // 认领闸门（PRT-711 / spec §6.3）。
+  //
+  // **每一轮 tick() 都会重新问一次**，而不是建实例时问一次：
+  // 「正在升级」「Runtime 变成不可用」都是**运行中才会发生**的事，
+  // 只在启动时判一次，等于在升级开始的下一秒又开始认领。
+  //
+  // 它是一个函数 `(ctx) => ({ claim, scope, reason, state })`，形状与
+  // `product/runtime-state.mjs` 的 `mayClaimTasks()` 一致。
+  //
+  // ## 为什么默认是 `null` 而 `null` 意味着"照旧"
+  //
+  // 生产入口（`product/orchestrator/worker.mjs`）**总是**装一个闸门；
+  // 这里的 `null` 是给"只想测扫单/停止循环语义"的用例留的口子。
+  // 但它**不会静默**：状态文件里 `claimGateMode` 会写成 `not-installed`，
+  // 于是"这个 worker 没有认领闸门"是一件看得见的事，而不是一件要猜的事。
+  //
+  //   > 一个"没装闸门所以照常认领"的默认值，
+  //   > 与一个"装了一个恒真的闸门"的默认值，是同一个东西——
+  //   > 只不过前者在代码里看起来像是一个中立的、没有做决定的默认值。
+  claimGate = null,
   logger = () => {},
   now = () => Date.now(),
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
@@ -166,6 +186,14 @@ export function createWorker({
   if (dataDir === null && statusPath === null) {
     throw new TypeError('createWorker 需要 dataDir 或 statusPath：没有状态出口的 worker 在外部与「卡住」完全同形')
   }
+  if (claimGate !== null && typeof claimGate !== 'function') {
+    throw new TypeError('createWorker 的 claimGate 必须是函数（每轮调用一次）或 null：'
+      + '一个"装上了但从不被调用"的闸门，与没装闸门是同一个东西')
+  }
+  const gateInstalled = claimGate !== null
+  // 最近一次闸门裁决。写进状态文件——**"为什么现在不认领"必须能从盘上读到**，
+  // 否则运维只能看见 claimed 一直是 0。
+  let lastGate = null
   const resolvedStatusPath = statusPath ?? joinPath(platform, dataDir, STATUS_RELPATH)
 
   // 阶段齐备性在**建实例时**就算清楚：等到认领之后才发现缺阶段，
@@ -212,6 +240,15 @@ export function createWorker({
     if (nextState === 'hub-unreachable' && previous !== 'hub-unreachable') {
       logger('[worker] 无法与 team-hub 通信：暂停认领并退避重试（不退出，等数据面恢复）')
     }
+    // ★ 闸门拦下时**必须说出理由**，而且要说的是**产品的状态**，不是"不认领"三个字。
+    //   一句"不认领"会让运维去查 hub、查执行引擎、查网络——而真正的原因
+    //   可能是"正在升级"。
+    if (nextState === 'claim-blocked' && previous !== 'claim-blocked') {
+      const g = extra.claimGate ?? lastGate
+      logger(`[worker] 认领被闸门拦下（产品状态：${g?.state ?? '未知'}）：${g?.reason ?? '闸门没有给出理由'}`
+        + '——不认领任何任务。这是**产品级的决定**，不是本进程的故障：'
+        + '去查产品状态（是否在升级 / Runtime 是否不可用），不要在这里查网络或执行引擎。')
+    }
     const status = buildStatus(nextState, extra)
     const written = writeStatusFile(resolvedStatusPath, status)
     lastStatusWrite = written
@@ -239,6 +276,16 @@ export function createWorker({
       hubConfigured: hub !== null,
       executorConfigured: executor !== null && executor !== undefined,
       stageMode: executor === null || executor === undefined ? 'none' : (stagesUsable ? 'full' : 'incomplete'),
+      // PRT-711：认领闸门的**存在与否**必须能从这里读出来。
+      //
+      // 三态而不是布尔：`not-installed` 不是一个"错"，它是一个**事实**，
+      // 而它与 `installed ∧ 现在是 true` 在"为什么 claimed 一直是 0"这件事上
+      // 给出的答案完全不同。合成一个布尔，等于把"没装闸门"与"闸门放行了"
+      // 写成一个值——那正是这块最容易被读错的地方。
+      claimGateMode: gateInstalled ? 'installed' : 'not-installed',
+      // 最近一次裁决（没装闸门时是 null）。`state` 是**产品状态**，
+      // 不是本进程状态：运维要能一眼看出"不认领"是产品级的决定。
+      claimGate: lastGate === null ? null : lastGate,
       // PRT-306：工作区隔离的状态必须是**可观测**的。
       //
       // 四态而不是布尔：`disabled` 带着理由（"没有隔离"本身不报错——它只在两条任务
@@ -344,6 +391,47 @@ export function createWorker({
     if (hub === null) {
       publish('hub-unreachable')
       return { acted: false, reason: 'hub-not-configured' }
+    }
+
+    // ── 认领闸门（PRT-711）──────────────────────────────────────────────
+    //
+    // 位置是这段代码的全部要点：它排在**真正调用 hub.claim() 之前**，
+    // 排在"能不能执行"（executor/stages）之后。
+    //
+    // 前两道闸问的是「我干得了吗」，这一道问的是「现在该不该干」——
+    // 两件事的出处完全不同：前者是本进程的能力，后者是产品的状态
+    // （正在升级 / Runtime 不可用 / 部分能力缺失）。
+    //
+    //   > 一个"引擎在、我就认领"的 worker，
+    //   > 与一个在升级过程中继续把任务领走并跑起来的 worker，
+    //   > 是同一个东西——只不过前者在"我能不能执行"这个问题上回答得完全正确。
+    if (gateInstalled) {
+      let verdict = null
+      let gateError = null
+      try {
+        verdict = claimGate({ workerId, counters, state })
+      } catch (e) {
+        gateError = String(e?.message ?? e)
+      }
+      // ★ 闸门抛错 / 没给结论，一律**不认领**。
+      //   "问不出来"与"可以认领"是两件事；把前者当成后者，
+      //   等于让一个坏掉的判据变成一张通行证。
+      if (gateError !== null) {
+        lastGate = { claim: false, state: null, reason: `认领闸门抛错：${gateError}`, error: gateError }
+      } else if (verdict === null || verdict === undefined) {
+        lastGate = { claim: false, state: null, reason: '认领闸门没有给出结论（返回空）' }
+      } else {
+        lastGate = {
+          claim: verdict.claim === true,
+          state: verdict.state ?? null,
+          scope: verdict.scope ?? null,
+          reason: verdict.reason ?? null,
+        }
+      }
+      if (lastGate.claim !== true) {
+        publish('claim-blocked', { claimGate: lastGate })
+        return { acted: false, reason: 'claim-blocked', claimGate: lastGate }
+      }
     }
 
     publish('claiming')
@@ -544,6 +632,15 @@ export function createWorker({
       if (loopPromise !== null) return loopPromise
       running = true
       stopped = false
+      // 没装闸门时**在启动时说一次**。这是一个配置事实，不是每轮都变的运行状态；
+      // 每轮都报的那种告警会被学会忽略，而它要说的事恰好最容易被忽略：
+      // 产品状态（升级中 / 不可用 / 部分能力）拦不住这个 worker。
+      if (!gateInstalled) {
+        logger('[worker] ⚠ **没有安装认领闸门**（claimGateMode=not-installed）：本 worker 会照常认领。'
+          + '生产入口 product/orchestrator/worker.mjs 总是装一个；'
+          + '看到这一行说明有调用方绕过了它——那样"正在升级"与"Runtime 不可用"'
+          + '都不会阻止这个 worker 把任务领走。')
+      }
       loopPromise = loop()
       return loopPromise
     },

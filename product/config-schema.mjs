@@ -365,6 +365,15 @@ export const SCHEMA = defineSchema({
     'HEARTBEAT_WIRING_FAILED', 'HEARTBEAT_WIRING_READY',
     // 心跳开始/停止的**信息级**码：它们是运行状态读数，不是配置键。
     'HEARTBEAT_WIRING_STARTED', 'HEARTBEAT_WIRING_STOPPED',
+    // PRT-709 收尾：**日志策略命令行**（product/launcher/log-policy-cli.mjs）的具名码。
+    // 同样是**输出**用的码。`CONFIG_UNREADABLE` 与 `WRITE_FAILED` 必须分开：
+    // 前者是"我们没有动你的文件，请你自己看一眼"，后者是"我们动了但没成功"——
+    // 用户下一步要做的事完全不同。
+    'LOGCLI_NO_CONFIG_PATH', 'LOGCLI_CONFIG_UNREADABLE', 'LOGCLI_BAD_VALUE',
+    'LOGCLI_UNKNOWN_KEY', 'LOGCLI_WRITE_FAILED', 'LOGCLI_NOTHING_TO_SET',
+    // 查看器里那条诊断的**兜底标签**：诊断一般自带 `code`（如 `CONFIG_INVALID_JSON`），
+    // 万一没有就用它。不是配置键，也不是环境变量。
+    'CONFIG_DIAGNOSTIC',
     // 逐候选的去向（诊断包清单的契约，四种，没有第五种）：
     'included', 'excluded', 'skipped', 'oversized',
     // 结构性排除规则的 id。它们是**排除理由的分类名**，不是配置键；

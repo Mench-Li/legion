@@ -72,6 +72,12 @@ export const CLI_FLAGS = Object.freeze([
     '**不放在配置文件里**——跟着配置走的同意会被复制到别的机器上，而那里没人同意过' },
   { name: '--heartbeat-revoke-consent', kind: 'boolean', doc: '撤回心跳同意（与 --heartbeat-consent=<who> 同用）。' +
     '撤回**不删记录**，而是写下一条撤回：一份被删掉的同意与一份从来没有过的同意，事后是同一个东西' },
+  { name: '--log-policy', kind: 'boolean', doc: '打印当前生效的日志策略（PRT-709）。' +
+    '每个值都带**来源**——"值是多少"与"这个值是谁给的"必须一起说，' +
+    '否则「我改了但没生效」是一个无法回答的问题' },
+  { name: '--set-log-policy=<k=v,...>', kind: 'value', doc: '改日志策略并写入产品配置文件（PRT-709）。' +
+    '键：maxFileBytes / maxTotalBytes / keepFiles / minFreeBytes。' +
+    '**先校验再写**；配置坏了则拒绝改写（那会把用户原来的内容永久弄没）' },
   { name: '--sweep-orphans', kind: 'boolean', doc: '启动前清理上一次运行留下的进程（PRT-705）。' +
     '**默认只报告不清理**：杀进程不可撤销。清理前会核对映像名，对不上的一律不动' },
   { name: '--allow-unverified-sweep', kind: 'boolean', doc: '与 --sweep-orphans 同用：' +
@@ -380,7 +386,83 @@ export async function run({
   //   它会让读命令行的人以为"这件事是要显式打开的"。
   const autoDiagnostics = parsed.flags['no-auto-diagnostics'] !== true
 
-  // ── 健康心跳的同意（PRT-713 收尾）────────────────────────────────────
+  // ── 日志策略：查看 / 修改（PRT-709 收尾）──────────────────────────────
+  //
+  // 位置与诊断包、同意同一条理由：**排在配置校验之前**。
+  //
+  // 这一条尤其要紧：一个"配置有问题"的产品，最需要用户能**看一眼现在的值**。
+  // 把这两个入口挂在"配置能解析才往下走"的流程后面，等于
+  // **恰恰在配置坏掉的时候**不让他看配置——而那时他唯一能做的补救
+  // 就是猜。
+  //
+  //   > 一个只在配置正确时才可用的配置查看器，
+  //   > 与一个不存在的配置查看器，在用户最需要它的那一刻是同一个东西。
+  if (parsed.flags['log-policy'] === true || typeof parsed.flags['set-log-policy'] === 'string') {
+    const { applyLogPolicy, describeLogPolicy, effectiveLogPolicy, LOG_CLI_CODES, parsePolicyAssignments } =
+      await import('./log-policy-cli.mjs')
+    const configPath = options.layout?.productConfigPath ?? null
+
+    if (typeof parsed.flags['set-log-policy'] === 'string') {
+      const parsedValues = parsePolicyAssignments(parsed.flags['set-log-policy'])
+      if (parsedValues.ok !== true) {
+        if (json) write(JSON.stringify({ ok: false, code: parsedValues.code, message: parsedValues.message }, null, 2))
+        else write(`✖ ${parsedValues.message}`)
+        return 2
+      }
+      const r = applyLogPolicy({ configPath, values: parsedValues.values })
+      if (json) {
+        write(JSON.stringify({ ok: r.ok, code: r.code ?? null, path: r.path, applied: r.applied ?? null, policy: r.policy ?? null, message: r.message }, null, 2))
+      } else {
+        write(r.ok === true ? `✔ ${r.message}` : `✖ ${r.message}`)
+        if (r.ok === true) {
+          write(`  ${r.path}`)
+          // 改完必须把**生效值**再打一遍。只报"写成功"的话，
+          // 用户仍然要自己去推"写进去的等价于生效的"——而这两件事
+          // 在这一层是可以不一致的（后一层覆盖前一层）。
+          if (r.kept.length > 0) write(`  （保留了 ${r.kept.length} 个别的顶层键：${r.kept.join('、')}）`)
+        }
+      }
+      if (r.ok !== true) return r.code === LOG_CLI_CODES.BAD_VALUE ? 2 : 9
+    }
+
+    if (parsed.flags['log-policy'] === true) {
+      // ★ 重新读一遍，而不是用 `options.logPolicy`。
+      //
+      //   `options` 是在 `run()` 开头算好的；而 `--set-log-policy` 刚刚
+      //   改过配置文件。用旧的那份，"改完之后看一眼"会显示**改之前**的值——
+      //   而这一幕会被读成"我的修改没生效"。
+      //
+      //     > 一个"在改完之后仍然显示旧值"的查看器，
+      //     > 与一个"修改根本没生效"的产品，在用户下一步要做什么上是同一个读数。
+      const cfg = loadProductConfig(options.layout, { envValues: {} })
+      const derived = launcherInputFromConfig(cfg.merged ?? null)
+      const diags = cfg.diagnostics ?? []
+      const broken = cfg.ok !== true || diags.some((d) => d.severity === 'error')
+      if (json) {
+        write(JSON.stringify({
+          ok: !broken, effective: effectiveLogPolicy(cfg.merged ?? null),
+          provenance: derived.provenance ?? {}, path: configPath, diagnostics: diags,
+        }, null, 2))
+      } else {
+        // ★ 必须把配置自己的诊断传进去。
+        //
+        //   第一版没传，于是坏 JSON 被渲染成"四项都是默认值"——
+        //   一份看起来完全正常的输出。而真相是整份配置被忽略了。
+        //   这正是本任务要消灭的「改了但没反应」，只是换了个位置发生。
+        write(describeLogPolicy({
+          merged: cfg.merged ?? null,
+          provenance: derived.provenance ?? {},
+          filePath: configPath,
+          diagnostics: diags,
+        }))
+      }
+      // 配置坏掉 ⇒ 退出码 6，与主流程里"产品配置有问题"那一条**同一个码**：
+      // 同一件事不该有两个码，否则脚本要判两次。
+      return broken ? 6 : 0
+    }
+    return 0
+  }
+
   //
   // 这是产品里**唯一**一个能产生"同意"这个值的入口。在此之前 `consent`
   // 只有测试与假设能提供，于是"没有同意就不发"那道闸的实际效果是**永久关闭**

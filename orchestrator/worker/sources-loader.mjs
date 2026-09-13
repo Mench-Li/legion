@@ -42,6 +42,13 @@
 import { createHash } from 'node:crypto'
 
 import { INVENTORY_OUTCOMES, createSourceInventory } from '../../runtime/contracts/context.mjs'
+// ★ PRT-406：`trustForOrigin` 是"哪种来源算系统内容"的**唯一出处**。
+//   从 `sources.mjs` 导入，而不是在这里再写一遍判断——两处判断会在某一天分叉，
+//   而分叉之后哪一侧更宽松，从代码上是看不出来的。
+//
+//   `trustOfPublishedItem` 是本模块真正要传的那一个（条目 → 可信性）；
+//   `trustForOrigin` 给下面的 `originBreakdown` 用（它数的是 origin 本身）。
+import { trustForOrigin, trustOfPublishedItem } from '../../runtime/context/sources.mjs'
 
 export const SOURCES_LOADER_CODES = Object.freeze({
   /** 依赖没给对（缺 read 等）。接线错误必须在构造期说清，不能推迟到某次运行。 */
@@ -144,6 +151,43 @@ export const UNCONSUMED_ENDPOINTS = Object.freeze([
       + '让模型知道自己有哪些技能可用。',
   }),
 ])
+
+// ★ PRT-406：清单 detail 的"有内容"那一支，说清**来源构成**。
+//
+//   为什么不能只报条数：`count: 3` 无法回答"这 3 条里有没有运维安装的"，
+//   而那一件事恰恰决定了它们在上下文里是系统内容还是外部内容。
+//   一份只说条数的清单，会让"两种来源混在一起"这件事**在清单上不可见**——
+//   而清单的全部用处就是把不可见的东西写出来。
+//
+//     > 一个"只报条数"的清单，
+//     > 与一个"报条数、但那些条数的身份无从查起"的清单，在两种来源同数时
+//     > 是同一个东西——只不过前者会让人以为已经清点过了。
+function originBreakdown(items) {
+  let operator = 0
+  for (const it of items) {
+    if (trustForOrigin(it?.origin) === 'trusted') operator += 1
+  }
+  // ★ 用 `trustForOrigin` 而不是 `it.origin === 'operator'` 来数：
+  //   两处判断迟早分叉，而分叉之后"清单里说系统内容几条"与
+  //   "装配器按系统内容处理几条"会不一致——那种不一致**没有任何用例会发现**，
+  //   因为两边的读数各自都是自洽的。
+  return { operator, member: items.length - operator }
+}
+
+function originsPhrase(items) {
+  const { operator, member } = originBreakdown(items)
+  if (member === 0) return `${operator} 条运维安装的（系统内容）`
+  if (operator === 0) return `${member} 条成员登记的（外部内容）`
+  return `${operator} 条运维安装的（系统内容）+ ${member} 条成员登记的（外部内容）`
+}
+
+function skillsOriginDetail(skills) {
+  return `读了：${originsPhrase(skills)}`
+}
+
+function documentsOriginDetail(documents) {
+  return `读了：${originsPhrase(documents)}`
+}
 
 /**
  * 由评论的三个字段算出一个**内容派生**的稳定 id。
@@ -254,6 +298,7 @@ class SourceLoaderError extends Error {  constructor(code, message, extra = {}) 
  * @param {string|null} [deps.scope] 兜底空间（lease 上有 scope 时以 lease 为准）
  * @param {boolean} [deps.requireTask] 缺 taskId 时是否拒绝（默认 true）
  * @param {number} [deps.maxSkills] 最多带几条已发布技能（默认 50）
+ * @param {number} [deps.maxDocuments] 最多带几份显式文档（默认 20，PRT-406）
  * @param {number} [deps.maxUpstream] 最多读几个上游前驱任务（默认 20）
  * @returns {{loadSources: Function, availability: Function, lastReads: Function}}
  */
@@ -262,6 +307,7 @@ export function createHubSourceLoader({
   scope = null,
   requireTask = true,
   maxSkills = 50,
+  maxDocuments = 20,
   maxUpstream = 20,
   clock = () => Date.now(),
 } = {}) {
@@ -275,6 +321,11 @@ export function createHubSourceLoader({
   }
   if (!Number.isInteger(maxSkills) || maxSkills < 0) {
     throw new SourceLoaderError(SOURCES_LOADER_CODES.BAD_WIRING, 'maxSkills 必须是非负整数')
+  }
+  // ★ 文档的预算比技能**更紧**（20 vs 50）：技能的条目只是一个 prompt 引用，
+  //   而文档的每一条都**带着正文**。同样的条数，两者对 token 预算的压力差一个量级。
+  if (!Number.isInteger(maxDocuments) || maxDocuments < 0) {
+    throw new SourceLoaderError(SOURCES_LOADER_CODES.BAD_WIRING, 'maxDocuments 必须是非负整数')
   }
 
   // 每次运行读了些什么。它不是日志，而是**可被断言的东西**：
@@ -474,11 +525,27 @@ export function createHubSourceLoader({
       goal = pickGoal(goalBody, task?.goalId ?? lease.goalId ?? null)
 
       // ── 已发布技能 ──
+      //
+      // ★ PRT-406：`origin` 是**逐条**带回来的（hub 入库时写死，见 registerSkill /
+      //   installSkill），下游按它逐条判可信性。整批一个值做不到这件事：
+      //   要么把运维安装的也当外部内容，要么把成员提交的也当系统内容。
       const skillsBody = await readOrThrow(`/api/skills?scope=${encodeURIComponent(effScope)}`, { notFoundIsNull: true })
       const skillList = Array.isArray(skillsBody)
         ? skillsBody
         : (skillsBody?.skills ?? skillsBody?.items ?? [])
       const skills = (Array.isArray(skillList) ? skillList : []).slice(0, maxSkills)
+
+      // ── PRT-406：显式文档 ──
+      //
+      // 此前 `documents` 是硬编码的 `[]`，而空数组**什么都不说**：
+      //   "这次运行确实没有文档" 与 "产品还没做这件事" 在快照上长得一样。
+      // 现在真去读；读到空才是 read-empty，读不到是 read-failed，
+      // 没去读才是 not-attempted——三者各有各的位置（见来源清单）。
+      const documentsBody = await readOrThrow(`/api/documents?scope=${encodeURIComponent(effScope)}`, { notFoundIsNull: true })
+      const documentList = Array.isArray(documentsBody)
+        ? documentsBody
+        : (documentsBody?.documents ?? documentsBody?.items ?? [])
+      const documents = (Array.isArray(documentList) ? documentList : []).slice(0, maxDocuments)
 
       // ── PRT-402：团队计划与岗位清单 ──
       //
@@ -720,18 +787,34 @@ export function createHubSourceLoader({
         count: skillsOk ? countOrNull(skills.length) : undefined,
         detail: !skillsTried
           ? '这次运行没有去读它'
-          : (skillsOk ? (skills.length === 0 ? '读了，这次确实没有已发布 skill' : null) : '读了但没取到'),
+          : (skillsOk
+            ? (skills.length === 0 ? '读了，这次确实没有已发布 skill' : skillsOriginDetail(skills))
+            : '读了但没取到'),
       })
 
-      // ★ 显式文档：hub 上**没有**读端点，所以永远是 not-attempted。
-      //   这一条就是"没去取"与"确实没有"必须分开的最好例子——
-      //   从 PRT-406 起 `documents` 一直是空数组，而空数组**什么都不说**。
+      // ★ PRT-406：显式文档**现在真的去读了**。
+      //
+      //   在此之前这一条硬编码 `NOT_ATTEMPTED` + "hub 上没有读端点"——
+      //   那是**如实**的（确实没有端点）。但它同时意味着：无论世界里有没有
+      //   文档，快照上都写着"没去取"，而 `documents` 永远是 `[]`。
+      //
+      //     > 一个"因为读端点不存在所以永远不取"的清单，
+      //     > 与一个"去取了、这次确实没有"的清单，
+      //     > 在没人在意 `documents` 这个字段的时候是同一个东西——
+      //     > 只不过前者的 `not-attempted` 会随着端点上线而**变成一句假话**，
+      //     > 而它看起来仍然是一句诚实的自我说明。
+      const documentsTried = didAttempt('/api/documents')
+      const documentsOk = documentsTried && didSucceed('/api/documents')
       inventory.push({
         family: 'documents',
-        outcome: INVENTORY_OUTCOMES.NOT_ATTEMPTED,
-        endpoint: null,
-        detail: 'hub 上没有显式文档的读端点（见 availability().unconsumed 的 /api/skill-source 说明）'
-          + '——**没有去读**，而不是"确实没有文档"',
+        outcome: outcomeFor('/api/documents', { empty: documents.length === 0 }),
+        endpoint: documentsTried ? '/api/documents' : null,
+        count: documentsOk ? countOrNull(documents.length) : undefined,
+        detail: !documentsTried
+          ? '这次运行没有去读它'
+          : (documentsOk
+            ? (documents.length === 0 ? '读了，这个空间里确实没有显式文档' : documentsOriginDetail(documents))
+            : '读了但没取到'),
       })
 
       // ★ 工作区状态：同上，属于 `UNSERVED_SOURCE_FAMILIES`。
@@ -779,7 +862,22 @@ export function createHubSourceLoader({
         // 产物**只给引用**（PRT-405）：正文是一个预算决定。
         artifacts: mapEpochMs(task?.artifacts),
         skills: mapEpochMs(skills),
-        documents: [],
+        // ★ PRT-406：显式文档。**不再是硬编码的 `[]`**。
+        documents: mapEpochMs(documents),
+        // ★ PRT-406：逐条判可信性——**这里**是"运维安装的算系统内容"这件事
+        //   在装配侧的接线处。`trustOfPublishedItem` 只认 `origin === 'operator'`，
+        //   别的（含缺失、含将来新增的取值）一律外部内容。
+        //
+        //   为什么传**函数**而不是先算好一个值：`collectCandidates` 是按条目
+        //   调用的，一个函数能让"两种来源混在同一个类型里"这件事成立。
+        //   算成一个值就必然要把两类之一丢掉。
+        //
+        //   ⚠️ 传的必须是**条目 → 可信性**那一个（`trustOfPublishedItem`），
+        //   不是**origin → 可信性**那一个（`trustForOrigin`）。传错的话
+        //   不会抛错：每条都会落到 untrusted，而那是安全的一侧，
+        //   于是"功能没生效"会看起来像"一次保守的取舍"。
+        skillTrust: trustOfPublishedItem,
+        documentTrust: trustOfPublishedItem,
         workspaceState: null,
       }
     },
@@ -806,6 +904,9 @@ export function createHubSourceLoader({
           '/api/task-feedback',
           // PRT-405：上游交付走的是**同一个** `/api/task`（按 blockedBy 逐个读前驱），
           // 所以这里不新增条目——新增会谎称多了一个端点。
+          // PRT-406：显式文档。这一条是**真的新增了一个端点**（此前没有），
+          // 所以必须加在这里；不加会让 `consumed` 少报一个已接上的读面。
+          '/api/documents',
         ]),
         /**
          * ★ PRT-405：上游交付读的是**哪些**任务。

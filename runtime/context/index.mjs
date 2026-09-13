@@ -24,6 +24,15 @@ export {
   createSourceInventoryEntry,
 } from '../contracts/context.mjs'
 
+// PRT-406：skill / document 的可信性——`trustForOrigin` 是"逐条区分"的唯一出处
+export {
+  collectCandidates,
+  defaultTrustForType,
+  publishedSources,
+  trustForOrigin,
+  trustOfPublishedItem,
+} from './sources.mjs'
+
 // PRT-413：精确 tokenizer 的**接入点**（词表由使用者提供，见 tokenizer-registry.mjs）
 export {
   BPE_ARTIFACT_FIELDS,

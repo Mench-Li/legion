@@ -450,18 +450,66 @@ export function workspaceStateSource(state, { scope, nowMs } = {}) {
 // ---------------------------------------------------------------- PRT-406
 
 /**
+ * ★ PRT-406：**由 hub 记录的来源字段**推出这一条内容该算系统内容还是外部内容。
+ *
+ * 这是"逐条区分"的**唯一出处**，与 `defaultTrustForType` 同一性质：
+ * 它把散落的判断收成一处，好让"哪一类算系统内容"这个问题只有一个答案。
+ *
+ * 判据只有一条：**只有 `'operator'` 是系统内容，别的全都是外部内容**。
+ * 写成"不是 member 就是 operator"会开一个与 `defaultTrustForType` 同形的口子：
+ * 将来新增一种 origin（比如 `'imported'`、`'upstream'`）就**静默获得可信身份**。
+ *
+ *   > 一个"列一份可信来源名单"的判定，
+ *   > 与一个"列一份不可信来源名单"的判定，在名单刚好覆盖今天全部取值时
+ *   > 是同一个东西——只不过前者会在新增一种取值的那天，
+ *   > 把一种**从没被审过**的来源当成系统指示。
+ *
+ * ⚠️ 这个值**只影响提示词里这段内容的身份标注与排序**。它**不是**授权判据：
+ * PRT-412 的整套用例断言的是"不可信来源不能扩大权限、不能改变审批策略"，
+ * 而那条边界由 `AUTHORITY_BEARING_KEYS`、ToolGuard 与审批栈守着，
+ * 与这里的 `trust` 无关——**把 `trust` 接进任何授权判定都是错的**。
+ */
+export function trustForOrigin(origin) {
+  return origin === 'operator' ? TRUSTED : UNTRUSTED
+}
+
+/**
+ * ★ PRT-406：`publishedSources`/`collectCandidates` 的 `trust` 参数要的是
+ * **从条目到可信性**的函数，而 {@link trustForOrigin} 要的是**从 origin 字符串**
+ * 到可信性的函数。这一个就是两者之间的适配器。
+ *
+ * 为什么必须分开、而不是把 `trustForOrigin` 写成"能同时吃两种入参"：
+ *
+ *   第一版就是把 `trustForOrigin` 直接当逐条判定函数传下去的。它永远不会抛错——
+ *   收到一个对象时 `origin === 'operator'` 恒为假，于是**每一条都返回 untrusted**。
+ *
+ *     > 一个"传错了投影函数"的接线，
+ *     > 与一个"逐条判定确实生效了"的接线，在**没有任何一条是系统内容**的时候
+ *     > 是同一个东西——只不过前者会让"运维安装的内容按外部内容处理"
+ *     > 这件事，看起来像一次**保守的取舍**，而不是一次接线错误。
+ *
+ *   方向恰好是安全的一侧，所以它不是漏洞；但它是**功能没生效**，
+ *   而唯一能发现它的方式是断言"某些条目**是** trusted"——纯否定断言发现不了。
+ *   （本批的用例正是这么抓到它的。）
+ */
+export function trustOfPublishedItem(item) {
+  return trustForOrigin(item?.origin)
+}
+
+/**
  * 已发布 Skills 与显式文档 → 来源。
  *
  * **可信性必须由调用方显式声明**，因为这两类里混着两种来源：
  *   · 运维装进安装目录的 skill / 运维放进去的规范文档 —— 属于系统内容；
  *   · 从仓库读到的 README、从网页抓来的文档 —— 是外部内容。
  *
- * 而**同一个类型**（`skill` / `document`）两者都用。所以默认取
- * `INHERENTLY_UNTRUSTED_TYPES` 的判断：`document` 在名单里 → 默认不可信；
- * 而 `skill` 不在名单里 → 仍然**默认不可信**（判据是"没显式声明 trusted 就是
- * untrusted"，名单只用来解释"这一类向来是外来的"）。
+ * 而**同一个类型**（`skill` / `document`）两者都用。所以这里**不猜**：
+ * 要 trusted 就显式传 `trust`（一个值，或一个逐条判定的函数
+ * ——生产侧的逐条判定用 {@link trustForOrigin}）。
  *
- * 也就是说：**这个方法不猜**。要 trusted 就显式传 `trust`。
+ * 名单（`INHERENTLY_UNTRUSTED_TYPES`）只用来**解释**"这一类向来是外来的"，
+ * 不用来放行：`document` 在名单里 → 默认不可信；`skill` 不在名单里 →
+ * 仍然**默认不可信**。
  */
 export function publishedSources(items, { scope, nowMs, type, trust, allowTruncate = true } = {}) {
   if (items === null || typeof items === 'undefined') return []
@@ -471,9 +519,9 @@ export function publishedSources(items, { scope, nowMs, type, trust, allowTrunca
   if (type !== 'skill' && type !== 'document') {
     throw new SourceError(SOURCE_CODES.BAD_INPUT, `publishedSources 的 type 只能是 skill 或 document，收到：${type}`)
   }
-  if (trust !== TRUSTED && trust !== UNTRUSTED) {
+  if (typeof trust !== 'function' && trust !== TRUSTED && trust !== UNTRUSTED) {
     throw new SourceError(SOURCE_CODES.BAD_INPUT,
-      `publishedSources 必须显式给出 trust（'${TRUSTED}' 或 '${UNTRUSTED}'）：` +
+      `publishedSources 必须显式给出 trust（'${TRUSTED}' 或 '${UNTRUSTED}'，或一个逐条判定的函数）：` +
       '同一个类型里既有运维安装的内容也有从仓库/网页读来的内容，猜错了就是把外部文本当成了系统指示。')
   }
   const out = []
@@ -485,13 +533,35 @@ export function publishedSources(items, { scope, nowMs, type, trust, allowTrunca
     if (typeof id !== 'string' || id === '') {
       throw new SourceError(SOURCE_CODES.BAD_INPUT, 'Skill/文档必须有 id、name 或 path')
     }
+    // ★ PRT-406：`trust` 允许是**函数**，于是"同一个类型里两种来源"可以**逐条**判定。
+    //
+    //   一个对所有 skill 生效的 `skillTrust` 值，只有两种结局：
+    //   要么把运维安装的也当成外部内容（保守，但那个字段就白记了），
+    //   要么把成员提交的也当成系统内容（不保守，而且**没有任何调用方会发现**）。
+    //
+    //     > 一个"只能整批声明可信性"的接口，
+    //     > 与一个"根本没打算区分"的接口，在调用方只有一个值的用法下是同一个东西——
+    //     > 只不过前者会让"逐条区分"这件事看起来是**接口不支持**，
+    //     > 而它其实是接口**逼着你放弃**的那一半。
+    //
+    //   返回值**逐条校验**（不是 `?? UNTRUSTED`）：一个写错的判定函数返回
+    //   `undefined` 时必须抛错。默认成 untrusted 会让"忘了处理某种 origin"
+    //   表现得像"这种来源本来就是外部的"——一次静默的**降级**，
+    //   而它恰好是安全的一侧，所以**永远不会有人发现**。
+    const itemTrust = typeof trust === 'function' ? trust(it) : trust
+    if (itemTrust !== TRUSTED && itemTrust !== UNTRUSTED) {
+      throw new SourceError(SOURCE_CODES.BAD_INPUT,
+        `publishedSources 的 trust 判定对 ${type} ${id} 给出了 '${itemTrust}'——`
+        + `只能是 '${TRUSTED}' 或 '${UNTRUSTED}'。`
+        + '（不默认成 untrusted：那会让"忘了处理这种来源"看起来像"这种来源本来就是外部的"。）')
+    }
     out.push(createCandidate({
       id: `${type}:${id}`,
       type,
       version: versionOf(it.version ?? it.sha256 ?? it.updatedAtMs, `${type} ${id}`),
       acquiredAtMs: acquiredAt(it.updatedAtMs ?? it.createdAtMs, `${type} ${id}`, nowMs),
       content: stableRecord(it, ['id', 'name', 'path', 'title', 'body', 'sha256', 'originUrl', 'updatedAtMs']),
-      trust,
+      trust: itemTrust,
       scope,
       allowTruncate,
     }))
@@ -540,8 +610,14 @@ export function collectCandidates(input = {}) {
   out.push(...commentSources(input.userFeedback ?? [], { scope, nowMs, type: 'user-feedback' }))
   out.push(...upstreamDeliverySources(input.upstreamDeliveries ?? [], { scope, nowMs }))
   out.push(...artifactSources(input.artifacts ?? [], { scope, nowMs }))
-  out.push(...publishedSources(input.skills ?? [], { scope, nowMs, type: 'skill', trust: input.skillTrust ?? UNTRUSTED }))
-  out.push(...publishedSources(input.documents ?? [], { scope, nowMs, type: 'document', trust: input.documentTrust ?? UNTRUSTED }))
+  // ★ PRT-406：skill / document 的 `trust` 允许是**函数**——生产侧用
+  //   `trustOfPublishedItem`（条目 → 可信性），于是"运维安装的"与
+  //   "成员登记的"在**同一次**调用里各自拿到自己的可信性。
+  //   缺省就是它，所以调用方通常什么都不用传。
+  const skillTrust = input.skillTrust ?? trustOfPublishedItem
+  const documentTrust = input.documentTrust ?? trustOfPublishedItem
+  out.push(...publishedSources(input.skills ?? [], { scope, nowMs, type: 'skill', trust: skillTrust }))
+  out.push(...publishedSources(input.documents ?? [], { scope, nowMs, type: 'document', trust: documentTrust }))
 
   const ws = workspaceStateSource(input.workspaceState ?? null, { scope, nowMs })
   if (ws !== null) out.push(ws)

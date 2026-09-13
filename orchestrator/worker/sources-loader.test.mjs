@@ -1005,7 +1005,7 @@ function invOf(src, family) {
 }
 
 test('★★★ "没去读"与"读了但没有"在清单里**分得开**（这份清单存在的唯一理由）', async () => {
-  // 同一个端点、同一个空数组，两种截然不同的处境。
+  // 同一个空数组，两种截然不同的处境。
   const id = await seedTask({ title: '没有评论也没有产物的任务' })
   const loader = createHubSourceLoader({ hub: makeHub(), scope: SCOPE })
   const src = await loader.loadSources({ taskId: id, scope: SCOPE })
@@ -1016,15 +1016,44 @@ test('★★★ "没去读"与"读了但没有"在清单里**分得开**（这�
   assert.equal(comments.count, 0)
   assert.equal(comments.endpoint, '/api/task')
 
-  // ② 显式文档：hub 上**没有读端点**，我们压根没去读 → not-attempted，count 是 null
-  const docs = invOf(src, 'documents')
-  assert.equal(docs.outcome, 'not-attempted')
-  assert.equal(docs.count, null, '"没去读"没有条数可言——写 0 就与 read-empty 重合了')
-  assert.equal(docs.endpoint, null)
+  // ② 工作区状态：hub 上**没有读端点**，我们压根没去读 → not-attempted，count 是 null
+  //
+  //   ★ 这里原本举的例子是 `documents`，而 PRT-406 给文档**加上了读端点**，
+  //     于是这条用例红了：actual 'read-empty' / expected 'not-attempted'。
+  //
+  //     红得对——"hub 上没有显式文档的读端点"这句话**过期了**。
+  //     一个把"还没做"当作例子的用例，会在那个功能做完的那天变成一条假话，
+  //     而它红得越晚，越可能被人当成"用例写错了"去改期望而不是改事实。
+  //     所以换成一个**确实仍然没有端点**的来源族（工作区状态是本机目录，
+  //     它不属于 hub），而不是把期望改成 read-empty 了事。
+  const ws = invOf(src, 'workspaceState')
+  assert.equal(ws.outcome, 'not-attempted')
+  assert.equal(ws.count, null, '"没去读"没有条数可言——写 0 就与 read-empty 重合了')
+  assert.equal(ws.endpoint, null)
 
   // ③ 两者**不能**是同一个读数。这是整条用例的重点。
-  assert.notEqual(comments.outcome, docs.outcome)
-  assert.notEqual(comments.count, docs.count)
+  assert.notEqual(comments.outcome, ws.outcome)
+  assert.notEqual(comments.count, ws.count)
+})
+
+test('★★ PRT-406：documents **真的去读了**（不再是"没有端点所以永远没去读"）', async () => {
+  const id = await seedTask({ title: '文档用例任务' })
+  const loader = createHubSourceLoader({ hub: makeHub(), scope: SCOPE })
+  const src = await loader.loadSources({ taskId: id, scope: SCOPE })
+
+  // 这个空间里确实没有文档 → read-empty（**不是** not-attempted）。
+  //
+  //   > 一个"因为读端点不存在所以永远不取"的清单，
+  //   > 与一个"去取了、这次确实没有"的清单，
+  //   > 在没人在意 `documents` 这个字段的时候是同一个东西——
+  //   > 只不过前者的 `not-attempted` 会随着端点上线而变成一句假话。
+  const docs = invOf(src, 'documents')
+  assert.equal(docs.outcome, 'read-empty')
+  assert.equal(docs.count, 0)
+  assert.equal(docs.endpoint, '/api/documents')
+  // 而且这个端点必须出现在 `consumed` 里：不加会少报一个已接上的读面。
+  assert.ok(loader.availability().consumed.includes('/api/documents'),
+    '`/api/documents` 已经接上了，就必须出现在 consumed 里')
 })
 
 test('★ 上游交付："链头"是 not-attempted，"读了但都没交付"是 skipped（处置完全不同）', async () => {
@@ -1161,4 +1190,78 @@ test('★★★ "发过请求但没成功" 与 "没去读" 必须分开（read-f
   assert.equal(skills.outcome, 'read-failed',
     '发过请求但没拿到，必须是 read-failed——记成 not-attempted 等于谎称我们没打算读')
   assert.equal(skills.endpoint, '/api/skills', '失败也要记下读的是哪个端点')
+})
+
+// ============================================================================
+// PRT-406 收尾：装载器读回来的东西，**逐条**可信性分得开吗
+//
+// 这一条是端到端的**落点**——它把三段真实接线串起来：
+//
+//   `registerSkill` / `installSkill`（谁写的 origin）
+//     → `/api/skills`（能不能读回来）
+//     → `loadSources`（逐条带回去、不压平）
+//     → `collectCandidates`（按条目判可信性）
+//
+// ## 为什么必须走真 hub + 真路由
+//
+// 这条链上**任何一段**接错了，表现都一样：候选全是 untrusted。
+// 而"全是 untrusted"恰好是**安全的一侧**，所以：
+//
+//   > 一个"传错了投影函数、于是每条都落到不可信"的接线，
+//   > 与一个"运维安装的内容确实被按外部内容处理"的保守实现，
+//   > 在只看否定断言（"成员的内容不可信"）时是同一个东西——
+//   > 只有**肯定断言**（"某一条**是**可信的"）能把它们分开。
+//
+// 所以本节既有肯定断言也有否定断言，而且断言**同一次调用**里两类并存。
+// ============================================================================
+test('★★★ 端到端：运维装的与成员登记的 skill，**同一次装配**里可信性不同', async () => {
+  // ① 运维安装（真函数，与 CLI 走同一条路）——origin='operator'
+  mod.installSkill({ id: 'e2e-operator-skill', name: '运维装的技能', scope: SCOPE, main: '系统内容正文' })
+  // ② 成员登记（真 HTTP 路由）——origin='member'，发布后才可见
+  const reg = await post('/api/skills/register', {
+    id: 'e2e-member-skill', name: '成员登记的技能', scope: SCOPE, main: '外部内容正文', by: 'general',
+    // 顺带确认客户端说了不算
+    origin: 'operator',
+  })
+  assert.equal(reg.status, 200, `登记失败：${reg.status} ${JSON.stringify(reg.body).slice(0, 200)}`)
+  const pub = await post('/api/skills/review', { id: 'e2e-member-skill', action: 'publish', by: 'general' })
+  assert.equal(pub.status, 200, `发布失败：${pub.status} ${JSON.stringify(pub.body).slice(0, 200)}`)
+
+  // ③ 装载器**走真读面**取回来
+  //
+  //   ★ 这里需要一个**真实存在**的任务：`loadSources` 会先读 `/api/task`，
+  //     读回空就抛 `SOURCES_LOADER_TASK_NOT_FOUND`。
+  //     第一版我随手写了 `taskId: 't1'`——那是上面几个假 hub 用例里的
+  //     虚构 id，在真 hub 上并不存在。
+  //
+  //       > 一个"随手编一个 taskId"的用例，
+  //       > 与一个"这个任务真的读不到"的用例，报的是同一个错——
+  //       > 只不过前者会让人去查产品，而真相是用例自己少了一步播种。
+  const taskId = await seedTask({ title: 'PRT-406 端到端任务' })
+  const loader = createHubSourceLoader({ hub: makeHub(), scope: SCOPE })
+  const src = await loader.loadSources({ taskId, scope: SCOPE })
+
+  const byId = Object.fromEntries(src.skills.map((s) => [s.id, s]))
+  assert.ok(byId['e2e-operator-skill'], `运维装的技能没被读回来：${JSON.stringify(src.skills.map((s) => s.id))}`)
+  assert.ok(byId['e2e-member-skill'], '成员登记的技能没被读回来（发布了吗？）')
+
+  // 装载器这一层的职责：**逐条保留 origin**，不压成一个字段。
+  assert.equal(byId['e2e-operator-skill'].origin, 'operator')
+  assert.equal(byId['e2e-member-skill'].origin, 'member',
+    '客户端在 register 请求里写的 origin 被采纳了')
+
+  // ④ 装配（与 hub 路由 `server.mjs` 里那一处**同形**：`collectCandidates({...src, scope})`）
+  const { collectCandidates } = await import('../../runtime/context/sources.mjs')
+  const cands = collectCandidates({ ...src, scope: SCOPE })
+  const skillCands = cands.filter((c) => c.source.type === 'skill')
+  const trustById = Object.fromEntries(skillCands.map((c) => [c.source.id, c.source.trust]))
+
+  // ★ 肯定断言：运维装的**必须**是可信的。
+  //   这一条是整节的支点——只有它能发现"投影函数传错、每条都静默落到 untrusted"。
+  assert.equal(trustById['skill:e2e-operator-skill'], 'trusted',
+    '运维安装的 skill 没有被判为系统内容——'
+    + '如果这行红了而否定断言全绿，说明判定函数被整体降级了（安全一侧，所以没人会发现）')
+  assert.equal(trustById['skill:e2e-member-skill'], 'untrusted')
+  // 两者**同时**成立，才说明是"逐条"，而不是"整批一个值"。
+  assert.notEqual(trustById['skill:e2e-operator-skill'], trustById['skill:e2e-member-skill'])
 })

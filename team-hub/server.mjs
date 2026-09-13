@@ -1214,6 +1214,26 @@ ensureColumn('skills', 'status', "status TEXT DEFAULT 'pending'")
 ensureColumn('skills', 'contentHash', "contentHash TEXT DEFAULT ''")
 ensureColumn('skills', 'reviewedAt', 'reviewedAt TEXT')
 ensureColumn('skills', 'bundle', "bundle TEXT DEFAULT ''")
+// ── PRT-406：skills 的**来源**（谁把它放进来的），用于上下文可信性判定 ────────────
+//
+// spec §6.5 / PRT-406 要求区分「运维安装的 skill（系统内容）」与
+// 「团队成员登记/从仓库读来的 skill（外部内容）」——同一个类型 `skill` 里两者都有。
+//
+// ★ 为什么是**入库时由 hub 写死**、而不是请求体里带：
+//   如果 `origin` 来自 body，那么一个成员只要在自己的 register 请求里写
+//   `origin: 'operator'`，就能把自己的技能**升格成系统指示**。
+//
+//     > 一个"由提交者声明自己可信"的来源字段，
+//     > 与一个"任何人都可以自称可信"的字段，在没人恶意提交的时候是同一个东西——
+//     > 只不过前者会把**信任这件事，交给被信任的那一方去填**。
+//
+//   所以两条写入路径各自**硬编码**一个值（registerSkill → 'member'、
+//   installSkill → 'operator'），谁都不读 `input.origin`。
+//
+// ★ 默认值取 `'member'`（不可信那一侧）：迁移前就存在的那些 skill 都是成员登记的，
+//   而"老数据"与"运维安装"是两件事——把它们默认成系统内容，等于用一次迁移
+//   悄悄给全部历史内容升格。
+ensureColumn('skills', 'origin', "origin TEXT DEFAULT 'member'")
 // 老库迁移：skills 先于 bundle 列存在，旧内容只有 prompt → 生成单件 bundle（main=prompt），
 // 并按「bundle 化」新公式重算 contentHash，保证旧技能「同内容重复提交」幂等、改内容才 bump version。
 // （skillContentHash / normalizeBundle 为函数声明，已提升，可在建表后调用。）
@@ -1222,6 +1242,39 @@ for (const r of db.prepare("SELECT id, name, description, prompt, scope FROM ski
   const hash = skillContentHash({ name: r.name, description: r.description, scope: r.scope, bundle })
   db.prepare('UPDATE skills SET bundle=?, contentHash=? WHERE id=?').run(JSON.stringify(bundle), hash, r.id)
 }
+// ── PRT-406：显式文档（context source 里的 `document` 那一类）──────────────────
+//
+// spec §6.5 把「显式文档」与「已发布 Skills」并列为上下文来源。`skill` 那一半
+// 走 `/api/skills`，`document` 那一半此前**根本没有数据面**——`collectCandidates`
+// 的 `input.documents` 一直是硬编码的 `[]`。
+//
+//   > 一个"每份文档都不存在"的世界，
+//   > 与一个"产品还没做这件事"的世界，在快照上是同一个东西——
+//   > 只不过前者会出现在来源清单的 `read-empty` 那一栏，
+//   > 而后者必须出现在 `not-attempted` 那一栏。
+//
+// ★ `origin` 与 skills 同一套纪律：入库时由路由**硬编码**，不读 body
+//   （成员登记 → 'member'；运维安装 → 'operator'，走本机 CLI）。
+// ★ `body` 是**内容本身**：文档与 skill 一样，正文进上下文是一个预算决定，
+//   所以快照侧走 `allowTruncate`，而不是在这里截断（截断理由要能被记下来）。
+db.exec(`
+  CREATE TABLE IF NOT EXISTS documents (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL DEFAULT '',
+    path TEXT DEFAULT '',
+    body TEXT DEFAULT '',
+    scope TEXT DEFAULT 'default',
+    origin TEXT DEFAULT 'member',
+    version INTEGER NOT NULL DEFAULT 1,
+    sha256 TEXT DEFAULT '',
+    createdAt TEXT,
+    updatedAt TEXT
+  )
+`)
+// 老库幂等补齐（本表随 PRT-406 引入，无老库，保留 ensureColumn 是为了
+// 与其它表的迁移纪律一致：将来加列走同一条路，不再手写 ALTER）。
+ensureColumn('documents', 'origin', "origin TEXT DEFAULT 'member'")
+ensureColumn('documents', 'sha256', "sha256 TEXT DEFAULT ''")
 // 任务 TTL/幂等/转派列（老 tasks 表补齐）
 ensureColumn('tasks', 'ttlMinutes', 'ttlMinutes INTEGER')
 ensureColumn('tasks', 'expiresAt', 'expiresAt TEXT')
@@ -2375,8 +2428,64 @@ function registerSkill(input) {
       db.prepare("UPDATE skills SET name=?, description=?, prompt=?, bundle=?, scope=?, version=version+1, status='pending', contentHash=?, reviewedAt=NULL, updatedAt=? WHERE id=?")
         .run(name, description, bundle.main, JSON.stringify(bundle), scope, hash, now(), id)
     } else {
-      db.prepare("INSERT INTO skills (id, name, description, prompt, bundle, scope, owner, version, status, contentHash, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'pending', ?, ?, ?)")
+      // ★ PRT-406：`origin` **写死 'member'**，不读 `input.origin`。
+      //
+      //   本路由是**成员**登记技能的那条路（`handleWrite` → token + `by`）。
+      //   如果它接受 body 里的 `origin`，那么拿得到 token 的人只要在自己的
+      //   请求里写 `origin: 'operator'`，就能把自己的技能**升格成系统指示**——
+      //   而下游的可信性判定正是按这个字段做的。
+      //
+      //     > 一个"由提交者声明自己可信"的来源字段，
+      //     > 与一个"任何人都可以自称可信"的字段，在没人恶意提交的时候
+      //     > 是同一个东西——只不过前者会把**信任这件事，交给被信任的那一方去填**。
+      //
+      //   运维的安装路径是另一个函数（`installSkill`），它不经 HTTP。
+      //   两条路径各自硬编码一个值，是"谁写的"这件事**唯一**的出处。
+      db.prepare("INSERT INTO skills (id, name, description, prompt, bundle, scope, owner, origin, version, status, contentHash, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, 'member', 1, 'pending', ?, ?, ?)")
         .run(id, name, description, bundle.main, JSON.stringify(bundle), scope, input.owner ?? null, hash, now(), now())
+    }
+    return getSkill(id)
+  })
+}
+
+/**
+ * ★ PRT-406：**运维安装**技能——`origin` 写死 `'operator'`，直接 `published`。
+ *
+ * 为什么它是**一个函数**而不是一条路由：
+ * 运维安装这件事的真实边界是**文件系统**，不是 HTTP token。做成路由的话，
+ * 任何拿得到 token 的成员都能调用它，于是"运维安装"这个名字就成了一句
+ * 谁都能说的话——而它正是"系统内容"的唯一依据。
+ *
+ *   > 一个"任何 token 持有者都能说自己是在安装系统内容"的入口，
+ *   > 与一个"系统内容由部署者写入"的入口，在没人滥用的时候是同一个东西——
+ *   > 只不过前者会让"系统内容"这个身份，变成一句**客户端自己填的声明**。
+ *
+ * 所以它只被 `team-hub/scripts/install-skill.mjs`（本机 CLI）调用：
+ * 走 HTTP 的登记一律 `'member'`，走本机 CLI 的一律 `'operator'`。
+ *
+ * 直接 `published`：运维装进来的东西**已经是他审过的**，再走一遍复审队列
+ * 只会让人以为"运维的安装也需要另一个成员批准"。
+ */
+export function installSkill(input) {
+  return withTx(() => {
+    const id = input.id
+    if (typeof id !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(id)) {
+      throw new Error('技能 id 非法：小写字母/数字开头，可含连字符，≤64 字符')
+    }
+    const name = input.name
+    if (typeof name !== 'string' || name.trim().length === 0) throw new Error('技能名称为空')
+    const description = input.description ?? ''
+    const scope = input.scope ?? 'default'
+    const bundle = normalizeBundle(input)
+    const hash = skillContentHash({ name, description, scope, bundle })
+    const existing = db.prepare('SELECT * FROM skills WHERE id = ?').get(id)
+    if (existing) {
+      if (existing.contentHash === hash && existing.origin === 'operator') return getSkill(id)
+      db.prepare("UPDATE skills SET name=?, description=?, prompt=?, bundle=?, scope=?, origin='operator', version=version+1, status='published', contentHash=?, reviewedAt=?, updatedAt=? WHERE id=?")
+        .run(name, description, bundle.main, JSON.stringify(bundle), scope, hash, now(), now(), id)
+    } else {
+      db.prepare("INSERT INTO skills (id, name, description, prompt, bundle, scope, owner, origin, version, status, contentHash, reviewedAt, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, 'operator', 1, 'published', ?, ?, ?, ?)")
+        .run(id, name, description, bundle.main, JSON.stringify(bundle), scope, 'operator', hash, now(), now(), now())
     }
     return getSkill(id)
   })
@@ -2428,6 +2537,114 @@ function listSkills({ scope, member, includePending } = {}) {
       const grantedToMember = member !== undefined && s.grants.includes(member)
       return inScope || grantedByScope || grantedToMember
     })
+}
+
+/**
+ * ★ PRT-406：显式文档的 DAO。
+ *
+ * 与 skills 的两个不同之处，都是刻意的：
+ *   ① **没有状态机**。skill 走「成员登记 → 复审 → 发布」，因为它会被员工
+ *      当指令执行；文档是**参考资料**，登记即生效——给它加一道复审队列
+ *      只会让人以为"文档也需要批准"（而审批的真实边界是 ToolGuard 与权限，
+ *      不是这张表）。
+ *   ② **正文随条目返回**。文档的全部用处就是它的正文；只给元数据等于
+ *      没接。正文进上下文是一个**预算**决定，所以截断发生在装配侧并记理由，
+ *      而不是在这里悄悄砍掉。
+ */
+function listDocuments({ scope, id } = {}) {
+  const rows = db.prepare('SELECT * FROM documents ORDER BY id').all()
+  return rows.filter((d) => {
+    if (id !== undefined && id !== null && String(id) !== '' && d.id !== String(id)) return false
+    // scope 未指定 = 不限空间（与 /api/skills 的"全缺省即全部"同口径）
+    if (scope === undefined || scope === null || String(scope) === '') return true
+    return d.scope === String(scope)
+  })
+}
+
+/** 内容哈希：正文 + 标题 + 路径。同内容重复登记幂等，改内容才 bump version。 */
+function documentContentHash({ title, path, body }) {
+  return createHash('sha256')
+    .update(`${title}\u0000${path}\u0000${body}`, 'utf8')
+    .digest('hex')
+}
+
+/**
+ * 登记/更新一份显式文档。
+ *
+ * ★ `origin` **写死 'member'**，与 `registerSkill` 同一条纪律：不读 `input.origin`。
+ *   内容哈希不含 `origin`——"谁放进去的"变了，内容没变，就不该产生新版本
+ *   （否则一次运维接手会让全部文档的版本号凭空 +1，而正文一字未改）。
+ */
+function registerDocument(input) {
+  return withTx(() => {
+    const id = input.id
+    if (typeof id !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(id)) {
+      throw new Error('文档 id 非法：小写字母/数字开头，可含 . _ -，≤128 字符')
+    }
+    const title = typeof input.title === 'string' ? input.title : ''
+    const path = typeof input.path === 'string' ? input.path : ''
+    const body = typeof input.body === 'string' ? input.body : ''
+    if (title.trim() === '' && body.trim() === '') {
+      throw new Error('文档必须有 title 或 body（两者都空等于登记了一份空文档）')
+    }
+    const scope = input.scope ?? 'default'
+    const hash = documentContentHash({ title, path, body })
+    const existing = db.prepare('SELECT * FROM documents WHERE id = ?').get(id)
+    if (existing) {
+      // 幂等：同内容重复登记不产生新版本、也不动 origin。
+      if (existing.sha256 === hash) return getDocument(id)
+      db.prepare('UPDATE documents SET title=?, path=?, body=?, scope=?, version=version+1, sha256=?, updatedAt=? WHERE id=?')
+        .run(title, path, body, scope, hash, now(), id)
+    } else {
+      db.prepare("INSERT INTO documents (id, title, path, body, scope, origin, version, sha256, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, 'member', 1, ?, ?, ?)")
+        .run(id, title, path, body, scope, hash, now(), now())
+    }
+    return getDocument(id)
+  })
+}
+
+function getDocument(id) {
+  const row = db.prepare('SELECT * FROM documents WHERE id = ?').get(id)
+  if (!row) throw new Error(`文档不存在：${id}`)
+  return row
+}
+
+/** ★ PRT-406：运维安装文档——`origin` 写死 'operator'，与 `installSkill` 同边界。 */
+export function installDocument(input) {
+  return withTx(() => {
+    const id = input.id
+    if (typeof id !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(id)) {
+      throw new Error('文档 id 非法：小写字母/数字开头，可含 . _ -，≤128 字符')
+    }
+    const title = typeof input.title === 'string' ? input.title : ''
+    const path = typeof input.path === 'string' ? input.path : ''
+    const body = typeof input.body === 'string' ? input.body : ''
+    if (title.trim() === '' && body.trim() === '') {
+      throw new Error('文档必须有 title 或 body（两者都空等于登记了一份空文档）')
+    }
+    const scope = input.scope ?? 'default'
+    const hash = documentContentHash({ title, path, body })
+    const existing = db.prepare('SELECT * FROM documents WHERE id = ?').get(id)
+    if (existing) {
+      if (existing.sha256 === hash && existing.origin === 'operator') return getDocument(id)
+      db.prepare("UPDATE documents SET title=?, path=?, body=?, scope=?, origin='operator', version=version+1, sha256=?, updatedAt=? WHERE id=?")
+        .run(title, path, body, scope, hash, now(), id)
+    } else {
+      db.prepare("INSERT INTO documents (id, title, path, body, scope, origin, version, sha256, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, 'operator', 1, ?, ?, ?)")
+        .run(id, title, path, body, scope, hash, now(), now())
+    }
+    return getDocument(id)
+  })
+}
+
+/** 删除文档（按 id）。不存在时**不抛**：删除是幂等的（与 revokeSkill 同口径）。 */
+function deleteDocument(id) {
+  return withTx(() => {
+    const row = db.prepare('SELECT * FROM documents WHERE id = ?').get(id)
+    if (!row) return { deleted: false, id }
+    db.prepare('DELETE FROM documents WHERE id = ?').run(id)
+    return { deleted: true, id }
+  })
 }
 
 function grantSkill(id, grants) {
@@ -6540,6 +6757,53 @@ async function handle(req, res, stripPrefix) {
       })
       return
     }
+    // ── PRT-406：显式文档的写面（登记 / 删除）──
+    //
+    // 与技能写面的一处**刻意不同**：这里**没有 review 路由**。
+    // 技能走「登记 → 复审 → 发布」，因为它会被员工当指令执行；文档是参考资料，
+    // 登记即生效。给它加一道复审队列只会让人以为"文档也需要批准"——
+    // 而审批的真实边界是 ToolGuard 与权限栈，不是这张表。
+    //
+    // ⚠️ `origin` **不由 body 决定**（registerDocument 里写死 'member'）：
+    //   否则任何拿得到 token 的成员都能把自己的文档标成系统内容。
+    if (req.method === 'POST' && path === '/api/documents') {
+      await handleWrite(req, res, (body, by, scope) => {
+        const id = body.id
+        if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
+        const doc = registerDocument({
+          id: id.trim(),
+          title: body.title,
+          path: body.path,
+          body: body.body,
+          // 归属空间：显式 body.scope 优先，否则用写路径解析出来的 scope
+          // （与 registerSkill 同口径）。
+          scope: body.scope ?? scope,
+        })
+        // ★ 审计的 detail 里**不带正文**：审计是"谁改了什么"的记录，
+        //   把 body 塞进去等于给每一份文档另存一份全文（还包括被删掉的那些）。
+        audit(by, doc.scope, 'document:register', doc.id, {
+          title: doc.title, path: doc.path, version: doc.version, sha256: doc.sha256,
+          docScope: doc.scope, bodyBytes: Buffer.byteLength(doc.body, 'utf8'),
+        })
+        return doc
+      })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/documents/delete') {
+      await handleWrite(req, res, (body, by, scope) => {
+        const id = body.id
+        if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
+        // 删除前先读一次：审计要记的是"删掉了什么"，而删完之后再读就没有了。
+        let before = null
+        try { before = getDocument(id) } catch { before = null }
+        const out = deleteDocument(id.trim())
+        audit(by, before?.scope ?? scope, 'document:delete', id.trim(), {
+          deleted: out.deleted, title: before?.title ?? null, version: before?.version ?? null,
+        })
+        return out
+      })
+      return
+    }
     // ── 技能来源（skill-source）：每个空间绑定的团队技能仓库（github url + 分支，供一键拉取同步）──
     if (req.method === 'GET' && path === '/api/skill-source') {
       try {
@@ -7136,6 +7400,24 @@ async function handle(req, res, stripPrefix) {
         scope: url.searchParams.get('scope') ?? undefined,
         member: url.searchParams.get('member') ?? undefined,
         includePending: wantPending,
+      }))
+      return
+    }
+    if (req.method === 'GET' && path === '/api/documents') {
+      // ★ PRT-406：显式文档读端点（`document` 来源族的唯一出处）。
+      //
+      //   形状与 `/api/skills` **刻意不同**：技能返回 `prompt`（会被当指令执行的
+      //   那一段），文档返回 `body`（参考资料）。两者都带 `origin`，于是装配侧
+      //   可以**逐条**判可信性，而不是整批一刀切。
+      //
+      //   ⚠️ `origin` 是**服务端写死**的字段（见 registerDocument / installDocument），
+      //   客户端改不动——这正是它能被用来做判定前提的原因。
+      //
+      //   与 `/api/skills` 的另一个不同：**没有 status 过滤**。文档不走向导机
+      //   （理由见 listDocuments 的注释）。
+      json(res, 200, listDocuments({
+        scope: url.searchParams.get('scope') ?? undefined,
+        id: url.searchParams.get('id') ?? undefined,
       }))
       return
     }

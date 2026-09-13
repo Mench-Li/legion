@@ -77,8 +77,10 @@ const HEADER = Object.freeze([
   '# 按默认表实现「无人值守 = never」会同时把沙箱降级为 danger-full-access。',
   '#',
   '# ★ 本文件目前**只包含造得出来的行**。',
-  '#   三个 enforcement 行（hard-floor / pre-execute / approval-answerer）需要在 DSH 进程内',
-  '#   被加载的**插件模块**，而那些模块还不存在（`PATCH_LAYER_ROWS[].module === null`）。',
+  '#   下面这几行需要在 DSH 进程内被加载的**插件模块**，而它们的模块还不存在',
+  '#   （`PATCH_LAYER_ROWS[].module === null`）：',
+  ...PATCH_LAYER_ROWS.filter((r) => r.module === null && r.mount?.anchor !== 'patch-over')
+    .map((r) => `#     · ${r.id} —— ${r.purpose ?? r.kind ?? ''}`.trimEnd()),
   '#   它们**刻意不在这里**：一个 insert 项没有可加载的 name 时，DSH 对它是 warn-and-skip，',
   '#   于是那一行会「看起来装好了、而什么都没做」。缺行比假行好。',
   '#',
@@ -88,6 +90,10 @@ const HEADER = Object.freeze([
   '#',
   '#   缺的那几行由 reconcilePatchLayer() 报成 ROW_MISSING，于是启动自检仍然拒绝注册',
   '#   （fail closed）。**PRT-214 因此仍是未完成状态**，而不是"装好了但没生效"。',
+  '#',
+  '#   ★ 上面这份清单是**从 `PATCH_LAYER_ROWS` 推出来的**，不是手写的散文。',
+  '#     手写清单会腐烂：填上一个模块之后，注释里仍然写着"它不存在"，',
+  '#     于是文件同时说了两句互相矛盾的话，而读到哪一句取决于读的人。',
 ])
 
 /**
@@ -127,8 +133,20 @@ export function renderPatchReport({ moduleUrlOf = null } = {}) {
   const built = patchDocument({ moduleUrlOf })
   return Object.freeze({
     text: renderPatchYamlText(built.document, { header: HEADER }),
-    /** 文档里实际有的行 id（patch-over 记**目标**行 id）。 */
-    renderedRowIds: Object.freeze(built.document.map((d) => d.id)),
+    /**
+     * **声明里**哪些行的 id 真的进了文档。由构造器给出（`built.rendered`）。
+     *
+     * ★ 此前这里是 `built.document.map((d) => d.id)` —— 读顶层项的 id。
+     *   那是错的：新增行嵌在 `insert: [...]` 里，顶层项的 `id` 是 `undefined`；
+     *   而 patch-over 项的顶层 `id` 是**被覆盖的目标**（`permission`），不是 Legion 行 id。
+     *   于是清单里躺着 `undefined` 与 `'permission'`，而**两行数的计数恰好是 2**，
+     *   与"真有两行"对得上——读数因此在行数相等时看起来是证据。
+     *
+     *   > 一个"把顶层项的 id 当成行 id"的读数，
+     *   > 与一个"从来不报告哪些行进去了"的读数，在计数恰好相等时是同一个东西——
+     *   > 只不过前者会在行数对得上时假装自己是证据。
+     */
+    renderedRowIds: built.rendered,
     /** 声明里全部行的 id。 */
     declaredRowIds: Object.freeze(PATCH_LAYER_ROWS.map((r) => r.id)),
     /** 造不出来、因此**不在文档里**的行。 */

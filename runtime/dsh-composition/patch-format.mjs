@@ -71,6 +71,19 @@ export const PATCH_DOCUMENT_CODES = Object.freeze({
   INSERT_WITH_TARGET_ID: 'PATCH_DOCUMENT_INSERT_WITH_TARGET_ID',
   /** 出现了 `PatchOptions` 之外的键 —— DSH **静默忽略**它。 */
   UNKNOWN_KEY: 'PATCH_DOCUMENT_UNKNOWN_KEY',
+  /**
+   * 一个 `patch-over` 行声明了 `module`。
+   *
+   * **实测确认**（真 `applyEntryPatches`）：`patch-over` **不能**换掉一行的模块。
+   * 实现里 `const { id, insert, name, ...overrides } = patch` 把 `name` 单独解构出去，
+   * 它只在 `if (name && name !== target.name)` 那一行当**守卫**用，
+   * 永远不会写进 target。想给某行换实现，只能 `disabled: true` 关掉旧行 +
+   * 根级插入新的一行。
+   *
+   *   > 一个"以为 patch-over 能替换模块"的声明，
+   *   > 与一个"模块永远不会被加载、而文件里写着它"的补丁层，是同一个东西。
+   */
+  PATCH_OVER_WITH_MODULE: 'PATCH_DOCUMENT_PATCH_OVER_WITH_MODULE',
   /** 某一行的插件模块还不存在，因此这一行造不出来。 */
   ROW_MODULE_MISSING: 'PATCH_DOCUMENT_ROW_MODULE_MISSING',
 })
@@ -262,6 +275,17 @@ export function toPatchDocument({ rows = [], presets = {}, moduleUrlOf = null } 
 
   for (const row of rows) {
     if (row?.mount?.anchor === 'patch-over') {
+      // ★ patch-over **不能**换模块 —— 实测确认。所以声明里给它一个 module 是
+      //   范畴错误：那个模块永远不会被加载，而文件里写着它。
+      if (row.module !== null && row.module !== undefined) {
+        unbuildable.push(Object.freeze({
+          id: row?.id ?? null,
+          code: PATCH_DOCUMENT_CODES.PATCH_OVER_WITH_MODULE,
+          detail: `行 ${row?.id} 是 patch-over，却声明了 module=${JSON.stringify(row.module)}。` +
+            'DSH 的 patch-over **不能**换模块（`name` 在实现里只当守卫用）：' +
+            '要替换某行的实现，只能 disabled 掉旧行 + 根级插入新行',
+        }))
+      }
       // patch-over 不需要模块：它按 id 覆盖**既有**行的 config。
       //
       // ★ 只带 `config`，不带 `plane`、也不带 Legion 的行 id。
@@ -296,6 +320,23 @@ export function toPatchDocument({ rows = [], presets = {}, moduleUrlOf = null } 
   return Object.freeze({
     document: Object.freeze(document),
     unbuildable: Object.freeze(unbuildable),
+    // ★ **声明里哪些行真的进了文档。**
+    //
+    //   这份清单必须由**构造器**给出，不能靠读回 `document` 反推：
+    //   新增行嵌在 `insert: [...]` 里面，顶层项的 `id` 是 `undefined`；
+    //   而 patch-over 项的顶层 `id` 是**被覆盖的目标**（`permission`），
+    //   不是 Legion 的行 id。两种情况下"读回顶层 id"都拿不到正确的答案。
+    //
+    //     > 一个"把顶层项的 id 当成行 id"的读数，
+    //     > 与一个"从来不报告哪些行进去了"的读数，在计数恰好相等时是同一个东西——
+    //     > 只不过前者会在行数对得上时假装自己是证据。
+    rendered: Object.freeze([
+      ...inserts.map((i) => i.id),
+      ...overrides.flatMap((o) => {
+        const src = rows.find((r) => r?.mount?.anchor === 'patch-over' && String(r.mount.target) === o.id)
+        return src === undefined ? [] : [String(src.id)]
+      }),
+    ]),
   })
 }
 
@@ -467,6 +508,27 @@ function selfCheck() {
   if (built.document.some((d) => 'insert' in d && 'id' in d)) {
     problems.push('生成器把 after 锚点翻成了 id+insert —— 那会被 warn-and-skip')
   }
+  // ★ patch-over 行声明了 module 必须被报出来（patch-over 换不了模块，实测确认）。
+  const overWithModule = toPatchDocument({
+    rows: [{ id: 'x', mount: { anchor: 'patch-over', target: 'permission' }, module: './plugins/x.mjs' }],
+    presets: {},
+  })
+  const overCode = PATCH_DOCUMENT_CODES.PATCH_OVER_WITH_MODULE
+  if (!overWithModule.unbuildable.some((u) => u.code === overCode)) {
+    problems.push('patch-over 行声明了 module 却没被报出来——那个模块永远不会被加载')
+  } else {
+    // ★ 真的触发过就**记下来**。
+    //
+    //   第一版这里只做了断言、没做记录，于是覆盖度检查把
+    //   `PATCH_OVER_WITH_MODULE` 报成"没有任何一条路径能触发（等于死代码）"——
+    //   而它其实刚刚才在本函数里触发过。
+    //
+    //     > 一个"触发了但没被记账"的判据，
+    //     > 与一个"根本触发不了"的判据，在覆盖度读数上是同一个东西。
+    checked.push(overCode)
+  }
+  // 构造器那一侧也要记账：`ROW_MODULE_MISSING` 只在造行时出现。
+  for (const u of built.unbuildable) checked.push(u.code)
 
   return Object.freeze({
     ok: problems.length === 0,

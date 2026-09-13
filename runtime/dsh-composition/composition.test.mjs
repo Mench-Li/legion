@@ -159,7 +159,27 @@ test('渲染：YAML 含 Legion 两个 preset，且**没有任何** sandbox 取�
 
   // ★ 声明里的行**不一定**在文件里：模块不存在的行刻意不写进去（见 render.mjs 头部）。
   //   所以这里断言的是**文档里实际有的行**，而"哪些行没进文档"由下一条用例盯。
-  for (const id of renderPatchReport().renderedRowIds) assert.match(text, new RegExp(id))
+  //
+  // ★ 而且两种行的"在文件里长什么样"**不同**，不能一概而论：
+  //   · `insert` 行：自己的 id 就写在 `- id:` 里。
+  //   · `patch-over` 行：顶层 `id` 是**被覆盖的目标**（`permission`），
+  //     Legion 自己的行 id **刻意不出现**——它出现才说明我们写错了，会打不到靶子。
+  //
+  //   > 一个"要求每一行的 id 都出现在文件里"的断言，
+  //   > 会把两件事同时逼坏：要么让 patch-over 写成打不到靶子的形状，
+  //   > 要么把这条断言删掉、连 insert 行也不检查了。
+  const report = renderPatchReport()
+  for (const row of PATCH_LAYER_ROWS) {
+    if (!report.renderedRowIds.includes(row.id)) continue
+    if (row.mount?.anchor === 'patch-over') {
+      assert.ok(!text.includes(row.id),
+        `patch-over 行的 Legion id ${row.id} 不该出现在文件里——顶层 id 必须是被覆盖的目标（${row.mount.target}）`)
+      assert.match(text, new RegExp(`id:\\s*"${row.mount.target}"`),
+        `patch-over 的目标 ${row.mount.target} 必须在文件里，否则这一层打不到靶子`)
+    } else {
+      assert.match(text, new RegExp(row.id), `insert 行 ${row.id} 声称进了文档，文件里却找不到`)
+    }
+  }
 
   // 只检查**生效的配置值**，不检查散文。
   // 注释里出现 `danger-full-access` 是刻意的（说明为什么不用 DSH 默认表）；
@@ -199,17 +219,23 @@ test('★★★ 渲染：声明了而**没进文档**的行必须被报出来，
     assert.match(u.detail, /warn-and-skip/, '理由必须说清后果是静默跳过，而不是"暂时没装"')
   }
 
-  // complete 必须与 unbuildable 一致，且**当前**应为 false（三个模块还没有）
+  // complete 必须与 unbuildable 一致。
   assert.equal(report.complete, report.unbuildable.length === 0)
-  assert.equal(report.complete, false,
-    '★ 三个 enforcement 模块尚不存在，这一层现在**必须是**不完整的；' +
-    '如果这条红了，说明你补上了模块——那很好，请把这条断言连同 PRT-214 的状态一起改掉')
 
-  // 而且缺的正是那三个 enforcement 行
-  assert.deepEqual(
-    report.unbuildable.map((u) => u.id).sort(),
-    ['legion-enforcement-approval-answerer', 'legion-enforcement-hard-floor', 'legion-enforcement-pre-execute'],
-  )
+  // 缺的清单**从声明推导**，不写死。
+  //
+  //   ★ 第一版把三行写死了，于是 hard-floor 一拿到模块，这条就对着
+  //     "现在只缺两行"报红——红的是一个**已经变好的事实**。
+  //     写死清单的断言会随着进展变成噪声，而噪声会被改掉，
+  //     改掉的那一次很可能顺手把判据本身也改掉。
+  const expected = PATCH_LAYER_ROWS.filter((r) => r.module === null && r.mount?.anchor !== 'patch-over')
+    .map((r) => r.id).sort()
+  assert.deepEqual(report.unbuildable.map((u) => u.id).sort(), expected)
+  // 而"有模块的行"必须真的进了文档——否则"只缺 N 行"在一个什么都不生成的
+  // 实现上同样为真。
+  const withModule = PATCH_LAYER_ROWS.filter((r) => typeof r.module === 'string')
+  assert.ok(withModule.every((r) => report.renderedRowIds.includes(r.id)),
+    '有模块的行必须都进文档')
 })
 
 test('★★ 渲染：文档必须能被 DSH 加载（形状检查），且**不含**会静默失效的形状', () => {

@@ -16,8 +16,10 @@
 # 按默认表实现「无人值守 = never」会同时把沙箱降级为 danger-full-access。
 #
 # ★ 本文件目前**只包含造得出来的行**。
-#   三个 enforcement 行（hard-floor / pre-execute / approval-answerer）需要在 DSH 进程内
-#   被加载的**插件模块**，而那些模块还不存在（`PATCH_LAYER_ROWS[].module === null`）。
+#   下面这几行需要在 DSH 进程内被加载的**插件模块**，而它们的模块还不存在
+#   （`PATCH_LAYER_ROWS[].module === null`）：
+#     · legion-enforcement-pre-execute —— 动态 allow / deny / ask，team-hub 不可达或策略异常时 deny（fail closed）
+#     · legion-enforcement-approval-answerer —— 把审批请求写入审批箱；只有 allowed-once 执行；双段超时 fail closed
 #   它们**刻意不在这里**：一个 insert 项没有可加载的 name 时，DSH 对它是 warn-and-skip，
 #   于是那一行会「看起来装好了、而什么都没做」。缺行比假行好。
 #
@@ -27,7 +29,14 @@
 #
 #   缺的那几行由 reconcilePatchLayer() 报成 ROW_MISSING，于是启动自检仍然拒绝注册
 #   （fail closed）。**PRT-214 因此仍是未完成状态**，而不是"装好了但没生效"。
+#
+#   ★ 上面这份清单是**从 `PATCH_LAYER_ROWS` 推出来的**，不是手写的散文。
+#     手写清单会腐烂：填上一个模块之后，注释里仍然写着"它不存在"，
+#     于是文件同时说了两句互相矛盾的话，而读到哪一句取决于读的人。
 
+- insert:
+    - id: "legion-enforcement-hard-floor"
+      name: "./plugins/hard-floor.mjs"
 - id: "permission"
   config:
     presets:

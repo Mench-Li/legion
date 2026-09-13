@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-13　`run-ci`（**8 个阶段全 PASS**）；其中 `test` **164 套件 / 4457 用例 / 0 fail**（证据 `.ci/prt-214/`）
+**最近一次全量基线**：2026-09-13　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **165 套件 / 4469 用例 / 0 fail**（证据 `.ci/prt-214b/`）
 （**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数会少）
 —— 以本文件所在提交为准；证据 `.ci/prt-901/`（PRT-901/902 第三方组件清单、SBOM 与商业分发条件那一批）
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
@@ -3457,6 +3457,131 @@
 > `docs/DUAL-WRITE-RACE-evidence/verify-evidence.md`。
 
 ---
+
+## 2026-09-13　PRT-214（续）：enforcement 插件模块的第一块——hard-floor 真的挂上了
+
+> 上一批修好了**格式**：补丁层终于能被 DSH 读。
+> 这一批把**第一行真的插进去**——`legion-enforcement-hard-floor` 有了模块本体。
+
+### 探到的三件事（都是实测，不是读代码）
+
+**① `tools/pre-execute` 与 `tools.guard` 是真的，而且 guard 真的是"单调"的。**
+
+DSH 的 `packages/core/tools/src/index.ts:1090` 原文：
+
+    Any matching guard may deny by returning a reason,
+    while **no guard can force-allow a call another guard denied**.
+
+这正好是 spec §6.8 对下限的要求。实测确认：一个返回 `{kind:'allow'}` 的
+`tools/pre-execute` **压不过** guard——工具照样没执行。
+
+**② `patch-over` 不能换模块。**
+
+实现里 `const { id, insert, name, ...overrides } = patch` 把 `name` 单独解构出去，
+只在 `if (name && name !== target.name)` 当**守卫**用，永远不写进 target。
+实测：`{ id:'approval', name:'file:///legion/x.mjs' }` → warn + skip，名字原封不动。
+
+> 一个"以为 patch-over 能替换模块"的声明，
+> 与一个"模块永远不会被加载、而文件里写着它"的补丁层，是同一个东西。
+
+想替换某行的实现只能：**`disabled: true` 关掉旧行 + 根级插入新行**。
+（两条都提供同名服务而不 disable，是**注册冲突**，会响亮地抛——这次是好事。）
+
+**③ Cordis 不允许不声明 `inject` 就按属性访问服务。**
+
+我第一版**故意没写** `inject: ['tools']`，想"自己在 apply 里检查端口，免得进 waiting"。
+理由本身没错，结论反了：
+
+    cannot get property "tools" without inject
+
+那一版在真运行时下**一行都挂不上**。正确做法是声明式地表达依赖，
+让 waiting 被 DSH 的挂载审计报出来（`N row(s) did not activate`）——
+那正是 `reconcilePatchLayer()` 的 `ROW_NOT_ACTIVATED` 判据在读的东西。
+
+> 一个"自己偷偷检查端口、于是永远不进 waiting"的插件，
+> 与一个"正确声明了依赖、等待被如实记录"的插件，在坏接线时是同一个东西——
+> 只不过前者的失败发生在运行时，而没有任何审计会报它。
+
+### 交付
+
+- **`plugins/hard-floor.mjs`（新增）**：`legion-enforcement-hard-floor` 的插件本体。
+  `inject: ['tools']`；判定逻辑**不复制**——直接是 `enforcement.mjs` 的
+  `createHardFloorGuard`，与 `composePreExecuteFloor` 共用同一个调用结果。
+  *两份"同一个下限"的实现，与一个"下限会在 pre-execute 与 guard 之间漂移"的实现，
+  是同一个东西——而漂移的那一天只表现为"这次怎么被拒了"。*
+  挂载时把 `ctx.tools.guard()` 的 disposer **交给本行自己的 effect 作用域**
+  （它挂的是 ToolRuntime 的 fiber，不接管就会"卸载了还在拦"）。
+- **`enforcement-plugin.test.mjs`（新增，10 例）**：对着**真 cordis Context + 真
+  ToolRuntime**，10/10。测的全是别人的契约：guard 单调性、deny 真的短路执行、
+  路径下限、**卸载后 guard 真的消失**、端口形状不对时抛、观测点改不了判定。
+- **`patch-format.mjs`**：新增拒绝码 `PATCH_OVER_WITH_MODULE`。
+- **`patch-loadable.test.mjs` 8 → 10 例**：新增"文档里每个 insert 的 name
+  都指向真的存在的文件"（按 DSH 自己的 `anchorInsertedPluginNames` 规则解析）。
+- **`legion-host.patch.yml`**：`legion-enforcement-hard-floor` 一行**真的进去了**，
+  `name: "./plugins/hard-floor.mjs"` —— 相对路径，由 DSH 按补丁文件所在目录解析成
+  file:// URL，所以补丁层连同 `plugins/` 一起搬走仍然有效。
+
+### ★ 本批抓到的三个"我自己的错"
+
+1. **`renderedRowIds` 一直在读错东西。** 它是 `document.map(d => d.id)`——
+   而 insert 行嵌在 `insert:[...]` 里，顶层 `id` 是 `undefined`；
+   patch-over 项顶层的 `id` 是**被覆盖的目标**（`permission`）。
+   于是清单里躺着 `undefined` 与 `'permission'`，而**计数恰好是 2**，与"真有两行"对得上。
+
+   > 一个"把顶层项的 id 当成行 id"的读数，
+   > 与一个"从来不报告哪些行进去了"的读数，在计数恰好相等时是同一个东西——
+   > 只不过前者会在行数对得上时假装自己是证据。
+
+   已改成由**构造器**给出 `built.rendered`。
+
+2. **两条断言把"缺 3 行"写死了**，于是 hard-floor 一拿到模块，它们就对着
+   "现在只缺 2 行"报红——**红的是一个已经变好的事实**。
+   写死清单的断言会随着进展变成噪声，而噪声会被改掉，改掉的那一次
+   很可能顺手把判据本身也改掉。已改成从 `PATCH_LAYER_ROWS` 推导。
+
+3. **`PATCH_OVER_WITH_MODULE` 被覆盖度检查报成"死代码"**——而它**刚刚才在同一个
+   函数里触发过**，只是触发了没记账。
+
+   > 一个"触发了但没被记账"的判据，
+   > 与一个"根本触发不了"的判据，在覆盖度读数上是同一个东西。
+
+### ★ 过程修复：新增第 7 道门禁 `scripts/ci/ci-syntax.mjs`
+
+"插入新块吃掉下一个块的 `{`"这个事故本轮**第四次**发生，而且每次都是
+六道门禁全绿、只有 `node --check`（靠纪律手动跑）能抓到。原因是结构性的：
+
+> 一个"改坏了 CI 运行器、而门禁全绿"的提交，
+> 与一个"改坏了 CI 运行器、并且被拦下"的提交，在门禁日志上长得一模一样。
+
+`run-ci.mjs` 是**跑门禁的那个程序**，它自己不跑门禁；它坏掉时六道门禁不会响，
+它们只是**不被执行**——而"没被执行"与"通过了"都没有 FAIL 行。
+
+新增 `ci-syntax.mjs`：对 `scripts/**/*.mjs`（**50 个**）逐个跑 `node --check`。
+零依赖、不执行被测对象。并作为 CI 的 **syntax 阶段排在最前**。
+
+**它的局限写在它自己的注释里**：它跑在 `run-ci.mjs` 里面，所以它守得住别的脚本，
+却守不住 `run-ci.mjs` 自己——那个文件坏掉时这个阶段根本不会被启动。
+所以它也必须被**单独**跑一次。
+
+> 一个"跑在它要守的那个程序里面"的门禁，
+> 与一个"根本没在守那个程序"的门禁，在被守对象坏掉的那一天是同一个东西。
+
+已断验证：埋一个语法错 → `FAIL: scripts/_syntax-probe.mjs — …:2 — SyntaxError: Unexpected identifier 'b'`、exit 1；
+删掉 → PASS、exit 0。
+
+### ⚠️ 诚实边界：**PRT-214 仍是 🟡**
+
+强制面三行，现在只挂上了**一行**：
+
+| 行 | 状态 |
+| --- | --- |
+| `legion-enforcement-hard-floor` | ✅ 有模块，已进补丁层，真运行时下 10 例全绿 |
+| `legion-enforcement-pre-execute` | ⬜ `module: null` |
+| `legion-enforcement-approval-answerer` | ⬜ `module: null` |
+| `legion-enforcement-permission-presets` | ✅ patch-over，已生效 |
+
+`reconcilePatchLayer()` 仍报两条 `ROW_MISSING`，启动自检仍然拒绝注册（fail closed）。
+补丁层**仍未真的被注入过任何 profile**；员工 agent preset 那一半尚未开始。
 
 ## 2026-09-13　PRT-214：补丁层的格式——让 DSH 真的能读它
 

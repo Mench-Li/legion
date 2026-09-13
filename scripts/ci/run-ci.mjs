@@ -1915,6 +1915,27 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-214：enforcement 插件模块的**一致性**用例——对着真 DSH 运行时。
+      //
+      // 测的全部是**别人的契约**：`ctx.tools.guard()` 是不是真同步、真单调
+      // （DSH 原文："no guard can force-allow a call another guard denied"）、
+      // guard 返回 string 会不会真变成一次 deny、卸载插件后 guard 还在不在。
+      //
+      //   *一个用替身喂出来的"强制面已生效"，
+      //   与一个从没被真运行时拦下过的"强制面已生效"，是同一个东西——
+      //   只不过前者的用例数是完整的。*
+      //
+      // 这一步实测抓到两个我自己的错：`ToolRuntime` 有
+      // `static inject = ['systemPrompt']`（不提供就挂载但不激活），
+      // 以及 Cordis **不允许**不声明 inject 就按属性访问服务
+      // （`cannot get property "tools" without inject`）。
+      //
+      // 条件套件：需要 DSH_CHECKOUT，逐条 SKIP（不伪造通过）。
+      label: 'enforcement-plugin（PRT-214：enforcement 插件模块 × 真 DSH 运行时）',
+      files: ['runtime/dsh-composition/enforcement-plugin.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-214：补丁文档的**形状**与 YAML 生成器（不连 DSH）。
       //
       // 为什么值得单独一套：补丁层的落盘形式此前是一个**自由格式的散文文件**，
@@ -2308,6 +2329,9 @@ async function stageTest() {
     //   而那个漏登记正是本检查存在的唯一理由。
     const conditionalFiles = new Set([
       'runtime/dsh-composition/patch-loadable.test.mjs',
+      // 与 patch-loadable 同理：需要 DSH_CHECKOUT 才推得进 test 清单。
+      // 它在环境里跑的是**真 DSH ToolRuntime**，没有检出时逐条 SKIP。
+      'runtime/dsh-composition/enforcement-plugin.test.mjs',
     ])
     const tracked = await exec('git', ['ls-files', '*.test.mjs'], { cwd: ROOT })
     const all = tracked.out.split('\n').map((x) => x.trim()).filter(Boolean)
@@ -2511,8 +2535,39 @@ async function stageBoundary() {
   return { ok, detail: 'boundary: DSH 执行面边界棘轮（dsh-boundary.mjs）exit=' + r.code + extra }
 }
 
+// ---------- 阶段：CI 脚本语法 ----------
+
+/**
+ * 全部 `scripts/**\/*.mjs` 必须能被 Node **解析**。
+ *
+ * ★ 这个阶段有一个**结构性**的局限，必须说清楚，否则它是一道假门禁：
+ *
+ *   它自己跑在 `run-ci.mjs` **里面**，所以它守得住别的脚本，
+ *   却守不住 `run-ci.mjs` **自己**——那个文件坏掉时，本阶段根本不会被启动。
+ *   而"没被启动"与"通过了"在日志里都是"没有 FAIL 行"。
+ *
+ *     > 一个"跑在它要守的那个程序里面"的门禁，
+ *     > 与一个"根本没在守那个程序"的门禁，在被守对象坏掉的那一天是同一个东西。
+ *
+ *   所以 `scripts/ci/ci-syntax.mjs` 也必须被**单独**跑一次（六道门禁之外）。
+ *   本阶段的独立价值是：它守住了其它 49 个脚本，
+ *   以及"run-ci.mjs 改坏之后、别人下次跑 CI 时至少能看见它是坏的"。
+ */
+async function stageSyntax() {
+  const script = join(ROOT, 'scripts', 'ci', 'ci-syntax.mjs')
+  const r = await exec(process.execPath, [script], { cwd: ROOT })
+  const ok = r.code === 0
+  const lines = String(r.stdout ?? '').split('\n').filter(Boolean)
+  const detail = 'syntax: CI 脚本可解析性（ci-syntax.mjs）exit=' + r.code +
+    '\n  输出要点：' + (lines.slice(-2).join(' ') || String(r.stderr ?? '').trim().split('\n').slice(-2).join(' '))
+  return { ok, detail }
+}
+
 // ---------- 主流程 ----------
 const STAGES = [
+  // ★ syntax 排在最前：它守的是"跑门禁的那些程序"。
+  //   排在后面就等于"先跑了一堆可能根本没被解析成功的脚本"。
+  { name: 'syntax', label: 'CI 脚本语法（ci-syntax.mjs）', fn: stageSyntax },
   { name: 'env', label: '环境自检', fn: stageEnv },
   { name: 'boundary', label: 'DSH 执行面边界（PRT-108 棘轮）', fn: stageBoundary },
   { name: 'deps', label: '依赖就绪', fn: stageDeps },

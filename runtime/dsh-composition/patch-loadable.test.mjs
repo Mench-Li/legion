@@ -37,11 +37,12 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 import { existsSync, readFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { patchDocument } from './render.mjs'
 import { PATCH_YAML_PATH, renderPatchYaml, renderPatchReport } from './render.mjs'
+import { PATCH_LAYER_ROWS } from './patch-layer.mjs'
 
 const ROOT = resolve(import.meta.dirname, '..', '..')
 
@@ -238,21 +239,71 @@ describe('PRT-214 补丁层可加载性（真 DSH 管线）', () => {
     assert.match(presets['legion-unattended'].name, /无人值守/)
   })
 
+  guarded('★★★ 文档里每一行 insert 的 `name` 都指向一个**真的存在**的模块', () => {
+    // `./` 开头的 name 由 DSH 按 `dirname(patchFile)` 解析成 file:// URL
+    // （`anchorInsertedPluginNames`，`packages/boot/app-boot/src/index.ts:326`）。
+    // 所以这里做同一件事，然后确认那个文件在。
+    //
+    //   > 一个"指向不存在模块"的补丁行，与一个"根本没写这一行"的补丁行，
+    //   > 在运行时的效果是同一个东西——只不过前者在文件里看起来是装好的。
+    const patchFile = join(ROOT, PATCH_YAML_PATH)
+    const parsed = parseLikeDsh(patchFile)
+    const seen = []
+    for (const entry of parsed) {
+      for (const item of entry.insert ?? []) {
+        seen.push({ id: item.id, name: item.name })
+        assert.equal(typeof item.name, 'string', `insert 项 ${item.id} 没有 name`)
+        if (!item.name.startsWith('./') && !item.name.startsWith('../')) {
+          continue // 包名：装没装由 DSH 的加载器判，本仓库判不了
+        }
+        const abs = resolve(dirname(patchFile), item.name)
+        assert.ok(existsSync(abs),
+          `insert 项 ${item.id} 的 name=${JSON.stringify(item.name)} 解析到 ${abs}，而它不存在`)
+      }
+    }
+    // 至少有一个真实模块被检查过——否则这条断言是空的。
+    assert.ok(seen.length > 0, '文档里一行 insert 都没有，这条断言什么都没检查')
+    assert.ok(seen.some((s) => s.id === 'legion-enforcement-hard-floor'),
+      'hard-floor 那一行应当已经在文档里了（它现在有模块了）')
+  })
+
   guarded('★ 生成物与 `renderPatchYaml()` 一致（新鲜度）', () => {
     const onDisk = readFileSync(join(ROOT, PATCH_YAML_PATH), 'utf8').replace(/\r\n/g, '\n')
     assert.equal(onDisk, renderPatchYaml(),
       'YAML 是生成物；手工编辑或忘记重新生成都会在这里被抓住')
   })
 
-  guarded('★ 报告说清"这一层还不完整"，并点名缺的是哪三个模块', () => {
+  guarded('★ 报告说清"这一层还不完整"，并点名缺的是哪几个模块', () => {
+    // ★ **不写死**缺哪几行，而是从声明里推导：`module === null` 的行就是缺的。
+    //
+    //   第一版把三行写死了，于是 hard-floor 一拿到模块，这条用例就对着
+    //   "现在只缺两行"报红——红的是一个**已经变好的事实**。
+    //   写死清单的断言会随着进展变成噪声，而噪声会被改掉，改掉的可能是判据本身。
+    const expected = PATCH_LAYER_ROWS.filter((r) => r.module === null && r.mount?.anchor !== 'patch-over')
+      .map((r) => r.id).sort()
     const report = renderPatchReport()
-    assert.equal(report.complete, false, '三个 enforcement 模块尚不存在，这一层现在必须是不完整的')
-    assert.deepEqual(
-      report.unbuildable.map((u) => u.id).sort(),
-      ['legion-enforcement-approval-answerer', 'legion-enforcement-hard-floor', 'legion-enforcement-pre-execute'],
-    )
+    assert.deepEqual(report.unbuildable.map((u) => u.id).sort(), expected,
+      '报告的缺行清单必须与声明里 module=null 的行逐一对上')
+    // 现在应当仍然不完整（强制面本体还没写完）——若哪天完整了，这条会提醒改判据。
+    if (expected.length > 0) {
+      assert.equal(report.complete, false, `还缺 ${expected.length} 行模块，这一层必须是不完整的`)
+    }
     for (const u of report.unbuildable) {
       assert.match(u.detail, /warn-and-skip/, '理由必须说清后果是静默跳过')
+    }
+  })
+
+  guarded('★★★ `module` 非 null 的行**真的**在文档里，且指向存在的文件', () => {
+    // 与上一条互为反面：上一条守"缺的行被报出来"，这条守"有的行真进去了"。
+    // 少了任何一条，"报告说缺 2 行"都可以在一个什么都没生成的实现上为真。
+    const withModule = PATCH_LAYER_ROWS.filter((r) => typeof r.module === 'string')
+    assert.ok(withModule.length > 0, '一行有模块的都没有，这条断言是空的')
+    const report = renderPatchReport()
+    for (const row of withModule) {
+      assert.ok(report.renderedRowIds.includes(row.id),
+        `行 ${row.id} 有模块却没进文档 —— 那它永远不会被加载`)
+      const abs = resolve(dirname(join(ROOT, PATCH_YAML_PATH)), row.module)
+      assert.ok(existsSync(abs), `行 ${row.id} 的模块 ${row.module} 解析到 ${abs}，不存在`)
     }
   })
 })

@@ -106,8 +106,19 @@ export const PATCH_LAYER_ROWS = Object.freeze([
     // 依据 §6.8：guard 只有降级语义、没有 allow 语义。
     // 因此这一行**永远不能**成为唯一防线 —— 它只负责「不可能被说成可以」的那部分。
     registrations: Object.freeze(['ctx.tools.guard']),
-    // ⚠️ 还没有这个模块。见上面 `module` 的说明。
-    module: null,
+    // ★ 路径是**相对于补丁文件自己所在目录**的。
+    //
+    // 这不是我挑的写法：DSH 的 `parsePatchList` 会调
+    // `anchorInsertedPluginNames(patches, file)`，把 `./` 或 `../` 开头的
+    // `name` 按 `dirname(patchFile)` 解析成 file:// URL
+    // （`packages/boot/app-boot/src/index.ts:326-336`）。
+    //
+    //   > 一个"写成机器绝对路径"的模块引用，
+    //   > 与一个"换台机器就加载不到"的补丁层，是同一个东西——
+    //   > 只不过前者在作者自己的机器上跑得通。
+    //
+    // 所以这里用相对路径，补丁层连同 `plugins/` 一起搬走仍然有效。
+    module: './plugins/hard-floor.mjs',
   }),
   Object.freeze({
     id: `${LEGION_ROW_PREFIX}pre-execute`,

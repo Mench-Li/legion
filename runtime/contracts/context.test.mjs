@@ -23,10 +23,13 @@ import {
   CONTEXT_SNAPSHOT_SCHEMA_VERSION,
   CONTEXT_SOURCE_TYPES,
   EXCLUSION_REASONS,
+  INVENTORY_OUTCOMES,
   SOURCE_TRUST,
   TOKEN_ESTIMATOR_KINDS,
   createContextSource,
   createExclusion,
+  createSourceInventory,
+  createSourceInventoryEntry,
   createTokenMeasurement,
   freezeContextSnapshot,
   computeSnapshotHash,
@@ -289,8 +292,19 @@ describe('⑥ 接线：投影模块必须真的被导出（否则它和不存在
     // **一个测字符串的断言，和一个正确的实现，在输出上完全一样。**
     // 所以这里真的去 import 并调用。
     const idx = await import('./index.mjs')
-    for (const name of ['createContextSource', 'freezeContextSnapshot', 'verifySnapshotHash', 'domainSeparatedHash']) {
+    for (const name of ['createContextSource', 'freezeContextSnapshot', 'verifySnapshotHash', 'domainSeparatedHash',
+      // PRT-408
+      'createSourceInventory', 'createSourceInventoryEntry']) {
       assert.equal(typeof idx[name], 'function', `contracts/index.mjs 未导出可用的 ${name}`)
+    }
+    // ★ 枚举是**对象**不是函数——第一版把它塞进了上面那个 for，
+    //   于是断言变成 `typeof {} === 'function'`，红的是一条**正确的导出**。
+    //   > 一个"把所有导出都当函数检查"的断言，
+    //   > 与一个"按导出各自的种类检查"的断言，在导出的都是函数时是同一个东西——
+    //   > 只不过前者会把一个**导出得好好的枚举**报成缺失。
+    assert.equal(typeof idx.INVENTORY_OUTCOMES, 'object', 'contracts/index.mjs 未导出 INVENTORY_OUTCOMES')
+    for (const v of ['read', 'read-empty', 'read-failed', 'not-attempted', 'skipped']) {
+      assert.ok(Object.values(idx.INVENTORY_OUTCOMES).includes(v), `INVENTORY_OUTCOMES 缺 ${v}`)
     }
     // 真的跑一遍：导出存在但一调用就炸同样是"没有入口"。
     const s = idx.freezeContextSnapshot({
@@ -308,5 +322,117 @@ describe('⑥ 接线：投影模块必须真的被导出（否则它和不存在
       !/^export function canonicalJson/m.test(enf),
       '审批侧不应再有自己的 canonicalJson 实现',
     )
+  })
+})
+
+// ============================================================================
+// ⑦ PRT-408：来源清单
+//
+// 这一节存在的理由，写在 `orchestrator/worker/sources-loader.mjs` 的
+// `listShapedAbsence` 里，同一句话重复了三次：
+//
+//   > 一个"列表形来源缺席时给空数组"的装配，
+//   > 与一个"确实没有这一类内容"的装配，在账本上是同一个东西——
+//   > 只不过前者会让一条**没去读**的来源彻底不留痕迹。
+//
+// 来源清单就是那个"新的位置"。
+// ============================================================================
+
+describe('⑦ 来源清单：把"没去取"与"取了但没有"分开（PRT-408）', () => {
+  test('★★ `not-attempted` 与"确实为空"必须是两件不同的事', () => {
+    // 这是整份清单存在的唯一理由。两者如果读起来一样，这份清单就白做了。
+    const neverTried = createSourceInventoryEntry({
+      family: 'documents', outcome: INVENTORY_OUTCOMES.NOT_ATTEMPTED,
+      endpoint: null, detail: 'hub 上没有显式文档的读端点',
+    })
+    const triedEmpty = createSourceInventoryEntry({
+      family: 'documents', outcome: INVENTORY_OUTCOMES.READ_EMPTY,
+      endpoint: '/api/documents', count: 0, detail: '读了，这次确实一份都没有',
+    })
+    assert.notEqual(neverTried.outcome, triedEmpty.outcome)
+    // ★ "没去取"的 count 必须是 null，而"取了但没有"必须是 0。
+    //   让前者也写 0，两者在读数上就重合了。
+    assert.equal(neverTried.count, null, '没去取的东西没有条数可言')
+    assert.equal(triedEmpty.count, 0)
+  })
+
+  test('★ `not-attempted` 带 count 直接报错（0 会与"确实没有"重合）', () => {
+    assert.throws(
+      () => createSourceInventoryEntry({
+        family: 'x', outcome: INVENTORY_OUTCOMES.NOT_ATTEMPTED, count: 0,
+      }),
+      /not-attempted[\s\S]{0,80}count|没去取的东西没有条数/,
+    )
+  })
+
+  test('`read-empty` 的 count 必须是 0（"空"不是一个可以随便填的说法）', () => {
+    assert.throws(
+      () => createSourceInventoryEntry({
+        family: 'x', outcome: INVENTORY_OUTCOMES.READ_EMPTY, count: 3,
+      }),
+      /read-empty/,
+    )
+  })
+
+  test('清单排序是**数据的函数**，不是插入顺序的函数（它要进哈希）', () => {
+    const a = createSourceInventory([
+      { family: 'skills', outcome: INVENTORY_OUTCOMES.READ, count: 2 },
+      { family: 'comments', outcome: INVENTORY_OUTCOMES.READ_EMPTY, count: 0 },
+    ])
+    const b = createSourceInventory([
+      { family: 'comments', outcome: INVENTORY_OUTCOMES.READ_EMPTY, count: 0 },
+      { family: 'skills', outcome: INVENTORY_OUTCOMES.READ, count: 2 },
+    ])
+    assert.deepEqual(a.map((e) => e.family), ['comments', 'skills'])
+    assert.deepEqual(a, b, '同一组记录、不同插入顺序，必须得到同一份清单')
+  })
+
+  test('★ 一个来源族只能有一条处置（两条会让"到底取没取"有第二个答案）', () => {
+    assert.throws(
+      () => createSourceInventory([
+        { family: 'skills', outcome: INVENTORY_OUTCOMES.READ, count: 1 },
+        { family: 'skills', outcome: INVENTORY_OUTCOMES.NOT_ATTEMPTED },
+      ]),
+      /出现了两次/,
+    )
+  })
+
+  test('未知 outcome 被拒（否则清单可以自己发明处置）', () => {
+    assert.throws(
+      () => createSourceInventoryEntry({ family: 'x', outcome: 'probably-fine' }),
+      /outcome 必须是/,
+    )
+  })
+
+  test('★★ 清单进哈希：同一批内容、不同的取数路径 = 两个快照', () => {
+    const mk = (inventory) => freezeContextSnapshot({
+      attemptId: 'a', runId: 'r', frozenAtMs: 1, candidateCount: 0, sources: [], excluded: [],
+      tokens: createTokenMeasurement({ kind: TOKEN_ESTIMATOR_KINDS.EXACT, tokens: 0 }),
+      sourceInventory: inventory,
+    })
+    const readIt = mk([{ family: 'comments', outcome: INVENTORY_OUTCOMES.READ_EMPTY, count: 0 }])
+    const neverReadIt = mk([{ family: 'comments', outcome: INVENTORY_OUTCOMES.NOT_ATTEMPTED }])
+    assert.notEqual(readIt.snapshotHash, neverReadIt.snapshotHash,
+      '两条来源一种是"读了、空的"、一种是"压根没读"，哈希必须分得开——'
+      + '否则回放会声称两次运行是同一份，而它们的取数路径不同')
+    // 顺序也不能影响哈希
+    const rev = mk([
+      { family: 'skills', outcome: INVENTORY_OUTCOMES.READ, count: 1 },
+      { family: 'comments', outcome: INVENTORY_OUTCOMES.READ_EMPTY, count: 0 },
+    ])
+    const fwd = mk([
+      { family: 'comments', outcome: INVENTORY_OUTCOMES.READ_EMPTY, count: 0 },
+      { family: 'skills', outcome: INVENTORY_OUTCOMES.READ, count: 1 },
+    ])
+    assert.equal(rev.snapshotHash, fwd.snapshotHash)
+  })
+
+  test('不给清单时是空数组（既有调用方一行不用改，但"没申报"不等于"都取到了"）', () => {
+    const s = freezeContextSnapshot({
+      attemptId: 'a', runId: 'r', frozenAtMs: 1, candidateCount: 0, sources: [], excluded: [],
+      tokens: createTokenMeasurement({ kind: TOKEN_ESTIMATOR_KINDS.EXACT, tokens: 0 }),
+    })
+    assert.deepEqual(s.sourceInventory, [])
+    assert.equal(verifySnapshotHash(s), true)
   })
 })

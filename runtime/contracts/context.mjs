@@ -109,6 +109,105 @@ export const TOKEN_ESTIMATOR_KINDS = Object.freeze({
 })
 
 /**
+ * 来源清单里一条记录的**处置**（PRT-408）。
+ *
+ * 这份枚举回答的是另一个问题——不是"这个来源为什么没进去"（那是
+ * `EXCLUSION_REASONS`），而是"**我们到底有没有去取它**"。
+ *
+ * 两者是**正交**的，不能合并：一个来源可以"去了、取到了、但因为越权没进去"
+ * （`READ` + `UNAUTHORIZED`），也可以"根本没去取"（`NOT_ATTEMPTED`，没有任何排除理由）。
+ * 合并成一个字段之后，"没进去"这一个读数会同时覆盖两种完全不同的处置，
+ * 而它们的责任人不一方——一个是策略，一个是接线。
+ */
+export const INVENTORY_OUTCOMES = Object.freeze({
+  /** 去取了，取到了（有无内容都可以是这一条，看 `count`）。 */
+  READ: 'read',
+  /** 去取了，**这一类确实是空的**（`count === 0`）。这是"读了但没有"，不是"没读"。 */
+  READ_EMPTY: 'read-empty',
+  /** 去取了，**没取到**（端点报错 / 404 / 根本没拿到 taskId）。 */
+  READ_FAILED: 'read-failed',
+  /** **没去取**——本装配器还没有这条接线（`unserved`），或调用方没给。 */
+  NOT_ATTEMPTED: 'not-attempted',
+  /** 去取了，但这一条**被跳过**（例：上游前驱不是 `done`，不能算交付）。 */
+  SKIPPED: 'skipped',
+})
+
+/**
+ * 来源清单的一条记录（PRT-408）。
+ *
+ * 为什么需要**新的位置**：`sources[]` 与 `excluded[]` 只能表达"整个进了"与
+ * "整个没进"。而**列表形**来源（comments / userFeedback / upstreamDeliveries /
+ * artifacts / skills）缺席时只能传空数组，空数组产出**零个候选**——于是
+ *
+ *   > 一个"列表形来源缺席时给空数组"的装配，
+ *   > 与一个"确实没有这一类内容"的装配，在账本上是同一个东西——
+ *   > 只不过前者会让一条**没去读**的来源彻底不留痕迹。
+ *
+ * 这句注释在 `orchestrator/worker/sources-loader.mjs` 的 `listShapedAbsence`
+ * 里出现过三次，每次都写着"需要新的位置（例如快照级的来源清点）"。
+ * 本函数就是那个位置。
+ *
+ * @param {object} input
+ * @param {string} input.family 来源族（`comments` / `upstreamDeliveries` / …）
+ * @param {string} input.outcome `INVENTORY_OUTCOMES` 之一
+ * @param {string|null} [input.endpoint] 为它读了哪个端点（没读就是 null）
+ * @param {number|null} [input.count] 取到几条（没读就是 null——**不是 0**）
+ * @param {string|null} [input.detail] 人读说明（为什么跳过 / 为什么没取）
+ */
+export function createSourceInventoryEntry(input) {
+  if (input === null || typeof input !== 'object') throw new Error('来源清单记录必须是对象')
+  const family = requireString(input.family, 'family')
+  const outcome = input.outcome
+  if (!Object.values(INVENTORY_OUTCOMES).includes(outcome)) {
+    throw new Error(`来源清单的 outcome 必须是 ${Object.values(INVENTORY_OUTCOMES).join(' / ')}`)
+  }
+  const count = input.count === undefined ? null : input.count
+  if (count !== null && (!Number.isInteger(count) || count < 0)) {
+    throw new Error('来源清单的 count 必须是 >= 0 的整数或 null')
+  }
+  // ★ `NOT_ATTEMPTED` 与 `count: 0` **不能同时出现**。
+  //
+  //   没去取的东西没有条数可言。写成 0 会让它与"去了、确实是空的"
+  //   在读数上重合——而那正是这份清单要分开的两件事。
+  //
+  //   > 一个"没去取也记 0 条"的清单，
+  //   > 与一个"确实没有"的清单，在没人去数的时候是同一个东西——
+  //   > 只不过前者会让"接线漏了"读起来像"这次恰好没有"。
+  if (outcome === INVENTORY_OUTCOMES.NOT_ATTEMPTED && count !== null) {
+    throw new Error('not-attempted 的来源不能有 count：没去取的东西没有条数可言（0 会与"确实没有"重合）')
+  }
+  // ★ `READ_EMPTY` 必须真的是 0。
+  if (outcome === INVENTORY_OUTCOMES.READ_EMPTY && count !== 0) {
+    throw new Error('read-empty 的 count 必须是 0')
+  }
+  return deepFreeze({
+    family: nfc(family),
+    outcome,
+    endpoint: input.endpoint === undefined || input.endpoint === null ? null : nfc(requireString(input.endpoint, 'endpoint')),
+    count,
+    detail: input.detail === undefined || input.detail === null ? null : nfc(String(input.detail)),
+  })
+}
+
+/**
+ * 构造一份来源清单（PRT-408）。
+ *
+ * 按 `family` 排序后冻结，使清单本身是**数据的函数**而不是插入顺序的函数
+ * （它要进快照哈希）。
+ */
+export function createSourceInventory(entries) {
+  if (!Array.isArray(entries)) throw new Error('来源清单必须是数组（没有记录时给空数组）')
+  const out = entries.map((e) => createSourceInventoryEntry(e))
+  const seen = new Set()
+  for (const e of out) {
+    if (seen.has(e.family)) throw new Error(`来源清单里 ${e.family} 出现了两次（一个来源族只能有一条处置）`)
+    seen.add(e.family)
+  }
+  out.sort((a, b) => (a.family < b.family ? -1 : (a.family > b.family ? 1 : 0)))
+  return deepFreeze(out)
+}
+
+/**
  * 能改变权限 / 策略的字段名。不可信来源**不得**携带它们。
  *
  * 这是把 spec §6.5「永远不能授予权限、修改 EmployeeManifest、改变审批策略
@@ -370,6 +469,22 @@ export function freezeContextSnapshot(input) {
     // 否则回放会给出与当初不同的结果，而哈希说它们是同一份。
     redactions: Array.isArray(input.redactions) ? input.redactions : [],
     redactionSchema: input.redactionSchema ?? null,
+    // PRT-408：来源清单进哈希。它记录的是**这次运行去过哪里**——
+    // 同一批内容、不同的取数路径（少读了一个端点、跳过了三个前驱）
+    // 是两个不同的运行，回放时该分得开。
+    //
+    // ★ 这里**归一化**（排序 + 逐条校验），而不是原样收下调用方给的数组。
+    //   直接用会让哈希变成**调用方组装顺序的函数**：
+    //
+    //   > 一个"清单顺序碰巧固定"的哈希，
+    //   > 与一个"清单顺序是数据的函数"的哈希，在调用方从不改变组装顺序时
+    //   > 是同一个东西——只不过前者会在有人换了两条 push 的先后之后，
+    //   > 让同一份取数路径算出两个快照哈希。
+    //
+    //   与本仓库对上游产物引用做投影是同一个理由（见 toUpstreamArtifacts）。
+    sourceInventory: Array.isArray(input.sourceInventory) && input.sourceInventory.length > 0
+      ? createSourceInventory(input.sourceInventory)
+      : [],
     tokens,
     budget: { maxTokens: budget.maxTokens ?? null, trimmed: budget.trimmed === true },
     finalText: input.finalText === undefined ? null : input.finalText,

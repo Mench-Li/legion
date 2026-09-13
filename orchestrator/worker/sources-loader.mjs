@@ -41,6 +41,8 @@
 
 import { createHash } from 'node:crypto'
 
+import { INVENTORY_OUTCOMES, createSourceInventory } from '../../runtime/contracts/context.mjs'
+
 export const SOURCES_LOADER_CODES = Object.freeze({
   /** 依赖没给对（缺 read 等）。接线错误必须在构造期说清，不能推迟到某次运行。 */
   BAD_WIRING: 'SOURCES_LOADER_BAD_WIRING',
@@ -558,8 +560,7 @@ export function createHubSourceLoader({
           reason: `依赖超过 maxUpstream=${maxUpstream}，只读了前 ${maxUpstream} 个`,
           truncated: blockedBy.length - maxUpstream,
         })
-      }
-      for (const depId of blockedBy.slice(0, maxUpstream)) {
+      }      for (const depId of blockedBy.slice(0, maxUpstream)) {
         const dep = await readOrThrow(
           `/api/task?id=${encodeURIComponent(depId)}`,
           { notFoundIsNull: true },
@@ -580,6 +581,169 @@ export function createHubSourceLoader({
         }
         upstreamDeliveries.push(toUpstreamDelivery(dep))
       }
+
+      // ── PRT-408：来源清单 ───────────────────────────────────────────────
+      //
+      // 逐族如实申报**我们到底做了什么**。四类处置的区别就是这份清单的全部内容：
+      //
+      //   read       去取了，取到了
+      //   read-empty 去取了，这一类**确实是空的**
+      //   read-failed 去取了，**没取到**（只有 404 走到这里；别的失败会抛错）
+      //   not-attempted **没去取**（没有这条接线 / 调用方没给）
+      //   skipped    去取了，但这一条**被跳过**（例：前驱不是 done）
+      //
+      // ★ 判断"读没读"用的是 `reads`（真实发出去的请求），不是这里的 `if`。
+      //   用 `if` 复述一遍读没读，等于给同一件事写第二份账，
+      //   而两份账会在**有人改了读的条件、忘了改账**的那一次分叉。
+      //
+      //   > 一个"照着自己刚写下的 if 复述读了什么"的清单，
+      //   > 与一个"照着**真的发出的请求**申报"的清单，在没人动过那段 if 时
+      //   > 是同一个东西——只不过前者会在条件改掉之后继续申报旧事实，
+      //   > 而它看起来是自洽的。
+      //
+      // ★★ "发过请求"与"请求成功"必须**分开**——这是被一条用例逼出来的：
+      //    第一版只写了 `didRead`（要求 `r.ok`），于是 `/api/skills` 回 404 时
+      //    清单申报 `not-attempted`（"我们没去读"），而**请求确实发出去过**。
+      //
+      //   > 一个"只看成功请求"的清单，
+      //   > 与一个"根本没接线"的清单，在端点恰好报错的时候是同一个形状——
+      //   > 只不过前者会把"读失败了"记成"我们没打算读"，
+      //   > 而这两件事的修复动作完全不同（查 hub vs 改接线）。
+      //
+      //    所以三态：没发过请求 / 发过但没成功 / 发过且成功。
+      const attemptsOf = (fragment) => reads.filter((r) => r.path.includes(fragment))
+      const didAttempt = (fragment) => attemptsOf(fragment).length > 0
+      const didSucceed = (fragment) => attemptsOf(fragment).some((r) => r.ok)
+      /**
+       * 一个来源族的三态处置。
+       *
+       * `null` 表示"没发过请求"；`read-failed` 表示发过但没成功。
+       */
+      const outcomeFor = (fragment, { empty }) => {
+        if (!didAttempt(fragment)) return INVENTORY_OUTCOMES.NOT_ATTEMPTED
+        if (!didSucceed(fragment)) return INVENTORY_OUTCOMES.READ_FAILED
+        return empty ? INVENTORY_OUTCOMES.READ_EMPTY : INVENTORY_OUTCOMES.READ
+      }
+      const countOrNull = (n) => (Number.isInteger(n) && n >= 0 ? n : 0)
+
+      const inventory = []
+      // 单值来源：缺席时 `sources.mjs` 会产出带原因的 `missing` 候选，
+      // 所以这里只报"去取了没有"。
+      for (const [family, value, endpoint] of [
+        ['teamPlan', teamPlan, '/api/team-plan'],
+        ['employeeManifest', employeeManifest, '/api/employee-manifest'],
+        ['goal', goal, '/api/goal'],
+        ['task', task, '/api/task'],
+      ]) {
+        const attempted = didAttempt(endpoint)
+        const failed = attempted && !didSucceed(endpoint)
+        inventory.push({
+          family,
+          outcome: attempted
+            ? (failed || value === null ? INVENTORY_OUTCOMES.READ_FAILED : INVENTORY_OUTCOMES.READ)
+            : INVENTORY_OUTCOMES.NOT_ATTEMPTED,
+          endpoint: attempted ? endpoint : null,
+          count: attempted && !failed && value !== null ? 1 : undefined,
+          detail: !attempted
+            ? '这次运行没有去读它'
+            : (failed || value === null ? '读了但没取到（404 或不适用）' : null),
+        })
+      }
+
+      // 列表形来源：**这一节就是 `listShapedAbsence` 一直缺的那个位置。**
+      const comments = toComments(task)
+      const taskAttempted = didAttempt('/api/task')
+      const taskOk = taskAttempted && didSucceed('/api/task') && task !== null
+      inventory.push({
+        family: 'comments',
+        outcome: taskOk
+          ? (comments.length === 0 ? INVENTORY_OUTCOMES.READ_EMPTY : INVENTORY_OUTCOMES.READ)
+          : (taskAttempted ? INVENTORY_OUTCOMES.READ_FAILED : INVENTORY_OUTCOMES.NOT_ATTEMPTED),
+        endpoint: taskAttempted ? '/api/task' : null,
+        count: taskOk ? countOrNull(comments.length) : undefined,
+        detail: taskOk
+          ? (comments.length === 0 ? '读了任务行，它确实没有评论' : null)
+          : (taskAttempted ? '任务没读到，评论无处可取' : '没有去读任务行'),
+      })
+
+      const feedbackTried = didAttempt('/api/task-feedback')
+      const feedbackOk = feedbackTried && didSucceed('/api/task-feedback')
+      inventory.push({
+        family: 'userFeedback',
+        outcome: outcomeFor('/api/task-feedback', { empty: userFeedback.length === 0 }),
+        endpoint: feedbackTried ? '/api/task-feedback' : null,
+        count: feedbackOk ? countOrNull(userFeedback.length) : undefined,
+        detail: !feedbackTried
+          ? '没有 taskId（或没有这条接线），**没有去读**——不等于"没有反馈"'
+          : (feedbackOk
+            ? (userFeedback.length === 0 ? '读了，这次确实没有用户反馈' : null)
+            : '读了但没取到'),
+      })
+
+      // 上游交付：有前驱才去读，所以"没读"与"读了但没有"必须分开。
+      const upstreamTried = blockedBy.length > 0
+      inventory.push({
+        family: 'upstreamDeliveries',
+        outcome: !upstreamTried
+          ? INVENTORY_OUTCOMES.NOT_ATTEMPTED
+          : (upstreamDeliveries.length > 0
+            ? INVENTORY_OUTCOMES.READ
+            : (upstreamSkipped.length > 0 ? INVENTORY_OUTCOMES.SKIPPED : INVENTORY_OUTCOMES.READ_EMPTY)),
+        endpoint: upstreamTried ? '/api/task?id=' : null,
+        count: upstreamTried ? countOrNull(upstreamDeliveries.length) : undefined,
+        detail: !upstreamTried
+          ? '这个任务没有 blockedBy 前驱（**链头**），不是"上游都没交付"'
+          : (upstreamDeliveries.length === 0
+            ? `读了 ${blockedBy.length} 个前驱，没有一个产出交付（跳过了 ${upstreamSkipped.length} 个）`
+            : (upstreamSkipped.length > 0 ? `另有 ${upstreamSkipped.length} 个前驱被跳过（见 upstreamSkipped）` : null)),
+      })
+
+      const artifacts = mapEpochMs(task?.artifacts)
+      inventory.push({
+        family: 'artifacts',
+        outcome: taskOk
+          ? (artifacts.length === 0 ? INVENTORY_OUTCOMES.READ_EMPTY : INVENTORY_OUTCOMES.READ)
+          : (taskAttempted ? INVENTORY_OUTCOMES.READ_FAILED : INVENTORY_OUTCOMES.NOT_ATTEMPTED),
+        endpoint: taskAttempted ? '/api/task' : null,
+        count: taskOk ? countOrNull(artifacts.length) : undefined,
+        detail: taskOk
+          ? (artifacts.length === 0 ? '读了任务行，它确实没有登记产物' : null)
+          : (taskAttempted ? '任务没读到，产物引用无处可取' : '没有去读任务行'),
+      })
+
+      const skillsTried = didAttempt('/api/skills')
+      const skillsOk = skillsTried && didSucceed('/api/skills')
+      inventory.push({
+        family: 'skills',
+        outcome: outcomeFor('/api/skills', { empty: skills.length === 0 }),
+        endpoint: skillsTried ? '/api/skills' : null,
+        count: skillsOk ? countOrNull(skills.length) : undefined,
+        detail: !skillsTried
+          ? '这次运行没有去读它'
+          : (skillsOk ? (skills.length === 0 ? '读了，这次确实没有已发布 skill' : null) : '读了但没取到'),
+      })
+
+      // ★ 显式文档：hub 上**没有**读端点，所以永远是 not-attempted。
+      //   这一条就是"没去取"与"确实没有"必须分开的最好例子——
+      //   从 PRT-406 起 `documents` 一直是空数组，而空数组**什么都不说**。
+      inventory.push({
+        family: 'documents',
+        outcome: INVENTORY_OUTCOMES.NOT_ATTEMPTED,
+        endpoint: null,
+        detail: 'hub 上没有显式文档的读端点（见 availability().unconsumed 的 /api/skill-source 说明）'
+          + '——**没有去读**，而不是"确实没有文档"',
+      })
+
+      // ★ 工作区状态：同上，属于 `UNSERVED_SOURCE_FAMILIES`。
+      inventory.push({
+        family: 'workspaceState',
+        outcome: INVENTORY_OUTCOMES.NOT_ATTEMPTED,
+        endpoint: null,
+        detail: 'hub 没有工作区状态的读端点（工作区是 worker 本机的目录）'
+          + '——**没有去读**，而不是"工作区没有变化"',
+      })
+
+      const sourceInventory = createSourceInventory(inventory)
 
       return {
         scope: effScope,
@@ -606,6 +770,12 @@ export function createHubSourceLoader({
         //   它现在的读者是**用例与调用方**（`loadSources` 的返回值是对外契约），
         //   进快照要等 PRT-408 的来源清单（"已读但为空 / 被过滤"的位置）。
         upstreamSkipped,
+        // ★ PRT-408：**来源清单**——把"没去取"与"取了但没有"分开的那一栏。
+        //
+        //   `listShapedAbsence`（见 `availability()`）原先只能把这件事
+        //   **记成一处已知边界**，因为列表形来源缺席时只能传空数组。
+        //   这份清单就是那个"新的位置"。
+        sourceInventory,
         // 产物**只给引用**（PRT-405）：正文是一个预算决定。
         artifacts: mapEpochMs(task?.artifacts),
         skills: mapEpochMs(skills),
@@ -654,7 +824,8 @@ export function createHubSourceLoader({
           endpoint: '/api/task?id=',
           maxUpstream: maxUpstream,
           onlyDone: true,
-          skippedReportedAs: 'loadSources() 返回值的 upstreamSkipped（**尚未**进快照，等 PRT-408）',
+          skippedReportedAs: 'loadSources() 返回值的 upstreamSkipped，并已由 sourceInventory 的 '
+            + 'upstreamDeliveries 一条（outcome=skipped）带进快照',
         }),
         /**
          * ⚠️ 一处**形状决定的**边界，写出来而不是留给运维去猜。
@@ -672,23 +843,30 @@ export function createHubSourceLoader({
          *   > 与一个"确实没有这一类内容"的装配，在账本上是同一个东西——
          *   > 只不过前者会让一条**没去读**的来源彻底不留痕迹。
          *
-         * 这条边界需要**新的位置**才能表达（例如"已读但为空"的候选，
-         * 或快照级的来源清点），那是 PRT-408 的来源清单该做的事。
-         * 现在把它如实列出来，让它是**已知的**，而不是看起来不存在。
+         * 这条边界曾经需要**新的位置**才能表达，而那个位置已经做出来了：
+         * `loadSources` 现在返回 `sourceInventory`（PRT-408），`context-stage`
+         * 把它转交给装配器，它进快照、也进哈希。下面这份清单因此
+         * **不再是"已知缺口"**，而是这些族在清单里的 `family` 名的索引——
+         * 留着是为了让读到这里的人不必自己猜"这条边界后来解决了没有"。
+         *
+         *   > 一个写着"这处缺口要等 PRT-408"的注释，
+         *   > 与一个写着"PRT-408 已经做了、清单在 sourceInventory"的注释，
+         *   > 在那件事做完之前是同一个东西——只不过前者会在做完之后
+         *   > 让下一个人**再去做一遍已经做完的事**。
          */
         listShapedAbsence: Object.freeze([
           Object.freeze({
             key: 'userFeedback',
             absentAs: [],
             why: '列表形来源：没读到（无 taskId / 404）与确实没有反馈，在快照里都是"零个候选"',
-            needs: 'PRT-408 的来源清单（"已读但为空"的位置）',
+            nowExpressedBy: 'sourceInventory 的 userFeedback 一条（read-empty / not-attempted 分得开）',
           }),
           Object.freeze({
             key: 'comments',
             absentAs: [],
             why: '任务行上没有评论时同样产出零个候选：注释里那个"没去读"的处境'
               + '（任务读回来是空的）在这条来源上完全没有痕迹，只有任务来源自己没有候选',
-            needs: 'PRT-408 的来源清单',
+            nowExpressedBy: 'sourceInventory 的 comments 一条',
           }),
           Object.freeze({
             key: 'upstreamDeliveries',
@@ -696,7 +874,8 @@ export function createHubSourceLoader({
             why: '列表形来源：**每个前驱都不产出交付**（全都没 done / 依赖超上限）'
               + '与"这个任务根本没有上游"在快照里都是零个候选，'
               + '而后者是链头、前者是链断了——两者的处置完全不同',
-            needs: 'PRT-408 的来源清单',
+            nowExpressedBy: 'sourceInventory 的 upstreamDeliveries 一条'
+              + '（read-empty / skipped / not-attempted 三者分得开）',
           }),
         ]),
       })

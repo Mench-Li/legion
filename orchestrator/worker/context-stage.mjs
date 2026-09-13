@@ -181,6 +181,17 @@ export function createContextStage(deps) {
           maxTokens: deps.policy?.maxTokens ?? null,
         },
         tokenizer,
+        // ★ PRT-408：来源清单**由取数方申报**，这里只负责转交。
+        //
+        //   不转交的后果不是"少一个字段"：清单缺席时快照里的
+        //   `sourceInventory` 是空数组，而空数组在摘要里什么都不说——
+        //   于是"这次运行少读了两类来源"与"全都读了"在快照上**是同一个形状**。
+        //
+        //   > 一个"取数方申报了清单、而装配阶段忘了转交"的实现，
+        //   > 与一个"取数方压根没申报"的实现，在取数全都正常的时候
+        //   > 是同一个东西——只不过前者会让**接线漏掉的那一次**
+        //   > 看起来像是"这一类确实没有"。
+        sourceInventory: inputs.sourceInventory,
       })
     } catch (err) {
       const e = new ContextStageError(CONTEXT_STAGE_ERRORS.ASSEMBLY_FAILED,

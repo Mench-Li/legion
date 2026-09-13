@@ -334,11 +334,20 @@ test('★★ 补上的缺口进 `formerlyUnserved`，且写明**当时缺的是�
   for (const k of keys) assert.ok(!unservedKeys.includes(k), `${k} 不能两边都在`)
 })
 
-test('★★ 列表形来源的缺席**不留痕迹**——这条边界被写出来，而不是留给运维猜', () => {
+test('★★ 列表形来源的缺席**曾经不留痕迹**——PRT-408 之后它被 sourceInventory 表达了', () => {
   // `teamPlan` / `employeeManifest` 是单值来源：缺席传 `null`，装配器产出
   // 一条带原因的 `missing` 候选，"没有"与"没去读"分得开。
   // 而 `comments` / `userFeedback` 是**列表形**：缺席只能传 `[]`，产出**零个**
-  // 候选——两种完全不同的处境在快照里是同一个形状。
+  // 候选——两种完全不同的处境在快照里曾经是同一个形状。
+  //
+  // ★ 这条用例的**名字从否定变成了过去式**，因为那处缺口已经补上：
+  //   PRT-408 的来源清单（`sourceInventory`）现在承载它。
+  //   名字不改的后果不是难看——下一个人读到"不留痕迹"会以为**现在仍然**
+  //   不留痕迹，于是再去做一遍已经做完的事。
+  //
+  //   > 一个用现在时描述已知缺口的用例名，
+  //   > 与一个用过去时描述已修缺口的用例名，在缺口还在的时候是同一个东西——
+  //   > 只不过前者会在缺口补上之后，继续宣称它还在。
   const loader = createHubSourceLoader({ hub: makeHub(), scope: SCOPE })
   const av = loader.availability()
   const keys = av.listShapedAbsence.map((u) => u.key)
@@ -347,7 +356,12 @@ test('★★ 列表形来源的缺席**不留痕迹**——这条边界被写出
   }
   for (const u of av.listShapedAbsence) {
     assert.deepEqual(u.absentAs, [], '列表形缺席只能表示为空数组')
-    assert.ok(u.why.length > 20 && u.needs.length > 5, `${u.key} 要说清为什么、以及需要什么才能表达`)
+    // ★ 断言的是"它现在由谁表达"——而不是"还需要什么才能表达"。
+    //   前者会在缺口被补上之后**因为写对了而绿**，后者会在补上之后**照样绿**。
+    assert.ok(u.why.length > 20, `${u.key} 要说清为什么这是一处形状决定的边界`)
+    assert.match(u.nowExpressedBy, /sourceInventory/,
+      `${u.key} 必须指出它现在由 sourceInventory 表达`)
+    assert.equal(u.needs, undefined, '缺口已补，不该再留 "needs" 字段')
   }
   // 单值来源**不在**这份清单里（它们有 `missing` 候选这个位置）
   assert.ok(!keys.includes('teamPlan'), '单值来源缺席有 missing 候选，不属于这条边界')
@@ -974,4 +988,177 @@ test('maxSkills 限制带进来的技能条数（一个上限，不是建议）'
 test('UNSERVED_SOURCE_FAMILIES 是冻结的（不是一份谁都能改的清单）', () => {
   assert.ok(Object.isFrozen(UNSERVED_SOURCE_FAMILIES))
   assert.ok(Object.isFrozen(UNSERVED_SOURCE_FAMILIES[0]))
+})
+
+// ============================================================================
+// PRT-408：来源清单
+//
+// 这一节钉的是**同一份快照不再有两种读法**：
+// 空数组从前同时表示"确实没有"与"我们没去读"，现在它们分得开。
+// ============================================================================
+
+/** 从清单里取一族的处置（取不到就是用例自己的问题，直接抛）。 */
+function invOf(src, family) {
+  const e = (src.sourceInventory ?? []).find((x) => x.family === family)
+  assert.ok(e, `来源清单里没有 ${family}：${JSON.stringify(src.sourceInventory?.map((x) => x.family))}`)
+  return e
+}
+
+test('★★★ "没去读"与"读了但没有"在清单里**分得开**（这份清单存在的唯一理由）', async () => {
+  // 同一个端点、同一个空数组，两种截然不同的处境。
+  const id = await seedTask({ title: '没有评论也没有产物的任务' })
+  const loader = createHubSourceLoader({ hub: makeHub(), scope: SCOPE })
+  const src = await loader.loadSources({ taskId: id, scope: SCOPE })
+
+  // ① 评论：**读了任务行**，它确实没有评论 → read-empty，count 是 0
+  const comments = invOf(src, 'comments')
+  assert.equal(comments.outcome, 'read-empty')
+  assert.equal(comments.count, 0)
+  assert.equal(comments.endpoint, '/api/task')
+
+  // ② 显式文档：hub 上**没有读端点**，我们压根没去读 → not-attempted，count 是 null
+  const docs = invOf(src, 'documents')
+  assert.equal(docs.outcome, 'not-attempted')
+  assert.equal(docs.count, null, '"没去读"没有条数可言——写 0 就与 read-empty 重合了')
+  assert.equal(docs.endpoint, null)
+
+  // ③ 两者**不能**是同一个读数。这是整条用例的重点。
+  assert.notEqual(comments.outcome, docs.outcome)
+  assert.notEqual(comments.count, docs.count)
+})
+
+test('★ 上游交付："链头"是 not-attempted，"读了但都没交付"是 skipped（处置完全不同）', async () => {
+  const loader = createHubSourceLoader({ hub: makeHub(), scope: SCOPE })
+
+  // ① 链头：没有 blockedBy → 压根没去读
+  const head = await seedTask({ title: '链头任务' })
+  const headSrc = await loader.loadSources({ taskId: head, scope: SCOPE })
+  const headInv = invOf(headSrc, 'upstreamDeliveries')
+  assert.equal(headInv.outcome, 'not-attempted')
+  assert.equal(headInv.count, null)
+
+  // ② 有前驱但前驱没 done → 去读了，一个交付都没有 → skipped（不是 not-attempted）
+  const dep = await seedTask({ title: '上游还没做完' })
+  const down = await seedTask({ title: '下游', blockedBy: [dep] })
+  const downSrc = await loader.loadSources({ taskId: down, scope: SCOPE })
+  const downInv = invOf(downSrc, 'upstreamDeliveries')
+  assert.equal(downInv.outcome, 'skipped', '读了前驱但没交付，必须与"没有前驱"分得开')
+  assert.equal(downInv.count, 0)
+  assert.equal(downInv.endpoint, '/api/task?id=')
+
+  assert.notEqual(headInv.outcome, downInv.outcome,
+    '链头与链断了是两件事，处置完全不同——这正是需要来源清单的原因')
+})
+
+test('★ 上游交付：前驱做完之后是 read（不是 read-empty）', async () => {
+  const dep = await seedTask({ title: '上游交付物' })
+  await driveToDone(dep, SCOPE)
+  const down = await seedTask({ title: '下游', blockedBy: [dep] })
+  const loader = createHubSourceLoader({ hub: makeHub(), scope: SCOPE })
+  const src = await loader.loadSources({ taskId: down, scope: SCOPE })
+  const inv = invOf(src, 'upstreamDeliveries')
+  assert.equal(inv.outcome, 'read')
+  assert.equal(inv.count, 1)
+})
+
+test('★ 用户反馈：没有 taskId 时是 not-attempted，**不是**"没有反馈"', async () => {
+  // `requireTask: false` 才允许空 taskId（默认会抛 NO_TASK_ID）。
+  const loader = createHubSourceLoader({ hub: makeHub(), scope: SCOPE, requireTask: false })
+  const src = await loader.loadSources({ taskId: '', scope: SCOPE })
+  const inv = invOf(src, 'userFeedback')
+  assert.equal(inv.outcome, 'not-attempted')
+  assert.equal(inv.count, null)
+  assert.equal(inv.endpoint, null)
+  assert.match(inv.detail, /没有去读/, inv.detail)
+  assert.match(inv.detail, /不等于"没有反馈"/, '必须说清这不是"没有反馈"')
+})
+
+test('★ 用户反馈：有 taskId 但确实没有反馈 → read-empty（与上一条相反）', async () => {
+  const id = await seedTask({ title: '没有反馈的任务' })
+  const loader = createHubSourceLoader({ hub: makeHub(), scope: SCOPE })
+  const src = await loader.loadSources({ taskId: id, scope: SCOPE })
+  const inv = invOf(src, 'userFeedback')
+  assert.equal(inv.outcome, 'read-empty')
+  assert.equal(inv.count, 0)
+  assert.equal(inv.endpoint, '/api/task-feedback')
+})
+
+test('★ 清单覆盖每一个来源族（一个族缺席就等于它又能"不留痕迹"了）', async () => {
+  const id = await seedTask({ title: '任务' })
+  const loader = createHubSourceLoader({ hub: makeHub(), scope: SCOPE })
+  const src = await loader.loadSources({ taskId: id, scope: SCOPE })
+  const families = src.sourceInventory.map((e) => e.family)
+  for (const f of ['teamPlan', 'employeeManifest', 'goal', 'task', 'comments',
+    'userFeedback', 'upstreamDeliveries', 'artifacts', 'skills', 'documents', 'workspaceState']) {
+    assert.ok(families.includes(f), `来源清单漏了 ${f}——它又能不留痕迹了`)
+  }
+})
+
+test('清单进得了装配器，并且**改变哈希**（否则它就不在快照里）', async () => {
+  const { assembleContext } = await import('../../runtime/context/assembler.mjs')
+  const { TOKEN_ESTIMATOR_KINDS } = await import('../../runtime/contracts/context.mjs')
+  const id = await seedTask({ title: '任务' })
+  const loader = createHubSourceLoader({ hub: makeHub(), scope: SCOPE })
+  const src = await loader.loadSources({ taskId: id, scope: SCOPE })
+
+  const mk = (sourceInventory) => assembleContext({
+    attemptId: 'a', runId: 'r', frozenAtMs: 1, associations: {},
+    candidates: [], policy: { scope: SCOPE, canRead: () => true, maxTokens: null },
+    tokenizer: { kind: TOKEN_ESTIMATOR_KINDS.EXACT, count: (t) => t.length },
+    sourceInventory,
+  })
+  const withInv = mk(src.sourceInventory)
+  const withoutInv = mk(undefined)
+  assert.ok(withInv.sourceInventory.length > 0, '清单必须真的进了快照')
+  assert.notEqual(withInv.snapshotHash, withoutInv.snapshotHash,
+    '清单必须进哈希：两次取数路径不同的运行不该是同一份快照')
+  // 摘要要说出"没去取"的那几类——否则用户看不出这份快照缺了东西
+  const { describeAssembly } = await import('../../runtime/context/assembler.mjs')
+  assert.match(describeAssembly(withInv), /没去取/, describeAssembly(withInv))
+})
+
+test('★★★ "发过请求但没成功" 与 "没去读" 必须分开（read-failed ≠ not-attempted）', async () => {
+  // 这条用例逼出过一个真缺陷：第一版只统计**成功**的请求（`r.ok`），
+  // 于是 `/api/skills` 回 404 时清单申报 `not-attempted`（"我们没去读"），
+  // 而请求**确实发出去过**。
+  //
+  //   > 一个"只看成功请求"的清单，
+  //   > 与一个"根本没接线"的清单，在端点恰好报错的时候是同一个形状——
+  //   > 只不过前者会把"读失败了"记成"我们没打算读"，
+  //   > 而这两件事的修复动作完全不同（查 hub vs 改接线）。
+  const seen = []
+  const hub = {
+    async read(path) {
+      seen.push(path)
+      if (path.startsWith('/api/task')) {
+        return { task: { id: 't1', title: 'x', comments: [], artifacts: [], blockedBy: [] } }
+      }
+      // skills 端点坏了；别的端点回空
+      if (path.startsWith('/api/skills')) { const e = new Error('skills 挂了'); e.status = 500; throw e }
+      return {}
+    },
+  }
+  const loader = createHubSourceLoader({ hub, scope: SCOPE })
+  // 500 会抛错（只有 404 才是"问到了、它说没有"）——所以这里要接住
+  await assert.rejects(() => loader.loadSources({ taskId: 't1', scope: SCOPE }),
+    /读 .* 失败|这不是"没有这条来源"/)
+
+  // 用 404 再看一次：404 被 notFoundIsNull 吃成 null，于是**请求成功返回、但没有内容**
+  const seen404 = []
+  const hub404 = {
+    async read(path) {
+      seen404.push(path)
+      if (path.startsWith('/api/task')) {
+        return { task: { id: 't1', title: 'x', comments: [], artifacts: [], blockedBy: [] } }
+      }
+      const e = new Error('没有'); e.status = 404; throw e
+    },
+  }
+  const l404 = createHubSourceLoader({ hub: hub404, scope: SCOPE })
+  const src = await l404.loadSources({ taskId: 't1', scope: SCOPE })
+  assert.ok(seen404.some((p) => p.startsWith('/api/skills')), '确实发过 skills 请求')
+  const skills = invOf(src, 'skills')
+  assert.equal(skills.outcome, 'read-failed',
+    '发过请求但没拿到，必须是 read-failed——记成 not-attempted 等于谎称我们没打算读')
+  assert.equal(skills.endpoint, '/api/skills', '失败也要记下读的是哪个端点')
 })

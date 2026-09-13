@@ -583,3 +583,68 @@ describe('⑨ 认领响应必须带 scope（权限判定以空间为参照）', 
     }
   })
 })
+
+// ============================================================================
+// PRT-408：本阶段必须把**取数方申报的来源清单**转交给装配器
+//
+// 这一条是被断验证逼出来的：探针「context-stage 不转交清单」跑出来 fail=0，
+// 因为当时**没有任何用例断言过那一行的存在**——清单在 loader 那侧被测得很细，
+// 而"它到底有没有进快照"没有人守。
+//
+//   > 一个"取数方申报了清单、装配阶段忘了转交"的实现，
+//   > 与一个"取数方压根没申报"的实现，在取数全都正常的时候
+//   > 是同一个东西——只不过前者会让**接线漏掉的那一次**
+//   > 看起来像是"这一类确实没有"。
+// ============================================================================
+
+describe('⑦ 来源清单被转交进快照（PRT-408）', () => {
+  test('★★★ loadInputs 给的 sourceInventory 必须**真的进快照**', async () => {
+    const env = makeEnv()
+    try {
+      const inventory = [
+        { family: 'comments', outcome: 'read-empty', count: 0, endpoint: '/api/task' },
+        { family: 'documents', outcome: 'not-attempted' },
+      ]
+      const detail = await stage(env, { sourceInventory: inventory })(lease())
+      assert.equal(detail.kind, 'frozen')
+      const snap = env.store.get('att:t1:1').snapshot
+      assert.ok(snap, '快照必须落库')
+      assert.equal(snap.sourceInventory.length, 2,
+        '清单没有进快照——取数方申报了，而阶段忘了转交')
+      const docs = snap.sourceInventory.find((e) => e.family === 'documents')
+      assert.equal(docs.outcome, 'not-attempted')
+      assert.equal(docs.count, null, '"没去取"没有条数')
+    } finally {
+      env.cleanup()
+    }
+  })
+
+  test('★ 清单缺席时快照里是空数组（既有调用方一行不用改）', async () => {
+    const env = makeEnv()
+    try {
+      const detail = await stage(env)(lease())
+      assert.equal(detail.kind, 'frozen')
+      assert.deepEqual(env.store.get('att:t1:1').snapshot.sourceInventory, [])
+    } finally {
+      env.cleanup()
+    }
+  })
+
+  test('★ 清单改变快照哈希（否则它进没进快照从外面看不出来）', async () => {
+    const envA = makeEnv()
+    const envB = makeEnv()
+    try {
+      await stage(envA)(lease())
+      await stage(envB, {
+        sourceInventory: [{ family: 'documents', outcome: 'not-attempted' }],
+      })(lease())
+      const a = envA.store.get('att:t1:1')
+      const b = envB.store.get('att:t1:1')
+      assert.notEqual(a.snapshotHash, b.snapshotHash,
+        '两次运行的取数路径不同，哈希必须分得开——否则回放会声称它们是同一份')
+    } finally {
+      envA.cleanup()
+      envB.cleanup()
+    }
+  })
+})

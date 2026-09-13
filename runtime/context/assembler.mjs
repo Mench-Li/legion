@@ -41,9 +41,11 @@
 import {
   CONTEXT_SNAPSHOT_SCHEMA_VERSION,
   EXCLUSION_REASONS,
+  INVENTORY_OUTCOMES,
   SOURCE_TRUST,
   TOKEN_ESTIMATOR_KINDS,
   createExclusion,
+  createSourceInventory,
   createTokenMeasurement,
   freezeContextSnapshot,
 } from '../contracts/context.mjs'
@@ -215,6 +217,19 @@ export function assembleContext(input) {
     throw new AssemblyError(ASSEMBLY_CODES.BAD_BUDGET, 'policy.maxTokens 必须是 >= 1 的整数或 null（不限）')
   }
   const priorityIndex = new Map((policy.priority ?? []).map((t, i) => [t, i]))
+
+  // PRT-408：来源清单由**调用方**给出。
+  //
+  // 装配器**不自己推断取了哪些来源**：它手上只有候选，"去过哪里"是取数那一侧
+  // （`orchestrator/worker/sources-loader.mjs`）的事实。这里只做形状校验。
+  //
+  //   > 一个"装配器自己猜取了哪些来源"的实现，
+  //   > 与一个"由取数方如实申报"的实现，在取数没漏的时候是同一个东西——
+  //   > 只不过前者会把**漏掉的那一次**写成"这一类确实没有"，
+  //   > 而清单的全部意义正是把这两件事分开。
+  const sourceInventory = input.sourceInventory === undefined || input.sourceInventory === null
+    ? []
+    : createSourceInventory(input.sourceInventory)
 
   const included = []
   const excluded = []
@@ -472,6 +487,10 @@ export function assembleContext(input) {
     // 而哈希说它们是同一份。
     redactions,
     redactionSchema: REDACTION_SCHEMA,
+    // PRT-408：来源清单。**这是"我们到底有没有去取它"的那一栏**，
+    // 与 `excluded`（"为什么没进去"）正交，见 INVENTORY_OUTCOMES 的说明。
+    // 它进哈希：同一批内容、不同的取数路径是两个不同的运行。
+    sourceInventory,
   })
 
   return snapshot
@@ -508,5 +527,22 @@ export function describeAssembly(snapshot) {
     const label = { unauthorized: '越权', stale: '过期', 'over-budget': '超预算', redacted: '整条不发（脱敏失败）', missing: '找不到', 'out-of-scope': '不在本空间' }
     parts.push(`；排除 ${snapshot.excluded.length} 个（${[...byReason].map(([r, n]) => `${label[r] ?? r} ${n}`).join('、')}）`)
   }
+  // PRT-408：**没去取**的那些来源族要出现在摘要里。
+  //
+  // 只说"包含 N 个来源"会让一份**缺了两条来源**的快照读起来跟完整的一样：
+  // 少了的那两类不产出任何候选，于是它们在那句话里根本不存在。
+  //
+  //   > 一个"只报包含几个来源"的摘要，
+  //   > 与一个"还报了有几类压根没去取"的摘要，在接线全都接上的时候是同一个东西——
+  //   > 只不过前者会在接线漏掉一条时，让那份快照看起来**完整**。
+  const inv = snapshot.sourceInventory ?? []
+  const neverTried = inv.filter((e) => e.outcome === INVENTORY_OUTCOMES.NOT_ATTEMPTED)
+  const triedEmpty = inv.filter((e) => e.outcome === INVENTORY_OUTCOMES.READ_EMPTY)
+  const failed = inv.filter((e) => e.outcome === INVENTORY_OUTCOMES.READ_FAILED)
+  const skipped = inv.filter((e) => e.outcome === INVENTORY_OUTCOMES.SKIPPED)
+  if (neverTried.length > 0) parts.push(`；**没去取** ${neverTried.length} 类（${neverTried.map((e) => e.family).join('、')}）`)
+  if (failed.length > 0) parts.push(`；取数失败 ${failed.length} 类（${failed.map((e) => e.family).join('、')}）`)
+  if (triedEmpty.length > 0) parts.push(`；取了但没有 ${triedEmpty.length} 类（${triedEmpty.map((e) => e.family).join('、')}）`)
+  if (skipped.length > 0) parts.push(`；跳过 ${skipped.length} 类（${skipped.map((e) => e.family).join('、')}）`)
   return `${parts.join('')}。`
 }

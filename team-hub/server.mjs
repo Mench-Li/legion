@@ -122,6 +122,10 @@ import { applyModelMigration, describeMigration, planModelMigration } from './mo
 // 在写入这张表之前，那份快照只存在于一次函数调用的栈上——**没有持久化就无从查看**，
 // 于是完成标准无法达成，无论装配器做得多对。
 import { createContextStore } from './context-store.mjs'
+// PRT-409 右半部分：快照导出（自验证 + 离线可验）。
+import {
+  buildSnapshotExport, verifySnapshotExport, ContextExportError, CONTEXT_EXPORT_CODES,
+} from './context-export.mjs'
 import { assembleContext, describeAssembly } from '../runtime/context/assembler.mjs'
 import { createConservativeTokenizer, tokenizerForProfile } from '../runtime/context/tokenizer.mjs'
 // PRT-402~406：把系统里的真实对象归一成候选。**没有它，候选只能由调用方手工拼**——
@@ -4389,8 +4393,94 @@ async function handle(req, res, stripPrefix) {
       })
       return
     }
+    // ── 导出一次 Attempt 的上下文快照（PRT-409 右半部分：spec line 897「导出」） ──
+    //
+    // ★ 导出与"读一条快照"共用**同一个** `path.startsWith('/api/context-snapshots/')`
+    //   守卫，而不是各写一条。第一版是两条独立的路由，于是：
+    //
+    //   ① 基线快照的"同一条路由不得被写两次"检查报了
+    //      `GET /api/context-snapshots/ ×2`——抽取器按**路径字面量**计数，
+    //      两条守卫用了同一个字面量，于是看起来是后者遮蔽了前者；
+    //   ② 真正的风险是**顺序**：如果 `/export` 那条写在通配那条**之后**，
+    //      通配那条会把含 `/` 的 id 判成 400 `MISSING_PARAM`，
+    //      导出路由**永远走不到**——而它看起来像"路由写好了"。
+    //
+    //   合并成一条守卫同时消掉这两件事：只有一条路由被声明，
+    //   也就不存在"谁在前面"这个问题。这也是 `duplicate route` 那条检查
+    //   真正想说的是：**同一段路径不该被判断两次。**
     if (req.method === 'GET' && path.startsWith('/api/context-snapshots/')) {
       const PREFIX = '/api/context-snapshots/'
+
+      if (path.endsWith('/export')) {
+        let exportAttemptId
+        try {
+          exportAttemptId = decodeURIComponent(path.slice(PREFIX.length, -'/export'.length))
+        } catch {
+          json(res, 400, { ok: false, code: 'BAD_ID_ENCODING', error: 'attemptId 不是合法的 URL 编码' })
+          return
+        }
+        if (exportAttemptId === '' || exportAttemptId.includes('/')) {
+          json(res, 400, { ok: false, code: 'MISSING_PARAM', error: '路径应为 /api/context-snapshots/<attemptId>/export' })
+          return
+        }
+        // 导出人必须有名字，导出时刻必须**显式给**。
+        //
+        // 不拿"现在"当 exportedAtMs 的默认值：一个没写时间的导出会被读成
+        // "就是刚导的"，而那是一次无法复核的猜测——而导出存在的意义正是可复核。
+        const by = url.searchParams.get('by')
+        const atMsRaw = url.searchParams.get('atMs')
+        if (by === null || by.trim() === '') {
+          json(res, 400, {
+            ok: false, code: 'EXPORT_BY_REQUIRED',
+            error: '缺少 by：导出必须记下**是谁导的**。一个无名的导出与一份匿名证据是同一种东西',
+            serverTimeMs: Date.now(),
+          })
+          return
+        }
+        const atMs = atMsRaw === null ? NaN : Number(atMsRaw)
+        if (!Number.isInteger(atMs)) {
+          json(res, 400, {
+            ok: false, code: 'EXPORT_AT_REQUIRED',
+            error: '缺少整数毫秒 atMs：不拿"现在"当默认值——导出时间是要被复核的',
+            serverTimeMs: Date.now(),
+          })
+          return
+        }
+        const rec = contextStore().get(exportAttemptId)
+        if (rec === null) {
+          // 404 而不是一份"空的但格式正确"的导出：后者会被下游当成有效证据。
+          json(res, 404, {
+            ok: false, code: 'CONTEXT_NOT_FOUND', error: `没有这份上下文快照：${exportAttemptId}`,
+            serverTimeMs: Date.now(),
+          })
+          return
+        }
+        try {
+          const exported = buildSnapshotExport(rec, {
+            exportedBy: by,
+            exportedAtMs: atMs,
+            exportedReason: url.searchParams.get('reason'),
+          })
+          json(res, 200, {
+            ok: true,
+            export: exported,
+            // 顺手把验证结论也带上：调用方不必自己再实现一遍哈希。
+            verification: verifySnapshotExport(exported),
+            serverTimeMs: Date.now(),
+          })
+        } catch (e) {
+          if (e instanceof ContextExportError) {
+            json(res, e.code === CONTEXT_EXPORT_CODES.RECORD_NOT_VERIFIED
+              || e.code === CONTEXT_EXPORT_CODES.STORE_HASH_MISMATCH ? 409 : 400, {
+              ok: false, code: e.code, error: e.message, serverTimeMs: Date.now(),
+            })
+            return
+          }
+          throw e
+        }
+        return
+      }
+
       let attemptId
       try {
         attemptId = decodeURIComponent(path.slice(PREFIX.length))

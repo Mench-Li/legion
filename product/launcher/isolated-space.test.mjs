@@ -118,7 +118,55 @@ function isolatedSpace() {
     //   一次 rmSync 会以 EPERM 失败——**而它是在 after 钩子里抛的**，
     //   于是"断言全过、用例却红"，红的原因还指向一个与断言无关的地方。
     //   （一个被清理失败染红的用例，与一个断言失败的用例，在这一列里是同一个东西。）
-    cleanup: () => rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }),
+    //
+    // ★★ 加了重试之后**仍然红过一次**（PRT-409 那轮全量 CI）：
+    //   `EPERM ... legion-space-xy88w2`，用时 1.3 秒。
+    //
+    //   于是单独做了一个**可复现**的验证（子进程把该目录当作自己的 cwd，
+    //   这正是 Windows 上"目录本身删不掉"的典型成因）：
+    //
+    //     ① 一次性 rmSync                    → EPERM
+    //     ② maxRetries:20 / retryDelay:250   → EPERM，**用时 0ms**
+    //     ③ 自己退避重试                     → 成功
+    //
+    //   ② 的 0ms 是关键：`maxRetries` 那套**根本没有重试**。
+    //   Node 的 `maxRetries` 只覆盖删**文件**那一步的重试，
+    //   而这里是删**目录**那一步失败——两处报同一个 `EPERM`，
+    //   于是一个"写着重试"的删除看起来已经处理过这个问题了：
+    //
+    //     > 一个"参数写着重试"的删除，
+    //     > 与一个"从来不重试"的删除，在源码上长得一模一样——
+    //     > 只不过前者的注释说它已经考虑过这个问题了。
+    //
+    //   所以这里改成**自己重试**，并且**清理失败绝不抛进 after 钩子**：
+    //
+    //     > 一个"因为临时目录没删掉而报红"的用例，
+    //     > 与一个"产品起不来"的用例，在 CI 那一列里是同一个东西——
+    //     > 只不过前者会让人去查 launcher，而问题在 Windows 的文件句柄时序上。
+    //
+    //   但**不静默**：删不掉就写一行警告。一个偶发的锁和一个持续的泄漏
+    //   在"什么都不说"的实现里长得一样，而只有后者需要有人去看。
+    cleanup: () => {
+      for (let i = 0; i < 10; i++) {
+        try {
+          rmSync(root, { recursive: true, force: true })
+          return true
+        } catch (e) {
+          if (i === 9) {
+            // 只警告，不抛：临时目录留在 tmp 里是无害的，而红一个通过的用例有害。
+            process.stderr.write(
+              `[isolated-space] 临时目录没能删掉（${e.code ?? 'unknown'}）：${root}\n`
+              + '  这不是产品缺陷——组件进程退出后句柄释放有一段时序。'
+              + `但如果每次都出现，说明有进程没退干净。\n`,
+            )
+            return false
+          }
+          // 同步退避：Windows 上句柄释放通常在几十到几百毫秒内完成。
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200 * (i + 1))
+        }
+      }
+      return false
+    },
   }
 }
 

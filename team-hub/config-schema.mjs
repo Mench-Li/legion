@@ -189,6 +189,29 @@ export const SCHEMA = defineSchema({
     'CONTEXT_ATTEMPT_REQUIRED', 'CONTEXT_NOT_FOUND', 'CONTEXT_SNAPSHOT_CONFLICT',
     'CONTEXT_SNAPSHOT_INVALID', 'CONTEXT_BAD_PAYLOAD', 'CONTEXT_PERMISSION_REQUIRED',
     'CONTEXT_BAD_CANDIDATE', 'CONTEXT_BAD_SOURCE', 'CONTEXT_BAD_REQUEST',
+    // PRT-409 右半部分：快照**导出**（team-hub/context-export.mjs + 导出路由）。
+    //
+    // 导出有**两个**哈希：`snapshotHash` 盖住正文，`exportHash` 盖住封皮与整份文档。
+    // 下面这几个码就是按"哪一个不对"分的——**故意不合成一个 `EXPORT_TAMPERED`**：
+    //   · CONTEXT_EXPORT_SNAPSHOT_TAMPERED — **正文**被改过（内容不可信）
+    //   · CONTEXT_EXPORT_ENVELOPE_TAMPERED — **封皮**被改过（这份文件在说谎关于它
+    //     从哪来）。这一条必须单独存在：正文一字未动时单哈希验证会**照样通过**，
+    //     而一份指着错误 Attempt 的文件"验过了"比没有导出更坏——它是**盖过章的错证据**
+    //   · CONTEXT_EXPORT_BAD_RECORD        — 给的记录形状不对（缺 attemptId/正文/导出人/时间）
+    //   · CONTEXT_EXPORT_RECORD_NOT_VERIFIED — 导出**前**自检发现正文哈希对不上。
+    //     拒绝把一份验不过的记录导出，否则等于把一次篡改**洗白**成"带哈希的正规文件"
+    //   · CONTEXT_EXPORT_STORE_HASH_MISMATCH — 正文自洽，但库里那一行记的哈希是另一个
+    //     （整行连同 payload 一起被换成了另一份**自洽**的快照）。只验正文自洽会漏掉它
+    //   · CONTEXT_EXPORT_MALFORMED_DOC     — 待验证的导出文档结构不合法，
+    //     或封面版本不是本实现认识的版本（**不按未知版本猜字段语义**）
+    //   · EXPORT_BY_REQUIRED / EXPORT_AT_REQUIRED — 导出路由缺 `by` / `atMs`。
+    //     两者给**不同**的码：同一个码会让调用方不知道该补哪一个。
+    //     不拿"现在"当 `atMs` 的默认值——一个没写时间的导出会被读成"就是刚导的"，
+    //     而那是一次无法复核的猜测，导出存在的意义正是可复核
+    'CONTEXT_EXPORT_BAD_RECORD', 'CONTEXT_EXPORT_RECORD_NOT_VERIFIED',
+    'CONTEXT_EXPORT_MALFORMED_DOC', 'CONTEXT_EXPORT_SNAPSHOT_TAMPERED',
+    'CONTEXT_EXPORT_ENVELOPE_TAMPERED', 'CONTEXT_EXPORT_STORE_HASH_MISMATCH',
+    'EXPORT_BY_REQUIRED', 'EXPORT_AT_REQUIRED',
     // spec §6.7 凭证管理的**写**一半（team-hub/secret-admin.mjs）。
     //
     // 在它之前，`security/secrets/store.mjs` 的 put/rotate/remove 在整个仓库里

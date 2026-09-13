@@ -151,6 +151,90 @@ describe('① 每条客户端调用都打到正确的 method + 路径（错法�
     assert.match(lastCall().url, /\/api\/config-bundle\/apply$/)
     assert.equal(lastCall().body.conflictPolicy, 'skip')
   })
+
+  test('凭证：状态 / 列表 / 新增 / 轮换 / 删除（方法 + 路径逐字对上）', async () => {
+    await api.fetchSecretStatus()
+    assert.equal(lastCall().method, 'GET')
+    assert.match(lastCall().url, /\/api\/secrets\/status$/)
+
+    await api.fetchSecrets()
+    assert.equal(lastCall().method, 'GET')
+    assert.match(lastCall().url, /\/api\/secrets$/)
+
+    await api.putSecret({ ref: 'OPENAI_KEY', value: 'v1', purpose: 'probe', actor: 'general' })
+    assert.equal(lastCall().method, 'POST')
+    assert.match(lastCall().url, /\/api\/secrets$/)
+    assert.equal(lastCall().body.ref, 'OPENAI_KEY')
+    assert.equal(lastCall().body.purpose, 'probe')
+    assert.equal(lastCall().body.actor, 'general')
+
+    // 轮换的路径**必须**带 `/rotate` 后缀：少了它就是一个打到 `/api/secrets/<ref>`
+    // 的 POST（那条路由根本不存在 → 404），而 404 看起来只是"这个引用没有"。
+    // 引用名同样要编码：`r/1` 不编码会变成两段路径。
+    await api.rotateSecret('r/1', { value: 'v2', actor: 'general' })
+    assert.equal(lastCall().method, 'POST')
+    assert.match(lastCall().url, /\/api\/secrets\/r%2F1\/rotate$/)
+    assert.equal(lastCall().body.value, 'v2')
+
+    await api.deleteSecret('OLD_KEY', 'general')
+    assert.equal(lastCall().method, 'DELETE')
+    assert.match(lastCall().url, /\/api\/secrets\/OLD_KEY$/)
+    assert.equal(lastCall().body.actor, 'general')
+    // 删除**不需要**值：请求体里不许出现 value 字段。
+    assert.equal(lastCall().body.value, undefined)
+  })
+
+  test('**值只走请求体，绝不进 URL**（本族最硬的一条纪律）', async () => {
+    const secret = 'sk-live-DO-NOT-LEAK-0123456789'
+    await api.putSecret({ ref: 'K', value: secret, actor: 'g' })
+    assert.equal(lastCall().body.value, secret, '值必须在请求体里')
+    assert.equal(lastCall().url.includes(secret), false, `值漏进了 URL：${lastCall().url}`)
+
+    await api.rotateSecret('K', { value: secret, actor: 'g' })
+    assert.equal(lastCall().body.value, secret)
+    assert.equal(lastCall().url.includes(secret), false, `值漏进了 URL：${lastCall().url}`)
+
+    // 引用名是引用名，不是密钥：它出现在路径里是设计如此。
+    assert.match(lastCall().url, /\/api\/secrets\/K\/rotate$/)
+  })
+
+  test('密钥库的失败必须带**结构化码**（这条链路以前会把码压成一句字符串）', async () => {
+    nextResponse = {
+      status: 503,
+      body: { ok: false, code: 'SECRET_ADMIN_STORE_UNAVAILABLE', error: '无法管理凭证：产品目录布局未确定' },
+    }
+    await assert.rejects(() => api.fetchSecrets(), (e) => {
+      assert.equal(e.name, 'HubError')
+      assert.equal(e.status, 503)
+      assert.equal(e.code, 'SECRET_ADMIN_STORE_UNAVAILABLE', '码到不了界面，"打不开"就会被渲染成"你没有"')
+      return true
+    })
+  })
+
+  test('自检失败是 **HTTP 200 + ok:false**，客户端不把它当异常、也不编造一份健康的自检', async () => {
+    nextResponse = {
+      status: 200,
+      body: { ok: true, status: { ok: false, code: 'SECRET_ADMIN_STORE_UNAVAILABLE', message: '密钥库不可用', aclVerified: false, aclExists: false, count: null } },
+    }
+    const s = await api.fetchSecretStatus()
+    assert.equal(s.ok, false, '这是"报告说打不开"，不是一次失败请求')
+    assert.equal(s.code, 'SECRET_ADMIN_STORE_UNAVAILABLE')
+
+    // 响应里**根本没有** status 字段（中枢版本不对/代理截断）：不许补一份
+    // `ok:true` 的自检结果——那正是"读不出来"伪装成"没问题"。
+    nextResponse = { status: 200, body: { ok: true } }
+    const missing = await api.fetchSecretStatus()
+    assert.equal(missing.ok, false)
+    assert.equal(missing.code, null, '不知道就是 null，不发明一个码')
+    assert.equal(missing.count, null)
+  })
+
+  test('列表响应的形状被显式收窄（不是数组时给空数组，不是 boolean 时给 false）', async () => {
+    nextResponse = { status: 200, body: { ok: true, secrets: 'nope', aclVerified: 'yes' } }
+    const r = await api.fetchSecrets()
+    assert.deepEqual(r.secrets, [])
+    assert.equal(r.aclVerified, false)
+  })
 })
 
 describe('② 结构化错误必须真的到达调用方（这正是此前断掉的那一环）', () => {
@@ -268,9 +352,16 @@ describe('③ 每条路径都必须在平台契约里真实存在（交叉校验
 
     // 本轮新增的那一族**必须**在集合里——否则上面的阈值可能被既有调用凑够，
     // 而新写的路径一条都没被检查到。
-    for (const p of ['/api/model-profiles', '/api/model-bindings', '/api/model-migration/plan', '/api/config-bundle/plan']) {
+    for (const p of ['/api/model-profiles', '/api/model-bindings', '/api/model-migration/plan', '/api/config-bundle/plan',
+      '/api/secrets', '/api/secrets/status']) {
       assert.ok(found.some((f) => f.path === p || f.path.startsWith(p + '/')), `抽取结果里缺少 ${p}`)
     }
+
+    // 已知的两处**本抽取器覆盖不到**的地方，写在这里以免日后被当成"已经校验过"：
+    //   · 轮换的路径以 `${encodeURIComponent(ref)}/rotate` 结尾，抽取器在 `$` 处截断，
+    //     只能拿到 `/api/secrets/`。**后缀本身**由 ① 的行为用例断言
+    //     （`rotateSecret` 的真实 URL 必须以 `/rotate` 结尾），不靠这里。
+    //   · DELETE 的路径同理在 `$` 处截断。行为断言同样在 ①。
 
     const bad = found.filter((f) => !exists(f.method, f.path))
     assert.deepEqual(

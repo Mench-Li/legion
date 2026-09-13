@@ -987,6 +987,116 @@ body {
   white-space: nowrap;
 }
 
+/* ---------- 模型设置页的面板（PRT-507） ----------
+ *
+ * 颜色语义在这里被定死一次（与 `components/settingsBits.tsx` 的文件头对应）：
+ *   muted 中性事实（空状态 / 加载中 / 全新安装还没建文件）
+ *   ok    确认过的好消息
+ *   warn  需要看一眼，但事情可能已经做成了（例如写完没能复核权限）
+ *   bad   真的没做成 / 读不出来
+ *
+ * 其中 bad 与 muted 的区别是本页最要紧的一处：
+ * **「读不出来」不许长得像「是空的」**——故障画成空状态会把用户送去
+ * 重新录入一堆其实好端端躺在本机的东西。
+ */
+.set-tabs { display: flex; gap: 4px; padding: 0 16px 4px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+
+.set-tab {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11.5px;
+  padding: 5px 10px;
+  border-radius: 6px 6px 0 0;
+  cursor: pointer;
+}
+
+.set-tab:hover { color: var(--text); }
+
+.set-tab.on { color: var(--text); background: var(--panel-2); border-color: var(--line); border-bottom-color: transparent; }
+
+.set-panel { display: flex; flex-direction: column; gap: 10px; }
+
+.set-section { display: flex; flex-direction: column; gap: 6px; border-top: 1px dashed var(--line); padding-top: 10px; }
+
+.set-notice { border: 1px solid var(--line-2); border-left-width: 3px; border-radius: 6px; padding: 8px 10px; font-size: 11.5px; line-height: 1.7; background: rgba(13, 18, 25, 0.4); }
+
+.set-notice-title { font-weight: 600; color: var(--text); }
+
+.set-notice-text { color: var(--muted); white-space: pre-wrap; }
+
+.set-notice-line { color: var(--muted); }
+
+.set-notice-action { color: var(--cyan); }
+
+.set-notice-field { color: var(--muted-2); }
+
+.set-notice.ok { border-left-color: var(--green); }
+.set-notice.ok .set-notice-title { color: var(--green); }
+.set-notice.warn { border-left-color: var(--yellow); }
+.set-notice.warn .set-notice-title { color: var(--yellow); }
+.set-notice.bad { border-left-color: var(--red, #ff6b6b); }
+.set-notice.bad .set-notice-title { color: var(--red, #ff6b6b); }
+.set-notice.muted { border-left-color: var(--line-2); }
+
+.set-card { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: rgba(13, 18, 25, 0.35); display: flex; flex-direction: column; gap: 4px; }
+
+.set-card-head { display: flex; align-items: center; gap: 8px; }
+
+.set-card-sub { font-size: 11px; color: var(--muted); }
+
+.set-card-detail { font-size: 11px; color: var(--muted-2); line-height: 1.7; white-space: pre-wrap; }
+
+.set-card-action { font-size: 11px; color: var(--cyan); }
+
+.set-card-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
+
+.set-form { display: flex; flex-direction: column; gap: 8px; border-top: 1px dashed var(--line); padding-top: 10px; }
+
+.set-form-title { font-size: 12px; font-weight: 600; color: var(--text); }
+
+.set-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px; }
+
+.set-row-space { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+.set-input {
+  background: var(--panel-2);
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 12px;
+  padding: 6px 8px;
+  outline: none;
+  width: 100%;
+}
+
+.set-input:focus { border-color: var(--blue); }
+
+/* 结构化错误的 `field` 就落在这个边框上：**错在哪个框**比一句 toast 有用得多。 */
+.set-input.invalid { border-color: var(--red, #ff6b6b); }
+
+.set-textarea {
+  background: var(--panel-2);
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 6px 8px;
+  resize: vertical;
+  outline: none;
+}
+
+.set-check { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); }
+
+.set-kv { display: flex; gap: 8px; font-size: 11px; }
+
+.set-kv-k { color: var(--muted-2); min-width: 84px; }
+
+.set-kv-v { color: var(--text); }
+
+.chip.muted { color: var(--muted-2); }
+
 .agent-card.clickable { cursor: pointer; transition: border-color 0.15s; }
 
 .agent-card.clickable:hover { border-color: rgba(90, 160, 255, 0.5); }

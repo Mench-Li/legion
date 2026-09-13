@@ -1310,15 +1310,21 @@ export function deleteModelProfile(id: string, version: number, actor: string): 
  * 失败时抛 `HubError`；其中 `status === 503` 表示**这次没有探测过**
  * （密钥库打不开 / 布局不合法 / 没填 endpoint）——**那不是"连不上"**，
  * 调用方必须分开渲染（见 `modelSettings.ts` 的 `probeBadge`）。
+ *
+ * ★ 线缆上的形状要注意：`probe-service.mjs` 内部造的结果带 `unavailable:true`，
+ * 但 `server.mjs` 在 503 分支里**只把 message 与 code 放进错误体**
+ * （`handleRun` 的 catch 认 `error`/`code`，不认 `unavailable`）。
+ * 也就是说 HTTP 层根本收不到那个判别字段——调用方**不能**去读 `unavailable`，
+ * 只能按 `status === 503` 分类。`modelSettingsUi.ts` 的 `probeViewFrom` 就是补这一环。
  */
 export function probeModelProfile(
   id: string,
   opts: { force?: boolean; requiredCapabilities?: string[] } = {},
-): Promise<unknown> {
+): Promise<{ probe: Record<string, unknown>; profileId: string }> {
   return hubPost(`/api/model-profiles/${encodeURIComponent(id)}/probe`, {
     force: opts.force !== false,
     requiredCapabilities: opts.requiredCapabilities ?? [],
-  })
+  }) as Promise<{ probe: Record<string, unknown>; profileId: string }>
 }
 
 // ── 岗位绑定与 fallback（PRT-502）─────────────────────────────────────────
@@ -1408,4 +1414,155 @@ export function planConfigBundle(bundle: unknown, conflictPolicy: 'fail' | 'skip
 
 export function applyConfigBundle(bundle: unknown, conflictPolicy: 'fail' | 'skip' | 'overwrite', actor: string): Promise<unknown> {
   return hubPost('/api/config-bundle/apply', { bundle, conflictPolicy, actor })
+}
+
+// ── 凭证管理（spec §6.7 的**写**一半，PRT-507 的界面入口）─────────────────
+//
+// ## 这一族此前**没有客户端函数**
+//
+// `team-hub/secret-admin.mjs` + `server.mjs` 的五条路由是完整实现、有套件覆盖
+// （`team-hub/secret-routes.test.mjs`），而 `workbench/src/api.ts` 里
+// `/api/secrets` 一次都没出现过——`store.put`/`rotate`/`remove` 因此仍然
+// 只有后端调用方，**界面上一个都点不到**。
+//
+//   > 一个功能没有入口，与这个功能不存在，对用户来说是同一件事。
+//
+// ## 三条纪律（与 `secret-admin.mjs` 的文件头一一对应）
+//
+// ① **值只走请求体，绝不进 URL、日志或错误文案。**
+//    轮换/删除的路径里只有 `ref`（它是引用名，不是密钥）；
+//    `value` 只出现在 POST body 里，函数**不**把它拼进任何字符串。
+//    这也意味着"把密钥塞进 URL"这条路由在此处**结构上不成立**。
+// ② **响应里没有值，客户端也不假装有。** `HubSecretEntry` 就是
+//    `security/secrets` 的 `freezeMeta` 产物（ref/purpose/scheme/时间戳），
+//    多出来的字段一律不看。
+// ③ **`GET /api/secrets/status` 的失败是 HTTP 200 + `ok:false`**，
+//    而 `GET /api/secrets` 的失败是 503（抛 `HubError`）。
+//    两者必须分开渲染：把 `ok:false` 读成"没有凭证"会让一次密钥库故障
+//    看起来像一次干净的空状态，用户会照着重录一遍钥匙。
+
+/** 一条已录入凭证的**元数据**。**永远不含值**（`freezeMeta` 只给这些字段）。 */
+export interface HubSecretEntry {
+  ref: string | null
+  purpose: string | null
+  scheme: string | null
+  createdAt: string | null
+  updatedAt: string | null
+  /** `null` = **从未轮换**（不是"轮换失败"）。 */
+  rotatedAt: string | null
+}
+
+/**
+ * 密钥库自检（`GET /api/secrets/status`）。
+ *
+ * `ok:false` 走 **HTTP 200**：它是一份"报告"，不是一次失败请求。
+ * `code: null` = 响应里根本没有自检结果（中枢版本不对/代理截断），
+ * 与"自检说打不开"是两件事（见 `modelSettingsUi.ts` 的 `secretStatusView`）。
+ */
+export interface HubSecretStatus {
+  ok: boolean
+  code: string | null
+  message: string
+  path: string | null
+  protection: unknown
+  acl: string | null
+  aclVerified: boolean
+  /**
+   * 文件是否已经存在。`aclVerified:false` 有**两种**原因，必须分开：
+   * `false` → 全新安装还没建文件，没什么可保护的（常态）；
+   * `true`  → 文件在，但没能确认它只有所有者可读（**这才是要提醒的**）。
+   */
+  aclExists: boolean
+  count: number | null
+}
+
+/** 写路径的公共回执：`aclVerified` 与 `aclNote` **必须一起看**。 */
+export interface HubSecretWriteResult {
+  aclVerified: boolean
+  aclExists: boolean
+  acl: string | null
+  aclNote: string | null
+}
+
+/** 自检结果。失败**不是**异常——返回 `ok:false` 的报告，由界面分开渲染。 */
+export async function fetchSecretStatus(): Promise<HubSecretStatus> {
+  const data = await hubRequest('GET', '/api/secrets/status') as { status?: Partial<HubSecretStatus> } | undefined
+  const s = data?.status
+  if (s === undefined || s === null || typeof s !== 'object') {
+    // 不编造一份"看起来正常"的自检结果：那正是"读不出来"伪装成"没问题"。
+    return {
+      ok: false, code: null, message: '中枢没有返回密钥库自检结果（响应里没有 status 字段）。',
+      path: null, protection: null, acl: null, aclVerified: false, aclExists: false, count: null,
+    }
+  }
+  return {
+    ok: s.ok === true,
+    code: typeof s.code === 'string' && s.code !== '' ? s.code : null,
+    message: typeof s.message === 'string' && s.message !== '' ? s.message : '',
+    path: typeof s.path === 'string' ? s.path : null,
+    protection: s.protection ?? null,
+    acl: typeof s.acl === 'string' ? s.acl : null,
+    aclVerified: s.aclVerified === true,
+    aclExists: s.aclExists === true,
+    count: typeof s.count === 'number' ? s.count : null,
+  }
+}
+
+/**
+ * 列出已录入的引用（**只有元数据，永远没有值**）。
+ *
+ * 用 `hubRequest('GET', …)` 而不是 `hubGet` + `readJson`：后者把失败压成
+ * `"503 Internal Server Error"`，于是密钥库的 `SECRET_ADMIN_*` 码到不了界面——
+ * 正是 `hub-errors.ts` 文件头记的那条断链。这里失败会抛带 `code` 的 `HubError`。
+ */
+export async function fetchSecrets(): Promise<{ secrets: HubSecretEntry[]; aclVerified: boolean }> {
+  const data = await hubRequest('GET', '/api/secrets') as { secrets?: HubSecretEntry[]; aclVerified?: boolean } | undefined
+  return { secrets: asArray<HubSecretEntry>(data?.secrets), aclVerified: data?.aclVerified === true }
+}
+
+/**
+ * 新增或更新一把钥匙。引用已存在时是**更新**（`store.put` 的既有语义）。
+ *
+ * `value` **只进请求体**。引用名的合法性由密钥库自己判（`assertSecretRef`
+ * 是唯一判据）——客户端不重复校验，两处判据必然会漂移。
+ */
+export function putSecret(input: {
+  ref: string
+  value: string
+  purpose?: string
+  actor: string
+}): Promise<{ secret: HubSecretEntry | null } & HubSecretWriteResult> {
+  return hubPost('/api/secrets', {
+    ref: input.ref,
+    value: input.value,
+    purpose: input.purpose,
+    actor: input.actor,
+  }) as Promise<{ secret: HubSecretEntry | null } & HubSecretWriteResult>
+}
+
+/**
+ * 轮换：引用名不变、值替换。**只影响轮换之后创建的 Run**（spec §6.7）。
+ *
+ * 轮换一个**不存在**的引用是错误（404 `SECRET_NOT_FOUND`）：没有任何可轮换的
+ * 对象。删除不同——删一个不存在的引用是幂等的（见 `deleteSecret`）。
+ */
+export function rotateSecret(
+  ref: string,
+  input: { value: string; purpose?: string; actor: string },
+): Promise<{ secret: HubSecretEntry | null } & HubSecretWriteResult> {
+  return hubRequest('POST', `/api/secrets/${encodeURIComponent(ref)}/rotate`, {
+    value: input.value,
+    purpose: input.purpose,
+    actor: input.actor,
+  }) as Promise<{ secret: HubSecretEntry | null } & HubSecretWriteResult>
+}
+
+/**
+ * 删除一个引用。不存在时回 `removed:false`——**这是幂等，不是失败**：
+ * 删除的意图是"让它不存在"，而它已经不存在了。
+ *
+ * 路径里只有引用名：**没有任何一次删除需要知道值**。
+ */
+export function deleteSecret(ref: string, actor: string): Promise<{ removed: boolean } & HubSecretWriteResult> {
+  return hubRequest('DELETE', `/api/secrets/${encodeURIComponent(ref)}`, { actor }) as Promise<{ removed: boolean } & HubSecretWriteResult>
 }

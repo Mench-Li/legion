@@ -1977,6 +1977,19 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-507 的**界面状态**那一层。与上面两组是不同的问题：
+      //   · model-settings 守「没探测过 ≠ 探测失败」（一条判定的渲染）；
+      //   · 这一组守「**读不出来 ≠ 是空的**」（一次异步读取的三态）。
+      // 后者更危险一点：空状态是**可操作**的——用户会照着"你还没有任何凭证"
+      // 重新录入钥匙，而真相是密钥库打不开，录进去的每一次都会失败。
+      // 同组还钉住：503 的线上形状里根本没有 `unavailable` 字段（只能按状态码分类）、
+      // 删除的 `removed:false` 是幂等不是失败、以及岗位解析链的字段名适配。
+      label: 'model-settings-ui（PRT-507：读不出来 ≠ 是空的 / 503 没有 unavailable 字段 / 幂等 ≠ 失败）',
+      files: ['workbench/scripts/model-settings-ui.test.mjs'],
+      cwd: ROOT,
+      nodeArgs: ['--experimental-strip-types'],
+    },
+    {
       // PRT-401（spec §6.5）：Context Source 与 RunContextSnapshot。
       // 守的是「任一员工运行都能还原其实际输入、来源版本、过滤和裁剪原因」——
       // 重点是**能否区分**："没有这个来源" vs "有但被裁掉了"、

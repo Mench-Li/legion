@@ -241,6 +241,30 @@ export function layoutDiagnostics(layout) {
       `无法确定安装目录：请设置 ${LEGION_ENV.INSTALL_DIR} 或由 Launcher 传入。安装目录未确定时无法校验任何写入边界。`)
   }
 
+  // 产品家目录解析不出来时**必须自己说**（PRT-255 实测抓到的缺陷）。
+  //
+  // 这是本文件原先漏掉的一条：`productHomeSource` 被记成 `'unresolved'`，
+  // 但没有任何一条诊断把它说出来。于是 `secretsFile` 静悄悄变成 `null`
+  // （它默认在 `productHome/secrets/` 下），用户最后看到的唯一线索是启动时的
+  //
+  //     SECRETS_PLACEMENT_INVALID：布局里没有密钥库路径：
+  //     请先解析产品目录布局（resolveLayout）再打开密钥库。
+  //
+  // ——而布局**是**解析过的，只是家目录没定下来；而且"请你先调用
+  // resolveLayout"这句是给库的调用方看的，命令行用户根本无从照做。
+  //
+  //   > 一个把「我不知道该把产品家目录放在哪」说成「你没有解析布局」的提示，
+  //   > 与一个什么都没说的提示，在用户能不能自己修好这件事上是同一个东西——
+  //   > 只不过前者读起来像是一条有用的错误。
+  const home = layout?.productHome ?? null
+  if (home === null) {
+    add('error', 'PRODUCT_HOME_UNRESOLVED', 'data',
+      `无法确定产品家目录：请设置 ${LEGION_ENV.HOME}（或在支持它的平台上提供用户主目录）。` +
+      '产品家目录未确定时，受保护密钥库、缓存与日志都没有落地位置——' +
+      '密钥库路径会是空的，于是**任何一次启动都会被拒绝**。' +
+      '这一条才是根因，后面关于密钥库的诊断都是它的后果。')
+  }
+
   for (const role of DIR_ROLES) {
     const value = role === 'install' ? install
       : role === 'data' ? layout?.dataDir

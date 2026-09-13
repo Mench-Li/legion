@@ -97,6 +97,22 @@ export const SCHEMA = defineSchema({
   ],
   // 子进程的 env 键名 + 平台必需键名：都是「变量名」，不是本进程的读取点。
   // 不显式列出的话 `scan --check` 会要求把它们登记为读取点（P3-4 遇到过同类问题）。
+  //
+  // ── OS 家目录事实（PRT-255）────────────────────────────────────────
+  //
+  // `product/launcher/cli.mjs` 的 `osHomeFacts()` 读这三个变量来推出
+  // 「产品家目录在哪」。它们**属于操作系统/用户会话**，不属于 Legion：
+  // 产品只是读它们，不定义它们，也不该把它们当自己的配置项。
+  //
+  // 为什么必须读：`resolveLayout` 的 `homeDir`/`appDataDir` 两个入参原先
+  // **没有任何生产调用方传过**，于是产品家目录恒为 null、`secretsFile` 恒为 null，
+  // 每一次启动都被 `SECRETS_PLACEMENT_INVALID` 拒绝——用文档上的开关装完之后
+  // 产品根本起不来。PRT-255 的隔离空间验证抓到了这一条。
+  foreignEnv: [
+    { name: 'LOCALAPPDATA', owner: '操作系统（Windows）', reason: 'Windows 上 %LOCALAPPDATA%\\Legion 是产品家目录的默认位置；读它才能在不设 LEGION_HOME 时定出家目录' },
+    { name: 'USERPROFILE', owner: '操作系统（Windows）', reason: '没有 %LOCALAPPDATA% 时用它推出 AppData\\Local；仅作为回退' },
+    { name: 'HOME', owner: '操作系统（POSIX）', reason: 'POSIX 上 ~/.legion 是产品家目录的默认位置；名称与其他进程共用，故逐个登记' },
+  ],
   nonEnvLiterals: [
 
     // ── PRT-907 支持手册引用的**具名错误码** ────────────────────────────
@@ -292,6 +308,11 @@ export const SCHEMA = defineSchema({
     'CONFIG_FILE_INSIDE_INSTALL_DIR', 'DEPENDENCY_CYCLE', 'ENTRY_MISSING', 'ENTRY_NOT_VERIFIED',
     'ENTRY_UNRESOLVED', 'ENV_UNDECLARED', 'INSTALL_DIR_UNRESOLVED', 'NON_LOOPBACK_BIND',
     'PATH_NOT_ABSOLUTE', 'PORT_CONFLICT', 'PORT_OUT_OF_RANGE', 'PRODUCT_HOME_INSIDE_INSTALL_DIR',
+    // PRT-255：产品家目录解析不出来时的根因诊断。
+    // 这一条是补的缺口——原先 `productHomeSource` 被记成 'unresolved' 却没有任何
+    // 诊断把它说出来，于是 `secretsFile` 静悄悄变成 null，用户看到的唯一线索是
+    // 「SECRETS_PLACEMENT_INVALID：请先解析产品目录布局」——而布局是解析过的。
+    'PRODUCT_HOME_UNRESOLVED',
     'READINESS_MISSING', 'ROLE_DIRS_OVERLAP', 'UNKNOWN_DEPENDENCY', 'WORKSPACE_NOT_CONFIGURED',
     'WRITABLE_DIR_INSIDE_INSTALL_DIR', 'WRITES_INSTALL_DIR',
     'PORT_CHECK_FAILED', 'PORT_CHECK_TIMEOUT', 'PORT_CLAIMED_TWICE', 'PORT_IN_USE', 'PORT_PRIVILEGED',

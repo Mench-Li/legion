@@ -163,6 +163,51 @@ export function readReadinessTimeoutMs(env = {}) {
 export const LEGION_READINESS_TIMEOUT_ENV = 'LEGION_READINESS_TIMEOUT_MS'
 
 /**
+ * 操作系统级的家目录事实（不是 Legion 的配置，是它必须读的环境）。
+ *
+ * 这三个变量属于**操作系统/用户会话**，不属于 Legion —— 因此它们是
+ * `foreignEnv`（登记在 `product/config-schema.mjs`），不是本进程的配置项。
+ */
+export const OS_HOME_ENV = Object.freeze({
+  LOCAL_APP_DATA: 'LOCALAPPDATA',
+  USER_PROFILE: 'USERPROFILE',
+  HOME: 'HOME',
+})
+
+/**
+ * 从**进程环境**推出家目录事实，交给 `resolveLayout`。
+ *
+ * ## 为什么这件事必须在这里做（PRT-255 实测抓到的缺陷）
+ *
+ * `resolveLayout` 的签名里一直有 `homeDir` / `appDataDir` 两个入参，
+ * 而 `defaultProductHome` 在拿不到它们时会返回 `root: null`。可是**唯一的生产
+ * 调用方从来没有传过它们**——于是产品家目录永远是 null，`secretsFile` 永远是
+ * null，接着每一次启动都被 `SECRETS_PLACEMENT_INVALID` 拒绝。
+ *
+ * 实测形态：用文档上的那几个开关（`--install-dir` / `--data-dir` / `--workspace`）
+ * 装完之后，`--init` 成功、诊断包能导出，**而产品根本起不来**：
+ *
+ *   > 一个「装得上、也导得出诊断包」的产品，
+ *   > 与一个「装完起不来」的产品，是同一个东西——
+ *   > 只不过前者在"安装成功"这个返回值上是完全正确的。
+ *
+ * ## 优先级
+ *
+ * `LEGION_HOME`（受控环境变量，显式覆盖）> 操作系统事实 > 未解析。
+ * 显式覆盖这一条不受本函数影响：它由 `resolveLayout` 内部的 `defaultProductHome`
+ * 先判，所以"部署时设的 LEGION_HOME 不生效"这种倒置不会发生。
+ */
+export function osHomeFacts(env = {}) {
+  const nonEmpty = (v) => (typeof v === 'string' && v.trim() !== '' ? v : null)
+  return {
+    appDataDir: nonEmpty(env[OS_HOME_ENV.LOCAL_APP_DATA]),
+    // POSIX 上是 HOME，Windows 上是 USERPROFILE；两者都给，由
+    // `defaultProductHome` 按 platform 决定怎么用。
+    homeDir: nonEmpty(env[OS_HOME_ENV.USER_PROFILE]) ?? nonEmpty(env[OS_HOME_ENV.HOME]),
+  }
+}
+
+/**
  * 组装 Launcher 选项（把 CLI、环境与产品配置文件合成**一份显式输入**）。
  *
  * ## 优先级（spec §6.11 + CLI 的位置）
@@ -183,10 +228,15 @@ export const LEGION_READINESS_TIMEOUT_ENV = 'LEGION_READINESS_TIMEOUT_MS'
 export function launcherOptionsFrom({ argv = [], env = {}, nodePath = process.execPath, configLoader = loadProductConfig, installDirDefault = defaultInstallDir } = {}) {
   const parsed = parseArgs(argv)
   const declared = readEnv(env)
+  // ★ 把操作系统事实传进去（PRT-255 实测抓到的缺陷：这两个入参一直存在，
+  //   而唯一的生产调用方从来没传过，于是产品家目录恒为 null → 起不来）。
+  const osHome = osHomeFacts(env)
   const { layout, diagnostics } = resolveLayout({
     installDir: parsed.flags['install-dir'] ?? declared[LEGION_ENV.INSTALL_DIR] ?? installDirDefault(),
     dataDir: parsed.flags['data-dir'] ?? null,
     workspaceDir: parsed.flags.workspace ?? null,
+    homeDir: osHome.homeDir,
+    appDataDir: osHome.appDataDir,
     env: declared,
   })
 

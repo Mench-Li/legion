@@ -3521,6 +3521,28 @@
 而"一个没生效的替换"与"成因不止一个"的真结论，在失败信息里长得一模一样。
 现按装配器自己的 `stableRecord` 文本格式（键**没有引号**）匹配。
 
+### ★ 顺带查出一处"看起来权威但其实没人读"的字段（留痕，未改动）
+
+`createBudgetGate` 把 `currency`（默认 `'USD'`）放进
+`/api/runtime/run-budget/reserve` 的请求体，而**那条路由不把它传给账本**
+（`budget-ledger.reserve` 只读 `budget.currency`）。
+
+> 一个"把币种写死在构造处、请求里带着它、而接收方从不读"的字段，
+> 与一个"币种完全没人管"的系统，在今天的账上是同一个东西——
+> 只不过前者看起来像是有人维护的，于是下一个人会信任它。
+
+**今天没有用户可见的错**：权威币种是 `budget.currency`，与价目表币种不一致时
+账本会明确拒绝（`CURRENCY_MISMATCH`）。所以这是一个**陷阱**而不是缺陷：
+一旦有人开始读 `body.currency`，他读到的是写死的 `'USD'`。
+与 `scope` 的不对称也值得注意——`scope` 是 `lease.scope ?? scope`
+（**每次运行的值优先**），`currency` 没有这个回退。
+
+排查方法（下一轮可复用）：把 `createProductionExecutor` 的 deps 列表与
+`productionExecutorProvider` 实际转发的键逐项对照。本批就是这样找回
+`loadSources` 与 `associations` 的——
+**一个"参数已经接好了"的模块与一个"参数有人真的会传"的模块，
+只有靠逐个对照才能区分。**
+
 ### ⚠️ 诚实边界
 
 子进程 import 必须给真的 `file://` URL（Windows 上 `import 'D:/…'` 直接报错）；

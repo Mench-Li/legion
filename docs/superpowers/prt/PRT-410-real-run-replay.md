@@ -101,6 +101,21 @@
   Windows 上 `import 'D:/…'` 会报 `ERR_UNSUPPORTED_ESM_URL_SCHEMA`。
 - 本批仍没有"真实部署走过这条路"的证据：生产路径要求 DSH 宿主端口已绑定
   （PRT-214/215），用例是自己绑一个最小端口来驱动的。
+- ★ **顺带查出一处"看起来权威但其实没人读"的字段**（已在报告里留痕，
+  本批不改动钱路）：`createBudgetGate` 会把 `currency`（默认 `'USD'`）放进
+  `/api/runtime/run-budget/reserve` 的请求体，而**那条路由根本不把它传给账本**
+  （`budget-ledger.reserve` 只读 `budget.currency`）。也就是说：
+
+  > 一个"把币种写死在构造处、请求里带着它、而接收方从不读"的字段，
+  > 与一个"币种完全没人管"的系统，在今天的账上是同一个东西——
+  > 只不过前者看起来像是有人维护的，于是下一个人会信任它。
+
+  今天**没有用户可见的错**：权威币种是 `budget.currency`，而它与价目表币种
+  不一致时账本会**明确拒绝**（`CURRENCY_MISMATCH`）。所以这不是缺陷，
+  是一个**陷阱**——一旦有人开始读 `body.currency`，
+  他读到的是一个写死的 `'USD'`，而真实币种在另一个字段里。
+  与 `scope` 的不对称也值得注意：`scope` 是 `lease.scope ?? scope`
+  （**每次运行的值优先**），`currency` 没有这个回退。
 - `associations.employeeId` / `teamPlanId` 仍恒为 `null`——
   因为 hub 没有 TeamPlan / EmployeeManifest 的读端点（PRT-402/406 的剩余部分）。
   本批只保证它们**不再因为"没人发"而丢**。

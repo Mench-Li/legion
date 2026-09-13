@@ -409,10 +409,20 @@ describe('⑥ 账本守恒（不做假账）', () => {
     assert.equal(s.sources.length, 1, '没有 missing 标记就是正常来源')
   })
 
-  test('**每个排除理由要么能产出、要么被明确标为预留**（防止加了枚举没人产出）', () => {
+  test('**每个排除理由都必须能产出**（不允许"预留"，防止加了枚举没人产出）', () => {
     // 一个"定义了但没有任何代码路径能产出"的枚举值是个陷阱：
     // 调用方以为可以传它，而它永远不会出现。所以这里把**当前可达集合**钉住，
     // 新增理由却忘了写产出路径时，这条用例会红。
+    //
+    // ★ 用例**名字**里原先写着"要么被明确标为预留"——那是旧判据的说法。
+    //   PRT-407 取消了预留名单（`EXCLUSION_REASONS.REDACTED` 从"预留"变成
+    //   "脱敏失败时整条不发"，有了真的产出路径），判据收紧成"每一条都必须可达"。
+    //   名字不改的后果不是难看：下一个人读用例名会以为**还可以**留一个预留值，
+    //   于是他会新加一个永不产出的枚举值，而这条用例照样绿。
+    //
+    //   > 一个名字里写着"允许预留"的用例，
+    //   > 与一个真的允许预留的用例，在没有任何预留值的时候是同一个东西——
+    //   > 只不过前者会在有人照着名字做的时候放行一个死枚举。
     const reachable = new Set()
     // ① 无权
     reachable.add(assembleContext(base({
@@ -435,24 +445,80 @@ describe('⑥ 账本守恒（不做假账）', () => {
       candidates: [{ source: src({ content: 'x'.repeat(100) }) }],
       policy: { scope: 'default', maxTokens: 5, canRead: () => true },
     })).excluded[0].reason)
+    // ⑥ ★ PRT-407：**脱敏失败** → 整条不发。
+    //
+    //   触发方式是让 `content` 的取值**抛错**——那是脱敏工序唯一真正做不成的
+    //   情形（`redactText` 本身对任何输入都不抛）。这条用例存在的意义不是
+    //   "这个 getter 很特别"，而是把 REDACTED 从"预留值"变成"可达值"。
+    reachable.add(assembleContext(base({
+      candidates: [{
+        source: (() => {
+          const s = src({ content: 'normal' })
+          return {
+            ...s,
+            get content() { throw new Error('内容读取失败（用例故意）') },
+          }
+        })(),
+      }],
+    })).excluded[0].reason)
 
     const all = Object.values(EXCLUSION_REASONS)
-    const reserved = [EXCLUSION_REASONS.REDACTED]
+    // ★ 这里**不再有** `reserved`。
+    //
+    //   旧版把 `REDACTED` 列为"留给 PRT-408 的预留值"，于是判据是
+    //   "可达 + 预留 = 全部"。那个判据有一个安静的缺口：**预留值可以永远预留**
+    //   ——一个永远不会被产出的枚举值，与一个不存在的枚举值，在所有快照上
+    //   是同一个东西，只不过前者让"枚举都有人写"这句话看起来成立了。
+    //
+    //   > 一个"允许把枚举值标成预留"的判据，
+    //   > 与一个"每个枚举值都必须可达"的判据，在该值恰好后来被实现时是同一个东西——
+    //   > 只不过前者会**一直**允许它不被实现，而没有任何用例会红。
+    //
+    //   现在判据是"**每一条**都必须被某条路径产出"。PRT-407 补上了 REDACTED
+    //   的产出路径（脱敏失败 → 整条不发），所以预留名单可以取消了；
+    //   留着它反而会让下一个人以为"还有值是允许不可达的"。
     assert.deepEqual(
-      all.filter((r) => !reachable.has(r) && !reserved.includes(r)), [],
-      '这些理由既不可达也没有被标为预留',
+      all.filter((r) => !reachable.has(r)), [],
+      '这些理由不可达——每一条 EXCLUSION_REASONS 都必须有产出路径（不允许"预留"）',
     )
     assert.deepEqual(
       [...reachable].filter((r) => !all.includes(r)), [],
       '可达集合里出现了未定义的枚举值',
     )
-    // 预留的那一个必须**记在文档里**，否则下一个人不知道它是等谁
-    assert.equal(reserved.length, 1)
-    assert.match(
-      readFileSync(resolve(HERE, 'assembler.mjs'), 'utf8'),
-      /REDACTED[\s\S]{0,400}PRT-408|PRT-408[\s\S]{0,400}REDACTED/,
-      'REDACTED 是留给脱敏（PRT-408）的，必须在源码里写明，否则它看起来只是没人用的枚举',
-    )
+    assert.equal(reachable.size, all.length, '可达数必须等于枚举总数')
+  })
+
+  test('★★★ 脱敏失败 → **整条不发**，且原文一个字都不进快照（PRT-407）', () => {
+    // 这条钉的是 fail-closed：脱敏这道工序没做成时，**不能放行原文**。
+    const SECRET = 'sk-live-ABCDEFGHIJKLMNOPQRSTUV'
+    const boom = {
+      ...src({ id: 'bad', content: `里面有密钥 ${SECRET}` }),
+      get content() { throw new Error('脱敏前的读取失败') },
+    }
+    const s = assembleContext(base({
+      candidates: [
+        { source: boom },
+        { source: src({ id: 'good', content: '正常的文档' }) },
+      ],
+    }))
+
+    // ① 那一条被排除，理由正是 REDACTED
+    const e = s.excluded.find((x) => x.id === 'bad')
+    assert.ok(e, `应当被排除：${JSON.stringify(s.excluded)}`)
+    assert.equal(e.reason, EXCLUSION_REASONS.REDACTED)
+    assert.ok(e.detail.includes('脱敏失败'), e.detail)
+    // ② 它**不在** sources[] 里
+    assert.ok(!s.sources.some((x) => x.id === 'bad'), '脱敏失败的来源不该进 sources')
+    // ③ 密钥一个字都没进最终文本（放行原文是这条要防的唯一一件事）
+    assert.ok(!s.finalText.includes(SECRET), '原文不得进入 finalText')
+    assert.ok(!JSON.stringify(s).includes(SECRET), '密钥不得出现在快照的任何字段里')
+    // ④ 其他来源**不受影响**（排除一条不等于整次装配失败）
+    assert.ok(s.sources.some((x) => x.id === 'good'), '别的来源照常进去')
+    // ⑤ 这不叫"脱敏"：脱敏成功的来源留在 sources[] 里，两者不混
+    assert.deepEqual(s.redactions, [], '被排除的那条不该产生 redactions 记录')
+    // ⑥ 人读摘要说的是"整条不发"，不是"已脱敏"
+    assert.match(describeAssembly(s), /整条不发/, describeAssembly(s))
+    assert.ok(!describeAssembly(s).includes('已脱敏'), '不能把排除说成脱敏')
   })
 
   test('每个候选都有去向，且快照哈希可校验', () => {

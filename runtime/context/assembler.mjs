@@ -290,9 +290,11 @@ export function assembleContext(input) {
     // 注意 `content === null` **不是** missing：那是"只有出处、没有正文"的
     // 引用型来源，合法且常见。把它自动当成缺失会让引用型来源被误报。
     //
-    // `EXCLUSION_REASONS.REDACTED` 目前**没有产出路径**：它是留给脱敏（PRT-408）的
-    // 预留值——脱敏改变内容是因为**策略**，而截断是因为**预算**，两者不能合并成
-    // 同一个理由。装配器的用例里有一条专门钉住"可达集合 + 预留集合 = 全部枚举值"，
+    // `EXCLUSION_REASONS.REDACTED` 的产出路径在**下面那道脱敏工序**里（PRT-407 补上）：
+    // 脱敏**失败**时整条排除。它的名字容易读错，这里说清它**不是**"脱敏过的来源"——
+    // 脱敏成功的来源留在 `sources[]` 里，根本不进 `excluded[]`。
+    // 它说的是"脱敏这道工序没做成，所以这条不能发"。
+    // 装配器的用例里有一条专门钉住"**每一条**枚举值都必须可达"，
     // 所以新增一个理由却忘了写产出路径时，那条用例会红。
     if (c.missing === true) {
       const why = typeof c.missingReason === 'string' && c.missingReason !== '' ? c.missingReason : null
@@ -318,14 +320,47 @@ export function assembleContext(input) {
   //
   // spec §6.5 要的"脱敏结果"就是这里的 `redactions[]`：只记路径与命中说明，
   // **不记原值**——把原值写进快照等于把泄漏从正文搬家到审计。
+  //
+  // ★ 但脱敏**本身失败**时走的是另一条路：整条排除，理由是
+  //   `EXCLUSION_REASONS.REDACTED`（PRT-407 给这个枚举值补上的产出路径）。
   const redactions = []
+  const redactable = []
   for (const p of pending) {
-    const r = redactSource(p.source)
-    if (r.redactions.length > 0) {
-      p.source = r.source
-      redactions.push(...r.redactions)
+    let r
+    try {
+      r = redactSource(p.source)
+    } catch (e) {
+      // ★ 脱敏失败 → **这条来源整条不进上下文**（fail closed）。
+      //
+      //   放行是绝对不能做的：那会把**没脱敏的原文**送进模型，
+      //   而那正是脱敏要防的唯一一件事。
+      //
+      //   > 一个"脱敏失败就放行原文"的实现，
+      //   > 与一个"脱敏失败就整条排除"的实现，在脱敏从不失败的时候是同一个东西——
+      //   > 只不过前者会在它失败的那一次，把密钥原样送给模型，
+      //   > 而快照上两次看起来都"来源已完整清点"。
+      //
+      //   放行之外还有一种写法是**整个装配抛错**。那更安全，但代价是
+      //   一个来源的问题会让整次运行失败——而运行失败与"这个来源没进去"
+      //   是两件不同的事，前者没有任何东西记录**是哪个来源**出的问题。
+      //   排除方案把"哪一条、为什么"写进 `excluded[]`，那正是账本的用途。
+      //
+      //   注意这与"脱敏成功"是**两个不同的理由**：成功的那个来源留在
+      //   `sources[]` 里（见上），失败的这一个才进 `excluded[]`。
+      //   两者共用一个 `type` 而不是共用一个 reason，界面上也分开显示。
+      excluded.push(createExclusion({
+        id: p.source.id,
+        reason: EXCLUSION_REASONS.REDACTED,
+        detail: '脱敏失败，无法确认它不含密钥，按不发送处理：'
+          + `${e instanceof Error ? e.message : String(e)}`,
+      }))
+      continue
     }
+    redactable.push(r.redactions.length > 0 ? { candidate: p.candidate, source: r.source } : p)
+    if (r.redactions.length > 0) redactions.push(...r.redactions)
   }
+  pending.length = 0
+  pending.push(...redactable)
 
   // ⑤ 按固定优先级排出确定顺序：同一批输入在任何路径下都得到同样的顺序与哈希。
   pending.sort((a, b) => compareForAssembly(a.source, b.source, priorityIndex))
@@ -458,7 +493,19 @@ export function describeAssembly(snapshot) {
   if (snapshot.excluded.length > 0) {
     const byReason = new Map()
     for (const e of snapshot.excluded) byReason.set(e.reason, (byReason.get(e.reason) ?? 0) + 1)
-    const label = { unauthorized: '越权', stale: '过期', 'over-budget': '超预算', redacted: '已脱敏', missing: '找不到', 'out-of-scope': '不在本空间' }
+    // ★ `redacted` 的文案必须与**前端**（`workbench/src/snapshotView.ts` 的
+    //   `EXCLUSION_REASON_LABEL`）说的是同一件事：**整条不发**。
+    //
+    //   这一条原先写的是「已脱敏」——而那是**反的**：脱敏成功的来源留在
+    //   `sources[]` 里，根本不会出现在这段"排除 N 个"的话里。
+    //   于是同一个枚举值，后端摘要说"已脱敏"、前端说"整条不发：内容整体不可外发"，
+    //   同一个快照在两处会读成两件相反的事。
+    //
+    //   > 一个"排除原因写已脱敏"的摘要，
+    //   > 与一个"排除原因写整条不发"的摘要，在没有任何来源被排除时是同一个东西——
+    //   > 只不过前者会让用户以为那份文档**进去了**（只是变了样），
+    //   > 而它其实压根没发出去。
+    const label = { unauthorized: '越权', stale: '过期', 'over-budget': '超预算', redacted: '整条不发（脱敏失败）', missing: '找不到', 'out-of-scope': '不在本空间' }
     parts.push(`；排除 ${snapshot.excluded.length} 个（${[...byReason].map(([r, n]) => `${label[r] ?? r} ${n}`).join('、')}）`)
   }
   return `${parts.join('')}。`

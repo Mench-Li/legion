@@ -47,10 +47,18 @@ export const LEGACY_CALL_TOKEN = 'ctx.' + 'subagents' + '.start('
 /** 匹配旧调用的正则（同样由拼接得到，理由见上）。 */
 const LEGACY_CALL_RE = new RegExp('ctx\\.' + 'subagents' + '\\.start\\(')
 
-/** 旧调用的调用点（读到的位置，不是猜的）。 */
+/** 旧调用的调用点（读到的位置，不是猜的）。
+ *
+ * 2026-09-13 PRT-315 切片 1：2219 → 2111。
+ * 该批把合入调解搬去 `plugins/src/mediation.ts`（−400 行），这个调用被上移。
+ * 行号是**对拍出来的**不是算出来的：用本模块自己的抽取器从旧源码取 2219 行的选项集合，
+ * 再在新源码里要求"选项完全一致"的调用**恰好一个**，取它的行号。
+ *   > 算术（"上面删了 108 行"）在下一批拆分时会再错一次；
+ *   > 而"找到了一行、只是不是那一行"这种错误，是不会报错的。
+ * 本批同时核对：调用点总数 4 → 4（搬走的是它的**调用者**，不是它）。 */
 export const LEGACY_CALL_SITE = Object.freeze({
   file: 'plugins/src/index.ts',
-  line: 2219,
+  line: 2111,
   context: 'worker 派工（scrum:<taskId>）',
 })
 

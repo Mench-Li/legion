@@ -32,6 +32,23 @@ export {
   reconcilePatchLayer,
 } from './patch-layer.mjs'
 
+// PRT-214：员工 agent preset（spec §6.9 的 agent 平面那一半）。
+export {
+  DSH_PRESET_ROWS,
+  EMPLOYEE_PRESET_CHECKED,
+  EMPLOYEE_PRESET_CODES,
+  EMPLOYEE_PRESET_VERSION,
+  LEGION_TOOL_ROUTING,
+  PRESET_ID_PATTERN,
+  SHIPPED_PRESET_IDS,
+  assertEveryRowReachable,
+  coverageOf,
+  installEmployeePreset,
+  needsQuoting,
+  renderEmployeePreset,
+  yamlScalar,
+} from './employee-preset.mjs'
+
 export {
   APPROVAL_OUTCOMES,
   AVAILABILITY_CHECK_CODES,

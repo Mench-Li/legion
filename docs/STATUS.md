@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-13　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **167 套件 / 4503 用例 / 0 fail**（证据 `.ci/prt-214d/`）
+**最近一次全量基线**：2026-09-13　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **168 套件 / 4531 用例 / 0 fail**（证据 `.ci/prt-214e/`）
 （**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数会少）
 —— 以本文件所在提交为准；证据 `.ci/prt-901/`（PRT-901/902 第三方组件清单、SBOM 与商业分发条件那一批）
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
@@ -3457,6 +3457,98 @@
 > `docs/DUAL-WRITE-RACE-evidence/verify-evidence.md`。
 
 ---
+
+## 2026-09-13　PRT-214（五）：员工 agent preset —— agent 平面那一半
+
+> 前四批把 **host 平面**做完了（hard floor、pre-execute、approval answerer、preset 表）。
+> 本批做 spec §6.9 那张归属表的**第二行**：员工 agent preset
+> （岗位工具集、persona、提示段、skill 引用，agent 平面按 session 挂载）。
+>
+> 顺带更正：`dshCompositionPatchVersion`（PRT-214 的第三项要求）**早已完成**——
+> 在 `patch-layer.mjs:41`，并已接进 `product/upgrade/manifest.mjs`、`preflight.mjs`、
+> `runtime/packs/manifest.mjs`、`selfcheck.mjs`、`render.mjs`。本轮开始前先核实了这一点，
+> 没有重复实现。
+
+### 交付
+
+- **`runtime/dsh-composition/employee-preset.mjs`（新增）**：工具路由表、
+  授权覆盖推导、渲染（`agent.cordis.yml` + `preset.yml`）、安装。
+- **`runtime/dsh-composition/employee-preset.test.mjs`（新增，28 例）**。
+- `runtime/dsh-composition/index.mjs`：导出新模块（入口现 127 项）。
+
+### ★ 为什么工具行必须**由授权推导**
+
+它的失败模式与强制面**相反**：强制面坏掉是"该拦的没拦"（吓人、可见）；
+员工 preset 坏掉是"**该有的工具没有**"——而这件事**不报错**。
+
+> 一个"清单给了权限、preset 没给工具"的 preset，
+> 与一个"这个岗位本来就没有这个权限"的 preset，在模型那里是同一个东西——
+> 只不过前者会让一次本该成功的工作变成一句"**我做不到**"。
+
+`coverageOf()` 对每个被授予工具给出 `covered`（装 DSH 行）／`hosted`
+（Legion 宿主平面，不装行）／`unknown`（**渲染失败**）。`hosted` 是
+spec §6.9 平面规则的直接后果：跨 session 能力归 host，preset 只承载岗位能力。
+
+### ★ 包名是**读出来的**，不是猜的
+
+每个 `provides` 都来自 `DSH_CHECKOUT` 源码（`tool-fs` → read/write/edit/read_image 等）。
+用例有一条**逐字比对**：我们用的每个包名都必须出现在随部署分发的 `standard` preset 里。
+凭记忆写包名的后果不是报错，而是挂载时报 `Cannot find package`——那时已经是"部署起不来"。
+平台门（`disabled: !!js ...`）断言两条表达式**不相等**——同向会让两个平台各少一半 shell。
+
+### ★ 四条平面红线（渲染期拒绝）
+
+① 强制面字段（§6.9 line 493）；② 名字像强制面组件的提示段行（preset 可被 shadow，
+把下限放进去等于让它取决于当前 session 挂了什么）；③ 会发布服务的行却没有 `isolate` realm；
+④ 与随部署分发的 preset 撞名（§6.9 line 496）——**渲染期与安装期各拦一次**，
+安装期拦的是"有人手工造了个 `id:'standard'` 的假对象直接调安装器"。
+
+### ★ 三条实测抓出来的真问题
+
+1. **有一个行"声明了却永远装不上"**：第一版 `read-file` 只路由到 `tool-fs`，
+   于是 `tool-fs-search` 没有任何工具能到达它。
+   > 一个"声明了却永远装不上"的行，与一个"根本不在表里"的行，在产出的 preset 上
+   > 是同一个东西——只不过前者会让读表的人以为 `glob`/`grep` 已经给了员工。
+   修法：`read-file` 同时路由到 `tool-fs-search`，并加可达性不变量
+   `assertEveryRowReachable()`；配套用例喂**故意断链表**证明它不是恒真的。
+2. **表头随输入顺序变 → 伪变更**：同一份授权、清单里工具名换顺序就渲染出不同文件。
+   > 一个"行序固定但表头随输入顺序变"的渲染器，与一个"每次渲染都产生一次伪变更"的
+   > 渲染器，是同一个东西——只不过前者会让代码评审里出现一条没有实际内容的 diff。
+   修法：表头与行序用同一个依据（字典序），让"逐字节相同"对整份文件成立。
+3. **`@` 开头必须加引号**——我原来的用例把它归进"不该加引号"，**是我错**：
+   `@` 是 YAML 保留指示符，不能作 plain scalar 开头；`standard` preset 也正是给它加了引号。
+
+### 断验证（7/7，逐字节还原）
+
+① 未覆盖降级成静默丢掉 ② 强制面字段不再拦 ③ 撞名不再拦（能覆盖 `standard`）
+④ id 校验放宽 ⑤ 引号判定退化 ⑥ 表头不排序 ⑦ 安装器不拒写随部署分发的目录
+——**全部判红**。
+
+### ★ 真 DSH loader（不是自己抄的 schema）
+
+用 DSH 自己的 `entryListSchema` + 真 js-yaml 解析生成的 preset
+（与 `agent-presets/src/discovery.ts:236` 同一路径），断言顶层是数组、
+行 id 序列正确、且 `disabled` 被读成**表达式对象**
+`{__jsExpr: "process.platform === 'win32'"}` 而不是字符串——那证明 `!!js` 真的生效。
+
+### 验证
+
+`employee-preset` **28/28**；七道门禁全 PASS；全量 CI **9 阶段全 PASS**，
+`test` **168 套件 / 4531 用例 / 0 fail**（`.ci/prt-214e/`）。
+
+### ⚠️ 诚实边界
+
+① **没有做 `standingKeyFor` 挂载验证**——那需要把 preset 装进用户 preset 根并让宿主
+roster 去挂，是对**用户环境**的写操作。**本批只证明了"DSH 的 loader 能解析"，
+没有证明"它挂得上"。**
+> 一个"schema 解析通过"的 preset，与一个"真的能挂上"的 preset，在解析器那里是
+> 同一个东西——只不过前者会在一行包名解析不到时，于部署启动时才失败。
+② `installEmployeePreset()` **没有生产调用方**（生产写入方是 Launcher，PRT-257）；
+③ 员工清单的权威来源还没定（属 PRT-4xx）；
+④ **员工 preset 与补丁层从未一起装进任何 profile**。
+
+**PRT-214 仍是 🟡**，但已不是"实现没写完"：四行强制面 + preset 表 + 员工 preset 渲染器
+都在。剩下的是**把它们接进一次真实的部署**——那属于 PRT-257。
 
 ## 2026-09-13　PRT-214（四）：pre-execute —— 强制面第一次**真的**连起来
 

@@ -1959,6 +1959,26 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-214：员工 agent preset（spec §6.9 的 **agent 平面**那一半）。
+      //
+      // 它的失败模式与强制面**不同**：强制面坏掉是"该拦的没拦"，
+      // 员工 preset 坏掉是"该有的工具没有"——后者**不报错**。
+      //
+      //   *一个"清单给了权限、preset 没给工具"的 preset，
+      //   与一个"这个岗位本来就没有这个权限"的 preset，在模型那里是同一个东西——
+      //   只不过前者会让一次本该成功的工作变成一句"我做不到"。*
+      //
+      // 所以本套件守三件事：① 工具行由**授权推导**、每一项都要有交代；
+      // ② 覆盖不到的工具**失败**而不是 warn；③ 永不携带强制面、
+      // 永不写随部署分发的 preset 目录。
+      //
+      // 需要 DSH_CHECKOUT 的只有"真 loader 解析"与"包真的装了"那几条，
+      // 纯渲染逻辑照常跑；缺 DSH 时逐条 SKIP（不伪造通过）。
+      label: 'employee-preset（PRT-214：员工 agent preset 渲染 × 授权覆盖）',
+      files: ['runtime/dsh-composition/employee-preset.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-214：enforcement 插件模块的**一致性**用例——对着真 DSH 运行时。
       //
       // 测的全部是**别人的契约**：`ctx.tools.guard()` 是不是真同步、真单调
@@ -2380,6 +2400,8 @@ async function stageTest() {
       'runtime/dsh-composition/approval-answerer.test.mjs',
       // 同上（真 ToolRuntime + 全链路）。
       'runtime/dsh-composition/pre-execute.test.mjs',
+      // 同上（真 DSH loader + 真包解析）。
+      'runtime/dsh-composition/employee-preset.test.mjs',
     ])
     const tracked = await exec('git', ['ls-files', '*.test.mjs'], { cwd: ROOT })
     const all = tracked.out.split('\n').map((x) => x.trim()).filter(Boolean)

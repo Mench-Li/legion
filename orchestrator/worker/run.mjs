@@ -154,7 +154,35 @@ export function createHubClient({ baseUrl, token, fetchImpl = globalThis.fetch, 
     return payload
   }
 
+  /**
+   * GET 一个读端点（PRT-402~406 的来源装配需要读面）。
+   *
+   * 与 `call` 分开而不是加一个 method 参数：两者的**失败含义**不同。
+   * POST 失败通常意味着这个动作没发生；GET 失败意味着"我们没问到"，
+   * 而把它当成"没有"正是来源装配最要防的那件事
+   * （见 `orchestrator/worker/sources-loader.mjs` 的文件头）。
+   * 这里把 `status` 挂在错误上，让调用方能区分 404（真的没有）与别的失败。
+   */
+  async function read(path) {
+    const res = await fetchImpl(`${root}${path}`, {
+      method: 'GET',
+      headers: { authorization: `Bearer ${token}` },
+      signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(timeoutMs) : undefined,
+    })
+    let payload = null
+    try { payload = await res.json() } catch { payload = null }
+    if (!res.ok) {
+      throw new HubHttpError(
+        `${path} 返回 ${res.status}：${payload?.error ?? '（无错误说明）'}`,
+        { status: res.status, code: payload?.code ?? null, body: payload, path },
+      )
+    }
+    return payload
+  }
+
   return Object.freeze({
+    /** 读一个 GET 端点。见上面的注释：404 与"读失败"必须能被调用方分开。 */
+    read,
     /** 领取。返回**解包后**的 claim 对象，或 null（队列空 / 抢输了）。 */
     async claim({ workerId, scope = null, leaseTtlMs = null }) {
       const r = await call('/api/runtime/claim', { workerId, scope, leaseTtlMs })

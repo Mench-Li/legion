@@ -99,6 +99,24 @@ export const NON_ENV_LITERALS = Object.freeze([
   // 四者的处置动作各不相同。
   'BUDGET_RESERVE_FAILED', 'BUDGET_UNBOUNDED', 'BUDGET_SETTLE_FAILED',
   'BUDGET_ACTOR_REQUIRED', 'BUDGET_BAD_WIRING', 'BUDGET_OBSERVE_FAILED',
+  // PRT-402~406：来源装配的生产数据面（worker/sources-loader.mjs 的 SOURCES_LOADER_CODES）。
+  //
+  // 与上面几批同一条口径：这些码会被跨进程读取（worker 上报 → Attempt 记录 → 人排查），
+  // 所以是契约不是实现细节。
+  //
+  // 它们区分的是**修复动作完全不同**的处境，其中最容易混淆的一对是
+  // `SOURCES_READ_FAILED`（有这条路，这次没问到）与"这条来源不存在"：
+  // 前者要去看 hub 与网络，后者要去看产品的读面。
+  //
+  //   > 一次"读失败"被当成"没有"，与一次"真的没有"，
+  //   > 在快照里长得一模一样——只不过前者会让模型基于一份不完整的世界观
+  //   > 得出结论，而快照上写着"来源已完整清点"。
+  //
+  // `SOURCES_LOADER_TASK_NOT_FOUND` 与 `SOURCES_LOADER_NO_TASK_ID` 同属"这次运行
+  // 没有任务定义"的两个不同来处：前者是任务真的不在（去查是不是被删了），
+  // 后者是 lease 上压根没带（去查调用点）。压成一个码就只能靠文案猜。
+  'SOURCES_LOADER_BAD_WIRING', 'SOURCES_LOADER_NO_SCOPE', 'SOURCES_LOADER_NO_TASK_ID',
+  'SOURCES_LOADER_TASK_NOT_FOUND', 'SOURCES_READ_FAILED',
   // 「没接闸门」这个状态必须与「预算充足」区分得开：
   // 一个没接预算的执行与一个预算充足的执行，在结果上不该长得一样。
   'not-gated', 'bounded', 'unbounded',

@@ -742,12 +742,35 @@ test('⑥ 真实进程：入口能起来、写状态文件；被终止后状态�
     child.stderr.on('data', (d) => out.push(String(d)))
 
     const statusPath = join(dataDir, STATUS_RELPATH)
-    // 等状态文件出现：这是「进程真的跑起来了」的唯一可信信号
+    // ★ 等**状态安定下来**，而不是只等文件出现。
+    //
+    // 状态文件的写法是**两拍**：`start()` → `loop()` 先 `publish('starting')`
+    // （文件在这一刻诞生），随后第一轮 `tick()` 才发现没有执行引擎、
+    // 改写为 `no-executor`。所以"文件出现了"只证明**进程起来了**，
+    // 不证明"状态已经是它最终的那个"——而下面断言的是后者。
+    //
+    //   > 一个等「文件出现」却断言「文件稍后才会变成的内容」的用例，
+    //   > 与一个随机失败的用例，是同一个东西——
+    //   > 只不过前者看起来像是产品不稳定。
+    //
+    // 实测依据：全量 CI 下这一条以 `actual: 'starting'`（期望 `no-executor`）
+    // 变红，而单跑 3/3 全绿——两拍之间的窗口被负载拉长正好被读到。
+    // 这条用例本身没有错（它要判的就是"没有引擎时必须如实报 no-executor"），
+    // 错的是它**等的条件**与它**断言的事实**不是同一件事。
     const deadline = Date.now() + 20000
-    while (!existsSync(statusPath) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100))
+    let status = null
+    while (Date.now() < deadline) {
+      if (existsSync(statusPath)) {
+        const r = readStatusFile(statusPath)
+        // `starting` 是唯一一个"还没安定"的值：进程刚起来、第一轮还没跑完。
+        if (r.ok === true && r.status?.state !== 'starting') { status = r; break }
+      }
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    assert.notEqual(status, null,
+      `状态未在 20s 内安定下来（文件未出现，或一直停在 starting）；输出：\n${out.join('')}`)
     assert.equal(existsSync(statusPath), true, `状态文件未出现；输出：\n${out.join('')}`)
 
-    const status = readStatusFile(statusPath)
     assert.equal(status.ok, true)
     assert.equal(status.status.workerId, 'real-1')
     assert.equal(status.status.state, 'no-executor', '没有执行引擎时必须如实报 no-executor 且不认领')

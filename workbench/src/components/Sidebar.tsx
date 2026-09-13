@@ -20,6 +20,9 @@ const MODULES: ModuleDef[] = [
   { id: 'chat', name: '对话中心', icon: '💬' },
   { id: 'calendar', name: '日程日历', icon: '📅' },
   { id: 'notify', name: '通知中心', icon: '🔔' },
+  // PRT-409：上下文快照查看（"支持查看和导出"里的**查看**那一半）。
+  // 放在末位是因为它是审计面，不是日常工作面。
+  { id: 'snapshots', name: '上下文快照', icon: '🧾' },
 ]
 
 /** v1（serve.mjs，无 scope 分区）时的固定空间列表；中枢模式用 team-hub 真实空间替换。 */
@@ -70,7 +73,7 @@ export function Sidebar({ board, active, scope, hubMode, spaces, onNavigate, onS
 
   const clickModule = (mod: ModuleDef): void => {
     // 面板化模块：任务中心（融合 Scrum 看板 + 总指挥部）与各中心面板（S2/S5/S6/S7 先例）
-    if (mod.id === 'tasks' || mod.id === 'home' || mod.id === 'agents' || mod.id === 'skills' || mod.id === 'rules' || mod.id === 'chat' || mod.id === 'files' || mod.id === 'browser' || mod.id === 'calendar' || mod.id === 'notify') {
+    if (mod.id === 'tasks' || mod.id === 'home' || mod.id === 'agents' || mod.id === 'skills' || mod.id === 'rules' || mod.id === 'chat' || mod.id === 'files' || mod.id === 'browser' || mod.id === 'calendar' || mod.id === 'notify' || mod.id === 'snapshots') {
       onNavigate(mod.id)
       return
     }

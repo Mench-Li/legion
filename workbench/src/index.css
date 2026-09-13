@@ -3381,3 +3381,26 @@ body {
 .tc-meta { font-size: 9.5px; color: var(--muted-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tc-time { margin-left: auto; font-size: 9.5px; color: var(--muted-2); font-variant-numeric: tabular-nums; flex: none; }
 
+
+/* ═══ PRT-409：上下文快照查看（三态判定必须**看得见**）═══
+ *
+ * 这三个类不是装饰。快照的验证结论、账本结论、墓碑提示都是**三态**的，
+ * 而"判定对了但样式没落地"的三态，与一个只有一态的界面在屏幕上长得一模一样——
+ * 只不过前者的代码里写着 verdict === 'mismatch'。
+ *
+ *   > 一个"算出了三种状态、而它们共用一套灰底"的界面，
+ *   > 与一个"只算了一种状态"的界面，对用户是同一个东西。
+ *
+ * 所以 .ok / .warn / .err 各有**不同的颜色与左边框**，而不是共用一套底。
+ * 用例（workbench/scripts/snapshot-view.test.mjs）会逐条核对这三个类
+ * 真的存在、且**互不相同**——只钉组件里写了三态是不够的。
+ */
+.snapshot-view .snap-verdict { padding: 8px 12px; border-radius: 4px; border-left: 3px solid transparent; margin-bottom: 8px; }
+.snapshot-view .snap-verdict.ok { background: rgba(46,160,67,.12); border-left-color: #2ea043; color: #2ea043; }
+.snapshot-view .snap-verdict.warn { background: rgba(210,153,34,.14); border-left-color: #d29922; color: #d29922; }
+.snapshot-view .snap-verdict.err { background: rgba(248,81,73,.14); border-left-color: #f85149; color: #f85149; }
+.snapshot-view .snap-note { padding: 8px 12px; border-radius: 4px; border-left: 3px solid transparent; margin-bottom: 8px; }
+.snapshot-view .snap-note.warn { background: rgba(210,153,34,.14); border-left-color: #d29922; }
+.snapshot-view .snap-note.err { background: rgba(248,81,73,.14); border-left-color: #f85149; }
+.snapshot-view table th { font-weight: 500; padding: 4px 8px 4px 0; }
+.snapshot-view table td { padding: 4px 8px 4px 0; vertical-align: top; }

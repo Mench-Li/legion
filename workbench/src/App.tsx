@@ -41,6 +41,7 @@ import { FilesView } from './components/FilesView'
 import { BrowserView } from './components/BrowserView'
 import { CalendarView } from './components/CalendarView'
 import { NotifyView } from './components/NotifyView'
+import { SnapshotView } from './components/SnapshotView'
 import { TaskCenterView } from './components/TaskCenterView'
 import { NewSpaceModal } from './components/NewSpaceModal'
 import { SpaceSettingsModal } from './components/SpaceSettingsModal'
@@ -488,6 +489,8 @@ export default function App(): React.JSX.Element {
               onUnreadChange={setNotifyUnread}
               onGoHome={() => setActive('home')}
             />
+          ) : active === 'snapshots' ? (
+            <SnapshotView scope={scope} hubMode={hubMode} />
           ) : (
             <CenterPanel board={displayBoard} labels={labels} active={active} rosterAgents={hubMode ? roster : null} scope={scope} spaces={hubSpaces} goalInfo={hubMode ? goalInfo : null} hubActive={hubMode} onGoalStatus={hubMode ? handleGoalStatus : undefined} onSaveContext={hubMode ? handleGoalContext : undefined} />
           )

@@ -66,11 +66,6 @@ export const SOURCES_LOADER_CODES = Object.freeze({
  */
 export const UNSERVED_SOURCE_FAMILIES = Object.freeze([
   Object.freeze({
-    key: 'userFeedback',
-    reason: 'hub 没有用户反馈的独立读端点（`userFeedback` 在 `sources.mjs` 里是**另一个类型**：'
-      + '"要不要按反馈调整"的处理与评论不同，所以不能拿任务评论去填它）',
-  }),
-  Object.freeze({
     key: 'upstreamDeliveries',
     reason: 'hub 的 `/api/runtime/handoffs` 是 worker 的移交状态，不是上游员工的交付物；'
       + '两者混用会把"某个 worker 交出了租约"读成"上游交付了一份成果"',
@@ -109,6 +104,14 @@ export const FORMERLY_UNSERVED_SOURCE_FAMILIES = Object.freeze([
     servedBy: '/api/employee-manifest?scope=&role=',
     was: 'hub 没有 EmployeeManifest 的读端点（`/api/members` 只有在线的成员 id/kind，'
       + '没有职责边界与工具范围——而 manifest 进上下文的**全部意义**就是让模型读到自己的边界）',
+  }),
+  Object.freeze({
+    key: 'userFeedback',
+    fixedBy: 'PRT-404',
+    servedBy: '/api/task-feedback?scope=&taskId=',
+    was: 'hub 没有用户反馈的独立读端点，而 **不能拿任务评论去填**它——'
+      + '`sources.mjs` 里用户反馈是另一个类型（`user-feedback`）：'
+      + '"要不要按反馈调整"的处理与评论不同，混成一个会让那件事无从下手',
   }),
 ])
 
@@ -310,6 +313,32 @@ export function createHubSourceLoader({
     }))
   }
 
+  /**
+   * 用户反馈 → `commentSources` 要的形状。
+   *
+   * ★ 读的是**专门那个端点**（`/api/task-feedback`），不是从 `/api/task` 里挑。
+   *   hub 的任务行上现在有三个批注列（`comments` / `evidence` / `feedback`），
+   *   从整行里"自己挑出反馈"等于把"哪一列是用户反馈"复制到每个读点。
+   *
+   *   > 一个"从任务行里自己挑反馈"的读法，
+   *   > 与一个"问专门那个端点"的读法，在只有一种批注的时候是同一个东西——
+   *   > 只不过前者会在有人忘了挑、顺手把 `comments` 也当反馈时，
+   *   > 把"同事说了一句话"读成"用户要求调整"。
+   *
+   * ★ 与评论**共用** `commentIdOf`（都按 `(by, at, text)` 派生）：一条反馈在库里
+   *   只存在于 `feedback` 一列，不会同时出现在两份列表里，所以两条列表的 id
+   *   不会撞。这一点由用例钉住（同一条文本只以 `user-feedback` 出现**一次**）。
+   */
+  function toFeedback(body) {
+    const raw = Array.isArray(body?.feedback) ? body.feedback : []
+    return raw.map((c) => ({
+      id: commentIdOf({ by: c?.by, at: c?.at, text: c?.text }),
+      author: c?.by ?? null,
+      body: c?.text ?? '',
+      createdAtMs: epochMsOf(c?.at),
+    }))
+  }
+
   return Object.freeze({
     /**
      * @param {object} lease 认领到的 Attempt（至少要 `taskId`；`scope` 优先用它的）
@@ -397,6 +426,29 @@ export function createHubSourceLoader({
       if (employeeManifest !== null && typeof employeeManifest !== 'object') employeeManifest = null
       if (employeeManifest !== null && employeeManifest.manifest !== undefined) employeeManifest = employeeManifest.manifest
 
+      // ── PRT-404：用户反馈（与评论**分开**的一条来源）──
+      //
+      // ★ 没有 taskId 就**不读**（`requireTask: false` 时可能走到这里）。
+      //   读不到时传 `[]`——而这一步诚实地记下来：对**列表形**的来源，
+      //   "我们没去看"与"确实一条都没有"在快照里**是同一个形状**（都不会产出候选）。
+      //   这与 `teamPlan` / `employeeManifest` 不同：那两条是 `required: true`，
+      //   缺席会产出带原因的 `missing` 候选。列表形来源没有这个位置。
+      //
+      //   > 一个"列表形来源缺席时给空数组"的装配，
+      //   > 与一个"确实没有这一类内容"的装配，在账本上是同一个东西——
+      //   > 只不过前者会让一条**没去读**的来源彻底不留痕迹。
+      //
+      //   这是本批的一处已知边界，不是被忽略的：它被写进了 `availability()`
+      //   的 `listShapedAbsence`，运维能查，而不是只能猜。
+      let userFeedback = []
+      if (typeof taskId === 'string' && taskId !== '') {
+        const fbBody = await readOrThrow(
+          `/api/task-feedback?scope=${encodeURIComponent(effScope)}&taskId=${encodeURIComponent(taskId)}`,
+          { notFoundIsNull: true },
+        )
+        userFeedback = toFeedback(fbBody)
+      }
+
       return {
         scope: effScope,
         teamPlan,
@@ -410,7 +462,7 @@ export function createHubSourceLoader({
         // 该由调用方显式决定要不要，而不是由装配器顺手全带上。
         tasks: [],
         comments: toComments(task),
-        userFeedback: [],
+        userFeedback,
         upstreamDeliveries: [],
         // 产物**只给引用**（PRT-405）：正文是一个预算决定。
         artifacts: mapEpochMs(task?.artifacts),
@@ -438,6 +490,50 @@ export function createHubSourceLoader({
           '/api/task', '/api/goal', '/api/skills',
           // PRT-402 接上的两条
           '/api/team-plan', '/api/employee-manifest',
+          // PRT-404 接上的一条
+          '/api/task-feedback',
+        ]),
+        /**
+         * ⚠️ 一处**形状决定的**边界，写出来而不是留给运维去猜。
+         *
+         * `teamPlan` / `employeeManifest` 是"单值来源"，缺席时传 `null`，
+         * `sources.mjs` 会产出一条带原因的 `missing` 候选——所以"没有"与
+         * "没去读"在快照里**分得开**。
+         *
+         * 而 `comments` / `userFeedback` / `upstreamDeliveries` /
+         * `artifacts` / `skills` 是**列表形**来源：缺席时只能传空数组，
+         * 而空数组产出**零个**候选——于是"这次运行确实没有用户反馈"
+         * 与"我们压根没去读"在快照里是同一个形状：
+         *
+         *   > 一个"列表形来源缺席时给空数组"的装配，
+         *   > 与一个"确实没有这一类内容"的装配，在账本上是同一个东西——
+         *   > 只不过前者会让一条**没去读**的来源彻底不留痕迹。
+         *
+         * 这条边界需要**新的位置**才能表达（例如"已读但为空"的候选，
+         * 或快照级的来源清点），那是 PRT-408 的来源清单该做的事。
+         * 现在把它如实列出来，让它是**已知的**，而不是看起来不存在。
+         */
+        listShapedAbsence: Object.freeze([
+          Object.freeze({
+            key: 'userFeedback',
+            absentAs: [],
+            why: '列表形来源：没读到（无 taskId / 404）与确实没有反馈，在快照里都是"零个候选"',
+            needs: 'PRT-408 的来源清单（"已读但为空"的位置）',
+          }),
+          Object.freeze({
+            key: 'comments',
+            absentAs: [],
+            why: '任务行上没有评论时同样产出零个候选：注释里那个"没去读"的处境'
+              + '（任务读回来是空的）在这条来源上完全没有痕迹，只有任务来源自己没有候选',
+            needs: 'PRT-408 的来源清单',
+          }),
+          Object.freeze({
+            key: 'upstreamDeliveries',
+            absentAs: [],
+            why: '列表形来源，而且这一族**还没有读端点**（见 unserved）：'
+              + '现在它既没有候选、也不会有 missing，只在 availability 里被点名',
+            needs: 'PRT-405（读端点）与 PRT-408（"已读但为空"的位置）',
+          }),
         ]),
       })
     },

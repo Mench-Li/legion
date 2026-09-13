@@ -277,16 +277,16 @@ test('★★ 取不到的来源族被**点名**列出，且每条都说清缺的
   const loader = createHubSourceLoader({ hub: makeHub(), scope: SCOPE })
   const av = loader.availability()
   const keys = av.unserved.map((u) => u.key)
-  for (const k of ['userFeedback', 'upstreamDeliveries', 'workspaceState']) {
+  for (const k of ['upstreamDeliveries', 'workspaceState']) {
     assert.ok(keys.includes(k), `${k} 必须被点名——"静静地不出现"与"取不到"在账本上长得一样`)
   }
   for (const u of av.unserved) {
     assert.ok(u.reason.length > 20, `${u.key} 的原因必须具体，不能只写"没有"`)
   }
-  // ★ PRT-402 之后这两条**不再缺**，所以它们必须从 `unserved` 里消失。
+  // ★ PRT-402 / PRT-404 之后这三条**不再缺**，所以它们必须从 `unserved` 里消失。
   //   留着它们的后果不是"多说了一句"：`unserved` 是**产品缺口的清单**，
   //   而一个已经补上的缺口挂在上面，会让这份清单失去"照着它能干完活"的性质。
-  for (const k of ['teamPlan', 'employeeManifest']) {
+  for (const k of ['teamPlan', 'employeeManifest', 'userFeedback']) {
     assert.ok(!keys.includes(k), `${k} 已经接上了，不该还留在 unserved 里`)
   }
 })
@@ -295,17 +295,36 @@ test('★★ 补上的缺口进 `formerlyUnserved`，且写明**当时缺的是�
   const loader = createHubSourceLoader({ hub: makeHub(), scope: SCOPE })
   const av = loader.availability()
   const keys = av.formerlyUnserved.map((u) => u.key)
-  assert.deepEqual([...keys].sort(), ['employeeManifest', 'teamPlan'])
+  assert.deepEqual([...keys].sort(), ['employeeManifest', 'teamPlan', 'userFeedback'])
   for (const u of av.formerlyUnserved) {
-    assert.equal(u.fixedBy, 'PRT-402')
+    assert.ok(['PRT-402', 'PRT-404'].includes(u.fixedBy), `${u.key} 要写明是哪一批补上的`)
     assert.ok(u.servedBy.startsWith('/api/'), `${u.key} 要写清现在由哪条端点供上`)
     // "当时缺的是什么"必须留着：删掉它，下一次有人看到一份带 missing 候选的
-    // 快照时，就没有任何地方告诉他这两条**曾经每次运行都缺**。
+    // 快照时，就没有任何地方告诉他这几条**曾经每次运行都缺**。
     assert.ok(u.was.length > 20, `${u.key} 要写明它当时为什么缺`)
   }
   // 与 unserved 是**互补**的两份，不是同一份的两种叫法
   const unservedKeys = av.unserved.map((u) => u.key)
   for (const k of keys) assert.ok(!unservedKeys.includes(k), `${k} 不能两边都在`)
+})
+
+test('★★ 列表形来源的缺席**不留痕迹**——这条边界被写出来，而不是留给运维猜', () => {
+  // `teamPlan` / `employeeManifest` 是单值来源：缺席传 `null`，装配器产出
+  // 一条带原因的 `missing` 候选，"没有"与"没去读"分得开。
+  // 而 `comments` / `userFeedback` 是**列表形**：缺席只能传 `[]`，产出**零个**
+  // 候选——两种完全不同的处境在快照里是同一个形状。
+  const loader = createHubSourceLoader({ hub: makeHub(), scope: SCOPE })
+  const av = loader.availability()
+  const keys = av.listShapedAbsence.map((u) => u.key)
+  for (const k of ['userFeedback', 'comments']) {
+    assert.ok(keys.includes(k), `${k} 的形状边界必须被登记，否则它会看起来不存在`)
+  }
+  for (const u of av.listShapedAbsence) {
+    assert.deepEqual(u.absentAs, [], '列表形缺席只能表示为空数组')
+    assert.ok(u.why.length > 20 && u.needs.length > 5, `${u.key} 要说清为什么、以及需要什么才能表达`)
+  }
+  // 单值来源**不在**这份清单里（它们有 `missing` 候选这个位置）
+  assert.ok(!keys.includes('teamPlan'), '单值来源缺席有 missing 候选，不属于这条边界')
 })
 
 test('★★ 团队计划与岗位清单**真的从 hub 读得到**（PRT-402 的接线）', async () => {
@@ -405,6 +424,92 @@ test('★ 没有 goalId / role 时**不发那次请求**（不猜 = 不读别人
   assert.ok(!paths.some((p) => p.startsWith('/api/team-plan')), `不该读团队计划：${paths.join(' | ')}`)
   assert.ok(!paths.some((p) => p.startsWith('/api/employee-manifest')), `不该读岗位清单：${paths.join(' | ')}`)
 })
+
+// ── ④c PRT-404：用户反馈（与评论**分开**的一条来源）────────────────────
+test('★★★ 用户反馈**真的从 hub 读得到**，且以 `user-feedback` 而不是 `comment` 进快照', async () => {
+  const scope = 'src-load-feedback'
+  const id = await seedTask({ title: '要被反馈的任务', scope, role: 'coder' })
+  // 同时写一条**普通评论**和一条**用户反馈**——两者的文本刻意不同，
+  // 这样"谁进了哪一类"是可判定的。
+  const c = await post('/api/comment', { id, by: 'coder', text: '同事的一句普通评论', scope })
+  assert.equal(c.status, 200, JSON.stringify(c.body))
+  const fb = await post('/api/comment', { id, by: 'general', text: '用户要求：把导出改成 CSV', kind: 'feedback', scope })
+  assert.equal(fb.status, 200, JSON.stringify(fb.body))
+
+  const loader = createHubSourceLoader({ hub: makeHub(), scope })
+  const src = await loader.loadSources({ taskId: id, scope })
+  // 装载器把反馈读回来了（形状对齐 commentSources）
+  assert.equal(src.userFeedback.length, 1, JSON.stringify(src.userFeedback))
+  assert.equal(src.userFeedback[0].author, 'general')
+  assert.equal(src.userFeedback[0].body, '用户要求：把导出改成 CSV')
+  assert.ok(Number.isFinite(src.userFeedback[0].createdAtMs), '时间要换成 epoch 毫秒')
+  assert.ok(src.userFeedback[0].id.startsWith('c-'), '内容派生的稳定 id')
+
+  // ★ 反馈**不在**评论列表里（结构上分开的两个列）
+  assert.equal(src.comments.length, 1)
+  assert.equal(src.comments[0].body, '同事的一句普通评论')
+
+  // 装配一次：类型必须是 user-feedback，且**只出现一次**
+  const { collectCandidates } = await import('../../runtime/context/sources.mjs')
+  const cands = collectCandidates({ ...src, scope })
+  const fbCands = cands.filter((x) => x.source.type === 'user-feedback')
+  const cCands = cands.filter((x) => x.source.type === 'comment')
+  assert.equal(fbCands.length, 1, `反馈候选应恰好 1 条：${JSON.stringify(cands.map((x) => [x.source.type, x.source.id]))}`)
+  assert.equal(cCands.length, 1, '普通评论候选应恰好 1 条')
+  // 两条候选的 id 不能相同（否则同一份内容在快照里有两个身份）
+  const ids = cands.map((x) => x.source.id)
+  assert.equal(new Set(ids).size, ids.length, `来源 id 必须唯一：${ids.join(' | ')}`)
+  assert.ok(!JSON.stringify(fbCands[0].source.content).includes('同事的一句普通评论'),
+    '反馈的内容里不该混进评论')
+})
+
+test('★★★ 用户反馈**读的是专门那个端点**，不是从任务行里自己挑出来', async () => {
+  // 这条钉的是"不混淆"的**机制**：hub 的任务行上同时有三个批注列
+  // （comments / evidence / feedback），若装载器从 `/api/task` 里自己挑，
+  // 那么"哪一列是用户反馈"就会被复制到每个读点，忘了挑的那一处会把
+  // "同事说了一句话"读成"用户要求调整"。
+  const scope = 'src-load-fbroute'
+  const id = await seedTask({ title: '端点归属', scope, role: 'coder' })
+  await post('/api/comment', { id, by: 'general', text: '一条反馈', kind: 'feedback', scope })
+  const loader = createHubSourceLoader({ hub: makeHub(), scope })
+  await loader.loadSources({ taskId: id, scope })
+  const paths = loader.lastReads().map((r) => r.path.split('?')[0])
+  assert.ok(paths.includes('/api/task-feedback'), `必须读专门端点：${paths.join(' | ')}`)
+})
+
+test('★ 反馈端点：任务不存在 → 404（不是 `{feedback: []}`）', async () => {
+  const res = await fetch(`${base}/api/task-feedback?scope=default&taskId=T-不存在`)
+  assert.equal(res.status, 404)
+  const body = await res.json()
+  assert.equal(body.code, 'TASK_NOT_FOUND')
+})
+
+test('★ 反馈端点：缺 taskId → 400；跨空间问别人空间的 id → 404', async () => {
+  const noId = await fetch(`${base}/api/task-feedback?scope=default`)
+  assert.equal(noId.status, 400)
+  assert.equal((await noId.json()).code, 'MISSING_PARAM')
+
+  const scope = 'src-load-fbscope'
+  const id = await seedTask({ title: '空间校验', scope })
+  await post('/api/comment', { id, by: 'general', text: '反馈', kind: 'feedback', scope })
+  // ★ 任务 id 是全库唯一的，但拿别空间的 id 来问**仍然是一次越权读取**
+  //   （装配是按空间做的）——所以拒绝，而不是照答。
+  const cross = await fetch(`${base}/api/task-feedback?scope=别的空间&taskId=${id}`)
+  assert.equal(cross.status, 404)
+  // 同一空间则答得出来
+  const own = await fetch(`${base}/api/task-feedback?scope=${scope}&taskId=${id}`)
+  assert.equal(own.status, 200)
+  assert.equal((await own.json()).count, 1)
+})
+
+test('★★ 没有 taskId 且 `requireTask: false` 时**不读**反馈端点（不猜）', async () => {
+  const loader = createHubSourceLoader({ hub: makeHub(), scope: SCOPE, requireTask: false })
+  const src = await loader.loadSources({ scope: SCOPE })
+  assert.deepEqual(src.userFeedback, [])
+  const paths = loader.lastReads().map((r) => r.path.split('?')[0])
+  assert.ok(!paths.includes('/api/task-feedback'), `没有 taskId 就不该读：${paths.join(' | ')}`)
+})
+
 
 // ── ④b PRT-402 的**路由参数校验**（探针⑭量出来的缺口）───────────────────
 //

@@ -704,6 +704,23 @@ function ensureColumn(table, column, ddl) {
 function columnExists(table, column) {
   return columnExistsImpl(db, table, column)
 }
+// ★ PRT-404：`feedback` 是**与 `comments` / `evidence` 并列的第三个批注列**，
+//   不是往 `comments` 里加的一个 `kind` 标记。
+//
+//   > 一个"把反馈塞进 comments 数组、加个 kind 字段"的实现，
+//   > 与一个"给它自己的列"的实现，在只看反馈的时候是同一个东西——
+//   > 只不过前者要求**每一个**读 comments 的地方都记得过滤掉它，
+//   > 而漏掉一处就会让同一条反馈同时以"同事的评论"和"用户的反馈"
+//   > 两种身份进模型上下文。
+//
+//   那个漏掉的地方不是假设：装配器正是按 `task.comments` 读评论的
+//   （`sources-loader.mjs` 的 `toComments`）。分成两列之后，"不混淆"这件事
+//   **在结构上**成立，而不是靠每一处读点自觉。
+//
+//   ⚠️ 注意：SQL 的模板字符串里**不能写 `//` 注释**（SQLite 不认），也不能出现
+//   反引号（会把模板字符串截断）。第一版我把上面这段话写进了 CREATE TABLE 里，
+//   `node --check` 当场报 `missing ) after argument list`——那还是**幸运**的：
+//   若那段话里没有反引号，它会变成一段被 SQLite 拒绝的 DDL，而报错发生在**启动期**。
 db.exec(`
   CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
@@ -729,6 +746,7 @@ db.exec(`
     blockedBy TEXT DEFAULT '[]',
     comments TEXT DEFAULT '[]',
     evidence TEXT DEFAULT '[]',
+    feedback TEXT DEFAULT '[]',
     patches TEXT DEFAULT '[]',
     artifacts TEXT DEFAULT '[]',
     slice TEXT,
@@ -1188,6 +1206,9 @@ ensureColumn('tasks', 'fixCount', 'fixCount INTEGER DEFAULT 0')
 ensureColumn('tasks', 'testReport', 'testReport TEXT')
 // 审计批注列（L2 审计工作台）：review_notes JSON = [{ file:'*'|相对路径, verdict:'ok'|'issue', note, by, at }]
 ensureColumn('tasks', 'review_notes', "review_notes TEXT DEFAULT '[]'")
+// PRT-404 用户反馈列：feedback JSON = [{ by, at, text }]。老库幂等补齐。
+// 与 `comments` 分开存（不是加 kind 标记）——理由见 CREATE TABLE tasks 里那段说明。
+ensureColumn('tasks', 'feedback', "feedback TEXT DEFAULT '[]'")
 // 目标归属列（多目标并发）：链任务带 goalId 关联到具体目标（goal 表 id）。
 // 进度/取消按 goalId 统计——不同目标的任务链互不干扰、可并行推进。
 ensureColumn('tasks', 'goalId', 'goalId TEXT')
@@ -1469,6 +1490,14 @@ function rowToTask(row) {
     blockedBy: parseJson(row.blockedBy, []),
     comments: parseJson(row.comments, []),
     evidence: parseJson(row.evidence, []),
+    // PRT-404：任务行把三列都摊开（写入的响应要能回读到自己刚写的那一条）。
+    // ★ 摊开**不等于**会被装配进上下文：`sources.mjs` 的 `taskSource` 用的是
+    //   显式字段白名单（`['id','scope','title','description','status','role',
+    //   'assignee','goalId','createdAtMs','updatedAtMs']`），`feedback` 不在里面；
+    //   而 `comments` 那一栏由装载器的 `toComments(task)` 只读 `task.comments`。
+    //   也就是说"反馈不会被误当成评论"这件事**不靠这里的取舍**，靠的是
+    //   两个来源各自读各自的那一列。这一条的用例在 sources-loader 套件里。
+    feedback: parseJson(row.feedback, []),
     patches: parseJson(row.patches, []),
     artifacts: parseJson(row.artifacts, []),
     slice: row.slice ?? null,
@@ -3687,10 +3716,27 @@ function advanceTask(id, by, ifVersion) {
   })
 }
 
-function commentTask(id, by, text, isEvidence) {
+/**
+ * 往任务的某个批注列追加一条 `{ by, at, text }`。
+ *
+ * 三个列各有各的意思，**不是**同一个东西的三种标签：
+ *   · `comments` —— 同事/同事型智能体的批注（peer 的话）
+ *   · `evidence` —— 验收证据
+ *   · `feedback` —— **用户反馈**（PRT-404）：人说的话，装配时进 `user-feedback` 来源
+ *
+ * ★ 这里**不再**留一个 `commentTask(id, by, text, isEvidence)` 的兼容包装。
+ *   加反馈那一批我确实先写了它，然后把路由改成直接调本函数——包装就成了
+ *   **只有定义、没有调用**的死代码。
+ *
+ *   > 一个"留着给旧调用方用"的兼容包装，
+ *   > 与一个"已经没有任何调用方"的死函数，在现在这一刻是同一个东西——
+ *   > 只不过前者会让下一个人以为还有别的调用方，于是不敢改它的语义。
+ *
+ * @param {'comments'|'evidence'|'feedback'} field
+ */
+function appendTaskNote(id, by, text, field) {
   return withTx(() => {
     const t = getTask(id)
-    const field = isEvidence ? 'evidence' : 'comments'
     const list = parseJson(t[field], [])
     list.push({ by, at: now(), text })
     db.prepare(`UPDATE tasks SET ${field}=?, version=version+1, updatedAt=? WHERE id=?`).run(JSON.stringify(list), now(), id)
@@ -5839,10 +5885,60 @@ async function handle(req, res, stripPrefix) {
         const text = body.text
         if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
         if (typeof text !== 'string' || text.trim().length === 0) throw new Error('缺少参数 text')
-        const task = commentTask(id, by, text.trim(), body.isEvidence === true)
-        audit(by, scope, body.isEvidence === true ? 'evidence' : 'comment', id, {}, task.goalId)
+        // PRT-404：`kind: 'feedback'` 写的是**用户反馈**列，与评论、证据分开存。
+        // 三条路径共用一个写入口是有意的：它们都是"往任务的某个批注列追加一条"，
+        // 分成三个路由只会把同一段校验抄三遍。
+        const kind = body.kind === 'feedback' ? 'feedback' : body.isEvidence === true ? 'evidence' : 'comments'
+        const task = appendTaskNote(id, by, text.trim(), kind)
+        audit(by, scope, kind === 'evidence' ? 'evidence' : kind === 'feedback' ? 'feedback' : 'comment', id, {}, task.goalId)
         return task
       })
+      return
+    }
+    if (req.method === 'GET' && path === '/api/task-feedback') {
+      // PRT-404：用户反馈的**独立读端点**。
+      //
+      // 为什么不是"读 /api/task 然后自己挑"：`/api/task` 回来的是整行任务，
+      // 里面有几个不同性质的批注列（comments / evidence / feedback）。
+      // 让每个消费者自己去挑，等于把"哪一列是用户反馈"这件事复制到每个读点——
+      // 而 PRT-404 全部的意义就是让它**只有一个答案**。
+      //
+      //   > 一个"从任务行里自己挑反馈"的读法，
+      //   > 与一个"问专门那个端点"的读法，在只有一种批注的时候是同一个东西——
+      //   > 只不过前者会在有人忘了挑、顺手把 `comments` 也当反馈时，
+      //   > 把"同事说了一句话"读成"用户要求调整"。
+      const askId = url.searchParams.get('taskId')
+      if (askId === null || askId.trim() === '') {
+        json(res, 400, { ok: false, code: 'MISSING_PARAM', error: '缺少参数 taskId', serverTimeMs: Date.now() })
+        return
+      }
+      const scopeParam = url.searchParams.get('scope')
+      const task = db.prepare('SELECT id, scope, feedback FROM tasks WHERE id = ?').get(askId.trim())
+      if (task === undefined || task === null) {
+        // 404 而不是 `{feedback: []}`：**"任务不存在"与"这个任务没有反馈"是两件事**，
+        // 而一个空数组会让两者在调用方那里长得一样。装配器把 404 翻成 `null`，
+        // 再由 `sources.mjs` 决定这是不是致命。
+        json(res, 404, {
+          ok: false,
+          code: 'TASK_NOT_FOUND',
+          error: `任务 ${askId.trim()} 不存在`,
+          serverTimeMs: Date.now(),
+        })
+        return
+      }
+      // 空间必须对得上：任务 id 是全库唯一的，但拿别空间的 id 来问
+      // 仍然是一次越权读取（装配是**按空间**做的）。调用方给了 scope 就校验。
+      if (scopeParam !== null && scopeParam.trim() !== '' && task.scope !== scopeParam.trim()) {
+        json(res, 404, {
+          ok: false,
+          code: 'TASK_NOT_FOUND',
+          error: `任务 ${askId.trim()} 不在空间 ${scopeParam.trim()} 里`,
+          serverTimeMs: Date.now(),
+        })
+        return
+      }
+      const feedback = parseJson(task.feedback, [])
+      json(res, 200, { ok: true, taskId: task.id, count: feedback.length, feedback, serverTimeMs: Date.now() })
       return
     }
     if (req.method === 'POST' && path === '/api/heartbeat') {

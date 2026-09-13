@@ -1915,6 +1915,27 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-214：approval answerer 插件 × 真 cordis 的 `approval/request` 瀑布。
+      //
+      // 驱动的是 DSH `ApprovalService.decide()` 里那一行**原样的**派发：
+      //   `ctx.waterfall(target, 'approval/request', req, () => 'unavailable')`
+      // 并额外做一条**源码契约检查**（直接读 DSH 的源文件），确认事件名、
+      // 兜底值、以及"`'never'` 在派发之前就决定"这三件事没变。
+      //
+      //   *一个"对着自己抄下来的契约"测的用例，
+      //   与一个"对着真契约"测的用例，在别人改契约那天是同一个东西——
+      //   只不过前者一直是绿的。*
+      //
+      // 这一套的 ★★★★★ 用例是被**断验证逼出来**的：我第一版把"没有投影就 next()"
+      // 测成"结局 == unavailable"，而把它改成"抢答再答不上来"**照样是绿的**——
+      // 因为 DSH 的兜底值也是 unavailable。要区分它们，必须有**一个下游答主在场**。
+      //
+      // 条件套件：需要 DSH_CHECKOUT，逐条 SKIP（不伪造通过）。
+      label: 'approval-answerer（PRT-214：answerer 链 × 真 approval/request 瀑布）',
+      files: ['runtime/dsh-composition/approval-answerer.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-214：enforcement 插件模块的**一致性**用例——对着真 DSH 运行时。
       //
       // 测的全部是**别人的契约**：`ctx.tools.guard()` 是不是真同步、真单调
@@ -2332,6 +2353,8 @@ async function stageTest() {
       // 与 patch-loadable 同理：需要 DSH_CHECKOUT 才推得进 test 清单。
       // 它在环境里跑的是**真 DSH ToolRuntime**，没有检出时逐条 SKIP。
       'runtime/dsh-composition/enforcement-plugin.test.mjs',
+      // 同上：要 DSH_CHECKOUT 里的 cordis 才推得进 test 清单。
+      'runtime/dsh-composition/approval-answerer.test.mjs',
     ])
     const tracked = await exec('git', ['ls-files', '*.test.mjs'], { cwd: ROOT })
     const all = tracked.out.split('\n').map((x) => x.trim()).filter(Boolean)

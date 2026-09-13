@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-13　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **165 套件 / 4469 用例 / 0 fail**（证据 `.ci/prt-214b/`）
+**最近一次全量基线**：2026-09-13　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **166 套件 / 4486 用例 / 0 fail**（证据 `.ci/prt-214c/`）
 （**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数会少）
 —— 以本文件所在提交为准；证据 `.ci/prt-901/`（PRT-901/902 第三方组件清单、SBOM 与商业分发条件那一批）
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
@@ -3457,6 +3457,151 @@
 > `docs/DUAL-WRITE-RACE-evidence/verify-evidence.md`。
 
 ---
+
+## 2026-09-13　PRT-214（三）：approval answerer —— 而且上一批的规划是错的
+
+> 上一批我说"接管 `approval` 必须 `disabled` 掉 base bundle 那一行，否则服务注册冲突"。
+> **那句话是错的。** 读了 DSH 的源码才发现正确的缝合点是别的，而且好得多。
+
+### ★ 更正：不该接管 `ApprovalService`，该**加入 answerer 链**
+
+DSH 的 `ApprovalService`（`packages/interaction/user-approval/src/index.ts`）是
+**策略 + 审计层**，判定本身委托出去：
+
+1. 先按 session 策略判：`'never'` → 直接 `'rejected'`，**不问任何人**（:268）
+2. 再派发瀑布：`ctx.waterfall(target, 'approval/request', req, () => 'unavailable')`（:273）
+3. 把 `approval/asked` + `approval/decided` 这一对**审计事件**写进 session
+
+Legion 该做的是 `ctx.on('approval/request', …)` 加入那条链，
+**不是**取代那个服务。这样：
+
+- **没有服务注册冲突**，base bundle 那一行完全不用动（上一批的 `disabled` 计划作废）；
+- **审计事件仍由 DSH 写**。自己接管就得把那一对事件再写一遍，而写第二遍的东西会与第一遍漂移。
+
+> 一个"自己接管 approval 服务"的实现，
+> 与一个"接进 answerer 链"的实现，在一个人批准之后看起来是同一个东西——
+> 只不过前者的审计事件得靠我们自己再写一遍。
+
+而 `ApprovalOutcome`（DSH）= `'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'`
+= Legion 的 `APPROVAL_OUTCOMES`，**逐字相同**，所以不需要翻译层。
+
+### ⚠️ 撞上一个真实的限制：answerer 拿不到工具参数
+
+DSH 递过来的是（`tools/src/index.ts:1696`）：
+
+    { agent, toolName, callId, reason, signal }
+
+**没有 `arguments`。** 而 team-hub 的权限检查要靠参数算绑定哈希
+（`hashToolArguments`）——没有参数就造不出一次**可被消费**的批准。
+
+> 一个"没有参数也算得出主体"的审批，
+> 与一个"人批了却在执行时不匹配"的审批，在审计里是同一个东西——
+> 只不过前者会让每一次批准都白批。
+
+而 `tools/pre-execute` **拿得到**完整 `exec`（含 `arguments`）。
+于是这两个缝合点必须共享一份状态。本批交付了那份状态：
+
+    pre-execute 行 ──put(callId, 投影)──▶ 【在飞登记簿】 ◀──peek(callId)── answerer 行
+
+### 交付
+
+- **`runtime/dsh-composition/inflight.mjs`（新增）**：进程级在飞登记簿。
+  两行是两个独立的 DSH 补丁行，各自加载自己的模块，ESM 让它们共享同一份实例——
+  这是它们唯一的会合点。有 TTL、有 `clear()`（用例必须能互相隔离）、只放纯数据。
+  **代价写在文件里**：进程级单例是隐藏的全局状态。
+- **`runtime/dsh-composition/plugins/approval-answerer.mjs`（新增）**：
+  `inject: ['approval']`；复用 `createApprovalAnswerer`（两段超时、故障→`unavailable`、
+  闭集外→`unavailable` 都已现成）。它只补一件事：从登记簿取投影。
+- **`runtime/dsh-composition/approval-answerer.test.mjs`（新增，17 例）**：
+  驱动 **DSH 那一行原样的派发**（`ctx.waterfall('approval/request', req, () => 'unavailable')`），
+  外加一条**源码契约检查**——直接读 DSH 源文件，确认事件名、兜底值、
+  以及"`'never'` 在派发之前就决定"这三件事没变。
+
+### ★ 两条要害判据：一条是断验证逼出来的，一条被判成死代码
+
+**① "`next()`" 与 "抢答但答不上来" 必须能被区分开。**
+
+我第一版测"没有投影就 `next()`"是这么断言的：结局 == `'unavailable'`。
+断验证把它改成"抢答，然后因为找不到投影返回 `unavailable`"——**那条用例照样绿**，
+因为 **DSH 自己的兜底值也是 `unavailable`**。
+
+> 一个"让给别人"的实现，
+> 与一个"抢答然后答不上来"的实现，
+> 在**下游没有别人**的时候是同一个东西——
+> 只不过前者不会把好部署弄坏，而后者会。
+
+要区分它们，必须有**一个下游答主在场**，而且它给出的答案与 `unavailable` 不同。
+新增用例：Legion 先注册（瀑布里排前面），下游再挂一个会放行的答主；
+callId 不在登记簿里 → Legion 让路 → 下游放行 → `allowed-once`。
+抢答的实现会在这里给出 `unavailable`。
+**读者注意**：`allowed-once` 是这条用例的关键——它是"下游真的被问到了"的唯一证据。
+
+**② 插件里那层"闭集兜底"是死代码，已删除。**
+
+我第一版在插件里又写了一遍
+`APPROVAL_OUTCOMES.includes(outcome) ? outcome : 'unavailable'`。
+断验证证明它永远触发不了：`createApprovalAnswerer` 已把闭集外归一
+（`enforcement.mjs:543`），DSH 那边还会**再**归一化一次（`:281`）。
+
+> 一个"永远不会执行的兜底"，与一个"根本没有兜底"，
+> 在它能被触发的那一天之前是同一个东西。
+
+保证只该写在一个地方。删掉之后，探针④（把 `enforcement.mjs` 里那一处改成放行）
+**仍然判红**——证明那条保证还是活的，只是不再有第二、第三份副本。
+
+### 断验证（4/4，逐字节还原）
+
+| 探针 | 弄坏什么 | 结果 |
+| --- | --- | --- |
+| ① | 取不到投影改成抢答 | ✅ 红（★★★★★ 那条） |
+| ② | 没 port 改成默默造一个永远拒绝的端口 | ✅ 红 |
+| ③ | TTL 判定改成永不过期 | ✅ 红 |
+| ④ | `enforcement.mjs` 里闭集外 → 放行 | ✅ 红 |
+
+脚本本身也修了一处：原来的循环在锚点找不到时**抛在还原之前**，
+会把源码留在被改坏的状态。已改成 `try/finally` 全局还原——
+断验证脚本必须**即使被杀也**逐字节还原。
+
+### ⚠️ 诚实边界：**PRT-214 仍是 🟡**，而且这一行**故意没有 default 导出**
+
+`plugins/approval-answerer.mjs` **不导出 default**，因此
+`PATCH_LAYER_ROWS` 里这一行**仍然是 `module: null`**。理由不是偷懒：
+
+hard-floor 可以有 `export default createHardFloorPlugin()`，因为静态下限是一个
+**常量**。本行不行：它需要一个接在 team-hub 上的审批端口，而
+**`PatchOptions.config` 是数据，不是函数**——YAML 带不了它。
+
+于是有两条路，都需要先定下来，本模块**不替部署猜**：
+
+  a) 由 `pre-execute` 行（或一个装配函数）在进程内
+     `ctx.plugin(createApprovalAnswererPlugin({ port }))`；
+  b) 给一行装一个**从 config 造 hub 客户端**的 default 导出
+     （需要 `hubBaseUrl` / `scope` / `actor`），而这几个值目前没有权威来源
+     （见下面那条未决问题）。
+
+在没有定下来之前导出一个"会挂载、却因为没端口而什么都不做"的 default，
+正是本批要防的东西——补丁层里会因此多一行"看起来装好了"的行：
+
+> 一个"挂上了、但什么都没接管"的 answerer，
+> 与一个"从来没有被写进补丁层"的 answerer，在组合树上长得一模一样——
+> 只不过前者的文件看起来是装好的。
+
+**但是**：本行现在挂不上去并不会弄坏任何部署——因为"取不到投影就让给别人"
+这条判据就在**这里**，它保证 Legion 不会抢答别人的询问。
+这也是为什么这条判据值得一条 ★★★★★ 用例。
+
+| 行 | 状态 |
+| --- | --- |
+| `legion-enforcement-hard-floor` | ✅ 有模块、已进补丁层、真运行时 10 例全绿 |
+| `legion-enforcement-permission-presets` | ✅ patch-over，已生效 |
+| `legion-enforcement-approval-answerer` | 🟡 模块已写好并验证 17 例，**但刻意无 default**（等装配路径定下来） |
+| `legion-enforcement-pre-execute` | ⬜ `module: null`——**它是在飞登记簿的生产者，也是本行的前置** |
+
+`reconcilePatchLayer()` 仍报两条 `ROW_MISSING`，启动自检仍然拒绝注册（fail closed）。
+补丁层**仍未真的被注入过任何 profile**；员工 agent preset 那一半尚未开始。
+
+**下一轮**：`pre-execute` 行——它有完整 `exec.arguments`，是唯一能造出合法审批主体
+的角色；`put(callId, 投影)` 之后 answerer 那一行的两条判据就都能真跑起来了。
 
 ## 2026-09-13　PRT-214（续）：enforcement 插件模块的第一块——hard-floor 真的挂上了
 

@@ -243,3 +243,14 @@ cannot get property "tools" without inject
 **而接管 `approval` 服务必须用 §1② 的形状**：DSH 的 base bundle 里已经有一行
 提供 `approval`，所以 Legion 那一行必须**同时** `disabled: true` 掉 base 的那一行，
 否则是服务注册冲突。
+
+> ⚠️ **上面这段结论是错的，已在下一批更正。** 读了 DSH 源码才发现：
+> `ApprovalService` 是**策略 + 审计层**，判定委托给 `approval/request` **answerer 链**。
+> Legion 该做的是 `ctx.on('approval/request', …)` **加入那条链**，不是接管服务——
+> 于是根本**没有**服务注册冲突，base 那一行完全不用动。
+> 详见 `PRT-214-approval-answerer.md`。
+>
+> 这条错误值得留着而不是删掉：它当时**读起来完全合理**——
+> "要换掉一个能力就得先关掉旧的"在有服务注册冲突时是对的，
+> 而我是在**还没读那个服务的源码之前**就把它写成了结论。
+

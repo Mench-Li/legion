@@ -270,11 +270,39 @@ test('数据面 + 分类/优先级/跳转：真实审计派生通知，chat:* �
     assert.deepEqual(st1.ids, [maxSeq], '该条进入显式已读集合')
     assert.ok(api.notifyReadState('software').ids.includes(maxSeq), '状态已持久化到本机存储')
     assert.equal(api.countNotifyUnread(raw, 'software'), items.length - 1)
-    // 批量选中所有未读 → 连续区间被压实，游标推进到最高 seq
+    // 批量选中所有未读 → 用户可见的「未读」必须归零。
+    //
+    // ★ 这里**不再断言** `cursor === maxSeq`。第一版这么断言，而它只在
+    //   「可通知的 seq 从 1 到 maxSeq 稠密连续」时成立——那是**种子数据的巧合**，
+    //   不是设计性质。PRT-402 之后 `POST /api/goal` 会多写一行
+    //   `team-plan.freeze` 审计（不是通知项，见 notify 白名单），它落在序列
+    //   **中间**（seq 4），于是压实只走到它前面那一位。
+    //
+    //   > 一个"游标必然推到最高 seq"的断言，
+    //   > 与一个"没有一条**通知项**仍未读"的断言，在审计序列恰好稠密时是同一个东西——
+    //   > 只不过前者会在出现一行"不值得通知的审计"时变红，
+    //   > 而那次变红与用户看得见的东西毫无关系。
     const stBatch = api.markNotifyRead('software', items.map((i) => i.seq))
-    assert.equal(stBatch.cursor, maxSeq, '批量已读全覆盖 → 游标压实推进')
-    assert.deepEqual(stBatch.ids, [], '压实后显式集合清空')
-    assert.equal(api.countNotifyUnread(raw, 'software'), 0, '全部已读后未读为 0')
+    assert.equal(api.countNotifyUnread(raw, 'software'), 0, '批量已读后未读必须为 0（用户可见的口径）')
+    for (const it of items) {
+      assert.ok(it.seq <= stBatch.cursor || stBatch.ids.includes(it.seq),
+        '通知项 seq=' + String(it.seq) + ' 应已读（state=' + JSON.stringify(stBatch) + '）')
+    }
+    // ⚠️ 边界（钉住）：**不值得通知的审计行**会挡住"连续已读游标"。
+    //    `applyMarkRead` 的压实是在 **seq 全空间**上做的（`while (ids.has(cursor+1))`），
+    //    而不可通知的行永远不会进入被标记的集合——所以游标只能停在它们之前。
+    //    用户可见的未读数不受影响（按通知项口径算），但 cursor 不等于最高 seq。
+    const notNotifiable = raw.filter((r) => !items.some((i) => i.seq === r.seq)).map((r) => r.seq)
+    const interior = notNotifiable.filter((s) => s < maxSeq)
+    if (interior.length > 0) {
+      assert.ok(stBatch.cursor < Math.min(...interior),
+        '游标(' + String(stBatch.cursor) + ') 不得越过不可通知的 seq ' + interior.join(','))
+      assert.deepEqual(stBatch.ids, items.filter((i) => i.seq > stBatch.cursor).map((i) => i.seq).sort((a, b) => a - b),
+        '游标之上的通知项落入显式已读集合')
+    } else {
+      assert.equal(stBatch.cursor, maxSeq, '没有中间空洞时游标压实到最高 seq')
+      assert.deepEqual(stBatch.ids, [], '压实后显式集合清空')
+    }
     api.markAllNotifyRead('software', maxSeq)
     assert.equal(store.getItem('legion.notify.read.software'), String(maxSeq), '游标写在本机存储')
 

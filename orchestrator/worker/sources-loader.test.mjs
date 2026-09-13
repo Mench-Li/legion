@@ -486,6 +486,178 @@ test('★ 冻结冲突经 HTTP 是 **409**，且带上 id/version（调用方要
 })
 
 
+test('★★★ 发布目标 → 团队计划被**冻住** → 装载器读得到（PRT-402 的触发点）', async () => {
+  // 这是整批的**端到端链条**：spec 说 TeamPlan 是「目标创建时**冻结**的
+  // 团队、岗位、流水线和能力包组合快照」。读端点、表、装载器都齐了之后，
+  // 唯一还缺的就是那个**时点**——没有任何地方在目标创建时写一份计划。
+  //
+  //   > 一个"读写两端都齐、只是没人写"的数据面，
+  //   > 与一个"根本没有这张表"的数据面，在**第一次运行**的时候是同一个东西——
+  //   > 只不过前者的用例是绿的。
+  const scope = 'src-load-goalfreeze'
+  // 先配编队：链上的阶段由「编队 ∩ 流水线启用岗位」决定，流水线为空时入链 = 编队。
+  for (const role of ['coder', 'tester']) {
+    const r = await post('/api/agents', { scope, by: 'general', role, name: `${role}-甲` })
+    assert.equal(r.status, 200, `配编队失败：${JSON.stringify(r.body)}`)
+  }
+
+  const published = await post('/api/goal', { scope, by: 'general', objective: '把某件事做成' })
+  assert.equal(published.status, 200, `发布目标失败：${JSON.stringify(published.body)}`)
+  // ★ `handleWrite` 把结果包在 `task` 下（`{ok, task:{goal, …}}`），
+  //   不是 `{ok, goal}`。第一版我写的 `body.goal.id` 拿到 undefined，
+  //   而断言说的是"没有返回 goal id"——**看起来像服务端没返回 id**。
+  //   *一个"找错了一层"的断言，与一个"服务端真的没给"的断言，在失败信息上是同一个东西。*
+  const result = published.body?.task
+  const goalId = result?.goal?.id
+  assert.ok(typeof goalId === 'string' && goalId !== '', `发布目标没有返回 goal id：${JSON.stringify(published.body)}`)
+  // 发布响应里要能一眼看到"计划被冻住了、冻的是第几版"
+  assert.equal(result.teamPlan?.id, goalId)
+  assert.equal(result.teamPlan?.version, 1)
+  assert.equal(result.teamPlan?.stages, 2, `阶段数应为 2，响应：${JSON.stringify(result.teamPlan)}`)
+
+  // ★ 冻的是**那一刻的**流水线，而且阶段顺序就是链的顺序
+  const plan = await (await fetch(`${base}/api/team-plan?scope=${scope}&goalId=${encodeURIComponent(goalId)}`)).json()
+  assert.equal(plan.ok, true)
+  assert.equal(plan.plan.id, goalId)
+  assert.equal(plan.plan.version, 1)
+  assert.deepEqual(plan.plan.stages.map((s) => s.role), ['coder', 'tester'])
+  assert.equal(plan.plan.goalId, goalId)
+
+  // ★ 装载器现在读得到它——用它自己的那三个键（scope + goalId）
+  const taskId = await seedTask({ title: '目标下的任务', scope, role: 'coder', goalId })
+  const loader = createHubSourceLoader({ hub: makeHub(), scope })
+  const src = await loader.loadSources({ taskId, scope, role: 'coder' })
+  assert.equal(src.teamPlan?.id, goalId, '装载器必须能读到刚冻住的那一版')
+
+  // 装配一次：它必须在 included 里，而不是 exexcluded 里的 missing
+  const { collectCandidates } = await import('../../runtime/context/sources.mjs')
+  const { assembleContext } = await import('../../runtime/context/assembler.mjs')
+  const { createConservativeTokenizer } = await import('../../runtime/context/tokenizer.mjs')
+  const asm = assembleContext({
+    candidates: collectCandidates({ ...src, scope }),
+    scope,
+    policy: { maxTokens: 100000, canRead: () => true },
+    tokenizer: createConservativeTokenizer(),
+    runId: 'r-goalfreeze', attemptId: 'a-goalfreeze', frozenAtMs: Date.now(),
+  })
+  const included = asm.sources.map((s) => s.id)
+  assert.ok(included.includes(`team-plan:${goalId}`), `团队计划必须在 included 里：${included.join(' | ')}`)
+  assert.ok(!included.some((i) => i.endsWith(':missing')), `不该再有 missing：${included.join(' | ')}`)
+})
+
+test('★★ 冻结之后**改流水线**不会改写已冻住的那一版（历史运行指向的还是当时那一份）', async () => {
+  const scope = 'src-load-frozen2'
+  await post('/api/agents', { scope, by: 'general', role: 'coder', name: 'coder-乙' })
+  const published = await post('/api/goal', { scope, by: 'general', objective: '冻结不可回改' })
+  const goalId = published.body.task.goal.id
+  assert.equal(published.body.task.teamPlan.stages, 1)
+
+  // 目标发布**之后**再加一个人
+  await post('/api/agents', { scope, by: 'general', role: 'tester', name: 'tester-乙' })
+
+  // 已冻住的那一版**一个字段都不变**
+  const plan = await (await fetch(`${base}/api/team-plan?scope=${scope}&goalId=${encodeURIComponent(goalId)}`)).json()
+  assert.equal(plan.plan.version, 1)
+  assert.deepEqual(plan.plan.stages.map((s) => s.role), ['coder'], '冻的是目标创建那一刻的流水线')
+})
+
+test('★★ 计划里**不含用户散文**（否则一句像密钥的正文会让"发布目标"失败）', async () => {
+  // 这条钉的是一个**刻意的设计决定**，不是实现细节：
+  // 计划里放 `objective` 会带来一个没人要的新失败模式——正文里有一句
+  // 长得像密钥的话，`findPlaintextSecrets` 会让**发布目标**失败，
+  // 而真正把正文发给供应商的那条路（目标上下文）一点没变。
+  const scope = 'src-load-noprose'
+  const objective = '把 key: sk-live-abcdefghijklmnopqrstuvwxyz 记进笔记里'
+  const published = await post('/api/goal', { scope, by: 'general', objective })
+  // ★ 发布**成功**——正文里那句像密钥的话不该拦住一个目标的创建
+  assert.equal(published.status, 200, `发布目标不该被正文里的疑似密钥拦住：${JSON.stringify(published.body)}`)
+  const goalId = published.body.task.goal.id
+
+  const plan = await (await fetch(`${base}/api/team-plan?scope=${scope}&goalId=${encodeURIComponent(goalId)}`)).json()
+  // 计划里**没有**那段散文（标题是 id 派生的，note 是固定措辞）
+  assert.ok(!JSON.stringify(plan.plan).includes('sk-live-abcdefghijklmnopqrstuvwxyz'),
+    '目标正文不该出现在团队计划里——它只该走目标来源那一条路')
+  assert.equal(plan.plan.objective, '')
+})
+
+test('★★★ 编队带边界内容 → 岗位清单被写出来 → 装载器读得到（PRT-402 的另一个触发点）', async () => {
+  const scope = 'src-load-manifest'
+  const r = await post('/api/agents', {
+    scope, by: 'general', role: 'reviewer', name: '审查员',
+    responsibilities: ['审代码'], allowedTools: ['read'], deniedTools: ['deploy'],
+    approvalPolicy: 'ask-on-write', limits: { maxTokens: 2048 },
+  })
+  assert.equal(r.status, 200, JSON.stringify(r.body))
+  const ref = r.body?.task?.employeeManifest
+  assert.equal(ref?.role, 'reviewer')
+  assert.equal(ref?.version, 1)
+  assert.equal(ref?.created, true)
+
+  const got = await (await fetch(`${base}/api/employee-manifest?scope=${scope}&role=reviewer`)).json()
+  assert.equal(got.ok, true)
+  assert.deepEqual(got.manifest.deniedTools, ['deploy'])
+  assert.equal(got.manifest.approvalPolicy, 'ask-on-write')
+  assert.deepEqual(got.manifest.limits, { maxTokens: 2048 })
+
+  // 装载器读得到
+  const taskId = await seedTask({ title: '给审查员的任务', scope, role: 'reviewer' })
+  const src = await createHubSourceLoader({ hub: makeHub(), scope }).loadSources({ taskId, scope, role: 'reviewer' })
+  assert.equal(src.employeeManifest?.role, 'reviewer')
+})
+
+test('★★★ 编队**不带**边界内容 → 不写空清单（空 allowedTools 是一条**假规则**）', async () => {
+  // 这条钉的是一个刻意的设计决定：编队记录本来只有 role/name/kind/avatar。
+  // 若替它写一份空清单，`allowedTools: []` 会被模型读成"这个岗位不允许使用
+  // 任何工具"——那是一条它自己编出来的**假规则**，而那句话会改变它的行为。
+  //
+  //   > 一个"没配置就写一份空清单"的实现，与一个"没配置就不写"的实现，
+  //   > 在界面上都显示"没有"——只不过前者会让模型读到一条**假规则**。
+  const scope = 'src-load-nomanifest'
+  const r = await post('/api/agents', { scope, by: 'general', role: 'coder', name: '只有名字' })
+  assert.equal(r.status, 200, JSON.stringify(r.body))
+  assert.equal(r.body.task.employeeManifest, null, '没给边界内容就不该写清单')
+
+  const got = await fetch(`${base}/api/employee-manifest?scope=${scope}&role=coder`)
+  assert.equal(got.status, 404, '不该存在一份空清单')
+
+  // 而"没写"必须在快照里表现为**带原因的 missing**，不是"少一项"
+  const taskId = await seedTask({ title: '没清单的任务', scope, role: 'coder' })
+  const src = await createHubSourceLoader({ hub: makeHub(), scope }).loadSources({ taskId, scope, role: 'coder' })
+  assert.equal(src.employeeManifest, null)
+  assert.ok('employeeManifest' in src)
+})
+
+test('★★ 已有清单时再改编队 → version 递增（边界变更必须改快照哈希）', async () => {
+  const scope = 'src-load-manifest2'
+  const first = await post('/api/agents', {
+    scope, by: 'general', role: 'dev', name: '甲', allowedTools: ['read'],
+  })
+  assert.equal(first.body.task.employeeManifest.version, 1)
+  const second = await post('/api/agents', {
+    scope, by: 'general', role: 'dev', name: '甲改名', allowedTools: ['read', 'write'],
+  })
+  assert.equal(second.body.task.employeeManifest.created, false)
+  assert.equal(second.body.task.employeeManifest.version, 2)
+  const got = await (await fetch(`${base}/api/employee-manifest?scope=${scope}&role=dev`)).json()
+  assert.deepEqual(got.manifest.allowedTools, ['read', 'write'])
+  assert.equal(got.manifest.version, 2)
+})
+
+test('★ 边界内容里带明文密钥 → **拒绝**，且编队那一行也不该被写进去', async () => {
+  // 事务性：清单写失败必须让整次编队变更回滚，否则会出现
+  // "编队里有这个人、但他的清单没有"——那种状态看起来一切正常。
+  const scope = 'src-load-secretagent'
+  const r = await post('/api/agents', {
+    scope, by: 'general', role: 'bad', name: '坏的', limits: { apiKey: 'sk-live-abcdefghijklmnopqrstuvwxyz' },
+  })
+  assert.notEqual(r.status, 200, `带明文密钥的边界内容必须被拒：${JSON.stringify(r.body)}`)
+  assert.equal(r.body.code, 'CONTEXT_SOURCE_PLAINTEXT_SECRET')
+  // 编队那一行也**没有**留下
+  const roster = await (await fetch(`${base}/api/agents?scope=${scope}`)).json()
+  const roles = (roster.agents ?? roster.items ?? roster.roster ?? []).map((a) => a.role)
+  assert.ok(!roles.includes('bad'), `编队里不该有 bad：${JSON.stringify(roles)}`)
+})
+
 test('★ 产物只给引用：正文不装配进来（PRT-405 的预算决定留给调用方）', async () => {
   const id = await seedTask({ title: '任务' })
   const loader = createHubSourceLoader({ hub: makeHub(), scope: SCOPE })

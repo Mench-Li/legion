@@ -23,8 +23,10 @@ import {
   PATCH_LAYER_ROWS,
   reconcilePatchLayer,
 } from './patch-layer.mjs'
-import { PATCH_YAML_PATH, renderPatchYaml } from './render.mjs'
+import { PATCH_YAML_PATH, patchDocument, renderPatchReport, renderPatchYaml } from './render.mjs'
 import { PROBE_ARGV, SELFCHECK_STATES, probeSandbox, startupSelfCheck } from './selfcheck.mjs'
+// PRT-214：文档形状判定。它的字段表逐字取自 DSH 的 PatchOptions 定义。
+import { patchDocumentProblems } from './patch-format.mjs'
 // 修法表：自检里的跨点违规要**说得出**下一步去跑哪个入口，而修法表只有这里（bootstrap）
 // 有——selfcheck 与 enforcement-mapping 都 import 不了它（会成环）。
 import { REPAIR_ACTIONS } from './bootstrap.mjs'
@@ -154,17 +156,83 @@ test('渲染：YAML 与声明一致（声明改了而 YAML 未重新生成 → �
 test('渲染：YAML 含 Legion 两个 preset，且**没有任何** sandbox 取值是 danger-full-access', () => {
   const text = renderPatchYaml()
   for (const name of Object.keys(LEGION_PERMISSION_PRESETS)) assert.match(text, new RegExp(name))
-  for (const row of PATCH_LAYER_ROWS) assert.match(text, new RegExp(row.id))
+
+  // ★ 声明里的行**不一定**在文件里：模块不存在的行刻意不写进去（见 render.mjs 头部）。
+  //   所以这里断言的是**文档里实际有的行**，而"哪些行没进文档"由下一条用例盯。
+  for (const id of renderPatchReport().renderedRowIds) assert.match(text, new RegExp(id))
 
   // 只检查**生效的配置值**，不检查散文。
   // 注释里出现 `danger-full-access` 是刻意的（说明为什么不用 DSH 默认表）；
   // 整段正则匹配会把这条解释判成违规，于是要么删掉解释、要么放松断言 —— 两者都是倒退。
-  const sandboxValues = [...text.matchAll(/^\s*sandbox:\s*(\S+)\s*$/gm)].map((m) => m[1])
+  //
+  // ★ 必须**去掉引号**再比。生成器给所有字符串加双引号（`sandbox: "workspace-write"`），
+  //   于是 `(\S+)` 拿到的是 `"workspace-write"`，而它与 `'danger-full-access'`
+  //   永远不相等 —— 这个断言会**恒真**，连真的写成 `sandbox: "danger-full-access"`
+  //   也拦不住。
+  //
+  //     > 一个"因为值带了引号而永远不相等"的危险档位检查，
+  //     > 与一个"根本没有这个检查"的补丁层，在用例上是同一个东西。
+  const sandboxValues = [...text.matchAll(/^\s*sandbox:\s*(\S+)\s*$/gm)]
+    .map((m) => m[1].replace(/^["']|["']$/g, ''))
   assert.ok(sandboxValues.length > 0, '至少要有一个 sandbox 取值，否则这个断言什么都没检查')
   assert.ok(
     sandboxValues.every((v) => v !== 'danger-full-access'),
     `补丁层不得引入全盘访问档位，实际取值：${sandboxValues.join(', ')}`,
   )
+  // 并且必须至少真的读到过一个**非空**值，否则上面的 every 又是恒真
+  assert.ok(sandboxValues.every((v) => v.length > 0), 'sandbox 取值不该是空串')
+})
+
+test('★★★ 渲染：声明了而**没进文档**的行必须被报出来，不能只写在注释里', () => {
+  // 这条是 PRT-214 的核心判据。此前"补丁层不完整"只存在于注释里，
+  // 而注释不会被任何判据读 —— 于是"补丁层已就绪"可以一直是绿的。
+  const report = renderPatchReport()
+
+  assert.equal(report.declaredRowIds.length, PATCH_LAYER_ROWS.length)
+  for (const row of PATCH_LAYER_ROWS) assert.ok(report.declaredRowIds.includes(row.id))
+
+  // 文档里不得出现**造不出来**的行 id —— 那是"看起来装好了"的原型
+  for (const u of report.unbuildable) {
+    assert.ok(!report.renderedRowIds.includes(u.id),
+      `行 ${u.id} 被报成造不出来，却又出现在文档里`)
+    assert.equal(u.code, 'PATCH_DOCUMENT_ROW_MODULE_MISSING')
+    assert.match(u.detail, /warn-and-skip/, '理由必须说清后果是静默跳过，而不是"暂时没装"')
+  }
+
+  // complete 必须与 unbuildable 一致，且**当前**应为 false（三个模块还没有）
+  assert.equal(report.complete, report.unbuildable.length === 0)
+  assert.equal(report.complete, false,
+    '★ 三个 enforcement 模块尚不存在，这一层现在**必须是**不完整的；' +
+    '如果这条红了，说明你补上了模块——那很好，请把这条断言连同 PRT-214 的状态一起改掉')
+
+  // 而且缺的正是那三个 enforcement 行
+  assert.deepEqual(
+    report.unbuildable.map((u) => u.id).sort(),
+    ['legion-enforcement-approval-answerer', 'legion-enforcement-hard-floor', 'legion-enforcement-pre-execute'],
+  )
+})
+
+test('★★ 渲染：文档必须能被 DSH 加载（形状检查），且**不含**会静默失效的形状', () => {
+  // 这条把"生成"与"能加载"钉在一起。旧用例只断言"磁盘 == render 输出"，
+  // 也就是生成物与自己的声明一致 —— 从来没有让任何解析器读过它。
+  const doc = patchDocument().document
+  assert.deepEqual(patchDocumentProblems(doc), [], '生成出来的文档通不过自己的形状检查')
+
+  // ★ `insert` 与 `id` 同时出现 = DSH 读作「插进那一行的 config 数组」，
+  //   要求那一行已存在且是 group。实测（真 applyEntryPatches）靶子不存在或不
+  //   是 group 时都是 warn-and-skip —— 文件看起来装好了，而那一行什么也没做。
+  for (const entry of doc) {
+    assert.ok(!('insert' in entry && 'id' in entry),
+      `第 ${entry.id} 项同时带 id 与 insert —— 会被 warn-and-skip`)
+  }
+  // `plane` 不是 PatchOptions 的字段，写进文件会被**静默忽略**
+  for (const entry of doc) assert.ok(!('plane' in entry), 'plane 不是 PatchOptions 的字段')
+
+  // patch-over 那一条必须带 config（替换整个 config），而不是 insert
+  const over = doc.filter((e) => e.id === 'permission')
+  assert.equal(over.length, 1, '应恰有一条针对 permission 行的 patch-over')
+  assert.ok('config' in over[0])
+  assert.deepEqual(Object.keys(over[0].config.presets).sort(), ['legion-attended', 'legion-unattended'])
 })
 
 test('渲染：YAML 的注释提到 danger-full-access 是为了解释**为什么不采用它**', () => {

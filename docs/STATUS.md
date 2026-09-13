@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-13　`run-ci`（**8 个阶段全 PASS**）；其中 `test` **162 套件 / 4428 用例 / 0 fail**（证据 `.ci/prt-212/`）
+**最近一次全量基线**：2026-09-13　`run-ci`（**8 个阶段全 PASS**）；其中 `test` **164 套件 / 4457 用例 / 0 fail**（证据 `.ci/prt-214/`）
 （**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数会少）
 —— 以本文件所在提交为准；证据 `.ci/prt-901/`（PRT-901/902 第三方组件清单、SBOM 与商业分发条件那一批）
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
@@ -3457,6 +3457,111 @@
 > `docs/DUAL-WRITE-RACE-evidence/verify-evidence.md`。
 
 ---
+
+## 2026-09-13　PRT-214：补丁层的格式——让 DSH 真的能读它
+
+> 前一条进展里"生成物 `legion-host.patch.yml` 已就绪"这句话是**错的**。
+> 它当时根本不能被 DSH 加载。
+
+### 三处硬伤（用真解析器读出来的）
+
+| # | 此前生成的样子 | DSH 实际会怎样 |
+| --- | --- | --- |
+| ① | 顶层是**映射**（`patch:` / `permission:`） | `parsePatchList` 直接抛：`must be a top-level YAML array of entries` |
+| ② | `insert: after:tools` —— insert 是**字符串** | `applyEntryPatches` 对它调 `.forEach` → TypeError |
+| ③ | `plane: host` | **不报错**，静默忽略（`PatchOptions` 有索引签名） |
+
+第 ③ 条最危险：另外两条至少会响。
+
+> 一个会被静默忽略的字段，与一个不存在的字段，在组合树上没有任何区别——
+> 只不过前者的文件里写着它。
+
+### 为什么仓库用例看不见
+
+`composition.test.mjs` 断言的是「磁盘 YAML == `renderPatchYaml()`」——
+生成物与自己的声明一致。那个断言是真的，也一直绿着。
+
+> 一个"与自己的声明完全一致"的补丁层，与一个"能被 DSH 加载"的补丁层，
+> 在用例上是同一个东西——只不过前者的用例是绿的，而它从未被任何解析器读过。
+
+### ★ 坑中之坑：`insert` 与 `id` 同时出现
+
+修格式时第一版把每行渲染成 `{id: <自己的行 id>, insert: [...]}`。看起来正常，实测：
+
+```
+patch insert: entry "legion-enforcement-hard-floor" not found
+```
+
+**DSH 的解释不是"给这次插入取个 id"**，而是「插进 **`id` 那一行**的 config 数组」，
+要求那一行**已存在**且 `group: true`。三种形状实测：
+
+| 形状 | 语义 | 打不中时 |
+| --- | --- | --- |
+| `{ insert: [...] }` | 追加到**根** | — |
+| `{ id, config }` | **替换**那一行的整个 config | `patch: entry "X" not found` |
+| `{ id, insert: [...] }` | 插进那一行的 **config 数组** | `not found` / `is not a group` |
+
+三种都**不抛**，只 warn-and-skip。
+
+> 一个"能被 DSH 接受、然后被 warn-and-skip 掉"的补丁行，
+> 与一个"从未被写进补丁层"的补丁行，在组合树里长得一模一样——
+> 只不过前者的文件看起来是装好的。
+
+**顺带结论**：`mount.after` 在 DSH 里**不存在**，行顺序也不携带加载语义
+（base bundle 注释写明 `activation is service-availability driven`）。
+把它字面翻译成 `{id: 'tools', insert: [...]}` 就是上表第三种，而 `tools` 不是 group
+→ 静默失效。所以 `after` 只作阅读提示留在声明里。
+
+### 交付
+
+- **`patch-format.mjs`（新增）**：生成器 + 形状检查器。判据逐字取自 DSH 的
+  `PatchOptions` 定义与 `parsePatchList` 的实际断言。拦 9 类问题，其中 4 类
+  （`UNKNOWN_KEY` / `INSERT_WITH_TARGET_ID` / `INSERT_ENTRY_NO_NAME` / `ROW_MODULE_MISSING`）
+  是"DSH 不会报错"的那种。字符串**一律**印成双引号标量 → `!!js` 注入靠
+  **结构**关掉（没有路径能产出裸标量），不是靠一个判据。
+- **`render.mjs` 重写**：只管"翻文档 + 印文本"。新增 `renderPatchReport()`，
+  不完整时 CLI **exit 3**。"这一层不完整"以前只写在注释里，而注释不会被任何判据读。
+- **`patch-layer.mjs` 加 `module` 字段**：三个 enforcement 行 `null` →
+  **刻意不写进文件**（没有 `name` 的 insert 项会被 warn-and-skip）。
+  **缺行比假行好**：缺行由 `reconcilePatchLayer()` 报 `ROW_MISSING`，自检 fail closed。
+- **新增 `patch-format` 套件（19 例）** 与 **`patch-loadable` 条件套件（8 例）**。
+- **修正 `composition.test.mjs` 一条恒真检查**：加引号后 `(\S+)` 拿到
+  `"workspace-write"`，与 `'danger-full-access'` 永不相等。
+  *一个"因为值带了引号而永远不相等"的危险档位检查，与一个"根本没有这个检查"的补丁层，
+  在用例上是同一个东西。*
+
+### 验证
+
+- **真 DSH 管线端到端**：真 `js-yaml` + 真 `entryListSchema` + 真 `applyEntryPatches`；
+  先应用 **DSH 自己的 base bundle 补丁**（84 行、0 警告），再叠 Legion 层 →
+  **0 警告** → `permission` 行 presets 替换为 `legion-attended`/`legion-unattended`，
+  DSH 默认的 `danger-full-access` 档位**消失**。
+- **带对照**：会静默失效的三种形状**真的**会 warn-and-skip，
+  且断言了"那一行根本没被插进去"——否则"零警告"是一个恒不报警的读数。
+- 还证明**模块齐备时**插入路径真的能把三个 enforcement 行插进树里：否则等模块写好的那天，
+  我们只是在**同一个从未跑过的插入路径**上填了名字。
+- 六道门禁全 PASS；`patch-loadable` 无 `DSH_CHECKOUT` 时逐条 SKIP（摘要留 `skipped: N`）。
+
+### ⚠️ 诚实边界：**PRT-214 仍是 🟡**
+
+本批修好的是**格式与可加载性**——一份以前根本读不了的文件，现在能被真管线读了。
+但**这一层仍然是空的**：三个 enforcement 插件模块（`hard-floor` / `pre-execute` /
+`approval-answerer`）不存在，因此补丁层目前只做一件事——替换 permission preset 表；
+`reconcilePatchLayer()` 报三条 `ROW_MISSING`，启动自检拒绝注册（**有意的** fail closed）。
+补丁层**从未真的被注入过任何 profile**（profile 层 `patchReload: live`，
+写入会立刻改变运行中的强制面）。**员工 agent preset 那一半尚未开始。**
+
+### 过程待办
+
+`scripts/ci/run-ci.mjs` 没有任何门禁解析它。改坏它会让**整条 CI 无法运行**，
+而 6 道门禁**全部照旧绿灯**：
+
+> 一个"改坏了 CI 运行器、而门禁全绿"的提交，
+> 与一个"改坏了 CI 运行器、并且被拦下"的提交，在门禁日志上长得一模一样。
+
+本轮又踩了一次（同一处插入手法第三次吃掉下一个块的 `{`）。纪律是每次编辑后
+`node --check`；**结构性修法**（把 `node --check scripts/ci/*.mjs` 变成一道门禁）
+尚未落地，记在这里。
 
 ## 2026-09-13　PRT-212：审批 answerer 接上 team-hub 审批箱（**生产者半边**）
 

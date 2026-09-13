@@ -80,6 +80,21 @@ export const LEGION_ROW_PREFIX = 'legion-enforcement-'
  *
  * `anchor` 是 patch 目标：`insert` 表示新增行，`patch-over` 表示按 id 覆盖既有行
  * （DSH 的 patch 语义：**替换目标行的整个 config**，而不是合并进去）。
+ *
+ * ## ★ `module` 字段（PRT-214 补记）
+ *
+ * `insert` 在 DSH 的 `PatchOptions` 里是 **`EntryOptions[]`**，而一个
+ * `EntryOptions` 必须带 `name`（要加载的模块）。DSH 对**匹配不到任何东西**的
+ * 补丁行是 **warn-and-skip**：它不会报错，只是什么也不做。
+ *
+ *   > 一个"能被 DSH 接受、然后被 warn-and-skip 掉"的补丁行，
+ *   > 与一个"从未被写进补丁层"的补丁行，在组合树里长得一模一样——
+ *   > 只不过前者的文件看起来是装好的。
+ *
+ * 所以每一行**显式**记下自己的模块。`null` 的意思是"这个模块还不存在"，
+ * 于是 `toPatchDocument()` 会把这一行归到 `unbuildable` 而不是造一个
+ * 加载不了的空壳。这个字段让"PRT-214 没做完"变成一件**机械可查**的事，
+ * 而不是一句散文。
  */
 export const PATCH_LAYER_ROWS = Object.freeze([
   Object.freeze({
@@ -91,6 +106,8 @@ export const PATCH_LAYER_ROWS = Object.freeze([
     // 依据 §6.8：guard 只有降级语义、没有 allow 语义。
     // 因此这一行**永远不能**成为唯一防线 —— 它只负责「不可能被说成可以」的那部分。
     registrations: Object.freeze(['ctx.tools.guard']),
+    // ⚠️ 还没有这个模块。见上面 `module` 的说明。
+    module: null,
   }),
   Object.freeze({
     id: `${LEGION_ROW_PREFIX}pre-execute`,
@@ -99,6 +116,8 @@ export const PATCH_LAYER_ROWS = Object.freeze([
     purpose: '动态 allow / deny / ask，team-hub 不可达或策略异常时 deny（fail closed）',
     mount: Object.freeze({ anchor: 'insert', after: 'tools' }),
     registrations: Object.freeze(["ctx.on('tools/pre-execute')"]),
+    // ⚠️ 还没有这个模块。见上面 `module` 的说明。
+    module: null,
   }),
   Object.freeze({
     id: `${LEGION_ROW_PREFIX}approval-answerer`,
@@ -107,6 +126,8 @@ export const PATCH_LAYER_ROWS = Object.freeze([
     purpose: '把审批请求写入审批箱；只有 allowed-once 执行；双段超时 fail closed',
     mount: Object.freeze({ anchor: 'insert', after: 'approval' }),
     registrations: Object.freeze(["ctx.on('approval/request')"]),
+    // ⚠️ 还没有这个模块。见上面 `module` 的说明。
+    module: null,
   }),
   Object.freeze({
     id: `${LEGION_ROW_PREFIX}permission-presets`,
@@ -115,6 +136,8 @@ export const PATCH_LAYER_ROWS = Object.freeze([
     purpose: '用 Legion 自有 preset 表**替换** DSH 默认表（不合并）',
     mount: Object.freeze({ anchor: 'patch-over', target: 'permission' }),
     registrations: Object.freeze(['config.presets']),
+    // patch-over **不需要**模块：它按 id 覆盖既有行的 config（`permission` 行本来就在）。
+    module: null,
   }),
 ])
 

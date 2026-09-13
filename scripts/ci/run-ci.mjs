@@ -1915,6 +1915,27 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-214：补丁文档的**形状**与 YAML 生成器（不连 DSH）。
+      //
+      // 为什么值得单独一套：补丁层的落盘形式此前是一个**自由格式的散文文件**，
+      // 而 DSH 对它的要求是硬的——顶层数组、`insert: EntryOptions[]`、
+      // 字段名必须在 `PatchOptions` 里。仓库此前的用例只断言
+      // 「磁盘上的 YAML == renderPatchYaml()」，也就是**生成物与自己的声明一致**：
+      //
+      //   *一个"与自己的声明完全一致"的补丁层，
+      //   与一个"能被 DSH 加载"的补丁层，在用例上是同一个东西——
+      //   只不过前者的用例是绿的，而它从未被任何解析器读过。*
+      //
+      // 本套件守的是 `patch-format.mjs` 自己的判据，其中最要紧的一条是
+      // **每个拒绝码都够得着**：一个写了却永远触发不了的分支，与一个不存在的分支，
+      // 在"它到底拦住了什么"上是同一个东西。
+      //
+      // 真管线那一半在 `patch-loadable.test.mjs`（条件套件，需 DSH_CHECKOUT）。
+      label: 'patch-format（PRT-214：补丁文档形状检查与 YAML 生成）',
+      files: ['runtime/dsh-composition/patch-format.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-212：把工具调用投影送进 team-hub 审批箱，并把人/策略的决定带回来。
       //
       // 为什么值得单独一套：`createApprovalAnswerer`（阶段期限、`unavailable` vs
@@ -2209,6 +2230,30 @@ async function stageTest() {
     }
     suites.push({ label: 'board-plugin（宿主 HTTP 契约回归）', files: readdirSync(join(ROOT, 'board-plugin', 'tests')).filter(f => f.endsWith('.test.mjs')).map(f => join('board-plugin', 'tests', f)), cwd: ROOT })
     detail.push('  PASS board-plugin build（DSH_CHECKOUT=' + dsh + '）')
+    // PRT-214：补丁层的**可加载性**——让真的 DSH 管线去读 legion-host.patch.yml。
+    //
+    // 为什么它必须用真 DSH 而不是本仓库的判据：这条线的每一个事实都是**别人的**——
+    // 顶层要数组、schema 是 js-yaml 的 `entryListSchema`、`insert` 必须是
+    // `EntryOptions[]`、`insert` 与 `id` 同时出现时语义变成"插进那一行的 config 数组"。
+    // 实测（真 `applyEntryPatches`）确认：拿 Legion 自己的行 id 当 insert 靶子会得到
+    // `patch insert: entry "..." not found` → **warn-and-skip，什么都不发生、也不抛**。
+    //
+    //   *一个"与自己的声明完全一致"的补丁层，
+    //   与一个"能被 DSH 加载"的补丁层，在用例上是同一个东西——
+    //   只不过前者的用例是绿的，而它从未被任何解析器读过。*
+    //
+    // 因此本套件跑真管线（真 js-yaml + 真 schema + 真 applyEntryPatches），
+    // 而且 base 不是手编的：先应用 **DSH 自己的 base bundle 补丁**，再叠 Legion 这一层——
+    // 那正是 profile 层在运行时的真实位置。
+    //
+    // 没有可用 DSH_CHECKOUT 时整组逐条 SKIP（摘要里留下 `skipped: N`），
+    // 与 plugins/board-plugin 同一纪律：外部宿主测试不伪造通过。
+    suites.push({
+      label: 'patch-loadable（PRT-214：补丁层可加载性，真 DSH 管线）',
+      files: ['runtime/dsh-composition/patch-loadable.test.mjs'],
+      cwd: ROOT,
+    })
+    detail.push('  PASS patch-loadable（真 DSH 管线读 legion-host.patch.yml）')
   } else {
     detail.push('  SKIP plugins/board-plugin（未配置可用 DSH_CHECKOUT；外部宿主测试不伪造通过）')
   }
@@ -2255,11 +2300,21 @@ async function stageTest() {
     //
     //   本检查问的是**归属**（有没有人负责跑它），不是**这一次跑没跑**（那是 SKIP 的语义）。
     const conditionalDirs = ['plugins/tests/', 'board-plugin/tests/']
+    // ★ 单个**有条件**的文件（不是整个目录）：PRT-214 的可加载性套件只在
+    //   DSH_CHECKOUT 可用时才 push 进 `suites`，但它**有归属**。
+    //
+    //   条目形状要动整个目录吗？不要。`runtime/dsh-composition/` 下面还有一堆
+    //   无条件套件，把整个目录列进来会顺手放过**真的**漏登记的新文件——
+    //   而那个漏登记正是本检查存在的唯一理由。
+    const conditionalFiles = new Set([
+      'runtime/dsh-composition/patch-loadable.test.mjs',
+    ])
     const tracked = await exec('git', ['ls-files', '*.test.mjs'], { cwd: ROOT })
     const all = tracked.out.split('\n').map((x) => x.trim()).filter(Boolean)
     const missing = all
       .filter((f) => !listed.has(f))
       .filter((f) => !conditionalDirs.some((d) => f.startsWith(d)))
+      .filter((f) => !conditionalFiles.has(f))
       .filter((f) => !EXEMPT.has(f))
     if (missing.length > 0) {
       const listing = missing.map((f) => `      ${f}`).join('\n')

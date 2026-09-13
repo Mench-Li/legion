@@ -136,9 +136,18 @@ export function createHubClient({ baseUrl, token, fetchImpl = globalThis.fetch, 
   }
   const root = baseUrl.replace(/\/+$/, '')
 
-  async function call(path, body) {
+  /**
+   * 带 body 的写请求。`method` 是参数而不是写死 POST——因为 hub 的模型档案
+   * 更新端点是 `PATCH`/`PUT`（乐观锁 `version` 在 body 里），而"用一个 POST
+   * 打过去"得到的不是 405 就是一条落到别处的路由。
+   *
+   *   > 一个"只会发 POST"的 hub 客户端，与一个"能发 PATCH"的客户端，
+   *   > 在只读场景里是同一个东西——只不过前者会在第一次要改一份已有配置时，
+   *   > 报出一个与"要改配置"毫无关系的错。
+   */
+  async function send(method, path, body) {
     const res = await fetchImpl(`${root}${path}`, {
-      method: 'POST',
+      method,
       headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
       body: JSON.stringify(body),
       signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(timeoutMs) : undefined,
@@ -153,6 +162,9 @@ export function createHubClient({ baseUrl, token, fetchImpl = globalThis.fetch, 
     }
     return payload
   }
+
+  const call = (path, body) => send('POST', path, body)
+  const patch = (path, body) => send('PATCH', path, body)
 
   /**
    * GET 一个读端点（PRT-402~406 的来源装配需要读面）。
@@ -183,6 +195,15 @@ export function createHubClient({ baseUrl, token, fetchImpl = globalThis.fetch, 
   return Object.freeze({
     /** 读一个 GET 端点。见上面的注释：404 与"读失败"必须能被调用方分开。 */
     read,
+    /** POST 一个写端点。 */
+    call,
+    /**
+     * PATCH 一个写端点（乐观锁更新，`version` 在 body 里）。
+     *
+     * 与 `call` 分开暴露而不是让调用方选 method：hub 上"改一份已有的东西"与
+     * "新建一份东西"是两组语义不同的端点，调用方该说的是它要**做哪件事**。
+     */
+    patch,
     /** 领取。返回**解包后**的 claim 对象，或 null（队列空 / 抢输了）。 */
     async claim({ workerId, scope = null, leaseTtlMs = null }) {
       const r = await call('/api/runtime/claim', { workerId, scope, leaseTtlMs })

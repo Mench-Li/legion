@@ -129,6 +129,24 @@ export const SCHEMA = defineSchema({
     'DSH_OVERLAY_NO_INSTALL_DIR',
     'DSH_OVERLAY_DISABLED_BY_CONFIG',
 
+    // ── PRT-707 首次运行向导**接线层**的诊断码 ──────────────────────────
+    //
+    // `product/launcher/first-run.mjs` 的 `FIRST_RUN_CODES` 的值。名字是
+    // SCREAMING_SNAKE，所以 scan 会怀疑它们是环境变量——它们不是：
+    // 进程不"读"它们，而是把它们放进诊断给用户看。
+    //
+    // ★ 这里**只有四条**，而第一版我写了八条。被 scan 抓出来之后去数了一遍
+    //   引用：另外四条（`NO_LAYOUT`/`NO_HUB`/`BAD_MODEL_INPUT`/
+    //   `NO_ENVIRONMENT_PROBE`）**一次都没被引用过**——前提不成立走的是
+    //   `firstRunPreconditions` 的 `key`，输入非法走的是 `message`。
+    //   处置是**删掉那四条**，不是把它们也登记进来：
+    //   一个导出但永远不会产生的码，与"这条路径已经覆盖了"的宣告，
+    //   在读代码时是同一个东西——只不过运维会照着它去 grep，然后什么也找不到。
+    'FIRST_RUN_SECRETS_UNAVAILABLE',
+    'FIRST_RUN_SECRET_WRITE_FAILED',
+    'FIRST_RUN_PROFILE_WRITE_FAILED',
+    'FIRST_RUN_BINDING_WRITE_FAILED',
+
     // ── PRT-907 支持手册引用的**具名错误码** ────────────────────────────
     //
     // `product/support/runbook.mjs` 的手册正文里引用了这两个错误码，用来把

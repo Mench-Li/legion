@@ -133,6 +133,34 @@ export function createWizard({
   isModelConfigured = null,
   // **独立观测**：返回 {runtimeState, modelResolved, detail?}
   observe = null,
+  // ── 前提（PRT-707 接线批新增）────────────────────────────────────────────
+  //
+  // 在**第一步之前**必须成立的事。`null` = 没有前提。
+  //
+  // 可以是静态数组 `[{key, message}]`，也可以是一个函数
+  // （同步或异步）返回 `{ok, unmet:[{key,message}]}`。
+  //
+  // ## 为什么是"第一步之前"，而不是"某一步的一部分"
+  //
+  // 前提不成立时的症状，通常会在**第三步**才以另一个面孔出现：
+  // 没有 hub 凭证 → `configure-model` 写不进模型档案 → 到 `verify` 报
+  // "模型没有通过解析"。用户顺着这句话去查自己的 API key，
+  // 而 key 本来是对的。
+  //
+  //   > 一个"先跑第一步、再在第三步发现前提不成立"的向导，
+  //   > 与一个"在第一步之前就说清前提不成立"的向导，
+  //   > 在最终都报"没配好"这件事上是同一个东西——
+  //   > 只不过前者会让人去改一个本来没错的东西。
+  //
+  // ## 三条判定纪律
+  //
+  // ① **每次 `run()` 都重查**，不缓存结论。用户就是去把 hub 打开、把 token 配上
+  //    然后再点一次的——缓存住第一次的结论等于让他重启向导。
+  // ② 前提函数**抛错一律算不成立**（同 `isModelConfigured` 的纪律）：
+  //    一个"判断前提时出错就放行"的实现，等于没有前提。
+  // ③ 前提不成立时**一步都不跑**，所以 `initialize` 不会去建目录、
+  //    `start` 不会去拉进程——"还没开始"与"开始到一半失败"要能被区分。
+  preconditions = null,
   // 状态持久化
   stateFile = null,
   fs = null,
@@ -215,6 +243,57 @@ export function createWizard({
       return { ok: false, message: `这一步没有配置动作（${id}）` }
     }
     return fn()
+  }
+
+  /** 上一次算出来的前提结论；`status()` 同步地报它。 */
+  let lastPrecondition = null
+
+  /**
+   * 算前提。**任何异常都算不成立**——理由同 `isModelConfigured`：
+   * 一个"判断前提时出错就放行"的实现，等于没有前提。
+   *
+   * 没配 `preconditions` 时返回成立（`unmet: []`），于是这一批新增的机制
+   * 对既有调用方是**零影响**的。
+   */
+  async function checkPreconditions() {
+    if (preconditions === null || preconditions === undefined) {
+      return Object.freeze({ ok: true, unmet: Object.freeze([]) })
+    }
+    let raw = null
+    try {
+      raw = typeof preconditions === 'function' ? await preconditions() : preconditions
+    } catch (e) {
+      return Object.freeze({
+        ok: false,
+        unmet: Object.freeze([Object.freeze({
+          key: 'precondition-error',
+          message: `判断前提时出错，按不成立处理：${String(e?.message ?? e)}`,
+        })]),
+      })
+    }
+    // 静态数组形态：`[{key, message}]`，空数组 = 成立。
+    const list = Array.isArray(raw) ? raw : (Array.isArray(raw?.unmet) ? raw.unmet : null)
+    if (list === null) {
+      return Object.freeze({
+        ok: false,
+        unmet: Object.freeze([Object.freeze({
+          key: 'precondition-shape',
+          message: '前提判断没有返回可判读的结果（要 `{ok, unmet}` 或 `[{key,message}]`），按不成立处理',
+        })]),
+      })
+    }
+    const unmet = list
+      .filter((u) => u !== null && u !== undefined)
+      .map((u) => Object.freeze({
+        key: typeof u?.key === 'string' && u.key !== '' ? u.key : 'unnamed',
+        message: typeof u?.message === 'string' && u.message !== '' ? u.message : '前提不成立（没有说明）',
+      }))
+    // 显式 `ok:true` 与"空 unmet 列表"都算成立；`ok:false` 但 unmet 为空时
+    // 也要报出来——"说不成立却不说为什么"不能静默变成成立。
+    if (raw !== null && typeof raw === 'object' && !Array.isArray(raw) && raw.ok === false && unmet.length === 0) {
+      unmet.push(Object.freeze({ key: 'unnamed', message: '前提判断说不成立，但没有说明原因' }))
+    }
+    return Object.freeze({ ok: unmet.length === 0, unmet: Object.freeze(unmet) })
   }
 
   /** `verify`：**独立观测**，不是汇总前面的返回值。 */
@@ -349,7 +428,16 @@ export function createWizard({
           : null
     let r = null
     try {
-      r = runAutomatic(current, fn)
+      // ★ **必须 await。** 第一版这里没有 await，于是任何一个 async 的自动动作
+      // 都会让 `r` 是一个 Promise：`r?.ok !== true` 对它成立，每一步都被报成
+      // "没有成功"，而真正的失败原因（`r.message`）永远读不到——报出来的是
+      // `blockingReason` 那句写死的文案。
+      //
+      //   > 一个"支持异步动作"的向导，与一个"只在动作恰好同步时才对"的向导，
+      //   > 在动作都很小的时候是同一个东西——只不过后者会在接入真实模块
+      //   > （`initializeProductDir`、`launcher.start()` 几乎都是异步的）那一天，
+      //   > 把每一步都报成失败，还说不出为什么。
+      r = await runAutomatic(current, fn)
     } catch (e) {
       const m = `${def.title}失败：${String(e?.message ?? e)}`
       note('error', WIZARD_CODES.STEP_FAILED, m)
@@ -381,6 +469,24 @@ export function createWizard({
     async run({ maxSteps = WIZARD_STEP_IDS.length + 2 } = {}) {
       if (finished === true) {
         return Object.freeze({ done: true, step: current, results: Object.freeze([...results]), diagnostics: Object.freeze([...diagnostics]) })
+      }
+      // ★ 前提在**第一步之前**判，且每次都重判（理由见 createWizard 的 `preconditions`）。
+      const pre = await checkPreconditions()
+      lastPrecondition = pre
+      if (pre.ok !== true) {
+        const m = `前提不成立，向导一步都没有跑：${pre.unmet.map((u) => u.message).join('；')}`
+        note('error', WIZARD_CODES.PRECONDITION_UNMET, m)
+        const r = Object.freeze({
+          step: current, ok: false, precondition: true, unmet: pre.unmet, message: m,
+        })
+        results.push(Object.freeze({ ...r, at: now() }))
+        return Object.freeze({
+          done: false, blocked: true, blockedStep: current, precondition: true,
+          unmet: pre.unmet,
+          message: m,
+          results: Object.freeze([...results]),
+          diagnostics: Object.freeze([...diagnostics]),
+        })
       }
       for (let i = 0; i < maxSteps; i += 1) {
         const r = await stepOnce()
@@ -459,17 +565,28 @@ export function createWizard({
           ? def.needsInputReason
           : null,
         blockingReason: finished ? null : (def?.blockingReason ?? null),
+        // 前提不成立是**第一步之前**的状态，与"卡在第三步"不是一回事，
+        // 所以单独报，不混进 `blockingReason`。
+        preconditions: lastPrecondition,
         results: Object.freeze([...results]),
       })
     },
 
-    /** 从头再来一次。**不删除任何产品数据**——那是 `initialize` 的事。 */
+    /** 主动算一次前提（界面在进入向导前想问"现在能不能开始"时用）。 */
+    checkPreconditions,
+
+    /**
+     * 从头再来一次。**不删除任何产品数据**——那是 `initialize` 的事。
+     *
+     * 前提结论一并清掉：它是"上一次看到的"，重来之后不该继续显示旧的。
+     */
     reset() {
       current = WIZARD_STEP_IDS[0]
       finished = false
       pendingInput.value = null
       results.length = 0
       diagnostics.length = 0
+      lastPrecondition = null
       saveState()
       return Object.freeze({ reset: true, step: current })
     },

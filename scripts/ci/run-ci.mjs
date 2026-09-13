@@ -2276,6 +2276,13 @@ async function stageTest() {
         // 一个"整组被跳过、计数里什么都不显示"的套件，与一个压根不存在的套件，
         // 在"这次到底跑了什么"上是同一个东西。
         'product/launcher/dsh-overlay.test.mjs',
+        // PRT-707（接线批）：六步向导接到**真实**的 init.mjs / launcher.mjs /
+        // security/secrets 上。这一套盯的是"接线"而不是"状态机"（状态机在
+        // `wizard.test.mjs`，40 条）。钉住的都是**读契约才发现**的东西：
+        // 环境探测必须看存在的最近祖先、档案更新是 PATCH 不是 POST、
+        // 绑定字段名是 employeeRole/primaryProfile、密钥引用要按约定算
+        // （因为 hub 的单条档案读取**有意不含 secretRef**）。
+        'product/launcher/first-run.test.mjs',
       ],
       cwd: ROOT,
     },

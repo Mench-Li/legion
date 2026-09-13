@@ -99,6 +99,19 @@ export const SCHEMA = defineSchema({
   // 不显式列出的话 `scan --check` 会要求把它们登记为读取点（P3-4 遇到过同类问题）。
   nonEnvLiterals: [
 
+    // ── PRT-907 支持手册引用的**具名错误码** ────────────────────────────
+    //
+    // `product/support/runbook.mjs` 的手册正文里引用了这两个错误码，用来把
+    // "钥匙不对"（AUTH_FAILED）与"本机取不到钥匙"（SECRET_UNAVAILABLE）分开——
+    // spec §6.7 第 423 行明确要求两者不得混为一类，手册的处置也完全不同。
+    //
+    // 它们是 `runtime/contracts/errors.mjs` 里的**具名错误码**，不是本进程的配置键，
+    // 所以列在这里而不是 `fields`。★ 而且 runbook.mjs 在**装载期**拿这两个字面量去
+    // 与 `ERROR_CODES` 交叉核对（`isKnownErrorCode`）——`scan` 抓的是"有没有登记"，
+    // runbook 抓的是"登的码还存不存在"，两者互补：漏登记这里红，码被删掉 runbook 红。
+    'AUTH_FAILED',
+    'SECRET_UNAVAILABLE',
+
     // ── PRT-709 日志轮转与磁盘保护 ──────────────────────────────────────
     //
     // 下面是**诊断码**，不是配置键：它们出现在 `LOG_CODES` / `SINK_CODES`、

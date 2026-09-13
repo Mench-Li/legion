@@ -1936,6 +1936,29 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-214：pre-execute 插件 × 真 DSH ToolRuntime，以及**第一次全链路集成**。
+      //
+      // 此前两个半边各自被验证过，但**从未连起来**。本套件把这条链在真运行时里
+      // 跑通：策略说 `ask` → 投影进登记簿 → answerer 认领 → 审批箱说
+      // `allowed-once` → 工具**真的执行**；说 `rejected` → 一次都不执行。
+      //
+      //   *一个"两个半边各自全绿"的实现，
+      //   与一个"两个半边能接上"的实现，在各自的用例里是同一个东西——
+      //   只不过前者的失败发生在**生产**里。*
+      //
+      // 三条 ★ 用例是这一轮实测抓出来的真问题：
+      //   ① `ask` 需要 `exec.agent`，否则 DSH 直接拒绝
+      //      （`serviceAsk`：no agent to route it through）——
+      //      第一版用例没带，于是每个全链路用例都"没通过审批"；
+      //   ② 我写的 `approval` 替身**直接回答**，把 answerer 链整条短路了，
+      //      全链路却"看起来是绿的"，直到一条断言"审批箱被问过几次"暴露了 0；
+      //   ③ 我原来的"装载顺序有讲究"是一句**错误的因果**——断验证把顺序倒过来
+      //      全部用例照样绿（两次 `ctx.plugin` 都 `await` 到底，没有窗口）。
+      label: 'pre-execute（PRT-214：策略门 × 真 pre-execute 瀑布 + 全链路集成）',
+      files: ['runtime/dsh-composition/pre-execute.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-214：enforcement 插件模块的**一致性**用例——对着真 DSH 运行时。
       //
       // 测的全部是**别人的契约**：`ctx.tools.guard()` 是不是真同步、真单调
@@ -2355,6 +2378,8 @@ async function stageTest() {
       'runtime/dsh-composition/enforcement-plugin.test.mjs',
       // 同上：要 DSH_CHECKOUT 里的 cordis 才推得进 test 清单。
       'runtime/dsh-composition/approval-answerer.test.mjs',
+      // 同上（真 ToolRuntime + 全链路）。
+      'runtime/dsh-composition/pre-execute.test.mjs',
     ])
     const tracked = await exec('git', ['ls-files', '*.test.mjs'], { cwd: ROOT })
     const all = tracked.out.split('\n').map((x) => x.trim()).filter(Boolean)

@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-13　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **166 套件 / 4486 用例 / 0 fail**（证据 `.ci/prt-214c/`）
+**最近一次全量基线**：2026-09-13　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **167 套件 / 4503 用例 / 0 fail**（证据 `.ci/prt-214d/`）
 （**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数会少）
 —— 以本文件所在提交为准；证据 `.ci/prt-901/`（PRT-901/902 第三方组件清单、SBOM 与商业分发条件那一批）
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
@@ -3457,6 +3457,118 @@
 > `docs/DUAL-WRITE-RACE-evidence/verify-evidence.md`。
 
 ---
+
+## 2026-09-13　PRT-214（四）：pre-execute —— 强制面第一次**真的**连起来
+
+> 前三批各自把半边做绿了，但那条链**从未接上过**。本批把它接通，
+> 并在真 DSH `ToolRuntime` 里跑完了全链路。同时更正了上一批留下的
+> 一句**错误的因果**。
+
+### 交付
+
+- **`runtime/dsh-composition/plugins/pre-execute.mjs`（新增）**：
+  `ctx.on('tools/pre-execute')` 的策略门本体。判定逻辑**一行都不在这里**——
+  它就是 `createEnforcementBridge().preExecute`。本文件只做三件事：
+  绑定、**认领策略**、把投影写进在飞登记簿。
+- **`runtime/dsh-composition/assemble.mjs`（新增）**：**装配路径**——此前"没定下来"的
+  那一条。造**一次**桥、备**一份**登记簿，把两行都挂上；`dispose()` 对称拆除。
+- **`runtime/dsh-composition/pre-execute.test.mjs`（新增，17 例）**：
+  真 `ToolRuntime` + **全链路集成**。
+
+### ★★ 认领策略：`allow` 必须**让路**
+
+瀑布里 `return {kind:'allow'}` 与 `return next()` 在**下游没有别人**时是同一个东西：
+都会让工具跑起来。但前者会让后面每一道门**再也说不出话**。
+
+> 一个"自己就把 allow 定案了"的强制面，
+> 与一个"把后面的门全部关掉"的强制面，是同一个东西——
+> 只不过前者把自己说成是"放行"，而它实际干的是"**闭嘴**"。
+
+本行取 `next()`。这与 hard floor 那条"guard 只有降级语义、没有 allow 语义"
+是同一条原则的另一面：**强制面永远不该成为某个东西被允许的原因**。
+
+### ★ 全链路第一次跑通
+
+    pre-execute ──put──▶ 在飞登记簿 ──peek──▶ answerer
+                                                  │
+             真 DSH ask → ApprovalService → 瀑布 ◀┘
+
+| 审批箱说 | 工具 | 断言 |
+| --- | --- | --- |
+| `allowed-once` | ✅ 执行了 | 且审批箱**被问过 1 次** |
+| `rejected` | ❌ 一次没执行 | `isError === true` |
+| 抛错 | ❌ 不执行 | 结局是 `unavailable`（故障）而非 `rejected`（决定） |
+
+> 一个"两个半边各自全绿"的实现，
+> 与一个"两个半边能接上"的实现，在各自的用例里是同一个东西——
+> 只不过前者的失败发生在**生产**里。
+
+### ★ 三条实测抓出来的真问题
+
+1. **`ask` 需要 `exec.agent`**，否则 DSH 直接拒绝
+   （`serviceAsk`：`no agent to route it through`）。第一版用例没带，
+   于是**每个全链路用例都没通过审批**，而失败理由看起来像"两个半边没接上"。
+2. **★ 我写的审批替身把 answerer 链整条短路了**：第一版替身**直接返回结局**，
+   于是 `answerer` 那一行一次都没被调用过，而全链路用例"通过"了。
+   直到一条断言"审批箱被问过几次"暴露了那个 **0**。
+   > 一个"直接回答"的审批替身，
+   > 与一个"把 answerer 链整条短路掉"的替身，是同一个东西——
+   > 只不过前者让全链路用例**看起来**是绿的。
+   修法：替身必须复刻 `ApprovalService.decide()` 的两步（`'never'` 在**派发之前**
+   短路，否则走 `ctx.waterfall('approval/request', …)`）。顺带钉住一条产品事实：
+   **无人值守 preset（`approval: never`）下 Legion 的审批箱永远不会被咨询**
+   （新增用例断言 `portCalls === 0`）。
+3. **★ 我那句"装载顺序有讲究"是错误的因果**：断验证把顺序倒过来，
+   **全部用例照样绿**——两次 `ctx.plugin` 都 `await` 到底，根本没有窗口。
+   > 一个"顺序无关、却被写成顺序有关"的注释，
+   > 与一个"顺序真的有关"的实现，在断验证面前是同一个东西——
+   > 只不过前者会让下一个人去守一条**不存在的约束**。
+   已换成一条**可测**的性质：**故意不挂 answerer**，只挂 producer，
+   审批端口甚至"愿意"说 `allowed-once` —— 但没人接链 → 工具**不执行**。
+   > 一个"没人能批准就不执行"的强制面，
+   > 与一个"没人能批准就默默放行"的强制面，在审批箱空着的部署里是同一个东西——
+   > 只不过后者在**审批箱坏掉那天**才开始放行。
+
+第 4 处：那段"ask 却投影不出来"的守卫在真桥下够不着（桥在 `decide` 包装里
+已经 `deny` 了）。**没删**，而是当**契约守卫**对待，用一条**故意违约的假桥**
+去测——那样它才是活代码。配套断言"真桥下拒绝理由来自桥"，把这个前提也钉住。
+
+### 断验证（6/6，逐字节还原）
+
+| 探针 | 弄坏什么 | 结果 |
+| --- | --- | --- |
+| ① | `allow` 改成认领 | ✅ 红 |
+| ② | `ask` 时不写登记簿 | ✅ 红（4 条） |
+| ③ | `deny` 改成 `allow` | ✅ 红（10 条） |
+| ④ | 装配 `dispose` 只弹出、不卸载 | ✅ 红 |
+| ⑤ | 缺 `decide` 不抛（默认永远放行） | ✅ 红 |
+| ⑥ | 替身退回"直接回答" | ✅ 红（4 条） |
+
+探针④原本是"把装载顺序倒过来"——**它没红**，那是本批最值钱的发现之一。
+
+### 验证与行的状态
+
+`pre-execute` **17/17**；七道门禁全 PASS；全量 CI **9 阶段全 PASS**，
+`test` **167 套件 / 4503 用例 / 0 fail**（`.ci/prt-214d/`）。
+
+| 行 | 状态 |
+| --- | --- |
+| `legion-enforcement-hard-floor` | ✅ 有模块、已进补丁层、真运行时 10 例全绿 |
+| `legion-enforcement-permission-presets` | ✅ patch-over，已生效 |
+| `legion-enforcement-pre-execute` | ✅ **实现完成、全链路已通**（17 例）；无 default，由 `assemble.mjs` 挂 |
+| `legion-enforcement-approval-answerer` | ✅ **实现完成、全链路已通**（17 例）；无 default，由 `assemble.mjs` 挂 |
+
+**四行实现全部完成**，但 PRT-214 仍是 🟡，原因**不在实现**：
+① 补丁层那两行仍是 `module: null`（刻意，YAML 装不下函数），自检仍 fail closed；
+② 补丁层**仍未真的被注入过任何 profile**；③ 装配好的强制面**还没有任何生产调用方**
+——`assembleEnforcement()` 目前只有用例在调；④ 员工 agent preset 那一半尚未开始。
+
+> **实现完成**与**已经生效**，在"没有任何生产调用方"的时候是同一个东西——
+> 只不过前者会让 STATUS 上那一行看起来该变绿了。
+
+**下一批**：把 `assembleEnforcement()` 接进 `orchestrator/worker/executor-binding.mjs`
+那条**唯一的生产接缝**（`createProductionExecutor` / `productionExecutorProvider`），
+让它真的有一个调用方。
 
 ## 2026-09-13　PRT-214（三）：approval answerer —— 而且上一批的规划是错的
 

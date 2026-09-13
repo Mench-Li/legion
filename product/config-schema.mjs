@@ -336,6 +336,18 @@ export const SCHEMA = defineSchema({
     //                        所以不生成空包而是如实报错。
     'DIAG_NO_LAYOUT', 'DIAG_PACKAGE_EXISTS', 'DIAG_LEAK_DETECTED',
     'DIAG_WRITE_FAILED', 'DIAG_EMPTY_PACKAGE',
+    // PRT-710 收尾：**启动失败时自动出诊断包**
+    // （product/diagnostics/auto-export.mjs）的具名码。
+    // 与上面那组一样是**输出**用的码，不是配置键：
+    //   AUTO_NO_BASE_DIR    — 布局里没有产品家目录，**不猜**位置；
+    //   AUTO_DISABLED       — 显式关掉了（`--no-auto-diagnostics`）；
+    //   AUTO_BASE_DIR_FAILED— 读不到 `diagnostics/` 目录。
+    //                         与"目录是空的"必须分开：后者会静默跳过清理，
+    //                         于是一个塞满的目录永远不被收缩；
+    //   AUTO_EXPORT_FAILED  — 导出本身失败（含"导出抛错"）。
+    //                         调用方必须**原样保留**启动失败的原因，
+    //                         不能把它换成这条。
+    'AUTO_NO_BASE_DIR', 'AUTO_DISABLED', 'AUTO_BASE_DIR_FAILED', 'AUTO_EXPORT_FAILED',
     // 逐候选的去向（诊断包清单的契约，四种，没有第五种）：
     'included', 'excluded', 'skipped', 'oversized',
     // 结构性排除规则的 id。它们是**排除理由的分类名**，不是配置键；

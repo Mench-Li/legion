@@ -28,6 +28,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { LEGION_ENV, resolveLayout } from '../paths.mjs'
 import { launcherInputFromConfig, loadProductConfig } from '../config.mjs'
+import { AUTO_EXPORT_DEFAULTS, runAutoExport } from '../diagnostics/auto-export.mjs'
 import { initializeProductDir, isInitialized } from '../init.mjs'
 import { createLauncher, PRODUCT_STATE_TEXT } from './launcher.mjs'
 import { DEFAULT_BACKOFF } from './supervisor.mjs'
@@ -61,6 +62,11 @@ export const CLI_FLAGS = Object.freeze([
   { name: '--allow-port-in-use=<a,b>', kind: 'value', doc: '允许复用已在监听的端口的进程（显式决定，不是默认行为）' },
   { name: '--diagnostics=<dir>', kind: 'value', doc: '导出脱敏诊断包到指定目录（PRT-710）。' +
     '**这是唯一在体检/配置/布局出问题时仍然可用的入口**：诊断包最需要在产品坏掉的时候拿到' },
+  { name: '--no-auto-diagnostics', kind: 'boolean', doc: '关掉「启动失败时自动留诊断包」（PRT-710）。' +
+    '**默认是开的**：诊断包只写在本机 `<产品家目录>/diagnostics/`，不外发，' +
+    '而它的全部价值就在于"用户没想起来的时候它也在"。给这一条留一个显式退出' },
+  { name: '--auto-diagnostics-keep=<n>', kind: 'value', doc: '自动导出的保留份数（默认 3，最小 1）。' +
+    '自动写盘意味着**失败循环里自动写盘**，这个数字就是磁盘上界' },
   { name: '--sweep-orphans', kind: 'boolean', doc: '启动前清理上一次运行留下的进程（PRT-705）。' +
     '**默认只报告不清理**：杀进程不可撤销。清理前会核对映像名，对不上的一律不动' },
   { name: '--allow-unverified-sweep', kind: 'boolean', doc: '与 --sweep-orphans 同用：' +
@@ -245,6 +251,21 @@ export function launcherOptionsFrom({ argv = [], env = {}, nodePath = process.ex
     : configLoader(layout, { envValues: {} })
   const fromConfig = launcherInputFromConfig(config.merged ?? null)
 
+  // ★ PRT-710 收尾：自动导出**默认开着**，`--no-auto-diagnostics` 是显式的退出。
+  //
+  //   为什么默认开：诊断包只写在本机 `<产品家目录>/diagnostics/`、不外发，
+  //   而这一整条任务的定位是"最需要在产品坏掉的时候拿到"。默认关的话，
+  //   它就退化成"用户可以手工敲 --diagnostics"，而这正是它要补上的那一步。
+  //
+  //   只留一个**关**的开关（不留"开"的开关）：一个已经是默认值的 `--auto-diagnostics`
+  //   是一个**没有任何效果的参数**，而一个没有效果的参数比没有这个参数更坏——
+  //   它会让读命令行的人以为"这件事是要显式打开的"。
+  //
+  //   ⚠️ 它必须定义在 `run()` 里，不是 `launcherOptionsFrom()` 里：
+  //   第一版我按 `const fromConfig = ...` 定位、插错了函数，于是启动失败那条路
+  //   报 `ReferenceError: autoDiagnostics is not defined`——**只在真的启动失败时才崩**。
+  //   一个"只在出错路径上才崩"的变量引用，在跑得通的运行里与一个正确的实现同形。
+
   const include = parsed.flags.include === undefined
     ? null
     : String(parsed.flags.include).split(',').map((s) => s.trim()).filter(Boolean)
@@ -303,7 +324,24 @@ function printDiagnostics(diagnostics, write = console.log) {
 }
 
 /** 主流程。返回进程退出码（0 成功）。 */
-export async function run({ argv = process.argv.slice(2), env = process.env, write = console.log, waitForSignal = true } = {}) {
+export async function run({
+  argv = process.argv.slice(2), env = process.env, write = console.log, waitForSignal = true,
+  // ★ PRT-710 收尾：这两个是可注入的**接缝**，默认就是真实实现。
+  //
+  //   为什么需要它们：启动失败这条路要用例去走，而"让一次真实启动失败"
+  //   意味着起真实子进程、等它就绪超时——慢、依赖机器状态，而且它的失败
+  //   方式与产品是否正常无关。一个"只在机器恰好很慢时才走到"的分支，
+  //   等于**没有被测**。
+  //
+  //     > 一个"靠构造真实故障才走得到"的分支，
+  //     > 与一个"没有测试能走到"的分支，在覆盖率上看起来不一样——
+  //     > 只不过前者的绿是**机器当时心情好**换来的。
+  //
+  //   注入的是"启动器工厂"而不是"启动结果"：这样 `start()` 的失败形状
+  //   仍然由真实的 `createLauncher` 契约决定，测试只换掉**谁来起进程**。
+  createLauncherFn = createLauncher,
+  autoExportFn = runAutoExport,
+} = {}) {
   if (argv.includes('--help')) {
     write('Legion Launcher（PRT-251）')
     write('')
@@ -318,6 +356,17 @@ export async function run({ argv = process.argv.slice(2), env = process.env, wri
   }
 
   const json = parsed.flags.json === true
+
+  // ★ PRT-710 收尾：自动导出**默认开着**，`--no-auto-diagnostics` 是显式的退出。
+  //
+  //   为什么默认开：诊断包只写在本机 `<产品家目录>/diagnostics/`、不外发，
+  //   而这一整条任务的定位是"最需要在产品坏掉的时候拿到"。默认关的话，
+  //   它就退化成"用户可以手工敲 --diagnostics"，而这正是它要补上的那一步。
+  //
+  //   只留一个**关**的开关（不留"开"的开关）：一个已经是默认值的 `--auto-diagnostics`
+  //   是一个**没有任何效果的参数**，而一个没有效果的参数比没有这个参数更坏——
+  //   它会让读命令行的人以为"这件事是要显式打开的"。
+  const autoDiagnostics = parsed.flags['no-auto-diagnostics'] !== true
 
   // ── 诊断包导出（PRT-710）─────────────────────────────────────────────
   //
@@ -401,7 +450,7 @@ export async function run({ argv = process.argv.slice(2), env = process.env, wri
     return init.ok === true ? 0 : 7
   }
 
-  const launcher = createLauncher(options)
+  const launcher = createLauncherFn(options)
 
   if (parsed.flags.check === true) {
     const pre = await launcher.preflight()
@@ -431,6 +480,38 @@ export async function run({ argv = process.argv.slice(2), env = process.env, wri
     write(`✖ 启动失败（阶段：${result.phase}）`)
     for (const f of result.failures) write(`  ✖ [${f.process}] ${f.code}：${f.detail ?? '无详情'}`)
     printDiagnostics(launcher.allDiagnostics(), write)
+
+    // ── PRT-710 收尾：启动失败时**自动**留下诊断包 ──
+    //
+    // 为什么必须自动：`--diagnostics=<dir>` 要求用户在**产品已经坏掉之后**
+    // 还想起来、并且能够，手工敲一条命令。而这一整条任务的定位就是
+    // "诊断包最需要在产品坏掉的时候拿到"。
+    //
+    //   > 一个"坏掉之后可以手工导出"的诊断包，
+    //   > 与一个"坏掉时会自动留下证据"的诊断包，
+    //   > 在用户记得去敲那条命令的时候是同一个东西——
+    //   > 只不过前者会在用户不记得、或者产品坏到连命令行都进不去的时候，
+    //   > 恰好什么都不留下，而"这次没有证据"与"这次没什么可记的"长得一样。
+    //
+    // ★ 它在**打印完启动失败之后**才跑，且**不改变退出码**（仍是 5）。
+    //
+    //   自动导出失败时**绝不能**把已经说清的启动失败原因换掉：
+    //
+    //     > 一个"出不了诊断包于是报了个诊断包错误"的启动，
+    //     > 与一个"真的就是诊断包坏了"的启动，
+    //     > 在用户读到的第一行上是同一个东西——
+    //     > 只不过前者会把一个**已经查明的**故障，换成一句**关于工具的**抱怨。
+    if (autoDiagnostics === true) {
+      const r = await autoExportFn({
+        layout: options.layout,
+        reason: `启动失败（阶段：${result.phase}）`,
+        keep: parsed.flags['auto-diagnostics-keep'] === undefined
+          ? AUTO_EXPORT_DEFAULTS.keep
+          : Number(parsed.flags['auto-diagnostics-keep']),
+      })
+      write(r.ok === true ? `  ⤷ ${r.message}` : `  ⤷ 未留下诊断包：${r.message}`)
+      if (json) write(JSON.stringify({ autoDiagnostics: { ok: r.ok, code: r.code ?? null, path: r.path ?? null, pruned: r.pruned } }))
+    }
   }
 
   if (result.ok !== true) return 5

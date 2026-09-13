@@ -65,6 +65,42 @@ export const MAX_LEASE_TTL_MS = 3600000
  */
 export const DEFAULT_MAX_ATTEMPTS = 5
 
+/**
+ * 「租约还握在某个 worker 手里」的那些状态。**只此一处。**
+ *
+ * ★ 这份清单原先在本文件里**逐字抄了三遍**（`recoverExpired` 的带 scope 与不带 scope
+ * 两条 SQL，以及 `stats()` 的过期租约统计）。抄三遍的后果与 `claim-policy.mjs`
+ * 开头写的那件事一样：有人给其中一处加了个状态，另两处没跟着改，
+ * 于是**同一个东西在三处有不同定义**，而它们平时看起来都"对"。
+ *
+ * 具体到这一份，`stats()` 的过期租约数会与 `recoverExpired` 实际愿意回收的集合
+ * **不一致**——仪表盘说"有 3 个过期租约"，而回收只认其中 2 个，
+ * 剩下那个没有人会去查。
+ *
+ *   > 一个"统计过期租约"与"回收过期租约"各写一遍状态清单的实现，
+ *   > 与一个"报表上的过期数永远收不回来"的实现，是同一个东西——
+ *   > 只不过平时看不出来。
+ *
+ * 想改集合，只有这一处可改。
+ */
+export const IN_FLIGHT_ATTEMPT_STATES = Object.freeze([
+  'Leased', 'PreparingWorkspace', 'BuildingContext', 'Running', 'Validating', 'HandingOff', 'AwaitingApproval',
+])
+
+/**
+ * 上面那份清单的 SQL 字面量（带引号、逗号分隔）。
+ *
+ * 由常量生成而不是并排再写一遍：**并排写一份就是第四处抄写**，
+ * 而这几处正是本次要合并掉的东西。
+ */
+export function inFlightStatesSql(states = IN_FLIGHT_ATTEMPT_STATES) {
+  if (!Array.isArray(states) || states.length === 0) {
+    throw new TypeError('inFlightStatesSql 需要非空状态数组：空集合会生成 `IN ()`，'
+      + '而 `IN ()` 在 SQLite 里恒为假——那会让"有多少过期租约"永远返回 0')
+  }
+  return states.map((s) => `'${s}'`).join(',')
+}
+
 /** 本仓储的具名错误码。笼统的「400」无法被 metrics 分类，也无法告诉调用方下一步。 */
 export const RUN_ERRORS = Object.freeze({
   TASK_NOT_CLAIMABLE: 'TASK_NOT_CLAIMABLE',
@@ -1258,15 +1294,18 @@ export function createRunStore({
     const decide = typeof externalEffectPossible === 'function' ? externalEffectPossible : () => externalEffectPossible
     return withTx(() => {
       const atMs = clock()
+      // 状态清单由 `IN_FLIGHT_ATTEMPT_STATES` 生成（见文件头那段说明）：
+      // 这里要与 `stats()` 的过期租约统计、以及 `metricsCounts()` 用**同一份**集合。
+      const flight = inFlightStatesSql()
       const rows = scope === null
         ? db.prepare(
           `SELECT * FROM run_attempts
-            WHERE state IN ('Leased','PreparingWorkspace','BuildingContext','Running','Validating','HandingOff','AwaitingApproval')
+            WHERE state IN (${flight})
               AND lease_expires_at_ms IS NOT NULL AND lease_expires_at_ms <= ?
             ORDER BY lease_expires_at_ms ASC LIMIT ?`).all(atMs, limit)
         : db.prepare(
           `SELECT * FROM run_attempts
-            WHERE scope = ? AND state IN ('Leased','PreparingWorkspace','BuildingContext','Running','Validating','HandingOff','AwaitingApproval')
+            WHERE scope = ? AND state IN (${flight})
               AND lease_expires_at_ms IS NOT NULL AND lease_expires_at_ms <= ?
             ORDER BY lease_expires_at_ms ASC LIMIT ?`).all(scope, atMs, limit)
       const recovered = []
@@ -1959,6 +1998,74 @@ export function createRunStore({
     })
   }
 
+  /**
+   * 仪表盘的**原始读数**（PRT-712 的数据源）。
+   *
+   * 本函数只做一件事：把"产品要看的九个指标"里属于**运行库**的那几个，
+   * 从库里取出来，且**保持"没有"与"是零"的区别**。
+   *
+   * ## 为什么不是一个"取指标"的函数
+   *
+   * 指标的口径（什么算"老"、比率怎么除、什么时候不适用）住在
+   * `product/metrics.mjs`；这里只给**计数**。把口径也搬进来，
+   * 就会出现"库这边改了一个定义、界面那边还是旧的"这种两边各有一份口径的局面。
+   *
+   * ## 两处刻意的 null
+   *
+   * · `oldestPendingAgeMs`：队列为空时**返回 null，不返回 0**。
+   *   0 会被读成"有一个刚进来的任务"，那是一句与事实相反的话。
+   * · `attemptsTotal` / `leasesTotal` 为 0 时，比率的分母是 0——
+   *   这不是"比率是 0%"，而是"还算不出比率"。除法留空，由指标层报"不适用"。
+   *
+   * 与 `stats()` 的分工：`stats()` 回答"现在库里的尝试各有多少"，
+   * 面向排查；本函数回答"仪表盘那九格里要填什么"，面向展示。
+   * 两者都用 `IN_FLIGHT_ATTEMPT_STATES`，所以"在途"只有一个定义。
+   */
+  function metricsCounts({ scope = null } = {}) {
+    const atMs = clock()
+    const flight = inFlightStatesSql()
+    const where = scope === null ? '' : ' AND scope = ?'
+    const p = scope === null ? [] : [scope]
+
+    const scalar = (sql, ...args) => Number(db.prepare(sql).get(...args)?.n ?? 0)
+
+    const queued = scalar(
+      `SELECT COUNT(*) AS n FROM run_attempts WHERE state = 'Queued'${where}`, ...p)
+    // 队列为空 → null（而不是 0）。见上面那段说明。
+    const oldest = db.prepare(
+      `SELECT MIN(created_at_ms) AS m FROM run_attempts WHERE state = 'Queued'${where}`).get(...p)?.m
+    const oldestPendingAgeMs = oldest === null || oldest === undefined
+      ? null
+      : Math.max(0, atMs - Number(oldest))
+
+    return Object.freeze({
+      atMs,
+      queueDepth: queued,
+      oldestPendingAgeMs,
+      // 「活跃 lease」= 在途**且租约尚未过期**的。已过期的那些是
+      // `expiredLeases`，把它们也算成"持有中"会让仪表盘说有人正在干活。
+      activeLeases: scalar(
+        `SELECT COUNT(*) AS n FROM run_attempts
+          WHERE state IN (${flight})${where}
+            AND lease_expires_at_ms IS NOT NULL AND lease_expires_at_ms > ?`, ...p, atMs),
+      expiredLeases: scalar(
+        `SELECT COUNT(*) AS n FROM run_attempts
+          WHERE state IN (${flight})${where}
+            AND lease_expires_at_ms IS NOT NULL AND lease_expires_at_ms <= ?`, ...p, atMs),
+      // 累积分母：**曾经被租出去过**的尝试（lease_epoch > 0）。
+      // 与"现在在途"是两个不同的集合，混用会算出一个没有含义的比率。
+      leasesTotal: scalar(
+        `SELECT COUNT(*) AS n FROM run_attempts WHERE lease_epoch > 0${where}`, ...p),
+      leasesExpired: scalar(
+        `SELECT COUNT(*) AS n FROM run_attempts WHERE failure_code = 'lease-expired'${where}`, ...p),
+      attemptsTotal: scalar(`SELECT COUNT(*) AS n FROM run_attempts WHERE 1 = 1${where}`, ...p),
+      attemptsRetried: scalar(
+        `SELECT COUNT(*) AS n FROM run_attempts WHERE attempt_no > 1${where}`, ...p),
+      deadLetterCount: scalar(
+        `SELECT COUNT(*) AS n FROM run_attempts WHERE state = 'DeadLetter'${where}`, ...p),
+    })
+  }
+
   function stats() {
     // 只用服务端时钟。「有多少租约已过期」是一个**判定**而不是一次查询参数：
     // 允许调用方传时间，就等于允许它把「全都过期」或「一个都没过期」说出来。
@@ -1971,7 +2078,7 @@ export function createRunStore({
     }
     const expired = Number(db.prepare(
       `SELECT COUNT(*) AS n FROM run_attempts
-        WHERE state IN ('Leased','PreparingWorkspace','BuildingContext','Running','Validating','HandingOff','AwaitingApproval')
+        WHERE state IN (${inFlightStatesSql()})
           AND lease_expires_at_ms IS NOT NULL AND lease_expires_at_ms <= ?`).get(atMs).n)
     return Object.freeze({ byState: Object.freeze(byState), expiredLeases: expired, serverTimeMs: atMs })
   }
@@ -1986,7 +2093,7 @@ export function createRunStore({
     recordValidation, validationsOf, criteriaOf,
     // PRT-308：交接（原子创建下一岗位任务 + 收口）
     handoff, handoffsOf,
-    getAttempt, historyOf, eventsOf, stats,
+    getAttempt, historyOf, eventsOf, stats, metricsCounts,
     withTx,
     /** 供测试与诊断：当前生效的默认租期。 */
     defaultLeaseTtlMs: defaultTtl,

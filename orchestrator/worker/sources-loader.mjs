@@ -55,6 +55,17 @@ export const SOURCES_LOADER_CODES = Object.freeze({
 })
 
 /**
+ * 一份上游交付里最多带几条产物引用。
+ *
+ * 为什么不设成"全带"：产物引用会整份进快照正文，而链上每个前驱都可能登记了
+ * 几十条。这个上限与 `maxSkills` 同性质——是**预算**决定，不是正确性决定。
+ * 截断**不静默**：`truncated` 记在交付条目的 `summary` 之外由
+ * `upstreamSkipped`/调用方判断（见 `toUpstreamDelivery` 的说明），
+ * 而 PRT-408 的来源清单会给出统一的裁剪理由。
+ */
+const MAX_UPSTREAM_ARTIFACTS = 20
+
+/**
  * hub 上**没有读端点**因此拿不到的来源族。
  *
  * 这份清单是**量出来的**，不是推断的：逐个在 `team-hub/server.mjs` 里
@@ -65,11 +76,6 @@ export const SOURCES_LOADER_CODES = Object.freeze({
  * 列出来之后，运维能一眼看出缺的是**产品的**这一块，而不是自己的配置。
  */
 export const UNSERVED_SOURCE_FAMILIES = Object.freeze([
-  Object.freeze({
-    key: 'upstreamDeliveries',
-    reason: 'hub 的 `/api/runtime/handoffs` 是 worker 的移交状态，不是上游员工的交付物；'
-      + '两者混用会把"某个 worker 交出了租约"读成"上游交付了一份成果"',
-  }),
   Object.freeze({
     key: 'workspaceState',
     reason: 'hub 没有工作区状态的读端点（工作区是 worker 本机的目录，'
@@ -112,6 +118,14 @@ export const FORMERLY_UNSERVED_SOURCE_FAMILIES = Object.freeze([
     was: 'hub 没有用户反馈的独立读端点，而 **不能拿任务评论去填**它——'
       + '`sources.mjs` 里用户反馈是另一个类型（`user-feedback`）：'
       + '"要不要按反馈调整"的处理与评论不同，混成一个会让那件事无从下手',
+  }),
+  Object.freeze({
+    key: 'upstreamDeliveries',
+    fixedBy: 'PRT-405',
+    servedBy: '/api/task?id=（按当前任务的 blockedBy 逐个读前驱）',
+    was: 'hub 的 `/api/runtime/handoffs` 是 worker 的**移交状态**，不是上游员工的交付物；'
+      + '两者混用会把"某个 worker 交出了租约"读成"上游交付了一份成果"——'
+      + '现在走链上的 `blockedBy` 前驱，那才是"这个任务的输入来自哪个岗位"',
   }),
 ])
 
@@ -220,8 +234,7 @@ function mapEpochMs(list) {
   return Array.isArray(list) ? list.map((x) => withEpochMs(x)) : []
 }
 
-class SourceLoaderError extends Error {
-  constructor(code, message, extra = {}) {
+class SourceLoaderError extends Error {  constructor(code, message, extra = {}) {
     super(message)
     this.name = 'SourceLoaderError'
     this.code = code
@@ -239,6 +252,7 @@ class SourceLoaderError extends Error {
  * @param {string|null} [deps.scope] 兜底空间（lease 上有 scope 时以 lease 为准）
  * @param {boolean} [deps.requireTask] 缺 taskId 时是否拒绝（默认 true）
  * @param {number} [deps.maxSkills] 最多带几条已发布技能（默认 50）
+ * @param {number} [deps.maxUpstream] 最多读几个上游前驱任务（默认 20）
  * @returns {{loadSources: Function, availability: Function, lastReads: Function}}
  */
 export function createHubSourceLoader({
@@ -246,12 +260,16 @@ export function createHubSourceLoader({
   scope = null,
   requireTask = true,
   maxSkills = 50,
+  maxUpstream = 20,
   clock = () => Date.now(),
 } = {}) {
   if (hub === null || typeof hub?.read !== 'function') {
     throw new SourceLoaderError(SOURCES_LOADER_CODES.BAD_WIRING,
       'createHubSourceLoader 需要一个提供 read(path) 的 hub 客户端：'
       + '没有它本装配器只能返回零来源，而零来源会冻结出一份**完全合法**的空快照')
+  }
+  if (!Number.isInteger(maxUpstream) || maxUpstream < 0) {
+    throw new SourceLoaderError(SOURCES_LOADER_CODES.BAD_WIRING, 'maxUpstream 必须是非负整数')
   }
   if (!Number.isInteger(maxSkills) || maxSkills < 0) {
     throw new SourceLoaderError(SOURCES_LOADER_CODES.BAD_WIRING, 'maxSkills 必须是非负整数')
@@ -337,6 +355,80 @@ export function createHubSourceLoader({
       body: c?.text ?? '',
       createdAtMs: epochMsOf(c?.at),
     }))
+  }
+
+  /**
+   * 上游交付里的产物引用 → **固定键序**的对象。
+   *
+   * ★ 为什么必须投影一遍，而不是把 hub 给的对象原样塞进去：
+   *   `upstreamDeliverySources` 用 `stableRecord` 序列化交付，而 `stableRecord`
+   *   对**嵌套值**用的是 `JSON.stringify`——它的键序取决于对象的**插入顺序**。
+   *   hub 写产物时是 `list.push({ by, at, kind, path, title })` 再**条件性**加
+   *   `digest`，所以顺序恰好是确定的；但那是**写入代码路径**的性质，
+   *   不是数据的性质。
+   *
+   *   > 一个"键序碰巧对得上"的内容哈希，
+   *   > 与一个"键序是数据的函数"的内容哈希，在写入路径不变的时候是同一个东西——
+   *   > 只不过前者会在有人调整了产物登记那段的对象字面量顺序之后，
+   *   > 让同一个世界算出两个快照哈希。
+   *
+   *   四个键**一律出现**（缺的写 `null`）：省略会让"这个字段从没被填过"
+   *   与"填了空"得到同一个哈希。
+   */
+  function toUpstreamArtifacts(list) {
+    const raw = Array.isArray(list) ? list : []
+    return raw.slice(0, MAX_UPSTREAM_ARTIFACTS).map((a) => ({
+      kind: a?.kind ?? null,
+      path: a?.path ?? null,
+      title: a?.title ?? null,
+      digest: a?.digest ?? null,
+    }))
+  }
+
+  /**
+   * 上游任务（`blockedBy` 里的前驱）→ `upstreamDeliverySources` 要的形状。
+   *
+   * ## 为什么走 `blockedBy` 而不是 `/api/runtime/handoffs`
+   *
+   * 见 `UNSERVED_SOURCE_FAMILIES` 里那条的原因：handoffs 是 **worker 的移交状态**
+   * （"某个 worker 交出了租约"），不是"上游员工交付了一份成果"。两者混用会把
+   * 一次租约交接读成一份交付物。
+   *
+   * 而链上的 `blockedBy: [prev]` **就是**"这个任务的输入来自哪个岗位"——
+   * `createGoalChain` 建的正是阶段链，下游任务的输入就是上游岗位的产出。
+   *
+   * ## ★ 只有 `done` 的前驱才产出交付
+   *
+   * `assertUnblocked` 会拦住"未完成依赖"，但 `force` 绕得过去，而且前驱也可能
+   * 是 `canceled`（**取消了就没有交付物**）。把这类前驱做成一条
+   * `upstream-delivery` 来源，等于让模型读到一份**并不存在的交付**——
+   * 而它会照着那份（空）交付继续做下去。
+   *
+   *   > 一个"把没完成的上游也写成一条交付"的实现，
+   *   > 与一个"只写真的交付了的"的实现，在上游总是按时完成时是同一个东西——
+   *   > 只不过前者会让模型把"还没做"读成"做完了、只是内容是空的"。
+   *
+   * 被跳过的前驱**不静默**：进 `upstreamSkipped`（见返回值那段说明）。
+   */
+  function toUpstreamDelivery(dep) {
+    const role = dep?.role ?? dep?.soldier ?? null
+    const report = dep?.testReport
+    const summary = (report && typeof report.summary === 'string' && report.summary.trim() !== '')
+      // 结构化测试报告里的摘要**就是**这份交付的人类可读摘要——优先用它。
+      ? report.summary.trim().slice(0, 2000)
+      // 没有结构化摘要时**如实说没有**，而不是编一个。编出来的摘要会被模型
+      // 当成"上游说了这句话"，而它其实是我们替上游说的。
+      : `上游岗位 ${role ?? '（未知）'} 完成了《${dep?.title ?? dep?.id ?? '（无标题）'}》，未留下结构化摘要`
+    return {
+      id: String(dep.id),
+      fromEmployeeId: dep.soldier ?? role ?? null,
+      fromRole: role,
+      taskId: dep.id,
+      summary,
+      artifacts: toUpstreamArtifacts(dep.artifacts),
+      createdAtMs: epochMsOf(dep.createdAt),
+      updatedAtMs: epochMsOf(dep.updatedAt),
+    }
   }
 
   return Object.freeze({
@@ -449,6 +541,46 @@ export function createHubSourceLoader({
         userFeedback = toFeedback(fbBody)
       }
 
+      // ── PRT-405：上游员工交付（`blockedBy` 里的前驱任务）──
+      //
+      // 一个前驱一行 `/api/task?id=`。**顺序读**而不是并发：`reads` 是排障证据，
+      // 并发会让它的顺序变成调度器的函数，而"这次运行问了哪些端点、按什么顺序"
+      // 在复现问题时是数据的一部分。
+      const blockedBy = Array.isArray(task?.blockedBy) ? task.blockedBy.map(String).filter(Boolean) : []
+      const upstreamDeliveries = []
+      const upstreamSkipped = []
+      if (blockedBy.length > maxUpstream) {
+        // 截断**要说出来**。超过上限的前驱既没有交付、也没有 skip 记录——
+        // 只有这一条 `truncated` 能证明它们是**没被读**，而不是不存在。
+        upstreamSkipped.push({
+          taskId: null,
+          status: null,
+          reason: `依赖超过 maxUpstream=${maxUpstream}，只读了前 ${maxUpstream} 个`,
+          truncated: blockedBy.length - maxUpstream,
+        })
+      }
+      for (const depId of blockedBy.slice(0, maxUpstream)) {
+        const dep = await readOrThrow(
+          `/api/task?id=${encodeURIComponent(depId)}`,
+          { notFoundIsNull: true },
+        )
+        if (dep === null || typeof dep !== 'object') {
+          // 依赖指向一个不存在的任务。这是**数据不一致**（链被删过？），
+          // 记下来而不是当成"没有上游"——那会让模型以为自己是链头。
+          upstreamSkipped.push({ taskId: depId, status: null, reason: '依赖任务不存在（读回来是空的）' })
+          continue
+        }
+        if (dep.status !== 'done') {
+          upstreamSkipped.push({
+            taskId: depId,
+            status: dep.status ?? null,
+            reason: `上游任务状态是 ${dep.status ?? '（未知）'}，不是 done —— 没有交付物`,
+          })
+          continue
+        }
+        upstreamDeliveries.push(toUpstreamDelivery(dep))
+      }
+
       return {
         scope: effScope,
         teamPlan,
@@ -463,7 +595,17 @@ export function createHubSourceLoader({
         tasks: [],
         comments: toComments(task),
         userFeedback,
-        upstreamDeliveries: [],
+        upstreamDeliveries,
+        // ★ 被跳过的前驱**不静默**，但也要说清它现在**到不了快照里**：
+        //   `collectCandidates` 只认上面那些键，本字段不会被消费。
+        //
+        //   > 一个"产出了但没人读"的诊断字段，
+        //   > 与一个"根本没记"的字段，在排障的人是**唯一读者**的时候是同一个东西——
+        //   > 只不过前者看起来像是已经解决了"上游没交付"这件事的可见性。
+        //
+        //   它现在的读者是**用例与调用方**（`loadSources` 的返回值是对外契约），
+        //   进快照要等 PRT-408 的来源清单（"已读但为空 / 被过滤"的位置）。
+        upstreamSkipped,
         // 产物**只给引用**（PRT-405）：正文是一个预算决定。
         artifacts: mapEpochMs(task?.artifacts),
         skills: mapEpochMs(skills),
@@ -492,7 +634,28 @@ export function createHubSourceLoader({
           '/api/team-plan', '/api/employee-manifest',
           // PRT-404 接上的一条
           '/api/task-feedback',
+          // PRT-405：上游交付走的是**同一个** `/api/task`（按 blockedBy 逐个读前驱），
+          // 所以这里不新增条目——新增会谎称多了一个端点。
         ]),
+        /**
+         * ★ PRT-405：上游交付读的是**哪些**任务。
+         *
+         * `consumed` 只能说明"读了 `/api/task`"，而 PRT-405 的全部内容恰恰是
+         * "读的是**前驱**，不是随便什么任务"。这一条把那个选择写出来，
+         * 让"上游交付"这个来源族可被审计：
+         *
+         *   > 一个"读了 /api/task 就算接上了上游交付"的覆盖账，
+         *   > 与一个"读的是 blockedBy 前驱"的覆盖账，在任务恰好没有前驱时
+         *   > 是同一个东西——只不过前者会让"上游交付"永远显示为已覆盖，
+         *   > 而实际上它一个前驱都没读过。
+         */
+        upstreamSelection: Object.freeze({
+          by: 'task.blockedBy',
+          endpoint: '/api/task?id=',
+          maxUpstream: maxUpstream,
+          onlyDone: true,
+          skippedReportedAs: 'loadSources() 返回值的 upstreamSkipped（**尚未**进快照，等 PRT-408）',
+        }),
         /**
          * ⚠️ 一处**形状决定的**边界，写出来而不是留给运维去猜。
          *
@@ -530,9 +693,10 @@ export function createHubSourceLoader({
           Object.freeze({
             key: 'upstreamDeliveries',
             absentAs: [],
-            why: '列表形来源，而且这一族**还没有读端点**（见 unserved）：'
-              + '现在它既没有候选、也不会有 missing，只在 availability 里被点名',
-            needs: 'PRT-405（读端点）与 PRT-408（"已读但为空"的位置）',
+            why: '列表形来源：**每个前驱都不产出交付**（全都没 done / 依赖超上限）'
+              + '与"这个任务根本没有上游"在快照里都是零个候选，'
+              + '而后者是链头、前者是链断了——两者的处置完全不同',
+            needs: 'PRT-408 的来源清单',
           }),
         ]),
       })

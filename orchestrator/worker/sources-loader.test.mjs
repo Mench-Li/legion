@@ -87,7 +87,7 @@ async function post(path, body) {
  * 而这会表现成"装配器读不到任务"，看起来像本模块的缺陷。
  * （写这组用例时正是这么踩了一次。）
  */
-async function seedTask({ title = '做一个东西', scope = 'default', description = '描述', role = null, goalId = null } = {}) {
+async function seedTask({ title = '做一个东西', scope = 'default', description = '描述', role = null, goalId = null, blockedBy = null } = {}) {
   const r = await post('/api/create', {
     title, description, scope, acceptance: [], boundary: { do: [], dont: [] }, by: 'general',
     // PRT-402：`role` 与 `goalId` 是装载器**取团队计划与岗位清单的键**，
@@ -95,6 +95,8 @@ async function seedTask({ title = '做一个东西', scope = 'default', descript
     // 而手插库会让"路由的参数名写错了"整条不被执行。
     ...(role === null ? {} : { role }),
     ...(goalId === null ? {} : { goalId }),
+    // PRT-405：`blockedBy` 是装载器**取上游交付的键**（同一个理由）。
+    ...(blockedBy === null ? {} : { blockedBy }),
   })
   assert.ok(r.status === 200 || r.status === 201, `造任务失败：${r.status} ${JSON.stringify(r.body).slice(0, 200)}`)
   const id = r.body?.task?.id
@@ -103,6 +105,30 @@ async function seedTask({ title = '做一个东西', scope = 'default', descript
 }
 
 const SCOPE = 'default'
+
+/**
+ * 把一个任务推到 `done`，**走真实的状态机**（不是直接改库）。
+ *
+ * ★ 为什么不是一次 `POST /api/transition {to:'done'}`：hub 的迁移是有向图，
+ *   而且 `to='done'` 有两条额外的守卫——必须先到 `in_review`，且
+ *   **只有 `by='general'`** 能在用户接受后完成。第一版我直接跳 `done`，
+ *   断言红在 `upstreamSkipped[0].status`（实际 `backlog`）上，
+ *   而红的原因是**用例自己没走状态机**，不是产品少了一层。
+ *
+ *   > 一个"手改库把任务标成 done"的种子，
+ *   > 与一个"走真实状态机"的种子，在跑起来之后是同一个东西——
+ *   > 只不过前者会让"这条链真的能走到 done 吗"这件事永远不被执行，
+ *   > 而 PRT-405 读的正是 `done` 这个状态。
+ */
+async function driveToDone(id, scope, by = 'coder') {
+  const steps = ['todo', 'in_progress', 'in_review']
+  for (const to of steps) {
+    const r = await post('/api/transition', { id, by, to, scope, force: true })
+    assert.equal(r.status, 200, `迁移到 ${to} 失败：${r.status} ${JSON.stringify(r.body).slice(0, 200)}`)
+  }
+  const done = await post('/api/transition', { id, by: 'general', to: 'done', scope, force: true })
+  assert.equal(done.status, 200, `迁移到 done 失败：${done.status} ${JSON.stringify(done.body).slice(0, 200)}`)
+}
 
 // ── ① 从真 hub 取到真来源 ────────────────────────────────────────────────
 
@@ -277,16 +303,16 @@ test('★★ 取不到的来源族被**点名**列出，且每条都说清缺的
   const loader = createHubSourceLoader({ hub: makeHub(), scope: SCOPE })
   const av = loader.availability()
   const keys = av.unserved.map((u) => u.key)
-  for (const k of ['upstreamDeliveries', 'workspaceState']) {
+  for (const k of ['workspaceState']) {
     assert.ok(keys.includes(k), `${k} 必须被点名——"静静地不出现"与"取不到"在账本上长得一样`)
   }
   for (const u of av.unserved) {
     assert.ok(u.reason.length > 20, `${u.key} 的原因必须具体，不能只写"没有"`)
   }
-  // ★ PRT-402 / PRT-404 之后这三条**不再缺**，所以它们必须从 `unserved` 里消失。
+  // ★ PRT-402 / 404 / 405 之后这几条**不再缺**，所以它们必须从 `unserved` 里消失。
   //   留着它们的后果不是"多说了一句"：`unserved` 是**产品缺口的清单**，
   //   而一个已经补上的缺口挂在上面，会让这份清单失去"照着它能干完活"的性质。
-  for (const k of ['teamPlan', 'employeeManifest', 'userFeedback']) {
+  for (const k of ['teamPlan', 'employeeManifest', 'userFeedback', 'upstreamDeliveries']) {
     assert.ok(!keys.includes(k), `${k} 已经接上了，不该还留在 unserved 里`)
   }
 })
@@ -295,9 +321,9 @@ test('★★ 补上的缺口进 `formerlyUnserved`，且写明**当时缺的是�
   const loader = createHubSourceLoader({ hub: makeHub(), scope: SCOPE })
   const av = loader.availability()
   const keys = av.formerlyUnserved.map((u) => u.key)
-  assert.deepEqual([...keys].sort(), ['employeeManifest', 'teamPlan', 'userFeedback'])
+  assert.deepEqual([...keys].sort(), ['employeeManifest', 'teamPlan', 'upstreamDeliveries', 'userFeedback'])
   for (const u of av.formerlyUnserved) {
-    assert.ok(['PRT-402', 'PRT-404'].includes(u.fixedBy), `${u.key} 要写明是哪一批补上的`)
+    assert.ok(['PRT-402', 'PRT-404', 'PRT-405'].includes(u.fixedBy), `${u.key} 要写明是哪一批补上的`)
     assert.ok(u.servedBy.startsWith('/api/'), `${u.key} 要写清现在由哪条端点供上`)
     // "当时缺的是什么"必须留着：删掉它，下一次有人看到一份带 missing 候选的
     // 快照时，就没有任何地方告诉他这几条**曾经每次运行都缺**。
@@ -508,6 +534,114 @@ test('★★ 没有 taskId 且 `requireTask: false` 时**不读**反馈端点（
   assert.deepEqual(src.userFeedback, [])
   const paths = loader.lastReads().map((r) => r.path.split('?')[0])
   assert.ok(!paths.includes('/api/task-feedback'), `没有 taskId 就不该读：${paths.join(' | ')}`)
+})
+
+
+// ── ④d PRT-405：上游员工交付（`blockedBy` 前驱）──────────────────────────
+test('★★★ 上游交付**真的读得到**：按 `blockedBy` 读前驱，且只认 `done` 的', async () => {
+  const scope = 'src-load-upstream'
+  // 上游（coder）先建、做成 done、登记一条产物；下游（tester）blockedBy 指向上游。
+  const up = await seedTask({ title: '实现导出', scope, role: 'coder' })
+  assert.equal((await post('/api/artifact', { id: up, by: 'coder', kind: 'file', path: 'src/export.mjs', title: '导出实现', scope })).status, 200)
+  // ★ 上游**没完成**时：下游拿不到交付（这是后半段要验的）
+  const down = await seedTask({ title: '测试导出', scope, role: 'tester', blockedBy: [up] })
+
+  const mk = () => createHubSourceLoader({ hub: makeHub(), scope })
+  let src = await mk().loadSources({ taskId: down, scope })
+  assert.deepEqual(src.upstreamDeliveries, [], '上游还没 done，不能产出交付')
+  assert.equal(src.upstreamSkipped.length, 1, '但**必须记下来**，不能静默')
+  assert.equal(src.upstreamSkipped[0].taskId, up)
+  assert.notEqual(src.upstreamSkipped[0].status, 'done', '还没 done')
+  assert.ok(src.upstreamSkipped[0].reason.includes('done'), src.upstreamSkipped[0].reason)
+
+  // 把上游推到 done（**走真实状态机**，见 driveToDone）
+  await driveToDone(up, scope)
+
+  const loader = mk()
+  src = await loader.loadSources({ taskId: down, scope })
+  assert.equal(src.upstreamDeliveries.length, 1, JSON.stringify(src.upstreamDeliveries))
+  const d = src.upstreamDeliveries[0]
+  assert.equal(d.id, up, '交付 id 就是上游任务 id')
+  assert.equal(d.fromRole, 'coder')
+  assert.equal(d.taskId, up)
+  assert.equal(d.artifacts.length, 1, '上游登记的产物要带在交付里')
+  assert.equal(d.artifacts[0].path, 'src/export.mjs')
+  // ★ 四个键**一律出现**（缺的写 null）：省略会让"从没填过"与"填了空"
+  //   得到同一个内容哈希。
+  assert.deepEqual(Object.keys(d.artifacts[0]), ['kind', 'path', 'title', 'digest'])
+  assert.equal(d.artifacts[0].digest, null, '没给 digest 就是 null，不是被省略')
+  assert.ok(typeof d.summary === 'string' && d.summary.includes('coder'), d.summary)
+  assert.deepEqual(src.upstreamSkipped, [], '读到了就没有跳过的')
+
+  // 装配一次：类型是 upstream-delivery，且**不可信**
+  const { collectCandidates } = await import('../../runtime/context/sources.mjs')
+  const cands = collectCandidates({ ...src, scope })
+  const upCands = cands.filter((x) => x.source.type === 'upstream-delivery')
+  assert.equal(upCands.length, 1, `上游交付候选应恰好 1 条：${JSON.stringify(cands.map((x) => x.source.type))}`)
+  assert.equal(upCands[0].source.trust, 'untrusted',
+    '上游是内部员工**不构成可信理由**：它的输出可能含它读到的外部内容（污染的传递性）')
+  assert.ok(upCands[0].source.content.includes('src/export.mjs'), '产物引用要进内容')
+})
+
+test('★★ 上游交付读的是 `blockedBy` 前驱，**不是**别的任务（`/api/task` 覆盖不算数）', async () => {
+  // 这条钉的是"读的是**哪些**任务"：`consumed` 里只有 `/api/task`，
+  // 而 PRT-405 的全部内容恰恰是"读的是前驱"。
+  const scope = 'src-load-upstream2'
+  const a = await seedTask({ title: '无关任务 A', scope, role: 'coder' })
+  await driveToDone(a, scope)
+  const leaf = await seedTask({ title: '没有上游的任务', scope, role: 'coder' })
+
+  const loader = createHubSourceLoader({ hub: makeHub(), scope })
+  const src = await loader.loadSources({ taskId: leaf, scope })
+  // ★ 链头**没有**上游：不该因为"A 是 done"就把它当成交付。
+  assert.deepEqual(src.upstreamDeliveries, [], '没有 blockedBy 就没有上游交付')
+  const readIds = loader.lastReads().map((r) => r.path).filter((p) => p.startsWith('/api/task?'))
+  assert.deepEqual(readIds, [`/api/task?id=${leaf}`],
+    `只该读自己那一个任务：${readIds.join(' | ')}`)
+
+  // availability 要把"读的是前驱"这件事写出来
+  const av = loader.availability()
+  assert.equal(av.upstreamSelection.by, 'task.blockedBy')
+  assert.equal(av.upstreamSelection.maxUpstream, 20)
+  assert.equal(av.upstreamSelection.onlyDone, true)
+})
+
+test('★★ 上游前驱**不存在**时不静默（数据不一致要说出来，而不是当成链头）', async () => {
+  const scope = 'src-load-upstream3'
+  // blockedBy 指向一个不存在的任务：链被删过 / 数据不一致。
+  // 若当成"没有上游"，模型会以为自己是链头——而它是链断了。
+  const t = await seedTask({ title: '依赖幽灵', scope, role: 'tester', blockedBy: ['T-根本不存在'] })
+  const loader = createHubSourceLoader({ hub: makeHub(), scope })
+  const src = await loader.loadSources({ taskId: t, scope })
+  assert.deepEqual(src.upstreamDeliveries, [])
+  assert.equal(src.upstreamSkipped.length, 1)
+  assert.equal(src.upstreamSkipped[0].taskId, 'T-根本不存在')
+  assert.ok(src.upstreamSkipped[0].reason.includes('不存在'), src.upstreamSkipped[0].reason)
+})
+
+test('★★ `maxUpstream` 截断时**说出来**（没读 ≠ 不存在）', async () => {
+  const scope = 'src-load-upstream4'
+  const deps = []
+  for (let i = 0; i < 3; i += 1) {
+    const d = await seedTask({ title: `前驱 ${i}`, scope, role: 'coder' })
+    await driveToDone(d, scope)
+    deps.push(d)
+  }
+  const last = await seedTask({ title: '三个上游', scope, role: 'tester', blockedBy: deps })
+  const loader = createHubSourceLoader({ hub: makeHub(), scope, maxUpstream: 2 })
+  const src = await loader.loadSources({ taskId: last, scope })
+  assert.equal(src.upstreamDeliveries.length, 2, '只读前 2 个')
+  const trunc = src.upstreamSkipped.find((s) => s.truncated !== undefined)
+  assert.ok(trunc, `截断必须被说出来：${JSON.stringify(src.upstreamSkipped)}`)
+  assert.equal(trunc.truncated, 1)
+  assert.ok(trunc.reason.includes('maxUpstream=2'), trunc.reason)
+})
+
+test('★ `maxUpstream` 必须是非负整数（接线错误在构造期说清）', () => {
+  for (const bad of [-1, 1.5, 'x', null]) {
+    assert.throws(() => createHubSourceLoader({ hub: makeHub(), scope: SCOPE, maxUpstream: bad }),
+      /maxUpstream/, `maxUpstream=${JSON.stringify(bad)} 应当构造期就拒绝`)
+  }
 })
 
 

@@ -122,6 +122,20 @@ import { applyModelMigration, describeMigration, planModelMigration } from './mo
 // 在写入这张表之前，那份快照只存在于一次函数调用的栈上——**没有持久化就无从查看**，
 // 于是完成标准无法达成，无论装配器做得多对。
 import { createContextStore } from './context-store.mjs'
+// PRT-402：TeamPlan 与 EmployeeManifest 的数据面。**新建在独立模块**——
+// 与 `run-store.mjs` / `context-store.mjs` 的方向一致，不再往 server.mjs 里堆表结构。
+//
+// ★ `CONTEXT_PLAN_ERRORS` 要在这里用，不是死导入：路由的 404 必须回**与 store
+//   同一个常量**。第一版我在路由里手打了 `'TEAM_PLAN_NOT_FOUND'` 这个字符串，
+//   于是同一个错误码有了两份字面量——而两份字面量迟早有一份改不到。
+//
+//   > 一个"路由手打错误码、store 定义错误码"的实现，
+//   > 与一个"两边用同一个常量"的实现，在谁都没改过它的时候是同一个东西——
+//   > 只不过前者会让一次码改名变成"store 报了新码、路由还在报旧码"，
+//   > 而调用方按新码写的分支从此**永远不命中**。
+import {
+  CONTEXT_PLAN_ERRORS, createContextPlanStore, ensureContextPlanSchema,
+} from './context-plan-store.mjs'
 // PRT-409 右半部分：快照导出（自验证 + 离线可验）。
 import {
   buildSnapshotExport, verifySnapshotExport, ContextExportError, CONTEXT_EXPORT_CODES,
@@ -481,6 +495,24 @@ let contextStoreInstance = null
  */
 const TOKENIZER_REGISTRY = new Map()
 
+// PRT-402：TeamPlan / EmployeeManifest 的存储。**延迟构造**，与 contextStore 同形——
+// 这样只跑只读路由的进程不会因为建表而写库。
+let contextPlanStoreInstance = null
+function contextPlanStore() {
+  if (contextPlanStoreInstance === null) {
+    contextPlanStoreInstance = createContextPlanStore({
+      db,
+      // 与 contextStore 同一处适配：本文件的 `audit` 是**位置参数**的，
+      // 而 store 按对象形态调用（见 `context-store.mjs` 里那段注释——
+      // 直接把函数本身传进去会让 SQLite 绑定报错，而那次异常发生在**写入之后**，
+      // 于是"一次成功的写入被报成失败"）。
+      writeAudit: ({ action, scope, detail, actor }) =>
+        audit(actor ?? null, scope ?? '*', action, '*', detail),
+    })
+  }
+  return contextPlanStoreInstance
+}
+
 function contextStore() {
   if (contextStoreInstance === null) {
     contextStoreInstance = createContextStore({
@@ -603,6 +635,13 @@ async function handleRun(req, res, run) {
       fromAmount: e?.fromAmount,
       toAmount: e?.toAmount,
       currency: e?.currency,
+      // PRT-402：计划被冻结时必须带上**是哪一版**、是哪个 id、以及哪几个字段
+      // 出了问题。不带 id/version 的话调用方只收到一句"已经冻结"，
+      // 而它要做的是发一个新版本——那需要知道当前冻到第几版。
+      id: e?.id,
+      version: e?.version,
+      field: e?.field,
+      fields: e?.fields,
       serverTimeMs: Date.now(),
     })
   }
@@ -951,6 +990,14 @@ ensureApprovalSchema(db)
 // 安全事实，后者会被清理/过期。把不可回收的事实放进一张会被清理的表里，
 // 表现是"清理跑完之后，同一操作又能被放行一次"。
 ensureAllowOnceSchema(db)
+
+// PRT-402：TeamPlan 与 EmployeeManifest 两张表。
+//
+// 与 `ensureApprovalSchema` 同一条理由：**表结构与"什么算一条合法记录"
+// 是同一份知识**，所以它住在 `context-plan-store.mjs` 里，生产与夹具调**同一个**函数。
+// 在这里建一份、夹具里抄一份的后果不是"重复劳动"，是夹具手抄的列名会在增删时
+// **静默**与真实结构脱节——插入报错还算好的。
+ensureContextPlanSchema(db)
 
 // PRT-608：**有意不回填**既有行的绑定哈希。
 //
@@ -4668,6 +4715,125 @@ async function handle(req, res, stripPrefix) {
         ...found,
         ...(withVerify ? { verification: contextStore().verify(attemptId) } : {}),
         serverTimeMs: Date.now(),
+      })
+      return
+    }
+    // ── PRT-402：TeamPlan 与 EmployeeManifest 的读面 ────────────────────────
+    //
+    // 这两条来源在 `runtime/context/sources.mjs` 里都是 `required: true`，
+    // 而 hub 一直没有读端点，于是 `sources-loader.mjs` 只能传 `null`——
+    // **每次运行**都产出两条 `missing` 候选。那两条不是"世界就是这样"，
+    // 是"产品的这一块还没做"；而两者在账本上长得一模一样。
+    //
+    //    > 一个"每次运行都缺两条必需来源"的产品，
+    //    > 与一个"这次运行确实没有团队计划"的运行，在快照上长得一模一样——
+    //    > 只不过前者的那两条缺失**永远**不会消失，于是没有人会去看它们。
+    //
+    // 缺席一律 **404**（不是 200 带 null）：装配器把 404 翻成 `null`，
+    // 再由 `sources.mjs` 产出一条**带原因**的 `missing` 候选。若这里回 200 + null，
+    // "读到了、它是空的"与"读不到"就分不开了——而那正是整个装载器要防的事。
+    if (req.method === 'GET' && path === '/api/team-plan') {
+      const scope = url.searchParams.get('scope')
+      if (scope === null || scope.trim() === '') {
+        json(res, 400, { ok: false, code: 'MISSING_PARAM', error: '缺少 scope：计划是挂在空间上的' })
+        return
+      }
+      const versionRaw = url.searchParams.get('version')
+      let version = null
+      if (versionRaw !== null && versionRaw.trim() !== '') {
+        version = Number(versionRaw)
+        if (!Number.isInteger(version) || version < 1) {
+          json(res, 400, { ok: false, code: 'BAD_VERSION', error: 'version 必须是 >= 1 的整数' })
+          return
+        }
+      }
+      const plan = contextPlanStore().readTeamPlan(
+        url.searchParams.get('id'),
+        { scope, version, goalId: url.searchParams.get('goalId') },
+      )
+      if (plan === null) {
+        // 说清是**哪一种**缺席：没有这个 id，还是没有这个目标下的计划。
+        // 两者的修复动作不同（建一份计划 vs 把目标接上计划）。
+        const askId = url.searchParams.get('id')
+        const askGoal = url.searchParams.get('goalId')
+        json(res, 404, {
+          ok: false,
+          code: CONTEXT_PLAN_ERRORS.TEAM_PLAN_NOT_FOUND,
+          error: askId !== null && askId.trim() !== ''
+            ? `空间 ${scope} 里没有团队计划 ${askId}${version === null ? '' : ` 的第 ${version} 版`}`
+            : `空间 ${scope} 里没有挂在目标 ${askGoal} 下的团队计划`,
+          serverTimeMs: Date.now(),
+        })
+        return
+      }
+      json(res, 200, { ok: true, plan, serverTimeMs: Date.now() })
+      return
+    }
+    if (req.method === 'GET' && path === '/api/team-plans') {
+      const scope = url.searchParams.get('scope')
+      const limitRaw = url.searchParams.get('limit')
+      const limit = limitRaw === null ? 100 : Math.min(Math.max(Number(limitRaw) || 0, 1), 500)
+      const items = contextPlanStore().listTeamPlans({ scope, limit })
+      json(res, 200, { ok: true, plans: items, count: items.length, serverTimeMs: Date.now() })
+      return
+    }
+    // 冻结一版团队计划（PRT-402 的**写**一半）。
+    //
+    // 没有这条路由，读面永远返回 404，而"读面做好了"与"库里永远为空"
+    // 在用户那里是同一件事（与 PRT-505 的 `store.put` 零调用方同源）。
+    if (req.method === 'POST' && path === '/api/team-plans') {
+      await handleRun(req, res, (body) => {
+        const r = contextPlanStore().putTeamPlan(body.plan ?? body, {
+          scope: body.scope, actor: body.actor ?? body.by ?? null,
+        })
+        return { plan: r.plan, idempotent: r.idempotent }
+      })
+      return
+    }
+    if (req.method === 'GET' && path === '/api/employee-manifest') {
+      const scope = url.searchParams.get('scope')
+      if (scope === null || scope.trim() === '') {
+        json(res, 400, { ok: false, code: 'MISSING_PARAM', error: '缺少 scope：岗位边界是按空间定的' })
+        return
+      }
+      const role = url.searchParams.get('role')
+      const employeeId = url.searchParams.get('employeeId')
+      if ((role === null || role.trim() === '') && (employeeId === null || employeeId.trim() === '')) {
+        // 两个都不给就**不猜**：返回"任意一份清单"会让模型读到别人的边界，
+        // 而它看起来完全正常。
+        json(res, 400, {
+          ok: false, code: 'MISSING_PARAM',
+          error: '缺少 role 或 employeeId：不指定身份就取不到"我的边界"，'
+            + '而随便给一份会让模型照着一个不是它的岗位约束干活',
+        })
+        return
+      }
+      const manifest = contextPlanStore().readEmployeeManifest({ scope, role, employeeId })
+      if (manifest === null) {
+        json(res, 404, {
+          ok: false, code: CONTEXT_PLAN_ERRORS.EMPLOYEE_MANIFEST_NOT_FOUND,
+          error: `空间 ${scope} 里没有 ${role ?? employeeId} 的岗位清单`,
+          serverTimeMs: Date.now(),
+        })
+        return
+      }
+      json(res, 200, { ok: true, manifest, serverTimeMs: Date.now() })
+      return
+    }
+    if (req.method === 'GET' && path === '/api/employee-manifests') {
+      const scope = url.searchParams.get('scope')
+      const limitRaw = url.searchParams.get('limit')
+      const limit = limitRaw === null ? 100 : Math.min(Math.max(Number(limitRaw) || 0, 1), 500)
+      const items = contextPlanStore().listEmployeeManifests({ scope, limit })
+      json(res, 200, { ok: true, manifests: items, count: items.length, serverTimeMs: Date.now() })
+      return
+    }
+    if (req.method === 'POST' && path === '/api/employee-manifests') {
+      await handleRun(req, res, (body) => {
+        const r = contextPlanStore().putEmployeeManifest(body.manifest ?? body, {
+          scope: body.scope, actor: body.actor ?? body.by ?? null,
+        })
+        return { manifest: r.manifest, created: r.created }
       })
       return
     }

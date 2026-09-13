@@ -87,9 +87,14 @@ async function post(path, body) {
  * 而这会表现成"装配器读不到任务"，看起来像本模块的缺陷。
  * （写这组用例时正是这么踩了一次。）
  */
-async function seedTask({ title = '做一个东西', scope = 'default', description = '描述' }) {
+async function seedTask({ title = '做一个东西', scope = 'default', description = '描述', role = null, goalId = null } = {}) {
   const r = await post('/api/create', {
     title, description, scope, acceptance: [], boundary: { do: [], dont: [] }, by: 'general',
+    // PRT-402：`role` 与 `goalId` 是装载器**取团队计划与岗位清单的键**，
+    // 所以它们必须在种子这一步就能给出来——否则那两条路径只能靠手插库来测，
+    // 而手插库会让"路由的参数名写错了"整条不被执行。
+    ...(role === null ? {} : { role }),
+    ...(goalId === null ? {} : { goalId }),
   })
   assert.ok(r.status === 200 || r.status === 201, `造任务失败：${r.status} ${JSON.stringify(r.body).slice(0, 200)}`)
   const id = r.body?.task?.id
@@ -272,29 +277,214 @@ test('★★ 取不到的来源族被**点名**列出，且每条都说清缺的
   const loader = createHubSourceLoader({ hub: makeHub(), scope: SCOPE })
   const av = loader.availability()
   const keys = av.unserved.map((u) => u.key)
-  for (const k of ['teamPlan', 'employeeManifest', 'userFeedback', 'upstreamDeliveries', 'workspaceState']) {
+  for (const k of ['userFeedback', 'upstreamDeliveries', 'workspaceState']) {
     assert.ok(keys.includes(k), `${k} 必须被点名——"静静地不出现"与"取不到"在账本上长得一样`)
   }
   for (const u of av.unserved) {
     assert.ok(u.reason.length > 20, `${u.key} 的原因必须具体，不能只写"没有"`)
   }
-  // 原因要指向**具体缺的东西**，而不是一句套话
-  assert.match(av.unserved.find((u) => u.key === 'teamPlan').reason, /missions|TeamPlan/)
-  assert.match(av.unserved.find((u) => u.key === 'employeeManifest').reason, /members|边界|manifest/i)
+  // ★ PRT-402 之后这两条**不再缺**，所以它们必须从 `unserved` 里消失。
+  //   留着它们的后果不是"多说了一句"：`unserved` 是**产品缺口的清单**，
+  //   而一个已经补上的缺口挂在上面，会让这份清单失去"照着它能干完活"的性质。
+  for (const k of ['teamPlan', 'employeeManifest']) {
+    assert.ok(!keys.includes(k), `${k} 已经接上了，不该还留在 unserved 里`)
+  }
 })
 
-test('★ teamPlan / employeeManifest 传 null（让 sources.mjs 产出 missing 候选，而不是少一项）', async () => {
-  const id = await seedTask({ title: '任务' })
+test('★★ 补上的缺口进 `formerlyUnserved`，且写明**当时缺的是什么**', () => {
   const loader = createHubSourceLoader({ hub: makeHub(), scope: SCOPE })
-  const src = await loader.loadSources({ taskId: id, scope: SCOPE })
+  const av = loader.availability()
+  const keys = av.formerlyUnserved.map((u) => u.key)
+  assert.deepEqual([...keys].sort(), ['employeeManifest', 'teamPlan'])
+  for (const u of av.formerlyUnserved) {
+    assert.equal(u.fixedBy, 'PRT-402')
+    assert.ok(u.servedBy.startsWith('/api/'), `${u.key} 要写清现在由哪条端点供上`)
+    // "当时缺的是什么"必须留着：删掉它，下一次有人看到一份带 missing 候选的
+    // 快照时，就没有任何地方告诉他这两条**曾经每次运行都缺**。
+    assert.ok(u.was.length > 20, `${u.key} 要写明它当时为什么缺`)
+  }
+  // 与 unserved 是**互补**的两份，不是同一份的两种叫法
+  const unservedKeys = av.unserved.map((u) => u.key)
+  for (const k of keys) assert.ok(!unservedKeys.includes(k), `${k} 不能两边都在`)
+})
+
+test('★★ 团队计划与岗位清单**真的从 hub 读得到**（PRT-402 的接线）', async () => {
+  // 这份种子数据走的是**真实路由**（POST /api/team-plans、POST /api/employee-manifests），
+  // 不是往库里手插行。手插行会让"路由的参数名写错了"这件事整条不被执行——
+  // 而参数名写错正是本批最容易犯的错。
+  const scope = 'src-load-plan'
+  // ★ `goalId` 是取团队计划的**键**——不给它，装载器按设计**不发那次请求**。
+  //   第一版这份用例忘了给，于是"计划必须读回来"红在 `null` 上，
+  //   而红的原因是**用例自己少给了一个参数**。这正是 §「没有 goalId 就不猜」
+  //   那条用例存在的价值：它把这个前提变成了一条会红的断言。
+  const goalId = 'g-src-load'
+  const planSeeded = await post('/api/team-plans', {
+    scope, actor: 'tester',
+    plan: {
+      id: 'tp-src-load', version: 1, goalId,
+      title: '装载器用例的团队计划', objective: '证明它读得到',
+      stages: ['dev', 'review'],
+    },
+  })
+  assert.equal(planSeeded.status, 200, `种子计划写入失败：${JSON.stringify(planSeeded.body)}`)
+  const seeded = await post('/api/employee-manifests', {
+    scope, actor: 'tester',
+    manifest: {
+      role: 'dev', employeeId: 'e-src-load', displayName: '装载器用例岗位',
+      responsibilities: ['写代码'], allowedTools: ['read', 'edit'], deniedTools: ['deploy'],
+      approvalPolicy: 'ask-on-write', limits: { maxTokens: 1000 },
+    },
+  })
+  assert.equal(seeded.status, 200, `种子清单写入失败：${JSON.stringify(seeded.body)}`)
+
+  const id = await seedTask({ title: '任务', scope, role: 'dev', goalId })
+  const loader = createHubSourceLoader({ hub: makeHub(), scope })
+  const src = await loader.loadSources({ taskId: id, scope, role: 'dev' })
+
+  assert.equal(src.teamPlan?.id, 'tp-src-load', '团队计划必须真的读回来')
+  assert.equal(src.teamPlan?.version, 1)
+  assert.equal(src.teamPlan?.stages.length, 2)
+  assert.equal(src.employeeManifest?.employeeId, 'e-src-load', '岗位清单必须真的读回来')
+  assert.deepEqual(src.employeeManifest?.deniedTools, ['deploy'])
+
+  // ★ 端点回的是 `{ok, plan}` / `{ok, manifest}`，而 `sources.mjs` 要的是**里面那个**。
+  //   忘了拆包的表现极其隐蔽：`teamPlanSource({ok:true,plan:{…}})` 里 `plan.id`
+  //   是 `undefined` → 抛 `TeamPlan 必须有 id` → 整条装配 400。
+  //   或者更坏：`employeeManifestSource` 取 `manifest.employeeId ?? manifest.id`
+  //   两个都是 undefined，同样抛错——**但它抛的是"必须有 employeeId"**，
+  //   而响应里明明有一个 employeeId。这正是本断言要钉住的形状。
+  assert.ok(!('ok' in src.teamPlan), '包装层必须被拆掉，不能把 {ok, plan} 整个递下去')
+  assert.ok(!('ok' in src.employeeManifest))
+
+  // 读过的端点要出现在 lastReads 里——"到底问了哪些端点"是排障时的一半答案
+  const paths = loader.lastReads().map((r) => r.path)
+  assert.ok(paths.some((p) => p.startsWith('/api/team-plan?')), `没读过团队计划端点：${paths.join(' | ')}`)
+  assert.ok(paths.some((p) => p.startsWith('/api/employee-manifest?')), `没读过岗位清单端点：${paths.join(' | ')}`)
+})
+
+test('★★ 读不到时是 `null`（→ missing 候选），**不是** `{}` 也不是 400', async () => {
+  // 没有种子的空间：两条端点都回 404，而 404 必须翻成 `null`。
+  // `goalId` 要给（否则按设计不发请求，测的就成了"没问过"而不是"问过说没有"）。
+  const scope = 'src-load-empty'
+  const id = await seedTask({ title: '空空间任务', scope, role: 'nobody', goalId: 'g-src-load-empty' })
+  const loader = createHubSourceLoader({ hub: makeHub(), scope })
+  const src = await loader.loadSources({ taskId: id, scope, role: 'nobody' })
+
   assert.equal(src.teamPlan, null)
   assert.equal(src.employeeManifest, null)
-  // ★ 关键：这两个键**必须存在**。少了键会让 collectCandidates 里
-  //   `input.teamPlan ?? null` 同样得到 null，看似一样——但一个显式的
-  //   null 是一个"我们知道它该在这"的声明，缺键不是。
+  // ★ 键**必须存在**。少了键会让 collectCandidates 里 `input.teamPlan ?? null`
+  //   同样得到 null，看似一样——但一个显式的 null 是一个"我们知道它该在这"
+  //   的声明，缺键不是。
   assert.ok('teamPlan' in src, '键必须在：缺席与没说过的区别就在这里')
   assert.ok('employeeManifest' in src)
+  // ★ 而 `{}` 会让 `sources.mjs` 走进"有来源"那条分支，产出一条**内容为空**的
+  //   TeamPlan，于是它不再出现在 `excluded[]` 里——快照会声称模型看过团队计划。
+  assert.notDeepEqual(src.teamPlan, {})
+  assert.notDeepEqual(src.employeeManifest, {})
+
+  // 404 是**问过之后**才知道的事，所以它不该让整次装配失败
+  const reads = loader.lastReads().filter((r) => r.path.startsWith('/api/team-plan'))
+  assert.equal(reads.length, 1)
+  assert.equal(reads[0].ok, false)
+  assert.equal(reads[0].status, 404)
 })
+
+test('★ 没有 goalId / role 时**不发那次请求**（不猜 = 不读别人的东西）', async () => {
+  // ★ 两个都缺时若照样去问（比如把 goalId 省略成空串），会在 hub 上拿到 400；
+  //   而把 400 也当"没有"处理，与**根本没问过**在账本上是同一行。
+  //   这里钉的是更强的一件事：**不猜身份就不读**。
+  const scope = 'src-load-noguess'
+  const id = await seedTask({ title: '无目标无岗位的任务', scope })
+  const loader = createHubSourceLoader({ hub: makeHub(), scope })
+  const src = await loader.loadSources({ taskId: id, scope })
+
+  // 任务没有 goalId、没有 role → 两条来源都取不到，且**没有发出请求**
+  assert.equal(src.teamPlan, null)
+  assert.equal(src.employeeManifest, null)
+  const paths = loader.lastReads().map((r) => r.path)
+  assert.ok(!paths.some((p) => p.startsWith('/api/team-plan')), `不该读团队计划：${paths.join(' | ')}`)
+  assert.ok(!paths.some((p) => p.startsWith('/api/employee-manifest')), `不该读岗位清单：${paths.join(' | ')}`)
+})
+
+// ── ④b PRT-402 的**路由参数校验**（探针⑭量出来的缺口）───────────────────
+//
+// 这一段是断验证逼出来的，不是我事先想到的：探针⑭把
+// 「清单端点必须要求 role/employeeId」改坏成 `if (false)`，**一条用例都没红**。
+// 也就是说那几行校验**没有任何用例覆盖**——它们看起来像防线，
+// 而没有任何东西证明它们真的拦得住。
+//
+//   > 一段"写了但没被任何用例打过"的参数校验，
+//   > 与一段"根本没写"的参数校验，在有人真的漏传参数的时候是同一个东西——
+//   > 只不过前者在代码审查里看起来是完成的。
+test('★★ 清单端点缺 role 与 employeeId → 400，**不猜**给一份别人的边界', async () => {
+  const scope = 'src-load-norole'
+  const res = await fetch(`${base}/api/employee-manifest?scope=${scope}`)
+  const body = await res.json()
+  assert.equal(res.status, 400)
+  assert.equal(body.code, 'MISSING_PARAM')
+  assert.match(body.error, /role|employeeId/)
+})
+
+test('★ 团队计划端点缺 scope → 400（计划是挂在空间上的）', async () => {
+  const res = await fetch(`${base}/api/team-plan?goalId=g1`)
+  const body = await res.json()
+  assert.equal(res.status, 400)
+  assert.equal(body.code, 'MISSING_PARAM')
+})
+
+test('★★ `?version=` 不是正整数 → 400 BAD_VERSION（不是静默退回最新版）', async () => {
+  // ★ 这是这一组里最要紧的一条：若非法 version 被**静默忽略**，
+  //   调用方要"第 3 版"却拿到最新版，而响应里带着一个合法的 plan——
+  //   它会以为历史那一版就是这样的。
+  for (const bad of ['0', '-1', 'abc', '1.5']) {
+    const res = await fetch(`${base}/api/team-plan?scope=default&id=x&version=${encodeURIComponent(bad)}`)
+    const body = await res.json()
+    assert.equal(res.status, 400, `version=${bad} 应被拒`)
+    assert.equal(body.code, 'BAD_VERSION')
+  }
+})
+
+test('★ 列表路由：`/api/team-plans` 与 `/api/employee-manifests` 都答得出，且按空间过滤', async () => {
+  const scope = 'src-load-list'
+  const seeded = await post('/api/team-plans', {
+    scope, actor: 'tester',
+    plan: { id: 'tp-list', version: 1, goalId: 'g-list', stages: ['dev'] },
+  })
+  assert.equal(seeded.status, 200, JSON.stringify(seeded.body))
+  await post('/api/employee-manifests', {
+    scope, actor: 'tester', manifest: { role: 'dev', employeeId: 'e-list' },
+  })
+
+  const plans = await (await fetch(`${base}/api/team-plans?scope=${scope}`)).json()
+  assert.equal(plans.ok, true)
+  assert.deepEqual(plans.plans.map((p) => p.id), ['tp-list'])
+  assert.equal(plans.count, 1)
+
+  const mans = await (await fetch(`${base}/api/employee-manifests?scope=${scope}`)).json()
+  assert.equal(mans.ok, true)
+  assert.deepEqual(mans.manifests.map((m) => m.employeeId), ['e-list'])
+
+  // 别的空间看不到它们（列表也必须带隔离）
+  const other = await (await fetch(`${base}/api/team-plans?scope=src-load-list-other`)).json()
+  assert.deepEqual(other.plans, [])
+})
+
+test('★ 冻结冲突经 HTTP 是 **409**，且带上 id/version（调用方要据此发新版本）', async () => {
+  const scope = 'src-load-frozen'
+  const payload = { scope, actor: 'tester', plan: { id: 'tp-frozen', version: 1, stages: ['dev'] } }
+  assert.equal((await post('/api/team-plans', payload)).status, 200)
+  const again = await post('/api/team-plans', payload)
+  assert.equal(again.status, 200, '同版同内容是幂等，不是冲突')
+  const conflict = await post('/api/team-plans', {
+    scope, actor: 'tester', plan: { id: 'tp-frozen', version: 1, stages: ['dev', 'review'] },
+  })
+  assert.equal(conflict.status, 409)
+  assert.equal(conflict.body.code, 'TEAM_PLAN_FROZEN')
+  // ★ 从 HTTP 一路带出来，不是只留在 store 的异常对象上
+  assert.equal(conflict.body.id, 'tp-frozen')
+  assert.equal(conflict.body.version, 1)
+})
+
 
 test('★ 产物只给引用：正文不装配进来（PRT-405 的预算决定留给调用方）', async () => {
   const id = await seedTask({ title: '任务' })

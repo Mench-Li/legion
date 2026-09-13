@@ -269,6 +269,36 @@ export const SCHEMA = defineSchema({
     'APPROVAL_PORT_REQUEST_ID_MISSING', 'APPROVAL_PORT_ROW_VANISHED',
     'APPROVAL_PORT_ROW_MALFORMED', 'APPROVAL_PORT_TTL_NOT_ANSWERED',
     'APPROVAL_PORT_ABORTED',
+
+    // ── PRT-402：TeamPlan / EmployeeManifest 的具名错误码 ────────────────
+    //
+    // `team-hub/context-plan-store.mjs` 的 `CONTEXT_PLAN_ERRORS` 的值，加上
+    // `server.mjs` 那六条新路由自己回的两个码（`MISSING_PARAM` 上面已登记）。
+    //
+    // 它们不是配置键：进程不"读"它们，而是把它们放进响应与错误对象给调用方看。
+    // 名字是 SCREAMING_SNAKE，所以扫描器会怀疑它们是环境变量——不是。
+    //
+    // ★ 这一组有一条与上面各组都不同的性质：**状态码分两档**。
+    //   `TEAM_PLAN_FROZEN` 是 409（请求合法，是**状态**不允许——要做的是发新版本），
+    //   其余是 400/404（请求本身该改）。所以码在 `code`、状态码在 `statusCode`，
+    //   调用方不该从 HTTP 状态反推该改哪儿。
+    //
+    //   > 一个"所有错误都回 400"的接口，与一个"按修复动作分档"的接口，
+    //   > 在调用方只有一种修法的时候是同一个东西——只不过前者会让
+    //   > "发一个新版本"（409）与"把 scope 填上"（400）看起来是同一种失败。
+    'TEAM_PLAN_NOT_FOUND', 'TEAM_PLAN_INVALID', 'TEAM_PLAN_FROZEN',
+    'EMPLOYEE_MANIFEST_NOT_FOUND', 'EMPLOYEE_MANIFEST_INVALID',
+    // 明文密钥 fail closed 的码。**与 model-store 共用同一个判据**
+    // （`findPlaintextSecrets`），但码不同：model 档案拒收与上下文来源拒收
+    // 是两条不同的修复路径（前者改档案、后者改计划/清单正文）。
+    'CONTEXT_SOURCE_PLAINTEXT_SECRET',
+    // 缺 scope / 缺 role（或 employeeId）——"不猜"的两处。
+    'CONTEXT_SOURCE_SCOPE_UNKNOWN',
+    // `server.mjs` 的 `/api/team-plan?version=` 校验用。**故意不带前缀**：
+    // 它的语义就是"这个查询参数不合法"，与 `MISSING_PARAM` 同族，
+    // 而加 `TEAM_PLAN_` 前缀会让它看起来像 store 的错误码——
+    // 那会让调用方以为要去看 store 的实现，而它只需改 URL。
+    'BAD_VERSION',
   ],
   // team-hub 的 CHAT_ 前缀覆盖了插件的提示词预算变量（CHAT_CTX_*）：它们是**插件**读的配置，
   // team-hub 不读，登记为外来变量，避免误报成「拼写错误」（P3-4）。

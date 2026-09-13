@@ -1907,6 +1907,20 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-402：TeamPlan 与 EmployeeManifest 的数据面。
+      //
+      // 它守的是"那两条来源到底存不存在"这件事本身——在此之前的实情是：
+      // `sources.mjs` 的两个来源函数都做全了、都是 `required: true`，
+      // 而 hub 没有读端点，于是**每次运行**都产出两条 `missing` 候选。
+      //
+      //   > 一个"每次运行都缺两条必需来源"的产品，
+      //   > 与一个"这次运行确实没有团队计划"的运行，在快照上长得一模一样——
+      //   > 只不过前者的那两条缺失**永远**不会消失，于是没有人会去看它们。
+      label: 'context-plan-store（PRT-402：计划冻结不可改写 / 岗位清单 version 服务端递增 / 明文密钥 fail closed）',
+      files: ['team-hub/context-plan-store.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-409：快照持久化。守"没有持久化就等于无法查看"——
       // 在写入这张表之前，快照只存在于一次函数调用的栈上，
       // 于是阶段 4 的完成标准无论装配器做得多对都无法达成。

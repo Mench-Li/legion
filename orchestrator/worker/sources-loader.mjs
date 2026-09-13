@@ -66,16 +66,6 @@ export const SOURCES_LOADER_CODES = Object.freeze({
  */
 export const UNSERVED_SOURCE_FAMILIES = Object.freeze([
   Object.freeze({
-    key: 'teamPlan',
-    reason: 'hub 没有 TeamPlan 的读端点（`/api/missions` 是按 role 聚合的任务视图，'
-      + '与 TeamPlan 记录不是同一个东西，拿它冒充会让"团队计划"变成一份当前任务的镜像）',
-  }),
-  Object.freeze({
-    key: 'employeeManifest',
-    reason: 'hub 没有 EmployeeManifest 的读端点（`/api/members` 只有在线的成员 id/kind，'
-      + '没有职责边界与工具范围——而 manifest 进上下文的**全部意义**就是让模型读到自己的边界）',
-  }),
-  Object.freeze({
     key: 'userFeedback',
     reason: 'hub 没有用户反馈的独立读端点（`userFeedback` 在 `sources.mjs` 里是**另一个类型**：'
       + '"要不要按反馈调整"的处理与评论不同，所以不能拿任务评论去填它）',
@@ -89,6 +79,36 @@ export const UNSERVED_SOURCE_FAMILIES = Object.freeze([
     key: 'workspaceState',
     reason: 'hub 没有工作区状态的读端点（工作区是 worker 本机的目录，'
       + '由后续的工作区阶段提供，不在 hub 的读面里）',
+  }),
+])
+
+/**
+ * 曾经列在 {@link UNSERVED_SOURCE_FAMILIES} 里、**PRT-402 之后不再缺**的来源族。
+ *
+ * ★ 留一份"修好了什么"的账，而不是把那两条直接删掉。
+ *
+ * 删掉的后果是：下一次有人看到一份带 `missing` 候选的快照时，没有任何地方
+ * 告诉他这两条**曾经每次运行都缺**——而那正是它们最危险的地方：
+ * 一个恒久不变的缺口看起来像一条正常的账本条目，于是没有人会去看它。
+ *
+ *   > 一个"把修好的缺口从清单里删掉"的账本，
+ *   > 与一个"记着它曾经永远缺"的账本，在今天的快照上是同一个东西——
+ *   > 只不过前者会让同一个缺口再犯一次，而没人记得它犯过。
+ */
+export const FORMERLY_UNSERVED_SOURCE_FAMILIES = Object.freeze([
+  Object.freeze({
+    key: 'teamPlan',
+    fixedBy: 'PRT-402',
+    servedBy: '/api/team-plan?scope=&goalId=',
+    was: 'hub 没有 TeamPlan 的读端点（`/api/missions` 是按 role 聚合的任务视图，'
+      + '与 TeamPlan 记录不是同一个东西，拿它冒充会让"团队计划"变成一份当前任务的镜像）',
+  }),
+  Object.freeze({
+    key: 'employeeManifest',
+    fixedBy: 'PRT-402',
+    servedBy: '/api/employee-manifest?scope=&role=',
+    was: 'hub 没有 EmployeeManifest 的读端点（`/api/members` 只有在线的成员 id/kind，'
+      + '没有职责边界与工具范围——而 manifest 进上下文的**全部意义**就是让模型读到自己的边界）',
   }),
 ])
 
@@ -337,12 +357,50 @@ export function createHubSourceLoader({
         : (skillsBody?.skills ?? skillsBody?.items ?? [])
       const skills = (Array.isArray(skillList) ? skillList : []).slice(0, maxSkills)
 
+      // ── PRT-402：团队计划与岗位清单 ──
+      //
+      // 这两条都是 `required: true`。此前 hub 没有读端点，只能传 `null`，
+      // 于是**每次运行**都产出两条 `missing` 候选——那不是"世界就是这样"，
+      // 是"产品的这一块还没做"。现在读真端点。
+      //
+      // ★ 404 **必须**翻成 `null`（`notFoundIsNull: true`），不能翻成 `{}`：
+      //   `sources.mjs` 用 `plan === null` 判定"没有这条来源"，而一个空对象
+      //   会让它走进"有来源"那条分支，产出一条**内容为空**的 TeamPlan 来源——
+      //   于是它不再出现在 `excluded[]` 里，而快照会声称模型看过团队计划。
+      //
+      //   > 一个"读不到就给个空对象"的兜底，
+      //   > 与一个"这份来源确实存在、只是内容为空"的记录，在账本上是同一个东西——
+      //   > 只不过前者会让一条**缺失**从"被排除"那一栏里消失。
+      const goalIdForPlan = task?.goalId ?? lease.goalId ?? null
+      let teamPlan = null
+      if (goalIdForPlan !== null && goalIdForPlan !== undefined && String(goalIdForPlan).trim() !== '') {
+        teamPlan = await readOrThrow(
+          `/api/team-plan?scope=${encodeURIComponent(effScope)}&goalId=${encodeURIComponent(goalIdForPlan)}`,
+          { notFoundIsNull: true },
+        )
+      }
+      if (teamPlan !== null && typeof teamPlan !== 'object') teamPlan = null
+      // 端点回的是 `{ok, plan}`，`sources.mjs` 要的是 plan 本身。
+      if (teamPlan !== null && teamPlan.plan !== undefined) teamPlan = teamPlan.plan
+
+      // 岗位清单按**角色的身份**取：任务上写着这个岗位是谁（`role`）。
+      // 取不到 `role` 时**不猜**——猜错等于把别人的边界递给模型，
+      // 而它看起来完全正常。
+      const roleForManifest = task?.role ?? lease.employeeRole ?? lease.role ?? null
+      let employeeManifest = null
+      if (roleForManifest !== null && roleForManifest !== undefined && String(roleForManifest).trim() !== '') {
+        employeeManifest = await readOrThrow(
+          `/api/employee-manifest?scope=${encodeURIComponent(effScope)}&role=${encodeURIComponent(roleForManifest)}`,
+          { notFoundIsNull: true },
+        )
+      }
+      if (employeeManifest !== null && typeof employeeManifest !== 'object') employeeManifest = null
+      if (employeeManifest !== null && employeeManifest.manifest !== undefined) employeeManifest = employeeManifest.manifest
+
       return {
         scope: effScope,
-        // 这两条 hub 没有读端点，只能是 null —— 由 `sources.mjs` 各自产出
-        // 一条 `missing` 候选（而不是**少一项**）。见 UNSERVED_SOURCE_FAMILIES。
-        teamPlan: null,
-        employeeManifest: null,
+        teamPlan,
+        employeeManifest,
         // ★ 一律过一遍 `withEpochMs`：hub 给的是 ISO 的 `createdAt`/`updatedAt`，
         // 而 `sources.mjs` 认的是 `createdAtMs`/`updatedAtMs`。见那个函数的说明——
         // 这是本批**接线才暴露出来**的一处字段名错配，不补会整条装配 400。
@@ -371,9 +429,16 @@ export function createHubSourceLoader({
     availability() {
       return Object.freeze({
         unserved: UNSERVED_SOURCE_FAMILIES,
+        // PRT-402：曾经缺、现在取得到的那些。**不从这里删掉**——
+        // 见 FORMERLY_UNSERVED_SOURCE_FAMILIES 的说明。
+        formerlyUnserved: FORMERLY_UNSERVED_SOURCE_FAMILIES,
         unconsumed: UNCONSUMED_ENDPOINTS,
         // 读面覆盖：hub 上有读端点、且本装配器真的会去读的那些
-        consumed: Object.freeze(['/api/task', '/api/goal', '/api/skills']),
+        consumed: Object.freeze([
+          '/api/task', '/api/goal', '/api/skills',
+          // PRT-402 接上的两条
+          '/api/team-plan', '/api/employee-manifest',
+        ]),
       })
     },
 

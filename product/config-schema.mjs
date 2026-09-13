@@ -147,6 +147,16 @@ export const SCHEMA = defineSchema({
     'FIRST_RUN_PROFILE_WRITE_FAILED',
     'FIRST_RUN_BINDING_WRITE_FAILED',
 
+    // ★ PRT-402 的那 8 个码**不在这里**——它们在 `team-hub/config-schema.mjs`。
+    //   第一版我按"是诊断码就放这儿"的思路加进来了，scan 当场报同样 8 项未处理：
+    //
+    //   > 一个"把所有诊断码都堆在同一个 schema 里"的登记方式，
+    //   > 与一个"按进程分开放"的登记方式，在只有一个进程的时候是同一个东西——
+    //   > 只不过前者会让一条 `team-hub` 的码看起来像 `product` 读的配置，
+    //   > 而 scan 的整条判据正是"这个字面量属于**哪个进程**"。
+    //
+    //   码住在哪个目录，就登记在哪个进程的 schema 里。
+
     // ── PRT-907 支持手册引用的**具名错误码** ────────────────────────────
     //
     // `product/support/runbook.mjs` 的手册正文里引用了这两个错误码，用来把

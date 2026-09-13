@@ -86,6 +86,17 @@ const SCHEMA_SOURCES = [
   // 少了 `decisionSource`，"策略拒绝与沙箱兜底拒绝的修复动作不同"就无从谈起；
   // 少了 `rawInput`，事后回答不了"模型当初到底要它做什么"。
   'toolCallLog',
+  // PRT-402：`team_plans`（冻结的团队计划快照）与 `employee_manifests`（活的岗位清单）。
+  //
+  // 这两张表进基线，与上面几张同一条理由：**表结构就是 spec 那几条要求本身**。
+  // `team_plans` 的复合主键 `(scope, id, version)` 不是索引偏好——它就是
+  // "冻结"这件事的落地：没有 version 进主键，改写旧版就是一次普通 UPDATE；
+  // `employee_manifests` 的 `(scope, role)` 主键就是"一个岗位在这个空间里只有一份"。
+  //
+  // 两列还各自替一句话做证：`team_plans.created_at_ms`（"当时冻的是哪一版、什么时候"）
+  // 与 `employee_manifests.version`（"边界变过没有"——`sources.mjs` 拿它当来源版本，
+  // 于是它决定快照哈希）。少任何一列，那两句话都无从回答。
+  'contextPlanStore',
 ]
 
 // 这些模块也一并纳入 sources 哈希：它们变了，基线里的表清单就可能过期。
@@ -97,6 +108,13 @@ SOURCES.contextStore = join(ROOT, 'team-hub', 'context-store.mjs')
 SOURCES.approvalBinding = join(ROOT, 'team-hub', 'approval-binding.mjs')
 SOURCES.allowOnce = join(ROOT, 'team-hub', 'allow-once.mjs')
 SOURCES.toolCallLog = join(ROOT, 'team-hub', 'tool-call-log.mjs')
+// PRT-402：TeamPlan 与 EmployeeManifest 两张表。
+//
+// ★ 这一行是**门禁自己要求加的**，不是我事先想到的：新文件建了表却没登记，
+//   `--check` 直接报"它们的表对平台契约基线**不可见**"。
+//   不登记的后果正是这道门禁存在的理由——表在真实 schema 里多出来，
+//   而 `--check` 兴高采烈地说"无漂移"。
+SOURCES.contextPlanStore = join(ROOT, 'team-hub', 'context-plan-store.mjs')
 
 /**
  * 采集 schema 的目录。

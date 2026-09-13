@@ -39,7 +39,7 @@ import {
   requestFromExecution,
   toolCallRowOf,
 } from './tool-request.mjs'
-import { CANONICAL_OP_KEYS } from './enforcement.mjs'
+import { AVAILABILITY_CODES, CANONICAL_OP_KEYS, createApprovalAnswerer } from './enforcement.mjs'
 import { CAPABILITY_IDS } from './tool-capability.mjs'
 
 const CTX = Object.freeze({
@@ -614,3 +614,100 @@ test('⑤ ★ 装载时留下的证据都是**算出来的产物**', () => {
   assert.equal(GENERIC_TARGET_ARGUMENTS.includes('path'), true)
   assert.equal(CONTEXT_SCOPED_CAPABILITIES.includes('repo:read'), true)
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PRT-212：`requestApproval` 端口必须拿到 `onConnected` / `signal`（补记的透传）
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('★★★ PRT-212：`onConnected` 必须**透传到** `requestApproval`（不是只传投影）', async () => {
+  // 这条测的是一个**已经发生过的**缺陷：`request: async (short) => …` 那一层
+  // 只把 `projection` 交给了 `requestApproval`，于是上面 `createApprovalAnswerer`
+  // 的 `onConnected` **一次都不会被调用**。
+  //
+  // 后果不是报错，而是**报错的东西**：`runWithPhaseDeadlines` 在连接窗口到期
+  // 而端口没自报时，会退化成 `PHASE_UNREPORTED`（"阶段未自报"）而不是
+  // `RESPONSE_TIMEOUT`。于是：
+  //
+  //   > 一个"从不自报已连接"的审批桥，
+  //   > 与一个"每次都连不上审批箱"的审批桥，在可用性报告上是同一个东西——
+  //   > 只不过前者其实已经把申请放进审批箱了，而且很可能只是没人批。
+  //
+  // 而这两件事的排查方向完全相反：一个去看 hub 起没起，一个去看谁的申请积压着。
+  const seen = []
+  const bridge = createEnforcementBridge({
+    context: CTX,
+    decide: () => ({ kind: 'ask' }),
+    // ★ 端口把收到的第二个参数记下来——这正是被漏掉的那一半。
+    requestApproval: async (_projection, ports) => {
+      seen.push(ports)
+      // 一个**真的**会自报已连接的端口该做的事：先自报，再给结局。
+      ports?.onConnected?.()
+      return 'allowed-once'
+    },
+  })
+
+  const outcome = await bridge.answerer({
+    toolName: 'write-file', callId: 'call-onconnected-1',
+    arguments: { path: 'C:\\work\\a.txt', mode: 'w' },
+  })
+  assert.equal(outcome, 'allowed-once')
+  assert.equal(seen.length, 1, '`requestApproval` 没被调用')
+  const ports = seen[0]
+  assert.equal(typeof ports?.onConnected, 'function',
+    '★★ `onConnected` 没有透传下去——审批箱的"连上了"永远报不出来')
+  assert.ok('signal' in (ports ?? {}), '`signal` 也应该透传（调用方撤回时端口要能看见）')
+  assert.ok('responseTimeoutMs' in (ports ?? {}),
+    '`responseTimeoutMs` 也要透传：端口自己的轮询预算要跟调用方的窗口一致，' +
+    '否则轮询会比 Run 的期限活得更久')
+})
+
+test('★★★ PRT-212：自报了连接才算**响应阶段**超时，不自报就不是', async () => {
+  // 上一条证明了回调传下去了；这条证明**传下去有什么用**。
+  //
+  // 同样一次"端口超时"，两种端口的归因必须不同：
+  //   · 自报了已连接 → `RESPONSE_TIMEOUT`（响应阶段）→ 去看谁的申请积压着；
+  //   · 没自报       → `PHASE_UNREPORTED`（阶段未自报）→ 端口没告诉我们它在哪一段。
+  //
+  // 直接在 `createApprovalAnswerer` 这一层测：只有它有 `onOutcome`，
+  // 而归因（`code`/`phase`）只在 `onOutcome` 里看得见。
+  // 从 `bridge.answerer()` 只能看到"结局是 unavailable"——而两个端口都是 unavailable，
+  // 断言它们相等等于什么都没断言。
+  const mk = (report) => {
+    const seen = []
+    const answerer = createApprovalAnswerer({
+      request: async (_req) => {
+        if (report) _req.onConnected()
+        await new Promise((r) => setTimeout(r, 60))
+        return 'allowed-once'
+      },
+      connectTimeoutMs: 5,
+      responseTimeoutMs: 25,
+      onOutcome: (e) => seen.push(e),
+    })
+    return { answerer, seen }
+  }
+
+  const reported = mk(true)
+  const silent = mk(false)
+  const [a, b] = await Promise.all([
+    reported.answerer({ toolName: 'write-file', callId: 'c1' }),
+    silent.answerer({ toolName: 'write-file', callId: 'c2' }),
+  ])
+
+  assert.equal(a, 'unavailable')
+  assert.equal(b, 'unavailable', '两条路径的**结局**相同——这正是必须看归因的原因')
+
+  const codeOf = (s) => s[0]?.code ?? null
+  const phaseOf = (s) => s[0]?.phase ?? null
+  assert.equal(codeOf(reported.seen), AVAILABILITY_CODES.RESPONSE_TIMEOUT,
+    `自报了连接的端口应该记成响应阶段超时，实际 ${codeOf(reported.seen)}`)
+  assert.equal(phaseOf(reported.seen), 'response', '自报了连接就该落在响应阶段')
+  assert.equal(reported.seen[0].connected, true)
+
+  assert.notEqual(codeOf(silent.seen), codeOf(reported.seen),
+    '★ 不自报与自报的归因**必须不同**——否则"连不上"与"等不到人"就再也分不开了')
+  assert.equal(codeOf(silent.seen), AVAILABILITY_CODES.PHASE_UNREPORTED)
+  assert.equal(phaseOf(silent.seen), null, '没自报时不该硬安一个阶段')
+  assert.equal(silent.seen[0].connected, false)
+})
+

@@ -715,13 +715,31 @@ export function createEnforcementBridge({
     //   > 与一个「上游已经算过、下游却因为拿不到输入而永远说不」的桥，是同一个东西。
     //
     // 正确做法：投影在**收到完整请求的那一层**做（下面的 wrapper），这里只按 callId 取。
+    //
+    // PRT-212 补记：`onConnected` / `signal` / `responseTimeoutMs` 也必须**透传**下去。
+    //
+    // 第一版只把 `projection` 交给 `requestApproval`，于是上面 `createApprovalAnswerer`
+    // 那个 `onConnected` **一次都不会被调用**。后果不是"报错"，而是报**错的东西**：
+    // `runWithPhaseDeadlines` 在连接窗口到期而端口没自报时，会退化成
+    // `PHASE_UNREPORTED`（"阶段未自报"）而不是 `RESPONSE_TIMEOUT`。
+    //
+    //   > 一个"从不自报已连接"的审批桥，
+    //   > 与一个"每次都连不上审批箱"的审批桥，在可用性报告上是同一个东西——
+    //   > 只不过前者其实已经把申请放进审批箱了，而且很可能只是没人批。
+    //
+    // 而"连不上"与"等不到人"的排查方向完全相反：前者去看 hub 起没起，
+    // 后者去看审批箱里积压了谁的申请。中间少传一个回调，这两件事就再也分不开了。
     request: async (short) => {
       const projection = byCallId.get(short?.callId)
       if (projection === undefined) {
         // 没有投影就不问：问不到 = 故障，不是"人说不"。
         return 'unavailable'
       }
-      const outcome = await requestApproval(projection)
+      const outcome = await requestApproval(projection, {
+        onConnected: short?.onConnected ?? null,
+        signal: short?.signal ?? null,
+        responseTimeoutMs: short?.responseTimeoutMs ?? null,
+      })
       if (outcome === 'allowed-once') {
         record(projection.canonicalHash, { source: 'approval', decision: 'allowed-once', reason: 'granted', at: now() })
       }

@@ -246,6 +246,29 @@ export const SCHEMA = defineSchema({
     //   · WRITE_FAILED — 本表没登记的内部码收敛到这里（503，不猜状态码）
     'SECRET_ADMIN_STORE_UNAVAILABLE', 'SECRET_REF_INVALID', 'SECRET_VALUE_EMPTY',
     'SECRET_NOT_FOUND', 'SECRET_STORE_WRITE_FAILED',
+    // PRT-212 审批端口（team-hub/approval-port.mjs）的失败码。
+    //
+    // 它们是**这个端口**对外可见的名字，而端口要回答的问题恰恰是
+    // "为什么这次审批问不到人"——所以每一个都必须是不同的一件事：
+    //   · BAD_WIRING / BAD_POLL_INTERVAL — 接线错了（构造期就抛，不是运行期）
+    //   · CHECK_FAILED                   — 审批箱不可达（**故障**）
+    //   · INBOX_FAILED                   — 读审批箱失败或形状不对（**故障**）
+    //   · UNKNOWN_STATUS / ROW_MALFORMED — 审批箱答了，但我们读不懂（**不可信**）
+    //   · REQUEST_ID_MISSING             — 说好待批准却没给票号（批准之后消费不了）
+    //   · ROW_VANISHED                   — 说好待批准的那一行查不到
+    //                                      （**不是"还没人批"**，见该模块文件头 §二）
+    //   · TTL_NOT_ANSWERED               — 等满了预算，没人处理（申请本身是好的）
+    //   · ABORTED                        — 调用方撤回（不是任何一方的故障）
+    //   · BAD_OPERATION                  — 投影造不出合法主体（桥那一层缺字段）
+    //
+    // 合并其中任何两个，都会让"连不上"与"等不到人"在日志上长得一样——
+    // 而这两件事的排查方向完全相反。
+    'APPROVAL_PORT_BAD_WIRING', 'APPROVAL_PORT_BAD_POLL_INTERVAL',
+    'APPROVAL_PORT_BAD_OPERATION', 'APPROVAL_PORT_CHECK_FAILED',
+    'APPROVAL_PORT_INBOX_FAILED', 'APPROVAL_PORT_UNKNOWN_STATUS',
+    'APPROVAL_PORT_REQUEST_ID_MISSING', 'APPROVAL_PORT_ROW_VANISHED',
+    'APPROVAL_PORT_ROW_MALFORMED', 'APPROVAL_PORT_TTL_NOT_ANSWERED',
+    'APPROVAL_PORT_ABORTED',
   ],
   // team-hub 的 CHAT_ 前缀覆盖了插件的提示词预算变量（CHAT_CTX_*）：它们是**插件**读的配置，
   // team-hub 不读，登记为外来变量，避免误报成「拼写错误」（P3-4）。

@@ -1915,6 +1915,38 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-212：把工具调用投影送进 team-hub 审批箱，并把人/策略的决定带回来。
+      //
+      // 为什么值得单独一套：`createApprovalAnswerer`（阶段期限、`unavailable` vs
+      // `rejected`、闭集外的值不当放行）早已写好，`tool-request.mjs` 也早已把
+      // 端口留好，`tool-request-bridge.mjs` 甚至已经把投影翻成了完整的 F-02 主体。
+      // **三块都在，而中间那条线不存在**——`requestApproval` 在全仓库只有
+      // `null`（默认）或测试里的 `async () => 'rejected'`。
+      //
+      //   *一个"answerer 写得对、端口处处留好、而从来没有人填过它"的审批，
+      //   与一个"根本没有审批"的审批，在运行时的表现是同一个东西——
+      //   只不过前者的用例是绿的。*
+      //
+      // ★ 起一个**真的 hub**。这套件里几乎每个判据都取决于**别人写的**东西：
+      // 状态串叫什么、判定体放在响应的哪一层、`by` 是不是必填、绑定的哈希对不对得上。
+      // 实测抓到三条只有发过请求才知道的：
+      //   ① `check` **必填 `by`**（`handleWrite` 先 `requireMember`）——
+      //      缺了它 400，而端口会记成"审批箱不可达"，把**参数缺失**报成**基础设施故障**；
+      //   ② 判定体在 **`task`** 下面（`{ok:true, task:result}`）不在顶层——
+      //      从顶层读永远是 `undefined` → `UNKNOWN_STATUS`；
+      //   ③ `approved` 有**两个**来源（策略放行不落行、人批准落在行上有 `decidedBy`）——
+      //      一律当策略放行会打出一张自相矛盾的凭据：
+      //      `human:false` + `reason:"策略直接放行"` + `decidedBy:"general"`。
+      //
+      // 还有一条端到端的：**凭据不是装饰**——`ticket.requestId` + 绑定真的能拿去
+      // `/api/permissions/check` 消费掉，而换一份参数就必须被拒。
+      // *一个"批准了、也返回 allowed-once、而拿回来的票据根本消费不了"的端口，
+      // 与一个"什么都没接"的端口，在用户那里都是"我批了，执行时说操作不匹配"。*
+      label: 'approval-port（PRT-212：审批端口 → team-hub 审批箱，起真 hub）',
+      files: ['team-hub/approval-port.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-409 最后一件：上下文快照**查看**界面（spec line 897「支持查看和导出」）。
       //
       // 与其它 `*-ui` 套件同一个形状：界面判定抽进 `workbench/src/snapshotView.ts`

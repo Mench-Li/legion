@@ -45,6 +45,43 @@ import { createEnforcementBridge } from './tool-request.mjs'
 
 export const ASSEMBLE_VERSION = 1
 
+/**
+ * 读一行**实际**拿到的 `{ bridge, registry }`。
+ *
+ * ## 为什么必须"读行自己报的"，而不是"记下我传了什么"
+ *
+ * 本模块存在的全部理由是**两行共用同一份桥与同一本登记簿**。
+ * 而"共用"是**身份**，不是形状：两份各自 `createInFlightRegistry()` 出来的
+ * 登记簿有一模一样的接口，`put`/`peek` 各自都对，只在"一行 put 了、
+ * 另一行 peek 不到"时才暴露。
+ *
+ *   > 一个"两份登记簿都有同样的方法"的装配，
+ *   > 与一个"两行共用同一本"的装配，在形状断言下是同一个东西——
+ *   > 只不过前者的失败要等到真的有人要审批的那一天。
+ *
+ * ★ 这里踩过一次：第一版在本函数所在模块里用 WeakMap **记下传参**
+ * （`set(row, { bridge, registry: sharedRegistry })`），于是把一个
+ * "答案行被传了另一本登记簿"的实现改出来之后，用例**照样全绿**——
+ * 因为账本记的是我以为传了什么，不是行实际闭包到了什么。
+ *
+ *     > 一个"记录了我传了什么"的诊断，
+ *     > 与一个"记录了行实际拿到什么"的诊断，在传错参数时是同一个东西——
+ *     > 只不过前者的用例是绿的。
+ *
+ * 所以改为读**插件对象自己暴露的诊断属性**（`createPreExecutePlugin` /
+ * `createApprovalAnswererPlugin` 用不可枚举属性挂上去），装配方不再自证。
+ *
+ * @returns {{bridge: object|null, registry: object|null}|null}
+ *   不是本目录装配出来的行返回 `null`。
+ */
+export function bindingOf(row) {
+  if (row === null || typeof row !== 'object') return null
+  const registry = row.registry ?? null
+  const bridge = row.bridge ?? null
+  if (registry === null && bridge === null) return null
+  return Object.freeze({ bridge, registry })
+}
+
 /** 装配期的失败码。 */
 export const ASSEMBLE_CODES = Object.freeze({
   /** 没给 Legion 上下文（scope/actor/action/taskId/cwd）。 */

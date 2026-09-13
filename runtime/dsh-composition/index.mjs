@@ -102,6 +102,62 @@ export {
   repairPlanFor,
 } from './bootstrap.mjs'
 
+// PRT-214 组合根：`assembleEnforcement()` 与 `bootstrapDshRuntime()` 缺的**生产调用方**。
+//
+// 在此之前那两件东西（以及 `bindDshRuntime()`）只有用例在调，于是 worker 的
+// `executor` 永远是 `HOST_PORT_REQUIRED`——「强制面未生效时禁止自动执行」
+// 这条保证从未被行使过。
+//
+// 本出口**只**解析配置、装配一次、把 `mount` / `bootstrap` / `bind` 交出去；
+// 它不写补丁层、不 mount 任何东西（理由同上面那段：profile 是 `patchReload: 'live'`）。
+export {
+  ENFORCEMENT_CONFIG_FIELDS,
+  ENFORCEMENT_ROOT_CODES,
+  ENFORCEMENT_ROOT_VERSION,
+  REQUIRED_ENFORCEMENT_CONFIG,
+  enforcementContextOf,
+  enforcementInstallation,
+  enforcementRoot,
+  installEnforcementRoot,
+  resetEnforcementRoot,
+  resolveEnforcementConfig,
+} from './root.mjs'
+
+// PRT-214（续）：补丁层里那一行**真的会调** `installEnforcementRoot()` 的模块。
+//
+// 在此之前"装组合根"这一步没有任何调用方：`installEnforcementRoot()` 只被用例调过，
+// 于是 `enforcementRoot()` 在真实部署里永远是 `null`。
+//
+//   > 一个"有人可以调"的装配入口，与一个"从来没有被调用过"的装配入口，
+//   > 在运行的部署上是同一个东西——只不过前者的用例是绿的。
+//
+// 本出口给出那一行的构造器与它发布的服务名；`plugins/root-row.mjs` 的 `default`
+// 是补丁层实际加载的那个对象（补丁 YAML 按路径加载，不经过本出口）。
+export {
+  DECIDE_ENV_KEYS,
+  ENFORCEMENT_ROOT_SERVICE,
+  NONE_SHORTCUT_CHECKED,
+  REQUIREMENT_OF,
+  ROOT_ROW_CODES,
+  ROOT_ROW_PLUGIN_NAME,
+  ROOT_ROW_VERSION,
+  approvalPortFactory,
+  assertNoneShortcutHolds,
+  createPolicyDecide,
+  createRootRow,
+  decideInputsFromEnv,
+  setApprovalPortFactory,
+} from './plugins/root-row.mjs'
+
+// 装配原语本体。`bindingOf(row)` 是**身份**诊断：这一行挂的是哪一份桥/登记簿——
+// 两行共用同一本是 `assemble.mjs` 存在的全部理由，而共用是身份、不是形状。
+export {
+  ASSEMBLE_CODES,
+  ASSEMBLE_VERSION,
+  assembleEnforcement,
+  bindingOf,
+} from './assemble.mjs'
+
 // 修复入口的**执行**一半（PRT-257）。
 //
 // `repairPlanFor()` 给出计划，本出口让计划真的被行使。在它之前，那份计划的

@@ -19,11 +19,15 @@ import {
   CONTINUABLE_ASPECTS,
   DSH_CONTINUABLE_SURFACE,
   EVIDENCE_LEVEL,
+  IMPLEMENTATION_FINDINGS,
   OWNERSHIP,
   RECOVERY_DECISIONS,
   checkContinuableBoundary,
+  childPolicyPlan,
   classifyRecovery,
   describeContinuableBoundary,
+  implementationFindingsFor,
+  ownershipCheckScope,
 } from './session-boundary.mjs'
 
 const CAPS_OK = Object.freeze({
@@ -91,9 +95,50 @@ test('① 接口面：证据分级同时包含「已核实」与「未验证」�
   assert.equal(EVIDENCE_LEVEL.behavior, 'behavior-unverified')
   const d = describeContinuableBoundary()
   assert.equal(d.evidenceLevel.behavior, 'behavior-unverified')
-  assert.match(d.caveat, /未经端到端验证/)
+  // ★ 原来断言的是 `/未经端到端验证/` 这**一句话**。加了 `implementation` 一级
+  //   之后措辞换了，于是它红了——**红的是措辞，不是判据**。
+  //   把判据从"那句话在不在"改成"那件事有没有被说出来"，否则下一个人
+  //   只要重写一遍注释就能让这条守不住。
+  assert.match(d.caveat, /没有任何一个做过运行时行为验证/)
+  assert.match(d.caveat, /不是端到端实验/)
   for (const a of d.aspects) {
     assert.equal(a.behaviorVerified, false, `${a.aspect} 不得声称行为已验证 —— 本批次没跑过续接`)
+  }
+  // ★ 反面：**不许有任何一面自称 behavior**。
+  //   `behaviorVerified:false` 只管住了那个布尔字段；如果有人把某一面的
+  //   `evidence` 直接写成 `behavior-unverified`（那个常量名字很像"没验证"，
+  //   但它其实是分级里的**最强**一档），上面那条断言**照样绿**。
+  for (const a of d.aspects) {
+    assert.notEqual(a.evidence, EVIDENCE_LEVEL.behavior,
+      `${a.aspect} 标成了 behavior 分级，而本批次一个端到端实验都没跑过`)
+  }
+})
+
+test('① 接口面：`implementation` 是**挣来的** —— 没有出处的结论不许标这一级', () => {
+  // 这一条是本批次新增分级的**门禁**。
+  //
+  // 「读了实现所以结论确定」是一个很强的声明。它只在**给出出处**时才可核，
+  // 而一个不可核的强声明与一个编出来的强声明，在读者那里是同一个东西：
+  //
+  //   > 一条没有出处的结论，与一条编出来的结论，
+  //   > 在读者无法核实这一点上是同一个东西——只不过前者可能是对的。
+  for (const a of describeContinuableBoundary().aspects) {
+    if (a.evidence !== EVIDENCE_LEVEL.implementation) continue
+    const findings = implementationFindingsFor(a.aspect)
+    assert.ok(findings.length > 0,
+      `${a.aspect} 标了 implementation-verified 却一条结论都没有——那一级是空口声明的`)
+    for (const f of findings) {
+      assert.match(f.source, /\.ts$/,
+        `${a.aspect} 的结论 ${f.code} 必须写出处文件（DSH 的 .ts 路径），好让人自己去核`)
+      assert.ok(typeof f.lines === 'string' && f.lines.length > 0,
+        `${a.aspect} 的结论 ${f.code} 必须给出处行号或函数名`)
+      assert.ok(typeof f.evidence === 'string' && f.evidence.length > 40,
+        `${a.aspect} 的结论 ${f.code} 的 evidence 太短——那是一句断言，不是依据`)
+    }
+  }
+  // 反过来：**不许有无主的结论**（挂在一个不存在的面上）。
+  for (const f of IMPLEMENTATION_FINDINGS) {
+    assert.ok(CONTINUABLE_ASPECTS.includes(f.aspect), `结论 ${f.code} 挂在不存在的面上：${f.aspect}`)
   }
 })
 
@@ -252,4 +297,80 @@ test('④ 真实适配器：同 runId 第二次 execute 被拒绝 —— 重执�
     '同 runId 的第二次执行必须被拒绝：把它当"恢复"会得到重复副作用',
   )
   await first.return?.()
+})
+
+// ================================================================ ⑤ 源码级结论的**可执行**部分
+//
+// 上面那张 `IMPLEMENTATION_FINDINGS` 表是给读的人看的。下面这一组守的是
+// 「调用方真的会照着它写」——因为一条只写在表里的结论，
+// 与一条没写下来的结论，在代码有没有照做这件事上是同一个东西。
+
+test('⑤ 子会话策略：未显式设置时落到**全局默认**，而**不是**父策略', () => {
+  const plan = childPolicyPlan({ childHasOwnPolicy: false, configPolicy: 'ask', parentPolicy: 'never' })
+  // ★ 这一条是整组里最要害的：父策略是 `never`（确定性拒绝），
+  //   而子会话未设策略时生效的是 `ask`——**子会话比父会话更宽松**。
+  //   任何"父拒绝了所以子也会拒绝"的推理都会在这里出错，且方向是放开。
+  assert.equal(plan.effectiveIfUnset, 'ask')
+  assert.notEqual(plan.effectiveIfUnset, 'never',
+    '未显式设置时不得继承父会话的 never —— 那是把一次放宽读成一次继承')
+  assert.equal(plan.needsExplicitSet, true)
+})
+
+test('⑤ 子会话策略：`configPolicy` 缺省时落到 ask（再往下就没有兜底了）', () => {
+  const plan = childPolicyPlan({ childHasOwnPolicy: false })
+  assert.equal(plan.effectiveIfUnset, 'ask')
+  // 三个入口必须给出**同一个**答案，否则"没配"这件事会有两种后果
+  assert.equal(childPolicyPlan({ childHasOwnPolicy: false, configPolicy: null }).effectiveIfUnset, 'ask')
+  assert.equal(childPolicyPlan({}).effectiveIfUnset, 'ask')
+})
+
+test('⑤ 子会话策略：设过与没设过是**不同的**读数（不许都塌成"有策略")', () => {
+  const set = childPolicyPlan({ childHasOwnPolicy: true, configPolicy: 'ask' })
+  const unset = childPolicyPlan({ childHasOwnPolicy: false, configPolicy: 'ask' })
+  assert.equal(set.needsExplicitSet, false)
+  assert.equal(unset.needsExplicitSet, true)
+  assert.notEqual(set.effective, unset.effective)
+  // ★ 而**生效值恰好相同**时（都回落到 ask）也必须还能被区分——
+  //   `setPolicy(child,'ask')` 在全局默认就是 ask 时**一个事件都不写**，
+  //   所以"两个会话生效值一样"不代表"两个会话的日志一样"。
+  assert.notEqual(set.needsExplicitSet, unset.needsExplicitSet)
+})
+
+test('⑤ 子会话策略：传了父策略也**不参与**判定（"传了但没用"要看得见）', () => {
+  const a = childPolicyPlan({ childHasOwnPolicy: false, configPolicy: 'ask', parentPolicy: 'never' })
+  const b = childPolicyPlan({ childHasOwnPolicy: false, configPolicy: 'ask', parentPolicy: 'ask' })
+  // 换掉父策略，结论必须一个字都不变
+  assert.equal(a.effectiveIfUnset, b.effectiveIfUnset)
+  assert.equal(a.needsExplicitSet, b.needsExplicitSet)
+  // 但传进来的值要如实回显，好让调用方看出"我传的这个没被用上"
+  assert.equal(a.parentPolicyIgnored, 'never')
+  assert.equal(childPolicyPlan({ childHasOwnPolicy: false, configPolicy: 'ask' }).parentPolicyIgnored, null)
+})
+
+test('⑤ 归属判定：活体 → 可用但**永不持久**', () => {
+  const live = ownershipCheckScope({ live: true })
+  assert.equal(live.usable, true)
+  // ★ 哪怕它这次答对了，答案也不能进持久授权记录：
+  //   重启后同一个 id 会给出不同答案。
+  assert.equal(live.durable, false)
+})
+
+test('⑤ 归属判定：不在活体注册表里时，false **不等于**"不是你的子会话"', () => {
+  const gone = ownershipCheckScope({ live: false })
+  assert.equal(gone.usable, false)
+  assert.equal(gone.durable, false)
+  // ★ 这一条守的是措辞：`isOwnedBy` 此时的 false 只意味着"现在问不到"，
+  //   把它读成"越权"会把一次**重启**变成一次**授权失败**。
+  assert.match(gone.note, /不代表|只代表/)
+  assert.notEqual(gone.code, ownershipCheckScope({ live: true }).code,
+    '两种情形必须是不同的码，否则调用方无法分辨该不该重问')
+})
+
+test('⑤ 归属判定：三个入参只认 `live === true`（不许把"有值"当成"活着")', () => {
+  // `store.get(id)` 落空给 undefined；有人会顺手写 `if (entry)`。
+  // 任何 truthy 非 true 的值都不该被接受。
+  for (const v of [undefined, null, 0, '', 'yes', 1, {}]) {
+    assert.equal(ownershipCheckScope({ live: v }).usable, false, `live=${JSON.stringify(v)} 不该被当成活着`)
+  }
+  assert.equal(ownershipCheckScope().usable, false)
 })

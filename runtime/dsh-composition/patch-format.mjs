@@ -84,7 +84,13 @@ export const PATCH_DOCUMENT_CODES = Object.freeze({
    *   > 与一个"模块永远不会被加载、而文件里写着它"的补丁层，是同一个东西。
    */
   PATCH_OVER_WITH_MODULE: 'PATCH_DOCUMENT_PATCH_OVER_WITH_MODULE',
-  /** 某一行的插件模块还不存在，因此这一行造不出来。 */
+  /** 某一行的插件模块**在静态补丁层里**不可加载，因此这一行造不出来。
+   *
+   * 两种子处境由输出的 `moduleState` 分辨（**不能同形**，修法不同）：
+   *   · `'absent'`       —— 模块还不存在（`module: null` 且没有 `runtimeModule`）；
+   *   · `'runtime-only'` —— 模块**存在**（`runtimeModule`），但它需要一个进程内
+   *     装配好的组合根才挂得上，而静态 patch 文件只能带数据、带不了桥与端口。
+   */
   ROW_MODULE_MISSING: 'PATCH_DOCUMENT_ROW_MODULE_MISSING',
 })
 
@@ -266,6 +272,9 @@ export function assertPatchDocumentLoadable(doc) {
  *   默认实现直接返回 `row.module`（`null` 就是不存在）。
  * @returns {{document: object[], unbuildable: object[]}}
  *   `document` 是**能造出来的那部分**（可加载）；`unbuildable` 是造不出来的行。
+ *   每一条 `unbuildable` 带 `code` / `moduleState`（`'absent'` | `'runtime-only'`）
+ *   与 `runtimeModule`：一个"模块还不存在"与一个"模块存在但静态层装不了"
+ *   不是同一件事，修法也不同。
  */
 export function toPatchDocument({ rows = [], presets = {}, moduleUrlOf = null } = {}) {
   const resolve = typeof moduleUrlOf === 'function' ? moduleUrlOf : (m) => m ?? null
@@ -300,11 +309,27 @@ export function toPatchDocument({ rows = [], presets = {}, moduleUrlOf = null } 
 
     const name = resolve(row?.module)
     if (typeof name !== 'string' || name.trim() === '') {
+      // ★ 两种"造不出来"必须分开报（`moduleState`），因为修法完全不同：
+      //   · absent       —— 去把这个模块写出来；
+      //   · runtime-only —— 模块已经写好了，缺的是"把它装配起来"那条路。
+      //
+      //   合成一句的话，一个"装配路径还没接上"的部署会被读成"模块还没写"，
+      //   于是下一个人会去重写一个已经存在的文件。
+      const runtimeModule = typeof row?.runtimeModule === 'string' && row.runtimeModule.trim() !== ''
+        ? row.runtimeModule.trim()
+        : null
       unbuildable.push(Object.freeze({
         id: row?.id ?? null,
         code: PATCH_DOCUMENT_CODES.ROW_MODULE_MISSING,
-        detail: `行 ${row?.id} 的插件模块还不存在（声明里 module=${JSON.stringify(row?.module ?? null)}）——` +
-          '没有模块可加载，插进去的行会被 warn-and-skip',
+        moduleState: runtimeModule === null ? 'absent' : 'runtime-only',
+        runtimeModule,
+        detail: runtimeModule === null
+          ? `行 ${row?.id} 的插件模块还不存在（声明里 module=${JSON.stringify(row?.module ?? null)}）——` +
+            '没有模块可加载，插进去的行会被 warn-and-skip'
+          : `行 ${row?.id} 的模块**存在**（${runtimeModule}），但它需要一个进程内装配好的组合根` +
+            '（runtime/dsh-composition/root.mjs）才挂得上，而静态 patch 文件只能带数据、带不了桥与端口。' +
+            '所以这一行仍然不进文档：插一个"挂上却没有桥"的行会被 warn-and-skip，' +
+            '或者更糟——挂上了而什么都没接管',
       }))
       continue
     }

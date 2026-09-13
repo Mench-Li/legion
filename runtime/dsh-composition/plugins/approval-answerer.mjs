@@ -119,7 +119,7 @@ export function createApprovalAnswererPlugin({
       `${APPROVAL_ANSWERER_PLUGIN_NAME} 的 registry 需要 peek(callId)`)
   }
 
-  return {
+  const plugin = {
     name: APPROVAL_ANSWERER_PLUGIN_NAME,
     // 声明依赖：没有 ApprovalService 就没有人会派发 `approval/request`。
     // 与 hard-floor 同理——**等待要被记录**，而不是靠"挂了但没人叫"。
@@ -199,6 +199,21 @@ export function createApprovalAnswererPlugin({
       )
     },
   }
+
+  // ★ 诊断用（**不可枚举**）：本行**实际**闭包到的登记簿与端口。
+  //
+  // 登记簿必须与 `pre-execute` 行是**同一本**——那是两行唯一的会合点，
+  // 而"共用"是身份、不是形状。端口则必须是调用方**真的**注入的那一个：
+  // 少了这条身份，一个"配置解析对了、端口却在半路被换成另一个"的实现
+  // 在形状断言下完全看不出来。
+  //
+  // 让行自己报出实际拿到的东西，是为了防住"装配方记下自己传了什么、
+  // 然后对着那份记录断言"这种绿法。
+  //
+  // 不可枚举：活对象不能走 `JSON.stringify` / `Object.keys`。
+  Object.defineProperty(plugin, 'registry', { value: registry, enumerable: false })
+  Object.defineProperty(plugin, 'port', { value: port, enumerable: false })
+  return plugin
 }
 
 /**
@@ -224,8 +239,15 @@ export function createApprovalAnswererPlugin({
  *   > 只不过前者的文件看起来是装好的。
  *
  * 因此 `PATCH_LAYER_ROWS` 里这一行仍然是 `module: null`。
+ *
+ * PRT-214 组合根补记：**这一行现在有运行期模块了**——`./approval-answerer-row.mjs`。
+ * 那条路走的是上面 (a) 的变体：模块的 `default` 导出从组合根（`../root.mjs`）
+ * 取装配好的那一行，组合根没装好时在 `apply` 期**抛具名码**，不挂空 listener。
+ * 本文件仍然刻意不导出 `default`——能导出 `default` 的必须是那个
+ * "要么拿到端口、要么响亮失败"的模块，而不是这个"需要参数才能构造"的工厂。
  */
 export const NO_DEFAULT_EXPORT_REASON = Object.freeze({
   code: 'APPROVAL_ANSWERER_NEEDS_RUNTIME_CONFIG',
-  detail: '本行需要一个不能由 YAML 携带的 port；在装配路径定下来之前刻意不导出 default',
+  detail: '本行需要一个不能由 YAML 携带的 port；本文件刻意不导出 default。'
+    + '运行期入口在 ./approval-answerer-row.mjs（由组合根 root.mjs 装配）',
 })

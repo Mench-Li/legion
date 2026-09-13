@@ -89,7 +89,7 @@ export function createPreExecutePlugin({ bridge, registry = IN_FLIGHT, onDecisio
       `${PRE_EXECUTE_PLUGIN_NAME} 的 registry 需要 put(callId, projection)`)
   }
 
-  return {
+  const plugin = {
     name: PRE_EXECUTE_PLUGIN_NAME,
     // 声明依赖：`ctx.on` 是 Context 自己带的，但 `tools` 服务必须已经在场，
     // 否则我们这个 listener 挂在一个没有派发点的瀑布上。
@@ -152,10 +152,27 @@ export function createPreExecutePlugin({ bridge, registry = IN_FLIGHT, onDecisio
       )
     },
   }
+
+  // ★ 诊断用（**不可枚举**）：本行**实际**闭包到的桥与登记簿。
+  //
+  // 装配方与用例要断言"两行共用同一本登记簿"，而"共用"是**身份**。
+  // 让行自己报出它实际拿到的东西，是为了防住一种很安静的错法：
+  // 装配方**记下自己传了什么**、然后对着那份记录断言——
+  // 那样即使真的传了两本登记簿进去，用例也照样绿。
+  //
+  //   > 一个"记录了我传了什么"的诊断，
+  //   > 与一个"记录了行实际拿到什么"的诊断，在传错参数时是同一个东西——
+  //   > 只不过前者的用例是绿的。
+  //
+  // 不可枚举：这是**活对象**，不该被 `JSON.stringify` / `Object.keys` /
+  // 任何"显示整行"的路径带出去。
+  Object.defineProperty(plugin, 'bridge', { value: bridge, enumerable: false })
+  Object.defineProperty(plugin, 'registry', { value: registry, enumerable: false })
+  return plugin
 }
 
 /**
- * ⚠️ **没有可用的默认导出**，理由与 `approval-answerer.mjs` 完全相同：
+ * ⚠️ **本文件没有 `default` 导出**，理由与 `approval-answerer.mjs` 完全相同：
  *
  * 本行需要一条 `createEnforcementBridge(...)` 造出来的桥，而桥的参数里
  * 有 Legion 身份（`scope` / `actor` / `action`）、策略端口 `decide`、
@@ -168,8 +185,15 @@ export function createPreExecutePlugin({ bridge, registry = IN_FLIGHT, onDecisio
  *   > 一个"能在 YAML 里写出来、于是挂上了、但没有桥"的 listener，
  *   > 与一个"从来没有被写进补丁层"的 listener，在组合树上长得一模一样——
  *   > 只不过前者的文件看起来是装好的。
+ *
+ * PRT-214 组合根补记：**这一行现在有运行期模块了**，只是它在另一个文件里——
+ * `./pre-execute-row.mjs`。那个文件的 `default` 导出从组合根（`../root.mjs`）
+ * 取那一行；组合根没装好时它在 `apply` 期**抛具名码**，不会挂一个空 listener。
+ * 所以本文件仍然刻意不导出 `default`：能导出 `default` 的必须是那个
+ * "要么拿到桥、要么响亮失败"的模块，而不是这个"需要参数才能构造"的工厂。
  */
 export const NO_DEFAULT_EXPORT_REASON = Object.freeze({
   code: 'PRE_EXECUTE_NEEDS_RUNTIME_CONFIG',
-  detail: '本行需要一条带 Legion 身份与策略端口的桥；那些不能由 YAML 携带，因此刻意不导出 default',
+  detail: '本行需要一条带 Legion 身份与策略端口的桥；那些不能由 YAML 携带，'
+    + '因此本文件刻意不导出 default。运行期入口在 ./pre-execute-row.mjs（由组合根 root.mjs 装配）',
 })

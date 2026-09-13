@@ -38,6 +38,11 @@ export const CHILD_ENV_NAMES = Object.freeze([
   'TEAM_HUB_PORT', 'TEAM_HUB_HOST', 'TEAM_HUB_TOKEN', 'TEAM_HUB_DB', 'TEAM_HUB_URL',
   'DSH_HUB_UPSTREAM', 'DSH_WORKBENCH_TOKEN',
   'DSH_HOME', 'LEGION_DATA_DIR', 'LEGION_LOG_DIR',
+  // PRT-214 续：注入 Runtime 子进程的 Legion 身份（组合根的六项输入 + 三项审批口径）。
+  // 它们是注入目标的**变量名**，不是本进程的读取点——本进程从不读它们，
+  // 只把值写进子进程的环境（见 product/launcher/enforcement-identity.mjs）。
+  'LEGION_ACTOR', 'LEGION_SCOPE', 'LEGION_ENFORCEMENT_ACTION', 'LEGION_CWD', 'LEGION_TASK_ID',
+  'LEGION_APPROVAL_POLICY', 'LEGION_ATTENDED', 'LEGION_PERMISSION_PRESET',
   'WHITEBOARD_TOKEN', 'PORT', 'HOST', 'DB_PATH', 'WB_ROOMS_DIR', 'WB_AUDIT_DIR', 'WB_IN_MEMORY',
 ])
 
@@ -128,6 +133,16 @@ export const SCHEMA = defineSchema({
     'DSH_OVERLAY_PATCH_FILE_NOT_A_FILE',
     'DSH_OVERLAY_NO_INSTALL_DIR',
     'DSH_OVERLAY_DISABLED_BY_CONFIG',
+
+    // ── PRT-214 续 Legion 身份注入的诊断码 ──────────────────────────────
+    //
+    // `product/launcher/enforcement-identity.mjs` 的 `ENFORCEMENT_IDENTITY_CODES` 的值。
+    // 同样是**输出**用的码，不是配置键。
+    //
+    // ★ 它必须与 `DSH_OVERLAY_DISABLED_BY_CONFIG` **分开**：那一条说"你故意关掉了"，
+    //   这一条说"你要它、但它缺料"。合成一个的话，一个关掉了覆盖层、
+    //   因而本来就不需要身份的正常部署，会被报成"身份缺失"。
+    'ENFORCEMENT_IDENTITY_MISSING',
 
     // ── PRT-707 首次运行向导**接线层**的诊断码 ──────────────────────────
     //
@@ -459,6 +474,19 @@ export const SCHEMA = defineSchema({
     { target: 'whiteboard', env: 'WB_ROOMS_DIR', via: 'env', from: 'dataDir/whiteboard/rooms', note: '同上' },
     { target: 'whiteboard', env: 'WB_AUDIT_DIR', via: 'env', from: 'dataDir/whiteboard/audit', note: '同上' },
     { target: 'orchestrator', env: 'TEAM_HUB_URL', via: 'env', from: 'ports.team-hub', note: 'worker 经 HTTP 访问 hub（里程碑 PRT-301）' },
+    // ── PRT-214 续：Legion 身份注入 Runtime（组合根的生产调用方的输入）──────
+    //
+    // 组合根（`runtime/dsh-composition/root.mjs`）**只从进程环境读**这几项，
+    // 不读配置文件、不给默认值。Launcher 是唯一知道前两项的进程。
+    { target: 'runtime', env: 'TEAM_HUB_URL', via: 'env', from: 'ports.team-hub', note: '**派生值**：强制面必须指向本次启动的 hub，而不是某个默认 8787' },
+    { target: 'runtime', env: 'LEGION_CWD', via: 'env', from: 'process-manifest 的 runtime.cwd', note: '**派生值**：就是 supervisor spawn 时用的工作目录——工具调用投影出的路径按它展开，覆盖会让授权路径与执行路径落在两个根上' },
+    { target: 'runtime', env: 'LEGION_ACTOR', via: 'env', from: 'runtime.env', note: '授权主体。本批次没有别的权威来源，**不编默认值**：一个默认 actor 会让审计里的主体变成谁也不是的名字' },
+    { target: 'runtime', env: 'LEGION_SCOPE', via: 'env', from: 'runtime.env', note: '同上：授权空间' },
+    { target: 'runtime', env: 'LEGION_ENFORCEMENT_ACTION', via: 'env', from: 'runtime.env', note: '同上：本次执行的行动名。它进 canonical 授权哈希' },
+    { target: 'runtime', env: 'LEGION_TASK_ID', via: 'env', from: 'runtime.env', note: '可选。组合根允许它是 null（进程级装配时常常还没有任务）' },
+    { target: 'runtime', env: 'LEGION_APPROVAL_POLICY', via: 'env', from: 'runtime.env', note: '可选。session 级审批策略（ask / never）；缺了由 decide 在判定期 fail closed，不影响只读调用' },
+    { target: 'runtime', env: 'LEGION_ATTENDED', via: 'env', from: 'runtime.env', note: '可选。现场有没有人可问；**刻意不给默认值**——默认"有人"会去问一个不在场的人' },
+    { target: 'runtime', env: 'LEGION_PERMISSION_PRESET', via: 'env', from: 'runtime.env', note: '可选。权限档位名，给了就一起校验' },
   ],
   notes: [
     '子进程环境**不继承**宿主进程：只放行进程清单声明的键、平台必需键与 Launcher 显式给定的值（环境白名单模块 product/launcher/allowlist）。',

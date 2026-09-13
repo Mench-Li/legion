@@ -1112,6 +1112,49 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-214 组合根：`assembleEnforcement()` / `bootstrapDshRuntime()` /
+      // `bindDshRuntime()` 此前**只有用例在调**，于是 worker 的 `executor`
+      // 永远是 `HOST_PORT_REQUIRED`——「强制面未生效时禁止自动执行」这条保证
+      // **从未被行使过**。
+      //
+      //   > 一个宣言从没被行使过，与这个宣言不存在，在行为上完全一样。
+      //
+      // 这一组最要紧的三条不是"配置解析对不对"，而是：
+      //   ① 装配**只发生一次**，两行共用**同一份**桥与**同一本**登记簿
+      //      （断言身份 `===`，不是形状——形状相同的两份登记簿在这里恒真）；
+      //   ② 组合根拿不到时，行模块**拒绝**且**不挂一个空的 listener**
+      //      （并配一条反向对照：装好了就真的挂上，否则"没挂"是空的）；
+      //   ③ `root.bind` 真的把 `productionExecutorProvider()` 从
+      //      `HOST_PORT_REQUIRED` 翻成可用、`unbind` 再翻回去。
+      //
+      // 全是注入的假件：端口是假的，绝不注册进任何真 `ToolRuntime`。
+      label: 'dsh-composition-root（PRT-214：只装配一次 / 行模块拒绝而不空挂 / 绑定真的翻转 provider）',
+      files: ['runtime/dsh-composition/root.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      // PRT-214 续：组合根的**第一个生产调用方**。
+      //
+      // `root.test.mjs` 证明的是"装一次、拒绝不空挂、绑定翻转 provider"——
+      // 而在此之前 `installEnforcementRoot()` 只被用例调过，于是 `enforcementRoot()`
+      // 在真实部署里永远是 `null`：
+      //
+      //   > 一个"有人可以调"的装配入口，与一个"从来没有被调用过"的装配入口，
+      //   > 在运行的部署上是同一个东西——只不过前者的用例是绿的。
+      //
+      // 这一套盯的就是那一件事，外加两个只在**真 cordis Context** 上才立得住的判据：
+      //   · 补丁层的行序**不携带加载语义**，所以"根先装好"必须由服务依赖保证——
+      //     用例把根行**最后**加载，两行运行期模块仍然激活；反向也跑一遍；
+      //   · 根真的缺席时那两行是 **pending**（由挂载审计报未激活），不是抛、
+      //     也不是静默 no-op。这两条路必须可分。
+      //
+      // 需要 DSH_CHECKOUT 的那几条逐条 `t.skip()`（`skipped: N` 看得见）；
+      // 其余（拒绝码、配置闭集、`decide` 适配器、与 product/ 的键名对账）照常跑。
+      label: 'dsh-composition-root-row（PRT-214 续：真正调用组合根那一行，且激活与行序无关）',
+      files: ['runtime/dsh-composition/plugins/root-row.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-601：工具能力描述与风险等级。
       //
       // 这一组盯的**不是**"登记表里有没有那些工具"，而是**风险等级能不能被填低**。
@@ -2423,6 +2466,12 @@ async function stageTest() {
         // 一个"整组被跳过、计数里什么都不显示"的套件，与一个压根不存在的套件，
         // 在"这次到底跑了什么"上是同一个东西。
         'product/launcher/dsh-overlay.test.mjs',
+        // PRT-214 续：把组合根要求的 Legion 身份**注入** Runtime 子进程。
+        //
+        // 覆盖层那一条解决了"补丁层交给了进程没有"，这一条解决"补丁层里的
+        // root-row 拿得到配置没有"——两个都要有：只有前者时，root-row 会在
+        // DSH 进程里以 CONFIG_MISSING 拒绝，而那条错误离"产品配置该写什么"很远。
+        'product/launcher/enforcement-identity.test.mjs',
         // PRT-707（接线批）：六步向导接到**真实**的 init.mjs / launcher.mjs /
         // security/secrets 上。这一套盯的是"接线"而不是"状态机"（状态机在
         // `wizard.test.mjs`，40 条）。钉住的都是**读契约才发现**的东西：

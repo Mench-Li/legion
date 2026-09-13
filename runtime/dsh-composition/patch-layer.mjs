@@ -95,6 +95,28 @@ export const LEGION_ROW_PREFIX = 'legion-enforcement-'
  * 于是 `toPatchDocument()` 会把这一行归到 `unbuildable` 而不是造一个
  * 加载不了的空壳。这个字段让"PRT-214 没做完"变成一件**机械可查**的事，
  * 而不是一句散文。
+ *
+ * ## ★ `runtimeModule` 字段（PRT-214 组合根补记）
+ *
+ * 后两行（`pre-execute` / `approval-answerer`）**有模块了**，但那两个模块
+ * 需要一个**进程内装配好的组合根**才挂得上（`root.mjs` 的
+ * `installEnforcementRoot`）——DSH 加载补丁行时给的是 `config`（数据），
+ * 而它们要的是桥、策略端口、审批端口（函数）。
+ *
+ * 于是这两个字段要分成两件事，**不能合成一件**：
+ *
+ *   · `module: null`       —— 静态补丁层里**没有**可加载的模块；
+ *   · `runtimeModule: '…'` —— 模块**存在**，但只能由组合根在进程内挂载。
+ *
+ * 把 `module` 直接填成那个路径是**假话**：DSH 会去加载它，而它在组合根
+ * 没装配好时会在 `apply` 期抛出（那是刻意的，见
+ * `plugins/pre-execute-row.mjs` 的文件头）——一行"文件里写着、加载时就炸"
+ * 的行，比缺行更坏。
+ *
+ * `toPatchDocument()` 因此对这类行报 `moduleState: 'runtime-only'` +
+ * `runtimeModule`，`renderPatchReport()` 再把它单列一份 `runtimeOnly`。
+ * 缺行与"有运行期模块但静态层装不了"在读数上**必须不同形**：
+ * 前者是"模块还没写"，后者是"装配路径还没被接上"，修法完全不同。
  */
 export const PATCH_LAYER_ROWS = Object.freeze([
   Object.freeze({
@@ -121,14 +143,42 @@ export const PATCH_LAYER_ROWS = Object.freeze([
     module: './plugins/hard-floor.mjs',
   }),
   Object.freeze({
+    id: `${LEGION_ROW_PREFIX}root`,
+    plane: 'host',
+    kind: 'composition-root',
+    purpose: '在 DSH 进程内装配**一次**组合根（桥 + 共享登记簿），并发布服务供另两行按依赖激活',
+    mount: Object.freeze({ anchor: 'insert', after: 'tools' }),
+    // 这一行**不注册任何 listener**：它只装配 + 发布服务。真正的强制面在
+    // 另外两行里，而那两行的挂载时机由这个服务决定（Cordis 的 inject 语义），
+    // **不由补丁层的行序决定**——行顺序不携带加载语义，见文件头。
+    registrations: Object.freeze(["ctx.provide('legionEnforcementRoot')"]),
+    // ★ 本行是**静态可加载**的：它的输入是进程环境 + 一个注入的审批端口工厂，
+    //   没有一样是 YAML 带不动的东西。所以它进 `legion-host.patch.yml`——
+    //   这也是 `installEnforcementRoot()` 在全仓库的第一个生产调用方。
+    //
+    //   代价说清楚：配置不可解析时本行在 `apply` 期抛具名码，于是**启动路径上
+    //   的失败**。那正是要的（被要求装上的强制面不能只写一行日志），而且
+    //   `product/launcher/` 会在更早一步用一条带修法的 error 拦下同一种处境。
+    //
+    //   ⚠️ 审批端口工厂（`team-hub/approval-port.mjs` 的 `createHubApprovalPort`）
+    //   由 `team-hub/` 侧经 `setApprovalPortFactory()` 注册进来：本目录**不能**
+    //   import 它（会反转既有分层方向并造出真实的模块环，见 `root.mjs` 文件头）。
+    //   注册方本批**没有交付**，所以默认部署里本行会以
+    //   `ENFORCEMENT_ROOT_ROW_NO_APPROVAL_PORT_FACTORY` 拒绝——那比装一个
+    //   "永远问不到人"的半根好。缺口写在 PRT-214 文档的诚实边界里。
+    module: './plugins/root-row.mjs',
+  }),
+  Object.freeze({
     id: `${LEGION_ROW_PREFIX}pre-execute`,
     plane: 'host',
     kind: 'listener',
     purpose: '动态 allow / deny / ask，team-hub 不可达或策略异常时 deny（fail closed）',
     mount: Object.freeze({ anchor: 'insert', after: 'tools' }),
     registrations: Object.freeze(["ctx.on('tools/pre-execute')"]),
-    // ⚠️ 还没有这个模块。见上面 `module` 的说明。
+    // ⚠️ 静态层里**没有**可加载的模块（它要一条桥，YAML 装不下），
+    //    但运行期模块**存在**：组合根装配好之后由它挂上。见上面 `runtimeModule` 一段。
     module: null,
+    runtimeModule: './plugins/pre-execute-row.mjs',
   }),
   Object.freeze({
     id: `${LEGION_ROW_PREFIX}approval-answerer`,
@@ -137,8 +187,9 @@ export const PATCH_LAYER_ROWS = Object.freeze([
     purpose: '把审批请求写入审批箱；只有 allowed-once 执行；双段超时 fail closed',
     mount: Object.freeze({ anchor: 'insert', after: 'approval' }),
     registrations: Object.freeze(["ctx.on('approval/request')"]),
-    // ⚠️ 还没有这个模块。见上面 `module` 的说明。
+    // ⚠️ 同上：静态层没有模块，运行期模块存在。
     module: null,
+    runtimeModule: './plugins/approval-answerer-row.mjs',
   }),
   Object.freeze({
     id: `${LEGION_ROW_PREFIX}permission-presets`,

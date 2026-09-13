@@ -76,11 +76,14 @@ const HEADER = Object.freeze([
   '# 默认表把 workspace-write↔ask 与 danger-full-access↔never 绑定；',
   '# 按默认表实现「无人值守 = never」会同时把沙箱降级为 danger-full-access。',
   '#',
-  '# ★ 本文件目前**只包含造得出来的行**。',
-  '#   下面这几行需要在 DSH 进程内被加载的**插件模块**，而它们的模块还不存在',
-  '#   （`PATCH_LAYER_ROWS[].module === null`）：',
+  '# ★ 本文件目前**只包含造得出来的行**。下面这几行不进文档，原因逐行写在括号里：',
   ...PATCH_LAYER_ROWS.filter((r) => r.module === null && r.mount?.anchor !== 'patch-over')
-    .map((r) => `#     · ${r.id} —— ${r.purpose ?? r.kind ?? ''}`.trimEnd()),
+    .map((r) => {
+      const state = typeof r.runtimeModule === 'string' && r.runtimeModule.trim() !== ''
+        ? `模块存在（${r.runtimeModule}），但需要一个进程内装配好的组合根才挂得上`
+        : '模块还不存在'
+      return `#     · ${r.id} —— ${state}（${r.purpose ?? r.kind ?? ''}）`.trimEnd()
+    }),
   '#   它们**刻意不在这里**：一个 insert 项没有可加载的 name 时，DSH 对它是 warn-and-skip，',
   '#   于是那一行会「看起来装好了、而什么都没做」。缺行比假行好。',
   '#',
@@ -88,6 +91,8 @@ const HEADER = Object.freeze([
   '#   > 与一个"从未被写进补丁层"的补丁行，在组合树里长得一模一样——',
   '#   > 只不过前者的文件看起来是装好的。',
   '#',
+  '#   标着「模块存在」的那两行由 runtime/dsh-composition/root.mjs 在进程内挂载：',
+  '#   它们要的是桥与端口（函数），而静态 patch 文件带的是数据。',
   '#   缺的那几行由 reconcilePatchLayer() 报成 ROW_MISSING，于是启动自检仍然拒绝注册',
   '#   （fail closed）。**PRT-214 因此仍是未完成状态**，而不是"装好了但没生效"。',
   '#',
@@ -151,6 +156,18 @@ export function renderPatchReport({ moduleUrlOf = null } = {}) {
     declaredRowIds: Object.freeze(PATCH_LAYER_ROWS.map((r) => r.id)),
     /** 造不出来、因此**不在文档里**的行。 */
     unbuildable: built.unbuildable,
+    /**
+     * ★ 造不出来、但**模块确实存在**、只是需要一个进程内装配好的组合根的行。
+     *
+     * 单列这一份是为了让"模块还没写"与"装配路径还没接上"在读数上不同形：
+     * 前者要去写一个文件，后者要去把组合根接上（`root.mjs`）。
+     * 合成一句"缺 2 行模块"会把后者的真因藏起来。
+     */
+    runtimeOnly: Object.freeze(
+      built.unbuildable
+        .filter((u) => u.moduleState === 'runtime-only')
+        .map((u) => Object.freeze({ id: u.id, runtimeModule: u.runtimeModule })),
+    ),
     /** 这一层是不是完整（声明里每一行都以某种形式进了文档）。 */
     complete: built.unbuildable.length === 0,
   })

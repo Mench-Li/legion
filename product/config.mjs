@@ -417,6 +417,32 @@ export function launcherInputFromConfig(merged, { base = {} } = {}) {
     out.enforcementOverlay = overlay
     out.provenance['runtime.enforcementOverlay'] = configLayerOf(merged, 'runtime.enforcementOverlay')
   }
+
+  // 注入 Runtime 子进程的额外环境变量（PRT-214 续）。
+  //
+  // 这个键**早就在** `KNOWN_CONFIG_KEYS` 里（「注入 Runtime 子进程的额外环境变量
+  // （不含密钥）」），但一直没有任何读取点——于是它是**一条写在文档里的通路**。
+  // 强制面的身份（actor / scope / action）本批次找不到别的权威来源，
+  // 所以把它接上：不改键名、不加新键，只是让这条早就存在的通路真的通。
+  //
+  //   > 一个"配置里声明了、而没有任何代码读它"的键，
+  //   > 与一个不存在的键，在部署上是同一个东西——只不过前者看起来是配好的。
+  //
+  // ★ 只收「非空白字符串」值：数字与布尔会被静默转成字符串，而
+  //   `LEGION_ATTENDED` 的读取端**只认字面 `'true'` / `'false'`**。
+  //   把 `false`（布尔）当字符串收下来会得到 `'false'`（正好对），
+  //   但把 `1` 收成 `'1'` 会得到一个判定期才炸的值——那种"配置写错了、
+  //   直到第一次需要人审批才发现"的失败，不如根本收不下它。
+  const runtimeEnv = configValueAt(merged, 'runtime.env')
+  if (runtimeEnv !== null && typeof runtimeEnv === 'object' && !Array.isArray(runtimeEnv)) {
+    const clean = {}
+    for (const [k, v] of Object.entries(runtimeEnv)) {
+      if (typeof v !== 'string') continue
+      clean[k] = v
+    }
+    out.runtimeEnv = clean
+    out.provenance['runtime.env'] = configLayerOf(merged, 'runtime.env')
+  }
   return out
 }
 

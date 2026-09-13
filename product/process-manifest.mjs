@@ -128,7 +128,23 @@ export const PROCESS_SPECS = Object.freeze([
     host: '127.0.0.1',
     readiness: Object.freeze({ kind: 'http', path: '/', expectStatus: 200, timeoutMs: 60000, intervalMs: 500, verified: false }),
     writesRoles: Object.freeze(['data', 'cache']),
-    envNames: Object.freeze(['DSH_HOME', 'LEGION_DATA_DIR', 'LEGION_LOG_DIR']),
+    // ★ PRT-214 续：Legion 身份由 Launcher **派生 + 从产品配置取**后注入本进程，
+    //   组合根（`runtime/dsh-composition/root.mjs`）只从进程环境读它。
+    //   加进 `envNames` 不是可选的：`buildChildEnv()` 对未声明的键直接抛，
+    //   而"漏声明"会让「进程实际需要的配置」与「清单说它需要的配置」不一致。
+    //
+    //   · `TEAM_HUB_URL` / `LEGION_CWD` —— **派生值**，与 workbench 的
+    //     `DSH_HUB_UPSTREAM` 同一条理由（见 `launcher.mjs` 的 `derivedValuesFor`）；
+    //   · `LEGION_ACTOR` / `LEGION_SCOPE` / `LEGION_ENFORCEMENT_ACTION` /
+    //     `LEGION_TASK_ID` —— 只能来自产品配置 `runtime.env`，本批次没有别的权威来源；
+    //   · `LEGION_APPROVAL_POLICY` / `LEGION_ATTENDED` / `LEGION_PERMISSION_PRESET`
+    //     —— session 级的审批口径，可选；缺了由 `decide` 在判定期 fail closed。
+    envNames: Object.freeze([
+      'DSH_HOME', 'LEGION_DATA_DIR', 'LEGION_LOG_DIR',
+      'TEAM_HUB_URL',
+      'LEGION_ACTOR', 'LEGION_SCOPE', 'LEGION_ENFORCEMENT_ACTION', 'LEGION_CWD', 'LEGION_TASK_ID',
+      'LEGION_APPROVAL_POLICY', 'LEGION_ATTENDED', 'LEGION_PERMISSION_PRESET',
+    ]),
     milestone: 'PRT-257',
   }),
   Object.freeze({

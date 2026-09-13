@@ -15,11 +15,9 @@
 # 默认表把 workspace-write↔ask 与 danger-full-access↔never 绑定；
 # 按默认表实现「无人值守 = never」会同时把沙箱降级为 danger-full-access。
 #
-# ★ 本文件目前**只包含造得出来的行**。
-#   下面这几行需要在 DSH 进程内被加载的**插件模块**，而它们的模块还不存在
-#   （`PATCH_LAYER_ROWS[].module === null`）：
-#     · legion-enforcement-pre-execute —— 动态 allow / deny / ask，team-hub 不可达或策略异常时 deny（fail closed）
-#     · legion-enforcement-approval-answerer —— 把审批请求写入审批箱；只有 allowed-once 执行；双段超时 fail closed
+# ★ 本文件目前**只包含造得出来的行**。下面这几行不进文档，原因逐行写在括号里：
+#     · legion-enforcement-pre-execute —— 模块存在（./plugins/pre-execute-row.mjs），但需要一个进程内装配好的组合根才挂得上（动态 allow / deny / ask，team-hub 不可达或策略异常时 deny（fail closed））
+#     · legion-enforcement-approval-answerer —— 模块存在（./plugins/approval-answerer-row.mjs），但需要一个进程内装配好的组合根才挂得上（把审批请求写入审批箱；只有 allowed-once 执行；双段超时 fail closed）
 #   它们**刻意不在这里**：一个 insert 项没有可加载的 name 时，DSH 对它是 warn-and-skip，
 #   于是那一行会「看起来装好了、而什么都没做」。缺行比假行好。
 #
@@ -27,6 +25,8 @@
 #   > 与一个"从未被写进补丁层"的补丁行，在组合树里长得一模一样——
 #   > 只不过前者的文件看起来是装好的。
 #
+#   标着「模块存在」的那两行由 runtime/dsh-composition/root.mjs 在进程内挂载：
+#   它们要的是桥与端口（函数），而静态 patch 文件带的是数据。
 #   缺的那几行由 reconcilePatchLayer() 报成 ROW_MISSING，于是启动自检仍然拒绝注册
 #   （fail closed）。**PRT-214 因此仍是未完成状态**，而不是"装好了但没生效"。
 #
@@ -37,6 +37,8 @@
 - insert:
     - id: "legion-enforcement-hard-floor"
       name: "./plugins/hard-floor.mjs"
+    - id: "legion-enforcement-root"
+      name: "./plugins/root-row.mjs"
 - id: "permission"
   config:
     presets:

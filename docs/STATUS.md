@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-13　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **177 套件 / 4908 用例 / 0 fail**（证据 `.ci/prt-507/`）
+**最近一次全量基线**：2026-09-13　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **179 套件 / 4989 用例 / 0 fail**（证据 `.ci/prt-214b/`）
 （**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数会少）
 —— 以本文件所在提交为准；证据 `.ci/prt-901/`（PRT-901/902 第三方组件清单、SBOM 与商业分发条件那一批）
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
@@ -3455,6 +3455,147 @@
 > **WAL 切换不受 `busy_timeout` 保护**——二者都会让后到进程在模块加载期崩溃（宿主侧表现为
 > `/team-hub` 路由缺失直到重启）。详见 `docs/CI-TEST-STAGE-evidence/verify-evidence.md`、
 > `docs/DUAL-WRITE-RACE-evidence/verify-evidence.md`。
+
+---
+
+## 2026-09-13　PRT-214 续批 + PRT-211 源码级复核（两行都**仍是** 🟡）
+
+这一批做了两件**互不相干**的事，放在一条里是因为它们同一次提交。**两行都没有翻绿**，
+理由在各段末尾——先说做了什么。
+
+### 一、PRT-214：组合根接上了**第一个生产调用方**
+
+上一批（`PRT-214` 的 `root.mjs`）证明了调用链存在且可用，但它自己的诚实边界里
+第一条就是「**组合根本身仍然没有生产调用方**」——一句话概括当时的处境：
+
+> 一个从来没有人调用的装配函数，
+> 与一个不存在的装配函数，在运行的部署上是同一个东西。
+
+现在补齐了三段：
+
+1. **`runtime/dsh-composition/plugins/root-row.mjs`（新）** —— 补丁层里**真的可加载**的一行，
+   它的 `apply` 调 `installEnforcementRoot(...)`。重新生成的 `legion-host.patch.yml`
+   真的带上了 `legion-enforcement-root`（3 行）。
+2. **★ 加载顺序用 Cordis 的服务依赖解决，而不是靠行序。**
+   仓库此前已经确立「行顺序**不携带**加载语义」（`patch-layer.mjs` 与 PRT-214 文档都写着），
+   所以指望「根行排在前面」会得到一个只在开发机上成立的实现。
+   做法：root 行 `ctx.provide('legionEnforcementRoot', …)`，
+   两个 `-row.mjs` 声明 `inject: [..., 'legionEnforcementRoot']`，
+   依赖没到位时它们进 **pending**，服务一出现 Cordis 自己激活。
+   **反面控制是必需的**：只测「根行最后加载」的话，一个"要求根行必须先"的实现照样全绿。
+   实测那条用例**两个方向都测**（最后加载 + 最先加载），并单独断言
+   「根行还没来的时候，策略门**不许**已经在拦东西」。
+3. **Launcher 注入 Legion 身份**：用的是 `product/config.mjs` 里**早就在**
+   `KNOWN_CONFIG_KEYS`、却**一直没有任何读取点**的 `runtime.env`（不是新键）。
+   三种处境是**三个不同的读数**：
+   覆盖层开+身份齐 → 通过；开+身份缺 → `ENFORCEMENT_IDENTITY_MISSING`（**error，拦启动**）；
+   关 → `DSH_OVERLAY_DISABLED_BY_CONFIG`（warn，一条）。有一条**元判据**
+   断言三者 `new Set(...).size === 3`。
+   派生值优先于配置（hub 地址 ← 本次 team-hub 端口；cwd ← spawn 的 cwd），
+   **没有编造任何默认 hub/actor**。
+
+顺手修掉一处**门禁误读**：`scan --check` 第一次报红 4 项，说
+`LEGION_ACTOR`/`LEGION_SCOPE`/`LEGION_ENFORCEMENT_ACTION`/`LEGION_TASK_ID` 是
+`product/` **直接读取**的 env 键。来源是 `FIELD_SOURCES` 里的产品文案写了
+`…runtime.env.LEGION_ACTOR…`，而 `scan.mjs` 规则②（`\w*[Ee]nv\.([A-Z][A-Z0-9_]*)`）
+扫的是**源码文本、不看上下文**。**修的是文案，不是 schema**——
+Launcher **不读**这四个键，只把它们**写进子进程**；为了哄过门禁往配置面补一条
+假读取点，与一条真实读取点在「这个进程吃什么配置」上是两个答案。
+
+**★ 同一批还撞出第二处门禁假阳性**，性质不同，值得单独记：
+`dsh-boundary` 套件在本批第一次跑时红了，红的不是代码，是**我在注释里引用的一句
+DSH 源码**（`this.<宿主>.agents.get(...)`）。它的执行面记号按**源码文本**匹配
+（`\bctx\s*\??\.\s*agents\b`），**不看上下文**——注释、字符串字面量里的一律算。
+于是「在文档里引用一句 DSH 源码」被记成「这个文件依赖 DSH 执行面」，
+而这个文件**一个执行面 API 都没调**。修法是把引文里的容器写成 `<宿主>.agents`。
+
+> 一个"按文本匹配、不看上下文"的扫描器，
+> 与一个"扫得对"的扫描器，在**没有人在注释里引用源码**的时候是同一个东西——
+> 只不过前者会把一份**说明文档**记成一份**依赖清单**。
+
+一并记下一处**潜在矛盾**（本批没有触发，但迟早会）：`diffAgainstBaseline()`
+对 `runtime/adapters/dsh/` 与 `runtime/dsh-composition/` **豁免**，但套件 ④
+用的是**未经豁免**的 `scanRepo()`，而同一套件的另一条断言又**禁止**适配层文件
+出现在基线里。两条合起来意味着：**适配层一旦真的写下第一个执行面调用，那条
+用例就会红，而且没有合法修法**——既不能进基线，也不能让豁免生效。
+本批之所以没触发，只是因为既有适配层代码的记号**恰好是 0**：
+这是一个"还没被踩到的坑"，不是"没有坑"。**没有修它**（改门禁超出本批范围，
+且改法有取舍：是让豁免进 `scanRepo()`，还是给适配层留一条进基线的例外通道）。
+
+### 二、PRT-211：把「接口面已验证」升级成**按面如实**，并更正一处**自己的错**
+上一批五个关注面**一律**标成 `api-surface-verified`，理由写得很漂亮
+（「写成逐面不同的分级会暗示某些面验证得更深，而实际上五个面都没做过运行时行为验证」）。
+那条理由把两件事混成了一件：「没做过端到端实验」与「不知道答案」。
+
+去读 DSH 实现之后，有三个面的答案**在源码里是确定的**，而且**与适配器原先的假设相反**：
+
+* **`permission`：子会话策略**不**从父会话继承。** `overrideOf(session)` 只折叠
+  **这个 session 自己**的事件日志（`packages/interaction/user-approval/src/index.ts`），
+  没有就回落到 `config.policy ?? 'ask'`。所以父会话是 `never`（确定性拒绝）时，
+  一个没被显式设过策略的子会话会落到**全局默认**——**子会话比父会话更宽松**。
+* **`permission` 附带：`setPolicy` 在"设成当前生效值"时一个事件都不写。**
+  `if (previous === policy) return` 早于 `setApprovalPolicy`，而 `previous` 是**生效值**
+  （含默认回落）。于是事后审计**无法**区分「有人显式设过」与「从没设过、只是回落」——
+  **不能**把 `setPolicy` 的调用当作"这条子会话被显式定过策略"的证据。
+* **`identity`：`isOwnedBy` 读的是活体注册表。** DSH 自己写着
+  "Runtime ownership is independent of durable session lineage"，
+  实现是 `this.store.get(id)?.owner === owner`。于是同一个 id 的归属判定
+  **跨进程重启会翻转**，它**只能**用于进程内判断，不能当持久授权判据。
+
+**★ 还有一处是更正我自己的错。** `OWNERSHIP['event-resumption']` 原文写
+「sendMessage 是往一个**活着的** continuable child 追加轮次」。读
+`packages/subagent/subagent/src/continuation.ts` 之后发现**反了**：
+要求活的是**发送方**（且是**对象引用**相等），而**目标不在也能送**——
+注释逐字写着 "A missing direct child cold-resumes through the ordinary continuation lifecycle."
+
+> 一个「目标必须活着才能投递」的信念，
+> 与一个「目标不在就冷恢复」的实现，
+> 在**没有崩溃过**的那段时间里是同一个东西——只不过前者会在真的崩一次之后，
+> 让编排器以为自己做不到一件其实做得到的事。
+
+顺带把**逐面证据等级**补齐（新增 `implementation-verified` 一档），
+并把结论变成**可执行判据**：`childPolicyPlan()`（未设时落在**全局默认**、
+永远不是父策略）与 `ownershipCheckScope()`（可用但**永不持久**）。
+一条只写在表里的结论，与一条只写在文档里的结论，在代码有没有照做这件事上
+是同一个东西。
+
+### 三、验证
+
+* 变红验证 **184/184 咬住，0 无效，0 没咬住**，逐字节还原。其中
+  **⑩①/⑩② 是我自己**对"服务依赖真的在起作用"的独立复核：
+  从两个 `-row.mjs` 的 `inject` 里分别摘掉服务名，**恰好**那两条顺序用例报红。
+* 8 道门禁全 PASS；全套 CI `.ci/prt-214b/` **9/9 阶段 PASS**，
+  `test` **179 套件 / 4989 用例 / 0 fail**。
+  `root-row.test.mjs` 24/24、`enforcement-identity.test.mjs` 22/22、
+  `session-boundary.test.mjs` 20 → **28**。
+
+**★ 一处必须写下来的读数**：`root-row.test.mjs` 的真 cordis 那 4 条
+（**包括本批最核心的顺序无关性**）在**没设 `DSH_CHECKOUT`** 时是 **skip**。
+于是「全绿」与「核心声明从未被跑过」在**只看通过率**的时候是同一个读数。
+本仓库的 CI 设了 `DSH_CHECKOUT`，但这是**环境决定的**，不是用例保证的。
+
+### 四、两行为什么**仍然**是 🟡
+
+* **PRT-214 仍然 🟡**：`legion-host.patch.yml` 依然**不完整**——
+  `pre-execute` / `approval-answerer` 两行仍是 `module: null`，`render.mjs --write` 仍 **exit 3**。
+  而且**本批最重要的一条读数是**：这条链的每一段都被证明过，
+  **整条链从未在真实 DSH 进程里跑过一次**。实际驱动真 DSH CLI 的结果是：
+  `--dump-config` **解析并锚定**了补丁行（输出里确实有 `legion-enforcement-root`），
+  但**从不实例化插件**（探针模块的 `apply` 一个字都没输出）。
+  **"强制面在真实部署里装上了"这句话，本批没有证据说它成立。**
+  唯一能拿到那个证据的做法是启动真 DSH profile（会 auth/探凭据）或往真 profile
+  写补丁文件——后者按绝对禁令**不能做**（`patchReload: 'live'` 会改掉正在跑的 harness，
+  包括本次会话自己）。
+  另：团队侧 `setApprovalPortFactory()` 的**注册者仍无人交付**，
+  所以走的是"注入工厂"路线且没有生产调用者——root 行会以
+  `ENFORCEMENT_ROOT_ROW_NO_APPROVAL_PORT_FACTORY` **响亮地拒绝**，
+  但"响亮地拒绝"仍然是"强制面没装上"。
+* **PRT-211 仍然 🟡**：升级的是**源码级**证据，**没有任何一面**是
+  `behavior-verified`，`behaviorVerified` 一律仍为 `false`。
+  spec 自己把「运行时行为验证（权限是否真沿 parent→child 生效、事件续接能否跨崩溃）」
+  归给阶段 3，那个端到端实验**本批没有做**。
+  另：DSH **不是冻结依赖**，上面每条结论都钉着文件+行号，
+  而仓库**没有**任何机制在 DSH 升级时重新核对它们——它们是不会自己变红的手写常量。
 
 ---
 

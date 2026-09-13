@@ -34,6 +34,10 @@ import {
   overlayArgsFor,
   resolveDshOverlay,
 } from './dsh-overlay.mjs'
+import {
+  ENFORCEMENT_IDENTITY_PROCESS_KEY,
+  resolveEnforcementIdentity,
+} from './enforcement-identity.mjs'
 import { buildChildEnv, isSecretLikeKey, OS_ESSENTIAL_ENV } from './allowlist.mjs'
 import { checkPorts } from './ports.mjs'
 import { readinessResultToDiagnostic, waitForReadiness } from './readiness.mjs'
@@ -186,6 +190,14 @@ export function createLauncher({
   enforcementOverlay = true,
   /** 覆盖层探测用的 fs（可注入）。`null` = 真实 fs。 */
   overlayFs: overlayFsOption = null,
+  /**
+   * 注入 Runtime 子进程的 Legion 身份（PRT-214 续）。
+   *
+   * 取自产品配置键 `runtime.env`（既有键，不是本批次发明的）——
+   * `actor` / `scope` / `action` / `taskId` **只能**从这里来；
+   * hub 地址与 cwd 由 Launcher 派生（见 `enforcement-identity.mjs` 的文件头）。
+   */
+  runtimeEnv = {},
   /** 日志策略（PRT-709）。缺省用 `DEFAULT_LOG_POLICY`。 */
   logPolicy = {},
   // ── PRT-713 收尾：健康心跳 ──
@@ -268,6 +280,26 @@ export function createLauncher({
 
   const teamHubPort = plan.processes.find((p) => p.key === 'team-hub')?.port ?? null
 
+  // ── Legion 身份（PRT-214 续）─────────────────────────────────────────
+  //
+  // 组合根（`runtime/dsh-composition/root.mjs`）要求六项输入，而它只从进程环境读。
+  // 本进程是**唯一**知道 hub 端口与 Runtime 工作目录的地方，所以这里是那条线的
+  // 起点：派生出这两项，其余从产品配置 `runtime.env` 取，缺了就拦启动。
+  //
+  // 与覆盖层同一条纪律：诊断带 `process: 'runtime'`，于是 `--include` 不含 runtime
+  // 的受限启动会把这条 error 降级成 warn——一次本来就不拉 runtime 的启动，
+  // 不该因为"强制面没装上"而起不来。
+  //
+  // `cwd` 取的是 **Runtime 进程计划里的那个值**（`supervisor.mjs` 用它当 spawn 的
+  // `cwd`），不是 Launcher 自己的目录：工具调用投影出来的路径按这个 cwd 展开。
+  const runtimeProc = plan.processes.find((p) => p.key === ENFORCEMENT_IDENTITY_PROCESS_KEY) ?? null
+  const enforcementIdentity = resolveEnforcementIdentity({
+    enabled: enforcementOverlay,
+    teamHubPort,
+    cwd: runtimeProc?.cwd ?? null,
+    configured: runtimeEnv,
+  })
+
   const rawPlanDiagnostics = [
     ...layoutDiagnostics(layout),
     // 强制面覆盖层（PRT-257）。它带 `process: 'runtime'`，于是**自动**参与下面
@@ -275,6 +307,8 @@ export function createLauncher({
     // "没装上强制面"不该阻塞一次本来就不启动 runtime 的启动。
     // 这一条是白拿的，但前提是诊断里带对了 process。
     ...overlay.diagnostics,
+    // 身份的完整性（PRT-214 续）。关掉覆盖层时它**刻意**什么都不说（见模块文件头）。
+    ...enforcementIdentity.diagnostics,
     // `validateProcessPlan` 已经并入 `plan.diagnostics`，此处**不再**重复拼接：
     // 重复的同一诊断会让「同一问题出现两次」看起来像两个问题，
     // 而诊断列表是要直接展示给用户的。
@@ -392,6 +426,16 @@ export function createLauncher({
     }
     if (proc.key === 'workbench' && teamHubPort !== null) {
       out.DSH_HUB_UPSTREAM = `http://127.0.0.1:${teamHubPort}`
+    }
+    // Legion 身份（PRT-214 续）。**只有 Runtime 子进程**拿到它们：
+    // 它们是"这个运行时以谁的名义、在哪个空间、干什么"的声明，
+    // 别的进程（hub / workbench / 白板）不需要，也就拿不到。
+    //
+    // 身份不全时 `enforcementIdentity.values` 里缺的那几项**不在**——
+    // 这里不补空串、不补默认值：一个空 actor 会在审计里变成一个谁也不是的名字。
+    // 那种部署已经在 preflight 被拦下，走不到这里。
+    if (proc.key === ENFORCEMENT_IDENTITY_PROCESS_KEY) {
+      Object.assign(out, enforcementIdentity.values)
     }
     return out
   }
@@ -698,6 +742,15 @@ export function createLauncher({
      * 混在 `runtime.command` 自己的参数里；分开一份，排查时不必去数逗号。
      */
     enforcementOverlay: overlay,
+    /**
+     * Legion 身份的解析结果（PRT-214 续）。
+     *
+     * 与 `enforcementOverlay` 同一个理由暴露出来：`--patch` 接上了、而身份没接上，
+     * 与"两层都没接上"在 DSH 进程里的表现（组合根拒绝装配）是一样的，
+     * 但**修法完全不同**——一个要去看补丁文件，一个要去看 `runtime.env`。
+     * 两个读数分开摆，排查时不必去 grep 诊断列表。
+     */
+    enforcementIdentity,
 
     /** 只做检查，不启动任何东西。产品入口在真正启动前调用它。 */
     async preflight() {

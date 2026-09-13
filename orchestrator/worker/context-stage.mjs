@@ -344,7 +344,31 @@ export function createHubContextStage(deps) {
     let res
     try {
       res = await deps.post('/api/context-snapshots/assemble', {
-        attemptId, runId, frozenAtMs, scope, ...permissionBody, sources,
+        attemptId, runId, frozenAtMs, scope,
+        // ★ `associations` 必须显式发出去。
+        //
+        // 路由**一直**接受这个字段（`associations: body.associations ?? {}`），
+        // 库里也一直有 `goal_id` / `task_id` / `employee_id` / `team_plan_id`
+        // 四列并建了索引——而远程路径**从来不发它**。于是那四列恒为 NULL：
+        //
+        //   > 一份"查不出它属于哪个任务"的快照，
+        //   > 与一份"没有归属概念"的快照，在库里长得一模一样——
+        //   > 只不过前者的列、索引与路由全都写好了，看起来像是有人维护的。
+        //
+        // 与 `loadSources` 是**同一类**接缝缺陷：本地路径做了（见上面
+        // `associations: { goalId, taskId, … }` 那段），生产路径漏了。
+        // 而"这次运行是哪个任务"正是 spec §6.5 要能回答的问题之一——
+        // 少了它，按任务回放上下文这条查询根本不成立。
+        //
+        // 取值口径与本地路径**逐字一致**，这样两条路产出的快照可比较：
+        // 任务 id 优先取真读到的那条任务，退回 lease 上的 taskId。
+        associations: {
+          goalId: sources.goal?.id ?? null,
+          taskId: sources.task?.id ?? lease.taskId ?? null,
+          employeeId: sources.employeeManifest?.employeeId ?? null,
+          teamPlanId: sources.teamPlan?.id ?? null,
+        },
+        ...permissionBody, sources,
       })
     } catch (err) {
       throw new ContextStageError(CONTEXT_STAGE_ERRORS.PERSIST_FAILED,

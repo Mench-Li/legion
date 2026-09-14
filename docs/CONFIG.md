@@ -205,6 +205,32 @@ node scripts/config/sync.mjs --check    # 白板副本与根引擎逐字节一�
 > `⚠ 另有 N 个未跟踪文件未纳入扫描` 提醒这一点；② 注释里写 `process.env.X` **不算**读取点
 > （扫描前会剥掉注释，字符串内的 `//` 不会误伤同一行的真实读取）。
 
+#### 动态下标读取（`process.env[expr]` / `env[expr]`）——必须显式登记
+
+字面量规则（`process.env.NAME`、`env.NAME`、解构、别名对象）覆盖不到**计算键**的读取，
+所以 `--check` 另有一条判据：**每一处动态下标都必须在对应进程 schema 的 `dynamicEnvReads` 里**，
+每条写明 `file` / `expr` / `reason`。这条判据此前**只打印不判定**——`product` 有 8 处动态下标、
+一条声明都没有，门禁照旧 PASS；现在缺一条就 FAIL 并报出「进程 → 文件 → 表达式」。
+
+三个必须知道的口径：
+
+1. **匹配单位是「文件 + 归一化表达式」**。归一化剥掉 `process.env[…]` / `env[…]` 外壳与尾部 `]`，
+   因为同一处读取点会出现多种渲染（扫描器对 `process.env[name]` 会报 `name` 与 `env[name]` 两条，
+   而 schema 里登记的是源码写法 `process.env[name]`）。**文件不同或归一后键表达式不同，一律不互相覆盖**——
+   所以「同一个文件里随便加一条声明」不会让任何读取点变绿。仍然存在的缺口：同一文件内两个归一后
+   相同的下标只需一条声明（它们本来就是同一处读法）。
+2. **schema 文件自身按精确路径排除**。`config-schema.mjs` 就在被扫描的目录里，它写下的
+   `expr: 'env[k]'` 会被同一条规则再扫一遍——那是**登记文本**，不是读取点。输出里会分别报出
+   「真实源 N 处」与「schema 自身登记文本 M 处已排除」，两者不能同形（否则「5 处已排除」与
+   「5 处没登记」在日志里长得一样）。排除**只认那一个精确路径**，不做 basename/后缀匹配：
+   后者会把任意子目录里同名的真实源码一起吞掉。
+3. **命中了动态规则但确实不是 env 读取的位置**（例如 `security/secrets/dsh-credentials.mjs` 里
+   `env` 是**凭证文档的 YAML 映射节点**，或 `product/launcher/allowlist.mjs` 里
+   `env[key] = …` 是**赋值左值**），登记在 `scripts/config/scan.mjs` 的 `FOREIGN_DYNAMIC_SUBSCRIPTS`，
+   每条写明 `kind` / `reason` / `occurrences`（覆盖几处）。**不要**写进 `dynamicEnvReads`——
+   那份声明说的是「我确实这样读进程环境」，写进去就是让声明说谎。处数不符、或源码里已找不到那处下标，
+   一样判 FAIL；豁免不是一张可以随手加一行的永久免检表。
+
 ### 跨进程一致性规则（`scripts/config/cross-checks.mjs`）
 
 单进程 schema 管不到的事故都在这里拦：
@@ -286,6 +312,8 @@ node scripts/config/sync.mjs --check   # CI env 阶段校验一致性
 1. 在对应进程的 `config-schema.mjs` 里加一个字段（`key` / `env` / `type` / `default` / `doc`，密钥记得 `sensitive: true`）。
 2. 若该键是**核心项**（host/port/token/路径等影响启动的），在进程入口改成走 `loadConfig()` 的解析结果；其余功能键保持原样读取即可，但**必须在 schema 中声明**。
 3. 跑 `node scripts/config/scan.mjs --check`——它会告诉你哪个读取点漏登记了。
+   若读取点写成 `process.env[expr]` / `env[expr]`（键是算出来的），还要在同一个 schema 的
+   `dynamicEnvReads` 里加一条 `{ file, expr, reason }`；确实不是 env 读取的下标见上一节的第 3 条。
 4. 跑 `node scripts/config/check.mjs` 确认摘要与跨进程规则仍自洽。
 5. 单测里的「默认值漂移」用例会把你写的 `default` 与代码里的真实默认值比对：**两侧不一致就会失败**，这正是防止 schema 变成过期文档的机制。
 

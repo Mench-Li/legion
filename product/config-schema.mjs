@@ -108,6 +108,62 @@ export const SCHEMA = defineSchema({
       doc: '单进程就绪判据超时（ms）。判据本身在进程清单里，这里只覆盖超时',
     },
   ],
+  // ── 动态下标读取（本批起 `scan --check` 强制登记）────────────────────
+  //
+  // 这 6 处是**计算出来的键**：键名不写在字面量里，而是从**键名常量表**里取。
+  // 扫描器的字面量规则一条都读不到它们——所以这 6 条登记是它们唯一的机器可读记录，
+  // 而在这批之前 `--check` 只打印 `[动态]`、从不对照：product 一条都没有，门禁照样绿。
+  //
+  // 每一处读到的键都能在上面的 `fields` 或下面的 `foreignEnv` 里找到**同一条声明**
+  // （三张表：LEGION_ENV 受控层 → fields；OS_HOME_ENV → foreignEnv 的 OS 三项；DSH_HOME_ENV → foreignEnv）。
+  //
+  // ★ 本进程另有 2 处 `env[key]`（product/launcher/allowlist.mjs）**不是读取**：
+  //   `env[key] = String(value)` 是赋值左值（正在构造的子进程环境对象）。它们登记在
+  //   `scan.mjs` 的 `FOREIGN_DYNAMIC_SUBSCRIPTS`（kind: write-target），**不写在这里**——
+  //   把写目标写进 `dynamicEnvReads` 就是让这份声明说谎，而这份声明的价值全在它说的每句都真。
+  dynamicEnvReads: [
+    {
+      file: 'product/launcher/cli.mjs',
+      expr: 'env[OS_HOME_ENV.LOCAL_APP_DATA]',
+      reason: 'osHomeFacts(env) 从 OS_HOME_ENV 键名表取 Windows 的 `%LOCALAPPDATA%`（表值 LOCALAPPDATA）。'
+        + '键必须计算：那张表是「这三个名字属于操作系统、不属于 Legion 配置」的唯一住处，'
+        + '三个名字逐条登记在本 schema 的 foreignEnv 里；在读取点写死字面量会让这条事实两处各说一半。',
+    },
+    {
+      file: 'product/launcher/cli.mjs',
+      expr: 'env[OS_HOME_ENV.USER_PROFILE]',
+      reason: '同上（`nonEmpty(env[OS_HOME_ENV.USER_PROFILE]) ?? nonEmpty(env[OS_HOME_ENV.HOME])` 的第一顺位）：'
+        + 'Windows 的家目录事实。名字来自同一张 OS_HOME_ENV 表，归属登记在 foreignEnv（USERPROFILE）。',
+    },
+    {
+      file: 'product/launcher/cli.mjs',
+      expr: 'env[OS_HOME_ENV.HOME]',
+      reason: '同上：POSIX 家目录事实（表值 HOME），是上面那个 `??` 的第二顺位。'
+        + 'HOME 与别的进程共用同一个名字，所以在 foreignEnv 里逐个登记归属（操作系统 POSIX），不靠前缀猜。',
+    },
+    {
+      file: 'product/launcher/cli.mjs',
+      expr: 'env[DSH_HOME_ENV]',
+      reason: 'dshCredentialsFileFrom(env) 用 DSH_HOME_ENV 常量（值 DSH_HOME）定位 **DSH 自己的** .credentials.yaml。'
+        + '键必须计算：那个常量名就是「DSH 用哪个变量」这个事实的唯一定义处（PRT-509 路线 A′）；'
+        + 'DSH_HOME 在本 schema 的 foreignEnv 里登记为「DSH 拥有、Legion 只读该文件」。',
+    },
+    {
+      file: 'product/paths.mjs',
+      expr: 'env[LEGION_ENV.HOME]',
+      reason: 'defaultProductHome 用 LEGION_ENV 表取受控环境变量 LEGION_HOME（spec §6.11 受控层，'
+        + '优先级高于操作系统事实）。键必须计算：LEGION_ENV 是「本模块认的全部环境变量」的唯一登记处；'
+        + 'LEGION_HOME 本身是上面 fields 里声明过的读取点。',
+    },
+    {
+      file: 'product/paths.mjs',
+      expr: 'env[envKey]',
+      reason: 'resolveLayout 的通用取值器 `pick(explicit, envKey)`：envKey 由每个调用点从同一张 LEGION_ENV 表传入'
+        + '（INSTALL_DIR / DATA_DIR / CACHE_DIR / LOG_DIR / WORKSPACE_DIR / PRODUCT_CONFIG / SECRETS_FILE —— '
+        + '七个键全部是上面 fields 里声明的读取点）。它必须计算，否则七个键要写七份几乎相同的取值代码，'
+        + '而「哪一层压过哪一层」（§6.11）会散成七处、只会在某一处被改错。',
+    },
+  ],
   // 子进程的 env 键名 + 平台必需键名：都是「变量名」，不是本进程的读取点。
   // 不显式列出的话 `scan --check` 会要求把它们登记为读取点（P3-4 遇到过同类问题）。
   //

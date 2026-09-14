@@ -56,7 +56,7 @@
 | `28ac81f` | 阶段 8 十三行状态对齐已交付事实 |
 | `16c3fa7` | 修掉探针编号撞号 + 补记阶段 10 独立复核 |
 
-每一步都先跑通**六道门禁 + 全量 8 阶段 CI** 才推送。
+每一步都先跑通**八道门禁 + 全量 9 阶段 CI** 才推送。
 
 ### 2.4 续批：PRT-315 拆完五个边界 + 一处门禁修复（同一分支，逐条推送）
 
@@ -162,10 +162,12 @@ CI 当时正跑在一个**还在被写的文件**上（阶段 8 子代理仍在�
 
 ## 四、验证纪律（本次每次都做了）
 
-- **六道门禁**全绿：`scan --check`（448 疑似字面量）、`dsh-boundary`、
-  `baseline-snapshot`、`topology-inventory`、`progress-check`、`check-docs`，
-  外加 `encoding-check --all`（1780 个文本文件）。
-- **全量 CI 8 阶段**（env/boundary/deps/build/test/smoke/stage/doc）每次推送前跑通。
+- **八道门禁**全绿：`scan --check`（**902** 疑似字面量）、`dsh-boundary`（3 文件 / 26 处）、
+  `baseline-snapshot`、`topology-inventory`、`progress-check`、`check-docs`、
+  `ci-syntax`（50 脚本），外加 `encoding-check --all`（**1943** 个文本文件）。
+- **全量 CI 9 阶段**（syntax/env/boundary/deps/build/test/smoke/stage/doc）每次推送前跑通。
+  （本报告上一版写"六道门禁 + 8 阶段"、`scan` 448 疑似字面量、`encoding` 1780 文件，
+  都是当时的口径；数字随批次增长，这里改成现状。）
 - **破坏性验证**逐条要求：`applied > 0`、`failCount > 0`、`importErr === false`、
   `thrown === 0`、逐字节还原并当场比对。**崩溃式变红一律判为无效。**
 - **绝不**在全量 CI 运行期间跑破坏性脚本（会改写源码）。

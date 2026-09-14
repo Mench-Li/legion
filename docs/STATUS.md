@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-14　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **195 套件 / 5656 用例 / 0 fail**（证据 `.ci/prt-254scan/`）
+**最近一次全量基线**：2026-09-14　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **195 套件 / 5666 用例 / 0 fail**（证据 `.ci/prt-dyn/`）
 （**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数会少）
 —— 以本文件所在提交为准；证据 `.ci/prt-901/`（PRT-901/902 第三方组件清单、SBOM 与商业分发条件那一批）
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
@@ -3457,6 +3457,111 @@
 > `docs/DUAL-WRITE-RACE-evidence/verify-evidence.md`。
 
 ---
+
+## 2026-09-14　动态 env 读取现在**真的**被门禁强制登记（并因此量出 Launcher 有 8 处未登记的下标读取）
+
+上一批把 `runtime/` 与 `security/` 纳入扫描范围时，顺带报出了一条**真实缺口**（当时只报告、没有修）：
+
+> `extractEnvReads` 附近的注释写着「动态访问（`process.env[expr]`）**必须显式登记**」，
+> 但 **`--check` 从来没有强制过 `dynamic`**——它只把 `[动态]` 打印出来；
+> 真正读 `SCHEMA.dynamicEnvReads` 的只有 `topology-inventory`。
+
+**一个只把警告打出来、没有人据它拦下的检查，与没有这个检查，在"新增一处计算型 env 读取会不会被发现"上是同一个读数。**
+本批把它补上，于是这条缝立刻暴露出一处真实缺口。
+
+### 一、量出来的缺口：**`product`（Launcher）有 8 处动态下标读取，零声明**
+
+| 进程 | 动态下标 | 有 `dynamicEnvReads`？ |
+| --- | --- | --- |
+| `workbench` | 6（含自身登记文本 4） | 有 |
+| `whiteboard` | 4（含 2） | 有 |
+| **`product`** | **8** | **完全没有** |
+| `runtime` | 7（含 5） | 有（上一批补） |
+| `security` | 1 | 无（假阳性，见下） |
+
+★ 要紧的是**哪一个**进程没声明：`product/launcher/allowlist.mjs` 正是**决定哪些 env 键能进子进程**的白名单入口
+（`scan.mjs` 自己的 `PROCESSES` 注释就这么写）。也就是说——**最该被盯住的那个进程，是唯一一个零声明、且当时无人强制它声明的。**
+
+### 二、★ 我又写错了一处，子代理读调用点纠正（这是本批第二处自我更正）
+
+我说那 8 处"全部是真实 env 读取"。**不准确**：`product/launcher/allowlist.mjs:71/80` 是
+`env[key] = String(value)` —— **赋值左值**（`const env = {}` 正在构造要交给子进程的那份环境），
+不是读取；那个函数真正的读取面是 `baseEnv`，走 `Object.entries(baseEnv)` 整表遍历，没有下标读。
+
+所以真相是 **6 处真读 + 2 处写目标**。把它写进 `dynamicEnvReads`（字段名就是"我这样读 env"）
+**就是让这份声明说谎**；于是按 `kind: write-target` 登记进非 env 台账，处数 2。
+
+> 这是我**第二次**在简报里给出错前提（上一批是"两个目录都 0 个真实 env 读取、`fields` 会是空的"）。
+> 两次都是子代理去读了源码才发现。**"上游说的"不是证据——包括我自己说的。**
+
+### 三、强制登记抓什么、不抓什么（如实划界）
+
+**抓得到**：任何进程新增一处动态下标而没登记（哪怕键名来自已声明的常量表）；
+豁免处数不符；豁免在源码里已失效；豁免缺 reason / occurrences。
+输出形如 `✖ [product] 未声明动态读取（6）：product/launcher/cli.mjs → env[DSH_HOME_ENV]；…` 并 `exit 1`。
+
+**抓不到（明说）**：(a) 归一后相同的下标在同一文件内只算一组（同一处读法的不同渲染本来就是同一处）；
+(b) 扫描器本身看不见的读取（如参数名不是 `env` 的 `source[key]`）依旧看不见——既有边界，不因本批改变。
+
+### 四、★ 处理"schema 文件自己也在被扫描目录里"这件事（同一天第三次撞到它）
+
+`config-schema.mjs` 的**登记文本**（`expr: 'env[k]'`）就在被扫描的目录里，于是它**自己被当成动态读取**。
+`runtime` 报 7 处，**其中 5 处是它自己的登记文本**。处置：**按精确路径排除**（不是 basename ——
+按 basename 会把任意子目录里同名的**真实源码**一起吞掉，那等于**藏掉未声明读取**），
+并且**把两者分开打印**：`动态访问 7 处（真实源 2，schema 自身登记文本 5 处已排除）`。
+⇒ **读者能分辨"已排除"与"缺失"**，而不是只看到一个更小的数字。
+
+同一个坑今天已经踩过两次（切片 7 的心跳断言、上一批的编造断言），这是第三次——
+三次的形状完全一样：**判据取在了一个包含被断言对象自己的集合上。**
+
+### 五、★ 第四次"变异不咬"，而且它这次指向的是"PASS 本身"
+
+变异 D：从 `main()` 里把那句把发现变成 `exit 1` 的**内联计数**删掉 →
+**51 条全绿、`scan --check` 照旧 PASS**。也就是说，"把发现变成非零退出"这半句**当时没有任何测试守着**。
+
+★ 由此得到一个更一般的读数（子代理报的、我认为是本批最值钱的一句）：
+
+> 现状下每一处都已登记，所以 **`scan --check` 的 PASS 对"判定是否还在"零信息量**——
+> 一个把判定短路掉、让红线永远不出现的改动，得到的还是那个绿色的 PASS。
+
+修法：把计数口径抽成**导出的** `countViolations()`（`main()` 只留一行调用），
+并加用例钉住四类未处理项**逐类计入**；等价变异 D′（删掉 `countViolations` 里两个 dyn 项）
+⇒ `✖ --check 的违规计数口径… 3 !== 6` 红 1 条。
+
+★ **我独立复核了强制登记真的会红**：改掉 `product` 一处已声明 expr ⇒
+`✖ [product] 未声明动态读取（1）：product/launcher/cli.mjs → env[OS_HOME_ENV.LOCAL_APP_DATA]` + `scan: FAIL`；
+`sha256` 核对还原、还原后 PASS。也独立核了 `countViolations` 已导出且两个 dyn 项被用例钉住（`config.test.mjs:1051-1052`）。
+
+### 六、`security` 那处假阳性：**没有**为了讨好扫描器去改生产代码
+
+`security/secrets/dsh-credentials.mjs:582` 的 `record.env[names[0]]` 里 `env` 是 **YAML 映射节点**
+（465–475 行：`env.t !== 'map'` / `env.v`），**不是进程环境**。
+处置：`scan.mjs` 里与真实声明**明确分开**的一份 `FOREIGN_DYNAMIC_SUBSCRIPTS` 台账
+（每条要求 `kind` / `reason` / `occurrences`），按扫描器**原样**的 `env[names[0]`（它把 `]` 截掉了）登记，
+另存 `source: 'record.env[names[0]]'` 供人核对；`security/config-schema.mjs` **一行未动**，
+且有 `expect(SECURITY.dynamicEnvReads) === []` 守住"它不该有声明"。
+
+### 七、验证
+
+- `scan --check` **PASS**（输出文案已从"读取点与疑似字面量"扩成"读取点、疑似字面量**与动态读取**"）。
+- `config.test.mjs` **42 → 52 例**，52/52；**既有 10 个进程读取键 47 → 47 未变**。
+- 变异 A（去掉自身排除）红 4 + 门禁自己 FAIL（9 项）；B（关掉判定）红 4 —— ★ 且 **`--check` 仍 PASS**；
+  C（排除放宽成 basename）红；D 不咬 ⇒ 抽成 `countViolations()` 后 D′ 红；五次 `sha256` 核对还原。
+- 不变式 #3 逐条 PASS（sync / topology 无漂移 / encoding **1943** / baseline 无漂移 / ci-syntax 50 /
+  dsh-boundary 3 文件 26 处 / check-docs 10 类全绿）。
+- **未跑** `topology-inventory --record`：`dynamicEnvReads` 不在被记录的清单里（已核 `inventory.json` 无该字段），
+  且 `diffInventories()` 比较的 7 类字段**一项未变**，所以没有需要"记录掉"的漂移。
+
+### 八、诚实边界
+
+- **"非 env 豁免"放在 `scan.mjs` 而不是 schema 字段**：因为上一批的禁改清单包含 `security/config-schema.mjs`。
+  若希望它长成 schema 的 `foreignDynamicReads`，需要解禁那个文件——**这是一处为遵守禁改而做的妥协**。
+- 豁免要求精确 `occurrences`，而真实声明没有处数字段（要加就得动 `runtime/config-schema.mjs`，被禁）
+  ⇒ **豁免比声明更严**，方向是安全的那一侧。
+- `allowlist.mjs` 那 2 处判为「写」而非「读」。若评审口径是"对子进程环境对象的写也算注入面"，
+  结论要改成 8 条声明——但那样 `dynamicEnvReads` 就在说"我这样读 env"，而它并没有读。**这条请复核。**
+- 非 `--check` 的列表模式现在也会 import schema 以显示登记状态（schema 坏掉时列表模式静默降级、`--check` 仍抛）。
+- `foreignProblems` 是全局的：`--process=X` 时若全局豁免登记坏了也会 FAIL。
 
 ## 2026-09-14　PRT-254 覆盖缺口闭合：`runtime/` 与 `security/` 纳入配置面门禁（558 → 902 个疑似字面量）
 

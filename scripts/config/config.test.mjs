@@ -20,7 +20,7 @@ import {
 import * as ENGINE from '../../packages/shared/src/config.mjs'
 import { runCrossChecks, isExposed } from './cross-checks.mjs'
 import { parseEnvFileDetailed, SCHEMA_FILES } from './check.mjs'
-import { scanProcess, extractEnvReads, PROCESSES } from './scan.mjs'
+import { scanProcess, extractEnvReads, PROCESSES, normalizeDynamicExpr, dynamicCoverage, foreignDynamicProblems, countViolations, FOREIGN_DYNAMIC_SUBSCRIPTS } from './scan.mjs'
 import { SCHEMA as HUB } from '../../team-hub/config-schema.mjs'
 import { SCHEMA as WB } from '../../workbench/scripts/config-schema.mjs'
 import { SCHEMA as BOARD } from '../../whiteboard/apps/server/src/config-schema.mjs'
@@ -30,6 +30,8 @@ import { SCHEMA as SERVICES } from '../../services-plugin/config-schema.mjs'
 // PRT-254：`runtime/`（清单声明的第 3 个进程）与 `security/`（安全面库）此前不在扫描范围里
 import { SCHEMA as RUNTIME } from '../../runtime/config-schema.mjs'
 import { SCHEMA as SECURITY } from '../../security/config-schema.mjs'
+// 本批（动态读取强制登记）：product 的 8 处动态下标此前一处都没登记
+import { SCHEMA as PRODUCT } from '../../product/config-schema.mjs'
 
 const ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..')
 // 六个**配置面**：三个活跃进程 + 三个 DSH 插件族（P3-4 纳入；插件主配置面仍是宿主 composition）
@@ -260,6 +262,17 @@ test('跨进程：白板 DB_PATH 落进房间目录给 warning', () => {
 function runCheck(args) {
   try {
     const out = execFileSync(process.execPath, [join(ROOT, 'scripts', 'config', 'check.mjs'), ...args], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+    return { code: 0, out }
+  } catch (e) {
+    return { code: e.status, out: `${e.stdout ?? ''}${e.stderr ?? ''}` }
+  }
+}
+
+/** 跑 `scripts/config/scan.mjs`（配置面门禁）并连 stderr 一起收——不重定向到文件，
+ *  因为 PowerShell 的 `>` 会写成 UTF-16，而这里只需要拿到文本判读。 */
+function runScan(args) {
+  try {
+    const out = execFileSync(process.execPath, [join(ROOT, 'scripts', 'config', 'scan.mjs'), ...args], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
     return { code: 0, out }
   } catch (e) {
     return { code: e.status, out: `${e.stdout ?? ''}${e.stderr ?? ''}` }
@@ -802,4 +815,239 @@ test('★ 引擎：fields 为空必须显式写 allowEmptyFields，默认仍然�
   // 默认（不给开关）必须仍然拒绝：忘写 fields 与"确实没有 fields"不能是同一个读数
   assert.throws(() => defineSchema({ process: 'x', fields: [] }), /非空 fields/)
   assert.throws(() => defineSchema({ process: 'x', allowEmptyFields: true, fields: undefined }), /必须是数组/)
+})
+
+// ───────────────────────── ⑦ 动态读取的强制登记（本批：把「打印」变成「判定」）─────────────────────────
+//
+// 背景：`extractEnvReads` 一直会返回 `dynamic`，注释里也一直写着「必须显式登记」，
+// 但 `--check` **只打印 `[动态]` 就从不算它**。于是「新加一处计算式 env 读取」在门禁上没有任何读数：
+// 唯一的消费方是 `topology-inventory`，它读 `dynamicEnvReads` 却从不判缺失。
+// 结果就是本批实测到的形态：**product 有 8 处动态下标、一份声明都没有，而 `scan --check` 一直是 PASS**。
+//
+//   > 一道只打印、不判定的门禁，与没有这道门禁，在"新读取点能不能溜过去"这个问题上是同一个读数——
+//   > 只不过前者会让人以为已经核对过。
+//
+// 这一节的要害是**判据不能自证**：被断言的对象（读取点）必须来自源码扫描，
+// 断言的依据（声明）必须来自 schema，两者分开构造。下面第 1/3/8 条用的是**人造 scan**，
+// 与被测的实现完全独立——那是"把实现改坏，测试必须红"的来源。若断言写成
+// `declared ⊆ scan.dynamic`，schema 文件本身就在扫描目录里，往声明里编一条会立刻被扫出来，
+// 那条断言在**任何实现下**都为真（这正是本仓库今天踩过两次的坑）。
+
+/** 造一份最小的 scan 结果（只带动态读取），与被测实现无关。 */
+const dynScan = (name, dyn) => ({ name, dynamic: dyn.map((d) => ({ file: d.file, expr: d.expr })) })
+/** 造一份最小 schema（只带 dynamicEnvReads）。 */
+const dynSchema = (dynamicEnvReads = []) => ({ dynamicEnvReads })
+
+test('★★ 动态读取必须被 dynamicEnvReads 覆盖：一处未登记即违规（并报出进程/文件/表达式）', () => {
+  const scan = dynScan('demo', [
+    { file: 'demo/a.mjs', expr: 'env[k]' },
+    { file: 'demo/b.mjs', expr: 'env[other]' },
+  ])
+  const cov = dynamicCoverage(scan, dynSchema([{ file: 'demo/a.mjs', expr: 'env[k]' }]),
+    { schemaFile: 'demo/config-schema.mjs', processName: 'demo', foreign: [] })
+  assert.deepEqual(cov.uncovered.map((e) => `${e.file} → ${e.expr}`), ['demo/b.mjs → env[other]'])
+  assert.equal(cov.uncovered[0].file, 'demo/b.mjs', '违规必须带文件')
+  assert.equal(cov.uncovered[0].expr, 'env[other]', '违规必须带表达式')
+
+  // 空声明 ⇒ 两处都违规。这一条就是本批要消掉的那个洞：不登记必须红，而不是"跳过判定"。
+  const none = dynamicCoverage(scan, dynSchema([]), { schemaFile: 'demo/config-schema.mjs', processName: 'demo', foreign: [] })
+  assert.deepEqual(none.uncovered.map((e) => `${e.file} → ${e.expr}`), ['demo/a.mjs → env[k]', 'demo/b.mjs → env[other]'])
+  // schema 连 dynamicEnvReads 这个属性都没有（product 在本批之前的形态）同样按"一处都没声明"处理
+  const bare = dynamicCoverage(scan, {}, { schemaFile: 'demo/config-schema.mjs', processName: 'demo', foreign: [] })
+  assert.equal(bare.uncovered.length, 2, 'schema 没有 dynamicEnvReads 属性时不得被当成"全部已登记"')
+})
+
+test('★ Trap 4 匹配规则：文件 + 归一化表达式（同一处读法的三种渲染互相覆盖，同文件不同键不覆盖）', () => {
+  // 归一：剥掉 process.env[...] / env[...] 外壳与尾部 ]
+  assert.equal(normalizeDynamicExpr('process.env[name]'), 'name')
+  assert.equal(normalizeDynamicExpr('env[name]'), 'name')
+  assert.equal(normalizeDynamicExpr('name'), 'name')
+  assert.equal(normalizeDynamicExpr('process.env[env[name]]'), 'name')
+  assert.equal(normalizeDynamicExpr('env[LEGION_ENV.HOME]'), 'LEGION_ENV.HOME')
+  // security 那处被扫描器截断的表达式与源码写法**不相等**（`]` 不在规则的字符集里）——
+  // 这正是"非 env 登记要按扫描器的原样写 expr"的原因，用一条断言把它钉住。
+  assert.equal(normalizeDynamicExpr('env[names[0]'), 'names[0')
+  assert.equal(normalizeDynamicExpr('env[names[0]]'), 'names[0]')
+
+  // workbench 的真实形态：源码一处 `process.env[name]`，扫描器报两条（`name` / `env[name]`），
+  // 而 schema 登记的是源码写法 `process.env[name]`。逐字比对会把一条**正确**的声明判成没生效。
+  const scan = dynScan('wb', [{ file: 'wb/serve.mjs', expr: 'name' }, { file: 'wb/serve.mjs', expr: 'env[name]' }])
+  const ok = dynamicCoverage(scan, dynSchema([{ file: 'wb/serve.mjs', expr: 'process.env[name]' }]),
+    { schemaFile: 'wb/config-schema.mjs', processName: 'wb', foreign: [] })
+  assert.deepEqual(ok.uncovered, [], '同一处读法的不同渲染必须互相覆盖（否则正确声明会被判成没生效）')
+
+  // 归一化仍然**不是**"同文件放行"：文件相同但键表达式不同，一律不覆盖。
+  // （注意分组口径：上面两条渲染归一后是**同一个键**，所以这里是一组、occurrences=2。）
+  const loose = dynamicCoverage(scan, dynSchema([{ file: 'wb/serve.mjs', expr: 'env[anythingElse]' }]),
+    { schemaFile: 'wb/config-schema.mjs', processName: 'wb', foreign: [] })
+  assert.equal(loose.uncovered.length, 1, '同文件里随手指一个声明不得覆盖任何读取点')
+  assert.equal(loose.uncovered[0].occurrences, 2)
+  // 文件不同也不行
+  const otherFile = dynamicCoverage(scan, dynSchema([{ file: 'wb/other.mjs', expr: 'env[name]' }]),
+    { schemaFile: 'wb/config-schema.mjs', processName: 'wb', foreign: [] })
+  assert.equal(otherFile.uncovered.length, 1, '文件不同的声明不得互相覆盖')
+  assert.equal(otherFile.uncovered[0].occurrences, 2)
+})
+
+test('★★ Trap 1：只按**精确 schema 路径**排除自身登记文本（宽松排除会藏掉真实读取）', () => {
+  const scan = dynScan('demo', [
+    { file: 'demo/config-schema.mjs', expr: 'env[notDeclared]' }, // schema 自己的登记文本
+    { file: 'demo/deep/config-schema.mjs', expr: 'env[k]' }, // 真实源码，只是同名文件
+  ])
+  const cov = dynamicCoverage(scan, dynSchema([]), { schemaFile: 'demo/config-schema.mjs', processName: 'demo', foreign: [] })
+  // ① 排除必须**只**认那一个精确路径：按 basename / 后缀排除会把子目录里的真实同名文件一起吞掉，
+  //    于是一处未声明的真实读取被静默藏起来——那是比不排除更坏的假绿。放在最前面断言，
+  //    这样"把排除放宽"的改动会直接命中这条消息，而不是被其它断言先拦下。
+  assert.deepEqual(cov.uncovered.map((e) => e.file), ['demo/deep/config-schema.mjs'],
+    '同名的真实文件被当成 schema 自身排除 = 悄悄藏掉未声明读取')
+  // ② 排除本身必须发生：否则 schema 自己的 `expr: 'env[k]'` 会被当成一处"未声明读取"（门禁自咬）
+  assert.deepEqual(cov.self.map((d) => d.file), ['demo/config-schema.mjs'], 'schema 文件自身必须被排除，且只排除它一个')
+})
+
+test('★ Trap 1 实测：runtime 7 处 = 5 处 schema 自身登记文本 + 2 处真实源（product 声明后自身文本变 8）', () => {
+  // 这组数字是"重数一遍"的锚点：数量变了就要重新审这份声明，而不是改数字让它变绿。
+  const rt = scanProcess('runtime', { includeTests: false })
+  const rtCov = dynamicCoverage(rt, RUNTIME, { schemaFile: SCHEMA_FILES.runtime, processName: 'runtime' })
+  assert.equal(rt.dynamic.length, 7, 'runtime 动态命中数变了（基线 7）')
+  assert.equal(rtCov.self.length, 5, 'runtime 的 5 处自身登记文本必须被排除，而不是当成 5 处待登记读取')
+  assert.equal(rtCov.source.length, 2, 'runtime 的真实源动态读取是 2 处（root-row.mjs 同一行两处 env[k]）')
+  assert.ok(rtCov.self.every((d) => d.file === SCHEMA_FILES.runtime))
+  assert.deepEqual(rtCov.uncovered, [], 'runtime 的 2 处真实源必须被现有 dynamicEnvReads 覆盖：' + JSON.stringify(rtCov.uncovered))
+
+  const wb = scanProcess('workbench', { includeTests: false })
+  const wbCov = dynamicCoverage(wb, WB, { schemaFile: SCHEMA_FILES.workbench, processName: 'workbench' })
+  assert.equal(wb.dynamic.length, 6)
+  assert.equal(wbCov.self.length, 4)
+  assert.equal(wbCov.source.length, 2)
+  assert.deepEqual(wbCov.uncovered, [])
+})
+
+test('★★ Trap 3：security 的那处动态下标是**非 env 读取**，用独立登记记录，绝不进 dynamicEnvReads', () => {
+  const scan = scanProcess('security', { includeTests: false })
+  assert.equal(scan.dynamic.length, 1)
+  assert.equal(scan.dynamic[0].file, 'security/secrets/dsh-credentials.mjs')
+  // 不能为了变绿往 fields / dynamicEnvReads 里编东西：security 的实测结论是"一个 env 键都不读"
+  assert.deepEqual(SECURITY.envNames(), [])
+  assert.deepEqual(SECURITY.dynamicEnvReads, [], '假阳性不得被写成"我确实这样读 env"')
+
+  const cov = dynamicCoverage(scan, SECURITY, { schemaFile: SCHEMA_FILES.security, processName: 'security' })
+  assert.deepEqual(cov.uncovered, [], '假阳性必须有机器可读的去处，否则 --check 只能靠「不检查动态读取」变绿')
+  assert.equal(cov.entries.length, 1)
+  assert.equal(cov.entries[0].via, 'foreign')
+  assert.equal(cov.entries[0].foreign.kind, 'foreign-object')
+
+  // 登记必须指向源码里真实存在的那处下标（判据在 security/config-schema.mjs 文件头：env 是 YAML 映射节点）
+  const src = readFileSync(join(ROOT, 'security/secrets/dsh-credentials.mjs'), 'utf8')
+  assert.ok(src.includes('record.env[names[0]]'), '非 env 登记必须指向源码里真实存在的那处下标')
+  assert.deepEqual([...extractEnvReads(src).literal], [], 'security 确实不读 process.env（否则这条"假阳性"判断就错了）')
+})
+
+test('★★ product 的 8 处动态下标逐条对账：6 处真读进 dynamicEnvReads，2 处写目标进非 env 名单', () => {
+  const scan = scanProcess('product', { includeTests: false })
+  const cov = dynamicCoverage(scan, PRODUCT, { schemaFile: SCHEMA_FILES.product, processName: 'product' })
+  // ① 源码侧：先把"要登记什么"数清楚。★ 用 cov.source（已排除 schema 文件自身）而不是 scan.dynamic——
+  //    schema 文件就在扫描目录里，它自己的登记文本（`env[OS_HOME_ENV.HOME]` 之类）会被同一条规则再扫一遍，
+  //    直接数 scan.dynamic 会把**声明**当成读取点（这条断言第一版就是这么红的，正好是 Trap 1 的真身）。
+  const got = cov.source.map((d) => `${d.file} → ${d.expr}`).sort()
+  assert.deepEqual(got, [
+    'product/launcher/allowlist.mjs → env[key]',
+    'product/launcher/allowlist.mjs → env[key]',
+    'product/launcher/cli.mjs → env[DSH_HOME_ENV]',
+    'product/launcher/cli.mjs → env[OS_HOME_ENV.HOME]',
+    'product/launcher/cli.mjs → env[OS_HOME_ENV.LOCAL_APP_DATA]',
+    'product/launcher/cli.mjs → env[OS_HOME_ENV.USER_PROFILE]',
+    'product/paths.mjs → env[LEGION_ENV.HOME]',
+    'product/paths.mjs → env[envKey]',
+  ], 'product 的动态下标清单变了——重数一遍再改 schema，不要照抄旧数字')
+  assert.equal(cov.self.length, 8, 'product 声明之后，schema 自身登记文本命中 8 处（必须被排除，不是待登记）')
+
+  // ② 声明侧：每一处都必须有明确去处
+  assert.deepEqual(cov.uncovered, [], 'product 的每处动态下标都必须有去处：' + JSON.stringify(cov.uncovered))
+  assert.equal(PRODUCT.dynamicEnvReads.length, 6, '真实读取 6 处')
+  assert.equal(PRODUCT.dynamicEnvReads.length + 0, cov.entries.filter((e) => e.via === 'dynamicEnvReads').length,
+    '每条声明都必须真的覆盖到一处读取（多一条声明 = 编造，少一条 = 覆盖不到）')
+  for (const d of PRODUCT.dynamicEnvReads) {
+    assert.ok(d.file && d.expr && typeof d.reason === 'string' && d.reason.trim().length > 20,
+      `动态读取登记必须写明 file/expr/reason：${JSON.stringify(d)}`)
+    // 声明必须指向扫描器真的看到的站点（不是编出来的读取点）
+    assert.ok(
+      cov.entries.some((e) => e.via === 'dynamicEnvReads' && e.file === d.file && e.normalized === normalizeDynamicExpr(d.expr)),
+      `product 声明了源码里不存在的动态读取：${d.file} → ${d.expr}`,
+    )
+  }
+
+  // ③ allowlist 的两处是**赋值左值**（写），不是读取：登记在非 env 名单里，kind 必须是 write-target
+  const allow = cov.entries.find((e) => e.file === 'product/launcher/allowlist.mjs')
+  assert.equal(allow.occurrences, 2)
+  assert.equal(allow.via, 'foreign')
+  assert.equal(allow.foreign.kind, 'write-target')
+  const allowSrc = readFileSync(join(ROOT, 'product/launcher/allowlist.mjs'), 'utf8')
+  assert.equal((allowSrc.match(/env\[key\] = /g) ?? []).length, 2, 'allowlist 的 env[key] 必须是赋值左值')
+  assert.ok(!/env\[key\](?!\s*=)/.test(allowSrc), 'allowlist 里不存在以 env[key] 为右值的读取')
+})
+
+test('★ 非 env 动态下标登记必须完整（缺 reason / 缺处数即红），且每条都指向源码里真实存在的下标', () => {
+  assert.deepEqual(foreignDynamicProblems(), [], '登记不完整：' + foreignDynamicProblems().join('；'))
+  // 豁免必须写明"为什么不是 env 读取"与"覆盖几处"——否则它就是一张永久免检表
+  const problems = foreignDynamicProblems([
+    { process: 'x', file: 'x/a.mjs', expr: 'env[k]', occurrences: 1 },
+    { process: 'x', file: 'x/a.mjs', expr: 'env[k]', reason: '有理由' },
+  ])
+  assert.equal(problems.length, 2, '缺 reason 与缺 occurrences 都必须被报出来：' + JSON.stringify(problems))
+  // 反向：每条豁免都要有源码出处（把 expr / source 文本回到文件里找得到），
+  // 这样"删掉源码里的下标、豁免留着"会被红，而不是变成一句越攒越多的假话。
+  for (const f of FOREIGN_DYNAMIC_SUBSCRIPTS) {
+    const src = readFileSync(join(ROOT, f.file), 'utf8')
+    assert.ok(src.includes(f.source ?? f.expr), `${f.file} 里找不到「${f.source ?? f.expr}」——这条非 env 登记已经失效`)
+    assert.equal(typeof f.reason, 'string')
+  }
+})
+
+test('★ 非 env 登记按「文件 + 表达式 + 处数」精确豁免：多出一处同类下标即违规，登记失效也违规', () => {
+  const scan = dynScan('demo', [{ file: 'demo/a.mjs', expr: 'env[k]' }, { file: 'demo/a.mjs', expr: 'env[k]' }])
+  const one = [{ process: 'demo', file: 'demo/a.mjs', expr: 'env[k]', occurrences: 1, kind: 'write-target', reason: 'r' }]
+  const short = dynamicCoverage(scan, dynSchema([]), { schemaFile: 'demo/config-schema.mjs', processName: 'demo', foreign: one })
+  assert.equal(short.entries[0].occurrences, 2)
+  assert.equal(short.uncovered.length, 1, '登记 1 处、实际 2 处 ⇒ 多出来那处必须违规（豁免不能顺手放大）')
+  assert.equal(short.entries[0].via, null)
+  assert.equal(short.entries[0].foreign.occurrences, 1, '输出要能说出"登记 N 处、实际 M 处"')
+
+  const exact = dynamicCoverage(scan, dynSchema([]), { schemaFile: 'demo/config-schema.mjs', processName: 'demo', foreign: [{ ...one[0], occurrences: 2 }] })
+  assert.deepEqual(exact.uncovered, [])
+  assert.equal(exact.entries[0].via, 'foreign')
+
+  // 豁免条目在源码里已经没有对应下标 ⇒ 也是违规（登记已经变成一句假话）
+  const gone = dynamicCoverage(scan, dynSchema([]),
+    { schemaFile: 'demo/config-schema.mjs', processName: 'demo', foreign: [{ ...one[0], file: 'demo/gone.mjs', occurrences: 2 }] })
+  assert.deepEqual(gone.staleForeign.map((f) => f.file), ['demo/gone.mjs'])
+  assert.equal(gone.uncovered.length, 1, '原读取点仍然没有去处')
+})
+
+test('★ 端到端：scan --check 必须 PASS，且把「schema 自身登记文本」与「真实源」分开报（Trap 1 可见）', () => {
+  // 这条守的是"最终形态"：本仓库当前必须绿；同时"5 处已排除"必须在输出里看得见——
+  // 看不看得见不是美观问题：没有它，"5 处已排除"与"5 处没登记"在日志里是同一个读数。
+  const r = runScan(['--check'])
+  assert.equal(r.code, 0, r.out)
+  assert.match(r.out, /scan: PASS（全部 env 读取点、疑似字面量与动态读取均已处理/)
+  assert.match(r.out, /runtime\/config-schema\.mjs 命中 5 处/)
+  assert.match(r.out, /product\/config-schema\.mjs 命中 8 处/)
+  assert.match(r.out, /allowlist\.mjs[\s\S]{0,60}write-target/)
+  assert.match(r.out, /dsh-credentials\.mjs[\s\S]{0,60}foreign-object/)
+  assert.ok(!/未声明动态读取/.test(r.out), 'PASS 时不得报未声明动态读取：\n' + r.out)
+})
+
+test('★ --check 的违规计数口径（countViolations）：四类未处理项全部计入，一项都不许漏算', () => {
+  // 这条守的是 main() 里那半句"把发现变成非零退出"的式子。
+  // 它原本内联在 main() 里，本批实测（Mutation D）：从内联式里删掉两个 dyn 项，
+  // 51 条用例全绿、scan --check 照旧 PASS —— 现状每处都已登记，少算不会变红。
+  // 抽成 countViolations 之后，同一处删改会在这里变红。
+  const n = (k) => Array.from({ length: k }, (_, i) => ({ file: `f${i}.mjs`, expr: 'env[k]' }))
+  assert.equal(countViolations({
+    undeclared: ['A'], undeclaredLiterals: ['B', 'C'],
+    dyn: { uncovered: n(2), staleForeign: n(1) },
+  }), 6) // 1 未声明 env 键 + 2 未处理字面量 + 2 未登记动态读取 + 1 登记失效
+  assert.equal(countViolations({}), 0)
+  assert.equal(countViolations({ dyn: null }), 0)
+  assert.equal(countViolations({ dyn: { uncovered: n(1), staleForeign: [] } }), 1, '动态未登记必须计入')
+  assert.equal(countViolations({ dyn: { uncovered: [], staleForeign: n(3) } }), 3, '「非 env」登记失效必须计入')
 })

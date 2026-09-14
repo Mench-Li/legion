@@ -1060,6 +1060,31 @@ async function stageTest() {
       files: ['runtime/dsh-composition/runtime-contract-server.test.mjs'],
       cwd: ROOT,
     },
+    {
+      // PRT-253 续批四：**临时端口怎么让另一个进程知道**。
+      //
+      // 服务端绑 `port: 0`（绝不占固定端口），于是端口是随机的——消费方凭什么知道它？
+      // 由**真正绑上了的那个进程**把实际端口写进 DataDir（`pid`/`host`/`port`/`wireVersion`，
+      // 原子 tmp+rename）。被否决的替代方案是"Launcher 先分配再传"：那条路的失败模式
+      // 落在看不见的地方——`reserveEphemeralPort` 是"先绑再放开"，窗口里被抢时 Runtime
+      // 里那一行报 `LISTEN_FAILED`（正确），**但 Runtime 进程自己仍然健康**（`/` 照样 200）
+      // ⇒ Launcher 报就绪并交出一个已不属于任何人的端口 ⇒ worker 读到 `RUNTIME_UNREACHABLE`
+      // （"配了但够不着"），真因只在另一个进程的一份服务值里。
+      //
+      //   > 一个把「端口被抢」报成「端点够不着」的部署，
+      //   > 会让排障的人去查网络，而问题在分配。
+      //
+      // ★ 发布记录里**结构上放不下 token**：只有那四个字段（有用例钉住字段清单）。
+      label: 'runtime-contract-publication（PRT-253：端口发布与陈旧判据，读不到就具名拒绝）',
+      files: ['runtime/dsh-composition/runtime-contract-publication.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      // PRT-253 续批四：契约服务端那一行自己的输入契约（真 `apply` 与真 Context）。
+      label: 'runtime-contract-server-row（PRT-253：契约行自己的输入契约与具名拒绝）',
+      files: ['runtime/dsh-composition/plugins/runtime-contract-server-row.test.mjs'],
+      cwd: ROOT,
+    },
     // PRT-007：旧系统平台契约基线（HTTP/表/状态机）。第 ④ 类用例把「当前源码提取结果」
     // 与已记录基线对账——它是**提醒**而不是迁移门禁：迁移期旧路径仍在正常演进，
     // 做成硬门禁会让每次功能提交都红，最后被人无脑 --record 刷掉，反而失去对拍价值。
@@ -2657,6 +2682,23 @@ async function stageTest() {
         // 一个"整组被跳过、计数里什么都不显示"的套件，与一个压根不存在的套件，
         // 在"这次到底跑了什么"上是同一个东西。
         'product/launcher/dsh-overlay.test.mjs',
+        // PRT-253 续批四：**Runtime Contract 的端点与凭证**怎么从 Launcher 交到
+        // worker 手里（另外三个缺口）。
+        //
+        //   ① `runtime-contract-endpoint.test.mjs`：端口**发布**的读侧。
+        //      三种失败模式各有具名码、**都不编 URL**——`ABSENT`（去看那一行挂没挂）、
+        //      `STALE`（带 `publishedPid`：去看是不是有第二个进程在写同一个 DataDir）、
+        //      `INVALID`/`UNREADABLE`。*一个"读不到就猜一个默认端口"的实现，
+        //      与一个"具名拒绝"的实现，在端口恰好是默认值的机器上是同一个读数。*
+        //      凭证侧钉的是"生成失败 ⇒ 不注入、不空串、不默认值、不关鉴权"。
+        //   ② `runtime-contract-wiring.test.mjs`：Launcher 真的把两个名字与两个值
+        //      交给那两个进程，且**只**交给那两个（hub / workbench / 白板拿不到）。
+        //      ★ 这一套同时钉住一个既有缺口：`LEGION_DATA_DIR` 早已声明在
+        //      `orchestrator.envNames` 里，但 Launcher 从不给它值 ⇒ worker 以
+        //      `exitCode:8 / DATA_DIR_REQUIRED` 崩溃重启，而 Launcher 读数里
+        //      **lastError 是 null**（崩溃循环不带一条错误信息）。
+        'product/launcher/runtime-contract-endpoint.test.mjs',
+        'product/launcher/runtime-contract-wiring.test.mjs',
         // PRT-214 续：把组合根要求的 Legion 身份**注入** Runtime 子进程。
         //
         // 覆盖层那一条解决了"补丁层交给了进程没有"，这一条解决"补丁层里的

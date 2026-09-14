@@ -37,7 +37,7 @@
 //
 // ## 输入从哪来
 //
-// `{runtimeHost, token, bindPort, enforcement?}`，由**知道答案的那一侧**在
+// `{runtimeHost, token, bindPort, dataDir?, enforcement?}`，由**知道答案的那一侧**在
 // 模块求值期注册（`setRuntimeContractInputsFactory`）。形状与
 // `runtime-host-registrar-row.mjs` / `team-hub/approval-registrar-row.mjs` 完全一样：
 // 注册方在自己的模块图里注册，然后 `export default` **真的那个**插件对象。
@@ -49,8 +49,14 @@
 //
 // **一样默认值都没有**：没有 `runtimeHost` → `NO_HOST_PORT`；没有 `bindPort` →
 // `NO_BIND_PORT`；没有 `token` → 服务照起但**需要鉴权的操作全部具名拒绝**
-// （`RUNTIME_CONTRACT_NO_TOKEN`，由 server 那一层给）。
+// （`RUNTIME_CONTRACT_NO_TOKEN`，由 server 那一层给）；没有 `dataDir` →
+// 服务照起、端口照听，但**端口发布不出去**（`NO_PUBLICATION_DIR`，一条可见的降级；
+// 跨进程那个 worker 会因此以 `RUNTIME_CONTRACT_PUBLICATION_ABSENT` 具名拒绝）。
 // 编一个 token 或一个端口默认值，会让"没配"与"配好了"在读数上同形。
+//
+// `dataDir` 是 PRT-253 续批四加上去的**可选**输入：本行绑的是临时端口
+// （`bindPort: 0`），消费方只有经发布文件才知道实际端口。见
+// `../runtime-contract-publication.mjs` 的文件头。
 //
 // ## `canRead` 为什么**不**在这一行
 //
@@ -88,10 +94,17 @@ import {
   RUNTIME_CONTRACT_SERVER_CODES,
   createRuntimeContractServer,
 } from '../runtime-contract-server.mjs'
+import {
+  clearRuntimeContractPublication,
+  publishRuntimeContractEndpoint,
+} from '../runtime-contract-publication.mjs'
 import { RUNTIME_HOST_BINDING_SERVICE } from './runtime-host-row.mjs'
 
-/** 行接口（插件名、服务名、状态字段、具名码）变化时递增。 */
-export const RUNTIME_CONTRACT_ROW_VERSION = 1
+/** 行接口（插件名、服务名、状态字段、具名码）变化时递增。
+ *
+ * 续批四把它从 1 提到 2：服务值新增了 `publication` 状态字段
+ * （见 `published()`）——按本节自己的规矩，状态字段变化就要递增。 */
+export const RUNTIME_CONTRACT_ROW_VERSION = 2
 
 /** 补丁行 id 与插件名。与 `legion-host.patch.yml` 里那一行逐字一致。 */
 export const RUNTIME_CONTRACT_ROW_PLUGIN_NAME = 'legion-runtime-contract-server'
@@ -135,6 +148,22 @@ export const RUNTIME_CONTRACT_ROW_CODES = Object.freeze({
    * 这里不另立一个同义的码：那个处境**只有一个**名字，写在 `wire.mjs` 里。
    */
   NO_ENFORCEMENT_SOURCE: 'RUNTIME_CONTRACT_ENFORCEMENT_UNAVAILABLE',
+  /**
+   * 装上了、也听上了，但输入工厂**没有给 `dataDir`**：端口无处发布。
+   *
+   * 后果是一条**可见的降级**：同进程/本机诊断仍然能用（服务值里有端口），
+   * 但另一个进程里的 worker **发现不了**这台监听器——Launcher 会以
+   * `RUNTIME_CONTRACT_PUBLICATION_ABSENT` 具名拒绝，而不是编一个 URL。
+   *
+   * ★ 它是一条 warning 而不是 `ok:false`：把"降级"与"没装上"合成一个读数，
+   *   会让一个只配了一半的部署看起来像完全没配（与 `NO_TOKEN` 同一条判据）。
+   */
+  NO_PUBLICATION_DIR: 'RUNTIME_CONTRACT_ROW_NO_PUBLICATION_DIR',
+  /**
+   * 发布**写失败**（目录建不出来、盘满、权限）。与"没给目录"分开：
+   * 一个要去看路径有没有被写坏，一个要去补输入。
+   */
+  PUBLICATION_FAILED: 'RUNTIME_CONTRACT_ROW_PUBLICATION_FAILED',
 })
 
 /**
@@ -194,6 +223,10 @@ function degraded(code, message, extra = {}) {
     listening: false,
     port: null,
     warnings: Object.freeze([]),
+    // 降级路径也给出**形状完整**的 `publication`：读侧读到 `undefined` 时
+    // "没这一项"与"没发布"看起来是同一个东西（与 heartbeat 的
+    // `wired`/`enabled` 无条件给出同一条判据）。
+    publication: Object.freeze({ published: false, path: null }),
     ...rest,
     reasons,
   })
@@ -222,7 +255,7 @@ export function verdictFromRuntimeHostBinding(binding) {
 }
 
 /** 本行发布的服务值形状（真装上了）。 */
-function published(server, { warnings = [] } = {}) {
+function published(server, { warnings = [], publication = null } = {}) {
   const state = server.state()
   return Object.freeze({
     ok: true,
@@ -237,11 +270,67 @@ function published(server, { warnings = [] } = {}) {
     tokenConfigured: state.tokenConfigured === true,
     enforcementConfigured: state.enforcementConfigured === true,
     /**
+     * 端口**发布**的结果（PRT-253 续批四）。
+     *
+     * 为什么把它放进服务值而不是只放进日志：另一个进程里的 worker 能不能
+     * 发现本监听器，**取决**于这件事。一台"在听、但没人能发现"的监听器
+     * 与一台不存在的监听器，对 worker 是同一个东西——
+     * 只不过前者的服务值是 `ok:true`。
+     *
+     * `published:false` 时 `code` 说明为什么（`NO_PUBLICATION_DIR` /
+     * `PUBLICATION_FAILED`），而那条码**同时**在 `warnings` 里。
+     */
+    publication: Object.freeze({
+      published: publication === null ? false : publication.published === true,
+      path: publication === null ? null : publication.path,
+      code: publication === null ? null : publication.code,
+    }),
+    /**
      * 降级——**装上了但少配了一样**。它与 `ok:false` 必须分得开：
      * 一个是"出口不在"，一个是"出口在、某些操作会拒绝"。
      */
     warnings: Object.freeze([...warnings]),
   })
+}
+
+/**
+ * 把「本进程实际绑在哪个地址上」发布到 DataDir 下（PRT-253 续批四）。
+ *
+ * `dataDir` 缺失 → `NO_PUBLICATION_DIR`；写失败 → `PUBLICATION_FAILED`。
+ * 两条都**不**拒绝启动：监听器照常服务，只是另一个进程发现不了它。
+ * 见 `RUNTIME_CONTRACT_ROW_CODES` 上那两段说明。
+ */
+function publishEndpoint(inputs, listened) {
+  // `trim()` 而不是只判空串：**读侧**（`product/launcher/runtime-contract-endpoint.mjs`
+  // 的 `runtimeContractEndpointPath`）判的就是 trim 之后非空。两边判据不一致时，
+  // 一个 `"  "` 的 dataDir 会让这里"发布成功"、而那里报"没有 DataDir"——
+  // 一个写进了别处、另一个在正确的地方找不到，两条读数都"合理"却互相矛盾。
+  const raw = typeof inputs?.dataDir === 'string' ? inputs.dataDir.trim() : ''
+  const dataDir = raw === '' ? null : raw
+  if (dataDir === null) {
+    return Object.freeze({
+      published: false,
+      path: null,
+      code: RUNTIME_CONTRACT_ROW_CODES.NO_PUBLICATION_DIR,
+      detail: '输入工厂没有给 dataDir：契约端口无处发布，另一个进程里的 worker 无法发现本监听器',
+    })
+  }
+  const pid = typeof process !== 'undefined' && Number.isInteger(process.pid) ? process.pid : null
+  const r = publishRuntimeContractEndpoint({
+    dataDir,
+    host: listened.host,
+    port: listened.port,
+    pid,
+  })
+  if (r.ok !== true) {
+    return Object.freeze({
+      published: false,
+      path: null,
+      code: RUNTIME_CONTRACT_ROW_CODES.PUBLICATION_FAILED,
+      detail: `发布失败（内层码 ${r.code}）：${r.message}`,
+    })
+  }
+  return Object.freeze({ published: true, path: r.path, code: null, detail: null })
 }
 
 /**
@@ -366,16 +455,38 @@ export const runtimeContractServerRow = {
       return
     }
 
+    // ★ 端口**发布**（PRT-253 续批四）：本进程绑的是**临时端口**，
+    //   而消费方（另一个进程里的 worker）只有在拿到它之后才能构造出
+    //   `LEGION_RUNTIME_URL`。发布的时机**必须**是"listen 成功之后"——
+    //   先发布再监听会让消费方拿到一个没人听的端口，而那个读数是
+    //   `RUNTIME_UNREACHABLE`（看起来像网络问题）。
+    //
+    //   `dataDir` 缺失 → `NO_PUBLICATION_DIR`；写失败 → `PUBLICATION_FAILED`。
+    //   两条都不拒绝启动：见 `RUNTIME_CONTRACT_ROW_CODES` 上那两段说明。
+    const publication = publishEndpoint(inputs, listened)
+
     // 监听是一个**进程级副作用**：本行被卸载（HMR / stop）时必须关掉，
     // 否则同一个进程里的下一次启动会撞上自己的旧监听（EADDRINUSE）。
     // 形状照既有那几行：`ctx.effect` 收的是**返回 disposer 的回调**。
+    //
+    // 发布文件也在这里收尾：它描述的是"**本进程**在听哪个端口"，
+    // 本行卸掉之后那句话就不成立了，留着它就是一份**陈旧发布**——
+    // 而消费侧虽然还有 pid 兜底，让一个已经下线的监听器继续"看起来在"
+    // 没有任何好处。
     if (typeof ctx.effect === 'function') {
-      ctx.effect(() => () => { created.close().catch(() => undefined) })
+      ctx.effect(() => () => {
+        created.close().catch(() => undefined)
+        if (publication.published === true) {
+          clearRuntimeContractPublication({ dataDir: inputs.dataDir })
+        }
+      })
     }
 
-    ctx.provide(RUNTIME_CONTRACT_SERVER_SERVICE, published(created, {
-      warnings: created.state().tokenConfigured === true ? [] : [RUNTIME_CONTRACT_ROW_CODES.NO_TOKEN],
-    }))
+    const warnings = []
+    if (created.state().tokenConfigured !== true) warnings.push(RUNTIME_CONTRACT_ROW_CODES.NO_TOKEN)
+    if (publication.code !== null) warnings.push(publication.code)
+
+    ctx.provide(RUNTIME_CONTRACT_SERVER_SERVICE, published(created, { warnings, publication }))
 
     // ★ **不返回任何东西**。cordis 会把 `apply` 的返回值当**效果**收集，
     // 一个既不是函数、又没有 then / Symbol.iterator 的对象会当场报

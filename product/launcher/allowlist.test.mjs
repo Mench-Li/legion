@@ -71,10 +71,31 @@ test('secretSurfaceOf：能回答「哪几个进程拿得到凭证键」', () =>
   assert.deepEqual(byProcess['team-hub'], ['TEAM_HUB_TOKEN'])
   assert.deepEqual(byProcess.workbench, ['TEAM_HUB_TOKEN', 'DSH_WORKBENCH_TOKEN'])
   assert.deepEqual(byProcess.whiteboard, ['WHITEBOARD_TOKEN'])
-  // 执行引擎不出现在这张表里：模型密钥经 secretRef 解析后注入，不走环境变量。
-  // 这里断言的是「表里没有它」，而不是「它的键列表为空」——
-  // 后者会让「有人给 runtime 加了一个 *_TOKEN」在断言层面看不出来。
-  assert.equal('runtime' in byProcess, false, 'runtime 不得有任何凭证类环境变量（模型密钥走 secretRef 解析）')
-  // orchestrator 需要 hub 访问令牌才能认领任务；这是它唯一应当持有的凭证
-  assert.deepEqual(byProcess.orchestrator, ['TEAM_HUB_TOKEN'])
+  // ★ PRT-253 续批四**改掉了这一条的前提**，理由必须写在这里而不是只写在别处。
+  //
+  //   原文（本批之前）是：`assert.equal('runtime' in byProcess, false)`，
+  //   理由是「模型密钥走 secretRef 解析，不走环境变量」。那个理由**仍然成立**
+  //   ——runtime 依旧拿不到模型密钥。
+  //
+  //   但 `LEGION_RUNTIME_TOKEN` 不是模型密钥：它是 Runtime Contract 的
+  //   **服务端凭证**，由 Launcher 每次启动生成一份，只注入 runtime 与
+  //   orchestrator 两个进程。服务端要拿它去比对 worker 出示的那一份，
+  //   因此它**必须**在 runtime 进程里；而它不能经发布文件/状态文件传递
+  //   （那些是**落盘**的，凭证落盘是被禁止的），环境变量是唯一既不落盘、
+  //   又只在该进程内可见的通道。三条纪律写在
+  //   `runtime-contract-endpoint.mjs` 的 `generateRuntimeToken` 上。
+  //
+  //   ⚠️ 口径仍然是**逐字列举**（deepEqual），不是"表里没有它"：
+  //   后者会让"有人又给 runtime 加了一个 *_TOKEN"在断言层面看不出来。
+  //   这正是这条用例原本要保住的性质，本批没有把它放松。
+  assert.deepEqual(byProcess.runtime, ['LEGION_RUNTIME_TOKEN'],
+    'runtime 只应当持有契约服务端那一份凭证；模型密钥仍然走 secretRef 解析，不得出现')
+  // orchestrator 需要 hub 访问令牌才能认领任务，另加与 runtime 同一份的契约凭证；
+  // 这两条是它唯一应当持有的凭证。
+  assert.deepEqual(byProcess.orchestrator, ['TEAM_HUB_TOKEN', 'LEGION_RUNTIME_TOKEN'])
+  // 反向锚：契约凭证**只**进了这两个进程，别的进程一个字节都拿不到。
+  for (const proc of ['team-hub', 'workbench', 'whiteboard']) {
+    assert.equal((byProcess[proc] ?? []).includes('LEGION_RUNTIME_TOKEN'), false,
+      `进程 ${proc} 拿到了契约凭证——它不该拿（spec §6.7 密钥只注入需要它的进程）`)
+  }
 })

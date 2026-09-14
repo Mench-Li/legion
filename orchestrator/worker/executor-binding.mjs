@@ -287,11 +287,17 @@ export async function productionExecutorProvider(io = {}) {
  * `LEGION_RUNTIME_URL` 指向 Runtime 进程的契约监听器，
  * `LEGION_RUNTIME_TOKEN` 是它与那台进程约定的凭证。
  *
- * ⚠️ **它们还没有被写进 `product/process-manifest.mjs` 的 orchestrator.envNames**。
- * `product/launcher/allowlist.mjs` 的 `buildChildEnv()` 对**未声明**的键直接抛，
- * 所以在一个由 Launcher 启动的部署里，这两个键**会被丢掉**——
- * 也就是说跨进程这条路的真实部署还差一次清单改动（见文档 §诚实边界）。
- * 本批**没有**改那份清单：它是 PRT-258 冻结的契约，改它需要一次明确的决策。
+ * ✅ **它们已经写进 `product/process-manifest.mjs` 的 orchestrator.envNames**
+ * （PRT-253 续批四）。那是一处**增量扩展**：只往一个进程的声明面里加两个已经
+ * 在 `orchestrator/config-schema.mjs` 里登记过的键，不是对 PRT-258 冻结契约的
+ * 重新设计。同一次改动还让 `LEGION_RUNTIME_TOKEN` 进入 `runtime` 的 `envNames`
+ * （服务端要拿它比对）。
+ *
+ * 剩下的那一截不在本模块：**值从哪来**。`LEGION_RUNTIME_URL` 不是算出来的，
+ * 而是**读回来的**——Runtime 进程绑的是临时端口，它把实际端口发布到 DataDir 下，
+ * Launcher 读回并用本次那些子进程的 pid 校验；读不到就具名拒绝，不编 URL。
+ * 那一侧在 `product/launcher/runtime-contract-endpoint.mjs` 与
+ * `runtime/dsh-composition/runtime-contract-publication.mjs`。
  */
 export const RUNTIME_URL_ENV = 'LEGION_RUNTIME_URL'
 

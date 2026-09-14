@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-13　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **190 套件 / 5377 用例 / 0 fail**（证据 `.ci/prt-253d/`）
+**最近一次全量基线**：2026-09-13　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **192 套件 / 5430 用例 / 0 fail**（证据 `.ci/prt-253e/`）
 （**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数会少）
 —— 以本文件所在提交为准；证据 `.ci/prt-901/`（PRT-901/902 第三方组件清单、SBOM 与商业分发条件那一批）
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
@@ -3457,6 +3457,115 @@
 > `docs/DUAL-WRITE-RACE-evidence/verify-evidence.md`。
 
 ---
+
+## 2026-09-14　PRT-253 续批四：把 Runtime Contract 接上 Launcher（三个缺口 + 一个撞出来的）
+
+续批三证明了边界能跨，但它自己在诚实边界里点名**三件没做的事**——不落地，那条路在真实部署里
+仍是死的。本批就是那三件，外加实测撞出来的第四件。
+
+### 一、三件 + 一件
+
+| # | 缺口 | 闭合到什么程度 |
+| --- | --- | --- |
+| 1 | worker 收不到那两个名字 | `product/process-manifest.mjs` **只改两个 `envNames` 列表**：23 行增、1 行删，其余全是注释。条目数/顺序/`key`/`kind`/`dependsOn`/`entry`/`portKey`/`readiness`/`writesRoles` 全未触碰，`PROCESS_MANIFEST_VERSION` 仍 `1`。修的是**一处已存在的自相矛盾**：两个键早就在 `orchestrator/config-schema.mjs` 里声明，而白名单只放行**清单**声明过的键 |
+| 2 | 临时端口怎么到 worker | 选**由真正绑上端口的那个进程发布**（原子 tmp+rename 写 `<dataDir>/runtime/runtime-contract.json`）。发布记录**结构上放不下 token**——只有 `{version,pid,host,port,wireVersion}` 四个字段 |
+| 3 | 凭证谁产生、怎么只给两方 | Launcher 每次 `createLauncher()` 一份，`randomBytes(32)→base64url`；**只**注入 `runtime`+`orchestrator`；失败 ⇒ **不注入**、具名码、返回值里没有 token 字段 |
+| 4 | **worker 连状态文件落点都没有** | 任务书没这条，是实测撞出来的：`LEGION_DATA_DIR` 早已声明在 `orchestrator.envNames` 里，但 Launcher **从不给它值**（`git show HEAD:product/launcher/launcher.mjs` 里出现 **0 次**），而 `product/orchestrator/worker.mjs` 缺它返回 `exitCode:8 / DATA_DIR_REQUIRED` |
+
+★ 第 4 条的真入口实测读数值得单列：注入 ⇒ `state:'ready'` / `pid:22736` / `restarts:0`；
+**不**注入 ⇒ `state:'restarting'` / `pid:null` / `restarts:2`，而 **`lastError` 是 `null`**。
+
+> 一个崩溃重启循环，与一个"每次启动都要重启一下"的正常形态，
+> 在 Launcher 的读数里是同一个东西——**因为那条错误信息根本没被记下来**。
+
+### 二、端口机制：被否决的那条路与它的失败模式
+
+否决的是"Launcher 先分配端口再传"。`reserveEphemeralPort()` 是"先绑一次再放开"，放开到 Runtime
+真的绑上之间有窗口；窗口里被抢走时，Runtime 里那一行报 `LISTEN_FAILED`（正确），**但 Runtime 进程
+自己仍然健康**（`/` 照样 200）⇒ Launcher 报就绪并交出那个已不属于任何人的端口 ⇒ worker 读到
+`RUNTIME_UNREACHABLE`（"配了但够不着"），真因只写在**另一个进程**的一份服务值里。
+
+> 一个把「端口被抢」报成「端点够不着」的部署，会让排障的人去查网络，而问题在分配。
+
+代价如实列出：多一个文件、多一次磁盘往返、两进程须共享 DataDir 约定、发布是**非同步**的（所以必须等）。
+三种失败模式各有具名码、**都不编 URL**：`PUBLICATION_ABSENT`、`PUBLICATION_STALE`（带 `publishedPid`）、
+`PUBLICATION_INVALID`/`_UNREADABLE`。等超时返回**最后一次那个拒绝**而不合成 `_TIMEOUT`——
+*一个合成的超时码，会把两种修法完全不同的处境压成同一个读数。*
+
+### 三、凭证设计（安全面推理）
+
+- **不落盘、不进 argv/日志/状态文件/运行记录/发布文件**；唯一通道是环境变量块（`envSurface()` 对外是 `<redacted>`）。
+- **不复用** `.credentials.yaml`/密钥库：那套是**长期、跨启动、要落盘**的模型密钥；本凭证射程只有本机回环、
+  生命周期只有本次启动。合并会让一次性凭证获得长期密钥的落盘与轮换要求。
+- **fail closed**：生成失败不注入、不空串、不默认值、不"关掉鉴权"；含空白的凭证也拒
+  （HTTP 头里会被截断，症状离真因很远）。
+- **`sensitive:true` 买到了什么**：它**不**参与 `buildChildEnv()` 判定，而是"跨进程凭证绝不进状态文件"
+  这条纪律在读取层的落点。本批**遵守但不依赖**它——凭证不进状态文件的保证来自"Launcher 根本不把它
+  交给写状态文件的代码路径"。
+- **没填上**：轮换（进程活着时不换）、重启续用（每次新一份，有意）、防能读本机进程环境的人（威胁模型已含他）。
+
+### 四、★ 一处被改掉前提的既有断言（原文要保的性质**用更强的方式**保住了）
+
+`product/launcher/allowlist.test.mjs` 原文：`assert.equal('runtime' in byProcess, false, 'runtime 不得有任何凭证类环境变量')`。
+
+理由仍成立（runtime 依旧拿不到**模型**密钥），但前提变了——`LEGION_RUNTIME_TOKEN` 是**服务端凭证**
+（服务端要拿它比对 worker 出示的那一份），必须在该进程里；它不能经发布/状态文件（要落盘），
+环境变量是唯一不落盘且只在该进程可见的通道。处置是把口径写清并**改成逐字列举**：
+`deepEqual(byProcess.runtime, ['LEGION_RUNTIME_TOKEN'])` + `deepEqual(byProcess.orchestrator, [...])`
++ 反向锚三个进程拿不到。
+
+> ★ 逐字 `deepEqual` 保住的正是原文想保的性质（"又有人给 runtime 加了个 `*_TOKEN`"立刻可见），
+> 而原文那种 `'runtime' in byProcess === false` 反而做不到。**把一条断言改强，与把一条断言改松，
+> 在只看"它现在还是绿的吗"的时候是同一个读数**——所以这条改动必须写进文档。
+
+### 五、验证
+
+- **8 道门禁全 PASS**（scan **558** 字面量 / boundary 3 文件 26 处 / snapshot / topology /
+  progress-check / check-docs / ci-syntax 50 脚本 / encoding **1917** 文件）。
+  **topology 与 baseline 都无漂移**（只跑 `--diff`/`--check`，没跑 `--record`）。
+- **全量 CI `.ci/prt-253e/`：9/9 阶段 PASS**，`test` **192 套件 / 5430 用例 / 0 fail**
+  （上一批 190 / 5377）。四个新套件已登记（两个进了既有 `product-launcher`，该套件 160 → **190** 例），
+  stageTest「套件清单完备（274 个 `*.test.mjs` 全部有归属）」通过。
+- **变红验证 211/211 咬住、0 无效、0 没咬住**，还原**逐字节通过**。本批新增 5 个探针 **5/5 咬住**：
+  不再比对 pid（陈旧端口被当成本次的）、生成失败返回空串凭证、启动前不清陈旧发布、
+  orchestrator 不再拿到 DataDir、端点没解析成功也注入 URL。
+
+### 六、★ 本轮断验证里两条**关于我自己的**发现
+
+1. **一个既有探针的锚点被本批的改动弄失效了，而分类器如实报了"无效"。**
+   续批四在 `launcher.mjs` 的诊断数组里插入了 `...runtimeContractDiagnostics,`，于是 ⑤⑯
+   （心跳诊断必须进 `allDiagnostics()`）原来那个"两行式"锚点不再匹配。它**没有**被算成咬住，
+   也**没有**被悄悄跳过，而是进了"无效"。
+   > 一个把"锚点找不到"静默当成"探针通过"的分类器，
+   > 会在源码改版那天把覆盖率变成一句空话。
+   已重新锚在**那一行本身**，并复跑确认咬住。
+2. **我第一版把修复写进了生成物里被丢弃的那一段。** 生成物的 `prologue` 只取第一个 `PRT-413` 标记
+   **之前**的部分（第 964 行），而 ⑤⑯ 在第 1847 行——权威副本其实在 `probes-713.txt`。
+   第一次重建后旧锚点原样还在，我才发现改错了副本。
+   > 一个"改了文件"的动作，与一个"改了会被读的那份文件"的动作，
+   > 在 diff 上是同一个读数——直到你重跑一遍。
+   另：我第一版探针里把常量写成 `EP`/`PUB`/`LAUNCH`（实际名字是 `CONTRACT_EP`/`CONTRACT_PUB`/
+   `LAUNCHER`），被自己的校验器当场报成 "is not defined"，**没有**当成咬住计入。
+
+### 七、诚实边界
+
+- **三层"真"分开**：Launcher→子进程注入**真**；端口发布与鉴权**真**（真进程写出的发布与它自报端口对账）；
+  DSH Runtime 进程里**那一行真的挂上了**；但**引擎是替身**（续批三 §6.1 结论一字未改）。
+- **没有任何一个真 DSH 引擎跑完过一个真任务**，也**没有**一次"由 Launcher 启动的完整部署执行了一个任务"
+  的读数。wiring 套件证明**接线**，不是 `product/orchestrator/worker.mjs` 因此完成了派工
+  （那要一台真 hub + 一份 lease + 一次真实派工）。
+- 那条真 worker 的用例里**没有连任何 hub**（`TEAM_HUB_URL` 没给 ⇒ 以 hub-unreachable 稳定运行）：
+  它证明的是"不再崩溃重启"，**不是**"能干活"。
+- **本批新引入的未覆盖面**：`runtimeContract()` 返回 `null` 的分支无用例；`PUBLICATION_CLEAR_FAILED`
+  无用例；`PUBLICATION_INVALID`/`_STALE` 在真进程各只走一种形态；轮换无用例；`LEGION_DATA_DIR`
+  **只验到"注入了、真入口因此不死"**，没验"worker 真把状态文件写到那个目录"。
+- **仍然悬着**：`legion-host.patch.yml` 里**仍然没有契约行**；`currentModelSelection` 仍无生产来源
+  （跨进程一通，下一个读数就是 `MODEL_UNAVAILABLE`）；发布文件位置是**约定**而不是评审过的接口
+  （两份副本由用例逐段对账钉住，但"为什么是这个名、要不要更强隔离"没论证）。
+- **一处既有 flake（非本批引入，本轮没出现）**：`runtime/dsh-composition` 那批并发跑时
+  `tool-request.test.mjs` 的「自报了连接才算响应阶段超时」偶发 `allowed-once` vs `unavailable`；
+  机制是真实计时器竞态（`responseTimeoutMs:25` vs 替身 `await setTimeout(r,60)`），
+  在 `HEAD` 的独立工作树上也能复现。**没有**据此调整任何读数。
 
 ## 2026-09-14　PRT-253 续批三：跨进程 Runtime Contract 边界（worker 终于能到另一台进程里的引擎）
 

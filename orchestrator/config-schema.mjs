@@ -37,11 +37,14 @@ export const ENV_NAMES = Object.freeze([
   // 与下面的 `fields`（门禁与配置面真正消费的那一份）。
   // 只在其中一处登记过，就是一次实测到的 `scan: FAIL —— 未处理字面量（2）`。
   //
-  // ⚠️ 它们**还没有**写进 `product/process-manifest.mjs` 的 orchestrator.envNames，
-  // 而 `product/launcher/allowlist.mjs` 的白名单只放行声明过的键——
-  // 也就是说 Launcher 启动的真实部署里它们会被丢掉。这是本批**报告**而没有
-  // 擅自修改的一处清单缺口（清单是 PRT-258 冻结的契约），见
-  // `docs/superpowers/prt/PRT-253-runtime-contract-boundary.md` §5.2。
+  // ✅ PRT-253 续批四**已补**：它们现在也在
+  // `product/process-manifest.mjs` 的 `orchestrator.envNames` 里登记过，
+  // 因此 `product/launcher/allowlist.mjs` 的白名单会放行它们——
+  // Launcher 启动的真实部署里 worker 终于读得到这两个键。
+  //
+  // 那是一次**增量扩展**（只往一个进程的 `envNames` 里加两个已声明的键），
+  // 不是对 PRT-258 冻结契约的重新设计；理由与剩下的边界见
+  // `docs/superpowers/prt/PRT-253-runtime-contract-launcher-wiring.md`。
   'LEGION_RUNTIME_URL',
   'LEGION_RUNTIME_TOKEN',
 ])

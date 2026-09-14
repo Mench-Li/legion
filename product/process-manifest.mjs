@@ -144,6 +144,15 @@ export const PROCESS_SPECS = Object.freeze([
       'TEAM_HUB_URL',
       'LEGION_ACTOR', 'LEGION_SCOPE', 'LEGION_ENFORCEMENT_ACTION', 'LEGION_CWD', 'LEGION_TASK_ID',
       'LEGION_APPROVAL_POLICY', 'LEGION_ATTENDED', 'LEGION_PERMISSION_PRESET',
+      // ★ PRT-253 续批四（**增量扩展**，见下）：契约服务端的凭证。
+      //   本进程是**服务端**：它要拿这份值去比对 worker 出示的那一份。
+      //   生成者是 Launcher（`runtime-contract-endpoint.mjs` 的
+      //   `generateRuntimeToken`），每次启动一份；Launcher 只把它注入
+      //   `runtime` 与 `orchestrator` 两个进程。
+      //   端口**不在这里**：监听器绑临时端口（`port: 0`），实际端口由本进程
+      //   发布到 DataDir 下（`runtime/dsh-composition/runtime-contract-publication.mjs`），
+      //   消费侧读回——所以没有一个"端口环境变量"可声明。
+      'LEGION_RUNTIME_TOKEN',
     ]),
     milestone: 'PRT-257',
   }),
@@ -161,7 +170,20 @@ export const PROCESS_SPECS = Object.freeze([
     host: null,
     readiness: Object.freeze({ kind: 'none', verified: false }),
     writesRoles: Object.freeze(['data', 'workspace']),
-    envNames: Object.freeze(['TEAM_HUB_URL', 'TEAM_HUB_TOKEN', 'LEGION_DATA_DIR']),
+    // ★ PRT-253 续批四：worker 经**另一个进程**里的契约监听器调用执行引擎
+    //   （`orchestrator/worker/executor-binding.mjs` 的
+    //   `productionExecutorProviderFromEnv` 读这两个键）。在这之前它们
+    //   只登记在 `orchestrator/config-schema.mjs` 里，而白名单只放行
+    //   **本清单**声明过的键——于是 Launcher 启动的真实部署里它们会被丢掉，
+    //   worker 永远报 `EXECUTOR_HOST_PORT_REQUIRED`。
+    //
+    //   `LEGION_RUNTIME_URL`：Runtime 进程实际绑定的临时端口派生出来的回环 URL
+    //   （读端口发布 → 用**本次那个 pid** 校验；读不到就具名拒绝，不编 URL）。
+    //   `LEGION_RUNTIME_TOKEN`：与 runtime 进程同一份、每次启动新生成的凭证。
+    envNames: Object.freeze([
+      'TEAM_HUB_URL', 'TEAM_HUB_TOKEN', 'LEGION_DATA_DIR',
+      'LEGION_RUNTIME_URL', 'LEGION_RUNTIME_TOKEN',
+    ]),
     milestone: 'PRT-301',
   }),
   Object.freeze({

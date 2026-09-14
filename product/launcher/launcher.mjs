@@ -38,6 +38,14 @@ import {
   ENFORCEMENT_IDENTITY_PROCESS_KEY,
   resolveEnforcementIdentity,
 } from './enforcement-identity.mjs'
+import {
+  RUNTIME_CONTRACT_ENDPOINT_CODES,
+  generateRuntimeToken,
+  readRuntimeContractEndpoint,
+  runtimeContractDiagnostic,
+  runtimeContractEndpointPath,
+  waitForRuntimeContractEndpoint,
+} from './runtime-contract-endpoint.mjs'
 import { buildChildEnv, isSecretLikeKey, OS_ESSENTIAL_ENV } from './allowlist.mjs'
 import { checkPorts } from './ports.mjs'
 import { readinessResultToDiagnostic, waitForReadiness } from './readiness.mjs'
@@ -246,6 +254,17 @@ export function createLauncher({
    * `runtime/probe/secret-resolver.mjs` 里，只有一处。
    */
   dshCredentialsFile = null,
+  // ── PRT-253 续批四：Runtime Contract 的端点与凭证（跨进程那条路的两个坐标）──
+  //
+  // `runtimeTokenFactory` 可注入：`fail closed` 的判据是"**生成失败时**会怎样"，
+  // 而那个处境不需要一个真的坏掉的随机源就能逐条验证。
+  // 默认实现用 `node:crypto`（零第三方依赖），**每次启动生成一次**。
+  runtimeTokenFactory = generateRuntimeToken,
+  /** 等 Runtime 进程发布端口的上限。临时端口是**绑上了才发布**，所以要等。 */
+  runtimeContractWaitMs = 5000,
+  runtimeContractIntervalMs = 50,
+  /** 发布文件的 fs（可注入；`null` = 真实 fs）。与 `logFs` / `overlayFs` 同一做法。 */
+  publicationFs = null,
 } = {}) {
   if (layout === null || typeof layout !== 'object') throw new Error('createLauncher 需要 layout（见 product/paths.mjs）')
 
@@ -286,6 +305,142 @@ export function createLauncher({
   const excluded = scopeKeys === null ? [] : plan.processes.filter((p) => !scopeKeys.includes(p.key))
   const scopePartial = scopeKeys !== null && excluded.length > 0
   const includedKeys = new Set(included.map((p) => p.key))
+
+  // ── PRT-253 续批四：Runtime Contract 的**端点**与**凭证** ─────────────
+  //
+  // worker（orchestrator 进程）读两个键：`LEGION_RUNTIME_URL` 与
+  // `LEGION_RUNTIME_TOKEN`。在本批之前**没有任何生产方写它们**——
+  // 白名单只放行清单声明过的键，所以真实部署里它们会被丢掉，
+  // worker 永远报 `EXECUTOR_HOST_PORT_REQUIRED`。
+  //
+  // 两样东西的来源刻意不同，因为它们**只有一处**说得清：
+  //
+  //   · **端口**：谁都不知道临时端口会分到几号，只有**真的绑上了**的那个进程知道。
+  //     所以由它发布到 DataDir 下，这里读回并校验（pid 必须是本次那个子进程）。
+  //     读不到 → 具名拒绝，**不编 URL**。理由与替代方案见
+  //     `runtime/dsh-composition/runtime-contract-publication.mjs` 的文件头。
+  //   · **凭证**：由本进程**每次启动生成一次**，只注入 runtime 与 orchestrator。
+  //     它是 Launcher 独占的能力：`buildChildEnv` 的白名单注入是唯一能保证
+  //     "别的进程拿不到"的地方。生成失败 → **不注入**（fail closed），
+  //     对端以 `RUNTIME_CONTRACT_NO_TOKEN` 拒绝，而不是"关掉鉴权"。
+  const publicationFsImpl = publicationFs ?? null
+  const runtimeContractDiagnostics = []
+  let runtimeTokenResolved = null
+  let runtimeContractEndpoint = null
+
+  /**
+   * 运行时凭证（**每次 createLauncher 一份**，即每次启动一份）。
+   *
+   * 惰性求值 + 记忆化：`envSurface()`（诊断用）与 `envFor()`（真的 spawn）
+   * 都会问它，两次必须是**同一个**值——两次生成会让两个进程拿着两份不同的
+   * 凭证，而那表现为"鉴权失败"，看起来像配错了凭证。
+   */
+  function runtimeToken() {
+    if (runtimeTokenResolved !== null) return runtimeTokenResolved
+    let raw = null
+    try {
+      raw = runtimeTokenFactory()
+    } catch (e) {
+      raw = {
+        ok: false,
+        code: RUNTIME_CONTRACT_ENDPOINT_CODES.TOKEN_GENERATION_FAILED,
+        message: `生成运行时凭证时抛了（${e?.name ?? 'Error'}）：${e?.message ?? String(e)}`,
+        reasons: [],
+      }
+    }
+    const usable = raw !== null && typeof raw === 'object' && raw.ok === true
+      && typeof raw.token === 'string' && raw.token.trim() !== ''
+    runtimeTokenResolved = usable
+      ? Object.freeze({ ok: true, code: null, message: null, reasons: Object.freeze([]), token: raw.token })
+      : Object.freeze({
+        ok: false,
+        code: raw?.code ?? RUNTIME_CONTRACT_ENDPOINT_CODES.TOKEN_GENERATION_FAILED,
+        message: raw?.message ?? '生成运行时凭证失败：工厂返回了不可用的值。**不注入空串、不注入默认值**',
+        reasons: Object.freeze([...(raw?.reasons ?? [])]),
+      })
+    if (runtimeTokenResolved.ok !== true) {
+      runtimeContractDiagnostics.push(runtimeContractDiagnostic(runtimeTokenResolved))
+    }
+    return runtimeTokenResolved
+  }
+
+  /**
+   * 清掉**上一次运行**可能留下的端口发布。
+   *
+   * 时机是"spawn Runtime 之前"，因为那条顺序给出了这条保证：
+   * **清完之后再出现的发布，只可能来自本次那个进程。**
+   * 于是 pid 判定之外又多了一层——上一次崩溃留下的文件不会活到本次启动。
+   * 清理失败只记 `warn`：读回来时还会比对 pid，陈旧发布仍然不会被采用。
+   */
+  function clearStalePublication() {
+    const path = runtimeContractEndpointPath(layout.dataDir, layout.platform)
+    if (path === null) return
+    const fsImpl = publicationFsImpl ?? nodeFs
+    try {
+      fsImpl.rmSync(path, { force: true })
+    } catch (e) {
+      if (e?.code === 'ENOENT') return
+      runtimeContractDiagnostics.push(Object.freeze({
+        severity: 'warn',
+        code: RUNTIME_CONTRACT_ENDPOINT_CODES.PUBLICATION_CLEAR_FAILED,
+        process: DSH_OVERLAY_PROCESS_KEY,
+        message: `清理上一次的端口发布失败（${e?.code ?? e?.name ?? 'Error'}）：${e?.message ?? String(e)}`,
+        reasons: Object.freeze(['陈旧发布不会被误当成本次的：读回来时还会比对 pid']),
+      }))
+    }
+  }
+
+  /**
+   * 读出本次 Runtime 进程发布的端点。**在 spawn orchestrator 之前**调用。
+   *
+   * 读不到时返回 `{ok:false, code}` 并记一条**具名**诊断——于是
+   * "worker 拿不到引擎"这件事有两条互相印证的读数：Launcher 说"发布缺了/是旧的"，
+   * worker 说 `EXECUTOR_HOST_PORT_REQUIRED`。两条都不是编出来的。
+   */
+  async function resolveRuntimeContractEndpoint(failures) {
+    if (!includedKeys.has(DSH_OVERLAY_PROCESS_KEY)) {
+      const r = Object.freeze({
+        ok: false,
+        code: RUNTIME_CONTRACT_ENDPOINT_CODES.PUBLICATION_ABSENT,
+        message: '本次启动范围不含 runtime 进程：没有任何东西会发布契约端口。**不编一个 URL**',
+        reasons: Object.freeze([
+          '要么把 runtime 纳入范围，要么不要拉起 orchestrator——它拿不到引擎会一直报 HOST_PORT_REQUIRED',
+        ]),
+      })
+      // ★ 严重级是 `warn`，不是 `error`：这一次**刻意的**受限启动
+      //   （`--include` 里没有 runtime）已经有一条 `PROCESS_EXCLUDED_BY_SCOPE`
+      //   在说同一件根因，而这条诊断**不参与**那段作用域降级（它跑在启动计划那一步，
+      //   本条是启动过程中产生的）。两条叠在一起会读成"两个问题"，且这条 error
+      //   并不阻塞启动——一个不阻塞的 error 只会训练人忽略 error。
+      //
+      //   码本身不变：它是准确的（确实没人发布），`derivedValuesFor` 也依赖
+      //   `ok !== true` 才不注入 URL。
+      runtimeContractDiagnostics.push(runtimeContractDiagnostic(r, { severity: 'warn' }))
+      return r
+    }
+    const handle = supervisor === null ? null : supervisor.handles.get(DSH_OVERLAY_PROCESS_KEY)
+    const pid = handle === null || typeof handle.status !== 'function' ? null : handle.status().pid
+    const runtimeFailed = failures.some((f) => f.process === DSH_OVERLAY_PROCESS_KEY)
+    if (runtimeFailed || typeof pid !== 'number') {
+      // runtime 没起来 / 没有 pid：`readinessDiagnostics` 里已经有一条**具名码**
+      // 在说这件事，而这条路上 `failures` 非空 → 整体回滚，orchestrator 不会被拉起。
+      // 这里**不**再合成一条"发布缺失"——把"进程没起来"与"进程起来了但没发布"
+      // 说成同一句话，会让下一次排查从错的地方开始。
+      return null
+    }
+    const r = await waitForRuntimeContractEndpoint({
+      dataDir: layout.dataDir,
+      expectedPid: pid,
+      timeoutMs: runtimeContractWaitMs,
+      intervalMs: runtimeContractIntervalMs,
+      fs: publicationFsImpl,
+      platform: layout.platform,
+      now,
+      sleep,
+    })
+    if (r.ok !== true) runtimeContractDiagnostics.push(runtimeContractDiagnostic(r))
+    return r
+  }
 
   const teamHubPort = plan.processes.find((p) => p.key === 'team-hub')?.port ?? null
 
@@ -449,6 +604,40 @@ export function createLauncher({
     // 那种部署已经在 preflight 被拦下，走不到这里。
     if (proc.key === ENFORCEMENT_IDENTITY_PROCESS_KEY) {
       Object.assign(out, enforcementIdentity.values)
+    }
+    // ── PRT-253 续批四：Runtime Contract 的两个坐标 ─────────────────────
+    //
+    // ★ **只有这两个进程**拿到它们（清单里也只有这两个声明了这两个键）：
+    //   · runtime      —— 它是服务端：凭证要它来比对，DataDir 要它来发布。
+    //   · orchestrator —— 它是消费端：端点 + 同一份凭证。
+    //   hub / workbench / 白板**拿不到**：它们的 `envNames` 里没有这两个键，
+    //   `buildChildEnv()` 因此连 baseEnv 里的同名值都不会放行。
+    //   这就是 spec §6.7「密钥只注入需要它的执行进程」在实现层的落点。
+    //
+    // ★ 凭证**不进 argv**、不进日志、不进运行记录、不进状态文件。
+    //   它唯一的去处是这两个子进程的环境块（`envSurface()` 对外是 `<redacted>`）。
+    if (proc.key === DSH_OVERLAY_PROCESS_KEY) {
+      if (typeof layout.dataDir === 'string' && layout.dataDir !== '') {
+        // 发布落在 DataDir 下：Runtime 进程是唯一知道"实际绑在几号端口"的那一侧，
+        // 而它需要知道写到哪里。DataDir 只有 Launcher 知道（同 DATA_PATH_ENV 的理由）。
+        out.LEGION_DATA_DIR = layout.dataDir
+      }
+      const token = runtimeToken()
+      if (token.ok === true) out.LEGION_RUNTIME_TOKEN = token.token
+    }
+    if (proc.key === 'orchestrator') {
+      if (typeof layout.dataDir === 'string' && layout.dataDir !== '') {
+        out.LEGION_DATA_DIR = layout.dataDir
+      }
+      // 端点**只有解析成功时才写**。没解析出来时这里什么都不放，
+      // 于是 worker 的读数是 `EXECUTOR_HOST_PORT_REQUIRED`（"没配引擎"），
+      // 而缺口的具名理由在 `runtimeContractDiagnostics` 里。
+      // **绝不回落成 http://127.0.0.1:<默认端口>**：那会让"不知道"变成"知道"。
+      if (runtimeContractEndpoint !== null && runtimeContractEndpoint.ok === true) {
+        out.LEGION_RUNTIME_URL = runtimeContractEndpoint.url
+      }
+      const token = runtimeToken()
+      if (token.ok === true) out.LEGION_RUNTIME_TOKEN = token.token
     }
     return out
   }
@@ -765,6 +954,21 @@ export function createLauncher({
      */
     enforcementIdentity,
 
+    /**
+     * Runtime Contract 的端点解析结果（PRT-253 续批四）。
+     *
+     * `null` = 还没走到"要拉起 orchestrator"那一步（受限范围 / 启动在更早的阶段失败）；
+     * `{ok:true, url, host, port, pid}` = 端点已经拿到并**校验过是本次那个进程**发布的；
+     * `{ok:false, code, message}` = 具名拒绝，而那一条**同时**在诊断列表里。
+     *
+     * 与 `enforcementOverlay` / `enforcementIdentity` 同一个理由暴露出来：
+     * "worker 报 HOST_PORT_REQUIRED" 有三四种完全不同的修法，
+     * 这里是能区分它们的那一个读数。
+     */
+    runtimeContract() {
+      return runtimeContractEndpoint
+    },
+
     /** 只做检查，不启动任何东西。产品入口在真正启动前调用它。 */
     async preflight() {
       const blocking = planDiagnostics.filter((d) => d.severity === 'error')
@@ -846,6 +1050,18 @@ export function createLauncher({
           .map((k) => plan.processes.find((p) => p.key === k))
           .filter((p) => p !== undefined && p.command !== null)
         if (waveProcs.length === 0) continue
+        // ★ 清陈旧发布必须在 **spawn Runtime 之前**：那条顺序是"清完之后再出现的
+        //   发布只可能来自本次那个进程"这条保证的全部依据（pid 判定是第二道）。
+        if (includedKeys.has(DSH_OVERLAY_PROCESS_KEY) && wave.includes(DSH_OVERLAY_PROCESS_KEY)) {
+          clearStalePublication()
+        }
+        // ★ 端点必须在 **spawn orchestrator 之前**解析出来：`envFor` 是在
+        //   `supervisor.handles.get(key).start()` 里被调用的，而 orchestrator
+        //   与 runtime 不在同一波（`dependsOn` 保证），所以这里是那一波之前的
+        //   最后一个位置。解析不出来就**不注入 URL**（见 derivedValuesFor）。
+        if (includedKeys.has('orchestrator') && wave.includes('orchestrator') && runtimeContractEndpoint === null) {
+          runtimeContractEndpoint = await resolveRuntimeContractEndpoint(failures)
+        }
         for (const proc of waveProcs) {
           const result = supervisor.handles.get(proc.key).start()
           if (result.started !== true) failures.push(Object.freeze({ process: proc.key, code: 'SPAWN_REFUSED', detail: result.reason }))
@@ -866,7 +1082,7 @@ export function createLauncher({
         }
       }
 
-      const diagnostics = Object.freeze([...pre.diagnostics, ...readinessDiagnostics])
+      const diagnostics = Object.freeze([...pre.diagnostics, ...readinessDiagnostics, ...runtimeContractDiagnostics])
       if (failures.length > 0) {
         const stopResults = await this.stop({ reason: '启动失败回滚' })
         return Object.freeze({
@@ -1076,6 +1292,9 @@ export function createLauncher({
         // PRT-713 收尾：心跳的诊断同理——一个"用户开了心跳但它其实没发出去"
         // 的配置，如果只在 `status().heartbeat` 里，那就只有专门去查的人看得到。
         ...heartbeatDiagnostics,
+        // PRT-253 续批四：端点/凭证的诊断（生成失败、发布缺失/陈旧/非法）。
+        // 与上面几条同一条纪律：只在 `status()` 里的话，不查它的人就看不到。
+        ...runtimeContractDiagnostics,
       ]
       for (const item of status.needsAttention) {
         out.push(Object.freeze({

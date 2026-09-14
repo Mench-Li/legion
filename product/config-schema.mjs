@@ -44,6 +44,14 @@ export const CHILD_ENV_NAMES = Object.freeze([
   'LEGION_ACTOR', 'LEGION_SCOPE', 'LEGION_ENFORCEMENT_ACTION', 'LEGION_CWD', 'LEGION_TASK_ID',
   'LEGION_APPROVAL_POLICY', 'LEGION_ATTENDED', 'LEGION_PERMISSION_PRESET',
   'WHITEBOARD_TOKEN', 'PORT', 'HOST', 'DB_PATH', 'WB_ROOMS_DIR', 'WB_AUDIT_DIR', 'WB_IN_MEMORY',
+  // PRT-253 续批四：Runtime Contract 的两个坐标。它们是**注入目标**的变量名
+  // （`product/process-manifest.mjs` 里 runtime / orchestrator 的 `envNames`），
+  // 本进程从不读它们——只把值写进那两个子进程的环境。
+  //
+  // ★ 它们**只**出现在那两个进程的 `envNames` 里。别的进程（hub / workbench /
+  //   白板）即使宿主环境里有同名值也拿不到：`buildChildEnv()` 只放行目标进程
+  //   声明过的键。这就是"凭证只注入需要它的进程"的判据本身。
+  'LEGION_RUNTIME_URL', 'LEGION_RUNTIME_TOKEN',
 ])
 
 /** Launcher 从环境读取、但**不属于**产品配置面的键（操作系统必需键，见 allowlist.mjs）。 */
@@ -482,7 +490,32 @@ export const SCHEMA = defineSchema({
     // 密钥库内部码（security/secrets/errors.mjs）经 product/secrets.mjs 转成自检码时被引用。
     'SECRET_STORE_UNPROTECTED', 'SECRET_STORE_UNSUPPORTED_PLATFORM',
     'EACCES', 'EADDRINUSE', 'ECONNREFUSED',
+    // PRT-253 续批四新增：`ENOENT` 是"端口发布文件不在"的判据
+    // （`runtime-contract-endpoint.mjs` 用它把"没发布"与"读不了"分开）。
+    // 与上面三个同一条：**Node 的 fs 错误码**，不是配置键，也不是环境变量名——
+    // 只是名字长得像 SCREAMING_SNAKE，所以 scan 会怀疑它。
+    'ENOENT',
     'SIGINT', 'SIGKILL', 'SIGTERM',
+
+    // ── PRT-253 续批四 Runtime Contract 端点/凭证的具名码 ────────────────
+    //
+    // `product/launcher/runtime-contract-endpoint.mjs` 的
+    // `RUNTIME_CONTRACT_ENDPOINT_CODES` 的值。它们是**给用户看的读数**，
+    // 不是配置键：进程不"读"它们，而是把它们放进启动诊断。
+    //
+    // ★ 七条而不是一条，因为**下一步动作各不相同**：
+    //   `TOKEN_GENERATION_FAILED` 去查随机源；`PATH_UNAVAILABLE` 去把 DataDir 交给
+    //   Launcher；`ABSENT` 去看 Runtime 那一行挂没挂；`UNREADABLE` 去看盘/权限；
+    //   `INVALID` 去看写侧版本；`STALE` 去看是不是有第二个进程在写同一个 DataDir；
+    //   `CLEAR_FAILED` 是"上次的残留没清掉"（有 pid 兜底，所以只是 warn）。
+    //   把它们压成一个"端点不可用"，运维只能靠文案猜。
+    'RUNTIME_CONTRACT_TOKEN_GENERATION_FAILED',
+    'RUNTIME_CONTRACT_PUBLICATION_PATH_UNAVAILABLE',
+    'RUNTIME_CONTRACT_PUBLICATION_ABSENT',
+    'RUNTIME_CONTRACT_PUBLICATION_UNREADABLE',
+    'RUNTIME_CONTRACT_PUBLICATION_INVALID',
+    'RUNTIME_CONTRACT_PUBLICATION_STALE',
+    'RUNTIME_CONTRACT_PUBLICATION_CLEAR_FAILED',
   ],
   injects: [
     { target: 'team-hub', env: 'TEAM_HUB_PORT', via: 'env', from: 'ports.team-hub', note: '端口由 Launcher 决定，不由各进程的代码默认值决定' },
@@ -508,6 +541,16 @@ export const SCHEMA = defineSchema({
     { target: 'runtime', env: 'LEGION_APPROVAL_POLICY', via: 'env', from: 'runtime.env', note: '可选。session 级审批策略（ask / never）；缺了由 decide 在判定期 fail closed，不影响只读调用' },
     { target: 'runtime', env: 'LEGION_ATTENDED', via: 'env', from: 'runtime.env', note: '可选。现场有没有人可问；**刻意不给默认值**——默认"有人"会去问一个不在场的人' },
     { target: 'runtime', env: 'LEGION_PERMISSION_PRESET', via: 'env', from: 'runtime.env', note: '可选。权限档位名，给了就一起校验' },
+    // ── PRT-253 续批四：Runtime Contract 的端点与凭证 ─────────────────────
+    //
+    // 这三条与上面那一组**不是同一类**：上面几项由 `runtime.env`（产品配置）
+    // 提供，而下面这几项的来源是 **Launcher 自己**或**另一个子进程**——
+    // 配置里给不出它们，也不该给得出（一个写进配置文件的凭证就不再是"每次启动一份"）。
+    { target: 'runtime', env: 'LEGION_DATA_DIR', via: 'env', from: 'layout.dataDir', note: '**派生值**：契约端口发布写在它下面（`runtime/runtime-contract.json`）。写路径由冻结的目录布局决定，不由进程自己的默认值决定' },
+    { target: 'runtime', env: 'LEGION_RUNTIME_TOKEN', via: 'env', from: 'Launcher 每次启动生成（node:crypto，32 字节 base64url）', note: '契约服务端的凭证。**每次启动一份**、**只注入 runtime 与 orchestrator**、**不落盘/不打印/不进状态文件**；生成失败就不注入（对端以 NO_TOKEN 拒绝），绝不注入空串或默认值' },
+    { target: 'orchestrator', env: 'LEGION_DATA_DIR', via: 'env', from: 'layout.dataDir', note: '**派生值**：worker 的状态文件与端口发布的读取都以它为锚' },
+    { target: 'orchestrator', env: 'LEGION_RUNTIME_URL', via: 'env', from: 'Runtime 进程发布的实际临时端口', note: '**派生值**（读回来、不是猜出来）：读端口发布并用**本次那个 runtime 子进程的 pid** 校验；读不到/对不上就**不注入**并记具名诊断——绝不回落成默认端口' },
+    { target: 'orchestrator', env: 'LEGION_RUNTIME_TOKEN', via: 'env', from: 'Launcher 每次启动生成（与 runtime 同一份）', note: '与 runtime 进程逐字相同的凭证。**只**注入这两个进程' },
   ],
   notes: [
     '子进程环境**不继承**宿主进程：只放行进程清单声明的键、平台必需键与 Launcher 显式给定的值（环境白名单模块 product/launcher/allowlist）。',
@@ -520,6 +563,16 @@ export const SCHEMA = defineSchema({
     // nonEnvLiterals 豁免）。实测这条曾让 scan --check 报出 `未声明 env 键（1）：mjs`。
     // 规避方式是**给模块改名**（allowlist.mjs 不含 `env.` 形态），而不是给扫描器开豁免。
     // 假阳性本身记在此处，供后续修扫描器的人取证。
+    // ★ PRT-253 续批四：`LEGION_RUNTIME_TOKEN` 是**唯一**一条由本进程生成、
+    //   并且只注入两个子进程的凭证。它的三条纪律写在
+    //   `product/launcher/runtime-contract-endpoint.mjs` 的
+    //   `generateRuntimeToken` 上：每次启动一份 / 失败就不注入 / 值不进任何可读输出。
+    //
+    //   为什么"端口"没有对应的环境变量：监听器绑的是**临时端口**，
+    //   所以没有任何一侧能在 spawn 之前知道它——端口走"Runtime 进程发布
+    //   → Launcher 读回并校验 pid"，不走进"Launcher 派生一个值写进环境"。
+    //   两条路的取舍写在
+    //   `runtime/dsh-composition/runtime-contract-publication.mjs` 的文件头。
   ],
 })
 

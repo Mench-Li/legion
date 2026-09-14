@@ -52,7 +52,7 @@
 import { test, after, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -295,13 +295,20 @@ setDshRuntimeInputsFactory(() => ({ runtimeHost: buildRuntimeHost(), canRead: ca
 setRuntimeContractInputsFactory(() => {
   const token = process.env.PRT253CT_TOKEN
   const configured = typeof token === 'string' && token !== ''
-  note('CONTRACT-FACTORY-CALLED tokenConfigured=' + (configured ? 1 : 0))
+  // ★ PRT-253 续批四：DataDir 交进去，那一行才会把**临时端口**发布出来。
+  //   本套件的父进程随后去读那份发布，与探针打印的 \`CONTRACTSVC port=\` 对账
+  //   —— 于是"发布的是实际绑定的端口"这件事在一个**真 DSH 进程**里被验到，
+  //   而不只是在行内用例里。
+  const dataDir = process.env.PRT253CT_DATA_DIR
+  note('CONTRACT-FACTORY-CALLED tokenConfigured=' + (configured ? 1 : 0)
+    + ' dataDirConfigured=' + (typeof dataDir === 'string' && dataDir !== '' ? 1 : 0))
   return {
     runtimeHost: buildRuntimeHost(),
     token: configured ? token : null,
     // port 0 = 内核分配临时端口。**绝不绑固定端口**（会与别的用例/服务撞）。
     // 实际端口由服务值带出来，探针把它打印在 stderr 上给父进程读。
     bindPort: 0,
+    dataDir: typeof dataDir === 'string' && dataDir !== '' ? dataDir : null,
   }
 })
 `
@@ -531,10 +538,21 @@ after(async () => {
  */
 function runDsh(scenario) {
   const home = makeHome(scenario.tag)
+  /**
+   * 一次性的 Legion DataDir。
+   *
+   * 它必须**在 scratch 里**（`tmpdir()` 下、本次运行的目录下）：那一行会往
+   * `<dataDir>/runtime/runtime-contract.json` 写一份发布，而"往哪个目录写"
+   * 是本批新接的线之一。写到真实目录里去就等于污染运行环境。
+   */
+  const dataDir = join(home, 'legion-data')
+  mkdirSync(dataDir, { recursive: true })
+  assert.ok(resolve(dataDir).startsWith(TMP_ROOT), `一次性 DataDir 逃出了 tmpdir：${dataDir}`)
+  assert.ok(resolve(dataDir).startsWith(SCRATCH), `一次性 DataDir 逃出了本次运行的 scratch：${dataDir}`)
   const args = ['--profile', PROFILE_NAME]
   for (const patch of scenario.patches) args.push('--patch', patch)
 
-  const env = { ...process.env, DSH_HOME: home, ...LEGION_ENV, PRT253CT_WAIT_MS: String(scenario.waitMs) }
+  const env = { ...process.env, DSH_HOME: home, ...LEGION_ENV, PRT253CT_WAIT_MS: String(scenario.waitMs), PRT253CT_DATA_DIR: dataDir }
   if (scenario.token === null) delete env.PRT253CT_TOKEN
   else env.PRT253CT_TOKEN = scenario.token
   delete env.DSH_SNAPSHOT
@@ -573,6 +591,7 @@ function runDsh(scenario) {
     tag: scenario.tag,
     child,
     home,
+    dataDir,
     ready,
     finished,
     get stderr() { return stderr },
@@ -605,6 +624,26 @@ async function scenario(name) {
 function lineOf(stderr, key) {
   const m = new RegExp(`^${key} (.*)$`, 'm').exec(stderr)
   return m === null ? null : m[1].trim()
+}
+
+/**
+ * 递归列出目录下的**普通文件**（找不到目录时返回空数组，不抛）。
+ *
+ * 它存在的理由是"凭证不许落盘"这条要求：只检查 `stderr` 是不够的——
+ * 一个把令牌写进状态文件的实现，在进程输出里是干净的。
+ */
+function walkFiles(dir) {
+  const out = []
+  let entries = []
+  try { entries = readdirSync(dir) } catch { return out }
+  for (const name of entries) {
+    const full = join(dir, name)
+    let st = null
+    try { st = statSync(full) } catch { continue }
+    if (st.isDirectory()) out.push(...walkFiles(full))
+    else if (st.isFile()) out.push(full)
+  }
+  return out
 }
 
 /** 读一个 `CONTRACTSVC k=v k=v` 读数行。 */
@@ -742,8 +781,37 @@ guarded('A0. ★★★ Runtime 进程里那一行**真的**起了监听器（端
   // 真补丁层那几行也照常在（说明这不是一个"只挂了本行"的假进程）。
   assert.match(r.stderr, /^SERVICES-PROVIDED tools,approval,sandbox$/m, r.stderr)
   assert.match(r.stderr, /^PERMISSION-STANDIN-APPLY-RAN$/m, r.stderr)
-  assert.match(r.stderr, /^CONTRACT-FACTORY-CALLED tokenConfigured=1$/m, r.stderr)
+  assert.match(r.stderr, /^CONTRACT-FACTORY-CALLED tokenConfigured=1 dataDirConfigured=1$/m, r.stderr)
   t.diagnostic(`A0: 端口 ${svc.port}`)
+})
+
+guarded('A0b. ★★★ 那一行把**实际绑定**的临时端口发布到了 DataDir 下（真进程、真文件）', async (t) => {
+  const r = await scenario('full')
+  const svc = contractReading(r.stderr)
+  const publicationPath = join(r.dataDir, 'runtime', 'runtime-contract.json')
+  assert.equal(existsSync(publicationPath), true,
+    `契约行没有发布端口：${publicationPath}（DataDir=${r.dataDir}）`)
+  const published = JSON.parse(readFileSync(publicationPath, 'utf8'))
+
+  // ★ 发布里的端口 == 探针从服务值读回的那个端口。
+  //   这一条在两个真读数之间对账，而不是在"代码里有没有那一行"之间对账：
+  //   把 `listened.port` 写成 `bindPort`（0）会让这条立刻红。
+  assert.equal(published.port, Number(svc.port),
+    `发布里的端口(${published.port})与那一行实际听的端口(${svc.port})不一致`)
+  assert.notEqual(published.port, 0)
+  assert.notEqual(published.port, 3080)
+  assert.equal(published.host, '127.0.0.1')
+  // ★ pid 必须是**本套件 spawn 的那个进程**：消费侧唯一的陈旧判据就是它。
+  assert.equal(published.pid, r.child.pid, '发布的 pid 不是那个 DSH 进程')
+  assert.equal(published.version, 1)
+  assert.equal(Number.isInteger(published.wireVersion), true)
+  // 反向锚：发布文件里**没有**任何凭证。它是本批唯一由 Runtime 进程写下的文件，
+  // 如果凭证会落盘，落在这里是最"顺手"的。
+  for (const token of ALL_TOKENS) {
+    assert.equal(readFileSync(publicationPath, 'utf8').includes(token), false,
+      '端口发布文件里出现了令牌——凭证落盘是被禁止的')
+  }
+  t.diagnostic(`A0b: 发布 ${publicationPath} → 端口 ${published.port} / pid ${published.pid}`)
 })
 
 guarded('A1. ★★★ 强制面结论**跨进程**读回来：worker 的 selfCheck 是那台进程的自检结论', async (t) => {
@@ -806,8 +874,23 @@ guarded('A3. 凭证不出现在任何一侧的可读输出里（反向锚）', a
     assert.equal(r.stdout.includes(token), false, `Runtime 进程的 stdout 里出现了令牌：${token}`)
   }
   // 而"配了令牌"这个**事实**是可读的（可观测性不该靠泄漏凭证）。
-  assert.match(r.stderr, /^CONTRACT-FACTORY-CALLED tokenConfigured=1$/m, r.stderr)
+  assert.match(r.stderr, /^CONTRACT-FACTORY-CALLED tokenConfigured=1 dataDirConfigured=1$/m, r.stderr)
   t.diagnostic('A3: 令牌未出现在子进程输出里')
+})
+
+guarded('A3b. ★★★ 凭证也**不落盘**：DataDir 下每一个文件里都没有它（含那份端口发布）', async (t) => {
+  const r = await scenario('full')
+  const files = walkFiles(r.dataDir)
+  // 至少要有那份发布，否则这条断言可能什么都没查（一个空目录会让它恒真）。
+  assert.ok(files.some((f) => f.endsWith('runtime-contract.json')),
+    `DataDir 下没有端口发布，这条没查到东西：${JSON.stringify(files)}`)
+  for (const f of files) {
+    const text = readFileSync(f, 'utf8')
+    for (const token of ALL_TOKENS) {
+      assert.equal(text.includes(token), false, `DataDir 下的文件落盘了令牌：${f}`)
+    }
+  }
+  t.diagnostic(`A3b: 扫了 ${files.length} 个文件，均无令牌`)
 })
 
 // ================================================================ B / C / D / E / F / G / H
@@ -857,7 +940,7 @@ guarded('D. ★★★ 挂上但**没有令牌** → 服务仍在听，但需要�
   assert.equal(svc.tokenConfigured, '0')
   assert.equal(svc.warnings, RUNTIME_CONTRACT_ROW_CODES.NO_TOKEN,
     `"装上了但没配令牌"必须是一条**可见的降级**：${svc.warnings}`)
-  assert.match(r.stderr, /^CONTRACT-FACTORY-CALLED tokenConfigured=0$/m, r.stderr)
+  assert.match(r.stderr, /^CONTRACT-FACTORY-CALLED tokenConfigured=0 dataDirConfigured=1$/m, r.stderr)
 
   // 那台进程自己读自己的强制面端点 → 403 NO_TOKEN（匿名/错凭证都到不了）。
   const self = lineOf(r.stderr, 'SELF-ENFORCEMENT')

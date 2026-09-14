@@ -55,6 +55,7 @@ import { createReclamation, type BootReconcileState } from './reclamation.js'
 import { createStateMachine } from './stateMachine.js'
 import { createWorkspace, type SpaceBinding } from './workspace.js'
 import { createAcceptance } from './acceptance.js'
+import { createHandoff, isSliceTesterTask } from './handoff.js'
 
 type AppContext = Context & {
   subagents: SubagentRuntime
@@ -1483,63 +1484,11 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     }
   }
 
-  /** 流水线流转：done 任务所属角色有 next 且尚无后继时，创建下一角色任务（todo）。 */
-  async function advancePipeline(doneTask: Task): Promise<void> {
-    if (pipeline === null) return
-    // 切片流水线任务不走 roles.json 的 next 流转：
-    // 切片束任务（slice≠null）的"下一环"由切片编排决定（coder→tester 已由 blockedBy 预建、
-    // tester→devops 尾同理）；fix 回炉任务合入即闭环（重测由编排重开 tester）。
-    // 分析前缀尾（test-designer）done 也不建通用 coder——切片束由 readyToExpand 注册。
-    if (doneTask.slice != null) return
-    if (doneTask.fixOf != null) return
-    if (doneTask.role === SLICE_ANALYSIS_TAIL && isSliceGoalTask(doneTask)) return
-    const stage = stageByRole.get(doneTask.role ?? '')
-    if (!stage || !stage.next) return
-    const nextStage = stageByRole.get(stage.next)
-    if (!nextStage) return
-    const all = await listTasks()
-    // 后继已存在则跳过：advance 补建的任务以 parent 链识别（任意状态，含 canceled——避免将军
-    // 废弃补建任务后每轮重建的拉锯）；createGoalChain 预建的全链任务以「同 scope 同 role 且
-    // blockedBy 含已完成任务」识别（parent 为空，done 也算存在，仅 canceled 不算——真被砍掉才允许补建）。
-    const hasSuccessor = all.some(t =>
-      t.scope === scope && t.role === nextStage.role &&
-      (t.parent === doneTask.id ||
-        (t.status !== 'canceled' && Array.isArray(t.blockedBy) && t.blockedBy.includes(doneTask.id))),
-    )
-    if (hasSuccessor) return
-    const doneSummary = doneTask.comments
-      .filter(c => c.text.startsWith('✓'))
-      .map(c => c.text.replace(/\n.*$/s, ''))
-      .slice(-1)[0] ?? doneTask.title
-    const base = (doneTask.description ?? '').replace(/\n\n\[本阶段\].*$/s, '')
-    const description = [
-      base,
-      `[前序阶段] ${stage.label}（${stage.role}）已完成：${doneSummary}`,
-      `[本阶段] ${nextStage.label}（${nextStage.role}）`,
-    ].filter(s => s.trim().length > 0).join('\n\n')
-    // 标题沿用上一环但把「【阶段标签】」换成下一环的，避免重复建任务时标题仍旧是前序阶段
-    const title = doneTask.title.replace(/^【[^】]*】/, `【${nextStage.label}】`)
-    try {
-      let res: { id?: string }
-      if (useHub) {
-        res = await hubPost('/api/create', {
-          title, description, role: nextStage.role,
-          parent: doneTask.id, priority: doneTask.priority, status: 'todo',
-          by: config.role, scope: scope,
-          goalId: doneTask.goalId ?? undefined,
-        }) as { id?: string }
-      } else {
-        res = await runTaskctl(config.scrumDir, [
-          'create', '--title', title, '--description', description,
-          '--role', nextStage.role, '--parent', doneTask.id, '--priority', doneTask.priority, '--status', 'todo',
-        ]) as { id?: string }
-      }
-      log(`${doneTask.id} 流水线流转：${stage.role} → ${nextStage.role}（新任务 ${res?.id ?? ''}）`)
-      activity('dispatch', doneTask.id, `流水线流转 ${stage.label} → ${nextStage.label}`)
-    } catch (e) {
-      log(`${doneTask.id} 流转失败：${String(e)}`)
-    }
-  }
+  // 流水线阶段交接（`advancePipeline`）已拆到 ./handoff.ts（交接边界）；原始注释（切片/fix/
+  // 分析前缀尾为何不走 next 流转、"后继已存在"的两条识别口径）随代码搬入该模块。D7' 机器闸门
+  // 的**绕行谓词** `isSliceTesterTask` 是那里的**纯函数导出**（本文件两个读点共用它）；闸门的
+  // **动作** `settleSliceTest` 仍留本文件（要用 hub / worktree / ctx 的执行面能力）。接线见
+  // 下方 `const handoff = createHandoff({...})`。
 
   /** P1-4.4 doctor 用：最近一次 buildWorkerPrompt 的真实注入产物（sections 拼接 + 截断标志）。
    *  守护每轮派工至少一次 → 该缓存反映"最近一个士兵实际看到的规则文本"。 */
@@ -1657,7 +1606,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       ...(goal !== null && goal !== undefined
         ? ['   若上方含「所属目标」，报告 JSON 请再追加 "goalRef":{"goalId":"<目标ID>","contextVersion":<执行时依据的版本整数>}（仅用于版本对账，不改变报告语义）。']
         : []),
-      ...(stage?.role === 'tester' && t.slice != null && String(t.slice).includes(':S')
+      ...(isSliceTesterTask(stage, t)
         ? [
             '',
             '**测试士兵纪律（切片验收岗，D7\' 机器闸门）**：只测不修——绝不改动被测代码/测试用例来"通过"。',
@@ -1843,7 +1792,10 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       await safeComment(t.id, `ℹ️ 本报告基于目标上下文 v${goalRef.contextVersion}，目标现已更新至 v${goal.contextVersion}——如改动受旧上下文约束，请将军核对后决定是否打回重做（默认不自动重做，下一派工按新版本对齐）。`)
     }
     // D7' 机器闸门：切片测试任务（tester + slice 键）走专用结算，不进入常规 advancePipeline 流转
-    if (report.status === 'done' && stage?.role === 'tester' && t.slice != null && String(t.slice).includes(':S')) {
+    // 绕行谓词 isSliceTesterTask 已拆到 ./handoff.ts（交接边界）——它与 advancePipeline 是
+    // 同一问题的两个面。闸门动作 settleSliceTest 与闸门在 runWorker 里的**位置**（必须排在常规
+    // done 分支之前）仍留本文件：前者跨执行面/workspace 边界，后者是控制流形状（见该模块 §D7'）。
+    if (report.status === 'done' && isSliceTesterTask(stage, t)) {
       await settleSliceTest(t, worktreeDir, report)
       return
     }
@@ -1919,7 +1871,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
         await safeComment(t.id, `✓ ${stage.label}完成：${report.summary}\n证据：${report.evidence}${contractDocSummary(contractReg)}`)
         activity('done', t.id, `${stage.label}完成：${report.summary}`)
         log(`${t.id} → done（${stage.label}），流转下一角色`)
-        await advancePipeline(t)
+        await handoff.advancePipeline(t)
       } else if (isPipeline && stage) {
         // 流水线最终阶段（如 devops 链尾，next=null）：worker 已完成自检（门禁/证据/报告全绿），
         // 将军已授权整条流水线 → 自动合入主分支 + 推进 done 收官，不停 in_review 等将军验收。
@@ -2075,6 +2027,21 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     normsGlobalText: () => normsGlobalText,
     injectedNorms: () => lastInjectedNorms,
     ruleDoctor: { get: () => lastRuleDoctor, set: r => { lastRuleDoctor = r } },
+  })
+  // ── 阶段 3 PRT-315 切片 6：流水线阶段交接已拆到 ./handoff.ts（交接边界），这里只做**接线** ──
+  // `useHub` / `pipeline` / `stageByRole` 三个运行期会被重新赋值的 `let` 一律传**取值函数**——
+  // 传值 = 模块从构造那刻起看着一份冻结的旧快照（症状：整条流水线一个任务都不流转 / 明明有 hub
+  // 却去 fork taskctl，日志里一行都不会有）。`scope` / `listTasks` / `hubPost` / `runTaskctl` /
+  // `activity` 传值（const 或身份稳定的函数声明）。`SLICE_ANALYSIS_TAIL` / `isSliceGoalTask`
+  // 的**单一定义留在这里**——`orchestrateSlices`（切片编排边界）也读它们，与 stateMachine 注入
+  // `stageOf` 同形。
+  const handoff = createHandoff({
+    config, log, scope, activity,
+    useHub: () => useHub,
+    pipeline: () => pipeline,
+    stageByRole: () => stageByRole,
+    listTasks, hubPost, runTaskctl,
+    SLICE_ANALYSIS_TAIL, isSliceGoalTask,
   })
 
 
@@ -2591,7 +2558,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       // 4. 流水线 done 补流转：将军人工合入/验收后手动 done 的中间阶段任务 → 创建下一角色任务（幂等：已有后继则跳过）
       if (isPipeline) {
         for (const t of tasks.filter(x => x.status === 'done' && stageOf(x) !== undefined)) {
-          await advancePipeline(t)
+          await handoff.advancePipeline(t)
         }
       }
       // 4.2 / 4.3 / 4.4 / 4.5a 验收与沉淀管线已拆到 ./acceptance.ts（验收边界）；原始注释

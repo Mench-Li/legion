@@ -366,6 +366,87 @@ test('a failing slice tester parks in_review and creates a bounded fix task', as
   }
 })
 
+test('★ 人工/验收 done 的中间阶段任务：下轮 sweep 的 `// 4.` 补流转建下一角色任务（PRT-315 切片 6 调用点）', async () => {
+  // 这条钉的是**调用点**，不是 handoff 模块：将军人工合入/验收后把中间阶段任务手动置 done 时，
+  // 链不会自己前进——靠这一轮扫单的 `// 4.` 补建下一角色任务（幂等：已有后继则跳过）。
+  //
+  // 为什么它必须在这里（而 handoff.test.mjs 里没有）：切片 6 的白盒用例只喂 `advancePipeline`
+  // 本身，**看不见** index.ts 里的调用点——把 `// 4.` 整块删掉，那 32 条全绿。这正是切片 5
+  // 那条教训（"顺序/调用点在注释里"与"被用例钉住"在绿套件里长得一模一样）在本切片的实例。
+  const root = await mkdtemp(join(tmpdir(), 'handoff-sweep-'))
+  const originalFetch = globalThis.fetch
+  const restoreTasks = protectTasksFile(root)
+  writeFileSync(join(root, 'roles.json'), JSON.stringify({
+    name: 'software',
+    stages: [
+      { role: 'coder', label: '编码实现', prompt: 'code', next: 'tester' },
+      { role: 'tester', label: '测试执行', prompt: 'test', next: null },
+    ],
+  }))
+  const requests = []
+  let created
+  const doneCoder = {
+    ...TD, id: 'T-001', role: 'coder', title: '【切片编码】登录接口', status: 'done',
+    soldier: 'coder', slice: null, sliceIdx: null, fixOf: null, parent: null, blockedBy: [],
+    description: '目标正文。\n\n[本阶段] 编码实现',
+    comments: [{ by: 'guard', at: '2026-09-02T00:00:00.000Z', text: '✓ 编码完成：写了三个文件\n证据：npm test' }],
+  }
+  let boardTasks = [doneCoder]
+  const base = hubStub({ board: () => boardTasks, requests })
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input))
+    const body = JSON.parse(String(init.body ?? '{}'))
+    const handled = await base(input, init)
+    if (handled !== undefined) return handled
+    if (url.pathname === '/api/pipeline') return response({}, 404) // 数据面无流水线 → 回落部署面 roles.json
+    if (url.pathname === '/api/goal') return response({ goals: [] })
+    if (url.pathname === '/api/create') {
+      requests.push('create')
+      created = body
+      // 下一轮 board 带上新任务（模拟 hub 落库）：它已在办 → 不该再被补建一次
+      // scope 必须是流转时的 scope（= roles.json 的 name），否则"后继存在"判定按 scope 过滤时会落空
+      boardTasks = [...boardTasks, {
+        ...TD, id: 'T-009', role: 'tester', title: '【测试执行】登录接口', parent: 'T-001',
+        scope: 'software', status: 'in_progress', soldier: 'tester', claimedAt: '2026-09-02T00:05:00.000Z',
+        slice: null, sliceIdx: null, fixOf: null, blockedBy: [], comments: [],
+      }]
+      return response({ task: { id: 'T-009', ...body } })
+    }
+    return response({}, 404)
+  }
+
+  const harness = fakeContext({ status: 'done', summary: '', evidence: '', blocker: '' })
+  try {
+    apply(harness.ctx, config(root, { rolesFile: join(root, 'roles.json') }))
+    harness.intervals[0]()
+    await waitFor(() => created !== undefined, 'sweep 的 // 4. 没有补建下一角色任务')
+    assert.deepEqual(created, {
+      // 标题沿用上一环、只把「【…】」换成下一环的标签（用 roles.json 里的 label）
+      title: '【测试执行】登录接口',
+      description: '目标正文。\n\n[前序阶段] 编码实现（coder）已完成：✓ 编码完成：写了三个文件\n\n[本阶段] 测试执行（tester）',
+      role: 'tester',
+      parent: 'T-001',
+      priority: 'high',
+      status: 'todo',
+      by: 'soldier-auto',
+      // scope = 部署面 roles.json 的 name（数据面无流水线时回落），不是 config.scope='default'
+      scope: 'software',
+    })
+    // goalId 来自 `doneTask.goalId ?? undefined`：JSON 序列化会把 undefined 键丢掉，
+    // 所以**线上 body 里没有这个键**（不是 null）——hub 侧按"无目标"落库。
+    assert.equal('goalId' in created, false)
+    // 幂等：board 已有后继（parent=T-001）之后，再扫一轮不得重复建
+    harness.intervals[0]()
+    await new Promise(resolve => setTimeout(resolve, 100))
+    assert.equal(requests.filter(r => r === 'create').length, 1, '已有后继时不得重复补建')
+  } finally {
+    for (const dispose of harness.disposers) await dispose()
+    globalThis.fetch = originalFetch
+    restoreTasks()
+    await cleanup(root)
+  }
+})
+
 test('a completed fix reopens the tester for retest unless budget escalation stopped it', async () => {
   // 机器闸门闭环：fix 任务合入 done → tester（in_review）自动重开（in_review→todo）；
   // 但已升级将军（预算用尽评论）的 tester 绝不自动重开，避免 fix 全 done 后的无限重测循环。

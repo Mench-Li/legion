@@ -56,6 +56,7 @@ import { createStateMachine } from './stateMachine.js'
 import { createWorkspace, type SpaceBinding } from './workspace.js'
 import { createAcceptance } from './acceptance.js'
 import { createHandoff, isSliceTesterTask } from './handoff.js'
+import { createSliceOrchestration } from './sliceOrchestration.js'
 
 type AppContext = Context & {
   subagents: SubagentRuntime
@@ -737,28 +738,9 @@ function spaceWorker(ctx: AppContext, config: Config): void {
   /** 是否为切片束任务（coder/tester/devops 且带 slice 键）。 */
   const isSliceBeam = (t: Task): boolean => t.slice != null && t.role != null && (t.role === 'coder' || t.role === 'tester' || t.role === 'devops')
 
-  /** 解析 breaker 产出的 TASK_BREAKDOWN.md 切片清单（P1-4 机器可读格式，见 roles.json breaker 提示词）：
-   *  '## slices' 段落后逐行「- S1 | 切片标题 | a.js, b.ts | 验收1; 验收2」。 */
-  function parseSlices(text: string): Array<{ title: string; files: string[]; acceptance: string[] }> {
-    const lines = text.split(/\r?\n/)
-    const start = lines.findIndex(l => /^#{2,3}\s*(slices|切片)/i.test(l.trim()))
-    if (start === -1) return []
-    const out: Array<{ title: string; files: string[]; acceptance: string[] }> = []
-    for (const raw of lines.slice(start + 1)) {
-      const line = raw.trim()
-      if (line === '') continue
-      if (/^#{1,6}\s/.test(line)) break // 下一个标题 = 清单结束
-      const m = /^[-*]\s*S?(\d+)\s*[|:]\s*(.*)$/.exec(line)
-      if (!m) continue
-      const parts = m[2].split('|').map(x => x.trim())
-      const title = (parts[0] ?? '').trim()
-      if (title === '') continue
-      const files = (parts[1] ?? '').split(/[,，]/).map(x => x.trim()).filter(Boolean)
-      const acceptance = (parts[2] ?? '').split(/[;；]/).map(x => x.trim()).filter(Boolean)
-      out.push({ title, files, acceptance })
-    }
-    return out
-  }
+  // ── 阶段 3 PRT-315 切片 7：`parseSlices()` 已搬到 ./sliceOrchestration.ts（切片流水线编排边界）──
+  // 它此前是本闭包里的函数声明，全仓**只有编排一个读者**，且是纯函数（不碰闭包/hub/git），
+  // 故随边界一起搬；`TASK_BREAKDOWN.md` 的机器可读格式契约与本界同址，改格式时一处就能看到。
 
   // ── 空间仓库绑定：每个工作空间可配置自己的「本地文件夹 + 远程仓库」（team-hub /api/spaces，
   //    军团指挥台「空间设置」维护；命中 localDir → worker 工作目录 = 该文件夹、隔离仓库根 = 所属仓库根
@@ -2043,6 +2025,19 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     listTasks, hubPost, runTaskctl,
     SLICE_ANALYSIS_TAIL, isSliceGoalTask,
   })
+  // ── 阶段 3 PRT-315 切片 7：切片流水线编排已拆到 ./sliceOrchestration.ts，这里只做**接线** ──
+  // 本界**没有**运行期会被重新赋值的绑定：`useHub` 的守卫（`// 5.`）留在下面调用点，故不传取值
+  // 函数；`scope` / `config` / 四个判据 / `hubPost` / `safeComment` / `transitionTo` / `runGit`
+  // 全是 const 或身份稳定的函数（传值）。两个容器**所有权留在本闭包**：`expandRetryAt` 是每实例
+  // 状态（多空间 mount 共享模块注册表会串台，见该模块文件头）；`goalCtxById` 是「目标级缓存」
+  // （refreshGoals 每轮写、非本界的读者读）——只借出去读改，不搬所有权。
+  const sliceOrchestration = createSliceOrchestration({
+    config, log, scope, activity,
+    isSliceBeam, SLICE_ANALYSIS_TAIL, isSliceGoalTask,
+    expandRetryAt, goalCtxById, goalDocPath,
+    repoRootFor: workspace.repoRootFor, worktreeRootFor: workspace.worktreeRootFor,
+    hubPost, safeComment, transitionTo, runGit,
+  })
 
 
   /** 一名角色士兵在需求讨论群聊中做头脑风暴式陈述（只输出意见，不写文件）。 */
@@ -2214,74 +2209,9 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     log(`${t.id} → done（讨论收敛），流水线已启动`)
   }
 
-  /** 切片流水线编排（每轮扫单，仅 hub 模式）：
-   * ① readyToExpand：分析前缀尾（test-designer done + [slice-mode]）且切片束尚未注册 →
-   *    解析已合入主分支的 TASK_BREAKDOWN.md（目标目录 docs/<goalId>/ 或遗留根 docs/，breaker 机器可读切片清单）→
-   *    POST /api/goal/slices 注册
-   *    （coder_Si→tester_Si 微链 + devops 目标级收尾；注册幂等，失败退避后重试）。
-   * ② readyToRetest：tester 停在 in_review 且其 fix 回炉任务已全部合入 done（预算未用尽）→
-   *    重开 tester（in_review→todo），下轮由 todo 认领重测——机器闸门闭环。
-   */
-  async function orchestrateSlices(tasks: Task[]): Promise<void> {
-    const sliced = tasks.filter(t =>
-      t.scope === scope && !t.hold && t.status !== 'canceled' &&
-      (isSliceBeam(t) || (t.role === SLICE_ANALYSIS_TAIL && isSliceGoalTask(t))))
-    if (sliced.length === 0) return
-    // ① 展开就绪
-    const tdDone = sliced.find(t => t.role === SLICE_ANALYSIS_TAIL && t.status === 'done' && isSliceGoalTask(t))
-    if (tdDone !== undefined) {
-      const beamExists = sliced.some(x => x.slice === tdDone.id || String(x.slice ?? '').startsWith(`${tdDone.id}:S`))
-      if (!beamExists && (expandRetryAt.get(tdDone.id) ?? 0) + config.intervalMs * 6 <= Date.now()) {
-        // 拆解文档按目标目录解析：目标化目标在 docs/<goalId>/TASK_BREAKDOWN.md，遗留目标回退根 docs/TASK_BREAKDOWN.md。
-        const tdGoal = tdDone.goalId ? goalCtxById.get(tdDone.goalId) ?? null : null
-        const bdPath = join(workspace.repoRootFor(), goalDocPath(tdGoal, 'docs/TASK_BREAKDOWN.md'))
-        let slices: Array<{ title: string; files: string[]; acceptance: string[] }> = []
-        try {
-          if (existsSync(bdPath)) slices = parseSlices(readFileSync(bdPath, 'utf8'))
-        } catch (e) {
-          log(`TASK_BREAKDOWN.md 读取失败：${String(e)}`)
-        }
-        if (slices.length === 0) {
-          expandRetryAt.set(tdDone.id, Date.now())
-          log(`${tdDone.id} 分析前缀完成但 TASK_BREAKDOWN.md 无切片清单（${bdPath}），等待 breaker 产出（退避重试）`)
-          return
-        }
-        try {
-          const res = await hubPost('/api/goal/slices', { testDesignerTaskId: tdDone.id, slices, by: config.role }) as { created?: string[] }
-          const n = (res.created ?? []).length
-          await safeComment(tdDone.id, `📐 已注册 ${n} 个切片（coder_Si→tester_Si 微链 + devops 目标级收尾），切片之间互不依赖，可并行派工。`)
-          activity('slices', tdDone.id, `切片展开：${n} 个任务`)
-          log(`${tdDone.id} 切片束已注册：${n} 个任务`)
-        } catch (e) {
-          expandRetryAt.set(tdDone.id, Date.now())
-          log(`${tdDone.id} 切片注册失败（退避重试）：${String(e)}`)
-        }
-      }
-    }
-    // ② 重测重开
-    for (const tester of sliced.filter(t => t.role === 'tester' && t.status === 'in_review' && String(t.slice ?? '').includes(':S'))) {
-      // 已升级将军（预算用尽）的 tester 绝不自动重开——否则 fix 全 done 后每轮都重测，形成死循环
-      if (tester.comments.some(c => (c.text ?? '').includes('预算已用尽'))) continue
-      const fixes = tasks.filter(f => f.role === 'coder' && f.fixOf === tester.id && f.status !== 'canceled')
-      if (fixes.length === 0 || fixes.length > config.maxFixPerSlice) continue
-      if (!fixes.every(f => f.status === 'done')) continue // 有在途/失败 fix 未合入，等下一轮
-      // 清掉上一轮的 tester worktree/分支：重测必须基于合入修复后的主分支，而非复用旧快照
-      // （prepareWorktree 对既有 worktree/分支默认复用续做——那是"打回纠错"语义；重测是"换基线"语义）。
-      if (config.isolate) {
-        const staleDir = join(workspace.worktreeRootFor(), tester.id)
-        if (existsSync(staleDir)) {
-          const removed = await runGit(workspace.repoRootFor(), ['worktree', 'remove', '--force', staleDir])
-          if (removed.code !== 0) log(`${tester.id} 重开前清理旧 worktree 失败（下轮 prepareWorktree 将复用旧快照）：${(removed.err || removed.out).trim()}`)
-        }
-        await runGit(workspace.repoRootFor(), ['branch', '-D', `w/${tester.id}`])
-        activity('worktree', tester.id, `重测换基线：已清理旧 worktree/分支 w/${tester.id}，将基于最新主分支重建`)
-      }
-      await transitionTo(tester.id, 'todo')
-      await safeComment(tester.id, `🔄 修复已完成（第 ${fixes.length} 轮），自动重开本切片重测（机器闸门：通过后自动 done）。`)
-      activity('retest', tester.id, `修复完成，重开重测（第 ${fixes.length} 轮）`)
-      log(`${tester.id} → todo（fix 完成，第 ${fixes.length} 轮重测）`)
-    }
-  }
+  // ── 阶段 3 PRT-315 切片 7：切片流水线编排（readyToExpand 注册切片束 / fix 合入后重开 tester
+  //    重测）已搬到 ./sliceOrchestration.ts；该模块文件头逐条列了搬了什么、两个容器为什么只借
+  //    不搬（每实例状态 / 目标级缓存）、以及哪四个判据按值注入。调用点见本文件 `// 5.`。
 
   /** 一轮扫单：todo 认领派工；本角色的退回任务纠错；依赖解除的 blocked 续做。 */
   // ── R-4 对话 AI 回复（S10）：chat-responder 扫单 ────────────────────────────
@@ -2611,9 +2541,13 @@ function spaceWorker(ctx: AppContext, config: Config): void {
         }
       }
       // 5. 切片流水线编排（仅 hub 模式）：readyToExpand 注册切片束 / fix 合入后重开 tester 重测
+      //    （PRT-315 切片 7：编排本体已搬到 ./sliceOrchestration.ts；`if (useHub)` 守卫与下面
+      //     这圈 try/catch **故意留在这里**——hub 不可达就不编排、编排抛错只记一行日志、本轮
+      //     照常收尾（writeDaemonStatus 仍会跑）。搬进模块等于让模块自己决定「hub 不可达算不算
+      //     失败」，那是调用方的语义。）
       if (useHub) {
         try {
-          await orchestrateSlices(tasks)
+          await sliceOrchestration.orchestrateSlices(tasks)
         } catch (e) {
           log(`切片编排失败：${String(e)}`)
         }

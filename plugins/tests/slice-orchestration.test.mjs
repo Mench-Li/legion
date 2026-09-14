@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { mkdtemp, rm } from 'node:fs/promises'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -643,6 +643,139 @@ test('retest reopen drops the stale tester worktree so retests run on the fixed 
     // stale worktree 与分支必须已被清理
     assert.equal(git(repo, ['rev-parse', '--verify', 'refs/heads/w/T-200']).code !== 0, true, 'stale branch w/T-200 must be deleted')
     assert.equal(git(repo, ['worktree', 'list']).out.includes(staleDir), false, 'stale worktree dir must be removed from git')
+  } finally {
+    for (const dispose of harness.disposers) await dispose()
+    globalThis.fetch = originalFetch
+    restoreTasks()
+    await cleanup(root)
+  }
+})
+
+test('★ `sweep()` 的 `// 5.` 守卫：本地模式（无 hub）下**不**跑切片编排（PRT-315 切片 7 调用点）', async () => {
+  // 这条钉的是**调用点上的守卫**，不是新模块：`if (useHub) { try { orchestrateSlices } catch }`。
+  // 本地模式（hubUrl='' → useHub=false；detectHub 探测两个候选都失败）下，即使 board 上摆着
+  // 一条分析前缀尾 done 的切片目标、且 TASK_BREAKDOWN.md 就在仓库里，也**不得**去 POST
+  // /api/goal/slices —— 那是在往一个不存在的 hub 说话。
+  //
+  // 为什么它必须在这里：sliceOrchestration.test.mjs 的白盒用例只喂 orchestrateSlices 本身，
+  // **看不见** index.ts 里这道守卫——把 `if (useHub)` 去掉，那 32 条全绿（去掉守卫后模块照样
+  // 正常工作，只是根本没有 hub 可说话）。这正是切片 5 / 6 那条教训在本切片的实例。
+  //
+  // 本地模式的任务池走 scrumDir 下的 taskctl.mjs（runTaskctl 用 process.execPath 起它），
+  // 所以这里放一个**假的 taskctl.mjs**：它把 argv 记进日志文件、对 `list` 回 board。
+  const root = await mkdtemp(join(tmpdir(), 'slice-nohub-'))
+  const originalFetch = globalThis.fetch
+  const restoreTasks = protectTasksFile(root)
+  const scrumDir = join(root, 'scrum')
+  mkdirSync(join(scrumDir, 'docs'), { recursive: true })
+  mkdirSync(join(root, 'docs'), { recursive: true })
+  writeFileSync(join(root, 'docs', 'TASK_BREAKDOWN.md'), [
+    '# 拆解说明',
+    '## slices',
+    '- S1 | 登录接口 | src/auth.ts | 注册成功返回 201',
+    '',
+  ].join('\n'))
+  const taskctlCalls = join(root, 'taskctl-calls.log')
+  const fakeTaskctl = [
+    "import { appendFileSync } from 'node:fs'",
+    'const CALLS = ' + JSON.stringify(taskctlCalls),
+    'const BOARD = ' + JSON.stringify([{ ...TD, id: 'T-001', status: 'done' }]),
+    'const argv = process.argv.slice(2)',
+    "appendFileSync(CALLS, argv.join(' ') + '\\n')",
+    "process.stdout.write(JSON.stringify(argv[0] === 'list' ? BOARD : {}))",
+    '',
+  ].join('\n')
+  writeFileSync(join(scrumDir, 'taskctl.mjs'), fakeTaskctl, 'utf8')
+  const urls = []
+  globalThis.fetch = async (input) => {
+    urls.push(String(input))
+    return response({}, 404) // 连探测 hub 也 404：useHub 保持 false
+  }
+  const harness = fakeContext({ status: 'done', summary: '', evidence: '', blocker: '' })
+  try {
+    apply(harness.ctx, config(root, { hubUrl: '', scrumDir }))
+    harness.intervals[0]()
+    await waitFor(
+      () => existsSync(taskctlCalls) && readFileSync(taskctlCalls, 'utf8').includes('list'),
+      '本地 taskctl 没有被调用：这一轮扫单根本没跑起来',
+    )
+    await new Promise(resolve => setTimeout(resolve, 150))
+    // 前提：清单与"该注册的样子"**真的都在**——所以"没注册"只可能是守卫拦的
+    assert.equal(existsSync(join(root, 'docs', 'TASK_BREAKDOWN.md')), true, '夹具失效：清单不在')
+    assert.equal(
+      urls.some(u => u.includes('/api/goal/slices')), false,
+      `无 hub 时不得尝试注册切片，实际打到：${JSON.stringify(urls)}`,
+    )
+  } finally {
+    for (const dispose of harness.disposers) await dispose()
+    globalThis.fetch = originalFetch
+    restoreTasks()
+    await cleanup(root)
+  }
+})
+
+test('★ `sweep()` 的 `// 5.` try/catch：编排抛错 → 只记一行「切片编排失败」，本轮照常收尾（PRT-315 切片 7 调用点）', async () => {
+  // 这条钉的是**调用点上的吞错范围**。orchestrateSlices 自己吞掉的只有 ① 里的两类失败
+  // （hub 注册失败 / 清单文件读取失败）；② 里的 `transitionTo` **没有内层 catch**——它抛出来时
+  // 必须被 `// 5.` 这圈 try/catch 接住，只记一行日志，而不是把整轮 sweep 掀掉
+  // （掀掉的后果是 writeDaemonStatus 不写、看板与健康页看不到这一轮心跳）。
+  // 变异：删掉这圈 try/catch ⇒ sweep() reject ⇒ interval 回调的 `.catch` 打「sweep 异常」⇒ 本用例红。
+  const root = await mkdtemp(join(tmpdir(), 'slice-throw-'))
+  const originalFetch = globalThis.fetch
+  const restoreTasks = protectTasksFile(root)
+  const logFile = join(root, 'worker.log')
+  const requests = []
+  const fix = {
+    ...TD, id: 'T-300', role: 'coder', title: '【切片 S1 修复】', status: 'done',
+    soldier: 'coder', slice: 'T-001:S1', sliceIdx: 1, fixOf: 'T-200', blockedBy: [], comments: [],
+  }
+  const tester = {
+    ...TD, id: 'T-200', role: 'tester', title: '【切片 S1 测试】', status: 'in_review',
+    soldier: 'tester', slice: 'T-001:S1', sliceIdx: 1, blockedBy: ['T-100'], fixCount: 1, testReport: null,
+  }
+  const base = hubStub({ board: () => [tester, fix], requests })
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input))
+    const body = JSON.parse(String(init.body ?? '{}'))
+    const handled = await base(input, init)
+    if (handled !== undefined) return handled
+    if (url.pathname === '/api/transition') {
+      requests.push(`transition:${body.id}:${body.to}`)
+      // 只让**这条 tester** 的 transition 失败：把编排掀翻，看调用点接不接得住
+      if (body.id === 'T-200') return response({ error: 'boom' }, 500)
+      return response({ task: { ...tester, status: body.to } })
+    }
+    return response({}, 404)
+  }
+  const harness = fakeContext({ status: 'done', summary: '', evidence: '', blocker: '' })
+  const logText = () => { try { return readFileSync(logFile, 'utf8') } catch { return '' } }
+  try {
+    apply(harness.ctx, config(root, { logFile }))
+    // 挂载时 `apply()` 自己写过一次心跳（index.ts 的 `writeDaemonStatus(0)`），所以"文件在"
+    // 不足以证明这一轮扫单收尾时**又**写了一次——先把内容踩成哨兵，再看它有没有被真实的覆盖。
+    // （第一版断言只查"文件存在 + 有 lastSweepAt"，在"整轮跳过写入"时照样成立，是空转的。）
+    const daemonJson = join(root, 'scrum', 'daemon.json')
+    assert.equal(existsSync(daemonJson), true, '夹具失效：挂载时没写心跳（statusFileNames 的路径变了？）')
+    writeFileSync(daemonJson, "{\"lastSweepAt\":\"哨兵-不该留到最后\"}")
+    const daemonText = () => { try { return readFileSync(daemonJson, 'utf8') } catch { return '' } }
+    harness.intervals[0]()
+    await waitFor(() => /切片编排失败|sweep 异常/.test(logText()), '既没接住也没掀翻：日志里什么都没有', 5000)
+    const txt = logText()
+    assert.ok(
+      requests.some(r => r.startsWith('transition:T-200:todo')),
+      `② 没有走到 transition：${requests.join(', ')}`,
+    )
+    assert.match(txt, /切片编排失败：/, '调用点应把编排的异常吞成一行日志')
+    assert.equal(txt.includes('sweep 异常：'), false, '调用点必须接住异常，不能把整轮 sweep 掀掉')
+    // 还要钉住守卫注释里的另一半：「本轮**照常收尾**（writeDaemonStatus 仍会跑）」。
+    // 只在 catch 里记日志还不够——catch 末尾多一个 `return`，本轮心跳就不写了，
+    // 而看板 / 健康页只认这个文件：一次切片编排失败会让这个空间**静默地不再有心跳**。
+    await waitFor(
+      () => !daemonText().includes('哨兵-不该留到最后'),
+      '编排抛错后本轮没写心跳：catch 接住之后必须继续走到 writeDaemonStatus',
+      3000,
+    )
+    assert.match(daemonText(), /"lastSweepAt"/)
   } finally {
     for (const dispose of harness.disposers) await dispose()
     globalThis.fetch = originalFetch

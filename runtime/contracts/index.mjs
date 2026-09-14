@@ -105,3 +105,44 @@ export {
 } from './context.mjs'
 export { canonicalJson, canonicalScalar, domainSeparatedHash, nfc } from './canonical.mjs'
 export { FAKE_SCENARIOS, INJECTABLE_ERROR_CODES, createFakeRuntimeAdapter } from './fake-adapter.mjs'
+
+// PRT-253 跨进程边界：Runtime Contract 的**线上表示**（路由 / 信封 / NDJSON 帧 /
+// 失败语义 / 鉴权比较）。它是契约的一部分，因此与其余契约符号同一个出口——
+// 两侧各 import 一份，就不会出现"服务端与客户端各有一份协议"。
+export {
+  RUNTIME_CONTRACT_WIRE_VERSION,
+  WIRE_ADAPTER_OPERATIONS,
+  WIRE_ANONYMOUS_OPERATIONS,
+  WIRE_AUTH_HEADER,
+  WIRE_AUTH_SCHEME,
+  WIRE_BASE_PATH,
+  WIRE_CODES,
+  WIRE_CONTROL_FRAMES,
+  WIRE_CONTROL_KEY,
+  WIRE_CONTRACT_CHECKED,
+  WIRE_CONTRACT_VERSION,
+  WIRE_ENDING_FAILURE_CODE,
+  WIRE_ENDING_YIELDS_OUTCOME,
+  WIRE_EXECUTE_ENDINGS,
+  WIRE_JSON_CONTENT_TYPE,
+  WIRE_MAX_BODY_BYTES,
+  WIRE_NDJSON_CONTENT_TYPE,
+  WIRE_OPERATIONS,
+  WIRE_ROUTES,
+  assertWireCoversContract,
+  decodeEventLine,
+  encodeControlFrame,
+  encodeEventLine,
+  isAnonymousOperation,
+  isControlFrame,
+  isWireKnownEventType,
+  isWireTerminalEvent,
+  parseAuthorization,
+  readEnvelope,
+  readRequestEnvelope,
+  routeFor,
+  tokensMatch,
+  wireRefusal,
+  wireRequest,
+  wireSuccess,
+} from './wire.mjs'

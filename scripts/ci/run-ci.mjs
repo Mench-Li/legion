@@ -1034,6 +1034,32 @@ async function stageTest() {
       files: ['runtime/contracts/contract.test.mjs', 'runtime/contracts/fake-adapter.test.mjs'],
       cwd: ROOT,
     },
+    {
+      // PRT-253 续批三：跨进程 Runtime Contract 的**线路协议**。
+      //
+      // 这一套盯的是「流断了」与「跑完了」必须**不同形**：`execute` 有五种结束方式，
+      // 而 `WIRE_ENDING_YIELDS_OUTCOME` 里**恰好一项为 true**。把这张表写成数据
+      // 而不是写成一串 `if`，就是为了让用例能断言那个"恰好一项"——
+      //
+      //   > 一个把 `transport-failed` 也标成 true 的实现，
+      //   > 会在那条断言上变红，而它的其余用例**全都还是绿的**。
+      //
+      // 装载期还有 `assertWireCoversContract()` 把线路操作集合钉在契约方法集合上：
+      // 契约加了方法而线路没跟上时，这是**装载期**的响声，不是某次运行的静默缺项。
+      label: 'runtime-contract-wire（PRT-253：跨进程线路协议与 execute 的五种结束方式）',
+      files: ['runtime/contracts/wire.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      // PRT-253 续批三：**Runtime 进程侧**的契约服务端。
+      //
+      // 鉴权 fail closed，且 `NO_TOKEN`(403) 与 `UNAUTHORIZED`(401) 是**两条可分**的码：
+      // 「这台没配令牌」与「你给的令牌不对」要修的地方不一样。
+      // 监听器一律绑 port 0（临时端口），绝不占固定端口——操作者机器上跑着真服务。
+      label: 'runtime-contract-server（PRT-253：契约服务端、回环监听、鉴权 fail closed）',
+      files: ['runtime/dsh-composition/runtime-contract-server.test.mjs'],
+      cwd: ROOT,
+    },
     // PRT-007：旧系统平台契约基线（HTTP/表/状态机）。第 ④ 类用例把「当前源码提取结果」
     // 与已记录基线对账——它是**提醒**而不是迁移门禁：迁移期旧路径仍在正常演进，
     // 做成硬门禁会让每次功能提交都红，最后被人无脑 --record 刷掉，反而失去对拍价值。
@@ -1738,6 +1764,41 @@ async function stageTest() {
       //   所以这套用例是**自己绑一个最小端口**来驱动那条路的。
       label: 'executor-binding-sources（PRT-411 收尾：生产路径接上真来源，而非零来源快照）',
       files: ['orchestrator/worker/executor-binding-sources.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      // PRT-253 续批三：**worker 侧**的契约客户端。
+      //
+      // 它经 `executor.mjs` **既有的 `adapterFactory` 注入点**接入——执行逻辑一行未改。
+      // 不编默认 URL、不编空 token：本地绑定优先；两条都不通时 `EXECUTOR_HOST_PORT_REQUIRED`
+      // **一字未改**（既有套件钉着它，本批不放松那条拒绝）。
+      label: 'runtime-contract-client（PRT-253：worker 侧的契约客户端，缺配置时老读数不变）',
+      files: ['orchestrator/worker/runtime-contract-client.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      // PRT-253 续批三：★ **两个真进程**之间的读数。
+      //
+      // 这是本批存在的理由。在此之前，"绑定生效"是在**同一个** DSH 进程内读出来的，
+      // 而 `product/process-manifest.mjs` 把 `runtime` 与 `orchestrator` 声明成**两个进程**
+      // ——于是那条读数证明的是"一个进程内通"，而部署要求的是"两个进程之间通"。
+      //
+      //   > 一个"在一个进程里绑好了"的绑定，
+      //   > 与一个"从来没绑过"的绑定，在**消费它的那个进程**里是同一个读数。
+      //
+      // 判据：本测试进程 `resetDshRuntimeBinding()` 之后**没有任何本地绑定**，
+      // 经**产品自己的入口** `productionExecutorProviderFromEnv` 拿到引擎；
+      // `execute` 真的进了另一个进程（对端打印 `START-RUN-CALLED`，
+      // **不是**靠"返回了 completed"推断——一个把请求丢进虚空却仍回 completed 的替身
+      // 也会让后者变绿）。八种处境逐条给出**两两不同形**的读数。
+      //
+      // ★ 安全形状：真 `dsh` 子进程吃自己的一次性 `DSH_HOME`（tmpdir 下、spawn 前断言）、
+      //   `bundles: []`、`patchReload: 'startup'`、删 `DSH_SNAPSHOT`、spawnSync 超时、
+      //   跑完整棵删；监听器一律 **port 0**（绝不占固定端口——操作者机器上有真服务）；
+      //   令牌值不出现在任何一侧的可读输出里（有反向锚用例）。
+      //   需要 DSH_CHECKOUT 的那几条逐条 `t.skip()`，缺席时不伪造通过。
+      label: 'runtime-contract-cross-process（PRT-253：worker 跨进程拿到引擎，逐条对照可分）',
+      files: ['orchestrator/worker/runtime-contract-cross-process.test.mjs'],
       cwd: ROOT,
     },
     {

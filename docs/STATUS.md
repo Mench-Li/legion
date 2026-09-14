@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-13　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **186 套件 / 5257 用例 / 0 fail**（证据 `.ci/prt-253b/`）
+**最近一次全量基线**：2026-09-13　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **190 套件 / 5377 用例 / 0 fail**（证据 `.ci/prt-253d/`）
 （**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数会少）
 —— 以本文件所在提交为准；证据 `.ci/prt-901/`（PRT-901/902 第三方组件清单、SBOM 与商业分发条件那一批）
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
@@ -3457,6 +3457,109 @@
 > `docs/DUAL-WRITE-RACE-evidence/verify-evidence.md`。
 
 ---
+
+## 2026-09-14　PRT-253 续批三：跨进程 Runtime Contract 边界（worker 终于能到另一台进程里的引擎）
+
+上一批量出的那条缝——`bindDshRuntime()` 填的是**本进程**的模块级状态，而 `product/process-manifest.mjs`
+把 `runtime` 与 `orchestrator` 声明成**两个进程**——本批按 spec 的层次把它补上。
+**人做的决策**：走 spec 的分层（worker 跨 Runtime Contract），**不**合并进程、**不**动 PRT-258 冻结的清单。
+
+### 一、三份交付，各在自己那一层
+
+| | 文件 | 要点 |
+| --- | --- | --- |
+| ① 线路协议 | `runtime/contracts/wire.mjs` | 七个操作、NDJSON 分帧、`Bearer`、**`execute` 的五种结束方式**；装载期 `assertWireCoversContract()` 把线路操作集合钉在契约方法集合上 |
+| ② 服务端 | `runtime/dsh-composition/runtime-contract-server.mjs` + `plugins/runtime-contract-server-row.mjs` | `node:http` 回环、**零第三方依赖**、audit fail closed、`close()` 幂等 |
+| ③ 客户端 | `orchestrator/worker/runtime-contract-client.mjs` | 经 `executor.mjs` **既有的 `adapterFactory` 注入点**接入——执行逻辑一行未改 |
+
+**★ 五种结束方式**是这一批最该被记住的设计。`WIRE_ENDING_YIELDS_OUTCOME` 里**恰好一项为 true**，
+而它被写成**数据**而不是一串 `if`，就是为了让用例能断言那个"恰好一项"：
+
+> 一个把 `transport-failed` 也标成 true 的实现，会在那条断言上变红，
+> 而它的其余用例（"运行成功时能拿到 completed"）**全都还是绿的**。
+
+`NO_TOKEN`(403) 与 `UNAUTHORIZED`(401) 是**两条可分**的码："这台没配令牌"与"你给的令牌不对"
+要修的地方不一样。
+
+### 二★ 两个**真进程**之间的读数（本批存在的理由）
+
+`orchestrator/worker/runtime-contract-cross-process.test.mjs`：真 `dsh` CLI + 真 Loader + 真 Cordis
+Context + 真补丁层 + 真 `node:http` + 真鉴权比较。判据是本测试进程 `resetDshRuntimeBinding()`
+之后**没有任何本地绑定**，经**产品自己的入口** `productionExecutorProviderFromEnv` 拿到引擎。
+`execute` 真的进了另一个进程——**不靠"返回了 completed"推断**，而是靠对端进程打印了
+`START-RUN-CALLED`（一个把请求丢进虚空却仍回 `completed` 的替身也会让前者变绿）。
+
+八种处境，逐条给出**两两不同形**的读数：行挂上+有工厂+有 token ⇒ 成功；**不挂**那一行 ⇒
+服务 absent + 老码 `EXECUTOR_HOST_PORT_REQUIRED` 一字不变；挂上但没人注册工厂 ⇒ 进程照常退出 0 +
+具名降级；挂上但没配 token ⇒ `NO_TOKEN`；token 给错 ⇒ `UNAUTHORIZED`（**与上一条不同形**）；
+URL 配了但那台进程不在 ⇒ `RUNTIME_UNREACHABLE`（**与 absent 不同形**）；没给 `canRead` ⇒
+本进程当场拒绝；没给 token ⇒ 当场拒绝且**一次匿名请求都不发**。
+
+### 三、⚠️ 要生效还差三件，本批**报告而没有擅自改**（清单是 PRT-258 冻结的契约）
+
+1. `orchestrator.envNames` 需要加上 `LEGION_RUNTIME_URL` / `LEGION_RUNTIME_TOKEN`。
+   **后果具体**：`product/launcher/allowlist.mjs` 的 `buildChildEnv()` 对未声明键**直接抛**
+   （第 78 行，我读过），所以 Launcher 启动的 worker 里这两个键会被丢掉，退化回 `EXECUTOR_HOST_PORT_REQUIRED`。
+2. **端口传递**：契约监听器是临时端口（`bindPort: 0`，绝不占固定端口——操作者机器上跑着真服务），
+   目前只能从服务值/stdout 读到；Launcher 的派生值管道没动。
+3. **`LEGION_RUNTIME_TOKEN` 的产生与分发**没有任何实现——那是安全面决定（谁生成、怎么只让两个进程看到、
+   要不要轮换），不宜顺手定。
+
+**在这三处落地前，真实部署读数仍然是 `EXECUTOR_HOST_PORT_REQUIRED`；本批每一个读数都活在测试进程里。**
+
+### 四、一处门禁真的红了，是它该红（有意变更已记录）
+
+`topology-inventory` 报：
+
+```
+~ orchestrator.敏感字段: ["TEAM_HUB_TOKEN"] -> ["TEAM_HUB_TOKEN","LEGION_RUNTIME_TOKEN"]
+```
+
+我核过这个门禁**只比 `ports`/`sensitiveEnv`/`entryPoints`** 三项，所以它报的就是这一条真实语义变更；
+`--record` 顺带刷新的 `filesScanned`/`declaredFieldCount` 是此前多批累积下来、这个门禁**从不比较**的统计量，
+不是被掩盖的漂移。已 `--record` 并在提交信息里说明。
+
+### 五、一次 CI 失败是**机器负载**，不是功能回归（如实记下）
+
+第一次全量 CI 的 `test` 阶段 FAIL：`p13-host-injection`（真 DSH 宿主注入冒烟）三条用例
+以 `test did not finish before its parent and was cancelled` 超时。我没有接受这个读数就下结论，
+
+- 单跑 `p13`：**14/14 通过**（两次）；
+- 紧接着跑完本批四个新套件（120 例 / 37s）再单跑 `p13`：**14/14 通过**；
+- 查进程：**没有**本批测试泄漏的 DSH 子进程（剩下的 node 进程都是操作者环境自己的）；
+- 查 `run-ci`：套件是**串行**跑的（`for (const s of suites) await ...`），不存在套件间争抢；
+- 查阶段耗时：那一次**每个**阶段都慢一个数量级（syntax 31s vs 3.5s、build 65s vs 16s），
+  是机器整体被占满，不是本批引入的负载；
+- 只重跑 `test` 阶段：**PASS**（615s，基线 449s；本批新增 4 套约 37s）。
+
+所以记为**环境性偶发**，并在文档里留痕，而不是"重跑一次绿了就算了"。
+
+### 六、验证
+
+- **8 道门禁全 PASS**（scan **548** 字面量 / boundary 3 文件 26 处 / snapshot / topology（已 record）/
+  progress-check / check-docs / ci-syntax 50 脚本 / encoding **1910** 文件）。
+- **全量 CI `.ci/prt-253d/`：`test` 阶段 PASS**，**190 套件 / 5377 用例 / 0 fail**
+  （上一批 186 / 5257）。四个新套件已登记进 `run-ci`，stageTest 的"套件清单完备性"通过。
+- **变红验证 206/206 咬住、0 无效、0 没咬住**，还原**逐字节通过**。
+  本批新增 5 个探针（⑮①–⑮⑤），**5/5 咬住**：把"流断了/没给终态"标成"有结论"（⑮①）、
+  把"没配令牌"塌成"令牌不对"（⑮②）、丢掉对端具名码（⑮③）、鉴权直接放行一切（⑮④）、
+  客户端编一个默认 token（⑮⑤）。
+  > 探针第一版我**自己写错两处**（`SERVER` 与既有的 team-hub 常量重名、`CLIENT` 根本不存在），
+  > 被自己的校验器当场报成"锚点未找到"与 "is not defined"——**没有**当成咬住计入。
+
+### 七、诚实边界
+
+- 那个 `dsh` 进程里的**引擎端口是替身**（能力表按 `REQUIRED_CAPABILITIES` 推导、`startRun` 不启子代理）。
+  替换原因是一条实测事实：真 `createRuntimeHostInputsFactory()` 在只有脚手架服务的进程里
+  只确认得了 `structured-result`，`bootstrapDshRuntime` 报 `BOOTSTRAP_SELF_CHECK_INCOMPATIBLE`，
+  `legion-runtime-host` 那一行**不发布**绑定服务。所以本批证明的是「**边界**通了、请求真的进了
+  另一个进程、具名拒绝逐条可分」，**不是**「一台真 DSH 引擎能跑完一个真任务」。
+- `product/process-manifest.mjs` **一字未改**（PRT-258 冻结），因此上面第三节那三件仍悬着。
+- `scan --check` 绿对 `runtime/` 的三份新代码**不是证据**（`PROCESSES` 里没有 `runtime`）；
+  只有 `orchestrator/` 那一部分算被覆盖。
+- `enforcement` 的三种来源里**只实测了两种**，第二种（惰性读绑定服务）只有单测覆盖。
+- 既有的相邻缺口（非本批引入）：`currentModelSelection` 无生产来源 ⇒ 这条路一通，
+  下一个读数就是 `MODEL_UNAVAILABLE`。
 
 ## 2026-09-14　PRT-253 续批二：`runtimeHost`/`canRead` 的生产来源——并量出**双进程拓扑**这条更大的缝
 

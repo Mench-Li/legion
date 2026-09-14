@@ -25,6 +25,25 @@ export const ENV_NAMES = Object.freeze([
   'LEGION_WORKER_ID',
   // PRT-306：worktree 从用户授权的项目目录检出。
   'LEGION_WORKSPACE_DIR',
+  // PRT-253 跨进程边界：DSH 执行引擎住在**另一个进程**（Runtime）里，
+  // worker 只能经 Runtime Contract 走过去。这两个键就是那条路的坐标：
+  // 端点与凭证。**都没有默认值**——猜出来的地址会让"没配"与"配对了"同形，
+  // 空 token 会让"没鉴权"看起来像"鉴权过了"。
+  //
+  // ⚠️ 这份名单是**读取声明**，不是门禁读的那一份：
+  // `scripts/config/scan.mjs` 调的是 `SCHEMA.envNames()`，而那个函数是从
+  // `fields` 推出来的（见 packages/shared/src/config.mjs）。
+  // 所以这两个键在**两处**都有登记：这里（"本进程确实要读它"的声明）
+  // 与下面的 `fields`（门禁与配置面真正消费的那一份）。
+  // 只在其中一处登记过，就是一次实测到的 `scan: FAIL —— 未处理字面量（2）`。
+  //
+  // ⚠️ 它们**还没有**写进 `product/process-manifest.mjs` 的 orchestrator.envNames，
+  // 而 `product/launcher/allowlist.mjs` 的白名单只放行声明过的键——
+  // 也就是说 Launcher 启动的真实部署里它们会被丢掉。这是本批**报告**而没有
+  // 擅自修改的一处清单缺口（清单是 PRT-258 冻结的契约），见
+  // `docs/superpowers/prt/PRT-253-runtime-contract-boundary.md` §5.2。
+  'LEGION_RUNTIME_URL',
+  'LEGION_RUNTIME_TOKEN',
 ])
 
 /**
@@ -88,6 +107,21 @@ export const NON_ENV_LITERALS = Object.freeze([
   'EXECUTOR_CONTEXT_NOT_FROZEN', 'EXECUTOR_CONTEXT_UNVERIFIED',
   'EXECUTOR_BAD_WIRING', 'EXECUTOR_RUN_NOT_COMPLETED',
   'EXECUTOR_PROVIDER_THREW', 'EXECUTOR_PROVIDER_EMPTY',
+  // PRT-253 跨进程边界新增的四个码（worker/executor.mjs 的 EXECUTOR_CODES）。
+  //
+  // 它们区分的是**修法完全不同**的四种处境，而这正是本批新增的那条路
+  // （经 Runtime Contract 走到另一个进程）最容易被压成一句话的地方：
+  //
+  //   · `EXECUTOR_RUNTIME_UNREACHABLE` —— **配了**端点但够不着。去看那台进程。
+  //   · `EXECUTOR_RUNTIME_UNAUTHORIZED` —— 端点在对，凭证不成立。去看配置。
+  //   · `EXECUTOR_RUNTIME_REFUSED` —— 对端具名拒绝了别的东西，对端的码在 `innerCode`。
+  //   · `EXECUTOR_CAN_READ_REQUIRED` —— 权限判定没有来源。**不回落成"默认都能读"**。
+  //
+  // 与 `EXECUTOR_HOST_PORT_REQUIRED` 的关系是刻意的：那一条的含义是
+  // "这一次部署**没有**把引擎接上来"（没绑定、也没配端点），它一字未改——
+  // 加了一条新路之后把老路的读数改掉，等于用一次重构悄悄换掉一条既有契约。
+  'EXECUTOR_RUNTIME_UNREACHABLE', 'EXECUTOR_RUNTIME_UNAUTHORIZED',
+  'EXECUTOR_RUNTIME_REFUSED', 'EXECUTOR_CAN_READ_REQUIRED',
   // PRT-510 运行侧的预算闸门（worker/budget-gate.mjs 的 BUDGET_GATE_CODES）。
   //
   // 与 EXECUTOR_* 同一口径：这些码会被跨进程读取（worker 上报 → 启动结果 →
@@ -256,6 +290,31 @@ export const SCHEMA = defineSchema({
       doc: 'PRT-306：用户授权的项目目录，每次 Attempt 从它检出一份隔离的 git worktree。' +
         '**未配置时不认领任何任务**——不自动退回原地执行：那会让两个 worker 在同一个目录里' +
         '改同一份文件，而那种冲突不报错（表现为"改的东西莫名不见了"）',
+    },
+    {
+      key: 'runtimeUrl', env: 'LEGION_RUNTIME_URL', type: 'string', default: '',
+      doc: 'PRT-253 跨进程边界：DSH 执行引擎住在**另一个进程**（Runtime）里，' +
+        'worker 只能经 Runtime Contract 走过去。这是那个监听器的回环地址' +
+        '（如 http://127.0.0.1:51234）。' +
+        '**没有默认值，也不猜**：猜出来的地址会让「没配」与「配在一个别的端口上」同形，' +
+        '而这两者的修法相反（一个去配、一个去查那台进程）。' +
+        '未配置时 worker 退回进程内绑定；两条路都不通时以 ' +
+        '`EXECUTOR_HOST_PORT_REQUIRED` 拒绝——那是既有的具名拒绝，本批一字未改。' +
+        '⚠️ 生成与分发这个地址的 Launcher 派生值管道本批**没有**实现：' +
+        'Runtime 的契约监听器绑的是临时端口（bindPort: 0），端口目前只能从' +
+        'Runtime 进程 stdout / 已发布的服务值读到。',
+    },
+    {
+      // sensitive：与 hubToken 同一纪律——跨进程凭证绝不进状态文件
+      //（worker/status-file.mjs 的禁用键名单也钉着这个字符串）。
+      key: 'runtimeToken', env: 'LEGION_RUNTIME_TOKEN', type: 'string', default: '', sensitive: true,
+      doc: 'PRT-253 跨进程边界：Runtime Contract 的 Bearer 凭证。' +
+        '**没有默认值**——空串/纯空白一律按「没配」处理（`tokensMatch(\'\', \'\') === false`：' +
+        '"没配"不是"配对了"），于是空 token 不会把"没鉴权"变成看起来像"鉴权过了"。' +
+        '对端的两种拒绝是分开的读数：没配 `RUNTIME_CONTRACT_NO_TOKEN`（403，去配）与' +
+        '凭证不匹配 `RUNTIME_CONTRACT_UNAUTHORIZED`（401，去取对的）。' +
+        '⚠️ 这个值的**产生与轮换**本批没有实现（谁生成、怎么只让两个进程看到），' +
+        '那是安全面决策，见 docs/superpowers/prt/PRT-253-runtime-contract-boundary.md §5.2。',
     },
     {
       key: 'budgetActor', env: 'LEGION_BUDGET_ACTOR', type: 'string', default: '',

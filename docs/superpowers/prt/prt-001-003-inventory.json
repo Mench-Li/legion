@@ -33,7 +33,7 @@
       "sensitiveEnv": [
         "TEAM_HUB_TOKEN"
       ],
-      "declaredFieldCount": 15,
+      "declaredFieldCount": 17,
       "envReadKeys": [
         "CHAT_ATTACH_BLACKLIST_EXT",
         "CHAT_ATTACH_MAX_BYTES",
@@ -52,7 +52,7 @@
       ],
       "envReadCount": 14,
       "undeclaredEnvKeys": [],
-      "filesScanned": 21
+      "filesScanned": 34
     },
     {
       "name": "workbench",
@@ -93,7 +93,7 @@
       ],
       "envReadCount": 8,
       "undeclaredEnvKeys": [],
-      "filesScanned": 48
+      "filesScanned": 56
     },
     {
       "name": "whiteboard",
@@ -155,7 +155,7 @@
       "envReadKeys": [],
       "envReadCount": 0,
       "undeclaredEnvKeys": [],
-      "filesScanned": 13
+      "filesScanned": 15
     },
     {
       "name": "board-plugin",
@@ -243,7 +243,7 @@
       ],
       "envReadCount": 8,
       "undeclaredEnvKeys": [],
-      "filesScanned": 17
+      "filesScanned": 55
     },
     {
       "name": "orchestrator",
@@ -262,9 +262,10 @@
       "protocol": "子进程长驻；对 team-hub 发 HTTP（扫单 / 认领 / 提交终态）",
       "ports": [],
       "sensitiveEnv": [
-        "TEAM_HUB_TOKEN"
+        "TEAM_HUB_TOKEN",
+        "LEGION_RUNTIME_TOKEN"
       ],
-      "declaredFieldCount": 7,
+      "declaredFieldCount": 9,
       "envReadKeys": [
         "LEGION_DATA_DIR",
         "LEGION_RUNTIME_COMMAND",
@@ -275,7 +276,7 @@
       ],
       "envReadCount": 6,
       "undeclaredEnvKeys": [],
-      "filesScanned": 18
+      "filesScanned": 20
     }
   ],
   "declarationGaps": [],
@@ -294,6 +295,9 @@
       ],
       "WHITEBOARD_TOKEN": [
         "whiteboard"
+      ],
+      "LEGION_RUNTIME_TOKEN": [
+        "orchestrator"
       ]
     },
     "plaintextOnDisk": {

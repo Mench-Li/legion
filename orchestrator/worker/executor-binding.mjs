@@ -39,6 +39,11 @@
 
 import { createProductionExecutor, EXECUTOR_CODES } from './executor.mjs'
 import { createHubSourceLoader } from './sources-loader.mjs'
+import {
+  createRuntimeContractAdapter,
+  fetchEnforcementVerdict,
+} from './runtime-contract-client.mjs'
+import { WIRE_CODES } from '../../runtime/contracts/wire.mjs'
 
 /**
  * 把 hub 的 `get`（`{status, body}` 形状）适配成来源装配器要的 `read`。
@@ -155,21 +160,69 @@ export function resetDshRuntimeBinding() {
  *
  * 返回判别式联合，形状与 `runWorkerProcess` 的 `executorProvider` 一致。
  *
+ * ## 两条**互斥**的取得引擎的路（本批把第二条接上了）
+ *
+ *   ① **进程内绑定**（`bindDshRuntime`）：DSH 侧那一行把宿主端口装进
+ *      `bindingStack`。只在"worker 与引擎在同一个进程里"时成立
+ *      ——真实部署里它们**是两个进程**（`product/process-manifest.mjs`），
+ *      所以这条路在真机上永远读不到东西。
+ *   ② **跨进程契约**（本批新增）：Runtime 进程起一台契约监听器
+ *      （`runtime/dsh-composition/runtime-contract-server.mjs`），
+ *      worker 按 `LEGION_RUNTIME_URL` + `LEGION_RUNTIME_TOKEN` 走 HTTP 过去。
+ *
+ * 优先级：**①优先**。理由是同进程绑定是更强的证据（它就是本进程里那一台引擎），
+ * 而②要先相信一个网络端点。反过来的优先级会让一个同进程部署去连一个
+ * 可能是别的进程的地址。
+ *
+ * ## ★ 两条路都走不通时：**保持原来那条具名拒绝**
+ *
+ * 没有绑定、也没有配端点 → 仍然是 `EXECUTOR_HOST_PORT_REQUIRED`，
+ * 一字不改。这不是"降级"：它是"这次部署真的没有把引擎接上来"。
+ * `executor.test.mjs` 与 `executor-binding-sources.test.mjs` 钉着它。
+ *
+ *   > 加了一条新路之后把老路的读数改掉，等于用一次重构悄悄换掉了一条
+ *   > 别人正在依赖的契约。
+ *
  * @param {object} io
  * @param {(path: string, body: object) => Promise<{status:number, body:object}>} io.post
  * @param {(path: string) => Promise<{status:number, body:object}>} io.get
- * @param {object} [io.env] 环境变量（用于从进程环境构造 hub 的 post/get）
+ * @param {object} [io.env] 环境变量（用于从进程环境构造 hub 的 post/get 与端点）
+ * @param {string} [io.runtimeUrl] 覆盖 `LEGION_RUNTIME_URL`
+ * @param {string} [io.runtimeToken] 覆盖 `LEGION_RUNTIME_TOKEN`
+ * @param {(meta: object) => any} [io.canRead] 跨进程路径**必须**由调用方给出
+ * @param {typeof fetch} [io.fetchImpl]
  */
 export async function productionExecutorProvider(io = {}) {
-  const { post, get, env = process.env } = io
+  const { post, get, env = process.env, fetchImpl = globalThis.fetch } = io
+  const cleanOf = (v) => (typeof v === 'string' && v.trim() !== '' ? v.trim() : null)
+  const runtimeUrl = cleanOf(io.runtimeUrl) ?? cleanOf(env?.[RUNTIME_URL_ENV])
+  const runtimeToken = cleanOf(io.runtimeToken) ?? cleanOf(env?.[RUNTIME_TOKEN_ENV])
+
   if (currentBinding() === null) {
+    // ── ② 跨进程契约（PRT-253）───────────────────────────────────────────
+    if (runtimeUrl !== null) {
+      return crossProcessExecutorProvider({
+        runtimeUrl,
+        runtimeToken,
+        post,
+        get,
+        canRead: io.canRead,
+        fetchImpl,
+        budgetActor: deriveBudgetActor(io, env),
+      })
+    }
+    // ── 两条都不通：**原样保留**那条拒绝 ────────────────────────────────
     return Object.freeze({
       ok: false,
       code: EXECUTOR_CODES.HOST_PORT_REQUIRED,
       message: 'DSH 运行时尚未绑定（没有宿主端口，也没有启动自检结论）。' +
         '绑定由 runtime/dsh-composition 在 DSH 进程内完成——' +
-        'worker 在一个独立进程里，import 不到也探测不到那台引擎',
-      reasons: Object.freeze([]),
+        'worker 在一个独立进程里，import 不到也探测不到那台引擎。' +
+        `跨进程那条路也还没配：${RUNTIME_URL_ENV} 没有设置`,
+      reasons: Object.freeze([
+        `要么让 DSH 进程内那一行把端口装进来（同进程部署），` +
+        `要么起 Runtime 契约监听器并把 ${RUNTIME_URL_ENV} / ${RUNTIME_TOKEN_ENV} 交给本进程`,
+      ]),
     })
   }
   if (typeof post !== 'function' || typeof get !== 'function') {
@@ -189,12 +242,12 @@ export async function productionExecutorProvider(io = {}) {
   //   ④ 都没有 → **不建闸门**，且 `budgetState` 会是 `'not-gated'`
   //
   // ①② 缺省不影响正确性，只是"谁花的钱"记得粗一点；
-  // ③ 是让闸门在真实部署里**真的会被建起来**的那一层（见上面的说明）。
+  // ③ 是让闸门在真实部署里**真的会被建起来**的那一层（见下面的说明）。
   // ④ 是"没接"，它必须可见——不与"预算充足"同形。
-  const clean = (v) => (typeof v === 'string' && v.trim() !== '' ? v.trim() : null)
-  const budgetActor = clean(io.budgetActor)
-    ?? clean(env?.[BUDGET_ACTOR_ENV])
-    ?? clean(env?.[BUDGET_ACTOR_FALLBACK_ENV])
+  //
+  // ★ 抽成一个函数是**跨进程那条路也要用同一份**：两条路各写一遍
+  //   "谁花的钱"，会在某一天只改其中一份，而账本上的差别要到对账时才看得见。
+  const budgetActor = deriveBudgetActor(io, env)
 
   // ── ★ 来源装配的数据面（PRT-402~406 / PRT-411）────────────────────────
   //
@@ -225,6 +278,186 @@ export async function productionExecutorProvider(io = {}) {
     loadSources: sourceLoader.loadSources,
     ...(budgetActor === null ? {} : { budgetActor }),
   })
+}
+
+/**
+ * Runtime 契约端点的环境变量名。**本批新增**（见文档「需要改的清单」那一节）。
+ *
+ * 取名的依据是"这个值是**这个进程**从环境读的"：
+ * `LEGION_RUNTIME_URL` 指向 Runtime 进程的契约监听器，
+ * `LEGION_RUNTIME_TOKEN` 是它与那台进程约定的凭证。
+ *
+ * ⚠️ **它们还没有被写进 `product/process-manifest.mjs` 的 orchestrator.envNames**。
+ * `product/launcher/allowlist.mjs` 的 `buildChildEnv()` 对**未声明**的键直接抛，
+ * 所以在一个由 Launcher 启动的部署里，这两个键**会被丢掉**——
+ * 也就是说跨进程这条路的真实部署还差一次清单改动（见文档 §诚实边界）。
+ * 本批**没有**改那份清单：它是 PRT-258 冻结的契约，改它需要一次明确的决策。
+ */
+export const RUNTIME_URL_ENV = 'LEGION_RUNTIME_URL'
+
+/** 见 `RUNTIME_URL_ENV`。 */
+export const RUNTIME_TOKEN_ENV = 'LEGION_RUNTIME_TOKEN'
+
+/** 把客户端的具名失败翻成执行引擎提供者的具名拒绝。**逐条对应，不笼统归并。** */
+function refusalFromClientError(e) {
+  const code = e?.code ?? null
+  const innerCode = e?.innerCode ?? null
+  const message = e?.message ?? String(e)
+  if (code === WIRE_CODES.UNREACHABLE) {
+    return Object.freeze({
+      ok: false,
+      code: EXECUTOR_CODES.RUNTIME_UNREACHABLE,
+      message,
+      innerCode,
+      reasons: Object.freeze([
+        'Runtime 契约端点配了但够不着：去看那台进程起没起、端口对不对',
+      ]),
+    })
+  }
+  if (code === WIRE_CODES.UNAUTHORIZED || innerCode === WIRE_CODES.UNAUTHORIZED || innerCode === WIRE_CODES.NO_TOKEN) {
+    return Object.freeze({
+      ok: false,
+      code: EXECUTOR_CODES.RUNTIME_UNAUTHORIZED,
+      message,
+      innerCode,
+      reasons: Object.freeze([
+        `${RUNTIME_TOKEN_ENV} 必须与 Runtime 进程配置的 token 逐字相同；` +
+        '本模块**不**在缺凭证时发一次匿名请求——那会让"没鉴权"看起来像"鉴权过了"',
+      ]),
+    })
+  }
+  if (code === WIRE_CODES.BAD_WIRING) {
+    return Object.freeze({
+      ok: false,
+      code: EXECUTOR_CODES.BAD_WIRING,
+      message,
+      innerCode,
+      reasons: Object.freeze([]),
+    })
+  }
+  return Object.freeze({
+    ok: false,
+    code: EXECUTOR_CODES.RUNTIME_REFUSED,
+    message,
+    innerCode,
+    reasons: Object.freeze([
+      '对端具名拒绝了这一次读取；innerCode 是**对端**的码，它回答"为什么"',
+    ]),
+  })
+}
+
+/**
+ * 跨进程那条路（PRT-253）：**没有**本地绑定、但配了 Runtime 契约端点。
+ *
+ * 五样东西各有来源，**一样都没有默认值**：
+ *
+ * | 东西 | 来源 | 没有时 |
+ * | --- | --- | --- |
+ * | 端点 | `LEGION_RUNTIME_URL` / `io.runtimeUrl` | 调用方根本不会走到这里（回 `HOST_PORT_REQUIRED`）|
+ * | 凭证 | `LEGION_RUNTIME_TOKEN` / `io.runtimeToken` | `RUNTIME_UNAUTHORIZED`（**不发明空 token**）|
+ * | 适配器 | `createRuntimeContractAdapter`（走 HTTP 的 `RuntimeAdapter`）| — |
+ * | 强制面结论 | `/enforcement` 附加端点（Runtime 进程里那一次启动自检）| `RUNTIME_REFUSED`（**不发明"通过"**）|
+ * | `canRead` | 调用方显式给（权威在 lease 上）| `CAN_READ_REQUIRED`（**不默认放行**）|
+ *
+ * ## 为什么强制面结论要在这里读，而不是留给 `createProductionExecutor` 的 `selfCheck`
+ *
+ * `createProductionExecutor` 把 `selfCheck()` 的**任何异常**都收成
+ * `EXECUTOR_SELF_CHECK_INCOMPATIBLE`。那对同进程是合适的（自检跑不起来确实
+ * 等于没有可信结论），但跨进程时它会把"连不上"、"凭证不对"、"对端没配 token"
+ * 三种**修法完全不同**的处境压成同一个码——
+ *
+ *   > 一句不区分处境的报错，与没有报错，在排障上的价值是一样的。
+ *
+ * 所以先读、先归类，再把**已经算完的结论**包成函数交下去
+ * （与 `bootstrap.mjs` 的做法一致：一次装配对应一次结论，不重新探测）。
+ */
+async function crossProcessExecutorProvider({ runtimeUrl, runtimeToken, post, get, canRead, fetchImpl, budgetActor = null }) {
+  if (runtimeToken === null) {
+    return Object.freeze({
+      ok: false,
+      code: EXECUTOR_CODES.RUNTIME_UNAUTHORIZED,
+      message: `${RUNTIME_URL_ENV} 配了（${runtimeUrl}），但没有 ${RUNTIME_TOKEN_ENV}。` +
+        '契约的 execute/cancel/recover **永不匿名**，而本模块不发明一个空 token 去试',
+      innerCode: null,
+      reasons: Object.freeze([
+        `补上 ${RUNTIME_TOKEN_ENV}（它必须与 Runtime 进程配置的 token 逐字相同）`,
+      ]),
+    })
+  }
+  if (typeof post !== 'function' || typeof get !== 'function') {
+    return Object.freeze({
+      ok: false,
+      code: EXECUTOR_CODES.BAD_WIRING,
+      message: 'productionExecutorProvider 需要 post 与 get：前者冻结上下文，后者读回冻结的正文',
+      innerCode: null,
+      reasons: Object.freeze([]),
+    })
+  }
+  if (typeof canRead !== 'function') {
+    return Object.freeze({
+      ok: false,
+      code: EXECUTOR_CODES.CAN_READ_REQUIRED,
+      message: '跨进程路径需要调用方显式给出 canRead（装配阶段的权限判定）。' +
+        '它的权威是**这一次 Attempt 的 lease / 岗位清单**，只有 worker 一侧有；' +
+        'Runtime 进程没有 lease，也就无从判断',
+      innerCode: null,
+      reasons: Object.freeze([
+        '**不**回落成"默认都能读"：一次接线遗漏会因此变成一次静默越权',
+      ]),
+    })
+  }
+
+  const contractHost = { baseUrl: runtimeUrl, token: runtimeToken, fetchImpl }
+
+  let verdict
+  try {
+    verdict = await fetchEnforcementVerdict(contractHost)
+  } catch (e) {
+    return refusalFromClientError(e)
+  }
+  if (verdict === null || typeof verdict !== 'object' || typeof verdict.autoExecutionForbidden !== 'boolean') {
+    return Object.freeze({
+      ok: false,
+      code: EXECUTOR_CODES.SELF_CHECK_INCOMPATIBLE,
+      message: 'Runtime 进程给的强制面结论缺少布尔字段 autoExecutionForbidden。' +
+        '缺了它，「禁止执行」这个判定读出来是 false——形状错误会被当成通过',
+      innerCode: WIRE_CODES.ENFORCEMENT_UNAVAILABLE,
+      reasons: Object.freeze([]),
+    })
+  }
+
+  const sourceLoader = createHubSourceLoader({ hub: { read: readFromGet(get) }, scope: null })
+
+  return createProductionExecutor({
+    // ★ 宿主端口在跨进程时**不是** DSH 端口，而是"怎么找到那台 Runtime 进程"。
+    //   `adapterFactory` 是本批接入的注入点（`executor.mjs` 的执行逻辑一行未改）。
+    host: contractHost,
+    adapterFactory: (h) => createRuntimeContractAdapter(h),
+    selfCheck: async () => ({
+      autoExecutionForbidden: verdict.autoExecutionForbidden === true,
+      state: verdict.state ?? null,
+      patchVersion: verdict.patchVersion ?? null,
+      checks: Array.isArray(verdict.checks) ? verdict.checks : [],
+      reasons: Array.isArray(verdict.reasons) ? verdict.reasons : [],
+    }),
+    canRead,
+    post,
+    get,
+    loadSources: sourceLoader.loadSources,
+    ...(budgetActor === null ? {} : { budgetActor }),
+  })
+}
+
+/**
+ * 记账主体的**唯一**推导处（两条取得引擎的路共用）。
+ * 返回 `null` 表示"三个来源都没有"——那时**不建闸门**，且 `budgetState`
+ * 会是 `'not-gated'`（不与"预算充足"同形）。
+ */
+function deriveBudgetActor(io, env) {
+  const clean = (v) => (typeof v === 'string' && v.trim() !== '' ? v.trim() : null)
+  return clean(io?.budgetActor)
+    ?? clean(env?.[BUDGET_ACTOR_ENV])
+    ?? clean(env?.[BUDGET_ACTOR_FALLBACK_ENV])
 }
 
 /**
@@ -313,8 +546,20 @@ export function hubIo({ hubUrl, hubToken, fetchImpl = globalThis.fetch } = {}) {
  *
  * `TEAM_HUB_URL` 缺省时返回 `BAD_WIRING` 而不是抛错：worker 仍要能起来、
  * 写状态文件、如实报告自己干不了活。
+ *
+ * ## PRT-253：`canRead` 是本函数新增的**必填注入点**（跨进程那条路用）
+ *
+ * 同进程那条路从 `bindDshRuntime` 的绑定里拿 `canRead`；跨进程那条路
+ * **没有任何东西**能替调用方决定权限（权威是 lease，只有 worker 一侧有）。
+ * 所以它**不放进 `env`**：一个"从环境变量读出来的权限判定"与"默认都能读"
+ * 只差一次抄错，而后果是静默越权。
+ *
+ * @param {object} [input]
+ * @param {object} [input.env]
+ * @param {typeof fetch} [input.fetchImpl]
+ * @param {(meta: object) => any} [input.canRead] 跨进程路径必填；同进程路径忽略（用绑定里的那份）
  */
-export async function productionExecutorProviderFromEnv({ env = process.env, fetchImpl = globalThis.fetch } = {}) {
+export async function productionExecutorProviderFromEnv({ env = process.env, fetchImpl = globalThis.fetch, canRead } = {}) {
   const hubUrl = env.TEAM_HUB_URL ?? null
   const hubToken = env.TEAM_HUB_TOKEN ?? null
   if (hubUrl === null) {
@@ -332,5 +577,11 @@ export async function productionExecutorProviderFromEnv({ env = process.env, fet
   } catch (e) {
     return Object.freeze({ ok: false, code: EXECUTOR_CODES.BAD_WIRING, message: e.message, reasons: Object.freeze([]) })
   }
-  return productionExecutorProvider({ post: io.post, get: io.get, env })
+  return productionExecutorProvider({
+    post: io.post,
+    get: io.get,
+    env,
+    fetchImpl,
+    ...(canRead === undefined ? {} : { canRead }),
+  })
 }

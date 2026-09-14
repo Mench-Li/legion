@@ -63,6 +63,35 @@ export const EXECUTOR_CODES = Object.freeze({
   BAD_WIRING: 'EXECUTOR_BAD_WIRING',
   /** 引擎返回的终态不是成功。 */
   RUN_NOT_COMPLETED: 'EXECUTOR_RUN_NOT_COMPLETED',
+  /**
+   * PRT-253 跨进程：**配了** Runtime 端点，但连不上（进程没起 / 端口没人听）。
+   *
+   * 与 `HOST_PORT_REQUIRED` 必须分开：那一条是"没配"，这一条是"配了但够不着"。
+   * 修法完全不同——一个去补配置，一个去看那台进程为什么没起来。
+   */
+  RUNTIME_UNREACHABLE: 'EXECUTOR_RUNTIME_UNREACHABLE',
+  /**
+   * PRT-253 跨进程：**端点在，但凭证不成立**（本进程没配 token / 对端说 token 不对）。
+   *
+   * 与 `RUNTIME_UNREACHABLE` 分开：一个去配凭证，一个去查网络与进程。
+   * 具体的对端码在 `innerCode` 上（例如 `RUNTIME_CONTRACT_NO_TOKEN`
+   * 与 `RUNTIME_CONTRACT_UNAUTHORIZED` 是两件事：前者是那台机器没配，后者是你给错了）。
+   */
+  RUNTIME_UNAUTHORIZED: 'EXECUTOR_RUNTIME_UNAUTHORIZED',
+  /**
+   * PRT-253 跨进程：对端**具名拒绝**了一件不属于上面两类的请求
+   * （协议版本对不上、强制面结论没有来源、请求形状不对……）。
+   * 对端的码在 `innerCode` 上。
+   */
+  RUNTIME_REFUSED: 'EXECUTOR_RUNTIME_REFUSED',
+  /**
+   * PRT-253 跨进程：`canRead` 没有来源。
+   *
+   * 跨进程之后，权限判定的权威只在 worker 一侧（它手上有 lease），
+   * 而**没有**任何东西能替它决定。这一条**不回落**到"默认都能读"：
+   * 那会让一次接线遗漏变成一次静默越权。
+   */
+  CAN_READ_REQUIRED: 'EXECUTOR_CAN_READ_REQUIRED',
 })
 
 export class ExecutorError extends Error {

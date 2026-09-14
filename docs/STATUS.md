@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-13　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **195 套件 / 5453 用例 / 0 fail**（证据 `.ci/prt-253h/`）
+**最近一次全量基线**：2026-09-14　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **195 套件 / 5455 用例 / 0 fail**（证据 `.ci/prt-253i/`）
 （**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数会少）
 —— 以本文件所在提交为准；证据 `.ci/prt-901/`（PRT-901/902 第三方组件清单、SBOM 与商业分发条件那一批）
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
@@ -3457,6 +3457,131 @@
 > `docs/DUAL-WRITE-RACE-evidence/verify-evidence.md`。
 
 ---
+
+## 2026-09-14　PRT-253 能力判据批：结论 **(C) 保持阻塞**，(A) 被**顺序**否掉，(B) 只出提案（生产代码 0 行）
+
+上一批把绑定在真进程里立起来了，剩下的就是"自检判 incompatible"——四项必需能力只确认了 **1/4**。
+本批去问：那三项能不能像 `currentModelSelection` 那样"其实有来源、只是没人接"？
+
+**结论是不能。** 这三条拒绝是**实质的**，而且第一条的拒绝理由本身指出了一个**范畴错误**。
+
+### 一、四项能力在 spec 里**一个都没有**
+
+四个能力名（`tool-permission-enforcement` / `cancel-and-timeout` / `structured-result` /
+`usage-reporting`）在 spec 里命中数 **0/0/0/0**——"必需四项"是
+`runtime/contracts/adapter.mjs:39-48` 的**实现选择**，不是规格输入。spec 只有
+`getCapabilities(): Promise<RuntimeCapabilities>`（行 173，类型名）与行 230 的
+"任何必需能力缺失都返回 `UNSUPPORTED_CAPABILITY`，不得静默降级"。
+
+> 所以"哪几项必需"是一个**可以被论证的决定**，不是一个被规定的常量。
+
+### 二、(A) 被**顺序**否掉（不是被偏好否掉的）
+
+`tool-permission-enforcement` 的拒绝理由说：那件事由 Legion 自己的补丁层实现，
+生效与否由启动自检的 `composition-patch-layer` / `enforcement-mapping` 判定，
+*探针不把同一件事再判一遍（两份判定会漂移）*。
+
+这个理由指向一条干净的修法：**让能力表引用同一份判定**。但**判定在探针跑的时候还不存在**：
+
+```
+bootstrap.mjs:247  probed = await probeFactory(runtimeHost ?? {})   ← 能力表在这里算
+bootstrap.mjs:264  const run = ... selfCheck ... startupSelfCheck   ← 判定在这里才算
+实测 ORDER: probeRuntime -> startupSelfCheck
+```
+
+还有一条更硬的**环**：自检第 ② 项 `runtime-probe` 吃的正是 `probed.ok`，而 `probed.ok`
+由能力表算出。能前置的只有不依赖 runtime 的 ①③④⑤⑥。
+
+**而且即使接上也不解阻**：`checkCompatibility`（`adapter.mjs:108-118`）任一必需能力缺失即
+`UNSUPPORTED_CAPABILITY`。接上只把 1/4 变 2/4：
+
+```
+COMPAT_PARTIAL {"compatible":false,"code":"UNSUPPORTED_CAPABILITY",
+                "missingRequired":["tool-permission-enforcement","cancel-and-timeout","usage-reporting"]}
+```
+
+★ 顺带一个**读数**：能力表说"未确认"时，自检说"生效"——两个读数**本来就不同**，而且它们**必须**不同：
+
+```
+TWO_READINGS_DIFFER {"selfCheckSaysEffective":true,"capabilitySaysUnconfirmed":true}
+```
+
+所以修法不是"让两个读数一样"，而是"让能力表**引用**同一份判定"——这两件事在只看
+"现在绿了吗"的时候是同一个读数。
+
+### 三、(B) 方向真实，但**大于一次窄改** ⇒ 只出提案
+
+`degraded` 那条口径（spec 行 266：*只认领其必需能力全部满足的任务*）看起来正是为这种情况准备的，
+而且**判据是齐的**（`product/runtime-state.mjs` 的 `CLAIM_POLICY.degraded`、`mayClaimTasks`、
+`claim-gate.mjs:66-77`、`runtime-state.test.mjs` 全绿）。缺的是三样：
+
+1. **`satisfiedCapabilities` 没有生产者**——`claim-gate.mjs:66` 默认 `() => ({})`，
+   全仓库 17 处只出现在读方/透传/用例/注释（`run-ci.mjs:509` 操作者早就记下"判据在，喂给它的人还没有"）；
+2. **任务级"需要哪些运行时能力"的声明面不存在**——`RunRequest` 15 个必填字段里没有能力字段，
+   spec 全文四个能力名 0 命中；
+3. **没有"已接线但部分能力"这一档**——`claim-gate.mjs:45-55` 里 `wired === true → 'ready'` ⇒ 全认领：
+
+```
+WIRED_PROCESS_STATE ready / WIRED_CLAIM {"mayClaim":true,"scope":"all"}
+```
+
+> 即：**一个"接线接好了"的读数，与一个"能力齐了"的读数，在今天的状态机里是同一个 `ready`**——
+> 于是 `degraded` 这一档在代码里存在，却在生产路径上**永远到不了**。
+
+另有第 4/5/6 条（线上协议那一档、行 230 与行 266 的两层能力分层这个**产品决策**、usage 的替代来源），
+**没有实现**——一次窄改夹带不进去。
+
+### 四、★ 两条**不许合并**的分界（批前硬要求）
+
+- **`cancel-and-timeout`：分界未决。** 引擎契约**声称**能取消（`request.signal` / `run.dispose()`），
+  仓库记录**相反**的现场事实（`port.mjs` 文件头：abort 不保证杀死子代理），Legion 有**补偿**
+  （适配器看门狗）——但对"补偿是否真的收得住那次挂死"**没有任何读数**。
+  所以这一批**不**把它合并成"反正有人补"。
+- **`usage-reporting`：两侧都缺，侧别清楚。** DSH 检出 `SubagentResult` 只有
+  `{output, structured?, diagnostic?, stopReason}`（逐字读过，无 usage 字段）；
+  `collectUsage({stopReason:'completed',output:[],structured:null}) → null`（实测）。
+
+> 一个"引擎能保证"与一个"Legion 替他兜住"，在没有读数的日子里是同一个能力表格子——
+> 而它们该不该是同一格，是一个要单独论证的问题。
+
+### 五、★ 我独立破验了那条新读数
+
+子代理说新加的两条用例守着"能力表不跟着强制面判定动"。我把
+`tool-permission-enforcement` 的 `satisfied` 从 `false` 改成 `true`（谎报具备）：
+
+- **33 例里 3 条变红**，正是守着它的那些（含本批新增的两条），其余全绿；
+- 还原**逐字节**一致。
+
+第一次我的锚点用了 6 空格缩进，**命中 0 次**——脚本**拒绝执行**这次破验而不是跳过它：
+> 一个"锚点找不到"被静默当成"探针通过"的分类器，会在源码改版那天把覆盖率变成一句空话。
+
+### 六、验证
+
+- **7 道门禁全 PASS**（scan 558 / boundary 3 文件 26 处 / snapshot / topology 无漂移 / check-docs /
+  ci-syntax 50 脚本 / encoding **1923** 文件）。
+- 改动的套件 `runtime-host-registrar-row.test.mjs` **33/33**（原 31，+2）。
+  **无新增测试文件** ⇒ 套件清单完备性不受影响，无需改 `run-ci.mjs`。
+- **生产代码 0 行改动**：三项 `satisfied:false` 与三个具名码一字未动。
+- **全量 CI `.ci/prt-253i/`：9/9 阶段 PASS**，`test` **195 套件 / 5455 用例 / 0 fail**（+2 例、套件数不变）。
+  ★ 这条是我**先写成"本批未跑全量 CI"、随后补跑并改正**的——
+  > 一个"我打算跳过这一步"与一个"这一步真的过了"，在文档里长得一模一样。
+
+### 七、诚实边界
+
+- **本批没有解开阻塞**：`legion-runtime-host` 行仍不能进静态补丁层，绑定仍不建立。
+- 顺序结论是**读出来的**（调用链 + `ORDER` 读数 + 那条环），前提是组合没被改。
+- "接上就解阻"**未实测**（因为不施行），靠 `adapter.mjs:108-118` 的代码事实。
+- `fullSandbox()` 是**替身**（"沙箱说它完全管制"的最有利情形），本批没重跑真 DSH 进程；
+  真进程能力读数沿用上一批（`caps` 里只有 `structured-result` 为 true）。
+- `degraded` 只做了**静态证据**（缺席可用枚举证明），没跑成"真降级"。
+- §(B) 是**提案不是已验证修法**；"能力表那一格是引擎自述还是产品自检结论"**spec 没有这个口径**，
+  我按代码现状读，没替它定口径。
+- `cancel-and-timeout` 的"补偿是否有效"**仍无读数**——这一条**没有被本批判定**。
+- `/scripts/prt/dsh-session-usage.mjs` 是一条**真实**的会话转录 usage 来源（它对
+  `.jsonl.zstd` **多帧**拼接的处理有实测依据：`totalTokens = input + output + cacheRead`），
+  本批只**阅读**、**没运行**，也没验证它对单次 run 的归因——**记为一个未探索的 usage 方向**。
+- `runtime/` **不在** `scan.mjs` 的 `PROCESSES` 里 ⇒ scan 绿**不是** `runtime/` 新字面量的证据
+  （本批 runtime/ 生产新增字面量 0）。
 
 ## 2026-09-14　PRT-253 解阻批：那条残留要求拿掉了，**绑定在真 DSH 进程里建立得起来**
 

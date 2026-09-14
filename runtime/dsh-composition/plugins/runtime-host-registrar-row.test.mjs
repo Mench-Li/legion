@@ -15,7 +15,12 @@
 //   C2. `currentModelSelection` 的来源：`agentDefaultModel` 服务在 → 原样带出；
 //      不在 / 形状不对 / 返回值不是对象 → `null`，三个码分得开，**绝不编模型名**；
 //   D. 注册形状：默认导出与 `runtime-host-row.mjs` 的 default 是**同一个对象**（`===`），
-//      且注册发生在**模块求值期**（import 完就已经在缝上了）。
+//      且注册发生在**模块求值期**（import 完就已经在缝上了）；
+//   E. 工厂拿到的是**本行 `apply` 的现场**；
+//   F. ★ 能力判据批：强制面判定**在能力探针之后**才发生——所以那一项能力**不能**
+//      引用它。用例把这条顺序边界钉成读数：判定说"生效"时能力仍报"未确认"，
+//      且判定变红时能力的判据码**一字不变**。谁哪天把两者接上（无论接对还是接错），
+//      这里都会红，逼他先回答"那份判定在探针跑的时候到底存不存在"。
 //
 // 测试形状纪律：只断言**具名码 / 具体值**，不写"它抛了"；两个必须区分开的读数
 // 就断言它们**不同**；每条断言在把对应实现删掉时会红。
@@ -29,6 +34,8 @@ import { pathToFileURL } from 'node:url'
 import { after, describe, test } from 'node:test'
 
 import { REQUIRED_CAPABILITIES } from '../../contracts/adapter.mjs'
+import { LEGION_PERMISSION_PRESETS, PATCH_LAYER_ROWS } from '../patch-layer.mjs'
+import { startupSelfCheck } from '../selfcheck.mjs'
 import realRuntimeHostRow, {
   CAPABILITY_EVIDENCE_CODES,
   CAPABILITY_TABLE_CHECKED,
@@ -452,6 +459,86 @@ describe('PRT-253 续批二 · 工厂拿得到本行 `apply` 的现场', () => {
       undo()
     }
     assert.equal(seen, ctx, '工厂必须收到本行这一侧的**同一个** Context（===），而不是 undefined 或替身')
+  })
+})
+
+// ────────────────────────────── F. 强制面判定的**顺序边界**（能力判据批）
+
+/**
+ * 一份"强制面**全部生效**"的自检输入：补丁层每一行都在且已激活，preset 表是 Legion 自己的。
+ *
+ * 它由**声明**推出来（`PATCH_LAYER_ROWS` / `LEGION_PERMISSION_PRESETS`），不手抄行 id——
+ * 手抄一份会在补丁层加一行的当天变成假话，而那份假话只让这条用例"更容易绿"。
+ */
+function effectiveComposition() {
+  return {
+    rows: PATCH_LAYER_ROWS.map((r) => ({ id: r.id, activated: true })),
+    permissionPresets: [...Object.keys(LEGION_PERMISSION_PRESETS)],
+  }
+}
+
+/**
+ * 一个**真的管制住了**的沙箱端口：`probeSandbox` 的三条判据（`enforcement === 'full'` /
+ * argv 真的变了 / `denialSignatures` 非空）全过。
+ */
+function fullSandbox() {
+  return {
+    confine: async (argv) => ({
+      enforcement: 'full',
+      backend: 'unit-full-backend',
+      argv: ['sandbox-run', ...argv],
+      denialSignatures: ['unit-sandbox-denied'],
+    }),
+  }
+}
+
+const confirmingCtx = () => ctxWith({
+  subagents: registry([{ name: 'spawn', capabilities: { outputSchema: true } }]),
+})
+
+describe('PRT-253 能力判据批 · 强制面判定在能力探针**之后**才发生', () => {
+  test('★ 强制面判定生效时，能力表里那一项仍然是"未确认"——两个读数必须不同', async () => {
+    const check = await startupSelfCheck({
+      composition: effectiveComposition(),
+      sandbox: fullSandbox(),
+      runtime: { ok: true, version: '1.0.0' },
+    })
+    const itemOf = (name) => check.checks.find((c) => c.name === name)
+    assert.equal(itemOf('composition-patch-layer').ok, true)
+    assert.equal(itemOf('sandbox-enforcement').ok, true)
+
+    const { capabilities, evidence } = runtimeCapabilityEvidence(confirmingCtx())
+    assert.equal(capabilities['structured-result'], true, '这一项有真来源（现场 provider 注册表），必须为 true')
+    assert.equal(capabilities['tool-permission-enforcement'], false)
+    assert.equal(evidence['tool-permission-enforcement'].code,
+      CAPABILITY_EVIDENCE_CODES.ENFORCEMENT_PLANE_MEASURED_ELSEWHERE)
+
+    // ★ 这一条就是"顺序边界"的读数：判定说生效，能力说未确认。
+    //   两者若哪天相同，说明有人把能力接到了那份判定上——而那份判定在
+    //   `runtimeCapabilityEvidence()` 跑的时候**还不存在**（它在自检里才算），
+    //   接上它只可能靠"再判一遍"（两份判定会漂移）或"写死一个值"（两个都不是）。
+    assert.notEqual(itemOf('composition-patch-layer').ok, capabilities['tool-permission-enforcement'],
+      '强制面判定与能力表不再是两个不同的读数：有人把二者接上了，而接法必须是"同一份测量"')
+  })
+
+  test('★ 反向控制：判定变红时能力判据码**一字不变**（能力表不跟着那份判定动）', async () => {
+    const broken = {
+      ...effectiveComposition(),
+      rows: effectiveComposition().rows.filter((r) => r.id !== PATCH_LAYER_ROWS[0].id),
+    }
+    const check = await startupSelfCheck({
+      composition: broken,
+      sandbox: fullSandbox(),
+      runtime: { ok: true, version: '1.0.0' },
+    })
+    assert.equal(check.checks.find((c) => c.name === 'composition-patch-layer').ok, false,
+      '反向控制必须真的变红，否则这条用例只在一个"本来就全绿"的输入上跑过')
+
+    const { capabilities, evidence } = runtimeCapabilityEvidence(confirmingCtx())
+    assert.equal(capabilities['tool-permission-enforcement'], false)
+    assert.equal(evidence['tool-permission-enforcement'].code,
+      CAPABILITY_EVIDENCE_CODES.ENFORCEMENT_PLANE_MEASURED_ELSEWHERE,
+      '两个方向上报同一个码 ⇒ 能力表既没接判定、也没被判定驱动；接了就必须两个方向一起变')
   })
 })
 

@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-14　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **195 套件 / 5474 用例 / 0 fail**（证据 `.ci/prt-315d/`）
+**最近一次全量基线**：2026-09-14　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **195 套件 / 5513 用例 / 0 fail**（证据 `.ci/prt-315e/`）
 （**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数会少）
 —— 以本文件所在提交为准；证据 `.ci/prt-901/`（PRT-901/902 第三方组件清单、SBOM 与商业分发条件那一批）
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
@@ -3457,6 +3457,109 @@
 > `docs/DUAL-WRITE-RACE-evidence/verify-evidence.md`。
 
 ---
+
+## 2026-09-14　PRT-315 切片 3（状态机边界）：本轮任务迁移决策拆出 `index.ts`
+
+`spaceWorker()` 这个单函数里，"这一轮该对每个任务做什么"是一段独立的判定。本批按 PRT-315 的
+"每次只迁移一个切片"把它整块搬进 `plugins/src/stateMachine.ts`。
+
+### 一、搬了什么
+
+| | 前 | 后 |
+| --- | --- | --- |
+| `plugins/src/index.ts` | **3292 行** | **3177 行**（`19 insertions(+), 134 deletions(-)`） |
+| `plugins/src/stateMachine.ts` | — | 281 行（新，`createStateMachine(deps)` → `{ runRound(tasks, byId) }`） |
+| `plugins/tests/stateMachine.test.mjs` | — | 600 行 / **39 例**（新） |
+| `plugins` 套件 | 228 例 | **267 例** |
+| `spaceWorker()` | ≈2725 行 | ≈2610 行 |
+
+搬的是 `// 依赖未解除` 的 `openDeps` + `// 1.` → `// 3.2` 整块（92 行），
+加上五个判定谓词 `confirmState` / `gaveUp` / `giveUpAwaitingGeneral` / `workerFailStreak` /
+`medWorkerRedispatchCount`（39 行，**含 T-117 现场注释**）与 `self` / `isOurs`（2 行）。
+**对拍 133 行逐字一致**，只放行 4 条声明过的改写规则（`isPipeline ?`→`isPipeline() ?` 等）。
+按**构建产物**核对（不只是 grep 源码）：`lib/stateMachine.js` 含 13 条迁移记号，
+`lib/index.js` 已不含其中 12 条、只剩 4 条接线记号。
+
+### 二、**故意没搬**的，与理由（这一节比"搬了什么"更重要）
+
+- **`stageOf(t)`**：`// 4. 流水线 done 补流转` **也**在用它。搬进来就要么在 `index.ts` 留第二份
+  （同一逻辑两处 = 本次任务明令禁止），要么让流水线补流转反向依赖状态机里的阶段查表。
+  两害相权，**留在原处、把同一个函数注入进去**。这是本切片对"逻辑只有一处"的**唯一例外**，
+  单独写在这里以免被误读。
+- **`room()` / `sliceRoomOk()` / `inflight` / `runDetached`**：并发与在办登记，不是迁移决策；
+  且 `sliceRoomOk` 依赖**本轮**的任务聚合（属切片编排边界）。
+- **兄弟能力**（`claimTask` / `workTodo` / `workReturned` / `runDiscussion` / `safeComment` /
+  `transitionTo` / 调解员重派）：它们要写 hub、跑 subagent、动 worktree。
+- `isOurInbox`（离线计数，不是迁移决策）、两条常量定义（调解也读）。
+
+### 三、两条不变量，以及它们**怎么被守住**
+
+1. **模块级可变状态：0 个。** 会被改写的只有 `inflight` 与 `abortRetryAt`，都由 `spaceWorker()`
+   闭包持有、注入。★ 为什么非这样不可：`superviseSpaces()` 在**同一个进程**里按空间 mount
+   **多个** `spaceWorker`，而任务 id **只在空间内唯一**——模块级退避表会让**空间 A 的退避
+   把空间 B 的同名 taskId 一起挡住**。
+2. **运行期会被重新赋值的绑定必须传取值函数。** `isPipeline`（`applyPipeline` 重赋值）与
+   `stageByRole`（整个 Map 被替换）传 `() => …`；`config` / `scope` / `stageOf` / 常量按值传。
+   `isPipeline` 尤其要紧：它决定"谁是守护自己"，**同一份评论在单角色模式算他人反馈、
+   在流水线模式不算**——写用例时正是这一点咬到了我，两边都断言了。
+
+★ **我独立破验了第 1 条**：把 `abortRetryAt` 改成模块级 `Map` ⇒ **39 例里 4 条红**，
+其中一条就是"退避表由调用方持有、每实例一份：一个空间的退避不得挡住另一个空间"；
+源码逐字节还原、重建后 39/39 复绿。
+
+### 四、★ 棘轮又动了，而这次"算术"恰好也是对的
+
+`dsh-parity` 的锚点从 **2114 → 2115**（顶部只多 1 行 `import`；搬的块在调用点**下方**）。
+子代理按上一批立下的规矩，**没有**用算术，而是用 `parity.mjs` 自己的抽取器重新对拍：
+4 处调用（1151 / 2115 / 2328 / 2723），**恰好 1 处**与 `LEGACY_CALL_OPTIONS` `deepEqual` ⇒ 2115。
+
+我也独立复核了一遍，并且注意到一件事：
+
+```
+(参考) 若按算术 2114+1 = 2115 ；抽取器说 = 2115
+```
+
+**这次算术与对拍给出了同一个答案。** 而这恰恰是最危险的一次——
+> 一个"算术恰好蒙对"的锚点，与一个"对拍出来的"锚点，在这一次的读数上完全一样；
+> 区别只在下一次拆分时才显形。
+
+所以规矩不该是"算术看着对就用算术"，而是**每次都用抽取器重算**——哪怕答案一样。
+
+★ 子代理还踩了一次坑并自己记下：它第一版把新块插在 JSDoc 收尾行**之后**，
+导致 JSDoc 提前闭合、`parity.test.mjs` 变成**解析红**而不是断言红——
+**"测试文件读不懂"与"测试断言失败"在只看"红了"的时候是同一个读数。** 已回滚重做。
+
+### 五、验证
+
+- `npm run typecheck` exit 0；`plugins` 套件 **267/267**（基线 228，+39）。
+- `dsh-parity` **36/36**（重钉前 5 条红）；`dsh-boundary --check` **3 文件 / 26 处，未增长**。
+- **8 道门禁全 PASS**（scan 558 / encoding **1929** 文件 / topology 与 baseline 无漂移 /
+  progress-check / check-docs / ci-syntax 50 脚本）。
+- 新增测试文件 `plugins/tests/stateMachine.test.mjs`（CI 自动 glob，无需改 `run-ci.mjs`）。
+- 破验 9/9 全咬（含模块级状态那条红 4）；对拍自身有元检查（改一个日志串 ⇒ 对拍红、exit 1）。
+- `index.ts` 公开导出未动。
+- **全量 CI `.ci/prt-315e/`：9/9 阶段 PASS**，`test` **195 套件 / 5513 用例 / 0 fail**
+  （本批 +39 例，套件数不变）；stageTest「套件清单完备（**279** 个 `*.test.mjs`）」通过；
+  关键套件 `plugins` **267/267**、`dsh-parity` **36/36**。
+
+### 六、诚实边界
+
+- **只搬了 `sweep()` 里的任务迁移决策。** 仍属"状态机"却**一行没动**的：`// 4.` done 补流转
+  （`advancePipeline`）、`// 4.5` 内嵌调解的驱动循环与退避、`// 5.` `orchestrateSlices`。
+- **`spaceWorker()` 仍是约 2610 行。** 剩余边界至少还有 workspace（worktree 建/复用/清理、
+  `prepareWorktree`、`runWorker` 派工 + 看门狗）、验收（`// 4.2`/`4.3`/`4.4`/`4.5a`）、
+  以及状态机其余部分。**这是分批迁移，不是拆完了。**
+- 逐字对拍只证明**"搬对了"**，不证明**"代码对"**。原实现里一处既有时钟混用被**原样保留**：
+  `// 3.2` 用 `Date.now()`，而反馈/评论时间用 `new Date(c.at).getTime()`。**没有顺手统一。**
+- 9 个变异只覆盖**被断言到的分支**；未覆盖者举例：`workerFailStreak` 的 `claimedAt === null`、
+  `confirmState` 里 `at` 与 `lastAsk.at` 完全相等、`comments` 缺 `text` 时 `// 3.2` 的
+  `c.text.startsWith` **会抛**（原实现如此）、多依赖部分解除、`room()` 变 false 后已在 `inflight` 的收尾。
+- `runDetached` 在用例里是**替身**（手动 `flush()`），所以"`inflight.delete` 在 finally"
+  仍只由继承来的端到端用例覆盖，本批**没为它加断言**。
+- `stateMachine` 每轮 sweep 构造一次（语义同原实现每轮重建谓词），但"每轮一次对象创建"的
+  运行时开销**我没有测**——"量级可忽略"是推断不是测量。
+- 多空间"退避不串台"只有**替身证据 + 代码形态**（Map 在 `spaceWorker()` 闭包创建），
+  **未**在真实多空间 hub 部署里观察。
 
 ## 2026-09-14　PRT-315 切片 2（仓储边界）：租约回收拆出 `index.ts`，含一次"破验差点被我读错"的记录
 

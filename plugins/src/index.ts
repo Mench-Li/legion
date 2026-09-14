@@ -57,6 +57,7 @@ export type { StageDef, Task } from './types.js'
 import type { StageDef, Task } from './types.js'
 import { createMergeMediation } from './mediation.js'
 import { createReclamation, type BootReconcileState } from './reclamation.js'
+import { createStateMachine } from './stateMachine.js'
 
 type AppContext = Context & {
   subagents: SubagentRuntime
@@ -2860,53 +2861,15 @@ exit 0
         return true
       }
       // 流水线模式：守护按任务角色认领/派工；单角色模式：只认 config.role 的任务
-      const self = (t: Task) => (isPipeline ? (t.role ?? config.role) : config.role)
-      const isOurs = (t: Task) => (isPipeline ? (t.role !== null && stageByRole.has(t.role)) : t.soldier === config.role)
+      // `self` / `isOurs`（本角色判定）随状态机搬到 ./stateMachine.ts（读 isPipeline/stageByRole 取值函数）。
       const stageOf = (t: Task) => (isPipeline ? stageByRole.get(t.role ?? '') : undefined)
       const runDetached = (taskId: string, job: Promise<void>): void => {
         void job
           .catch(e => log(`${taskId} 后台派工异常：${String(e)}`))
           .finally(() => inflight.delete(taskId))
       }
-      // ❓ 士兵提问待将军答复状态：最后一条 ❓（守护评论）之后还没有他人（非守护）评论 = 仍待答复。
-      // 返回 { open: 是否仍在等答复, answers: 将军/他人已给的答复评论（供重跑时带进提示词） }
-      const confirmState = (t: Task): { open: boolean; answers: Task['comments'] } => {
-        const asks = t.comments.filter(c => (c.text ?? '').startsWith('❓'))
-        if (asks.length === 0) return { open: false, answers: [] }
-        const lastAsk = asks[asks.length - 1]
-        const answers = t.comments.filter(c => c.by !== config.role && new Date(c.at).getTime() >= new Date(lastAsk.at).getTime())
-        return { open: answers.length === 0, answers }
-      }
-      // worker 连续失败 give-up：任务已带 🛑 give-up 标记。仅当「将军/他人（非守护）在该标记之后新评论」才解除等待 → 将军答复后下轮自动续做；
-      // 未答复前保持停手（blocked/in_progress 均不自动重跑），避免 40 分钟 stale 释放→重新认领→再失败的无限空转。
-      const gaveUp = (t: Task): boolean => t.comments.some(c => (c.text ?? '').startsWith('🛑 已自动重试'))
-      const giveUpAwaitingGeneral = (t: Task): boolean => {
-        const lastGiveUp = [...t.comments].reverse().find(c => (c.text ?? '').startsWith('🛑 已自动重试'))
-        if (!lastGiveUp) return false
-        const ts = new Date(lastGiveUp.at).getTime()
-        return !t.comments.some(c => c.by !== config.role && new Date(c.at).getTime() >= ts)
-      }
-      // 同一认领内末尾连续的「worker 未完成/超时/派工失败」计数（将军/他人评论或非失败评论会打断并重置）。
-      // 超时也算失败：跑满 workerTimeoutMs 被强制结算同样说明这轮没产出，连续超时也是热循环（如 reviewer 大 diff 超时→重派→再超时）。
-      // T-117 现场（fix 背景）：runWorker 每轮派工都发「🟢 已派 AI worker」评论，它在 ⚠ 失败评论之后；
-      // 旧实现从尾部倒数遇 🟢 即 break，streak 恒 0 → give-up/调解（maxWorkerRetry）永不触发 → 无限重派死循环。
-      // 修复：🟢 派工评论只标记「新一轮开始」，跳过不打断失败连续计数；将军/他人评论等仍打断。
-      const workerFailStreak = (t: Task): number => {
-        const since = t.claimedAt === null ? 0 : new Date(t.claimedAt).getTime()
-        let n = 0
-        for (let i = t.comments.length - 1; i >= 0; i--) {
-          const c = t.comments[i]
-          if (new Date(c.at).getTime() < since) break
-          const txt = c.text ?? ''
-          if (txt.startsWith('⚠ worker 未完成') || txt.startsWith('⚠ worker 超时') || txt.startsWith('⚠ 派工失败')) n++
-          else if (txt.startsWith('🟢 已派 AI')) continue
-          else break
-        }
-        return n
-      }
-      // 调解员处理重派已发生的次数（按 🤝 标记计数）：超过上限后不再自动调解，转将军（终态安全阀，防调解-再失败死循环）。
-      const medWorkerRedispatchCount = (t: Task): number =>
-        t.comments.filter(c => (c.text ?? '').startsWith('🤝 调解员处理重派')).length
+      // openDeps / confirmState / gaveUp / giveUpAwaitingGeneral / workerFailStreak /
+      // medWorkerRedispatchCount 六个判定谓词随状态机一起搬到 ./stateMachine.ts（含原始注释）。
 
       // 离线 inbox 计数：本守护名下待认领（todo/blocked 未认领）任务，每轮汇报一次（将军拦截的除外）
       const isOurInbox = (t: Task) => (isPipeline ? (t.role !== null && stageByRole.has(t.role)) : true)
@@ -2918,99 +2881,21 @@ exit 0
       await reclamation.reclaimStaleLeases(byId)
       await reclamation.reclaimBootOrphans(tasks, byId)
 
-      // 依赖未解除（链上后段在上一环 done 前保持待命，不空转抢认领）
-      const openDeps = (t: Task): boolean =>
-        (t.blockedBy ?? []).some(depId => {
-          const dep = byId.get(depId)
-          return dep === undefined || (dep.status !== 'done' && dep.status !== 'canceled')
-        })
-
-      // 1. todo：认领（互斥）→ 派工（流水线模式按任务角色；讨论任务走群聊）。
-      //    自动交接纪律：被将军拦截（hold）的任务不认领；依赖未解除的任务待上一环 done 后由下轮认领。
-      for (const t of tasks.filter(t => t.status === 'todo')) {
-        if (!room() || inflight.has(t.id)) continue
-        if (isPipeline && stageOf(t) === undefined && t.role !== 'discussion') continue // 流水线模式跳过无角色/未知角色任务
-        if (t.hold) continue // 将军拦截：等放行
-        if (openDeps(t)) continue // 链上后段：上一环 done 后自动交接
-        if (!sliceRoomOk(t)) continue // 切片类型化槽位 / 目标并发预算已满：留给其他切片或下轮
-        inflight.add(t.id)
-        const job = t.role === 'discussion' ? runDiscussion(t) : workTodo(t, stageOf(t))
-        runDetached(t.id, job)
-      }
-      // 2. blocked 且本角色、依赖已全部解除：解阻续做（同样遵守拦截）；
-      //    士兵「❓ 待将军答复」的疑问型 blocked 不自动重跑——醒目等将军介入，将军评论答复后下轮自动带答复续做
-      for (const t of tasks.filter(t => t.status === 'blocked' && isOurs(t))) {
-        if (!room() || inflight.has(t.id)) continue
-        if (t.hold) continue
-        if (openDeps(t)) continue
-        if (giveUpAwaitingGeneral(t)) continue // give-up 待将军答复：不自动续做，等将军评论后下轮带答复续做
-        if (!sliceRoomOk(t)) continue
-        const cf = confirmState(t)
-        if (cf.open) continue // 待将军确认：不自动重跑，等答复
-        // blocked 续做必须先认领（claim blocked→in_progress），否则任务停留在 blocked：
-        // worker 心跳（/api/progress 仅 in_progress 可上报）与完成结算（advanceTo）都会失败
-        // ——T-117 现场：将军答复后 workReturned 未认领，任务长时间卡 blocked、progress 被 hub 拒。
-        // workReturned 不认领（workTodo 才认领），故 answers>0（带将军答复续做）需先 claim；
-        // answers=0 保持 workTodo 原路径（其内部 claimTask 幂等，勿重复认领）。
-        const resumeStage = stageOf(t)
-        if (cf.answers.length > 0) {
-          inflight.add(t.id)
-          runDetached(t.id, (async () => {
-            try {
-              await claimTask(t.id, resumeStage ? resumeStage.role : config.role)
-            } catch (e) {
-              log(`${t.id} blocked 续做认领失败（可能已被他人认领）：${String(e)}`)
-              return
-            }
-            await workReturned(t, cf.answers, resumeStage)
-          })())
-        } else {
-          inflight.add(t.id)
-          runDetached(t.id, workTodo(t, resumeStage))
-        }
-      }
-      // 3. in_progress 且本角色、认领后有他人评论：视为退回，附反馈纠错；
-      //    守护自己的「worker 未完成 / 派工失败」评论也触发重试（单角色模式 self=config.role 会把它过滤掉，
-      //    导致中止的 worker 只能等 stale 释放），带 ≥4 个扫单周期的退避，避免故障期间热循环
-      for (const t of tasks.filter(t => t.status === 'in_progress' && isOurs(t))) {
-        if (!room() || inflight.has(t.id)) continue
-        if (t.hold) continue // 将军拦截进行中任务：不自动纠错续跑
-        if (giveUpAwaitingGeneral(t)) continue // give-up 待将军答复：不自动重跑，等将军评论后下轮带答复续做
-        if (confirmState(t).open) continue // ❓ 待将军确认：不自动重跑，等将军答复（否则士兵❓后仍被错误重派，造成空转）
-        const since = t.claimedAt === null ? 0 : new Date(t.claimedAt).getTime()
-        const feedback = t.comments.filter(c => new Date(c.at).getTime() > since && c.by !== self(t))
-        // 3.1 连续 worker 失败 → 交调解员处理重派（默认不升级将军）：调解员诊断根因并修复工作树，成功后重新派工；
-        //     只有在「调解已尝试 ≥maxMediateAttempts 次仍失败」或「调解员无法修复根因」时才置 blocked 留将军（终态安全阀）。
-        const streak = workerFailStreak(t)
-        if (streak >= maxWorkerRetry && !gaveUp(t)) {
-          inflight.add(t.id)
-          runDetached(t.id, (async () => {
-            if (medWorkerRedispatchCount(t) >= maxMediateAttempts) {
-              await safeComment(t.id, `🛑 已自动重试 ${streak} 次、调解员处理重派 ${maxMediateAttempts} 次仍未解决，任务已置 blocked，请将军人工处理（或转派）`, t.scope ?? scope)
-              await transitionTo(t.id, 'blocked', t.scope ?? scope)
-              return
-            }
-            const rec = await mediation.mediatorRecoverWorker(t.id, t.scope ?? scope)
-            if (rec.fixed) {
-              await safeComment(t.id, `🤝 调解员处理重派：已修复根因（${(rec.summary ?? '').slice(0, 200)}），重新派工续做`, t.scope ?? scope)
-              await workReturned(t, [], stageOf(t))
-            } else {
-              await safeComment(t.id, `🛑 已自动重试 ${streak} 次且调解员未能自动修复根因（${(rec.whyFailed ?? rec.summary ?? '').slice(0, 160)}），任务已置 blocked，请将军人工处理（或转派）`, t.scope ?? scope)
-              await transitionTo(t.id, 'blocked', t.scope ?? scope)
-            }
-          })())
-          continue
-        }
-        // 3.2 存在将军 / 他人反馈 → 退回附反馈纠错；只有守护自己的「worker 未完成/超时/派工失败」评论 → 退避重试
-        // （超时也算中止驱动：worker 跑满 workerTimeoutMs 被强制结算后任务留在 in_progress，下一轮应自动重试续做）
-        const abortDriven = feedback.length === 0 && t.comments.some(c =>
-          new Date(c.at).getTime() > since && (c.text.startsWith('⚠ worker 未完成') || c.text.startsWith('⚠ worker 超时') || c.text.startsWith('⚠ 派工失败')))
-        if (feedback.length === 0 && !abortDriven) continue
-        if (abortDriven && (abortRetryAt.get(t.id) ?? 0) + config.intervalMs * 4 > Date.now()) continue
-        if (abortDriven) abortRetryAt.set(t.id, Date.now())
-        inflight.add(t.id)
-        runDetached(t.id, workReturned(t, feedback, stageOf(t)))
-      }
+      // 1/2/3 任务迁移决策（todo 认领派工 / blocked 解阻续做 / in_progress 退回纠错·调解重派·中止退避）
+      // 已拆到 ./stateMachine.ts（状态机边界）；原始注释（含 T-117 现场与退回/退避口径）随代码搬入该模块。
+      // 接线就在调用点、**每轮一次**：`room` / `sliceRoomOk` / `stageOf` 是本轮 sweep 的局部闸门
+      // （`sliceRoomOk` 依赖本轮任务聚合），与原实现把这些谓词定义在 sweep 体内同形。
+      const stateMachine = createStateMachine({
+        config, log, scope,
+        isPipeline: () => isPipeline,
+        stageByRole: () => stageByRole,
+        stageOf, room, sliceRoomOk, runDetached, inflight, abortRetryAt,
+        maxWorkerRetry, maxMediateAttempts,
+        claimTask, workTodo, workReturned, runDiscussion,
+        safeComment, transitionTo,
+        mediatorRecoverWorker: mediation.mediatorRecoverWorker,
+      })
+      stateMachine.runRound(tasks, byId)
       // 4. 流水线 done 补流转：将军人工合入/验收后手动 done 的中间阶段任务 → 创建下一角色任务（幂等：已有后继则跳过）
       if (isPipeline) {
         for (const t of tasks.filter(x => x.status === 'done' && stageOf(x) !== undefined)) {

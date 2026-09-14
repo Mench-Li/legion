@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-13　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **192 套件 / 5430 用例 / 0 fail**（证据 `.ci/prt-253e/`）
+**最近一次全量基线**：2026-09-13　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **194 套件 / 5439 用例 / 0 fail**（证据 `.ci/prt-253g/`）
 （**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数会少）
 —— 以本文件所在提交为准；证据 `.ci/prt-901/`（PRT-901/902 第三方组件清单、SBOM 与商业分发条件那一批）
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
@@ -3457,6 +3457,127 @@
 > `docs/DUAL-WRITE-RACE-evidence/verify-evidence.md`。
 
 ---
+
+## 2026-09-14　PRT-253 canRead 授权批：这条缝在现有契约下**合不上**（结论 B，附一份可执行的判据）
+
+上一批把跨进程边界接通之后，挡在"真引擎真的绑上"前面的最后一件事是 `canRead`：
+`runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs` 的默认工厂以
+`RUNTIME_HOST_REGISTRAR_NO_CAN_READ_SOURCE` 具名拒绝，因为那个进程里**没有**权限来源。
+本批去查"per-attempt 授权到底有没有跨过那条边界"。
+
+### 一、结论：**没有跨**（逐条都有出处）
+
+授权判定**确实发生了**，但发生在 **worker** 里，而且受众是 **hub** 不是 Runtime：
+
+| 位置 | 事实 |
+| --- | --- |
+| `orchestrator/worker/executor.mjs:200-203` | 用的是 **`createHubContextStage`**（远程那个） |
+| `orchestrator/worker/context-stage.mjs:340-383` | `canRead({lease,scope,sources})` 的产物变成 `POST /api/context-snapshots/assemble` 的 `canReadAll`/`canReadIds`——**判定与装配都在 hub 侧** |
+| `orchestrator/worker/executor.mjs:406-431` | `defaultRequestFor` **逐字段挑值**，权限面只有工具档位；授权不在它挑的字段里 |
+| `orchestrator/worker/runtime-contract-client.mjs:217` | 只发 `{ request }` |
+| `runtime/dsh-composition/runtime-contract-server.mjs:277` | `handleExecute` 只转给适配器，**从不装配上下文** |
+| `runtime/dsh-composition/enforcement.mjs` | 全文对 `canRead` **零命中**（我亲自 grep 复核：0） |
+
+原始读数（`deepEqual` 比**完整键集**，不是 `includes`）：
+
+```
+A-SENT-BODY-KEYS    request,wireVersion
+A-SENT-REQUEST-KEYS attemptId,budget,contextSnapshotRef,employeeId,expectedOutput,goalId,
+                    idempotencyKey,modelProfileRef,permissions,prompt,runId,taskId,
+                    teamPlanRef,timeoutMs,workdir,workspaceId
+A-SERVER-ADAPTER-KEYS （与上一行**逐字相同**——服务端不补字段）
+A-SENT-READAUTH-LOOKING-KEYS (none)     # /read|auth|grant|permit|acl|visib/i 筛，四处全空
+D-CLAIMED-KEYS      attemptId,attemptNo,leaseEpoch,leaseExpiresAtMs,scope,serverTimeMs,state,taskId
+D-CLAIMED-READAUTH-LOOKING (none)
+```
+
+★ 判据用 `deepEqual` 比完整键集而不是 `includes`，正是因为**"多加一个字段"就是这里要找的东西**
+——`includes` 会漏掉它。
+
+### 二、为什么不选 (A)（那条"看起来更主动"的路）
+
+任务限定：找出 (A)/(B) 哪条成立。两条都测了：
+
+1. **boot 期只要求"一个函数"，不要求"一个决定"**——形状上延迟判定是合法的。
+   `bootstrap.mjs:187` 只做 `typeof canRead !== 'function'` 的形状检查，**从不调用**它。
+2. **但没有可依之物**：授权不随请求到达。真 DSH 进程的对照读数 F 很关键——
+   注入一个**永远放行** `{all:true}` 的替身，绑定**照样失败**于 `BOOTSTRAP_SELF_CHECK_INCOMPATIBLE`
+   （自检看的是能力表 + 组合树，不是 `canRead` 的返回值）。
+
+所以按 (B) 办：**拒绝保留**，不发明默认值、不造替身、不开"暂时放行"的口子。
+
+### 三、要合上这条缝得改什么（记录，未擅自改）
+
+契约 `runtime/contracts/run.mjs` 要为"per-attempt 授权"开一个字段并定 `WIRE_VERSION` 语义 →
+`defaultRequestFor` 把它放进去（**今天拿不到**：`canRead` 的产物直接 POST 给了 hub，没留在快照上）→
+工厂多给一个从 `execute(request)` 派生的 `canRead`。
+
+★ 值得单列：**Runtime 进程本身无事可做**——这正是 (A) 形状合法却空转的原因。
+
+### 四、★ 下一个阻塞点：`MODEL_UNAVAILABLE`，而且**合法来源存在**
+
+`runtime/adapters/dsh/port.mjs:27,47` 把 `currentModelSelection` 定为**可选**端口方法
+（所以 `assertHostPort` 不拦它），`index.mjs:250` 无此方法 → `null` → `:455-457` `MODEL_UNAVAILABLE`；
+而生产工厂 `runtime-host-registrar-row.mjs:583-588` 只返回 `{startRun, probeRuntime}`。
+
+**合法来源（本批的附带发现，已独立复核）**：DSH 把它做成了**一等服务**——
+`packages/core/agent-default-model/src/index.ts:64,73,90`（`super(ctx,'agentDefaultModel')`、`currentSelection()`），
+由基础组合层 `packages/bundle/base/cordis.patch.yml` 挂载（`provider: deepseek-official`、
+`model: deepseek-flash`，且 `$DSH_HOME/settings.yaml` 的 `agent-default-model:` 段会热覆盖）。
+
+> 所以 ③ **不是"没有合法来源"，而是"有来源、没人读"**——修法方向是把
+> `ctx.get('agentDefaultModel')?.currentSelection() ?? null` 接进工厂，**不发明模型名**。
+
+⚠️ 诚实边界：这是**文件级证据，不是进程内读数**——既有真进程套件用 `bundles: []`，
+在那里读它**本来就该缺席**，去那读会得到误导性的"不存在"。
+
+### 五、验证
+
+- **8 道门禁全 PASS**（scan 558 / boundary 3 文件 26 处 / snapshot / topology 无漂移 /
+  progress-check / check-docs / ci-syntax 50 脚本 / encoding **1920** 文件）。
+- `test` 阶段 PASS：**194 套件 / 5439 用例 / 0 fail**（`.ci/prt-253g/`；上一批 192 / 5430）；
+  stageTest「套件清单完备（**276** 个 `*.test.mjs` 全部有归属）」通过。
+- 两个新套件已登记。**生产代码 0 行改动**（`git status` 只有 2 个新增测试 + 1 篇文档 + 登记）。
+- **变红验证（我在本批结论上独立复核过）**：往 `defaultRequestFor` 的 RunRequest 里塞一个
+  `readableSourceIds` ⇒ **A2 与 C 两条用例同时变红**，`git checkout --` 还原后 6/6 复绿。
+  子代理另跑了两个变异（给 `canRead` 塞 `authorization:null` ⇒ B 红；给 `claim()` 塞 `canReadIds`
+  ⇒ ① 红）。
+  ★ 第三个变异有个**副产品读数**：只改 lease 那一侧时 **② 仍绿**——`defaultRequestFor` 逐字段挑值，
+  即使 lease 带上授权也会被丢掉。**边界在两处同时关着**，这是读数不是推断。
+
+### 六、★ 一条关于"证据"本身的观察：这个套件在负载下会假红
+
+本批的全量 CI 里 `test` 阶段 **FAIL** 过一次：`runtime/dsh-composition/availability.test.mjs` 的
+`③ ★★ 总预算不被超过：迟到的连接自报也不能把预算撑成两倍`。我没有接受这个读数就下结论：
+
+- 单跑该文件 **3/3 次 12/12 全绿**；
+- 按 run-ci 的真实形状（三个文件同跑）**3/3 次 34/34 全绿**；
+- 把本批新套件与它一起跑：**18/18 全绿**（无相互干扰）；
+- 那一轮 `test` 阶段耗时 **946s**（正常 ~456–615s），与上一批那次**同一种负载特征**；
+- 只重跑 `test` 阶段：**PASS**（456s）。
+
+机制是真实计时器竞态（`responseTimeoutMs:25` vs 替身 `await setTimeout(r,60)`）。
+**记为环境性偶发并留痕**，也没有据此调整任何断言。
+
+> 一个"在负载下会假红"的用例，与一个"真的坏了"的用例，在只看 CI 结论时是同一个读数——
+> 区别只在于你愿不愿意去单跑它。而*"重跑一次绿了就算了"正是让偶发失败永远不被修的做法*。
+
+### 七、诚实边界
+
+- **"绑定通过自检" ≠ "真引擎执行了真任务"**：本批**没有**让任何引擎跑过一次真实 Attempt；
+  execute 读数走的是**契约服务端 + 桩适配器**（真 socket、真 wire、真 NDJSON，但适配器是替身）。
+- 真 DSH 进程读数**沿用上一批的套件**，本批只复跑、**未新增场景**（(B) 下没有新的可观测差异，
+  硬加只会得到一个恒绿场景）。
+- `agentDefaultModel` 的存在性是**文件级证据**，不是进程内读数（见第四节末）。
+- `runtime/` **不在** `scan.mjs` 的 `PROCESSES` 里 ⇒ `scan --check` 绿**不是**新 `runtime/` 代码的证据；
+  被覆盖的只有 orchestrator 那一侧。`dsh-boundary` 覆盖 `runtime/`。
+- `team-hub/server.mjs:4132-4139` 的 `authorized(req)` 在 token 为空时**恒放行**——本批**没有**判定
+  生产部署里那个 token 是否配了；与本文问题正交但同类风险，**记为未知**。
+- "(A) 形状合法"是**结构判断**，不是"应该按 (A) 做"：即使授权将来随请求到达，仍要回答
+  "同一份授权被评估两次、两次不一致怎么办"。**我没设计后者。**
+- ★ 子代理在本批中**自己踩到了那条文字编辑规则**（`Get-Content -Raw` + `Set-Content` 当场破坏了一个
+  测试文件的 CJK，`node --check` 报 `Invalid or unexpected token`、`encoding-check` 数出 1 处损坏），
+  已整文件重写并复核为 0 处损坏。记录在此以免下一批重现。
 
 ## 2026-09-14　PRT-253 续批四：把 Runtime Contract 接上 Launcher（三个缺口 + 一个撞出来的）
 

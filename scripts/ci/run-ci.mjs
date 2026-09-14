@@ -2518,6 +2518,35 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-253 canRead 授权批：**这条缝在现有契约下合不上**，而这一套就是那份判据。
+      //
+      // 结论是 (B)：per-attempt 授权**确实不跨**那条边界。它判在 **worker** 里，受众是 **hub**
+      // （`context-stage.mjs` 的 `createHubContextStage` 把它变成 `POST /api/context-snapshots/
+      // assemble` 的 `canReadAll`/`canReadIds`），而 Runtime 进程**只**收到 RunRequest
+      // ——`runtime/dsh-composition/enforcement.mjs` 全文对 `canRead` **零命中**。
+      //
+      // 所以本套用例不是"证明功能生效"，而是**把这条边界钉成一条会响的线**：
+      // 谁哪天把读权限字段塞进 RunRequest，这里就红，逼他先回答
+      // "同一份授权被评估两次、两次不一致怎么办"。
+      //
+      // ★ 判据一律是 `deepEqual` 比**完整键集**而不是 `includes`：
+      //   *"多加一个字段"正是这里要找的东西，而 `includes` 会漏掉它。*
+      label: 'can-read-authorization-boundary（PRT-253：读权限字段真的不跨进程边界）',
+      files: ['runtime/dsh-composition/can-read-authorization-boundary.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      // PRT-253 canRead 授权批：worker 侧**授权来源**的可核对的读数。
+      //
+      // 真 `claim()` 的返回值里没有任何读权限字段（`D-CLAIMED-READAUTH-LOOKING (none)`）——
+      // 与上一条合起来说明：边界**两处同时关着**（lease 不带、`defaultRequestFor` 逐字段挑值也不放）。
+      // 这是**读数**不是推断：串行造两个变异时，只改 lease 那一侧，`defaultRequestFor`
+      // 仍会把授权丢掉。
+      label: 'can-read-authorization-source（PRT-253：lease 认领结果里没有读权限字段）',
+      files: ['orchestrator/worker/can-read-authorization-source.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-410 + PRT-412：上下文的**端到端**契约。
       //
       // 与上面那四条 `context-*` 套件的分工不是"覆盖更多"，而是**换了一层**：

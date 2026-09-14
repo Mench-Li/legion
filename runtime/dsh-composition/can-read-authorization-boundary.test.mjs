@@ -7,8 +7,15 @@
 //
 // `runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs` 以
 // `RUNTIME_HOST_REGISTRAR_NO_CAN_READ_SOURCE` 拒绝了绑定，理由是
-// 「DSH Runtime 进程里没有任何 canRead 的合法来源」。那条拒绝**只有在
-// "答案确实不在这一侧"成立时才是对的**——否则它就是一个把能做的事说成不能做的借口。
+// 「DSH Runtime 进程里没有任何 canRead 的合法来源」。
+//
+// ⚠️ **那条拒绝在后续一批里被拿掉了**（见
+// `docs/superpowers/prt/PRT-253-runtime-host-binding-unblocked.md`）：进一步量到的
+// 事实是"这个进程里**没有任何东西读**这个绑定的 `canRead`"，所以拿"没有来源"
+// 拦住整个绑定是把两件不同的事压成同一条拒绝。现在缺席被**如实**记成 `null`，
+// 而真正要执行的那一侧（worker）仍然 `EXECUTOR_CAN_READ_REQUIRED`。
+// 本套件的 A/B/B2/C 四项**一字未变**——它们锁的是"授权有没有跨过边界"，
+// 那个答案仍然是"没有"。只有 E 跟着改了。
 //
 // 于是本套件把"答案在不在"变成一个**可失败**的读数，逐段钉住：
 //
@@ -17,7 +24,8 @@
 //   B.  远程 `buildContext` 交给 `canRead` 的对象恰好是哪几个键；
 //   B2. 本地 `buildContext` 交给 `canRead` 的两个参数恰好是哪几个键；
 //   C.  `defaultRequestFor` 造出来的 RunRequest 与契约必填集的关系；
-//   E.  生产默认工厂在**具名码**上仍然拒绝，注入 canRead 后同一形状能建出端口。
+//   E.  生产默认工厂**成功**并把缺席如实记成 `canRead: null`（不是替身）；
+//       注入 canRead 后同一形状照旧按引用带出；"挂一个不是函数的"仍然拒。
 //
 // ## 这一套的判据是"**恰好**"，不是"包含"
 //
@@ -289,7 +297,7 @@ test('C. `defaultRequestFor` 造出的 RunRequest 不含任何读权限字段', 
 
 // ─────────────────────────────────────────────────────────────────────────── E
 
-test('E. 生产默认工厂**仍然**以具名码拒绝；注入 canRead 后同一形状能建出端口', () => {
+test('E. 生产默认工厂**成功**并把缺席如实记成 `canRead: null`；注入 canRead 后按引用带出；坏值仍然拒', () => {
   const subagents = {
     list: () => [],
     getProvider: () => undefined,
@@ -299,28 +307,39 @@ test('E. 生产默认工厂**仍然**以具名码拒绝；注入 canRead 后同�
   // 不在源码里写出执行面服务访问的完整记号。
   const ctx = { get: (name) => (name === 'subagents' ? subagents : undefined) }
 
-  // ① 生产默认：没有 canRead 来源 → 必须**具名**拒绝（不是"它抛了"）。
-  let refused = null
-  try {
-    createRuntimeHostInputsFactory()(ctx)
-  } catch (e) {
-    refused = e
-  }
-  assert.notEqual(refused, null, '生产默认工厂在"没有 canRead 来源"时**没有**拒绝')
-  assert.equal(refused.code, RUNTIME_HOST_REGISTRAR_CODES.NO_CAN_READ_SOURCE,
-    '生产默认的拒绝码变了——它现在说的是哪一件事？')
-  assert.equal(refused.name, 'RuntimeHostRegistrarError')
-
-  // ② 反向对照：同一形状 + 显式注入的 canRead → 端口建得出来，且按引用转发。
-  const injected = () => ({ ids: [] })
-  const built = createRuntimeHostInputsFactory({ canRead: injected })(ctx)
-  assert.equal(built.canRead, injected, '注进来的 canRead 不是按引用交出去的')
+  // ① 生产默认：**没有** canRead 来源 → 工厂成功，缺席被**如实**记成 `null`。
+  //
+  //    这里**不是**在断言"它不抛"就完事：`null` 是那个缺席的读数值，而
+  //    `undefined`（= 忘了写这个键）、`() => true`（= 默认放行）、`() => false`
+  //    （= 默认拒绝）都会让"没有来源"与别的东西同形。三条都被下面钉住。
+  const built = createRuntimeHostInputsFactory()(ctx)
+  assert.equal(built.canRead, null, `缺席必须原样交成 null，实际 ${JSON.stringify(built.canRead)}`)
+  assert.equal('canRead' in built, true, '这个键必须在场（undefined 与"忘了写"同形）')
+  assert.equal(typeof built.canRead !== 'function', true, 'canRead 不许是一个替身函数')
+  assert.deepEqual(sorted(built), ['canRead', 'runtimeHost'])
   assert.equal(typeof built.runtimeHost.startRun, 'function')
   assert.equal(typeof built.runtimeHost.probeRuntime, 'function')
-  assert.deepEqual(sorted(built), ['canRead', 'runtimeHost'])
 
-  // ③ 另一个反向对照：没有 `subagents` 时拒绝的是**另一条**码——
-  //    "缺权限来源"与"缺引擎端口"必须分得开（修法不同）。
+  // ② 反向对照：显式注入的 canRead 必须**按引用**带出（不包一层）。
+  const injected = () => ({ ids: [] })
+  const withInjected = createRuntimeHostInputsFactory({ canRead: injected })(ctx)
+  assert.equal(withInjected.canRead, injected, '注进来的 canRead 不是按引用交出去的')
+  assert.deepEqual(sorted(withInjected), ['canRead', 'runtimeHost'])
+
+  // ③ 挂一个**不是函数**的 canRead → 仍然当场拒。静默丢掉它，就再没有人看得出
+  //    有人试图挂它——而那正是最该被看见的一种接线错误。
+  let mountedBad = null
+  try {
+    createRuntimeHostInputsFactory({ canRead: 'yes' })(ctx)
+  } catch (e) {
+    mountedBad = e
+  }
+  assert.notEqual(mountedBad, null, '"挂了个坏的 canRead"没有被拒——那个值被静默丢掉了')
+  assert.equal(mountedBad.code, RUNTIME_HOST_REGISTRAR_CODES.NO_CAN_READ_SOURCE)
+  assert.equal(mountedBad.name, 'RuntimeHostRegistrarError')
+
+  // ④ 另一个反向对照：没有 `subagents` 时拒绝的是**另一条**码——
+  //    "挂了坏的 canRead"与"缺引擎端口"必须分得开（修法不同）。
   let noEngine = null
   try {
     createRuntimeHostInputsFactory({ canRead: injected })({ get: () => undefined })
@@ -329,5 +348,5 @@ test('E. 生产默认工厂**仍然**以具名码拒绝；注入 canRead 后同�
   }
   assert.notEqual(noEngine, null, '没有 subagents 时工厂没有拒绝')
   assert.equal(noEngine.code, RUNTIME_HOST_REGISTRAR_CODES.NO_SUBAGENTS_PORT)
-  assert.notEqual(noEngine.code, refused.code, '两条拒绝码相同——"缺权限来源"与"缺引擎端口"就分不开了')
+  assert.notEqual(noEngine.code, mountedBad.code, '两条拒绝码相同——"挂了坏的 canRead"与"缺引擎端口"就分不开了')
 })

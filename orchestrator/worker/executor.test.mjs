@@ -383,11 +383,47 @@ test('④ 注销之后又回到拒绝（绑定是进程级副作用，必须可�
   assert.equal(r.code, EXECUTOR_CODES.HOST_PORT_REQUIRED)
 })
 
-test('④ `bindDshRuntime` 拒收缺 `selfCheck` / `canRead` 的绑定', async () => {
+test('④ `bindDshRuntime` 拒收缺 `selfCheck`；`canRead` 缺席**合法**（如实记成 null）', async () => {
   resetDshRuntimeBinding()
   // 一个"没给自检就当通过"的默认值，会让这个注册口本身变成绕过 PRT-215 的入口。
   assert.throws(() => bindDshRuntime({ host: makeHost(), canRead: () => true }), /selfCheck/)
-  assert.throws(() => bindDshRuntime({ host: makeHost(), selfCheck: async () => CHECK_OK }), /canRead/)
+
+  // ★ `canRead` 缺席**不再**是注册口的拒绝理由（Runtime 进程里没有任何东西读它，
+  //   见 executor-binding.mjs 的 `bindDshRuntime` 说明）。注册口收下它，
+  //   并且把这一缺席如实记成一个分得开的值——拦它的是**真正要执行的那一侧**。
+  const unbind = bindDshRuntime({ host: makeHost(), selfCheck: async () => CHECK_OK })
+  try {
+    assert.equal(dshRuntimeBound(), true, 'canRead 缺席不该拦下绑定')
+  } finally { unbind(); resetDshRuntimeBinding() }
+
+  // 但"挂一个不是函数的 canRead"仍然当场拒：静默丢掉它，就再没有人看得出有人试图挂它。
+  assert.throws(() => bindDshRuntime({ host: makeHost(), selfCheck: async () => CHECK_OK, canRead: 'yes' }), /canRead/)
+  assert.equal(dshRuntimeBound(), false, '抛了却仍然注册上了')
+  resetDshRuntimeBinding()
+})
+
+test('④ ★★ 绑定在、但 `canRead` 缺席 → 同进程 provider 仍然 fail closed（`EXECUTOR_CAN_READ_REQUIRED`）', async () => {
+  // 这是本批**最容易被悄悄放松**的那条不变量：`bindDshRuntime` 现在允许缺席，
+  // 如果 `productionExecutorProvider()` 不再检查，一次绑定就会变成一个
+  // "谁都能读"的引擎，而没有任何读数会变。
+  resetDshRuntimeBinding()
+  const hub = makeHub()
+  const unbind = bindDshRuntime({ host: makeHost(), selfCheck: async () => CHECK_OK })
+  try {
+    const r = await productionExecutorProvider({ post: hub.post, get: hub.get })
+    assert.equal(r.ok, false, `同进程这条路放过了没有 canRead 的绑定：${JSON.stringify(r).slice(0, 200)}`)
+    assert.equal(r.code, EXECUTOR_CODES.CAN_READ_REQUIRED,
+      `拒绝码不是那个具名的权限码（收到 ${r.code}）——笼统的接线码会把排障指向错的地方`)
+    assert.equal(r.innerCode, null, '这是**本进程**的拒绝，不该伪装成一次对端拒绝')
+  } finally { unbind() }
+
+  // 反向对照：同一个形状 + 一个**函数** canRead → 引擎造得出来。
+  // 没有这一条，"一律拒绝"与"真的读了绑定里的那个值"就分不开。
+  const unbindOk = bindDshRuntime({ host: makeHost(), selfCheck: async () => CHECK_OK, canRead: () => true })
+  try {
+    const ok = await productionExecutorProvider({ post: hub.post, get: hub.get })
+    assert.equal(ok.ok, true, `给了 canRead 之后仍然造不出引擎：${JSON.stringify(ok).slice(0, 300)}`)
+  } finally { unbindOk(); resetDshRuntimeBinding() }
 })
 
 test('④ 自检**在绑定时不跑、在构造时才跑**（结论过期了就要重算）', async () => {

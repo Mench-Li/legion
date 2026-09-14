@@ -13,15 +13,19 @@
 //   N. 组件的模块**就是** `runtime-host-row.mjs`（= 上一批的补丁层取值，没人注册工厂）
 //      → 具名拒绝 `RUNTIME_HOST_ROW_NO_INPUTS_FACTORY`，exit 1。
 //   R. 组件的模块换成**本批的生产注册方**（模块求值期注册、默认导出真对象）
-//      → 换了一条**不同**的具名码：`..._INPUTS_FACTORY_THREW`，且消息里带着
-//        `RUNTIME_HOST_REGISTRAR_NO_CAN_READ_SOURCE`（"没有权限来源"的落地），exit 1。
+//      → 工厂**成功**（`canRead` 现在缺席是合法的，如实记成 `null`），于是拒绝
+//        移到**下一站**：`RUNTIME_HOST_ROW_BIND_REFUSED` + 内层
+//        `BOOTSTRAP_SELF_CHECK_INCOMPATIBLE`（三项未确认的能力）。exit 1。
+//        ★ 本批之前这里读的是 `..._INPUTS_FACTORY_THREW(RUNTIME_HOST_REGISTRAR_NO_CAN_READ_SOURCE)`
+//        ——两个读数的原始对照见新套件
+//        `runtime-host-binding-unblocked-dsh-process.test.mjs` 与文档。
 //        N 与 R 的差别只有**一个模块路径**。
 //   F. 注册方 + 显式注入的 `canRead`（**测试替身**，见诚实边界）
-//      → 工厂成功、探针跑完、然后是**启动自检**拒绝：`RUNTIME_HOST_ROW_BIND_REFUSED`
-//        + 内层 `BOOTSTRAP_SELF_CHECK_INCOMPATIBLE`，理由里**逐个列出**未确认的能力。
-//        这一条就是"未确认的能力后果看得见"。
+//      → 与 R **同形**：这也是一条读数——`canRead` 这个输入在本进程里**不被任何东西读**
+//        （R 没有、F 有一个替身，绑定阶段的结论一字不差）。
 //   S. 注册方**被加载**（由脚手架按路径 import，补丁层就是这么加载它的）但**不挂那一行**，
-//      于是进程活着 → 直接读**生产函数**的读数：版本、能力表、逐项判据、`startRun` 转发。
+//      于是进程活着 → 直接读**生产函数**的读数：版本、能力表、逐项判据、`startRun` 转发、
+//      生产默认工厂交出的 `canRead`、以及 `currentModelSelection` 的来源判据。
 //      → 版本必须等于 `<DSH>/apps/cli/package.json` 里那个值（真读数，不是常量）。
 //   S2. S 的**反向对照**：唯一变量是桩 provider 的 `outputSchema` 变成 false
 //      → `structured-result` 与它的判据码**必须跟着变**。
@@ -32,8 +36,10 @@
 //   · **$1 引擎（`subagents`）是替身**：`bundles: []` 的一次性 profile 里没有真引擎。
 //     能力判据中"读现场 provider 注册表"这一路因此由**替身 provider**驱动；
 //     被验的是**推导链**（注册表 → 判据码 → 布尔表），不是"真 DSH 引擎支持 outputSchema"。
-//   · **`canRead` 是替身**（`() => true`）。生产默认**没有**这个替身——R 场景读的就是那条
-//     拒绝。所以"权限判定接对了"不是本套件的读数。
+//     生产 `startRun` 本身**不是**替身——它是按引用转发到现场服务的（S 那条钉着它）；
+//     替身的是**这个进程里那个服务**。
+//   · **`canRead` 在 R 里是"缺席"，在 F 里是替身**；两者读数同形，正是本批量到的
+//     "这个进程里没有它的读者"。R 才是生产取值。
 //   · **沙箱端口是替身**（沿用上一批的 `SERVICES_SRC` 形状）。
 //   · **组合补丁层用的是磁盘上那份真 `legion-host.patch.yml`**（一个字节都不改），
 //     所以"组合树观察"与"强制面装配"是真读数。
@@ -256,7 +262,7 @@ const WRAPPER_PATCH_SRC = `- insert:
 
 // S / S2：按**路径** import 生产注册方（补丁层就是这么加载它的），读生产函数的输出；
 // **不挂**那一行，于是进程活着，读数拿得到。
-const SCAFFOLD_SRC = `import { CAPABILITY_EVIDENCE_CODES, RUNTIME_HOST_REGISTRAR_CODES, createRuntimeHostInputsFactory, probeDshRuntime, readDshVersionOfInstall, dshInstallCandidates } from ${JSON.stringify(fileUrl(REGISTRAR_ABS))}
+const SCAFFOLD_SRC = `import { CAPABILITY_EVIDENCE_CODES, RUNTIME_HOST_REGISTRAR_CODES, createRuntimeHostInputsFactory, probeDshRuntime, readDshVersionOfInstall, readModelSelection, dshInstallCandidates } from ${JSON.stringify(fileUrl(REGISTRAR_ABS))}
 
 const note = (line) => process.stderr.write(line + '\\n')
 
@@ -294,12 +300,27 @@ export default {
       } catch (error) {
         note('FACTORY-THREW ' + String(error && error.message ? error.message : error) + ' code=' + String(error && error.code))
       }
-      // ④ 生产默认（没有 canRead 来源）在真 ctx 上必须**具名拒绝**。
+      // ④ 生产默认（**没有** canRead 来源）在真 ctx 上：工厂**成功**，
+      //    缺席被如实记成一个分得开的值（null）——**不是**替身、不是默认放行/拒绝。
       try {
-        createRuntimeHostInputsFactory()(ctx)
-        note('DEFAULTFACTORY built')
+        const dflt = createRuntimeHostInputsFactory()(ctx)
+        note('DEFAULTFACTORY ' + (dflt.canRead === null ? 'canRead-null' : String(typeof dflt.canRead)))
+        note('DEFAULTCANREADISFUNCTION ' + String(typeof dflt.canRead === 'function'))
+        note('DEFAULTCANREADKEYPRESENT ' + String('canRead' in dflt))
       } catch (error) {
-        note('DEFAULTFACTORY ' + String(error && error.code))
+        note('DEFAULTFACTORY-THREW ' + String(error && error.code))
+      }
+      // ⑤ 模型选择的**来源判据**：一次性 profile 用的是 bundles: []，基础组合层不在，
+      //    所以这里**应该**读到"服务缺席"，端口给出 null——**不是**一个编出来的模型名。
+      try {
+        const reading = readModelSelection(ctx)
+        note('MODELSELECTIONCODE ' + reading.code)
+        note('MODELSELECTION ' + JSON.stringify(reading.selection))
+        note('MODELSELECTIONSERVICEPRESENT ' + String(ctx.get('agentDefaultModel') !== undefined))
+        const port = createRuntimeHostInputsFactory()(ctx)
+        note('PORTSELECTION ' + JSON.stringify(port.runtimeHost.currentModelSelection()))
+      } catch (error) {
+        note('MODELSELECTION-THREW ' + String(error && error.message ? error.message : error))
       }
       note('SCAFFOLD-EXIT-0')
       process.exit(0)
@@ -406,25 +427,29 @@ describe('PRT-253 续批二：生产注册方在**真 DSH 进程**里的读数',
     t.diagnostic(`N: exit=${r.code} ${READINGS.n.code}`)
   })
 
-  guarded('R. ★★★ 换成生产注册方当那一行的模块 → 换一条**不同**的具名码', (t) => {
+  guarded('R. ★★★ 换成生产注册方当那一行的模块 → 工厂**成功**，拒绝移到下一站（自检）', (t) => {
     const r = runDsh({
       tag: 'r',
       patches: [...basePatches(SCRATCH_PATH.servicesTruePatch), SCRATCH_PATH.registrarRowPatch],
     })
     assert.equal(r.spawnError, null)
-    assert.equal(r.code, 1, `期望"没有权限来源"拦下启动：\n${r.stderr}`)
+    assert.equal(r.code, 1, `期望"未确认的能力"拦下启动：\n${r.stderr}`)
     // ① 注册**真的**发生在模块求值期：否则这里读到的会是 N 那条 NO_INPUTS_FACTORY。
     assert.equal(r.stderr.includes(RUNTIME_HOST_ROW_CODES.NO_INPUTS_FACTORY), false,
       `注册方在场却报"没有人注册工厂"——注册没发生在模块求值期：\n${r.stderr}`)
-    // ② 工厂被调用了，并且拒绝得出来。
-    assert.ok(r.stderr.includes(RUNTIME_HOST_ROW_CODES.INPUTS_FACTORY_THREW),
-      `没有读到 ${RUNTIME_HOST_ROW_CODES.INPUTS_FACTORY_THREW}：\n${r.stderr}`)
-    // ③ ★ 具名码是"没有 canRead 来源"，原样带进了消息。
-    assert.ok(r.stderr.includes(RUNTIME_HOST_REGISTRAR_CODES.NO_CAN_READ_SOURCE),
-      `没有读到 ${RUNTIME_HOST_REGISTRAR_CODES.NO_CAN_READ_SOURCE}：\n${r.stderr}`)
-    // ④ 默认导出确实是**真那个**插件对象（否则这一行根本不会走到工厂那一步）。
+    // ② ★★ 本批改掉的那条读数：工厂**不再**抛。这条断言是本套件里"绑定变了"的落点。
+    assert.equal(r.stderr.includes(RUNTIME_HOST_ROW_CODES.INPUTS_FACTORY_THREW), false,
+      `工厂仍然抛了——canRead 缺席这条要求没有被拿掉：\n${r.stderr}`)
+    assert.equal(r.stderr.includes(RUNTIME_HOST_REGISTRAR_CODES.NO_CAN_READ_SOURCE), false,
+      `仍然读到"没有 canRead 来源"的具名码：\n${r.stderr}`)
+    // ③ 拒绝移到**下一站**：启动自检（三项未确认的能力），且本行把内层码带出来。
+    assert.ok(r.stderr.includes(RUNTIME_HOST_ROW_CODES.BIND_REFUSED),
+      `没有读到 ${RUNTIME_HOST_ROW_CODES.BIND_REFUSED}：\n${r.stderr}`)
+    assert.ok(r.stderr.includes(BOOTSTRAP_CODES.SELF_CHECK_INCOMPATIBLE),
+      `没有读到 ${BOOTSTRAP_CODES.SELF_CHECK_INCOMPATIBLE}：\n${r.stderr}`)
+    // ④ 默认导出确实是**真那个**插件对象（否则这一行根本不会走到自检那一步）。
     assert.match(r.stderr, /failed to apply loader entry legion-runtime-host/, r.stderr)
-    READINGS.r = { code: RUNTIME_HOST_ROW_CODES.INPUTS_FACTORY_THREW, inner: RUNTIME_HOST_REGISTRAR_CODES.NO_CAN_READ_SOURCE, exit: r.code }
+    READINGS.r = { code: RUNTIME_HOST_ROW_CODES.BIND_REFUSED, inner: BOOTSTRAP_CODES.SELF_CHECK_INCOMPATIBLE, exit: r.code }
     t.diagnostic(`R: exit=${r.code} ${READINGS.r.code}(${READINGS.r.inner})`)
   })
 
@@ -493,15 +518,32 @@ describe('PRT-253 续批二：生产注册方在**真 DSH 进程**里的读数',
     assert.equal(reading(r.stderr, 'STARTFWD'), 'handle', r.stderr)
     assert.match(r.stderr, /^SUBAGENTS-START-FORWARDED provider=prt253ri-spawn$/m, r.stderr)
 
-    // ⑤ ★ 生产**默认**（没有 canRead 来源）在同一时刻必须具名拒绝。
-    assert.equal(reading(r.stderr, 'DEFAULTFACTORY'), RUNTIME_HOST_REGISTRAR_CODES.NO_CAN_READ_SOURCE, r.stderr)
+    // ⑤ ★ 生产**默认**（没有 canRead 来源）在同一时刻：工厂**成功**，缺席是 `null`，
+    //     而且**不是**一个函数（不是替身）。
+    assert.equal(reading(r.stderr, 'DEFAULTFACTORY'), 'canRead-null', r.stderr)
+    assert.equal(reading(r.stderr, 'DEFAULTCANREADISFUNCTION'), 'false', r.stderr)
+    assert.equal(reading(r.stderr, 'DEFAULTCANREADKEYPRESENT'), 'true', r.stderr)
+    assert.equal(r.stderr.includes('DEFAULTFACTORY-THREW'), false,
+      `生产默认工厂仍然抛了：\n${r.stderr}`)
+
+    // ⑤b ★ 模型选择的来源：`bundles: []` 的一次性 profile 里基础组合层不在，
+    //      所以这里**必须**是"服务缺席 + null"，**不是**一个编出来的模型名。
+    //      （这条读数只说明"缺席时如实报缺席"；真 `agentDefaultModel` 有没有被
+    //        观察到，见文档的诚实边界。）
+    assert.equal(reading(r.stderr, 'MODELSELECTIONCODE'), 'RUNTIME_HOST_REGISTRAR_MODEL_SELECTION_SERVICE_ABSENT', r.stderr)
+    assert.equal(reading(r.stderr, 'MODELSELECTION'), 'null', r.stderr)
+    assert.equal(reading(r.stderr, 'MODELSELECTIONSERVICEPRESENT'), 'false', r.stderr)
+    assert.equal(reading(r.stderr, 'PORTSELECTION'), 'null', r.stderr,
+      '端口在服务缺席时给了一个不是 null 的选择——那只能是编的')
 
     READINGS.s = {
       version, caps, evidence: ev,
       defaultFactory: reading(r.stderr, 'DEFAULTFACTORY'),
+      modelSelectionCode: reading(r.stderr, 'MODELSELECTIONCODE'),
+      modelSelection: reading(r.stderr, 'MODELSELECTION'),
       startFwd: reading(r.stderr, 'STARTFWD'),
     }
-    t.diagnostic(`S: version=${version} caps=${JSON.stringify(caps)}`)
+    t.diagnostic(`S: version=${version} caps=${JSON.stringify(caps)} defaultFactoryCanRead=${READINGS.s.defaultFactory} modelSelection=${READINGS.s.modelSelection}/${READINGS.s.modelSelectionCode}`)
   })
 
   guarded('S2. S 的反向对照：桩 provider 把 `outputSchema` 报成 false → 那两项读数跟着变', (t) => {
@@ -525,18 +567,31 @@ describe('PRT-253 续批二：生产注册方在**真 DSH 进程**里的读数',
     t.diagnostic(`S2: structured-result=${caps['structured-result']} ${ev['structured-result']}`)
   })
 
-  guarded('★ 四个场景的读数两两不同形（"注册方在不在""能力读没读到"都被读出来了）', (t) => {
+  guarded('★ 读数对照：注册方在不在分得开；**canRead 在不在分不开**；能力读没读到分得开', (t) => {
     for (const k of ['n', 'r', 'f', 's', 's2']) {
       assert.notEqual(READINGS[k], null, `${k} 没有留下读数——上面某条用例没跑成`)
     }
+    // ① "有没有注册方"是**分得开的**（N 报"没人注册"，R 走到了下一站）。
     assert.notEqual(READINGS.n.code, READINGS.r.code,
       `N/R 的码相同（${READINGS.n.code}）——那"有没有注册方"就没被读出来`)
-    assert.notEqual(READINGS.r.code, READINGS.f.code,
-      `R/F 的码相同（${READINGS.r.code}）——那"工厂成不成功"就没被读出来`)
-    assert.notEqual(READINGS.f.code, READINGS.n.code)
-    assert.equal(READINGS.s.defaultFactory, RUNTIME_HOST_REGISTRAR_CODES.NO_CAN_READ_SOURCE)
+    // ② ★★ 本批的**新读数**：R（没有 canRead）与 F（注入了一个 canRead 替身）
+    //      在绑定阶段**一字不差**。这不是"两个场景碰巧都失败"——它们失败在**同一站**
+    //      （启动自检的 runtime-probe），而 canRead 缺席/在场没有改变任何东西。
+    //      这就是"这个进程里没有它的读者"的**直接读数**。
+    assert.equal(READINGS.r.code, READINGS.f.code,
+      `R 与 F 的码不同（${READINGS.r.code} vs ${READINGS.f.code}）——canRead 居然影响了本进程的绑定阶段？`)
+    assert.equal(READINGS.r.inner, READINGS.f.inner,
+      `R 与 F 的内层码不同（${READINGS.r.inner} vs ${READINGS.f.inner}）`)
+    // ③ ★ 而且它与**本批之前**那条读数不同形：工厂不再抛。
+    assert.notEqual(READINGS.r.code, RUNTIME_HOST_ROW_CODES.INPUTS_FACTORY_THREW,
+      'R 仍然读成"工厂抛了"——canRead 缺席这条要求还在拦绑定')
+    assert.notEqual(READINGS.r.inner, RUNTIME_HOST_REGISTRAR_CODES.NO_CAN_READ_SOURCE)
+    // ④ 生产默认工厂交出的 attendance 读数是**缺席本身**（null），不是替身。
+    assert.equal(READINGS.s.defaultFactory, 'canRead-null')
+    assert.equal(READINGS.s.modelSelection, 'null', '模型选择被编出来了？')
+    // ⑤ "能力读没读到"分得开（S 与 S2 的唯一变量是桩 provider 的 outputSchema）。
     assert.notEqual(READINGS.s.caps['structured-result'], READINGS.s2.caps['structured-result'])
-    t.diagnostic(`N=${READINGS.n.code} / R=${READINGS.r.code}(${READINGS.r.inner}) / F=${READINGS.f.code}(${READINGS.f.inner})`)
+    t.diagnostic(`N=${READINGS.n.code} / R=${READINGS.r.code}(${READINGS.r.inner}) / F=${READINGS.f.code}(${READINGS.f.inner}) [R===F：canRead 无读者] / canRead=${READINGS.s.defaultFactory} / model=${READINGS.s.modelSelection}`)
   })
 })
 

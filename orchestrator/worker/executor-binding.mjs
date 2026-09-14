@@ -117,8 +117,31 @@ function currentBinding() {
  * @param {object} input
  * @param {object} input.host DSH 宿主端口（`startRun` / `probeRuntime`）。
  * @param {() => Promise<object>} input.selfCheck 启动自检。
- * @param {(meta: object) => any} input.canRead 装配阶段的权限判定。
+ * @param {(meta: object) => any} [input.canRead] 装配阶段的权限判定。
+ *   **可以不传**——见下面「`canRead` 为什么不是必填的」。
  * @param {object} [input.rest] 其余透传给 `createProductionExecutor`。
+ *
+ * ## ★ `canRead` 为什么**不是**必填的（本批改掉的那条要求）
+ *
+ * 上一版这里写的是「需要 canRead：权限判定由调用方显式给出，不猜」。那条要求
+ * 在本仓库的**同进程**部署形状下是对的（worker 与引擎同进程 ⇒ 绑定就是给
+ * worker 用的），但这个注册口真正跑的地方是 **DSH Runtime 进程**，而那里面：
+ *
+ *   · `runtime/dsh-composition/enforcement.mjs` 全文 0 处 `canRead`；
+ *   · `runtime/adapters/dsh/port.mjs` 的必需/可选方法表里没有权限面；
+ *   · 权威（岗位清单 / lease）在 worker 一侧，Runtime 进程的 `envNames` 里
+ *     既没有 hub 凭证也没有 lease。
+ *
+ * 也就是说：**Runtime 进程里没有任何东西读这个绑定的 `canRead`。** 为一个
+ * 没有读者的输入拦住整个绑定，是把"接线遗漏"与"进程里根本没有这个读者"
+ * 混成同一条拒绝。所以本批把它改成**可选**，并且：
+ *
+ *   · 缺席 → **如实存成 `canRead: null`**（不是替身、不是 `() => true`、
+ *     不是"默认拒绝"的假函数）；
+ *   · 到**真正要执行的那一侧**（`productionExecutorProvider`）仍然是
+ *     fail closed：读到 `canRead` 不是函数 → `EXECUTOR_CAN_READ_REQUIRED`；
+ *   · 传了、但它不是函数（且不是 null/undefined）→ 这里**当场抛**：
+ *     一个"挂了个坏的"与"明确没有来源"必须在读数上分得开。
  */
 export function bindDshRuntime(input = {}) {
   if (input === null || typeof input !== 'object') {
@@ -129,10 +152,14 @@ export function bindDshRuntime(input = {}) {
     // 会让这个注册口本身变成绕过 PRT-215 的入口。
     throw new TypeError('bindDshRuntime 需要 selfCheck：不给默认值——"没检查"不等于"没问题"')
   }
-  if (typeof input.canRead !== 'function') {
-    throw new TypeError('bindDshRuntime 需要 canRead：权限判定由调用方显式给出，不猜')
+  if (input.canRead !== null && input.canRead !== undefined && typeof input.canRead !== 'function') {
+    throw new TypeError('bindDshRuntime 的 canRead 要么是函数，要么是 null/undefined（表示"这个进程里没有来源"）：'
+      + '一个"挂上了、但不是函数"的 canRead 与"明确没有来源"必须在读数上分得开——'
+      + '把前者悄悄丢掉，就再也没人看得出有人试图挂它')
   }
-  const mine = Object.freeze({ ...input })
+  // ★ 缺席**如实记成 `null`**，不补任何东西。
+  const canRead = input.canRead ?? null
+  const mine = Object.freeze({ ...input, canRead })
   bindingStack = [...bindingStack, mine]
   return function unbind() {
     // 按引用删掉自己那一份。**只删自己**，于是：
@@ -182,6 +209,15 @@ export function resetDshRuntimeBinding() {
  *
  *   > 加了一条新路之后把老路的读数改掉，等于用一次重构悄悄换掉了一条
  *   > 别人正在依赖的契约。
+ *
+ * ## ★ 同进程那条路：绑定在、但 `canRead` 缺席 → 仍然 fail closed
+ *
+ * `bindDshRuntime` 现在允许缺席 `canRead`（Runtime 进程里没有它的权威，
+ * 见那里的说明），但那**不表示**执行引擎可以不知道权限就开跑。所以读到
+ * 一个 `canRead` 不是函数的绑定时，本函数在这里就以
+ * `EXECUTOR_CAN_READ_REQUIRED` 拒绝——与跨进程那条路同一个码、同一个理由。
+ * 这一条是刻意的：它让"缺席"在**唯一真正要执行的那一侧**仍然是一个明确的否，
+ * 而不是靠 `createProductionExecutor` 深处那条更笼统的 `BAD_WIRING`。
  *
  * @param {object} io
  * @param {(path: string, body: object) => Promise<{status:number, body:object}>} io.post
@@ -234,6 +270,30 @@ export async function productionExecutorProvider(io = {}) {
     })
   }
   const { host, selfCheck, canRead, ...rest } = currentBinding()
+
+  // ★ 绑定**可以**没有 canRead（Runtime 进程里没有它的权威，见 `bindDshRuntime`），
+  //   但执行引擎的权限判定仍然必须由调用方显式给出。所以缺席在这里被拒成
+  //   与跨进程那条路**同一个码**——两种取得引擎的路对"没有权限判定"的回答
+  //   不该因为"引擎从哪来"而不同。
+  //
+  //   为什么不靠 `createProductionExecutor` 深处那条 `BAD_WIRING`：
+  //   那条是给"post / get / canRead 都该有"的通用接线用的；把"权限来源缺席"
+  //   压成一个笼统的接线错误，会让值班的人去查网络与路由，而真因是权限权威
+  //   不在这个进程里。
+  if (typeof canRead !== 'function') {
+    return Object.freeze({
+      ok: false,
+      code: EXECUTOR_CODES.CAN_READ_REQUIRED,
+      message: '当前绑定没有 canRead（装配阶段的权限判定）。' +
+        '绑定可以是"没有来源"的——Runtime 进程里没有权限权威（岗位清单 / lease 都在 worker 一侧）——' +
+        '但**执行**这一步的权限判定仍然必须由调用方显式给出。' +
+        '**不**回落成"默认都能读"：一次接线遗漏会因此变成一次静默越权',
+      innerCode: null,
+      reasons: Object.freeze([
+        '把 canRead 交给 bindDshRuntime（同进程），或改走跨进程那条路由调用方显式给出',
+      ]),
+    })
+  }
 
   // 记账主体，按**可信度**从高到低取：
   //   ① 调用方显式传入（部署可以点名一个非 worker 身份）

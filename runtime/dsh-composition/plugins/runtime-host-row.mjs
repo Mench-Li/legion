@@ -31,7 +31,7 @@
 // | `composition` | **真 DSH 组合树**：`ctx.loader.entries()` 的 `options.id` + `fiber.state` | `..._NO_COMPOSITION` |
 // | `sandbox` | **真 DSH 服务**：`ctx.sandbox`（`probeSandbox` 要的 `confine`） | `..._NO_SANDBOX_PORT` |
 // | `runtimeHost` | **注册缝**（见下）：本目录造不出一个真的 | `..._NO_HOST_PORT` |
-// | `canRead` | **注册缝**：权限判定由调用方显式给出，不猜 | `..._NO_CAN_READ` |
+// | `canRead` | **可选**：缺席是合法的，被**如实**记成 `null` 交下去 | 只有"给了一个不是函数的"才拒（`..._NO_CAN_READ`） |
 //
 // `composition` 与 `sandbox` 有真来源，本行**自己读**，不要求调用方重复给一遍
 // （重复给一遍只会得到两个会漂移的副本）。读数上的依据是实测的，不是推的：
@@ -52,7 +52,7 @@
 //     调的：`plugins/src/index.ts`）。**而 `probeRuntime` 要报 version 与四项必需能力**
 //     （`runtime/contracts/adapter.mjs` 的 `REQUIRED_CAPABILITIES`），
 //     全仓库**没有任何生产实现**：实测过一个真 DSH 进程里能看见的服务，
-//     没有版本服务、也没有能力服务（探针读数见本批文档 §3）。
+//     没有版本服务、也没有能力服务（探针读数见文档 §3）。
 //     给一个"全 true"的能力表就是**编**——它会让 `checkCompatibility` 在一个
 //     从未验过的引擎上判"兼容"。
 //
@@ -60,9 +60,13 @@
 //      "本目录不 import 任何 DSH 包、棘轮里 adapterPrefixes 的豁免**存在但不用**"。
 //      第一版这段话里写了完整记号，于是本目录的 DSH 记号数从 0 变成 1——
 //      一次"豁免可用所以顺手用了"的漂移，在门禁上**恰好是绿的**。）
-//   · `canRead` 是**装配阶段**的权限判定。全仓库的 `canRead` 实现清一色是
-//     `() => true` 之类**用例替身**（`grep canRead` 的读数见文档 §3）；
-//     默认放行会让一次接线遗漏变成一次静默越权，默认拒绝会让它静默停摆。
+//   · `canRead` 是**装配阶段**的权限判定，而它的合法性**只在消费它的那个进程里**
+//     才成立：本行跑在 DSH Runtime 进程，那里没有任何东西读它（PRT-253 授权批的
+//     四条测量写在 `runtime-host-registrar-row.mjs` 的文件头）。所以本批起它的取值
+//     是**可选**：**缺席如实记成 `null`**（不是放行、不是拒绝、不是替身），
+//     而真正要执行的那一侧（worker 的 `productionExecutorProvider`）读到缺席
+//     仍然 `EXECUTOR_CAN_READ_REQUIRED`。**挂一个不是函数的** → 本行当场拒
+//     （`..._NO_CAN_READ`）：静默丢掉它会让"有人试图挂它"这件事消失。
 //
 // 所以两样都只能由**知道答案的那一侧**注册进来。这与 `root-row.mjs` 的
 // `setApprovalPortFactory()` 是同一条取舍，理由也相同（方向见下）。
@@ -73,10 +77,15 @@
 // import 图，本批验证过）。所以端口工厂走**注入**，注册方留在依赖方向允许的那一侧——
 // 与审批端口工厂（`team-hub/approval-registrar-row.mjs`）同一个形状。
 //
-//   ⚠️ **今天没有生产注册方。** 本行交付的是"调用方 + 缝 + 具名拒绝"；
-//   缝里那一件（真的 DSH 宿主端口 / 真的 `canRead`）是本批**没有**交付的东西，
-//   而且是**唯一**还缺的那一件。它没有被含糊过去：没有工厂时本行以
-//   `..._NO_INPUTS_FACTORY` 当场拒绝，真 DSH 进程里的读数见文档 §4。
+//   ⚠️ 上一版这里写着「**今天没有生产注册方**」。那句话在注册方落地的那一批之后
+//   就不再成立，本批顺手改掉：生产注册方在
+//   `runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs`（模块求值期
+//   注册、默认导出**就是这个**插件对象）。它现在给得出 `runtimeHost`（`startRun`
+//   按引用转发到 `subagents`、`probeRuntime` 读现场安装、`currentModelSelection`
+//   读 `agentDefaultModel`）与"如实为 null 的 `canRead`"。
+//   仍然缺的是**能力表**：`probeRuntime` 里三项必需能力在这个进程里没有可确认的
+//   来源，于是启动自检判不兼容——那是本批之后的**下一个**阻塞点，不是接线缝。
+//   没有工厂时本行照旧以 `..._NO_INPUTS_FACTORY` 当场拒绝。
 //
 // ## ★ 为什么本行**故意不进**静态补丁层（`PATCH_LAYER_ROWS`）
 //
@@ -153,7 +162,14 @@ export const RUNTIME_HOST_ROW_CODES = Object.freeze({
   INPUTS_FACTORY_THREW: 'RUNTIME_HOST_ROW_INPUTS_FACTORY_THREW',
   /** 工厂没给出宿主端口（`{startRun, probeRuntime}`）。 */
   NO_HOST_PORT: 'RUNTIME_HOST_ROW_NO_HOST_PORT',
-  /** 工厂没给出 `canRead`。 */
+  /**
+   * 工厂**试图挂一个不是函数的** `canRead`。
+   *
+   * ⚠️ 含义本批收窄了：它**不再**表示"工厂没给 `canRead`"——缺席现在是合法的
+   * （如实记成 `null` 交下去，由 worker 侧那一侧具名拒绝）。它只表示"给了一个
+   * 不是函数、也不是 null/undefined 的值"。静默把那种值丢掉，会让"有人试图挂它"
+   * 从读数上消失，而那正是最该被看见的一种接线错误。
+   */
   NO_CAN_READ: 'RUNTIME_HOST_ROW_NO_CAN_READ',
   /** 组合树读不出来或读到零行。**"没读到"不等于"没生效"**，两者不许同形。 */
   NO_COMPOSITION: 'RUNTIME_HOST_ROW_NO_COMPOSITION',
@@ -409,8 +425,9 @@ export const runtimeHostRow = {
     if (typeof factory !== 'function') {
       throw rowError(RUNTIME_HOST_ROW_CODES.NO_INPUTS_FACTORY,
         '没有人注册宿主端口工厂（setDshRuntimeInputsFactory）。' +
-        '**本行不补一个假的**：一个"全 true 的能力表 + 一个永远放行的 canRead"会让这次绑定' +
-        '在一个从未验过的引擎上判"兼容"。真来源与缺失读数见本文件头与 PRT-253 文档')
+        '**本行不补一个假的**：一个"全 true 的能力表"会让这次绑定' +
+        '在一个从未验过的引擎上判"兼容"；而一个编出来的 `canRead` 会让"没有来源"读成"有来源"。' +
+        '真来源与缺失读数见本文件头与 PRT-253 文档')
     }
 
     let inputs = null
@@ -441,11 +458,20 @@ export const runtimeHostRow = {
         `宿主端口是 ${describe(runtimeHost)}，而它必须是 {startRun, probeRuntime} 对象`)
     }
 
-    const canRead = inputs.canRead
-    if (typeof canRead !== 'function') {
+    // ★ `canRead` **可以缺席**（PRT-253 授权批 + 本批）：本行跑在 DSH Runtime
+    //   进程里，而那个进程里没有任何东西读它（四条测量见
+    //   `runtime-host-registrar-row.mjs` 文件头）。所以缺席被**如实**记成 `null`
+    //   原样交下去——不是替身、不是默认放行、也不是默认拒绝。
+    //
+    //   但"没有来源"与"挂了个坏的"是两件事：后者当场拒，**不静默丢掉**。
+    //   （上一版这里要求"必须是函数"，那条要求拦的是一个没有读者的输入。）
+    const canRead = inputs.canRead ?? null
+    if (canRead !== null && typeof canRead !== 'function') {
       throw rowError(RUNTIME_HOST_ROW_CODES.NO_CAN_READ,
-        `canRead 是 ${describe(canRead)}，而它必须是函数。` +
-        '权限判定由调用方显式给出——本行不猜（默认放行 = 静默越权，默认拒绝 = 静默停摆）')
+        `canRead 是 ${describe(canRead)}，而它要么是函数，要么是 null（表示"这个进程里没有来源"）。` +
+        '权限判定由调用方显式给出——本行不猜；但**缺席是合法的**，它被如实交下去，' +
+        '由真正要执行的那一侧（worker 的 productionExecutorProvider）以具名码拒绝。' +
+        '把一个不是函数的值悄悄丢掉，会让"有人试图挂它"从读数上消失')
     }
 
     const composition = observeComposition(ctx)

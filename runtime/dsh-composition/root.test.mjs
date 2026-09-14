@@ -533,19 +533,31 @@ test('★★ `bind` 缺 `selfCheck` 当场抛（**不补一个"自检通过"的�
 })
 
 // ===========================================================================
-// ⑦ bootstrap：输入必须显式，缺 `canRead` 时 fail closed
+// ⑦ bootstrap：`canRead` 可选（缺席如实记成 null），"挂了个坏的"仍然 fail closed
 // ===========================================================================
 
-test('★★ `root.bootstrap` 缺 `canRead` → `BAD_WIRING`，且**什么都不注册**', async () => {
+test('★★ `root.bootstrap` 的 `canRead` 缺席**合法**（如实记成 null）；给了个不是函数的 → `BAD_WIRING`，且什么都不注册', async () => {
+  resetDshRuntimeBinding()
   const root = installEnforcementRoot(inputOk()).root
-  const r = await root.bootstrap({
+  const absent = await root.bootstrap({
     runtimeHost: hostOk(),
     composition: compositionOk(),
     sandbox: sandboxOk(),
   })
-  assert.equal(r.ok, false)
-  assert.equal(r.code, BOOTSTRAP_CODES.BAD_WIRING)
+  assert.equal(absent.ok, true, `canRead 缺席不该拦下装配：${JSON.stringify(absent).slice(0, 300)}`)
+  assert.equal(dshRuntimeBound(), true)
+  absent.unbind?.()
+
+  const bad = await root.bootstrap({
+    runtimeHost: hostOk(),
+    composition: compositionOk(),
+    sandbox: sandboxOk(),
+    canRead: 'yes',
+  })
+  assert.equal(bad.ok, false)
+  assert.equal(bad.code, BOOTSTRAP_CODES.BAD_WIRING)
   assert.equal(dshRuntimeBound(), false, '自检入口拒绝了，端口却已经注册上了')
+  resetDshRuntimeBinding()
 })
 
 test('★★ `root.bootstrap` 给齐输入 → 注册成功；它返回的 `unbind` 真的能拆掉', async () => {

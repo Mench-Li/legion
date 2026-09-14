@@ -307,12 +307,25 @@ test('② 端口**不是对象**时也拒（`null` 读出来是"缺两个方法"
   }
 })
 
-test('② 缺 `canRead` 时拒绝（不替调用方决定权限）', async () => {
+test('② `canRead` 缺席**合法**（如实记成 null，不拦注册）；给个不是函数的才拒', async () => {
   resetDshRuntimeBinding()
-  const r = await boot({ canRead: undefined })
-  assert.equal(r.ok, false)
-  assert.equal(r.code, BOOTSTRAP_CODES.BAD_WIRING)
-  assert.equal(dshRuntimeBound(), false)
+  // 本函数跑在 DSH Runtime 进程那一侧，而那里**没有**权限权威（岗位清单 / lease
+  // 都只在 worker 一侧）——所以"没有 canRead 来源"是这个进程的**正常**形状，
+  // 拦它会把"接线遗漏"与"这里根本没有这个读者"混成同一条拒绝。
+  // 真正要执行的那一侧仍然 fail closed（`executor.test.mjs` ④ 钉着它）。
+  const absent = await boot({ canRead: undefined })
+  try {
+    assert.equal(absent.ok, true, `canRead 缺席不该拦下装配：${JSON.stringify(absent).slice(0, 300)}`)
+    assert.equal(dshRuntimeBound(), true)
+  } finally { absent.unbind?.(); resetDshRuntimeBinding() }
+
+  // 但"挂一个不是函数的"仍然当场拒——静默丢掉它会让"有人试图挂它"消失。
+  for (const bad of ['yes', 42, {}]) {
+    const r = await boot({ canRead: bad })
+    assert.equal(r.ok, false, `canRead=${JSON.stringify(bad)} 时必须拒绝`)
+    assert.equal(r.code, BOOTSTRAP_CODES.BAD_WIRING)
+    assert.equal(dshRuntimeBound(), false)
+  }
 })
 
 test('② 自检结果**形状不对**时拒绝（缺 autoExecutionForbidden 会被读成放行）', async () => {

@@ -9,8 +9,11 @@
 //      而且**不会**把路上遇到的别的 `package.json`（比如 Legion 自己的）当成引擎版本；
 //   B. 四项能力**逐项**的判据：一项读现场 provider 注册表，三项按**未确认**报，
 //      每项一个**互不相同**的码；
-//   C. 工厂的**具名拒绝**：没有 ctx / 没有 `subagents` / 没有 `canRead` 各自一个码，
-//      其中 `canRead` 那一个是"没有合法来源"的落地；
+//   C. 工厂的**具名拒绝**：没有 ctx / 没有 `subagents` 各自一个码；
+//      `canRead` **缺席是合法的**（如实记成 `null`），只有"挂一个不是函数的"
+//      才拒（`NO_CAN_READ_SOURCE`）；
+//   C2. `currentModelSelection` 的来源：`agentDefaultModel` 服务在 → 原样带出；
+//      不在 / 形状不对 / 返回值不是对象 → `null`，三个码分得开，**绝不编模型名**；
 //   D. 注册形状：默认导出与 `runtime-host-row.mjs` 的 default 是**同一个对象**（`===`），
 //      且注册发生在**模块求值期**（import 完就已经在缝上了）。
 //
@@ -31,12 +34,14 @@ import realRuntimeHostRow, {
   CAPABILITY_TABLE_CHECKED,
   DSH_PACKAGE_NAMES,
   DSH_VERSION_CODES,
+  MODEL_SELECTION_CODES,
   RUNTIME_HOST_REGISTRAR_CODES,
   RUNTIME_HOST_REGISTRAR_VERSION,
   createRuntimeHostInputsFactory,
   dshInstallCandidates,
   probeDshRuntime,
   readDshVersionOfInstall,
+  readModelSelection,
   registeredRuntimeHostInputsFactory,
   runtimeCapabilityEvidence,
 } from './runtime-host-registrar-row.mjs'
@@ -221,7 +226,8 @@ describe('PRT-253 续批二 · 四项能力逐项有据', () => {
     assert.deepEqual(Object.keys(capabilities).sort(), [...REQUIRED_CAPABILITIES].sort())
     assert.deepEqual(Object.keys(evidence).sort(), [...REQUIRED_CAPABILITIES].sort())
     assert.equal(CAPABILITY_TABLE_CHECKED, true)
-    assert.equal(RUNTIME_HOST_REGISTRAR_VERSION, 1)
+    // 2 = `canRead` 改为可选（缺席如实记成 null）+ 接上 `currentModelSelection`。
+    assert.equal(RUNTIME_HOST_REGISTRAR_VERSION, 2)
   })
 
   test('布尔表里只有布尔值：判据码不会被混进 capabilities（probe.mjs 会把非 true 当 false）', () => {
@@ -260,12 +266,20 @@ describe('PRT-253 续批二 · 工厂：缺哪一样报哪一样', () => {
       (e) => e.code === RUNTIME_HOST_REGISTRAR_CODES.NO_SUBAGENTS_PORT)
   })
 
-  test('★ `subagents` 在、没有 canRead 来源 → NO_CAN_READ_SOURCE（这是生产默认）', () => {
-    assert.throws(() => factory({ get: (n) => (n === 'subagents' ? SUBAGENTS : undefined) }),
-      (e) => e.code === RUNTIME_HOST_REGISTRAR_CODES.NO_CAN_READ_SOURCE)
+  test('★ `subagents` 在、**没有** canRead 来源 → 工厂成功，缺席被如实记成 `null`', () => {
+    // ★ 这条是本批改掉的那条要求：缺席**不再**是一条例外。
+    //   断言的不是"它不抛"（那太弱），而是那个缺席的**读数值**：
+    //   `null` 与 `undefined`（= 忘了写这个键）、与 `() => true`（= 默认放行）、
+    //   与 `() => false`（= 默认拒绝）都必须分得开。
+    const built = factory({ get: (n) => (n === 'subagents' ? SUBAGENTS : undefined) })
+    assert.equal(built.canRead, null, `缺席必须原样交成 null，实际 ${JSON.stringify(built.canRead)}`)
+    assert.equal('canRead' in built, true, '这个键必须在场（undefined 与"忘了写"同形）')
+    assert.notEqual(typeof built.canRead, 'function', 'canRead 不许是一个替身函数')
+    assert.equal(typeof built.runtimeHost.startRun, 'function')
+    assert.equal(typeof built.runtimeHost.probeRuntime, 'function')
   })
 
-  test('三个码互不相同（"没装服务"与"没有权限来源"的修法不是一件事）', () => {
+  test('三个码互不相同（"没装服务"与"挂了个坏的 canRead"的修法不是一件事）', () => {
     const codes = new Set([
       RUNTIME_HOST_REGISTRAR_CODES.NO_CONTEXT,
       RUNTIME_HOST_REGISTRAR_CODES.NO_SUBAGENTS_PORT,
@@ -275,9 +289,12 @@ describe('PRT-253 续批二 · 工厂：缺哪一样报哪一样', () => {
     assert.notEqual(RUNTIME_HOST_REGISTRAR_CODES.NO_SUBAGENTS_PORT, RUNTIME_HOST_REGISTRAR_CODES.NO_CAN_READ_SOURCE)
   })
 
-  test('`canRead` 给的不是函数也不是 null → 当场拒绝（"注册了个空的"与"明确没有来源"要分得开）', () => {
-    assert.throws(() => createRuntimeHostInputsFactory({ canRead: 'yes' }),
-      (e) => e.code === RUNTIME_HOST_REGISTRAR_CODES.NO_CAN_READ_SOURCE)
+  test('`canRead` 给的不是函数也不是 null/undefined → 当场拒绝（"挂了个坏的"与"明确没有来源"要分得开）', () => {
+    for (const bad of ['yes', 42, {}, []]) {
+      assert.throws(() => createRuntimeHostInputsFactory({ canRead: bad }),
+        (e) => e.code === RUNTIME_HOST_REGISTRAR_CODES.NO_CAN_READ_SOURCE,
+        `canRead=${JSON.stringify(bad)} 必须被拒（静默丢掉它会让"有人试图挂它"消失）`)
+    }
   })
 
   test('给全了 → 端口**按引用**转发真实服务，canRead 原样带出', () => {
@@ -304,6 +321,83 @@ describe('PRT-253 续批二 · 工厂：缺哪一样报哪一样', () => {
     const probe = built.runtimeHost.probeRuntime()
     assert.equal(probe.version, '7.7.7')
     assert.equal(probe.capabilities['structured-result'], false, '没有注册表时这一项仍然是未确认')
+  })
+})
+
+// ─────────────────────────────────────────────── C2. `currentModelSelection` 的来源
+
+/**
+ * 一个 `agentDefaultModel` 的一等服务**替身**。
+ *
+ * 它替的是**现场服务**，不是被测的那条读法：形状照 DSH 的
+ * `packages/core/agent-default-model/src/index.ts` 的 `currentSelection()`
+ * （`{provider, model, reasoningEffort?}`）。
+ */
+function modelService(selection) {
+  const calls = []
+  return {
+    calls,
+    service: {
+      currentSelection() { calls.push(1); return selection },
+    },
+  }
+}
+
+describe('PRT-253 续批二 · `currentModelSelection` 从 `agentDefaultModel` 读', () => {
+  test('★ 服务在 → 端口把它的选择**原样**（按引用）交出来，一个字段都不搬', () => {
+    const { service } = modelService({ provider: 'stub-provider', model: 'stub-model', reasoningEffort: 'high' })
+    const raw = service.currentSelection()
+    const built = createRuntimeHostInputsFactory()({
+      get: (n) => (n === 'subagents' ? SUBAGENTS : n === 'agentDefaultModel' ? service : undefined),
+    })
+    const got = built.runtimeHost.currentModelSelection()
+    // 判据是**按引用同一个对象**：搬一遍字段就说明这里有一份会漂移的副本，
+    // 而"两个形状对不上"会在某一天变成一次静默的字段丢失。
+    assert.equal(got, raw, '端口没有原样交出服务给的那个对象（搬了字段或包了一层）')
+    assert.deepEqual(got, { provider: 'stub-provider', model: 'stub-model', reasoningEffort: 'high' })
+  })
+
+  test('★ 服务不在 → `null`，判据码是"服务缺席"，**绝不编一个模型名**', () => {
+    const ctx = { get: (n) => (n === 'subagents' ? SUBAGENTS : undefined) }
+    const reading = readModelSelection(ctx)
+    assert.equal(reading.selection, null)
+    assert.equal(reading.code, MODEL_SELECTION_CODES.SERVICE_ABSENT)
+    const built = createRuntimeHostInputsFactory()(ctx)
+    assert.equal(built.runtimeHost.currentModelSelection(), null)
+    // `undefined` 与"服务在但没给东西"同形；这里必须是 `null`。
+    assert.equal(built.runtimeHost.currentModelSelection() === null, true)
+  })
+
+  test('★ 三个"没有"必须分得开：服务不在 / 服务形状不对 / 返回值不是对象', () => {
+    const absent = readModelSelection({ get: () => undefined })
+    const malformedService = readModelSelection({ get: (n) => (n === 'agentDefaultModel' ? {} : undefined) })
+    const malformedResult = readModelSelection({ get: (n) => (n === 'agentDefaultModel' ? { currentSelection: () => 'deepseek-flash' } : undefined) })
+    assert.equal(absent.code, MODEL_SELECTION_CODES.SERVICE_ABSENT)
+    assert.equal(malformedService.code, MODEL_SELECTION_CODES.SERVICE_MALFORMED)
+    assert.equal(malformedResult.code, MODEL_SELECTION_CODES.RESULT_MALFORMED)
+    assert.equal(new Set([absent.code, malformedService.code, malformedResult.code]).size, 3,
+      '三个成因报同一个码——"去装基础组合层"与"去看引擎版本"就分不开了')
+    for (const r of [absent, malformedService, malformedResult]) {
+      assert.equal(r.selection, null, '三种"没有"都不许编一个模型选择')
+      assert.equal(r.ok, false)
+    }
+  })
+
+  test('服务给的选择原样带出（`ok: true` + 那个码），与"没有"是两个读数', () => {
+    const { service } = modelService({ provider: 'deepseek-official', model: 'deepseek-flash' })
+    const reading = readModelSelection({ get: (n) => (n === 'agentDefaultModel' ? service : undefined) })
+    assert.equal(reading.ok, true)
+    assert.equal(reading.code, MODEL_SELECTION_CODES.SERVICE_READ)
+    assert.deepEqual(reading.selection, { provider: 'deepseek-official', model: 'deepseek-flash' })
+    assert.notEqual(reading.code, MODEL_SELECTION_CODES.SERVICE_ABSENT)
+  })
+
+  test('服务自己抛错 → **让它抛**（吞掉会把"坏了"读成"没有"）', () => {
+    const broken = { currentSelection() { throw new Error('settings 服务挂了') } }
+    assert.throws(
+      () => readModelSelection({ get: (n) => (n === 'agentDefaultModel' ? broken : undefined) }),
+      /settings 服务挂了/,
+      '服务抛错被吞掉了——适配器那条 MODEL_UNAVAILABLE 的真因就没了')
   })
 })
 

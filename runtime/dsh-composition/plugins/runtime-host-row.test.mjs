@@ -378,16 +378,29 @@ describe('PRT-253 runtime-host-row：缺哪一样就报哪一个码', () => {
     assert.match(e.message, /HUB_URL_MISSING/)
   })
 
-  test('⑧ 工厂没给端口 → `NO_HOST_PORT`；没给 canRead → `NO_CAN_READ`（两个码不同）', async () => {
-    const { ctx } = readyContext()
+  test('⑧ 工厂没给端口 → `NO_HOST_PORT`；`canRead` **缺席合法**、给个不是函数的才 `NO_CAN_READ`', async () => {
+    const noPortCtx = readyContext().ctx
     setDshRuntimeInputsFactory(() => ({ canRead: () => true }))
-    const noPort = await applyRejects(ctx)
+    const noPort = await applyRejects(noPortCtx)
     assert.equal(noPort.code, RUNTIME_HOST_ROW_CODES.NO_HOST_PORT)
 
+    // ★ 缺席**不**在这里拒：本行跑在 DSH Runtime 进程里，那里没有任何东西读
+    //   `canRead`（测量见 `runtime-host-registrar-row.mjs` 文件头）。缺席如实交下去，
+    //   由真正要执行的那一侧（worker 的 productionExecutorProvider）具名拒绝。
+    const absentCtx = readyContext().ctx
     setDshRuntimeInputsFactory(() => ({ runtimeHost: inputsOk().runtimeHost }))
-    const noCanRead = await applyRejects(ctx)
-    assert.equal(noCanRead.code, RUNTIME_HOST_ROW_CODES.NO_CAN_READ)
-    assert.notEqual(noPort.code, noCanRead.code, '两样缺失必须报两个码')
+    const absent = await runtimeHostRow.apply(absentCtx)
+      .then(() => absentCtx.services.get(RUNTIME_HOST_BINDING_SERVICE), (e) => e)
+    assert.equal(absent?.ok, true, `canRead 缺席不该拦下这一行：${JSON.stringify(absent)?.slice(0, 300)}`)
+    assert.notEqual(absent?.code ?? absent, RUNTIME_HOST_ROW_CODES.NO_CAN_READ)
+
+    // 但**挂一个不是函数的** → 仍然当场拒。静默丢掉它，就再没有人看得出
+    // 有人试图挂它——而那正是最该被看见的一种接线错误。
+    const badCtx = readyContext().ctx
+    setDshRuntimeInputsFactory(() => ({ runtimeHost: inputsOk().runtimeHost, canRead: 'yes' }))
+    const bad = await applyRejects(badCtx)
+    assert.equal(bad.code, RUNTIME_HOST_ROW_CODES.NO_CAN_READ)
+    assert.notEqual(noPort.code, bad.code, '两样缺失必须报两个码')
   })
 
   test('⑨ 组合树读不到 → `NO_COMPOSITION`（**不是**"补丁层未生效"）', async () => {
@@ -470,6 +483,22 @@ describe('PRT-253 runtime-host-row：交给组合根的到底是什么', () => {
     assert.equal(published.state, 'enforcement-effective')
     assert.equal(published.rowVersion, 1)
     assert.equal(undo(), true)
+  })
+
+  test('⑫c ★ `canRead` 缺席时交给组合根的是 `null`——**不是** undefined、不是函数、不是空对象', async () => {
+    // "没有来源"必须是一个**分得开**的值。`undefined` 与"工厂忘了写这个键"同形；
+    // 一个替身函数与"有来源"同形；空对象与"来源是空的"同形。三者在这里都被排除。
+    const root = fakeRoot()
+    const ctx = fakeContext({ root: root.service, sandbox: { async confine(a) { return { enforcement: 'full', argv: ['x', ...a] } } }, entries: treeEntriesOk() })
+    const factory = setDshRuntimeInputsFactory(() => ({ runtimeHost: inputsOk().runtimeHost }))
+    try {
+      await runtimeHostRow.apply(ctx)
+      assert.equal(root.calls.length, 1, '必须恰好调一次 bootstrap')
+      const deps = root.calls[0]
+      assert.equal(deps.canRead, null, `缺席必须原样交成 null，实际 ${JSON.stringify(deps.canRead)}`)
+      assert.equal(deps.canRead === undefined, false, 'undefined 与"工厂没写这个键"同形，不许用它表示缺席')
+      assert.equal('canRead' in deps, true, '这个键必须在场，值是 null')
+    } finally { factory() }
   })
 
   test('⑫b `apply` **不返回**任何东西（cordis 会把返回值当效果收集）', async () => {

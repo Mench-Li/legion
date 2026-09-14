@@ -1,5 +1,28 @@
 # PRT-253 canRead 授权批：「这一次 Attempt 能读哪些来源」到不到得了 Runtime 进程
 
+> ## ⚠️ 后续批次（阅读本文前先读这一段）
+>
+> 本文的**结论不变**：`canRead` 的答案**没有**跨过 worker → Runtime 的进程边界，
+> 应当**走 (B)**。后来的一批（[`PRT-253-runtime-host-binding-unblocked.md`](./PRT-253-runtime-host-binding-unblocked.md)）
+> 只改了本文**没有**主张的一件事：
+>
+> - 本文记录的是"答案不在这边"这条**边界事实**——它仍然成立。
+> - 但本文写的时候，那条边界事实被**实现**成了一道**拦绑定的门**
+>   （`runtime-host-registrar-row.mjs` 的默认工厂在"没有 `canRead` 来源"时抛
+>   `RUNTIME_HOST_REGISTRAR_NO_CAN_READ_SOURCE`，`bindDshRuntime` 硬性必填）。
+>   后一批量到：**Runtime 进程里没有任何东西读这个绑定的 `canRead`**
+>   （五条测量见后文那篇 §0 的表，其中第 ⑤ 条正是"这个绑定的读者只取
+>   `{ok,state,patchVersion,checks}`"），
+>   于是"缺席"改为**如实记成 `canRead: null`**，绑定照常建立。
+> - **两条 fail-closed 一字未改**：同进程（后一批**新加**了这条判定）与跨进程
+>   两条路都仍然 `EXECUTOR_CAN_READ_REQUIRED`；`createProductionExecutor` 自己的
+>   要求（`executor.mjs:147`）也原样保留。
+>
+> 也就是说：**本文是那篇的"为什么答案不在这边"，那篇是"所以这边不应据此拒绝绑定"。**
+> 本文 §8 里"注册方的具名拒绝是对的、下一个读数会是 `MODEL_UNAVAILABLE`"
+> 这两句**已被后一批取代**——`MODEL_UNAVAILABLE` 不是下一个读数，
+> 下一个阻塞点是三项必需能力在进程内没有可确认的来源（见那篇 §9）。
+
 > 本文回答一个问题，并**只**回答这一个问题：
 >
 > **`canRead`（"这一次 Attempt 能读哪些上下文来源"的权限判定）的答案，有没有跨过

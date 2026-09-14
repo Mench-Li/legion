@@ -1274,6 +1274,34 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-253 解阻批：**那条残留要求拿掉了，绑定真的建立得起来**。
+      //
+      // 上一版 `bindDshRuntime` 硬要求 `canRead`，于是 Runtime 进程里的注册方
+      // 以 `RUNTIME_HOST_REGISTRAR_NO_CAN_READ_SOURCE` 拒绝 ⇒ 整个绑定建立不起来。
+      // 但本仓库的**跨进程**部署形状下，那个进程里**没有任何东西读**这个绑定的
+      // `canRead`：`runtime/dsh-composition/enforcement.mjs` 全文 0 处、
+      // `runtime/adapters/dsh/port.mjs` 的方法表里没有权限面、权威（岗位清单 / lease）
+      // 在 worker 一侧。为一个没有读者的输入拦住整个绑定，是把"接线遗漏"与
+      // "进程里根本没有这个读者"混成同一条拒绝。
+      //
+      // ★ 而**两条 fail closed 一字未放松**，且各自有用例真的守着：
+      //   · 同进程：`productionExecutorProvider()` 读到绑定的 canRead 不是函数 ⇒
+      //     `EXECUTOR_CAN_READ_REQUIRED`；
+      //   · 跨进程：`productionExecutorProviderFromEnv` 没有调用方给的 canRead ⇒ 同一个码。
+      //   （我独立破验过同进程那道门：把它改成恒不进入 ⇒ 正好只让守着它的那条用例变红。）
+      //
+      // ★ 安全形状同上：一次性 `DSH_HOME`（tmpdir 下、启动前断言）、`bundles: []`、
+      //   `patchReload: 'startup'`、删 `DSH_SNAPSHOT`、spawnSync 超时、跑完整棵删，
+      //   监听一律 port 0，**从不**读写 `~/.dsh`。
+      //
+      // ⚠️ 诚实边界：正例读数是在**一个声明过的能力探针替身**下取得的；真探针在真进程里
+      //   只能确认 **1/4**（`structured-result`），真取值下自检仍然拒绝
+      //   （那正是 `AFTER` 那条读数）。所以"绑定建立" ≠ "真引擎完成真任务"。
+      label: 'dsh-composition-runtime-host-binding-unblocked（PRT-253：绑定在真进程里建立得起来，两条 fail closed 未放松）',
+      files: ['runtime/dsh-composition/plugins/runtime-host-binding-unblocked-dsh-process.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-253 续批二：`runtimeHost` 探针与 `canRead` 的**生产来源**。
       //
       // 这一套盯的是"探针不许乐观"：版本从进程现场的安装读（读不到 ⇒ null ⇒ 判不兼容）；

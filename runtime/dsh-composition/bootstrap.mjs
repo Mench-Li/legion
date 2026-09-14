@@ -167,7 +167,14 @@ export function repairPlanFor(check) {
  * @param {object} deps.runtimeHost 运行时宿主（至少要有 `probeRuntime`）
  * @param {object} [deps.composition] 组合树观察结果（`{rows, permissionPresets}`，注入）
  * @param {object} [deps.sandbox] 沙箱端口（`{confine}`，注入）
- * @param {() => object} deps.canRead 装配阶段的权限判定（**必给**，不给默认值）
+ * @param {() => object} [deps.canRead] 装配阶段的权限判定。
+ *   **可以不传**：本函数跑在 DSH Runtime 进程那一侧，而那里**没有**权限权威
+ *   （岗位清单 / lease 都在 worker 一侧）。缺席被**如实**记成"没有"，原样交下去
+ *   （`bindDshRuntime` 存成 `canRead: null`）——不是替身、不是默认放行，也不是默认拒绝。
+ *   真正要执行的那一侧（worker 的 `productionExecutorProvider`）读到这个缺席时
+ *   以 `EXECUTOR_CAN_READ_REQUIRED` 拒绝。
+ *   传了、但它不是函数（且不是 null/undefined）→ `BAD_WIRING`：一个"挂了个坏的"
+ *   与"明确没有来源"必须分得开。
  * @param {object} [deps.selfCheck] 覆盖自检实现（用例用）
  * @param {(input: object) => Function} [deps.bind] 覆盖注册口（用例用）
  */
@@ -184,12 +191,23 @@ export async function bootstrapDshRuntime(deps = {}) {
     probeFactory = probeRuntime,
   } = deps
 
-  if (typeof canRead !== 'function') {
-    // 与本仓库其他几处同一条口径：不替调用方决定权限。
-    // 一个"默认都能读"的默认值会让一次接线遗漏变成一次静默越权。
+  // `canRead` 是**可选**的，但"可选"不等于"随便什么值都收"。
+  //
+  // 本批把上一版的"必给"改成可选，理由是实测的：本函数跑在 DSH Runtime 进程里，
+  // 而那个进程里 `canRead` **没有读者**（`runtime/dsh-composition/enforcement.mjs`
+  // 0 处命中；`runtime/adapters/dsh/port.mjs` 的必需/可选方法表里没有权限面；
+  // 权威是岗位清单 / lease，两者都只在 worker 一侧）。
+  // 详见 `docs/superpowers/prt/PRT-253-runtime-host-binding-unblocked.md`。
+  //
+  // 但**没有来源**与**挂了个坏的**是两件事：
+  //   · 缺席（null / undefined）→ 如实交下去，最终由 worker 侧以具名码拒绝；
+  //   · 给了个不是函数的 → 这里当场拒。静默丢掉它，就再没有人看得出有人试图挂它。
+  if (canRead !== null && canRead !== undefined && typeof canRead !== 'function') {
     return refuse(BOOTSTRAP_CODES.BAD_WIRING,
-      'bootstrapDshRuntime 需要 canRead：装配阶段的权限判定必须由调用方显式给出，不给默认值')
+      'bootstrapDshRuntime 的 canRead 要么是函数，要么是 null/undefined（表示"这个进程里没有来源"）：'
+      + '一个"挂上了、但不是函数"的 canRead 与"明确没有来源"必须在读数上分得开')
   }
+  const readAuthorization = canRead ?? null
 
   // ①a 组合树观察结果必须**真的给了**。
   //
@@ -307,7 +325,7 @@ export async function bootstrapDshRuntime(deps = {}) {
       // 这里不重新探测——一次装配对应一次结论，
       // 而"两次探测得到不同答案"会让 worker 的判定与 Launcher 的判定不一致。
       selfCheck: async () => check,
-      canRead,
+      canRead: readAuthorization,
     })
   } catch (e) {
     return refuse(BOOTSTRAP_CODES.BAD_WIRING,

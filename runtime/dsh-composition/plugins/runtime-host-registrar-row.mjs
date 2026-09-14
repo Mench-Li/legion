@@ -22,7 +22,8 @@
 // | --- | --- | --- |
 // | 引擎**版本** | **有**真来源 → 填上了 | 进程自己那次启动的入口（`process.argv[1]`）所属安装的 `package.json`；读不到就**报 null**（fail closed） |
 // | 四项必需**能力** | 一项有真来源，三项**报未确认** | 见下 |
-// | `canRead` | **没有**合法来源 → **具名拒绝** | 见下 |
+// | `canRead` | **这个进程里没有读者** → 缺席如实记成 `null`（改掉了上一版的"具名拒绝"） | 见下 |
+// | `currentModelSelection` | **有**合法来源 → 接上了 | DSH 的 `agentDefaultModel` 服务；缺席报 `null`（`MODEL_UNAVAILABLE`） |
 //
 // ### 版本：从"正在跑的那份安装"读，不从常量读
 //
@@ -73,29 +74,77 @@
 //     （顺带量到的一条**相邻缺陷**：预算闸门（PRT-510）在生产路径上因此永远拿不到
 //     token 数。本批**不修**它——它不属于这条缝；记在文档的诚实边界里。）
 //
-// ### `canRead`：**没有**合法来源 → 具名拒绝，不猜
+// ### `canRead`：**这个进程里没有读者** → 缺席就是缺席，不猜（本批改掉了"具名拒绝"）
 //
-// `canRead` 是"这一次 Attempt 能读哪些上下文来源"的**权限判定**。它的合法权威只有
-// 一处：EmployeeManifest / lease 上的那次授权（`orchestrator/worker/context-stage.mjs`
-// 的注释写明了这一点）。而本模块跑在 **DSH Runtime 进程**里，那个进程**只有**
-// 身份 / hub 地址 / cwd / taskId / scope（`root.mjs` 从环境解析出来的那一份），
-// 没有岗位清单、也没有 lease——lease 要等 worker 侧认领之后才存在。实测（真 DSH 进程、
-// 一次性 `DSH_HOME`）：`ctx.get('canRead')` 那一类东西不存在，能看见的服务里
-// **没有**任何权限来源。
+// ⚠️ 上一版这里写的是「`canRead` **没有**合法来源 → 默认工厂在**被调用时**抛
+// `RUNTIME_HOST_REGISTRAR_NO_CAN_READ_SOURCE`」。**那条要求是残留的**，本批把它
+// 改掉了，理由是四条**读出来的**测量（不是态度）：
 //
-// 所以默认工厂在**被调用时**抛 `RUNTIME_HOST_REGISTRAR_NO_CAN_READ_SOURCE`，
-// 而不是给一个"默认放行"或"默认拒绝"的替身：
+//   ① `runtime/adapters/dsh/port.mjs:44` 的 `REQUIRED_PORT_METHODS` 是
+//      `['startRun','probeRuntime']`，`:47` 的可选表是 `currentModelSelection` /
+//      `subscribeRun` / `listModels`——**端口契约里没有权限面**；同一文件里
+//      `canRead|permission|readScope|acl` 是 **0 命中**。
+//   ② `runtime/dsh-composition/enforcement.mjs` 里 `canRead` 是 **0 命中**。
+//   ③ 全仓库**唯一**读某个绑定的 `canRead` 的地方是
+//      `orchestrator/worker/executor-binding.mjs` 的 `productionExecutorProvider()`
+//      ——而那个函数跑在 **worker 进程**里。跨进程那条路（
+//      `productionExecutorProviderFromEnv({canRead})`）用的是**调用方**给的那一份，
+//      走线上的 `selfCheck` 也是 worker 自己读的。
+//   ④ spec（`docs/superpowers/specs/2026-09-11-legion-product-runtime-design.md`）
+//      里 `canRead` 是 **0 命中**——它是 Legion 的实现概念，不是 spec 要求的输入。
+//   ⑤ 绑定本身在 Runtime 进程里**确有**读者，但读的是别的字段：
+//      `runtime-contract-server-row.mjs:415-416` 惰性读 `legionRuntimeHostBinding`，
+//      交给 `verdictFromRuntimeHostBinding()`（`:244-255`），后者**只取**
+//      `{ok, state, patchVersion, checks}` 并附一个 `source`。**`canRead` 不在其中。**
 //
-//   · 默认放行 → 一次接线遗漏变成一次静默越权；
-//   · 默认拒绝 → 一次接线遗漏变成一次静默停摆；
-//   · **两者都不报错**，而"报不出来"正是这条缝上一批要修的东西。
+// 合起来只有一句话：**Runtime 进程里没有任何东西读这个绑定的 `canRead`。**
+// 为一个没有读者的输入拦住整个绑定，是把两种完全不同的处境压成同一条拒绝：
 //
-// 这与强制面 plane 的口径同源（`hub = derivedHub ?? configuredFrom(ENV.hubUrl)`，
-// **没有编出来的默认值**）：拿不到来源的名字，就以具名码拒绝。
+//   · "某个部署忘了接权限权威"（worker 进程的问题，那里确实要拦）；
+//   · "这个进程里根本没有这个读者"（Runtime 进程的**正常**形状）。
 //
-// 注入点留给**知道答案的那一侧**（`createRuntimeHostInputsFactory({canRead})`，
-// 形状与 `createRootRow({createRequestApproval})` 相同）：生产默认是拒绝，
-// 用例可以显式注入一个替身来驱动其余接线。
+// 所以本批的取值是：
+//
+//   · **缺席 → 如实记成 `canRead: null`**，原样交下去。不是 `() => true`
+//     （默认放行 = 一次接线遗漏变成一次静默越权），不是 `() => false`
+//     （默认拒绝 = 一次接线遗漏变成一次静默停摆），不是空对象，不是别的东西。
+//     "没有"就是"没有"，而它在读数上是一个**分得开的**值。
+//   · **真正要执行的那一侧仍然 fail closed**：
+//     `productionExecutorProvider()` 读到 `canRead` 不是函数（同进程绑定与跨进程
+//     两条路**都**）→ `EXECUTOR_CAN_READ_REQUIRED`。跨进程那条路一字未改。
+//     同进程那条路本批**新加**了这个判定：它以前根本读不到这种绑定
+//     （`bindDshRuntime` 当场就拒了），所以必须自己拒——而且是那个**具名**的权限码，
+//     不是 `executor.mjs:147` 那条更笼统的 `BAD_WIRING`（那条**原样保留**，它是
+//     `createProductionExecutor` 自己的要求，把"权限来源缺席"压成一个笼统接线错误
+//     会把排障指向网络与路由）。
+//   · **想挂一个不是函数的 `canRead` → 当场拒**（构造期与本工厂被调用时两处）。
+//     静默丢掉它，就再没有人看得出有人试图挂它。
+//
+// 注入点原样保留：知道答案的那一侧（岗位清单 / lease 的持有者）仍然可以
+// `createRuntimeHostInputsFactory({canRead})` 显式给。给的会被**按引用**带出去。
+//
+// ### `currentModelSelection`：**有**合法来源 → 接上了（本批新增）
+//
+// `runtime/adapters/dsh/port.mjs:27` 把 `currentModelSelection()` 写进端口契约
+// （返回 `{provider, model, endpoint?, reasoningEffort?, limits?}`，**可选**方法），
+// `index.mjs:250` 读它，`:455-457` 在它缺席时给出 `MODEL_UNAVAILABLE`。
+// 而 DSH 自己就把"当前默认模型"做成了一等服务：`agentDefaultModel`
+// （`packages/core/agent-default-model/src/index.ts:64,73,90`：`super(ctx,'agentDefaultModel')`
+// + `currentSelection()`），由基础组合层挂载。本模块跑在 DSH 宿主进程里，
+// 所以它**读得到**——本批把它接上：
+//
+//     currentModelSelection: () => readModelSelection(ctx).selection
+//
+// 形状**先对过**：DSH 的 `currentSelection()` 返回 `{provider, model, reasoningEffort?}`
+// （同一文件 `:49-57` 的 `selection()`），是端口契约那个形状的**子集**——
+// 必需的 `provider` / `model` 都在，可选的几个缺席本来就被 `index.mjs:266-270`
+// 各自兜成 `''` / `null` / `{}`。所以这里**不做任何字段搬运**（搬一遍就等于多一份
+// 会漂移的副本），原样返回服务给的对象。
+//
+// **不编模型名**：服务不在 → `null`（判据码 `..._MODEL_SELECTION_SERVICE_ABSENT`），
+// 适配器照旧走它那条诚实的 `MODEL_UNAVAILABLE`；服务在但形状不对 → 另外两个码。
+// 服务自己抛错就**让它抛**——`index.mjs:252-258` 已经把它归类成 `MODEL_UNAVAILABLE`
+// 并带上真因，在这里吞掉会把"坏了"变成"没有"。
 //
 // ## ★★ 本批量到的**更大的**一条：这条缝填上也不会改变部署读数
 //
@@ -119,12 +168,14 @@
 //
 // ## ★ 为什么本行仍然**不进**静态补丁层（`PATCH_LAYER_ROWS`）
 //
-// 三条，任一条单独成立就够：
+// 两条，任一条单独成立就够（**本批去掉了上一版列在这里的第②条**——"`canRead`
+// 没有合法来源、工厂会以具名码拒绝"。它已经不成立了，因为工厂现在如实交出缺席）：
 //
 //   ① 探针**现在**会以"缺三项必需能力"判不兼容（这是诚实的读数），
-//      于是挂上去 = 每一个 DSH Runtime 进程都起不来（PRT-214 文档 §9 读数 C 的形状）；
-//   ② `canRead` 没有合法来源，工厂会以具名码拒绝——同样拦启动；
-//   ③ 上面那条进程拓扑：挂上了也改不了 worker 进程的读数。
+//      于是挂上去 = 每一个 DSH Runtime 进程都起不来（PRT-214 文档 §9 读数 C 的形状）。
+//      这一条是本批之后**下一个**阻塞点：它不再是接线问题，而是"三项必需能力在
+//      这个进程里没有可确认的来源"（探针按未确认报，是对的）。
+//   ② 上面那条进程拓扑：挂上了也改不了 worker 进程的读数。
 //
 // 所以本模块**没有** `PATCH_LAYER_ROWS` 登记、**没有**进 `legion-host.patch.yml`、
 // `DSH_COMPOSITION_PATCH_VERSION` **不变**、`render.mjs --write` **不跑**。
@@ -145,8 +196,8 @@ import { fileURLToPath } from 'node:url'
 import { REQUIRED_CAPABILITIES } from '../../contracts/adapter.mjs'
 import realRuntimeHostRow, { setDshRuntimeInputsFactory } from './runtime-host-row.mjs'
 
-/** 改动来源、拒绝码或能力判据时递增。 */
-export const RUNTIME_HOST_REGISTRAR_VERSION = 1
+/** 改动来源、拒绝码或能力判据时递增。2 = `canRead` 改为可选 + 接上 `currentModelSelection`。 */
+export const RUNTIME_HOST_REGISTRAR_VERSION = 2
 
 /** 本模块的具名码。每一个对应**一样具体的输入**，不是一个笼统的"注册失败"。 */
 export const RUNTIME_HOST_REGISTRAR_CODES = Object.freeze({
@@ -157,13 +208,36 @@ export const RUNTIME_HOST_REGISTRAR_CODES = Object.freeze({
   /** 能力表与 `REQUIRED_CAPABILITIES` 对不上（装载期就抛，不安静地少报一项）。 */
   CAPABILITY_TABLE_MISMATCH: 'RUNTIME_HOST_REGISTRAR_CAPABILITY_TABLE_MISMATCH',
   /**
-   * 没有任何 `canRead` 来源。
+   * **尝试挂一个不是函数的 `canRead`**（`createRuntimeHostInputsFactory({canRead})`
+   * 的构造期检查）。
    *
-   * **这就是那个"没有合法来源"的输入**：见文件头。它单列一个码，而不是与
-   * `NO_SUBAGENTS_PORT` 合成一个"接线不对"——两者的修法完全不同：
-   * 前者要去接权限权威（岗位清单 / lease），后者要去看引擎装没装上。
+   * ⚠️ 这个码的含义本批**收窄**了：它不再表示"没有 `canRead` 来源"（缺席现在是
+   * 合法的，会被如实记成 `null`），只表示"给了一个不是函数、也不是 null/undefined 的
+   * `canRead`"。静默丢掉它就会让"有人试图挂一个坏的"这件事在读数上消失。
+   *
+   * 与 `NO_SUBAGENTS_PORT` 仍然分开：前者要去修调用方给的那个值，后者要去看
+   * 引擎装没装上。
    */
   NO_CAN_READ_SOURCE: 'RUNTIME_HOST_REGISTRAR_NO_CAN_READ_SOURCE',
+})
+
+/**
+ * `currentModelSelection` 来源的**判据码**。
+ *
+ * 为什么要有码、而不是只报 `null`：`null` 有三种成因，修法不同——
+ * 服务不在（去装基础组合层）、服务在但形状不对（去看引擎版本）、
+ * 服务在、也调了，但返回值不是一个对象（去看引擎）。
+ * 只有"没有选择"这一件事是同一件；成因不是。
+ */
+export const MODEL_SELECTION_CODES = Object.freeze({
+  /** 现场有 `agentDefaultModel`，它给了一个对象——**原样**交出去。 */
+  SERVICE_READ: 'RUNTIME_HOST_REGISTRAR_MODEL_SELECTION_READ',
+  /** 现场没有那个服务。**不编一个模型名**：端口报 `null`，适配器判 `MODEL_UNAVAILABLE`。 */
+  SERVICE_ABSENT: 'RUNTIME_HOST_REGISTRAR_MODEL_SELECTION_SERVICE_ABSENT',
+  /** 服务在，但它没有 `currentSelection`（形状不对）——与"服务不在"必须分开。 */
+  SERVICE_MALFORMED: 'RUNTIME_HOST_REGISTRAR_MODEL_SELECTION_SERVICE_MALFORMED',
+  /** 服务调了，返回值不是对象：同样**不编**，与"服务不在"也分开。 */
+  RESULT_MALFORMED: 'RUNTIME_HOST_REGISTRAR_MODEL_SELECTION_RESULT_MALFORMED',
 })
 
 /** 版本来源的具名码。"读到了"与"没读到"必须分得开。 */
@@ -527,7 +601,51 @@ export function probeDshRuntime(ctx, { readVersion = readDshVersionOfInstall, ar
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// 工厂：生产默认**拒绝**（canRead 没有合法来源），注入点是给知道答案的那一侧
+// `currentModelSelection`：从 DSH 一等服务 `agentDefaultModel` 读
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * 读现场 `agentDefaultModel` 服务给出的**当前默认模型选择**。
+ *
+ * ## 形状先对过，不搬运
+ *
+ * 端口契约（`runtime/adapters/dsh/port.mjs:27`）要的是
+ * `{provider, model, endpoint?, reasoningEffort?, limits?}`；
+ * DSH 的 `currentSelection()`（`packages/core/agent-default-model/src/index.ts:49-57`）
+ * 返回 `{provider, model, reasoningEffort?}`。前者所需的两项后者都给，
+ * 后者多出来的 `reasoningEffort` 也在前者的可选表里。所以这里**原样返回**
+ * 服务给的那个对象：搬一遍字段就多一份会漂移的副本，而"两个形状对不上"这件事
+ * 会在某一天变成一次静默的字段丢失。
+ *
+ * ## 三条"没有"必须分开
+ *
+ * 都返回 `selection: null`，但码不同——因为修法不同：
+ *   · 服务不在 → 去装基础组合层（或接受 `MODEL_UNAVAILABLE`）；
+ *   · 服务在、没有 `currentSelection` → 引擎版本不对；
+ *   · 调了、返回的不是对象 → 引擎行为不对。
+ *
+ * **服务自己抛错就让它抛**：`runtime/adapters/dsh/index.mjs:252-258` 已经把它
+ * 归类成 `MODEL_UNAVAILABLE` 并带上真因。在这里吞掉它，会把"坏了"读成"没有"。
+ *
+ * @returns {{ok: boolean, code: string, selection: object|null}}
+ */
+export function readModelSelection(ctx) {
+  const service = serviceOf(ctx, 'agentDefaultModel')
+  if (service === undefined || service === null) {
+    return { ok: false, code: MODEL_SELECTION_CODES.SERVICE_ABSENT, selection: null }
+  }
+  if (typeof service !== 'object' || typeof service.currentSelection !== 'function') {
+    return { ok: false, code: MODEL_SELECTION_CODES.SERVICE_MALFORMED, selection: null }
+  }
+  const raw = service.currentSelection()
+  if (raw === null || typeof raw !== 'object') {
+    return { ok: false, code: MODEL_SELECTION_CODES.RESULT_MALFORMED, selection: null }
+  }
+  return { ok: true, code: MODEL_SELECTION_CODES.SERVICE_READ, selection: raw }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// 工厂：`canRead` **可选**（缺席如实记成 null），端口接上模型选择
 // ───────────────────────────────────────────────────────────────────────────
 
 /**
@@ -540,25 +658,32 @@ export function probeDshRuntime(ctx, { readVersion = readDshVersionOfInstall, ar
  * 后者在 DSH 里根本不存在（模块求值期还没有树）。这是本批对上一批契约的**唯一**
  * 一处扩展，方向与上一批文件头写的那句一致：「工厂在本行 `apply` 时被调用：
  * 它需要 DSH 进程的现场」——现在它**真的**拿得到现场。
+ * `currentModelSelection` 同样要现场（`ctx.get('agentDefaultModel')`）。
  *
  * 零参工厂（上一批的用例形状）不受影响：多传一个参数，JS 会忽略。
  *
- * ## 为什么 `canRead` 默认是拒绝
+ * ## 为什么 `canRead` **缺席是合法的**
  *
- * 见文件头。生产默认 = **没有合法来源 → 具名拒绝**；
- * 知道答案的那一侧（岗位清单 / lease 的持有者）用 `createRuntimeHostInputsFactory({canRead})`
- * 显式给。
+ * 见文件头那四条测量：Runtime 进程里**没有**这个绑定的读者。所以缺席被**如实**
+ * 记成 `canRead: null` 交出去，而不是抛、不是替身。
+ *
+ * 但**"没有来源"与"挂了个坏的"是两件事**：构造期给了个不是函数、也不是
+ * null/undefined 的值 → 当场拒（`NO_CAN_READ_SOURCE`）。静默丢掉它，就再也没有人
+ * 看得出有人试图挂它。给的**是**函数时按引用带出，不包一层。
  */
 export function createRuntimeHostInputsFactory({
   canRead = null,
   probe = probeDshRuntime,
   readVersion = readDshVersionOfInstall,
 } = {}) {
-  if (canRead !== null && typeof canRead !== 'function') {
+  if (canRead !== null && canRead !== undefined && typeof canRead !== 'function') {
     throw registrarError(RUNTIME_HOST_REGISTRAR_CODES.NO_CAN_READ_SOURCE,
-      `canRead 要么是一个函数，要么是 null（表示"没有来源"），收到 ${typeof canRead}。` +
-      '一个"注册了个空的"与"明确没有来源"必须在读数上分得开')
+      `canRead 要么是一个函数，要么是 null/undefined（表示"没有来源"），收到 ${typeof canRead}。` +
+      '一个"挂了一个不是函数的"与"明确没有来源"必须在读数上分得开——静默丢掉它，' +
+      '就再没有人看得出有人试图挂它')
   }
+  // ★ 缺席**如实记成 `null`**：不是 `() => true`，不是 `() => false`，不是空对象。
+  const suppliedCanRead = canRead ?? null
   return function runtimeHostInputsFactory(ctx) {
     if (ctx === null || typeof ctx !== 'object' || typeof ctx.get !== 'function') {
       throw registrarError(RUNTIME_HOST_REGISTRAR_CODES.NO_CONTEXT,
@@ -572,22 +697,18 @@ export function createRuntimeHostInputsFactory({
         '它是 `startRun` 的**唯一**真来源——编一个"能返回结果的 startRun"就是伪造执行引擎')
     }
 
-    if (typeof canRead !== 'function') {
-      throw registrarError(RUNTIME_HOST_REGISTRAR_CODES.NO_CAN_READ_SOURCE,
-        '没有任何 `canRead` 来源：这次的上下文能读哪些来源，权威在 EmployeeManifest / lease 上，' +
-        '而 DSH Runtime 进程里两者都不在（它只有身份 / hub 地址 / cwd / taskId / scope）。' +
-        '**不猜**——默认放行会让一次接线遗漏变成一次静默越权，默认拒绝会让它静默停摆，' +
-        '两者都不报错。把来源交进来：`createRuntimeHostInputsFactory({ canRead })`')
-    }
-
     const runtimeHost = Object.freeze({
       // 真来源：引擎的 subagents 服务。**不包一层**，按引用转发，
       // 于是"端口连的是谁"与"引擎是谁"是同一个对象——多包一层就会有一个会漂移的替身。
       startRun: (provider, options) => subagents.start(provider, options),
       probeRuntime: () => probe(ctx, { readVersion }),
+      // ★ 端口契约里的**可选**方法，本批接上：来源是 DSH 一等服务
+      //   `agentDefaultModel`。服务不在 → `null`（适配器判 `MODEL_UNAVAILABLE`），
+      //   **绝不**编一个模型名。判据码用 `readModelSelection()` 单独读得到。
+      currentModelSelection: () => readModelSelection(ctx).selection,
     })
 
-    return { runtimeHost, canRead }
+    return { runtimeHost, canRead: suppliedCanRead }
   }
 }
 
@@ -599,8 +720,12 @@ export function createRuntimeHostInputsFactory({
  * 插件的 Fiber 的 `apply`。所以无论 Loader 并发创建多少行、无论别的行挂起多久，
  * `setDshRuntimeInputsFactory()` 都已经执行过了。
  *
- * 生产默认**没有** `canRead` → 被调用时以 `NO_CAN_READ_SOURCE` 拒绝。
- * 这不是"什么都没注册"：注册了、并且**拒绝得出来**，这两件事在读数上分得开。
+ * 生产默认**没有** `canRead` 来源 → 工厂被调用时**成功**，并把这一缺席如实记成
+ * `canRead: null`。这不是"少挂了一样"：注册了、并且**缺席本身是一个分得开的值**，
+ * 这两件事在读数上分得开（上一版会在这里以 `NO_CAN_READ_SOURCE` 拒绝——那条
+ * 拒绝拒绝的是一个在这个进程里没有读者的输入，见文件头）。
+ *
+ * 它同时给 `runtimeHost` 接上了 `currentModelSelection`（来源：`agentDefaultModel`）。
  */
 export const registeredRuntimeHostInputsFactory = createRuntimeHostInputsFactory()
 

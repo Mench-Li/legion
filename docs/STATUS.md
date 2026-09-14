@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-13　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **194 套件 / 5439 用例 / 0 fail**（证据 `.ci/prt-253g/`）
+**最近一次全量基线**：2026-09-13　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **195 套件 / 5453 用例 / 0 fail**（证据 `.ci/prt-253h/`）
 （**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数会少）
 —— 以本文件所在提交为准；证据 `.ci/prt-901/`（PRT-901/902 第三方组件清单、SBOM 与商业分发条件那一批）
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
@@ -3457,6 +3457,126 @@
 > `docs/DUAL-WRITE-RACE-evidence/verify-evidence.md`。
 
 ---
+
+## 2026-09-14　PRT-253 解阻批：那条残留要求拿掉了，**绑定在真 DSH 进程里建立得起来**
+
+上一批的结论 (B)（per-attempt 授权**不跨**进程边界）本来会被读成"这条缝合不上"。本批把它翻了个面：
+既然授权不跨边界，那就去问**Runtime 进程里到底有没有人读那个绑定的 `canRead`**。
+
+### 一、★ 关键测量：那个输入在 Runtime 进程里**没有读者**
+
+| 测量 | 读数 |
+| --- | --- |
+| `runtime/dsh-composition/enforcement.mjs` 里的 `canRead` | **0 处** |
+| `runtime/adapters/dsh/port.mjs` 的必需/可选方法表 | `REQUIRED = [startRun, probeRuntime]`、可选 = `currentModelSelection`/`subscribeRun`/`listModels`——**没有权限面** |
+| 谁读绑定里的 `canRead` | 只有 `executor-binding.mjs` 的 `productionExecutorProvider`，而它是 **worker 进程**里那条**同进程**路径 |
+| 跨进程那条路 | worker 从**调用方**拿 `canRead`（`productionExecutorProviderFromEnv({canRead})`），`selfCheck` 走线 |
+| spec 里 `canRead` 的出现次数 | **0**——它是 Legion 的实现概念，不是规格输入 |
+
+⇒ 所以注册方以 `RUNTIME_HOST_REGISTRAR_NO_CAN_READ_SOURCE` 拦住整个绑定，
+**是为一个没有读者的输入，拦住了一件真正的事**：
+
+> 一个"接线遗漏"的拒绝，与一个"这个进程里根本没有这个读者"的拒绝，
+> 在错误码上是同一个读数——只不过前者要你去接线，后者要你去删掉那条要求。
+
+### 二、改法与**未放松**的两条 fail closed
+
+- 默认工厂不再因缺 `canRead` 抛码，改为**如实返回 `{runtimeHost, canRead: null}`**——
+  缺席记成 `null`（不是 `undefined`，有用例钉住），不是替身、不是 `() => true`、不是"默认拒绝"的假函数。
+- `bindDshRuntime` 的 `canRead` 改可选；但**传了、又不是函数**（且非 null/undefined）仍然当场抛：
+  *"挂了个坏的"与"明确没有来源"必须在读数上分得开*。
+- ★ **同进程**：`productionExecutorProvider()` **新增**一道门——读到绑定的 `canRead` 不是函数 ⇒
+  `EXECUTOR_CAN_READ_REQUIRED`（`innerCode: null`）。用**与跨进程同一个码、同一个理由**：
+  两条取得引擎的路，对"没有权限判定"的回答不该因为引擎从哪来而不同。
+- ★ **跨进程**：`productionExecutorProviderFromEnv` 没拿到调用方给的 `canRead` ⇒ 仍是同一个码。
+- `createProductionExecutor`（`executor.mjs:147`）**一行未改**——那是 worker 侧真正的要求。
+
+### 三、真 DSH 进程的 before/after（拒绝换了位置，绑定那一步通了）
+
+before 用**本批改动前的真代码**（`git stash` 掉四个生产文件后跑同一场景）：
+
+```
+Error [RuntimeHostRowError]: legion-runtime-host 拒绝装配：宿主端口 factory 抛了：
+  runtime-host-registrar 拒绝：没有任何 `canRead` 来源…
+  { code: 'RUNTIME_HOST_ROW_INPUTS_FACTORY_THREW' }          exit=1
+```
+
+after（生产注册方当那一行的模块）：
+
+```
+RUNTIME_HOST_ROW_BIND_REFUSED(BOOTSTRAP_SELF_CHECK_INCOMPATIBLE)   exit=1
+```
+
+**拒绝从"工厂抛"移到"自检"**——绑定那一步通了，剩下的是能力表。而在一个声明过的能力探针替身下：
+
+```
+BOUND        exit=0 bound=true serviceOk=true startFwd=true provider=EXECUTOR_CAN_READ_REQUIRED
+```
+
+即：**服务已发布、`dshRuntimeBound()===true`、生产 `startRun` 转发到现场服务**，
+而**同一个绑定**去问 `productionExecutorProvider()` 仍然 `EXECUTOR_CAN_READ_REQUIRED`。
+另有一条硬读数：**R（无 canRead）与 F（注入 canRead 替身）在绑定阶段码与内层码完全相同**
+——这就是"这个进程里没有它的读者"的直接证据。
+
+### 四、`currentModelSelection` 接上了**真**来源
+
+`runtime/adapters/dsh/port.mjs:27,47` 里它是**可选**方法，`index.mjs:250` 读它、
+缺了就 `MODEL_UNAVAILABLE`；而生产工厂此前只给 `{startRun, probeRuntime}`。
+
+现在接的是 DSH 的**一等服务** `agentDefaultModel`（`packages/core/agent-default-model/src/index.ts`
+的 `super(ctx,'agentDefaultModel')` + `currentSelection()`），由基础组合层
+`packages/bundle/base/cordis.patch.yml` 挂载。
+
+★ **确实观察到了一个真的 `agentDefaultModel`**：把检出里真正的
+`@deepseek-ai/dsh-agent-default-model` 按绝对路径挂进一次性 profile，
+`MODELSERVICECLASS=AgentDefaultModelConfig`，`ctx.get` → `readModelSelection` → 端口 →
+适配器 `listModels`/`_selection` 四条读数一致并**按引用原样返回**（一个字段都没搬运）。
+不挂时 ⇒ `null` + `SERVICE_ABSENT`——**没有编出任何模型名**。
+
+⚠️ 但 **`settings.yaml` 会不会进这个读数没有证明**（`settings` 服务未挂，provider/model 是用例显式配置的）。
+
+### 五、★ 我独立破验了那条"未放松"的声明
+
+子代理声称两条 fail closed 都有用例守着。我去验了那条最容易悄悄松掉的——同进程那道门：
+
+- 把 `if (typeof canRead !== 'function')` 改成 `if (false)` ⇒
+  **正好只有守着它的那条用例变红**（`④ ★★ 绑定在、但 canRead 缺席 → 同进程 provider 仍然 fail closed`），
+  85 例里 1 例红，其余全绿；
+- 还原**逐字节**一致。
+
+第一次我的变异脚本锚点命中 **2 次**（同进程与跨进程两处守卫形状完全相同），脚本**拒绝执行**这次破验——
+> 一个"两处都改了"的变异，与一个"只改了我要验的那一处"的变异，
+> 在只看"红了几条"时是同一个读数。
+
+补上各自的消息行让锚点唯一后才跑。
+
+### 六、验证
+
+- **8 道门禁全 PASS**（scan 558 / boundary 3 文件 26 处 / snapshot / topology 无漂移 / progress-check /
+  check-docs / ci-syntax 50 脚本 / encoding **1922** 文件）。
+- **全量 CI `.ci/prt-253h/`：9/9 阶段 PASS**，`test` **195 套件 / 5453 用例 / 0 fail**
+  （上一批 194 / 5439）；stageTest「套件清单完备（**277** 个 `*.test.mjs`）」通过。
+  新套件已登记。
+- 关联套件全绿：`orchestrator/worker/*` **273**、`runtime/dsh-composition/*+plugins/*` **709**。
+
+### 七、诚实边界
+
+- ③ 的"绑定建立"是在**一个声明过的能力探针替身**下取得的；**真**探针在真进程里只能确认 **1/4**
+  （`structured-result`），真取值下自检仍然拒绝（`AFTER` 读的就是那条）。
+  **"绑定建立" ≠ "真引擎完成真任务"。**
+- 生产 `startRun` **不是**替身（真按引用转发到 `subagents.start`），但这个 profile 里的 `subagents`
+  服务是桩（`bundles: []` 无真引擎）：读数只证明"端口 → 服务这一跳通了"，**不是**"子代理跑完了"。
+- **没有**改变上一批结论（授权不跨边界）；本批只是不再让那条边界事实拦住一个**没有读者**的输入。
+- **没有**证明真实部署的 `settings.yaml` 会进 `currentModelSelection`。
+- **没有**让绑定成为生产行为：要成为生产行为还需要 `product/process-manifest.mjs` 那侧（操作者拥有）。
+  用例里的 `BEFORE-CONTROL` 是**包装层重建那道门**（让 before/after 的唯一变量是那道门）；
+  真旧代码读数来自一次性 `git stash`，不在用例里。
+- **下一个阻塞点不是接线，是能力口径**：`tool-permission-enforcement` / `cancel-and-timeout` /
+  `usage-reporting` 三项在进程内**没有可确认来源**（真探针 1/4）⇒ 自检判 incompatible ⇒
+  本行仍**不能**进静态补丁层（挂上去＝每个 Runtime 进程起不来）。修它要么给三项各自真来源、
+  要么改"必需能力"集合口径，两条都要单独一批论证。
+- `scan` 的绿**只对本批 `orchestrator` 那半边有效**（`PROCESSES` 不含 `runtime/`，新增具名码全在
+  未扫描的那侧）。
 
 ## 2026-09-14　PRT-253 canRead 授权批：这条缝在现有契约下**合不上**（结论 B，附一份可执行的判据）
 

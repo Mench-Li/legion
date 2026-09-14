@@ -44,7 +44,68 @@ export const SECRETS_DIAGNOSTIC_CODES = Object.freeze({
   UNSUPPORTED_PLATFORM: 'SECRETS_STORE_UNSUPPORTED_PLATFORM',
   ACL_TOO_PERMISSIVE: 'SECRETS_ACL_TOO_PERMISSIVE',
   ACL_UNVERIFIABLE: 'SECRETS_ACL_UNVERIFIABLE',
+  DSH_CREDENTIALS_UNREADABLE: 'SECRETS_DSH_CREDENTIALS_UNREADABLE',
+  DSH_CREDENTIALS_UNRECOGNIZED: 'SECRETS_DSH_CREDENTIALS_UNRECOGNIZED',
 })
+
+/**
+ * 把回退来源（DSH 的 `.credentials.yaml`，PRT-509 路线 A′）的文件层读数
+ * 翻成诊断。
+ *
+ * ## 为什么只有两种状态产生诊断
+ *
+ * 读取器的 `inspect()` 有四态，这里只报两种：
+ *
+ *   | state | 诊断 | 为什么 |
+ *   | --- | --- | --- |
+ *   | `absent` | **无** | 从没用过 DSH 的 Models 页时就是这个形状，是常态 |
+ *   | `loaded` | **无** | 读得懂就没什么可说的——"能读"不该占一行字 |
+ *   | `unrecognized` | warn | 文件在、但不在认识的确切子集内：**要用户动手** |
+ *   | `unreadable` | warn | 文件在、但读不出来：同上，且方向更明确 |
+ *
+ * `absent` 与 `unrecognized` 必须**分开**：把"没有这个文件"报成一条告警，
+ * 这条告警会在每一台没用过 DSH 的机器上永远出现——而一条永远不对的告警
+ * 与没有告警是同一件事。反过来把"读不懂"静默掉，用户会以为回退来源
+ * 在工作，而它每一次都拒绝了整份文件。
+ *
+ * 两种状态的严重度都是 **warn**：**回退来源坏了不影响 Legion 自己的密钥库**
+ * ——那是唯一权威的写入路径，也是第一顺位。把它判成 error 会让一个
+ * 附带的便利功能挡住整个产品启动。
+ *
+ * @param {object} check `openProductSecrets` 的产物。
+ * @returns {Array<object>} 0 或 1 条诊断。
+ */
+export function fallbackDiagnostic(check) {
+  const fallback = check?.fallback
+  if (fallback === null || fallback === undefined || typeof fallback !== 'object') {
+    // 这次**没有接**回退来源（调用方没给出路径）。与"接了但没有文件"不同，
+    // 但两者都不产生诊断——沉默在这里说的是"这一项不适用"。
+    return null
+  }
+  if (fallback.state === 'loaded' || fallback.state === 'absent') return null
+  const code = fallback.state === 'unreadable'
+    ? SECRETS_DIAGNOSTIC_CODES.DSH_CREDENTIALS_UNREADABLE
+    : SECRETS_DIAGNOSTIC_CODES.DSH_CREDENTIALS_UNRECOGNIZED
+  const detail = fallback.code === null || fallback.code === undefined ? '' : `（${fallback.code}）`
+  if (fallback.state === 'unreadable') {
+    return {
+      severity: 'warn',
+      code,
+      message: `DSH 的凭证文件存在但读不出来${detail}：本机回退来源**不可用**。`
+        + 'Legion 自己的密钥库不受影响（它仍然是唯一的权威写入路径），因此这不阻止启动；'
+        + '但**"读不出来"不等于"没有凭证"**。',
+    }
+  }
+  return {
+    severity: 'warn',
+    code,
+    message: `DSH 的凭证文件存在但不在本读取器认识的确切子集内${detail}：`
+      + '该文件**整份被拒绝**，而不是被猜着读，因此回退来源整份不可用（不是"少读了几条"）。'
+      + 'Legion 自己的密钥库不受影响，这不阻止启动。'
+      + '若要用 DSH 里的凭证，请继续用 DSH 自己的 Models 页维护该文件，'
+      + '或把需要的值录入 Legion 自己的密钥库。',
+  }
+}
 
 /**
  * 把 ACL 的判定翻成**一条**诊断。
@@ -107,10 +168,14 @@ export function secretsDiagnostics(check) {
   }
   const out = []
   const acl = aclDiagnostic(check)
+  // 回退来源的读数**在任何成败分支上都要报**：它说的是"另一个来源"的状态，
+  // 与 Legion 自己的库开没开成是两件事。
+  const fallback = fallbackDiagnostic(check)
 
   if (check.ok === true) {
-    // 自检通过也必须把 ACL 的状态说出来（不阻塞，但绝不沉默）。
+    // 自检通过也必须把 ACL 与回退来源的状态说出来（不阻塞，但绝不沉默）。
     if (acl !== null) out.push(acl)
+    if (fallback !== null) out.push(fallback)
     return Object.freeze(out)
   }
 
@@ -150,8 +215,9 @@ export function secretsDiagnostics(check) {
       break
   }
 
-  // 整体失败时，ACL 的问题只要拿到了就一并报出来（失败原因可能不止一个）。
+  // 整体失败时，ACL 与回退来源的问题只要拿到了就一并报出来（失败原因可能不止一个）。
   if (acl !== null) out.push(acl)
+  if (fallback !== null) out.push(fallback)
 
   return Object.freeze(out)
 }
@@ -170,10 +236,14 @@ export async function runSecretsCheck({
   run = null,
   owner = null,
   requireProtected = true,
+  // PRT-509 路线 A′：DSH `.credentials.yaml` 的路径；缺省 `null` = 不接回退来源，
+  // 于是自检的行为与这一批之前逐字相同。
+  dshCredentialsFile = null,
+  dshCredentialsIo = null,
 } = {}) {
   let check
   try {
-    check = await openSecrets({ layout, platform, run, owner, requireProtected })
+    check = await openSecrets({ layout, platform, run, owner, requireProtected, dshCredentialsFile, dshCredentialsIo })
   } catch (err) {
     // 自检自己崩了也必须变成一条可读的状态，而不是一个未捕获的拒绝。
     check = Object.freeze({

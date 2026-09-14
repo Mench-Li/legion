@@ -16,7 +16,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { CLI_FLAGS, EXIT_CODES, defaultInstallDir, launcherOptionsFrom, parseArgs, readEnv, readReadinessTimeoutMs, run } from './cli.mjs'
+import { CLI_FLAGS, EXIT_CODES, defaultInstallDir, dshCredentialsFileFrom, launcherOptionsFrom, parseArgs, readEnv, readReadinessTimeoutMs, run } from './cli.mjs'
 import { reserveEphemeralPort } from './ports.mjs'
 
 /** 收集输出的收集器。 */
@@ -379,5 +379,52 @@ test('CLI_FLAGS 里声明的开关，报错信息里也要列全（用户唯一�
     assert.ok(errors[0].includes(f.name),
       `报错信息里没列 ${f.name}：那句硬编码的"支持 --check/--json/--help"` +
       '已经与真实名单不一致过一次了')
+  }
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DSH 只读回退来源的路径解析（PRT-509 路线 A′）
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// 这一组守的是**边界**，不是读取器（读取器有它自己的 162 例）：
+//   · `DSH_HOME` 是唯一来源，**不猜路径**；
+//   · `DSH_HOME` 未设 ⇒ 不接（`null`），与"设了但文件不在"是两件事；
+//   · `--no-dsh-credentials` 能显式关掉。
+//
+// 为什么"不猜路径"值得一条用例：猜路径会读完**另一个账户**留下的凭证文件
+// ——用户不知道它存在，也没同意过读它。
+
+test('DSH_HOME 决定回退来源的路径；未设就是 null（不猜路径）', () => {
+  assert.equal(dshCredentialsFileFrom({}), null)
+  assert.equal(dshCredentialsFileFrom({ DSH_HOME: '' }), null)
+  assert.equal(dshCredentialsFileFrom({ DSH_HOME: '   ' }), null)
+  assert.equal(dshCredentialsFileFrom({ DSH_HOME: join('C:', 'Users', 'alice', '.dsh') }),
+    join('C:', 'Users', 'alice', '.dsh', '.credentials.yaml'))
+  // ★ 反面对照：`USERPROFILE` / `HOME` 存在也**不**去猜 `~/.dsh`。
+  //   少了这一条，一个"翻几个候选位置"的实现照样能绿。
+  assert.equal(dshCredentialsFileFrom({ USERPROFILE: join('C:', 'Users', 'alice'), HOME: '/home/alice' }), null)
+})
+
+test('★ --no-dsh-credentials 显式关掉回退来源（读别人的文件应当可以被拒绝）', () => {
+  const root = mkdtempSync(join(tmpdir(), 'legion-cli-dsh-'))
+  try {
+    mkdirSync(join(root, 'ws'), { recursive: true })
+    const dshHome = join('C:', 'Users', 'alice', '.dsh')
+    const env = { ...envFor(root), DSH_HOME: dshHome }
+
+    // 默认：DSH_HOME 已设 ⇒ 接上
+    const on = launcherOptionsFrom({ argv: [], env })
+    assert.equal(on.options.dshCredentialsFile, join(dshHome, '.credentials.yaml'))
+
+    // 显式关掉 ⇒ null。它与"DSH_HOME 未设"落到同一个值，这是刻意的：
+    // 两者对读取器都意味着"这次没有回退来源"。
+    const off = launcherOptionsFrom({ argv: ['--no-dsh-credentials'], env })
+    assert.equal(off.options.dshCredentialsFile, null)
+
+    // DSH_HOME 未设、也没关 ⇒ 同样是 null（两个不同原因，同一个结果）
+    const none = launcherOptionsFrom({ argv: [], env: envFor(root) })
+    assert.equal(none.options.dshCredentialsFile, null)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
   }
 })

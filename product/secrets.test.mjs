@@ -465,3 +465,158 @@ test('⑥ 文件不存在时 `aclExists: false`，加固**不被调用**', async
   assert.equal(calls.filter((c) => c.args.join(' ').includes('/inheritance:r')).length, 0,
     '不得对着不存在的路径跑 icacls /inheritance:r')
 })
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ⑦ DSH 只读回退来源的接线（PRT-509 路线 A′）
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// 这一组守的是**接线**：`openProductSecrets` 会不会把 DSH 的凭证文件接上，
+// 以及**接上之后 Legion 的库还赢不赢**。读取器内部的行为在
+// `security/secrets/dsh-credentials.test.mjs`（162 例），这里不重复。
+//
+// 守这条的理由：一个"接上了、但优先级是反的"的实现，会在库里明明有这条时
+// 用 DSH 文件里的旧值——而那看起来与一切正常完全一样。
+//
+// 刻意**不碰真实文件**：`dshCredentialsIo` 注入一个内存实现，于是这一组
+// 不依赖磁盘、也不需要任何真实密钥。
+
+const DSH_SECRET = 'sk-from-dsh-file-DO-NOT-LEAK'
+const DSH_FILE = 'C:\\Users\\alice\\.dsh\\.credentials.yaml'
+
+/** 内存版 DSH 凭证文件 IO：`text === null` 表示文件不存在。 */
+const dshIo = (text) => ({
+  readFile: async () => {
+    if (text === null) throw Object.assign(new Error('no such file'), { code: 'ENOENT' })
+    return text
+  },
+  stat: async () => ({ mtimeMs: 1_700_000_000_000 }),
+  now: () => '2026-01-01T00:00:00.000Z',
+})
+
+/** 与 `product/launcher/cli.mjs` 同形的假布局，好让 `layoutFor` 仍能复用。 */
+const withDsh = (args = {}, text = `version: 1\nrefs:\n  DEEPSEEK_API_KEY: ${DSH_SECRET}\n`) => ({
+  layout: layoutFor(), storeFactory: fakeFactory(), run: aclRunner(CLEAN_ACL), owner: OWNER,
+  dshCredentialsFile: DSH_FILE, dshCredentialsIo: dshIo(text), ...args,
+})
+
+test('⑦ 缺省**不接**回退来源：`fallback` 是 null，行为与这一批之前相同', async () => {
+  const r = await openProductSecrets({ layout: layoutFor(), storeFactory: fakeFactory(), run: aclRunner(CLEAN_ACL) })
+  assert.equal(r.ok, true)
+  // ★ 「没接」与「接了但没有文件」必须是两个不同的读数：前者是 `null`，
+  //   后者是 `{state:'absent'}`。塌成一个值，诊断就没法说"这一项不适用"。
+  assert.equal(r.fallback, null)
+  // 而且解析器上真的没有回退来源：库里没有的引用必须报 SECRET_NOT_FOUND。
+  await assert.rejects(() => r.resolver.resolveSecret('DEEPSEEK_API_KEY'),
+    (e) => e.code === 'SECRET_NOT_FOUND')
+})
+
+test('⑦ 接了：库里没有的引用由 DSH 文件回答，且**带出处**', async () => {
+  const r = await openProductSecrets(withDsh())
+  assert.equal(r.ok, true)
+  assert.equal(r.fallback.state, 'loaded')
+  assert.equal(r.fallback.code, null)
+  assert.equal(r.fallback.refs, 1)
+  assert.equal(r.fallback.records, 0)
+  const credential = await r.resolver.resolveCredential('DEEPSEEK_API_KEY')
+  assert.deepEqual({ ...credential }, {
+    ref: 'DEEPSEEK_API_KEY', value: DSH_SECRET, source: 'dsh-credentials-file',
+  })
+  // 明文形式仍然只有值本身（历史契约不变）。
+  assert.equal(await r.resolver.resolveSecret('DEEPSEEK_API_KEY'), DSH_SECRET)
+})
+
+test('⑦ ★ 优先级：Legion 的库里有这条时，DSH 文件里的**不会被用**', async () => {
+  const factory = fakeFactory()
+  const r = await openProductSecrets(withDsh({ storeFactory: factory }))
+  // 同一个引用名，两边都有，值不同。
+  await factory.seedAfter('DEEPSEEK_API_KEY', SECRET)
+  const credential = await r.resolver.resolveCredential('DEEPSEEK_API_KEY')
+  assert.equal(credential.value, SECRET)
+  assert.notEqual(credential.value, DSH_SECRET)
+  assert.equal(credential.source, 'legion-store')
+})
+
+test('⑦ 文件不在 ⇒ `state: absent`（不是错误，也不是"读不懂"）', async () => {
+  const r = await openProductSecrets(withDsh({}, null))
+  // 自检本身照样通过：**回退来源缺失不影响 Legion 自己的库**。
+  assert.equal(r.ok, true)
+  assert.equal(r.fallback.state, 'absent')
+  assert.equal(r.fallback.code, null)
+  // 但解析器上它确实被接上了：库里没有的引用会**去问它**，
+  // 然后仍然是"找不到"那条错（不是"读不懂"）。
+  await assert.rejects(() => r.resolver.resolveSecret('DEEPSEEK_API_KEY'),
+    (e) => e.code === 'SECRET_NOT_FOUND')
+  assert.equal(await r.resolver.resolveCredential('DEEPSEEK_API_KEY').catch((e) => e.code), 'SECRET_NOT_FOUND')
+})
+
+test('⑦ ★ 文件在读、但读不懂 ⇒ `state: unrecognized` 且**具名码**；自检仍 ok', async () => {
+  // 引号是 YAML 的一个特性，读取器不认它 → 整份被拒绝。
+  const r = await openProductSecrets(withDsh({}, `version: 1\nrefs:\n  DEEPSEEK_API_KEY: "${DSH_SECRET}"\n`))
+  // ★ 回退来源坏掉**不阻止启动**：Legion 自己的库仍然是唯一权威的写入路径，
+  //   把一个附带的便利功能判成 error 会让用户被锁在门外。
+  assert.equal(r.ok, true)
+  assert.equal(r.code, SECRETS_CHECK_CODES.OK)
+  assert.equal(r.fallback.state, 'unrecognized')
+  assert.equal(r.fallback.code, 'DSH_CREDENTIALS_QUOTED_SCALAR')
+  // ★ 并且"读不懂"**不**塌成"文件里没有这条"：
+  //   前者要用户去改文件写法，后者要用户去录入一条记录。
+  await assert.rejects(() => r.resolver.resolveSecret('DEEPSEEK_API_KEY'),
+    (e) => e.code === 'DSH_CREDENTIALS_QUOTED_SCALAR')
+  await assert.rejects(() => r.resolver.resolveSecret('DEEPSEEK_API_KEY'),
+    (e) => e.code !== 'SECRET_NOT_FOUND')
+})
+
+test('⑦ 文件读不出来（EACCES）⇒ `state: unreadable`，与 `unrecognized` 不同码', async () => {
+  const io = {
+    readFile: async () => { throw Object.assign(new Error('拒绝访问'), { code: 'EACCES' }) },
+    stat: async () => ({ mtimeMs: 0 }),
+  }
+  const r = await openProductSecrets(withDsh({ dshCredentialsIo: io }))
+  assert.equal(r.ok, true)
+  assert.equal(r.fallback.state, 'unreadable')
+  assert.equal(r.fallback.code, 'DSH_CREDENTIALS_UNREADABLE')
+  assert.notEqual(r.fallback.state, 'unrecognized')
+})
+
+test('⑦ 自检文案说得清回退来源的状态，且**不含任何值**', async () => {
+  const loaded = await openProductSecrets(withDsh())
+  // `loaded` 不占字：能读懂就没什么可说的。
+  assert.ok(!loaded.message.includes('DSH'), `能读懂时不该在结论里重复一遍：${loaded.message}`)
+
+  const absent = await openProductSecrets(withDsh({}, null))
+  assert.match(absent.message, /不存在/)
+  assert.match(absent.message, /不是错误/)
+
+  const bad = await openProductSecrets(withDsh({}, `version: 1\nrefs:\n  K: "${DSH_SECRET}"\n`))
+  assert.match(bad.message, /读不懂/)
+  assert.match(bad.message, /DSH_CREDENTIALS_QUOTED_SCALAR/)
+  assert.match(bad.message, /没有被猜着读/)
+
+  for (const r of [loaded, absent, bad]) {
+    const surface = JSON.stringify({ message: r.message, fallback: r.fallback, code: r.code })
+    assert.ok(!surface.includes(DSH_SECRET), `值泄漏进了自检结果：${surface}`)
+    assert.ok(!surface.includes(SECRET), `值泄漏进了自检结果：${surface}`)
+  }
+})
+
+test('⑦ 空字符串路径 = 不接（与缺省同一条路）', async () => {
+  const r = await openProductSecrets({ layout: layoutFor(), storeFactory: fakeFactory(), run: aclRunner(CLEAN_ACL), dshCredentialsFile: '' })
+  assert.equal(r.fallback, null)
+})
+
+test('⑦ 回退来源**不写**任何东西：文件逐字节不变', async () => {
+  // 这一条把"只读"变成一个可失败的断言：如果哪一天有人在解析路径上
+  // 顺手"补一个 version"或"重写一份"，它会红。
+  let writes = 0
+  const text = `version: 1\nrefs:\n  DEEPSEEK_API_KEY: ${DSH_SECRET}\n`
+  const io = {
+    readFile: async () => text,
+    stat: async () => ({ mtimeMs: 1 }),
+    writeFile: async () => { writes += 1 },
+  }
+  const r = await openProductSecrets(withDsh({ dshCredentialsIo: io }))
+  await r.resolver.resolveSecret('DEEPSEEK_API_KEY')
+  await r.resolver.resolveSecret('NOT_THERE').catch(() => null)
+  assert.equal(writes, 0)
+  assert.equal(text, `version: 1\nrefs:\n  DEEPSEEK_API_KEY: ${DSH_SECRET}\n`)
+})

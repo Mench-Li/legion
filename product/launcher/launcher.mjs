@@ -237,6 +237,15 @@ export function createLauncher({
   secretsRun = null,
   secretsOwner = null,
   requireProtected = true,
+  /**
+   * DSH `$DSH_HOME/.credentials.yaml` 的路径（PRT-509 路线 A′）。
+   *
+   * `null` = **不接**只读回退来源（`product/launcher/cli.mjs` 从 `DSH_HOME`
+   * 推出路径；`DSH_HOME` 未设或用户用 `--no-dsh-credentials` 关掉时就是 null）。
+   * 它只影响自检怎么**描述**回退来源；真正的解析优先级在
+   * `runtime/probe/secret-resolver.mjs` 里，只有一处。
+   */
+  dshCredentialsFile = null,
 } = {}) {
   if (layout === null || typeof layout !== 'object') throw new Error('createLauncher 需要 layout（见 product/paths.mjs）')
 
@@ -393,6 +402,10 @@ export function createLauncher({
         run: secretsRun,
         owner: secretsOwner,
         requireProtected,
+        // PRT-509 路线 A′：把**只读**回退来源的位置一起交给自检，
+        // 这样"DSH 的凭证文件在不在、读不读得懂"会出现在启动诊断里，
+        // 而不是只在某一次解析失败时才被发现。
+        dshCredentialsFile,
       })
       return r.diagnostics
     } catch (err) {

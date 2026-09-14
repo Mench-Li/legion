@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-13　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **179 套件 / 4989 用例 / 0 fail**（证据 `.ci/prt-214b/`）
+**最近一次全量基线**：2026-09-13　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **182 套件 / 5198 用例 / 0 fail**（证据 `.ci/prt-214c/`）
 （**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数会少）
 —— 以本文件所在提交为准；证据 `.ci/prt-901/`（PRT-901/902 第三方组件清单、SBOM 与商业分发条件那一批）
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
@@ -3457,6 +3457,171 @@
 > `docs/DUAL-WRITE-RACE-evidence/verify-evidence.md`。
 
 ---
+
+## 2026-09-14　PRT-214 续批七（生产注册方）+ PRT-509 路线 A′（DSH 只读凭证读桥）
+
+本批补上**两处具名的缺失环节**。两处都是此前文档自己写下来的前提——一段写在 PRT-212 的诚实边界里，
+一段写在 PRT-509 §9 的"仍未解"里。本批把这两句话兑现了，也把它们**换成了新的、更小的缺口**。
+
+### 一、PRT-214 续批七：审批端口工厂的**生产注册方**（「跑了然后拒绝」→「跑了然后装上」）
+
+上一批的诚实边界最后一条写着：审批端口工厂**没有生产注册方**，所以**真部署永远装不上**强制面
+（`ENFORCEMENT_ROOT_ROW_NO_APPROVAL_PORT_FACTORY`，启动即失败）。本批交付
+`team-hub/approval-registrar-row.mjs`：它**就是补丁层那一行的模块**，在**模块求值期**调
+`setApprovalPortFactory(...)`，并**默认导出真的那个 root row 插件对象**（`===`，不是形状相同的替身）。
+
+**★ 为什么不是"再加一行注册行"——这是在真进程里\*\*量\*\*出来的。**
+`@deepseek-ai/cordis-plugin-loader` 的 `EntryGroup.create` 是
+`await Promise.allSettled(config.map(o => this.create(o)))`，即**兄弟模块并发求值**；
+于是"注册行先求值"只在兄弟都不挂起时**碰巧**成立。真进程 2×2 矩阵（每格 6 次）：
+
+| 装配 | 注册前挂起 | 根行先 | 根行后 |
+| --- | --- | --- | --- |
+| 独立的第二行 | 无 | 6/6 装上 | 6/6 装上 |
+| 独立的第二行 | 顶层 `await` 500ms | **6/6 拒绝** | **6/6 拒绝** |
+| **同一模块图** | 同样的 500ms | 6/6 装上 | 6/6 装上 |
+
+行序甚至不是那个变量：兄弟模块一挂起，两种行序都拒绝。
+
+> 一个"靠兄弟行的求值顺序"的注册，与一个"在同一个模块图里、求值顺序无关"的注册，
+> 在两者都不挂起时是同一个东西——只不过前者会在某天有人加一个 `await` 之后悄悄退化成拒绝。
+
+**真补丁层（一个字节都没改）在真 DSH 进程里的原始读数**（`_prt-handoff/prt214b-real-patch-driver.mjs`）：
+
+```text
+exit=0
+SERVICES-ROW-APPLY-RAN / PROBE-APPLY-RAN
+WATERFALL-RESULT {"kind":"deny","reason":"无法投影这次调用（tool-request-target-missing）…"}
+GATE-DENIED
+MOUNT …/plugins/hard-floor.mjs              fiberState: 2
+MOUNT …/team-hub/approval-registrar-row.mjs fiberState: 2
+MOUNT …/plugins/pre-execute-row.mjs         fiberState: 2
+MOUNT …/plugins/approval-answerer-row.mjs   fiberState: 2
+ENFORCEMENT-ROOT-SERVICE present
+APPROVAL-PORT-FACTORY registered
+```
+
+**反向对照**（`PRT214B_MODE=no-registrar`，把插件本体当那一行的模块 = 注册方缺席）：
+`exit=1`，仍然是具名的 `ENFORCEMENT_ROOT_ROW_NO_APPROVAL_PORT_FACTORY`。
+**没有**把响亮拒绝改成静默 no-op——那正是这片区域存在的理由。
+
+**分层方向**（注册方在 team-hub 侧 import `runtime/dsh-composition/`，不是反过来）：
+模块图 45 文件、**`runtime/` → `team-hub/` 0 处**、**模块环 0 个**、`@deepseek-ai/*` 0 个。
+我自己独立重走了一遍图：33 文件可达、0 环、0 反向边。
+
+**凭证不发明**：复用既有的 `hubIo()`，**不**用要求非空 token 的 `createHubClient()`；
+新增的 `approvalHubOf()` 只做一件事——`status >= 400` 就抛。
+不抛的话端口会把 401 读成 `UNKNOWN_STATUS`，把**鉴权失败**记成**协议缺陷**。
+
+**⚠️ 仍然 🟡**（诚实边界，按字面读；「这一行在真 DSH 进程里装上了」≠「强制面在真部署里生效」）：
+
+- **没有任何一次真实工具调用被拦下。** `deny` 的对象是 `no-such-tool`，理由是**投影失败**
+  （`tool-request-target-missing`）。这是 fail-closed 的正确表现，但**不是**"某个真工具被拒"——
+  一次性的 `bundles: []` profile 里没有真 ToolRuntime。
+- **宿主是桩**：`tools` / `approval` 由探针行 `ctx.provide`。所以"四行 ACTIVE"是**桩宿主**上的读数。
+- **审批端口造出来了，但一次申请都没发过**（构造期不发 HTTP，进程里也没有 hub）。
+- **配了 token 的部署会退化成"审批类调用一律拒绝"**：Runtime 进程拿不到 `TEAM_HUB_TOKEN`，
+  端口以 `APPROVAL_PORT_CHECK_FAILED` → `unavailable` → 工具不执行（fail closed，方向安全但功能未通）。
+  **这条没有用空 token 或默认值糊过去。**
+- `render.mjs --write` **仍然 exit 3**：静态补丁文件只有 3 行，
+  `legion-enforcement-pre-execute` / `-approval-answerer` 依然不进文档
+  （它们要的是进程内的桥与端口，由 `root.mjs` 在进程内挂载，静态 patch 只能带数据）。
+- 那份 **2×2 矩阵是一次性证据脚本**（24 个真进程），**不是 CI 门槛**——这是本批一个真实的弱点：
+  那份结论不是每次 CI 都能复现的。
+- **注册是进程级副作用**：import 该模块就装工厂（刻意的），用例用返回的注销闭包还原。
+- **可搬移性变差**：补丁层的 root 行现在指向 `team-hub/`，补丁层不再能连同 `plugins/` 一起单独搬走。
+- **扫描覆盖不对等**：`team-hub/` 在 `scan.mjs` 的 `PROCESSES` 里，`runtime/` **不在** ⇒
+  `scan --check` 的 PASS **不是**对新 `runtime/` 代码的判据。
+
+### 二、PRT-509 路线 A′：`$DSH_HOME/.credentials.yaml` 的**只读**读桥
+
+决策是**人**做的（路线 A′，不是实现挑的）：Legion 的 DPAPI 密钥库**仍是唯一写路径**，
+只加一个**只读**回退来源读 DSH 那份文件，且**只认 DSH 自己写出的那个子集**，子集之外一律拒绝。
+
+- 新增 `security/secrets/dsh-credentials.mjs`（**零第三方依赖**；DSH 用的是 `yaml` 包，Legion 不许引）。
+  识别的是 DSH 的 v1 布局（`version`/`refs`/`records`、`api-key` 与 `grant` 两种记录），
+  **40 个具名拒绝码**覆盖锚点/别名/标签/多行标量/流式/引号标量/制表符/重复键/未知顶层键/未知记录字段……
+  全部 → `SECRET_UNAVAILABLE`。
+- **★ 价值有一半在交叉核对**：同一批夹具喂给 **DSH 真实的** `parseCredentialsDocument`
+  （`$DSH_CHECKOUT` 下已构建的 `lib/index.js`），三重保证：①本读取器接受 ⇒ DSH 必接受且逐字段相同；
+  ②拒绝清单逐条标注 DSH 侧行为；③"我们更严"的清单 15 条**逐字钉住**。
+  **它跑了，不是 skip**：`DSH_CHECKOUT` 已设 → 套件 **164 例全跑、skipped 0**；
+  未设 → 逐条 skip 并留下跳过条数。
+
+> 一个"手写的子集读取器"，与一个"真的读懂了 DSH 格式的读取器"，
+> 在 DSH 不换写法的那些日子里是同一个东西——只不过前者会在 DSH 换个写法的第二天，
+> 安静地把一份凭证文件读错，或者整份读不出来。
+
+**优先级被用例钉住**（这一批最重要的一条是 ③/④ 的分界）：
+① 引用名为空 → 两个来源都不碰；② 库里**有** → 用它，**一次都不问**回退来源（断言 `asked === 0`）；
+③ 库里**没有这条** → 才问回退来源；④ 库里**有但取不出来** → **不回退**（断言 `asked === 0`）；
+⑤ 两边都没有 → 仍是那一条 `SECRET_NOT_FOUND`。
+
+> "解不开"（换了 Windows 账户）必须报解不开，而不是从别处拿到一把保护等级**不同**的旧钥匙——
+> 一个"库里没有就去别处找"的回退，与一个"钥匙打不开了就换一把更差的"的回退，
+> 在用户按下回车的那一刻是同一件事——只不过前者看起来只是方便。
+
+**四个读数不得塌成一个**：文件不在 / 读不出来 / 读不懂 / 文件里没这条 / 这条不可寻址；
+`fallback: null`（这次没接）与 `{state:'absent'}`（接了、文件不在）也是**两件事**。
+出处可见：`source` = `legion-store` / `dsh-credentials-file`，三个来源名**互不相等**（有用例断言）。
+
+**★ 顺手更正了 PRT-509 §9 的一句错话**：原文称 Legion 的 `SECRET_REF_RE`"强制的正是『恰好两段』"——
+读 `security/secrets/ref.mjs` 后确认**不是**：单段（`DEEPSEEK_API_KEY`）与多段（`a/b/c`）都合法。
+所以与 DSH 的对应关系是"无 `/` → `refs`、有 `/` → `records`"，不是"必然两段"。
+
+> 一条没有出处的结论，与一条编出来的结论，在读者无法核实这一点上是同一个东西——只不过前者可能是对的。
+
+**⚠️ 仍然 🟡**：只覆盖 DSH 写出的子集（DSH 换写法就整份拒绝，方向安全但会坏）；
+`records` 里 `env` **恰好一条**时取用它，是**替 DSH 做的判断**（DSH 不定义该解析出哪个字符串），
+选"多条就拒绝"是因为另一选项会编出用户没选过的凭证——**这点值得 review**；
+**没有**端到端产品级走查（验的是接线 + 各层单测，没有真跑 `legion --wizard` 让 DSH 文件回答一次真实请求）；
+1 MiB 上限是拍的；行号进错误比 `security/secrets/acl.mjs`（连路径都不带）松一格；
+`security/` 与 `runtime/` **都不在** `scan.mjs` 的进程清单、也不在 `check.mjs` 的 `SCHEMA_FILES` 里
+⇒ 新模块那 40 个字面量**不受**"必须登记 nonEnvLiterals"那条检查约束（真实覆盖缺口，未填）。
+
+### 三、PRT-212 的**前置条件**兑现了，但它仍然不是"已完成"
+
+PRT-212 的行里写着一个明确的前提：「`createEnforcementBridge` 在全仓库**只有测试构造它**，
+没有任何生产代码把 `requestApproval` 递进去」，并声明「在它解决之前，PRT-212 不该被读成已完成」。
+本批的注册方**就是**那段生产代码：它把 `createHubApprovalPort()` 造成的端口交给组合根，
+而组合根在真 DSH 进程里确实拿到了它。
+
+**⚠️ 仍然 🟡**：被替换掉的那个前提不是全部。本批证明的是"端口被造出来并交给了组合根"，
+**不是**"一次真实的工具调用走完了申请→批准→执行"。
+
+### 四、本批的验证
+
+- **8 道门禁全 PASS**：`scan --check`（542 疑似字面量）、`dsh-boundary --check`（3 文件 / 26 处，基线内）、
+  `baseline-snapshot --check`、`topology-inventory --diff`、`progress-check`、
+  `check-docs`、`ci-syntax`（50 脚本）、`encoding-check --all --quiet`（1893 文件）。
+- **全量 CI `.ci/prt-214c/`：9 个阶段全 PASS**，`test` **182 套件 / 5198 用例 / 0 fail**
+  （基线 `.ci/prt-214b/` 为 179 / 4989）。新登记 `security/secrets/dsh-credentials.test.mjs` 到 `run-ci` 后，
+  stageTest 末尾的"套件清单完备性"检查通过。
+- **变红验证 191/191 咬住、0 无效、0 没咬住**，且**还原逐字节通过**。
+  本批新增 7 个探针，其中两个我**自己写错了、被自己的校验抓住**（见下），改成有效探针后才计入。
+
+#### 本批我自己犯的两个错（写下来，因为它们和"实现写错"是同一类读数）
+
+1. **独立复核用了一个"自己会炸"的观察者。** 我第一版真进程复核脚本在观察者行里读
+   `ctx.loader.entries()` 并 `map/slice`，于是**我的观察者自己在 apply 期抛错**，
+   把三格全毒了——连"不给补丁层"的对照组也 `exit=1`。那一刻它**看起来**像"装配失败"。
+
+   > 一个自己会炸的观察者，与一次真的装配失败，在只看退出码时是同一个读数。
+
+   修好观察者后，对照 `exit=0`、实验 `exit=1`，才把"没有 `tools` 服务 ⇒ hard-floor 合法 pending"
+   这个**真正的原因**读出来（我那个极简 profile 没有 `tools`，测试用的是桩宿主）。
+
+2. **两个探针是无效的，被 harness 的"锚点未找到 / fail=0"判据抓住，没有当成咬住。**
+   ⑪① 锚在了 `root-row.mjs` 的**模块级 setter** 上，而那条守卫在 **apply 期**那一处；
+   ⑫④ 我改了 `refuse()` 自己——那是**空招**：多数调用点传的 `cause` 是 `null` 或位置串，
+   **值根本不在那里**。换个路由（把值从 `cause` 送进去）仍然不咬，因为
+   `SecretStoreError` 的 `cause` 会过 `redactCause()`（`sk-…`／32 位十六进制被抹成 `<redacted>`）——
+   **下一层替我拦住了**。
+
+   > 一个"下一层也拦得住"的实现，会让上一层的用例**看起来**守住了。
+
+   真正该问的是那条**没有兜底**的通道：`ref=` 在消息里是**不脱敏**的，它只靠"调用方传键名"这条约定守着。
+   把值放进那条通道，用例立刻红（`fail=1`）——**这才证明那条用例真的守住了东西**。
 
 ## 2026-09-13　PRT-214 续批 + PRT-211 源码级复核（两行都**仍是** 🟡）
 

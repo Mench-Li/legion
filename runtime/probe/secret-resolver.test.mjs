@@ -391,3 +391,239 @@ test('⑥ 自检不抛：坏掉的 store 也返回结果', () => {
   assert.equal(r.ok, false)
   assert.ok(!r.message.includes('bob'), '自检消息里也不得带出路径/账户')
 })
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ⑦ 回退来源与出处（PRT-509 路线 A′）
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// 这一组守两件事：
+//
+//   ① **只有"库里没有这条"才问回退来源。**
+//      "解不开"（换了 Windows 账户）、"库坏了"、"引用名非法"都**不**回退。
+//      那不是"没有"，那是"有但取不出来"——回退等于把保护等级从 DPAPI
+//      静默降到明文。这一条是这一组里最重要的一条。
+//
+//   ② **结果必须说出是哪一边回答的。**
+//      两个来源都能回答而结果不带出处，就是"我轮换的那把钥匙没生效"
+//      的起点。所以断言的是**具体的来源名字**，不是一个布尔值。
+
+const FALLBACK_SECRET = 'sk-from-dsh-file-DO-NOT-LEAK'
+const FALLBACK_NAME = 'dsh-credentials-file'
+
+/** 一个最小的只读回退来源：与 `createDshCredentialsSource` 同形。 */
+function makeFallback({ entries = {}, source = FALLBACK_NAME, describe: withDescribe = null } = {}) {
+  const get = async (ref) => (ref in entries
+    ? { ref, value: entries[ref], resolvedAt: '2026-01-01T00:00:00.000Z', source }
+    : null)
+  const fallback = { get }
+  if (source !== null) fallback.source = source
+  if (withDescribe !== null) fallback.describe = withDescribe
+  return fallback
+}
+
+test('⑦ 库里命中 ⇒ **不问**回退来源，出处是 legion-store', async () => {
+  const { store } = makeStore()
+  await store.put('legion/openai', SECRET)
+  let asked = 0
+  const fallback = makeFallback({ entries: { 'legion/openai': FALLBACK_SECRET } })
+  const spy = { source: fallback.source, get: async (ref) => { asked += 1; return fallback.get(ref) } }
+
+  const r = createSecretResolver({ store, fallback: spy })
+  const credential = await r.resolveCredential('legion/openai')
+  assert.equal(credential.value, SECRET)
+  assert.equal(credential.source, 'legion-store')
+  // ★ 反面对照：库里已经有这条时，回退来源**一次都不能被问到**。
+  //   少了这一条，一个"总是两个来源都读、然后挑一个"的实现照样能绿——
+  //   而它会把回退来源的读取变成每次解析的固定开销与固定泄漏面。
+  assert.equal(asked, 0)
+})
+
+test('⑦ 库里没有这条 ⇒ 回退来源回答，出处是**它自己声明的名字**', async () => {
+  const { store } = makeStore()
+  const r = createSecretResolver({ store, fallback: makeFallback({ entries: { 'legion/openai': FALLBACK_SECRET } }) })
+  const credential = await r.resolveCredential('legion/openai')
+  assert.deepEqual({ ...credential }, {
+    ref: 'legion/openai', value: FALLBACK_SECRET, source: FALLBACK_NAME,
+  })
+  // 明文形式仍然只有值本身（历史契约不变）
+  assert.equal(await r.resolveSecret('legion/openai'), FALLBACK_SECRET)
+})
+
+test('⑦ ★ 优先级：两边都有时 Legion 的库赢，且出处说得出来', async () => {
+  const { store } = makeStore()
+  await store.put('legion/openai', SECRET)
+  const r = createSecretResolver({ store, fallback: makeFallback({ entries: { 'legion/openai': FALLBACK_SECRET } }) })
+  const credential = await r.resolveCredential('legion/openai')
+  assert.equal(credential.value, SECRET)
+  assert.notEqual(credential.value, FALLBACK_SECRET)
+  // 两个读数**不同**：否则"Legion 优先"这句话在结果里看不出来。
+  assert.notEqual(credential.source, FALLBACK_NAME)
+  assert.equal(credential.source, 'legion-store')
+})
+
+test('⑦ ★ 库里"解不开"时**不**回退：报的是解密失败，不是从别处取到一把旧钥匙', async () => {
+  const { store, backend } = makeStore()
+  await store.put('legion/openai', SECRET)
+  // 换一台机器/换一个 Windows 账户：密文还在，但解不开。
+  const foreign = createProtector({
+    scheme: DPAPI_SCHEME,
+    protect: (v) => `foreign:${v}`,
+    unprotect: () => { throw new Error('DPAPI 解不开（换了账户？）') },
+  })
+  const brokenStore = createSecretStore({ backend, protector: foreign })
+  let asked = 0
+  const fallback = makeFallback({ entries: { 'legion/openai': FALLBACK_SECRET } })
+  const spy = { source: fallback.source, get: async (ref) => { asked += 1; return fallback.get(ref) } }
+  const r = createSecretResolver({ store: brokenStore, fallback: spy })
+
+  await assert.rejects(() => r.resolveSecret('legion/openai'),
+    (e) => e.code === 'SECRET_DECRYPT_FAILED' && e.runtimeErrorCode === 'SECRET_UNAVAILABLE')
+  // ★ 这是本组最重要的一条断言：**一次都没有回退**。
+  //   回退了的话，用户换了账户之后会看到"密钥可用"——用的却是一把
+  //   来自另一个来源、保护等级不同的钥匙。
+  assert.equal(asked, 0)
+})
+
+test('⑦ 引用名非法时也不回退（那不是"没有"，那是"根本不是一个引用"）', async () => {
+  const { store } = makeStore()
+  let asked = 0
+  const spy = { source: FALLBACK_NAME, get: async () => { asked += 1; return null } }
+  const r = createSecretResolver({ store, fallback: spy })
+  await assert.rejects(() => r.resolveSecret('..'), (e) => e.code === 'SECRET_REF_INVALID')
+  assert.equal(asked, 0)
+})
+
+test('⑦ 两个来源都没有 ⇒ 仍然是**那一条** SECRET_NOT_FOUND', async () => {
+  const { store } = makeStore()
+  const r = createSecretResolver({ store, fallback: makeFallback({ entries: {} }) })
+  await assert.rejects(() => r.resolveCredential('legion/openai'),
+    (e) => e.code === 'SECRET_NOT_FOUND' && e.runtimeErrorCode === 'SECRET_UNAVAILABLE')
+})
+
+test('⑦ 回退来源自己拒绝时，它的**具名码**原样传出（不被塌成"没找到"）', async () => {
+  const { store } = makeStore()
+  const fallback = {
+    source: FALLBACK_NAME,
+    get: async (ref) => { throw new SecretStoreError('DSH_CREDENTIALS_QUOTED_SCALAR', { ref }) },
+  }
+  const r = createSecretResolver({ store, fallback })
+  // 读取器"读不懂整份文件"必须看起来**不是**"文件里没有这一条"：
+  // 前者要用户去修文件，后者要用户去录入一条记录。
+  await assert.rejects(() => r.resolveSecret('legion/openai'),
+    (e) => e.code === 'DSH_CREDENTIALS_QUOTED_SCALAR')
+  await assert.rejects(() => r.resolveSecret('legion/openai'),
+    (e) => e.code !== 'SECRET_NOT_FOUND' && e.runtimeErrorCode === 'SECRET_UNAVAILABLE')
+})
+
+test('⑦ 没有 secretRef 的档案返回 null，且**不碰**任何来源', async () => {
+  const { store } = makeStore()
+  let asked = 0
+  const spy = { source: FALLBACK_NAME, get: async () => { asked += 1; return null } }
+  const r = createSecretResolver({ store, fallback: spy })
+  assert.equal(await r.resolveCredential(null, { id: 'local', secretRef: null }), null)
+  assert.equal(await r.resolveCredential(undefined, { id: 'local' }), null)
+  assert.equal(asked, 0)
+})
+
+test('⑦ 回退来源的形状不对 ⇒ **构造时**就拒绝（不是静默忽略它）', () => {
+  const { store } = makeStore()
+  // 静默忽略一个配错了的回退来源，会让"我配了回退来源"与
+  // "回退来源从来没被问过"在行为上完全一样。
+  assert.throws(() => createSecretResolver({ store, fallback: {} }), TypeError)
+  assert.throws(() => createSecretResolver({ store, fallback: 'yes' }), TypeError)
+  assert.equal(RESOLVER_RAISED.FALLBACK_INVALID, 'SECRET_FALLBACK_INVALID')
+  // 一个**没有声明名字**的合法来源可以用，但要有一个说得出来的兜底名字。
+  assert.doesNotThrow(() => createSecretResolver({ store, fallback: { get: async () => null } }))
+})
+
+test('⑦ 出处不是布尔：legion-store / 回退来源名 / 未命名兜底，三者互不相等', async () => {
+  const { store } = makeStore()
+  const hit = createSecretResolver({ store, fallback: makeFallback({ entries: { 'legion/openai': 'sk-f' } }) })
+  const fromFallback = await hit.resolveCredential('legion/openai')
+  assert.equal(fromFallback.source, FALLBACK_NAME)
+
+  const unnamed = createSecretResolver({ store, fallback: {
+    get: async (ref) => (ref === 'legion/openai' ? { ref, value: 'sk-f' } : null),
+  } })
+  assert.equal((await unnamed.resolveCredential('legion/openai')).source, 'fallback')
+
+  await store.put('legion/openai', SECRET)
+  assert.equal((await hit.resolveCredential('legion/openai')).source, 'legion-store')
+
+  const sources = new Set([fromFallback.source, 'fallback', 'legion-store'])
+  assert.equal(sources.size, 3)
+})
+
+test('⑦ onResolve 带上 source，且仍然拿不到明文', async () => {
+  const { store } = makeStore()
+  const seen = []
+  const r = createSecretResolver({
+    store,
+    fallback: makeFallback({ entries: { 'legion/openai': FALLBACK_SECRET } }),
+    onResolve: (e) => seen.push(e),
+  })
+  await r.resolveSecret('legion/openai')
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0].source, FALLBACK_NAME)
+  assert.equal(seen[0].ok, true)
+  const text = JSON.stringify(seen)
+  assert.ok(!text.includes(FALLBACK_SECRET), `回调收到了明文：${text}`)
+  assert.ok(!text.includes(SECRET), `回调收到了明文：${text}`)
+
+  // 失败路径上也带 source——"谁没有这条"与"谁不肯给"是两件事。
+  seen.length = 0
+  await r.resolveSecret('legion/absent').catch(() => null)
+  assert.equal(seen[0].ok, false)
+  assert.equal(seen[0].source, FALLBACK_NAME)
+})
+
+test('⑦ credentialVersionOf：库优先，库里没有才问回退来源的文件时间', async () => {
+  const { store } = makeStore()
+  const describe = async (ref) => (ref === 'legion/openai' ? { ref, updatedAt: '2026-02-02T00:00:00.000Z' } : null)
+  const r = createSecretResolver({ store, fallback: makeFallback({ describe }) })
+  // 库里没有这条 → 用回退来源的时间（它是**文件**时间，过一个粗但安全的方向：
+  // 任何一个条目的改动都会让所有回退来源的缓存失效）。
+  assert.equal(await r.credentialVersionOf({ secretRef: 'legion/openai' }), '2026-02-02T00:00:00.000Z')
+
+  // 库里有了 → 库的时间赢，回退来源**不再被问**。
+  await store.put('legion/openai', SECRET)
+  const version = await r.credentialVersionOf({ secretRef: 'legion/openai' })
+  assert.notEqual(version, '2026-02-02T00:00:00.000Z')
+  assert.match(version, /^\d{4}-\d{2}-\d{2}T/)
+
+  // 回退来源不提供 describe（默认的 `createSecretResolver` 契约只要求 get）
+  // → 版本是 null，于是探测缓存**永不命中**。宁可多探一次，不能用"过期的
+  // 版本号"让轮换悄悄不生效。
+  const noDescribe = createSecretResolver({ store: makeStore().store, fallback: makeFallback({ entries: {} }) })
+  assert.equal(await noDescribe.credentialVersionOf({ secretRef: 'legion/openai' }), null)
+})
+
+test('⑦ 库里"没有这条"的两种实现都要回退：抛 SECRET_NOT_FOUND 与返回 null', async () => {
+  // 真实 `security/secrets/store.mjs` 的 `get()` 对缺失的引用**抛**
+  // `SECRET_NOT_FOUND`（见 store.mjs:296），所以上面那些用例走的是 catch 那一路。
+  // 而本函数里还有另一半：`store.get` 返回 `null` 而不抛的实现也必须回退。
+  // 少了这一条，一个"只在异常时才回退"的实现照样全绿——
+  // 而它与正确实现在**换一个 store 实现**之后就会分道扬镳。
+  const fallback = makeFallback({ entries: { 'legion/openai': FALLBACK_SECRET } })
+  const nullStore = {
+    get: async () => null,
+    describe: async () => null,
+    protection: () => ({ scheme: DPAPI_SCHEME, protected: true }),
+  }
+  const r = createSecretResolver({ store: nullStore, fallback })
+  assert.equal((await r.resolveCredential('legion/openai')).value, FALLBACK_SECRET)
+  assert.equal((await r.resolveCredential('legion/openai')).source, FALLBACK_NAME)
+
+  // 反面对照：抛别的具名码时**不**回退（返回 null 与抛 NOT_FOUND 不是
+  // 同一件事——前者是"这里没有"，后者可能只是"这次取不到"）。
+  let asked = 0
+  const brokenStore = {
+    get: async () => { throw new SecretStoreError('SECRET_STORE_UNREADABLE', { ref: 'legion/openai' }) },
+    describe: async () => null,
+    protection: () => ({ scheme: DPAPI_SCHEME, protected: true }),
+  }
+  const spy = { source: FALLBACK_NAME, get: async (ref) => { asked += 1; return fallback.get(ref) } }
+  const r2 = createSecretResolver({ store: brokenStore, fallback: spy })
+  await assert.rejects(() => r2.resolveCredential('legion/openai'), (e) => e.code === 'SECRET_STORE_UNREADABLE')
+  assert.equal(asked, 0)
+})

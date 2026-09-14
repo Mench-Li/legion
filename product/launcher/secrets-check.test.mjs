@@ -196,3 +196,108 @@ test('诊断对象不可变（避免下游顺手改写等级）', () => {
   assert.equal(Object.isFrozen(diags), true)
   assert.throws(() => { diags.push({}) }, TypeError)
 })
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DSH 只读回退来源的读数 → 诊断（PRT-509 路线 A′）
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// 这一段的**判据**与 ACL 那一段逐字同构，理由也同构：
+//
+//   | state | 诊断 | 为什么 |
+//   | --- | --- | --- |
+//   | `absent` | 无 | 从没用过 DSH 的 Models 页时就是这个形状，是常态 |
+//   | `loaded` | 无 | 读得懂就没什么可说的 |
+//   | `unrecognized` | warn | 文件在、不在认识的子集里：**要用户动手** |
+//   | `unreadable` | warn | 文件在、读不出来：同上 |
+//
+// 后两者**必须不同码**：一个要用户去改文件写法，一个要用户去查权限/磁盘。
+// 把前者塌成后者，用户会去查一个并不存在的权限问题。
+
+/** 造一份带回退来源读数的自检结果。 */
+const withFallback = (state, code = null, ok = true) => check({
+  ok, aclVerified: true, acl: { ok: true, code: 'ACL_OK' }, fallback: { state, code },
+})
+
+test('⑦ `absent` 与 `loaded` 都**不产生**诊断（常态与"没问题"都不该占字）', () => {
+  for (const state of ['absent', 'loaded']) {
+    assert.deepEqual(secretsDiagnostics(withFallback(state)), [],
+      `${state} 不该产生诊断`)
+  }
+})
+
+test('⑦ **`unrecognized` → warn，且与 `unreadable` 是不同码**', () => {
+  const bad = secretsDiagnostics(withFallback('unrecognized', 'DSH_CREDENTIALS_QUOTED_SCALAR'))
+  assert.equal(bad.length, 1)
+  assert.equal(bad[0].severity, 'warn')
+  assert.equal(bad[0].code, SECRETS_DIAGNOSTIC_CODES.DSH_CREDENTIALS_UNRECOGNIZED)
+  // 具名码必须出现在文案里：不说"哪一类不认识"，用户只能靠猜。
+  assert.match(bad[0].message, /DSH_CREDENTIALS_QUOTED_SCALAR/)
+  // "整份被拒绝"而不是"少读了几条"——这两句话的下一步动作完全不同。
+  assert.match(bad[0].message, /整份被拒绝/)
+
+  const unreadable = secretsDiagnostics(withFallback('unreadable', 'DSH_CREDENTIALS_UNREADABLE'))
+  assert.equal(unreadable.length, 1)
+  assert.equal(unreadable[0].code, SECRETS_DIAGNOSTIC_CODES.DSH_CREDENTIALS_UNREADABLE)
+  // ★ 两个码**不同**：否则"看过了，它不在子集里"会看起来像"根本没看到"。
+  assert.notEqual(unreadable[0].code, bad[0].code)
+})
+
+test('⑦ ★ 回退来源坏了**不阻止启动**：两种状态都是 warn，没有 error', () => {
+  // 回退来源是**附带的便利**——Legion 自己的库仍然是唯一权威的写入路径，
+  // 也是第一顺位。把它判成 error 会让一个附属功能把用户锁在门外。
+  for (const state of ['unrecognized', 'unreadable']) {
+    const diags = secretsDiagnostics(withFallback(state, 'X'))
+    assert.equal(diags.length, 1)
+    assert.equal(diags[0].severity, 'warn', `${state} 不得判成 error`)
+    assert.ok(!diags.some((d) => d.severity === 'error'))
+  }
+})
+
+test('⑦ `fallback: null`（这次没接）与 `absent`（接了、文件不在）**都不产生诊断**', () => {
+  // 两者是不同的事实，但两者都不该说话——沉默在这里说的是"这一项不适用"。
+  // 把它们变成一个值会丢掉"到底接没接"这条信息（product/secrets.mjs 里保留着）。
+  assert.deepEqual(secretsDiagnostics(check({ ok: true, aclVerified: true, fallback: null })), [])
+  assert.deepEqual(secretsDiagnostics(withFallback('absent')), [])
+})
+
+test('⑦ 回退来源的读数在**失败分支上也要报**（失败原因可能不止一个）', () => {
+  const diags = secretsDiagnostics(check({
+    ok: false, code: 'SECRETS_STORE_OPEN_FAILED', message: '损坏',
+    acl: { ok: false, code: 'ACL_TOO_PERMISSIVE', message: 'Users 可读' },
+    fallback: { state: 'unrecognized', code: 'DSH_CREDENTIALS_NO_VERSION' },
+  }))
+  const codes = codesOf(diags)
+  assert.ok(codes.includes(SECRETS_DIAGNOSTIC_CODES.OPEN_FAILED))
+  assert.ok(codes.includes(SECRETS_DIAGNOSTIC_CODES.ACL_TOO_PERMISSIVE))
+  assert.ok(codes.includes(SECRETS_DIAGNOSTIC_CODES.DSH_CREDENTIALS_UNRECOGNIZED))
+})
+
+test('⑦ 回退来源的读数里**没有**密钥值（诊断会进日志与诊断包）', () => {
+  const LEAK = 'sk-DO-NOT-LEAK-0123456789'
+  const diags = secretsDiagnostics(check({
+    ok: true, aclVerified: true,
+    fallback: { state: 'unrecognized', code: 'DSH_CREDENTIALS_QUOTED_SCALAR', file: `C:\\Users\\${LEAK}\\.dsh` },
+  }))
+  const surface = JSON.stringify(diags)
+  assert.ok(!surface.includes(LEAK), `值泄漏进了诊断：${surface}`)
+})
+
+test('⑦ runSecretsCheck 把回退来源的路径与 IO 一起传下去', async () => {
+  const seen = []
+  await runSecretsCheck({
+    layout: { platform: 'win32' },
+    dshCredentialsFile: 'C:\\Users\\alice\\.dsh\\.credentials.yaml',
+    dshCredentialsIo: { readFile: async () => '' },
+    openSecrets: async (args) => { seen.push(args); return check({ ok: true, aclVerified: true }) },
+  })
+  assert.equal(seen[0].dshCredentialsFile, 'C:\\Users\\alice\\.dsh\\.credentials.yaml')
+  assert.equal(typeof seen[0].dshCredentialsIo.readFile, 'function')
+  // 缺省不接：与这一批之前逐字相同。
+  const none = []
+  await runSecretsCheck({
+    layout: { platform: 'win32' },
+    openSecrets: async (args) => { none.push(args); return check({ ok: true, aclVerified: true }) },
+  })
+  assert.equal(none[0].dshCredentialsFile, null)
+  assert.equal(none[0].dshCredentialsIo, null)
+})

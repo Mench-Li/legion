@@ -19,6 +19,8 @@ export {
 export {
   RUNTIME_CODE_FOR,
   SECRET_ERROR_HINTS,
+  DSH_CREDENTIALS_CODE_PREFIX,
+  DSH_CREDENTIALS_HINT,
   SecretStoreError,
   isSecretStoreError,
 } from './errors.mjs'
@@ -66,3 +68,23 @@ export {
   inspectFileAcl,
   parseIcacls,
 } from './acl.mjs'
+
+// DSH `$DSH_HOME/.credentials.yaml` 的**只读子集读取器**（PRT-509 路线 A′）。
+//
+// 它在这里而不是在 `runtime/`，理由是它属于**密钥层**：它只读一份凭证
+// 文档，它的失败码是密钥库失败码（`SecretStoreError`），它的规矩是密钥层
+// 的规矩（fail closed、不猜、诊断里没有值）。放在 `runtime/` 会让
+// "哪一种文件算凭证库"这件事分散到两个平面。
+//
+// ★ 它**不写**任何东西，也**不是** store：Legion 自己的 DPAPI 库仍然是
+//   唯一权威写入路径（见 `docs/superpowers/prt/PRT-509-dsh-credentials-read-bridge.md`）。
+export {
+  DSH_CREDENTIALS_CODES,
+  DSH_CREDENTIALS_FILENAME,
+  DSH_CREDENTIALS_MAX_BYTES,
+  DSH_CREDENTIALS_SOURCE,
+  DSH_DOCUMENT_VERSION,
+  createDshCredentialsSource,
+  parseDshCredentialsDocument,
+  planDshLookup,
+} from './dsh-credentials.mjs'

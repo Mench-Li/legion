@@ -163,10 +163,28 @@ export const PATCH_LAYER_ROWS = Object.freeze([
     //   ⚠️ 审批端口工厂（`team-hub/approval-port.mjs` 的 `createHubApprovalPort`）
     //   由 `team-hub/` 侧经 `setApprovalPortFactory()` 注册进来：本目录**不能**
     //   import 它（会反转既有分层方向并造出真实的模块环，见 `root.mjs` 文件头）。
-    //   注册方本批**没有交付**，所以默认部署里本行会以
-    //   `ENFORCEMENT_ROOT_ROW_NO_APPROVAL_PORT_FACTORY` 拒绝——那比装一个
-    //   "永远问不到人"的半根好。缺口写在 PRT-214 文档的诚实边界里。
-    module: './plugins/root-row.mjs',
+    //
+    //   ★ PRT-214 续：注册方已交付，它就是下面这个模块
+    //   （`team-hub/approval-registrar-row.mjs`）——所以本行的 `module` **不是**
+    //   `./plugins/root-row.mjs`，补丁层加载的是**注册方**，它默认导出的仍然是
+    //   真的那个 root row 插件对象（`===`，`approval-registrar-row.test.mjs` 钉住）。
+    //
+    //   为什么不另起一行 `legion-enforcement-approval-registrar`：
+    //   Loader 用 `Promise.allSettled(config.map(create))` **并发**创建所有补丁行
+    //   （`@deepseek-ai/cordis-plugin-loader/lib/index.js:97`），所以"注册行先求值、
+    //   root 行后 apply"只在两个模块都**不挂起**时碰巧成立。真 DSH 进程里量到的
+    //   2×2 矩阵（§10）：注册行做一次合法的顶层 await（500ms），root-first 与
+    //   registrar-first **都** 6/6 拒绝——行序甚至都不是那个变量。
+    //   而把注册放进 root 行自己的模块图后，**同样的 500ms 挂起** 6/6 装上：
+    //   被 import 的模块必先求值完，才轮到 import 它的那个插件的 `apply`。
+    //
+    //   把它做成服务依赖（root 行 inject 注册行发布的服务）也能行序无关，但会让
+    //   "注册行缺了"从 root 行那条具名拒绝变成一句 pending 审计——两者要值班的人
+    //   去查的东西不同。完整对照见 PRT-214 文档 §10。
+    //
+    //   代价说清楚：这个模块住在 `team-hub/`，所以本补丁层**不再能连同
+    //   `plugins/` 一起单独搬走**（相对路径要跨到仓库的 `team-hub/`）。
+    module: '../../team-hub/approval-registrar-row.mjs',
   }),
   Object.freeze({
     id: `${LEGION_ROW_PREFIX}pre-execute`,

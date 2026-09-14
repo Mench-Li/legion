@@ -25,8 +25,10 @@
 // ============================================================================
 
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { join } from 'node:path'
 
 import { LEGION_ENV, resolveLayout } from '../paths.mjs'
+import { DSH_CREDENTIALS_FILENAME } from '../../security/secrets/index.mjs'
 import { launcherInputFromConfig, loadProductConfig } from '../config.mjs'
 import { AUTO_EXPORT_DEFAULTS, runAutoExport } from '../diagnostics/auto-export.mjs'
 import { initializeProductDir, isInitialized } from '../init.mjs'
@@ -52,6 +54,10 @@ export const CLI_FLAGS = Object.freeze([
   { name: '--init', kind: 'boolean', doc: '首次运行初始化：建目录、写默认产品配置与产品元数据，然后退出（不启动进程）' },
   { name: '--dry-run', kind: 'boolean', doc: '与 --init 同用：只报告将会创建什么，不落盘' },
   { name: '--no-config', kind: 'boolean', doc: '忽略产品配置文件（只用内置默认值 + env + CLI）' },
+  { name: '--no-dsh-credentials', kind: 'boolean', doc: '不把 DSH 的 $DSH_HOME/.credentials.yaml 当作**只读**回退来源（PRT-509 路线 A′）。' +
+    '**默认是读的**（当 DSH_HOME 已设时）：只有 Legion 自己的密钥库里**没有这条**才会去读它，' +
+    '结果里带出处；Legion 的库仍然是唯一的权威写入路径。' +
+    '给这一条留一个显式退出，是因为"读一个属于另一个程序的、里面全是明文的文件"应当可以被拒绝' },
   { name: '--json', kind: 'boolean', doc: '以 JSON 输出结果（供脚本与验收使用）' },
   { name: '--install-dir=<path>', kind: 'value', doc: `安装目录；等价于 ${LEGION_ENV.INSTALL_DIR}` },
   { name: '--data-dir=<path>', kind: 'value', doc: `数据目录；等价于 ${LEGION_ENV.DATA_DIR}` },
@@ -231,6 +237,45 @@ export function osHomeFacts(env = {}) {
 }
 
 /**
+ * DSH 的家目录变量名。**DSH 自己**用它定位 `.credentials.yaml`。
+ *
+ * 它登记在 `product/config-schema.mjs` 的 `CHILD_ENV_NAMES` 里——原本只是
+ * 「注入给 Runtime 子进程的变量名」。PRT-509 路线 A′ 之后它**也**是本进程的
+ * 读取点，所以那份登记的理由跟着改了一句（`scan --check` 只看字面量是否
+ * 登记过，有没有被读它管不着——登记理由漂了它不会报，只能靠这句话守着）。
+ */
+export const DSH_HOME_ENV = 'DSH_HOME'
+
+/**
+ * 从进程环境推出**DSH 凭证文件的路径**（PRT-509 路线 A′）。
+ *
+ * ## 为什么只有一句 `join`，却值得单独一个函数
+ *
+ * 因为"要不要读一个**别人**拥有的、里面全是明文的文件"是一个**决策**，
+ * 而决策必须有唯一一个能被引用、被测试、被讨论的位置。散落在两个
+ * `openProductSecrets` 调用点里的路径拼接，事后没人说得清"产品到底会不会
+ * 去读 DSH 的文件"。
+ *
+ * ## 三条边界
+ *
+ *   ① **只认 `DSH_HOME`**，不猜路径。用户为 DSH 设了哪个目录，就读那个目录
+ *      ——不去翻 `%USERPROFILE%\.dsh` 之类的候选位置。猜路径会读到
+ *      "另一个账户留下的、当前用户并不知道存在的"凭证文件。
+ *   ② **`DSH_HOME` 没设就没有回退来源**（返回 `null`）。这与"设了但文件不在"
+ *      是两个不同的读数，由读取器自己的 `inspect()` 分开报。
+ *   ③ **它只给出路径**，读取与拒绝全在 `security/secrets/dsh-credentials.mjs`。
+ *      这一层不解析、不校验、不碰文件内容。
+ *
+ * @param {object} env 进程环境。
+ * @returns {string|null} `.credentials.yaml` 的绝对路径；`DSH_HOME` 未设时为 `null`。
+ */
+export function dshCredentialsFileFrom(env = {}) {
+  const home = env[DSH_HOME_ENV]
+  if (typeof home !== 'string' || home.trim() === '') return null
+  return join(home, DSH_CREDENTIALS_FILENAME)
+}
+
+/**
  * 组装 Launcher 选项（把 CLI、环境与产品配置文件合成**一份显式输入**）。
  *
  * ## 优先级（spec §6.11 + CLI 的位置）
@@ -337,6 +382,14 @@ export function launcherOptionsFrom({ argv = [], env = {}, nodePath = process.ex
       allowUnverifiedSweep: parsed.flags['allow-unverified-sweep'] === true,
       // Launcher 自己的环境只作为**白名单的读取来源**传入，不会被整份复制给子进程
       baseEnv: env,
+      // PRT-509 路线 A′：**只读**回退来源的路径。`null` = 这次没接
+      // （`DSH_HOME` 没设，或用 `--no-dsh-credentials` 显式关掉）。
+      //
+      // 与 `baseEnv` 一样，这里只**给出路径**：读取、子集判定与拒绝全在
+      // `security/secrets/dsh-credentials.mjs`，这一层不碰文件内容。
+      dshCredentialsFile: parsed.flags['no-dsh-credentials'] === true
+        ? null
+        : dshCredentialsFileFrom(env),
       readiness: readinessTimeout === null
         ? (fromConfig.readinessTimeoutMs === undefined ? {} : { timeoutMs: fromConfig.readinessTimeoutMs })
         : { timeoutMs: readinessTimeout },
@@ -498,6 +551,10 @@ export async function run({
             const { openProductSecrets } = await import('../secrets.mjs')
             // ★ 向导里**必须**要求受保护后端：一个"配好了"却存在明文里的密钥，
             //   是这一整条流程最坏的结果——用户以为安全，而它只是没报错。
+            //
+            // 这里**刻意不传 `dshCredentialsFile`**：本函数要**写**，
+            // 而路线 A′ 的回退来源是**只读**的，写路径永远只写 Legion 自己的库。
+            // 传进来只会让"我写了，它去哪了"变成一个需要解释的问题。
             const opened = await openProductSecrets({ layout: options.layout, requireProtected: true })
             if (opened?.ok !== true) {
               return { ok: false, message: `密钥库不可用：${opened?.message ?? '未知原因'}` }
@@ -516,6 +573,10 @@ export async function run({
           isModelConfigured: async () => {
             const { openProductSecrets } = await import('../secrets.mjs')
             let opened = null
+            // 同理不传回退来源：这一条问的是 `store.has(...)`——
+            // "Legion 自己的库里录过这个引用名吗"。它问的**不是**解析器，
+            // 所以回退来源在这里既用不上、也不该被接上：
+            // 一个从 DSH 文件读到的值**不构成**"向导配过模型"。
             try { opened = await openProductSecrets({ layout: options.layout, requireProtected: true }) } catch { return false }
             if (opened?.ok !== true) return false
             try { return opened.store.has(MODEL_KEY_REF) === true } catch { return false }

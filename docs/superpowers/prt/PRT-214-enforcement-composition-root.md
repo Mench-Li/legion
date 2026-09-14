@@ -558,3 +558,663 @@ node scripts/ci/dsh-boundary.mjs --check                            # PASS（4 �
 探针 1 是关键的一条：它证明「根行最后加载仍然激活」这个读数是**服务依赖**
 给的，不是碰巧。
 
+---
+
+## 9. ★ 真 DSH 进程里的读数（PRT-214 续，本批新增）
+
+本批只干一件事：把"补丁行的 `apply()` 到底有没有在**真 DSH 进程**里跑"
+从**推断**变成**观测**。这是整条链此前唯一缺席的那个读数。
+
+### 9.1 结论先说
+
+**(a) 是。** `apply()` 在一个真 `dsh` 进程里**确实会跑**，而且是靠 DSH 自己的
+加载器跑的（`@deepseek-ai/dsh-app-boot` 的 `boot()`），不是靠假的 `Context`、
+也不是靠重新实现一遍加载器。原文见 §9.4。
+
+同时必须把三件事分开说，混成一句就是撒谎：
+
+| | 读数 | 证据 |
+| --- | --- | --- |
+| ① 补丁行的 `apply` 会在真 DSH 进程里执行 | **已观测** | §9.4 读数 B / C / E |
+| ② 真 `legion-host.patch.yml` 那一行的 `apply` 会执行，然后**拒绝** | **已观测**：拒绝码 `ENFORCEMENT_ROOT_CONFIG_EMPTY`（无身份配置）/ `ENFORCEMENT_ROOT_BAD_WIRING`（有身份配置但无审批端口工厂） | §9.4 读数 C / D |
+| ③ 强制面在**真部署里**装上了 | **未观测，且按现状不会发生** | §9.4 读数 D 需要 §9.6 说的那件产品里**不存在**的东西 |
+
+**这一次没有把强制面挂进任何正在跑的 harness；没有读写 `~/.dsh`；
+没有把任何补丁文件写进真实 profile。** 每个子进程都吃自己的临时 `DSH_HOME`。
+
+### 9.2 这个读数此前为什么是缺的
+
+之前有两条证据，两条都**不是 DSH 进程**：
+
+- `patch-loadable.test.mjs` —— 解析期接受（`patch-format.mjs` 的**形状检查**，
+  不是解析器）；
+- `root-row.test.mjs` 下半部分 —— 真 cordis `Context`，但那是用例自己
+  `new Context()` 出来的，不是 `dsh` 进程的加载器。
+
+而 `--dump-config` 这条路**看起来**像证过了：code 0，输出里带着锚定好的
+`file://…/root-row.mjs`。它为什么不算，本批给了**正面读数**（§9.4 读数 A）：
+同一份补丁层、同一个探针模块，dump 出锚定行、code 0，而 stderr 里
+**一个字节都没有** `PROBE-APPLY-RAN`。原因在代码里写得很直白——
+`apps/cli/lib/types/dump-config.js` 的文件头：
+
+> compose the profile's patch layers through the include plugin's patch algorithm
+> **without booting or evaluating `!!js`**
+
+它调的是 `renderConfigDump()`，只**解析并锚定**：
+
+> 一条"被解析并锚定"的补丁行，
+> 与一条"被真的挂进进程"的补丁行，在 dump 的输出里完全同形——
+> 只不过前者从来没有 `apply` 过。
+
+### 9.3 ★ 缺口在哪：不是"启动 profile 要凭据"，而是**别人替你选的 profile 要凭据**
+
+这是本批最有用的一条发现，前面那份评估把它读偏了。
+
+`dsh --profile <name>` 确实是唯一会**真的启动**的模式（`plugin` 只是
+pnpm 转发器，见 `apps/cli/lib/types/plugin.js`；`--dump-config` 不实例化）。
+但它**不要求**那个 profile 是随部署分发的 `web`。启动哪一个 profile，
+由**你自己在 `$DSH_HOME/profiles/` 下建的那个目录**决定：
+
+- `profile-boot.js` 的 `withProfileModuleFallback` 会读
+  `$DSH_HOME/profiles/<name>/package.json` 的 `dsh.profile.bundles`；
+- 那个数组是**数据**，不是常量。写成 `[]`，就**一个 bundle 层都不挂**。
+
+于是"启动 profile 会探凭据"这句话漏了限定语：**凭据来自 bundle 层**
+（`dsh-base` / web / llm 那几片），而不是来自"启动了 profile"这个动作本身。
+一个 `bundles: []` 的临时 profile 里，唯一进树的行就是本批通过 `--patch`
+插进去的那几行——没有 auth、没有网络、没有浏览器、没有 TTY 需求。
+
+本批 8 个场景全部用这条路，**没有一个**碰到凭据路径。
+
+> 一个"必须借用部署方那份 profile 才能启动"的验证，
+> 与一个"自己造一个空 profile 就能启动"的验证，
+> 在"要不要凭据"这件事上完全相反——只不过两者的命令长得几乎一样。
+
+### 9.4 原始读数
+
+命令模板（每次 `DSH_HOME` 都是新建的 `os.tmpdir()` 目录，profile 里
+`dsh.profile.bundles: []`、`patchReload: 'startup'`）：
+
+```text
+node <DSH>/apps/cli/lib/bin.js --profile prtprobe [--patch <p1> ...] [--dump-config]
+DSH_HOME=<一次性临时目录>       # 显式设置，不继承操作者的
+```
+
+**读数 A —— 对照组：`--dump-config` 锚定，但从不实例化**
+
+```text
+$ node apps/cli/lib/bin.js --profile prtprobe --patch <…>\prt214rt-probe.patch.yml --dump-config
+exit=0  markerOnStderr=false
+--- stdout ---
+# == D:\project\DSH\legion\.worktrees\_prt-handoff\prt214rt-probe.patch.yml
+- id: prt214rt-probe
+  name: file:///D:/project/DSH/legion/.worktrees/_prt-handoff/prt214rt-probe-row.mjs
+--- stderr ---
+（空）
+```
+
+**读数 B —— 真启动：补丁行的 `apply` 真的跑了**
+
+```text
+$ node apps/cli/lib/bin.js --profile prtprobe --patch <…>\prt214rt-probe.patch.yml
+exit=0  markerOnStderr=true
+--- stderr ---
+PROBE-APPLY-RAN
+PROBE-PID 2768
+PROBE-DSH_HOME C:\Users\11150\AppData\Local\Temp\prt214rt-a2-profile-with-probe-TbpM2c
+PROBE-CWD D:\project\DSH\legion\.worktrees\_prt-handoff
+PROBE-EXIT-0
+```
+
+**读数 C —— 真 `legion-host.patch.yml`，没有 Legion 身份配置：跑了，然后拒绝**
+
+```text
+$ node apps/cli/lib/bin.js --profile prtprobe --patch <…>\prt214rt-probe.patch.yml \
+    --patch <LEGION>\runtime\dsh-composition\legion-host.patch.yml
+exit=1  markerOnStderr=true
+--- stderr ---
+PROBE-APPLY-RAN
+Error: dsh: plugin tree failed to load: failed to apply loader entry include (cordis:include):
+failed to apply loader entry legion-enforcement-root (file:///D:/…/runtime/dsh-composition/plugins/root-row.mjs):
+legion-enforcement-root 拒绝装配：组合根给的是 ENFORCEMENT_ROOT_CONFIG_EMPTY——配置来源存在，但一个字段都没有给
+（全是空白或未设置）。**与"没给来源"分开**：这一种更像是变量名写错或漏填，而不是部署方忘了配。缺的字段：（未列出）
+    at rowError (file:///D:/…/runtime/dsh-composition/plugins/root-row.mjs:110:15)
+    at Object.apply [as callback] (file:///D:/…/runtime/dsh-composition/plugins/root-row.mjs:379:15)
+    at Fiber.execute (file:///D:/project/DSH/dsh/deepseek-harness/vendor/cordis/lib/index.js:1070:28)
+```
+
+**读数 D —— 真 `legion-host.patch.yml`，身份配齐但没有审批端口工厂**
+
+```text
+$ TEAM_HUB_URL=http://hub.invalid:8787 LEGION_ACTOR=… LEGION_SCOPE=… \
+  LEGION_ENFORCEMENT_ACTION=write LEGION_CWD=C:\work \
+  node apps/cli/lib/bin.js --profile prtprobe --patch <…>\prt214rt-probe.patch.yml \
+    --patch <LEGION>\runtime\dsh-composition\legion-host.patch.yml
+exit=1
+Error: … failed to apply loader entry legion-enforcement-root (…/root-row.mjs):
+legion-enforcement-root 拒绝装配：组合根给的是 ENFORCEMENT_ROOT_BAD_WIRING——createRequestApproval 造端口时抛错：
+legion-enforcement-root 没有可用的审批端口工厂：… （code=ENFORCEMENT_ROOT_ROW_NO_APPROVAL_PORT_FACTORY）。缺的字段：（未列出）
+```
+
+**读数 E —— 真 `hard-floor.mjs` 那一行：跑了，并且真的绑上了 guard**
+
+（`tools` 端口由桩宿主行提供；被测的行是**产品文件本身**，按绝对路径挂。）
+
+```text
+exit=0
+--- stderr ---
+SERVICES-ROW-APPLY-RAN
+SERVICES-PROVIDED tools,approval
+PROBE-APPLY-RAN
+SERVICES-TOOLS-GUARD-REGISTERED count=1     ← hard-floor 的 apply 调到了 ctx.tools.guard()
+```
+
+**读数 F —— 全链（一个真 DSH 进程内）**
+
+根行装配成功 → `ctx.provide('legionEnforcementRoot')` → 两行运行期模块离开
+waiting 并激活 → 真 `tools/pre-execute` 瀑布**认领**一次调用：
+
+```text
+exit=0
+--- stderr ---
+REGISTRAR-INSTALLED
+REGISTRAR-FACTORY-CALLED keys=action,actor,cwd,hubToken,hubUrl,platform,scope,taskId
+WATERFALL-RESULT {"kind":"deny","reason":"无法投影这次调用（tool-request-target-missing）：工具 no-such-tool
+（能力 []）的目标推导不出来。拒绝投影：一个\"目标推导不出来时用空串兜底\"的投影，与一个\"所有无法定位的写操作
+共用同一个身份\"的投影，是同一个东西——而它的方向是放行（tool-request-target-missing）"}
+GATE-DENIED
+MOUNT {"name":"cordis:include","disabled":false,"fiberState":2}
+MOUNT {"name":"file:///…/prt214rt-services-row.mjs","disabled":false,"fiberState":2}
+MOUNT {"name":"file:///…/prt214rt-out/prt214rt-rootrow-wrapper.mjs","disabled":false,"fiberState":2}
+MOUNT {"name":"file:///…/runtime/dsh-composition/plugins/pre-execute-row.mjs","disabled":false,"fiberState":2}
+MOUNT {"name":"file:///…/runtime/dsh-composition/plugins/approval-answerer-row.mjs","disabled":false,"fiberState":2}
+MOUNT {"name":"file:///…/prt214rt-probe-row.mjs","disabled":false,"fiberState":2}
+MOUNT {"name":"file:///…/prt214rt-waterfall-probe.mjs","disabled":false,"fiberState":2}
+```
+
+`fiberState: 2` 是 **ACTIVE**；这份 `MOUNT` 清单来自 DSH 自己的
+`ctx.loader.entries()`，不是我们对模块形状的断言。
+
+**读数 G —— 反向对照：根行缺席（同两行、同一份 `tools` 桩）**
+
+```text
+exit=1
+Error: dsh: plugin tree failed to load: dsh: 2 entries did not activate
+file:///…/runtime/dsh-composition/plugins/pre-execute-row.mjs: pending (waiting for service: legionEnforcementRoot)
+file:///…/runtime/dsh-composition/plugins/approval-answerer-row.mjs: pending (waiting for service: legionEnforcementRoot)
+    at assertEntriesActivated (file:///D:/project/DSH/dsh/deepseek-harness/packages/boot/app-boot/lib/index.js:1492:9)
+```
+
+这条读数是**DSH 自己**给的（`assertEntriesActivated`），不是我们数的。
+没有它，读数 F 里的"激活"可能只是加载顺序碰巧。
+
+**8 个场景的机器读数**
+
+```text
+tag                              exitCode  markerOnStderr
+a0-dump-config-with-probe            0      false      ← 对照组：dump 不实例化
+a1-profile-no-patch                  0      false      ← 反向对照：没有行就没有标记
+a2-profile-with-probe                0      true
+b1-legion-patch-no-env               1      true       ← 真补丁层：拒绝（CONFIG_EMPTY）
+b2-legion-patch-full-env             1      true       ← 真补丁层：拒绝（BAD_WIRING）
+c1-hard-floor-with-tools             0      true
+c2-both-real-rows-with-tools         1      true
+d1-root-row-with-registrar           0      true
+d2-full-chain-gate-bound             0      true       ← 全链：GATE-DENIED
+e1-runtime-rows-without-root         1      true       ← 反向对照：pending
+```
+
+### 9.5 新增的用例
+
+`runtime/dsh-composition/plugins/root-row-dsh-process.test.mjs`（+1 文件，
+注册在 `scripts/ci/run-ci.mjs` 里 `root-row.test.mjs` 那一块的**紧后面**）。
+它就是上面 A–G 的可复跑版本，5 条：
+
+```text
+$ DSH_CHECKOUT=D:\project\DSH\dsh\deepseek-harness node --test runtime/dsh-composition/plugins/root-row-dsh-process.test.mjs
+▶ PRT-214：补丁行的 apply 在**真 DSH 进程**里跑没跑
+  ✔ A. `--dump-config` 解析并锚定那一行，但**从不实例化**它（对照组） (140.8469ms)
+  ✔ B. 真 profile 启动：补丁行的 `apply` **真的跑了**（此前从未被观测） (3697.057ms)
+  ✔ C. 真 legion-host.patch.yml：root-row 跑了、并且**拒绝**（具名码，code 1） (723.5384ms)
+  ✔ D. 全链：根行装好 → 服务发布 → 两行激活 → 真瀑布**认领**一次调用 (3206.8737ms)
+  ✔ E. 反向对照：根行缺席 → DSH 挂载审计报 pending，瀑布上**没有** listener (715.3484ms)
+✔ PRT-214：补丁行的 apply 在**真 DSH 进程**里跑没跑 (8484.8425ms)
+ℹ tests 5  ℹ pass 5  ℹ fail 0
+```
+
+`DSH_CHECKOUT` 缺席时逐条 `t.skip()`，并附一条说明用的通过项：
+
+```text
+  ﹣ A. … (0.6593ms) # SKIP：未配置 DSH_CHECKOUT
+  ～ 5 条全部 skip
+  ✔ PRT-214 真 DSH 进程那几条本次未运行
+ℹ tests 6  ℹ pass 1  ℹ fail 0  ℹ skipped 5
+```
+
+**安全形状写在用例里，不写在纪律里**：每个子进程吃自己的临时 `DSH_HOME`
+（`os.tmpdir()` 下，启动前 `assert` 它确实在 tmpdir 内），profile 声明
+`bundles: []`，`DSH_SNAPSHOT` 从子进程环境里删掉，每个子进程都有
+`spawnSync` 超时上界 + 探针自己的退出兜底。**没有长命进程。**
+
+### 9.6 仍然**未**证明的（这一批没有把它变成"装好了"）
+
+必须说得很直白，因为把 §9.4 读数 F 读成"强制面装上了"是错的：
+
+- **读数 F 需要一件产品里不存在的东西。** 那个"审批端口工厂注册方"
+  是我在**测试脚手架**里写的一个替身（`prt214rt-rootrow-wrapper.mjs`，
+  `setApprovalPortFactory(...)`）。它**不是产品代码**，产品里**没有**这个注册方
+  ——这正是 §4/§8 一直写着的那个诚实边界。
+- **真补丁层单独跑，永远走到拒绝。** 读数 C 与 D 就是**没有任何替身**时的真实行为：
+  root-row 进了树、`apply` 跑了、然后拒绝，进程以 1 退出。
+- **未观测**：一次 gate 在真 DSH 进程里**拦下一次真实工具执行**。
+  读数 F 里的 `deny` 是拿着一个合成调用去问瀑布，工具名 `no-such-tool` 根本不存在，
+  拒绝理由是**投影失败**（`tool-request-target-missing`）——这是
+  fail-closed 的正确表现，但它**不是**"某个真工具被拦下了"。
+- **未观测**：审批应答者那一行在真进程里真的处理过一次审批。
+  它在读数 F 里是 ACTIVE，但没有 `approval/request` 被派发过。
+- **未动**：`runtime/dsh-composition/render.mjs --write` 仍因两行缺模块而 exit 3，
+  本批**没有**修它（不在范围内）。
+
+所以本批的净收益是**一个此前不存在的读数**，不是"强制面生效了"：
+
+> 此前我们只能说"这一行的模块写得对"；
+> 现在我们能说"这一行在真 DSH 进程里真的被 `apply` 了，而且它拒绝时拒绝得对"。
+> 而这两句话**都不等于**"强制面在部署里生效"——那还差一个注册方。
+
+### 9.7 复跑命令
+
+```powershell
+$env:DSH_CHECKOUT = 'D:\project\DSH\dsh\deepseek-harness'
+# 5 条真进程用例（自己建一次性 DSH_HOME，不碰任何真实 profile）
+node --test runtime/dsh-composition/plugins/root-row-dsh-process.test.mjs
+
+# 证据驱动脚本（8 个场景 + 机器摘要），产物写在 .worktrees\_prt-handoff\prt214rt-out\
+$env:LEGION_REPO = 'D:\project\DSH\legion\.worktrees\prt-runtime'
+node D:\project\DSH\legion\.worktrees\_prt-handoff\prt214rt-driver.mjs
+
+# 静态门禁
+node scripts/config/scan.mjs --check          # exit 0
+node scripts/ci/ci-syntax.mjs                 # PASS（50 个脚本）
+node scripts/ci/encoding-check.mjs --all --quiet   # PASS（1888 个文件）
+node scripts/ci/check-docs.mjs                # PASS（10 类校验项）
+node scripts/ci/dsh-boundary.mjs --check      # PASS（3 文件 / 26 处，基线内）
+```
+
+**没有跑**：`scripts/ci/run-ci.mjs` 全量、构建、冒烟（按约定由操作者执行）。
+**没有**修改产品源码；本批的产品面改动只有**一个测试文件**加它在
+`run-ci.mjs` 里的登记项。
+
+复跑环境：DSH 检出 `c291e7961a515f6d7af9304e7fd1d257929aef26`
+（`0.1.5-rc.2`，2026-09-10）、Node `v24.19.0`、Windows。
+
+---
+
+## 10. 注册方交付：把"跑了然后拒绝"变成"跑了然后装上"
+
+§9 的净收益是**一个此前不存在的读数**：那一行在真 DSH 进程里真的 `apply` 了，
+而且它拒绝时拒绝得对。§9.6 也把话说死了：
+
+> 而这两句话**都不等于**"强制面在部署里生效"——那还差一个注册方。
+
+这一节补的就是那个注册方，以及**它为什么长成现在这个形状**。
+
+### 10.1 缺口的确切形状
+
+`runtime/dsh-composition/plugins/root-row.mjs` 里那个注册缝
+（`setApprovalPortFactory()`）此前**全仓库零生产调用方**。它的拒绝是对的，代价也写明了：
+
+```
+Error: dsh: plugin tree failed to load: failed to apply loader entry include (cordis:include):
+failed to apply loader entry legion-enforcement-root (…/runtime/dsh-composition/plugins/root-row.mjs):
+legion-enforcement-root 拒绝装配：组合根给的是 ENFORCEMENT_ROOT_BAD_WIRING——
+createRequestApproval 造端口时抛错：legion-enforcement-root 没有可用的审批端口工厂……
+（code=ENFORCEMENT_ROOT_ROW_NO_APPROVAL_PORT_FACTORY）
+    at rowError (…/runtime/dsh-composition/plugins/root-row.mjs:118:15)
+    at Object.apply [as callback] (…/runtime/dsh-composition/plugins/root-row.mjs:390:15)
+    at Fiber.execute (…/vendor/cordis/lib/index.js:1070:28)
+exit=1
+```
+
+> 一个"写好了、也验证过会拒绝"的注册缝，
+> 与一个"没有任何东西去注册"的注册缝，在运行的部署上是同一个东西——
+> 只不过前者的用例是绿的。
+
+### 10.2 注册方长什么样，为什么是这个形状
+
+新文件 `team-hub/approval-registrar-row.mjs`：在**模块求值期**调
+`setApprovalPortFactory(createApprovalPortFactory())`，并 **default 导出真的那个 root row
+插件对象**（`===`，不是形状相同的替身，`team-hub/approval-registrar-row.test.mjs` 钉住）。
+补丁层里那一行的 `module` 随之改成它：
+
+```yaml
+- insert:
+    - id: "legion-enforcement-hard-floor"
+      name: "./plugins/hard-floor.mjs"
+    - id: "legion-enforcement-root"
+      name: "../../team-hub/approval-registrar-row.mjs"
+```
+
+直觉写法是**再加一行** `legion-enforcement-approval-registrar`。它不安全，而这**不是推测**
+——下面是在**真 DSH 进程**里量出来的 2×2 矩阵。
+
+### 10.3 三条候选机制，只有一条保住了两样东西
+
+先看装载实现（`@deepseek-ai/cordis-plugin-loader/lib/index.js`）：
+
+- `update(config)` 第 97 行：`await Promise.allSettled(config.map((o) => this.create(o)))`
+  —— 所有补丁行**并发**创建；
+- `Entry.update()` 第 466 行：`plugin = … await this.parent.tree.import(candidate.name, …)`
+  —— 模块求值（含顶层 `await`）在**这一行自己的 `create` 里**等；
+- 于是"注册行先求值、root 行后 `apply`"**只在兄弟模块都不挂起时碰巧成立**。
+
+探针脚本（`D:\project\DSH\legion\.worktrees\_prt-handoff\prt214b-registrar-race.mjs`，
+不在仓库里、不进 CI；手法见 §10.7）把这件事量成了一个 2×2 矩阵：
+
+| 装配方式 | 注册前挂起 | root 行在补丁层里**在前** | root 行在补丁层里**在后** |
+| --- | --- | --- | --- |
+| 补丁层里的**第二行** | 无 | 6/6 装上 | 6/6 装上 |
+| 补丁层里的**第二行** | 顶层 `await` 500ms | **6/6 拒绝** | **6/6 拒绝** |
+| **root 行自己的模块图** | 顶层 `await` 500ms | 6/6 装上 | 6/6 装上 |
+
+原始读数（`Q2 第二行·root-first·注册前 await 500ms`，`exit=1`）：
+
+```text
+REGISTRAR-MODULE-EVAL-START
+SERVICES-ROW-APPLY-RAN
+PROBE-APPLY-RAN
+ROOT-ROW-APPLY-RAN                      ← root 行先 apply 了
+REGISTRAR-MODULE-EVAL-AWAITED 500ms
+REGISTRAR-MODULE-REGISTERED             ← 注册来晚了
+REGISTRAR-ROW-APPLY-RAN
+```
+
+```text
+{"label":"Q1 第二行·root-first·无挂起","mode":"row","delayMs":0,"rootFirst":true,"runs":6,"refused":0,"installed":6,"other":0}
+{"label":"Q1 第二行·registrar-first·无挂起","mode":"row","delayMs":0,"rootFirst":false,"runs":6,"refused":0,"installed":6,"other":0}
+{"label":"Q2 第二行·root-first·注册前 await 500ms","mode":"row","delayMs":500,"rootFirst":true,"runs":6,"refused":6,"installed":0,"other":0}
+{"label":"Q2 第二行·registrar-first·注册前 await 500ms","mode":"row","delayMs":500,"rootFirst":false,"runs":6,"refused":6,"installed":0,"other":0}
+{"label":"Q3 同模块图·root-first·注册前 await 500ms","mode":"graph","delayMs":500,"rootFirst":true,"runs":6,"refused":0,"installed":6,"other":0}
+{"label":"Q3 同模块图·registrar-first·注册前 await 500ms","mode":"graph","delayMs":500,"rootFirst":false,"runs":6,"refused":0,"installed":6,"other":0}
+```
+
+两行都要读清楚：
+
+- **行序甚至都不是那个变量**：第二行那一路挂起之后，root-first 与 registrar-first
+  **一样** 6/6 拒绝。Q1 里"两种顺序都装上"只是因为两个模块都不挂起、几乎同时求值完。
+- **Q3 是 Q2 的对照**：同一个 500ms 挂起，把注册搬进 root 行**自己的模块图**就 6/6 装上。
+  所以 Q2 的拒绝来自"注册方在另一行"，不是来自那个 `await`。
+
+第三条候选是把注册行做成**服务**、让 root 行 `inject` 它。它确实行序无关，但要**放弃**一样东西：
+root 行会停在 `pending (waiting for service: …)`，于是"注册方没挂上"从 root 行自己那条
+**具名拒绝**变成一句**挂载审计**。两者要值班的人去查的东西不同，而且 §10.5 那条反向对照
+也就测不出来了。因此选同模块图：
+
+> 被 import 的模块必先求值完，才轮到 import 它的那个模块——
+> 于是"注册先于 `apply`"由 ESM 保证，而不是由补丁层的行序或兄弟模块的行为保证。
+
+### 10.4 真补丁层现在**装上**了（原始读数）
+
+```text
+$ dsh --profile prt214b --patch … --patch <真 legion-host.patch.yml> …
+exit=0
+--- stderr ---
+SERVICES-ROW-APPLY-RAN
+PROBE-APPLY-RAN
+WATERFALL-RESULT {"kind":"deny","reason":"无法投影这次调用（tool-request-target-missing）：工具 no-such-tool（能力 []）的目标推导不出来。…（tool-request-target-missing）"}
+GATE-DENIED
+MOUNT {"name":"cordis:include","disabled":false,"fiberState":2}
+MOUNT {"name":"…/prt214b-services.mjs","disabled":false,"fiberState":2}
+MOUNT {"name":"…/runtime/dsh-composition/plugins/hard-floor.mjs","disabled":false,"fiberState":2}
+MOUNT {"name":"…/team-hub/approval-registrar-row.mjs","disabled":false,"fiberState":2}
+MOUNT {"name":"…/runtime/dsh-composition/plugins/pre-execute-row.mjs","disabled":false,"fiberState":2}
+MOUNT {"name":"…/runtime/dsh-composition/plugins/approval-answerer-row.mjs","disabled":false,"fiberState":2}
+MOUNT {"name":"…/prt214b-probe.mjs","disabled":false,"fiberState":2}
+MOUNT {"name":"…/prt214b-waterfall.mjs","disabled":false,"fiberState":2}
+ENFORCEMENT-ROOT-SERVICE present
+APPROVAL-PORT-FACTORY registered
+WATERFALL-PROBE-EXIT-0
+```
+
+三件事同时可读：**那一行的模块解析成了 `team-hub/approval-registrar-row.mjs`**；
+**`legionEnforcementRoot` 服务发布了**；**两行运行期模块是 `fiberState: 2`（ACTIVE）**，
+不再停在 `pending (waiting for service: …)`。而 §9 那两份读数（§9.4 的 C/D）
+一个字都没改：它们是同一个进程形状下的**旧行为**，本批没有把它们变绿，只是加了一条 F。
+
+### 10.5 反向对照：注册方缺席时**仍然**是那条具名拒绝
+
+把插件本体（`runtime/dsh-composition/plugins/root-row.mjs`）当那一行的模块挂上去——
+这正是产品注册方交付前补丁层的取值，所以它不是虚构的坏例子：
+
+```text
+exit=1
+SERVICES-ROW-APPLY-RAN
+PROBE-APPLY-RAN
+Error: dsh: plugin tree failed to load: failed to apply loader entry include (cordis:include):
+failed to apply loader entry legion-enforcement-root (…/runtime/dsh-composition/plugins/root-row.mjs):
+legion-enforcement-root 拒绝装配：组合根给的是 ENFORCEMENT_ROOT_BAD_WIRING——
+createRequestApproval 造端口时抛错：…（code=ENFORCEMENT_ROOT_ROW_NO_APPROVAL_PORT_FACTORY）
+    at rowError (…/runtime/dsh-composition/plugins/root-row.mjs:118:15)
+```
+
+用例 G 断言的是**那个码本身**（`ROOT_ROW_CODES.NO_APPROVAL_PORT_FACTORY`，从产品模块 import，
+不在用例里另抄一份字符串），并且另外断言：**不是**配置码（`ENFORCEMENT_ROOT_CONFIG_EMPTY`）、
+**没有**被静默降级成"装好了但没端口"（`ENFORCEMENT-ROOT-SERVICE` 不出现）。
+把这条对照去掉，F 的"装上了"就可能是"这一行现在什么都不检查了"。
+
+> 一个"注册方缺了就退化成没强制面"的接线，
+> 与一个"注册方缺了就拒绝启动"的接线，在日志上都是"没装上"——
+> 只不过前者会让一次配置事故静默到运行时。
+
+### 10.6 真实 import 图（不是"我读了一遍代码"）
+
+从 `team-hub/approval-registrar-row.mjs` 出发的静态 import 闭包
+（`_prt-handoff\prt214b-import-graph.mjs`，正则解析 `import … from '<spec>'`）：
+
+```text
+入口：team-hub/approval-registrar-row.mjs
+
+① 闭包内文件数：45
+   其中 team-hub/ 下的：4
+     team-hub/approval-port.mjs
+     team-hub/approval-registrar-row.mjs
+     team-hub/permission-engine.mjs
+     team-hub/tool-request-bridge.mjs
+
+② 闭包里指向 team-hub/ 的边：
+     team-hub/approval-port.mjs → team-hub/tool-request-bridge.mjs
+     team-hub/approval-registrar-row.mjs → team-hub/approval-port.mjs
+     team-hub/tool-request-bridge.mjs → team-hub/permission-engine.mjs
+
+③ 闭包里的 team-hub/ → runtime/ 边（**允许**的方向）：
+     team-hub/approval-registrar-row.mjs → runtime/dsh-composition/plugins/root-row.mjs
+     team-hub/permission-engine.mjs → runtime/contracts/canonical.mjs
+     team-hub/permission-engine.mjs → runtime/dsh-composition/tool-args.mjs
+
+④ runtime/ → team-hub/ 的边（**被禁止**的方向）：0
+
+④b 闭包内跨顶层目录的全部边：
+     orchestrator → runtime   （例：orchestrator/worker/executor.mjs → runtime/adapters/dsh/index.mjs）
+     runtime → orchestrator   （例：runtime/dsh-composition/root.mjs → orchestrator/worker/executor-binding.mjs）
+     team-hub → orchestrator   （例：team-hub/approval-registrar-row.mjs → orchestrator/worker/executor-binding.mjs）
+     team-hub → runtime   （例：team-hub/approval-registrar-row.mjs → runtime/dsh-composition/plugins/root-row.mjs）
+
+④c 闭包按顶层目录计数：
+     orchestrator   5
+     runtime        36
+     team-hub       4
+
+⑤ 检测到的模块环：0
+⑥ 仓库外的 specifier：1   （node:crypto）
+⑦ 解析不到的相对路径：0
+⑧ DSH 执行面包（@deepseek-ai/*）：0
+```
+
+三条结论，逐条对应一个问题：
+
+1. **没有新造出模块环**（⑤ = 0）。被禁止的方向（`runtime/` → `team-hub/`）也是 0 处（④）。
+   §8.3 那条既有理由（`team-hub/approval-port.mjs` → `team-hub/tool-request-bridge.mjs`
+   → `runtime/dsh-composition/tool-args.mjs`）仍然成立，所以注册方只能住在
+   `team-hub/` 这一侧——本模块正是。
+2. `team-hub/` → `orchestrator/` 是一条**新边**，但不是新方向：
+   `team-hub/binding-store.mjs` 与 `team-hub/run-store.mjs` 早就在 import
+   `orchestrator/`（`model-binding` / `state-machine` / `acceptance` / `pipeline`）。
+   `runtime/dsh-composition/root.mjs` 也早就 import 同一个 `executor-binding.mjs`。
+3. 闭包里**一个 `@deepseek-ai/*` 都没有**：真 DSH 进程里加载这一行的模块图**不需要**
+   任何 DSH 执行面包——这是它能在 `bundles: []` 的一次性 profile 里跑起来的原因。
+
+### 10.7 凭证：没有发明任何默认值
+
+`createHubApprovalPort` 要的是 `{read, write}`，而生产里同源的形状是
+`orchestrator/worker/executor-binding.mjs` 的 `hubIo()`（`{get, post}` → `{status, body}`，
+`team-hub/approval-port.test.mjs` 的注释早就把这条"同源"写死）。这里复用它，**没有**另写一份 HTTP。
+
+**没有**改用 `orchestrator/worker/run.mjs` 的 `createHubClient()`，理由是硬的：它要求非空 token，
+而 DSH Runtime 进程**拿不到** hub 凭证——`product/launcher/enforcement-identity.test.mjs`
+有一条用例专门守着"`runtime.env` 不是凭证的后门"（`TEAM_HUB_TOKEN` 不在 `runtime` 的
+`envNames` 里）。hub 自己的鉴权口径是"token 非空时才要求"，所以注册方带上**进程真有的**
+那个 token（可能为空串），而不是发明一个：
+
+> 一个"猜一个 token 好让客户端造得出来"的注册方，
+> 与一个"把 401 记成审批箱不可达"的注册方，是同一个东西——
+> 只不过前者还会把一次配置缺失写成一次鉴权失败。
+
+`approvalHubOf()` 因此只做一件事：`status >= 400` 就**抛**，并把 `status`/`code`/`body`
+挂上去。不抛的话，端口会把一次 401 读成"审批箱答了一个我们不认识的 status"
+（`APPROVAL_PORT_UNKNOWN_STATUS`），把**鉴权失败**记成**协议缺陷**——
+两者的排查方向相反。这条翻译有独立用例（401 → `unavailable`，`denied` → `rejected`，
+并断言两者**不同**）。
+
+### 10.8 诚实边界
+
+这一节的判据必须按字面读。**"这一行在真 DSH 进程里装上了" ≠ "强制面在真部署里生效"。**
+
+**已经证明的（在此环境、此 DSH 检出上）：**
+
+- 真 `legion-host.patch.yml`（不改一个字节）+ 齐备的身份配置 → 那一行**装上**，`exit=0`；
+  服务发布；两行运行期模块 `fiberState: 2`；瀑布上有 listener 且认领（`kind: 'deny'`）。
+- 注册方缺席时**仍然**是 `ENFORCEMENT_ROOT_ROW_NO_APPROVAL_PORT_FACTORY`，`exit=1`（用例 G）。
+- 行序与 `--patch` 层序都反过来，读数不变（用例 H）。
+- 注册在 root 行自己的模块图里，因此不依赖兄弟模块是否挂起（§10.3 的 2×2 矩阵）。
+
+**没有证明 / 有意没做的：**
+
+- **没有一次真实工具调用被拦下。** deny 的对象是 `no-such-tool`，拒绝理由是**投影失败**
+  （`tool-request-target-missing`）。这是 fail-closed 的正确表现，但它**不是**
+  "某个真工具被拦下了"——`BOGUS` 这个合成投影换成正牌 `file_write` 也一样，因为
+  这一批的进程里**没有真 ToolRuntime**。
+- **宿主是桩**：`tools`（只有 `guard`）与 `approval` 是探针行 `ctx.provide` 的，
+  一次性 profile 声明 `bundles: []`（web/llm/凭据/网络那一整片行根本不进树）。
+  所以"两行 ACTIVE"是在**桩宿主**上的读数，不是真 DSH 工具面上的。
+- **审批端口造出来了，但一次申请都没发过。** 真进程里没有 hub 可问，也没有
+  `approval/request` 被派发过；`createHubApprovalPort` 的构造期不发 HTTP。
+- **token 保护的部署里，强制面会退化成"审批类调用一律拒绝"。** DSH 进程拿不到
+  `TEAM_HUB_TOKEN`（刻意的，见 §10.7），所以 hub 若配了 token，端口会以
+  `APPROVAL_PORT_CHECK_FAILED` → `unavailable` 收场 → 工具不执行（fail closed）。
+  这是一个**真实且未修**的能力缺口：装上了，但在那种部署里问不到人。
+  要修得先给 Runtime 进程一条**正当的**凭证来源（Launcher 注入 + `envNames` 声明 +
+  反向用例一起改），本批**没有**做，也**没有**用默认值或空 token 糊过去。
+- **`render.mjs --write` 仍然 exit 3**（两行 `module: null`）。本批只把 root 行那一行的
+  `module` 改了，没有动另外两行——它们要的是"进程内装配好的那一根"，YAML 带不动。
+- **注册是一次进程级副作用**：import `team-hub/approval-registrar-row.mjs` 就会装工厂。
+  这是刻意的（§10.3），代价是任何 import 它的进程都会被装上；用例用
+  `setApprovalPortFactory` 返回的注销闭包把它还原（只撤掉自己那一次）。
+- **搬移性变差**：补丁层 root 行的模块现在指向 `team-hub/`，所以补丁层**不再能连同
+  `plugins/` 一起单独搬走**。这是"注册方必须住在依赖方向允许的那一侧"的直接代价。
+- **`root-row-dsh-process.test.mjs` 的 F/G/H 是回归门槛，2×2 矩阵不是。** 那份矩阵要
+  24 个真进程（4 组 × 6 次），只作为证据脚本留在仓库外
+  （`_prt-handoff\prt214b-registrar-race.mjs`），CI 不跑它。所以"§10.3 的结论"是
+  **一次性的实测证据**，不是每次 CI 都能复现的门槛——这是本批一个真实的弱点。
+- **扫描覆盖不对等**（与 §9 同一条）：`team-hub/` 在 `scripts/config/scan.mjs` 的
+  `PROCESSES` 里，`runtime/` **不在**。所以 `scan --check` 的 PASS **不是**对新
+  `runtime/` 代码的判据。本批新增的两个字面量
+  （`APPROVAL_REGISTRAR_HUB_URL_MISSING` / `APPROVAL_REGISTRAR_HUB_IO_BAD_RESPONSE`）
+  已在 `team-hub/config-schema.mjs` 的 `nonEnvLiterals` 里登记并写明理由。
+- **未跑**：`scripts/ci/run-ci.mjs` 全量、构建、冒烟。`runtime/dsh-composition/plugins/`
+  下新增的文件已 `git add` 并登记到 `run-ci.mjs` 的套件清单里（否则它会"永远不会跑"）。
+
+### 10.9 本批改动的文件
+
+| 文件 | 改动 |
+| --- | --- |
+| `team-hub/approval-registrar-row.mjs` | **新增**：注册方（模块求值期注册 + `approvalHubOf` 适配 + 工厂） |
+| `team-hub/approval-registrar-row.test.mjs` | **新增**：6 条判据（`===` 身份、注册可分、缺 hub 地址具名拒绝、错误翻译、真端口协议） |
+| `runtime/dsh-composition/patch-layer.mjs` | root 行的 `module` 指向注册方；注释重写成实测理由 |
+| `runtime/dsh-composition/legion-host.patch.yml` | `render.mjs --write` 重新生成（root 行 `name` 随之改变） |
+| `runtime/dsh-composition/plugins/root-row.mjs` | 只改**注释**（注册方已交付）；拒绝路径与逻辑一字未动 |
+| `runtime/dsh-composition/plugins/root-row.test.mjs` | 补丁层声明断言改成注册方路径 + 插件本体仍存在 |
+| `runtime/dsh-composition/plugins/root-row-dsh-process.test.mjs` | 加 F（真补丁层装上）、G（注册方缺席仍拒绝）、H（顺序对照）；探针加两条直接读数 |
+| `team-hub/config-schema.mjs` | 登记两个新字面量并写明理由 |
+| `scripts/ci/run-ci.mjs` | 登记新套件 `team-hub/approval-registrar-row.test.mjs` |
+
+### 10.10 复跑命令与原始输出
+
+```text
+$ DSH_CHECKOUT=D:\project\DSH\dsh\deepseek-harness node --test runtime/dsh-composition/plugins/root-row-dsh-process.test.mjs
+▶ PRT-214：补丁行的 apply 在**真 DSH 进程**里跑没跑
+  ✔ A. `--dump-config` 解析并锚定那一行，但**从不实例化**它（对照组） (358.1526ms)
+  ✔ B. 真 profile 启动：补丁行的 `apply` **真的跑了**（此前从未被观测） (4744.1991ms)
+  ✔ C. 真 legion-host.patch.yml：root-row 跑了、并且**拒绝**（具名码，code 1） (1846.6175ms)
+  ✔ D. 全链：根行装好 → 服务发布 → 两行激活 → 真瀑布**认领**一次调用 (4222.4988ms)
+  ✔ E. 反向对照：根行缺席 → DSH 挂载审计报 pending，瀑布上**没有** listener (731.5622ms)
+  ✔ F. ★★★ 真 legion-host.patch.yml（一个字节都不改）：这一行**装上**，不再拒绝 (3284.8744ms)
+  ✔ G. ★★★ 反向对照：**注册方缺席**（把插件本体当那一行的模块）→ 仍是具名拒绝 (1053.1459ms)
+  ✔ H. ★★★ 行序与 `--patch` 顺序**都反过来**：F 的读数一字不变 (4141.1649ms)
+ℹ tests 8  ℹ pass 8  ℹ fail 0  ℹ skipped 0
+```
+
+```text
+$ node --test team-hub/approval-registrar-row.test.mjs
+  ✔ ★★★ 默认导出就是真的 root row 插件对象（`===`，不是形状相同的替身）
+  ✔ ★★★ 模块求值期注册了工厂：`approvalPortFactory()` 就是本模块那一个
+  ✔ ★★★ 反向对照：注册缝清空后读数**必须变**，恢复后必须变回来
+  ✔ ★★ 组合根没给 hub 地址时抛 `APPROVAL_REGISTRAR_HUB_URL_MISSING`，不造空端口
+  ✔ ★★ `approvalHubOf`：非 2xx 抛（带 status/code），形状不对抛另一个码
+  ✔ ★★★ 工厂交的是真端口：按 check 协议说话，`denied`→rejected，401→unavailable
+ℹ tests 6  ℹ pass 6  ℹ fail 0
+```
+
+```text
+$ node --test "runtime/dsh-composition/*.test.mjs"          ℹ tests 539  ℹ pass 539  ℹ fail 0
+$ node --test "runtime/dsh-composition/plugins/*.test.mjs"  ℹ tests  32  ℹ pass  32  ℹ fail 0
+$ node --test runtime/dsh-composition/plugins/root-row.test.mjs
+                                                             ℹ tests  24  ℹ pass  24  ℹ fail 0
+$ node --test team-hub/approval-port.test.mjs                ℹ tests  19  ℹ pass  19  ℹ fail 0
+$ node --test team-hub/approval-ttl.test.mjs                 ℹ tests  40  ℹ pass  40  ℹ fail 0
+$ node --test team-hub/tool-request-bridge.test.mjs          ℹ tests  22  ℹ pass  22  ℹ fail 0
+$ node --test product/launcher/enforcement-identity.test.mjs ℹ tests  22  ℹ pass  22  ℹ fail 0
+$ node --test scripts/config/config.test.mjs                 ℹ tests  36  ℹ pass  36  ℹ fail 0
+```
+
+```text
+$ node scripts/config/scan.mjs --check
+scan: PASS（全部 env 读取点与疑似字面量均已处理；共 542 个疑似字面量）
+
+$ node scripts/ci/ci-syntax.mjs
+ci-syntax: PASS（50 个脚本全部可被 Node 解析）
+
+$ node scripts/ci/encoding-check.mjs --all --quiet
+encoding-check: PASS（1892 个文本文件：无 U+FFFD；代码/配置无 NUL 字节）
+
+$ node scripts/ci/check-docs.mjs
+check-docs: PASS（README.md + docs/FEATURES.md 结构/链接/索引一致，10 类校验项全绿）
+
+$ node scripts/ci/dsh-boundary.mjs --check
+dsh-boundary: PASS（执行面依赖未增长：3 个文件 / 26 处，均在基线内）
+```
+
+证据脚本（**仓库外**，`D:\project\DSH\legion\.worktrees\_prt-handoff\`，不进 CI）：
+
+```powershell
+$env:DSH_CHECKOUT = 'D:\project\DSH\dsh\deepseek-harness'
+$env:LEGION_REPO  = 'D:\project\DSH\legion\.worktrees\prt-runtime'
+node ...\_prt-handoff\prt214b-registrar-race.mjs        # §10.3 的 2×2 矩阵
+node ...\_prt-handoff\prt214b-import-graph.mjs          # §10.6 的 import 闭包
+node ...\_prt-handoff\prt214b-real-patch-driver.mjs     # §10.4 / §10.5 的原始 stderr
+$env:PRT214B_MODE='no-registrar'; node ...\prt214b-real-patch-driver.mjs   # §10.5 那一条
+```
+
+复跑环境与本文件 §9.7 相同：DSH 检出 `c291e7961a515f6d7af9304e7fd1d257929aef26`
+（`0.1.5-rc.2`，2026-09-10）、Node `v24.19.0`、Windows。每一次 spawn 都用自己的一次性
+`DSH_HOME`（`os.tmpdir()` 下，启动前断言）、`bundles: []`/`patchReload: 'startup'` profile、
+删掉 `DSH_SNAPSHOT`、`spawnSync` 带超时——**从不**读写操作者的 `~/.dsh`。
+

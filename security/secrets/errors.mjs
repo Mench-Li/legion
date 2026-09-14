@@ -25,6 +25,31 @@ export const RUNTIME_CODE_FOR = Object.freeze({
   SECRET_STORE_CORRUPT: 'SECRET_UNAVAILABLE',
 })
 
+/**
+ * DSH 凭证子集读取器（`security/secrets/dsh-credentials.mjs`）拒绝码的前缀。
+ *
+ * 这一族码**刻意不逐个登记进** {@link RUNTIME_CODE_FOR}：它们全部都是
+ * "本机取不到明文"（spec §6.7 的 `SECRET_UNAVAILABLE`），而 `RUNTIME_CODE_FOR`
+ * 的默认分支给出的正是这个值。逐个登记只会把同一句话抄四十遍，并把
+ * "哪些码需要**不同的**对外码"这件唯一重要的事淹没在名单里。
+ */
+export const DSH_CREDENTIALS_CODE_PREFIX = 'DSH_CREDENTIALS_'
+
+/**
+ * DSH 子集读取器每个拒绝码共用的处置指引。
+ *
+ * 四十个码的**处置**是同一件事，所以文案共用而不是各写一份：
+ *   · "这个文件不在认识的确切子集内" 是事实；
+ *   · "整份被拒绝而不是被猜着读" 是决策；
+ *   · "把值录进 Legion 自己的库" 是下一步。
+ * 逐码不同的那部分（到底哪一类不认识）由 `code` 本身回答，而它已经在
+ * 消息最前面——不需要在散文里再说一遍。
+ */
+export const DSH_CREDENTIALS_HINT =
+  '这个 DSH 凭证文件不在本读取器认识的确切子集内（读取器只认 DSH 自己写出的那个子集），' +
+  '因此整份文件被拒绝，而不是被猜着读。请继续用 DSH 自己的 Models 页维护该文件，' +
+  '或把需要的值录入 Legion 自己的密钥库——Legion 的库仍然是唯一的权威写入路径。'
+
 /** 每个内部码对应的**用户可操作**文案。 */
 export const SECRET_ERROR_HINTS = Object.freeze({
   SECRET_REF_INVALID: '把 secretRef 改成合法引用名（字母数字开头，不含空段或 ".."）。',
@@ -50,7 +75,8 @@ export class SecretStoreError extends Error {
    * @param {{ref?: string, platform?: string, cause?: string}} [context] 白名单上下文（不得含密钥值或密文）
    */
   constructor(code, context = {}) {
-    const hint = SECRET_ERROR_HINTS[code] ?? '未知的密钥库错误。'
+    const hint = SECRET_ERROR_HINTS[code]
+      ?? (code.startsWith(DSH_CREDENTIALS_CODE_PREFIX) ? DSH_CREDENTIALS_HINT : '未知的密钥库错误。')
     const ref = typeof context.ref === 'string' ? context.ref : null
     const where = ref === null ? '' : `（ref=${ref}）`
     const cause = context.cause === undefined || context.cause === null ? '' : `；原因：${redactCause(context.cause)}`

@@ -29,11 +29,23 @@
 // ④ **诊断里没有密钥、也没有明文引用值。** 自检结果只带 `code`/`message`/
 //    方案名与**计数**。连"有哪些引用名"都不带出去：引用名能画出这台机器配了
 //    哪些供应商，而自检结果会进日志与诊断包。
+//
+// ⑤ **回退来源是"接上"而不是"默认开"。** PRT-509 路线 A′：DSH 的
+//    `$DSH_HOME/.credentials.yaml` 可以被当成一个**只读回退来源**，但
+//    Legion 的 DPAPI 库仍然是唯一权威写入路径，且**只有调用方显式给出
+//    文件位置时**才接线。缺省（`null`）不接，于是"配了回退来源"这件事
+//    在行为上是可辨认的——一个永远悄悄生效的第二来源，就是
+//    "我轮换的那把钥匙没生效"的起点。
+//
+//    回退来源的文件层读数（`absent` / `loaded` / `unrecognized`）进自检
+//    结果：**"没有这个文件"是常态，"有这个文件但读不懂"才需要用户动手**，
+//    把两者说成同一句话会让后者永远不被看见。
 // ============================================================================
 
 import {
   ACL_CODES,
   SecretStoreError,
+  createDshCredentialsSource,
   createProductSecretStore,
   createSystemRunner,
   hardenFileAcl,
@@ -65,7 +77,13 @@ export const SECRETS_CHECK_CODES = Object.freeze({
  * @param {Function} [deps.run]             ACL 检查用的 runner（`icacls`/`stat`）
  * @param {Function} [deps.onAudit]
  * @param {boolean} [deps.hardenAcl]        是否在打开时就收紧文件权限（默认 true）
- * @returns {Promise<{ok, code, message, path, store, resolver, acl, protection, count}>}
+ * @param {string|null} [deps.dshCredentialsFile]
+ *        DSH `$DSH_HOME/.credentials.yaml` 的路径。**缺省 null = 不接回退来源**
+ *        （PRT-509 路线 A′）。给了它，Legion 的库仍然是第一顺位，
+ *        只有"库里没有这条"才会去读它——且**只读**，永不写回。
+ * @param {{readFile?: Function, stat?: Function, now?: Function}|null} [deps.dshCredentialsIo]
+ *        回退来源的文件 IO 注入点（用例用）。缺省走 `node:fs/promises`。
+ * @returns {Promise<{ok, code, message, path, store, resolver, acl, protection, count, fallback}>}
  */
 export async function openProductSecrets({
   layout,
@@ -80,6 +98,8 @@ export async function openProductSecrets({
   // 用例注入假实现，这样"文件还没创建"与"文件在但 ACL 异常"两条分支
   // 都能被**确定性地**测到，而不需要真的去碰文件系统。
   exists = existsSync,
+  dshCredentialsFile = null,
+  dshCredentialsIo = null,
 } = {}) {
   const path = layout?.secretsFile ?? null
   if (path === null || path === undefined || path === '') {
@@ -156,7 +176,25 @@ export async function openProductSecrets({
   }
 
   // ⑤ 解析器——这一步才是"生产调用方"真正被接上的地方。
-  const resolver = createSecretResolver({ store, requireProtected })
+  //
+  // PRT-509 路线 A′：调用方显式给出 DSH 凭证文件位置时，把它作为一个
+  // **只读回退来源**接在 Legion 自己的库后面。缺省不接，于是默认行为
+  // 与这一批之前逐字相同。
+  let fallbackSource = null
+  let fallbackReading = null
+  let resolver
+  if (dshCredentialsFile === null || dshCredentialsFile === undefined || dshCredentialsFile === '') {
+    resolver = createSecretResolver({ store, requireProtected })
+  } else {
+    // 文件层读数**不抛**（`absent` / `loaded` / `unrecognized` 三态），
+    // 所以自检不会被一个坏掉的回退来源挡住——它只该被看见。
+    fallbackSource = createDshCredentialsSource({
+      file: dshCredentialsFile,
+      ...(dshCredentialsIo === null || dshCredentialsIo === undefined ? {} : dshCredentialsIo),
+    })
+    fallbackReading = await fallbackSource.inspect()
+    resolver = createSecretResolver({ store, requireProtected, fallback: fallbackSource })
+  }
 
   // 计数而不列名：引用名不进诊断（见文件头 ④）。
   let count = null
@@ -174,10 +212,22 @@ export async function openProductSecrets({
     ? `密钥库可用（scheme=${protection.scheme}）`
     : `密钥库可用（scheme=${protection.scheme}，已录入 ${count} 条）`
 
+  // 回退来源的**文件层状态**必须出现在文案里，但只在真的接了它的时候。
+  // 三态里只有两种值得占一行字：
+  //   · `absent`（没接过这个文件）——常态，一句话说清楚"这是正常的"；
+  //   · `unrecognized`（在、但读不懂）——**需要用户动手**的那一种。
+  // `loaded` 不占字：能读懂就不必在结论里重复一遍。
+  const fallbackNote = fallbackReading === null || fallbackReading.state === 'loaded'
+    ? ''
+    : (fallbackReading.state === 'absent'
+        ? '；DSH 凭证回退来源不存在（从未用过 DSH 的 Models 页时这是常态，不是错误）'
+        : `；DSH 凭证回退来源**读不懂**（${fallbackReading.code}）：该文件整份被拒绝，` +
+          '需要用它自己那套维护它——**没有被猜着读**')
+
   return result({
     ok: true,
     code: SECRETS_CHECK_CODES.OK,
-    message: `${base}；文件访问控制：${acl.message}`,
+    message: `${base}；文件访问控制：${acl.message}${fallbackNote}`,
     path,
     store,
     resolver,
@@ -186,6 +236,9 @@ export async function openProductSecrets({
     aclBefore,
     hardened,
     count,
+    // 回退来源**接上了没有、读成了什么样**。`null` = 这次没接
+    // （调用方没有给出文件位置）——它与"接了但没有这个文件"是两件事。
+    fallback: fallbackReading,
     aclVerified: acl.ok === true,
     // 文件是否已经存在。`aclVerified: false` 有**两种**原因，调用方要能分开：
     //   `aclExists: false` → 还没有文件，没什么可保护的（全新安装的常态）
@@ -274,6 +327,10 @@ function result(fields) {
     hardened: null,
     count: null,
     aclVerified: false,
+    // 回退来源（DSH 凭证文件）的文件层读数；`null` = **这次没有接**
+    // （调用方没给出路径，或者自检在到达那一步之前就短路了）。
+    // 与 `fallback.state === 'absent'` 不同：那一种是真的去看了、文件不在。
+    fallback: null,
     ...fields,
   })
 }

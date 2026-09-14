@@ -1155,6 +1155,41 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-214：**真 DSH 进程**里的读数。
+      //
+      // 上面两套都不是 DSH 进程：`patch-loadable` 是解析期接受（形状检查），
+      // `root-row.test.mjs` 下半部分是自己 `new` 出来的**真 cordis `Context`**。
+      // 而 `--dump-config` 看起来更像证过了——它 code 0，输出里还带着锚定好的
+      // `file://…/root-row.mjs`。但 `dump-config.js` 自己写着 "without booting or
+      // evaluating"，`renderConfigDump()` 只**解析并锚定**，从不实例化。
+      //
+      //   > 一条"被解析并锚定"的补丁行，
+      //   > 与一条"被真的挂进进程"的补丁行，在 dump 的输出里完全同形——
+      //   > 只不过前者从来没有 `apply` 过。
+      //
+      // 所以这一套不看 dump，它启动**真 CLI**（`apps/cli/lib/bin.js`），用探针行的
+      // stderr 读数回答"apply 跑没跑"，并给出四条此前没有的读数：
+      //   · dump 锚定但 `apply` 未执行（对照组，其余几条的前提）；
+      //   · 真 profile 启动时补丁行的 `apply` **真的跑了**；
+      //   · 真 `legion-host.patch.yml` 的 root-row 跑了并**拒绝**（具名码，启动失败）
+      //     —— 拒绝不是成功，这条断言的就是拒绝本身；
+      //   · 全链：根行装好 → 服务发布 → 两行运行期模块由挂载审计报 ACTIVE →
+      //     真 `tools/pre-execute` 瀑布**认领**（`deny`）一次调用；
+      //     外加反向对照：根行缺席时 DSH 自己报 `pending (waiting for service: …)`。
+      //
+      // ★ 安全形状写进用例本身：每个子进程都吃**自己的临时 `DSH_HOME`**
+      //   （`os.tmpdir()` 下，启动前断言），profile 声明 `bundles: []`
+      //   ——一个 bundle 层都不挂，于是 web/llm/凭据/网络那一整片行根本不进树；
+      //   `DSH_SNAPSHOT` 从子进程环境删掉；每个子进程都有 spawnSync 超时上界。
+      //   **从不**读写 `~/.dsh`，**从不**把补丁文件写进真实 profile。
+      //
+      // 需要 DSH_CHECKOUT 的那几条逐条 `t.skip()`（`skipped: N` 看得见）；
+      // 缺席的宿主不伪造通过。
+      label: 'dsh-composition-root-row-dsh-process（PRT-214：apply 在**真 DSH 进程**里跑没跑，含全链与否决对照）',
+      files: ['runtime/dsh-composition/plugins/root-row-dsh-process.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-601：工具能力描述与风险等级。
       //
       // 这一组盯的**不是**"登记表里有没有那些工具"，而是**风险等级能不能被填低**。
@@ -1956,6 +1991,23 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-509 路线 A′：`$DSH_HOME/.credentials.yaml` 的**只读**回退来源。
+      //
+      // ★ 这一套的价值有一半在它的第 ⑥ 组：把同一批夹具喂给 **DSH 自己的**
+      //   `parseCredentialsDocument`，断言两边在"接受/拒绝"上一致，并逐条钉住
+      //   一份"我们更严"的清单（DSH 接受、我们拒绝）。
+      //
+      //   没有那一组的话，"手写的子集读取器"与"真的读懂了 DSH 的格式"在
+      //   用例上是同一个读数——只不过前者会在 DSH 换个写法的第二天，
+      //   安静地把一份凭证文件读错或者整份读不出来。
+      //
+      //   未设 `DSH_CHECKOUT` 时 ⑥ 组逐条 skip（并留下跳过的条数），
+      //   跑不了不算跑过。
+      label: 'dsh-credentials（PRT-509 A′：只读子集读取器 + 与 DSH 真解析器的交叉核对）',
+      files: ['security/secrets/dsh-credentials.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-254 的「Secret Store 最小闭环」：密钥库文件位置、fail closed 保护判定、
       // 解析器真的接上、诊断不泄漏。
       label: 'product-secrets（PRT-254：密钥库不得在 DataDir 内 / 明文后端 fail closed / 解析器真的接上）',
@@ -2240,6 +2292,26 @@ async function stageTest() {
       // 与一个"什么都没接"的端口，在用户那里都是"我批了，执行时说操作不匹配"。*
       label: 'approval-port（PRT-212：审批端口 → team-hub 审批箱，起真 hub）',
       files: ['team-hub/approval-port.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      // PRT-214 续：**审批端口注册方**——把工厂注册进 DSH 进程的那一段接线
+      // （`team-hub/approval-registrar-row.mjs`，它也是补丁层 root 行的模块）。
+      //
+      // 这套件盯的是四件此前没有任何判据的事：默认导出**就是**真的 root row 插件
+      // 对象（`===`，不是替身）；注册**真的发生**（模块求值期）且"注册了/没注册"
+      // 两种读数可分；没有 hub 地址时抛**具名码**而不是造一个永远问不到人的端口；
+      // 工厂交出来的是**真端口**（按 `/api/permissions/check` 的协议说话），
+      // 并且把 401 翻成 `unavailable`（故障）而**不是** `rejected`（人说不）。
+      //
+      //   一个"把 401 记成审批箱答了但读不懂"的适配，
+      //   与一个"审批箱真的换了状态串"的适配，在屏幕上都是 `UNKNOWN_STATUS`——
+      //   只不过前者要值班的人去翻 hub 的鉴权配置，而 prompt 指的是错的那份代码。
+      //
+      // 假的只有 HTTP 传输（注入 `fetchImpl`）：`hubIo()` → `approvalHubOf()` →
+      // `createHubApprovalPort()` 三段全是产品代码。
+      label: 'approval-registrar（PRT-214 续：审批端口工厂的注册方与它的错误翻译）',
+      files: ['team-hub/approval-registrar-row.test.mjs'],
       cwd: ROOT,
     },
     {

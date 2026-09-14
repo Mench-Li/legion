@@ -128,12 +128,23 @@ test('① 补丁层：这一行**在静态文档里**（module 是字符串，�
   const row = PATCH_LAYER_ROWS.find((r) => r.id === `${LEGION_ROW_PREFIX}root`)
   assert.ok(row !== undefined, '补丁层里没有 legion-enforcement-root 这一行')
   assert.equal(row.id, ROOT_ROW_PLUGIN_NAME, '行 id 与插件名必须逐字相同——挂载审计按它对号')
-  assert.equal(row.module, './plugins/root-row.mjs')
+  // ★ PRT-214 续：这一行的模块是**注册方**，不是下面那个插件文件本身。
+  //
+  //   为什么不能直接挂 `./plugins/root-row.mjs`：那样进程里**没有任何东西**去调
+  //   `setApprovalPortFactory()`，于是本行在真 DSH 进程里以
+  //   `ENFORCEMENT_ROOT_ROW_NO_APPROVAL_PORT_FACTORY` 拒绝（§9 的读数 D）。
+  //   注册方默认导出的就是本文件 import 的那个 root row 插件对象（`===`，
+  //   由 `team-hub/approval-registrar-row.test.mjs` 钉住，不是替身）。
+  //
+  //   所以这条断言是有内容的：把它改回 `./plugins/root-row.mjs`，这里立刻红。
+  assert.equal(row.module, '../../team-hub/approval-registrar-row.mjs')
   assert.equal(row.runtimeModule, undefined, '本行是静态可加载的，不该同时带 runtimeModule')
   // ★ `module` 是**相对于补丁文件所在目录**的（DSH 的 `anchorInsertedPluginNames`
   //   按 `dirname(patchFile)` 解析），不是相对本用例。少拐这一层就会把
   //   "解析错了目录"读成"文件不存在"。
   assert.ok(existsSync(resolve(HERE, '..', row.module)), `${row.module} 不存在——DSH 加载不到它`)
+  // 注册方要 import 的**插件本体**必须还在：它才是这一行真正挂上去的东西。
+  assert.ok(existsSync(resolve(HERE, 'root-row.mjs')), 'root-row.mjs 不存在——注册方没有东西可导出')
   assert.equal(row.mount.anchor, 'insert')
 })
 

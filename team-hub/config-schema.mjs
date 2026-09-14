@@ -283,6 +283,18 @@ export const SCHEMA = defineSchema({
     'APPROVAL_PORT_ROW_MALFORMED', 'APPROVAL_PORT_TTL_NOT_ANSWERED',
     'APPROVAL_PORT_ABORTED',
 
+    // PRT-214 续：审批端口**注册方**（`team-hub/approval-registrar-row.mjs`）的具名码。
+    //
+    // 这个模块在 DSH 进程里造审批端口，它的码会经 root 行透传进启动失败消息——
+    // 也就是说，值班的人看到的第一行就是它。两个码是**两件不同的坏事**：
+    //   · HUB_URL_MISSING      — 组合根没交来 hub 地址。没有审批箱可问。
+    //     （真部署里通常先被组合根的 `ENFORCEMENT_ROOT_NO_HUB_URL` 拦下；保留它
+    //      是为了直接调工厂的调用方也拿得到一个说得清"缺地址"的码，而不是 TypeError。）
+    //   · HUB_IO_BAD_RESPONSE  — hub 客户端返回的不是 `{status, body}`。这是**接线错**，
+    //     与"审批箱答了但我们读不懂"（`APPROVAL_PORT_UNKNOWN_STATUS`）不是一回事：
+    //     合并两者会让一次适配器接错被记成"hub 升级换了状态串"。
+    'APPROVAL_REGISTRAR_HUB_URL_MISSING', 'APPROVAL_REGISTRAR_HUB_IO_BAD_RESPONSE',
+
     // ── PRT-402：TeamPlan / EmployeeManifest 的具名错误码 ────────────────
     //
     // `team-hub/context-plan-store.mjs` 的 `CONTEXT_PLAN_ERRORS` 的值，加上

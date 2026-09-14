@@ -117,6 +117,19 @@ export const SCHEMA = defineSchema({
     { name: 'LOCALAPPDATA', owner: '操作系统（Windows）', reason: 'Windows 上 %LOCALAPPDATA%\\Legion 是产品家目录的默认位置；读它才能在不设 LEGION_HOME 时定出家目录' },
     { name: 'USERPROFILE', owner: '操作系统（Windows）', reason: '没有 %LOCALAPPDATA% 时用它推出 AppData\\Local；仅作为回退' },
     { name: 'HOME', owner: '操作系统（POSIX）', reason: 'POSIX 上 ~/.legion 是产品家目录的默认位置；名称与其他进程共用，故逐个登记' },
+    // PRT-509 路线 A′：本进程**也**读它（`product/launcher/cli.mjs` 的
+    // `dshCredentialsFileFrom`），不只是注入给 Runtime 子进程。
+    //
+    // 为什么必须登记在这里而不是只留在 `CHILD_ENV_NAMES` 里：那一份说的是
+    // 「注入目标的变量名」，理由里写着"本进程从不读它们"。现在这句话不成立了，
+    // 而 `scan --check` 只看字面量**有没有登记**、看不出理由漂了没有——
+    // 登记理由要漂，只能靠人把它挪到看得见的地方。
+    {
+      name: 'DSH_HOME',
+      owner: 'DeepSeek Harness（DSH）',
+      reason: 'DSH 用它定位自己的 $DSH_HOME/.credentials.yaml。Legion **只读**该文件作为凭证回退来源（PRT-509 路线 A′），'
+        + '只在 Legion 自己的密钥库里没有那条引用时才去读，结果里带出处；不写它、不迁移、不猜路径',
+    },
   ],
   nonEnvLiterals: [
 
@@ -454,6 +467,14 @@ export const SCHEMA = defineSchema({
     // 「查了，太宽」与「没查出来」——这两个必须保持不同的码，把前者塌成后者
     // 会让"已经确认的危险"看起来像"这次没查到"。
     'SECRETS_PLACEMENT_INVALID', 'SECRETS_CHECK_FAILED', 'ACL_TOO_PERMISSIVE',
+    // PRT-509 路线 A′：DSH 只读回退来源的两条启动诊断码
+    // （`product/launcher/secrets-check.mjs` 的 `fallbackDiagnostic`）。
+    //
+    // 两条而不是一条，理由与上面 `ACL_TOO_PERMISSIVE` / `ACL_UNVERIFIABLE`
+    // 完全一样：**"看过了，它不在认识的子集里"与"根本没看到"** 是两条
+    // 不同的信息，下一步动作也不同（前者去改文件写法，后者去改权限）。
+    // 把前者塌成后者，用户会去查一个并不存在的权限问题。
+    'SECRETS_DSH_CREDENTIALS_UNREADABLE', 'SECRETS_DSH_CREDENTIALS_UNRECOGNIZED',
     // `ACL_NOT_CREATED`：密钥库文件**还没被创建**。它与 `ACL_UNVERIFIABLE`
     // 是不同的事实，必须分开——新装机器上每次启动都会碰到它，若归成"未验证"，
     // 那条告警会每次都出现而每次都说得不对（没有文件就没有暴露面）。

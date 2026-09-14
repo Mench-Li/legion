@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-14　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **195 套件 / 5546 用例 / 0 fail**（证据 `.ci/prt-315f/`）
+**最近一次全量基线**：2026-09-14　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **195 套件 / 5583 用例 / 0 fail**（证据 `.ci/prt-315g/`）
 （**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数会少）
 —— 以本文件所在提交为准；证据 `.ci/prt-901/`（PRT-901/902 第三方组件清单、SBOM 与商业分发条件那一批）
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
@@ -3457,6 +3457,106 @@
 > `docs/DUAL-WRITE-RACE-evidence/verify-evidence.md`。
 
 ---
+
+## 2026-09-14　PRT-315 切片 5（验收边界）：验收与沉淀管线拆出 `index.ts`
+
+本批把 `spaceWorker()` 里任务完成之后的**结算管线**整块搬进 `plugins/src/acceptance.ts`。
+
+### 一、搬了什么
+
+| | 前 | 后 |
+| --- | --- | --- |
+| `plugins/src/index.ts` | **3069 行** | **2862 行**（`45 insertions(+), 252 deletions(-)`） |
+| `plugins/src/acceptance.ts` | — | 426 行（新，`createAcceptance(deps)` 四个方法） |
+| `plugins/tests/acceptance.test.mjs` | — | 603 行 / **37 例**（新） |
+| `plugins` 套件 | 300 例 | **337 例** |
+
+搬了 231 行：`// 4.2` 结算（`expSettled` + `settleExperience`）、`// 4.3` 事件扫描与票务扫单
+（`taskScanText` + `collectVoteEvents` + `sweepExperienceVotes`）、`// 4.4` 规则 doctor
+（`runRuleDoctorNow`）、`// 4.5a` 技能桥（4 个函数）。**对拍 7 段逐字一致**，白名单 7 条穷尽改写规则，
+形态自检 12/12。按**构建产物**核对：`acceptance.js` 不含执行面记号。
+
+### 二、按边界留在原处的（每处点名）
+
+- ★ **`promoteDraft`**：需要 `ensureForeman` + 执行面子代理 + hub register。搬进来会让新文件
+  出现**执行面记号**、`dsh-boundary` 当场红 —— 所以作为**兄弟能力**注入，`expPromoting` /
+  `expPromoteRetryAt` 随之留下。这是一条**棘轮反向约束了分层**的例子：不只是分层决定棘轮，
+  棘轮也在决定分层。
+- `expDraftDir` / `expLearningDir`（workspace 边界；另有两个非验收读者）、
+  规范读取三函数、`pendingRecallRefs`、`lastInjectedNorms` / `normsGlobalText`。
+- ★ **`lastRuleDoctor`**：本模块**写**、`writeDaemonStatus` **读** ⇒ 用 `{ get, set }` **访问器**，
+  **不能**用"返回新值由调用方回写"——因为**状态变化比较必须在 `set` 之前读到旧报告**。
+  （与切片 2 的 `{ done }` 状态对象同一族手法，但触发原因不同：切片 2 是"动手之前就算做过了"，
+  这里是"写之前要先读旧的"。）
+- `// 4.`（advancePipeline）、`// 5.`（orchestrateSlices）、`// 4.5 合入调解`（切片 1）未动。
+
+### 三、★ 一条**没被任何用例守住的**顺序不变量（我独立复核确认）
+
+`index.ts` 接线处留着一行注释：
+
+> `// 四步的先后即下面四行的先后：4.3 必须在 4.2 之后跑，本轮新落盘的草稿才能参与事件扫描。`
+
+**这条不变量是真的被写下来了，但它没有被任何用例守住。** 我独立做了破验：
+把 `settleExperience` 的 `for` 块与 `sweepExperienceVotes` **对调** ⇒
+**337 例全绿、0 红**；逐字节还原后 337/337 复绿。
+
+新套件钉的是"**两个方法之间的**有序依赖"（先 sweep 无草稿 ⇒ 零票；先 settle 再 sweep ⇒ 当场得票），
+而**不是** `index.ts` 里那两行的先后。要守住后者需要能驱动整个 `spaceWorker()` 的夹具。
+
+> 所以这条要老实说：**一行注释里的顺序，与一个被用例钉住的顺序，在 `npm test` 的读数上完全一样。**
+> 哪天有人为了"清理"把两行挪一下，绿着的 CI 什么都不会说。
+
+（子代理主动把这条写进了它自己的诚实边界；我复核后确认它**说的是真的**，不是谦辞。）
+
+### 四、★ 一个"没咬住"的变异，被改造成了真缺口 + 真用例
+
+7 组变异里 **M6-pre 没咬住**。子代理没有就此收工，而是**去查为什么**：
+原夹具里 `..` 闸门的测试数据是含 `/` 的路径，而**只含 `..`（不含 `/`）的 id**（如 `..evil`）
+**零覆盖**。它补了夹具与断言 ⇒ M6 咬住、M6-pre 仍然不咬住（对照有效）。
+
+> 这是本系列里"破验发现覆盖缺口"的**第二次**（切片 4 的 M9 是第一次，选择留档不补用例）。
+> 两次的处理不同——一次补、一次不补——但**都写下来了**：
+> 一个"变异没咬住"的读数，与一个"我没去变异"的读数，在覆盖率上看起来一模一样。
+
+### 五、棘轮
+
+`dsh-parity` 锚点 **2007 → 1790**。重对拍：4 个调用点（993 / 1790 / 2003 / 2415），
+与 `LEGACY_CALL_OPTIONS` `deepEqual` 的**恰好 1 个 = 1790**。我也独立复核了一遍，一致。
+
+★ 而这里出现了一个**值得单独记下的统计**：切片 2 与切片 3 的算术**都不对**，
+切片 4 与切片 5 的算术**恰好都对**。子代理在 JSDoc 里写下了正确的判据：
+
+> 决定对不对的**不是记性**，是**被搬走的行是否全在锚点之上**。
+
+——但即便这句话是对的，它也只是**事后解释**：真正安全的做法仍然是每次都用抽取器重算。
+**四批里两批蒙对**，这个命中率不足以支撑"我这次看准了"。
+
+### 六、验证
+
+- `npm run typecheck` exit 0；`plugins` 套件 **337/337**（基线 300，+37）。
+- `dsh-parity` **36/36**（重钉前 5 条红）；`dsh-boundary --check` **3 文件 / 26 处，未增长**。
+- **7 道门禁全 PASS**（scan 558 / encoding **1935** 文件 / topology 与 baseline 无漂移 /
+  check-docs / ci-syntax 50 脚本）。
+- 新增测试文件 `plugins/tests/acceptance.test.mjs`（CI 自动 glob，无需改 `run-ci.mjs`）。
+- 破验 7 组：**6 咬住 + 1 未咬住（已查清原因并补上用例）**；变异全部逐字节还原（sha256 相等）。
+- **全量 CI `.ci/prt-315g/`：9/9 阶段 PASS**，`test` **195 套件 / 5583 用例 / 0 fail**
+  （本批 +37 例，套件数不变）；stageTest「套件清单完备（**281** 个 `*.test.mjs`）」通过；
+  `plugins` **337/337**、`dsh-parity` **36/36**。
+
+### 七、诚实边界
+
+- ★ **sweep 里四步的先后没有任何执行期用例**（第三节，我独立复核确认）：对调 `settleExperience`
+  与 `sweepExperienceVotes` 不会红任何用例。
+- **`promoteDraft` 与 `fetch` 都是替身**：不证明真实 AI 改写、hub register、team-hub 行为。
+- **`~/.dsh/skills` 的真实回落路径零覆盖**：用例**故意不碰**操作员的活体 harness，
+  只验注入的临时目录与空白串短路。
+- 对拍是**归一化后**的（一个多余/缺失的空行抓不到）；`// 4.2` 注释与 `expSettled` 之间
+  确实插了一个空行。
+- doctor 的"恢复"分支在现有代码里**不可达**（既有怪癖，**未改未测**）。
+- `writeDaemonStatus` 对报告的投影**未新增用例**。
+- `spaceWorker()` 仍约 **2240 行**；剩余边界：worker 派工 + 看门狗（`runWorker`）、
+  状态机其余部分（done 补流转、内嵌调解驱动）、切片编排（`orchestrateSlices`），
+  以及 `spaceWorker` 自身的收尾骨架。
 
 ## 2026-09-14　PRT-315 切片 4（workspace 边界）：worktree 生命周期拆出 `index.ts`
 

@@ -578,6 +578,46 @@ describe('PRT-214：补丁行的 apply 在**真 DSH 进程**里跑没跑', () =>
     }
     assert.match(r.stderr, /^GATE-DENIED$/m, r.stderr)
   })
+
+  guarded('I. ★★★ PRT-214 收口：**不挂那两行补丁条目**，瀑布上仍然有人认领', async () => {
+    // 与 D / F 的唯一区别：**不放** `runtimeRowsPatch`。D / F 证明的是"补丁条目在场时
+    // 整条链通"；这一条证明的是本批补的那一截——`mount()` 有了生产调用方之后，
+    // 两行 enforcement 由**组合根那一行自己在进程内挂**，不再依赖它们是补丁条目。
+    //
+    // 这是"挂载真的发生了"的**行为**读数（不是"文件里有这个 import"）：
+    // 瀑布被认领并 deny。
+    //
+    // ⚠️ 诚实边界两条，都必须一起读：
+    //   ① 这一条**不**说明"强制面已生效"：`legion-host.patch.yml` 里仍然没有那两行，
+    //      所以 `reconcilePatchLayer()` 照旧报 `ROW_MISSING`、启动自检照旧拒绝注册
+    //      （`runtime-host-row*.test.mjs` 那些套件量的就是那一件事）。这里量的是
+    //      "两行 listener 在真进程里真的挂上了"，是**前一步**。
+    //   ② `MOUNT` dump 里**不会**出现那两个模块名——它们不是 loader 条目。
+    //      所以下面显式断言"dump 里没有它们"，免得下一个人把这条读数读成 D 的重复。
+    const r = runDsh({
+      tag: 'i',
+      patches: [
+        SCRATCH_PATH.servicesPatch,
+        SCRATCH_PATH.rootRowWrapperPatch,
+        SCRATCH_PATH.probePatch,
+        SCRATCH_PATH.waterfallPatch,
+      ],
+      legionEnv: true,
+    })
+
+    assert.equal(r.spawnError, null)
+    assert.equal(r.code, 0, `期望装配成功：\n${r.stderr}`)
+    assert.match(r.stderr, /^ENFORCEMENT-ROOT-SERVICE present$/m, r.stderr)
+    // ★ 本批的核心读数：没有那两行补丁条目，瀑布上仍然有人认领。
+    assert.match(r.stderr, /^GATE-DENIED$/m, r.stderr)
+    assert.equal(r.stderr.includes('GATE-NOT-BOUND'), false,
+      `两行没有挂上——\`mount()\` 仍然没有生产调用方：\n${r.stderr}`)
+    // 反向控制：确实没有那两行补丁条目（否则这一条与 D 就是同一个读数）。
+    for (const row of ['pre-execute-row.mjs', 'approval-answerer-row.mjs']) {
+      assert.equal(r.stderr.includes(`MOUNT `) && new RegExp(`MOUNT \\{[^}]*${row.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`).test(r.stderr), false,
+        `${row} 竟然在 loader 树里——这一条就退化成 D 的重复了：\n${r.stderr}`)
+    }
+  })
 })
 
 if (SKIP !== false) {

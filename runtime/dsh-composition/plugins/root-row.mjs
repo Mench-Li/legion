@@ -64,6 +64,69 @@
 // pending。这不是静默——DSH 的挂载审计会报 `N row(s) did not activate`，
 // 而那正是 `reconcilePatchLayer()` 的 `ROW_NOT_ACTIVATED` 判据读的东西。
 //
+// ## ★★（PRT-214 收口）`mount()` 的**第一个生产调用方**就在本行的 `apply` 里
+//
+// 上面那段"靠服务依赖等对面激活"是**设计意图**，而它此前从未在生产里成立过：
+//
+//   · `installEnforcementRoot()` 造出的 `mount(ctx)`（`root.mjs:482`）在**全仓库
+//     没有任何调用方**——对 `.mount(` 的其余出现全是注释，`root.mjs` 那一行只是转发；
+//   · 两行运行期模块（`pre-execute-row` / `approval-answerer-row`）又**不在**
+//     `legion-host.patch.yml` 里（`module: null`，只出现在注释块里）。
+//
+// 于是 `assembleEnforcement()` 每次都跑、每次都造出一个**能挂**的装配，
+// 而两行 enforcement **从来没有进过任何真 DSH 进程**：
+//
+//   > 一个"装配好了、也验证过能被挂载"的强制面，
+//   > 与一个"从来没有被挂载过"的强制面，在运行的部署上是同一个东西——
+//   > 只不过前者的用例是绿的。
+//
+// 所以本行在**发布服务之后自己调** `mount(ctx)`。它是那条路径上唯一的生产调用方，
+// 于是"两行到底挂上了没有"从此有一条不读注释的读数：
+// 真 `tools/pre-execute` 瀑布被认领（`GATE-DENIED`，见
+// `root-row-dsh-process.test.mjs` 的场景 I）。
+//
+// 三段读数因此变成四段，仍然**不能混成一段**（文件末尾
+// `ROOT_ROW_DOES_NOT_PUBLISH_A_LISTENER` 的说明照旧成立）：
+//
+//   ① 根行没进文档     → 组合根永远不会被装配（`renderedRowIds` 回答）；
+//   ② 根行在、但配置抛  → 启动路径上的失败，具名码（`enforcementInstallation()` 回答）；
+//   ③ 根行装好了、但**挂载失败** → 服务被收回、已挂的行被拆掉，依赖它的行退回
+//      pending（记的是 `ENFORCEMENT_ROOT_ASSEMBLY_FAILED` + 一段说清是**挂载**的文本）；
+//   ④ 根行装好了、也挂上了 → 两行 enforcement 真的在听（这一条**现在才可达**）。
+//
+// ⚠️ 诚实边界，**不许把 ④ 读成"强制面已生效"**：`legion-host.patch.yml` 里仍然
+// **没有**这两行（它们的 `module` 是 `null`，理由见 `patch-layer.mjs`），因此
+// `reconcilePatchLayer()` 依旧把它们报成 `ROW_MISSING`、启动自检依旧判这一层未生效
+// 并拒绝注册（fail closed）。"两行挂上了"是 ④；"这一层被启动自检判为生效"是**另一件事**，
+// 本批次没有动那一件。两者在报告里必须分开写。
+//
+// ## ★★ 为什么 `apply` **保持同步**（本批实测出来的，不是风格）
+//
+// 直觉上"`apply` 改成 async 并 `await mount(ctx)`"更强：挂载失败会直接让本行 fiber
+// 失败。**但它会改掉激活时序，而那个时序是有读者的**——本批实测（一次真 DSH 进程，
+// 补丁层与既有用例同形：两行运行期模块作为条目存在，另加一个"只 inject 组合根服务、
+// 在自己的 `apply` 里读一次组合树"的观察者，也就是 `runtime-host-row.mjs` 的
+// `observeComposition` 所做的那件事）：
+//
+//   · 本行 `apply` **同步**：那两行 patch 条目 `activated=true`（与既有基线一致）；
+//   · 本行 `apply` **async 且 `await mount`**：**同一次观察**读到它们 `activated=false`，
+//     下一个 tick 之后才变 true。
+//
+// 原因是 Cordis 的激活是**微任务级联**：组合根服务"可读"（`strict` 要求提供方 fiber
+// 已 ACTIVE）与"依赖方被通知"发生在同一瞬间，而 patch 条目与本行的观察者是**同一批**
+// 被通知的——谁先跑 `apply`，取决于组合根**何时**激活。同步 `apply` 让组合根在观察者的
+// loader 条目被建出来**之前**就激活（观察者于是是后来者，读到的是已收敛的树）；
+// 异步 `apply` 把它推迟到条目建好之后，两者于是挤在同一批里，观察者读到**还没收敛**的树。
+//
+//   > 一个"更强"的失败语义，
+//   > 与一个"把安全自检的读数从已收敛改成未收敛"的改动，是同一个东西——
+//   > 只不过前者写在注释里，后者写在读数里。
+//
+// 而那个自检的判据正是"组合树里这几行激活了没有"：读数一变，`bootstrapDshRuntime()`
+// 就判"强制面未生效"并**拒绝注册**（fail closed）——`await` 换来的那点强度，
+// 代价是把一条**本来成立的**启动路径变成不成立。所以本行不 `await`：
+// 挂载**同步发起**，失败走下面那条"具名 + 收回服务"的路。
+//
 // ## 配置读不出来时：**在 apply 期抛**，不装半根
 //
 // 与 `hard-floor.mjs` 的 `NO_GUARD_SEAM`、两行运行期模块同一条口径。三条理由：
@@ -82,8 +145,14 @@ import {
   installEnforcementRoot,
 } from '../root.mjs'
 
-/** 改动绑定方式时递增。 */
-export const ROOT_ROW_VERSION = 1
+/**
+ * 改动绑定方式时递增。
+ *
+ * v2（PRT-214 收口）：本行的 `apply` 除了"装配 + 发布服务"之外，**自己把装配好的
+ * 两行挂上当前 Context**（`mount()` 的第一个生产调用方），并登记拆装。这是绑定方式
+ * 的实质变化，所以递增——不是文案改动。
+ */
+export const ROOT_ROW_VERSION = 2
 
 /** 补丁层的行 id 与插件名**必须逐字相同**（挂载审计按它对号）。 */
 export const ROOT_ROW_PLUGIN_NAME = 'legion-enforcement-root'
@@ -113,6 +182,22 @@ export const ROOT_ROW_CODES = Object.freeze({
   /** `decideApproval` 的 ① 分支不再与 policy/attended 无关——`createPolicyDecide` 的捷径失效。 */
   NONE_SHORTCUT_DRIFTED: 'ENFORCEMENT_ROOT_ROW_NONE_SHORTCUT_DRIFTED',
 })
+
+// ⚠️ 这里**刻意没有**给"服务已发布、但挂载失败"新造一个 `ROOT_ROW_CODES.*`。
+//
+// 想造，而且本来已经造了（`ENFORCEMENT_ROOT_ROW_ROWS_NOT_MOUNTED`）。它被拿掉是因为
+// 它过不了本仓自己的配置面门禁：`scripts/config/scan.mjs` 会把 `runtime/` 里**每一个**
+// 新字面量扫出来，而"登记"只发生在 `runtime/config-schema.mjs` 的 `NON_ENV_LITERALS`
+// 里（PRT-254 那条"漏登 ⇒ 红"）。本批次不碰那个文件，所以新造的字面量没有合法的登记处。
+//
+//   > 一个"把新码悄悄塞进日志"的改动，
+//   > 与一个"码没登记、于是门禁当场红"的改动，是同一个东西——
+//   > 只不过前者要靠下一个人发现。
+//
+// 于是失败路径复用**已登记**的 `ENFORCEMENT_ROOT_CODES.ASSEMBLY_FAILED`
+// （`root.mjs:118`，语义是"装配这一侧失败了"），而"这一条说的是挂载而不是配置"
+// 由**消息文本**与调用点承担。要真正分开这两个码，需要一次一行的 schema 登记——
+// 那是独立的改动，报告里已标出。
 
 function rowError(code, message, extra = {}) {
   const err = new Error(message)
@@ -321,10 +406,44 @@ function requestApprovalOf(factoryResult, resolved) {
   return candidate
 }
 
+// ── 组合根的**挂载账**（`mount()` 的生产调用方） ──────────────────────────────
+//
+// ★ 为什么键是**组合根本身**，既不是一个模块级布尔量、也不是 `ctx`：
+//
+//   ① `assembleEnforcement()` 的 `mounted` 数组与 `dispose()` 是**装配级**的：
+//      同一份根挂两次 → `mounted` 里躺着 4 个 fiber，而任何一次 `dispose()` 都会把
+//      它们**全部**拆掉——另一个挂载者于是留下一句"我装了"、实际上一根 listener 都没有。
+//      所以"这份根挂过没有"的粒度只能是这份根自己。
+//      `installEnforcementRoot()` 本来就是**进程级单例**（第二次装配被
+//      `ALREADY_INSTALLED` 挡掉），两边的粒度因此是对齐的。
+//      用 `ctx` 作键会漏掉"同一份根挂到两个 Context 上"这条同样会双挂的路。
+//   ② 真 DSH 的 Loader 用 `Promise.allSettled(config.map((o) => this.create(o)))`
+//      **并发**创建补丁行（`@deepseek-ai/cordis-plugin-loader`），所以两次 `apply`
+//      可以真的交错。因此"先查再写"必须是**同步的**——本行的 `apply` 就是同步的
+//      （这也是它不 `await mount` 的第二个理由：`await` 会把这段变成有窗口的）。
+//
+// ★ 为什么存的是**那个挂载 Promise**，而不是一个 `true`：
+//   后到的 `apply` 等的是**同一次**挂载的结果。存 `true` 会让"第一次挂到一半失败"
+//   被第二次读成"已经挂好了"——那正是本行最想避免的那种"看起来装好了"。
+//
+// WeakMap 而不是 Map：键是活对象；`resetEnforcementRoot()`（用例专用）换掉根之后
+// 旧条目自己可回收，不需要在别处再写第二份清理。
+const mountedRows = new WeakMap()
+
 /**
  * 造出补丁层那一行要加载的插件。
  *
  * 默认（`default` 导出）用**进程环境**与已注册的工厂；用例可以逐项注入。
+ *
+ * ⚠️ `apply` **是同步的**（见文件头"为什么 apply 保持同步"：async + `await mount`
+ * 会把组合自检的读数从"已收敛"改成"未收敛"，于是本来成立的启动路径变红）。
+ * 它保证的顺序是确定的，而且是同步可观察的：
+ *
+ *   · `installEnforcementRoot()` → `ctx.provide(服务)` → **挂上两行**（同步发起）
+ *     → 登记拆装 —— 发布**先于**挂载，且发布**不依赖**挂载成功；
+ *   · `apply` 返回时，两行的 `ctx.plugin(...)` **已经被调用过**（挂载已开始），
+ *     但**不保证**它们的 fiber 已经 ACTIVE——那是它们的 `ctx.plugin` 自己的时序，
+ *     本行不去等（等了就是上面那条读数倒退）。
  *
  * @param {object} [o]
  * @param {object|null} [o.env] `undefined` = 在 `apply` 期读 `process.env`；`null` = 明确没有环境。
@@ -342,9 +461,14 @@ export function createRootRow({
     inject: [],
 
     apply(ctx) {
-      if (ctx === null || typeof ctx !== 'object' || typeof ctx.provide !== 'function') {
+      // ★ `ctx.effect` 也在这里要求，而不是"挂上去了再说"：挂载**必须**配上拆装登记。
+      //   一个"挂上了、却没人负责拆"的强制面，会让本行比它挂上去的 Context 活得久——
+      //   那与本文件「不装半根」的口径是同一条（半根不只是少一行，也包括"收不回来"）。
+      if (ctx === null || typeof ctx !== 'object' || typeof ctx.provide !== 'function'
+        || typeof ctx.effect !== 'function') {
         throw rowError(ROOT_ROW_CODES.NO_CONTEXT,
-          `${ROOT_ROW_PLUGIN_NAME} 需要一个 Cordis Context（要能 ctx.provide 发布组合根服务）`)
+          `${ROOT_ROW_PLUGIN_NAME} 需要一个 Cordis Context（要能 ctx.provide 发布组合根服务、` +
+          'ctx.effect 把挂上去的两行登记成本行的 effect，否则没人负责拆）')
       }
 
       const effectiveEnv = env === undefined ? processEnv() : env
@@ -396,18 +520,109 @@ export function createRootRow({
       // 不是本次调用的返回值——否则下游读到的是"拒绝"而根其实好好的。
       const published = installed.ok === true ? installed : enforcementInstallation()
 
-      // ★ 发布服务：另外两行 `inject` 它。顺序语义由 Cordis 提供，不由补丁层的行序提供。
+      // ★ 发布服务：另外两行 `inject` 它。
       //
       //   幂等：同一进程里第二次挂本行时服务已在，不再 provide（`ctx.provide` 对
       //   重复注册是抛错，而不是覆盖）。
+      //
+      //   留住 `provide` 的拆装句柄（`ctx.provide` 返回一个 effect 拆装器）：
+      //   下面"挂载失败"那一条要**把服务收回去**，而那必须用**同一个**它——
+      //   再写一份"删掉服务"的代码就会与 Cordis 的 effect 账分家。
       const already = typeof ctx.get === 'function' ? ctx.get(ENFORCEMENT_ROOT_SERVICE, false) : undefined
-      if (already === undefined) {
-        ctx.provide(ENFORCEMENT_ROOT_SERVICE, published)
-      }
+      const unprovide = already === undefined
+        ? ctx.provide(ENFORCEMENT_ROOT_SERVICE, published)
+        : null
 
       ctx.logger?.info?.(
         `[${ROOT_ROW_PLUGIN_NAME}] v${ROOT_ROW_VERSION} 已装配组合根并发布服务 ` +
         `${ENFORCEMENT_ROOT_SERVICE}（另外两行靠它决定何时激活；顺序不靠补丁层的行序）`,
+      )
+
+      // ── ★★ 把装配好的两行**真的挂上去**：`mount()` 的生产调用方 ────────────
+      //
+      // 来龙去脉见文件头两节。这里只留四条决定：
+      const assemblyRoot = published.root
+
+      // ① 幂等：查的是"**这份组合根**挂过没有"。`get` 与下面的 `set` 之间
+      //    **没有 `await`**（本函数是同步的），所以并发创建的第二次 `apply`
+      //    不可能同时通过——真 Loader 用 `Promise.allSettled(config.map(create))`
+      //    并发创建补丁行，这条竞态是真的存在。
+      let mounting = mountedRows.get(assemblyRoot)
+      const started = mounting === undefined
+      if (started) {
+        // ② 生命周期：**先登记拆装，再开始挂**。用的是装配自己那一个
+        //    `dispose()`（反序卸载，见 `assemble.mjs`）——不另写第二份 teardown，
+        //    两份 teardown 会漂移，而漂移的那一份只在真的卸载那天才暴露。
+        //    账与挂载同生共死：拆掉之后同一进程里再挂必须能真的重挂。
+        ctx.effect(() => () => {
+          mountedRows.delete(assemblyRoot)
+          return assemblyRoot.dispose()
+        }, `${ROOT_ROW_PLUGIN_NAME}.mount`)
+
+        // ③ **挂载同步发起**（`mount()` 是 async，但它一直到第一个 `await` 之前
+        //    都是同步跑的：两个 `ctx.plugin(...)` 里第一个已经被调用）。
+        //    这里**不 `await`**——理由在文件头"为什么 apply 保持同步"。
+        mounting = assemblyRoot.mount(ctx)
+        // 先占坑再挂：从上面的 `get` 到这里没有 `await`。
+        mountedRows.set(assemblyRoot, mounting)
+
+        // ④ 失败方向：**整根不装 + 服务收回**，不留下半根。
+        //
+        //    `mount()` 抛得出来的一共有两类，而它们**分别**处理、不能合成一条：
+        //
+        //      · 同步那一类（`ctx.plugin` 在第一个 `await` 之前抛，例如插件对象不合法）
+        //        **不在这里**：它是 `mount()` 那个 async 函数内部的抛，会变成返回的
+        //        promise 被拒——也就是说它也会落到下面这个 `.catch` 里。
+        //        所以本行**不会**再往 `apply` 外面抛：`apply` 的失败面只剩"配置期"，
+        //        而那一条保持"抛 ⇒ 启动失败"（见文件头第三节）。
+        //      · 异步那一类（某一行自己的 `apply` 抛）本来就没有同步抛点。
+        //
+        //    处理动作是三件，按顺序：
+        //      1. **收回服务**（`unprovide()`）。依赖它的行会由 Cordis 重新求值
+        //         （`provide` 的拆装器自己 `notify`）→ 退回 pending。于是
+        //         "根行在、服务也在"这个读数**不会**留下来；
+        //      2. 拆掉已经挂上的部分（同一份 `dispose()`，反序、幂等）；
+        //      3. 释放占坑 + 大声记一笔（具名码），好让排查不必翻两层。
+        //
+        //    落到实处是什么：真 DSH 里依赖那两行会一直 pending，DSH 自己的
+        //    `assertEntriesActivated` 报 `did not activate` ⇒ **启动失败**
+        //    （那条读数在 `root-row-dsh-process.test.mjs` 场景 E 量过）。
+        //    也就是说失败的方向是**关闸**（fail closed），不是"少挂一行照样跑"。
+        //
+        //    为什么不"留着 pre-execute 单独守着"：`assemble.mjs` 记过，
+        //    pre-execute 单独在场时 ask 会落到 DSH 的兜底 `unavailable` ⇒ 工具不执行
+        //    （fail closed），那一侧**确实**更安全；但它是**半根**，而半根的死法是
+        //    "下一个人以为 answerer 还在"，与本行「不装半根」的口径直接冲突。
+        mounting.catch((err) => {
+          mountedRows.delete(assemblyRoot)
+          let retracted = false
+          try {
+            if (typeof unprovide === 'function') { unprovide(); retracted = true }
+          } catch (e) {
+            ctx.logger?.error?.(`[${ROOT_ROW_PLUGIN_NAME}] 收回服务时又抛了：${e?.message ?? e}`)
+          }
+          Promise.resolve(assemblyRoot.dispose()).catch(() => {})
+          // 码用已登记的 `ASSEMBLY_FAILED`（理由见 `ROOT_ROW_CODES` 后面那段）；
+          // "是挂载而不是配置"由这段文本承担。
+          ctx.logger?.error?.(
+            `[${ROOT_ROW_PLUGIN_NAME}] ${ENFORCEMENT_ROOT_CODES.ASSEMBLY_FAILED}：` +
+            `服务已发布，但挂载装配好的两行 enforcement 失败：` +
+            `${err?.code === undefined ? '' : `[${err.code}] `}${err?.message ?? String(err)}。` +
+            `**不装半根**：服务${retracted ? '已收回' : '收回失败（见上一条）'}、已挂的行已拆，` +
+            '依赖它的行会退回未激活（DSH 的挂载审计会报 did not activate ⇒ 启动失败）',
+          )
+        })
+      }
+
+      // 这条日志必须说清**本次 apply 干了什么**：幂等路径下它**没有**发起挂载，
+      // 只是接上了已经发起的那一次。写成"已发起挂载"会让"两次 apply"看起来
+      // 挂了两次——而排查的人正是靠这条日志判断有没有双挂。
+      ctx.logger?.info?.(
+        started
+          ? `[${ROOT_ROW_PLUGIN_NAME}] v${ROOT_ROW_VERSION} 已发起挂载组合根装配好的两行`
+            + `（${Object.keys(assemblyRoot.rows).join(' / ')}；两行共享同一份桥与同一本在飞登记簿）`
+          : `[${ROOT_ROW_PLUGIN_NAME}] v${ROOT_ROW_VERSION} 本次 apply **没有**再挂一次：`
+            + '这份组合根已经发起过挂载（幂等路径），本次只是发布/复用了服务',
       )
     },
   }
@@ -450,19 +665,27 @@ export default createRootRow()
  *   · 另外两行不在（`module: null`），因为它们要的是**装配好的那一份根**，
  *     而那必须先在同一个进程里被装配出来。
  *
- * 于是"这一层到底装上了没有"的读法变成三段，**不能混成一段**：
- *   ① 根行没进文档   → 组合根永远不会被装配（本行的 `module` 字段决定）；
- *   ② 根行在、但抛了 → 配置不可解析（一个具名码，启动路径上可见）；
- *   ③ 根行装好了     → 另外两行由服务依赖决定何时激活（pending ≠ 装上）。
+ * 于是"这一层到底装上了没有"的读法变成**四段**，**不能混成一段**：
+ *   ① 根行没进文档     → 组合根永远不会被装配（本行的 `module` 字段决定）；
+ *   ② 根行在、但配置抛 → 配置不可解析（一个具名码，启动路径上可见）；
+ *   ③ 根行装好了、但**挂载失败** → 服务被收回、已挂的行被拆掉，依赖它的行退回 pending
+ *      （日志里是 `ENFORCEMENT_ROOT_ASSEMBLY_FAILED` + 一段说清"是挂载"的文本；
+ *      为什么没给这一格单独一个 `ROOT_ROW_CODES.*` 见那个常量后面的说明）；
+ *   ④ 根行装好了、也挂上了 → 两行 enforcement 真的在听（`mount()` 由本行调用）。
  *
- * `enforcementInstallation()` 只回答 ② 与 ③ 之间的那一格；① 由
- * `renderPatchReport()` 的 `renderedRowIds` 回答。两者都要看。
+ * `enforcementInstallation()` 只回答 ②（装配有没有成功）；① 由
+ * `renderPatchReport()` 的 `renderedRowIds` 回答；③ 由具名日志回答；④ 由真
+ * `tools/pre-execute` 瀑布被认领回答（`root-row-dsh-process.test.mjs` 场景 I）。几者都要看。
+ *
+ * ⚠️ ④ 成立**不等于**"这一层被启动自检判为生效"：那两行仍然不是补丁层的条目，
+ * `reconcilePatchLayer()` 照旧报 `ROW_MISSING`（见文件头"诚实边界"）。
  */
 export const ROOT_ROW_DOES_NOT_PUBLISH_A_LISTENER = Object.freeze({
   code: 'ENFORCEMENT_ROOT_ROW_IS_A_COMPOSITION_ROW',
-  detail: '本行只装配组合根并发布服务，不注册任何 listener；'
-    + '策略门与审批应答者分别在 ./pre-execute-row.mjs 与 ./approval-answerer-row.mjs，'
-    + '它们 inject 本行发布的服务',
+  detail: '本行自己不注册任何 listener：它装配组合根、发布服务，并把装配好的两行'
+    + '（./pre-execute-row.mjs 与 ./approval-answerer-row.mjs 会挂的那两个 listener）'
+    + '直接挂到当前 Context 上；两行的 listener 本体在 ./pre-execute.mjs 与'
+    + ' ./approval-answerer.mjs（由 assemble.mjs 装配，两行共享一份桥与一本登记簿）',
 })
 
 /** `enforcementInstallation` 在这里重导出，方便调用方只 import 本行就能读装配结果。 */

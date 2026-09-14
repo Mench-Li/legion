@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-14　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **195 套件 / 5668 用例 / 0 fail**（证据 `.ci/prt-audit/`；本轮无代码改动）
+**最近一次全量基线**：2026-09-15　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **195 套件 / 5675 用例 / 0 fail**（证据 `.ci/prt-mount/`）
 （**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数会少）
 —— 以本文件所在提交为准；证据 `.ci/prt-901/`（PRT-901/902 第三方组件清单、SBOM 与商业分发条件那一批）
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
@@ -3457,6 +3457,95 @@
 > `docs/DUAL-WRITE-RACE-evidence/verify-evidence.md`。
 
 ---
+
+## 2026-09-15　`mount()` 终于有了生产调用方：两行 enforcement **真的**挂进了真 DSH 进程
+
+### 一、缺口（本批量到的）
+
+`assembleEnforcement()` 造出的 `mount(ctx)`（定义 `assemble.mjs:213`，`root.mjs:482` 只是转发）
+**在全仓库没有任何生产调用方**：
+
+- 对 `.mount(` 的其余出现**全是注释**；`root-row.mjs` 与 `team-hub/approval-registrar-row.mjs`
+  里 `mount(` 的命中数都是 **0**；
+- 两行运行期模块（`pre-execute-row` / `approval-answerer-row`）又**不在**
+  `legion-host.patch.yml` 里（`module: null`，只出现在注释块里）；
+- ⇒ **两行 enforcement 从来没有进过任何真 DSH 进程。**
+
+> 一个"装配好了、也验证过能被挂载"的强制面，与一个"从来没有被挂载过"的强制面，
+> 在运行的部署上是同一个东西——只不过前者的用例是绿的。
+
+★ 台账 PRT-214 行里那句「两行…由 `root.mjs` 在**进程内挂载**」在本批之前**是意图、不是事实**。
+本批把它变成事实，并把这句历史如实记进了台账（不删旧句，只追加更正）。
+
+### 二、修法
+
+`root-row.mjs` 的 `apply` 在 `ctx.provide(组合根服务)` **之后自己调** `mount(ctx)`——
+它由此成为那条路径上**唯一**的生产调用方。`ROOT_ROW_VERSION` 1 → **2**。四条决定：
+
+| 决定 | 做法 |
+| --- | --- |
+| **幂等** | `WeakMap`，键=**组合根对象**、值=**挂载 promise**（记 `true` 会把"挂了一半失败"读成"已挂好"）；`get`→`set` 之间**无 `await`**（`apply` 同步），故 Loader 的 `Promise.allSettled(config.map(create))` 并发建行不可能双挂 |
+| **生命周期** | 复用装配自己那一个 `dispose()`（反序卸载），挂在 `ctx.effect` 上——**不写第二份 teardown**（两份会漂移，而漂移只在真卸载那天暴露） |
+| **失败方向** | 收回服务（用 `ctx.provide` 返回的**同一个**拆装句柄）→ 拆掉已挂部分 → 释放占坑 + 具名日志。依赖方退回 pending ⇒ DSH `assertEntriesActivated` 报 `did not activate` ⇒ **启动失败**（fail closed）。**不选"留 pre-execute 单独守"**：那一侧确实更安全，但它是**半根** |
+| **顺序** | 发布**先于**挂载，且发布**不依赖**挂载是否成功 |
+
+### 三、★★ 本批最有分量的实测结论：`apply` **必须保持同步**
+
+第一版写成 `async apply` + `await mount`（直觉上失败语义更强）。它**实测打红了启动自检**：
+
+| 版本 | 真 DSH 进程里，观察者读到的两行 `activated` |
+| --- | --- |
+| 基线（HEAD） | `true` |
+| 第一版 `async` + `await mount` | **`false`**（下一个 tick 才变 true） |
+| 最终**同步**版 | `true`（与基线一致） |
+
+机理（**读数是硬的，机理是我从读数 + 读 cordis 反推的最佳模型**）：Cordis 激活是**微任务级联**。
+同步 `apply` 让组合根在观察者的 loader 条目被建出来**之前**就激活，观察者于是是后来者、
+读到**已收敛**的树；`async apply` 把它推迟到条目建好之后，两者挤进同一批，观察者读到**未收敛**的树。
+而那个自检的判据正是"这几行激活了没有" ⇒ 读数一变，`bootstrapDshRuntime()` 就判
+"强制面未生效"并**拒绝注册**。
+
+> 一个"更强"的失败语义，与一个"把安全自检的读数从已收敛改成未收敛"的改动，是同一个东西——
+> 只不过前者写在注释里，后者写在读数里。
+
+★ **我自己独立复核了这条**（子代理报的 6 条红，我复跑得到更广的结果）：把 `apply` 改成
+`async` + `await mount` ⇒ 三个真进程套件 **15 条 fail / 20 例**，逐字还原（`sha256` 一致）后
+**20/20 全绿**。机理与读数一并写进 `root-row.mjs` 的文件头，供下一个人不必重踩。
+
+### 四、验证
+
+- `root-row` 套件 **24 → 30 例**；新增真 DSH **场景 I**（不放测试脚手架的补丁条目，
+  真 DSH CLI + 一次性 `DSH_HOME` 在 `os.tmpdir()` 下 + `bundles: []` + `patchReload: 'startup'`）
+  ⇒ `ENFORCEMENT-ROOT-SERVICE present` + `GATE-DENIED`，且 `GATE-NOT-BOUND` **不出现**，
+  同一条用例里另有反向对照断言那两行**不在** loader 的条目 dump 里。
+- `runtime/dsh-composition` 全组 **720/720**；四个真进程套件 **9 + 17 = 26/26**。
+- **我的独立破验**：M1（缺陷复原：`mount(ctx)` 换成 no-op）⇒ **红 3 条**，正是新的核心断言；
+  M2（去掉幂等守卫）⇒ 红 1 条，正是幂等那条；M3 **外科式**（失败路径不收回服务）⇒ 红 1 条、
+  `importErr=false`。★ **我第一版 M3 用整条替换把 `.catch` 弄成语法错误**，整个文件 import 失败——
+  那只证明"文件坏了"，**按我自己的规矩判为无效红**，重做成外科式才计入。
+- `dsh-boundary` 棘轮**未动**：3 文件 / 26 处（本目录的 DSH 记号数没有增加）。
+- 9 道门禁全 PASS；全量 CI `.ci/prt-mount/`：9/9 阶段 PASS，
+  `test` **195 套件 / 5675 用例 / 0 fail**（套件数不变——两个套件都已在 `run-ci.mjs` 里登记）。
+
+### 五、诚实边界（★ 必须与第二节的结论分开读）
+
+- **「两行挂上了」——本批证明了。** 三处独立读数：进程内假 Context、真 cordis fiber 状态、
+  真 DSH CLI 的行为读数。
+- **「这一层被启动自检判为生效」——本批没有改。** `legion-host.patch.yml` 里两行仍是
+  `module: null`，`reconcilePatchLayer()` 仍报 `ROW_MISSING`，`render.mjs --check` 仍 **exit 3**，
+  启动自检仍拒绝注册（fail closed）。**故 PRT-214 仍 🟡**：那串 `exit 3` 就是仓库自己给出的
+  "补丁层不完整"读数，我不会在没有它变化的情况下把这行翻成 ✅。
+- 被 `deny` 的**对象是一个不存在的工具**（`no-such-tool`），理由是**投影失败**——
+  那是 fail-closed 的正确表现，**不是**"某个真工具被拒"。要证明后者需要真 ToolRuntime，
+  而隔离进程里 `bundles: []` 没有它。
+- 场景 I **不**证明"这一层被启动自检判为生效"。
+- 新造的具名码 `ENFORCEMENT_ROOT_ROW_ROWS_NOT_MOUNTED` **没能留下**：它过不了本仓配置面门禁
+  （新字面量必须登记进 `runtime/config-schema.mjs` 的 `NON_ENV_LITERALS`，该文件在禁改清单上）。
+  故失败路径复用**已登记**的 `ENFORCEMENT_ROOT_CODES.ASSEMBLY_FAILED` + 一段说清"是挂载"的文本，
+  并加了一条"本套件内出现 `MOUNT` 字样新码就红"的断言。
+  **要独立具名码需要一次单行登记——这是我留给下一批的待决项。**
+- `mounting.catch` 里若 `assemblyRoot.dispose()` **自己**再拒绝，会被按设计吞掉（日志里有）。
+  这条嵌套失败**没有**单独用例。
 
 ## 2026-09-15　本轮：把"还剩什么"从印象改成逐条核过（含一处**规格副本**的发现）
 

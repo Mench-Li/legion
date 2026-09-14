@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-14　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **195 套件 / 5666 用例 / 0 fail**（证据 `.ci/prt-dyn/`）
+**最近一次全量基线**：2026-09-14　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **195 套件 / 5668 用例 / 0 fail**（证据 `.ci/prt-rowfix/`）
 （**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数会少）
 —— 以本文件所在提交为准；证据 `.ci/prt-901/`（PRT-901/902 第三方组件清单、SBOM 与商业分发条件那一批）
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
@@ -3457,6 +3457,100 @@
 > `docs/DUAL-WRITE-RACE-evidence/verify-evidence.md`。
 
 ---
+
+## 2026-09-14　修掉 `reconcilePatchLayer()` 那条"永远对不上账"的缺陷（它会永久堵死任何生产调用方）
+
+★ **这一条不是新功能，是一个既有的、被记了很久的缺陷。**上一批（PRT-253 续批）在真 DSH 进程里
+量到它、**在观察侧绕开**、并把它记为遗留项。本批把账本本身修对。
+
+### 一、缺陷是什么（已在上一批独立复现过，本批再复现一次并给出读数）
+
+`reconcilePatchLayer()` 逐行对账时用的是**声明 id**（`byId.get(spec.id)`），
+而 `PATCH_LAYER_ROWS` 里那一行的形状是：
+
+```
+id = 'legion-enforcement-permission-presets'
+mount = { anchor: 'patch-over', target: 'permission' }
+```
+
+DSH 的 `patch-over` 语义是**替换目标行的整个 config**——所以它在组合树里的条目 id 是
+**靶子**（`permission`），**Legion 自己的 id 刻意不出现**。
+
+于是：一份**真实的**组合树进来 ⇒ 这一行**永远**报 `ROW_MISSING` ⇒ `effective:false` ⇒
+启动自检永远判「强制面未生效」⇒ `bootstrapDshRuntime()` 永远拒绝注册。
+
+复现读数（真实形状的树：靶子行在、已激活、preset 表也已换成 Legion 自有项）：
+
+```
+legion-enforcement-permission-presets      ROW_MISSING          effective=false
+legion-enforcement-permission-presets      OK                   effective=true
+⇒ effective = false
+```
+
+★ 顺带量到第二个读数：**同一个 row id 在一次对账里出现两次、给出互相矛盾的码**
+（循环里那次 `ROW_MISSING` + preset 那次 `OK`）。`findings` 不按 row 索引，
+调用方用 `Map` 归约时取哪条**取决于遍历顺序**。
+
+### 二、★ 它为什么能活这么久：**夹具是照着声明造出来的树**
+
+`composition.test.mjs` 的"好组合"夹具是这么写的：
+
+```js
+rows: PATCH_LAYER_ROWS.map((r) => ({ id: r.id, activated: true }))
+```
+
+也就是说，它造出的树**把声明 id 当成了树条目 id**——而**真实的树里那一行叫 `permission`**。
+**夹具造出了一棵现实中不存在的树**，于是"声明 id 能查到"在这个夹具下**平凡成立**，
+12 条对账用例全绿。
+
+> 一个"照着声明造的树"的夹具，与一棵"真的组合树"，在"这一段代码对不对"上是同一个读数——
+> 只不过前者的树在现实中不存在。
+
+这与本会话已经踩过三次的**完全同一个形状**（切片 7 的心跳断言、PRT-254 的编造断言、
+动态读取判定）：**判据的输入集合是从被检验对象自己推出来的。** 这是第四次，也是根因最清楚的一次。
+
+生产路径当时**不是**靠修这个缺陷绕过去的，而是靠 `observeComposition()`
+（`plugins/runtime-host-row.mjs`）先把 id **重写**成声明 id 再喂进来——
+**绕过的是观察器，账本一直是错的**；任何别的"只按 `options.id` 直读"的观察器仍会踩同一个坑。
+
+### 三、修法（不放松任何判据）
+
+1. 新增 `treeIdFor(spec)`：`patch-over` 行解析到 `mount.target`，其余行就是 `spec.id`；
+   **从声明推导，不写死 `'permission'`**（写死的那份会在补丁层加一行的当天变成假话）。
+2. 查表**先查解析出的树 id，再退回声明 id**——兼容两种输入：真实的树（靶子 id）
+   与 `observeComposition()` 那种**已按声明重写过 id** 的观察结果。
+   两者都没有，才算真的不在树里。
+3. 每条 finding 多带一个 **`treeId`**：**让映射可见**，
+   否则下一个人只能靠"effective 是 true"去猜它查了哪个 id。
+4. `ROW_MISSING` 的 `detail` 现在**同时写出声明 id 与树条目 id**——
+   只说"少了一行"会让排障的人去补丁层里找，而真因可能是**靶子行没了**。
+
+**判据一条都没放松**：真实树里靶子那一行真的不在 ⇒ 仍然 `ROW_MISSING`（有新用例钉住）。
+
+### 四、验证
+
+- 新增 2 条用例（`composition.test.mjs` **34 → 36**）：
+  ①真实形状的树必须判生效，且先**断言夹具确实是"patch-over 用靶子"的形状**（防止下一个人又把它改回照抄声明）；
+  ②真实树里靶子那一行真的不在 ⇒ 仍 `ROW_MISSING`，且 `detail` 里两个 id 都在。
+- **破验**（逐字节还原、`sha256` 每次核对）：
+  · **M1 改回"只用声明 id"（修之前的形态）** ⇒ **红 1 条，正是新加的那条真实树用例**；
+  · M3 把生效判据放宽成恒 `true` ⇒ 红 6 条（判据本身守得住）；
+  · M2 的替换锚点没匹配上 ⇒ 脚本如实报"锚点没匹配上，跳过"，**没有**当成"咬住"计入。
+- `runtime/dsh-composition/*.test.mjs` **598/598**；8 道门禁全 PASS（scan 902 / encoding 1943 /
+  topology 与 baseline 无漂移 / dsh-boundary 3 文件 26 处）。
+- 全量 CI `.ci/prt-rowfix/`：见下。
+
+### 五、诚实边界
+
+- 这条修的是**账本函数本身**。它**不会**让真实部署的读数改变：
+  引擎仍是替身、`legion-host.patch.yml` 里仍无契约行、
+  「没有任何真 DSH 引擎跑完过一个真任务」这条结论**一字未改**。
+- "同一个 row id 出现两次" **本批没有合并**（两次是两条不同的判据：行在不在 / preset 表覆盖没覆盖）。
+  现在两者在有缺陷的输入下不再互相矛盾（因为那一条不再误报），但
+  **`findings` 仍不按 row 索引**——调用方用 `Map` 归约的隐患仍在，**记为遗留项**。
+- 我**没有**去改 `observeComposition()`（它的重写逻辑现在与账本**互为冗余**）。
+  冗余本身不是缺陷，但两处各有一份映射 ⇒ 将来加第三种 anchor 时**两处都要改**。
+  本批没有把 `treeIdFor()` 抽出来共用，**这是可以再走一步的地方**。
 
 ## 2026-09-14　动态 env 读取现在**真的**被门禁强制登记（并因此量出 Launcher 有 8 处未登记的下标读取）
 

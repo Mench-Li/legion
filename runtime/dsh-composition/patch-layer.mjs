@@ -249,15 +249,43 @@ export function reconcilePatchLayer(observation = {}) {
   const rows = Array.isArray(observation.rows) ? observation.rows : []
   const byId = new Map(rows.map((r) => [String(r?.id ?? ''), r]))
 
+  /** 声明 id → 它**在组合树里的**条目 id。
+   *
+   *  ★ 这一层映射是必需的，不是防御性写法：`patch-over` 覆盖的是**靶子那一行自己**
+   *  （DSH 的语义是「替换目标行的整个 config」），所以它在树里的条目 id 是
+   *  `mount.target`（例如 `permission`），**Legion 自己的 id 刻意不出现**。
+   *
+   *  为什么必须在这里做、不能要求调用方先映射好：
+   *  本函数的参数在 JSDoc 里写的是「组合树观察结果」——而**组合树里就是那个靶子 id**。
+   *  按声明 id 去查，会为这一行**永远**报 `ROW_MISSING`。
+   *
+   *    > 一个"按声明的 id 逐行对账"的观察器，与一个"永远对不上账"的观察器，
+   *    > 在只看它自己的用例里是同一个东西——因为夹具是照着声明造出来的树。
+   *
+   *  实测（本函数自己的夹具）：`GOOD_COMPOSITION` 用
+   *  `PATCH_LAYER_ROWS.map((r) => ({ id: r.id, activated: true }))` 造行，
+   *  而**真实**的树里那一行叫 `permission` ⇒ 夹具造出了一棵现实中不存在的树，
+   *  于是这个缺陷在 12 条用例下活了很久。修法必须带一条**真实形状**的树进来。
+   *
+   *  `insert` 行的条目 id 就是声明 id，所以只有 `patch-over` 需要换。 */
+  const treeIdFor = (spec) => (spec?.mount?.anchor === 'patch-over' && typeof spec.mount.target === 'string'
+    ? spec.mount.target
+    : spec.id)
+
   const findings = []
   for (const spec of PATCH_LAYER_ROWS) {
-    const hit = byId.get(spec.id)
+    const treeId = treeIdFor(spec)
+    // 兼容两种输入：真实的树（`patch-over` 用靶子 id）与**已按声明重写过 id** 的观察结果
+    // （`observeComposition()` 产出的就是后者，见 `runtime/dsh-composition/plugins/runtime-host-row.mjs`）。
+    // 先查解析出来的树 id，再退回声明 id；两者都没有才算真的不在树里。
+    const hit = byId.get(treeId) ?? (treeId === spec.id ? undefined : byId.get(spec.id))
     if (hit === undefined) {
       findings.push({
         row: spec.id,
+        treeId,
         code: 'ROW_MISSING',
         effective: false,
-        detail: `补丁层行未出现在组合树中（预期锚点：${spec.mount.anchor}）`,
+        detail: `补丁层行未出现在组合树中（声明 id：${spec.id}；树条目 id：${treeId}；预期锚点：${spec.mount.anchor}）`,
       })
       continue
     }
@@ -266,13 +294,14 @@ export function reconcilePatchLayer(observation = {}) {
     if (hit.activated === false) {
       findings.push({
         row: spec.id,
+        treeId,
         code: 'ROW_NOT_ACTIVATED',
         effective: false,
         detail: '行已挂载但未激活（等待依赖服务），不产生任何强制效果',
       })
       continue
     }
-    findings.push({ row: spec.id, code: 'OK', effective: true, detail: '行已挂载并激活' })
+    findings.push({ row: spec.id, treeId, code: 'OK', effective: true, detail: '行已挂载并激活' })
   }
 
   // preset 表是否真的被替换：判据是**Legion 的 preset 名能否解析**，

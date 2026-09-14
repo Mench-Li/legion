@@ -129,6 +129,60 @@ test('对账：读不到 preset 表 → 不生效（「没观察到」不等于�
   assert.match(r.reasons.join('\n'), /PRESETS_UNOBSERVED|没观察到/)
 })
 
+// ★★ 这一条补的是一个**活了很久的缺陷**：`GOOD_COMPOSITION` 是
+// `PATCH_LAYER_ROWS.map((r) => ({ id: r.id, activated: true }))` 造出来的——
+// 也就是**照着声明造的一棵树**。而真实的组合树里，`patch-over` 那一行的条目 id 是它的**靶子**
+// （`permission`），Legion 自己的 id 刻意不出现。
+//
+// 于是按声明 id 查表的实现对这一行**永远**报 `ROW_MISSING` ⇒ `effective:false` ⇒
+// 启动自检永远判「强制面未生效」⇒ `bootstrapDshRuntime()` 永远拒绝注册。
+// 而 12 条既有用例全都造不出这个形状，所以它一直是绿的。
+//
+//   > 一个"照着声明造的树"的夹具，与一棵"真的组合树"，
+//   > 在"这一段代码对不对"上是同一个读数——只不过前者的树在现实中不存在。
+//
+// 生产路径当时是靠 `observeComposition()` 先把 id 重写成声明 id 才绕过去的
+// （见 `plugins/runtime-host-row.mjs`）；绕过的是观察器，账本本身一直是错的。
+test('对账：★ 真实的组合树（patch-over 行的条目 id 是它的**靶子**）→ 必须判生效', () => {
+  const realTree = {
+    // 真树的形状：insert 行用声明 id，patch-over 行用 target
+    rows: PATCH_LAYER_ROWS.map((r) => ({
+      id: r.mount?.anchor === 'patch-over' ? r.mount.target : r.id,
+      activated: true,
+    })),
+    permissionPresets: Object.keys(LEGION_PERMISSION_PRESETS),
+  }
+  // 先证明这棵树确实是"patch-over 用靶子"的形状，而不是又一次照抄声明
+  const over = PATCH_LAYER_ROWS.filter((r) => r.mount?.anchor === 'patch-over')
+  assert.ok(over.length > 0, '夹具失效：声明里没有 patch-over 行')
+  assert.ok(realTree.rows.some((r) => r.id === over[0].mount.target), '夹具失效：真树里没有靶子 id 那一条')
+  assert.ok(!realTree.rows.some((r) => r.id === over[0].id), '夹具失效：真树里不该出现 Legion 自己的 id')
+
+  const r = reconcilePatchLayer(realTree)
+  assert.deepEqual(r.reasons, [], `真实形状的树被判成未生效：${r.reasons.join(' / ')}`)
+  assert.equal(r.effective, true)
+
+  // 映射必须是**可见的**：否则下一个人只能靠"effective 是 true"猜它查了哪个 id。
+  const f = r.findings.find((x) => x.row === over[0].id)
+  assert.equal(f.code, 'OK')
+  assert.equal(f.treeId, over[0].mount.target, '裁决里必须写明它查的是树里的哪个条目 id')
+})
+
+test('对账：真实树里**靶子那一行真的不在** → 仍然报 ROW_MISSING（没有放松判据）', () => {
+  const over = PATCH_LAYER_ROWS.find((r) => r.mount?.anchor === 'patch-over')
+  const rows = PATCH_LAYER_ROWS
+    .map((r) => ({ id: r.mount?.anchor === 'patch-over' ? r.mount.target : r.id, activated: true }))
+    .filter((r) => r.id !== over.mount.target)
+  const r = reconcilePatchLayer({ rows, permissionPresets: Object.keys(LEGION_PERMISSION_PRESETS) })
+  assert.equal(r.effective, false)
+  const f = r.findings.find((x) => x.row === over.id)
+  assert.equal(f.code, 'ROW_MISSING')
+  // 诊断必须同时给出"声明 id"与"我实际去找的树条目 id"——
+  // 只说"少了一行"会让排障的人去补丁层里找，而真因可能是靶子行没了。
+  assert.match(f.detail, new RegExp(over.mount.target))
+  assert.match(f.detail, new RegExp(over.id))
+})
+
 test('对账：preset 行在、但生效表里**没有** Legion 项 → 不生效（patch-over 未生效）', () => {
   // 这是最隐蔽的一种：行存在、激活，看起来一切正常，但实际还在用 DSH 默认表。
   const r = reconcilePatchLayer({ rows: GOOD_COMPOSITION.rows, permissionPresets: Object.keys(DSH_DEFAULT_PRESETS) })

@@ -91,6 +91,31 @@ const PROCESS_TOPOLOGY = Object.freeze({
     managedBy: 'Product Launcher（清单第 4 个进程，dependsOn: team-hub, runtime）',
     protocol: '子进程长驻；对 team-hub 发 HTTP（扫单 / 认领 / 提交终态）',
   },
+  // PRT-254：`runtime/` 是清单**已经声明**的第 3 个进程，此前只在
+  // `scan.mjs`/`check.mjs` 两边都缺席（本清单因此也看不见它）。
+  // 补充说明一件容易看错的事：清单里 runtime 的 `entry.kind` 是 `'configured'`
+  //——入口来自产品配置 `runtime.command`，仓库里**没有**一个固定路径可以登记
+  //（这正是 PRT-258 记的 `ENTRY_UNRESOLVED:runtime`）。所以这里登记的是
+  //「入口从哪里来」，而不是一个假的文件路径：写一个不存在的 .mjs 路径会让
+  // 下一个人以为 `existsSync` 能替他检查它。
+  runtime: {
+    entryPoints: ["由产品配置 runtime.command 提供（清单 entry.kind: 'configured'；未配置时 Launcher 拒绝启动，不跳过）"],
+    readyProbe: 'tcp-connect（清单默认端口 3080，见 product/process-manifest.mjs 的 DEFAULT_PORTS.runtime）',
+    managedBy: 'Product Launcher（清单第 3 个进程；orchestrator 的 dependsOn 里有它）',
+    protocol: 'DSH 组合层（进程内）+ Runtime Contract HTTP（回环端口，端口由 bindPort: 0 分配后发布）',
+  },
+  // PRT-254：`security/` **不是**一个独立进程，而是被其它进程 import 的安全面库
+  //（凭证引用语法 / ACL / DPAPI / 凭证文档解析）。它出现在本清单里，是因为本清单的
+  // `processes` 实际上就是 `scan.mjs` 的**扫描范围登记表**：库目录同样会有
+  // "像 env 键的字面量"（59 条具名错误码），而它没有入口、没有就绪判据，
+  // 也就没有一个"该由谁来登记它"的时刻——无人的角落就是这么形成的。
+  // 下面四个字段如实写明"这不是一个进程"，而不是给库编一套进程的形状。
+  security: {
+    entryPoints: ['security/secrets/index.mjs（**库目录**：被其它进程 import，没有自己的入口）'],
+    readyProbe: '不适用（库目录，没有独立进程与监听端口）',
+    managedBy: '不适用（随 import 它的进程一起加载）',
+    protocol: '库（无监听端口）',
+  },
 })
 
 /** 产品目录分类（PRT-003 要求的五类归属）。 */

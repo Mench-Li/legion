@@ -35,6 +35,19 @@ export const PROCESSES = Object.freeze({
   // 入口在 `product/orchestrator/worker.mjs`（清单冻结的路径），实现住在这里——
   // 两侧都会读 env，因此**两边都必须被扫描到**，否则「入口读了什么」会漏登记。
   orchestrator: { label: 'Legion Orchestrator worker（扫单 / 认领 / 派工；PRT-301 起）', dirs: ['orchestrator'] },
+  // PRT-254 缺口（本批填上）：`runtime/` 是 `product/process-manifest.mjs` 的 `PROCESS_SPECS`
+  // **已经声明**的进程（清单里 orchestrator 的 `dependsOn: [team-hub, runtime]` 指的就是它），
+  // 却从 PRT-301 起一直不在本清单里 ⇒ 这份门禁对它**从来没有读过一行**。
+  // 一个被声明为进程、又没有任何配置面门禁的目录，与"它没有配置面"是同一个读数——
+  // 只不过前者会让 285 个字面量（含三个**真实**的 LEGION_* 读取键，经 `env[k]` 下标读）
+  // 悄悄留在所有 schema 之外。这正是本清单存在的理由：**没登记等于没检查**。
+  runtime: { label: 'Runtime 执行引擎/DSH 组合层（`runtime/`；清单第 3 个进程，PRT-254 起纳入扫描）', dirs: ['runtime'] },
+  // PRT-254 缺口（本批填上）：`security/` 不是一个独立进程，而是**被其它进程 import 的
+  // 安全面库**（凭证引用语法、ACL、DPAPI、YAML 凭证文档解析）。它之所以必须可扫描，
+  // 与 plugins 族同一条理由：库目录里同样会有"像 env 键的字面量"（错误码、路径、头名），
+  // 而**库目录最容易成为无人检查的角落**——它没有入口、没有就绪判据，也就没有一个
+  // 自然的"该由谁来登记它"的时刻。
+  security: { label: '安全面库（`security/`：凭证引用/ACL/DPAPI/凭证文档解析；PRT-254 起纳入扫描）', dirs: ['security'] },
 })
 
 const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', '.legion-worktrees', '.worktrees', 'releases', 'scratch', 'coverage', 'data', '.ci', 'vendor'])

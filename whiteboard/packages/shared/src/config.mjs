@@ -42,7 +42,20 @@ export function maskSecret(value) {
 export function defineSchema(spec) {
   const { process: proc, title, fields } = spec
   if (!proc || typeof proc !== 'string') throw new Error('schema 必须提供 process 名')
-  if (!Array.isArray(fields) || fields.length === 0) throw new Error(`${proc}: schema 必须提供非空 fields`)
+  // `fields` 为空的两种情况必须分开：
+  //   · 忘了写 / 传了个别的类型        → 仍然是**错误**（下面这条不变）；
+  //   · **这个扫描范围确实一个 env 键都不读** → 显式写 `allowEmptyFields: true` 才放行。
+  //
+  // 为什么必须留出第二种：PRT-254 把 `security/` 纳入 `scripts/config/scan.mjs` 时，
+  // 该目录的真实读取点数是 **0**（它的文件头写着「不读 process.env」），而它有 59 个
+  // "像 env 键的字面量"需要 `nonEnvLiterals` 登记。此时为了凑过"非空 fields"
+  // 往里编一个字段，就是**让配置面声明开始说谎**——一个凭空来的环境变量，
+  // 与一个真的存在的环境变量，在 `scan --check` 与 `config check` 的输出里长得一样。
+  // 那份声明的全部价值就是它说的每一句都是真的；宁可多一个显式开关。
+  if (!Array.isArray(fields)) throw new Error(`${proc}: schema 的 fields 必须是数组`)
+  if (fields.length === 0 && spec.allowEmptyFields !== true) {
+    throw new Error(`${proc}: schema 必须提供非空 fields（确实不读任何 env 的扫描范围请显式写 allowEmptyFields: true）`)
+  }
   const seenKey = new Set()
   const seenEnv = new Set()
   const norm = fields.map((f) => {

@@ -36,6 +36,12 @@ export const SCHEMA_FILES = Object.freeze({
   product: 'product/config-schema.mjs',
   // PRT-301：Orchestrator worker（常驻进程，有独立的读取面）。
   orchestrator: 'orchestrator/config-schema.mjs',
+  // PRT-254：`runtime/`（清单声明的第 3 个进程）与 `security/`（安全面库）此前
+  // **两边都没登记**——既不在 `PROCESSES` 的扫描范围里，也不在本映射里，
+  // 于是那两个目录里的 344 个疑似 env 字面量不受「必须登记 nonEnvLiterals」那条检查约束。
+  // 登记在这里等于声明「这两个扫描范围各有权威 schema」。
+  runtime: 'runtime/config-schema.mjs',
+  security: 'security/config-schema.mjs',
 })
 
 /** 解析 --env-file=path（KEY=VALUE，忽略空行与 # 注释；不展开变量引用）

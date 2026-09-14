@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-14　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **195 套件 / 5651 用例 / 0 fail**（证据 `.ci/prt-scan/`）
+**最近一次全量基线**：2026-09-14　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **195 套件 / 5656 用例 / 0 fail**（证据 `.ci/prt-254scan/`）
 （**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数会少）
 —— 以本文件所在提交为准；证据 `.ci/prt-901/`（PRT-901/902 第三方组件清单、SBOM 与商业分发条件那一批）
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
@@ -3457,6 +3457,141 @@
 > `docs/DUAL-WRITE-RACE-evidence/verify-evidence.md`。
 
 ---
+
+## 2026-09-14　PRT-254 覆盖缺口闭合：`runtime/` 与 `security/` 纳入配置面门禁（558 → 902 个疑似字面量）
+
+上一批修掉扫描器那个"编造环境变量"的假阳性，是为了**能**填这个缺口。本批把它填上。
+
+### 一、缺口是什么（PRT-254 明细里的原话）
+
+> `security/` 与 `runtime/` **都不在** `scan.mjs` 的进程清单、也不在 `check.mjs` 的 `SCHEMA_FILES` 里
+> ⇒ 那两个目录的字面量**不受**"必须登记"那条检查约束。
+
+而 `product/process-manifest.mjs` 的 `PROCESS_SPECS` 里 **`runtime` 是第 3 个进程**——
+**一个清单声明的进程，门禁从来没读过它。** 也就是说：`scan --check` 这些年一直是**绿的**，
+但它对这两个目录从来没有形成过一句话。
+
+| | 前 | 后 |
+| --- | --- | --- |
+| 扫描范围 | 8 个 | **10 个**（+`runtime` +`security`） |
+| 疑似 env 字面量 | 558 | **902**（= 558 + 285 + 59） |
+| 既有 8 个进程的读取键 | 47 | **47（子集 sha256 逐字节相同）** |
+| `config.test.mjs` | 37 例 | **42 例** |
+
+### 二、★ 我在简报里写错了一件事，子代理去核了源码并纠正——这是本批最该记的一处
+
+我告诉它"两个目录都 0 个真实 env 读取，`fields` 会是空的"。**对 `security/` 成立，对 `runtime/` 不成立。**
+
+`runtime/` 的读取**全部是指读取**，正则在文本上看不见它们。但它**有 10 个真实 env 键**，
+分在两张封闭表里：
+- `root-row.mjs` 的 `DECIDE_ENV_KEYS` → `LEGION_APPROVAL_POLICY` / `LEGION_ATTENDED` / `LEGION_PERMISSION_PRESET`（经 `env[k]` 读，`apply` 期真的读 `process.env`）；
+- `root.mjs` 的 `ENFORCEMENT_CONFIG_FIELDS[].envKeys` → `TEAM_HUB_URL` / `TEAM_HUB_TOKEN` / `LEGION_ACTOR` / `LEGION_SCOPE` / `LEGION_ENFORCEMENT_ACTION` / `LEGION_CWD` / `LEGION_TASK_ID`（经 `readString(source, keys)`）。
+
+所以我给的那个"344 条全是 `nonEnvLiterals`"的分解**也是错的**。真实分解是
+**309 条 `nonEnvLiterals` + 10 个真实 env 键（进 `fields`）+ 25 个 foreign env 名**
+（`execution-scope.mjs` 的 `DANGEROUS_ENV_KEYS`：是真 env 名，但属于**子进程/别的程序**，
+进 `foreignEnv` 而不是 `nonEnvLiterals`，更不是 `fields`）。
+
+★ **若照着我的简报做，就会把 10 个真实环境变量当成"不是 env 键"登记进 `nonEnvLiterals`**——
+那正是上一批花力气防的"让配置面声明开始说谎"，只是方向相反。
+我抽查复核了这 10 个键确实存在于源码（各命中 1–8 个源文件，`config-schema.mjs` 自身除外）。
+
+> 一条**我自己写进简报的错前提**，与一条子代理没去核的错前提，在结果上是同一个东西——
+> 区别只在于它去 grep 了源码。**"上游说的"不是证据，源码才是。**
+
+### 三、生成而非誊写（344 条正是"人会开始编"的量级）
+
+子代理把生成器写在仓库外（`_prt-handoff/scanreg-gen.mjs`，`report|verify|emit` 三个子命令），
+它 import `scan.mjs` **自己的** `extractEnvReads`（绝不复写第二份实现——仓库明确禁止两份权威实现漂移），
+每条字面量带**出处文件**作为行尾注释、按模块分组，并且 `emit` 在写盘前**拒绝执行**，
+除非手写的 `fields` 与源码里那两张表**逐键相等**。
+
+对账读数：`源码疑似字面量 285；nonEnvLiterals 250；声明 env 键 10；foreign env 名 28`，
+**编造 0 / 丢失 0 / 声明为 env 键但源码无字面量 0**；
+且 `scan --check` 的口径总数 `902 = 558 + 285 + 59` **在加入两份 schema 之后仍然成立**
+（schema 文件自己也在被扫的目录里，它们贡献的字面量恰好就是自己声明的那批，故并集不变）。
+
+### 四、★★★ 又一次"空转的断言"——同一个失效模式，同一天第二次
+
+子代理报：变异 B（往 `runtime` 的 `nonEnvLiterals` 里**编造**一条 `LEGION_MADE_UP_KEY`）
+**第一版没有咬住**：`scan --check` 仍然 PASS、**42 条用例全绿**。
+
+根因与切片 7 那一次同类且更隐蔽：**schema 文件自己就在被扫描的目录里**。
+往里编一条字面量，规则③立刻又把那条字符串扫出来，
+于是"登记 ⊆ 扫描结果"**平凡成立**——**那条断言在任何实现下都为真**。
+
+修法：判据改成"这条字面量必须出现在**除 `SCHEMA_FILES[name]` 以外**的源文件里"。
+
+★ **我独立做了两方向的对照**（不是只听复述）：
+
+| 方向 | 读数 |
+| --- | --- |
+| **A** 现断言（要求非 schema 源文件出处）+ 编造条目 | **红 1 条**，文案正是「编造，少一条是漏登」 |
+| **B** 把那一行过滤去掉（换回空转形态）+ **同一个**编造条目 | **42/42 全绿** ⇒ 看不见编造 |
+
+两个方向都逐字节还原（schema `sha256` 一致、测试文件逐字节一致），还原后 42/42。
+
+> **一个在任何实现下都为真的断言，与一条没写的断言，在覆盖率报告里长得一样。**
+> 这是本系列第四次"变异不咬"，也是**第二次**由"变异不咬"直接换来一条**真的**防线（切片 7 是第一次）。
+> 值得注意：两次都不是"探针写错了"，而是**断言取错了判据**——
+> 而这两次的判据都取在"被扫描的集合"上，那个集合**包含被断言的对象自己**。
+
+### 五、三个越界的改动（我逐条审过，都成立）
+
+1. **`packages/shared/src/config.mjs`（+ `sync.mjs` 同步的白板副本）**：`defineSchema` 原本要求
+   `fields` 非空，而 `security/` **诚实地说**它一个 env 都不读。为了凑过而编一个字段，
+   正是上面那条纪律禁止的事。它加了**显式开关** `allowEmptyFields: true`：
+   忘了写 / 类型不对 → **仍然是错**（原报错逐字保留），只有显式声明才放行。
+   **默认行为不变**（既有 `/非空 fields/` 用例仍绿）。这是一次**共享文件**的改动，故我单独读了两份 diff。
+2. **`scripts/prt/topology-inventory.mjs` + 清单 JSON**：`--diff` 会遍历 `PROCESSES` 并要求
+   `SCHEMA_FILES[name]` 存在，所以加两个扫描范围**必然**让清单漂移，只能 `--record`。
+   ★ **我核了它会不会掩盖真漂移**：`diffInventories()` 实际比较的字段只有
+   `ports` / `sensitiveEnv` / `envReadKeys` / `undeclaredEnvKeys` / `entryPoints` / 数据产物 / 凭证路径；
+   **`filesScanned` 在整个文件里只出现一次（写入点，第 296 行）、从不被比较**。
+   而这次 dif 里仅有的三处删改是：`plugins.filesScanned` 15→**21**、`product.filesScanned` 55→**56**、
+   以及 `dependsOn` 列表里 `"orchestrator"` 加逗号后追加 `"runtime"`。
+   15→21 恰好是**我这几个 PRT-315 切片新增的 6 个插件模块**——**该字段从不被比较**，
+   所以这不是被掩盖的漂移，是一个统计量在正常追上现状。**既有条目的读取键/端口/入口一个都没动。**
+3. **`security/` 被当作一个"扫描范围"而非进程**：它其实是**库**。清单里它的条目**如实标注**为库目录，
+   `runtime` 的入口标成"来自 `runtime.command`"而不是编一个路径。**这个归类的取舍记在这里**。
+
+### 六、★ 一条顺带查出的真实缺口（**报告，未修**）
+
+`extractEnvReads` 附近那句注释写着"动态访问（`process.env[expr]`）单列，**必须显式登记**"，
+但 **`--check` 从来没有强制过 `dynamic`**——它只把 `[动态]` 打印出来；
+真正读 `SCHEMA.dynamicEnvReads` 的只有 `topology-inventory`。
+所以**对真实的那一条（`root-row.mjs` 的 `env[k]`），门禁里没有任何东西会因为漏登记而变红**。
+本批把它登记了（连同 `root.mjs` 的 `readString(source, keys)`——**那条连"动态"规则都匹配不到**，
+因为它只匹配字面叫 `env` 的标识符），但**没有加强制**（超出本批范围）。记为缺口。
+
+三个动态下标里：`root-row.mjs` 的 `env[k]` 是**真的**（同一行被同一个正则报两次，不是两个正则）；
+`security/secrets/dsh-credentials.mjs` 的 `env[names[0]]` 是**假阳性**（那是 YAML 映射节点），
+**没有登记、也没有为了讨好扫描器去改生产变量名**，只在 security schema 的注释里写明来历。
+
+### 七、验证
+
+- `scan --check` **PASS（902）**；`config.test.mjs` **42/42**；`sync --check` PASS。
+- 既有 8 个进程读取键 **47 → 47（子集 sha256 相同）**；两个新范围贡献 **0 个**字面读取
+  （runtime 靠索引读、security 不读）——这正是那 10 个键走 `fields`+`dynamicEnvReads` 的原因。
+- 变异 5 组：A（去掉 `security` 的 PROCESSES）红 3、B（编造）红 1、C（去掉 `allowEmptyFields`）导入即抛、
+  D（去掉 `SCHEMA_FILES` 条目）红 1、E（删 5 条 `REPAIR_*`）`scan` 红 + 漏登 5 条；
+  五次还原 **sha256 全部一致**。
+- 8 道门禁全 PASS（encoding **1943** 文件 / topology 与 baseline 无漂移 / dsh-boundary 3 文件 26 处）。
+- 全量 CI `.ci/prt-254scan/`：**9/9 阶段 PASS**，`test` **195 套件 / 5656 用例 / 0 fail**
+  （本批 +5 例）；stageTest「套件清单完备（**283** 个 `*.test.mjs`）」；
+  `config scan` PASS（**902**）、`config check(good fixture)` PASS。
+
+### 八、诚实边界
+
+- `security/` 是**库**却被登记成"扫描范围"，清单里的 `processes` 数组现在含一个库条目（已如实标注）。
+  若将来要区分"进程"与"库扫描范围"，那是一次独立改动。
+- `runtime` 那 7 个来自 `root.mjs` 的键，是按"生产接线把 `process.env` 传进那个纯解析器"这个**判断**
+  登记为 runtime 的进程环境键的。若这个判断不成立，它们该进别的桶。
+- `DANGEROUS_ENV_KEYS` 进 `foreignEnv` 而不是 `nonEnvLiterals` 是**取舍**（它们确实是 env 名，
+  只是不属于本进程）。
+- **没有加对 `dynamic` 的强制**（见 §6）。
+- 902 这个数字的含义是"**全部已处理**"，不是"每一类都有人在运行期读过"——
+  这 344 条绝大多数是具名错误码与契约字符串，`scan` 绿证明的是"它们都被登记了"。
 
 ## 2026-09-14　扫描器修一个会**编造环境变量**的假阳性（PRT-254 那条"两个目录不被覆盖"的缺口，先撞到它的原因）
 

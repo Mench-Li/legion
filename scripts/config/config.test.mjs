@@ -9,7 +9,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -19,14 +19,17 @@ import {
 } from '../../packages/shared/src/config.mjs'
 import * as ENGINE from '../../packages/shared/src/config.mjs'
 import { runCrossChecks, isExposed } from './cross-checks.mjs'
-import { parseEnvFileDetailed } from './check.mjs'
-import { scanProcess, extractEnvReads } from './scan.mjs'
+import { parseEnvFileDetailed, SCHEMA_FILES } from './check.mjs'
+import { scanProcess, extractEnvReads, PROCESSES } from './scan.mjs'
 import { SCHEMA as HUB } from '../../team-hub/config-schema.mjs'
 import { SCHEMA as WB } from '../../workbench/scripts/config-schema.mjs'
 import { SCHEMA as BOARD } from '../../whiteboard/apps/server/src/config-schema.mjs'
 import { SCHEMA as PLUGINS } from '../../plugins/config-schema.mjs'
 import { SCHEMA as BOARD_PLUGIN } from '../../board-plugin/config-schema.mjs'
 import { SCHEMA as SERVICES } from '../../services-plugin/config-schema.mjs'
+// PRT-254：`runtime/`（清单声明的第 3 个进程）与 `security/`（安全面库）此前不在扫描范围里
+import { SCHEMA as RUNTIME } from '../../runtime/config-schema.mjs'
+import { SCHEMA as SECURITY } from '../../security/config-schema.mjs'
 
 const ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..')
 // 六个**配置面**：三个活跃进程 + 三个 DSH 插件族（P3-4 纳入；插件主配置面仍是宿主 composition）
@@ -666,4 +669,137 @@ test('P3-4：插件族的 schema 不接管宿主 composition 的主配置面（�
     'workbench:DSH_HUB_UPSTREAM', 'workbench:DSH_WORKBENCH_PORT', 'workbench:TEAM_HUB_TOKEN',
   ])
   assert.equal(injects.find((i) => i.env === 'DSH_WORKBENCH_PORT').via, 'cli')
+})
+
+// ───────────────────────── ⑥ PRT-254：runtime / security 的扫描覆盖 ─────────────────────────
+//
+// 这一节补的是一个**真实覆盖缺口**：`runtime/` 是 `product/process-manifest.mjs` 的
+// `PROCESS_SPECS` 已经声明的进程，却从 PRT-301 起一直不在 `scan.mjs` 的 `PROCESSES` 里；
+// `security/` 更是两边都没有登记。结果：这两个目录里的 344 个疑似字面量
+//（含 **10 个真实的环境变量键**）不受「必须登记」那条检查约束，而 `scan --check`
+// 一直报 PASS——它报的是"我扫过的东西没问题"，不是"没问题"。
+//
+//   > 一道看不见某个目录的闸门，比没有闸门更坏：它给出"已核对过"的错觉。
+
+test('★ PRT-254：runtime/ 与 security/ 同时登记了扫描范围与权威 schema（缺一处就红）', () => {
+  // 为什么两处都要断言：PRT-251 的真实事故就是"两份手写映射只更新了一份"——
+  // `scan --check` 说"全部已处理"，`topology-inventory --diff` 说"product 的 8 个键未声明"。
+  // 两边各自的输出都能自圆其说，而目录其实是无人检查的。这里把"必须两处都有"钉死。
+  for (const name of ['runtime', 'security']) {
+    assert.ok(PROCESSES[name], `PROCESSES 缺少 ${name}——这个目录又回到"没有任何配置面门禁"的状态`)
+    assert.deepEqual(PROCESSES[name].dirs, [name], `${name} 的扫描范围必须正好是它自己的目录`)
+    assert.ok(existsSync(join(ROOT, PROCESSES[name].dirs[0])), `${name} 的扫描目录不存在`)
+    assert.ok(SCHEMA_FILES[name], `SCHEMA_FILES 缺少 ${name}——scan --check 会把它扫到的读取点全部当成未声明`)
+    assert.ok(existsSync(join(ROOT, SCHEMA_FILES[name])), `${name} 的 schema 文件不存在：${SCHEMA_FILES[name]}`)
+  }
+  // 映射只有一份（scan.mjs 委托 check.mjs）：每个扫描范围都必须在 SCHEMA_FILES 里
+  for (const name of Object.keys(PROCESSES)) {
+    assert.ok(SCHEMA_FILES[name], `进程 ${name} 未在 SCHEMA_FILES 登记：要么它不该在 PROCESSES，要么它缺 config-schema`)
+  }
+})
+
+test('★ PRT-254：runtime/ 与 security/ 真的被扫到了（不是"扫了 0 个文件"的绿）', () => {
+  const rt = scanProcess('runtime', { includeTests: false })
+  assert.equal(rt.mode, 'git-tracked')
+  // 空集合只有在"确实扫到了文件"的前提下才是证据（P3-4 的实测反面教材：文件未提交时扫描器跳过它）
+  assert.ok(rt.filesScanned >= 74, `runtime/ 应被完整扫描，实际 ${rt.filesScanned} 个文件`)
+  assert.deepEqual([...rt.reads.keys()], [], 'runtime/ 没有**字面量**形式的 env 读取点（它的读取全在下标里）')
+  assert.ok(rt.suspicious.size >= 285, `runtime/ 的疑似字面量应 ≥285，实际 ${rt.suspicious.size}`)
+  // 真读法：root-row.mjs 在 apply 期按 k 下标读 process.env
+  assert.ok(
+    rt.dynamic.some((d) => d.file === 'runtime/dsh-composition/plugins/root-row.mjs' && d.expr === 'env[k]'),
+    'root-row.mjs 的 env[k] 是真实读取点，必须在动态清单里：' + JSON.stringify(rt.dynamic),
+  )
+
+  const sec = scanProcess('security', { includeTests: false })
+  assert.equal(sec.mode, 'git-tracked')
+  assert.ok(sec.filesScanned >= 8, `security/ 应被完整扫描，实际 ${sec.filesScanned} 个文件`)
+  assert.deepEqual([...sec.reads.keys()], [], 'security/ 不读 process.env（它自己的设计约束）')
+  assert.ok(sec.suspicious.size >= 59, `security/ 的疑似字面量应 ≥59，实际 ${sec.suspicious.size}`)
+})
+
+test('★★ PRT-254：nonEnvLiterals 与**源码**逐条对账——多一条是编造，少一条是漏登', () => {
+  // 344 个字面量正是"人会开始编"的量级，而编造与真实在名单里**长得一模一样**：
+  //   · 漏一条 → 门禁红（可见，代价小）；
+  //   · 编一条 → 门禁**比真相更绿**（不可见，代价大）。
+  // 所以两个方向都钉死，而不是只断言"没有漏"。
+  //
+  // ⚠️ 判据必须取"这条字面量出现在**除 config-schema.mjs 以外**的源文件里没有"，
+  // 不能直接用 `scan.suspicious.has(k)`——那是一条**空的**断言：
+  // schema 文件自己就在被扫描的目录里，往 nonEnvLiterals 里编一条，规则③立刻又把
+  // 那条字符串扫出来，"登记 ⊆ 扫描结果"于是永远成立。
+  // 这不是推理——是本批**实测**到的：编造一条时 `scan --check` 仍然 PASS、42 条用例全绿。
+  //   > 一条在任何实现下都为真的断言，与一条没写的断言，在覆盖率报告里长得一样。
+  for (const name of ['runtime', 'security']) {
+    const schema = name === 'runtime' ? RUNTIME : SECURITY
+    const schemaRel = SCHEMA_FILES[name]
+    const scan = scanProcess(name, { includeTests: false })
+    // 只保留"至少有一个出处不是 schema 文件"的字面量
+    const fromSource = new Set(
+      [...scan.suspicious.keys()].filter((k) => scan.suspicious.get(k).files.some((f) => f !== schemaRel)),
+    )
+    const declared = new Set(schema.nonEnvLiterals)
+    const known = new Set([
+      ...schema.envNames(),
+      ...schema.nonEnvLiterals,
+      ...schema.prefixes,
+      ...schema.foreignEnv.map((x) => (typeof x === 'string' ? x : x.name)),
+    ])
+    const fabricated = [...declared].filter((k) => !fromSource.has(k)).sort()
+    const dropped = [...fromSource].filter((k) => !known.has(k)).sort()
+    assert.deepEqual(fabricated, [], `${name} 的 nonEnvLiterals 里有**源码中不存在**的条目（编造）：${fabricated.join(', ')}`)
+    assert.deepEqual(dropped, [], `${name} 有扫到、却没被任何机制覆盖的字面量（漏登）：${dropped.join(', ')}`)
+  }
+  // 反向：`security/` 一个 env 键都不读，所以它的 nonEnvLiterals 必须与**源码**里的那一批
+  // 完全相等（多一条就是编的；少一条上面的 dropped 会红）——这是最强的一档对账。
+  const secScan = scanProcess('security', { includeTests: false })
+  const secSource = [...secScan.suspicious.keys()]
+    .filter((k) => secScan.suspicious.get(k).files.some((f) => f !== SCHEMA_FILES.security))
+    .sort()
+  assert.deepEqual([...SECURITY.nonEnvLiterals].sort(), secSource, 'security 的 nonEnvLiterals 必须逐条等于源码里的字面量')
+})
+
+test('★★ PRT-254：声明的 env 键必须等于 runtime 源码里两张键名表的并集（不许多、不许少）', async () => {
+  // 键名**不手抄**：从 runtime 自己的源码取。这两张表就是它全部的下标读取面，
+  // 而两张表都是 `env[k]` / `source[key]` 形态——扫描器的字面量规则一条都读不到，
+  // 所以这条断言是它们**唯一**的机器判据：
+  //   · 表里加了一个键而 fields 没跟上 → 红（否则门禁看不见它，与缺口当初一模一样）；
+  //   · fields 里编了一个键 → 红（那是往配置面声明里塞假话）。
+  const { DECIDE_ENV_KEYS } = await import('../../runtime/dsh-composition/plugins/root-row.mjs')
+  const { ENFORCEMENT_CONFIG_FIELDS, } = await import('../../runtime/dsh-composition/root.mjs')
+  const expected = [...new Set([
+    ...Object.values(DECIDE_ENV_KEYS),
+    ...Object.values(ENFORCEMENT_CONFIG_FIELDS).flatMap((f) => [...f.envKeys]),
+  ])].sort()
+  assert.equal(expected.length, 10, `两张键名表共 ${expected.length} 个键（复核基线 10）：数量变了就要重新审一遍这份声明`)
+  assert.deepEqual(RUNTIME.envNames().sort(), expected,
+    'runtime/config-schema.mjs 的 fields 与源码里的键名表不一致（多一个=编了一个环境变量，少一个=门禁看不见它）')
+
+  // foreignEnv 同理：必须逐条等于 execution-scope.mjs 的 DANGEROUS_ENV_KEYS，不许只抄一半
+  const { DANGEROUS_ENV_KEYS } = await import('../../runtime/dsh-composition/execution-scope.mjs')
+  assert.deepEqual(
+    RUNTIME.foreignEnv.map((x) => (typeof x === 'string' ? x : x.name)).sort(),
+    [...DANGEROUS_ENV_KEYS].sort(),
+    'foreignEnv 必须逐条等于 execution-scope.mjs 的 DANGEROUS_ENV_KEYS',
+  )
+  assert.ok(RUNTIME.foreignEnv.every((x) => x.owner && x.reason), 'foreignEnv 每一条都要写明归属与理由')
+
+  // 安全面库：0 个 env 键，而且是**显式**声明"没有"，不是靠空数组默认放行
+  assert.deepEqual(SECURITY.envNames(), [])
+  assert.equal(SECURITY.fields.length, 0)
+})
+
+test('★ 引擎：fields 为空必须显式写 allowEmptyFields，默认仍然报错（"忘写"与"确实没有"不能同形）', () => {
+  const empty = defineSchema({ process: 'demo-empty', title: '无 env 的扫描范围', allowEmptyFields: true, fields: [] })
+  assert.deepEqual(empty.envNames(), [])
+  assert.deepEqual(empty.keys(), [])
+  assert.deepEqual(empty.secretKeys(), [])
+  // 空 schema 走一遍解析引擎：不崩、无错误、无告警（包括 unknownEnv——它没有前缀）
+  const resolved = resolveConfig(empty, { env: { ANY: '1' } })
+  assert.deepEqual(resolved.values, {})
+  assert.deepEqual(resolved.errors, [])
+  assert.deepEqual(resolved.warnings, [])
+  // 默认（不给开关）必须仍然拒绝：忘写 fields 与"确实没有 fields"不能是同一个读数
+  assert.throws(() => defineSchema({ process: 'x', fields: [] }), /非空 fields/)
+  assert.throws(() => defineSchema({ process: 'x', allowEmptyFields: true, fields: undefined }), /必须是数组/)
 })

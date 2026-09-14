@@ -155,7 +155,7 @@
       "envReadKeys": [],
       "envReadCount": 0,
       "undeclaredEnvKeys": [],
-      "filesScanned": 15
+      "filesScanned": 21
     },
     {
       "name": "board-plugin",
@@ -243,7 +243,7 @@
       ],
       "envReadCount": 8,
       "undeclaredEnvKeys": [],
-      "filesScanned": 55
+      "filesScanned": 56
     },
     {
       "name": "orchestrator",
@@ -277,6 +277,54 @@
       "envReadCount": 6,
       "undeclaredEnvKeys": [],
       "filesScanned": 20
+    },
+    {
+      "name": "runtime",
+      "label": "Runtime 执行引擎/DSH 组合层（`runtime/`；清单第 3 个进程，PRT-254 起纳入扫描）",
+      "dirs": [
+        "runtime"
+      ],
+      "schemaFile": "runtime/config-schema.mjs",
+      "schemaOk": true,
+      "schemaReason": null,
+      "entryPoints": [
+        "由产品配置 runtime.command 提供（清单 entry.kind: 'configured'；未配置时 Launcher 拒绝启动，不跳过）"
+      ],
+      "readyProbe": "tcp-connect（清单默认端口 3080，见 product/process-manifest.mjs 的 DEFAULT_PORTS.runtime）",
+      "managedBy": "Product Launcher（清单第 3 个进程；orchestrator 的 dependsOn 里有它）",
+      "protocol": "DSH 组合层（进程内）+ Runtime Contract HTTP（回环端口，端口由 bindPort: 0 分配后发布）",
+      "ports": [],
+      "sensitiveEnv": [
+        "TEAM_HUB_TOKEN"
+      ],
+      "declaredFieldCount": 10,
+      "envReadKeys": [],
+      "envReadCount": 0,
+      "undeclaredEnvKeys": [],
+      "filesScanned": 75
+    },
+    {
+      "name": "security",
+      "label": "安全面库（`security/`：凭证引用/ACL/DPAPI/凭证文档解析；PRT-254 起纳入扫描）",
+      "dirs": [
+        "security"
+      ],
+      "schemaFile": "security/config-schema.mjs",
+      "schemaOk": true,
+      "schemaReason": null,
+      "entryPoints": [
+        "security/secrets/index.mjs（**库目录**：被其它进程 import，没有自己的入口）"
+      ],
+      "readyProbe": "不适用（库目录，没有独立进程与监听端口）",
+      "managedBy": "不适用（随 import 它的进程一起加载）",
+      "protocol": "库（无监听端口）",
+      "ports": [],
+      "sensitiveEnv": [],
+      "declaredFieldCount": 0,
+      "envReadKeys": [],
+      "envReadCount": 0,
+      "undeclaredEnvKeys": [],
+      "filesScanned": 9
     }
   ],
   "declarationGaps": [],
@@ -288,7 +336,8 @@
         "workbench",
         "board-plugin",
         "services-plugin",
-        "orchestrator"
+        "orchestrator",
+        "runtime"
       ],
       "DSH_WORKBENCH_TOKEN": [
         "workbench"

@@ -520,6 +520,38 @@ test('P3-4：扫描器不被注释骗到，也不会因为字符串里的 // 漏
   assert.ok(extractEnvReads("readKey('WB_MAX_CONNECTIONS')").suspicious.has('WB_MAX_CONNECTIONS'))
 })
 
+test('★ 别名 `env` 对象：只认大写键、且方法调用不算读取点（否则会编出不存在的环境变量）', () => {
+  // 背景：为了把 `runtime/` 与 `security/` 纳入扫描范围（PRT-254 里那条"这两个目录不被覆盖"的缺口），
+  // 先试扫了一遍，读出**三个根本不存在的环境变量**：
+  //
+  //   · `req.env.some((k) => …)` —— `req.env` 是**数组**，`some` 是它的方法；
+  //   · `env.t !== 'map'` —— `env` 是**YAML 映射节点**，`t` 是节点类型标签；
+  //   · `env.v` —— 同上，`v` 是节点值。
+  //
+  // 这三条进不了 `nonEnvLiterals`（那份名单管的是"像 env 键的字面量"，不管"读到的键名"），
+  // 于是让门禁变绿的唯一做法就是往 schema 的 `fields` 里写三个不存在的环境变量——
+  // **那等于让配置面声明开始说谎**，而这份声明的全部价值就是它说的每一句都是真的。
+  const alias = [
+    'const n = req.env.some((k) => typeof k !== "string")',
+    "if (env.t !== 'map') return null",
+    'const v = env.v',
+    // —— 下面这些是**真实读取点**，必须仍然被认出来 ——
+    'const url = options.env.TEAM_HUB_URL',
+    'const tok = baseEnv.WHITEBOARD_TOKEN',
+  ].join('\n')
+  const r = extractEnvReads(alias).literal
+  assert.ok(!r.has('some'), '方法调用不算读取点（`req.env.some(` 是调用不是读取）：' + [...r])
+  assert.ok(!r.has('t'), '小写属性不算别名读取点（`env.t` 是 YAML 节点标签）：' + [...r])
+  assert.ok(!r.has('v'), '小写属性不算别名读取点：' + [...r])
+  assert.ok(r.has('TEAM_HUB_URL'), '别名上的大写键必须仍被认出：' + [...r])
+  assert.ok(r.has('WHITEBOARD_TOKEN'), '②b 的别名形态不受影响：' + [...r])
+
+  // ① 的 `process.env.*` **不区分大小写**，不受本次收紧影响——
+  //    否则就会为了消掉假阳性而制造一个假阴性，而假阴性比假阳性更危险。
+  const direct = extractEnvReads('const a = process.env.lower_case_key').literal
+  assert.ok(direct.has('lower_case_key'), 'process.env 是明确无歧义的，小写键仍要认：' + [...direct])
+})
+
 test('P3-4：plugins schema 覆盖插件真实读取的全部 env，且扫描器能看到别名 env 对象的读取', () => {
   const plugins = scanProcess('plugins', { includeTests: false })
   // 先确认真的扫到了文件：`[]` 作为「没有直接读取」的证据，只有在这个前提下才有意义

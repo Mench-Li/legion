@@ -114,7 +114,33 @@ export function extractEnvReads(source) {
     }
   }
   // ② 形如 `env.NAME` / `env['NAME']`（env 为独立标识符或其结尾，如 options.env.NAME）
-  for (const m of text.matchAll(/(?:^|[^\w.'"])(?:\w+\.)*env\.([A-Za-z_][A-Za-z0-9_]*)/g)) literal.add(m[1])
+  //
+  // ★ 为什么要求 `NAME` 是**大写形态**（`[A-Z][A-Z0-9_]*`），而不是任意标识符：
+  //
+  // 这一条针对的是**别名**（`options.env.X` / `req.env.X`），与 ① 的 `process.env.X` 不同——
+  // `process.env` 是无歧义的，别名则要看**那个对象到底是不是进程环境**。
+  // 原先它按 `[A-Za-z_][A-Za-z0-9_]*` 匹配，于是任何**局部变量**只要叫 `env`，
+  // 它的**小写**属性都会被当成环境变量读取点。实测（把 `runtime/` 纳入扫描范围时撞到）：
+  //
+  //   · `req.env.some((k) => …)`（`req.env` 是**数组**）→ 报出一个环境变量 `some`；
+  //   · `env.t !== 'map'`（`env` 是**YAML 映射节点**，`t` 是节点类型标签）→ 报出 `t`；
+  //   · `env.v` → 报出 `v`。
+  //
+  // 三条都是**编出来的读取点**，而 `nonEnvLiterals` 机制对它们**不适用**
+  // （那份名单管的是"像 env 键的字面量"，不管"读到的键名"），于是唯一能让门禁变绿的做法
+  // 就是往 schema 的 `fields` 里写三个根本不存在的环境变量——
+  // **那等于让配置面声明开始说谎**，而这份声明的全部价值就是它说的每一句都是真的。
+  //
+  //   > 一个"把局部变量 env 的属性当成环境变量"的扫描器，与一个"环境变量多了三个"的结论，
+  //   > 在 `scan --check` 的输出里是同一个读数——只不过前者会让下一个人去给不存在的键配默认值。
+  //
+  // ②b（下方）**本来就是**要求大写形态的，所以这里是**对齐**两条同类规则的判定口径，
+  // 不是收紧一条本来正确的规则。真实的读取点不受影响：`process.env.X` 仍由 ① 逐字匹配
+  // （那一条不区分大小写），别名上的真实键按仓库惯例都是大写的。
+  //
+  // 末尾的 `(?!\s*\()` 再排掉**方法调用**：`env.some(` 是调用一个叫 `some` 的方法，
+  // 不是在读一个叫 `some` 的键。属性读取后面跟的是 `)` `,` `;` `&&` 之类，不会是 `(`。
+  for (const m of text.matchAll(/(?:^|[^\w.'"])(?:\w+\.)*env\.([A-Z][A-Z0-9_]*)(?!\s*\()/g)) literal.add(m[1])
   for (const m of text.matchAll(/(?:\w+\.)*env\[\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s*\]/g)) literal.add(m[1])
   // ②b 别名环境对象：`const baseEnv = { ...process.env, ... }` 之后写 `baseEnv.NAME`
   //     （P3-4 实测：services-plugin 正是这样读 TEAM_HUB_HOST/TOKEN 与 DSH_HUB_UPSTREAM——

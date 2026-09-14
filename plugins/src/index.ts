@@ -572,6 +572,25 @@ function spaceWorker(ctx: AppContext, config: Config): void {
   const foremen = new Map<string, { agent: Agent; dispose: () => Promise<void> }>()
   /** foreman 创建中的 promise 去重：同 cwd 并发请求只创建一次（isolate=false 且 maxWorkers>1 时多个 worker 同 cwd 的竞态防护） */
   const foremanPending = new Map<string, Promise<Agent | undefined>>()
+  /**
+   * foreman **持久**失败登记：cwd → { reason, since, attempts }（非空 = 该 cwd 的 worker 父级建不起来）。
+   *
+   * 为什么需要它：旧实现把**任何**异常都当「本轮瞬时失败」处理（记一行日志、返回 undefined、下轮重试）。
+   * 但 sessionId 由 cwd 派生、是确定性常量，而 agent 会话是**持久化**的（session-persistence）——
+   * 上一个进程未优雅退出时残留的 foreman 会话，会让此后每一次 ctx.agents.create 都以
+   * SessionAlreadyExistsError 失败，于是守护每 20s 打一行同样的日志、**永久**跳过该 cwd 的 foreman。
+   * 现场（2026-09-11）：ozon 661 次 / software 399 次撞同一个 id，对话回复与 /api/rewrite 静默中断。
+   * 现在：撞名即改用唯一 id 自愈，并把失败态写进 daemon-<scope>.json，让看板/健康页看得见。
+   */
+  const foremanDown = new Map<string, { reason: string; since: string; attempts: number }>()
+  /** 本插件实例的短标识：撞名后据此派生一个全新 foreman 会话 id（每进程唯一 → 必定可创建）。 */
+  const foremanRunId = Math.random().toString(36).slice(2, 8)
+  /** 判定「会话 id 已被占」：session-persistence 的 SessionAlreadyExistsError（按 name/文案判定，不跨包耦合错误类）。 */
+  const isSessionExistsError = (e: unknown): boolean => {
+    if ((e as { name?: unknown } | null)?.name === 'SessionAlreadyExistsError') return true
+    const msg = e instanceof Error ? e.message : String(e)
+    return msg.includes('SessionAlreadyExistsError') || /session "[^"]*" already exists/.test(msg)
+  }
   /** 中止类重试的退避时间戳：taskId → 上次「worker 未完成/派工失败」重试时间（防故障期热循环） */
   const abortRetryAt = new Map<string, number>()
   /** 切片展开重试退避：tdId → 上次「TASK_BREAKDOWN.md 未就绪/注册失败」时间（防每轮空转重试） */
@@ -1042,6 +1061,12 @@ function spaceWorker(ctx: AppContext, config: Config): void {
           },
         // T-123 对话中心：daemon 运行状态（在线/心跳）透出给 UI 健康条
         chat: { ...daemonChatState },
+        // foreman 可用性：非空 = 该 cwd 的 worker 父级建不起来（会话 id 残留自愈后仍失败），
+        // 此时对话回复/改写不可用；isolate 下派工走各自 worktree cwd，通常不受影响。
+        foreman: {
+          ok: foremanDown.size === 0,
+          down: [...foremanDown.entries()].map(([cwd, v]) => ({ cwd, reason: v.reason, since: v.since, attempts: v.attempts })),
+        },
         // P1-4.4 规则资产 doctor：desired 规则单元 vs 实际注入产物（false = 有规则没进提示词）
         rulesDoctor: lastRuleDoctor === null
           ? null
@@ -1364,17 +1389,43 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     const creating = (async () => {
       try {
         const selection = ctx.agentDefaultModel.currentSelection()
-        const handle = await ctx.agents.create({
-          sessionId: SessionId(`${config.mode === 'mediator' ? 'scrum-mediator' : 'scrum-worker'}-foreman-${hashStr(cwd)}`),
-          meta: { cwd },
-          agentOptions: { provider: selection.provider, model: selection.model },
-          setup: async (agentCtx: Context) => void await ctx.agentPresets.mount(agentCtx, config.agentPreset),
+        const base = `${config.mode === 'mediator' ? 'scrum-mediator' : 'scrum-worker'}-foreman-${hashStr(cwd)}`
+        // 首选稳定 id（保留「按 cwd 稳定」的原意）；若它已被占（= 上一个进程残留的持久化会话，
+        // 见 foremanDown 注释），改写带本实例标识的唯一 id 重建——否则会以同一个确定性错误永久失败。
+        const candidates = [base, `${base}-${foremanRunId}`]
+        let lastErr: unknown
+        for (const sessionId of candidates) {
+          try {
+            const handle = await ctx.agents.create({
+              sessionId: SessionId(sessionId),
+              meta: { cwd },
+              agentOptions: { provider: selection.provider, model: selection.model },
+              setup: async (agentCtx: Context) => void await ctx.agentPresets.mount(agentCtx, config.agentPreset),
+            })
+            foremen.set(cwd, { agent: handle.agent, dispose: () => handle.dispose() })
+            if (foremanDown.delete(cwd)) {
+              log(`foreman 恢复：${handle.agent.session.id}（cwd=${cwd}）——此前会话 id 残留导致不可用`)
+            } else {
+              log(`foreman 就绪：${handle.agent.session.id}（cwd=${cwd}，model=${selection.provider}/${selection.model}）`)
+            }
+            return handle.agent
+          } catch (e) {
+            lastErr = e
+            // 只有「稳定 id 撞名」才值得换唯一 id 重试；其他错误维持原语义（本轮跳过）
+            if (!isSessionExistsError(e) || sessionId !== base) break
+            log(`foreman 会话 id 已被占用（${sessionId}，多为此前进程未释放的持久化会话）→ 换唯一 id 重建`)
+          }
+        }
+        // 换唯一 id 仍失败（或非撞名错误）：登记持久失败，并**只在该 cwd 首次失败时**记日志，
+        // 避免每轮重复刷屏掩盖真实问题；失败态同时进 daemon 状态供看板/健康页读取。
+        const reason = lastErr instanceof Error ? lastErr.message : String(lastErr)
+        if (!foremanDown.has(cwd)) log(`foreman 创建失败（本轮跳过派工，cwd=${cwd}）：${reason}`)
+        const prev = foremanDown.get(cwd)
+        foremanDown.set(cwd, {
+          reason,
+          since: prev?.since ?? new Date().toISOString(),
+          attempts: (prev?.attempts ?? 0) + 1,
         })
-        foremen.set(cwd, { agent: handle.agent, dispose: () => handle.dispose() })
-        log(`foreman 就绪：${handle.agent.session.id}（cwd=${cwd}，model=${selection.provider}/${selection.model}）`)
-        return handle.agent
-      } catch (e) {
-        log(`foreman 创建失败（本轮跳过派工，cwd=${cwd}）：${String(e)}`)
         return undefined
       } finally {
         foremanPending.delete(cwd)
@@ -1922,6 +1973,21 @@ exit 0
     if (doneTask.slice != null) return
     if (doneTask.fixOf != null) return
     if (doneTask.role === SLICE_ANALYSIS_TAIL && isSliceGoalTask(doneTask)) return
+    // 目标已终态（done/canceled）不再补建后继。
+    // 动机（T-156 现场）：给流水线末环接上 `next`（新增运营/投广阶段）时，**所有历史已收口目标**的末环
+    // 任务都被判为「该有后继」，于是凭空长出新一轮任务链——已 done 的 G-mttwdurn-1 被接上了 ops-store 链，
+    // 与当前目标的同岗位链并存，两者产物路径相同会互相覆盖。
+    // 语义：目标 done/canceled = 将军已收口/取消，不应再自动开工。
+    // 目标状态未知时（无 goalId 的遗留非目标链、或 hub 缓存缺失）保持原行为——避免误伤正常流转。
+    // 注：`paused`（将军暂停）**有意不拦**——暂停是可恢复态，此处拦下会让恢复后的链永久断档
+    //（advance 只在 done 事件触发，恢复时不会补跑）。
+    if (doneTask.goalId) {
+      const g = goalCtxById.get(doneTask.goalId)
+      if (g && (g.status === 'done' || g.status === 'canceled')) {
+        log(`${doneTask.id} 流水线流转跳过：目标 ${doneTask.goalId} 已 ${g.status}（终态不再补建后继）`)
+        return
+      }
+    }
     const stage = stageByRole.get(doneTask.role ?? '')
     if (!stage || !stage.next) return
     const nextStage = stageByRole.get(stage.next)

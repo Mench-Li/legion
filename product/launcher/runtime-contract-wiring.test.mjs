@@ -194,6 +194,30 @@ async function waitForJson(path, { timeoutMs = 15000, intervalMs = 100, onTimeou
 }
 
 /**
+ * 等**已经累积在父进程内存里**的子进程输出满足条件。返回当时的全文。
+ *
+ * ★ 为什么需要它：worker 桩的顺序是 `writeFileSync(out, …)` 之后才 `console.log('PROBE …')`
+ * ——而 `boot()` 是**等那个文件**出现的。也就是说，`boot()` 返回时 `PROBE` 那一行
+ * **可能还在管道里**。"子进程写过了"与"父进程读到了"是两件事。
+ *
+ *   > 一个"管道还没把字节送到"的读数，与一个"子进程根本没输出"的读数，
+ *   > 在断言里是同一个失败——只不过前者要等一会儿，后者要改代码。
+ *
+ * 所以这里**不猜**：等到（有上限）或者报出等到了多少字节。
+ */
+async function waitForStdout(readText, re, { timeoutMs = 10000, intervalMs = 25, what = '子进程输出' } = {}) {
+  const began = Date.now()
+  for (;;) {
+    const text = readText()
+    if (re.test(text)) return text
+    if (Date.now() - began >= timeoutMs) {
+      throw new Error(`等不到 ${what} 匹配 ${re}（${timeoutMs}ms 内只收到 ${text.length} 字节：${JSON.stringify(text.slice(0, 300))}）`)
+    }
+    await new Promise((r) => setTimeout(r, intervalMs))
+  }
+}
+
+/**
  * 起一个受监督的部署：runtime 跑真监听器（stub），worker 跑探针。
  *
  * ★ `spawnImpl` **只**替换 worker 那一侧跑哪个文件；runtime 仍是真 spawn，
@@ -318,6 +342,9 @@ test('① ★★★ 端点与凭证**真的到达** worker 进程，并被那台
 
   // ★ 两边读数**对得上**：worker 用的那个端口就是发布里那一个
   assert.equal(b.resolved.url, `http://127.0.0.1:${b.resolved.port}`)
+  // ★ 等它**真的到了父进程**再断言（见 `waitForStdout`：boot() 等的是那个读数文件，
+  //   而 `PROBE` 那一行是在写文件**之后**才打印的，字节可能还在管道里）。
+  await waitForStdout(() => b.stdout.worker.join(''), /PROBE /, { what: 'worker 的探针读数' })
   assert.match(b.stdout.worker.join(''), /PROBE /, '探针没有输出读数')
 
   // 别的进程**拿不到**这两个键（spec §6.7）
@@ -690,11 +717,21 @@ test('⑤ ★★★ 凭证的值**不出现**在任何进程的可读输出里�
   assert.equal(b.reading.tokenPresent, true)
   assert.equal(b.reading.status, 200)
 
+  // ★★ 先等两个子进程的输出**真的到了父进程**，再取快照。
+  //
+  // 这一条以前是**假红**的来源：`boot()` 等的是 worker 的读数文件，而 `PROBE` 那一行是在
+  // 写文件**之后**才打印的——于是负载高时 `PROBE` 还没进管道，本用例就在
+  // 「凭证不泄漏」这条断言上以 `/PROBE /` 不匹配而失败。**失败文案看起来像"凭证泄漏了"**，
+  // 而它其实什么都没说。等之后再取快照还有一个好处：快照**更大**，泄漏断言覆盖更多输出。
+  const stdoutOf = () => [...b.stdout.runtime, ...b.stdout.worker].join('')
+  await waitForStdout(() => b.stdout.runtime.join(''), /STUB ready/, { what: 'runtime 的 ready 行' })
+  await waitForStdout(() => b.stdout.worker.join(''), /PROBE /, { what: 'worker 的探针读数' })
+
   const surfaces = {
     envSurface: JSON.stringify(b.L.envSurface()),
     status: JSON.stringify(b.L.status()),
     diagnostics: JSON.stringify(b.L.allDiagnostics()),
-    childStdout: [...b.stdout.runtime, ...b.stdout.worker].join(''),
+    childStdout: stdoutOf(),
   }
   // 而且它确实出现在这张表里（掩码形态）——否则下面几条断言是空的
   assert.equal(b.envOf('orchestrator')[TOKEN_ENV], '<redacted>')
@@ -717,7 +754,9 @@ test('⑤ ★★★ 凭证的值**不出现**在任何进程的可读输出里�
     assert.equal(text.includes(TOKEN_A), false, `日志 ${f} 泄漏了凭证的值`)
   }
 
-  // 两个子进程的 stdout 里必须有**内容**（否则这条断言什么都没查）
+  // 两个子进程的 stdout 里必须有**内容**（否则这条断言什么都没查）。
+  // 上面已经等到了，所以这两条现在不会因管道延迟而红——但它们仍然要留着：
+  // 谁哪天把上面的等待删掉，这两条就会立刻把"断言变成空的"这件事喊出来。
   assert.match(surfaces.childStdout, /STUB ready/)
   assert.match(surfaces.childStdout, /PROBE /)
 })

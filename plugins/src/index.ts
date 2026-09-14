@@ -56,6 +56,7 @@ import {
 export type { StageDef, Task } from './types.js'
 import type { StageDef, Task } from './types.js'
 import { createMergeMediation } from './mediation.js'
+import { createReclamation, type BootReconcileState } from './reclamation.js'
 
 type AppContext = Context & {
   subagents: SubagentRuntime
@@ -559,8 +560,10 @@ function spaceWorker(ctx: AppContext, config: Config): void {
   /** worker 连续「未完成/派工失败」重试上限：超过后置 blocked + 🛑 留将军，打断故障期热循环（镜像调解员 give-up 语义）。
    *  仅统计同一认领（claimedAt 之后）的连续失败，将军/他人评论会重置计数。 */
   const maxWorkerRetry = 3
-  /** 守护进程启动后第一轮扫单已做过孤儿回收（重启前进程的在办 worker 已随进程消失，需释放回 todo 重新认领）。 */
-  let bootReconciled = false
+  /** 守护进程启动后第一轮扫单已做过孤儿回收（重启前进程的在办 worker 已随进程消失，需释放回 todo 重新认领）。
+   *  阶段 3 PRT-315 切片 2：已从闭包 `let` 提升为 ./reclamation.ts 读写的显式状态对象，
+   *  仍是**每 spaceWorker 实例一份**——多空间监督者在同进程 mount 多个实例，模块级标志会串台（见该模块文件头）。 */
+  const bootReconcile: BootReconcileState = { done: false }
   let sweeping = false
   /** 暂停提示节流：避免每轮扫单都打日志。 */
   let lastPausedNotice = 0
@@ -2369,6 +2372,17 @@ exit 0
     safeComment, advanceTo, activity, getTask, listTasks, startOneShot,
     now: () => Date.now(),
   })
+  // ── 阶段 3 PRT-315 切片 2：租约回收已拆到 ./reclamation.ts（仓储边界），这里只做**接线** ──
+  // `useHub` / `isPipeline` 传**取值函数**（两者都是运行期会被重新赋值的 `let`：detectHub()
+  // 探测成功、applyPipeline() 换流水线来源）；`scope` / `config` / `mediating` 传值（const /
+  // 身份稳定的集合，与 mediation.ts 一致）；重启标志 `boot` 由本实例持有（见该模块文件头）。
+  const reclamation = createReclamation({
+    config, log, scope,
+    useHub: () => useHub,
+    isPipeline: () => isPipeline,
+    hubPost, runTaskctl, activity, mediating,
+    boot: bootReconcile,
+  })
 
 
   /** 一名角色士兵在需求讨论群聊中做头脑风暴式陈述（只输出意见，不写文件）。 */
@@ -2899,50 +2913,10 @@ exit 0
       const inboxIds = tasks.filter(t => (t.status === 'todo' || t.status === 'blocked') && (t.soldier === null || t.soldier === undefined) && !t.hold && isOurInbox(t))
       if (inboxIds.length > 0) log(`inbox=${inboxIds.length}（${inboxIds.map(t => t.id).join(', ')}）`)
 
-      // 0. 认领租约回收：释放超过 staleMinutes 无进展（距最近 progress 起算）或过 TTL 的 in_progress 任务。
-      //    hub 模式走 hub 的 /api/release-stale（守护不直连本地库，多存储部署下避免误碰其他任务池）；本地模式带 --scope 限定本守护 scope。
-      try {
-        const res = useHub
-          ? await hubPost('/api/release-stale', { by: config.role, scope, olderThan: config.staleMinutes }) as { released?: string[] }
-          : await runTaskctl(config.scrumDir, ['release-stale', '--older-than', String(config.staleMinutes), '--by', config.role, '--scope', scope]) as { released?: string[] }
-        for (const id of res.released ?? []) {
-          activity('released', id, `距最近进展超过 ${config.staleMinutes} 分钟或过 TTL，自动释放回 todo`)
-          const t = byId.get(id)
-          if (t) { t.status = 'todo'; t.soldier = null; t.claimedAt = null }
-        }
-      } catch (e) {
-        log(`release-stale 失败：${String(e)}`)
-      }
-
-      // 0.5 守护重启孤儿回收（仅进程启动后第一轮）：重启前进程的 worker 已随进程消失，
-      //     其任务停在 in_progress 且通常无「未完成」评论——若只靠 stale 释放要等 staleMinutes（如 100 分钟）。
-      //     立即把「本守护名下、未拦截」的 in_progress 释放回 todo，下轮自动重新认领续做（复用 w/<id> WIP）。
-      if (!bootReconciled) {
-        bootReconciled = true
-        // 只回收本守护认领的任务（soldier = 守护角色或流水线阶段角色）；人类手动在办（soldier=人名）不碰。
-        const claimedByUs = (t: Task): boolean =>
-          t.soldier === config.role || (isPipeline && t.role !== null && t.soldier === t.role)
-        const orphans = tasks
-          .filter(t => t.status === 'in_progress' && claimedByUs(t) && !t.hold && !mediating.has(t.id))
-          .map(t => t.id)
-        if (orphans.length > 0) {
-          try {
-            const res = useHub
-              ? await hubPost('/api/release-stale', { by: config.role, scope, olderThan: config.staleMinutes, ids: orphans }) as { released?: string[] }
-              : await runTaskctl(config.scrumDir, ['release-stale', '--older-than', '0', '--by', config.role, '--scope', scope]) as { released?: string[] }
-            for (const id of res.released ?? []) {
-              activity('released', id, '守护重启：孤儿 in_progress 释放回 todo，自动重新认领续做')
-              log(`${id} 守护重启孤儿回收 → todo（下轮重新认领续做）`)
-              // 同步更新本轮快照：若不同步，step 3 仍按旧快照把该任务当 in_progress + 有 abort 评论 →
-              // abortDriven 重派会派「无主 worker」（workReturned 不 claim），占满 inflight 且任务仍是 todo。
-              const t = byId.get(id)
-              if (t) { t.status = 'todo'; t.soldier = null; t.claimedAt = null }
-            }
-          } catch (e) {
-            log(`守护重启孤儿回收失败：${String(e)}`)
-          }
-        }
-      }
+      // 0/0.5 认领租约回收 + 守护重启孤儿回收已拆到 ./reclamation.ts（仓储边界）；
+      // 原始注释（hub 模式为何不动本地库、孤儿回收为何必须在第一轮、为何要同步本轮快照）随代码搬入该模块。
+      await reclamation.reclaimStaleLeases(byId)
+      await reclamation.reclaimBootOrphans(tasks, byId)
 
       // 依赖未解除（链上后段在上一环 done 前保持待命，不空转抢认领）
       const openDeps = (t: Task): boolean =>

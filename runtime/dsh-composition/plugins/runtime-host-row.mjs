@@ -175,13 +175,18 @@ export function dshRuntimeInputsFactory() {
 }
 
 /**
- * 注册一个输入工厂：`() => ({runtimeHost, canRead})`。
+ * 注册一个输入工厂：`(ctx) => ({runtimeHost, canRead})`。
  *
  * 返回**注销函数**，幂等，且只撤掉**自己**那一次注册——与
  * `executor-binding.mjs` 的绑定栈是同一个理由：撤销顺序不该复活任何东西。
  *
- * 工厂在**本行 `apply` 时**被调用（不是注册时）：它需要 DSH 进程的现场，
- * 而注册可能发生在更早的模块求值期。
+ * 工厂在**本行 `apply` 时**被调用（不是注册时），并收到**本行这一侧的 Context**：
+ * 真的 `runtimeHost` 只能从现场服务上取（`ctx.get('subagents').start` 是
+ * `startRun` 的唯一真来源），而注册可能发生在更早的模块求值期——那时还没有树。
+ *
+ * 上一批的零参工厂仍然合法（多余实参被忽略），但从此**拿不到现场**：
+ * 新的生产注册方应当用 `runtime-host-registrar-row.mjs` 的
+ * `createRuntimeHostInputsFactory()`（它就是要 `ctx` 的那个形状）。
  */
 export function setDshRuntimeInputsFactory(factory) {
   if (typeof factory !== 'function') {
@@ -410,7 +415,16 @@ export const runtimeHostRow = {
 
     let inputs = null
     try {
-      inputs = factory()
+      // ★ 工厂拿得到**本行这一侧的** Context（PRT-253 续批二起）。
+      //
+      // 为什么非给它不可：真的 `runtimeHost` 只能从现场服务上取
+      // （`ctx.get('subagents').start` 是 `startRun` 的唯一真来源），而模块求值期
+      // 还没有树。上一批的文件头已经把意图写成「工厂在本行 `apply` 时被调用：
+      // 它需要 DSH 进程的现场」——这一行让"现场"真的到手。
+      //
+      // 传参是**向后兼容**的：上一批那些零参工厂（`() => inputs`）在 JS 里
+      // 忽略多余实参，行为一字不变。
+      inputs = factory(ctx)
     } catch (e) {
       throw rowError(RUNTIME_HOST_ROW_CODES.INPUTS_FACTORY_THREW,
         `宿主端口工厂抛了：${e?.message ?? String(e)}` +

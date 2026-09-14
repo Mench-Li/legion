@@ -1223,6 +1223,31 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-253 续批二：`runtimeHost` 探针与 `canRead` 的**生产来源**。
+      //
+      // 这一套盯的是"探针不许乐观"：版本从进程现场的安装读（读不到 ⇒ null ⇒ 判不兼容）；
+      // 四项能力里只有一项有真来源，另外三项按**未确认**报（fail closed）；
+      // `canRead` 没有合法来源 ⇒ 具名拒绝，**没有**默认放行、**没有**抄替身。
+      //
+      //   > 一个"全 true 的能力表"，与一个"真的验过的能力表"，
+      //   > 在 `checkCompatibility` 的返回值上是同一个读数——
+      //   > 只不过前者会在一个从未验过的引擎上判"兼容"。
+      label: 'dsh-composition-runtime-host-registrar（PRT-253：探针与 canRead 的生产来源，不乐观）',
+      files: ['runtime/dsh-composition/plugins/runtime-host-registrar-row.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      // PRT-253 续批二：**真 DSH 进程**里，注册方在场/缺席是两个不同的具名读数。
+      //
+      // N↔R 只差**一个模块路径**却是两个不同的码；S↔S2 唯一变量是桩 provider 的一个布尔值。
+      // ★ 安全形状同上：每个子进程自己的一次性 `DSH_HOME`（tmpdir 下、spawn 前断言）、
+      //   `bundles: []`、`patchReload: 'startup'`、删 `DSH_SNAPSHOT`、`spawnSync` 超时、
+      //   跑完整棵删。**从不**读写 `~/.dsh`，**从不**把补丁层写进任何真实 profile。
+      label: 'dsh-composition-runtime-host-registrar-dsh-process（PRT-253：注册方在场/缺席在真 DSH 进程里可分）',
+      files: ['runtime/dsh-composition/plugins/runtime-host-registrar-row-dsh-process.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-601：工具能力描述与风险等级。
       //
       // 这一组盯的**不是**"登记表里有没有那些工具"，而是**风险等级能不能被填低**。

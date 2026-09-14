@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-13　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **184 套件 / 5225 用例 / 0 fail**（证据 `.ci/prt-253/`）
+**最近一次全量基线**：2026-09-13　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **186 套件 / 5257 用例 / 0 fail**（证据 `.ci/prt-253b/`）
 （**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数会少）
 —— 以本文件所在提交为准；证据 `.ci/prt-901/`（PRT-901/902 第三方组件清单、SBOM 与商业分发条件那一批）
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
@@ -3457,6 +3457,92 @@
 > `docs/DUAL-WRITE-RACE-evidence/verify-evidence.md`。
 
 ---
+
+## 2026-09-14　PRT-253 续批二：`runtimeHost`/`canRead` 的生产来源——并量出**双进程拓扑**这条更大的缝
+
+上一批（`c2cdeb5`）的诚实边界里点着**唯一**没交付的一件：`probeRuntime`（版本 + 四项必需能力）
+与 `canRead` 在全仓库没有任何生产实现。本批去填，结果**部分交付**，并且量到一条比"缺端口工厂"
+更大的事。
+
+### 一、三样东西各自源自哪里（逐项，不含糊）
+
+| 输入 | 结论 | 来源 |
+| --- | --- | --- |
+| 引擎**版本** | ✅ 填上了 | 进程现场：`process.argv[1]` 向上有限层找 `@deepseek-ai/dsh` / `dsh-root` 的 `package.json.version` → `0.1.5-rc.2`，与 `<DSH>/apps/cli/package.json` **逐字相等**。读不到 ⇒ `version: null` ⇒ 判**不兼容**（fail closed） |
+| `structured-result` | ✅ 真来源 | `ctx.get('subagents')` 命名 provider 注册表的 `capabilities.outputSchema`，且引擎 `start()` 真的按它拒收。多于一个 provider ⇒ **不挑一个**，报未确认 |
+| `tool-permission-enforcement` | ⚠️ 未确认 | 由 Legion 自己的补丁层做、由启动自检判；探针**不判第二遍**（两处判据会漂移） |
+| `cancel-and-timeout` | ⚠️ 未确认 | 依据 `runtime/adapters/dsh/port.mjs` 记录的**已发生生产故障**「abort 不保证杀死子代理」 |
+| `usage-reporting` | ⚠️ 未确认 | `SubagentResult` 契约（`output`/`structured?`/`diagnostic?`/`stopReason`）**没有用量字段**，而 `collectUsage()` 读 `result.usage`/`tokenUsage`/`tokens` |
+| `canRead` | ❌ **无合法来源** | 具名拒绝 `RUNTIME_HOST_REGISTRAR_NO_CAN_READ_SOURCE`。**没有**默认放行、**没有**默认拒绝、**没有**抄替身 |
+
+「能力全 true」会让 `checkCompatibility` 在一个从未验过的引擎上判"兼容"——这正是这一层存在的理由。
+所以四项里只有一项有真来源时，就只报一项。
+
+### 二、★★ 本批最大的发现：`bindDshRuntime()` 填的是**另一个进程**里的状态
+
+`bindDshRuntime()` 注册的是 `orchestrator/worker/executor-binding.mjs` 里一个
+**模块级** `bindingStack`（该文件第 98 行 `let bindingStack = []`）。
+而消费方 `product/orchestrator/worker.mjs` 在 `product/process-manifest.mjs` 里是
+`orchestrator` 进程（第 151 行），它 `dependsOn: ['team-hub', 'runtime']`，
+而 DSH 组合层（`runtime/dsh-composition/`）在 **`runtime`** 进程（第 118 行）里。
+
+**我独立复核过，不看那批的结论**：从一个全新进程直接调
+`productionExecutorProviderFromEnv({env})`（只喂 `orchestrator` 条目 `envNames` 里的键），
+读到 `ok=false code=EXECUTOR_HOST_PORT_REQUIRED`。
+
+⇒ **上一批证明的是"一个进程内通"，而部署的形状要求"两个进程之间通"。**
+这条缝**填多好都不会改变 worker 进程的读数**。`orchestrator` 的 `envNames` 里
+没有任何能携带这次绑定的东西。
+
+> 一个"在一个进程里绑好了"的绑定，
+> 与一个"从来没绑过"的绑定，在**消费它的那个进程**里是同一个读数。
+
+**这不是"再填一个工厂"能修的**，本批没有修——它是 PRT-253 从「单员工黄金任务迁移到
+RuntimeAdapter」真正落地前必须先解决的结构问题。
+
+### 三、因此这一行仍然不进补丁层
+
+`PATCH_LAYER_ROWS`、`legion-host.patch.yml`、`DSH_COMPOSITION_PATCH_VERSION` 一字未动，
+`render.mjs --write` 未跑。三条理由任一条就够：探针会在未验过的引擎上判不兼容 ⇒
+每个 Runtime 进程起不来；`canRead` 会拦启动；双进程拓扑。部署读数**仍然**是
+`EXECUTOR_HOST_PORT_REQUIRED`。
+
+### 四、注册形状：上一批的 load-order 教训照搬
+
+注册发生在**模块求值期**（`setDshRuntimeInputsFactory(...)`），默认导出
+`runtime-host-row.mjs` 的 `default`（`===` 同一个对象），与 `team-hub/approval-registrar-row.mjs`
+逐条同形，**不靠兄弟行的求值顺序**。
+
+### 五、我自己的验证装置里也有一处假读数（已修）
+
+跑变红验证时，探针 ⑭④（「模块求值期的注册被删掉」）被判成**无效：改动后套件编译失败**。
+我没有接受这个读数——手动复现后发现：变异**确实咬住了**（`fail=2`，且断言正是
+「注册方在场却报'没有人注册工厂'——注册没发生在模块求值期」）。
+
+根因在分类器自己：它用 `/^\s*throw new Error/m` 在套件输出里找"语法错误"，
+而变异后套件抛的是**运行期**错误，`node --test` 的错误输出会带上**出错那一行的源码**，
+那一行恰好就是 `throw new Error(...)`。
+
+> 一个"在输出文本里找 `throw new Error`"的分类器，
+> 与一个"真的检查了这个文件能不能被解析"的分类器，
+> 在没人把 `throw new Error` 打进输出里的时候是同一个东西——
+> 只不过前者会把**咬住了的**探针记成无效，而"无效"是不计入覆盖率的。
+
+改成对**被改的那个文件**跑 `node --check`（"能不能解析"的直接读数，不经过中间层）。
+修完 ⑭④ 正常计入，总数从 `196/201（5 无效）` 变成 **`201/201`**。
+
+**顺带一条工具教训**：用 PowerShell 的 `Get-Content -Raw` + `Set-Content` 做文本替换，
+把一个探针文件里的中文**全部**变成了 `U+FFFD`（46 处）并合并了行——文件随后连读都读不了。
+改文本一律走 `write` 工具或 node，不走 PowerShell 往返。
+
+### 六、验证
+
+- **8 道门禁全 PASS**（scan 542 / boundary 3 文件 26 处 / snapshot / topology / progress-check /
+  check-docs / ci-syntax 50 脚本 / encoding **1901** 文件）。
+- **全量 CI `.ci/prt-253b/`：9/9 阶段 PASS**，`test` **186 套件 / 5257 用例 / 0 fail**
+  （上一批 `.ci/prt-253/` 为 184 / 5225）。新登记两套后 stageTest 的"套件清单完备性"通过。
+- **变红验证 201/201 咬住、0 无效、0 没咬住**，还原**逐字节通过**。
+  本批新增 5 个探针（⑭①–⑭⑤），**5/5 咬住**；锚点先用脚本对过源文件（命中且**唯一**）才跑。
 
 ## 2026-09-14　PRT-253 续：`bindDshRuntime()` 的第一个生产调用方（并量出一处既有缺陷）
 

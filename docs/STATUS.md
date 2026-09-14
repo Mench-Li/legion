@@ -4,7 +4,7 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-13　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **182 套件 / 5198 用例 / 0 fail**（证据 `.ci/prt-214c/`）
+**最近一次全量基线**：2026-09-13　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **184 套件 / 5225 用例 / 0 fail**（证据 `.ci/prt-253/`）
 （**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数会少）
 —— 以本文件所在提交为准；证据 `.ci/prt-901/`（PRT-901/902 第三方组件清单、SBOM 与商业分发条件那一批）
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
@@ -3457,6 +3457,108 @@
 > `docs/DUAL-WRITE-RACE-evidence/verify-evidence.md`。
 
 ---
+
+## 2026-09-14　PRT-253 续：`bindDshRuntime()` 的第一个生产调用方（并量出一处既有缺陷）
+
+PRT-253 的诚实边界里有一句明确的话：「**`bindDshRuntime` 的调用者还不存在**
+（本批与"真的跑起来"之间唯一还缺的一环）」。本批把它补上——形状与刚交付的强制面注册方同源。
+
+### 一、交付
+
+新增 `runtime/dsh-composition/plugins/runtime-host-row.mjs`：一条**真的可加载**的补丁行，
+\`apply\` 走组合根 \`bootstrap()\` → \`bootstrapDshRuntime()\` → \`bindDshRuntime()\` → worker 的
+\`productionExecutorProvider()\`。十一个互不相同的具名拒绝码；\`ctx.effect(() => bound.unbind)\`
+挂注销；\`apply\` **不返回**任何值。出口加在 \`runtime/dsh-composition/index.mjs\`（与 \`root-row.mjs\` 同一处）。
+
+**真 DSH 进程里的读数**（真补丁层一字不改，替身与真件逐项在文档 §6 里标注）：
+
+| 场景 | 读数 |
+| --- | --- |
+| A 挂上本行 | \`ok=true code=none\`（造出了引擎） |
+| B **只少这一行补丁** | \`ok=false code=EXECUTOR_HOST_PORT_REQUIRED\` |
+| C 有行、但没有端口工厂 | 进程 exit 1，具名码 \`RUNTIME_HOST_ROW_NO_INPUTS_FACTORY\` |
+
+A/B 只差**一行补丁**，A/C 只差**工厂在不在**；判据是 **worker 自己那个模块**
+（\`orchestrator/worker/executor-binding.mjs\`）的读数——探针 import 的是它本身，不是副本。
+
+### 二、★ 顺带量出一处**既有的、会永久堵死任何生产调用方**的缺陷
+
+`reconcilePatchLayer()` 按**声明里的行 id**逐行对账，而声明里的两种行在组合树里**不是同一种东西**：
+
+- \`insert\` 行：树条目 id **就是**声明的 id；
+- \`patch-over\` 行：补丁文件顶层的 id 是**被覆盖的目标**（\`permission\`），Legion 自己的 id
+  刻意不出现（\`composition.test.mjs\` 把这一条写成了断言——出现了才说明打不到靶子）。
+
+于是只按 \`options.id\` 直读的观察器会为那一行**永远**报 \`ROW_MISSING\`，
+启动自检于是永远判"强制面未生效"，\`bootstrapDshRuntime()\` 于是永远拒绝注册。
+
+**我独立复现了这一条**（不看那批的结论，自己喂两种观察面）：
+
+\`\`\`text
+未映射版 ROW_MISSING： ["legion-enforcement-pre-execute","legion-enforcement-approval-answerer",
+                       "legion-enforcement-permission-presets"]
+未映射版 effective = false
+映射后   effective = true    （那一行 OK）
+\`\`\`
+
+**并且我这次复现比那批多读出一个读数**：那一行的 id 在结果里**出现两次**——
+\`ROW_MISSING\`（来自逐行循环）与 \`OK\`（来自 \`permissionPresets\` 那条独立判定），
+**同一次对账里同一行给出互相矛盾的码**（未映射时）。映射之后两个都变 \`OK\`，
+所以本批的绕法把这个矛盾也一并消掉了；但 \`findings\` 这个列表**不是按行 id 索引的**，
+调用方若用 \`Map\` 归约，取到哪一条取决于遍历顺序——这一点是遗留的隐患，**没有修**。
+
+**缺陷的位置要说准**：它在 \`reconcilePatchLayer()\` **自己**里，本批是在**观察侧**
+（\`observeComposition()\` 按 \`PATCH_LAYER_ROWS\` 的 \`mount.anchor === 'patch-over' → mount.target\`
+推导出映射，不写死 \`'permission'\`）绕开的。**没有修账本本身**——所以另外任何一个
+"只按 \`options.id\` 读"的观察器仍然会踩同一个坑。这一点记为遗留项。
+
+> 一个"按声明的 id 逐行对账"的观察器，与一个"永远对不上账"的观察器，
+> 在只看它自己的用例里是同一个东西。
+
+### 三、真进程咬出来的三个错（第一版在假 Context 上**全绿**）
+
+这批我交给的 worker 在真 DSH 进程里咬出三处只有真进程才会暴露的错误，值得记下来——
+它们的共同形状是"在替身上成立、在真件上不成立"：
+
+1. **\`ctx.get(name, x)\` 的第二个参数是 \`strict\`，不是 fallback**（服务缺席一律 \`undefined\`）。
+   当成 fallback 并自造哨兵 ⇒ **沙箱缺席会被读成沙箱在场**。
+2. **\`async apply\` 不能返回普通对象**：cordis 把返回值当效果收集，报 \`TypeError: Invalid effect\`，
+   并**连带回滚这一行已经 \`provide\` 的服务**。
+3. **组合根服务是"安装结果"** \`{ok, code, message, root}\`，组合根在 \`installed.root\`。
+   把服务值当组合根 ⇒ 真进程里报成"服务不在"。为此单开一个码
+   \`RUNTIME_HOST_ROW_ROOT_SHAPE_INVALID\`。
+
+### 四、⚠️ 仍然 🟡，且有一件**明确没交付**的
+
+- **宿主端口今天仍然只有桩。** \`runtimeHost\` 里的 \`probeRuntime\`（版本 + 四项必需能力）
+  在全仓库**没有任何生产实现**，\`canRead\` 同样只有替身。
+  **没有编默认值**——"能力全 true"会让 \`checkCompatibility\` 在一个从未验过的引擎上判"兼容"，
+  那正是这一层存在的理由。本行提供注册缝并以具名码当场拒绝；
+  **今天这个缝是空的，没有生产注册方**。所以**真实部署今天的读数仍然是**
+  \`EXECUTOR_HOST_PORT_REQUIRED\`。
+- **本行刻意不进 \`legion-host.patch.yml\`**：进去的话，每一行静态补丁层的 Runtime 进程都会
+  因为"没有端口工厂"而**起不来**——而本行不是强制面（没有引擎绑定时 harness 仍可用，
+  worker 侧照旧**可见地**拒绝认领）。拿一个大故障换一个小故障不划算。
+  版本号 \`dshCompositionPatchVersion\` 因此**不**递增。
+- **没有走到一次真 \`execute()\`**：黄金任务仍未跑过。
+- **没有写任何"往 profile 里写补丁层"的代码**，\`index.mjs\` 那条"本仓库不写 profile"的性质**保持不变**
+  ——操作者那台机器是 \`patchReload: 'live'\`，一次误调用能把**当前进程**的沙箱降级。
+- 文档 §6.6 列了五条**猜测**：\`ACTIVE_FIBER_STATE = 2\` 是实测值、没去核对 cordis 常量表；
+  "生效 preset 表 = \`permission\` 行 \`options.config.presets\` 的键"是**依据注释与文件形状的假设**；
+  "\`--patch\` 层序 vs patch-over 靶子"只量到现象、没读 \`applyEntryPatches\` 实现；
+  "本行该不该进补丁层"是**判断**不是读数；"注册缝该谁注册"没核对
+  \`product/launcher/\` 那条 \`dsh-overlay.mjs\` 是否更该承担。
+
+### 五、验证
+
+- **8 道门禁全 PASS**（scan 542 / boundary 3 文件 26 处 / snapshot / topology / progress-check /
+  check-docs / ci-syntax 50 脚本 / encoding **1897** 文件）。
+- **全量 CI \`.ci/prt-253/\`：9/9 阶段 PASS**，\`test\` **184 套件 / 5225 用例 / 0 fail**
+  （基线 \`.ci/prt-214c/\` 为 182 / 5198）。新登记两套到 \`run-ci\` 后，
+  stageTest 的"套件清单完备性"检查通过。
+- **变红验证 196/196 咬住、0 无效、0 没咬住**，还原**逐字节通过**。
+  本批新增 5 个探针（⑬①–⑬⑤），**5/5 咬住**；锚点先用脚本对过源文件才跑，
+  没有靠"跑一轮 25 分钟再看"来发现问题。
 
 ## 2026-09-14　PRT-214 续批七（生产注册方）+ PRT-509 路线 A′（DSH 只读凭证读桥）
 

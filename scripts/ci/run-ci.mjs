@@ -1190,6 +1190,39 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-253 续：`bindDshRuntime()` 的**生产调用方**。
+      //
+      // 这一套问的是一个此前答"否"的问题：worker 的 `productionExecutorProvider()`
+      // 在真实部署里能不能造出引擎？在那批之前，`bindDshRuntime()` 与
+      // `bootstrapDshRuntime()` **只有用例在调**，于是答案永远是
+      // `EXECUTOR_HOST_PORT_REQUIRED`——「强制面未生效时禁止自动执行」与预算闸门
+      // 从来没被行使过。
+      //
+      //   > 一个"写好了、也验证过被调用"的注册口，
+      //   > 与一个"没有任何生产代码调用它"的注册口，在运行的部署上是同一个东西——
+      //   > 只不过前者的用例是绿的。
+      //
+      // 需要 DSH_CHECKOUT 的那几条逐条 `t.skip()`；其余照常跑。
+      label: 'dsh-composition-runtime-host-row（PRT-253：bindDshRuntime 的生产调用方与它的具名拒绝）',
+      files: ['runtime/dsh-composition/plugins/runtime-host-row.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      // PRT-253 续：**真 DSH 进程**里的读数。
+      //
+      // 判据是 **worker 自己那个模块**（`orchestrator/worker/executor-binding.mjs`）的
+      // 读数，不是副本：挂上这一行 ⇒ `ok=true code=none`；只少这一行补丁 ⇒
+      // `ok=false code=EXECUTOR_HOST_PORT_REQUIRED`；有行但没有端口工厂 ⇒
+      // 进程 exit 1 + 具名码。三个读数两两不同形。
+      //
+      // ★ 安全形状同上：每个子进程自己的临时 `DSH_HOME`（tmpdir 下、启动前断言）、
+      //   `bundles: []`、删掉 `DSH_SNAPSHOT`、`spawnSync` 超时、跑完删干净。
+      //   **从不**读写 `~/.dsh`。本行**不进** `legion-host.patch.yml`（理由见其文件头）。
+      label: 'dsh-composition-runtime-host-row-dsh-process（PRT-253：生产调用方在**真 DSH 进程**里绑定生效）',
+      files: ['runtime/dsh-composition/plugins/runtime-host-row-dsh-process.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-601：工具能力描述与风险等级。
       //
       // 这一组盯的**不是**"登记表里有没有那些工具"，而是**风险等级能不能被填低**。

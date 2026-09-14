@@ -149,6 +149,33 @@ export {
   setApprovalPortFactory,
 } from './plugins/root-row.mjs'
 
+// PRT-253（续）：`bindDshRuntime()` 的**生产调用方**。
+//
+// `orchestrator/worker/executor-binding.mjs` 的 `bindDshRuntime()` 与
+// `bootstrap.mjs` 的 `bootstrapDshRuntime()` 在此之前都只有用例在调，
+// 于是 worker 的 `productionExecutorProvider()` 在真实部署里永远是
+// `EXECUTOR_HOST_PORT_REQUIRED`——「强制面未生效时禁止自动执行」（PRT-215）
+// 与 PRT-510 的预算闸门从来没被行使过。
+//
+//   > 一个"写好了、也验证过被调用"的注册口，
+//   > 与一个"没有任何生产代码调用它"的注册口，在运行的部署上是同一个东西——
+//   > 只不过前者的用例是绿的。
+//
+// ⚠️ 本行**不进** `legion-host.patch.yml`（理由写在它的文件头：没有端口工厂时
+// 它会在每个 Runtime 进程里拒绝，而那会把一个小得多的故障换成一个更大的）。
+// 所以补丁 YAML 里没有它，`dshCompositionPatchVersion` 也**不**因它递增。
+export {
+  ACTIVE_FIBER_STATE,
+  RUNTIME_HOST_BINDING_SERVICE,
+  RUNTIME_HOST_ROW_CODES,
+  RUNTIME_HOST_ROW_PLUGIN_NAME,
+  RUNTIME_HOST_ROW_VERSION,
+  dshRuntimeInputsFactory,
+  resetDshRuntimeInputsFactory,
+  runtimeHostRow,
+  setDshRuntimeInputsFactory,
+} from './plugins/runtime-host-row.mjs'
+
 // 装配原语本体。`bindingOf(row)` 是**身份**诊断：这一行挂的是哪一份桥/登记簿——
 // 两行共用同一本是 `assemble.mjs` 存在的全部理由，而共用是身份、不是形状。
 export {

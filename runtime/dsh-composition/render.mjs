@@ -45,6 +45,17 @@
 // profile 层是 `patchReload: 'live'`，写入会立刻改变**正在运行**的强制面。
 // 落盘动作必须是一次显式决策，不能藏在一个"顺手"的函数里。
 // 本文件的 CLI 只在被显式传 `--write` 时写；写不写、写到哪，由调用方决定并留痕。
+//
+// ## 两个退出码，两件不同的事（PRT-214 收口续三）
+//
+//   · `--check`                 —— **新鲜度**：磁盘上的 YAML 是否等于本模块刚生成的
+//     文本。改变它的是"改了声明忘了重新生成"（人可以修）。⇒ 0 / 1。
+//   · `--require-complete`      —— **完整性**：声明的每一行是否都以某种形式进了文档。
+//     它是长期架构状态（运行期行造不出来），**不随重新生成而改变**。⇒ 3。
+//
+// 两者此前被压成一个信号（`--check` 恒返回 3），于是它既不能当门禁，也说不清
+// 该修什么。要断言完整性的调用方显式传 `--require-complete`。
+// 无论走哪个模式，**不完整都会逐条打印到 stderr**——拆分退出码不等于允许静默。
 // ============================================================================
 
 import {
@@ -193,10 +204,15 @@ export function renderPatchReport({ moduleUrlOf = null } = {}) {
     const target = join(here, 'legion-host.patch.yml')
     const report = renderPatchReport()
 
-    if (process.argv.includes('--write')) {
+    const wantsWrite = process.argv.includes('--write')
+    const wantsCheck = process.argv.includes('--check')
+    // 显式要求"整层完整"才把完整性变成退出码。默认不传 —— 理由见下面那一段。
+    const requireComplete = process.argv.includes('--require-complete')
+
+    if (wantsWrite) {
       writeFileSync(target, report.text, 'utf8')
       console.log(`已写入 ${PATCH_YAML_PATH}（${report.renderedRowIds.length} 行）`)
-    } else if (process.argv.includes('--check')) {
+    } else if (wantsCheck) {
       if (!existsSync(target)) {
         console.error(`⛔ ${PATCH_YAML_PATH} 不存在，运行 node runtime/dsh-composition/render.mjs --write`)
         process.exit(1)
@@ -211,13 +227,39 @@ export function renderPatchReport({ moduleUrlOf = null } = {}) {
       process.stdout.write(report.text)
     }
 
-    // ★ 缺失的行**必须**报出来。此前这一层"不完整"只写在注释里，
-    //   而注释不会被任何判据读——于是"补丁层已就绪"可以一直是绿的。
+    // ★★ 「没漂移」与「没装完整」是**两个**读数，不能合进同一个退出码。
+    //
+    // 此前这一段无条件 `process.exitCode = 3`，于是 `--check` **永远**不可能返回 0：
+    // `complete === false` 是这一层的**长期架构状态**——两个运行期行只能由进程内
+    // 装配好的组合根提供，而静态 patch 文件带不了桥与端口（理由见
+    // `patch-layer.mjs` 的 `RUNTIME_ONLY_ROW_IDS`）。它**不随重新生成而改变**。
+    //
+    // 后果：`--check` 作为门禁恒红。而一个恒红的门禁与一个坏掉的门禁，在
+    // "它有没有拦过东西"这件事上完全一样——它因此也确实没被任何门禁引用。
+    //
+    //   > 一个永远不可能变绿的检查，与一个从来不检查的检查，
+    //   > 在流水线上是同一件事——只不过前者还会让人以为自己有覆盖。
+    //
+    //   > 而这与「探针只记了一个读数」是同一种病：把两件独立的事
+    //   > （YAML 过期了 / 这一层本来就装不满）压成一个信号，
+    //   > 就没人再说得出该去重新生成，还是该去接组合根。
+    //
+    // 所以拆开：
+    //   · **漂移**由 `--check` 的退出码表达（0/1）。可修、可门禁、可断言。
+    //   · **不完整**默认只报告（理由逐条打印，绝不静默），要把它变成退出码 3
+    //     必须**显式**传 `--require-complete`——那是一次说出来的断言，
+    //     而不是所有调用方都要背的默认值。
     if (!report.complete) {
-      console.error(`\n⚠️ 补丁层**不完整**：声明 ${report.declaredRowIds.length} 行，文档只有 ${report.renderedRowIds.length} 行。`)
+      const missing = report.unbuildable.length
+      console.error(`\n⚠️ 补丁层**不完整**：声明 ${report.declaredRowIds.length} 行，文档只有 ${report.renderedRowIds.length} 行，造不出来 ${missing} 行。`)
       for (const u of report.unbuildable) console.error(`   · [${u.code}] ${u.detail}`)
-      console.error('   缺行不是"暂时没装"：这三个 enforcement 行是强制面的本体，缺了它们启动自检会拒绝注册。')
-      process.exitCode = 3
+      console.error(`   缺的这 ${missing} 行不是"暂时没装"：它们是强制面的本体，缺了它们启动自检会拒绝注册。`)
+      if (requireComplete) {
+        console.error('   已传 --require-complete：按退出码 3 处理。')
+        process.exitCode = 3
+      } else if (wantsCheck) {
+        console.error('   （这**不**改变上面的新鲜度结论：它是长期状态，不是漂移；要把它变成退出码请传 --require-complete）')
+      }
     }
   }
 }

@@ -10,7 +10,9 @@
 // ============================================================================
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -536,6 +538,81 @@ test('★★★ 渲染：声明了而**没进文档**的行必须被报出来，
   const withModule = PATCH_LAYER_ROWS.filter((r) => typeof r.module === 'string')
   assert.ok(withModule.every((r) => report.renderedRowIds.includes(r.id)),
     '有模块的行必须都进文档')
+})
+
+// ────────────────────────────────────────────────────────────────────────────
+// CLI 的**两个退出码**是两件不同的事（PRT-214 收口续三）
+//
+// 这个 CLI 此前**一条用例都没有**：`--check` 恒返回 3（完整性被无条件写进退出码），
+// 所以它既不能当门禁、也说不清该修什么，于是没有任何门禁引用它 —— 也就没人发现
+// 它永远不会绿。
+//
+//   > 一个没有用例的 CLI，与一个没人调用的 CLI，
+//   > 在"它有没有说过真话"这件事上分不开。
+//
+// 这里把它当**外部程序**读：跑它、看退出码、看 stderr。断言"函数返回了什么"
+// 对 CLI 是不敏感的 —— 退出码是另一条代码路径。
+// ────────────────────────────────────────────────────────────────────────────
+
+/** 把 CLI 当外部程序跑一次，返回 {code, stdout, stderr}。 */
+function runRenderCli(args) {
+  const r = spawnSync(process.execPath, [join(HERE, 'render.mjs'), ...args], {
+    cwd: HERE, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' }
+}
+
+test('★★★ CLI：`--check` 只表达**新鲜度**——这一层装不满也必须返回 0', () => {
+  const r = runRenderCli(['--check'])
+  // ★ 这一条就是本次修的缺陷。此前它恒为 3：`complete === false` 是长期架构状态
+  //   （运行期行永远进不了静态 patch 文件），却被无条件写进退出码，
+  //   于是"YAML 有没有过期"这个**可修**的读数被一个**不可修**的状态盖住了。
+  assert.equal(r.code, 0,
+    `--check 在 YAML 新鲜时应当返回 0；返回 ${r.code}。\nstdout=${r.stdout}\nstderr=${r.stderr}`)
+  assert.match(r.stdout, /与 patch-layer\.mjs 声明一致/)
+
+  // ★★ 而"不完整"**仍然必须说出来**——拆分退出码不等于允许静默。
+  //    少了这一条，一个"把警告删掉、只留退出码 0"的实现会绿，
+  //    而那正是这次修改最危险的失败模式（把长期缺口变成看不见的）。
+  assert.match(r.stderr, /不完整/, '不完整必须逐条报出来，不能因为退出码变绿就静默')
+  assert.match(r.stderr, /造不出来 \d+ 行/)
+})
+
+test('★★ CLI：`--require-complete` 才把**完整性**变成退出码 3（显式断言，不是默认负担）', () => {
+  const plain = runRenderCli(['--check'])
+  const strict = runRenderCli(['--check', '--require-complete'])
+  // 同一份 YAML、同一次生成，只有那个显式开关不同 —— 差异只可能来自它。
+  assert.equal(plain.code, 0)
+  assert.equal(strict.code, 3, `--require-complete 应当返回 3；返回 ${strict.code}`)
+  assert.match(strict.stderr, /--require-complete/)
+  // 而它**不**借用同一个退出码表达漂移：3 与 1 是两件事。
+  assert.notEqual(strict.code, 1)
+})
+
+test('★★★ CLI：YAML 与声明**漂移**时返回 1（与"不完整"的 3 分开）', (t) => {
+  // ⚠️ 这一条必须临时改动**仓库里那个生成物**，因为 CLI 的路径是按脚本位置定的
+  //    （不给参数覆盖——那会让"检查的是哪份文件"变成一个可以配错的东西）。
+  //    所以备份 → 改动 → 断言 → **无论成败都还原**，并核对 sha256。
+  const target = join(HERE, 'legion-host.patch.yml')
+  const original = readFileSync(target, 'utf8')
+  const before = createHash('sha256').update(original).digest('hex')
+  t.after(() => {
+    writeFileSync(target, original, 'utf8')
+    assert.equal(createHash('sha256').update(readFileSync(target, 'utf8')).digest('hex'), before,
+      '生成物没有被逐字节还原 —— 下一次跑套件会带着一个假的"漂移"')
+  })
+
+  // 在**注释行**上改一个字符：YAML 结构不变，只有文本变了。
+  // 用整段替换而不是追加，避免误伤"文件末尾有没有换行"这一类与主题无关的差异。
+  const drifted = original.replace('# 由 runtime', '# 由  runtime')
+  assert.notEqual(drifted, original, '锚点没匹配上 —— 这条用例将什么都没测')
+  writeFileSync(target, drifted, 'utf8')
+
+  const r = runRenderCli(['--check'])
+  assert.equal(r.code, 1, `漂移时必须返回 1；返回 ${r.code}。\nstdout=${r.stdout}\nstderr=${r.stderr}`)
+  assert.match(r.stderr, /与声明不一致/)
+  // ★ 而且它**不**报"不完整"的退出码：漂移与长期状态是两件事。
+  assert.notEqual(r.code, 3)
 })
 
 test('★★ 渲染：文档必须能被 DSH 加载（形状检查），且**不含**会静默失效的形状', () => {

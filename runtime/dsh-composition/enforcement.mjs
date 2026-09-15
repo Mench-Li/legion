@@ -910,16 +910,37 @@ export async function probeTwoPhaseAvailability({
   const unsettled = rows.filter((r) => r.got.settled !== true)
   const mismatched = rows.filter((r) => r.matches !== true)
   const overBudget = rows.filter((r) => r.withinBudget !== true)
+  // ★★ 判据是 `budget + slack`，**不是** `budget`。理由里必须报**生效的**那个阈值。
+  //
+  // 此前这条理由写的是「耗时 Xms 超过预算 20ms」——而 20ms 是 `connect + response`
+  // 两个**模拟**超时之和，生效判据其实是它加 150ms 余量 = 170ms。于是同一个读数：
+  //
+  //   · 按理由读 → 超出 12.5 倍，像是"哪里严重不对"；
+  //   · 按真实判据读 → 超出 1.5 倍，像是"这台机器当时很忙"。
+  //
+  // 两个结论指向**完全不同的**排查动作。实测（2026-09-15 一次全量 CI）：
+  // 真读数 251ms / 272ms，理由报的是 20ms。
+  //
+  //   > 一个把生效阈值写成"预算"的理由，与一个把 1.5 倍报成 12.5 倍的理由，
+  //   > 在排查的人手里是同一个东西——只不过前者会让他去查代码，而真因是机器忙。
+  //
+  // 这与本函数的注释（"判据是'有没有结算、码对不对'，不是精确耗时"）是同一件事：
+  // 余量是为繁忙机器留的，那么报出来的就必须是含余量的阈值。
   return Object.freeze({
     ok: unsettled.length === 0 && mismatched.length === 0 && overBudget.length === 0,
     connectTimeoutMs,
     responseTimeoutMs,
     budgetMs: budget,
+    slackMs: slack,
+    /** ★ 生效阈值 = budget + slack。**读的是这个**，不是 budgetMs。 */
+    withinBudgetMs: budget + slack,
     rows: Object.freeze(rows),
     reasons: Object.freeze([
       ...unsettled.map((r) => `${r.id} ${r.what}：没有结算（会无限期挂起）`),
       ...mismatched.map((r) => `${r.id} ${r.what}：得到 ${JSON.stringify(r.got)}，期望 ${JSON.stringify(r.expected)}`),
-      ...overBudget.map((r) => `${r.id} ${r.what}：耗时 ${r.got.elapsedMs}ms 超过预算 ${budget}ms`),
+      ...overBudget.map((r) =>
+        `${r.id} ${r.what}：耗时 ${r.got.elapsedMs}ms 超过生效阈值 ${budget + slack}ms`
+        + `（${budget}ms 预算 + ${slack}ms 繁忙余量；余量是为慢机器留的，见本函数注释）`),
     ]),
   })
 }

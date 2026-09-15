@@ -241,7 +241,9 @@ export async function startupSelfCheck(inputs = {}) {
     name: 'enforcement-availability',
     ok: availability.ok,
     detail: availability.ok
-      ? `两段超时各自可观测（${availability.rows.length} 个成因，预算 ${availability.budgetMs}ms），故障一律 fail closed`
+      // ★ 报**生效阈值**（budget + 余量），不是那个光秃秃的 budget：后者会让人把
+      //   "机器当时很忙"读成"哪里严重不对"。见 `probeTwoPhaseAvailability` 的注释。
+      ? `两段超时各自可观测（${availability.rows.length} 个成因，生效阈值 ${availability.withinBudgetMs ?? availability.budgetMs}ms），故障一律 fail closed`
       : `可用性语义实测未通过（${availability.reasons.length} 项）`,
     reasons: availability.reasons,
     availability,

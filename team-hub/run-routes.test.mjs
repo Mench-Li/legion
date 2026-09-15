@@ -493,3 +493,66 @@ test('⑩ ★★ 对账记录能**从界面读回来**：谁判的、按哪种�
   // 租约世代要能读回来：事后要分得出"是哪一次持有期间做的决定"
   assert.equal(Number.isInteger(rec.leaseEpoch), true)
 })
+
+// ---------------------------------------------------------------- ⑪ 运行结果
+
+test('⑪ ★★ 运行结果能**从界面读回来**，且"引擎产出的"与"只报了结局的"分得开', async () => {
+  // 这两行在库里都只是一行，而它们回答的是**两个不同的问题**：
+  //   · source='engine'      → "模型当时输出了什么"（有原文）
+  //   · source='report-only' → "谁报了个什么结局"（没有原文）
+  // 读成同一个，会让人以为"引擎当时输出了 null"，而事实是"引擎什么都没给"。
+  const c = await claimToRunning('w-rr', 'rt-rr')
+  const engineResult = { runId: 'run-rr', outcome: 'succeeded', output: '产物正文' }
+  const done = await call('POST', '/api/runtime/transition', {
+    attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w-rr', outcome: 'completed',
+    context: { detail: '摘要一句', runResult: engineResult },
+  })
+  assert.equal(done.status, 200)
+
+  const empty = await call('GET', `/api/runtime/run-results?attemptId=rt-not-yet`)
+  assert.equal(empty.status, 200)
+  assert.deepEqual(empty.body.runResults, [], '没跑过时是"空清单"而不是"查不到"')
+
+  const missing = await call('GET', '/api/runtime/run-results')
+  assert.equal(missing.status, 400)
+  assert.equal(missing.body.code, 'MISSING_PARAM')
+
+  const got = await call('GET', `/api/runtime/run-results?attemptId=${c.attemptId}`)
+  assert.equal(got.status, 200)
+  assert.equal(got.body.runResults.length, 1)
+  const rr = got.body.runResults[0]
+  assert.equal(rr.attemptId, c.attemptId)
+  assert.equal(rr.taskId, 'rt-rr')
+  assert.equal(rr.source, 'engine')
+  assert.equal(rr.outcome, 'completed', '列上是仓储口径')
+  assert.equal(rr.detail, '摘要一句')
+  assert.deepEqual(rr.result, engineResult, '引擎原文必须原样读回来')
+  assert.equal(rr.result.outcome, 'succeeded', '引擎口径留在原文里，不得被翻译')
+
+  // 另一条路：只报结局、没有引擎产出 → `report-only`，`result` 为 null
+  const c2 = await claimToRunning('w-rr2', 'rt-rr2')
+  const done2 = await call('POST', '/api/runtime/transition', {
+    attemptId: c2.attemptId, leaseEpoch: c2.leaseEpoch, workerId: 'w-rr2', outcome: 'completed',
+    context: { detail: '没有原文' },
+  })
+  assert.equal(done2.status, 200)
+  const got2 = await call('GET', `/api/runtime/run-results?attemptId=${c2.attemptId}`)
+  assert.equal(got2.body.runResults.length, 1)
+  assert.equal(got2.body.runResults[0].source, 'report-only')
+  assert.equal(got2.body.runResults[0].result, null,
+    '没有引擎产出时必须是 null——写个 {} 上去就看不出"引擎没说话"与"引擎说了个空的"')
+})
+
+test('⑪ ★★ 什么都不报就想离开 Running：409 EVIDENCE_MISSING（HTTP 层）', async () => {
+  // 闸门非恒真的 HTTP 证据。没有这一条，"闸门在服务层挡住"就只是一句设计意图。
+  const c = await claimToRunning('w-rg', 'rt-rg')
+  const r = await call('POST', '/api/runtime/transition', {
+    attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w-rg', to: 'Validating',
+  })
+  assert.equal(r.status, 409)
+  assert.equal(r.body.code, 'EVIDENCE_MISSING')
+  assert.deepEqual(r.body.missing, ['runResult'])
+  // 状态没被推进
+  const still = await call('GET', `/api/runtime/attempt?attemptId=${c.attemptId}`)
+  assert.equal(still.body.attempt.state, 'Running')
+})

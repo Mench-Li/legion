@@ -4,15 +4,17 @@
 > 目录内的文档都是**历史快照**（顶部带 `⚠️ 历史快照` banner），其中的测试数量、端口、命令与
 > 结论只代表当时基线，**不得作为当前状态依据**。
 
-**最近一次全量基线**：2026-09-15　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **195 套件 / 5700 用例 / 0 fail**（证据 `.ci/prt-rec/`，`test` 阶段 555877ms）
-> 上一次基线的 5685 与本次的 5700 相差 **15** 条，正好是两批新增：密钥库并发写锁 **+10**、对账落库 **+5**，没有别处增减。
+**最近一次全量基线**：2026-09-15　`run-ci`（**9 个阶段全 PASS**）；其中 `test` **195 套件 / 5712 用例 / 0 fail**（证据 `.ci/prt-runresult/`，`test` 阶段 596003ms）
+> 上一次基线的 5700 与本次的 5712 相差 **12** 条，正好是两处新增：`team-hub` **+9**
+> （运行结果落库 6、路由读回 2、端到端整根线 1）、`orchestrator/worker` **+3**
+> （执行侧把 RunResult 原样带出），没有别处增减。
 >
-> ⚠️ **上一批（密钥库并发写锁）自己那四次 `run-ci` 没有一次全绿**：四次 `test` 阶段分别在**不同**的套件上红（`plugins` / `runtime-contract-cross-process` / `dsh-composition` + `tool-request` + `p13-host-injection`）。实测宿主内存 **1.4GB 可用 / 15.8GB**（占用方是用户自己的长驻进程：DSH harness 714MB、`team-hub/server.mjs` 等），失败形态是**延时预算超时**（334ms 超上界）、**真 DSH 用例超时**（60885ms / 30937ms）与**中途被杀**（39 例只跑了 25 例）。受影响的套件单独复跑**全绿**。受影响的套件单独复跑**全绿**。
+> ⚠️ **上一次基线（`.ci/prt-rec/`）之前的密钥库并发写锁那批，自己那四次 `run-ci` 没有一次全绿**：四次 `test` 阶段分别在**不同**的套件上红（`plugins` / `runtime-contract-cross-process` / `dsh-composition` + `tool-request` + `p13-host-injection`）。实测宿主内存 **1.4GB 可用 / 15.8GB**（占用方是用户自己的长驻进程：DSH harness 714MB、`team-hub/server.mjs` 等），失败形态是**延时预算超时**（334ms 超上界）、**真 DSH 用例超时**（60885ms / 30937ms）与**中途被杀**（39 例只跑了 25 例）。受影响的套件单独复跑**全绿**。
 >
-> **本次基线（`.ci/prt-rec/`）的全绿运行里包含那批代码**——这与"那四次红是环境造成的"**一致**，
-> 但**不等于证明了**它：`tool-request` 那一条我至今**没有归因**（它在四次全量里红了两次，
-> 单独复跑一次红 2/3、另一次 6/6 全绿），所以我既不声称"是我引入的"，也不声称"先前就有"。
-> 两批的新增用例分别记在「密钥库的读-改-写终于互斥了」与「"对过账"这件事第一次真的需要有人做过」两节。
+> `.ci/prt-rec/` 与 `.ci/prt-runresult/` **两次连续全绿**，都包含 `tool-request`（本次 37/37）——
+> 这与"那四次红是环境造成的"**一致**，但**仍不等于证明了**它：`tool-request` 那一条我至今**没有归因**
+> （它在四次全量里红了两次，单独复跑一次红 2/3、另一次 6/6 全绿），所以我既不声称"是我引入的"，
+> 也不声称"先前就有"。本批的新增用例记在「"这次跑出了什么"终于有人答得出来」一节。
 （**须设 `DSH_CHECKOUT`**：不设时 `plugins/board-plugin` 与 `plugins` 按纪律 SKIP，计数会少）
 —— 以本文件所在提交为准；证据 `.ci/prt-901/`（PRT-901/902 第三方组件清单、SBOM 与商业分发条件那一批）
 ⚠️ `test` 阶段耗时**不是稳定值**：同一提交上空载约 **4.5 分钟**，而在 `gf001` 守护
@@ -3463,6 +3465,131 @@
 > **WAL 切换不受 `busy_timeout` 保护**——二者都会让后到进程在模块加载期崩溃（宿主侧表现为
 > `/team-hub` 路由缺失直到重启）。详见 `docs/CI-TEST-STAGE-evidence/verify-evidence.md`、
 > `docs/DUAL-WRITE-RACE-evidence/verify-evidence.md`。
+
+---
+
+## 2026-09-15　"这次跑出了什么"终于有人答得出来（PRT-103 的 RunResult 落地），以及为了让失败通道还能用而做的一个让步
+
+状态机为 `Running → Validating / RetryableFailure / UnknownOutcome` **三条边**都声明了
+`requiresPersist: ['attempt','runResult']`（只有 `Running → Cancelled` 不要——取消不产生结果）。
+这句话在本批之前是**空话**，而且空了两层：
+
+1. `EVIDENCE_CHECKS` 里**没有** `runResult` 这个键（已用 `git show HEAD` 核过：本批之前是
+   `validation` / `handoff` / `approval` / `reconciliation` 四个，本批之后是五个），
+   `checkEvidence` 遇到没有探针的项直接 `continue` 跳过；
+2. 就算有探针，**也没有任何一行东西可查**——`runResult` 在执行侧被压成一段摘要字符串就丢了。
+
+### 先量"之前"，再说"之后"
+
+沿用上一批对账那条路子的做法：不推断，而是把探针退化成恒真（等价于"声明了但从不检查"），
+跑同一条 HTTP 用例，看它到底是放行还是拒绝：
+
+```
+POST /api/runtime/transition {attemptId, leaseEpoch, workerId, to:'Validating'}   ← 既不给结果、也不报结局
+  之前（探针恒真）：✅ HTTP 200 —— 迁移被放行，库里没有任何运行结果
+  之后（真探针）  ：✖ HTTP 409 EVIDENCE_MISSING，missing:["runResult"]
+```
+
+也就是说：**任何人都可以把一条尝试推进 `Validating`，而说不出它是怎么结束的**。
+后果不是报错，是任务随后卡在"机器验收"里——验收要按 `runResult` 判判据，
+`evaluateAcceptance({runResult:null})` 会拒绝，而库里的状态说它一切正常。
+
+> 一个"记下来但从不检查"的要求，与一个"没有这个要求"，
+> 在库里的表现是同一个东西——只不过前者在事件流里看起来像一句保证。
+
+### 那个让步：探针不能只认"引擎产出的原文"
+
+这是本批最要紧的一处判断，**动手之前**就量到了：`Running → RetryableFailure` **也**要求
+`runResult`，而引擎抛错时（`executor.mjs` 的 catch → `ExecutorError`）**根本没有终态事件**、
+没有 `result`。于是"老老实实注册一个只认引擎原文的探针"这一个动作本身，就会让
+**每一次真实失败**都变成 `EVIDENCE_MISSING`——**安全，但整条失败通道不可用**。
+
+安全但不可用也是一种坏法，只是它不报错。所以 `run_results` 用一个 `source` 列
+把**两种不同的事实**分开，探针**两者都算数**：
+
+| source | 事实 | `result_json` |
+| --- | --- | --- |
+| `'engine'` | 有引擎产出的原文，能回答"模型当时输出了什么" | 非空 |
+| `'report-only'` | 只有"谁报的、结局是什么"，**没有**引擎产出 | `NULL`（不写 `{}`） |
+
+区分留给**读**的人（`runResultsOf()` 与 `GET /api/runtime/run-results` 把 `source` 原样返回）；
+探针若也去区分，就会把"引擎炸了"这一整类结局判成"缺少证据"。
+
+> 一条合成的记录，与一条引擎产出的记录，在"事后能不能回答模型当时输出了什么"上是两个答案
+> ——只不过它们在库里都是一行。
+
+具体接线是：执行侧 → worker → `transition(context.runResult)` → **同一次事务**落库 → 核验。
+`runtime/adapters/dsh/index.mjs` 的终态事件本来就带着 `result`（`buildResult()` 造的那个对象），
+`executor.mjs` 现在把它原样放回返回值（`base.runResult = terminal.result`），
+`main.mjs` 随 `transition` 一起送上去。**这三处缺任何一处，线就断在那儿**——
+而断在哪一处，状态迁移全都还是对的（见下面的破验）。
+
+### 两套 outcome 词表**故意不归一**
+
+`outcome` 列是**仓储口径**（`completed` / `failed` / `outcome_unknown`），
+`result_json.outcome` 是**引擎口径**（`succeeded` / `timed-out` / `outcome-unknown`…）。
+强行翻译（看到 `succeeded` 就写 `completed`）会制造一个当场看不出来的错误：
+没人知道那一列到底是"引擎说的"还是"我们翻译的"。这也正是上一批把
+"适配器 `succeeded` vs worker `completed`"判为**不是缺陷**的同一理由——
+跨层真正的载体是**终态事件的 `type`**，由 `TERMINAL_TO_OUTCOME` 映射。
+
+### 顺手改掉一句**错话**
+
+`failAndRetry()` 里原有一句注释：
+
+> 「注意这一条**只对 AwaitingApproval 生效**：从 `Running` 来的失败只要 `['attempt']`，
+> 所以正常失败路径不受影响。」
+
+**它与状态机源码相反**（`Running → RetryableFailure` 声明的是 `['attempt','runResult']`）。
+它在当时"没后果"——因为探针不存在，两种说法都得到同一个结果（放行）。
+但它正是**下一个人会踩的坑**：照着这句话去注册探针，会以为失败路径不受影响，
+实际上每一次真实失败都会被拒。已改成实测结论并写明原话错在哪。
+
+> 一句"这里不受影响"的注释，与一次"这里真的不受影响"的验证，
+> 在没人去注册那个探针之前，是同一个东西——只不过前者会让你相信它。
+
+顺带补了一处**可诊断性**：`EVIDENCE_MISSING` 的 `missing` 原先只写在中文散文里，
+调用方要判断"缺的是不是我补得上的那一项"只能去匹配字符串，措辞一改就**静默失效**。
+现在 HTTP 正文里多了结构化的 `missing` 字段（与 `code` / `stateMachineCode` 同一层级）。
+
+### 验证
+
+- `team-hub` **975/975**（+9）、`orchestrator` **389/389**（+3）；全量 `run-ci` **9/9 PASS**，
+  **195 套件 / 5712 用例 / 0 fail**（`.ci/prt-runresult/`）。
+- **破验 9 个变异全部咬住**，且 `importErr=false`、还原逐字节一致（sha256 相同）：
+  探针恒真、引擎给了结果也不落库、`{}` 冒充 `null`、失败路径不落库、来源恒标 `engine`、
+  删 `executor → main` 的线、删 `executor` 侧返回、executor 用 `?? {}` 兜底、
+  结局列改用引擎口径。
+- ★ **其中两个变异，各暴露了我自己测试里的一个空洞**，都已补：
+  - **M7**（删掉 `executor.mjs` 侧返回的 `runResult`）**一条红都没有**。原因：我的端到端用例
+    用的是**替身执行器**（直接返回 `{outcome, runResult}`），它压根不走 `executor.mjs`。
+    补法是在 `orchestrator/worker/executor.test.mjs` 里注入剧本适配器，直接断言那一段接线。
+  - **M9**（把 `?? null` 改成 `?? {}`）也没咬住：我只测了"**没有**终态事件"，
+    没测"**有**终态事件但没带 `result`"——而后者才是那个兜底会发作的地方。
+  - 教训与上一批同源：**"闸门在服务层挡住了"这句话，需要一条会红的用例来兑现；
+    而"引擎原文会一路送到库里"这句话，需要一条断言原文本身的用例来兑现**——
+    因为丢掉原文之后，状态迁移**全都还是对的**。
+
+### ⚠️ 一个**尚未执行验证**的相邻疑点（不是本批引入，本批也未修）
+
+读源码时顺出来的，**只有静态证据，我还没有跑验证，所以不声称它是缺陷**，只记在这里免得丢失：
+
+`main.mjs` 有两条上报失败的路——**抛错**走 `hub.fail()`（第 592 行，会经
+`failAndRetry` → `scheduleRetry` 排队重试），**返回值**走 `hub.transition({outcome:'failed'})`
+（第 553 行）。而 `Running → RetryableFailure` 的 `createsNewAttempt` 是 `false`，
+`transition` 内部**不调用** `scheduleRetry`（全仓 `scheduleRetry` 只有 4 个调用点：回收、
+`failAndRetry`、人工处置、验收打回），且 `RetryableFailure` **不在**
+`IN_FLIGHT_ATTEMPT_STATES`（回收扫不到它）、**不在** `listHeld()` 的
+`state IN ('UnknownOutcome','DeadLetter')` 里（人工待办列不出来）。
+
+若这条推断成立，则"适配器把引擎故障分类成 `run.failed` 终态 → worker 返回
+`outcome:'failed'` → 走 `transition`"这条**常见**失败路径会把尝试留在 `RetryableFailure`
+而**没有人会去处理它**——正是 `failAndRetry` 自己的注释所描述的那个故障
+（"任务永远停在 `RetryableFailure`……从任何界面看它都只是'失败了'"）。
+注意 `RetryableFailure` **是**可以被 `resolveAttempt()` 处置的，缺的只是"没人被通知"。
+
+**下一步该做的**是量它，而不是信它：用真 hub + 一个返回 `{outcome:'failed'}` 的执行器 tick 一次，
+看有没有新尝试被排队。量出来是缺陷就修，量出来不是就把这段删掉。
 
 ---
 

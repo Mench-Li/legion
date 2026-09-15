@@ -655,6 +655,13 @@ async function handleRun(req, res, run) {
       error: message,
       code: e?.code ?? null,
       stateMachineCode: e?.stateMachineCode ?? null,
+      // 证据闸门（`EVIDENCE_MISSING`）：**缺的是哪几项**必须能结构化地读到。
+      //
+      // 原来只写在 `error` 那段散文里（"…证据不存在：runResult"），于是调用方
+      // 要判断"缺的是不是我补得上的那一项"就只能去匹配中文字符串。这与本文件
+      // 别处"具名码原样交给调用方"的口径不一致，而且一旦措辞改了，调用方的
+      // 判断会**静默失效**——它不报错，只是永远匹配不上。
+      missing: e?.missing ?? null,
       currentEpoch: e?.currentEpoch,
       currentWorkerId: e?.currentWorkerId,
       leaseExpiresAtMs: e?.leaseExpiresAtMs,
@@ -4582,6 +4589,12 @@ async function handle(req, res, stripPrefix) {
           failureCode: body.failureCode ?? null,
           detail: body.detail ?? null,
           reason: body.reason ?? 'failure-reported',
+          // `Running → RetryableFailure` 声明了 `requiresPersist: ['attempt','runResult']`。
+          // 引擎**抛错**时调用方手里没有结果（`executor.mjs` 的 catch 路径），
+          // 那就只能由仓储从失败事实合成一行；引擎若正常返回了失败终态，
+          // 调用方可以把 `result` 一起带上，那一行就是**真凭据**。
+          // 两种来源在库里分得开（`run_results.source`）。
+          runResult: body.runResult ?? null,
           nowMs: body.nowMs ?? null,
         })
         try { settleGoalsOfScope(getTask(r.attempt.taskId).scope) } catch { /* 任务不存在时不结算 */ }
@@ -5985,6 +5998,20 @@ async function handle(req, res, stripPrefix) {
       const attemptId = url.searchParams.get('attemptId')
       if (attemptId === null || attemptId.length === 0) { json(res, 400, { ok: false, error: '缺少 attemptId', code: 'MISSING_PARAM' }); return }
       json(res, 200, { ok: true, attemptId, handoffs: runStore.handoffsOf(attemptId), serverTimeMs: Date.now() })
+      return
+    }
+    if (req.method === 'GET' && path === '/api/runtime/run-results') {
+      // 运行结果（只读）：这次运行**产出了什么**。
+      //
+      // 它同时是 `Running → Validating / RetryableFailure / UnknownOutcome` 要的证据，
+      // 因此排查"为什么它推不动 / 当初到底跑出了什么"时要能直接看到。
+      //
+      // `source` 必须透出去：`'engine'`（有引擎产出的原文）与
+      // `'report-only'`（没有引擎产出，只有"谁报的、结局是什么"，`result` 为 null）
+      // 是**两个不同的事实**，读成同一个会让人以为"引擎当时输出了 null"。
+      const attemptId = url.searchParams.get('attemptId')
+      if (attemptId === null || attemptId.length === 0) { json(res, 400, { ok: false, error: '缺少 attemptId', code: 'MISSING_PARAM' }); return }
+      json(res, 200, { ok: true, attemptId, runResults: runStore.runResultsOf(attemptId), serverTimeMs: Date.now() })
       return
     }
     if (req.method === 'GET' && path === '/api/runtime/reconciliations') {

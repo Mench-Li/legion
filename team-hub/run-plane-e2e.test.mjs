@@ -175,6 +175,56 @@ test('① 客户端解包：claim 返回的是 claim 对象本身，不是 HTTP 
   assert.equal(typeof claimed.leaseExpiresAtMs, 'number')
 })
 
+test('① ★★ 引擎的 RunResult 真的走完了整根线：执行侧 → worker → transition → 落库', async () => {
+  // 这一条是本批**唯一**能证明"线接上了"的用例，而且它非有不可：
+  //
+  // 仓储允许"只报结局、没有引擎原文"也算一条记录（`source: 'report-only'`），
+  // 否则每一次引擎抛错都会变成 EVIDENCE_MISSING。但这个让步有一个后果——
+  // **把 executor → main → hub 那一段 `runResult` 传递整个删掉，别的用例全都不会红**
+  // （结局照样报上去，闸门照样通过，只是那一行从 'engine' 悄悄降级成 'report-only'）。
+  //
+  //   > 一个"引擎原文会一路送到库里"的设计，
+  //   > 与一个"引擎原文在半路被丢掉、只是没人发现"的设计，
+  //   > 在只断言状态迁移的用例下长得一模一样。
+  //
+  // 所以这里断言的是**原文本身**：库里必须能读到引擎给的那个对象，
+  // 一字不差，且来源是 'engine'。
+  onlyTask('e2e-rr')
+  const ENGINE_RESULT = {
+    runId: 'run-e2e-rr', outcome: 'succeeded', code: null,
+    output: '模型说：做完了', usage: { inputTokens: 3, outputTokens: 5 },
+  }
+  await withWorker({
+    hub,
+    executor: {
+      ...inPlaceStages({ contextStage: hubContextStage() }),
+      execute: async () => ({ outcome: 'completed', detail: 'e2e-rr', runResult: ENGINE_RESULT }),
+    },
+    dataDir: dataDirOf('data-rr'),
+    workerId: 'w-e2e-rr',
+    heartbeatIntervalMs: 50,
+  }, async (w) => {
+    const r = await w.tick()
+    assert.equal(r.outcome, 'completed', JSON.stringify(r))
+    const attemptId = mod.db.prepare('SELECT id FROM run_attempts WHERE task_id = ?').get('e2e-rr').id
+
+    const rows = mod.db.prepare('SELECT source, outcome, result_json FROM run_results WHERE attempt_id = ?').all(attemptId)
+    assert.equal(rows.length, 1, '引擎跑过一次就必须有一行运行结果')
+    assert.equal(rows[0].source, 'engine',
+      '来源必须是 engine。若这里变成 report-only，说明引擎原文在半路被丢掉了——' +
+      '而状态迁移仍然全对，只有这一条断言看得出来')
+    assert.equal(rows[0].outcome, 'completed', '列上是仓储口径')
+    assert.deepEqual(JSON.parse(rows[0].result_json), ENGINE_RESULT,
+      '引擎给的 RunResult 必须一字不差地到库：它是"模型当时输出了什么"的唯一凭据')
+
+    // 再从**界面**读一遍：产品读得到的，才算真的交付了
+    const got = await operatorGet(`/api/runtime/run-results?attemptId=${encodeURIComponent(attemptId)}`)
+    assert.equal(got.runResults.length, 1)
+    assert.equal(got.runResults[0].source, 'engine')
+    assert.deepEqual(got.runResults[0].result, ENGINE_RESULT)
+  })
+})
+
 test('① worker 端到端：认领 → 执行 → 提交，看板投影到 in_review', async () => {
   onlyTask('e2e-2')
   const executed = []

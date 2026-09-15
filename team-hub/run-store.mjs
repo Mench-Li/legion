@@ -374,6 +374,58 @@ export function ensureRunSchema(db) {
     )
   `)
   db.exec('CREATE INDEX IF NOT EXISTS idx_run_reconciliations_attempt ON run_reconciliations(attempt_id, seq)')
+
+  // ── 运行结果（RunResult）：离开 `Running` 的**三条**边全都要求它 ──
+  //
+  // 状态机为 `Running → Validating / RetryableFailure / UnknownOutcome`
+  // 三条边都声明了 `requiresPersist: ['attempt','runResult']`
+  // （只有 `Running → Cancelled` 不要，因为取消不产生结果）。
+  // 在本批之前那句话是**空话**：`EVIDENCE_CHECKS` 里没有这个探针，
+  // `checkEvidence` 直接 `continue` 跳过它。
+  //
+  // ★ 这张表**不是**"补上最后一个未实现的证据种类"那么轻。在动手之前先量了一件事，
+  // 它决定整个设计：`Running → RetryableFailure` 也要求 `runResult`，
+  // 而失败路径上引擎**可能什么都没产出**（`executor.mjs` 在引擎抛错时直接
+  // `throw ExecutorError`，没有终态事件、没有 `result`）。
+  //
+  // 于是"老老实实注册探针"这一个动作本身，会让**每一次真实失败**都变成
+  // `EVIDENCE_MISSING` 拒绝：安全，但整个失败通道不可用。这正是本会话反复防的
+  // "安全但不可用也是一种坏法"。所以本表用 `source` 把**两种不同的事实**分开：
+  //
+  //   · `source = 'engine'`：有引擎产出的原文（`result_json` 非空）。
+  //     真凭据——"模型当时输出了什么"能从这里回答。
+  //   · `source = 'report-only'`：**没有**引擎产出，只有"谁报的、结局是什么"
+  //     （`result_json` 为 NULL）。引擎抛错、或调用方只报了结局时是这种。
+  //
+  //   > 一条合成的记录，与一条引擎产出的记录，在"事后能不能回答模型当时输出了什么"
+  //   > 上是两个答案——只不过它们在库里都是一行。
+  //
+  // 探针**不区分**这两者：合成的那一行同样记录了这次运行的真实结局。
+  // 区分留给**读**的人——`runResultsOf()` 把 `source` 原样返回，界面上分得开。
+  // 探针若也去区分，就会把"引擎炸了"这一整类结局判成"缺少证据"。
+  //
+  // 只追加，不提供任何 UPDATE/DELETE 路径。
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS run_results (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      attempt_id TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      run_id TEXT,
+      outcome TEXT NOT NULL,
+      terminal_event_type TEXT,
+      code TEXT,
+      detail TEXT,
+      result_json TEXT,
+      usage_json TEXT,
+      source TEXT NOT NULL,
+      lease_epoch INTEGER,
+      at_ms INTEGER NOT NULL
+    )
+  `)
+  // 一条 Attempt **最多一份结果**：它只能离开 `Running` 一次（回不到 Running，
+  // 重试是**新** Attempt）。这条唯一索引是"一条尝试不会有两份互相矛盾的运行结果"
+  // 在数据库层面的保证——只在应用层查重时，两个并发写入会各查一次、各写一行。
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_run_results_attempt ON run_results(attempt_id)')
 }
 
 // ---------------------------------------------------------------- 内部工具
@@ -479,6 +531,19 @@ const EVIDENCE_CHECKS = Object.freeze({
   // 表不存在时返回 false 而不是抛错：理由与 `contextSnapshot` / `approval` 同源——
   // 一个只有 run schema 的库里，"查不到"与"没有那张表"对这一步是**同一个事实**。
   reconciliation: (db, attemptId) => reconciliationRowCount(db, attemptId) > 0,
+  // 「这次运行的产出已经落库」——`Running → Validating / RetryableFailure /
+  // UnknownOutcome` 三条边全都声明了它（`Running → Cancelled` 不要：取消不产生结果）。
+  //
+  // 这一条声明防的是：**状态告诉下游"这次跑完了"，而没有人能说出它跑出了什么**。
+  // 一条进了 `Validating` 却没有任何运行结果的尝试，后面那一步"机器验收"要按
+  // `runResult` 判判据——`evaluateAcceptance({ runResult: null })` 会拒绝，
+  // 于是任务卡在验收里，而库里的状态说它一切正常。
+  //
+  // ★ 这里**不区分** `source`：合成的那一行（引擎抛错时由 hub 从失败报告生成）
+  // 同样是这次运行的真实结局。区分留给**读**的人——`runResultsOf()` 把
+  // `source` 原样返回，于是"引擎产出的"与"hub 合成的"在界面上仍然分得开。
+  // 探针若也去区分，就会把"引擎炸了"这一整类结局判成"缺少证据"。
+  runResult: (db, attemptId) => runResultRowCount(db, attemptId) > 0,
 })
 
 /**
@@ -537,6 +602,96 @@ function approvalRowCount(db, attemptId) {
 function reconciliationRowCount(db, attemptId) {
   if (!tableExists(db, 'run_reconciliations')) return 0
   return db.prepare('SELECT COUNT(*) AS n FROM run_reconciliations WHERE attempt_id = ?').get(attemptId).n
+}
+
+/**
+ * 这条 Attempt 名下有没有运行结果（0 表示"没有"）。
+ *
+ * 表不存在时返回 0：理由与 `approvalRowCount` / `reconciliationRowCount` 同源。
+ *
+ * ★ 两个调用方问的必须是**同一个问题**，但它们的**答案来源不同**，这一点要说清楚：
+ *   · `EVIDENCE_CHECKS.runResult` 的**前置**核验（拦住通用迁移路由）；
+ *   · `failAndRetry()` 合成一行之后的**后置**条件。
+ *
+ * 前置核验读的是**这个进程刚写进去的那一行**（同一次事务），所以它挡住的不是
+ * "数据还没写好"，而是"**调用方根本没有把结果送上来**"——那才是这条声明要防的事。
+ */
+function runResultRowCount(db, attemptId) {
+  if (!tableExists(db, 'run_results')) return 0
+  return db.prepare('SELECT COUNT(*) AS n FROM run_results WHERE attempt_id = ?').get(attemptId).n
+}
+
+/** 能被当作 RunResult 落库的对象（不是 null / 数组 / 标量）。 */
+function asRunResult(v) {
+  return v !== null && typeof v === 'object' && !Array.isArray(v) ? v : null
+}
+
+/**
+ * 只给了 `to:` 而没给 `outcome` 时，按**目标状态**回推仓储口径的结局。
+ *
+ * 反方向的映射（`outcome → 状态`）是 `mapOutcomeToState()`；这一张是从状态回推，
+ * 只用于"结果那一列该写什么"，**不参与任何迁移判定**——迁移合法性只有状态机说了算。
+ * 表里没有的状态（例如 `Running → AwaitingApproval`）回推不出来，此时那一列写
+ * `'unknown'`，而不是猜一个看着合理的值。
+ */
+const OUTCOME_FOR_RUN_EXIT = Object.freeze({
+  Validating: 'completed',
+  RetryableFailure: 'failed',
+  UnknownOutcome: 'outcome_unknown',
+  Cancelled: 'cancelled',
+})
+
+/**
+ * 落一行运行结果。**唯一的写入点**（`transition` 的引擎路径与 `failAndRetry` 的
+ * 合成路径都走这里），这样"什么算一份结果"只有一处解释。
+ *
+ * @param {object} args
+ * @param {object} args.attempt  当前 `run_attempts` 行（取 task_id / lease_epoch）
+ * @param {object|null} args.runResult 引擎给的 RunResult（可为 null：只有报告、没有产出）
+ * @param {string} args.outcome  本次运行的**结局**，用仓储的口径
+ *   （`completed` / `failed` / `outcome_unknown` / `cancelled`）
+ * @param {string|null} args.code
+ * @param {string|null} args.detail
+ * @param {number} args.atMs
+ *
+ * ★ `source` **由数据本身推出来，不由调用方声称**：
+ *   · `runResult` 是对象      → `'engine'`（有引擎产出的原文）
+ *   · `runResult` 是 null      → `'report-only'`（只记了"谁报的结局是什么"，`result_json` 留 NULL）
+ *
+ *   这样就没有"标错来源"的可能。第一版我让调用方传 `source`，那意味着
+ *   一个写错参数的地方可以把一条空记录标成引擎产出的——而来源正是这一列唯一的用途。
+ *
+ * ★ 两套 outcome 词表**故意**不在这里统一，而是各存各的：
+ *   · `outcome` 列：**仓储口径**，即驱动这次迁移的那个结局（worker 报的）。
+ *   · `result_json` 里的 `outcome`：**引擎口径**。适配器的 `buildResult()` 用的是
+ *     `succeeded` / `failed` / `cancelled` / `timed-out` / `outcome-unknown`，
+ *     与仓储的 `completed` / … **不是同一套词**。
+ *
+ *   把两者强行归一（比如看到 `succeeded` 就写 `completed`）会制造一个当场看不出来的
+ *   错误：没人知道那一列到底是"引擎说的"还是"我们翻译的"。分开存，读的人能自己判。
+ *   这也是上一批我把"适配器 `succeeded` vs worker `completed`"判为**不是缺陷**的
+ *   同一个理由——跨层真正的载体是**终态事件的 `type`**，由 `TERMINAL_TO_OUTCOME` 映射。
+ */
+function insertRunResult(db, { attempt, runResult, outcome, code = null, detail = null, atMs }) {
+  const r = asRunResult(runResult)
+  db.prepare(
+    `INSERT INTO run_results
+       (attempt_id, task_id, run_id, outcome, terminal_event_type, code, detail, result_json, usage_json, source, lease_epoch, at_ms)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    attempt.id,
+    attempt.task_id,
+    typeof r?.runId === 'string' ? r.runId : null,
+    outcome,
+    typeof r?.terminalEventType === 'string' ? r.terminalEventType : null,
+    code ?? (typeof r?.code === 'string' ? r.code : null),
+    detail ?? (typeof r?.detail === 'string' ? r.detail : null),
+    r === null ? null : JSON.stringify(r),
+    r !== null && asRunResult(r.usage) !== null ? JSON.stringify(r.usage) : null,
+    r === null ? 'report-only' : 'engine',
+    attempt.lease_epoch ?? null,
+    atMs,
+  )
 }
 
 /**
@@ -1194,6 +1349,57 @@ export function createRunStore({
         })
       }
 
+      // ── 运行结果落库（在证据闸门**之前**，同一次事务）──────────────────────
+      //
+      // `Running → Validating / RetryableFailure / UnknownOutcome` 三条边声明了
+      // `requiresPersist: ['attempt','runResult']`。这一段的职责就是把
+      // **调用方随请求带上来的引擎结果**写进 `run_results`，好让紧接着的闸门
+      // 有东西可查。
+      //
+      // 只在声明真的要它时才写（`plan.requiresPersist` 里有 `runResult`）：
+      // 无差别地给每条边都插一行，会让"这条边需要结果"这件事本身失去意义。
+      //
+      // 三种情形，**第三种才是闸门要拦的**：
+      //   ① 带了 `context.runResult`（引擎的 RunResult）→ 写一行，`source: 'engine'`；
+      //   ② 没带，但**报了结局**（`outcome`）→ 写一行，`source: 'report-only'`，
+      //      `result_json` 留 NULL。"worker 报告这次运行以 X 结束"本身就是一条记录，
+      //      而它**不是**引擎的输出——两件事在库里必须分得开，所以来源那一列不同。
+      //   ③ 既没有结果、也没有报结局（例如 `transition({to:'Validating'})`）→
+      //      **什么都不写**，闸门随后报 `EVIDENCE_MISSING: runResult`。
+      //
+      // 情形③正是这条声明要防的事：**有人告诉你"这次跑完了"，却说不出它是怎么结束的**。
+      // 一条进了 `Validating` 的尝试没有任何运行结果，后面"机器验收"就没有判据可依，
+      // 任务会卡在验收里，而库里的状态说它一切正常。
+      if (Array.isArray(plan.requiresPersist) && plan.requiresPersist.includes('runResult')) {
+        const supplied = asRunResult(context?.runResult)
+        const reportedOutcome = (typeof outcome === 'string' && outcome !== '')
+          ? outcome
+          : null
+        if (supplied !== null) {
+          insertRunResult(db, {
+            attempt: row,
+            runResult: supplied,
+            // 仓储口径的结局：优先用调用方报的 `outcome`；只给了 `to:` 时按目标状态回推。
+            // 这里**不**去读 `supplied.outcome`——那是引擎口径（`succeeded` 等），
+            // 两套词表混在一列里，读的人就再也分不出哪一列是谁说的。
+            outcome: reportedOutcome ?? (OUTCOME_FOR_RUN_EXIT[target] ?? 'unknown'),
+            // `detail` 列放**这次运行的一句话摘要**（调用方报的，与 `run_attempts.detail`
+            // 同一来源）。引擎自己若也有个 `detail` 字段，它留在 `result_json` 里——
+            // 这一列的口径是"仓储记的运行摘要"，不是"引擎的某个字段"。
+            detail: typeof context?.detail === 'string' ? context.detail : null,
+            atMs,
+          })
+        } else if (reportedOutcome !== null) {
+          insertRunResult(db, {
+            attempt: row,
+            runResult: null,
+            outcome: reportedOutcome,
+            detail: typeof context?.detail === 'string' ? context.detail : null,
+            atMs,
+          })
+        }
+      }
+
       // **证据闸门**：状态机为这条边声明了 `requiresPersist`。声明必须在**落库之前**
       // 被核验，否则它只是一段 JSON——`Validating → Completed` 声明要求
       // `['attempt','validation']`，但只记录不核验时，一条从未被验收过的尝试
@@ -1455,7 +1661,7 @@ export function createRunStore({
    * `leaseEpoch` 可选：worker 报告时必须给（否则它可能是在替别人报失败）；
    * 系统侧（回收、对账）用自己的 CAS 语义，不给 epoch。
    */
-  function failAndRetry({ attemptId, leaseEpoch = null, actor, failureCode = null, detail = null, reason = 'failure-reported', nowMs = null } = {}) {
+  function failAndRetry({ attemptId, leaseEpoch = null, actor, failureCode = null, detail = null, reason = 'failure-reported', runResult = null, nowMs = null } = {}) {
     if (typeof actor !== 'string' || actor.trim() === '') {
       throw new ContractError(RUN_ERRORS.WORKER_REQUIRED, 'failAndRetry 需要 actor（谁报告的失败）')
     }
@@ -1522,8 +1728,43 @@ export function createRunStore({
         // 原来这里只 `transitionPlan` 就 UPDATE，从不核验 `plan.requiresPersist`——
         // 于是 `AwaitingApproval → RetryableFailure`（要求 `['attempt','approval']`）
         // 可以在**一张审批记录都没有**的情况下被写进历史，"审批被拒或被 TTL 自动 deny"
-        // 这句话就成了纯文案。注意这一条**只对 AwaitingApproval 生效**：
-        // 从 `Running` 来的失败只要 `['attempt']`，所以正常失败路径不受影响。
+        // 这句话就成了纯文案。
+        //
+        // ★★ 本批**改掉了一句错话**。这里原先写着：
+        //
+        //     「注意这一条**只对 AwaitingApproval 生效**：从 `Running` 来的失败
+        //       只要 `['attempt']`，所以正常失败路径不受影响。」
+        //
+        //   那是**假的**。状态机（`orchestrator/state-machine/transitions.mjs`）里
+        //   `Running → RetryableFailure` 声明的是 `['attempt', 'runResult']`。
+        //   这句话在当时"没后果"——因为 `runResult` 这个探针**根本不存在**，
+        //   `checkEvidence` 跳过它，所以两种说法都得到同一个结果（放行）。
+        //
+        //   而它正是**下一个人会踩的坑**：照着这句话去注册 `runResult` 探针，
+        //   会以为"正常失败路径不受影响"，实际上**每一次真实失败**都会变成
+        //   `EVIDENCE_MISSING` 拒绝——引擎抛错时根本没有终态事件，
+        //   于是没有任何 RunResult 可查。安全，但整条失败通道不可用。
+        //
+        //   > 一句"这里不受影响"的注释，与一次"这里真的不受影响"的验证，
+        //   > 在没人去注册那个探针之前，是同一个东西——只不过前者会让你相信它。
+        //
+        // 所以下面先把**失败这件事本身**落成一行结果（`source: 'report-only'`），
+        // 再核验。合成是有条件的：只有这条边真的声明了 `runResult` 才做。
+        if (Array.isArray(plan.requiresPersist) && plan.requiresPersist.includes('runResult')) {
+          // 引擎**抛错**时调用方手里没有结果（`executor.mjs` 的 catch 路径），但
+          // worker 报上来的**失败事实**（`failureCode` / `detail`）本身就是一份记录：
+          // 它如实写下"这次运行失败了、原因是什么"，只是**没有**引擎的输出原文。
+          // `insertRunResult` 会按"有没有 payload"把它标成 `'report-only'`——
+          // 绝不写成 `'engine'`，也就绝不会让人误以为引擎产出过一个空结果。
+          insertRunResult(db, {
+            attempt: row,
+            runResult: asRunResult(runResult),
+            outcome: 'failed',
+            code: failureCode,
+            detail,
+            atMs,
+          })
+        }
         const midEvidence = checkEvidence(db, attemptId, plan.requiresPersist, { from: row.state, to: toRetryable })
         if (midEvidence.missing.length > 0) {
           throw evidenceError(attemptId, row.state, toRetryable, midEvidence.missing)
@@ -2020,6 +2261,43 @@ export function createRunStore({
   }
 
   /**
+   * 运行结果（只读）：这次运行**产出了什么**。
+   *
+   * 与 `handoffsOf` / `validationsOf` / `reconciliationsOf` 同一个形状，理由也同一个：
+   * 这一行同时是 `Running → Validating / RetryableFailure / UnknownOutcome` 的**证据**，
+   * 所以"为什么它推不动 / 当初跑出了什么"必须能直接读到，而不是去开数据库文件。
+   *
+   * ★ `source` **原样返回**，这是本方法存在的一半理由：
+   *   · `'engine'` —— 引擎给的终态事件里的 `RunResult`，`result` 是它**说过的话**；
+   *   · `'report-only'` —— 没有引擎产出（引擎抛错、或调用方只报了结局），
+   *     `result` 必然是 `null`。
+   *
+   *   把这两种读成同一种，会让人以为"引擎当时输出了 null"，而事实是"引擎炸了"。
+   *
+   * ★ `outcome` 是**仓储口径**，`result.outcome` 是**引擎口径**（`succeeded` 等），
+   *   两套词表都原样给出，不做翻译——翻译会让读的人分不出哪一列是谁说的。
+   */
+  function runResultsOf(attemptId) {
+    return Object.freeze(db.prepare('SELECT * FROM run_results WHERE attempt_id = ? ORDER BY seq').all(attemptId)
+      .map((r) => Object.freeze({
+        seq: Number(r.seq),
+        attemptId: r.attempt_id,
+        taskId: r.task_id,
+        runId: r.run_id,
+        outcome: r.outcome,
+        terminalEventType: r.terminal_event_type,
+        code: r.code,
+        detail: r.detail,
+        /** 引擎给的 RunResult 原文；合成行为 `null`（引擎没产出东西）。 */
+        result: r.result_json === null ? null : JSON.parse(r.result_json),
+        usage: r.usage_json === null ? null : JSON.parse(r.usage_json),
+        source: r.source,
+        leaseEpoch: r.lease_epoch === null ? null : Number(r.lease_epoch),
+        atMs: Number(r.at_ms),
+      })))
+  }
+
+  /**
    * 交接（PRT-308，spec 第 333 行）：当前 Task 收口并**原子创建**下一岗位任务。
    *
    * 一次事务里做完三件事：建后继任务 → 记交接记录 → 把本尝试终结为 `Completed`。
@@ -2238,6 +2516,9 @@ export function createRunStore({
     // PRT-310/311：等人工清单与人工处置
     // `reconciliationsOf` 与 `resolveAttempt` 配对：处置写入证据，读回证据
     listHeld, resolveAttempt, reconciliationsOf,
+    // PRT-312：运行结果（`Running` 三条出边要的证据）。写入点有两处（`transition`
+    // 的引擎路径与 `failAndRetry` 的合成路径），读只有这一处。
+    runResultsOf,
     // PRT-307：机器验收的唯一入口（核判据 → 落库 → 按结论推进状态）
     recordValidation, validationsOf, criteriaOf,
     // PRT-308：交接（原子创建下一岗位任务 + 收口）

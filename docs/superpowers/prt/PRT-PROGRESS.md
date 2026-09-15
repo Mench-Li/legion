@@ -14,7 +14,7 @@
 > ⚠️ 「有用例」不等于「已生效」。带生产调用方的任务在证据栏注明调用方；
 > 只有自己的用例驱动的原语一律标 🟡。
 
-**最近更新**：PRT-312 真实进程被强杀的整链路演练（不丢任务 / 不伪装成功 / 不重复外部写）
+**最近更新**：PRT-103 RunResult 端到端落地——把状态机里那句"离开 `Running` 必须留下结果"从空话变成闸门（含失败路径的让步与来源区分）
 
 ---
 
@@ -40,7 +40,7 @@
 | --- | --- | --- |
 | PRT-101 RuntimeAdapter / RuntimeCapabilities | ✅ | `runtime/contracts/adapter.mjs`、`index.d.mts` |
 | PRT-102 ModelProfile / ModelDescriptor / 验证结果 | ✅ | `runtime/contracts/model.mjs`（含明文密钥结构化拒绝） |
-| PRT-103 RunRequest / RunEvent / RunResult | ✅ | `runtime/contracts/run.mjs` |
+| PRT-103 RunRequest / RunEvent / RunResult | ✅ | `runtime/contracts/run.mjs`（13 种事件 / 4 种终态 / `TERMINAL_TO_OUTCOME` 固定映射 / 终态事件必须携带或引用 RunResult）+ **RunResult 端到端落地**。契约定义了它，但落地这根线一直是断的：终态事件本来就带着 `result`（`runtime/adapters/dsh/index.mjs` 的 `buildResult()` 造的那个对象），而 `orchestrator/worker/executor.mjs` 只把 `terminal` 压成 `detail: summarize(terminal)` 一段摘要字符串就丢掉，`main.mjs` 也只发 `{detail, trace, frozen}`——于是状态机为 `Running → Validating / RetryableFailure / UnknownOutcome` 三条边声明的 `requiresPersist: ['attempt','runResult']` 是**空话**：`EVIDENCE_CHECKS` 里没有这个探针，`checkEvidence` 直接 `continue` 跳过它（`Running → Cancelled` 不要它，取消不产生结果）。现在建 `run_results` 表（只追加；`attempt_id` **唯一索引** = "一条尝试最多一份结果"，应用层查重在并发下会各查各的然后各写一行）、`EVIDENCE_CHECKS.runResult`、`runResultsOf()`、`GET /api/runtime/run-results`，线接通为 执行侧 → worker → `transition(context.runResult)` → 同事务落库 → 核验。★ **本批要害在失败路径**：`Running → RetryableFailure` **也**要求 runResult，而引擎抛错时（`executor.mjs` 的 catch → `ExecutorError`）根本没有终态事件、没有 `result`；探针若只认"引擎产出的原文"，**每一次真实失败**都会变成 `EVIDENCE_MISSING`——安全，但整条失败通道不可用，而"安全但不可用"是另一种坏法。表用 `source` 把两种事实分开：`'engine'`（有引擎原文，`result_json` 非空）与 `'report-only'`（只有"谁报的、结局是什么"，`result_json` 为 NULL，**不伪造** `{}`）。探针两者都算数，**区分留给读的人**。★ 两套 outcome 词表**故意不归一**：`outcome` 列是仓储口径（`completed`／`failed`／`outcome_unknown`），`result_json.outcome` 是引擎口径（`succeeded`／`timed-out`…），强行翻译会让"这一列到底是引擎说的还是我们翻译的"无从分辨——这也是上一批把"适配器 `succeeded` vs worker `completed`"判为**不是缺陷**的同一理由（跨层真正的载体是终态事件的 `type`）。★ 顺手改掉一句**错话**：`failAndRetry` 原注释写「从 `Running` 来的失败只要 `['attempt']`，所以正常失败路径不受影响」，与状态机源码**相反**；它在探针不存在时没有后果（两种说法都放行），但正是照着它去注册探针的人会踩的坑。★ 闸门非恒真有据：`transition({to:'Validating'})` 既不给结果也不报结局 → 409 `EVIDENCE_MISSING`，`missing: ["runResult"]`（HTTP 层新增结构化 `missing` 字段，原先只在中文散文里，措辞一改调用方判断就**静默失效**）。★ 破验 9 个变异（探针退化成恒真、不落库、`{}` 冒充 null、失败路径不落库、来源恒标 engine、删 executor→main 的线、删 executor 侧返回、结局列改用引擎口径）全部咬住且逐字节还原；其中 M7 与 M9 **各暴露了我自己测试里的一个空洞**（e2e 用替身执行器看不见 `executor.mjs` 这一层；只测了"没有终态事件"没测"有终态但没带 result"），已补。 |
 | PRT-104 标准错误码 / 重试等级 / 用户可见错误 | ✅ | `runtime/contracts/errors.mjs`（16 码版本化映射） |
 | PRT-105 取消 / 超时 / 恢复 / UnknownOutcome 语义 | ✅ | `runtime/contracts/contract.test.mjs`（终态唯一、cancel 幂等） |
 | PRT-106 Runtime Contract 契约测试 | ✅ | 套件 `runtime-contract`（43 例） |

@@ -552,3 +552,161 @@ test('⑫ ★ 人工处置走完后，**同一个库**里对账行数是可查�
     } finally { reopened.close() }
   } finally { env.cleanup() }
 })
+
+// ============================================================================
+// ⑬ 运行结果落库（`Running` 三条出边要求的 `runResult` 证据）
+//
+// `Running → Validating / RetryableFailure / UnknownOutcome` 三条边全都声明了
+// `requiresPersist: ['attempt','runResult']`（只有 `Running → Cancelled` 不要，
+// 取消不产生结果）。在此之前那句话是空话：`EVIDENCE_CHECKS` 里没有这个探针。
+//
+// ★ 这一组里**最重要的一条是"闸门真的会红"**。本批的设计允许"只报结局、没有引擎
+// 输出"也算一条记录（否则每一次引擎抛错都会变成 `EVIDENCE_MISSING`，失败通道
+// 整体不可用）——那就有必要证明：这个让步没有把闸门变成恒真。
+//
+//   > 一条"在有人真的什么都没报时才会红"的断言，
+//   > 与一条"任何情况下都不会红"的断言，在绿的时候长得一模一样。
+// ============================================================================
+
+/** 这条 Attempt 名下的运行结果行。 */
+function runResultRows(env, attemptId) {
+  return env.db.prepare(
+    'SELECT attempt_id, task_id, outcome, source, code, detail, result_json, run_id, lease_epoch, at_ms FROM run_results WHERE attempt_id = ? ORDER BY seq',
+  ).all(attemptId)
+}
+
+test('⑬ ★★ 闸门不是恒真的：`Running → Validating` **既不报结局、也不给结果**时必须被拒', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c = claimToRunning(env)
+    assert.equal(env.store.getAttempt(c.attemptId).state, 'Running')
+
+    // 这一条是本组存在的理由。它模拟的是：有人声称"这次跑完了"，
+    // 却说不出它是怎么结束的——没有 outcome、没有引擎结果。
+    const e = assertRunError(() => env.store.transition({
+      attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to: 'Validating',
+    }), RUN_ERRORS.EVIDENCE_MISSING)
+    assert.deepEqual([...e.missing], ['runResult'],
+      '缺的必须**具名**是 runResult；笼统的"证据缺失"排查时只能去读状态机源码')
+    // 拒绝而不是"记一条警告然后继续"：状态不得被推进，库里也不得留下半条记录
+    assert.equal(env.store.getAttempt(c.attemptId).state, 'Running')
+    assert.equal(runResultRows(env, c.attemptId).length, 0)
+  } finally { env.cleanup() }
+})
+
+test('⑬ ★ 引擎给了结果 → 原文**逐字**落库，来源标 `engine`', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c = claimToRunning(env)
+    // 引擎口径的词表（`succeeded`）与仓储口径（`completed`）**故意不同**，
+    // 这一条同时钉住"两套词表没有被悄悄归一"。
+    const engineResult = {
+      runId: 'run-abc', outcome: 'succeeded', code: null,
+      output: '产物正文', usage: { inputTokens: 11, outputTokens: 7 }, userMessage: '运行完成',
+    }
+    env.store.transition({
+      attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1',
+      outcome: 'completed', context: { runResult: engineResult, detail: '一句话摘要' },
+    })
+    assert.equal(env.store.getAttempt(c.attemptId).state, 'Validating')
+
+    const rows = runResultRows(env, c.attemptId)
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].source, 'engine')
+    assert.equal(rows[0].outcome, 'completed', '仓储口径那一列必须是 worker 报的结局')
+    assert.equal(rows[0].run_id, 'run-abc')
+    assert.equal(rows[0].detail, '一句话摘要')
+    // 引擎的原文**一字不改**——包括它自己那套词表里的 `succeeded`
+    assert.deepEqual(JSON.parse(rows[0].result_json), engineResult,
+      '引擎给的 RunResult 必须原样存下：它是"模型当时输出了什么"的唯一凭据')
+  } finally { env.cleanup() }
+})
+
+test('⑬ ★ 只报结局、没有引擎产出 → 一条 `report-only`，`result` 必须是 **null** 而不是空对象', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c = claimToRunning(env)
+    env.store.transition({
+      attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1',
+      outcome: 'completed', context: { detail: '没有引擎原文' },
+    })
+    const rows = runResultRows(env, c.attemptId)
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].source, 'report-only')
+    assert.equal(rows[0].outcome, 'completed')
+    assert.equal(rows[0].result_json, null,
+      '没有引擎产出时必须是 null。写个 {} 上去，事后就看不出"引擎没说话"与"引擎说了个空的"')
+    // 读回来也必须分得清
+    const got = env.store.runResultsOf(c.attemptId)
+    assert.equal(got[0].source, 'report-only')
+    assert.equal(got[0].result, null)
+  } finally { env.cleanup() }
+})
+
+test('⑬ ★★ 引擎抛错那条路（`failAndRetry`）也得留下结果——否则每次真失败都被拒', () => {
+  // 这一条是上一批量出来的陷阱的回归闸：`Running → RetryableFailure` **也**要求
+  // `runResult`，而引擎在抛错时没有终态事件、没有 `result`。
+  // 若探针只认"引擎产出的原文"，这里会变成 EVIDENCE_MISSING——**每一次真实失败**。
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c = claimToRunning(env)
+    const r = env.store.failAndRetry({
+      attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, actor: 'w1',
+      failureCode: 'RUNTIME_UNAVAILABLE', detail: '引擎炸了',
+    })
+    assert.equal(r.ok, true, '正常失败路径必须仍然走得通')
+    const rows = runResultRows(env, c.attemptId)
+    assert.equal(rows.length, 1, '失败也必须有一行结果：它是这条边的证据')
+    assert.equal(rows[0].source, 'report-only')
+    assert.equal(rows[0].outcome, 'failed')
+    assert.equal(rows[0].code, 'RUNTIME_UNAVAILABLE')
+    assert.equal(rows[0].result_json, null, '引擎没产出东西，就如实写 null')
+  } finally { env.cleanup() }
+})
+
+test('⑬ 一条 Attempt 只有一份结果：重放迁移不写第二行', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c = claimToRunning(env)
+    const args = {
+      attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1',
+      outcome: 'completed', context: { runResult: { runId: 'run-1', outcome: 'succeeded' } },
+    }
+    env.store.transition(args)
+    const first = runResultRows(env, c.attemptId)
+    assert.equal(first.length, 1)
+
+    // 重放同一次迁移（worker 写完后崩溃再重放是**正常路径**）
+    const again = env.store.transition(args)
+    assert.equal(again.ok, true)
+    assert.equal(again.idempotent, true)
+    const second = runResultRows(env, c.attemptId)
+    assert.equal(second.length, 1, '重放不得写第二行结果——一条尝试不会有两份互相矛盾的运行结果')
+    assert.deepEqual(second[0], first[0], '重放也不得改写已有那一行')
+  } finally { env.cleanup() }
+})
+
+test('⑬ 读方法把两套 outcome 词表**都**原样给出，不做翻译', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c = claimToRunning(env)
+    env.store.transition({
+      attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1',
+      outcome: 'completed', context: { runResult: { runId: 'run-1', outcome: 'succeeded' } },
+    })
+    const got = env.store.runResultsOf(c.attemptId)
+    assert.equal(got.length, 1)
+    // 仓储口径在列上，引擎口径在 result 里。两者都在，且**互不覆盖**。
+    assert.equal(got[0].outcome, 'completed', '列上是仓储口径')
+    assert.equal(got[0].result.outcome, 'succeeded', '引擎口径留在原文里，不得被翻译成 completed')
+    assert.equal(got[0].source, 'engine')
+    assert.equal(Number.isInteger(got[0].atMs), true)
+    assert.equal(Number.isInteger(got[0].leaseEpoch), true)
+  } finally { env.cleanup() }
+})

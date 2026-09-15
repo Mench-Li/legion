@@ -555,7 +555,14 @@ export function createWorker({
         leaseEpoch: claimed.leaseEpoch,
         workerId,
         outcome,
-        context: { detail: result?.detail ?? null, trace, frozen: contextEvidence },
+        // PRT-312：`runResult` 必须随这次迁移一起上去。状态机为
+        // `Running → Validating / RetryableFailure / UnknownOutcome` 声明的
+        // `requiresPersist: ['attempt','runResult']` 是在 **hub 侧**核验的，
+        // 而 hub 唯一可能的来源就是这里——漏掉这一个字段，执行侧算出来的结果
+        // 就永远到不了库里，那条声明也就永远只是事件流里的一句话。
+        // 注意这与 `detail` **不是**二选一：`detail` 是给人看的一句话摘要，
+        // `runResult` 是给机器判的凭据（机器验收要按它判判据）。
+        context: { detail: result?.detail ?? null, runResult: result?.runResult ?? null, trace, frozen: contextEvidence },
       })
       stopHeartbeat()
       currentLease = null

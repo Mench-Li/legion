@@ -221,8 +221,8 @@ export function createHubClient({ baseUrl, token, fetchImpl = globalThis.fetch, 
      * （既没有可领的队列，也不在等人工清单里）。让 worker 有能力绕过这个入口，
      * 就等于让它有能力制造那个缺陷。
      */
-    fail: ({ attemptId, leaseEpoch, workerId, failureCode = null, detail = null, reason = null }) =>
-      call('/api/runtime/fail', { attemptId, leaseEpoch, workerId, failureCode, detail, reason }),
+    fail: ({ attemptId, leaseEpoch, workerId, failureCode = null, detail = null, reason = null, runResult = null }) =>
+      call('/api/runtime/fail', { attemptId, leaseEpoch, workerId, failureCode, detail, reason, runResult }),
     /**
      * 回收过期租约（PRT-310 的入口）。
      *

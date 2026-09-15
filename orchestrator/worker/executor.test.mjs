@@ -216,6 +216,86 @@ test('① `requestFor` 可以把 lease 与快照翻成自己的 RunRequest', asy
   assert.deepEqual(seen, [{ lease: 'att:1', text: FROZEN_TEXT }], 'requestFor 必须同时拿到 lease 与**冻结后的**快照')
 })
 
+// 注入一个只会按剧本发事件的适配器。
+//
+// 为什么要**换掉适配器**而不是用默认的：这一组要验的是
+// 「终态事件里的 `result` → `execute()` 返回值」这一段接线，
+// 与真实适配器内部怎么造那个 `result` 无关。用剧本适配器就能让
+// "我给的原文"与"它还回来的原文"逐字对齐，不受适配器字段演化的影响。
+function makeAdapter(events) {
+  return () => ({
+    async probe() { return { ok: true, version: 'scripted', capabilities: {} } },
+    async *execute() { for (const e of events) yield e },
+  })
+}
+
+test('① ★★ 终态事件的 RunResult 被**原样**带回：`r.runResult` 就是引擎说过的那份', async () => {
+  // hub 侧 `Running → Validating / RetryableFailure / UnknownOutcome` 三条边声明的
+  // `requiresPersist: ['attempt','runResult']`，其凭据**只能从这里出去**。
+  //
+  // 这一条是补上来的：我的端到端用例（run-plane-e2e）用的执行器是**替身**
+  // （直接返回 `{outcome, runResult}`），它压根不走 `executor.mjs`。于是
+  // "删掉 executor 侧这一行"在那边**一条红都不会有**——破验 M7 就是这么发现的。
+  //
+  //   > 一个"引擎原文会从这里带出去"的设计，
+  //   > 与一个"这一行被删了、只是没人发现"的设计，
+  //   > 在所有只断言 outcome/detail 的用例下长得一模一样。
+  const ENGINE_RESULT = {
+    runId: 'run-att-1', attemptId: 'att:1', outcome: 'succeeded', code: null,
+    output: '模型说：做完了', usage: { inputTokens: 3, outputTokens: 5 },
+  }
+  const { result } = await build({
+    extra: {
+      adapterFactory: makeAdapter([
+        { type: 'run.started', seq: 1, at: NOW, runId: 'run-att-1' },
+        { type: 'run.completed', seq: 2, at: NOW, runId: 'run-att-1', result: ENGINE_RESULT },
+      ]),
+    },
+  })
+  const r = await result.executor.execute(LEASE)
+  // 终态类型 → 结局：走契约里的 `TERMINAL_TO_OUTCOME`，不是我在这里另写一遍
+  assert.equal(r.outcome, 'completed', JSON.stringify(r))
+  assert.deepEqual(r.runResult, ENGINE_RESULT,
+    '引擎给的 RunResult 必须**逐字**带出来。丢了它，hub 侧那条 requiresPersist 就没有凭据')
+  // 它**不是**那段给人看的摘要
+  assert.notEqual(typeof r.runResult, 'string')
+  assert.equal(typeof r.detail, 'string', 'detail 仍然是给运维的一句话，两者并存')
+  // 引擎口径原样保留（`succeeded`），本层不做翻译——翻译只发生在读的人那里
+  assert.equal(r.runResult.outcome, 'succeeded')
+})
+
+test('① ★ 没有终态事件时 `runResult` 必须是 **null**（不编一个空对象顶上）', async () => {
+  // `terminal === null` 时引擎确实没产出结果，`outcome` 已经是 `outcome_unknown`。
+  // 编个 `{}` 顶上去，会让 hub 那条记录看起来像"引擎给了结果，只是内容是空的"，
+  // 而真相是"引擎什么都没说"。
+  const { result } = await build({
+    extra: { adapterFactory: makeAdapter([{ type: 'run.started', seq: 1, at: NOW, runId: 'run-x' }]) },
+  })
+  const r = await result.executor.execute(LEASE)
+  assert.equal(r.outcome, 'outcome_unknown')
+  assert.equal(r.runResult, null, '没有终态事件就没有 RunResult，如实写 null')
+})
+
+test('① ★ 终态事件**没带** `result` 时也是 null，不得编个 `{}` 顶上', async () => {
+  // 契约（`runtime/contracts/run.mjs` 的 `validateRunEvent`）要求终态事件**必须**
+  // 携带或引用 RunResult，所以这里是"适配器违约"的情形。违约了也不能由本层替它编：
+  // 一个 `{}` 记进库里，事后看就是"引擎给了结果，只是内容是空的"，
+  // 而真相是"引擎没说它跑出了什么"。
+  //
+  // 这一条是破验 M9（把 `?? null` 改成 `?? {}`）逼出来的：我原先只测了
+  // "没有终态事件"，没测"有终态事件但没带 result"——而后者才是那个兜底会发作的地方。
+  const { result } = await build({
+    extra: {
+      adapterFactory: makeAdapter([
+        { type: 'run.completed', seq: 1, at: NOW, runId: 'run-y' },   // 刻意不带 result
+      ]),
+    },
+  })
+  const r = await result.executor.execute(LEASE)
+  assert.equal(r.outcome, 'completed', '终态类型仍然决定结局：这一条与结果缺失是两件事')
+  assert.equal(r.runResult, null, '引擎没给结果就如实记 null，不代笔')
+})
+
 test('① 终态 `run.failed` → `failed`，且理由可读（不是把整个结果塞进 detail）', async () => {
   const { result } = await build({ host: makeHost({ stopReason: 'error' }) })
   const r = await result.executor.execute(LEASE)

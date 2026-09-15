@@ -364,6 +364,21 @@ export async function createProductionExecutor(deps = {}) {
 
       const base = {
         outcome,
+        // ── PRT-312：把引擎的 RunResult **原样**带出去 ──
+        //
+        // 状态机为 `Running → Validating / RetryableFailure / UnknownOutcome`
+        // 三条边声明了 `requiresPersist: ['attempt','runResult']`，而 hub 侧要
+        // 落库的那份结果**只能从这里出去**：`terminal.result` 就是适配器
+        // `buildResult()` 造的那个 RunResult（`runId` / `outcome` / `code` /
+        // `output` / `usage` / `userMessage` …）。
+        //
+        // 在补这一行之前，这个值在这里被 `summarize(terminal)` 压成一段摘要字符串
+        // 就丢掉了：执行侧**有**结果、hub 侧**收不到**——中间断的正是这一根线。
+        //
+        // 没有终态事件时（`terminal === null`）如实给 `null`：此时引擎**确实**
+        // 没产出结果，而 `outcome` 已经是 `outcome_unknown`。编一个空对象顶上去，
+        // 会让 hub 侧那条记录看起来像"引擎给了结果，只是内容是空的"。
+        runResult: terminal === null ? null : (terminal.result ?? null),
         detail: terminal === null
           ? '执行引擎的事件流结束了，但没有给出终态事件。' +
             '此时唯一安全的结论是结果未知——外部写是否已经发生无法判断，禁止自动重试写入'

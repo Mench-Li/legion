@@ -890,19 +890,18 @@ test('⑪ 核验清单是**总**的：状态机声明的每一项都有归宿', 
   // 那条声明的执行点是**前置核验**：它拦住从 `/api/runtime/transition`
   // 通用路由把 `UnknownOutcome` 直接推成"写成功了"的调用方。
   const KNOWN_UNIMPLEMENTED = [
-    // `runResult`（PRT-312 结果提取）：**不是「还没建表」，是「东西根本没送到 hub」**。
-    // 已量到的两个事实：
-    //   · `runtime/adapters/dsh/index.mjs` 的终态事件**确实带着** `result`
-    //     （`executor.mjs` 的 `summarize()` 就在读 `terminal.result?.stopReason`），
-    //     所以 RunResult 在执行侧是存在的；
-    //   · 但 `orchestrator/worker/executor.mjs` 返回给 worker 的 `base` 里
-    //     只有 `detail: summarize(terminal)`（一段摘要字符串），**没有** `result`；
-    //     `main.mjs` 随后只发 `context: { detail, trace, frozen }`。
-    // 于是 hub 侧在 `Running → Validating` 这一刻**收不到** RunResult，
-    // 这条声明缺的是**端到端的一根线**（执行侧 → worker → transition → 落库），
-    // 而不是一张表。只建表会让探针永远返回 false，从而**永远拒绝**每一次
-    // `Running → Validating`——那也是一种坏法：安全但不可用。
-    'runResult',
+    // `runResult` **已落地**（原先这里写着"PRT-312 结果提取：尚未建表"）。
+    // 上一批量到的结论是"缺的不是一张表，是一根线"，本批把线接上：
+    //   · `run_results` 建表 + `EVIDENCE_CHECKS.runResult` 探针；
+    //   · 适配器的终态事件本来就带着 `result`（`buildResult()` 造的那个 RunResult），
+    //     `orchestrator/worker/executor.mjs` 现在把它**原样**放回返回值
+    //     （`base.runResult = terminal.result`），`main.mjs` 随 `transition`
+    //     一起送上去（`context.runResult`）；仓储在**同一次事务**里落库再核验。
+    // ★ 与 `reconciliation` 的**关键差别**：`Running → RetryableFailure` 也要求
+    // `runResult`，而失败路径上引擎**可能什么都没产出**（抛错时没有终态事件）。
+    // 探针不能只认"引擎产出的原文"，否则每一次真实失败都会被拒——安全但不可用。
+    // 表用 `source` 把两者分开：`'engine'`（有原文）与 `'report-only'`（只有报告）。
+    // 探针两者都算数；**区分留给读的人**（见 `run-store-policy.test.mjs` 的 ⑬ 组）。
     'workspace',     // PRT-306 工作区隔离未交付，无工作区表可查（见上）
   ]
   const declared = new Set()

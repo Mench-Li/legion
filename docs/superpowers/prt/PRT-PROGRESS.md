@@ -14,7 +14,7 @@
 > ⚠️ 「有用例」不等于「已生效」。带生产调用方的任务在证据栏注明调用方；
 > 只有自己的用例驱动的原语一律标 🟡。
 
-**最近更新**：PRT-103 RunResult 端到端落地——把状态机里那句"离开 `Running` 必须留下结果"从空话变成闸门（含失败路径的让步与来源区分）
+**最近更新**：PRT-103 RunResult 端到端落地（把"离开 `Running` 必须留下结果"从空话变成闸门，含失败路径的让步与来源区分）；同批**量到** PRT-309 一处未修缺陷——worker **返回**失败走的是 `transition` 而非 `fail`，任务会变成"永远领不到的 todo"，故 PRT-309 由 ✅ 降为 🟡
 
 ---
 
@@ -109,7 +109,7 @@ applier **抛错**的项不参与复核改写（它没有成功执行过，「�
 `BOOTSTRAP_ALREADY_BOUND` 仍是定义了但没有产生它的代码 | 原有：**本批交付「自检」的一半**：`product/launcher/secrets-check.mjs`
 | PRT-258 冻结进程清单 / 目录布局 / 配置 Schema / Secret Store 接口 | ✅ | 四份契约全部有实现与用例：`PRT-258-product-contracts.md`（前三份）+ `PRT-505-secret-store.md`（第四份） |
 
-## 阶段 3：Orchestrator Core（15/16）
+## 阶段 3：Orchestrator Core（14/16）
 
 | 任务 | 状态 | 证据 / 说明 |
 | --- | --- | --- |
@@ -121,7 +121,7 @@ applier **抛错**的项不参与复核改写（它没有成功执行过，「�
 | PRT-306 提取 workspace/worktree 管理 | ✅ | `orchestrator/workspace/index.mjs`（真 `git worktree`：`planWorkspace` 规划期拒绝、`createWorkspace` 先落意图再做副作用、`reclaimWorkspace` 删除是拒绝边界）+ `worktreeStages()` 声明 `workspaceIsolation: 'worktree'` + worker 接线（`LEGION_WORKSPACE_DIR`、`resolveWorkspaceStages`、状态文件 `workspaceMode` 四态）；套件 `workspace`（24 例，跑真 git）、`workspace-wiring`（9 例）。判据四条：① **按 Attempt 分配**（不按 Task）——按 Task 时重试会继承上一次的半成品改动，于是"上次改坏了"的东西这次看起来是"已经改好了"；② **拒绝嵌套布局**——worktree 落在仓库内部会出现在主仓库的 `git status` 里，另一个 worker 的 `git add -A` 会把它整棵树提交走，本模块不靠"记得加 .gitignore"来防；③ **删除是拒绝边界**——有未提交改动就拒绝回收，`force` 也不越过（一个布尔开关不该成为丢掉别人唯一一份成果的入口），陌生目录一律拒绝覆盖；④ **「git 说成功」≠「工作区可用」**——建完重读登记表，没有登记就报错（起了但干不了活不能看起来像成功）。**抓到两个真实缺陷**：Attempt id 是 `att:<taskId>:<n>`，**含冒号**，而冒号在 Windows 上是非法文件名字符——"id 直接当目录名"这条路根本走不通，必须有显式且**单射**的编码（`att:T-1:2` 与 `att-T-1-2` 不得撞进同一个目录）；以及 worker 调 `prepareWorkspace`/`buildContext` 时是 `await run()`，**不传 lease**——空的 `inPlaceStages()` 不需要它，于是从没人发现阶段拿不到自己在给哪条任务干活 |
 | PRT-307 提取结构化结果与机器验收 | ✅ | `orchestrator/acceptance/index.mjs`（**纯函数**：判据核验 + 结论到去向的映射）+ `run_validations` 只追加表（结论与**当时用的判据**一起落库）+ `runStore.recordValidation/validationsOf/criteriaOf` + `POST /api/runtime/validate`、`GET /api/runtime/validations`；套件 `acceptance`（24 例）、`acceptance-store`（16 例）、`acceptance-routes`（10 例）。判据有四条：① **三种结论而不是布尔**——`accepted`/`rejected`/`needs-human`，因为"没通过"的两种成因（机器确认不满足 / 机器判不了）走的路完全不同，合成一个 `false` 时选哪条都是错的；② 判据**封闭**——不在已登记种类里的一律算"判不了"而**不是**通过，新增一种必须显式加进清单；③ **散文判据 = 人工判据**（`tasks.acceptance` 由 `stage-standards.mjs` 生成的正是散文），任务只带散文判据时结论必然是 `needs-human`，这是对的——从没人说过"什么叫做完了"；④ 状态机声明的 `requiresPersist: ['attempt','validation']` **真的被核验**：一条从未被验收过的尝试进 `Completed` 会被 409 `EVIDENCE_MISSING` 拒绝（只记录不核验时那句话只是事件流里的一段 JSON，而"没人验收过"会被写成"已验收"）。**这条路抓到一个真实缺陷**：交付级审批（`Validating → AwaitingApproval`）的任务在看板上显示为 `in_progress` 而不是 `in_review`——因为投影读的是**边**的 hint 而不是刚写进那一行的 `returnTo`；审批人于是以为活还在干，任务既不在待办里也没人在跑。**执行成功不再等于交付完成**：PRT-312 那条用例留下的"成功永远停在 `Validating`"由此收口 |
 | PRT-308 提取打回、交接与完成 | ✅ | **打回**（`rejected` → 经 `scheduleRetry` 重试或 Dead Letter）、**完成**（`accepted` + `hasNextPost=false` → `Completed`）随 PRT-307 落地；**交接**随本批落地：`runStore.handoff` 在**一个事务**里建后继任务 + 记 `run_handoffs` + 收口，`createTask`/`readPipeline` 由 server 注入（运行仓储不认识那两张表的 schema，但注入的实现跑在它的事务里）。判据四条：① spec 第 333 行的「**原子**创建/释放下一岗位任务」——建任务失败时整笔回滚，不留孤儿后继（有用例撞唯一索引验证）；② **幂等**靠 `run_handoffs` 查询 + `successor_id` 上的**唯一索引**两处，且都在同一事务里——只在应用层查重时两个并发进程会各建一条（与 `ensureColumn` 那次的失败模式一样）；③ `HandingOff → Completed` 要 `handoff` 证据，**没有后继就收口会被 409 拒绝**，否则任务链静默断在这里；④ `successor_id` 建出后若 `createTask` 没返回 id 一律拒绝，不把"下一岗位已建好"写成事实。套件 `handoff-store`（12 例）、`handoff-routes`（8 例）。**这条路抓到一个真实缺陷**：`server.mjs` 与 `run-store.mjs` 各有一个 `withTx`，两个闭包各记各的 `txDepth`——`createTask` 进到运行仓储已开启的事务里时以为自己在最外层，于是又发一次 `BEGIN IMMEDIATE`，报 `cannot start a transaction within a transaction`；修法是把函数体拆成 `createTaskInTx`，由调用方声明"我已经在事务里了" |
-| PRT-309 重试、退避与 Dead Letter | ✅ | `scheduleRetry`（重试/放弃的**唯一**决策点）+ `failAndRetry` + 退避写进队列 `next_attempt_at_ms`（真的生效，不是没人调用的纯函数）+ 额度上限（默认 5 次）+ `retryDelayMs` 指数退避；`/api/runtime/fail`（失败结算的唯一入口）与 `/api/runtime/budget`。判据：额度耗尽必进 `DeadLetter`（终态），且回收路径**同样**查额度——否则"每次快失败就被杀"的任务会永远重试 |
+| PRT-309 重试、退避与 Dead Letter | 🟡 | `scheduleRetry`（重试/放弃的**唯一**决策点）+ `failAndRetry` + 退避写进队列 `next_attempt_at_ms`（真的生效，不是没人调用的纯函数）+ 额度上限（默认 5 次）+ `retryDelayMs` 指数退避；`/api/runtime/fail`（失败结算的唯一入口）与 `/api/runtime/budget`。判据：额度耗尽必进 `DeadLetter`（终态），且回收路径**同样**查额度——否则"每次快失败就被杀"的任务会永远重试。**★ 本批量到一处未修的缺陷，故由 ✅ 降为 🟡**：上面那句"失败结算的唯一入口"只对**抛错**那条路成立。`orchestrator/worker/main.mjs` 有两条上报失败的路——第 592 行 `hub.fail()`（执行器**抛出**异常时走，正确）与第 553 行 `hub.transition({outcome:'failed'})`（执行器**返回** `{outcome:'failed'}` 时走）；而"适配器把引擎故障分类成 `run.failed` **终态事件**、不往外抛栈"恰恰是引擎故障的常见形态，于是常见路径走的是后者——`Running → RetryableFailure` 的 `createsNewAttempt` 是 `false`，而 `transition` 内部**不调用** `scheduleRetry`。实测（真 `createRunStore` + 注入 clock）：返回值失败后 attempt 停在 `RetryableFailure`、`next_attempt_at_ms=null`、尝试数 **1**（上限 5 一次没用）、**再 `claim` 领不到（reason=`queue-empty`）**、`task.status='todo'` 且 `hold=0`（界面上它是个正常待办）、不在 `IN_FLIGHT_ATTEMPT_STATES`（回收扫描扫不到；时间推 30 天后 `recoverExpired` 捡到 0 条）、`listHeld()` 里也没有（人工待办列不出来）；对照组（抛错路径，同一套代码同一库）得到 `1:RetryableFailure + 2:Queued`、`attemptsUsed=1/5`。**最坏的一点是"停在中间态"与"任务状态是 todo"同时发生**：任何看板都把它算成"待办、还没被领走"，而派发器永远领不到它，且没有任何告警。修法要动 `main.mjs` 的失败分流（`outcome_unknown` 与 `failed` 去向不同，写错会把"结果不可确认"变成"自动重试已可能发生的副作用"），须连同用例与破验一起做——见 `docs/STATUS.md` 该批一节。 |
 | PRT-310 恢复扫描与人工处置 | ✅ | `recoverExpired` 两条分支 + `listHeld`（`UnknownOutcome`/`DeadLetter` 待办清单，标出 `isLatest` 避免历史条目反复出现）+ `resolveAttempt`（四种决定各自对应一个不同的事实，缺省拒绝不猜）；路由 `GET /api/runtime/held` 与 `POST /api/runtime/resolve`。判据：挂起的任务必须能从界面找到并逐个结清，否则"不会静默重跑"会变成"静默消失" |
 | PRT-311 外部副作用幂等与 Unknown Outcome | ✅ | ① **幂等键跨尝试稳定**（`idem:{taskId}`，刻意不含 `attempt_no`——含了就等于没有）；② 状态机为 `UnknownOutcome` 补 `Validating`（确认已发生 → 按成功走验收，绝不重跑）与 `RetryableFailure`（确认未发生 → 降级为普通可重试失败）两条出边，`UnknownOutcome → Queued` **仍然非法**；③ 两个守卫要求显式布尔值，缺省报 `MISSING_GUARD_INPUT`。判据：对账的两个确定结论都能被记下来——原来一个只能被当失败重做（重复付费），一个永远等人工 **★ 续批（"对账"从一句空话变成一件需要有人做过的事）**：本行原先写着「判据：对账的两个确定结论都能被记下来」——而**"记下来"当时只指 `run_attempts.external_effect` 那三列**，四条第边声明的 `reconciliation` 证据是一句**空话**：`EVIDENCE_CHECKS` 里没有这个探针（`checkEvidence` 静默 `continue`），人工处置那条路径也没有任何一处核验它。★ **"改之前会怎样"是量出来的**：摘掉探针后走通用迁移路由，`POST /api/runtime/transition {to:'Validating', context:{externalEffectConfirmed:true}}` **成功**推进到 `Validating`，库里对账行数 **0**——即任何人都能绕过人工处置把一次未知结局判成"外部写确认已发生"。改后同一请求被拒：`EVIDENCE_MISSING` / `missing=["reconciliation"]`。**修法**：`run_reconciliations` 只追加表（`cancel` 那条路也写——它原来连 `external_effect` 三列都不写）+ `EVIDENCE_CHECKS.reconciliation` 前置核验 + `recordReconciliation()`（写入并以后置条件回头用**闸门自己的探针**查库确认）+ `reconciliationsOf()` 与 `GET /api/runtime/reconciliations`（只写不读的证据与没写的证据，在"事后能不能回答谁判的"上是同一个东西）。★ 刻意**没有**在人工处置的 `move()` 里再加一段 `checkEvidence`：它永远不可能为假（每条分支都先落库），一段永不执行的检查读起来像一道防线。★ 破验时量到自己测试的洞：M7 把读方法改成 `LIMIT 1`（折叠历史）时**红 0 条**——原断言查的是自己写的 SQL 而非产品的读法；补断言后 M7 咬住。**验证**：`team-hub` **966 全绿**（+5 用例）、`orchestrator` 386/386、**7 个变异全部咬住**且逐字节还原；`baseline-snapshot` 已如实 `--record`（路由 150 / 数据表 39）。**剩余**：`runResult`（PRT-312）仍无表，"已知未实现"清单从 3 条减到 2 条；对账只由 `resolveAttempt` 一条路径写，且**不记录对账用了什么凭据**（`note` 是自由文本）。 |
 | PRT-312 状态迁移 / 并发 / 崩溃 / 恢复测试 | ✅ | 13×13 迁移矩阵、CAS 竞态、两连接并发领取、过期 epoch 拒写、崩后回收两条分支、**真进程被强杀**的整链路演练（`run-kill-drill` 2 例：真 worker 进程 + 真 team-hub，`SIGKILL` 后逐条验阶段 3 完成标准的三个分句「不丢任务 / 不伪装成功 / 不重复执行已确认的外部写操作」，并用 marker 文件数外部写的**次数**）+ 多进程并发（PRT-314）+ 运行面用例。**这条用例抓到的第一件事**是"执行成功 ≠ `Completed`"：成功入 `Validating`。当时我写的是断言 `Completed`——它暴露了一个真实的诱惑：为了让用例变绿而把"执行完"写成"已完成"，那正是完成标准里"不伪装成功"要禁的事。该落点已由 PRT-307 补上后续（`Validating` 现在真的能被验收，并按结论收口） **★ 续批（诚实边界，量过）**：本行论的是"测试覆盖"，而状态机为本状态的四条出边声明的 `requiresPersist: ['attempt','runResult']` **仍未兑现**——`run-store.test.mjs` 的"已知未实现"清单里还留着 `runResult`。**关键是这不是"还没建表"，而是"东西根本没送到 hub"**：① `runtime/adapters/dsh/index.mjs` 的终态事件**确实带着** `result`（`orchestrator/worker/executor.mjs` 的 `summarize()` 就在读 `terminal.result?.stopReason`），所以 RunResult 在执行侧真实存在；② 但 `executor.mjs` 返回给 worker 的 `base` 只把它压成 `detail: summarize(terminal)`（摘要字符串），`main.mjs` 随后只发 `context: { detail, trace, frozen }`。所以缺的是**端到端一根线**（执行侧 → worker → transition → 落库），不是一张表——只建表会让探针恒为 false，从而**永远拒绝**每一次 `Running → Validating`（安全但不可用，也是一种坏法）。**顺带纠正我自己差点误报的一条**：适配器内部 `buildResult()` 的 outcome 词表是 `succeeded`，而 worker 比对的是 `completed`——看着像"成功被记成失败"。但真正跨层的是**终态事件的 `type`**，由契约的 `TERMINAL_TO_OUTCOME` 映射，两边一致，**不是缺陷**；不记入报告。 |
@@ -261,7 +261,7 @@ applier **抛错**的项不参与复核改写（它没有成功执行过，「�
 | 1 Runtime Contract | 9 | 0 | 0 | 0 | 9 |
 | 2 DshRuntimeAdapter | 11 | 4 | 0 | 0 | 15 |
 | 2.5 商业薄切片 | 4 | 3 | 0 | 1 | 8 |
-| 3 Orchestrator Core | 15 | 0 | 1 | 0 | 16 |
+| 3 Orchestrator Core | 14 | 1 | 1 | 0 | 16 |
 | 4 上下文边界 | 13 | 0 | 0 | 0 | 13 |
 | 5 模型与密钥 | 10 | 1 | 0 | 0 | 11 |
 | 6 工具、权限和审批 | 20 | 0 | 0 | 0 | 20 |
@@ -269,7 +269,7 @@ applier **抛错**的项不参与复核改写（它没有成功执行过，「�
 | 8 安装、升级和回滚 | 13 | 0 | 0 | 0 | 13 |
 | 9 商业 Alpha 保障 | 9 | 0 | 0 | 1 | 10 |
 | 10 能力包协议 | 6 | 0 | 0 | 0 | 6 |
-| **合计** | **132** | **10** | **1** | **2** | **145** |
+| **合计** | **131** | **11** | **1** | **2** | **145** |
 
 > 计数口径：**部分**计入「已有交付物但完成标准未全部满足」，
 > 因此不能与「已完成」相加后宣称完成度。真实完成度按**完成标准**判定：

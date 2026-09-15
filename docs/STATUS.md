@@ -3570,26 +3570,54 @@ POST /api/runtime/transition {attemptId, leaseEpoch, workerId, to:'Validating'} 
     而"引擎原文会一路送到库里"这句话，需要一条断言原文本身的用例来兑现**——
     因为丢掉原文之后，状态迁移**全都还是对的**。
 
-### ⚠️ 一个**尚未执行验证**的相邻疑点（不是本批引入，本批也未修）
+### ★★ 相邻缺陷：**"返回失败"那条路会把任务变成永远领不到的 todo**（本批发现并**量到**，本批未修）
 
-读源码时顺出来的，**只有静态证据，我还没有跑验证，所以不声称它是缺陷**，只记在这里免得丢失：
+先说清归属：这不是本批引入的，也不是我改的那条线，而是我在给 `Running → RetryableFailure`
+补证据时**顺出来的**。它是**先量后判**的——下面每个数字都是实测，不是推断。
 
-`main.mjs` 有两条上报失败的路——**抛错**走 `hub.fail()`（第 592 行，会经
-`failAndRetry` → `scheduleRetry` 排队重试），**返回值**走 `hub.transition({outcome:'failed'})`
-（第 553 行）。而 `Running → RetryableFailure` 的 `createsNewAttempt` 是 `false`，
-`transition` 内部**不调用** `scheduleRetry`（全仓 `scheduleRetry` 只有 4 个调用点：回收、
-`failAndRetry`、人工处置、验收打回），且 `RetryableFailure` **不在**
-`IN_FLIGHT_ATTEMPT_STATES`（回收扫不到它）、**不在** `listHeld()` 的
-`state IN ('UnknownOutcome','DeadLetter')` 里（人工待办列不出来）。
+`main.mjs` 有两条上报失败的路：
 
-若这条推断成立，则"适配器把引擎故障分类成 `run.failed` 终态 → worker 返回
-`outcome:'failed'` → 走 `transition`"这条**常见**失败路径会把尝试留在 `RetryableFailure`
-而**没有人会去处理它**——正是 `failAndRetry` 自己的注释所描述的那个故障
-（"任务永远停在 `RetryableFailure`……从任何界面看它都只是'失败了'"）。
-注意 `RetryableFailure` **是**可以被 `resolveAttempt()` 处置的，缺的只是"没人被通知"。
+| 路径 | 触发 | 去处 |
+| --- | --- | --- |
+| 第 **592** 行 `hub.fail()` | 执行器**抛出**异常 | `failAndRetry` → `scheduleRetry` → 额度 + 退避 + 排队新尝试 ✅ |
+| 第 **553** 行 `hub.transition({outcome:'failed'})` | 执行器**返回** `{outcome:'failed'}` | `Running → RetryableFailure`，到此为止 ❌ |
 
-**下一步该做的**是量它，而不是信它：用真 hub + 一个返回 `{outcome:'failed'}` 的执行器 tick 一次，
-看有没有新尝试被排队。量出来是缺陷就修，量出来不是就把这段删掉。
+而"适配器把引擎故障分类成 `run.failed` **终态事件**"才是引擎故障的**常见**形态
+（`orchestrator/worker/executor.test.mjs` 里那条"引擎抛错 → 以失败终态回来"的用例
+测的就是它：适配器**不发栈**，发一个终态事件），所以走的是**上面第 553 行那一格**。
+
+实测（真 `createRunStore` + 真 schema，注入 clock）：
+
+```
+worker 返回 {outcome:'failed'}（main.mjs:553 那条路）
+  attempt      → RetryableFailure，next_attempt_at_ms = null   ← 没有排任何重试
+  尝试总数      → 1（重试额度上限 maxAttempts = 5，一次都没用）
+  再 claim     → **领不到**（reason = "queue-empty"）
+  task.status  → 'todo'，hold = 0                              ← 界面上它看起来是个正常的待办任务！
+  IN_FLIGHT_ATTEMPT_STATES 含它吗 → false（回收扫描扫不到）
+  时间推 30 天后 recoverExpired  → 捡到 0 条
+  listHeld()   → 0 条（人工待办里也没有）
+  只有主动对知道 attemptId 的人调 resolveAttempt 才能救它（实测：会建出 2:Queued）
+
+对照——抛错那条路（main.mjs:592 → failAndRetry），同一个库、同一套代码：
+  action=retry-new-attempt  attemptsUsed=1/5
+  1:RetryableFailure + 2:Queued(排队中)                        ← 正确
+```
+
+**最坏的一点不是"停在中间态"，是"停在中间态的同时任务状态是 `todo`"**：
+任何看板、任何列表、任何统计都会把它算成"待办、还没被领走"，
+而派发器**永远领不到它**（队列里没有 `Queued` 尝试）。没有人会收到告警，
+因为它看起来完全正常。这正是本仓 `run-store-policy.test.mjs` 文件头警告的第 ② 类缺陷
+（"停在中间态——从任何界面看只是'失败了'，而没有人会去处理它"），
+也是 `failAndRetry` 自己的注释所描述的那件事——只不过它防住的是**抛错**那条路，
+**没防住返回值**这条。
+
+**为什么本批不改**：改它要动的是"失败之后系统做什么"这条语义（`main.mjs` 的分流：
+`completed` → 验收、`outcome_unknown` → 等人工、`failed` → **必须**走 `failAndRetry`），
+而 `outcome_unknown` 与 `failed` 在 `transition` 里的去向完全不同，分流写错会把
+"结果不可确认"变成"自动重试已可能发生的副作用"——那是本仓最不能犯的方向。
+它需要自己的用例与破验，不该在给另一条线补证据时顺手改掉。
+**下一批就修它，并先补一条会红的用例（"返回 failed 之后任务必须仍能被领走"）。**
 
 ---
 

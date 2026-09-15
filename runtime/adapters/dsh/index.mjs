@@ -43,6 +43,9 @@ import {
   recoveryResult,
   validateRunRequest,
 } from '../../contracts/run.mjs'
+// PRT-214 缺口①：这次 Run 的静态 hard floor 先在**适配器这一侧**读成三种处境之一，
+// 再作为**已解析的载荷**交给宿主端口（`./port.mjs` 的 `enforcementFloor`）。
+import { RUN_FLOOR_PORT_STATES, RUN_FLOOR_STATES, readRunFloor } from '../../contracts/run-floor.mjs'
 import { toModelDescriptor, validateProfile as validateProfileAgainstContract, validationResult, findPlaintextSecrets } from '../../contracts/model.mjs'
 import { RuntimeContractError, describeError } from '../../contracts/errors.mjs'
 
@@ -356,6 +359,43 @@ export function createDshRuntimeAdapter(host, options = {}) {
       })
     }
 
+    // ── 这一次 Run 的静态 hard floor（PRT-214 缺口①）─────────────────────────
+    //
+    // 读成三种处境之一，**在这里就把它们分开**（不是等到装的时候）：
+    //   · `installed` → 把那份下限原样交下去；
+    //   · `absent`    → 如实交一个 absent 载荷。安装点按 spec §6.8:479 的**发布前姿态**
+    //                   拒绝一切工具调用。这一档**不看**工具的风险等级、也不看它在不在
+    //                   任何名单上，因为静态下限比的是**执行面的工具名**，而 Legion
+    //                   派生出来的那些名单写的是 Legion 的**能力名**：两个名字空间不相交，
+    //                   把那份名单当禁名单装进来，一个真工具名都拦不住。名字名单**不是**
+    //                   fail closed（不在名单里的一律放行），所以接线完成前唯一 fail closed
+    //                   的姿态是拒绝；接线完成后由 `installed` 那一档按真名单放行。
+    //                   这一档**不拒收这个 Run**：今天没有任何生产调用方生产下限
+    //                   （`team-hub/run-floor.mjs` 的 `deriveRunFloor()` 零调用点），
+    //                   拒收会让每一次 Run 都失败，那会把"搬运还没接线"表现成"产品起不来"；
+    //   · `refused`   → **拒收**。一份解释不了的载荷不是政策，是一次接线错误：
+    //                   照跑等于把"派生失败"洗成"这次没有东西要禁止"。而"读不懂"
+    //                   与"没给"必须分开：前者连"这份载荷想说什么"都不知道，
+    //                   安装点同样按 fail closed 拒绝一切工具，**不猜**一份名单。
+    //                   （`validateRunRequest` 已经在上面拦过一道，这里是第二道。）
+    const floorReading = readRunFloor(request.enforcementFloor)
+    if (floorReading.state === RUN_FLOOR_STATES.REFUSED) {
+      throw new RuntimeContractError('INVALID_RESULT',
+        `这次 Run 的静态 hard floor 无法解释（${floorReading.code}）：${floorReading.message}`, {
+          details: { code: floorReading.code, errors: [...floorReading.errors] },
+        })
+    }
+    /**
+     * 交给宿主端口的**已解析**载荷。
+     *
+     * ★ 这个对象是**每次 Run 新建的**，而且它会跟着这次创建请求一起走
+     * （宿主端口把它挂到 `agentOptions` 上，见 `../../dsh-composition/run-floor.mjs`）。
+     * 于是"哪一份下限属于哪一次 Run"由**对象身份**回答——并发两次派工不可能串台。
+     */
+    const floorPayload = floorReading.state === RUN_FLOOR_STATES.INSTALLED
+      ? Object.freeze({ state: RUN_FLOOR_PORT_STATES.INSTALLED, floor: floorReading.floor })
+      : Object.freeze({ state: RUN_FLOOR_PORT_STATES.ABSENT })
+
     const runId = request.runId
     if (active.has(runId)) {
       throw new RuntimeContractError('INVALID_RESULT', `runId ${runId} 已在运行中（同一 Run 不得并发执行）`, { details: { runId } })
@@ -499,6 +539,11 @@ export function createDshRuntimeAdapter(host, options = {}) {
           prompt: [{ type: 'text', text: requestPrompt(request) }],
           signal: controller.signal,
           outputSchema: request.expectedOutput.schema,
+          // ★ 这次 Run 的下限**总是**显式交出去（缺席也是一种要交出去的状态）。
+          //   一个"缺席就什么都不传"的适配器，与一个"缺席被读成空下限"的适配器，
+          //   在端口那一侧的读数上是同一个东西——只不过前者的键根本不在，
+          //   于是端口分不出"这次 Run 没有下限"和"调用我的人不支持下限"。
+          enforcementFloor: floorPayload,
         })
       } catch (err) {
         clearTimeout(watchdog)

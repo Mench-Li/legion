@@ -194,10 +194,18 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { REQUIRED_CAPABILITIES } from '../../contracts/adapter.mjs'
+import {
+  createRunFloorInstallation,
+  installRunFloorIntoAgent,
+  runFloorCarrierOf,
+  runFloorOptionOf,
+  withRunFloorCarrier,
+} from '../run-floor.mjs'
+import { RUN_FLOOR_STATES } from '../../contracts/run-floor.mjs'
 import realRuntimeHostRow, { setDshRuntimeInputsFactory } from './runtime-host-row.mjs'
 
-/** 改动来源、拒绝码或能力判据时递增。2 = `canRead` 改为可选 + 接上 `currentModelSelection`。 */
-export const RUNTIME_HOST_REGISTRAR_VERSION = 2
+/** 改动来源、拒绝码或能力判据时递增。3 = `startRun` 按 Run 安装静态 hard floor。 */
+export const RUNTIME_HOST_REGISTRAR_VERSION = 3
 
 /** 本模块的具名码。每一个对应**一样具体的输入**，不是一个笼统的"注册失败"。 */
 export const RUNTIME_HOST_REGISTRAR_CODES = Object.freeze({
@@ -207,6 +215,20 @@ export const RUNTIME_HOST_REGISTRAR_CODES = Object.freeze({
   NO_SUBAGENTS_PORT: 'RUNTIME_HOST_REGISTRAR_NO_SUBAGENTS_PORT',
   /** 能力表与 `REQUIRED_CAPABILITIES` 对不上（装载期就抛，不安静地少报一项）。 */
   CAPABILITY_TABLE_MISMATCH: 'RUNTIME_HOST_REGISTRAR_CAPABILITY_TABLE_MISMATCH',
+  /**
+   * Run 的下限载荷解释不了（`createRunFloorInstallation` 具名拒绝）。
+   *
+   * 这一条发生在**起跑之前**：一个解释不了的下限不许"跳过安装照跑"——
+   * 那正是"派生失败"被洗成"这次没有东西要禁止"的那一步。
+   */
+  FLOOR_UNREADABLE: 'RUNTIME_HOST_REGISTRAR_FLOOR_UNREADABLE',
+  /**
+   * 下限**装不上**：引擎没交回 in-process 子 Agent（远程 provider），
+   * 或那个 Agent 的作用域里没有 `tools.guard` / `tools/pre-execute`。
+   *
+   * 与 `FLOOR_UNREADABLE` 分开：那一条要改**载荷的生产者**，这一条要看**引擎/provider**。
+   */
+  FLOOR_NOT_INSTALLABLE: 'RUNTIME_HOST_REGISTRAR_FLOOR_NOT_INSTALLABLE',
   /**
    * **尝试挂一个不是函数的 `canRead`**（`createRuntimeHostInputsFactory({canRead})`
    * 的构造期检查）。
@@ -698,9 +720,7 @@ export function createRuntimeHostInputsFactory({
     }
 
     const runtimeHost = Object.freeze({
-      // 真来源：引擎的 subagents 服务。**不包一层**，按引用转发，
-      // 于是"端口连的是谁"与"引擎是谁"是同一个对象——多包一层就会有一个会漂移的替身。
-      startRun: (provider, options) => subagents.start(provider, options),
+      startRun: (provider, options) => startRun(provider, options),
       probeRuntime: () => probe(ctx, { readVersion }),
       // ★ 端口契约里的**可选**方法，本批接上：来源是 DSH 一等服务
       //   `agentDefaultModel`。服务不在 → `null`（适配器判 `MODEL_UNAVAILABLE`），
@@ -708,9 +728,154 @@ export function createRuntimeHostInputsFactory({
       currentModelSelection: () => readModelSelection(ctx).selection,
     })
 
+    /**
+     * 在飞的下限载荷（按**对象身份**）。只有端口自己放进来的那些对象在里面，
+     * 于是"这是不是我要管的那次 Run"由身份回答，不由顺序或 sessionId 猜。
+     */
+    const pendingFloors = new Set()
+    /** 载荷 → 已装好的读数（含 dispose）。装上之后留着供收尾用。 */
+    const installedFloors = new Map()
+
+    /**
+     * 创建窗口那一钩（见上面 `startRun` 的长注释）。
+     *
+     * ⚠️ 这里**故意让安装失败抛出去**：`agent/created` 的同步抛出会否决这次发布
+     * （`packages/core/agent/src/index.ts:548`：`A synchronous creation failure vetoes
+     * publication and rolls back`），于是"下限装不上"直接变成"这个孩子没出生"，
+     * 而不是"出生了但没人管"。**不用 try/catch 吞掉它。**
+     */
+    if (typeof ctx.on === 'function') {
+      ctx.on('agent/created', ({ agent }) => {
+        const payload = runFloorCarrierOf(agent)
+        if (payload === undefined || !pendingFloors.has(payload)) return
+        pendingFloors.delete(payload)
+        installedFloors.set(payload, installRunFloorIntoAgent({
+          agent,
+          installation: createRunFloorInstallation(payload),
+        }))
+      })
+    }
+
+    /**
+     * 一次 Run 的起跑。三种处境：
+     *   · 端口选项里**没有**下限键 → 老调用方/别的适配器：按引用转发，一个字段都不动；
+     *   · 有键 → **按 Run** 安装，装不上就拒绝；
+     *   · 载荷解释不了 → 起跑前拒绝（具名码）。
+     */
+    async function startRun(provider, options) {
+      const payload = runFloorOptionOf(options)
+      if (payload === undefined) {
+        // 真来源：引擎的 subagents 服务。**不包一层**，按引用转发，
+        // 于是"端口连的是谁"与"引擎是谁"是同一个对象——多包一层就会有一个会漂移的替身。
+        return subagents.start(provider, options)
+      }
+
+      let installation
+      try {
+        installation = createRunFloorInstallation(payload)
+      } catch (e) {
+        throw registrarError(RUNTIME_HOST_REGISTRAR_CODES.FLOOR_UNREADABLE,
+          `这次 Run 的下限载荷解释不了（${e?.code ?? 'unknown'}）：${e?.message ?? String(e)}。`
+          + '**不跳过安装照跑**：跳过就等于把"派生失败"洗成"这次没有东西要禁止"')
+      }
+      // ★ 解释不了的载荷**在起跑之前**拒绝这次 Run。
+      //
+      //   `createRunFloorInstallation` 对坏载荷也会给出一份"拒绝一切"的 guard，
+      //   而这一档**不是**它：那一份是给"给了下限、但读不懂"用的（第三档），
+      //   与"没给下限"（`absent`，同样拒绝一切，但理由是 §6.8 `:479` 的发布前姿态——
+      //   静态下限比的是**执行面的工具名**，而派生出来的名单写的是 Legion 的
+      //   **能力名**，名字空间不相交，按名字装进来一个真工具名都拦不住）
+      //   是两件事。坏载荷是一次接线错误，不是一份政策：照跑会让它伪装成一个
+      //   能跑的 Run，于是"搬运写坏了"只会表现为"这次任务什么也没干成"。
+      if (installation.state === RUN_FLOOR_STATES.REFUSED) {
+        throw registrarError(RUNTIME_HOST_REGISTRAR_CODES.FLOOR_UNREADABLE,
+          `这次 Run 的下限载荷解释不了（${installation.code}）：${installation.message}。`
+          + '**不跳过安装照跑**：跳过就等于把"派生失败"洗成"这次没有东西要禁止"')
+      }
+
+      const forwarded = withRunFloorCarrier(options, payload)
+      pendingFloors.add(payload)
+      let run
+      try {
+        run = await subagents.start(provider, forwarded)
+      } catch (e) {
+        pendingFloors.delete(payload)
+        installedFloors.delete(payload)
+        throw e
+      }
+
+      let reading = installedFloors.get(payload)
+      if (reading === undefined) {
+        // 创建窗口那一钩没接上（端口 ctx 没有 on，或 provider 不走 agent/created）。
+        // 退到"拿回句柄之后立刻装"——但**装不上就拒绝**，不退化成"没装"。
+        pendingFloors.delete(payload)
+        const agent = run?.localAgent
+        if (agent === undefined) {
+          throw registrarError(RUNTIME_HOST_REGISTRAR_CODES.FLOOR_NOT_INSTALLABLE,
+            `这次 Run 的下限装不上：引擎交回的运行没有 in-process 子 Agent（provider=${String(provider)}）。`
+            + '下限的落点就是那个 Agent 的作用域，没有它这次 Run 一个工具都没人管——'
+            + '**拒绝起跑**，而不是让它跑在一个没有下限的执行面上')
+        }
+        try {
+          reading = installRunFloorIntoAgent({ agent, installation })
+        } catch (e) {
+          throw registrarError(RUNTIME_HOST_REGISTRAR_CODES.FLOOR_NOT_INSTALLABLE,
+            `这次 Run 的下限装不上（${e?.code ?? 'unknown'}）：${e?.message ?? String(e)}`)
+        }
+        installedFloors.set(payload, reading)
+      }
+
+      // 收尾：Run 结算就把那两个面撤掉。**不影响返回值**——句柄原样交出去
+      // （`runtime-host-registrar-row.test.mjs` 有一条按引用比较的用例）。
+      const settle = () => {
+        pendingFloors.delete(payload)
+        installedFloors.delete(payload)
+        try { reading.dispose() } catch { /* Agent 自己的作用域回收也会撤它 */ }
+      }
+      if (run?.result !== undefined && typeof run.result.then === 'function') {
+        run.result.then(settle, settle)
+      }
+
+      return run
+    }
+
     return { runtimeHost, canRead: suppliedCanRead }
   }
 }
+
+/**
+ * ★★ PRT-214 缺口①：**按 Run** 安装静态 hard floor。
+ *
+ * ## 这一段为什么住在宿主端口里，而不是装配方
+ *
+ * spec §6.8 `:440` 的原话是「**DshRuntimeAdapter 安装到目标 Agent/Session**」。
+ * 而"目标 Agent"只有引擎在派生子 Agent 的那一刻才知道——`startRun` 正好是
+ * Legion 与引擎之间的那道缝，也是**每次 Run 只过一次**的地方。
+ * 装配级（`assembleEnforcement({floor})`）是进程级、只过一次，所以它装出来的下限
+ * 必然被第二个 Run 继承（见 `../run-floor.mjs` 文件头）。
+ *
+ * ## 两种装法，一个结论
+ *
+ *   ① **创建窗口**（正常路径）：下限随 `agentOptions` 走（`withRunFloorCarrier`），
+ *      `agent/created` 在 `agents.create()` 内、`followup()` **之前**派发，
+ *      于是安装发生在任何一次模型请求之前——顺序保证，不是时序侥幸。
+ *   ② **回退**（端口 ctx 没有 `ctx.on`，或引擎的 provider 不走 `agent/created`）：
+ *      `start()` 结算之后立刻装到 `run.localAgent` 上。
+ *
+ * 两条路都**不是**"装不上就照跑"：`localAgent` 缺席（远程 provider）或那个 Agent
+ * 的作用域里没有 guard/pre-execute 落点时，这次 Run **当场拒绝**（具名码）。
+ * 这就是"缺席不许退化成空下限"在安装点的落法。
+ *
+ * ## 为什么载荷要按**对象身份**配对，而不是按 FIFO / sessionId
+ *
+ * 并发两个 Run 各带各的载荷对象；`agent.options[KEY]` 就是端口这次传进去的那个对象
+ * 本身（见 `../run-floor.mjs` 里 `RUN_FLOOR_CHILD_OPTION_KEY` 的注释）。
+ * 按身份配对，于是"第二个 Run 拿到了第一个 Run 的下限"在构造上不可能发生：
+ *
+ *   > 一个"按到达顺序给下一次创建分配下限"的实现，
+ *   > 与一个"每次 Run 都拿对自己的下限"的实现，在串行的那些用例里是同一个东西——
+ *   > 只不过前者在两次派工重叠时会把甲的下限装到乙的头上。
+ */
 
 /**
  * ★ 注册发生在**模块求值期**——与 `team-hub/approval-registrar-row.mjs` 同一个形状。

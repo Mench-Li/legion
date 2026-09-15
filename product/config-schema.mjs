@@ -165,6 +165,43 @@ export const SCHEMA = defineSchema({
         + '七个键全部是上面 fields 里声明的读取点）。它必须计算，否则七个键要写七份几乎相同的取值代码，'
         + '而「哪一层压过哪一层」（§6.11）会散成七处、只会在某一处被改错。',
     },
+    // ── PRT-708 托盘图标宿主：解析"用哪个 PowerShell"要读的三个操作系统键 ──
+    //
+    // `product/launcher/tray-icon.mjs` 的 `candidateTrayShells()` 按
+    // `%ProgramFiles%\PowerShell\7\pwsh.exe` → PATH 上的 `pwsh.exe` →
+    // `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe` 解析一档 shell。
+    //
+    // 键必须**计算**：三个名字住在同一张 `SHELL_ENV` 表里，那张表是
+    // 「这三个名字属于操作系统、不属于 Legion 配置」的唯一住处，
+    // 归属逐条登记在上面的 `OS_ONLY_ENV_NAMES`（ProgramFiles / SystemRoot / PATH）。
+    // 三个读取点各写一份字面量，会让"哪些键是操作系统的"这条事实散成三段，
+    // 而解析顺序恰恰依赖它们三者的先后——散开之后，改顺序的人只需要漏改一处。
+    //
+    // ★ `PATH` 那一条是**同一处的两遍**（`×2`）：`candidateTrayShells` 里
+    //   "切分 PATH 取出每个目录"与"去重后仍然按原顺序取第一个存在的"读的是同一个键，
+    //   两遍都在这一个函数里、由同一条登记覆盖。
+    {
+      file: 'product/launcher/tray-icon.mjs',
+      expr: 'env[SHELL_ENV.PROGRAM_FILES]',
+      reason: '解析 PowerShell 7 的候选路径：`%ProgramFiles%\\PowerShell\\7\\pwsh.exe`。'
+        + '键名来自 SHELL_ENV 表（值 ProgramFiles），归属登记在 OS_ONLY_ENV_NAMES。'
+        + '顺序是第一档——装了 pwsh 7 的机器上应当用它，而不是退到 5.1。',
+    },
+    {
+      file: 'product/launcher/tray-icon.mjs',
+      expr: 'env[SHELL_ENV.SYSTEM_ROOT]',
+      reason: '解析随 Windows 发货的那一档：`%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`。'
+        + '键名来自 SHELL_ENV 表（值 SystemRoot），归属登记在 OS_ONLY_ENV_NAMES。'
+        + '它是**最后一档**：这台机器上 pwsh 与 PATH 上的 pwsh 都不存在时，图标能不能画出来取决于它。',
+    },
+    {
+      file: 'product/launcher/tray-icon.mjs',
+      expr: 'env[SHELL_ENV.PATH]',
+      reason: '解析 PATH 上的 `pwsh.exe`（剥掉引号、按大小写不敏感去重、保持原顺序）。'
+        + '键名来自 SHELL_ENV 表（值 PATH），归属登记在 OS_ONLY_ENV_NAMES。'
+        + '这一档在 Windows 上通常是空的（pwsh 装在 ProgramFiles 或 System32），'
+        + '但用户自装的 pwsh 只在这一档里——不读它就会把一个能画图标的机器报成"不支持"。',
+    },
   ],
   // 子进程的 env 键名 + 平台必需键名：都是「变量名」，不是本进程的读取点。
   // 不显式列出的话 `scan --check` 会要求把它们登记为读取点（P3-4 遇到过同类问题）。
@@ -678,6 +715,58 @@ export const SCHEMA = defineSchema({
     'RUNTIME_PLAN_MANIFEST_NOT_FOUND',
     'RUNTIME_PLAN_MANIFEST_UNREADABLE',
     'RUNTIME_PLAN_MANIFEST_INVALID',
+
+    // ── PRT-708 原生托盘图标宿主（`product/launcher/tray-icon.mjs`）的码 ────
+    //
+    // `TRAY_ICON_CODES` 的值。与上面每一组同类：它们是**输出**给用户看的码，
+    // 不是配置键——进程不"读"它们。
+    //
+    // ★ 这一组里混着三种语义，合并任何两条都会让用户去修错的东西：
+    //   · `UNSUPPORTED_PLATFORM` / `NO_SHELL` —— **这台机器**画不出来（修机器）；
+    //   · `HOST_PENDING` / `HOST_READY` / `HOST_FAILED` / `HOST_NOT_READY` /
+    //     `HOST_EXITED_BEFORE_READY` / `HOST_UNHEALTHY` —— 宿主**这一次**的读数
+    //     （修环境或重试）；
+    //   · `*_INSIDE_DSH_HOME` / `*_INSIDE_INSTALL_DIR` / `*_OUTSIDE_ALLOWED_ROOT` /
+    //     `NO_DATA_DIR` / `DATA_DIR_NOT_ABSOLUTE` / `WRITE_REFUSED` —— **写在哪**
+    //     被拒绝了（修调用方传进来的路径）。
+    //
+    //   `SHUTDOWN_TIMEOUT` 与 `SHUTDOWN_UNCLEAN` 刻意分开：前者是"它没说自己拆了图标"，
+    //   后者是"它说自己拆了、但说没拆"。两者的下一步不同（前者去查进程，后者去查脚本）。
+    //
+    //   ★ `EXITED` 与 `NOT_STARTED` 也在列：它们让"干净退出"与"本来就没在跑"
+    //     成为两个不同的读数——一个把两者合成"ok"的实现，会在宿主根本没起过的
+    //     机器上把"没什么可收的"说成"收干净了"。
+    'TRAY_ICON_ALREADY_STARTED',
+    'TRAY_ICON_BUSY',
+    'TRAY_ICON_DATA_DIR_NOT_ABSOLUTE',
+    'TRAY_ICON_EXITED',
+    'TRAY_ICON_HOST_EXITED_BEFORE_READY',
+    'TRAY_ICON_HOST_FAILED',
+    'TRAY_ICON_HOST_NOT_READY',
+    'TRAY_ICON_HOST_PENDING',
+    'TRAY_ICON_HOST_READY',
+    'TRAY_ICON_HOST_UNHEALTHY',
+    'TRAY_ICON_MENU_MALFORMED',
+    'TRAY_ICON_MENU_REPUBLISH_FAILED',
+    'TRAY_ICON_MENU_UNAVAILABLE',
+    'TRAY_ICON_NOT_STARTED',
+    'TRAY_ICON_NO_DATA_DIR',
+    'TRAY_ICON_NO_SHELL',
+    'TRAY_ICON_SHUTDOWN_TIMEOUT',
+    'TRAY_ICON_SHUTDOWN_UNCLEAN',
+    'TRAY_ICON_SPAWN_FAILED',
+    'TRAY_ICON_TARGET_INSIDE_DSH_HOME',
+    'TRAY_ICON_TARGET_INSIDE_INSTALL_DIR',
+    'TRAY_ICON_TARGET_OUTSIDE_ALLOWED_ROOT',
+    'TRAY_ICON_UNEXPECTED',
+    'TRAY_ICON_UNKNOWN_ACTION',
+    'TRAY_ICON_UNKNOWN_MESSAGE',
+    'TRAY_ICON_UNSUPPORTED_PLATFORM',
+    'TRAY_ICON_WRITE_REFUSED',
+    // `product/launcher/tray-wiring.mjs` 的 `iconNoticeOf()` 在一份探测读数
+    // 连 `code` 都没有时的兜底文案。它不是诊断码，是一个**占位**——
+    // 一个说不出是哪种原因的读数也必须能印出来，而不是印出 `undefined`。
+    'UNKNOWN',
   ],
   injects: [
     { target: 'team-hub', env: 'TEAM_HUB_PORT', via: 'env', from: 'ports.team-hub', note: '端口由 Launcher 决定，不由各进程的代码默认值决定' },

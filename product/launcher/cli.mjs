@@ -50,6 +50,14 @@ import { doctorReport, renderDoctor } from './doctor.mjs'
 //   > 一个"版本号写在调用方"的安装器，
 //   > 与一个"版本号写在清单里"的安装器，在它们碰巧一致的那些运行里是同一个东西。
 import { createManifest, digestOf, validateManifest } from '../upgrade/manifest.mjs'
+// PRT-708：托盘三层里**最外面那一层的生产入口**。
+//
+// `tray.mjs`（菜单模型 + 动作派发）、`tray-wiring.mjs`（接 launcher + 平台打开）、
+// `tray-icon.mjs`（生成并监管 PowerShell 宿主，真的把图标画出来）三层此前
+// 都齐了，却**只有用例在调**。接线落在本文件、而不是落在 `tray-wiring.mjs`
+// 自己里，理由是这里才有"产品正在跑"这个状态——托盘是"产品在跑"的界面，
+// 而 `tray-wiring.mjs` 不知道产品跑没跑。
+import { attachLauncherTray } from './tray-wiring.mjs'
 
 /**
  * 安装目录的默认值：**Launcher 自己所在的那棵树**。
@@ -131,6 +139,24 @@ export const CLI_FLAGS = Object.freeze([
   { name: '--runtime-manifest=<path>', kind: 'value', doc: '（PRT-257）产品版本清单（spec §9.1）的路径。' +
     '**要装哪一版 DSH、受支持区间、补丁层版本全部只从它来**——本 CLI 里没有任何 DSH 版本号字面量' +
     '（§9.1：客户不能在产品内单独升级 DSH）。不给这条 ⇒ 算不出计划（退出 3），**不是**"计划通过"' },
+  // ── PRT-708：把已经做好的托盘**接上电源** ───────────────────────────────
+  //
+  // `tray.mjs`（菜单模型与动作派发）、`tray-wiring.mjs`（接线）、
+  // `tray-icon.mjs`（真的把图标画出来的宿主）三层此前都只有用例在调。
+  // 一个"三层都齐、用例全绿、而启动路径上一个字都没提它"的托盘，
+  // 与一个不存在的托盘，对用户是同一个东西——只不过前者的报告很好看。
+  //
+  // ★ 为什么是"默认接、可关掉"而不是"默认不接、要显式打开"：
+  //   spec §6.10 把托盘写成产品的**入口**，不是可选插件。一个要用户
+  //   先知道有个开关才会出现的入口，等于没有入口。
+  //   `--no-tray` 给的是**退出**这条路（CI、无桌面、排障时用）。
+  //
+  // ★ 为什么 `--json` 下**不接**：那一路是给脚本读的，脚本没有桌面，
+  //   而"在用户看不见的地方起了一个 GUI 宿主"正是最难查的那类副作用。
+  { name: '--no-tray', kind: 'boolean', doc: '（PRT-708）**不要**起系统托盘图标。' +
+    '默认在等待运行（即产品真的在跑）时会挂一个图标：`打开 Workbench` / `状态` / `启动` / `停止` / `退出`。' +
+    '`--json` 模式下**一律不挂**（脚本没有桌面）。' +
+    '图标挂不上时**只报告原因、不改退出码**——一个因为画不出图标就拒绝启动的产品更坏' },
   { name: '--help', kind: 'boolean', doc: '打印本说明' },
 ])
 
@@ -920,6 +946,49 @@ function parseDiagnosisInput(raw) {
   return value
 }
 
+/**
+ * PRT-708：真实装配托盘（默认实现，用例可注入替身）。
+ *
+ * 三件事按顺序做，**每一步失败都不假装下一步成功了**（那是
+ * `attachLauncherTray` 自己的契约）：
+ *
+ *   1. 把 launcher 接成托盘（菜单与动作都来自**观测**）；
+ *   2. 在 `<DataDir>/tray/` 下生成图标宿主脚本（边界不过就拒绝）；
+ *   3. 起宿主——**只有宿主报了 ready 才算有图标**。
+ *
+ * ★ `allowedRoot` 取 **DataDir**，不是产品家目录：宿主脚本与那两份控制文件
+ *   都落在数据面里，而数据面是"升级时不会被整体换掉"的那棵树。
+ *   把可变状态写进只读面是另一个教训（同一段推理见 `runtime-install.mjs`）。
+ *
+ * ★ `dshHome` / `operatorHome` 一并**显式**注入：`tray-icon.mjs` 靠它们判定
+ *   "这次写入是不是落进了**另一个程序**拥有的目录"。漏注入 = 那条判据拿不到
+ *   输入 = 它只能放行，所以这两个不能靠默认。
+ */
+async function defaultTrayAttach({ launcher, options }) {
+  const layout = options?.layout ?? {}
+  const attached = await attachLauncherTray({
+    launcher,
+    dataDir: layout.dataDir ?? null,
+    allowedRoot: layout.dataDir ?? null,
+    installDir: layout.installDir ?? null,
+    dshHome: layout.dshHome ?? null,
+    operatorHome: layout.operatorHome ?? null,
+    platform: layout.platform ?? process.platform,
+    env: process.env,
+  })
+  const iconStatus = typeof attached.icon?.status === 'function' ? attached.icon.status() : null
+  return Object.freeze({
+    ok: attached.ok === true,
+    code: attached.code ?? null,
+    message: attached.message,
+    iconNotice: attached.iconNotice ?? '',
+    shellKind: iconStatus?.shellKind ?? null,
+    pid: iconStatus?.pid ?? null,
+    // CLI 这一侧的 `detach()` 就是契约里的 `disconnect()`——
+    // 先收图标宿主、再释放托盘，顺序写在它的文档注释里。
+    detach: () => attached.disconnect('cli-shutdown'),
+  })
+}
 
 export async function run({
   argv = process.argv.slice(2), env = process.env, write = console.log, waitForSignal = true,
@@ -958,6 +1027,13 @@ export async function run({
   // 时把"即将执行什么"写出去——那条通知必须出现在动作**之前**，而 stdout
   // 上那一个 JSON 文档不能被它污染（脚本要能整份 `JSON.parse`）。
   writeErr = (m) => process.stderr.write(`${m}\n`),
+  // ★ PRT-708：托盘的接缝。默认走真实的 `attachLauncherTray()`（会起 PowerShell 宿主），
+  //   用例注入一个假的就能断言"`--json` / `--no-tray` 时**一次都没被碰过**"——
+  //   而那句话唯一的证据就是这个计数。
+  //
+  //   注入的是"装配函数"而不是"装配结果"：菜单与宿主的行为仍由真实的
+  //   `tray.mjs` / `tray-icon.mjs` 决定，用例只换掉**谁来起那个进程**。
+  trayAttachFn = defaultTrayAttach,
 } = {}) {
   /** 诊断来源自己要说的一句话（读 stdin 失败时用）。 */
   let diagNote = null
@@ -975,6 +1051,12 @@ export async function run({
   }
 
   const json = parsed.flags.json === true
+
+  // PRT-708：`--no-tray` 是显式的退出。**默认接**，理由写在 `CLI_FLAGS` 那一条上
+  // （spec §6.10 把托盘写成产品入口，不是可选插件）。`.includes()` 而不是
+  // 只认 flag 键：`parseArgs` 对布尔开关给的是 `true`，而这一行要在
+  // "没给" 与 "给了 false" 之间给出同一个答案。
+  const trayDisabled = parsed.flags['no-tray'] === true
 
   // ★ PRT-710 收尾：自动导出**默认开着**，`--no-auto-diagnostics` 是显式的退出。
   //
@@ -1546,11 +1628,65 @@ export async function run({
   if (result.ok !== true) return 5
 
   if (waitForSignal) {
-    await new Promise((resolve) => {
-      const stop = () => resolve()
-      process.once('SIGINT', stop)
-      process.once('SIGTERM', stop)
-    })
+    // ── PRT-708：产品真的在跑了，把托盘挂上 ──────────────────────────────
+    //
+    // 位置就在这里、不在启动之前：托盘是「产品在跑」的界面，而"产品在跑"
+    // 这句话在这一行之前**还不成立**。在启动前挂图标会造出一个点开什么都没
+    // 的入口；在启动失败后挂更是如此。
+    //
+    // ★ 三条互不相同的读数，报告里必须分得开：
+    //   ① 挂了（图标真的在）② 没挂、而且**知道为什么**（非 win32 / 没有 shell）
+    //   ③ 没挂、但**不知道**（探测是 `null`：还没起过宿主）
+    //   把 ③ 报成 ② 是"我看不出来"被说成"不支持"，那是两个不同的修法。
+    //
+    // ★ 失败**不改退出码**：一个因为画不出图标就拒绝启动的产品，
+    //   比一个没有图标的产品更坏。所以整段是 fail-soft 的。
+    let trayHandle = null
+    if (trayDisabled === true) {
+      if (!json) write('  （--no-tray：按参数要求没有起系统托盘图标）')
+    } else if (json) {
+      // 脚本没有桌面。在用户看不见的地方起一个 GUI 宿主是最难查的那类副作用。
+      // 这里**什么都不说**：`--json` 的 stdout 必须是一份能整份 parse 的文档。
+    } else {
+      try {
+        const attached = await trayAttachFn({ launcher, options })
+        if (attached?.ok === true) {
+          trayHandle = attached
+          write(`  ● 系统托盘图标已挂上（${attached.shellKind ?? '未知 shell'}，PID ${attached.pid ?? '?'}）`)
+          if (attached.iconNotice) write(`    ${attached.iconNotice}`)
+          write('  （右键图标可用：打开 Workbench / 状态 / 启动 / 停止 / 退出）')
+        } else {
+          // ② / ③：挂不上，但**原因说清楚**，并且不说成"产品坏了"。
+          write(`  ○ 系统托盘图标没有挂上：${attached?.message ?? attached?.code ?? '未知原因'}`)
+          if (attached?.iconNotice) write(`    ${attached.iconNotice}`)
+        }
+      } catch (e) {
+        write(`  ○ 系统托盘图标没有挂上（装配时抛错）：${e?.message ?? String(e)}`)
+      }
+    }
+
+    try {
+      await new Promise((resolve) => {
+        const stop = () => resolve()
+        process.once('SIGINT', stop)
+        process.once('SIGTERM', stop)
+      })
+    } finally {
+      // 收工时**先摘图标再停产品**：一个在产品停掉之后还留着的图标
+      // 会让用户以为它还能用，而它后面已经什么都没有了。
+      if (trayHandle !== null) {
+        try {
+          const off = await trayHandle.detach?.()
+          if (!json) {
+            write(off?.ok === true
+              ? '  ● 系统托盘图标已摘下'
+              : `  ⚠ 系统托盘图标没有干净摘下：${off?.code ?? '未知'}（可能残留一个图标）`)
+          }
+        } catch (e) {
+          if (!json) write(`  ⚠ 摘系统托盘图标时抛错：${e?.message ?? String(e)}`)
+        }
+      }
+    }
     const stopped = await launcher.stop({ reason: '收到停止信号' })
     if (!json) write(`  ${PRODUCT_STATE_TEXT.unavailable}（已停止 ${stopped.results.length} 个进程）`)
   }

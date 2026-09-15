@@ -44,14 +44,18 @@
 // `status()` 根本不暴露 `ports.*`，唯一可能把默认端口带进来的路径就是上面那条
 // 被闸住的 `url` 字段。换句话说，"用没用观测"这件事，在不需要读配置的前提下就成立。
 //
-// ── ★ 另一半边界：本模块**不产生原生托盘图标** ──
+// ── ★ 另一半边界：图标是**另一层**，而那一层现在已经有了 ──
 //
-// 零依赖的 Node 拿不到托盘图标：那需要原生绑定（或 Electron 之类的壳）。
-// `createTray()` 从一开始就只做菜单模型 + 动作派发，本模块也不会假装补上这一截——
-// 它交出去的仍然只有 `menu()` 与 `invoke(id)`，由将来的原生外壳去画图标、接点击。
+// `createTray()` 从一开始就只做菜单模型 + 动作派发。画图标、接点击是另一个模块：
+// `tray-icon.mjs`——它在 Windows 上生成一个 PowerShell 宿主脚本、起一个真的
+// 子进程、把它画出来的 `NotifyIcon` 看住。本模块**只负责把它们接起来**：
+//
+//   · `nativeIconSupport()` 转发那一层的探测（三态：支持 / 不支持 / 还不知道）；
+//   · `attachLauncherTray()` 是 `createLauncherTray()` 的**生产调用点**——
+//     接托盘、造宿主、起宿主，三步各自失败各自报，不假装下一步成功了。
 //
 //   > 一个"看起来接进了托盘、却什么图标也没出"的实现，
-//   > 与一个明说"这里只有菜单模型"的实现，在用户找那个不存在的图标之前
+//   > 与一个明说"这一层需要宿主进程"的实现，在用户找那个不存在的图标之前
 //   > 是同一个东西——只不过前者会让他一直找下去。
 //
 // ── ★ 退出不许在这里重新实现 ──
@@ -65,6 +69,11 @@ import { spawn } from 'node:child_process'
 
 import { createTray } from './tray.mjs'
 import { READINESS_VERIFIED_CODE } from './readiness.mjs'
+import {
+  TRAY_ICON_CODES,
+  createTrayIconHost,
+  probeTrayIconSupport,
+} from './tray-icon.mjs'
 
 /** 要观测的是进程清单里 workbench 那一行的 key。 */
 export const TRAY_WIRING_WORKBENCH_KEY = 'workbench'
@@ -96,19 +105,74 @@ export const TRAY_WIRING_CODES = Object.freeze({
 })
 
 /**
- * ★ 本模块**不**产生原生托盘图标。
+ * ★ 图标到底支不支持？——**一个读数，不是一个常量**。
  *
- * 这个常量存在的意义是让"没有图标"这件事成为**读数**而不是读者的推断：
- * 一个导出里写着 `NATIVE_ICON_SUPPORTED = false` 的托盘接线，与一个
- * 什么都不说、只是恰好没画图标的托盘接线，在用户去找那个图标时是两回事。
+ * 这里曾经写着 `export const NATIVE_ICON_SUPPORTED = false`，理由是"零依赖的 Node
+ * 画不出图标"。**那半句是错的**：Windows 上不需要原生模块，一个 PowerShell 宿主
+ * 就能画出真的 `NotifyIcon`（见 `tray-icon.mjs`）。于是一个恒为 `false` 的常量
+ * 从"诚实的边界"变成了"一句关于这台机器的谎话"——而反过来，一个恒为 `true` 的常量
+ * 在一台没有桌面会话、或者没有 shell 的机器上同样是谎话。
+ *
+ *   > 一个"托盘需要原生外壳"的结论，
+ *   > 与一个"我没有试过平台上现成的那套 UI 组件"的读数，
+ *   > 在 `NATIVE_ICON_SUPPORTED = false` 那一行上是同一个东西。
+ *
+ * 所以判据整个搬到 `tray-icon.mjs` 的 `probeTrayIconSupport()` 里，这里只**转发**：
+ * 支持与否是 `(平台, shell 解析, 宿主有没有真的报过 ready)` 的函数，**三态**
+ * （`true` / `false` / `null`＝还没起过宿主，不知道）。转发而不是重写：两份判据
+ * 迟早在"某台机器上到底行不行"这件事上给出两个答案。
+ *
+ * @param {object} o
+ * @param {object|null} [o.iconHost] 起过的图标宿主（`createTrayIconHost(...)` 的返回值）
  */
-export const NATIVE_ICON_SUPPORTED = false
+export function nativeIconSupport({
+  platform = process.platform,
+  env = {},
+  configuredShell = null,
+  exists = undefined,
+  iconHost = null,
+} = {}) {
+  const probe = probeTrayIconSupport({
+    platform,
+    env,
+    configured: configuredShell,
+    ...(exists === undefined ? {} : { exists }),
+    host: iconHost,
+  })
+  return Object.freeze({ ...probe, notice: iconNoticeOf(probe) })
+}
 
-/** 说清"没有图标"以及"那谁该来画"，免得读者以为这是漏做。 */
-export const NO_NATIVE_ICON_REASON = '本模块不产生原生托盘图标：零依赖的 Node 没有画图标的能力。'
-  + '它交付的是菜单模型与动作派发（menu() / invoke(id)），'
-  + '图标与点击要由原生外壳（或 Electron / DSH Desktop 那一层）来画。'
-  + '在那之前，"托盘"只以菜单的形式存在。'
+/**
+ * 说清"这次为什么没有图标"，以及**什么证据会翻转它**。
+ *
+ * 它取代了旧的那句"本模块不产生原生托盘图标"：那句话现在是假的（这个产品**会**
+ * 产生图标），留着它会让用户以为"还没有这一层"。真相是"这一层在，但这台机器
+ * 上这一层的三件前提缺了一件"。
+ *
+ * 每一支仍然要说清**那谁该来补**：一个只说"不支持"的读数，用户只能猜。
+ */
+export const NO_NATIVE_ICON_REASON = '这次没有托盘图标。三种原因，`nativeIconSupport().code` 说清是哪一种：'
+  + '① 平台不是 win32（图标宿主要加载的 WinForms 只存在于 Windows）；'
+  + '② 这台机器上解析不到任何一档候选 shell（%ProgramFiles%\\PowerShell\\7\\pwsh.exe、'
+  + 'PATH 上的 pwsh.exe、随 Windows 发货的 %SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe）；'
+  + '③ 解析到了，但宿主**没有报 ready**（被执行策略/AppLocker 拦下、WinForms 加载失败、'
+  + '或者这是一个没有交互桌面的会话）。'
+  + '翻转它需要的证据：在 win32 上、某一档候选真的存在、并且那个宿主在 stdout 上报出 ready——'
+  + '三件里少一件都不算"支持"。'
+
+/** 把一次探测变成一句能给用户看的话。**每一种读数都有自己的话**，不共用一句。 */
+export function iconNoticeOf(probe) {
+  if (probe?.supported === true) {
+    return `托盘图标宿主已就绪（${probe.shell}）：这次真的有图标，点击会走托盘的动作派发。`
+  }
+  const head = NO_NATIVE_ICON_REASON
+  const why = probe?.reason ?? '（这次探测没有给出原因）'
+  const flips = probe?.flips ?? '（这次探测没有说清怎么翻转）'
+  if (probe?.supported === null) {
+    return `${head} 当前读数：**还不知道**（${probe?.code ?? 'UNKNOWN'}）——${why}。翻转它：${flips}。`
+  }
+  return `${head} 当前读数：**不支持**（${probe?.code ?? 'UNKNOWN'}）——${why}。翻转它：${flips}。`
+}
 
 /** 观测 workbench 地址时缺一不可的那三道闸，都写在这里，而不是散在调用点。 */
 function checkWorkbenchRow(proc) {
@@ -257,19 +321,24 @@ export function createPlatformOpener({ platform = process.platform, spawnImpl = 
 }
 
 /** 接不上的时候**不抛**，而是给一个具名拒绝 + 一个不会假装能用的替身。 */
-function notWired(code, message) {
+function notWired(code, message, { platform = process.platform, env = {}, iconHost = null } = {}) {
   const refusal = Object.freeze({ ok: false, code, message })
   const reject = async () => refusal
+  const probe = nativeIconSupport({ platform, env, iconHost })
   return Object.freeze({
     ok: false, code, message,
     tray: null,
     observe: async () => null,
-    nativeIcon: NATIVE_ICON_SUPPORTED,
-    iconNotice: NO_NATIVE_ICON_REASON,
+    /** ★ 接不上也一样要给**真实**的图标读数：`false` 在这里是"这根线没接上"，
+     *  不是"这台机器画不出来"。两者混在一起会让一台完全能画图标的机器
+     *  因为 launcher 缺一个方法而被报成"不支持原生图标"。 */
+    nativeIcon: probe.supported,
+    nativeIconProbe: probe,
+    iconNotice: probe.notice,
     menu: reject,
     invoke: reject,
     dispose: () => refusal,
-    status: () => Object.freeze({ wired: false, code, message }),
+    status: () => Object.freeze({ wired: false, code, message, nativeIcon: probe.supported }),
     diagnostics: () => Object.freeze([]),
   })
 }
@@ -285,10 +354,12 @@ function notWired(code, message) {
  * @param {Function} [deps.now]
  * @param {Function} [deps.spawnImpl] 默认 `node:child_process` 的 `spawn`（用例注入替身）
  * @param {Function} [deps.trayFactory] 默认 `createTray`（用例可验装配失败路径）
+ * @param {object} [deps.env] shell 解析要读的环境（默认 `process.env`）
+ * @param {object|null} [deps.iconHost] 已经起好的图标宿主；给了它，`nativeIcon` 才会是 `true`
  *
  * @returns {{ok: boolean, code: string|null, message: string, tray: object|null,
- *            observe: Function, nativeIcon: boolean, iconNotice: string,
- *            menu: Function, invoke: Function, dispose: Function,
+ *            observe: Function, nativeIcon: boolean|null, nativeIconProbe: object,
+ *            iconNotice: string, menu: Function, invoke: Function, dispose: Function,
  *            status: Function, diagnostics: Function}}
  */
 export function createLauncherTray({
@@ -299,6 +370,8 @@ export function createLauncherTray({
   now = () => Date.now(),
   spawnImpl = spawn,
   trayFactory = createTray,
+  env = process.env,
+  iconHost = null,
 } = {}) {
   if (launcher === null || typeof launcher !== 'object'
     || typeof launcher.status !== 'function'
@@ -308,6 +381,7 @@ export function createLauncherTray({
       TRAY_WIRING_CODES.MISSING_LAUNCHER,
       '接线需要一个同时提供 status() / start() / stop() 的 launcher'
         + `（收到 ${launcher === null ? 'null' : typeof launcher}）`,
+      { platform, env, iconHost },
     )
   }
 
@@ -353,23 +427,149 @@ export function createLauncherTray({
       now,
     })
   } catch (e) {
-    return notWired(TRAY_WIRING_CODES.FAILED, `装配托盘时抛错：${e?.message ?? String(e)}`)
+    return notWired(TRAY_WIRING_CODES.FAILED, `装配托盘时抛错：${e?.message ?? String(e)}`,
+      { platform, env, iconHost })
   }
+
+  const probe = nativeIconSupport({ platform, env, iconHost })
 
   return Object.freeze({
     ok: true,
     code: null,
     message: '托盘已接进 Launcher（菜单与动作都来自观测）',
-    /** ★ 底层控制器：未来的原生外壳就靠它渲染 `menu()` / 派发 `invoke(id)`。 */
+    /** ★ 底层控制器：图标宿主就靠它渲染 `menu()` / 派发 `invoke(id)`。 */
     tray,
-    /** 观测本身也暴露出去：原生外壳与用例都能直接看这份读数。 */
+    /** 观测本身也暴露出去：图标宿主与用例都能直接看这份读数。 */
     observe,
-    nativeIcon: NATIVE_ICON_SUPPORTED,
-    iconNotice: NO_NATIVE_ICON_REASON,
+    /**
+     * ★ 三态中的那一个"还不知道"：解析到了 shell、但还没起过宿主时它是 `null`。
+     * 用一个 `false` 去覆盖它是这一层最容易犯的谎（见 `nativeIconSupport` 的注释）。
+     */
+    nativeIcon: probe.supported,
+    nativeIconProbe: probe,
+    iconNotice: probe.notice,
     menu: () => tray.menu(),
     invoke: (id) => tray.invoke(id),
     dispose: () => tray.dispose(),
-    status: () => Object.freeze({ wired: true, nativeIcon: NATIVE_ICON_SUPPORTED, ...tray.status() }),
+    status: () => Object.freeze({ wired: true, nativeIcon: probe.supported, ...tray.status() }),
     diagnostics: () => tray.diagnostics(),
+  })
+}
+
+/**
+ * ★ `createLauncherTray()` 的**生产调用点**：把 launcher、托盘菜单、以及那个真的
+ * 会画出图标的宿主装配成一件东西。
+ *
+ * 在这之前 `createLauncherTray` 一个生产调用者都没有——一个"写好了、测过了、
+ * 没有任何东西在启动路径上碰它"的接线，与一个没写的接线在用户那里是同一个东西。
+ * 本函数是那根线的落点：它按顺序做三件事，**每一步失败都不假装下一步成功了**：
+ *
+ *   1. 接托盘（`createLauncherTray`）：菜单与动作都来自观测；
+ *   2. 造图标宿主（`createTrayIconHost`）：生成物落 `<DataDir>/tray/`，边界不过就拒绝；
+ *   3. `start()` 宿主：**只有宿主报了 ready 才算有图标**。
+ *
+ * 第 3 步失败时返回 `ok:false`，但**把托盘接线一起交出去**（`wiring` 非空）：
+ * 菜单模型与动作派发仍然可用，缺的只是"画到系统托盘上"那一层。
+ * 把两者一起丢掉，会让一个"图标起不来"的机器连 `menu()` 都失去。
+ *
+ * @returns {Promise<{ok: boolean, code: string|null, message: string,
+ *            wiring: object|null, icon: object|null, nativeIcon: boolean|null,
+ *            nativeIconProbe: object|null, iconNotice: string,
+ *            invoke: Function, menu: Function, stop: Function, disconnect: Function,
+ *            status: Function, diagnostics: Function}>}
+ */
+export async function attachLauncherTray({
+  launcher = null,
+  dataDir = null,
+  allowedRoot = null,
+  installDir = null,
+  dshHome = null,
+  operatorHome = null,
+  platform = process.platform,
+  env = process.env,
+  exists = undefined,
+  configuredShell = null,
+  spawnImpl = spawn,
+  openExternal = null,
+  logger = null,
+  now = () => Date.now(),
+  tickMs = undefined,
+  heartbeatMs = undefined,
+  /** `false` 时只装配不启动（"准备好了但先别画"是合法的，例如向导还没走完）。 */
+  autoStart = true,
+  /** 用例注入：直接给一个宿主替身，跳过生成与 spawn。 */
+  iconHostFactory = createTrayIconHost,
+  iconHostDeps = {},
+} = {}) {
+  const wiring = createLauncherTray({ launcher, openExternal, platform, logger, now, spawnImpl, env })
+  if (wiring.ok !== true) {
+    return Object.freeze({
+      ok: false, code: wiring.code, message: wiring.message,
+      wiring: null, icon: null,
+      nativeIcon: wiring.nativeIcon, nativeIconProbe: wiring.nativeIconProbe, iconNotice: wiring.iconNotice,
+      invoke: wiring.invoke, menu: wiring.menu,
+      stop: async () => Object.freeze({ ok: true, code: TRAY_ICON_CODES.NOT_STARTED, message: '没有宿主' }),
+      disconnect: async () => Object.freeze({ ok: false, code: wiring.code, message: wiring.message }),
+      status: wiring.status, diagnostics: wiring.diagnostics,
+    })
+  }
+
+  const icon = iconHostFactory({
+    tray: wiring.tray,
+    dataDir,
+    allowedRoot,
+    installDir,
+    dshHome,
+    operatorHome,
+    platform,
+    env,
+    ...(exists === undefined ? {} : { exists }),
+    configuredShell,
+    spawnImpl,
+    now,
+    logger,
+    ...(tickMs === undefined ? {} : { tickMs }),
+    ...(heartbeatMs === undefined ? {} : { heartbeatMs }),
+    ...iconHostDeps,
+  })
+
+  const started = autoStart === true ? await icon.start() : null
+  const probe = nativeIconSupport({ platform, env, configuredShell, iconHost: started?.ok === true ? icon : null })
+
+  return Object.freeze({
+    ok: started === null ? true : started.ok === true,
+    code: started === null ? null : started.code,
+    message: started === null
+      ? `托盘与图标宿主已装配（没有启动：autoStart=false）。${probe.notice}`
+      : started.ok === true
+        ? `托盘已接进 Launcher，并且图标宿主报了 ready（pid ${started.pid ?? '未知'}）`
+        : `托盘已接进 Launcher，但**图标没起来**：${started.message}`,
+    wiring,
+    icon,
+    nativeIcon: probe.supported,
+    nativeIconProbe: probe,
+    iconNotice: probe.notice,
+    invoke: (id) => wiring.invoke(id),
+    menu: () => wiring.menu(),
+    /** 收掉图标宿主（幂等）。**不动**产品本身。 */
+    stop: (reason) => icon.stop(reason),
+    /**
+     * 收工：先收图标宿主，再释放托盘。
+     *
+     * ★ 顺序不能反：先 `wiring.dispose()` 会让还在跑的宿主往一个已释放的托盘上
+     * 送点击，而那时每一个点击都会被拒——用户看到的是"点了没反应"。
+     */
+    async disconnect(reason = 'launcher-shutdown') {
+      const stopped = await icon.stop(reason)
+      wiring.dispose()
+      return stopped
+    },
+    status: () => Object.freeze({
+      wired: true,
+      icon: icon.status(),
+      nativeIcon: probe.supported,
+      ...wiring.status(),
+    }),
+    diagnostics: () => Object.freeze([...wiring.diagnostics(), ...icon.diagnostics()]),
   })
 }

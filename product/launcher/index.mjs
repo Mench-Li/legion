@@ -51,3 +51,25 @@ export {
   overlayRelpathOf,
   resolveDshOverlay,
 } from './dsh-overlay.mjs'
+
+// PRT-708：系统托盘的三层。以前这里一条都没有——`tray.mjs` / `tray-wiring.mjs`
+// 只被各自的用例 import 过，于是"这个功能存不存在"在产品这一层无从判断。
+//
+// ★ `attachLauncherTray` 是**生产入口**（`cli.mjs` 的启动路径就是调它），
+//   `nativeIconSupport` 是那个**三态**读数（`true` / `false` / `null`）。
+//   诊断面板要按 `null` 显示"还没起过宿主"而不是"不支持"——两者的修法不同，
+//   所以这里导出的是探测函数本身，不是一个快照常量。
+export {
+  TRAY_WIRING_CODES,
+  attachLauncherTray,
+  createLauncherTray,
+  iconNoticeOf,
+  nativeIconSupport,
+} from './tray-wiring.mjs'
+export {
+  TRAY_ICON_CODES,
+  createTrayIconHost,
+  probeTrayIconSupport,
+  resolveTrayShell,
+} from './tray-icon.mjs'
+export { TRAY_CODES, createTray } from './tray.mjs'

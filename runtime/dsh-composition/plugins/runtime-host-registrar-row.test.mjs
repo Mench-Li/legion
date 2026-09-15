@@ -36,6 +36,7 @@ import { after, describe, test } from 'node:test'
 import { REQUIRED_CAPABILITIES } from '../../contracts/adapter.mjs'
 import { LEGION_PERMISSION_PRESETS, PATCH_LAYER_ROWS, RUNTIME_ONLY_ROW_IDS } from '../patch-layer.mjs'
 import { startupSelfCheck } from '../selfcheck.mjs'
+import { HIGH_RISK_TOOL_NAMES } from '../tool-capability.mjs'
 import realRuntimeHostRow, {
   CAPABILITY_EVIDENCE_CODES,
   CAPABILITY_TABLE_CHECKED,
@@ -234,7 +235,11 @@ describe('PRT-253 续批二 · 四项能力逐项有据', () => {
     assert.deepEqual(Object.keys(evidence).sort(), [...REQUIRED_CAPABILITIES].sort())
     assert.equal(CAPABILITY_TABLE_CHECKED, true)
     // 2 = `canRead` 改为可选（缺席如实记成 null）+ 接上 `currentModelSelection`。
-    assert.equal(RUNTIME_HOST_REGISTRAR_VERSION, 2)
+    // 3 = PRT-214 缺口①：`startRun` 按 Run 安装静态 hard floor（下限随创建请求走，
+    //     装不上就拒绝这次 Run）。**版本号是给读它的人看的**：2 与 3 的
+    //     `startRun` 在"端口选项里没有 enforcementFloor"时行为完全相同，
+    //     所以只有这条注释能说出"这台进程里的下限是可以按 Run 装的"。
+    assert.equal(RUNTIME_HOST_REGISTRAR_VERSION, 3)
   })
 
   test('布尔表里只有布尔值：判据码不会被混进 capabilities（probe.mjs 会把非 true 当 false）', () => {
@@ -328,6 +333,239 @@ describe('PRT-253 续批二 · 工厂：缺哪一样报哪一样', () => {
     const probe = built.runtimeHost.probeRuntime()
     assert.equal(probe.version, '7.7.7')
     assert.equal(probe.capabilities['structured-result'], false, '没有注册表时这一项仍然是未确认')
+  })
+})
+
+// ─────────────────────────────────────────────── D. PRT-214 缺口①：按 Run 装下限
+
+/**
+ * 一个能演"引擎在创建窗口里派发 `agent/created`"的 ctx 替身。
+ *
+ * ★ 它替的是**现场服务与引擎的事件缝**，不是被测的那条顺序：
+ * 真实的 `agent/created` 由 `packages/core/agent/src/index.ts:545` 在
+ * `agents.create()` **内部**、`followup()` **之前**同步派发；这里用
+ * `emit()` 忠实复刻"同一个同步窗口"这一件事。真进程里的那一条读数在
+ * `run-floor-dsh-process.test.mjs`（带外哨兵文件）。
+ *
+ * `subagents` 是**迟到绑定**的：端口自己要去 `ctx.get('subagents')` 拿它，
+ * 而那个替身又要往这个 ctx 上 emit——两者互相引用，所以分开两步接。
+ */
+function engineCtx() {
+  const listeners = new Map()
+  let service
+  return {
+    setService(value) { service = value },
+    get: (n) => (n === 'subagents' ? service : undefined),
+    on(name, listener) {
+      listeners.set(name, listener)
+      return () => listeners.delete(name)
+    },
+    emit(name, payload) {
+      const listener = listeners.get(name)
+      if (listener !== undefined) listener(payload)
+    },
+  }
+}
+
+/** 造一个"子 Agent 形状"的作用域：guard 与 `ctx.on` 各自登记，便于数面数。 */
+function childAgent(id, agentOptions) {
+  const guards = []
+  const events = []
+  const key = { id, options: agentOptions }
+  key.ctx = {
+    tools: {
+      guard(fn) {
+        guards.push(fn)
+        return () => { const i = guards.indexOf(fn); if (i >= 0) guards.splice(i, 1) }
+      },
+    },
+    on(name, fn) {
+      const row = { name, fn }
+      events.push(row)
+      return () => { const i = events.indexOf(row); if (i >= 0) events.splice(i, 1) }
+    },
+  }
+  return { key, guards, events }
+}
+
+/**
+ * 一个在创建窗口里派发 `agent/created` 的 `subagents` 替身。
+ *
+ * ★ `result` 是**受控的**（不是 `Promise.resolve`）：真 Run 的 result 要到那一轮
+ * 结束才结算，而"下限在 Run 存活期间真的挂着、结算之后撤掉"这两条读数
+ * 只有在 result 还没结算的时候才读得到。一个立刻结算的替身会让
+ * "装上了"与"装完就撤"在读数上完全同形。
+ */
+function spawningSubagents(ctx, { emitCreated = true } = {}) {
+  const calls = []
+  const children = []
+  const handles = []
+  return {
+    calls,
+    children,
+    handles,
+    async start(provider, options) {
+      calls.push({ provider, options })
+      const child = childAgent(`child-${children.length + 1}`, options?.agentOptions)
+      children.push(child)
+      if (emitCreated) ctx.emit('agent/created', { agent: child.key })
+      let settle
+      const result = new Promise((resolve) => { settle = resolve })
+      const handle = {
+        localAgent: child.key,
+        result,
+        dispose: async () => {},
+        /** 用例自己的开关：让这一轮"结束"。 */
+        settle: (value = { stopReason: 'completed' }) => settle(value),
+      }
+      handles.push(handle)
+      return handle
+    },
+  }
+}
+
+const INSTALLED_FLOOR = Object.freeze({
+  denyTools: ['rm_rf'], denyPathPrefixes: [], cwd: '/work', platform: 'linux',
+})
+
+/** 组装一次「端口 + 引擎替身」：ctx 与 subagents 互相引用，所以分开接。 */
+function portWithSpawningEngine(options) {
+  const ctx = engineCtx()
+  const subagents = spawningSubagents(ctx, options)
+  ctx.setService(subagents)
+  return { ctx, subagents, built: createRuntimeHostInputsFactory()(ctx) }
+}
+
+describe('PRT-214 缺口① · 端口 startRun 按 Run 安装静态 hard floor', () => {
+  test('★ 端口选项里**没有**下限键 → 按引用转发，一个字段都不动（老调用方不受影响）', async () => {
+    const { subagents, built } = portWithSpawningEngine()
+    const sent = { label: 'x', prompt: [{ type: 'text', text: 'y' }] }
+    const handle = await built.runtimeHost.startRun('spawn', sent)
+    assert.equal(subagents.calls.length, 1)
+    assert.equal(subagents.calls[0].options, sent, '没有下限时选项必须按引用原样转发')
+    assert.equal('agentOptions' in sent, false, '没有下限时不许凭空加一个 agentOptions')
+    assert.equal(handle, subagents.handles[0], '句柄必须按引用交出去')
+    // 没有载体 ⇒ 那个孩子的 guard 一面都不该多出来。
+    assert.equal(subagents.children[0].guards.length, 0)
+    assert.equal(subagents.children[0].events.length, 0)
+  })
+
+  test('★★ 有下限 → 两个面都装上，且判定来自**这次 Run 的**那份下限', async () => {
+    const { subagents, built } = portWithSpawningEngine()
+    const payload = { state: 'installed', floor: INSTALLED_FLOOR }
+    const options = { label: 'a', prompt: [], enforcementFloor: payload }
+    const handle = await built.runtimeHost.startRun('spawn', options)
+
+    const child = subagents.children[0]
+    assert.equal(child.guards.length, 1, '最终复核（ctx.tools.guard）没有落点')
+    assert.equal(child.events.length, 1, '提前拒绝（tools/pre-execute 的瀑布）没有落点')
+    // 载体按**引用**跟着创建请求走：端口按身份配对靠的就是这一点。
+    const forwarded = subagents.calls[0].options
+    assert.notEqual(forwarded, options, '不许就地改调用方交出来的那份选项')
+    assert.equal('agentOptions' in options, false, '调用方的选项被就地加了一个键')
+    assert.equal(forwarded.enforcementFloor, payload, '端口选项上的载荷必须原样转发')
+    assert.equal(forwarded.agentOptions.legionRunFloor, payload,
+      '载荷必须按引用跟着创建请求走，否则"哪份下限属于哪次 Run"只能靠顺序猜')
+    // 判定：名单里的拒、名单外的放。
+    assert.match(child.guards[0]({ name: 'rm_rf', arguments: {} }), /rm_rf/)
+    assert.equal(child.guards[0]({ name: 'read_file', arguments: {} }), undefined)
+    assert.equal(handle, subagents.handles[0])
+  })
+
+  test('★★ 缺席的下限 → guard 拒绝**任何**工具（含低风险与真 DSH 名），理由来自这份下限', async () => {
+    // ★ 这一档的读数是"拒绝一切"，理由不是一句判断而是一条名字空间事实：
+    //   `HIGH_RISK_TOOL_NAMES` 写的是 Legion **能力名**，而 guard 比的是**执行面工具名**
+    //   （`employee-preset.mjs` 的 `dshToolNamesOf()` 读出来只有 shell 那一对）。
+    //   所以只读"Legion 高风险名被拒"是不够的：那一条对"按 Legion 名单禁九个"的实现
+    //   照样绿，而那个实现在真调用上一个真工具名都拦不住。
+    const { subagents, built } = portWithSpawningEngine()
+    await built.runtimeHost.startRun('spawn', { label: 'a', prompt: [], enforcementFloor: { state: 'absent' } })
+    const child = subagents.children[0]
+    assert.equal(child.guards.length, 1,
+      '缺席时必须仍然装上一个 guard —— 不装就等于"这次 Run 一个工具都没人管"')
+    assert.equal(child.events.length, 1, '提前拒绝那一面同样要有落点')
+    const denied = child.guards[0]({ name: HIGH_RISK_TOOL_NAMES[0], arguments: {} })
+    assert.equal(typeof denied, 'string',
+      `缺席的下限放行了一个 Legion 高风险能力名（${HIGH_RISK_TOOL_NAMES[0]}）—— §6.8:479 的静态禁止是空的`)
+    assert.match(denied, /RUN_FLOOR_NOT_SUPPLIED/, '拒绝理由要能被日志检索到"这次没有下限"')
+    assert.match(denied, /6\.8:479/, '拒绝理由必须点出这是 spec §6.8:479 的发布前姿态，而不是"读不懂"')
+    // ★ 低风险的能力名与一个**真 DSH 工具名**也必须被拒：它们是"拒绝一切"与
+    //   "按 Legion 能力名名单禁"之间**唯一**分得开的那两个读数。
+    assert.equal(typeof child.guards[0]({ name: 'write-file', arguments: {} }), 'string',
+      '★ 缺席放行了低风险的能力名 ⇒ 它其实是"按 Legion 名单禁"，而那份名单在真调用上一个都拦不住')
+    assert.equal(typeof child.guards[0]({ name: 'pwsh', arguments: {} }), 'string',
+      '★ 缺席放行了一个**真 DSH 工具名**（pwsh）—— 那正是"名单 ∩ 真工具名 = ∅"的读数')
+  })
+
+  test('★★ Run 结算之后两个面都撤掉（否则长命进程里会越积越多）', async () => {
+    const { subagents, built } = portWithSpawningEngine()
+    const handle = await built.runtimeHost.startRun('spawn', {
+      label: 'a', prompt: [], enforcementFloor: { state: 'installed', floor: INSTALLED_FLOOR },
+    })
+    const child = subagents.children[0]
+    assert.equal(child.guards.length, 1, 'Run 还活着时下限就该挂着')
+    assert.equal(child.events.length, 1)
+    // 这一轮结束 ⇒ 收尾：让微任务队列跑完。
+    handle.settle()
+    await new Promise((r) => setTimeout(r, 0))
+    assert.equal(child.guards.length, 0, '结算之后 guard 还挂着 —— 一次静默泄漏')
+    assert.equal(child.events.length, 0, '结算之后 pre-execute 还挂着')
+  })
+
+  test('★★★ 载荷解释不了 → 具名拒绝，**连引擎都不叫**（不跳过安装照跑）', async () => {
+    const { subagents, built } = portWithSpawningEngine()
+    await assert.rejects(
+      () => built.runtimeHost.startRun('spawn', { label: 'a', prompt: [], enforcementFloor: { state: 'nope' } }),
+      (e) => {
+        assert.equal(e.code, RUNTIME_HOST_REGISTRAR_CODES.FLOOR_UNREADABLE)
+        return true
+      })
+    assert.equal(subagents.calls.length, 0,
+      '载荷解释不了却已经把 Run 起跑了 —— 那等于"派生失败"照跑')
+  })
+
+  test('★★★ 引擎没交回 in-process 子 Agent（远程 provider）→ 具名拒绝，不退化成"没装"', async () => {
+    const ctx = engineCtx()
+    const subagents = {
+      calls: [],
+      async start(provider, options) {
+        this.calls.push({ provider, options })
+        return { result: Promise.resolve({ stopReason: 'completed' }), dispose: async () => {} }
+      },
+    }
+    ctx.setService(subagents)
+    const built = createRuntimeHostInputsFactory()(ctx)
+    await assert.rejects(
+      () => built.runtimeHost.startRun('spawn', {
+        label: 'a', prompt: [], enforcementFloor: { state: 'installed', floor: INSTALLED_FLOOR },
+      }),
+      (e) => {
+        assert.equal(e.code, RUNTIME_HOST_REGISTRAR_CODES.FLOOR_NOT_INSTALLABLE)
+        return true
+      })
+  })
+
+  test('★★★ 创建窗口没接上（端口 ctx 没有 `ctx.on`）→ 退到句柄之后装，装不上则拒绝', async () => {
+    // 这一条钉住的是**回退路**：`ctx.on` 不在时不许"算了不装了"。
+    const ctx = engineCtx()
+    const subagents = spawningSubagents(ctx)
+    // 端口拿到的 ctx **没有** `on`：创建窗口那一钩根本注册不上。
+    const built = createRuntimeHostInputsFactory()({
+      get: (n) => (n === 'subagents' ? subagents : undefined),
+    })
+    const handle = await built.runtimeHost.startRun('spawn', {
+      label: 'a', prompt: [], enforcementFloor: { state: 'installed', floor: INSTALLED_FLOOR },
+    })
+    assert.equal(handle, subagents.handles[0])
+    const child = subagents.children[0]
+    assert.equal(child.guards.length, 1, '回退路没有把下限装上')
+    assert.match(child.guards[0]({ name: 'rm_rf', arguments: {} }), /rm_rf/)
+  })
+
+  test('★ 两个码分开：载荷坏了（改生产者）与装不上（看引擎/provider）不是同一条修法', () => {
+    assert.notEqual(RUNTIME_HOST_REGISTRAR_CODES.FLOOR_UNREADABLE, RUNTIME_HOST_REGISTRAR_CODES.FLOOR_NOT_INSTALLABLE)
+    const codes = new Set(Object.values(RUNTIME_HOST_REGISTRAR_CODES))
+    assert.equal(codes.size, Object.keys(RUNTIME_HOST_REGISTRAR_CODES).length, '码必须互不相同')
   })
 })
 

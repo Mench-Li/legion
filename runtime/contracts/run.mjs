@@ -12,6 +12,11 @@
 // ============================================================================
 import { createHash } from 'node:crypto'
 
+// PRT-214 缺口①：Run 的**静态 hard floor**要跟着这次 Run 一起过线，所以它必须先有
+// 一个**契约上的形状**。形状与三种处境（没给 / 给清楚了 / 解释不了）的判定都在
+// `./run-floor.mjs`——与 `permissions` 一样，本模块只调用它，不重写一份。
+import { RUN_FLOOR_STATES, RUN_FLOOR_WIRE_FIELD, readRunFloor } from './run-floor.mjs'
+
 /** 全部 RunEvent 类型（spec §6.1，共 13 种）。 */
 export const RUN_EVENT_TYPES = Object.freeze([
   'run.started',
@@ -88,6 +93,29 @@ export const RUN_REQUEST_REQUIRED = Object.freeze([
  * 都有确定的输入快照、输出产物、工具记录」，一个缺工具权限或验收契约的 RunRequest
  * 无法产生可审计的执行，应当拒收而不是补默认值。
  *
+ * ## `enforcementFloor` 为什么**不**在必填之列（PRT-214 缺口①）
+ *
+ * spec §6.8 `:437-440` 把「静态 hard floor」与「Run 权限档位」并列为控制面**生成**的两样
+ * 东西。把它写成必填看着更严，实际会把这里变成**唯一**的判定点，而它判不了：
+ *
+ *   · 必填 ⇒ 每一个还没有接生产者的调用方都得**编一份空下限**才能过契约。
+ *     而"派生出来的空下限"与"这次没有任何东西该被禁止"在空数组上是同一个读数——
+ *     只不过前者意味着强制面整段不在，且**没有告警**。
+ *   · 可选 ⇒ 契约只回答"形状能不能解释"，缺席**如实**保留为缺席，由安装点
+ *     （`runtime/dsh-composition/run-floor.mjs`）按 fail closed 处置。
+ *
+ *   > 一个"用必填字段把缺席挡在门外"的契约，
+ *   > 与一个"让每个人都编一份空下限才进得来"的契约，是同一个东西——
+ *   > 只不过前者的门禁是绿的，而它把一次接线遗漏洗成了"这次没有东西要禁止"。
+ *
+ * 因此：**给了就必须解释得通，不给就如实缺席**。三种处境在 guard 那一侧分得开：
+ * 缺席（`absent`）→ 按 spec §6.8 `:479` 的**发布前姿态**拒绝一切（因为静态下限比的是
+ * **执行面的工具名**，而派生出来的名单写的是 Legion 的**能力名**，名字空间不相交，
+ * 按名字装进来一个真工具名都拦不住——**名字名单不是 fail closed**）；
+ * 空名单（`installed`）→ 只拒名单里的（名单是空的，于是放行一切）；
+ * 给了一份却**解释不通**（`refused`）→ 也拒绝一切——那种情况下连"这份载荷想说什么"
+ * 都不知道，猜一份名单等于把一次接线错误伪装成一份政策。
+ *
  * @param {object} req
  * @returns {{ok: boolean, errors: string[], value: object|null}}
  */
@@ -127,6 +155,18 @@ export function validateRunRequest(req) {
       if (typeof p.preset !== 'string' || p.preset.trim() === '') errors.push('permissions.preset 必须是字符串')
       if (!Array.isArray(p.tools)) errors.push('permissions.tools 必须是数组')
       else if (p.tools.some((t) => typeof t !== 'string')) errors.push('permissions.tools 只能包含字符串')
+    }
+  }
+  // 静态 hard floor（PRT-214 缺口①）：**可选**，但给了就必须解释得通。
+  //
+  // 判定整体委托给 `readRunFloor`——这里**不重写**一份形状检查：
+  // 两份"同一个载荷"的检查会漂，而漂的那一天表现为"服务端收了、适配器拒了"。
+  // 三个状态里只有 `refused` 是错误：`absent` 是合法缺席（由安装点 fail closed），
+  // `installed` 是合法装填（**允许为空**：那是"这次没有东西要禁止"这个陈述）。
+  if (req[RUN_FLOOR_WIRE_FIELD] !== undefined) {
+    const floorReading = readRunFloor(req[RUN_FLOOR_WIRE_FIELD])
+    if (floorReading.state === RUN_FLOOR_STATES.REFUSED) {
+      errors.push(...floorReading.errors)
     }
   }
   // 预期输出契约：schema 与验收提示必须同时给出

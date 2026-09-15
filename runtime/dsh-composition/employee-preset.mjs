@@ -188,6 +188,50 @@ export const LEGION_TOOL_ROUTING = Object.freeze({
 })
 
 /**
+ * **把映射读出来的那一份读数**：一组 Legion 工具名 → 它们真正落到执行面的工具名。
+ *
+ * ## 为什么它必须存在（而不是只活在注释里）
+ *
+ * 有一条可验证、而且**会静默失效**的名字空间事实：
+ *
+ *   · 静态下限 `createHardFloorGuard()`（`enforcement.mjs`）比对的是
+ *     **执行面（DSH）的工具名**——它只看 `execution.name`，中间没有翻译；
+ *   · Legion 的高风险名单（`tool-capability.mjs` 的 `HIGH_RISK_TOOL_NAMES`）写的是
+ *     **能力名**（`read-secret` / `run-command` / …）。
+ *
+ * 两个名字空间不相交。把后者直接当 `denyTools` 装上去，实际拒绝集是**这个函数
+ * 返回的并集**，而不是那九个能力名——对 `HIGH_RISK_TOOL_NAMES` 它只有 shell 那一对
+ * （`bash` / `pwsh`）。**六个宿主平面能力连一个执行面名字都没有**（`hosted: true`），
+ * 另外几个能力又**共用**同一批名字（`run-command` / `git-commit` / `git-push` /
+ * 低风险的 `git-status` 都走 shell）。
+ *
+ *   > 一份「写的是能力名、比的是工具名」的名单，
+ *   > 与一份「写的是工具名、于是真的拦得住」的名单，
+ *   > 在用例只喂 Legion 名字的那些日子里是同一个东西（手写的 probe 都能被拒）——
+ *   > 只不过真工具名进来时，前者一个都拦不住，却在摘要里看起来在生效。
+ *
+ * ⚠️ 这个函数是**读数**，不是安装路径：`run-floor.mjs` 的 `absent` 档**不**用它装
+ * guard——接线完成前那一档的 fail closed 姿态是"拒绝一切"（名字名单做不到 fail
+ * closed：不在名单里的一律放行）。把映射算出来是为了让"名单对不上号"这件事**可被
+ * 断言**，而不是只活在注释里；它**不改变** `absent` 拦什么。
+ *
+ * @param {string[]} [legionToolNames] Legion 工具名，默认取整张路由表
+ * @returns {readonly string[]} 去重后的执行面工具名（`hosted` 的不产生名字）
+ */
+export function dshToolNamesOf(legionToolNames = Object.keys(LEGION_TOOL_ROUTING)) {
+  const out = []
+  for (const name of legionToolNames) {
+    const route = LEGION_TOOL_ROUTING[name]
+    // 不在表里的名字**不猜**：猜一个执行面名字就是凭空造一条禁不掉的规则。
+    if (route === undefined || route.hosted === true) continue
+    for (const dsh of route.dshTools ?? []) {
+      if (!out.includes(dsh)) out.push(dsh)
+    }
+  }
+  return Object.freeze(out)
+}
+
+/**
  * 从**授权**推导出这份 preset 需要哪些 DSH 行，以及覆盖情况。
  *
  * @param {{grant: object, allowedTools?: string[]}} input

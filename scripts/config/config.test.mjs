@@ -30,7 +30,8 @@ import { SCHEMA as SERVICES } from '../../services-plugin/config-schema.mjs'
 // PRT-254：`runtime/`（清单声明的第 3 个进程）与 `security/`（安全面库）此前不在扫描范围里
 import { SCHEMA as RUNTIME } from '../../runtime/config-schema.mjs'
 import { SCHEMA as SECURITY } from '../../security/config-schema.mjs'
-// 本批（动态读取强制登记）：product 的 8 处动态下标此前一处都没登记
+// PRT-254（动态读取强制登记）：product 当时那 8 处动态下标此前一处都没登记
+// （PRT-708 之后是 12 处：托盘图标宿主多了 PATH / ProgramFiles / SystemRoot 三处读）
 import { SCHEMA as PRODUCT } from '../../product/config-schema.mjs'
 
 const ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..')
@@ -942,7 +943,7 @@ test('★★ Trap 3：security 的那处动态下标是**非 env 读取**，用�
   assert.deepEqual([...extractEnvReads(src).literal], [], 'security 确实不读 process.env（否则这条"假阳性"判断就错了）')
 })
 
-test('★★ product 的 8 处动态下标逐条对账：6 处真读进 dynamicEnvReads，2 处写目标进非 env 名单', () => {
+test('★★ product 的 12 处动态下标逐条对账：10 处真读进 dynamicEnvReads（9 条声明），2 处写目标进非 env 名单', () => {
   const scan = scanProcess('product', { includeTests: false })
   const cov = dynamicCoverage(scan, PRODUCT, { schemaFile: SCHEMA_FILES.product, processName: 'product' })
   // ① 源码侧：先把"要登记什么"数清楚。★ 用 cov.source（已排除 schema 文件自身）而不是 scan.dynamic——
@@ -956,14 +957,20 @@ test('★★ product 的 8 处动态下标逐条对账：6 处真读进 dynamicE
     'product/launcher/cli.mjs → env[OS_HOME_ENV.HOME]',
     'product/launcher/cli.mjs → env[OS_HOME_ENV.LOCAL_APP_DATA]',
     'product/launcher/cli.mjs → env[OS_HOME_ENV.USER_PROFILE]',
+    // PRT-708：托盘图标宿主要在 Windows 上照 DSH 那条解析顺序找 shell，
+    // 于是多了 PATH / ProgramFiles / SystemRoot 三处读（PATH 读两处，见注册表 occ=2）。
+    'product/launcher/tray-icon.mjs → env[SHELL_ENV.PATH]',
+    'product/launcher/tray-icon.mjs → env[SHELL_ENV.PATH]',
+    'product/launcher/tray-icon.mjs → env[SHELL_ENV.PROGRAM_FILES]',
+    'product/launcher/tray-icon.mjs → env[SHELL_ENV.SYSTEM_ROOT]',
     'product/paths.mjs → env[LEGION_ENV.HOME]',
     'product/paths.mjs → env[envKey]',
   ], 'product 的动态下标清单变了——重数一遍再改 schema，不要照抄旧数字')
-  assert.equal(cov.self.length, 8, 'product 声明之后，schema 自身登记文本命中 8 处（必须被排除，不是待登记）')
+  assert.equal(cov.self.length, 11, 'product 声明之后，schema 自身登记文本命中 11 处（必须被排除，不是待登记）')
 
   // ② 声明侧：每一处都必须有明确去处
   assert.deepEqual(cov.uncovered, [], 'product 的每处动态下标都必须有去处：' + JSON.stringify(cov.uncovered))
-  assert.equal(PRODUCT.dynamicEnvReads.length, 6, '真实读取 6 处')
+  assert.equal(PRODUCT.dynamicEnvReads.length, 9, '真实读取 9 条声明（覆盖 10 处，PATH 那一处出现两次）')
   assert.equal(PRODUCT.dynamicEnvReads.length + 0, cov.entries.filter((e) => e.via === 'dynamicEnvReads').length,
     '每条声明都必须真的覆盖到一处读取（多一条声明 = 编造，少一条 = 覆盖不到）')
   for (const d of PRODUCT.dynamicEnvReads) {
@@ -1030,7 +1037,7 @@ test('★ 端到端：scan --check 必须 PASS，且把「schema 自身登记文
   assert.equal(r.code, 0, r.out)
   assert.match(r.out, /scan: PASS（全部 env 读取点、疑似字面量与动态读取均已处理/)
   assert.match(r.out, /runtime\/config-schema\.mjs 命中 5 处/)
-  assert.match(r.out, /product\/config-schema\.mjs 命中 8 处/)
+  assert.match(r.out, /product\/config-schema\.mjs 命中 11 处/)
   assert.match(r.out, /allowlist\.mjs[\s\S]{0,60}write-target/)
   assert.match(r.out, /dsh-credentials\.mjs[\s\S]{0,60}foreign-object/)
   assert.ok(!/未声明动态读取/.test(r.out), 'PASS 时不得报未声明动态读取：\n' + r.out)

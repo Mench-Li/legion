@@ -445,6 +445,91 @@ export function resolveTool(name) {
   })
 }
 
+/**
+ * **高风险工具名单**（`risk >= high`）——`HIGH_RISK_TOOL_NAMES`。
+ *
+ * 为什么是"算出来的"而不是手写的九个名字：手写的那一份与登记表在
+ * "没有人只改一边的那些日子里"完全一致，而它会在有人给登记表加一个
+ * `read-secret` 之类的工具、或者把某个工具的 `declaredRisk` 抬上去的第二天
+ * **安静地少一项**——少掉的那一项恰恰是小一号的 `denyTools`。
+ *
+ *   > 一份"今天恰好与登记表同名"的名单，
+ *   > 与一份"登记表本身"的名单，在没人改登记表的日子里是同一个东西——
+ *   > 只不过前者在下一次加工具时会让新工具**默认放行**。
+ *
+ * ⚠️ 这一组**不是** `hardFloor: true` 的那三个（`file:delete` / `repo:push` /
+ * `credential:write` 的能力）。硬底线是"永远不能自动放行"，`high` 是
+ * "需要人工批准、且发布前姿态下静态禁止"。spec §6.8 `:479` 说的是**高风险**，
+ * 所以这一档是**九个**，不是三个。
+ *
+ * ## ★★ 名字空间：这一组**绝不能**被当成 `denyTools` 直接装
+ *
+ * 下面每一个名字都在 **Legion 的能力名空间**里（`read-secret` / `run-command` / …），
+ * 而静态下限 `createHardFloorGuard()`（`enforcement.mjs`）比对的是
+ * **执行面（DSH）的工具名**——它只看 `execution.name`（`write` / `read` / `pwsh` / …），
+ * 中间**没有任何翻译**。两个名字空间**不相交**，结构上是这样分的：
+ *
+ *   · 九个里有**六个是宿主平面能力**，根本没有执行面的工具名
+ *     （`delete-file` / `mcp-invoke` / `read-secret` / `write-secret` /
+ *     `send-message` / `post-external-api`——见 `employee-preset.mjs` 的 `hosted: true`）；
+ *   · 剩下三个（`run-command` / `git-commit` / `git-push`）都塌在**同一对**
+ *     shell 工具名上，而**低风险**的 `git-status` 也用那一对——于是"按名字禁"连
+ *     "禁高风险、放低风险"这个粒度都表达不出来。
+ *
+ * 两个空间之间的映射在 `employee-preset.mjs` 的 `LEGION_TOOL_ROUTING`（`dshTools`），
+ * 读数由同文件的 `dshToolNamesOf()` 算出来：对**这一组九个**，它只返回 shell 那一对。
+ *
+ *   > 一个「把 Legion 能力名当 `denyTools` 装上去」的下限，
+ *   > 与一个「名字空间对得上、于是真的拦住了高风险工具」的下限，
+ *   > 在用例只喂 Legion 名字的那些日子里是同一个东西（手写的 probe 都能被拒）——
+ *   > 只不过真工具名进来时，前者一个都拦不住，却在摘要里看起来在执行 §6.8:479。
+ *
+ * 所以：**作为数据**这一组是对的、也是单一来源（下面的单源说明）；**作为 `denyTools`**
+ * 它是**空的**（`名单 ∩ 真工具名 = ∅`）。`run-floor.mjs` 的 `absent` 档因此选
+ * "拒绝一切"——名字名单不是 fail closed 的，不在名单里的一律放行。
+ *
+ * 位置：必须放在 `TOOL_CATALOG` / `RISK_RANK` 之后——模块求值期 `const` 不可
+ * 提前读取（TDZ），把它挪到 `resolveTool` 附近就得保证这几个名字已经算出来了。
+ */
+export const HIGH_RISK_TOOL_NAMES = Object.freeze(
+  KNOWN_TOOL_NAMES.filter((n) => RISK_RANK[TOOL_CATALOG[n].risk] >= RISK_RANK.high),
+)
+
+/**
+ * **发布前姿态**（spec §6.8 `:479`）的静态下限**形状**：高风险工具那一组。
+ *
+ * spec 的原文把这个姿态说得很清楚：「无人值守模式下，要求人工审批的操作默认拒绝或
+ * 保持等待，不自动降级为允许。legacy 路径在完成 DSH 强制面接线前**禁止高风险工具**」。
+ *
+ * ⚠️★★ 这里有一个**容易读错**的地方，写在这里而不是留给下一个人踩：
+ * **这个对象今天没有任何生产安装点**，而且它**不能**被直接当作 `denyTools` 装上去。
+ * 它的 `denyTools` 是 `HIGH_RISK_TOOL_NAMES`——一组 **Legion 能力名**，而
+ * `createHardFloorGuard()` 比对的是**执行面（DSH）的工具名**（见那一组的注释）。
+ * 把它装进 guard，拒绝集是**空集**：六个高风险能力是宿主平面的（没有执行面名字），
+ * 另外三个都塌在 shell 那一对上（低风险的 `git-status` 也共用）。
+ *
+ *   > 一个「装上这份下限、于是看起来在执行 §6.8:479」的实现，
+ *   > 与一个「装上这份下限、而它一个真工具名都没命中」的实现，
+ *   > 在用例只喂 Legion 名字的那些日子里是同一个东西——
+ *   > 只不过真工具名进来时，前者是绿的，而这一档其实什么都没拦住。
+ *
+ * 所以"没给下限"（`run-floor.mjs` 的 `absent`）今天装的是**拒绝一切**：
+ * §6.8:479 要的是禁止高风险工具，**过度禁止满足它**，而"看起来在禁、实际一个都没拦"
+ * 不满足。这份常量留下是因为它作为**数据**是对的（单一来源、可断言），
+ * 且接线完成（控制面派生→过线→`installed`）之后它才是名单的来源。
+ *
+ * ★ 形状与 `createHardFloorGuard()` 消费的那一份一致（`enforcement.mjs:167`）。
+ * `denyPathPrefixes` **故意为空**，而且**不许有人"顺手"补一个 `cwd`**：
+ * guard 只在**前缀非空**时才去读 `cwd` / `platform`（同文件 `:180`：
+ * `if (typeof target === 'string' && denyPathPrefixes.length > 0)`）。
+ * 前缀为空 ⇒ 路径那一支整段不进入 ⇒ 这份下限**不需要 cwd 也判得对**。
+ * 补一个 `cwd` 只会制造一个"它看起来需要这台机器的现场"的假象。
+ */
+export const PRE_WIRING_HARD_FLOOR = Object.freeze({
+  denyTools: HIGH_RISK_TOOL_NAMES,
+  denyPathPrefixes: Object.freeze([]),
+})
+
 /** 给用户看的一句话：这个工具会做什么、风险多高、要不要批。 */
 export function describeRiskText(tool) {
   const t = tool?.known === undefined ? resolveTool(tool?.name) : tool

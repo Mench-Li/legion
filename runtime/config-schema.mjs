@@ -160,6 +160,17 @@ export const NON_ENV_LITERALS = Object.freeze([
   'TABLE_INVALID', // runtime/contracts/price-table.mjs
   'TOKENS_UNKNOWN', // runtime/contracts/price-table.mjs
   'VERSION_REQUIRED', // runtime/contracts/price-table.mjs
+  // ── runtime/contracts/run-floor.mjs（8 条）PRT-214 缺口①：一次 Run 的静态 hard floor
+  //    在**线上**长什么样。这一组是"搬运形状"的判定码：每一种的修法不同，
+  //    所以各自一个名字（`RUN_FLOOR_NOT_SUPPLIED` 是状态码，不在这一组里）。
+  'RUN_FLOOR_BAD_PATH_PREFIX', // runtime/contracts/run-floor.mjs
+  'RUN_FLOOR_BAD_SHAPE', // runtime/contracts/run-floor.mjs
+  'RUN_FLOOR_BAD_TOOL_NAME', // runtime/contracts/run-floor.mjs
+  'RUN_FLOOR_NOT_DERIVED', // runtime/contracts/run-floor.mjs
+  'RUN_FLOOR_NOT_OBJECT', // runtime/contracts/run-floor.mjs
+  'RUN_FLOOR_NOT_SUPPLIED', // runtime/contracts/run-floor.mjs
+  'RUN_FLOOR_UNKNOWN_KEY', // runtime/contracts/run-floor.mjs
+  'RUN_FLOOR_VERSION_UNSUPPORTED', // runtime/contracts/run-floor.mjs
   // ── runtime/contracts/wire.mjs（16 条）
   'RUNTIME_CONTRACT_ADAPTER_SHAPE_INVALID', // runtime/contracts/wire.mjs
   'RUNTIME_CONTRACT_ADAPTER_THREW', // runtime/contracts/wire.mjs
@@ -261,7 +272,7 @@ export const NON_ENV_LITERALS = Object.freeze([
   'RUNTIME_CONTRACT_ROW_NO_PUBLICATION_DIR', // runtime/dsh-composition/plugins/runtime-contract-server-row.mjs
   'RUNTIME_CONTRACT_ROW_NO_TOKEN', // runtime/dsh-composition/plugins/runtime-contract-server-row.mjs
   'RUNTIME_CONTRACT_ROW_PUBLICATION_FAILED', // runtime/dsh-composition/plugins/runtime-contract-server-row.mjs
-  // ── runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs（18 条）
+  // ── runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs（20 条）
   'RUNTIME_HOST_REGISTRAR_CAPABILITY_CANCEL_NOT_GUARANTEED_BY_ENGINE', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
   'RUNTIME_HOST_REGISTRAR_CAPABILITY_ENFORCEMENT_PLANE_MEASURED_ELSEWHERE', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
   'RUNTIME_HOST_REGISTRAR_CAPABILITY_PROVIDER_LACKS_OUTPUT_SCHEMA', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
@@ -273,6 +284,11 @@ export const NON_ENV_LITERALS = Object.freeze([
   'RUNTIME_HOST_REGISTRAR_DSH_VERSION_MALFORMED', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
   'RUNTIME_HOST_REGISTRAR_DSH_VERSION_NOT_FOUND', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
   'RUNTIME_HOST_REGISTRAR_DSH_VERSION_READ', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
+  // PRT-214 缺口①：一次 Run 的静态 hard floor 过线时，端口那一侧的两种具名拒绝。
+  // 与相邻的那些**分开**：`FLOOR_UNREADABLE` 要改载荷的生产者，
+  // `FLOOR_NOT_INSTALLABLE` 要看引擎/provider——修法不同，所以码不同。
+  'RUNTIME_HOST_REGISTRAR_FLOOR_NOT_INSTALLABLE', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
+  'RUNTIME_HOST_REGISTRAR_FLOOR_UNREADABLE', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
   'RUNTIME_HOST_REGISTRAR_MODEL_SELECTION_READ', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
   'RUNTIME_HOST_REGISTRAR_MODEL_SELECTION_RESULT_MALFORMED', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
   'RUNTIME_HOST_REGISTRAR_MODEL_SELECTION_SERVICE_ABSENT', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
@@ -316,6 +332,17 @@ export const NON_ENV_LITERALS = Object.freeze([
   'ENFORCEMENT_ROOT_NO_DECIDE_PORT', // runtime/dsh-composition/root.mjs
   'ENFORCEMENT_ROOT_NO_HUB_URL', // runtime/dsh-composition/root.mjs
   'ENFORCEMENT_ROOT_NO_SCOPE', // runtime/dsh-composition/root.mjs
+  // ── runtime/dsh-composition/run-floor.mjs（7 条）PRT-214 缺口①：**安装点**的拒绝码。
+  //    与上面契约组分开：那一组是"载荷长什么样"，这一组是"装不装得上"。
+  //    ★ 这里**没有**"引擎交回的不是 in-process 子 Agent"那个码：那个条件由端口那一层
+  //    先判掉（`RUNTIME_HOST_REGISTRAR_FLOOR_NOT_INSTALLABLE`），在这一层永远产生不了。
+  'RUN_FLOOR_INSTALL_MISSING_FLOOR', // runtime/dsh-composition/run-floor.mjs
+  'RUN_FLOOR_INSTALL_NOT_AN_OBJECT', // runtime/dsh-composition/run-floor.mjs
+  'RUN_FLOOR_INSTALL_NO_AGENT_CONTEXT', // runtime/dsh-composition/run-floor.mjs
+  'RUN_FLOOR_INSTALL_NO_EVENT_SEAM', // runtime/dsh-composition/run-floor.mjs
+  'RUN_FLOOR_INSTALL_NO_GUARD_SEAM', // runtime/dsh-composition/run-floor.mjs
+  'RUN_FLOOR_INSTALL_UNKNOWN_KEY', // runtime/dsh-composition/run-floor.mjs
+  'RUN_FLOOR_INSTALL_UNKNOWN_STATE', // runtime/dsh-composition/run-floor.mjs
   // ── runtime/dsh-composition/runtime-contract-publication.mjs（5 条）
   'ENOENT', // runtime/dsh-composition/runtime-contract-publication.mjs
   'RUNTIME_CONTRACT_PUBLICATION_CLEAR_FAILED', // runtime/dsh-composition/runtime-contract-publication.mjs
@@ -412,6 +439,16 @@ export const SCHEMA = defineSchema({
   // 前缀机制的前提是"该前缀下的变量都属于我"；只拥有其中十个成员时这个前提不成立——
   // 声明它只会对别人的变量产出假告警，而假告警会让人习惯性忽略 warnings。
   // 理由与 orchestrator 不声明 TEAM_HUB_ 前缀完全相同。
+  //
+  // ★ `RUN_FLOOR_` 也**不**作为前缀声明，尽管这一族确实只属于 Runtime 进程
+  //   （PRT-214 缺口①的 15 个具名码，见 `NON_ENV_LITERALS` 里那两组）。
+  //   理由不是命名空间问题，是这个机制在 `scan.mjs:514` 里**不做前缀匹配**：
+  //   它把 `prefixes` 的元素原样并进 `known` 再做精确 `.has(k)`，
+  //   于是 `prefixes: ['RUN_FLOOR_']` 只能放行那个恰好叫 `RUN_FLOOR_` 的字面量，
+  //   一个真实的码都盖不住——而它看起来像盖住了。
+  //   > 一条"看起来覆盖一族、实际覆盖零个"的声明，
+  //   > 与一条根本没写的声明，在门禁读数上是同一个东西（都是红的），
+  //   > 但它会让人以为查过了。所以这一族逐条登记。
   fields: [
     {
       key: 'hubUrl', env: 'TEAM_HUB_URL', type: 'string', default: '',

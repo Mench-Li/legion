@@ -35,6 +35,22 @@ function envFor(root) {
   }
 }
 
+/**
+ * 一个用例自己的临时根，**用完必删**。
+ *
+ * 本文件此前的临时根只在几个 runtime 用例里统一回收，其余靠 `%TEMP%` 自己
+ * 长草——本会话实测那里积了 1300 多个孤儿目录、约 1 GB。托盘那一组会
+ * 真起进程，孤儿目录里就会带着"一个已经没人管的宿主脚本"，所以这一组
+ * 一律用 `finally` 收干净。
+ */
+function tmpRoot(tag) {
+  const dir = mkdtempSync(join(tmpdir(), `legion-${tag}-`))
+  return {
+    dir,
+    cleanup: () => { try { rmSync(dir, { recursive: true, force: true }) } catch { /* 尽力而为 */ } },
+  }
+}
+
 test('parseArgs：只接受 --k=v，位置参数与未知参数都被点名拒绝', () => {
   assert.deepEqual(parseArgs([]).errors, [])
   const ok = parseArgs(['--install-dir=C:\\L', '--port.team-hub=9000', '--include=a,b', '--check'])
@@ -1034,4 +1050,218 @@ test('★ 诚实边界：这一套接线**没有**证明什么', async () => {
   assert.equal(c, RUNTIME_INSTALL_CLI_EXIT.UNDIAGNOSED)
 
   // ⑥ 所以：**这一套证明的是"接线接上了"，不是"产品能装 DSH 了"。**
+})
+
+// ============================================================================
+// PRT-708：托盘**真的挂在启动路径上**
+//
+// 在加这一组之前，`tray.mjs` / `tray-wiring.mjs` / `tray-icon.mjs` 三层
+// 全齐、用例全绿，而 `run()` 里**一个字都没提过它们**——`waitForSignal`
+// 这条长驻路径更是**从来没有被任何用例走过**（测试里它只出现过 `false`）。
+//
+//   > 一个"三层都齐、用例全绿、而启动路径上没人调"的功能，
+//   > 与一个不存在的功能，在用户那里是同一个东西——
+//   > 只不过前者的测试报告很好看。
+// ============================================================================
+
+/** 一个"启动成功"的启动器替身：`start()` 的形状由 createLauncher 的契约决定。 */
+function fakeStartedLauncher(stopCalls) {
+  return () => ({
+    async start() { return { ok: true, phase: 'ready', failures: [] } },
+    status() {
+      return { state: 'ready', stateText: '产品已就绪', scope: 'default', processes: [] }
+    },
+    allDiagnostics() { return [] },
+    async stop(deps) { stopCalls.push(deps); return { results: [{ key: 'team-hub', stopped: true }] } },
+  })
+}
+
+/**
+ * 走一趟**长驻**路径（`waitForSignal: true`），并在它挂上监听之后送一个 SIGINT。
+ *
+ * `process.emit('SIGINT')` 与真信号不同：**没有监听者时它是空操作**，不会
+ * 杀掉测试进程。所以这里可以毫无风险地反复送，直到 `run()` 收工——
+ * 既避免了"送早了、信号丢了"（那会让用例挂死），也不会误伤别的用例。
+ */
+async function runUntilSignal(runFn, deps) {
+  const p = runFn(deps)
+  const tick = setInterval(() => { try { process.emit('SIGINT') } catch {} }, 15)
+  try {
+    return await p
+  } finally {
+    clearInterval(tick)
+  }
+}
+
+test('★★★ PRT-708：默认运行真的把托盘接上了（接缝被调用、收工被摘掉、退出码不变）', async () => {
+  const { dir, cleanup } = tmpRoot('cli-tray-on')
+  try {
+    const { run } = await import('./cli.mjs')
+    const out = collector()
+    const attached = []
+    const detached = []
+    const stopCalls = []
+
+    const code = await runUntilSignal(run, {
+      argv: ['--workspace=' + join(dir, 'ws')],
+      env: envFor(dir),
+      write: out.write,
+      // ★ 这里**必须**是 true：托盘只长在"产品真的在跑"那一段时间里，
+      //   而 `false` 会让整段根本不执行——那正是这条用例存在的理由。
+      waitForSignal: true,
+      createLauncherFn: fakeStartedLauncher(stopCalls),
+      trayAttachFn: async (deps) => {
+        attached.push(deps)
+        return {
+          ok: true, code: null, message: 'ok', iconNotice: '图标宿主已报 ready',
+          shellKind: 'windows-powershell-5.1', pid: 4242,
+          detach: async () => { detached.push(true); return { ok: true, code: 'TRAY_ICON_EXITED' } },
+        }
+      },
+    })
+
+    assert.equal(code, 0, '挂了托盘不该改变退出码')
+    assert.equal(attached.length, 1, '默认运行没有把托盘接上去——那等于这个功能不存在')
+    // ★ 交下去的必须是一个**真的 launcher**，不是一个空壳：
+    //   托盘的动作（启动/停止/状态/打开）全都要通过它。
+    assert.ok(attached[0].launcher, '没有把 launcher 交给托盘——那样菜单里每个动作都会失败')
+    assert.ok(attached[0].options?.layout, '没有把布局交下去——那样写入边界无从判定')
+    assert.equal(detached.length, 1, '收工时没有摘掉图标（幽灵图标就是这么留下的）')
+    assert.equal(stopCalls.length, 1, '收工没有真的停产品')
+
+    const text = out.text()
+    assert.match(text, /系统托盘图标已挂上/, `没有告诉用户托盘挂上了：\n${text}`)
+    assert.match(text, /已摘下/, '没有告诉用户图标已经摘掉')
+    // ★ 顺序：先摘图标，再报"已停止"。反过来的话，用户会先看到"停了"
+    //   而图标还在——那一段时间里点它会得到一个空壳。
+    assert.ok(text.indexOf('已摘下') < text.indexOf('已停止'), `摘图标必须在停产品之前：\n${text}`)
+  } finally { cleanup() }
+})
+
+test('★★★★ PRT-708：`--json` 与 `--no-tray` 一次都不碰托盘（关得掉的开关才算开关）', async () => {
+  const { dir, cleanup } = tmpRoot('cli-tray-off')
+  try {
+    const { run } = await import('./cli.mjs')
+
+    for (const [why, extra] of [
+      ['--json（脚本没有桌面）', ['--json']],
+      ['--no-tray（显式退出）', ['--no-tray']],
+    ]) {
+      const out = collector()
+      let calls = 0
+      const code = await runUntilSignal(run, {
+        argv: [...extra, '--workspace=' + join(dir, 'ws')],
+        env: envFor(dir),
+        write: out.write,
+        waitForSignal: true,
+        createLauncherFn: fakeStartedLauncher([]),
+        trayAttachFn: async () => { calls++; return { ok: true, detach: async () => ({ ok: true }) } },
+      })
+      assert.equal(code, 0, why)
+      // ★ 这个计数就是"没被碰过"这句话**唯一**的证据。
+      assert.equal(calls, 0, `${why} 下托盘装配被调用了 ${calls} 次`)
+
+      if (extra[0] === '--json') {
+        // `--json` 的 stdout 必须是一份能整份 parse 的文档——所以托盘
+        // **连一句提示都不能往上写**。
+        for (const line of out.lines) {
+          assert.doesNotThrow(() => JSON.parse(String(line)), `--json 下混进了非 JSON 的一行：${line}`)
+        }
+      } else {
+        assert.match(out.text(), /no-tray|按参数要求/, '关掉了却没说一声——用户会以为它坏了')
+      }
+    }
+  } finally { cleanup() }
+})
+
+test('★★★★ PRT-708：图标起不来**不改退出码**，而且原因必须说清楚（三态不能混）', async () => {
+  const { dir, cleanup } = tmpRoot('cli-tray-fail')
+  try {
+    const { run } = await import('./cli.mjs')
+
+    // ① 装配返回"挂不上、且知道为什么" → 报原因，退出码仍是 0
+    {
+      const out = collector()
+      const code = await runUntilSignal(run, {
+        argv: ['--workspace=' + join(dir, 'ws')],
+        env: envFor(dir), write: out.write, waitForSignal: true,
+        createLauncherFn: fakeStartedLauncher([]),
+        trayAttachFn: async () => ({
+          ok: false, code: 'TRAY_ICON_NO_SHELL',
+          message: '这台机器上没有一档可用的 PowerShell',
+          iconNotice: '解析不到 shell，所以"支持不支持"还没被量过',
+          detach: async () => ({ ok: true }),
+        }),
+      })
+      assert.equal(code, 0, '画不出图标不该拒绝启动——那比没有图标更坏')
+      const t = out.text()
+      assert.match(t, /没有挂上/, `没有报告挂不上：\n${t}`)
+      assert.match(t, /没有一档可用的 PowerShell/, '没有把原因说出来')
+      // ★★ 三态里最要紧的一条：`null`（还没量过）**不能**被说成
+      //    `false`（机器不支持）。两者的修法完全不同。
+      assert.match(t, /还没被量过/, '把"不知道"说成了"不支持"')
+    }
+
+    // ② 装配**抛错**（最坏情况）→ 同样不改退出码，且要说出来
+    {
+      const out = collector()
+      const code = await runUntilSignal(run, {
+        argv: ['--workspace=' + join(dir, 'ws')],
+        env: envFor(dir), write: out.write, waitForSignal: true,
+        createLauncherFn: fakeStartedLauncher([]),
+        trayAttachFn: async () => { throw new Error('生成脚本时炸了') },
+      })
+      assert.equal(code, 0, '装配抛错也不该改变退出码')
+      const t = out.text()
+      assert.match(t, /没有挂上/, '抛错被静默吞掉了')
+      assert.match(t, /生成脚本时炸了/, '没有把抛错的原因带出来')
+    }
+  } finally { cleanup() }
+})
+
+test('★★ PRT-708：`--help` 里有 `--no-tray`（能用的与文档里写的不能分成两件事）', async () => {
+  const { run } = await import('./cli.mjs')
+  const out = collector()
+  const code = await run({ argv: ['--help'], write: out.write, waitForSignal: false })
+  assert.equal(code, 0)
+  assert.match(out.text(), /--no-tray/, 'CLI_FLAGS 里加了开关，说明里却没有')
+  assert.ok(CLI_FLAGS.some((f) => f.name === '--no-tray'), 'CLI_FLAGS 里没有这一条')
+})
+
+test('★★★ PRT-708：真装配（不注入替身）端到端——有结论、不挂死、收工不残留', async () => {
+  const { dir, cleanup } = tmpRoot('cli-tray-real')
+  try {
+    const { run } = await import('./cli.mjs')
+    const { resolveTrayShell } = await import('./tray-icon.mjs')
+
+    // 本机解析不到任何一档 shell（例如无桌面的 Linux 容器）时，
+    // 这条路**证不到**"真装配能挂上"，如实跳过并写明理由。
+    const shell = resolveTrayShell({ platform: process.platform, env: process.env })
+    if (process.platform !== 'win32' || shell.ok !== true) {
+      console.log(`  ⤷ SKIP 真装配：本机 platform=${process.platform} shell.ok=${shell.ok}（${shell.code ?? '-'}）`)
+      return
+    }
+
+    const out = collector()
+    const t0 = Date.now()
+    // ★ 走的是**真的** `defaultTrayAttach`：真生成脚本、真 spawn PowerShell 宿主。
+    const code = await runUntilSignal(run, {
+      argv: ['--workspace=' + join(dir, 'ws')],
+      env: envFor(dir), write: out.write, waitForSignal: true,
+      createLauncherFn: fakeStartedLauncher([]),
+    })
+    const elapsed = Date.now() - t0
+
+    assert.equal(code, 0, `真装配不得改变退出码：\n${out.text()}`)
+    // ★ 本机实测：解析到的是随 Windows 发货的 5.1，图标真的挂上了。
+    //   但这一条**不**断言"一定挂上"——那会在 GUI 不可用的会话里假红。
+    //   它断言的是"**有结论**"：要么挂上，要么说出为什么没挂上。
+    const t = out.text()
+    assert.ok(/已挂上|没有挂上/.test(t), `既没说挂上也没说挂不上——那是静默失败：\n${t}`)
+    assert.ok(elapsed < 90_000, `真装配耗时 ${elapsed}ms，疑似挂死`)
+    // 真挂上时，收工必须摘掉；没挂上时不该出现"已摘下"。
+    if (t.includes('已挂上')) assert.match(t, /已摘下/, '挂上了却没摘（幽灵图标）')
+    console.log(`  ⤷ 真装配读数 ${elapsed}ms：` +
+      t.split('\n').filter((l) => /托盘/.test(l)).map((l) => l.trim()).join(' | '))
+  } finally { cleanup() }
 })

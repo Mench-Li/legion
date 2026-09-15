@@ -335,6 +335,69 @@ test('③ startRun 收到的是取消信号与结构化 schema', async () => {
   assert.match(call.options.prompt[0].text, /T-1/)
 })
 
+// ================================================================ ③′ PRT-214 缺口①：静态 hard floor 过线
+
+test('③′ 请求里**没有** `enforcementFloor` → 端口收到的是 `{state:"absent"}`，**不是**空下限', async () => {
+  // ★ 这条是"缺席与空下限必须分得开"在适配器那一侧的落点。
+  //   一个"缺席就什么都不传"的适配器，与一个"缺席被读成空下限"的适配器，
+  //   在端口那一侧的读数上是同一个东西——只不过前者的键根本不在。
+  //
+  //   适配器**只运形状，不决定处置**：`absent` 在安装点被落成 spec §6.8:479 的
+  //   发布前姿态——**拒绝一切**工具调用（静态下限比的是执行面工具名，而 Legion 派生
+  //   出来的名单写的是能力名，两个空间不相交；名字名单不是 fail closed 的）。
+  //   处置的读数不在这一层：真进程那一对哨兵在
+  //   `../dsh-composition/run-floor-dsh-process.test.mjs`。
+  //   所以这里两条断言读的是**形状**。
+  const host = hostOk()
+  const a = await readyAdapter(host)
+  await collect(a, makeRequest())
+  const payload = host.calls.startRun[0].options.enforcementFloor
+  assert.deepEqual(payload, { state: 'absent' })
+  assert.equal('floor' in payload, false, '缺席不许带一份 floor —— 那正是"空下限"的形状')
+})
+
+test('③′ 请求里**有** `enforcementFloor` → 原样过线（含空名单这一档）', async () => {
+  const host = hostOk()
+  const a = await readyAdapter(host)
+  const floor = { denyTools: ['rm_rf'], denyPathPrefixes: [], cwd: 'C:/tmp/ws', platform: 'win32' }
+  await collect(a, makeRequest({
+    enforcementFloor: { version: 1, derived: true, floor, runId: 'run-1' },
+  }))
+  const payload = host.calls.startRun[0].options.enforcementFloor
+  assert.equal(payload.state, 'installed')
+  assert.deepEqual(payload.floor, floor, '下限必须原样过线，不许在这里加字段或改名')
+
+  // 空名单也是 `installed`：那是"这次没有东西要禁止"这个陈述，不是"没有下限"。
+  const emptyHost = hostOk()
+  const emptyAdapter = await readyAdapter(emptyHost)
+  await collect(emptyAdapter, makeRequest({
+    enforcementFloor: { version: 1, derived: true, floor: { denyTools: [], denyPathPrefixes: [], platform: 'linux' } },
+  }))
+  assert.equal(emptyHost.calls.startRun[0].options.enforcementFloor.state, 'installed')
+})
+
+test('③′ 请求里的下限**解释不了** → 拒收这次 Run，**连 startRun 都不叫**', async () => {
+  // 一份解释不了的载荷不是政策，是一次接线错误：照跑等于把它伪装成一次能跑的 Run。
+  // 与既有的"必填字段缺失"同一个形状：`execute` 在产出任何事件**之前**就抛。
+  for (const bad of [
+    { version: 1, derived: false, floor: null },
+    { version: 1, derived: true, floor: { denyTools: 'rm_rf' } },
+    { version: 1, derived: true, floor: { denyTools: [] }, extra: 1 },
+    null,
+  ]) {
+    const host = hostOk()
+    const a = await readyAdapter(host)
+    await assert.rejects(async () => { await collect(a, makeRequest({ enforcementFloor: bad })) },
+      (err) => {
+        assert.equal(err.code, 'INVALID_RESULT', `坏载荷 ${JSON.stringify(bad)} 的错误码不对`)
+        assert.match(err.message, /enforcementFloor/, '拒绝理由必须点名是哪个字段')
+        return true
+      })
+    assert.equal(host.calls.startRun.length, 0,
+      `坏载荷 ${JSON.stringify(bad)} 已经把 Run 起跑了 —— 那等于"派生失败"照跑`)
+  }
+})
+
 // ================================================================ ④ 结构化校验
 
 test('④ 缺 required 字段 → INVALID_RESULT，不放行', async () => {

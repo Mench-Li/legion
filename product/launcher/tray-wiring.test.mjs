@@ -8,10 +8,13 @@
 //   ① 「打开 Workbench」用**观测到的**地址 —— 计划里那个默认端口拼出来的
 //      地址在 workbench 没就绪时**一个字都不许出去**；
 //   ② 「退出」不许被接线层绕过 —— 观测到产品还在跑时，返回的必须是
-//      `TRAY_QUIT_UNCONFIRMED`，并且托盘留着。
+//      `TRAY_QUIT_UNCONFIRMED`，并且托盘留着；
+//   ③ 「支不支持原生托盘图标」是一个**探测出来的读数**（三态），不是一行常量；
+//      `attachLauncherTray()` 是这个模块唯一的生产调用点。
 //
 // 全程用**假的 launcher**：不起任何真进程；默认打开器那条路径也只换掉
-// `spawn`，不打开任何浏览器。
+// `spawn`，不打开任何浏览器。图标宿主在 ④ 里也是替身——真宿主那几条在
+// `tray-icon.test.mjs` 的 ⑧ 里（那里会真的起一个 PowerShell）。
 // ============================================================================
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -21,13 +24,16 @@ import { DEFAULT_PORTS } from '../process-manifest.mjs'
 import { PRODUCT_STATE_TEXT } from './launcher.mjs'
 import { READINESS_VERIFIED_CODE, readinessResultToDiagnostic } from './readiness.mjs'
 import { TRAY_CODES, TRAY_MENU_IDS } from './tray.mjs'
+import { TRAY_ICON_CODES } from './tray-icon.mjs'
 import {
-  NATIVE_ICON_SUPPORTED,
   NO_NATIVE_ICON_REASON,
   TRAY_WIRING_CODES,
   TRAY_WIRING_READINESS_VERIFIED,
+  attachLauncherTray,
   createLauncherTray,
   createPlatformOpener,
+  iconNoticeOf,
+  nativeIconSupport,
 } from './tray-wiring.mjs'
 
 /**
@@ -369,22 +375,96 @@ test('③ 没有既定打开方式的平台：报 OPEN_FAILED，而不是静默�
   assert.equal(spawned.length, 0)
 })
 
-// ── ④ 诚实边界：本模块不产生原生图标 ──────────────────────────────────────
+// ── ④ 诚实边界：图标到底支不支持，是一个**读数** ──────────────────────────
 
-test('④ ★ 本模块不产生原生托盘图标（诚实边界）', async () => {
-  assert.equal(NATIVE_ICON_SUPPORTED, false)
-  assert.ok(NO_NATIVE_ICON_REASON.includes('不产生原生托盘图标'), NO_NATIVE_ICON_REASON)
-  assert.ok(NO_NATIVE_ICON_REASON.includes('原生外壳'), NO_NATIVE_ICON_REASON)
+/** 这台机器上"能加载 WinForms 的那一档 shell 存在吗"的替身：只让 5.1 那一档存在。 */
+const fakeShellExists = (p) => /powershell\.exe$/i.test(String(p))
 
+test('④ ★ 「支不支持」是三态，而且是**探测的函数**（不是一行常量）', () => {
+  // ① 平台不对 → false。这不是"试过但失败了"，是**这一层在非 Windows 上不存在**。
+  const linux = nativeIconSupport({ platform: 'linux', env: {} })
+  assert.equal(linux.supported, false)
+  assert.equal(linux.code, TRAY_ICON_CODES.UNSUPPORTED_PLATFORM)
+
+  // ② win32 但一档候选 shell 都没有 → false，且说清要装什么才能翻转。
+  const noShell = nativeIconSupport({ platform: 'win32', env: {}, exists: () => false })
+  assert.equal(noShell.supported, false)
+  assert.equal(noShell.code, TRAY_ICON_CODES.NO_SHELL)
+  assert.ok(noShell.flips.includes('候选'), noShell.flips)
+
+  // ★ ③ 第三态：解析到了 shell，但**还没有起过宿主** → `null`（不知道）。
+  //    这一格是最容易说谎的地方：把 `null` 压成 `false`，一台完全能画图标的机器
+  //    就会在向导页里被报成"不支持托盘"；压成 `true`，一台 headless 机器会
+  //    被报成"支持"，然后用户在托盘里找一个不存在的图标。
+  const pending = nativeIconSupport({
+    platform: 'win32', env: {}, exists: fakeShellExists,
+  })
+  assert.equal(pending.supported, null)
+  assert.equal(pending.code, TRAY_ICON_CODES.HOST_PENDING)
+  assert.ok(pending.flips.includes('ready'), pending.flips)
+
+  // ④ 宿主报过 ready → true。这里的"宿主"就是一个形状正确的读数。
+  const ready = nativeIconSupport({
+    platform: 'win32',
+    env: {},
+    exists: fakeShellExists,
+    iconHost: { status: () => ({ ready: true, alive: true, everStarted: true, pid: 4321, shell: 'C:\\x\\powershell.exe' }) },
+  })
+  assert.equal(ready.supported, true)
+  assert.equal(ready.code, TRAY_ICON_CODES.HOST_READY)
+  assert.equal(ready.evidence.hostReady, true)
+  assert.equal(ready.evidence.pid, 4321)
+
+  // ⑤ 宿主起过、但没 ready → false，并且理由里带着那一次失败的结论。
+  const failed = nativeIconSupport({
+    platform: 'win32',
+    env: {},
+    exists: fakeShellExists,
+    iconHost: {
+      status: () => ({
+        ready: false, alive: false, everStarted: true, pid: 1, exitCode: 1,
+        lastFailure: { code: TRAY_ICON_CODES.HOST_EXITED_BEFORE_READY, message: '被执行策略拦下' },
+      }),
+    },
+  })
+  assert.equal(failed.supported, false)
+  assert.equal(failed.code, TRAY_ICON_CODES.HOST_FAILED)
+  assert.ok(failed.reason.includes('被执行策略'), failed.reason)
+  assert.ok(failed.reason.includes('1'), failed.reason)
+})
+
+test('④ ★ 那句"没有图标"的话说清了三种原因与**什么证据会翻转**它', () => {
+  // 它曾经是"本模块不产生原生托盘图标"—— 那句话现在是**假的**：
+  // `tray-icon.mjs` 会在 Windows 上生成一个真能画出 NotifyIcon 的宿主。
+  // 一句"还没有这一层"会让用户以为这是漏做，而真相是"这一层在，只是这台机器上缺前提"。
+  assert.ok(!NO_NATIVE_ICON_REASON.includes('不产生原生托盘图标'), NO_NATIVE_ICON_REASON)
+  assert.ok(NO_NATIVE_ICON_REASON.includes('win32'), NO_NATIVE_ICON_REASON)
+  assert.ok(NO_NATIVE_ICON_REASON.includes('pwsh'), NO_NATIVE_ICON_REASON)
+  assert.ok(NO_NATIVE_ICON_REASON.includes('ready'), NO_NATIVE_ICON_REASON)
+  // 每一种读数都有**自己的**一句：共用一句话的读数没法告诉用户该去修哪一件事。
+  const notices = [
+    iconNoticeOf({ supported: true, shell: 'C:\\x\\powershell.exe', code: TRAY_ICON_CODES.HOST_READY }),
+    iconNoticeOf({ supported: null, code: TRAY_ICON_CODES.HOST_PENDING, reason: '还没起过', flips: '起一次' }),
+    iconNoticeOf({ supported: false, code: TRAY_ICON_CODES.NO_SHELL, reason: '一个都没有', flips: '装一个' }),
+  ]
+  assert.equal(new Set(notices).size, 3, '三种读数给出了同一句话：那用户读不出是哪一种')
+  assert.ok(notices[0].includes('有图标'), notices[0])
+  assert.ok(notices[1].includes('还不知道'), notices[1])
+  assert.ok(notices[2].includes('不支持'), notices[2])
+  assert.ok(notices[2].includes('装一个'), notices[2])
+})
+
+test('④ ★★ 接线层**转发**那一份判据，不自己再判一遍', async () => {
+  // 两份判据迟早在"这台机器到底行不行"上给出两个答案。
   const { launcher } = fakeLauncher({
     state: 'ready',
     processes: [workbenchRow({ url: OBSERVED_WORKBENCH_URL })],
   })
-  const w = createLauncherTray({ launcher })
-  assert.equal(w.nativeIcon, false)
-  assert.equal(w.iconNotice, NO_NATIVE_ICON_REASON)
-
-  // 它交出去的渲染面只有"菜单模型 + 动作派发"——图标由原生外壳去画。
+  const w = createLauncherTray({ launcher, platform: 'win32' })
+  assert.equal(w.nativeIcon, w.nativeIconProbe.supported)
+  assert.equal(w.iconNotice, w.nativeIconProbe.notice)
+  assert.equal(w.status().nativeIcon, w.nativeIconProbe.supported)
+  // 它交出去的渲染面仍然只有"菜单模型 + 动作派发"。
   const m = await w.menu()
   assert.deepEqual(m.items.map((i) => i.id), [...TRAY_MENU_IDS])
   assert.equal(typeof w.tray, 'object')
@@ -405,6 +485,8 @@ test('④ ★ 本模块不产生原生托盘图标（诚实边界）', async () 
   //     > 而那条红说的是"你改的不是我要守的东西"。
   //
   //   所以：node 内建允许，同目录的内部模块允许，**第三方包一律不允许**。
+  //   ★ 这一条在 `tray-icon.mjs` 落地之后**依然成立、而且更要紧**：
+  //     那一层能画图标靠的是系统自带的 PowerShell + WinForms，不是装一个包。
   const src = readFileSync(new URL('./tray-wiring.mjs', import.meta.url), 'utf8')
   const specifiers = [...src.matchAll(/^\s*import\s[^\n]*from\s+'([^']+)'/gm)].map((mm) => mm[1])
   assert.ok(specifiers.length > 0)
@@ -420,16 +502,79 @@ test('④ ★ 本模块不产生原生托盘图标（诚实边界）', async () 
   }
 })
 
+test('④ ★★ `attachLauncherTray()`：三步各自失败各自报，图标起不来也不丢菜单', async () => {
+  const { launcher } = fakeLauncher({
+    state: 'ready',
+    processes: [workbenchRow({ url: OBSERVED_WORKBENCH_URL })],
+  })
+  const calls = { start: 0, stop: 0, disposed: 0 }
+  // 一个形状正确的图标宿主替身：真的按 `tray-icon.mjs` 的契约走。
+  const iconHostFactory = (deps) => ({
+    ok: true,
+    code: null,
+    start: async () => { calls.start += 1; return { ok: true, code: TRAY_ICON_CODES.HOST_READY, pid: 99 } },
+    stop: async () => { calls.stop += 1; return { ok: true, code: TRAY_ICON_CODES.EXITED, disposed: true } },
+    status: () => ({ ready: calls.start > 0 && calls.stop === 0, alive: calls.start > 0 && calls.stop === 0, everStarted: calls.start > 0, pid: 99 }),
+    diagnostics: () => Object.freeze([{ severity: 'info', code: 'ICON_STUB', message: '替身' }]),
+    _deps: deps,
+  })
+
+  const attached = await attachLauncherTray({ launcher, iconHostFactory, dataDir: 'C:\\data', allowedRoot: 'C:\\data' })
+  assert.equal(attached.ok, true, attached.message)
+  assert.equal(calls.start, 1)
+  assert.equal(attached.nativeIcon, true, '宿主报了 ready 之后仍是别的读数：那这个读数没跟着宿主走')
+  assert.deepEqual((await attached.menu()).items.map((i) => i.id), [...TRAY_MENU_IDS])
+  assert.ok(attached.diagnostics().some((d) => d.code === 'ICON_STUB'), '图标宿主的诊断没有被带出来')
+
+  // ★ 收工顺序：先收宿主，再释放托盘。反了的话，还在跑的宿主会往一个已释放的托盘
+  //   上送点击，而那时每一个点击都会被拒——用户看到的是"点了没反应"。
+  const stopped = await attached.disconnect('unit-test')
+  assert.equal(stopped.ok, true)
+  assert.equal(calls.stop, 1)
+  assert.equal((await attached.invoke('status')).ok, false, '托盘释放之后仍然能派发动作')
+
+  // 图标起不来时：**托盘接线照旧交出去**。把两者一起丢掉，会让一个
+  // "图标起不来"的机器连 menu() 都失去。
+  const failing = await attachLauncherTray({
+    launcher,
+    dataDir: 'C:\\data',
+    allowedRoot: 'C:\\data',
+    iconHostFactory: () => ({
+      ok: true,
+      code: null,
+      start: async () => ({ ok: false, code: TRAY_ICON_CODES.HOST_NOT_READY, message: '没有交互桌面' }),
+      stop: async () => ({ ok: true, code: TRAY_ICON_CODES.NOT_STARTED }),
+      status: () => ({ ready: false, alive: false, everStarted: true, exitCode: 1 }),
+      diagnostics: () => Object.freeze([]),
+    }),
+  })
+  assert.equal(failing.ok, false)
+  assert.equal(failing.code, TRAY_ICON_CODES.HOST_NOT_READY)
+  assert.ok(failing.iconNotice.includes('没有交互桌面'), failing.iconNotice)
+  assert.equal(failing.wiring.ok, true, '图标起不来时连托盘接线都没了')
+  assert.ok((await failing.menu()).items.length > 0)
+
+  // 没接上 launcher 时，图标读数**仍然是这台机器的读数**，
+  // 不是"因为缺一个方法所以说画不出来"。
+  const unwired = await attachLauncherTray({ launcher: null, platform: 'win32' })
+  assert.equal(unwired.ok, false)
+  assert.equal(unwired.wiring, null)
+  assert.equal(unwired.nativeIcon, unwired.nativeIconProbe.supported)
+})
+
 // ── ⑤ 接不上的时候要有话 ───────────────────────────────────────────────────
 
 test('⑤ 没有 launcher 时给出具名拒绝，而不是一个假装能用的托盘', async () => {
-  const w = createLauncherTray()
+  const w = createLauncherTray({ platform: 'aix', env: {} })
   assert.equal(w.ok, false)
   assert.equal(w.code, TRAY_WIRING_CODES.MISSING_LAUNCHER)
   assert.equal(w.tray, null)
   assert.equal((await w.invoke('start')).code, TRAY_WIRING_CODES.MISSING_LAUNCHER)
   assert.equal((await w.menu()).ok, false)
+  // ★ 这里说"不支持"的原因是 **aix**，不是"缺一个 launcher"：
+  //   接口没接上不该被报成"这台机器画不出图标"。
   assert.equal(w.nativeIcon, false)
+  assert.equal(w.nativeIconProbe.code, TRAY_ICON_CODES.UNSUPPORTED_PLATFORM)
 })
 
 test('⑤ 装配抛错时兜住并报 FAILED（不把半成品交出去）', () => {

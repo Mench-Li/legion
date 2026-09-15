@@ -3500,6 +3500,141 @@
 
 ---
 
+## 2026-09-15　图标真的画出来了；以及一份"看起来在拦、其实一个真工具都没拦到"的拒绝名单
+
+### 一、PRT-708：上面那节 `### 三` 列的四件事，现在都做完了
+
+上一节（`:3933`「这一条现在**还没有**变成实现」）把"可行性读数"与"实现了"分得很清，
+并列了四件还差的事：图标宿主的解析顺序、生命周期与父进程监督、菜单与
+"打开 Workbench"的接线、以及一条诚实的边界。**这四件这一批都做了**，
+所以那一节的结论现在要读成"已经实现"，而**不是**"还差四步"。
+
+新增 `product/launcher/tray-icon.mjs`（+ `tray-icon.test.mjs`，43 例）：
+生成一个 PowerShell 宿主（`Add-Type -AssemblyName System.Windows.Forms` +
+`System.Windows.Forms.NotifyIcon`）并监管它。**零第三方依赖、零原生模块**——
+用的是随 Windows 发货的那套 UI 组件。图标宿主的 shell 解析顺序**照抄**
+上一节 §二 那条理由（`configured` → `%ProgramFiles%\PowerShell\7\pwsh.exe` →
+`PATH` → `System32\...\v1.0\powershell.exe`），而不是自己发明一个。
+
+本机实测（**带外判据**，不信宿主自报）：
+
+```
+SHELL_KIND windows-powershell-5.1
+SHELL_PATH C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+START_OK true TRAY_ICON_HOST_READY PID 16596
+STOP_OK true TRAY_ICON_EXITED   STOP_DISPOSED true REASON stop-file EXIT 0
+```
+
+`process.kill(pid, 0)` 与 `tasklist` 都确认过那个 PID 前后真的在、真的没了
+（我自己独立复核过一次：PID 20604，停后两者都报"没了"）。
+
+**★★ 菜单来自模型这件事是构造性的，不是靠断言维持的。** 菜单写在一份**单独的
+JSON**（`<DataDir>/tray/tray-menu.json`）里，生成物只负责读它。于是换一份菜单模型时
+**生成物逐字节相同**——独立复核 11/11 里那一条读的是 `len=4862 相同=true`，
+且脚本里既没有菜单文案也没有动作 id。
+
+> 一份"脚本里也写了一遍菜单"的实现，
+> 与一份"菜单来自模型"的实现，
+> 在两边今天恰好一样的那些运行里是同一个东西——
+> 只不过前者会在有人只改一边的第二天，让用户点到一个模型里不存在的动作。
+
+**★ `NATIVE_ICON_SUPPORTED = false` 这个常量被删掉了。** 一个常量做不到"是探测的
+函数"，而恒 `false` 会把一台**完全能画图标**的机器报成"不支持"。它现在是**三态**：
+`true`（唯一正面证据＝宿主报过 ready）／`false`（确定的否定：非 win32、或一档候选都
+没有）／`null`（**还没起过宿主**，真的不知道）。诊断面板必须按 `null` 说"还没量过"
+而不是"不支持"——两者的修法不同。
+
+**接线**：给 `createLauncherTray` 补上生产入口 `attachLauncherTray()`，并由
+`product/launcher/cli.mjs` 的**长驻路径**（`waitForSignal`）真的调用。★ 那条路径
+在本批之前**没有任何用例走过它**（测试里 `waitForSignal` 只出现过 `false`），
+于是"托盘挂在启动路径上"这件事此前既没实现、也**不可能**被用例发现。
+`--no-tray` 是显式退出；`--json` 下一律不挂（脚本没有桌面，而在用户看不见的地方
+起一个 GUI 宿主是最难查的那类副作用）；挂不上**只报告、不改退出码**
+（一个因为画不出图标就拒绝启动的产品更坏）；装配抛错也照样带出原因而不是吞掉。
+
+**破验**：关掉托盘段落 → 3 红；让 `--json` 挡不住 → 1 红；收工顺序反过来 → 2 红。
+三个都咬住，逐字节 sha256 还原。`product/launcher` 全套 **547/547**；三个托盘套件
+**98/98**；真装配**经生产 CLI** 挂上真图标（PID 26072，825 ms），收工摘掉。
+
+### 二、PRT-214 缺口①：按 Run 的静态下限现在真的过线了
+
+spec §6.8 `:437-440` 说控制面生成三样、由 DshRuntimeAdapter 安装到**目标 Agent/Session**。
+此前"静态 hard floor"两侧都在、中间全空：`bootstrapDshRuntime({floor})` 一直收这个参数，
+**没有任何生产者**。现在：`RunRequest.enforcementFloor`（`runtime/contracts/run-floor.mjs`
+定形状，三态 `absent`/`installed`/`refused`、键集合闭合）→ 适配器在起跑前拒收坏载荷 →
+宿主端口 → 装在**那一次 Run 的目标 Agent 自己的作用域**上，随 Run 撤掉。
+
+为什么不是装配级：Runtime 进程长命、一个进程服务很多次 Run，装配级的下限**必然等于
+第一个 Run 的下限**并被后面每一个继承——它比"没有下限"更坏，因为第二个 Run 看起来有下限。
+
+真进程读数（一个进程、三次 Run、带外哨兵）：控制组写出的哨兵**在**、被拒的那两个
+**不存在**。跨 Run 不外溢是构造性的（按载荷对象身份配对）。
+
+### 三、★★ 本批最要紧的发现：那份拒绝名单在生产里**一个真工具都拦不到**
+
+`createHardFloorGuard(floor)` 是一个**名字**名单：它拿 `execution.name` 与
+`floor.denyTools` 比。而：
+
+- `execution.name` 是 **DSH 的真实工具名**（`write` / `read` / `edit` / `pwsh` / `glob` …）——
+  `tool-request.mjs:190` 只做字段改名（`toolName ?? name`），**不做任何翻译**；
+- 而流水线里每一份名单——`team-hub/run-floor.mjs` 的 `declaredDenyTools`、
+  `HIGH_RISK_TOOL_NAMES`、`HARD_FLOOR_CAPABILITIES`——都是 **Legion 的能力名**
+  （`write-file` / `run-command` / `read-secret` …）。
+
+**两套名字空间不相交。** 实测：拿 12 个真 DSH 名去问那份"发布前姿态"的下限，
+**12 个全部放行**（而 Legion 自己的登记表把这 12 个全报成 `known:false, risk:critical`）。
+
+映射其实**存在**，只是从来没在这条路上用过：`employee-preset.mjs:149` 的
+`LEGION_TOOL_ROUTING` 把每个能力映射到它的 DSH 工具名。按它展开那 9 个高风险能力，
+落到的 DSH 名字只有 **`['bash','pwsh']`**——因为其中 **6 个是宿主平面注册的**
+（`delete-file` / `mcp-invoke` / `read-secret` / `write-secret` / `send-message` /
+`post-external-api`），**根本没有 DSH 工具名**，按名字永远禁不到。
+
+而 `bash`/`pwsh` 又是**跨风险等级共用**的：`run-command`(high)、`git-commit`(high)、
+`git-push`(critical) 与 **`git-status`(low)** 全落在同一对上。于是"按名字禁高风险"
+在这套粒度下**没有忠实实现**：禁 `bash` 会把低风险的 `git-status` 一起禁掉，
+不禁就等于放行 `run-command`。
+
+> 一个"名单里写着 9 个高风险工具"的实现，
+> 与一个"真的拦住了高风险工具"的实现，
+> 在只看那份名单的时候是同一个东西——
+> 只不过前者比的是另一套名字，于是它**一个真工具都没拦到**。
+
+**结论与处置**：名字名单**永远不是 fail-closed**——不在名单上的一律放行，而真实的
+工具名一个都不在名单上。§6.8 `:479` 要的是"禁止高风险工具"，**过度禁止满足它，
+禁不到则不满足**。所以 `absent` 这一档改回**拒绝一切**：这是现有 guard 唯一能给
+的 fail-closed 形状，而且它确实禁止了高风险工具。理由是写进代码注释的，不是隐式的。
+
+这条发现比它修的那一处更宽：**只要 `denyTools` 还是拿 Legion 能力名去喂一个比 DSH
+工具名的 guard，任何"名单式"下限都是空的。** 真正的修法是让下限带上能力语义
+（guard 需要知道那份映射），或者让控制面在**派生前**把能力名翻成 DSH 工具名——
+两者都不是"补一个常量"能了事的，故如实记在这里，而不是用一个看起来精确的名单盖过去。
+
+### 四、验证与未证明
+
+- 全量 CI **9/9 PASS**（syntax/env/boundary/deps/build/test/smoke/stage/doc）。
+- `dsh-boundary` / `ci-syntax` / `encoding-check` / `config scan`（runtime 面）全 PASS。
+- `product/launcher` **547/547**；托盘三套件 **98/98**（43 例 ×3 连跑全绿）；
+  下限四套件（契约/安装点/真进程/registrar）各绿；真进程套件约 3.6 s。
+- ★ 一处**派生数字**跟着涨了：`product/config-schema.mjs` 的动态下标清单
+  **8 处 → 12 处**（托盘图标宿主照 DSH 那条顺序找 shell，多了 `PATH`（两处）/
+  `ProgramFiles`/`SystemRoot` 三处读），`dynamicEnvReads` 声明 **6 → 9 条**（覆盖 10 处），
+  schema 自身登记文本 **8 → 11 处**。`scripts/config/config.test.mjs` 里那两条钉死这些
+  数字的断言已按新数字更新——**"未覆盖处为 0" 这个实质判据没有放宽**，改的只是计数。
+  第一次全量 CI 正是红在这里（`config` 套件 50/52），而这也正说明那张清单是**真的在数**，
+  不是一份抄来就忘的表。
+- **未证明**：① **一次真实鼠标点击从未被模拟**（所有点击都是注入"宿主会写的那一行"）；
+  ② 非 Windows 上什么都不画；③ **图标的外观没有被断言**（有没有出现在托盘、长什么样
+  都读不出来，能读的只有宿主自报）；④ 生成物里 `Dispose()` 在 `exited` 之前这一条
+  **只有静态断言兜得住**——变异里摘掉 `Dispose()` 之后宿主照样自报 `disposed:true`，
+  **运行期一条都不红**；⑤ 生产上仍然**没有下限的生产者**（`deriveRunFloor()` 零调用点、
+  `orchestrator` 不写 `enforcementFloor`），而且 **registrar 那一行没有被任何组合挂载**
+  （`legion-host.patch.yml` 只挂 `hard-floor.mjs` 与 `approval-registrar-row.mjs`），
+  所以这条搬运在**生产里目前是 inert 的**——本批证明的是"搬运与安装是对的"，
+  不是"生产已经在用"。
+
+---
+
 ## 2026-09-15　更正：空的下限不是缺陷，**没人填它**才是
 
 ### 一、我上一批把这件事说反了一半

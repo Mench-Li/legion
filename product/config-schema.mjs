@@ -146,7 +146,9 @@ export const SCHEMA = defineSchema({
       expr: 'env[DSH_HOME_ENV]',
       reason: 'dshCredentialsFileFrom(env) 用 DSH_HOME_ENV 常量（值 DSH_HOME）定位 **DSH 自己的** .credentials.yaml。'
         + '键必须计算：那个常量名就是「DSH 用哪个变量」这个事实的唯一定义处（PRT-509 路线 A′）；'
-        + 'DSH_HOME 在本 schema 的 foreignEnv 里登记为「DSH 拥有、Legion 只读该文件」。',
+        + 'DSH_HOME 在本 schema 的 foreignEnv 里登记为「DSH 拥有、Legion 只读该文件」。'
+        + '（PRT-257 起同一个常量还被 `dshHomeFrom(env)` 读一次——那是同一个键、同一处定义，'
+        + '所以这里仍然是这一条登记。）',
     },
     {
       file: 'product/paths.mjs',
@@ -193,6 +195,22 @@ export const SCHEMA = defineSchema({
       owner: 'DeepSeek Harness（DSH）',
       reason: 'DSH 用它定位自己的 $DSH_HOME/.credentials.yaml。Legion **只读**该文件作为凭证回退来源（PRT-509 路线 A′），'
         + '只在 Legion 自己的密钥库里没有那条引用时才去读，结果里带出处；不写它、不迁移、不猜路径',
+    },
+    // PRT-257：本进程**也**读它——`product/launcher/cli.mjs` 的
+    // `underNodeTestRunner()`。
+    //
+    // 它不是产品配置面，而是"我们现在跑在哪"这个事实：`node --test` 会给每个
+    // 测试子进程设它。那条判据守的是一条**结构性**保证——
+    // `--runtime-install` 用默认运行器时，在测试进程里**构造不出**真实 npm
+    // 运行器，于是"用例漏注入一次假运行器"不会变成一次真实联网安装。
+    //
+    // 归属写在这里而不是 `OS_ONLY_ENV_NAMES`：它不是操作系统必需键，
+    // 而是**另一个程序**（Node 的测试运行器）设的，与 DSH_HOME 同一类。
+    {
+      name: 'NODE_TEST_CONTEXT',
+      owner: 'Node.js 自带测试运行器（node:test）',
+      reason: '`node --test` 在测试子进程里设它。Legion **只读**它来判断"这一跑是不是测试"，'
+        + '并据此拒绝构造真实的 npm 运行器（用例必须注入运行器）——它不改变任何产品行为',
     },
   ],
   nonEnvLiterals: [
@@ -645,6 +663,21 @@ export const SCHEMA = defineSchema({
     'RUNTIME_INSTALL_ROLLBACK_UNAVAILABLE',
     'RUNTIME_INSTALL_ROLLBACK_TARGET_INCOMPLETE',
     'RUNTIME_INSTALL_UNEXPECTED',
+
+    // ── PRT-257 运行时安装入口（CLI 这一层）自己的拒绝码 ─────────────────
+    //
+    // `product/launcher/cli.mjs` 的 `RUNTIME_PLAN_CODES` 的值。与上面那组**分开**
+    // 是有理由的：上面那组是**判据算出来之后**的结论（"算过了，答案是不行"），
+    // 这一组是**判据根本没算成**（没有清单、清单不在、读不出来、不合法）——
+    // 它在退出码上也是另一档（3，而拒绝是 1）。
+    //
+    // ★ 四条不许合并：对用户是四件不同的事，对下一步是四个不同的动作
+    //   （补一个参数 / 看那个路径 / 修文件读权限或 JSON / 改清单字段）。
+    //   合并成一条"清单有问题"会让其中三种处境的人去修另外两种东西。
+    'RUNTIME_PLAN_NO_MANIFEST',
+    'RUNTIME_PLAN_MANIFEST_NOT_FOUND',
+    'RUNTIME_PLAN_MANIFEST_UNREADABLE',
+    'RUNTIME_PLAN_MANIFEST_INVALID',
   ],
   injects: [
     { target: 'team-hub', env: 'TEAM_HUB_PORT', via: 'env', from: 'ports.team-hub', note: '端口由 Launcher 决定，不由各进程的代码默认值决定' },

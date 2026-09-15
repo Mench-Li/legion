@@ -29,7 +29,9 @@ import { join } from 'node:path'
 
 import { LEGION_ENV, resolveLayout } from '../paths.mjs'
 import { DSH_CREDENTIALS_FILENAME } from '../../security/secrets/index.mjs'
-import { launcherInputFromConfig, loadProductConfig } from '../config.mjs'
+// `readJsonFile` 一起 import：清单是**配置面**的最后一个来源，它的读取规则
+// （BOM、坏 JSON、顶层不是对象）应当只有一份实现——本文件不再写第二个 JSON 读取器。
+import { launcherInputFromConfig, loadProductConfig, readJsonFile } from '../config.mjs'
 import { AUTO_EXPORT_DEFAULTS, runAutoExport } from '../diagnostics/auto-export.mjs'
 import { initializeProductDir, isInitialized } from '../init.mjs'
 import { createLauncher, PRODUCT_STATE_TEXT } from './launcher.mjs'
@@ -37,6 +39,17 @@ import { DEFAULT_BACKOFF } from './supervisor.mjs'
 // PRT-257 修复入口（spec `line 275`：「禁止自动执行，**提示修复或回滚**」）。
 // 零 IO 的纯模块：它只把结论讲清楚，不碰磁盘、不改环境（理由见那个文件头）。
 import { doctorReport, renderDoctor } from './doctor.mjs'
+// PRT-257：**清单的形状与判据**的唯一住处（PRT-801/802）。
+//
+// 这里的接线守的是 spec §9.1 那句话本身：「客户**不能在产品内单独升级 DSH**。」
+// 它的可执行形式只有一个：**要装哪一版，是清单说了算**。所以本文件里
+// **不出现任何 DSH 版本号字面量**——写成 `targetVersion: '0.1.5-rc.2'` 的接线，
+// 与一条"清单说 0.8.3、CLI 里写 0.1.5"的接线，在两者恰好一致的那些日子里
+// 是同一个东西——只不过前者的漂移要等到装错版本那天才有人发现。
+//
+//   > 一个"版本号写在调用方"的安装器，
+//   > 与一个"版本号写在清单里"的安装器，在它们碰巧一致的那些运行里是同一个东西。
+import { createManifest, digestOf, validateManifest } from '../upgrade/manifest.mjs'
 
 /**
  * 安装目录的默认值：**Launcher 自己所在的那棵树**。
@@ -55,7 +68,7 @@ export function defaultInstallDir(moduleUrl = import.meta.url) {
 export const CLI_FLAGS = Object.freeze([
   { name: '--check', kind: 'boolean', doc: '只做启动前体检（端口/入口/依赖/目录边界），不启动任何进程' },
   { name: '--init', kind: 'boolean', doc: '首次运行初始化：建目录、写默认产品配置与产品元数据，然后退出（不启动进程）' },
-  { name: '--dry-run', kind: 'boolean', doc: '与 --init 同用：只报告将会创建什么，不落盘' },
+  { name: '--dry-run', kind: 'boolean', doc: '与 --init / --runtime-install 同用：只报告将会创建什么、将要跑哪条命令，**不落盘、不起 npm**' },
   { name: '--no-config', kind: 'boolean', doc: '忽略产品配置文件（只用内置默认值 + env + CLI）' },
   { name: '--no-dsh-credentials', kind: 'boolean', doc: '不把 DSH 的 $DSH_HOME/.credentials.yaml 当作**只读**回退来源（PRT-509 路线 A′）。' +
     '**默认是读的**（当 DSH_HOME 已设时）：只有 Legion 自己的密钥库里**没有这条**才会去读它，' +
@@ -100,6 +113,24 @@ export const CLI_FLAGS = Object.freeze([
   { name: '--doctor', kind: 'boolean', doc: '（PRT-257）修复入口：读 stdin 上的一份自检结论/拒绝，' +
     '把「该修哪几项、或者回滚」讲清楚。**只提示、不自动改**。' +
     '退出码：0 全过 / 1 有待修项 / **3 拿不到诊断（不是 0）**' },
+  // ── PRT-257：DSH 运行时安装的**生产调用方** ─────────────────────────────
+  //
+  // 在加这两条之前，`runtime-install.mjs` 的调用方只有它自己的用例：
+  // 一个"判据齐全、用例全绿、而没有任何人能敲出来"的安装器，
+  // 与一个不存在的安装器，在部署上是同一个东西——只不过前者的测试报告很好看。
+  //
+  // ★ 计划与应用**分成两条开关**，不是一个开关加 `--apply`：
+  //   默认的那一边必须是**没有任何副作用**的那一边。
+  { name: '--runtime-install-plan', kind: 'boolean', doc: '（PRT-257）把 DSH 运行时的**安装计划**打出来：' +
+    '装哪一版、受支持区间、装到哪个目录、将要跑哪条命令。**零副作用**（不建目录、不起 npm；' +
+    '只读清单与现役指针）。退出码：0 计划可执行 / 1 计划被拒绝（附修法）/ **3 算不出计划（缺清单，不是 0）**' },
+  { name: '--runtime-install', kind: 'boolean', doc: '（PRT-257）**真的装**：先打上面那份计划，' +
+    '再执行一次真实的 npm install（会联网、会写 DataDir）。**必须显式给出这一条**；' +
+    '计划被拒绝时一次都不执行（退出 1）；`--dry-run` 时只打命令不起进程。' +
+    '退出码：0 装好并切成现役 / **10 没装成（指针没动，不是 1）**' },
+  { name: '--runtime-manifest=<path>', kind: 'value', doc: '（PRT-257）产品版本清单（spec §9.1）的路径。' +
+    '**要装哪一版 DSH、受支持区间、补丁层版本全部只从它来**——本 CLI 里没有任何 DSH 版本号字面量' +
+    '（§9.1：客户不能在产品内单独升级 DSH）。不给这条 ⇒ 算不出计划（退出 3），**不是**"计划通过"' },
   { name: '--help', kind: 'boolean', doc: '打印本说明' },
 ])
 
@@ -276,9 +307,37 @@ export const DSH_HOME_ENV = 'DSH_HOME'
  * @returns {string|null} `.credentials.yaml` 的绝对路径；`DSH_HOME` 未设时为 `null`。
  */
 export function dshCredentialsFileFrom(env = {}) {
-  const home = env[DSH_HOME_ENV]
-  if (typeof home !== 'string' || home.trim() === '') return null
+  const home = dshHomeFrom(env)
+  if (home === null) return null
   return join(home, DSH_CREDENTIALS_FILENAME)
+}
+
+/**
+ * DSH 的家目录**本身**（不是它下面某个文件的路径）。
+ *
+ * 与 `dshCredentialsFileFrom` 同一个来源、同一个键、同一个"没设就是 `null`"。
+ * 运行时安装器需要它，但理由**不是**"要去读它的东西"——恰恰相反：
+ * 它是被拒绝写入的那棵树。`$DSH_HOME` 是**另一个程序**的地盘，
+ * 它的 clean / 升级会把整棵树换掉，把 Legion 的运行时装进去等于把
+ * 一个版本的字节放在别人随时会删的位置上（见 `runtime-install.mjs` 的
+ * `TARGET_INSIDE_DSH_HOME`）。
+ *
+ * ★ 它**不猜路径**：没设 `DSH_HOME` 就是 `null`，不会去回落
+ * `%USERPROFILE%\.dsh`。猜出来的家目录会把"守卫一个不存在的禁区"
+ * 伪装成"守卫过了"。
+ *
+ * ★ 它也是**这一条唯一的读取点**：`dshCredentialsFileFrom` 反过来调它。
+ *
+ *   两个函数各自读一次 `env[DSH_HOME_ENV]` 也能跑，而且行为一模一样——
+ *   差别在 `scan --check` 那边：动态下标是**按出现次数**逐处对账的
+ *   （`scripts/config/config.test.mjs` 里"product 有几处动态下标"那条），
+ *   于是同一次读取写成两处，会让那份对账必须跟着动一次。
+ *   为了一次读取去改那份"重数一遍再改 schema"的对账，等于把守卫
+ *   从一个稳定的数字变成了每次加一个调用方就要动的东西。
+ */
+export function dshHomeFrom(env = {}) {
+  const home = env[DSH_HOME_ENV]
+  return typeof home === 'string' && home.trim() !== '' ? home : null
 }
 
 /**
@@ -403,6 +462,415 @@ export function launcherOptionsFrom({ argv = [], env = {}, nodePath = process.ex
   }
 }
 
+// ============================================================================
+// PRT-257：DSH 运行时安装的**生产调用方**（计划 + 应用）
+//
+// ## 这一段补的是哪一截
+//
+// `runtime-install.mjs` 把判断（纯）与效果（脏）分成了两半，写得很好——
+// 而在此之前，它的调用方**只有它自己的用例**。一个"判据齐全、28 条用例全绿、
+// 而没有任何一条命令行能走到"的安装器，与一个不存在的安装器，在部署上是
+// 同一个东西：
+//
+//   > 一个"计划算得出来、但没有任何人能敲出来"的安装器，
+//   > 与一个不存在的安装器，在用户手上是同一个东西——
+//   > 只不过前者的测试报告是绿的。
+//
+// ## 为什么是"计划"和"应用"两条独立的开关
+//
+// 因为默认的那一边必须是**没有任何副作用**的那一边。一个"`--runtime-install`
+// 加不加 `--apply` 都会装"的入口，在一个只想知道"会装什么"的人手上，
+// 已经在一次真实的 npm install 之后了。
+//
+//   > 一个"看一眼计划"与一个"真的装"共用一条命令的入口，
+//   > 在计划恰好没写任何东西的那些运行里是同一个读数——
+//   > 只不过前者会在一次把 DataDir 建出来的"计划"上也照样是绿的。
+//
+// ## 三个读数必须分开（抄 `doctor.mjs` 的 0/1/3）
+//
+//   · `0` 计划可执行 —— 清单读到了、版本形状对、边界过、成对过；
+//   · `1` 计划被拒绝 —— 判断**做出来了**，答案是"不行"，并逐条给出下一步；
+//   · `3` **算不出计划** —— 清单没给、文件不在、读不出来、或者不是一份合法清单。
+//
+// `3` 与 `0` 分开是这一段最要紧的一条，理由与 `doctor.mjs` 里那句一字不差：
+//
+//   > 一个"因为没拿到结论所以什么都没报"的体检，
+//   > 与一个"结论是一切正常"的体检，在退出码上是同一个东西——
+//   > 只不过前者会让一个已经坏掉的部署安静地通过门禁。
+//
+// 所以"没有清单 ⇒ 退出 0"是**禁止**的。没有清单就没有结论，而没有结论
+// 不等于"可以装"：本 CLI 里**没有任何 DSH 版本号字面量**可以回退——
+// 那正是 spec §9.1「客户不能在产品内单独升级 DSH」的可执行形式。
+//
+// ## 这个入口**不**证明什么（诚实边界）
+//
+//   ① 它不证明产品里有一份清单：本仓库**没有**随产品发货任何一份 §9.1 清单
+//      （`product/upgrade/manifest.mjs` 是"清单长什么样 + 怎么校验"，
+//      不是一份清单）。要装哪一版必须由调用者用 `--runtime-manifest` 指出来。
+//   ② 它不证明"补丁层与 DSH 真的配得上"：绑定表由**同一份清单**导出，
+//      所以它只能证明"清单与自己一致"（PRT-801-813 §7.5：没有任何一张
+//      真实的绑定表随产品发货）。计划输出里会写明这一点，不让它藏起来。
+//   ③ 它不证明任何一次真实的 `npm install` 跑通过。
+// ============================================================================
+
+/**
+ * 本 CLI 自己的拒绝码（模块的那些在 `runtime-install.mjs` 的 `RUNTIME_INSTALL_CODES` 里）。
+ *
+ * 它们说的是同一件事的三个不同理由，所以是三个码而不是一个：
+ * "没给清单"、"给的路径下没有文件"、"文件在但不是一份合法清单"——
+ * 对用户是三件不同的事，对下一步也是三个不同的动作。
+ */
+export const RUNTIME_PLAN_CODES = Object.freeze({
+  /** 没给 `--runtime-manifest`（没有来源，也就没有结论）。 */
+  NO_MANIFEST: 'RUNTIME_PLAN_NO_MANIFEST',
+  /** 给了路径，那个路径下没有文件。 */
+  MANIFEST_NOT_FOUND: 'RUNTIME_PLAN_MANIFEST_NOT_FOUND',
+  /** 文件在，但读不出来或不是 JSON 对象。 */
+  MANIFEST_UNREADABLE: 'RUNTIME_PLAN_MANIFEST_UNREADABLE',
+  /** 读出来了，但 `validateManifest` 逐项判定它不是一份合法清单。 */
+  MANIFEST_INVALID: 'RUNTIME_PLAN_MANIFEST_INVALID',
+})
+
+/**
+ * `--runtime-install-plan` / `--runtime-install` 的退出码。**四档**，
+ * 前三档与 `doctor.mjs` 的 `DOCTOR_EXIT` 同形、同理由（那是本仓库的既有约定，
+ * 这里**抄**它而不是另立一套：同一个产品里两套"0/1/3"会让读的人以为
+ * 3 在两处有不同含义）。
+ *
+ * 不复用 `EXIT_CODES` 的键：那是**启动流程**的码（布局/体检/启动/配置/初始化），
+ * 而这几档说的是**安装**的读数。`REFUSED`（1）在本 CLI 里是全新的一个值，
+ * 之前没有任何路径返回过 1——这正是"计划被拒绝"应当有的辨识度。
+ *
+ * ★ 第四档 `APPLY_FAILED`（10）与 `REFUSED`（1）**必须分开**：
+ *
+ *   > 一个"计划阶段就被拒绝、于是什么都没做"的读数，
+ *   > 与一个"计划过了、真的动手了、但没装成"的读数，
+ *   > 在"现在机器上是什么状态"上是同一件事吗？不是——
+ *   > 前者一个字节都没写，后者可能在 versions/ 下留了一个没有完成标记的目录。
+ *
+ *   合成一个码的话，写脚本的人分不出"要不要去看一眼磁盘"。
+ *   它也不取 1：那会把"没通过判据"和"动手之后失败"混成一个读数。
+ *
+ * ★ 为什么不取 9：`9` 在本 CLI 里**已经被 `--wizard` 占了**
+ *   （向导自己抛错时 `return 9`，HEAD 起就是这样，只是从未写进下面那份契约）。
+ *   同一个数字在两个子命令下说两件不同的事，正是这一整段要避免的读数混同；
+ *   而顺手复用它会让人以为"9 = 运行时装不上"，同时把向导那条路也一起改了语义。
+ *   所以取下一个没被占的 10，并把 9 的既有含义一并写进下面的退出码契约
+ *   （它本来就在用，只是一直没登记）。
+ */
+export const RUNTIME_INSTALL_CLI_EXIT = Object.freeze({
+  /** 计划可执行。 */
+  PLANNED: 0,
+  /** 计划被拒绝，且逐条给了下一步。**一个字节都没写。** */
+  REFUSED: 1,
+  /** 算不出计划（没有清单/读不到/清单不合法）。**不是 0**。 */
+  UNDIAGNOSED: 3,
+  /** 计划过了，但这一次没有装成（指针没动；可能留下一个未完成的版本目录）。 */
+  APPLY_FAILED: 10,
+})
+
+/**
+ * Node 自带测试运行器给测试子进程设的变量名。
+ *
+ * 与 `DSH_HOME_ENV` 同一做法：**名字住在这里**，于是"这一跑是不是测试"
+ * 这个事实只有一处定义。
+ */
+export const NODE_TEST_CONTEXT_ENV = 'NODE_TEST_CONTEXT'
+
+/**
+ * 本进程是不是跑在 node 自带的测试运行器里（`node --test` 会给子进程设这个变量）。
+ *
+ * 它守的是任务书里那条硬规矩：「`--runtime-install` **never run in tests**」。
+ * 靠"每个用例都记得注入假运行器"来守这条规矩，是一条**纪律**，不是一条**结构**：
+ * 下一个写用例的人漏注入一次，跑的就是真的 `npm install`。
+ *
+ *   > 一条"用例都注入了假运行器所以没有联网"的保证，
+ *   > 与一条"在测试进程里根本构造不出真运行器"的保证，
+ *   > 在所有人都记得注入的那些日子是同一个东西。
+ *
+ * 所以真实运行器**在测试进程里构造不出来**：这条判据只作用于"用默认运行器"
+ * 这一条路（注入进来的运行器不受影响——用例正是靠它跑完安装的）。
+ *
+ * ★ 判据是**这个变量在不在**，不是它的值。
+ *
+ *   Node 把值设成 `child-v8` 这类东西，那是**它的实现细节**；把 `'child-v8'`
+ *   写进判据，等于把"这一跑是不是测试"绑在一个随时会改的字符串上——
+ *   而它改的那天，这条守卫会静默失效（退出码、日志都还是绿的）。
+ *   在不在则是一条稳定的信号：只有测试运行器会设它。
+ *
+ *   代价说清楚：谁的 shell 里恰好设了一个空的同名变量，真实的
+ *   `--runtime-install` 也会被拒。**这个方向的误判是刻意选的**——
+ *   "该装的时候没装"看得见、可以再敲一次；"测试里真的去装了一次"看不见。
+ *
+ * ★ 读法是 `Object.hasOwn(env, 名字)`，不是 `env[名字]`。
+ *   后者在 `scan --check` 眼里是一处**动态下标 env 读取**，于是它必须进
+ *   `product/config-schema.mjs` 的 `dynamicEnvReads`，而那份登记要与
+ *   `scripts/config/config.test.mjs` 里"product 有几处动态下标"的逐条对账一起动——
+ *   为了一个**只看键在不在**的判据去改那份对账，是把声明写成了它没有做的事。
+ *   这里只问归属，字面量登记在 `foreignEnv` 里就够了。
+ */
+export function underNodeTestRunner(env = process.env) {
+  return Object.hasOwn(env, NODE_TEST_CONTEXT_ENV)
+}
+
+/**
+ * 读产品版本清单（spec §9.1）。
+ *
+ * `--runtime-manifest=<path>` 指到一个 JSON 文件；解析交给 `config.mjs` 的
+ * `readJsonFile`（BOM、坏 JSON、顶层不是对象——只有一份实现），校验交给
+ * `upgrade/manifest.mjs` 的 `createManifest` + `validateManifest`。
+ * **本函数不自己看一眼版本号字符串**：形状判据住在那两个函数里，
+ * 在这里再写一份 `split('.')` 会让"合法清单"有两处认知。
+ *
+ * @returns {{ok: boolean, code: string|null, path: string|null, manifest: object|null,
+ *            problems: ReadonlyArray<object>, digest: string|null, message: string}}
+ */
+export function runtimeManifestFrom({ manifestPath = null, readFile = undefined, exists = undefined } = {}) {
+  const path = typeof manifestPath === 'string' && manifestPath.trim() !== '' ? manifestPath.trim() : null
+  if (path === null) {
+    return Object.freeze({
+      ok: false, code: RUNTIME_PLAN_CODES.NO_MANIFEST, path: null, manifest: null,
+      problems: Object.freeze([]), digest: null,
+      message: '没有给出产品版本清单（spec §9.1）：要装哪一版 DSH **只能**从清单来，'
+        + '所以没有清单时算不出计划——这不是"计划通过"，也不是"计划被拒绝"。'
+        + '本 CLI 里没有任何 DSH 版本号字面量可以回退，那正是 §9.1「客户不能在产品内单独升级 DSH」的可执行形式。',
+    })
+  }
+
+  const read = readJsonFile(path, { readFile, exists })
+  if (read.ok !== true) {
+    return Object.freeze({
+      ok: false, code: RUNTIME_PLAN_CODES.MANIFEST_UNREADABLE, path, manifest: null,
+      problems: Object.freeze([]), digest: null,
+      message: `${path} 读不出来或不是 JSON 对象：`
+        + read.diagnostics.map((d) => d.message).join('；'),
+    })
+  }
+  if (read.exists !== true) {
+    return Object.freeze({
+      ok: false, code: RUNTIME_PLAN_CODES.MANIFEST_NOT_FOUND, path, manifest: null,
+      problems: Object.freeze([]), digest: null,
+      message: `清单不在：${path}。一个"路径写错了于是当成没有清单"的读数，`
+        + '与一个"这份清单不存在"的读数，在这里是同一个——所以它单独一个码。',
+    })
+  }
+
+  const manifest = createManifest(read.values)
+  const verdict = validateManifest(manifest)
+  if (verdict.ok !== true) {
+    return Object.freeze({
+      ok: false, code: RUNTIME_PLAN_CODES.MANIFEST_INVALID, path, manifest,
+      problems: verdict.problems, digest: null,
+      message: `${path} 不是一份合法清单（${verdict.problems.length} 项）：`
+        + verdict.problems.map((p) => `[${p.code}] ${p.field}：${p.message}`).join('；'),
+    })
+  }
+  return Object.freeze({
+    ok: true, code: null, path, manifest,
+    problems: Object.freeze([]), digest: digestOf(manifest),
+    message: `DSH ${manifest.dshVersion}　补丁层 v${manifest.dshCompositionPatchVersion}　`
+      + `产品 ${manifest.productVersion}　通道 ${manifest.channel}`,
+  })
+}
+
+/**
+ * 组装 `planRuntimeInstall()` 的入参——**每一个都来自已经存在的地方**。
+ *
+ *   · 数据目录 / 安装目录 / 允许根 —— `launcherOptionsFrom()` 解析出来的布局；
+ *   · `$DSH_HOME` / operator 家目录 —— `readEnv` 与 `osHomeFacts`（同一份来源）；
+ *   · 目标版本 / 受支持区间 / 补丁层版本 —— **清单**（下面有为什么是精确锁定）。
+ *
+ * ## ★ 受支持区间：精确锁定（`=<version>`），不是 caret 区间
+ *
+ * 清单里能写的是**一个精确版本**：`upgrade/manifest.mjs` 的 `isExactVersion()`
+ * 拒绝 `^` / `~` / `*` / `.x` / `latest`，`validateManifest()` 对带区间记号的
+ * `dshVersion` 直接报 `VERSION_NOT_EXACT`（`manifest.mjs:86-92`、`:236-247`）。
+ * 于是这里只有两条路：
+ *
+ *   ① 把声明的那一版**原样**当区间（`=x.y.z`，等价于 `satisfiesRange` 里
+ *      不给算子时的默认 `=`，见 `runtime/packs/manifest.mjs:299`）；
+ *   ② CLI 自己造一个 caret 上界（`^x.y.z` ⇒ `<x+1.0.0`）。
+ *
+ * 选 ①，理由是 ② 等于**在 CLI 里发明清单拒绝声明的策略**：
+ *
+ *   · spec `2026-09-11-legion-product-runtime-design.md:696`（§9.1）要求
+ *     `dshVersion` 与 `dshCompositionPatchVersion` **成对验证**；
+ *   · 同一节 `:698` 写下「客户**不能在产品内单独升级 DSH**。启动时发现实际
+ *     版本与清单不一致，应停止自动执行并引导修复」；
+ *   · 而 caret 区间**恰好允许装一个清单没有声明的版本**（清单说 0.8.3、
+ *     `^0.8.3` 允许装 0.8.7）——那就是一次"在产品内单独升级 DSH"。
+ *
+ * `manifest.mjs:18-25` 把这件事讲得比我能讲的更直白：
+ *
+ *   > 一个写着 `"^0.8.3"` 的版本清单，
+ *   > 与一个"清单说 0.8.3、机器上跑 0.9.0"的清单，在"出事时能不能复原现场"上
+ *   > 是同一个东西——只不过前者看起来是钉住的。
+ *
+ * 代价说清楚：**精确锁定让"换一个版本"必须去改清单**（那是刻意的一次决定，
+ * 而且会被 `digestOf()` 记下来）。一个"命令行上一个 `--version=` 就能换版"
+ * 的入口，与一个"清单是唯一来源"的入口，在两者恰好一致的运行里是同一个东西——
+ * 只不过前者的换版不会在清单摘要里留下任何痕迹。
+ *
+ * ## ★ `patchBindings`：由**同一份清单**导出（这条弱点写在脸上）
+ *
+ * `patchBindings` 要的是「已知可用的 (dshVersion, 补丁层版本) 组合表」。
+ * PRT-801-813 的诚实边界第 5 条写着：**没有任何一张真实的绑定表随产品发货**。
+ * 这里不假装有：表就是清单自己声明的那一对——清单是**不可变的产品版本声明**，
+ * 它声明的两个字段就是这一版**一起发布**的那一对。
+ *
+ * 不接的话每一次调用都停在 `PATCH_PAIR_UNVERIFIED`，于是这个安装器
+ * **一个东西都装不了**——那正是 `rangeSatisfied` 缺省写成 `null` 那一次的同一个坑。
+ * 代价是这条检查在这里只能证明"清单与自己一致"；所以计划输出里
+ * **明写** `patchPairSource: 'manifest-itself'`，让人看得见，而不是把它当成
+ * "成对关系已验证"。
+ *
+ * ## 刻意不给 `shippedPresetRoot`
+ *
+ * `product/launcher/` 里没有任何东西知道 DSH 自带 preset 装在哪
+ * （`dsh-overlay.mjs` 只用安装目录里的 `--patch` 文件）。猜一个路径比留空更坏：
+ * 一个"守着一个猜出来的根"的守卫，与一个不守的守卫，在被保护的那棵树
+ * 真被写到的那天是同一个东西。这**不影响**那一层保护——写入守卫的允许根是
+ * DataDir，而计划本身已经在 `TARGET_INSIDE_INSTALL_DIR` / `TARGET_INSIDE_DSH_HOME`
+ * 上拒绝"把运行时装进任何只读根"。
+ */
+export function runtimeInstallInputFrom({ layout = null, env = {}, manifest = null, active = null, platform = process.platform } = {}) {
+  const osHome = osHomeFacts(env)
+  const dataDir = layout?.dataDir ?? null
+  return {
+    dataDir,
+    // PRT-011 §2.1：运行时**只**装在 DataDir 里。允许根就是数据目录本身——
+    // 不是它的父目录、不是产品家目录。
+    allowedRoot: dataDir,
+    installDir: layout?.installDir ?? null,
+    dshHome: dshHomeFrom(env),
+    operatorHome: osHome.homeDir,
+    shippedPresetRoot: null,
+    targetVersion: manifest?.dshVersion ?? null,
+    supportedRange: manifest === null ? null : `=${manifest.dshVersion}`,
+    expectedPatchVersion: manifest?.dshCompositionPatchVersion ?? null,
+    patchBindings: manifest === null ? null : Object.freeze([
+      Object.freeze({
+        dshVersion: manifest.dshVersion,
+        compositionPatchVersion: manifest.dshCompositionPatchVersion,
+      }),
+    ]),
+    // 现役读数（`readActiveRuntime` 的产物）：`relation` 靠它区分 fresh / upgrade /
+    // downgrade。传 `null` 时安装器报 `fresh`——而"没读过"与"没装过"是两件事，
+    // 所以调用方**必须**先读一次再传进来（`run()` 里就是这么做的）。
+    installedVersion: active?.version ?? null,
+    installedPatchVersion: active?.patchVersion ?? null,
+    legionSourceRoot: layout?.installDir ?? null,
+    platform,
+  }
+}
+
+/**
+ * 逐码的"下一步"。**拒绝必须可解**——这是 `doctor.mjs` 立的规矩
+ * （「一份算出来了、也跟着拒绝走了、但没有任何人能照着做的修复计划，
+ * 与一份不存在的修复计划，对用户是同一个东西」）。
+ *
+ * 模块的 `repair` 字段说的永远是同一件事（去跑 `--doctor`），而这里的每一条
+ * 说的是"**这一次**为什么被拒、下一个动作是什么"。`--doctor` 那条仍然会
+ * 追加在后面，所以这个入口与修复入口之间没有断头路。
+ */
+const RUNTIME_PLAN_NEXT_STEP = Object.freeze({
+  RUNTIME_INSTALL_NO_DATA_DIR: '给出数据目录：--data-dir=<path> 或设置 LEGION_DATA_DIR（运行时只装在 DataDir 里）',
+  RUNTIME_INSTALL_DATA_DIR_NOT_ABSOLUTE: '把数据目录换成**绝对路径**：相对路径的落点取决于当时的 cwd',
+  RUNTIME_INSTALL_TARGET_INSIDE_DSH_HOME: '换一个数据目录：DSH 的家目录属于**另一个程序**，它的清理/升级会把整棵树换掉',
+  RUNTIME_INSTALL_TARGET_INSIDE_INSTALL_DIR: '换一个数据目录：安装目录在升级时被整体替换，写进去的字节会随升级消失（PRT-011 §2.1）',
+  RUNTIME_INSTALL_TARGET_OUTSIDE_ALLOWED_ROOT: '数据目录没解析对：--data-dir / LEGION_DATA_DIR 必须指向这次允许写入的那棵树',
+  RUNTIME_INSTALL_VERSION_MALFORMED: '清单里的 dshVersion 不是完整三段版本号（major.minor.patch，可带 -预发布）：去改清单',
+  RUNTIME_INSTALL_RANGE_UNCHECKED: '区间判据没接上，或清单没有声明 dshVersion：检查清单的 dshVersion 字段',
+  RUNTIME_INSTALL_VERSION_OUT_OF_RANGE: '要装的版本与清单声明的不一致：**去改清单**（清单是版本的唯一来源，spec §9.1），不是在命令行上换一个版本',
+  RUNTIME_INSTALL_PATCH_PAIR_UNVERIFIED: '成对关系没有验证过：清单必须同时给出 dshVersion 与 >=1 的 dshCompositionPatchVersion',
+  RUNTIME_INSTALL_PATCH_PAIR_MISMATCH: '清单声明的 (dshVersion, 补丁层版本) 不是已知可用的一对：对齐声明之后重新验证补丁锚点',
+})
+
+/** 取一条拒绝的"下一步"。取不到时**不编**：如实说"这一步没有预置动作"。 */
+export function runtimeInstallNextStepOf(code) {
+  return RUNTIME_PLAN_NEXT_STEP[code] ?? null
+}
+
+/**
+ * 人读的渲染。**先结论、再理由、最后下一步**——与 `renderDoctor` 同一顺序。
+ *
+ * `manifestRead.ok !== true` 走"算不出计划"那一支：它**不是**拒绝，
+ * 所以措辞上也必须是"算不出"（否则退出 3 与退出 1 会在文案上混成同一件事）。
+ */
+export function renderRuntimePlan({ manifestRead, plan = null, applying = false, dryRun = false } = {}) {
+  const L = []
+  L.push('Legion DSH 运行时安装计划（PRT-257，spec §9.1）')
+
+  if (manifestRead === undefined || manifestRead === null || manifestRead.ok !== true) {
+    L.push('')
+    L.push(`✖ 算不出计划（${manifestRead?.code ?? '（无读数）'}）`)
+    L.push(`  ${manifestRead?.message ?? '没有清单读数'}`)
+    L.push('')
+    L.push('下一步：')
+    L.push('  · 用 --runtime-manifest=<path> 指到一份产品版本清单（字段见 spec §9.1）')
+    L.push('  · 清单随**产品版本**发布，不是本机生成的：本仓库当前没有发货任何一份')
+    L.push('  · 想先看看当前部署哪里不对：node product/launcher/cli.mjs --doctor')
+    L.push('')
+    L.push('★ 这一条**不是**"计划通过"，也**不是**"计划被拒绝"：没有清单就没有结论。')
+    return L.join('\n')
+  }
+
+  L.push('')
+  L.push(`清单：${manifestRead.path}`)
+  L.push(`  ${manifestRead.message}`)
+  L.push(`  摘要：${manifestRead.digest}`)
+  L.push('  受支持区间：清单只声明**一个精确版本**，因此这里是精确锁定（`=版本`，不是 caret 区间）')
+  L.push('                ——caret 会允许装一个清单没声明的版本，而那正是 §9.1 禁止的"在产品内单独升级 DSH"')
+
+  if (plan === null) return L.join('\n')
+
+  if (plan.ok !== true) {
+    L.push('')
+    L.push(`✖ 计划被拒绝（${plan.code}）`)
+    L.push(`  ${plan.message}`)
+    L.push('')
+    L.push('下一步（照着做就能往前走）：')
+    const step = runtimeInstallNextStepOf(plan.code)
+    if (step !== null) L.push(`  · ${step}`)
+    const repair = plan.repair ?? null
+    if (repair !== null) {
+      L.push(`  · ${repair.command}`)
+      if (typeof repair.why === 'string' && repair.why !== '') L.push(`    （${repair.why}）`)
+    } else {
+      L.push('  · 这一次没有预置修法：本入口拒绝编造一个没有代码会做的动作')
+    }
+    L.push('')
+    L.push('★ 拒绝发生在**任何目录被创建之前**：这一次运行没有建过任何目录。')
+    return L.join('\n')
+  }
+
+  L.push('')
+  L.push(`✔ 计划可执行：装 DSH ${plan.targetVersion} 到 ${plan.versionDir}`)
+  L.push(`  版本关系：${plan.relation}${plan.installedVersion === null ? '（当前没有现役运行时）' : `（现役 ${plan.installedVersion}）`}`)
+  L.push(`  成对关系：${plan.patchPair.verdict}（补丁层 v${plan.expectedPatchVersion}）`)
+  L.push('            绑定表来源：清单自证（patchPairSource=manifest-itself）——')
+  L.push('            PRT-801-813 §7.5：没有任何一张真实的绑定表随产品发货；这条检查只能证明"清单与自己一致"')
+  L.push(`  只读根：${plan.readOnlyRoots.length === 0 ? '（无）' : plan.readOnlyRoots.join('　')}`)
+  L.push(`  将要执行：${plan.installCommand.file} ${plan.installCommand.args.join(' ')}`)
+  L.push(`  Legion 包：${plan.legion.links.length} 个 ${plan.legion.links[0]?.linkType ?? '链接'}`
+    + `（${plan.legion.links.map((l) => l.name).join('、')}）`)
+  L.push(`            源目录 ${plan.legion.sourceRoot}（路线 ${plan.legion.route}）`)
+  if (plan.diagnostics.length > 0) {
+    L.push('  读数：')
+    for (const d of plan.diagnostics) L.push(`  · [${d.code}] ${d.message}`)
+  }
+  L.push('')
+  if (applying) {
+    L.push(dryRun
+      ? '⚠ --dry-run：上面那条命令**不会**被执行，也不会创建任何目录。'
+      : '⚠ 接下来会**真的执行**上面那条命令（npm install，会联网、会写 DataDir）。')
+  } else {
+    L.push('★ 计划阶段零副作用：没有建过任何目录，也没有起过 npm（只读了清单与现役指针）。')
+    L.push('  要真的装，请显式加 --runtime-install。')
+  }
+  return L.join('\n')
+}
+
 function printDiagnostics(diagnostics, write = console.log) {
   for (const d of diagnostics) {
     const tag = d.severity === 'error' ? '✖' : '⚠'
@@ -474,6 +942,22 @@ export async function run({
   //   让用例去接管真实 stdin 会把测试变成"看这一跑有没有人往管道里写东西"，
   //   而那条路在 CI 里根本不是确定的。默认就是真实现。
   readStdinFn = readAllStdin,
+  // ★ PRT-257 运行时安装：两个接缝，各自守一件事。
+  //
+  //   ① `runtimeInstallModuleFn` —— "谁来算计划、谁来装"。默认是**动态**
+  //      import 真模块：CLI 的普通启动（体检/启动/向导）不该把安装器与它
+  //      拖着的 `runtime/packs/manifest.mjs` 一起加载进来。用例注入一个
+  //      假模块，就能断言"没有 --runtime-install 时 installRuntime
+  //      一次都没被调用"——**这是那句话唯一的证据**。
+  //   ② `npmRunnerFn` —— "谁来跑那条 npm 命令"。默认 `null` 表示用模块自己的
+  //      `createNpmRunner()`；只有给了这一条才会被调用。用例靠它把
+  //      **真实的** `installRuntime` 跑完整一遍而不联网。
+  runtimeInstallModuleFn = () => import('./runtime-install.mjs'),
+  npmRunnerFn = null,
+  // 与 `write` 同源的第二路输出。它**只有一个用途**：`--runtime-install --json`
+  // 时把"即将执行什么"写出去——那条通知必须出现在动作**之前**，而 stdout
+  // 上那一个 JSON 文档不能被它污染（脚本要能整份 `JSON.parse`）。
+  writeErr = (m) => process.stderr.write(`${m}\n`),
 } = {}) {
   /** 诊断来源自己要说的一句话（读 stdin 失败时用）。 */
   let diagNote = null
@@ -542,6 +1026,114 @@ export async function run({
     if (json) write(JSON.stringify(rep, null, 2))
     else write(renderDoctor(rep))
     return rep.exitCode
+  }
+
+  // ── DSH 运行时安装：计划（零副作用）与**显式**应用（PRT-257）───────────
+  //
+  // ★ 这一支放在**布局门禁之前**，与 `--doctor` 同一个理由：安装运行时这件事
+  //   最需要在产品还没装好、布局还不完整的时候被问到。计划自己会把
+  //   "数据目录没定下来"如实报成一条拒绝（退出 1），而不是被上面某一道
+  //   别的门禁换成一个与安装无关的错误。
+  //
+  // ★ 应用那一边的四条硬要求，逐条对应下面四行：
+  //   ① 必须显式给出 `--runtime-install`（没有任何配置键、环境变量能打开它）；
+  //   ② 计划必须 `ok === true`（被拒绝的计划**一次都不执行**）；
+  //   ③ 执行之前先把**将要跑的那条命令**打出来；
+  //   ④ 测试进程里构造不出真实运行器（`underNodeTestRunner()`，见上面那条注释）。
+  if (parsed.flags['runtime-install-plan'] === true || parsed.flags['runtime-install'] === true) {
+    const applying = parsed.flags['runtime-install'] === true
+    const dryRun = parsed.flags['dry-run'] === true
+    const manifestFlag = parsed.flags['runtime-manifest']
+    const manifestRead = runtimeManifestFrom({
+      manifestPath: typeof manifestFlag === 'string' ? manifestFlag : null,
+    })
+
+    // 计划阶段**只读**：清单、产品配置、现役指针。`readActiveRuntime` 是一次
+    // 纯读——它让 `relation` 能区分 fresh / upgrade / downgrade，而
+    // "没读过"与"没装过"是两件不同的事，所以这里必须读一次再传进去。
+    let plan = null
+    if (manifestRead.ok === true) {
+      const mod = await runtimeInstallModuleFn()
+      const active = mod.readActiveRuntime({ dataDir: options.layout?.dataDir ?? null })
+      plan = mod.planRuntimeInstall(runtimeInstallInputFrom({
+        layout: options.layout,
+        env,
+        manifest: manifestRead.manifest,
+        active,
+        platform: options.layout?.platform ?? process.platform,
+      }))
+    }
+
+    const exitCode = manifestRead.ok !== true
+      ? RUNTIME_INSTALL_CLI_EXIT.UNDIAGNOSED
+      : (plan.ok === true ? RUNTIME_INSTALL_CLI_EXIT.PLANNED : RUNTIME_INSTALL_CLI_EXIT.REFUSED)
+
+    if (json) {
+      write(JSON.stringify({
+        phase: 'runtime-install-plan',
+        ok: exitCode === RUNTIME_INSTALL_CLI_EXIT.PLANNED,
+        exitCode,
+        code: manifestRead.ok === true ? plan.code : manifestRead.code,
+        manifest: manifestRead.ok === true
+          ? {
+            path: manifestRead.path,
+            digest: manifestRead.digest,
+            productVersion: manifestRead.manifest.productVersion,
+            dshVersion: manifestRead.manifest.dshVersion,
+            dshCompositionPatchVersion: manifestRead.manifest.dshCompositionPatchVersion,
+            channel: manifestRead.manifest.channel,
+          }
+          : { path: manifestRead.path, digest: null },
+        manifestProblems: manifestRead.problems,
+        plan,
+        repair: plan?.repair ?? null,
+      }, null, 2))
+    } else {
+      write(renderRuntimePlan({ manifestRead, plan, applying, dryRun }))
+    }
+
+    // 计划没通过 ⇒ **到此为止**。被拒绝的计划在 `installRuntime` 里本来就会抛，
+    // 而"在调用它之前就返回"比"靠它自己抛"更硬：前者不依赖模块的守卫还写着。
+    if (exitCode !== RUNTIME_INSTALL_CLI_EXIT.PLANNED) return exitCode
+    if (applying !== true || dryRun === true) return RUNTIME_INSTALL_CLI_EXIT.PLANNED
+
+    // ①② 已经过了（显式开关 + 计划 ok）。③ 先说要做什么，再动手。
+    const command = `${plan.installCommand.file} ${plan.installCommand.args.join(' ')}`
+    writeErr(`⚠ 即将执行真实安装（npm install，会联网、会写 ${options.layout?.dataDir ?? '(数据目录未定)'}）：`)
+    writeErr(`  ${command}`)
+
+    const mod = await runtimeInstallModuleFn()
+    let runner = null
+    if (npmRunnerFn === null) {
+      if (underNodeTestRunner()) {
+        // ④ 结构性事实：测试进程里**没有**真实运行器可构造。
+        writeErr('✖ 本进程跑在 node 测试运行器里（NODE_TEST_CONTEXT 已设）：拒绝构造真实 npm 运行器。')
+        writeErr('  这不是"安装失败"，而是"这一次不允许真的去装"——用例必须注入运行器才能跑完安装。')
+        return RUNTIME_INSTALL_CLI_EXIT.APPLY_FAILED
+      }
+      runner = mod.createNpmRunner()
+    } else {
+      runner = npmRunnerFn()
+    }
+
+    const result = mod.installRuntime({ plan, runner })
+    if (json) {
+      write(JSON.stringify({ phase: 'runtime-install', ...result }, null, 2))
+    } else if (result.ok === true) {
+      write(`✔ ${result.message}`)
+      write(`  指针：${result.pointerPath}（现役 ${result.targetVersion}，上一版 ${result.previousVersion ?? '（无）'}）`)
+      for (const c of result.verify.checks) write(`  ${c.ok === true ? '✔' : '✖'} ${c.label}：${c.detail ?? ''}`)
+      write('  回滚：node product/launcher/cli.mjs --doctor（只提示，不自动改）')
+    } else {
+      write(`✖ 安装未完成（${result.code}）`)
+      write(`  ${result.message}`)
+      write('  指针**没有动**：旧版本仍然现役。这次失败只可能在 versions/ 下留下一个没有完成标记的目录。')
+      for (const s of result.stages.filter((x) => x.ok !== true)) {
+        write(`  · 出错的阶段：${s.stage}（${s.detail ?? '无详情'}）`)
+      }
+      if (result.repair !== null) write(`  下一步：${result.repair.command}`)
+    }
+    return result.ok === true ? 0 : RUNTIME_INSTALL_CLI_EXIT.APPLY_FAILED
   }
 
   // ── 首次运行向导（PRT-707 收尾）──────────────────────────────────────
@@ -975,6 +1567,19 @@ if (isMain) {
 // 退出码（脚本与验收依赖它们，因此是契约的一部分）：
 //   0 = 成功；2 = 参数错误；3 = 目录布局未确定；4 = --check 未通过；
 //   5 = 启动失败；6 = 产品配置文件有 error；7 = 初始化未完成。
+//   9 = `--wizard` 自己抛错（HEAD 起就在用，只是此前一直没写进这份契约——
+//       一条"已经在用但没登记"的退出码，与一条没人用的退出码，
+//       在读这份契约的人眼里是同一个东西：都不存在）。
+//
+// ★ PRT-257 的运行时安装入口**不复用**上表，它有自己的四档
+//   （`RUNTIME_INSTALL_CLI_EXIT`，前三档与 `doctor.mjs` 的 `DOCTOR_EXIT` 同形）：
+//     0 = 计划可执行；1 = 计划被拒绝（附下一步）；3 = 算不出计划（缺清单）；
+//     10 = 计划过了但没装成。
+//   为什么不并进 `EXIT_CODES`：上表是**启动流程**的读数，而这几档是**安装**的
+//   读数；`1` 在本 CLI 里是全新的一个值（此前没有任何路径返回过它）。
+//   `3` 两处含义一致（"拿不到结论，不能自动往前走"），不需要第二个数字；
+//   而 `10` 取下一个没被占的数（`9` 是向导的），因为"向导抛错"与
+//   "运行时装不上"是两件不同的、需要做不同下一步的事。
 export const EXIT_CODES = Object.freeze({
   ok: 0, args: 2, layout: 3, check: 4, start: 5, config: 6, init: 7,
 })

@@ -10,13 +10,14 @@
 // `run()` 全程不碰真实进程与真实信号：`write` 注入、`waitForSignal: false`，
 // 且只用 `--check` 或参数错误这两种不启动进程的路径。
 // ============================================================================
-import { test } from 'node:test'
+import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { CLI_FLAGS, EXIT_CODES, defaultInstallDir, dshCredentialsFileFrom, launcherOptionsFrom, parseArgs, readEnv, readReadinessTimeoutMs, run } from './cli.mjs'
+import { CLI_FLAGS, EXIT_CODES, RUNTIME_INSTALL_CLI_EXIT, RUNTIME_PLAN_CODES, defaultInstallDir, dshCredentialsFileFrom, launcherOptionsFrom, parseArgs, readEnv, readReadinessTimeoutMs, run, underNodeTestRunner } from './cli.mjs'
+import { COMPLETION_MARKER_FILENAME, installRuntime, planRuntimeInstall, readActiveRuntime, runtimeRootOf } from './runtime-install.mjs'
 import { reserveEphemeralPort } from './ports.mjs'
 
 /** 收集输出的收集器。 */
@@ -531,4 +532,506 @@ test('★ --no-dsh-credentials 显式关掉回退来源（读别人的文件应�
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+// ============================================================================
+// PRT-257：DSH 运行时安装的**生产调用方**（计划 + 应用）
+//
+// ## 这一套守的是什么
+//
+// `runtime-install.mjs` 自己那 28 条用例守的是"判据对不对"。这一套守的是
+// **另一件事**：有没有一条命令行真的走到那些判据上。
+//
+//   > 一个"判据齐全、用例全绿"的安装器，
+//   > 与一个"没有任何人能敲出来"的安装器，在部署上是同一个东西——
+//   > 只不过前者的测试报告很好看。
+//
+// ## 两条最要紧的断言，以及它们为什么**不能**合并
+//
+//   > 一条"计划打出来了"的断言，
+//   > 与一条"计划这一步什么都没写"的断言，在计划恰好没写东西的那些运行里
+//   > 是同一片绿——只不过前者的绿，在一次把 DataDir 建出来的"计划"上
+//   > 也照样是绿的。
+//
+// 所以计划那两条**分开**断言：一条看输出里有没有那份计划，另一条拿
+// `readdirSync(root, {recursive:true})` 快照整个临时树，逐条比。
+//
+// ## 测试从不联网
+//
+// 三条结构性的事实一起保证这件事，而不是靠"记得注入"：
+//   ① `installRuntime` 的 `runner` 在模块里是**必填**的（没有缺省实现）；
+//   ② 本套用例的 `npmRunnerFn` 只返回一个把假 DSH 写进目标目录的函数；
+//   ③ **默认**运行器在 `NODE_TEST_CONTEXT` 存在时**构造不出来**——
+//      所以"漏注入一次"跑的是"拒绝执行"，不是一次真实的 npm install。
+// ============================================================================
+
+/** 这一段的临时根：两层清理，失败也一样清（与 `runtime-install.test.mjs` 同一做法）。 */
+const RUNTIME_TEMP_ROOTS = []
+
+function runtimeTempRoot(tag) {
+  const dir = mkdtempSync(join(tmpdir(), `legion-cli-runtime-${tag}-`))
+  RUNTIME_TEMP_ROOTS.push(dir)
+  return dir
+}
+
+function sweepRuntimeTemps() {
+  while (RUNTIME_TEMP_ROOTS.length > 0) {
+    const dir = RUNTIME_TEMP_ROOTS.pop()
+    try { rmSync(dir, { recursive: true, force: true }) } catch { /* 尽力而为；不清会留孤儿目录 */ }
+  }
+}
+
+after(sweepRuntimeTemps)
+
+/** 目录树的快照：断言"什么都没多出来"的可执行形式。 */
+const snapshotDir = (root) => readdirSync(root, { recursive: true }).map(String).sort()
+
+/** Legion 自有包的源目录（`runtime-install.mjs` 的 `LEGION_FILE_PACKAGES`）。 */
+const RUNTIME_SOURCE_DIRS = ['team-hub', 'plugins', 'board-plugin', 'services-plugin']
+
+/** 一份 spec §9.1 形状的清单对象（**用例现造的**：本仓库不发货任何一份）。 */
+function manifestObject({ dshVersion = '7.7.7', patchVersion = 4, productVersion = '0.9.0', channel = 'stable' } = {}) {
+  return {
+    manifestFormat: 'legion/version-manifest@1',
+    productVersion,
+    legionVersion: productVersion,
+    dshVersion,
+    dshCompositionPatchVersion: patchVersion,
+    schemaVersion: 12,
+    runtimeContractVersion: 1,
+    packProtocolVersion: 1,
+    channel,
+  }
+}
+
+function writeManifest(path, options) {
+  writeFileSync(path, `${JSON.stringify(manifestObject(options), null, 2)}\n`, 'utf8')
+  return path
+}
+
+/**
+ * 夹具：安装目录里有那四个 Legion 源目录，数据目录在同一个临时根下。
+ * **全部在 `mkdtempSync` 里**——一个字节都不会落到真实的 DataDir。
+ */
+function runtimeFixture(tag, options) {
+  const root = runtimeTempRoot(tag)
+  const installDir = join(root, 'install')
+  for (const d of RUNTIME_SOURCE_DIRS) mkdirSync(join(installDir, d), { recursive: true })
+  const dataDir = join(root, 'data')
+  const manifestPath = writeManifest(join(root, 'manifest.json'), options)
+  return {
+    root,
+    installDir,
+    dataDir,
+    manifestPath,
+    env: {
+      LEGION_HOME: root,
+      LEGION_INSTALL_DIR: installDir,
+      LEGION_DATA_DIR: dataDir,
+      LEGION_WORKSPACE_DIR: join(root, 'ws'),
+    },
+  }
+}
+
+/** 假运行器：把 `node_modules/@deepseek-ai/dsh/{package.json,lib/bin.js}` 写出来。 */
+function fakeNpmRunner(version) {
+  const calls = []
+  const runner = (cmd) => {
+    calls.push({ file: cmd.file, args: [...cmd.args] })
+    const prefix = cmd.args[cmd.args.indexOf('--prefix') + 1]
+    const pkgDir = join(prefix, 'node_modules', '@deepseek-ai', 'dsh')
+    mkdirSync(join(pkgDir, 'lib'), { recursive: true })
+    writeFileSync(join(pkgDir, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version }), 'utf8')
+    writeFileSync(join(pkgDir, 'lib', 'bin.js'), '// 假的 DSH 入口（用例造的，不是真 npm 装的）\n', 'utf8')
+    return { ok: true, status: 0, stdout: '', stderr: '', error: null }
+  }
+  runner.calls = calls
+  return runner
+}
+
+/**
+ * 一个**带计数**的模块替身：计划/现役读数走真实现，只有"装"这一边被盯住。
+ *
+ * 为什么不整个造假：如果连 `planRuntimeInstall` 也换成假的，那么
+ * "没有 `--runtime-install` 时 `installRuntime` 零次调用"这句话，在一个
+ * **压根没进那一支**的运行里也成立。所以 `calls.plan` 必须一起断言。
+ */
+function spiedRuntimeModule() {
+  const calls = { plan: 0, install: 0, readActive: 0, runnerFactory: 0 }
+  return {
+    calls,
+    mod: {
+      readActiveRuntime: (o) => { calls.readActive += 1; return readActiveRuntime(o) },
+      planRuntimeInstall: (o) => { calls.plan += 1; return planRuntimeInstall(o) },
+      installRuntime: (o) => { calls.install += 1; return installRuntime(o) },
+      createNpmRunner: () => { calls.runnerFactory += 1; throw new Error('用例里不得构造真实 npm 运行器') },
+    },
+  }
+}
+
+/** 把 stdout 与 stderr 两路按发生顺序收进同一个数组。 */
+function eventCollector() {
+  const events = []
+  return {
+    events,
+    write: (m) => events.push({ ch: 'out', m: String(m) }),
+    writeErr: (m) => events.push({ ch: 'err', m: String(m) }),
+    text: (ch) => events.filter((e) => e.ch === ch).map((e) => e.m).join('\n'),
+  }
+}
+
+test('★★★★ --runtime-install-plan：版本与区间来自**清单**，不是 CLI 里的字面量', async () => {
+  const a = runtimeFixture('plan-a', { dshVersion: '7.7.7', patchVersion: 4 })
+  const b = runtimeFixture('plan-b', { dshVersion: '0.2.3', patchVersion: 1 })
+  const seen = []
+
+  for (const [f, version, patch] of [[a, '7.7.7', 4], [b, '0.2.3', 1]]) {
+    const json = collector()
+    const code = await run({
+      argv: [`--runtime-manifest=${f.manifestPath}`, '--runtime-install-plan', '--json'],
+      env: f.env,
+      write: json.write,
+    })
+    assert.equal(code, 0)
+    const doc = JSON.parse(json.text())
+    assert.equal(doc.phase, 'runtime-install-plan')
+    assert.equal(doc.manifest.dshVersion, version)
+    assert.equal(doc.plan.targetVersion, version)
+    // ★ 精确锁定，不是 caret：清单只声明一个精确版本，`=` 就是这个事实的写法。
+    assert.equal(doc.plan.supportedRange, `=${version}`)
+    assert.equal(doc.plan.expectedPatchVersion, patch)
+    assert.equal(doc.plan.patchPair.verdict, 'match')
+    assert.equal(doc.plan.installCommand.args.at(-1), `@deepseek-ai/dsh@${version}`)
+    seen.push(doc.plan.supportedRange)
+
+    const human = collector()
+    const code2 = await run({
+      argv: [`--runtime-manifest=${f.manifestPath}`, '--runtime-install-plan'],
+      env: f.env,
+      write: human.write,
+    })
+    assert.equal(code2, 0)
+    assert.match(human.text(), /计划可执行/)
+    assert.ok(human.text().includes(version), '人读输出里没有清单声明的版本')
+  }
+
+  // ★ 两份**不同**的清单算出了两个不同的区间。一条硬编码在 CLI 里的区间
+  //   在这里必然红——而"计划算出来了"那一条在硬编码下照样是绿的。
+  assert.notEqual(seen[0], seen[1], '两份不同的清单算出了同一个区间：区间没有从清单来')
+})
+
+test('★★★★★ --runtime-install-plan：计划打出来了，而且磁盘上一个字节都没多', async () => {
+  const f = runtimeFixture('plan-pure')
+  const before = snapshotDir(f.root)
+
+  const out = collector()
+  const code = await run({
+    argv: [`--runtime-manifest=${f.manifestPath}`, '--runtime-install-plan'],
+    env: f.env,
+    write: out.write,
+  })
+
+  assert.equal(code, 0)
+  assert.match(out.text(), /计划可执行/)
+  // ★ 这两条**不能**互相代替：前一条在一次"把 DataDir 建出来的计划"上
+  //   也照样是绿的，只有后一条会红。
+  assert.deepEqual(snapshotDir(f.root), before, '计划在磁盘上留下了东西')
+  assert.equal(existsSync(f.dataDir), false, '计划把 DataDir 建出来了')
+})
+
+test('★★★★ 计划被拒绝：退出 1（与 0、3 都分开），且给出照着做就能往前走的下一步', async () => {
+  const f = runtimeFixture('plan-refuse')
+  const dshHome = join(f.root, 'dsh-home')
+  const insideDshHome = join(dshHome, 'data')
+  const env = { ...f.env, DSH_HOME: dshHome, LEGION_DATA_DIR: insideDshHome }
+  const before = snapshotDir(f.root)
+
+  const out = collector()
+  const code = await run({
+    argv: [`--runtime-manifest=${f.manifestPath}`, '--runtime-install-plan'],
+    env,
+    write: out.write,
+  })
+
+  assert.equal(code, RUNTIME_INSTALL_CLI_EXIT.REFUSED)
+  assert.equal(code, 1)
+  assert.notEqual(code, RUNTIME_INSTALL_CLI_EXIT.PLANNED)
+  assert.notEqual(code, RUNTIME_INSTALL_CLI_EXIT.UNDIAGNOSED)
+  assert.match(out.text(), /RUNTIME_INSTALL_TARGET_INSIDE_DSH_HOME/)
+  // ★ 拒绝必须**可解**：一句"被拒绝了"与一个不存在的入口，对用户是同一个东西。
+  assert.match(out.text(), /下一步/)
+  assert.match(out.text(), /--doctor/)
+
+  assert.deepEqual(snapshotDir(f.root), before, '被拒绝的计划在磁盘上留下了东西')
+  assert.equal(existsSync(insideDshHome), false)
+
+  // 脚本形态也要能照着做：`repair` 与逐码的下一步都在 JSON 里。
+  const json = collector()
+  const jcode = await run({
+    argv: [`--runtime-manifest=${f.manifestPath}`, '--runtime-install-plan', '--json'],
+    env,
+    write: json.write,
+  })
+  assert.equal(jcode, 1)
+  const doc = JSON.parse(json.text())
+  assert.equal(doc.ok, false)
+  assert.equal(doc.exitCode, 1)
+  assert.equal(doc.plan.ok, false)
+  assert.match(doc.repair.command, /--doctor/)
+  assert.equal(doc.code, 'RUNTIME_INSTALL_TARGET_INSIDE_DSH_HOME')
+})
+
+test('★★★★ 算不出计划 ⇒ 退出 3（缺清单/文件不在/读不出来/清单不合法），**不是 0**', async () => {
+  const f = runtimeFixture('plan-undiagnosed')
+
+  // ① 没给 --runtime-manifest：没有来源，也就没有结论。
+  const noFlag = collector()
+  const c1 = await run({ argv: ['--runtime-install-plan'], env: f.env, write: noFlag.write })
+  assert.equal(c1, RUNTIME_INSTALL_CLI_EXIT.UNDIAGNOSED)
+  assert.equal(c1, 3)
+  assert.match(noFlag.text(), new RegExp(RUNTIME_PLAN_CODES.NO_MANIFEST))
+  assert.match(noFlag.text(), /--runtime-manifest/)
+  assert.doesNotMatch(noFlag.text(), /计划可执行/)
+
+  // ② 路径给了，那个路径下没有文件。
+  const missing = collector()
+  const c2 = await run({
+    argv: [`--runtime-manifest=${join(f.root, 'nope.json')}`, '--runtime-install-plan'],
+    env: f.env,
+    write: missing.write,
+  })
+  assert.equal(c2, 3)
+  assert.match(missing.text(), new RegExp(RUNTIME_PLAN_CODES.MANIFEST_NOT_FOUND))
+
+  // ③ 文件在、也是合法 JSON，但**不是一份合法清单**：区间写法。
+  //    那正是 `manifest.mjs` 拒绝的 `^0.8.3`（"看起来是钉住的"）。
+  const bad = writeManifest(join(f.root, 'bad.json'), { dshVersion: '^7.7.7' })
+  const invalid = collector()
+  const c3 = await run({ argv: [`--runtime-manifest=${bad}`, '--runtime-install-plan'], env: f.env, write: invalid.write })
+  assert.equal(c3, 3)
+  assert.match(invalid.text(), new RegExp(RUNTIME_PLAN_CODES.MANIFEST_INVALID))
+  // 逐项问题要**出得来**：只说"清单不合法"等于让用户去猜是哪一行。
+  assert.match(invalid.text(), /manifest-version-not-exact/)
+  assert.match(invalid.text(), /dshVersion/)
+
+  // ④ 坏 JSON 是"读不出来"，与"读出来了但不合法"**分开**：下一步动作不同。
+  const garbage = join(f.root, 'garbage.json')
+  writeFileSync(garbage, '{ 这不是 JSON', 'utf8')
+  const unreadable = collector()
+  const c4 = await run({ argv: [`--runtime-manifest=${garbage}`, '--runtime-install-plan'], env: f.env, write: unreadable.write })
+  assert.equal(c4, 3)
+  assert.match(unreadable.text(), new RegExp(RUNTIME_PLAN_CODES.MANIFEST_UNREADABLE))
+
+  // 四条"算不出"一条都没有写出任何东西。
+  assert.equal(existsSync(f.dataDir), false)
+})
+
+test('★★★★ 没有 --runtime-install：installRuntime 与真实运行器都**一次都没有**被碰到', async () => {
+  const f = runtimeFixture('no-apply')
+  const { mod, calls } = spiedRuntimeModule()
+
+  const out = collector()
+  const code = await run({
+    argv: [`--runtime-manifest=${f.manifestPath}`, '--runtime-install-plan'],
+    env: f.env,
+    write: out.write,
+    runtimeInstallModuleFn: async () => mod,
+  })
+
+  assert.equal(code, 0)
+  assert.match(out.text(), /计划可执行/)
+  // ★ 反证：这一支**真的走过**。少了它，"installRuntime 零次"在一个
+  //   压根没进去的分支上也成立。
+  assert.equal(calls.plan, 1)
+  assert.equal(calls.install, 0, '没有 --runtime-install，却调用了 installRuntime')
+  assert.equal(calls.runnerFactory, 0, '没有 --runtime-install，却去构造了真实 npm 运行器')
+  assert.equal(existsSync(f.dataDir), false)
+
+  // 别的入口**连模块都不加载**：安装器的依赖不该被体检/修复入口拖进来。
+  let loaded = 0
+  const doctorOut = collector()
+  const dcode = await run({
+    argv: ['--doctor'],
+    env: f.env,
+    write: doctorOut.write,
+    readStdinFn: async () => '',
+    runtimeInstallModuleFn: async () => { loaded += 1; return mod },
+  })
+  assert.equal(dcode, 3, '没有诊断时 --doctor 必须是「拿不到诊断」，不是 0')
+  assert.equal(loaded, 0, '别的入口把安装器模块加载进来了')
+})
+
+test('★★★★ --runtime-install 在计划被拒绝时**一步都不走**，磁盘上也不留目录', async () => {
+  const f = runtimeFixture('refuse-apply')
+  const dshHome = join(f.root, 'dsh-home')
+  const insideDshHome = join(dshHome, 'data')
+  const env = { ...f.env, DSH_HOME: dshHome, LEGION_DATA_DIR: insideDshHome }
+  const before = snapshotDir(f.root)
+
+  const { mod, calls } = spiedRuntimeModule()
+  let runnerBuilt = 0
+  const out = collector()
+  const code = await run({
+    argv: [`--runtime-manifest=${f.manifestPath}`, '--runtime-install'],
+    env,
+    write: out.write,
+    writeErr: () => {},
+    runtimeInstallModuleFn: async () => mod,
+    npmRunnerFn: () => { runnerBuilt += 1; return fakeNpmRunner('7.7.7') },
+  })
+
+  assert.equal(code, RUNTIME_INSTALL_CLI_EXIT.REFUSED)
+  assert.match(out.text(), /RUNTIME_INSTALL_TARGET_INSIDE_DSH_HOME/)
+  // `installRuntime` 对一条被拒绝的计划**会抛**（模块自己的守卫），所以
+  // 这里的 0 不只是"没装成"，而是"根本没有走到它"。
+  assert.equal(calls.install, 0)
+  assert.equal(runnerBuilt, 0)
+  assert.deepEqual(snapshotDir(f.root), before)
+  assert.equal(existsSync(insideDshHome), false)
+})
+
+test('★★★★ --runtime-install：用模块的注入运行器真的装完一遍，指针与完成标记都落下（绝不联网）', async () => {
+  const f = runtimeFixture('apply')
+  const runner = fakeNpmRunner('7.7.7')
+  const ev = eventCollector()
+
+  const code = await run({
+    argv: [`--runtime-manifest=${f.manifestPath}`, '--runtime-install'],
+    env: f.env,
+    write: ev.write,
+    writeErr: ev.writeErr,
+    npmRunnerFn: () => runner,
+  })
+
+  assert.equal(code, 0)
+  assert.equal(runner.calls.length, 1)
+  assert.equal(runner.calls[0].file, 'npm.cmd')
+  assert.equal(runner.calls[0].args.at(-1), '@deepseek-ai/dsh@7.7.7')
+
+  // ★ 先说"要做什么"，再动手：那条通知必须出现在结果**之前**。
+  //   两条流分开收集的话，这个顺序就**没有**任何断言在看——而"打印在动作之前"
+  //   正是这一条的全部意义。
+  const announceAt = ev.events.findIndex((e) => e.ch === 'err' && /npm install/.test(e.m))
+  const resultAt = ev.events.findIndex((e) => e.ch === 'out' && /已装好/.test(e.m))
+  assert.ok(announceAt >= 0, '没有先说要执行什么')
+  assert.ok(resultAt > announceAt, '通知出现在结果之后（等于没有提前说）')
+  assert.match(ev.text('err'), /@deepseek-ai\/dsh@7\.7\.7/)
+
+  // 磁盘终态：指针、完成标记、假入口、四个 junction。
+  const root = runtimeRootOf({ dataDir: f.dataDir })
+  assert.equal(existsSync(root.pointerPath), true)
+  const pointer = JSON.parse(readFileSync(root.pointerPath, 'utf8'))
+  assert.equal(pointer.version, '7.7.7')
+  assert.equal(existsSync(join(pointer.dir, COMPLETION_MARKER_FILENAME)), true)
+  assert.match(readFileSync(join(pointer.dir, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'), 'utf8'), /假的 DSH 入口/)
+  for (const name of ['dsh-team-hub', 'dsh-scrum-worker', 'dsh-scrum-board', 'dsh-legion-services']) {
+    assert.equal(existsSync(join(pointer.dir, 'node_modules', '@dsh-external', name)), true, `缺 junction：${name}`)
+  }
+  // 装完之后现役读数也认得它（计划里的 `fresh` 变成了 `active`）。
+  const active = readActiveRuntime({ dataDir: f.dataDir })
+  assert.equal(active.state, 'active')
+  assert.equal(active.version, '7.7.7')
+})
+
+test('★★★★ --runtime-install --dry-run：只打命令，不起 npm、不建目录', async () => {
+  const f = runtimeFixture('apply-dry')
+  let runnerBuilt = 0
+  const out = collector()
+
+  const code = await run({
+    argv: [`--runtime-manifest=${f.manifestPath}`, '--runtime-install', '--dry-run'],
+    env: f.env,
+    write: out.write,
+    writeErr: () => {},
+    npmRunnerFn: () => { runnerBuilt += 1; return fakeNpmRunner('7.7.7') },
+  })
+
+  assert.equal(code, 0)
+  assert.match(out.text(), /--dry-run/)
+  assert.match(out.text(), /将要执行：npm/)
+  assert.equal(runnerBuilt, 0, '--dry-run 竟然构造了运行器')
+  assert.equal(existsSync(f.dataDir), false)
+})
+
+test('★★★★ 在测试进程里真实运行器**构造不出来**：--runtime-install 拒绝执行而不是去连网', async () => {
+  const f = runtimeFixture('apply-guard')
+  // 本用例的前提：它自己就跑在 node --test 里。前提不成立时这条用例**没有意义**，
+  // 所以先把前提断言出来，而不是让它安静地绿。
+  assert.equal(underNodeTestRunner(), true, '本用例只有在 node --test 里才有意义')
+  // 判据是"这个键**在不在**"，不是它的值——把 Node 的实现细节（`child-v8`）
+  // 写进判据的话，它改的那天这条守卫会静默失效。
+  assert.equal(underNodeTestRunner({ NODE_TEST_CONTEXT: 'child-v8' }), true)
+  assert.equal(underNodeTestRunner({ NODE_TEST_CONTEXT: '' }), true)
+  assert.equal(underNodeTestRunner({}), false, '没有这个键就不是测试运行器（真实运行必须能过）')
+  assert.equal(underNodeTestRunner({ LEGION_HOME: 'x' }), false)
+
+  const out = collector()
+  const errs = collector()
+  const { mod } = spiedRuntimeModule()
+  // ★ 这一层是**防自己**的：这个替身的 `createNpmRunner()` 会抛，
+  //   所以万一守卫被改掉，红的是这条用例（抛一个可辨认的标记），
+  //   **而不是真的去跑一次 `npm install`**。
+  //   一条"守卫坏了就会联网"的用例，在守卫坏掉的那天会把测试机连上外网——
+  //   它自己就是它要防的那件事。
+  const poisoned = { ...mod, createNpmRunner: () => { throw new Error('守卫没有生效：真实 npm 运行器被构造了') } }
+
+  // ★ 刻意**不**注入 npmRunnerFn：走默认那条路。
+  const code = await run({
+    argv: [`--runtime-manifest=${f.manifestPath}`, '--runtime-install'],
+    env: f.env,
+    write: out.write,
+    writeErr: errs.write,
+    runtimeInstallModuleFn: async () => poisoned,
+  })
+
+  assert.equal(code, RUNTIME_INSTALL_CLI_EXIT.APPLY_FAILED)
+  assert.equal(code, 10)
+  assert.notEqual(code, RUNTIME_INSTALL_CLI_EXIT.REFUSED, '守卫拒绝不是"计划被拒"（两者该看的磁盘状态不同）')
+  assert.match(errs.text(), /测试运行器|NODE_TEST_CONTEXT/)
+  assert.equal(existsSync(f.dataDir), false, '守卫必须在建任何目录之前生效')
+  // 退出 9 的原因**不是**计划被拒：计划是过的。
+  assert.match(out.text(), /计划可执行/)
+})
+
+test('★ 诚实边界：这一套接线**没有**证明什么', async () => {
+  const f = runtimeFixture('honest')
+  const runner = fakeNpmRunner('7.7.7')
+  const ev = eventCollector()
+  const code = await run({
+    argv: [`--runtime-manifest=${f.manifestPath}`, '--runtime-install'],
+    env: f.env,
+    write: ev.write,
+    writeErr: ev.writeErr,
+    npmRunnerFn: () => runner,
+  })
+  assert.equal(code, 0)
+
+  // ① **没有真的跑过 npm install。** 被执行的命令是假运行器记录下来的那一条；
+  //    真 npm 一次也没有被起过。这里是这一句的机器可读形式：
+  //    落盘的是用例造的假 DSH（只有两个文件），而不是任何一个真的 DSH 包。
+  const root = runtimeRootOf({ dataDir: f.dataDir })
+  const pointer = JSON.parse(readFileSync(root.pointerPath, 'utf8'))
+  assert.deepEqual(readdirSync(join(pointer.dir, 'node_modules', '@deepseek-ai', 'dsh')).sort(), ['lib', 'package.json'])
+
+  // ② **一个字节都没有装进真实的 DataDir。** 这套用例里 DataDir 永远是
+  //    `mkdtempSync` 出来的临时目录。
+  assert.ok(f.dataDir.startsWith(tmpdir()), `DataDir 不在临时目录里：${f.dataDir}`)
+
+  // ③ **junction 路线仍然没有在任何一个真的装好的 DSH 上跑过。**
+  //    链接指向的是仓库/夹具里的源码目录，而它们里面并没有一个装好的 DSH。
+  for (const d of RUNTIME_SOURCE_DIRS) {
+    assert.equal(existsSync(join(f.installDir, d, 'node_modules')), false,
+      `${d} 的源目录里出现了 node_modules —— 这一跑碰到了某种真实安装`)
+  }
+
+  // ④ **默认（真实）运行器这条路一次都没有被跑过**：测试守护卫把它挡在
+  //    "构造运行器"之前（上一条用例的退出 9 就是证据）。
+
+  // ⑤ **本仓库没有随产品发货任何一份 §9.1 清单。** 这套用例里的清单都是现造的，
+  //    而"没有清单"在生产里的读数是退出 3——不是 0。
+  const none = collector()
+  const c = await run({ argv: ['--runtime-install-plan'], env: f.env, write: none.write })
+  assert.equal(c, RUNTIME_INSTALL_CLI_EXIT.UNDIAGNOSED)
+
+  // ⑥ 所以：**这一套证明的是"接线接上了"，不是"产品能装 DSH 了"。**
 })

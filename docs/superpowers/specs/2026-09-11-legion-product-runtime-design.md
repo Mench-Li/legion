@@ -6,7 +6,7 @@
 
 <!-- LEGION-PROGRESS-HEAD:BEGIN —— 本行由 `node scripts/prt/spec-progress.mjs` 从 `docs/superpowers/prt/PRT-PROGRESS.md` **生成**；手改会让 `--check` 变红 -->
 
-> **实施进度：133 / 145 已完成（91.7%），尚未完成 12 个。**见文末 **附录 A.7 任务进度总览**；逐条现状见 `docs/superpowers/prt/PRT-PROGRESS.md`。
+> **实施进度：134 / 145 已完成（92.4%），尚未完成 11 个。**见文末 **附录 A.7 任务进度总览**；逐条现状见 `docs/superpowers/prt/PRT-PROGRESS.md`。
 > 该区由 `node scripts/prt/spec-progress.mjs` 从台账生成，`run-ci` 的 `doc` 阶段会验证它与台账一致——手改即变红。
 
 <!-- LEGION-PROGRESS-HEAD:END -->
@@ -1378,10 +1378,24 @@ Legion 商业化不以脱离 DSH 为前置条件。首版采用“Legion 产品�
 的强制面**（包括写入者自己的会话）。因此强制点原语目前**只被自己的用例驱动，没有生产调用方**。
 理由写在 `runtime/dsh-composition/index.mjs` 的文件头，不只写在文档里。
 
-**⚠️ 一处证据分级**：`PRT-211` 完成的是 continuable session 的**接口面与归属划分**
-（15 条签名逐字读自运行中的 Inspect 注册表）；**运行时行为未经端到端验证**
-（权限是否真沿 parent→child 生效、事件续接能否跨崩溃）。后者需要真实 parent/child 会话对，属阶段 3。
-不要把前者读成后者——该分级由 `EVIDENCE_LEVEL` 写在代码里并有用例强制。
+**⚠️ 一处证据分级（本批已改写，原说明描述的状态已过期）**：`PRT-211` 完成的是 continuable
+session 的**接口面与归属划分**（15 条签名逐字读自运行中的 Inspect 注册表），该分级由
+`EVIDENCE_LEVEL` 写在代码里并有用例强制。**原说明里那句「运行时行为未经端到端验证……
+需要真实 parent/child 会话对，属阶段 3」已经不再成立**：现在有了真实 parent/child 会话对。
+做法不是等阶段 3，而是在**一次性 ACP 进程里插一行** `inject:['subagents','agents','llm']`，
+用 `ctx.agents.create` **现造**一个活父 agent——`subagents` 服务本来就在进程里
+（DSH base bundle 装了 `@deepseek-ai/dsh-subagent` 与 spawn/fork 两个 in-process provider），
+缺的从来不是角色，是**没人插过那一行**。八个签名于是**全部被驱动**：
+`startContinuable` 建立 durable 子会话且 `childId` 跨 Activation 稳定、`sendMessage` 的送达
+落在**孩子自己那一轮**的模型流上、`interrupt`/`interruptByParent` 分得开「被干净打断」
+与「进程死了」、`drain*` 之后投递报 `DRAINING`、越权父级被拒（`UNAUTHORIZED`）。
+套件在 `runtime/dsh-composition/subagents-surface-real-process.test.mjs`（12 例，~8.9s）。
+
+**✅ 不覆盖**：① 跨**崩溃**的恢复（只证明了冷恢复＝重建会话再开一轮，**不是**把中断的执行
+接着跑完）；② 权限沿 parent→child 生效的**值**本身（只证明了归属越权被拒）；③
+`sessions.fork` / `approval.setPolicy` / `approval.overrideOf` **未被驱动**。
+`runtime/adapters/dsh/session-boundary.mjs` 的 `behaviorVerified` 静态旗**仍是 `false`**——
+它评的是**那个文件自己的源码锚点审计**，不是行为；新套件是**另一层**，一个字没改它。
 
 **完成标准达成情况**：阶段 2 完成标准为「同一任务通过两条路径得到等价任务状态、结构化结果和产物，
 且敏感信息不出现在输出中」。`dsh-parity` 是它的可执行形式：violations **0**，
@@ -1391,13 +1405,13 @@ Legion 商业化不以脱离 DSH 为前置条件。首版采用“Legion 产品�
 
 ### A.7 任务进度总览（**由台账生成，勿手改**）
 
-**已完成 133 / 145 = 91.7%**　·　尚未完成 **12** 个；还有 1 个从未开始。
+**已完成 134 / 145 = 92.4%**　·　尚未完成 **11** 个；还有 1 个从未开始。
 
 | 阶段 | ✅ 已完成 | 🟡 部分 | ⏸ 需外部输入 | ⬜ 未开始 | 合计 | 完成率 |
 | --- | --- | --- | --- | --- | --- | --- |
 | 阶段 0 冻结基线 | 10 | 1 | 0 | 0 | 11 | 90.9% |
 | 阶段 1 Runtime Contract | 9 | 0 | 0 | 0 | 9 | 100.0% |
-| 阶段 2 DshRuntimeAdapter | 12 | 3 | 0 | 0 | 15 | 80.0% |
+| 阶段 2 DshRuntimeAdapter | 13 | 2 | 0 | 0 | 15 | 86.7% |
 | 阶段 2.5 商业薄垂直切片 | 4 | 3 | 1 | 0 | 8 | 50.0% |
 | 阶段 3 Orchestrator Core | 15 | 0 | 0 | 1 | 16 | 93.8% |
 | 阶段 4 上下文边界 | 13 | 0 | 0 | 0 | 13 | 100.0% |
@@ -1407,15 +1421,14 @@ Legion 商业化不以脱离 DSH 为前置条件。首版采用“Legion 产品�
 | 阶段 8 安装、升级和回滚 | 13 | 0 | 0 | 0 | 13 | 100.0% |
 | 阶段 9 商业 Alpha 发布保障 | 9 | 0 | 1 | 0 | 10 | 90.0% |
 | 阶段 10 能力包协议 | 6 | 0 | 0 | 0 | 6 | 100.0% |
-| **合计** | **133** | **9** | **2** | **1** | **145** | **91.7%** |
+| **合计** | **134** | **8** | **2** | **1** | **145** | **92.4%** |
 
-**尚未完成的 12 个任务**（逐条现状见 `docs/superpowers/prt/PRT-PROGRESS.md` 对应行）：
+**尚未完成的 11 个任务**（逐条现状见 `docs/superpowers/prt/PRT-PROGRESS.md` 对应行）：
 
 | 任务 | 名称 | 状态 | 阶段 |
 | --- | --- | --- | --- |
 | PRT-009 | 成功率/人工介入/token/费用/耗时/资源基线 | 🟡 部分 | 0 |
 | PRT-207 | 采集模型 / token / 费用估算 / 耗时 | 🟡 部分 | 2 |
-| PRT-211 | continuable session 边界验证 | 🟡 部分 | 2 |
 | PRT-214 | Legion DSH 组合补丁层与员工 agent preset | 🟡 部分 | 2 |
 | PRT-253 | 单员工黄金任务迁移到 RuntimeAdapter | 🟡 部分 | 2.5 |
 | PRT-254 | per-user 数据目录 + Secret Store 最小闭环 | 🟡 部分 | 2.5 |
@@ -1433,9 +1446,9 @@ Legion 商业化不以脱离 DSH 为前置条件。首版采用“Legion 产品�
 > 阶段 2.5 及其后各阶段的完成标准涉及**真实端到端跑通**（真引擎、真任务、
 > 真审批往返），那些标准目前**尚未达标**，而其中很多任务自己的交付物是齐的。
 > 
-> 因此：**133 / 145 是"任务交付率"，不是"产品完成度"。**
+> 因此：**134 / 145 是"任务交付率"，不是"产品完成度"。**
 > 
-> 另有 9 个 🟡 是"已有交付物但完成标准未全部满足"。
+> 另有 8 个 🟡 是"已有交付物但完成标准未全部满足"。
 > 把 🟡 也计入"已开工"，则已开工 142 / 145 = 97.9%。
 > 真实完成度按**完成标准**判定；里程碑方面 **M0、M1 已达成**，M1.5 未达标。
 

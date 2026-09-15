@@ -3500,6 +3500,68 @@
 
 ---
 
+## 2026-09-15　Legion 的模型引用名，DSH 一个键空间都收不下
+
+### 一、这不是"没人调用"，是**名字对不上**
+
+PRT-509 的缺口一直写作"`openRunCredentials()` 没有生产调用方"。
+今天把它的**结构性原因**跑出来了：Legion 自己那套引用名，
+**DSH 的两个键空间一个都收不下**。
+
+`security/secrets/dsh-credentials.mjs` 的 `planDshLookup(ref)` 说得很清楚
+（`:544-546`）：DSH 让两个键空间的语法**故意不同**
+——`refs` 的键是 POSIX 标识符（`DEEPSEEK_API_KEY`），
+`records` 的键是**恰好两段**的小写连字符标识符（`deepseek/main`）。
+
+实测（不是我读正则推的，是**真的调了那个函数**）：
+
+| Legion 引用 | 可寻址 | 键空间 |
+| --- | --- | --- |
+| `DEEPSEEK_API_KEY` | true | `refs` |
+| `deepseek/main` | true | `records` |
+| **`legion/model/deepseek-v4-flash`** | **false** | **null** |
+| `legion/model/x` | false | null |
+| `a/b/c` | false | null |
+| `a/b` | true | `records` |
+
+模型档案的引用名是 **`legion/model/<profileId>`——三段**，
+而 `records` 只收两段、`refs` 一个斜杠都不收。所以：
+
+> 一个"没有生产调用方"的缺口，
+> 与一个"调用方就算写了也交不过去"的缺口，
+> 在 `git grep` 的结果上是同一个东西——
+> 只不过前者补一次接线就行，而后者还要先解决名字。
+
+### 二、这解释了为什么之前的调查停在这一步
+
+上一批确认了凭证经**环境变量**确实能抵达 DSH 的模型客户端
+（`MISSING_CREDENTIAL` → `AUTH: ... is invalid`），
+也确认了**不需要** Legion 自己发明 provider→环境变量的映射表
+（DSH 把 `apiKeyEnv: DEEPSEEK_API_KEY` 声明成行的配置）。
+
+但把这两件事实拼起来，缺的那块就具体了：
+**Legion 的引用名与 DSH 的键名不是同一个东西，中间必须有一次显式映射**，
+而这次映射**只能由 DSH 自己声明的 `apiKeyEnv` 提供**——
+`legion/model/deepseek-v4-flash` → `DEEPSEEK_API_KEY` 这一步，
+既不能猜、也不能用 Legion 的引用名直接当键。
+
+### 三、顺带发现 `planDshLookup` 早就防着这件事
+
+它把"不能寻址"与"文件里没有这一条"**分成两个读数**报
+（`:548-551`）：Legion 的 `secretRef` 比两个键空间都宽，
+于是"不能寻址"是一条**真实且常见**的结论——
+文件头写明，把它说成后者，用户会去 DSH 里找一条**根本不可能存在**的记录。
+
+> 一个"这条凭证不在文件里"的报错，
+> 与一个"这条凭证的名字永远不可能出现在这个文件里"的报错，
+> 在用户看到的界面上是同一句"找不到"——
+> 只不过前者让人去补一条，而后者让人去改一个名字。
+
+（这批只订正事实与台账，**没有**写任何生产代码。
+把映射 + 落盘 + 真读者回读做成一条可跑的读数，是下一批。）
+
+---
+
 ## 2026-09-15　DSH 有一个程序驱动的会话协议——它一直就在那张表里
 
 ### 一、`headless` 能跑工具，但它不能开会话

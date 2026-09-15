@@ -30,6 +30,11 @@ import {
   WIRE_ROUTES,
 } from '../../runtime/contracts/wire.mjs'
 import { createRuntimeContractServer } from '../../runtime/dsh-composition/runtime-contract-server.mjs'
+import { verdictFromRuntimeHostBinding } from '../../runtime/dsh-composition/plugins/runtime-contract-server-row.mjs'
+import { RUNTIME_HOST_ROW_CODES } from '../../runtime/dsh-composition/plugins/runtime-host-row.mjs'
+import { BOOTSTRAP_CODES } from '../../runtime/dsh-composition/bootstrap.mjs'
+import { productionExecutorProvider } from './executor-binding.mjs'
+import { EXECUTOR_CODES } from './executor.mjs'
 import {
   RUNTIME_CONTRACT_CLIENT_DEFAULT_TIMEOUT_MS,
   RuntimeContractClientError,
@@ -621,4 +626,129 @@ test('⑥ 路由表是共享的：客户端请求的路径就是 WIRE_ROUTES 里
     WIRE_ROUTES.cancel.path,
     WIRE_ROUTES.recover.path,
   ], '两侧各写一份路径字符串，会在改名的当天变成一次静默的 404')
+})
+
+// ═══════════════════════════════════════════════ ⑦ 整条跨进程链，一次跑通
+//
+// 上面每一组测的都是**一半**：服务端的行、客户端的七个方法、入口的形状。
+// 而「Runtime 进程里自检判未生效 ⇒ worker 不认领任务」这句话要成立，
+// 需要两半**接在一起**——服务端把结论发出去、worker 真的把它读回来、
+// 读到之后**真的拒绝**。
+//
+//   > 一半接线的两半各自全绿，
+//   > 与整条链真的通了一次，
+//   > 在"每一半的用例都过了"这件事上是同一个东西。
+//
+// `crossProcessExecutorProvider` 此前**一条用例都没有**：它是跨进程那条路的
+// 全部实现（PRT-253 的核心），却从来没有被任何测试行使过。
+//
+// 这里用**真服务端**（`createRuntimeContractServer`）+ **真 worker 侧入口**
+// （`productionExecutorProvider` 带 `runtimeUrl`/`runtimeToken`），中间的
+// HTTP、鉴权、信封、结论解析全是真的。三个形状必须落到三个**不同**的
+// 结论上——这正是"分不清就等于没做"的那件事。
+
+const STUB_RUNTIME_HOST = Object.freeze({
+  async startRun() { return { dispose() {} } },
+  probeRuntime() { return { version: 'stub-0.1.0' } },
+})
+
+/** 起一个真服务端，把 `binding`（= Runttime 进程里那一行发布的服务值）接上去。 */
+async function chainPeer(binding) {
+  const server = createRuntimeContractServer({
+    adapter: stubAdapter(),
+    token: TOKEN,
+    port: 0,
+    // ★ 与生产**逐字相同**的两行（`runtime-contract-server-row.mjs:450-453`）：
+    //   惰性读绑定服务，交给 `verdictFromRuntimeHostBinding()`。
+    //   在这里另写一个判决函数，测的就是"我另写的那个函数"，不是产品。
+    enforcement: async () => verdictFromRuntimeHostBinding(binding === undefined ? null : binding),
+  })
+  assert.equal(server.ok, true, `服务端没造出来：${server.code}`)
+  const l = await server.listen()
+  assert.equal(l.ok, true)
+  OPEN.push(() => server.close())
+  return `http://127.0.0.1:${l.port}`
+}
+
+/** 从 worker 那一侧走完整条跨进程路。 */
+async function chainReading(base, overrides = {}) {
+  return productionExecutorProvider({
+    runtimeUrl: base,
+    runtimeToken: TOKEN,
+    canRead: () => ({ all: true }),
+    post: async () => ({ status: 200, body: {} }),
+    get: async () => ({ status: 200, body: {} }),
+    ...overrides,
+  })
+}
+
+/** 自检不兼容时，那一行发布出来的服务值（形状见 `runtime-host-row.mjs`）。 */
+function incompatibleBinding() {
+  return {
+    ok: false,
+    // ★ 码与状态都取**生产常量**，不在这里抄一份字符串：
+    //   抄一份的结果是"产品改了码、用例还绿着"，而这条链要证明的正是
+    //   "worker 认得出**产品**发的那个码"。
+    code: RUNTIME_HOST_ROW_CODES.SELF_CHECK_INCOMPATIBLE,
+    innerCode: BOOTSTRAP_CODES.SELF_CHECK_INCOMPATIBLE,
+    state: 'incompatible',
+    patchVersion: 'prt-chain-1',
+    autoExecutionForbidden: true,
+    checks: [{ name: 'composition-patch-layer', ok: false }],
+    reasons: ['缺必需能力：tool-permission-enforcement', '缺必需能力：cancel-and-timeout'],
+    repair: { code: 'REPAIR_REINSTALL_PATCH_LAYER' },
+  }
+}
+
+test('⑦ ★★★ 整条链：Runtime 自检判未生效 → worker 真的不认领（这就是 PRT-215 那句话）', async () => {
+  const base = await chainPeer(incompatibleBinding())
+  const r = await chainReading(base)
+  assert.equal(r.ok, false, '自检判未生效，worker 却拿到了一个能用的引擎')
+  assert.equal(r.code, EXECUTOR_CODES.SELF_CHECK_INCOMPATIBLE,
+    `结论没有走完跨进程那一趟：${JSON.stringify(r)}`)
+  // ★★ 归因**跨过了 HTTP**：拒绝理由得是对端那几条，不是 worker 自己编的。
+  //    少了这一条，一个"读到了、但只说'不行'"的实现也能过上面那句。
+  assert.ok(r.reasons.some((x) => x.includes('tool-permission-enforcement')),
+    `拒绝理由里没有对端的归因，只有：${JSON.stringify(r.reasons)}`)
+})
+
+test('⑦ ★★★ 三个形状必须落到三个**不同**的结论上（否则"分不清"就等于没做）', async () => {
+  // ① 服务**不在**：连判定都没有人做过。
+  const absent = await chainReading(await chainPeer(undefined))
+  // ② 服务在、**说不行**：强制面未生效。
+  const incompatible = await chainReading(await chainPeer(incompatibleBinding()))
+  // ③ 服务在、**说行**：放行。
+  const ok = await chainReading(await chainPeer({
+    ok: true, code: null, state: 'enforcement-effective', patchVersion: 'p', autoExecutionForbidden: false,
+    checks: [{ name: 'composition-patch-layer', ok: true }], reasons: [],
+  }))
+
+  assert.equal(absent.code, EXECUTOR_CODES.RUNTIME_REFUSED,
+    `"没有人做过判定"必须是"对端拒绝"这一档：${JSON.stringify(absent)}`)
+  assert.equal(incompatible.code, EXECUTOR_CODES.SELF_CHECK_INCOMPATIBLE)
+  assert.equal(ok.ok, true, `自检说行，worker 却不肯用：${JSON.stringify(ok)}`)
+
+  // ★★★ 本条的**本体**：三个码两两不同形。
+  //    改这一句之前，①②都是 `RUNTIME_REFUSED`——于是"Runtime 进程在告诉你
+  //    强制面没生效"这件事，到了 worker 耳朵里与"Runtime 进程没回答"一样。
+  //    *一个"读不到强制面结论"的部署，与一个"读到了、结论是强制面没生效"的部署，
+  //    对值班的人是两种完全不同的处境：前者要去查进程和端口，后者照着修就行。*
+  const codes = [absent.code, incompatible.code, 'OK']
+  assert.equal(new Set(codes).size, 3, `三个形状没有落到三个不同的结论上：${JSON.stringify(codes)}`)
+})
+
+test('⑦ ★★ 反向对照：换一个 token，链**断在鉴权**上而不是"照常执行"', async () => {
+  const base = await chainPeer(incompatibleBinding())
+  const r = await chainReading(base, { runtimeToken: 'not-the-token' })
+  assert.equal(r.ok, false)
+  assert.equal(r.code, EXECUTOR_CODES.RUNTIME_UNAUTHORIZED,
+    `凭证不对却拿到了别的结论（那会让"没鉴权"看起来像"鉴权过了"）：${JSON.stringify(r)}`)
+})
+
+test('⑦ ★★ 反向对照：Runtime 没起 → UNREACHABLE，而**不是**"自检不兼容"', async () => {
+  // 20875：一个刚关掉的端口，绝不会有人监听。
+  const r = await chainReading('http://127.0.0.1:20875')
+  assert.equal(r.ok, false)
+  assert.equal(r.code, EXECUTOR_CODES.RUNTIME_UNREACHABLE,
+    `"够不着"与"够得着但对端说不行"必须是两档：${JSON.stringify(r)}`)
 })

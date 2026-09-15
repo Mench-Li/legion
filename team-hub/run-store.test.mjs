@@ -881,9 +881,16 @@ test('⑪ 核验清单是**总**的：状态机声明的每一项都有归宿', 
   // 入边那一半由 PRT-607（审批箱）补上：迁移在**同一次事务**里调 `createApproval`
   // 端口建出那一行，再以**后置条件**回头查库确认它真的在（见 `transition` 与
   // `approvalRowCount`）。前置无事可查、后置必须查，两个方向合起来才是完整含义。
+  // `reconciliation` **已落地**（原先这里写着"PRT-313 对账：尚未建表"）：
+  // `UnknownOutcome` 的四条出边全都声明了
+  // `requiresPersist: ['attempt','reconciliation']`，而那时它是**空话**——
+  // 既没有探针（`checkEvidence` 直接 `continue`），也没有任何一行对账可查。
+  // 现在 `run_reconciliations` 建表、`EVIDENCE_CHECKS.reconciliation` 落地，
+  // 且**每一次人工处置都写一行**（见 `run-store-policy.test.mjs` 的 ⑫ 组）。
+  // 那条声明的执行点是**前置核验**：它拦住从 `/api/runtime/transition`
+  // 通用路由把 `UnknownOutcome` 直接推成"写成功了"的调用方。
   const KNOWN_UNIMPLEMENTED = [
     'runResult',     // PRT-312 结果提取：尚未建表
-    'reconciliation', // PRT-313 对账：尚未建表
     'workspace',     // PRT-306 工作区隔离未交付，无工作区表可查（见上）
   ]
   const declared = new Set()

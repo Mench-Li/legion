@@ -5987,6 +5987,21 @@ async function handle(req, res, stripPrefix) {
       json(res, 200, { ok: true, attemptId, handoffs: runStore.handoffsOf(attemptId), serverTimeMs: Date.now() })
       return
     }
+    if (req.method === 'GET' && path === '/api/runtime/reconciliations') {
+      // 对账记录（只读）：这条尝试被谁、以什么决定、按哪种结论处置过。
+      //
+      // 这条记录同时是 `UnknownOutcome` 四条出边要的证据，因此排查
+      // 「为什么它推进不了 / 当初是谁把它判成'写成功了'」时要能直接看到它——
+      // 而不是去打开数据库文件。
+      //
+      // 与 `/api/runtime/handoffs`、`/api/runtime/validations` 同一个形状：
+      // 一份只写不读的证据，与一份没写的证据，在"事后能不能回答谁判的"上
+      // 是同一个东西——只不过前者占了一张表。
+      const attemptId = url.searchParams.get('attemptId')
+      if (attemptId === null || attemptId.length === 0) { json(res, 400, { ok: false, error: '缺少 attemptId', code: 'MISSING_PARAM' }); return }
+      json(res, 200, { ok: true, attemptId, reconciliations: runStore.reconciliationsOf(attemptId), serverTimeMs: Date.now() })
+      return
+    }
     if (req.method === 'GET' && path === '/api/runtime/next-post') {
       // 「这条任务后面还有没有岗位、是谁」——验收前要能先看到，
       // 否则调用方只能靠猜来决定 `hasNextPost`。

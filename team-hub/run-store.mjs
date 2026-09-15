@@ -341,6 +341,39 @@ export function ensureRunSchema(db) {
   // 与 ensureColumn 那次的失败模式一样。
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_run_handoffs_successor ON run_handoffs(successor_id)')
   db.exec('CREATE INDEX IF NOT EXISTS idx_run_handoffs_attempt ON run_handoffs(attempt_id, seq)')
+
+  // ── 对账记录：`UnknownOutcome` 的**四条**出边全都要求它 ──
+  //
+  // 状态机为 `UnknownOutcome → Validating / RetryableFailure / DeadLetter / Cancelled`
+  // 四条边都声明了 `requiresPersist: ['attempt','reconciliation']`。
+  // 在本批之前那句话是**空话**：`EVIDENCE_CHECKS` 里没有 `reconciliation` 这个探针，
+  // `checkEvidence` 直接 `continue` 跳过它；`resolveAttempt()` 那条路径也从来没有
+  // 任何一处能核验它。于是"外部写到底发生了没有"这个决定只活在
+  // `run_attempts.external_effect` 那三列里，而 `cancel` 那条路径连那三列都不写；
+  // 两条路的差别在库里都看不出来。
+  //
+  //   > 一个"记下来但从不检查"的要求，与一个"没有这个要求"，
+  //   > 在库里的表现是同一个东西——只不过前者在事件流里看起来像一句保证。
+  //
+  // 这张表让那句声明真的能被核验：**一次人工处置 = 一行对账**。
+  // 只追加，不提供任何 UPDATE/DELETE 路径（与 `run_validations` / `run_handoffs` 同纪律）。
+  //
+  // 主键是自增 seq 而不是 attempt_id：同一条尝试**可以**被处置多次
+  // （`DeadLetter` / `RetryableFailure` 仍允许再处置），每次都得留一行。
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS run_reconciliations (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      attempt_id TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      decision TEXT NOT NULL,
+      external_effect TEXT,
+      actor TEXT NOT NULL,
+      note TEXT,
+      lease_epoch INTEGER,
+      at_ms INTEGER NOT NULL
+    )
+  `)
+  db.exec('CREATE INDEX IF NOT EXISTS idx_run_reconciliations_attempt ON run_reconciliations(attempt_id, seq)')
 }
 
 // ---------------------------------------------------------------- 内部工具
@@ -429,6 +462,23 @@ const EVIDENCE_CHECKS = Object.freeze({
     if (edge.from !== 'AwaitingApproval') return EVIDENCE_NOT_APPLICABLE
     return approvalRowCount(db, attemptId) > 0
   },
+  // 「这次对账结论已经落库」——`UnknownOutcome` 的四条出边全都声明了它。
+  //
+  // 与 `approval` 一样，这个探针在两条**方向相反**的路径上含义完全不同：
+  //
+  //   · **前置**（`transition()`）：这条边要**用**一个对账结论，所以它必须先存在。
+  //     这一半拦住的是 `/api/runtime/transition` 那条**通用**路由——没有它，
+  //     任何人都能把一条 `UnknownOutcome` 直接推到 `Validating`，
+  //     而"外部写确实发生了"这句话没有任何凭据。那条路一旦走通，
+  //     下游要付的钱与要交代的事就已经定了，事后翻事件流只会看到
+  //     `requires_persist: ['attempt','reconciliation']` 这句看起来像保证的话。
+  //
+  //   · **后置**（`resolveAttempt()`）：那一行正是这次处置要创建的东西，
+  //     要求它先存在是循环的，所以那里改成"写进去、再回头查库确认它真的在"。
+  //
+  // 表不存在时返回 false 而不是抛错：理由与 `contextSnapshot` / `approval` 同源——
+  // 一个只有 run schema 的库里，"查不到"与"没有那张表"对这一步是**同一个事实**。
+  reconciliation: (db, attemptId) => reconciliationRowCount(db, attemptId) > 0,
 })
 
 /**
@@ -471,6 +521,22 @@ function approvalRowCount(db, attemptId) {
   if (!tableExists(db, 'permission_requests')) return 0
   if (!columnExists(db, 'permission_requests', 'attempt_id')) return 0
   return db.prepare('SELECT COUNT(*) AS n FROM permission_requests WHERE attempt_id = ?').get(attemptId).n
+}
+
+/**
+ * 这条 Attempt 名下的对账行数（0 表示"没有"）。
+ *
+ * 表不存在时返回 0 而不是让 `db.prepare` 抛出去：理由与 `approvalRowCount` 同源。
+ *
+ * 两个调用方必须问的是**同一个问题**（"这条 Attempt 有没有一行对账"）：
+ *   · `EVIDENCE_CHECKS.reconciliation` 的**前置**核验（拦住通用迁移路由）；
+ *   · `resolveAttempt()` 的**后置**条件（"语句被执行过"不等于"行存在"）。
+ * 分成两份 SQL 迟早会漂移成两个答案——而"对过账"与"没对过账"漂移的那一天，
+ * 表现是有人凭一句话把一次未知结局判成了"写成功了"。
+ */
+function reconciliationRowCount(db, attemptId) {
+  if (!tableExists(db, 'run_reconciliations')) return 0
+  return db.prepare('SELECT COUNT(*) AS n FROM run_reconciliations WHERE attempt_id = ?').get(attemptId).n
 }
 
 /**
@@ -1588,6 +1654,24 @@ export function createRunStore({
           throw fail(RUN_ERRORS.TRANSITION_REJECTED, plan.message, { stateMachineCode: plan.code, from: current.state, to })
         }
         if (plan.idempotent === true) return current
+
+        // ★ 这里**刻意不**再调一次 `checkEvidence`。
+        //
+        // 我第一版在这加了一段"证据闸门"，与 `transition()` 里那段对称。它看着更稳妥，
+        // 但实际上**永远不可能成立为 false**：本函数上面每一条决定分支都先调
+        // `recordReconciliation()`（它自己带后置条件），所以轮到这一行时
+        // `reconciliation` 那一行必定已经在库里。
+        //
+        // 一段永远不会执行的检查，与一段不存在的检查，在"它挡住了什么"上是同一个答案——
+        // 而它读起来像一道防线。这条声明的**执行点**是 `EVIDENCE_CHECKS.reconciliation`
+        // 的前置核验：它挡住的是从**别处**进来的调用方（`/api/runtime/transition`
+        // 那条通用路由），那才是能绕开人工处置的入口。人工处置这条路径则是
+        // **按构造满足**它（先落库、再迁移，同一次事务）。
+        //
+        // 代价说清楚：将来若有人加了"不落库就迁移"的分支，这里不会报错。
+        // 那时该修的是那个分支——而 `run-store.test.mjs` 的"核验清单是总的"那条用例
+        // 仍然盯着"声明的每一项都有归宿"。
+
         const finishedAtMs = ['Completed', 'Cancelled', 'DeadLetter'].includes(to) ? atMs : null
         db.prepare('UPDATE run_attempts SET state = ?, updated_at_ms = ?, finished_at_ms = COALESCE(?, finished_at_ms) WHERE id = ?')
           .run(to, atMs, finishedAtMs, attemptId)
@@ -1599,12 +1683,43 @@ export function createRunStore({
         return next
       }
 
+      // ── 对账记录：**每一次**处置都写，包括 `cancel` ──
+      //
+      // `UnknownOutcome → Cancelled` 同样声明了 `requiresPersist: ['attempt','reconciliation']`，
+      // 而"决定不做"本身就是一个关于外部写的结论（结论是"按没发生处理"）。
+      // `setVerdict()` 只在两条路径上写 `external_effect`，`cancel` 那条连它都不写——
+      // 所以对账不能复用那三列，必须有自己的行。
+      const recordReconciliation = (decisionName, externalEffect) => {
+        const current = rowOf(db, attemptId)
+        db.prepare(
+          `INSERT INTO run_reconciliations
+             (attempt_id, task_id, decision, external_effect, actor, note, lease_epoch, at_ms)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(attemptId, current.task_id, decisionName, externalEffect ?? null, actor, note, current.lease_epoch, atMs)
+        // **后置条件**：写完之后用**闸门自己那个探针**回头查库，确认真有一行。
+        //
+        // 这不是形式主义：写用 `INSERT ... (decision, ...)`、查用
+        // `reconciliationRowCount()`（按 `attempt_id` 数行），两者的表名/列名一旦
+        // 漂移，这一条会当场炸出来，而不是让闸门安静地永远返回"没有"从而**永远拒绝**
+        // 每一次人工处置（那也是一种坏法：安全但不可用）。
+        // "语句被执行过"不等于"行存在"——与 PRT-607 审批箱那句是同一句话。
+        if (!EVIDENCE_CHECKS.reconciliation(db, attemptId)) {
+          throw fail(RUN_ERRORS.EVIDENCE_MISSING,
+            '对账结论没有落库：这次处置的依据必须在同一次事务里写进 run_reconciliations。' +
+            '不降级成"先处置、稍后补记录"——一条已经按"外部写确认发生过"继续验收的尝试，' +
+            '事后翻库找不到任何人对过账',
+            { attemptId, decision: decisionName }, 500)
+        }
+      }
+
       if (decision === 'cancel') {
+        recordReconciliation(decision, null)
         const next = move('Cancelled')
         projectToTask(db, next, 'Cancelled', atMs)
         return Object.freeze({ ok: true, decision, attempt: shapeAttempt(next), action: 'cancelled', serverTimeMs: atMs, ignoredClientFields: Object.freeze(ignoredClientFields) })
       }
       if (decision === 'dead-letter') {
+        recordReconciliation(decision, row.external_effect ?? null)
         setVerdict(row.external_effect ?? null)
         // `UnknownOutcome → DeadLetter` 与 `RetryableFailure → DeadLetter` 都是合法边
         const next = move('DeadLetter')
@@ -1612,6 +1727,7 @@ export function createRunStore({
         return Object.freeze({ ok: true, decision, attempt: shapeAttempt(next), action: 'dead-letter', serverTimeMs: atMs, ignoredClientFields: Object.freeze(ignoredClientFields) })
       }
       if (decision === 'external-effect-happened') {
+        recordReconciliation(decision, 'confirmed')
         setVerdict('confirmed')
         const next = move('Validating', { externalEffectConfirmed: true })
         const taskStatus = projectToTask(db, next, 'Validating', atMs)
@@ -1621,6 +1737,7 @@ export function createRunStore({
         })
       }
       // external-effect-absent / retry：确认没发生 → 降级为可重试失败，再走额度判定
+      recordReconciliation(decision, 'absent')
       setVerdict('absent')
       let current = row
       if (current.state === 'UnknownOutcome') {
@@ -1872,6 +1989,37 @@ export function createRunStore({
   }
 
   /**
+   * 对账记录（只读）：这条尝试被谁、以什么决定、按哪种结论处置过。
+   *
+   * 与 `handoffsOf` / `validationsOf` 同一个形状，理由也是同一个：
+   * 这些行同时是某条迁移边的**证据**，所以排查「为什么推不动」时要能直接看到它。
+   *
+   *   > 一份只写不读的证据，与一份没写的证据，
+   *   > 在"事后能不能回答谁判的"上是同一个东西——只不过前者占了一张表。
+   *
+   * 而且这里读的是**全部**历史（`ORDER BY seq`），不是最新一行：
+   * 同一条尝试可以被处置多次（先在 `RetryableFailure` 上判"没发生"、后来兜底成
+   * `DeadLetter`），只回最后一行会让"当初为什么那么判"消失。
+   */
+  function reconciliationsOf(attemptId) {
+    return Object.freeze(db.prepare('SELECT * FROM run_reconciliations WHERE attempt_id = ? ORDER BY seq').all(attemptId)
+      .map((r) => Object.freeze({
+        seq: Number(r.seq),
+        attemptId: r.attempt_id,
+        taskId: r.task_id,
+        decision: r.decision,
+        // `null` 表示"没确认外部写发生过"（`cancel` / `dead-letter` 的结论），
+        // 不是"没记"。与 `run_attempts.external_effect` 的三态口径一致：
+        // 这里刻意不把 null 说成 false——那会把"未确认"读成"确认没发生"。
+        externalEffect: r.external_effect,
+        actor: r.actor,
+        note: r.note,
+        leaseEpoch: r.lease_epoch === null ? null : Number(r.lease_epoch),
+        atMs: Number(r.at_ms),
+      })))
+  }
+
+  /**
    * 交接（PRT-308，spec 第 333 行）：当前 Task 收口并**原子创建**下一岗位任务。
    *
    * 一次事务里做完三件事：建后继任务 → 记交接记录 → 把本尝试终结为 `Completed`。
@@ -2088,7 +2236,8 @@ export function createRunStore({
     // PRT-309：失败结算的唯一入口（重试 / 退避 / 额度耗尽 → Dead Letter）
     failAndRetry, scheduleRetry, retryBudgetOf,
     // PRT-310/311：等人工清单与人工处置
-    listHeld, resolveAttempt,
+    // `reconciliationsOf` 与 `resolveAttempt` 配对：处置写入证据，读回证据
+    listHeld, resolveAttempt, reconciliationsOf,
     // PRT-307：机器验收的唯一入口（核判据 → 落库 → 按结论推进状态）
     recordValidation, validationsOf, criteriaOf,
     // PRT-308：交接（原子创建下一岗位任务 + 收口）

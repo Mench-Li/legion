@@ -448,3 +448,48 @@ test('⑨ 额度耗尽 → Dead Letter，并且这条任务仍然能被人在清
   assert.equal(mine[0].state, 'DeadLetter')
   assert.equal(mine[0].isLatest, true)
 })
+
+// ---------------------------------------------------------------- ⑩ 对账记录
+
+test('⑩ ★★ 对账记录能**从界面读回来**：谁判的、按哪种结论、什么理由', async () => {
+  // 这条记录同时是 `UnknownOutcome` 四条出边要的证据（`requiresPersist:
+  // ['attempt','reconciliation']`）。只写不读的证据与没写的证据，
+  // 在"事后能不能回答谁判的"上是同一个东西——只不过前者占了一张表。
+  //
+  // 自建一条任务（不依赖前面用例留下的状态）：用例之间的顺序依赖
+  // 会在某次重排之后变成一条查不到东西、却依然"绿"的断言。
+  const c = await claimToRunning('w-rec', 'rt-rec')
+  await call('POST', '/api/runtime/transition', {
+    attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w-rec', outcome: 'outcome_unknown',
+  })
+
+  // 处置**之前**：读得到，且是空的（不是 404、不是报错）
+  const empty = await call('GET', `/api/runtime/reconciliations?attemptId=${c.attemptId}`)
+  assert.equal(empty.status, 200)
+  assert.deepEqual(empty.body.reconciliations, [],
+    '还没处置过时必须是"空清单"而不是"查不到"——两者对排查的人是两件事')
+
+  // 缺参数 → 400（与 handoffs / validations 一致）
+  const missing = await call('GET', '/api/runtime/reconciliations')
+  assert.equal(missing.status, 400)
+  assert.equal(missing.body.code, 'MISSING_PARAM')
+
+  const r = await call('POST', '/api/runtime/resolve', {
+    attemptId: c.attemptId, decision: 'external-effect-happened', actor: 'general', note: '对账单确认已扣费',
+  })
+  assert.equal(r.status, 200)
+
+  const got = await call('GET', `/api/runtime/reconciliations?attemptId=${c.attemptId}`)
+  assert.equal(got.status, 200)
+  assert.equal(got.body.reconciliations.length, 1)
+  const rec = got.body.reconciliations[0]
+  assert.equal(rec.attemptId, c.attemptId)
+  assert.equal(rec.taskId, 'rt-rec')
+  assert.equal(rec.decision, 'external-effect-happened')
+  assert.equal(rec.externalEffect, 'confirmed')
+  assert.equal(rec.actor, 'general')
+  assert.equal(rec.note, '对账单确认已扣费')
+  assert.equal(Number.isInteger(rec.atMs), true)
+  // 租约世代要能读回来：事后要分得出"是哪一次持有期间做的决定"
+  assert.equal(Number.isInteger(rec.leaseEpoch), true)
+})

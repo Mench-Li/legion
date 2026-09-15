@@ -406,3 +406,149 @@ test('⑪ 幂等键跨尝试稳定（含 attempt_no 就等于没有幂等键）'
     assert.equal(env.store.retryBudgetOf('t1').idempotencyKey, 'idem:t1')
   } finally { env.cleanup() }
 })
+
+// ============================================================================
+// ⑫ 对账落库（`UnknownOutcome` 四条出边要求的 `reconciliation` 证据）
+//
+// 这一组盯的是一种**不会报错**的失败：状态机为 `UnknownOutcome → Validating /
+// RetryableFailure / DeadLetter / Cancelled` **四条边全部**声明了
+// `requiresPersist: ['attempt','reconciliation']`，而在此之前那句话是空话，
+// 而且是**两重**的：
+//   · `EVIDENCE_CHECKS` 里没有这个探针，`checkEvidence` 直接 `continue` 跳过；
+//   · `resolveAttempt()` 的 `move()` **根本不调 `checkEvidence`**——
+//     连"被跳过"都算不上，这条边从来没有被闸门看过一眼。
+// 于是"外部写到底发生了没有"这个决定只活在 `run_attempts` 的三列里，
+// 而 `cancel` 那条路连那三列都不写。两条路的差别在库里都看不出来。
+//
+//   > 一个"记下来但从不检查"的要求，与一个"没有这个要求"，
+//   > 在库里的表现是同一个东西——只不过前者在事件流里看起来像一句保证。
+// ============================================================================
+
+/** 这条 Attempt 名下的对账行（按写入顺序）。 */
+function reconciliationRows(env, attemptId) {
+  return env.db.prepare(
+    'SELECT attempt_id, task_id, decision, external_effect, actor, note, lease_epoch, at_ms FROM run_reconciliations WHERE attempt_id = ? ORDER BY seq',
+  ).all(attemptId)
+}
+
+test('⑫ ★★ 对账未落库时，**通用迁移路由**不得把 UnknownOutcome 推到 Validating', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c = claimToRunning(env)
+    env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', outcome: 'outcome_unknown' })
+    assert.equal(env.store.getAttempt(c.attemptId).state, 'UnknownOutcome')
+    assert.equal(reconciliationRows(env, c.attemptId).length, 0)
+
+    // 这条断言是本组的全部意义：守卫输入**给足了**（`externalEffectConfirmed: true`），
+    // 状态机上这条边是合法的，唯一缺的东西就是"对过账"这件事本身。
+    // 没有它，任何人都能绕过人工处置那条路径把一次未知结局判成"写成功了"。
+    const e = assertRunError(() => env.store.transition({
+      attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to: 'Validating',
+      context: { externalEffectConfirmed: true },
+    }), RUN_ERRORS.EVIDENCE_MISSING)
+    assert.deepEqual([...e.missing], ['reconciliation'],
+      '缺的必须**具名**是 reconciliation——笼统的"证据缺失"排查时只能去读状态机源码')
+    // 状态没被推进：拒绝而不是"记一条警告然后继续"
+    assert.equal(env.store.getAttempt(c.attemptId).state, 'UnknownOutcome')
+  } finally { env.cleanup() }
+})
+
+test('⑫ ★★ 每一次人工处置都写一行对账——**四条决定**，含不写 external_effect 的 cancel', () => {
+  // `cancel` 单独重要：另外三条决定都经 `setVerdict()` 写 `run_attempts` 的三列，
+  // 唯独它不写。若对账复用那三列，"决定不做"这条路上就**没有任何凭据**，
+  // 而对账要求的正是"每一次处置都有凭据"。
+  const CASES = [
+    { decision: 'external-effect-happened', expectEffect: 'confirmed', expectState: 'Validating' },
+    { decision: 'external-effect-absent', expectEffect: 'absent', expectState: 'RetryableFailure' },
+    { decision: 'dead-letter', expectEffect: null, expectState: 'DeadLetter' },
+    { decision: 'cancel', expectEffect: null, expectState: 'Cancelled' },
+  ]
+  for (const k of CASES) {
+    const env = makeEnv()
+    try {
+      env.addTask('t1')
+      const c = claimToRunning(env)
+      env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', outcome: 'outcome_unknown' })
+      const leaseEpoch = env.store.getAttempt(c.attemptId).leaseEpoch
+
+      env.store.resolveAttempt({
+        attemptId: c.attemptId, decision: k.decision, actor: 'general', note: `处置：${k.decision}`,
+      })
+
+      const rows = reconciliationRows(env, c.attemptId)
+      assert.equal(rows.length, 1, `${k.decision}：一次处置必须正好留一行对账`)
+      const r = rows[0]
+      assert.equal(r.decision, k.decision, `${k.decision}：留下的必须是**这次**的决定`)
+      assert.equal(r.actor, 'general', '决定必须能定位到人——"谁判的"是对账要回答的第一个问题')
+      assert.equal(r.note, `处置：${k.decision}`)
+      assert.equal(r.external_effect, k.expectEffect,
+        `${k.decision}：对账要记下"按哪种结论处置的"，而 cancel/dead-letter 的结论是"未确认"（null）而不是编一个`)
+      assert.equal(r.attempt_id, c.attemptId)
+      assert.equal(r.task_id, 't1', '任务号要跟着行一起走，否则按任务查对账要走一次 join')
+      assert.equal(r.lease_epoch, leaseEpoch, '租约世代要留痕：事后要能分出"哪一次持有期间做的决定"')
+      assert.equal(Number.isInteger(r.at_ms), true)
+      // 状态确实推进了（对账只是**依据**，不是替代品）
+      assert.equal(env.store.getAttempt(c.attemptId).state, k.expectState)
+    } finally { env.cleanup() }
+  }
+})
+
+test('⑫ ★ 对账行**只追加**：同一条尝试被二次处置时，第一行不被改写', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c = claimToRunning(env)
+    env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', outcome: 'outcome_unknown' })
+    // 第一次：确认没发生 → RetryableFailure（仍允许再处置）
+    env.store.resolveAttempt({ attemptId: c.attemptId, decision: 'external-effect-absent', actor: 'general', note: '第一次' })
+    const first = reconciliationRows(env, c.attemptId)
+    assert.equal(first.length, 1)
+
+    // 第二次：把它兜底成 DeadLetter
+    env.store.resolveAttempt({ attemptId: c.attemptId, decision: 'dead-letter', actor: 'ops', note: '第二次' })
+    const rows = reconciliationRows(env, c.attemptId)
+    assert.equal(rows.length, 2, '两次处置必须留两行——只留最后一行会让"当初为什么这么判"消失')
+    // 第一行**逐字段没变**（只追加，不提供 UPDATE/DELETE 路径）
+    assert.deepEqual(rows[0], first[0], '历史对账不得被后一次处置改写')
+    assert.equal(rows[1].actor, 'ops')
+    assert.equal(rows[1].decision, 'dead-letter')
+
+    // ★ 同一件事还要**从公开读方法**再看一遍：上面 `rows` 是我自己写的 SQL，
+    // 而产品（路由器、界面）读的是 `reconciliationsOf()`。两者一旦分叉——
+    // 比如读方法被写成只回最新一行——"多次处置的历史被折叠"这件事
+    // 在只查原始表的断言下**完全看不见**：表里明明两行，读出来一行。
+    //
+    //   > 一个「按表查」的断言，与一个「按产品的读法查」的断言，
+    //   > 在"历史有没有被折叠"上是同一个东西——只不过只有后者会红。
+    const viaApi = env.store.reconciliationsOf(c.attemptId)
+    assert.equal(viaApi.length, 2, '读方法不得把多次处置折叠成一行')
+    assert.deepEqual(viaApi.map((r) => r.decision), ['external-effect-absent', 'dead-letter'],
+      '读回来必须是**按发生顺序**的完整历史')
+    assert.equal(viaApi[0].note, '第一次')
+    assert.equal(viaApi[1].note, '第二次')
+    assert.equal(viaApi[0].actor, 'general')
+    assert.equal(viaApi[1].actor, 'ops')
+  } finally { env.cleanup() }
+})
+
+test('⑫ ★ 人工处置走完后，**同一个库**里对账行数是可查的（不是只写在返回值里）', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c = claimToRunning(env)
+    env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', outcome: 'outcome_unknown' })
+    env.store.resolveAttempt({ attemptId: c.attemptId, decision: 'external-effect-happened', actor: 'general' })
+    // 关掉数据库连接再重开：对账必须**真的落盘**，而不是活在进程内存里。
+    // 一个只改了返回值、没写库的实现，在"处置完当下"看起来完全一样。
+    env.db.close()
+    const reopened = new DatabaseSync(env.dbFile)
+    try {
+      const n = reopened.prepare('SELECT COUNT(*) AS n FROM run_reconciliations WHERE attempt_id = ?').get(c.attemptId).n
+      assert.equal(n, 1, '重开库之后对账行必须还在')
+      const row = reopened.prepare('SELECT decision, actor FROM run_reconciliations WHERE attempt_id = ?').get(c.attemptId)
+      assert.equal(row.decision, 'external-effect-happened')
+      assert.equal(row.actor, 'general')
+    } finally { reopened.close() }
+  } finally { env.cleanup() }
+})

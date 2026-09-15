@@ -107,7 +107,17 @@ const LEGION_ENV = Object.freeze({
 
 const PROFILE_NAME = 'prt253rt'
 
-function makeHome(tag) {
+/**
+ * 建一个一次性 home。`bundles` 默认是**空**（本套件其余场景的口径：树里只有我们
+ * 通过 `--patch` 插进去的行）。
+ *
+ * ★ 传 `bundles: ['@deepseek-ai/dsh-base']` 就得到**生产形状**：那一层真的声明了
+ * `permission` 行（`dsh-base/cordis.patch.yml:229`），于是 Legion 补丁层的
+ * `patch-over permission` 有靶子可打。DSH 自己会把安装处的依赖闭包软链进
+ * `$DSH_HOME/profiles/node_modules`（`healProfilesModuleFallback`），所以一个
+ * **tmpdir 里的** 一次性 home 也能起真 bundle——**不需要**碰操作者的 `~/.dsh`。
+ */
+function makeHome(tag, bundles = []) {
   const home = mkdtempSync(join(SCRATCH, `home-${tag}-`))
   assert.ok(resolve(home).startsWith(TMP_ROOT), `一次性 home 逃出了 tmpdir：${home}`)
   assert.ok(resolve(home).startsWith(SCRATCH), `一次性 home 逃出了本次运行的 scratch：${home}`)
@@ -117,7 +127,7 @@ function makeHome(tag) {
     name: `dsh-profile-${PROFILE_NAME}`,
     private: true,
     dependencies: {},
-    dsh: { profile: { bundles: [], patchReload: 'startup' } },
+    dsh: { profile: { bundles, patchReload: 'startup' } },
   }, null, 2) + '\n')
   writeFileSync(join(profileDir, 'cordis.patch.yml'), '# 空用户层\n[]\n')
   return home
@@ -347,6 +357,7 @@ const PROBE_PATCH_SRC = `- insert:
 // 于是"整层判生效"这句话是**有因果的**，不是一个碰巧为空的读数。
 const RECONCILE_PROBE_SRC = `import { observeComposition } from ${JSON.stringify(fileUrl(join(HERE, 'runtime-host-row.mjs')))}
 import { reconcilePatchLayer } from ${JSON.stringify(fileUrl(join(COMPOSITION, 'patch-layer.mjs')))}
+import { approvalPortFactory } from ${JSON.stringify(fileUrl(join(HERE, 'root-row.mjs')))}
 const note = (line) => process.stderr.write(line + '\\n')
 export default {
   name: 'prt253rt-reconcile-probe',
@@ -361,6 +372,14 @@ export default {
         note('RECONCILE-EFFECTIVE ' + r.effective)
         note('RECONCILE-REASONS ' + JSON.stringify(r.reasons))
         for (const f of r.findings) note('RECONCILE-FINDING ' + JSON.stringify([f.row, f.code]))
+        // ★ 生产形状那两条（H/I）要读的三样：服务、注册缝、以及**生效的 config 内容**
+        note('ROOT-SERVICE ' + (ctx.get('legionEnforcementRoot', false) === undefined ? 'absent' : 'present'))
+        note('PORT-FACTORY ' + (approvalPortFactory() === null ? 'none' : 'registered'))
+        try {
+          for (const e of ctx.loader.entries()) {
+            if ((e.options.id ?? '') === 'permission') note('PERM-CONFIG ' + JSON.stringify(e.options.config ?? null))
+          }
+        } catch (error) { note('PERM-CONFIG-THREW ' + String(error && error.message ? error.message : error)) }
       } catch (error) {
         note('RECONCILE-THREW ' + String(error && error.message ? error.message : error))
       }
@@ -412,11 +431,12 @@ for (const p of [RUNTIME_HOST_ROW_ABS, EXECUTOR_BINDING_ABS, join(HERE, 'pre-exe
  * @param {{tag: string, patches: string[]}} scenario
  */
 function runDsh(scenario) {
-  const home = makeHome(scenario.tag)
+  const home = makeHome(scenario.tag, scenario.bundles ?? [])
   const args = ['--profile', PROFILE_NAME]
   for (const patch of scenario.patches) args.push('--patch', patch)
 
   const env = { ...process.env, DSH_HOME: home, ...LEGION_ENV }
+  if (scenario.env !== undefined) for (const [k, v] of Object.entries(scenario.env)) env[k] = v
   delete env.DSH_SNAPSHOT
 
   const result = spawnSync(process.execPath, [CLI, ...args], {
@@ -665,6 +685,170 @@ describe('PRT-253：`bindDshRuntime` 的生产调用方在**真 DSH 进程**里�
     // 反向锚：这一次**没有**走到"端口注册成功"。
     assert.equal(reading(r.stderr, 'BOUND'), null, '被拒绝的场景里不该有 BOUND 读数')
     t.diagnostic('G: exit 1 + BOOTSTRAP_SELF_CHECK_INCOMPATIBLE（靶子缺席的下游）')
+  })
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // ★★★ H/I：**生产形状**的启动 —— 真 bundle 声明 `permission`，Legion 覆盖它
+  //
+  // 上面 A–G 用的 profile 都是 `bundles: []`，于是 `permission` 那一行**必须**
+  // 靠测试替身插进去。PRT-214 因此一直留着这句话：
+  //
+  //   「一次带 bundle 的 profile 启动让 Legion preset 表真的生效，
+  //     **依然没有被观察到**。」
+  //
+  // `dsh-base` 自己的 `cordis.patch.yml:229` 就声明了 `permission`
+  // （`name: '@deepseek-ai/dsh-permission-presets'`）。把它挂上，Legion 补丁层的
+  // `patch-over permission` 就有了**真的**靶子——于是这一条量的是生产那件事，
+  // 不是"对账器会把某种树判生效"。
+  //
+  // 安全：仍然是**一次性 DSH_HOME**。DSH 会把安装处的依赖闭包软链进
+  // `$DSH_HOME/profiles/node_modules`（`healProfilesModuleFallback`），
+  // 写入全在临时目录里；真实 `~/.dsh` 一个字节都不碰。
+  // ───────────────────────────────────────────────────────────────────────────
+
+  guarded('H. ★★★ 生产形状：真 bundle + 真补丁层 → 生效的 preset 表是 **Legion 的**', (t) => {
+    // ★ 刻意**不挂** `legion-runtime-host`：那一行**不在**真补丁层里
+    //   （`legion-host.patch.yml` 里没有它，`PATCH_LAYER_ROWS` 里也没有）。
+    //   把它混进来读的就不是"生产形状"，而是"生产形状 + 一件尚未接上的东西"——
+    //   那一天它确实会拒绝，而拒绝的原因是**另外两项**自检（见 J）。
+    const r = runDsh({
+      tag: 'h',
+      bundles: ['@deepseek-ai/dsh-base'],
+      patches: [REAL_PATCH, SCRATCH_PATH.reconcileProbePatch],
+    })
+    assert.equal(r.spawnError, null)
+    // bundle 起不来时**响亮地红**，不要静默退化成"读数不对"——
+    // 那会让人以为产品坏了，而真因是这个环境里 bundle 解析不了。
+    assert.equal(r.code, 0, `真 bundle 启动失败：\n${r.stderr}`)
+    assert.match(r.stderr, /^RECONCILE-PROBE-DONE$/m, `对账探针没跑完：\n${r.stderr}`)
+    const rec = reconcileReading(r.stderr)
+    assert.notEqual(rec, null, `读不到对账读数：\n${r.stderr}`)
+
+    // ① ★ 缺了很久的那个读数：整层**判生效**，在真的带 bundle 的启动里。
+    assert.equal(rec.effective, true, `生产形状下自检判未生效：${JSON.stringify(rec.reasons)}`)
+    assert.deepEqual(rec.reasons, [], '判生效了却还带着理由')
+    for (const [row, code] of rec.findings) {
+      assert.equal(code, 'OK', `${row} 在生产形状下的结论是 ${code}，不是 OK`)
+    }
+    // ② ★★ 生效的 preset 表是 **Legion 的**，不是 DSH 默认的那三个。
+    assert.deepEqual(rec.presets, ['legion-attended', 'legion-unattended'],
+      `生效的 preset 表不是 Legion 的：${JSON.stringify(rec.presets)}`)
+    for (const dshDefault of ['read-only', 'workspace-write', 'danger-full-access']) {
+      assert.equal((rec.presets ?? []).includes(dshDefault), false,
+        `DSH 默认 preset "${dshDefault}" 还在生效表里 —— 覆盖没真发生`)
+    }
+    // ③ ★★★ 覆盖的是**内容**，不只是名字。
+    //    两种值守都锁在 `workspace-write`，区别只在 approval。少了这一条，
+    //    一个"只把名字塞进表里、sandbox 仍是 danger-full-access"的实现会绿——
+    //    而把无人值守从"降到全权限"里救回来正是这张表的**全部意义**。
+    const perm = reading(r.stderr, 'PERM-CONFIG')
+    assert.notEqual(perm, null, `读不到生效的 permission config：\n${r.stderr}`)
+    const cfg = JSON.parse(perm)
+    assert.equal(cfg.presets['legion-attended'].sandbox, 'workspace-write')
+    assert.equal(cfg.presets['legion-attended'].approval, 'ask')
+    assert.equal(cfg.presets['legion-unattended'].sandbox, 'workspace-write',
+      '无人值守的 sandbox 不是 workspace-write —— 那正是"无人值守 ⇒ 降到全权限"这个陷阱')
+    assert.equal(cfg.presets['legion-unattended'].approval, 'never')
+    // ④ 产品注册方（**不是**替身）把工厂注册进来了，组合根服务也发布了。
+    assert.match(r.stderr, /^ROOT-SERVICE present$/m, r.stderr)
+    assert.match(r.stderr, /^PORT-FACTORY registered$/m, r.stderr)
+    t.diagnostic(`H: effective=true，presets=${JSON.stringify(rec.presets)}，sandbox=workspace-write×2`)
+  })
+
+  guarded('I. ★★★ H 的反向对照：**同一棵树、同一个 bundle**，只是不加载 Legion 补丁层', (t) => {
+    // 这是 H 的**非空洞**保证。只跑 H，"preset 表是 Legion 的"可能只是
+    // "这个 DSH 版本默认就叫这个名字"。把 Legion 的补丁层拿掉、其余一字不变：
+    // 靶子行 `permission` 仍然由 **bundle** 提供，但生效表必须回到 DSH 默认。
+    const r = runDsh({
+      tag: 'i',
+      bundles: ['@deepseek-ai/dsh-base'],
+      patches: [SCRATCH_PATH.reconcileProbePatch],
+    })
+    assert.equal(r.spawnError, null)
+    assert.equal(r.code, 0, `对照组启动失败：\n${r.stderr}`)
+    assert.match(r.stderr, /^RECONCILE-PROBE-DONE$/m, r.stderr)
+    const rec = reconcileReading(r.stderr)
+    assert.notEqual(rec, null, `对照组读不到对账读数：\n${r.stderr}`)
+
+    // ★ 靶子行在树里、且激活 —— 所以下面那条差异**只**能来自 Legion 的补丁层，
+    //   不可能来自"这一行根本不存在"。这一条是 I 存在的全部理由。
+    assert.match(r.stderr, /"legion-enforcement-permission-presets",true,true/,
+      `对照组里 permission 行不在树里 —— 那这条对照读的是"行缺席"，不是"覆盖没发生"：\n${r.stderr}`)
+    assert.deepEqual(rec.presets, ['read-only', 'workspace-write', 'danger-full-access'],
+      `没加载 Legion 补丁层，生效表却不是 DSH 默认：${JSON.stringify(rec.presets)}`)
+    // 而 Legion 的名字**一个都不能在**。
+    for (const name of ['legion-attended', 'legion-unattended']) {
+      assert.equal((rec.presets ?? []).includes(name), false,
+        `${name} 在没有 Legion 补丁层的启动里也生效了 —— 那 H 读的不是覆盖`)
+    }
+    t.diagnostic(`I: presets=${JSON.stringify(rec.presets)}（DSH 默认），permission 行在树里且激活`)
+  })
+
+  guarded('J. ★★★ 把**生产消费者**自己的判决读出来：它没有把"组合补丁层"列进未通过项', (t) => {
+    // H 读的是**我们自己的**对账探针调 `reconcilePatchLayer()`。
+    // 这一条读的是**产品自己的**那一次判定：`bootstrapDshRuntime()` →
+    // `startupSelfCheck()` 第①项。两者是同一份观察，但**调用方不同**——
+    // 探针对了、生产调用方不对，是完全可能的。
+    //
+    // 挂上 `legion-runtime-host`（生产里尚未接上的那一行）来驱动它。那一行在这个
+    // 形状下**会拒绝**，而拒绝的理由是**具体哪几项**没过——失败清单里有没有
+    // `composition-patch-layer`，就是这一条要读的东西。
+    //
+    // ⚠️ 这条**不**断言"它一定拒绝"：②③两项取决于环境（见下），某台机器上它可能
+    //    直接装上。两种结局都允许，被钉住的只有"第①项不在失败清单里"。
+    const r = runDsh({
+      tag: 'j',
+      bundles: ['@deepseek-ai/dsh-base'],
+      patches: [REAL_PATCH, SCRATCH_PATH.hostRowPatch, SCRATCH_PATH.reconcileProbePatch],
+    })
+    assert.equal(r.spawnError, null)
+
+    // 自检的逐项归因在拒绝消息里，每行形如 `  · <项名>：<原因>`。
+    const failedItems = [...new Set(
+      [...r.stderr.matchAll(/^\s*· ([a-z0-9-]+)[:：]/gm)].map((m) => m[1]),
+    )]
+    // ★★★ 本条的判据。生产调用方要么根本没拒绝（说明它把三项都判过了），
+    //     要么拒绝的理由里**不含**组合补丁层这一项。
+    assert.equal(failedItems.includes('composition-patch-layer'), false,
+      `生产自检把"组合补丁层"列进了未通过项 —— 那 H 的 effective=true 是探针说的，`
+      + `生产调用方并不这么看。未通过项：${JSON.stringify(failedItems)}\n${r.stderr.slice(-1200)}`)
+    // ★★ 拒绝必须是**逐项归因**的：报出来的名字得是自检自己的项名，
+    //    而不是一段随手拼的文本。少了这一条，一个"把三项糊成一句'未生效'"的实现
+    //    也能过上面那条断言（它的未通过清单会是空的或全是垃圾名）。
+    const CHECK_ITEMS = ['composition-patch-layer', 'runtime-probe', 'sandbox-enforcement',
+      'enforcement-mapping', 'guard-approval-consistency', 'enforcement-availability']
+    for (const item of failedItems) {
+      assert.ok(CHECK_ITEMS.includes(item),
+        `未通过项里出现了不是自检项名的东西："${item}" —— 那这条归因读的不是自检输出：`
+        + `${JSON.stringify(failedItems)}`)
+    }
+
+    if (r.code === 0) {
+      // 三项全过 ⇒ 宿主端口真的注册了。这是最强的那一种结局。
+      assert.match(r.stderr, /^BOUND /m, `自检全过却没留下绑定读数：\n${r.stderr}`)
+      assert.deepEqual(failedItems, [], '没拒绝却有未通过项 —— 两者不一致')
+      t.diagnostic('J: 三项全过，BOUND 已留下；未通过项=[]')
+    } else {
+      // 拒绝了，但**不是因为组合补丁层**。把真实理由记进诊断，不假装它不存在。
+      assert.notEqual(r.code, 0)
+      assert.ok(failedItems.length > 0, `拒绝了却没给出逐项归因：\n${r.stderr}`)
+      // ★★★ 这一条是**本轮量到的那个平台级阻塞**的可执行版本：
+      //     Windows 上 DSH 的 `windows-acl` 后端**静态**报 `partial`
+      //     （`sandbox-local/src/index.ts:186`，理由写在源码注释里：WRITE_RESTRICTED
+      //     需要 Everyone 在两个 restricting 列表里、且 NTFS 硬链接能把已授权文件
+      //     别名到工作区外），而本产品的判据取 `full`（spec §A.7 第 1 条）。
+      //     两者在 Windows 上不相容 ⇒ 生产宿主行在这个平台上**永远拒绝**。
+      //     不断言"一定拒绝"（Linux 上 bwrap/landlock 是 full），但当拒绝发生时，
+      //     在这个平台上它**必须**是沙箱那一项——否则就说明我们对"为什么起不来"
+      //     的判断是错的，而那正是这一轮要钉住的东西。
+      if (process.platform === 'win32') {
+        assert.ok(failedItems.includes('sandbox-enforcement'),
+          `Windows 上拒绝了，未通过项却不是沙箱：${JSON.stringify(failedItems)}——`
+          + '本轮量到的平台级阻塞（windows-acl 静态 partial vs 判据 full）不成立，'
+          + '或者拒绝的原因另有其物，两种情况都必须重读\n' + r.stderr.slice(-1200))
+      }
+      t.diagnostic(`J: 拒绝了，未通过项=${JSON.stringify(failedItems)}——**不含** composition-patch-layer`)
+    }
   })
 })
 

@@ -1317,6 +1317,43 @@ Legion 商业化不以脱离 DSH 为前置条件。首版采用“Legion 产品�
    `workspace-write↔ask`、`danger-full-access↔never` 绑定 —— 这正是 §6.9 那条警告成立的**机制**：
    按默认表实现「无人值守 = `never`」会**同时**把沙箱升级为 `danger-full-access`。
 
+**★ 第 4 条实测结论（本批新增，对设计有**阻塞级**影响）：在 Windows 上，"判据取 `full`" 与
+"目标平台是 Windows" 这两件事**互斥**，**生产宿主端口因此永远注册不上**。**
+
+- 读数（本批在一次性 `DSH_HOME` + `bundles: ['@deepseek-ai/dsh-base']` 的真 bundle 启动里量到）：
+  真 `ctx.sandbox.confine(['node','-e','process.exit(0)'])` 返回
+  `{"enforcement":"partial", "backend": …sandbox-windows-acl…runner.js}`；
+  把 `DSH_PERMISSION_MODE` 设成 `danger-full-access` **不变**。
+- 这不是探针参数造成的：DSH 自己把这一档写成**静态**属性——
+  `packages/sandbox/sandbox-local/src/index.ts:177-187` 的
+  `STATIC_ENFORCEMENT = { bwrap: 'full', landlock: 'full', seatbelt: 'full', 'windows-acl': 'partial' }`，
+  理由写在紧邻的注释里：`WRITE_RESTRICTED` 需要 Everyone 在两个 restricting 列表里才能完成进程
+  初始化，因此一个"给 Everyone 写权限"的外部对象仍然可写；且 NTFS **硬链接**能把已授权的
+  工作区文件**别名**到工作区之外。**这是后端能力的真实上界，不是配置问题。**
+- 后果链（本批用**生产自己的**判定器读出来的，不是推的）：真 bundle + 真补丁层 + 把
+  `legion-runtime-host` 那一行挂上 ⇒ `bootstrapDshRuntime()` → `startupSelfCheck()` 拒绝
+  ⇒ 树加载失败、进程 exit 1；自检的逐项归因是
+  **`未通过项 = ["sandbox-enforcement"]`，且 `composition-patch-layer` 不在其中**
+  （即**组合补丁层这一项是过的**，卡住的是沙箱那一项）。宿主端口不注册 ⇒
+  worker 拿不到 `productionExecutorProvider()` 的端口 ⇒ **在这台机器上不会有任何自动执行**。
+- 为什么这是"设计"层面的问题而不是"实现"层面的 bug：本 spec 的完成标准明确以
+  **干净的 Windows 机器**为准（§8.1 与阶段 8 完成标准），而第 1 条判据又明确取 `full`。
+  两条都各自有理——**合起来在 Windows 上无解**。把判据放松成"接受 `partial`"会削弱 §6.8
+  的保证（硬链接别名那条路径是真的存在的），因此本批**没有**动它，只把它量清楚并记录。
+- 需要 spec 所有者裁决的二选一（本批不代决）：
+  (a) 自动执行在 Windows 上**不支持**，改用 WSL2/Linux（`bwrap`/`landlock` = `full`）跑强制面，
+      产品在 Windows 上明确降级为"必须有人值守"；
+  (b) 接受 Windows 上的 `partial`，但把"哪些路径未被管制"写成一条**显式、可见、随 run 记录**的
+      降级声明——**而不是让它悄悄变成一个等于 `full` 的判据**。
+
+  在裁决落地之前：`PRT-257`（生产组合宿主 / 一键启动）在 Windows 上**不可能**达到"完成"，
+  因为它的完成意味着装上宿主行，而装上宿主行会被上面这条挡住。
+
+  可执行的回归锚：`runtime/dsh-composition/plugins/runtime-host-row-dsh-process.test.mjs`
+  的用例 **J**（读的正是生产判定器的逐项归因；在 Windows 上它断言未通过项**必须**含
+  `sandbox-enforcement`）。
+
+
 **⚠️ 一处刻意的未落盘（不得读成"已生效"）**：组合补丁层已声明、已受测、已生成产物，
 但**尚未写入运行 profile**。该层 `patchReload: 'live'` —— 写入会**立刻改变正在运行的 harness
 的强制面**（包括写入者自己的会话）。因此强制点原语目前**只被自己的用例驱动，没有生产调用方**。

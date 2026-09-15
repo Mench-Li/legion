@@ -3468,6 +3468,153 @@
 
 ---
 
+## 2026-09-15　第一次让**真 bundle** 声明那一行：Legion 的 preset 表真的生效了 —— 以及它揭出来的平台级阻塞
+
+上一批把「自检判生效」这个正向读数补上了，但留下一条自己写下的限制：
+
+> 靶子是替身，不是 bundle 层。真部署里 `permission` 那一行由 bundle 声明；
+> 本批证明的是"对账器会把那种树判生效"，**不是**"一次带 bundle 的 profile
+> 启动里 Legion 的 preset 表真的生效了"。
+
+这一批把靶子换成**真的**。
+
+### 怎么在 tmpdir 里起一个真 bundle
+
+先要弄清 `permission` 那一行是谁声明的。答案是 DSH 自带的 `dsh-base`：
+
+```
+apps/cli/node_modules/@deepseek-ai/dsh-base/cordis.patch.yml:229
+  - id: permission
+    name: '@deepseek-ai/dsh-permission-presets'
+```
+
+而 `bundles` 是 profile 清单里的一个字段（`packages/boot/app-boot/src/profile.ts:110`）。
+于是关键问题是：一个**临时** `DSH_HOME` 里的 profile 能不能解析到 `dsh-base`？
+
+能——因为 DSH 自己会把安装处的依赖闭包软链进 `$DSH_HOME/profiles/node_modules`
+（`healProfilesModuleFallback()`，`profile.ts:547`）：
+
+> 一条"需要人去搭环境"的验收路径，与一条"它自己会把自己准备好"的验收路径，
+> 区别只在于是它被跑过一次，还是它**能**被跑一万次。
+
+所以整个实验**一个字节都不碰**操作者的 `~/.dsh`。
+
+### 生产形状的读数
+
+一次性 home + `bundles: ['@deepseek-ai/dsh-base']` + 真 `legion-host.patch.yml`：
+
+```
+EFFECTIVE true
+REASONS   []
+F ["legion-enforcement-hard-floor","OK"]              ← loader-entry
+F ["legion-enforcement-root","OK"]                    ← loader-entry
+F ["legion-enforcement-pre-execute","OK"]             ← in-process-mount
+F ["legion-enforcement-approval-answerer","OK"]       ← in-process-mount
+F ["legion-enforcement-permission-presets","OK"] ×2   ← loader-entry + effective-config
+PRESETS ["legion-attended","legion-unattended"]
+PERM-CONFIG legion-attended   = {sandbox: workspace-write, approval: ask}
+PERM-CONFIG legion-unattended = {sandbox: workspace-write, approval: never}
+ROOT-SERVICE present       PORT-FACTORY registered
+```
+
+`read-only` / `workspace-write` / `danger-full-access` —— DSH 默认那三个**一个都不在**，
+而且读的是**内容**不只是名字：两种值守都锁在 `workspace-write`。spec §6.9 那条警告
+说的陷阱（"无人值守 = `never`"会**跟着默认表把沙箱一起升到 `danger-full-access`"）
+在生产形状下**确实没有发生**。
+
+**非空洞由反向对照钉住**（用例 I）：同一棵树、同一个 bundle，只是**不加载** Legion
+补丁层 ⇒ 生效表回到 `["read-only","workspace-write","danger-full-access"]`，
+Legion 的名字一个都不在。而 I 同时断言那一刻 `permission` 行**在树里且激活**——
+所以那条差异只可能来自补丁层，不可能来自"这一行根本不存在"。
+
+> 只跑"正向"的那一半，"生效表是 Legion 的"可能只是"这个 DSH 版本默认就叫这个名字"。
+> 一条没有反向对照的正向读数，与一条恰好读到默认值的读数，在结论行上一样好看。
+
+### 顺带读到：生产调用方**自己**的判决
+
+正向读数是我方的对账探针说的。`bootstrapDshRuntime()` → `startupSelfCheck()` 是
+**产品自己的**那一次判定——探针对了、调用方不对，是完全可能的。所以补了用例 J：
+读生产判定器的逐项归因，断言它**不会**把 `composition-patch-layer` 列进未通过项。
+把宿主行 `legion-runtime-host` 挂上驱动它之后，读数是：
+
+```
+未通过项 = ["sandbox-enforcement"]
+```
+
+**`composition-patch-layer` 不在其中** —— 组合补丁层那一项是**过的**。J 承重已单独核实：
+把挂载账改成恒 `null`，J 立刻变红。
+
+### ★★★ 而这就揭出了一条平台级阻塞
+
+`未通过项` 里唯一那一项，是沙箱。往下挖：
+
+```
+CONFINE-RAW {"argv":[…runner.js…], "enforcement":"partial", …}
+```
+
+把 `DSH_PERMISSION_MODE` 设成 `danger-full-access` —— **不变**。这不是配置问题：
+DSH 把它写成**静态**属性（`packages/sandbox/sandbox-local/src/index.ts:177`）：
+
+```js
+const STATIC_ENFORCEMENT = {
+  bwrap: 'full', landlock: 'full', seatbelt: 'full',
+  // WRITE_RESTRICTED 需要 Everyone 在两个 restricting 列表里才能完成进程初始化；
+  // 一个"给 Everyone 写权限"的外部对象因此仍然可写；
+  // 且 NTFS **硬链接**能把已授权的工作区文件**别名**到工作区之外。
+  'windows-acl': 'partial',
+}
+```
+
+即：**Windows 上 `partial` 是后端的真实上界**，不是本仓库配错了什么。
+
+而 spec §A.7 第 1 条明确「判据取 `full`」，阶段 8 完成标准又明确以**干净的 Windows
+机器**为准。两条都各自有理——**合起来在 Windows 上无解**：
+
+```
+Windows ⇒ enforcement=partial ⇒ 自检第③项不过 ⇒ 拒绝装配
+        ⇒ 宿主端口不注册 ⇒ worker 拿不到端口 ⇒ 没有任何自动执行
+```
+
+**我没有放松判据。** `partial` 的字面意思就是"存在不被管制的路径"，而硬链接别名那条
+路径是真的存在的；把判据改成"接受 partial"，是把一个**真的**缺口变成一个**看不见的**
+缺口——那恰好是这一整轮工作在防的那件事。
+
+所以我只把它量清楚，写进 spec §A.7 第 4 条，并留了可执行回归锚（用例 J：Windows 上
+拒绝时未通过项**必须**含 `sandbox-enforcement`），然后**请 spec 所有者裁决**：
+
+- **(a)** 自动执行在 Windows 上**不支持**，强制面改用 WSL2/Linux（`bwrap`/`landlock` = `full`），
+  Windows 上产品明确降级为"必须有人值守"；
+- **(b)** 接受 Windows 上的 `partial`，但把"哪些路径未被管制"写成**显式、可见、随 run
+  记录**的降级声明——而不是让它悄悄变成一个等于 `full` 的判据。
+
+**在裁决落地之前，PRT-257「一键启动」在 Windows 上不可能达到"完成"**：它的完成意味着
+装上宿主行，而装上宿主行会被这一条挡住。
+
+> 一个"验收在目标平台上永远过不了"的设计，与一个"还没实现"的设计，
+> 在台账上都是 🟡。区别在于前者再写多少代码也不会变绿。
+
+### 破验：工具自己坏了两次
+
+- **M1/M3 被误判成"无效红"**：我给 `.yml` 也跑了 `node --check`——那个命令只对 JS
+  有意义。而它们其实**都咬住了**（5 红 / 1 红）。改成"结构仍是顶层数组条目列表"。
+- **M4 把断言换成了恒真式**：`x === x` 不改变任何可观察行为，所以"没咬住"是
+  **变异设计**的错，不是断言不承重。换成"让组合补丁层真的判不过"之后立刻红。
+
+> "破验工具坏了"与"断言没承重"，在输出上是同一个词：「没咬住」。
+
+修好之后 **4/4 全部咬住**、逐字节 sha256 还原、还原后 **10/10 全绿**
+（`runtime-host-row-dsh-process` 7→**10**，**无新增测试文件**）。
+
+### ⚠️ 仍未做
+
+1. **靶子虽真，profile 仍是一次性的**：真实部署里这一层要写进**运行中**的 profile
+   （`patchReload: 'live'`），那一步**依然没有生产调用方**（= PRT-257）。
+2. `mountSettled()` 的等待仍然**没有超时**（前两批的取舍，原样保留）。
+3. 上一批记的**第三条**偶发红（`files-p27` 的 `ECONNRESET`）**仍未定位根因**；
+   本轮全量 CI 第 2 次 9/9 全绿，原始输出留在 `.ci/prt-present/suites/`。
+
+---
+
 ## 2026-09-15　第一次量到「自检判**生效**」这个正向读数，顺带发现**理由在说谎**
 
 PRT-214 的残留里有一句自己写下的话：

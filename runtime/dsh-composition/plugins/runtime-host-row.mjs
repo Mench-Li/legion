@@ -402,6 +402,86 @@ function mountedEnforcementRows(ctx) {
   return Object.freeze(rows)
 }
 
+/**
+ * ★★ 在**读挂载账之前**等这次挂载 settle（PRT-214 收口续二）。
+ *
+ * ## 为什么必须有这一步
+ *
+ * `assemble.mjs` 的挂载账原来只有一本，且写在第一个 `await` 之前。它同时承担了
+ * 两个不同的职责，而这两个职责在"读的时刻"上要求相反：
+ *
+ *   · **诊断**："这次挂载覆盖了哪几行" —— 越早写越好；
+ *   · **生效证据**："哪几行真的挂上了" —— 只有 `ctx.plugin` resolve 之后才为真。
+ *
+ * 合成一本的后果本批量到了，而且是**确定的**（不是时序巧合）：
+ *
+ *   ```js
+ *   const mounting = root.mount(ctx)      // 同步返回
+ *   root.mountedEnforcementRows()         // 已经宣布两行已挂载
+ *   // ↑ 此刻两个 `apply` **一个都还没被调用**
+ *   ```
+ *
+ * 顺着 `reconcilePatchLayer()` → `startupSelfCheck()` 第①项 →
+ * `bootstrapDshRuntime()` 注册端口，这个窗口上开着的是**最关键的那条保证**：
+ * 「强制面未生效时禁止自动执行」——那一刻强制面一行都没在听，判决却说"生效"。
+ *
+ *   > 一本"挂载一发起就宣布挂好了"的账，
+ *   > 与一本"根本没记挂载"的账，在没有并发读者的世界里是同一个东西——
+ *   > 只不过前者的假绿只在**读的时刻恰好在窗口里**才看得见。
+ *
+ * ## 为什么等待放在**这一侧**，而不是把账写晚一点
+ *
+ * 只把证据账写晚（本批已经这么改）会把假绿换成**假红**：观察者若在窗口里读，
+ * 会读到空集 ⇒ `ROW_MISSING` ⇒ 自检判未生效 ⇒ 拒绝注册 ⇒ **一个健康的部署起不来**。
+ *
+ *   > 一个"把假绿换成假红"的修法，
+ *   > 与一个"什么都没修"的修法，在"产品能不能起来"这件事上是同一个东西。
+ *
+ * 所以证据语义与读取时机必须**一起**改。本行的 `apply` 本来就是 async
+ * （下面还要 `await root.bootstrap(...)`），多等一次不改变它的性质。
+ *
+ * ## 反过来会不会变得更糟：不会
+ *
+ * 本行的 `apply` 晚一点读完组合树，读到的是**更收敛**的树，不是更不收敛的。
+ * `root-row.mjs` 文件头警告的那种"读数从已收敛变成未收敛"，来自把**根行**的
+ * `apply` 改成 async（那会推迟服务发布、把观察者挤进同一批微任务）；本函数
+ * 改的是观察者**自己**的时序，方向相反。
+ *
+ * ## ⚠️ 诚实边界：等待没有超时
+ *
+ * `mount()` 永不 settle（某一行永久 pending）时，本行会一直等下去。那在方向上
+ * 是 fail closed（不注册 ⇒ 不自动执行），但**不可见**——比一次拒绝更难排查。
+ * 不加超时的理由：超时需要一个凭空的常数，而超时之后仍然要决定"读到没收敛的账
+ * 算不算数"——那等于把本批修掉的假绿重新放回来一次。这个取舍写在这里，
+ * 而不是假装它不存在。
+ */
+async function settleEnforcementMount(ctx) {
+  if (ctx === null || typeof ctx !== 'object' || typeof ctx.get !== 'function') {
+    return Object.freeze({ waited: false, reason: 'no-context' })
+  }
+  const installed = ctx.get(ENFORCEMENT_ROOT_SERVICE)
+  if (absent(installed) || typeof installed !== 'object' || installed.ok !== true) {
+    return Object.freeze({ waited: false, reason: 'no-installation' })
+  }
+  const root = installed.root
+  if (absent(root) || typeof root !== 'object') {
+    return Object.freeze({ waited: false, reason: 'no-root' })
+  }
+  // 形状不对 ⇒ 等不了。**不假装等过**：后面 `mountedEnforcementRows()` 会按
+  // "读到什么算什么"处理，而缺这个口说明装配方不是本仓库的这一份。
+  if (typeof root.mountSettled !== 'function') {
+    return Object.freeze({ waited: false, reason: 'no-mount-settled' })
+  }
+  try {
+    await root.mountSettled()
+  } catch {
+    // ★ 永远不该走到这里（`mountSettled()` 自己不 reject）。真走到了就当"没等到"，
+    //   让证据账自己去说话——吞掉一个挂载异常会把它变成"观察者坏了"。
+    return Object.freeze({ waited: false, reason: 'settle-threw' })
+  }
+  return Object.freeze({ waited: true, reason: null })
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 
 /**
@@ -539,6 +619,11 @@ export const runtimeHostRow = {
         '把一个不是函数的值悄悄丢掉，会让"有人试图挂它"从读数上消失')
     }
 
+    // ★★ 先等这次挂载 settle，再读账。理由见 `settleEnforcementMount()` 那一段：
+    //    挂载账原来是"一发起就是满的"，而那一刻两个 `apply` 一个都还没跑——
+    //    假绿正好落在「强制面未生效时禁止自动执行」这条保证上。
+    const settled = await settleEnforcementMount(ctx)
+
     const composition = observeComposition(ctx)
     if (composition === null || composition.rows.length === 0) {
       const got = composition === null ? '读不到加载器树' : 'rows 为空'
@@ -584,6 +669,13 @@ export const runtimeHostRow = {
       state: bound.state ?? null,
       patchVersion: bound.patchVersion ?? null,
       checks: Object.freeze([...(bound.checks ?? [])]),
+      // ★ "这次判决是在**已 settle 的**证据上做的吗"——写成字段，不靠读者推断。
+      //   与 `reconcilePatchLayer()` 的 `mountSource` 同一个口径：把"哪个宇宙"
+      //   写出来，读者就不用回去看代码才知道自己读到的是哪一种。
+      //   `waited:false` + `reason:'no-installation'` 表示这个进程里根本没有组合根
+      //   （那种情况下 `observeComposition` 早已按"没有证据"处理，判决是 fail closed）。
+      mountSettled: settled.waited,
+      mountSettledReason: settled.reason,
     })
     // 绑定是**进程级副作用**：本行被卸载（HMR / stop）时必须把它撤掉，
     // 否则同一个进程里的下一次启动带着上一次的残留状态跑。

@@ -496,9 +496,32 @@ export function installEnforcementRoot(input = {}) {
      * `mount()` 一点关系都没有。拿它当证据会让"删掉挂载"这件事在读数上消失。
      *
      * 账由 `mount()` 这个动作本身写（见 `assemble.mjs` 的 `mountedRowNames`）：
-     * 没挂过 / 挂载失败 / 已拆装 ⇒ **空数组**，调用方必须按未生效处理。
+     * 没挂过 / 挂载失败 / 已拆装 / **这次挂载还没 settle** ⇒ **空数组**，
+     * 调用方必须按未生效处理。
+     *
+     * ★ 最后那一项是本批补的：本读数此前是"挂载**发起**时覆盖的行"，
+     * 于是 `mount()` 一返回它就已经是满的——而那一刻两个 `apply` 一个都还没跑。
      */
     mountedEnforcementRows: () => assembly.mountedRowNames(),
+
+    /**
+     * 这次挂载**覆盖**了哪几行（诊断读数，**不是**生效证据）。
+     *
+     * 与 `mountedEnforcementRows()` 分成两个口是刻意的：一个说"打算挂这两行"，
+     * 一个说"真的挂上了"。合成一个就是本批修掉的那个假绿。
+     */
+    coveredEnforcementRows: () => assembly.coveredRowNames(),
+
+    /**
+     * 等当前这次挂载 settle（成功或失败都算）。**永不 reject**。
+     *
+     * 观察方（`plugins/runtime-host-row.mjs`）在读账**之前**等它：
+     * 不等就会在窗口里读到空账 ⇒ `ROW_MISSING` ⇒ 自检判未生效 ⇒ 拒绝注册 ⇒
+     * **一个健康的部署起不来**。把假绿修成假红，与什么都没修，在"产品能不能起来"
+     * 这件事上是同一个东西。
+     */
+    mountSettled: () => assembly.mountSettled(),
+
     /** 强制面到底挂了几道——证据是"装上了什么"，不是"配置里写了什么"。 */
     enforcementSurfaces: () => assembly.enforcementSurfaces(),
 

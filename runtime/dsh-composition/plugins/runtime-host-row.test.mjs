@@ -325,6 +325,84 @@ describe('PRT-253 runtime-host-row：组合树观察', () => {
       '组合根不在却读到了挂载账 —— 那是一份编出来的证据')
   })
 
+  // ─────────── ③d ★★★ 读账之前必须**等这次挂载 settle**（PRT-214 收口续二）
+  //
+  // 背景（本批量到的，不是推的）：挂载账原来只有一本，且写在第一个 `await` 之前，
+  // 于是 `mount()` 一同步返回它就已经宣布两行已挂载——而那一刻两个 `apply`
+  // **一个都还没被调用**。顺着 `startupSelfCheck()` 第①项到
+  // `bootstrapDshRuntime()` 注册端口，这个窗口上开着的是最关键的那条保证：
+  // 「强制面未生效时禁止自动执行」。
+  //
+  //   > 一本"挂载一发起就宣布挂好了"的账，
+  //   > 与一本"根本没记挂载"的账，在没有并发读者的世界里是同一个东西——
+  //   > 只不过前者的假绿只在**读的时刻恰好在窗口里**才看得见。
+  //
+  // 修法是两半：证据账改成"逐行 settle 之后才写"，**且**读账的一方先等 settle。
+  // 只做前一半会把假绿换成假红（观察者在窗口里读到空账 ⇒ 判未生效 ⇒ 拒绝注册 ⇒
+  // 一个健康的部署起不来）。下面这条用例钉的是**后一半**。
+  test('③d ★★★ 载入前先等 `mountSettled()`：在"账要等 settle 才有行"的组合根上仍判生效', async () => {
+    assert.ok(RUNTIME_ONLY_ROW_IDS.length > 0, '没有运行期行 —— 这条用例是空的')
+
+    // 一个**只在 settle 之后才报行**的组合根——正是修好之后的生产形状。
+    // 观察方若不等就直接读，读到的是空集。
+    let settled = false
+    let readEarly = false
+    const calls = []
+    const inner = {
+      async mountSettled() { await tick(); settled = true },
+      mountedEnforcementRows() {
+        if (!settled) readEarly = true
+        return settled ? [...RUNTIME_ONLY_ROW_IDS] : []
+      },
+      async bootstrap(deps) {
+        calls.push(deps)
+        return {
+          ok: true,
+          state: 'enforcement-effective',
+          patchVersion: 1,
+          checks: [{ name: 'composition-patch-layer', ok: true }],
+          unbind: () => true,
+        }
+      },
+    }
+    // `readyContext` 要的是 `fakeRoot()` 那个形状（`{service: {ok, code, message, root}}`）。
+    const { ctx } = readyContext({
+      root: { service: { ok: true, code: null, message: null, root: inner } },
+    })
+    setDshRuntimeInputsFactory(() => inputsOk())
+    await runtimeHostRow.apply(ctx)
+
+    assert.equal(calls.length, 1, '组合根没被调用 —— 夹具不成立')
+    assert.equal(readEarly, false,
+      '观察方在挂载 settle **之前**就把账读了 —— 那正是把假绿换成假红的那一半')
+    assert.deepEqual([...calls[0].composition.inProcessMounted], [...RUNTIME_ONLY_ROW_IDS],
+      '交给自检的观察结果里**没有**挂载账 —— 两行会被报成 ROW_MISSING、'
+      + '自检判未生效、拒绝注册（假红：一个健康的部署起不来）')
+  })
+
+  test('③d ★★ 判决把"账是不是在已 settle 的证据上读的"写成字段', async () => {
+    // 与 `reconcilePatchLayer()` 的 `mountSource` 同一个口径：把"哪个宇宙"写出来，
+    // 读者就不用回去看代码才知道自己读到的是哪一种。
+    const root = fakeRoot()
+    root.service.root.mountSettled = async () => {}
+    const { ctx } = readyContext({ root })
+    setDshRuntimeInputsFactory(() => inputsOk())
+    await runtimeHostRow.apply(ctx)
+    const published = ctx.services.get(RUNTIME_HOST_BINDING_SERVICE)
+    assert.equal(published.mountSettled, true, '等过了却没记下来')
+    assert.equal(published.mountSettledReason, null)
+
+    // 反向：组合根没这个口（形状不是本仓库这一份）⇒ 如实记"没等到"，而不是假装等过。
+    // 假装等过会让"账是在未 settle 的证据上读的"这件事从读数上消失。
+    const legacy = fakeRoot()
+    const { ctx: ctx2 } = readyContext({ root: legacy })
+    setDshRuntimeInputsFactory(() => inputsOk())
+    await runtimeHostRow.apply(ctx2)
+    const p2 = ctx2.services.get(RUNTIME_HOST_BINDING_SERVICE)
+    assert.equal(p2.mountSettled, false, '没等到却记成等过了 —— 那会让假绿重新看不见')
+    assert.equal(p2.mountSettledReason, 'no-mount-settled')
+  })
+
   test('③c ★★ 挂载账读不出来时一律 `null`（fail closed），不给半份', () => {
     const cases = [
       ['服务缺席', undefined],

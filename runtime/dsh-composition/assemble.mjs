@@ -191,7 +191,7 @@ export function assembleEnforcement({
   const mounted = []
 
   /**
-   * ★★ 挂载账（PRT-214 收口续）：**只有 `mount()` 会往它里面写**。
+   * 挂载账（PRT-214 收口续）：**只有 `mount()` 会往它里面写**。
    *
    * ## 它回答的是哪一个问题
    *
@@ -208,23 +208,52 @@ export function assembleEnforcement({
    * 所以证据必须由**挂载这个动作本身**产生：账在 `mount()` 的第一刻被写，
    * `mount()` 没被调用过 ⇒ 账是空的 ⇒ 那两行按未生效处理（fail closed）。
    *
-   * ## 为什么在**任何 `await` 之前**写，而不是"每个 `ctx.plugin` 解析之后"各写一格
+   * ## ★★ 两本账，不是一个（本批修的一个**确定的**假绿）
    *
-   * Cordis 的 `ctx.plugin()` 是**同步调用**、解析在微任务里。而组合根的自检
-   * （`plugins/runtime-host-row.mjs` 的 `observeComposition()`）恰好在那批微任务里跑——
-   * 按"解析之后才写"记账，第二行在自检读账的那一刻**还没被记上**，
-   * 于是自检会对一个真的挂好了的部署报 `ROW_MISSING`：
+   * 上面那段只回答了"`mount()` 调没调过"，**没有**回答"那两行挂上了没有"。
+   * 而 `mount()` 是 async：`ctx.plugin(...)` 要跨越若干微任务才 settle。
+   * 于是"在第一刻就写账"这件事本身留下了一个窗口——**在这个窗口里，
+   * 账宣布两行已挂载，而实际上一个 `apply` 都还没被调用**：
    *
-   *   > 一个"记账比挂载早一步、于是永远绿"的实现，
-   *   > 与一个"记账比挂载晚一步、于是永远红"的实现，是同一个东西——
-   *   > 只不过前者的假绿要靠删掉 `mount()` 才能看出来。
+   *   ```js
+   *   const mounting = root.mount(ctx)      // 同步返回
+   *   root.mountedEnforcementRows()         // 已经是两行 ← 一行都没挂上
+   *   ```
    *
-   * 所以这里记的是"**这次挂载覆盖了哪几行**"（两行无条件地各调一次 `ctx.plugin`，
-   * 见 `mount()`），并在失败路径上**整本清空**：宁可少报（fail closed），不许虚报。
+   * 顺着 `reconcilePatchLayer()` → `startupSelfCheck()` 第①项 →
+   * `bootstrapDshRuntime()` 注册端口，这个窗口在**最关键的那条保证**上是
+   * 开着的：「强制面未生效时禁止自动执行」——那一刻强制面**一行都没在听**，
+   * 而判决说"生效"。
    *
-   * `dispose()` 也清空它——拆掉之后就没有"挂在进程里"的行了，账与挂载同生共死。
+   *   > 一本"挂载一发起就宣布挂好了"的账，
+   *   > 与一本"根本没记挂载"的账，在没有并发读者的世界里是同一个东西——
+   *   > 只不过前者的假绿只在**读的时刻恰好在窗口里**才看得见。
+   *
+   * 本批的处置是把两件事分成两本账，各有各的名字：
+   *   · `coveredRowNames` —— **本次挂载覆盖哪几行**（第一刻就写；给诊断与用例看）；
+   *   · `settledRowNames` —— **真的挂上去了哪几行**（每个 `ctx.plugin` resolve 之后追加）。
+   *
+   * `mountedRowNames()` 是**证据**那一本，返回 `settledRowNames`——
+   * 它的文档一直写着"真的挂上去的行名"，本批之前那句话是**不成立**的。
+   *
+   * ## ★ 另一个方向（为什么必须有 `mountSettled()`）
+   *
+   * 修正证据的语义会**引入**一个新的假红：观察者若在窗口里读账，会读到空集 ⇒
+   * `ROW_MISSING` ⇒ 自检判未生效 ⇒ 拒绝注册 ⇒ **一个健康的部署起不来**。
+   * 所以证据语义与读取时机必须**一起**改：`mountSettled()` 给出"这次挂载
+   * settle 了没有"的等待口，观察方（`plugins/runtime-host-row.mjs` 的 `apply`
+   * 本来就是 async）先 `await` 它再读。
+   *
+   *   > 一个"把假绿换成假红"的修法，
+   *   > 与一个"什么都没修"的修法，在"产品能不能起来"这件事上是同一个东西。
+   *
+   * `dispose()` 两本都清——拆掉之后就没有"挂在进程里"的行了，账与挂载同生共死。
    */
-  const mountedRowNames = []
+  const coveredRowNames = []
+  const settledRowNames = []
+
+  /** 当前在飞的那次挂载。`mountSettled()` 等它；`dispose()` 之后复位。 */
+  let inFlightMount = null
 
   return Object.freeze({
     bridge,
@@ -232,12 +261,37 @@ export function assembleEnforcement({
     rows,
 
     /**
-     * 这份装配**在当前进程里真的挂上去的行名**（`rows.*.name`，逐字等于补丁层声明里的行 id）。
+     * 这份装配**在当前进程里真的挂上去了的行名**（`rows.*.name`，逐字等于补丁层声明里的行 id）。
      *
      * 返回的是**快照**（冻结的新数组）：读的人不会因为下一次 `mount()` 把它改成半份。
-     * 没有挂载过 / 挂载失败 / 已拆装 ⇒ 空数组。**空数组不是"挂上了零行"的证据，是"没有挂载"**。
+     * 没有挂载过 / 挂载失败 / 已拆装 / **挂载还在飞** ⇒ 空数组。
+     * **空数组不是"挂上了零行"的证据，是"没有任何一行可被证明已经挂上"**。
+     *
+     * ★ 最后那一项是本批补的：本函数此前返回的是"挂载**发起**时覆盖的行"，
+     * 于是 `mount()` 一返回它就已经是满的，而那时一个 `apply` 都还没跑。
      */
-    mountedRowNames: () => Object.freeze([...mountedRowNames]),
+    mountedRowNames: () => Object.freeze([...settledRowNames]),
+
+    /**
+     * 这次挂载**覆盖**了哪几行（第一刻就写）。
+     *
+     * 它是诊断读数，**不是**生效证据：它说的是"`mount()` 打算挂这两行"。
+     * 把它当证据用就是本批修掉的那个假绿。留它是因为排查时要能分清两种情况：
+     * "没发起挂载"（空）与"发起了但没挂成"（覆盖 ≠ 已挂）。
+     */
+    coveredRowNames: () => Object.freeze([...coveredRowNames]),
+
+    /**
+     * 等"当前这次挂载"settle（成功或失败都算 settle）。
+     *
+     * 没发起过挂载 ⇒ 立刻 resolve（调用方随后会读到空账 ⇒ fail closed，方向正确）。
+     * 已经 settle ⇒ 立刻 resolve。还在飞 ⇒ 等它。
+     *
+     * **永远不 reject**：调用方要的是"可以读了"，不是"挂载成功了"——
+     * 成功与否由 `mountedRowNames()` 的内容表达。让这个口把挂载的异常抛给观察者，
+     * 会把"账里没有这两行"变成"观察者自己炸了"，而后者排障时看不出是挂载失败。
+     */
+    mountSettled: () => (inFlightMount === null ? Promise.resolve() : inFlightMount.then(() => {}, () => {})),
 
     /**
      * 把两行挂到一个 Context 上。
@@ -260,20 +314,34 @@ export function assembleEnforcement({
       if (ctx === null || typeof ctx.plugin !== 'function') {
         throw assembleError(ASSEMBLE_CODES.NO_CONTEXT, 'mount 需要一个 cordis Context')
       }
-      // ★ 账在这里写（第一个 `await` 之前），理由见 `mountedRowNames` 那一段。
-      mountedRowNames.length = 0
+      // 覆盖账在这里写（第一个 `await` 之前）——它是**诊断**读数，不是证据。
+      coveredRowNames.length = 0
       for (const row of [rows.approvalAnswerer, rows.preExecute]) {
-        if (typeof row?.name === 'string' && row.name !== '') mountedRowNames.push(row.name)
+        if (typeof row?.name === 'string' && row.name !== '') coveredRowNames.push(row.name)
       }
-      try {
-        mounted.push(await ctx.plugin(rows.approvalAnswerer))
-        mounted.push(await ctx.plugin(rows.preExecute))
-      } catch (error) {
-        // 挂了、但没挂成：账上不能留下"它挂过"的痕迹（fail closed 的方向是少报）。
-        mountedRowNames.length = 0
-        throw error
-      }
-      return Object.freeze([...mounted])
+      settledRowNames.length = 0
+
+      const run = (async () => {
+        try {
+          mounted.push(await ctx.plugin(rows.approvalAnswerer))
+          // ★ 证据逐行追加：**resolve 之后**才算挂上。中途抛 ⇒ 这一行不留痕。
+          if (typeof rows.approvalAnswerer?.name === 'string' && rows.approvalAnswerer.name !== '') {
+            settledRowNames.push(rows.approvalAnswerer.name)
+          }
+          mounted.push(await ctx.plugin(rows.preExecute))
+          if (typeof rows.preExecute?.name === 'string' && rows.preExecute.name !== '') {
+            settledRowNames.push(rows.preExecute.name)
+          }
+        } catch (error) {
+          // 挂了、但没挂成：证据账上不能留下"它挂过"的痕迹（fail closed 的方向是少报）。
+          settledRowNames.length = 0
+          throw error
+        }
+        return Object.freeze([...mounted])
+      })()
+
+      inFlightMount = run
+      return run
     },
 
     /** 卸载两行。与 `mount` 对称——装配与拆装同生共死。 */
@@ -283,8 +351,10 @@ export function assembleEnforcement({
         const fork = mounted.pop()
         await fork.dispose()
       }
-      // 拆完就没有"挂在进程里"的行了；账必须跟着清，否则"挂过"会变成单向门。
-      mountedRowNames.length = 0
+      // 拆完就没有"挂在进程里"的行了；两本账必须跟着清，否则"挂过"会变成单向门。
+      coveredRowNames.length = 0
+      settledRowNames.length = 0
+      inFlightMount = null
     },
 
     /**

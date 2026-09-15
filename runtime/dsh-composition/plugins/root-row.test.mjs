@@ -665,6 +665,139 @@ test('★★★ 反向对照：装配了、**没有** mount 调用方 ⇒ 账是
   }
 })
 
+// ─────────────── 挂载账的**两本**：覆盖账（诊断） vs 证据账（生效）
+//
+// 这一组补的是 PRT-214 收口时自己记下的那条残留：
+//
+//   「账写在第一个 `await` 之前 ⇒ 自检读账那刻两行 fiber **可能尚未 ACTIVE**，
+//     这个窗口**没有单独用例钉住**。」
+//
+// 本批把它量到底了，结论不是"可能"，而是**确定**：`mount(ctx)` 一同步返回，
+// 旧实现就已经宣布两行已挂载——而那一刻两个 `apply` **一个都还没被调用**。
+// 顺着 `reconcilePatchLayer()` → `startupSelfCheck()` 第①项 →
+// `bootstrapDshRuntime()` 注册端口，这个窗口上开着的是最关键的那条保证：
+// 「强制面未生效时禁止自动执行」。
+//
+//   > 一本"挂载一发起就宣布挂好了"的账，
+//   > 与一本"根本没记挂载"的账，在没有并发读者的世界里是同一个东西——
+//   > 只不过前者的假绿只在**读的时刻恰好在窗口里**才看得见。
+
+/**
+ * 一个**由用例控制每一行何时 settle** 的假 Context。
+ *
+ * `fakeContext()` 的 `plugin()` 直接 `await p.apply(ctx)`，所以它只能表达
+ * "马上挂好"或"马上抛"。要钉住"证据逐行结算"，得让两次 `ctx.plugin` 各自
+ * 悬着——这个控制权是本组的全部意义。
+ */
+function gatedContext() {
+  const gates = []
+  const ctx = {
+    logger: { info() {}, error() {} },
+    provide: () => () => {},
+    get: () => undefined,
+    on: () => () => {},
+    effect: (fn) => fn(),
+    plugin(p) {
+      return new Promise((resolve) => { gates.push({ name: p?.name, resolve }) })
+    },
+  }
+  return { ctx, gates }
+}
+
+test('★★★ 窗口：`mount()` 刚发起、一行都还没 settle 时，**证据账是空的**、对账判未生效', async () => {
+  const { ctx } = fakeContext()
+  const { factory } = portFactory()
+  await ctx.plugin(createRootRow({ env: ENV_OK, createRequestApproval: factory }))
+  await settle()
+
+  const root = enforcementRoot()
+  const { ctx: gated, gates } = gatedContext()
+
+  // ★ 同步发起挂载、**不 await**：这就是真进程里窗口的那一刻。
+  const mounting = root.mount(gated)
+
+  // ① 覆盖账：这次挂载**覆盖**了那两行（诊断读数，第一刻就该有）。
+  assert.deepEqual([...root.coveredEnforcementRows()].sort(), [...RUNTIME_ONLY_ROW_IDS].sort(),
+    '覆盖账不是那两行——"没发起挂载"与"发起了还没挂成"会分不开')
+
+  // ② ★★★ 证据账：**一行都不许有**。此刻两个 `ctx.plugin` 都还没被 settle，
+  //    第一个 `apply` 甚至还没被调用。
+  assert.deepEqual([...root.mountedEnforcementRows()], [],
+    '挂载还没 settle，证据账却已经有行了——那就是本批修掉的那个假绿：'
+    + '它顺着 startupSelfCheck 第①项让「强制面未生效时禁止自动执行」误判为已生效')
+
+  // ③ 顺着真实消费链读一次：观察 → 对账。
+  const { ctx: obsCtx, services } = fakeContext()
+  services.set(ENFORCEMENT_ROOT_SERVICE, { ok: true, code: null, message: null, root })
+  services.set('loader', { entries: () => STATIC_TREE_ENTRIES })
+  const observation = observeComposition(obsCtx)
+  assert.equal(observation.inProcessMounted, null,
+    '窗口里观察到了挂载——账在还没有行可证明的时候就报了行')
+  const r = reconcileObservation(observation)
+  assert.equal(r.effective, false, '窗口里对账判了生效——这正是那条 fail-open')
+  for (const id of RUNTIME_ONLY_ROW_IDS) {
+    assert.equal(r.findings.find((x) => x.row === id).code, 'ROW_MISSING')
+  }
+
+  // ④ settle 之后才转绿。两次 `ctx.plugin` 是**顺序**的（第二次要等第一次 resolve），
+  //    所以窗口里只有一个在飞——这一点本身也要钉住，否则下一个人会以为两行并发挂。
+  assert.equal(gates.length, 1,
+    `窗口里应该有且只有一次在飞的 ctx.plugin（两次是顺序的），实际 ${gates.length}`)
+
+  gates[0].resolve({ dispose() {} })
+  await settle()
+  assert.equal(gates.length, 2, '第一行 settle 之后第二次 ctx.plugin 才该被调用')
+  // ★★ 证据**逐行**结算：第一行挂好了就只该有第一行。
+  //    这一条在"等整次 mount 结束后一次性写满"的实现上会红——
+  //    那种实现把"两行都挂上了"当成一个原子事件，而它不是。
+  assert.deepEqual([...root.mountedEnforcementRows()], [gates[0].name],
+    'settle 了一行却记了两行（或一行都没记）——证据没有逐行结算')
+
+  gates[1].resolve({ dispose() {} })
+  await mounting
+  assert.deepEqual([...root.mountedEnforcementRows()].sort(), [...RUNTIME_ONLY_ROW_IDS].sort())
+  assert.equal(reconcileObservation(observeComposition(obsCtx)).effective, true,
+    '两行都 settle 了却仍判未生效——那是把假绿换成了假红，产品会起不来')
+})
+
+test('★★★ `mountSettled()`：没挂载过立刻 resolve；挂载失败**不 reject**；失败后证据账为空', async () => {
+  const { ctx } = fakeContext()
+  const { factory } = portFactory()
+  await ctx.plugin(createRootRow({ env: ENV_OK, createRequestApproval: factory }))
+  await settle()
+  const root = enforcementRoot()
+
+  // ① 没发起过挂载 ⇒ 立刻可读（调用方随后读到空账 ⇒ fail closed，方向正确）。
+  //    用一个"如果它不 resolve 就会超时"的形状来钉：真挂起的话下面这行永不返回。
+  await root.mountSettled()
+
+  // ② 挂载失败：`mountSettled()` **不许**把挂载的异常抛给观察者。
+  //    抛了会把"账里没有这两行"变成"观察者自己炸了"，而后者看不出是挂载失败。
+  const { ctx: gated, gates } = gatedContext()
+  const mounting = root.mount(gated)
+  const settledP = root.mountSettled()
+  // 先让挂载拒，再把 settle 的口交出去——顺序反过来也一样，但这样更贴生产。
+  gates[0].resolve({ dispose() {} })
+  await settle()
+  gates[1].resolve(Promise.reject(new Error('第二行挂载失败')))
+  await assert.rejects(mounting, /第二行挂载失败/)
+  await settledP // ← 不 reject 才算过
+  assert.deepEqual([...root.mountedEnforcementRows()], [],
+    '挂载失败之后证据账还留着行——fail closed 的方向是少报')
+  // ★ 覆盖账**故意不清**：它记的是"这次挂载打算挂哪两行"。
+  //   清掉它会让"发起了、但两行都没挂成"与"从来没发起过挂载"在读数上合流——
+  //   而那正是把账分开两个口的全部意义。
+  //   注意它**不是**生效证据：`reconcilePatchLayer()` 只读上面那一本。
+  assert.deepEqual([...root.coveredEnforcementRows()].sort(), [...RUNTIME_ONLY_ROW_IDS].sort(),
+    '失败之后覆盖账被清了——"发起了但没挂成"与"没发起过"会分不开')
+  // 而证据仍然必须是"没有"：这一条是上面那条的护栏，防止有人把覆盖账当证据接上去。
+  const { ctx: obsCtx, services: obsServices } = fakeContext()
+  obsServices.set(ENFORCEMENT_ROOT_SERVICE, { ok: true, code: null, message: null, root })
+  obsServices.set('loader', { entries: () => STATIC_TREE_ENTRIES })
+  assert.equal(reconcileObservation(observeComposition(obsCtx)).effective, false,
+    '挂载失败之后对账判了生效——覆盖账被当成了生效证据')
+})
+
 test('★★★ 幂等：同一份组合根被 apply 两次**不双挂**', async () => {
   const { ctx, mounted } = fakeContext()
   const { factory } = portFactory()

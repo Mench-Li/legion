@@ -21,6 +21,8 @@ export const RUNTIME_CODE_FOR = Object.freeze({
   SECRET_STORE_UNSUPPORTED_PLATFORM: 'SECRET_UNAVAILABLE',
   SECRET_STORE_UNPROTECTED: 'SECRET_UNAVAILABLE',
   SECRET_STORE_WRITE_FAILED: 'SECRET_UNAVAILABLE',
+  SECRET_STORE_LOCK_FAILED: 'SECRET_UNAVAILABLE',
+  SECRET_STORE_LOCK_TIMEOUT: 'SECRET_UNAVAILABLE',
   SECRET_DECRYPT_FAILED: 'SECRET_UNAVAILABLE',
   SECRET_STORE_CORRUPT: 'SECRET_UNAVAILABLE',
 })
@@ -59,6 +61,8 @@ export const SECRET_ERROR_HINTS = Object.freeze({
   SECRET_STORE_UNSUPPORTED_PLATFORM: '当前平台的受保护密钥库尚未实现：不要退化为明文存储，请改用受支持的系统或等待该平台的支持。',
   SECRET_STORE_UNPROTECTED: '密钥库后端未提供受保护存储（当前为明文后端）：不得用于真实密钥。',
   SECRET_STORE_WRITE_FAILED: '写入密钥库失败：检查磁盘空间与目录权限。',
+  SECRET_STORE_LOCK_FAILED: '无法在密钥库旁创建写锁文件：检查目录是否可写、磁盘是否已满。',
+  SECRET_STORE_LOCK_TIMEOUT: '另一个 Legion 进程正在写本机密钥库，本次写入没有执行（已写入的内容未被改动）。稍后重试；若长期如此，检查是否有卡住的进程，或删除与密钥库同级的 .lock 文件后重试。',
   SECRET_DECRYPT_FAILED: '密钥无法解密：常见原因是换了 Windows 账户或用另一台机器复制了密钥库文件。请用当前账户重新录入密钥。',
   SECRET_STORE_CORRUPT: '密钥库文件结构损坏：从备份恢复，或清空后重新录入（已录入的密钥无法找回）。',
 })

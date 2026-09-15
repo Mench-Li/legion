@@ -29,7 +29,7 @@
 //   而密钥不该出现在环境变量里。
 // ============================================================================
 
-import { mkdirSync, readFileSync, renameSync, writeFileSync, existsSync, unlinkSync } from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, writeFileSync, existsSync, unlinkSync, statSync } from 'node:fs'
 import { dirname } from 'node:path'
 
 import { SecretStoreError } from './errors.mjs'
@@ -116,6 +116,32 @@ export function memoryBackend() {
   })
 }
 
+/** 锁文件后缀。与库文件同级（同卷才能保证 `wx` 的原子性对所有人都成立）。 */
+const LOCK_SUFFIX = '.lock'
+
+/** 锁多久没被动过就算陈旧（持锁进程大概已经崩了）。 */
+const DEFAULT_LOCK_TTL_MS = 10_000
+
+/** 拿锁的总预算。**有界**：密钥库写入发生在启动路径上，不能无限等。 */
+const DEFAULT_LOCK_TIMEOUT_MS = 2_000
+
+/** 两次尝试之间的间隔。 */
+const DEFAULT_LOCK_RETRY_MS = 10
+
+/** 本进程内递增，保证同一进程的两次锁也不同 token。 */
+let lockTokenSeq = 0
+
+/**
+ * 同步小睡。
+ *
+ * `Atomics.wait` 是 Node 里**不需要第三方依赖**的同步睡眠。刻意不忙等：
+ * 争用恰恰发生在别的进程正忙的时候，忙等会把 CPU 抢给等待方、让持锁方更慢。
+ */
+function syncSleep(ms) {
+  if (!(ms > 0)) return
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
 /**
  * 单文件 JSON 后端。结构刻意与 `$DSH_HOME/.credentials.yaml` 的
  * `refs → records` 引用式存储同形（PRT-003 §3.2 的结论：复用既有机制，不另建密钥库），
@@ -124,10 +150,47 @@ export function memoryBackend() {
  * 写入用「临时文件 + rename」：rename 在同一卷内是原子的，
  * 半截写入的密钥库比没有密钥库更危险——它会以「所有密钥都无法解密」的形式失败，
  * 而用户看不出是写入被打断了。
+ *
+ * ## ★ 但「写是原子的」不等于「读-改-写是原子的」（PRT-254 的并发缺口）
+ *
+ * `write()` / `remove()` 都是**整体读-改-写**：读全量 → 改一条 → 写回全量。
+ * `rename` 只保证**每一次写**不会被撕成半截，它对**两次读-改-写交错**毫无帮助：
+ *
+ *   P1 读 {A}          P2 读 {A}
+ *   P1 写 {A,B}        P2 写 {A,C}      ← P2 的 rename 覆盖掉 P1，**B 静默消失**
+ *
+ * 而这不是理论：Legion 的写入方**本来就有多个进程**——Launcher（安装向导 /
+ * `--set-secret`）与 hub（工作台那 5 条密钥路由），多 Runtime 并存也是正常形态。
+ *
+ *   > 一个"写下去就返回成功"的密钥库，与一个"刚才存的那把钥匙下次启动时不见了"
+ *   > 的密钥库，在用户那一次操作里是同一个东西——只不过前者会回一句"已保存"。
+ *
+ * 所以写路径加一把**跨进程**的锁：`<file>.lock`，用 `flag: 'wx'`
+ * （`O_CREAT|O_EXCL`，它是在不引第三方依赖的前提下**唯一**可用的原子占位）。
+ *
+ * 三条纪律：
+ *   ① **拿不到锁就不写**。超时即抛 `SECRET_STORE_LOCK_TIMEOUT`，绝不"无锁照写"——
+ *      那正好把丢更新重新变成静默的；也绝不把失败报成成功。
+ *   ② **陈旧的锁要能破**。持锁进程崩了不能把密钥库永久锁死：锁文件 mtime 超过
+ *      `lockTtlMs` 即视为陈旧，抢过来（`unlink` 与 `wx` 之间有竞态，但只有一个能建成）。
+ *   ③ **只删自己的锁**。锁文件里写一个本进程唯一 token，释放前核对；
+ *      TTL 到期后别人可能已把陈旧的锁抢走并建了他自己的，那时替它删锁
+ *      等于**同时放行两个写者**。
+ *
+ * 读路径（`read` / `entries`）**不加锁**：读没有丢更新的问题，而给读加锁会让
+ * 「诊断/列表」这些路径在别的进程写库时被阻塞。
  */
-export function fileBackend({ file, fs: fsImpl = null } = {}) {
+export function fileBackend({
+  file,
+  fs: fsImpl = null,
+  lockTtlMs = DEFAULT_LOCK_TTL_MS,
+  lockTimeoutMs = DEFAULT_LOCK_TIMEOUT_MS,
+  lockRetryMs = DEFAULT_LOCK_RETRY_MS,
+  sleep = syncSleep,
+  nowMs = () => Date.now(),
+} = {}) {
   if (typeof file !== 'string' || file === '') throw new Error('fileBackend 需要 file 路径')
-  const io = fsImpl ?? { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync, unlinkSync, dirname }
+  const io = fsImpl ?? { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync, unlinkSync, statSync, dirname }
   const readAll = () => {
     if (!io.existsSync(file)) return { version: SECRET_STORE_VERSION, refs: {}, records: {} }
     let text
@@ -159,6 +222,105 @@ export function fileBackend({ file, fs: fsImpl = null } = {}) {
       throw new SecretStoreError('SECRET_STORE_WRITE_FAILED', { cause: e?.code ?? 'write-error' })
     }
   }
+
+  // ── 跨进程写锁（见文件头「读-改-写不是原子的」那一节）────────────────────────
+  const lockFile = `${file}${LOCK_SUFFIX}`
+  const lockToken = `${process.pid}-${++lockTokenSeq}`
+  const lockTimeoutError = () => new SecretStoreError('SECRET_STORE_LOCK_TIMEOUT')
+
+  /** 读锁文件里的 token；读不到（不存在 / 刚被删）返回 `null`。 */
+  const lockTokenOnDisk = () => {
+    try {
+      return io.readFileSync(lockFile, 'utf8')
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * 锁文件存在多久了（ms）。**取不到年龄就返回 `null`**，调用方按「不陈旧」处理。
+   *
+   * `statSync` 可以被注入的 fs 省掉。省掉时我们**不猜年龄**，于是永远不会去破锁——
+   * 代价只是争用时走到超时（fail closed）；反过来猜一次，就可能把别人**正持有的**
+   * 活锁当成陈旧的破掉，那等于同时放行两个写者。
+   */
+  const lockAgeMs = () => {
+    if (typeof io.statSync !== 'function') return null
+    try {
+      const st = io.statSync(lockFile)
+      const mtime = typeof st?.mtimeMs === 'number' ? st.mtimeMs : null
+      if (mtime === null) return null
+      const age = nowMs() - mtime
+      return Number.isFinite(age) ? age : null
+    } catch {
+      return null
+    }
+  }
+
+  /** 尝试占位：成功 `true`，被别人占了 `false`。 */
+  const tryAcquireLock = () => {
+    try {
+      io.writeFileSync(lockFile, lockToken, { encoding: 'utf8', flag: 'wx' })
+      return true
+    } catch (e) {
+      // ★★ 「被占用」的判据**不能只认 `EEXIST`**——这是本机实测出来的，不是推演：
+      //
+      //   · **静态**场景（文件已存在，单进程）：报 `EEXIST`。
+      //   · **并发**场景（8 进程 × 400 次建/删同一路径）：实测分布
+      //     `EEXIST 1393 / 成功 1594 / **EPERM 213**`——约 6.7% 的独占创建在争用下
+      //     报的是 `EPERM`（Windows 上名字正被别人删/建时，独占创建拿到的不是
+      //     "已存在"而是"访问被拒"）。
+      //
+      //   于是"只认 EEXIST"的实现在**单进程用例里全绿**（用例都是静态造一个锁文件），
+      //   一到真并发就把 6.7% 的正常争用当成致命错误：实测 8 进程 × 40 写，
+      //   320 条只落 208 条，失败的子进程报 `SECRET_STORE_LOCK_FAILED`。
+      //
+      //   > 一个"在夹具里认得出被占用"的判据，
+      //   > 与一个"在真争用下认得出被占用"的判据，在只跑单进程用例时是同一个东西——
+      //   > 只不过前者会让真并发的写入随机失败。
+      if (e?.code === 'EEXIST' || e?.code === 'EPERM') return false
+      // 不是"被占用"而是别的写失败（目录不可写 / 磁盘满）：具名抛，不退化。
+      throw new SecretStoreError('SECRET_STORE_LOCK_FAILED', { cause: e?.code ?? 'lock-error' })
+    }
+  }
+
+  /**
+   * 放弃时区分「抢不到」与「建不出来」。
+   *
+   * 两者的修法完全不同——前者是"等一会儿再试"，后者是"去修目录权限"。
+   * 判据是锁文件到底在不在：它不在，就说明整个预算内**没有人持有它**，
+   * 而我们却始终没能把它建出来 ⇒ 那是权限问题，不是争用。
+   */
+  const lockGiveUpError = () => (lockTokenOnDisk() === null
+    ? new SecretStoreError('SECRET_STORE_LOCK_FAILED')
+    : lockTimeoutError())
+
+  /** 在锁的保护下跑 `fn`。拿不到锁**就抛**，绝不无锁照写。 */
+  const withWriteLock = (fn) => {
+    const deadline = nowMs() + lockTimeoutMs
+    for (;;) {
+      if (tryAcquireLock()) break
+      const age = lockAgeMs()
+      // `lockTtlMs > 0` 是必要条件而不是防御性写法：配成 0 会让**任何**锁立刻算陈旧，
+      // 于是去破一把别人正持有的活锁——那比不加锁更坏。
+      if (lockTtlMs > 0 && age !== null && age > lockTtlMs) {
+        try { io.unlinkSync(lockFile) } catch { /* 别人已经删了 */ }
+        if (nowMs() >= deadline) throw lockGiveUpError()
+        continue
+      }
+      if (nowMs() >= deadline) throw lockGiveUpError()
+      sleep(lockRetryMs)
+    }
+    try {
+      return fn()
+    } finally {
+      // 只删自己的锁（纪律 ③）：TTL 到期后别人可能已把陈旧的锁抢走并建了他自己的。
+      if (lockTokenOnDisk() === lockToken) {
+        try { io.unlinkSync(lockFile) } catch { /* 已经没了 */ }
+      }
+    }
+  }
+
   return Object.freeze({
     kind: 'file',
     file,
@@ -169,19 +331,25 @@ export function fileBackend({ file, fs: fsImpl = null } = {}) {
       return { blob: record.blob, meta: { ...(data.refs[ref] ?? {}) } }
     },
     write(ref, record) {
-      const data = readAll()
-      data.version = SECRET_STORE_VERSION
-      data.records[ref] = { scheme: record.meta.scheme, blob: record.blob }
-      data.refs[ref] = { ...record.meta }
-      writeAll(data)
+      // ★ `readAll()` 必须在锁**里面**：锁外读出来的就是一份可能在写回前过期的快照，
+      //   而那正是丢更新的成因。
+      return withWriteLock(() => {
+        const data = readAll()
+        data.version = SECRET_STORE_VERSION
+        data.records[ref] = { scheme: record.meta.scheme, blob: record.blob }
+        data.refs[ref] = { ...record.meta }
+        writeAll(data)
+      })
     },
     remove(ref) {
-      const data = readAll()
-      const existed = data.records[ref] !== undefined
-      delete data.records[ref]
-      delete data.refs[ref]
-      writeAll(data)
-      return existed
+      return withWriteLock(() => {
+        const data = readAll()
+        const existed = data.records[ref] !== undefined
+        delete data.records[ref]
+        delete data.refs[ref]
+        writeAll(data)
+        return existed
+      })
     },
     entries() {
       const data = readAll()

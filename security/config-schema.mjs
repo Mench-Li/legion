@@ -108,6 +108,20 @@ export const NON_ENV_LITERALS = Object.freeze([
   // ── security/secrets/errors.mjs（2 条）
   'DSH_CREDENTIALS_', // security/secrets/errors.mjs
   'SECRET_UNAVAILABLE', // security/secrets/errors.mjs
+  // ── security/secrets/store.mjs（3 条，PRT-254 并发写锁）
+  //   `EEXIST` 是 Node 的 errno（`O_EXCL` 占位失败时抛出），与 `dsh-credentials.mjs`
+  //   登记的 `ENOENT` 同类：**不是配置键**，是"写锁被别人占着"的唯一判据。
+  //
+  //   ★ 同一条判据里还有 `EPERM`（真并发下 `wx` 也会报它，实测分布
+  //   `EEXIST 1393 / 成功 1594 / EPERM 213`），但它**不在这里**——
+  //   这不是漏登记：`scan.mjs:168` 的规则是
+  //   `if (!v.includes('_') && v.length < 6) continue`（排除 'ERROR' 这类单词常量），
+  //   于是 5 个字母、无下划线的 `EPERM` 被判成普通单词常量而**不进入** suspected 集合，
+  //   而 6 个字母的 `EEXIST` 刚好过线。**登记一条扫描器根本没扫到的字面量，
+  //   等于声称一份并不存在的覆盖**——`config.test.mjs` 的双向对账会（且已经）把它判成"编造"。
+  'EEXIST', // security/secrets/store.mjs
+  'SECRET_STORE_LOCK_FAILED', // security/secrets/store.mjs、security/secrets/errors.mjs
+  'SECRET_STORE_LOCK_TIMEOUT', // security/secrets/store.mjs、security/secrets/errors.mjs
   // ── security/secrets/index.d.mts（4 条）
   'SECRET_NOT_FOUND', // security/secrets/index.d.mts、security/secrets/store.mjs
   'SECRET_STORE_CORRUPT', // security/secrets/index.d.mts、security/secrets/store.mjs

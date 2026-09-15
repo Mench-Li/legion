@@ -3468,6 +3468,141 @@
 
 ---
 
+## 2026-09-15　第一次量到「自检判**生效**」这个正向读数，顺带发现**理由在说谎**
+
+PRT-214 的残留里有一句自己写下的话：
+
+> 本批**没有**新增真 DSH 场景去断言"自检判生效"（量的是**反向**）。
+
+"反向"是指：既有真进程场景量的全是自检**拒绝**（配置为空、注册方缺席、entry 未激活）。
+
+> 一个只会红的火警，与一个坏掉的火警，
+> 在"它有没有报过警"这件事上分不开。
+
+这一批把正向那个读数补上了，而补它的过程里撞见一件更重的事。
+
+### 正向读数：怎么让"判生效"这件事**有因果**
+
+难点是：`bundles: []` 的一次性 profile 里，`permission` 那一行根本不在树里
+（没有 bundle 层声明它），于是自检**必然**判未生效。要让整层判生效，得给
+`patch-over permission` 一个**靶子**。
+
+靶子是刻意选的**假**的：替身行声明的是 DSH 默认名（`workspace-write` /
+`danger-full-access`）。真补丁层的 `patch-over` 只有**真的打中**了，生效表里才会
+出现 Legion 的名字；打不中就会读到那组假名字 ⇒ `PRESETS_NOT_OVERRIDDEN`。
+
+于是"整层判生效"这句话是**有因果的**，不是一个碰巧为空的读数。真进程读数：
+
+```
+RECONCILE effective=true
+RECONCILE reasons=[]
+RECONCILE-FINDING ["legion-enforcement-hard-floor","OK"]        ← loader-entry
+RECONCILE-FINDING ["legion-enforcement-root","OK"]              ← loader-entry
+RECONCILE-FINDING ["legion-enforcement-pre-execute","OK"]       ← in-process-mount
+RECONCILE-FINDING ["legion-enforcement-approval-answerer","OK"] ← in-process-mount
+RECONCILE-FINDING ["legion-enforcement-permission-presets","OK"] ×2  ← loader-entry + effective-config
+presets = ["legion-attended","legion-unattended"]
+```
+
+六条结论全 OK、理由为空，而且 `danger-full-access` **不在**生效表里。
+
+### 同一批量到的：缺席被读成了"在等依赖服务"
+
+把靶子拿掉（其余一字不变），读到的理由是这样：
+
+```
+OBS rows=[…,["legion-enforcement-permission-presets", false, "permission", **false**]]
+reasons=["…行已挂载但未激活（等待依赖服务），不产生任何强制效果", …]
+```
+
+`present: false` 明写着"我找了这一行、**没找到**"，判决却读成"已挂载、只是没激活"。
+
+**裁定是对的**（两者都判未生效），错的是**理由**——而理由是排查的人唯一会读的东西：
+它把人指向"哪个依赖服务没到"，真因却是"这棵树里没有它可以作用的那一行"
+（DSH 对匹配不到任何东西的补丁行是 **warn-and-skip**：不报错，只是什么也不做）。
+
+根因是三种行形状混在一起，而有一个组合**没人读过**：
+
+| 形状 | 谁产的 | patch-over 那一行的 `id` |
+| --- | --- | --- |
+| 真树夹具 | `realTreeRows()` | **靶子 id**（`permission`） |
+| **富形状** | `observeComposition()`（真进程唯一形状） | **声明 id**，靶子放在 `treeId`，外加 `present` |
+| 贫形状 | 手写夹具 / 旧调用方 | 声明 id，无 `treeId`/`present` |
+
+`reconcilePatchLayer()` 只按 `id` 建一张表，然后拿"声明 id → 树 id"推导出来的键去查——
+富形状下**永远查不到**，于是 `?? byId.get(spec.id)` 那条兼容回退成了**唯一**真正生效的路径，
+而它看不见 `present`。
+
+> 「没观察到」与「观察到没有」是两个读数。
+> 把它们合成一个 `activated: false`，就没人再说得出"是缺席，还是在等"。
+
+修法：`present` / `treeId` 由观察方给出时**必须**被用上（新增
+`present === false ⇒ ROW_MISSING` 一跳，且**排在** `activated === false` **之前**——
+顺序本身就是判据），理由改成把 warn-and-skip 说出来；两个字段都缺才走兼容路径。
+
+### ★ 探针自己也犯了这个错
+
+第一版探针是这么写的：
+
+```js
+const r = reconcilePatchLayer({
+  rows: obs.rows.map((x) => ({ id: x.id, activated: x.activated })),  // ← 丢了 treeId / present
+  ...
+})
+```
+
+它**丢掉了正在被测的那两个字段**，于是量的是一棵生产路径**永远不会产出**的形状。
+修好之后理由才变。这和上一批那条教训同源：
+
+> 一个把待测字段丢掉的探针，与一个测出"没有差异"的探针，
+> 在结论行上一模一样。
+
+### 验证
+
+- **破验 5/5 全红**、逐字节 sha256 还原、还原后 52/52 全绿：
+  M1 删掉 `present` 那一跳 / M2 那一跳改成 `ROW_NOT_ACTIVATED` /
+  M3 **调换两个分支的顺序** / M4 观察方 `present` 恒为 true / M5 preset 判据恒为"未观察"。
+  M4、M5 咬的是**真进程**用例（E/F），即真进程那几条确实承重。
+- 新增 6 条用例，**无新增测试文件**：`dsh-composition-composition` 42 → **45**、
+  `dsh-composition-runtime-host-row-dsh-process` 4 → **7**。
+- 无回归：`dsh-composition` **743/743**。
+
+### ⚠️ 这一批**没有**做到的
+
+1. **靶子是替身，不是 bundle 层**。真部署里 `permission` 那一行由 bundle 声明；
+   本批证明的是"对账器会把那种树判生效"，**不是**"一次带 bundle 的 profile 启动里
+   Legion 的 preset 表真的生效了"。后者**依然没有被观察到**。
+2. `mountSettled()` 的等待仍然**没有超时**（上一批的取舍，原样保留）。
+
+### ⚠️ 另记：一条**新的**偶发红，未定位根因
+
+本轮全量 CI 的 `test` 阶段红了一次，失败套件是 `files-p27` 的
+「P2-7 ④git：HTTP 路由层（真路由）」，签名是：
+
+```
+TypeError: fetch failed
+  [cause]: Error: read ECONNRESET   (errno -4077, syscall read)
+```
+
+我能说的（有证据的）：
+
+- 这是**传输层**错误，不是行为断言失败；
+- 失败后**单独复跑该文件 3 次：3/3 全绿**；
+- `run-ci.mjs` 的套件是**顺序**跑的（`for … await runNodeTests`），
+  所以本批新增的 3 个真 DSH 子进程**没有**增加并行度；
+- 改动的三个文件都在 `runtime/dsh-composition/`，到 workbench 的 HTTP `fetch`
+  之间没有任何代码路径。
+
+我**不能**说的：根因是什么。它既不是 `dual-write` 那条（2026-09-10 已定性），
+也不是 `canRead` 那条（`docs/STATUS.md` 里记的那一例，同样未定位）——这是**第三**条。
+
+> 区别只在于你愿不愿意去单跑它。而*"重跑一次绿了就算了"
+> 正是让偶发失败永远不被修的做法*。
+
+所以它进待观察项，原始输出留在 `.ci/prt-present/suites/`，而不是"复跑绿了"就算过去。
+
+---
+
 ## 2026-09-15　一个**确定的**假绿：挂载账在"一行都还没挂上"的时候就说"已挂载"
 
 台账 PRT-214 里挂着一条自己记下的残留：

@@ -336,6 +336,46 @@ const PROBE_PATCH_SRC = `- insert:
       name: "./prt253rt-probe.mjs"
 `
 
+// ★★★ 对账探针：在**真 DSH 进程**里问一句此前从未问过的话——
+//   `reconcilePatchLayer(observeComposition(ctx)).effective` 到底是什么？
+//
+// PRT-214 的残留写着：「本批**没有**新增真 DSH 场景去断言"自检判生效"（量的是**反向**）」。
+// 既有真进程场景量的都是**拒绝**（配置空 / 注册方缺席 / entry 未激活）。
+// 这一支把**正向**那个读数补上，而且用**替身行的假 preset 表**当靶子：
+// 替身声明的是 DSH 默认名（workspace-write / danger-full-access），
+// 真补丁层的 `patch-over` 如果没打中，对账读到的就是那组假名字 ⇒ PRESETS_NOT_OVERRIDDEN。
+// 于是"整层判生效"这句话是**有因果的**，不是一个碰巧为空的读数。
+const RECONCILE_PROBE_SRC = `import { observeComposition } from ${JSON.stringify(fileUrl(join(HERE, 'runtime-host-row.mjs')))}
+import { reconcilePatchLayer } from ${JSON.stringify(fileUrl(join(COMPOSITION, 'patch-layer.mjs')))}
+const note = (line) => process.stderr.write(line + '\\n')
+export default {
+  name: 'prt253rt-reconcile-probe',
+  inject: [],
+  apply(ctx) {
+    setTimeout(() => {
+      try {
+        const obs = observeComposition(ctx)
+        note('RECONCILE-ROWS ' + JSON.stringify(obs.rows.map((r) => [r.id, r.activated, r.present])))
+        note('RECONCILE-PRESETS ' + JSON.stringify(obs.permissionPresets))
+        const r = reconcilePatchLayer(obs)
+        note('RECONCILE-EFFECTIVE ' + r.effective)
+        note('RECONCILE-REASONS ' + JSON.stringify(r.reasons))
+        for (const f of r.findings) note('RECONCILE-FINDING ' + JSON.stringify([f.row, f.code]))
+      } catch (error) {
+        note('RECONCILE-THREW ' + String(error && error.message ? error.message : error))
+      }
+      note('RECONCILE-PROBE-DONE')
+      process.exit(0)
+    }, 3000)
+  },
+}
+`
+
+const RECONCILE_PROBE_PATCH_SRC = `- insert:
+    - id: "prt253rt-reconcile-probe"
+      name: "./prt253rt-reconcile.mjs"
+`
+
 const REAL_PATCH = join(COMPOSITION, 'legion-host.patch.yml')
 
 const SCRATCH_FILES = {
@@ -350,6 +390,8 @@ const SCRATCH_FILES = {
   noHostRowPatch: ['prt253rt-no-hostrow.patch.yml', NO_HOST_ROW_PATCH_SRC],
   probe: ['prt253rt-probe.mjs', PROBE_SRC],
   probePatch: ['prt253rt-probe.patch.yml', PROBE_PATCH_SRC],
+  reconcileProbe: ['prt253rt-reconcile.mjs', RECONCILE_PROBE_SRC],
+  reconcileProbePatch: ['prt253rt-reconcile.patch.yml', RECONCILE_PROBE_PATCH_SRC],
 }
 
 const SCRATCH_PATH = {}
@@ -513,7 +555,145 @@ describe('PRT-253：`bindDshRuntime` 的生产调用方在**真 DSH 进程**里�
     assert.notEqual(READINGS.a.provider, READINGS.c.code)
     t.diagnostic(`A=${READINGS.a.provider} / B=${READINGS.b.provider} / C=${READINGS.c.code}`)
   })
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // ★★★ E/F：把「自检判**生效**」这个**正向**读数第一次量出来（PRT-214 残留三）
+  //
+  // 残留原文：「本批**没有**新增真 DSH 场景去断言"自检判生效"（量的是反向）」。
+  // 反向是指：既有场景量的都是自检**拒绝**（配置空 / 注册方缺席 / entry 未激活）。
+  // 一个只会红的火警，与一个坏掉的火警，在"它有没有报过警"这件事上分不开。
+  // ───────────────────────────────────────────────────────────────────────────
+
+  guarded('E. ★★★ 真补丁层 + 靶子替身 → 自检**判生效**（`effective=true`、`reasons=[]`）', (t) => {
+    // 与 A 用的是同一份 BASE_PATCHES：真 `legion-host.patch.yml`、真注册方、
+    // 真运行期两行由组合根在进程内挂载。加一个对账探针，把**判决**读出来。
+    const r = runDsh({ tag: 'e', patches: [...BASE_PATCHES, SCRATCH_PATH.hostRowPatch, SCRATCH_PATH.reconcileProbePatch] })
+    assert.equal(r.spawnError, null)
+    assert.equal(r.code, 0, `期望装配成功：\n${r.stderr}`)
+    assert.match(r.stderr, /^RECONCILE-PROBE-DONE$/m, `对账探针没跑完：\n${r.stderr}`)
+    const rec = reconcileReading(r.stderr)
+    assert.notEqual(rec, null, `读不到对账读数（探针没跑到那一步）：\n${r.stderr}`)
+
+    // ① ★ 本批的正面读数本身。
+    assert.equal(rec.effective, true, `真进程里自检判了未生效：${JSON.stringify(rec.reasons)}`)
+    assert.deepEqual(rec.reasons, [], '判生效了却还带着理由——判决与理由不一致')
+    // ② 每一行都要有具名结论，且**全部**是 OK。少一行就等于有一条判决没被读出来。
+    assert.ok(rec.findings.length > 0, '一条逐行结论都没有——那"判生效"是空口说的')
+    for (const [row, code] of rec.findings) {
+      assert.equal(code, 'OK', `${row} 在真进程里的结论是 ${code}，不是 OK`)
+    }
+    // ③ 运行期两行必须走**进程内挂载**那条证据路，而不是静态树那条。
+    //    没有这一条，"生效"可能只是"这几行碰巧是 loader 条目"。
+    assert.match(r.stderr, /^RECONCILE-FINDING \["legion-enforcement-pre-execute","OK"\]$/m, r.stderr)
+    assert.match(r.stderr, /^RECONCILE-FINDING \["legion-enforcement-approval-answerer","OK"\]$/m, r.stderr)
+
+    // ④ ★★ 非空洞：靶子替身声明的是 **DSH 默认** preset 名（见 PERMISSION_PATCH_SRC），
+    //    真补丁层的 patch-over 只有**真的打中**了，生效表里才会是 Legion 的名字。
+    assert.deepEqual(rec.presets, ['legion-attended', 'legion-unattended'],
+      `生效的 preset 表不是 Legion 那组——真 patch-over 没打中靶子：${JSON.stringify(rec.presets)}`)
+    assert.equal((rec.presets ?? []).includes('danger-full-access'), false,
+      '替身自己声明的默认名还在生效表里 —— 那说明这一跳读的是替身，不是覆盖结果')
+    t.diagnostic(`E: effective=true，逐行结论 ${rec.findings.length} 条全 OK，presets=${JSON.stringify(rec.presets)}`)
+  })
+
+  guarded('F. ★★★ 反向对照：**靶子不在树里** → 未生效，且理由是"缺席"不是"在等依赖服务"', (t) => {
+    // 与 E 的唯一区别：**不挂**靶子替身。真补丁层里的 `patch-over permission`
+    // 于是匹配不到任何东西——DSH 对它是 warn-and-skip：不报错，只是什么也不做。
+    //
+    // ★ 这里**故意不挂** `runtime-host-row`：挂了它，本行会因为自检不过而**拒绝装配**，
+    //   整棵树加载失败、探针没机会跑——那样读到的就只有"进程失败了"，
+    //   而这一条要读的是**理由的措辞**。拒绝这件事由 G 单独读。
+    //   （把两件事塞进一条用例，就会得到"两个都对才绿"的读数：红的时候说不清是哪个。）
+    const r = runDsh({
+      tag: 'f',
+      patches: [
+        SCRATCH_PATH.servicesPatch,
+        REAL_PATCH,
+        SCRATCH_PATH.runtimeRowsPatch,
+        SCRATCH_PATH.reconcileProbePatch,
+      ],
+    })
+    assert.equal(r.spawnError, null)
+    assert.equal(r.code, 0, `期望仍然装配成功（warn-and-skip 不是错）：\n${r.stderr}`)
+    assert.match(r.stderr, /^RECONCILE-PROBE-DONE$/m, `对账探针没跑完：\n${r.stderr}`)
+    const rec = reconcileReading(r.stderr)
+    assert.notEqual(rec, null, `读不到对账读数：\n${r.stderr}`)
+
+    assert.equal(rec.effective, false, '靶子不在树里，自检却判了生效')
+    // ★ 裁定之外，**理由**才是这一条的全部信息量。
+    const codes = rec.byRow('legion-enforcement-permission-presets')
+    assert.ok(codes.includes('ROW_MISSING'),
+      `靶子缺席被报成了 ${JSON.stringify(codes)} —— ROW_NOT_ACTIVATED 的意思是`
+      + '"已挂载、在等依赖服务"，而这里根本没有那一行')
+    assert.equal(codes.includes('ROW_NOT_ACTIVATED'), false,
+      '缺席与"在等依赖服务"被读成了同一件事')
+    const joined = rec.reasons.join(' / ')
+    assert.match(joined, /warn-and-skip/, `理由里没有说出 warn-and-skip 这回事：${joined}`)
+    assert.equal(joined.includes('等待依赖服务'), false,
+      `缺席被说成了"等待依赖服务"——那句话把人指向一个不存在的服务依赖：${joined}`)
+
+    // 其余四行仍然各自 OK：这条对照变的**只有**靶子那一样，
+    // 不然它读的就可能是"整棵树坏了"。
+    assert.deepEqual(rec.byRow('legion-enforcement-hard-floor'), ['OK'])
+    assert.deepEqual(rec.byRow('legion-enforcement-root'), ['OK'])
+    assert.deepEqual(rec.byRow('legion-enforcement-pre-execute'), ['OK'])
+    assert.deepEqual(rec.byRow('legion-enforcement-approval-answerer'), ['OK'])
+    t.diagnostic(`F: effective=false，靶子行=${JSON.stringify(codes)}，其余四行 OK`)
+  })
+
+  guarded('G. ★★★ 同 F、但把生产宿主行**挂上**：具名拒绝，且**不注册**端口（fail closed 全链）', (t) => {
+    // 这是 F 的下游那一步，单独读出来：靶子缺席 ⇒ 自检判未生效 ⇒
+    // `bootstrapDshRuntime()` 拒绝注册宿主端口 ⇒ 树加载失败、进程退出 1。
+    // 与 E 的唯一差别就是**没有靶子替身**；有了 E，这一条的"拒绝"才不是
+    // "它本来就起不来"。
+    const r = runDsh({
+      tag: 'g',
+      patches: [
+        SCRATCH_PATH.servicesPatch,
+        REAL_PATCH,
+        SCRATCH_PATH.runtimeRowsPatch,
+        SCRATCH_PATH.hostRowPatch,
+      ],
+    })
+    assert.equal(r.spawnError, null)
+    assert.equal(r.code, 1, `期望"自检不过 ⇒ 拒绝注册"拦下启动：\n${r.stderr}`)
+    // ★ 断言**具名内层码本身**，不写"它抛了"。
+    assert.match(r.stderr, /BOOTSTRAP_SELF_CHECK_INCOMPATIBLE/, r.stderr)
+    assert.match(r.stderr, /failed to apply loader entry legion-runtime-host/, r.stderr)
+    // 拒绝要说得出**是哪一项**没过——自检的全部意义就是逐项归因。
+    assert.match(r.stderr, /composition-patch-layer/, `拒绝里没有指出是哪一项自检没过：\n${r.stderr}`)
+    // 反向锚：这一次**没有**走到"端口注册成功"。
+    assert.equal(reading(r.stderr, 'BOUND'), null, '被拒绝的场景里不该有 BOUND 读数')
+    t.diagnostic('G: exit 1 + BOOTSTRAP_SELF_CHECK_INCOMPATIBLE（靶子缺席的下游）')
+  })
 })
+
+/**
+ * 把对账探针的读数解析成结构化结果。读不到就返回 `null`——**不猜默认值**：
+ * 一个"读不到就当 false"的解析器，与一个"读不到就是真的 false"的读数，
+ * 在只看结论的时候是同一个东西。
+ */
+function reconcileReading(stderr) {
+  const effective = reading(stderr, 'RECONCILE-EFFECTIVE')
+  if (effective === null) return null
+  const rawPresets = reading(stderr, 'RECONCILE-PRESETS')
+  const rawReasons = reading(stderr, 'RECONCILE-REASONS')
+  const findings = []
+  for (const line of stderr.split(/\r?\n/)) {
+    const m = /^RECONCILE-FINDING (\[.*\])$/.exec(line)
+    if (m !== null) {
+      try { findings.push(JSON.parse(m[1])) } catch { /* 形状不对就不收 */ }
+    }
+  }
+  const parse = (s) => { try { return JSON.parse(s) } catch { return null } }
+  return {
+    effective: effective === 'true',
+    presets: parse(rawPresets),
+    reasons: parse(rawReasons) ?? [],
+    findings,
+    byRow: (id) => findings.filter(([row]) => row === id).map(([, code]) => code),
+  }
+}
 
 if (SKIP !== false) {
   test('PRT-253 真 DSH 进程部分本次未运行', () => {

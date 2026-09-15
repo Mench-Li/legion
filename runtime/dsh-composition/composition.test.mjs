@@ -201,6 +201,116 @@ test('对账：真实树里**靶子那一行真的不在** → 仍然报 ROW_MIS
   assert.match(f.detail, new RegExp(over.id))
 })
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ★★ 观察结果的**富形状**：`{id: 声明id, activated, treeId, present}`
+//
+// 上面那两条用的是**另一种**夹具形状（`realTreeRows()` 让 patch-over 那一行直接带
+// **靶子 id**）。真进程里 `observeComposition()` 产的是第三种：行 id 是**声明 id**，
+// 靶子 id 放在 `treeId` 里，另外明说一个 `present`。
+//
+// 三种形状混在一起，于是有一个**没人读过**的组合：富形状 + `present:false`。
+// 本批在真 DSH 进程里量到了它（`bundles: []` 的临时 profile、真补丁层）：
+//
+//   OBS rows=[…,["legion-enforcement-permission-presets", false, "permission", **false**]]
+//   FINDING {"row":"legion-enforcement-permission-presets","code":"ROW_NOT_ACTIVATED"}
+//   reasons=["…行已挂载但未激活（等待依赖服务），不产生任何强制效果", …]
+//
+// `present:false` 明写着"这条**不在**树里"，判决却读成"已挂载、只是没激活"。
+// **裁定是对的**（两者都判未生效），错的是**理由**——而理由是排查的人唯一会读的东西：
+// 它把人指向"哪个依赖服务没到"，而真因是"这棵树里根本没有它可以作用的那一行"
+// （声明了它的 bundle 层没挂上，DSH 对这条补丁 warn-and-skip）。
+//
+//   > 「没观察到」与「观察到没有」是两个读数。
+//   > 把它们合成一个 `activated: false`，就没人再说得出"是缺席，还是在等"。
+
+/** 富形状的一条行：`id` 是**声明 id**，`present` 明说它在不在树里。 */
+function observerRow(spec, { present = true, activated = true } = {}) {
+  const treeId = spec.mount?.anchor === 'patch-over' && typeof spec.mount.target === 'string'
+    ? spec.mount.target
+    : spec.id
+  return { id: spec.id, treeId, present, activated }
+}
+
+/** 一份**富形状**的、整层生效的观察结果（真进程里 `observeComposition()` 的样子）。 */
+function observerObservation(over = {}) {
+  const over$ = PATCH_LAYER_ROWS.find((r) => r.mount?.anchor === 'patch-over')
+  const rows = PATCH_LAYER_ROWS
+    .filter((r) => !isRuntimeOnlyRow(r))
+    .map((r) => observerRow(r, r === over$ ? over : {}))
+  return {
+    rows,
+    permissionPresets: Object.keys(LEGION_PERMISSION_PRESETS),
+    inProcessMounted: [...RUNTIME_ONLY_ROW_IDS],
+    ...over,
+  }
+}
+
+test('对账：★★★ 富形状 + `present:false` → `ROW_MISSING`（**不是**"已挂载但未激活"）', () => {
+  const over = PATCH_LAYER_ROWS.find((r) => r.mount?.anchor === 'patch-over')
+  // 靶子行不在树里，其余都齐 ⇒ 唯一的那条红必须是"缺席"。
+  const rows = observerObservation().rows.map((r) => (
+    r.id === over.id ? { ...r, present: false, activated: false } : r
+  ))
+  const r = reconcilePatchLayer({ ...observerObservation(), rows })
+
+  assert.equal(r.effective, false)
+  const f = r.findings.find((x) => x.row === over.id)
+  assert.equal(f.code, 'ROW_MISSING',
+    '靶子不在树里却被报成 ROW_NOT_ACTIVATED —— 那句话把人指向"哪个依赖服务没到"，'
+    + '而真因是这棵树里没有它可以作用的那一行')
+  // ★ 理由必须说得出**这一种**缺席：patch-over 匹配不到靶子时 DSH 是 warn-and-skip，
+  //   不报错、只是什么也不做。这句话是这条红的全部信息量。
+  assert.match(f.detail, /warn-and-skip/)
+  assert.match(f.detail, new RegExp(over.mount.target), '理由里没写它去找的是哪个树条目 id')
+  assert.match(f.detail, new RegExp(over.id), '理由里没写声明 id')
+  // 反向：那句**不该出现**的话不能出现。少了这一条，把两种缺席合成一句话的
+  // 实现照样能过上面所有断言。
+  assert.equal(f.detail.includes('等待依赖服务'), false,
+    '缺席被说成了"等待依赖服务" —— 那是另一种处境的话')
+
+  // 而"真的在树里、只是没激活"必须仍然是 ROW_NOT_ACTIVATED。
+  // 没有这一条，把两种处境合成 ROW_MISSING 的实现会绿。
+  const pending = observerObservation().rows.map((r2) => (
+    r2.id === over.id ? { ...r2, present: true, activated: false } : r2
+  ))
+  const r2 = reconcilePatchLayer({ ...observerObservation(), rows: pending })
+  const f2 = r2.findings.find((x) => x.row === over.id)
+  assert.equal(f2.code, 'ROW_NOT_ACTIVATED', '在树里但没激活，被报成了缺席')
+  assert.equal(r2.effective, false)
+})
+
+test('对账：★★ 富形状 + 全部 present/activated → 整层生效（真进程里的正向读数）', () => {
+  // 这条钉的是"rich 形状能被判**生效**"。夹具里造不出真进程，但至少钉住：
+  // ① 富形状不会因为多了两个字段就查不到行；② 靶子那一行的 treeId 真被用上了。
+  const r = reconcilePatchLayer(observerObservation())
+  assert.deepEqual(r.reasons, [], `富形状的整层生效观察被判未生效：${r.reasons.join(' / ')}`)
+  assert.equal(r.effective, true)
+  const over = PATCH_LAYER_ROWS.find((x) => x.mount?.anchor === 'patch-over')
+  const f = r.findings.find((x) => x.row === over.id)
+  assert.equal(f.code, 'OK')
+  assert.equal(f.treeId, over.mount.target, '裁决里没写明它查的是树里的哪个条目 id')
+})
+
+test('对账：★ 贫形状（只有 id+activated）仍然工作——兼容路径不许被这次改动弄断', () => {
+  // 手写夹具与旧调用方给的是贫形状：没有 `treeId`、没有 `present`。
+  // 本批给富形状加了"缺席"这一跳，**不能**顺手把贫形状当缺席处理。
+  const over = PATCH_LAYER_ROWS.find((r) => r.mount?.anchor === 'patch-over')
+  const poor = {
+    rows: PATCH_LAYER_ROWS.map((r) => ({ id: r.id, activated: true })),
+    permissionPresets: Object.keys(LEGION_PERMISSION_PRESETS),
+    inProcessMounted: [...RUNTIME_ONLY_ROW_IDS],
+  }
+  const good = reconcilePatchLayer(poor)
+  assert.equal(good.effective, true, '贫形状全激活却被判未生效 —— 兼容路径断了')
+  assert.equal(good.findings.find((x) => x.row === over.id).code, 'OK')
+
+  // 贫形状里"声明 id 那一行没激活"——没有 present 可依，只能按"在树里但没激活"处理。
+  const poorPending = { ...poor, rows: poor.rows.map((r) => (r.id === over.id ? { ...r, activated: false } : r)) }
+  const pend = reconcilePatchLayer(poorPending)
+  assert.equal(pend.effective, false)
+  assert.equal(pend.findings.find((x) => x.row === over.id).code, 'ROW_NOT_ACTIVATED')
+})
+
 test('对账：preset 行在、但生效表里**没有** Legion 项 → 不生效（patch-over 未生效）', () => {
   // 这是最隐蔽的一种：行存在、激活，看起来一切正常，但实际还在用 DSH 默认表。
   const r = reconcilePatchLayer({

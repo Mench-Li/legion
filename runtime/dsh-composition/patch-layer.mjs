@@ -304,15 +304,60 @@ export const EMPLOYEE_PRESET_CONTRACT = Object.freeze({
  * 一个只存在于当前进程。把两者都写成光秃秃的 `OK`，读者就得回去看 `module` 字段
  * 才知道自己读到的是哪一种——而那正是这一批要修掉的那种"看着一样"。
  *
- * @param {{rows?: Array<{id: string, activated?: boolean}>,
+ * @param {{rows?: Array<{id: string, activated?: boolean, treeId?: string, present?: boolean}>,
  *          permissionPresets?: string[],
  *          inProcessMounted?: string[]}} observation
  *   组合树观察结果（由宿主侧注入，本模块不读文件、不 import DSH）。
  *   `inProcessMounted` 是**运行期行**的进程内挂载报告（行 id 数组）。
+ *
+ *   ★ 行对象有**两种形状**，本函数两种都吃（见下面 `byId` / `byTreeId` 那一段）：
+ *   · 富形状 —— `id` 是**声明 id**，外加 `treeId`（它在树里的条目 id）与
+ *     `present`（"这条在树里有没有"）。`observeComposition()` 产的就是它，
+ *     也是真 DSH 进程里唯一的形状；
+ *   · 贫形状 —— 只有 `id` + `activated`（手写夹具 / 旧调用方）。
+ *
+ *   `present: false` 比"查不到这一行"更强：它证明观察方**找了**、并且**没找到**。
+ *   两者都判未生效，但**理由不同**（"缺席"vs"在等依赖服务"）——而理由是排查的人
+ *   唯一会读的东西。
  */
 export function reconcilePatchLayer(observation = {}) {
   const rows = Array.isArray(observation.rows) ? observation.rows : []
-  const byId = new Map(rows.map((r) => [String(r?.id ?? ''), r]))
+
+  // ★★ 观察结果有**两种形状**，而它们对"这一行在不在树里"给出不同强度的读数：
+  //
+  //   ① 富形状（`observeComposition()` 产的）：`{id, activated, treeId, present}`，
+  //      其中 `id` 是**声明 id**、`treeId` 是它在树里的条目 id，`present` 明说
+  //      "这条在树里有没有"。这是真进程里唯一的形状。
+  //   ② 贫形状（手写夹具 / 旧调用方）：只有 `{id, activated}`。
+  //
+  // 只按 `id` 建一张表，然后拿"声明 id → 树 id"推导出来的键去查——这是本函数
+  // 原来做的那件事，而它在富形状下**永远查不到**（表里键是声明 id，查的是树 id），
+  // 于是 `?? byId.get(spec.id)` 那条兼容回退成了**唯一**真正生效的路径。
+  //
+  // 后果本批在真 DSH 进程里量到了（`permission` 那一行、`bundles: []` 的临时 profile）：
+  //
+  //   OBS rows=[…,["legion-enforcement-permission-presets", false, "permission", **false**]]
+  //   FINDING {"row":"legion-enforcement-permission-presets","code":"ROW_NOT_ACTIVATED",
+  //            "mountSource":"loader-entry"}
+  //   reasons=["…行已挂载但未激活（等待依赖服务），不产生任何强制效果", …]
+  //
+  // `present: false` 明写着"这条**不在**树里"，判决却读成"已挂载、只是没激活"。
+  // **裁定是对的**（两者都是未生效），错的是**理由**——而理由是排查的人唯一会读的东西：
+  // 它把人指向"哪个依赖服务没到"，而真因是"这棵树里根本没有这一行"（没有 bundle 声明它）。
+  //
+  //   > 一个"缺席"被读成"在等依赖"的读数，
+  //   > 与一个"根本读错了行"的读数，在只有 `effective` 一个字段的时候是同一个东西——
+  //   > 只不过前者会让人去查一个不存在的服务。
+  //
+  // 所以：`treeId` 与 `present` 由观察方给出时**必须**被用上；两个都缺（贫形状）才回退。
+  const byId = new Map()
+  const byTreeId = new Map()
+  for (const r of rows) {
+    const id = String(r?.id ?? '')
+    if (id !== '') byId.set(id, r)
+    const tid = typeof r?.treeId === 'string' && r.treeId !== '' ? r.treeId : null
+    if (tid !== null && !byTreeId.has(tid)) byTreeId.set(tid, r)
+  }
 
   /** 进程内挂载报告 → 集合；**没有证据**一律是 `null`（不是空集）。
    *
@@ -386,8 +431,13 @@ export function reconcilePatchLayer(observation = {}) {
     const treeId = treeIdFor(spec)
     // 兼容两种输入：真实的树（`patch-over` 用靶子 id）与**已按声明重写过 id** 的观察结果
     // （`observeComposition()` 产出的就是后者，见 `runtime/dsh-composition/plugins/runtime-host-row.mjs`）。
-    // 先查解析出来的树 id，再退回声明 id；两者都没有才算真的不在树里。
-    const hit = byId.get(treeId) ?? (treeId === spec.id ? undefined : byId.get(spec.id))
+    // 查找顺序（每一跳都有它对应的形状，不是"多试几个"）：
+    //   ① `byTreeId` —— 富形状给了 `treeId`，这是**权威**的一跳；
+    //   ② `byId[treeId]` —— 贫形状但行 id 已经是树 id（`patch-over` 的靶子）；
+    //   ③ `byId[spec.id]` —— 富形状/贫形状里行 id 是**声明 id** 的那一种。
+    const hit = byTreeId.get(treeId)
+      ?? byId.get(treeId)
+      ?? (treeId === spec.id ? undefined : byId.get(spec.id))
     if (hit === undefined) {
       findings.push({
         row: spec.id,
@@ -396,6 +446,34 @@ export function reconcilePatchLayer(observation = {}) {
         effective: false,
         mountSource: 'loader-entry',
         detail: `补丁层行未出现在组合树中（声明 id：${spec.id}；树条目 id：${treeId}；预期锚点：${spec.mount.anchor}）`,
+      })
+      continue
+    }
+    // ★★ 观察方**明说**了这一行不在树里。
+    //
+    // 富形状里 `present === false` 是比"查不到"更强的读数：它证明观察方**找了**
+    // 这一行、并且**没找到**。这与"观察方没给这一行"是两件事，而下面那条
+    // `ROW_NOT_ACTIVATED`（"已挂载但未激活"）只对后者里"确实在树里"的情形成立。
+    //
+    // 这一跳此前是缺的，缺的后果不是裁定错，而是理由错：`patch-over` 那一行在
+    // `bundles: []` 的树里根本不存在，判决却报"已挂载但未激活（等待依赖服务）"，
+    // 把排查的人指向一个不存在的服务依赖。真因是：**这棵树里没有可以覆盖的靶子行**，
+    // 于是 DSH 对这条补丁 warn-and-skip——那条最该被说出来的话。
+    //
+    //   > 「没观察到」与「观察到没有」是两个读数。
+    //   > 把它们合成一个 `activated: false`，就没人再说得出"是缺席，还是在等"。
+    if (hit.present === false) {
+      findings.push({
+        row: spec.id,
+        treeId: typeof hit.treeId === 'string' && hit.treeId !== '' ? hit.treeId : treeId,
+        code: 'ROW_MISSING',
+        effective: false,
+        mountSource: 'loader-entry',
+        detail: `${spec.mount.anchor === 'patch-over' ? '覆盖' : '插入'}行的靶子不在**这棵树**里`
+          + `（声明 id：${spec.id}；树条目 id：${treeId}）。`
+          + 'DSH 对匹配不到任何东西的补丁行是 warn-and-skip：它不报错，只是什么也不做。'
+          + '所以这不是"在等依赖服务"，而是"这棵树里没有它可以作用的那一行"——'
+          + '最常见的原因是声明了这一行的 bundle 层没有挂上',
       })
       continue
     }

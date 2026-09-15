@@ -890,7 +890,19 @@ test('⑪ 核验清单是**总**的：状态机声明的每一项都有归宿', 
   // 那条声明的执行点是**前置核验**：它拦住从 `/api/runtime/transition`
   // 通用路由把 `UnknownOutcome` 直接推成"写成功了"的调用方。
   const KNOWN_UNIMPLEMENTED = [
-    'runResult',     // PRT-312 结果提取：尚未建表
+    // `runResult`（PRT-312 结果提取）：**不是「还没建表」，是「东西根本没送到 hub」**。
+    // 已量到的两个事实：
+    //   · `runtime/adapters/dsh/index.mjs` 的终态事件**确实带着** `result`
+    //     （`executor.mjs` 的 `summarize()` 就在读 `terminal.result?.stopReason`），
+    //     所以 RunResult 在执行侧是存在的；
+    //   · 但 `orchestrator/worker/executor.mjs` 返回给 worker 的 `base` 里
+    //     只有 `detail: summarize(terminal)`（一段摘要字符串），**没有** `result`；
+    //     `main.mjs` 随后只发 `context: { detail, trace, frozen }`。
+    // 于是 hub 侧在 `Running → Validating` 这一刻**收不到** RunResult，
+    // 这条声明缺的是**端到端的一根线**（执行侧 → worker → transition → 落库），
+    // 而不是一张表。只建表会让探针永远返回 false，从而**永远拒绝**每一次
+    // `Running → Validating`——那也是一种坏法：安全但不可用。
+    'runResult',
     'workspace',     // PRT-306 工作区隔离未交付，无工作区表可查（见上）
   ]
   const declared = new Set()

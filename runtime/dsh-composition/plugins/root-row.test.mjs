@@ -48,9 +48,17 @@ import {
   ENFORCEMENT_ROOT_CODES,
   enforcementInstallation,
   enforcementRoot,
+  installEnforcementRoot,
   resetEnforcementRoot,
 } from '../root.mjs'
-import { LEGION_ROW_PREFIX, PATCH_LAYER_ROWS } from '../patch-layer.mjs'
+import {
+  LEGION_PERMISSION_PRESETS,
+  LEGION_ROW_PREFIX,
+  PATCH_LAYER_ROWS,
+  RUNTIME_ONLY_ROW_IDS,
+  isRuntimeOnlyRow,
+  reconcilePatchLayer,
+} from '../patch-layer.mjs'
 import preExecuteRow, { PRE_EXECUTE_ROW_CODES } from './pre-execute-row.mjs'
 import approvalAnswererRow, { APPROVAL_ANSWERER_ROW_CODES } from './approval-answerer-row.mjs'
 // 两个**内层** listener 的插件名（组合根装配的就是它们）——用来断言"挂上的是哪两行"，
@@ -59,7 +67,7 @@ import { PRE_EXECUTE_PLUGIN_NAME } from './pre-execute.mjs'
 import { APPROVAL_ANSWERER_PLUGIN_NAME } from './approval-answerer.mjs'
 // ACTIVE 的判据只有一处：产品模块 `observeComposition` 用的那个常量。
 // 抄一个字面量 `2` 会让"判据说改了而用例还绿着"变成可能。
-import { ACTIVE_FIBER_STATE } from './runtime-host-row.mjs'
+import { ACTIVE_FIBER_STATE, observeComposition } from './runtime-host-row.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CWD = process.platform === 'win32' ? 'C:\\work' : '/work'
@@ -544,6 +552,116 @@ test('★★★ 装配之后**真的挂上两行**：`mount()` 有生产调用�
   for (const name of [PRE_EXECUTE_PLUGIN_NAME, APPROVAL_ANSWERER_PLUGIN_NAME]) {
     assert.equal(ctx.servicesPublishedAt[name], true,
       `挂 ${name} 时服务还没发布——ctx.plugin 被放到了 ctx.provide 之前`)
+  }
+})
+
+// ─────────────── 进程内挂载账：运行期行（module: null）的**唯一**证据
+//
+// 这一组是 PRT-214 收口续的判据。背景：`reconcilePatchLayer()` 按声明逐行对账，
+// 而 `pre-execute` / `approval-answerer` 在声明里是 `module: null`（YAML 装不了桥与
+// 端口）——它们**永远不会**是 loader 条目。按组合树查它们，得到的是一条永远修不掉的红。
+//
+//   > 一个"读一个结构上不可能装着它的地方"的检查，
+//   > 与一个"它真的没装"的检查，给出同一条红——只有后者能被接线修好。
+//
+// 新证据必须由**挂载这个动作本身**产生，而且**不能**是"装配好了"那类读数：
+// `enforcementSurfaces()` 在 `assembleEnforcement()` 一跑就是满的，与有没有人调
+// `mount()` 无关。下面两条用例把正面与反面都钉住。
+
+/**
+ * 真进程里 loader 树的形状：静态补丁行（`module: string` 的 insert 行 +
+ * `patch-over` 的**靶子** id）+ 一份 Legion preset 表。**没有**运行期行——
+ * 它们 `module: null`，永远不是 loader 条目。
+ */
+const STATIC_TREE_ENTRIES = Object.freeze(PATCH_LAYER_ROWS
+  .filter((r) => !isRuntimeOnlyRow(r))
+  .map((r) => Object.freeze({
+    options: Object.freeze(r.mount?.anchor === 'patch-over'
+      ? {
+        id: r.mount.target,
+        config: Object.freeze({
+          presets: Object.freeze(Object.fromEntries(
+            Object.keys(LEGION_PERMISSION_PRESETS).map((n) => [n, Object.freeze({})]),
+          )),
+        }),
+      }
+      : { id: r.id }),
+    fiber: Object.freeze({ state: ACTIVE_FIBER_STATE }),
+  })))
+
+/** 把一次观察结果按 `reconcilePatchLayer()` 的形状交出去。 */
+function reconcileObservation(observation) {
+  return reconcilePatchLayer({
+    rows: observation.rows.map((x) => ({ id: x.id, activated: x.activated })),
+    permissionPresets: observation.permissionPresets,
+    inProcessMounted: observation.inProcessMounted,
+  })
+}
+
+test('★★★ 挂载账：只有 `mount()` 写得出来；观察器读得到，reconcile 因此判生效', async () => {
+  const { ctx, services } = fakeContext()
+  services.set('loader', { entries: () => STATIC_TREE_ENTRIES })
+  const { factory } = portFactory()
+
+  await ctx.plugin(createRootRow({ env: ENV_OK, createRequestApproval: factory }))
+  await settle()
+
+  // ① 账由**挂载动作**写：两行运行期行都在，且逐字等于声明里的行 id。
+  assert.deepEqual([...enforcementRoot().mountedEnforcementRows()].sort(), [...RUNTIME_ONLY_ROW_IDS].sort(),
+    '挂载之后账不是那两行——观察器要读的就是它')
+  // 反向控制：loader 树里**没有**这两行。所以它们若被判生效，证据只可能来自账。
+  const treeIds = STATIC_TREE_ENTRIES.map((e) => e.options.id)
+  for (const id of RUNTIME_ONLY_ROW_IDS) {
+    assert.equal(treeIds.includes(id), false, `夹具失效：树里竟然有 ${id}`)
+  }
+
+  // ② 观察器把账带出来（同一份读数，不是又算了一遍）。
+  const observation = observeComposition(ctx)
+  assert.deepEqual(observation.inProcessMounted, enforcementRoot().mountedEnforcementRows())
+
+  // ③ ★ 对账判生效。这一条在"两行只能从 loader 条目读"的实现上**不可能**为真。
+  const r = reconcileObservation(observation)
+  assert.deepEqual(r.reasons, [], `挂了却没判生效：${r.reasons.join(' / ')}`)
+  assert.equal(r.effective, true)
+
+  // ④ 拆装之后账清空 ⇒ 同一份 loader 树不再判生效（"挂过"不是单向门）。
+  await enforcementRoot().dispose()
+  assert.deepEqual([...enforcementRoot().mountedEnforcementRows()], [],
+    '拆装之后账没清——"挂过"会变成单向门')
+  assert.equal(reconcileObservation(observeComposition(ctx)).effective, false,
+    '拆装之后仍然判生效——账没有随挂载一起清掉')
+})
+
+test('★★★ 反向对照：装配了、**没有** mount 调用方 ⇒ 账是空的，判决仍然红', async () => {
+  const { ctx, services } = fakeContext()
+  services.set('loader', { entries: () => STATIC_TREE_ENTRIES })
+
+  // 直接装配 = 34bffba 之前的形状：根装好了、服务发布了，而 `mount()` 从没被调用过。
+  const installed = installEnforcementRoot({
+    env: ENV_OK,
+    decide: createPolicyDecide({ policy: 'ask', attended: true }),
+    createRequestApproval: () => (async () => 'rejected'),
+  })
+  assert.equal(installed.ok, true, `装配失败，夹具不成立：${installed.code} ${installed.message}`)
+  services.set(ENFORCEMENT_ROOT_SERVICE, installed)
+
+  // ★ 本批最要紧的反面：`enforcementSurfaces()` 在**没有挂载**时就是满的。
+  //   拿它当证据会让"删掉 mount()"在读数上完全消失——一份证明得了任何东西的证据，
+  //   与一份什么都证明不了的证据，在"门禁是绿的"这件事上是同一个东西。
+  const surfaces = installed.root.enforcementSurfaces()
+  assert.equal(surfaces.hardFloor, true,
+    '反向对照的前提没了：端口齐全是"装配过"的读数，与"挂载过"无关')
+  assert.equal(surfaces.approval, true)
+
+  // 而账是空的：没有挂载 ⇒ 没有证据。
+  assert.deepEqual([...installed.root.mountedEnforcementRows()], [])
+  const observation = observeComposition(ctx)
+  assert.equal(observation.inProcessMounted, null, '没有挂载却读到了挂载账——证据是编出来的')
+
+  const r = reconcileObservation(observation)
+  assert.equal(r.effective, false)
+  for (const id of RUNTIME_ONLY_ROW_IDS) {
+    assert.equal(r.findings.find((x) => x.row === id).code, 'ROW_MISSING')
   }
 })
 

@@ -21,6 +21,8 @@ import {
   LEGION_PERMISSION_PRESETS,
   LEGION_ROW_PREFIX,
   PATCH_LAYER_ROWS,
+  RUNTIME_ONLY_ROW_IDS,
+  isRuntimeOnlyRow,
   reconcilePatchLayer,
 } from './patch-layer.mjs'
 import { PATCH_YAML_PATH, patchDocument, renderPatchReport, renderPatchYaml } from './render.mjs'
@@ -33,11 +35,33 @@ import { REPAIR_ACTIONS } from './bootstrap.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
-/** 一份「一切正常」的组合树观察。 */
+/** 一份「一切正常」的组合树观察。
+ *
+ * ★ `rows` 是**照着声明造**的那棵树（含运行期行的 loader 条目）——而现实中不存在
+ * 那样一棵树：`pre-execute` / `approval-answerer` 在声明里是 `module: null`，
+ * 永远不会是 loader 条目。所以让这份观察"生效"的**不是** `rows`，而是
+ * `inProcessMounted`（组合根的挂载账）。这两行**只看那份账**，见下面那几条用例。 */
 const GOOD_COMPOSITION = Object.freeze({
   rows: PATCH_LAYER_ROWS.map((r) => ({ id: r.id, activated: true })),
   permissionPresets: Object.keys(LEGION_PERMISSION_PRESETS),
+  inProcessMounted: [...RUNTIME_ONLY_ROW_IDS],
 })
+
+/** 真进程里 loader 树的形状：`module: string` 的 insert 行 + `patch-over` 的**靶子** id。 */
+function realTreeRows() {
+  return PATCH_LAYER_ROWS
+    .filter((r) => !isRuntimeOnlyRow(r))
+    .map((r) => ({ id: r.mount?.anchor === 'patch-over' ? r.mount.target : r.id, activated: true }))
+}
+
+/** 真树的完整观察（loader 树 + 生效的 preset 表 + 组合根挂载账）。 */
+function realTreeObservation() {
+  return {
+    rows: realTreeRows(),
+    permissionPresets: Object.keys(LEGION_PERMISSION_PRESETS),
+    inProcessMounted: [...RUNTIME_ONLY_ROW_IDS],
+  }
+}
 
 /** 一个「完全生效」的沙箱端口。 */
 function goodSandbox() {
@@ -144,14 +168,10 @@ test('对账：读不到 preset 表 → 不生效（「没观察到」不等于�
 // 生产路径当时是靠 `observeComposition()` 先把 id 重写成声明 id 才绕过去的
 // （见 `plugins/runtime-host-row.mjs`）；绕过的是观察器，账本本身一直是错的。
 test('对账：★ 真实的组合树（patch-over 行的条目 id 是它的**靶子**）→ 必须判生效', () => {
-  const realTree = {
-    // 真树的形状：insert 行用声明 id，patch-over 行用 target
-    rows: PATCH_LAYER_ROWS.map((r) => ({
-      id: r.mount?.anchor === 'patch-over' ? r.mount.target : r.id,
-      activated: true,
-    })),
-    permissionPresets: Object.keys(LEGION_PERMISSION_PRESETS),
-  }
+  // 真树的形状：insert 行用声明 id，patch-over 行用 target，**运行期行不在树里**
+  // （它们 `module: null`，只能由组合根在进程内挂载）。所以这份观察同时带上
+  // 组合根的挂载账——那是运行期行唯一的证据来源。
+  const realTree = realTreeObservation()
   // 先证明这棵树确实是"patch-over 用靶子"的形状，而不是又一次照抄声明
   const over = PATCH_LAYER_ROWS.filter((r) => r.mount?.anchor === 'patch-over')
   assert.ok(over.length > 0, '夹具失效：声明里没有 patch-over 行')
@@ -170,10 +190,8 @@ test('对账：★ 真实的组合树（patch-over 行的条目 id 是它的**�
 
 test('对账：真实树里**靶子那一行真的不在** → 仍然报 ROW_MISSING（没有放松判据）', () => {
   const over = PATCH_LAYER_ROWS.find((r) => r.mount?.anchor === 'patch-over')
-  const rows = PATCH_LAYER_ROWS
-    .map((r) => ({ id: r.mount?.anchor === 'patch-over' ? r.mount.target : r.id, activated: true }))
-    .filter((r) => r.id !== over.mount.target)
-  const r = reconcilePatchLayer({ rows, permissionPresets: Object.keys(LEGION_PERMISSION_PRESETS) })
+  const rows = realTreeRows().filter((r) => r.id !== over.mount.target)
+  const r = reconcilePatchLayer({ rows, permissionPresets: Object.keys(LEGION_PERMISSION_PRESETS), inProcessMounted: [...RUNTIME_ONLY_ROW_IDS] })
   assert.equal(r.effective, false)
   const f = r.findings.find((x) => x.row === over.id)
   assert.equal(f.code, 'ROW_MISSING')
@@ -185,7 +203,11 @@ test('对账：真实树里**靶子那一行真的不在** → 仍然报 ROW_MIS
 
 test('对账：preset 行在、但生效表里**没有** Legion 项 → 不生效（patch-over 未生效）', () => {
   // 这是最隐蔽的一种：行存在、激活，看起来一切正常，但实际还在用 DSH 默认表。
-  const r = reconcilePatchLayer({ rows: GOOD_COMPOSITION.rows, permissionPresets: Object.keys(DSH_DEFAULT_PRESETS) })
+  const r = reconcilePatchLayer({
+    rows: GOOD_COMPOSITION.rows,
+    permissionPresets: Object.keys(DSH_DEFAULT_PRESETS),
+    inProcessMounted: [...RUNTIME_ONLY_ROW_IDS],
+  })
   assert.equal(r.effective, false)
   const f = r.findings.find((x) => x.code === 'PRESETS_NOT_OVERRIDDEN')
   assert.ok(f, '必须报 PRESETS_NOT_OVERRIDDEN')
@@ -196,6 +218,120 @@ test('对账：空观察不抛错，逐项报未生效', () => {
   const r = reconcilePatchLayer()
   assert.equal(r.effective, false)
   assert.equal(r.findings.length, PATCH_LAYER_ROWS.length + 1)
+})
+
+// ───────────── 运行期行（module: null + runtimeModule）：证据来自**挂载动作本身** ─────────────
+//
+// 这一组是 PRT-214 收口续的判据。它替换掉的旧读数是：`PATCH_LAYER_ROWS.map(声明 → 树)`
+// 造一棵树就能让那两行判 OK——而那样一棵树在真部署里**不存在**（它们 `module: null`，
+// 永远不会是 loader 条目）。所以每一条断言都必须能因为"删掉 `mount(ctx)`"而变红：
+// 见 `plugins/root-row.test.mjs` 里那条端到端用例与报告里的断验证记录。
+
+/** 按声明 id 取裁决项。 */
+const findingOf = (r, id) => r.findings.find((f) => f.row === id)
+
+test('★★ 运行期行**只看进程内挂载账**：loader 条目里就算有同名行也不算', () => {
+  assert.ok(RUNTIME_ONLY_ROW_IDS.length > 0,
+    '一条运行期行都没有 —— 这条用例会退化成恒真，先去看 PATCH_LAYER_ROWS')
+  const r = reconcilePatchLayer({
+    rows: PATCH_LAYER_ROWS.map((x) => ({ id: x.id, activated: true })),
+    permissionPresets: Object.keys(LEGION_PERMISSION_PRESETS),
+  })
+  assert.equal(r.effective, false, '没有挂载账却判生效 —— 证据又回到了组合树上')
+  for (const id of RUNTIME_ONLY_ROW_IDS) {
+    const f = findingOf(r, id)
+    assert.equal(f.code, 'ROW_MISSING', `${id} 没有挂载账时必须 ROW_MISSING`)
+    assert.equal(f.treeId, null, `${id} 的判据不该指向任何 loader 条目`)
+    assert.equal(f.mountSource, 'in-process-mount')
+  }
+})
+
+test('★★ 挂载账里列出运行期行 → 生效；`mountSource` 把两个宇宙分开写出来', () => {
+  const r = reconcilePatchLayer(realTreeObservation())
+  assert.deepEqual(r.reasons, [], `真树 + 挂载账被判成未生效：${r.reasons.join(' / ')}`)
+  assert.equal(r.effective, true)
+  // 运行期行：证据来自组合根的挂载账。
+  for (const id of RUNTIME_ONLY_ROW_IDS) {
+    const f = findingOf(r, id)
+    assert.equal(f.code, 'OK')
+    assert.equal(f.mountSource, 'in-process-mount')
+    assert.equal(f.treeId, null)
+  }
+  // 静态行：证据来自组合树，**不许**被挂载账顶替（否则两个宇宙就并成一个了）。
+  const statics = PATCH_LAYER_ROWS.filter((x) => !isRuntimeOnlyRow(x))
+  assert.ok(statics.length > 0, '一条静态行都没有 —— 这条断言是空的')
+  for (const spec of statics) {
+    const f = findingOf(r, spec.id)
+    assert.equal(f.mountSource, 'loader-entry', `${spec.id} 的来源必须是组合树`)
+    assert.notEqual(f.treeId, null)
+  }
+})
+
+test('★★ 静态行**不许**拿挂载账顶替：树里没有它，账里就算列了也还是 ROW_MISSING', () => {
+  // 反向对照：把一条静态行从树里拿掉，同时把它写进挂载账。
+  // 一个"凡出现在账里就算 OK"的实现会在这里变绿。
+  const target = PATCH_LAYER_ROWS.find((x) => typeof x.module === 'string')
+  assert.ok(target, '一条有模块的静态行都没有 —— 这条用例验不了')
+  const obs = realTreeObservation()
+  const r = reconcilePatchLayer({
+    ...obs,
+    rows: obs.rows.filter((x) => x.id !== target.id),
+    inProcessMounted: [...RUNTIME_ONLY_ROW_IDS, target.id],
+  })
+  assert.equal(r.effective, false)
+  assert.equal(findingOf(r, target.id).code, 'ROW_MISSING')
+  assert.equal(findingOf(r, target.id).mountSource, 'loader-entry')
+})
+
+test('★★ 挂载账**缺席 / 空 / 形状不对** 一律按未生效（fail closed）', () => {
+  assert.ok(RUNTIME_ONLY_ROW_IDS.length > 0, '没有运行期行 —— 这条用例是空的')
+  const base = { rows: realTreeRows(), permissionPresets: Object.keys(LEGION_PERMISSION_PRESETS) }
+  const shapes = [
+    ['字段缺席', undefined],
+    ['null', null],
+    ['空数组', []],
+    ['只有一个空串', ['']],
+    ['不是数组（字符串）', RUNTIME_ONLY_ROW_IDS.join(',')],
+    ['不是数组（对象）', { 0: RUNTIME_ONLY_ROW_IDS[0] }],
+    ['数字', 7],
+    ['数组里只有非字符串', [1, 2, 3]],
+  ]
+  for (const [label, inProcessMounted] of shapes) {
+    const obs = label === '字段缺席' ? { ...base } : { ...base, inProcessMounted }
+    const r = reconcilePatchLayer(obs)
+    assert.equal(r.effective, false, `${label} 被判成生效 —— 未观察被当成了已挂载`)
+    for (const id of RUNTIME_ONLY_ROW_IDS) {
+      assert.equal(findingOf(r, id).code, 'ROW_MISSING', `${label} 时 ${id} 不是 ROW_MISSING`)
+    }
+  }
+})
+
+test('★★ 挂载账只列出**一行** → 另一行仍然 ROW_MISSING（部分报告不许连坐）', () => {
+  assert.ok(RUNTIME_ONLY_ROW_IDS.length >= 2, '运行期行不足两行 —— 这条用例验不了"部分"')
+  const [first, ...rest] = RUNTIME_ONLY_ROW_IDS
+  const r = reconcilePatchLayer({
+    rows: realTreeRows(),
+    permissionPresets: Object.keys(LEGION_PERMISSION_PRESETS),
+    inProcessMounted: [first],
+  })
+  assert.equal(r.effective, false)
+  assert.equal(findingOf(r, first).code, 'OK')
+  for (const id of rest) {
+    assert.equal(findingOf(r, id).code, 'ROW_MISSING', `${id} 没被挂载却被算成生效`)
+  }
+})
+
+test('★★ `RUNTIME_ONLY_ROW_IDS` 必须恰好是声明里 module:null + runtimeModule 的那些行', () => {
+  // 防止这条判据因为"集合是空的"而恒真。
+  const expected = PATCH_LAYER_ROWS
+    .filter((x) => x.module === null && typeof x.runtimeModule === 'string' && x.runtimeModule !== '')
+    .map((x) => x.id)
+  assert.ok(expected.length > 0, '声明里没有运行期行 —— 上面那几条用例全是空的')
+  assert.deepEqual([...RUNTIME_ONLY_ROW_IDS], expected)
+  // 判据本身：`permission-presets` 的 module 也是 null，但它**不是**运行期行。
+  const presets = PATCH_LAYER_ROWS.find((x) => x.mount?.anchor === 'patch-over')
+  assert.equal(isRuntimeOnlyRow(presets), false,
+    'patch-over 那一行被误判成运行期行 —— 它会被报成一条永远修不掉的 ROW_MISSING')
 })
 
 // ----------------------------------------------------------------- 渲染新鲜度

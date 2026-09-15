@@ -221,6 +221,32 @@ export const PATCH_LAYER_ROWS = Object.freeze([
   }),
 ])
 
+/**
+ * 这一行是不是**运行期行**：静态补丁层里装不了（`module: null`），
+ * 只能由组合根在**进程内**挂载（`runtimeModule` 是它的真实模块）。
+ *
+ * ★ 判据必须与「`module` 是 null」分开看：`permission-presets` 那一行的 `module`
+ * 也是 `null`，但它**不需要模块**（`patch-over` 按 id 覆盖既有行的 config），
+ * 它生效与否的判据是「Legion 的 preset 名解析得到」，不是「有没有挂载」。
+ *
+ *   > 一个「凡 module 为 null 都按"没挂载"处理」的对账，
+ *   > 与一个「把 patch-over 那一行也一起报 ROW_MISSING」的对账，是同一个东西——
+ *   > 只不过后者会在真部署上多报一条永远修不掉的红。
+ */
+export function isRuntimeOnlyRow(row) {
+  return row?.module === null && typeof row?.runtimeModule === 'string' && row.runtimeModule !== ''
+}
+
+/**
+ * 声明里所有**只能进程内挂载**的行 id。
+ *
+ * 从 `PATCH_LAYER_ROWS` **推导**，不手抄：手抄一份会在补丁层加一行的当天变成假话，
+ * 而那份假话只会让读到它的东西"更容易绿"。用例与组合根观察都用它。
+ */
+export const RUNTIME_ONLY_ROW_IDS = Object.freeze(
+  PATCH_LAYER_ROWS.filter((row) => isRuntimeOnlyRow(row)).map((row) => row.id),
+)
+
 /** 员工 agent preset（agent 平面，按 session 挂载）。只承载岗位能力，不提供任何服务。 */
 export const EMPLOYEE_PRESET_CONTRACT = Object.freeze({
   plane: 'agent',
@@ -242,12 +268,63 @@ export const EMPLOYEE_PRESET_CONTRACT = Object.freeze({
  * 如果它**根本没被覆盖**（还是 DSH 默认表），行也照样存在，
  * 但 `legion-unattended` 这个 preset 名会解析失败 —— 这才是判据。
  *
- * @param {{rows?: Array<{id: string, activated?: boolean}>, permissionPresets?: string[]}} observation
- *   组合树观察结果（由宿主侧注入，本模块不读文件、不 import DSH）
+ * ## ★★ 运行期行（`module: null` + `runtimeModule`）的证据来源**不是组合树**
+ *
+ * `pre-execute` / `approval-answerer` 这两行**永远不会**作为 loader 条目出现：
+ * 它们在声明里是 `module: null`（YAML 装不了桥与端口），只能由组合根在**进程内**
+ * `mount()` 上去——而 Cordis 的 fiber **不是** loader 条目。
+ *
+ *   > 一个"读一个结构上不可能装着它的地方"的检查，
+ *   > 与一个"它真的没装"的检查，给出的是同一条红——
+ *   > 只不过只有后者能被接线修好。
+ *
+ * 所以这两行的判据换成一份**进程内挂载报告**：`observation.inProcessMounted`
+ * （由 `plugins/runtime-host-row.mjs` 的 `observeComposition()` 从组合根服务里读出来，
+ * 而那份账**只有 `assemble.mjs` 的 `mount()` 写得出来**）。
+ *
+ * 三件事因此**必须**成立，缺一条这条判据就会退化成恒真的装饰：
+ *   ① 报告缺席 / 空 / 形状不对 ⇒ 该行 `ROW_MISSING`（与 `PRESETS_UNOBSERVED` 同一条口径：
+ *      「没观察到」不等于「已挂上」）；
+ *   ② 报告里**没有**这一行 ⇒ `ROW_MISSING`；
+ *   ③ 报告**不能**由"端口装好了"推出来（`enforcementSurfaces()` 那类读数在
+ *      `assembleEnforcement()` 一跑就是 true，与有没有 `mount()` 无关）。见
+ *      `plugins/runtime-host-row.mjs` 里读那份账的那一段。
+ *
+ * ## `mountSource`：把"哪个宇宙"写成**字段**，不靠读者自己推
+ *
+ * 每条 finding 都带 `mountSource`，取值只有四个，都指"这一行的生效证据从哪来"：
+ *
+ *   · `'loader-entry'`    —— 静态补丁行（`module` 是字符串，或 `patch-over` 那一行）：
+ *     证据是组合树里有这一条且已激活；
+ *   · `'in-process-mount'` —— 上面说的运行期行：证据是组合根的**挂载账**；
+ *   · `'effective-config'` —— `patch-over` 的 preset 表判据：证据是生效的 preset 表内容；
+ *   · `null`              —— **没有证据**（`PRESETS_UNOBSERVED`）。
+ *
+ * 前两者都用 `code: 'OK'` 表示"生效"，但**来源是两个宇宙**：一个在静态补丁文件里、
+ * 一个只存在于当前进程。把两者都写成光秃秃的 `OK`，读者就得回去看 `module` 字段
+ * 才知道自己读到的是哪一种——而那正是这一批要修掉的那种"看着一样"。
+ *
+ * @param {{rows?: Array<{id: string, activated?: boolean}>,
+ *          permissionPresets?: string[],
+ *          inProcessMounted?: string[]}} observation
+ *   组合树观察结果（由宿主侧注入，本模块不读文件、不 import DSH）。
+ *   `inProcessMounted` 是**运行期行**的进程内挂载报告（行 id 数组）。
  */
 export function reconcilePatchLayer(observation = {}) {
   const rows = Array.isArray(observation.rows) ? observation.rows : []
   const byId = new Map(rows.map((r) => [String(r?.id ?? ''), r]))
+
+  /** 进程内挂载报告 → 集合；**没有证据**一律是 `null`（不是空集）。
+   *
+   *  三件事都算"没有证据"，按未生效处理：不是一个数组、数组里没有可用的行 id、
+   *  或者它是一个空数组。空集与 `null` 在这里的行为**一样**是故意的：
+   *  两者都表示"没有任何一行被报告为已挂载"——把它们分开只会多一个读者要学的区分。 */
+  const inProcessMounted = Array.isArray(observation.inProcessMounted)
+    ? observation.inProcessMounted.filter((x) => typeof x === 'string' && x !== '')
+    : null
+  const mountedInProcess = inProcessMounted !== null && inProcessMounted.length > 0
+    ? new Set(inProcessMounted)
+    : null
 
   /** 声明 id → 它**在组合树里的**条目 id。
    *
@@ -274,6 +351,38 @@ export function reconcilePatchLayer(observation = {}) {
 
   const findings = []
   for (const spec of PATCH_LAYER_ROWS) {
+    // ── 运行期行：判据是**进程内挂载报告**，不是组合树 ────────────────────────
+    //
+    // 这两行在声明里 `module: null`，所以它们**不可能**是 loader 条目——按组合树
+    // 查它们只会得到一条永远不变的红（见本函数 JSDoc 那一节）。这里刻意**只**看
+    // 那份报告：loader 条目里恰好出现了同名行也**不算**（一个部署把运行期行静态
+    // 挂进补丁层，与"组合根挂过它"是两件事，修法也不同）。
+    if (isRuntimeOnlyRow(spec)) {
+      if (mountedInProcess !== null && mountedInProcess.has(spec.id)) {
+        findings.push({
+          row: spec.id,
+          treeId: null,
+          code: 'OK',
+          effective: true,
+          mountSource: 'in-process-mount',
+          detail: `行由组合根在**当前进程内**挂载（静态补丁层里没有它：module=null，`
+            + `runtimeModule=${spec.runtimeModule}）。它与静态补丁行是**两个不同的来源**`,
+        })
+      } else {
+        findings.push({
+          row: spec.id,
+          treeId: null,
+          code: 'ROW_MISSING',
+          effective: false,
+          mountSource: 'in-process-mount',
+          detail: `声明为运行期行（module=null，runtimeModule=${spec.runtimeModule}），`
+            + '而进程内挂载报告里没有它：报告缺席 / 是空的 / 形状不对，或者里面没有这一行。'
+            + '「没观察到挂载」不等于「已挂上」，按未生效处理',
+        })
+      }
+      continue
+    }
+
     const treeId = treeIdFor(spec)
     // 兼容两种输入：真实的树（`patch-over` 用靶子 id）与**已按声明重写过 id** 的观察结果
     // （`observeComposition()` 产出的就是后者，见 `runtime/dsh-composition/plugins/runtime-host-row.mjs`）。
@@ -285,6 +394,7 @@ export function reconcilePatchLayer(observation = {}) {
         treeId,
         code: 'ROW_MISSING',
         effective: false,
+        mountSource: 'loader-entry',
         detail: `补丁层行未出现在组合树中（声明 id：${spec.id}；树条目 id：${treeId}；预期锚点：${spec.mount.anchor}）`,
       })
       continue
@@ -297,11 +407,19 @@ export function reconcilePatchLayer(observation = {}) {
         treeId,
         code: 'ROW_NOT_ACTIVATED',
         effective: false,
+        mountSource: 'loader-entry',
         detail: '行已挂载但未激活（等待依赖服务），不产生任何强制效果',
       })
       continue
     }
-    findings.push({ row: spec.id, treeId, code: 'OK', effective: true, detail: '行已挂载并激活' })
+    findings.push({
+      row: spec.id,
+      treeId,
+      code: 'OK',
+      effective: true,
+      mountSource: 'loader-entry',
+      detail: '行已挂载并激活',
+    })
   }
 
   // preset 表是否真的被替换：判据是**Legion 的 preset 名能否解析**，
@@ -313,6 +431,7 @@ export function reconcilePatchLayer(observation = {}) {
       row: `${LEGION_ROW_PREFIX}permission-presets`,
       code: 'PRESETS_UNOBSERVED',
       effective: false,
+      mountSource: null,
       detail: '未能读到生效的 preset 表；「没观察到」不等于「已替换」，按未生效处理',
     }
   } else {
@@ -322,6 +441,7 @@ export function reconcilePatchLayer(observation = {}) {
         row: `${LEGION_ROW_PREFIX}permission-presets`,
         code: 'PRESETS_NOT_OVERRIDDEN',
         effective: false,
+        mountSource: 'effective-config',
         detail: `生效的 preset 表里缺少 Legion 自有项 [${missing.join(', ')}]：patch-over 未生效，仍在用 DSH 默认表`,
       }
     } else {
@@ -329,6 +449,7 @@ export function reconcilePatchLayer(observation = {}) {
         row: `${LEGION_ROW_PREFIX}permission-presets`,
         code: 'OK',
         effective: true,
+        mountSource: 'effective-config',
         detail: `Legion preset 表已生效：${names.join(', ')}`,
       }
     }

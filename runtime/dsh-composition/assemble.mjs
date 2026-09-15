@@ -123,6 +123,8 @@ function assembleError(code, message) {
  *   rows: {preExecute: object, approvalAnswerer: object},
  *   mount: (ctx: object) => Promise<object[]>,
  *   dispose: () => Promise<void>,
+ *   mountedRowNames: () => string[],
+ *   enforcementSurfaces: () => object,
  * }}
  */
 export function assembleEnforcement({
@@ -188,10 +190,54 @@ export function assembleEnforcement({
   /** 已经挂上的 fiber，供 `dispose()` 按序卸载。 */
   const mounted = []
 
+  /**
+   * ★★ 挂载账（PRT-214 收口续）：**只有 `mount()` 会往它里面写**。
+   *
+   * ## 它回答的是哪一个问题
+   *
+   * `reconcilePatchLayer()` 要为补丁层声明里的两行运行期行（`module: null` +
+   * `runtimeModule`）找一个**真的来源**：它们永远不会是 loader 条目，所以按组合树
+   * 查只会得到一条永远不变的红。而"装配好了"这件事**不能**当证据——
+   * `enforcementSurfaces()` 在 `assembleEnforcement()` 一跑就是 true，
+   * 与"有没有人调 `mount()`"完全无关：
+   *
+   *   > 一个"装配好了、端口齐全"的读数，
+   *   > 与一个"真的挂上去了"的读数，在**没有挂载**的部署上完全同形——
+   *   > 只不过前者来自一份注释，后者来自一次调用。
+   *
+   * 所以证据必须由**挂载这个动作本身**产生：账在 `mount()` 的第一刻被写，
+   * `mount()` 没被调用过 ⇒ 账是空的 ⇒ 那两行按未生效处理（fail closed）。
+   *
+   * ## 为什么在**任何 `await` 之前**写，而不是"每个 `ctx.plugin` 解析之后"各写一格
+   *
+   * Cordis 的 `ctx.plugin()` 是**同步调用**、解析在微任务里。而组合根的自检
+   * （`plugins/runtime-host-row.mjs` 的 `observeComposition()`）恰好在那批微任务里跑——
+   * 按"解析之后才写"记账，第二行在自检读账的那一刻**还没被记上**，
+   * 于是自检会对一个真的挂好了的部署报 `ROW_MISSING`：
+   *
+   *   > 一个"记账比挂载早一步、于是永远绿"的实现，
+   *   > 与一个"记账比挂载晚一步、于是永远红"的实现，是同一个东西——
+   *   > 只不过前者的假绿要靠删掉 `mount()` 才能看出来。
+   *
+   * 所以这里记的是"**这次挂载覆盖了哪几行**"（两行无条件地各调一次 `ctx.plugin`，
+   * 见 `mount()`），并在失败路径上**整本清空**：宁可少报（fail closed），不许虚报。
+   *
+   * `dispose()` 也清空它——拆掉之后就没有"挂在进程里"的行了，账与挂载同生共死。
+   */
+  const mountedRowNames = []
+
   return Object.freeze({
     bridge,
     registry: sharedRegistry,
     rows,
+
+    /**
+     * 这份装配**在当前进程里真的挂上去的行名**（`rows.*.name`，逐字等于补丁层声明里的行 id）。
+     *
+     * 返回的是**快照**（冻结的新数组）：读的人不会因为下一次 `mount()` 把它改成半份。
+     * 没有挂载过 / 挂载失败 / 已拆装 ⇒ 空数组。**空数组不是"挂上了零行"的证据，是"没有挂载"**。
+     */
+    mountedRowNames: () => Object.freeze([...mountedRowNames]),
 
     /**
      * 把两行挂到一个 Context 上。
@@ -214,8 +260,19 @@ export function assembleEnforcement({
       if (ctx === null || typeof ctx.plugin !== 'function') {
         throw assembleError(ASSEMBLE_CODES.NO_CONTEXT, 'mount 需要一个 cordis Context')
       }
-      mounted.push(await ctx.plugin(rows.approvalAnswerer))
-      mounted.push(await ctx.plugin(rows.preExecute))
+      // ★ 账在这里写（第一个 `await` 之前），理由见 `mountedRowNames` 那一段。
+      mountedRowNames.length = 0
+      for (const row of [rows.approvalAnswerer, rows.preExecute]) {
+        if (typeof row?.name === 'string' && row.name !== '') mountedRowNames.push(row.name)
+      }
+      try {
+        mounted.push(await ctx.plugin(rows.approvalAnswerer))
+        mounted.push(await ctx.plugin(rows.preExecute))
+      } catch (error) {
+        // 挂了、但没挂成：账上不能留下"它挂过"的痕迹（fail closed 的方向是少报）。
+        mountedRowNames.length = 0
+        throw error
+      }
       return Object.freeze([...mounted])
     },
 
@@ -226,6 +283,8 @@ export function assembleEnforcement({
         const fork = mounted.pop()
         await fork.dispose()
       }
+      // 拆完就没有"挂在进程里"的行了；账必须跟着清，否则"挂过"会变成单向门。
+      mountedRowNames.length = 0
     },
 
     /**

@@ -45,7 +45,7 @@ import {
   resolveEnforcementConfig,
 } from './root.mjs'
 import { bindingOf } from './assemble.mjs'
-import { LEGION_PERMISSION_PRESETS, LEGION_ROW_PREFIX, PATCH_LAYER_ROWS } from './patch-layer.mjs'
+import { LEGION_PERMISSION_PRESETS, LEGION_ROW_PREFIX, PATCH_LAYER_ROWS, RUNTIME_ONLY_ROW_IDS } from './patch-layer.mjs'
 import { renderPatchReport } from './render.mjs'
 import { toPatchDocument } from './patch-format.mjs'
 import { BOOTSTRAP_CODES } from './bootstrap.mjs'
@@ -150,6 +150,9 @@ function compositionOk() {
   return {
     rows: PATCH_LAYER_ROWS.map((r) => ({ id: r.id, activated: true })),
     permissionPresets: Object.keys(LEGION_PERMISSION_PRESETS),
+    // 运行期行（`pre-execute` / `approval-answerer`）的证据不在组合树里：
+    // 它们 `module: null`，永远不会是 loader 条目。见 `patch-layer.mjs` 对账那一节。
+    inProcessMounted: [...RUNTIME_ONLY_ROW_IDS],
   }
 }
 

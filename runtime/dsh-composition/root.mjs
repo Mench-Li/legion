@@ -482,6 +482,23 @@ export function installEnforcementRoot(input = {}) {
     mount: (ctx) => assembly.mount(ctx),
     /** 反序卸载两行。 */
     dispose: () => assembly.dispose(),
+    /**
+     * ★★ 这份组合根的**进程内挂载账**：当前进程里真的挂上去的行名
+     * （逐字等于补丁层声明里的行 id）。
+     *
+     * 它不是一件便利方法，而是**运行期行唯一的证据来源**：
+     * `pre-execute` / `approval-answerer` 在补丁层声明里是 `module: null`
+     * （YAML 装不了桥与端口），所以它们**永远不会**是 loader 条目——
+     * `reconcilePatchLayer()` 若按组合树查它们，得到的那条红永远修不掉。
+     *
+     * 为什么这个读数**不能**用 `enforcementSurfaces()` 顶替：那个报的是"桥是用哪几个
+     * 端口造出来的"，`assembleEnforcement()` 一跑就是 true/满的，与有没有人调
+     * `mount()` 一点关系都没有。拿它当证据会让"删掉挂载"这件事在读数上消失。
+     *
+     * 账由 `mount()` 这个动作本身写（见 `assemble.mjs` 的 `mountedRowNames`）：
+     * 没挂过 / 挂载失败 / 已拆装 ⇒ **空数组**，调用方必须按未生效处理。
+     */
+    mountedEnforcementRows: () => assembly.mountedRowNames(),
     /** 强制面到底挂了几道——证据是"装上了什么"，不是"配置里写了什么"。 */
     enforcementSurfaces: () => assembly.enforcementSurfaces(),
 

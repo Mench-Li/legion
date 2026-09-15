@@ -32,7 +32,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { bootstrapDshRuntime, BOOTSTRAP_CODES } from './bootstrap.mjs'
-import { PATCH_LAYER_ROWS, LEGION_PERMISSION_PRESETS } from './patch-layer.mjs'
+import { PATCH_LAYER_ROWS, LEGION_PERMISSION_PRESETS, RUNTIME_ONLY_ROW_IDS } from './patch-layer.mjs'
 import {
   productionExecutorProvider, resetDshRuntimeBinding, dshRuntimeBound,
 } from '../../orchestrator/worker/executor-binding.mjs'
@@ -130,6 +130,9 @@ function compositionOk() {
   return {
     rows: PATCH_LAYER_ROWS.map((r) => ({ id: r.id, activated: true })),
     permissionPresets: Object.keys(LEGION_PERMISSION_PRESETS),
+    // 运行期行的证据不在组合树里（`module: null` ⇒ 永远不是 loader 条目），
+    // 而在组合根的挂载账里。见 `patch-layer.mjs` 对账那一节。
+    inProcessMounted: [...RUNTIME_ONLY_ROW_IDS],
   }
 }
 

@@ -39,7 +39,7 @@ import runtimeHostRow, {
   setDshRuntimeInputsFactory,
 } from './runtime-host-row.mjs'
 import { ENFORCEMENT_ROOT_SERVICE } from './root-row.mjs'
-import { PATCH_LAYER_ROWS } from '../patch-layer.mjs'
+import { PATCH_LAYER_ROWS, RUNTIME_ONLY_ROW_IDS } from '../patch-layer.mjs'
 
 /**
  * 声明里的行 id 与那条 `patch-over` 行 —— **从产品声明推导**，不在用例里另抄一份。
@@ -289,6 +289,67 @@ describe('PRT-253 runtime-host-row：组合树观察', () => {
     ] }) })
     assert.equal(unrelated.rows.length, DECLARED_ROW_IDS.length)
     assert.ok(unrelated.rows.every((r) => r.present === false))
+  })
+
+  /**
+   * 一个同时有 loader 与组合根服务的 ctx：观察器要能**同时**从两个来源读。
+   *
+   * `loader` 的那一份固定用 `treeEntriesOk()`（本套件既有的"全都在"假树）；
+   * 被测的是组合根那一侧。
+   */
+  function ctxWithRoot(service) {
+    return {
+      get: (name) => {
+        if (name === 'loader') return { entries: () => treeEntriesOk() }
+        if (name === ENFORCEMENT_ROOT_SERVICE) return service
+        return undefined
+      },
+    }
+  }
+
+  test('③b ★★ 观察结果带出组合根的**进程内挂载账**（运行期行唯一的证据来源）', () => {
+    assert.ok(RUNTIME_ONLY_ROW_IDS.length > 0, '没有运行期行 —— 这条用例是空的')
+    const mounted = [...RUNTIME_ONLY_ROW_IDS]
+    const observation = observeComposition(ctxWithRoot({
+      ok: true,
+      code: null,
+      message: null,
+      root: { mountedEnforcementRows: () => mounted },
+    }))
+    assert.deepEqual(observation.inProcessMounted, mounted,
+      '挂载账没有被带出来 —— 运行期行会永远 ROW_MISSING')
+
+    // 反向对照：同一棵 loader 树、组合根服务不在 ⇒ **没有**账。
+    const noRoot = { get: (name) => (name === 'loader' ? { entries: () => treeEntriesOk() } : undefined) }
+    assert.equal(observeComposition(noRoot).inProcessMounted, null,
+      '组合根不在却读到了挂载账 —— 那是一份编出来的证据')
+  })
+
+  test('③c ★★ 挂载账读不出来时一律 `null`（fail closed），不给半份', () => {
+    const cases = [
+      ['服务缺席', undefined],
+      ['服务是 null', null],
+      ['服务在但被**拒绝**（ok=false）', { ok: false, code: 'ENFORCEMENT_ROOT_CONFIG_MISSING', message: '缺配置', root: { mountedEnforcementRows: () => RUNTIME_ONLY_ROW_IDS } }],
+      ['root 缺席', { ok: true, root: null }],
+      ['root 上没有那个方法', { ok: true, root: {} }],
+      ['那个方法不是函数', { ok: true, root: { mountedEnforcementRows: RUNTIME_ONLY_ROW_IDS } }],
+      ['那个方法抛了', { ok: true, root: { mountedEnforcementRows() { throw new Error('boom') } } }],
+      ['返回的不是数组', { ok: true, root: { mountedEnforcementRows: () => 'legion-enforcement-pre-execute' } }],
+      ['返回空数组', { ok: true, root: { mountedEnforcementRows: () => [] } }],
+      ['数组里没有可用的行 id', { ok: true, root: { mountedEnforcementRows: () => ['', 3, null] } }],
+    ]
+    for (const [label, service] of cases) {
+      assert.equal(observeComposition(ctxWithRoot(service)).inProcessMounted, null,
+        `${label} 被读成了一份证据 —— 未观察被当成了已挂载`)
+    }
+    // ★ 反向对照：**同一组输入**里，一份合法的账必须被读出来。
+    //   没有这一条，上面那十条在一个"永远返回 null"的实现上同样全绿。
+    const good = observeComposition(ctxWithRoot({
+      ok: true,
+      root: { mountedEnforcementRows: () => [...RUNTIME_ONLY_ROW_IDS, 3, ''] },
+    }))
+    assert.deepEqual(good.inProcessMounted, [...RUNTIME_ONLY_ROW_IDS],
+      '合法的账没被读出来 —— 上面那十条 fail-closed 断言是恒真的')
   })
 })
 

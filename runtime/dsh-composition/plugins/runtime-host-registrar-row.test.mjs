@@ -34,7 +34,7 @@ import { pathToFileURL } from 'node:url'
 import { after, describe, test } from 'node:test'
 
 import { REQUIRED_CAPABILITIES } from '../../contracts/adapter.mjs'
-import { LEGION_PERMISSION_PRESETS, PATCH_LAYER_ROWS } from '../patch-layer.mjs'
+import { LEGION_PERMISSION_PRESETS, PATCH_LAYER_ROWS, RUNTIME_ONLY_ROW_IDS } from '../patch-layer.mjs'
 import { startupSelfCheck } from '../selfcheck.mjs'
 import realRuntimeHostRow, {
   CAPABILITY_EVIDENCE_CODES,
@@ -474,6 +474,8 @@ function effectiveComposition() {
   return {
     rows: PATCH_LAYER_ROWS.map((r) => ({ id: r.id, activated: true })),
     permissionPresets: [...Object.keys(LEGION_PERMISSION_PRESETS)],
+    // 运行期行的证据不在组合树里（它们 `module: null`），而在组合根的挂载账里。
+    inProcessMounted: [...RUNTIME_ONLY_ROW_IDS],
   }
 }
 

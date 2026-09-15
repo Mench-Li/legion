@@ -265,6 +265,13 @@ export function resetDshRuntimeInputsFactory() {
  * **不返回 `{rows: []}`**：一个"读到零行"的观察结果与一个"根本没读到"的
  * 观察结果在这一层的用途上必须分得开——`bootstrapDshRuntime()` 的
  * `BOOTSTRAP_COMPOSITION_UNOBSERVED` 那段注释写的就是这条。
+ *
+ * ## `inProcessMounted`：运行期行（`module: null`）的**唯一**证据
+ *
+ * 返回的观察结果多一个字段，由下面的 `mountedEnforcementRows(ctx)` 从组合根服务里读。
+ * 它缺席（`null`）是**正常**的——没装组合根、或者根还没挂过——此时
+ * `reconcilePatchLayer()` 会为那两行报 `ROW_MISSING`（fail closed）。
+ * 为什么这份证据不能用 `enforcementSurfaces()` 顶替，见那个函数的注释。
  */
 export function observeComposition(ctx) {
   // 用 `ctx.get('loader')` 而不是 `ctx.loader`：实测过（本批文档 §3）——
@@ -334,7 +341,65 @@ export function observeComposition(ctx) {
     }
   }
 
-  return { rows, permissionPresets }
+  return { rows, permissionPresets, inProcessMounted: mountedEnforcementRows(ctx) }
+}
+
+/**
+ * 从组合根服务里读**进程内挂载账**（`assemble.mjs` 的 `mountedRowNames`）。
+ *
+ * ## 它补的是哪一截（★ 这一条是本文件里唯一的"新证据源"，别把它读成便利方法）
+ *
+ * `PATCH_LAYER_ROWS` 里有两行是 `module: null` + `runtimeModule`（`pre-execute` /
+ * `approval-answerer`）：它们**永远不会**作为 loader 条目出现——只能由组合根在进程内
+ * `mount()` 上去，而 Cordis 的 fiber 不是 loader 条目。于是按组合树逐行对账的
+ * `reconcilePatchLayer()` 对这两行**永远**报 `ROW_MISSING`，启动自检永远判
+ * "强制面未生效"并拒绝注册：
+ *
+ *   > 一个"读一个结构上不可能装着它的地方"的检查，
+ *   > 与一个"它真的没装"的检查，给出同一条红——只有后者能被接线修好。
+ *
+ * 所以这里去问**唯一知道答案的那一侧**：组合根本身。它手里那份账**只有 `mount()`
+ * 写得出来**（见 `assemble.mjs`），所以"删掉挂载"会立刻在这里变成"读不到"。
+ *
+ * ## ★ 为什么**不能**改用 `enforcementSurfaces()`
+ *
+ * 那个读数报的是"桥是用哪几个端口造出来的"（hardFloor / pathScope / whitelist /
+ * policy / approval）——`assembleEnforcement()` 一跑就是满的，**与有没有人调
+ * `mount()` 完全无关**。拿它当证据，会让"把 `mount(ctx)` 那一行删掉"在读数上
+ * 完全消失：一套删掉挂载也照样全绿的用例，与一套真的验过挂载的用例，
+ * 在绿的输出上长得一模一样。
+ *
+ *   > 一个证明得了任何东西的证据，与一个什么都证明不了的证据，
+ *   > 在"门禁是绿的"这件事上是同一个东西——只不过前者在改动之后还会红。
+ *
+ * ## 失败一律返回 `null`（fail closed），**不返回空数组**
+ *
+ * 服务缺席 / 是一份拒绝（`ok !== true`）/ `root` 形状不对 / 账不是函数 /
+ * 账抛了 / 返回值不是字符串数组 / 数组里一行都没有 —— 全部按"**没有证据**"处理。
+ * 上层（`reconcilePatchLayer`）于是把那两行报成 `ROW_MISSING`：
+ * 「没观察到挂载」不等于「已挂上」，与 `PRESETS_UNOBSERVED` 同一条口径。
+ */
+function mountedEnforcementRows(ctx) {
+  if (ctx === null || typeof ctx !== 'object' || typeof ctx.get !== 'function') return null
+  // 与 `runtimeHostRow.apply` 读的是**同一个**服务；但那一段的失败会以具名码拒绝，
+  // 这里只负责"读得到就读、读不到就当没有证据"，所以不抛。
+  const installed = ctx.get(ENFORCEMENT_ROOT_SERVICE)
+  if (absent(installed) || typeof installed !== 'object') return null
+  if (installed.ok !== true) return null
+  const root = installed.root
+  if (absent(root) || typeof root !== 'object') return null
+  if (typeof root.mountedEnforcementRows !== 'function') return null
+  let names = null
+  try {
+    names = root.mountedEnforcementRows()
+  } catch {
+    // 账读了一半抛错：**不给部分结果**（与上面 loader 树那条同一个理由）。
+    return null
+  }
+  if (!Array.isArray(names)) return null
+  const rows = names.filter((name) => typeof name === 'string' && name !== '')
+  if (rows.length === 0) return null
+  return Object.freeze(rows)
 }
 
 // ───────────────────────────────────────────────────────────────────────────

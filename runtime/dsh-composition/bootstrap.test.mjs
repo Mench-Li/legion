@@ -28,7 +28,7 @@ import assert from 'node:assert/strict'
 import {
   bootstrapDshRuntime, repairPlanFor, REPAIR_ACTIONS, BOOTSTRAP_CODES,
 } from './bootstrap.mjs'
-import { PATCH_LAYER_ROWS, LEGION_PERMISSION_PRESETS } from './patch-layer.mjs'
+import { PATCH_LAYER_ROWS, LEGION_PERMISSION_PRESETS, RUNTIME_ONLY_ROW_IDS } from './patch-layer.mjs'
 import {
   bindDshRuntime, dshRuntimeBound, resetDshRuntimeBinding, productionExecutorProvider,
 } from '../../orchestrator/worker/executor-binding.mjs'
@@ -70,6 +70,10 @@ function compositionOk() {
     rows: PATCH_LAYER_ROWS.map((r) => ({ id: r.id, activated: true })),
     // `LEGION_PERMISSION_PRESETS` 是**按名字作键的对象**，不是数组。
     permissionPresets: Object.keys(LEGION_PERMISSION_PRESETS),
+    // ★ 运行期行（`pre-execute` / `approval-answerer`）的证据**不在**组合树里：
+    //   它们 `module: null`，永远不会是 loader 条目。没有这一项，`rows` 里就算
+    //   有同名行也照样是 `ROW_MISSING`。
+    inProcessMounted: [...RUNTIME_ONLY_ROW_IDS],
   }
 }
 
@@ -93,6 +97,9 @@ function compositionNotApplied() {
   return {
     rows: PATCH_LAYER_ROWS.map((r) => ({ id: r.id, activated: false })),
     permissionPresets: Object.keys(LEGION_PERMISSION_PRESETS),
+    // 挂载账照给：这条用例要验的是"**行没激活** ⇒ 补丁层没生效"，
+    // 别让运行期行那一项变成第二个变量（那样红就分不清是哪一边红的）。
+    inProcessMounted: [...RUNTIME_ONLY_ROW_IDS],
   }
 }
 

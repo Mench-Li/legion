@@ -191,6 +191,97 @@ test('② 执行抛错记成 failed，不把 worker 一起带走', async () => {
   }
 })
 
+test('② ★★ 执行器**返回** `{outcome:"failed"}` 必须走 `fail`，不能走 `transition`', async () => {
+  // 这条与上面那条"抛错"是**两条不同的路**，而它们走的是数据面的两个不同端口：
+  //   · 抛错      → `catch` → `hub.fail()`     → 服务端排重试/额度/DeadLetter
+  //   · 返回值失败 → `hub.transition()`         → 只把这次尝试标成 RetryableFailure
+  //
+  // 而"适配器把引擎故障分类成 `run.failed` **终态事件**、不往外抛栈"恰恰是引擎故障的
+  // 常见形态（`executor.test.mjs` 里"引擎抛错 → 以失败终态回来"那条测的就是它），
+  // 也就是说**常见路径**走的是返回值这一条。若它走 `transition`，这次失败就
+  // 没有任何人接手：服务端不会排新尝试，而 `RetryableFailure` 既不在回收扫描的
+  // 集合里、也不在人工待办清单里——任务会变成"状态 todo、却永远领不到"的静默停住。
+  //
+  //   > 一个"失败之后有人接手"的设计，与一个"失败只是被记了一笔"的设计，
+  //   > 在只看状态字段的用例下长得一模一样——只不过前者的任务还能被领走。
+  const { root, dataDir } = tempDataDir()
+  try {
+    const hub = fakeHub({ tasks: [{ taskId: 't1', attemptId: 'att:t1:1', leaseEpoch: 1 }] })
+    const w = createWorker({
+      hub,
+      executor: { ...inPlaceStages(), execute: async () => ({ outcome: 'failed', detail: '引擎报了 run.failed' }) },
+      dataDir,
+    })
+    const r = await w.tick()
+    assert.equal(r.outcome, 'failed')
+    assert.equal(w.counters.failed, 1)
+    // ★ 判据一：走了失败结算的单一入口
+    assert.equal(hub.calls.fail.length, 1,
+      '返回值失败必须走 hub.fail（服务端才知道"接下来怎么办"）；' +
+      `实际 fail=${hub.calls.fail.length}`)
+    // 而且**不能**同时又用 transition 报终态：那会把同一次失败结算两次。
+    // 判据是"**带 outcome 的** transition"——准备阶段本来就有 3 次
+    // Leased→PreparingWorkspace→BuildingContext→Running 的迁移，它们不带 outcome，
+    // 用"transition 总数为 0"来判会把正常流程也算成违规。
+    assert.deepEqual(
+      hub.calls.transition.filter((t) => t.outcome !== undefined),
+      [],
+      '终态上报不得走 transition —— 一次失败被结算两次会产出两条排队尝试')
+    // ★ 判据二：服务端的处置被读回来（否则"有没有排上重试"外面看不见）
+    assert.equal(r.reported, true)
+    assert.equal(w.snapshot().lastError.disposition, 'retry-new-attempt')
+    assert.equal(w.snapshot().lastError.nextAttemptAtMs, 1_700_000_002_000)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('② ★★ 返回值失败也要把 `runResult` 一起送上去（引擎的原文不能在这一层丢）', async () => {
+  // 引擎返回 `run.failed` 时**手里是有结果的**（终态事件带着 `result`）。
+  // 走 `fail` 时若不带 `runResult`，hub 侧那一行会退化成 `source: 'report-only'`
+  // ——"引擎当时说了什么"就再也答不出来了，而状态迁移全都还是对的。
+  const { root, dataDir } = tempDataDir()
+  try {
+    const hub = fakeHub({ tasks: [{ taskId: 't1', attemptId: 'att:t1:1', leaseEpoch: 1 }] })
+    const ENGINE = { runId: 'r1', outcome: 'failed', code: 'MODEL_ERROR', detail: '模型报错' }
+    const w = createWorker({
+      hub,
+      executor: { ...inPlaceStages(), execute: async () => ({ outcome: 'failed', detail: 'x', runResult: ENGINE }) },
+      dataDir,
+    })
+    await w.tick()
+    assert.equal(hub.calls.fail.length, 1)
+    assert.deepEqual(hub.calls.fail[0].runResult, ENGINE, '引擎的 RunResult 必须原样随 fail 上报')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('② ★ `outcome_unknown` 仍然走 `transition`（它**不是**失败，不能触发重试）', async () => {
+  // 反向确认：修"返回值失败"时不得顺手把 `outcome_unknown` 也改成走 `fail`。
+  // 两者的去向**故意相反**：`outcome_unknown` 是"外部写可能已经发生、结果不可确认"，
+  // 它的去向是**等人工**；把它送进 `fail` 会排一次自动重试，
+  // 也就是把"可能已经付过费的外部写"再执行一遍——本仓最不能犯的方向。
+  const { root, dataDir } = tempDataDir()
+  try {
+    const hub = fakeHub({ tasks: [{ taskId: 't1', attemptId: 'att:t1:1', leaseEpoch: 1 }] })
+    const w = createWorker({
+      hub,
+      executor: { ...inPlaceStages(), execute: async () => ({ outcome: 'outcome_unknown', detail: '不确定' }) },
+      dataDir,
+    })
+    const r = await w.tick()
+    assert.equal(r.outcome, 'outcome_unknown')
+    assert.equal(hub.calls.fail.length, 0, 'outcome_unknown 绝不能走 fail（那会排一次自动重试）')
+    const terminal = hub.calls.transition.filter((t) => t.outcome !== undefined)
+    assert.equal(terminal.length, 1, '结果未知必须由 transition 提交（去向是"等人工"）')
+    assert.equal(terminal[0].outcome, 'outcome_unknown')
+    assert.equal(w.counters.unknownOutcome, 1)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('② outcome_unknown 单独计数（它既不是成功也不是普通失败）', async () => {
   const { root, dataDir } = tempDataDir()
   try {

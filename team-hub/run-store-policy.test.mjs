@@ -710,3 +710,101 @@ test('⑬ 读方法把两套 outcome 词表**都**原样给出，不做翻译', 
     assert.equal(Number.isInteger(got[0].leaseEpoch), true)
   } finally { env.cleanup() }
 })
+
+// ============================================================================
+// ⑭ 「卡在 RetryableFailure」必须有人看得见——而**合法重试不能**变成待办
+//
+// 本批修掉的缺陷（PRT-309）：worker **返回**失败时走的是 `transition` 而不是
+// `fail`，于是那次失败没有任何人接手，attempt 停在 `RetryableFailure`、
+// 没有后继尝试，而 `task.status` 还是 `todo`——每个看板都把它算成"待办的、
+// 还没被领走的"，派发器却永远领不到它。
+//
+// worker 那一侧已经改成走 `fail`（见 `orchestrator/worker/worker.test.mjs`）。
+// 这一组补的是**纵深**：不管是谁造出这个形状（例如直接调通用迁移路由），
+// 人工待办清单都必须把它列出来。
+//
+// 同一份文件里本来就自相矛盾：`resolveAttempt()` 早就把 `RetryableFailure`
+// 列为需要人工处置的状态，而这个清单从来不列它——于是那条处置路径
+// **没有任何人会被告知去用**。声明了能处置、却没人被通知，与不能处置是一回事。
+//
+// ★ 但把它收进清单有一个**必须同时守住的反向风险**：每一次合法重试都会留下
+// 一条历史的 `RetryableFailure`。若不加区分地列出来，一个重试了 5 次的任务
+// 会往待办里塞 4 条早已被替代的条目——清单会被噪音淹没，而"清单被淹没"
+// 与"没有清单"在效果上是一样的。所以下面**成对**断言：
+//   有 ⇒ 卡住的形状**必须**出现；
+//   无 ⇒ 合法重试的中间态**必须不**出现。
+// ============================================================================
+
+test('⑭ ★★ 卡在 RetryableFailure（无人接手）必须出现在人工待办里', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c = claimToRunning(env)
+    // 通用迁移路由（外部调用方进得来）：把 Running 推到 RetryableFailure 就收工。
+    // 这正是 worker 修好之前那条路造出来的形状。
+    env.store.transition({
+      attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1',
+      to: 'RetryableFailure', outcome: 'failed',
+    })
+    assert.equal(env.store.getAttempt(c.attemptId).state, 'RetryableFailure')
+
+    // 先把"它确实卡住了"量出来：队列里领不到它
+    const claim = env.store.claim({ workerId: 'w-next' })
+    assert.equal(claim.claimed, null, '这个形状的定义就是"领不到"——领得到就不是卡住')
+
+    // ★ 因此它必须有人看得见。看不到它，任务就是静默停住。
+    const held = env.store.listHeld()
+    assert.equal(held.actionable, 1,
+      '卡住的尝试必须出现在待人工处理的清单里；否则任务状态是 todo 而永远没人管它')
+    assert.equal(held.items[0].attemptId, c.attemptId)
+    assert.equal(held.items[0].state, 'RetryableFailure')
+
+    // 而且它**真的能被处置**（清单里列出来但处置不了，等于没列）
+    const r = env.store.resolveAttempt({
+      attemptId: c.attemptId, actor: 'ops', decision: 'external-effect-absent', note: '重排',
+    })
+    assert.equal(r.action, 'retry-new-attempt')
+    assert.notEqual(r.nextAttemptId, null, '处置之后必须真的排出一条新尝试')
+    assert.equal(env.store.listHeld().actionable, 0, '处置后不再挂在等人工清单上')
+  } finally { env.cleanup() }
+})
+
+test('⑭ ★★ 合法重试的中间态**不得**进待办清单（否则清单被噪音淹没）', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c = claimToRunning(env)
+    // 走失败结算的唯一入口：它会终结为 RetryableFailure **并立刻排一条新尝试**
+    const r = env.store.failAndRetry({
+      attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, actor: 'w1', failureCode: 'runtime-unavailable',
+    })
+    assert.equal(r.action, 'retry-new-attempt')
+    // 库里此刻确实有一条 RetryableFailure（历史）与一条 Queued（最新）
+    const states = env.db.prepare('SELECT state FROM run_attempts WHERE task_id = ? ORDER BY attempt_no').all('t1')
+      .map((x) => x.state)
+    assert.deepEqual(states, ['RetryableFailure', 'Queued'])
+
+    const held = env.store.listHeld()
+    assert.equal(held.items.length, 0,
+      '历史上那条 RetryableFailure 是**已被接手**的失败——它有人管（新尝试已经在队列里），' +
+      '把它列进待办会让每次重试都产出一条假待办')
+    assert.equal(held.actionable, 0)
+  } finally { env.cleanup() }
+})
+
+test('⑭ ★ 额度耗尽进 DeadLetter：清单里是那一条 DeadLetter，不是中间那几条失败', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const { last } = failUntilDeadLetter(env)
+    assert.equal(last.action, 'dead-letter')
+    // 这条任务一共有 maxAttempts 次失败尝试，但只有最后那条 NeedsHuman
+    const total = env.db.prepare('SELECT COUNT(*) AS n FROM run_attempts WHERE task_id = ?').get('t1').n
+    assert.ok(total > 1, `本该有多次尝试，实际 ${total}`)
+
+    const held = env.store.listHeld()
+    assert.equal(held.items.length, 1, '清单里只该有那一条 DeadLetter，中间态不该混进来')
+    assert.equal(held.items[0].state, 'DeadLetter')
+    assert.equal(held.actionable, 1, '额度过期的那条才是需要人处理的')
+  } finally { env.cleanup() }
+})

@@ -1800,26 +1800,53 @@ export function createRunStore({
   }
 
   /**
-   * 「等人工处置」清单（PRT-310）：`UnknownOutcome`（外部写结果不可确认）
-   * 与 `DeadLetter`（重试额度用完）两类。
+   * 「等人工处置」清单（PRT-310）：`UnknownOutcome`（外部写结果不可确认）、
+   * `DeadLetter`（重试额度用完）与**卡住的 `RetryableFailure`**。
    *
-   * 这两类**必须**能从界面上看到并逐个结掉，否则：
+   * 这三类**必须**能从界面上看到并逐个结掉，否则：
    *   - `UnknownOutcome` 挂着的任务没人知道，队列看起来只是"没有任务"；
-   *   - `DeadLetter` 只是历史里的一条记录，用户以为它还在跑。
+   *   - `DeadLetter` 只是历史里的一条记录，用户以为它还在跑；
+   *   - 卡住的 `RetryableFailure` 更坏：任务状态还是 `todo`，
+   *     每个看板都把它算成"待办的、还没被领走的"，而派发器**永远领不到它**。
    * 因此这个列表是"不丢任务"在**运维意义上**的落点：状态机保证不会静默重跑，
    * 这个列表保证不会静默消失。
+   *
+   * ★ `RetryableFailure` 是**本批补进来的**，补的理由是同一份文件里的**自相矛盾**：
+   * `resolveAttempt()` 早就把它列为需要人工处置的状态（"只有 UnknownOutcome /
+   * DeadLetter / RetryableFailure 需要"），而这个清单从来不列它——于是那条处置路径
+   * **没有任何人会被告知去用**。声明了能处置、却没人被通知，与不能处置是一回事。
+   *
+   * 为什么把 `RetryableFailure` 收进来**不会**把每次重试都变成一条待办：
+   * 这个清单只保留**最新**的尝试（`isLatest`，见下），而每一次**合法**的重试
+   * 都会**立刻**产生后继——`scheduleRetry` 要么新建下一条尝试（`Queued`，
+   * 于是最新的那条是 `Queued`），要么额度用完再走一步进 `DeadLetter`
+   * （最新的那条是 `DeadLetter`，本来就在清单里）。
+   * 所以「最新尝试停在 `RetryableFailure`」只有一种成因：**有人把它标成失败，
+   * 却没有任何人接手**。它就是这个清单要捞的那个形状。
    */
   function listHeld({ scope = null, limit = 100, nowMs = null } = {}) {
     const ignoredClientFields = []
     if (nowMs !== null && nowMs !== undefined) ignoredClientFields.push('nowMs')
     const atMs = clock()
     const cap = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 1000) : 100
+    // `RetryableFailure` **只收最新的那一条**（相关子查询把"最新"写进 SQL，
+    // 而不是先全捞回来再在 JS 里筛）：每一次**合法**重试都会留下一条历史的
+    // `RetryableFailure`，把它们全列出来会让 `items` 随重试次数线性膨胀，
+    // 而这个清单的用途是"此刻有哪几件事需要人管"。
+    // 只按"最新"筛，恰好只留下**卡住**的那一种形状（见上面的长注释）。
     const rows = scope === null
       ? db.prepare(
-        `SELECT * FROM run_attempts WHERE state IN ('UnknownOutcome','DeadLetter')
+        `SELECT * FROM run_attempts
+          WHERE state IN ('UnknownOutcome','DeadLetter')
+             OR (state = 'RetryableFailure'
+                 AND attempt_no = (SELECT MAX(x.attempt_no) FROM run_attempts x WHERE x.task_id = run_attempts.task_id))
           ORDER BY updated_at_ms DESC LIMIT ?`).all(cap)
       : db.prepare(
-        `SELECT * FROM run_attempts WHERE state IN ('UnknownOutcome','DeadLetter') AND scope = ?
+        `SELECT * FROM run_attempts
+          WHERE scope = ?
+            AND (state IN ('UnknownOutcome','DeadLetter')
+                 OR (state = 'RetryableFailure'
+                     AND attempt_no = (SELECT MAX(x.attempt_no) FROM run_attempts x WHERE x.task_id = run_attempts.task_id)))
           ORDER BY updated_at_ms DESC LIMIT ?`).all(scope, cap)
     const items = rows.map((row) => {
       // 只看这一条任务**最新**的尝试是否就是这一条：历史里的 DeadLetter 不该继续出现在待办列表上，

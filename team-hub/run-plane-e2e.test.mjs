@@ -225,6 +225,55 @@ test('① ★★ 引擎的 RunResult 真的走完了整根线：执行侧 → wo
   })
 })
 
+test('② ★★ 返回值失败之后，任务**仍然领得走**（否则它是个"永远领不到的 todo"）', async () => {
+  // 上一批量到的缺陷（PRT-309，真 hub + 真 worker）：
+  // 执行器**返回** `{outcome:'failed'}`（`run.failed` 终态的常见形态）时，
+  // worker 走的是 `transition` 而不是 `fail`，于是这次失败**没有任何人接手**——
+  // attempt 停在 `RetryableFailure`、没有新尝试、回收扫描扫不到（它不在
+  // `IN_FLIGHT_ATTEMPT_STATES` 里）、人工待办也列不出来（`listHeld` 只收
+  // `UnknownOutcome`/`DeadLetter`），而 `task.status` 还是 `todo`。
+  //
+  //   > 最坏的不是"停在中间态"，是"停在中间态的同时任务状态是 todo"：
+  //   > 每个看板都把它算成待办的、还没被领走的任务，而派发器永远领不到它。
+  //
+  // 这一条用**真 hub + 真 createWorker**（只换执行引擎）钉住那个不变量。
+  const id = onlyTask('e2e-returned-fail')
+  await withWorker({
+    hub,
+    executor: {
+      ...inPlaceStages({ contextStage: hubContextStage() }),
+      execute: async () => ({ outcome: 'failed', detail: '引擎报了 run.failed' }),
+    },
+    dataDir: dataDirOf('data-rf'),
+    workerId: 'w-rf',
+    heartbeatIntervalMs: 50,
+  }, async (w) => {
+    const r = await w.tick()
+    assert.equal(r.outcome, 'failed')
+
+    const rows = mod.db.prepare(
+      'SELECT attempt_no, state, next_attempt_at_ms, failure_code FROM run_attempts WHERE task_id = ? ORDER BY attempt_no',
+    ).all(id)
+    assert.equal(rows[0].state, 'RetryableFailure', '首次尝试被终结为失败：这是"它失败了一次"这个事实')
+    assert.equal(rows[0].failure_code, 'runtime-unavailable', '失败原因要留痕，否则事后只能猜')
+    // ★ 判据一：必须**已经排好**下一次尝试。只有 1 条就说明这次失败没人接手。
+    assert.equal(rows.length, 2,
+      '失败之后必须有下一次尝试。只有 1 条 = 这次失败只是被记了一笔，没有任何人接手')
+    assert.equal(rows[1].state, 'Queued')
+    assert.notEqual(rows[1].next_attempt_at_ms, null,
+      '排进队列必须带退避时间——退避是**服务端**的队列闸门，不是 worker 自己 sleep')
+
+    // ★ 判据二（决定性）：把退避闸门放开之后，它必须真的**领得走**。
+    // 刚失败完直接 claim 会拿到空队列，那是退避在正常工作，不是缺陷；
+    // 所以这里只把退避时间抹掉，再问一次队列——这样"能不能领走"与"退避到没到"
+    // 就是两个分开的问题，不会因为退避恰好没到而误判成通过。
+    mod.db.prepare('UPDATE run_attempts SET next_attempt_at_ms = NULL WHERE task_id = ?').run(id)
+    const next = await hub.claim({ workerId: 'w-next' })
+    assert.notEqual(next, null, '放开通避之后必须能领到——领不到就说明这个任务被静默停住了')
+    assert.equal(next.taskId, id)
+  })
+})
+
 test('① worker 端到端：认领 → 执行 → 提交，看板投影到 in_review', async () => {
   onlyTask('e2e-2')
   const executed = []

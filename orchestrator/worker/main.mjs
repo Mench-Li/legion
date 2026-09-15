@@ -376,6 +376,66 @@ export function createWorker({
     heartbeatActive = false
   }
 
+  /**
+   * 把一次失败交给服务端结算——**worker 上报失败的唯一出口**。
+   *
+   * 存在的理由不是"少写几行"，是这一批修掉的那个缺陷：worker 有**两条**失败上报的路，
+   * 一条在执行器**抛出**异常时（`catch`），一条在执行器**返回** `{outcome:'failed'}` 时。
+   * 两条路各自写一遍 `hub.fail({...})` 时，其中一条会漂移成 `transition({to:...})`
+   * ——而后者只把这次尝试标成失败就结束了，"接下来怎么办"（还有额度就排新尝试、
+   * 额度用完就进 DeadLetter）没有任何人做。
+   *
+   * 后果不是报错，是**任务变成"状态 todo、却永远领不到"**：`RetryableFailure`
+   * 既不在回收扫描的集合里（`IN_FLIGHT_ATTEMPT_STATES`），也不在人工待办清单里
+   * （`listHeld` 只收 `UnknownOutcome`/`DeadLetter`），而看板上它是个正常的待办。
+   *
+   * 注意"引擎抛栈"与"引擎给失败终态"这两条路，**后者才是常见形态**
+   * （适配器把引擎故障分类成 `run.failed` 终态事件，不往外抛），
+   * 所以漂移掉的恰好是常见的那条。
+   *
+   * 用一个函数收口，是让"两条路走同一个出口"变成**结构上做不到别的**，
+   * 而不是靠下一批的人记得。`transition` 只用于**不带失败的**终态上报
+   * （`completed` → 验收、`outcome_unknown` → 等人工）。
+   *
+   * @returns {Promise<object|null>} 服务端的处置（含 `action`/`nextAttemptAtMs`）；上报本身失败时为 null
+   *
+   * **本函数保证不抛**：主循环（`loop()`）没有给 `tick()` 包 try/catch，
+   * 所以从这里漏出去一个异常会把整个 worker 循环带死——而"上报失败失败"恰恰是
+   * 最可能发生的那一种（epoch 已前进 = 我们被接管了），那不是异常情况，是正确结果。
+   * 两个调用方因此都可以直接 await，不必各自再包一层（各自包一层就会漂移）。
+   */
+  async function submitFailure({ claimed, failureCode, detail, runResult = null }) {
+    let reported = null
+    try {
+      // `fail` 还负责算退避并写进队列（`next_attempt_at_ms`），
+      // 因此 worker 不需要自己 sleep 一个退避时间再试——退避是**服务端**的队列闸门。
+      reported = await hub.fail({
+        attemptId: claimed.attemptId,
+        leaseEpoch: claimed.leaseEpoch,
+        workerId,
+        failureCode,
+        detail,
+        // 引擎**返回**失败终态时手里是有结果的（终态事件带着 `result`），
+        // 那就原样送上去，让 hub 侧那一行是 `source: 'engine'` 而不是 `'report-only'`
+        // ——后者答不出"引擎当时说了什么"，而状态迁移全都还是对的。
+        runResult,
+      })
+      lastError.disposition = reported?.action ?? null
+      lastError.nextAttemptAtMs = reported?.nextAttemptAtMs ?? null
+    } catch (reportError) {
+      // 上报失败本身也要可见：最可能的原因是 epoch 已经前进（我们被接管了）。
+      try {
+        lastError.reportFailed = String(reportError?.message ?? reportError)
+        logger(`[worker] 无法上报失败（${lastError.reportFailed}）：Attempt 会停在 ${trace[trace.length - 1] ?? 'Leased'}，` +
+          '由恢复扫描处置。若原因是 epoch 已前进，说明它已被别人接管——这是正确的结果')
+      } catch {
+        // 连日志都写不出去（logger 是调用方给的）。**仍然不能抛**：
+        // 这条路上的"失败"已经如实留在 lastError 里由状态文件带出去。
+      }
+    }
+    return reported
+  }
+
   /** 一轮：能认领就认领，不能认领就如实说明原因。 */
   async function tick() {
     if (executor === null || executor === undefined) {
@@ -546,10 +606,38 @@ export function createWorker({
       else counters.failed += 1
       counters.consecutiveFailures = 0
       lastError = outcome === 'completed' ? null : { stage: 'execute', message: result?.detail ?? outcome }
+      // ★★ 失败必须走 `fail`，**不能**走 `transition` —— 见 `submitFailure` 的注释。
+      //
+      // 判据是 `outcome`，不是"有没有抛异常"：执行器**返回** `{outcome:'failed'}`
+      // 与它**抛出**异常是同一件事（这次运行失败了），必须走同一个出口。
+      // 原先这里只有一条 `hub.transition({outcome, ...})`，于是返回值失败那条路
+      // （**常见**形态：适配器把引擎故障分类成 `run.failed` 终态、不往外抛）
+      // 只被记了一笔就结束了，任务静默地变成"永远领不到的 todo"。
+      if (outcome === 'failed') {
+        // 失败码用 worker 自己的词表（与 `catch` 那条路一致）。
+        // 引擎自己的 `code` **不**搬到这里来：它在 `runResult` 里原样存着
+        // （`result_json.code`），把两套词表混进同一列，事后就分不出哪一列是谁说的。
+        const reported = await submitFailure({
+          claimed,
+          failureCode: classifyStageFailure('execute'),
+          detail: result?.detail ?? 'execute-failed',
+          runResult: result?.runResult ?? null,
+        })
+        stopHeartbeat()
+        currentLease = null
+        publish('idle')
+        // 形状与 `catch` 那条路**一致**：调用方不该因为"失败是抛出来的还是返回的"
+        // 而拿到两种不同的信封。
+        return { acted: true, outcome: 'failed', error: lastError, reported: reported !== null, trace }
+      }
       // 提交终态由 hub 负责（它才知道 leaseEpoch 与事务边界）；worker 只报告结果。
       // **结果未知**时同样要提交：`outcome_unknown` 的去向是「等人工」而不是「重试」
       // （状态机与仓储都拒绝让 UnknownOutcome 回到队列），
       // 于是「外部写结果不可确认」这件事才不会被一次自动重试变成重复副作用。
+      //
+      // ⚠️ 这里**只**处理 `completed` / `outcome_unknown`。它们与 `failed` 的去向
+      // 是**相反**的：把它们也送进 `fail` 会排一次自动重试，也就是把"可能已经
+      // 付过费的外部写"再执行一遍——本仓最不能犯的方向。
       await hub.transition({
         attemptId: claimed.attemptId,
         leaseEpoch: claimed.leaseEpoch,
@@ -576,34 +664,27 @@ export function createWorker({
       // 停在那儿的话，恢复扫描只能按「有没有可能已产生外部副作用」去猜，
       // 而我们知道得更多——我们知道它失败在哪一步、有没有越过 Running。
       stopHeartbeat()
-      let reported = null
-      try {
-        const code = e?.code === 'LEASE_EPOCH_STALE' ? 'lease-epoch-stale' : (e?.failureCode ?? classifyStageFailure(e?.stage))
-        // 走 `fail`（服务端单一入口），而不是 `transition({to:'RetryableFailure'})`。
-        //
-        // 差别是**实质**的，不是风格：`transition` 只把这次尝试标成失败就结束了，
-        // 而"接下来怎么办"（还有额度就排新尝试、额度用完就进 Dead Letter）没人做。
-        // 结果是任务永远停在 `RetryableFailure`——既没有可领的队列，也不在等人工清单里
-        // （它不是 DeadLetter/UnknownOutcome），从任何界面看都只是"失败了"，
-        // 而没有任何人会去处理它。这类缺陷不会报错，只会让任务安静地停在那里。
-        //
-        // `fail` 还负责算退避并写进队列（`next_attempt_at_ms`），
-        // 因此 worker 不需要自己 sleep 一个退避时间再试——退避是**服务端**的队列闸门。
-        reported = await hub.fail({
-          attemptId: claimed.attemptId,
-          leaseEpoch: claimed.leaseEpoch,
-          workerId,
-          failureCode: code,
-          detail: lastError.message,
-        })
-        lastError.disposition = reported?.action ?? null
-        lastError.nextAttemptAtMs = reported?.nextAttemptAtMs ?? null
-      } catch (reportError) {
-        // 上报失败本身也要可见：最可能的原因是 epoch 已经前进（我们被接管了）。
-        lastError.reportFailed = String(reportError?.message ?? reportError)
-        logger(`[worker] 无法上报失败（${lastError.reportFailed}）：Attempt 会停在 ${trace[trace.length - 1] ?? 'Leased'}，` +
-          '由恢复扫描处置。若原因是 epoch 已前进，说明它已被别人接管——这是正确的结果')
-      }
+      const code = e?.code === 'LEASE_EPOCH_STALE' ? 'lease-epoch-stale' : (e?.failureCode ?? classifyStageFailure(e?.stage))
+      // 走 `fail`（服务端单一入口），而不是 `transition({to:'RetryableFailure'})`。
+      //
+      // 差别是**实质**的，不是风格：`transition` 只把这次尝试标成失败就结束了，
+      // 而"接下来怎么办"（还有额度就排新尝试、额度用完就进 Dead Letter）没人做。
+      // 结果是任务永远停在 `RetryableFailure`——既没有可领的队列，也不在等人工清单里
+      // （它不是 DeadLetter/UnknownOutcome），从任何界面看都只是"失败了"，
+      // 而没有任何人会去处理它。这类缺陷不会报错，只会让任务安静地停在那里。
+      //
+      // ⚠️ 本批修掉的正是"上面这段话只对抛错那条路成立"：返回值失败那条路
+      // （**常见**形态：适配器把引擎故障分类成 `run.failed` 终态、不往外抛栈）
+      // 原先走的是 `transition`。现在两条路共用 `submitFailure` 这一个出口，
+      // 它保证不抛，所以这里不需要再包一层 try/catch。
+      const reported = await submitFailure({
+        claimed,
+        failureCode: code,
+        detail: lastError.message,
+        // 抛错这条路**手里没有**引擎产出（根本没收到的终态事件），如实给 null：
+        // hub 侧那一行会是 `source: 'report-only'`，而不是伪造一个空结果。
+        runResult: null,
+      })
       currentLease = null
       publish('idle')
       return { acted: true, outcome: 'failed', error: lastError, reported: reported !== null, trace }

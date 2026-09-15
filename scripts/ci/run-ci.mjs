@@ -22,7 +22,8 @@
  *          （board-plugin 宿主 HTTP 契约：/api/artifact 逐条、/api/board、/api/events、hub 模式）
  *   smoke  L1 真实服务冒烟（仓库既有冒烟脚本直跑 + 白板真实进程探活 + v1 看板启停）
  *   stage  发布物暂存：releases/legion-<gitHead>-<date>/（dist 快照 + MANIFEST.json + SHA256SUMS.txt）
- *   doc    文档新鲜度校验：node scripts/ci/check-docs.mjs（README + docs/FEATURES.md 结构/链接/索引一致；可 --skip doc）
+ *   doc    文档新鲜度校验：node scripts/ci/check-docs.mjs（README + docs/FEATURES.md 结构/链接/索引一致）
+ *          + 进度表自检：node scripts/prt/spec-progress.mjs --check（spec 的进度区与台账一致；可 --skip doc）
  *
  * 通过标准：全部阶段 PASS，exit code 0；输出落 --out 目录（默认 .ci/<时间戳>/）。
  * 沙箱说明：本仓库既有边界 = pwsh/受限 shell 拦截子进程 pipe 捕获（spawn EPERM）；
@@ -3064,21 +3065,42 @@ async function stageStage() {
 async function stageDoc() {
   // 文档新鲜度校验（R-5 / S3）：调用零依赖脚本 check-docs.mjs，验证 README + docs/FEATURES.md 结构/链接/索引一致。
   const r = await exec(process.execPath, [join(ROOT, 'scripts', 'ci', 'check-docs.mjs')], { cwd: ROOT })
-  const ok = r.code === 0
+  // ★ spec 附录 A.7 的「任务进度总览」是**生成**的（`scripts/prt/spec-progress.mjs`）。
+  //
+  //   放在同一个阶段、且**默认执行**：进度数字是派生量（由台账 145 个状态标记算出），
+  //   手写或忘记同步一定会漂——而 spec 是**被当成基准**的那份文档，
+  //   它上面一个过期的百分比，比台账里一个错数字更容易被当真。
+  //
+  //     > 一份"要记得手动同步"的进度表，与一份"从来没同步过"的进度表，
+  //     > 在读者眼里是同一个东西——只不过前者在第一次忘记之后开始说谎。
+  const rp = await exec(process.execPath, [join(ROOT, 'scripts', 'prt', 'spec-progress.mjs'), '--check'], { cwd: ROOT })
+  const ok = r.code === 0 && rp.code === 0
   // RC-3 修复（T-117 实测）：原实现只保留 PASS|FAIL 过滤行，check-docs 缺失/脚本语法错等模块级错误被吞
   // （ci.log 仅剩「doc: … exit=1」+「[doc] -> FAIL」，排障只能另跑 check-docs）。失败态改为带原始输出尾部。
   const raw = (r.out + '\n' + r.err).trim()
+  const rawProgress = (rp.out + '\n' + rp.err).trim()
   let extra = ''
   if (ok) {
-    const tail = raw.split('\n').filter(l => /PASS|FAIL/.test(l)).slice(-4).join(' | ')
+    const tail = [raw, rawProgress].join('\n').split('\n').filter(l => /PASS|FAIL/.test(l)).slice(-4).join(' | ')
     if (tail) extra = '\n  输出要点：' + tail
   } else {
-    const lines = raw.split('\n').filter(Boolean)
-    const fails = lines.filter(l => /^FAIL:/.test(l))
-    const tail = (fails.length > 0 ? fails.slice(-10) : lines.slice(-12)).join('\n  ')
-    extra = '\n  失败明细：\n  ' + tail
+    // 两个脚本各自的失败形态都要留下：只报其中一个会把"另一个也坏了"变成一次误诊。
+    const part = (txt, tag) => {
+      const lines = txt.split('\n').filter(Boolean)
+      const fails = lines.filter(l => /^FAIL:/.test(l))
+      const t = (fails.length > 0 ? fails.slice(-10) : lines.slice(-12)).join('\n  ')
+      return t === '' ? '' : `【${tag}】\n  ${t}`
+    }
+    extra = '\n  失败明细：\n  ' + [
+      r.code === 0 ? '' : part(raw, 'check-docs'),
+      rp.code === 0 ? '' : part(rawProgress, 'spec-progress'),
+    ].filter(Boolean).join('\n  ')
   }
-  return { ok, detail: 'doc: 文档新鲜度校验（check-docs.mjs）exit=' + r.code + extra }
+  return {
+    ok,
+    detail: 'doc: 文档新鲜度校验（check-docs.mjs）exit=' + r.code +
+      ' / 进度表自检（spec-progress.mjs --check）exit=' + rp.code + extra,
+  }
 }
 
 // ---------- DSH 执行面边界（PRT-108 棘轮） ----------
@@ -3144,7 +3166,7 @@ const STAGES = [
   { name: 'test', label: 'L0 契约/基线测试', fn: stageTest },
   { name: 'smoke', label: 'L1 真实服务冒烟', fn: stageSmoke },
   { name: 'stage', label: '发布物暂存', fn: stageStage },
-  { name: 'doc', label: '文档新鲜度校验（check-docs.mjs）', fn: stageDoc },
+  { name: 'doc', label: '文档新鲜度校验（check-docs.mjs）+ 进度表自检（spec-progress.mjs --check）', fn: stageDoc },
 ]
 
 async function main() {

@@ -224,6 +224,22 @@ export async function waitForReadiness(expected, {
 }
 
 /**
+ * 「判据**真的量过了**、并且过了」那一个码。
+ *
+ * 导出它，是因为它不只属于本模块：`tray-wiring.mjs` 要用它回答
+ * 「workbench 这个地址算不算一次**观测**」——只有见过这个码的地址才准交给浏览器。
+ *
+ *   > 一个"由生产方写死、消费方再抄一遍"的码，
+ *   > 与一个"只有生产方写死"的码，在生产方不改它的那些天里是同一个东西——
+ *   > 只不过前者会在生产方改名时，让消费方那道闸**永远为真**：
+ *   > 「打开 Workbench」从此恒灰，而没有任何东西报错。
+ *
+ * `product/config-schema.mjs` 里也登记着这个字面量，所以改名本来就要动两处；
+ * 现在消费方改成引用，**改名的落点从三处收回到两处**。
+ */
+export const READINESS_VERIFIED_CODE = 'READINESS_VERIFIED'
+
+/**
  * 把 `waitForReadiness` 的结果转成 `ProcessDiagnostic` 形态。
  * `verified` 标记区分「声明过的判据」与「本次真实量到的判据」——
  * 清单里的判据在真正跑过一次之前都只能算声明。
@@ -232,7 +248,7 @@ export function readinessResultToDiagnostic(processKey, readiness, outcome) {
   if (outcome.ok === true) {
     return Object.freeze({
       severity: 'warn',
-      code: 'READINESS_VERIFIED',
+      code: READINESS_VERIFIED_CODE,
       process: processKey,
       message: `进程 ${processKey} 就绪：${readiness.url} 在 ${outcome.elapsedMs}ms 内满足判据`
         + `${readiness.expectJson === undefined ? '' : `（身份断言：${Object.keys(readiness.expectJson).join(', ')}）`}`,

@@ -400,6 +400,16 @@ export const SCHEMA = defineSchema({
     'TRAY_OPEN_FAILED',
     'TRAY_BUSY',
     'TRAY_NOT_SUPPORTED',
+    // `tray-wiring.mjs` 的四个具名拒绝。它们与上面那八个**不同层**：
+    // 上面管"托盘自己怎么动作"，这四个管"这根线接不接得上、
+    // 以及那次"打开浏览器"为什么不许发出去"。
+    //
+    //   *一个"接不上时报一句具体原因"的接线，与一个"接不上时安静地什么都不做"
+    //   的接线，在装得上的那台机器上是同一个东西——只不过前者的失败可诊断。*
+    'TRAY_WIRING_MISSING_LAUNCHER',
+    'TRAY_WIRING_OPEN_UNSUPPORTED',
+    'TRAY_WIRING_OPEN_BAD_URL',
+    'TRAY_WIRING_FAILED',
     'open-workbench',
     'status',
     'start',

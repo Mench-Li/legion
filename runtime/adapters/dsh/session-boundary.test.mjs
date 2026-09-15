@@ -11,9 +11,19 @@
 // ============================================================================
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 
 import { createDshRuntimeAdapter } from './index.mjs'
 import { OPTIONAL_CAPABILITIES, REQUIRED_CAPABILITIES } from '../../contracts/adapter.mjs'
+import {
+  PIN_STATUS,
+  anchorPattern,
+  auditFindingAnchors,
+  checkDshPins,
+  foldSource,
+} from './pin-drift.mjs'
 import {
   ADAPTER_PORT_METHODS,
   CONTINUABLE_ASPECTS,
@@ -373,4 +383,128 @@ test('⑤ 归属判定：三个入参只认 `live === true`（不许把"有值"�
     assert.equal(ownershipCheckScope({ live: v }).usable, false, `live=${JSON.stringify(v)} 不该被当成活着`)
   }
   assert.equal(ownershipCheckScope().usable, false)
+})
+
+// ============================================================================
+// ⑥ 出处锚点：让"写着出处"变成一件**可核对的事**（PRT-211 缺口收口）
+//
+// `IMPLEMENTATION_FINDINGS` 六条结论各自钉着文件 + "约 177-252"这种字样。
+// 而 DSH **不是冻结依赖**：升一次级行号就漂、措辞可能改，而结论会继续以原来的
+// 语气留在代码里。这组用例守的是"核对机制本身在不在、对不对"。
+//
+//   > 一条"写着出处、但没人再核对过"的结论，
+//   > 与一条"当初就是编的"结论，在下一个读者眼里是同一个东西——
+//   > 只不过前者在库里看起来更像有依据。
+//
+// ★ 这一组里**最要紧的不是"能通过"**，而是"能不能红"：
+// 一个永远说"锚点都在"的核对器，与没有核对器，读起来一模一样。
+// ============================================================================
+
+const DSH_ROOT = process.env.DSH_CHECKOUT ?? null
+const SKIP_PINS = DSH_ROOT === null || DSH_ROOT === ''
+  ? '未配置 DSH_CHECKOUT'
+  : (!existsSync(join(DSH_ROOT, 'packages')) ? `DSH_CHECKOUT 下没有 packages/：${DSH_ROOT}` : false)
+
+test('⑥ ★★ 每条结论都必须声明锚点（否则核对会**静默跳过**它）', () => {
+  // 这一条不是关于 DSH 的，是关于**机制自己的**：没有它，
+  // 以后新增一条结论而忘了写 `anchors` 时，漂移核对会跳过它——
+  // 而"跳过了"与"核对通过"在报告里长得一样。
+  const problems = auditFindingAnchors(IMPLEMENTATION_FINDINGS)
+  assert.deepEqual(problems, [],
+    '有结论没声明锚点或锚点不合格：' + JSON.stringify(problems))
+  // 而且这条判据**能红**：拿一条真的没锚点的结论喂进去。
+  const fake = [{ code: 'FAKE', source: 'x', anchors: [] }]
+  assert.equal(auditFindingAnchors(fake).length, 1, '没锚点的结论必须被报出来')
+  assert.equal(auditFindingAnchors(fake)[0].status, PIN_STATUS.NO_ANCHOR)
+  // 太短的锚点也报（一个在任何文件里都能找到的锚点等于没核）。
+  const short = [{ code: 'FAKE2', source: 'x', anchors: ['}'] }]
+  assert.equal(auditFindingAnchors(short)[0].status, PIN_STATUS.ANCHOR_TOO_SHORT)
+})
+
+test('⑥ ★★ 折行不会造成假漂移（这一条是两个真实误报换来的）', () => {
+  // DSH 的注释是折行的：
+  //     * ... independent of durable session
+  //     * lineage and remains unambiguous ...
+  // 两句之间的原文是 `\n   * `——里面有一个 **`*`**，它不是空白。
+  // 所以"把锚点的空格换成 `\s+`"这种写法**匹配不上**：本批第一版就是这么写的，
+  // 六条里两条因此误报"漂移"，而那两句其实一个字都没变。
+  //
+  //   > 一条因为探针自己写坏而报出来的"漂移"，
+  //   > 与一条真的漂移，在只看"✖ 找不到"这一行时是同一个东西——
+  //   > 只不过前者会让人去改一句本来正确的话。
+  const src = [
+    '  /**',
+    '   * Test whether a live agent was created through one exact parent agent\'s',
+    '   * scoped context. Runtime ownership is independent of durable session',
+    '   * lineage and remains unambiguous when unrelated providers reuse an id.',
+    '   * @returns true only while the exact child entry is live under that owner.',
+    '   */',
+  ].join('\n')
+  const folded = foldSource(src)
+  // 跨两行的句子，折叠后必须连成一个连续串
+  assert.ok(folded.text.includes('independent of durable session lineage and remains'),
+    '折行没有被折平：' + folded.text)
+  assert.ok(anchorPattern('Runtime ownership is independent of durable session lineage').test(folded.text),
+    '跨行锚点必须命中——否则 DSH 每次重排注释都会让门禁变红，而总是叫狼来了的门禁会被关掉')
+  // 行号要能回到原文件（只用于给人核实，不参与判定）：这句从第 3 行开始
+  const m = anchorPattern('Runtime ownership is independent of durable session lineage').exec(folded.text)
+  assert.equal(src.slice(0, folded.map[m.index]).split('\n').length, 3, '行号应指回第 3 行')
+  // 反向：**真的**变了的话，必须报找不到。
+  assert.equal(anchorPattern('Runtime ownership depends on durable session lineage').test(folded.text), false,
+    '措辞真的改了却仍然命中，那这个核对就是恒真的')
+})
+
+test('⑥ ★★ 真检出上：六条结论的锚点逐字命中（无 DSH_CHECKOUT 时逐条 skip）', (t) => {
+  if (SKIP_PINS !== false) return t.skip(`SKIP：${SKIP_PINS}`)
+  const r = checkDshPins({ checkoutRoot: DSH_ROOT })
+  assert.equal(r.observed, true)
+  assert.equal(r.checkedAnchors, IMPLEMENTATION_FINDINGS.reduce((n, f) => n + f.anchors.length, 0),
+    '核到的锚点数必须等于声明数——少了就是有结论被静默跳过')
+  const drifted = r.rows.filter((x) => x.status !== PIN_STATUS.OK)
+  assert.deepEqual(drifted, [],
+    '出处对不上了（要么 DSH 改了，要么锚点抄错了，两种都要人去核）：' + JSON.stringify(drifted))
+  assert.equal(r.ok, true)
+  // 行号是给人二次核实的提示，所以它必须是个正数，不能是 null
+  for (const row of r.rows) {
+    for (const a of row.anchors) {
+      assert.equal(typeof a.line, 'number', `${row.code} 的锚点没给出行号`)
+      assert.ok(a.line > 0)
+    }
+  }
+})
+
+test('⑥ ★★ "没观察"与"没漂移"必须是两个读数（不许把没核过说成通过）', () => {
+  // 本仓库为这件事付过学费（PRT-214 的 `..._UNOBSERVED`）：
+  // "没人给观察结果"静默变成"观察结果是空"，会报出一个**错的诊断**。
+  const none = checkDshPins({ checkoutRoot: null })
+  assert.equal(none.observed, false)
+  assert.equal(none.ok, false, '没有检出时 ok 必须是 false——"我没核过"不等于"核过了没问题"')
+  assert.equal(none.checkedAnchors, 0)
+  assert.deepEqual([...none.rows], [])
+  // 一个**不存在**的路径同样是"没观察"，不是"漂移"
+  const bogus = checkDshPins({ checkoutRoot: join(tmpdir(), 'legion-no-such-checkout-9f3a') })
+  assert.equal(bogus.observed, false)
+  assert.equal(bogus.driftCount, 0, '不存在检出时不该报"漂移"——那会把一个环境问题报成一个 DSH 问题')
+})
+
+test('⑥ ★★ 核对器**能红**：注入一个"文件变了"的 reader', () => {
+  // 这一条是这组的反空洞：上面几条量的都是"能通过"，
+  // 而一个恒真的核对器同样满足它们。
+  //
+  // 用注入的 `readFile` 造出"被引文件还在、但那句话没了"的处境。
+  const r = checkDshPins({
+    checkoutRoot: tmpdir(), // 只为让 observed 为真；真实文件由 readFile 提供
+    readFile: (p) => (p.includes('continuation') ? '这个文件里没有那句话' : 'overrideOf config.policy ?? \'ask\' effectivePolicy setApprovalPolicy'),
+  })
+  assert.equal(r.observed, true)
+  assert.equal(r.ok, false, '锚点找不到却报 ok，这个核对器就是恒真的')
+  assert.ok(r.driftCount > 0)
+  const cont = r.rows.find((x) => x.code === 'SENDER_MUST_BE_LIVE_TARGET_NEED_NOT_BE')
+  assert.equal(cont.status, PIN_STATUS.DRIFT)
+  assert.ok(cont.missing.length > 0, '要说清楚**缺的是哪一句**，否则排查只能去读源码')
+
+  // 反面：所有锚点都在时必须 ok（否则它就是个恒假的核对器，同样无用）
+  const all = IMPLEMENTATION_FINDINGS.flatMap((f) => f.anchors).join(' ')
+  const ok = checkDshPins({ checkoutRoot: tmpdir(), readFile: () => all })
+  assert.equal(ok.ok, true, '锚点都在时必须报 ok')
 })

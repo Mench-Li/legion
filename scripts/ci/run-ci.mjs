@@ -3111,19 +3111,41 @@ async function stageDoc() {
 // 而不是等四分钟的 test 阶段跑完才报。
 async function stageBoundary() {
   const r = await exec(process.execPath, [join(ROOT, 'scripts', 'ci', 'dsh-boundary.mjs'), '--check'], { cwd: ROOT })
-  const ok = r.code === 0
+  // ★ DSH 出处锚点漂移（PRT-211 缺口收口）：`IMPLEMENTATION_FINDINGS` 里六条结论
+  //   各自钉着"读哪个文件、哪一句"，而 DSH **不是冻结依赖**。这个核对让"出处"
+  //   从一句话变成一件可核对的事。
+  //
+  //   三个读数分开：0 全部命中 / 1 漂移 / **3 未观察**。
+  //   `DSH_CHECKOUT` 不可用时是 3 ⇒ 本阶段**仍然 PASS**，但 detail 里明写"未观察"，
+  //   绝不写成"通过"——"没接"与"没做"是两个不同的问题。
+  const rp = await exec(process.execPath, [join(ROOT, 'scripts', 'prt', 'dsh-pin-drift.mjs')], { cwd: ROOT })
+  const pinRaw = (rp.out + '\n' + rp.err).trim()
+  const pinUnobserved = rp.code === 3
+  const ok = r.code === 0 && (rp.code === 0 || pinUnobserved)
   const raw = (r.out + '\n' + r.err).trim()
   let extra = ''
   if (ok) {
     const line = raw.split('\n').filter(l => /dsh-boundary: PASS/.test(l)).slice(-1)[0]
     if (line) extra = '\n  ' + line.trim()
+    // 未观察时把那句"未观察"原样带进 CI 日志，别让它只存在于子进程的 stdout 里。
+    const pinLine = pinRaw.split('\n').filter(l => /dsh-pin-drift:/.test(l)).slice(-1)[0]
+    if (pinLine) extra += '\n  ' + pinLine.trim()
+    if (pinUnobserved) extra += '\n  ⚠️ 出处锚点**这一批没有核对**（不是"核对通过"）：未找到 DSH 检出'
   } else {
     const lines = raw.split('\n').filter(Boolean)
     const fails = lines.filter(l => /^\s*FAIL \[/.test(l))
     const tail = (fails.length > 0 ? fails.slice(-10) : lines.slice(-12)).join('\n  ')
     extra = '\n  违规明细（优先移入 runtime/adapters/dsh/；确属迁移期债务才显式下移基线）：\n  ' + tail
+    if (rp.code === 1) {
+      const pinFails = pinRaw.split('\n').filter(l => /^\s*✖/.test(l)).slice(-8).join('\n  ')
+      extra += '\n  \n  出处锚点对不上（PRT-211）：\n  ' + pinFails
+    }
   }
-  return { ok, detail: 'boundary: DSH 执行面边界棘轮（dsh-boundary.mjs）exit=' + r.code + extra }
+  return {
+    ok,
+    detail: 'boundary: DSH 执行面边界棘轮（dsh-boundary.mjs）exit=' + r.code +
+      ' / DSH 出处锚点漂移（dsh-pin-drift.mjs）exit=' + rp.code + extra,
+  }
 }
 
 // ---------- 阶段：CI 脚本语法 ----------
@@ -3160,7 +3182,7 @@ const STAGES = [
   //   排在后面就等于"先跑了一堆可能根本没被解析成功的脚本"。
   { name: 'syntax', label: 'CI 脚本语法（ci-syntax.mjs）', fn: stageSyntax },
   { name: 'env', label: '环境自检', fn: stageEnv },
-  { name: 'boundary', label: 'DSH 执行面边界（PRT-108 棘轮）', fn: stageBoundary },
+  { name: 'boundary', label: 'DSH 执行面边界（PRT-108 棘轮）+ DSH 出处锚点漂移（PRT-211）', fn: stageBoundary },
   { name: 'deps', label: '依赖就绪', fn: stageDeps },
   { name: 'build', label: '构建（whiteboard + workbench dist）', fn: stageBuild },
   { name: 'test', label: 'L0 契约/基线测试', fn: stageTest },

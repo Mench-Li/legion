@@ -1289,11 +1289,20 @@ Legion 商业化不以脱离 DSH 为前置条件。首版采用“Legion 产品�
 
 | 任务 | 产物 | CI 套件（用例数） |
 | --- | --- | --- |
-| `PRT-201`~`209` | `runtime/adapters/dsh/`（`port`/`errors`/`redact`/`schema`/`usage`/`events`/`probe` + `index.mjs`） | `dsh-adapter`（85） |
+| `PRT-201`~`209` | `runtime/adapters/dsh/`（`port`/`errors`/`redact`/`schema`/`usage`/`events`/`probe` + `index.mjs`） | `dsh-adapter`（90） |
 | `PRT-210` | `runtime/adapters/dsh/parity.mjs` —— 旧调用语义**复刻**、漂移检测、四类差异归因 | `dsh-parity`（36） |
-| `PRT-211` | `runtime/adapters/dsh/session-boundary.mjs` —— continuable session 接口面与归属、证据分级 | `dsh-session-boundary`（20） |
-| `PRT-212`~`214` | `runtime/dsh-composition/`（`patch-layer`/`enforcement`/`render` + 生成物 `legion-host.patch.yml`） | `dsh-enforcement`（34） |
-| `PRT-213`~`215` | `runtime/dsh-composition/selfcheck.mjs` —— 沙箱实际管制探测与启动自检 | `dsh-composition`（28） |
+| `PRT-211` | `runtime/adapters/dsh/session-boundary.mjs` —— continuable session 接口面与归属、证据分级；`pin-drift.mjs` —— **DSH 出处锚点漂移核对**（进 `boundary` 阶段） | `dsh-session-boundary`（33） |
+| `PRT-212`~`214` | `runtime/dsh-composition/`（`patch-layer`/`enforcement`/`render` + 生成物 `legion-host.patch.yml`） | `dsh-enforcement`（37） |
+| `PRT-213`~`215` | `runtime/dsh-composition/selfcheck.mjs` —— 沙箱实际管制探测与启动自检 | `dsh-composition`（34） |
+
+> ⚠️ **上表右列是人工维护的读数，会随每个批次变化。** 2026-09-15 复核时发现 5 行里**有 4 行已经过期**
+> （`dsh-adapter` 85→90、`dsh-session-boundary` 20→28、`dsh-enforcement` 34→37、`dsh-composition` 28→34），
+> 原因是这些数字**没有任何东西在核对**。*一个没人核对的读数，与一个当初就写错的读数，
+> 在下一个读者眼里是同一个东西——只不过前者看起来像是量过的。*
+> 本次已按实测值更正，但**同一类漂移还会再发生**：要一个不会漂的进度读数，
+> 看 **A.7**（由台账生成、`spec-progress.mjs --check` 门禁守着），逐条现状见
+> `docs/superpowers/prt/PRT-PROGRESS.md`；套件用例数的**权威来源**是每次 CI 的
+> `run-ci.mjs` 输出（`.ci/<批次>/ci.log`，每行 `tests=N pass=N fail=N`）。
 
 **对设计有实际影响的三条实测结论**（与 A.2 同性质，故不并入 A.2 以保持其"阶段 0～1"的时点含义）：
 

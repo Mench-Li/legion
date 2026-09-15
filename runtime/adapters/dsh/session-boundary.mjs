@@ -68,6 +68,26 @@ export const ASPECT_EVIDENCE = Object.freeze({
  *   > 在读者无法核实这一点上是同一个东西——只不过前者可能是对的。
  *
  * ⚠️ 每一条都是**读实现**读出来的，**不是**跑出来的。`behaviorVerified` 仍为 false。
+ *
+ * ## `anchors`：让"出处"从一句话变成**一件可核对的事**
+ *
+ * `source` + `lines` 是给人看的（`lines` 是"约 177-252"这种字样）。问题是：
+ * **DSH 不是冻结依赖**，而这两项**没有任何东西在核对**。升级一次 DSH，行号就漂了，
+ * 措辞也可能改，而这条结论会**继续以原来的语气留在代码里**。
+ *
+ *   > 一条"写着出处、但没人再核对过"的结论，
+ *   > 与一条"当初就是编的"结论，在下一个读者眼里是同一个东西——
+ *   > 只不过前者在库里看起来更像有依据。
+ *
+ * 所以每条结论多一个 `anchors`：一段**必须在被引文件里逐字（忽略换行与缩进）出现**
+ * 的原文。核对由 `pin-drift.mjs` 做，能跑起来的地方就真的跑
+ * （`scripts/prt/dsh-pin-drift.mjs`，`run-ci` 的 `boundary` 阶段）。
+ *
+ * ★ 锚点取**代码/注释原文**而不是行号，理由是一次实测：本批第一版核对器按
+ * "单行包含"匹配，六条里有两条报"找不到"——而那两句只是**被折行**了
+ * （`agent/src/index.ts` 的注释在 573/574 两行，`continuation.ts` 的在 194/195 两行）。
+ * 换成行号核对，每一次 DSH 顺手重排注释都会让它变红，于是一个**总是叫狼来了**的门禁
+ * 会被关掉——那与没有门禁是同一个结果。
  */
 export const IMPLEMENTATION_FINDINGS = Object.freeze([
   Object.freeze({
@@ -75,6 +95,11 @@ export const IMPLEMENTATION_FINDINGS = Object.freeze([
     code: 'CHILD_POLICY_NOT_INHERITED',
     source: 'packages/interaction/user-approval/src/index.ts',
     lines: 'effectivePolicy / overrideOf / setPolicy（约 177-252）',
+    anchors: Object.freeze([
+      'overrideOf',
+      "config.policy ?? 'ask'",
+      'effectivePolicy',
+    ]),
     claim: '子会话的策略**不**从父会话继承。',
     evidence: '`overrideOf(session)` 从**这个 session 自己的**事件日志里'
       + '倒着找最后一条 `approval/policy`；没有就返回 `undefined`，'
@@ -89,6 +114,10 @@ export const IMPLEMENTATION_FINDINGS = Object.freeze([
     code: 'SET_POLICY_MAY_WRITE_NOTHING',
     source: 'packages/interaction/user-approval/src/index.ts',
     lines: 'setPolicy（约 177-188）',
+    anchors: Object.freeze([
+      'setApprovalPolicy',
+      'if (previous === policy) return',
+    ]),
     claim: '把策略设成**当前生效值**时，`setPolicy` 一个事件都不写。',
     evidence: '`setPolicy` 第一句是 `const previous = this.effectivePolicy(...)`，'
       + '紧接 `if (previous === policy) return`——早于 `setApprovalPolicy`。'
@@ -104,6 +133,10 @@ export const IMPLEMENTATION_FINDINGS = Object.freeze([
     code: 'POLICY_CHANGE_ALWAYS_SAYS_USER',
     source: 'packages/interaction/user-approval/src/index.ts',
     lines: 'setPolicy 注入的那条 user message（约 181-187）',
+    anchors: Object.freeze([
+      '(changed by the user).',
+      "plugin: 'user-approval'",
+    ]),
     claim: '策略变更注入子会话的那句话，永远写着 changed by the user。',
     evidence: '文本是 `` `The approval policy changed from "${previous}" to "${policy}"'
       + ' (changed by the user).` ``，而 `source` 标的是 `{ kind: \'plugin\', plugin: \'user-approval\' }`。'
@@ -118,6 +151,11 @@ export const IMPLEMENTATION_FINDINGS = Object.freeze([
     code: 'OWNERSHIP_IS_LIVE_ONLY',
     source: 'packages/core/agent/src/index.ts',
     lines: 'isOwnedBy（约 571-581）',
+    anchors: Object.freeze([
+      'Runtime ownership is independent of durable session lineage',
+      'only while the exact child entry is live under that owner',
+      'return this.store.get(id)?.owner === owner',
+    ]),
     claim: '`isOwnedBy` 是**活体注册表**判定，DSH 自己写明它与持久谱系无关。',
     evidence: '实现是 `return this.store.get(id)?.owner === owner`，`store` 是活体注册表；'
       + 'DSH 的注释逐字写着 "Runtime ownership is independent of durable session lineage'
@@ -133,6 +171,10 @@ export const IMPLEMENTATION_FINDINGS = Object.freeze([
     code: 'OWNERSHIP_BY_REFERENCE_NOT_BY_ID',
     source: 'packages/core/agent/src/index.ts',
     lines: 'isOwnedBy 的注释（约 571-578）',
+    anchors: Object.freeze([
+      'unrelated providers reuse an id',
+      'Test whether a live agent was created through one exact parent agent',
+    ]),
     claim: '按 owner **引用**比，而不是按 id 查谱系，是刻意的取舍。',
     evidence: '注释说明按引用比是为了在 "unrelated providers reuse an id" 时仍然明确。',
     consequence: '**不要**自己另发明一个"按谱系查"的归属判定——'
@@ -144,6 +186,15 @@ export const IMPLEMENTATION_FINDINGS = Object.freeze([
     code: 'SENDER_MUST_BE_LIVE_TARGET_NEED_NOT_BE',
     source: 'packages/subagent/subagent/src/continuation.ts',
     lines: 'sendMessage（约 192-232）+ deliverToChild 的注释（约 193-195）',
+    anchors: Object.freeze([
+      'A missing direct child cold-resumes through the ordinary continuation lifecycle.',
+      'exact live Agent authorizing and originating the message',
+      // ★ 第三个锚点原本是 `'UNAUTHORIZED'`，被 `scan.mjs` 判成"疑似 env 字面量"
+      //   （长全大写、无下划线）。那条门禁是对的：**锚点是源码里的字符串字面量**，
+      //   而一个裸的大写标识符在别的文件里也到处都是——它本来就是个弱锚点。
+      //   换成这句**比的是对象引用**的判断，判别力强得多，也不再与配置面门禁打架。
+      'agents.get(sender.id) !== sender',
+    ]),
     claim: '`sendMessage` 要求**发送方**是活着的精确 agent；而**目标**可以不在。'
       + '目标缺失时会**从持久化冷恢复**（cold-resume），不是失败。',
     // ⚠️ 这里**不逐字**引用那句判断里的宿主容器属性（写成 `<宿主>.agents`）。

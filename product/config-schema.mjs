@@ -514,6 +514,19 @@ export const SCHEMA = defineSchema({
     // 一个"读不到结论所以什么都没报"的体检，与一个"结论是一切正常"的体检，
     // 在退出码上是同一个东西——而前者会让一个已经坏掉的部署安静地通过门禁。
     'DOCTOR_CLEAN', 'DOCTOR_ACTIONABLE', 'DOCTOR_NO_PLAN', 'DOCTOR_NO_DIAGNOSIS',
+    // PRT-708 单实例锁（`product/launcher/single-instance.mjs`）的**具名结论**。
+    // 它们会被打印、也会被调用方按码分支，所以与"读取点"区分开。
+    // 六种处境各自不同，尤其这三条不能混：
+    //   · `ACQUIRED`    拿到了；
+    //   · `RECLAIMED`   接手了一个**崩溃留下**的锁（持有者确定死了）；
+    //   · `HELD`        有一个**活着的**实例；
+    //   · `HOLDER_UNKNOWN` **判断不了**死活 —— 这一条与 `HELD` 分开是刻意的：
+    //     两者的处置不同（前者要用户确认后删文件，后者只需去用那个实例），
+    //     而把它们混成一个码会把"我判断不了"说成"确实有别人在跑"。
+    // `EEXIST` 是 `open(..., 'wx')` 的返回码，这把锁的原子性就来自它。
+    'EEXIST', 'INSTANCE_LOCK_ACQUIRED', 'INSTANCE_LOCK_STALE_RECLAIMED',
+    'INSTANCE_ALREADY_RUNNING', 'INSTANCE_LOCK_HOLDER_UNKNOWN',
+    'INSTANCE_LOCK_NOT_OURS', 'INSTANCE_LOCK_RELEASED',
     'PROCESS_CIRCUIT_OPEN', 'PROCESS_EXCLUDED_BY_SCOPE', 'PROCESS_EXITED_BEFORE_READY', 'PROCESS_FAILED',
     'READINESS_FAILED', 'READINESS_IDENTITY_MISMATCH', 'READINESS_TIMEOUT', 'READINESS_VERIFIED',
     'SPAWN_REFUSED',

@@ -3500,6 +3500,92 @@
 
 ---
 
+## 2026-09-15　更正：空的下限不是缺陷，**没人填它**才是
+
+### 一、我上一批把这件事说反了一半
+
+上一批我写："今天这份补丁里，下限一条规则都不拦"，并暗示修法是
+"产品该给出一个默认禁止集"。**前半句是对的，后半句是错的。**
+把 spec §6.8 读完之后（`line 432-463`），正确的读法是：
+
+```
+line 437-440   Legion/team-hub 控制面
+                 EmployeeManifest + TeamPlan + UserPolicy + TaskContext
+                 → 生成 Run 权限档位、静态 hard floor 和动态策略
+                 → DshRuntimeAdapter 安装到目标 Agent/Session
+line 500       静态 hard floor、策略 listener、approval answerer 与 preset 表
+               必须位于 host 组合补丁层，**不得只放在 agent preset**
+```
+
+**机制**（那一行）必须在 host 组合补丁层——它确实在。
+**规则值**是**按 Run 生成的数据**，由 `DshRuntimeAdapter` 装进目标 Agent/Session。
+
+所以 `legion-host.patch.yml` 里那一行不带 `config`，**按 spec 是对的**：
+它是**接缝**，不是缺陷。往那儿硬写一个静态默认禁止集，
+恰好是把"按 Run 生成的策略"塞进"进程全局的层"——正是 §6.8 在防的那个分层错误。
+
+> 一个"空的下限行"到底是缺陷还是设计，取决于**谁负责填它**。
+> 如果 spec 说由 `DshRuntimeAdapter` 在 Run 开始时填，那它就是接缝；
+> 而"接缝上没有东西"与"接缝不存在"，是两个不同的读数、两种不同的修法。
+
+### 二、接缝确实存在，而且做得很薄
+
+`runtime/dsh-composition/plugins/hard-floor.mjs:98-99`：
+
+```js
+apply(ctx, config) {
+  const effectiveFloor = config?.floor ?? floor    // floor 默认 = DEFAULT_HARD_FLOOR
+```
+
+也就是说补丁行**可以**给 `config.floor`，插件会用它。它甚至会把结果记一行日志
+（`:135-139`：`已挂上静态下限：N 个禁止工具、M 个禁止路径前缀`）。
+
+**而 `run-ci.mjs` 的登记与 `patch-loadable` 套件都只验证"这一行装得上"。**
+装得上、且规则集为空——于是：
+
+> 一个"挂上去了、规则集为空"的下限，
+> 与一个"真的在拦"的下限，在组合树上**长得一模一样**——
+> `ROW_NOT_ACTIVATED` 不报它，`patch-loadable` 不报它，
+> 只有"哨兵文件必须不存在"那种**带外读数**的用例才报它。
+
+这正是上一批那套真进程用例的价值所在，也是为什么它必须存在。
+
+### 三、★ 顺带读出一件更值得记的事：仓库里有**两份**硬下限，而它们不是同一个机制
+
+| | `team-hub/permission-engine.mjs` | `runtime/dsh-composition/` |
+| --- | --- | --- |
+| 判据 | `isHardFloor(operation)`（`:481`，在 `:488` 拒绝） | `createHardFloorGuard(floor)` |
+| 按什么拒 | **能力**（`file:delete` / `repo:push` / `credential:write`） | **工具名** + **路径前缀** |
+| 规则从哪来 | 策略引擎内部（私有函数，**没有第二个调用方**） | `config.floor`，默认**空** |
+| 在哪生效 | F-02 纯策略（`tools/pre-execute` 那一侧） | `ctx.tools.guard()` 最终复核 |
+| spec 要求 | `line 456`：`tools/pre-execute` 提前拒绝 **+** `ctx.tools.guard()` 最终复核 | 同左 |
+
+`isHardFloor` 是**私有函数**（`git grep` 只有一个调用点，就在它下面），
+所以它**不可能**被装成一个 DSH guard。两份名单目前只有
+"动作名集合相同"这一层一致性，由用例断言，**没有代码级共享**
+（PRT-601 的文档自己就写着这句）。
+
+> 一份"只有同名集合一致"的两份名单，
+> 与一份"真的共用同一个来源"的名单，在名字都对得上的那些日子里是同一个东西——
+> 只不过前者在有人只改了一边的第二天，会让 spec §6.8 的两道闸里
+> **安静地少掉一道**。
+
+### 四、因此 PRT-214 剩下的缺口被改写为
+
+**不是**"产品没给出默认禁止集"，而是：
+
+1. **没人把按 Run 生成的 floor 交到 Runtime 进程**——
+   `DshRuntimeAdapter`（`runtime/adapters/dsh/index.mjs:144`）
+   的 `DEFAULT_ADAPTER_OPTIONS`（`:129`）里有 `runtimePolicy: undefined`，
+   **没有 floor 这一项**；`git grep` 在整个 `runtime/adapters/`、
+   `product/`、`team-hub/` 里找不到任何一处产出 `denyTools`/`denyPathPrefixes`。
+2. **两侧的硬下限名单没有共享来源**（`isHardFloor` 私有）。
+
+这两条都不是"补一个静态常量"能解决的。**故本行仍 🟡**，
+且下一批的范围比上一批写下的更窄、更准。
+
+---
+
 ## 2026-09-15　Legion 的模型引用名，DSH 一个键空间都收不下
 
 ### 一、这不是"没人调用"，是**名字对不上**

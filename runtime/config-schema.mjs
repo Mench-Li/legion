@@ -280,7 +280,11 @@ export const NON_ENV_LITERALS = Object.freeze([
   'RUNTIME_HOST_REGISTRAR_NO_CAN_READ_SOURCE', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
   'RUNTIME_HOST_REGISTRAR_NO_CONTEXT', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
   'RUNTIME_HOST_REGISTRAR_NO_SUBAGENTS_PORT', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
-  // ── runtime/dsh-composition/plugins/runtime-host-row.mjs（11 条）
+  // ── runtime/dsh-composition/plugins/runtime-host-row.mjs（12 条）
+  // `SELF_CHECK_INCOMPATIBLE`：spec `line 854` 要的「按 `incompatible` 处理并禁止自动执行」。
+  // 与 `BIND_REFUSED` 分开：那一条是"我们自己的接线错了"（当场响），
+  // 这一条是"强制面没生效"（进程活着、端口不注册、状态是 incompatible）。
+  'RUNTIME_HOST_ROW_SELF_CHECK_INCOMPATIBLE', // runtime/dsh-composition/plugins/runtime-host-row.mjs
   'RUNTIME_HOST_ROW_BIND_REFUSED', // runtime/dsh-composition/plugins/runtime-host-row.mjs
   'RUNTIME_HOST_ROW_ENFORCEMENT_ROOT_REFUSED', // runtime/dsh-composition/plugins/runtime-host-row.mjs
   'RUNTIME_HOST_ROW_INPUTS_FACTORY_THREW', // runtime/dsh-composition/plugins/runtime-host-row.mjs

@@ -334,6 +334,77 @@ const SCAFFOLD_PATCH_SRC = `- insert:
       name: "./prt253ri-scaffold.mjs"
 `
 
+/**
+ * R / F 的读数脚手架：把**发布出来的**那份拒绝读出来。
+ *
+ * 为什么必须挂脚手架、不能只 grep stderr：本批把自检不兼容从 `throw`
+ * 改成了 `provide`，于是拒绝从"进程退出时的 stderr"搬到了"一个服务值上"。
+ * 而 `ctx.logger` 虽然**在真进程里确实存在**（已实测：`logger=true`、
+ * `warn` 是函数），它的输出**不落到子进程的 stderr**（一次性 profile 下没有
+ * 终端 sink）——所以"日志里有没有"在 stderr 上是读不到的。
+ *
+ *   > 一个"记进了日志但日志不在你手上"的读数，
+ *   > 与一个"根本没记"的读数，在 stderr 上完全同形。
+ *
+ * 于是这里读**权威来源**：服务值本身。它同时证明了三件事——
+ * 拒绝在、拒绝是具名的、以及**端口没有绑上**。
+ */
+const INCOMPAT_READ_SRC = `import { RUNTIME_HOST_BINDING_SERVICE } from ${JSON.stringify(fileUrl(RUNTIME_HOST_ROW_ABS))}
+import { verdictFromRuntimeHostBinding } from ${JSON.stringify(fileUrl(join(HERE, 'runtime-contract-server-row.mjs')))}
+import { dshRuntimeBound, productionExecutorProvider } from ${JSON.stringify(fileUrl(EXECUTOR_BINDING_ABS))}
+
+const note = (line) => process.stderr.write(line + '\\n')
+
+export default {
+  name: 'prt253ri-incompat-read',
+  inject: [],
+  apply(ctx) {
+    note('INCOMPAT-READ-APPLY-RAN')
+    setTimeout(async () => {
+      try {
+        const svc = ctx.get(RUNTIME_HOST_BINDING_SERVICE)
+        const present = svc !== undefined && svc !== null
+        const read = (k) => String(present ? svc[k] : 'no-service')
+        note('INCOMPATPRESENT ' + String(present))
+        note('INCOMPATOK ' + read('ok'))
+        note('INCOMPATCODE ' + read('code'))
+        note('INCOMPATINNER ' + read('innerCode'))
+        note('INCOMPATSTATE ' + read('state'))
+        note('INCOMPATFORBID ' + read('autoExecutionForbidden'))
+        note('INCOMPATREPAIR ' + String(present && svc.repair !== null && svc.repair !== undefined))
+        // ★ 归因逐条带出来（F 靠这几条断言"未确认的能力"仍然可见）
+        note('INCOMPATCHECKS ' + JSON.stringify(present ? svc.checks : null))
+        note('INCOMPATREASONS ' + JSON.stringify(present ? svc.reasons : null))
+        note('INCOMPATMESSAGE ' + String(present ? svc.message : 'no-service'))
+        // ★ 安全方向：端口**没有**被注册
+        note('INCOMPATBOUND ' + String(dshRuntimeBound()))
+        // ★ 跨进程那一端：契约出口翻出来的结论
+        const v = verdictFromRuntimeHostBinding(present ? svc : null)
+        note('INCOMPATVERDICTNULL ' + String(v === null))
+        note('INCOMPATVERDICTFORBID ' + String(v === null ? 'null' : v.autoExecutionForbidden))
+        note('INCOMPATVERDICTSTATE ' + String(v === null ? 'null' : v.state))
+        // ★ 真正要执行的那一侧照样拒绝
+        const provider = await productionExecutorProvider({
+          post: async () => ({ status: 200, body: {} }),
+          get: async () => ({ status: 200, body: {} }),
+        })
+        note('INCOMPATPROVIDEROK ' + String(provider.ok))
+        note('INCOMPATPROVIDERCODE ' + String(provider.code))
+      } catch (error) {
+        note('INCOMPAT-READ-THREW ' + String(error && error.message ? error.message : error))
+      }
+      note('INCOMPAT-READ-EXIT-0')
+      process.exit(0)
+    }, 3000)
+  },
+}
+`
+
+const INCOMPAT_READ_PATCH_SRC = `- insert:
+    - id: "prt253ri-incompat-read"
+      name: "./prt253ri-incompat-read.mjs"
+`
+
 const REAL_PATCH = join(COMPOSITION, 'legion-host.patch.yml')
 
 const SCRATCH_PATH = {}
@@ -357,6 +428,8 @@ put('wrapper', 'prt253ri-wrapper.mjs', WRAPPER_SRC)
 put('wrapperPatch', 'prt253ri-wrapper.patch.yml', WRAPPER_PATCH_SRC)
 put('scaffold', 'prt253ri-scaffold.mjs', SCAFFOLD_SRC)
 put('scaffoldPatch', 'prt253ri-scaffold.patch.yml', SCAFFOLD_PATCH_SRC)
+put('incompatRead', 'prt253ri-incompat-read.mjs', INCOMPAT_READ_SRC)
+put('incompatReadPatch', 'prt253ri-incompat-read.patch.yml', INCOMPAT_READ_PATCH_SRC)
 
 assert.ok(existsSync(REAL_PATCH), `真补丁层不在：${REAL_PATCH}`)
 for (const p of [REGISTRAR_ABS, RUNTIME_HOST_ROW_ABS, EXECUTOR_BINDING_ABS,
@@ -427,52 +500,84 @@ describe('PRT-253 续批二：生产注册方在**真 DSH 进程**里的读数',
     t.diagnostic(`N: exit=${r.code} ${READINGS.n.code}`)
   })
 
-  guarded('R. ★★★ 换成生产注册方当那一行的模块 → 工厂**成功**，拒绝移到下一站（自检）', (t) => {
+  guarded('R. ★★★ 换成生产注册方当那一行的模块 → 工厂**成功**；自检不兼容时**不抛**、进程活着、端口没绑上', (t) => {
     const r = runDsh({
       tag: 'r',
-      patches: [...basePatches(SCRATCH_PATH.servicesTruePatch), SCRATCH_PATH.registrarRowPatch],
+      patches: [...basePatches(SCRATCH_PATH.servicesTruePatch), SCRATCH_PATH.registrarRowPatch, SCRATCH_PATH.incompatReadPatch],
     })
     assert.equal(r.spawnError, null)
-    assert.equal(r.code, 1, `期望"未确认的能力"拦下启动：\n${r.stderr}`)
+    // ★★★ 本批翻过来的那个取舍：**exit 0**。spec `line 854` 要的是
+    //   「按 `incompatible` 处理并禁止自动执行」，§6.3 表格把 `incompatible`
+    //   的行为定成「禁止自动执行，**提示修复或回滚**」——崩掉的进程提示不了。
+    assert.equal(r.code, 0, `期望"进程活着并明说自己不能自动执行"：\n${r.stderr}`)
+    assert.match(r.stderr, /^INCOMPAT-READ-APPLY-RAN$/m, r.stderr)
+    assert.equal(r.stderr.includes('INCOMPAT-READ-THREW'), false, `读数脚手架抛了：\n${r.stderr}`)
     // ① 注册**真的**发生在模块求值期：否则这里读到的会是 N 那条 NO_INPUTS_FACTORY。
     assert.equal(r.stderr.includes(RUNTIME_HOST_ROW_CODES.NO_INPUTS_FACTORY), false,
       `注册方在场却报"没有人注册工厂"——注册没发生在模块求值期：\n${r.stderr}`)
-    // ② ★★ 本批改掉的那条读数：工厂**不再**抛。这条断言是本套件里"绑定变了"的落点。
+    // ② ★★ 本批改掉的那条读数：工厂**不再**抛。
     assert.equal(r.stderr.includes(RUNTIME_HOST_ROW_CODES.INPUTS_FACTORY_THREW), false,
       `工厂仍然抛了——canRead 缺席这条要求没有被拿掉：\n${r.stderr}`)
     assert.equal(r.stderr.includes(RUNTIME_HOST_REGISTRAR_CODES.NO_CAN_READ_SOURCE), false,
       `仍然读到"没有 canRead 来源"的具名码：\n${r.stderr}`)
-    // ③ 拒绝移到**下一站**：启动自检（三项未确认的能力），且本行把内层码带出来。
-    assert.ok(r.stderr.includes(RUNTIME_HOST_ROW_CODES.BIND_REFUSED),
-      `没有读到 ${RUNTIME_HOST_ROW_CODES.BIND_REFUSED}：\n${r.stderr}`)
-    assert.ok(r.stderr.includes(BOOTSTRAP_CODES.SELF_CHECK_INCOMPATIBLE),
-      `没有读到 ${BOOTSTRAP_CODES.SELF_CHECK_INCOMPATIBLE}：\n${r.stderr}`)
-    // ④ 默认导出确实是**真那个**插件对象（否则这一行根本不会走到自检那一步）。
-    assert.match(r.stderr, /failed to apply loader entry legion-runtime-host/, r.stderr)
-    READINGS.r = { code: RUNTIME_HOST_ROW_CODES.BIND_REFUSED, inner: BOOTSTRAP_CODES.SELF_CHECK_INCOMPATIBLE, exit: r.code }
-    t.diagnostic(`R: exit=${r.code} ${READINGS.r.code}(${READINGS.r.inner})`)
+    // ③ ★★★ 与**旧版**R 不同形：拒绝不再以 `BIND_REFUSED`（= 整树加载失败）出现，
+    //    也不再有"装载这一行失败"。这两条是"开关真的翻了"的判据——
+    //    少了它们，下面那些断言在旧实现上也会绿。
+    assert.equal(r.stderr.includes(RUNTIME_HOST_ROW_CODES.BIND_REFUSED), false,
+      `仍然读到 ${RUNTIME_HOST_ROW_CODES.BIND_REFUSED}——那一行还在抛：\n${r.stderr}`)
+    assert.equal(r.stderr.includes('failed to apply loader entry legion-runtime-host'), false,
+      `仍然读到"装载这一行失败"——整棵树还是被拖垮了：\n${r.stderr}`)
+    // ④ ★★★ 拒绝**仍然可见**——只是搬到了服务值上（读权威来源，不 grep 日志）
+    assert.equal(reading(r.stderr, 'INCOMPATPRESENT'), 'true',
+      `自检不兼容时什么都没发布：\n${r.stderr}`)
+    assert.equal(reading(r.stderr, 'INCOMPATOK'), 'false')
+    assert.equal(reading(r.stderr, 'INCOMPATCODE'), RUNTIME_HOST_ROW_CODES.SELF_CHECK_INCOMPATIBLE)
+    assert.equal(reading(r.stderr, 'INCOMPATINNER'), BOOTSTRAP_CODES.SELF_CHECK_INCOMPATIBLE)
+    assert.equal(reading(r.stderr, 'INCOMPATSTATE'), 'incompatible')
+    assert.equal(reading(r.stderr, 'INCOMPATFORBID'), 'true')
+    assert.equal(reading(r.stderr, 'INCOMPATREPAIR'), 'true',
+      '只报"不兼容"而不给修复入口 = 把 spec 要的"提示修复或回滚"又丢了一次')
+    // ⑤ ★★★ 安全方向**一点没放松**：端口没有被注册。
+    //    这一条与"进程活着"**必须一起读**——只读后者会得出"降级了"。
+    assert.equal(reading(r.stderr, 'INCOMPATBOUND'), 'false',
+      `宿主端口被注册了——那才是真的放松：\n${r.stderr}`)
+    // ⑥ 跨进程那一端 + 真正要执行的那一侧
+    assert.equal(reading(r.stderr, 'INCOMPATVERDICTNULL'), 'false',
+      '契约出口把"服务在说强制面不行"读成了"服务不在"——上层只会看到"够不着"')
+    assert.equal(reading(r.stderr, 'INCOMPATVERDICTFORBID'), 'true')
+    assert.equal(reading(r.stderr, 'INCOMPATPROVIDERCODE'), 'EXECUTOR_HOST_PORT_REQUIRED')
+    READINGS.r = { code: RUNTIME_HOST_ROW_CODES.SELF_CHECK_INCOMPATIBLE, inner: BOOTSTRAP_CODES.SELF_CHECK_INCOMPATIBLE, exit: r.code }
+    t.diagnostic(`R: exit=${r.code} ${READINGS.r.code}(${READINGS.r.inner}) bound=${reading(r.stderr, 'INCOMPATBOUND')} state=${reading(r.stderr, 'INCOMPATSTATE')}`)
   })
 
   guarded('F. 注册方 + 注入的 canRead（替身）→ 未确认的能力在**启动自检**那一步后果可见', (t) => {
     const r = runDsh({
       tag: 'f',
-      patches: [...basePatches(SCRATCH_PATH.servicesTruePatch), SCRATCH_PATH.wrapperPatch],
+      patches: [...basePatches(SCRATCH_PATH.servicesTruePatch), SCRATCH_PATH.wrapperPatch, SCRATCH_PATH.incompatReadPatch],
     })
     assert.equal(r.spawnError, null)
-    assert.equal(r.code, 1, `期望未确认的能力拦下绑定：\n${r.stderr}`)
+    // 同上：自检不兼容不再是启动失败，而是"活着 + 明说不能自动执行"。
+    assert.equal(r.code, 0, `期望"未确认的能力"只禁止自动执行、不拦启动：\n${r.stderr}`)
     assert.match(r.stderr, /^REGISTRAR-WRAPPER-EVALUATED$/m, r.stderr)
-    // ★ 链条逐段可读：本行拒绝 → 内层是启动自检不兼容。
-    assert.ok(r.stderr.includes(RUNTIME_HOST_ROW_CODES.BIND_REFUSED),
-      `没有读到 ${RUNTIME_HOST_ROW_CODES.BIND_REFUSED}：\n${r.stderr}`)
-    assert.ok(r.stderr.includes(BOOTSTRAP_CODES.SELF_CHECK_INCOMPATIBLE),
-      `没有读到 ${BOOTSTRAP_CODES.SELF_CHECK_INCOMPATIBLE}：\n${r.stderr}`)
-    // ★ 未确认的那几项**逐个**出现在理由里（structured-result 由桩注册表确认，不在其中）。
+    // ★ 链条逐段可读：本行的具名码 → 内层是启动自检不兼容。
+    assert.equal(reading(r.stderr, 'INCOMPATCODE'), RUNTIME_HOST_ROW_CODES.SELF_CHECK_INCOMPATIBLE)
+    assert.equal(reading(r.stderr, 'INCOMPATINNER'), BOOTSTRAP_CODES.SELF_CHECK_INCOMPATIBLE)
+    assert.equal(r.stderr.includes(RUNTIME_HOST_ROW_CODES.BIND_REFUSED), false,
+      `仍然读到 ${RUNTIME_HOST_ROW_CODES.BIND_REFUSED}——那一行还在抛：\n${r.stderr}`)
+    // ★★ 归因**一条都没丢**：未确认的能力逐个出现在消息里
+    //    （structured-result 由桩注册表确认，不在其中）。
+    //    这正是"改成 provide 之后最容易丢掉的东西"。
+    const blob = (reading(r.stderr, 'INCOMPATMESSAGE') ?? '') + (reading(r.stderr, 'INCOMPATCHECKS') ?? '')
+      + (reading(r.stderr, 'INCOMPATREASONS') ?? '')
     for (const cap of REQUIRED_CAPABILITIES.filter((c) => c !== 'structured-result')) {
-      assert.ok(r.stderr.includes(cap), `未确认的能力 ${cap} 没有出现在拒绝理由里：\n${r.stderr}`)
+      assert.ok(blob.includes(cap), `未确认的能力 ${cap} 没有出现在读出来的理由里：\n${blob}`)
     }
-    assert.ok(r.stderr.includes('缺必需能力'), `拒绝理由里没有"缺必需能力"那段：\n${r.stderr}`)
-    READINGS.f = { code: RUNTIME_HOST_ROW_CODES.BIND_REFUSED, inner: BOOTSTRAP_CODES.SELF_CHECK_INCOMPATIBLE, exit: r.code }
-    t.diagnostic(`F: exit=${r.code} ${READINGS.f.code}(${READINGS.f.inner})`)
+    assert.ok(blob.includes('缺必需能力'), `理由里没有"缺必需能力"那段：\n${blob}`)
+    // 安全方向照样没放松
+    assert.equal(reading(r.stderr, 'INCOMPATBOUND'), 'false')
+    assert.equal(reading(r.stderr, 'INCOMPATFORBID'), 'true')
+    READINGS.f = { code: RUNTIME_HOST_ROW_CODES.SELF_CHECK_INCOMPATIBLE, inner: BOOTSTRAP_CODES.SELF_CHECK_INCOMPATIBLE, exit: r.code }
+    t.diagnostic(`F: exit=${r.code} ${READINGS.f.code}(${READINGS.f.inner}) bound=${reading(r.stderr, 'INCOMPATBOUND')}`)
   })
 
   guarded('S. ★★ 生产探针在真 DSH 进程里的读数：版本是真安装的版本，能力逐项有据', (t) => {

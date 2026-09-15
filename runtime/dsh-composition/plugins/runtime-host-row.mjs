@@ -107,6 +107,8 @@
 // ============================================================================
 
 import { ENFORCEMENT_ROOT_SERVICE } from './root-row.mjs'
+import { BOOTSTRAP_CODES } from '../bootstrap.mjs'
+import { SELFCHECK_STATES } from '../selfcheck.mjs'
 import { PATCH_LAYER_ROWS } from '../patch-layer.mjs'
 
 /** 改动输入来源、拒绝码或发布形状时递增。 */
@@ -177,6 +179,28 @@ export const RUNTIME_HOST_ROW_CODES = Object.freeze({
   NO_SANDBOX_PORT: 'RUNTIME_HOST_ROW_NO_SANDBOX_PORT',
   /** `bootstrapDshRuntime()` 拒绝了。内层码原样带在 `innerCode` 上。 */
   BIND_REFUSED: 'RUNTIME_HOST_ROW_BIND_REFUSED',
+  /**
+   * 自检判定**强制面未生效**（补丁层没应用 / 沙箱不够 / 可用性探不通）。
+   *
+   * ★ 与 `BIND_REFUSED` **必须分开**，因为 spec 对这两件事的要求不同：
+   *   · `line 854`：「补丁层应用与强制面生效的启动自检；**未生效时 Runtime Manager
+   *     按 `incompatible` 处理并禁止自动执行**」；
+   *   · §6.3（`line 275`）：`incompatible` 的产品状态是「组件版本不兼容」，
+   *     Orchestrator 行为是「禁止自动执行，**提示修复或回滚**」。
+   *
+   * 这两个码在**旧实现里是同一个东西**：`bootstrap` 拒绝 → `apply` 抛 →
+   * 整棵插件树加载失败 → Runtime 进程死。于是 spec 要的两条读数都拿不到：
+   *   · 拿不到 `incompatible`（进程死了，没人能报状态）；
+   *   · 拿不到「提示修复或回滚」（`line 278` 明确要求 Runtime 不可用时
+   *     只读界面**继续开放**——进程死了就只剩一个崩溃）。
+   *
+   *   > 一个"强制面没生效就整个产品起不来"的部署，把一条**可修复**的读数
+   *   > 换成了一个**不可用**的现象——而 `line 854` 要的恰恰是前者。
+   *
+   * 安全方向**没有**放松：宿主端口**照样不注册**，所以没有任何执行路径被打开；
+   * 变的只是"这份拒绝**能不能被看见**"。
+   */
+  SELF_CHECK_INCOMPATIBLE: 'RUNTIME_HOST_ROW_SELF_CHECK_INCOMPATIBLE',
 })
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -649,17 +673,92 @@ export const runtimeHostRow = {
         .filter((c) => c?.ok !== true)
         .map((c) => `  · ${c?.name ?? '(无名)'}：${(c?.reasons ?? []).join(' / ') || '(未给出原因)'}`)
       const innerReasons = (bound?.reasons ?? []).map((r) => `  · ${r}`)
+      const detail = failedChecks.length === 0 && innerReasons.length === 0
+        ? ''
+        : `\n未通过的自检项 / 原因：\n${[...failedChecks, ...innerReasons].join('\n')}`
+      const refusalExtra = {
+        innerCode: bound?.code ?? null,
+        missing: Object.freeze([...(bound?.missing ?? [])]),
+        reasons: Object.freeze([...(bound?.reasons ?? [])]),
+        checks: Object.freeze([...(bound?.checks ?? [])]),
+      }
+
+      // ★★★ **自检判定"强制面未生效"时不抛**——本批翻过来的那个取舍。
+      //
+      //   为什么这是对的（三条都是 spec 正文，不是我们的附录）：
+      //     · `line 854`：未生效时「按 `incompatible` 处理并禁止自动执行」
+      //       ——"处理"意味着**继续存在并处于那个状态**，而不是消失；
+      //     · `line 275`（§6.3 表）：`incompatible` 的行为是
+      //       「禁止自动执行，**提示修复或回滚**」——一个已经死掉的进程
+      //       无法提示任何东西，也无法被回滚；
+      //     · `line 278`：「只读 Workbench 和 team-hub 在 Runtime 不可用时
+      //       **继续开放**」——这句话预设了产品**还在跑**。
+      //
+      //   而**安全方向一点没动**：宿主端口仍然不注册（下面这个 `return` 在
+      //   `ctx.provide(RUNTIME_HOST_BINDING_SERVICE, ...)` 之前就结束了注册路径），
+      //   所以 worker 那边拿不到端口、构造不出执行引擎、不认领任何任务。
+      //   换掉的只是这份拒绝的**可见性**：从一个"进程崩了"变成一个
+      //   "进程活着、明确说自己不能干活、并且能被上层读到"。
+      //
+      //   > 一个"因为强制面没生效而整个产品起不来"的部署，
+      //   > 与一个"强制面没生效、产品照常在跑并明说自己不能自动执行"的部署，
+      //   > 后者的失败面小得多——而**两者都禁止执行**，区别只在谁能被修。
+      //
+      //   这与 `runtime-contract-server-row.mjs` 的取舍同向（那个文件在自己的
+      //   文件头里为**出口**写了同样的理由），而与本文件对**其他**拒绝
+      //   （`BAD_WIRING` / `PORT_INCOMPLETE` / `COMPOSITION_UNOBSERVED`）的处理
+      //   **故意不同**：那些是**我们自己的接线错误**，接线错了要当场响，
+      //   而不是安静地降级成一个"产品看起来在跑"的状态。
+      if (bound?.code === BOOTSTRAP_CODES.SELF_CHECK_INCOMPATIBLE) {
+        const refusalMessage =
+          `[${RUNTIME_HOST_ROW_PLUGIN_NAME}] 启动自检判定强制面未生效（内层码 ${bound.code}）：`
+          + `${bound.message ?? '(无消息)'}——**不注册宿主端口**，运行时按 \`incompatible\` 处理并禁止自动执行`
+          + detail
+        // ★★ 拒绝**必须留下痕迹**：服务值只有"读得到它的人"才看得见，
+        //   而一个"产品不能自动执行"的原因如果不在日志里，值班的人只能靠猜。
+        //   spec §6.3 要的是「提示修复或回滚」——提示得**出得去**才算提示。
+        //
+        //   这一条不是装饰：把 `throw` 换成 `provide` 之后，
+        //   拒绝就从"进程退出时的 stderr"搬到了"一个服务值上"——
+        //   如果没有这条路，**同一个原因会从所有日志里消失**，
+        //   而"进程活着"会把这件事伪装成"一切正常"。
+        //
+        //   > 一个"不再崩溃、但也不再说明为什么"的启动，
+        //   > 与一个"正常启动"的启动，在日志里是同一个东西。
+        const logFn = typeof ctx.logger?.warn === 'function'
+          ? ctx.logger.warn
+          : (typeof ctx.logger?.info === 'function' ? ctx.logger.info : null)
+        if (logFn !== null) logFn.call(ctx.logger, refusalMessage)
+
+        ctx.provide(RUNTIME_HOST_BINDING_SERVICE, Object.freeze({
+          ok: false,
+          code: RUNTIME_HOST_ROW_CODES.SELF_CHECK_INCOMPATIBLE,
+          rowVersion: RUNTIME_HOST_ROW_VERSION,
+          // 内层码原样带着走：上层要能分辨"自检不兼容"与别的 `BOOTSTRAP_*` 拒绝，
+          // 而这一点从 `code` 上读不出来（`code` 是本行的码）。
+          innerCode: refusalExtra.innerCode,
+          message: refusalMessage,
+          // `incompatible` 是 spec §6.3 表格里的那一个值，不是这里发明的字符串。
+          state: bound.state ?? SELFCHECK_STATES.incompatible,
+          patchVersion: bound.patchVersion ?? null,
+          checks: refusalExtra.checks,
+          reasons: refusalExtra.reasons,
+          // 修法**跟着读数一起走**：只说"不兼容"而不给修复入口，
+          // 就等于把 spec 要求的"提示修复或回滚"又丢了一次。
+          repair: bound.repair ?? null,
+          // `true` 是给下游（契约出口）的**显式**信号：这条拒绝的含义就是
+          // "禁止自动执行"。让下游从 `ok:false` 去猜是不行的——
+          // `ok:false` 也可能只是一个"出口没配好"的降级，那不该禁止执行。
+          autoExecutionForbidden: true,
+          mountSettled: settled.waited,
+          mountSettledReason: settled.reason,
+        }))
+        return
+      }
+
       throw rowError(RUNTIME_HOST_ROW_CODES.BIND_REFUSED,
-        `bootstrapDshRuntime 拒绝了（内层码 ${bound?.code ?? '(无码)'}）：${bound?.message ?? '(无消息)'}` +
-        (failedChecks.length === 0 && innerReasons.length === 0
-          ? ''
-          : `\n未通过的自检项 / 原因：\n${[...failedChecks, ...innerReasons].join('\n')}`),
-        {
-          innerCode: bound?.code ?? null,
-          missing: Object.freeze([...(bound?.missing ?? [])]),
-          reasons: Object.freeze([...(bound?.reasons ?? [])]),
-          checks: Object.freeze([...(bound?.checks ?? [])]),
-        })
+        `bootstrapDshRuntime 拒绝了（内层码 ${bound?.code ?? '(无码)'}）：${bound?.message ?? '(无消息)'}` + detail,
+        refusalExtra)
     }
 
     const published = Object.freeze({

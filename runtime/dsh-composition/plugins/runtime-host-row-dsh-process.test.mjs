@@ -56,6 +56,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 // 拒绝码与状态量取自**产品模块**，不在用例里另抄一份字符串：抄一份的话，
 // 产品改了码而用例还绿着，"断言的是那个码"就变成了一句注释。
 import { RUNTIME_HOST_ROW_CODES } from './runtime-host-row.mjs'
+import { BOOTSTRAP_CODES } from '../bootstrap.mjs'
 import { EXECUTOR_CODES } from '../../../orchestrator/worker/executor.mjs'
 import { REQUIRED_CAPABILITIES } from '../../contracts/adapter.mjs'
 import { SUPPORTED_RUNTIME } from '../../adapters/dsh/probe.mjs'
@@ -323,7 +324,19 @@ export default {
       //    ctx.get(name, strict) 的第二个参数是 **strict**，不是 fallback——
       //    服务不在时拿到的是 undefined。写成 === null 会把"不在"读成"在"
       //    （这正是第一版探针的错误，被 B 场景咬出来的）。
-      note('SVC ' + (ctx.get('legionRuntimeHostBinding', false) === undefined ? 'absent' : 'present'))
+      const svc = ctx.get('legionRuntimeHostBinding', false)
+      note('SVC ' + (svc === undefined ? 'absent' : 'present'))
+      // ★ 服务在时**逐字段**读出来（本批把自检不兼容从 throw 改成了 provide，
+      //   于是拒绝从"进程退出时的 stderr"搬到了这个服务值上）。
+      //   message 一律 JSON.stringify：它里面有多行，直接写会把 reading()
+      //   的单行正则在第一行就截断——那样读到的就只是"第一行"，而不是"整条理由"。
+      const at = (f) => (svc === undefined ? 'absent' : String(svc[f]))
+      note('SVCCODE ' + at('code'))
+      note('SVCINNER ' + at('innerCode'))
+      note('SVCSTATE ' + at('state'))
+      note('SVCFORBID ' + at('autoExecutionForbidden'))
+      note('SVCMESSAGE ' + JSON.stringify(svc === undefined ? null : svc.message))
+      note('SVCCHECKS ' + JSON.stringify(svc === undefined ? null : svc.checks))
       // ② 组合根服务也在场（它由真补丁层的 root 行发布）。
       note('ROOTSVC ' + (ctx.get('legionEnforcementRoot', false) === undefined ? 'absent' : 'present'))
       // ③ **worker 自己的**读数：绑定生不生效，由它说了算。
@@ -358,6 +371,7 @@ const PROBE_PATCH_SRC = `- insert:
 const RECONCILE_PROBE_SRC = `import { observeComposition } from ${JSON.stringify(fileUrl(join(HERE, 'runtime-host-row.mjs')))}
 import { reconcilePatchLayer } from ${JSON.stringify(fileUrl(join(COMPOSITION, 'patch-layer.mjs')))}
 import { approvalPortFactory } from ${JSON.stringify(fileUrl(join(HERE, 'root-row.mjs')))}
+import { dshRuntimeBound } from ${JSON.stringify(fileUrl(EXECUTOR_BINDING_ABS))}
 const note = (line) => process.stderr.write(line + '\\n')
 export default {
   name: 'prt253rt-reconcile-probe',
@@ -374,6 +388,24 @@ export default {
         for (const f of r.findings) note('RECONCILE-FINDING ' + JSON.stringify([f.row, f.code]))
         // ★ 生产形状那两条（H/I）要读的三样：服务、注册缝、以及**生效的 config 内容**
         note('ROOT-SERVICE ' + (ctx.get('legionEnforcementRoot', false) === undefined ? 'absent' : 'present'))
+        // ★★ 绑定服务逐字段读出来（J 要读的就是它）。
+        //    J 只挂本探针——prt253rt-probe 与它在同一个进程里**各自**
+        //    process.exit(0)，谁先到谁赢：两个都挂上会得到一个**竞态**，
+        //    而"读数随机缺失"与"读数不存在"在断言里是同一个东西。
+        //    所以这里自己读一遍，不靠另一个脚手架。
+        const svc = ctx.get('legionRuntimeHostBinding', false)
+        const at = (f) => (svc === undefined ? 'absent' : String(svc[f]))
+        note('SVCCODE ' + at('code'))
+        note('SVCINNER ' + at('innerCode'))
+        note('SVCSTATE ' + at('state'))
+        note('SVCFORBID ' + at('autoExecutionForbidden'))
+        note('SVCMESSAGE ' + JSON.stringify(svc === undefined ? null : svc.message))
+        note('SVCCHECKS ' + JSON.stringify(svc === undefined ? null : svc.checks))
+        // ★ worker 自己的读数。J 靠它区分"端口真的注册了"与"自检拒绝了"——
+        //   少了这一条，reading(...) 返回 null，而 null 既不是 true 也不是 false，
+        //   于是那个分支判据会**静默走错路**（这一次它走到了 else 里，然后
+        //   拿 null 去比 'false' 才炸出来；换个写法就会变成一个假绿）。
+        note('BOUND ' + dshRuntimeBound())
         note('PORT-FACTORY ' + (approvalPortFactory() === null ? 'none' : 'registered'))
         try {
           for (const e of ctx.loader.entries()) {
@@ -661,9 +693,20 @@ describe('PRT-253：`bindDshRuntime` 的生产调用方在**真 DSH 进程**里�
     t.diagnostic(`F: effective=false，靶子行=${JSON.stringify(codes)}，其余四行 OK`)
   })
 
-  guarded('G. ★★★ 同 F、但把生产宿主行**挂上**：具名拒绝，且**不注册**端口（fail closed 全链）', (t) => {
+  guarded('G. ★★★ 同 F、但把生产宿主行**挂上**：具名拒绝、**不注册**端口，而进程**活着**', (t) => {
     // 这是 F 的下游那一步，单独读出来：靶子缺席 ⇒ 自检判未生效 ⇒
-    // `bootstrapDshRuntime()` 拒绝注册宿主端口 ⇒ 树加载失败、进程退出 1。
+    // `bootstrapDshRuntime()` 拒绝注册宿主端口。
+    //
+    // ★★★ 本批**翻掉的就是这一条的后半句**：旧版这里写的是
+    //     「树加载失败、进程退出 1」，并且用 `failed to apply loader entry` 钉住它。
+    //     spec `line 854` 要的是「按 `incompatible` 处理并禁止自动执行」，
+    //     而 §6.3 表格把 `incompatible` 定成「禁止自动执行，**提示修复或回滚**」——
+    //     一个已经崩掉的进程提示不了任何东西，也无法被回滚。
+    //
+    //   > 一个"拒绝执行"的读数，与一个"拒绝启动"的读数，
+    //   > 在**只看进程有没有起来**的时候是同一个东西——
+    //   > 只不过前者还能被修，而后者只剩一次崩溃。
+    //
     // 与 E 的唯一差别就是**没有靶子替身**；有了 E，这一条的"拒绝"才不是
     // "它本来就起不来"。
     const r = runDsh({
@@ -673,18 +716,32 @@ describe('PRT-253：`bindDshRuntime` 的生产调用方在**真 DSH 进程**里�
         REAL_PATCH,
         SCRATCH_PATH.runtimeRowsPatch,
         SCRATCH_PATH.hostRowPatch,
+        SCRATCH_PATH.probePatch,
       ],
     })
     assert.equal(r.spawnError, null)
-    assert.equal(r.code, 1, `期望"自检不过 ⇒ 拒绝注册"拦下启动：\n${r.stderr}`)
+    assert.equal(r.code, 0, `期望"进程活着并明说自己不能自动执行"：\n${r.stderr}`)
     // ★ 断言**具名内层码本身**，不写"它抛了"。
-    assert.match(r.stderr, /BOOTSTRAP_SELF_CHECK_INCOMPATIBLE/, r.stderr)
-    assert.match(r.stderr, /failed to apply loader entry legion-runtime-host/, r.stderr)
+    assert.equal(reading(r.stderr, 'SVCCODE'), RUNTIME_HOST_ROW_CODES.SELF_CHECK_INCOMPATIBLE)
+    assert.equal(reading(r.stderr, 'SVCINNER'), BOOTSTRAP_CODES.SELF_CHECK_INCOMPATIBLE)
+    // 承诺的那两条读数：状态是 `incompatible`，且明确"禁止自动执行"。
+    assert.equal(reading(r.stderr, 'SVCSTATE'), 'incompatible')
+    assert.equal(reading(r.stderr, 'SVCFORBID'), 'true')
+    // ★★★ 与旧版**不同形**：整棵树**没有**被拖垮。
+    assert.equal(r.stderr.includes('failed to apply loader entry legion-runtime-host'), false,
+      `仍然读到"装载这一行失败"——整棵树还是被拖垮了：\n${r.stderr}`)
+    assert.equal(r.stderr.includes(RUNTIME_HOST_ROW_CODES.BIND_REFUSED), false,
+      `仍然读到 ${RUNTIME_HOST_ROW_CODES.BIND_REFUSED}——那一行还在抛：\n${r.stderr}`)
     // 拒绝要说得出**是哪一项**没过——自检的全部意义就是逐项归因。
-    assert.match(r.stderr, /composition-patch-layer/, `拒绝里没有指出是哪一项自检没过：\n${r.stderr}`)
-    // 反向锚：这一次**没有**走到"端口注册成功"。
-    assert.equal(reading(r.stderr, 'BOUND'), null, '被拒绝的场景里不该有 BOUND 读数')
-    t.diagnostic('G: exit 1 + BOOTSTRAP_SELF_CHECK_INCOMPATIBLE（靶子缺席的下游）')
+    assert.match(JSON.stringify(reading(r.stderr, 'SVCCHECKS')), /composition-patch-layer/,
+      `拒绝里没有指出是哪一项自检没过：\n${r.stderr}`)
+    // ★★★ 反向锚（本批变**更强**了）：不是"没有 BOUND 读数"，而是
+    //     worker 自己明确报 `false`——端口**确实没被注册**。
+    //     "读不到"与"读到 false"是两件事：旧写法在探针根本没跑时也会绿。
+    assert.equal(reading(r.stderr, 'BOUND'), 'false',
+      `被拒绝的场景里端口却被注册了：\n${r.stderr}`)
+    t.diagnostic(`G: exit 0 + ${RUNTIME_HOST_ROW_CODES.SELF_CHECK_INCOMPATIBLE}(${BOOTSTRAP_CODES.SELF_CHECK_INCOMPATIBLE})`
+      + ` state=${reading(r.stderr, 'SVCSTATE')} bound=${reading(r.stderr, 'BOUND')}`)
   })
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -803,10 +860,22 @@ describe('PRT-253：`bindDshRuntime` 的生产调用方在**真 DSH 进程**里�
     })
     assert.equal(r.spawnError, null)
 
-    // 自检的逐项归因在拒绝消息里，每行形如 `  · <项名>：<原因>`。
-    const failedItems = [...new Set(
-      [...r.stderr.matchAll(/^\s*· ([a-z0-9-]+)[:：]/gm)].map((m) => m[1]),
-    )]
+    // 自检的逐项归因。本批之后拒绝**不再抛**，所以它不再只出现在 stderr 的
+    // 「未通过的自检项」那一段里，而是出现在**发布出来的**服务值上。
+    // 两条来源都收：stderr（旧路径，仍被更下面的 C 场景用着）与 `SVCCHECKS`。
+    //   > 只收其中一条，会在"拒绝换了条路"的那一刻读到空清单——
+    //   > 而空清单会让下面那条 `includes(...) === false` 变成一个恒真断言。
+    const failedItems = [...new Set([
+      ...[...r.stderr.matchAll(/^\s*· ([a-z0-9-]+)[:：]/gm)].map((m) => m[1]),
+      ...(() => {
+        const raw = reading(r.stderr, 'SVCCHECKS')
+        if (raw === null) return []
+        try {
+          const parsed = JSON.parse(raw)
+          return Array.isArray(parsed) ? parsed.filter((c) => c?.ok !== true).map((c) => c.name) : []
+        } catch { return [] }
+      })(),
+    ])]
     // ★★★ 本条的判据。生产调用方要么根本没拒绝（说明它把三项都判过了），
     //     要么拒绝的理由里**不含**组合补丁层这一项。
     assert.equal(failedItems.includes('composition-patch-layer'), false,
@@ -823,16 +892,20 @@ describe('PRT-253：`bindDshRuntime` 的生产调用方在**真 DSH 进程**里�
         + `${JSON.stringify(failedItems)}`)
     }
 
-    if (r.code === 0) {
+    if (r.code === 0 && reading(r.stderr, 'BOUND') === 'true') {
       // 三项全过 ⇒ 宿主端口真的注册了。这是最强的那一种结局。
-      assert.match(r.stderr, /^BOUND /m, `自检全过却没留下绑定读数：\n${r.stderr}`)
       assert.deepEqual(failedItems, [], '没拒绝却有未通过项 —— 两者不一致')
-      t.diagnostic('J: 三项全过，BOUND 已留下；未通过项=[]')
+      t.diagnostic('J: 三项全过，BOUND=true；未通过项=[]')
     } else {
-      // 拒绝了，但**不是因为组合补丁层**。把真实理由记进诊断，不假装它不存在。
-      assert.notEqual(r.code, 0)
+      // ★★★ 自检**拒绝**了。本批之后这不再意味着进程退出——而是
+      //     "进程活着、端口没注册、结论是 `incompatible`"。
+      //     把真实理由记进诊断，不假装它不存在。
+      assert.equal(reading(r.stderr, 'SVCCODE'), RUNTIME_HOST_ROW_CODES.SELF_CHECK_INCOMPATIBLE,
+        `既没有 BOUND=true、也没有具名拒绝——那是第三种状态，本用例不认：\n${r.stderr.slice(-1200)}`)
+      assert.equal(reading(r.stderr, 'SVCFORBID'), 'true')
+      assert.equal(reading(r.stderr, 'BOUND'), 'false', '拒绝了却把端口注册上了——那是真的放松')
       assert.ok(failedItems.length > 0, `拒绝了却没给出逐项归因：\n${r.stderr}`)
-      // ★★★ 这一条是**本轮量到的那个平台级阻塞**的可执行版本：
+      // ★★★ 这一条是**那个平台级阻塞**的可执行版本：
       //     Windows 上 DSH 的 `windows-acl` 后端**静态**报 `partial`
       //     （`sandbox-local/src/index.ts:186`，理由写在源码注释里：WRITE_RESTRICTED
       //     需要 Everyone 在两个 restricting 列表里、且 NTFS 硬链接能把已授权文件
@@ -847,7 +920,7 @@ describe('PRT-253：`bindDshRuntime` 的生产调用方在**真 DSH 进程**里�
           + '本轮量到的平台级阻塞（windows-acl 静态 partial vs 判据 full）不成立，'
           + '或者拒绝的原因另有其物，两种情况都必须重读\n' + r.stderr.slice(-1200))
       }
-      t.diagnostic(`J: 拒绝了，未通过项=${JSON.stringify(failedItems)}——**不含** composition-patch-layer`)
+      t.diagnostic(`J: 拒绝了（exit=${r.code}，端口未注册），未通过项=${JSON.stringify(failedItems)}——**不含** composition-patch-layer`)
     }
   })
 })

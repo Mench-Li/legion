@@ -576,13 +576,65 @@ describe('PRT-253 runtime-host-row：缺哪一样就报哪一个码', () => {
   })
 
   test('⑪ 组合根拒绝时把**内层码**原样带出来（两种"装不上"可分）', async () => {
-    const root = fakeRoot({ result: { ok: false, code: 'BOOTSTRAP_SELF_CHECK_INCOMPATIBLE', message: '自检没过', reasons: ['沙箱仅 partial'] } })
+    // ★ 这里**故意**用一个**不是**自检不兼容的内层码。
+    //   自检不兼容现在走的是"发布具名拒绝、不抛"那条路（见 ⑪b）——
+    //   如果这条用例还用那个码，它测的就不再是"抛不抛"，而会变成
+    //   "有没有发布"的一个更弱的副本。
+    const root = fakeRoot({ result: { ok: false, code: 'BOOTSTRAP_COMPOSITION_UNOBSERVED', message: '组合树读不出来', reasons: ['loader 里没有行'] } })
     const { ctx } = readyContext({ root })
     setDshRuntimeInputsFactory(() => inputsOk())
     const e = await applyRejects(ctx)
     assert.equal(e.code, RUNTIME_HOST_ROW_CODES.BIND_REFUSED)
-    assert.equal(e.innerCode, 'BOOTSTRAP_SELF_CHECK_INCOMPATIBLE')
-    assert.deepEqual([...e.reasons], ['沙箱仅 partial'])
+    assert.equal(e.innerCode, 'BOOTSTRAP_COMPOSITION_UNOBSERVED')
+    assert.deepEqual([...e.reasons], ['loader 里没有行'])
+  })
+
+  test('⑪b ★★★ 自检判「强制面未生效」→ **不抛**，发布一条可读的 incompatible，且不注册端口', async () => {
+    // spec `line 854`：「未生效时 Runtime Manager 按 `incompatible` 处理并禁止自动执行」。
+    // §6.3 表格（`line 275`）把它读成「禁止自动执行，**提示修复或回滚**」——
+    // 而一个已经崩掉的进程提示不了任何东西。
+    const root = fakeRoot({
+      result: {
+        ok: false,
+        code: 'BOOTSTRAP_SELF_CHECK_INCOMPATIBLE',
+        message: '启动自检判定强制面未生效：禁止自动执行，**不注册宿主端口**',
+        state: 'incompatible',
+        patchVersion: 7,
+        reasons: ['沙箱仅 partial'],
+        checks: [{ name: 'sandbox-enforcement', ok: false, reasons: ['windows-acl partial'] }],
+        repair: { actions: [{ id: 'install-sandbox', text: '装一个能管制的沙箱后端' }] },
+      },
+    })
+    const { ctx } = readyContext({ root })
+    setDshRuntimeInputsFactory(() => inputsOk())
+
+    // ★ 第一条断言就是本批那个开关：**它不再抛**。
+    await runtimeHostRow.apply(ctx)
+
+    const published = ctx.get(RUNTIME_HOST_BINDING_SERVICE)
+    assert.ok(published !== undefined, '自检不兼容时什么都没发布——那上层只能读到"服务不在"')
+    assert.equal(published.ok, false)
+    // ★★ 具名码必须**是自检那一个**。发布一个笼统的 `ok:false` 会让
+    //    「强制面没生效」与「出口没配好」在上层同形——这两件事的处置完全不同。
+    assert.equal(published.code, RUNTIME_HOST_ROW_CODES.SELF_CHECK_INCOMPATIBLE)
+    assert.equal(published.innerCode, 'BOOTSTRAP_SELF_CHECK_INCOMPATIBLE')
+
+    // spec 那两条读数：状态是 `incompatible`，且明确"禁止自动执行"。
+    assert.equal(published.state, 'incompatible')
+    assert.equal(published.autoExecutionForbidden, true)
+    // 「提示修复或回滚」——修法必须跟着读数一起走，否则那句话又丢了一次。
+    assert.ok(published.repair !== null, '只报"不兼容"而不给修复入口 = 把 spec 要的"提示修复"又丢了一次')
+    assert.deepEqual([...published.reasons], ['沙箱仅 partial'])
+    assert.equal(published.patchVersion, 7)
+    assert.deepEqual(published.checks.map((c) => c.name), ['sandbox-enforcement'])
+
+    // ★★★ 安全方向**一点没放松**：`ok:true` 的那条路（端口已注册、可以执行）
+    //   必须**没有**被走到。这一条是本次取舍的落点——翻开关只换了"可见性"，
+    //   没有换"能不能执行"。
+    assert.equal(root.calls.length, 1, '必须恰好调一次 bootstrap')
+    for (const d of root.calls) {
+      assert.ok(d.runtimeHost !== null, '端口还是要交下去让组合根判——不能在这里替它做决定')
+    }
   })
 })
 

@@ -3468,6 +3468,131 @@
 
 ---
 
+## 2026-09-15　一个"拒绝执行"的读数，与一个"拒绝启动"的读数
+
+### 一、这一批翻的是四批以来一直写着"没有翻"的那个开关
+
+`PRT-214` 的台账里躺着这句话，写了很久：
+
+> 自检拒绝后是**整棵树加载失败**，还是只不注册宿主端口、把运行时标成 `incompatible`、
+> 产品照常运行但禁止自动执行——**`line 854` 的字面写法是后者**，而当前实现的是前者，
+> **比正文更严**。本批**没有**翻这个开关（fail-closed 是安全取舍，改它要同时改写多条
+> 钉住"拒绝即退出"的用例，应当是一次**说出来的**决定）。
+
+这一批就是那次说出来的决定。**而推翻旧取舍的不是偏好，是三条 spec 正文**：
+
+| 出处 | 原文 | 它要求什么 |
+| --- | --- | --- |
+| `line 854` | 「未生效时 Runtime Manager 按 `incompatible` 处理并禁止自动执行」 | "处理"意味着**继续存在并处于那个状态** |
+| `line 275`（§6.3 表） | `incompatible` → 「禁止自动执行，**提示修复或回滚**」 | 一个崩掉的进程提示不了任何东西 |
+| `line 278` | 「只读 Workbench 和 team-hub 在 Runtime 不可用时**继续开放**」 | 这句话**预设了产品还在跑** |
+
+> 一个"拒绝执行"的读数，与一个"拒绝启动"的读数，
+> 在只看进程有没有起来的时候是同一个东西——
+> 只不过前者还能被修，而后者只剩一次崩溃。
+
+### 二、开关分两处，缺一处都不成立
+
+**① 宿主行不再抛。**
+
+```js
+if (bound?.code === BOOTSTRAP_CODES.SELF_CHECK_INCOMPATIBLE) {
+  ctx.provide(RUNTIME_HOST_BINDING_SERVICE, Object.freeze({
+    ok: false,
+    code: RUNTIME_HOST_ROW_CODES.SELF_CHECK_INCOMPATIBLE,
+    innerCode: refusalExtra.innerCode,
+    state: bound.state ?? SELFCHECK_STATES.incompatible,
+    repair: bound.repair ?? null,
+    autoExecutionForbidden: true,
+    …
+  }))
+  return                       // ← 注册路径到此为止
+}
+```
+
+**宿主端口照样不注册**，所以**没有任何执行路径被打开**。换掉的只是这份拒绝的**可见性**。
+
+**② 出口学会分辨三种形态。** `verdictFromRuntimeHostBinding()` 此前只会说"行"或"不知道"，
+于是①②③三种处境里有两种同形：
+
+| | 服务值 | 出口 | worker | 产品状态 |
+| --- | --- | --- | --- | --- |
+| ① 服务**不在** | `undefined` | `null` → 503 | `RUNTIME_REFUSED` | `unavailable` |
+| ② 服务在、**说不行** | `ok:false` + 具名码 | `autoExecutionForbidden: true` | `SELF_CHECK_INCOMPATIBLE` | **`incompatible`** |
+| ③ 服务在、**说行** | `ok:true` | `autoExecutionForbidden: false` | 放行 | `ready` |
+
+> 一个"读不到强制面结论"的部署，
+> 与一个"读到了、结论是强制面没生效"的部署，
+> 对值班的人是两种完全不同的处境：前者要去查进程和端口，
+> 后者只要照着 `repair` 修。
+
+**③ 但②不能推广成"任何 `ok:false` 都禁止执行"。** 出口自身的降级
+（`NO_BIND_PORT` / `PUBLICATION_FAILED` …）也是 `ok:false`，那些**没有**说强制面不行。
+一律禁止会造出一个"出口没配好 ⇒ 整个产品不能干活"的假故障。所以只认那一个具名码——
+这一条**单独有一个反向用例**钉着（破验 K5）。
+
+### 三、真 DSH 进程里的读数（这就是本批的证据）
+
+```
+runtime-host-binding-unblocked-dsh-process ②
+  改前：exit=1  RUNTIME_HOST_ROW_INPUTS_FACTORY_THREW(…)   ← 反向对照
+  改后：exit=0  RUNTIME_HOST_ROW_SELF_CHECK_INCOMPATIBLE(BOOTSTRAP_SELF_CHECK_INCOMPATIBLE)
+
+  INCOMPAT: exit=0 logger=true loggerWarn=function bound=false
+            code=RUNTIME_HOST_ROW_SELF_CHECK_INCOMPATIBLE state=incompatible
+            forbid=true verdictForbid=true provider=EXECUTOR_HOST_PORT_REQUIRED
+
+runtime-host-registrar-row-dsh-process R / F
+  R: exit=0 … bound=false state=incompatible
+  J: 拒绝了（exit=0，端口未注册），未通过项=["sandbox-enforcement"]——不含 composition-patch-layer
+```
+
+`bound=false` 与 `exit=0` **必须一起读**：只读后者会得出"降级了"（危险），
+只读前者得不出"进程还在"。分开之后才看得出这次改的到底是**安全性**还是**可见性**——
+答案是后者。
+
+### 四、一处必须记下的代价
+
+拒绝从"进程退出时的 stderr"搬到了"一个服务值上"。而 `ctx.logger`
+**在真进程里确实存在**（实测 `logger=true`、`warn` 是函数），
+它的输出**却不落到子进程的 stderr**。
+
+> 一个"记进了日志但日志不在你手上"的读数，
+> 与一个"根本没记"的读数，在 stderr 上完全同形。
+
+所以：保留一条显式日志（`ctx.logger?.warn ?? info`，`warn` 不在时回落 `info`），
+而**用例读权威来源**——服务值本身——不是日志。
+
+### 五、Windows 上那句话的性质变了
+
+台账里长期写着「Windows 上装不上宿主行」。**这件事仍然成立，但它的后果变了**：
+
+- 改前：拒绝 ⇒ 抛 ⇒ 整树加载失败 ⇒ **产品起不来**；
+- 改后：拒绝 ⇒ 不注册端口 + 发布 `incompatible` ⇒ **产品照常跑，只是不能自动执行**。
+
+**判据本身没有放松**——`full` 这条取舍不得改，`partial` 的定义就是"存在不被管制的路径"
+（硬链接别名那条路径真的存在），放松它会把**真的**缺口变成**看不见的**缺口。
+
+### 六、验证
+
+- 真 DSH 进程读数：两个套件、共 13 例（`binding-unblocked` 7 + `registrar` 6）；
+- `dsh-composition` 家族 **756/756**（36 个文件）；`runtime-host-row` 29 例；
+  `runtime-contract-server-row` 13 例（**这个函数此前一个用例都没有**）；
+- 破验 **7/7 全部咬住**，逐字节 sha256 还原。其中 **K7** 最有说服力：
+  把开关翻回 `throw`，两个真进程套件**同时**变红（3 + 4 条）；
+- 11/11 门禁；`scan.mjs` 新增的那条字面量登记（`RUNTIME_HOST_ROW_SELF_CHECK_INCOMPATIBLE`）。
+
+### 七、本批真正的教训
+
+那个开关在我自己的台账里躺了四批，每一批都写着"这是安全取舍，改它要一次说出来的决定"。
+**我把"这是一个取舍"写下来，就以为已经处理完了**——而写下它并没有让任何东西变好。
+
+> 一个"记录在案的取舍"，
+> 与一个"已经做过的决定"，在台账里长得一模一样——
+> 只不过前者会一直躺在那里，而后者会改变行为。
+
+---
+
 ## 2026-09-15　上一批我只改了**理由**，这一批才发现**判据本身**会让健康的部署拒绝启动
 
 ### 一、它不是一个"偶发红的测试"

@@ -39,7 +39,9 @@ import runtimeContractServerRow, {
   resetRuntimeContractInputsFactory,
   runtimeContractInputsFactory,
   setRuntimeContractInputsFactory,
+  verdictFromRuntimeHostBinding,
 } from './runtime-contract-server-row.mjs'
+import { RUNTIME_HOST_ROW_CODES } from './runtime-host-row.mjs'
 import { RUNTIME_CONTRACT_PUBLICATION_RELPATH_PARTS } from '../runtime-contract-publication.mjs'
 
 const TOKEN = 'prt253row-token-z-4b81'
@@ -264,4 +266,86 @@ test('⑤ 没有输入工厂时，服务值里也有**形状完整**的 `publica
   // 后者说"这一行明确地没有发布"，前者会让调用方崩或静默判假。
   assert.equal(served.publication.published, false)
   assert.equal(served.publication.path, null)
+})
+
+// ============================================================================
+// ⑥ `verdictFromRuntimeHostBinding`：**三种**形态必须互不同形
+//
+// 这个函数此前**一个用例都没有**，而它是 `line 854` 那条链上的一环：
+// 宿主行说"强制面没生效"，靠它翻成一条 worker 读得懂的结论。
+//
+// 三条路的**下游后果完全不同**，混起来就等于把 spec 要求的
+// 「按 `incompatible` 处理」退化成一个笼统的"读不到"：
+//
+//   ① 服务不在            → null → HTTP 503 → worker `RUNTIME_REFUSED`
+//                          → 产品 `unavailable`（"执行引擎不可用"）
+//   ② 服务在、说强制面不行 → 结论 `autoExecutionForbidden: true`
+//                          → worker `SELF_CHECK_INCOMPATIBLE`
+//                          → 产品 `incompatible`（"提示修复或回滚"）
+//   ③ 服务在、说行         → 结论 `autoExecutionForbidden: false`
+// ============================================================================
+
+test('⑥ ★★★ 服务**不在** → null（会被翻成 503/不可用），绝不返回"自动执行被禁止"', () => {
+  // 「读不到」与「读到了、说不行」是两件事。前者要去查进程和端口，
+  // 后者只要照 `repair` 修——把它当成后者会让排障方向从一开始就错。
+  for (const absent of [undefined, null, 42, 'x', []]) {
+    assert.equal(verdictFromRuntimeHostBinding(absent), null, `${JSON.stringify(absent)} 被当成了结论`)
+  }
+})
+
+test('⑥ ★★★ 服务在、说自检不兼容 → 一条真的 `incompatible` 结论（不是 null、也不是"允许"）', () => {
+  const binding = Object.freeze({
+    ok: false,
+    code: RUNTIME_HOST_ROW_CODES.SELF_CHECK_INCOMPATIBLE,
+    innerCode: 'BOOTSTRAP_SELF_CHECK_INCOMPATIBLE',
+    state: 'incompatible',
+    patchVersion: 7,
+    checks: [{ name: 'sandbox-enforcement', ok: false }],
+    reasons: ['沙箱仅 partial'],
+    repair: { actions: [{ id: 'install-sandbox' }] },
+    autoExecutionForbidden: true,
+  })
+  const v = verdictFromRuntimeHostBinding(binding)
+  assert.ok(v !== null, '服务明明在说"强制面没生效"，却被读成了"服务不在"')
+  assert.equal(v.autoExecutionForbidden, true, '这一条读错方向的后果是**放行执行**')
+  assert.equal(v.state, 'incompatible')
+  assert.deepEqual([...v.reasons], ['沙箱仅 partial'])
+  assert.deepEqual(v.checks.map((c) => c.name), ['sandbox-enforcement'])
+  assert.equal(v.patchVersion, 7)
+  // 修法要跟着结论走：spec §6.3 要求的是「提示修复或回滚」。
+  assert.deepEqual(v.repair.actions.map((a) => a.id), ['install-sandbox'])
+  // 来源必须写得出来，读者不必从字段猜这条结论是哪一种。
+  assert.match(v.source, /self-check-incompatible/)
+})
+
+test('⑥ ★★★ 但**不是**任何 `ok:false` 都禁止执行——出口自己的降级不算强制面不行', () => {
+  // ★ 这是上一条的**反向**，也是它最容易被过度推广的地方。
+  //   出口（本行）自身的降级也是 `ok:false`：没给 bindPort、发布写不进去……
+  //   那些**没有**说"强制面没生效"。如果一律翻成"禁止自动执行"，
+  //   就造出一个"出口没配好 ⇒ 整个产品不能干活"的假故障——
+  //   而那与"强制面没生效"是两条完全不同的读数。
+  const otherRefusals = [
+    RUNTIME_CONTRACT_ROW_CODES.NO_BIND_PORT,
+    RUNTIME_CONTRACT_ROW_CODES.PUBLICATION_FAILED,
+    RUNTIME_CONTRACT_ROW_CODES.NO_PUBLICATION_DIR,
+    RUNTIME_CONTRACT_ROW_CODES.LISTEN_FAILED,
+    RUNTIME_CONTRACT_ROW_CODES.NO_INPUTS_FACTORY,
+    'WHATEVER_ELSE',
+  ]
+  for (const code of otherRefusals) {
+    const v = verdictFromRuntimeHostBinding({ ok: false, code, state: 'incompatible' })
+    assert.equal(v, null, `${code} 被当成了"强制面未生效"——出口的降级不该禁止执行`)
+  }
+})
+
+test('⑥ 服务在、说行 → `autoExecutionForbidden: false`，但**不**顺手把 reasons 编出来', () => {
+  const v = verdictFromRuntimeHostBinding({
+    ok: true, state: 'enforcement-effective', patchVersion: 3, checks: [{ name: 'x', ok: true }],
+  })
+  assert.equal(v.autoExecutionForbidden, false)
+  assert.equal(v.state, 'enforcement-effective')
+  assert.equal(v.patchVersion, 3)
+  // 「说行」的那条路**没有**理由可报，就不该编一个空数组以外的任何东西。
+  assert.deepEqual([...v.reasons], [])
+  assert.equal(v.source, 'legionRuntimeHostBinding')
 })

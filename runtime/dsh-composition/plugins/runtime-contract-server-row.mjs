@@ -98,7 +98,7 @@ import {
   clearRuntimeContractPublication,
   publishRuntimeContractEndpoint,
 } from '../runtime-contract-publication.mjs'
-import { RUNTIME_HOST_BINDING_SERVICE } from './runtime-host-row.mjs'
+import { RUNTIME_HOST_BINDING_SERVICE, RUNTIME_HOST_ROW_CODES } from './runtime-host-row.mjs'
 
 /** 行接口（插件名、服务名、状态字段、具名码）变化时递增。
  *
@@ -242,7 +242,43 @@ function degraded(code, message, extra = {}) {
  * 值本身是从**模块外**传进来的（`ctx.get` 的结果），因此这里不 import 任何东西。
  */
 export function verdictFromRuntimeHostBinding(binding) {
-  if (binding === null || typeof binding !== 'object' || binding.ok !== true) return null
+  if (binding === null || typeof binding !== 'object') return null
+
+  // ★★ 三条路必须**互不同形**，否则上层会把它们当成同一件事：
+  //   ① 服务**不在**（`undefined` / `null` / 不是对象）→ `null` → 503
+  //      `ENFORCEMENT_UNAVAILABLE` → worker `RUNTIME_REFUSED` →
+  //      产品状态 `unavailable`（"执行引擎不可用"）。
+  //   ② 服务在、**说不行**（`SELF_CHECK_INCOMPATIBLE`）→ 一条真的结论，
+  //      `autoExecutionForbidden: true`、`state: 'incompatible'` →
+  //      worker `SELF_CHECK_INCOMPATIBLE` → 产品状态 `incompatible`
+  //      （"组件版本不兼容"，行为是"禁止自动执行，**提示修复或回滚**"）。
+  //   ③ 服务在、**说行** → `autoExecutionForbidden: false`。
+  //
+  //   在**旧实现**里①和②是同一个东西：宿主行自检不过时直接抛，整棵树加载失败，
+  //   于是契约出口这一行也可能根本没起来——上层只能读到"够不着"。
+  //
+  //   > 一个"读不到强制面结论"的部署，
+  //   > 与一个"读到了、结论是'强制面没生效'"的部署，
+  //   > 对值班的人是两种完全不同的处境：前者要去查进程和端口，
+  //   > 后者只要照着 `repair` 修——而 `line 854` 要的是后者。
+  //
+  //   ⚠️ 但②**不能**推广成"任何 `ok:false` 都禁止执行"：出口自身的降级
+  //   （`NO_BIND_PORT` / `PUBLICATION_FAILED` …）也是 `ok:false`，
+  //   那些**没有**说强制面不行，把它们当成"禁止执行"会造出一个
+  //   "出口没配好 ⇒ 整个产品不能干活"的假故障。所以这里**只认**那一个具名码。
+  if (binding.ok === false && binding.code === RUNTIME_HOST_ROW_CODES.SELF_CHECK_INCOMPATIBLE) {
+    return Object.freeze({
+      autoExecutionForbidden: true,
+      state: binding.state ?? 'incompatible',
+      patchVersion: binding.patchVersion ?? null,
+      checks: Object.freeze([...(binding.checks ?? [])]),
+      reasons: Object.freeze([...(binding.reasons ?? [])]),
+      repair: binding.repair ?? null,
+      source: 'legionRuntimeHostBinding:self-check-incompatible',
+    })
+  }
+
+  if (binding.ok !== true) return null
   return Object.freeze({
     autoExecutionForbidden: false,
     state: binding.state ?? null,

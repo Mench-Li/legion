@@ -3468,6 +3468,86 @@
 
 ---
 
+## 2026-09-15　第三例同一类缺陷：`Queued → Leased` 声明的 `lease` 证据没有探针（已量到，本批未修）
+
+上一批末尾我把"**声明了要持久化的证据，却没有探针**"写成本会话反复出现的缺陷类型
+（reconciliation 一次、runResult 一次），并说"该顺着查有没有第三例"。这一批查了，
+**有**。查法是机械的、可重复的：把 `transitions.mjs` 里所有
+`requiresPersist: Object.freeze([...])` 出现过的种类收集起来，与 `EVIDENCE_CHECKS`
+的键对一遍。（审计脚本落在 `_prt-handoff/audit-evidence-probes.mjs`。）
+
+```
+transitions.mjs 声明过的种类（9）：attempt approval contextSnapshot handoff lease reconciliation runResult validation workspace
+EVIDENCE_CHECKS 的键（7）：      attempt approval contextSnapshot handoff      reconciliation runResult validation
+                                                                              ↑ 缺 lease、workspace
+```
+
+`workspace` 是已知且已记录的那一条（`PreparingWorkspace → BuildingContext` 声明它，
+但 `orchestrator/workspace/index.mjs` 目前没有别的消费者，做探针等于用"它自己刚建的东西"
+自证）。**`lease` 是新的**，而且它不是无害的。
+
+### 量出来的后果
+
+`Queued → Leased` 声明 `requiresPersist: ['attempt','lease']`，而那行字旁边自己还写着
+`'领取必须用 team-hub 事务与 team-hub 时钟（PRT-302/313），worker 不得自报权威时间'`。
+因为 `EVIDENCE_CHECKS` 里没有 `lease`，`checkEvidence` 走到这一项就 `continue` 跳过它。
+实测（真 `createRunStore`）：
+
+```
+POST /api/runtime/transition { to:'Leased', workerId:'w-forge', leaseEpoch:0 }   （路由对 to 无白名单，body.to 直接透传）
+  → ✅ 被接受了
+  → 那一行： state='Leased'  lease_epoch=0  lease_expires_at_ms=null  worker_id=null
+```
+
+也就是说库里出现了一个**"状态写着已租出、却完全没有租约"**的尝试：没有租约、没有到期
+时间、没有归属 worker。接着量它的两个出口：
+
+```
+③ 再 claim     → claimed=null（reason=queue-empty）      ← 派发器领不到
+④ 时间推 30 天后 recoverExpired → 捡到 0 条                ← 回收也扫不到
+```
+
+④ 的机制值得写下来：回收扫描是拿 `lease_expires_at_ms` 与当前时间比的，而这一列是
+`NULL`——`NULL <= x` 在 SQL 里是 `NULL`（不成立），所以它**永远不会**被判定为过期。
+于是这条尝试两个出口都没有：既不会被派发，也永远不会被回收。这是与 PRT-309 那个缺陷
+**同一形状**的结果（"任务安静地停住，没有任何人知道"），只是入口不同。
+
+### 为什么本批不修
+
+修法本身很小（加一个 `lease` 探针），但**语义上有一个必须先想清楚的选择**，而它不该在
+一个已经很长的批次末尾顺手定下来：
+
+`checkEvidence` 是**前置**核验（在 UPDATE **之前**跑），而 `Queued → Leased` 这条边上的
+租约恰恰是**这次迁移自己将要创建**的东西。于是：
+
+- 若把 `lease` 做成普通前置探针 → 任何 `transition({to:'Leased'})` 都会以
+  `EVIDENCE_MISSING` 被拒。这正是"领取必须走 team-hub 事务"的字面意思，但错误语义是
+  "证据缺失"，而真实语义是"这条路根本不该用来领取"——**两句话对运维的意义不同**。
+- 若照 `approval` **入边**的先例返回 `EVIDENCE_NOT_APPLICABLE`（那条边有完全相同的
+  结构：审批行是由该迁移自己创建的）→ 那就等于**不拦**，得另找一处拦。（`approval` 入边
+  之所以能这么做，是因为它另有一道前置核验在别处兜着。）
+
+这个选择要连同用例与破验一起做，而且**必须先确认没有合法调用方会因此变红**。
+本仓有过"修一个缺陷时自己造出第二个"的先例（见下面 PRT-254 那一节），所以留到下一批。
+
+> 一个"前置核验永远为真"的声明，与一个"没有这条声明"，
+> 在库里的表现是同一个东西——只不过前者会在有人从通用路由进来时，
+> 安静地留下一条谁也看不见的 `Leased`。
+
+### 记账
+
+**不改 PRT-313 的状态**（它仍是 ✅）：它宣称的三件事——`lease_epoch` 单调推进、
+过期写入返回 `LEASE_EPOCH_STALE`、`/api/config` 的能力发现位——都仍然成立且有用例。
+缺的这一块是**证据门的实现**（`requiresPersist` 那句声明的执行点），
+属 PRT-103 那一类"契约声明"的账。但后果落在租约语义上，所以在 PRT-313 行里
+加了一句残留说明，让读那一行的人看得到它。
+
+**也顺带记下一个改动风险**：`claim()` 用的是自己的条件 UPDATE
+（`WHERE id = ? AND state = 'Queued'`），**不经过** `transition`。所以给 `lease`
+加探针**不会**影响正常领取——这条已核，是本批唯一一个"已经查清、下一批可直接用"的结论。
+
+---
+
 ## 2026-09-15　修掉"返回值失败没人接手"（PRT-309），以及我在修它时**改正的两处自己的错**
 
 上一批把它量出来并记在下面（当时降为 🟡）。这一批修它。缺陷本体是：

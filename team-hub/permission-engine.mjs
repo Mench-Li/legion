@@ -57,6 +57,11 @@ import { canonicalJson, domainSeparatedHash, nfc } from '../runtime/contracts/ca
 // 参数身份归 PRT-613 所有，本模块**不**另算一份。`team-hub/` → `runtime/dsh-composition/`
 // 是本仓库既有的方向（同一个方向上的还有 `team-hub/tool-call-log.mjs`）。
 import { hashToolArguments } from '../runtime/dsh-composition/tool-args.mjs'
+// 硬底线那三个名字**不在这里**：它们是 `HARD_FLOOR_CAPABILITIES`（team-hub/run-floor.mjs），
+// 与 `runtime/dsh-composition/tool-capability.mjs` 的能力标记**同一个来源**。
+// 本文件里再写一份字面量，与"两处名单迟早只改一边"是同一个东西——
+// 而那一天丢的是 spec §6.8 静态下限里的一条，没有任何用例会报。
+import { HARD_FLOOR_CAPABILITIES } from './run-floor.mjs'
 
 const MODES = new Set(['deny', 'ask', 'allow-once', 'allow-for-task', 'allow-by-policy'])
 const REQUIRED = ['scope', 'actor', 'action', 'target']
@@ -479,7 +484,8 @@ export function matchRule(operationInput, rules = [], now = Date.now()) {
 }
 
 function isHardFloor(operation) {
-  return operation.metadata.irreversible === true || ['file:delete', 'repo:push', 'credential:write'].includes(operation.action)
+  // 判定逻辑一字未动；变的只是那份名单的**来源**（见文件上方 import 处的注释）。
+  return operation.metadata.irreversible === true || HARD_FLOOR_CAPABILITIES.includes(operation.action)
 }
 
 export function evaluatePermission(operationInput, rules = [], context = {}) {

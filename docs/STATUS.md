@@ -3752,6 +3752,275 @@ it('denial → model escalation → machine allow-once → the retried write lan
 
 ---
 
+## 2026-09-15　spec §6.8 控制面那一格里，少了一半的东西补上了
+
+### 一、`静态 hard floor` 此前一处生产代码都没有
+
+spec §6.8 `:437-440` 那张图写着控制面**生成三样东西**：
+
+```
+Legion/team-hub 控制面
+  EmployeeManifest + TeamPlan + UserPolicy + TaskContext
+  → 生成 Run 权限档位、静态 hard floor 和动态策略
+  → DshRuntimeAdapter 安装到目标 Agent/Session
+```
+
+把这三样逐个 `git grep` 之后：**「Run 权限档位」有**（`lease.permissions`
+一路搬到 `RunRequest`），**「静态 hard floor」没有**——
+
+- `git grep denyTools` / `denyPathPrefixes`：**没有任何生产者**；
+- `orchestrator/worker/executor.mjs:439` 只搬 `{preset:'legion-attended', tools:[]}`；
+- `runtime/contracts/run.mjs:121-131` 校验的 `permissions` 形状里**没有**承载字段；
+- 而 DSH 侧的 `createHardFloorGuard(floor)` 一直在等一个
+  `{denyTools, denyPathPrefixes}`，`plugins/hard-floor.mjs:99` 拿的是
+  `DEFAULT_HARD_FLOOR`（**空**）。
+
+> 一个「强制面已经装好、只是在等一份规则」的读数，
+> 与一个「从来没有人生产过那份规则」的读数，
+> 在"还没有任何东西被拦下来"这个现象上是同一个东西。
+
+### 二、两个判据此前靠一句注释连着
+
+- 控制面 `team-hub/permission-engine.mjs:481` 的 `isHardFloor` 判**动作**：
+  `file:delete` / `repo:push` / `credential:write` 加 `metadata.irreversible`。
+  它是**私有**的，只有一个调用点。
+- DSH 侧 `runtime/dsh-composition/tool-capability.mjs` 判**工具名与能力**，
+  它的注释写着那一组「与 `permission-engine` 的 `isHardFloor` 同名同义」。
+- 于是**两处手写字面量，靠一句注释维持一致**；而它们之间没有任何代码级联系。
+
+### 三、名单落在**定义强制面的那一侧**
+
+新增 `team-hub/run-floor.mjs`：纯函数、零 IO 的 `deriveRunFloor()`，
+产出 `{denyTools, denyPathPrefixes, cwd, platform}` —— `createHardFloorGuard()`
+直接吃得下。**不可派生时 `derived:false` 且 `floor:null`**（不是空对象），
+12 个具名拒绝码：
+
+> 一份"派生出来的空下限"，
+> 与一份"这次没有任何东西该被禁止"，
+> 在空数组这个读数上是同一个东西——
+> 只不过前者意味着强制面整段不在。
+
+但名单**没有定义在控制面**，而是定义在 `runtime/dsh-composition/enforcement.mjs`。
+这是本批最要紧的一个决定，理由是**方向**：
+`team-hub/` → `runtime/` 是本仓库既有的分层方向，反之是 **0 处**
+（`enforcement-mapping.mjs:101-116` 为取一个常量专门拒绝过反转）。
+名单落在 `enforcement.mjs` 之后，两个消费方拿到的是**同一个数组对象**：
+
+```
+team-hub/run-floor.mjs            → ../runtime/dsh-composition/enforcement.mjs
+runtime/dsh-composition/tool-capability.mjs → ./enforcement.mjs（同目录）
+```
+
+于是「只有一份名单」是**构造上**成立的：
+
+> 一个「两边各自声明、由一条用例断言相等」的一致，
+> 与一个「两边取的是同一个数组对象」的一致，
+> 在没有人只改一边的那些日子里是同一个东西——
+> 只不过前者的守卫是纪律，后者的守卫是引用。
+
+实测：`runtime/ → team-hub/` 仍是 **0 处**，两份引用 `===` 为真。
+
+### 四、未知工具进静态下限
+
+未登记的工具（`tool-capability.mjs:400-418` 给 `critical` +
+`requiresApproval:true` + **`hardFloor:true`** + `known:false`）选择
+**进静态下限、判静态拒绝**，而不是"留给审批"或静默跳过。依据是同文件
+`:56-57`：`hardFloor` 的能力「连『问一下』都不够，永远不能被自动放行」。
+决定里带 `known:false` 与一条 notice，文案指向"登记进 `RAW_CATALOG`"。
+
+### 五、★ 那个面不是"跑不了"，是没人插过一行
+
+`runtime/adapters/dsh/session-boundary.mjs` 审计的
+**进程内 父↔continuable 子** 那个面（15 条签名），此前全挂着
+`behaviorVerified: false`。见本文件上面那一条：八个 `subagents` 方法
+在真进程里**全部可注入**，父 agent 可以**现造**。新套件
+`runtime/dsh-composition/subagents-surface-real-process.test.mjs`
+（12 例，真进程，约 8.9 秒）把它驱动起来了：
+
+| 读数 | 值 |
+| --- | --- |
+| `startContinuable` | 真的建立了一个 durable 子会话，`childId` 跨 Activation **稳定** |
+| `sendMessage` 送达 | **孩子自己那一轮**的模型流带着父级 mint 的 token |
+| 打断 | 挂起的流 `aborted=true abortMs=30`；孩子日志 `turn/end {"kind":"aborted"}` |
+| 越权 | 陌生父级地址被拒（`UNAUTHORIZED`） |
+| drain | 之后 `sendMessage` 报 `DRAINING` |
+
+**它不改 `session-boundary.mjs` 一个字、不翻转它的任何一面**——
+那是**静态源码锚点审计**，本套件是**另一层**（真派生/真投递/真打断/真释放）。
+用例里断言 `DSH_CONTINUABLE_SURFACE.length === 15`，就是「本层没动上一层」的读数。
+
+### 六、★ 这一批的破验有一次是"不咬"的，而且有价值
+
+给那个真进程套件提的四条破验里，**三条没咬**（都是把断言改弱：
+`assert.match(UUID_RE)` → `length >= 1`、删掉送达三连、让 `listChildren`
+接受空表）——改弱后的绿不证明什么。真能咬的是**污染读数**：
+把伪造的合法 UUID 塞进读数 → **红 10 条**；把 `aborted` 强制写成 `false`
+→ **红 1 条，且红的正是该红的那条**。
+
+> 一个"我写了这条断言"的读数，
+> 与一个"这条断言在缺陷回来时会红"的读数，
+> 在缺陷不在场的时候是同一个东西——
+> 而"把断言改弱"这种变异**两件事都证明不了**。
+
+顺带一条真实的口径修正：本会话此前写过「一次性的 `dsh --profile acp`
+进程**没有父 agent**」。**按字面是错的**——ACP 的 `session/new` 逐字调用
+`ctx.agents.create`，那个进程里有一个活的**根** agent；
+精确的说法是它**不拥有任何 continuable 子会话**，
+而那不是阻碍。`run-ci.mjs` 里那句现在与事实不符的注释也一并改正了。
+
+---
+
+## 2026-09-15　托盘那个"需要原生模块"的前提，其实不成立
+
+### 一、`NATIVE_ICON_SUPPORTED = false` 的理由是"没有原生外壳"
+
+`product/launcher/tray.mjs` 里那个常量与 `NO_NATIVE_ICON_REASON` 记的是：
+装了产品也看不到图标，因为要有一个原生外壳。**本批实测：Windows 上不需要原生模块。**
+
+用 PowerShell 的 `System.Windows.Forms.NotifyIcon` 就能真的建出一个托盘图标：
+
+```
+OK NotifyIcon 创建成功：Type=System.Windows.Forms.NotifyIcon
+OK Icon 已设置：True
+OK Visible=True
+OK 已 Dispose
+```
+
+而且一个**独立的**卡尺也通过了（不是只调了一个构造函数）：
+
+```
+图标宿主进程还在：True  (PID 5700)
+自行退出：True  退出码=0
+```
+
+也就是说 `powershell.exe -Command '... New-Object System.Windows.Forms.NotifyIcon ... Visible = $true; Start-Sleep 3 ...'`
+真的会**活满那 3 秒**并干净退出——图标是挂在一个活着的宿主上的，不是一次打印。
+
+> 一个"托盘需要原生外壳"的结论，
+> 与一个"我没有试过平台上现成的那套 UI 组件"的读数，
+> 在 `NATIVE_ICON_SUPPORTED = false` 那一行上是同一个东西。
+
+### 二、★ 顺带纠正一条我自己记下来的前提（它没进文档，但值得留痕）
+
+写那几套真进程用例的子代理报过一个前提："工具面是 `pwsh`，
+所以跑在**没有 PowerShell 7** 的机器上会 **RED 而不是 skip**"。
+我当时差点把它写进台账。**它是错的。**
+
+DSH 自己的解析器写明有**最后一档回落**
+（`packages/shell/pwsh-local/src/resolve.ts`）：
+
+```
+const candidates = [ join(programFiles, 'PowerShell', '7', 'pwsh.exe') ]
+for (const entry of (env.PATH ?? '').split(';')) { ... candidates.push(join(trimmed, 'pwsh.exe')) }
+// Windows PowerShell 5.1 remains the last-resort fallback on legacy hosts.
+candidates.push(join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'))
+```
+
+本机实测恰好落在这最后一档上：`pwsh` **不在 PATH**、
+`%ProgramFiles%\PowerShell\7\pwsh.exe` **不存在**，
+只有 `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`。
+而 round 46 那几套真工具调用用例**一直是绿的**——因为回落生效了。
+
+> 一个"这台机器上没有 PowerShell 7"的读数，
+> 与一个"工具面在这台机器上跑不了"的读数，
+> 在只看了候选列表前两项的人那里是同一个东西——
+> 只不过那两项后面还有一行写着 `last-resort fallback`。
+
+（这条没进文档也没进台账，所以**不需要更正**；记在这里是因为
+"托盘该用哪个 shell"这个问题正好要用到同一条解析顺序——
+Legion 应当**照抄那条顺序的理由**，而不是自己发明一个。）
+
+### 三、这一条现在**还没有**变成实现
+
+上面全部是**可行性读数**，不是"托盘已经能用了"。要把它变成 PRT-708 的进展，
+至少还要：图标宿主的解析顺序（照抄上那条理由）、生命周期与父进程监督、
+菜单项与"打开 Workbench"的接线、以及**一条诚实的边界**——
+"图标出现了"与"点它真的打开了 Workbench"是两件事，
+而**一次真实的鼠标点击在无人值守的用例里模拟不出来**。
+
+---
+
+## 2026-09-15　那个"没有父 agent 所以跑不了"的面，服务就在进程里
+
+### 一、把一条注释里的结论，换成一次 `ctx.get`
+
+`runtime/adapters/dsh/session-boundary.mjs:232-247` 审计的是
+**进程内 父↔continuable 子** 那个面——`subagents` 服务的八个方法
+（`startContinuable` / `sendMessage` / `interrupt` / `drainContinuableChildren` /
+`drainContinuableDescendants` / `listChildren` / `listDescendants` /
+`interruptByParent`），外加 `agents.resume/isOwnedBy/enter`、`agentLoop.resume`、
+`sessions.fork`、`approval.setPolicy/overrideOf`。
+该文件 `:70` 与 `:436` 老老实实写着 `behaviorVerified: false`——因为它是**读出来的**。
+
+上一批我把这件事的结论写成了"一个一次性的 ACP 进程**没有父 agent**，
+所以 `subagents.*` 一个都没被跑过"。前半句是推理，后半句是事实。
+**但推理的前提是错的**：DSH 的 base bundle 里**本来就挂着**
+`@deepseek-ai/dsh-subagent` 以及 spawn/fork 两个 in-process provider
+（`packages/bundle/base/cordis.patch.yml:328-339`），
+而 `acp` profile 的 bundle 列表里就包含 base。
+
+所以本批直接问了一次。在一个一次性 `os.tmpdir()` home 里起
+`--profile acp`，用一层 overlay 插入一行 `inject: ['subagents']` 的探针：
+
+```
+探针行被激活（= `subagents` 注入成功）= true
+服务的键：["continuations","ctx","emitLifecycle","name","providers","typertRemote"]
+startContinuable function          sendMessage function
+interrupt function                 listChildren function
+listDescendants function           drainContinuableChildren function
+drainContinuableDescendants function   interruptByParent function
+```
+
+**八个方法全在，而且这一行真的激活了。**
+（`inject` 的语义在这里正好当判据用：服务不在时整行不激活、**不报错**——
+于是"探针什么都没写下来"本身就是一个可读的读数。）
+
+> 一个"我读源码知道 base 装了 subagent"的结论，
+> 与一个"那个服务在这个进程里真的可注入"的读数，
+> 在源码注释里是同一个东西——
+> 只不过前者从来没被 `ctx.get` 问过一次。
+
+### 二、这条发现改写了什么
+
+- **PRT-211** 剩下的那个面不再卡在"没有父 agent"上。那八个方法是 PRT-211
+  要的证据分级里唯一还全是 `false` 的部分，现在有了可跑的落点。
+- **PRT-253**（单员工黄金任务迁移到 RuntimeAdapter）的方向也亮了：
+  `runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs:451`
+  读的就是 `serviceOf(ctx, 'subagents')`——Legion 自己的注册行挂进
+  同一个进程时，读到的会是**真的**那个服务。
+
+### 三、★ 顺带：`ContinuableStartSpec` 是**可调用**的，不是只能看
+
+DSH `packages/subagent/subagent/src/types.ts:32-50`：
+
+```
+readonly provider: string      // 'spawn' / 'fork' 都是 in-process provider
+readonly label: string
+readonly childId?: SessionId   // 可省，manager 自己分配 UUID
+readonly request: Omit<SubagentStartRequest, 'label' | 'signal' | 'outputSchema'>
+readonly signal: AbortSignal
+```
+
+也就是说它**没有**要求一个 ACP 侧的父 agent 才能调。
+"能不能真的派生出一个 continuable 子会话"是本批正在跑的那一套要回答的问题，
+**不是**现在已经成立的事——上面那段只是形状，不是读数。
+
+### 四、这一条是怎么被写错的（值得单独记）
+
+我上一批写下的那句推论，形式是"从**某条测试被跳过**推出**这条能力不可用**"
+（沙箱升级 e2e 那次），本批又犯了一次同族的错：
+从"**这个进程没有父 agent**"推出"**这个服务的方法跑不了**"。
+
+> 一个"这个进程里没有那个角色"的读数，
+> 与一个"那个角色提供的服务不存在"的读数，
+> 在没人问过那个服务的时候是同一个东西——
+> 只不过前者说的是角色，而后者说的是能力。
+
+两次的共同形状：**我把"某个前提不成立"直接当成了"某个东西不存在"，
+中间那一步（那个东西到底依赖不依赖这个前提）没走。**
+
+---
+
 ## 2026-09-15　一根"没有人会传"的接线，看起来像一条纪律
 
 ### 一、上一批我给安装器留的那个"接线缺口"，其实是我的判断错了

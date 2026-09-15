@@ -292,7 +292,14 @@ async function stageTest() {
   const suites = [
     { label: 'chat（对话中心契约）', files: ['team-hub/chat.test.mjs'], cwd: ROOT },
     { label: 'skills（共享技能回归）', files: ['team-hub/skills.test.mjs'], cwd: ROOT },
-    { label: 'permissions（F-02 权限内核与审批）', files: ['team-hub/permission-engine.test.mjs', 'team-hub/permissions.test.mjs', 'team-hub/skills-permission.test.mjs'], cwd: ROOT },
+    {
+      // PRT-214：静态 hard floor 的**派生**（spec §6.8 `:437-440` 控制面那一格）。
+      //
+      // 名单本身在 `runtime/dsh-composition/enforcement.mjs`（定义强制面的地方），
+      // 控制面与 DSH 侧目录取到的是**同一个数组对象**。这一组盯的就是那件事：
+      // 谁把名单改回"两处各声明一份"，恒等断言立刻红（实测破验 3/3 咬）。
+      label: 'permissions（F-02 权限内核与审批）', files: ['team-hub/permission-engine.test.mjs', 'team-hub/permissions.test.mjs', 'team-hub/skills-permission.test.mjs', 'team-hub/run-floor.test.mjs'], cwd: ROOT,
+    },
     {
       // PRT-611：F-02 canonical operation —— 键序不是操作身份。
       //
@@ -2548,12 +2555,51 @@ async function stageTest() {
       //
       // ★ 层不同：本套件驱动的是**外部客户端会话面**；而
       //   `runtime/adapters/dsh/session-boundary.mjs` 审计的主要是**进程内 父↔continuable 子**
-      //   那个面（`subagents.startContinuable` 等）。一次性 acp 进程**没有父 agent**，
-      //   所以本套件**不翻转那个文件里的任何 `behaviorVerified`**。
+      //   那个面（`subagents.startContinuable` 等）。该面由**下一个**套件驱动，
+      //   本套件**不翻转那个文件里的任何 `behaviorVerified`**。
+      //
+      // ★ 前提再纠正（后一批实测又推翻了这里原来的一句话）：这里原先写的是
+      //   「一次性 acp 进程**没有父 agent**，所以那个面驱动不了」。**前半句按字面是错的**：
+      //   ACP 的 `session/new` 逐字调用 `ctx.agents.create`，进程里有一个活的**根** agent。
+      //   精确的说法是它**不拥有任何 continuable 子会话**，而那不是阻碍——
+      //   下一个套件自己用 `ctx.agents.create` 现造一个父 agent 就把整个面驱动起来了。
+      //
+      //     一个"这个进程里没有那个角色"的读数，
+      //     与一个"那个角色提供的服务不存在"的读数，
+      //     在没人问过那个服务的时候是同一个东西——
+      //     只不过前者说的是角色，而后者说的是能力。
       //
       // 条件套件：需要 DSH_CHECKOUT，逐条 SKIP（不伪造通过）。
       label: 'session-boundary-real-process（PRT-211/212：真进程里的续接、cwd 前置条件与审批口三侧）',
       files: ['runtime/dsh-composition/session-boundary-real-process.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      // PRT-211：**进程内 父↔continuable 子** 那个面。
+      //
+      // `session-boundary.mjs` 的 `DSH_CONTINUABLE_SURFACE` 是 15 条，是一个
+      // **静态源码锚点审计**（`:70` / `:436` 逐字写着 `behaviorVerified: false`）。
+      // 本套件是**另一层**：真进程、真派生、真投递、真打断、真释放。
+      // 它不改那个文件一个字，也不翻转它的任何一面——用例里断言
+      // `DSH_CONTINUABLE_SURFACE.length === 15` 就是"本层没动上一层"的读数。
+      //
+      // ★ 本套件最要紧的读数（都是"只有跑起来才看得见"的那一类）：
+      //   · `startContinuable` 真的建立了一个 durable 子会话，且 `childId` **跨
+      //     Activation 稳定**——一个已释放的 Activation 之后，同一个 id 又被
+      //     冷启动跑出下一轮。前提同时成立（投递那刻目标不在册）才说明是冷恢复。
+      //   · `sendMessage` 的送达判据落在**孩子自己那一轮**的模型流上（带着父级 mint
+      //     的 token），不是返回值。*一条"sendMessage 返回了 MessageId"的断言，
+      //     与一条"那个孩子真的收到了"的断言，在投递失败时前半句也是绿的。*
+      //   · 打断分得开"被干净打断"与"进程死了"：挂起的那条流**观察到 abort**，
+      //     孩子自己的 durable 日志以 `turn/end {"kind":"aborted"}` 收尾，
+      //     读数落盘之后再问 ACP 一次仍能开新会话。
+      //
+      // ★ 冷恢复 ≠ 续跑：那是**重建会话再开一轮**，不是把中断的执行接着跑完。
+      //   "编排器必须自己持久化进度"这条结论不变，但理由变了。
+      //
+      // 条件套件：需要 DSH_CHECKOUT，逐条 SKIP（不伪造通过）。
+      label: 'subagents-surface-real-process（PRT-211：真进程里派生/投递/打断/释放一个 continuable 子会话）',
+      files: ['runtime/dsh-composition/subagents-surface-real-process.test.mjs'],
       cwd: ROOT,
     },
     {

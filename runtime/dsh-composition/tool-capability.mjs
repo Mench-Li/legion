@@ -38,6 +38,13 @@
 // 且明确标出 `known: false`——让调用方有机会去问，而不是静默放行。
 // ============================================================================
 
+// 硬底线那一组**不是在这里定义的**，也不是在控制面那一侧定义的：
+// 它在 `./enforcement.mjs`——定义强制面的地方（`DEFAULT_HARD_FLOOR` 与真 guard
+// 都在那里）。两个消费方因此取到的是**同一个数组对象**，而分层方向没有被反转
+// （`team-hub/` → `runtime/` 是既有方向，`runtime/` → `team-hub/` 是 0 处）。
+// 理由写在 `enforcement.mjs` 的 `HARD_FLOOR_CAPABILITIES` 上。
+import { HARD_FLOOR_CAPABILITIES } from './enforcement.mjs'
+
 /** 四档风险，**有序**。数值用于取最大值，不要单独使用名字做比较。 */
 export const RISK_LEVELS = Object.freeze(['low', 'medium', 'high', 'critical'])
 
@@ -56,88 +63,109 @@ export const UNKNOWN_TOOL_RISK = 'critical'
  * 它的有效风险就不可能低于这一档。`hardFloor` 的能力连"问一下"都不够，
  * 它们永远不能被自动放行（与 `permission-engine` 的 `isHardFloor` 同一组动作名）。
  */
-export const CAPABILITY_KINDS = Object.freeze({
+const RAW_CAPABILITY_KINDS = Object.freeze({
   'file:read': Object.freeze({
-    riskFloor: 'low', direction: 'read', externalEffect: false, irreversible: false, hardFloor: false,
+    riskFloor: 'low', direction: 'read', externalEffect: false, irreversible: false,
     userText: '读取文件',
   }),
   'file:write': Object.freeze({
-    riskFloor: 'medium', direction: 'write', externalEffect: false, irreversible: false, hardFloor: false,
+    riskFloor: 'medium', direction: 'write', externalEffect: false, irreversible: false,
     userText: '写入或修改文件',
   }),
   'file:delete': Object.freeze({
     // 删掉的东西回不来，因此这是硬底线：不接受"自动放行"，只能人来批。
-    riskFloor: 'critical', direction: 'write', externalEffect: false, irreversible: true, hardFloor: true,
+    riskFloor: 'critical', direction: 'write', externalEffect: false, irreversible: true,
     userText: '删除文件',
   }),
   'repo:read': Object.freeze({
-    riskFloor: 'low', direction: 'read', externalEffect: false, irreversible: false, hardFloor: false,
+    riskFloor: 'low', direction: 'read', externalEffect: false, irreversible: false,
     userText: '读取代码仓库',
   }),
   'repo:write': Object.freeze({
-    riskFloor: 'high', direction: 'write', externalEffect: false, irreversible: false, hardFloor: false,
+    riskFloor: 'high', direction: 'write', externalEffect: false, irreversible: false,
     userText: '修改代码仓库',
   }),
   'repo:push': Object.freeze({
     // 推上去之后**别人也看得到**，而且改不回来——一次强推能让队友的工作消失。
-    riskFloor: 'critical', direction: 'write', externalEffect: true, irreversible: true, hardFloor: true,
+    riskFloor: 'critical', direction: 'write', externalEffect: true, irreversible: true,
     userText: '向远端仓库推送',
   }),
   'command:exec': Object.freeze({
     // 一条命令能做的事没有上界。它的下限只能是"高"，而不可能是"中"。
-    riskFloor: 'high', direction: 'write', externalEffect: true, irreversible: false, hardFloor: false,
+    riskFloor: 'high', direction: 'write', externalEffect: true, irreversible: false,
     userText: '执行命令',
   }),
   'process:spawn': Object.freeze({
-    riskFloor: 'high', direction: 'write', externalEffect: true, irreversible: false, hardFloor: false,
+    riskFloor: 'high', direction: 'write', externalEffect: true, irreversible: false,
     userText: '启动子进程',
   }),
   'network:read': Object.freeze({
     // 读网络：数据**进来**。它不改变外部世界，但会带进不受控的内容。
-    riskFloor: 'medium', direction: 'read', externalEffect: true, irreversible: false, hardFloor: false,
+    riskFloor: 'medium', direction: 'read', externalEffect: true, irreversible: false,
     userText: '访问网络读取内容',
   }),
   'network:write': Object.freeze({
-    riskFloor: 'high', direction: 'write', externalEffect: true, irreversible: false, hardFloor: false,
+    riskFloor: 'high', direction: 'write', externalEffect: true, irreversible: false,
     userText: '向网络发送数据',
   }),
   'external-api:read': Object.freeze({
-    riskFloor: 'medium', direction: 'read', externalEffect: true, irreversible: false, hardFloor: false,
+    riskFloor: 'medium', direction: 'read', externalEffect: true, irreversible: false,
     userText: '读取外部 API',
   }),
   'external-api:write': Object.freeze({
     // PRT-606 要区分的那一对。写外部 API 可能让别人真的付钱/发货/发消息，
     // 而且**这个动作在我们这边没有回滚**，所以它是可逆性上的风险点。
-    riskFloor: 'critical', direction: 'write', externalEffect: true, irreversible: true, hardFloor: false,
+    riskFloor: 'critical', direction: 'write', externalEffect: true, irreversible: true,
     userText: '写入外部 API',
   }),
   'mcp:call': Object.freeze({
     // MCP 服务器的能力对我们是不透明的：我们只知道"它在那边干了点什么"。
-    riskFloor: 'high', direction: 'write', externalEffect: true, irreversible: false, hardFloor: false,
+    riskFloor: 'high', direction: 'write', externalEffect: true, irreversible: false,
     userText: '调用 MCP 服务器',
   }),
   'credential:read': Object.freeze({
-    riskFloor: 'high', direction: 'read', externalEffect: false, irreversible: false, hardFloor: false,
+    riskFloor: 'high', direction: 'read', externalEffect: false, irreversible: false,
     userText: '读取密钥',
   }),
   'credential:write': Object.freeze({
-    riskFloor: 'critical', direction: 'write', externalEffect: false, irreversible: false, hardFloor: true,
+    riskFloor: 'critical', direction: 'write', externalEffect: false, irreversible: false,
     userText: '写入或删除密钥',
   }),
   'message:send': Object.freeze({
     // 发出去的话收不回来。
-    riskFloor: 'high', direction: 'write', externalEffect: true, irreversible: true, hardFloor: false,
+    riskFloor: 'high', direction: 'write', externalEffect: true, irreversible: true,
     userText: '对外发送消息',
   }),
 })
 
+/**
+ * 编译后的能力表：**唯一**加上 `hardFloor` 这一步。
+ *
+ * 名单在 `./enforcement.mjs`（`HARD_FLOOR_CAPABILITIES`，与 `DEFAULT_HARD_FLOOR`
+ * 和真 guard 放在一起），与控制面 `permission-engine.mjs` 的 `isHardFloor`
+ * 是**同一个数组对象**。这里只做一次成员判定，于是"改名单"与"改能力表"
+ * 不可能各改各的。
+ */
+export const CAPABILITY_KINDS = Object.freeze(Object.fromEntries(
+  Object.entries(RAW_CAPABILITY_KINDS).map(([id, kind]) => [
+    id,
+    Object.freeze({ ...kind, hardFloor: HARD_FLOOR_CAPABILITIES.includes(id) }),
+  ]),
+))
+
 /** 全部能力种类名，供校验与遍历。 */
 export const CAPABILITY_IDS = Object.freeze(Object.keys(CAPABILITY_KINDS))
 
-/** 与 `permission-engine.mjs` 的 `isHardFloor` 同名同义的那一组。 */
-export const HARD_FLOOR_CAPABILITIES = Object.freeze(
-  CAPABILITY_IDS.filter((id) => CAPABILITY_KINDS[id].hardFloor),
-)
+// 硬底线那一组**不是在这里定义的**：它就是 `./enforcement.mjs` 的
+// `HARD_FLOOR_CAPABILITIES`（`team-hub/run-floor.mjs` 也只是把它转出去），
+// 控制面 `permission-engine.mjs` 的 `isHardFloor` 用的是同一个数组对象。
+// 这里**重导出**，不再从本表算第二份。
+//
+//   > 一份"两处名单今天恰好同名"的一致性，
+//   > 与一份"它们来自同一个来源"的一致性，
+//   > 在没有人只改一边的那些日子里是同一个东西——
+//   > 只不过前者会在有人只改一边的第二天，让 spec §6.8 的两道闸安静地少掉一道。
+export { HARD_FLOOR_CAPABILITIES }
 
 /** 声明非法。工具作者就在现场，因此这是**抛错**而不是诊断。 */
 export class CapabilityDeclarationError extends Error {

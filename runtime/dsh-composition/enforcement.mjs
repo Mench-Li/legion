@@ -34,6 +34,40 @@ export const DEFAULT_HARD_FLOOR = Object.freeze({
   denyPathPrefixes: Object.freeze([]),
 })
 
+/**
+ * **静态 hard floor 能力名单的唯一一份。**
+ *
+ * spec §6.8（`2026-09-11-legion-product-runtime-design.md:456`）把「hard floor」
+ * 映射到「pre-execute 提前拒绝 + guard 最终复核」，而这两道闸都在本模块：
+ * `DEFAULT_HARD_FLOOR` 是它们的空装配，`createHardFloorGuard()` 与
+ * `composePreExecuteFloor()` 是它们的实现。名单因此放在**定义强制面**的一侧，
+ * 而不是放在某一个消费方那里。
+ *
+ * ★ 放在这里还有一个方向上的理由，与 `enforcement-mapping.mjs:101-116` 记的是同一条：
+ * `team-hub/` → `runtime/` 是本仓库既有的分层方向，而 `runtime/` → `team-hub/`
+ * 是 **0 处**。名单落在本模块里，两个消费方拿到的是**同一个数组对象**：
+ *
+ *   · `team-hub/run-floor.mjs` → 本模块（team-hub → runtime，既有方向）
+ *   · `runtime/dsh-composition/tool-capability.mjs` → 同目录的 `./enforcement.mjs`
+ *
+ * 于是「只有一份名单」是**构造上**成立的：不需要一条对拍用例去维持它，
+ * 也不需要为了取一个常量反转一条已经一致的方向。
+ *
+ *   > 一个「两边各自声明、由一条用例断言相等」的一致，
+ *   > 与一个「两边取的是同一个数组对象」的一致，
+ *   > 在没有人只改一边的那些日子里是同一个东西——
+ *   > 只不过前者的守卫是纪律，后者的守卫是引用。
+ *
+ * 三个名字是 §6.8 那三类"静态面"里落在**不可逆**上的那一组：
+ * 删文件回不来、推远端别人也看得到、写密钥会让已录入的凭证无法恢复。
+ * 想加一条就在这里加——改完两边同时变，这正是它只有一份的理由。
+ */
+export const HARD_FLOOR_CAPABILITIES = Object.freeze([
+  'file:delete',
+  'repo:push',
+  'credential:write',
+])
+
 // ----------------------------------------------------------------- canonical op
 
 /** canonical operation 的 schema 版本。**改变 canonical 形式必须递增它。** */

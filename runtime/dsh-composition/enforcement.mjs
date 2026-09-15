@@ -283,7 +283,50 @@ async function runWithPhaseDeadlines(invoke, {
   }
 
   try {
-    return await Promise.race([invoke(onConnected), gate])
+    const value = await Promise.race([invoke(onConnected), gate])
+
+    // ★★ 迟到的答案不是答案（PRT-212 补：本批修的缺陷）。
+    //
+    // 上面的闸门是一个**计时器**，而计时器抢不了同步代码：端口只要在返回前把事件循环
+    // 占住（同步阻塞、一次长 GC、别的插件在同一个 tick 里干重活），闸门就一次也 fire
+    // 不了，于是一个**远远超期**的答案会直接赢下 `Promise.race`。
+    // 事件循环只是卡顿超过总预算时也一样：那一刻 `remaining()` 被夹到 1ms，
+    // 谁先结算取决于计时器的插入顺序——那是一个硬币。
+    //
+    // 本仓库那条 PRT-212 用例（`tool-request.test.mjs`「自报了连接才算响应阶段超时」）
+    // 长期抖动就是这个硬币：干净树上单独跑 6 次红 4 次，失败时那一侧返回 `allowed-once`。
+    // 一个"偶尔把超期的放行当成决定"的审批箱，在真实系统里是一类**最坏**的失败：
+    // 它看起来像"用户批准了"。
+    //
+    //   > 一个"超时了"的判据，如果只由计时器表达，与一个"谁先结算谁赢"的判据，
+    //   > 在事件循环从不卡顿的世界里是同一个东西——
+    //   > 只不过前者的承诺会在下一次卡顿时变成后者。
+    //
+    // 所以判据要在**端口返回之后**再核一次：期限是**事实**，不是一次调度。
+    // 形状与 `approval` 入边那条后置核验同源——"端口被调用过 ≠ 那一行存在"，
+    // 所以进 `AwaitingApproval` 之后要回头查库；这里是"端口返回过 ≠ 它在期限内返回过"。
+    const elapsedMs = now() - started
+    if (elapsedMs > budget) {
+      // 归因口径与计时器路径保持一致：自报过连接就是响应阶段超时；
+      // 没自报时，声明了分段的调用方拿 `CONNECT_TIMEOUT`，没声明的拿"阶段未自报"。
+      const code = connected
+        ? AVAILABILITY_CODES.RESPONSE_TIMEOUT
+        : (portsPhases ? AVAILABILITY_CODES.CONNECT_TIMEOUT : AVAILABILITY_CODES.PHASE_UNREPORTED)
+      const phase = AVAILABILITY_PHASE_OF[code]
+      const where = phase === 'connect' ? '连接阶段' : phase === 'response' ? '响应阶段' : '阶段未自报'
+      const err = new Error(`${label}不可用（${where}，${code}，${elapsedMs}ms）：` +
+        `端口在期限（${budget}ms）之后才给出答案，这个答案不算数。` +
+        '**不降级**成"它毕竟答了"——审批箱的截止时间来自 Run 的期限约束，' +
+        '晚到的放行与没有放行，在下游看来必须是同一件事')
+      err.code = code
+      err.phase = phase
+      err.phaseDeclared = portsPhases
+      err.connected = connected
+      err.lateAnswer = true
+      err.elapsedMs = elapsedMs
+      throw err
+    }
+    return value
   } catch (err) {
     // 端口自己抛的错：按"有没有自报连接建立"归因。一律叫"不可达"会让一次
     // "策略请求本身失败"被读成"team-hub 挂了"，于是排查方向从一开始就是错的。
@@ -306,7 +349,7 @@ async function runWithPhaseDeadlines(invoke, {
  * 构造一次分类（`code` 必须是闭集里的码）。供**不经过异常**的归类使用，
  * 例如端口返回了闭集外的值——那不是抛错，是"这个端口现在不可信"。
  */
-export function availabilityOf(code, detail, { phaseDeclared = false, connected = false } = {}) {
+export function availabilityOf(code, detail, { phaseDeclared = false, connected = false, lateAnswer = false } = {}) {
   if (AVAILABILITY_PHASE_OF[code] === undefined) {
     throw new Error(`未知的可用性分类码 ${JSON.stringify(code)}（闭集之外的东西不能进审计）`)
   }
@@ -316,6 +359,21 @@ export function availabilityOf(code, detail, { phaseDeclared = false, connected 
     phase: AVAILABILITY_PHASE_OF[code] ?? null,
     phaseDeclared,
     connected,
+    // ★ `lateAnswer`：端口**答了，但答晚了**。
+    //
+    // 不带上这一项，"超期才到的答案"与"端口根本没答"在审计里是同一个读数
+    // ——而这两件事该派去查的地方完全不同：前者要去看那个端口为什么慢
+    // （它活着、链路通、只是在期限之后才回来），后者要去看它是不是挂了。
+    //
+    //   > 一个"答了但答晚了"的读数，与一个"没答"的读数，
+    //   > 在只有 `code` 一个字段的时候是同一个东西——
+    //   > 只不过前者会让人去查一个根本没挂的服务。
+    //
+    // ⚠️ 这里**不放** `elapsedMs`：它已经由 `createApprovalAnswerer` 的 `finish()`
+    // 放在同一个对象上了，而且那是**权威**值。第一版在这里也加了 `elapsedMs: null`，
+    // 它在展开时覆盖掉 `finish()` 的数值，把 `availability.test.mjs` 里
+    // 「`typeof elapsedMs === 'number'`」那条断言打破——**重复的字段不是冗余，是遮蔽。**
+    lateAnswer,
     detail,
   })
 }
@@ -339,12 +397,17 @@ export function classifyAvailability(err) {
       phase: null,
       phaseDeclared: err?.phaseDeclared === true,
       connected: err?.connected === true,
+      lateAnswer: err?.lateAnswer === true,
       detail,
     })
   }
   return availabilityOf(err.code, detail, {
     phaseDeclared: err?.phaseDeclared === true,
     connected: err?.connected === true,
+    // ★ `lateAnswer` 必须**透传**：`classifyAvailability` 会重建一个对象，
+    // 忘了带就等于"迟到的答案"这个事实在归因那一步被丢掉——
+    // 而丢掉它的后果正是本批修的那个缺陷"看起来像用户批准了"的审计版本。
+    lateAnswer: err?.lateAnswer === true,
   })
 }
 

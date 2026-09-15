@@ -22,6 +22,7 @@ import {
   createHardFloorGuard,
   createPreExecutePolicy,
   nfc,
+  AVAILABILITY_CODES,
 } from './enforcement.mjs'
 
 /** 一个最小的合法 canonical operation。 */
@@ -247,6 +248,122 @@ test('approval：超时 → `unavailable`，**不是** `rejected`', async () => 
   const outcome = await answerer({ toolName: 'write' })
   assert.equal(outcome, 'unavailable')
   assert.notEqual(outcome, 'rejected', '把故障伪装成决策，会让人去追问一个从未被问过的人')
+})
+
+// ----------------------------------------------------------------- 迟到的答案
+//
+// ★★ 这一组修的是一个**真实缺陷**，不是补一条边角用例。
+//
+// 原来的实现只靠计时器表达"超时"。而计时器抢不了同步代码：端口只要在返回前把事件
+// 循环占住，闸门就一次也 fire 不了，于是一个**远远超期**的答案会直接赢下
+// `Promise.race`，被当成"用户批准了"。事件循环只是卡顿超过总预算时也一样——
+// 那一刻 `remaining()` 被夹到 1ms，谁先结算取决于计时器插入顺序，那是一个硬币。
+//
+// 那个硬币就是本仓库 `tool-request.test.mjs` 里那条 PRT-212 用例长期抖动的原因：
+// 干净树上单独跑 6 次红 4 次，失败时返回 `allowed-once` 而不是 `unavailable`。
+// **不是测试写得松，是它把一个真的会放行的行为如实地报了出来。**
+
+test('★★ 超期才到的答案不算答案（注入时钟，确定性复现）', async () => {
+  // 注入时钟让这件事**确定的**可测：端口"花了"多少时间由一个变量说了算，
+  // 与真实调度无关。真实计时器版本在下面那条。
+  const mk = (spendMs) => {
+    let t = 0
+    const seen = []
+    const answerer = createApprovalAnswerer({
+      request: () => { t = spendMs; return 'allowed-once' },
+      connectTimeoutMs: 5,
+      responseTimeoutMs: 25,
+      now: () => t,
+      onOutcome: (e) => seen.push(e),
+    })
+    return { answerer, seen, budget: 30 }
+  }
+
+  // ① 端口花了 100ms 而总预算是 30ms ⇒ 这个放行**不算数**
+  const late = mk(100)
+  assert.equal(await late.answerer({ toolName: 'write' }),
+    'unavailable', '超期 3 倍才给出的放行，绝不能被当成及时的放行')
+  assert.equal(late.seen[0].code, AVAILABILITY_CODES.PHASE_UNREPORTED)
+  assert.equal(late.seen[0].lateAnswer, true, '要能看出它是"迟到"而不是别的不可用')
+
+  // ② ★ 反面：在预算**之内**返回的答案必须照常采纳。
+  //    没有这一条，`if (elapsedMs > budget)` 换成 `if (true)` 也全绿——
+  //    一个"把一切都判成超时"的实现与一个"真的在核对期限"的实现，
+  //    在只看被拒的那一次时读数相同。
+  const inTime = mk(10)
+  assert.equal(await inTime.answerer({ toolName: 'write' }),
+    'allowed-once', '预算之内返回的放行必须被采纳（否则这个判据就是恒真的）')
+
+  // ③ 边界：正好等于预算算**没有超**（`>` 而不是 `>=`）。
+  const atBudget = mk(30)
+  assert.equal(await atBudget.answerer({ toolName: 'write' }),
+    'allowed-once', '正好用满预算不算超期——把边界收紧会把合法的慢端口判死')
+})
+
+test('★★ 迟到的归因跟着"有没有自报连接"走（与计时器路径同一口径）', async () => {
+  const mk = ({ connected, portsPhases = false }) => {
+    let t = 0
+    const seen = []
+    const answerer = createApprovalAnswerer({
+      request: (req) => {
+        if (connected) req.onConnected()
+        t = 100 // 远超预算 30ms
+        return 'allowed-once'
+      },
+      connectTimeoutMs: 5,
+      responseTimeoutMs: 25,
+      portsPhases,
+      now: () => t,
+      onOutcome: (e) => seen.push(e),
+    })
+    return { answerer, seen }
+  }
+
+  // 自报过连接 ⇒ 是**响应阶段**超时：人该去看谁的申请积压着
+  const c = mk({ connected: true })
+  assert.equal(await c.answerer({ toolName: 'write' }), 'unavailable')
+  assert.equal(c.seen[0].code, AVAILABILITY_CODES.RESPONSE_TIMEOUT)
+  assert.equal(c.seen[0].phase, 'response')
+
+  // 没自报、也没声明分段 ⇒ 如实说"阶段未自报"，不猜一段
+  const u = mk({ connected: false })
+  assert.equal(await u.answerer({ toolName: 'write' }), 'unavailable')
+  assert.equal(u.seen[0].code, AVAILABILITY_CODES.PHASE_UNREPORTED)
+  assert.equal(u.seen[0].phase, null, '不归因到任何一段——猜一段等于把一半的故障派给错的人')
+
+  // 声明了 `portsPhases: true` 却没自报 ⇒ 连接窗口是硬期限，记成连接阶段超时
+  const d = mk({ connected: false, portsPhases: true })
+  assert.equal(await d.answerer({ toolName: 'write' }), 'unavailable')
+  assert.equal(d.seen[0].code, AVAILABILITY_CODES.CONNECT_TIMEOUT)
+  assert.equal(d.seen[0].phase, 'connect')
+})
+
+test('★★ 真实计时器下的同一件事：同步卡死事件循环后再给答案', async () => {
+  // 上面两条用注入时钟，读起来像"在测那个注入的时钟"。
+  // 这一条用**真实**计时器把同一件事钉死：端口同步阻塞 80ms（预算 30ms），
+  // 期间闸门一次也 fire 不了。修复前这里会拿到 `allowed-once`。
+  //
+  // 成本 80ms 是可接受的：它是"这个缺陷真的存在"的那一份证据，
+  // 而注入时钟只能证明"判据是按 elapsed 算的"。
+  const seen = []
+  const answerer = createApprovalAnswerer({
+    request: async () => {
+      const t = Date.now()
+      while (Date.now() - t < 80) { /* 同步阻塞，计时器一次也 fire 不了 */ }
+      return 'allowed-once'
+    },
+    connectTimeoutMs: 5,
+    responseTimeoutMs: 25,
+    onOutcome: (e) => seen.push(e),
+  })
+  const started = Date.now()
+  const outcome = await answerer({ toolName: 'write' })
+  const wall = Date.now() - started
+
+  assert.ok(wall > 30, `前提：这一次确实超过了 30ms 预算（实际 ${wall}ms）`)
+  assert.equal(outcome, 'unavailable',
+    '端口在期限之后才给出的放行不算数——**"它毕竟答了"不是放行的理由**')
+  assert.equal(seen[0].lateAnswer, true)
 })
 
 test('approval：审批箱抛错 → unavailable', async () => {

@@ -3500,6 +3500,186 @@
 
 ---
 
+## 2026-09-15　DSH 有一个程序驱动的会话协议——它一直就在那张表里
+
+### 一、`headless` 能跑工具，但它不能开会话
+
+上一批证明了真 DSH 进程能跑真工具。但 `headless` 是**一次性**的：
+起、跑一轮、退出，没有会话，也就没有"恢复边界"可测。PRT-211 卡在这里。
+
+今天发现：DSH 的 `PROFILE_TEMPLATES` 里**一直**有五个 profile
+（`acp` / `web` / `headless` / `sdk` / `sdk-minimal`），
+其中 **`acp` 的自我描述是 "automation-only JSON-RPC stdio and process lifecycle"**。
+
+在一次性 home 里起它、从 stdin 喂一条 `initialize`：
+
+```
+exit=0  6068ms
+{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,
+ "agentInfo":{"name":"deepseek-harness-acp","version":"0.0.1"},
+ "agentCapabilities":{...,"sessionCapabilities":{"close":{},"list":{},"resume":{}}},
+ "authMethods":[]}}
+```
+
+**`sessionCapabilities` 里写着 `resume`。** 加上 `close` 与 `list`，
+这就是 PRT-211 要的"续接 / 取消 / 恢复边界"的**程序面**；
+而 ACP 的 `session/request_permission` 还是 PRT-212 剩下的那半句
+（"没有一个真 DSH 进程**通过审批口**执行过工具调用"）的落点。
+
+> 一个"仓库里没有能程序驱动的会话面"的结论，
+> 与一个"我只试过 `headless`"的结论，
+> 在只看过 `headless` 的人那里是同一个东西。
+
+### 一之二、★★ 审批口就在这套协议里——但它的**示范路径在本机跑不了**
+
+ACP 的审批是**代理→客户端**的一次请求
+（`packages/acp/acp/src/index.ts:168`：`conn.request(methods.client.session.requestPermission, params)`），
+所以脚本化的客户端可以**回答**它。DSH 自己有一条 e2e 走的正是这条路
+（`apps/cli/tests/profiles/acp/tests/escalation.e2e.ts`）：
+
+```
+it('denial → model escalation → machine allow-once → the retried write lands on disk')
+  ...
+  expect(prompt.options.map(o => o.optionId).sort())
+    .toEqual(['allow-once', 'reject-once'])
+  // The WORLD: the approved escalated retry landed the write.
+  expect(await readFile(join(workdir, 'escalated.txt'), 'utf8')).toContain('ACP_ESCALATION_OK')
+```
+
+它把"世界"（写真的落盘了）与"通道"（授权真的来自一次 `session/request_permission`）
+**分开断言**——这正是本仓库一直在用的那条纪律。
+
+★ **但它在本机跑不了**，而且闸不在凭证上：
+
+```
+:47  const hasBwrap   = spawnSync('bwrap', [...], ...)
+:51  const hasSeatbelt = process.platform === 'darwin' && spawnSync('sandbox-exec', ...)
+:55  const hasRunner  = hasBwrap || hasSeatbelt
+:140 describe.skipIf(!process.env.DEEPSEEK_API_KEY || !hasRunner)
+```
+
+本机实测：`bwrap` 不在 PATH，`sandbox-exec` 不在 PATH，平台是 Windows 11。
+**DSH 的沙箱运行器只有 Linux（bwrap）与 macOS（seatbelt）两种。**
+
+> 一条"被 `skipIf` 跳过的 e2e"，与一条"这个能力不存在"的读数，
+> 在 CI 的摘要里都是 `skipped`——
+> 只不过前者说的是"这台机器上没有 bwrap"，而后者说的是"没有人实现过它"。
+
+**这条直接改写了 PRT-212 剩下那半句的性质**：那句
+「没有一个真 DSH 进程通过审批口执行过工具调用」如果按 DSH 的**升级示范路径**去补，
+就补在一条**本机永远 skip** 的路上。
+
+★ 但审批口与沙箱是**两件事**：`session/request_permission` 由审批服务 + 桥发出，
+不需要沙箱运行器。而同一批调查已经读出：当能力目录未注入时，
+组合根的策略门对未知工具给 `requiresApproval: true`——
+也就是说**每一次**工具调用都会走到审批口。
+于是"批准则执行、拒绝则不执行"这**两侧**有可能在本机被真的跑出来。
+这是下一批要验证的事，**不是**现在已经成立的事。
+
+### 一之三、★★★ 审批口只有四个结局，而其中两个在"工具没跑"上长得一样
+
+把审批服务的判定读出来（`packages/interaction/user-approval/src/index.ts`）：
+
+```
+:48   const OUTCOMES = ['allowed-once', 'rejected', 'cancelled', 'unavailable']
+:204  @returns the closed outcome；`'allowed-once'` 是**唯一**的授权
+:260  private async decide(req, session): Promise<ApprovalOutcome> {
+:262    if (signal?.aborted) return 'cancelled'
+:268    if (this.effectivePolicy(session) === 'never') return 'rejected'   // ← 在派发之**前**
+:273    const answer = Promise.resolve().then(() => this.ctx.waterfall(
+:275      ..., 'approval/request', req,
+:276      () => Promise.resolve('unavailable'),        // ← 没有 answerer 时的兜底
+:278    )).then(
+:281      outcome => OUTCOMES.includes(outcome) ? outcome : 'unavailable',
+:284      () => 'unavailable',                          // ← answerer 抛异常 → 也是 unavailable
+```
+
+三条结论：
+
+**① `approval: never` 在第 268 行短路，waterfall 根本不会派发。**
+所以 Legion 自己的 `legion-unattended`（`approval: never`）是一个**免费的精确负对照**：
+同一段对话、同一次工具调用，客户端应当记录到 **0 次** `session/request_permission`。
+它分开了"审批口拒绝了"与"审批口根本没被咨询过"。
+
+**② 兜底是 `'unavailable'`，不是 `'rejected'`（:276）。**
+所以当 ACP 桥的 listener 因自己的守卫（`record === undefined ||
+request.callId === undefined`）走 `next()` 时，结局是 `unavailable`；
+而 answerer **抛异常**也是 `unavailable`（:284）——**fail closed，不 fail open**。
+
+**③ 于是四个结局的语义是：**
+
+| 结局 | 含义 |
+| --- | --- |
+| `allowed-once` | 唯一的授权 |
+| `rejected` | 策略是 `never`，**或**某个真的 answerer 说了不 |
+| `unavailable` | **没有任何 answerer 处理它**——审批口其实没被真正咨询 |
+| `cancelled` | 被中止（signal），或 `optionId` 缺失/不认识 |
+
+> 一条"审批没通过"的断言，
+> 与一条"审批口根本没被问过"的断言，
+> 在"工具没跑起来"这个读数上是同一个东西——
+> 只不过前者证明的是那道闸有用，而后者什么都没证明。
+
+**所以审批口那两侧的用例不能只断言"哨兵不存在"**：那只会在整座桥都不存在时
+同样变绿。必须断言**结局值**与**`session/request_permission` 的调用次数**。
+（这是下一批的验收条件。）
+
+★ 另外一条值得单独看：`packages/interaction/user-approval/src/index.ts:263-267`
+写着"`never` 这个决定必须由服务自己在下发之前做，因为一个用 `prepend: true`
+后挂上来的 listener 会排在任何闸 listener 前面"——
+也就是说"`never` 确定性地拒绝"这条承诺**只能由服务自身的请求路径兑现**，
+一个 listener 形状的闸兑现不了它。这与 Legion 下限那边
+"guard 只有降级语义、没有 allow 语义"是同一类设计约束。
+
+### 二、★ 顺带查了一件以前没人查的事：%TEMP% 里的残留
+
+`acp` 那个探针跑完我去数了一下 `%TEMP%`，发现 **12 个孤儿目录**：
+
+| 前缀 | 个数 | 日期 | 来源 |
+| --- | --- | --- | --- |
+| `dsh-p13-home-*` | 9 | 09-09 ~ 09-11 | `tests/p13-fixture/host-fixture.mjs` |
+| `dsh-probe-*-A-*` | 3 | 今天 | 我自己的只读探针（解析压缩日志时抛了错，没走到清理） |
+
+两边的成因是**同一个**：清理写在 `after()`（p13 套件）或脚本末尾（我的探针）里，
+而**两者都活不过一次硬杀或一次提前抛错**。p13 那 9 个的日期，
+正好对得上之前某一轮 CI 记录里那句「`p13-host-injection`（中途被杀 25/39）」。
+
+> 一个"清理写在 `after()` 里"的套件，与一个"从不清理"的套件，
+> 在它跑完的那些运行里是同一个东西——
+> 只不过前者被强杀一次，就会在 `%TEMP%` 里留下一个只有它认识的家目录。
+
+★ 这条**同样适用于本批刚提交的那两个真进程套件**（它们一个用 `after()`、
+一个用 `finally`）——所以这是它们的**诚实边界**，不是别人的问题：
+**被 SIGKILL 时，`after()` 与 `finally` 都不会跑。**
+影响有界：家在 `os.tmpdir()` 下，且每次运行都新建一个，
+残留不会影响下一次运行——但它会**累积**，而且"清理跑过了"与"脚本早退了"
+在输出里长得一模一样。
+
+（12 个已清掉。**已核对该核实的事**：两个新套件的清理方式本身是对的——
+`headless-real-tool` 用 `after()`、`enforcement-real-process` 用 `finally`，
+所以正常失败路径下不会留残留；只有硬杀会。）
+
+### 三、★ 自查时发现我自己一直在用一个错的"行数"
+
+核对那两个套件时，我用 `Get-Content <f> | Measure-Object -Line` 读了"行数"，
+得到 **528** 与 **558**；而 `git show --stat` 与读文件工具给的都是 **733** 与 **761**。
+
+以 node 为准复算：`headless-real-tool.test.mjs` 总行 **733**（空行 62），
+`enforcement-real-process.test.mjs` 总行 **761**（空行 77）——
+**PowerShell 的 `Measure-Object -Line` 不是行数**（它少算了空行/连续空行）。
+
+> 一个"用 `Measure-Object -Line` 数出来的行数"，
+> 与一个"文件真的短了 200 行"的读数，
+> 在只看那个数字的人那里是同一个东西——
+> 只不过前者每次都少，而且少得很有规律，于是看起来像个正常的读数。
+
+这条不改产品，但它是**我这一整轮里反复用过的那个数字**（"行数=732"那种），
+所以记在这里：**行数以 node 的 `split('\n').length` 为准**，或用 `git show --stat`。
+文件完整性我另外用 sha256 核对过，两份都与子代理报的一致
+（`A3E061B1…` / `DED5D94E…`），所以"文件短了"这件事没有发生。
+
+---
+
 ## 2026-09-15　下限真的拦住了——但今天这份补丁里，它一条规则都没有
 
 ### 一、这一批补的是 PRT-212 的下一句

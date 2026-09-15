@@ -308,6 +308,48 @@ describe('PRT-257 DSH 运行时安装：纯计划（零 IO）', () => {
     assert.deepEqual(snapshot(f.root), before, '区间判定在磁盘上留下了东西')
   })
 
+  // ★★★★★ 缺省判据**就是生产实现**——这一条钉的是"接线"，不是"判据"。
+  //
+  // 上面那条用例里的 `planFor()` **总是**把 `rangeSatisfied` 传进去，所以
+  // 缺省值本身**没有任何用例覆盖**。上一版的缺省是 `null`，于是任何真实调用
+  // 都会停在 `RANGE_UNCHECKED` 上：安装器**一个东西都装不了**。
+  //
+  //   > 一根"没有任何调用方会传"的接线，
+  //   > 与一根"故意不接、要求调用方显式提供"的接线，
+  //   > 在每一次被拒绝的调用上都是同一个东西——
+  //   > 只不过前者是缺陷，而后者看起来像纪律。
+  //
+  // 但只断言"它不再拒绝了"是不够的：`() => true` 也能过那一条。承重的是 ②。
+  test('★★★★★ 缺省判据是生产实现：既不再"什么都装不了"，也不是"永远放行"', () => {
+    const f = fixture('plan-default-range')
+    const before = snapshot(f.root)
+
+    // ① 不传 `rangeSatisfied`：合法区间下**必须越过区间这一关**。
+    const withoutPredicate = planFor(f, { rangeSatisfied: undefined })
+    assert.notEqual(withoutPredicate.code, RUNTIME_INSTALL_CODES.RANGE_UNCHECKED,
+      `缺省判据没有生效：仍然停在 RANGE_UNCHECKED（说明缺省还是 null）`)
+
+    // ② ★ 承重：同一个缺省判据**必须真的拒掉区间外的版本**。
+    //    这一条把"缺省接的是生产实现"与"缺省接了一个恒真的东西"分开——
+    //    两者在 ① 上是一样的绿。
+    const outOfRange = planFor(f, { rangeSatisfied: undefined, targetVersion: '9.9.9' })
+    assert.equal(outOfRange.ok, false, '缺省判据放行了区间外的版本')
+    assert.equal(outOfRange.code, RUNTIME_INSTALL_CODES.VERSION_OUT_OF_RANGE,
+      `缺省判据没有拒掉区间外的版本，码是 ${outOfRange.code}`)
+
+    // ③ 显式 `null` 仍然关得掉它：fail-closed 的那条路保留着，且与"没传"不同。
+    //    （JS 的解构缺省只对 `undefined` 生效，所以 `null` 是个**显式**的关闭动作。）
+    const disabled = planFor(f, { rangeSatisfied: null })
+    assert.equal(disabled.code, RUNTIME_INSTALL_CODES.RANGE_UNCHECKED,
+      `显式 null 没有关掉判据，码是 ${disabled.code}`)
+
+    // ④ 而 `null` 与"没传"必须**不是同一个读数**——否则这一整条用例就是空的。
+    assert.notEqual(withoutPredicate.code, disabled.code,
+      '「没传判据」与「显式关掉判据」给出了同一个码：缺省值没有被区分出来')
+
+    assert.deepEqual(snapshot(f.root), before, '缺省判据的判定在磁盘上留下了东西')
+  })
+
   test('★★★★ §9.1 成对：绑定表里没有那一对 → 具名拒绝，并说清是哪一侧', () => {
     const f = fixture('plan-pair')
     const before = snapshot(f.root)

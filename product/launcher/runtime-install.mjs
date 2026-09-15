@@ -90,9 +90,17 @@
 //   > 一个"向 npm 问 latest"的解析器，
 //   > 与一个"读清单声明的版本"的解析器，在两者恰好一致的那些日子里是同一个东西。
 //
-// 区间判据（`rangeSatisfied`）是**注入**的，而且**缺省即拒绝**：一个
-// "没有区间判据于是默认放行"的实现与一个不检查区间的实现是同一个东西。
-// 生产里由调用方接上 `runtime/packs/manifest.mjs` 的 `satisfiesRange`（见报告）。
+// 区间判据（`rangeSatisfied`）**缺省就是生产实现** `satisfiesRange`
+// （`runtime/packs/manifest.mjs`），显式传 `null` 才关掉它、那时走
+// `RANGE_UNCHECKED` 拒绝：一个"没有区间判据于是默认放行"的实现与一个
+// 不检查区间的实现是同一个东西。
+//
+// ★ 上一版把缺省写成 `null`，并把"生产里由调用方接上"写在这里——那句话
+//   是**错的**，而且错得很贵：它让任何真实调用都在 `RANGE_UNCHECKED` 上停下，
+//   于是这个安装器**一个东西都装不了**，而"为什么装不了"在读数上与
+//   "区间判据正确地拒绝了"长得一模一样。接线现在落在被用例覆盖的函数里面
+//   （`product/logging/sink.mjs:45` 早就在 `product/` 里 import `runtime/`，
+//   而 `dsh-boundary` 守的是 DSH 执行面记号、不是这条）。
 //
 // ★ 两个"版本号"不是同一个命名空间：PRT-011 §1.1 记的 `0.1.5-rc.2` 是 npm 上
 //   `@deepseek-ai/dsh` 的**包版本**，spec §9.1 例子里的 `0.8.3` 是**产品清单字段**
@@ -118,6 +126,16 @@ import {
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 
 import { isPathInside, normalizePath, samePath } from '../paths.mjs'
+// 区间判据的**生产实现**（通用 semver，与 DSH 无耦合）。见 `planRuntimeInstall()`
+// 里 `rangeSatisfied` 缺省值那一段：接线必须落在被用例覆盖的函数**里面**。
+//
+// `product/` 在 `scripts/ci/dsh-boundary.mjs` 里是"必须为零"的边界模块，
+// 但那条闸守的是 **DSH 执行面记号**——执行面的那几个**服务名**与几个
+// **包名**（不在这里写出来：那是一条文本扫描，注释里的记号与真实依赖
+// 在它眼里是同一个东西，本行第一版就因此被判成"新增执行面依赖"）。
+// 它**不是**"不许 import `runtime/`"：既有的生产代码早就在这么做
+// （`product/logging/sink.mjs:45` → `runtime/contracts/redact-patterns.mjs`）。
+import { satisfiesRange } from '../../runtime/packs/manifest.mjs'
 
 /** 本模块的版本。落进计划与结果，便于把一次安装与一份实现对起来。 */
 export const RUNTIME_INSTALL_VERSION = 1
@@ -514,7 +532,24 @@ export function planRuntimeInstall({
   shippedPresetRoot = null,
   targetVersion = null,
   supportedRange = null,
-  rangeSatisfied = null,
+  // ★★ 缺省**就是生产实现**，不是 `null`。
+  //
+  // 上一版把它写成 `null`，理由是"没有区间判据于是默认放行的实现，与不检查
+  // 区间的实现是同一个东西"——那条理由本身是对的，但结论落错了地方：
+  // 它把一个**接线缺口**变成了一个**运行期拒绝**，于是任何真实调用都会拿到
+  // `RANGE_UNCHECKED`，安装器**什么都装不了**，而"为什么装不了"在读数上
+  // 与"区间判据被正确地拒绝了"长得一模一样。
+  //
+  //   > 一根"没有任何调用方会传"的接线，
+  //   > 与一根"故意不接、要求调用方显式提供"的接线，
+  //   > 在每一次被拒绝的调用上都是同一个东西——
+  //   > 只不过前者是缺陷，而后者看起来像纪律。
+  //
+  // 所以默认值取 `satisfiesRange`（`runtime/packs/manifest.mjs`，一个通用
+  // semver 区间判据，与 DSH 无耦合）：**接线落在被用例覆盖的函数里面**，
+  // 而不是落在一个没人能跑到的组装点。显式传 `null`/`undefined` 仍然可以
+  // 关掉它——那时才真的走 `RANGE_UNCHECKED`（fail-closed 保留）。
+  rangeSatisfied = satisfiesRange,
   expectedPatchVersion = null,
   installedVersion = null,
   installedPatchVersion = null,

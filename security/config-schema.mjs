@@ -127,6 +127,14 @@ export const NON_ENV_LITERALS = Object.freeze([
   'SECRET_STORE_CORRUPT', // security/secrets/index.d.mts、security/secrets/store.mjs
   'SECRET_STORE_UNPROTECTED', // security/secrets/index.d.mts、security/secrets/store.mjs
   'SECRET_STORE_UNREADABLE', // security/secrets/index.d.mts、security/secrets/store.mjs
+  // ── security/secrets/run-credentials.mjs（4 条，PRT-509 / spec §6.7）
+  // 在途 Run 的凭证句柄的**具名内部码**。它们不是 env 键，也不是契约码
+  // （契约码仍由 `errors.mjs` 的 `RUNTIME_CODE_FOR` 决定）——
+  // 但它们会被抛进错误、会被脚本读，所以与"读取点"区分开。
+  'RUN_CREDENTIAL_REFS_REQUIRED', // security/secrets/run-credentials.mjs
+  'RUN_CREDENTIAL_RUN_ID_REQUIRED', // security/secrets/run-credentials.mjs
+  'RUN_CREDENTIAL_RESOLVE_FAILED', // security/secrets/run-credentials.mjs
+  'RUN_CREDENTIAL_REF_NOT_HELD', // security/secrets/run-credentials.mjs
 ])
 
 export const SCHEMA = defineSchema({

@@ -2712,7 +2712,29 @@ async function stageTest() {
     // 「我调用了自己的函数」，证明不了密文落盘、重启可解、换 blob 即解不开。
     {
       label: 'secret-store（PRT-505：引用校验、DPAPI 往返、fail-closed 与脱敏）',
-      files: ['security/secrets/secrets.test.mjs'],
+      files: [
+        'security/secrets/secrets.test.mjs',
+        // PRT-509 / spec §6.7（`line 428`）：**在途 Run 的凭证不因轮换而中途替换**。
+        //
+        // store 的 `rotate()` 上原写着一句「在途 Run 已把凭证解析进进程内」——
+        // 而**没有任何对象在做那件事**：store 刻意不缓存，同一个 `get(ref)`
+        // 在轮换前后返回两个不同的值。于是那句话把一个**承诺**写成了**事实**。
+        //
+        //   > 一句"在途 Run 已把凭证解析进进程内"的注释，
+        //   > 与一个真的把凭证解析进进程内的机制，
+        //   > 在读到那句话的人眼里是同一个东西——
+        //   > 只不过前者会在某一次轮换之后，让一个跑到一半的任务换掉手里的钥匙。
+        //
+        // 本组钉的是那个机制（`run-credentials.mjs`），两个方向都要：
+        // 在途 Run 拿旧值、**轮换后新建的 Run 拿新值**。
+        //
+        // ★ 其中一条是**数数**的：句柄开出来之后 `store.get` 的调用次数必须
+        //   一次都不涨。一个"每次都重读"的实现，在轮换还没发生的那些日子里
+        //   与"抓了一次"的实现读出**一模一样**的结果——
+        //   *一个"抓了一次"的实现，与一个"每次都重读、只是恰好还没轮换"的实现，
+        //   在那次轮换到来之前是同一个东西。*
+        'security/secrets/run-credentials.test.mjs',
+      ],
       cwd: ROOT,
     },
     // PRT-251 / PRT-703 / PRT-704：最小 Product Launcher（启动前体检、白名单注入、

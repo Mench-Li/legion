@@ -556,3 +556,43 @@ test('⑪ ★★ 什么都不报就想离开 Running：409 EVIDENCE_MISSING（HT
   const still = await call('GET', `/api/runtime/attempt?attemptId=${c.attemptId}`)
   assert.equal(still.body.attempt.state, 'Running')
 })
+
+test('⑫ ★★ 通用路由不得凭空造出 Leased：缺 lease 证据 409，且任务仍领得走（HTTP 层）', async () => {
+  // ⑮ 组的服务层证据在 `run-store-policy.test.mjs`；这一条钉的是**路由层**
+  // ——`to` 是 `body.to` 直接透传的（没有白名单），所以"能不能通过 HTTP 造出
+  // 一个没有租约的 Leased"是一个必须单独量的问题。
+  onlyTask('rt-forge')
+  const c = await call('POST', '/api/runtime/claim', { workerId: 'w-a', scope: 'default' })
+  assert.equal(c.body.claimed.taskId, 'rt-forge')
+  // 退回队列：`release` 会把这条尝试终结掉、**另建一条** Queued 尝试
+  // （不是把原来那条改回 Queued）——所以下面要重新取它的 id，
+  // 拿旧的那条去调只会撞 `LEASE_EPOCH_STALE`，测的就不是本用例要测的门了。
+  const rel = await call('POST', '/api/runtime/release', {
+    attemptId: c.body.claimed.attemptId, leaseEpoch: c.body.claimed.leaseEpoch, workerId: 'w-a', reason: 'setup',
+  })
+  assert.equal(rel.status, 200)
+  const q = mod.db.prepare("SELECT * FROM run_attempts WHERE task_id = 'rt-forge' AND state = 'Queued'").get()
+  assert.notEqual(q, undefined, '夹具要先有一条 Queued 尝试')
+  assert.equal(q.lease_epoch, 0, 'Queued 行必须还没被领过，否则测的不是这条判据')
+  assert.equal(q.lease_expires_at_ms, null)
+
+  const r = await call('POST', '/api/runtime/transition', {
+    attemptId: q.id, leaseEpoch: 0, workerId: 'w-forge', to: 'Leased',
+  })
+  assert.equal(r.status, 409, '凭空进入 Leased 必须被拒——否则库里出现一个没有租约的"已租出"')
+  assert.equal(r.body.code, 'EVIDENCE_MISSING')
+  assert.deepEqual(r.body.missing, ['lease'], '缺的必须是 lease 本身，而不是被别的门挡下')
+  assert.match(r.body.error, /claim\(\)/, 'HTTP 层也要给出正确路径（claim），不能让人去补租约')
+
+  // 那一行没被改动
+  const after = await call('GET', `/api/runtime/attempt?attemptId=${q.id}`)
+  assert.equal(after.body.attempt.state, 'Queued')
+  assert.equal(after.body.attempt.leaseEpoch, 0)
+  assert.equal(after.body.attempt.leaseExpiresAtMs, null)
+
+  // 最要紧的一条：拒绝之后这条任务**仍然能被正常领走**。
+  // 拒绝的意义是"别用这条路"，不是"把这个任务废掉"——若拒完就领不到了，
+  // 那只是把一个缺陷换成了另一个（从"假 Leased"变成"静默停住"）。
+  const again = await call('POST', '/api/runtime/claim', { workerId: 'w-b', scope: 'default' })
+  assert.equal(again.body.claimed.taskId, 'rt-forge', '被拒之后必须仍能正常领取')
+})

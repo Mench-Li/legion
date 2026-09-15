@@ -465,6 +465,53 @@ function validationRows(db, attemptId) {
  */
 const EVIDENCE_CHECKS = Object.freeze({
   attempt: (db, attemptId) => rowOf(db, attemptId) !== null,
+  // 「这一次领取真的留下了租约」——`Queued → Leased` 是**唯一**声明 `lease` 的边。
+  //
+  // ★ 这个探针是**前置**核验，而它故意不是 `EVIDENCE_NOT_APPLICABLE`。
+  //
+  // `approval` 的入边之所以能返回 `NOT_APPLICABLE`，是因为**同一次事务里有后置核验**
+  // 兜着（见下面 `approval` 那段：端口建行 → 回头查库确认它真的在）。
+  // 这条边没有那样的后置核验：`transition` 的 UPDATE 压根不碰
+  // `lease_epoch` / `lease_expires_at_ms` 两列（只写 state/outcome/detail 那一组）。
+  // 于是如果这里返回 `NOT_APPLICABLE`，`/api/runtime/transition {to:'Leased'}`
+  // 就**不受任何约束**，能造出这个形状（本批实测，真 `createRunStore`）：
+  //
+  //     state='Leased'  lease_epoch=0  lease_expires_at_ms=null  worker_id=null
+  //
+  // 也就是**一个没有租约的「已租出」**。它的两个出口都关着：再 `claim` 领不到
+  // （`queue-empty`），而回收扫描是拿 `lease_expires_at_ms` 与当前时间比的——
+  // `NULL <= x` 在 SQL 里不成立，所以它**永远不会**被判为过期。
+  // 结果与 PRT-309 那个缺陷同一形状：任务安静地停住，没有任何人知道。
+  //
+  // ## 判据为什么是"这一行记录过一次租约"
+  //
+  // 本批实测过四种流程（release / failAndRetry / recoverExpired / 额度耗尽），
+  // 库里**每一条** `Queued` 行都是 `lease_epoch=0` + `lease_expires_at_ms=null`
+  // ——`Queued` 行的唯一来源是 `createAttempt`（`lease_epoch` 从 0 起、租约列为 null）。
+  // 而真的领过的行（`Leased` / `Running` / `UnknownOutcome` …）两列都有值。
+  // 所以这两个字段合起来恰好是"领过 / 从没领过"的分界，不是随手挑的列。
+  //
+  // ## 它的实际效果，以及**为什么那是正确的**
+  //
+  // 结论是 `Queued → Leased` 这条边**不可能**从通用迁移路由走通（前置核验必失败）。
+  // 这不是副作用，是这条边本来就该有的性质：**领取是一次原子占用，不是一次状态编辑**。
+  // 真正的领取入口 `claim()` 用的是它自己的条件 UPDATE
+  // （`WHERE id = ? AND state = 'Queued'`），**不经过** `transition`，
+  // 因此本探针对正常领取零影响（本批已核）。
+  // `claim()` 不经过这里、却仍然满足这条声明——因为那一次 UPDATE 把租约与状态
+  // **写在同一条语句里**，"进入 Leased"与"留下租约"在构造上同时成立。
+  //
+  // ⚠️ 残留（未修）：`claim()` 会把 `requiresPersist: ['attempt','lease']` 写进事件流
+  // （那里的 `requiresPersist` 只用于记录），而它同样**不经过**这个探针。
+  // 那一条记录是真的（租约确实由同一条 UPDATE 写了），但它**没有被核验过**——
+  // 属于同一类"看起来像保证"的记录，只是在那里它恰好为真。
+  lease: (db, attemptId) => {
+    const row = rowOf(db, attemptId)
+    if (row === null) return false
+    // `lease_epoch` 从 0 起，"大于 0"就是"至少被领过一次"；
+    // 再加上租约到期时间非空，两者缺一都不算"留下了租约"。
+    return Number(row.lease_epoch) > 0 && row.lease_expires_at_ms !== null
+  },
   validation: (db, attemptId) => validationRows(db, attemptId).length > 0,
   // 「交接发生了」= 真的有一条后继任务被创建（PRT-308）。
   // 否则 `HandingOff → Completed` 会在**没有后继**的情况下收口：
@@ -721,14 +768,42 @@ function checkEvidence(db, attemptId, requiresPersist, edge = {}) {
   })
 }
 
+/**
+ * 有些证据种类的**补救办法不是"先把证据补上"，而是"换一条路"**。
+ *
+ * 不写这句话，错误信息就会给出一个**错的诊断**：`Queued → Leased` 缺 `lease` 时，
+ * 那句话读起来像是"先弄出一条租约、然后再调一次这个路由"，而正确做法是改用
+ * `claim()`——租约**只能由领取产生**，不存在"先有租约、再改状态"的顺序。
+ * 顺着错的诊断走，人会去手写 `lease_epoch` / `lease_expires_at_ms` 两列，
+ * 而那正是这个探针要拦住的事。
+ *
+ *   > 一个"缺了证据"的诊断，与一个"你走错路了"的诊断，
+ *   > 在只看 `missing` 里那一项时是同一个读数——
+ *   > 只不过前者会让人去补一个不该补的东西。
+ *
+ * 键是证据种类名，值是给**人**看的一句补救说明。没列进来的种类不加这句：
+ * 大多数种类的补救办法确实就是"先把那件事做出来"。
+ */
+const EVIDENCE_REMEDY = Object.freeze({
+  lease: '这一项**不是"先把租约补上"**：租约只能由领取产生，' +
+    '所以 `Queued → Leased` 不该从这个通用路由走——请改用 `claim()`' +
+    '（它是 `WHERE state = \'Queued\'` 的原子条件 UPDATE，租约与状态写在同一条语句里）',
+})
+
 /** 证据缺失时的统一错误。把「缺哪一项」说清楚，否则排查只能去看状态机源码。 */
 function evidenceError(attemptId, state, to, missing) {
+  // 只对**有专属补救说明**的种类追加那一段，其余保持原样：
+  // 一句话套在它不适用的场合上，比不说更坏。
+  const remedy = missing.filter((name) => EVIDENCE_REMEDY[name] !== undefined)
+    .map((name) => `「${name}」：${EVIDENCE_REMEDY[name]}`)
+    .join('；')
   // 409 而不是 400：请求本身完全合法，是**当前状态**不允许这一步
   // （缺的是这一步的前提）。与 LEASE_EPOCH_STALE / TRANSITION_REJECTED 同一类。
   return fail(RUN_ERRORS.EVIDENCE_MISSING,
     `迁移 ${state} → ${to} 声明要先落库的证据不存在：${missing.join('、')}。` +
     `这不是"数据还没写好"的时序问题，而是"这一步的结论没有依据"——` +
-    `例如一条没有验收记录的尝试进入 Completed，等于把"没人验收过"写成"已验收"`,
+    `例如一条没有验收记录的尝试进入 Completed，等于把"没人验收过"写成"已验收"` +
+    (remedy === '' ? '' : `。补救方向：${remedy}`),
     { attemptId, from: state, to, missing: Object.freeze([...missing]) }, 409)
 }
 

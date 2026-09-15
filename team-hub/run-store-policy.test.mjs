@@ -808,3 +808,140 @@ test('⑭ ★ 额度耗尽进 DeadLetter：清单里是那一条 DeadLetter，�
     assert.equal(held.actionable, 1, '额度过期的那条才是需要人处理的')
   } finally { env.cleanup() }
 })
+
+// ============================================================================
+// ⑮ `Queued → Leased` 声明的 `lease` 证据（本批补上的最后一个缺失探针）
+//
+// 这条边声明 `requiresPersist: ['attempt','lease']`，而那行字旁边自己还写着
+// 「领取必须用 team-hub 事务与 team-hub 时钟」。在补探针之前它**只是事件流里的一段
+// JSON**：`EVIDENCE_CHECKS` 里没有 `lease`，`checkEvidence` 直接 `continue` 跳过，
+// 于是通用迁移路由能造出这个形状（真 `createRunStore` 实测）：
+//
+//     state='Leased'  lease_epoch=0  lease_expires_at_ms=null  worker_id=null
+//
+// 一个**没有租约的「已租出」**。两个出口都关着：再 `claim` 领不到（`queue-empty`），
+// 回收扫描拿 `lease_expires_at_ms` 比时间而它是 `NULL`（`NULL <= x` 不成立）
+// ⇒ 永远不会被判为过期。与 PRT-309 那个缺陷同一形状：安静停住，没人知道。
+//
+// ★ 成对断言（两个相反方向，缺一个这条边界就没守住）：
+//   有 ⇒ 通用路由**必须**被拒，且**不得**留下半个状态、任务**仍可被领走**；
+//   无 ⇒ 真正的领取入口 `claim()` **必须**照常可用（探针不能误伤它）。
+// ============================================================================
+
+test('⑮ ★★ 通用路由不得凭空造出 Leased：缺 lease 证据就拒，且不动那一行', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    // 先造出一条 Queued 尝试：claim 之后 release，就得到一条全新的 Queued 尝试
+    const c0 = env.store.claim({ workerId: 'w0' }).claimed
+    env.store.release({ attemptId: c0.attemptId, leaseEpoch: c0.leaseEpoch, workerId: 'w0', reason: 'setup' })
+    const q = env.db.prepare("SELECT * FROM run_attempts WHERE task_id = 't1' AND state = 'Queued'").get()
+    assert.notEqual(q, undefined, '夹具要先有一条 Queued 尝试')
+    // 断言探针的判据确实为假，而不是"碰巧被别的门拦住了"
+    assert.equal(q.lease_epoch, 0, 'Queued 行必须还没被领过（否则这条用例测的不是它）')
+    assert.equal(q.lease_expires_at_ms, null)
+
+    const e = assertRunError(() => env.store.transition({
+      attemptId: q.id, workerId: 'w-forge', leaseEpoch: 0, to: 'Leased',
+    }), RUN_ERRORS.EVIDENCE_MISSING)
+    assert.deepEqual([...e.missing], ['lease'], '缺的必须是 lease 这一项本身')
+    // 错误信息要给出**正确的补救方向**：不是"去补一条租约"，而是"改用 claim()"。
+    // 一个错的诊断比没有诊断更坏——顺着"先补租约"走，人会去手写那两列。
+    assert.match(e.message, /claim\(\)/, '必须指出正确的路径是 claim()，而不是让人去补租约')
+
+    // ★ 不得留下半个状态：那一行一字未改
+    const after = env.db.prepare('SELECT state, lease_epoch, lease_expires_at_ms, worker_id FROM run_attempts WHERE id = ?').get(q.id)
+    assert.equal(after.state, 'Queued', '被拒的迁移不得改动状态')
+    assert.equal(after.lease_epoch, 0)
+    assert.equal(after.lease_expires_at_ms, null)
+    assert.equal(after.worker_id, null, '被拒的伪造领取不得留下 worker 归属')
+
+    // ★ 最要紧的一条：被拒之后这条尝试**仍然领得走**。
+    // 拒绝的意义是"别用这条路"，不是"把这个任务废掉"——若拒完变成领不到，
+    // 那它就从"造出一个假 Leased"退化成"让一个真任务静默停住"，两种都是缺陷。
+    const claimed = env.store.claim({ workerId: 'w-real' }).claimed
+    assert.notEqual(claimed, null, '被拒之后必须仍能正常领取')
+    assert.equal(claimed.attemptId, q.id)
+  } finally { env.cleanup() }
+})
+
+test('⑮ ★★ 真正的领取入口 claim() 不受影响：它写的是真租约，探针认的就是它', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c = env.store.claim({ workerId: 'w1' }).claimed
+    assert.notEqual(c, null)
+    const row = env.db.prepare('SELECT state, lease_epoch, lease_expires_at_ms FROM run_attempts WHERE id = ?').get(c.attemptId)
+    assert.equal(row.state, 'Leased')
+    // claim 的租约与状态写在**同一条 UPDATE** 里，所以"进入 Leased"与"留下租约"
+    // 在构造上同时成立——这正是探针判据（epoch>0 且到期时间非空）的正面样本。
+    assert.ok(row.lease_epoch > 0, `claim 必须推进 lease_epoch，实际 ${row.lease_epoch}`)
+    assert.notEqual(row.lease_expires_at_ms, null, 'claim 必须写下租约到期时间')
+
+    // 而且从 Leased 往下走**不受**这条探针影响（只有 Queued→Leased 声明了 lease）。
+    // 若探针写成"任何迁移都要求租约"，正常流水线会在这里整段卡死。
+    env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to: 'PreparingWorkspace' })
+    assert.equal(env.db.prepare('SELECT state FROM run_attempts WHERE id = ?').get(c.attemptId).state, 'PreparingWorkspace')
+  } finally { env.cleanup() }
+})
+
+test('⑮ ★★ 探针不是恒假：一行**真的**记着租约时，这条边必须放行', () => {
+  // ★ 这一条是**防空洞**用的，而且是必须的：
+  // 上面两条用例量的都是"被拒"这个方向，而 `lease: () => false`（一个恒假的探针）
+  // 同样满足它们——两个读数一样。若不做这一条，"探针在核验"这件事就没有证据。
+  //
+  //   > 一个"永远说缺证据"的探针，与一个"真的在核验证据"的探针，
+  //   > 在只看"非法的那次被拒了"时是同一个东西——只不过前者拦住的是全部。
+  //
+  // 为什么必须**直接改库**来构造：本批实测过四种真实流程（release / failAndRetry /
+  // recoverExpired / 额度耗尽），库里每一条 `Queued` 行都是 `lease_epoch=0` +
+  // 到期时间 null，也就是说探针的"真"分支在正常流程里**到不了**。
+  // 既然到不了，就只能把这个状态造出来量——这不是"测一个够不着的分支"，
+  // 而是"量那个探针判据本身到底在判什么"。
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c0 = env.store.claim({ workerId: 'w0' }).claimed
+    env.store.release({ attemptId: c0.attemptId, leaseEpoch: c0.leaseEpoch, workerId: 'w0', reason: 'setup' })
+    const q = env.db.prepare("SELECT * FROM run_attempts WHERE task_id = 't1' AND state = 'Queued'").get()
+    assert.equal(q.lease_epoch, 0, '前提：这一行本来是"从没领过"')
+
+    // 造出"这一行记着租约"的状态
+    env.db.prepare('UPDATE run_attempts SET lease_epoch = 1, lease_expires_at_ms = ?, worker_id = ? WHERE id = ?')
+      .run(1_700_000_120_000, 'w-past', q.id)
+
+    // 判据为真 ⇒ 这条边放行（探针判的是"证据在不在"，不是"这条路许不许用"）
+    const r = env.store.transition({ attemptId: q.id, workerId: 'w-forge', leaseEpoch: 1, to: 'Leased' })
+    assert.equal(r.attempt.state, 'Leased', '记着租约时必须放行——否则探针就是恒假的')
+    assert.equal(env.db.prepare('SELECT state FROM run_attempts WHERE id = ?').get(q.id).state, 'Leased')
+  } finally { env.cleanup() }
+})
+
+test('⑮ ★ 判据是两个条件的**合取**：有 epoch 但没有到期时间，不算"留下了租约"', () => {
+  // 探针写的是 `lease_epoch > 0 && lease_expires_at_ms !== null`。只测"被拒"与"放行"
+  // 两个端点，是**测不出第二个条件的**——把探针改成只看 `lease_epoch > 0`，
+  // 上面两条用例仍然全绿（本批用变异确认过这一点）。
+  //
+  //   > 一条判据里"多余的那个条件"，与"那个条件被验证过"，
+  //   > 在两端都取到极值的用例集合里是同一个东西——只不过前者永远不会被删对。
+  //
+  // 为什么这个条件在语义上必须有：`lease_expires_at_ms` 是回收扫描唯一的时间依据
+  // （它拿这一列与当前时间比）。一行 `lease_epoch > 0` 而到期时间为 `NULL` 的尝试，
+  // 正是本批要拦的那个形状的变体——它会被判成"已租出"，却永远不被判为过期。
+  // 所以"有 epoch"不等于"有租约"：**没有到期时间的租约不是租约。**
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c0 = env.store.claim({ workerId: 'w0' }).claimed
+    env.store.release({ attemptId: c0.attemptId, leaseEpoch: c0.leaseEpoch, workerId: 'w0', reason: 'setup' })
+    const q = env.db.prepare("SELECT * FROM run_attempts WHERE task_id = 't1' AND state = 'Queued'").get()
+
+    // 只有 epoch，没有到期时间
+    env.db.prepare('UPDATE run_attempts SET lease_epoch = 1, lease_expires_at_ms = NULL WHERE id = ?').run(q.id)
+    const e = assertRunError(() => env.store.transition({
+      attemptId: q.id, workerId: 'w-forge', leaseEpoch: 1, to: 'Leased',
+    }), RUN_ERRORS.EVIDENCE_MISSING)
+    assert.deepEqual([...e.missing], ['lease'], '没有到期时间的租约不算租约')
+    assert.equal(env.db.prepare('SELECT state FROM run_attempts WHERE id = ?').get(q.id).state, 'Queued', '状态不得被推进')
+  } finally { env.cleanup() }
+})

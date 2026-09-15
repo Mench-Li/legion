@@ -27,8 +27,7 @@ import { pathToFileURL } from 'node:url'
 
 import {
   DSH_PRESET_ROWS,
-  EMPLOYEE_PRESET_CHECKED,
-  EMPLOYEE_PRESET_CODES,
+  EMPLOYEE_PRESET_CHECKED,  EMPLOYEE_PRESET_CODES,
   LEGION_TOOL_ROUTING,
   PRESET_ID_PATTERN,
   SHIPPED_PRESET_IDS,
@@ -326,6 +325,57 @@ describe('PRT-214 员工 agent preset', () => {
     assert.match(p.text, /read-secret — host 平面/)
     // 能力按字典序（与工具表头同一个依据，见渲染器里那段"伪变更"的说明）
     assert.match(p.text, /# 能力：credential:read、file:read/)
+  })
+
+  // ── 必填 config 必须真的**落到文本上** ────────────────────────────────
+  //
+  // 这一条是**真挂载套件**（`employee-preset-mount-dsh-process.test.mjs`）
+  // 抓到缺口之后补的快速守卫：那个套件需要 `DSH_CHECKOUT` 才能跑，
+  // 而这条不需要——所以"有人把那一行 config 删了"在**任何**环境上都会红。
+  //
+  // 它不替代真挂载：这条只证明"文本里有"，真挂载证明"DSH 认这个文本"。
+  //   > 一个"文本里有这一行"的断言，
+  //   > 与一个"组合真的挂得上"的断言，
+  //   > 在没有 DSH 的那些运行里是同一个东西——只不过前者连缺口的样子都看不见。
+  test('★★★ 声明了 config 的行，config 必须**出现在文本里**（不是只写在表里）', () => {
+    const p = render({ allowedTools: ['read-file', 'run-command', 'fetch-url'] })
+    for (const [key, spec] of Object.entries(DSH_PRESET_ROWS)) {
+      if (spec.config === undefined) continue
+      // 按**行边界**取，而不是全文找键名：全文找的话，那个键出现在别的行里
+      // 也能让断言成立（那样这条就测不到"config 属于哪一行"）。
+      const lines = p.text.split('\n')
+      const at = lines.indexOf(`- id: ${key}`)
+      assert.notEqual(at, -1, `渲染出的 preset 里没有 ${key} 行：${p.text}`)
+      let end = at + 1
+      while (end < lines.length && !/^- id: /.test(lines[end])) end++
+      const block = lines.slice(at, end).join('\n')
+      for (const [k, v] of Object.entries(spec.config)) {
+        assert.match(block, new RegExp(`^\\s+${k}: ${String(v)}$`, 'm'),
+          `${key} 声明了 config.${k}，但渲染出的那一行里没有它：\n${block}`)
+      }
+    }
+  })
+
+  test('★★★★★ `tool-fs-search` 必须带 `sampleOverCapGlobResults`（必填、无兜底、本人踩过）', () => {
+    // 这一行是**唯一**一个"漏了它整套组合就挂不上"的 config：DSH 的 schema 是
+    // `z.boolean().required()`，README 明说「必填项且没有回退值」；兜底只写在
+    // **宿主**行上（`dsh-base` 与三个 shipped preset 各写一次 `false`），
+    // 而 preset 里的行**不继承**宿主行的 config。
+    //
+    // 后果的形状很难看：只要授权含 `read-file`，这个 preset 就挂不上，
+    // 而**发现层仍然报它健康**——也就是解析器用例逐字节相同、一挂就炸。
+    const p = render({ allowedTools: ['read-file'] })
+    const lines = p.text.split('\n')
+    const at = lines.indexOf('- id: tool-fs-search')
+    assert.notEqual(at, -1)
+    let end = at + 1
+    while (end < lines.length && !/^- id: /.test(lines[end])) end++
+    const block = lines.slice(at, end).join('\n')
+    assert.match(block, /^\s+sampleOverCapGlobResults: false$/m, block)
+
+    // 取值必须与**宿主**行一致：这不是我们发明的默认值，是跟着部署已有的选择走。
+    // 写死一个数会让"跟着走"退化成"猜一个数"。
+    assert.equal(DSH_PRESET_ROWS['tool-fs-search'].config.sampleOverCapGlobResults, false)
   })
 
   // ── DSH 侧：真 loader ───────────────────────────────────────────────

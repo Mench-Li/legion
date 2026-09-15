@@ -106,6 +106,27 @@ export const DSH_PRESET_ROWS = Object.freeze({
   }),
   'tool-fs-search': Object.freeze({
     pkg: '@deepseek-ai/dsh-tool-fs-search', provides: Object.freeze(['glob', 'grep']), platform: null,
+    /**
+     * ★ `sampleOverCapGlobResults` **必填，且没有兜底值**。
+     *
+     * DSH 那边的 schema 是 `z.boolean().required()`，它的 README 明说
+     * 「是必填项且没有回退值：部署必须显式选择超过上限时的排序约定」。
+     * 兜底只写在**宿主**行上（`dsh-base` 的 `cordis.patch.yml` 与三个 shipped
+     * preset 各写了一次 `false`）——**preset 里的行不继承宿主行的 config**。
+     *
+     * 于是漏掉这一行的后果是：`read-file`（→ 行集含 `tool-fs-search`）一被授权，
+     * 这个 preset 就**挂不上**，而**发现层仍然报它健康**。
+     *
+     *   > 一个"能被解析器读进去"的 preset，
+     *   > 与一个"能真的挂上"的 preset，
+     *   > 在渲染器的用例里是同一个东西——
+     *   > 只不过前者的用例是绿的，而它从未被任何 mount 读过。
+     *
+     * 取 `false` 与 `dsh-base`、`standard`、`ptc`、`cordis` 四处**逐字一致**：
+     * 这不是我们发明的默认值，是跟着部署已有的选择走。
+     * （这一行是破验式的：一套只断言"渲染文本 == 声明"的用例看不见它。）
+     */
+    config: Object.freeze({ sampleOverCapGlobResults: false }),
   }),
   'tool-bash': Object.freeze({
     pkg: '@deepseek-ai/dsh-tool-bash', provides: Object.freeze(['bash']), platform: 'posix',
@@ -418,6 +439,10 @@ export function renderEmployeePreset({
     const row = { id: key, pkg: spec.pkg }
     if (spec.platform === 'posix') row.disabledJs = "process.platform === 'win32'"
     if (spec.platform === 'win32') row.disabledJs = "process.platform !== 'win32'"
+    // ★ 表的 `config` 必须**真的落到** YAML 上。
+    // 漏这一行的话，`DSH_PRESET_ROWS` 里那份 config 就成了一句没人读的声明
+    // ——而"表里写了"与"文件里有"，在只读表的用例上是同一个东西。
+    if (spec.config !== undefined) row.config = spec.config
     rows.push(renderRow(row))
   }
 

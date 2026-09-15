@@ -14,7 +14,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'nod
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { scanSource, scanRepo, diffAgainstBaseline, totalOf } from './dsh-boundary.mjs'
+import { scanSource, scanRepo, diffAgainstBaseline, isRatchetConstrained, totalOf } from './dsh-boundary.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(HERE, '..', '..')
@@ -137,12 +137,30 @@ test('③ 适配层豁免：runtime/adapters/dsh 允许调用执行面 API', () 
 // ---------------------------------------------------------------- ④ 棘轮真实性
 
 test('④ 当前仓库扫描结果与基线完全一致（不多不少）', () => {
-  const scan = scanRepo()
+  // ★ 比的是**受棘轮约束**的那一部分，而不是原始 `scanRepo()` 的全部键。
+  //
+  //   这两者在"适配层里一个记号都没有"的那些天里恰好一致——直到
+  //   `runtime/dsh-composition/` 下第一次出现带记号的文件（本仓库真实发生过）。
+  //   而 `--check` 从一开始就跳过适配层（基线里也只装受约束的文件），
+  //   所以只比原始键集的话，**门禁绿、对拍红**，红在一个门禁从未主张过的口径上。
+  //
+  //     > 一个"原始扫描 == 基线"的断言，
+  //     > 与一个"受约束的扫描 == 基线"的断言，
+  //     > 在适配层恰好干干净净时是同一个东西——
+  //     > 只不过前者的绿是"豁免集合刚好是空的"换来的。
+  //
+  //   豁免本身仍被下一条用例守着（基线不得含适配层/边界模块），
+  //   另有一条专门证"适配层允许调用执行面 API"——所以这里过滤掉它们
+  //   不是放宽，是把口径对齐到 `--check`。
+  const raw = scanRepo()
+  const scan = Object.fromEntries(
+    Object.entries(raw).filter(([file]) => isRatchetConstrained(file)),
+  )
   const baseline = BASELINE.baseline
   assert.deepEqual(
     Object.keys(scan).sort(),
     Object.keys(baseline).sort(),
-    '扫描到的文件集合与基线不一致：新增依赖文件或基线未下移',
+    '受棘轮约束的文件集合与基线不一致：新增依赖文件或基线未下移',
   )
   for (const [file, hits] of Object.entries(scan)) {
     assert.deepEqual(hits, baseline[file], `${file} 的记号与基线不一致`)
@@ -210,8 +228,13 @@ test('④ --update-baseline 拒绝把边界模块写进基线', () => {
 })
 
 test('④ 记号总数与清单口径一致（供 PRT-002 文档引用）', () => {
+  // 与上一条同一个口径：债务总数说的是**受棘轮约束**的那些文件的记号数。
+  // 基线里本来就只装受约束的文件，所以把豁免项算进来就一定会多——
+  // 而多出来的那部分在这个数被 PRT-002 文档引用时是**错的**。
   const scan = scanRepo()
-  const total = Object.values(scan).reduce((n, h) => n + totalOf(h), 0)
+  const total = Object.entries(scan)
+    .filter(([file]) => isRatchetConstrained(file))
+    .reduce((n, [, h]) => n + totalOf(h), 0)
   assert.ok(total > 0, '当前仓库必然存在待迁移的执行面债务')
   // 基线是债务快照；总数变化必须伴随基线变更，因此这里用基线自身对账
   const baselineTotal = Object.values(BASELINE.baseline).reduce((n, h) => n + totalOf(h), 0)

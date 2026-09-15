@@ -2390,7 +2390,31 @@ async function stageTest() {
       // 需要 DSH_CHECKOUT 的只有"真 loader 解析"与"包真的装了"那几条，
       // 纯渲染逻辑照常跑；缺 DSH 时逐条 SKIP（不伪造通过）。
       label: 'employee-preset（PRT-214：员工 agent preset 渲染 × 授权覆盖）',
-      files: ['runtime/dsh-composition/employee-preset.test.mjs'],
+      files: [
+        'runtime/dsh-composition/employee-preset.test.mjs',
+        // ★ 同一条线的另一头：上面那套只证"**解析得进去**"（真 loader 读 YAML +
+        //   每一行都指向装了的包），这套证"**挂得上**"——真 DSH 子进程里问
+        //   DSH 自己 roster 服务的 `standingKeyFor(id)` —— 那才是"这一份组合
+        //   真的能被挂起来"，而不只是"文本能被读成节点"。
+        //   这里刻意**不写**那个服务在 DSH 里的访问路径记号：它是 DSH 执行面，
+        //   写进 `scripts/` 会被 PRT-108 边界闸判成执行面泄漏（确实被它拦过）。
+        //
+        //   *一个"能被解析器读进去"的 preset，与一个"能真的挂上"的 preset，
+        //   在渲染器的用例里是同一个东西——只不过前者的用例是绿的，
+        //   而它从未被任何 mount 读过。*
+        //
+        //   ★ 这套第一次跑，抓到的就是缺口本身：渲染器把 tool-fs-search 渲染成
+        //   **不带 config**，而那一行的 `sampleOverCapGlobResults` 是必填、
+        //   兜底只在宿主行上（preset 行不继承）——于是"发现层判健康、挂载层具名
+        //   拒绝"，而**每一个授权了 read-file 的员工 preset 都挂不上**。
+        //   渲染器已修（表里声明 + 渲染器透传），这套随之从"记录缺口"翻成
+        //   **回归哨兵**：断言的个数也跟着从四种拒绝降到三种——*一条"四种拒绝
+        //   两两不同"的断言，在只剩三种时会红，那不是它坏了，是它如实地说
+        //   "我守的那个局面已经变了"。*
+        //
+        //   条件套件：需要 DSH_CHECKOUT，逐条 SKIP（不伪造通过）。
+        'runtime/dsh-composition/employee-preset-mount-dsh-process.test.mjs',
+      ],
       cwd: ROOT,
     },
     {

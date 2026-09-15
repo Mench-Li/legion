@@ -238,6 +238,26 @@ export function totalOf(hits) {
   return Object.values(hits).reduce((n, v) => n + v, 0)
 }
 
+/**
+ * 这个文件是否**受棘轮约束**（= 不在适配层豁免里）。
+ *
+ * 导出它是因为它此前只活在 `diffAgainstBaseline()` 内部，于是**基线对拍**
+ * 与 **`--check`** 用的是两套口径：基线里只装受约束的文件，而对拍直接把
+ * 原始 `scanRepo()` 的键集拿去比。两者在"适配层里一个记号都没有"的那些天里
+ * 恰好一致——直到 `runtime/dsh-composition/` 下第一次出现带记号的文件。
+ *
+ *   > 一个"原始扫描 == 基线"的断言，
+ *   > 与一个"受约束的扫描 == 基线"的断言，
+ *   > 在适配层恰好干干净净时是同一个东西——
+ *   > 只不过前者的绿是"豁免集合刚好是空的"换来的。
+ *
+ * 复用同一个判据（而不是在对拍里再写一遍前缀）才是重点：抄一遍前缀
+ * 就等于给"两套口径"留了下一个分岔口。
+ */
+export function isRatchetConstrained(file) {
+  return !hasPrefix(file, ADAPTER_PREFIXES)
+}
+
 // ---------------------------------------------------------------- 基线
 
 function loadBaseline() {

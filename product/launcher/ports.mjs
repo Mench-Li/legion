@@ -29,6 +29,42 @@ const DEFAULT_TIMEOUT_MS = 1000
  * 用「真的去绑一次再放开」而不是查进程表：端口占用者可能不是本机 Node 进程，
  * 而且 `listen(0)` 分配端口之后到底归谁，只有绑一次才知道。
  */
+/**
+ * 把 `listen` 的错误翻成**具名码 + 指向正确动作的文案**。
+ *
+ * ★ 抽成纯函数是为了能**直接**喂一个 `EACCES`：保留段是**机器相关**的
+ * （本机 51999/52000/62200 都不行，51998 却行），靠"找一个真的绑不上的端口"
+ * 来测，等于把用例重新绑回这台机器——而"绑回某台机器"正是本次要修的那个毛病。
+ *
+ * 两种 `EACCES` 的成因**相反**，处置也相反：
+ *   · 端口 < 1024 → 真的需要特权；
+ *   · 端口 ≥ 1024 → 落在**系统保留段**里（Windows 上 Hyper-V / WSL / 管理员保留段
+ *     都这样，而 `netsh int ipv4 show excludedportrange protocol=tcp` **列不全**）。
+ *     这时该**换端口**，提权不会让任何东西变得可绑。
+ *
+ *   > 一个把"端口被系统保留"报成"你需要管理员"的诊断，
+ *   > 与一个"照着它做、然后还是绑不上"的诊断，是同一条信息。
+ *
+ * @param {object} err `listen` 抛出的错误（只需要 `code` / `message`）
+ * @param {number} port 尝试绑定的端口
+ * @returns {{code: string, message: string}}
+ */
+export function classifyBindError(err, port) {
+  const privileged = Number.isInteger(port) && port > 0 && port < 1024
+  const code = err?.code === 'EADDRINUSE' ? 'PORT_IN_USE'
+    : err?.code === 'EACCES' ? (privileged ? 'PORT_PRIVILEGED' : 'PORT_RESERVED')
+      : 'PORT_CHECK_FAILED'
+  const message = code === 'PORT_IN_USE'
+    ? `端口 ${port} 已被其他进程占用`
+    : code === 'PORT_PRIVILEGED'
+      ? `端口 ${port} 需要更高权限（<1024 的端口通常需要管理员）`
+      : code === 'PORT_RESERVED'
+        ? `端口 ${port} 落在系统保留段里（Windows 上常见于 Hyper-V/WSL/管理员保留段）：`
+          + '**换一个端口**即可——这不是权限问题，提权也不会让它绑得上'
+        : `端口 ${port} 不可用：${err?.code ?? err?.message ?? 'unknown'}`
+  return { code, message }
+}
+
 export function canBind(port, { host = '127.0.0.1', timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   return new Promise((resolve) => {
     if (!Number.isInteger(port) || port < 0 || port > 65535) {
@@ -47,14 +83,8 @@ export function canBind(port, { host = '127.0.0.1', timeoutMs = DEFAULT_TIMEOUT_
     if (typeof timer.unref === 'function') timer.unref()
     server.once('error', (err) => {
       clearTimeout(timer)
-      const code = err?.code === 'EADDRINUSE' ? 'PORT_IN_USE'
-        : err?.code === 'EACCES' ? 'PORT_PRIVILEGED'
-          : 'PORT_CHECK_FAILED'
-      const message = code === 'PORT_IN_USE'
-        ? `端口 ${port} 已被其他进程占用`
-        : code === 'PORT_PRIVILEGED'
-          ? `端口 ${port} 需要更高权限（<1024 的端口通常需要管理员）`
-          : `端口 ${port} 不可用：${err?.code ?? err?.message ?? 'unknown'}`
+      // 分类与文案在 `classifyBindError()` 里（**纯函数**，故能直接喂一个 `EACCES` 去测）。
+      const { code, message } = classifyBindError(err, port)
       done({ ok: false, code, port, message })
     })
     server.listen({ port, host, exclusive: true }, () => {

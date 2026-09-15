@@ -23,6 +23,7 @@ import {
   AVAILABILITY_CHECKED,
   AVAILABILITY_CODES,
   AVAILABILITY_CONTRACT,
+  ENFORCEMENT_HANG_GUARD_MS,
   ENFORCEMENT_PHASES,
   assertUnavailableIsNotPendingNorRejected,
   createApprovalAnswerer,
@@ -201,16 +202,57 @@ test('③ ★★★ 真定时器实测：每一种成因都**结算**，且落�
   }
 })
 
-test('③ ★★★ 超出预算时，理由必须报**生效阈值**（budget + 余量），不是那个光秃秃的 budget', async () => {
+test('③ ★★★ 事故回归：默认 20ms 预算在繁忙机器上实测 ~300ms，**不得**被判成不可用', async () => {
+  // 这就是 2026-09-15 那次全量 CI 的真实读数（251ms / 272ms，预算 20ms）。
+  // 当时生效阈值是 170ms（budget 20 + 余量 150），于是：
+  //
+  //   probeTwoPhaseAvailability().ok === false
+  //     ⇒ startupSelfCheck 判 `incompatible`
+  //     ⇒ 拒绝注册宿主端口
+  //     ⇒ **一个健康的部署起不来**
+  //
+  //   > 一条"加载一高就判定生产环境不兼容"的判据，
+  //   > 与一条"拒绝启动"的判据，在值班的人那里是同一个东西——
+  //   > 只不过前者是机器的错，而报出来的是产品的错。
+  //
+  // 用注入时钟把那次读数**构造**出来（每次读表前进 300ms），于是这条回归与
+  // "这台机器当时忙不忙"完全无关。
+  let ticks = 0
+  const clock = () => (ticks += 300)
+  const p = await probeTwoPhaseAvailability({
+    now: clock, // 默认 connect=10 / response=10 ⇒ budget = 20
+    scenarioSet: [{
+      id: '①', what: '连接阶段：端口抛错（team-hub 不可达）',
+      via: 'answerer', portsPhases: true,
+      request: () => { throw new Error('ECONNREFUSED 127.0.0.1:1') },
+      expect: { outcome: 'unavailable', code: AVAILABILITY_CODES.UNREACHABLE, phase: 'connect' },
+    }],
+  })
+  assert.equal(p.budgetMs, 20, '这条回归针对的就是默认的那 20ms 预算')
+  assert.equal(p.withinBudgetMs, ENFORCEMENT_HANG_GUARD_MS,
+    '生效阈值必须已经退成**护栏**，而不是紧贴配置预算的延迟断言')
+  const row = p.rows[0]
+  assert.ok(row.got.elapsedMs >= 300, `注入时钟没生效：${row.got.elapsedMs}ms`)
+  assert.equal(row.withinBudget, true,
+    `实测 ${row.got.elapsedMs}ms 被判成超过护栏 ${p.withinBudgetMs}ms——`
+    + '这正是让健康部署拒绝启动的那条判据')
+  // ★ 而**语义**判据一条都不许放松：结局与码必须还是对的。
+  assert.equal(row.got.outcome, 'unavailable')
+  assert.equal(row.got.code, AVAILABILITY_CODES.UNREACHABLE)
+  assert.equal(row.matches, true)
+  assert.equal(p.ok, true, `整份探针被判成不可用：${JSON.stringify(p.reasons)}`)
+})
+
+test('③ ★★★ 超出护栏时，理由必须报**生效阈值**，而且必须是**护栏**不是延迟断言', async () => {
   // 起因是一次**真事故**（2026-09-15 全量 CI）：两个成因实测 251ms / 272ms，
   // 而理由写的是「超过预算 20ms」。20ms 是两段**模拟**超时之和，生效判据其实是
-  // 它加 150ms 余量 = 170ms。同一个读数按理由读是"超出 12.5 倍，哪里严重不对"，
+  // 它加上余量。同一个读数按理由读是"超出 12.5 倍，哪里严重不对"，
   // 按真实判据读是"超出 1.5 倍，机器当时很忙"——**两个结论指向完全不同的动作**。
   //
   //   > 一个把生效阈值写成"预算"的理由，
   //   > 会把一个"机器忙"报成一个"代码坏"。
   //
-  // ★★ 时钟**注入**，不靠"这台机器慢"来造超预算。
+  // ★★ 时钟**注入**，不靠"这台机器慢"来造超阈值。
   //    第一版就是那么写的（connect=1/response=1，指望实测超过 152ms），
   //    而破验立刻证明它**恒真**：本机 8 条全部落在 152ms 内，用例走的是
   //    "机器太快所以什么都没测"那条早退分支，于是把理由改回旧措辞它**也不红**。
@@ -218,42 +260,49 @@ test('③ ★★★ 超出预算时，理由必须报**生效阈值**（budget +
   //      > 一个"等机器慢下来才会真的断言"的用例，
   //      > 与一个什么都不检查的用例，在快机器上是同一个东西。
   //
-  //    注入一个每次都前进 1000ms 的 `now`，超预算就是**构造出来的**，与机器无关。
+  // ★★ 余量后来**从 150ms 提到 5s 的护栏**：150ms 那个紧贴配置预算的容差
+  //    会让 `startupSelfCheck` 在繁忙机器上判出 `incompatible`
+  //    （`composition.test.mjs:710` 实测拿到过），也就是**健康的部署拒绝启动**。
+  //    所以下面断的是**护栏的语义**，不是某个具体毫秒数。
   let ticks = 0
-  const clock = () => (ticks += 1000)
+  const clock = () => (ticks += 10_000)
   const p = await probeTwoPhaseAvailability({
     connectTimeoutMs: 1,
     responseTimeoutMs: 1,
     now: clock,
     scenarioSet: [{
-      id: '⑨', what: '注入时钟：必然超出计时阈值',
+      id: '⑨', what: '注入时钟：必然超出计时护栏',
       via: 'answerer', portsPhases: true,
       request: () => { throw new Error('ECONNREFUSED 127.0.0.1:1') },
       expect: { outcome: 'unavailable', code: AVAILABILITY_CODES.UNREACHABLE, phase: 'connect' },
     }],
   })
   assert.equal(p.budgetMs, 2, 'budget = connect + response = 1 + 1')
-  assert.equal(p.slackMs, 150, 'slack 的下界是 150ms（为繁忙机器留的）')
-  assert.equal(p.withinBudgetMs, 152, '生效阈值必须是 budget + slack')
+  assert.equal(p.withinBudgetMs, ENFORCEMENT_HANG_GUARD_MS,
+    '生效阈值应当就是护栏本身（预算远小于护栏时）')
+  assert.ok(p.withinBudgetMs > p.budgetMs * 100,
+    `生效阈值只比配置预算大 ${p.withinBudgetMs / p.budgetMs} 倍——`
+    + '那不是护栏，是一条会被负载顶穿的延迟断言（默认 responseTimeoutMs 是 60 秒，'
+    + '所以护栏必须远低于它、又远高于调度抖动）')
 
-  // ★ 硬断言，不是"有就检查、没有就早退"：构造保证它必然超预算。
+  // ★ 硬断言，不是"有就检查、没有就早退"：构造保证它必然超阈值。
   const over = p.rows.filter((r) => r.withinBudget !== true)
   assert.equal(over.length, 1,
-    `注入时钟下必须恰好有 1 条超预算；实际 ${over.length} 条（读数 ${JSON.stringify(p.rows.map((r) => [r.id, r.got.elapsedMs, r.withinBudget]))}）`)
+    `注入时钟下必须恰好有 1 条超护栏；实际 ${over.length} 条（读数 ${JSON.stringify(p.rows.map((r) => [r.id, r.got.elapsedMs, r.withinBudget]))}）`)
 
   for (const r of over) {
     const reason = p.reasons.find((x) => x.startsWith(`${r.id} `))
-    assert.ok(reason, `${r.id} 超出了预算却没有任何理由`)
+    assert.ok(reason, `${r.id} 超出了护栏却没有任何理由`)
     // ★ 必须出现**生效阈值**这个数，而不是只出现 budget。
-    assert.match(reason, new RegExp(`超过生效阈值 ${p.withinBudgetMs}ms`),
+    assert.match(reason, new RegExp(`超过挂起护栏 ${p.withinBudgetMs}ms`),
       `理由没有报出生效阈值：${reason}`)
     // ★★ 反向：不得再出现旧措辞「超过预算 Nms」（那正是把 1.5 倍报成 12.5 倍的那句）。
     assert.doesNotMatch(reason, /超过预算 \d+ms/,
       `理由用的是会被误读的旧措辞（把生效阈值说成"预算"）：${reason}`)
     // 而且必须把两个分量都摆出来，否则读者无法判断是"预算太小"还是"机器太忙"。
     assert.match(reason, /余量/, `理由没有说明余量：${reason}`)
-    // 报出来的耗时必须真的是注入时钟量出来的（1000 的整数倍），不是猜的。
-    assert.ok(r.got.elapsedMs >= 1000, `注入时钟下耗时应当 >= 1000ms，实际 ${r.got.elapsedMs}`)
+    // 报出来的耗时必须真的是注入时钟量出来的（10000 的整数倍），不是猜的。
+    assert.ok(r.got.elapsedMs >= 10_000, `注入时钟下耗时应当 >= 10000ms，实际 ${r.got.elapsedMs}`)
   }
 })
 

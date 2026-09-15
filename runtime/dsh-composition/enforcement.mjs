@@ -796,13 +796,52 @@ export const AVAILABILITY_CHECKED = Object.freeze(availabilitySelfCheck())
  * `ok === false` 的含义是具体的：要么某个成因落到了别的码上，
  * 要么某一条**没有结算**（没结算 = 工具调用会无限期挂起）。
  */
+/**
+ * ★★★ 计时**护栏**（不是延迟断言）。见 `probeTwoPhaseAvailability` 的注释。
+ *
+ * 它拦的是"配置的超时根本没生效"——那种情况实测会落在调用方的响应预算上
+ * （默认 60 秒）或干脆不结算，与 5 秒差着十几倍。而**精确**的延迟性质由
+ * 注入时钟确定性断言，不靠墙钟。
+ *
+ * 取值理由是**负载**而不是性能：CI 机器上 10ms 的定时器实测到过 272ms
+ * （约 27 倍）。一个紧贴配置预算的容差会让 `startupSelfCheck` 在繁忙机器上
+ * 判出 `incompatible`，从而让**健康的部署拒绝启动**。
+ */
+export const ENFORCEMENT_HANG_GUARD_MS = 5000
+
 export async function probeTwoPhaseAvailability({
   connectTimeoutMs = 10, responseTimeoutMs = 10, now = () => Date.now(), scenarioSet = null,
 } = {}) {
   const budget = connectTimeoutMs + responseTimeoutMs
-  // CI 机器可能很慢。判据是"有没有结算、码对不对"，不是精确耗时——
-  // 用耗时当判据会造出一条在繁忙机器上偶发变红的检查。
-  const slack = Math.max(150, budget * 4)
+  // ## ★★ 这个数**不是延迟断言，是挂起护栏**
+  //
+  // 原先这里是 `slack = Math.max(150, budget * 4)`——一个**紧贴**配置预算的容差
+  // （默认 20ms 预算 ⇒ 170ms 生效阈值）。它的问题不是"偶尔误报"，而是**在产品里
+  // 制造假阴性**：`startupSelfCheck` 用的是**真**探针，而 `ok === false` 会让它把
+  // 强制面判成 `incompatible` ⇒ 拒绝注册宿主端口 ⇒ **一个健康的部署起不来**。
+  //
+  // 实测（2026-09-15 两次全量 CI）：CI 机器上 10ms 的定时器实测到 251ms / 272ms；
+  // `runtime/dsh-composition/composition.test.mjs:710` 因此拿到 `incompatible`
+  // 而不是 `enforcement-effective`——**在干净树上单跑 48/48 全绿**。
+  //
+  //   > 一条"加载一高就判定生产环境不兼容"的判据，
+  //   > 与一条"拒绝启动"的判据，在值班的人那里是同一个东西——
+  //   > 只不过前者是机器的错，而报出来的是产品的错。
+  //
+  // 与本函数下方那段注释对照着读：那里写着"判据是'有没有结算、码对不对'，
+  // **不是**精确耗时"。**那句话一直是对的，错的是代码没有照它做。**
+  //
+  // 所以这里把两种性质分开：
+  //   · **语义**（结算了没有、码与阶段对不对）—— 与负载无关，仍然是严格判据，
+  //     它们在 `ok` 里、也在每一条用例里逐项断言；
+  //   · **耗时** —— 退成**护栏**：它要拦的是"配置的 10ms 超时根本没生效"，
+  //     那种情况下实测会落在**调用方给的响应预算**上（默认 `responseTimeoutMs`
+  //     是 60 秒）或干脆不结算，与 5 秒差了十几倍。
+  //
+  // 护栏取 5s：是 60s 默认响应预算的 1/12，离任何真实故障都还很远；
+  // 而精确的延迟性质改由**注入时钟**确定性地断言（见 availability.test.mjs）。
+  const slack = Math.max(ENFORCEMENT_HANG_GUARD_MS - budget, budget * 4)
+  const withinBudgetMs = budget + slack
 
   const runAnswerer = async (s) => {
     const started = now()
@@ -903,7 +942,7 @@ export async function probeTwoPhaseAvailability({
       expected: Object.freeze({ ...s.expect }),
       got: Object.freeze({ ...got }),
       matches,
-      withinBudget: got.elapsedMs <= budget + slack,
+      withinBudget: got.elapsedMs <= withinBudgetMs,
     }))
   }
 
@@ -932,15 +971,18 @@ export async function probeTwoPhaseAvailability({
     responseTimeoutMs,
     budgetMs: budget,
     slackMs: slack,
-    /** ★ 生效阈值 = budget + slack。**读的是这个**，不是 budgetMs。 */
-    withinBudgetMs: budget + slack,
+    /**
+     * ★ 生效阈值 = budget + slack。**读的是这个**，不是 budgetMs。
+     * 它是**挂起护栏**（见 `ENFORCEMENT_HANG_GUARD_MS`），不是延迟断言。
+     */
+    withinBudgetMs,
     rows: Object.freeze(rows),
     reasons: Object.freeze([
       ...unsettled.map((r) => `${r.id} ${r.what}：没有结算（会无限期挂起）`),
       ...mismatched.map((r) => `${r.id} ${r.what}：得到 ${JSON.stringify(r.got)}，期望 ${JSON.stringify(r.expected)}`),
       ...overBudget.map((r) =>
-        `${r.id} ${r.what}：耗时 ${r.got.elapsedMs}ms 超过生效阈值 ${budget + slack}ms`
-        + `（${budget}ms 预算 + ${slack}ms 繁忙余量；余量是为慢机器留的，见本函数注释）`),
+        `${r.id} ${r.what}：耗时 ${r.got.elapsedMs}ms 超过挂起护栏 ${withinBudgetMs}ms`
+        + `（${budget}ms 预算 + ${slack}ms 护栏余量；护栏不是延迟断言，见 ENFORCEMENT_HANG_GUARD_MS）`),
     ]),
   })
 }

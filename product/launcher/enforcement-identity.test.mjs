@@ -38,6 +38,8 @@ import {
 } from './enforcement-identity.mjs'
 import { DSH_OVERLAY_CODES, DSH_OVERLAY_RELPATH } from './dsh-overlay.mjs'
 import { createLauncher } from './launcher.mjs'
+import { canBind } from './ports.mjs'
+import { createServer } from 'node:net'
 import { resolveLayout } from '../paths.mjs'
 import { ENFORCEMENT_CONFIG_FIELDS, REQUIRED_ENFORCEMENT_CONFIG } from '../../runtime/dsh-composition/root.mjs'
 import { specFor } from '../process-manifest.mjs'
@@ -67,6 +69,38 @@ function layoutIn(root, overrides = {}) {
 
 const CWD = process.platform === 'win32' ? 'C:\\Legion' : '/legion'
 const HUB_PORT = 51814
+
+/**
+ * ★★★ 拿一个**这台机器上真的绑得上**的端口，不再写死。
+ *
+ * 此前这里硬编码 `runtime: 51999`。而在本机，**51999 / 52000 / 62200 一律 `EACCES`**
+ * （系统保留段），51998 / 50001 却正常——于是整套用例以 `PORT_PRIVILEGED` 失败，
+ * **与代码一点关系都没有**：
+ *
+ *   > 一个把端口写死的用例，
+ *   > 与一个"只在写它的那台机器上能过"的用例，是同一个东西。
+ *
+ * 而且 `netsh int ipv4 show excludedportrange protocol=tcp` **列不全**本机的保留段
+ * （它只列了 50000-50059 与 62178-62677），所以"查表挑端口"也不可靠——
+ * 唯一可靠的判据是**真的绑一次再放开**，用的就是产品自己那个 `canBind()`。
+ */
+async function pickBindablePort() {
+  for (let attempt = 0; attempt < 40; attempt++) {
+    const server = createServer()
+    const port = await new Promise((resolve) => {
+      server.once('error', () => resolve(null))
+      server.listen(0, '127.0.0.1', () => resolve(server.address().port))
+    })
+    await new Promise((r) => server.close(() => r()))
+    if (port === null) continue
+    // 复核一次：`listen(0)` 分到的端口在放开的瞬间可能已被别人拿走。
+    const check = await canBind(port)
+    if (check.ok) return port
+  }
+  throw new Error('拿不到一个可绑端口：这台机器的保留段太密')
+}
+
+const RUNTIME_PORT = await pickBindablePort()
 
 /** 一份**完整**的 `runtime.env`。字段不多不少，就是只能从配置来的那几个。 */
 const CONFIGURED_OK = Object.freeze({
@@ -299,7 +333,7 @@ const makeLauncher = (root, over = {}) => createLauncher({
   layout: layoutIn(root, over.layout ?? {}),
   include: ['runtime'],
   runtimeCommand: 'dsh --profile web',
-  ports: { runtime: 51999, 'team-hub': HUB_PORT },
+  ports: { runtime: RUNTIME_PORT, 'team-hub': HUB_PORT },
   ...over,
 })
 

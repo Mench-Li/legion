@@ -10,7 +10,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:net'
 
-import { canBind, checkPorts, reserveEphemeralPort, somethingIsListening } from './ports.mjs'
+import { canBind, checkPorts, classifyBindError, reserveEphemeralPort, somethingIsListening } from './ports.mjs'
 
 function listenOn(port = 0, host = '127.0.0.1') {
   return new Promise((resolve, reject) => {
@@ -45,6 +45,44 @@ test('canBind：非法端口报 PORT_OUT_OF_RANGE，不做无意义的绑定尝�
   const big = await canBind(70000)
   assert.equal(big.code, 'PORT_OUT_OF_RANGE')
   assert.equal(await canBind(1.5).then((r) => r.code), 'PORT_OUT_OF_RANGE')
+})
+
+test('★★★ 两种 EACCES 必须分开：<1024 是"要提权"，≥1024 是"端口被系统保留"', () => {
+  // 实测（本机）：51998 绑得上，51999 / 52000 / 62200 一律 `EACCES`。
+  // 而 `netsh int ipv4 show excludedportrange protocol=tcp` **列不全**这些段
+  // （它只列了 50000-50059 与 62178-62677）。
+  //
+  // 旧实现把两者一律报成 `PORT_PRIVILEGED` + "需要更高权限"——于是值班的人会去开一个
+  // 管理员终端，**然后照样绑不上**。
+  //
+  //   > 一个把"端口被系统保留"报成"你需要管理员"的诊断，
+  //   > 与一个"照着它做、然后还是绑不上"的诊断，是同一条信息。
+  //
+  // ★ 这里喂的是**构造的 err**，不是"找一个真的绑不上的端口"：
+  //   保留段是**机器相关**的，靠本机端口来测等于把用例重新绑回这台机器——
+  //   而那正是本次要修的那个毛病。
+  const eacces = Object.assign(new Error('listen EACCES'), { code: 'EACCES' })
+
+  const low = classifyBindError(eacces, 80)
+  assert.equal(low.code, 'PORT_PRIVILEGED')
+  assert.match(low.message, /管理员|权限/)
+
+  const high = classifyBindError(eacces, 51999)
+  assert.equal(high.code, 'PORT_RESERVED', '≥1024 的 EACCES 被报成了需要提权')
+  assert.notEqual(high.code, 'PORT_PRIVILEGED')
+  // 文案必须指向**正确**的动作
+  assert.match(high.message, /换一个端口/)
+  assert.match(high.message, /不是权限问题/)
+  // ★ 反向：既然 ≥1024 走的不是提权那条，它的文案里就不该叫人来提权。
+  assert.doesNotMatch(high.message, /需要更高权限/)
+
+  // 边界：1023 仍是特权端口，1024 不是
+  assert.equal(classifyBindError(eacces, 1023).code, 'PORT_PRIVILEGED')
+  assert.equal(classifyBindError(eacces, 1024).code, 'PORT_RESERVED')
+
+  // 另外两类不受影响
+  assert.equal(classifyBindError(Object.assign(new Error('x'), { code: 'EADDRINUSE' }), 51999).code, 'PORT_IN_USE')
+  assert.equal(classifyBindError(Object.assign(new Error('x'), { code: 'EWHATEVER' }), 51999).code, 'PORT_CHECK_FAILED')
 })
 
 test('reserveEphemeralPort 返回的端口当下可绑（名字说明它只是「先问一下」）', async () => {

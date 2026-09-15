@@ -39,6 +39,11 @@ import {
 } from './approval-port.mjs'
 import { BRIDGE_CODES } from './tool-request-bridge.mjs'
 import { APPROVAL_OUTCOMES } from '../runtime/dsh-composition/enforcement.mjs'
+// ★ 副作用导入：**注册那一步就发生在这里**。注册方在模块求值期调
+//   `setApprovalPortFactory()`，把工厂放进 `root-row` 的注册缝。
+//   不导入它，注册缝就是空的——而"空注册缝"与"链没接通"在读数上分不开，
+//   这正是下面第 ③ 组用例要跑真 hub 的理由。
+import './approval-registrar-row.mjs'
 
 const REPO = resolve(import.meta.dirname, '..')
 
@@ -117,7 +122,7 @@ const portOf = (over = {}) => createHubApprovalPort({
 })
 
 /** 后台当"用户"：等某条待批准行出现，然后按 `decision` 处理它。 */
-function decideWhenPending(decision, { reason = '用例处理', match = null } = {}) {
+function decideWhenPending(decision, { reason = '用例处理', match = null, onRow = null } = {}) {
   let settled = false
   const done = (async () => {
     for (let i = 0; i < 300; i++) {
@@ -127,6 +132,9 @@ function decideWhenPending(decision, { reason = '用例处理', match = null } =
         && (match === null || match(r)))
       if (row !== undefined) {
         settled = true
+        // `onRow` 让调用方拿到**审批箱那一侧看到的**行本体（字段名不能靠猜：
+        // 实测 `target` 是**规范化之后**的绝对路径，不是用例传进去的那一份）。
+        if (typeof onRow === 'function') onRow(row)
         return realHub.write('/api/permissions/decide', {
           requestId: row.requestId, decision, by: 'general', reason,
         })
@@ -539,3 +547,225 @@ test('★ 每条路径的结局都在 `APPROVAL_OUTCOMES` 闭集里', async () =
     assert.ok(APPROVAL_OUTCOMES.includes(outcome), `第 ${i} 种返回了闭集外的 ${JSON.stringify(outcome)}`)
   }
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ③ ★★★ 组合根 → 注册缝工厂 → **真 hub**：端到端真的发出一次请求
+//
+// PRT-212 的台账里长期挂着一条限定：「端点的**生产者**已交付，但端点**从未真的
+// 发过一次请求**（构造期不发 HTTP，进程里也没有 hub）」。
+//
+// 上面各条已经分别守住了两段：端口自己接真 hub（①②），工厂自己翻译错误
+// （`approval-registrar-row.test.mjs`，注入传输）。**缺的是中间那一截**：
+// `installEnforcementRoot` 从注册缝取工厂、拿解析好的身份配置跑出端口、
+// 交给桥——这条链**从来没有对着一个真 hub 跑过一次**。
+//
+//   > 一个「每一段各自都被测过」的链路，
+//   > 与一个「真的接通过一次」的链路，在它被接通之前是同一个东西——
+//   > 只不过前者的用例数是完整的。
+//
+// 判据不是"函数返回了 allowed-once"（那可以靠默认值蒙对），而是
+// **审批箱里真的出现过一条携带着 hub 自己铸的 `requestId` 的待批准行**：
+// 那个 id 只能由真 hub 铸出来，本地编不出来。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 组合根读的这几个键，就是根行在真 DSH 进程里会读到的那一组。 */
+const ROOT_ENV = Object.freeze({
+  TEAM_HUB_URL: BASE,
+  LEGION_ACTOR: 'e2e-actor',
+  LEGION_SCOPE: 'e2e-scope',
+  LEGION_ENFORCEMENT_ACTION: 'write',
+  LEGION_CWD: process.platform === 'win32' ? 'C:\\work' : '/work',
+})
+
+/**
+ * 装一份组合根，**走注册缝**取审批端口工厂——即生产里那条链。
+ *
+ * `resetEnforcementRoot()` 是必须的：组合根是**进程单例**，而"只装一次"正是它的
+ * 设计（两次装配会得到两份桥和两本登记簿）。用例之间要换 hub 地址，就得显式重置。
+ */
+async function installRoot({
+  hubUrl = BASE,
+  approvalResponseTimeoutMs = 8000,
+  approvalConnectTimeoutMs = 2000,
+  decide = () => ({ kind: 'allow' }),
+} = {}) {
+  const { resetEnforcementRoot, installEnforcementRoot } = await import('../runtime/dsh-composition/root.mjs')
+  const row = await import('../runtime/dsh-composition/plugins/root-row.mjs')
+  resetEnforcementRoot()
+  const inst = installEnforcementRoot({
+    env: { ...ROOT_ENV, TEAM_HUB_URL: hubUrl },
+    // `decide` 是组合根**必需**的端口。注意：桥的 `answerer` **不读它**
+    // （它无条件把可投影的调用交给审批端口），所以下面两条用例都不把结局归因于它。
+    decide,
+    // ★ 生产那条链的中间一截：注册缝里的工厂 + 解析好的身份配置 → 端口 → `requestApproval`。
+    //   组合根要的是**函数**，而工厂给的是 `{requestApproval, ticketFor, …}`，
+    //   中间那次提取就是根行 `requestApprovalOf` 做的事。
+    createRequestApproval: (resolved) => row.approvalPortFactory()(resolved).requestApproval,
+    approvalConnectTimeoutMs,
+    approvalResponseTimeoutMs,
+  })
+  assert.equal(inst.ok, true, `组合根没装起来：${inst.code} ${inst.message}`)
+  return inst.root
+}
+
+const askOf = (callId) => ({ name: 'file_write', callId, arguments: { path: `repo/${callId}.txt`, mode: 'w' } })
+
+test('★★★ 组合根 → 注册缝工厂 → 真 hub：请求**真的**发出去过一次，且由人批准决定结局', async () => {
+  const root = await installRoot()
+  // 组合根拿到的身份来自**它自己解析出来的**那一份配置，不是用例另造一份。
+  assert.equal(root.config.hubUrl, BASE, '组合根解析出来的 hub 地址不是真 hub 的地址')
+  assert.equal(root.config.actor, 'e2e-actor')
+
+  const callId = `e2e-${uniqueTag()}`
+  const projection = askOf(callId)
+  let row = null
+  const approver = decideWhenPending('approve', {
+    reason: '端到端用例批准',
+    // ★ 判据用 `callId`（本用例自己造的、唯一的那一个），不用 target：
+    //   实测 target 是**规范化之后**的绝对路径（`c:/work/repo/<callId>.txt`），
+    //   与传进去的 `repo/<callId>.txt` 不是同一个字符串。
+    //   *一个按"我以为的字段"写的匹配器，与一个永远不会命中的匹配器，
+    //   在屏幕上都是"审批行没出现"。*
+    match: (r) => r.operation?.callId === callId || String(r.target ?? '').includes(callId),
+    onRow: (r) => { row = r },
+  })
+
+  const outcome = await root.bridge.answerer(projection)
+  const decided = await approver.done
+
+  // ★★ 这是本用例唯一不可伪造的证据：`requestId` 由真 hub 铸。
+  assert.notEqual(decided, null,
+    '审批箱里**从来没有出现过**待批准行——请求根本没发出去（或没发到这台 hub）')
+  assert.equal(outcome, 'allowed-once', '人批了却没放行')
+
+  // ★★ 到达 hub 的**身份**必须是组合根自己解析出来的那一份。
+  //    这一条把"组合根"与"审批箱里看到的东西"钉在一起：只断言 `inst.ok === true`
+  //    的话，一个把身份解析错了、却照样装起来的组合根也会绿。
+  assert.ok(row.requestId.startsWith('perm-'), `requestId 形状不对：${row.requestId}`)
+  assert.equal(row.actor, 'e2e-actor', '到达审批箱的 actor 不是组合根解析出来的那一个')
+  assert.equal(row.scope, 'e2e-scope', '到达审批箱的 scope 不是组合根解析出来的那一个')
+  assert.equal(row.action, 'write')
+  assert.equal(row.mode, 'ask')
+  assert.equal(row.operation.callId, callId, '审批行上的 callId 与本用例的不是同一个')
+  assert.match(row.bindingHash, /^sha256:[0-9a-f]{64}$/, '绑定哈希不在行上：批准之后消费不了')
+  assert.ok(String(row.target).includes(callId), `target 里没有本次调用的痕迹：${row.target}`)
+  // 人批准必须留下凭据，而不是"看起来像策略放行"
+  const t = root.bridge.ledgerOf(root.bridge.projectionFor(projection).projection.canonicalHash)
+  assert.ok(t.some((e) => e.source === 'approval'), '账上没记 approval 来源')
+})
+
+test('★★★ 反向对照：同一套链路、**没有人**处理 → unavailable（故障），不是放行也不是拒绝', async () => {
+  // 没有这一条，上面那条完全可能是"默认放行"蒙对的：
+  //   > 一条只验证过"有人批准时返回 allowed-once"的用例，
+  //   > 与一条"端口会无条件放行"的链路，在只有正例的套件里是同一个东西。
+  const root = await installRoot({ approvalResponseTimeoutMs: 300, approvalConnectTimeoutMs: 200 })
+  const outcome = await root.bridge.answerer(askOf(`e2e-none-${uniqueTag()}`))
+  assert.equal(outcome, 'unavailable',
+    '没人处理的申请返回了 ' + JSON.stringify(outcome) + '——"没人回答"必须是故障（unavailable），不是 allow、也不是 rejected（人说不）')
+  assert.ok(APPROVAL_OUTCOMES.includes(outcome))
+})
+
+test('★★★ 反向对照：hub 地址指向一个**没人监听**的端口 → 一律 fail closed', async () => {
+  // 先起一个真 server 拿一个确定空闲的端口，再关掉它 —— 这样"连不上"是构造出来的，
+  // 不是碰运气撞上一个没被占的端口号。
+  const probe = await import('node:net')
+  const srv = probe.createServer()
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r))
+  const deadPort = srv.address().port
+  await new Promise((r) => srv.close(r))
+
+  const root = await installRoot({
+    hubUrl: `http://127.0.0.1:${deadPort}`,
+    approvalResponseTimeoutMs: 300,
+    approvalConnectTimeoutMs: 300,
+  })
+  const outcome = await root.bridge.answerer(askOf(`e2e-dead-${uniqueTag()}`))
+  assert.equal(outcome, 'unavailable',
+    '审批箱不可达时返回了 ' + JSON.stringify(outcome) + '——不可达必须是故障（fail closed）')
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ④ ★★★ 驱动**生产的两行插件本体**（不是桥）：tools/pre-execute → 登记簿 → approval/request → 真 hub
+//
+// 上面第 ③ 组走的是 `root.bridge.answerer`——那是**桥**。而 DSH 真正派发的是事件，
+// 承接它的是 `root.rows.approvalAnswerer` 这个**插件行**；两行之间靠一本共享登记簿
+// 会合：pre-execute 行在 `ask` 时把投影写进去，answerer 行靠它算绑定哈希。
+//
+//   > 一个"桥自己接得上审批箱"的证明，
+//   > 与一个"DSH 派发事件时这一行答得出话"的证明，是两件事——
+//   > 只不过前者看起来已经覆盖了后者。
+//
+// DSH 那一侧的契约（事件名、瀑布语义、`ctx.plugin` 的装载）已经由
+// `enforcement-plugin.test.mjs` 对着**真运行时**守住；这里补的是**我们自己两行之间的
+// 会合**在真 hub 上跑不跑得通，所以用记录型 ctx 把两行的 handler 抓出来直接驱动。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 记录型 ctx：行只需要 `ctx.on`（其余都是可选的）。 */
+function recordingCtx() {
+  const handlers = new Map()
+  return {
+    handlers,
+    /** 取某事件的处理器；取不到就是**接线本身**没接上，如实报出来。 */
+    handlerOf(event) {
+      const fn = handlers.get(event)
+      assert.equal(typeof fn, 'function', `没有任何一行注册了 ${event}——两行的接线没接上`)
+      return fn
+    },
+    ctx: {
+      on: (event, fn) => { handlers.set(event, fn); return () => { handlers.delete(event) } },
+      logger: { info: () => {} },
+    },
+  }
+}
+
+test('★★★ 生产两行之间真的会合：pre-execute 留投影 → approval/request 认领 → 真 hub 批准', async () => {
+  // `decide` 必须答 `ask`，否则 pre-execute 行走的是 `allow` 分支（让路），不留投影。
+  const root = await installRoot({ decide: () => ({ kind: 'ask' }) })
+
+  // ★ 两行必须闭包到**同一本**登记簿 —— 那是它们唯一的会合点，而"共用"是身份不是形状。
+  assert.equal(root.rows.preExecute.registry, root.rows.approvalAnswerer.registry,
+    '生产的两行没有共用同一本登记簿：ask 留下的投影在审批那一侧查不到，审批将永远问不到人')
+  assert.equal(typeof root.rows.approvalAnswerer.port, 'function', 'answerer 行闭包到的端口不是端口')
+
+  const pre = recordingCtx()
+  root.rows.preExecute.apply(pre.ctx, undefined)
+  const answer = recordingCtx()
+  root.rows.approvalAnswerer.apply(answer.ctx, undefined)
+
+  const callId = `row-${uniqueTag()}`
+  const exec = askOf(callId)
+
+  // ① 真·第一道门：DSH 会派发的 `tools/pre-execute`。
+  const decision = await pre.handlerOf('tools/pre-execute')(exec, async () => ({ kind: 'allow' }))
+  assert.equal(decision.kind, 'ask', '策略答 ask 时 pre-execute 行没有认领')
+  assert.notEqual(root.registry.peek(callId), undefined,
+    'pre-execute 行没有把投影写进登记簿——answerer 行随后必然算不出绑定哈希')
+
+  // ② 后台当"人"，然后派发 `approval/request`（DSH 在需要审批时派发的那个事件）。
+  let row = null
+  const approver = decideWhenPending('approve', {
+    reason: '两行会合用例批准',
+    match: (r) => r.operation?.callId === callId || String(r.target ?? '').includes(callId),
+    onRow: (r) => { row = r },
+  })
+
+  const nextCalls = []
+  const outcome = await answer.handlerOf('approval/request')(
+    { callId, toolName: 'file_write', reason: '端到端' },
+    async () => { nextCalls.push(1); return 'unavailable' },
+  )
+  const decided = await approver.done
+
+  // ★★ 只有真 hub 铸得出 requestId —— 这是"审批申请真的到了审批箱"的唯一硬证据。
+  assert.notEqual(decided, null, '审批箱里从来没有出现过待批准行：请求没发出去')
+  assert.equal(outcome, 'allowed-once', '人批准了，而 answerer 行给的是 ' + JSON.stringify(outcome))
+  // ★ answerer 行**认领**了这次询问：它不能把球踢给 next()，
+  //   否则 DSH 的兜底会接管，而"我们拦下了"与"我们让开了"在结局上可能同形。
+  assert.deepEqual(nextCalls, [], 'answerer 行没有认领这次审批，把它让给了下一道（next()）')
+  assert.equal(row.operation.callId, callId, '送到审批箱的不是本次调用')
+  assert.equal(row.actor, 'e2e-actor', '到达审批箱的 actor 不是组合根解析出来的那一个')
+  assert.match(row.bindingHash, /^sha256:[0-9a-f]{64}$/
+    , '审批行上没有绑定哈希——说明投影没有经过登记簿')
+})
+
+

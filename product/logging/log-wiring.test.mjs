@@ -26,7 +26,23 @@ function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'legion-logwire-'))
   const logDir = join(root, 'log')
   mkdirSync(logDir, { recursive: true })
-  return { root, logDir, cleanup: () => rmSync(root, { recursive: true, force: true }) }
+  // ★ Windows 上 `rmSync` 会因为**句柄还没放开**而 `EPERM`：本套件起的是**真子进程**，
+  //   而日志文件的句柄归它（以及 sink）所有，进程退出到句柄释放之间有一个窗口。
+  //   CI 负载一高，这个窗口就会张开，于是清理抛 `EPERM` —— **用例外面的清理炸掉，
+  //   报告出来却像用例失败**：
+  //
+  //     > 一个"清理时抢跑"的失败，
+  //     > 与一个"被断言抓住的真缺陷"，在失败列表里是同一个东西——
+  //     > 只不过前者重跑就好，而后者要改代码。
+  //
+  //   `maxRetries` / `retryDelay` 就是为这个窗口准备的（Node 在 Windows 上会退避重试）。
+  return {
+    root,
+    logDir,
+    cleanup: () => {
+      try { rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 }) } catch { /* 让位给下次 */ }
+    },
+  }
 }
 
 /** 让 launcher 在临时目录里解析出布局（与 `launcher.test.mjs` 同法）。 */

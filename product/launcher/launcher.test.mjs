@@ -620,3 +620,239 @@ test('⑥ CLI 的两个开关**默认是关的**（不存在「忘记关」这�
   assert.equal(on.options.sweepOrphansOnStart, true)
   assert.equal(on.options.allowUnverifiedSweep, false, '允许未验证必须单独要求')
 })
+
+// ═══════════════════════════════════════════════ 单实例锁接进启动路径（PRT-708）
+//
+// `single-instance.mjs` 写出来之后，`product/launcher/` 里对它的引用次数是 **0** ——
+// 也就是本会话反复在修的那一类：*一个"写好了、也有用例"的机制，与一个"从未被
+// 交给任何调用方"的机制，在运行的部署上是同一个东西——只不过前者的用例是绿的。*
+//
+// 这一组钉的是**接线**，而且钉的是顺序（顺序在这里是安全性）。
+
+/** 一个记账用的假锁：记录拿到/释放，并按脚本给结论。 */
+function fakeLock({ outcomes = null, code = 'INSTANCE_LOCK_ACQUIRED' } = {}) {
+  const calls = { acquire: [], release: 0 }
+  let n = 0
+  const impl = async (input) => {
+    calls.acquire.push(input)
+    const scripted = outcomes === null ? null : outcomes[Math.min(n, outcomes.length - 1)]
+    n++
+    const c = scripted ?? code
+    const ok = c === 'INSTANCE_LOCK_ACQUIRED' || c === 'INSTANCE_LOCK_STALE_RECLAIMED'
+    return {
+      ok,
+      code: c,
+      lock: { file: join(input.dataDir, 'legion-instance.lock'), pid: input.pid },
+      holder: ok ? { pid: input.pid } : { pid: 424242, startedAt: '2026-09-11T00:00:00.000Z' },
+      handle: ok ? { release: () => { calls.release++; return { ok: true, code: 'INSTANCE_LOCK_RELEASED' } } } : null,
+      diagnostics: ok ? [] : ['已经有实例在跑（pid 424242）', `确认没有 Legion 在跑之后删掉：${join(input.dataDir, 'legion-instance.lock')}`],
+    }
+  }
+  return { impl, calls }
+}
+
+test('★ 拿到锁：`start()` 会在 `dataDir` 上真的去拿一次，且读数被暴露出来', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'legion-lk-'))
+  try {
+    const lock = fakeLock()
+    const L = createLauncher({
+      layout: layoutIn(root), include: ['team-hub'], exists: () => true,
+      runtimeCommand: null, acquireInstanceLockImpl: lock.impl,
+    })
+    assert.equal(L.instanceLock, null, '还没 start()，读数应该是 null（不是"拿到了"）')
+    await L.start()
+    assert.equal(lock.calls.acquire.length, 1)
+    // 锁必须落在**产品家目录**上，那是被保护的东西所在的地方。
+    assert.equal(lock.calls.acquire[0].dataDir, layoutIn(root).dataDir)
+    assert.equal(L.instanceLock.code, 'INSTANCE_LOCK_ACQUIRED')
+    assert.equal(L.instanceLock.holder.pid, lock.calls.acquire[0].pid)
+    await L.stop()
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('★★★ 另一个实例持有锁 → `start()` 在 `instance-lock` 阶段拒绝，起 0 个进程', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'legion-lk-'))
+  try {
+    const lock = fakeLock({ code: 'INSTANCE_ALREADY_RUNNING' })
+    let spawned = 0
+    const L = createLauncher({
+      layout: layoutIn(root), include: ['team-hub'], exists: () => true,
+      runtimeCommand: null, acquireInstanceLockImpl: lock.impl,
+      spawnImpl: () => { spawned++; return liveFakeChild(1) },
+    })
+    const r = await L.start()
+    assert.equal(r.ok, false)
+    assert.equal(r.phase, 'instance-lock')
+    assert.equal(r.code, 'INSTANCE_ALREADY_RUNNING')
+    assert.equal(spawned, 0, '拿不到锁却还是起了进程 —— 那样两个实例会真的同时在跑')
+    // 诊断要原样交出来：里面有"该删哪个文件"，那是用户唯一的出路。
+    assert.match(r.diagnostics.join('\n'), /legion-instance\.lock/)
+    assert.equal(L.instanceLock.ok, false)
+    assert.equal(L.instanceLock.holder.pid, 424242, '要说清是谁占着')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('★★★ 锁**早于**上一次运行的残留检查：拿不到锁就不去碰任何进程', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'legion-lk-'))
+  try {
+    // 磁盘上放一份"上一次运行"的记录，里面有一个活着的 pid。
+    const dataDir = layoutIn(root).dataDir
+    mkdirSync(dataDir, { recursive: true })
+    writeFileSync(join(dataDir, 'launcher-run.json'), JSON.stringify({
+      version: 'legion/launcher-run@1',
+      runId: 'run-old', launcherPid: 111,
+      processes: [{ key: 'team-hub', pid: 111, image: 'node.exe' }],
+    }))
+    const killed = []
+    const lock = fakeLock({ code: 'INSTANCE_ALREADY_RUNNING' })
+    const L = createLauncher({
+      layout: layoutIn(root), include: ['team-hub'], exists: () => true,
+      runtimeCommand: null, acquireInstanceLockImpl: lock.impl,
+      options: { sweepOrphansOnStart: true },
+    })
+    const r = await L.start()
+    assert.equal(r.phase, 'instance-lock')
+    // ★ 这条断言是这一组里最要紧的：
+    //   运行记录里那个 pid 属于**第一个实例**。第二个实例若先跑到
+    //   `checkPreviousRun()`/清理那一步，它清理的就是别人正在用的进程。
+    //   *一个"先清理残留、再检查自己该不该启动"的启动器，会把"我上次没退干净"
+    //   与"别人正在跑"当成同一件事处理——只不过它清理的是别人正在用的那批。*
+    assert.deepEqual(killed, [], '拿不到锁却动了进程')
+    assert.match(r.diagnostics.join('\n'), /pid 424242/)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('★★★ 早退路径（preflight 不过）也要**放锁**，否则下一次启动被自己挡住', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'legion-lk-'))
+  try {
+    const lock = fakeLock()
+    const L = createLauncher({
+      layout: layoutIn(root), include: ['team-hub'],
+      // 清单里少一个入口 → preflight/plan 阶段就返回，`supervisor` 始终是 null。
+      exists: () => false,
+      runtimeCommand: null, acquireInstanceLockImpl: lock.impl,
+    })
+    const r = await L.start()
+    assert.notEqual(r.phase, 'instance-lock', '这一跑应该是**拿到了锁**之后才失败的')
+    // ★ 这一条同样是"用例测的是不是那条分支"的诚实性检查：
+    //   早退路径的特征就是 `supervisor` 从没被建起来（`phase` 停在 plan）。
+    assert.equal(r.phase, 'plan', `这一跑没走到早退那条路径：${JSON.stringify(r)}`)
+    assert.equal(lock.calls.acquire.length, 1)
+    await L.stop()
+    // ★ 锁是在 `supervisor` 被建**之前**拿到的，所以"没起来就没什么可收的"
+    //   这个判断会漏掉它——而残留的锁会把**下一次**启动挡在门外，
+    //   提示还是"已经有一个实例在运行"（那句话是假的）。
+    assert.equal(lock.calls.release, 1, '早退路径没放锁')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('★★ 正常 stop() 放锁，且**重复 stop() 不会重复释放**', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'legion-lk-'))
+  try {
+    const lock = fakeLock()
+    const port = await reserveEphemeralPort()
+    let t = 0
+    const refused = Object.assign(new Error('refused'), { code: 'ECONNREFUSED' })
+    const L = createLauncher({
+      layout: layoutIn(root),
+      ports: { 'team-hub': port },
+      include: ['team-hub'],
+      exists: () => true,
+      acquireInstanceLockImpl: lock.impl,
+      readiness: { timeoutMs: 1000, intervalMs: 100 },
+      sleep: async (ms) => { t += ms },
+      now: () => t,
+      fetchImpl: async () => { throw refused },
+      spawnImpl: () => liveFakeChild(1),
+    })
+    const r = await L.start()
+    // ★★★ 这条断言是**这一组用例自己**的诚实性检查。
+    //
+    //   破验 L4（"正常 stop() 不放锁"）第一次**没咬住**，原因就在这里：
+    //   当时的夹具让 `start()` 在 preflight 就失败了，于是 `supervisor` 始终是
+    //   `null`、`stop()` 走的是**早退**那条 —— 一条叫"正常 stop() 放锁"的用例，
+    //   实际上测的是早退路径，而早退那条本来就有释放。
+    //
+    //     > 一条"测正常停止路径"的用例，
+    //     > 与一条"碰巧测了同一段代码的另一条分支"的用例，
+    //     > 在绿灯上是同一个东西——只不过前者会在被测的那条分支坏掉时保持绿。
+    //
+    //   所以这里先钉住"这一次真的走到了 readiness（= supervisor 已建）"，
+    //   再谈锁。`phase: 'readiness'` 是那条路径的具名读数。
+    assert.equal(r.phase, 'readiness', `这一跑没有走到 supervisor 那一步，用例测错了分支：${JSON.stringify(r)}`)
+    assert.equal(lock.calls.acquire.length, 1)
+
+    // ★★★ 在**这里**断言，而不是在下面那次显式 `stop()` 之后。
+    //
+    //   破验 L4（"正常 stop() 不放锁"）第二次仍然**没咬住**，就是因为第一次
+    //   我把断言写在显式 `stop()` 之后：`start()` 的就绪失败会**内部**调一次
+    //   `stop({ reason: '启动失败回滚' })`，而那时 `supervisor` 还活着 ——
+    //   也就是**正常路径已经在 `start()` 里被走过了**，同时 `supervisor`
+    //   被置成了 `null`。于是紧随其后的显式 `stop()` 走的是**早退**那条
+    //   （早退有释放），计数被"救"回 1，被摘掉的那条分支就查不出来了。
+    //
+    //     > 一次"计数恰好等于 1"的读数，
+    //     > 与一次"我测的那条分支恰好释放过"的读数，
+    //     > 只有在**没有第二条分支会补上这个计数**时才等价。
+    //
+    //   所以：紧接 `start()` 返回就断言——此刻唯一可能释放过的就是
+    //   `supervisor` 还活着时的那次回滚 `stop()`。
+    assert.equal(lock.calls.release, 1, '正常路径（supervisor 已建时）没放锁')
+
+    // 之后 supervisor 已是 null，这次显式 stop() 走早退路径；
+    // 它必须**幂等**，不能因为"又 release 了一次"把计数顶到 2。
+    await L.stop()
+    assert.equal(lock.calls.release, 1)
+    await L.stop()
+    assert.equal(lock.calls.release, 1, '重复释放 —— 一个已经放掉的句柄不该被再用一次')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('★★ 每次 `start()` 各拿各的锁（`retry()` 不会复用上一次那个句柄）', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'legion-lk-'))
+  try {
+    const lock = fakeLock()
+    const port = await reserveEphemeralPort()
+    let t = 0
+    const refused = Object.assign(new Error('refused'), { code: 'ECONNREFUSED' })
+    const make = () => createLauncher({
+      layout: layoutIn(root),
+      ports: { 'team-hub': port },
+      include: ['team-hub'],
+      exists: () => true,
+      acquireInstanceLockImpl: lock.impl,
+      readiness: { timeoutMs: 1000, intervalMs: 100 },
+      sleep: async (ms) => { t += ms },
+      now: () => t,
+      fetchImpl: async () => { throw refused },
+      spawnImpl: () => liveFakeChild(1),
+    })
+    const L = make()
+    await L.start()
+    // 就绪失败 → `start()` 内部回滚（正常路径，supervisor 还活着）→ 已放一次。
+    assert.equal(lock.calls.acquire.length, 1)
+    assert.equal(lock.calls.release, 1, '第一次启动没有放锁')
+    await L.stop()
+    assert.equal(lock.calls.release, 1, '第二次 stop 不该再放一次')
+    // 第二次启动（`retry()` 就是"先 stop 再 start"）：必须**重新**拿一次锁。
+    await L.start()
+    await L.stop()
+    assert.equal(lock.calls.acquire.length, 2, '第二次启动没有重新拿锁 —— 那把锁在第一次 stop 之后已经放掉了')
+    assert.equal(lock.calls.release, 2, '两次启动各要放一次 —— 漏一次就把家目录锁死了')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('★★ 没有 dataDir 时锁落不下 —— 如实退到 `instance-lock` 而不是静默跳过', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'legion-lk-'))
+  try {
+    // 真实现（不注入）：空 dataDir 会抛，而"抛"绝不能变成"那就跳过这把锁"。
+    const L = createLauncher({
+      layout: { ...layoutIn(root), dataDir: '' },
+      include: ['team-hub'], exists: () => true, runtimeCommand: null,
+    })
+    const r = await L.start()
+    assert.equal(r.ok, false, '拿不到锁却照常启动 —— 那就等于没有这把锁')
+    assert.equal(r.phase, 'instance-lock')
+    assert.match(r.diagnostics.join('\n'), /dataDir|产品家目录/)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})

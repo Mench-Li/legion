@@ -52,6 +52,8 @@ import { readinessResultToDiagnostic, waitForReadiness } from './readiness.mjs'
 import { createSupervisor, defaultKillTree } from './supervisor.mjs'
 import { createLogSink } from '../logging/sink.mjs'
 import { createLauncherHeartbeat } from './heartbeat-wiring.mjs'
+// 单实例锁（PRT-708）。**必须早于 `checkPreviousRun()`**——见 `start()` 里那段。
+import { SINGLE_INSTANCE_CODES, acquireSingleInstance } from './single-instance.mjs'
 import {
   buildRunRecord,
   classifyRecordedPids,
@@ -208,7 +210,17 @@ export function createLauncher({
   runtimeEnv = {},
   /** 日志策略（PRT-709）。缺省用 `DEFAULT_LOG_POLICY`。 */
   logPolicy = {},
-  // ── PRT-713 收尾：健康心跳 ──
+  /**
+   * 单实例锁的**拿锁实现**（PRT-708）。默认 `acquireSingleInstance`（真实现）。
+   *
+   * 与 `spawnImpl` / `probe` 同一个手法：判据是"该拦谁、该放谁、该在哪些路径上
+   * 释放"，而那件事不需要真的去独占一个文件就能逐条验证。
+   *
+   * **默认就是真实现**——注入只用于构造"另一个实例正在跑""读不出持有者"
+   * 那几条分支，因为它们靠真磁盘是走不顺的（要么得真起两个进程，
+   * 要么得手工把锁文件写坏）。
+   */
+  acquireInstanceLockImpl = acquireSingleInstance,  // ── PRT-713 收尾：健康心跳 ──
   //
   // 默认 `{}` → `enabled` 不是 true → 不装配、不排定时器、不建 transport。
   // **默认关**这件事在两处各判一次（这里与 `wireHeartbeat`），
@@ -505,6 +517,15 @@ export function createLauncher({
   let stoppedAt = null
   let portDiagnostics = []
   let secretsDiagnostics = []
+  /**
+   * 单实例锁（PRT-708）。
+   *
+   * `null` = 本次运行**没有**拿到锁（启动被拒、或还没启动过）。
+   * 它是这一层唯一"拦住启动"的东西之一，所以它既要能被观测
+   * （`launcher.instanceLock`），也要在**每一条**退出路径上被释放。
+   */
+  let instanceLock = null
+  let instanceLockReading = null
   /** 日志 sink（PRT-709）。`null` 表示建不起来——**不阻止启动**。 */
   let logSink = null
   const logSinkDiagnostics = []
@@ -789,6 +810,106 @@ export function createLauncher({
   const probe = processProbe ?? createProcessProbe({ spawnImpl })
 
   /**
+   * 拿单实例锁（PRT-708）。每次 `start()` 都真的去拿一次。
+   *
+   * 为什么不是"构造 `createLauncher` 时拿"：构造是**只读**的
+   * （它算 plan、解析覆盖层、解析身份，不碰产品家目录里的独占资源）。
+   * 在构造期拿锁会让"建一个 launcher 看一眼它打算做什么"变成一次占用，
+   * 而那种占用没有任何人会去释放——**每一次 `--check` 都会留下一个死锁文件**。
+   *
+   *   > 一个"构造时就把资源占了"的工厂，
+   *   > 与一个"看一眼就再也起不来"的产品，
+   *   > 在用户那里是同一个东西——只不过前者看起来是把初始化提前做了。
+   *
+   * @returns {Promise<{ok: boolean, code: string, diagnostics: ReadonlyArray<string>}>}
+   */
+  async function acquireInstanceLock() {
+    let outcome = null
+    try {
+      outcome = await acquireInstanceLockImpl({
+        dataDir: layout?.dataDir ?? '',
+        pid: typeof process?.pid === 'number' ? process.pid : 0,
+        now: () => new Date(now()).toISOString(),
+      })
+    } catch (e) {
+      // ★ 拿锁**抛**了（例如 `dataDir` 空 → 真实现抛"需要 dataDir"），
+      //   必须翻成一次**具名拒绝**，而不是让它穿出 `start()`。
+      //
+      //     > 一个"拿不到锁时把异常抛穿启动函数"的启动器，
+      //     > 与一个"拿不到锁时照常启动"的启动器，
+      //     > 在调用方看来是两个东西——而前者更坏：
+      //     > 调用方拿到的是一个未捕获异常，它说不清"是锁的问题"还是"是别的问题"。
+      //
+      //   `SINGLE_INSTANCE_CODES.UNKNOWN` 是这里唯一诚实的码：我们**判断不了**
+      //   这个家目录有没有别的实例，所以不放行。
+      instanceLockReading = Object.freeze({
+        ok: false,
+        code: SINGLE_INSTANCE_CODES.UNKNOWN,
+        holder: null,
+        file: null,
+        error: e?.message ?? String(e),
+      })
+      log('error', `[instance-lock] 拿锁失败：${e?.message ?? String(e)}`)
+      return Object.freeze({
+        ok: false,
+        code: SINGLE_INSTANCE_CODES.UNKNOWN,
+        diagnostics: Object.freeze([
+          `无法确认这个产品家目录有没有别的实例：${e?.message ?? String(e)}`,
+          '不放行：判断不了的时候启动，等于把"可能有两个实例"当成"只有一个"。',
+        ]),
+      })
+    }
+    instanceLockReading = Object.freeze({
+      ok: outcome.ok === true,
+      code: outcome.code,
+      holder: outcome.holder ?? null,
+      file: outcome.lock?.file ?? null,
+    })
+    if (outcome.ok === true) {
+      instanceLock = outcome.handle
+    } else {
+      // 拒绝时**把诊断原样交出去**。这一层的诊断里带着"该删哪个文件"，
+      // 而那句话是用户唯一的出路——吞掉它就把一个可解的问题变成死胡同。
+      for (const d of outcome.diagnostics ?? []) {
+        log('error', `[instance-lock] ${d}`)
+      }
+    }
+    return Object.freeze({
+      ok: outcome.ok === true,
+      code: outcome.code,
+      diagnostics: Object.freeze([...(outcome.diagnostics ?? [])]),
+    })
+  }
+
+  /**
+   * 放掉单实例锁。**幂等**，且在**每一条**退出路径上都要调到。
+   *
+   * `stop()` 有两条早退（`supervisor === null`、以及正常那条），而锁是在
+   * `start()` 里、早于 `supervisor` 被建之前就拿到的。于是"早退就不收尾"
+   * 这个判断会**泄漏这把锁**——而下一次启动会被自己上一次的残留挡住。
+   *
+   * 这与同一段代码里 `forgetRunRecord()` 踩过的那个坑是**同一个形状**：
+   * 「什么都没起来所以不用收尾」。
+   */
+  function releaseInstanceLock() {
+    if (instanceLock === null) return null
+    let outcome = null
+    try {
+      outcome = instanceLock.release()
+    } catch (e) {
+      outcome = { ok: false, reason: e?.message ?? String(e) }
+    }
+    instanceLock = null
+    if (outcome?.ok !== true) {
+      // 释放失败**不是**灾难（进程退出后那个文件是陈旧的，下次启动会按
+      // "持有者已死"回收掉），但它必须被记下来——静默失败会让
+      // "为什么下次启动说已经有实例在跑"变成一件要读代码才知道的事。
+      log('warn', `[instance-lock] 释放未完成：${outcome?.reason ?? outcome?.code ?? '未知原因'}`)
+    }
+    return outcome
+  }
+
+  /**
    * 查上一次运行留下了什么。**只报告，不动手。**
    *
    * 清理是单独的一步（`sweepOrphansOnStart`），因为杀进程不可撤销——
@@ -945,6 +1066,19 @@ export function createLauncher({
      */
     enforcementOverlay: overlay,
     /**
+     * 单实例锁的读数（PRT-708）。
+     *
+     * 暴露理由与 `enforcementOverlay` 同：**"锁接上了没有"必须可被观测**。
+     * 一个拿不到锁的启动会退在 `phase: 'instance-lock'`，但那是**这一次**的
+     * 读数；`instanceLockReading` 说的是"最近一次尝试拿到了什么、是谁占着"，
+     * 排查"为什么起不来"时要看的是它。
+     *
+     * 取值：`null`（还没 `start()` 过）或
+     * `{ ok, code, holder, file }`，其中 `code` 是 `SINGLE_INSTANCE_CODES` 之一。
+     * `holder: null` 与 `holder: {pid: …}` 要分开读：前者是"没人"，后者是"有人，
+     * 是谁写在这儿了"。
+     */
+    get instanceLock() { return instanceLockReading },    /**
      * Legion 身份的解析结果（PRT-214 续）。
      *
      * 与 `enforcementOverlay` 同一个理由暴露出来：`--patch` 接上了、而身份没接上，
@@ -1000,7 +1134,32 @@ export function createLauncher({
       const beganAt = now()
       // **第一步**：日志。早于 preflight 与 plan——启动失败时最需要它。
       ensureLogSink()
-      // **第二步**：上一次运行留下了什么。
+
+      // **第二步：单实例锁（PRT-708）。早于** `checkPreviousRun()`。
+      //
+      // 顺序在这里是**安全性**，不是风格。`checkPreviousRun()` 会去核对运行记录
+      // 并清理上一次留下的孤儿进程——如果第二个实例先跑到那里，它读到的是
+      // **第一个实例**的记录，然后按自己的理解去"清理"那批进程。
+      //
+      //   > 一个"先清理残留、再检查自己该不该启动"的启动器，
+      //   > 会把"我上次没退干净"与"别人正在跑"当成同一件事处理——
+      //   > 只不过它清理的是**别人正在用的**那批进程。
+      //
+      // 所以：先证明"这个产品家目录没有别的实例"，再去碰任何与进程有关的东西。
+      const lockOutcome = await acquireInstanceLock()
+      if (lockOutcome.ok !== true) {
+        return Object.freeze({
+          ok: false,
+          phase: 'instance-lock',
+          code: lockOutcome.code,
+          failures: Object.freeze([]),
+          diagnostics: Object.freeze(lockOutcome.diagnostics ?? []),
+          states: Object.freeze([]),
+          elapsedMs: now() - beganAt,
+        })
+      }
+
+      // **第三步**：上一次运行留下了什么。
       //
       // 晚于日志（日志要能记下这次查的结果），早于 preflight（端口占用检查
       // 报「被其他进程占用」时，这条诊断是解释它的那句话）。
@@ -1138,6 +1297,10 @@ export function createLauncher({
         // 本来就是空的；但"通常"不是"一定"——一次中途失败的启动
         // 可能已经装配过。停止路径不该依赖"另一条路径应该没走到那一步"。
         stopHeartbeat()
+        // ★ 锁也要放。它是在 `start()` 里、**早于** `supervisor` 被建之前拿到的，
+        //   所以"没起来就没什么可收的"这个判断同样会漏掉它——而上一次残留的锁
+        //   会把**下一次**启动挡在门外，提示还是"已经有一个实例在运行"。
+        releaseInstanceLock()
         return Object.freeze({ reason, results: Object.freeze([]), states: Object.freeze([]), log: logResult })
       }
       log('info', `停止：${reason}`)
@@ -1169,6 +1332,10 @@ export function createLauncher({
       //   放在**最后**（进程都停干净之后）：反过来的话，一次卡住的
       //   心跳停止会拖住我们对进程的清理，而进程清理才是 stop 的主职。
       stopHeartbeat()
+      // ★ 最后放锁（PRT-708）。放在 `forgetRunRecord()` 之后：反过来的话，
+      //   一次失败的"删记录"会让我们在**已经宣布停止**之后仍然占着锁，
+      //   而那正是"关掉了却起不来"那个形状。
+      releaseInstanceLock()
       return Object.freeze({ reason, results, states, log: logResult })
     },
 

@@ -611,6 +611,40 @@ export const SCHEMA = defineSchema({
     'RUNTIME_CONTRACT_PUBLICATION_INVALID',
     'RUNTIME_CONTRACT_PUBLICATION_STALE',
     'RUNTIME_CONTRACT_PUBLICATION_CLEAR_FAILED',
+
+    // ── PRT-257 DSH 运行时安装器的诊断码 ────────────────────────────────
+    //
+    // `product/launcher/runtime-install.mjs` 的 `RUNTIME_INSTALL_CODES` 的值。
+    // 它们是**给用户看的读数**、也是调用方按码分支的依据，不是配置键：
+    // 进程不"读"它们，而是把它们放进拒绝与结果里。名字是 SCREAMING_SNAKE，
+    // 所以 scan 会把它们当成疑似环境变量——这正是它该做的事，由这里逐条否定。
+    //
+    // ★ 一条码对应一种**下一步动作不同**的处境，因此不许合并：例如
+    //   `TARGET_INSIDE_DSH_HOME`（去换 DataDir）与 `TARGET_INSIDE_INSTALL_DIR`
+    //   （去换安装布局）都是"不许装在那里"，但要看的是两份不同的配置；
+    //   而 `PATCH_PAIR_UNVERIFIED`（去补绑定表）与 `PATCH_PAIR_MISMATCH`
+    //   （去对齐清单声明）之间隔着一条"有没有查过"的界线。
+    'RUNTIME_INSTALL_NO_DATA_DIR',
+    'RUNTIME_INSTALL_DATA_DIR_NOT_ABSOLUTE',
+    'RUNTIME_INSTALL_TARGET_INSIDE_DSH_HOME',
+    'RUNTIME_INSTALL_TARGET_INSIDE_INSTALL_DIR',
+    'RUNTIME_INSTALL_TARGET_OUTSIDE_ALLOWED_ROOT',
+    'RUNTIME_INSTALL_VERSION_MALFORMED',
+    'RUNTIME_INSTALL_RANGE_UNCHECKED',
+    'RUNTIME_INSTALL_VERSION_OUT_OF_RANGE',
+    'RUNTIME_INSTALL_PATCH_PAIR_MISMATCH',
+    'RUNTIME_INSTALL_PATCH_PAIR_UNVERIFIED',
+    'RUNTIME_INSTALL_LEGION_SOURCE_MISSING',
+    'RUNTIME_INSTALL_TARGET_DIR_EXISTS',
+    'RUNTIME_INSTALL_RUNNER_FAILED',
+    'RUNTIME_INSTALL_VERIFY_FAILED',
+    'RUNTIME_INSTALL_WRITE_REFUSED',
+    'RUNTIME_INSTALL_POINTER_UNREADABLE',
+    'RUNTIME_INSTALL_POINTER_SWITCH_FAILED',
+    'RUNTIME_INSTALL_ACTIVE_RUNTIME_INCOMPLETE',
+    'RUNTIME_INSTALL_ROLLBACK_UNAVAILABLE',
+    'RUNTIME_INSTALL_ROLLBACK_TARGET_INCOMPLETE',
+    'RUNTIME_INSTALL_UNEXPECTED',
   ],
   injects: [
     { target: 'team-hub', env: 'TEAM_HUB_PORT', via: 'env', from: 'ports.team-hub', note: '端口由 Launcher 决定，不由各进程的代码默认值决定' },

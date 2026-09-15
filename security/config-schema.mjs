@@ -135,6 +135,34 @@ export const NON_ENV_LITERALS = Object.freeze([
   'RUN_CREDENTIAL_RUN_ID_REQUIRED', // security/secrets/run-credentials.mjs
   'RUN_CREDENTIAL_RESOLVE_FAILED', // security/secrets/run-credentials.mjs
   'RUN_CREDENTIAL_REF_NOT_HELD', // security/secrets/run-credentials.mjs
+  // ── security/secrets/credential-materializer.mjs（20 条，PRT-509 写侧）
+  // 把 Run 句柄写成 DSH 读得回来的凭证文件时用的**具名内部码**。它们与上面
+  // `RUN_CREDENTIAL_*` 同类：不是配置键、不是契约码，只是会被抛进错误、会被用例钉住的字符串。
+  //
+  // 本模块**不读任何进程环境**（`$DSH_HOME` / `~/.dsh` 由调用方注入，见该文件头），
+  // 所以这里只登记码，一个 env 键都不加：`fields` 继续为空是**实测结论**而不是默认放行——
+  // `credential-materializer.test.mjs` 的诚实边界用例用**本扫描器的** `extractEnvReads`
+  // 断言那份源码的 env 读取点恰好是 0，于是"本目录不读环境"这句话每次跑测试都要重新成立。
+  'CREDENTIAL_MATERIALIZER_ALLOWED_ROOT_REQUIRED', // security/secrets/credential-materializer.mjs
+  'CREDENTIAL_MATERIALIZER_ALLOWED_ROOT_UNRESOLVED', // security/secrets/credential-materializer.mjs
+  'CREDENTIAL_MATERIALIZER_HANDLE_REQUIRED', // security/secrets/credential-materializer.mjs
+  'CREDENTIAL_MATERIALIZER_MAPPING_DUPLICATE', // security/secrets/credential-materializer.mjs
+  'CREDENTIAL_MATERIALIZER_MAPPING_INVALID', // security/secrets/credential-materializer.mjs
+  'CREDENTIAL_MATERIALIZER_MAPPING_TARGET_INVALID', // security/secrets/credential-materializer.mjs
+  'CREDENTIAL_MATERIALIZER_MODE_NOT_PRIVATE', // security/secrets/credential-materializer.mjs
+  'CREDENTIAL_MATERIALIZER_OPERATOR_HOME_INVALID', // security/secrets/credential-materializer.mjs
+  'CREDENTIAL_MATERIALIZER_OPERATOR_HOME_REQUIRED', // security/secrets/credential-materializer.mjs
+  'CREDENTIAL_MATERIALIZER_REF_UNMAPPED', // security/secrets/credential-materializer.mjs
+  'CREDENTIAL_MATERIALIZER_TARGET_BASENAME', // security/secrets/credential-materializer.mjs
+  'CREDENTIAL_MATERIALIZER_TARGET_DIR_UNRESOLVED', // security/secrets/credential-materializer.mjs
+  'CREDENTIAL_MATERIALIZER_TARGET_IN_OPERATOR_HOME', // security/secrets/credential-materializer.mjs
+  'CREDENTIAL_MATERIALIZER_TARGET_NOT_ABSOLUTE', // security/secrets/credential-materializer.mjs
+  'CREDENTIAL_MATERIALIZER_TARGET_OUTSIDE_ROOT', // security/secrets/credential-materializer.mjs
+  'CREDENTIAL_MATERIALIZER_TARGET_REQUIRED', // security/secrets/credential-materializer.mjs
+  'CREDENTIAL_MATERIALIZER_VALUE_NOT_A_STRING', // security/secrets/credential-materializer.mjs
+  'CREDENTIAL_MATERIALIZER_VALUE_NOT_REPRESENTABLE', // security/secrets/credential-materializer.mjs
+  'CREDENTIAL_MATERIALIZER_VERIFICATION_FAILED', // security/secrets/credential-materializer.mjs
+  'CREDENTIAL_MATERIALIZER_WRITE_FAILED', // security/secrets/credential-materializer.mjs
 ])
 
 export const SCHEMA = defineSchema({

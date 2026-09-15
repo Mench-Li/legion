@@ -2524,6 +2524,39 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // ★★★ PRT-211 / PRT-212：审批口在**真 DSH 进程**里响了三侧，而且本机跑得通。
+      //
+      // 手法是 `--profile acp`——DSH 那个 "automation-only JSON-RPC stdio" 面
+      // （**一行一条 JSON**，没有 Content-Length 头）。它不可能被折成一次 `input`：
+      // `session/new` 返回服务端随机 UUID，`session/prompt` 要带着它，
+      // 而中途服务端还会**反向**发一条 `session/request_permission` 要现场作答。
+      // 所以这一套用 `spawn` + 自己的对话循环。
+      //
+      //   ALLOW   perm=2 sentinel1=1 sentinel3=1   ← 批准 → 真的执行
+      //   REJECT  perm=1 sentinel1=0 sentinel3=1   ← 拒绝 → 没执行，且**同进程对照真的跑了**
+      //   NEVER   perm=0 asked=1 decided=rejected  ← 闸被咨询了，而审批口**一次都没响**
+      //
+      // ★ 最后一行是本套件最要紧的判别：*一条"审批没通过"的断言，与一条"审批口根本
+      //   没被问过"的断言，在"工具没跑起来"这个读数上是同一个东西*——现在它由
+      //   断言分开，而不是靠散文。
+      //
+      // ★ 前提纠正（本批实测推翻了一个过重的推论）：DSH 自己的 sandbox 升级 e2e
+      //   在本机**永远 skip**（`hasRunner = hasBwrap || hasSeatbelt`，而 Windows 两样都没有），
+      //   因为那条用例需要**先真的被拒一次**。但**审批口本身**不需要沙箱运行器：
+      //   `packages/sandbox/sandbox/src/escalation.ts:162` 比的是**这一次调用的有效模式**
+      //   （per-call truth），只要请求比它更宽且带上 `sandbox_permissions` 就会走到 `:173` 的审批口。
+      //
+      // ★ 层不同：本套件驱动的是**外部客户端会话面**；而
+      //   `runtime/adapters/dsh/session-boundary.mjs` 审计的主要是**进程内 父↔continuable 子**
+      //   那个面（`subagents.startContinuable` 等）。一次性 acp 进程**没有父 agent**，
+      //   所以本套件**不翻转那个文件里的任何 `behaviorVerified`**。
+      //
+      // 条件套件：需要 DSH_CHECKOUT，逐条 SKIP（不伪造通过）。
+      label: 'session-boundary-real-process（PRT-211/212：真进程里的续接、cwd 前置条件与审批口三侧）',
+      files: ['runtime/dsh-composition/session-boundary-real-process.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-214：补丁文档的**形状**与 YAML 生成器（不连 DSH）。
       //
       // 为什么值得单独一套：补丁层的落盘形式此前是一个**自由格式的散文文件**，
@@ -2843,6 +2876,24 @@ async function stageTest() {
         //   *一个"抓了一次"的实现，与一个"每次都重读、只是恰好还没轮换"的实现，
         //   在那次轮换到来之前是同一个东西。*
         'security/secrets/run-credentials.test.mjs',
+        // PRT-509 写侧：把 Run 的**冻结凭证句柄**写成一份 DSH 真的读得回来的
+        // `.credentials.yaml`。此前 Legion 对那个文件只有**读**的一侧，于是
+        // "一个解析成功的凭证"与"某个模型客户端能拿到它"之间那一段是空的。
+        //
+        // ★ 本组最要紧的不是"我把值写进了文件"，而是**那个文件被真实读者读回来了**：
+        //   每次落盘之前，先把文档交给 `dsh-credentials.mjs` 的**真实读者**读一遍，
+        //   逐条比对名字与值是否逐字相等；证不出来就**不写**（`VERIFICATION_FAILED`）。
+        //
+        //   *一个"写出去的格式符合我自己以为的格式"的用例，
+        //   与一个"真实读者读得回来"的用例，在两边各自单测时是同一片绿——
+        //   只不过前者的绿，在读者一改键空间语法的那天照样是绿的。*
+        //
+        // ★ 结构性原因也在这里被钉住：Legion 的模型引用是 `legion/model/<id>`（**三段**），
+        //   而 DSH 的 `records` 只收两段、`refs` 一个斜杠都不收 ⇒ `planDshLookup()`
+        //   对它返回 `{addressable:false, space:null}`。所以"持有、但既不可寻址又没映射"
+        //   必须是**具名拒绝**而不是跳过——*一个"文件看起来完整、就是少了最要紧那一把钥匙"
+        //   的读数，与一个"文件本来就只该有这么多"的读数，在 `cat` 的输出里长得一模一样。*
+        'security/secrets/credential-materializer.test.mjs',
       ],
       cwd: ROOT,
     },
@@ -2935,6 +2986,23 @@ async function stageTest() {
         // 绑定字段名是 employeeRole/primaryProfile、密钥引用要按约定算
         // （因为 hub 的单条档案读取**有意不含 secretRef**）。
         'product/launcher/first-run.test.mjs',
+        // PRT-257 的最大一块空白：**DSH 运行时的安装**（PRT-011 裁决的路线 C）。
+        //
+        // 在此之前 `product/launcher/` 里**没有任何一行**在生产代码里解析过 DSH 版本、
+        // 装进 DataDir、做过原子切换或回滚——`git grep` 零命中。
+        //
+        // ★ 本组最要紧的一条是**原子性**：指针**只在**新版本校验通过之后才动。
+        //
+        //   *一条"新版本装好了"的断言，
+        //   与一条"指针只有在校验通过之后才动"的断言，
+        //   在安装永远成功的那些运行里是同一片绿——
+        //   只不过前者的绿，在一次装到一半的失败里会留下一个半装的 current。*
+        //
+        // 所以用例注入命令运行器与文件系统操作，**绝不联网、绝不跑真的 npm install**；
+        // 并且断言"半装的目录**永远不可能**被选中"（靠一个只有装完才写的标记），
+        // 以及回滚要断言**磁盘终态**（指针指向哪个目录、它的入口文件在不在）——
+        // *一个只返回 `{ok:true}` 的回滚不是证据。*
+        'product/launcher/runtime-install.test.mjs',
       ],
       cwd: ROOT,
     },

@@ -3717,6 +3717,244 @@ it('denial → model escalation → machine allow-once → the retried write lan
 「没有一个真 DSH 进程通过审批口执行过工具调用」如果按 DSH 的**升级示范路径**去补，
 就补在一条**本机永远 skip** 的路上。
 
+#### 一之二·更正：**审批口本身在本机跑得通**，我上面那段的推论下得太重了
+
+我上面写的是"DSH 自己的升级 e2e 在本机永远 skip"——**这句是对的**。
+但我接下来暗示"审批口这条路在本机补不了"——**这句是错的**，本批实测推翻了它。
+
+读 `packages/sandbox/sandbox/src/escalation.ts`：
+
+```
+:144  Resolve a sandbox-escalation request BEFORE anything executes: check strict
+:145  widening against the call's effective mode, then resolve the approval channel, …
+:157  export async function approveEscalation(request, approval) {
+:162    if (!(WIDER_MODES[effectiveMode] ?? []).includes(mode)) throw new Error(
+             `sandbox escalation to "${mode}" is not strictly wider than this call's current "${effectiveMode}" mode`)
+:165    if (approval.approver === undefined) throw new Error('requires approval, but no approval service is composed')
+:168    if (approval.agent === undefined) throw new Error('requires approval, but the call has no agent …')
+:173    const outcome = await approval.approver.request({ agent, toolName, callId, reason: `escalate sandbox to ${mode}: …` })
+```
+
+关键在于 `:162` 比的是**这一次调用的有效模式**（per-call truth），
+而不是"这台机器上有没有 bwrap"：
+
+- DSH 自己的 e2e 要 `hasRunner`，是因为它需要**真的先被拒一次**才谈得上升级；
+- 而**审批口本身**只要有"一次比当前模式更宽的请求"就会响——
+  桩模型直接带上 `sandbox_permissions` 即可，**不需要任何沙箱运行器**。
+
+> 一条"DSH 自己的那条 e2e 被 `skipIf` 掉了"的读数，
+> 与一条"这条能力在本机不可用"的读数，
+> 在只看 `skipped` 计数的人那里是同一个东西——
+> 只不过前者说的是"那个测试需要 bwrap"，而后者是我当时**多做的一步推论**。
+
+**教训记在这里**：我从"某个测试被跳过"直接推到"这条能力不可用"，
+中间那一步（那个测试到底在测什么、它为什么需要那个前置条件）我没走。
+
+---
+
+## 2026-09-15　运行时装得上、凭证写得出去：两块"零生产代码"被填上
+
+### 一、PRT-257 最大的一块空白：DSH 运行时**自己的安装**
+
+在此之前 `product/launcher/` 里**没有任何一行**在生产代码里解析过 DSH 版本、
+装进 `DataDir`、做过原子切换或回滚。现在有了
+`product/launcher/runtime-install.mjs`（**27 例 / 7 组，三次全绿 0.75–0.79 秒**）。
+
+**纯/脏分离**：`planRuntimeInstall()` **零 IO**——版本区间、§9.1 成对判据、
+路径/危险目标全在这里判，**在任何目录被创建之前**；
+`installRuntime({plan, runner, fs})` 里**命令运行器与文件系统都是注入的、
+没有默认运行器**。于是"这套用例从没跑过真的 `npm install`"是**结构性事实**，
+不是一句注释。
+
+★ 最要紧的一条是**原子性**：指针**只在**新版本校验通过之后才动，
+两例（校验失败 / 安装中途抛出）都断言**指针仍指旧版本且旧版本仍可用**。
+
+> 一条"新版本装好了"的断言，
+> 与一条"指针只有在校验通过之后才动"的断言，
+> 在安装永远成功的那些运行里是同一片绿——
+> 只不过前者的绿，在一次装到一半的失败里会留下一个半装的 current。
+
+**回滚断言磁盘终态**（指针指向哪个目录、入口文件在不在）——
+*一个只返回 `{ok:true}` 的回滚不是证据。*
+**完成标记**把"目录存在"与"这次装完了"分开（一个变异咬的正是这条）。
+
+**§9.1 成对判据**（spec `:688-698`）：`dshPatchPairOf()` 与 `product/upgrade` 的
+`patchPairOf()` 在 4 版本 × 3 补丁版本上**逐格对拍**；
+`PATCH_PAIR_MISMATCH`（表里没有这一对）与 `PATCH_PAIR_UNVERIFIED`（**没给表**）分开——
+**"没有验证过"≠"验证通过"，缺表是拒绝不是放行**；`side` 说清是哪一侧动的。
+**没有任何 "upgrade to latest" 面**（用例断言命令里不出现 `latest`/`^`/`~`/`*`）。
+
+★ **用例抓到一个真 bug**：第一次跑 3 例红，
+`ENOENT: symlink … @dsh-external/dsh-team-hub`——建链前 `@dsh-external/`
+这一层作用域目录不存在（真实 npm 只建自己依赖树里的目录）。
+
+> 那个 ENOENT 看起来像"源目录不在"，而源目录其实好好的。
+
+★ **变异 5/5 全咬**，但其中一条**差点没咬**：第一版只读根用例里那个目标
+**同时**也不在 `writableRoot` 里，于是"越出允许根"替"只读根"红出来——
+**两条判据长得一样，分不清是哪条在守**。补了一格把 `writableRoot` 放大到包含
+shipped preset，只读才成为唯一能拒它的那条。
+
+⚠️ **现在还不该接进启动路径**，三条理由：① **没有任何调用方会传 `rangeSatisfied`**
+（`product/` 在 `dsh-boundary` 里是 must-be-zero，判据只能由 Launcher **之外**
+的调用方组装时传进来）⇒ 今天接上去**每次启动都会被 `RANGE_UNCHECKED` 拒绝**
+（fail-closed 方向对，但意味着**现在还装不了任何东西**）；
+② `installRuntime` 会真的跑 `npm install`（`timeoutMs` 600 秒）⇒
+用户启动时可能**静默等 10 分钟**，需要一个进度面；
+③ `<DataDir>/runtime/` 的**所有权没定**（谁建、升级时谁清）。
+
+### 二、PRT-509 的写侧：`openRunCredentials()` 终于有了消费者
+
+`security/secrets/credential-materializer.mjs`（**20 例 / 17 pass / 3 skip**，
+其中 3 条 skip 都写明理由）把 Run 的**冻结句柄**写成一份 DSH 读得回来的
+`.credentials.yaml`。
+
+★ **判据不是"我把值写进了文件"，而是"那个文件被真实读者读回来了"**：
+**每次落盘之前**先把文档交给 `dsh-credentials.mjs` 的**真实读者**读一遍，
+逐条比对名字与值是否**逐字相等**；证不出来就**不写**（`VERIFICATION_FAILED`）。
+
+> 一个"写出去的格式符合我自己以为的格式"的用例，
+> 与一个"真实读者读得回来"的用例，
+> 在两边各自单测时是同一片绿——
+> 只不过前者的绿，在读者一改键空间语法的那天照样是绿的。
+
+**映射内容一个字都不在模块里**——来源是 DSH 自己的声明
+（`apiKeyEnv: DEEPSEEK_API_KEY`），且有一条用例**读源码**断言
+"引号内的环境变量名形状字面量"一个都不存在，并用本仓库自己的 `extractEnvReads`
+实测 env 读取点为 **0**。
+
+#### ★★ 复核时发现一个**反方向**的既有缺口
+
+把 **DSH 自己的写者**（`credentials-local/src/index.ts:425-434` 的 `mutableDocument`
++ `:443-448` 的 `renderRef`）渲染出来的文档喂给 Legion 的窄读者，
+**多数非平凡值读不回来**。我自己用真的 `yaml` 包跑了一遍
+（正对照 `sk-normal-abc123` → ACCEPT 且逐字相等）：
+
+| 值 | DSH 渲染出的那一行 | Legion 回读 |
+| --- | --- | --- |
+| `sk-normal-abc123` | `DEEPSEEK_API_KEY: sk-normal-abc123` | **ACCEPT 且逐字相等** |
+| `1234567890` | `DEEPSEEK_API_KEY: "1234567890"` | REFUSE `DSH_CREDENTIALS_QUOTED_SCALAR` |
+| `true` | `DEEPSEEK_API_KEY: "true"` | REFUSE `DSH_CREDENTIALS_QUOTED_SCALAR` |
+| `null` | `DEEPSEEK_API_KEY: "null"` | REFUSE `DSH_CREDENTIALS_QUOTED_SCALAR` |
+| `" sk-padded "` | `DEEPSEEK_API_KEY: " sk-padded "` | REFUSE `DSH_CREDENTIALS_QUOTED_SCALAR` |
+| `"sk-a: b"` | `DEEPSEEK_API_KEY: "sk-a: b"` | REFUSE `DSH_CREDENTIALS_QUOTED_SCALAR` |
+| `sk-a#b` | `DEEPSEEK_API_KEY: sk-a#b` | ACCEPT 且逐字相等 |
+| `sk-凭证` | `DEEPSEEK_API_KEY: sk-凭证` | REFUSE `DSH_CREDENTIALS_UNSAFE_CHARACTER` |
+
+`dsh-credentials.mjs:270` 逐字是 `if (token.startsWith("'") || token.startsWith('"'))
+throw refuse(DSH_CREDENTIALS_CODES.QUOTED_SCALAR, …)`。
+
+**这是既有读取器的性质，不是新模块引入的**：即"DSH 写 → Legion 读"这条方向
+对这几类值**本来就不通**。新模块的处理是**两侧都 fail closed**——
+这类值在落盘前就被具名拒绝（写 plain 会被 DSH 读成数字/布尔/null，
+那是"读出一个不是用户存进去的值"）。
+
+⚠️ 建议单独记一条：**读取器不认识引号标量，而 DSH 的写者在需要保型时会加引号**
+⇒ 一条由 DSH 写入、值恰好是纯数字的凭证，Legion 这一侧读不回来。
+
+### 三、这一批把 PRT-212 判为**已完成**（145 行里 ✅ 132 → 133）
+
+**判据口径**（spec `line 1432`）：本表的 ✅ 判的是**该任务自己的交付物与用例
+是否已交付**，不是阶段 exit criteria。PRT-212 的三个具名机制
+（Guard / pre-execute / answerer）现在**全部交付、全部挂上、全部可加载，
+且逐个在真 DSH 进程里被证明**。
+
+⚠️ 那个 ✅ **不覆盖**"Legion 自己的 answerer × 真 hub"：本批那套用的是
+脚本化 ACP 客户端直接作答，**绕过了** Legion 的 `approval-answerer.mjs`
+（把审批写进 team-hub 审批箱）。那一块留在 **PRT-214** 的行里。
+
+---
+
+## 2026-09-15　审批口真的响了：批准就执行、拒绝就不执行、`never` 连问都不问
+
+这是 PRT-212 剩下那半句的正面读数。**无凭证、无 bwrap、无 seatbelt、Windows 11。**
+
+### 一、协议面（真进程，一次性 home）
+
+`--profile acp` 是**程序驱动的会话面**：**一行一条 JSON**、没有 `Content-Length` 头
+（`packages/acp/acp/src/index.ts:374` 的 `ndJsonStream`，
+SDK `dist/stream.js:13-20` 逐字是 `JSON.stringify(message) + "\n"`）。
+对话**不可能**折成一次 `input`：`session/new` 返回的是服务端随机 UUID，
+`session/prompt` 得带着它，而中途服务端还会**反向**发一条
+`session/request_permission` 要现场作答。
+
+### 二、★★★ 实测：三侧都有读数
+
+```
+ALLOW   sid=892f971b… perm=2 sentinel1=1 sentinel3=1 exit=0
+REJECT  perm=1 decided=rejected sentinel1=0 sentinel3=1 exit=0
+NEVER   perm=0 asked=1 decided=rejected sentinel1=0 exit=0
+```
+
+- **批准 → 执行**：两次升级各发一次 `session/request_permission`
+  （选项恰好 `['allow-once','reject-once']`），哨兵文件真的出现。
+- **拒绝 → 不执行**：哨兵**不存在**。而**承重的是同进程里那条对照**——
+  紧接着一条同样形状、**不带 `sandbox_permissions`** 的命令写成了 `sentinel3`。
+  于是"文件不在"不能用"这套工具链坏了"解释。
+- **`never` → 连问都不问**（`perm=0`）**但闸确实被咨询过**（`asked=1`、`decided=rejected`）：
+  这正是我上一批认定的那条判别——*一条"审批没通过"的断言，与一条"审批口根本没被问过"
+  的断言，在"工具没跑起来"这个读数上是同一个东西*——现在它由断言分开了。
+
+### 三、★ 一次授权不是永久授权
+
+`perm=2` 说明**第二次一模一样的升级调用又被问了一次**——
+对应 ACP 源码里那句 *"offers one-shot choices only and never infers a durable grant"*
+与审批服务里 `'allowed-once'` 是**唯一**的授权（`user-approval/src/index.ts:204`）。
+这被机器数出来，不是注释里的承诺。
+
+### 四、身份与权限继承：读得出来的和读不出来的
+
+| | 读数 |
+| --- | --- |
+| 会话的 sandbox/approval | 续接进程自己的组合默认是 `danger-full-access`/`never`（由 `DSH_PERMISSION_MODE` 推导），而续接后的桩读到的**仍然是 `workspace-write`/`ask`**——**会话自己记在日志里的那一份压过了进程默认值，且跨过了进程边界** |
+| `cwd` | **不是继承来的值，是前置条件**：换个 cwd 去 resume 直接被拒（`session cwd does not match`），**且该拒绝是终态**——那个 id 之后 `unknown session` |
+| 审批策略的**值**本身 | **读不出来**。只能从桩读到的系统提示文本 + 日志里的 `approval/policy` 事件两处**间接**读——都不是服务内存里的那份状态 |
+| per-user / per-agent 身份 | ACP 面上**根本没有**；这里的"身份"指 DSH 会话 id + 持久化 header |
+
+★ 那条 cwd 检查在 DSH 源码里被一对 `/* v8 ignore start … stop */` 包着
+（`packages/acp/acp/src/index.ts:270-275`）——**上游刻意没覆盖它**。
+所以钉住它是**新证据**，不是把 DSH 自己的用例抄一遍。
+
+### 五、层与层不同（这一条是本批被纠正出来的）
+
+本套件驱动的是**外部客户端会话面**（`session/new|list|resume|close|prompt|cancel`
++ `session/request_permission`）。
+而 `runtime/adapters/dsh/session-boundary.mjs` 审计的主要是
+**进程内 父↔continuable 子** 那个面（`subagents` 的 `startContinuable` / `sendMessage` /
+`interrupt` / `drainContinuableChildren` / `listChildren` / `interruptByParent` …）。
+
+一个一次性的 `acp` 进程**没有父 agent**，所以 `subagents.*` 一个都没被跑过。
+**本套件不翻转那个文件里的任何 `behaviorVerified`**——唯一的映射是
+`session-boundary.mjs:240` 的 `agents.resume` ↔ ACP `session/resume`
+（`packages/acp/acp/src/session.ts:80` 逐字调 `ctx.agents.resume(...)`）。
+
+> 一个"在 ACP 面上跑绿的续接用例"，与一个"`subagents` 面被验证过了"的结论，
+> 在报告里都是"续接已验证"——
+> 只不过前者一个父 agent 都没有，而后者的全部内容就是父子关系。
+
+### 六、变红（5 个变异，每次 sha256 还原）
+
+| 变异 | 结果 |
+| --- | --- |
+| 把续接断言削成"有响应就行" | 9/9 **仍绿**——**它本来就分辨不出任何东西**（这正是要记下来的那个读数） |
+| 拒绝路径的 answerer 改成永远批准（那个"永远批准的审批口"） | **红 1**：`升级被拒却还是写出了 sentinel1——审批口没有拦住执行` |
+| `session/resume` 换成 `session/new` | **红 3**：`prior=0`（模型没看见上一轮），且 `policy=never sandbox=danger-full-access`——新会话**什么都没继承** |
+| 去掉 `session/cancel` 通知 | **红 1**：`stopReason` 是 `end_turn` 而不是 `cancelled` |
+| 上两条合并 | 削弱的断言**过了**，但另有**三条独立读数**仍红（哨兵缺失、`approval/policy`、update 归属） |
+
+★ 最后一行是**如实报告的强度**而不是"干净的空洞性证明"：
+续接这个结论**不靠单一断言**支撑，它被磁盘 + 日志 + 通知归属三重兜着。
+★ 另外两条子代理**自己写错**的断言也如实报了出来
+（"被拒的 resume 不产生新的 `turn/start`"——而 `session/resume` 在 cwd 检查**之前**
+就调了 `agents.resume()`，所以被拒的 resume 合法地留下边界事件；
+以及一个依赖顺序的硬编码计数）。
+
+### 七、验证
+
+我自己跑了一遍：**9/9 通过，26.6 秒**，读到上面那三行诊断。
+`DSH_CHECKOUT` 未设 → 9 条 SKIP（不伪造通过）。win32 专属
+（`tool-pwsh` 在非 win32 上是 `disabled`），posix 分支**没写过**，故非 win32 逐条 SKIP。
+
 ★ 但审批口与沙箱是**两件事**：`session/request_permission` 由审批服务 + 桥发出，
 不需要沙箱运行器。而同一批调查已经读出：当能力目录未注入时，
 组合根的策略门对未知工具给 `requiresApproval: true`——

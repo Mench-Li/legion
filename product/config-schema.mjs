@@ -502,6 +502,18 @@ export const SCHEMA = defineSchema({
     // （Windows 上 Hyper-V/WSL/管理员保留段），处置是**换端口**而不是提权。
     // 与 `PORT_PRIVILEGED`（<1024，真的需要特权）分开，是因为两者指向**相反**的动作。
     'PORT_RESERVED',
+    // PRT-257 修复入口（`product/launcher/doctor.mjs`）的**具名结论**。
+    // 它们会被打印、也可能被脚本读，所以与"读取点"区分开。
+    //
+    // 四个值不是四个严重程度，而是**四种处境**，其中第三种最要紧：
+    //   · `DOCTOR_CLEAN`       自检全过；
+    //   · `DOCTOR_ACTIONABLE`  有待修项，逐项给了修法；
+    //   · `DOCTOR_NO_PLAN`     知道它坏了（`incompatible`），却给不出修法 —— 产品侧缺口；
+    //   · `DOCTOR_NO_DIAGNOSIS` 连诊断都没有（没做过自检 / 来源缺席 / 输入畸形）。
+    // 后两者**共用退出码 3**，与 `DOCTOR_CLEAN` 的 0 严格分开：
+    // 一个"读不到结论所以什么都没报"的体检，与一个"结论是一切正常"的体检，
+    // 在退出码上是同一个东西——而前者会让一个已经坏掉的部署安静地通过门禁。
+    'DOCTOR_CLEAN', 'DOCTOR_ACTIONABLE', 'DOCTOR_NO_PLAN', 'DOCTOR_NO_DIAGNOSIS',
     'PROCESS_CIRCUIT_OPEN', 'PROCESS_EXCLUDED_BY_SCOPE', 'PROCESS_EXITED_BEFORE_READY', 'PROCESS_FAILED',
     'READINESS_FAILED', 'READINESS_IDENTITY_MISMATCH', 'READINESS_TIMEOUT', 'READINESS_VERIFIED',
     'SPAWN_REFUSED',

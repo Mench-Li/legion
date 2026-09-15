@@ -34,6 +34,9 @@ import { AUTO_EXPORT_DEFAULTS, runAutoExport } from '../diagnostics/auto-export.
 import { initializeProductDir, isInitialized } from '../init.mjs'
 import { createLauncher, PRODUCT_STATE_TEXT } from './launcher.mjs'
 import { DEFAULT_BACKOFF } from './supervisor.mjs'
+// PRT-257 修复入口（spec `line 275`：「禁止自动执行，**提示修复或回滚**」）。
+// 零 IO 的纯模块：它只把结论讲清楚，不碰磁盘、不改环境（理由见那个文件头）。
+import { doctorReport, renderDoctor } from './doctor.mjs'
 
 /**
  * 安装目录的默认值：**Launcher 自己所在的那棵树**。
@@ -94,6 +97,9 @@ export const CLI_FLAGS = Object.freeze([
     '**默认只报告不清理**：杀进程不可撤销。清理前会核对映像名，对不上的一律不动' },
   { name: '--allow-unverified-sweep', kind: 'boolean', doc: '与 --sweep-orphans 同用：' +
     '连映像名读不出来的那些也清理。**不建议**——那正是「按号码杀」的那条路' },
+  { name: '--doctor', kind: 'boolean', doc: '（PRT-257）修复入口：读 stdin 上的一份自检结论/拒绝，' +
+    '把「该修哪几项、或者回滚」讲清楚。**只提示、不自动改**。' +
+    '退出码：0 全过 / 1 有待修项 / **3 拿不到诊断（不是 0）**' },
   { name: '--help', kind: 'boolean', doc: '打印本说明' },
 ])
 
@@ -410,6 +416,43 @@ const MODEL_KEY_REF = 'model/api-key'
 const MODEL_NAME_REF = 'model/name'
 
 /** 主流程。返回进程退出码（0 成功）。 */
+/**
+ * 把 stdin 读干。**空输入返回空串**（不是异常、也不是 `null`）——
+ * "没有管道"与"管道里是空"在这里是同一件事：没有诊断可读。
+ * 那一件事由 `parseDiagnosisInput()` 翻成 `{}`，再落到 `NO_DIAGNOSIS`。
+ */
+async function readAllStdin() {
+  const chunks = []
+  for await (const c of process.stdin) chunks.push(c)
+  return Buffer.concat(chunks.map((c) => (Buffer.isBuffer(c) ? c : Buffer.from(String(c))))).toString('utf8')
+}
+
+/**
+ * 解析 stdin 上的诊断输入。**畸形输入一律当"没有诊断"**，绝不猜。
+ *
+ * 为什么是"当没有"而不是"抛错"：调用方（`--doctor`）会把结果翻成
+ * `NO_DIAGNOSIS`（退出 3），而**抛出**会退到 CLI 的一般错误路径。
+ * 两条路看起来都是"非零退出"，但前者说得清"是没读到结论"，后者只说"命令挂了"。
+ *
+ * 接受的两种形状（都是生产里真实存在的那两种）：
+ *   · `{refusal: …}` —— `bindDshRuntime()` 拒绝的形状（里面有 `repair`）；
+ *   · `{plan: {ok, items}}` —— `repairPlanFor()` 的形状。
+ * 也接受**直接把这两者之一**写在顶层（省掉一层包装）。
+ */
+function parseDiagnosisInput(raw) {
+  const text = typeof raw === 'string' ? raw.trim() : ''
+  if (text === '') return {}
+  let value = null
+  try { value = JSON.parse(text) } catch { return {} }
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return {}
+  // 顶层直接是计划：`{ok, items}`。
+  if (Array.isArray(value.items)) return { plan: value }
+  // 顶层直接是拒绝：带 `repair` 或带 `autoExecutionForbidden`。
+  if (value.repair !== undefined || value.autoExecutionForbidden !== undefined) return { refusal: value }
+  return value
+}
+
+
 export async function run({
   argv = process.argv.slice(2), env = process.env, write = console.log, waitForSignal = true,
   // ★ PRT-710 收尾：这两个是可注入的**接缝**，默认就是真实实现。
@@ -427,7 +470,13 @@ export async function run({
   //   仍然由真实的 `createLauncher` 契约决定，测试只换掉**谁来起进程**。
   createLauncherFn = createLauncher,
   autoExportFn = runAutoExport,
+  // ★ PRT-257 修复入口：stdin 读入是**可注入的接缝**。理由与上面那两个一样——
+  //   让用例去接管真实 stdin 会把测试变成"看这一跑有没有人往管道里写东西"，
+  //   而那条路在 CI 里根本不是确定的。默认就是真实现。
+  readStdinFn = readAllStdin,
 } = {}) {
+  /** 诊断来源自己要说的一句话（读 stdin 失败时用）。 */
+  let diagNote = null
   if (argv.includes('--help')) {
     write('Legion Launcher（PRT-251）')
     write('')
@@ -453,6 +502,47 @@ export async function run({
   //   是一个**没有任何效果的参数**，而一个没有效果的参数比没有这个参数更坏——
   //   它会让读命令行的人以为"这件事是要显式打开的"。
   const autoDiagnostics = parsed.flags['no-auto-diagnostics'] !== true
+
+  // ── 修复入口（PRT-257 / spec `line 275`）───────────────────────────────
+  //
+  // `line 854` 要「按 `incompatible` 处理并禁止自动执行」，§6.3 表格要
+  // 「禁止自动执行，**提示修复或回滚**」。`REPAIR_ACTIONS` 与 `repairPlanFor()`
+  // 早就把修法算出来了，而 `product/launcher/` 里对它们的引用次数是 **0**——
+  // *一份"算出来了、也跟着拒绝走了、但没有任何人能照着做"的修复计划，
+  // 与一份不存在的修复计划，对用户是同一个东西。*
+  //
+  // ★ 结论**从 stdin 读**，不从 argv 读，也不在这里自己算：
+  //
+  //   自检结论住在那台 **DSH Runtime 进程**里（`startupSelfCheck` 的输出，
+  //   以及它翻成的 `repair`）。Launcher 是一个**独立进程**——它 import 不到、
+  //   也探测不到那份结论（`executor-binding.mjs:254-261` 对同一件事有过一句
+  //   同源的说明）。所以本进程**没有**诊断来源，而"没有来源"这件事
+  //   必须以 `NO_DIAGNOSIS`（退出 3）如实报出来，**不是**退出 0。
+  //
+  //     > 一个"因为读不到结论所以什么都没报"的体检，
+  //     > 与一个"结论是一切正常"的体检，在退出码上是同一个东西——
+  //     > 只不过前者会让一个已经坏掉的部署安静地通过门禁。
+  //
+  //   它长成 stdin 而不是某个"约定好的文件"，是因为**没有任何生产者会写那个文件**：
+  //   发明一个只有本模块认识的文件格式，等于把"读不到"伪装成"读的是一个真来源"。
+  //   管道是诚实的：对面有什么，就诊断什么。
+  //
+  // 附注：这份输入里有**没有**秘密？自检结论里只有检查项名与原因码，不含 token；
+  // 但仍**只从 stdin 读**，与 `--wizard` 的密钥同一条纪律——argv 会进 shell 历史。
+  if (parsed.flags.doctor === true) {
+    let raw = null
+    try {
+      raw = await readStdinFn()
+    } catch (e) {
+      raw = null
+      diagNote = `读 stdin 失败：${e?.message ?? String(e)}`
+    }
+    const input = parseDiagnosisInput(raw)
+    const rep = doctorReport({ ...input, source: input.source ?? 'stdin', ...(diagNote === null ? {} : { note: diagNote }) })
+    if (json) write(JSON.stringify(rep, null, 2))
+    else write(renderDoctor(rep))
+    return rep.exitCode
+  }
 
   // ── 首次运行向导（PRT-707 收尾）──────────────────────────────────────
   //

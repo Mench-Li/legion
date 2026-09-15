@@ -29,6 +29,7 @@ import {
   matchFlag,
   referencedFlags,
   renderRunbook,
+  uniqueUnknownFlag,
 } from './runbook.mjs'
 import { CLI_FLAGS, EXIT_CODES } from '../launcher/cli.mjs'
 import { ERROR_CODES, isKnownErrorCode } from '../../runtime/contracts/errors.mjs'
@@ -45,8 +46,16 @@ const mkEntry = (patch = {}) => ({
 test('① ★★ 装载期自检：六条核心判据都真的跑过（留下的是值不是布尔）', () => {
   assert.equal(RUNBOOK_CHECKED.ok, true, JSON.stringify(RUNBOOK_CHECKED.problems))
   const s = RUNBOOK_CHECKED.samples
-  // ① 引用不存在的开关被抓住
-  assert.deepEqual(s.ghostFlagCaught, ['--doctor'])
+  // ① 引用不存在的开关被抓住。
+  //
+  // ★★ 这里**不写开关名的字面量**：那条自检原来钉的是 `['--doctor']`，
+  //    而 PRT-257 后来真的把 `--doctor` 加进了 CLI —— 于是"这是个假开关"
+  //    这个前提无声地失效了，检查器开始正确地认为它存在，用例报红。
+  //    *一个"用真实名字当假数据"的夹具，与一个"永远为真"的夹具，
+  //    在被观察到的那一天之前是同一个东西。*
+  //    现在核对的是"被抓住的正是自检**按构造**造出来的那一个"。
+  assert.deepEqual(s.ghostFlagCaught, [s.ghostFlag])
+  assert.equal(FLAGS.includes(s.ghostFlag), false, '自检的假开关名竟然真的在 CLI 开关表里')
   // 反向控制：改对之后必须干净（否则是无差别报警）
   assert.equal(s.fixedFlagClean, true)
   // ② 不可观测的症状
@@ -82,10 +91,14 @@ test('① ★ 自检留下的开关表**真的来自 CLI**', () => {
 // ---------------------------------------------------------------- ★★ 开关
 
 test('② ★★ 引用不存在的开关必须被抓住（本模块存在的理由）', () => {
-  const r = checkRunbook({ entries: [mkEntry({ diagnose: 'legion --doctor --json' })], knownFlags: FLAGS })
+  // ★★ 假开关**按构造**造：拿真实的开关表，造一个核对过不在里面的名字。
+  //    原来这里硬编的是 `--doctor`，而它后来真的成了 CLI 开关（PRT-257）。
+  const ghostFlag = uniqueUnknownFlag(FLAGS)
+  assert.equal(FLAGS.includes(ghostFlag), false, '造出来的假开关竟然在表里')
+  const r = checkRunbook({ entries: [mkEntry({ diagnose: `legion ${ghostFlag} --json` })], knownFlags: FLAGS })
   const f = r.findings.find((x) => x.code === RUNBOOK_CODES.UNKNOWN_FLAG)
   assert.ok(f, '不存在的开关没有被抓住')
-  assert.equal(f.flag, '--doctor')
+  assert.equal(f.flag, ghostFlag)
   assert.equal(r.ok, false)
 })
 
@@ -354,7 +367,8 @@ test('⑦ ★ 渲染出六段式：症状 / 怎么认 / 查一下 / 怎么做 / 
 })
 
 test('⑦ ★ 有未闭合项时渲染**明说**，不宣布健康', () => {
-  const bad = checkRunbook({ entries: [mkEntry({ diagnose: 'legion --doctor' })], knownFlags: FLAGS })
+  // 同样用**按构造**的假开关（原来是硬编的 `--doctor`，PRT-257 之后它成了真开关）。
+  const bad = checkRunbook({ entries: [mkEntry({ diagnose: `legion ${uniqueUnknownFlag(FLAGS)}` })], knownFlags: FLAGS })
   const text = renderRunbook(bad)
   assert.match(text, /自身有问题/)
   assert.match(text, /runbook-unknown-flag/)

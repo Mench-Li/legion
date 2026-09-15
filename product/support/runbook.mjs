@@ -606,6 +606,30 @@ export function renderRunbook(report = checkRunbook(), { entries = RUNBOOK_ENTRI
 }
 
 /**
+ * 造一个**按构造**不在 `knownFlags` 里的开关名。
+ *
+ * 自检需要一个"引用了不存在的开关"的条目来证明检查器咬得住。那个名字**不能**
+ * 写成字面量：产品随时可能真的加上它，而那一刻这条自检的前提就无声地失效了
+ * ——`--doctor` 已经这么发生过一次（PRT-257 把它加成了真开关，于是
+ * "抓住假开关"这条自检开始报自己没问题、而用例报红）。
+ *
+ *   > 一个"用真实名字当假数据"的夹具，
+ *   > 与一个"永远为真"的夹具，在被观察到的那一天之前是同一个东西。
+ *
+ * 做法：从一个显然不是开关的基名开始，**核对**它不在表里；在就接一段再核。
+ * 于是返回值与表的关系是"核对过"的，不是"但愿如此"。
+ *
+ * @param {ReadonlyArray<string>} knownFlags
+ * @returns {string} 一个保证不在 `knownFlags` 里的开关名
+ */
+export function uniqueUnknownFlag(knownFlags = []) {
+  let candidate = '--ghost-flag-for-runbook-selfcheck'
+  const has = (x) => knownFlags.some((f) => String(f).split('=')[0] === x)
+  while (has(candidate)) candidate += '-x'
+  return candidate
+}
+
+/**
  * 装载期自检：把六条核心判据各真的跑一遍，留下算出来的值。
  */
 function auditRunbook() {
@@ -622,7 +646,21 @@ function auditRunbook() {
   }))
 
   // ① ★ 引用不存在的开关必须被抓住（本模块存在的理由）。
-  const ghost = checkRunbook({ entries: [mkEntry({ diagnose: 'legion --doctor' })], knownFlags: ['--check'] })
+  //
+  // ★★ 那个"不存在的开关"必须**按构造**不存在，不能写一个"现在恰好不存在"的字面量。
+  //
+  //   这条自检原来写的是 `legion --doctor`，而 `--doctor` 当时确实不在开关表里。
+  //   后来 PRT-257 给 CLI **加上了** `--doctor`——于是这条自检的**前提**（"这是个
+  //   假开关"）无声地失效了：检查器现在正确地认为它存在，而这条断言期望它被抓住。
+  //
+  //     > 一个"用真实名字当假数据"的夹具，
+  //     > 与一个"永远为真"的夹具，在被观察的那一天之前是同一个东西——
+  //     > 只不过前者的绿是**开关表当时没有那个名字**换来的。
+  //
+  //   用一个不可能撞上的名字（连字符重复 + "ghost" 前缀）是必要的，但还不够：
+  //   真正的保证是**事后核对**它确实不在表里，不在就往下接一段。
+  const ghostFlag = uniqueUnknownFlag(['--check'])
+  const ghost = checkRunbook({ entries: [mkEntry({ diagnose: `legion ${ghostFlag}` })], knownFlags: ['--check'] })
   if (!ghost.findings.some((f) => f.code === RUNBOOK_CODES.UNKNOWN_FLAG)) {
     problems.push('引用不存在的开关没有被抓住——支持人员会在客户现场才发现手册是假的')
   }
@@ -714,6 +752,9 @@ function auditRunbook() {
     faultClasses: FAULT_CLASS_IDS,
     samples: Object.freeze({
       ghostFlagCaught: ghost.findings.filter((f) => f.code === RUNBOOK_CODES.UNKNOWN_FLAG).map((f) => f.flag),
+    // 那个"按构造不存在"的开关名本身也留出来：用例要能核对
+    // "被抓住的正是我造的那一个"，而不是又去硬编一个字面量。
+    ghostFlag,
       fixedFlagClean: !fixed.findings.some((f) => f.code === RUNBOOK_CODES.UNKNOWN_FLAG),
       vagueCaught: vague.findings.map((f) => f.code),
       deadEndCaught: dead.findings.map((f) => f.code),

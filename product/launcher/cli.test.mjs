@@ -91,6 +91,110 @@ test('参数错误返回退出码 2，且不启动任何进程', async () => {
   assert.match(out.text(), /未知参数/)
 })
 
+// ═══════════════════════════════════════════════ --doctor（PRT-257 修复入口）
+//
+// `line 275` 要的是「禁止自动执行，**提示修复或回滚**」。`repairPlanFor()` 早就
+// 算得出修法，而 `product/launcher/` 里对它的引用次数曾经是 **0** ——
+// 这一组钉的就是"那个出口真的在命令行上"。
+//
+// ★ 三个退出码必须分开，其中**"没诊断"绝不能是 0**：
+//   一个"读不到结论所以什么都没报"的体检，与一个"结论是一切正常"的体检，
+//   在退出码上是同一个东西——而前者会让一个已经坏掉的部署安静地通过门禁。
+
+test('★ --doctor：stdin 上有一份「未生效」的拒绝 → 退出 1，并列出逐项修法', async () => {
+  const out = collector()
+  const refusal = {
+    code: 'RUNTIME_HOST_ROW_SELF_CHECK_INCOMPATIBLE',
+    state: 'incompatible',
+    autoExecutionForbidden: true,
+    patchVersion: 'prt-chain-1',
+    reasons: ['缺必需能力：tool-permission-enforcement'],
+    repair: {
+      ok: false,
+      items: [{
+        check: 'sandbox-enforcement', action: 'fix-sandbox-backend',
+        label: '修好沙箱后端到 full 级管制', why: 'partial 意味着存在不被管制的路径', reasons: ['sandbox-partial'],
+      }],
+    },
+  }
+  const code = await run({ argv: ['--doctor'], env: {}, write: out.write, readStdinFn: async () => JSON.stringify(refusal) })
+  assert.equal(code, 1, `未生效的诊断必须退 1：\n${out.text()}`)
+  const text = out.text()
+  assert.match(text, /DOCTOR_ACTIONABLE/)
+  assert.match(text, /sandbox-enforcement/)
+  assert.match(text, /fix-sandbox-backend/, '生产修法表里的动作名要落到输出上')
+  assert.match(text, /自动执行已禁止/, '操作后果要先说清楚')
+  assert.match(text, /回滚/, 'line 275 是「提示修复**或**回滚」，回滚那条路总要在')
+})
+
+test('★★★ --doctor：stdin **空** → 退出 **3**，绝不是 0', async () => {
+  const out = collector()
+  const code = await run({ argv: ['--doctor'], env: {}, write: out.write, readStdinFn: async () => '' })
+  assert.equal(code, 3, `读不到诊断却退 0 —— 那会让接线遗漏看起来像体检通过：\n${out.text()}`)
+  assert.match(out.text(), /DOCTOR_NO_DIAGNOSIS/)
+  assert.match(out.text(), /这不等于"一切正常"/)
+})
+
+test('★★★ --doctor：stdin 上是**畸形 JSON** → 退出 3（当"没有诊断"，不猜也不崩）', async () => {
+  const out = collector()
+  const code = await run({ argv: ['--doctor'], env: {}, write: out.write, readStdinFn: async () => '{ 这不是 JSON' })
+  assert.equal(code, 3)
+  assert.match(out.text(), /DOCTOR_NO_DIAGNOSIS/)
+})
+
+test('★★★ --doctor：stdin 读入**抛错** → 退出 3，且把读失败的原因带出来', async () => {
+  const out = collector()
+  const code = await run({
+    argv: ['--doctor'], env: {}, write: out.write,
+    readStdinFn: async () => { throw new Error('EIO 管道断了') },
+  })
+  assert.equal(code, 3)
+  assert.match(out.text(), /EIO 管道断了/, '读失败的原因必须读得到，否则用户只会看到一个 3')
+})
+
+test('★ --doctor：自检全过 → 退出 0（唯一一个 0）', async () => {
+  const out = collector()
+  const code = await run({
+    argv: ['--doctor'], env: {}, write: out.write,
+    readStdinFn: async () => JSON.stringify({ ok: true, items: [{ check: 'a', ok: true }] }),
+  })
+  assert.equal(code, 0)
+  assert.match(out.text(), /DOCTOR_CLEAN/)
+})
+
+test('★ --doctor：拒绝说了「未生效」却没带修法 → 退出 3，并指出那是**产品侧缺口**', async () => {
+  const out = collector()
+  const code = await run({
+    argv: ['--doctor'], env: {}, write: out.write,
+    readStdinFn: async () => JSON.stringify({ autoExecutionForbidden: true, state: 'incompatible', reasons: ['x-code'], repair: null }),
+  })
+  assert.equal(code, 3, '说不出怎么修，就不能退 0 也不能退 1')
+  assert.match(out.text(), /DOCTOR_NO_PLAN/)
+  assert.match(out.text(), /产品侧的缺口/)
+})
+
+test('★ --doctor --json：输出是**可脚本化**的 JSON，退出码照旧', async () => {
+  const out = collector()
+  const code = await run({
+    argv: ['--doctor', '--json'], env: {}, write: out.write,
+    readStdinFn: async () => JSON.stringify({ autoExecutionForbidden: true, state: 'incompatible', repair: { ok: false, items: [{ check: 'runtime-probe', action: 'a', label: 'b', why: 'c', reasons: [] }] } }),
+  })
+  assert.equal(code, 1)
+  const parsed = JSON.parse(out.text())
+  assert.equal(parsed.code, 'DOCTOR_ACTIONABLE')
+  assert.equal(parsed.exitCode, 1)
+  assert.equal(parsed.items.length, 1)
+  // JSON 里不得出现不可序列化的东西（`Object.freeze` 的数组要照常序列化）。
+  assert.equal(Array.isArray(parsed.lines), true)
+})
+
+test('★ --doctor：帮助里列出了这个参数（帮助与实现同源）', async () => {
+  const out = collector()
+  await run({ argv: ['--help'], env: {}, write: out.write })
+  assert.match(out.text(), /--doctor/)
+  assert.match(out.text(), /只提示、不自动改/, '"不自动改"这条取舍要写在帮助里，否则下一个人会顺手把它自动化')
+})
+
 test('布局未确定（未给工作区）返回退出码 3，并把原因说清楚', async () => {
   const root = mkdtempSync(join(tmpdir(), 'legion-cli-'))
   try {

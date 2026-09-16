@@ -54,7 +54,18 @@
 //
 // ## 端口只能注入，不能在本模块里造
 //
-//   · `decide`（策略门）在全仓库**只有测试实现**，没有生产实现；
+//   · `decide`（策略门）由调用方注入。★ 本行**曾经**写着"全仓库只有测试实现，
+//     没有生产实现"——**那句话现在是错的**：`plugins/root-row.mjs` 的
+//     `createPolicyDecide()` 就是生产实现，而 `root-row.mjs:483` 在没显式给
+//     `decide` 时用它。留这段订正记录是因为它不是一处笔误，而是本仓库
+//     反复出现的形状：
+//
+//       > 一条"某能力只有测试实现"的断言，在实现被补上之后**不会自己失效**——
+//       > 它只是从"事实"变成了"注释"，而注释不参与任何门禁。
+//
+//     仍然成立的那半句：`decide` 在本模块里**不许**造。它是策略门，
+//     而策略属于部署配置（`LEGION_APPROVAL_POLICY` / `LEGION_ATTENDED`），
+//     不是一个库文件能替调用方决定的东西。
 //   · `requestApproval` 的真实实现是 `team-hub/approval-port.mjs`，
 //     而 `team-hub/` → `runtime/dsh-composition/` 是**既有依赖方向**
 //     （`scripts/ci/run-ci.mjs` 里记着：反向实测 0 处），本目录 import 它会成环。

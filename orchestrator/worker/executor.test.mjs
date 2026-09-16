@@ -26,7 +26,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { createProductionExecutor, EXECUTOR_CODES, defaultRequestFor, deriveRunFloorCarrier, UNSUPPLIED_PERMISSIONS } from './executor.mjs'
+import { createProductionExecutor, EXECUTOR_CODES, defaultRequestFor, deriveRunFloorCarrier, permissionsFromLease, UNSUPPLIED_PERMISSIONS } from './executor.mjs'
 import { validateRunRequest } from '../../runtime/contracts/run.mjs'
 // 判据取**产品**的那几份，不在用例里另抄：
 //   · `readRunFloor` 是传输层判定线上载荷的那一个函数；
@@ -933,4 +933,144 @@ test('⑧ ★ 没接出口时**不**在结果里写一个空失败数组', async
   })
   assert.equal(r.outcome, 'completed')
   assert.equal('floorNoticeSinkFailed' in r, false)
+})
+
+// ============================================================================
+// ⑨ 政策禁令（`permissions.deniedTools`）真的进了静态下限
+//
+// 与⑧同一处接缝，但换了一个方向：⑧量的是**派生出来的告诫有没有出口**，
+// ⑨量的是**控制面写下的禁令有没有生效**。
+//
+// ★ 这一组的判据必须落在**`denyTools` 里真的多了那个执行面名字**上，
+//   不是"`declaredDenyTools` 参数传下去了"。传下去而没人用，与没传，
+//   在 guard 那一侧是同一个东西——而 guard 才是真的拦人的那一个。
+// ============================================================================
+
+test('⑨ ★★★ `deniedTools` 里能表达的那一类：真的进了 `denyTools`（guard 拦得到）', async () => {
+  // `git-push` 在执行面上有名字（bash/pwsh）。把它写进**政策禁令**之后，
+  // guard 必须真的能拦到那两个名字。
+  //
+  // 反面对照在下一个断言里：不写它时 `denyTools` 里没有 bash/pwsh
+  // （`git-push` 是 `repo:push`＝硬底线能力，所以它本来就会被禁——
+  //  这里用 **`read-file`** 那一侧来验"不影响"）。
+  //
+  // ★ 判据落在**发出去的那份下限**上（`host.calls.startRun[0].options.enforcementFloor`），
+  //   不是"`declaredDenyTools` 参数传下去了"。传下去而没人用，与没传，
+  //   在 guard 那一侧是同一个东西——而 guard 才是真的拦人的那一个。
+  const { result, host } = await build()
+  const r = await result.executor.execute({
+    ...LEASE,
+    permissions: {
+      preset: 'legion-unattended',
+      tools: ['read-file', 'git-status'],
+      deniedTools: ['git-push'],
+    },
+  })
+  assert.equal(r.outcome, 'completed', JSON.stringify(r).slice(0, 400))
+  const floor = host.calls.startRun[0]?.options?.enforcementFloor
+  assert.ok(floor, '这次 Run 没有下发下限——那说明派生根本没走通')
+  assert.equal(floor.state, 'installed')
+  assert.ok(floor.floor.denyTools.includes('bash') && floor.floor.denyTools.includes('pwsh'),
+    `政策禁了 git-push，执行面上却没有禁 bash/pwsh：denyTools=${JSON.stringify(floor.floor.denyTools)}`)
+})
+
+test('⑨ ★★★ hosted 的政策禁令（执行面上没名字）：**不拒 Run**，但留下具名告诫', async () => {
+  // 这是本批的**核心裁决**。`mcp-invoke` 是 `hosted: true`——Legion 宿主平面
+  // 今天没有被任何组合挂载，所以它在执行面上没有名字可以让 guard 去拒。
+  //
+  // 上一版的行为是"整次 Run 具名拒绝"。改判的依据是**禁令的出处**：
+  // 允许名单里那条是**产品不变量**（删文件回不来），
+  // `deniedTools` 里这条是**操作者配置**（他要求得没错，产品欠他一句
+  // "这条落在哪一层"）。拿产品缺口拒绝操作者的岗位，是把账记错了人。
+  const seen = []
+  const { result, host } = await build({ extra: { onFloorNotice: (n) => seen.push(n) } })
+  const r = await result.executor.execute({
+    ...LEASE,
+    permissions: {
+      preset: 'legion-unattended',
+      tools: ['read-file'],
+      deniedTools: ['mcp-invoke'],
+    },
+  })
+  // ① Run 照常完成——**这是本批改的那一条**。
+  assert.equal(r.outcome, 'completed',
+    `hosted 的政策禁令把整次 Run 拒了（outcome=${r.outcome}）——那正是本批要改掉的行为`)
+
+  // ② 下限是活的（`installed`，而不是 `absent`/`refused`）：Run 真的带上下限跑了。
+  const floor = host.calls.startRun[0]?.options?.enforcementFloor
+  assert.equal(floor?.state, 'installed',
+    'Run 照跑，却没有一份已装填的下限——那才是真的没保护')
+
+  // ③ ★ 而"这条禁令没生效"必须被读出来。否则它与"禁了、而且生效了"
+  //    在接纳这次 Run 的那一刻是同一个读数。
+  const notice = seen.find((n) => n.code === 'run-floor-policy-deny-not-enforceable-at-plane')
+  assert.ok(notice,
+    `没有那条具名告诫：出口收到的是 ${JSON.stringify(seen.map((n) => n?.code))}。`
+    + '缺了它，"禁不了"与"没禁"在读端同形')
+  assert.equal(notice.tool, 'mcp-invoke')
+  assert.equal(notice.why, 'hosted')
+  assert.deepEqual([...notice.dshTools], [], '它没有执行面名字，dshTools 必须是空的')
+})
+
+test('⑨ ★★ `deniedTools` 缺席与"空数组"都不产生静态禁令', async () => {
+  // 两者都不禁任何东西（这是对的：没有禁令就是没有禁令）。
+  // （"两者在**请求形状**上仍然不同"由 `permissionsFromLease` 那一条单测钉住，
+  //  因为 `execute` 的结果里看不到 `permissions` 原样。）
+  for (const deniedTools of [undefined, []]) {
+    const { result, host } = await build()
+    const perms = { preset: 'legion-unattended', tools: ['read-file'] }
+    if (deniedTools !== undefined) perms.deniedTools = deniedTools
+    const r = await result.executor.execute({ ...LEASE, permissions: perms })
+    assert.equal(r.outcome, 'completed', `deniedTools=${JSON.stringify(deniedTools)} 时 Run 没跑完`)
+    const floor = host.calls.startRun[0]?.options?.enforcementFloor
+    assert.deepEqual([...floor.floor.denyTools], [],
+      `deniedTools=${JSON.stringify(deniedTools)} 不该产生任何静态禁令`)
+  }
+})
+
+test('⑨ ★★ `permissionsFromLease`：`deniedTools` 缺席与空数组形状不同（审计要读的那个对象）', () => {
+  // 下限上两者一样（上一条），但 `permissions` 是**审计要读的对象**：
+  // 把一句操作者**没做过**的陈述（`deniedTools: []`＝"我说了这次没有禁令"）
+  // 补进去，等于让审计读到一个不存在的决定。
+  const withoutField = permissionsFromLease({
+    attemptId: 'att:1', allowedTools: ['read-file'], approvalPolicy: null,
+  })
+  assert.equal('deniedTools' in withoutField, false,
+    '控制面没有表达禁令，却凭空写了一个 deniedTools 进档位')
+
+  const explicitEmpty = permissionsFromLease({
+    attemptId: 'att:1', allowedTools: ['read-file'], approvalPolicy: null, deniedTools: [],
+  })
+  assert.deepEqual([...explicitEmpty.deniedTools], [],
+    '控制面**明确说了**没有禁令时，那个陈述必须原样留着')
+
+  const withDenies = permissionsFromLease({
+    attemptId: 'att:1', allowedTools: ['read-file'], approvalPolicy: null, deniedTools: ['mcp-invoke'],
+  })
+  assert.deepEqual([...withDenies.deniedTools], ['mcp-invoke'])
+})
+
+test('⑨ ★★★ `deniedTools` 形状坏掉（不是数组）→ 具名拒绝，不是静默当成空', async () => {
+  // 一个读不出来的禁令名单，与一份空名单，在下限上是同一个读数——
+  // 而前者意味着"操作者说要禁的东西我们没读到"。
+  // 那必须是一次**具名**失败（`run-floor-declared-deny-tools-invalid`），
+  // 否则静默的后果是：一份被写坏的政策让所有禁令**消失**，而 Run 照跑。
+  const { result } = await build()
+  // ★ 形状是**抛**（`EXECUTOR_RUN_FLOOR_NOT_DERIVED`），不是"返回一个没跑完的结果"：
+  //   一个"派生失败但照样返回了一个结果对象"的接口，会让每个调用点都必须记得
+  //   判那一种结果——而漏判的那一个会把一次拒绝当成一次能跑的 Run。
+  await assert.rejects(
+    () => result.executor.execute({
+      ...LEASE,
+      permissions: { preset: 'legion-unattended', tools: ['read-file'], deniedTools: 'mcp-invoke' },
+    }),
+    (err) => {
+      // 拒绝码要落到**派生失败的原因**上，而不是停在传输层那个笼统的码上。
+      assert.equal(err.refusalCode, 'run-floor-declared-deny-tools-invalid',
+        `拒绝理由没有点名那个码：${JSON.stringify(err.refusalCode)}`)
+      assert.equal(err.code, 'EXECUTOR_RUN_FLOOR_NOT_DERIVED')
+      assert.deepEqual([...err.refusals], ['run-floor-declared-deny-tools-invalid'])
+      return true
+    },
+  )
 })

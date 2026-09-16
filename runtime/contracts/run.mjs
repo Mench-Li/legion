@@ -153,7 +153,7 @@ export function validateRunRequest(req) {
       if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) errors.push('budget.maxCostUsd 必须是正的有限数')
     }
   }
-  // 权限档位：preset 名 + 工具白名单。空白名单是合法的（该员工不能用任何工具）。
+  // 权限档位：preset 名 + 工具白名单 + 政策禁令。空白名单是合法的（该员工不能用任何工具）。
   if (req.permissions !== undefined && req.permissions !== null) {
     const p = req.permissions
     if (typeof p !== 'object' || Array.isArray(p)) {
@@ -162,6 +162,20 @@ export function validateRunRequest(req) {
       if (typeof p.preset !== 'string' || p.preset.trim() === '') errors.push('permissions.preset 必须是字符串')
       if (!Array.isArray(p.tools)) errors.push('permissions.tools 必须是数组')
       else if (p.tools.some((t) => typeof t !== 'string')) errors.push('permissions.tools 只能包含字符串')
+      // `deniedTools`（PRT-214 续）：**可选**，但给了就必须是"非空字符串数组"。
+      //
+      // 为什么在这里也查一遍（`deriveRunFloor` 已经会拒）：这一层是**线上形状**，
+      // 而派生点那一层是**语义**。两次检查的理由不是"更保险"，是它们回答的问题
+      // 不同——这里答"这份请求合法吗"（调用方拿到的是契约错误），
+      // 那里答"这次 Run 能不能派生出一份下限"（调用方拿到的是具名拒绝码）。
+      // 少了这一层，一个 `deniedTools: 'mcp-invoke'`（写成字符串）会一路走到
+      // 派生点才被拒，而那时的报错指向"下限派生失败"，不指向"请求写坏了"。
+      if (p.deniedTools !== undefined && p.deniedTools !== null) {
+        if (!Array.isArray(p.deniedTools)) errors.push('permissions.deniedTools 必须是数组')
+        else if (p.deniedTools.some((t) => typeof t !== 'string' || t.trim() === '')) {
+          errors.push('permissions.deniedTools 只能包含非空字符串')
+        }
+      }
     }
   }
   // 静态 hard floor（PRT-214 缺口①）：**可选**，但给了就必须解释得通。

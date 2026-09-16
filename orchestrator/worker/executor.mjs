@@ -645,9 +645,31 @@ export function permissionsFromLease(lease) {
     )
   }
   // `tools` 是**允许**名单（契约 §4.4）：清单里的 `allowedTools` 就是它。
-  // `deniedTools` **不进**这里——它是控制面的显式禁令，走静态下限那条路
-  // （`deriveRunFloorCarrier` 的 `declaredDenyTools`），与允许名单是两件事。
-  return { preset, tools: Object.freeze([...allowed]) }
+  // `deniedTools` 是**政策禁令**，走静态下限那条路
+  // （`deriveRunFloorCarrier` 的 `declaredDenyTools`）——但它挂在**同一个
+  // `permissions` 对象**上，理由见 `deriveRunFloorCarrier` 里那段注释：
+  // 拆成两个 RunRequest 字段会让"有允许名单、却没有对应禁止名单"变成一个
+  // 合法形状，而那个形状读起来与"这个员工没有任何禁令"完全一样。
+  const denied = lease?.deniedTools
+  if (denied !== undefined && denied !== null &&
+      (!Array.isArray(denied) || denied.some((t) => typeof t !== 'string' || t.trim() === ''))) {
+    throw new ExecutorError(
+      EXECUTOR_CODES.BAD_WIRING,
+      `租约上的 deniedTools 不是"非空字符串数组"（收到 ${JSON.stringify(denied)}）。`
+      + '`deniedTools` 只由控制面在认领时写下（`team-hub/run-store.mjs` 会先校验形状），'
+      + '所以走到这里说明有人手搓了一份租约',
+      { attemptId: lease?.attemptId ?? null },
+    )
+  }
+  return {
+    preset,
+    tools: Object.freeze([...allowed]),
+    // 缺席（`undefined`/`null`）**如实缺席**，不补一个空数组：`deniedTools: []`
+    // 是"控制面说了这次没有禁令"这句**陈述**，而"控制面没有表达"是另一件事。
+    // 两者的下限一样（都不禁任何东西），但 `permissions` 是审计要读的对象，
+    // 把一句没做过的陈述写进去，就是让审计读到一个不存在的决定。
+    ...(denied === undefined || denied === null ? {} : { deniedTools: Object.freeze([...denied]) }),
+  }
 }
 
 /**
@@ -719,6 +741,17 @@ export function deriveRunFloorCarrier(request, {
   const permissions = request.permissions === UNSUPPLIED_PERMISSIONS ? undefined : request.permissions
   const result = deriveRunFloor({
     permissions,
+    // ★ 政策禁令（`deniedTools`）从 `permissions` 上取，不另开一个 RunRequest 字段。
+    //
+    //   理由是契约 §4.4 已经把权限档位定成**一个**对象（`{preset, tools}`），
+    //   而"允许哪些"与"禁止哪些"是同一次决定的两个方面——分成两个字段之后，
+    //   "有一份允许名单、却没有对应的禁止名单"会变成一个合法的请求形状，
+    //   而那个形状读起来与"这个员工没有任何禁令"完全一样。
+    //
+    //   `?? []`：缺席是"没有政策禁令"（一个**合法**的读数，不是失败）。
+    //   而"有一份但读不出来"（不是数组）由 `deriveRunFloor` 自己具名拒绝
+    //   （`DECLARED_DENY_TOOLS_INVALID`），不在这里吞掉。
+    declaredDenyTools: permissions?.deniedTools ?? [],
     resolveTool: resolver,
     resolveExecutionNames: namesResolver,
     cwd: request.workdir,

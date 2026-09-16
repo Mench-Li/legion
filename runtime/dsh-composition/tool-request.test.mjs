@@ -356,37 +356,94 @@ test('④ ★★ guard **只有降级语义**：返回 string 或 undefined，�
   assert.match(denied, /delete-file/)
 })
 
-test('④ ★★ 同一个哈希上 pre-execute 放行、guard 拒绝 → 归类为**强制点冲突**', async () => {
-  // spec §6.8 line 479：guard 只有降级语义，出现"人工已批准但仍被 guard 拒绝"
-  // 即视为强制面配置错误，必须能由审计定位到具体强制点。
-  const findings = []
+test('④ ★★★★ 下限里的调用**根本走不到**策略门——两道闸现在是同一份判定', async () => {
+  // ★★ 这一条是**本批最重的一条**，而它是**实测逼出来的**。
+  //
+  // 在这之前，这一个位置上的用例钉的是**相反**的行为：
+  // 「pre-execute 放行 + guard 拒绝 → 归类为强制点冲突」。
+  // 那一版之所以绿，是因为桥的 pre-execute 那一段**从不跑下限判定**——
+  // 而 spec §6.8（`:456`）要求的是**两道闸**：
+  // 「`tools/pre-execute` 提前拒绝」+「`ctx.tools.guard()` 最终复核」。
+  // `composePreExecuteFloor()`（写出第一道闸的函数）在全仓库只有用例在调。
+  //
+  //   > 一条"造出一个强制点冲突、断言它能被归类"的用例，
+  //   > 与一条"证明这个冲突**根本不该发生**"的用例，
+  //   > 在绿树上长得一样——只不过前者把缺陷当成了被测规格。
+  //
+  // 实测证据（修之前，真桥、真下限）：
+  //   一次 `delete-file` → pre-execute `allow` → 策略门被调用 **1** 次
+  //   → guard「hard floor：工具 delete-file 被静态禁止（不可由审批解除）」
+  // 也就是：注定被拒的调用走进了审批箱，人批了仍然被拒。
+  const policyCalls = []
   const bridge = createEnforcementBridge({
     context: CTX,
-    floor: { denyTools: ['write-file'] },
-    decide: () => ({ kind: 'allow' }),
-    onContradiction: (f) => findings.push(f),
+    floor: { denyTools: ['write-file'], denyPathPrefixes: [] },
+    // 策略门记下**它看见了什么**——这是"有没有走进审批箱"的唯一判据。
+    decide: (projection) => { policyCalls.push(projection.toolName); return { kind: 'allow' } },
   })
   const execution = { name: 'write-file', callId: 'c9', arguments: { path: 'C:/work/a.txt' } }
-  const d = await bridge.preExecute(execution)
-  assert.equal(d.kind, 'allow')
-  const reason = bridge.guard(execution)
-  assert.equal(typeof reason, 'string', 'guard 没有拒绝（但 floor 里禁了它）')
-  // 归类：不是"投影漂移"，而是"强制点冲突"
-  assert.equal(findings.length, 1)
-  assert.equal(findings[0].code, PROJECTION_CODES.GUARD_CONTRARY)
-  assert.notEqual(findings[0].code, PROJECTION_CODES.PROJECTION_DRIFT)
-  // 能定位到**具体强制点**：floor 的拒绝理由点名了工具
-  assert.match(findings[0].guardReason, /write-file/)
-  assert.deepEqual(findings[0].allowedBy.map((a) => a.source), ['pre-execute'])
-  // 账里两条都在同一个哈希下
-  const ledger = bridge.ledgerOf(findings[0].canonicalHash)
-  assert.deepEqual(ledger.map((e) => `${e.source}:${e.decision}`), ['pre-execute:allow', 'guard:deny'])
-  // 事后审计查得出同一件事
-  const audited = bridge.assertNoContradiction()
-  assert.equal(audited.length, 1)
-  assert.equal(audited[0].canonicalHash, findings[0].canonicalHash)
-  assert.match(audited[0].guardReason, /write-file/)
-  assert.deepEqual(audited[0].allowedBy.map((a) => a.source), ['pre-execute'])
+
+  const pre = await bridge.preExecute(execution)
+  assert.equal(pre.kind, 'deny', '下限里的调用在 pre-execute 被放行了')
+  // ① ★ 策略门**一次都没被叫**：没有走进审批箱，也就没有"人批了仍然被拒"。
+  assert.deepEqual(policyCalls, [],
+    `注定被 guard 拒绝的调用进了策略门（看见了 ${JSON.stringify(policyCalls)}）——`
+    + '那正是"人工已批准但仍被拒绝"这条无修复动作的审计记录的产生方式')
+  // ② 两道闸说**同一句话**：不是"两处各有一份拒绝理由"，是同一份判定。
+  const guardReason = bridge.guard(execution)
+  assert.equal(typeof guardReason, 'string')
+  assert.equal(pre.reason, guardReason,
+    'pre-execute 与 guard 给出的理由不同 —— 两份"同一个下限"的实现会漂，'
+    + '而漂的那一天只表现为"这次怎么被拒了"')
+  assert.match(pre.reason, /write-file/)
+  // ③ 于是**没有冲突可归**：冲突检测器是正确的安静，不是失效。
+  assert.deepEqual(bridge.assertNoContradiction(), [],
+    '早退生效之后不该再有"放行过、又被 guard 拒"的对')
+})
+
+test('④ ★★★ 冲突检测器在同桥之内**结构上不可达**（这正是"一份判定"的目的，可实测）', async () => {
+  // 上一条把"下限造成的冲突"消灭了。于是有一个必须回答的问题：
+  // 那个检测器是不是变成了死代码？
+  //
+  // 答案是"同桥之内不可达，但它守的是**另一种**处境"。这一条把"不可达"
+  // 当**判据**钉住，而不是靠推理——穷举桥上所有公开调用序列，一条都不该造出冲突：
+  // 只 guard / preExecute→guard / guard→guard / 别的工具先过→本工具 guard。
+  //
+  //   > 一个"两个强制点各有一份下限"的实现，
+  //   > 与一个"两个强制点共用同一次 `createHardFloorGuard` 调用结果"的实现，
+  //   > 在**拒绝行为**上是同一个东西——只不过前者迟早会出现一条
+  //   > "人批了仍然被拒"的对，而那条对里没有任何东西告诉你去改哪里。
+  //
+  // ★ 而检测器**没有**变成死代码：它守的是**别的行**挂了一份会漂的下限
+  //   （补丁层里的 `legion-enforcement-hard-floor` 是一个**独立**的行，
+  //   它拿到的 floor 与桥的这一份在构造上不是同一个对象）。
+  //   那正是本仓库反复出现的形状，所以检测器必须留着。
+  //   它自己的逻辑由 `guard-consistency.test.mjs` 的合成对覆盖
+  //   （`checkApprovedCallsSurviveGuard` / `assertNoContradiction`）——
+  //   不需要在这里假装构造一次。
+  const exOfWriteFile = () => ({ name: 'write-file', callId: 'c1', arguments: { path: 'C:/work/a.txt' } })
+  const SEQUENCES = {
+    '只 guard': async (b) => { b.guard(exOfWriteFile()) },
+    'preExecute → guard': async (b) => { await b.preExecute(exOfWriteFile()); b.guard(exOfWriteFile()) },
+    'guard → guard': async (b) => { b.guard(exOfWriteFile()); b.guard(exOfWriteFile()) },
+    '别的工具先过 → 本工具 guard': async (b) => {
+      await b.preExecute({ name: 'read-file', callId: 'c2', arguments: { path: 'C:/work/a.txt' } })
+      b.guard(exOfWriteFile())
+    },
+  }
+  for (const [name, run] of Object.entries(SEQUENCES)) {
+    const findings = []
+    const bridge = createEnforcementBridge({
+      context: CTX,
+      floor: { denyTools: ['write-file'], denyPathPrefixes: [] },
+      decide: () => ({ kind: 'allow' }),
+      onContradiction: (f) => findings.push(f),
+    })
+    await run(bridge)
+    assert.deepEqual(findings, [],
+      `「${name}」造出了 ${findings.length} 条强制点冲突——两道闸不是同一份判定了`)
+    assert.deepEqual(bridge.assertNoContradiction(), [])
+  }
 })
 
 test('④ ★★ 没有冲突时审计安静（不能"永远报一条冲突"）', async () => {

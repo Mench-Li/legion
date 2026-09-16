@@ -649,6 +649,38 @@ export function createEnforcementBridge({
         // 投影不了 = 拿不到这次调用的身份 = 拒绝（不是"放行但记不下来"）。
         return { kind: 'deny', reason: `无法投影这次调用（${got.code}）：${got.message}` }
       }
+      // ★★ 静态 hard floor 在**这里**先判——PRT-214 缺口，实测补上。
+      //
+      // spec §6.8（`:456`）把「hard floor」映射到**两道闸**：
+      // 「`tools/pre-execute` 提前拒绝」+「`ctx.tools.guard()` 最终复核」。
+      // 在这之前，生产里**只有第二道**：guard 那一行（`plugins/hard-floor.mjs`）
+      // 挂了，而 pre-execute 这一段从不跑下限判定。`composePreExecuteFloor()`
+      // ——写出这道闸的那个函数——在全仓库**只有用例在调**。
+      //
+      // 它的文件头自己预言了后果，而那个预言是**可实测**的（本次就是这么测到的）：
+      //
+      //     一次 `delete-file`（下限里的名字）→ pre-execute 返回 `allow`
+      //     → 策略门被调用 **1** 次（也就是**走进了审批箱**）
+      //     → guard 返回「hard floor：工具 delete-file 被静态禁止（不可由审批解除）」
+      //
+      //   > 一个「hard floor 只在 guard 一处生效」的接线，
+      //   > 与一个「人批了之后仍然被 guard 拒绝、而审计里找不到该修哪里」的接线，
+      //   > 是同一个东西。
+      //
+      // 而这里的修法**不是**再写一份比较：`guarded` 就是 guard 那一行用的
+      // **同一个** `createHardFloorGuard` 调用结果，`guardInputOf(projection)`
+      // 也是同一份投影。两道闸问的是同一件事、拿到的是同一份下限，
+      // 所以不存在"pre-execute 与 guard 之间漂移"的可能。
+      //
+      // ★ 顺序：在 `scopeGuard` / 白名单**之前**。理由不是随便排的——
+      //   下限是"不可由审批解除"的那一类（删文件回不来、写密钥会让已录入的
+      //   凭证无法恢复），而路径范围与岗位清单都可能有修复动作。
+      //   两条同时命中时，先说那条**没有修复动作**的，值班的人才知道
+      //   改哪里是白费力气。
+      const floorReason = guarded(guardInputOf(got.projection))
+      if (floorReason !== undefined) {
+        return { kind: 'deny', reason: floorReason }
+      }
       // ★ 路径范围在**白名单之前**：越界是 hard floor 的一部分（spec §6.6 line 449），
       // 而岗位清单是"这个岗位能干哪些事"，两者拒绝的理由不同、修复动作也不同。
       const outOfScope = scopeGuard(got.projection)

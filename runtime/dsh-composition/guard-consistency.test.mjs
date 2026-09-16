@@ -227,8 +227,19 @@ test('④ ★★★ 违规说得出去跑哪个修复入口（注入了修法表
 })
 
 test('④ ★★ 与真实原语一致：pairs 里的 pre-execute 判定就是 guard 那份判定的投影', async () => {
-  // 生产里这一投影由 `composePreExecuteFloor` 接在动态策略之前；
-  // 这里用真 `createPreExecutePolicy` 跑一遍，证明"下限先判"确实会先于动态策略生效。
+  // ⚠️ 订正：本行曾写着「生产里这一投影由 `composePreExecuteFloor` 接在动态策略之前」。
+  //    **那句话曾经是错的**，而这一条用例当年**照样是绿的**——
+  //    因为它自己在**测试里**调了 `composePreExecuteFloor`，
+  //    于是它证明的是"这个组合能用"，不是"生产里有人在用"。
+  //
+  //      > 一条在测试里自己把零件装好、再断言零件能用的用例，
+  //      > 与一条证明**生产装配点**装了这个零件的用例，
+  //      > 在绿树上是同一个东西——只不过前者不覆盖"没人装"这种故障。
+  //
+  //    2026-09 实测（真桥、真下限、一次 `delete-file`）：pre-execute `allow`、
+  //    策略门被调用 1 次、guard 拒绝。缺口已补在
+  //    `tool-request.mjs` 的 pre-execute 那一段（现在它先跑 `guarded`），
+  //    而覆盖它的判据在 `tool-request.test.mjs` 的「下限里的调用根本走不到策略门」。
   const { composePreExecuteFloor } = await import('./enforcement.mjs')
   let policyCalls = 0
   const decide = composePreExecuteFloor({

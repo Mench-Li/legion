@@ -503,20 +503,84 @@ test('⑤ ★★★ 控制面显式禁止的工具进下限；与允许名单撞
     + '它进下限只可能是因为政策显式禁止了它')
 })
 
-test('⑤ ★★★★ 政策声明禁一个**执行面上没有名字**的工具：也是整次拒绝，不是记一条就算', () => {
-  // 与允许名单那一侧同一条规则——"必须被禁"与"禁得了"是两件事，
-  // 后者不成立时前者不构成一份可安装的下限。
+test('⑤ ★★★★ 政策声明禁一个**执行面上没有名字**的工具：**照常派发**，但留一条具名告诫', () => {
+  // ★★ 这一条**反过来了**——上一版钉的是"也是整次拒绝"，本批按裁决改成告诫。
+  //
+  // 区分的依据是**禁令的出处**，不是它的强弱（见
+  // `POLICY_DENY_NOT_ENFORCEABLE_AT_PLANE` 的注释）：
+  //
+  //   · 硬底线（允许名单那一侧的 `delete-file`）是**产品不变量**——
+  //     我们承诺过"删文件不会发生"，兑现不了（说不出它在执行面上叫什么）
+  //     就不派发，那是诚实的；
+  //   · `declaredDenyTools` 是**操作者配置**——产品从没承诺过
+  //     "你写什么我们都能在 guard 上执行"。操作者禁 `mcp-invoke` 这个要求
+  //     没有错，产品欠他的是**告诉他这条禁令落在哪一层**，
+  //     而不是让他的岗位每一次 Run 都被拒。
+  //
+  //   > 把"某类能力禁不了"的处置从**这一类能力**外推到**任何一条禁令**，
+  //   > 是一个改变部署可用性的决定，不是一次翻译。
+  //
+  // ⚠️ 但"照常派发"不等于"这条禁令生效了"——那才是这一条用例的重点：
+  //    必须有一条可读的读数说明它**没生效**，否则"禁不了"与"没禁"同形。
+  const result = derive({ declaredDenyTools: ['mcp-invoke'] })
+  // ① 派发照常：不是拒绝，下限也不为 null。
+  assert.equal(result.derived, true, '政策禁了一个 hosted 工具就把整次 Run 拒了——那是把产品缺口记在操作者头上')
+  assert.notEqual(result.floor, null, '照常派发就必须有一份下限')
+  assert.deepEqual([...result.refusals.map((r) => r.code)], [], '这一档不该留下任何拒绝码')
+  // ② 它也确实**没有**进静态下限（执行面上没有名字可以禁）。
+  assert.deepEqual([...result.floor.denyTools], [],
+    '`mcp-invoke` 在执行面上没有名字，不该出现在 denyTools 里——放一个 guard 比不到的名字等于没禁')
+  // ③ ★ 而"没生效"这件事必须有人读得到：这就是那条告诫的全部意义。
+  const notices = result.notices.filter((n) => n.code === RUN_FLOOR_NOTICE_CODES.POLICY_DENY_NOT_ENFORCEABLE_AT_PLANE)
+  assert.equal(notices.length, 1, `告诫没产生（notices=${JSON.stringify(result.notices.map((n) => n.code))}）`)
+  assert.equal(notices[0].tool, 'mcp-invoke')
+  assert.equal(notices[0].why, 'hosted')
+  assert.deepEqual([...notices[0].dshTools], [])
+  assert.match(String(notices[0].message), /静态面/)
+  assert.match(String(notices[0].message), /没有生效/)
+})
+
+test('⑤ ★★★ 同一件事在**两种出处**下处置不同：硬底线拒绝，政策禁令只记告诫', () => {
+  // 把两种来源并排放在**一次**派生里，断言它们的读数**不同**。
+  // 这一条防的是下一个人"顺手统一一下"——统一之后的形状看起来更整齐，
+  // 而代价是操作者的配置错误会让整个岗位跑不起来。
   const result = derive({
-    permissions: { preset: 'p', tools: ['read-file'] },
-    declaredDenyTools: ['mcp-invoke'],
+    permissions: { preset: 'legion-attended', tools: ['read-file', 'delete-file'] }, // 硬底线，且禁不了
+    declaredDenyTools: ['mcp-invoke'],                                               // 政策禁令，且禁不了
   })
-  assert.equal(result.derived, false)
-  assert.equal(result.floor, null)
-  assert.deepEqual([...result.refusals.map((r) => r.code)], [CODES.HARD_FLOOR_NOT_ENFORCEABLE_AT_PLANE])
-  assert.equal(result.refusals[0].why, 'hosted')
-  assert.equal(result.refusals[0].tool, 'mcp-invoke')
-  // 明说：这一条不是"拒绝执行"的意思丢失了，而是这一层表达不了它。
-  assert.match(String(result.refusals[0].message), /执行面上没有名字/)
+  assert.equal(result.derived, false, '硬底线禁不了必须整次拒绝，哪怕同一次里还有政策禁令')
+  // 硬底线那一侧：一条拒绝，点名 `delete-file`。
+  assert.deepEqual([...result.refusals.map((r) => r.tool)], ['delete-file'])
+  assert.equal(result.refusals[0].code, CODES.HARD_FLOOR_NOT_ENFORCEABLE_AT_PLANE)
+  // 政策那一侧：仍然产生自己的告诫（它说的是另一个工具、另一件事）。
+  const policyNotices = result.notices.filter((n) => n.code === RUN_FLOOR_NOTICE_CODES.POLICY_DENY_NOT_ENFORCEABLE_AT_PLANE)
+  assert.deepEqual(policyNotices.map((n) => n.tool), ['mcp-invoke'],
+    '政策禁令那条告诫不该因为"同一次里还有硬底线失败"而消失——两条读数说的是不同的事')
+})
+
+test('⑤ ★★ "问不出来"在**两种出处**下都拒绝（与"已知禁不了"分开）', () => {
+  // 这一档与上一档必须分开，否则"这块能力还没建"（产品缺口）
+  // 会与"我们不知道它能不能被禁"（接线错误）在读端同形。
+  for (const tools of [['read-file'], ['read-file', 'delete-file']]) {
+    const result = deriveRunFloor({
+      permissions: { preset: 'legion-attended', tools },
+      declaredDenyTools: ['mcp-invoke'],
+      resolveTool,
+      // 解析口**缺席**：我们连"它有没有执行面名字"都不知道。
+      resolveExecutionNames: undefined,
+      cwd: WIN.cwd, platform: WIN.platform,
+    })
+    assert.equal(result.derived, false,
+      `解析口缺席时必须拒绝（tools=${JSON.stringify(tools)}）——不知道它能不能被禁，就不许声称禁掉了`)
+    assert.equal(result.refusals[0].code, CODES.EXECUTION_NAMES_RESOLVER_MISSING)
+    // ★ 而这时**不该**有那条政策告诫：告诫说的是"我知道它禁不了"，
+    //   而这里我们连知道都不知道——两种处境不能共用一个读数。
+    assert.deepEqual(
+      result.notices.filter((n) => n.code === RUN_FLOOR_NOTICE_CODES.POLICY_DENY_NOT_ENFORCEABLE_AT_PLANE),
+      [],
+      '"问不出来"不许伪装成"已知禁不了"',
+    )
+  }
 })
 
 // ═══════════════════════════════════════ ⑥ ★★★ 零 IO、冻结、叶子

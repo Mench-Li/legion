@@ -263,6 +263,39 @@ test('③ 空工具白名单是合法的（该员工不能用任何工具）', (
   assert.equal(res.ok, true)
 })
 
+test('③ ★★ permissions.deniedTools：可选、合法形状通过；坏形状在**这一层**就被点名', () => {
+  // PRT-214 续：政策禁令（`deniedTools`）随权限档位一起过线，因为
+  // "允许哪些"与"禁止哪些"是同一次决定的两个方面。
+  //
+  // ★ 为什么这一层也要查一遍（`deriveRunFloor` 已经会拒）：
+  //   这一层答的是"这份请求合法吗"（调用方拿到的是**契约**错误，
+  //   点到 `permissions.deniedTools` 这个名字），
+  //   派生点那一层答的是"这次 Run 能不能派生出一份下限"（拿到的是具名拒绝码）。
+  //   少了这一层，一个写成字符串的 `deniedTools` 会一路走到派生点才被拒，
+  //   而那时的报错指向"下限派生失败"，**不指向"请求写坏了"**——
+  //   修的人会去查下限，而该改的是那份清单。
+  const withOk = { ...VALID_REQUEST, permissions: { preset: 'legion-attended', tools: ['read-file'], deniedTools: ['git-push'] } }
+  assert.equal(validateRunRequest(withOk).ok, true, '合法形状的 deniedTools 不该被拒')
+
+  // 缺席与空数组都是合法的：两者都不禁任何东西。
+  const bare = { ...VALID_REQUEST, permissions: { preset: 'legion-attended', tools: ['read-file'] } }
+  assert.equal(validateRunRequest(bare).ok, true)
+  const empty = { ...VALID_REQUEST, permissions: { preset: 'legion-attended', tools: ['read-file'], deniedTools: [] } }
+  assert.equal(validateRunRequest(empty).ok, true)
+
+  // 而坏形状必须在**这一层**被点名到字段。
+  for (const bad of ['git-push', 42, { t: 1 }, [''], ['ok', '  '], [1], [null]]) {
+    const res = validateRunRequest({
+      ...VALID_REQUEST,
+      permissions: { preset: 'legion-attended', tools: ['read-file'], deniedTools: bad },
+    })
+    assert.equal(res.ok, false, `deniedTools=${JSON.stringify(bad)} 应被拒绝`)
+    const text = JSON.stringify(res.errors ?? res)
+    assert.match(text, /deniedTools/,
+      `拒绝理由没有点名 deniedTools（deniedTools=${JSON.stringify(bad)}）：${text.slice(0, 200)}`)
+  }
+})
+
 test('③ timeoutMs / budget 必须是正的有限数', () => {
   assert.equal(validateRunRequest({ ...VALID_REQUEST, timeoutMs: 0 }).ok, false)
   assert.equal(validateRunRequest({ ...VALID_REQUEST, timeoutMs: -1 }).ok, false)

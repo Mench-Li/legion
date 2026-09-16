@@ -202,6 +202,41 @@ export function parseHostFailures(logText) {
         current = null
         continue
       }
+      // ★★ DSH 2026-09-11（`bd4cfc7c46`）起，**模块导入失败**不再单列成
+      //    `failed to import loader entry <id> (<spec>)`，而是并进"未激活"清单：
+      //
+      //        dsh: warning: 1 entry did not activate
+      //        p13-broken-file (file:///…/broken-plugin.mjs): failed to import
+      //
+      //    （实测：本次现场跑真宿主，整份 stderr **只有这两行**。）
+      //    它说的是同一件事，所以归一到 `entryFailures` 通道——
+      //    否则会被降级成笼统的 `activation_failed`，而
+      //    「模块**根本没 import 进来**」与「import 进来了、apply 抛了」
+      //    是两条修法完全不同的路（见本文件头）。
+      //
+      //    ⚠️ 顺带一个**丢掉的事实**：新形状里**没有**插件自己的错误文本。
+      //    DSH 对"fiber 从未创建"的条目只报 `failed to import` 四个词，
+      //    底层 Node 的 `Cannot find package …` 一个字都不透。
+      //    所以本诊断能给"哪一行、哪个入口、哪种失败、怎么修"，
+      //    **不能**给"插件自己说了什么"——这一条如实写进 `detail`。
+      //
+      //    ⚠️ 判定要用**整行的行尾**，不能先走下面那条 `^(\S[^:]*?):\s*(.+)$`：
+      //    条目名里就有冒号（`file:///D:/…`），那条非贪婪正则会从 `file:` 处切开，
+      //    于是 `名 (file` + `///D:/…): failed to import`——detail 永远不等于
+      //    `failed to import`。**这正是"用一条通用正则去读一个自带分隔符的值"的坑**：
+      //    实测踩过，第一次改完仍然报 `activation_failed`。
+      if (/: failed to import$/.test(line.trim())) {
+        const name = line.trim().replace(/: failed to import$/, '')
+        const spec = /^(\S+?)(?:\s+\(([^)]*)\))?$/.exec(name)
+        const id = spec ? spec[1] : name
+        const specifier = spec && spec[2] ? spec[2] : null
+        if (!out.entryFailures.some((f) => f.id === id)) {
+          out.entryFailures.push({ action: 'import', id, specifier, message: 'failed to import' })
+        }
+        commit()
+        current = null
+        continue
+      }
       const failed = /^(\S[^:]*?):\s*(.+)$/.exec(line)
       commit()
       current = failed ? { name: failed[1].trim(), detail: failed[2].trim() } : null
@@ -253,18 +288,26 @@ export function diagnoseHostLogs({ logText = '', rows = [], repoRoot = process.c
     const r = resolveRowEntry(row, resolveOpts)
     const moduleErr = f.message.includes('Cannot find ') ? (specifierFromError(f.message) ?? null) : null
     const entryMissing = !r.exists
+    // 导入期失败、但入口文件**在**：这是"模块没求值成功"，不是"文件不存在"。
+    // DSH 对它的原文只有 `failed to import` 四个词（底层错误不转录），
+    // 所以 `detail` 必须把这份**缺失**说出来，而不是留一句没有信息量的话给值班的人。
+    const importThrew = !entryMissing && f.action === 'import'
     add({
       kind: entryMissing ? 'missing_entry' : (f.action === 'import' ? 'import_threw' : 'activation_failed'),
       plugin: label(row),
       entry: r.entry ?? null,
       detail: entryMissing
         ? `${f.message}（入口文件不存在：${r.entry ?? '未知路径'}）`
-        : f.message,
+        : (importThrew
+          ? `${f.message}（入口文件在：${r.entry ?? '未知路径'}，但模块在**导入期**没有求值成功。` +
+            'DSH 只报 `failed to import`，**不转录**底层错误——本诊断因此给不出"插件自己说了什么"；' +
+            '要看它抛了什么，单独跑一次该入口即可）'
+          : f.message),
       raw: f.message,
       hint: entryMissing
         ? buildHint(row.name)
         : (f.action === 'import'
-          ? '模块在**导入期**就抛错（不是 apply 期）→ 上方原始错误即插件自己的错误；若是依赖缺失，按 specifier 补依赖或修入口'
+          ? '模块在**导入期**就抛错（不是 apply 期）→ 入口文件存在，问题在它自己或它的依赖：单独 import 该入口复现原始错误，再按错误补依赖或修入口'
           : '插件已在 apply/激活期抛错 → 上方原始错误即插件自己的错误（含栈）'),
       specifier: f.specifier ?? null,
       moduleError: moduleErr,

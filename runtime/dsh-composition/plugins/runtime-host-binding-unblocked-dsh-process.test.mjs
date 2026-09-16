@@ -593,7 +593,14 @@ describe('PRT-253 解阻批：真 DSH 进程里的绑定读数', () => {
     })
     assert.equal(r.spawnError, null)
     assert.match(r.stderr, /^BEFORE-CONTROL-WRAPPER-EVALUATED$/m, r.stderr)
-    assert.equal(r.code, 1, `期望"没有 canRead 来源"拦下启动：\n${r.stderr}`)
+    // ⚠️ 本行拒绝**不会**让进程非零退出：DSH 的启动严格性是**消费方自有**的
+    //    （只有全局 required 名单里的 entry 才会拆卸应用；Legion 的补丁行不在其中）。
+    //    逐条证据与那份 DSH 架构决定记录见
+    //    `root-row-dsh-process.test.mjs` 文件头「DSH 的启动严格性是消费方自有的」一节，
+    //    那里另有一条 A3 钉子守着这个外部事实。
+    //    这里断言的是**具名拒绝码本身**（下面两条），不是进程的生死。
+    assert.equal(r.code, 0, `DSH 对非 required entry 只报 warning，进程应照常起来：\n${r.stderr}`)
+    assert.match(r.stderr, /warning: \d+ entr(?:y|ies) did not activate/, r.stderr)
     // 具名码本身 + 内层码，两条都断言（不写"它抛了"）。
     assert.ok(r.stderr.includes(RUNTIME_HOST_ROW_CODES.INPUTS_FACTORY_THREW),
       `没有读到 ${RUNTIME_HOST_ROW_CODES.INPUTS_FACTORY_THREW}：\n${r.stderr}`)
@@ -722,13 +729,26 @@ describe('PRT-253 解阻批：真 DSH 进程里的绑定读数', () => {
     })
     assert.equal(r.spawnError, null)
     assert.match(r.stderr, /^BAD-CANREAD-WRAPPER-EVALUATED$/m, r.stderr)
-    assert.equal(r.code, 1, `期望"挂了个坏的 canRead"拦下启动：\n${r.stderr}`)
+    // 同①：本行拒绝不会让进程非零退出（DSH 只 warn）。断言具名码。
+    assert.equal(r.code, 0, `DSH 对非 required entry 只报 warning，进程应照常起来：\n${r.stderr}`)
     assert.ok(r.stderr.includes(RUNTIME_HOST_ROW_CODES.NO_CAN_READ),
       `没有读到 ${RUNTIME_HOST_ROW_CODES.NO_CAN_READ}：\n${r.stderr}`)
-    // ★ 与③（绑定没建立 = exit 0）必须**不同形**：这条拒绝是真会拦启动的。
-    assert.notEqual(r.code, READINGS.bound.exit,
-      '③与④的退出码相同——那"挂了个坏的"就没被读出来')
+    // ★ 与③（绑定成功）必须**不同形**。
+    //
+    //   ⚠️ 这条原来比的是**退出码**（③ exit 0 / ④ exit 1）。DSH 把非 required entry 的
+    //   失败降成 warning 之后两者都是 0，退出码不再携带这个区别。
+    //   而**区别本身从来没有消失**，它只是从来就不该由退出码承载：
+    //   ④ 读到了具名拒绝码 `NO_CAN_READ`，③ 一个拒绝码都不该有
+    //   （③ 的循环正是在断言这一点）。改读这两个值之后这条比原来**更强**：
+    //   两个不同的退出码也可能来自别的原因，现在读的是拒绝本身。
+    //
+    //   ⚠️ 顺序要紧：这两个读数**必须先写下来再读**。第一版把比较写在赋值之前，
+    //   读到的是上一批留下的 `null`（表现为 `Cannot read properties of null`）——
+    //   那正是"读一个还没人写的格子"，与读数本身对不对无关。
     READINGS.badCanRead = { code: RUNTIME_HOST_ROW_CODES.NO_CAN_READ, exit: r.code }
+    assert.equal(READINGS.badCanRead.code, RUNTIME_HOST_ROW_CODES.NO_CAN_READ)
+    assert.equal(READINGS.bound.bound, 'true',
+      '③ 没有留下"绑定建立"的读数——那这条与④就没有可比性')
     t.diagnostic(`BAD-CANREAD: exit=${r.code} ${READINGS.badCanRead.code}`)
   })
 
@@ -789,7 +809,14 @@ describe('PRT-253 解阻批：真 DSH 进程里的绑定读数', () => {
         '"真服务读到"与"服务缺席"报了同一个码')
       assert.notEqual(READINGS.modelReal.selection, READINGS.modelAbsent.selection)
     }
-    assert.notEqual(READINGS.badCanRead.exit, READINGS.bound.exit)
+    // ⚠️ 原来这里比的是 `READINGS.badCanRead.exit !== READINGS.bound.exit`——
+    //   DSH 把非 required entry 的失败降成 warning 之后两者都是 0，
+    //   那个比较变成了"0 !== 0"。**区别本身没消失**：④ 以具名码 `NO_CAN_READ` 拒绝，
+    //   ③ 建立了绑定（`bound === 'true'`）。改读这两个值——它们才是区别的承载者，
+    //   而且在旧实现上也**不会**恒真。
+    assert.equal(READINGS.badCanRead.code, RUNTIME_HOST_ROW_CODES.NO_CAN_READ,
+      '④ 没有留下具名拒绝码')
+    assert.equal(READINGS.bound.bound, 'true', '③ 没有留下"绑定建立"的读数')
     t.diagnostic(`MODEL-ABSENT: selection=${READINGS.modelAbsent.selection} code=${READINGS.modelAbsent.code}`)
   })
 

@@ -733,14 +733,32 @@ test('⑥ ★★ 映射目标名来自 DSH 自己的声明，而不是本模块�
 }, (t) => {
   const checkout = process.env.DSH_CHECKOUT
   const patchFile = join(checkout, 'packages', 'bundle', 'base', 'cordis.patch.yml')
-  const providerFile = join(checkout, 'packages', 'llm', 'llm-deepseek', 'src', 'index.ts')
-  if (!existsSync(patchFile) || !existsSync(providerFile)) {
+  // ★ 扫整个包的 `src/**/*.ts`，**不钉文件名**。
+  //
+  //   ⚠️ 这里原来钉的是 `src/index.ts`。2026-09-10 的 DSH 重构
+  //   `6a137ea7`（"refactor(llm): unify DeepSeek protocol implementations"）
+  //   把 `DEFAULT_API_KEY_ENV` **逐字节**搬到了同目录的 `config.ts`：
+  //   值没变、语义没变、正则也不用改，**变的只是它住在哪个文件里**。
+  //   钉文件的断言于是报了一次"漂移"——而 DSH 声明的东西一个字都没变。
+  //
+  //   > 一条钉死"声明住哪个文件"的断言，
+  //   > 守的不是"这个名字是 DSH 声明的"，而是"DSH 的目录布局还是 2026-07 那副样子"。
+  //
+  //   改成扫目录之后，断言仍然要求**标识符与字符串字面量**同时出现在 DSH 自己的
+  //   源码里（改名或删掉照样红），但不再对"文件被拆开/搬走"敏感。
+  //   加 `^…$` 行锚：否则一句注释或字符串里提到它也能满足。
+  const providerSrc = join(checkout, 'packages', 'llm', 'llm-deepseek', 'src')
+  if (!existsSync(patchFile) || !existsSync(providerSrc)) {
     return t.skip('DSH_CHECKOUT 可达，但这两处声明文件不在预期路径上——那本身是个值得报的漂移')
   }
   // 行配置那一侧：`apiKeyEnv: DEEPSEEK_API_KEY`
   assert.match(readFileSync(patchFile, 'utf8'), /apiKeyEnv: DEEPSEEK_API_KEY/)
   // 适配器那一侧：`DEFAULT_API_KEY_ENV = 'DEEPSEEK_API_KEY'`
-  assert.match(readFileSync(providerFile, 'utf8'), /DEFAULT_API_KEY_ENV = 'DEEPSEEK_API_KEY'/)
+  const providerCode = readdirSync(providerSrc, { recursive: true })
+    .filter((rel) => rel.endsWith('.ts'))
+    .map((rel) => readFileSync(join(providerSrc, rel), 'utf8'))
+    .join('\n')
+  assert.match(providerCode, /^const DEFAULT_API_KEY_ENV = 'DEEPSEEK_API_KEY'$/m)
   // 而本套件喂给 materializeRunCredentials 的映射目标就是这个名字。
   assert.equal(DSH_MODEL_NAME, 'DEEPSEEK_API_KEY')
   return undefined

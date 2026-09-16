@@ -565,7 +565,7 @@ describe('PRT-214 员工 preset 真挂载（真 DSH 进程 × standingKeyFor）'
     t.diagnostic(`PRESETMOUNT-HEALTHY ${IDS.NOPKG}=false  ${err}`)
   })
 
-  guarded('★★★ 另一种损坏：包在、模块不在 → 发现层判健康，挂载时才 `Cannot find package`', async (t) => {
+  guarded('★★★ 另一种损坏：包在、模块不在 → 发现层判健康，挂载时才在 import 期失败（DSH 报 `never started`）', async (t) => {
     const r = await scenario('ghost', buildGhost)
     assert.equal(r.spawnError, null)
     assert.equal(r.code, 0, `探针必须正常收尾：\n${r.stderr}`)
@@ -578,8 +578,32 @@ describe('PRT-214 员工 preset 真挂载（真 DSH 进程 × standingKeyFor）'
     assert.equal(mountOk(r.stderr, IDS.GHOST), false)
     const err = mountErr(r.stderr, IDS.GHOST)
     assert.notEqual(err, null, `没有读到 ${IDS.GHOST} 的拒绝：\n${r.stderr}`)
-    assert.ok(err.includes('Cannot find package'), `读数不是 loader 级的缺包：${err}`)
     assert.ok(err.includes('tool-fs-search'), `拒绝没点名哪一行：${err}`)
+    // ★ 缺的是**哪一个包**也要点名——这一条比"报错里有个词"更接近本用例要守的东西。
+    assert.ok(err.includes(GHOST_PKG), `拒绝没点名哪个包：${err}`)
+
+    // ★★ 拒绝的**形态**：这是**挂载期**的失败，不是发现层的"包找不到"。
+    //
+    //   ⚠️ 这里原来断言 `err.includes('Cannot find package')`——那是 Node 的错误文本，
+    //   而 DSH **刻意不把它透出来**。`packages/preset/agent-presets/src/mount.ts:309-311`：
+    //   条目的 fiber 从未被创建时（= 模块 import 失败正是这一种），只报
+    //   `<entry id> (<package name>): never started`，**不带**底层 import 错误。
+    //   这不是回归，是 DSH 自己的**受测契约**：它自己的用例
+    //   `packages/preset/agent-presets/tests/mount.spec.ts:262` 就把
+    //   `'missing (cordis:missingBuiltin): never started'` 钉死在那里。
+    //
+    //   > 一条"必须出现某个底层库的错误文本"的断言，
+    //   > 与那条文本的上游从未承诺过要透出它，是同一件事的两面。
+    //
+    //   于是改成断言**两件可分辨的事**：这是"行没被激活"（挂载期），
+    //   而不是发现层那句 "names a plugin that cannot be resolved"（NOPKG 的读数）。
+    assert.ok(err.includes('did not activate'), `读数不是挂载期的"没被激活"：${err}`)
+    assert.ok(err.includes('never started'), `DSH 对"模块 import 失败"的读数是 never started：${err}`)
+    // 反向锚：它与 NOPKG（发现层就点名）**不是同一个读数**。
+    // 这一条是**非空**断言——NOPKG 的消息里**确实**有这句话（见本文件 NOPKG 用例），
+    // 所以它守的是一个真实可能的串味，不是恒真。
+    assert.equal(err.includes('cannot be resolved'), false,
+      `GHOST 报成了发现层的"包解析不了"——那两种损坏就没被分开：${err}`)
     t.diagnostic(`PRESETMOUNT-HEALTHY ${IDS.GHOST}=true  ${err}`)
   })
 

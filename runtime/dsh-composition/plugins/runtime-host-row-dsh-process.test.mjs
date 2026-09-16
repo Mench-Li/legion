@@ -568,24 +568,37 @@ describe('PRT-253：`bindDshRuntime` 的生产调用方在**真 DSH 进程**里�
     t.diagnostic(`B: ${provider}`)
   })
 
-  guarded('C. ★★ 本行挂上、但**没有人注册端口** → 真进程里具名拒绝（exit 1）', (t) => {
+  guarded('C. ★★ 本行挂上、但**没有人注册端口** → 真进程里具名拒绝（进程照常起来，端口没绑上）', (t) => {
     const r = runDsh({
       tag: 'c',
       patches: [...BASE_PATCHES, SCRATCH_PATH.hostRowOnlyPatch, SCRATCH_PATH.probePatch],
     })
 
     assert.equal(r.spawnError, null)
-    // 行在 `apply` 期拒绝 ⇒ 启动路径上失败 ⇒ 非 0 退出。**不是**静默 no-op。
-    assert.equal(r.code, 1, `期望"没有端口工厂"拦下启动：\n${r.stderr}`)
+    // ⚠️ 本行拒绝**不会**让进程非零退出：DSH 的启动严格性是**消费方自有**的
+    //    （只有全局 required 名单里的 entry 才会拆卸应用；Legion 的补丁行不在其中）。
+    //    逐条证据与那份 DSH 架构决定记录见
+    //    `root-row-dsh-process.test.mjs` 文件头「DSH 的启动严格性是消费方自有的」一节。
+    assert.equal(r.code, 0, `DSH 对非 required entry 只报 warning，进程应照常起来：\n${r.stderr}`)
+    assert.match(r.stderr, /warning: \d+ entr(?:y|ies) did not activate/, r.stderr)
     // ★ 断言具名码本身，不写"它抛了"。
     assert.match(r.stderr, new RegExp(RUNTIME_HOST_ROW_CODES.NO_INPUTS_FACTORY), r.stderr)
     // 反向锚：这一行确实被真加载器当成**条目**在报。
-    assert.match(r.stderr, /failed to apply loader entry legion-runtime-host/, r.stderr)
+    //
+    // ⚠️ 这里原来写的是 `failed to apply loader entry legion-runtime-host`——那是**旧版 DSH**
+    //    的措辞，当前 app-boot 已不再产生它。当前形状是
+    //    `<entry id> (<模块 file:// URL>): <诊断>`。
+    assert.match(r.stderr, /legion-runtime-host \(file:\/\/[^)]+\): RuntimeHostRowError: /, r.stderr)
     // 两种"装不上"不能同形：这一条**不是**组合树或自检的问题。
     assert.equal(r.stderr.includes('BOOTSTRAP_SELF_CHECK_INCOMPATIBLE'), false,
       `缺工厂却报成自检不过——那这条对照读的是别的东西：\n${r.stderr}`)
     assert.equal(r.stderr.includes(RUNTIME_HOST_ROW_CODES.NO_COMPOSITION), false, r.stderr)
-    assert.equal(reading(r.stderr, 'BOUND'), null, '拒绝的场景里不该有 BOUND 读数')
+    // ★★★ 与下面 G 同一条纪律：**「读不到」与「读到 false」是两件事**——
+    //     旧写法断言 `null`（"拒绝的场景里不该有 BOUND 读数"），而探针**总是**会打这一行，
+    //     于是它既没有读出"端口没被注册"，在探针根本没跑时也照样绿。
+    //     这里读的是**强制面本身**。
+    assert.equal(reading(r.stderr, 'BOUND'), 'false',
+      `被拒绝的场景里端口却被注册了：\n${r.stderr}`)
     READINGS.c = { code: RUNTIME_HOST_ROW_CODES.NO_INPUTS_FACTORY }
     t.diagnostic('C: 具名拒绝 ' + RUNTIME_HOST_ROW_CODES.NO_INPUTS_FACTORY)
   })

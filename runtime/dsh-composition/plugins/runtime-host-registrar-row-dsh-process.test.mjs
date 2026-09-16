@@ -490,7 +490,13 @@ describe('PRT-253 续批二：生产注册方在**真 DSH 进程**里的读数',
       patches: [...basePatches(SCRATCH_PATH.servicesTruePatch), SCRATCH_PATH.rowOnlyPatch],
     })
     assert.equal(r.spawnError, null)
-    assert.equal(r.code, 1, `期望"没有工厂"拦下启动：\n${r.stderr}`)
+    // ⚠️ 本行拒绝**不会**让进程非零退出：DSH 的启动严格性是**消费方自有**的
+    //    （只有全局 required 名单里的 entry 才会拆卸应用；Legion 的补丁行不在其中）。
+    //    逐条证据与那份 DSH 架构决定记录见
+    //    `root-row-dsh-process.test.mjs` 文件头「DSH 的启动严格性是消费方自有的」一节。
+    //    这里断言的是**具名拒绝码本身**（下面那条），不是进程的生死。
+    assert.equal(r.code, 0, `DSH 对非 required entry 只报 warning，进程应照常起来：\n${r.stderr}`)
+    assert.match(r.stderr, /warning: \d+ entr(?:y|ies) did not activate/, r.stderr)
     // ★ 断言具名码本身，不写"它抛了"。
     assert.ok(r.stderr.includes(RUNTIME_HOST_ROW_CODES.NO_INPUTS_FACTORY),
       `没有读到 ${RUNTIME_HOST_ROW_CODES.NO_INPUTS_FACTORY}：\n${r.stderr}`)

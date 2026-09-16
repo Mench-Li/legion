@@ -428,10 +428,14 @@ describeHost('P4-2 宿主插件导入失败：诊断可读性（负向 · 入口
       ],
     })
     child = spawnHost(fx)
-    // 实测：导入期抛错**不阻止**宿主把树挂起来（/__p13/ready 一度 200），随后 audit 失败 exit 1。
-    // 因此这里等的是日志里那句装载器错误，而不是「未就绪」——这正是旧诊断看不到失败的原因。
-    const seen = await waitLog(child, 'failed to import loader entry', { timeoutMs: 30000 })
-    assert.ok(seen, '宿主日志里应出现装载器的条目导入失败文本；实际尾部：\n' + (child._p13logs.out + child._p13logs.err).slice(-1200))
+    // ⚠️ 这里原来等的是 `failed to import loader entry …`——**旧版 DSH** 的措辞。
+    //   当前 app-boot 已不再产生它（`packages/boot/app-boot/src/` 内该字符串 0 命中）。
+    //   现在的形状是"未激活"清单里的一行：
+    //       dsh: warning: 1 entry did not activate
+    //       p13-broken-file (file:///…/broken-plugin.mjs): failed to import
+    //   实测（本次现场跑真宿主）：整份 stderr **只有这两行**。
+    const seen = await waitLog(child, '): failed to import', { timeoutMs: 30000 })
+    assert.ok(seen, '宿主日志里应出现装载器对坏条目的"导入失败"读数；实际尾部：\n' + (child._p13logs.out + child._p13logs.err).slice(-1200))
   }, { timeout: 60000 })
 
   after(async () => {
@@ -447,7 +451,14 @@ describeHost('P4-2 宿主插件导入失败：诊断可读性（负向 · 入口
     assert.equal(p.kind, 'import_threw', '入口存在却导入失败 → import_threw，实际：' + p.kind)
     assert.match(p.plugin, /^p13-broken-file（file:\/\/\//, '应点名组合行 id：' + p.plugin)
     assert.equal(p.entry, join(REPO, 'tests', 'p13-fixture', 'broken-plugin.mjs'), '应给出该行的入口文件')
-    assert.match(p.detail, /故意在导入期抛错/, '应带上插件自己抛出的错误')
+    // ⚠️ 这里原来断言 `/故意在导入期抛错/`——那是 `broken-plugin.mjs` 自己抛的文本。
+    //   **现在它不在日志里**：DSH 对"fiber 从未创建"的条目只报 `failed to import` 四个词，
+    //   底层错误一个字都不转录（实测 stderr 全文只有 warning + 那一行）。
+    //   所以这里不再假装读到了插件自己的错误，改成断言**本诊断如实说出了这份缺失**——
+    //   一条断言"必须出现某个底层库的错误文本"的用例，在**上游从未承诺透出它**时，
+    //   守的不是产品行为，而是那个库当时的实现细节。
+    assert.match(p.detail, /failed to import/, '应带上 DSH 对导入失败的原文')
+    assert.match(p.detail, /不转录|导入期/, '应如实说明"插件自己的错误拿不到"以及失败发生在导入期')
     assert.match(p.hint, /导入期/, '应说明失败发生在导入期')
 
     const text = formatDiagnosis(diag, { logText })
@@ -459,17 +470,42 @@ describeHost('P4-2 宿主插件导入失败：诊断可读性（负向 · 入口
     assert.ok(!/dsh-team-hub|dsh-scrum-board|dsh-scrum-worker/.test(p.plugin), '不得牵连健康条目')
   })
 
-  it('真实后果：宿主确实因该条目退出 exit 1（旧表现：客户端只看到「未就绪/路由缺失」）', async () => {
+  it('★ 真实后果：宿主**不**因该条目退出（DSH 的启动严格性是消费方自有的），只剩一行具名 warning', async () => {
+    // ⚠️ 这条原来断言 `exit 1` + 日志里的 `plugin tree failed to load`
+    //   + `failed to import loader entry p13-broken-file`。三条**都不再成立**：
+    //
+    //     · DSH `bd4cfc7c46`（2026-09-11）起，只有全局 required 名单
+    //       （`agent-loop`/`webserver`/`modules`/`connection`/`headless-runner`/`acp`/
+    //       `sdk-jsonrpc-server`）与本 profile 的 bootstrap include 才**拆卸应用**；
+    //       `p13-broken-file` 不在其中 → 只 warn（`app-boot/src/index.ts:827-834`）。
+    //       那份架构决定记录把理由写全了：严格语义**属于应用或资源 owner**。
+    //     · 不抛 ⇒ 没有错误路径 ⇒ `plugin tree failed to load` 这个阶段标签也不会出现。
+    //     · 装载器点名条目的措辞一并改成了 `: failed to import`。
+    //
+    //   **这不是"降级"，是"责任换了人"**：宿主不再替 Legion 断言它的插件装上了。
+    //   所以这条用例改成断言**当前真实存在的两个读数**——进程活着、且它明说了哪一行没装上。
+    //   本套件**不**因此放弃严格性：`legion-host.patch.yml` 那一层由
+    //   `runtime/dsh-composition/**` 的自检负责（缺行 ⇒ `ROW_MISSING` ⇒ 不注册端口），
+    //   那条链的读数在 `*-dsh-process.test.mjs` 里。
     const code = await new Promise((resolve) => {
       if (child.exitCode !== null) return resolve(child.exitCode)
-      const timer = setTimeout(() => resolve('TIMEOUT'), 30000)
+      const timer = setTimeout(() => resolve('STILL-RUNNING'), 8000)
       child.once('close', (c) => { clearTimeout(timer); resolve(c) })
     })
-    assert.equal(code, 1, '插件导入失败的宿主应以 exit 1 退出（实际 ' + code + '）')
+    assert.equal(code, 'STILL-RUNNING',
+      '宿主因一个非 required 条目退出了——DSH 的启动严格性变了，回去重读那份架构决定记录')
+
     const logText = child._p13logs.out + child._p13logs.err
-    assert.match(logText, /plugin tree failed to load/, '日志应带 app-boot 的阶段标签')
-    assert.match(logText, /failed to import loader entry p13-broken-file/, '日志应带装载器点名的条目')
-  }, { timeout: 40000 })
+    // 反面对照：真出过致命路径才该有这两个标签。它们的**缺席**是"没走错误路径"的读数。
+    assert.equal(/plugin tree failed to load/.test(logText), false,
+      '非 required 条目不该把整棵树拖垮：\n' + logText.slice(-800))
+    assert.equal(/required startup failure/.test(logText), false,
+      '非 required 条目不该报 required 启动失败：\n' + logText.slice(-800))
+    // 正面读数：具名 warning + 点名到那一行。
+    assert.match(logText, /warning: 1 entry did not activate/, '应留下一次具名 warning')
+    assert.match(logText, /p13-broken-file \([^)]*\): failed to import/,
+      '日志应点名坏条目与它的入口：\n' + logText.slice(-800))
+  }, { timeout: 20000 })
 })
 
 describeHost('P4-2 宿主插件导入失败：诊断可读性（负向 · 入口产物缺失）', () => {
@@ -486,13 +522,13 @@ describeHost('P4-2 宿主插件导入失败：诊断可读性（负向 · 入口
       extraRows: ["    - id: p13-broken-missing\n      name: '@dsh-external/dsh-p13-missing'"],
     })
     child = spawnHost(fx)
-    // 该场景宿主**来不及**就绪：入口解析失败发生在树挂载期 → 直接从「未就绪」变成 exit 1
-    const died = await new Promise((resolve) => {
-      if (child.exitCode !== null) return resolve(true)
-      const timer = setTimeout(() => resolve(false), 30000)
-      child.once('close', () => { clearTimeout(timer); resolve(true) })
-    })
-    assert.ok(died, '入口缺失的宿主应在 30s 内退出；实际仍在运行（日志尾部：\n' + (child._p13logs.out + child._p13logs.err).slice(-800) + '）')
+    // ⚠️ 这里原来等宿主"在 30s 内退出"（`close` 事件）。**它不会退出了**：
+    //   `p13-broken-missing` 不在 DSH 的 required 名单里（见本文件上一节的长注释），
+    //   所以启动审计只 warn、成功的 sibling 继续跑，进程**活着**。
+    //   判据随之从"进程死没死"换成"它有没有如实报出这一行没装上"——
+    //   后者才是本套件真正要守的东西（诊断能不能点名到条目）。
+    const seen = await waitLog(child, '): failed to import', { timeoutMs: 30000 })
+    assert.ok(seen, '宿主日志里应出现该条目的"导入失败"读数；实际尾部：\n' + (child._p13logs.out + child._p13logs.err).slice(-1200))
     await drainLogs(child)   // 等 stdio 排空，否则诊断只能看到被截断的日志
   }, { timeout: 60000 })
 
@@ -511,36 +547,38 @@ describeHost('P4-2 宿主插件导入失败：诊断可读性（负向 · 入口
     assert.ok(!pre.problems.some((x) => x.plugin.includes('p13-team-hub')), '健康条目不得误报')
   })
 
-  it('真实宿主：入口缺失也能被反查到具体条目（真实宿主只打 `Cannot find package <路径>`）', async () => {
-    const t0 = Date.now()
-    let err = null
-    try {
-      // 宿主已退出：waitReady 必须**立刻**给出诊断（而不是等满 60s 超时）
-      await waitReady(fx.base, { child, rows: fx.rows, timeoutMs: 60000, packageDirs: fx.packageDirs })
-    } catch (e) { err = e }
-    const elapsed = Date.now() - t0
-
-    assert.ok(err, '宿主已退出 → 不应报「就绪」')
-    assert.equal(err.name, 'HostBootError', '应抛出 HostBootError：' + String(err?.message ?? err).slice(0, 300))
-    const msg = err.message
-    assert.match(msg, /宿主进程已退出/)
-    assert.match(msg, /p13-broken-missing|dsh-p13-missing/, '诊断必须把裸模块错误反查到组合行（否则只能报「未能定位」）')
-    assert.match(msg, /lib[\\/]index\.js/, '应给出缺失的入口路径')
-    assert.match(msg, /处置：/, '应给出处置建议')
-    assert.ok(elapsed < 10000, `进程已退出时应即时失败（实际 ${elapsed}ms）`)
-    const kinds = err.diagnosis.problems.map((p) => p.kind)
-    assert.ok(kinds.includes('missing_entry'), '问题类型应为 missing_entry，实际：' + JSON.stringify(kinds))
-  }, { timeout: 40000 })
-
-  it('解析的是真实宿主日志（不是自造文本）：日志里确有 app-boot / Node 的解析失败原文', () => {
+  it('★ 真实宿主：入口缺失也能**只凭日志**反查到具体条目（宿主不再退出，所以日志是唯一线索）', async () => {
+    // ⚠️ 这条原来等的是"宿主已退出 → `waitReady` 立刻抛 HostBootError"。
+    //   宿主不再退出之后，这个时序不存在了（而且 `/__p13/ready` 会正常答 200——
+    //   坏条目只影响它自己那一行，其余插件照常服务）。
+    //
+    //   于是判据落到**唯一可靠的那一个**：拿到日志，诊断就必须点名到条目。
+    //   这比原来更贴近本套件的用途——旧写法依赖"进程先死"，
+    //   而死不死是 DSH 的策略，不是 Legion 的诊断能力。
     const logText = child._p13logs.out + child._p13logs.err
-    assert.match(logText, /plugin\(s\) failed to load|did not activate|Cannot find (module|package)|ERR_MODULE_NOT_FOUND/,
-      '宿主日志里应出现真实加载失败文本；实际尾部：\n' + logText.slice(-800))
-    assert.equal(child.exitCode, 1, '插件加载失败的宿主应以 exit 1 退出（旧症状：客户端只看到「60s 未就绪」）')
+    const diag = diagnoseHostLogs(fx.diagnoseOpts(logText))
+    const p = diag.problems.find((x) => /p13-broken-missing|dsh-p13-missing/.test(x.plugin))
+    assert.ok(p, '诊断必须把该条目反查到组合行（否则只能报「未能定位」）：'
+      + JSON.stringify(diag.problems.map((x) => x.plugin)))
+    assert.equal(p.kind, 'missing_entry', '入口产物缺失 → missing_entry，实际：' + p.kind)
+    assert.match(p.entry ?? '', /lib[\\/]index\.js/, '应给出缺失的入口路径：' + p.entry)
+    assert.match(p.hint, /入口文件不存在|入口产物缺失/, '应给出处置建议：' + p.hint)
+    // 健康条目不得被牵连。
+    assert.ok(!/dsh-team-hub|dsh-scrum-board|dsh-scrum-worker/.test(p.plugin),
+      '不得牵连健康条目：' + p.plugin)
+  })
 
+  it('解析的是真实宿主日志（不是自造文本）：日志里确有 app-boot 的未激活读数', () => {
+    const logText = child._p13logs.out + child._p13logs.err
+    assert.match(logText, /warning: \d+ entr(?:y|ies) did not activate/,
+      '宿主日志里应出现真实的"未激活"读数；实际尾部：\n' + logText.slice(-800))
+    assert.match(logText, /p13-broken-missing \([^)]*\): failed to import/,
+      '应点名到那一行与它的入口：\n' + logText.slice(-800))
+    // ⚠️ 这里原来断言 `child.exitCode === 1`。DSH 不再为非 required 条目拆卸应用，
+    //   所以那条断言测的是 DSH 的策略，不是 Legion 的诊断。删掉它**不是**放宽要求：
+    //   下面这几条（只凭日志点名到条目 + 类型 + 入口路径）一条都没少，
+    //   而"进程活着"这个事实由同 describe 的另一条用例正面断言。
     // 与「等进程退出」无关的独立判据：只要拿到日志，诊断就必须点名到条目。
-    // 必需，因为本场景下 /__p13/ready **可能短暂答 200**（实测两种时序都出现过：一次 waitReady
-    // 返回就绪、一次从未就绪），所以「未就绪」不能当判据 —— 可靠判据是 exit 1 + 日志诊断。
     const diag = diagnoseHostLogs(fx.diagnoseOpts(logText))
     const p = diag.problems.find((x) => /p13-broken-missing|dsh-p13-missing/.test(x.plugin))
     assert.ok(p, '只凭日志也必须点名到坏条目：' + JSON.stringify(diag.problems.map((x) => x.plugin)))

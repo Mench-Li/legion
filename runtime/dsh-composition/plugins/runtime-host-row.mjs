@@ -526,8 +526,40 @@ function absent(value) {
   return value === undefined || value === null
 }
 
+/**
+ * 本行的拒绝错误。
+ *
+ * ## ★ 为什么码既要放 `err.code`、也要进**消息文本**（2026-09-16 补）
+ *
+ * 原来只做前者。于是**在真 DSH 进程里，本行的拒绝码根本不出现在 stderr 上**：
+ * app-boot 打印的是 `err.stack` 的首行，形状是
+ * `RuntimeHostRowError: <message>`，而 `err.code` **不在那一行里**
+ * （实测：只有一个**内层**注册方码因为被 `INPUTS_FACTORY_THREW` 的消息引用而看见）。
+ *
+ * 两件事同时坏掉：
+ *
+ *   · **值班的人 grep 不到它**。拒绝的理由是"组合树没观察到"还是"没有人注册工厂"，
+ *     只能靠读一整句中文去分辨——而 `code` 之所以存在，就是为了让这件事可 grep。
+ *     这与 `a374a7f` 自己那句「拒绝**必须留下痕迹**」「提示得**出得去**才算提示」同向；
+ *   · **一批用例因此变成空的**。它们写的是
+ *     `assert.equal(r.stderr.includes(<本行的码>), false, '绑定没建立：读到了 …')`——
+ *     一句"某码**不在** stderr 里"的断言，在该码**从来不会**进 stderr 时**恒真**。
+ *     它本该抓住"绑定没建立"，实际上一句都抓不住。
+ *
+ *   > 一条"某个记号不出现"的断言，
+ *   > 在那个记号**不可能**出现的世界上，与没有断言是同一个东西。
+ *
+ * 所以码进消息文本。`err.code` 照旧保留（进程内调用方读的是它，不是文本）。
+ * 与本仓既有的写法一致：`root-row.mjs` 的装配失败消息里就写着
+ * `组合根给的是 ENFORCEMENT_ROOT_CONFIG_EMPTY`——那一条一直是可 grep 的。
+ *
+ * @param {string} code 具名拒绝码；同时进 `err.code` 与消息文本。
+ * @param {string} message 人读的理由。
+ * @param {object} [extra] 附加字段（`checks` / `reasons` / `innerCode` 等）。
+ * @returns {Error} `name` 为 `RuntimeHostRowError` 的错误。
+ */
 function rowError(code, message, extra = {}) {
-  const err = new Error(`${RUNTIME_HOST_ROW_PLUGIN_NAME} 拒绝装配：${message}`)
+  const err = new Error(`${RUNTIME_HOST_ROW_PLUGIN_NAME} 拒绝装配（code=${code}）：${message}`)
   err.name = 'RuntimeHostRowError'
   err.code = code
   Object.assign(err, extra)

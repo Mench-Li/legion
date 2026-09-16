@@ -308,8 +308,21 @@ export const DSH_PACKAGE_NAMES = Object.freeze(['@deepseek-ai/dsh', '@deepseek-a
 /** 向上找 `package.json` 的层数上界。有限，免得在一个异常路径上走到盘根。 */
 export const DSH_VERSION_SEARCH_DEPTH = 8
 
+/**
+ * 本模块的拒绝错误。
+ *
+ * ★ 码进**消息文本**的理由与 `runtime-host-row.mjs` 的 `rowError()` 逐字相同
+ * （那里写全了）：DSH 的 app-boot 打的是 `err.stack` 首行，`err.code` **不在其中**，
+ * 于是只放 `err.code` 的码在真进程的 stderr 上**根本看不见**——
+ * 值班的人 grep 不到它，而"某个码不在 stderr 里"这一类断言也变成恒真。
+ *
+ * @param {string} code 具名拒绝码；同时进 `err.code` 与消息文本。
+ * @param {string} message 人读的理由。
+ * @param {object} [extra] 附加字段。
+ * @returns {Error} `name` 为 `RuntimeHostRegistrarError` 的错误。
+ */
 function registrarError(code, message, extra = {}) {
-  const err = new Error(`runtime-host-registrar 拒绝：${message}`)
+  const err = new Error(`runtime-host-registrar 拒绝（code=${code}）：${message}`)
   err.name = 'RuntimeHostRegistrarError'
   err.code = code
   Object.assign(err, extra)

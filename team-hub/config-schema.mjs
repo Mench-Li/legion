@@ -115,6 +115,17 @@ export const SCHEMA = defineSchema({
     //   > 一个「把装配缺失报成请求非法」的诊断，
     //   > 与一个「值班的人去改请求、而端口一直没接上」的诊断，是同一个东西。
     'APPROVAL_NOT_WIRED', 'APPROVAL_NOT_CREATED',
+    // PRT-214 第二步：认领时解析"这次 Run 的权限档位"的那一步自己坏了。
+    //
+    // 与"这个员工没有清单"**必须**分开，虽然两者都会让这次 Run 在下游被拒：
+    //
+    //   · 员工没有清单（端口返回 null）—— 租约上**没有**权限字段，
+    //     下游是 `run-floor-permissions-missing`。修法是**配置那个员工**。
+    //   · `RUN_TIER_UNRESOLVABLE` —— 控制面**自己读不出来**（清单表坏了、
+    //     端口形状不对）。修法是**查控制面**。
+    //
+    // 折成一个码的后果是排障会去查那个员工的配置，而真正坏掉的是另一张表。
+    'RUN_TIER_UNRESOLVABLE',
     // PRT-307 机器验收的契约错误码（orchestrator/acceptance/index.mjs 的
     // ACCEPTANCE_ERRORS，经 run-store 转成 ContractError 抛出）
     'CRITERIA_NOT_ARRAY', 'RUN_RESULT_INVALID',

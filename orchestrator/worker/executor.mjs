@@ -66,6 +66,10 @@ import { resolveTool as resolveLegionTool } from '../../runtime/dsh-composition/
 //   默认值是**生产实现**，不是替身——`resolveLegionTool` 那一行也是这个写法，
 //   理由是"接线要落在被用例覆盖的函数里面"，而不是落在一个没人能跑到的组装点。
 import { executionDenialFor } from '../../runtime/dsh-composition/employee-preset.mjs'
+// ★ PRT-214 第二步：`approvalPolicy`（自由文本）→ Legion preset（闭集）的**反查**。
+//   反查走 `LEGION_PERMISSION_PRESETS` 本身，于是"正着写的表"与"反着查的表"
+//   不可能分叉——这与本仓库其它地方"两份表只在有人只改一边的第二天分叉"是同一条纪律。
+import { LEGION_PERMISSION_PRESETS, legionPresetForApproval } from '../../runtime/dsh-composition/patch-layer.mjs'
 import { createBudgetGate } from './budget-gate.mjs'
 
 /** 本模块的具名拒绝码。跨进程读取（worker 上报 → hub 记录 → 人排查），属契约。 */
@@ -80,6 +84,18 @@ export const EXECUTOR_CODES = Object.freeze({
   CONTEXT_UNVERIFIED: 'EXECUTOR_CONTEXT_UNVERIFIED',
   /** 接线错误（参数缺失或形状不对）。 */
   BAD_WIRING: 'EXECUTOR_BAD_WIRING',
+  /**
+   * ★ PRT-214 第二步：员工清单里的 `approvalPolicy` 在执行面上**没有对应的权限档位**。
+   *
+   * 这不是"清单写错了"那种笼统的话，而是一条**可裁决**的读数：控制面那一侧
+   * `approvalPolicy` 是自由文本，执行面认的 preset 是闭集，两者之间必须有一次
+   * 显式翻译，而翻译不出来的那个值只有人能裁决。
+   *
+   * 与 `RUN_FLOOR_NOT_DERIVED` 分开：那一条说的是"下限派生不出来"（去查权限档位），
+   * 这一条说的是"**档位本身翻译不出来**"（去查那个员工的 `approvalPolicy` 取值）。
+   * 合并成一个码会让排障停在下限那一层，而真正要改的是另一张表里的一个字符串。
+   */
+  APPROVAL_POLICY_UNKNOWN: 'EXECUTOR_APPROVAL_POLICY_UNKNOWN',
   /** 引擎返回的终态不是成功。 */
   RUN_NOT_COMPLETED: 'EXECUTOR_RUN_NOT_COMPLETED',
   /**
@@ -314,6 +330,16 @@ export async function createProductionExecutor(deps = {}) {
       try {
         request = buildRequest(lease, snapshot)
       } catch (e) {
+        // ★ 具名错误**不许**被压成笼统的接线码。
+        //
+        //   > 一个"下游所有的失败都变成 `BAD_WIRING`"的包装，
+        //   > 与一个"排障永远指向接线、而真正的修法在另一张表里"的包装，
+        //   > 是同一个东西——只不过前者看起来更整齐。
+        //
+        // `defaultRequestFor` 现在会为"认不出来的 approvalPolicy"抛一个**具名**的
+        // `ExecutorError`；那正是调用方要按码分流的东西，压掉它等于把本批
+        // 刚接上的那条归因链断在第一跳。
+        if (e instanceof ExecutorError) throw e
         throw new ExecutorError(EXECUTOR_CODES.BAD_WIRING,
           `无法把 lease 与快照翻成 RunRequest：${e?.message ?? e}`, { attemptId: lease.attemptId })
       }
@@ -486,6 +512,96 @@ export const UNSUPPLIED_PERMISSIONS = Object.freeze({
 })
 
 /**
+ * ★ PRT-214 第二步：**租约上的权限档位 → `RunRequest.permissions`**。
+ *
+ * 这是「静态 hard floor 在生产里真的有来源」的最后一段接线。上游是
+ * `claim()`：控制面在**认领那一刻**把员工清单里的 `allowedTools` /
+ * `deniedTools` / `approvalPolicy` 三个字段原样放进租约（见
+ * `team-hub/run-store.mjs` 的 `resolveRunPermissions`）。
+ *
+ * ## 三个读数，三种处置
+ *
+ *   · **租约上没有 `allowedTools`** ⇒ 返回 `null`，调用方填 `UNSUPPLIED_PERMISSIONS`，
+ *     派生点判成 `run-floor-permissions-missing` 并具名拒绝。
+ *     这说的是"控制面没有给出这次能干什么"——**不是**"什么都不能干"。
+ *   · **有 `allowedTools`** ⇒ 翻成 `{preset, tools}`。
+ *   · **`approvalPolicy` 认不出来** ⇒ **抛** `ExecutorError`
+ *     （`EXECUTOR_CODES.APPROVAL_POLICY_UNKNOWN`），由调用方按具名拒绝处置。
+ *
+ *     为什么是"抛"而不是"返回一个失败读数"：这个函数的返回值**只有两种**
+ *     合法形状（一份档位，或 `null` ＝ 控制面没给）。加第三种"失败读数"会让
+ *     每一个调用点都必须记得判它，而**漏判的那一个会把失败读数当成一份档位
+ *     用下去**——那正好是这个函数要防的事。抛出去则由 JS 自己保证不会漏判。
+ *     （`deriveRunFloorCarrier` 走的是另一条路：它的返回值天然要携带拒绝清单，
+ *     所以那里用"读数"。两者不是不一致，是返回形状不同——一个没有地方放
+ *     拒绝码的函数，只能用抛。）
+ *
+ * `allowedTools` 形状不对同理（`BAD_WIRING`）：它只由控制面写下，走到那里
+ * 说明有人手搓了一份租约。
+ *
+ * ## 为什么反查失败必须**拒绝**，而不是挑一个默认
+ *
+ * 控制面那一侧的 `approvalPolicy` 是**自由文本**（`team-hub` 只做
+ * `optionalString`；`orchestrator/worker/sources-loader.test.mjs` 里的取值就是
+ * `'ask-on-write'`），而执行面认的 preset 是一个**闭集**（今天只有
+ * `ask` / `never` 两个）。
+ *
+ *   > 一张"`never` 之外一律当有人值守"的表是安全的（更严），
+ *   > 而一张"`ask` 之外一律当无人值守"的表会把一个拼错的 `'never '`
+ *   > 变成一个**更宽**的档位——而那个拼写错误在清单里看不出来。
+ *
+ * 两张表都"能跑"，所以这里**不给默认**：查不到就拒绝，让那个人来裁决
+ * "`ask-on-write` 到底该是哪个 preset"。
+ *
+ * ## 为什么 `approvalPolicy` 缺省是**有人值守**
+ *
+ * 与上面不矛盾：`null`/缺省不是"一个认不出来的值"，是"控制面没有表达偏好"。
+ * 那时取 `ask` 是**fail closed** 的方向——比无人值守**更严**，
+ * 不可能放宽任何东西。反过来的默认（缺省取 `never`）才是会静默放宽的那一种。
+ *
+ * @param {object} lease
+ * @returns {{preset: string, tools: readonly string[]}|null} `null` = 控制面没给档位
+ * @throws {ExecutorError} `APPROVAL_POLICY_UNKNOWN`（策略值翻译不出来）
+ *   或 `BAD_WIRING`（`allowedTools` 形状不对——那是有人手搓了一份租约）
+ */
+export function permissionsFromLease(lease) {
+  // 已有一份 `permissions` 时以它为准：那是显式的、调用方自己造的请求
+  // （`executor.test.mjs` 的 `requestFor` 那条路），租约上的档位不该覆盖它。
+  if (lease?.permissions !== undefined && lease?.permissions !== null) return null
+
+  const allowed = lease?.allowedTools
+  if (allowed === undefined || allowed === null) return null
+  if (!Array.isArray(allowed) || allowed.some((t) => typeof t !== 'string' || t.trim() === '')) {
+    throw new ExecutorError(
+      EXECUTOR_CODES.BAD_WIRING,
+      `租约上的 allowedTools 不是"非空字符串数组"（收到 ${JSON.stringify(allowed)}）。`
+      + '`allowedTools` 只由控制面在认领时写下（`team-hub/run-store.mjs` 会先校验形状），'
+      + '所以走到这里说明有人手搓了一份租约',
+      { attemptId: lease?.attemptId ?? null },
+    )
+  }
+
+  const approvalPolicy = lease.approvalPolicy ?? null
+  // 缺省 → 有人值守（更严的那个）。见上面那段"为什么不矛盾"。
+  const preset = approvalPolicy === null ? 'legion-attended' : legionPresetForApproval(approvalPolicy)
+  if (preset === null) {
+    throw new ExecutorError(
+      EXECUTOR_CODES.APPROVAL_POLICY_UNKNOWN,
+      `员工清单里的 approvalPolicy=${JSON.stringify(approvalPolicy)} 在执行面上没有对应的权限档位。`
+      + `今天认得的是 ${JSON.stringify(Object.values(LEGION_PERMISSION_PRESETS).map((p) => p.approval))}。`
+      + '不猜：一个"认不出来就当有人值守"的实现是安全的，'
+      + '而一个"认不出来就当无人值守"的实现会把一个拼写错误变成**更宽**的档位——'
+      + '两者在清单上看不出区别，所以这里拒绝，由人来裁决这个值该是哪一个',
+      { attemptId: lease?.attemptId ?? null, approvalPolicy },
+    )
+  }
+  // `tools` 是**允许**名单（契约 §4.4）：清单里的 `allowedTools` 就是它。
+  // `deniedTools` **不进**这里——它是控制面的显式禁令，走静态下限那条路
+  // （`deriveRunFloorCarrier` 的 `declaredDenyTools`），与允许名单是两件事。
+  return { preset, tools: Object.freeze([...allowed]) }
+}
+
+/**
  * **生产生产者**：从这次 Run 的权限档位派生静态 hard floor，并挂到 `RunRequest` 上。
  *
  * ## 为什么生产者长在**执行侧**，而不是装配侧或适配器侧
@@ -627,10 +743,14 @@ export function defaultRequestFor(lease, snapshot) {
     budget: lease.budget ?? {},
     timeoutMs: lease.timeoutMs ?? 600_000,
     workdir: lease.workdir,
-    // ★ **不要**把这一份读成"这个员工的权限"：`lease` 上没有 `permissions` 时它
-    //    只是把契约必填项填满。它**按引用**可辨认（`UNSUPPLIED_PERMISSIONS`），
-    //    于是下限的派生点能把"没给"与"给了空名单"分开——见那个常量的注释。
-    permissions: lease.permissions ?? UNSUPPLIED_PERMISSIONS,
+    // ★ 三条来源，优先级从高到低（`??` 短路，所以只会算到需要的那一条）：
+    //    ① 租约上**已经有一份**显式的 `permissions`——调用方自己造的请求
+    //       （`requestFor` 那条路），它比清单更具体，以它为准；
+    //    ② 控制面在**认领时**写下的 `allowedTools` / `approvalPolicy`
+    //       （本批新接上的那条，`permissionsFromLease`）；
+    //    ③ 都没有 → 那个**按引用可辨认**的哨兵，派生点据此判成
+    //       "控制面没给档位"并具名拒绝，而不是当成"这个员工不能用任何工具"。
+    permissions: lease.permissions ?? permissionsFromLease(lease) ?? UNSUPPLIED_PERMISSIONS,
     expectedOutput: {
       schema: lease.outputSchema ?? { type: 'object', additionalProperties: true },
       acceptance: lease.acceptance ?? '引擎正常结算',

@@ -89,7 +89,7 @@ import {
 //   用一个手写替身会让"翻译对了没有"变成自问自答。
 import { dshToolNamesOf, executionDenialFor } from '../runtime/dsh-composition/employee-preset.mjs'
 // 线上三态与字段名的**唯一**来源。§⑦ 用它读"生产者产出的那一份到底是什么状态"。
-import { RUN_FLOOR_STATES, RUN_FLOOR_WIRE_FIELD, readRunFloor } from '../runtime/contracts/run-floor.mjs'
+import { RUN_FLOOR_STATES, RUN_FLOOR_WIRE_FIELD, RUN_FLOOR_WIRE_VERSION, readRunFloor } from '../runtime/contracts/run-floor.mjs'
 // ★ 生产消费者本身就是**生产者**（PRT-214 缺口①最后那一格）。
 //   这里 import 的是**产品模块**而不是替身：替身会让"接上了没有"变成自问自答。
 import { deriveRunFloorCarrier, UNSUPPLIED_PERMISSIONS } from '../orchestrator/worker/executor.mjs'
@@ -156,6 +156,20 @@ test('① ★★★★★ 控制面、DSH 侧目录与派生模块取到的是**
   //   那是一件**改变 guard 行为**的事，不是加了个码。
   assert.equal(RUN_FLOOR_VERSION, 2)
   assert.equal(Object.isFrozen(HARD_FLOOR_CAPABILITIES), true)
+  // ★ 两个版本号必须**一起**动。
+  //
+  //   派生结果上的这个号（`RUN_FLOOR_VERSION`）只给**控制面 / 审计**那一侧看；
+  //   跨进程那一侧看到的是**线上契约**那个号。只升其中一个的后果是：
+  //
+  //     > 新 Runtime 收到老 worker 递来的名单（全是执行面上不存在的 Legion 名字），
+  //     > 线上版本号对得上、于是照单全收，而那份下限一个真工具都拦不住。
+  //
+  //   所以这条断言守的不是"某个数字等于几"，而是"这两个描述同一件事的号
+  //   不会各走各的"。
+  assert.equal(RUN_FLOOR_VERSION, RUN_FLOOR_WIRE_VERSION,
+    '派生结果的名字空间版本与线上载荷的名字空间版本不一致——'
+    + '它们描述的是同一件事（这份名单是给哪个名字空间的），只升一个会让'
+    + '跨进程那一侧拿着对得上的版本号装上一份拦不住东西的名单')
   assert.deepEqual([...HARD_FLOOR_CAPABILITIES], ['file:delete', 'repo:push', 'credential:write'])
 
   // ★ 恒等（===）而不是 deepEqual：deepEqual 对"两份今天恰好相等的名单"也是绿的，

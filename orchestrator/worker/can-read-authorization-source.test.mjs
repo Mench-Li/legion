@@ -30,6 +30,22 @@
 //     档位还没被搬到这一侧来"——§④ 用同一个真 lease 把它读出来。
 //     一个"缺口还在"的批评与一个"接线断了、所以每次 Run 都当场停下"的读数，
 //     在只看 ①②③ 的时候是同一个东西——只不过前者不会让任何一次 Run 停下来。
+//
+// ## ★ PRT-214 第二步之后：这个文件现在是**两半**，而两半都必须留着
+//
+// ①②③④ 跑的是**没有接线**的 `createRunStore`（不给 `resolveRunPermissions`）。
+// 那时租约上**恰好还是那 8 个键**——所以它们一字未改地继续成立，而且继续承重：
+// 它们证明的是"档位不会自己长出来"，这正是"为什么必须显式接线"的证据。
+//
+// ⑤ 跑的是**接了线**的那个，结论**恰好相反**：租约上多出三个键，它们**是**
+// 授权载体。于是这个文件的结论从"授权不在这一侧"变成了：
+//
+//   > **授权在不在这一侧取决于有没有接线；接了线之后，它就在这一侧，
+//   >  而它的来源被钉死在注入的那个端口上。**
+//
+// 一条断言"这个键不存在"的用例，在功能接上之后**必须**换成一条断言"这个键存在、
+// 而且它只能从那个地方来"——直接删掉 ①②③ 等于把"档位不会自己长出来"这道边界
+// 一起删掉；只留 ①②③ 则会让这个文件在功能接上之后**继续报平安**。
 // ============================================================================
 
 import assert from 'node:assert/strict'
@@ -185,6 +201,163 @@ test('④ ★★ 真 lease 走**真**生产者：档位没到这一侧 ⇒ 派�
     assert.equal(carried.payload.floor, null, '"派生不出来"不能被写成一份空名单')
     assert.deepEqual([...carried.payload.refusals], ['run-floor-permissions-missing'],
       '拒绝码就是"去改哪里"：把权限档位搬到 lease（或搬到那条装配路）上')
+  } finally {
+    db.close()
+  }
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// ⑤ PRT-214 第二步：**接了线之后**，授权就在这一侧——而来源被钉死
+// ════════════════════════════════════════════════════════════════════════════
+//
+// 与 ①②③④ 用的是同一套真件（临时 SQLite + 真 `claim()`），只多给了一个
+// `resolveRunPermissions`。这样两半的差异**只有那一个变量**，
+// "多出来的三个键是从哪来的"就只有一个可能答案。
+
+/** 接上端口的 `createRunStore`。`tier` 是端口要返回的东西（`null` = 没有清单）。 */
+function claimWithTier(tag, tier) {
+  const db = new DatabaseSync(join(SCRATCH, `tier-${tag}.db`))
+  db.exec('PRAGMA journal_mode = WAL')
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS tasks (
+      id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', priority TEXT DEFAULT 'medium',
+      status TEXT NOT NULL DEFAULT 'backlog', version INTEGER NOT NULL DEFAULT 1,
+      soldier TEXT, scope TEXT DEFAULT 'default', hold INTEGER DEFAULT 0,
+      createdAt TEXT, updatedAt TEXT
+    )
+  `)
+  ensureContextSchema(db)
+  const store = createRunStore({
+    db,
+    clock: () => 1_700_000_000_000,
+    // ★ 这就是"接线"本身。**生产实现在 `team-hub/server.mjs`**：
+    //   它拿 `taskId` 去读 `tasks.role`，再读那一行的岗位清单。
+    //   这里用一个显式返回值的最小实现，是为了让"多出来的三个键从哪来"
+    //   在这条用例里**唯一确定**。
+    resolveRunPermissions: (args) => {
+      assert.deepEqual(Object.keys(args).sort(), ['attemptId', 'scope', 'taskId', 'workerId'],
+        '端口被调用时的参数集变了——那"这次是哪个岗位"的来源就变了，这一组要重判')
+      return tier
+    },
+  })
+  const taskId = `task:tier-${tag}`
+  db.prepare('INSERT INTO tasks (id, title, priority, status, scope, hold, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(taskId, taskId, 'medium', 'todo', SCOPE, 0, '2023-11-14T22:13:20.000Z', '2023-11-14T22:13:20.000Z')
+
+  const claimed = store.claim({ workerId: `w-tier-${tag}` })
+  assert.equal(claimed.ok, true, `真 claim 没成功：${JSON.stringify(claimed.code ?? claimed)}`)
+  assert.notEqual(claimed.claimed, null, 'claim 成功了却没有 lease')
+  return { lease: claimed.claimed, taskId, db }
+}
+
+/** 把接了线的租约补成能过 `defaultRequestFor` 必填校验的那一份。 */
+const CALLER_SUPPLIED = {
+  workspaceId: 'ws:tier', modelProfileRef: 'model:tier',
+  workdir: process.platform === 'win32' ? 'C:\\work' : '/work',
+}
+
+test('⑤ ★★★★★ 接了线：租约上**多出**恰好三个键，而它们是授权载体', () => {
+  const tier = { allowedTools: ['read-file', 'git-push'], deniedTools: ['mcp-invoke'], approvalPolicy: 'never' }
+  const { lease, db } = claimWithTier('wired', tier)
+  try {
+    // 键集 = 原来那 8 个 ∪ 恰好这三个。多一个少一个都要重判。
+    assert.deepEqual(Object.keys(lease).sort(),
+      [...CLAIMED_LEASE_KEYS, 'allowedTools', 'approvalPolicy', 'deniedTools'].sort(),
+      '接了线之后的键集不是"8 + 3"——那要么少搬了字段，要么搬了没人要的东西')
+    assert.deepEqual([...lease.allowedTools], ['read-file', 'git-push'])
+    assert.deepEqual([...lease.deniedTools], ['mcp-invoke'])
+    assert.equal(lease.approvalPolicy, 'never')
+
+    // ★ 这一条是**对 ① 的正面反证**：`AUTHORITY_LOOKING` 那个过滤器在这里
+    //   **抓不到**这三个键（`allowedTools`/`approvalPolicy`/`deniedTools` 都不含
+    //   read/auth/grant/permit/acl/visib）。也就是说：
+    //
+    //     > 一个只靠"键名看起来像不像授权"来守这道边的检查，
+    //     > 与一个**真的**在这条边上守住了东西的检查，是同一个东西——
+    //     > 只不过前者在授权换了个名字搬过来的时候会继续报平安。
+    //
+    //   所以 ① 里那条 `AUTHORITY_LOOKING` 零命中**不能**单独当结论用；
+    //   承重的是它上面那条**整体键集比较**。这里如实把这一点读出来。
+    assert.deepEqual(Object.keys(lease).filter((k) => AUTHORITY_LOOKING.test(k)), [],
+      '正则应然抓不到这三个键——抓到说明键名换了，过滤器要重判')
+    assert.equal(lease.allowedTools !== undefined, true, '而键**确实**在')
+  } finally {
+    db.close()
+  }
+})
+
+test('⑤ ★★★★★ 端到端：接了线的租约一路走到 **installed**，且名单是执行面名字', () => {
+  const tier = { allowedTools: ['read-file', 'git-push'], deniedTools: [], approvalPolicy: 'never' }
+  const { lease, taskId, db } = claimWithTier('e2e', tier)
+  try {
+    const request = defaultRequestFor({ ...lease, ...CALLER_SUPPLIED }, {
+      associations: { goalId: 'goal:tier', taskId, employeeId: 'emp:tier', teamPlanId: 'plan:tier' },
+      finalText: 'FROZEN',
+    })
+    // 这一跳是 ④ 的**反面**：那边是 `refused`，这边必须是 `installed`。
+    const carried = deriveRunFloorCarrier(request, { platform: process.platform })
+    assert.equal(carried.state, RUN_FLOOR_STATES.INSTALLED,
+      `接了线之后下限还是 ${carried.state}——那说明档位没走到派生点`)
+    assert.equal(carried.payload.derived, true)
+    assert.deepEqual([...carried.payload.floor.denyTools], ['bash', 'pwsh'],
+      '下限里不是**执行面**名字')
+  } finally {
+    db.close()
+  }
+})
+
+test('⑤ ★★★★ 端口返回 `null`（没有清单）与"接了线但没接上"必须分开', () => {
+  // 三种读数，三种处置，而它们**都在这一层**分得开：
+  //   · 端口没接（①②③④）      → 没有那三个键，下游 `permissions-missing`
+  //   · 端口接了、返回 null     → **同样**没有那三个键（"这个员工没有清单"）
+  //   · 端口抛错 / 形状不对     → `claim()` 直接失败 `RUN_TIER_UNRESOLVABLE`
+  //
+  // 前两者对 worker 是同一件事（没人告诉它这次能干什么），所以它们在租约上
+  // **本来就该同形**；真正需要分开的是第三种——那一种在这里当场说清楚。
+  const { lease, db } = claimWithTier('nom', null)
+  try {
+    assert.deepEqual(Object.keys(lease).sort(), [...CLAIMED_LEASE_KEYS].sort(),
+      '端口返回 null 时租约的形状必须与"没接线"完全一样——'
+      + '那正是"没有清单"这个读数的定义')
+  } finally {
+    db.close()
+  }
+})
+
+test('⑤ ★★★★ 端口抛错 ⇒ `claim()` 当场失败（不是安静地当成"没有清单"）', () => {
+  const db = new DatabaseSync(join(SCRATCH, 'tier-broken.db'))
+  db.exec('PRAGMA journal_mode = WAL')
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS tasks (
+      id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', priority TEXT DEFAULT 'medium',
+      status TEXT NOT NULL DEFAULT 'backlog', version INTEGER NOT NULL DEFAULT 1,
+      soldier TEXT, scope TEXT DEFAULT 'default', hold INTEGER DEFAULT 0,
+      createdAt TEXT, updatedAt TEXT
+    )
+  `)
+  ensureContextSchema(db)
+  try {
+    // ① 端口自己抛（清单表坏了）
+    const boom = createRunStore({
+      db, clock: () => 1_700_000_000_000,
+      resolveRunPermissions: () => { throw new Error('清单表读写失败（探针）') },
+    })
+    // ② 端口形状不对（注入了写错列的实现）
+    const malformed = createRunStore({
+      db, clock: () => 1_700_000_000_000,
+      resolveRunPermissions: () => ({ allowedTools: 'read-file' }),
+    })
+    db.prepare('INSERT INTO tasks (id, title, priority, status, scope, hold, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run('task:broken', 'task:broken', 'medium', 'todo', SCOPE, 0, 'x', 'x')
+
+    for (const [what, store] of [['抛错', boom], ['形状不对', malformed]]) {
+      assert.throws(() => store.claim({ workerId: 'w-broken' }), (e) => {
+        assert.equal(e.code, 'RUN_TIER_UNRESOLVABLE',
+          `${what}的端口没有被判成"控制面读不出来"（收到 ${e.code}）——`
+          + '它会退化成"这个员工没有清单"，于是排障会去查那个员工的配置')
+        return true
+      }, `${what}的端口应该让 claim 当场失败`)
+    }
   } finally {
     db.close()
   }

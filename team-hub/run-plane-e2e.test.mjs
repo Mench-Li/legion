@@ -24,6 +24,12 @@ import { join } from 'node:path'
 import { createHubClient } from '../orchestrator/worker/run.mjs'
 import { createHubContextStage } from '../orchestrator/worker/context-stage.mjs'
 import { createWorker, inPlaceStages } from '../orchestrator/worker/main.mjs'
+// ★ PRT-214 第二步的**下游两跳**：租约 → RunRequest → 静态下限。
+//   这一组用例的要点是**全程用真件**：真的 `server.mjs`、真的库、真的 `claim()`、
+//   真的 `defaultRequestFor`、真的 `deriveRunFloorCarrier`、真的 guard 名字空间。
+//   任何一处换成替身，这个套件就退化成"它自己跟自己对答案"。
+import { defaultRequestFor, deriveRunFloorCarrier, UNSUPPLIED_PERMISSIONS } from '../orchestrator/worker/executor.mjs'
+import { createHardFloorGuard } from '../runtime/dsh-composition/enforcement.mjs'
 
 /**
  * 不带连接池的 fetch 实现（只给测试用）。
@@ -644,4 +650,170 @@ test('⑦ 等人工的 UnknownOutcome 不会被后续的失败上报偷偷重试
   // 处置后不再挂在等人工清单上（否则人会反复处理同一条）
   const held = await operatorGet('/api/runtime/held?scope=default')
   assert.equal(held.items.filter((i) => i.taskId === 'e2e-unknown' && i.isLatest).length, 0)
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// ⑧ PRT-214 第二步：**权限档位终于在认领时有了来源**，而且一路走到真 guard
+// ════════════════════════════════════════════════════════════════════════════
+//
+// 这一组要守的是本批之前那个状态的**反面**：
+//
+//   > 一个"上限的接线全接好了、只是 `permissions` 从来没有来源"的部署，
+//   > 与一个"权限档位真的从控制面流到 guard"的部署，
+//   > 在只看那几个套件的时候是同一个东西——只不过前者的每一次 Run
+//   > 都在派发前停下，而停下这件事在监控上看起来像"权限判定为否"。
+//
+// 判据分四跳，缺一不可：清单行 → `claim()` → `defaultRequestFor` → 真 guard。
+//
+// ⚠️ 这一组会往真库里写**新任务**，而本文件是按队首领取的（见 `onlyTask` 的注释）。
+//    所以每一步都先用 `onlyTask()` 把队列清干净，否则后面的用例会领到前面留下的任务。
+
+/**
+ * 往真库里写一行岗位清单——**走真的生产写入点** `POST /api/agents`。
+ *
+ * 为什么不用 `mod.contextPlanStore().putEmployeeManifest(...)` 直接写：
+ * 那个工厂**没有导出**（`server.mjs` 只在模块内部持有它），而且更重要的是
+ * `/api/agents` 就是 PRT-402 认定的**清单生产触发点**——它在一个事务里
+ * 同时写编队行与清单行。绕过它去写，用例就少验了"生产真的会写出这一行"。
+ */
+async function putManifest(role, { allowedTools, deniedTools = [], approvalPolicy = null, scope = 'default' }) {
+  const r = await operatorPost('/api/agents', {
+    role, name: role, scope, allowedTools, deniedTools, approvalPolicy, by: 'e2e-operator',
+  })
+  assert.equal(r.ok, true, `写岗位清单失败：${JSON.stringify(r)}`)
+  return r
+}
+
+/** 一条带岗位的任务（`tasks.role` 是清单的查找键）。 */
+function onlyTaskWithRole(id, role) {
+  const taskId = onlyTask(id)
+  mod.db.prepare('UPDATE tasks SET role = ? WHERE id = ?').run(role, taskId)
+  return taskId
+}
+
+/**
+ * 把 `claim()` 回来的租约补成一份**能过 `defaultRequestFor` 必填校验**的租约。
+ *
+ * 真实生产里那 6 个字段由 worker 的 `buildContext`（`/api/context-snapshots/assemble`）
+ * 装配后再并进请求；这一组用例只关心权限档位那一跳，所以**只补字段**、
+ * 不碰本批改动的任何逻辑（`defaultRequestFor` 的必填校验本身也是它自己的行为，
+ * 用它当"租约不完整会被拒"的读数正合适）。
+ */
+function completeLease(claimed) {
+  return {
+    ...claimed,
+    workspaceId: 'ws-e2e', goalId: 'g-e2e', employeeId: 'e2e/employee',
+    teamPlanRef: 'tp-e2e', modelProfileRef: 'mp-e2e', workdir: process.cwd(),
+  }
+}
+
+test('⑧ ★★★★★ 清单行 → `claim()`：租约**真的带上了**这次 Run 的权限档位', async () => {
+  await putManifest('e2e-tier', { allowedTools: ['read-file', 'git-push'], approvalPolicy: 'never' })
+  onlyTaskWithRole('e2e-tier-1', 'e2e-tier')
+
+  const claimed = await hub.claim({ workerId: 'w-e2e-tier' })
+  assert.notEqual(claimed, null)
+  assert.equal(claimed.taskId, 'e2e-tier-1')
+
+  // ★ 这三行是本批的全部要点：在此之前 `claim()` 回来的对象上**一个都没有**
+  //   （`can-read-authorization-source.test.mjs` 逐键断言过只有 8 个键）。
+  assert.deepEqual([...claimed.allowedTools], ['read-file', 'git-push'],
+    '租约上没有权限档位——那 worker 那侧就只能具名拒绝，或者自己猜一个')
+  assert.deepEqual([...claimed.deniedTools], [])
+  assert.equal(claimed.approvalPolicy, 'never', '策略值必须原样带出来，不被这一侧解释')
+  // 原有的 8 个键一个都不能少（本批只加不改）。
+  for (const k of ['attemptId', 'taskId', 'scope', 'attemptNo', 'leaseEpoch', 'leaseExpiresAtMs', 'state', 'serverTimeMs']) {
+    assert.notEqual(claimed[k], undefined, k + ' 不见了——本批只加键，不改原有那 8 个')
+  }
+})
+
+test('⑧ ★★★★★ 端到端：清单里的 `git-push` 一路变成 guard **真的拒掉**的 `bash`/`pwsh`', async () => {
+  await putManifest('e2e-tier2', { allowedTools: ['read-file', 'git-push'], approvalPolicy: 'never' })
+  onlyTaskWithRole('e2e-tier-2', 'e2e-tier2')
+
+  const claimed = await hub.claim({ workerId: 'w-e2e-tier2' })
+  const request = defaultRequestFor(completeLease(claimed), { associations: {} })
+  // 第二跳：租约 → RunRequest.permissions
+  assert.equal(request.permissions.preset, 'legion-unattended', 'approvalPolicy=never 应翻成无人值守')
+  assert.deepEqual([...request.permissions.tools], ['read-file', 'git-push'])
+
+  // 第三跳：RunRequest → 静态下限。第四跳：下限 → 真 guard。
+  const carried = deriveRunFloorCarrier(request, { platform: process.platform })
+  assert.equal(carried.state, 'installed', JSON.stringify(carried.payload))
+  assert.deepEqual([...carried.payload.floor.denyTools], ['bash', 'pwsh'],
+    '下限里不是**执行面**名字——那 guard 一个真工具都拦不住')
+
+  const guard = createHardFloorGuard(carried.payload.floor)
+  for (const name of ['bash', 'pwsh']) {
+    assert.equal(typeof guard({ name, arguments: {} }), 'string',
+      `${name} 没被拒：从清单到 guard 这条线在 ${name} 这一跳断了`)
+  }
+  // 反向对照：没被禁的执行面名字照常放行（名字名单不是 fail closed）。
+  assert.equal(guard({ name: 'read', arguments: {} }), undefined)
+  assert.equal(guard({ name: 'write', arguments: {} }), undefined)
+})
+
+test('⑧ ★★★★ 没有清单的岗位：租约上**没有**权限字段，而且它 ≠ "什么都不能干"', async () => {
+  // 这一条守着本批最容易被"顺手修好"的那个形状问题。
+  onlyTaskWithRole('e2e-tier-3', 'e2e-tier-nobody')
+
+  const claimed = await hub.claim({ workerId: 'w-e2e-tier3' })
+  assert.notEqual(claimed, null)
+  assert.equal(claimed.allowedTools, undefined,
+    '没有清单时不许填一份空的 allowedTools——那个形状说的是"这个员工不能用任何工具"')
+  assert.equal(claimed.deniedTools, undefined)
+  assert.equal(claimed.approvalPolicy, undefined)
+
+  // 下游：落到那个**按引用可辨认**的哨兵上，于是"没给"与"给了空名单"分得开。
+  const request = defaultRequestFor(completeLease(claimed), { associations: {} })
+  assert.equal(request.permissions, UNSUPPLIED_PERMISSIONS,
+    '没有清单时必须落到哨兵上，而不是一份形状相同的 `{preset, tools: []}`')
+  const carried = deriveRunFloorCarrier(request, { platform: process.platform })
+  assert.equal(carried.state, 'refused', '没有来源的档位必须判成"拒绝"，不是"空下限"')
+  assert.deepEqual([...carried.refusals.map((r) => r.code)], ['run-floor-permissions-missing'])
+  assert.equal(carried.payload.floor, null)
+
+  // 而"控制面给了一份**空的**允许名单"是**另一个**读数：派得出来，正常跑。
+  await putManifest('e2e-tier-empty', { allowedTools: [], approvalPolicy: 'never' })
+  onlyTaskWithRole('e2e-tier-4', 'e2e-tier-empty')
+  const emptyClaim = await hub.claim({ workerId: 'w-e2e-tier4' })
+  assert.deepEqual([...emptyClaim.allowedTools], [], '空允许名单必须原样带出来')
+  const emptyReq = defaultRequestFor(completeLease(emptyClaim), { associations: {} })
+  assert.notEqual(emptyReq.permissions, UNSUPPLIED_PERMISSIONS)
+  const emptyCarried = deriveRunFloorCarrier(emptyReq, { platform: process.platform })
+  assert.equal(emptyCarried.state, 'installed', '空允许名单是**合法**的一档，不是"没给"')
+  assert.deepEqual([...emptyCarried.payload.floor.denyTools], [])
+})
+
+test('⑧ ★★★★ 认不出来的 `approvalPolicy`：具名拒绝，**不猜**是哪个档位', async () => {
+  // 控制面那一侧 `approvalPolicy` 是自由文本，执行面认的 preset 是闭集。
+  // 这个值只有人能裁决——所以它必须是**具名拒绝**，而不是"顺手当成某个档位"。
+  await putManifest('e2e-tier-odd', { allowedTools: ['read-file'], approvalPolicy: 'ask-on-write' })
+  onlyTaskWithRole('e2e-tier-5', 'e2e-tier-odd')
+
+  const claimed = await hub.claim({ workerId: 'w-e2e-tier5' })
+  assert.equal(claimed.approvalPolicy, 'ask-on-write', '这一侧原样带出，不解释')
+  assert.throws(
+    () => defaultRequestFor(completeLease(claimed), { associations: {} }),
+    (e) => {
+      assert.equal(e.code, 'EXECUTOR_APPROVAL_POLICY_UNKNOWN',
+        `拒绝码不是那个具名的策略码（收到 ${e.code}）：笼统的接线码会把排障指向错的地方`)
+      assert.match(e.message, /ask-on-write/, '消息里要出现那个**具体**的值')
+      assert.match(e.message, /ask|never/, '消息里要出现今天认得的那些值')
+      return true
+    },
+  )
+})
+
+test('⑧ ★★★ 策略**缺省** → 有人值守（更严的那个），不是无人值守', async () => {
+  // 缺省 ≠ "一个认不出来的值"：它是"控制面没有表达偏好"。那时取更严的那个
+  // 不可能放宽任何东西；反过来取 `never` 才会静默放宽。
+  await putManifest('e2e-tier-quiet', { allowedTools: ['read-file'] })
+  onlyTaskWithRole('e2e-tier-6', 'e2e-tier-quiet')
+
+  const claimed = await hub.claim({ workerId: 'w-e2e-tier6' })
+  assert.equal(claimed.approvalPolicy, null)
+  const request = defaultRequestFor(completeLease(claimed), { associations: {} })
+  assert.equal(request.permissions.preset, 'legion-attended',
+    '缺省策略取成了无人值守——那是一次静默的放宽')
 })

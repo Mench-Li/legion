@@ -20,6 +20,17 @@ import { collectUsage, estimateCostUsd, checkBudget, PRICING } from './usage.mjs
 import { mapDshEvent, createEventEmitter, terminalTypeFor, DSH_EVENT_MAP } from './events.mjs'
 import { parseVersion, compareVersion, checkRuntimeVersion, probeRuntime, SUPPORTED_RUNTIME } from './probe.mjs'
 import { validateRunRequest, validateRunEvent, assertTerminalContract, RUN_EVENT_TYPES } from '../../contracts/run.mjs'
+// ★ 下限载荷的**线上版本号必须取常量**，不许在夹具里写死字面量。
+//
+//   这里原来是 `version: 1` 写死五处。PRT-214 第二步把 `denyTools` 的名字空间
+//   从 Legion 能力名改成了执行面工具名，于是线上版本升到 2——而写死的那五处
+//   当场让这个套件红：适配器按契约拒收了一份"版本不认识"的载荷。
+//
+//   红的是**夹具**，不是适配器；但一个"夹具里写死协议版本"的套件，在协议
+//   升版时给出的信号与"适配器坏了"是同一条失败——排障的人会去读适配器。
+//   换成常量之后，升版只需要动一个地方，而这条套件测的仍然是它本来要测的
+//   那件事（"形状合法的载荷原样过线"）。
+import { RUN_FLOOR_WIRE_VERSION } from '../../contracts/run-floor.mjs'
 
 // ------------------------------------------------------------------ 测试夹具
 
@@ -366,7 +377,7 @@ test('③′ 请求里**有** `enforcementFloor` → 原样过线（含空名单
   const a = await readyAdapter(host)
   const floor = { denyTools: ['rm_rf'], denyPathPrefixes: [], cwd: 'C:/tmp/ws', platform: 'win32' }
   await collect(a, makeRequest({
-    enforcementFloor: { version: 1, derived: true, floor, runId: 'run-1' },
+    enforcementFloor: { version: RUN_FLOOR_WIRE_VERSION, derived: true, floor, runId: 'run-1' },
   }))
   const payload = host.calls.startRun[0].options.enforcementFloor
   assert.equal(payload.state, 'installed')
@@ -376,7 +387,7 @@ test('③′ 请求里**有** `enforcementFloor` → 原样过线（含空名单
   const emptyHost = hostOk()
   const emptyAdapter = await readyAdapter(emptyHost)
   await collect(emptyAdapter, makeRequest({
-    enforcementFloor: { version: 1, derived: true, floor: { denyTools: [], denyPathPrefixes: [], platform: 'linux' } },
+    enforcementFloor: { version: RUN_FLOOR_WIRE_VERSION, derived: true, floor: { denyTools: [], denyPathPrefixes: [], platform: 'linux' } },
   }))
   assert.equal(emptyHost.calls.startRun[0].options.enforcementFloor.state, 'installed')
 })
@@ -385,9 +396,9 @@ test('③′ 请求里的下限**解释不了** → 拒收这次 Run，**连 sta
   // 一份解释不了的载荷不是政策，是一次接线错误：照跑等于把它伪装成一次能跑的 Run。
   // 与既有的"必填字段缺失"同一个形状：`execute` 在产出任何事件**之前**就抛。
   for (const bad of [
-    { version: 1, derived: false, floor: null },
-    { version: 1, derived: true, floor: { denyTools: 'rm_rf' } },
-    { version: 1, derived: true, floor: { denyTools: [] }, extra: 1 },
+    { version: RUN_FLOOR_WIRE_VERSION, derived: false, floor: null },
+    { version: RUN_FLOOR_WIRE_VERSION, derived: true, floor: { denyTools: 'rm_rf' } },
+    { version: RUN_FLOOR_WIRE_VERSION, derived: true, floor: { denyTools: [] }, extra: 1 },
     null,
   ]) {
     const host = hostOk()

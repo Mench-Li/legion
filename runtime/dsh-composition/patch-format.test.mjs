@@ -18,8 +18,67 @@ import {
   assertPatchDocumentLoadable, isPlainObject, patchDocumentProblems, renderPatchYamlText,
   scalarOf, toPatchDocument, unknownPatchKeys,
 } from './patch-format.mjs'
+import { LEGION_PERMISSION_PRESETS, legionPresetForApproval } from './patch-layer.mjs'
 
 const ALL_CODES = Object.values(PATCH_DOCUMENT_CODES)
+
+// ============================================================================
+// PRT-214 第二步：`approvalPolicy`（自由文本）→ preset（闭集）的反查
+// ============================================================================
+//
+// 这一组守的是那条接线里**唯一会静默放宽**的一步。控制面存下来的
+// `approvalPolicy` 是自由文本（`team-hub` 只做 `optionalString`），执行面认的
+// preset 是闭集。两者之间那次翻译如果"给个默认"，一个拼写错误就会变成一个
+// 档位——而它在清单里看不出来。
+
+describe('legionPresetForApproval：反查，而且只认那两个值', () => {
+  test('★★★★ 两个已知值各查到**不同**的 preset（双射）', () => {
+    const entries = Object.entries(LEGION_PERMISSION_PRESETS)
+    assert.deepEqual(entries.map(([id]) => id).sort(), ['legion-attended', 'legion-unattended'])
+    assert.equal(legionPresetForApproval('ask'), 'legion-attended')
+    assert.equal(legionPresetForApproval('never'), 'legion-unattended')
+    // 双射：两个值不能查到同一个 preset，否则"问一下"与"永远不行"会合并。
+    assert.notEqual(legionPresetForApproval('ask'), legionPresetForApproval('never'))
+    // 反向对照：每个 preset 的 `approval` 都能查回它自己（正表与反查同源）。
+    for (const [id, p] of entries) {
+      assert.equal(legionPresetForApproval(p.approval), id, id + ' 的 approval 查不回自己')
+    }
+  })
+
+  test('★★★★★ 认不出来的值一律 `null`，**不给默认**', () => {
+    // 每一个都必须 `null`。给默认的那一天，拼写错误会变成一个**具体**的档位。
+    for (const bad of [
+      'ask-on-write',      // ← 生产里真实出现过的取值（sources-loader 的夹具）
+      'askOnWrite', 'no-approval', 'never ', ' never', 'NEVER', 'Ask',
+      '', '   ', null, undefined, 42, {}, [],
+    ]) {
+      assert.equal(legionPresetForApproval(bad), null,
+        `${JSON.stringify(bad)} 竟然查出了一个 preset——那是一个**猜**出来的档位`)
+    }
+    // ★ 尤其：`' never'` / `'NEVER'` 不许被 trim / 转小写后当作 `never`。
+    //   一个"顺手规范化一下"的实现会把控制面里一个手滑的空格变成一次**放宽**。
+    assert.notEqual(legionPresetForApproval(' never'), 'legion-unattended')
+  })
+
+  test('★★★★ 反查读的是那张表本身：改表就改答案（没有第二份字面量）', () => {
+    // 替身表：如果反查里抄了一份 `{ask: ..., never: ...}`，这个用例会红。
+    const presets = { 'probe-a': { approval: 'probe-ask' }, 'probe-b': { approval: 'probe-never' } }
+    assert.equal(legionPresetForApproval('probe-ask', presets), 'probe-a')
+    assert.equal(legionPresetForApproval('probe-never', presets), 'probe-b')
+    // 而真表里的两个值在替身表里查不到——证明答案真的来自传入的那张表。
+    assert.equal(legionPresetForApproval('ask', presets), null)
+  })
+
+  test('★★★★ 多对一时**抛错**，不许由遍历顺序决定用哪个 preset', () => {
+    // `approval` 今天在真表里是双射。哪一天不是了，这件事必须由人重新裁决
+    // ——"哪个 preset 才是这个 approval 的意思"不是一个可以由 `Object.keys`
+    // 顺序回答的问题。
+    const ambiguous = { 'probe-x': { approval: 'same' }, 'probe-y': { approval: 'same' } }
+    assert.throws(() => legionPresetForApproval('same', ambiguous), /重新裁决|不唯一|遍历顺序/)
+    // 反向对照：只有一个命中时不抛（否则上面那条在一个"永远抛"的实现上也是绿的）。
+    assert.equal(legionPresetForApproval('same', { 'probe-x': { approval: 'same' } }), 'probe-x')
+  })
+})
 
 describe('PRT-214 补丁文档形状与 YAML 生成', () => {
   // ── 自检本身（一个没人断言的检查等于没有检查）────────────────────────────

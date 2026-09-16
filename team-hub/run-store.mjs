@@ -142,6 +142,18 @@ export const RUN_ERRORS = Object.freeze({
   // 这是**后置条件**核验失败：把"端口被调用过"当成"审批行存在"，会让
   // `requiresPersist: ['attempt','approval']` 这句声明在事件流里继续看起来像一句保证。
   APPROVAL_NOT_CREATED: 'APPROVAL_NOT_CREATED',
+  // ★ PRT-214 第二步：这次 Run 的权限档位**读不出来**。
+  //
+  // 与「这个员工没有清单」严格分开的第二种读数：那一侧是 `null`（正常结果，
+  // 租约上没有权限字段，worker 那侧具名拒绝），这一侧是**控制面自己坏了**
+  // （端口抛错，或返回的形状不对）。合并成一个读数的后果：
+  //
+  //   > 一份"清单表读不出来"的租约与一份"员工没有清单"的租约，
+  //   > 在 worker 那侧是同一条 `run-floor-permissions-missing`——
+  //   > 于是排障会去查那个员工的配置，而真正坏掉的是另一张表。
+  //
+  // 所以这里**不吞**：`claim()` 直接失败，在花钱之前说清楚是哪一张表。
+  RUN_TIER_UNRESOLVABLE: 'RUN_TIER_UNRESOLVABLE',
 })
 
 /** 允许的人工处置决定。逐个列出，未登记的一律拒绝而不是猜一个默认值。 */
@@ -1006,6 +1018,33 @@ export function createRunStore({
   // 一条停在 `AwaitingApproval` 而没有任何东西可批的尝试，与一条卡住的任务，
   // 在"用户会不会一直等下去"上是同一个东西。
   createApproval = null,
+  // ★ PRT-214 第二步：**这次 Run 的权限档位从哪里来**。
+  //
+  // 在此之前 `RunRequest.permissions` 在生产里**没有任何来源**（全仓库只有
+  // `executor.mjs` 那一行回落），于是每一次 Run 都在派发前停下——不是因为它
+  // 危险，而是因为**没人告诉它该不该允许**。
+  //
+  // 来源必须是控制面：员工清单那一行住在本仓储**同一个 db** 上，但它的列、
+  // 以及它的"清单是内容、不是授权"纪律都属于那个模块。所以这里同样只规定
+  // 端口形状、**怎么读由注入方决定**（与 `createApproval` 完全同一个模式）：
+  //
+  //   resolveRunPermissions({ taskId, scope, attemptId, workerId })
+  //     → { allowedTools: string[], deniedTools?: string[], approvalPolicy?: string|null }
+  //     | null
+  //
+  // 参数只有本仓储真的知道的那些：`run_attempts` 上没有 `role`/`employee_id`
+  // （见 `resolveTier` 里那段注释），所以"这次是哪个岗位"由注入方拿 `taskId`
+  // 自己去它的表里查。
+  //
+  // `null` 的语义被**钉死**为"这个员工没有清单"——一个**正常**结果，不是错误。
+  // 它让租约上**没有**权限字段，于是 worker 那侧派生出
+  // `run-floor-permissions-missing` 并具名拒绝。绝不能把它换成一份
+  // `{allowedTools: []}`：那个形状说的是"这个员工不能用任何工具"，是**另一个读数**
+  // （这正是 `orchestrator/worker/executor.mjs` 那个 `UNSUPPLIED_PERMISSIONS`
+  // 哨兵存在的全部理由）。
+  //
+  // 端口**抛错**或返回形状不对时本仓储抛 `RUN_TIER_UNRESOLVABLE`（见那个码的注释）。
+  resolveRunPermissions = null,
 } = {}) {
   if (db === undefined || db === null) throw new TypeError('createRunStore 需要 db')
   if (typeof clock !== 'function') throw new TypeError('createRunStore 的 clock 必须是函数')
@@ -1241,6 +1280,84 @@ export function createRunStore({
    * `claimed: null` 是正常结果（队列空），不是错误——把「没事可做」表达成异常，
    * 会逼着调用方用 catch 来做正常流程控制。
    */
+  /**
+   * 把注入端口的读数**校验并冻结**成租约上那三个键，或者 `null`。
+   *
+   * 这里只做形状，不做解释：`approvalPolicy` 是一个**自由文本**（`team-hub`
+   * 把它当内容存），翻成执行面的 preset 是**执行面那一侧**的事——
+   * 本仓储不认识 preset 的名字，也不该认识。
+   *
+   *   > 一个"在这里顺手把 `approvalPolicy` 认成 `never`/其余"的仓储，
+   *   > 与一个"把没人认得的策略值安静地当成无人值守"的仓储，是同一个东西。
+   *
+   * 形状不对就抛：注入的实现写错了列名、返回了 `undefined` 以外的怪东西，
+   * 在这里说清楚比在 worker 那侧变成"这个员工没有清单"要省一个小时的排障。
+   */
+  function resolveTier({ row, scope, workerId }) {
+    if (typeof resolveRunPermissions !== 'function') {
+      // 没接线 = 控制面没有给出档位。与端口返回 `null` 同一个读数，
+      // 因为**它们对 worker 是同一件事**：没人告诉它这次能干什么。
+      // 真正需要与之分开的是"表坏了"——那一种下面抛错。
+      return null
+    }
+    const strList = (value, field) => {
+      if (value === undefined || value === null) return Object.freeze([])
+      if (!Array.isArray(value) || value.some((t) => typeof t !== 'string' || t.trim() === '')) {
+        throw fail(
+          RUN_ERRORS.RUN_TIER_UNRESOLVABLE,
+          `权限来源端口返回的 ${field} 不是"非空字符串数组"（收到 ${JSON.stringify(value)}）。`
+          + '形状不对的档位与"这个员工没有清单"在 worker 那侧是同一条拒绝码，'
+          + '于是排障会去查员工的配置，而真正坏掉的是清单表',
+        )
+      }
+      return Object.freeze([...value])
+    }
+
+    let raw
+    try {
+      // ★ 参数刻意**只有**本仓储真的知道的东西。
+      //
+      // 不传 `role` / `employeeId`：`run_attempts` 的列里**没有**它们
+      // （`rowOf` 读的是 `SELECT * FROM run_attempts`），于是这里传出去的
+      // 只会是一个凭空拼出来的 `null`——而注入方拿它去查清单，得到的
+      // `null` 与"这个员工没有清单"是**同一个读数**。
+      //
+      //   > 一个"由仓储拼一个 null 参数、再由端口把 null 解释成没清单"的接线，
+      //   > 与一个"这两个字段根本没有来源"的接线，在结果上是同一个东西——
+      //   > 只不过前者看起来像是查过了。
+      //
+      // 任务属于哪张表、那个表里哪个列是岗位，是**注入方**的知识
+      // （`tasks` 的 30 个列属于 `server.mjs`）。它拿 `taskId` 自己去看。
+      raw = resolveRunPermissions({ taskId: row.task_id, scope, attemptId: row.id, workerId })
+    } catch (err) {
+      throw fail(
+        RUN_ERRORS.RUN_TIER_UNRESOLVABLE,
+        `读这次 Run 的权限档位时控制面自己抛了：${err?.message ?? String(err)}`,
+      )
+    }
+    // `null` / `undefined` = 这个员工没有清单。**正常结果**，不是错误。
+    if (raw === null || raw === undefined) return null
+    if (typeof raw !== 'object' || Array.isArray(raw)) {
+      throw fail(
+        RUN_ERRORS.RUN_TIER_UNRESOLVABLE,
+        `权限来源端口必须返回对象或 null（收到 ${Array.isArray(raw) ? 'array' : typeof raw}）`,
+      )
+    }
+    const approvalPolicy = raw.approvalPolicy ?? null
+    if (approvalPolicy !== null && (typeof approvalPolicy !== 'string' || approvalPolicy.trim() === '')) {
+      throw fail(
+        RUN_ERRORS.RUN_TIER_UNRESOLVABLE,
+        '权限来源端口返回的 approvalPolicy 既不是非空字符串也不是 null：'
+        + '一个空串会被执行面读成"没有策略"，而它的意思是"策略是这个空串"',
+      )
+    }
+    return Object.freeze({
+      allowedTools: strList(raw.allowedTools, 'allowedTools'),
+      deniedTools: strList(raw.deniedTools, 'deniedTools'),
+      approvalPolicy,
+    })
+  }
+
   function claim({ workerId, scope = null, leaseTtlMs: rawTtl = null, nowMs = null } = {}) {
     const worker = requireWorker(workerId)
     const ttl = resolveTtl(rawTtl ?? undefined)
@@ -1289,6 +1406,16 @@ export function createRunStore({
         reason: 'claim', requiresPersist: claimPlan.requiresPersist, atMs,
       })
       projectToTask(db, row, 'Leased', atMs)
+      // ★ 权限档位在**认领时**定下来（PRT-214 第二步）。
+      //
+      // 时点不是随便挑的：认领是"这一条尝试归谁跑"的**唯一**发生点，而权限档位
+      // 是"这次跑能干什么"——两者是同一个决定的两半。放到执行时再读，就等于
+      // 让"这次跑能干什么"取决于执行那一刻库里的状态，而**清单可以在那之间被改**。
+      //
+      //   > 一份"认领时定档"的实现，与一份"执行时再看一眼清单"的实现，
+      //   > 在清单从不改变的部署里是同一个东西——只不过后者让一次已经在跑的
+      //   > Run 的权限，随着一次与它无关的清单编辑而改变。
+      const tier = resolveTier({ row, scope: row.scope, workerId: worker })
       return Object.freeze({
         ok: true,
         claimed: Object.freeze({
@@ -1307,6 +1434,17 @@ export function createRunStore({
           leaseExpiresAtMs: row.lease_expires_at_ms,
           state: row.state,
           serverTimeMs: atMs,
+          // ★ 权限档位（PRT-214 第二步）。三态，**不是**"有/没有"：
+          //
+          //   · 三个键都在 → 控制面给了这一档，worker 据此派生静态下限；
+          //   · 三个键都不在（`tier === null`）→ 这个员工没有清单。
+          //     这是一个**正常**读数，worker 那侧会具名拒绝；
+          //   · 端口抛错/形状不对 → 根本走不到这里（下面 `resolveTier` 已经抛了）。
+          ...(tier === null ? {} : {
+            allowedTools: tier.allowedTools,
+            deniedTools: tier.deniedTools,
+            approvalPolicy: tier.approvalPolicy,
+          }),
         }),
         serverTimeMs: atMs,
         ignoredClientFields: Object.freeze(ignoredClientFields),

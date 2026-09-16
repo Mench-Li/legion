@@ -138,6 +138,20 @@ export const NON_ENV_LITERALS = Object.freeze([
   // 把后者折进前者，会让一个"档位没接上"的问题看起来像"引擎没装配"——
   // 而这两件事的排查方向一个是装配路、一个是权限路，完全不重合。
   'EXECUTOR_RUN_FLOOR_NOT_DERIVED',
+  // PRT-214 第二步：员工清单里的 `approvalPolicy` 在执行面上**没有**对应的权限档位。
+  //
+  // 控制面那一侧它是**自由文本**（`team-hub` 只做 `optionalString`，真实取值里
+  // 出现过 `'ask-on-write'`），而执行面认的 preset 是**闭集**（今天 `ask` / `never`）。
+  //
+  // 与上面两个码都要分开，因为三种处境的人不同：
+  //
+  //   · `EXECUTOR_HOST_PORT_REQUIRED`      —— 部署没把引擎接上来（查装配）。
+  //   · `EXECUTOR_RUN_FLOOR_NOT_DERIVED`   —— 档位没送到派生点（查权限搬运）。
+  //   · `EXECUTOR_APPROVAL_POLICY_UNKNOWN` —— 档位送到了，但那个**值**没人认识
+  //     （查员工清单里写了什么）。这个值只有人能裁决，所以它必须是拒绝，
+  //     不能由代码挑一个默认——挑宽的会静默放宽，而挑严的会让一个
+  //     合法但没登记的策略永远跑不起来，两种都不会有人发现。
+  'EXECUTOR_APPROVAL_POLICY_UNKNOWN',
   // PRT-510 运行侧的预算闸门（worker/budget-gate.mjs 的 BUDGET_GATE_CODES）。
   //
   // 与 EXECUTOR_* 同一口径：这些码会被跨进程读取（worker 上报 → 启动结果 →

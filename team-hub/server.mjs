@@ -357,6 +357,43 @@ const runStore = createRunStore({
   // 而人会一直等下去。`permission_requests` 的 schema 属于本文件 / approval-binding.mjs，
   // 所以那一行由这里注入的端口写（运行仓储不认识它）。
   createApproval: (payload) => createAwaitingApprovalInTx(payload),
+  // ★ PRT-214 第二步：**这次 Run 的权限档位**在认领时定下来。
+  //
+  // 来源就是员工清单那一行——它住在本文件同一个 `db` 上，但它的列与
+  // "清单是内容、不是授权"这条纪律属于 `context-plan-store.mjs`，
+  // 所以那一行由这里注入的端口读（与 `createApproval` 完全同一个模式）。
+  //
+  // 三件刻意的选择：
+  //
+  //   · **岗位从 `tasks` 那一行读**。`run_attempts` 上没有 `role`
+  //     （它的列里根本没有这一项），所以"这次是哪个岗位"只有本文件知道
+  //     ——`tasks` 的 30 个列属于这里。而 hub 的编队本来就是按 role 的
+  //     （`roster(scope, role)`），`putEmployeeManifest` 的唯一键也是
+  //     `(scope, role)`。凭空传一个 employeeId 去查，会让"查不到"与
+  //     "清单不存在"变成同一个读数。
+  //   · 查不到就返回 `null`——**正常结果**，不是错误。它让租约上
+  //     没有权限字段，worker 那侧具名拒绝（`run-floor-permissions-missing`）。
+  //     绝不返回 `{allowedTools: []}`：那个形状说的是"这个员工不能用任何工具"。
+  //   · `approvalPolicy` **原样带出去、不解释**：它在这一侧是自由文本，
+  //     翻成执行面的 preset 是执行面那一侧的事（`executor.mjs` 的
+  //     `permissionsFromLease`），因为只有那一侧知道 preset 的闭集。
+  resolveRunPermissions: ({ taskId, scope }) => {
+    const task = db.prepare('SELECT role FROM tasks WHERE id = ?').get(taskId)
+    const role = task?.role
+    if (typeof role !== 'string' || role.trim() === '') {
+      // 这条任务没有被指派给任何岗位。不是 `null`（"清单不存在"），
+      // 而是调度上的另一个问题——但两者对 worker 是同一件事（没人告诉它
+      // 这次能干什么），所以这里同样返回 `null`。
+      return null
+    }
+    const manifest = contextPlanStore().readEmployeeManifest({ scope, role })
+    if (manifest === null || manifest === undefined) return null
+    return {
+      allowedTools: manifest.allowedTools,
+      deniedTools: manifest.deniedTools,
+      approvalPolicy: manifest.approvalPolicy,
+    }
+  },
 })
 
 /**

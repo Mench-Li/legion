@@ -72,6 +72,51 @@ export const DSH_DEFAULT_PRESETS = Object.freeze({
   'danger-full-access': Object.freeze({ sandbox: 'danger-full-access', approval: 'never' }),
 })
 
+/**
+ * ★ **反查**：一个 `approval` 取值 → Legion 的 preset 名。没有对应的返回 `null`。
+ *
+ * 为什么需要反查：控制面存下来的员工清单里那个 `approvalPolicy` 是**自由文本**
+ * （`team-hub` 把它当内容存，写入路径只做 `optionalString`），而执行面认的
+ * preset 是一个**闭集**。两者之间必须有一次显式翻译，而翻译的**答案只该有一份**。
+ *
+ *   > 一张"`ask` → 有人值守、其余一律当无人值守"的表，
+ *   > 与一张"我们根本没在看这个字段"的表，在**无人值守那条分支上**是同一个读数——
+ *   > 只不过前者会把一个拼错的 `'never '` 悄悄变成"有人值守"（更严，尚可），
+ *   > 也会把一个 `'no-approval'` 悄悄变成"无人值守"（**更宽**，不可接受）。
+ *
+ * 所以这里**不做近似、不给默认**：查不到就返回 `null`，由调用方判成具名拒绝。
+ * 反查走 `LEGION_PERMISSION_PRESETS` 本身，不另抄一张表——两张表只会在
+ * 有人只改一边的第二天分叉。
+ *
+ * 注意反查在多对一时会**抛错**而不是随便挑一个：`approval` 目前是双射
+ * （`ask` / `never` 各一个 preset）。哪一天不是了，这里必须有人重新裁决
+ * "哪个 preset 才是这个 approval 的意思"，而不是由遍历顺序决定。
+ *
+ * @param {unknown} approval
+ * @param {object} [presets] 只给用例用
+ * @returns {string|null}
+ */
+export function legionPresetForApproval(approval, presets = LEGION_PERMISSION_PRESETS) {
+  if (typeof approval !== 'string' || approval === '') return null
+  // ★ **不 trim、不转大小写**。第一版写的是 `approval.trim()`，而
+  //   `patch-format.test.mjs` 里那条 `' never'` 当场把它抓了出来。
+  //
+  //   > 一个"顺手 trim 一下"的反查，与一个"控制面里一个手滑的空格
+  //   > 变成一次**放宽**（`' never'` → 无人值守）"的反查，是同一个东西——
+  //   > 只不过前者看起来更宽容。
+  //
+  //   严格比较的代价是一次**响亮**的具名拒绝（消息里带着那个值原本的样子，
+  //   连空格一起），而宽容的代价是一次没人知道的政策替换。前者可查，后者不可查。
+  const hits = Object.keys(presets).filter((id) => presets[id].approval === approval)
+  if (hits.length > 1) {
+    throw new Error(
+      `approval=${JSON.stringify(approval)} 同时对应 ${JSON.stringify(hits)} 这几个 Legion preset。`
+      + '反查不再唯一——"用哪个 preset"这个决定必须由人重新裁决，不许由遍历顺序决定',
+    )
+  }
+  return hits.length === 1 ? hits[0] : null
+}
+
 /** 补丁层行 id 前缀。用来在组合树里认出「哪些行是 Legion 注入的」。 */
 export const LEGION_ROW_PREFIX = 'legion-enforcement-'
 

@@ -701,6 +701,52 @@ export const SCHEMA = defineSchema({
     'RUNTIME_INSTALL_ROLLBACK_TARGET_INCOMPLETE',
     'RUNTIME_INSTALL_UNEXPECTED',
 
+    // ── PRT-257 npm 运行器自己的读数（`NPM_RUNNER_CODES`）───────────────
+    //
+    // `product/launcher/runtime-install.mjs` 的 `NPM_RUNNER_CODES` 的值。
+    // 它只有一条，而那一条必须与"npm 跑了但失败了"分开：
+    //
+    //   > 一个"命令根本拼不出来"的失败，
+    //   > 与一个"npm 起了、装到一半失败"的失败，在"指针动没动"上是同一个答案，
+    //   > 但在"磁盘上多了什么"上是两个完全不同的现场。
+    //
+    // 所以它单独成码，而不是复用 `RUNTIME_INSTALL_RUNNER_FAILED`。
+    'RUNTIME_NPM_INVOCATION_UNRESOLVED',
+
+    // ── PRT-257 现役指针 → runtime 命令（`RUNTIME_RESOLVE_CODES`）────────
+    //
+    // `product/launcher/runtime-resolve.mjs` 的 `RUNTIME_RESOLVE_CODES` 的值。
+    // 这一组是**六种处境、六个不同的下一步**，因此不许合并：
+    //   · `NO_DATA_DIR`（去给数据目录）—— 且它**不阻塞**（另有更准确的诊断说话）；
+    //   · `NOT_INSTALLED`（去装一次）—— 干净机器上的正常读数，也不阻塞；
+    //   · `POINTER_UNREADABLE`（去看/清那个文件）—— 阻塞；
+    //   · `POINTER_BROKEN`（去重装或回滚）—— 阻塞；
+    //   · `ENTRY_MISMATCH`（指针被改过或被挪过）—— 阻塞，且**不挑一个用**；
+    //   · `PROFILE_REQUIRED`（去给 profile）—— 阻塞，因为一条少了 `--profile`
+    //     的命令是"每个字都对、但 DSH 会退出 1"的那种命令。
+    'RUNTIME_RESOLVE_NO_DATA_DIR',
+    'RUNTIME_RESOLVE_NOT_INSTALLED',
+    'RUNTIME_RESOLVE_POINTER_UNREADABLE',
+    'RUNTIME_RESOLVE_POINTER_BROKEN',
+    'RUNTIME_RESOLVE_ENTRY_MISMATCH',
+    'RUNTIME_RESOLVE_PROFILE_REQUIRED',
+    // 启动期诊断（与上面的拒绝码分开：它们说的是"磁盘上那一份与这次要跑的那一份
+    // 不是同一个"，而不是"命令拼不出来"）。两条都是 warn——它们**不**拦启动。
+    'RUNTIME_RESOLVE_INSTALLED_UNUSED',
+    'RUNTIME_RESOLVE_INSTALLED_BROKEN_UNUSED',
+
+    // ── PRT-257 §9.1 清单的组装读数（`RUNTIME_MANIFEST_CODES`）───────────
+    //
+    // `product/launcher/runtime-manifest.mjs` 的 `RUNTIME_MANIFEST_CODES` 的值。
+    // 三条对应三种不同的下一步：
+    //   · `FIELD_UNDECIDED`（去把发布决定写进来）—— 缺的是**人**要到场的那几个字段；
+    //   · `INVALID`（去修生成器）—— 生产校验器拒绝了生成器造出来的清单；
+    //   · `PATCH_VERSION_MISMATCH`（去判哪一边对）—— 清单与仓库声明不一致，
+    //     而本模块刻意**不替用户决定**哪一边是对的。
+    'RUNTIME_MANIFEST_FIELD_UNDECIDED',
+    'RUNTIME_MANIFEST_INVALID',
+    'RUNTIME_MANIFEST_PATCH_VERSION_MISMATCH',
+
     // ── PRT-257 运行时安装入口（CLI 这一层）自己的拒绝码 ─────────────────
     //
     // `product/launcher/cli.mjs` 的 `RUNTIME_PLAN_CODES` 的值。与上面那组**分开**

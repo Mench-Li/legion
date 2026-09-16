@@ -42,21 +42,23 @@
 
 import assert from 'node:assert/strict'
 import { after, afterEach, describe, test } from 'node:test'
+import { spawn, spawnSync } from 'node:child_process'
 import {
-  chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync,
-  readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync,
+  appendFileSync, chmodSync, closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync,
+  openSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 
 import {
   COMPLETION_MARKER_FILENAME, DEFAULT_DSH_PACKAGE, DEFAULT_ENTRY_RELPATH,
   LEGION_FILE_PACKAGES, LEGION_PACKAGE_PREFIX, LEGION_ROUTE_JUNCTION, NODE_MODULES_DIRNAME,
-  POINTER_FILENAME, PREVIOUS_POINTER_FILENAME, RUNTIME_INSTALL_CODES, RUNTIME_INSTALL_VERSION,
-  RUNTIME_ROOT_PARTS, TARGET_DIR_POLICY, VERSIONS_DIRNAME,
+  NPM_LOG_FILENAME, NPM_RUNNER_CODES, POINTER_FILENAME, PREVIOUS_POINTER_FILENAME,
+  RUNTIME_INSTALL_CODES, RUNTIME_INSTALL_VERSION, RUNTIME_ROOT_PARTS, TARGET_DIR_POLICY,
+  VERSIONS_DIRNAME,
   compareDshVersions, createNpmRunner, createRuntimeWriteGuard, dshPatchPairOf, installationRepairPlan,
   installRuntime, parseDshVersion, planRuntimeInstall, readActiveRuntime,
-  rollbackRuntime, runtimePathsOf, runtimeRootOf, verifyInstallation,
+  resolveNpmInvocation, rollbackRuntime, runtimePathsOf, runtimeRootOf, verifyInstallation,
 } from './runtime-install.mjs'
 import { DOCTOR_CODES, DOCTOR_EXIT, doctorReport, renderDoctor } from './doctor.mjs'
 import { isPathInside, normalizePath, samePath } from '../paths.mjs'
@@ -877,6 +879,14 @@ describe('PRT-257 诚实边界', () => {
     const res = installRuntime({ plan, runner })
     assert.equal(runner.calls.length, 1)
     assert.equal(res.runnerCalls.length, 1)
+    // ★ 这一段是**计划里的**那条命令（`kind: 'planned'`）。它是产品决定要跑什么，
+    //   不是这一次真的起了哪个进程——后者在 `runnerCalls` 里另记一条
+    //   （`kind: 'actual'`），而在本套件的假运行器下它**刻意缺席**：
+    //   假运行器不回报 `invocation`，于是"真的起了哪个进程"在这条路径上
+    //   确实没有读数。真运行器那一边由下面第八节覆盖。
+    assert.equal(res.runnerCalls[0].kind, 'planned')
+    assert.equal(res.runnerCalls.length, 1, '假运行器不该产出一条 actual 记录')
+    assert.equal(res.invocation, null)
     assert.equal(res.runnerCalls[0].file, process.platform === 'win32' ? 'npm.cmd' : 'npm')
     assert.deepEqual([...res.runnerCalls[0].args].slice(-1), ['@deepseek-ai/dsh@0.1.5-rc.2'])
 
@@ -1007,6 +1017,11 @@ describe('PRT-257 导出面', () => {
     assert.equal(typeof seen[0].opts.timeout, 'number')
     assert.equal(seen[0].opts.windowsHide, true)
     assert.equal(seen[0].opts.cwd, '/tmp/x')
+    // ★ 真的起了哪个进程，也要读得到（计划里那条与它可能不是同一条）。
+    assert.equal(ok.invocation.file, 'npm')
+    assert.equal(ok.invocation.plannedFile, 'npm')
+    assert.equal(ok.invocation.timeoutMs, 600_000)
+    assert.equal(typeof ok.elapsedMs, 'number')
 
     // 非零退出、以及"根本没起来"（error），是两种不同的读数。
     const failing = createNpmRunner({ spawn: () => ({ status: 1, stdout: '', stderr: 'npm ERR!', error: undefined }) })
@@ -1015,5 +1030,440 @@ describe('PRT-257 导出面', () => {
     const broken = createNpmRunner({ spawn: () => ({ status: null, stdout: '', stderr: '', error: new Error('ENOENT npm') }) })
     assert.equal(broken(cmd).ok, false)
     assert.match(broken(cmd).error, /ENOENT npm/)
+  })
+
+  test('★★★★ resolveNpmInvocation：Windows 上的 .cmd 垫片**必须**被翻成 node + cli 脚本', () => {
+    // 判据全部注入（`platform` / `execPath` / `exists`），所以这一段在任何平台上
+    // 都逐条可验证，且不依赖这台机器上真的有 npm。
+    const cli = 'C:\\nodejs\\node_modules\\npm\\bin\\npm-cli.js'
+    const win = (over = {}) => resolveNpmInvocation({
+      command: { file: 'npm.cmd', args: ['install', '--prefix', 'C:\\d', 'pkg@1.0.0'] },
+      platform: 'win32', execPath: 'C:\\nodejs\\node.exe', exists: (p) => p === cli, ...over,
+    })
+
+    // ① Windows + `.cmd` → 翻成 `node <cli>`，参数**逐字**搬过去。
+    const r = win()
+    assert.equal(r.ok, true)
+    assert.equal(r.mode, 'node-cli')
+    assert.equal(r.file, 'C:\\nodejs\\node.exe')
+    assert.deepEqual([...r.args], [cli, 'install', '--prefix', 'C:\\d', 'pkg@1.0.0'])
+    // 参数里带空格的路径不许被切开：它是数组元素，不是拼出来的一行字。
+    const spaced = win({ command: { file: 'npm.cmd', args: ['--prefix', 'C:\\Program Files\\Legion'] } })
+    assert.deepEqual([...spaced.args].slice(-2), ['--prefix', 'C:\\Program Files\\Legion'])
+
+    // ② 垫片解析不出来 → **具名拒绝**，且**不回落**到直接 spawn 那个 .cmd。
+    const missing = win({ exists: () => false })
+    assert.equal(missing.ok, false)
+    assert.equal(missing.code, NPM_RUNNER_CODES.INVOCATION_UNRESOLVED)
+    assert.equal(missing.file, null)
+    assert.equal(missing.args, null)
+    assert.match(missing.message, /not.*安装失败|这不是"安装失败"/)
+    assert.ok(missing.candidates.length >= 1, '拒绝里要给出试过哪些候选路径')
+
+    // ③ 非 Windows / 非垫片 → 原样直通（不许对 `.exe` 也套一层 node）。
+    const posix = win({ platform: 'linux', execPath: '/usr/bin/node' })
+    assert.equal(posix.mode, 'direct')
+    assert.equal(posix.file, 'npm.cmd')
+    const exe = win({ command: { file: process.execPath, args: ['x'] } })
+    assert.equal(exe.mode, 'direct')
+    assert.equal(exe.file, process.execPath)
+    // ④ 裸的 `npm.cmd`（不带目录）不许推出一个**相对**候选：落点取决于 cwd。
+    const bare = resolveNpmInvocation({
+      command: { file: 'npm.cmd', args: [] }, platform: 'win32',
+      execPath: 'C:\\nodejs\\node.exe', exists: () => false,
+    })
+    assert.equal(bare.candidates.some((c) => !isAbsolute(c)), false,
+      `候选里出现了相对路径：${JSON.stringify(bare.candidates)}`)
+
+    // ⑤ 解析不出来时，运行器**一个进程都不起**：`status` 是 null（不是 0 也不是 1）。
+    const spawned = []
+    const runner = createNpmRunner({
+      spawn: (...a) => { spawned.push(a); return { status: 0, stdout: '', stderr: '', error: undefined } },
+      platform: 'win32', execPath: 'C:\\nodejs\\node.exe', exists: () => false,
+    })
+    const res = runner({ file: 'npm.cmd', args: ['install'] })
+    assert.equal(res.ok, false)
+    assert.equal(res.status, null)
+    assert.equal(res.code, NPM_RUNNER_CODES.INVOCATION_UNRESOLVED)
+    assert.equal(res.invocation, null)
+    assert.equal(spawned.length, 0, '解析不出来却还是起了一个进程')
+  })
+})
+
+// ============================================================================
+// 八、**真的**跑一次 npm / **真的**制造一次 EPERM
+//
+// 这一节存在的理由，是前面七节全部合起来也证明不了的那两件事：
+//
+//   > 一套"全部注入假运行器"的安装器用例，
+//   > 与一套"生产运行器在 Windows 上 100% 起不来"的实现，
+//   > 在测试报告上是同一片绿。
+//
+// 实测结论（本节把它变成可重复的读数）：
+//   · `spawnSync('npm.cmd', args)` 在 Windows 上 **EINVAL**（Node 2024-04 安全发布后
+//     `.cmd`/`.bat` 不带 `shell:true` 一律拒绝）——见 `resolveNpmInvocation` 的文件注释；
+//   · 而 `node <npm-cli.js>` 能跑，并且真的把包装进了 `node_modules/`。
+//
+// ## 这两条用例**不需要网络**，但仍然**真的**起 npm 进程
+//
+// 装的是一个**本地目录**（`file:` 源），npm 对它不做任何网络请求；
+// 而且参数里带 `--offline`。用例第一次跑实测 843 ms。
+// 于是"这一跑真的经过 npm"是一个可重复的事实，不是一句注释——
+// 而"它会不会因为 CI 没网而红"这件事被排除了。
+//
+// 真 npm 找不到时**跳过**（而不是静默通过）：`t.skip()` 会在报告里留痕。
+// ============================================================================
+
+/** 这台机器上 npm 的 CLI 脚本（Node 官方发行包的布局）。找不到返回 `null`。 */
+function npmCliPath() {
+  const candidates = [
+    join(dirname(process.execPath), NODE_MODULES_DIRNAME, 'npm', 'bin', 'npm-cli.js'),
+    join(dirname(process.execPath), '..', 'lib', NODE_MODULES_DIRNAME, 'npm', 'bin', 'npm-cli.js'),
+  ]
+  return candidates.find((p) => { try { return existsSync(p) } catch { return false } }) ?? null
+}
+
+/** 真的起一次 npm，参数是"装一个本地目录"。 */
+function realNpmInstall({ npmCli, prefix, sourceDir, extra = [] }) {
+  return spawnSync(process.execPath, [
+    npmCli, 'install', '--prefix', prefix, '--no-save', '--no-audit', '--no-fund',
+    '--loglevel=error', '--offline', ...extra, `file:${sourceDir}`,
+  ], { encoding: 'utf8', windowsHide: true, timeout: 300_000, stdio: ['ignore', 'pipe', 'pipe'] })
+}
+
+/** 造一个本地"DSH 包"目录（不是真的 dsh，用例造的，但 npm 认它是一个包）。 */
+function localDshPackage(root, version = '9.9.9-probe') {
+  const dir = join(root, 'local-dsh-pkg')
+  mkdirSync(join(dir, 'lib'), { recursive: true })
+  writeFileSync(join(dir, 'package.json'), `${JSON.stringify({
+    name: DEFAULT_DSH_PACKAGE, version, bin: { dsh: 'lib/bin.js' }, files: ['lib/*.js'],
+  }, null, 2)}\n`, 'utf8')
+  writeFileSync(join(dir, 'lib', 'bin.js'), 'process.exit(0)\n', 'utf8')
+  return dir
+}
+
+describe('PRT-257 真运行器：真的起 npm、真的 EPERM（不联网）', () => {
+  test('★★★★★ 真的 npm install 一次本地包：`node <npm-cli>` 这条路真的装得进去', (t) => {
+    const npmCli = npmCliPath()
+    if (npmCli === null) {
+      // ★ `t.skip()` 而不是提前 return：静默 return 会让"这条用例从来没跑过"
+      //   与"它跑绿了"在报告上长得一模一样。
+      return t.skip('这台机器上找不到 npm 的 CLI 脚本（不是 Node 官方布局）')
+    }
+    const root = tempRoot('real-npm')
+    const source = localDshPackage(root)
+    const prefix = join(root, 'runtime', 'dsh', 'versions', '9.9.9-probe')
+    // ★ 版本目录先建出来：**生产路径就是这样**（`runtime-install.mjs` 的第 4 步先
+    //   `mkdir` 再跑 npm），而且 `spawnSync` 的 `cwd` 不存在时会直接 ENOENT——
+    //   那会让这条用例红在一个与 npm 无关的原因上。
+    mkdirSync(prefix, { recursive: true })
+
+    // ① ★ 先用**实测**钉住那个 bug 本身：直接 spawn 一个 `.cmd` 垫片在 Windows 上起不来。
+    if (process.platform === 'win32') {
+      const direct = spawnSync('npm.cmd', ['--version'], { encoding: 'utf8', windowsHide: true, timeout: 60_000 })
+      assert.notEqual(direct.status, 0, 'npm.cmd 竟然直接跑起来了 —— Node 的行为变了，这段注释要重写')
+      assert.match(String(direct.error?.message ?? direct.error ?? ''), /EINVAL/,
+        `直接 spawn .cmd 的失败原因不是 EINVAL：${direct.error?.message ?? direct.error}`)
+    }
+
+    // ② **生产运行器**跑真 npm。不是用例自己拼的命令行——用的是 `createNpmRunner()`。
+    const runner = createNpmRunner()
+    const res = runner({
+      file: process.platform === 'win32' ? 'npm.cmd' : 'npm',
+      args: ['install', '--prefix', prefix, '--no-save', '--no-audit', '--no-fund',
+        '--loglevel=error', '--offline', `file:${source}`],
+    }, { cwd: prefix })
+
+    assert.equal(res.ok, true,
+      `真 npm 没装成：status=${res.status} code=${res.code ?? '-'} error=${res.error ?? '-'}\n`
+      + `stderr=${String(res.stderr).slice(-800)}\ninvocation=${JSON.stringify(res.invocation)}`)
+    // ③ 它**回报了自己真的起了哪个进程**：Windows 上是 `node <npm-cli>`，
+    //    而不是计划里那个起不来的 `npm.cmd`。
+    assert.ok(res.invocation !== null, '真运行器没有回报 invocation')
+    assert.equal(res.invocation.plannedFile, process.platform === 'win32' ? 'npm.cmd' : 'npm')
+    assert.equal(res.invocation.file, process.execPath)
+    if (process.platform === 'win32') {
+      assert.equal(res.invocation.mode, 'node-cli')
+      assert.equal(res.invocation.args[0], npmCli)
+    }
+    assert.equal(typeof res.elapsedMs, 'number')
+
+    // ④ 磁盘上的**结果**：真 npm 写出了 package.json 与入口文件。
+    const pkgDir = join(prefix, NODE_MODULES_DIRNAME, ...DEFAULT_DSH_PACKAGE.split('/'))
+    const installed = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8'))
+    assert.equal(installed.version, '9.9.9-probe')
+    assert.equal(existsSync(join(pkgDir, 'lib', 'bin.js')), true)
+    // ⑤ 而且这个入口**能被执行**（它是真 npm 落下来的，不是用例写的）。
+    const ran = spawnSync(process.execPath, [join(pkgDir, 'lib', 'bin.js')], {
+      encoding: 'utf8', windowsHide: true, timeout: 60_000,
+    })
+    assert.equal(ran.status, 0)
+  })
+
+  test('★★★★★ 真的 EPERM：指针被另一个句柄占着时，切换**失败**且旧版本仍然现役', () => {
+    if (process.platform !== 'win32') return // 这条读数是 Windows 的 rename 语义
+    const f = fixture('real-eperm')
+    const firstPlan = planFor(f)
+    installOk(f, firstPlan)
+    const pointerPath = join(f.dataDir, 'runtime', 'dsh', POINTER_FILENAME)
+    const before = readFileSync(pointerPath, 'utf8')
+    assert.match(before, /0\.1\.5-rc\.2/)
+
+    // ★ 一个**真的**打开着的文件句柄（本进程内，不需要第二个进程、也没有孤儿）。
+    //   实测：Node 在 Windows 上打开文件时不带 `FILE_SHARE_DELETE`，
+    //   于是 `MoveFileExW(..., MOVEFILE_REPLACE_EXISTING)` 真的拿到 EPERM。
+    const held = openSync(pointerPath, 'r')
+    try {
+      const second = installRuntime({
+        plan: planFor(f, { targetVersion: '0.1.6', supportedRange: '=0.1.6', expectedPatchVersion: 1 }),
+        runner: fakeRunner({ version: '0.1.6' }),
+      })
+
+      // ① 具名码 + 指针**没动**。
+      assert.equal(second.ok, false, '指针被占着，切换竟然成功了')
+      assert.equal(second.code, RUNTIME_INSTALL_CODES.POINTER_SWITCH_FAILED)
+      assert.equal(second.movedPointer, false)
+      assert.match(second.message, /EPERM/, `失败原因不是 EPERM：${second.message}`)
+      // ② 磁盘终态：指针还是旧版本，而新目录**没有**完成标记那一层被当成现役。
+      assert.equal(readFileSync(pointerPath, 'utf8'), before, '指针内容变了')
+      const active = readActiveRuntime({ dataDir: f.dataDir })
+      assert.equal(active.state, 'active')
+      assert.equal(active.version, '0.1.5-rc.2', '现役版本被换成了没装完的那一个')
+      assert.equal(active.entryPath, firstPlan.entryPath)
+      // ③ 失败发生在**最后一步**：新目录确实被填满了（这是"半装"的真实模样），
+      //    但它是靠完成标记与指针区分开的，不是靠"目录在不在"。
+      const newDir = runtimePathsOf({ dataDir: f.dataDir, targetVersion: '0.1.6' }).versionDir
+      assert.equal(existsSync(join(newDir, NODE_MODULES_DIRNAME)), true)
+      // ④ ★ 而且失败**自己说出了**它留下的那个反直觉终态：
+      //    0.1.6 是"装完了、但不是现役"，于是再装同一个版本会被 TARGET_DIR_EXISTS 挡下。
+      //    不说这一句的话，第二次尝试的拒绝读起来像是"我明明没装成过"。
+      assert.match(second.message, /TARGET_DIR_EXISTS|目标目录已存在|带着完成标记/)
+      assert.equal(second.detail.orphanedVersionDir, newDir)
+    } finally {
+      closeSync(held)
+    }
+    // ⑤ 放开句柄之后，**同一个版本**仍然被拒（那条拒绝说的是真话），
+    //    而**另一个版本**装得上——证明第 ①步的红只来自那个句柄。
+    const retrySame = installRuntime({
+      plan: planFor(f, { targetVersion: '0.1.6', supportedRange: '=0.1.6', expectedPatchVersion: 1 }),
+      runner: fakeRunner({ version: '0.1.6' }),
+    })
+    assert.equal(retrySame.ok, false)
+    assert.equal(retrySame.code, RUNTIME_INSTALL_CODES.TARGET_DIR_EXISTS)
+    const other = installRuntime({
+      plan: planFor(f, { targetVersion: '0.1.7', supportedRange: '=0.1.7', expectedPatchVersion: 2 }),
+      runner: fakeRunner({ version: '0.1.7' }),
+    })
+    assert.equal(other.ok, true, `放开句柄后仍然装不上：${other.code} ${other.message}`)
+    assert.equal(readActiveRuntime({ dataDir: f.dataDir }).version, '0.1.7')
+  })
+})
+
+// ============================================================================
+// 九、进度面：本线程被 `spawnSync` 挡住的这几分钟里，**别人**读得到什么
+//
+// 这一节的判断对象只有一句：**进度是真的活的，还是跑完才有的。**
+//
+//   > 一个"跑完之后 stderr 全文可见"的运行器，
+//   > 与一个"跑的过程中就能被读到"的运行器，在成功的那次运行里是同一个东西——
+//   > 只不过在卡住的那一次里，前者是十分钟的静默。
+//
+// `installRuntime` 是同步的（`cli.mjs` 同步调用它），所以本进程在 npm 跑的时候
+// **不可能**报进度。于是这一节不去断言"有个回调被调了"（那可以是被伪造的），
+// 而是起一个**真的第二个进程**去看那个日志文件：如果它在第一个进程还阻塞着的时候
+// 就读到了"前半段"，那么"边产生边可见"这件事就被证明了。
+//
+// 这一节用的每一句断言都能在两个方向上错：把它改成"文件最终存在"会红，
+// 改成"文件里有全部内容"也会红——因为那条断言在"跑完才写"的实现下同样成立。
+// ============================================================================
+
+/** 同步睡（测试里阻塞主线程是**故意**的：那正是被测的那种处境）。 */
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+/** 轮询等一个文件出现（有上限；超时就返回 false）。 */
+function waitForFile(path, timeoutMs = 15_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (existsSync(path)) return true
+    sleepSync(50)
+  }
+  return false
+}
+
+describe('PRT-257 进度面：npm 输出边产生边可见', () => {
+  test('★★★★★ 注入的 spawn 拿到的是**继承的文件描述符**，不是管道', () => {
+    const root = tempRoot('log-fd')
+    const logPath = join(root, 'npm-install.log')
+    let seen = null
+    const runner = createNpmRunner({
+      // 假 spawn：把字节**真的**写进那个 fd 号（就像子进程会做的那样）。
+      spawn: (file, args, opts) => {
+        seen = { file, args, opts }
+        const fd = opts.stdio[1]
+        assert.equal(typeof fd, 'number', `stdio[1] 不是文件描述符：${JSON.stringify(opts.stdio)}`)
+        assert.equal(opts.stdio[0], 'ignore')
+        assert.equal(opts.stdio[1], opts.stdio[2], 'stdout 与 stderr 应当合流到同一个 fd')
+        writeFileSync(join(root, 'probe'), '')
+        appendFileSync(fd, 'npm http fetch GET 200\n')
+        appendFileSync(fd, 'added 1 package\n')
+        return { status: 0, stdout: '', stderr: '', error: undefined }
+      },
+    })
+    const res = runner({ file: 'npm', args: ['install'] }, { cwd: root, logPath })
+    assert.equal(res.ok, true)
+    assert.equal(seen.opts.stdio.length, 3)
+    assert.equal(res.logPath, logPath)
+    assert.equal(res.logsCombined, true, 'stdout/stderr 合流这件事必须被说出来')
+    assert.equal(res.stdout, '', '合流之后 stdout 不再单独可得')
+    assert.match(res.stderr, /npm http fetch GET 200/)
+    assert.match(res.stderr, /added 1 package/)
+    assert.equal(res.invocation.logPath, logPath)
+    // 日志文件真的在磁盘上（不是"我们以为写了"）。
+    assert.match(readFileSync(logPath, 'utf8'), /added 1 package/)
+  })
+
+  test('★★★★ 不传 logPath 时**完全不改**原来的形状（管道 + stdout/stderr 分开）', () => {
+    let seen = null
+    const runner = createNpmRunner({
+      spawn: (file, args, opts) => {
+        seen = { file, args, opts }
+        return { status: 0, stdout: 'out', stderr: 'err', error: undefined }
+      },
+    })
+    const res = runner({ file: 'npm', args: ['install'] }, { cwd: '.' })
+    assert.deepEqual(seen.opts.stdio, ['ignore', 'pipe', 'pipe'])
+    assert.equal(res.stdout, 'out')
+    assert.equal(res.stderr, 'err')
+    assert.equal(res.logPath, null)
+    assert.equal(res.logsCombined, false)
+  })
+
+  test('★★ 日志开不出来**不算安装失败**（宁可没有进度面，也不能因此装不上）', () => {
+    const runner = createNpmRunner({
+      spawn: () => ({ status: 0, stdout: '', stderr: '', error: undefined }),
+    })
+    const root = tempRoot('log-unopenable')
+    // 两种开不出来的方式，都必须落到同一档：
+    //  ① 日志路径**是个目录**（Windows 上 `openSync(dir,'a')` 会成功——所以只
+    //     "openSync 没抛"不足以说明写得出日志）；
+    //  ② 父路径**是个文件**（`mkdirSync` 必然失败）。
+    for (const logPath of [root, join(root, 'blocker', 'npm.log')]) {
+      if (logPath !== root) writeFileSync(join(root, 'blocker'), 'not a directory\n', 'utf8')
+      const res = runner({ file: 'npm', args: ['install'] }, { cwd: root, logPath })
+      assert.equal(res.ok, true, `日志写不进去竟然让安装失败了（${logPath}）`)
+      assert.equal(res.logPath, null, `${logPath} 被当成了可用的日志：${res.logPath}`)
+      assert.equal(typeof res.logError, 'string')
+      assert.equal(res.logBytes, 0)
+    }
+  })
+
+  test('★★★★★ 真的第二个进程在**本线程还阻塞着**的时候读到了前一半', () => {
+    const root = tempRoot('live-progress')
+    const logPath = join(root, 'npm-install.log')
+    const observationsPath = join(root, 'observations.json')
+    const donePath = join(root, 'watcher-done')
+    const childPath = join(root, 'slow-npm.mjs')
+    const watcherPath = join(root, 'watcher.mjs')
+
+    // 假 npm：先吐前半段，**卡住** 1.5 秒，再吐后半段并退出。
+    writeFileSync(childPath, [
+      "process.stdout.write('PHASE-ONE\\n')",
+      'setTimeout(() => { process.stdout.write(\'PHASE-TWO\\n\'); process.exit(0) }, 1500)',
+    ].join('\n'), 'utf8')
+    // 观察者：每 50ms 读一次日志文件，把每一次读到的**全文**记下来。
+    writeFileSync(watcherPath, [
+      "import { existsSync, readFileSync, writeFileSync } from 'node:fs'",
+      `const log = ${JSON.stringify(logPath)}`,
+      `const out = ${JSON.stringify(observationsPath)}`,
+      `const done = ${JSON.stringify(donePath)}`,
+      'const seen = []',
+      'const deadline = Date.now() + 20000',
+      'while (Date.now() < deadline) {',
+      '  if (existsSync(log)) seen.push(readFileSync(log, "utf8"))',
+      '  if (seen.some((s) => s.includes("PHASE-TWO"))) break',
+      '}',
+      'writeFileSync(out, JSON.stringify(seen))',
+      'writeFileSync(done, "1")',
+    ].join('\n'), 'utf8')
+
+    // 观察者**先起**，而且是**异步**起的（`spawn`，不是 `spawnSync`）：
+    // 它必须在主线程被那 1.5 秒的 `spawnSync` 挡住的时候**同时**在跑。
+    // stdio 全部 `ignore`：不经管道，也就不会留下一个握着管道句柄的孤儿。
+    const watcher = spawn(process.execPath, [watcherPath], { stdio: 'ignore', windowsHide: true })
+    let watcherExited = false
+    watcher.on('exit', () => { watcherExited = true })
+    try {
+      const runner = createNpmRunner()
+      const beganAt = Date.now()
+      const res = runner({ file: process.execPath, args: [childPath] }, { cwd: root, logPath })
+      const finishedAt = Date.now()
+      assert.equal(res.ok, true, `假 npm 没跑成：${res.status} ${res.error ?? ''}`)
+      assert.ok(finishedAt - beganAt >= 1400,
+        `它根本没有阻塞住（${finishedAt - beganAt}ms）——这一条就证明不了"主线程还阻塞着"`)
+
+      const sawDone = waitForFile(donePath, 20_000)
+      assert.equal(sawDone, true, '观察者没有收尾（它是独立的进程，不该被本进程的阻塞影响）')
+      const seen = JSON.parse(readFileSync(observationsPath, 'utf8'))
+      assert.ok(seen.length >= 2, `观察者只读了 ${seen.length} 次，这条断言证明不了"边产生边可见"`)
+      // ★ 核心断言：观察者读到过**只有前半段**的那个中间态。
+      //   一个"跑完才落盘"的实现下，它只会读到完整的两段（或者读到空）——
+      //   也就是 `sawPartial` 恒为 false。
+      const sawPartial = seen.some((s) => s.includes('PHASE-ONE') && !s.includes('PHASE-TWO'))
+      assert.equal(sawPartial, true,
+        `没有任何一次读数落在"前半段已写、后半段未写"之间：${JSON.stringify(seen)}`)
+      // 而最终的日志里两段都在（它同时仍然是"错误详情"）。
+      assert.match(readFileSync(logPath, 'utf8'), /PHASE-ONE[\s\S]*PHASE-TWO/)
+    } finally {
+      // 观察者自己会退，但**无论它退没退**都要收干净：一个还在轮询的孤儿进程
+      // 比一条红的断言更糟（它会在整个测试跑完之后才消失）。
+      if (watcherExited !== true) { watcher.kill(); }
+    }
+  })
+
+  test('★★★★ installRuntime 把进度日志落在版本目录里，并把它报成一条读数', () => {
+    const f = fixture('integration-log')
+    const root = tempRoot('integration-log-root')
+    const realRunner = createNpmRunner({
+      spawn: (file, args, opts) => {
+        // 只做"假 npm"该做的事：写几行输出到进度面，再把包写进 prefix。
+        appendFileSync(opts.stdio[1], 'npm http fetch GET 200\nadded 1 package\n')
+        const spec = args[args.length - 1]
+        const at = spec.lastIndexOf('@')
+        const pkg = spec.slice(0, at)
+        const ver = spec.slice(at + 1)
+        const prefix = args[args.indexOf('--prefix') + 1]
+        const dir = join(prefix, NODE_MODULES_DIRNAME, ...pkg.split('/'))
+        mkdirSync(join(dir, 'lib'), { recursive: true })
+        writeFileSync(join(dir, 'package.json'), `${JSON.stringify({ name: pkg, version: ver })}\n`, 'utf8')
+        writeFileSync(join(dir, 'lib', 'bin.js'), '// 假的 DSH 入口（用例造的）\n', 'utf8')
+        return { status: 0, stdout: '', stderr: '', error: undefined }
+      },
+    })
+    const plan = planFor(f)
+    const res = installRuntime({ plan, runner: realRunner })
+    assert.equal(res.ok, true, `${res.code} ${res.message}`)
+    // ① 结果里有 `npmLog` 这一条读数，位置在版本目录里（可写面之内）。
+    assert.ok(res.npmLog !== null, '成功路径上没有 npmLog 读数')
+    assert.equal(res.npmLog.path, join(plan.versionDir, NPM_LOG_FILENAME))
+    assert.equal(res.npmLog.combined, true)
+    assert.ok(res.npmLog.bytes > 0)
+    assert.ok(isPathInside(plan.versionDir, res.npmLog.path), '进度日志落在了版本目录之外')
+    // ② `stages` 里也留了一条，事后复盘能指着它说话。
+    assert.ok(res.stages.some((s) => s.stage === 'npm-log' && s.ok === true))
+    // ③ 失败时这条读数照样在（那时它最有用）。
+    const f2 = fixture('integration-log-fail')
+    const plan2 = planFor(f2)
+    const failing = createNpmRunner({
+      spawn: (file, args, opts) => {
+        appendFileSync(opts.stdio[2], 'npm ERR! code EAI_AGAIN\n')
+        return { status: 1, stdout: '', stderr: '', error: undefined }
+      },
+    })
+    const bad = installRuntime({ plan: plan2, runner: failing })
+    assert.equal(bad.ok, false)
+    assert.match(bad.message, /EAI_AGAIN/, '日志尾部的错误详情没有被带进失败文案')
+    assert.equal(bad.npmLog.path, join(plan2.versionDir, NPM_LOG_FILENAME))
   })
 })

@@ -179,19 +179,20 @@
 
 ---
 
-## 4. 仍待采集
+## 4. 采集状态：`estimated-cost` 已结清，`peak-resource` 仍阻塞
 
-以下两项**没有数值**，且本工具拒绝为它们编造数值。理由：阶段 3 会拿这些数字判断
-新路径是否性能回退；一个编造的基线会让回退看起来正常，比没有基线更糟。
+`estimated-cost` **已结清**（2026-09-15，见 §5）。剩下一项**没有数值**，且本工具
+拒绝为它编造数值。理由：阶段 3 会拿这些数字判断新路径是否性能回退；一个编造的
+基线会让回退看起来正常，比没有基线更糟。
 
-| 项 | 内容 | 阻塞原因 |
+| 项 | 内容 | 状态 |
 | --- | --- | --- |
-| `estimated-cost` | 黄金任务费用估算 | token **已采集**；仍缺**有来源的单价**——自建网关 `custom-ds` 无公开报价，`PRICING.asOf` 仍是 `UNSET`。`estimateCost()` 在单价缺失时返回 `null` 而不是 `0` |
-| `peak-resource` | 峰值内存与 CPU | DSH 会话转录**不记录**进程资源；需在执行期外部采样，且目标平台取决于 **PRT-011 分发形态裁决**（Task 4 待业主裁决） |
+| `estimated-cost` | 黄金任务费用估算 | ✅ 结清：`$0.045086 USD`（记录时刻 basis；不看缓存、不挑时段的默认上界 = `$0.549772`）。由 `--pending` 从证据文件的模型与 token × 记录价目表**重算**，数字不抄进代码。见 §5 |
+| `peak-resource` | 峰值内存与 CPU | ⛔ 仍阻塞：DSH 会话转录**不记录**进程资源；需在执行期外部采样，且目标平台取决于 **PRT-011 分发形态裁决**（Task 4 待业主裁决） |
 
-> 这两项的阻塞原因都已**不再是**「需要一次真实执行」——那个理由已经被用掉了。
+> 唯一仍阻塞的那一项，原因**不是**「需要一次真实执行」——那个理由已经被用掉了。
 > 清单长期挂着同一个理由，读的人会默认它没变，清单就成了噪音；
-> 因此 `baseline-measure.test.mjs` 有一条用例专门断言这两条的原因里不再出现
+> 因此 `baseline-measure.test.mjs` 有一条用例专门断言阻塞项的原因里不再出现
 > 「需要一次真实执行」。
 
 采集命令：`node scripts/prt/baseline-measure.mjs --pending`（逐项列出结清状态、
@@ -209,17 +210,71 @@
 
 ## 5. 费用模型
 
-单价表在 `baseline-measure.mjs` 的 `PRICING` 中，**是数据而不是代码**：单价随供应商
-调整，必须独立于 Runtime Contract（spec §6.1 的 `usage.estimatedCostUsd` 由产品侧按
-该表计算）。
+### 5.1 表在哪、数字从哪来
 
-`estimateCost()` 在单价缺失时返回 **`null` 而不是 `0`**：`0` 会让「未配置单价」
-看起来像「免费」，进而让预算检查静默失效。该行为已由用例钉死。
+单价表**只有一份**：`runtime/contracts/price-table.mjs` 的 `DEEPSEEK_PRICE_TABLE`
+（`baseline-measure.mjs` 的 `PRICING` 与 `runtime/adapters/dsh/usage.mjs` 的 `PRICING`
+都直接引用它）。它是**记录的常量，不是运行时网络抓取**：
 
-当前 `asOf: UNSET`——**尚未填入任何真实报价**。GF-001 实测用到的两个模型
-（`deepseek-v4-pro-openai` / `deepseek-v4-flash-openai`）已登记在表中、单价留空，
-这样「缺哪个模型的价」本身可查，而不是连模型都找不到。填入时必须同时在本文档
-注明来源与日期。
+| 来源 URL | 页面 | 检索日期 | 币种 / 单位 | 版本号 |
+| --- | --- | --- | --- | --- |
+| `https://api-docs.deepseek.com/quick_start/pricing` | Models & Pricing | 2026-09-15 | USD，每 1M tokens | `deepseek-2026-09-15` |
+
+页面自己写着「Product prices may vary and DeepSeek reserves the right to adjust
+them」。所以 `version` / `effectiveAtMs` / `retrievedAt` 一起冻结进每条估算结果：
+**一张过期的价目表看得出来它是过期的**，而不是被当成权威。本模块不做任何网络
+请求——一个在估算费用时抓网页的实现，会把「这笔钱按哪版价算的」变成一次不可复现
+的运行时副作用。
+
+### 5.2 真实价格有两个轴，估算默认取**更贵**的那一支
+
+| 模型（页面命名） | 输入 cache hit（off-peak / peak） | 输入 cache miss | 输出 |
+| --- | --- | --- | --- |
+| `deepseek-flash`（`DeepSeek-V4.1-Flash`） | 0.003 / 0.006 | 0.15 / 0.3 | 0.6 / 1.2 |
+| `deepseek-v4-pro`（`DeepSeek-V4-Pro-0813`） | 0.022 / 0.044 | 0.66 / 1.32 | 1.98 / 3.96 |
+
+（每 1M tokens，USD。）peak 时段 = **01:00–04:00 与 06:00–10:00 UTC，周一至周五**
+——这条规则是**数据**（`DEEPSEEK_PEAK_RULE`），不是散文；其余时间 off-peak，
+off-peak 恰为 peak 的一半。
+
+估算默认 **peak + cache miss**（上界）。理由：预算闸门**少算** → 用户静默超支；
+**多算** → 提前拒绝、可见。要拿便宜的那一支，调用方必须**显式**声明
+（`atMs` = 知道这次调用的时刻；`tokensInCacheHit` = 知道输入里有多少命中缓存）。
+两者都不传，拿到的是上界，不是猜测。
+
+GF-001 那三段的 basis：执行发生在 **2026-09-11 12:36–12:43 UTC（周五，off-peak）**，
+证据又记录了 `cacheRead`，所以 `$0.045086` 是按记录时刻 + 真实缓存拆分算的；
+`$0.549772` 是"不看缓存、不挑时段"时预算闸门会用的上界。两者相差 **12 倍**，
+差在缓存（1,563,264 cacheRead vs 68,822 miss 输入）——这正是把两个数都写下来的理由。
+
+### 5.3 ⚠️ 一处必须写明的推断：网关 id 不是页面命名的名字
+
+GF-001 实际跑在自建网关 `custom-ds`（`https://fjbigmodel.fjdac.cn`）的
+`deepseek-v4-flash-openai` / `deepseek-v4-pro-openai` 上。**页面没有命名这两个 id。**
+表里把它们标成 `sourceKind: 'derived'`（按 `-openai` 端点后缀推导的别名），
+估算结果里带着这个标记（`priceSource.kind === 'derived'`），
+`price-table.test.mjs` 有一条用例钉死它们不得被标成 `page`。
+
+   > 「官方页面给这个模型报过价」与「我们按命名规则把它归到了那一档」不是一个事实。
+
+页面**直接命名**的四条是 `deepseek-flash`、`deepseek-v4-pro`，以及页面明确说
+「退役名、按 Flash 价计费」的 `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp`。
+推导别名是这张表里**唯一一处推断**。若认定「网关 id ≠ 官方 SKU」，正确动作是删掉
+那两条 derived 条目、让 `estimated-cost` 回到阻塞，而**不是**改数字。
+
+### 5.4 没有价的模型仍然是 `null`
+
+`estimateCost()` 在模型不在表中时返回 **`null` 而不是 `0`**：`0` 会让「未配置单价」
+看起来像「免费」，进而让预算检查静默失效。该行为既由合成表、也由真实表上的用例钉死
+（`deepseek-v9`、`glm-5.3-flash` 之类一律 `MODEL_NOT_PRICED`）。
+
+### 5.5 一处结构性缺陷（本批修掉）
+
+第一版 `estimateCost` 写成 `unitsIn * entry.perUnit + unitsOut * entry.perUnit`
+——**输入输出同一个单价**。真实表里这两个数不一样（Flash 0.15 / 0.60），所以那个
+形状**装不下**它本来要装的价格：要么低估输出、要么高估输入，**且不会报错**。
+现在一条 entry 可以给 `perUnitIn` + `perUnitOut`（老的单 `perUnit` 仍然可用），
+`price-table.test.mjs` 有一条用例断言"输入≠输出"在同 token 量下必须给出不同的数。
 
 ---
 

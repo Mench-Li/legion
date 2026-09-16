@@ -7,12 +7,19 @@
 //   - 代码与平台表面规模（可 diff、可归因）
 //   - SQLite 库规模与行数（读现有 DB 或临时空库）
 //   - 进程就绪延迟与常驻内存（真实启动 team-hub 子进程并采样）
-//   - 费用模型的**输入**（token 单价表 + 估算式）
+//   - 费用估算（记录价目表 × 证据里的真实 token 数；2026-09-15 起有来源）
 //
 // 明确**不**做的事：不伪造 token / 费用 / 端到端耗时的具体数值。
 // 这三个量必须有一次真实的模型执行才能得到。本工具把它们的「采集协议」落成
 // 可执行条目（见 --pending），而不是填一个估算值冒充基线——一个编造的基线
 // 比没有基线更糟：阶段 3 会拿它当性能回退的判据。
+//
+// ── 2026-09-15：`estimated-cost` 结清 ──
+//
+// 原来它挂在"没有**有来源**的单价"上。现在有一张记录了来源 URL 与检索日期的
+// 价目表（`runtime/contracts/price-table.mjs`），于是这一项可以**从证据文件重算**：
+// 数字不抄进代码，只把模型与 token 从证据里读出来，价格从记录表里取。
+// 表里没有的模型依然返回 null（→ 仍记待采集），绝不返回 0。
 //
 // 用法：
 //   node scripts/prt/baseline-measure.mjs --record    # 采集并写入 JSON + markdown
@@ -28,6 +35,8 @@ import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { DEEPSEEK_PRICE_TABLE, estimateCost as estimateCostFromTable, isPriceTable } from '../../runtime/contracts/price-table.mjs'
+
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const OUT_JSON = join(ROOT, 'docs', 'superpowers', 'prt', 'prt-009-baseline.json')
 const rel = (p) => relative(ROOT, p).split(sep).join('/')
@@ -35,33 +44,103 @@ const rel = (p) => relative(ROOT, p).split(sep).join('/')
 /**
  * 单模型费用估算表。**这是数据而不是代码**：单价会随供应商调整，
  * 因此必须独立于契约（spec §6.1 的 `usage.estimatedCostUsd` 由产品侧按本表计算）。
- * 表中数值为「每百万 token 美元」，采集时必须注明来源与生效日期。
  *
- * ## 为什么三个模型的价格至今仍是 null
+ * ## 2026-09-15：不再留空
+ *
+ * 这里曾经是一张全是 `null` 的表。现在表来自 `runtime/contracts/price-table.mjs`
+ * 的 `DEEPSEEK_PRICE_TABLE`：来源 URL、检索日期、模型版本串、peak/off-peak 规则
+ * 都在那里，**只有一份**。
+ *
+ * 本文件不再自带第二套单价形状：两套形状必然漂移，而"两个模块对同一笔用量
+ * 给出两个不同的数"不会有任何报错——它只会在对账时变成两笔对不上的钱。
+ *
+ * ## 历史（保留，因为它解释了为什么"留空"曾经是正确答案）
  *
  * GF-001 走的是自建网关 `custom-ds`（`https://fjbigmodel.fjdac.cn`），
- * **没有公开报价**可引用。填一个「看起来合理」的数字比留空更危险：
+ * **当时没有公开报价**可引用。填一个「看起来合理」的数字比留空更危险：
  * `estimateCost` 会返回它，预算检查会当真，而它没有任何来源。
- * 所以这里只把**实际用到的模型 id 摆好**，等真实报价到位时补两个数字即可。
+ *
+ * 现在官方页面给了这两个模型的报价，但**网关 id 不是页面直接命名的名字**：
+ * 表里把 `deepseek-v4-flash-openai` / `deepseek-v4-pro-openai` 标成
+ * `sourceKind: 'derived'`（按 `-openai` 端点后缀推导的别名）。估算结果里会带着
+ * 这个标记——"官方页面给这个模型报过价"与"我们按命名规则把它归到了那一档"
+ * 不是一个事实。详见 docs/PRT-009-evidence/verify-evidence.md §5。
  */
-export const PRICING = Object.freeze({
-  $comment: '每百万 token 的美元单价。填入实际供应商报价并在 evidence 中注明来源与日期。',
-  asOf: 'UNSET',
-  currency: 'USD',
-  perMillionTokens: Object.freeze({
-    // GF-001 实测用到的两个模型（自建网关，无公开报价 → 保持 null）
-    'deepseek-v4-flash-openai': Object.freeze({ input: null, output: null }),
-    'deepseek-v4-pro-openai': Object.freeze({ input: null, output: null }),
-    'example-model-x': Object.freeze({ input: null, output: null }),
-  }),
-})
+export const PRICING = DEEPSEEK_PRICE_TABLE
 
-/** 由 token 用量与单价表计算费用；单价缺失时返回 null 而不是 0。 */
+/**
+ * 由 token 用量与单价表计算费用；单价缺失时返回 null 而不是 0。
+ *
+ * 算术只有一处：契约的 `estimateCost`。这里只负责把"表不认识 / token 缺失"
+ * 变成 `null`——**不吞成一个数**。
+ */
 export function estimateCost({ tokensIn, tokensOut, model }, pricing = PRICING) {
-  const entry = pricing.perMillionTokens[model]
-  if (!entry || entry.input === null || entry.output === null) return null
-  const cost = (tokensIn / 1e6) * entry.input + (tokensOut / 1e6) * entry.output
-  return Number(cost.toFixed(6))
+  if (!isPriceTable(pricing)) return null
+  const est = estimateCostFromTable({ priceTable: pricing, model, tokensIn, tokensOut })
+  return est.ok ? est.amount : null
+}
+
+/**
+ * 从 GF-001 证据文件重算黄金流程的费用。
+ *
+ * 为什么**不把数字抄进代码**：抄一次就多一处会与源漂移的副本，而且抄来的数字
+ * 事后没人能重算。这里只认证据文件里记的模型与 token，价格来自记录表——
+ * 于是"这个数是怎么来的"永远可复现。
+ *
+ * ⚠️ 两处保留必须写在明面上：
+ *   ① 证据里的 `tokens.input` **不含** cacheRead（reportedTotal = input + output +
+ *      cacheRead）。所以 `tokensIn = input + cacheRead`，`cacheRead` 作为缓存命中数
+ *      ——用上了记录里真实存在的缓存读数，而不是把它当成 0。
+ *   ② 证据里的模型是 custom-ds 网关 id（`*-openai`），记录表把它们标为
+ *      `sourceKind: 'derived'`。这里如实写进结果串。
+ *
+ * 两笔数一起给：
+ *   · `recorded` —— 按证据里每段执行的 `startedAt` 判时段（UTC 墙钟）、
+ *     并按真实缓存命中拆分输入；
+ *   · `ceiling`  —— 契约估算的**默认 basis**（peak + 全 miss），不依赖时间戳推导。
+ * 前者是这次执行的花费，后者是"不看缓存、不挑时段"时预算闸门会用的上界。
+ *
+ * 返回 `null`（→ 该项仍记为待采集）当且仅当没有任何一段能找到价。
+ */
+export function estimateGoldenFlowCost(evidence) {
+  const runs = evidence?.execution?.runs
+  if (!Array.isArray(runs) || runs.length === 0) return null
+  let recorded = 0
+  let ceiling = 0
+  let pricedRuns = 0
+  const models = new Set()
+  const sourceKinds = new Set()
+  for (const run of runs) {
+    const input = run?.tokens?.input
+    const output = run?.tokens?.output
+    if (typeof run?.model !== 'string' || typeof input !== 'number' || typeof output !== 'number') continue
+    const cacheRead = typeof run?.tokens?.cacheRead === 'number' ? run.tokens.cacheRead : 0
+    const parsed = typeof run?.startedAt === 'string' ? Date.parse(run.startedAt) : Number.NaN
+    const common = {
+      priceTable: PRICING,
+      model: run.model,
+      tokensIn: input + cacheRead,
+      tokensOut: output,
+    }
+    const exact = estimateCostFromTable({
+      ...common,
+      tokensInCacheHit: cacheRead,
+      atMs: Number.isFinite(parsed) ? parsed : null,
+    })
+    if (!exact.ok) continue
+    const upper = estimateCostFromTable(common) // 默认 basis：peak + 全 miss
+    models.add(run.model)
+    sourceKinds.add(exact.priceSource.kind)
+    recorded += exact.amount
+    ceiling += upper.ok ? upper.amount : exact.amount
+    pricedRuns += 1
+  }
+  if (pricedRuns === 0) return null
+  const fmt = (n) => `$${n.toFixed(6)}`
+  const origin = sourceKinds.has('derived') ? '含推导别名' : '页面直接命名'
+  return `${fmt(recorded)} ${PRICING.currency}（记录时刻 basis：`
+    + `${pricedRuns} 段、模型 ${[...models].join('/')}、价目表 ${PRICING.version}@${PRICING.retrievedAt}、${origin}；`
+    + `不看缓存/不挑时段的默认上界 peak+全 miss = ${fmt(ceiling)}）`
 }
 
 // ---------------------------------------------------------------- 静态规模
@@ -226,9 +305,12 @@ export const PENDING_ITEMS = Object.freeze([
   Object.freeze({
     key: 'estimated-cost',
     what: '黄金任务的费用估算',
-    how: '用本次 token 用量 × PRICING.perMillionTokens[model] 计算（estimateCost）',
-    blockedBy: 'token 已采集；仍缺**有来源**的单价——自建网关无公开报价，PRICING.asOf 仍是 UNSET',
-    resolvedBy: null,
+    how: 'node scripts/prt/baseline-measure.mjs --pending（从 GF-001 证据的模型与 token × 记录价目表重算，数字不抄进代码）',
+    blockedBy: '证据里的模型不在记录价目表内时仍无值——价目表里没有的模型 = 没有价，不是 0',
+    resolvedBy: Object.freeze({
+      file: 'docs/superpowers/prt/prt-009-gf001-execution.json',
+      extract: (j) => estimateGoldenFlowCost(j),
+    }),
   }),
   Object.freeze({
     key: 'end-to-end-latency',

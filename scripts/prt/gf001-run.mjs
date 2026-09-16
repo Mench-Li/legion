@@ -743,7 +743,10 @@ export async function executionEvidence({ hub = HUB, goalId = null, sessionsRoot
       },
       {
         key: 'estimated-cost',
-        why: 'token 已采集，但无**有来源**的单价（PRICING.asOf = UNSET）；估算公式在 baseline-measure.mjs::estimateCost',
+        why: '本文件只落 token 用量，不在这里换算费用。2026-09-15 起有来源的单价已记录在 '
+          + 'runtime/contracts/price-table.mjs（DEEPSEEK_PRICE_TABLE），费用由 '
+          + 'baseline-measure.mjs::estimateGoldenFlowCost 从本文件的模型与 token **重算**；'
+          + '见 docs/PRT-009-evidence/verify-evidence.md §5',
       },
     ],
   }

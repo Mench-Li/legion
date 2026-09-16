@@ -109,6 +109,107 @@ export const DOCTOR_CODES = Object.freeze({
 
 const asArray = (v) => (Array.isArray(v) ? v : [])
 
+// ============================================================================
+// PRT-257：**运行时安装**这一项检查（`runtime-install`）
+//
+// 在加上它之前，这个产品的"修复入口"里**没有**运行时安装的位置：
+// `doctorReport()` 认得的是"组合层自检没过的那几项"，而"DSH 到底装没装、
+// 装的是哪一版、指针指着一个装完的目录还是一个半装的目录"这件事，
+// 在整个 doctor 词汇表里出现次数是 **0**。
+//
+//   > 一个能报出"强制面没生效"、却报不出"执行引擎根本没装"的体检，
+//   > 与一个只查了半个体检项目的入口，在用户手上是同一个东西——
+//   > 只不过前者的报告看起来很完整。
+//
+// ## 它是**第二份**读数，不是第一份的替代
+//
+// 本模块原来的那条纪律不变：诊断结论**只从 `plan` / `refusal` 来**，
+// 拿不到就是 `NO_DIAGNOSIS`（退出 3）。运行时安装读数走**另一条**通道
+// （`input.runtimeInstall`，一个 `readActiveRuntime()` 的产物），因为两者
+// 证明的确实是两件事：
+//
+//   · 组合层自检：强制面（hard floor / pre-execute / approval answerer）**生没生效**；
+//   · 运行时安装：字节**装没装对**、现役是哪一版、指针可不可用。
+//
+// 所以"安装读数是绿的"**永远**不能把 `NO_DIAGNOSIS` 变成 `CLEAN`——
+// 那正是"两个各自绿了的半边"最容易合出来的那个假结论。
+// 反方向可以：一份全过的自检 + 一个没装好的运行时 ⇒ 至少是 `ACTIONABLE`，
+// 因为"强制面生效了"这句话是在**某个** DSH 进程里成立的，
+// 而它未必是我们自己装的那一个（实测：`state === 'absent'` 时产品仍然能用
+// 操作员自己的 DSH 起来）。
+// ============================================================================
+
+/** 检查项名。落进报告，也是"这一项是什么"的唯一标识。 */
+export const RUNTIME_INSTALL_CHECK = 'runtime-install'
+
+/**
+ * 现役运行时的四态各自的**下一步**。
+ *
+ * 与 `runtime-install.mjs` 的 `RUNTIME_INSTALL_CODES` 用同一套 `state` 值
+ * （`absent` / `unreadable` / `broken` / `active`），但那两处刻意**不互相 import**：
+ * 这里是 doctor 的词汇表，那边是安装器的码表，两边各有各的消费者。
+ * 代价是可能漂移——所以用例里有一条拿**真的** `readActiveRuntime()` 产物喂进来。
+ */
+const RUNTIME_INSTALL_NEXT_STEP = Object.freeze({
+  absent: '还没有装过运行时：先跑 `--runtime-install-plan --runtime-manifest=<产品版本清单>` 看计划，'
+    + '确认之后再跑 `--runtime-install`。注意**本仓库不随发任何一份 §9.1 清单**，那一份要由发布流程产出',
+  broken: '指针指着一次没装完的安装：重装那个版本（下一次安装会删掉没有完成标记的目录），'
+    + '或者用 `rollback` 切回上一个版本——指针没动的时候旧版本仍然现役',
+  unreadable: '指针文件读不懂（不是 JSON / 不是本产品写的形状）：'
+    + '先看懂它为什么坏，再重装那个版本；不要让一个读不懂的指针留在磁盘上',
+  active: '不需要修',
+})
+
+/**
+ * 把一次**现役运行时读数**翻成一个 doctor 计划项。**零 IO**：读数从入参来。
+ *
+ * @param {object|null} reading `readActiveRuntime()` 的产物
+ * @returns {object|null} 计划项；读数缺席时 `null`（"没给"与"给了个坏的"必须分开）
+ */
+export function runtimeInstallCheckItem(reading) {
+  if (reading === null || reading === undefined || typeof reading !== 'object') return null
+  const state = typeof reading.state === 'string' ? reading.state : null
+  const known = state !== null && Object.prototype.hasOwnProperty.call(RUNTIME_INSTALL_NEXT_STEP, state)
+  // ★ 三件事一起成立才算这一项过了：状态是 `active`、完成标记在、入口在。
+  //   只认 `state` 会让一个"状态字段对、磁盘不对"的读数被读成绿的；
+  //   只认 `entryExists` 会让一个"入口恰好还在"的半装目录被读成绿的。
+  const ok = known && state === 'active' && reading.complete === true && reading.entryExists === true
+
+  const reasons = []
+  if (!known) {
+    // 未知 / 畸形读数：**不许绿**。一个"读不出状态就当没问题"的体检，
+    // 与一个没做这项体检的入口，在报告上是同一个东西。
+    reasons.push(`读数畸形：没有可识别的 state（拿到的是 ${JSON.stringify(state)}）。`
+      + '这一档**不能当作通过**——它说明读这份读数的人与写它的人对不上')
+  } else {
+    reasons.push(state === 'active'
+      ? `读数：现役 DSH ${reading.version ?? '?'}（补丁层 ${reading.patchVersion ?? '未记录'}）`
+      : `读数：state=${state}`)
+    if (typeof reading.pointerPath === 'string') reasons.push(`指针：${reading.pointerPath}`)
+    if (typeof reading.entryPath === 'string') {
+      reasons.push(`入口：${reading.entryPath}（在磁盘上：${reading.entryExists === true}）`)
+    }
+    if (typeof reading.dir === 'string') reasons.push(`版本目录：${reading.dir}（完成标记：${reading.complete === true}）`)
+    if (typeof reading.message === 'string' && reading.message !== '') reasons.push(`读数自己说：${reading.message}`)
+    if (!ok) reasons.push(`下一步：${RUNTIME_INSTALL_NEXT_STEP[state] ?? '（没有预置的下一步）'}`)
+  }
+
+  return Object.freeze({
+    check: RUNTIME_INSTALL_CHECK,
+    ok,
+    // 刻意**不**编一个修法动作名：本模块原来就写着"编出来的修法是猜的，
+    // 而猜的修法会让人照着做"。真实可执行的下一步在上面的 `reasons` 里，
+    // 渲染器会把 `inspect-manually` 的项连 `reasons` 一起打出来。
+    action: 'inspect-manually',
+    label: 'DSH 运行时的安装状态（指针 / 完成标记 / 入口三者）',
+    why: '这一项说的是"执行引擎到底装没装、装的是哪一版、现役指针可不可用"。'
+      + '它与组合层自检证明的不是同一件事：自检说的是强制面**生没生效**，'
+      + '这一项说的是字节**装没装对**——两件事都成立，产品才算真的能跑；'
+      + '而"两个各自绿了的半边"恰好是这两件事各自为真、合起来不成立的模样。',
+    reasons: Object.freeze(reasons),
+  })
+}
+
 /**
  * 从一堆可能的输入里取出**唯一**那份修复计划。
  *
@@ -146,15 +247,30 @@ export function planFrom(input = {}) {
  * @param {object} input
  * @param {object} [input.plan] `{ok, items}` —— 已经算好的修复计划
  * @param {object} [input.refusal] 拒绝值（`bindDshRuntime` 的产物）；会取它的 `repair`
- * @param {string} [input.source] 诊断是**从哪读来的**（`run-record` / `self-check` / …）。
+ * @param {object} [input.source] 诊断是**从哪读来的**（`run-record` / `self-check` / …）。
  *   落进报告：一个不说"这是哪来的一次诊断"的报告，在两次诊断之间分不开。
  * @param {string} [input.note] 来源自己要说的一句话（例如读不到的具名原因）
+ * @param {object} [input.runtimeInstall] `readActiveRuntime()` 的产物（PRT-257）。
+ *   **第二条读数**，不是第一条的替代：它只影响"要不要多报一项"，
+ *   永远不能把 `NO_DIAGNOSIS` 变成 `CLEAN`（理由见 `RUNTIME_INSTALL_CHECK` 那一节）。
  * @returns {object} 报告
  */
 export function doctorReport(input = {}) {
   const source = typeof input?.source === 'string' && input.source.trim() !== '' ? input.source.trim() : null
   const note = typeof input?.note === 'string' && input.note.trim() !== '' ? input.note.trim() : null
   const found = planFrom(input)
+  // 运行时安装这一项：**独立**算出来，然后按"它会不会改变结论"参与下面各支。
+  const installItem = runtimeInstallCheckItem(input?.runtimeInstall)
+  const installFailed = installItem !== null && installItem.ok !== true
+  const installLines = installItem === null
+    ? []
+    : [
+      '',
+      '另外，运行时的**安装**读数是这样的（它证明的是"字节装没装对"，'
+        + '**不能**替代上面那份组合层自检）：',
+      ...asArray(installItem.reasons).map((r) => `  · ${r}`),
+    ]
+  const installItems = installFailed ? [installItem] : []
 
   // 拒绝值**自己**有没有说"强制面未生效"。这是 `NO_PLAN` 与 `NO_DIAGNOSIS`
   // 分开的判据：两种都没有计划，但一种**知道**它坏了，另一种连知道都不知道。
@@ -182,6 +298,7 @@ export function doctorReport(input = {}) {
         '这是**产品侧的缺口**（拒绝该带上 `repair`），不是你操作错了。',
         '在此之前：按下面的回滚那条路走，或者人工看日志里那几项自检的名字。',
         ...(refusalReasons.length === 0 ? [] : ['拒绝给出的原因：', ...refusalReasons.map((r) => `  · ${r}`)]),
+        ...installLines,
       ],
     })
   }
@@ -189,6 +306,9 @@ export function doctorReport(input = {}) {
   // ── ③ 拿不到诊断 ────────────────────────────────────────────────────────
   // 这一支必须在**任何**"没发现问题"之前被判掉。顺序反过来就是那个假绿：
   // 一份读不到的诊断，会一路走到"没有待修项"。
+  //
+  // ★ 运行时安装读数是绿的也**不能**改这一支的结论。见 `RUNTIME_INSTALL_CHECK`：
+  //   "字节装对了"与"强制面生效了"是两件事，前者为真推不出后者。
   if (found === null) {
     return report({
       code: DOCTOR_CODES.NO_DIAGNOSIS,
@@ -204,6 +324,7 @@ export function doctorReport(input = {}) {
         '既不能说可以自动执行，也不能说该修哪一项。',
         note === null ? '（来源没有给出原因）' : `来源说：${note}`,
         '去做一次自检（把组合层装进一个 DSH 进程启动一次），再回来看这份报告。',
+        ...installLines,
       ],
     })
   }
@@ -234,29 +355,40 @@ export function doctorReport(input = {}) {
         '这是**产品侧的缺口**（拒绝该带上 `repair`），不是你操作错了。',
         '在此之前：按下面的回滚那条路走，或者人工看日志里那几项自检的名字。',
         ...(found.reasons.length === 0 ? [] : ['拒绝给出的原因：', ...found.reasons.map((r) => `  · ${r}`)]),
+        ...installLines,
       ],
     })
   }
 
   // ── ① 有待修项 ──────────────────────────────────────────────────────────
-  if (failed.length > 0) {
+  // 运行时安装那一项**并入**这里（而不是另开一个码）：它同样是"现在就有一件
+  // 要修的事"，而退出码的语义是"用户下一步该做什么"，不是"问题属于哪一类"。
+  if (failed.length > 0 || installFailed) {
+    const allFailed = [...failed, ...installItems]
     return report({
       code: DOCTOR_CODES.ACTIONABLE,
       exitCode: DOCTOR_EXIT.ACTIONABLE,
       source,
-      headline: `${failed.length} 项没通过：自动执行已被禁止，逐项修法如下`,
+      headline: `${allFailed.length} 项没通过：自动执行已被禁止，逐项修法如下`,
       forbidden: found.forbidden,
       patchVersion: found.patchVersion,
       state: found.state,
-      items: failed,
+      items: allFailed,
       lines: [
         // ★ 先把**操作后果**说清楚，再说怎么修。用户第一个要知道的不是"哪一项红了"，
         //   而是"我现在能不能用"——`line 278` 说只读面在 Runtime 不可用时继续开放。
         found.forbidden === true
           ? '当前状态：**自动执行已禁止**；只读的 Workbench 与 team-hub 仍然可用。'
           : '当前状态：这一份计划来自一次未生效的自检（自动执行被禁止）。',
+        // 只有运行时安装这一项没过时，把话说准：组合层自检**是过的**，
+        // 不这么说的话用户会去修一份本来就好的组合层。
+        ...(failed.length === 0
+          ? ['注意：组合层自检这一次是**全过**的。下面是另一个层面上的问题——' +
+             '执行引擎本身没装好，而"强制面生效"这句话只在**某个** DSH 进程里成立。']
+          : []),
         '修完之后重新做一次自检——这份报告证明的是**上一次**自检的结论。',
         '',
+        ...installLines,
       ],
     })
   }
@@ -271,7 +403,7 @@ export function doctorReport(input = {}) {
     patchVersion: found.patchVersion,
     state: found.state,
     items: [],
-    lines: ['没有任何一项需要修。'],
+    lines: ['没有任何一项需要修。', ...installLines],
   })
 }
 

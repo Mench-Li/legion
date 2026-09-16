@@ -52,6 +52,9 @@ import { readinessResultToDiagnostic, waitForReadiness } from './readiness.mjs'
 import { createSupervisor, defaultKillTree } from './supervisor.mjs'
 import { createLogSink } from '../logging/sink.mjs'
 import { createLauncherHeartbeat } from './heartbeat-wiring.mjs'
+// PRT-257：装完之后的下一跳。`runtime-command` 缺省不再是"没有"，
+// 而是"从现役指针里解析"（判据全在那个模块里，这里只调用）。
+import { DEFAULT_DSH_PROFILE, resolveRuntimeForLaunch } from './runtime-resolve.mjs'
 // 单实例锁（PRT-708）。**必须早于 `checkPreviousRun()`**——见 `start()` 里那段。
 import { SINGLE_INSTANCE_CODES, acquireSingleInstance } from './single-instance.mjs'
 import {
@@ -277,6 +280,17 @@ export function createLauncher({
   runtimeContractIntervalMs = 50,
   /** 发布文件的 fs（可注入；`null` = 真实 fs）。与 `logFs` / `overlayFs` 同一做法。 */
   publicationFs = null,
+  /**
+   * PRT-257 **装完之后的下一跳**：没有显式配置 runtime 命令时，从
+   * `<DataDir>/runtime/dsh/current.json` 里解析出装好的那个 DSH 入口。
+   *
+   * `dshProfile` 是 DSH 的 profile 名（见 `runtime-resolve.mjs` 里的实测：
+   * 不带 `--profile` 的入口会以退出码 1 结束）。缺省 `'web'` ——
+   * 那是 `dsh-overlay.mjs` 已经写着"`runtime.command` 里的模式"的那一个。
+   */
+  dshProfile = DEFAULT_DSH_PROFILE,
+  /** 解析现役指针用的 fs（可注入；`null` = 真实 fs）。 */
+  runtimeResolveFs = null,
 } = {}) {
   if (layout === null || typeof layout !== 'object') throw new Error('createLauncher 需要 layout（见 product/paths.mjs）')
 
@@ -297,8 +311,26 @@ export function createLauncher({
     fs: overlayFsOption ?? null,
   })
 
+  // ── PRT-257：装好的运行时**真的被用上**（`runtime-resolve.mjs`）────────
+  //
+  // 在 `materializeProcessPlan` **之前**算，因为它的产物要当 `runtimeCommand`。
+  // 在此之前，`runtime.command` 只能来自命令行或产品配置——安装器写下的
+  // `current.json` 从来没有任何生产代码读过，"我装好了"与"我跑的是它"
+  // 是两件事（详见 `runtime-resolve.mjs` 的文件头）。
+  //
+  // ★ 策略（配置赢 / 指针兜底 / 坏了就拦）全部落在 `resolveRuntimeForLaunch()`
+  //   里，而不是写在这一段。理由与 `resolveDshOverlay` 一样：**判据要能被
+  //   逐条断言**，而那件事不需要起一个 Launcher 就能验证。
+  const runtimeResolution = resolveRuntimeForLaunch({
+    runtimeCommand,
+    dataDir: layout.dataDir ?? null,
+    profile: dshProfile,
+    fs: runtimeResolveFs ?? null,
+    platform: layout.platform ?? process.platform,
+  })
+
   const plan = materializeProcessPlan({
-    layout, ports, runtimeCommand, nodePath,
+    layout, ports, runtimeCommand: runtimeResolution.command, nodePath,
     // `extraArgs` 的语义是"追加在 `runtime.command` 之后"。
     // `enabled === false` 时 `overlay.args` 是空数组，这里就等价于没接这一层——
     // 而那件事由 `overlay.diagnostics` 里那条 warn 记着。
@@ -483,6 +515,11 @@ export function createLauncher({
     // "没装上强制面"不该阻塞一次本来就不启动 runtime 的启动。
     // 这一条是白拿的，但前提是诊断里带对了 process。
     ...overlay.diagnostics,
+    // 装好的运行时（PRT-257）。三条读数各说各的事：
+    // "磁盘上那份没被用上"（warn）/ "磁盘上那份坏了但这次不靠它"（warn）/
+    // "磁盘上那份坏了、而这次正要靠它"（error，拦启动）。
+    // 与覆盖层同一条纪律：带 `process: 'runtime'`，于是受限范围下自动降级。
+    ...runtimeResolution.diagnostics,
     // 身份的完整性（PRT-214 续）。关掉覆盖层时它**刻意**什么都不说（见模块文件头）。
     ...enforcementIdentity.diagnostics,
     // `validateProcessPlan` 已经并入 `plan.diagnostics`，此处**不再**重复拼接：
@@ -1420,6 +1457,20 @@ export function createLauncher({
         //   装配失败时 `wired: false` 且 `code` 给出具体原因，
         //   同时 `allDiagnostics()` 里有对应的一条——三处都能看到，且互不矛盾。
         heartbeat: heartbeatStatus(),
+        // PRT-257：这一次启动的 runtime 命令**是从哪来的**。
+        //
+        // 为什么必须是一个可读的读数，而不是"反正命令跑起来了"：
+        // "用的是产品自己装的那一份"与"用的是配置里手写的那一条"
+        // 在进程列表、就绪判据、界面上**完全一样**。而它们的升级、
+        // 校验与回滚路径完全不同——一个只看"起没起来"的人，
+        // 会在升级 DSH 之后发现升级的其实是另一个副本。
+        runtimeEntry: Object.freeze({
+          source: runtimeResolution.used,
+          configured: runtimeResolution.given,
+          profile: runtimeResolution.resolution.profile,
+          command: runtimeResolution.command,
+          code: runtimeResolution.resolution.code,
+        }),
       })
     },
 

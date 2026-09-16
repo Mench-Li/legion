@@ -14,16 +14,21 @@
 // ============================================================================
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import {
   DOCTOR_CODES,
   DOCTOR_EXIT,
   DOCTOR_VERSION,
+  RUNTIME_INSTALL_CHECK,
   doctorReport,
   planFrom,
   renderDoctor,
 } from './doctor.mjs'
 import { REPAIR_ACTIONS, repairPlanFor } from '../../runtime/dsh-composition/bootstrap.mjs'
+import { readActiveRuntime } from './runtime-install.mjs'
 
 /** **自检**的一项：`name` / `ok` / `reasons`（`startupSelfCheck` 的形状）。 */
 const check = (name, ok, reasons = []) => ({ name, ok, reasons })
@@ -228,4 +233,162 @@ test('④ ★ 渲染器对畸形输入不抛（它可能被喂进任何东西）
   for (const v of [null, undefined, 0, '', 'x', []]) {
     assert.equal(typeof renderDoctor(v), 'string')
   }
+})
+
+// ═══════════════════════════════════════════ ⑤ PRT-257 运行时**安装**这一项
+//
+// 在此之前，doctor 的词汇表里"DSH 装没装"出现次数是 **0**：它能报出
+// "强制面没生效"，却报不出"执行引擎根本没装"。这一组用例守两件事：
+//   ① 那一项**确实**会出现在报告里，且带得出可执行的下一步；
+//   ② 它**永远不能**把 `NO_DIAGNOSIS` 说成 `CLEAN` ——
+//      "字节装对了"推不出"强制面生效了"，而把两者合成一个绿，
+//      正是本任务书点名的那类"两个各自绿了的半边"。
+
+/** `readActiveRuntime()` 的形状（四态），逐项可覆写。 */
+const reading = (state, extra = {}) => ({
+  state,
+  pointerPath: 'C:/data/runtime/dsh/current.json',
+  dir: state === 'active' ? 'C:/data/runtime/dsh/versions/0.1.5-rc.2' : null,
+  version: state === 'active' ? '0.1.5-rc.2' : null,
+  patchVersion: state === 'active' ? 1 : null,
+  entryPath: 'C:/data/runtime/dsh/versions/0.1.5-rc.2/node_modules/@deepseek-ai/dsh/lib/bin.js',
+  entryExists: state === 'active',
+  complete: state === 'active',
+  message: state === 'active' ? 'ok' : `${state}-读数`,
+  ...extra,
+})
+
+test('⑤ ★★★★ 装了、而且装完了 → 这一项**不算待修**，但那行读数仍然印得出来', () => {
+  const clean = doctorReport({ source: 'self-check', plan: repairPlanFor({ checks: [check('runtime-probe', true)] }) })
+  const r = doctorReport({
+    source: 'self-check',
+    plan: repairPlanFor({ checks: [check('runtime-probe', true)] }),
+    runtimeInstall: reading('active'),
+  })
+  assert.equal(r.code, DOCTOR_CODES.CLEAN, '一个装好的运行时不该把全过的自检变红')
+  assert.equal(r.exitCode, DOCTOR_EXIT.CLEAN)
+  assert.equal(clean.items.length, r.items.length)
+  // 但它不能被**静音**：绿的那一份读数也要印出来（否则"读了没读"分不出来）。
+  const text = renderDoctor(r)
+  assert.match(text, /0\.1\.5-rc\.2/)
+  assert.match(text, /字节装没装对/)
+})
+
+test('⑤ ★★★★★ 自检全过 + 运行时**没装** ⇒ ACTIONABLE（不能读成 CLEAN）', () => {
+  const r = doctorReport({
+    source: 'self-check',
+    plan: repairPlanFor({ checks: [check('runtime-probe', true)] }),
+    runtimeInstall: reading('absent'),
+  })
+  assert.equal(r.code, DOCTOR_CODES.ACTIONABLE)
+  assert.equal(r.exitCode, DOCTOR_EXIT.ACTIONABLE)
+  assert.equal(r.ok, false)
+  const item = r.items.find((i) => i.check === RUNTIME_INSTALL_CHECK)
+  assert.ok(item !== undefined, `报告里没有这一项：${JSON.stringify(r.items.map((i) => i.check))}`)
+  const text = renderDoctor(r)
+  // 下一步必须**可执行**：说得出跑哪条命令，而不是"请安装运行时"。
+  assert.match(text, /--runtime-install-plan/)
+  assert.match(text, /runtime-manifest/)
+  // 而且要说清组合层这一次是**全过**的——不说的话用户会去修一份本来就好的组合层。
+  assert.match(text, /组合层自检这一次是\*\*全过\*\*的/)
+})
+
+test('⑤ ★★★★★ 运行时读数**永远**不能把"没诊断"变成 CLEAN（退出码仍是 3）', () => {
+  for (const state of ['active', 'absent', 'broken', 'unreadable']) {
+    const r = doctorReport({ source: 'run-record', runtimeInstall: reading(state) })
+    assert.equal(r.code, DOCTOR_CODES.NO_DIAGNOSIS, `${state} 把没诊断变成了别的结论`)
+    assert.equal(r.exitCode, DOCTOR_EXIT.UNDIAGNOSED)
+    assert.equal(r.exitCode === 0, false)
+    // 但那份读数要印出来：它可能正是"为什么起不来"的答案。
+    assert.match(renderDoctor(r), /字节装没装对/)
+  }
+})
+
+test('⑤ ★★★★ 指针坏了 / 读不懂 ⇒ 这一项红，且带出**下一步**与现场读数', () => {
+  for (const state of ['broken', 'unreadable']) {
+    const r = doctorReport({
+      source: 'self-check',
+      plan: repairPlanFor({ checks: [check('runtime-probe', true)] }),
+      runtimeInstall: reading(state, { entryExists: false, complete: false }),
+    })
+    assert.equal(r.code, DOCTOR_CODES.ACTIONABLE)
+    const item = r.items.find((i) => i.check === RUNTIME_INSTALL_CHECK)
+    assert.ok(item !== undefined)
+    assert.equal(item.ok, false)
+    const blob = JSON.stringify(item)
+    // 现场读数：指针路径、入口路径、读数自己说的话——三条都必须在。
+    assert.match(blob, /current\.json/)
+    assert.match(blob, /bin\.js/)
+    assert.match(blob, new RegExp(`${state}-读数`))
+    // 下一步：没有预置修法的项走 `inspect-manually`，但**不能**因此没有内容。
+    assert.equal(item.action, 'inspect-manually')
+    assert.match(renderDoctor(r), /没有预置修法/)
+  }
+})
+
+test('⑤ ★★★★ 状态对、磁盘不对 ⇒ **不算过**（三项一起成立才算）', () => {
+  // 三种"字段对了一个"的假绿，每一种都必须红。
+  const fake = [
+    reading('active', { complete: false }),        // 目录没有完成标记
+    reading('active', { entryExists: false }),     // 入口文件不在
+    reading('active', { complete: null }),         // 完成标记**没说**
+  ]
+  for (const r0 of fake) {
+    const r = doctorReport({ source: 's', plan: repairPlanFor({ checks: [check('a', true)] }), runtimeInstall: r0 })
+    assert.equal(r.code, DOCTOR_CODES.ACTIONABLE,
+      `一个 ${JSON.stringify({ complete: r0.complete, entryExists: r0.entryExists })} 的读数被读成了通过`)
+  }
+})
+
+test('⑤ ★★★ 读数畸形（没有可识别的 state）⇒ **不许绿**', () => {
+  for (const bad of [{}, { state: 'ok' }, { state: null }, { state: 7 }]) {
+    const r = doctorReport({ source: 's', plan: repairPlanFor({ checks: [check('a', true)] }), runtimeInstall: bad })
+    assert.equal(r.code, DOCTOR_CODES.ACTIONABLE, `${JSON.stringify(bad)} 被当成了通过`)
+  }
+  // "没给这份读数"与"给了个坏的"是两回事：前者不影响结论。
+  const notGiven = doctorReport({ source: 's', plan: repairPlanFor({ checks: [check('a', true)] }) })
+  assert.equal(notGiven.code, DOCTOR_CODES.CLEAN)
+  assert.equal(notGiven.items.length, 0)
+})
+
+test('⑤ ★★★ 与生产对齐：喂 `readActiveRuntime()` 的**真产物**（不是手写的读数）', () => {
+  const root = mkdtempSync(join(tmpdir(), 'legion-doctor-rt-'))
+  try {
+    // ① 干净机器：真的读一次，得到一个真的 `absent`。
+    const empty = readActiveRuntime({ dataDir: join(root, 'empty') })
+    assert.equal(empty.state, 'absent')
+    const rAbsent = doctorReport({
+      source: 'self-check', plan: repairPlanFor({ checks: [check('runtime-probe', true)] }), runtimeInstall: empty,
+    })
+    assert.equal(rAbsent.code, DOCTOR_CODES.ACTIONABLE)
+    assert.ok(rAbsent.items.some((i) => i.check === RUNTIME_INSTALL_CHECK),
+      '真的 `absent` 读数没有让这一项红 —— 夹具与生产对不上')
+    // ② 指针坏了：真的写一份读不懂的指针，再读一次。
+    const dataDir = join(root, 'broken')
+    const runtimeRoot = join(dataDir, 'runtime', 'dsh')
+    mkdirSync(runtimeRoot, { recursive: true })
+    writeFileSync(join(runtimeRoot, 'current.json'), '{ 不是 JSON\n', 'utf8')
+    const unreadable = readActiveRuntime({ dataDir })
+    assert.equal(unreadable.state, 'unreadable')
+    const rUnreadable = doctorReport({
+      source: 'self-check', plan: repairPlanFor({ checks: [check('runtime-probe', true)] }), runtimeInstall: unreadable,
+    })
+    assert.equal(rUnreadable.code, DOCTOR_CODES.ACTIONABLE)
+    assert.match(JSON.stringify(rUnreadable.items), /current\.json/)
+    // ③ 这个模块**不许**自己碰磁盘：把 fs 换成只会抛的桩，读数照样出得来。
+    const exploding = { existsSync: () => { throw new Error('doctor 不该做 IO') } }
+    const rNoIo = doctorReport({
+      source: 's', plan: repairPlanFor({ checks: [check('a', true)] }), runtimeInstall: { ...empty, state: 'active', complete: true, entryExists: true },
+      fs: exploding,
+    })
+    assert.equal(rNoIo.code, DOCTOR_CODES.CLEAN)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('⑤ ★★ 检查项名是稳定字面量（报告里要能对上实现）', () => {
+  assert.equal(RUNTIME_INSTALL_CHECK, 'runtime-install')
+  const r = doctorReport({ source: 's', plan: { ok: true, items: [] }, runtimeInstall: reading('absent') })
+  assert.equal(r.items[0].check, RUNTIME_INSTALL_CHECK)
 })

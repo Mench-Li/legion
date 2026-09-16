@@ -262,11 +262,16 @@ test('③ 成功结果的 outcome/code/output 正确，usage 已采集', async (
   assert.equal(term.result.outcomeUnknown, false)
 })
 
-test('③ 未配置价格表时 estimatedCostUsd 为 null，不是 0', async () => {
+test('③ 模型不在记录价目表内时 estimatedCostUsd 为 null，不是 0', async () => {
   const a = await readyAdapter(hostOk({ ok: true }, { usage: { tokensIn: 120, tokensOut: 40 } }))
   const events = await collect(a, makeRequest())
   assert.equal(events.at(-1).result.usage.estimatedCostUsd, null)
-  assert.equal(PRICING.asOf, 'UNSET')
+  // 价目表已从 UNSET 迁到有来源的记录表：'没有价'现在是'这个模型不在表里'。
+  assert.equal(PRICING.version, 'deepseek-2026-09-15')
+  assert.equal(PRICING.retrievedAt, '2026-09-15')
+  // 同一张表上，表里有的模型**现在真的算出数**（PRT-207 的阻塞点）。
+  // 1M 输入、0 输出、默认 basis（peak + cache miss）→ 每百万 $0.3。
+  assert.equal(estimateCostUsd({ model: 'deepseek-flash', tokensIn: 1_000_000, tokensOut: 0 }), 0.3)
 })
 
 test('③ model.selected 不含 secretRef（引用名不进事件流）', async () => {
@@ -806,8 +811,10 @@ test('⑩ **token 用量不完整时不得判为「未超预算」**（缺的那
   assert.equal(checkBudget({ budget: { maxTokens: 10 }, usage: { tokensIn: 8, tokensOut: 8 } }).kind, 'tokens')
 })
 
-test('⑩ 价格表未生效或模型无价 → 费用为 null', () => {
+test('⑩ 模型无价 / 老形状价目表（含 asOf=UNSET）→ 费用为 null，兼容入口仍生效', () => {
+  // 默认表是记录的真实表，里面没有 'm' → "模型无价"，不是 0。
   assert.equal(estimateCostUsd({ model: 'm', tokensIn: 1e6, tokensOut: 1e6 }), null)
+  // 老形状 {asOf, models:{m:{inPerMTok,outPerMTok}}} 仍被接受：折进契约价目表后照常估算。
   const priced = { asOf: '2026-01-01', currency: 'USD', models: { m: { inPerMTok: 1, outPerMTok: 2 } } }
   assert.equal(estimateCostUsd({ model: 'm', tokensIn: 1e6, tokensOut: 1e6, pricing: priced }), 3)
   assert.equal(estimateCostUsd({ model: 'other', tokensIn: 1e6, tokensOut: 0, pricing: priced }), null)

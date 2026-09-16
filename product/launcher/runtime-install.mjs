@@ -120,8 +120,8 @@
 
 import { spawnSync } from 'node:child_process'
 import {
-  chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync,
-  rmSync, symlinkSync, unlinkSync, writeFileSync,
+  chmodSync, closeSync, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync,
+  renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync,
 } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 
@@ -177,6 +177,20 @@ export const COMPLETION_MARKER_FILENAME = 'install-complete.json'
 
 /** Node 的包目录名。 */
 export const NODE_MODULES_DIRNAME = 'node_modules'
+
+/**
+ * npm 输出的**进度日志**文件名（相对版本目录）。
+ *
+ * 为什么它必须真的存在，而不只是"我们想报进度"：`installRuntime` 是同步的，
+ * `spawnSync` 会把本线程挡到 npm 退出为止，所以这 600 秒里本进程报不出任何进度。
+ * 把 npm 的 stdout/stderr 直接交给两个**继承的文件描述符**，是在"不能改成异步"
+ * 的前提下唯一能做出**真进度面**的办法：另一个进程在 npm 还在跑的时候就能读到它。
+ * 详见 `createNpmRunner`。
+ */
+export const NPM_LOG_FILENAME = 'npm-install.log'
+
+/** 从日志文件里读回来的尾部长度上限（失败文案只要尾部，不要几 MB）。 */
+const LOG_TAIL_CHARS = 8_000
 
 /**
  * DSH 在 npm 上的包名。**默认值，不是硬编码**：调用方可以覆盖。
@@ -976,6 +990,123 @@ export function createRuntimeWriteGuard({
 // ---------------------------------------------------------------- runner
 
 /**
+ * 运行器的具名读数。**只有一条**：命令**拼不出来**。
+ *
+ * 它必须与"npm 跑了但失败了"分开：前者一个进程都没起、一个字节都没写，
+ * 后者可能已经在 `node_modules/` 下留了半棵树。`installRuntime` 把两者都报成
+ * `RUNNER_FAILED`（对"指针动没动"这个问题，两者是同一个答案），但 `error` 文案
+ * 与 `invocation` 字段让读日志的人分得出来。
+ */
+export const NPM_RUNNER_CODES = Object.freeze({
+  /** 在 Windows 上拿到了一个 `.cmd` 垫片，却解析不出它背后那份 npm 的 CLI 脚本。 */
+  INVOCATION_UNRESOLVED: 'RUNTIME_NPM_INVOCATION_UNRESOLVED',
+})
+
+/**
+ * 把**计划里的那条命令**翻成**这台机器上真的能起得来的那条调用**。
+ *
+ * ## 它修的是一个实测出来的洞，不是一个假想的洞
+ *
+ * `planRuntimeInstall()` 在 Windows 上把 `installCommand.file` 写成 `npm.cmd`
+ * （那是 npm 的**用户入口**）。而 `spawnSync('npm.cmd', args)` 在 Windows 上
+ * **根本起不来**：
+ *
+ * ```
+ *   spawnSync('npm.cmd', ['--version'])               → EINVAL: spawnSync npm.cmd EINVAL
+ *   spawnSync(process.execPath, [npmCli,'--version']) → status 0, "11.17.0"
+ *   spawnSync('npm.cmd', [...], {shell:true})         → status 0（但见下）
+ * ```
+ *
+ * （Node 2024 年 4 月那次安全发布之后，`.cmd` / `.bat` 不带 `shell: true` 一律
+ * 拒绝执行——见 <https://nodejs.org/ro/blog/vulnerability/april-2024-security-releases-2>
+ * 与 execa #987 <https://github.com/sindresorhus/execa/issues/987>。）
+ *
+ * 这一条在此之前**没有任何读数**：本 CLI 从来没有真的跑过一次 npm，用例全部
+ * 注入假运行器，于是"生产运行器在 Windows 上 100% 失败"与"生产运行器没问题"
+ * 在测试报告上是同一片绿。**实测一次就红。**
+ *
+ * ## 为什么不选 `shell: true`
+ *
+ * 它是能跑通的那条路（上面第三行），但 Node 自己为它发了弃用警告
+ * （`DEP0190`），理由是**参数只做拼接、不做转义**。而这条命令里有一个
+ * 用户选的绝对路径（`--prefix <DataDir>/...`）：Windows 上的数据目录
+ * 完全可能带空格（`C:\Program Files\...`、中文用户名目录下的临时根），
+ * 那时拼接出来的命令行会被切错位置。
+ *
+ *   > 一个"把路径拼进 shell 命令行"的调用，
+ *   > 与一个"把路径当数组元素交给 CreateProcess"的调用，
+ *   > 在路径恰好没有空格的那些机器上是同一个东西——
+ *   > 只不过前者的红只在**别人**的机器上出现。
+ *
+ * 所以走 `process.execPath` + npm 自己的 CLI 脚本，参数仍然是数组：
+ * 不经过 shell，路径里有空格也不会被切开，且 `.cmd` 垫片里那层 cmd.exe
+ * 语义（`%*` 转发）也不再参与。
+ *
+ * ## 解析不出来时**不猜**
+ *
+ * 两个候选都没有时返回 `ok:false`（具名码），**不回落**到 `shell:true`，
+ * 也不回落到直接 spawn 那个 `.cmd`（那是已知必然 EINVAL 的那条路）。
+ * 一个"想尽办法把命令拼出来"的解析器，会在拼错的时候照样返回一条看起来
+ * 正常的命令行——而那条命令行会以 npm 的退出码失败，读起来像"装不上"。
+ *
+ * @param {object} o
+ * @param {{file: string, args: string[]}} o.command 计划里的那条命令
+ * @param {string} [o.platform]
+ * @param {string} [o.execPath]   本进程的 node（默认 `process.execPath`）
+ * @param {Function} [o.exists]   存在性判据（可注入：判据要能离线逐条验证）
+ * @returns {{ok: true, file: string, args: string[], mode: string, candidates: string[]}
+ *          | {ok: false, code: string, message: string, candidates: string[],
+ *             file: null, args: null, mode: null}}
+ */
+export function resolveNpmInvocation({
+  command, platform = process.platform, execPath = process.execPath, exists = existsSync,
+} = {}) {
+  const file = typeof command?.file === 'string' ? command.file : ''
+  const argv = Array.isArray(command?.args) ? command.args.map(String) : []
+  const base = { candidates: Object.freeze([]), file: null, args: null, mode: null }
+
+  // ① 非 Windows：`npm` 是一个带 shebang 的可执行脚本，直接起就对了。
+  if (platform !== 'win32') {
+    return Object.freeze({ ...base, ok: true, file, args: Object.freeze([...argv]), mode: 'direct' })
+  }
+  // ② Windows，但不是 `.cmd` / `.bat` 垫片（例如调用方已经给了 `node.exe`，
+  //    或者给了一个 `.exe`）：原样交给 CreateProcess。
+  const isShim = /\.(cmd|bat)$/i.test(file)
+  if (!isShim) {
+    return Object.freeze({ ...base, ok: true, file, args: Object.freeze([...argv]), mode: 'direct' })
+  }
+
+  // ③ Windows + 垫片：找它背后那份 npm CLI 脚本。两个候选都是**推导**出来的
+  //    （不是猜一个魔法路径）：Node 官方发行包把 npm 装在 `node` 旁边；
+  //    nvm-windows / volta / fnm 也保持这个布局。
+  const candidates = []
+  if (typeof execPath === 'string' && execPath.trim() !== '') {
+    candidates.push(join(dirname(execPath), NODE_MODULES_DIRNAME, 'npm', 'bin', 'npm-cli.js'))
+  }
+  // 只有在 `file` 自己**带着目录**时才从它旁边找：裸的 `npm.cmd` 会让第二个
+  // 候选变成相对路径，而相对路径的落点取决于当时的 cwd —— 那正是
+  // `planRuntimeInstall` 拒绝相对 DataDir 的同一条理由。
+  if (file !== '' && (isAbsolute(file) || file.includes('/') || file.includes('\\'))) {
+    candidates.push(join(dirname(file), NODE_MODULES_DIRNAME, 'npm', 'bin', 'npm-cli.js'))
+  }
+  const found = candidates.find((c) => { try { return exists(c) === true } catch { return false } })
+  if (found === undefined) {
+    return Object.freeze({
+      ...base, ok: false, code: NPM_RUNNER_CODES.INVOCATION_UNRESOLVED, candidates: Object.freeze([...candidates]),
+      message: `在 Windows 上拿到了 npm 的 .cmd 垫片（${file}），但找不到它背后那份 npm CLI 脚本`
+        + `（试过：${candidates.join('、') || '（没有候选）'}）。`
+        + '**这不是"安装失败"**：一个 npm 进程都还没有起过，一个字节都还没有写。'
+        + '不带 shell 直接 spawn 这个垫片在 Windows 上必然 EINVAL，所以这里不回落、也不猜路径；'
+        + '请确认 npm 与它旁边那个 node 一起装的（`node -p "process.execPath"`）。',
+    })
+  }
+  return Object.freeze({
+    ...base, ok: true, mode: 'node-cli', candidates: Object.freeze([...candidates]),
+    file: execPath, args: Object.freeze([found, ...argv]),
+  })
+}
+
+/**
  * 真实命令运行器。**必须显式注入**——本模块不提供缺省实现。
  *
  * 这是本模块唯一一条"离开这台机器"的路径（npm install 会联网）。把它做成
@@ -988,24 +1119,131 @@ export function createRuntimeWriteGuard({
  * 生产调用方显式传 `createNpmRunner()`；用例传假运行器，于是"没有真的跑过
  * npm install"是一个**结构性**事实，而不是一句注释。
  *
+ * ## 返回值里的 `invocation`
+ *
+ * 计划里那条命令是 `npm.cmd install --prefix …`，而这台机器上**真的被执行**的
+ * 是 `node <…>/npm-cli.js install --prefix …`（见 `resolveNpmInvocation`）。
+ * 两者必须都能被读到：`installRuntime` 把 `invocation` 记进 `runnerCalls`，
+ * 于是"将要执行的"与"真的执行了的"不会被读成同一条命令。
+ *
+ * ## `logPath`：同步世界里的**真进度面**
+ *
+ * `installRuntime` 是同步的，`spawnSync` 会把本线程挡到 npm 退出为止。于是这
+ * 600 秒里本进程**没有任何办法**报出进度——而一个"最长要转十分钟、且十分钟里
+ * 一个字都不说"的安装，与一个卡死了的安装，在用户看到的界面上是同一个东西。
+ *
+ * 在"不能改成异步"（`product/launcher/cli.mjs` 同步调用它）的前提下，唯一能做出
+ * **真的**进度面的办法是：把 npm 的 stdout/stderr 交给**操作系统**（两个继承的
+ * 文件描述符），而不是接进管道。管道里的字节只有到进程退出才被 Node 交回来；
+ * 而落到文件上的字节，**另一个进程**在 npm 还在跑的时候就能读到。
+ *
+ *   > 一个"跑完之后 stderr 全文可见"的运行器，
+ *   > 与一个"跑的过程中就能被读到"的运行器，在成功的那次运行里是同一个东西——
+ *   > 只不过在卡住的那一次里，前者是十分钟的静默。
+ *
+ * 代价说清楚：stdout 与 stderr **混在同一个文件**里（一个 fd 不能分成两路），
+ * 所以 `logsCombined: true`；`stdout` 因此是空串，而 `stderr` 是那份日志的尾部
+ * ——失败文案里真正有信息量的东西（`npm ERR!`）本来就在 stderr。
+ *
  * @returns {(command: {file: string, args: string[]}, opts: object) => object}
  */
-export function createNpmRunner({ spawn = spawnSync, env = process.env, timeoutMs = 600_000 } = {}) {
-  return function npmRunner(command, { cwd = null } = {}) {
-    const r = spawn(command.file, [...command.args], {
-      cwd: cwd ?? undefined,
-      env,
-      encoding: 'utf8',
-      windowsHide: true,
-      timeout: timeoutMs,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    const stdout = typeof r?.stdout === 'string' ? r.stdout : ''
-    const stderr = typeof r?.stderr === 'string' ? r.stderr : ''
-    if (r?.error !== undefined && r?.error !== null) {
-      return { ok: false, status: null, stdout, stderr, error: String(r.error?.message ?? r.error) }
+export function createNpmRunner({
+  spawn = spawnSync,
+  env = process.env,
+  timeoutMs = 600_000,
+  platform = process.platform,
+  execPath = process.execPath,
+  exists = existsSync,
+  now = () => Date.now(),
+} = {}) {
+  return function npmRunner(command, { cwd = null, logPath = null } = {}) {
+    const invocation = resolveNpmInvocation({ command, platform, execPath, exists })
+    if (invocation.ok !== true) {
+      // 一个进程都没起：`status` 是 `null`（不是 0，也不是 1）。
+      return {
+        ok: false, status: null, stdout: '', stderr: '',
+        error: invocation.message,
+        code: invocation.code,
+        invocation: null,
+        logPath: null, logBytes: null, logsCombined: false,
+        elapsedMs: 0,
+      }
     }
-    return { ok: r?.status === 0, status: r?.status ?? null, stdout, stderr, error: null }
+
+    let fd = null
+    let resolvedLogPath = null
+    let logError = null
+    if (typeof logPath === 'string' && logPath.trim() !== '') {
+      try {
+        mkdirSync(dirname(logPath), { recursive: true })
+        const candidate = openSync(logPath, 'a')
+        // ★ 打开成功 ≠ 这是个**文件**：Windows 上 `openSync(一个目录, 'a')` 会成功。
+        //   不查这一下的话，"进度面在 <路径>"这句话可能指着一个目录，
+        //   而那个读数会被读成"日志写了但内容为空"（另一件完全不同的事）。
+        if (fstatSync(candidate).isFile() !== true) {
+          closeSync(candidate)
+          throw new Error(`不是普通文件：${logPath}`)
+        }
+        fd = candidate
+        resolvedLogPath = logPath
+      } catch (e) {
+        // 开不出日志文件**不是**安装失败：宁可不留痕，也不能让一次能装成功的
+        // 安装因为"日志写不进去"而红。这一档记在 `logError` 里。
+        fd = null
+        resolvedLogPath = null
+        logError = String(e?.message ?? e)
+      }
+    }
+
+    const beganAt = now()
+    let r = null
+    try {
+      r = spawn(invocation.file, [...invocation.args], {
+        cwd: cwd ?? undefined,
+        env,
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: timeoutMs,
+        stdio: fd === null ? ['ignore', 'pipe', 'pipe'] : ['ignore', fd, fd],
+      })
+    } finally {
+      if (fd !== null) { try { closeSync(fd) } catch { /* 关不掉不影响结论 */ } }
+    }
+
+    // 落盘的那份日志要在**退出之后**读回来：它同时是"进度面"与"错误详情"。
+    let tail = ''
+    let logBytes = 0
+    if (resolvedLogPath !== null) {
+      try {
+        const raw = readFileSync(resolvedLogPath, 'utf8')
+        logBytes = raw.length
+        tail = raw.length > LOG_TAIL_CHARS ? raw.slice(-LOG_TAIL_CHARS) : raw
+      } catch { /* 读不回来就当它没写 */ }
+    }
+    const pipedStdout = typeof r?.stdout === 'string' ? r.stdout : ''
+    const pipedStderr = typeof r?.stderr === 'string' ? r.stderr : ''
+
+    const out = {
+      stdout: resolvedLogPath === null ? pipedStdout : '',
+      stderr: resolvedLogPath === null ? pipedStderr : tail,
+      logPath: resolvedLogPath,
+      logBytes,
+      logsCombined: resolvedLogPath !== null,
+      ...(logError === null ? {} : { logError }),
+      invocation: Object.freeze({
+        file: invocation.file,
+        args: invocation.args,
+        mode: invocation.mode,
+        plannedFile: command?.file ?? null,
+        timeoutMs,
+        logPath: resolvedLogPath,
+      }),
+      elapsedMs: Math.max(0, now() - beganAt),
+    }
+    if (r?.error !== undefined && r?.error !== null) {
+      return { ...out, ok: false, status: null, error: String(r.error?.message ?? r.error) }
+    }
+    return { ...out, ok: r?.status === 0, status: r?.status ?? null, error: null }
   }
 }
 
@@ -1152,6 +1390,20 @@ export function installRuntime({ plan, runner, fs = null, now = () => Date.now()
 
   const stages = []
   const runnerCalls = []
+  /**
+   * **这台机器上真的被执行**的那条调用（`resolveNpmInvocation` 的产物）。
+   *
+   * 计划里的 `npm.cmd` 与它在这台机器上的实际形态（`node …/npm-cli.js`）
+   * 不是同一条命令行。两者都留着：前者是"产品决定要做什么"，
+   * 后者是"这一次到底起了哪个进程"。
+   */
+  let lastInvocation = null
+  /**
+   * npm 这一次的输出落在哪里、多大。`null` = 这一次没有留下进度日志
+   * （运行器不支持，或者日志文件开不出来——后者会记在 `error` 里，
+   * 且**不算安装失败**）。
+   */
+  let npmLog = null
   const record = (stage, ok, detail = null) => stages.push(Object.freeze({ stage, ok, detail }))
 
   // 守卫先建：下面每一条失败路径都要把它已经记下的写入带出去——
@@ -1171,7 +1423,7 @@ export function installRuntime({ plan, runner, fs = null, now = () => Date.now()
       detail: null, targetVersion: plan.targetVersion, versionDir: plan.versionDir,
       pointerPath: plan.pointerPath, movedPointer: false, targetDirAction: null,
       stages: Object.freeze([]), runnerCalls: Object.freeze([]), writes: Object.freeze([]),
-      verify: null, repair: runtimeInstallRepair(),
+      invocation: null, npmLog: null, verify: null, repair: runtimeInstallRepair(),
     })
   }
 
@@ -1193,6 +1445,8 @@ export function installRuntime({ plan, runner, fs = null, now = () => Date.now()
     stages: Object.freeze([...stages]),
     runnerCalls: Object.freeze([...runnerCalls]),
     writes: Object.freeze([...guard.calls]),
+    invocation: lastInvocation,
+    npmLog,
     verify,
     repair: runtimeInstallRepair(),
   })
@@ -1245,13 +1499,19 @@ export function installRuntime({ plan, runner, fs = null, now = () => Date.now()
     guard.mkdir(plan.versionDir, { recursive: true })
 
     // ── 5. npm install ──────────────────────────────────────────────────
+    //
+    // `logPath` 是**进度面**：npm 的输出直接落到版本目录里的一个文件上，
+    // 于是本进程被 `spawnSync` 挡住的这几分钟里，别的进程仍然读得到进度。
+    // 它落在版本目录里（可写面之内），随这一次安装一起被回滚/重装。
+    const npmLogPath = join(plan.versionDir, NPM_LOG_FILENAME)
     runnerCalls.push(Object.freeze({
+      kind: 'planned',
       file: plan.installCommand.file,
       args: Object.freeze([...plan.installCommand.args]),
     }))
     let run = null
     try {
-      run = runner(plan.installCommand, { cwd: plan.versionDir, purpose: 'runtime-install' })
+      run = runner(plan.installCommand, { cwd: plan.versionDir, purpose: 'runtime-install', logPath: npmLogPath })
     } catch (e) {
       record('npm-install', false, String(e?.message ?? e))
       return fail({
@@ -1261,6 +1521,31 @@ export function installRuntime({ plan, runner, fs = null, now = () => Date.now()
         detail: { command: plan.installCommand },
         targetDirAction,
       })
+    }
+    // ★ 运行器说它**真的起了哪个进程**时，把它单独记一条。
+    //
+    //   只在 `plan.installCommand` 里记计划是不够的：Windows 上计划写的是
+    //   `npm.cmd`，而真的被执行的是 `node <…>/npm-cli.js`（见
+    //   `resolveNpmInvocation`）。把两者折叠成一条，会让"将要执行的"
+    //   与"真的执行了的"在事后复盘里变成同一个读数。
+    if (run !== null && typeof run === 'object' && run.invocation !== null && run.invocation !== undefined) {
+      lastInvocation = Object.freeze({ ...run.invocation })
+      runnerCalls.push(Object.freeze({
+        kind: 'actual',
+        file: lastInvocation.file,
+        args: Object.freeze([...lastInvocation.args]),
+      }))
+    }
+    // 进度面落在哪里、有多大：失败之后要能**指着**那个文件说话
+    // （"去读 <路径> 的尾巴"比"npm 失败了"有用得多）。
+    if (run !== null && typeof run === 'object') {
+      npmLog = Object.freeze({
+        path: typeof run.logPath === 'string' ? run.logPath : null,
+        bytes: typeof run.logBytes === 'number' ? run.logBytes : null,
+        combined: run.logsCombined === true,
+        error: typeof run.logError === 'string' ? run.logError : null,
+      })
+      if (npmLog.path !== null) record('npm-log', true, `${npmLog.path}（${npmLog.bytes ?? 0} 字节）`)
     }
     if (run === null || run === undefined || run.ok !== true) {
       record('npm-install', false, `status=${run?.status ?? '?'}`)
@@ -1353,8 +1638,19 @@ export function installRuntime({ plan, runner, fs = null, now = () => Date.now()
         code: RUNTIME_INSTALL_CODES.POINTER_SWITCH_FAILED,
         message: `指针切换失败（${plan.pointerPath}）：${String(e?.message ?? e)}。`
           + '**这是安全的那一侧**：指针还是旧的，旧版本仍然现役。'
-          + 'Windows 上最常见的原因是目标文件正被另一个进程打开（杀毒 / 索引器 / 一个正在读它的进程）',
-        detail: { pointerPath: plan.pointerPath },
+          + 'Windows 上最常见的原因是目标文件正被另一个进程打开（杀毒 / 索引器 / 一个正在读它的进程）。'
+          // ★ 这一步失败会留下一个**反直觉**的终态，必须自己说出来：
+          //   完成标记在第 8 步就写过了，而指针在第 10 步才切——于是磁盘上多了一个
+          //   "装完了、但没成为现役"的目录。它会让**下一次装同一个版本**被
+          //   `TARGET_DIR_EXISTS` 拒绝，而那条拒绝读起来像是"我明明没装成过"。
+          //   > 一个"失败之后留下一个完整但没人指向的安装"的安装器，
+          //   > 与一个"失败之后什么都没留下"的安装器，在返回值的 `ok` 上是同一个东西——
+          //   > 只不过前者的第二次尝试会被一条看起来莫名其妙的拒绝挡住。
+          + `注意：${plan.versionDir} 里的安装**已经写完**（完成标记在指针之前写），`
+          + '但它不是现役。于是再装同一个版本会被"目标目录已存在且带着完成标记"拒绝——'
+          + `那是这条失败留下的痕迹。要么删掉 ${plan.versionDir} 再装一次，要么直接装一个别的版本；`
+          + '旧版本在这期间一直是现役，产品仍然可用',
+        detail: { pointerPath: plan.pointerPath, orphanedVersionDir: plan.versionDir },
         targetDirAction,
         verify,
       })
@@ -1378,6 +1674,8 @@ export function installRuntime({ plan, runner, fs = null, now = () => Date.now()
       stages: Object.freeze([...stages]),
       runnerCalls: Object.freeze([...runnerCalls]),
       writes: Object.freeze([...guard.calls]),
+      invocation: lastInvocation,
+      npmLog,
       verify,
       legion: Object.freeze({ route: plan.legion.route, linked: Object.freeze(createdLinks.map((l) => l.name)) }),
       repair: null,

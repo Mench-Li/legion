@@ -2,32 +2,47 @@
 // ============================================================================
 // 用量采集：模型、token、费用估算、耗时（PRT-207）
 //
-// ## `estimatedCostUsd` 未配置价格时返回 null，绝不返回 0
+// ## 2026-09-15：费用估算从"没有价"迁到"有来源的价目表"
 //
-// 这条与 `scripts/prt/baseline-measure.mjs` 的 `estimateCost()` 同源：
-// 返回 0 会让「价格未配置」看起来像「这次运行免费」，
-// 于是预算闸门（PRT-503/PRT-510）静默失效——一个**看起来在工作**的安全检查
-// 比没有检查更危险，因为它会让人停止人工核对。
+// 本模块原来的 `PRICING.asOf === 'UNSET'` 是一个**真实的**状态：当时没有任何
+// 可核对的单价，所以 `estimateCostUsd` 一律返回 `null`。那不是占位符，是
+// 这条纪律本身——返回 0 会让「价格未配置」看起来像「这次运行免费」。
+//
+// 现在有了有来源的单价（`DEEPSEEK_PRICE_TABLE`，来源 URL / 检索日期 / 模型版本
+// 都记录在 `runtime/contracts/price-table.mjs`），于是：
+//
+//   · `PRICING` 不再是空表，而是那张记录下来的表；
+//   · 估算**只有一处实现**——契约里的 `estimateCost`。本模块不再自己乘一遍：
+//     两份实现迟早会漂移，而"按两份算术算出两个数"的失败形态是
+//     预算闸门与报表各说各话，两者都看起来正常。
+//   · **没变的**：表里没有的模型仍然返回 `null`，绝不返回 0。
+//
+// ## 估算默认取**更贵**的那一支（peak + cache miss）
+//
+// 真实价格按 UTC 墙钟分 peak / off-peak（差 2 倍），输入侧分 cache hit / miss
+// （差最高 50 倍）。本模块拿不到"这次调用发生在什么时刻""输入里有多少命中缓存"，
+// 所以默认取上界：预算闸门**少算**会让用户静默超支，**多算**只是提前拒绝、可见。
+// 需要精确值的调用方显式传 `atMs` / `tokensInCacheHit`（见契约里的说明）。
+//
+// ## `estimatedCostUsd` 未定价时返回 null，绝不返回 0
+//
+// 这条与 `scripts/prt/baseline-measure.mjs` 的 `estimateCost()` 同源。
 // `null` 强制调用方处理「不知道」这个状态。
-//
-// ## 价格表带 `asOf`
-//
-// 价格会变。没有生效时间的价格表无法回答「这个估算用的是哪版价」，
-// 事后对账时就成了不可解释的数字。`PRICING.asOf` 未设定时不得用于估算。
 // ============================================================================
 
+import {
+  DEEPSEEK_PRICE_TABLE,
+  createPriceTable,
+  estimateCost,
+  isPriceTable,
+} from '../../contracts/price-table.mjs'
+
 /**
- * 价格表：`model -> { inPerMTok, outPerMTok, currency }`。
+ * 价格表：**契约里的记录表**（`model -> entry`，输入/输出/缓存/peak 分列）。
  *
- * **空表是刻意的当前状态**：阶段 0～1 没有真实执行过，也就没有任何
- * 可核对的真实价格。填假价格比留空更糟——留空会得到 `null`，
- * 填假会得到一个看起来很专业的错误数字。
+ * 空表不再是当前状态；没有来源的模型依然不报价。
  */
-export const PRICING = Object.freeze({
-  asOf: 'UNSET',
-  currency: 'USD',
-  models: Object.freeze({}),
-})
+export const PRICING = DEEPSEEK_PRICE_TABLE
 
 /** 用量字段的候选名（不同供应商/版本的命名不一致，按序取第一个存在的）。 */
 export const USAGE_FIELD_ALIASES = Object.freeze({
@@ -93,24 +108,68 @@ export function collectUsage(result, options = {}) {
 }
 
 /**
+ * 把**老形状**的价格表折进契约价目表：
+ * `{ asOf, currency, models: { m: { inPerMTok, outPerMTok } } }`。
+ *
+ * 这是给已有的调用方留的兼容入口，不是一个平行的算术实现——折好之后走的仍是
+ * 契约里的 `estimateCost`。折不动（缺单价/形状不对）就返回 `null`，
+ * 由 `estimateCostUsd` 变成"不知道"，而不是变成一个数。
+ */
+function legacyPricingToTable(pricing) {
+  if (pricing === null || typeof pricing !== 'object') return null
+  const models = pricing.models
+  if (models === null || typeof models !== 'object' || Array.isArray(models)) return null
+  const spec = {}
+  for (const [model, p] of Object.entries(models)) {
+    if (p === null || typeof p !== 'object') return null
+    spec[model] = {
+      billingUnit: 'per-mtok',
+      unitSize: 1_000_000,
+      perUnitIn: p.inPerMTok,
+      perUnitOut: p.outPerMTok,
+      sourceKind: 'unspecified',
+    }
+  }
+  try {
+    return createPriceTable({
+      version: typeof pricing.asOf === 'string' && pricing.asOf.trim() !== '' ? pricing.asOf.trim() : 'UNSET',
+      currency: typeof pricing.currency === 'string' && pricing.currency.trim() !== ''
+        ? pricing.currency.trim()
+        : 'USD',
+      effectiveAtMs: 0,
+      models: spec,
+    })
+  } catch {
+    // 形状坏掉 → 不知道。**不吞成一个数**。
+    return null
+  }
+}
+
+/** 接受契约价目表，或折得动就接受老形状；其余一律 `null`。 */
+function asPriceTable(pricing) {
+  if (isPriceTable(pricing)) return pricing
+  return legacyPricingToTable(pricing)
+}
+
+/**
  * 费用估算。
  *
- * 任一前提不满足（价格表未生效、模型无价格、token 数缺失）→ `null`。
+ * 任一前提不满足（没有价目表、模型无价格、token 数缺失）→ `null`。
  * 不抛错：费用是**可选**信息，缺它不该让一次成功的运行变成失败；
  * 但必须让「不知道」向上可见。
+ *
+ * 默认取**上界**（peak + cache miss）。`atMs` / `tokensInCacheHit` 是显式的
+ * "我知道实际时段/缓存命中"，传了才会用便宜的那一支——见契约里的理由。
  */
-export function estimateCostUsd({ model, tokensIn, tokensOut, pricing = PRICING }) {
-  if (pricing?.asOf === 'UNSET' || !pricing?.asOf) return null
+export function estimateCostUsd({ model, tokensIn, tokensOut, pricing = PRICING, tokensInCacheHit = 0, atMs = null }) {
+  const table = asPriceTable(pricing)
+  // 没有价目表（老形状的 asOf 仍可能是 'UNSET'）→ 不知道，不是 0。
+  if (table === null || table.version === 'UNSET' || table.isEmpty) return null
   if (typeof model !== 'string' || model === '') return null
-  const price = pricing.models?.[model]
-  if (!price) return null
-  const inRate = price.inPerMTok
-  const outRate = price.outPerMTok
-  if (typeof inRate !== 'number' || typeof outRate !== 'number') return null
-  if (typeof tokensIn !== 'number' || typeof tokensOut !== 'number') return null
-  const usd = (tokensIn / 1_000_000) * inRate + (tokensOut / 1_000_000) * outRate
+  const est = estimateCost({ priceTable: table, model, tokensIn, tokensOut, tokensInCacheHit, atMs })
+  if (!est.ok) return null
   // 四舍五入到 6 位：亚分精度对预算判定足够，且避免浮点尾数进审计
-  return Math.round(usd * 1e6) / 1e6
+  return Math.round(est.amount * 1e6) / 1e6
 }
 
 /**
@@ -155,6 +214,9 @@ export function createDurationTracker(now = () => Date.now()) {
  * `(usage.tokensIn ?? 0) + (usage.tokensOut ?? 0)`，于是引擎只报了一侧时，
  * 另一侧被补成 0，`used` 会**小于真实用量**——一次实际上超支的运行
  * 会被判成"未超"。**低估用量比不知道用量更危险**，因为它是错的却看起来是对的。
+ *
+ * 费用侧同理：`estimatedCostUsd` 是**上界**（peak + cache miss），所以
+ * 它判出的"超支"可能提前——这方向是安全的；而 `null` 仍然是"无法判定"。
  */
 export function checkBudget({ budget, usage }) {
   if (!budget || typeof budget !== 'object') return null

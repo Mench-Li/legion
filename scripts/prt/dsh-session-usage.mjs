@@ -29,8 +29,10 @@
 //
 // ## 只报事实，不做推断
 //
-// 不换算费用（单价未定，见 baseline-measure.mjs 的 PRICING）、不推断「模型够不够用」。
-// 会话里记着什么就报什么；没记着的（如进程峰值内存）**不在这里编**。
+// 不换算费用：本工具只报会话转录里记着的字段。单价已有来源（见
+// runtime/contracts/price-table.mjs 的 DEEPSEEK_PRICE_TABLE），费用由
+// baseline-measure.mjs 用那张表算——两处各乘一遍迟早会给出两个"看起来都正常"的数。
+// 也不推断「模型够不够用」。没记着的（如进程峰值内存）**不在这里编**。
 //
 // 用法：
 //   node scripts/prt/dsh-session-usage.mjs --cwd-prefix=D:/project/DSH/gf001-scratch

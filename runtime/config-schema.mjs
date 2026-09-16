@@ -145,7 +145,7 @@ export const NON_ENV_LITERALS = Object.freeze([
   'MODEL_CONFIG_PROFILE_DISABLED', // runtime/contracts/model-config.mjs
   'MODEL_CONFIG_UNKNOWN_MODEL', // runtime/contracts/model-config.mjs
   'MODEL_CONFIG_UNKNOWN_PROVIDER', // runtime/contracts/model-config.mjs
-  // ── runtime/contracts/price-table.mjs（14 条）
+  // ── runtime/contracts/price-table.mjs（16 条）
   'APPROVED', // runtime/contracts/price-table.mjs
   'BILLING_UNIT_REQUIRED', // runtime/contracts/price-table.mjs
   'CURRENCY_MISMATCH', // runtime/contracts/price-table.mjs
@@ -158,6 +158,8 @@ export const NON_ENV_LITERALS = Object.freeze([
   'NOT_MORE_EXPENSIVE', // runtime/contracts/price-table.mjs
   'PRICE_UNKNOWN', // runtime/contracts/price-table.mjs
   'TABLE_INVALID', // runtime/contracts/price-table.mjs
+  'TIME_OF_DAY_INVALID', // runtime/contracts/price-table.mjs
+  'TOKENS_INCONSISTENT', // runtime/contracts/price-table.mjs
   'TOKENS_UNKNOWN', // runtime/contracts/price-table.mjs
   'VERSION_REQUIRED', // runtime/contracts/price-table.mjs
   // ── runtime/contracts/run-floor.mjs（8 条）PRT-214 缺口①：一次 Run 的静态 hard floor

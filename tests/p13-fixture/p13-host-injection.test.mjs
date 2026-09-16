@@ -443,7 +443,7 @@ describeHost('P4-2 宿主插件导入失败：诊断可读性（负向 · 入口
     if (fx) fx.cleanup()
   }, { timeout: 15000 })
 
-  it('诊断点名坏条目：id + 入口文件 + 插件自己的错误 + 处置建议（结构化 + 可读两种形态）', () => {
+  it('诊断点名坏条目：id + 入口文件 + 失败性质 + 处置建议（结构化 + 可读两种形态）', () => {
     const logText = child._p13logs.out + child._p13logs.err
     const diag = diagnoseHostLogs(fx.diagnoseOpts(logText))
     assert.equal(diag.problems.length, 1, '应恰好定位到一处问题：' + JSON.stringify(diag.problems))
@@ -568,16 +568,26 @@ describeHost('P4-2 宿主插件导入失败：诊断可读性（负向 · 入口
       '不得牵连健康条目：' + p.plugin)
   })
 
-  it('解析的是真实宿主日志（不是自造文本）：日志里确有 app-boot 的未激活读数', () => {
+  it('解析的是真实宿主日志（不是自造文本）：日志里确有 app-boot 的未激活读数', async () => {
     const logText = child._p13logs.out + child._p13logs.err
     assert.match(logText, /warning: \d+ entr(?:y|ies) did not activate/,
       '宿主日志里应出现真实的"未激活"读数；实际尾部：\n' + logText.slice(-800))
     assert.match(logText, /p13-broken-missing \([^)]*\): failed to import/,
       '应点名到那一行与它的入口：\n' + logText.slice(-800))
     // ⚠️ 这里原来断言 `child.exitCode === 1`。DSH 不再为非 required 条目拆卸应用，
-    //   所以那条断言测的是 DSH 的策略，不是 Legion 的诊断。删掉它**不是**放宽要求：
-    //   下面这几条（只凭日志点名到条目 + 类型 + 入口路径）一条都没少，
-    //   而"进程活着"这个事实由同 describe 的另一条用例正面断言。
+    //   所以那条断言测的是 DSH 的策略，不是 Legion 的诊断。换掉它**不是**放宽要求——
+    //   但要**换成什么**必须说清楚，否则就是悄悄少守一件事：
+    //
+    //   · 下面这几条（只凭日志点名到条目 + 类型 + 入口路径）照旧；
+    //   · "进程活着"改由**本用例自己**正面断言。第一版把这一条写成
+    //     "由同 describe 的另一条用例断言"——**那是错的**：那个 describe 里
+    //     唯一的 ★ 用例在另一个 describe（入口文件在导入期抛错）下，
+    //     于是"打完 warning 就死"这个形态在 B 里**一条断言都碰不到**。
+    //     一条指着别处去的理由，与没有理由是同一件事。
+    assert.equal(child.exitCode, null,
+      '非 required 条目失败不打死宿主——DSH 的启动严格性是消费方自有的')
+    assert.equal((await req(fx.base, 'GET', '/__p13/ready')).status, 200,
+      '坏条目只影响它自己那一行；其余插件照常服务（"活着"要读得出来，不能只靠日志推断）')
     // 与「等进程退出」无关的独立判据：只要拿到日志，诊断就必须点名到条目。
     const diag = diagnoseHostLogs(fx.diagnoseOpts(logText))
     const p = diag.problems.find((x) => /p13-broken-missing|dsh-p13-missing/.test(x.plugin))

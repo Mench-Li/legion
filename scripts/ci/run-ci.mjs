@@ -3298,23 +3298,28 @@ async function stageTest() {
     //
     //   本检查问的是**归属**（有没有人负责跑它），不是**这一次跑没跑**（那是 SKIP 的语义）。
     const conditionalDirs = ['plugins/tests/', 'board-plugin/tests/']
-    // ★ 单个**有条件**的文件（不是整个目录）：PRT-214 的可加载性套件只在
-    //   DSH_CHECKOUT 可用时才 push 进 `suites`，但它**有归属**。
+    // ★ 单个**有条件**的文件（不是整个目录）：只有**真的**在 `if (dsh)` 分支里
+    //   `suites.push` 进去的那几个才需要列在这里。
+    //
+    //   ⚠️ 本表此前列了 5 个，其中 4 个是**多余的**（2026-09-16 复核发现的）：
+    //   `enforcement-plugin` / `approval-answerer` / `pre-execute` / `employee-preset`
+    //   这四个是 `suites` **数组字面量**里的无条件元素（2468 / 2491 / 2512 / 2556 行），
+    //   任何环境下都在 `listed` 里；它们**不跑**的原因不是"没登记"，而是没有
+    //   DSH_CHECKOUT 时**用例自己逐条 SKIP**。
+    //
+    //   那份注释当时写的是"需要 DSH_CHECKOUT 才推得进 test 清单"——对这四个文件
+    //   而言是**不成立**的。一条写错理由的豁免，比一条没有理由的豁免更接近事故：
+    //   下一个读到这里的人会以为"进了这张表就可以不登记"。
+    //
+    //   > 一张"把本来就在清单里的文件也豁免掉"的表，
+    //   > 与一张会顺手放过**真的**漏登记文件的表，区别只在它有没有列错。
     //
     //   条目形状要动整个目录吗？不要。`runtime/dsh-composition/` 下面还有一堆
     //   无条件套件，把整个目录列进来会顺手放过**真的**漏登记的新文件——
     //   而那个漏登记正是本检查存在的唯一理由。
     const conditionalFiles = new Set([
+      // 唯一一个真的在 `if (dsh)` 分支里 `suites.push` 的（3249 行）。
       'runtime/dsh-composition/patch-loadable.test.mjs',
-      // 与 patch-loadable 同理：需要 DSH_CHECKOUT 才推得进 test 清单。
-      // 它在环境里跑的是**真 DSH ToolRuntime**，没有检出时逐条 SKIP。
-      'runtime/dsh-composition/enforcement-plugin.test.mjs',
-      // 同上：要 DSH_CHECKOUT 里的 cordis 才推得进 test 清单。
-      'runtime/dsh-composition/approval-answerer.test.mjs',
-      // 同上（真 ToolRuntime + 全链路）。
-      'runtime/dsh-composition/pre-execute.test.mjs',
-      // 同上（真 DSH loader + 真包解析）。
-      'runtime/dsh-composition/employee-preset.test.mjs',
     ])
     const tracked = await exec('git', ['ls-files', '*.test.mjs'], { cwd: ROOT })
     const all = tracked.out.split('\n').map((x) => x.trim()).filter(Boolean)

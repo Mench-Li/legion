@@ -44,16 +44,22 @@
 //   B. 真 profile 启动：探针行的 `apply` **真的跑了**（stderr 出现 PROBE-APPLY-RAN）。
 //      ——"能加载"与"跑了"在这条之前从未被分开过。
 //   C. 真 `legion-host.patch.yml` 的那一行：root-row 的 `apply` 跑了，并且**拒绝**，
-//      拒绝码 `ENFORCEMENT_ROOT_CONFIG_EMPTY` 透传到 stderr，启动失败（code 1）。
+//      拒绝码 `ENFORCEMENT_ROOT_CONFIG_EMPTY` 透传到 stderr，DSH 把它报成一次
+//      **entry 激活失败**（`failed to apply loader entry …` + `did not activate`）。
 //      ——**拒绝不是成功**，这条断言的是拒绝本身。
+//      ⚠️ 它**不再**断言"进程非零退出"：那条读数是"强制面不在"的**代理**，
+//      而 DSH 的启动严格性是消费方自有的（见文末那一节）。
 //   D. 全链：根行装配成功 → 发布 `legionEnforcementRoot` → 两行运行期模块
 //      离开 waiting 并激活（挂载审计 `fiberState: 2`）→ 真 `tools/pre-execute`
 //      瀑布**认领**一次调用（`kind: 'deny'`）。
 //      ——这是"强制面真的挂上了"的读数，不是"文件里有这个 import"。
 //   E. 反向对照：两行运行期模块、同一条 `tools` 端口、但**根行缺席** →
 //      DSH 自己的挂载审计报 `pending (waiting for service: legionEnforcementRoot)`，
-//      启动失败（code 1），而且瀑布上**没有** listener。
+//      `legionEnforcementRoot` 服务**没有**发布，而且瀑布上**没有** listener
+//      （`WATERFALL-RESULT "NO-LISTENER"` + `GATE-NOT-BOUND`）。
 //      ——没有这一条，D 里的"激活"可能只是"加载顺序碰巧"。
+//      ★ 这是本套件**最强**的一条：它直接读"强制面在不在"，
+//      而不是拿"进程死没死"当它的代理。
 //   F. ★ D 用的是**替身注册方**（一个测试脚手架模块）。F 把补丁层换成**磁盘上那份
 //      真 `legion-host.patch.yml`**、`--patch` 里一个测试脚手架行都不加：根行的模块
 //      就是产品注册方（`team-hub/approval-registrar-row.mjs`），于是这一行**装上**
@@ -61,9 +67,14 @@
 //      ——"apply 跑了然后拒绝"与"apply 跑了然后装上"在这里第一次被分开。
 //   G. F 的反向对照：把**插件本体**当成那一行的模块（= 注册方缺席，也就是产品
 //      注册方交付前补丁层的取值）。身份配置是齐的，所以唯一缺的是工厂——读数必须是
-//      root 行自己的具名拒绝 `..._NO_APPROVAL_PORT_FACTORY`（code 1），
+//      root 行自己的具名拒绝 `..._NO_APPROVAL_PORT_FACTORY`，
 //      **不是**配置码，也不是一个"装好了但没端口"的静默结局。
 //      ——没有这一条，F 的"装上了"可能只是"这一行现在什么都不检查了"。
+//      ★ 本批顺带修掉这条里的一个**空断言**：原来写的是
+//      `assert.equal(r.stderr.includes('ENFORCEMENT-ROOT-SERVICE present'), false)`，
+//      而那句话的读数由**瀑布探针**打印——G 原来根本没挂那个探针，
+//      于是它**在任何情况下都成立**（一个恒真的否定断言，与没有断言同效）。
+//      现在挂上探针，并改断言读数本身。
 //   H. F 的**顺序对照**：把同一份补丁层的两行置换、并把 `--patch` 的层序整条倒过来，
 //      F 的读数必须一字不变。它排除的是"这条接线只在某一个具体顺序下装上"；
 //      "为什么行序无关"的正面读数是一个 2×2 矩阵（第二行 vs 同模块图 × 注册前挂起），
@@ -76,6 +87,57 @@
 //   · 每条"跑没跑"的断言都带反向对照；
 //   · 需要 DSH_CHECKOUT 的那几条逐条 `t.skip()`（`skipped: N` 看得见）；
 //     跑不了就不算跑过——外部宿主测试不伪造通过。
+//
+// ## ★★ DSH 的启动严格性是**消费方自有**的（本套件为什么不再断言"进程非零退出"）
+//
+// 在此之前，C / E / G 三条都拿 **`exit code === 1`** 当作"强制面没生效"的读数。
+// 那个读数是一个**代理**，而它在 DSH `bd4cfc7c46`（2026-09-11）之后失效了——
+// 不是被本仓库的改动弄坏的，是 DSH 改了它自己的启动策略。
+//
+// 那份提交的架构决定记录（随附在提交里，DSH 检出内为
+// `.agents/notes/implemented/architecture/2026-09-09-consumer-owned-startup-strictness.md`，
+// 标题即「由 consumer 持有启动严格语义」）说得很直白：
+//
+//   · 只有一份**全局硬编码**的 required entry id 名单
+//     （`packages/boot/app-boot/src/index.ts` 的 `requiredStartupEntryIds`：
+//      agent-loop / webserver / modules / connection / headless-runner / acp /
+//      sdk-jsonrpc-server），加上 bootstrap Include 按 entry 身份视为 required；
+//   · **其他** entry 未激活 → 输出一次 `warning`，**成功的 sibling 继续运行**，
+//     进程照常以 0 退出；
+//   · 该记录**明确拒绝**了"在每个 profile 中声明 required entry"这条替代方案
+//     （理由：同一应用 endpoint 会在 profile data 与 custom profile 里重复），
+//     并把严格语义定性为"属于**应用或资源 owner**"。
+//
+// 于是 Legion 的补丁行（`legion-enforcement-root` / `legion-enforcement-hard-floor`）
+// 对 DSH 永远是 **optional**：没有任何 required entry 依赖它们
+//（决定记录第 15 段：只有"被 required entry 注入的 provider"才不必单列）。
+// **Legion 的强制面失败，DSH 不会让进程死。**
+//
+//   > 一个"进程死了所以强制面一定没生效"的读数，
+//   > 与一个"进程活着所以强制面一定生效了"的读数，是同一种错误的两面——
+//   > 它们都把**进程的生死**当成了**强制面的在场**的代理。
+//
+// 所以本套件改成读**强制面本身**：瀑布上有没有 listener（`GATE-NOT-BOUND` /
+// `WATERFALL-RESULT "NO-LISTENER"`）、`legionEnforcementRoot` 服务发布了没有
+//（`ENFORCEMENT-ROOT-SERVICE absent|present`）、审批端口工厂在不在
+//（`APPROVAL-PORT-FACTORY none|registered`）。这些读数不经过任何代理，
+// DSH 换启动策略也换不掉它们。
+//
+// 那"失败要响"这件事谁来做？**Legion 自己**——这条链已经实现，且另有套件在测：
+// 补丁行没激活 ⇒ `reconcilePatchLayer()` 报缺行 ⇒ `startupSelfCheck()` 判
+// `autoExecutionForbidden: true` ⇒ `runtime-host-row.mjs` **不注册宿主端口**、
+// 并把 `ok:false` 的判决发布成服务值 ⇒ 契约出口报 `incompatible` ⇒ worker 不认领任务。
+// `runtime-host-row-dsh-process.test.mjs` 量的是这条链——它读的同样是
+// `autoExecutionForbidden` 与 `bound=false`，也**不是** exit code。
+//
+// ⚠️ 与它成对读的还有一条代价：拒绝从"进程退出时的 stderr"搬到了"一个服务值上"，
+// 而服务值只有读得到它的人看得见。见 `runtime-host-row.mjs` 里那段
+// "记录在案的取舍"（提交 `a374a7f`）与
+// `docs/superpowers/prt/PRT-214-enforcement-composition-root.md`。
+//
+// ## 测试形状纪律（本批加的第五条）
+//
+//   · **不许**拿进程退出码当作"某个内部状态成立"的代理；读那个状态本身。
 // ============================================================================
 
 import assert from 'node:assert/strict'
@@ -299,6 +361,24 @@ const ROOT_ROW_ONLY_PATCH_SRC = `- insert:
       name: ${JSON.stringify(join(HERE, 'root-row.mjs'))}
 `
 
+// A3 钉子用：一个**必定失败**的 entry。它的失败是确定的（`apply` 当场抛），
+// 所以"DSH 怎么处理一个失败的 entry"这个外部事实可以被单独钉住。
+const THROWING_SRC = `export default {
+  name: 'prt214rt-throwing',
+  inject: [],
+  apply() {
+    process.stderr.write('THROWING-ENTRY-APPLY-RAN\\n')
+    throw new Error('A3-PIN-THROWING-ENTRY-REFUSED')
+  },
+}
+`
+
+// id 故意**不在** DSH 的 `requiredStartupEntryIds` 里——这正是 Legion 那两行的处境。
+const THROWING_PATCH_SRC = `- insert:
+    - id: "prt214rt-throwing-optional"
+      name: "./prt214rt-throwing.mjs"
+`
+
 const REAL_PATCH = join(COMPOSITION, 'legion-host.patch.yml')
 
 const SCRATCH_FILES = {
@@ -312,6 +392,8 @@ const SCRATCH_FILES = {
   rootRowWrapper: ['prt214rt-rootrow-wrapper.mjs', ROOT_ROW_WRAPPER_SRC],
   rootRowWrapperPatch: ['prt214rt-rootrow-wrapper.patch.yml', ROOT_ROW_WRAPPER_PATCH_SRC],
   rootRowOnlyPatch: ['prt214rt-rootrow-only.patch.yml', ROOT_ROW_ONLY_PATCH_SRC],
+  throwing: ['prt214rt-throwing.mjs', THROWING_SRC],
+  throwingPatch: ['prt214rt-throwing.patch.yml', THROWING_PATCH_SRC],
 }
 
 const SCRATCH_PATH = {}
@@ -386,19 +468,31 @@ describe('PRT-214：补丁行的 apply 在**真 DSH 进程**里跑没跑', () =>
     assert.match(r.stderr, new RegExp(`^PROBE-DSH_HOME ${r.home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'))
   })
 
-  guarded('C. 真 legion-host.patch.yml：root-row 跑了、并且**拒绝**（具名码，code 1）', async () => {
+  guarded('C. 真 legion-host.patch.yml：root-row 跑了、并且**拒绝**（具名码，DSH 报成激活失败）', async () => {
     const r = runDsh({ tag: 'c', patches: [SCRATCH_PATH.probePatch, REAL_PATCH] })
 
     assert.equal(r.spawnError, null)
-    // 拒绝发生在启动路径上：树加载失败，进程非 0 退出。
-    assert.equal(r.code, 1, `期望启动因 root-row 拒绝而失败：\n${r.stderr}`)
+    // ⚠️ 拒绝**不会**让进程非零退出：DSH 把非 required entry 的失败记成一次 warning，
+    //    产品照常起来（理由与逐条对照见文末「DSH 的启动严格性是消费方自有的」）。
+    //    这里断言的是**拒绝本身**与**它被如实报出来**，不是进程的生死。
+    assert.equal(r.code, 0, `DSH 对非 required entry 只报 warning，进程应照常起来：\n${r.stderr}`)
+    assert.match(r.stderr, /warning: \d+ entr(?:y|ies) did not activate/)
     assert.match(r.stderr, /^PROBE-APPLY-RAN$/m)
     // ★ 断言的是**拒绝本身**，不是"装好了"。
     assert.match(r.stderr, /legion-enforcement-root/)
     assert.match(r.stderr, /ENFORCEMENT_ROOT_CONFIG_EMPTY/)
     assert.match(r.stderr, /root-row\.mjs/)
-    // 反向对照的锚：这一行确实被真加载器当成**条目**在报。
-    assert.match(r.stderr, /failed to apply loader entry legion-enforcement-root/)
+    // 反向对照的锚：这一行确实被真加载器当成**条目**在报——
+    // 形状是 `<entry id> (<模块 file:// URL>): <诊断>`。
+    //
+    // ⚠️ 这条原来断言的是 `failed to apply loader entry …`：那是**旧版 DSH** 的措辞，
+    //    当前 app-boot 已不再产生它（`grep -r 'failed to apply' packages/boot/app-boot/src/` 为空）。
+    //    而它此前**从未被求值过**——前面那句 `assert.equal(r.code, 1)` 先抛了，
+    //    于是它、以及它后面的每一条断言，一直都是**死代码**。
+    //
+    //   > 一条排在必然失败断言之后的断言，
+    //   > 与一条不存在的断言，在"它守住了什么"上是同一个东西。
+    assert.match(r.stderr, /legion-enforcement-root \(file:\/\/[^)]+\): Error: /, r.stderr)
   })
 
   guarded('D. 全链：根行装好 → 服务发布 → 两行激活 → 真瀑布**认领**一次调用', async () => {
@@ -447,12 +541,21 @@ describe('PRT-214：补丁行的 apply 在**真 DSH 进程**里跑没跑', () =>
     })
 
     assert.equal(r.spawnError, null)
-    // 依赖没到位 ⇒ 两行 pending ⇒ DSH 的启动断言把树判为失败。
-    assert.equal(r.code, 1, `期望"entry 未激活"拦下启动：\n${r.stderr}`)
+    // 依赖没到位 ⇒ 两行 pending ⇒ DSH 把这两条记成未激活（一次 warning，不拆卸树）。
+    assert.equal(r.code, 0, `DSH 对非 required entry 只报 warning，进程应照常起来：\n${r.stderr}`)
     assert.match(r.stderr, /did not activate/)
-    // ★ 这条读数由 **DSH 自己**给出（`assertEntriesActivated`），不是我们数的。
-    assert.match(r.stderr, /pre-execute-row\.mjs: pending \(waiting for service: legionEnforcementRoot\)/)
-    assert.match(r.stderr, /approval-answerer-row\.mjs: pending \(waiting for service: legionEnforcementRoot\)/)
+    // ★ 这条读数由 **DSH 自己**给出，不是我们数的。
+    // ★★ 本批加的**直接**读数（不经过"进程生死"这个代理）：
+    //    · 瀑布上没有任何 listener ⇒ 调用不会被任何人拦下，也就是**强制面不在**；
+    //    · 根服务没有发布 ⇒ 两行拿不到依赖，与上面的 pending 互为佐证。
+    assert.match(r.stderr, /^WATERFALL-RESULT "NO-LISTENER"$/m, r.stderr)
+    assert.match(r.stderr, /^GATE-NOT-BOUND$/m, r.stderr)
+    assert.match(r.stderr, /^ENFORCEMENT-ROOT-SERVICE absent$/m, r.stderr)
+    // ★ 这一行由真加载器点名报出，形状是 `<entry id> (<模块 URL>): pending (waiting for …)`。
+    //   ⚠️ 原来这里写的是 `pre-execute-row\.mjs: pending …`——少了模块 URL 右括号后的冒号，
+    //   所以它**永远**匹配不上；而它同样被前面那句 `code === 1` 挡着，从未被求值。
+    assert.match(r.stderr, /legion-enforcement-pre-execute \(file:\/\/[^)]*pre-execute-row\.mjs\): pending \(waiting for service: legionEnforcementRoot\)/, r.stderr)
+    assert.match(r.stderr, /legion-enforcement-approval-answerer \(file:\/\/[^)]*approval-answerer-row\.mjs\): pending \(waiting for service: legionEnforcementRoot\)/, r.stderr)
   })
 
   guarded('F. ★★★ 真 legion-host.patch.yml（一个字节都不改）：这一行**装上**，不再拒绝', async () => {
@@ -505,20 +608,29 @@ describe('PRT-214：补丁行的 apply 在**真 DSH 进程**里跑没跑', () =>
     // 补丁层里那一行 `module` 的取值（§9 的读数 D）。配置是齐的，所以缺的只可能是工厂。
     const r = runDsh({
       tag: 'g',
-      patches: [SCRATCH_PATH.servicesPatch, SCRATCH_PATH.rootRowOnlyPatch, SCRATCH_PATH.probePatch],
+      patches: [SCRATCH_PATH.servicesPatch, SCRATCH_PATH.rootRowOnlyPatch, SCRATCH_PATH.probePatch, SCRATCH_PATH.waterfallPatch],
       legionEnv: true,
     })
 
     assert.equal(r.spawnError, null)
-    assert.equal(r.code, 1, `期望"没有审批端口工厂"拦下启动：\n${r.stderr}`)
+    assert.equal(r.code, 0, `DSH 对非 required entry 只报 warning，进程应照常起来：\n${r.stderr}`)
     assert.match(r.stderr, /^PROBE-APPLY-RAN$/m)
-    assert.match(r.stderr, /failed to apply loader entry legion-enforcement-root/)
+    // 同 C：`failed to apply loader entry …` 是旧版 DSH 的措辞，当前不再产生
+    //（这条此前同样被前面那句 `code === 1` 挡住了，从未求值）。
+    assert.match(r.stderr, /legion-enforcement-root \(file:\/\/[^)]+\): Error: /, r.stderr)
     // ★ 断言**具名码本身**，不写"它抛了"。
     assert.match(r.stderr, new RegExp(ROOT_ROW_CODES.NO_APPROVAL_PORT_FACTORY), r.stderr)
     // 两种"装不上"不能同形：这一条**不是**配置问题（身份是齐的）。
     assert.equal(r.stderr.includes('ENFORCEMENT_ROOT_CONFIG_EMPTY'), false,
       `身份配齐了却报配置为空——那这条对照读的是配置，不是注册方：\n${r.stderr}`)
     // 也没有被静默降级成"装好了但没端口"：服务没有被发布。
+    //
+    // ★ 本批修掉一个**空断言**：原来只有下面那一句否定断言，而它的读数由**瀑布探针**
+    //   打印，本用例当时没挂那个探针 ⇒ 这句话在任何情况下都成立。
+    //   现在先证明探针**真的跑了**，再断言它读到的那个值。
+    assert.match(r.stderr, /^WATERFALL-PROBE-EXIT-0$/m, r.stderr)
+    assert.match(r.stderr, /^ENFORCEMENT-ROOT-SERVICE absent$/m, r.stderr)
+    assert.match(r.stderr, /^APPROVAL-PORT-FACTORY none$/m, r.stderr)
     assert.equal(r.stderr.includes('ENFORCEMENT-ROOT-SERVICE present'), false, r.stderr)
   })
 
@@ -617,6 +729,38 @@ describe('PRT-214：补丁行的 apply 在**真 DSH 进程**里跑没跑', () =>
       assert.equal(r.stderr.includes(`MOUNT `) && new RegExp(`MOUNT \\{[^}]*${row.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`).test(r.stderr), false,
         `${row} 竟然在 loader 树里——这一条就退化成 D 的重复了：\n${r.stderr}`)
     }
+  })
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // A3：把 DSH 的**外部事实**钉成一条可执行的断言。
+  //
+  // 上面那一节解释了"为什么本套件不再读退出码"。但"DSH 现在这么做"本身是一个
+  // **外部依赖**——下一个 DSH 版本完全可能改回去（也可能提供一条"消费方声明必需行"
+  // 的路径）。到那时，上面那几条 `code === 0` 会**照样绿**，因为进程确实还是 0。
+  //
+  //   > 一条"跟着外部实现一起改"的断言，与一条"没有断言"，
+  //   > 在外部实现改变的那一天是同一个东西。
+  //
+  // 所以这里把那个外部事实**单独钉住**：一个 id 不在 required 名单里的 entry 失败 ⇒
+  // 只 warn、不拆卸应用。它绿着，上面那些 `code === 0` 才有依据；
+  // 它红了，说明 DSH 换了策略——那时该回去重读那份架构决定记录，
+  // 而不是把这里的期望改到能过为止。
+  guarded('★ A3. DSH 策略钉子：非 required 的 entry 失败只 warn、不拆卸应用', async () => {
+    const r = runDsh({ tag: 'pin', patches: [SCRATCH_PATH.throwingPatch], legionEnv: false, probeExitMs: 3000 })
+
+    assert.equal(r.spawnError, null)
+    // ① 这一行**确实跑过并确实抛了**（否则下面"没有 fatal"是空话）。
+    assert.match(r.stderr, /^THROWING-ENTRY-APPLY-RAN$/m, r.stderr)
+    assert.match(r.stderr, /A3-PIN-THROWING-ENTRY-REFUSED/, r.stderr)
+    // ② 它被如实记成"未激活"——不是静默。
+    assert.match(r.stderr, /did not activate/, r.stderr)
+    assert.match(r.stderr, /warning: \d+ entr(?:y|ies) did not activate/, r.stderr)
+    // ③ **进程照常以 0 退出**：这就是本套件那几条 `code === 0` 的依据。
+    assert.equal(r.code, 0,
+      `DSH 拆卸了含 optional entry 失败的应用——启动策略变了，回去读那份架构决定记录：\n${r.stderr}`)
+    // ④ 而且它**没有**被当成 required failure（这一条与 ③ 分开写：两者可以同时为真）。
+    assert.equal(/required startup failure/.test(r.stderr), false,
+      `DSH 把不在名单里的 id 当成 required 了——那 Legion 的补丁行也许能借此变得响亮：\n${r.stderr}`)
   })
 })
 

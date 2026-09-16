@@ -1218,3 +1218,150 @@ $env:PRT214B_MODE='no-registrar'; node ...\prt214b-real-patch-driver.mjs   # §1
 `DSH_HOME`（`os.tmpdir()` 下，启动前断言）、`bundles: []`/`patchReload: 'startup'` profile、
 删掉 `DSH_SNAPSHOT`、`spawnSync` 带超时——**从不**读写操作者的 `~/.dsh`。
 
+
+## 11. ★★ 续批（2026-09-16）：DSH 的启动严格性是**消费方自有**的，以及本套件为什么不再读退出码
+
+本节记录一次**由外部实现变化触发的**清理。它不是本仓库改坏的，但它把本套件里
+一批**从未被求值过**的断言翻了出来。
+
+### 11.1 问题：拿"进程死没死"当作"强制面在不在"的代理
+
+`root-row-dsh-process.test.mjs` 的 C / E / G 三条原来都写着
+`assert.equal(r.code, 1, …)`，把它当作"强制面没生效"的读数。那个读数是**代理**：
+
+- 它成立时，强制面确实不在（这条没错）；
+- 但它**不成立**时，推不出"强制面在"。
+
+### 11.2 A0：在真 DSH 进程里量出来（4 个场景，活进程，不是读日志）
+
+探针 `_prt-handoff/probe-a0-startup-gate.mjs`（仓库外，不进 CI）：
+
+| 场景 | 装配 | 退出码 | DSH 定性 | 具名拒绝码 |
+|---|---|---|---|---|
+| 1 | 真 `legion-host.patch.yml`，无身份环境 | **0** | `warning(2)` | `ENFORCEMENT_ROOT_CONFIG_EMPTY` |
+| 1b | 真补丁层 + 完整身份环境 | **0** | `warning(1)` | （装上；`hard-floor` pending） |
+| 2 | 补丁行模块**不存在** | **0** | `warning(2)` | `failed to import` |
+| 3 | 对照：只有探针行 | **0** | （无激活诊断） | — |
+
+拒绝**真的发生了**（根行具名报错、栈都在），而进程 **exit 0**。
+
+### 11.3 归因：DSH `bd4cfc7c46`（2026-09-11）
+
+```
+DSH 检出 HEAD   0d1f5000（2026-09-15 11:16）
+bd4cfc7c46      feat(boot): distinguish required startup failures（2026-09-11 12:47）
+```
+
+那份提交把启动必需性收成一份**全局硬编码**名单
+（`packages/boot/app-boot/src/index.ts:711` 的 `requiredStartupEntryIds`：
+`agent-loop` / `webserver` / `modules` / `connection` / `headless-runner` / `acp` /
+`sdk-jsonrpc-server`），另有 bootstrap Include 按 entry 身份视为 required；
+**其余** entry 未激活 → `warning: N entries did not activate`，**成功的 sibling 继续运行**。
+
+随提交附带的架构决定记录（DSH 检出内
+`.agents/notes/implemented/architecture/2026-09-09-consumer-owned-startup-strictness.md`，
+标题即「由 consumer 持有启动严格语义」）把理由写全了：
+
+- 严格语义**属于应用或资源 owner**，不由 Loader 推断；
+- 该记录**明确拒绝**了"在每个 profile 中声明 required entry"这条替代方案
+  （理由：同一应用 endpoint 会在 profile data 与 custom profile 里重复）；
+- 第 15 段：只有"**被 required entry 注入的** provider"才不必单列。
+
+Legion 的补丁行不满足最后一条：没有任何 required entry 依赖它，所以它对 DSH
+**永远是 optional**。**Legion 的强制面失败，DSH 不会让进程死。**
+
+### 11.4 而已有的产品取舍本来就要求"别死"
+
+`runtime-host-row.mjs` 的「记录在案的取舍」（提交 `a374a7f`，2026-09-15）已经把这条
+翻过一次，理由是 spec 正文（不是偏好）：§6.3 表 `line 275`「禁止自动执行，**提示修复或回滚**」、
+`line 278`「只读 Workbench 和 team-hub 在 Runtime 不可用时**继续开放**」——
+两句都预设了**产品还在跑**。改前实现的是"整棵树加载失败"，比正文**更严**；
+改后是"不注册端口、判 `incompatible`、进程活着"。
+
+那次提交同时留下了本节的判据：**`bound=false` 与 `exit=0` 必须一起读**。
+
+### 11.5 三个决定的落地
+
+| 选项 | 结论 |
+|---|---|
+| **A1** 让 Legion 的行进 DSH 的 required 名单 | **不做**。DSH 的架构决定记录已经**明确拒绝**了等价的替代方案；那是平台级改动，且改了它等于替 DSH 重新决定它的设计 |
+| **A2** Legion 自持严格性 | **已经是现状**：缺行 ⇒ `reconcilePatchLayer()` 报 `ROW_MISSING` ⇒ `startupSelfCheck()` 判 `autoExecutionForbidden: true` ⇒ `runtime-host-row.mjs` **不注册宿主端口**、把 `ok:false` 发布成服务值 ⇒ 契约出口报 `incompatible` ⇒ worker 不认领。本套件要做的只是**别再用退出码代理它** |
+| **A3** 把 DSH 的外部事实钉住 | **新增一条用例**（见 11.6 ④） |
+
+### 11.6 本套件改了什么
+
+1. **C / E / G** 的 `assert.equal(r.code, 1, …)` → `assert.equal(r.code, 0, …)`
+   并**显式断言那句 warning**（把"DSH 会 warn"这件事本身也变成读数）；
+   具名拒绝码的断言**原样保留**。
+2. **E 变强**（这是本批最有价值的一处）：除原有的 pending 读数外，新增**直接**读数——
+   `WATERFALL-RESULT "NO-LISTENER"`、`GATE-NOT-BOUND`、`ENFORCEMENT-ROOT-SERVICE absent`。
+   这三条读的是**强制面本身**，DSH 换启动策略也换不掉它们。
+3. **G 修掉一个空断言**：原来那句
+   `assert.equal(r.stderr.includes('ENFORCEMENT-ROOT-SERVICE present'), false)` 的读数
+   由**瀑布探针**打印，而 G 当时**没挂那个探针** ⇒ 该断言恒真。
+   现在挂上探针，先断言 `WATERFALL-PROBE-EXIT-0`（证明探针跑了），再断言读到的值。
+4. **新增 A3 钉子**：一个 id **不在** required 名单里的 entry 当场抛错 ⇒ 只 warn、
+   **不拆卸应用**（exit 0）。它绿着，上面那些 `code === 0` 才有依据；它红了，
+   说明 DSH 换了策略——那时该回去重读那份架构决定记录，而**不是**把期望改到能过为止。
+
+### 11.7 顺带翻出来的：一批**从未被求值过**的断言
+
+`code === 1` 是每条用例里**最先**失败的那一句，于是它后面的每一条断言都**从未执行**。
+把退出码改对之后，它们第一次被求值，结果是红的。已在本套件内修掉两类：
+
+- `failed to apply loader entry legion-enforcement-root` —— 这是**旧版 DSH** 的措辞，
+  当前 app-boot 已不再产生它（`packages/boot/app-boot/src/` 内该字符串 0 命中）。
+  当前形状是 `<entry id> (<模块 file:// URL>): <诊断>`。C / G 各一处。
+- `pre-execute-row\.mjs: pending (…)` —— 少了模块 URL 右括号后的冒号，**永远**匹配不上。
+  E 一处。
+
+> 一条排在必然失败断言之后的断言，
+> 与一条不存在的断言，在"它守住了什么"上是同一个东西。
+
+### 11.8 诚实边界（本批**没有**做的）
+
+同样读 `exit code 1` 的还有三个**兄弟套件**，它们**仍然红**：
+
+```
+runtime-host-binding-unblocked-dsh-process.test.mjs   ① / ② / ④ / ⑥ / 汇总
+runtime-host-registrar-row-dsh-process.test.mjs       N / 读数对照
+runtime-host-row-dsh-process.test.mjs                 C / D
+```
+
+它们红的原因**与本节同源**（同上那句 `code === 1` 先抛），但把退出码改对之后暴露出
+**另一族**断言，本批没有处理：
+
+> 这些用例断言 `r.stderr.includes(<本行的外层拒绝码>)`，而 **DSH 不打印 `err.code`**。
+> app-boot 打的是 `err.stack` 的第一行，形状是 `RuntimeHostRowError: <message>`；
+> 而 `runtime-host-row.mjs:529` 的 `rowError()` 只把码放在 `err.code` 上、
+> **不进消息文本**（实测 stderr 里只有内层码 `RUNTIME_HOST_REGISTRAR_NO_CAN_READ_SOURCE`）。
+> 所以 `includes('RUNTIME_HOST_ROW_INPUTS_FACTORY_THREW')` **不可能成立**。
+
+两条候选修法，本批**没有**替它选：
+
+1. **改产品**：让 `rowError()` 把码也带进消息文本（`root-row.mjs` 的调用点就是这么做的，
+   那里 `组合根给的是 ENFORCEMENT_ROOT_CONFIG_EMPTY` 是可 grep 的）。这与 `a374a7f`
+   自己那句「拒绝**必须留下痕迹**」同向，但属于产品行为改动，影响面要单独量。
+2. **改用例**：断言**可观测**的东西（错误名 `RuntimeHostRowError` + 内层码 + 该路径独有的
+   消息片段），并写明"外层码在 `err.code` 上、stderr 里没有"。
+
+**这半个改动被主动回退了**：留着它会让这三个套件从 2/1/N 处红变成 5/N 处红
+（更诚实，但把两件事混在同一个改动里）。所以本批把 `root-row-dsh-process.test.mjs`
+这一条**完整修完并验证**，兄弟套件保持原状、连同上面的诊断留作下一批。
+
+### 11.9 复跑命令与实测
+
+```powershell
+$env:DSH_CHECKOUT = 'D:\project\DSH\dsh\deepseek-harness'
+Set-Location D:\project\DSH\legion\.worktrees\prt-integration
+node --test runtime/dsh-composition/plugins/root-row-dsh-process.test.mjs
+```
+
+```
+ℹ tests 10   ℹ pass 10   ℹ fail 0   ℹ skipped 0
+```
+
+A3 钉子**本身**的可用性也量过：它读的是"非 required entry 失败 ⇒ exit 0 + warning +
+无 `required startup failure`"三件事，任一条变了它就会红。
+
+A0 探针（仓库外）：`_prt-handoff\probe-a0-startup-gate.mjs`。

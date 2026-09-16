@@ -389,3 +389,94 @@ test('漂移：`RUNTIME_MODEL_KEY_REF` 必须与向导写进密钥库的那个�
   assert.deepEqual([...DEFAULT_RUNTIME_CREDENTIAL_REFS], [m[1]])
   assert.equal(WIRING_SOURCE.pathname.length > 0, true)
 })
+
+test('★★★★★ 缺口 ③：**DSH 自己的凭据提供方**真的从 Legion 材料化的那份文件里读到了值', async (t) => {
+  // 这是本组此前唯一一条没关的缺口，也是整条线**唯一**一个不撒谎的判据。
+  //
+  // 前面所有用例证明的都是 Legion 这一侧：文件写出来了、覆盖层里有那一行 id 与
+  // path、空补丁表是合法空操作。而这些在"DSH 根本读不到"时**全部成立**——
+  //
+  //   > 一条"我们把 DSH 指过去了"的断言，与一条"DSH 真的把钥匙拿到了"的断言，
+  //   > 在 DSH 没读懂那份文档的那些部署里给出同一片绿——只不过前者的绿
+  //   > 只说明了我们这一半，而钥匙没拿到的那一半没有任何读数。
+  //
+  // 判据因此必须落在 **DSH 的类**上，而不是我们自己再解析一遍那份 YAML
+  // （那是"我们读自己的文件"，与"DSH 读得到"是两件事）。
+  //
+  // 需要 DSH 检出：没有 `DSH_CHECKOUT` 时**逐条 skip**，不伪造通过。
+  // 一条"因为环境不在所以绿了"的用例，与一条"真的验过了"的用例，
+  // 在摘要里都是 pass——所以这里显式 skip，让"这次到底跑了什么"看得见。
+  const checkout = (process.env.DSH_CHECKOUT ?? '').trim()
+  if (checkout === '') {
+    t.skip('未配置 DSH_CHECKOUT：这一条要 DSH 自己的 dsh-credentials-local 才能验')
+    return
+  }
+  // 从检出里解析 DSH 自己的凭据提供方（**不是**我们的复刻）。
+  const { createRequire } = await import('node:module')
+  const { pathToFileURL } = await import('node:url')
+  const baseBundle = join(checkout, 'packages', 'bundle', 'base')
+  let credModule = null
+  try {
+    const req = createRequire(pathToFileURL(join(baseBundle, 'package.json')).href)
+    credModule = await import(pathToFileURL(req.resolve('@deepseek-ai/dsh-credentials-local')).href)
+  } catch (e) {
+    t.skip(`检出不完整，解析不到 @deepseek-ai/dsh-credentials-local（${e?.code ?? e?.name}）`)
+    return
+  }
+  const { LocalCredentialProvider } = credModule
+  const ctxModule = await import(pathToFileURL(
+    createRequire(pathToFileURL(join(baseBundle, 'package.json')).href).resolve('@deepseek-ai/cordis')).href)
+
+  const root = tempRoot('dshreads')
+  try {
+    const layout = layoutIn(root)
+    const dsh = fakeDshDeclaration(root)
+    const reading = await prepareRuntimeCredentials({
+      layout,
+      dshCredentialsFile: join(root, 'operator-dsh', '.credentials.yaml'),
+      operatorHome: join(root, 'operator-home'),
+      runId: 'launch-dshreads',
+      refs: [RUNTIME_MODEL_KEY_REF],
+      runtimeCommand: { file: 'node', args: [join(root, 'dsh', 'lib', 'bin.js')] },
+      requireFn: dsh.requireFn,
+      openHandle: async ({ refs }) => fakeHandle(refs),
+    })
+    assert.equal(reading.applied, true, reading.message ?? '')
+
+    // ① 覆盖层里**声明的那个路径**（从文档里读回来，不是从我们的记忆里）
+    const paths = runCredentialPaths(layout)
+    const overlayText = readFileSync(paths.overlayFile, 'utf8')
+    const line = overlayText.match(/path:\s*(.+)$/m)
+    assert.ok(line !== null, `覆盖层里没有 path：${overlayText}`)
+    // 覆盖层写的是 YAML 双引号标量（值是 JSON.stringify 的路径）⇒ `\\` 是一个反斜杠
+    let declared
+    try { declared = JSON.parse(line[1].trim()) } catch { declared = line[1].trim().replace(/^["']|["']$/g, '') }
+    assert.equal(declared, paths.targetFile,
+      '覆盖层指的不是本次材料化的那一份文件——那 DSH 读到的会是别的（或不存在的）东西')
+
+    // ② 用 **DSH 的** 提供方去读。真 cordis Context，不是手搓替身。
+    const provider = new LocalCredentialProvider(new ctxModule.Context(), {
+      path: declared,
+      dshHome: join(root, 'operator-home', '.dsh'),
+    })
+    for (const fn of ['loadInitial', 'refresh']) {
+      if (typeof provider[fn] === 'function') await provider[fn]()
+    }
+    // ③ 判据：DSH 按**它自己声明的那个名字**（假 DSH 声明里写的 PROBE_API_KEY）
+    //    取到的值，必须是材料化时那一把。
+    const got = await provider.resolve('PROBE_API_KEY')
+    assert.notEqual(got, undefined,
+      'DSH 的提供方从 Legion 那份文件里**一条都取不到**——覆盖层指过去了，但读不出来')
+    assert.equal(got.source, 'file', `值不是从文件来的（source=${got.source}）`)
+    assert.equal(got.value, 'probe-value-0', '取到的值不是材料化时写进去的那一把')
+
+    // ④ 反向对照：**Legion 的引用名不是 DSH 的寻址名**。
+    //    少了这条，上面那条可能只是"提供方对任何名字都返回同一把钥匙"。
+    const byRef = await provider.resolve(RUNTIME_MODEL_KEY_REF)
+    assert.equal(byRef, undefined,
+      `DSH 竟然能用 Legion 的引用名（${RUNTIME_MODEL_KEY_REF}）取到值——`
+      + '那说明写进文档的键不是 DSH 的可寻址名，而是我们的内部引用名')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})

@@ -24,6 +24,7 @@ export const SCHEMA = defineSchema({
     { key: 'maxUpload', env: 'DSH_WORKBENCH_MAX_UPLOAD', type: 'int', default: 64 * 1024 * 1024, min: 1, doc: '单文件上传上限（字节）' },
     { key: 'maxUploadTotal', env: 'DSH_WORKBENCH_MAX_UPLOAD_TOTAL', type: 'int', default: 1024 * 1024 * 1024, min: 1, doc: '分片上传总上限（字节）' },
     { key: 'chunkSize', env: 'DSH_WORKBENCH_CHUNK_SIZE', type: 'int', default: 4 * 1024 * 1024, min: 1, doc: '建议分片大小（前端据此切片）' },
+    { key: 'revealDry', env: 'DSH_WORKBENCH_REVEAL_DRY', type: 'bool', default: false, doc: '「打开所在位置」演练模式：只回传将执行的打开器与落点、不真的拉起文件管理器（契约测试用）' },
     // ── 浏览器助手（P2-8）──
     { key: 'fetchAllowPrivate', env: 'DSH_WEB_FETCH_ALLOW_PRIVATE', type: 'bool', default: false, doc: '允许抓取私网地址（默认关闭；仅测试用）' },
     { key: 'cacheTtlMs', env: 'DSH_WEB_CACHE_TTL_MS', type: 'int', default: 5 * 60 * 1000, min: 1, doc: '抓取缓存 TTL（ms，进程内）' },

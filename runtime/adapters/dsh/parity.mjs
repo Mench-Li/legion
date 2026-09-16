@@ -179,7 +179,21 @@ const LEGACY_CALL_RE = new RegExp('ctx\\.' + 'subagents' + '\\.start\\(')
  *   所以规矩不变：每次都重新对拍，算术只用来解释位移，不用来产出新行号。 */
 export const LEGACY_CALL_SITE = Object.freeze({
   file: 'plugins/src/index.ts',
-  line: 1721,
+  // ★ 2026-09-16（main 整合）：1721 → **1794**。这一处**不是**手工算的，
+  //   是对拍出来的——用本模块自己的抽取器在合并后的 `index.ts` 里求全部调用点
+  //   （1001 / 1794 / 2010 / 2391，共 4 处），取"选项集合与复刻件完全一致"的**恰好一处**。
+  //
+  //   这次之所以会动，原因与上面四个切片都不同：不是本分支又搬了代码，
+  //   而是**两条线在同一个函数上各自动过**——main 侧给它加了一段生产修复
+  //   （T-156：目标已终态不再补建后继），而本分支把这个函数整体搬去了 ./handoff.ts。
+  //   两者合起来使这个调用点整体下移。
+  //
+  //   > 一个"行号常量"在**只有一条线**在动的时候，
+  //   > 与它在上游也在动的时候，读起来是同一种东西——
+  //   > 只不过后者的失效发生在**别人的提交**之后，而那时没有人会想到去看它。
+  //   好在 `locateLegacyCall()` 现在会把"还在、只是挪了"与"真的没了"分开报告，
+  //   所以下一次它漂移时，症状是一句"按内容重新定位成功"，而不是一次静默的覆盖率损失。
+  line: 1794,
   context: 'worker 派工（scrum:<taskId>）',
 })
 
@@ -331,34 +345,104 @@ export function extractLegacyCallOptions(source, atLine) {
 }
 
 /**
+ * 定位旧调用：**行号只是提示，判据是内容**。
+ *
+ * ★ 合并说明（2026-09-16，codex/prt-runtime × main 整合）：本函数来自 `main` 那一侧，
+ *   与上面 `LEGACY_CALL_SITE` 的长注释是**同一件事的两个阶段**——
+ *   那条注释记的是**手工对拍**（每个切片搬完，用抽取器求出新行号再改常量），
+ *   而本函数把那次手工对拍**做成了代码**。
+ *
+ *   > 一个"每搬一次代码就手工重算一次锚点"的流程，
+ *   > 与一个"锚点自己按内容重新定位"的流程，在锚点**没动**的时候是同一个东西；
+ *   > 区别在它**动了**的那一次——前者要么被忘掉（于是对拍静默失效），
+ *   > 要么被重算（于是那次重算的结论没人复核）。
+ *
+ *   长注释保留在原文处：它是"为什么不能只认行号"的现场记录，
+ *   而本函数是那个结论的实现。两者不重复，一个是证据，一个是结论。
+ *
+ * 为什么不能只认行号：`plugins/src/index.ts` 有两千多行，任何在记录行之上的
+ * 无关改动都会让调用下移，此时只认行号会报「调用已被删除」—— 那是**假警报**。
+ * 假警报的代价不是噪音：一条会因为别人改了别的文件而变红的用例，最后会被关掉；
+ * 关掉之后，**真正的**漂移（选项变了、调用没了）就再没人看。
+ * 本模块存在的理由就是不让对拍失去意义，所以它自己更不能制造这种失效。
+ *
+ * 判定改为按选项集合**完全一致**来认：
+ *   恰好一个 → 就是它（`relocated` 标记它已不在记录行上，供报告说明）。
+ *   零个     → 选项变了或调用没了 → 报漂移。
+ *   多个     → 分不清是哪一处 → 报漂移，交给人确认（宁可让人来看，也不猜）。
+ *
+ * @param {string} source `plugins/src/index.ts` 的内容
+ * @param {number} [atLine] 记录的行号（仅作提示）
+ * @returns {{ok: true, line: number, options: string[], relocated: boolean}
+ *   | {ok: false, reason: string}}
+ */
+export function locateLegacyCall(source, atLine = LEGACY_CALL_SITE.line) {
+  const expected = [...LEGACY_CALL_OPTIONS]
+  const sameSet = (o) => o.length === expected.length && expected.every((e) => o.includes(e))
+
+  const atExact = extractLegacyCallOptions(source, atLine)
+  if (atExact.length > 0) {
+    return { ok: true, line: atExact[0].line, options: atExact[0].options, relocated: false }
+  }
+
+  const all = extractLegacyCallOptions(source)
+  const matching = all.filter((c) => sameSet(c.options))
+  if (matching.length === 1) {
+    return { ok: true, line: matching[0].line, options: matching[0].options, relocated: true }
+  }
+  if (matching.length === 0) {
+    return {
+      ok: false,
+      reason: `${LEGACY_CALL_SITE.file} 第 ${atLine} 行没有调用，全文也未找到选项集合与复刻件一致的调用`
+        + `（共扫描到 ${all.length} 处 ${LEGACY_CALL_TOKEN}）—— 调用已被删除或选项已变。`
+        + '复刻件不再代表旧路径，本对拍无效。',
+    }
+  }
+  return {
+    ok: false,
+    reason: `全文有 ${matching.length} 处调用的选项集合与复刻件一致`
+      + `（第 ${matching.map((c) => c.line).join('、')} 行），无法判断哪一处是 worker 派工路径。`
+      + `请人工确认后更新 LEGACY_CALL_SITE，本对拍暂不采信。`,
+  }
+}
+
+/**
  * 旧调用是否已经漂移（复刻件是否还忠实地代表旧路径）。
+ *
+ * ★ 合并说明：改用 {@link locateLegacyCall}。「行号漂移」不再是**失败**，
+ *   而是被**区分出来**的一种成功——`relocated: true` 说明"按内容找到了、只是不在记录行上"。
+ *   这两件事在读的人那里必须分开：前者要去看锚点，后者只需要知道锚点该刷新了。
  *
  * @param {string} source `plugins/src/index.ts` 的内容
  * @param {number} [atLine] 调用所在行；默认 {@link LEGACY_CALL_SITE}.line。
  *   显式传入是为了让用例能用短源码验证判定逻辑，而不必补齐两千行。
  */
 export function detectLegacyDrift(source, atLine = LEGACY_CALL_SITE.line) {
-  const calls = extractLegacyCallOptions(source, atLine)
-  if (calls.length === 0) {
-    return {
-      drifted: true,
-      reason: `${LEGACY_CALL_SITE.file}:${atLine} 处未找到 ${LEGACY_CALL_TOKEN} 调用 —— `
-        + '行号漂移或调用已被删除。复刻件不再代表旧路径，本对拍无效。',
-      actual: null,
-    }
+  const located = locateLegacyCall(source, atLine)
+  if (!located.ok) {
+    return { drifted: true, reason: located.reason, actual: null }
   }
-  const actual = calls[0].options
+  const actual = located.options
   const expected = [...LEGACY_CALL_OPTIONS]
   const missing = expected.filter((o) => !actual.includes(o))
   const added = actual.filter((o) => !expected.includes(o))
   if (missing.length === 0 && added.length === 0) {
-    return { drifted: false, reason: '旧调用的选项集合与复刻件一致', actual }
+    return {
+      drifted: false,
+      reason: located.relocated
+        ? `旧调用已从第 ${atLine} 行移到第 ${located.line} 行（选项集合未变）—— 按内容重新定位成功`
+        : '旧调用的选项集合与复刻件一致',
+      actual,
+      line: located.line,
+      relocated: located.relocated,
+    }
   }
   return {
     drifted: true,
     reason: `旧调用选项已变：新增 [${added.join(', ')}]，移除 [${missing.join(', ')}]。`
       + '复刻件必须同步更新，否则对拍在比较两件不同的事。',
     actual,
+    line: located.line,
   }
 }
 

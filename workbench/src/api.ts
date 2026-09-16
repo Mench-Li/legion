@@ -271,9 +271,23 @@ export function publishGoal(scope: string, objective: string, mode?: 'chain' | '
   return hubPost('/api/goal', mode ? { scope, objective, mode } : { scope, objective })
 }
 
-/** team-hub v2：目标状态迁移（仅将军）：active ↔ paused；done/canceled 为终态（cancel 会取消该目标未开工的链任务）。 */
-export function setGoalStatus(scope: string, goalId: string, status: GoalStatus): Promise<unknown> {
-  return hubPost('/api/goal/status', { scope, id: goalId, status })
+/** 目标状态迁移（POST /api/goal/status）响应：hub 写端点统一信封 `{ ok, task }`，
+ *  canceled 时 task 上带 canceledTasks（被硬取消的未开工任务数）与 strandedTasks（被留痕的在办任务 id）。 */
+export interface GoalStatusResult {
+  ok?: boolean
+  task?: {
+    goal?: { id?: string; status?: GoalStatus }
+    /** 被同步硬取消的未开工链任务数。 */
+    canceledTasks?: number
+    /** 在办/待验收任务（in_progress/in_review）：不会被处决，但已追加提示评论并置 hold，等将军裁决。 */
+    strandedTasks?: string[]
+  }
+}
+
+/** team-hub v2：目标状态迁移（仅将军）：active ↔ paused；done/canceled 为终态（cancel 会取消该目标未开工的链任务，
+ *  在办/待验收任务改为留痕 + 挂 hold，见返回信封 `task.strandedTasks`）。 */
+export function setGoalStatus(scope: string, goalId: string, status: GoalStatus): Promise<GoalStatusResult> {
+  return hubPost('/api/goal/status', { scope, id: goalId, status }) as Promise<GoalStatusResult>
 }
 
 /** team-hub v2：更新目标共享上下文（仅将军）。contextVersion 服务端 +1；守护下一派工按新版本对齐（在跑 worker 不打断）。 */
@@ -836,6 +850,38 @@ export interface ChunkUploadInit {
   skipped?: boolean
   requestedName?: string
   finalName?: string
+}
+
+export interface RevealResult {
+  ok: boolean
+  /** 落点类型：file（文件管理器里选中它）/ dir（直接打开该目录）。 */
+  kind?: 'file' | 'dir'
+  /** 空间根内相对路径（原样回显）。 */
+  rel?: string
+  /** 落点绝对路径（仅回环可见，供界面提示/复制）。 */
+  abs?: string
+  /** 所在目录绝对路径。 */
+  dir?: string
+  /** true = 原目标已不存在，已回落到根内最近的既有祖先目录。 */
+  missing?: boolean
+  /** 实际拉起的打开器（explorer.exe / open / xdg-open）与参数。 */
+  opener?: string
+  args?: string[]
+  spawned?: boolean
+  dryRun?: boolean
+  spawnError?: string
+}
+
+/**
+ * 「打开所在位置」：让本机文件管理器定位到该文件（Windows 资源管理器选中 / macOS Finder / Linux 打开所在目录）。
+ * scope=空间 id，path=空间根内相对路径（''= 空间根目录）；服务端做根内越界与 .git 校验，仅回环 + 写令牌。
+ */
+export function revealFileLocation(scope: string, path: string): Promise<RevealResult> {
+  return filesWrite<RevealResult>('/api/files/reveal', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scope, path }),
+  })
 }
 
 /** 发起（或复用）分片上传会话：同 path+size 已有未完成会话 → 返回原 uploadId 与 received（断点续传）。 */

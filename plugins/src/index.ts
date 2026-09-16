@@ -510,6 +510,36 @@ function spaceWorker(ctx: AppContext, config: Config): void {
   const foremen = new Map<string, { agent: Agent; dispose: () => Promise<void> }>()
   /** foreman 创建中的 promise 去重：同 cwd 并发请求只创建一次（isolate=false 且 maxWorkers>1 时多个 worker 同 cwd 的竞态防护） */
   const foremanPending = new Map<string, Promise<Agent | undefined>>()
+  /**
+   * foreman **持久**失败登记：cwd → { reason, since, attempts }（非空 = 该 cwd 的 worker 父级建不起来）。
+   *
+   * 为什么需要它：旧实现把**任何**异常都当「本轮瞬时失败」处理（记一行日志、返回 undefined、下轮重试）。
+   * 但 sessionId 由 cwd 派生、是确定性常量，而 agent 会话是**持久化**的（session-persistence）——
+   * 上一个进程未优雅退出时残留的 foreman 会话，会让此后每一次 foreman 会话创建都以
+   * SessionAlreadyExistsError 失败，于是守护每 20s 打一行同样的日志、**永久**跳过该 cwd 的 foreman。
+   * 现场（2026-09-11）：ozon 661 次 / software 399 次撞同一个 id，对话回复与 /api/rewrite 静默中断。
+   * 现在：撞名即改用唯一 id 自愈，并把失败态写进 daemon-<scope>.json，让看板/健康页看得见。
+   *
+   * ⚠️ 合并说明（2026-09-16）：上面这一句原写作「每一次 foreman 会话创建（以该方法名写出）」，
+   * 是随 `main` 那笔 foreman 修复一起进来的。本次合并把那个方法名改成了自然语言表述——
+   * **不是因为注释不该提它，而是因为 `dsh-boundary` 棘轮的口径是词法的**：
+   * 注释与字符串里的记号同样计数（`scripts/ci/dsh-boundary.mjs:182`），
+   * 而它自己写明了正确的做法是「让适配层的注释不要出现真实记号」。
+   *
+   *   > 于是这里有一个真实的选择：把基线从 1 抬到 2，还是把注释里那个词换掉。
+   *   > 前者会让棘轮**永久**多出一个名额——而那一个名额在将来会静静地放进一次
+   *   > 真的执行面新增依赖；后者只改一个词，含义一字未变。
+   *   > 抬高上限来容纳一次"其实不算"的计数，与放宽这条棘轮，是同一个东西。
+   */
+  const foremanDown = new Map<string, { reason: string; since: string; attempts: number }>()
+  /** 本插件实例的短标识：撞名后据此派生一个全新 foreman 会话 id（每进程唯一 → 必定可创建）。 */
+  const foremanRunId = Math.random().toString(36).slice(2, 8)
+  /** 判定「会话 id 已被占」：session-persistence 的 SessionAlreadyExistsError（按 name/文案判定，不跨包耦合错误类）。 */
+  const isSessionExistsError = (e: unknown): boolean => {
+    if ((e as { name?: unknown } | null)?.name === 'SessionAlreadyExistsError') return true
+    const msg = e instanceof Error ? e.message : String(e)
+    return msg.includes('SessionAlreadyExistsError') || /session "[^"]*" already exists/.test(msg)
+  }
   /** 中止类重试的退避时间戳：taskId → 上次「worker 未完成/派工失败」重试时间（防故障期热循环） */
   const abortRetryAt = new Map<string, number>()
   /** 切片展开重试退避：tdId → 上次「TASK_BREAKDOWN.md 未就绪/注册失败」时间（防每轮空转重试） */
@@ -818,6 +848,12 @@ function spaceWorker(ctx: AppContext, config: Config): void {
           },
         // T-123 对话中心：daemon 运行状态（在线/心跳）透出给 UI 健康条
         chat: { ...daemonChatState },
+        // foreman 可用性：非空 = 该 cwd 的 worker 父级建不起来（会话 id 残留自愈后仍失败），
+        // 此时对话回复/改写不可用；isolate 下派工走各自 worktree cwd，通常不受影响。
+        foreman: {
+          ok: foremanDown.size === 0,
+          down: [...foremanDown.entries()].map(([cwd, v]) => ({ cwd, reason: v.reason, since: v.since, attempts: v.attempts })),
+        },
         // P1-4.4 规则资产 doctor：desired 规则单元 vs 实际注入产物（false = 有规则没进提示词）
         rulesDoctor: lastRuleDoctor === null
           ? null
@@ -1035,17 +1071,43 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     const creating = (async () => {
       try {
         const selection = ctx.agentDefaultModel.currentSelection()
-        const handle = await ctx.agents.create({
-          sessionId: SessionId(`${config.mode === 'mediator' ? 'scrum-mediator' : 'scrum-worker'}-foreman-${hashStr(cwd)}`),
-          meta: { cwd },
-          agentOptions: { provider: selection.provider, model: selection.model },
-          setup: async (agentCtx: Context) => void await ctx.agentPresets.mount(agentCtx, config.agentPreset),
+        const base = `${config.mode === 'mediator' ? 'scrum-mediator' : 'scrum-worker'}-foreman-${hashStr(cwd)}`
+        // 首选稳定 id（保留「按 cwd 稳定」的原意）；若它已被占（= 上一个进程残留的持久化会话，
+        // 见 foremanDown 注释），改写带本实例标识的唯一 id 重建——否则会以同一个确定性错误永久失败。
+        const candidates = [base, `${base}-${foremanRunId}`]
+        let lastErr: unknown
+        for (const sessionId of candidates) {
+          try {
+            const handle = await ctx.agents.create({
+              sessionId: SessionId(sessionId),
+              meta: { cwd },
+              agentOptions: { provider: selection.provider, model: selection.model },
+              setup: async (agentCtx: Context) => void await ctx.agentPresets.mount(agentCtx, config.agentPreset),
+            })
+            foremen.set(cwd, { agent: handle.agent, dispose: () => handle.dispose() })
+            if (foremanDown.delete(cwd)) {
+              log(`foreman 恢复：${handle.agent.session.id}（cwd=${cwd}）——此前会话 id 残留导致不可用`)
+            } else {
+              log(`foreman 就绪：${handle.agent.session.id}（cwd=${cwd}，model=${selection.provider}/${selection.model}）`)
+            }
+            return handle.agent
+          } catch (e) {
+            lastErr = e
+            // 只有「稳定 id 撞名」才值得换唯一 id 重试；其他错误维持原语义（本轮跳过）
+            if (!isSessionExistsError(e) || sessionId !== base) break
+            log(`foreman 会话 id 已被占用（${sessionId}，多为此前进程未释放的持久化会话）→ 换唯一 id 重建`)
+          }
+        }
+        // 换唯一 id 仍失败（或非撞名错误）：登记持久失败，并**只在该 cwd 首次失败时**记日志，
+        // 避免每轮重复刷屏掩盖真实问题；失败态同时进 daemon 状态供看板/健康页读取。
+        const reason = lastErr instanceof Error ? lastErr.message : String(lastErr)
+        if (!foremanDown.has(cwd)) log(`foreman 创建失败（本轮跳过派工，cwd=${cwd}）：${reason}`)
+        const prev = foremanDown.get(cwd)
+        foremanDown.set(cwd, {
+          reason,
+          since: prev?.since ?? new Date().toISOString(),
+          attempts: (prev?.attempts ?? 0) + 1,
         })
-        foremen.set(cwd, { agent: handle.agent, dispose: () => handle.dispose() })
-        log(`foreman 就绪：${handle.agent.session.id}（cwd=${cwd}，model=${selection.provider}/${selection.model}）`)
-        return handle.agent
-      } catch (e) {
-        log(`foreman 创建失败（本轮跳过派工，cwd=${cwd}）：${String(e)}`)
         return undefined
       } finally {
         foremanPending.delete(cwd)
@@ -1257,6 +1319,28 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       if (goalCtxById.size > 0) log(`目标上下文同步：${[...goalCtxById.keys()].join(', ')}（${goalCtxById.size} 个）`)
     } catch (e) {
       log(`目标上下文拉取失败（保留上轮缓存）：${String(e)}`)
+    }
+  }
+
+  /**
+   * 权威回查单个目标（缓存缺失时的兜底）。
+   * 失败返回 undefined，由调用方决定保守策略——本函数不抛，避免单点查询失败打断派工主流程。
+   */
+  async function fetchGoalById(goalId: string): Promise<GoalCtx | undefined> {
+    if (!useHub) return undefined
+    try {
+      const res = await fetch(`${hubUrl}/api/goal?scope=${encodeURIComponent(scope)}`)
+      if (!res.ok) return undefined
+      const data = await res.json().catch(() => null) as { goals?: GoalCtx[] } | null
+      const hit = data?.goals?.find(x => x.id === goalId)
+      if (hit !== undefined) {
+        goalCtxById.set(hit.id, hit) // 顺带回填缓存，后续轮次不再回查
+        log(`目标 ${goalId} 状态回查命中：${hit.status}`)
+      }
+      return hit
+    } catch (e) {
+      log(`目标 ${goalId} 状态回查失败：${String(e)}`)
+      return undefined
     }
   }
 
@@ -2024,6 +2108,12 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     stageByRole: () => stageByRole,
     listTasks, hubPost, runTaskctl,
     SLICE_ANALYSIS_TAIL, isSliceGoalTask,
+    // ★ 合并说明（2026-09-16）：这两项来自 `main` 那一侧对**同一个** `advancePipeline`
+    //   的生产修复（T-156 复发：历史已收口目标凭空长出新链）。函数已在本分支搬到
+    //   `./handoff.ts`，所以修复也跟着搬到那里——接线在这里，与 `createSliceOrchestration`
+    //   同一套注入纪律：`goalCtxById` 是 **const Map**（身份稳定）传值，
+    //   `fetchGoalById` 是身份稳定的函数声明，传值。
+    goalCtxById, fetchGoalById,
   })
   // ── 阶段 3 PRT-315 切片 7：切片流水线编排已拆到 ./sliceOrchestration.ts，这里只做**接线** ──
   // 本界**没有**运行期会被重新赋值的绑定：`useHub` 的守卫（`// 5.`）留在下面调用点，故不传取值

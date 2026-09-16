@@ -52,7 +52,7 @@
       ],
       "envReadCount": 14,
       "undeclaredEnvKeys": [],
-      "filesScanned": 34
+      "filesScanned": 35
     },
     {
       "name": "workbench",
@@ -80,7 +80,7 @@
         "DSH_WORKBENCH_TOKEN",
         "TEAM_HUB_TOKEN"
       ],
-      "declaredFieldCount": 22,
+      "declaredFieldCount": 23,
       "envReadKeys": [
         "DSH_HUB_UPSTREAM",
         "DSH_WEB_AUDIT_FILE",
@@ -88,12 +88,13 @@
         "DSH_WEB_SHOT_BROWSER",
         "DSH_WEB_SHOT_DIR",
         "DSH_WEB_SHOT_ENABLE",
+        "DSH_WORKBENCH_REVEAL_DRY",
         "DSH_WORKBENCH_SPACES_JSON",
         "TEAM_HUB_TOKEN"
       ],
-      "envReadCount": 8,
+      "envReadCount": 9,
       "undeclaredEnvKeys": [],
-      "filesScanned": 56
+      "filesScanned": 58
     },
     {
       "name": "whiteboard",
@@ -243,7 +244,7 @@
       ],
       "envReadCount": 8,
       "undeclaredEnvKeys": [],
-      "filesScanned": 56
+      "filesScanned": 64
     },
     {
       "name": "orchestrator",
@@ -301,7 +302,7 @@
       "envReadKeys": [],
       "envReadCount": 0,
       "undeclaredEnvKeys": [],
-      "filesScanned": 75
+      "filesScanned": 78
     },
     {
       "name": "security",
@@ -324,7 +325,7 @@
       "envReadKeys": [],
       "envReadCount": 0,
       "undeclaredEnvKeys": [],
-      "filesScanned": 9
+      "filesScanned": 11
     }
   ],
   "declarationGaps": [],

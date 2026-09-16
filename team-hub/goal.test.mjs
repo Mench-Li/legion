@@ -24,6 +24,12 @@ function chainTasks(goalId) {
   return mod.db.prepare("SELECT id, status, role, goalId FROM tasks WHERE goalId = ? AND status != 'canceled' ORDER BY id").all(goalId)
 }
 
+/** 任务行读取视图（getTask 未导出：hold 归一为 boolean、comments 解析为数组）。 */
+function taskRow(id) {
+  const r = mod.db.prepare('SELECT id, status, hold, version, comments FROM tasks WHERE id = ?').get(id)
+  return { ...r, hold: r.hold === 1, comments: JSON.parse(r.comments ?? '[]') }
+}
+
 before(async () => {
   dbFile = join(tmpRoot, 'team.db')
   process.env.TEAM_HUB_DB = dbFile
@@ -157,6 +163,42 @@ describe('目标状态生命周期与护栏', () => {
     // 其他目标链（B done）不被误伤
     const afterOther = mod.db.prepare("SELECT COUNT(*) AS c FROM tasks WHERE goalId = ? AND status != 'canceled'").get(other.id).c
     assert.equal(afterOther, beforeOther)
+  })
+
+  // T-141 现场：目标取消时 in_review 的任务不会被硬杀（有意设计），但也必须留痕 + 挂起，
+  // 否则它既没有下游、也没人推进，会静默躺在「待我决定」直到将军偶然发现。
+  it('取消目标 → 在办/待验收任务留痕并置 hold（不静默滞留）', () => {
+    const g = mod.publishGoalRecord('software', '目标庚：在办留痕测试', 'chain', 'general').goal
+    const chain = chainTasks(g.id)
+    assert.equal(chain.length, 2)
+    const [running, reviewing] = chain
+    mod.db.prepare("UPDATE tasks SET status='in_progress' WHERE id=?").run(running.id)
+    mod.db.prepare("UPDATE tasks SET status='in_review' WHERE id=?").run(reviewing.id)
+    const beforeVersion = taskRow(reviewing.id).version
+
+    const r = mod.setGoalState(g.id, 'canceled', 'general')
+    assert.equal(r.goal.status, 'canceled')
+    assert.deepEqual([...r.strandedTasks].sort(), [running.id, reviewing.id].sort(), '两条在办任务都应留痕')
+    assert.equal(r.canceledTasks, 0, '在办任务不计入硬取消数')
+
+    for (const id of [running.id, reviewing.id]) {
+      const t = taskRow(id)
+      assert.notEqual(t.status, 'canceled', '在办任务保持原状态（不静默处决）')
+      assert.equal(t.hold, true, '应置 hold，挡住守护自动认领/流转')
+      const last = t.comments.at(-1)
+      assert.equal(last.by, 'general')
+      assert.match(last.text, /所属目标 .* 已取消/, '应留一条显式提示评论')
+      assert.match(last.text, /验收通过/, '应给出将军的处置路径')
+    }
+    assert.equal(taskRow(reviewing.id).version, beforeVersion + 1, '留痕应版本 +1')
+
+    // 反向：已 done 的任务不因目标取消而被 hold（它本来就没有下游）
+    const g2 = mod.publishGoalRecord('software', '目标辛：done 不挂起', 'chain', 'general').goal
+    const doneTask = chainTasks(g2.id)[0]
+    mod.db.prepare("UPDATE tasks SET status='done' WHERE id=?").run(doneTask.id)
+    const r2 = mod.setGoalState(g2.id, 'canceled', 'general')
+    assert.deepEqual(r2.strandedTasks, [], '无在办任务 → 留痕列表为空')
+    assert.equal(taskRow(doneTask.id).hold, false, 'done 任务不在留痕范围')
   })
 
   it('护栏：非将军不可改状态；canceled 是终态', () => {

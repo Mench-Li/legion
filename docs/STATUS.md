@@ -3500,6 +3500,40 @@
 
 ---
 
+## 2026-09-16　两条线合并：main 的流水线修复与这条线的 PRT 工作第一次见面
+
+**这一节是 `codex/prt-integration` 合并时补记的**，专门记 **main 那一侧**发生过、而这条线
+（`codex/prt-runtime`）里**没有**记录的事。合并会把代码带过来，但**不会**把"另一方当时为什么
+这么改"带过来；而后者只写在对方的 `STATUS.md` 里。不补记，它就随合并一起消失。
+
+分叉点在 `722764a7`（2026-09-11）。此后：
+
+- **main 侧 22 个提交**，其中 `4cc8a5c` 是一笔**合并提交**：
+  「并入 Product Runtime 阶段 0～2（规格 + Runtime Contract + DshRuntimeAdapter + PRT 基线工具 +
+  boundary 棘轮）」。也就是说 **main 早就合过 PRT 的阶段 0–2**，而这条线是从同一个分叉点
+  继续往下做的——两边踩的是**同一块工作面**，这也是本次合并 16 个文件冲突的根源。
+- main 侧当时的基线记录（`4a603e2`）：`--only env,boundary,deps,build,test,doc`，
+  **48 套件 / 1319 用例**（1316 PASS / 3 FAIL），证据 `.ci/prt-merge-verify/`；
+  那 3 例来自**工作区未提交的 WIP、不是该基线**——干净树上 `dsh-boundary --check` 为
+  `PASS（3 个文件 / 26 处，均在基线内）`。其中 `dsh-adapter`（PRT-201~209）**85 例**。
+- main 侧独立的生产修复（已随本次合并进入代码）：**foreman 会话 id 残留自愈**
+  （`foremanDown` / `foremanRunId` / `isSessionExistsError`——cwd 派生的 sessionId 是确定性常量，
+  而 agent 会话是持久化的，上个进程未优雅退出留下的 foreman 会话会让此后每次
+  `ctx.agents.create` 都以 `SessionAlreadyExistsError` 永久失败；现场 2026-09-11 ozon 661 次 /
+  software 399 次撞名，对话回复与 `/api/rewrite` 静默中断），以及
+  **T-156 的目标终态守卫**（历史已收口目标不再凭空长出新链——该缺陷 2026-09-16 复发过一次，
+  实测在 2 个历史收口目标上长出 4 个任务，下游下一环正是素材制作，会覆盖已验收的 creative-kit）。
+
+> 上面这些数字（48 套件 / 1319 用例）**不是当前基线**，是 main 侧在 2026-09-11 那一刻的记录。
+> 当前基线见本文件顶部（2026-09-15，195 套件 / 5712 用例）。两份都留着，因为
+> 「48 套件」与「195 套件」之间那 147 个套件，正是这条线的工作量。
+
+> **一条合并不会丢代码，但它会丢"为什么"。**
+> 代码有冲突块逼着人看，而另一方的状态记录**没有冲突**——它只是被这一侧更长的日志覆盖掉，
+> 覆盖时不报错、不留痕。故本次合并专门补了这一节。
+
+---
+
 ## 2026-09-15　图标真的画出来了；以及一份"看起来在拦、其实一个真工具都没拦到"的拒绝名单
 
 ### 一、PRT-708：上面那节 `### 三` 列的四件事，现在都做完了
@@ -12856,7 +12890,9 @@ PRT-312 真实进程被强杀：`run-kill-drill`（**2 例**，真 worker 进程
 ⚠️ 跑此基线必须设 `DSH_CHECKOUT`，否则 `plugins`（185）与 `board-plugin`（37）会 SKIP。
 上一批收口：新增 `dsh-adapter`（**85 例**：PRT-201~209 的 DSH 适配器）。
 全部用假宿主端口，覆盖真实 DSH 无法稳定复现的故障——`run.result` 永不结算、
-abort 无效、畸形结构化输出、事件流中断。47→**48** 套件、1230→**1315** 用例。
+abort 无效、畸形结构化输出、事件流中断。47→**48** 套件、1230→**1315** 用例，
+合入 main 后实测为 **1319**（+2 P4-7 的 `notify` 回归、+2 `prt-golden-flow` 夹具可执行性用例，
+两者都产生于并行分支合入之前，详见文末脚注）。
 该适配器**不 import 任何引擎包**（与 DSH 的耦合只在 `port.mjs` 的注入面），
 因此 `dsh-boundary` 里适配层贡献为 **0 处**——是真正零耦合，不是靠
 `adapterPrefixes` 豁免成 0。
@@ -12873,8 +12909,12 @@ abort 无效、畸形结构化输出、事件流中断。47→**48** 套件、12
 与 `prt-golden-flow`（**14 例**）；40→43 套件、1069→1161 用例。
 本轮 PRT-002/PRT-108 交付 `dsh-boundary.test.mjs` **22 例**（记号识别 / 反误报 / 判定语义 / 棘轮真实性），
 39→40 套件、1047→1069 用例，并让 `run-ci.mjs` 新增 **`boundary` 阶段**（紧随 `env`，纯静态秒级门禁）。
-上一基线为 P4-6 之后的 `39 套件 / 1047 用例`（`.ci/final-main4/`））
-（P4-6 之后：`dir-lock.test.mjs` 新增 **12 例**（7 纯函数 + 4 注册表联动 + 1 真实双进程），白板 199→**211**；
+上一基线为 P4-6 之后的 `39 套件 / 1047 用例`（`.ci/final-main4/`）；
+P4-6 之后：`dir-lock.test.mjs` 新增 **12 例**（7 纯函数 + 4 注册表联动 + 1 真实双进程），白板 199→**211**；
+**并行合入说明**：main 侧 **P4-7** 与上述 PRT 批次是并行进行的，另给 `notify` 加 **2 例**
+（就绪轮询的 2 条确定性回归，15→**17**；该套件单跑 19s→**11s**，证据 `docs/P4-7-evidence/verify-evidence.md`）。
+因此上述各批次的差值（1047→1069→…→1315）**不是合入后的总数**：本表头部与 §2 表格
+均按**并行合入后的实测值**记，不沿用任一分支的推算值。）
 P4-5 之后：`audit-archive.test.mjs` 新增 **14 例**（10 纯函数 + 4 真实进程：重启/写入量量级），白板 185→**199**；
 P4-4 之后：`static-serve` 6→**16 例**（新增导航/资源判定与缺失资源 404 契约）；
 P4-3 之后：`e2e-browser` 7→**10 例**（新增连接未就绪窗口/切房间补发/单连接三条用例）、`whiteboard` 158→**185 例**
@@ -12897,7 +12937,7 @@ P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-
 | calendar（P2-5 含重复展开/更新/冲突/关联） | 29 | dedupe | 9 |
 | spaces | 5 | calendar-ui（P2-5 前端纯函数） | 12 |
 | pipeline（SP-P0 空间流水线数据面） | 19 | chat-ui（P2-6 对话前端纯函数） | 8 |
-| goal | 14 | notify（P2-4 含真实 hub SSE 断线重连） | 15 |
+| goal | 14 | notify（P2-4 含真实 hub SSE 断线重连 + P4-7 句柄泄漏自检） | 17 |
 | rules | 7 | hub-event-stream（F-01 scope/游标/信封） | 5 |
 | artifact | 16 | dual-write（P1-1 双进程写同库竞态 + 迁移竞态） | 4 |
 | security | 6 | p13-host-injection（P1-3 真实宿主注入 + P3-4 配置摘要 + P4-2 导入失败诊断，2 文件） | 39 |
@@ -12909,8 +12949,22 @@ P4-1 之后：新增 `e2e-browser` 真实浏览器 DOM 端到端 **7 例**；P3-
 | skill-importer | 4 | scrum | 25 |
 | hub-board / artifact-policy | 1 / 3 | config（P3-2 统一配置 + P3-4 插件族） | 36 |
 | web-history（P2-8 抓取历史） | 1 | e2e-browser（P4-1 真实浏览器 DOM 端到端 + P4-3 重连补发，10 例） | 10 |
+| runtime-contract（PRT-101~107：七方法契约 / 16 错误码 / 能力协商 / Fake Adapter 六路径） | 62 | dsh-adapter（PRT-201~209：假宿主端口 / 脱敏 / 看门狗 / 取消恢复，85 例） | 85 |
+| dsh-boundary（PRT-002 依赖清单 + PRT-108 执行面边界棘轮） | 22 | prt-baseline（PRT-007 平台契约基线 85 路由 / 22 表，漂移定位） | 16 |
+| prt-golden-flow（PRT-004 黄金流程 GF-001 与固定夹具冻结） | 16 | prt-topology（PRT-001 拓扑 / PRT-003 配置与密钥来源清单） | 20 |
+| prt-composition（PRT-008 术语 + PRT-010 DSH 组合分层基线） | 22 | prt-backup（PRT-006 备份/恢复：三条路线 + 陈旧 WAL 危害） | 14 |
+| prt-churn（阶段 3 评审闸门：热点文件改动节奏探针） | 13 | — | — |
 
-（上表**全部**为 `--only test` 单次全量运行的实测值；不再存在「未入全量基线」的套件。）
+（上表**全部**为 `--only test` 单次全量运行的实测值；不再存在「未入全量基线」的套件。
+合计 **48 套件 / 1319 用例** = 合入前 main 的 `1049`（含 P4-7 的 2 例）+ PRT 批次的 `270`。）
+
+> ⚠️ **本轮实测的 3 例 FAIL 全部来自工作区未提交的 WIP，不是本基线的一部分**：
+> `.ci/prt-merge-verify/` 那次运行是在**带未提交改动**的工作区里跑的，`plugins/src/index.ts` 的 WIP
+> 新增了一行**注释**（`…此后每一次 ctx.agents.create 都以…`），被 `dsh-boundary` 的**文本扫描**
+> 计成一次记号 → `ctx.agents：实际 2，允许 1`。这是**扫描器对注释的误报**：该文件真实的
+> `ctx.agents.create` 调用仍只有 1 处，只是缩进变了。在**干净树**（合并提交 `4cc8a5c` 的 worktree）上
+> `node scripts/ci/dsh-boundary.mjs --check` 为 `PASS（3 个文件 / 26 处，均在基线内）`。
+> **登记为已知边界**：棘轮按文本计数、不区分调用与注释，**在注释里提到某个 DSH API 也会触发棘轮**。
 
 其他阶段：`--only doc`（文档新鲜度 + 历史 evidence banner 覆盖）、`--only boundary`（PRT-108 DSH 执行面边界棘轮，秒级）、`--only build|smoke|env|deps|stage`。
 部署与回滚：`docs/DEPLOY.md`。现场（真实宿主）验收脚本：`scripts/live/p11-step2-verify.mjs`。

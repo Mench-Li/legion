@@ -28,6 +28,7 @@ import {
   detectLegacyDrift,
   detectLegacyDriftFromRepo,
   extractLegacyCallOptions,
+  locateLegacyCall,
   runLegacyPath,
 } from './parity.mjs'
 
@@ -134,8 +135,14 @@ test('① 漂移检测：能从真实源码抽出全部子代理启动调用，�
   const source = readFileSync(join(ROOT, LEGACY_CALL_SITE.file), 'utf8')
   const calls = extractLegacyCallOptions(source)
   assert.ok(calls.length >= 4, `应找到多处调用，实际 ${calls.length}`)
-  const target = calls.find((c) => c.line === LEGACY_CALL_SITE.line)
-  assert.ok(target, `未在 ${LEGACY_CALL_SITE.line} 行找到调用`)
+  // ★ 合并说明（2026-09-16）：**不按行号取，按内容取**。这一段来自 `main` 那一侧。
+  //   行号会因同文件内别处的无关改动而下移（本分支实测发生过四次，合并时又发生一次），
+  //   只认行号的话，这一条会因为别人改了别的文件而变红——而一条会假红的守卫，
+  //   下一步就是被关掉。判据改成"用 locateLegacyCall 按选项集合定位"。
+  const located = locateLegacyCall(source)
+  assert.ok(located.ok, `定位旧调用失败：${located.reason ?? ''}`)
+  const target = calls.find((c) => c.line === located.line)
+  assert.ok(target, `未在定位到的第 ${located.line} 行找到调用`)
   // 简写属性 `parent,` 必须在列 —— 漏掉它会漏报「旧调用不再传 parent」
   assert.ok(target.options.includes('parent'), '简写属性 parent 未被识别')
   for (const k of ['label', 'prompt', 'signal', 'outputSchema']) {
@@ -145,7 +152,10 @@ test('① 漂移检测：能从真实源码抽出全部子代理启动调用，�
 
 test('① 漂移检测：条件展开记为 ...spread，而**不是**把 toolFilter 当顶层键', () => {
   const source = readFileSync(join(ROOT, LEGACY_CALL_SITE.file), 'utf8')
-  const target = extractLegacyCallOptions(source, LEGACY_CALL_SITE.line)[0]
+  // ★ 合并说明（2026-09-16）：同上去行号化，改按内容定位（来自 `main` 那一侧）。
+  const located = locateLegacyCall(source)
+  assert.ok(located.ok, `定位旧调用失败：${located.reason ?? ''}`)
+  const target = extractLegacyCallOptions(source, located.line)[0]
   assert.ok(target.options.includes('...spread'))
   assert.ok(!target.options.includes('toolFilter'), 'toolFilter 在条件展开内部，不是顶层字面量键')
   assert.equal(LEGACY_CONDITIONAL_OPTIONS[0].key, 'toolFilter')
@@ -185,6 +195,45 @@ test('① 漂移检测：行号漂移（该行已无调用）→ drifted 并说�
   assert.equal(d.drifted, true)
   assert.match(d.reason, /未找到/)
   assert.match(d.reason, /本对拍无效/)
+})
+
+test('① 漂移检测：记录行下移但调用仍在 → **不漂移**，按内容重新定位并标记 relocated', () => {
+  // ★ 合并说明：本用例来自 `main` 那一侧，与上面那条是**一对**——
+  //   上面那条是"真的没了"（全文找不到），这一条是"还在、只是不在记录行上"。
+  //   两者在旧实现里都是 `drifted: true`，于是一处**假警报**会把真警报一起淹掉：
+  //   一条会因为别人改了别的文件而变红的用例最终会被关掉，关掉之后真正的漂移就再没人看。
+  //
+  //   这也是上面 `LEGACY_CALL_SITE` 那段长注释（四个切片的手工对拍）的**终点**：
+  //   那四次手工对拍各自做对了一件事，本用例把这件事固定成了代码。
+  const src = [
+    '// 上面插入了 10 行无关代码，调用从第 1 行下移到第 3 行',
+    'const unrelated = 1',
+    '',
+    `return await ${LEGACY_CALL_TOKEN}config.provider, {`,
+    '  label,',
+    '  prompt: [{ type: "text", text: t }],',
+    '  parent,',
+    '  signal,',
+    '  outputSchema,',
+    '  ...(denyTools.length > 0 ? { toolFilter: { deny: denyTools } } : {}),',
+    '})',
+  ].join('\n')
+
+  const d = detectLegacyDrift(src, 1)
+  assert.equal(d.drifted, false, `不应报漂移：${d.reason}`)
+  assert.equal(d.relocated, true, '应标记为「按内容重新定位」')
+  assert.equal(d.line, 4, '应定位到实际所在行')
+  assert.match(d.reason, /移到第 4 行/)
+
+  // 反向守卫：定位仍然要求选项集合**完全一致**。选项一改就必须报漂移，
+  // 否则「按内容定位」会退化成「随便找个调用就算数」。
+  const missing = detectLegacyDrift(src.replace('  parent,\n', ''), 1)
+  assert.equal(missing.drifted, true, '选项集合不再一致时必须报漂移')
+
+  // 反向守卫：多处都吻合时不能猜 —— 报漂移，交给人。
+  const two = src + '\n' + src.split('\n').slice(3).join('\n')
+  const ambiguous = detectLegacyDrift(two, 1)
+  assert.equal(ambiguous.drifted, true, '无法区分是哪一处时必须报漂移')
 })
 
 // ================================================================ ② 比较语义
@@ -485,9 +534,13 @@ test('⑥ 边界棘轮：本模块对执行面记号贡献 **0**——豁免存�
 
 test('⑥ 边界棘轮：拼接出的记号仍然能命中真实调用（拼接没有改坏语义）', () => {
   assert.ok(LEGACY_CALL_TOKEN.endsWith('.start('))
-  const calls = extractLegacyCallOptions(readFileSync(join(ROOT, LEGACY_CALL_SITE.file), 'utf8'))
-  assert.ok(
-    calls.some((c) => c.line === LEGACY_CALL_SITE.line),
-    '拼接后的正则必须仍能命中旧调用，否则漂移检测会静默失效',
-  )
+  const source = readFileSync(join(ROOT, LEGACY_CALL_SITE.file), 'utf8')
+  // ★ 合并说明（2026-09-16）：断言的是「记号仍能命中真实调用」**这件事本身**，
+  //   而不是「记录的行号恰好命中」——后者会因同文件内别处的无关改动而假红，
+  //   而假红的下一步是这条守卫被关掉。这是 `main` 那一侧的判据，比原来更强：
+  //   原来只要行号对上就算过（哪怕那一行已经不是那个调用），现在要求
+  //   ①真有调用 ②仍能按选项集合**唯一**定位到它。
+  const calls = extractLegacyCallOptions(source)
+  assert.ok(calls.length > 0, '拼接后的记号必须仍能命中真实调用，否则漂移检测会静默失效')
+  assert.ok(locateLegacyCall(source).ok, '记录行失效后无法按内容定位旧调用')
 })

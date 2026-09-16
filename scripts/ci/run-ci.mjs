@@ -991,7 +991,7 @@ async function stageTest() {
     { label: 'chat-ui（P2-6 对话前端纯函数：健康判定/AI 三态/合并/断线补齐）', files: ['workbench/scripts/chat-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'spaces（空间删除级联）', files: ['team-hub/spaces.test.mjs'], cwd: ROOT },
     { label: 'pipeline（空间流水线：编队即流水线 SP-P0）', files: ['team-hub/pipeline.test.mjs'], cwd: ROOT },
-    { label: 'goal（目标生命周期）', files: ['team-hub/goal.test.mjs'], cwd: ROOT },
+    { label: 'goal（目标生命周期）', files: ['team-hub/goal.test.mjs', 'team-hub/goal-closed.test.mjs'], cwd: ROOT },
     { label: 'rules（规范数据面）', files: ['team-hub/rules.test.mjs'], cwd: ROOT },
     { label: 'artifact（产物读取）', files: ['team-hub/artifact-content.test.mjs'], cwd: ROOT },
     { label: 'security（监听安全配置）', files: ['team-hub/security.test.mjs'], cwd: ROOT },
@@ -1014,7 +1014,23 @@ async function stageTest() {
     { label: 'v1v2-contract（P2-1 双服务契约对比 + P2-3 SSE 信封/续传）', files: ['tests/contract/v1v2-contract.test.mjs'], cwd: ROOT },
     { label: 'team-hub-parity（P1-1 双形态对拍：独立服务 vs 宿主前缀外壳）', files: ['tests/contract/team-hub-parity.test.mjs'], cwd: ROOT },
     { label: 'dedupe（P2-3 前端去重纯函数）', files: ['workbench/scripts/dedupe.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
-    { label: 'notify（P2-4 通知分类/优先级/批量已读/跳转/去重补齐）', files: ['workbench/scripts/notify.test.mjs', 'workbench/scripts/notify-hub-smoke.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    { label: 'notify（P2-4 通知分类/优先级/批量已读/跳转/去重补齐 + P4-7 句柄泄漏自检）', files: ['workbench/scripts/notify.test.mjs', 'workbench/scripts/notify-hub-smoke.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    // ★ 2026-09-16（main 整合）：下面这一条**是本次合并补登记的**，不是新写的套件。
+    //
+    //   `reveal-open.test.mjs` 是 `main` 侧 P4-7「打开所在位置」带来的契约测试（21 例，全绿），
+    //   但**两侧的 run-ci.mjs 都没有登记它**：main 那一版根本没有"套件清单完备性"这道检查
+    //   （`git show origin/main:scripts/ci/run-ci.mjs | grep 套件清单不完备` 为空），
+    //   所以它不登记也不红；而本分支加了那道检查，于是合并一落地它就红了。
+    //
+    //   > 一道"每个测试文件都必须有归属"的检查，
+    //   > 在一棵**只有它自己**的树上，与在一棵刚和"没有这道检查"的树合并过的树上，
+    //   > 报出来的东西不是同一类：前者是"我漏登记了"，后者是"**对面**从来没登记过"。
+    //   > 两种都要修，但只有第二种能证明这道检查的价值——它第一次运行就抓到了一份
+    //   > **在两个分支上都存在、却谁也没跑过**的断言。
+    //
+    //   选择"登记"而不是"加进 EXEMPT"：这 21 例断言是真的、且真的能过（实测 21/21），
+    //   豁免它们等于把一份可执行的证据降级成一份声明。
+    { label: 'reveal-open（P4-7 打开所在位置：落点计算/祖先回落/安全矩阵与读面同强度/引导）', files: ['workbench/scripts/reveal-open.test.mjs'], cwd: ROOT },
     { label: 'hub-event-stream（F-01 scope/游标/信封）', files: ['workbench/scripts/hub-event-stream.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     // `dual-write-smoke` 守「两个进程同时启动、迁移同一新库」的**行为**，
     // 并在第 3 个锚点里按**源码**禁掉两种坏写法（自己 exec ALTER / try-catch 吞掉 ALTER）。

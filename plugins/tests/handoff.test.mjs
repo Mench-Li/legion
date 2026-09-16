@@ -105,6 +105,12 @@ function harness(over = {}) {
     pipeline: over.pipeline === undefined ? PIPELINE : over.pipeline,
     stageByRole: over.stageByRole ?? new Map(STAGES.map(s => [s.role, s])),
     tasks: over.tasks ?? [],
+    // ★ 2026-09-16（main 整合）：目标状态守卫的两个数据源，**刻意分开**。
+    //   `goals` = 本进程缓存（`goalCtxById`）；`fetchable` = 权威回查能查到的东西。
+    //   合成一个就没法区分"缓存命中"与"缓存缺失但回查到了"——
+    //   而后者正是 T-156 那次加固新加的那条路。
+    goals: over.goals ?? new Map(),
+    fetchable: over.fetchable ?? new Map(),
   }
   const deps = {
     config: { role: over.role ?? 'guard', scrumDir: over.scrumDir ?? 'C:/scrum' },
@@ -127,6 +133,11 @@ function harness(over = {}) {
     activity: (kind, taskId, text) => { calls.push(['activity', kind, taskId, text]) },
     SLICE_ANALYSIS_TAIL: 'test-designer',
     isSliceGoalTask: (t) => (t.description ?? '').includes('[slice-mode]'),
+    goalCtxById: { get: (id) => state.goals.get(id) },
+    fetchGoalById: async (id) => {
+      calls.push(['fetchGoalById', id])
+      return state.fetchable.get(id)
+    },
   }
   const handoff = createHandoff(deps)
   return { handoff, deps, calls, state, over, config: deps.config }
@@ -305,7 +316,11 @@ test('★ blockedBy 为空数组的后继不算（Array.isArray 那道闸门之�
 // ══════════════════════════════════════════════════════════════════════════════
 
 test('★ hub 模式：POST /api/create 的 body 逐字段 + log/activity 逐字', async () => {
-  const h = harness()
+  // ★ 2026-09-16（main 整合）：多了一条前置条件——该目标**仍未收口**。
+  //   这不是为了让用例变绿而补的夹具：目标终态时不建后继是 T-156 的生产语义，
+  //   所以"带 goalId 的正常流转"本来就必须包含"目标还开着"这一条。
+  //   （把这条前置写出来，正是下面 `目标状态守卫` 那一组用例存在的理由。）
+  const h = harness({ goals: new Map([['G-7', { id: 'G-7', status: 'active' }]]) })
   await h.handoff.advancePipeline(task({
     id: 'T-1', priority: 'P0', goalId: 'G-7',
     description: '目标描述正文。\n\n[本阶段] 切片编码（coder）\n\n旧阶段补充说明',
@@ -362,6 +377,77 @@ test('goalId 为空 → body.goalId 传 undefined（hub 侧按"无目标"落库�
   await h.handoff.advancePipeline(task({ goalId: null }))
   assert.equal(hubCalls(h)[0][2].goalId, undefined)
   assert.equal('goalId' in hubCalls(h)[0][2], true, 'key 仍在，值为 undefined')
+})
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ★★ 目标状态守卫（T-156）——这一组是**合并时新写的**，上游那一侧没有它
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// 这段守卫是 `main` 那一侧对**同一个** `advancePipeline` 的生产修复，随本次合并进入
+// 本模块，而它在上游**一条用例都没有**（`git grep advancePipeline origin/main -- '*.test.mjs'`
+// 为空）。也就是说：那笔修复是靠**事故**验证的，而不是靠用例。
+//
+//   > 一段"只在生产里被验证过"的修复，与一段"没有修复"的代码，
+//   > 在**下一次事故之前**是同一个东西——而事故的代价是"已验收的 creative-kit 被覆盖"。
+//
+// 现场（T-156 复发，2026-09-16）：守护比该防御代码早启动 27 分钟（跑的是旧代码），
+// 两个历史已收口目标上凭空长出 4 个任务（2 个已执行完并 promote、1 个已在跑），
+// 下游下一环正是素材制作。
+//
+// 注入纪律对应关系：`state.goals` = 本进程缓存（`goalCtxById`）；
+// `state.fetchable` = 权威回查（`fetchGoalById`）能查到的东西。
+
+test('★★ 目标守卫：缓存里是终态（done/canceled）→ **不建**后继，且给出可读理由', async () => {
+  for (const status of ['done', 'canceled']) {
+    const h = harness({ goals: new Map([['G-7', { id: 'G-7', status }]]) })
+    await h.handoff.advancePipeline(task({ goalId: 'G-7' }))
+    assert.deepEqual(hubCalls(h), [], `目标 ${status} 时不该建后继（hub 模式）`)
+    assert.deepEqual(logs(h), [`T-1 流水线流转跳过：目标 G-7 已 ${status}（终态不再补建后继）`])
+    // 缓存命中就够，**不许**为此去回查（否则每轮都为每个终态目标打一次 hub）
+    assert.deepEqual(h.calls.filter(c => c[0] === 'fetchGoalById'), [])
+  }
+})
+
+test('★★ 目标守卫：缓存缺失 → **权威回查**；回查到终态照样不建（T-156 加固的那条路）', async () => {
+  // 这一条正是 2026-09-16 加固新增的语义：旧实现只在**本进程缓存**里查，
+  // 缓存缺失时保持原行为 = **放行**（于是历史收口目标又长出链）。
+  const h = harness({ fetchable: new Map([['G-7', { id: 'G-7', status: 'done' }]]) })
+  await h.handoff.advancePipeline(task({ goalId: 'G-7' }))
+  assert.deepEqual(h.calls.filter(c => c[0] === 'fetchGoalById'), [['fetchGoalById', 'G-7']], '缓存缺失必须回查')
+  assert.deepEqual(hubCalls(h), [], '回查到终态也必须不建')
+  assert.deepEqual(logs(h), ['T-1 流水线流转跳过：目标 G-7 已 done（终态不再补建后继）'])
+})
+
+test('★★ 目标守卫：回查**也拿不到** → 保守跳过，且理由写明是"状态无法确认"（fail closed）', async () => {
+  // 判据不是"hub 挂了就跳过"这个动作，而是**跳过时说的话**：
+  // "已 done"与"状态无法确认"是两件事，运维要能分清——前者是正常收口，后者要去看 hub。
+  const h = harness() // 缓存空、回查也查不到
+  await h.handoff.advancePipeline(task({ goalId: 'G-7' }))
+  assert.deepEqual(hubCalls(h), [], '状态无法确认时必须保守跳过')
+  assert.deepEqual(logs(h), ['T-1 流水线流转跳过：目标 G-7 状态无法确认（hub 不可达），保守不补建后继'])
+})
+
+test('★★ 目标守卫：**`paused` 有意不拦**——它是可恢复态，拦下会让恢复后的链永久断档', async () => {
+  // 反向守卫。没有这一条，上面三条可以被一个"凡是不是 active 就跳过"的实现骗过，
+  // 而那个实现会造成一个更隐蔽的故障：将军暂停 → 恢复 → 链永远不往下走
+  //（advance 只在 done 事件触发，恢复时不会补跑）。
+  const h = harness({ goals: new Map([['G-7', { id: 'G-7', status: 'paused' }]]) })
+  await h.handoff.advancePipeline(task({ goalId: 'G-7' }))
+  assert.equal(hubCalls(h).length, 1, 'paused 不该拦下流转')
+})
+
+test('★★ 目标守卫：守卫排在**切片/fix/分析前缀尾**三道闸之后、取 stage 之前', async () => {
+  // 顺序是有意的（与上游逐字一致）：切片任务、fix 回炉、分析前缀尾本来就**不建**后继，
+  // 让它们先返回，就不必为一个终态目标多做一次回查。
+  // 没有这一条，"守卫放到函数最前面"会是一个**用例全绿**的改动，而它让每一轮
+  // 都为每个切片/fix 任务白打一次 hub 回查。
+  const h = harness({
+    fetchable: new Map([['G-7', { id: 'G-7', status: 'done' }]]),
+  })
+  await h.handoff.advancePipeline(task({ goalId: 'G-7', slice: 'T-4:S2' }))
+  assert.deepEqual(h.calls.filter(c => c[0] === 'fetchGoalById'), [], '切片任务不该走到守卫（它更早就返回了）')
+  assert.deepEqual(hubCalls(h), [])
+  assert.deepEqual(logs(h), [], '切片任务的返回不是"跳过"，不该打守卫那两条日志')
 })
 
 test('★ 非 hub 模式：runTaskctl 的 argv 逐字（含 config.scrumDir），且 body 不走 hub', async () => {

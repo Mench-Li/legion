@@ -2,17 +2,17 @@
   "$comment": "PRT-007 旧系统平台契约基线。由 scripts/prt/baseline-snapshot.mjs 生成；不含时间戳以便逐字节 diff。漂移由 sources 的 sha256 归因。",
   "version": 1,
   "sources": {
-    "team-hub/server.mjs": "90a71e805a90eb026b1cd140e66e3cdc8fb7bbd01235b09c8d0e45148625e17a",
-    "team-hub/permission-engine.mjs": "ad399442a1bb50f5a5796126caf402f114462e6b9f60735e24380d7a8672350f",
+    "team-hub/server.mjs": "d143e7b3b369367af38cdc291c456bdb454cf5f286972e3b3472f467c1f305bd",
+    "team-hub/permission-engine.mjs": "d7295dc90aca0056790f332f50b47afa6847cf08ace6cabb677f0f8ab9329fc6",
     "team-hub/run-store.mjs": "c020c81331c4c480d17cb4a608a7fcaedc4f097ffd1e3da4c17d3a9042b103cb",
     "team-hub/model-store.mjs": "1ab1a5b548740ca5f6810de6fe25658e79aea9d95fd6382ccff5facf6613d779",
-    "team-hub/binding-store.mjs": "f9b2b7a50e1b33b0c571530e8439cd6784121458494d7a4590dfaabcce7db8c0",
-    "team-hub/budget-ledger.mjs": "fcbdc5f48312def991d60ae5a136895b72840bb9e6e7bdb66a2d907494ddaebb",
-    "team-hub/context-store.mjs": "7c6d2d8798bcb9357a077d0bd147c7bf0762b6a2283d95cc60065ef0f945dfab",
-    "team-hub/approval-binding.mjs": "a1c24156139f8f85b228a98d96940ad23cb31de7e11eef9ea7d7f54c4b8c7868",
-    "team-hub/allow-once.mjs": "78ad3e9ef285e30e4331e4656b676741c474b876a57ed8e5593c17dcd63cca23",
-    "team-hub/tool-call-log.mjs": "a7143bdef245663539efb832826692ff5101499b3b1371eca4a9fc9802089685",
-    "team-hub/context-plan-store.mjs": "e5b00f75bba205c6bf886a33f1f42d5def15899979bcd3bfa335e770dae489b8"
+    "team-hub/binding-store.mjs": "1e25f01f11fd8d241148dfb07abcdcb9ed0047fe947adef5c6deba32131c4714",
+    "team-hub/budget-ledger.mjs": "ad1c31c6d9264e45de744f752db6cce644324b7c8f6069896927cd1b5a6e41a3",
+    "team-hub/context-store.mjs": "d55380c0aff67b1ed19066df3b13c5fec63ec227ae3f1098e445e385d427ca09",
+    "team-hub/approval-binding.mjs": "6d7d736433bb203e6c940cf8e4d9e494449bfd5e29a81130ce065f65064e12eb",
+    "team-hub/allow-once.mjs": "6fa9a84eb33dfd293e76e7029267de9ff5e114f95b7c831f8f75498af774400a",
+    "team-hub/tool-call-log.mjs": "ee597e5872354d5e5428d0067b40d04bab9ff026beb53323c2be14137c1fcdd5",
+    "team-hub/context-plan-store.mjs": "9b7e94cc5180b8099334d225a0f71502044c3542777e3313a70fe17ef2ee61fd"
   },
   "httpRoutes": [
     "DELETE /api/model-bindings/",

@@ -12,6 +12,7 @@ import {
   repoPrefixOf, searchSummary, shouldUseChunked, sizeText, splitHighlight, strategyLabel, toggleInSet, uploadProgressText,
   uploadResultText, writeStoredStrategy,
 } from '../filesUi'
+import { RevealButton } from './RevealButton'
 import { toast } from './Toast'
 
 interface FilesViewProps {
@@ -585,6 +586,7 @@ export function FilesView({ scope, hubMode, spaces, onOpenSettings }: FilesViewP
                       <td>{mtimeText(h.mtime ?? '')}</td>
                       <td className="file-row-actions">
                         <button className="btn small" onClick={() => { setHits(null); setQuery(''); if (h.type === 'dir') enter(h.path); else { setDir(h.path.split('/').slice(0, -1).join('/')); void load(h.path.split('/').slice(0, -1).join('/')) } }}>定位</button>
+                        <RevealButton scope={scope} path={h.path} className="btn small" what={h.name} />
                         {h.type === 'file' && <a className="btn small" href={fileDownloadUrl(scope as string, h.path)} download>下载</a>}
                       </td>
                     </tr>
@@ -637,6 +639,7 @@ export function FilesView({ scope, hubMode, spaces, onOpenSettings }: FilesViewP
                         <td>{mtimeText(e.mtime)}</td>
                         <td className="file-row-actions">
                           <button className="btn small" onClick={() => void openPreview(e)}>{e.type === 'dir' ? '打开' : '预览'}</button>
+                          <RevealButton scope={scope} path={relPath} className="btn small" what={e.name} />
                           {e.type === 'file' && <a className="btn small" href={fileDownloadUrl(scope as string, relPath)} download>下载</a>}
                           {mv && e.type === 'file' && <button className="btn small" title="查看该文件的 unified diff（只读）" onClick={() => void openGitDiff(relPath)}>差异</button>}
                           <button className="btn small" disabled={busy} onClick={() => { setRenaming(e.name); setRenameTo(e.name) }}>重命名</button>

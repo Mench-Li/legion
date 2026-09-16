@@ -132,6 +132,24 @@ export interface HandoffDeps {
   SLICE_ANALYSIS_TAIL: string
   /** 是否切片束目标任务（**单一定义留在 `index.ts`**，理由见文件头）。 */
   isSliceGoalTask: (t: Task) => boolean
+  /**
+   * 目标上下文缓存（`index.ts` 的 `const goalCtxById`）。**const Map**，身份稳定，按本模块的注入纪律
+   * **传值**（理由见文件头 §依赖：只有会被重新赋值的绑定才传取值函数）。
+   *
+   * ★ 声明为**只读视图**而不是 `Map`：本模块只 `.get()`，从不写。写成 `Map<string, GoalCtx>`
+   *   会让"这里可以顺手 set 一下"变成一个**能通过编译**的念头，而那个 set 会改到
+   *   `index.ts` 与其它模块共用的同一份缓存——一个只读的用法就该有一个只读的类型。
+   *
+   * ★ 合并说明（2026-09-16）：本项与 `fetchGoalById` 来自 `main` 那一侧，
+   * 服务的是同一件事——**目标已终态时不再补建后继**（T-156 现场）。
+   */
+  goalCtxById: { get: (key: string) => { id: string; status?: string } | undefined }
+  /**
+   * 权威回查单个目标（缓存缺失时的兜底）。`index.ts` 的 `async function` 声明，身份稳定，传值。
+   *
+   * 失败返回 `undefined`，由本模块决定保守策略——它自己不抛，避免单点查询失败打断派工主流程。
+   */
+  fetchGoalById: (goalId: string) => Promise<{ id: string; status?: string } | undefined>
 }
 
 /** `createHandoff` 交回给 `index.ts` 的东西。 */
@@ -156,7 +174,7 @@ export function isSliceTesterTask(stage: StageDef | undefined, t: Task): boolean
 export function createHandoff(deps: HandoffDeps): Handoff {
   const {
     config, log, scope, useHub, pipeline, stageByRole, listTasks, hubPost, runTaskctl, activity,
-    SLICE_ANALYSIS_TAIL, isSliceGoalTask,
+    SLICE_ANALYSIS_TAIL, isSliceGoalTask, goalCtxById, fetchGoalById,
   } = deps
 
   /** 流水线流转：done 任务所属角色有 next 且尚无后继时，创建下一角色任务（todo）。 */
@@ -169,6 +187,40 @@ export function createHandoff(deps: HandoffDeps): Handoff {
     if (doneTask.slice != null) return
     if (doneTask.fixOf != null) return
     if (doneTask.role === SLICE_ANALYSIS_TAIL && isSliceGoalTask(doneTask)) return
+    // ★ 合并说明（2026-09-16）：以下这一段来自 `main` 那一侧，是**本模块搬出去之后**
+    //   上游对同一个函数做的生产修复（T-156 复发）。整段逐字搬入，位置也与上游一致
+    //   （在切片/fix/分析前缀尾三道闸**之后**、取 stage **之前**）。
+    //
+    //   > 一次"把函数整段搬进新模块"的重构，
+    //   > 与一次"搬完之后上游又在原处修了它"的事故，在重构完成的那一天是看不见彼此的——
+    //   > 搬的人看到的是"一行没动"，而修复的人改的是他想改的那一行。
+    //   > 两者只有在**合并**的那一天才第一次见面，而那时它表现为一个冲突块。
+    //
+    // 目标已终态（done/canceled）不再补建后继。
+    // 动机（T-156 现场）：给流水线末环接上 `next`（新增运营/投广阶段）时，**所有历史已收口目标**的末环
+    // 任务都被判为「该有后继」，于是凭空长出新一轮任务链——已 done 的 G-mttwdurn-1 被接上了 ops-store 链，
+    // 与当前目标的同岗位链并存，两者产物路径相同会互相覆盖。
+    // 语义：目标 done/canceled = 将军已收口/取消，不应再自动开工。
+    // 注：`paused`（将军暂停）**有意不拦**——暂停是可恢复态，此处拦下会让恢复后的链永久断档
+    //（advance 只在 done 事件触发，恢复时不会补跑）。
+    //
+    // fail-closed（2026-09-16 加固，T-156 复发现场）：原实现只在**本进程缓存**里查，缓存缺失时
+    // 保持原行为=**放行**。2026-09-16 实测该洞真实致害：守护比该防御代码早启动 27 分钟（跑的是旧代码），
+    // 两个历史收口目标上凭空长出 4 个任务（2 个已执行完并 promote、1 个已在跑），下游下一环正是
+    // 素材制作——会覆盖已验收的 creative-kit。故：缓存缺失时**权威回查**，仍拿不到就**保守跳过**。
+    // 保守跳过不会丢合法流转：创建后继同样要走 hub，hub 不可达时创建本来也会失败。
+    if (doneTask.goalId) {
+      let g = goalCtxById.get(doneTask.goalId)
+      if (g === undefined) g = await fetchGoalById(doneTask.goalId)
+      if (g === undefined) {
+        log(`${doneTask.id} 流水线流转跳过：目标 ${doneTask.goalId} 状态无法确认（hub 不可达），保守不补建后继`)
+        return
+      }
+      if (g.status === 'done' || g.status === 'canceled') {
+        log(`${doneTask.id} 流水线流转跳过：目标 ${doneTask.goalId} 已 ${g.status}（终态不再补建后继）`)
+        return
+      }
+    }
     const stage = stageByRole().get(doneTask.role ?? '')
     if (!stage || !stage.next) return
     const nextStage = stageByRole().get(stage.next)

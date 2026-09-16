@@ -1757,6 +1757,28 @@ exit 0
     }
   }
 
+  /**
+   * 权威回查单个目标（缓存缺失时的兜底）。
+   * 失败返回 undefined，由调用方决定保守策略——本函数不抛，避免单点查询失败打断派工主流程。
+   */
+  async function fetchGoalById(goalId: string): Promise<GoalCtx | undefined> {
+    if (!useHub) return undefined
+    try {
+      const res = await fetch(`${hubUrl}/api/goal?scope=${encodeURIComponent(scope)}`)
+      if (!res.ok) return undefined
+      const data = await res.json().catch(() => null) as { goals?: GoalCtx[] } | null
+      const hit = data?.goals?.find(x => x.id === goalId)
+      if (hit !== undefined) {
+        goalCtxById.set(hit.id, hit) // 顺带回填缓存，后续轮次不再回查
+        log(`目标 ${goalId} 状态回查命中：${hit.status}`)
+      }
+      return hit
+    } catch (e) {
+      log(`目标 ${goalId} 状态回查失败：${String(e)}`)
+      return undefined
+    }
+  }
+
   /** 任务分支 w/<id> 相对当前主分支改动的文件清单（merge 前越域校验用）。 */
   async function changedFilesOfBranch(t: Task): Promise<string[]> {
     const root = repoRootFor()
@@ -1978,12 +2000,22 @@ exit 0
     // 任务都被判为「该有后继」，于是凭空长出新一轮任务链——已 done 的 G-mttwdurn-1 被接上了 ops-store 链，
     // 与当前目标的同岗位链并存，两者产物路径相同会互相覆盖。
     // 语义：目标 done/canceled = 将军已收口/取消，不应再自动开工。
-    // 目标状态未知时（无 goalId 的遗留非目标链、或 hub 缓存缺失）保持原行为——避免误伤正常流转。
     // 注：`paused`（将军暂停）**有意不拦**——暂停是可恢复态，此处拦下会让恢复后的链永久断档
     //（advance 只在 done 事件触发，恢复时不会补跑）。
+    //
+    // fail-closed（2026-09-16 加固，T-156 复发现场）：原实现只在**本进程缓存**里查，缓存缺失时
+    // 保持原行为=**放行**。2026-09-16 实测该洞真实致害：守护比该防御代码早启动 27 分钟（跑的是旧代码），
+    // 两个历史收口目标上凭空长出 4 个任务（2 个已执行完并 promote、1 个已在跑），下游下一环正是
+    // 素材制作——会覆盖已验收的 creative-kit。故：缓存缺失时**权威回查**，仍拿不到就**保守跳过**。
+    // 保守跳过不会丢合法流转：创建后继同样要走 hub，hub 不可达时创建本来也会失败。
     if (doneTask.goalId) {
-      const g = goalCtxById.get(doneTask.goalId)
-      if (g && (g.status === 'done' || g.status === 'canceled')) {
+      let g = goalCtxById.get(doneTask.goalId)
+      if (g === undefined) g = await fetchGoalById(doneTask.goalId)
+      if (g === undefined) {
+        log(`${doneTask.id} 流水线流转跳过：目标 ${doneTask.goalId} 状态无法确认（hub 不可达），保守不补建后继`)
+        return
+      }
+      if (g.status === 'done' || g.status === 'canceled') {
         log(`${doneTask.id} 流水线流转跳过：目标 ${doneTask.goalId} 已 ${g.status}（终态不再补建后继）`)
         return
       }

@@ -1058,6 +1058,39 @@ function settleGoalsOfScope(scope, by = 'general') {
   }
   return settled
 }
+
+/** 目标是否已收口（done/canceled）。目标行不存在时返回 false（新建目标的正常路径）。 */
+function goalIsClosed(goalId) {
+  if (typeof goalId !== 'string' || goalId.length === 0) return false
+  const g = db.prepare('SELECT status FROM goal WHERE id = ?').get(goalId)
+  return g !== undefined && (g.status === 'done' || g.status === 'canceled')
+}
+
+/**
+ * 建任务前的收口断言：**拒绝**给已 done/canceled 的目标新建任务。
+ *
+ * 动机（T-156 现场 → 2026-09-16 复发）：给流水线末环补 `next`（新增运营/投广阶段）时，历史**已收口**
+ * 目标的末环任务被守护判为「该有后继」，于是凭空长出新任务链——与当前目标的同岗位链并存，
+ * 产物路径相同会互相覆盖。
+ *
+ * 守护侧虽有「目标终态不补建后继」判断，但它读的是**守护进程内的缓存**，且缓存缺失时**放行**
+ * （fail-open）——旧代码、或缓存尚未就绪的窗口里都拦不住（2026-09-16 实测：守护比该防御早启动 27 分钟，
+ * 于是历史收口目标上长出了 4 个任务，其中 1 个已在跑）。故在**数据层**补唯一收口点：
+ * 无论谁建（守护补建、切片展开、fix 回炉、手工 /api/create）都拦得住。
+ *
+ * 恢复路径：done/canceled 都是**终态，不可恢复为 active**（见 setGoalState：只有 paused 可恢复）。
+ * 确实要续做该目标的工作，应**发布新目标**（POST /api/goal）承接——目标是工作的单位，
+ * 收口即结束；续做是新目标的事，不应由后台补建隐式塞回旧目标。
+ */
+function assertGoalOpen(goalId) {
+  if (!goalIsClosed(goalId)) return
+  const g = db.prepare('SELECT status, objective FROM goal WHERE id = ?').get(goalId)
+  throw new Error(
+    `目标 ${goalId} 已 ${g.status}（${String(g.objective).slice(0, 40)}）——收口目标不再接受新任务；` +
+    `done/canceled 是终态不可恢复，如需续做请发布**新目标**（POST /api/goal）承接`,
+  )
+}
+
 /** 目标 ID 分配：G-<毫秒时间戳36进制>-<进程内递增>，进程内/跨重启均不碰撞。 */
 let goalSeq = 0
 function nextGoalId() {
@@ -2451,6 +2484,8 @@ function createTask(input) {
         if (src?.goalId) goalId = src.goalId
       }
     }
+    // 收口目标的唯一收口点（解析后的 goalId，显式传入与切片前缀反查两条路径都覆盖）
+    assertGoalOpen(goalId)
     const t = {
       id,
       title: input.title.trim(),
@@ -2503,6 +2538,7 @@ const GOAL_STAGE_LABELS = ['需求讨论', '方案设计', '任务拆分', '用�
 
 /** 建一个 [auto-goal] 任务行（chain / slice 展开共用）。goalId = 所属目标（多目标并发按目标挂接）。返回新任务。 */
 function insertGoalTask({ title, description, acceptance, boundary, role, scope, blockedBy = [], status = 'todo', parent = null, slice = null, sliceIdx = null, fixOf = null, fixCount = 0, priority = 'high', goalId = null, fileDomain = null, docSync = false }) {
+  assertGoalOpen(goalId)
   const id = nextId()
   db.prepare(`
     INSERT INTO tasks (id, title, description, acceptance, boundary, priority, status, version, soldier, claimedRound, claimedAt,

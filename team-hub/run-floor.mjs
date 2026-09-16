@@ -101,8 +101,19 @@
 
 import { HARD_FLOOR_CAPABILITIES, canonicalizePath } from '../runtime/dsh-composition/enforcement.mjs'
 
-/** 下限形状或拒绝码变化时递增。 */
-export const RUN_FLOOR_VERSION = 1
+/**
+ * 下限形状、拒绝码或 **`denyTools` 的名字空间**变化时递增。
+ *
+ * ★ 本批从 1 升到 2，升的是一**件会改变 guard 行为的事**，不是加了个码：
+ * `denyTools` 从"Legion 能力名"改成了"**执行面（DSH）工具名**"。
+ *
+ * 在同一份输入下，`denyTools` 的内容、guard 真的拒掉哪些调用、以及
+ * "这次 Run 能不能派生"都变了。一个只靠后端码判断"这份下限是不是老形状"的消费者，
+ * 需要这个版本号来知道它读到的名单是喂给哪个名字空间的——
+ * *一份"写的是能力名"的名单与一份"写的是工具名"的名单，
+ * 在 `denyTools` 这个读数上是同一个东西，只不过前者一个真工具都拦不住。*
+ */
+export const RUN_FLOOR_VERSION = 2
 
 /**
  * 静态 hard floor 的名单**定义在强制面那一侧**
@@ -165,11 +176,52 @@ export const RUN_FLOOR_REFUSAL_CODES = Object.freeze({
   PATH_PREFIX_UNNORMALIZABLE: 'run-floor-path-prefix-unnormalizable',
   /** 规范化**不幂等**：存进去的那一份不是 guard 再算一次会得到的值。 */
   PATH_PREFIX_UNNORMALIZED: 'run-floor-path-prefix-unnormalized',
+  /**
+   * 有一条工具**必须**被静态禁止，但它在执行面上**没有名字**可以让 guard 去拒。
+   *
+   * 两种来源，修法不同，都靠 `detail.why` 分：`hosted`（由 Legion 宿主平面提供，
+   * 那个平面今天没有被任何组合挂载）与 `unrouted`（路由表里没有这一条，我们不知道
+   * 它在执行面上叫什么）。
+   *
+   * 为什么是**整次 Run 具名拒绝**而不是"记一条 notice 继续跑"：这一条说的是
+   * "有一条硬底线在这一层禁不了"。硬底线是**审批也解除不了**的那一类
+   * （`file:delete` / `credential:write`——删文件回不来、写密钥会让已录入的凭证
+   * 无法恢复）。让 Run 照跑，等于把它换成一次**没有告警**的放行：
+   *
+   *   > 一份"三个硬底线里能表达的那个被翻译了、另两个被静默跳过"的下限，
+   *   > 与一份"三个都覆盖了"的下限，在 `denyTools` 的长度上是同一个读数。
+   *
+   * 与 spec §6.8 `:479` 一致：「legacy 路径在完成 DSH 强制面接线前禁止高风险工具」——
+   * 而一个**说不出它在执行面上叫什么**的工具，是这份目录里最没法证明它没在跑的那一个。
+   */
+  HARD_FLOOR_NOT_ENFORCEABLE_AT_PLANE: 'run-floor-hard-floor-not-enforceable-at-plane',
+  /** 有工具必须被禁、需要在执行面上找名字，却没有注入那个解析口。 */
+  EXECUTION_NAMES_RESOLVER_MISSING: 'run-floor-execution-names-resolver-missing',
+  /** 执行面名字的解析口自己抛了。 */
+  EXECUTION_NAMES_RESOLVER_THREW: 'run-floor-execution-names-resolver-threw',
+  /** 解析口返回的东西不满足契约（不是对象 / `dshTools` 不是数组 / `hosted` 不是布尔）。 */
+  EXECUTION_NAMES_RESOLVER_CONTRACT: 'run-floor-execution-names-resolver-contract',
 })
 
 /** 看到这条 notice 的人要做的动作是"把工具登记进能力目录"，不是改名单。 */
 export const RUN_FLOOR_NOTICE_CODES = Object.freeze({
   UNKNOWN_TOOL_DENIED: 'run-floor-unknown-tool-denied',
+  /**
+   * 为了禁掉一个工具，连带禁掉了**别的** Legion 工具（它们共用同一批执行面名字）。
+   *
+   * 这不是警告，是**代价的读数**：`git-push` 只有在 `bash`/`pwsh` 上才能被执行面拒掉，
+   * 而那两个名字同时承载 `run-command` / `git-status` / `git-commit`。禁掉它们之后
+   * 那些工具也跑不了了。
+   *
+   *   > 一次"为了拦一个推送而关掉整个 shell"的决定，
+   *   > 与一次"只拦了推送"的决定，在 `denyTools` 上是同一个读数——
+   *   > 只不过前者的用户会看到几个毫不相干的命令**莫名其妙**地失败。
+   *
+   * 所以代价必须能被读出来。判成"安全优先、接受连带"是**被点名的选择**
+   * （spec §6.8 `:456` 把禁止工具放在**静态面**：静态面只降级、不由审批翻案，
+   * 于是它宁可多禁），但多禁了哪些必须写下来。
+   */
+  COLLATERAL_DENIAL: 'run-floor-collateral-denial',
 })
 
 /** 派生被拒时抛这个。**不是 `Error` 加一句话**：装配点要按码分流。 */
@@ -223,11 +275,24 @@ function nonEmptyString(value) {
  * @param {(name: string) => {known: boolean, capabilities: string[], requiresApproval?: boolean}} input.resolveTool
  *   能力目录的解析口，**由调用方注入**（真实实现是 `tool-capability.mjs` 的 `resolveTool`）。
  *   本模块不 import 它：那会造出一个真实的模块环（见文件头）。
+ * @param {(name: string) => {dshTools: string[], hosted: boolean, unrouted?: boolean, collateral?: string[]}} input.resolveExecutionNames
+ *   ★ **名字空间那一半的解析口**：一个 Legion 工具名 → 要在**执行面**上禁掉哪些名字。
+ *   同样由调用方注入（真实实现是 `employee-preset.mjs` 的 `executionDenialFor()`），
+ *   理由与 `resolveTool` 一样是模块环。
+ *
+ *   存在的理由是 `createHardFloorGuard()` 比的是 `execution.name`——**执行面的工具名**，
+ *   而 `permissions.tools` / `declaredDenyTools` 写的是 **Legion 能力名**。两个名字空间
+ *   不相交，把后者直接当 `denyTools` 装上去，一个真工具名都拦不住。
+ *
+ *   三种答案是**三种处置**，不是"有没有名字"：可表达 → 翻译；不可表达
+ *   （`hosted` / `unrouted`）→ **整次 Run 具名拒绝**；解析不出来 → 具名拒绝。
+ *   见 `RUN_FLOOR_REFUSAL_CODES.HARD_FLOOR_NOT_ENFORCEABLE_AT_PLANE` 的注释。
  * @param {string} [input.cwd] 本次 Run 的工作目录。进下限，供 guard 规范化相对目标路径。
  * @param {string} [input.platform] 路径语义；默认 `process.platform`。与 `cwd` 一起进下限。
  * @param {string} [input.runId] 证据标签，原样回显。
  * @returns {Readonly<object>} `{version, runId, preset, derived, floor, entries, pathPrefixes, notices, refusals}`
  *   `floor` 是 `{denyTools, denyPathPrefixes, cwd, platform}`，`createHardFloorGuard()` 直接吃它；
+ *   ★ **`denyTools` 里放的是执行面（DSH）工具名**，不是 Legion 能力名（`RUN_FLOOR_VERSION` 记着这次变更）；
  *   派生不出来时 `floor` 是 `null`（**不是**一个空对象）。
  */
 export function deriveRunFloor({
@@ -235,6 +300,7 @@ export function deriveRunFloor({
   declaredDenyTools = [],
   declaredDenyPathPrefixes = [],
   resolveTool,
+  resolveExecutionNames,
   cwd,
   platform = process.platform,
   runId = null,
@@ -243,6 +309,85 @@ export function deriveRunFloor({
   const entries = []
   const pathPrefixes = []
   const notices = []
+
+  /**
+   * 一条"必须被禁"的决定，落到执行面上要禁哪些名字。
+   *
+   * 返回值 `null` 表示**这一层禁不了**——那时已经推了一条具名拒绝，`derived` 会是 false。
+   * 调用方**不许**把 `null` 当成"没有名字要禁"：那正是本批要消灭的那个读数。
+   *
+   * 结果按工具名缓存：同一个工具在 `entries` 里可能有多条决定（允许名单一条、
+   * 政策声明一条），而连带代价的 notice 只该出现一次。
+   */
+  const executionNamesCache = new Map()
+  function executionNamesFor(legionTool) {
+    if (executionNamesCache.has(legionTool)) return executionNamesCache.get(legionTool)
+
+    const fail = (code, message, detail) => {
+      refusals.push(refusal(code, message, { tool: legionTool, ...(detail ?? {}) }))
+      executionNamesCache.set(legionTool, null)
+      return null
+    }
+
+    if (typeof resolveExecutionNames !== 'function') {
+      return fail(
+        RUN_FLOOR_REFUSAL_CODES.EXECUTION_NAMES_RESOLVER_MISSING,
+        '「' + legionTool + '」必须被静态禁止，但没有注入执行面名字的解析口（resolveExecutionNames）。'
+        + '没有它就无法知道禁掉这个工具要在执行面上禁哪些名字——'
+        + '而 `denyTools` 里放一个执行面认不出的名字，与不设这条禁令，在下一次调用时是同一个东西。',
+      )
+    }
+
+    let reading
+    try {
+      reading = resolveExecutionNames(legionTool)
+    } catch (err) {
+      return fail(
+        RUN_FLOOR_REFUSAL_CODES.EXECUTION_NAMES_RESOLVER_THREW,
+        '执行面名字的解析口解析「' + legionTool + '」时自己抛了：' + (err?.message ?? String(err)),
+      )
+    }
+    if (!isPlainObject(reading) || !Array.isArray(reading.dshTools) || typeof reading.hosted !== 'boolean') {
+      return fail(
+        RUN_FLOOR_REFUSAL_CODES.EXECUTION_NAMES_RESOLVER_CONTRACT,
+        '执行面名字的解析口对「' + legionTool + '」的返回值不满足契约'
+        + '（需要 {dshTools: string[], hosted: boolean}）。'
+        + '一个形状不对的解析结果，与一个"这个工具在执行面上没有名字"的解析结果，在下限上长得一样。',
+      )
+    }
+
+    if (reading.dshTools.length === 0) {
+      const why = reading.hosted === true ? 'hosted' : reading.unrouted === true ? 'unrouted' : 'unnamed'
+      return fail(
+        RUN_FLOOR_REFUSAL_CODES.HARD_FLOOR_NOT_ENFORCEABLE_AT_PLANE,
+        '「' + legionTool + '」必须被静态禁止，而它在**执行面上没有名字**可以让 guard 去拒（' + why + '：'
+        + (reading.reason ?? '没有给出理由') + '）。'
+        + '这不是"不用禁"，是"这一层禁不了"——硬底线是审批也解除不了的那一类，'
+        + '让 Run 照跑等于把它换成一次没有告警的放行。'
+        + '修法二选一：把这个工具从允许名单里去掉，或者给它接上一个强制执行面。',
+        { why, reason: reading.reason ?? null },
+      )
+    }
+
+    const names = Object.freeze([...reading.dshTools])
+    // ★ 连带代价：为了禁这一个，执行面上还会连带禁掉哪些**别的** Legion 工具。
+    const collateral = Array.isArray(reading.collateral) ? reading.collateral.filter((n) => typeof n === 'string' && n !== '') : []
+    if (collateral.length > 0) {
+      notices.push(Object.freeze({
+        code: RUN_FLOOR_NOTICE_CODES.COLLATERAL_DENIAL,
+        tool: legionTool,
+        dshTools: names,
+        collateral: Object.freeze([...collateral]),
+        message: '为了在执行面上禁掉「' + legionTool + '」，必须禁掉 ' + JSON.stringify([...names])
+          + '；这些名字同时承载 ' + JSON.stringify(collateral)
+          + '，于是它们也会被禁。这是静态面**被点名的选择**（只降级、不由审批翻案，宁可多禁），'
+          + '但代价必须被读出来：否则"为了拦一个推送而关掉整个 shell"'
+          + '与"只拦了推送"在 denyTools 上是同一个读数。',
+      }))
+    }
+    executionNamesCache.set(legionTool, names)
+    return names
+  }
 
   // ── ① Run 权限档位 ────────────────────────────────────────────────────────
   const preset = isPlainObject(permissions) ? (permissions.preset ?? null) : null
@@ -450,10 +595,31 @@ export function deriveRunFloor({
     }
   }
 
-  // ── ⑤ 组装 ───────────────────────────────────────────────────────────────
+  // ── ⑤ 名字空间：把**每一条**"必须被禁"的决定落到执行面的名字上 ──────────
+  //
+  // ★ 这一遍是**一次遍历所有 deny 决定**，而不是在②③各自的产地顺手翻译。
+  //   理由不是整洁：产地有三处（硬底线能力 / 不认识的工具 / 政策声明），
+  //   在每一处各翻一次，将来加第四处产地时**忘了翻**的表现与"这个工具不需要禁"
+  //   完全相同——而这正是本批要消灭的那类静默失效。
+  //
+  //     > 一份"在每个产地都记得翻译"的下限，
+  //     > 与一份"漏掉的那个产地恰好是空的"的下限，
+  //     > 在 denyTools 的长度上是同一个读数。
+  const translatedEntries = entries.map((entry) => {
+    if (entry.deny !== true) return entry
+    const names = executionNamesFor(entry.tool)
+    // 禁不了时不补一个空数组：`executionNames: []` 读起来是"这里没有要禁的名字"，
+    // 而事实是"这里有一个禁不掉的东西"。那条具名拒绝才是它的读数。
+    return names === null ? entry : Object.freeze({ ...entry, executionNames: names })
+  })
+
+  // ── ⑥ 组装 ───────────────────────────────────────────────────────────────
   const denyTools = []
-  for (const entry of entries) {
-    if (entry.deny === true && !denyTools.includes(entry.tool)) denyTools.push(entry.tool)
+  for (const entry of translatedEntries) {
+    if (entry.deny !== true) continue
+    for (const name of entry.executionNames ?? []) {
+      if (!denyTools.includes(name)) denyTools.push(name)
+    }
   }
   const derived = refusals.length === 0
   const floor = derived
@@ -471,7 +637,7 @@ export function deriveRunFloor({
     preset,
     derived,
     floor,
-    entries: Object.freeze(entries),
+    entries: Object.freeze(translatedEntries),
     pathPrefixes: Object.freeze(pathPrefixes),
     notices: Object.freeze(notices),
     refusals: Object.freeze(refusals),

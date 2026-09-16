@@ -33,14 +33,90 @@ import {
   SHIPPED_PRESET_IDS,
   assertEveryRowReachable,
   coverageOf,
+  dshToolNamesOf,
+  executionDenialFor,
   installEmployeePreset,
   needsQuoting,
   renderEmployeePreset,
   yamlScalar,
 } from './employee-preset.mjs'
+import { HARD_FLOOR_CAPABILITIES } from './enforcement.mjs'
 import { TOOL_CATALOG } from './tool-capability.mjs'
 import { narrowToGrant, normalizeManifest } from './employee-manifest.mjs'
 import { EMPLOYEE_PRESET_CONTRACT } from './patch-layer.mjs'
+
+describe('executionDenialFor：一个 Legion 工具 → 要在执行面上禁哪些名字', () => {
+  test('★★★★★ 可表达的那一个：`git-push` → `bash`/`pwsh`，且连带代价被算出来', () => {
+    const d = executionDenialFor('git-push')
+    assert.deepEqual([...d.dshTools], ['bash', 'pwsh'])
+    assert.equal(d.hosted, false)
+    assert.equal(d.unrouted, false)
+    // 连带代价 = **别的** Legion 工具里也落到这两个名字上、且**自己不是硬底线**的那些。
+    // 是硬底线的那些本来就该被禁，算进代价会把代价说大。
+    assert.deepEqual([...d.collateral], ['run-command', 'git-status', 'git-commit'])
+    // 反向对照：这三个确实不是硬底线（否则上面那条断言就是把它自己的同类算成了代价）。
+    for (const n of d.collateral) assert.equal(TOOL_CATALOG[n].hardFloor, false, n)
+  })
+
+  test('★★★★★ 硬底线里 2/3 在执行面上**没有名字**：`hosted` 必须说出来，不许静默跳过', () => {
+    // 这三个是 `HARD_FLOOR_CAPABILITIES` 的载体，而它们各自落到哪一侧并不一样。
+    const carriers = Object.values(TOOL_CATALOG)
+      .filter((t) => t.capabilities.some((c) => HARD_FLOOR_CAPABILITIES.includes(c)))
+      .map((t) => t.name).sort()
+    assert.deepEqual(carriers, ['delete-file', 'git-push', 'write-secret'])
+
+    const expressible = carriers.filter((n) => executionDenialFor(n).dshTools.length > 0)
+    const hosted = carriers.filter((n) => executionDenialFor(n).hosted === true)
+    assert.deepEqual(expressible, ['git-push'])
+    assert.deepEqual(hosted, ['delete-file', 'write-secret'])
+    // 这两组必须**恰好**覆盖全部载体：漏掉的那一天，一个硬底线会在
+    // "既没被翻译、也没被标成不可表达"的状态下，安静地不进任何名单。
+    assert.deepEqual([...expressible, ...hosted].sort(), carriers)
+
+    // `hosted` 的两条各自带一条说得清来源的理由——修法是接线，不是改名单。
+    for (const n of hosted) {
+      assert.equal(executionDenialFor(n).unrouted, false, n)
+      assert.equal(typeof executionDenialFor(n).reason, 'string', n)
+      assert.notEqual(executionDenialFor(n).reason.trim(), '', n)
+    }
+  })
+
+  test('★★★★ 路由表里没有的名字判 `unrouted`（与 `hosted` 是两件事，修法不同）', () => {
+    const d = executionDenialFor('ghost-tool')
+    assert.deepEqual([...d.dshTools], [])
+    assert.equal(d.unrouted, true, '修法是登记路由表')
+    assert.equal(d.hosted, false, '它**不是**"由宿主平面提供"——我们只是不知道它是什么')
+    assert.match(d.reason, /路由表/)
+  })
+
+  test('★★★★ 每一个路由项都不会抛，而且 `dshTools` 与 `dshToolNamesOf` 对得上', () => {
+    // 两个函数读同一张表，答案必须一致——不一致的那一天，
+    // "名字空间对不对得上"的读数与"下限里放什么"的读数会各说各话。
+    for (const name of Object.keys(LEGION_TOOL_ROUTING)) {
+      const one = executionDenialFor(name)
+      assert.deepEqual([...one.dshTools], [...dshToolNamesOf([name])], name)
+      assert.equal(Object.isFrozen(one), true, name + ' 的返回值没冻结')
+      assert.equal(Object.isFrozen(one.dshTools), true, name)
+      assert.equal(Object.isFrozen(one.collateral), true, name)
+    }
+  })
+
+  test('★★★★ 替身表：两张表都由参数注入（用例不该被生产表绑死）', () => {
+    const d = executionDenialFor('probe-tool', {
+      routing: {
+        'probe-tool': { rows: ['x'], dshTools: ['probe-dsh'] },
+        'other-tool': { rows: ['x'], dshTools: ['probe-dsh'] },
+        'hosted-tool': { rows: [], hosted: true, reason: '探针理由' },
+      },
+      catalog: {},
+    })
+    assert.deepEqual([...d.dshTools], ['probe-dsh'])
+    assert.deepEqual([...d.collateral], ['other-tool'])
+    assert.equal(executionDenialFor('hosted-tool', {
+      routing: { 'hosted-tool': { hosted: true, reason: '探针理由' } }, catalog: {},
+    }).reason, '探针理由')
+  })
+})
 
 // ── DSH 侧（可 SKIP） ────────────────────────────────────────────────────
 const DSH = process.env.DSH_CHECKOUT ?? null

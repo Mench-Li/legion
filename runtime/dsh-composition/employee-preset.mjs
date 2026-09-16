@@ -232,6 +232,89 @@ export function dshToolNamesOf(legionToolNames = Object.keys(LEGION_TOOL_ROUTING
 }
 
 /**
+ * **要在一个执行面上禁掉某个 Legion 工具，必须在执行面上禁掉哪些名字**（含代价）。
+ *
+ * ## 为什么 `dshToolNamesOf()` 不够
+ *
+ * `dshToolNamesOf()` 回答的是"这一组 Legion 工具会落到哪些执行面名字上"——
+ * 它是**读数**，用来让"名单对不上号"可被断言。而派生下限那一侧要回答的是另一个
+ * 问题，而且必须**逐个工具**回答，因为答案有三种形状、修法完全不同：
+ *
+ *   · **可表达**（`git-push`）→ 要禁的执行面名字是 `['bash','pwsh']`。
+ *     代价是这两个名字**同时承载**别的 Legion 工具（`run-command` / `git-status` /
+ *     `git-commit`），于是禁掉它们会**连带**禁掉那些工具。这个代价必须能被读出来
+ *     （`collateral`），否则一次"为了拦一个推送而关掉整个 shell"的决定
+ *     在读数上与"只拦了推送"是同一个东西。
+ *   · **不可表达**（`delete-file` / `write-secret`）→ `hosted: true`，执行面**没有**
+ *     这个工具，因此**没有一个名字可以让 guard 去拒**。这不是"不用禁"，
+ *     是"这一层禁不了"——两种读数必须分得开。
+ *   · **不知道**（路由表里没有这一条）→ 同上不可表达，但理由不同：
+ *     前者是"它由别的平面提供"，这里是"我们不知道它是什么"。
+ *     两种理由都指向"这一层禁不了"，但修法一个是接线、一个是登记路由表。
+ *
+ *   > 一个"三个硬底线里能表达的那一个被翻译了、另两个被静默跳过"的下限，
+ *   > 与一份"三个都覆盖了"的下限，在 `denyTools` 的长度上是同一个读数——
+ *   > 只不过前者漏掉的恰好是 `file:delete` 与 `credential:write`，
+ *   > 也就是"删文件回不来、写密钥会让已录入的凭证无法恢复"那两个。
+ *
+ * ## 为什么它属于本模块
+ *
+ * 答案完全由 `LEGION_TOOL_ROUTING` 决定，而那张表住在这里；把答案抄到
+ * `run-floor.mjs` 会造出第二份映射（那张表的注释里写着：两处名单今天恰好同名
+ * 有一致性，与来自同一个来源的一致性，在没有人只改一边的那些日子里是同一个东西）。
+ * `run-floor.mjs` 只**接收**这个函数的结论（注入），不 import 它——那会是一个
+ * 真实的模块环（见那个模块的文件头）。
+ *
+ * @param {string} legionToolName
+ * @param {{routing?: object, catalog?: object}} [o] 只给用例用；生产走默认的两张表
+ * @returns {Readonly<{legionTool: string, dshTools: readonly string[], hosted: boolean,
+ *   unrouted: boolean, collateral: readonly string[], reason: string|null}>}
+ */
+export function executionDenialFor(legionToolName, { routing = LEGION_TOOL_ROUTING, catalog = TOOL_CATALOG } = {}) {
+  const name = typeof legionToolName === 'string' ? legionToolName : String(legionToolName)
+  const route = routing[name]
+
+  if (route === undefined) {
+    return Object.freeze({
+      legionTool: name, dshTools: Object.freeze([]), hosted: false, unrouted: true,
+      collateral: Object.freeze([]),
+      reason: '路由表里没有这个工具：不知道它在执行面上叫什么，于是没有名字可以让 guard 去拒',
+    })
+  }
+  if (route.hosted === true) {
+    return Object.freeze({
+      legionTool: name, dshTools: Object.freeze([]), hosted: true, unrouted: false,
+      collateral: Object.freeze([]),
+      reason: route.reason ?? '由 Legion 宿主平面提供，不在执行面的 preset 里',
+    })
+  }
+
+  const dshTools = Object.freeze([...(route.dshTools ?? [])])
+
+  // 连带代价：**别的** Legion 工具里，有哪些也落到这批名字上。
+  // 只用目录判"是不是另一个硬底线"——不是硬底线的那些才是代价；
+  // 是硬底线的那些本来就该被禁，把它们算进代价会把代价说大。
+  const collateral = []
+  for (const other of Object.keys(routing)) {
+    if (other === name) continue
+    const r = routing[other]
+    if (r === undefined || r.hosted === true) continue
+    if (!(r.dshTools ?? []).some((d) => dshTools.includes(d))) continue
+    if (catalog[other]?.hardFloor === true) continue
+    if (!collateral.includes(other)) collateral.push(other)
+  }
+
+  return Object.freeze({
+    legionTool: name,
+    dshTools,
+    hosted: false,
+    unrouted: false,
+    collateral: Object.freeze(collateral),
+    reason: null,
+  })
+}
+
+/**
  * 从**授权**推导出这份 preset 需要哪些 DSH 行，以及覆盖情况。
  *
  * @param {{grant: object, allowedTools?: string[]}} input

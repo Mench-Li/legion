@@ -61,6 +61,11 @@ import {
 } from '../../runtime/contracts/run-floor.mjs'
 import { deriveRunFloor } from '../../team-hub/run-floor.mjs'
 import { resolveTool as resolveLegionTool } from '../../runtime/dsh-composition/tool-capability.mjs'
+// ★ 名字空间那一半：Legion 工具名 → 执行面名字（含连带代价）。
+//   与 `resolveLegionTool` 同一个注入模式：`run-floor.mjs` 是叶子，它只**接收**结论。
+//   默认值是**生产实现**，不是替身——`resolveLegionTool` 那一行也是这个写法，
+//   理由是"接线要落在被用例覆盖的函数里面"，而不是落在一个没人能跑到的组装点。
+import { executionDenialFor } from '../../runtime/dsh-composition/employee-preset.mjs'
 import { createBudgetGate } from './budget-gate.mjs'
 
 /** 本模块的具名拒绝码。跨进程读取（worker 上报 → hub 记录 → 人排查），属契约。 */
@@ -520,12 +525,17 @@ export const UNSUPPLIED_PERMISSIONS = Object.freeze({
  * @param {object} request 已构造好的 `RunRequest`
  * @param {object} [options]
  * @param {(name: string) => object} [options.resolveTool] 能力目录解析口（默认用真的目录）
+ * @param {(name: string) => object} [options.resolveExecutionNames]
+ *   **名字空间那一半的解析口**：Legion 工具名 → 要在执行面上禁掉哪些名字
+ *   （默认用真的路由表 `executionDenialFor()`）。没有它，`denyTools` 里放的就是
+ *   执行面认不出的 Legion 能力名，guard 一个真工具都拦不住。
  * @param {string} [options.platform] 路径语义；默认 `process.platform`
  * @returns {{request: object, payload: object, state: string, code: string|null,
  *   message: string|null, refusals: readonly object[], result: object}}
  */
 export function deriveRunFloorCarrier(request, {
   resolveTool: resolver = resolveLegionTool,
+  resolveExecutionNames: namesResolver = executionDenialFor,
   platform = process.platform,
 } = {}) {
   if (request === null || typeof request !== 'object') {
@@ -545,6 +555,7 @@ export function deriveRunFloorCarrier(request, {
   const result = deriveRunFloor({
     permissions,
     resolveTool: resolver,
+    resolveExecutionNames: namesResolver,
     cwd: request.workdir,
     platform,
     runId: request.runId ?? null,

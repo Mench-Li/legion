@@ -609,14 +609,16 @@ function leaseWith(tools, over = {}) {
 
 test('⑥ ★★ 下限来自**这一次**的权限档位，而且真的交到了端口上', async () => {
   const { result, host } = await build()
-  const r = await result.executor.execute(leaseWith(['read-file', 'delete-file']))
+  const r = await result.executor.execute(leaseWith(['read-file', 'git-push']))
   assert.equal(r.outcome, 'completed')
 
   assert.equal(host.calls.startRun.length, 1)
   const carried = host.calls.startRun[0].options.enforcementFloor
   assert.equal(carried.state, 'installed',
     `端口收到的不是"装填"那一档：${JSON.stringify(carried)}`)
-  assert.deepEqual([...carried.floor.denyTools], ['delete-file'],
+  // ★ 进去的是**执行面**名字：`git-push` 只有在 shell 那一对名字上才能被拒。
+  //   放 `git-push` 自己进去是拦不住的（guard 比的是 `execution.name`）。
+  assert.deepEqual([...carried.floor.denyTools], ['bash', 'pwsh'],
     '下限里没有这一档里那个带不可逆能力的工具——那它就不是从权限档位派生出来的')
   assert.equal(carried.floor.cwd, 'C:/tmp/ws', 'cwd 要跟着这次 Run 走（guard 靠它规范化路径）')
   assert.equal(carried.floor.platform, process.platform)
@@ -627,21 +629,45 @@ test('⑥ ★ 换一份权限档位，下限跟着换（不是 DEFAULT_HARD_FLOO
   const a = await build()
   await a.result.executor.execute(leaseWith(['read-file']))
   const b = await build()
-  await b.result.executor.execute(leaseWith(['delete-file', 'git-push']))
+  await b.result.executor.execute(leaseWith(['read-file', 'git-push']))
 
   const floorA = a.host.calls.startRun[0].options.enforcementFloor
   const floorB = b.host.calls.startRun[0].options.enforcementFloor
   assert.deepEqual([...floorA.floor.denyTools], [],
     '只授权了 read-file 的一次 Run 不该有任何静态禁止项')
-  assert.deepEqual([...floorB.floor.denyTools].sort(), ['delete-file', 'git-push'])
+  assert.deepEqual([...floorB.floor.denyTools].sort(), ['bash', 'pwsh'])
 })
 
-test('⑥ ★ 能力目录不认识的工具**进下限**（不是被静默跳过）', async () => {
+test('⑥ ★★★ 能力目录不认识的工具 ⇒ **不派发** + 具名拒绝（不是"进名单就算禁了"）', async () => {
+  // ★ 本批之前这一条断言的是"`ghost-tool` 进了 `denyTools`"。那个读数**看起来**
+  //   是"未知工具被禁了"，实际上名单里放的是一个执行面认不出的名字——
+  //   guard 谁也没拦住。未知工具在**这一层**禁不了，于是它与 hosted 那两个
+  //   落到同一个处置：整次 Run 具名拒绝。
   const { result, host } = await build()
-  await result.executor.execute(leaseWith(['read-file', 'ghost-tool']))
-  const floor = host.calls.startRun[0].options.enforcementFloor.floor
-  assert.deepEqual([...floor.denyTools], ['ghost-tool'],
-    '"不认识"必须落在静态拒绝上：`tool-capability.mjs` 对未登记工具的结论就是 hardFloor')
+  await assert.rejects(() => result.executor.execute(leaseWith(['read-file', 'ghost-tool'])), (e) => {
+    assert.equal(e.code, EXECUTOR_CODES.RUN_FLOOR_NOT_DERIVED)
+    assert.equal(e.refusalCode, 'run-floor-hard-floor-not-enforceable-at-plane',
+      `拒绝码不是"硬底线在这一层表达不了"（收到 ${e.refusalCode}）`)
+    assert.ok(Array.isArray(e.refusals) && e.refusals.includes('run-floor-hard-floor-not-enforceable-at-plane'))
+    return true
+  })
+  // 两件"没发生"的事：**一个字节都没有派发**。
+  assert.equal(host.calls.startRun.length, 0, '下限都没派生出来，却已经把 Run 派发出去了')
+  assert.equal(host.calls.probeRuntime, 0, '探测跑了——顺序反了')
+})
+
+test('⑥ ★★★ 硬底线里**执行面上没有名字**的那些（hosted）：也是不派发', async () => {
+  // `HARD_FLOOR_CAPABILITIES` 三个里两个（`file:delete` / `credential:write`）
+  // 由 Legion 宿主平面提供，执行面上没有名字可以让 guard 去拒。
+  for (const tool of ['delete-file', 'write-secret']) {
+    const { result, host } = await build()
+    await assert.rejects(() => result.executor.execute(leaseWith(['read-file', tool])), (e) => {
+      assert.equal(e.code, EXECUTOR_CODES.RUN_FLOOR_NOT_DERIVED, tool)
+      assert.equal(e.refusalCode, 'run-floor-hard-floor-not-enforceable-at-plane', tool)
+      return true
+    })
+    assert.equal(host.calls.startRun.length, 0, `${tool}：下限没派生出来却派发了`)
+  }
 })
 
 test('⑥ ★★ 控制面**没给**权限档位 → 具名拒绝，而且**一个字节都没有派发**', async () => {
@@ -729,14 +755,14 @@ test('⑥ ★ `requestFor` 自己造的请求也**照样**被挂上下限（不�
       requestFor: (lease, snapshot) => ({
         ...defaultRequestFor(lease, snapshot),
         // 注意：**没有** `permissions` 的默认回落——由 lease 给的那一份决定。
-        permissions: { preset: 'legion-unattended', tools: ['write-secret'] },
+        permissions: { preset: 'legion-unattended', tools: ['git-push'] },
       }),
     },
   })
   const r = await result.executor.execute({ ...LEASE })
   assert.equal(r.outcome, 'completed')
   const floor = host.calls.startRun[0].options.enforcementFloor.floor
-  assert.deepEqual([...floor.denyTools], ['write-secret'],
+  assert.deepEqual([...floor.denyTools], ['bash', 'pwsh'],
     '调用方自己造请求时下限没跟上——"只有默认那条路带下限"与"任何一条路都不带"在生产里同形')
 })
 
@@ -761,50 +787,80 @@ test('⑥ ★★ 请求上**已经有一份**下限 → 拒绝（本模块是唯
   assert.equal(host.calls.startRun.length, 0)
 })
 
-test('⑥ ★★ 解析口是**注入**的：默认那个是真的能力目录（换掉它，读数就变）', () => {
+test('⑥ ★★ 两个解析口都是**注入**的：换掉任何一个，读数就跟着变', () => {
   // 这一条同时守着 `team-hub/run-floor.mjs` 的**控制反转**不被吃掉：
-  // 它不 import 能力目录（那会造出 `tool-capability → run-floor → tool-capability`
-  // 这个真实的模块环，表现是"强制面整段加载不上"），解析口由调用方给。
-  const request = { ...LEASE, permissions: { preset: 'p', tools: ['ghost-tool'] } }
+  // 它不 import 能力目录、也不 import 路由表（那会造出
+  // `tool-capability → run-floor → tool-capability` 这个真实的模块环，
+  // 表现是"强制面整段加载不上"），两个口都由调用方给。
+  const request = { ...LEASE, permissions: { preset: 'p', tools: ['git-push'] } }
 
+  // ① 能力目录那一口：真目录说 `git-push` 是硬底线 → 进下限。
   const withReal = deriveRunFloorCarrier(request)
-  assert.deepEqual([...withReal.payload.floor.denyTools], ['ghost-tool'],
-    '真目录对未登记工具的结论没被用上——解析口可能被换成了一个"什么都认识"的替身')
+  assert.deepEqual([...withReal.payload.floor.denyTools], ['bash', 'pwsh'])
 
-  const withStub = deriveRunFloorCarrier(request, {
+  // 一个"一律说不是硬底线"的替身会让它**整个不进下限**——那证明目录真的被问到了。
+  const withStubCatalog = deriveRunFloorCarrier(request, {
     resolveTool: () => ({ known: true, capabilities: [], requiresApproval: false }),
   })
-  assert.deepEqual([...withStub.payload.floor.denyTools], [],
-    '一个"忽略输入、一律说认识"的解析口竟然没有改变读数——那说明目录根本没被问到')
+  assert.equal(withStubCatalog.payload.derived, true)
+  assert.deepEqual([...withStubCatalog.payload.floor.denyTools], [],
+    '一个"忽略输入、一律说不是硬底线"的解析口竟然没有改变读数——那说明目录根本没被问到')
+
+  // ② 名字空间那一口：换成一个"翻译成别的名字"的替身，名单必须跟着变。
+  //    少了这一段，上面那段在一个"把 bash/pwsh 硬编码进名单"的实现上也是绿的。
+  const withStubNames = deriveRunFloorCarrier(request, {
+    resolveExecutionNames: () => ({ dshTools: ['probe-dsh-tool'], hosted: false, unrouted: false, collateral: [] }),
+  })
+  assert.deepEqual([...withStubNames.payload.floor.denyTools], ['probe-dsh-tool'],
+    '执行面名字的解析口没被问到——那名单里的名字是哪来的？')
+
+  // ③ 而"禁不了"（`dshTools: []`）必须是**拒收**，不是一份空下限。
+  const withUnnamed = deriveRunFloorCarrier(request, {
+    resolveExecutionNames: () => ({ dshTools: [], hosted: true, unrouted: false, reason: 'probe' }),
+  })
+  assert.equal(withUnnamed.state, RUN_FLOOR_STATES.REFUSED)
+  assert.deepEqual([...withUnnamed.payload.refusals], ['run-floor-hard-floor-not-enforceable-at-plane'])
+  assert.equal(withUnnamed.payload.floor, null, '禁不了的时候不许补一个空下限')
+
   assert.deepEqual([...resolveLegionTool('ghost-tool').capabilities], [])
   assert.equal(resolveLegionTool('ghost-tool').known, false)
 })
 
-test('⑥ ★★★ 名字空间：这份"生产出来的"下限对**真执行面名字**放行（记录，不修）', () => {
-  // 这是本条目的**另一半诚实边界**，而且它现在读的是**生产者真的产出的**那一份，
-  // 不是用例手写的名单。结论（与 STATUS.md 的 round-53 一节一致）：
-  const { payload } = deriveRunFloorCarrier({
+test('⑥ ★★★★★ 名字空间：生产出来的名单**真的命中执行面**了（本批从"记录，不修"翻过来）', () => {
+  // ★ 这一条的前身叫「这份"生产出来的"下限对**真执行面名字**放行（记录，不修）」，
+  //   它逐条断言的是那个缺口：`denyTools` 里是 Legion 能力名，而 guard 比的是
+  //   `execution.name`（执行面工具名），两个空间不相交 ⇒ **一个真工具都没拦住**。
+  //
+  //   一条断言"缺陷还在"的用例，在缺陷被修掉之后**必须**换成一条断言"修好了，
+  //   而且是通过这一种方式修的"。删掉它等于把这道边界一起删掉。
+  const { payload, result: derived } = deriveRunFloorCarrier({
     ...LEASE,
-    permissions: { preset: 'legion-unattended', tools: ['delete-file', 'write-secret', 'git-push'] },
+    permissions: { preset: 'legion-unattended', tools: ['git-push', 'read-file'] },
   })
+  assert.equal(payload.derived, true)
   const guard = createHardFloorGuard(payload.floor)
 
-  // ① Legion 名字空间里的那些**真的被拒**（它们是 Legion 宿主平面注册的工具名）。
-  for (const name of ['delete-file', 'write-secret', 'git-push']) {
+  // ① 执行面上的**真名字真的被拒**——这是这一整条的目的。
+  assert.deepEqual([...payload.floor.denyTools], ['bash', 'pwsh'])
+  for (const name of ['bash', 'pwsh']) {
     assert.equal(typeof guard({ name, arguments: {} }), 'string',
-      `${name} 没有被这份下限拒——那"派生"与"安装"之间就断了一节`)
+      `${name} 没有被这份下限拒——那"派生"与"安装"之间又断了一节`)
   }
-  // ② 而执行面上的真名字**一个都不在名单里**——包括 `git-push` 真正的落地方式。
-  //    一个"按名字禁"的下限在这四个名字上全部放行：
-  for (const name of ['write', 'read', 'pwsh', 'bash']) {
-    assert.equal(guard({ name, arguments: {} }), undefined,
-      `${name} 被拒了——那说明有人偷偷把 Legion 名字翻成了执行面名字，`
-      + '而那会**过度禁止**（`pwsh` 也是低风险 `git-status` 的落地方式）')
+  // ② 名单里**不再有** Legion 能力名：一个执行面上不存在的名字放进拒绝名单，
+  //    与没有这条禁令在下一次调用时是同一个东西。
+  for (const name of ['git-push', 'delete-file', 'write-secret']) {
+    assert.equal(payload.floor.denyTools.includes(name), false,
+      `${name} 又出现在名单里了——那是 Legion 能力名，guard 永远比不到它`)
   }
-  // ③ 因此：`git-push` 这个不可逆能力在**执行面**上没有任何名字可禁。
-  //    修法要么给 guard 能力语义，要么在**派生前**把能力翻成执行面名字；
-  //    两者都不是"补一个常量"能了事的，所以这里如实记着。
-  assert.equal(payload.floor.denyTools.includes('pwsh'), false)
-  assert.equal(payload.floor.denyTools.includes('git-push'), true,
-    '派生出来的名单变了（不再是 Legion 能力名）——那这一整条要重判')
+  // ③ 连带代价被读出来了：`bash`/`pwsh` 也是 `run-command` / `git-status` /
+  //    `git-commit` 的落地方式，禁掉它们会连带禁掉那些工具。
+  //    少了这条，"为了拦一个推送而关掉整个 shell"在读数上与"只拦了推送"同形。
+  const notice = derived.notices.find((n) => n.code === 'run-floor-collateral-denial')
+  assert.notEqual(notice, undefined, '连带禁止没有留读数')
+  assert.deepEqual([...notice.dshTools], ['bash', 'pwsh'])
+  assert.deepEqual([...notice.collateral], ['run-command', 'git-status', 'git-commit'])
+  // ④ 而名字名单**仍然不是** fail closed——这句是这一组唯一没变的话，
+  //    留着它防的是下一个人把"翻译对了"读成"下限现在已经完备了"。
+  assert.equal(guard({ name: 'write', arguments: {} }), undefined)
+  assert.equal(guard({ name: 'read', arguments: {} }), undefined)
 })

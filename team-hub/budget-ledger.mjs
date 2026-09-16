@@ -54,6 +54,48 @@
 // ============================================================================
 
 import { PriceError, createPriceTable, estimateCost, frozenEstimate, canSwitchModel } from '../runtime/contracts/price-table.mjs'
+import { ensureColumn } from './schema-util.mjs'
+
+/**
+ * 价目表上**表级**的字段：它们不属于任何单个模型，但少了它们就复现不出同一条估算。
+ *
+ * 这份清单是**封闭**的（不是 `Object.keys` 过滤）：多出来的字段会被丢掉这件事
+ * 必须是**有人改了这一行**才会发生，而不是"随手往表上挂了个字段、落库时悄悄没了"。
+ * 用例里有一条钉住"表级字段集变了而这里没跟着改"会红。
+ */
+const PRICE_TABLE_PROVENANCE_FIELDS = Object.freeze([
+  'timeOfDay', 'sourceUrl', 'sourceKind', 'retrievedAt', 'note', 'pricingUnit',
+  'vendorDisclaimer', 'handEntered',
+])
+
+/** 从一份价目表里取出**表级出处**（只取上面那份封闭清单里的）。 */
+function provenanceOf(table) {
+  const out = {}
+  for (const f of PRICE_TABLE_PROVENANCE_FIELDS) {
+    if (table?.[f] !== undefined) out[f] = table[f]
+  }
+  return out
+}
+
+/**
+ * 还原表级出处。**只认封闭清单里的字段**，而且坏数据当作"没有出处"。
+ *
+ * ★ 为什么坏数据不抛：这一列是**附加**信息，`models` 才是钱的那一半。
+ *   一份 `provenance_json` 坏掉时正确的行为是"退回加这一列之前的行为"
+ *   （默认取 peak，方向安全），而不是让整个价目表版本取不到——
+ *   后者会把一次"出处字段损坏"升级成"结算拿不到价目表"，
+ *   那是拿大故障换小故障。
+ */
+function parseProvenance(raw) {
+  let value = null
+  try { value = JSON.parse(raw) } catch { return {} }
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return {}
+  const out = {}
+  for (const f of PRICE_TABLE_PROVENANCE_FIELDS) {
+    if (value[f] !== undefined) out[f] = value[f]
+  }
+  return out
+}
 
 /** 账本层的具名错误码。 */
 export const BUDGET_ERRORS = Object.freeze({
@@ -178,6 +220,23 @@ export function ensureBudgetSchema(db) {
       created_by TEXT NOT NULL
     )
   `)
+  // ★ 表级**出处**字段（`timeOfDay` / `sourceUrl` / `retrievedAt` / `note` / `sourceKind`）
+  //   此前只存在内存里那份价目表上，`publish()` 入库时**只存 `models`**，
+  //   于是取回来的是**一张比原来弱的表**：它仍然算得出金额（默认取 peak，
+  //   所以方向是安全的），但"这条价是从哪来的"这一层永久丢了。
+  //
+  //   > 一条"冻结了价目表版本、却取不回那版的出处"的历史费用记录，
+  //   > 与一条"当时就没记出处"的记录，在事后对账时是同一个东西——
+  //   > 只不过前者看上去像是记过的。
+  //
+  //   而且它**不止是溯源问题**：`timeOfDay` 丢了之后，`timeOfDayAt()` 判不出时段，
+  //   `estimateCost` 就退回保守默认。今天这不构成偏差，因为 `reserve()` 与
+  //   `settle()` **都不传 `atMs`**（两边都取默认）——可一旦哪一边开始按时段算，
+  //   同一笔预留与结算就会用**两个不同的时段**，而"少算"那一侧是静默的。
+  //
+  //   列用 `ensureColumn` 补（本仓的既有原语：在事务里就不再开事务、已存在即幂等），
+  //   不写 `try { ALTER } catch {}`——那正是 `server.mjs:1176` 明令禁止的写法。
+  ensureColumn(db, 'price_tables', 'provenance_json', 'TEXT')
 }
 
 const isNonEmptyString = (v) => typeof v === 'string' && v.trim() !== ''
@@ -263,6 +322,13 @@ export function createPriceTableRegistry({ db, clock = () => Date.now(), writeAu
         currency: row.currency,
         effectiveAtMs: Number(row.effective_at_ms),
         models,
+        // ★ 表级出处一并还原。旧行（本列加进来之前写的）是 `null`：
+        //   那是"这一行没有出处"，与"出处是空对象"不同，所以**不给默认值**，
+        //   而是如实什么都不补——缺 `timeOfDay` 时 `estimateCost` 自己会退回
+        //   保守默认，行为与加这一列之前**逐字相同**。
+        ...(typeof row.provenance_json === 'string' && row.provenance_json !== ''
+          ? parseProvenance(row.provenance_json)
+          : {}),
       })
     } catch (e) {
       if (e instanceof PriceError) return null
@@ -294,8 +360,10 @@ export function createPriceTableRegistry({ db, clock = () => Date.now(), writeAu
         { statusCode: 409, version: table.version })
     }
     db.prepare(
-      'INSERT INTO price_tables (version, currency, effective_at_ms, models_json, created_at_ms, created_by) VALUES (?,?,?,?,?,?)',
-    ).run(table.version, table.currency, table.effectiveAtMs, JSON.stringify(table.models), clock(), actor.trim())
+      'INSERT INTO price_tables (version, currency, effective_at_ms, models_json, provenance_json, created_at_ms, created_by)'
+      + ' VALUES (?,?,?,?,?,?,?)',
+    ).run(table.version, table.currency, table.effectiveAtMs, JSON.stringify(table.models),
+      JSON.stringify(provenanceOf(table)), clock(), actor.trim())
     const saved = get(table.version)
     if (saved === null) {
       throw new BudgetError(BUDGET_ERRORS.PRICE_TABLE_INVALID,

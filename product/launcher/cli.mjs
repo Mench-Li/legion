@@ -58,6 +58,7 @@ import { createManifest, digestOf, validateManifest } from '../upgrade/manifest.
 // 自己里，理由是这里才有"产品正在跑"这个状态——托盘是"产品在跑"的界面，
 // 而 `tray-wiring.mjs` 不知道产品跑没跑。
 import { attachLauncherTray } from './tray-wiring.mjs'
+import { SHIPPED_MANIFEST_PATH, SHIPPED_MANIFEST_RELATIVE_PATH } from './runtime-manifest.mjs'
 
 /**
  * 安装目录的默认值：**Launcher 自己所在的那棵树**。
@@ -138,7 +139,10 @@ export const CLI_FLAGS = Object.freeze([
     '退出码：0 装好并切成现役 / **10 没装成（指针没动，不是 1）**' },
   { name: '--runtime-manifest=<path>', kind: 'value', doc: '（PRT-257）产品版本清单（spec §9.1）的路径。' +
     '**要装哪一版 DSH、受支持区间、补丁层版本全部只从它来**——本 CLI 里没有任何 DSH 版本号字面量' +
-    '（§9.1：客户不能在产品内单独升级 DSH）。不给这条 ⇒ 算不出计划（退出 3），**不是**"计划通过"' },
+    '（§9.1：客户不能在产品内单独升级 DSH）。**不给这条时用随产品发的那一份**' +
+    `（${SHIPPED_MANIFEST_RELATIVE_PATH}），所以正常情况下不需要写它；` +
+    '显式给值会**覆盖**随发的那份（升级验证要能指向另一份清单）。' +
+    '连随发的那份都不在了 ⇒ 算不出计划（退出 3），**不是**"计划通过"' },
   // ── PRT-708：把已经做好的托盘**接上电源** ───────────────────────────────
   //
   // `tray.mjs`（菜单模型与动作派发）、`tray-wiring.mjs`（接线）、
@@ -481,6 +485,18 @@ export function launcherOptionsFrom({ argv = [], env = {}, nodePath = process.ex
       dshCredentialsFile: parsed.flags['no-dsh-credentials'] === true
         ? null
         : dshCredentialsFileFrom(env),
+      // ★ PRT-509 缺口 ②：operator 的真实家目录**必须显式给**。
+      //
+      //   `security/` 不许读 `process.env`，所以"operation 的家在哪"这件事
+      //   只能由调用方**注入**。这一个入参此前没有任何生产调用方传过，
+      //   于是材料化在生产里恒为具名拒绝 `RUN_CREDENTIALS_OPERATOR_HOME_REQUIRED`
+      //   ——接线在、每次都拒。读数是对的（拒绝说的是修法的名字），
+      //   而"每次启动真的写出那份文件"还差这一行。
+      //
+      //   来源与上面 `resolveLayout` 用的是同一份 `osHomeFacts(env)`：**同一个
+      //   OS 事实**，不是第二个判断。两处各自算一遍会让"Legion 认为的 operator 家"
+      //   与"产品家目录所在的那个家"有机会分叉——而分叉时没有任何东西会报错。
+      operatorHome: osHome.homeDir,
       readiness: readinessTimeout === null
         ? (fromConfig.readinessTimeoutMs === undefined ? {} : { timeoutMs: fromConfig.readinessTimeoutMs })
         : { timeoutMs: readinessTimeout },
@@ -947,6 +963,46 @@ function parseDiagnosisInput(raw) {
 }
 
 /**
+ * PRT-257 缺口⑥：**给 doctor 的"运行时安装"读数接一个生产生产者**。
+ *
+ * `doctor.mjs` 的 `runtimeInstallCheckItem()` 一直是"库支持 + 渲染器会打出来"，
+ * 而生产里**没有任何东西会把这一项塞进诊断输入**——那个 stdin JSON 的生产者
+ * （活着的那个进程自检）从来只写组合层的结论。于是真机上跑 `--doctor`，
+ * 报告里**永远看不到**"运行时到底装没装"这一行。
+ *
+ *   > 一个"体检项目写得对、用例也验过、但没有任何人会喂它输入"的体检，
+ *   > 与一个没有这个项目的体检，在用户的报告上是同一个东西。
+ *
+ * ★ 为什么这件事**不该**等 stdin：两条通道证明的是**两种不同的东西**——
+ *   组合层自检（强制面生没生效）只存在于活着的那个进程里，所以只能管道进来；
+ *   而"字节装没装对、现役是哪一版"是**磁盘上的事实**，本进程自己读得到。
+ *   把它挂在 stdin 上，等于要求对面替我们读一次磁盘。
+ *
+ * ★ **没定下 DataDir 时返回 `null`（= 不给这一项），绝不返回"没装"。**
+ *   实测 `readActiveRuntime({ dataDir: null })` 会给出 `state: 'absent'`——
+ *   那是"不知道去哪看"，而 `absent` 在 doctor 里会被渲染成
+ *   "还没有装过运行时：先跑 --runtime-install-plan"，**是一句假话**。
+ *   *一个"没定下数据目录"读成"还没装"的实现，会让用户在查错目录的路上走很久。*
+ *
+ * 读失败（模块装不上、磁盘读异常）同样返回 `null`：**读数缺席**是诚实的，
+ * 编一个绿的或红的是不诚实的。
+ *
+ * @returns {Promise<object|null>} `readActiveRuntime()` 的产物，或 `null`（不给这一项）
+ */
+async function readRuntimeInstallForDoctor({ layout = null, runtimeInstallModuleFn = null } = {}) {
+  const dataDir = layout !== null && typeof layout === 'object' ? layout.dataDir : null
+  if (typeof dataDir !== 'string' || dataDir.trim() === '') return null
+  if (typeof runtimeInstallModuleFn !== 'function') return null
+  try {
+    const mod = await runtimeInstallModuleFn()
+    const reading = mod.readActiveRuntime({ dataDir })
+    return reading !== null && typeof reading === 'object' ? reading : null
+  } catch {
+    return null
+  }
+}
+
+/**
  * PRT-708：真实装配托盘（默认实现，用例可注入替身）。
  *
  * 三件事按顺序做，**每一步失败都不假装下一步成功了**（那是
@@ -1104,7 +1160,30 @@ export async function run({
       diagNote = `读 stdin 失败：${e?.message ?? String(e)}`
     }
     const input = parseDiagnosisInput(raw)
-    const rep = doctorReport({ ...input, source: input.source ?? 'stdin', ...(diagNote === null ? {} : { note: diagNote }) })
+    // ★ PRT-257 缺口⑥：第二个通道（运行时安装）现在**由本进程自己读磁盘**产生。
+    //
+    //   ★ 显式给的读数**赢**，而且必须**两个位置都找**：`parseDiagnosisInput()`
+    //     在顶层看起来像一份拒绝时会把**整个对象**包进 `refusal`——于是
+    //     `{...一份拒绝, runtimeInstall}` 里的 `runtimeInstall` 会跟着进去，
+    //     只读顶层就会读不到，而"读不到"的表现恰好是**静默改用磁盘读数**。
+    //     *一个"只在顶层找"的读取，与一个"对面给的那份永远被丢掉"的实现，
+    //     在对面从没给过的那些运行里是同一个东西。*
+    const explicitRuntimeInstall = input.runtimeInstall !== undefined
+      ? input.runtimeInstall
+      : (input.refusal !== null && typeof input.refusal === 'object' ? input.refusal.runtimeInstall : undefined)
+    const runtimeInstall = await readRuntimeInstallForDoctor({
+      layout: options.layout ?? null,
+      runtimeInstallModuleFn,
+    })
+    // 显式的那份**原样放到顶层**（它可能原本被包在 `refusal` 里，医生只看顶层）；
+    // 没有显式的才用磁盘读数；两者都没有就**不给这一项**（绝不编一个）。
+    const installForDoctor = explicitRuntimeInstall !== undefined ? explicitRuntimeInstall : runtimeInstall
+    const rep = doctorReport({
+      ...input,
+      ...(installForDoctor === null || installForDoctor === undefined ? {} : { runtimeInstall: installForDoctor }),
+      source: input.source ?? 'stdin',
+      ...(diagNote === null ? {} : { note: diagNote }),
+    })
     if (json) write(JSON.stringify(rep, null, 2))
     else write(renderDoctor(rep))
     return rep.exitCode
@@ -1126,8 +1205,22 @@ export async function run({
     const applying = parsed.flags['runtime-install'] === true
     const dryRun = parsed.flags['dry-run'] === true
     const manifestFlag = parsed.flags['runtime-manifest']
+    // ★ 随产品发的那份 §9.1 清单是**默认**：`--runtime-manifest` 只用来覆盖它。
+    //
+    // 在此之前这里只有 `typeof manifestFlag === 'string' ? manifestFlag : null`，
+    // 于是真实机器上永远走 `NO_MANIFEST` 退出 3——**产品里没有清单，用户得自己写一份**。
+    // 那条路在日志里读起来像"调用方没给参数"，而实际发生的是"产品没带清单"：
+    //
+    //   > 一个"参数没给所以拒绝"的 CLI，
+    //   > 与一个"产品里根本没有那份清单所以拒绝"的 CLI，
+    //   > 在退出码上是同一个东西——只不过前者的修法是加个参数，
+    //   > 后者的修法是重新发一版产品。
+    //
+    // 显式给值仍然**赢**（覆盖是刻意的：升级验证要能指向另一份清单）。
+    // 随发的那份**不在**了，仍然是 `NO_MANIFEST`——缺清单不构成"现在就编一份"的理由。
+    const manifestIsExplicit = typeof manifestFlag === 'string' && manifestFlag.trim() !== ''
     const manifestRead = runtimeManifestFrom({
-      manifestPath: typeof manifestFlag === 'string' ? manifestFlag : null,
+      manifestPath: manifestIsExplicit ? manifestFlag : SHIPPED_MANIFEST_PATH,
     })
 
     // 计划阶段**只读**：清单、产品配置、现役指针。`readActiveRuntime` 是一次

@@ -7,7 +7,7 @@
     "team-hub/run-store.mjs": "ec790e66a1a502b6c8f3219d9295551695610248c85209ae8c0692280149c4da",
     "team-hub/model-store.mjs": "1ab1a5b548740ca5f6810de6fe25658e79aea9d95fd6382ccff5facf6613d779",
     "team-hub/binding-store.mjs": "f9b2b7a50e1b33b0c571530e8439cd6784121458494d7a4590dfaabcce7db8c0",
-    "team-hub/budget-ledger.mjs": "6969f9c9186bdbd7206ab800dbd5f08947468074cc091a8b3df6378fc0947d51",
+    "team-hub/budget-ledger.mjs": "fcbdc5f48312def991d60ae5a136895b72840bb9e6e7bdb66a2d907494ddaebb",
     "team-hub/context-store.mjs": "7c6d2d8798bcb9357a077d0bd147c7bf0762b6a2283d95cc60065ef0f945dfab",
     "team-hub/approval-binding.mjs": "a1c24156139f8f85b228a98d96940ad23cb31de7e11eef9ea7d7f54c4b8c7868",
     "team-hub/allow-once.mjs": "78ad3e9ef285e30e4331e4656b676741c474b876a57ed8e5593c17dcd63cca23",

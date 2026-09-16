@@ -47,6 +47,20 @@
 import { createHubContextStage } from './context-stage.mjs'
 import { createDshRuntimeAdapter } from '../../runtime/adapters/dsh/index.mjs'
 import { TERMINAL_TO_OUTCOME, isTerminalEventType, RUN_REQUEST_REQUIRED } from '../../runtime/contracts/run.mjs'
+// PRT-214 缺口①：那次 Run 的**静态 hard floor** 的**生产生产者**就长在本文件上。
+//
+// 三样东西各来自一处，而且都是**读**、不是抄：
+//   · `deriveRunFloor()` —— 控制面的纯函数（`team-hub/run-floor.mjs`），
+//     全仓库唯一一处把"权限档位"翻成下限的地方；
+//   · `resolveTool` —— 能力目录的解析口。`run-floor.mjs` **刻意不 import 它**
+//     （那会造出 `tool-capability → run-floor → tool-capability` 这个真实的模块环，
+//     它的表现是"强制面整段加载不上"），所以这里**注入**，把那条控制反转原样留着；
+//   · 线上形状的判定 —— 与传输层**同一份** `readRunFloor()`，不在这里另立一条。
+import {
+  RUN_FLOOR_STATES, RUN_FLOOR_WIRE_FIELD, RUN_FLOOR_WIRE_VERSION, readRunFloor,
+} from '../../runtime/contracts/run-floor.mjs'
+import { deriveRunFloor } from '../../team-hub/run-floor.mjs'
+import { resolveTool as resolveLegionTool } from '../../runtime/dsh-composition/tool-capability.mjs'
 import { createBudgetGate } from './budget-gate.mjs'
 
 /** 本模块的具名拒绝码。跨进程读取（worker 上报 → hub 记录 → 人排查），属契约。 */
@@ -92,6 +106,15 @@ export const EXECUTOR_CODES = Object.freeze({
    * 那会让一次接线遗漏变成一次静默越权。
    */
   CAN_READ_REQUIRED: 'EXECUTOR_CAN_READ_REQUIRED',
+  /**
+   * PRT-214 缺口①：这次 Run 的**静态 hard floor 派生不出来**
+   * （或请求上已经有一份别人放进来的下限）。
+   *
+   * 处置是**不派发这次 Run**。不是空下限，也不是缺席：
+   * 一个"派生出来的空下限"与一个"这次没有任何东西该被禁止"在空数组上是同一个读数，
+   * 只不过前者意味着强制面整段不在，而且**没有任何人会收到告警**。
+   */
+  RUN_FLOOR_NOT_DERIVED: 'EXECUTOR_RUN_FLOOR_NOT_DERIVED',
 })
 
 export class ExecutorError extends Error {
@@ -294,6 +317,39 @@ export async function createProductionExecutor(deps = {}) {
           'requestFor 必须返回一个 RunRequest 对象', { attemptId: lease.attemptId })
       }
 
+      // ── PRT-214 缺口①：这次 Run 的**静态 hard floor** ─────────────────────────
+      //
+      // 位置是刻意的：**在任何花钱或探测的动作之前**。反过来（先探测、先预留预算、
+      // 甚至先派发）会让一次纯装配失败表现成一次真实的执行失败——
+      // 而"改哪里"这件事正是靠这个顺序保住的。
+      //
+      // 它对**每一个**请求都跑，包括调用方自己传进来的 `requestFor`：
+      // 一个"只有默认那条路带下限"的实现，与一个"任何一条路都不带下限"的实现，
+      // 在生产里（只走默认那条路时）是同一个东西——只不过前者会在有人传了
+      // `requestFor` 的那一天安静地少掉下限。
+      const carried = deriveRunFloorCarrier(request)
+      if (carried.state === RUN_FLOOR_STATES.REFUSED) {
+        // 归因要落到**派生失败的原因码**上，而不是停在传输层那个笼统的
+        // `RUN_FLOOR_NOT_DERIVED` 上：后者说的是"没能读出来"，
+        // 前者（`run-floor-permissions-missing` 之类）说的是**去改哪里**。
+        const reasonCodes = carried.refusals.map((r) => r.code)
+        throw new ExecutorError(EXECUTOR_CODES.RUN_FLOOR_NOT_DERIVED,
+          `这次 Run 的静态 hard floor 派生失败（${reasonCodes.join('、') || carried.code}）：` +
+          `${carried.refusals[0]?.message ?? carried.message}。` +
+          '不派发：缺席（没给下限）与拒绝（给了但解释不了）是两件事，' +
+          '而"这次没有东西该被禁止"这句话只能由一次**成功**的派生说出来',
+          {
+            attemptId: lease.attemptId,
+            // ★ 这个键**不能**叫 `code`：`ExecutorError` 先写 `this.code` 再把 extra
+            //   `Object.assign` 上去，于是 extra 里一个同名的 `code` 会把具名拒绝码
+            //   悄悄换成下面这一层的码——一个测试里看得见、生产里看不见的覆盖。
+            wireCode: carried.code,
+            refusalCode: reasonCodes[0] ?? null,
+            refusals: Object.freeze(reasonCodes),
+          })
+      }
+      request = carried.request
+
       // 第一次执行前探测一次。适配器的 `execute` 依赖探测结论
       // （能力协商决定了能不能要求结构化输出），所以这不是可选步骤。
       if (probed === false) {
@@ -397,6 +453,130 @@ export async function createProductionExecutor(deps = {}) {
 }
 
 /**
+ * 「控制面**没有**给出这次 Run 的权限档位」时，`defaultRequestFor` 填进去的那一份。
+ *
+ * ## 为什么它是一个**有身份的常量**，而不是一段字面量
+ *
+ * `RunRequest.permissions` 是契约必填，而 `lease` 上今天**根本没有** `permissions`：
+ * 真 `claim()` 回来的对象只有 8 个键（见 `can-read-authorization-source.test.mjs`），
+ * 于是 `defaultRequestFor` 一直在**编**一份 `{preset:'legion-attended', tools: []}`。
+ *
+ * 编出来的这一份与"这个员工不能用任何工具"在**形状上**完全一样，而
+ * `deriveRunFloor()` 的输入契约里写着「空数组是合法的，意思是这个员工不能用任何工具」。
+ * 把编出来的那一份喂给它，得到的是 `derived: true` + **空名单**——一份
+ * "派生完成、没有任何东西该被禁止"的下限。
+ *
+ *   > 一份"因为没有权限档位而派生出来的空下限"，
+ *   > 与一份"这次确实没有东西该被禁止"的空下限，
+ *   > 在返回值的每一个字段上都是同一个东西——
+ *   > 只不过前者从一次**接线遗漏**里长出来，而它看起来像一句政策。
+ *
+ * 所以派生前必须把两者分开，而分开的依据是**引用**、不是形状：
+ * 这一份是唯一的那个对象，只在"lease 上什么都没有"时被填进去。
+ * 于是"控制面没给"这件事在派生点上是**可判定的**，不靠下一个人记得去比对。
+ */
+export const UNSUPPLIED_PERMISSIONS = Object.freeze({
+  preset: 'legion-attended',
+  tools: Object.freeze([]),
+})
+
+/**
+ * **生产生产者**：从这次 Run 的权限档位派生静态 hard floor，并挂到 `RunRequest` 上。
+ *
+ * ## 为什么生产者长在**执行侧**，而不是装配侧或适配器侧
+ *
+ *   · 装配侧（`bootstrapDshRuntime({floor})` / `assembleEnforcement`）是**进程级**的：
+ *     Runtime 进程长命、一个进程服务很多次 Run，装配级的下限必然等于第一个 Run 的、
+ *     并被后面每一个继承（见 `runtime/dsh-composition/run-floor.mjs` 文件头）。
+ *   · 适配器侧（`runtime/adapters/dsh/`）拿不到控制面的权限档位；而且
+ *     `runtime/ → team-hub/` 是本仓库**零处**的反向依赖（`enforcement-mapping.mjs:101`）。
+ *
+ * 剩下的唯一落点就是**构造 RunRequest 的那一处**——也就是本文件。
+ *
+ * ## 派生不出来时：**派发前具名拒绝**（不是缺席、不是空名单）
+ *
+ * `deriveRunFloor()` 说 `derived === false` 时 `floor` 是 `null`。三种处置：
+ *
+ *   ① **不挂这个字段** → 传输层读成 `absent`，即"没有人给我下限"。
+ *      一次"解释不了的输入"就此被洗成一次"没给"，而两者的修法完全不同
+ *      （改输入 / 补生产者）。**这是本模块最不能选的一条。**
+ *   ② **挂一份空下限顶上去** → 把 `refused` 洗成 `installed`，是同一个错的更坏版本：
+ *      空名单是"派生了、这次没有东西该被禁止"这句**陈述**，而我们并没有做出这句陈述。
+ *   ③ **把失败如实挂上去，然后在派发前停下来**（本模块的选择）。
+ *      挂上去的那一份在 `runtime/contracts/run-floor.mjs` 里读成 `refused`
+ *      （`derived !== true` ⇒ `NOT_DERIVED`）——也就是**传输层对它的判定本来就是拒收**。
+ *      既然无论如何都会被拒收，让它跑一趟只会把一次装配点的失败表现成下游一句
+ *      "引擎抛错"（`RUN_NOT_COMPLETED`），排障方向正好指错。
+ *      所以这里就地用 `RUN_FLOOR_NOT_DERIVED` 停下，把**每个拒绝码**原样带在
+ *      `refusals` 上——`run-floor-permissions-missing` 这类码就是修法的名字。
+ *
+ * ## 今天生产上的读数（不夸大）
+ *
+ * 真 `lease` 上没有 `permissions`（`claim()` 只回 8 个键），于是**每一个** Run 都走 ③：
+ * `run-floor-permissions-missing`。这是本次接线**第一次**让这个缺口变得可读——
+ * 在此之前，同一件事的表现是"Run 照跑、请求上没有下限"，而缺席那一档在传输层落到
+ * 「拒绝一切」的发布前姿态上：*看起来像有保护，实际上一个真工具也没有被这份下限拦过*。
+ *
+ * @param {object} request 已构造好的 `RunRequest`
+ * @param {object} [options]
+ * @param {(name: string) => object} [options.resolveTool] 能力目录解析口（默认用真的目录）
+ * @param {string} [options.platform] 路径语义；默认 `process.platform`
+ * @returns {{request: object, payload: object, state: string, code: string|null,
+ *   message: string|null, refusals: readonly object[], result: object}}
+ */
+export function deriveRunFloorCarrier(request, {
+  resolveTool: resolver = resolveLegionTool,
+  platform = process.platform,
+} = {}) {
+  if (request === null || typeof request !== 'object') {
+    throw new ExecutorError(EXECUTOR_CODES.BAD_WIRING,
+      'deriveRunFloorCarrier 需要一个 RunRequest 对象')
+  }
+  if (request[RUN_FLOOR_WIRE_FIELD] !== undefined) {
+    throw new ExecutorError(EXECUTOR_CODES.RUN_FLOOR_NOT_DERIVED,
+      `这次 Run 的 ${RUN_FLOOR_WIRE_FIELD} 已经有人填过了——本模块是唯一的那个生产者。` +
+      '两个生产者写同一个字段时，真正生效的那一份取决于谁后写，' +
+      '而"谁后写"不是一条能被审计的规则',
+      { attemptId: request.attemptId })
+  }
+  // ★「控制面没给」按**引用**判定（见 `UNSUPPLIED_PERMISSIONS`）：
+  //   它在形状上与一份合法的空允许名单完全一样，而两者的派生结论相反。
+  const permissions = request.permissions === UNSUPPLIED_PERMISSIONS ? undefined : request.permissions
+  const result = deriveRunFloor({
+    permissions,
+    resolveTool: resolver,
+    cwd: request.workdir,
+    platform,
+    runId: request.runId ?? null,
+  })
+  const payload = result.derived === true
+    ? Object.freeze({
+      version: RUN_FLOOR_WIRE_VERSION, derived: true, floor: result.floor, runId: result.runId,
+    })
+    : Object.freeze({
+      version: RUN_FLOOR_WIRE_VERSION,
+      derived: false,
+      floor: null,
+      runId: result.runId,
+      // 拒绝码**上载荷**：载荷本身是这份失败唯一会被人读到的地方
+      // （`readRunFloor` 不看这个键，但审计/排障会看）。
+      refusals: Object.freeze(result.refusals.map((r) => r.code)),
+    })
+  // 判定**借用传输层那一份**：这里不另写"怎样才算能装"的规则。
+  // 两份规则会漂，而漂的那一天表现为"生产者说能装、适配器说解释不了"。
+  const reading = readRunFloor(payload)
+  return Object.freeze({
+    request: Object.freeze({ ...request, [RUN_FLOOR_WIRE_FIELD]: payload }),
+    payload,
+    state: reading.state,
+    code: reading.code ?? null,
+    message: reading.message ?? null,
+    refusals: result.refusals,
+    result,
+  })
+}
+
+/**
  * 最小合法的一份 `RunRequest`。
  *
  * ## 为什么缺失字段是**抛错**而不是填空字符串
@@ -436,7 +616,10 @@ export function defaultRequestFor(lease, snapshot) {
     budget: lease.budget ?? {},
     timeoutMs: lease.timeoutMs ?? 600_000,
     workdir: lease.workdir,
-    permissions: lease.permissions ?? { preset: 'legion-attended', tools: [] },
+    // ★ **不要**把这一份读成"这个员工的权限"：`lease` 上没有 `permissions` 时它
+    //    只是把契约必填项填满。它**按引用**可辨认（`UNSUPPLIED_PERMISSIONS`），
+    //    于是下限的派生点能把"没给"与"给了空名单"分开——见那个常量的注释。
+    permissions: lease.permissions ?? UNSUPPLIED_PERMISSIONS,
     expectedOutput: {
       schema: lease.outputSchema ?? { type: 'object', additionalProperties: true },
       acceptance: lease.acceptance ?? '引擎正常结算',

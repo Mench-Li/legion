@@ -276,6 +276,31 @@ export const SCHEMA = defineSchema({
     //   因而本来就不需要身份的正常部署，会被报成"身份缺失"。
     'ENFORCEMENT_IDENTITY_MISSING',
 
+    // ── PRT-509 缺口 ① 凭证材料化接线的诊断码 ────────────────────────────
+    //
+    // `product/launcher/run-credential-materialization.mjs` 的
+    // `RUN_CREDENTIAL_WIRING_CODES` 的值。名字是 SCREAMING_SNAKE，所以 scan
+    // 会怀疑它们是环境变量——它们不是：进程不"读"它们，而是把它们放进诊断
+    // 给用户看，并让调用方按码决定"阻止启动"还是"只提醒"。
+    //
+    // ★ 它们与材料化器自己的 20 条（`security/config-schema.mjs` 那份）**是
+    //   两套**，刻意不合并：那 20 条说的是"这份凭证文档能不能写出去"，
+    //   这 11 条说的是"有没有把那次写入接到生产的启动路径上、以及 DSH 会不会
+    //   去读它"。合成一套的话，"接线没跑到"与"材料化被拒绝"在读数上会变成
+    //   同一个东西——而它们的修法完全不同（一个要改接线，一个要改密钥）。
+    'RUN_CREDENTIALS_NO_ALLOWED_ROOT',
+    'RUN_CREDENTIALS_ALLOWED_ROOT_INVALID',
+    'RUN_CREDENTIALS_TARGET_INSIDE_DATA_DIR',
+    'RUN_CREDENTIALS_OPERATOR_HOME_REQUIRED',
+    'RUN_CREDENTIALS_NO_REFS_DECLARED',
+    'RUN_CREDENTIALS_DSH_DECLARATION_MISSING',
+    'RUN_CREDENTIALS_DSH_DECLARATION_AMBIGUOUS',
+    'RUN_CREDENTIALS_DSH_DECLARATION_UNLOCATABLE',
+    'RUN_CREDENTIALS_HANDLE_FAILED',
+    'RUN_CREDENTIALS_MATERIALIZE_REFUSED',
+    'RUN_CREDENTIALS_OVERLAY_WRITE_FAILED',
+    'RUN_CREDENTIALS_TARGET_DIR_UNCREATABLE',
+
     // ── PRT-707 首次运行向导**接线层**的诊断码 ──────────────────────────
     //
     // `product/launcher/first-run.mjs` 的 `FIRST_RUN_CODES` 的值。名字是

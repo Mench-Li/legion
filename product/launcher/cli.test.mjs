@@ -16,8 +16,9 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { CLI_FLAGS, EXIT_CODES, RUNTIME_INSTALL_CLI_EXIT, RUNTIME_PLAN_CODES, defaultInstallDir, dshCredentialsFileFrom, launcherOptionsFrom, parseArgs, readEnv, readReadinessTimeoutMs, run, underNodeTestRunner } from './cli.mjs'
+import { CLI_FLAGS, EXIT_CODES, RUNTIME_INSTALL_CLI_EXIT, RUNTIME_PLAN_CODES, defaultInstallDir, dshCredentialsFileFrom, launcherOptionsFrom, parseArgs, readEnv, readReadinessTimeoutMs, run, runtimeManifestFrom, underNodeTestRunner } from './cli.mjs'
 import { COMPLETION_MARKER_FILENAME, installRuntime, planRuntimeInstall, readActiveRuntime, runtimeRootOf } from './runtime-install.mjs'
+import { SHIPPED_MANIFEST_PATH } from './runtime-manifest.mjs'
 import { reserveEphemeralPort } from './ports.mjs'
 
 /** 收集输出的收集器。 */
@@ -797,17 +798,34 @@ test('★★★★ 计划被拒绝：退出 1（与 0、3 都分开），且给�
   assert.equal(doc.code, 'RUNTIME_INSTALL_TARGET_INSIDE_DSH_HOME')
 })
 
-test('★★★★ 算不出计划 ⇒ 退出 3（缺清单/文件不在/读不出来/清单不合法），**不是 0**', async () => {
+test('★★★★ 算不出计划 ⇒ 退出 3（文件不在/读不出来/清单不合法），**不是 0**', async () => {
   const f = runtimeFixture('plan-undiagnosed')
 
-  // ① 没给 --runtime-manifest：没有来源，也就没有结论。
+  // ① **没给 `--runtime-manifest` 不再等于"没有清单"。**
+  //
+  //    这是 PRT-257 缺口① 的接线：产品自己发一份 §9.1 清单
+  //    （`product/release/runtime-manifest.json`），CLI 在没给参数时**默认读它**。
+  //    在此之前这里走 `NO_MANIFEST` → 退出 3，于是每一台真实机器上
+  //    `--runtime-install-plan` 都只有"拒绝"这一种结果，用户必须自己手写一份清单——
+  //    *一个"参数没给所以拒绝"的 CLI，与一个"产品里根本没有那份清单所以拒绝"的 CLI，
+  //    在退出码上是同一个东西；只不过前者的修法是加个参数，后者的修法是重新发一版产品。*
   const noFlag = collector()
-  const c1 = await run({ argv: ['--runtime-install-plan'], env: f.env, write: noFlag.write })
-  assert.equal(c1, RUNTIME_INSTALL_CLI_EXIT.UNDIAGNOSED)
-  assert.equal(c1, 3)
-  assert.match(noFlag.text(), new RegExp(RUNTIME_PLAN_CODES.NO_MANIFEST))
-  assert.match(noFlag.text(), /--runtime-manifest/)
-  assert.doesNotMatch(noFlag.text(), /计划可执行/)
+  const c1 = await run({ argv: ['--runtime-install-plan', '--json'], env: f.env, write: noFlag.write })
+  assert.equal(c1, 0, `没给参数时应当用随产品发的那一份算出计划，实际退出 ${c1}`)
+  assert.doesNotMatch(noFlag.text(), new RegExp(RUNTIME_PLAN_CODES.NO_MANIFEST),
+    '没给参数却又报"没有清单"——说明随产品发的那份没被读到')
+  // 读的**确实是那一份**：路径与里面的版本号都要出得来，否则"读到了什么"无从核对。
+  // ★ 正则要容忍 JSON 把反斜杠转义成两个：`--json` 输出里路径是
+  //   `...\\product\\release\\runtime-manifest.json`，写成单个分隔符会**永远匹配不上**，
+  //   而那种红看起来像"路径没报出来"。
+  assert.match(noFlag.text(), /product[\\/]{1,2}release[\\/]{1,2}runtime-manifest\.json/,
+    '没有报出读的是哪一份清单')
+  assert.match(noFlag.text(), /0\.1\.5-rc\.2/, '随产品发的那份清单里的 dshVersion 没有出现在输出里')
+
+  // ①b 但"产品自带清单"**不是**"没有清单也能算"：显式指过去的那份仍然要单独判。
+  //     下面 ②③④ 逐条覆盖。另外 `runtimeManifestFrom({manifestPath: null})` 这个
+  //     纯函数契约仍然存在（见本文件里那条单元用例）——它现在是"随发的那份也不在了"
+  //     时的读数，而不是"调用方忘了传参"。
 
   // ② 路径给了，那个路径下没有文件。
   const missing = collector()
@@ -842,6 +860,82 @@ test('★★★★ 算不出计划 ⇒ 退出 3（缺清单/文件不在/读不�
   assert.equal(existsSync(f.dataDir), false)
 })
 
+test('★★★★ 「没有清单」这个读数**仍然存在**，只是修法变了', () => {
+  // 缺口①接线之后，`NO_MANIFEST` 不再是"CLI 默认路径"的读数——
+  // 默认指向随产品发的那一份。它现在是"**那一份也不在了**"时的结论。
+  // ★ 保留这条判据很重要：一个"默认值接上之后就把'没有清单'这条读数删掉"的实现，
+  //   会让"产品没带清单"从**具名拒绝**退化成某种静默的回退。
+  const r = runtimeManifestFrom({ manifestPath: null })
+  assert.equal(r.ok, false)
+  assert.equal(r.code, RUNTIME_PLAN_CODES.NO_MANIFEST)
+  assert.equal(r.path, null)
+  assert.equal(r.manifest, null)
+  // 空串／纯空白与 `null` 同一条：`--runtime-manifest=` 写了但没给值，
+  // **不能**算成"调用方给了一份清单"。
+  assert.equal(runtimeManifestFrom({ manifestPath: '   ' }).code, RUNTIME_PLAN_CODES.NO_MANIFEST)
+  assert.equal(runtimeManifestFrom({}).code, RUNTIME_PLAN_CODES.NO_MANIFEST)
+})
+
+test('★★★★★ PRT-257 缺口⑥：`--doctor` 真的会报「运行时装没装」（这一项以前没有任何生产者）', async () => {
+  // `doctor.mjs` 的 `runtimeInstallCheckItem()` 一直是"库支持 + 渲染器会打出来"，
+  // 而生产里没有任何东西会把这一项塞进诊断输入——真机上跑 `--doctor` 永远看不到它。
+  //
+  //   > 一个"体检项目写得对、用例也验过、但没有任何人会喂它输入"的体检，
+  //   > 与一个没有这个项目的体检，在用户的报告上是同一个东西。
+  const f = runtimeFixture('doctor-runtime-install')
+
+  // 一份**能得出诊断**的拒绝（否则整份报告是 NO_DIAGNOSIS，没有 items 可谈）。
+  const refusal = JSON.stringify({
+    code: 'EXECUTOR_HOST_PORT_REQUIRED', message: '宿主端口没有装配',
+    repair: { items: [{ check: 'host-port', ok: false, detail: '没有工厂' }] },
+  })
+
+  // ① 没装过：这一项**必须出现**，而且是**没过的**。
+  const out1 = collector()
+  const c1 = await run({ argv: ['--doctor', '--json'], env: f.env, write: out1.write, readStdinFn: async () => refusal })
+  assert.equal(c1, 1)
+  const rep1 = JSON.parse(out1.text())
+  const item1 = rep1.items.find((i) => i.check === 'runtime-install')
+  assert.ok(item1 !== undefined,
+    `报告里没有 runtime-install 这一项：${JSON.stringify(rep1.items.map((i) => i.check))}`)
+  assert.equal(item1.ok, false, '没装过却把这一项判成了过')
+
+  // ② ★ stdin 上**显式给了** `runtimeInstall` 时，它**赢**过磁盘上读到的那份。
+  //    这条只有接线这一层能测（doctor 那两个模块各管一半）：磁盘上明明没装，
+  //    而调用方说"装的是 9.9.9"，报告里就该出现 9.9.9——否则"显式赢"是假的，
+  //    而假的表现是"它其实永远在读磁盘、对面给的那份被丢了"。
+  const explicit = JSON.stringify({
+    code: 'EXECUTOR_HOST_PORT_REQUIRED', message: '宿主端口没有装配',
+    repair: { items: [{ check: 'host-port', ok: false, detail: '没有工厂' }] },
+    runtimeInstall: { state: 'active', complete: true, entryExists: true, version: '9.9.9' },
+  })
+  const out2 = collector()
+  const c2 = await run({ argv: ['--doctor', '--json'], env: f.env, write: out2.write, readStdinFn: async () => explicit })
+  assert.equal(c2, 1)
+  const text2 = out2.text()
+  assert.match(text2, /9\.9\.9/, 'stdin 上显式给的 runtimeInstall 被磁盘读数盖掉了——"显式赢"不成立')
+  //    而且磁盘上那份（absent）**不该**把这一项重新变成待修项。
+  const rep2 = JSON.parse(text2)
+  assert.equal(rep2.items.some((i) => i.check === 'runtime-install'), false,
+    '显式给的读数说过，却又按磁盘上那份把它判成了待修')
+
+  // ③ ★ **DataDir 没定下来时不许报"没装"。**
+  //    实测 `readActiveRuntime({ dataDir: null })` 会给 `state: 'absent'`——
+  //    那是"不知道去哪看"，而 `absent` 会被渲染成
+  //    "还没有装过运行时：先跑 --runtime-install-plan"，**是一句假话**。
+  //    *一个"没定下数据目录"读成"还没装"的体检，会让用户在查错目录的路上走很久。*
+  const bare = { ...f.env }
+  delete bare.LEGION_DATA_DIR
+  delete bare.LEGION_HOME
+  delete bare.LEGION_INSTALL_DIR
+  delete bare.LEGION_WORKSPACE_DIR
+  const out3 = collector()
+  await run({ argv: ['--doctor', '--json'], env: bare, write: out3.write, readStdinFn: async () => refusal })
+  const rep3 = JSON.parse(out3.text())
+  assert.equal(rep3.items.some((i) => i.check === 'runtime-install'), false,
+    'DataDir 没定下来却报出了 runtime-install 这一项——那多半是把它读成了"没装"')
+})
+
 test('★★★★ 没有 --runtime-install：installRuntime 与真实运行器都**一次都没有**被碰到', async () => {
   const f = runtimeFixture('no-apply')
   const { mod, calls } = spiedRuntimeModule()
@@ -863,8 +957,22 @@ test('★★★★ 没有 --runtime-install：installRuntime 与真实运行器�
   assert.equal(calls.runnerFactory, 0, '没有 --runtime-install，却去构造了真实 npm 运行器')
   assert.equal(existsSync(f.dataDir), false)
 
-  // 别的入口**连模块都不加载**：安装器的依赖不该被体检/修复入口拖进来。
+  // ★ 「别的入口**连模块都不加载**」这条断言在本批**被有意改了**。
+  //
+  //   它原来守的是"--doctor 不该把安装器的依赖拖进来"。而 PRT-257 缺口⑥
+  //   恰恰是"doctor 的 `runtimeInstall` 读数**没有生产生产者**"——
+  //   要修它，`--doctor` 就必须读一次现役运行时（那是**磁盘上的事实**，
+  //   只有本进程读得到；组合层自检是另一条通道、只能从 stdin 来）。
+  //
+  //   所以这里换成一个**更强**的断言：doctor **可以读，但绝不许装**。
+  //   换掉的不是"少了一条检查"，而是把"别加载模块"这个**手段**
+  //   换成了"别起运行器、别装东西"这个**目的**——
+  //   *一条断言"没 import 那个模块"的用例，对"import 了但真的去装了一次"
+  //   完全不敏感；反过来，钉住"install 与 runnerFactory 都是 0"才钉住了代价。*
   let loaded = 0
+  // ★ 读数是**累加**的：上面那次 `--runtime-install-plan` 已经读过一次
+  //   （计划要知道 fresh / upgrade / downgrade），所以这里比的是**增量**。
+  const readActiveBefore = calls.readActive
   const doctorOut = collector()
   const dcode = await run({
     argv: ['--doctor'],
@@ -874,7 +982,11 @@ test('★★★★ 没有 --runtime-install：installRuntime 与真实运行器�
     runtimeInstallModuleFn: async () => { loaded += 1; return mod },
   })
   assert.equal(dcode, 3, '没有诊断时 --doctor 必须是「拿不到诊断」，不是 0')
-  assert.equal(loaded, 0, '别的入口把安装器模块加载进来了')
+  // 读了（这正是缺口⑥的接线），但**一步都没往下走**：
+  assert.equal(loaded, 1, '--doctor 没有读现役运行时——缺口⑥又回到了"没有生产者"')
+  assert.equal(calls.readActive, readActiveBefore + 1, '--doctor 应当恰好读一次现役运行时')
+  assert.equal(calls.install, 0, '--doctor 竟然调用了 installRuntime')
+  assert.equal(calls.runnerFactory, 0, '--doctor 竟然去构造了 npm 运行器')
 })
 
 test('★★★★ --runtime-install 在计划被拒绝时**一步都不走**，磁盘上也不留目录', async () => {
@@ -1043,11 +1155,21 @@ test('★ 诚实边界：这一套接线**没有**证明什么', async () => {
   // ④ **默认（真实）运行器这条路一次都没有被跑过**：测试守护卫把它挡在
   //    "构造运行器"之前（上一条用例的退出 9 就是证据）。
 
-  // ⑤ **本仓库没有随产品发货任何一份 §9.1 清单。** 这套用例里的清单都是现造的，
-  //    而"没有清单"在生产里的读数是退出 3——不是 0。
-  const none = collector()
-  const c = await run({ argv: ['--runtime-install-plan'], env: f.env, write: none.write })
-  assert.equal(c, RUNTIME_INSTALL_CLI_EXIT.UNDIAGNOSED)
+  // ⑤ **本仓库现在随产品发了一份 §9.1 清单**（`product/release/runtime-manifest.json`）。
+  //
+  //    这一条以前写的是「本仓库没有随产品发货任何一份 §9.1 清单，而'没有清单'
+  //    在生产里的读数是退出 3」——那句话**在本批被关掉了**，所以这里必须改成
+  //    断言**新的**事实。★ 直接删掉这一条是错的：它守的是"这套用例不许
+  //    把'接线接上了'说成'产品能装 DSH 了'"，那句话现在要换个形式继续守。
+  const shipped = collector()
+  const c = await run({ argv: ['--runtime-install-plan', '--json'], env: f.env, write: shipped.write })
+  assert.equal(c, 0, '随产品发的那份清单没有被读到——缺口①又回到了"用户得自己写一份"')
+  const shippedDoc = JSON.parse(shipped.text())
+  assert.equal(shippedDoc.manifest.path, SHIPPED_MANIFEST_PATH,
+    '默认读的不是随产品发的那一份')
+  //    ★ 但仍然**没有**证明：有任何一次真实安装用到过它。
+  //    那份清单里的五个值是人拍的决定（`dshVersion` 尤其：它是"这一版产品认哪个 DSH"），
+  //    用例能证明的只是"文件在、格式合法、与生成器一致"——证不了"这个版本选对了"。
 
   // ⑥ 所以：**这一套证明的是"接线接上了"，不是"产品能装 DSH 了"。**
 })

@@ -55,6 +55,16 @@ import { createLauncherHeartbeat } from './heartbeat-wiring.mjs'
 // PRT-257：装完之后的下一跳。`runtime-command` 缺省不再是"没有"，
 // 而是"从现役指针里解析"（判据全在那个模块里，这里只调用）。
 import { DEFAULT_DSH_PROFILE, resolveRuntimeForLaunch } from './runtime-resolve.mjs'
+// PRT-509 缺口 ①：写侧能力（`openRunCredentials()` 的冻结句柄 +
+// `materializeRunCredentials()`）此前**没有任何生产调用方**。接线落在本文件、
+// 而不是落在那个模块自己里：只有这里知道"Runtime 子进程会读哪一份
+// `.credentials.yaml`"——而"写一份没人读的文件"正是这个缺口本来的形状。
+import {
+  prepareRuntimeCredentials,
+  productRunCredentialOpener,
+  runCredentialOverlayArgs,
+  runCredentialPaths,
+} from './run-credential-materialization.mjs'
 // 单实例锁（PRT-708）。**必须早于 `checkPreviousRun()`**——见 `start()` 里那段。
 import { SINGLE_INSTANCE_CODES, acquireSingleInstance } from './single-instance.mjs'
 import {
@@ -178,6 +188,40 @@ export function expandExpectation(value, vars) {
  * 这样「启动前拦下错误」「必需进程失败回滚」「身份不符立刻熔断」这三条判据
  * 都能在不启动真实进程的前提下验证；另有一套用例跑**真实进程**验证接线。
  */
+/**
+ * 把凭证覆盖层的 `--patch` **按需**追加到运行面进程的命令上（PRT-509 收尾）。
+ *
+ * ★ 为什么不在建 `plan` 时和强制面覆盖层一起算：
+ *   那时还不知道"这一次有没有凭证要落地"——材料化发生在 `start()` 里、
+ *   `preflight()` 之后。而**无条件**追加会让每一次启动的 argv 都变，
+ *   包括那些**根本没有凭证可写**的部署：指向一份空覆盖层的 `--patch`
+ *   会变成所有部署的常态。
+ *
+ *   > 一个"没东西可写时也把 DSH 指过去"的接线，
+ *   > 与一个"只在真的写了东西时才指过去"的接线，
+ *   > 在凭证配好的机器上表现完全一样——差别只在没配好的机器上，
+ *   > 而那里多出来的那个参数恰好是最难解释的一种：它看起来像生效了。
+ *
+ * 附带的好处是判据变清楚了：`applied === true` 就意味着"写成功了"，
+ * 而 `--patch` 只在那之后出现。
+ */
+export function withRunCredentialPatch(plan, applied, paths) {
+  if (applied !== true) return plan
+  const extras = runCredentialOverlayArgs(paths)
+  if (extras.length === 0) return plan
+  const processes = plan.processes.map((p) => {
+    if (p.key !== DSH_OVERLAY_PROCESS_KEY || p.command === null) return p
+    return Object.freeze({
+      ...p,
+      command: Object.freeze({
+        file: p.command.file,
+        args: Object.freeze([...p.command.args, ...extras]),
+      }),
+    })
+  })
+  return Object.freeze({ ...plan, processes: Object.freeze(processes) })
+}
+
 export function createLauncher({
   layout,
   ports = {},
@@ -269,6 +313,27 @@ export function createLauncher({
    * `runtime/probe/secret-resolver.mjs` 里，只有一处。
    */
   dshCredentialsFile = null,
+  // ── PRT-509 缺口 ①：把 Run 的凭证材料化，并让 DSH 真的读它 ─────────────
+  //
+  // `operatorHome` 是**操作系统**家目录（不是产品家目录）：`~/.dsh` 由它推出，
+  // 和 `$DSH_HOME` 一起构成"operator 的真实 home"清单——材料化器**不允许**写进
+  // 那两棵树，而它不读 `process.env`（密钥层不得有环境读取点），所以这两个路径
+  // 只能由调用方注入。缺了就是具名拒绝，而不是"这条拒绝线不在"。
+  operatorHome = null,
+  /** 这次运行声明需要哪一份凭证。`null` = 模块的缺省声明（运行时的模型钥匙）。 */
+  runCredentialRefs = null,
+  /** Legion 引用 → DSH 可寻址名字。`null` = 问 DSH 自己的 `apiKeyEnv` 声明。 */
+  runCredentialMapping = null,
+  /** 冻结句柄工厂（`({refs, runId}) => Promise<handle>`）。`null` = 生产默认。 */
+  runCredentialHandleFactory = null,
+  /** 材料化实现（默认 `materializeRunCredentials`）。用例注入假的，以免碰真 IO。 */
+  runCredentialMaterialize = null,
+  /** `createRequire` 的替代（定位 DSH 的 base bundle 补丁）。 */
+  runCredentialRequire = null,
+  /** 材料化那一步的文件操作门面（`null` = 真实 `node:fs`）。 */
+  runCredentialIo = null,
+  /** 密钥库开启器（`openProductSecrets` 的替代）。`null` = 生产默认。 */
+  runCredentialSecretsOpener = null,
   // ── PRT-253 续批四：Runtime Contract 的端点与凭证（跨进程那条路的两个坐标）──
   //
   // `runtimeTokenFactory` 可注入：`fail closed` 的判据是"**生成失败时**会怎样"，
@@ -311,6 +376,19 @@ export function createLauncher({
     fs: overlayFsOption ?? null,
   })
 
+  // ── PRT-509 缺口 ①：凭证落地位置 + 「把 DSH 指过去」的覆盖层 ─────────────
+  //
+  // `runCredentialPaths()` 是**纯**的（只算路径）：Legion 自有的
+  // `<产品家目录>/runtime-credentials/` 下两份文件——材料化出来的
+  // `.credentials.yaml`，以及一个只含**一个路径**（不是密钥）的 DSH 覆盖层。
+  //
+  // 覆盖层参数在这里（而不是 spawn 时）就算好，是因为 `materializeProcessPlan`
+  // 的 `extraArgs` 是**冻结**的。而覆盖层的**内容**在 `start()` 里才决定：
+  // 那时才知道 Legion 有没有凭证可写。文件在 spawn 之前一定写出来——
+  // 内容是"那一行"或 `[]`（合法的空操作），于是"没东西可写"与"接线之前"
+  // 在行为上逐字相同。
+  const runCredentialPathReading = runCredentialPaths(layout)
+
   // ── PRT-257：装好的运行时**真的被用上**（`runtime-resolve.mjs`）────────
   //
   // 在 `materializeProcessPlan` **之前**算，因为它的产物要当 `runtimeCommand`。
@@ -336,6 +414,23 @@ export function createLauncher({
     // 而那件事由 `overlay.diagnostics` 里那条 warn 记着。
     extraArgs: { [DSH_OVERLAY_PROCESS_KEY]: overlayArgsFor(overlay) },
   })
+
+  /**
+   * 生产默认的冻结句柄工厂（PRT-509 缺口 ①）。
+   *
+   * 实现搬到了 `run-credential-materialization.mjs`（`productRunCredentialOpener`）：
+   * 留在本文件的闭包里，那条**只有生产才跑**的分支就没法被单测覆盖——而"只有
+   * 生产才跑的分支"正是缺陷最容易藏身的位置（本文件要修的缺口 ① 就是这一类）。
+   * 这里只做一件事：把本层的布局与回退来源绑上去。
+   */
+  function defaultRunCredentialHandle(args) {
+    return productRunCredentialOpener({
+      layout,
+      requireProtected,
+      dshCredentialsFile,
+      openSecrets: runCredentialSecretsOpener,
+    })(args)
+  }
 
   /**
    * 受限范围（`include`）。
@@ -579,6 +674,14 @@ export function createLauncher({
   // PRT-705：上一次运行残留、记录读写失败、清理结果都汇到这里。
   const orphanDiagnosticsOut = []
   let runId = null
+  // PRT-509 缺口 ①：凭证材料化那一步的读数与诊断。
+  //
+  // `null` = **还没走到那一步**（启动在更早的阶段失败）。与"走了、但这次没有
+  // 东西可材料化"（`applied: false` + `NO_REFS_DECLARED`）是**两个不同的读数**：
+  // 前者是"没问过"，后者是"问过了、答案是空操作"。把两者说成同一句话，
+  // 会让"接线根本没跑到"看起来像"这次不需要凭证"。
+  let runCredentialReading = null
+  let runCredentialDiagnostics = []
   let logRotationTimer = null
   let lastRotation = null
   // PRT-705：上一次运行的残留判成了什么样（`null` = 还没查过）。
@@ -1140,6 +1243,19 @@ export function createLauncher({
       return runtimeContractEndpoint
     },
 
+    /**
+     * 凭证材料化的读数（PRT-509 缺口 ①）。
+     *
+     * `null` = 还没走到那一步；否则是一个只含**引用名、DSH 名字、路径、模式与
+     * 计数**的读数（**永远没有值**）。与 `enforcementOverlay` / `runtimeContract`
+     * 同一个理由暴露出来："DSH 起来之后连不上模型"有四五种完全不同的修法
+     * （没配密钥 / 密钥库打不开 / 映射拿不到 / 覆盖层没生效 / DSH 没读那份文件），
+     * 而这里是能区分它们的那一个读数。
+     */
+    runCredentials() {
+      return runCredentialReading
+    },
+
     /** 只做检查，不启动任何东西。产品入口在真正启动前调用它。 */
     async preflight() {
       const blocking = planDiagnostics.filter((d) => d.severity === 'error')
@@ -1216,7 +1332,54 @@ export function createLauncher({
         return Object.freeze({ ok: false, phase: pre.phase, failures: Object.freeze([]), diagnostics: pre.diagnostics, states: Object.freeze([]), elapsedMs: now() - beganAt })
       }
 
-      supervisor = createSupervisor(plan, {
+      // ★ PRT-509 缺口 ①：把这次运行声明的凭证**材料化**，并让 DSH 真的读它。
+      //
+      // 位置是这一段，即 `preflight()` 之后、`createSupervisor()`/spawn **之前**：
+      //
+      //   · 早于 spawn ⇒ 文件在 Runtime 进程 **init 之前**就位（提供方在 init 时
+      //     读那份文档，`watch: true` 之后才热重载）；
+      //   · 晚于 preflight ⇒ 失败发生在一个**还没有产生任何副作用**的阶段
+      //     （没占端口、没建库、没留半启动进程）；
+      //   · 而它**不能**放到"每个 Run 开始时"：那份文档是进程级共享的一份，
+      //     Run B 落盘会覆盖 Run A 的，而 spec §6.7 要求"在途 Run 保持其启动时
+      //     解析到的凭证"——一次写入会改掉另一个正在跑的东西手里的钥匙，
+      //     而且**不报错**。理由全文在那个模块的文件头。
+      const credentialStep = await prepareRuntimeCredentials({
+        layout,
+        paths: runCredentialPathReading,
+        dshCredentialsFile,
+        operatorHome,
+        runId: `launch-${now()}-${typeof process?.pid === 'number' ? process.pid : 'x'}`,
+        refs: runCredentialRefs,
+        mapping: runCredentialMapping,
+        runtimeCommand: runtimeResolution.command,
+        openHandle: runCredentialHandleFactory ?? defaultRunCredentialHandle,
+        // ★ `null` 走**模块自己的默认实现**（真的 `materializeRunCredentials`）。
+        //   不能把 `null` 直接透传：解构默认值只在 `undefined` 时生效，
+        //   于是 `null` 会让那一步变成"没有可用的材料化实现"——一个**接了线、
+        //   但永远写不出东西**的接线，而它的读数看起来像一次正常的具名拒绝。
+        ...(runCredentialMaterialize === null ? {} : { materialize: runCredentialMaterialize }),
+        requireFn: runCredentialRequire,
+        io: runCredentialIo,
+      })
+      runCredentialReading = credentialStep
+      runCredentialDiagnostics = [...(credentialStep.diagnostics ?? [])]
+      if (credentialStep.blocking === true) {
+        // 与 `preflight()` 那条早退同一个形状：什么都没起来，所以记录只可能描述
+        // **上一次**运行。留着它会让下一次启动把同一批残留再报一遍。
+        forgetRunRecord()
+        return Object.freeze({
+          ok: false,
+          phase: 'run-credentials',
+          code: credentialStep.code,
+          failures: Object.freeze([]),
+          diagnostics: Object.freeze([...pre.diagnostics, ...runCredentialDiagnostics]),
+          states: Object.freeze([]),
+          elapsedMs: now() - beganAt,
+        })
+      }
+
+      supervisor = createSupervisor(withRunCredentialPatch(plan, credentialStep.applied, runCredentialPathReading), {
         order: plan.waves.flat().filter((k) => includedKeys.has(k)),
         spawnImpl,
         spawnOptions,
@@ -1278,7 +1441,7 @@ export function createLauncher({
         }
       }
 
-      const diagnostics = Object.freeze([...pre.diagnostics, ...readinessDiagnostics, ...runtimeContractDiagnostics])
+      const diagnostics = Object.freeze([...pre.diagnostics, ...runCredentialDiagnostics, ...readinessDiagnostics, ...runtimeContractDiagnostics])
       if (failures.length > 0) {
         const stopResults = await this.stop({ reason: '启动失败回滚' })
         return Object.freeze({

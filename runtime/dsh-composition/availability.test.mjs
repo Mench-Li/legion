@@ -160,27 +160,97 @@ test('② ★★★ 策略门在同样的情形下一律 `deny`（不是挂起�
 
 // ============================================================ ③ 预算与实测
 
+/**
+ * 读出 `runWithPhaseDeadlines` **真正武装**的那个窗口毫秒数。
+ *
+ * 判据要问的是"代码用了剩余预算，还是用了完整响应窗口"，不是"这台机器花了多久"。
+ * 武装值就在可用性审计的 `detail` 里（计时器路径的 `failWith` 把 `arm()` 的 ms
+ * 写进消息：`策略门不可用（响应阶段，…，10ms）`）——有它才说得清这一次是拿
+ * 10ms 的剩余窗口结算的，还是拿 200ms 的完整窗口结算的。
+ *
+ * ⚠️ 只对**计时器路径**成立：迟到答案那条路径的同一个位置是"耗时"而不是"武装窗口"。
+ */
+function armedWindowMsOf(audit) {
+  // 允许负号：读出来是负数本身就是"钳位丢了"的证据，让它走到下面那条断言上去说话，
+  // 而不是在这里变成一个"读不出来"。
+  const m = /\uFF0C(-?\d+)ms\uFF09/.exec(audit?.detail ?? '')
+  assert.ok(m, `审计 detail 里读不出武装的窗口毫秒数（detail=${JSON.stringify(audit?.detail)}）`)
+  return Number(m[1])
+}
+
 test('③ ★★ 总预算不被超过：迟到的连接自报也不能把预算撑成两倍', async () => {
   // 连接窗口用完之后才自报连接，此时响应窗口只能拿**剩下的**预算。
   // 不设这个上限，总耗时会是"连接窗口 + 完整响应窗口 × 2"。
-  const connectTimeoutMs = 10
-  const responseTimeoutMs = 200
-  const started = Date.now()
-  const seen = []
-  const listener = createPreExecutePolicy({
-    decide: (_exec, { onConnected }) => new Promise(() => { setTimeout(onConnected, 200) }),
-    connectTimeoutMs,
-    responseTimeoutMs,
-    portsPhases: false,
-    onDecision: (d) => seen.push(d),
-  })
-  const decision = await listener({ name: 'write', arguments: {} })
-  const elapsedMs = Date.now() - started
-  assert.equal(decision.kind, 'deny')
-  assert.equal(seen[0].code, AVAILABILITY_CODES.RESPONSE_TIMEOUT, '自报过连接之后，卡住的是响应段')
-  assert.equal(seen[0].phase, 'response')
-  // 预算 210ms；不设上限的话这里会是 ~400ms
-  assert.ok(elapsedMs <= 300, `耗时 ${elapsedMs}ms 超过预算上界`)
+  //
+  // ★ 这条判据**曾经是墙钟**（`assert.ok(elapsedMs <= 300)`，预算 210ms，只留 90ms 余量），
+  //   而它在真全量 CI 上红过两次（两次都只有这一条超时断言红，语义断言全绿）：
+  //     · 2026-09-14 `.ci/prt-253f`（commit 前身）：耗时 **324ms**
+  //     · 2026-09-15 `.ci/prt-lock-final`：耗时 **334ms**（台账里那句"延时预算超时（334ms）"）
+  //   两次红的时候，结局仍是 deny、码仍是 `response-timeout`、阶段仍是 response
+  //   ——**代码的行为一直是对的，被顶穿的是"这台机器当时有多快"**。
+  //
+  //   修法与同目录那两条事故回归一致（见 `ENFORCEMENT_HANG_GUARD_MS` 的注释与
+  //   本文件下面两条）：**精确的延迟性质用注入时钟确定性断言，不靠墙钟**。
+  //   而"总预算不被超过"在这里被读成一个**代码事实**：
+  //   迟到的连接自报之后，响应窗口武装的是 `min(responseTimeoutMs, 剩余预算)`。
+  //
+  //     > 一条"宿主机忙就红"的判据，与一条"每次都得先看看机器在干什么"的判据，
+  //     > 是同一个东西——只不过它红的时候，报出来的是代码。
+  const probe = async ({ connectTimeoutMs, responseTimeoutMs, fakeAtReport, realReportMs = null }) => {
+    let fake = 0
+    const seen = []
+    const listener = createPreExecutePolicy({
+      // 注入时钟让"连接窗口已经用完"成为一个**事实**，而不是一次 200ms 的等待；
+      // 于是"剩余预算"由算出来，与真实调度无关。
+      decide: realReportMs === null
+        ? (_exec, { onConnected }) => { fake = fakeAtReport; onConnected(); return new Promise(() => {}) }
+        : (_exec, { onConnected }) => new Promise((r) => setTimeout(() => { fake = fakeAtReport; onConnected() }, realReportMs)),
+      connectTimeoutMs,
+      responseTimeoutMs,
+      portsPhases: false,
+      now: () => fake,
+      onDecision: (d) => seen.push(d),
+    })
+    const started = Date.now()
+    const decision = await listener({ name: 'write', arguments: {} })
+    return { decision, audit: seen[0], realMs: Date.now() - started }
+  }
+
+  // ① 钳位：预算 210ms，自报时已经用完 200ms ⇒ 响应窗口只能拿剩下的 10ms。
+  const late = await probe({ connectTimeoutMs: 10, responseTimeoutMs: 200, fakeAtReport: 200 })
+  assert.equal(late.decision.kind, 'deny')
+  assert.equal(late.audit.code, AVAILABILITY_CODES.RESPONSE_TIMEOUT, '自报过连接之后，卡住的是响应段')
+  assert.equal(late.audit.phase, 'response')
+  assert.equal(late.audit.elapsedMs, 200, '注入时钟没生效——这条判据就退化成"什么都没测"')
+  assert.equal(armedWindowMsOf(late.audit), 10,
+    '迟到的连接自报之后，响应窗口武装的不是"剩余预算"——不设这个上限，'
+    + '总耗时会是"连接窗口 + 完整响应窗口 × 2"')
+
+  // ② 上界还在：剩余预算（55ms）比配置的响应窗口（50ms）大 ⇒ 取配置值。
+  //    没有这一条，把 `min()` 写成"永远取剩余"也全绿。
+  const early = await probe({ connectTimeoutMs: 10, responseTimeoutMs: 50, fakeAtReport: 5 })
+  assert.equal(armedWindowMsOf(early.audit), 50,
+    '`min()` 没有生效：剩余预算 55ms 不该把响应窗口撑过配置的 50ms')
+
+  // ③ 下界还在：自报时已经用完 260ms，而预算只有 210ms（剩余预算是**负数**）⇒ 夹到 1ms。
+  //    ★ 第一版这里写的是 209（剩余正好 1ms），于是把 `Math.max(1, …)` 整个删掉也全绿
+  //      ——一个落在钳位边界**上**的输入，与一个根本没验钳位的输入，在只看这条断言时
+  //      是同一个东西。要咬住它，剩余预算必须是负的。
+  const over = await probe({ connectTimeoutMs: 10, responseTimeoutMs: 200, fakeAtReport: 260 })
+  assert.equal(over.audit.elapsedMs, 260, '注入时钟没生效')
+  assert.equal(armedWindowMsOf(over.audit), 1,
+    '剩余预算为负时必须夹到 1ms：0 或负数进 setTimeout 是"立刻到期"，'
+    + '而审计里那个武装值必须还是一个正的、说得出话的数')
+
+  // ④ 真定时器下同一件事：真的等满 200ms 再自报，判据**仍然是代码武装了哪个窗口**，
+  //    不是这次等了多少毫秒（`realMs` 只进失败文案，不进判据）。
+  const real = await probe({ connectTimeoutMs: 10, responseTimeoutMs: 200, fakeAtReport: 200, realReportMs: 200 })
+  assert.equal(real.decision.kind, 'deny')
+  assert.equal(real.audit.code, AVAILABILITY_CODES.RESPONSE_TIMEOUT)
+  assert.equal(real.audit.phase, 'response')
+  assert.equal(armedWindowMsOf(real.audit), 10,
+    `真定时器路径（本次实测总耗时 ${real.realMs}ms，这一项不进判据）武装的窗口应当是剩余预算 10ms，`
+    + '而不是完整的 200ms 响应窗口')
 })
 
 test('③ ★★★ 真定时器实测：每一种成因都**结算**，且落到契约里的码上', async () => {

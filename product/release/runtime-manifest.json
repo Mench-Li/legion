@@ -1,0 +1,12 @@
+{
+  "manifestFormat": "legion/version-manifest@1",
+  "productVersion": "0.1.0",
+  "legionVersion": "0.1.0",
+  "dshVersion": "0.1.5-rc.2",
+  "dshCompositionPatchVersion": 1,
+  "runtimeContractVersion": 1,
+  "packProtocolVersion": 1,
+  "schemaVersion": 1,
+  "channel": "internal",
+  "releasedAt": "2026-09-16T00:00:00.000Z"
+}

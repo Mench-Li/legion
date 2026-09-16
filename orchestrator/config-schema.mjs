@@ -125,6 +125,19 @@ export const NON_ENV_LITERALS = Object.freeze([
   // 加了一条新路之后把老路的读数改掉，等于用一次重构悄悄换掉一条既有契约。
   'EXECUTOR_RUNTIME_UNREACHABLE', 'EXECUTOR_RUNTIME_UNAUTHORIZED',
   'EXECUTOR_RUNTIME_REFUSED', 'EXECUTOR_CAN_READ_REQUIRED',
+  // PRT-214：静态 hard floor 的派生失败（worker/executor.mjs 的 EXECUTOR_CODES）。
+  //
+  // 这一条与 `EXECUTOR_HOST_PORT_REQUIRED` 必须**分开**，虽然两者今天都会让
+  // 每一次 Run 停下：
+  //
+  //   · `EXECUTOR_HOST_PORT_REQUIRED` —— 这一次部署**没有**把引擎接上来。
+  //     修法是"接线"（绑定宿主端口或配端点）。
+  //   · `EXECUTOR_RUN_FLOOR_NOT_DERIVED` —— 引擎接上了，但这次 Run 的**权限档位**
+  //     没送到派生点，于是算不出该禁止什么。修法是"把档位送过来"。
+  //
+  // 把后者折进前者，会让一个"档位没接上"的问题看起来像"引擎没装配"——
+  // 而这两件事的排查方向一个是装配路、一个是权限路，完全不重合。
+  'EXECUTOR_RUN_FLOOR_NOT_DERIVED',
   // PRT-510 运行侧的预算闸门（worker/budget-gate.mjs 的 BUDGET_GATE_CODES）。
   //
   // 与 EXECUTOR_* 同一口径：这些码会被跨进程读取（worker 上报 → 启动结果 →

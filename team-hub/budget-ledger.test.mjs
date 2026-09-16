@@ -19,7 +19,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 
-import { createPriceTable, estimateCost } from '../runtime/contracts/price-table.mjs'
+import { DEEPSEEK_PRICE_TABLE, createPriceTable, estimateCost } from '../runtime/contracts/price-table.mjs'
 import {
   BUDGET_ERRORS,
   BudgetError,
@@ -585,5 +585,85 @@ test('⑫ 端到端：发布 v1 → 预留 → 发布 v2（涨价）→ 结算�
   assert.equal(r.reservation.spentAmount, 1, '必须按冻结的 pt-A，而不是涨价后的 pt-B（否则是 100）')
   assert.equal(r.reservation.priceTableVersion, 'pt-A')
   assert.deepEqual(ledger.usageOf('att:T-1:1').map((u) => u.priceTableVersion), ['pt-A', 'pt-A'])
+})
+
+test('⑬ ★★★★★ 价目表**表级出处**必须原样往返（publish → get 不许把它丢掉）', () => {
+  // 此前 `publish()` 只存 `models_json`，于是取回来的是**一张比原来弱的表**：
+  // 金额还算得出来（默认仍取 peak，方向是安全的），但
+  // `timeOfDay` / `sourceUrl` / `retrievedAt` 这些**出处**永久丢了。
+  //
+  //   > 一条"冻结了价目表版本、却取不回那版的出处"的历史费用记录，
+  //   > 与一条"当时就没记出处"的记录，在事后对账时是同一个东西——
+  //   > 只不过前者看上去像是记过的。
+  //
+  // 而它不止是溯源问题：`timeOfDay` 丢了之后，"按时间戳判时段"这条路就没了，
+  // 同一份表在内存里与在库里会对**同一次 `atMs`** 给出不同的金额。
+  // *一个"在内存里算得对、存一趟回来算得不一样"的价目表，
+  // 与一个价目表变了，在历史费用记录的读数上是同一个东西。*
+  const db = new DatabaseSync(':memory:')
+  ensureBudgetSchema(db)
+  const registry = createPriceTableRegistry({ db, clock })
+
+  // ★ 用**生产那份真表**：只有它带着能真的判出时段的模型档位
+  //   （手写一张 `perUnitIn` 的表会被判成 `flat-rate`，那样这条用例
+  //   证不了任何事——它必须用一份**真的会随时段变价**的表）。
+  const withRule = DEEPSEEK_PRICE_TABLE
+  registry.publish(withRule, { actor: 'ops' })
+  const back = registry.get(withRule.version)
+  assert.notEqual(back, null, '发布之后取不回来')
+
+  // ① 表级出处在往返之后必须**逐字段相同**。
+  assert.deepEqual(back.timeOfDay, withRule.timeOfDay, 'timeOfDay 在往返里丢了或被改了')
+  assert.equal(back.sourceUrl, withRule.sourceUrl, 'sourceUrl 丢了——事后对账就追不回这条价')
+  assert.equal(back.retrievedAt, withRule.retrievedAt, 'retrievedAt 丢了——看不出这条价是什么时候的')
+
+  // ② ★ 语义判据（比**算出来的钱**，不是比字段）：
+  //    同一个 `atMs`，内存里那份与库里取回的那份必须给出同一个金额。
+  const at = Date.UTC(2026, 8, 15, 20, 0, 0) // 周日 20:00 UTC = off-peak
+  const args = { model: 'deepseek-flash', tokensIn: 1_000_000, tokensOut: 0, atMs: at }
+  const inMemory = estimateCost({ priceTable: withRule, ...args })
+  const fromDb = estimateCost({ priceTable: back, ...args })
+  assert.equal(fromDb.amount, inMemory.amount,
+    `往返之后同一次 atMs 算出了不同的金额（${inMemory.amount} → ${fromDb.amount}）：`
+    + 'timeOfDay 没被存回来，"按时段判价"这条路在库里那份表上已经不存在了')
+  assert.equal(fromDb.basis.timeOfDaySource, 'derived-from-timestamp',
+    '库里的表没能按时段判价——它退回保守默认了')
+
+  // ③ ★ 反向对照：把规则摘掉，同一批 models 在**同一个 atMs** 下金额**确实会不同**。
+  //    没有这一条，②可能只是"这笔钱本来就不随时段变"，那它什么都证明不了。
+  const stripped = createPriceTable({
+    version: withRule.version, currency: withRule.currency, effectiveAtMs: withRule.effectiveAtMs,
+    models: withRule.models,
+  })
+  const noRule = estimateCost({ priceTable: stripped, ...args })
+  assert.notEqual(noRule.amount, inMemory.amount,
+    '摘掉时段规则后金额没变——那说明这条用例证明不了"规则被存回来了"')
+  assert.equal(noRule.basis.timeOfDaySource, 'default-peak', '摘掉规则后应当退回保守默认')
+})
+
+test('⑬ ★★★ 旧行（没有 provenance 列）仍然读得出来，行为与加这一列之前一致', () => {
+  // 兼容性判据：这一列是**附加**的。老库里的行 `provenance_json` 是 NULL，
+  // 取回来时**不补任何默认值**——缺 `timeOfDay` 时 `estimateCost` 自己退回保守
+  // 默认，于是行为与加列之前**逐字相同**。拿不到出处就说拿不到，不编一个。
+  const db = new DatabaseSync(':memory:')
+  ensureBudgetSchema(db)
+  const registry = createPriceTableRegistry({ db, clock })
+  db.prepare('INSERT INTO price_tables (version, currency, effective_at_ms, models_json, provenance_json, created_at_ms, created_by)'
+    + ' VALUES (?,?,?,?,?,?,?)')
+    .run('pt-old', 'USD', 1, JSON.stringify({
+      m: { billingUnit: 'per-mtok', perUnitIn: 2, perUnitOut: 6, unitSize: 1_000_000 },
+    }), null, 5, 'legacy')
+  const back = registry.get('pt-old')
+  assert.notEqual(back, null, '老行读不出来了——这一列把兼容性弄坏了')
+  // ★ `createPriceTable` 会把缺的出处**规范成 `null`**（不是 `undefined`），
+  //   所以这里断言的是"没有值"，而不是某个特定的空表示——
+  //   钉死 `undefined` 会把一条关于"出处有没有丢"的判据变成一条关于
+  //   "规范化用哪个空值"的判据，而后者与本次要证明的事无关。
+  assert.ok(back.timeOfDay === undefined || back.timeOfDay === null,
+    `老行被补上了一个它没有的时段规则：${JSON.stringify(back.timeOfDay)}`)
+  assert.ok(back.sourceUrl === undefined || back.sourceUrl === null,
+    `老行被补上了一个它没有的出处：${JSON.stringify(back.sourceUrl)}`)
+  assert.ok(back.retrievedAt === undefined || back.retrievedAt === null,
+    `老行被补上了一个它没有的检索日期：${JSON.stringify(back.retrievedAt)}`)
 })
 

@@ -151,8 +151,9 @@ export const RUNTIME_INSTALL_CHECK = 'runtime-install'
  * 代价是可能漂移——所以用例里有一条拿**真的** `readActiveRuntime()` 产物喂进来。
  */
 const RUNTIME_INSTALL_NEXT_STEP = Object.freeze({
-  absent: '还没有装过运行时：先跑 `--runtime-install-plan --runtime-manifest=<产品版本清单>` 看计划，'
-    + '确认之后再跑 `--runtime-install`。注意**本仓库不随发任何一份 §9.1 清单**，那一份要由发布流程产出',
+  absent: '还没有装过运行时：先跑 `--runtime-install-plan` 看计划——要装哪一版 DSH 来自清单，'
+    + '默认是随产品发的 `product/release/runtime-manifest.json`（`--runtime-manifest=<路径>` 可指向另一份），'
+    + '确认之后再跑 `--runtime-install`',
   broken: '指针指着一次没装完的安装：重装那个版本（下一次安装会删掉没有完成标记的目录），'
     + '或者用 `rollback` 切回上一个版本——指针没动的时候旧版本仍然现役',
   unreadable: '指针文件读不懂（不是 JSON / 不是本产品写的形状）：'

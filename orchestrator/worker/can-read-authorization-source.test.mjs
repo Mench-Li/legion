@@ -23,6 +23,13 @@
 //     的取数路径决定，见文档 §4。
 //   · 它**不**声称"权限判定没做"。判定做了，而且是在 worker 侧做的（喂给 hub 的装配路由）；
 //     它声称的是那个判定**不进 execute 请求**。
+//   · ★ PRT-214 缺口①之后 (B) 有了一个**新后果**，而它正好是这批最要紧的读数：
+//     既然真 lease 上**没有**权限档位，而每一次 Run 的静态 hard floor 现在都由
+//     那个档位派生，那么**今天生产里的每一次 Run 都会在派发前被具名拒绝**
+//     （`run-floor-permissions-missing`）。这不是"判定没做"，是"作为输入的那份
+//     档位还没被搬到这一侧来"——§④ 用同一个真 lease 把它读出来。
+//     一个"缺口还在"的批评与一个"接线断了、所以每次 Run 都当场停下"的读数，
+//     在只看 ①②③ 的时候是同一个东西——只不过前者不会让任何一次 Run 停下来。
 // ============================================================================
 
 import assert from 'node:assert/strict'
@@ -34,8 +41,9 @@ import { DatabaseSync } from 'node:sqlite'
 
 import { createRunStore } from '../../team-hub/run-store.mjs'
 import { ensureContextSchema } from '../../team-hub/context-store.mjs'
-import { defaultRequestFor } from './executor.mjs'
+import { defaultRequestFor, deriveRunFloorCarrier } from './executor.mjs'
 import { RUN_REQUEST_REQUIRED } from '../../runtime/contracts/run.mjs'
+import { RUN_FLOOR_STATES } from '../../runtime/contracts/run-floor.mjs'
 
 /** 真 claim 回来的那 8 个键（**带顺序无关的整体比较**，不是"包含"）。 */
 const CLAIMED_LEASE_KEYS = Object.freeze([
@@ -94,30 +102,37 @@ test('① 真 claim() 返回的对象**恰好**那 8 个键，且没有任何读
 })
 
 test('② 拿**真** lease 造 RunRequest：仍然只有工具面权限，读面一个字段都没有', () => {
-  const { lease, taskId } = claimOnce('request')
-  // `workspaceId` / `modelProfileRef` / `workdir` 是"在哪个目录、用哪个模型跑"，
-  // `defaultRequestFor` 明确拒绝猜它们（见它的 JSDoc）——生产里由 worker 的配置给。
-  // 这里显式列出来，正是为了让"lease 里没有它们"这件事在读数上可见（见 ③）。
-  const callerSupplied = { workspaceId: 'ws:cra', modelProfileRef: 'model:cra', workdir: process.platform === 'win32' ? 'C:\\work' : '/work' }
-  const snapshot = {
-    associations: { goalId: 'goal:cra', taskId, employeeId: 'emp:cra', teamPlanId: 'plan:cra' },
-    finalText: 'FROZEN-PROMPT-TEXT',
+  // ★ `db` 必须接住并关掉：不关的话 SQLite 的 WAL 句柄在 Windows 上会一直占着
+  //   临时目录，`after()` 里那次 `rmSync` 就删不掉——表现为每跑一次这套件，
+  //   `%TEMP%` 里就多留一个 `legion-cra-source-*`（本条此前正是这样漏的）。
+  const { lease, taskId, db } = claimOnce('request')
+  try {
+    // `workspaceId` / `modelProfileRef` / `workdir` 是"在哪个目录、用哪个模型跑"，
+    // `defaultRequestFor` 明确拒绝猜它们（见它的 JSDoc）——生产里由 worker 的配置给。
+    // 这里显式列出来，正是为了让"lease 里没有它们"这件事在读数上可见（见 ③）。
+    const callerSupplied = { workspaceId: 'ws:cra', modelProfileRef: 'model:cra', workdir: process.platform === 'win32' ? 'C:\\work' : '/work' }
+    const snapshot = {
+      associations: { goalId: 'goal:cra', taskId, employeeId: 'emp:cra', teamPlanId: 'plan:cra' },
+      finalText: 'FROZEN-PROMPT-TEXT',
+    }
+
+    const request = defaultRequestFor({ ...lease, ...callerSupplied }, snapshot)
+    const keys = Object.keys(request).sort()
+
+    // 契约必填集必须被填满（`defaultRequestFor` 自己也会查，这里是**独立**复核）。
+    assert.deepEqual(RUN_REQUEST_REQUIRED.filter((k) => request[k] === undefined || request[k] === null || request[k] === ''),
+      [], 'RunRequest 还有必填字段是空的')
+    assert.deepEqual(keys.filter((k) => !RUN_REQUEST_REQUIRED.includes(k)), ['prompt'],
+      '"不在必填集里"的键只能有 prompt')
+    assert.deepEqual(keys.filter((k) => AUTHORITY_LOOKING.test(k)), [],
+      '拿真 lease 造出来的 RunRequest 上出现了读 / 授权形状的键')
+    // 权限面**只有**工具面档位。它与"能读哪些上下文来源"是两件事，
+    // 而它是本请求里唯一带默认值的一项（`executor.mjs:424`）——不要把它读成授权。
+    assert.deepEqual(Object.keys(request.permissions).sort(), ['preset', 'tools'])
+    assert.equal(request.contextSnapshotRef, lease.attemptId, '执行引用的必须是那份被冻结的快照')
+  } finally {
+    db.close()
   }
-
-  const request = defaultRequestFor({ ...lease, ...callerSupplied }, snapshot)
-  const keys = Object.keys(request).sort()
-
-  // 契约必填集必须被填满（`defaultRequestFor` 自己也会查，这里是**独立**复核）。
-  assert.deepEqual(RUN_REQUEST_REQUIRED.filter((k) => request[k] === undefined || request[k] === null || request[k] === ''),
-    [], 'RunRequest 还有必填字段是空的')
-  assert.deepEqual(keys.filter((k) => !RUN_REQUEST_REQUIRED.includes(k)), ['prompt'],
-    '"不在必填集里"的键只能有 prompt')
-  assert.deepEqual(keys.filter((k) => AUTHORITY_LOOKING.test(k)), [],
-    '拿真 lease 造出来的 RunRequest 上出现了读 / 授权形状的键')
-  // 权限面**只有**工具面档位。它与"能读哪些上下文来源"是两件事，
-  // 而它是本请求里唯一带默认值的一项（`executor.mjs:424`）——不要把它读成授权。
-  assert.deepEqual(Object.keys(request.permissions).sort(), ['preset', 'tools'])
-  assert.equal(request.contextSnapshotRef, lease.attemptId, '执行引用的必须是那份被冻结的快照')
 })
 
 test('③ 真 lease 缺的 RunRequest 必填字段是"配置面"的，不是"授权面"的', () => {
@@ -138,6 +153,38 @@ test('③ 真 lease 缺的 RunRequest 必填字段是"配置面"的，不是"授
     for (const k of ['workspaceId', 'modelProfileRef', 'workdir']) {
       assert.ok(missing.includes(k), `${k} 不在真 lease 缺的字段里——那它现在从哪来？`)
     }
+  } finally {
+    db.close()
+  }
+})
+
+test('④ ★★ 真 lease 走**真**生产者：档位没到这一侧 ⇒ 派发前具名拒绝（不是空下限）', () => {
+  const { lease, taskId, db } = claimOnce('floor')
+  try {
+    const callerSupplied = {
+      workspaceId: 'ws:cra', modelProfileRef: 'model:cra',
+      workdir: process.platform === 'win32' ? 'C:\\work' : '/work',
+    }
+    const snapshot = {
+      associations: { goalId: 'goal:cra', taskId, employeeId: 'emp:cra', teamPlanId: 'plan:cra' },
+      finalText: 'FROZEN-PROMPT-TEXT',
+    }
+    const request = defaultRequestFor({ ...lease, ...callerSupplied }, snapshot)
+
+    // 前提：`defaultRequestFor` 把"控制面没给"如实标出来了（按引用，不是按形状）。
+    assert.equal('permissions' in lease, false, '真 lease 上出现了 permissions——这一条的结论要重判')
+
+    const carried = deriveRunFloorCarrier(request)
+    assert.equal(carried.state, RUN_FLOOR_STATES.REFUSED,
+      `真 lease 竟然派得出下限（${carried.state}）——那要么档位已经被搬到这一侧，`
+      + '要么生产者把"没给"读成了"没有工具"。两种都得先把这一组改掉')
+    // ★ 关键：状态是 `refused`（"给了但解释不了"），**不是** `absent`（"没有人给我下限"）。
+    //   两者都会拒绝一切，但只有前者说的是真话：这次 Run 的下限本来是有人生产的。
+    assert.notEqual(carried.state, RUN_FLOOR_STATES.ABSENT)
+    assert.equal(carried.payload.derived, false)
+    assert.equal(carried.payload.floor, null, '"派生不出来"不能被写成一份空名单')
+    assert.deepEqual([...carried.payload.refusals], ['run-floor-permissions-missing'],
+      '拒绝码就是"去改哪里"：把权限档位搬到 lease（或搬到那条装配路）上')
   } finally {
     db.close()
   }

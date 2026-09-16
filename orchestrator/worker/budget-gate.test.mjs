@@ -371,6 +371,8 @@ test('⑧ 没接闸门时 `budgetState` 是 `not-gated`，且**不**发任何账
   const r = await built.executor.execute({
     attemptId: 'att:T-1:1', taskId: 'T-1', workspaceId: 'ws', modelProfileRef: 'mp', workdir: '.',
     goalId: 'g1', employeeId: 'e1', teamPlanRef: 'tp1',
+    // PRT-214 缺口①：静态下限由权限档位派生，派不出来就**不派发**。
+    permissions: { preset: 'legion-attended', tools: ['read-file'] },
   })
   // 「一个字段没人断言」与「这个字段不存在」是同一件事。
   // 先断言这次执行**真的成功了**：能力齐全 ≠ 选中了模型，
@@ -421,6 +423,8 @@ test('⑧ 接了闸门时执行结果里带 reservation 与 settlement（不是�
   const r = await built.executor.execute({
     attemptId: 'att:T-1:1', taskId: 'T-1', workspaceId: 'ws', modelProfileRef: 'mp', workdir: '.',
     goalId: 'g1', employeeId: 'e1', teamPlanRef: 'tp1',
+    // PRT-214 缺口①：静态下限由权限档位派生，派不出来就**不派发**。
+    permissions: { preset: 'legion-attended', tools: ['read-file'] },
   })
   assert.equal(r.outcome, 'completed')
   assert.equal(r.budgetState, 'bounded')
@@ -476,6 +480,7 @@ test('⑨ 引擎抛出时执行路径也结算，并按「未知」锁定', asyn
     () => built.executor.execute({
       attemptId: 'att:T-1:1', taskId: 'T-1', workspaceId: 'ws', modelProfileRef: 'mp', workdir: '.',
       goalId: 'g1', employeeId: 'e1', teamPlanRef: 'tp1',
+      permissions: { preset: 'legion-attended', tools: ['read-file'] },
     }),
     /适配器自己炸了/,
   )

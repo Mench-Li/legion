@@ -34,6 +34,8 @@ import {
   MANIFEST_FIELD_SOURCES,
   PATCH_PAIR_SOURCE,
   RUNTIME_MANIFEST_CODES,
+  SHIPPED_MANIFEST_PATH,
+  SHIPPED_MANIFEST_RELATIVE_PATH,
   buildVersionManifest,
   checkPatchVersionAgainstRepo,
   deriveManifestFields,
@@ -222,4 +224,64 @@ test('① ★★★★★ 磁盘上的 `releases/*/MANIFEST.json` **没有一份
   assert.deepEqual(installable, [],
     `releases/ 下出现了可安装的 §9.1 清单：${installable.join('、')}。`
     + '缺口①可能已经被关掉了 —— 请更新这条用例，让它改成断言"它校验通过"')
+})
+
+// ═══════════════════════════════════ ⑨ ★★★★★ 随产品发出去的那一份
+
+test('⑨ ★★★★★ 产品**真的带了一份** §9.1 清单，而且它就是生成器的产物', () => {
+  // 上面那一套（①–⑧）证明的是"值从哪来、缺了会不会拒绝"。
+  // 这一条证明的是**那份文件在磁盘上、且内容与生成器一致**——
+  // 因为"生成器写得很对"与"产品里真的有那份清单"是两件事：
+  //
+  //   > 一张写清了八个字段各自出处的表，
+  //   > 与一份躺在产品里、装的时候真的会被读到的那份清单，
+  //   > 在测试报告上是同一个东西——只不过前者的绿全部来自自己造的夹具。
+  const raw = readFileSync(SHIPPED_MANIFEST_PATH, 'utf8')
+  const parsed = JSON.parse(raw)
+
+  // ① 它必须是**生产的**消费者的合法输入，而不是只对生成器合法。
+  const verdict = validateManifest(parsed)
+  assert.equal(verdict.ok, true,
+    `${SHIPPED_MANIFEST_RELATIVE_PATH} 没通过生产校验器：${JSON.stringify(verdict.problems)}`)
+
+  // ② 八个 spec 字段一个不少（`manifestFormat` 是格式标记，不算字段）。
+  for (const f of SPEC_FIELDS) {
+    assert.ok(f in parsed, `随产品发的清单缺了 ${f}`)
+  }
+
+  // ③ 三个可推导字段必须与**生产常量**相等——直接比，不经过本模块。
+  assert.equal(parsed.dshCompositionPatchVersion, DSH_COMPOSITION_PATCH_VERSION)
+  assert.equal(parsed.runtimeContractVersion, RUNTIME_CONTRACT_VERSION)
+  assert.equal(parsed.packProtocolVersion, PACK_PROTOCOL_VERSION)
+
+  // ④ ★ 核心：把这份文件里记录的那五个**发布决策**重新喂给生成器，
+  //    必须逐字段得到同一份清单。手工改过任何一个字段都会红——
+  //    这正是"生成器不只是用例在调用"这句话的可执行形式。
+  const rebuilt = buildVersionManifest({
+    productVersion: parsed.productVersion,
+    legionVersion: parsed.legionVersion,
+    dshVersion: parsed.dshVersion,
+    schemaVersion: parsed.schemaVersion,
+    channel: parsed.channel,
+    releasedAt: parsed.releasedAt,
+  })
+  assert.equal(rebuilt.ok, true, `生成器拒绝重造这份清单：${rebuilt.code} ${rebuilt.message}`)
+  // JSON 的键序没有语义，所以比规范化后的形式。
+  const canon = (o) => JSON.stringify(Object.entries(o).sort())
+  assert.equal(canon(rebuilt.manifest), canon(parsed),
+    '磁盘上那份清单与生成器用同一批决策造出来的**不是同一份**——'
+    + '说明有人手工改过它（或改了字段却没改生成器）。'
+    + `\n  磁盘：${canon(parsed)}\n  重造：${canon(rebuilt.manifest)}`)
+
+  // ⑤ 通道必须是 spec §9.2 里真的存在的那个。
+  assert.ok(['internal', 'canary', 'stable'].includes(parsed.channel),
+    `channel 取值不在 spec §9.2 的通道表里：${JSON.stringify(parsed.channel)}`)
+
+  // ⑥ 导出出来的路径**就是**这个文件：否则 CLI 的默认值会指向别处。
+  assert.equal(SHIPPED_MANIFEST_PATH, fileURLToPath(new URL('../release/runtime-manifest.json', import.meta.url)))
+  assert.equal(SHIPPED_MANIFEST_RELATIVE_PATH, 'product/release/runtime-manifest.json')
+
+  // ★ 诚实边界：这一条证明的是"产品带了一份合法清单，且与生成器一致"。
+  //   它**不**证明：任何一个真实用户装过它、也**不**证明那份清单里的版本号
+  //   是"正确的"——`dshVersion` 只有人能给，谁给谁负责（见上面 `patchPairSource`）。
 })

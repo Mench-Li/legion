@@ -20,14 +20,27 @@
 //      并且真的拿生产的 `createHardFloorGuard()` / `composePreExecuteFloor()`
 //      拦一次越界写入（形状对 ≠ 拦得住）。
 //
-// ## 诚实边界（本套件**没有**证明的东西）
+// ## 诚实边界（★ 本批改过：这条边界自己也搬了一次家）
 //
-//   · **没有任何东西消费派生出来的下限**：`orchestrator/worker/executor.mjs`
-//     仍然只把 `{preset, tools}` 放进 RunRequest，`runtime/contracts/run.mjs`
-//     里没有承载下限的字段。从"派生"到"装进一个运行中的 DSH"那一截是
-//     Runtime Contract 的事（PRT-253 的地界），本套件一个字都没碰。
-//   · 因此**没有任何真实 DSH 进程因为这份下限拒绝过一次工具调用**：
-//     这里拦住的每一次都是本进程里直接调用的 guard。
+// 上一版这一节写着「**没有任何东西**消费派生出来的下限」——`executor` 只搬
+// `{preset, tools}`、契约里没有承载字段。那句话现在**不再成立**：
+// `orchestrator/worker/executor.mjs` 有了生产调用方，§⑦ 读它。
+//
+//   > 一条只写在文件头、而代码已经走了的"边界"，
+//   > 与一条不存在的边界，在后来读它的人那里是同一个东西——
+//   > 只不过前者会让人以为这个缺口还没人动过。
+//
+// 所以这里换成**新的**边界，一条也不许省：
+//
+//   · 接上的是**生产者**，不是"生产已经在保护什么"。派生出来的名单写的是 Legion
+//     的**工具名**（`delete-file` …），而 guard 比的是执行面的工具名——§⑦ 最后
+//     两条把这个缺口从**生产者真的产出的**那一份上读出来。今天没有任何真实 DSH
+//     进程因为一份"从 lease 的权限档位派生出来"的下限拒绝过工具调用：
+//     真进程那一对（`runtime/dsh-composition/run-floor-dsh-process.test.mjs`）
+//     里的下限仍然是**测试挂上去的**（§⑦ 把它也读了一遍，免得这句话悄悄过期）。
+//   · 真 `claim()` 回来的 lease 上**没有** `permissions`，于是今天生产里的每一次
+//     Run 都在**派发前**具名拒绝（`run-floor-permissions-missing`）。这条读数由
+//     `orchestrator/worker/executor.test.mjs` 的 §⑥ 钉住；本套件只钉"它派得出来"。
 //   · `denyPathPrefixes` 是**拒绝名单**。spec line 456 说的"禁止越界路径"
 //     若按"工作区之外全都不许"理解，那是一个补集，guard 现在的形状表达不了
 //     ——本模块只承载**声明过的**前缀，不假装能算出补集。
@@ -66,9 +79,18 @@ import {
   CAPABILITY_IDS,
   CAPABILITY_KINDS,
   HARD_FLOOR_CAPABILITIES as FROM_TOOL_CAPABILITY,
+  HIGH_RISK_TOOL_NAMES,
   TOOL_CATALOG,
   resolveTool,
 } from '../runtime/dsh-composition/tool-capability.mjs'
+// 名字空间那一条的**映射读数**住在 employee-preset（`dshToolNamesOf()` 读它）：
+// 用例里不抄一份映射——抄一份的用例在映射改了之后仍然绿。
+import { dshToolNamesOf } from '../runtime/dsh-composition/employee-preset.mjs'
+// 线上三态与字段名的**唯一**来源。§⑦ 用它读"生产者产出的那一份到底是什么状态"。
+import { RUN_FLOOR_STATES, RUN_FLOOR_WIRE_FIELD, readRunFloor } from '../runtime/contracts/run-floor.mjs'
+// ★ 生产消费者本身就是**生产者**（PRT-214 缺口①最后那一格）。
+//   这里 import 的是**产品模块**而不是替身：替身会让"接上了没有"变成自问自答。
+import { deriveRunFloorCarrier, UNSUPPLIED_PERMISSIONS } from '../orchestrator/worker/executor.mjs'
 
 const CODES = RUN_FLOOR_REFUSAL_CODES
 const REASONS = RUN_FLOOR_DECISION_REASONS
@@ -451,29 +473,128 @@ test('⑥ ★★★ 本模块是叶子：它 import 的东西里没有能力目�
   assert.equal(code.includes('HARD_FLOOR_CAPABILITIES'), true)
 })
 
-// ═══════════════════════════════════════ ⑦ ★★★ 诚实边界
+// ═══════════════════════════════════════ ⑦ ★★★ 诚实边界（新版）
+//
+// 旧版这一组断言的是「**没有任何东西**消费派生出来的下限」：
+//
+//   · `executor.includes('deriveRunFloor') === false`
+//   · `/denyTools|denyPathPrefixes/.test(executor) === false`
+//   · `/denyTools|denyPathPrefixes/.test(contract) === false`
+//   · `plugin.includes('deriveRunFloor') === false` / `plugin.includes('DEFAULT_HARD_FLOOR') === true`
+//
+// 前两条的**前提**已经不成立了（后两条仍然成立，理由不同，见下）。一条断言
+// "没人消费它"的用例，在有人消费它之后**必须**换成一条断言"谁在消费、消费出了
+// 什么，以及还有什么是它没证明的"——直接把用例删掉，等于把这道边界一起删掉。
 
-test('⑦ ★★★ 诚实边界：**没有任何东西**消费派生出来的下限，也从来没有真 DSH 进程被它拒过', () => {
-  // ① 生产装配点仍然只搬 {preset, tools}——下限没有出口。
+/** 生产者要吃的最小一份 RunRequest（只用到 `permissions` / `workdir` / `runId`）。 */
+const REQUEST = Object.freeze({
+  runId: 'run:prt-214', attemptId: 'att:prt-214', workdir: WIN.cwd,
+  permissions: Object.freeze({ preset: 'legion-attended', tools: Object.freeze(['read-file']) }),
+})
+
+test('⑦ ★★★ 生产者**接上了**：executor 从这个模块取下限、从真能力目录取解析口', () => {
   const executor = codeOf(fileURLToPath(new URL('../orchestrator/worker/executor.mjs', import.meta.url)))
-  assert.equal(executor.includes('deriveRunFloor'), false,
-    'executor 已经在用派生的下限了——这条诚实边界要连同文件头一起改')
-  assert.equal(/denyTools|denyPathPrefixes/.test(executor), false,
-    'executor 里出现了去往强制面的下限字段——那说明传输那一截已经接上了')
 
-  // ② 运行契约里没有承载下限的字段：从"派生"到"装进运行中的 DSH"那一截不在本批。
-  const contract = codeOf(fileURLToPath(new URL('../runtime/contracts/run.mjs', import.meta.url)))
-  assert.equal(/denyTools|denyPathPrefixes/.test(contract), false,
-    'RunRequest 契约里出现了下限字段——PRT-253 那一截已经动了，本用例要跟着改')
+  // ① 它 import 的是**这个**模块。一个 import 了却没人调的函数，与一个没 import 的
+  //    函数，在运行时是同一个东西——所以下面还有一条**行为**读数（第二条）。
+  assert.match(executor, /from\s+'\.\.\/\.\.\/team-hub\/run-floor\.mjs'/,
+    'executor 没有从控制面这个模块取派生的下限——那它产出的那份东西是哪来的？')
+  // ② 解析口来自**真**能力目录：一个"什么都认识"的替身会让未知工具静默放行。
+  assert.match(executor, /from\s+'\.\.\/\.\.\/runtime\/dsh-composition\/tool-capability\.mjs'/,
+    '解析口不是从真能力目录注入的——那"不认识的工具默认最严"这条就没了')
+  // ③ 三态判定借用**契约那一份**，不在这里另立一条。
+  assert.match(executor, /from\s+'\.\.\/\.\.\/runtime\/contracts\/run-floor\.mjs'/,
+    'executor 没有用契约里的三态判定：两份判定会漂，而漂的那天表现为'
+    + '"生产者说能装、适配器说解释不了"')
+  assert.match(executor, /RUN_FLOOR_WIRE_VERSION/,
+    '线上形状的版本号被手写了一遍——契约改了它不会跟着改')
+})
 
-  // ③ 组合面那一行拿到的仍然是 DEFAULT_HARD_FLOOR（空下限），不是派生结果。
+test('⑦ ★★★ 行为读数：同一份输入，executor 产出的下限与本模块派生的一模一样', () => {
+  const permissions = { preset: 'legion-unattended', tools: ['read-file', 'delete-file', 'ghost'] }
+  const carried = deriveRunFloorCarrier({ ...REQUEST, permissions }, { platform: WIN.platform })
+
+  assert.equal(carried.state, RUN_FLOOR_STATES.INSTALLED, JSON.stringify(carried.payload))
+  const mine = derive({ permissions })
+  assert.deepEqual([...carried.payload.floor.denyTools], [...mine.floor.denyTools],
+    'executor 的产出与直接派生**不一样**——那说明它在派生之外又加了一条自己的规则')
+  assert.deepEqual(carried.payload.floor.denyTools, ['delete-file', 'ghost'],
+    '这一档里两个该被静态禁止的工具没进去（硬底线能力 + 未登记工具）')
+  assert.deepEqual([...carried.payload.floor.denyPathPrefixes], [])
+  // 载荷必须**挂在请求上**，而且是同一份对象（传输层按对象身份认"哪份下限属于哪次 Run"）。
+  assert.equal(carried.request[RUN_FLOOR_WIRE_FIELD], carried.payload)
+  assert.equal(readRunFloor(carried.request[RUN_FLOOR_WIRE_FIELD]).state, RUN_FLOOR_STATES.INSTALLED)
+})
+
+test('⑦ ★★ 派生失败**不是缺席**：载荷是 `derived:false`（传输层读成"拒收"），原因码跟着走', () => {
+  const carried = deriveRunFloorCarrier({ ...REQUEST, permissions: UNSUPPLIED_PERMISSIONS })
+  assert.equal(carried.state, RUN_FLOOR_STATES.REFUSED)
+  // 这一条与下一条合起来才是重点：它不是 `absent`（"没有人给我下限"），
+  // 而是 `refused`（"给了，但解释不了"）——两者的修法完全不同。
+  assert.equal(readRunFloor(carried.payload).state, RUN_FLOOR_STATES.REFUSED)
+  assert.notEqual(readRunFloor(carried.payload).state, RUN_FLOOR_STATES.ABSENT)
+  assert.equal(carried.payload.derived, false)
+  assert.equal(carried.payload.floor, null)
+  assert.deepEqual([...carried.payload.refusals], [CODES.PERMISSIONS_MISSING])
+})
+
+test('⑦ ★★★ 生产出来的名单对**执行面**的名字一个都不命中（记录，不修）', () => {
+  // 这一条是 round-53 那个发现的**生产者侧**读数：以前它读的是手写名单，
+  // 现在读的是**生产真的会产出的那一份**。结论没变，证据换成了真的。
+  const { payload } = deriveRunFloorCarrier(
+    { ...REQUEST, permissions: { preset: 'p', tools: [...HIGH_RISK_TOOL_NAMES] } },
+    { platform: WIN.platform },
+  )
+  const guard = createHardFloorGuard(payload.floor)
+
+  // ① 九个高风险能力**全都授权了**，而进静态下限的只有带硬底线能力的那三个
+  //    （其余六个是 `approval-liftable`：高风险但审批可以解除，那是另一个政策）。
+  //    这一半是**读数**，不是猜：从目录自己的标记算出来。
+  const hardFloorToolNames = Object.values(TOOL_CATALOG).filter((t) => t.hardFloor === true).map((t) => t.name).sort()
+  assert.deepEqual([...payload.floor.denyTools].sort(), hardFloorToolNames,
+    '静态下限里的名字与目录标了 `hardFloor` 的那一组对不上')
+
+  // ② 这些 Legion 名字**真的被拒**（不是"看起来在拒"）。
+  for (const name of hardFloorToolNames) {
+    assert.equal(typeof guard({ name, arguments: {} }), 'string', `${name} 没有被这份下限拒`)
+  }
+  // ③ 而它们真正落到的执行面名字**一个都不在名单里**——这正是那个缺口。
+  //    九个高风险能力里，映射到执行面的只有 shell 那一对（另外六个是宿主平面的，
+  //    `employee-preset.mjs` 里 `hosted: true`）。
+  const mapped = dshToolNamesOf(HIGH_RISK_TOOL_NAMES)
+  assert.deepEqual([...mapped], ['bash', 'pwsh'], '名字空间的映射读数变了，这一条要重判')
+  for (const name of mapped) {
+    assert.equal(guard({ name, arguments: {} }), undefined,
+      `${name} 被拒了——那说明有人把 Legion 名字**翻译**成了执行面名字，`
+      + '而那会过度禁止（`bash`/`pwsh` 也是低风险 `git-status` 的落地方式）')
+  }
+  // ④ 尤其：`git-push`（硬底线、不可逆）在**执行面**上没有任何名字可禁——
+  //    它在名单里，但它跑起来叫 `pwsh`，而 `pwsh` 是放行的。
+  assert.equal(payload.floor.denyTools.includes('git-push'), true)
+  assert.equal(guard({ name: 'pwsh', arguments: {} }), undefined)
+  // ⑤ 哪个名单里都没有的执行面名字同样放行：**名字名单不是 fail closed**。
+  assert.equal(guard({ name: 'write', arguments: {} }), undefined)
+  assert.equal(guard({ name: 'edit', arguments: {} }), undefined)
+})
+
+test('⑦ ★ 组合面那一行拿到的仍然是 DEFAULT_HARD_FLOOR（那次装配与"按 Run"是两条缝）', () => {
   const pluginPath = fileURLToPath(new URL('../runtime/dsh-composition/plugins/hard-floor.mjs', import.meta.url))
   const plugin = readFileSync(pluginPath, 'utf8')
   assert.equal(plugin.includes('deriveRunFloor'), false,
-    'hard-floor 插件已经在用派生的下限了——"没有任何东西消费它"这句话不再成立')
+    'hard-floor 插件直接开始派生了——那天再改这条，并且要说清它拿哪一次的权限档位')
   assert.equal(plugin.includes('DEFAULT_HARD_FLOOR'), true,
     '组合面那一行的默认值换了——先确认这是有意的，再改这条注释')
+  // 运行契约里仍然**没有**承载下限的字段：形状住在 `runtime/contracts/run-floor.mjs`，
+  // 它在 `run.mjs` 里只被调用、不被复制。这一条是防"两份形状"的。
+  const contract = codeOf(fileURLToPath(new URL('../runtime/contracts/run.mjs', import.meta.url)))
+  assert.equal(/denyTools|denyPathPrefixes/.test(contract), false,
+    'RunRequest 契约里又出现了一份下限形状——它会与 run-floor.mjs 那份漂')
+})
 
-  // ★ 因此本套件**没有**证明：某个真实 DSH 进程被一份这样派生出来的下限拒过。
-  //   这里每一次拒绝都发生在**本进程**里，用的是直接构造的 guard。
+test('⑦ ★ 真进程那一对里的下限仍然是**测试挂上去的**（这句话过期时这里要红）', () => {
+  const dshProcess = readFileSync(
+    fileURLToPath(new URL('../runtime/dsh-composition/run-floor-dsh-process.test.mjs', import.meta.url)), 'utf8')
+  assert.match(dshProcess, /enforcementFloor: floorForScenario/,
+    '真进程套件里的下限不再是用例手写的了——那么"没有真实 DSH 进程被**派生出来的**'
+    + '下限拒过"这句话要重判，这一组与文件头都要跟着改')
 })

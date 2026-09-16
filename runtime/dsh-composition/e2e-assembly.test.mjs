@@ -153,6 +153,10 @@ const LEASE = Object.freeze({
   attemptId: 'att:T-e2e:1', taskId: 'T-e2e', workspaceId: 'ws-1',
   goalId: 'g-1', employeeId: 'emp-1', teamPlanRef: 'tp-1',
   modelProfileRef: 'mp-1', workdir: '.',
+  // PRT-214 缺口①：静态 hard floor 由**这一次**的权限档位派生。
+  // 派不出来时 `execute()` **不派发**（`EXECUTOR_RUN_FLOOR_NOT_DERIVED`），
+  // 所以这里必须给出一份真的档位——权限档位缺席不是"没有工具"。
+  permissions: Object.freeze({ preset: 'legion-attended', tools: Object.freeze(['read-file']) }),
   // 用 `maxTokens` 而不是 `maxCostUsd`：没有价格表时后者会让适配器的**事后**
   // 判定报 `cost-unknown` → 判超支（那是正确且保守的），而它会掩盖本组要验的东西。
   budget: { maxTokens: 100000 },

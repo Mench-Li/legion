@@ -26,8 +26,15 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { createProductionExecutor, EXECUTOR_CODES, defaultRequestFor } from './executor.mjs'
+import { createProductionExecutor, EXECUTOR_CODES, defaultRequestFor, deriveRunFloorCarrier, UNSUPPLIED_PERMISSIONS } from './executor.mjs'
 import { validateRunRequest } from '../../runtime/contracts/run.mjs'
+// 判据取**产品**的那几份，不在用例里另抄：
+//   · `readRunFloor` 是传输层判定线上载荷的那一个函数；
+//   · `createHardFloorGuard` 是真 guard（⑥ 最后一条要在它身上读名字空间）；
+//   · `resolveTool` 是真能力目录的解析口（"解析口被注入了什么"必须是可读的）。
+import { RUN_FLOOR_STATES, RUN_FLOOR_WIRE_FIELD, RUN_FLOOR_WIRE_VERSION, readRunFloor } from '../../runtime/contracts/run-floor.mjs'
+import { createHardFloorGuard } from '../../runtime/dsh-composition/enforcement.mjs'
+import { resolveTool as resolveLegionTool } from '../../runtime/dsh-composition/tool-capability.mjs'
 import {
   bindDshRuntime, dshRuntimeBound, resetDshRuntimeBinding,
   productionExecutorProvider, productionExecutorProviderFromEnv, hubIo,
@@ -106,6 +113,10 @@ const LEASE = Object.freeze({
   goalId: 'g1', employeeId: 'e1', teamPlanRef: 'tp1', workdir: 'C:/tmp/ws',
   // 这两个**猜不出来**：它们是"在哪个目录里、用哪个模型跑"。
   workspaceId: 'ws-1', modelProfileRef: 'mp-1',
+  // ★ 权限档位（PRT-214 缺口①之后它**必须**在这里）：静态 hard floor 由它派生。
+  //   真 `claim()` 回来的 lease 上**没有**这个字段，而那种情况现在是**具名拒绝**
+  //   （见 ⑥ `RUN_FLOOR_NOT_DERIVED`）——不是"编一份空档位继续跑"。
+  permissions: Object.freeze({ preset: 'legion-attended', tools: Object.freeze(['read-file']) }),
 })
 
 async function build(over = {}) {
@@ -565,4 +576,235 @@ test('⑤ 非 JSON 响应如实返回文本（不是把它当成一个成功的�
   const r = await io.get('/api/z')
   assert.equal(r.status, 502)
   assert.equal(r.body, '<html>bad gateway</html>')
+})
+
+// ============================================================================
+// ⑥ PRT-214 缺口①：那次 Run 的静态 hard floor **终于有人生产了**
+// ============================================================================
+//
+// 这一组守的是此前**搬运全绿、却空着**的那一格：
+//
+//   > 一个"下限的搬运与安装都做对了、只是从来没有人生产过下限"的部署，
+//   > 与一个"下限已经接上生产"的部署，在只看那几个套件的时候是同一个东西——
+//   > 只不过前者的 guard 里装的永远是一份**没有来源**的空装配。
+//
+// 判据分两半，缺一不可：
+//
+//   · **生产**：`execute()` 把**这一次**的权限档位翻成下限，而且它真的出现在
+//     适配器交出去的端口选项上（读点是 `host.calls.startRun[0].options`）；
+//   · **不生产时的处置**：派生不出来时**不派发**（不是空名单、不是缺席），
+//     而且拒绝码就是权限档位本身给出的那个码。
+//
+// ★ 另一半**故意留在这里不修**：派生出来的名单写的是 Legion 的**工具名**，
+//   而 guard 比的是执行面的工具名。本组最后一条把这个缺口读出来。
+
+/** 一份把权限档位换掉的 lease。 */
+function leaseWith(tools, over = {}) {
+  return Object.freeze({
+    ...LEASE,
+    permissions: Object.freeze({ preset: 'legion-attended', tools: Object.freeze(tools) }),
+    ...over,
+  })
+}
+
+test('⑥ ★★ 下限来自**这一次**的权限档位，而且真的交到了端口上', async () => {
+  const { result, host } = await build()
+  const r = await result.executor.execute(leaseWith(['read-file', 'delete-file']))
+  assert.equal(r.outcome, 'completed')
+
+  assert.equal(host.calls.startRun.length, 1)
+  const carried = host.calls.startRun[0].options.enforcementFloor
+  assert.equal(carried.state, 'installed',
+    `端口收到的不是"装填"那一档：${JSON.stringify(carried)}`)
+  assert.deepEqual([...carried.floor.denyTools], ['delete-file'],
+    '下限里没有这一档里那个带不可逆能力的工具——那它就不是从权限档位派生出来的')
+  assert.equal(carried.floor.cwd, 'C:/tmp/ws', 'cwd 要跟着这次 Run 走（guard 靠它规范化路径）')
+  assert.equal(carried.floor.platform, process.platform)
+})
+
+test('⑥ ★ 换一份权限档位，下限跟着换（不是 DEFAULT_HARD_FLOOR、也不是常量）', async () => {
+  // 判别项是**两次读数不同**：一份写死的下限（或一份空装配）会让两次一样。
+  const a = await build()
+  await a.result.executor.execute(leaseWith(['read-file']))
+  const b = await build()
+  await b.result.executor.execute(leaseWith(['delete-file', 'git-push']))
+
+  const floorA = a.host.calls.startRun[0].options.enforcementFloor
+  const floorB = b.host.calls.startRun[0].options.enforcementFloor
+  assert.deepEqual([...floorA.floor.denyTools], [],
+    '只授权了 read-file 的一次 Run 不该有任何静态禁止项')
+  assert.deepEqual([...floorB.floor.denyTools].sort(), ['delete-file', 'git-push'])
+})
+
+test('⑥ ★ 能力目录不认识的工具**进下限**（不是被静默跳过）', async () => {
+  const { result, host } = await build()
+  await result.executor.execute(leaseWith(['read-file', 'ghost-tool']))
+  const floor = host.calls.startRun[0].options.enforcementFloor.floor
+  assert.deepEqual([...floor.denyTools], ['ghost-tool'],
+    '"不认识"必须落在静态拒绝上：`tool-capability.mjs` 对未登记工具的结论就是 hardFloor')
+})
+
+test('⑥ ★★ 控制面**没给**权限档位 → 具名拒绝，而且**一个字节都没有派发**', async () => {
+  // 真 `claim()` 回来的 lease 上没有 `permissions`（`can-read-authorization-source.test.mjs`
+  // 用的是真 claim）。此前 `defaultRequestFor` 会**编**一份 `{preset, tools: []}` 顶上去，
+  // 而形状上它与"这个员工不能用任何工具"完全一样——派生出的是"派生完成、空名单"。
+  const { result, host } = await build()
+  const noGrants = { ...LEASE }
+  delete noGrants.permissions
+
+  await assert.rejects(() => result.executor.execute(noGrants), (e) => {
+    assert.equal(e.code, EXECUTOR_CODES.RUN_FLOOR_NOT_DERIVED,
+      `拒绝码不是那个具名的下限码（收到 ${e.code}）：笼统的接线码会把排障指向错的地方`)
+    // 派生失败的原因码单独在一个键上——`ExecutorError` 的 `code` 要是被它覆盖了，
+    // 上面那条断言会红，而生产里没人看得出被换过。
+    assert.equal(e.refusalCode, 'run-floor-permissions-missing')
+    assert.equal(e.wireCode, 'RUN_FLOOR_NOT_DERIVED', '线上那个码是另一层的名字，两个都要在')
+    assert.ok(Array.isArray(e.refusals) && e.refusals.includes('run-floor-permissions-missing'),
+      `拒绝理由里没有权限档位那个码：${JSON.stringify(e.refusals)}`)
+    assert.match(e.message, /run-floor-permissions-missing/)
+    return true
+  })
+
+  // 两件"没发生"的事，缺一不可：
+  assert.equal(host.calls.startRun.length, 0, '下限都没派生出来，却已经把 Run 派发出去了')
+  assert.equal(host.calls.probeRuntime, 0,
+    '探测都跑了——说明下限那一步排在花钱/生效的动作之后，顺序反了')
+})
+
+test('⑥ ★★「没给权限档位」与「给了一份空允许名单」是**两个**读数（形状一样，结论相反）', async () => {
+  // 这是本批最容易被"修好"的一件事：两者在形状上都是 `{preset, tools: []}`。
+  //   · 没给   → 派不出来（`run-floor-permissions-missing`）→ **不派发**
+  //   · 给了空 → 派的出来，名单是空的 → **正常派发**（"这次没有东西该被禁止"）
+  // 把两者合并成一个读数的后果是：一次**接线遗漏**长出一句政策的形状。
+  const snapshot = { associations: {}, finalText: 'x' }
+
+  // ① 默认构建器在 lease 没有 permissions 时，填的是那个**按引用可辨认**的常量。
+  const bare = defaultRequestFor(
+    {
+      attemptId: 'att:1', taskId: 'T-1', workspaceId: 'ws-1', modelProfileRef: 'mp-1', workdir: 'C:/tmp/ws',
+      goalId: 'g1', employeeId: 'e1', teamPlanRef: 'tp1',
+    },
+    snapshot,
+  )
+  assert.equal(bare.permissions, UNSUPPLIED_PERMISSIONS,
+    '默认回落换成了一个新造的对象——那么"控制面没给"在派生点上就再也认不出来了')
+
+  // ② 真的走一遍：没给 → 不派发。
+  const none = await build()
+  const noGrants = { ...LEASE }
+  delete noGrants.permissions
+  await assert.rejects(() => none.result.executor.execute(noGrants),
+    (e) => e.code === EXECUTOR_CODES.RUN_FLOOR_NOT_DERIVED)
+  assert.equal(none.host.calls.startRun.length, 0)
+
+  // ③ 反向对照：**显式**给一份空允许名单 → 照常派发，且下限是"派生完成、零禁止项"。
+  //    没有这一条，"一律拒绝"与"真的分开了两者"就分不开。
+  const empty = await build()
+  const r = await empty.result.executor.execute(leaseWith([]))
+  assert.equal(r.outcome, 'completed')
+  assert.equal(empty.host.calls.startRun.length, 1)
+  const carried = empty.host.calls.startRun[0].options.enforcementFloor
+  assert.equal(carried.state, 'installed')
+  assert.deepEqual([...carried.floor.denyTools], [],
+    '显式空允许名单派出来的下限不是空名单——那这两个读数的区别就没了意义')
+})
+
+test('⑥ ★★ 派生失败时**载荷仍然被造出来**，且传输层对它的判定是"拒收"（不是"缺席"）', () => {
+  // 这一条盯的是"不挂字段"那条路：缺席（absent）是**另一个状态**，
+  // 而它意味着"没有人给我下限"。把一次解释不了的输入洗成一次缺席，读数就没了。
+  const request = { ...LEASE, permissions: UNSUPPLIED_PERMISSIONS, [RUN_FLOOR_WIRE_FIELD]: undefined }
+  const carried = deriveRunFloorCarrier(request)
+  assert.equal(carried.state, RUN_FLOOR_STATES.REFUSED)
+  assert.equal(carried.payload.derived, false)
+  assert.equal(carried.payload.floor, null, '"派生不出来"与"派生出空名单"必须是两个读数')
+  assert.deepEqual([...carried.payload.refusals], ['run-floor-permissions-missing'])
+  // 这个载荷过一下**传输层自己的**读取器：它读成 refused，而不是 absent。
+  assert.equal(readRunFloor(carried.payload).state, RUN_FLOOR_STATES.REFUSED)
+  assert.notEqual(readRunFloor(carried.payload).state, RUN_FLOOR_STATES.ABSENT)
+})
+
+test('⑥ ★ `requestFor` 自己造的请求也**照样**被挂上下限（不是只有默认那条路）', async () => {
+  const { result, host } = await build({
+    extra: {
+      requestFor: (lease, snapshot) => ({
+        ...defaultRequestFor(lease, snapshot),
+        // 注意：**没有** `permissions` 的默认回落——由 lease 给的那一份决定。
+        permissions: { preset: 'legion-unattended', tools: ['write-secret'] },
+      }),
+    },
+  })
+  const r = await result.executor.execute({ ...LEASE })
+  assert.equal(r.outcome, 'completed')
+  const floor = host.calls.startRun[0].options.enforcementFloor.floor
+  assert.deepEqual([...floor.denyTools], ['write-secret'],
+    '调用方自己造请求时下限没跟上——"只有默认那条路带下限"与"任何一条路都不带"在生产里同形')
+})
+
+test('⑥ ★★ 请求上**已经有一份**下限 → 拒绝（本模块是唯一的生产者）', async () => {
+  const { result, host } = await build({
+    extra: {
+      requestFor: (lease, snapshot) => ({
+        ...defaultRequestFor(lease, snapshot),
+        // 一份"看起来更严"的手工下限：它绕过了派生，于是它绕过了权限档位。
+        [RUN_FLOOR_WIRE_FIELD]: {
+          version: RUN_FLOOR_WIRE_VERSION, derived: true,
+          floor: { denyTools: ['everything'], denyPathPrefixes: [], platform: process.platform },
+        },
+      }),
+    },
+  })
+  await assert.rejects(() => result.executor.execute({ ...LEASE }), (e) => {
+    assert.equal(e.code, EXECUTOR_CODES.RUN_FLOOR_NOT_DERIVED)
+    assert.match(e.message, new RegExp(RUN_FLOOR_WIRE_FIELD))
+    return true
+  })
+  assert.equal(host.calls.startRun.length, 0)
+})
+
+test('⑥ ★★ 解析口是**注入**的：默认那个是真的能力目录（换掉它，读数就变）', () => {
+  // 这一条同时守着 `team-hub/run-floor.mjs` 的**控制反转**不被吃掉：
+  // 它不 import 能力目录（那会造出 `tool-capability → run-floor → tool-capability`
+  // 这个真实的模块环，表现是"强制面整段加载不上"），解析口由调用方给。
+  const request = { ...LEASE, permissions: { preset: 'p', tools: ['ghost-tool'] } }
+
+  const withReal = deriveRunFloorCarrier(request)
+  assert.deepEqual([...withReal.payload.floor.denyTools], ['ghost-tool'],
+    '真目录对未登记工具的结论没被用上——解析口可能被换成了一个"什么都认识"的替身')
+
+  const withStub = deriveRunFloorCarrier(request, {
+    resolveTool: () => ({ known: true, capabilities: [], requiresApproval: false }),
+  })
+  assert.deepEqual([...withStub.payload.floor.denyTools], [],
+    '一个"忽略输入、一律说认识"的解析口竟然没有改变读数——那说明目录根本没被问到')
+  assert.deepEqual([...resolveLegionTool('ghost-tool').capabilities], [])
+  assert.equal(resolveLegionTool('ghost-tool').known, false)
+})
+
+test('⑥ ★★★ 名字空间：这份"生产出来的"下限对**真执行面名字**放行（记录，不修）', () => {
+  // 这是本条目的**另一半诚实边界**，而且它现在读的是**生产者真的产出的**那一份，
+  // 不是用例手写的名单。结论（与 STATUS.md 的 round-53 一节一致）：
+  const { payload } = deriveRunFloorCarrier({
+    ...LEASE,
+    permissions: { preset: 'legion-unattended', tools: ['delete-file', 'write-secret', 'git-push'] },
+  })
+  const guard = createHardFloorGuard(payload.floor)
+
+  // ① Legion 名字空间里的那些**真的被拒**（它们是 Legion 宿主平面注册的工具名）。
+  for (const name of ['delete-file', 'write-secret', 'git-push']) {
+    assert.equal(typeof guard({ name, arguments: {} }), 'string',
+      `${name} 没有被这份下限拒——那"派生"与"安装"之间就断了一节`)
+  }
+  // ② 而执行面上的真名字**一个都不在名单里**——包括 `git-push` 真正的落地方式。
+  //    一个"按名字禁"的下限在这四个名字上全部放行：
+  for (const name of ['write', 'read', 'pwsh', 'bash']) {
+    assert.equal(guard({ name, arguments: {} }), undefined,
+      `${name} 被拒了——那说明有人偷偷把 Legion 名字翻成了执行面名字，`
+      + '而那会**过度禁止**（`pwsh` 也是低风险 `git-status` 的落地方式）')
+  }
+  // ③ 因此：`git-push` 这个不可逆能力在**执行面**上没有任何名字可禁。
+  //    修法要么给 guard 能力语义，要么在**派生前**把能力翻成执行面名字；
+  //    两者都不是"补一个常量"能了事的，所以这里如实记着。
+  assert.equal(payload.floor.denyTools.includes('pwsh'), false)
+  assert.equal(payload.floor.denyTools.includes('git-push'), true,
+    '派生出来的名单变了（不再是 Legion 能力名）——那这一整条要重判')
 })

@@ -3053,6 +3053,20 @@ async function stageTest() {
         // 一个"整组被跳过、计数里什么都不显示"的套件，与一个压根不存在的套件，
         // 在"这次到底跑了什么"上是同一个东西。
         'product/launcher/dsh-overlay.test.mjs',
+        // PRT-509：Run 凭证的**材料化接线**（`launcher.start()` 里那次调用）。
+        //
+        // 这一条存在的理由与上面那组同源：`openRunCredentials()` 与
+        // `materializeRunCredentials()` 两边**各自都有用例、都全绿**，而它们在
+        // 生产里的调用方数是 **0**。把 `start()` 里那一段整段删掉时，那个模块
+        // 自己的 15 条仍然全绿——因为那一组只测"算得对不对"，不测"有没有人算"。
+        //
+        //   > 一个"能力齐全、测试全绿、而没有任何生产代码调用它"的模块，
+        //   > 与一个不存在的模块，在部署上是同一个东西——只不过前者的报告是绿的。
+        //
+        // 所以本组钉的是三件**只有真接线才有**的事：`start()` 之后读数不是 null、
+        // 盘上真的有一份 `.credentials.yaml`、而那份文件在**产品家目录**下
+        // 而不是 operator 的真实 home 里。
+        'product/launcher/run-credential-materialization.test.mjs',
         // PRT-257 的**另一半**：修复入口（spec `line 275`        // 「禁止自动执行，**提示修复或回滚**」）。
         //
         // `REPAIR_ACTIONS` / `repairPlanFor()` 早在 `runtime/dsh-composition/

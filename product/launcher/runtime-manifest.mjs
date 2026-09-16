@@ -16,6 +16,10 @@
 // 于是 `--runtime-install-plan` 在真实机器上只能退出 3（`RUNTIME_PLAN_NO_MANIFEST`），
 // 用户必须手工写一份。
 //
+// ★ **现在产品真的带了那一份**：`product/release/runtime-manifest.json`
+// （见下面的 `SHIPPED_MANIFEST_PATH`），Launcher 在没给 `--runtime-manifest`
+// 时默认读它，显式给值则覆盖。所以缺口①从"沉默地退 3"变成了"读得到、说得清"。
+//
 //   > 一个"清单格式有校验器、有 33 条用例"的产品，
 //   > 与一个"发出去的每一个版本里都没有那份清单"的产品，
 //   > 在测试报告上是同一个东西——只不过前者的绿全部来自自己造的夹具。
@@ -77,6 +81,7 @@
 // 这一条残余在代码里以 `PATCH_PAIR_SOURCE` 这个读数存在，不靠注释。
 // ============================================================================
 
+import { fileURLToPath } from 'node:url'
 import { DSH_COMPOSITION_PATCH_VERSION } from '../../runtime/dsh-composition/index.mjs'
 import { RUNTIME_CONTRACT_VERSION } from '../../runtime/contracts/adapter.mjs'
 import { PACK_PROTOCOL_VERSION } from '../../runtime/packs/manifest.mjs'
@@ -84,6 +89,29 @@ import { MANIFEST_FORMAT, CHANNELS, validateManifest } from '../upgrade/manifest
 
 /** 本模块的版本。 */
 export const RUNTIME_MANIFEST_VERSION = 1
+
+/**
+ * ★ **随产品发出去的那份 §9.1 清单在磁盘上的位置。**
+ *
+ * 缺口①的原话是「产品里没有任何一份这样的清单」——`--runtime-install-plan`
+ * 于是只能退出 3，用户得自己手写一份。上面这些"来源表"回答了**值从哪来**，
+ * 但**没有回答"那份文件在不在"**：
+ *
+ *   > 一张写清了八个字段各自出处的表，
+ *   > 与一份躺在产品里、装的时候真的会被读到的那份清单，
+ *   > 在测试报告上是同一个东西——只不过前者的绿全部来自自己造的夹具。
+ *
+ * 所以这份文件真的存在，且**由 Launcher 在没给 `--runtime-manifest` 时默认读它**。
+ * 它是 `buildVersionManifest()` 的产物，不是手写的：`runtime-manifest.test.mjs`
+ * 里有一条"从记录下来的五个发布决策重造一遍、必须与磁盘上这份逐字节相同"的用例——
+ * 手工改过一个字段就会红。于是生成器不再只是"用例在调用"。
+ */
+export const SHIPPED_MANIFEST_PATH = fileURLToPath(
+  new URL('../release/runtime-manifest.json', import.meta.url),
+)
+
+/** 相对仓库根的路径，用于消息里报"读的是哪一份"。 */
+export const SHIPPED_MANIFEST_RELATIVE_PATH = 'product/release/runtime-manifest.json'
 
 export const RUNTIME_MANIFEST_CODES = Object.freeze({
   /** 缺一个只能由人决定的字段。 */

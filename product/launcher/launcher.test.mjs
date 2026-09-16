@@ -19,12 +19,13 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 
 import { resolveLayout } from '../paths.mjs'
 import { reserveEphemeralPort } from './ports.mjs'
-import { createLauncher, expandExpectation, productStateOf } from './launcher.mjs'
+import { createLauncher, expandExpectation, productStateOf, withRunCredentialPatch } from './launcher.mjs'
 import { launcherOptionsFrom } from './cli.mjs'
+import { runCredentialPaths } from './run-credential-materialization.mjs'
 
 const REPO_ROOT = new URL('../../', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
 
@@ -130,6 +131,167 @@ test('preflight：密钥库自检自己抛异常也只降级为 warn（**体检�
     assert.ok(d !== undefined, '但必须被看见，不能静默')
     assert.equal(d.severity, 'warn')
     assert.ok(!d.message.includes('boom'), '不原样带出底层 message')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('start：Run 的凭证材料化**接在生产启动路径上**，且那份文件是 Legion 自己的（PRT-509 缺口 ①）', async () => {
+  // ★ 这一条测的是**接线**，不是那个模块的算法。
+  //
+  //   在本用例之前，`openRunCredentials()` 与 `materializeRunCredentials()` 两边
+  //   都有用例、都全绿，而它们在生产里的调用方数是 **0**。把 `launcher.start()`
+  //   里那次 `prepareRuntimeCredentials(...)` 整段删掉时，那个模块自己的 15 条
+  //   **仍然全绿**——因为那一组只测"算得对不对"，不测"有没有人算"。
+  //
+  //   > 一个"能力齐全、测试全绿、而没有任何生产代码调用它"的模块，
+  //   > 与一个不存在的模块，在部署上是同一个东西——只不过前者的报告是绿的。
+  //
+  //   所以判据落在三件**只有真接线才有**的事情上：`start()` 之后
+  //   `runCredentials()` 不是 null；盘上真的有一份 `.credentials.yaml`；
+  //   那份文件在**产品家目录**下而不是在 operator 的真实 home 里。
+  const root = mkdtempSync(join(tmpdir(), 'legion-lz-'))
+  try {
+    const layout = layoutIn(root)
+    // 假的 DSH 声明（真实现会去 DSH 的 base bundle 补丁里读 `apiKeyEnv`）：
+    // 这一条测的是"接线把声明用起来了"，不是"DSH 的包装在哪"。
+    const dshBase = join(root, 'fake-dsh-base', 'cordis.patch.yml')
+    mkdirSync(dirname(dshBase), { recursive: true })
+    writeFileSync(dshBase, '      config:\n        apiKeyEnv: PROBE_API_KEY\n', 'utf8')
+
+    let spawned = 0
+    // ★ 记下**真正被 spawn 出去的**那份命令。断言必须落在这里，而不是 `L.plan`
+    //   上：凭证覆盖层的 `--patch` 是**按需**追加的（只有真的写出了凭证才指过去，
+    //   否则每一次启动的 argv 都会多一个指向空覆盖层的参数）。
+    //   于是"计划里有"与"真的起进程时带上了"是两件事——而只有后者有关系。
+    const spawnedArgs = []
+    // 虚拟时钟（与邻近那几条 `start()` 用例同一做法）：本用例不测"等了多久"，
+    // 而真实 sleep 会让一次就绪超时按真实秒数走完，用例从 5 秒变成 35 秒。
+    let t = 0
+    const L = createLauncher({
+      layout,
+      include: ['team-hub'],
+      ports: { 'team-hub': await reserveEphemeralPort() },
+      exists: () => true,
+      spawnImpl: (file, args) => { spawned += 1; spawnedArgs.push({ file, args: [...(args ?? [])] }); return liveFakeChild() },
+      // 就绪必然失败（没有真的在监听）：本用例要的是"走到材料化那一步之后"，
+      // 不是"起得来"。回滚与就绪的判据由本文件其它用例守着。
+      readiness: { timeoutMs: 150, intervalMs: 50 },
+      sleep: async (ms) => { t += ms },
+      now: () => t,
+      fetchImpl: async () => { throw new Error('refused') },
+      secretsCheck: () => [],
+      runtimeCommand: { file: 'node', args: [join(root, 'dsh', 'lib', 'bin.js')] },
+      dshCredentialsFile: join(root, 'operator-dsh', '.credentials.yaml'),
+      operatorHome: join(root, 'operator-home'),
+      runCredentialRequire: { resolve: () => dshBase },
+      runCredentialHandleFactory: async ({ refs }) => ({
+        refs, held: () => true, get: () => 'probe-value',
+      }),
+    })
+
+    const r = await L.start()
+    assert.ok(spawned >= 1, '必须先真的走到 spawn（材料化在它之前，没 spawn 就是更早的阶段就失败了）')
+
+    // ★ 覆盖层必须**真的进了 Runtime 的命令行**。
+    //
+    //   光写出一份覆盖层文件是不够的：DSH 只有当 `--patch` 指向它时才会读到它。
+    //   一个"文件写好了、而命令行里没有 --patch"的接线，与"什么都没写"在 DSH
+    //   那一侧是同一个结果——而写文件那一步的读数看起来完全正常。
+    const paths0 = runCredentialPaths(layout)
+    const runtimeProc = L.plan.processes.find((p) => p.key === 'runtime')
+    assert.ok(runtimeProc?.command != null, '计划里必须有 runtime 进程')
+    // ★★ 这一步**不许**把**凭证**覆盖层无条件塞进冻结的 `plan`。
+    //
+    //    凭证覆盖层的 `--patch` 是**按需**追加的（在 `start()` 里、材料化成功之后）。
+    //    无条件追加会让每一次启动的 argv 都变，包括那些**根本没有凭证可写**的
+    //    部署——指向一份空覆盖层的 `--patch` 会变成所有部署的常态，
+    //    而它在凭证配好的机器上与正确接线逐字相同。
+    //
+    //    ★ 判据必须指向**那一份具体的文件**：强制面覆盖层（`enforcementOverlay`）
+    //      本来就会往计划里放一个 `--patch`，那是另一条缝、是**对的**。
+    //      只断言"计划里没有 --patch"会把那条正确的缝一起判红——
+    //      一条分不清两件事的断言，会在正确的那一件事上先响。
+    assert.ok(!runtimeProc.command.args.includes(paths0.overlayFile),
+      '`plan` 在 spawn 之前就冻结了，它**不该**已经带**凭证**覆盖层的路径：'
+      + `带着就说明这一步是无条件追加的。args = ${JSON.stringify(runtimeProc.command.args)}`)
+
+    const reading = L.runCredentials()
+    assert.notEqual(reading, null,
+      '启动路径没有走到凭证材料化那一步（`runCredentials()` 返回 null = 那次调用不在）')
+    assert.equal(reading.applied, true, reading.message ?? '')
+    assert.equal(reading.blocking, false)
+
+    const paths = runCredentialPaths(layout)
+    assert.equal(existsSync(paths.targetFile), true,
+      `材料化出来的凭证文件必须真的在盘上：${paths.targetFile}`)
+    // operator 的真实 home **不得**被写（那是另一个程序的地盘）
+    assert.equal(existsSync(join(root, 'operator-dsh')), false, '不得往 operator 的真实 DSH 家目录里写')
+    assert.equal(existsSync(join(root, 'operator-home', '.dsh')), false, '不得往 ~/.dsh 里写')
+    // 覆盖层把 DSH 指到 Legion 那份（否则写的是一份**没人读**的文件——缺口 ③ 的形状）
+    const overlay = readFileSync(paths.overlayFile, 'utf8')
+    assert.match(overlay, /^- id: credentials$/m)
+    assert.ok(overlay.includes(JSON.stringify(paths.targetFile)))
+    assert.equal(r.ok, false, '本用例的就绪必然失败（没有真的在监听）')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('★★★★★ 凭证覆盖层的 `--patch` 是**按需**追加的：没写出凭证就一个参数都不加', () => {
+  // 这一条判的是 PRT-509 收尾时发现的一个真问题：覆盖层参数最初是**无条件**
+  // 追加到冻结的 `plan` 上的，于是每一次启动的 argv 都变——包括那些
+  // **根本没有凭证可写**的部署。而三条既有用例正是按 `--patch` 这个 flag
+  // 本身做断言的，它们红了才发现。
+  //
+  //   > 一个"没东西可写时也把 DSH 指过去"的接线，
+  //   > 与一个"只在真的写了东西时才指过去"的接线，
+  //   > 在凭证配好的机器上表现完全一样——
+  //   > 差别只在没配好的机器上，而那里多出来的那个参数看起来像生效了。
+  //
+  // 判据必须是**双向**的：只测"applied=true 时会加"会漏掉无条件追加
+  // （那条路永远都会加）；只有同时测"applied=false 时一点不变"才能把
+  // "按需"与"无条件"分开。
+  const root = mkdtempSync(join(tmpdir(), 'legion-rcp-'))
+  try {
+    const layout = layoutIn(root)
+    const paths = runCredentialPaths(layout)
+    // 一份最小的假计划：runtime 一个进程，另加一个**别的**进程当对照
+    // （证明我们只动 runtime，没顺手把 parameters 加到所有人身上）。
+    const mkPlan = () => Object.freeze({
+      waves: Object.freeze([Object.freeze(['runtime']), Object.freeze(['team-hub'])]),
+      processes: Object.freeze([
+        Object.freeze({ key: 'runtime', command: Object.freeze({ file: 'node', args: Object.freeze(['bin.js', '--profile', 'web']) }) }),
+        Object.freeze({ key: 'team-hub', command: Object.freeze({ file: 'node', args: Object.freeze(['hub.js']) }) }),
+      ]),
+    })
+    const argsOf = (p, k) => p.processes.find((x) => x.key === k).command.args
+    const base = mkPlan()
+
+    // ① 没有写出凭证 ⇒ **逐字不变**（同一个对象，连参数都不多一个）。
+    assert.equal(withRunCredentialPatch(base, false, paths), base,
+      'applied=false 时计划必须原样返回——否则每次启动的 argv 都会多出指向空覆盖层的 --patch')
+    assert.deepEqual(argsOf(withRunCredentialPatch(base, false, paths), 'runtime'), ['bin.js', '--profile', 'web'])
+
+    // ② 写出来了 ⇒ runtime 的命令行**末尾**追加 `--patch <覆盖层>`。
+    const patched = withRunCredentialPatch(base, true, paths)
+    assert.deepEqual(argsOf(patched, 'runtime'),
+      ['bin.js', '--profile', 'web', '--patch', paths.overlayFile],
+      '写出凭证之后，runtime 的命令行必须真的把 DSH 指到那份覆盖层上')
+
+    // ③ 别的进程**一点都不变**：覆盖层是给 DSH 的，不是给 hub 的。
+    assert.deepEqual(argsOf(patched, 'team-hub'), ['hub.js'], '覆盖层被顺手加到了别的进程上')
+
+    // ④ 原计划没被就地改（`plan` 是冻结的，但这条判的是"我们真的复制了"）：
+    assert.deepEqual(argsOf(base, 'runtime'), ['bin.js', '--profile', 'web'], '原计划被就地改掉了')
+
+    // ⑤ 路径算不出来（`ok !== true`）时 ⇒ 一个参数都不加。
+    //    这条防的是"路径是空字符串却照样加 --patch"——那会让 DSH 起不来，
+    //    而失败看起来像"运行时装坏了"。
+    assert.equal(withRunCredentialPatch(base, true, { ok: false, overlayFile: paths.overlayFile }), base,
+      '路径算不出来时不许加 --patch')
+    assert.equal(withRunCredentialPatch(base, true, { ok: true, overlayFile: '' }), base,
+      '覆盖层路径是空字符串时不许加 --patch')
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

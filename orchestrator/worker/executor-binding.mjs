@@ -245,6 +245,12 @@ export async function productionExecutorProvider(io = {}) {
         canRead: io.canRead,
         fetchImpl,
         budgetActor: deriveBudgetActor(io, env),
+        // ★ 告诫出口**两条路都要带上**（PRT-214 续）。
+        //
+        //   漏掉这一条的后果不是"少了一条日志"：跨进程部署下告诫**完全没有出口**，
+        //   于是"为了拦一个推送而关掉整个 shell"这件事在两个部署形态里
+        //   一个有记录、一个没有——而两份代码在 diff 上看起来只差一行。
+        onFloorNotice: io.onFloorNotice,
       })
     }
     // ── 两条都不通：**原样保留**那条拒绝 ────────────────────────────────
@@ -337,6 +343,11 @@ export async function productionExecutorProvider(io = {}) {
     host, selfCheck, canRead, post, get, ...rest,
     loadSources: sourceLoader.loadSources,
     ...(budgetActor === null ? {} : { budgetActor }),
+    // ★ `rest` 来自**绑定**（`currentBinding()`），而 `onFloorNotice` 是**调用方**
+    //   给的（它要把告诫送进这个进程的日志）。两者不是一回事，所以这里不能
+    //   指望 `...rest` 顺带带上——绑定的形状是 Runtime 进程发布的，
+    //   而"日志写到哪里"是 worker 自己的事。
+    ...(typeof io.onFloorNotice === 'function' ? { onFloorNotice: io.onFloorNotice } : {}),
   })
 }
 
@@ -437,7 +448,7 @@ function refusalFromClientError(e) {
  * 所以先读、先归类，再把**已经算完的结论**包成函数交下去
  * （与 `bootstrap.mjs` 的做法一致：一次装配对应一次结论，不重新探测）。
  */
-async function crossProcessExecutorProvider({ runtimeUrl, runtimeToken, post, get, canRead, fetchImpl, budgetActor = null }) {
+async function crossProcessExecutorProvider({ runtimeUrl, runtimeToken, post, get, canRead, fetchImpl, budgetActor = null, onFloorNotice = null }) {
   if (runtimeToken === null) {
     return Object.freeze({
       ok: false,
@@ -511,6 +522,8 @@ async function crossProcessExecutorProvider({ runtimeUrl, runtimeToken, post, ge
     get,
     loadSources: sourceLoader.loadSources,
     ...(budgetActor === null ? {} : { budgetActor }),
+    // 同进程那条路：`productionExecutorProvider` 的 `io.onFloorNotice`。
+    ...(typeof onFloorNotice === 'function' ? { onFloorNotice } : {}),
   })
 }
 
@@ -625,7 +638,9 @@ export function hubIo({ hubUrl, hubToken, fetchImpl = globalThis.fetch } = {}) {
  * @param {typeof fetch} [input.fetchImpl]
  * @param {(meta: object) => any} [input.canRead] 跨进程路径必填；同进程路径忽略（用绑定里的那份）
  */
-export async function productionExecutorProviderFromEnv({ env = process.env, fetchImpl = globalThis.fetch, canRead } = {}) {
+export async function productionExecutorProviderFromEnv({
+  env = process.env, fetchImpl = globalThis.fetch, canRead, onFloorNotice,
+} = {}) {
   const hubUrl = env.TEAM_HUB_URL ?? null
   const hubToken = env.TEAM_HUB_TOKEN ?? null
   if (hubUrl === null) {
@@ -649,5 +664,9 @@ export async function productionExecutorProviderFromEnv({ env = process.env, fet
     env,
     fetchImpl,
     ...(canRead === undefined ? {} : { canRead }),
+    // ★ 生产入口给的那条告诫出口原样转下去（PRT-214 续）。
+    //   缺省是 `undefined`（不传），由下游判成"这个部署没接出口"——
+    //   **不**在这里补一个 `() => {}`，那会让"没接"与"接了但丢弃"同形。
+    ...(onFloorNotice === undefined ? {} : { onFloorNotice }),
   })
 }

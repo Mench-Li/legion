@@ -719,6 +719,25 @@ export function createRuntimeHostInputsFactory({
         '它是 `startRun` 的**唯一**真来源——编一个"能返回结果的 startRun"就是伪造执行引擎')
     }
 
+    // ── 下限告诫（notices）的出口（PRT-214 续）────────────────────────────
+    //
+    // 安装点（`dsh-composition/run-floor.mjs`）把告诫交给它的 `log` 口，
+    // 而**本文件是那个口的唯一生产供给者**。此前两处调用都不传 `log`，
+    // 于是"为了拦一个推送而关掉整个 shell"这条告诫在真实部署里
+    // 产生了、跨了线、然后被丢掉——`log = null` 的默认值让它悄无声息。
+    //
+    //   > 一个"产出了告诫但没接出口"的下限，与一个"根本没产生告诫"的下限，
+    //   > 在运维读到的输出里是同一个东西。
+    //
+    // 用 `warn` 而不是 `info`：这类告诫说的是一次**代价**（连带禁掉了别的工具、
+    // 或一条政策禁令在执行面上落不了地），它是运维需要看见的东西，
+    // 级别不该与"已挂上下限"这种正常状态输出相同。`ctx.logger` 缺席时
+    // 返回 `null`（而不是空函数）——那让"这个部署没有日志设施"成为
+    // 调用点上可读的事实，而不是一次静默的丢弃。
+    const floorLog = typeof ctx.logger?.warn === 'function'
+      ? (line) => ctx.logger.warn(line)
+      : (typeof ctx.logger?.info === 'function' ? (line) => ctx.logger.info(line) : null)
+
     const runtimeHost = Object.freeze({
       startRun: (provider, options) => startRun(provider, options),
       probeRuntime: () => probe(ctx, { readVersion }),
@@ -752,6 +771,7 @@ export function createRuntimeHostInputsFactory({
         installedFloors.set(payload, installRunFloorIntoAgent({
           agent,
           installation: createRunFloorInstallation(payload),
+          log: floorLog,
         }))
       })
     }
@@ -817,7 +837,7 @@ export function createRuntimeHostInputsFactory({
             + '**拒绝起跑**，而不是让它跑在一个没有下限的执行面上')
         }
         try {
-          reading = installRunFloorIntoAgent({ agent, installation })
+          reading = installRunFloorIntoAgent({ agent, installation, log: floorLog })
         } catch (e) {
           throw registrarError(RUNTIME_HOST_REGISTRAR_CODES.FLOOR_NOT_INSTALLABLE,
             `这次 Run 的下限装不上（${e?.code ?? 'unknown'}）：${e?.message ?? String(e)}`)

@@ -33,6 +33,7 @@ import {
   RUN_FLOOR_CONTRACT_CHECKED,
   RUN_FLOOR_CODES,
   RUN_FLOOR_FLOOR_KEYS,
+  RUN_FLOOR_NOTICE_KEYS,
   RUN_FLOOR_PAYLOAD_KEYS,
   RUN_FLOOR_PORT_STATES,
   RUN_FLOOR_STATES,
@@ -43,7 +44,13 @@ import {
 import { RUN_REQUEST_REQUIRED, validateRunRequest } from './run.mjs'
 
 const LEGAL_FLOOR = Object.freeze({ denyTools: [], denyPathPrefixes: [], platform: 'linux' })
+// ★ `over` 进的是 **floor**，不是载荷。这个区分是上面 `installed()` 的名字没表达出来的
+//   一件事：`installed({ notices: [...] })` 会把 `notices` 放进 `floor`，
+//   读出来是 `floor` 上的未知键（`UNKNOWN_KEY`），而**不是**一条告诫。
+//   写这条用例时我自己先这么写了一次，断言把它当场抓出来了——所以下面要告诫
+//   必须用 `payloadWith()`，不要用 `installed()`。
 const installed = (over = {}) => ({ version: RUN_FLOOR_WIRE_VERSION, derived: true, floor: { ...LEGAL_FLOOR, ...over } })
+const payloadWith = (over = {}) => ({ ...installed(), ...over })
 
 describe('PRT-214 run-floor 契约（搬运形状）', () => {
   test('★ 三个状态各有名字，且 `absent` 与"空下限"是**两个**状态', () => {
@@ -99,6 +106,18 @@ describe('PRT-214 run-floor 契约（搬运形状）', () => {
       [{ version: RUN_FLOOR_WIRE_VERSION, derived: true, floor: { ...LEGAL_FLOOR, denyPathPrefixes: [''] } }, RUN_FLOOR_CODES.BAD_PATH_PREFIX],
       [{ version: RUN_FLOOR_WIRE_VERSION, derived: true, floor: { ...LEGAL_FLOOR, cwd: 7 } }, RUN_FLOOR_CODES.BAD_SHAPE],
       [{ version: RUN_FLOOR_WIRE_VERSION, derived: true, floor: { denyTools: [], denyPathPrefixes: [] } }, RUN_FLOOR_CODES.BAD_SHAPE],
+      // ── 告诫（notices）那一族：读不懂就必须具名拒绝，不许"跳过这条继续装" ──
+      //
+      // 这一段短，但它是**唯一**能产生 `BAD_NOTICE` 的地方：闭集里的码必须
+      // 每一条都有产生者（下面那段断言），否则那个码就只是文件里的一行字。
+      [{ version: RUN_FLOOR_WIRE_VERSION, derived: true, floor: { ...LEGAL_FLOOR }, notices: 'x' }, RUN_FLOOR_CODES.BAD_NOTICE],
+      [{ version: RUN_FLOOR_WIRE_VERSION, derived: true, floor: { ...LEGAL_FLOOR }, notices: [null] }, RUN_FLOOR_CODES.BAD_NOTICE],
+      [{ version: RUN_FLOOR_WIRE_VERSION, derived: true, floor: { ...LEGAL_FLOOR }, notices: [{ code: 'x' }] }, RUN_FLOOR_CODES.BAD_NOTICE],
+      [{ version: RUN_FLOOR_WIRE_VERSION, derived: true, floor: { ...LEGAL_FLOOR }, notices: [{ code: 'x', tool: 't' }] }, RUN_FLOOR_CODES.BAD_NOTICE],
+      [{ version: RUN_FLOOR_WIRE_VERSION, derived: true, floor: { ...LEGAL_FLOOR }, notices: [{ code: 'x', tool: 't', message: 'm', nope: 1 }] }, RUN_FLOOR_CODES.BAD_NOTICE],
+      [{ version: RUN_FLOOR_WIRE_VERSION, derived: true, floor: { ...LEGAL_FLOOR }, notices: [{ code: 'x', tool: 't', message: 'm', dshTools: 'bash' }] }, RUN_FLOOR_CODES.BAD_NOTICE],
+      [{ version: RUN_FLOOR_WIRE_VERSION, derived: true, floor: { ...LEGAL_FLOOR }, notices: [{ code: 'x', tool: 't', message: 'm', dshTools: [''] }] }, RUN_FLOOR_CODES.BAD_NOTICE],
+      [{ version: RUN_FLOOR_WIRE_VERSION, derived: true, floor: { ...LEGAL_FLOOR }, notices: [{ code: 'x', tool: 't', message: 'm', collateral: [7] }] }, RUN_FLOOR_CODES.BAD_NOTICE],
     ]
     const seen = new Set()
     for (const [payload, code] of cases) {
@@ -107,7 +126,7 @@ describe('PRT-214 run-floor 契约（搬运形状）', () => {
       assert.equal(r.code, code, `${JSON.stringify(payload)} 的码应当是 ${code}`)
       seen.add(code)
     }
-    assert.equal(seen.size, 6, `这组用例覆盖了 ${seen.size} 个不同的码`)
+    assert.equal(seen.size, 7, `这组用例覆盖了 ${seen.size} 个不同的码`)
     // 闭集里除了 NOT_SUPPLIED（状态码）之外，每一个都必须有产生者。
     const producible = new Set([...seen, RUN_FLOOR_CODES.NOT_DERIVED, RUN_FLOOR_CODES.NOT_SUPPLIED])
     for (const code of Object.values(RUN_FLOOR_CODES)) {
@@ -153,15 +172,44 @@ describe('PRT-214 run-floor 契约（搬运形状）', () => {
     assert.equal(RUN_FLOOR_CONTRACT_CHECKED.nullRefusedWith, RUN_FLOOR_CODES.NOT_OBJECT)
     assert.equal(RUN_FLOOR_CONTRACT_CHECKED.unknownKeyRefusedWith, RUN_FLOOR_CODES.UNKNOWN_KEY)
     assert.equal(RUN_FLOOR_CONTRACT_CHECKED.notDerivedRefusedWith, RUN_FLOOR_CODES.NOT_DERIVED)
+    // 第四条（`notices` 那一版）：读不懂的告诫必须具名拒绝；
+    // 而**缺席是合法的空**——两件事分开，否则"跳过它"会装成"没有它"。
+    assert.equal(RUN_FLOOR_CONTRACT_CHECKED.badNoticeRefusedWith, RUN_FLOOR_CODES.BAD_NOTICE)
+    assert.equal(RUN_FLOOR_CONTRACT_CHECKED.noticesAbsentIsEmpty, 0)
   })
 
   test('★ 字段名与端口状态是**同一处**定义（服务端、适配器、安装点不各写一遍）', () => {
     assert.equal(RUN_FLOOR_WIRE_FIELD, 'enforcementFloor')
-    assert.deepEqual([...RUN_FLOOR_PAYLOAD_KEYS], ['version', 'derived', 'floor', 'runId', 'refusals'])
+    assert.deepEqual([...RUN_FLOOR_PAYLOAD_KEYS],
+      ['version', 'derived', 'floor', 'runId', 'refusals', 'notices'])
+    assert.deepEqual([...RUN_FLOOR_NOTICE_KEYS], ['code', 'tool', 'message', 'dshTools', 'collateral'])
     assert.deepEqual([...RUN_FLOOR_FLOOR_KEYS], ['denyTools', 'denyPathPrefixes', 'cwd', 'platform'])
     assert.deepEqual(Object.values(RUN_FLOOR_PORT_STATES).sort(), ['absent', 'installed'])
     // `refused` **不**在端口状态里：它的处置是拒收这次 Run，根本走不到端口。
     assert.equal(Object.values(RUN_FLOOR_PORT_STATES).includes('refused'), false)
+  })
+
+  test('★ 告诫的**形状**有两条读法不同：缺席是空、读不懂是拒绝', () => {
+    // 空数组与缺席都读成"这次没有告诫"——但它们**不同源**：
+    // 缺席是"派生点没产出"，空数组是"派生点产出了零条"。这里只要求
+    // 读端把两者都读成 0 条；"为什么是 0"由生产者那一侧记录。
+    assert.equal(readRunFloor(payloadWith({ notices: [] })).notices.length, 0)
+    assert.equal(readRunFloor(payloadWith({})).notices.length, 0)
+    // 合法的一条：键齐全、而且会被规范化成冻结对象（含缺省的 dshTools/collateral）。
+    const one = readRunFloor(payloadWith({
+      notices: [{ code: 'n-1', tool: 'git-push', message: '连带禁了 shell' }],
+    }))
+    assert.equal(one.state, RUN_FLOOR_STATES.INSTALLED)
+    assert.equal(one.notices.length, 1)
+    assert.equal(one.notices[0].code, 'n-1')
+    assert.equal(one.notices[0].tool, 'git-push')
+    // 缺省的 `dshTools` / `collateral` **补成空数组**，而不是留 `undefined`：
+    // 留 `undefined` 会让读端每一次都得判空，而漏判的那一次表现为崩溃或静默跳过。
+    assert.deepEqual([...one.notices[0].dshTools], [])
+    assert.deepEqual([...one.notices[0].collateral], [])
+    assert.deepEqual([...readRunFloor(payloadWith({
+      notices: [{ code: 'n-1', tool: 't', message: 'm', dshTools: ['bash', 'bash'] }],
+    })).notices[0].dshTools], ['bash'])
   })
 })
 

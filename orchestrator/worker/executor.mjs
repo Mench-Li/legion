@@ -181,6 +181,16 @@ export async function createProductionExecutor(deps = {}) {
     adapterFactory = createDshRuntimeAdapter,
     // PRT-510 运行侧：给了 actor 才接预算闸门（见下面为什么没有默认值）。
     budgetActor = null, currency, onBudgetNote, scope = 'default',
+    // PRT-214 续：静态下限**派生成功**时那些"必须被记录"的告诫（连带禁止、
+    // 政策禁令落不了地）的出口。默认 `null`。
+    //
+    // ## 为什么默认是 `null`（"没有出口"）而不是 `() => {}`
+    //
+    // `null` 在调用点是可以被读出来的一个事实（"这个部署没有接记录出口"），
+    // 而 `() => {}` 让"没接"与"接了但什么都不做"变成同一个读数——
+    // 那正是本批要消灭的形状：告诫产生了、单测锁了、生产里没人读。
+    // 但**两者都不许**让这次 Run 失败，见下面调用点的理由。
+    onFloorNotice = null,
   } = deps
 
   if (typeof post !== 'function' || typeof get !== 'function') {
@@ -269,6 +279,10 @@ export async function createProductionExecutor(deps = {}) {
   // 运行中账本要求取消时记下**理由**。本层只记录，不自己取消——
   // 它不知道 Run 的生命周期，而"以为取消已经发出去了"是最坏的一种错觉。
   let cancelRequested = null
+
+  // 下限告诫出口坏掉的痕迹（见 `execute()` 里那个 try/catch）。
+  // 只留第一条：出口通常对每一条都坏，逐条重记会把真正的问题淹没。
+  const noticeSinkFailures = []
 
   /**
    * 读回**冻结下来的**正文。
@@ -359,6 +373,37 @@ export async function createProductionExecutor(deps = {}) {
       // 在生产里（只走默认那条路时）是同一个东西——只不过前者会在有人传了
       // `requestFor` 的那一天安静地少掉下限。
       const carried = deriveRunFloorCarrier(request)
+
+      // ── 告诫（notices）：这里是它们在**worker 进程**里的出口 ────────────────
+      //
+      // 位置在拒绝判定**之前**：派生失败时那些"停之前已经翻出来的连带代价"
+      // 对排障同样有用，而且"这条告诫存不存在"不该取决于派生成不成功。
+      //
+      // ## 为什么出口的异常**必须吞掉**（而且这与"不静默"不矛盾）
+      //
+      // 一个会抛的出口（日志盘满了、stdout 关了）如果能把异常传上去，
+      // 一次**纯诊断**失败就变成了一次 Run 失败——而这次 Run 的下限本身
+      // 是好的、工具调用本来会被正确地拦。让诊断能停生产，比丢掉一条诊断更坏。
+      //
+      //   > 一个"记录不下来就别跑了"的实现，与一个"把注意力和保护一起丢掉"的实现，
+      //   > 是同一个东西——只不过前者看起来更负责任。
+      //
+      // 但吞掉的那个异常**不能连自己也一起吞**：它必须留下痕迹，否则
+      // "出口坏了"与"没有告诫"又变成同一个读数。所以坏掉的出口会写进
+      // `notices.carryFailed`，随下次成功派生一起被人看到。
+      if (typeof onFloorNotice === 'function') {
+        for (const notice of carried.notices) {
+          try {
+            onFloorNotice(notice)
+          } catch (e) {
+            // 只记第一次：出口通常会对每一条都坏，逐条重记会把真正的问题淹没。
+            if (noticeSinkFailures.length === 0) {
+              noticeSinkFailures.push(`${notice?.code ?? '(无码)'}: ${e?.message ?? String(e)}`)
+            }
+          }
+        }
+      }
+
       if (carried.state === RUN_FLOOR_STATES.REFUSED) {
         // 归因要落到**派生失败的原因码**上，而不是停在传输层那个笼统的
         // `RUN_FLOOR_NOT_DERIVED` 上：后者说的是"没能读出来"，
@@ -476,6 +521,10 @@ export async function createProductionExecutor(deps = {}) {
         settlement,
       }
       if (cancelRequested !== null) base.cancelRequested = cancelRequested
+      // 下限告诫出口坏掉的痕迹：**成功**的 Run 也要能说出"有一条告诫没能被记录"。
+      // 只在真的有失败时才加这个键——无差别地加一个空数组，会让"出口坏了"
+      // 与"这次没有告诫"在结果的键集合上看起来一样（`[]` 与缺键是两件事）。
+      if (noticeSinkFailures.length > 0) base.floorNoticeSinkFailed = Object.freeze([...noticeSinkFailures])
       return Object.freeze(base)
     },
   })
@@ -676,9 +725,31 @@ export function deriveRunFloorCarrier(request, {
     platform,
     runId: request.runId ?? null,
   })
+  // ★ 告诫（notices）**两条分支都挂**，而且必须挂在载荷上。
+  //
+  //   派生**成功**时没有失败可以搭车：Run 会照跑，`execute()` 不会抛，
+  //   于是"这次下限连带禁了 run-command"这件事在本进程里**没有第二个出口**。
+  //   载荷是它唯一的载体，安装点靠它才读得到（见 `RUN_FLOOR_PAYLOAD_KEYS` 那段）。
+  //
+  //   派生失败时也挂：那时虽然已经有 `refusals` 在说为什么停，
+  //   但"停之前已经翻出来的连带代价"对排障仍然有用——而且如果只在成功分支挂，
+  //   这条告诫的**存在与否就取决于派生成不成功**，那是两个无关的读数被绑在一起。
+  //
+  //   形状在这里**规范化**（缺的 `dshTools`/`collateral` 补空数组）：
+  //   契约那一层要求键齐全，而派生点内部产出的两条 notice 形状本来就不完全一样
+  //   （`unknown-tool-denied` 没有 `dshTools`）。让契约容忍"有的有有的没有"，
+  //   等于把"缺失"和"空"在读端混成一件事。
+  const wireNotices = Object.freeze(result.notices.map((n) => Object.freeze({
+    code: n.code,
+    tool: n.tool,
+    message: n.message,
+    dshTools: Object.freeze([...(n.dshTools ?? [])]),
+    collateral: Object.freeze([...(n.collateral ?? [])]),
+  })))
   const payload = result.derived === true
     ? Object.freeze({
       version: RUN_FLOOR_WIRE_VERSION, derived: true, floor: result.floor, runId: result.runId,
+      notices: wireNotices,
     })
     : Object.freeze({
       version: RUN_FLOOR_WIRE_VERSION,
@@ -688,6 +759,7 @@ export function deriveRunFloorCarrier(request, {
       // 拒绝码**上载荷**：载荷本身是这份失败唯一会被人读到的地方
       // （`readRunFloor` 不看这个键，但审计/排障会看）。
       refusals: Object.freeze(result.refusals.map((r) => r.code)),
+      notices: wireNotices,
     })
   // 判定**借用传输层那一份**：这里不另写"怎样才算能装"的规则。
   // 两份规则会漂，而漂的那一天表现为"生产者说能装、适配器说解释不了"。
@@ -699,6 +771,9 @@ export function deriveRunFloorCarrier(request, {
     code: reading.code ?? null,
     message: reading.message ?? null,
     refusals: result.refusals,
+    // 与 `refusals` 对称地直接暴露：调用方不必下钻 `result` 才能读到告诫。
+    // 它们同时也在 `payload` 上——那一份是给**跨进程**的安装点读的。
+    notices: result.notices,
     result,
   })
 }

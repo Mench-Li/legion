@@ -162,9 +162,10 @@ export const NON_ENV_LITERALS = Object.freeze([
   'TOKENS_INCONSISTENT', // runtime/contracts/price-table.mjs
   'TOKENS_UNKNOWN', // runtime/contracts/price-table.mjs
   'VERSION_REQUIRED', // runtime/contracts/price-table.mjs
-  // ── runtime/contracts/run-floor.mjs（8 条）PRT-214 缺口①：一次 Run 的静态 hard floor
+  // ── runtime/contracts/run-floor.mjs（9 条）PRT-214 缺口①：一次 Run 的静态 hard floor
   //    在**线上**长什么样。这一组是"搬运形状"的判定码：每一种的修法不同，
   //    所以各自一个名字（`RUN_FLOOR_NOT_SUPPLIED` 是状态码，不在这一组里）。
+  'RUN_FLOOR_BAD_NOTICE', // runtime/contracts/run-floor.mjs
   'RUN_FLOOR_BAD_PATH_PREFIX', // runtime/contracts/run-floor.mjs
   'RUN_FLOOR_BAD_SHAPE', // runtime/contracts/run-floor.mjs
   'RUN_FLOOR_BAD_TOOL_NAME', // runtime/contracts/run-floor.mjs

@@ -158,7 +158,7 @@ export const RUN_FLOOR_INSTALL_CODES = Object.freeze({
 export { RUN_FLOOR_PORT_STATES }
 
 /** 端口载荷允许出现的键。**闭合**：多一个就拒（同 `readRunFloor` 的理由）。 */
-export const RUN_FLOOR_PORT_KEYS = Object.freeze(['state', 'floor'])
+export const RUN_FLOOR_PORT_KEYS = Object.freeze(['state', 'floor', 'notices'])
 
 /** 装到 Agent 作用域上的两个面。`pre-execute` 在前，`guard` 在后。 */
 export const RUN_FLOOR_SURFACES = Object.freeze(['tools/pre-execute', 'tools.guard'])
@@ -217,12 +217,16 @@ function isPlainObject(value) {
  *
  * `state: 'installed'` 时，`floor` 的形状**不在这里另写一份检查**：它被重新包成
  * 一份线上下限载荷交给 `readRunFloor()`——于是"什么算一份合法下限"全仓库只有一处定义。
+ * `notices` 同理一起借过去：告诫的形状判定也只有那一道，本层不抄第二份。
  *
  * @param {unknown} payload
- * @returns {{state: string, floor: object|null, code: string|null, message: string|null}}
+ * @returns {{state: string, floor: object|null, notices: readonly object[],
+ *            code: string|null, message: string|null}}
  */
 export function readRunFloorPortPayload(payload) {
-  const refuse = (code, message) => Object.freeze({ state: RUN_FLOOR_STATES.REFUSED, floor: null, code, message })
+  const refuse = (code, message) => Object.freeze({
+    state: RUN_FLOOR_STATES.REFUSED, floor: null, notices: Object.freeze([]), code, message,
+  })
   if (!isPlainObject(payload)) {
     return refuse(RUN_FLOOR_INSTALL_CODES.NOT_AN_OBJECT,
       `端口上的下限载荷必须是对象，收到 ${payload === null ? 'null' : Array.isArray(payload) ? 'array' : typeof payload}`)
@@ -242,6 +246,7 @@ export function readRunFloorPortPayload(payload) {
     return Object.freeze({
       state: RUN_FLOOR_STATES.ABSENT,
       floor: null,
+      notices: Object.freeze([]),
       code: RUN_FLOOR_CODES.NOT_SUPPLIED,
       message: '这次 Run 没有下限（`enforcementFloor` 不在 RunRequest 上）',
     })
@@ -251,15 +256,20 @@ export function readRunFloorPortPayload(payload) {
       `端口上的下限载荷 state 是 ${JSON.stringify(payload.state)}，本实现只认识 `
       + `${JSON.stringify(Object.values(RUN_FLOOR_PORT_STATES))}`)
   }
-  // 借用线上那一份形状判定（**同一份实现**，不是抄一份）
-  const asWire = readRunFloor({ version: RUN_FLOOR_WIRE_VERSION, derived: true, floor: payload.floor })
+  // 借用线上那一份形状判定（**同一份实现**，不是抄一份）——`floor` 与 `notices` 一起。
+  const asWire = readRunFloor({
+    version: RUN_FLOOR_WIRE_VERSION, derived: true, floor: payload.floor, notices: payload.notices,
+  })
   if (asWire.state !== RUN_FLOOR_STATES.INSTALLED) {
+    // 措辞要覆盖**两个**被借去检查的字段，否则一条形状坏掉的 `notices` 会被
+    // 读成"floor 解释不通"，排障的人会去看那份下限（它其实是对的）。
     return refuse(RUN_FLOOR_INSTALL_CODES.MISSING_FLOOR,
-      `端口上的下限载荷说 state 是 installed，但 floor 解释不通（${asWire.code}）：${asWire.message}`)
+      `端口上的下限载荷说 state 是 installed，但其中的 floor 或 notices 解释不通（${asWire.code}）：${asWire.message}`)
   }
   return Object.freeze({
     state: RUN_FLOOR_STATES.INSTALLED,
     floor: asWire.floor,
+    notices: asWire.notices,
     code: null,
     message: null,
   })
@@ -338,6 +348,10 @@ export function createRunFloorInstallation(payload) {
       code: null,
       message: null,
       floor: reading.floor,
+      // ★ 告诫跟着装备一起走。它是"下限装上去之后仍然成立"的读数，所以落在
+      //   **装置**上而不是某一次调用上：装的时候没人读，就再也没有第二次机会
+      //   ——`installRunFloorIntoAgent` 的 `log` 口是它唯一的读者（见那里）。
+      notices: reading.notices,
       // ★ 判定逻辑**不在这里**：它就是 `enforcement.mjs` 的 `createHardFloorGuard`，
       //   与装配级那一行、与 `composePreExecuteFloor` 用的是同一个函数。
       guard: createHardFloorGuard(reading.floor),
@@ -361,6 +375,7 @@ export function createRunFloorInstallation(payload) {
       // 冒名顶替。`denyTools: 0` 同样是读数而不是判定：这一档的拒绝**与名字无关**，
       // 而一份名字名单永远表达不出"拒绝一切"。
       floor: null,
+      notices: reading.notices,
       guard: (exec) => {
         const name = exec !== null && typeof exec === 'object' && typeof exec.name === 'string'
           ? exec.name
@@ -391,6 +406,7 @@ export function createRunFloorInstallation(payload) {
     code,
     message: reading.message,
     floor: null,
+    notices: reading.notices,
     guard: () => reason,
     denyTools: 0,
     denyPathPrefixes: 0,
@@ -469,6 +485,9 @@ export function installRunFloorIntoAgent({ agent, installation, onGuard = null, 
     surfaces: Object.freeze([...RUN_FLOOR_SURFACES]),
     denyTools: installation.denyTools,
     denyPathPrefixes: installation.denyPathPrefixes,
+    // 装备上的告诫原样带出来：`log` 口是**默认**读者，但调用方（诊断页、用例、
+    // 将来的审计行）要拿到结构化的那几条，不该去 grep 日志文本。
+    notices: Object.freeze([...(installation.notices ?? [])]),
     agentId: agent.id === undefined ? null : String(agent.id),
     guard,
     dispose: () => {
@@ -484,6 +503,26 @@ export function installRunFloorIntoAgent({ agent, installation, onGuard = null, 
     + `${reading.agentId ?? '<unknown>'}（state=${installation.state}`
     + `${installation.code === null ? '' : ` code=${installation.code}`}`
     + ` denyTools=${installation.denyTools} denyPathPrefixes=${installation.denyPathPrefixes}）`)
+
+  // ── 告诫（notices）：**这就是它的生产消费者** ──────────────────────────────
+  //
+  // 一行一条，而不是拼进上面那一行：告诫是"这次下限**额外**做了什么/做不到什么"，
+  // 把它挤进状态行会让它在下一次有人精简日志时第一个被删掉——而那正是
+  // step-1「接受连带禁止，但必须记录」那条裁决要防的事。
+  //
+  // 为什么值得单独占一行日志：
+  //
+  //   > 一个"为了拦一个推送而关掉整个 shell"的下限，与一个"只拦了推送"的下限，
+  //   > 在 `denyTools` 上是同一个读数、在状态行上也是同一个读数——
+  //   > 只有当那条告诫真的被打印出来时，这两件事才分得开。
+  //
+  // `installation.notices` 缺席时（旧调用方、或 `absent`/`refused` 那两档）
+  // 什么都不打印：**不**补一句"没有告诫"——那是把一个不存在的读数写进日志。
+  for (const n of installation.notices ?? []) {
+    log?.(`[run-floor] 告诫 ${n.code}：关于「${n.tool}」——${n.message}`
+      + (n.dshTools.length > 0 ? `（执行面上禁掉 ${JSON.stringify(n.dshTools)}）` : '')
+      + (n.collateral.length > 0 ? `（连带也会禁掉 ${JSON.stringify(n.collateral)}）` : ''))
+  }
   return reading
 }
 

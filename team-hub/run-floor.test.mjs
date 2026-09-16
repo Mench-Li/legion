@@ -152,9 +152,11 @@ function denyEntryFor(result, tool) {
 // ═══════════════════════════════════════════ ① ★★★★★ 一个来源，不是两份
 
 test('① ★★★★★ 控制面、DSH 侧目录与派生模块取到的是**同一个数组对象**', () => {
-  // ★ 本批 1 → 2：`denyTools` 的名字空间从 Legion 能力名改成执行面工具名，
-  //   那是一件**改变 guard 行为**的事，不是加了个码。
-  assert.equal(RUN_FLOOR_VERSION, 2)
+  // ★ 本批 2 → 3：派生结果多了一类**会跨线**的内容——告诫（`notices`），
+  //   载荷为此多了一个键。所以这个号跟着动：它描述的是"这份产物作为契约长什么样"。
+  //   （1 → 2 那次动的是名字空间，即 `denyTools` 里那些字符串**指什么**；
+  //    两次都由同一个号承载，因为这个号的全部意义就是"契约变了"。）
+  assert.equal(RUN_FLOOR_VERSION, 3)
   assert.equal(Object.isFrozen(HARD_FLOOR_CAPABILITIES), true)
   // ★ 两个版本号必须**一起**动。
   //

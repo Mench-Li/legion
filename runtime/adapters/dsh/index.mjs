@@ -393,7 +393,15 @@ export function createDshRuntimeAdapter(host, options = {}) {
      * 于是"哪一份下限属于哪一次 Run"由**对象身份**回答——并发两次派工不可能串台。
      */
     const floorPayload = floorReading.state === RUN_FLOOR_STATES.INSTALLED
-      ? Object.freeze({ state: RUN_FLOOR_PORT_STATES.INSTALLED, floor: floorReading.floor })
+      // ★ `notices` 原样带上：它是**成功派生**那一档唯一的告诫载体，而安装点
+      //   （`dsh-composition/run-floor.mjs`）是唯一读得到它的地方——那边会把它
+      //   写进"已装下限"的诊断行。这里**不解析、不改写**：措辞由知道原因的
+      //   派生点写，这一层只负责不把它弄丢。
+      ? Object.freeze({
+        state: RUN_FLOOR_PORT_STATES.INSTALLED,
+        floor: floorReading.floor,
+        notices: floorReading.notices,
+      })
       : Object.freeze({ state: RUN_FLOOR_PORT_STATES.ABSENT })
 
     const runId = request.runId

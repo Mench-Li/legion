@@ -28,7 +28,32 @@ import { claimGateFromExecutor } from './claim-gate.mjs'
 // 由 `runtime/dsh-composition/` 在 DSH 进程内完成（PRT-214/215），
 // 而 worker 是独立进程。装上之后，**这个入口不需要改一行代码**就开始真的执行。
 const startup = await runWorkerProcess({
-  executorProvider: () => productionExecutorProviderFromEnv({}),
+  executorProvider: () => productionExecutorProviderFromEnv({
+    // ★ PRT-214 续：静态下限派生成功时那些"必须被记录"的告诫的**生产出口**。
+    //
+    //   没有这一行，`run-floor-collateral-denial`（"为了拦一个推送，整个 shell
+    //   会被一起禁掉"）与政策禁令落不了地那两条告诫就只是派生物里的两个字段：
+    //   产生了、单测锁了、而**这台机器上没有任何人读得到**。
+    //
+    //     > 一条"记录在案"的连带禁止，与一条没人看得见的连带禁止，
+    //     > 在运维读到的那份输出里是同一个东西。
+    //
+    //   写到 stderr 而不是 stdout：它是**告诫**（这次下限额外付出了什么代价），
+    //   不是状态输出。与下面启动阶段的 `⚠` 走同一条流，于是"启动告警"与
+    //   "运行期告诫"在收集端落在同一个地方，不需要两套采集规则。
+    //
+    //   ⚠️ 出口本身的异常由 `executor.mjs` 吞掉（诊断不许让 Run 失败），
+    //   但**不静默**：那次失败会以 `floorNoticeSinkFailed` 出现在结果里。
+    onFloorNotice: (notice) => {
+      process.stderr.write(
+        `[worker] 下限告诫 ${notice?.code ?? '(无码)'}：关于「${notice?.tool ?? '(未点名)'}」——`
+        + `${notice?.message ?? ''}`
+        + (notice?.dshTools?.length ? `（执行面上禁掉 ${JSON.stringify([...notice.dshTools])}）` : '')
+        + (notice?.collateral?.length ? `（连带也会禁掉 ${JSON.stringify([...notice.collateral])}）` : '')
+        + '\n',
+      )
+    },
+  }),
   // PRT-711：认领闸门。**这是 `mayClaimTasks()` 的生产调用点**——
   // 没有它，"正在升级"与"Runtime 不可用"都不会阻止 worker 领走任务。
   claimGateFromExecutor,

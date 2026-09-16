@@ -864,3 +864,73 @@ test('⑥ ★★★★★ 名字空间：生产出来的名单**真的命中执�
   assert.equal(guard({ name: 'write', arguments: {} }), undefined)
   assert.equal(guard({ name: 'read', arguments: {} }), undefined)
 })
+
+// ============================================================================
+// ⑧ 下限告诫的**生产出口**（PRT-214 续）
+//
+// 这一组盯的不是"告诫在不在派生物里"（上一组已经钉了），而是**它有没有人读**：
+//
+//   > 一条产生了、单测锁了、而生产里没有任何人读的告诫，
+//   > 与一条根本没产生的告诫，在运维读到的输出里是同一个东西。
+//
+// 出口是 `createProductionExecutor` 的 `onFloorNotice`，而
+// `product/orchestrator/worker.mjs` 是它的**唯一生产供给者**（写 stderr）。
+// 所以下面三条分别钉：出口收得到、出口坏了不许连累 Run、没接出口是一种
+// **可见**的缺席（而不是被一个空函数冒名顶替）。
+// ============================================================================
+
+test('⑧ ★★ 真 execute 全链路：`onFloorNotice` 收到那条连带禁止告诫', async () => {
+  const seen = []
+  const { result } = await build({ extra: { onFloorNotice: (n) => seen.push(n) } })
+  assert.equal(result.ok, true, JSON.stringify(result))
+
+  const r = await result.executor.execute({
+    ...LEASE,
+    // `git-push` 是**执行面上有名字**的那一个（→ bash/pwsh），
+    // 而 bash/pwsh 同时承载 run-command / git-status / git-commit —— 于是有连带。
+    permissions: { preset: 'legion-unattended', tools: ['git-push', 'read-file'] },
+  })
+  assert.equal(r.outcome, 'completed')
+
+  assert.equal(seen.length, 1, `出口收到 ${seen.length} 条告诫：${JSON.stringify(seen.map((n) => n?.code))}`)
+  assert.equal(seen[0].code, 'run-floor-collateral-denial')
+  assert.equal(seen[0].tool, 'git-push')
+  assert.deepEqual([...seen[0].dshTools], ['bash', 'pwsh'])
+  assert.deepEqual([...seen[0].collateral], ['run-command', 'git-status', 'git-commit'])
+  // 人话也在：措辞由**知道原因的那一侧**写，出口不该自己拼一句。
+  assert.match(seen[0].message, /连带|同时承载/)
+})
+
+test('⑧ ★★ 出口自己抛了 ⇒ Run **照常完成**，但失败留下痕迹', async () => {
+  // 一个会抛的出口（日志盘满、stdout 关了）如果能把异常传上去，
+  // 一次**纯诊断**失败就变成一次 Run 失败——而这次 Run 的下限本身是好的、
+  // 工具调用本来会被正确拦下。让诊断能停生产，比丢掉一条诊断更坏。
+  const { result } = await build({
+    extra: { onFloorNotice: () => { throw new Error('日志盘满了') } },
+  })
+  const r = await result.executor.execute({
+    ...LEASE,
+    permissions: { preset: 'legion-unattended', tools: ['git-push', 'read-file'] },
+  })
+  // ① Run 没被连累。
+  assert.equal(r.outcome, 'completed', '出口抛错把一次好 Run 弄失败了')
+
+  // ② 但**不许静默**：痕迹必须在结果里，否则"出口坏了"与"没有告诫"同形。
+  assert.equal(Array.isArray(r.floorNoticeSinkFailed), true,
+    '出口坏掉了，结果里却没有痕迹——那与"这次没有告诫"是同一个读数')
+  assert.equal(r.floorNoticeSinkFailed.length, 1, '只该记第一条：出口通常对每条都坏，逐条重记会淹没真问题')
+  assert.match(r.floorNoticeSinkFailed[0], /日志盘满了/)
+})
+
+test('⑧ ★ 没接出口时**不**在结果里写一个空失败数组', async () => {
+  // `floorNoticeSinkFailed: []` 与"没有这个键"必须是两件事：
+  // 前者读作"出口接上了、这次没坏"，后者读作"这个部署没接出口"。
+  // 无差别地加一个空数组，会让这两种处境在结果的键集合上长得一样。
+  const { result } = await build()
+  const r = await result.executor.execute({
+    ...LEASE,
+    permissions: { preset: 'legion-unattended', tools: ['git-push', 'read-file'] },
+  })
+  assert.equal(r.outcome, 'completed')
+  assert.equal('floorNoticeSinkFailed' in r, false)
+})

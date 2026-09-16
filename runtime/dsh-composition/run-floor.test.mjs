@@ -118,6 +118,10 @@ const floorOf = (over = {}) => ({
 
 /** 一份"有下限"的端口载荷。 */
 const installedPort = (floor) => ({ state: RUN_FLOOR_PORT_STATES.INSTALLED, floor })
+/** 一份"带告诫的有下限"端口载荷（PRT-214 续：告诫是**成功派生**那一档的读数）。 */
+const installedPortWith = (floor, notices) => ({
+  state: RUN_FLOOR_PORT_STATES.INSTALLED, floor, notices,
+})
 /** 一份"没有下限"的端口载荷。 */
 const absentPort = () => ({ state: RUN_FLOOR_PORT_STATES.ABSENT })
 
@@ -415,6 +419,103 @@ describe('PRT-214 run-floor（纯判定，不需要 DSH 检出）', () => {
 
   test('★ 两个面是有名字的：pre-execute 与 guard', () => {
     assert.deepEqual([...RUN_FLOOR_SURFACES], ['tools/pre-execute', 'tools.guard'])
+  })
+
+  // ── 告诫（notices）：PRT-214 续 ─────────────────────────────────────────
+  //
+  // 这一组的判据不是"能不能把一条告诫从端口搬到安装读数上"——那是个赋值。
+  // 它盯的是 step-1 那条裁决「接受连带禁止，但**必须记录**」真正落地的那一环：
+  //
+  //   > 一条产生了、单测锁了、而**生产里没有任何人读**的告诫，
+  //   > 与一条根本没产生的告诫，在库里和日志里是同一个东西。
+  //
+  // 所以下面每一条都落在一个**能被读到的出口**上（安装读数的 `notices`、
+  // 或 `log` 口真的收到了那条文本），而不是落在"字段等于某个值"上。
+  //
+  // ★ 这里的码写成**字面量**，不 import `team-hub/run-floor.mjs` 的
+  //   `RUN_FLOOR_NOTICE_CODES`。那不是省事：`runtime/ → team-hub/` 是本仓库
+  //   **零处**的反向依赖（`enforcement-mapping.mjs:101` 为它写过理由），
+  //   而安装点确实**不需要**认识 Legion 的告诫词表——它只把跨线来的码原样打印。
+  //   所以"这一层不认识那些码"是**要被钉住的事实**，不是一处待还的技术债：
+  //   真 import 进来，`runtime/` 就绑上了控制面的词表，而那份词表是会长的东西。
+  const NOTICE_COLLATERAL = 'run-floor-collateral-denial'
+
+  test('★★ 告诫从端口一路走到安装读数的 `notices`（收到它的人在这里）', () => {
+    const notice = {
+      code: NOTICE_COLLATERAL,
+      tool: 'git-push',
+      message: '为了在执行面上禁掉「git-push」，必须禁掉 ["bash","pwsh"]',
+      dshTools: ['bash', 'pwsh'],
+      collateral: ['run-command', 'git-status', 'git-commit'],
+    }
+    const installation = createRunFloorInstallation(
+      installedPortWith(floorOf({ denyTools: ['bash', 'pwsh'] }), [notice]))
+    assert.equal(installation.state, RUN_FLOOR_STATES.INSTALLED)
+    assert.equal(installation.notices.length, 1, '告诫没有跟着下限一起被造出来')
+    assert.equal(installation.notices[0].code, NOTICE_COLLATERAL)
+    assert.equal(installation.notices[0].tool, 'git-push')
+    assert.deepEqual([...installation.notices[0].dshTools], ['bash', 'pwsh'])
+    assert.deepEqual([...installation.notices[0].collateral], ['run-command', 'git-status', 'git-commit'])
+    assert.equal(Object.isFrozen(installation.notices), true)
+    assert.equal(Object.isFrozen(installation.notices[0]), true)
+  })
+
+  test('★★ `log` 口**真的**收到那条告诫——这是它的生产消费者', () => {
+    // 这条用例是整组的重点：断言落在"有没有人读到"上，而不是"字段在不在"上。
+    const lines = []
+    const installation = createRunFloorInstallation(installedPortWith(
+      floorOf({ denyTools: ['bash', 'pwsh'] }),
+      [{
+        code: NOTICE_COLLATERAL,
+        tool: 'git-push',
+        message: '为了禁掉推送，整个 shell 会被禁',
+        dshTools: ['bash', 'pwsh'],
+        collateral: ['git-commit'],
+      }],
+    ))
+    // 用最小的假 agent（这一条只测 `log` 口，不需要真 ToolRuntime）。
+    const install = installRunFloorIntoAgent({
+      agent: { id: 'agent-a', ctx: { tools: { guard: () => () => {} }, on: () => () => {} } },
+      installation,
+      log: (s) => lines.push(s),
+    })
+    assert.equal(install.state, RUN_FLOOR_STATES.INSTALLED)
+    // ① 状态行仍然在（没被告诫挤掉）。
+    assert.equal(lines.filter((l) => l.includes('已把这次 Run 的下限装到')).length, 1)
+    // ② 告诫**单独占一行**，而且带着码、工具名与那句人话。
+    const noticeLines = lines.filter((l) => l.includes(NOTICE_COLLATERAL))
+    assert.equal(noticeLines.length, 1, `告诫没有被打印出来：${JSON.stringify(lines)}`)
+    assert.ok(noticeLines[0].includes('git-push'), '告诫那一行没点名是哪个工具')
+    assert.ok(noticeLines[0].includes('为了禁掉推送'), '告诫那一行丢了派生点写的原话')
+    assert.ok(noticeLines[0].includes('bash'), '告诫那一行没说执行面上禁了哪些名字')
+    assert.ok(noticeLines[0].includes('git-commit'), '告诫那一行没说连带禁了哪些 Legion 工具')
+    // ③ 结构化读数也可取（`log` 文本不该是唯一出口：文本会被 grep、会被改格式）。
+    assert.deepEqual(install.notices.map((n) => n.code), [NOTICE_COLLATERAL])
+  })
+
+  test('★ 没有告诫时**不**打印一句"没有告诫"', () => {
+    // 缺席是"这次派生没有任何告诫"，不是一条读数为零的告诫。
+    // 补一句"告诫：无"会把一个不存在的读数写进日志——而下一次有人按
+    // "日志里有没有告诫行"统计时，每一行 Run 都会被算成有告诫。
+    const lines = []
+    installRunFloorIntoAgent({
+      agent: { id: 'agent-a', ctx: { tools: { guard: () => () => {} }, on: () => () => {} } },
+      installation: createRunFloorInstallation(installedPort(floorOf())),
+      log: (s) => lines.push(s),
+    })
+    assert.equal(lines.filter((l) => l.includes('告诫')).length, 0)
+  })
+
+  test('★ 告诫的形状坏掉 → 整个端口载荷具名拒绝（不是"这条跳过")', () => {
+    // 一条读不懂的告诫必须把这次安装判成 refused：跳过它继续装，
+    // 与"这条告诫不存在"在读端是同一个东西——而这类告诫的全部价值就是它会被读到。
+    const bad = createRunFloorInstallation(installedPortWith(floorOf(), [{ code: 'n-1' }]))
+    assert.equal(bad.state, RUN_FLOOR_STATES.REFUSED)
+    assert.equal(bad.code, RUN_FLOOR_INSTALL_CODES.MISSING_FLOOR)
+    // 措辞必须同时提到 floor 与 notices，否则排障的人会去查那份**正确**的下限。
+    assert.ok(bad.message.includes('notices'), `文案没提 notices：${bad.message}`)
+    // refused 那一档**没有**告诫可读（不是空数组以外的别的什么）。
+    assert.deepEqual([...bad.notices], [])
   })
 })
 

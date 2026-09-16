@@ -88,8 +88,22 @@
  *
  * 递增的代价是有意写进契约的（见文件头「为什么键集合是闭的」）：新旧两侧必须
  * 一起升，滚动升级中途会**具名拒绝**而不是静默地装上一份拦不住东西的名单。
+ *
+ * ★ 2 → 3（PRT-214 续）：**载荷多了一个键 `notices`**。
+ *
+ * 这一版升的是**形状**，与 1 → 2 那次升的**语义**不同，但按本条注释的口径两者
+ * 都算（"形状或状态语义变化"）。加键这件事本来就归这个号管——见文件头那句
+ * 「加字段必须同时改两边，而那是**有意的**：契约版本就是为这件事存在的」。
+ *
+ *   > 一个"键集合是闭的、所以加字段不必升版本号"的推论，
+ *   > 与一个"老读者会把新载荷整个拒掉、于是滚动升级中途每一个 Run 都停住"
+ *   > 的事实，是同一个东西——只不过前者以为闭集已经保证了安全，
+ *   > 而安全与**可用**是两件事：版本号让"拒掉"这件事**可归因**，
+ *   > 而不是让值班的人先怀疑是不是自己配错了。
+ *
+ * `notices` 跨线的理由见 `RUN_FLOOR_PAYLOAD_KEYS` 那段：成功的派生没有失败可以搭车。
  */
-export const RUN_FLOOR_WIRE_VERSION = 2
+export const RUN_FLOOR_WIRE_VERSION = 3
 
 /** 线上字段名。写在一处，免得服务端、适配器与用例各写一遍字符串。 */
 export const RUN_FLOOR_WIRE_FIELD = 'enforcementFloor'
@@ -133,6 +147,8 @@ export const RUN_FLOOR_CODES = Object.freeze({
   BAD_TOOL_NAME: 'RUN_FLOOR_BAD_TOOL_NAME',
   /** `denyPathPrefixes` 里有一条不是非空字符串。 */
   BAD_PATH_PREFIX: 'RUN_FLOOR_BAD_PATH_PREFIX',
+  /** `notices` 不是数组，或其中一条的形状不对。 */
+  BAD_NOTICE: 'RUN_FLOOR_BAD_NOTICE',
 })
 
 // ★ 这里**没有**"前缀规范化不幂等"那个码，尽管生产侧确实在查它
@@ -144,13 +160,41 @@ export const RUN_FLOOR_CODES = Object.freeze({
 // 幂等性在派生点（有规范化函数的那一侧）检查；这一层只检查"是不是非空字符串"。
 // 一个声明了却没有任何代码会产生的拒绝码，比没有这个码更坏：它让读者以为查过了。
 
-/** 载荷允许出现的键，**逐字**。多一个就 `UNKNOWN_KEY`。 */
+/**
+ * 载荷允许出现的键，**逐字**。多一个就 `UNKNOWN_KEY`。
+ *
+ * ## 为什么 `refusals` 与 `notices` 都在这里，而它们的**读者**不同
+ *
+ *   · `refusals` —— 派生**失败**时的归因码。它跨线是为了让远端读得出"为什么没有下限"，
+ *     但它在**本进程内**已经有一个更近的读者：`executor.mjs` 的 `execute()` 拿它
+ *     拼出那次具名拒绝（`RUN_FLOOR_NOT_DERIVED`）。所以这一层只放行、不解析它。
+ *   · `notices` —— 下限**装上去之后仍然成立**的告诫（连带禁止、政策禁令落不了地）。
+ *     它没有"失败"可以搭车：派生是成功的、Run 会照跑，所以**载荷是它唯一的载体**。
+ *     因此本层既放行、**也解析**（见下面 `notices` 那一段），好让安装点读到它。
+ *
+ *   > 一个"把告诫挂在一次成功派生的旁边、而没有任何人读"的下限，
+ *   > 与一个"根本没产生这条告诫"的下限，在库里和日志里是同一个东西——
+ *   > 只不过前者会让人以为"连带禁止这件事有人知道"。
+ */
 export const RUN_FLOOR_PAYLOAD_KEYS = Object.freeze([
   'version',
   'derived',
   'floor',
   'runId',
   'refusals',
+  'notices',
+])
+
+/**
+ * 一条告诫（notice）允许出现的键，**逐字**。多一个就 `BAD_NOTICE`。
+ *
+ * 为什么 `message` 也跨线（而 `refusals` 只跨码）：拒绝码是给**程序**分流的，
+ * 而告诫是给**人**看的——"为了拦一个推送而关掉了整个 shell"这句话的措辞
+ * 由知道原因的那一侧（派生点）写，安装点只负责把它记下来。
+ * 让安装点按码现场拼一句话，等于把同一条告诫的措辞抄成两份。
+ */
+export const RUN_FLOOR_NOTICE_KEYS = Object.freeze([
+  'code', 'tool', 'message', 'dshTools', 'collateral',
 ])
 
 /**
@@ -189,14 +233,22 @@ function nonEmptyString(value) {
   return typeof value === 'string' && value.trim() !== '' ? value : null
 }
 
-/** 冻结的读取结果。调用方按 `state` 分流，按 `code` 归因。 */
-function result(state, { code = null, message = null, floor = null, runId = null, errors = [] } = {}) {
+/**
+ * 冻结的读取结果。调用方按 `state` 分流，按 `code` 归因。
+ *
+ * `notices` 默认是**空数组**而不是 `null`：它是"这次有几条告诫"的读数，
+ * 而 `absent` / `refused` 两档**根本没有**"有几条告诫"这回事——
+ * 用空数组统一表示"没有告诫要报"，比让调用方在两处判 `null` 更不容易漏。
+ * 只有 `installed` 那一档会把它填成派生点真正产出的那些。
+ */
+function result(state, { code = null, message = null, floor = null, runId = null, notices = [], errors = [] } = {}) {
   return Object.freeze({
     state,
     code,
     message,
     floor,
     runId,
+    notices: Object.freeze([...notices]),
     errors: Object.freeze([...errors]),
   })
 }
@@ -210,7 +262,8 @@ function result(state, { code = null, message = null, floor = null, runId = null
  * @param {unknown} payload `RunRequest` 上那个字段的值（原样，不做预处理）
  * @param {{field?: string}} [o] `field` 只影响错误文案里的字段名
  * @returns {{state: string, code: string|null, message: string|null,
- *            floor: object|null, runId: string|null, errors: string[]}}
+ *            floor: object|null, runId: string|null,
+ *            notices: readonly object[], errors: string[]}}
  */
 export function readRunFloor(payload, { field = RUN_FLOOR_WIRE_FIELD } = {}) {
   if (payload === undefined) {
@@ -310,8 +363,73 @@ export function readRunFloor(payload, { field = RUN_FLOOR_WIRE_FIELD } = {}) {
   }
 
   const runId = payload.runId === undefined || payload.runId === null ? null : String(payload.runId)
+
+  // ── 告诫（`notices`）─────────────────────────────────────────────────────
+  //
+  // 形状不对就**具名拒绝**，而不是"忽略这条读不懂的告诫继续装"。
+  // 理由是这条载荷的下限本身仍然可用，所以"忽略"看起来无害——但告诫的全部
+  // 价值就是它会被读到：
+  //
+  //   > 一个"读不懂就跳过"的告诫解析器，与一个"把这条告诫变成不存在"的解析器，
+  //   > 是同一个东西——只不过前者在载荷多写坏一个字段的那天开始说谎。
+  //
+  // 缺席（`undefined`）是**合法**的：它的意思是"这次派生没有任何告诫"，
+  // 与"有告诫但读不出来"必须分开。空数组同理，是"派生了、这次没有告诫"。
+  let notices = Object.freeze([])
+  if (payload.notices !== undefined) {
+    if (!Array.isArray(payload.notices)) {
+      return refuse(RUN_FLOOR_CODES.BAD_NOTICE,
+        `${field}.notices 必须是数组，收到 ${payload.notices === null ? 'null' : typeof payload.notices}`)
+    }
+    const out = []
+    for (const raw of payload.notices) {
+      if (!isPlainObject(raw)) {
+        return refuse(RUN_FLOOR_CODES.BAD_NOTICE, `${field}.notices 里有一条不是对象`)
+      }
+      for (const key of Object.keys(raw)) {
+        if (!RUN_FLOOR_NOTICE_KEYS.includes(key)) {
+          return refuse(RUN_FLOOR_CODES.BAD_NOTICE,
+            `${field}.notices 里有一条带了我不认识的键 ${JSON.stringify(key)}`
+            + `（只认识 ${RUN_FLOOR_NOTICE_KEYS.join(' / ')}）`)
+        }
+      }
+      if (nonEmptyString(raw.code) === null) {
+        return refuse(RUN_FLOOR_CODES.BAD_NOTICE, `${field}.notices 里有一条没有可读的 code`)
+      }
+      if (nonEmptyString(raw.tool) === null) {
+        return refuse(RUN_FLOOR_CODES.BAD_NOTICE,
+          `${field}.notices 里有一条没有点名是哪个工具：一条说不出它关于什么的告诫没法被处理`)
+      }
+      if (nonEmptyString(raw.message) === null) {
+        return refuse(RUN_FLOOR_CODES.BAD_NOTICE, `${field}.notices 里有一条没有可读的 message`)
+      }
+      const lists = {}
+      for (const key of ['dshTools', 'collateral']) {
+        const v = raw[key] === undefined ? [] : raw[key]
+        if (!Array.isArray(v)) {
+          return refuse(RUN_FLOOR_CODES.BAD_NOTICE, `${field}.notices 里的 ${key} 必须是数组`)
+        }
+        const names = []
+        for (const n of v) {
+          const name = nonEmptyString(n)
+          if (name === null) {
+            return refuse(RUN_FLOOR_CODES.BAD_NOTICE, `${field}.notices 里的 ${key} 有一条不是非空字符串`)
+          }
+          if (!names.includes(name)) names.push(name)
+        }
+        lists[key] = Object.freeze(names)
+      }
+      out.push(Object.freeze({
+        code: raw.code, tool: raw.tool, message: raw.message,
+        dshTools: lists.dshTools, collateral: lists.collateral,
+      }))
+    }
+    notices = Object.freeze(out)
+  }
+
   return result(RUN_FLOOR_STATES.INSTALLED, {
     code: null,
+    notices,
     floor: Object.freeze({
       denyTools: Object.freeze(denyTools),
       denyPathPrefixes: Object.freeze(denyPathPrefixes),
@@ -332,6 +450,11 @@ export function readRunFloor(payload, { field = RUN_FLOOR_WIRE_FIELD } = {}) {
  *   · `absent` 与 `installed`（空）**必须不同状态**——否则文件头那条区别在第一天就没了；
  *   · `null` 必须 `refused` 而不是 `absent`——否则"派生失败"会变成"没有给"；
  *   · 未知键必须 `refused`——否则"我不认识的更严格约束"会被静默降级。
+ *
+ * 第四条（`notices` 那一版）钉的是**告诫**：一条读不懂的告诫必须 `refused`，
+ * 因为"跳过它继续装"与"这条告诫不存在"在读端是同一个东西。
+ * `noticesAbsentIsEmpty` 是对照：**缺席是合法的**（"这次没有告诫"），
+ * 于是"拒绝"这一档说的确实是"读不懂"，不是"没给"。
  */
 export const RUN_FLOOR_CONTRACT_CHECKED = Object.freeze({
   version: RUN_FLOOR_WIRE_VERSION,
@@ -344,6 +467,16 @@ export const RUN_FLOOR_CONTRACT_CHECKED = Object.freeze({
   nullRefusedWith: readRunFloor(null).code,
   unknownKeyRefusedWith: readRunFloor({ version: RUN_FLOOR_WIRE_VERSION, derived: true, floor: { denyTools: [], denyPathPrefixes: [], platform: 'linux' }, extra: 1 }).code,
   notDerivedRefusedWith: readRunFloor({ version: RUN_FLOOR_WIRE_VERSION, derived: false, floor: null }).code,
+  // 告诫：读不懂 → 具名拒绝；缺席 → 合法的空（不是拒绝）。
+  badNoticeRefusedWith: readRunFloor({
+    version: RUN_FLOOR_WIRE_VERSION, derived: true,
+    floor: { denyTools: [], denyPathPrefixes: [], platform: 'linux' },
+    notices: [{ code: 'x' }],
+  }).code,
+  noticesAbsentIsEmpty: readRunFloor({
+    version: RUN_FLOOR_WIRE_VERSION, derived: true,
+    floor: { denyTools: [], denyPathPrefixes: [], platform: 'linux' },
+  }).notices.length,
   states: Object.freeze(Object.values(RUN_FLOOR_STATES)),
   codes: Object.freeze(Object.values(RUN_FLOOR_CODES)),
 })

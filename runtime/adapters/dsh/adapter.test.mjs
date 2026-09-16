@@ -392,6 +392,54 @@ test('③′ 请求里**有** `enforcementFloor` → 原样过线（含空名单
   assert.equal(emptyHost.calls.startRun[0].options.enforcementFloor.state, 'installed')
 })
 
+test('③″ 告诫（`notices`）**必须一起过线**——丢在这一跳等于整条记录链断掉', async () => {
+  // PRT-214 续。这一条是**破验逼出来**的：把 `notices: floorReading.notices`
+  // 改成 `notices: []` 时，全套件**一条都没红**——也就是说适配器这一跳
+  // 此前根本没有测试守着，而它是告诫从控制面走到安装点的**唯一通道**。
+  //
+  //   > 一个"派生了告诫、单测也锁了派生点"的实现，
+  //   > 与一个"告诫在这一跳被悄悄丢掉"的实现，
+  //   > 在安装点看到的读数上是同一个东西：没有告诫。
+  //
+  // 所以这一条钉的是**跨过适配器之后它还在**，不是"派生点产出了它"。
+  const host = hostOk()
+  const a = await readyAdapter(host)
+  const notice = {
+    code: 'run-floor-collateral-denial',
+    tool: 'git-push',
+    message: '为了在执行面上禁掉「git-push」，必须禁掉 ["bash","pwsh"]',
+    dshTools: ['bash', 'pwsh'],
+    collateral: ['run-command', 'git-status', 'git-commit'],
+  }
+  await collect(a, makeRequest({
+    enforcementFloor: {
+      version: RUN_FLOOR_WIRE_VERSION,
+      derived: true,
+      floor: { denyTools: ['bash', 'pwsh'], denyPathPrefixes: [], cwd: 'C:/tmp/ws', platform: 'win32' },
+      runId: 'run-1',
+      notices: [notice],
+    },
+  }))
+  const payload = host.calls.startRun[0].options.enforcementFloor
+  assert.equal(payload.state, 'installed')
+  assert.equal(payload.notices.length, 1, '告诫在适配器这一跳被丢掉了——安装点再也读不到它')
+  assert.equal(payload.notices[0].code, 'run-floor-collateral-denial')
+  assert.equal(payload.notices[0].tool, 'git-push')
+  assert.deepEqual([...payload.notices[0].dshTools], ['bash', 'pwsh'])
+  assert.deepEqual([...payload.notices[0].collateral], ['run-command', 'git-status', 'git-commit'])
+
+  // 而没有告诫时给的是**空数组**（不是 `undefined`）：安装点不必判两种"没有"。
+  const bare = hostOk()
+  const bareAdapter = await readyAdapter(bare)
+  await collect(bareAdapter, makeRequest({
+    enforcementFloor: {
+      version: RUN_FLOOR_WIRE_VERSION, derived: true,
+      floor: { denyTools: [], denyPathPrefixes: [], platform: 'linux' },
+    },
+  }))
+  assert.deepEqual([...bare.calls.startRun[0].options.enforcementFloor.notices], [])
+})
+
 test('③′ 请求里的下限**解释不了** → 拒收这次 Run，**连 startRun 都不叫**', async () => {
   // 一份解释不了的载荷不是政策，是一次接线错误：照跑等于把它伪装成一次能跑的 Run。
   // 与既有的"必填字段缺失"同一个形状：`execute` 在产出任何事件**之前**就抛。

@@ -127,8 +127,12 @@ import { HARD_FLOOR_CAPABILITIES, canonicalizePath } from '../runtime/dsh-compos
  *
  * 两个号一起动，是为了让滚动升级中途**具名拒绝**，而不是安静地少拦一层。
  * `team-hub/run-floor.test.mjs` 里有一条用例同时钉住这两个号。
+ *
+ * ★ 2 → 3（PRT-214 续）：这一版升的是**载荷多了 `notices` 键**（形状变化）。
+ * 派生结果自身多了一类**会跨线**的内容——告诫——所以这个号跟着动，
+ * 理由与 1 → 2 同源：它描述的是"这份产物作为契约长什么样"。
  */
-export const RUN_FLOOR_VERSION = 2
+export const RUN_FLOOR_VERSION = 3
 
 /**
  * 静态 hard floor 的名单**定义在强制面那一侧**

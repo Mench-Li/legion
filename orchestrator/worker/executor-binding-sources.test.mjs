@@ -25,9 +25,10 @@
 // ============================================================================
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import {
   bindDshRuntime, resetDshRuntimeBinding, productionExecutorProvider, hubIo,
@@ -257,4 +258,64 @@ test('★ lease 缺 scope 时装配拒绝（放错空间就是一次越权）', 
       },
     )
   } finally { undo() }
+})
+
+// ── ④ 下限告诫的出口经由**生产提供者**也接得上（PRT-214 续）──────────────
+//
+// ③ 那一组钉的是"生产路径把来源接上了"；这一条钉的是**同一类**接缝：
+// `onFloorNotice` 是调用方给的，必须经过 `productionExecutorProvider`
+// 走到 `createProductionExecutor`，否则告诫在真实部署里没有出口。
+//
+// ★ 判据落在**出口收到了东西**上，不是"参数传下去了"——
+//   参数传下去而没人用，与没传，在结果上是一样的。
+
+test('★★ `onFloorNotice` 经生产提供者真的收到了连带禁止告诫', async () => {
+  const undo = bound()
+  try {
+    const caught = []
+    const taskId = await seedTask({ title: '带推送权限的任务' })
+    const provider = await productionExecutorProvider({ ...io(), onFloorNotice: (n) => caught.push(n) })
+    assert.equal(provider.ok, true, JSON.stringify(provider).slice(0, 300))
+
+    const attemptId = `att:${taskId}:6`
+    const lease = {
+      attemptId, runId: attemptId, taskId, scope: 'default', leaseEpoch: 1, workerId: 'w1',
+      idempotencyKey: `idem:${taskId}`, goalId: 'g1', employeeId: 'e1', teamPlanRef: 'tp1',
+      workdir: process.cwd(),
+      // 这两个**猜不出来**：在哪个目录里、用哪个模型跑。
+      workspaceId: 'ws-1', modelProfileRef: 'mp-1',
+      // `git-push` 在执行面上有名字（→ bash/pwsh），而那两个名字同时承载
+      // run-command / git-status / git-commit —— 所以派生会留下一条连带告诫。
+      permissions: { preset: 'legion-unattended', tools: ['git-push', 'read-file'] },
+    }
+    // 先冻结上下文（执行时读回的就是它），再执行。
+    await provider.executor.buildContext(lease)
+    await provider.executor.execute(lease)
+
+    assert.equal(caught.length, 1,
+      `生产提供者那条路上出口收到 ${caught.length} 条告诫：${JSON.stringify(caught.map((n) => n?.code))}`)
+    assert.equal(caught[0].code, 'run-floor-collateral-denial')
+    assert.deepEqual([...caught[0].dshTools], ['bash', 'pwsh'])
+    assert.deepEqual([...caught[0].collateral], ['run-command', 'git-status', 'git-commit'])
+  } finally { undo() }
+})
+
+test('★ 生产入口**真的**供给了那个出口（源级钉子，因为它跑不起来）', async () => {
+  // 上一条证明了"经由生产提供者能到"，但**提供者由谁喂**是另一半：
+  // `product/orchestrator/worker.mjs` 是唯一的生产供给者。
+  //
+  // 为什么这里只能做源级检查：那个入口有顶层 `await` 与 `process.exit`，
+  // 它**不能**被 import 进来跑。这是本套件里唯一一处"读源码"的判据，
+  // 所以把它的弱点写下来：它证明的是**那一行在**，不是"那一行会执行"。
+  // 真正的行为证据是上面那条（出口收到告诫）——两条合起来才闭合：
+  // 上面证明链路通，这条证明链路的一端在生产入口上接着。
+  const src = readFileSync(
+    fileURLToPath(new URL('../../product/orchestrator/worker.mjs', import.meta.url)), 'utf8')
+  assert.match(
+    src,
+    /executorProvider:\s*\(\)\s*=>\s*productionExecutorProviderFromEnv\(\{[\s\S]*?onFloorNotice:/,
+    '生产入口不再给 `productionExecutorProviderFromEnv` 传 `onFloorNotice` —— '
+    + '那么连带禁止与"政策禁令落不了地"这两条告诫在真实部署里就没有出口，'
+    + '而它们会照旧产生、照旧跨线、然后被丢掉',
+  )
 })

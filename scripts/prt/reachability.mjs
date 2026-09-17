@@ -54,6 +54,7 @@
 //   node scripts/prt/reachability.mjs --diff     与基线比对（门禁用）
 //   node scripts/prt/reachability.mjs --record   重写基线（确认变化后）
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -104,6 +105,43 @@ const MANIFEST_PATTERNS = Object.freeze([
   /\bentryFile:\s*'([^']+\.mjs)'/g,
 ])
 
+/** 在**给定的候选路径**里，哪些被 `.gitignore` 排除。
+ *
+ * ★ 这些是**本地产物**（例：`team-hub/.watch.mjs` 是开发用观察器，
+ *   `.gitignore:32` 明确排除它），不是仓库源码。两个理由必须排除它们：
+ *   ① 它们**永远不是"已交付"**，进基线就是一条永远清不掉的噪声；
+ *   ② 更坏的是——一个本地文件 import 了某个模块，会让那个模块**假**报成可达。
+ *
+ *   > 一个「把本地未交付的产物算进源码面」的探针，
+ *   > 与一个「仓库里真的有人用」的探针，在输出上是同一个东西。
+ *
+ * ★ 实现上用 `git check-ignore --stdin` **只问我们已经走到的那些文件**，
+ *   而不是 `git ls-files --others --ignored` 让它去枚举整个忽略树——
+ *   后者会把 `node_modules/`（几万个文件、本身也被 ignore）全列一遍，
+ *   实测直接把探针拖到 2 分钟超时。
+ *
+ *   > 一个「把所有被忽略的文件都列出来」的实现，
+ *   > 与一个「问清楚我手上这些文件哪些被忽略」的实现，答案是一样的——
+ *   > 只不过前者在有大 `node_modules` 的仓库上永远跑不完。
+ */
+export function ignoredFiles(candidates = null) {
+  try {
+    if (candidates === null) {
+      const out = execFileSync('git', ['ls-files', '--others', '--ignored', '--exclude-standard'],
+        { cwd: REPO, encoding: 'utf8', maxBuffer: 1 << 26 })
+      return new Set(out.split('\n').map((s) => s.trim()).filter(Boolean))
+    }
+    if (candidates.length === 0) return new Set()
+    const out = execFileSync('git', ['check-ignore', '--stdin'],
+      { cwd: REPO, input: `${candidates.join('\n')}\n`, encoding: 'utf8', maxBuffer: 1 << 26 })
+    return new Set(out.split('\n').map((s) => s.trim()).filter(Boolean))
+  } catch {
+    // `check-ignore` 在**一个都没匹配**时退出码是 1（那是它的正常语义，不是错误）。
+    // 退出码 1 时 stdout 为空 ⇒ 返回空集合，正是我们要的。
+    return new Set()
+  }
+}
+
 export function collectFiles() {
   const out = []
   const walk = (rel) => {
@@ -115,7 +153,8 @@ export function collectFiles() {
     }
   }
   for (const d of SCAN_DIRS) if (existsSync(join(REPO, d))) walk(d)
-  return out.sort()
+  const ignored = ignoredFiles(out)
+  return out.filter((f) => !ignored.has(f)).sort()
 }
 
 /**
@@ -222,19 +261,49 @@ export function reachableFrom(edges, entries) {
   return seen
 }
 
+/** `git ls-files` 的产物：被 git 跟踪的路径集合。
+ *
+ * ★ **为什么判据只看被跟踪的文件**——本仓库有另一个 agent 进程在并发提交，
+ *   而"新出现一个不可达模块"在本探针里是**判红**的。若不区分，
+ *   别人当轮刚新建、还没提交的模块会让本门禁红，于是：
+ *
+ *   > 一个「把别人未提交的在飞产物判成回归」的闸门，
+ *   > 与一个「逼着人去查一个与自己无关的红」的闸门，是同一个东西——
+ *   > 只不过前者会在**共享工作树上天天红**。
+ *
+ *   这与本探针自己的 `in-flight` 分类是同一条语义：**没提交就不算"已交付"**。
+ *   未跟踪的不可达模块仍然会被**报出来**（`untrackedUnreachable`），只是不判红。
+ */
+export function trackedFiles() {
+  try {
+    const out = execFileSync('git', ['ls-files'], { cwd: REPO, encoding: 'utf8', maxBuffer: 1 << 26 })
+    return new Set(out.split('\n').map((s) => s.trim()).filter(Boolean))
+  } catch {
+    // 不是 git 仓库 / 没有 git：一律当成"已跟踪"，退回严格判据。
+    // ★ 宁可严，不可松——读不出来时判松，等于把门禁关掉。
+    return null
+  }
+}
+
 /** 一次算完。
  *
- * ★ `unreachable` **只报生产模块**。用例按定义就是"被按路径跑、不被 import"，
- *   把它们算进来会让名单里全是 `*.test.mjs`——而那份名单的用途是找
- *   "已交付但生产里到不了"的模块，混进用例等于把信号淹掉。
+ * ★ `unreachable` **只报生产模块**，且**只报被 git 跟踪的**。用例按定义就是
+ *   "被按路径跑、不被 import"，把它们算进来会让名单里全是 `*.test.mjs`——
+ *   而那份名单的用途是找"已交付但生产里到不了"的模块，混进用例等于把信号淹掉。
  */
 export function analyze() {
   const files = collectFiles()
   const { edges, src, known } = buildGraph(files)
   const entries = findEntries(files, src)
   const reach = reachableFrom(edges, entries)
-  const unreachable = files.filter((f) => !reach.has(f) && !f.endsWith('.test.mjs'))
-  return { files, edges, entries, reach, unreachable, known }
+
+  const tracked = trackedFiles()
+  const isProd = (f) => !f.endsWith('.test.mjs')
+  const rawUnreachable = files.filter((f) => !reach.has(f) && isProd(f))
+  const unreachable = tracked === null ? rawUnreachable : rawUnreachable.filter((f) => tracked.has(f))
+  const untrackedUnreachable = tracked === null ? [] : rawUnreachable.filter((f) => !tracked.has(f))
+
+  return { files, edges, entries, reach, unreachable, untrackedUnreachable, known, tracked }
 }
 
 export function loadBaseline() {
@@ -262,6 +331,7 @@ if (isMain) {
       entryCount: a.entries.size,
       reachableCount: a.files.filter((f) => a.reach.has(f)).length,
       unreachable: a.unreachable,
+      untrackedUnreachable: a.untrackedUnreachable,
     }, null, 2))
     process.exit(0)
   }
@@ -327,7 +397,13 @@ if (isMain) {
   console.log(`reachability — 从真实入口出发的可达性探针（PRT-611 续）`)
   console.log('')
   console.log(`  扫描 ${a.files.length} 个 .mjs；入口 ${a.entries.size} 个；` +
-    `可达 ${a.files.filter((f) => a.reach.has(f)).length} 个；**不可达 ${a.unreachable.length} 个**`)
+    `可达 ${a.files.filter((f) => a.reach.has(f)).length} 个；**不可达 ${a.unreachable.length} 个**` +
+    (a.untrackedUnreachable.length ? `（另有 ${a.untrackedUnreachable.length} 个未提交、不判红）` : ''))
+  if (a.untrackedUnreachable.length) {
+    console.log('')
+    console.log('  ⚠ 未跟踪（别人/自己当轮在飞，**不计入判据**）：')
+    for (const f of a.untrackedUnreachable) console.log(`      ~ ${f}`)
+  }
   console.log('')
   const base = loadBaseline()
   const classOf = new Map((base?.unreachable ?? []).map((x) => [x.file, x]))

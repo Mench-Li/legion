@@ -58,6 +58,8 @@ import {
   dshRuntimeInputsFactory,
   setDshRuntimeInputsFactory,
 } from './runtime-host-row.mjs'
+// PRT-214 缺口②：按 Run 装上去的身份，读回来必须按**对象身份**。
+import { runIdentityInstalledOn, runIdentityOverlayOf } from '../run-identity.mjs'
 import rowModuleDefault from './runtime-host-row.mjs'
 
 const SCRATCH = mkdtempSync(join(resolve(tmpdir()), 'legion-host-registrar-'))
@@ -239,7 +241,10 @@ describe('PRT-253 续批二 · 四项能力逐项有据', () => {
     //     装不上就拒绝这次 Run）。**版本号是给读它的人看的**：2 与 3 的
     //     `startRun` 在"端口选项里没有 enforcementFloor"时行为完全相同，
     //     所以只有这条注释能说出"这台进程里的下限是可以按 Run 装的"。
-    assert.equal(RUNTIME_HOST_REGISTRAR_VERSION, 3)
+    // 4 = PRT-214 缺口②：`startRun` 按 Run 安装**授权身份**（`enforcementIdentity`）。
+    //     同样地，3 与 4 在"两个载体键都没有"时行为逐字相同——这条注释是唯一能说出
+    //     "这台进程里的 `scope` 不再等于进程启动时那一个"的地方。
+    assert.equal(RUNTIME_HOST_REGISTRAR_VERSION, 4)
   })
 
   test('布尔表里只有布尔值：判据码不会被混进 capabilities（probe.mjs 会把非 true 当 false）', () => {
@@ -566,6 +571,142 @@ describe('PRT-214 缺口① · 端口 startRun 按 Run 安装静态 hard floor',
     assert.notEqual(RUNTIME_HOST_REGISTRAR_CODES.FLOOR_UNREADABLE, RUNTIME_HOST_REGISTRAR_CODES.FLOOR_NOT_INSTALLABLE)
     const codes = new Set(Object.values(RUNTIME_HOST_REGISTRAR_CODES))
     assert.equal(codes.size, Object.keys(RUNTIME_HOST_REGISTRAR_CODES).length, '码必须互不相同')
+  })
+})
+
+// ═══════════════════════════════════ D. PRT-214 缺口②：授权身份按 Run 安装
+
+describe('PRT-214 缺口② · 端口 startRun 按 Run 安装授权身份', () => {
+  const IDENTITY = (scope, extra = {}) => ({ version: 1, scope, ...extra })
+
+  test('★ 两个载体键都没有 → 按引用转发，一个字段都不动（老调用方不受影响）', async () => {
+    const { subagents, built } = portWithSpawningEngine()
+    const sent = { label: 'x', prompt: [] }
+    await built.runtimeHost.startRun('spawn', sent)
+    assert.equal(subagents.calls[0].options, sent, '没有载荷时选项必须按引用原样转发')
+    assert.equal('agentOptions' in sent, false, '没有载荷时不许凭空加一个 agentOptions')
+  })
+
+  test('★★ 有身份 → 按**引用**跟着创建请求走，且不动调用方的选项', async () => {
+    const { subagents, built } = portWithSpawningEngine()
+    const payload = { state: 'installed', identity: IDENTITY('gf001') }
+    const options = { label: 'a', prompt: [], enforcementIdentity: payload }
+    const handle = await built.runtimeHost.startRun('spawn', options)
+
+    const forwarded = subagents.calls[0].options
+    assert.notEqual(forwarded, options, '不许就地改调用方交出来的那份选项')
+    assert.equal('agentOptions' in options, false, '调用方的选项被就地加了一个键')
+    assert.equal(forwarded.enforcementIdentity, payload, '端口选项上的载荷必须原样转发')
+    assert.equal(forwarded.agentOptions.legionRunIdentity, payload,
+      '载荷必须按引用跟着创建请求走，否则"哪份身份属于哪次 Run"只能靠顺序猜')
+    // ★ 身份**不新增**任何判定点：一个 guard / 一个 listener 都不许多出来。
+    //   这是它与下限最实质的差别（见 `../run-identity.mjs` 文件头）。
+    const child = subagents.children[0]
+    assert.equal(child.guards.length, 0, '身份竟然挂了一个 guard——它不新增判定点')
+    assert.equal(child.events.length, 0, '身份竟然挂了一个 listener——它不新增判定点')
+    assert.equal(handle, subagents.handles[0])
+  })
+
+  test('★★★ 两个 Run 各带各的空间 → 两个 Agent 上是**两份**身份，互不串台', async () => {
+    //   > 一个"按到达顺序给下一次创建分配身份"的实现，
+    //   > 与一个"每次 Run 都拿对自己的身份"的实现，在串行的那些用例里是同一个东西——
+    //   > 只不过前者在两次派工重叠时会把甲空间的身份装到乙的头上。
+    const { subagents, built } = portWithSpawningEngine()
+    await built.runtimeHost.startRun('spawn', {
+      label: 'a', prompt: [], enforcementIdentity: { state: 'installed', identity: IDENTITY('gf001') },
+    })
+    await built.runtimeHost.startRun('spawn', {
+      label: 'b', prompt: [], enforcementIdentity: { state: 'installed', identity: IDENTITY('ozon') },
+    })
+    const [a, b] = subagents.children
+    assert.equal(runIdentityOverlayOf(a.key).scope, 'gf001')
+    assert.equal(runIdentityOverlayOf(b.key).scope, 'ozon')
+    assert.notEqual(runIdentityOverlayOf(a.key), runIdentityOverlayOf(b.key))
+  })
+
+  test('★ 只有下限、没有身份 → 身份**缺席**是一个读得出来的读数（不是空覆盖）', async () => {
+    const { subagents, built } = portWithSpawningEngine()
+    await built.runtimeHost.startRun('spawn', {
+      label: 'a', prompt: [], enforcementFloor: { state: 'installed', floor: INSTALLED_FLOOR },
+    })
+    assert.equal(runIdentityInstalledOn(subagents.children[0].key), false)
+    assert.equal(runIdentityOverlayOf(subagents.children[0].key), undefined,
+      '缺席被读成了空覆盖——那会让"没人给"与"给的就是进程级"变成同一个读数')
+  })
+
+  test('★★★ 身份载荷解释不了 → **具名拒绝**这次 Run，连引擎都不叫', async () => {
+    // 与 `FLOOR_UNREADABLE` 同一档、同样在起跑之前拒绝，但理由不同：
+    // 下限读不懂 ⇒ 强全面整段不在；身份读不懂 ⇒ 这次执行会被记在**进程级那个空间**
+    // 名下——不报错，只是错标，而审计从此不能用来追责。
+    const { subagents, built } = portWithSpawningEngine()
+    // `actor` 属于**这次安装**，不属于某一次 Run：它进不来（见 contracts 文件头）。
+    const bad = { state: 'installed', identity: { version: 1, scope: 'gf001', actor: 'someone-else' } }
+    await assert.rejects(
+      () => built.runtimeHost.startRun('spawn', { label: 'a', prompt: [], enforcementIdentity: bad }),
+      (e) => e.code === RUNTIME_HOST_REGISTRAR_CODES.IDENTITY_UNREADABLE,
+    )
+    assert.equal(subagents.calls.length, 0, '载荷读不懂却已经把 Run 派出去了')
+  })
+
+  test('★ 两个码分开：身份读不懂（改生产者）与下限读不懂不是同一条修法', () => {
+    assert.notEqual(RUNTIME_HOST_REGISTRAR_CODES.IDENTITY_UNREADABLE, RUNTIME_HOST_REGISTRAR_CODES.FLOOR_UNREADABLE)
+    assert.notEqual(RUNTIME_HOST_REGISTRAR_CODES.IDENTITY_UNREADABLE, RUNTIME_HOST_REGISTRAR_CODES.FLOOR_NOT_INSTALLABLE)
+  })
+
+  test('★★ Run 结算之后身份撤掉（否则长命进程里下一个 Run 会读到上一个的空间）', async () => {
+    const { subagents, built } = portWithSpawningEngine()
+    const handle = await built.runtimeHost.startRun('spawn', {
+      label: 'a', prompt: [], enforcementIdentity: { state: 'installed', identity: IDENTITY('gf001') },
+    })
+    const agent = subagents.children[0].key
+    assert.equal(runIdentityOverlayOf(agent).scope, 'gf001')
+    handle.settle()
+    await handle.result
+    await new Promise((r) => setTimeout(r, 0))
+    assert.equal(runIdentityOverlayOf(agent), undefined,
+      'Run 结算了身份还挂着——下一个 Run 若复用同一个 Agent 对象就会读到上一个的空间')
+  })
+
+  test('★★ 创建窗口没接上（引擎不派发 `agent/created`）→ 退到句柄之后装，装上即生效', async () => {
+    // `emitCreated: false` 就是"创建窗口那一钩没接上"的形状：`installedIdentities`
+    // 里读不到，于是走 `handle.localAgent` 那条回退。与下限同一条回退路，
+    // 但**装不上时的处置不同**（见下一条）。
+    const { subagents, built } = portWithSpawningEngine({ emitCreated: false })
+    await built.runtimeHost.startRun('spawn', {
+      label: 'a', prompt: [], enforcementIdentity: { state: 'installed', identity: IDENTITY('ozon') },
+    })
+    assert.equal(runIdentityOverlayOf(subagents.children[0].key).scope, 'ozon')
+  })
+
+  test('★★★ 返回的是远程运行（没有 in-process Agent）→ 身份**不拒绝起跑**（与下限相反）', async () => {
+    // ★ 这是身份与下限最要紧的一条**处置差别**，也是本批的一处刻意的取舍：
+    //   下限装不上 = 强全面整段不在 ⇒ 必须拒绝；
+    //   身份装不上 = 这次执行回落进程级归属 ⇒ **不拒绝**（任务不该因此生不出来），
+    //   但代价如实记一条日志，于是它不是无声的。
+    const ctx = engineCtx()
+    const remote = {
+      calls: [],
+      async start(provider, options) {
+        this.calls.push({ provider, options })
+        // 远程 provider 交回的句柄没有 `localAgent`
+        return { result: new Promise(() => {}), dispose: async () => {} }
+      },
+    }
+    ctx.setService(remote)
+    const port = createRuntimeHostInputsFactory()(ctx)
+    const handle = await port.runtimeHost.startRun('spawn', {
+      label: 'a', prompt: [], enforcementIdentity: { state: 'installed', identity: IDENTITY('gf001') },
+    })
+    assert.equal(remote.calls.length, 1, '身份装不上竟然把这次 Run 拒绝了')
+    assert.equal(typeof handle, 'object')
+    // 对照：**同一个**远程句柄下，下限装不上必须拒绝
+    await assert.rejects(
+      () => port.runtimeHost.startRun('spawn', {
+        label: 'b', prompt: [], enforcementFloor: { state: 'installed', floor: INSTALLED_FLOOR },
+      }),
+      (e) => e.code === RUNTIME_HOST_REGISTRAR_CODES.FLOOR_NOT_INSTALLABLE,
+      '下限装不上竟然照跑了',
+    )
   })
 })
 

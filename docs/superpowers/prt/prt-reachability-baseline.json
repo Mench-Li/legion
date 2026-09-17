@@ -1,12 +1,6 @@
 {
   "$comment": "可达性基线：从**真实入口**出发顺 import 图，走不到的模块（scripts/prt/reachability.mjs）。\n\n不可达**不等于**缺陷。每条都带 class 与 reason，四类动作完全不同：\n  · by-design   —— 按设计不被 import（config-schema 被 scan 读源码、barrel、夹具、按路径跑的脚本）\n  · deliberate  —— 刻意不接，理由写在代码注释里（例：升级链不 import 进 Launcher）\n  · gap         —— 真的没有生产路径，且台账/对照表说它已交付 ⇒ 需要在 §5 里裁决\n  · in-flight   —— 另一个 agent 进程当轮正在接线（工作树未提交）\n\n门禁（scripts/prt/reachability.test.mjs）只断言两件事：没有**未分类**的不可达模块、\n以及正对照成立。**基线过期（模块变可达）只报警不改红**——\n模块变成可达从来不是回归，把它判红等于惩罚正在接线的人。\n`node scripts/prt/reachability.mjs` 出人读报告；`--diff` 与基线比对；`--record` 重写（会保留已有分类）。",
   "version": 1,
-  "classes": {
-    "by-design": "按设计不被 import（读源码的工具/公开出口/夹具/按路径跑的脚本）",
-    "deliberate": "刻意不接，理由写在代码注释里",
-    "gap": "✔ 已交付但生产里没有路径——需要裁决",
-    "in-flight": "另一个 agent 进程当轮正在接线（工作树里未提交）"
-  },
   "unreachable": [
     {
       "file": "orchestrator/config-schema.mjs",
@@ -227,11 +221,6 @@
       "file": "security/config-schema.mjs",
       "class": "by-design",
       "reason": "同上"
-    },
-    {
-      "file": "team-hub/.watch.mjs",
-      "class": "by-design",
-      "reason": "开发用观察器，按路径手工跑"
     },
     {
       "file": "team-hub/approval-fixture.mjs",

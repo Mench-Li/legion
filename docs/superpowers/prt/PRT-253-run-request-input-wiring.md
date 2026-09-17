@@ -3,7 +3,7 @@
 > spec §6.2：适配器只执行一个已定义的 `RunRequest`；§6.11：取值优先级
 > 「内置默认值 < 产品配置 < 工作空间配置 < 用户设置 < 受控环境变量」。
 >
-> 日期：2026-09-17　状态：**本批已修（§8）**；§1~§7 保留为发现时的原始记录
+> 日期：2026-09-17　状态：**本批已修（§8、§9）**；§1~§7 保留为发现时的原始记录
 > 关系：本文是 `PRT-253-runtime-binding-caller.md` 与
 > `PRT-253-runtime-contract-launcher-wiring.md` 的续篇；记的是**接线之后仍然空着的一截**。
 
@@ -252,4 +252,86 @@ node scratch/probe-run-inputs-live.mjs                  # 对**真实** hub 的�
   仍被归成 `runtime-unavailable`（**可重试**）。一次配置错误因此会烧掉重试额度——
   这正是 `main.mjs` 文件头警告过的那种"任务都在跑但全都失败"。本批没有动它。
 - **旧库接管**：见 `PRT-255`。本批只量出"这台 hub 比仓库旧"，没有动数据迁移。
+
+---
+
+## 9 顺带闭掉的第五个缺口：`LEGION_WORKSPACE_DIR` 根本传不到 worker
+
+§8 把三个字段接上之后，评审"这条链在真实部署里还缺什么"时发现的**同形状反面**。
+它比 §8 那三条更安静，而且**更致命**。
+
+### 9.1 缺陷
+
+`product/process-manifest.mjs` 里 orchestrator 的 `envNames`（白名单）原本是：
+
+```js
+['TEAM_HUB_URL', 'TEAM_HUB_TOKEN', 'LEGION_DATA_DIR', 'LEGION_RUNTIME_URL', 'LEGION_RUNTIME_TOKEN']
+```
+
+**没有 `LEGION_WORKSPACE_DIR`**。而 `buildChildEnv()`（`product/launcher/allowlist.mjs:54`）
+对**未声明**的键一律 CONTINUE 掉——连 `baseEnv` 里有同名值都放行不了：
+
+```js
+for (const [key, value] of Object.entries(baseEnv)) {
+  if (!allow.has(key)) continue          // ← 声明面就是传递面
+  env[key] = String(value)
+}
+```
+
+于是真实部署里子进程读到 `undefined`，一路向下：
+
+```
+workspaceDir === null
+  → resolveWorkspaceStages() 返回 { stages: null }      （orchestrator/worker/run.mjs:63-69）
+  → worker 状态 = 'no-stages'                            （main.mjs：缺阶段不认领）
+  → **一个任务都不认领**
+```
+
+外部表现只有状态文件里 `no-stages` 这一个词：**没有错误、没有告警、
+没有任何一条日志说"我少了一个变量"**。从产品上看就是"任务一直没人做"。
+
+### 9.2 它与 §8 是同一个形状的正反面，两个都要防
+
+```
+LEGION_DATA_DIR       声明了，但 Launcher 从不给值  ⇒ 起来就退 8 / DATA_DIR_REQUIRED（崩溃循环）
+LEGION_WORKSPACE_DIR  连声明都没有                  ⇒ 宿主环境里配了也传不下去（静默不干活）
+```
+
+第一种已经在 PRT-253 续批四闭掉（`runtime-contract-wiring.test.mjs` 例①b，
+注释写着「『白名单放行』与『有人真的注入了它』是两件事」）。
+第二种就是本节。
+
+> 一个"没声明所以被白名单丢掉"的变量，
+> 与一个"根本没配"的变量，在子进程里是同一个读数（`undefined`）——
+> 只不过前者的部署方会反复确认自己明明配过了。
+
+### 9.3 修法（与 `LEGION_DATA_DIR` 逐字同形）
+
+| 层 | 改动 |
+| --- | --- |
+| `product/process-manifest.mjs` | orchestrator 的 `envNames` 补 `'LEGION_WORKSPACE_DIR'` |
+| `product/launcher/launcher.mjs` | `derivedValuesFor('orchestrator')` 里显式写 `out.LEGION_WORKSPACE_DIR = layout.workspaceDir`（Launcher 是唯一知道 `layout.workspaceDir` 的地方） |
+| `product/launcher/runtime-contract-wiring.test.mjs` | 新增例 ①b′ |
+
+**绝不回落成 `{install}` 或 cwd**：把项目目录猜成安装目录，
+等于让执行去改一个升级时会整体替换的目录（PRT-003 那类越界写入）。
+
+**只给 orchestrator**：hub / workbench / 白板不需要项目目录；
+runtime **也不需要**——它的目录是**逐 Run** 由 `RunRequest.workdir` 给的
+（这正是 §8 那个字段存在的理由）。例 ①b′ 对这四个进程各下一条反向锚。
+
+### 9.4 判据
+
+```bash
+node --test product/launcher/runtime-contract-wiring.test.mjs   # 10 例（含新增 ①b′）
+node scratch/mutate.mjs                                          # 10 条破坏性验证
+```
+
+新增的两条破坏性验证：
+
+| # | 改动 | 变红的判据 |
+| --- | --- | --- |
+| ⑨ | Launcher 不再注入项目目录 | ①b′ |
+| ⑩ | 从 worker 的 `envNames` 里删掉声明 | ①b′ |
+
 

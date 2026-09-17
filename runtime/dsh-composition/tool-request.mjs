@@ -90,6 +90,9 @@ import { CAPABILITY_IDS, CAPABILITY_KINDS, resolveTool } from './tool-capability
 import { freezeToolArguments, resolvePreExecuteResult } from './tool-args.mjs'
 // patch-layer 是纯数据模块（零 import），所以这一条依赖是单向的、不会成环。
 import { PATCH_LAYER_ROWS } from './patch-layer.mjs'
+// PRT-214 缺口②：身份覆盖的取用缝与叠加。单向依赖（它只 import contracts），不成环。
+import { applyIdentityOverlay } from '../contracts/run-identity.mjs'
+import { identityOverlayForExecution } from './run-identity.mjs'
 
 export const TOOL_REQUEST_VERSION = 'legion/tool-request@1'
 
@@ -519,6 +522,32 @@ export function createEnforcementBridge({
    * 只在一处查的写法在"只经过一个强制点"的用例里是绿的。
    */
   pathScope = null,
+  /**
+   * ★ PRT-214 缺口②：**按 Run** 取授权身份覆盖。
+   *
+   * `(execution) => overlay | undefined`。缺省就是
+   * `run-identity.mjs` 的 `identityOverlayForExecution`——它按 `exec.agent`
+   * 的对象身份查那张登记簿（装身份的是 `installRunIdentityIntoAgent`）。
+   *
+   * ## 为什么这是一个注入点，而不是在这里直接查
+   *
+   * 桥的用例要能在**不造 Agent** 的情况下验"两个 Run 各带各的身份"；
+   * 而"覆盖从哪来"正是这条链上唯一需要替身的一段。把它做成参数，
+   * 断言的仍然是**桥自己的行为**（它有没有把覆盖叠进投影），
+   * 而不是替身的行为。
+   *
+   * ## 为什么默认可为空（`null` 就是不叠）
+   *
+   * 一个"必须注入身份源才能造桥"的签名会让所有既有调用点都得改一遍，
+   * 而它们里的绝大多数（装配级用例、诊断页）验的**不是**身份。
+   * 传 `null` 时行为与今天逐字相同：投影只用进程级上下文。
+   *
+   * ★ 而**缺省值就是生产那个**（`identityOverlayForExecution`）：
+   * 生产装配（`assemble.mjs`）因此不必显式传参就已经是"按 Run 生效"的，
+   * 少一处"某天有人加了一个新的 `createEnforcementBridge` 调用点、而它忘了传身份"
+   * 的机会。要**关掉**覆盖才需要显式传 `null`——那在读代码时是看得见的。
+   */
+  identityFor = identityOverlayForExecution,
   connectTimeoutMs = 2000,
   responseTimeoutMs = 3000,
   approvalConnectTimeoutMs = 2000,
@@ -534,7 +563,32 @@ export function createEnforcementBridge({
   /** 按 callId 记住投影：guard 在 pre-execute 之后跑，读的是**同一份**。 */
   const byCallId = new Map()
 
-  const project = (request) => projectToolRequest({ request, context })
+  /**
+   * ★ PRT-214 缺口②：这次调用用的 Legion 上下文。
+   *
+   * 进程级那份是**基线**；这次 Run 若带了身份覆盖，就叠在它上面。
+   * `actor` / `action` **永远**来自基线（见 `run-identity.mjs` 的文件头：
+   * RunRequest 里没有能权威地assert"这次由别人负责"的字段，
+   * 接受覆盖等于让审计归属由请求方自填）。
+   */
+  const contextFor = (execution) => {
+    if (typeof identityFor !== 'function') return context
+    let overlay
+    try {
+      overlay = identityFor(execution)
+    } catch (err) {
+      // ★ 取覆盖时抛错 ⇒ **不叠**，按进程级继续。这不是"吞掉错误"：
+      //   `identityFor` 是装配方给的纯查表函数（WeakMap 读），会抛说明它坏了，
+      //   而一个坏掉的查表函数**没有任何**能推导出"这次该用哪个身份"的信息。
+      //   此时按进程级继续，是回落；`ask` 式的"问不到就拒绝"在这里用不上——
+      //   身份缺失不会让强全面少一个面（见 run-identity.mjs 文件头那条差别）。
+      overlay = undefined
+    }
+    if (overlay === undefined || overlay === null) return context
+    return applyIdentityOverlay(context, overlay)
+  }
+
+  const project = (request, execution) => projectToolRequest({ request, context: contextFor(execution) })
 
   function record(hash, entry) {
     if (!ledger.has(hash)) ledger.set(hash, [])
@@ -560,7 +614,7 @@ export function createEnforcementBridge({
     const remembered = byCallId.get(request.callId)
     if (remembered !== undefined) return { ok: true, projection: remembered, remembered: true }
     try {
-      const projection = project(request)
+      const projection = project(request, execution)
       byCallId.set(request.callId, projection)
       return { ok: true, projection, remembered: false }
     } catch (err) {

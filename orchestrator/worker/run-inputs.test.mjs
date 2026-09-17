@@ -555,3 +555,81 @@ test('㉓ ★★ 两处契约同时成立：外壳把输入**交给**引擎，�
     workspaceId: 'derived:scope', modelProfileRef: 'derived:model-binding', workdir: 'derived:project-dir',
   })
 })
+
+// ════════════════════════════════════════════════════════════════════════════
+// ㉖~㉘ 生产者：① 的三个输出**就是** ② 的三个输入（PRT-214 缺口②）
+// ════════════════════════════════════════════════════════════════════════════
+
+test('㉖ ★★★ 端到端：租约 → 三个运行输入 → RunRequest → **按 Run 的授权身份**', async () => {
+  // 这是 ① 与 ② 的交汇点，也是整条目标链的收口。
+  //
+  //   `①` 从租约推出 workspaceId / modelProfileRef / workdir；
+  //   `②` 把其中的 workspaceId / workdir（+ taskId）**搬成授权身份**。
+  //
+  // 于是"空间"在整条链上只有一个算法：租约的 `scope`。这正是缺口②要的东西——
+  // 一个 Runtime 进程服务多个空间时，每次执行带的是**自己那个**空间。
+  const { deriveRunIdentityCarrier } = await import('./executor.mjs')
+
+  const leaseA = { attemptId: 'a1', taskId: 'T-a', scope: 'gf001', leaseEpoch: 1, workerId: 'w' }
+  const leaseB = { attemptId: 'b1', taskId: 'T-b', scope: 'ozon', leaseEpoch: 1, workerId: 'w' }
+
+  const built = (lease, slot) => {
+    const inputs = resolveRunInputs({
+      lease, workspace: { kind: 'worktree', slotDir: slot }, modelProfileRef: 'mp:1',
+    })
+    assert.equal(inputs.ok, true, inputs.message ?? '')
+    return defaultRequestFor(lease, SNAPSHOT, inputs)
+  }
+
+  const reqA = built(leaseA, 'C:\\slots\\a')
+  const reqB = built(leaseB, 'C:\\slots\\b')
+  // 两份请求的必填字段都齐（① 的判据）
+  assert.equal(validateRunRequest(reqA).ok, true)
+  assert.equal(validateRunRequest(reqB).ok, true)
+
+  const idA = deriveRunIdentityCarrier(reqA)
+  const idB = deriveRunIdentityCarrier(reqB)
+  assert.equal(idA.state, 'installed', `${idA.code}: ${idA.message}`)
+  assert.equal(idB.state, 'installed')
+
+  // ★ 两个空间：两个 scope，不是同一个。
+  assert.equal(idA.payload.scope, 'gf001')
+  assert.equal(idB.payload.scope, 'ozon')
+  assert.notEqual(idA.payload.scope, idB.payload.scope,
+    '两次不同空间的 Run 派生了同一个 scope——那正是缺口②')
+  // cwd 跟着 workdir（有隔离时是 worktree 槽位）
+  assert.equal(idA.payload.cwd, 'C:\\slots\\a')
+  assert.equal(idB.payload.cwd, 'C:\\slots\\b')
+  // taskId 跟着任务
+  assert.equal(idA.payload.taskId, 'T-a')
+  // actor/action **不在**载荷上（它们属于这次安装，不属于某一次 Run）
+  assert.equal('actor' in idA.payload, false)
+  assert.equal('action' in idA.payload, false)
+  // 载荷挂回了请求上（安装点从那里读）
+  assert.equal(idA.request.enforcementIdentity, idA.payload)
+})
+
+test('㉗ ★ 造不出 scope 时挂一份**会被拒绝**的载荷，而不是干脆不挂', async () => {
+  // 两者的读数完全不同：
+  //   不挂   → `absent`  → 安装点按进程级身份继续（**安静地错标**）
+  //   挂坏件 → `refused` → 安装点**具名拒绝这次 Run**
+  // 而"这次没有空间"恰恰是必须拒绝的那一种。
+  const { deriveRunIdentityCarrier } = await import('./executor.mjs')
+  const carried = deriveRunIdentityCarrier({
+    runId: 'r', attemptId: 'a', taskId: 'T', workdir: 'C:\\x', permissions: {},
+  })
+  assert.equal(carried.state, 'refused', '没有 workspaceId 时竟然派生出了一份能装的载荷')
+  assert.equal(carried.payload.scope, null)
+  assert.match(carried.message, /scope/)
+  // 载荷**挂上去了**——这正是与"不挂"的区别
+  assert.notEqual(carried.request.enforcementIdentity, undefined)
+})
+
+test('㉘ ★ 唯一的那个生产者：字段已经有人填过就具名拒绝', async () => {
+  const { deriveRunIdentityCarrier } = await import('./executor.mjs')
+  assert.throws(
+    () => deriveRunIdentityCarrier({ workspaceId: 'gf001', enforcementIdentity: { version: 1, scope: 'x' } }),
+    (e) => e.code === EXECUTOR_CODES.RUN_FLOOR_NOT_DERIVED,
+    '两个生产者写同一个字段时，真正生效的那一份取决于谁后写',
+  )
+})

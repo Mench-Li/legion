@@ -56,6 +56,17 @@ export const LOOPBACK_HOSTS = Object.freeze(['127.0.0.1', '::1', 'localhost'])
  *   - `writesRoles` 引用 §6.11 的目录角色；`install` 永不允许出现在可写角色里。
  *   - `envNames` 是该进程**从环境读取**的键（声明面，不是运行期实际值）。
  *   - `milestone` 指向实现该进程真实入口的任务号。
+ *   - `portArgv`（**可选**，PRT-251 续）：该进程用**哪个 argv 旗标**接收端口，
+ *     例如 `['--port']`。值由 `materializeProcessPlan()` 在**末尾**补上。
+ *     它必须与 `argsTemplate` 分开，理由见 §5.1 —— 一句话：
+ *
+ *       > 对 DSH 这种「launcher 旗标在前、app 旗标在后」的命令行，
+ *       > 把 `--port` 放进 `argsTemplate` 会让它后面的 `--patch` **变成 app 参数**
+ *       > （DSH 的解析器遇未知 token 即 passthrough），于是强制面补丁层静默消失，
+ *       > 而这次启动**照样成功**。
+ *
+ *     所以「端口」不是「又一个模板占位符」，它是**位置敏感**的：必须在所有
+ *     launcher 旗标之后。写成一个独立字段，位置这件事才是可断言的。
  */
 export const PROCESS_SPECS = Object.freeze([
   Object.freeze({
@@ -123,6 +134,23 @@ export const PROCESS_SPECS = Object.freeze([
     entry: Object.freeze({ kind: 'configured', configKey: 'runtime.command' }),
     cwd: '{install}',
     argsTemplate: Object.freeze([]),
+    // ★ PRT-251 续：端口**必须**走这里，不能走 `argsTemplate`。
+    //
+    //   DSH 的命令行是两段：launcher 旗标（`--profile` / `--patch` / `--dump-config`）
+    //   在前，被启动的 app 的旗标（`--port` / `--host` / `--no-open`）在后。
+    //   它的解析器带 `passThroughOptions()`：**遇到第一个不认识的 token 就停止解析
+    //   自己的旗标**，从那以后所有东西都归 app。
+    //
+    //   而 Launcher 的 argv 是 `[…command.args, …argsTemplate, …extras]`，
+    //   `extras` 里就是 `--patch <覆盖层>`。于是把 `--port` 放进 `argsTemplate`
+    //   会拼出 `… --port 3081 --patch X`，其中 **`--patch X` 落进了 app 段**：
+    //   DSH 照常启动、照常绑 3081、照常打印 URL——**强制面补丁层静默消失**。
+    //
+    //   `portArgv` 由 `materializeProcessPlan()` 追加在最末尾，于是顺序是
+    //   `… --patch X --port 3081`，两段各归各位。这不是风格问题：一个
+    //   「端口修好了但强制面没了」的启动，比「端口没修好」坏得多，而它看起来
+    //   更像一次成功的修复。
+    portArgv: Object.freeze(['--port']),
     portKey: 'runtime',
     defaultPort: DEFAULT_PORTS.runtime,
     host: '127.0.0.1',
@@ -300,22 +328,63 @@ export function materializeProcessPlan({
     const entryPath = spec.entry.kind === 'node-file' ? expand(spec.entry.path, vars) : null
     const args = spec.argsTemplate.map((a) => expand(a, { ...vars, port: port ?? '' }))
     const extras = extraArgs[spec.key] ?? []
+    // ★ PRT-251 续：端口的 argv 段**追加在最末尾**——在所有 launcher 旗标
+    //   （含 `extras` 里的 `--patch`）之后、且只对声明了 `portArgv` 的进程生效。
+    //
+    //   位置是这条链的全部要点（见 `PROCESS_SPECS` 里 `portArgv` 那段）：
+    //   对 DSH 这种「launcher 段 + app 段」的命令行，端口一旦跑到 `--patch`
+    //   前面，`--patch` 就被解析器当成 app 参数，强制面补丁层静默消失。
+    //
+    //   没有 `portArgv` 或没有端口的进程得到**空数组**——于是它逐字等价于
+    //   「本字段不存在」，不需要在下面判第二遍。
+    const portArgs = port === null || spec.portArgv === undefined
+      ? []
+      : [...spec.portArgv, String(port)]
     let command = null
-
     if (spec.entry.kind === 'node-file') {
       // 入口按**安装目录**解析成绝对路径：命令里出现相对路径时，实际被执行的是
       // 「相对于 Launcher 的 cwd」那一个文件，而它与清单里写的可能不是同一个。
       const entryAbs = vars.install === ''
         ? entryPath
         : api.resolve(vars.install, String(entryPath).split('/').join(api.sep))
-      command = Object.freeze({ file: nodePath, args: Object.freeze([entryAbs, ...args, ...extras]) })
+      command = Object.freeze({ file: nodePath, args: Object.freeze([entryAbs, ...args, ...extras, ...portArgs]) })
     } else {
       const configured = expandConfigured(runtimeCommand, vars)
       if (configured === null) {
         diagnostics.push(diag('error', 'ENTRY_UNRESOLVED', spec.key,
           `进程 ${spec.key} 的入口由配置项 ${spec.entry.configKey} 提供，但当前未配置其值。未配置时必须拒绝启动，不能跳过该进程——跳过会让「执行引擎不可用」表现成「任务一直没人做」。`))
       } else {
-        command = Object.freeze({ file: configured.file, args: Object.freeze([...configured.args, ...args, ...extras]) })
+        /**
+         * ★ PRT-251 续：**两处都给了端口**时必须具名拒绝，不许靠 argv 顺序决出胜负。
+         *
+         * `runtime.command` 可以自带 `--port`（用户手写的那条命令），而计划也会按
+         * `ports.runtime` 补一个。经验上后者赢（commander 取最后一次出现的值），
+         * 但「实际生效的是哪一个」由此变成每次排障都要重新确认的问题——
+         * 而它与 `launcher.mjs:96-98` 拒绝「端口既走 env 又走 argv」是同一条理由。
+         *
+         *   > 一个「两处都写了端口、由解析器的取值顺序决定谁生效」的部署，
+         *   > 与一个「`ports.runtime` 配了但不起作用」的部署，在**这个端口到底是谁的**
+         *   > 这个读数上是同一个东西——只不过前者会让人以为自己改对了地方。
+         *
+         * 所以这里是 **error（阻塞启动）**，不是 warn：这不是风格问题，是一次
+         * 权威冲突，而产品必须知道端口归谁管（spec §6.3：端口是计划的一部分）。
+         */
+        const conflict = spec.portArgv === undefined
+          ? null
+          : spec.portArgv.find((flag) => configured.args.includes(flag))
+        if (conflict !== undefined && conflict !== null) {
+          diagnostics.push(diag('error', 'PORT_AUTHORITY_CONFLICT', spec.key,
+            `进程 ${spec.key} 的 ${spec.entry.configKey} 里已经带了 ${conflict}，而计划也会按 `
+            + `ports.${spec.portKey} 补一个（${port}）。两处都能决定端口时，「实际生效的是哪一个」`
+            + `取决于 argv 里谁在后面，而那不是一个能被审计的规则。`
+            + `**请在配置里删掉 ${conflict}**：端口由 ports.${spec.portKey} 管，`
+            + `否则改了 ports.${spec.portKey} 却不生效，而外部看不出任何差别。`))
+        }
+        // ★ 冲突时**不追加**：计划里显示的就该是用户那条命令本身，加一个重复的
+        //   `--port` 只会让「这个端口是谁的」在诊断输出里更看不清。诊断已经阻塞启动，
+        //   所以这里的 argv 不会被执行——留它原样是让报错与它指向的东西对得上。
+        const effectivePortArgs = conflict === undefined || conflict === null ? portArgs : []
+        command = Object.freeze({ file: configured.file, args: Object.freeze([...configured.args, ...args, ...extras, ...effectivePortArgs]) })
       }
     }
 

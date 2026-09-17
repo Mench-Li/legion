@@ -275,7 +275,7 @@ export const NON_ENV_LITERALS = Object.freeze([
   'RUNTIME_CONTRACT_ROW_NO_PUBLICATION_DIR', // runtime/dsh-composition/plugins/runtime-contract-server-row.mjs
   'RUNTIME_CONTRACT_ROW_NO_TOKEN', // runtime/dsh-composition/plugins/runtime-contract-server-row.mjs
   'RUNTIME_CONTRACT_ROW_PUBLICATION_FAILED', // runtime/dsh-composition/plugins/runtime-contract-server-row.mjs
-  // ── runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs（20 条）
+  // ── runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs（21 条）
   'RUNTIME_HOST_REGISTRAR_CAPABILITY_CANCEL_NOT_GUARANTEED_BY_ENGINE', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
   'RUNTIME_HOST_REGISTRAR_CAPABILITY_ENFORCEMENT_PLANE_MEASURED_ELSEWHERE', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
   'RUNTIME_HOST_REGISTRAR_CAPABILITY_PROVIDER_LACKS_OUTPUT_SCHEMA', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
@@ -292,6 +292,11 @@ export const NON_ENV_LITERALS = Object.freeze([
   // `FLOOR_NOT_INSTALLABLE` 要看引擎/provider——修法不同，所以码不同。
   'RUNTIME_HOST_REGISTRAR_FLOOR_NOT_INSTALLABLE', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
   'RUNTIME_HOST_REGISTRAR_FLOOR_UNREADABLE', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
+  // PRT-214 缺口②：一次 Run 的**授权身份**过线时读不懂载荷。
+  // 与 `FLOOR_UNREADABLE` **逐字同形但分开登记**：两者都指向"生产者造坏了载荷"，
+  // 而定位时要看的是**哪一份载体**（floor 还是 identity）——合成一个码，
+  // 报错就只能说"某个随 Run 来的东西读不懂"，而修法在两条不同的链上。
+  'RUNTIME_HOST_REGISTRAR_IDENTITY_UNREADABLE', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
   'RUNTIME_HOST_REGISTRAR_MODEL_SELECTION_READ', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
   'RUNTIME_HOST_REGISTRAR_MODEL_SELECTION_RESULT_MALFORMED', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
   'RUNTIME_HOST_REGISTRAR_MODEL_SELECTION_SERVICE_ABSENT', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
@@ -346,6 +351,28 @@ export const NON_ENV_LITERALS = Object.freeze([
   'RUN_FLOOR_INSTALL_NO_GUARD_SEAM', // runtime/dsh-composition/run-floor.mjs
   'RUN_FLOOR_INSTALL_UNKNOWN_KEY', // runtime/dsh-composition/run-floor.mjs
   'RUN_FLOOR_INSTALL_UNKNOWN_STATE', // runtime/dsh-composition/run-floor.mjs
+  // ── PRT-214 缺口②：授权身份（`scope` / `taskId` / `cwd`）按 Run 生效。
+  //
+  // 两层分开，与 floor 同构：
+  //   ① `runtime/contracts/run-identity.mjs`（6 条）——**线上形状**读不懂；
+  //   ② `runtime/dsh-composition/run-identity.mjs`（4 条）——**装不装得上**。
+  // 与之对应的两个状态字面量（`absent` / `installed` / `refused`）是**小写**，
+  // scan 不会把它们读成 env 键，所以不在这里登记。
+  //
+  // ★ `RUN_IDENTITY_NOT_SUPPLIED` 与 `RUN_IDENTITY_SCOPE_REQUIRED` 必须分开：
+  //   前者说"这次 Run 没带身份"（合法，回落进程级），后者说"带了、但没有空间名"
+  //   （**拒绝起跑**）。合成一个的话，"没覆盖"与"覆盖写坏了"在读数上同形，
+  //   而前者是正常部署的每一天，后者是必须当场拦住的那一种。
+  'RUN_IDENTITY_BAD_FIELD', // runtime/contracts/run-identity.mjs
+  'RUN_IDENTITY_BAD_VERSION', // runtime/contracts/run-identity.mjs
+  'RUN_IDENTITY_NOT_OBJECT', // runtime/contracts/run-identity.mjs
+  'RUN_IDENTITY_NOT_SUPPLIED', // runtime/contracts/run-identity.mjs
+  'RUN_IDENTITY_SCOPE_REQUIRED', // runtime/contracts/run-identity.mjs
+  'RUN_IDENTITY_UNKNOWN_KEY', // runtime/contracts/run-identity.mjs
+  'RUN_IDENTITY_INSTALL_NOT_AN_AGENT', // runtime/dsh-composition/run-identity.mjs
+  'RUN_IDENTITY_INSTALL_NOT_AN_OBJECT', // runtime/dsh-composition/run-identity.mjs
+  'RUN_IDENTITY_INSTALL_UNKNOWN_KEY', // runtime/dsh-composition/run-identity.mjs
+  'RUN_IDENTITY_INSTALL_UNKNOWN_STATE', // runtime/dsh-composition/run-identity.mjs
   // ── runtime/dsh-composition/runtime-contract-publication.mjs（5 条）
   'ENOENT', // runtime/dsh-composition/runtime-contract-publication.mjs
   'RUNTIME_CONTRACT_PUBLICATION_CLEAR_FAILED', // runtime/dsh-composition/runtime-contract-publication.mjs

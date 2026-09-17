@@ -35,7 +35,7 @@ import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { analyze, loadBaseline, REPO, SCAN_DIRS, PROCESS_ENTRIES } from './reachability.mjs'
+import { analyze, ignoredFiles, loadBaseline, REPO, SCAN_DIRS, PROCESS_ENTRIES } from './reachability.mjs'
 
 const a = analyze()
 const baseline = loadBaseline()
@@ -192,6 +192,71 @@ test('⑤ 基线每一条都带 class 与 reason，且 class 在封闭词表里'
   assert.equal(a.unreachable.some(isTest), false, '不可达名单里不该出现用例文件')
   assert.ok(a.known.size > 300, `扫到的文件只有 ${a.known.size} 个，探针可能没在扫全仓`)
   assert.ok(SCAN_DIRS.includes('scripts'), 'scripts/ 必须在扫描范围内（有模块只被生产脚本 import）')
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// ⑤b ★★ 判据只看**被 git 跟踪**的模块（共享工作树上不许因别人未提交而红）
+// ══════════════════════════════════════════════════════════════════════════
+
+test('⑤b ★★ 不可达名单只含被跟踪的文件；未跟踪的另列且不参与判据', () => {
+  // 本仓库有另一个 agent 进程在并发提交。若判据把"工作树里新出现的不可达模块"
+  // 也算进去，别人当轮刚建、还没提交的模块会让本门禁红，于是：
+  //
+  //   > 一个「把别人未提交的在飞产物判成回归」的闸门，
+  //   > 与一个「逼着人去查一个与自己无关的红」的闸门，是同一个东西。
+  //
+  // （本会话实测过同族事故：`prt-churn` 因共享工作树的瞬时状态报红，
+  //   被读成回归。见状态文档 §6.1。）
+  //
+  // 语义与本探针自己的 `in-flight` 分类一致：**没提交就不算"已交付"**。
+  assert.notEqual(a.tracked, null, 'git ls-files 读不出来——本仓库应当始终是 git 仓库')
+  const untrackedInJudged = a.unreachable.filter((f) => !a.tracked.has(f))
+  assert.deepEqual(untrackedInJudged, [],
+    `★ 判据里混进了未跟踪文件（${untrackedInJudged.join(', ')}）：` +
+    '别人当轮新建、还没提交的模块会让本门禁误红')
+
+  // 两个集合必须互斥且并集 = 全部生产不可达
+  const both = a.unreachable.filter((f) => a.untrackedUnreachable.includes(f))
+  assert.deepEqual(both, [], '同一文件同时出现在判据与未跟踪列表里')
+
+  // 未跟踪的那一列**必须被报出来**（不能静默丢掉——静默丢掉就是把探针关掉了）
+  const reachableProd = a.files.filter((f) => !isTest(f) && !a.reach.has(f))
+  assert.equal(a.unreachable.length + a.untrackedUnreachable.length, reachableProd.length,
+    '判据 + 未跟踪 必须恰好覆盖全部不可达生产模块（不许有文件被静默漏掉）')
+
+  // 基线里**不许**出现未跟踪文件（否则基线会随别人的工作树抖动）
+  const baseFiles = new Set(baseline.unreachable.map((x) => x.file))
+  const drift = a.untrackedUnreachable.filter((f) => baseFiles.has(f))
+  assert.deepEqual(drift, [],
+    `★ 基线里有未跟踪文件（${drift.join(', ')}）——基线必须只描述**已提交**的世界，` +
+    '否则别的 agent 一提交/一改名它就漂移')
+
+  // ★ 被 `.gitignore` 排除的**本地产物**不许进扫描面。
+  //   它们在扫描面里有两个害处：进基线是永远清不掉的噪声；
+  //   更坏的是本地文件 import 了谁，谁就**假**报成可达。
+  //   （实测咬到过一次：`team-hub/.watch.mjs`（`.gitignore:32`）曾在基线里。）
+  //
+  //   ★ 注意必须把 **`a.files` 当候选传进去**：不带参数的 `ignoredFiles()` 会走
+  //   `git ls-files --others --ignored`，那会把 `node_modules/`（本身也被 ignore）
+  //   几万个文件全列一遍——实测直接把本套件拖到 2 分钟超时。
+  const ignored = ignoredFiles(a.files)
+  {
+    const inScan = a.files.filter((f) => ignored.has(f))
+    assert.deepEqual(inScan, [],
+      `★ 扫描面里有被 gitignore 的本地产物（${inScan.join(', ')}）：` +
+      '它们永远不是"已交付"，而且本地文件 import 谁就会让谁假报成可达')
+    assert.equal(a.unreachable.some((f) => ignored.has(f)), false,
+      '不可达名单里出现了被 ignore 的本地产物')
+    // 正对照：`check-ignore` 必须真的能认出那条已知规则。
+    // ★ 必须**显式**把那个路径当候选传进去——`a.files` 里已经没有它了
+    //   （它已经被 `collectFiles()` 过滤掉），拿 `a.files` 去问等于
+    //   "在一份已经排除干净的名单里找被排除的人"，永远找不到。
+    const ctl = ignoredFiles(['team-hub/.watch.mjs', 'runtime/contracts/run.mjs'])
+    assert.equal(ctl.has('team-hub/.watch.mjs'), true,
+      'check-ignore 认不出 `.gitignore:32` 那条规则——本判据会静默失效')
+    assert.equal(ctl.has('runtime/contracts/run.mjs'), false,
+      'check-ignore 把一条**已跟踪**的源码报成了被忽略——判据过宽，会把真源码排除掉')
+  }
 })
 
 // ══════════════════════════════════════════════════════════════════════════

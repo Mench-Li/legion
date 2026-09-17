@@ -59,6 +59,9 @@ import { TERMINAL_TO_OUTCOME, isTerminalEventType, RUN_REQUEST_REQUIRED } from '
 import {
   RUN_FLOOR_STATES, RUN_FLOOR_WIRE_FIELD, RUN_FLOOR_WIRE_VERSION, readRunFloor,
 } from '../../runtime/contracts/run-floor.mjs'
+import {
+  RUN_IDENTITY_WIRE_FIELD, RUN_IDENTITY_WIRE_VERSION, readRunIdentity,
+} from '../../runtime/contracts/run-identity.mjs'
 import { deriveRunFloor } from '../../team-hub/run-floor.mjs'
 import { resolveTool as resolveLegionTool } from '../../runtime/dsh-composition/tool-capability.mjs'
 // ★ 名字空间那一半：Legion 工具名 → 执行面名字（含连带代价）。
@@ -433,6 +436,29 @@ export async function createProductionExecutor(deps = {}) {
           })
       }
       request = carried.request
+
+      // ── PRT-214 缺口②：这次 Run 的**授权身份** ─────────────────────────────
+      //
+      // 与下限**同一处、同一个理由**：装配失败必须在任何花钱或探测的动作之前发生。
+      //
+      // ## 三个值直接来自 RunRequest 自己（没有任何新的权威）
+      //
+      //   `scope` ← `workspaceId`（空间 = 效果命名空间；`①` 已证明它是租约 `scope` 的推导）
+      //   `cwd`   ← `workdir`（这次 Run 在哪个目录里干活）
+      //   `taskId`← `taskId`
+      //
+      // ★ 这不是"又抄了一份"：`workspaceId` / `workdir` 的权威就是 PRT-253 续批接上的
+      //   那一条链（租约 → 空间 / worktree 槽位）。于是**同一个字段只有一个来源**，
+      //   而"空间"这件事不会在 worker 里出现第二种算法。
+      //
+      // ## 为什么**不**在这里判"装不上就拒绝"
+      //
+      // 拒绝对象是"载荷解释不了"，而那由安装点（`runtime/dsh-composition/run-identity.mjs`）
+      // 判——判据只有一处。这里只负责**造**：一个字段拼错了的载荷会带着它的
+      // `state: 'refused'` 过线，然后在 Runtime 进程里**具名拒绝这次 Run**。
+      // 在这里也判一次，等于让"谁说了算"取决于哪一边先跑。
+      const identity = deriveRunIdentityCarrier(request)
+      request = identity.request
 
       // 第一次执行前探测一次。适配器的 `execute` 依赖探测结论
       // （能力协商决定了能不能要求结构化输出），所以这不是可选步骤。
@@ -878,6 +904,86 @@ export function deriveRunFloorCarrier(request, {
     // 它们同时也在 `payload` 上——那一份是给**跨进程**的安装点读的。
     notices: result.notices,
     result,
+  })
+}
+
+/**
+ * PRT-214 缺口②：把这次 Run 的**授权身份**装上跑线（生产者）。
+ *
+ * ## 为什么生产者在这里
+ *
+ * 与 `deriveRunFloorCarrier()` 逐字同一个理由：spec §6.8 `:437-440` 要求控制面
+ * **生成**那两样东西，而"控制面"在 worker 这一侧就是本模块——它是唯一同时看得见
+ * `RunRequest` 全部字段与 `permissions` 的地方。
+ *
+ * ## ★ 三个值全部来自 `RunRequest` 自己，不引入第二份权威
+ *
+ * | 线上字段 | 来源 | 为什么是它 |
+ * | --- | --- | --- |
+ * | `scope` | `request.workspaceId` | 空间 = 效果命名空间。`①` 已经证明 `workspaceId` 就是租约的 `scope` 推导出来的，于是"哪个空间"只有一个算法 |
+ * | `cwd` | `request.workdir` | 这次 Run 在哪个目录里干活（有隔离时是 worktree 槽位） |
+ * | `taskId` | `request.taskId` | 哪条任务 |
+ *
+ * **`actor` / `action` 不在这里**——它们属于**这次安装**，不是某一次 Run
+ * （`runtime/contracts/run-identity.mjs` 的文件头写了完整理由：`RunRequest` 里
+ * 没有任何字段能权威地assert"这次由别人负责"，接受它等于让审计归属由请求方自填）。
+ *
+ * ## 缺席与写坏在这里**分不开**，所以这里不做那个判断
+ *
+ * `workspaceId` 是契约必填，走到这里必然是**非空字符串**——除非调用方绕过了契约
+ * （`deriveRunFloorCarrier` 那条注释描述过同一类绕过）。所以本函数只做一件事：
+ * **把值搬到线上形状**。判"这份载荷能不能装"是安装点的职责，判据只有一处
+ * （同 `deriveRunFloorCarrier` 结尾那句"判定借用传输层那一份"）。
+ *
+ * @param {object} request
+ * @returns {{request: object, payload: object, state: string, code: string|null, message: string|null}}
+ */
+export function deriveRunIdentityCarrier(request) {
+  if (request === null || typeof request !== 'object') {
+    throw new ExecutorError(EXECUTOR_CODES.BAD_WIRING,
+      'deriveRunIdentityCarrier 需要一个 RunRequest 对象')
+  }
+  if (request[RUN_IDENTITY_WIRE_FIELD] !== undefined) {
+    throw new ExecutorError(EXECUTOR_CODES.RUN_FLOOR_NOT_DERIVED,
+      `这次 Run 的 ${RUN_IDENTITY_WIRE_FIELD} 已经有人填过了——本模块是唯一的那个生产者。` +
+      '两个生产者写同一个字段时，真正生效的那一份取决于谁后写，' +
+      '而"谁后写"不是一条能被审计的规则',
+      { attemptId: request.attemptId })
+  }
+
+  const asString = (v) => (typeof v === 'string' && v.trim() !== '' ? v.trim() : null)
+  const scope = asString(request.workspaceId)
+  const payload = scope === null
+    // ★ 造不出一份**可解释**的载荷时，仍然造一份**会被拒绝**的载荷——不是"不挂这个字段"。
+    //
+    //   两者的读数完全不同：不挂 = `absent` = 安装点按进程级身份继续（**安静地错标**）；
+    //   挂一份坏载荷 = `refused` = 安装点**具名拒绝这次 Run**。
+    //   而"这次没有空间"恰恰是必须拒绝的那一种——把一次执行记在进程级那个空间名下，
+    //   正是本缺口要消灭的形状。
+    //
+    //   > 一个"造不出来就干脆不挂"的生产者，
+    //   > 与一个"把读不出空间的 Run 记在别的空间名下"的运行时，是同一个东西——
+    //   > 只不过前者在代码里看起来像是一次体面的省略。
+    ? Object.freeze({ version: RUN_IDENTITY_WIRE_VERSION, scope: request.workspaceId ?? null, taskId: null, cwd: null })
+    : Object.freeze({
+      version: RUN_IDENTITY_WIRE_VERSION,
+      scope,
+      // `taskId` / `cwd` 用 `?? null` 而不是省略：省略是"这次没提这件事"
+      // （沿用进程级那个值），而 `null` 是"这次明确没有"。
+      // `workspaceId` 之外的两项在 `RunRequest` 上是必填的，所以这里通常都有值；
+      // 传 `null` 只发生在绕过契约的调用方那里，而那正是要被读出来的一种处境。
+      taskId: request.taskId ?? null,
+      cwd: request.workdir ?? null,
+    })
+
+  // 判定**借用传输层那一份**：这里不另写"怎样才算能装"的规则。
+  const reading = readRunIdentity(payload)
+  return Object.freeze({
+    request: Object.freeze({ ...request, [RUN_IDENTITY_WIRE_FIELD]: payload }),
+    payload,
+    state: reading.state,
+    code: reading.code ?? null,
+    message: reading.message ?? null,
   })
 }
 

@@ -282,10 +282,75 @@ applier **抛错**的项不参与复核改写（它没有成功执行过，「�
 下面两条是**既有任务内部**发现的缺口，**不新建任务号**（spec §12 的 145 项是权威清单），
 因此它们只是 PRT-214 / PRT-253 的续篇，不进明细行、不改汇总：
 
+- `PRT-251-ports-runtime-wiring.md`（**新**，2026-09-17）—— `ports.runtime`
+  收下、进计划、进诊断，**到不了 DSH**：runtime 的 `argsTemplate` 是 `[]`、
+  `envNames` 里也没有端口键，于是 `--port.runtime=3081` 的唯一表现是
+  「Launcher 以为端口换了，DSH 仍绑 3080」。
+  — **2026-09-17 已修**：`process-manifest.mjs` 的 runtime 行新增
+  `portArgv: ['--port']`，由 `materializeProcessPlan()` 追加在**所有 launcher
+  旗标之后**。★ 修的过程咬出**两个更坏的东西**，都写进文档：
+  ① **`--port` 会把 `--patch` 吃掉**——DSH 的解析器带 `passThroughOptions()`，
+  遇到第一个不认识的 token 就停止解析自己的旗标，所以最自然的修法
+  （把 `--port` 放进 `argsTemplate`）会拼出 `… --port 3081 --patch X`，
+  于是**强制面补丁层静默消失而启动照样成功**；`portArgv` 的位置就是为这件事存在的，
+  并有**顺序**判据（不是「含有 `--port`」）钉住。
+  ② **runtime 的就绪探测永远不可能通过**：清单声明 `path:'/'` + `expectStatus:200`，
+  而真实 `dsh --profile web` 对 `/` 答 **401**（`browser-auth.ts:233-237`：
+  「every other request receives the same minimal 401 response」），
+  401 落进 `FATAL_PROBE_CODES` 的 `http-status-mismatch` ⇒ **不可重试、立刻熔断**；
+  反过来若该端口后面是别的答 200 的服务，它会**通过**而那个端口后面根本不是 DSH。
+  **②本批未修**（要新增一种 stdout 就绪判据，是独立于端口接线的一件事），
+  证据与坐标在文档 §4；所以**不要把本批读成「runtime 现在能起来了」**。
+  另记 `--host` / `--no-open` 同形未接（后者意味着 Launcher 启动的 runtime
+  **会弹浏览器**）。新增 `L.commandSurface()`（argv 的观察口，与 `envSurface()` 对称）；
+  破坏性验证 **3/3 咬住**（⑱–⑳）；全量 `product/**` 885 例 0 fail。
+  本表状态与计数不变（无任务号）。
+- `PRT-251-legacy-data-adoption.md`（**新**，2026-09-17）—— 承接物早已备好
+  （`DATA_PATH_ENV` + `envFor()` 把写路径指到 DataDir），缺的是**承接这个动作**：
+  旧数据在 `<安装目录>/team-hub/team.db` 里，而 `<DataDir>/team-hub/` 是空的
+  ⇒ 切换后 team-hub 对着空路径建库 ⇒ **界面是空的**，且没有一条日志说
+  "我少读了什么"。
+  — **2026-09-17 已修**：新增 `product/launcher/legacy-data-adoption.mjs`
+  （计划纯函数 + 执行 + 快照 + 校验 + 装载期自检），在 `start()` 的
+  **`preflight()` 之后、spawn 之前**调用。★ 修的过程咬出**本缺口真正的坑**：
+  **只拷 `team.db` 会静默丢数据**——WAL 模式下已提交未 checkpoint 的事务只在
+  `-wal` 里，本机那份旧库 `team.db` 11.6 MB 而 `team.db-wal` **4.3 MB**。
+  并排实测（只读探针 `scratch/probe-adoption-live.mjs`，旧库 44 表 33263 行）：
+  **朴素文件拷贝少 82 行**（`audit` 31716 vs 31798），而 `VACUUM INTO` 快照
+  **逐表 44/44 相等**。所以 SQLite **不走文件拷贝**，走 `VACUUM INTO`
+  （目标已存在即报错 ⇒ 幂等由 SQLite 自己保证）。其余：
+  旧的落点**不另立第二张清单**（由 `DATA_PATH_ENV` 的同一片段推到安装目录下，
+  两张表漂移正是本缺口的形状）；四个不变量（不覆盖／不删来源——它同时就是
+  spec line 610 要的升级前备份／写不落安装目录内／"没有来源"不是错误）；
+  ★ **接不成即拒绝启动**（`phase: 'legacy-adoption'`），因为"有旧数据却没接成、
+  空着起来"与"新装机本来就没数据"在**界面**上是同一个读数。
+  套件 15 例；**破坏性验证 6/6 咬住**（㉑–㉖，其中 ㉑ 一次红 6 条）。
+  ⚠️ **未做**：没有真的把用户那份旧库接管走（探针只读、DataDir 未写，
+  `D:\project\DSH\legion\team-hub\team.db` 与它的 WAL 原样未动）；
+  没有起过一个由 Launcher 完整启动的部署。本表状态与计数不变（无任务号）。
 - `PRT-214-per-run-enforcement-identity.md` —— 授权身份（`scope` / `actor` / `action`）
   仍是**进程级**的：一个 Runtime 进程服务多个空间时，别的空间的执行会被盖上
   这一个空间的身份（**不报错，只是错标**）。同一份代码里 hard floor 早已有
   per-Run 落点（`runtime/dsh-composition/run-floor.mjs`）可照抄。
+  — **2026-09-17 已修**（取原文 §7 候选 A）：新增线上契约
+  `runtime/contracts/run-identity.mjs`（`{version, scope, taskId?, cwd?}`，键集闭合）
+  与安装点 `runtime/dsh-composition/run-identity.mjs`（按**对象身份**登记，落点与
+  floor 逐字相同）；worker 侧新增生产者 `deriveRunIdentityCarrier()`
+  （`scope ← workspaceId`、`cwd ← workdir`、`taskId ← taskId`——**全部来自
+  PRT-253 续批接上的那一条链**，于是"空间"在整条链上只有一个算法）；
+  适配器 → 宿主端口 → 桥一路接上，`RUNTIME_HOST_REGISTRAR_VERSION` 3 → 4。
+  ★ 两处刻意的**取舍**，都写进文档并有判据：
+  ① **`actor` / `action` 不被接受**（不是"可选"）——`RunRequest` 里没有能权威地
+  assert"这次由别人负责"的字段，接受覆盖等于让审计归属由请求方自填；
+  ② **装不上不拒绝起跑**（与 floor 相反）——身份不新增判定点、只改一份既有判定
+  读到的值，所以把"归属回落"升级成"任务生不出来"是过度反应；代价如实记一条日志。
+  套件 `run-identity` 20 例 + registrar/adapter/run-inputs 各增用例；
+  **破坏性验证 7/7 咬住**（⑪–⑰）；端到端探针 `scratch/probe-identity-loop.mjs`
+  在一个进程里用生产代码把「租约 → RunRequest → 端口 → Agent → 授权哈希」走通，
+  读数里两个空间得到**两个不同的 `canonicalHash`**。
+  ⚠️ **未验证**：§6 第 3 条（`scope` 对不上 `permission_rules` 时匹配器的失败方向）
+  仍未端到端验证；本批只保证"送到匹配器里的 `scope` 是这一次 Run 的那个"。
+  本表状态与计数不变（无任务号）。
 - `PRT-253-run-request-input-wiring.md` —— 生产入口没有给
   `workspaceId` / `modelProfileRef` / `workdir`：用真实认领形状实测，
   `defaultRequestFor()` 以 `EXECUTOR_BAD_WIRING` 拒绝，即 product-runtime
@@ -296,10 +361,19 @@ applier **抛错**的项不参与复核改写（它没有成功执行过，「�
   ⚠️ 但 **`canRead` 仍未接**（另一条独立缺口：`PRT-253-can-read-authorization.md`
   §3.1 写明合它要改 wire 契约），故执行引擎**仍然不会接上**——
   本表状态与计数不变。
+  — 同一批还顺带闭掉了**第五个**缺口（同形状反面）：`LEGION_WORKSPACE_DIR`
+  连声明都不在 worker 的 `envNames` 里，于是 `buildChildEnv()` 把宿主环境里的
+  同名值**丢掉** ⇒ `workspaceDir === null` ⇒ `no-stages` ⇒ **一个任务都不认领**，
+  而外部只看得见状态文件里那一个词。已在 `process-manifest.mjs` + `launcher.mjs`
+  补齐（与 `LEGION_DATA_DIR` 逐字同形），新例 ①b′ 钉住。
 
 ---
 
 ## 优化清单（F-01～F-25）已闭合的缺口（2026-09-17，**不改本表状态与计数**）
+
+> ⚠️ 本节由两个 agent 进程**并发追加**（PRT-214/253 一轮，F-05/F-15/F-16/F-17 一轮），
+> 因此条目顺序不代表优先级。两轮的完整对照都在
+> `docs/MULTI-AGENT-FEATURE-STATUS.md`。
 
 下面这些来自 `docs/MULTI-AGENT-FEATURE-OPTIMIZATION.md`，而它们在 spec §12 的
 145 项里**没有任务号**。这正是它们能长期存活的原因：一份"没有编号"的缺口
@@ -335,16 +409,45 @@ applier **抛错**的项不参与复核改写（它没有成功执行过，「�
 - **F-16｜自动化计划 / 运行历史**（§4.4「日历只做投影；新增计划、运行、
   时区、skip-on-overlap、补跑和审批暂停状态」）。**改动前这个能力完全不存在**
   （全仓 grep `skipOnOverlap` / `scheduleStore` 零命中）。
-  判据：`team-hub/automation-store.mjs` + `automation-store.test.mjs`（22 例，
+  判据：`team-hub/automation-store.mjs` + `automation-store.test.mjs`（27 例，
   含**真 `Intl`** 的时区换算与 DST 边界）+ `automation-http.test.mjs`
-  （7 例真 hub HTTP）。`projectOccurrences` 是纯函数（打 50 次投影运行表
+  （9 例真 hub HTTP）。`projectOccurrences` 是纯函数（打 50 次投影运行表
   一行都不多）；时区名写错**具名拒绝、绝不回落服务器时区**；跳过**留下行**
   且带封闭词表原因；补跑三策略（默认 `once`，因为 `all` 是"停机三天之后
   一次性重放三天的工作"）；`awaiting-approval` 是独立状态且必须带
   `approvalId`（没有它就是一条永远醒不过来的行）。
-  ★ **仍未做的**：`automationTick` 返回 `wired: false` —— 物化出来的运行是
-  `scheduled`，把它们变成可领任务需要"计划 → 目标"的映射，那属于编排面。
-  这一条**如实回给调用方**，不让"建出来"被读成"跑起来了"。
+  ★ **续批已做**：`automationTick` 现在返回 **`wired: true`**。
+  物化出来的运行会按计划的 `payload_json` 模板（`ensureColumn` 加列，老库平滑
+  升级）建出一张 **`todo`（可领取）** 的任务卡，并通过 `bindTask` 把
+  `automation_runs.task_id` 指回它。上一轮那个 `wired:false` 的诚实边界
+  因此被真正关掉——**而不是**被改成一个更好听的读数：
+  `wired:true` 的含义仍是"它们**有机会**被执行"，真正的执行仍要 worker
+  去认领那些任务。
+  两条纪律：物化与建任务**两步各自幂等**（前者靠 `UNIQUE(schedule_id,
+  planned_at_ms)`，后者靠 `WHERE task_id IS NULL` 的 CAS）——合成一个事务会让
+  "任务建好了但运行行没写上"变成无法自愈的状态；建任务走 `createTask()`
+  那个**唯一**的对外入口，不自己拼 `INSERT INTO tasks`（验收标准、目标归属、
+  状态词表校验都在那里，绕过它就是让第二份校验规则开始漂移）。
+  没配 payload 的计划**只物化、不建任务**，且这不是错误：建一个标题为空的
+  占位任务会让 worker 领到一张只能靠猜的卡。
+- **F-15｜用量/成本汇总**（§4.4「按 scope、goal、task、employee、model 记录
+  token、调用次数、耗时和成本」）。闸门那一半（`reserve`/`observe`/`settle`、
+  硬阻止、暂停、锁）已由 `budget-ledger` 落地；**改动前缺的是另一半**——
+  记录写进了 `usage_records`，而"按员工花了多少"没有任何读出口。
+  判据：`team-hub/usage-rollup.mjs` + `usage-rollup.test.mjs`（12 例）
+  + `usage-rollup-http.test.mjs`（6 例真 hub HTTP）、
+  `GET /api/usage/totals`、`GET /api/usage/rollup?dimension=`。
+  这块的全部难点是**每一个数字都有一个"不知道"的邻居**，判据因此是
+  按失效方向拆开的：`SUM()` 把 NULL 当 0 ⇒ 新增 `tokensUnknownRecords`；
+  缺价的金额算成 0 会**低估总成本**而报表看着正常 ⇒ `amountUnknownRecords`；
+  未结束的 Attempt 用 `now-created` 顶替会把"卡住"画成"在跑" ⇒ 单列
+  `inFlightAttempts`；未归属维度静默丢掉会让各维度之和小于总额 ⇒ 显式
+  `(未归属)` 桶 + `attributed:false` + 逐维度 `unattributed` 计数；
+  混币种求和会让 101 被当成 101 美元 ⇒ `currency:null` + `mixedCurrency:true`
+  （不替调用方换算：汇率是会随时间变的外部事实）。
+  ★ 本轮**真的写错过**的一处：耗时查询 JOIN 到 `usage_records`，一条 Attempt
+  记 N 笔账就被算 N 遍——而"每条恰好记一笔"的那个月里完全看不出来。
+  用例⑦与结构级用例⑫把它钉住。
 - **F-17｜长会话压缩：不可变原文 + 版本化摘要 + 引用回原文**
   （§4.3）。**改动前这个能力完全不存在**（全仓 grep `compact` 零命中）。
   判据：`team-hub/compaction-store.mjs` + `compaction-store.test.mjs`（14 例）
@@ -1086,119 +1189,3 @@ applier **抛错**的项不参与复核改写（它没有成功执行过，「�
   这条与 PRT-610、PRT-603/604/605/606 是**同一族**（"模块全绿、而生产里没接"），
   但失效形态更安静：那三条是"接不上"，这一条是"接上去了会更坏"。
   已记入 `MULTI-AGENT-FEATURE-STATUS.md` §5 第 17 条与 §5.3。
-
----
-
-## PRT-611 续批：可达性探针 —— 48 个生产模块从任何入口都到不了（2026-09-17）
-
-**交付物**
-
-| 文件 | 说明 |
-|---|---|
-| `scripts/prt/reachability.mjs` | 可达性探针：从**真实入口**出发顺 import 图跑 BFS。`--json` / `--diff` / `--record` |
-| `scripts/prt/reachability.test.mjs` | 门禁 5 例（**变异 10/10 成立**） |
-| `docs/superpowers/prt/prt-reachability-baseline.json` | 基线 48 条，逐条带 `class` + `reason` |
-| `scripts/ci/run-ci.mjs` | 登记 `reachability` 组 |
-
-**为什么需要它（它补的是哪一格）**
-
-台账与对照表的 ✅ 口径是「有代码落点 + 可复跑的判据」。那条口径里**没有**
-"这个落点在生产里到得了"这一格。§5.2 与 §5.3 都是**逐个模块**数的
-（"它有几个非测试导入者"），而那个读数有一个**传递**盲点，本轮实测到了：
-
-> `runtime/packs/store.mjs`（PRT-1003 安装/启用/停用/升级记录，**✅**）
-> 有 **1** 个非测试导入者 ⇒ 在"有几个导入者"这个读数上它是**活的**。
-> 而那 1 个是 `runtime/packs/builtin/software-delivery.mjs`，它有 **0** 个导入者。
->
-> **一个「唯一的导入者也是死的」的模块，
-> 与一个「真的有人在用」的模块，在"有几个非测试导入者"上是同一个东西。**
-
-**读数**：513 个 `.mjs`（不含用例）里 **48 个**从任何生产入口都到不了。
-
-| class | 条数 | 含义 | 正确动作 |
-|---|---|---|---|
-| `by-design` | 13 | `*/config-schema.mjs`（被 `scan.mjs` 读**源码**）、barrel/公开出口、`*-fixture.mjs`、按路径跑的开发脚本 | 不动 |
-| `deliberate` | 8 | 升级链 `product/upgrade/*`：`runtime-install.mjs` 注释写明 Launcher **刻意不 import** | **别动** |
-| `in-flight` | 5 | 另一个 agent 进程当轮正在接线（工作树未提交） | 等 |
-| **`gap`** | **22** | ★ **台账/对照表说它已交付，而生产里没有路径** | 见 §5 第 14/15/16/17/18 条 |
-
-**★★ 最要紧的一条：F-18 与 F-19 的「执行面一半」全都到不了**
-
-| 模块 | 台账 | 现实 |
-|---|---|---|
-| `runtime/experience/friction.mjs`（487 行：`collectFriction`/`frictionScore`/`shouldDraft`…） | F-18 ✅ | 只被自己的用例驱动 ⇒ **生产里没有任何地方算过一个摩擦分** |
-| `runtime/experience/graph.mjs`（`createGraph`） | F-18 ✅ | **没有任何地方记过一条边** |
-| `runtime/employee/role-pack.mjs`（756 行：`buildRolePack`/`verifyRolePack`/`diffRolePacks`…） | F-19 ✅ | **没有任何地方建出或校验过一个岗位包** |
-
-★ 这**不是**说 hub 侧没接：`team-hub/experience-store.mjs` / `role-pack-store.mjs`
-**是**可达的（经 `server.mjs` 的路由）。缺的是**产出者**——账和读面都在，
-而**没有任何东西往里面写**。这与 PRT-610 是同一种形状（"表建好了、能读，而一条记录都不会有"）。
-
-★ 这也正是台账 §0 自身那条告警的字面含义：「只有自己的用例驱动的原语一律 🟡」。
-**本轮没有改这两行的 ✅/🟡**——那口径由台账的读者（项目方）定，
-"改状态"与"补证据"是两件事。已记入 §5 第 18 条。
-
-**★ 过程教训（两条，都是"探针自己坏了"）**
-
-**① 漏一种入口 = 把正在跑的进程报成死代码。** 第一版只认
-「进程入口 / `scripts/` / `package.json`」，于是
-`product/orchestrator/worker.mjs` 被报成不可达——而 `product/process-manifest.mjs`
-里明写着 `entry: {kind:'node-file', path:…}`，**Launcher 真的会把它 spawn 起来**；
-全部 `plugins/*-row.mjs` 也被报成死代码——它们由 `patch-layer.mjs` 的
-`module:` / `runtimeModule:` **字符串**加载。
-
-> 一个「漏了一种入口」的探针，
-> 与一个「那个模块真的没人用」的探针，在输出上是同一个东西——
-> 只不过前者会把**正在跑的进程**报成死代码。
-
-同一类错犯了两次：先只按**仓库相对**解析清单路径（漏了 `./` 开头的），
-再只按**文件相对**解析（漏了仓库相对的）。两种约定**同时存在**
-（`patch-layer.mjs` 用 `./`，`process-manifest.mjs` 用仓库相对）。
-
-**② ★★ 把用例算成入口，整个探针当场反转。** 第二版为"`scripts/` 下的都算入口"
-顺手把 `*.test.mjs` 也加了进去，于是**每一个只被自己用例 import 的模块都变成了可达**——
-恰好就是本探针要查的那一类。读数从 48 掉到 0，而**报告看起来一切正常**。
-
-> 一个「把用例也算成入口」的可达性探针，
-> 与一个「什么都没查」的探针，在输出上是同一个东西。
-
-两条都由**正对照**挡住，而正对照自身也修过一次：第一版的四条对照全在
-`runtime/`+`team-hub/`，**恰好不需要 `scripts/`**（§5.3 那个假阳性）。
-现在 ① 里有五条，覆盖四种接线方式 + 两条清单写法。
-
-**变异验证（10/10 成立，9 处咬住 + 1 处等价变异如期不红）**
-
-让 `resolveSpec` 空转 / 不再认清单的仓库相对路径 / 不再认 `module:` 键 /
-★ 把用例算成入口 / 新建一个没人 import 的模块 / 往基线塞不存在的文件 /
-★ 把 `path-scope` 接上（读数用例必须红）/ `class` 改成词表外的值 / `reason` 清空 /
-只改注释。
-
-★ 延续两条纪律：**未变异的副本先全绿**（否则不给任何变异结论）、
-**核对是哪一条用例红了**（不只看 `fail > 0`）。
-
-**★ 一条刻意的取舍：基线过期不判红**
-
-模块**变成可达**（基线过期）只报警，**不判红**——那是好消息，不是回归。
-
-> 一个「把别人正在接线的好消息判成回归」的闸门，
-> 与一个「逼着人把好消息 `--record` 确认一遍」的闸门，是同一个东西——
-> 只不过前者会在**共享工作树上天天红**。
-
-新增不可达（新的"到不了"）仍然判红——那才是本探针要挡的方向。
-
-**★ 工具教训（本轮自己踩到，同上一轮的那条）**
-
-用 `git show HEAD:<路径> > .tmp` 再用 node 读，得到"HEAD 2102 行"的假象
-（真实 1089 行）——PowerShell 的 `>` **默认写 UTF-16LE**。同一个坑上一轮记录过一次，
-本轮又踩了。正确做法是让 node 自己取字节：
-`execSync('git show HEAD:<path>', { maxBuffer })` 返回 Buffer 后直接 `writeFileSync`。
-
-> 一个「因为重定向编码而切错行的对比」，
-> 与一个「文件真的被另一个进程覆盖了」的对比，在数字上是同一个东西。
-
-**与前一族的关系**
-
-这条与 PRT-610、PRT-603/604/605/606、PRT-707 是**同一族**
-（"模块全绿、而生产里到不了/没接"），但它是**元层面**的那一条：
-前三者是具体缺口，这一条是**把"到不了"变成可复跑读数**的那个探针。
-它不新增功能，但它让 §5.4 里那 22 条 `gap` **从此不会悄悄变多**。

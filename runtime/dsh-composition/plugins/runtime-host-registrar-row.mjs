@@ -202,10 +202,23 @@ import {
   withRunFloorCarrier,
 } from '../run-floor.mjs'
 import { RUN_FLOOR_STATES } from '../../contracts/run-floor.mjs'
+import {
+  createRunIdentityInstallation,
+  installRunIdentityIntoAgent,
+  runIdentityCarrierOf,
+  runIdentityOptionOf,
+  withRunIdentityCarrier,
+} from '../run-identity.mjs'
+import { RUN_IDENTITY_STATES } from '../../contracts/run-identity.mjs'
 import realRuntimeHostRow, { setDshRuntimeInputsFactory } from './runtime-host-row.mjs'
 
-/** 改动来源、拒绝码或能力判据时递增。3 = `startRun` 按 Run 安装静态 hard floor。 */
-export const RUNTIME_HOST_REGISTRAR_VERSION = 3
+/**
+ * 改动来源、拒绝码或能力判据时递增。
+ *
+ * 3 = `startRun` 按 Run 安装静态 hard floor。
+ * 4 = `startRun` 按 Run 安装**授权身份**（PRT-214 缺口②）。
+ */
+export const RUNTIME_HOST_REGISTRAR_VERSION = 4
 
 /** 本模块的具名码。每一个对应**一样具体的输入**，不是一个笼统的"注册失败"。 */
 export const RUNTIME_HOST_REGISTRAR_CODES = Object.freeze({
@@ -229,6 +242,18 @@ export const RUNTIME_HOST_REGISTRAR_CODES = Object.freeze({
    * 与 `FLOOR_UNREADABLE` 分开：那一条要改**载荷的生产者**，这一条要看**引擎/provider**。
    */
   FLOOR_NOT_INSTALLABLE: 'RUNTIME_HOST_REGISTRAR_FLOOR_NOT_INSTALLABLE',
+  /**
+   * PRT-214 缺口②：Run 的**授权身份**载荷解释不了。
+   *
+   * 与 `FLOOR_UNREADABLE` 同一档、同样在**起跑之前**拒绝，但理由不同：
+   * 下限读不懂时"照跑"= 强全面整段不在；身份读不懂时"照跑"= 这一次执行会被记在
+   * **进程级那个空间**名下——不报错，只是错标，而审计从此不能用来追责。
+   *
+   *   > 一次"读不懂就按进程级继续"的起跑，
+   *   > 与一次"把甲空间的事记在乙空间名下"的起跑，是同一个东西——
+   *   > 只不过前者的归因里只有一句"这次没覆盖"。
+   */
+  IDENTITY_UNREADABLE: 'RUNTIME_HOST_REGISTRAR_IDENTITY_UNREADABLE',
   /**
    * **尝试挂一个不是函数的 `canRead`**（`createRuntimeHostInputsFactory({canRead})`
    * 的构造期检查）。
@@ -769,6 +794,20 @@ export function createRuntimeHostInputsFactory({
     const installedFloors = new Map()
 
     /**
+     * PRT-214 缺口②：同一套「在飞载荷按对象身份」的登记，给授权身份一份。
+     *
+     * 两份 Set/Map 而不是合并成一份：合并之后"这次没给下限"与"这次没给身份"
+     * 会共用一个缺席读数，而两者的处置完全不同（前者 fail closed 拒绝一切工具，
+     * 后者回落进程级身份）。
+     */
+    const pendingIdentities = new Set()
+    const installedIdentities = new Map()
+    /** 身份安装的诊断口。与 `floorLog` 同一档，但不抢占它的"告诫"语义。 */
+    const identityLog = typeof ctx.logger?.info === 'function'
+      ? (line) => ctx.logger.info(line)
+      : null
+
+    /**
      * 创建窗口那一钩（见上面 `startRun` 的长注释）。
      *
      * ⚠️ 这里**故意让安装失败抛出去**：`agent/created` 的同步抛出会否决这次发布
@@ -787,6 +826,28 @@ export function createRuntimeHostInputsFactory({
           log: floorLog,
         }))
       })
+
+      /**
+       * ★ PRT-214 缺口②：**同一个创建窗口**里装授权身份。
+       *
+       * 与下限共用一个钩子，但**各认各的载体键**（`legionRunIdentity` /
+       * `legionRunFloor`），于是"这次只给了其中一个"是一件读得出来的事。
+       *
+       * ⚠️ 这里**不抛**（下限那一钩故意抛）：身份不新增任何判定点，只改一份既有判定
+       * 读到的值，所以它没有"装一半"的中间态——装不上只会让这次 Run 用进程级身份，
+       * 而那**已经**是一个被记下来的读数（`runIdentityOverlayOf === undefined`）。
+       * 让身份装失败否决整个孩子的发布，会把一次"归属回落"升级成"任务生不出来"。
+       */
+      ctx.on('agent/created', ({ agent }) => {
+        const payload = runIdentityCarrierOf(agent)
+        if (payload === undefined || !pendingIdentities.has(payload)) return
+        pendingIdentities.delete(payload)
+        installedIdentities.set(payload, installRunIdentityIntoAgent({
+          agent,
+          installation: createRunIdentityInstallation(payload),
+          log: identityLog,
+        }))
+      })
     }
 
     /**
@@ -797,48 +858,112 @@ export function createRuntimeHostInputsFactory({
      */
     async function startRun(provider, options) {
       const payload = runFloorOptionOf(options)
-      if (payload === undefined) {
+      const identityPayload = runIdentityOptionOf(options)
+      if (payload === undefined && identityPayload === undefined) {
         // 真来源：引擎的 subagents 服务。**不包一层**，按引用转发，
         // 于是"端口连的是谁"与"引擎是谁"是同一个对象——多包一层就会有一个会漂移的替身。
         return subagents.start(provider, options)
       }
 
-      let installation
-      try {
-        installation = createRunFloorInstallation(payload)
-      } catch (e) {
-        throw registrarError(RUNTIME_HOST_REGISTRAR_CODES.FLOOR_UNREADABLE,
-          `这次 Run 的下限载荷解释不了（${e?.code ?? 'unknown'}）：${e?.message ?? String(e)}。`
-          + '**不跳过安装照跑**：跳过就等于把"派生失败"洗成"这次没有东西要禁止"')
-      }
-      // ★ 解释不了的载荷**在起跑之前**拒绝这次 Run。
+      // ── PRT-214 缺口②：身份载荷先读，**缺席与读不懂分开**──────────────
       //
-      //   `createRunFloorInstallation` 对坏载荷也会给出一份"拒绝一切"的 guard，
-      //   而这一档**不是**它：那一份是给"给了下限、但读不懂"用的（第三档），
-      //   与"没给下限"（`absent`，同样拒绝一切，但理由是 §6.8 `:479` 的发布前姿态——
-      //   静态下限比的是**执行面的工具名**，而派生出来的名单写的是 Legion 的
-      //   **能力名**，名字空间不相交，按名字装进来一个真工具名都拦不住）
-      //   是两件事。坏载荷是一次接线错误，不是一份政策：照跑会让它伪装成一个
-      //   能跑的 Run，于是"搬运写坏了"只会表现为"这次任务什么也没干成"。
-      if (installation.state === RUN_FLOOR_STATES.REFUSED) {
-        throw registrarError(RUNTIME_HOST_REGISTRAR_CODES.FLOOR_UNREADABLE,
-          `这次 Run 的下限载荷解释不了（${installation.code}）：${installation.message}。`
-          + '**不跳过安装照跑**：跳过就等于把"派生失败"洗成"这次没有东西要禁止"')
+      // 缺席（适配器没给这个键）是**合法**的：老调用方、别的适配器都可能是这样，
+      // 那时沿用进程级身份——行为与接线之前逐字相同，而且 `runIdentityOverlayOf`
+      // 会如实返回 `undefined`，所以"这次没有覆盖"是一个读得出来的事实。
+      //
+      // 读不懂则**在起跑之前拒绝**：一次形状坏掉的载荷完全可能是"想覆盖但写错了
+      // 字段名"，回落会让它**看起来**成功了——而它失败的形状正是"把甲空间的事
+      // 记在乙空间名下"，不报错、只错标。
+      let identityInstallation = null
+      if (identityPayload !== undefined) {
+        identityInstallation = createRunIdentityInstallation(identityPayload)
+        if (identityInstallation.state === RUN_IDENTITY_STATES.REFUSED) {
+          throw registrarError(RUNTIME_HOST_REGISTRAR_CODES.IDENTITY_UNREADABLE,
+            `这次 Run 的授权身份载荷解释不了（${identityInstallation.code}）：${identityInstallation.message}。`
+            + '**不回落成进程级身份照跑**：回落之后这次执行会被安静地记在'
+            + '进程级那个空间名下，而审计从此不能用来追责')
+        }
       }
 
-      const forwarded = withRunFloorCarrier(options, payload)
-      pendingFloors.add(payload)
+      let installation = null
+      if (payload !== undefined) {
+        try {
+          installation = createRunFloorInstallation(payload)
+        } catch (e) {
+          throw registrarError(RUNTIME_HOST_REGISTRAR_CODES.FLOOR_UNREADABLE,
+            `这次 Run 的下限载荷解释不了（${e?.code ?? 'unknown'}）：${e?.message ?? String(e)}。`
+            + '**不跳过安装照跑**：跳过就等于把"派生失败"洗成"这次没有东西要禁止"')
+        }
+        // ★ 解释不了的载荷**在起跑之前**拒绝这次 Run。
+        //
+        //   `createRunFloorInstallation` 对坏载荷也会给出一份"拒绝一切"的 guard，
+        //   而这一档**不是**它：那一份是给"给了下限、但读不懂"用的（第三档），
+        //   与"没给下限"（`absent`，同样拒绝一切，但理由是 §6.8 `:479` 的发布前姿态——
+        //   静态下限比的是**执行面的工具名**，而派生出来的名单写的是 Legion 的
+        //   **能力名**，名字空间不相交，按名字装进来一个真工具名都拦不住）
+        //   是两件事。坏载荷是一次接线错误，不是一份政策：照跑会让它伪装成一个
+        //   能跑的 Run，于是"搬运写坏了"只会表现为"这次任务什么也没干成"。
+        if (installation.state === RUN_FLOOR_STATES.REFUSED) {
+          throw registrarError(RUNTIME_HOST_REGISTRAR_CODES.FLOOR_UNREADABLE,
+            `这次 Run 的下限载荷解释不了（${installation.code}）：${installation.message}。`
+            + '**不跳过安装照跑**：跳过就等于把"派生失败"洗成"这次没有东西要禁止"')
+        }
+      }
+
+      // ★ 两个载体**各挂各的键**，一次转发。合并成一个对象会让"这次只给了其中一个"
+      //   变成不可判定，而两者的缺席处置完全不同（见文件头那份清单）。
+      let forwarded = options
+      if (installation !== null) {
+        forwarded = withRunFloorCarrier(forwarded, payload)
+        pendingFloors.add(payload)
+      }
+      if (identityInstallation !== null) {
+        forwarded = withRunIdentityCarrier(forwarded, identityPayload)
+        pendingIdentities.add(identityPayload)
+      }
+
       let run
       try {
         run = await subagents.start(provider, forwarded)
       } catch (e) {
         pendingFloors.delete(payload)
         installedFloors.delete(payload)
+        pendingIdentities.delete(identityPayload)
+        installedIdentities.delete(identityPayload)
         throw e
       }
 
+      // ── 身份：装到那个 Agent 上（**装不上不拒绝起跑**，见下面的理由）──────
+      if (identityInstallation !== null && identityInstallation.state === RUN_IDENTITY_STATES.INSTALLED) {
+        let identityReading = installedIdentities.get(identityPayload)
+        if (identityReading === undefined) {
+          pendingIdentities.delete(identityPayload)
+          const agent = run?.localAgent
+          if (agent !== undefined) {
+            // 身份安装**不需要** ctx 缝合点（见 `../run-identity.mjs` 文件头），
+            // 所以这里唯一会抛的是"它不是 Agent"——那说明引擎交回了一个别的东西。
+            identityReading = installRunIdentityIntoAgent({
+              agent, installation: identityInstallation, log: identityLog,
+            })
+          } else {
+            // ★ 与下限**不同**：远程 provider 交不回 in-process Agent 时，
+            //   下限拒绝起跑（装不上 = 强全面整段不在），而身份**不拒绝**——
+            //   它不新增判定点，落空只会让这次 Run 用进程级身份，
+            //   而"归属回落"不该把一次任务变成生不出来。
+            //   代价如实记一条日志，于是它不是无声的。
+            identityLog?.(`[run-identity] 这次 Run 的身份没有装上：引擎交回的运行没有 `
+              + `in-process 子 Agent（provider=${String(provider)}）——本次执行会用**进程级**身份，`
+              + '它的归属可能是错的（这是"归属回落"，不是"拒绝起跑"）')
+          }
+          if (identityReading !== undefined) installedIdentities.set(identityPayload, identityReading)
+        }
+      } else {
+        pendingIdentities.delete(identityPayload)
+      }
+
+      // ── 下限：装不上就拒绝起跑（原有语义，一个字都没动）──────────────────
       let reading = installedFloors.get(payload)
-      if (reading === undefined) {
+      if (installation !== null && reading === undefined) {
         // 创建窗口那一钩没接上（端口 ctx 没有 on，或 provider 不走 agent/created）。
         // 退到"拿回句柄之后立刻装"——但**装不上就拒绝**，不退化成"没装"。
         pendingFloors.delete(payload)
@@ -858,12 +983,19 @@ export function createRuntimeHostInputsFactory({
         installedFloors.set(payload, reading)
       }
 
-      // 收尾：Run 结算就把那两个面撤掉。**不影响返回值**——句柄原样交出去
+      // 收尾：Run 结算就把那几个面撤掉。**不影响返回值**——句柄原样交出去
       // （`runtime-host-registrar-row.test.mjs` 有一条按引用比较的用例）。
       const settle = () => {
         pendingFloors.delete(payload)
         installedFloors.delete(payload)
-        try { reading.dispose() } catch { /* Agent 自己的作用域回收也会撤它 */ }
+        pendingIdentities.delete(identityPayload)
+        // ★ 先取出来再删：反过来的话 `dispose()` 拿到的是 `undefined`，
+        //   而"撤不掉身份"这件事**没有任何东西会报**——下一个 Run 若复用了同一个
+        //   Agent 对象（测试替身、或引擎的复用路径），它会读到上一个 Run 的空间。
+        const identityReading = installedIdentities.get(identityPayload)
+        installedIdentities.delete(identityPayload)
+        try { reading?.dispose() } catch { /* Agent 自己的作用域回收也会撤它 */ }
+        try { identityReading?.dispose() } catch { /* 同上 */ }
       }
       if (run?.result !== undefined && typeof run.result.then === 'function') {
         run.result.then(settle, settle)

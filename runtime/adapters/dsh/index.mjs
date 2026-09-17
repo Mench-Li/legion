@@ -46,6 +46,7 @@ import {
 // PRT-214 缺口①：这次 Run 的静态 hard floor 先在**适配器这一侧**读成三种处境之一，
 // 再作为**已解析的载荷**交给宿主端口（`./port.mjs` 的 `enforcementFloor`）。
 import { RUN_FLOOR_PORT_STATES, RUN_FLOOR_STATES, readRunFloor } from '../../contracts/run-floor.mjs'
+import { RUN_IDENTITY_PORT_STATES, RUN_IDENTITY_STATES, readRunIdentity } from '../../contracts/run-identity.mjs'
 import { toModelDescriptor, validateProfile as validateProfileAgainstContract, validationResult, findPlaintextSecrets } from '../../contracts/model.mjs'
 import { RuntimeContractError, describeError } from '../../contracts/errors.mjs'
 
@@ -404,6 +405,32 @@ export function createDshRuntimeAdapter(host, options = {}) {
       })
       : Object.freeze({ state: RUN_FLOOR_PORT_STATES.ABSENT })
 
+    // ── PRT-214 缺口②：这次 Run 的**授权身份** ──────────────────────────────
+    //
+    // 与下限逐字同一个形状、同一个理由，只有一处处置差别（见下面 `refused` 那一档）。
+    const identityReading = readRunIdentity(request.enforcementIdentity)
+    if (identityReading.state === RUN_IDENTITY_STATES.REFUSED) {
+      throw new RuntimeContractError('INVALID_RESULT',
+        `这次 Run 的授权身份无法解释（${identityReading.code}）：${identityReading.message}`, {
+          details: { code: identityReading.code },
+        })
+    }
+    /**
+     * 交给宿主端口的**已解析**身份载荷。
+     *
+     * ★ 与 `floorPayload` 一样，这个对象**每次 Run 新建**、并跟着这次创建请求走
+     * （宿主端口把它挂到 `agentOptions` 上）。于是"哪一份身份属于哪一次 Run"
+     * 由**对象身份**回答——并发两个空间的派工不可能串台。
+     *
+     * ★ `absent` **也要显式交出去**（一个 `{state:'absent'}` 对象，而不是"不传这个键"）。
+     *   理由与下限那句逐字相同：不传键的适配器会让端口分不出
+     *   "这次 Run 明确没有身份覆盖"与"调用我的人不支持身份覆盖"，
+     *   而前者是"按进程级身份继续"这个**已有**的语义。
+     */
+    const identityPayload = identityReading.state === RUN_IDENTITY_STATES.INSTALLED
+      ? Object.freeze({ state: RUN_IDENTITY_PORT_STATES.INSTALLED, identity: identityReading.overlay })
+      : Object.freeze({ state: RUN_IDENTITY_PORT_STATES.ABSENT })
+
     const runId = request.runId
     if (active.has(runId)) {
       throw new RuntimeContractError('INVALID_RESULT', `runId ${runId} 已在运行中（同一 Run 不得并发执行）`, { details: { runId } })
@@ -552,6 +579,10 @@ export function createDshRuntimeAdapter(host, options = {}) {
           //   在端口那一侧的读数上是同一个东西——只不过前者的键根本不在，
           //   于是端口分不出"这次 Run 没有下限"和"调用我的人不支持下限"。
           enforcementFloor: floorPayload,
+          // ★ PRT-214 缺口②：身份**也总是显式交出去**，理由与上面那一行逐字相同。
+          //   一个"缺席就什么都不传"的适配器会让端口分不出"这次没有覆盖"
+          //   与"调用我的人不支持覆盖"——而前者要按进程级身份继续，后者只能猜。
+          enforcementIdentity: identityPayload,
         })
       } catch (err) {
         clearTimeout(watchdog)

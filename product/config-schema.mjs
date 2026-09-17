@@ -915,6 +915,43 @@ export const SCHEMA = defineSchema({
     'TRAY_ICON_UNKNOWN_MESSAGE',
     'TRAY_ICON_UNSUPPORTED_PLATFORM',
     'TRAY_ICON_WRITE_REFUSED',
+    // ── PRT-251 续 ④ 旧数据接管（安装目录 → DataDir）的**逐项**诊断码 ──────
+    //
+    // `product/launcher/legacy-data-adoption.mjs` 的 `ADOPTION_CODES` 的值。
+    // 同样是**输出**用的码，不是配置键：进程不"读"它们，而是把逐项结论放进
+    // `launcher.allDiagnostics()` 的 `adoptionDiagnostics` 给用户看。
+    //
+    // ★ 与下面那组 `LEGACY_ADOPTION*` **分开**：那两条是**一次启动一行**的结论，
+    //   这七条是**逐项**的失败原因。合成一套的话，"四个落点里有几个没接成"
+    //   要靠读那行汇总去猜，而"哪一项、为什么没接成"才是要照着修的东西。
+    'ADOPTION_SOURCE_MISSING',
+    'ADOPTION_TARGET_EXISTS',
+    'ADOPTION_SOURCE_UNREADABLE',
+    'ADOPTION_COPY_FAILED',
+    'ADOPTION_VERIFY_FAILED',
+    'ADOPTION_NO_DATA_DIR',
+    'ADOPTION_TARGET_INSIDE_INSTALL',
+
+    // ── PRT-251 续 ④ 接管**结论**（`launcher.adoptLegacyData()`）─────────
+    //
+    // `LEGACY_ADOPTION` 是一行汇总（运维最常问的是"这次启动有没有接管"，
+    // 而它不该靠拼四条逐项记录才能答出来）；`LEGACY_ADOPTION_<STATE>` 由
+    // `LEGACY_ADOPTION_${state.toUpperCase()}` 拼出。
+    //
+    // ★ `RUNNING` 是**结论还没算出来**那一刻的替身：日志回调在 `runLegacyAdoption()`
+    //   运行**期间**就在跑，而那时 `state` 还不存在。它不是 `ADOPTION_STATES`
+    //   的成员，正是因为它表达的是"还没有状态"——把它登记成状态之一，
+    //   会让"跑着呢"与"跑完了、结果是这个"在读数上同形。
+    'LEGACY_ADOPTION',
+    'RUNNING',
+
+    // ── PRT-251 续：`ports.runtime` 的**权威冲突**（阻塞启动）─────────────
+    //
+    // `product/process-manifest.mjs` 在 `runtime.command` 自带的 argv 里已经含
+    // `--port` 时产出它。名字是 SCREAMING_SNAKE，但它不是 env 键：
+    // 它是一条 **error 级诊断**的码，产品靠它决定"这次启动不许继续"。
+    'PORT_AUTHORITY_CONFLICT',
+
     // `product/launcher/tray-wiring.mjs` 的 `iconNoticeOf()` 在一份探测读数
     // 连 `code` 都没有时的兜底文案。它不是诊断码，是一个**占位**——
     // 一个说不出是哪种原因的读数也必须能印出来，而不是印出 `undefined`。

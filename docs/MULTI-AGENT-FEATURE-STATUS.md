@@ -634,7 +634,7 @@ approval-answerer），`legion-host.patch.yml` 只有 2 行；而这两行**只�
 它们归 `in-flight`——**另一个 agent 进程当轮正持着这两个文件**（未提交），
 所以本轮不把它们记为缺口，只记录读数。
 
-### ★ 两个过程教训（都是"探针自己坏了"）
+### ★ 三个过程教训（都是"探针自己坏了"）
 
 **① 漏一种入口 = 把正在跑的进程报成死代码。** 第一版只认「进程入口 / `scripts/` /
 `package.json`」，于是：
@@ -659,17 +659,45 @@ approval-answerer），`legion-host.patch.yml` 只有 2 行；而这两行**只�
 > 一个「把用例也算成入口」的可达性探针，
 > 与一个「什么都没查」的探针，在输出上是同一个东西。
 
-这两条都由**正对照**挡住，而正对照本身也修过一次：第一版的四条对照全在
+**③ ★★ `evidenceFrom:` 是**存在性**断言，不是加载指令——别"顺手"加进去。**
+
+探针支持四种"按字符串加载"的清单写法，所以很自然会有人看到
+`product/release/checklist.mjs` 里的
+
+```js
+evidenceFrom: 'product/diagnostics/crash-report.mjs'
+```
+
+就以为"又漏了一种入口机制"，把它加进 `MANIFEST_PATTERNS`。**不能加。**
+`evidenceFrom` 的消费者只做一件事：
+
+```js
+const sourceExists = deps.sourceExists ?? ((p) => existsSync(join(REPO, p)))
+```
+
+它是「**这个文件必须存在**」的断言，不是「这个文件会被加载」。实测：加进去会让
+**8 个**模块**假**报成可达（`privacy.mjs`、`uninstall.mjs`、`preflight.mjs`、
+`switchover.mjs`、`backup.mjs`、`retention.mjs`、`crash-report.mjs`、`audit.mjs`），
+而每一个都是"存在但没人跑"。
+
+> 一个「把它当成入口声明」的探针，
+> 与一个「那些模块真的被用上了」的探针，在输出上是同一个东西——
+> 只不过前者会把**"存在"读成"在用"**。
+
+存在性与可达性是**两条不同的契约**。用例 ⑥ 专门把这条钉开
+（变异验证：把 `evidenceFrom` 加进 `MANIFEST_PATTERNS` ⇒ ⑥ 精确变红）。
+
+这三条都由**正对照**挡住，而正对照本身也修过一次：第一版的四条对照全在
 `runtime/`+`team-hub/`，**恰好不需要 `scripts/`**（见 §5.3）。
 现在 ① 里有五条，覆盖四种接线方式 + 两条清单写法。
 
 ### 判据与变异
 
-门禁 5 条，**变异验证 10/10 成立**（9 处咬住 + 1 处等价变异如期不红）：
+门禁 **6 条**，**变异验证 11/11 成立**（10 处咬住 + 1 处等价变异如期不红）：
 让 `resolveSpec` 空转 / 不再认清单的仓库相对路径 / 不再认 `module:` 键 /
 ★ 把用例算成入口 / 新建一个没人 import 的模块 / 往基线塞不存在的文件 /
 ★ 把 `path-scope` 接上（读数用例必须红）/ class 改成词表外的值 / reason 清空 /
-只改注释。
+★ 把 `evidenceFrom` 当成入口声明（⑥ 精确变红）/ 只改注释。
 
 ★ 一条**刻意的取舍**：基线**过期（模块变成可达）不判红**，只报警。
 

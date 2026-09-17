@@ -193,3 +193,61 @@ test('⑤ 基线每一条都带 class 与 reason，且 class 在封闭词表里'
   assert.ok(a.known.size > 300, `扫到的文件只有 ${a.known.size} 个，探针可能没在扫全仓`)
   assert.ok(SCAN_DIRS.includes('scripts'), 'scripts/ 必须在扫描范围内（有模块只被生产脚本 import）')
 })
+
+// ══════════════════════════════════════════════════════════════════════════
+// ⑥ ★★ `evidenceFrom:` **不是**入口声明 —— 别"顺手"把它加进去
+// ══════════════════════════════════════════════════════════════════════════
+
+test('⑥ ★★ `evidenceFrom:` 只是存在性断言，不是加载指令（加进去会假报 8 个可达）', () => {
+  // 背景：探针支持两种"按字符串加载"的清单写法（`module:` / `runtimeModule:` /
+  // `path:` / `entryFile:`），所以很自然会有人看到
+  // `product/release/checklist.mjs` 里的
+  //
+  //     evidenceFrom: 'product/diagnostics/crash-report.mjs'
+  //
+  // 就以为"又漏了一种入口机制"，把它加进 MANIFEST_PATTERNS。
+  //
+  // ★ **不能加。** `evidenceFrom` 的消费者只做一件事：
+  //
+  //     const sourceExists = deps.sourceExists ?? ((p) => existsSync(join(REPO, p)))
+  //
+  // 它是"**这个文件必须存在**"的断言，不是"这个文件会被加载"。
+  // 加进去会让 8 个模块**假**报成可达（实测），而每一个都是"存在但没人跑"。
+  //
+  //   > 一个「把它当成入口声明」的探针，
+  //   > 与一个「那些模块真的被用上了」的探针，在输出上是同一个东西——
+  //   > 只不过前者会把"存在"读成"在用"。
+  //
+  // 存在性与可达性是**两条不同的契约**，本用例把它们钉开。
+  const withEvidence = new Set()
+  for (const f of a.files) {
+    const text = readFileSync(join(REPO, f), 'utf8')
+    for (const m of text.matchAll(/evidenceFrom:\s*'([^']+\.mjs)'/g)) {
+      const p = m[1].replace(/^\.\//, '')
+      if (a.known.has(p)) withEvidence.add(p)
+    }
+  }
+
+  // 正方向：`evidenceFrom` 指的文件确实存在（所以这条纪律不是"没数据"）
+  assert.ok(withEvidence.size > 0, '没有扫到任何 evidenceFrom：这条用例失去意义')
+  for (const p of withEvidence) {
+    assert.equal(existsSync(join(REPO, p)), true, `${p} 被 evidenceFrom 指着却不存在`)
+  }
+
+  // ★ 反方向：它们**不在**基线里被当成入口，且仍有 8 个是不可达的。
+  //   如果哪天有人把 evidenceFrom 加进 MANIFEST_PATTERNS，这些会突然变可达 ⇒ 本用例红。
+  const wouldFlip = [...withEvidence].filter((f) => a.unreachable.includes(f))
+  assert.ok(wouldFlip.length >= 5,
+    `★ 只有 ${wouldFlip.length} 个 evidenceFrom 目标当前不可达（期望 ≥5）。\n` +
+    '  要么是有人把 `evidenceFrom` 当成了入口声明（把"存在"读成了"在用"），\n' +
+    '  要么是这些模块真的被接上了——两种都必须先看清再改本用例。\n' +
+    `  目标：${[...withEvidence].join(', ')}`)
+
+  // 而且证据里**不许**出现"它被 import 了"这种混淆：
+  //   evidenceFrom 的每一个目标，都不该因此出现在 entries 里
+  for (const p of withEvidence) {
+    const why = a.entries.get(p)
+    assert.equal(why === undefined || !String(why).includes('evidenceFrom'), true,
+      `${p} 被当成入口了（${why}）——evidenceFrom 是存在性断言，不是加载指令`)
+  }
+})

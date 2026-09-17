@@ -350,6 +350,7 @@ deny 会被宽松的默认静默盖掉，而他写那条正是为了拦住一样
 | 14 | ★★★ **三道范围检查的生产接线（PRT-603/604/605/606）** | 产品 + 项目主 | **这三道检查今天在生产里一次都不跑**（读数见 §5.2）。要决定的是：**这一次 Run 的范围表（读根/写根/平台、命令/网络/MCP 授权、外部 API 读写端点）从哪来、挂在哪一层**。可选方向：(A) 随 Run 的载荷到达，像 PRT-214 的下限/授权身份那样由 `runtime-host-registrar-row.mjs` 按 Run 安装；(B) 由岗位包（F-19 的 `permissions` 一节）派生，装配期算一次；(C) 仍留在 hub 侧判（那 `path-scope.mjs` 这类执行面检查器就应当明确废弃，而不是挂在桥上当"可选端口"） | 不决定则**越界路径今天拦不住**：`tool-request.mjs:639` 在 `pathScope === null` 时返回"放行"，而生产从不注入。★★ 我**没有**擅自接线，因为凭空造一份范围表正是 PRT-253 §3 明令禁止的"不发明任何默认值、替身或暂时放行"——那会让"没接线"与"接好了"在读数上同形。本轮的处置是把读数钉住（`production-scope-wiring.test.mjs` 5 例 + 5/5 变异），所以**接上了它会红**。★ 另注意：三个台账行（PRT-604/605/606）的 ✅ 依据是"模块 + 自己那套用例"——按本表 §0 那条告警（"只有自己的用例驱动的原语一律 🟡"），它们的口径需要在台账里对齐 |
 | 15 | ★★ **PRT-610 执行面的落账点** | 项目主 + 产品 | `tool_calls` 的**表、读面、就绪证据的产出点**已经接上（本轮），而**写入方仍然是 0**：要接 `recordToolCall`/`markDispatched` 得先定"一次工具调用在哪一层落账"——`tools/pre-execute` 是**判定**点，而 `markDispatched` 必须在**真的派发之前**落库，那个位置比判定点更靠下 | 不接则这笔账永远是空的：表建好了、三条路由能读、就绪判据能回答"在不在记"，而**一条记录都不会有**。★ 这与第 14 条是**同一个决定**（执行面的载荷里今天没有这些字段），不是代码量问题。★★ 另：`release-gate.mjs` 的 `evaluateReadiness` **本身也零生产调用方**，所以"证据有了产出点"之后仍没有人在**发布决策**里读它——本轮只补齐了能被代码单独关闭的那一半 |
 | 16 | ★★ **阶段 9 产品动作的 CLI 面（PRT-903/904/905/908/909、PRT-712、PRT-707）** | 产品 | 这批模块（发布检查清单、隐私说明、保留策略、数据导出、卸载、支持手册、首次运行向导、指标数据源）**全部自带用例、全部 ✅、全部零生产入口**（系统盘点见 §5.3）。要决定的是：**这些"产品级动作"由谁触发**——`legion` 的子命令？一个独立的发布/运维 CLI？还是只作为发布流程里人工跑的一次性脚本？ | 不决定则它们**对用户不存在**。台账自己为 PRT-509 写过这句话：「一个功能没有入口，与这个功能不存在，对用户来说是同一件事」。★ 其中 `metrics-source.mjs` 的台账行已如实写了"还没有界面/CLI 消费者"，另外六个没有写。★★ 另：PRT-801～813 的升级执行链**看起来**也在这个清单里，但它**不是**缺口——`runtime-install.mjs` 的注释写明 Launcher **刻意不 import** 它（进程卫生：Launcher 要在那些依赖起来之前先把进程看好）。**不要**给 Launcher 补这个 import，见 §5.3。它的执行者同样取决于第 1 条（PRT-011 DSH 分发形态） |
+| 17 | ★★★ **PRT-707 的两份实现用两个不同的模型密钥引用名** | 产品 + 项目主 | PRT-707（首次运行向导）在仓库里有**两份实现**：**活的**是 `cli.mjs` 的 `--wizard` 分支（内联，写 `model/api-key`），**死的**是 `first-run.mjs`（636 行 + 一整套用例，算 `legion/model/<profileId>`）。要裁决的是：**模型密钥的引用名用哪一个**——Legion 自己的三段式（`legion/model/<id>`，与 `credential-materializer.mjs` 文件头那句"Legion 的模型引用是 `legion/model/<profileId>`"一致，但 `planDshLookup()` 实测 `addressable:false`），还是运行时物化的那一段（`model/api-key`，端到端通、被 drift 用例钉着）？**或者**：两份实现留哪一份、另一份删掉还是明确废弃？ | ★★ **不要**把 `first-run.mjs` 直接接上去。它写进 hub 档案的 `secretRef` 是 `legion/model/<id>`——**三段**，而 `security/secrets/credential-materializer.mjs` 的 `planDshLookup()` 对三段引用返回 `{addressable:false, space:null}`（在 `refs` 与 `records` 两个键空间里**都没有位置**）。接上它的后果**不报错**：向导报"模型已配置"，而运行时拿不到钥匙——正是该模块文件头点破的那种失效（"文件看起来完整、就是少了最要紧那一把钥匙"）。★ 本轮**没有**替任何一方改代码：两份**各自都自洽**，裁决它需要产品决定。已把它变成读数：`product/launcher/wizard-wiring.test.mjs`（5 例，**今天全绿**，7/7 变异成立）——它红的那天，正是有人接线或对齐的那天 |
 
 ---
 
@@ -474,13 +475,18 @@ deny 会被宽松的默认静默盖掉，而他写那条正是为了拦住一样
 `config-schema.mjs`（被 `scan.mjs` 读**源码**，按设计不被 import）、
 测试夹具（`*-fixture.mjs`）、组合行（由 `patch-layer.mjs` 的 `runtimeModule:` **清单**加载）。
 
-### 收窄后的 14 个，按"为什么"分三类
+### 收窄后的 14 个，按"为什么"分四类
 
 | 类别 | 模块 | 为什么没有生产入口 |
 |---|---|---|
 | **已记账**（本轮/上轮） | `runtime/connectors/registry.mjs`（§4.2）、`path-scope.mjs`+`execution-scope.mjs`+`external-api-scope.mjs`（§5.2） | 判定面/范围表要等执行面载荷定义，见 §5 第 13/14 条 |
 | **★ 刻意不接，且理由写在代码里** | `product/upgrade/{index,backup,migration,switchover,package,preflight}.mjs`（PRT-801～813 的**执行**链） | 见下 |
-| **产品入口尚未定形** | `product/release/{checklist,privacy}.mjs`、`product/lifecycle/{retention,data-export,uninstall}.mjs`、`product/support/runbook.mjs`、`product/launcher/first-run.mjs`、`product/metrics-source.mjs` | 都是**阶段 9** 的交付物；它们的入口是一次"产品级动作"（发布检查、导出、卸载），而那个 CLI 面今天不存在。★ 其中 `metrics-source.mjs` 的台账行**已经如实写了**"`metricsCounts()` 目前只被这个数据源使用，还没有界面/CLI 消费者" |
+| **★★ 接上去会更坏** | `product/launcher/first-run.mjs`（PRT-707 的**死的那份**实现） | 见 §5.3.1 |
+| **产品入口尚未定形** | `product/release/{checklist,privacy}.mjs`、`product/lifecycle/{retention,data-export,uninstall}.mjs`、`product/support/runbook.mjs`、`product/metrics-source.mjs` | 都是**阶段 9** 的交付物；它们的入口是一次"产品级动作"（发布检查、导出、卸载），而那个 CLI 面今天不存在。★ 其中 `metrics-source.mjs` 的台账行**已经如实写了**"`metricsCounts()` 目前只被这个数据源使用，还没有界面/CLI 消费者" |
+
+★ **"零生产入口"这一列读数的结论只有一句：去读代码里的理由，再决定动作。**
+四类的正确动作**完全不同**：已记账的等裁决、刻意不接的**别动**、
+接上去会更坏的**先对齐**、入口未定形的才轮到"补一个入口"。
 
 ### ★★ 最要紧的一条：**不要**把升级链 import 进 Launcher
 
@@ -522,6 +528,56 @@ ci/脚本按路径跑（只有用例）。
 本批补上了建表、三条只读路由与那个产出点 —— 见 PRT-PROGRESS 的 PRT-610 续批段
 与 §5 第 15 条。
 
+### 5.3.1 ★★★ 第三类：**接上去会更坏**（PRT-707 有两份实现）
+
+前两类是"等裁决"与"别动"。这一类更安静：**动它会得到一个不报错的坏产品**。
+
+`product/launcher/first-run.mjs`（636 行、一整套用例、台账 ✅、零生产导入者）
+是 PRT-707 的**第二份**实现。**活的那份**是 `cli.mjs` 的 `--wizard` 分支里
+**内联**的一份。两份对"模型密钥叫什么名字"说法不一致：
+
+| 角色 | 文件 | 引用名 | 谁钉着它 |
+|---|---|---|---|
+| 活的 | `cli.mjs` `--wizard`（内联） | `model/api-key` | `run-credential-materialization.mjs` 的 `RUNTIME_MODEL_KEY_REF` + 一条 drift 用例 |
+| 死的 | `first-run.mjs` | `legion/model/<profileId>` | `first-run.test.mjs`（自己一整套） |
+
+关键在于**死的那份用的名字在三段**，而
+`security/secrets/credential-materializer.mjs` 的 `planDshLookup()` 对它返回
+`{addressable:false, space:null}`——**在两个键空间里都没有位置**
+（`refs` 的键是 POSIX 标识符，`records` 的键是**恰好两段**）。本轮用**真实读者**实测：
+
+```text
+model/api-key                {"addressable":true,"space":"records"}   ← 活的那条
+legion/model/default         {"addressable":false,"space":null}      ← 死的那条
+legion/openai                {"addressable":true,"space":"records"}   ← 正对照（两段→可以）
+DEEPSEEK_API_KEY             {"addressable":true,"space":"refs"}      ← 正对照（另一个空间）
+```
+
+所以把那份死的接上去的后果**不报错**：向导报"模型已配置"，而运行时拿不到钥匙。
+`credential-materializer.mjs` 自己把这种失效点破了：
+
+> 一个"文件看起来完整、就是少了最要紧那一把钥匙"的读数，
+> 与一个"文件本来就只该有这么多"的读数，在 `cat` 的输出里长得一模一样。
+
+**§5.3 那条"别动"的教训在这里推进一步**：上一节说的是"零调用方 ≠ 缺陷"，
+这一节说的是"**零调用方也可能是被一个更坏的东西挡住的**"。
+补一个 `import` 之前，先确认接上去的那条链**端到端**是同一件事
+（这里就是：写进去的引用名 == 运行时读出来的引用名）。
+
+★ **本轮没有替任何一方改代码。** 两份**各自都自洽**：
+死的那份用的是 Legion 自己的三段式（与 `credential-materializer.mjs` 文件头一致），
+活的那条链端到端通。裁决它是 §5 第 17 条。本轮把它变成**读数**：
+`product/launcher/wizard-wiring.test.mjs`（5 例，**今天全绿**，7/7 变异成立）。
+
+★ 变异验证在本轮**又咬到一次**（同族第四次）：第 ⑥ 处变异第一次没咬住，原因不是
+判据写错，而是**我的扫描漏了一种装法**（只收 `from '…'` 与 `import('…')`，
+不收 `import '…'` 这种纯副作用导入）。
+
+> 一个「漏了一种装法」的扫描，
+> 与一个「那个模块真的没人装」的扫描，在输出上是同一个东西。
+
+已补上第三种装法，并让那一处变异专门用这种形态——它咬住了，也就证明补漏**有效**。
+
 
 ## 6. 怎么复跑这份对照表里的每一条
 
@@ -545,6 +601,8 @@ node --test runtime/experience/friction.test.mjs runtime/experience/graph.test.m
 node --test runtime/connectors/registry.test.mjs team-hub/connector-store.test.mjs team-hub/connector-http.test.mjs
 node --test runtime/dsh-composition/production-scope-wiring.test.mjs
 node --test team-hub/tool-call-log.test.mjs team-hub/tool-call-http.test.mjs
+# ★ 下面这一套今天**全绿**——它是一份读数，不是待办（见 §5.3.1 与 §5 第 17 条）
+node --test product/launcher/wizard-wiring.test.mjs
 node --test runtime/packs/store.test.mjs
 node --test product/secrets.test.mjs
 node --test product/launcher/secrets-acl-runner.test.mjs

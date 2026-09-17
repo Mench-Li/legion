@@ -162,7 +162,7 @@ export async function openProductSecrets({
   // `owner` 必须传进 `inspectFileAcl`：`icacls` 的输出**不标出**哪个主体是所有者，
   // 所以不传 owner 时真所有者会被当成越权主体——那是 fail closed 方向（不会漏报），
   // 但会让一份干净的 ACL 永远显示"越权"，于是这个提示很快会被所有人忽略。
-  const aclBefore = await inspectFileAcl({ file: path, platform, run: aclRun, owner, exists })
+  const aclBefore = await inspectSecretsAcl({ path, platform, run: aclRun, owner, exists })
   let acl = aclBefore
   let hardened = null
   // `NOT_CREATED` 不触发加固：文件还不存在，没有东西可以加固，
@@ -172,7 +172,11 @@ export async function openProductSecrets({
     // owner 由调用方显式给出。**本模块不猜**：
     // 猜错主体去授权等于把权限给错人，而猜错的失败方向是"给了别人权限"（fail open）。
     hardened = await hardenFileAcl({ file: path, platform, run: aclRun, owner })
-    acl = await inspectFileAcl({ file: path, platform, run: aclRun, owner, exists })
+    // ④′ 加固后**重新读**，而且走的是同一个 `inspectSecretsAcl`。
+    // 这一处曾经是内联的 `inspectFileAcl({...})`，与上面那次各写一份传参——
+    // 只要其中一处漏掉 `owner`，两次读数就会用不同的口径，而它们要比较的
+    // 恰恰是"加固有没有生效"。
+    acl = await inspectSecretsAcl({ path, platform, run: aclRun, owner, exists })
   }
 
   // ⑤ 解析器——这一步才是"生产调用方"真正被接上的地方。
@@ -286,11 +290,48 @@ export function assertSecretsPlacement(layout, { platform = layout?.platform ?? 
   return { ok: true, code: null, message: null }
 }
 
-async function inspectSecretsAcl({ path, platform, run }) {
+/**
+ * 密钥库文件访问控制的**唯一**读取点（`openProductSecrets` 的 ④ 与 ④′ 共用它）。
+ *
+ * ## 这个函数曾经是死代码，而那是 PRT-509 缺口 B2
+ *
+ * 它此前长这样：
+ *
+ *     async function inspectSecretsAcl({ path, platform, run }) {
+ *       return inspectFileAcl({ file: path, platform, run: run ?? undefined })
+ *     }
+ *
+ * 定义在那里、有注释、**零调用方**——`openProductSecrets` 自己在第 ④ 步与
+ * 加固之后**各内联了一次** `inspectFileAcl`。所以它没被删掉，也没有人用它，
+ * 因为它**比调用点少两个参数**：它把 `owner` 与 `exists` 丢掉了。
+ *
+ * 那两个参数不是可有可无的：
+ *
+ *   · 少了 `owner` —— `icacls` 的输出**不标出**哪个主体是所有者，于是真所有者
+ *     会被当成越权主体。失败方向是 fail closed（不会漏报），但一份**干净的**
+ *     ACL 会永远显示"越权"，而这个提示很快会被所有人忽略（第 162-164 行那条注释
+ *     说的就是这件事）。而忽略它的那一天，真正的越权也在同一句提示里。
+ *   · 少了 `exists` —— 用例注入的假 `exists` 进不来，"文件还没创建"与
+ *     "文件在但 ACL 异常"这两条分支就无法被**确定性**地分别验到。
+ *
+ *   > 一个"参数比调用点少"的辅助函数，与一个"根本不存在的"辅助函数，
+ *   > 在调用点上完全一样——都是没有调用点。只不过前者看起来**像重构过**，
+ *   > 于是下一个人会以为抽取已经完成、只有两处忘了换。
+ *
+ * 现在把它补齐成真正的唯一读取点：**两个调用点都走它**，参数一次传全。
+ * 这样"加固前的读数"与"加固后的读数"不可能再各自漂移——它们连传参都只有一处。
+ */
+async function inspectSecretsAcl({ path, platform, run = null, owner = null, exists = existsSync }) {
   // 文件还不存在时（首次运行），`inspectFileAcl` 会按"读不到"报
   // UNVERIFIABLE/NO_RUNNER——那是**正确**的：没查过就是没查过，
   // 它不该伪装成 ACL_OK。加固会在第一次写入之后生效。
-  return inspectFileAcl({ file: path, platform, run: run ?? undefined })
+  return inspectFileAcl({
+    file: path,
+    platform,
+    run: run ?? undefined,
+    owner,
+    exists,
+  })
 }
 
 // 注：本模块**不读 `process.env`**。

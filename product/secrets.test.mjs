@@ -15,6 +15,11 @@
 // ============================================================================
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const HERE = dirname(fileURLToPath(import.meta.url))
 
 import { findPlaintextSecrets } from '../runtime/contracts/model.mjs'
 import {
@@ -619,4 +624,70 @@ test('⑦ 回退来源**不写**任何东西：文件逐字节不变', async () 
   await r.resolver.resolveSecret('NOT_THERE').catch(() => null)
   assert.equal(writes, 0)
   assert.equal(text, `version: 1\nrefs:\n  DEEPSEEK_API_KEY: ${DSH_SECRET}\n`)
+})
+
+// ── ⑧ PRT-509 缺口 B2：ACL 的读取点必须只有一处，而且真的被走 ==
+
+test('⑧ ★★★ 缺口 B2：`inspectSecretsAcl` 不再是死代码 —— 两次读数走同一个函数', () => {
+  const src = readFileSync(join(HERE, 'secrets.mjs'), 'utf8')
+  // ① 函数体里**不许**再内联 `inspectFileAcl`。它此前正是因为这个才成为死代码：
+  //    那个辅助函数比调用点少 `owner` / `exists` 两个参数，于是调用点各写一份。
+  const bodyStart = src.indexOf('export async function openProductSecrets')
+  const bodyEnd = src.indexOf('function messageForOpenError')
+  const openBody = src.slice(bodyStart, bodyEnd)
+  assert.equal(/await\s+inspectFileAcl\(/.test(openBody), false,
+    'openProductSecrets 里又出现了内联的 inspectFileAcl —— 加固前后的两次读数会各写一份传参，'
+    + '而它们要比较的恰恰是"加固有没有生效"')
+  // ② 而那两次读数必须**都**走 `inspectSecretsAcl`，且都带上 owner / exists。
+  const calls = [...openBody.matchAll(/await inspectSecretsAcl\(\{([^}]*)\}\)/g)].map((m) => m[1])
+  assert.equal(calls.length, 2, `应该有恰好两处读数（加固前 / 加固后），实际 ${calls.length}`)
+  for (const args of calls) {
+    assert.match(args, /\bowner\b/, '读数没有传 owner —— icacls 不标出所有者，真所有者会被当成越权主体')
+    assert.match(args, /\bexists\b/, '读数没有传 exists —— 用例注入的假 exists 进不来，两条分支无法分别验')
+    assert.match(args, /\brun\b/, '读数没有传 run —— 没有 runner 时整套检查只会说"没查过"')
+  }
+  // ③ 辅助函数自身必须把 `owner` / `exists` 真的转发下去（不是收下就丢）。
+  const helper = src.slice(src.indexOf('async function inspectSecretsAcl'))
+  const helperBody = helper.slice(0, helper.indexOf('\n}'))
+  assert.match(helperBody, /owner,/, 'inspectSecretsAcl 收下了 owner 却没有转发 —— 这正是 B2 的原始形态')
+  assert.match(helperBody, /exists,/, 'inspectSecretsAcl 收下了 exists 却没有转发')
+})
+
+test('⑧ ★★★ 缺口 B2（行为级）：`owner` 真的到达了 ACL 检查，不是收下就丢', async () => {
+  // 结构级断言证明不了"值真的到了"。这里用注入的 runner 走**真读数**：
+  // 一个"收了 owner 但没转发"的实现，结构上看不出差别，而在真机上
+  // 会让一份干净的 ACL 永远显示越权。
+  const r = await openProductSecrets({
+    layout: layoutFor(),
+    storeFactory: fakeFactory(),
+    platform: 'win32',
+    owner: OWNER,
+    run: aclRunner(CLEAN_ACL),
+    hardenAcl: false,
+  })
+  assert.equal(r.ok, true, JSON.stringify(r))
+  // ★ 判据：一份**只有 owner** 的 ACL 必须被读成"干净"。
+  //   `owner` 没转发时 `principalIsOwner` 无法判定，这条 ACL 会被翻成越权。
+  assert.equal(r.acl?.ok, true,
+    `一份只有 owner 的 ACL 被判成不干净（code=${r.acl?.code}）—— `
+    + '`owner` 没有转发到 inspectFileAcl，真机上这个提示会永远出现，'
+    + '于是很快被所有人忽略')
+  assert.equal(r.acl?.owner, OWNER, 'inspectSecretsAcl 没有把 owner 转发下去')
+})
+
+test('⑧ ★★ 缺口 B2（行为级）：`exists: () => false` 走进"文件尚未创建"，且不触发加固', async () => {
+  // 这条钉的是另一个被丢掉的参数。`exists` 不转发时，用例注入的假实现
+  // 进不来，于是"首次运行"这条分支只能用真文件系统去撞。
+  let hardened = 0
+  const r = await openProductSecrets({
+    layout: layoutFor(),
+    storeFactory: fakeFactory(),
+    exists: () => false,
+    platform: 'win32',
+    owner: OWNER,
+    run: async () => { hardened += 1; return { status: 0, stdout: '' } },
+  })
+  assert.equal(r.acl?.code, 'ACL_NOT_CREATED', `期望"尚未创建"，实际 ${r.acl?.code}`)
+  assert.equal(hardened, 0,
+    '文件不存在却触发了加固 —— 对着不存在的路径跑 icacls /grant 只会失败并留下一条假告警')
 })

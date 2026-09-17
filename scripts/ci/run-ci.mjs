@@ -1608,6 +1608,29 @@ async function stageTest() {
       files: ['team-hub/pack-facts.test.mjs', 'team-hub/pack-facts-http.test.mjs'],
       cwd: ROOT,
     },
+    // F-19 缺口②：冻结的岗位包。
+    //
+    // 这一组的重心是**冻结这件事能不能被证伪**：
+    //   · `runtime/employee/role-pack.test.mjs` 钉"七类版本都固化了"——
+    //     缺一类即拒（**不给默认空值**）、承载内容的那四类必须有哈希
+    //     （★ 版本号是标签、哈希才是身份）、对账时"版本没变而内容变了"
+    //     必须与"版本变了"分成两个码。
+    //   · `team-hub/role-pack-store.test.mjs` 钉"冻结之后改不动"：
+    //     主键 `(scope, role_pack_id, version)` 让多版本**同时存在**，
+    //     同版本同内容幂等、同版本不同内容 409。
+    //   · `team-hub/role-pack-http.test.mjs` 钉那个 409 **真的走得到网络上**
+    //     ——库里抛 409 与客户端收到 409 之间隔着 `handleRun` 的
+    //     `Number(e?.statusCode) || 400`，那层一旦不认识它，调用方就会把
+    //     "版本冲突"读成"请求格式不对"，于是永远不去递增版本号。
+    {
+      label: 'role-pack（F-19：七类版本固化、冻结不可改、对账分两种漂移）',
+      files: [
+        'runtime/employee/role-pack.test.mjs',
+        'team-hub/role-pack-store.test.mjs',
+        'team-hub/role-pack-http.test.mjs',
+      ],
+      cwd: ROOT,
+    },
     // PRT-314：多 worker 并发语义。竞争者是真的**操作系统进程**，
     // 不是同一进程里的两条连接——同一事件循环里两条 BEGIN IMMEDIATE
     // 不可能真的同时发出，因此那种测法证明不了「两个进程抢的时候不会都赢」。

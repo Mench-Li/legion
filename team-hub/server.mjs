@@ -168,6 +168,15 @@ import {
 } from './automation-store.mjs'
 import { createCompactionStore, ensureCompactionSchema } from './compaction-store.mjs'
 import {
+  ROLE_PACK_STORE_ERRORS,
+  ensureRolePackSchema,
+  exportRolePacks,
+  freezeRolePack,
+  getRolePack,
+  listRolePacks,
+  rolePackCounts,
+} from './role-pack-store.mjs'
+import {
   PACK_FACT_ERRORS,
   appendPackFact,
   ensurePackFactSchema,
@@ -565,6 +574,16 @@ const compactionStore = (() => {
  * 推导只有一处实现。
  */
 ensurePackFactSchema(db)
+
+/**
+ * F-19：冻结的岗位包。
+ *
+ * 主键 `(scope, role_pack_id, version)` —— **多版本共存**是"冻结"的全部含义。
+ * 它与 `employee_manifests`（主键 `(scope, role)`、就地更新、"这个岗位**现在**
+ * 是什么"）是两张表，因为"现在是什么"与"当时是哪一版"是两个问题：
+ * 把后者塞进前者，第二次修改就会把第一次的答案覆盖掉。
+ */
+ensureRolePackSchema(db)
 
 /**
  * 模型档案仓储（PRT-501，spec §6.6）。
@@ -6838,6 +6857,88 @@ async function handle(req, res, stripPrefix) {
       res.writeHead(200, {
         'content-type': 'application/json; charset=utf-8',
         'content-disposition': 'attachment; filename="legion-pack-install-facts.json"',
+      })
+      res.end(text)
+      return
+    }
+    // ── F-19 冻结的岗位包 ──────────────────────────────────────────────
+    //
+    // 三条路由，围绕着**只追加的版本化冻结**：
+    //   · `POST /api/role-packs`            冻结一版（幂等或 409，没有第三种）
+    //   · `GET  /api/role-packs`            列各版本 / 取一版（不传 version = 最新）
+    //   · `GET  /api/role-packs/export`     导出成可提交进 Git 的审阅文本
+    //
+    // ★ **刻意没有"改一版"或"删一版"的路由**：冻结的全部含义就是"当时是哪一版"，
+    // 而一条改/删的路由会让那个问题在**写的那一刻**失去答案。
+    // 确实改了内容就再冻一版——`freezeRolePack` 会拒绝"同版本换内容"。
+    //
+    // 与 F-20 那组的分工：那一组存的是**能力包**的安装事实（装了什么），
+    // 这一组存的是**岗位**的冻结描述（这个岗位当时是哪一版）。两者都不做推导。
+    if (path === '/api/role-packs' && req.method === 'POST') {
+      await handleRun(req, res, (body) => {
+        const r = freezeRolePack({
+          db,
+          scope: typeof body.scope === 'string' && body.scope.trim() !== '' ? body.scope.trim() : 'default',
+          record: {
+            // `pack` 原样收下（见 `role-pack-store.mjs` 文件头 ③）：
+            // 控制面不挑字段、不重排、不补默认值——挑字段就是一份多余的转写。
+            pack: body.pack,
+            frozenAtMs: body.frozenAtMs,
+            frozenBy: body.frozenBy ?? null,
+          },
+        })
+        return {
+          ok: true,
+          frozen: r.frozen,
+          // `created:false` 是**幂等重放**，不是"已经有一模一样的了所以不算数"。
+          // 调用方需要能分清"我冻了新的一版"与"这一版早就冻过"。
+          created: r.created,
+          rolePackId: r.record.projected.rolePackId,
+          version: r.record.projected.version,
+          contentHash: r.record.projected.contentHash,
+          frozenAtMs: r.record.frozenAtMs,
+        }
+      })
+      return
+    }
+    if (path === '/api/role-packs' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const rolePackId = url.searchParams.get('rolePackId')
+      const version = url.searchParams.get('version')
+      const role = url.searchParams.get('role')
+      const scope = url.searchParams.get('scope') ?? 'default'
+      // ★ **形状不随查询参数变**：永远是 `records`（一个清单）+ `latest`（可能是 null）。
+      //
+      //   早先的写法是"给了 rolePackId 就返回单条 `record`，否则返回 `records`"——
+      //   于是调用方必须知道"我刚才给没给 rolePackId"才知道该读哪个字段，
+      //   而一份"读哪个字段取决于我传了什么参数"的响应，与一份随机的响应
+      //   在调用方代码里是同一个东西（它只能两个都试一遍）。
+      //
+      //   `version` 只是**过滤**这个清单，不改变它的形状。
+      const all = listRolePacks({ db, role, rolePackId, scope, limit: optionalIntParam(url, 'limit') })
+      const records = version === null || version === ''
+        ? all
+        : all.filter((r) => r.pack?.version === version)
+      json(res, 200, {
+        ok: true,
+        records,
+        // "这个 id 现在该用哪一版"是另一个问题，同一个请求一并回答——
+        // 但它按 `frozen_at_ms DESC, version DESC` 定序，**不依赖数组顺序**。
+        latest: rolePackId === null || rolePackId === ''
+          ? null
+          : getRolePack({ db, rolePackId, scope }),
+        counts: rolePackCounts({ db, scope }),
+      })
+      return
+    }
+    if (path === '/api/role-packs/export' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const scope = url.searchParams.get('scope') ?? 'default'
+      const text = exportRolePacks({ db, scope })
+      // 与包事实的导出同一条理由：返回**文本**，因为这份东西的用途是进 diff。
+      res.writeHead(200, {
+        'content-type': 'application/json; charset=utf-8',
+        'content-disposition': 'attachment; filename="legion-role-packs-frozen.json"',
       })
       res.end(text)
       return

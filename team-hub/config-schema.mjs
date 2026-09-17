@@ -335,6 +335,22 @@ export const SCHEMA = defineSchema({
     //   **无限重试**同一个坏盘。
     'PACK_FACT_MALFORMED', 'PACK_FACT_UNKNOWN_KIND', 'PACK_FACT_SEQ_CONFLICT',
     'PACK_FACT_WRITE_FAILED', 'PACK_FACT_READ_FAILED',
+    // F-19 冻结岗位包的具名码（team-hub/role-pack-store.mjs）。
+    //
+    // 这几个码的**状态码**也是有意的，不只是名字：
+    // `ROLE_PACK_VERSION_CONFLICT` —— **409**。它不是"你请求写错了"，
+    //   而是"这个身份已经被别的内容占了"。报 400 会让调用方以为格式不对，
+    //   于是永远不去递增版本号，只会反复重试同一个请求。
+    // `ROLE_PACK_SECTIONS_MISMATCH` —— 七类（含**顺序**）对不上。
+    //   顺序单独成码，因为它不是"少写了一节"那种显眼错误：七节全在、
+    //   只是顺序不同，而顺序是内容哈希的输入，于是同一份岗位包会有两个身份。
+    // `ROLE_PACK_WRITE_FAILED` —— **500**。把磁盘错误报成 4xx 会让调用方
+    //   放弃一个其实可以重试的写入。
+    // `ROLE_PACK_RECORD_MALFORMED` / `ROLE_PACK_NOT_FOUND` / `ROLE_PACK_READ_FAILED`
+    //   —— 形状错误、找不到、读失败。
+    'ROLE_PACK_RECORD_MALFORMED', 'ROLE_PACK_SECTIONS_MISMATCH',
+    'ROLE_PACK_VERSION_CONFLICT', 'ROLE_PACK_NOT_FOUND',
+    'ROLE_PACK_WRITE_FAILED', 'ROLE_PACK_READ_FAILED',
     // spec §6.7 凭证管理的**写**一半（team-hub/secret-admin.mjs）。
     //
     // 在它之前，`security/secrets/store.mjs` 的 put/rotate/remove 在整个仓库里

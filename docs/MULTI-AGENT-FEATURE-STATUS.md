@@ -88,6 +88,8 @@
 | F-20 缺口① | 账里**没有回滚**：`upgrade()` 注释写着"降级是另一个操作（回滚）"，而那个操作不存在——需要回滚的人两条路都被堵（`install` 报 `ALREADY_INSTALLED`、`upgrade` 报 `NOT_AN_UPGRADE`） | `store.test.mjs` 用例⑦（8 条），两条关键守卫已**变异验证** |
 | F-20 缺口② | 账**纯内存**（`store.mjs` 第 129 行自陈）⇒ 重启即失忆，"现在装了什么"永远回答"什么都没装" | `store.test.mjs` 用例⑧（5 条）：快照/重建/seq 接着走/坏账整本拒绝；"整本拒绝"已**变异验证** |
 | F-20 缺口③ | team-hub **没有安装事实**（无表、无路由）⇒ 控制面重启后依赖预检拿一份空基线，每个包都突然报"缺依赖" | `pack-facts.test.mjs` 19 例 + `pack-facts-http.test.mjs` 8 例（含**跨模块实例**重建、seq 的 CAS、账只追加）；seq 的 CAS 已**变异验证** |
+| F-19 缺口① | 七类版本**没有落点**：`EmployeeManifest` 只是上下文来源，没有任何模块承载"这个岗位被冻结成哪一版" | `role-pack.test.mjs` 40 例（含对账两种漂移、嵌套强制面、连接器凭证），6 处守卫已**变异验证** |
+| F-19 缺口② | 冻结产物**算完即丢**（纯内存）⇒ "上周那个岗位是哪一版"永远回答不了 | `role-pack-store.test.mjs` 25 例 + `role-pack-http.test.mjs` 10 例（含 409 **真的走得到网络上**）；6 处守卫已**变异验证** |
 
 一条值得单独记下的判据：**F-05 后半的三条设计纪律各自对应一个真实的失效方向**，
 因此它们在用例里是**分开**验的，而不是合并成一句"投递可靠"：
@@ -138,13 +140,15 @@
 ```text
 + 数据表: automation_runs / automation_schedules / compaction_messages /
           compaction_summaries / event_deliveries / event_subscribers /
-          run_events / pack_install_facts
+          run_events / pack_install_facts / role_packs
 + 路由:   GET/POST /api/automation/*（6）、/api/compaction/*（5）、
           GET /api/event-delivery、GET /api/runtime/run-events、
           GET /api/usage/{totals,rollup}（2）、
-          GET/POST /api/packs/facts、GET /api/packs/{account,export}（4）
+          GET/POST /api/packs/facts、GET /api/packs/{account,export}（4）、
+          GET/POST /api/role-packs、GET /api/role-packs/export（3）
 ~ 源文件已变更：team-hub/server.mjs、team-hub/run-store.mjs、
-                team-hub/automation-store.mjs、team-hub/pack-facts.mjs
+                team-hub/automation-store.mjs、team-hub/pack-facts.mjs、
+                team-hub/role-pack-store.mjs
 ```
 
 `team-hub/automation-store.mjs` 与 `team-hub/usage-rollup.mjs` 的列变化
@@ -164,7 +168,7 @@
 | F-16 | 自动化计划 | ✅ | `team-hub/automation-store.mjs`、`server.mjs`（6 条路由 + 30s tick） | `automation-store.test.mjs`（27 例）+ `automation-http.test.mjs`（9 例真 HTTP）。★ 本轮补上 `payload` 任务模板与 `bindTask`，`automationTick` 从 `wired:false` 变为 **`wired:true`**：物化出的运行会按计划模板建出一张**可领取**的任务卡 |
 | F-17 | 长会话压缩 | ✅ | `team-hub/compaction-store.mjs`、`server.mjs`（5 条路由） | `compaction-store.test.mjs`（14 例）+ `compaction-http.test.mjs`（5 例真 HTTP）。★ 刻意**不调用模型**：收的是已算好的摘要文本 |
 | F-18 | 经验图谱/摩擦学习 | 🟡 | `plugins/src/experience.ts`、`experienceVotes.ts`、`experienceRecall.ts` | 摩擦打分/草稿/投票/晋升门限**都已实现且有用例**，但落在**旧的 `plugins/` 路径**上，未纳入 Product Runtime。§8 给的落点是「Context、Compaction、Knowledge」——三者都已就绪，缺的是把这一族搬过来 |
-| F-19 | Employee / Role Pack | 🟡 | 无独立落点 | 需要一份把 **Prompt / 技能 / 工具 / 权限 / 模型 / 连接器 / 预算** 七类版本一起固化的产物。今天 `EmployeeManifest` 只作为**上下文来源**存在（`runtime/context/sources.mjs`），没有任何模块承载"这个岗位被冻结成哪一版" |
+| F-19 | Employee / Role Pack | ✅ | `runtime/employee/role-pack.mjs`、`team-hub/role-pack-store.mjs`、`server.mjs`（3 条路由） | 本轮落地。★ **七类版本一个不少**（prompt / skills / tools / permissions / model / connectors / budget），缺一类**不给默认空值**——`connectors: []`（显式"就是不用"）合法，**没写这一节**非法：一个"缺连接器就当没有连接器"的包与一个"作者忘了写、而它静默地没有连接器"的包在运行结果上是同一个东西。★ **版本号是标签、内容哈希才是身份**：承载内容的四类必须带 `hash`，而对账把两种漂移**分开报**——版本变了（`VERSION_DRIFT`，显眼）与版本没变而内容变了（`CONTENT_DRIFT`，阴险到按版本号比对会报"一致"）。★ 岗位包属于 **agent 平面**（`EMPLOYEE_PRESET_CONTRACT.mayCarryEnforcement:false`），强制面字段在**每一层嵌套对象**上都被拒，连接器一节只许出现引用、出现凭证字段单独成码。★ 冻结**改不动**：主键 `(scope, role_pack_id, version)` 让多版本同时存在（塞进就地更新的 `employee_manifests` 会让第二次修改覆盖第一次的答案），同版本同内容幂等、同版本不同内容 **409** |
 | F-20 | Pack Manager | 🟡→✅ | `runtime/packs/{manifest,authority,store,compiled-plan}.mjs`、`team-hub/pack-facts.mjs` | 校验面**齐全**：签名三级（`builtin/signed/unsigned`，无验证器即 `unsigned`——"没法验"不是"验过了"）、依赖与权限（`authority.mjs`）、Runtime Contract、预检结论**必填**。★ **本轮关掉三处缺**（此前本表误记为 ✅）：① **`rollback` 已实现**——账上多一类**自己的**记录（不与 upgrade 混），四条拒绝各有具名码；② **账可持久化**——`snapshot()` / `createPackStore({history})`，坏账**整本拒绝**（跳过坏记录会让"这几个包没装过"与"这几条记录坏了"变成同一个读数）；③ **team-hub 保存安装事实**——`pack_install_facts` 表 + 4 条路由，`GET /api/packs/account` 的形状**原样**能喂回 `createPackStore`，`GET /api/packs/export` 给出可提交进 Git 的审阅文本（不含包内容/凭证） |
 
 ## 4. P2：扩展面
@@ -205,7 +209,7 @@ node scripts/ci/run-ci.mjs
 
 # 只跑本轮新增的套
 node scripts/ci/run-ci.mjs --only test   # 然后在输出里找：
-#   run-events / event-delivery / automation / compaction / usage-rollup / pack-facts
+#   run-events / event-delivery / automation / compaction / usage-rollup / pack-facts / role-pack
 
 # 单独复跑
 node --test team-hub/run-events.test.mjs
@@ -214,6 +218,7 @@ node --test team-hub/automation-store.test.mjs team-hub/automation-http.test.mjs
 node --test team-hub/compaction-store.test.mjs team-hub/compaction-http.test.mjs
 node --test team-hub/usage-rollup.test.mjs team-hub/usage-rollup-http.test.mjs
 node --test team-hub/pack-facts.test.mjs team-hub/pack-facts-http.test.mjs
+node --test runtime/employee/role-pack.test.mjs team-hub/role-pack-store.test.mjs team-hub/role-pack-http.test.mjs
 node --test runtime/packs/store.test.mjs
 node --test product/secrets.test.mjs
 node --test product/launcher/secrets-acl-runner.test.mjs

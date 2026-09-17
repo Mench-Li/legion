@@ -133,6 +133,15 @@ const SCHEMA_SOURCES = [
   // 把 `seq` 从主键里拿掉，第一条就没有任何地方能核——而它是这份账唯一
   // 能证明"没有静默重排"的东西。
   'packFacts',
+  // F-19（§4.4）：`role_packs`（冻结的岗位包）。
+  //
+  // ★ 它与 `employee_manifests` **必须**是两张表，而这条正是要进基线的判据：
+  //   后者主键 `(scope, role)` 且就地更新，回答"这个岗位**现在**是什么"；
+  //   前者主键 `(scope, role_pack_id, version)`，回答"**当时**是哪一版"。
+  //   把后者塞进前者，第二次修改就把第一次的答案覆盖掉了——
+  //   而 `version` 进主键这件事**没有别的地方能核**：少了它，
+  //   "冻结"与"只保留最近一版"在 schema 上长得一模一样。
+  'rolePackStore',
 ]
 
 // 这些模块也一并纳入 sources 哈希：它们变了，基线里的表清单就可能过期。
@@ -155,6 +164,7 @@ SOURCES.eventDelivery = join(ROOT, 'team-hub', 'event-delivery.mjs')
 SOURCES.automationStore = join(ROOT, 'team-hub', 'automation-store.mjs')
 SOURCES.compactionStore = join(ROOT, 'team-hub', 'compaction-store.mjs')
 SOURCES.packFacts = join(ROOT, 'team-hub', 'pack-facts.mjs')
+SOURCES.rolePackStore = join(ROOT, 'team-hub', 'role-pack-store.mjs')
 
 /**
  * 采集 schema 的目录。

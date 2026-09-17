@@ -96,11 +96,79 @@ test('runtime 入口由配置提供：未配置必须报错，而不是「跳过
   assert.ok(unresolved.diagnostics.some((d) => d.code === 'ENTRY_UNRESOLVED' && d.process === 'runtime'))
   assert.equal(hasBlockingProcessDiagnostic(unresolved.diagnostics), true)
 
-  const resolved = planFor({}, { runtimeCommand: '"C:\\Program Files\\nodejs\\node.exe" "C:\\Legion\\dsh\\bin.mjs" web --port 3080' })
+  // ★ PRT-251 续：`runtime.command` 里**不再**自带 `--port`——端口归 `ports.runtime` 管，
+  //   由计划在末尾补上（理由见下一条用例）。
+  const resolved = planFor({}, { runtimeCommand: '"C:\\Program Files\\nodejs\\node.exe" "C:\\Legion\\dsh\\bin.mjs" --profile web' })
   const runtime = resolved.processes.find((p) => p.key === 'runtime')
   assert.equal(runtime.command.file, 'C:\\Program Files\\nodejs\\node.exe')
-  assert.deepEqual([...runtime.command.args], ['C:\\Legion\\dsh\\bin.mjs', 'web', '--port', '3080'])
+  assert.deepEqual([...runtime.command.args],
+    ['C:\\Legion\\dsh\\bin.mjs', '--profile', 'web', '--port', '3080'])
   assert.equal(resolved.diagnostics.length, 0)
+})
+
+test('★★★ PRT-251 续：端口进 argv，且**在所有 launcher 旗标之后**', () => {
+  // 这一条盯的是本缺口真正的坑（文档 §3），**不是**「argv 里有没有 --port」：
+  // DSH 的命令行是「launcher 段 + app 段」，它的解析器遇到第一个不认识的 token
+  // 就停止解析自己的旗标。所以一旦 `--port` 跑到 `--patch` 前面，
+  // `--patch <覆盖层>` 就落进了 app 段——**强制面补丁层静默消失**，而启动照样成功。
+  const plan = planFor({}, {
+    runtimeCommand: 'node bin.js --profile web',
+    ports: { runtime: 3081 },
+    extraArgs: { runtime: ['--patch', 'legion-host.patch.yml'] },   // 真实形状：extraArgs 就是覆盖层
+  })
+  const args = [...plan.processes.find((p) => p.key === 'runtime').command.args]
+
+  assert.deepEqual(args, ['bin.js', '--profile', 'web', '--patch', 'legion-host.patch.yml', '--port', '3081'])
+
+  // ★ 顺序断言（不是 includes）：`--patch` 必须**早于** `--port`。
+  //   一个只断言两个都在的用例对这个坑完全不敏感——它们的 argv 里两个都在，
+  //   只不过那时 `--patch` 已经不在 launcher 段里了。
+  assert.ok(args.indexOf('--patch') < args.indexOf('--port'),
+    `--patch 跑到了 --port 后面，于是它变成 app 参数、覆盖层静默失效：${JSON.stringify(args)}`)
+  // 端口的值就是 ports.runtime（不是 DEFAULT_PORTS.runtime）
+  assert.equal(args[args.indexOf('--port') + 1], '3081', '端口不是 ports.runtime 那个值')
+  // 对面的控制：`--profile` 仍在最前（它也是 launcher 旗标）
+  assert.ok(args.indexOf('--profile') < args.indexOf('--patch'))
+})
+
+test('★★ 端口在每个进程的 argv 里**恰好出现一次**（不许有第二个来源）', () => {
+  // `portArgv` 是**逐进程**声明：team-hub 从 `TEAM_HUB_PORT` 读、whiteboard 从
+  // `PORT` 读、workbench 走自己的 `argsTemplate`（`['--port','{port}']`，本来就有）。
+  //
+  // 判据因此**不是**「有没有 `--port`」（workbench 本来就有，那不是缺陷），
+  // 而是「**有没有两次**」：一个进程的 argv 里出现两个 `--port`，
+  // 「实际生效的是哪一个」就取决于解析器的取值顺序。
+  const plan = planFor({}, {
+    runtimeCommand: 'node bin.js --profile web',
+    ports: { teamHub: 9001, workbench: 6001, runtime: 3081 },
+  })
+  const countPort = (key) => {
+    const p = plan.processes.find((x) => x.key === key)
+    return p?.command === null || p === undefined
+      ? 0
+      : [...p.command.args].filter((a) => a === '--port').length
+  }
+  assert.equal(countPort('runtime'), 1, 'runtime 的端口没有进 argv（本缺口）')
+  assert.equal(countPort('workbench'), 1, 'workbench 的端口应当恰好一次（它本来就走 argsTemplate）')
+  assert.equal(countPort('team-hub'), 0, 'team-hub 的端口走环境变量，不该出现在 argv 里')
+  assert.equal(countPort('whiteboard'), 0, 'whiteboard 的端口走 PORT 环境变量，不该出现在 argv 里')
+  assert.equal(countPort('orchestrator'), 0, 'orchestrator 是无端口 worker')
+})
+
+test('★★★ 两处都给了端口 → 具名阻塞，不许靠 argv 顺序决出胜负', () => {
+  // `runtime.command` 自带 `--port` 时，经验上计划那个赢（commander 取最后一次），
+  // 但「实际生效的是哪一个」就变成了每次排障都要重新确认的问题——
+  // 与 `launcher.mjs` 拒绝「端口既走 env 又走 argv」是同一条理由。
+  const plan = planFor({}, { runtimeCommand: 'node bin.js --profile web --port 3080' })
+  const conflict = plan.diagnostics.find((d) => d.code === 'PORT_AUTHORITY_CONFLICT')
+  assert.ok(conflict, '`runtime.command` 与 ports.runtime 都给了端口，却没有报冲突')
+  assert.equal(conflict.process, 'runtime')
+  assert.equal(conflict.severity, 'error', '冲突必须是阻塞的，不能只是警告')
+  assert.match(conflict.message, /ports\.runtime/, '拒绝理由必须说清端口归谁管')
+  assert.equal(hasBlockingProcessDiagnostic(plan.diagnostics), true)
+  // ★ 冲突时**不追加**重复的 `--port`：计划里显示的就该是用户那条命令本身。
+  const args = [...plan.processes.find((p) => p.key === 'runtime').command.args]
+  assert.deepEqual(args, ['bin.js', '--profile', 'web', '--port', '3080'])
 })
 
 test('splitCommandLine：支持引号，但不做任何 shell 展开', () => {

@@ -255,6 +255,155 @@ export const SCHEMA = defineSchema({
     'CONTEXT_SNAPSHOT_PURGED', 'CONTEXT_PURGE_BAD_REQUEST',
     'RETENTION_POLICY_REQUIRED', 'RETENTION_POLICY_INVALID',
     'RETENTION_DRYRUN_REQUIRED', 'RETENTION_ACTOR_REQUIRED', 'RETENTION_REASON_REQUIRED',
+    // F-05（MULTI-AGENT-FEATURE-OPTIMIZATION.md §4.1）——投递状态机与运行明细。
+    //
+    // 这一组码刻意**逐个**存在，而不是折成一个 `DELIVERY_FAILED` 之类的东西：
+    // 它们各自指向**不同的修法**，而折起来之后读的人只会去查同一个地方。
+    //
+    //   · SUBSCRIBER_NOT_FOUND    — 问了一个仓储里没有的订阅者（404）。
+    //     与"这个订阅者存在但什么都没有"**必须**分开：后者是一个正常的空读数
+    //     （它刚登记、还没有事件），而前者是**调用方搞错了身份**。
+    //     两者都给空数组时，「订阅根本没接上」会伪装成「暂时没有事件」。
+    //   · DELIVERY_ROW_MISSING    — 想标一条投递，但那一行不存在。
+    //     这是**内部不一致**（plan 没跑、或序号算错了），不是调用方的错。
+    //   · DELIVERY_NOT_SUPPRESSIBLE — 想抑制一条投递，但它的状态已经不允许抑制
+    //     （已经 delivered / 已经 suppressed）。一个可以静默改写的抑制
+    //     会让"这条到底有没有投出去"事后无法回答。
+    //   · RUN_EVENTS_NOT_RECORDED  — 终态请求带了事件明细但**没写成**。
+    //     它**不**让终态回滚（复盘材料缺一点 ≠ 这次运行不成立），
+    //     但必须让调用方读得到——否则"明细丢在路上"与"这次没有明细"同形。
+    'SUBSCRIBER_NOT_FOUND', 'DELIVERY_ROW_MISSING', 'DELIVERY_NOT_SUPPRESSIBLE',
+    'RUN_EVENTS_NOT_RECORDED',
+    // F-16（§4.4）自动化计划的具名码。逐个存在的理由同上一组：
+    //   · BAD_SCHEDULE_SPEC  — spec 不是三种形状之一（**包括 cron 字符串**：
+    //     它没有被实现，而"看不懂就当每小时"会让一条计划静默变成另一种语义）
+    //   · BAD_TIMEZONE       — 时区名认不出来。**绝不回落服务器本地时区**：
+    //     回落时计划每天都会成功，只不过跑在错的时间上
+    //   · BAD_OVERLAP_POLICY / BAD_CATCH_UP_POLICY — 策略不在封闭词表里。
+    //     自由文本会让"重叠时怎么办"退化成一句备注，而它是要被机器执行的分支
+    //   · SCHEDULE_ID_REQUIRED / SCHEDULE_NOT_FOUND / SCHEDULE_RUN_NOT_FOUND
+    //   · ILLEGAL_RUN_TRANSITION / RUN_ALREADY_FINISHED — 终态不可改写
+    //   · APPROVAL_ID_REQUIRED — 进 awaiting-approval 必须带审批 id，
+    //     否则那是一条**永远醒不过来**的行（没有任何东西会把它推回 running）
+    //   · BAD_CALENDAR_WINDOW — 投影窗口不合法
+    //   · AUTOMATION_TICK_FAILED — tick 自己坏了（它**不抛**，因为把主循环
+    //     带死比"这一次没物化"坏得多；下一轮 tick 会自己修好）
+    'BAD_SCHEDULE_SPEC', 'BAD_TIMEZONE', 'BAD_OVERLAP_POLICY', 'BAD_CATCH_UP_POLICY',
+    'SCHEDULE_ID_REQUIRED', 'SCHEDULE_NOT_FOUND', 'SCHEDULE_RUN_NOT_FOUND',
+    'ILLEGAL_RUN_TRANSITION', 'RUN_ALREADY_FINISHED', 'APPROVAL_ID_REQUIRED',
+    'BAD_CALENDAR_WINDOW', 'AUTOMATION_TICK_FAILED',
+    // F-17（§4.3）压缩的具名码。核心是 `COMPACTION_DANGLING_REFERENCE`：
+    // 它说的是"摘要引用了一段库里不存在的原文"，那是**内容完整性**问题
+    // 而不是参数问题——读的人会因此以为摘要代表了一段并不存在的历史。
+    // `COMPACTION_RANGE_ALREADY_COVERED` 同理：区间重叠时同一条消息会被
+    // 两版摘要同时代表，拼上下文的人会把它算两次。
+    'COMPACTION_SESSION_REQUIRED', 'COMPACTION_ACTOR_REQUIRED', 'COMPACTION_BAD_RANGE',
+    'COMPACTION_SUMMARY_REQUIRED', 'COMPACTION_DANGLING_REFERENCE', 'COMPACTION_SESSION_NOT_FOUND',
+    'COMPACTION_VERSION_NOT_FOUND', 'COMPACTION_VERSION_CONFLICT', 'COMPACTION_RANGE_ALREADY_COVERED',
+    'COMPACTION_FAILED',
+    // F-15（§4.4）用量汇总的具名码。只有两个，因为这块**只有读**：
+    // `BAD_ROLLUP_DIMENSION` —— 维度名不在封闭词表里。它必须被具名拒绝，
+    // 否则"按员工看"会落进一个永远为空的桶，而报表仍然显示成功。
+    // `ROLLUP_FAILED` —— 兜底的读失败（它不该发生；留着是为了让
+    // "算不出来"有一个具名出口，而不是一个空的 200）。
+    'BAD_ROLLUP_DIMENSION', 'ROLLUP_FAILED',
+    // F-16 收口（物化 → 可领取任务）：
+    // `BAD_SCHEDULE_PAYLOAD` —— 计划的任务模板非法。**在建计划时就拒绝**，
+    //   而不是等到物化时才失败：到点才发现模板是坏的，那一次运行
+    //   （`scheduled` 行）已经产生了，于是坏模板变成一批永远建不出任务的
+    //   孤儿运行行。
+    // `BIND_NOT_APPLIED` —— 运行行已经有主了（CAS 没生效）。它不是错误，
+    //   而是"我绑了"与"早就绑了别的"必须分得开；静默当作成功会让
+    //   "这条运行永远不会被执行"没有任何痕迹。
+    // `SCHEDULE_TASK_CREATE_FAILED` —— 由 payload 建任务时失败。
+    //   逐条记账、**不中断整轮 tick**：一个坏模板不该让这一批里
+    //   其它计划全部不物化，而下一轮 tick 会自己重试。
+    'BAD_SCHEDULE_PAYLOAD', 'BIND_NOT_APPLIED', 'SCHEDULE_TASK_CREATE_FAILED',
+    // F-20 缺口③ 安装事实的具名码（team-hub/pack-facts.mjs）。
+    //
+    // 账这一层的每一个拒绝都必须能说清**是哪一种坏**，因为它们的修法完全不同：
+    // `PACK_FACT_MALFORMED` —— 记录本身缺字段/字段类型不对（调用方的问题）。
+    // `PACK_FACT_UNKNOWN_KIND` —— 记录类型读不出来。**单独一个码**的理由：
+    //   账里出现一个不认识的类型时，整本账的可信度取决于读的人敢不敢说
+    //   "我不知道"；把它并进 MALFORMED，等于把一个未来的格式变化
+    //   当成一次手滑。
+    // `PACK_FACT_SEQ_CONFLICT` —— 另一个写入者抢先占了那个 seq（409）。
+    //   文案必须说清"这次写入**没有**发生"，而且**绝不重编号**：
+    //   重编号会静默改掉记录的顺序，而顺序是复盘时唯一能确定因果的东西。
+    // `PACK_FACT_WRITE_FAILED` / `PACK_FACT_READ_FAILED` —— 兜底。
+    //   写失败是 5xx、seq 冲突是 409：把磁盘错误报成 409 会让调用方
+    //   **无限重试**同一个坏盘。
+    'PACK_FACT_MALFORMED', 'PACK_FACT_UNKNOWN_KIND', 'PACK_FACT_SEQ_CONFLICT',
+    'PACK_FACT_WRITE_FAILED', 'PACK_FACT_READ_FAILED',
+    // F-19 冻结岗位包的具名码（team-hub/role-pack-store.mjs）。
+    //
+    // 这几个码的**状态码**也是有意的，不只是名字：
+    // `ROLE_PACK_VERSION_CONFLICT` —— **409**。它不是"你请求写错了"，
+    //   而是"这个身份已经被别的内容占了"。报 400 会让调用方以为格式不对，
+    //   于是永远不去递增版本号，只会反复重试同一个请求。
+    // `ROLE_PACK_SECTIONS_MISMATCH` —— 七类（含**顺序**）对不上。
+    //   顺序单独成码，因为它不是"少写了一节"那种显眼错误：七节全在、
+    //   只是顺序不同，而顺序是内容哈希的输入，于是同一份岗位包会有两个身份。
+    // `ROLE_PACK_WRITE_FAILED` —— **500**。把磁盘错误报成 4xx 会让调用方
+    //   放弃一个其实可以重试的写入。
+    // `ROLE_PACK_RECORD_MALFORMED` / `ROLE_PACK_NOT_FOUND` / `ROLE_PACK_READ_FAILED`
+    //   —— 形状错误、找不到、读失败。
+    'ROLE_PACK_RECORD_MALFORMED', 'ROLE_PACK_SECTIONS_MISMATCH',
+    'ROLE_PACK_VERSION_CONFLICT', 'ROLE_PACK_NOT_FOUND',
+    'ROLE_PACK_WRITE_FAILED', 'ROLE_PACK_READ_FAILED',
+    // F-18 经验图谱 / 摩擦学习的具名码（team-hub/experience-store.mjs）。
+    //
+    // ★ 这里**没有** `EXPERIENCE_SEQ_CONFLICT`（F-20 的账有）。
+    //   F-20 的 seq 是应用层 `MAX(seq)+1` 算的，两个进程会抢同一个号；
+    //   这一本用 `INTEGER PRIMARY KEY AUTOINCREMENT`——数据库分配，
+    //   由 SQLite 自己串行化，所以"号被抢"不可能发生。
+    //   登记一个永远抛不出的码，与登记一段被注释掉的代码是同一个东西，
+    //   只不过前者让错误码清单看起来更完整。
+    // `EXPERIENCE_DRAFT_ALREADY_SETTLED` —— **409**。它不是"请求写错了"，
+    //   而是"这条草稿已经处置过了"。报 400 会让调用方去改请求体，
+    //   而它该做的是去读那条草稿现在是什么状态。
+    'EXPERIENCE_RECORD_MALFORMED', 'EXPERIENCE_KIND_UNKNOWN',
+    'EXPERIENCE_DRAFT_NOT_FOUND', 'EXPERIENCE_DRAFT_ALREADY_SETTLED',
+    'EXPERIENCE_WRITE_FAILED', 'EXPERIENCE_READ_FAILED',
+    // F-21 连接器登记表的具名码（team-hub/connector-store.mjs）。
+    //
+    // `CONNECTOR_VERSION_CONFLICT` —— **409**，与 `ROLE_PACK_VERSION_CONFLICT`
+    //   同一条理由，但后果更重：连接器声明说的是"一个**外部进程**能拿到什么权限"。
+    //   报 400 会让调用方以为请求格式不对，于是永远不去递增版本号；
+    //   而"同一个版本号对应两份权限不同的声明"意味着事后复盘时
+    //   "当时放行了哪些工具"这个问题**不再有唯一答案**。
+    // `CONNECTOR_TRANSPORT_UNKNOWN` / `CONNECTOR_TOOLS_EMPTY` /
+    //   `CONNECTOR_TOOL_DUPLICATE` / `CONNECTOR_RECORD_MALFORMED` /
+    //   `CONNECTOR_EVENT_MALFORMED` / `CONNECTOR_CIRCUIT_STATE_UNKNOWN`
+    //   —— 400：调用方写错了请求（形状、封闭词表、必填项）。
+    //   `CONNECTOR_EVENT_MALFORMED` 里有一条刻意的话：事件**必须点名**是哪个
+    //   连接器。只记"某处发生了故障"时，一次隔离良好的单点故障与一次大面积
+    //   故障长得一样。
+    // `CONNECTOR_WRITE_FAILED` / `CONNECTOR_READ_FAILED` —— 500：
+    //   本表没登记的内部码收敛到这里（不猜状态码）。
+    //   ★ 这里**没有** `CONNECTOR_NOT_FOUND`：`getDeclaration` 找不到时返回
+    //   `null`——那是一个正常读数（"这个连接器还没登记过"），不是错误。
+    //   登记一个永远抛不出的码，与登记一段被注释掉的代码是同一个东西。
+    'CONNECTOR_RECORD_MALFORMED', 'CONNECTOR_TRANSPORT_UNKNOWN',
+    'CONNECTOR_VERSION_CONFLICT', 'CONNECTOR_TOOL_DUPLICATE', 'CONNECTOR_TOOLS_EMPTY',
+    'CONNECTOR_EVENT_MALFORMED', 'CONNECTOR_CIRCUIT_STATE_UNKNOWN',
+    'CONNECTOR_WRITE_FAILED', 'CONNECTOR_READ_FAILED',
+    // PRT-610 工具调用账的读面（`GET /api/tool-calls*`，team-hub/server.mjs）。
+    //
+    // 这两个码是**读**路径上的，而读路径之所以需要具名码，是因为它们各自
+    // 对应一个**不同的动作**：
+    //
+    // `TOOL_CALL_REPAIR_NEEDS_CALL_ID` —— **400**。值班的人问"这条拒绝该去改哪里"，
+    //   而修复动作由**它的来源**决定（§6.8 line 480：策略拒绝与沙箱兜底的修法不同）。
+    //   没有 callId 时唯一能做的就是猜，而猜错的修复动作会把人指向错误的文件。
+    //   ★ 这里**不是** 404：404 的意思是"你要的那条记录不存在"，
+    //   而这件事是"你没说是哪一条"——两者的下一步动作完全不同。
+    //
+    // `TOOL_CALL_NOT_FOUND` —— **404**。这次是"确实没有这条记录"，
+    //   与上面那个码刻意分开：`0 与不知道必须分得开`。
+    //   把它写成 400 会让调用方去改请求体，而它该做的是去查为什么这次调用
+    //   根本没有落账（那本身就是一个应该被追的问题）。
+    'TOOL_CALL_REPAIR_NEEDS_CALL_ID', 'TOOL_CALL_NOT_FOUND',
     // spec §6.7 凭证管理的**写**一半（team-hub/secret-admin.mjs）。
     //
     // 在它之前，`security/secrets/store.mjs` 的 put/rotate/remove 在整个仓库里

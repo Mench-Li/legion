@@ -260,6 +260,16 @@ export async function runWorkerProcess({
   // `product/orchestrator/worker.mjs`：那是 `product/` 的职责，
   // 而本文件只管把线插上。
   claimGateFromExecutor = null,
+  // ── PRT-253 续批：运行输入的模型那一项 ──
+  //
+  // `workspaceId` 与 `workdir` 由本外壳自己就能算（租约的 scope / 工作区阶段的产物），
+  // 而 `modelProfileRef` **必须**来自员工的模型绑定——那要读 team-hub，
+  // 而"怎么读 hub"是调用方的事（本文件只认识一个 hub 客户端面，不认识 HTTP）。
+  //
+  // 缺省 `null` = "没有这个端口"，那时模型那一项只能来自租约；
+  // 而这次 Run 会在执行引擎那里以具名错误停下（`defaultRequestFor` 的拒绝），
+  // **不会**用一个没人选过的模型跑起来。
+  modelProfileRefFor = null,
   // 调用方给的执行引擎通常只实现 `execute`；工作区阶段由下面按配置补上。
   // 传 `inPlaceStages()` 的调用方保持原样（那是显式的降级点，不是静默行为）。
   stages = null,
@@ -419,6 +429,12 @@ export async function runWorkerProcess({
     platform,
     workerId: cfg.workerId ?? undefined,
     claimGate,
+    // ★ 运行输入：`workdir` 的回落目录就是那个**被用户授权的项目目录**，
+    //   而它正是 `LEGION_WORKSPACE_DIR`。不把它传下去时，原地执行模式下的
+    //   `workdir` 没有来源——而"没有来源"必须表现为一次具名拒绝，
+    //   不是让执行引擎去猜自己该改哪个目录。
+    projectDir: cfg.workspaceDir,
+    modelProfileRefFor: typeof modelProfileRefFor === 'function' ? modelProfileRefFor : null,
     logger: write,
   })
 

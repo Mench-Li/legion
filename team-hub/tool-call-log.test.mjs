@@ -40,6 +40,7 @@ import {
   recordResult,
   recordToolCall,
   toolCallIdempotencyKey,
+  toolCallLogEvidence,
 } from './tool-call-log.mjs'
 import { ENFORCEMENT_SOURCES } from '../runtime/dsh-composition/enforcement.mjs'
 
@@ -476,6 +477,122 @@ test('⑥ ★ 读一行返回的是叶字段，不是行对象（不泄漏 live 
   // 能原样 JSON 往返，说明里面没有活着的东西（Service / 行对象 / 函数）。
   assert.deepEqual(JSON.parse(JSON.stringify(row)), { ...row })
   assert.equal(readToolCall({ db, idempotencyKey: 'nope' }), null)
+})
+
+// -------------------------------------------------- ⑦ 就绪证据（三态，不是布尔）
+
+test('⑦ ★★★ 证据分三态：表不在 / 读不出来 / 读得出来——**读不出来不能报成"还没建"**', () => {
+  //   > 一个「把读失败报成『表还没建』」的读数，
+  //   > 与一个「把库损坏报成『全新部署』」的读数，是同一个东西——
+  //   > 而它的表现是安全项被**跳过**，并且没人会去查。
+  const empty = new DatabaseSync(join(root, 'empty-evidence.db'))
+  try {
+    // ① absent：表还没建。这是全新部署的**正常**状态，不是故障。
+    const absent = toolCallLogEvidence({ db: empty })
+    assert.equal(absent.state, 'absent')
+    assert.equal(absent.recorded, false)
+    assert.match(absent.reason, /全新部署/)
+
+    // ② readable 但 0 行：表建了、还没人调用过工具。
+    //    它与 absent **必须**分得开——"表建好了但没流量"与"表压根没建"，
+    //    对值班的人是"要不要去查部署"的区别。
+    ensureToolCallSchema(empty)
+    const noRows = toolCallLogEvidence({ db: empty })
+    assert.equal(noRows.state, 'readable')
+    assert.equal(noRows.recorded, false, '0 行不能算"已记录"')
+    assert.equal(noRows.total, 0)
+    assert.match(noRows.reason, /没有一条带着决定来源/)
+
+    // ③ unreadable：表在，但读失败（这里用一个会在 get 时抛的替身）。
+    //    ★ 这是本用例最要紧的一条：它**不许**退化成 'absent'。
+    const broken = {
+      prepare(sql) {
+        if (/sqlite_master/.test(sql)) return { get: () => ({ name: TOOL_CALL_TABLE }) }
+        return { get: () => { throw new Error('database disk image is malformed') } }
+      },
+    }
+    const unreadable = toolCallLogEvidence({ db: broken })
+    // ★ 这条断言必须**自带**那句诊断。第一版把它写成两行：
+    //     assert.equal(unreadable.state, 'unreadable')          ← 失败的是这一行（没有消息）
+    //     assert.notEqual(unreadable.state, 'absent', '读失败被报成…')  ← 永远到不了
+    //   于是给读者写的那句"读失败被报成了『表还没建』"**一次都不会打印**：
+    //
+    //     > 一条挂在后面那行断言上的诊断，
+    //     > 与一条不存在的诊断，在"值班的人看到什么"上是同一个东西。
+    assert.equal(unreadable.state, 'unreadable',
+      '读失败被报成了"表还没建"——安全项会被跳过，而且没人会去查')
+    assert.equal(unreadable.recorded, false)
+    assert.match(unreadable.reason, /malformed/)
+
+    // ④ 连 sqlite_master 都读不了 → 也是 unreadable，不是 absent。
+    const fullyBroken = { prepare: () => ({ get: () => { throw new Error('unable to open database file') } }) }
+    const u2 = toolCallLogEvidence({ db: fullyBroken })
+    assert.equal(u2.state, 'unreadable')
+    assert.match(u2.reason, /sqlite_master/)
+
+    // ⑤ 参数错了要**抛**，不是安静地返回一个"没有证据"——
+    //    把一个编程错误读成"这套部署没有证据"，会让人去查部署而不是查代码。
+    assert.throws(() => toolCallLogEvidence({}), /需要 db/)
+    assert.throws(() => toolCallLogEvidence({ db: {} }), /需要 db/)
+  } finally { try { empty.close() } catch {} }
+})
+
+test('⑦ ★★★ `recorded` 只认"有来源的行存在"，且有行之后真的翻成 true', () => {
+  // 这一条是 ④ 的**正对照**：少了它，上面那三个 `recorded === false`
+  // 可能只是"这个字段永远是 false"——
+  //   > 一个恒定 false 的读数，与一个正确报出"没有证据"的读数，
+  //   > 在上一条断言下是同一条绿。
+  const d = new DatabaseSync(join(root, 'evidence.db'))
+  try {
+    ensureToolCallSchema(d)
+    assert.equal(toolCallLogEvidence({ db: d }).recorded, false)
+
+    recordToolCall({ db: d, ...newCall({ callId: 'ev-1', decisionSource: 'guard', decision: 'deny' }) })
+    const one = toolCallLogEvidence({ db: d })
+    assert.equal(one.state, 'readable')
+    assert.equal(one.recorded, true, '有了一条带来源的记录，证据必须翻成 true')
+    assert.equal(one.total, 1)
+    assert.equal(one.sourced, 1)
+
+    // `recorded` 是**结构**要求（这条列真的在写），不是计数要求：
+    // 再来一条同样是 true，且两个字段都必须给出**数**而不是布尔。
+    recordToolCall({ db: d, ...newCall({ callId: 'ev-2' }) })
+    const two = toolCallLogEvidence({ db: d })
+    assert.equal(two.recorded, true)
+    assert.equal(two.total, 2)
+    assert.equal(typeof two.sourced, 'number')
+    // ★ `0 与不知道必须分得开`：0 行时 total 是 0（一个确定的数），
+    //   而 unreadable 时**没有** total 这个字段——不是"total=0"。
+    assert.equal('total' in u0(), false, 'unreadable 时不应给出 total（那会把"不知道"说成"0"）')
+  } finally { try { d.close() } catch {} }
+})
+
+/** unreadable 的最小替身（只为上面最后一条断言取一次证据）。 */
+function u0() {
+  return toolCallLogEvidence({ db: { prepare: () => ({ get: () => { throw new Error('locked') } }) } })
+}
+
+test('⑦ ★★ 证据**从库里读**，不接受调用方传进来的布尔（"有没有证据"不能靠自述）', () => {
+  // `release-gate.mjs` 那一项的注释写着「`undefined`（没人告诉我们）按否处理：
+  // 这一项问的是"有没有证据"，而缺失的证据不是证据」。
+  // 那么证据就**必须**来自被观测的世界，不能来自被检查方的自述：
+  //
+  //   > 一个「接受调用方自述『我在记』的读数」，
+  //   > 与一个「由被检查方自己盖章的检查」，
+  //   > 在"决定来源到底有没有被记录"上是同一个东西。
+  const d = new DatabaseSync(join(root, 'evidence-self.db'))
+  try {
+    ensureToolCallSchema(d)
+    // 调用方无论传什么，都不影响结论（多传的键被忽略）。
+    const ev = toolCallLogEvidence({
+      db: d,
+      recorded: true,
+      decisionSourceRecorded: true,
+      reason: '我保证有记录',
+    })
+    assert.equal(ev.recorded, false, '调用方的自述改变了结论——那这就不是证据')
+    assert.equal(ev.state, 'readable')
+  } finally { try { d.close() } catch {} }
 })
 
 test.after(() => { try { db.close() } catch {} ; rmSync(root, { recursive: true, force: true }) })

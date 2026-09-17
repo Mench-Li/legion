@@ -39,6 +39,11 @@ import {
   resolveEnforcementIdentity,
 } from './enforcement-identity.mjs'
 import {
+  ADOPTION_STATES,
+  adoptLegacyData as runLegacyAdoption,
+  planAdoption,
+} from './legacy-data-adoption.mjs'
+import {
   RUNTIME_CONTRACT_ENDPOINT_CODES,
   generateRuntimeToken,
   readRuntimeContractEndpoint,
@@ -301,6 +306,19 @@ export function createLauncher({
   allowPortInUse = [],
   include = null,
   secretsCheck = null,
+  // PRT-509 缺口 B1：ACL 的 runner 与 owner。
+  //
+  // 两者都保持默认 `null`，但**语义变了**：`null` 现在意思是
+  // 「调用方没有指定 ⇒ 用生产默认」，而生产默认由 `collectSecretsDiagnostics`
+  // 延迟解析（`secrets-acl-runner.mjs`：`spawnSync` runner + `whoami` owner）。
+  //
+  // 在此之前 `null` 意思是「没有 runner、不知道所有者」——而**没有任何生产
+  // 调用方给过值**，于是那两句告警在生产上恒久为真。一个"永远说同一句"
+  // 的告警与没有告警是同一件事（用户学会忽略它，于是真的越权那天同样被忽略）。
+  //
+  // 显式注入仍然优先：用例要验"没有 runner 时会怎样"时传一个非 null 的值
+  // 表达它要的场景（传 `undefined` 也会被当成"没指定"，所以**不要**用
+  // `undefined` 表达"没有 runner"——用 `resolveSecretsAcl` 的假 runner）。
   secretsRun = null,
   secretsOwner = null,
   requireProtected = true,
@@ -466,6 +484,14 @@ export function createLauncher({
   const runtimeContractDiagnostics = []
   let runtimeTokenResolved = null
   let runtimeContractEndpoint = null
+
+  // ── PRT-251 续 ④：旧数据接管（安装目录 → DataDir）──────────────────────
+  //
+  // `adoptionReading` 是**记忆化**的读数（一次生命周期只做一次接管）；
+  // `adoptionDiagnostics` 是它的诊断面。两者分开是因为前者要说"接成没接成"，
+  // 后者要说"为什么"——把它们合成一个，`allDiagnostics()` 就得反过来解析读数。
+  let adoptionReading = null
+  const adoptionDiagnostics = []
 
   /**
    * 运行时凭证（**每次 createLauncher 一份**，即每次启动一份）。
@@ -712,18 +738,69 @@ export function createLauncher({
         return secretsCheck.diagnostics
       }
       const { runSecretsCheck } = await import('./secrets-check.mjs')
+      // ── PRT-509 缺口 B1：真 runner 与真 owner ────────────────────────────
+      //
+      // 上面两个入参（`secretsRun` / `secretsOwner`）在这之前**恒为 `null`**：
+      // 全仓只有"声明"与"传参"两处引用，没有任何生产调用方给过值。
+      // 于是 `inspectFileAcl` 每次都走 `ACL_NO_RUNNER` 分支、
+      // `hardenFileAcl` 每次都报"不知道文件所有者"——两条都不拦启动，
+      // 于是它们变成诊断里**永远出现、永远说同一句**的告警。
+      //
+      // 这里补上"没注入就用生产默认"的那一步。三条纪律：
+      //
+      //   ① **只有两者都是 `null` 时才解析**。任一被显式注入（用例）就原样用，
+      //      于是"注入假 runner"这件事不会与"又一次真 whoami"混在一起。
+      //   ② 解析**失败不抛**：`resolveSecretsAcl` 内部把失败折成
+      //      `owner: null` / 一个连命令都跑不起来的 runner，结果仍然是
+      //      既有的具名告警（`ACL_NO_RUNNER` / `HARDEN_FAILED`）。
+      //      一个体检程序崩溃不该让产品起不来——这条上面的 catch 已经在守，
+      //      这里再守一次是因为**这是新增的一次外部进程调用**。
+      //   ③ 延迟到**这里**而不是 `launcherOptionsFrom`：那个函数是同步的，
+      //      而 `whoami` 必须等一次进程返回。放在这里也顺带保证了
+      //      "只在真的走到密钥库自检时才 spawn"。
+      let effectiveRun = secretsRun
+      let effectiveOwner = secretsOwner
+      let aclResolution = null
+      if (effectiveRun === null && effectiveOwner === null) {
+        try {
+          const { resolveSecretsAcl } = await import('./secrets-acl-runner.mjs')
+          aclResolution = await resolveSecretsAcl({ platform: layout.platform })
+          effectiveRun = aclResolution.run
+          effectiveOwner = aclResolution.owner
+        } catch (e) {
+          aclResolution = {
+            owner: null, ownerSource: 'resolve-failed',
+            ownerReason: `解析 ACL runner/owner 失败：${e?.name ?? 'Error'}`,
+          }
+        }
+      }
       const r = await runSecretsCheck({
         layout,
         platform: layout.platform,
-        run: secretsRun,
-        owner: secretsOwner,
+        run: effectiveRun,
+        owner: effectiveOwner,
         requireProtected,
         // PRT-509 路线 A′：把**只读**回退来源的位置一起交给自检，
         // 这样"DSH 的凭证文件在不在、读不读得懂"会出现在启动诊断里，
         // 而不是只在某一次解析失败时才被发现。
         dshCredentialsFile,
       })
-      return r.diagnostics
+      // ★ owner **没问出来**这件事必须自己占一行。
+      //
+      //   否则读数会是"ACL 检查：HARDEN_FAILED（不知道文件所有者）"——
+      //   那句话说得没错，但它把两件完全不同的事说成了同一件：
+      //     · "这台机器上问不出当前用户"（环境问题，修法是查 PATH / 权限）
+      //     · "问出来了，但加固真的失败了"（权限问题，修法是看 icacls 输出）
+      //   分开之后，读诊断的人才知道该去看哪里。
+      const extra = []
+      if (aclResolution !== null && effectiveOwner === null && aclResolution.ownerReason !== null) {
+        extra.push({
+          severity: 'warn',
+          code: 'SECRETS_ACL_OWNER_UNRESOLVED',
+          message: `问不出当前用户身份，密钥库 ACL 无法收紧到"仅所有者"（**未加固**）：${aclResolution.ownerReason}`,
+        })
+      }
+      return extra.length === 0 ? r.diagnostics : [...extra, ...r.diagnostics]
     } catch (err) {
       // 自检自身出错只降级为一条 warn：**一个体检程序崩溃不该让产品起不来**，
       // 但它必须被看见（不能静默）。
@@ -789,6 +866,24 @@ export function createLauncher({
     if (proc.key === 'orchestrator') {
       if (typeof layout.dataDir === 'string' && layout.dataDir !== '') {
         out.LEGION_DATA_DIR = layout.dataDir
+      }
+      // ── PRT-253 续批五：项目目录 ────────────────────────────────────────
+      //
+      // ★ 与上面那行**同一个形状**，理由也一样：Launcher 是唯一知道
+      //   `layout.workspaceDir` 的地方（它来自 `--workspace`，见 `cli.mjs` 的
+      //   `resolveLayout`），所以由它显式写进去，而不是指望宿主环境里恰好有。
+      //
+      // 缺了它，worker 的 `workspaceDir` 是 `null` ⇒ `resolveWorkspaceStages()`
+      // 给 `{ stages: null }` ⇒ 状态 `no-stages` ⇒ **一个任务都不认领**，
+      // 而外部只看得见状态文件里那一个词（没有任何错误）。
+      //
+      // 这也是 `workdir` 那个字段在**原地执行**模式下的权威来源
+      // （有隔离时用的是按 Attempt 分配的 worktree 槽位，见 `run-inputs.mjs`）。
+      //
+      // **绝不回落成 `{install}` 或 cwd**：把项目目录猜成安装目录，
+      // 等于让执行去改一个升级时会整体替换的目录。
+      if (typeof layout.workspaceDir === 'string' && layout.workspaceDir !== '') {
+        out.LEGION_WORKSPACE_DIR = layout.workspaceDir
       }
       // 端点**只有解析成功时才写**。没解析出来时这里什么都不放，
       // 于是 worker 的读数是 `EXECUTOR_HOST_PORT_REQUIRED`（"没配引擎"），
@@ -1332,6 +1427,43 @@ export function createLauncher({
         return Object.freeze({ ok: false, phase: pre.phase, failures: Object.freeze([]), diagnostics: pre.diagnostics, states: Object.freeze([]), elapsedMs: now() - beganAt })
       }
 
+      // ★ PRT-251 续 ④：把**安装目录里已有的业务数据**接进 DataDir。
+      //
+      // 位置与凭证材料化那一步同一条理由，两端都卡死：
+      //   · 晚于 `preflight()` ⇒ 只在"这次真的要起来"时才动数据；
+      //   · 早于 spawn ⇒ team-hub 打开库**之前**它就在 DataDir 里了，
+      //     否则 hub 会对着一个空文件建表，而接管再也无从判断
+      //     （目标已存在 ⇒ 按幂等规则跳过 ⇒ 用户的数据永远接不进来）。
+      //
+      // ★ 失败时**拒绝启动**，不是警告后照常起。
+      //
+      //   这是本缺口唯一能不再重演的方式：
+      //
+      //   > 一个"有旧数据、但没接管成功、于是空着起来"的启动，
+      //   > 与一个"这是台新机器、本来就没有数据"的启动，
+      //   > 在**界面**上是同一个读数（都是空的）——只不过前者的数据
+      //   > 就在旁边一个目录里，而用户会以为数据丢了。
+      //
+      //   而"没有旧数据"（`nothing-to-adopt`）是**正常**，照常启动——
+      //   拒绝只针对"有东西该接、却没接成"。
+      const adoption = await this.adoptLegacyData()
+      if (adoption.ok !== true) {
+        forgetRunRecord()
+        return Object.freeze({
+          ok: false,
+          phase: 'legacy-adoption',
+          failures: Object.freeze([]),
+          diagnostics: Object.freeze(adoption.items.map((i) => Object.freeze({
+            severity: 'error',
+            code: i.code,
+            process: i.process,
+            message: i.message,
+          }))),
+          states: Object.freeze([]),
+          elapsedMs: now() - beganAt,
+        })
+      }
+
       // ★ PRT-509 缺口 ①：把这次运行声明的凭证**材料化**，并让 DSH 真的读它。
       //
       // 位置是这一段，即 `preflight()` 之后、`createSupervisor()`/spawn **之前**：
@@ -1676,6 +1808,10 @@ export function createLauncher({
         // PRT-253 续批四：端点/凭证的诊断（生成失败、发布缺失/陈旧/非法）。
         // 与上面几条同一条纪律：只在 `status()` 里的话，不查它的人就看不到。
         ...runtimeContractDiagnostics,
+        // PRT-251 续 ④：旧数据接管的逐项结论 + 一行总结。
+        // 「有旧数据却没接成」必须在这里出现——否则它就是那个只在界面上
+        // 表现为"空的"、而没有任何一处说得出原因的读数。
+        ...adoptionDiagnostics,
       ]
       for (const item of status.needsAttention) {
         out.push(Object.freeze({
@@ -1725,6 +1861,83 @@ export function createLauncher({
           values: Object.freeze(values),
         })
       }))
+    },
+
+    /**
+     * ★ PRT-251 续：**计划里的 argv**（与 `envSurface()` 对称的观察口）。
+     *
+     * ## 为什么需要它
+     *
+     * 「端口到达了 DSH」这件事的唯一判据是**argv 的顺序**，不是「argv 里有没有
+     * `--port`」：DSH 的命令行是「launcher 旗标段 + app 旗标段」，它的解析器
+     * 遇到第一个不认识的 token 就停止解析自己的旗标。所以一旦 `--port` 跑到
+     * `--patch` 前面，`--patch <覆盖层>` 就落进 app 段——**强制面补丁层静默消失**，
+     * 而启动照样成功。
+     *
+     *   > 一个「端口修好了但强制面没了」的启动，
+     *   > 与一个「端口没修好、强制面还在」的启动，在**启动成功**这个读数上
+     *   > 是同一个东西——只不过前者看起来更像一次成功的修复。
+     *
+     * 而那段 argv 此前**没有任何观察口**：`envSurface()` 只看环境，
+     * 于是「覆盖层还在 launcher 段里」这件事只能靠读代码相信。
+     *
+     * ## 它不做的事
+     *
+     * 不返回环境、不返回值里的密钥（argv 里本来就不该有凭证——那由
+     * 别处的断言钉着）；`command === null`（入口没解析出来）时如实给 `null`，
+     * **不编一个空数组**：`[]` 是「有一条没有参数的命令」，与「没有命令」是两件事。
+     */
+    commandSurface() {
+      return Object.freeze(plan.processes.map((proc) => Object.freeze({
+        process: proc.key,
+        args: proc.command === null ? null : Object.freeze([...proc.command.args]),
+      })))
+    },
+
+    /**
+     * ★ PRT-251 续 ④：把安装目录里已有的业务数据接进 DataDir。
+     *
+     * 记忆化：一次 Launcher 生命周期里只做**一次**。重复执行虽然幂等
+     * （目标已存在 ⇒ 跳过），但"启动路径调一次、状态查询又调一次"
+     * 会让读数在两次之间变化，而那正是"这个库到底是谁的"最难查的一类问题。
+     *
+     * 返回的是 `adoptLegacyData()` 的读数本身——**不加工**。计划与执行
+     * 分开（`planAdoption()` 是纯的），是为了让"该不该接"能在不真的拷一份库
+     * 的前提下被断言。
+     */
+    async adoptLegacyData({ dryRun = false } = {}) {
+      if (adoptionReading !== null && !dryRun) return adoptionReading
+      if (dryRun) {
+        const planned = planAdoption({ layout, dataPathEnv: DATA_PATH_ENV })
+        return Object.freeze({
+          dryRun: true, ok: planned.ok, state: null, items: planned.items, counts: planned.counts,
+        })
+      }
+      // 逐项结论进 `adoptionDiagnostics`（聚合进 `allDiagnostics()`），
+      // **不直接写日志 sink**：sink 是按「进程.流」分文件的，而这件事不属于
+      // 任何一个子进程——塞进某个进程的日志会让"这是谁说的话"变成猜的。
+      adoptionReading = await runLegacyAdoption({
+        layout,
+        dataPathEnv: DATA_PATH_ENV,
+        log: (severity, message) => adoptionDiagnostics.push(Object.freeze({
+          severity: severity === 'error' ? 'error' : 'info',
+          code: `LEGACY_ADOPTION_${String(adoptionReading?.state ?? 'RUNNING').toUpperCase()}`,
+          process: null,
+          message,
+        })),
+      })
+      adoptionDiagnostics.push(Object.freeze({
+        severity: adoptionReading.ok ? 'info' : 'error',
+        code: 'LEGACY_ADOPTION',
+        process: null,
+        // 一行结论。运维最常问的是"这次启动有没有接管"，而它不该要靠拼
+        // 四条逐项记录才能答出来。
+        message: `旧数据接管：${adoptionReading.state}`
+          + `（接管 ${adoptionReading.counts.adopted}／已是 ${adoptionReading.counts.already}`
+          + `／无来源 ${adoptionReading.counts.nothing}／失败 ${adoptionReading.counts.failed}`
+          + `／拒绝 ${adoptionReading.counts.refused}）`,
+      }))
+      return adoptionReading
     },
   }
 

@@ -3,7 +3,8 @@
  *
  * host 侧：在 DSH webServer 上自托管看板（serve kanban.html + /api/* + SSE），
  * 数据直接读 tasks.json / 调 taskctl.mjs / render.mjs，不依赖外部 serve.mjs。
- * client 侧（src/client）：conversation.view 槽位挂 iframe 面板，指向本路由。
+ * client 侧（src/client）：已无界面贡献——会话内 `conversation.view` 看板面板与
+ * 侧栏「总指挥部」常驻块均已移除，看板与指挥总览由 Legion 指挥台承载。
  */
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'

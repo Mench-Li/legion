@@ -844,6 +844,29 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-610 的**路由**那一半（真 HTTP）。
+      //
+      // 上面那组验的是"账写对没有"；这一组验的是"账有没有出口"。
+      // 两者分开是因为它们的失败模式完全不同——
+      //
+      //   > 一个「模块写好了、判据也留好了」的表，
+      //   > 与一个「从来没有被 CREATE 过」的表，
+      //   > 在"决定来源有没有被记录"上是同一个东西。
+      //
+      // 着重要钉的是 ★★★：`release-gate.mjs` 的就绪判据 `decisionSourceRecorded`
+      // 在本批之前**全仓没有产出者**，于是它永远判否——而它写得很谨慎
+      // （"缺失的证据不是证据"），所以看起来是"这套部署还没记录"，
+      // 而不是"没有任何地方能告诉我们"。`GET /api/tool-calls/evidence` 就是那个产出点。
+      //
+      // 另外三条：三态证据（表不在 / 读不出来 / 读得出来必须分得开）、
+      // 前缀路由不许吃掉 `/evidence`、以及**刻意没有写路径**
+      // （一个可以由外部直接写入的执行账，与一个"审计里的执行历史可以是任意值"的账，
+      //   是同一个东西）。
+      label: 'tool-call-http（PRT-610：就绪判据的产出点、三态证据、账没有写路径）',
+      files: ['team-hub/tool-call-http.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-613：审批、UI、审计与执行看到**同一份**不可变工具参数（spec §6.5 line 468）。
       //
       // 盯四件事：
@@ -959,6 +982,25 @@ async function stageTest() {
       // 它自己的判据（哪一类判失败、哪一类只记账、什么不可能出现）必须是被钉住的。
       label: 'encoding-check（源文件编码完整性的判据）',
       files: ['scripts/ci/encoding-check.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      // ★★★ 「这三道范围检查在生产里到底有没有跑」——把一句话变成读数。
+      //
+      // PRT-604/605/606 在台账里都是 ✅，而它们各自的套件验的是"检查器对不对"。
+      // 这三道检查**都是注入式的**（桥的可选端口 / 独立模块），于是有一个
+      // 前面那些套件**结构上问不到**的问题：生产装配到底注入了没有？
+      //
+      //   > 一个「端口没接上、而没接上时检查自动放行」的组合根，
+      //   > 与一个「路径范围限制没有生效」的组合根，是同一个东西——
+      //   > 只不过前者的证据里有一行诚实的 `pathScope:false`。
+      //
+      // 读数（本轮实测）：生产组合根报 `pathScope:false` / `whitelist:false`，
+      // 而 `execution-scope` / `external-api-scope` 连端口都没有。
+      // 本套件把这个读数钉住：**接上了它会红**（提醒一起改账），
+      // 而"没接"这件事从此不再是"作者当时相信"。
+      label: 'production-scope-wiring（PRT-604/605/606：检查器对不对 ≠ 生产里跑没跑）',
+      files: ['runtime/dsh-composition/production-scope-wiring.test.mjs'],
       cwd: ROOT,
     },
     {
@@ -1204,6 +1246,21 @@ async function stageTest() {
     // 阶段 3 评审闸门：热点文件改动节奏。本套件直接锁定「正确写法 vs 错误写法」的差异——
     // `git log -n 40 -- <file>` 会先按路径过滤再截断，恒返回 40，把「该开工」读成「不能开工」。
     { label: 'prt-churn（阶段 3 评审闸门：热点文件改动节奏探针）', files: ['scripts/prt/hot-file-churn.test.mjs'], cwd: ROOT },
+  // ★ PRT-611 续：**可达性**探针 —— "这个模块在生产里到得了吗？"
+  //
+  // 台账与对照表的 ✅ 口径是「有代码落点 + 可复跑的判据」，里面**没有**"到得了"这一格。
+  // 于是"唯一的导入者也是死的"这种传递死亡读不出来：
+  //
+  //   `runtime/packs/store.mjs`（PRT-1003，✅）有 1 个非测试导入者 ⇒ 看起来是活的，
+  //   而那 1 个是 `runtime/packs/builtin/software-delivery.mjs`，它有 0 个导入者。
+  //
+  //   > 一个「唯一的导入者也是死的」的模块，
+  //   > 与一个「真的有人在用」的模块，在"有几个非测试导入者"上是同一个东西。
+  //
+  // 本组从**真实入口**（进程入口 / scripts / package.json / **清单字符串**）出发跑 BFS，
+  // 断言：正对照成立（探针活着）、没有未分类的不可达模块、基线里没有已删除的文件、
+  // 四族 gap 的读数仍在。**基线过期（模块变可达）不判红**——那是好消息，不是回归。
+  { label: 'reachability（PRT-611 续：可达性探针——已交付但生产里到不了）', files: ['scripts/prt/reachability.test.mjs'], cwd: ROOT },
     // 阶段 2：DshRuntimeAdapter。全部用假宿主端口，覆盖真实 DSH 无法稳定复现的故障
     // （run.result 永不结算、abort 无效、畸形结果、事件流中断）。
     { label: 'dsh-adapter（PRT-201~209：DSH 适配器契约、脱敏、看门狗与取消/恢复）', files: ['runtime/adapters/dsh/adapter.test.mjs'], cwd: ROOT },
@@ -1513,6 +1570,173 @@ async function stageTest() {
       files: ['team-hub/run-store-policy.test.mjs'],
       cwd: ROOT,
     },
+    // F-05（MULTI-AGENT-FEATURE-OPTIMIZATION.md §4.1）——当时**没有** PRT 编号的一条缺口，
+    // 因此这一组是它唯一的判据。它分两半，理由不同：
+    //
+    //   前半「运行明细作为可持久化 RunEvent 写入控制面」：
+    //     改动前 `executor.mjs` 的事件循环只留终态与用量/产物，13 种契约事件里
+    //     **11 种读完即弃**。于是"这次用了哪个模型、调了哪些工具"事后无从回答。
+    //     用例分三层（仓储 / executor 接线 / 真 hub HTTP），因为它们失效的方式不同：
+    //     仓储层全绿也可能没有任何调用方，而"有用例"不等于"已生效"。
+    //
+    //   后半「可靠投递状态机」：
+    //     改动前 `broadcastAudit` 丢掉 `res.write` 的返回值、异常被事件循环吞掉，
+    //     读数是"发过了"。用具例锁住三件事——`delivered` 只能由 CAS 从
+    //     `delivering` 得到、`suppressed` 必须带封闭词表里的原因、崩了只能落
+    //     `unknown`（既不许说 `delivered` 谎报可见性，也不许回 `pending` 重投
+    //     一个可能已经到达的事件）。
+    {
+      label: 'run-events（F-05 前半：13 种 RunEvent 明细落控制面，三条出口都带明细）',
+      files: ['team-hub/run-events.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      label: 'event-delivery（F-05 后半：投递六态、CAS 交付、封闭抑制原因、崩溃收敛为 unknown）',
+      files: ['team-hub/event-delivery.test.mjs', 'team-hub/event-delivery-wiring.test.mjs'],
+      cwd: ROOT,
+    },
+    // F-16（MULTI-AGENT-FEATURE-OPTIMIZATION.md §4.4）——自动化计划 / 运行历史。
+    //
+    // spec 那一行是"日历只做投影；新增计划、运行、时区、skip-on-overlap、
+    // 补跑和审批暂停状态"，而它点出的六件事每一件都对应一个**不会报错的失效**：
+    //   · 日历不是投影 → 翻页产生运行行（"上个月跑了 400 次"里 380 次是有人看过）
+    //   · 时区回落本地 → 每天都成功，只不过跑在错的时间上
+    //   · 跳过不记账 → "没被触发"与"被跳过了"同形
+    //   · 补跑默认 all → 停机三天之后一次性重放三天的工作
+    //   · 等待审批合进 running → 这条计划从此永远不再触发（静默停摆）
+    //
+    // 两套用例的失效方式不同，都要有：仓储层（22 例，含**真 Intl** 的时区
+    // 换算与 DST 边界）+ 真 hub HTTP 接线层（7 例，含"投影端点打 50 次
+    // 运行表一行都不多"）。
+    {
+      label: 'automation（F-16：日历只做投影、真时区、skip-on-overlap、补跑三策略、审批暂停）',
+      files: ['team-hub/automation-store.test.mjs', 'team-hub/automation-http.test.mjs'],
+      cwd: ROOT,
+    },
+    // F-17（§4.3）——长会话压缩：**不可变原文 + 版本化摘要 + 引用回原文**。
+    //
+    // 三件事各自的失效方向都是**不可逆**的，所以它们是分开验的：
+    //   · 原文可改写 → "摘要读起来不对"这件事无法被证伪（没有东西可以对）
+    //   · 摘要不版本化 → 一次更差的摘要会盖掉上一个好摘要，且无痕迹
+    //   · 没有回引 → 摘要是一段无法复核的文本，读者只能选择相信它
+    // 加上 baseVersion CAS（不检查时两个进程会各写一份"版本 1"）、
+    // 区间不许重叠（重叠时同一条消息会被算两次）这两条并发判据。
+    {
+      label: 'compaction（F-17：不可变原文、版本化摘要、回引完整性、baseVersion CAS）',
+      files: ['team-hub/compaction-store.test.mjs', 'team-hub/compaction-http.test.mjs'],
+      cwd: ROOT,
+    },
+    // F-15（§4.4）——用量/成本汇总：按 scope、goal、task、employee、model
+    // 记录 token、调用次数、耗时和成本。
+    //
+    // 闸门那一半（reserve/observe/settle、硬阻止、暂停、锁）已由
+    // `budget-ledger` 与 `budget-gate` 覆盖。本组补的是另一半：**把已经
+    // 记下来的事实按五个维度读出来**，而它的全部难点在于"每一个数字都有
+    // 一个'不知道'的邻居"：
+    //   · NULL token 不是 0（`SUM` 会把它当 0 加进去）
+    //   · 缺价的金额不是 0（算进去会**低估**总成本，而报表看着正常）
+    //   · 未结束的 Attempt 没有耗时（用 now-created 顶替会把"卡住"画成"在跑"）
+    //   · 未归属维度要进显式桶（丢掉它们会让各维度之和不等于总额）
+    //   · 混币种的金额之和没有意义（必须报出来，不许替调用方换算）
+    //   · 耗时**不许按记账次数重复计算**（本模块第一版真的写错了这一处：
+    //     JOIN 到 usage_records 之后一条 Attempt 被算了 N 遍，
+    //     而"每条恰好记一笔"的时候完全看不出来）
+    {
+      label: 'usage-rollup（F-15：五个维度 × 四个量，且"不知道"必须与 0 分得开）',
+      files: ['team-hub/usage-rollup.test.mjs', 'team-hub/usage-rollup-http.test.mjs'],
+      cwd: ROOT,
+    },
+    // F-20 缺口③：能力包安装事实的**持久化**。
+    //
+    // 这一组存在的理由与 F-15 那组同源，方向相反：F-15 是"记录了却读不出来"，
+    // 这一条是"算得出来却存不下去"。`runtime/packs/store.mjs` 的账**纯内存**
+    // （它自己第 129 行写着），于是"安装事实"在重启之后什么都不剩——
+    // 而 `enabledPacks()` / `installedList()` 正是依赖预检的基线：
+    // 基线空了，每个包都会突然报"缺依赖"，而它们其实都装着。
+    //
+    //   > 一本重启即失忆的账，与一本从来没有写过的账，
+    //   > 在"现在装了什么"这个问题上是同一个回答。
+    //
+    // 两个文件分工：`pack-facts.test.mjs` 钉账本自身的纪律（seq 的 CAS、
+    // 只追加、坏账整本拒绝），`pack-facts-http.test.mjs` 钉**跨模块实例**
+    // 的重建——而"同一个实例里再读一次永远是对的"，所以后者才是真判据。
+    {
+      label: 'pack-facts（F-20：安装事实落盘、跨重启重建、可导出给 Git 审阅）',
+      files: ['team-hub/pack-facts.test.mjs', 'team-hub/pack-facts-http.test.mjs'],
+      cwd: ROOT,
+    },
+    // F-19 缺口②：冻结的岗位包。
+    //
+    // 这一组的重心是**冻结这件事能不能被证伪**：
+    //   · `runtime/employee/role-pack.test.mjs` 钉"七类版本都固化了"——
+    //     缺一类即拒（**不给默认空值**）、承载内容的那四类必须有哈希
+    //     （★ 版本号是标签、哈希才是身份）、对账时"版本没变而内容变了"
+    //     必须与"版本变了"分成两个码。
+    //   · `team-hub/role-pack-store.test.mjs` 钉"冻结之后改不动"：
+    //     主键 `(scope, role_pack_id, version)` 让多版本**同时存在**，
+    //     同版本同内容幂等、同版本不同内容 409。
+    //   · `team-hub/role-pack-http.test.mjs` 钉那个 409 **真的走得到网络上**
+    //     ——库里抛 409 与客户端收到 409 之间隔着 `handleRun` 的
+    //     `Number(e?.statusCode) || 400`，那层一旦不认识它，调用方就会把
+    //     "版本冲突"读成"请求格式不对"，于是永远不去递增版本号。
+    {
+      label: 'role-pack（F-19：七类版本固化、冻结不可改、对账分两种漂移）',
+      files: [
+        'runtime/employee/role-pack.test.mjs',
+        'team-hub/role-pack-store.test.mjs',
+        'team-hub/role-pack-http.test.mjs',
+      ],
+      cwd: ROOT,
+    },
+    // F-18 经验图谱 / 摩擦学习。
+    //
+    // ★ 这一组里最要紧的是**执行面与旧实现的分歧**：
+    //   `plugins/src/experience.ts` 从评论**散文**里数信号（正则匹配"打回"、
+    //   "退回："这类中文短语）。它有用例、也能跑，但它无法被证伪——
+    //   有人改了措辞，分数就变了，而"因为改词变成 0"与"确实没有摩擦"是同一个 0。
+    //   新架构里这些信号本来就是结构化的（拒绝是 `run_validations.decision`，
+    //   重做是同一任务的第 2 次 attempt），所以 `friction.test.mjs` 里有一条
+    //   **结构级**用例断言模块源码中不出现正则字面量。
+    // 另一条主线是"缺失的输入是**不知道**、不是 0"——把缺失当 0 求和会得到
+    // 一个看起来完全正常的低分，而"数据没到"与"没有摩擦"于是同形。
+    {
+      label: 'experience（F-18：摩擦只从结构化字段算、草稿不是知识、图只记不推断）',
+      files: [
+        'runtime/experience/friction.test.mjs',
+        'runtime/experience/graph.test.mjs',
+        'team-hub/experience-store.test.mjs',
+        'team-hub/experience-http.test.mjs',
+      ],
+      cwd: ROOT,
+    },
+    // F-21 连接器 / MCP 登记表。
+    //
+    // spec §4.4：`server/tool 级策略、风险等级、SecretStore 和故障隔离`。
+    // 四条主线的判据各自对应一个"看起来能用、其实在撒谎"的写法：
+    //   · **未声明的工具必须拒绝**——`if (declared === undefined) return 'allow'`
+    //     的含义其实是"只要有人往 MCP server 上加一个工具，它自动获得授权"。
+    //   · **风险只能往上抬**，且不认识的能力名/风险等级要**报错**而不是兜底：
+    //     兜底成最严看起来安全，实际最坏——整个连接器莫名其妙全要人批，
+    //     而没有任何一处报错指出原因是能力名拼错了。
+    //   · **故障隔离**：开路必须带截止时间（不带时一次临时故障变永久停用，
+    //     而"永久"与"临时"在状态读数上长得一样）；半开只放**一个**探针
+    //     （放所有请求过去时，探针这一步本身就在打你正在保护的东西）；
+    //     一个连接器失败不牵连别的；`unknown` 健康 ≠ healthy。
+    //   · **落盘面**按内容哈希冻结（同版本换内容 = 409），因为连接器声明说的是
+    //     "一个外部进程能拿到什么权限"；故障事件**必须点名**连接器。
+    // 另外两组结构级用例：`connector-store.test.mjs` ①**从执行面源码里抽**
+    // 词表逐字比对（再抄一遍互相核对时，两边一起写错它全绿），
+    // `connector-http.test.mjs` ⑤ 断言路由守卫写成**字面量**
+    // （正则守卫会悄悄不进平台契约——PRT-507 那个坑）。
+    {
+      label: 'connectors（F-21：未声明即拒绝、风险只能上抬、密钥只许引用、熔断有截止时间）',
+      files: [
+        'runtime/connectors/registry.test.mjs',
+        'team-hub/connector-store.test.mjs',
+        'team-hub/connector-http.test.mjs',
+      ],
+      cwd: ROOT,
+    },
     // PRT-314：多 worker 并发语义。竞争者是真的**操作系统进程**，
     // 不是同一进程里的两条连接——同一事件循环里两条 BEGIN IMMEDIATE
     // 不可能真的同时发出，因此那种测法证明不了「两个进程抢的时候不会都赢」。
@@ -1586,6 +1810,28 @@ async function stageTest() {
     {
       label: 'workspace-wiring（PRT-306：工作区阶段接入 worker，隔离模式可见）',
       files: ['orchestrator/worker/workspace-wiring.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      // PRT-253 续批：`RunRequest` 那三个"猜不出来"的必填字段的来源。
+      // 本套件同时钉住三层：纯装配（`resolveRunInputs`）、模型绑定的解析链
+      // （任务上的岗位 → `(scope, role)` 绑定）、以及**生产入口真的交出了端口**
+      // （源级钉子——那个入口有顶层 await，import 不进来）。
+      label: 'run-inputs（PRT-253 续批：workspaceId/modelProfileRef/workdir 的来源与接线）',
+      files: ['orchestrator/worker/run-inputs.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      // PRT-214 缺口②：授权身份（`scope` / `taskId` / `cwd`）按 **Run** 生效。
+      //
+      // 这一套里最要紧的几条都是**成对**的：一个 Run 用甲空间、另一个用乙空间，
+      // 断言两边的授权哈希真的不同；再拿"没有覆盖时两边必须相同"作反面控制。
+      //
+      //   *一个"用进程级身份服务所有 Run"的实现，
+      //   与一个"每次 Run 各带各的空间身份"的实现，
+      //   在只有一个空间的那些用例里是同一个东西。*
+      label: 'run-identity（PRT-214 续：授权身份按 Run 生效，多空间不错标）',
+      files: ['runtime/dsh-composition/run-identity.test.mjs'],
       cwd: ROOT,
     },
     {
@@ -3088,6 +3334,13 @@ async function stageTest() {
         // 一个"整组被跳过、计数里什么都不显示"的套件，与一个压根不存在的套件，
         // 在"这次到底跑了什么"上是同一个东西。
         'product/launcher/dsh-overlay.test.mjs',
+        // PRT-251 续 ④：旧数据接管（安装目录内的 `team.db` → DataDir）。
+        //
+        // 缺口的形状是"写路径已经指到 DataDir、而 DataDir 里没有数据"，
+        // 所以这一组的判据必须落在**两端之间**：计划三态、真 SQLite 快照、
+        // 幂等、以及 Launcher 在"该接却没接成"时**拒绝启动**。
+        // 其中 ⑥ 用真 WAL 把两条路径并排比一次——那是本模块存在的全部理由。
+        'product/launcher/legacy-data-adoption.test.mjs',
         // PRT-509：Run 凭证的**材料化接线**（`launcher.start()` 里那次调用）。
         //
         // 这一条存在的理由与上面那组同源：`openRunCredentials()` 与
@@ -3102,6 +3355,22 @@ async function stageTest() {
         // 盘上真的有一份 `.credentials.yaml`、而那份文件在**产品家目录**下
         // 而不是 operator 的真实 home 里。
         'product/launcher/run-credential-materialization.test.mjs',
+        // PRT-509 缺口 B1：ACL 的 **runner 与 owner** 的生产接线。
+        //
+        // 与上面那条是**同一类**缺口，而且它更隐蔽一点：`security/secrets/acl.mjs`
+        // 判据齐全、用例全绿，而 `launcher.mjs` 里 `secretsRun` / `secretsOwner`
+        // 两个入参**从来没有生产调用方给过值**（全仓只有"声明"与"传参"两处）。
+        // 于是生产上恒为 `ACL_NO_RUNNER` + 「不知道文件所有者」——两条都不拦启动，
+        // 于是变成诊断里**永远出现、永远说同一句**的告警。
+        //
+        //   > 一份"判据齐全、28 条用例全绿、而生产里每次都说'没有 runner'"
+        //   > 的访问控制检查，与一份不存在的访问控制检查，在被保护的文件上
+        //   > 是同一个东西——只不过它看起来**像查过了**。
+        //
+        // 本组除了纯函数读数，还包含三条**真 `whoami` + 真 `icacls`** 的用例
+        // （inspect → harden → 独立复验）。前一层全绿也可能 runner 根本不在 PATH 上，
+        // 而那种情况下生产读数与"没接线"完全一样。
+        'product/launcher/secrets-acl-runner.test.mjs',
         // PRT-257 的**另一半**：修复入口（spec `line 275`        // 「禁止自动执行，**提示修复或回滚**」）。
         //
         // `REPAIR_ACTIONS` / `repairPlanFor()` 早在 `runtime/dsh-composition/
@@ -3166,6 +3435,29 @@ async function stageTest() {
         // 绑定字段名是 employeeRole/primaryProfile、密钥引用要按约定算
         // （因为 hub 的单条档案读取**有意不含 secretRef**）。
         'product/launcher/first-run.test.mjs',
+        // ★★ PRT-707 有**两份**实现，而它们对模型密钥的引用名说法不一致。
+        //
+        // 上面那一套（`first-run.test.mjs`）验的是**死的那份**
+        // （`first-run.mjs`：636 行、零生产导入者）。**活的那份**是
+        // `cli.mjs` 的 `--wizard` 分支里**内联**的一份，用的是另一个引用名。
+        //
+        // 这一套不替任何一方说话（那是一个产品决定），只做三件事：
+        //   ① 把分歧钉住；
+        //   ② ★ 用**真实读者** `planDshLookup()` 证明死的那份算出来的
+        //      `legion/model/<id>`（**三段**）在 DSH 的两个键空间里都
+        //      `addressable:false` —— 也就是**没有任何位置**；
+        //   ③ 把"两份各自绿着"本身钉住。
+        //
+        // 为什么值得单列一组：把那份死的接上去是个**很自然**的动作
+        // （它有 636 行、有一整套用例，而"零生产入口"看起来总是缺陷），
+        // 而接上它不会报错——它会得到一个"向导说『模型已配置』、
+        // 运行时拿不到钥匙"的产品。
+        //
+        //   > 一个"文件看起来完整、就是少了最要紧那一把钥匙"的读数，
+        //   > 与一个"文件本来就只该有这么多"的读数，在 `cat` 的输出里长得一模一样。
+        //
+        // 本套件今天**全绿**：它是一份**读数**，不是待办。
+        'product/launcher/wizard-wiring.test.mjs',
         // PRT-257 的最大一块空白：**DSH 运行时的安装**（PRT-011 裁决的路线 C）。
         //
         // 在此之前 `product/launcher/` 里**没有任何一行**在生产代码里解析过 DSH 版本、

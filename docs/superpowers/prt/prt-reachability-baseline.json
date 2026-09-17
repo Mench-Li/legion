@@ -1,0 +1,236 @@
+{
+  "$comment": "可达性基线：从**真实入口**出发顺 import 图，走不到的模块（scripts/prt/reachability.mjs）。\n\n不可达**不等于**缺陷。每条都带 class 与 reason，四类动作完全不同：\n  · by-design   —— 按设计不被 import（config-schema 被 scan 读源码、barrel、夹具、按路径跑的脚本）\n  · deliberate  —— 刻意不接，理由写在代码注释里（例：升级链不 import 进 Launcher）\n  · gap         —— 真的没有生产路径，且台账/对照表说它已交付 ⇒ 需要在 §5 里裁决\n  · in-flight   —— 另一个 agent 进程当轮正在接线（工作树未提交）\n\n门禁（scripts/prt/reachability.test.mjs）只断言两件事：没有**未分类**的不可达模块、\n以及正对照成立。**基线过期（模块变可达）只报警不改红**——\n模块变成可达从来不是回归，把它判红等于惩罚正在接线的人。\n`node scripts/prt/reachability.mjs` 出人读报告；`--diff` 与基线比对；`--record` 重写（会保留已有分类）。",
+  "version": 1,
+  "unreachable": [
+    {
+      "file": "orchestrator/config-schema.mjs",
+      "class": "by-design",
+      "reason": "scan.mjs 读源码对账，不由别的模块 import"
+    },
+    {
+      "file": "orchestrator/worker/index.mjs",
+      "class": "by-design",
+      "reason": "re-export 出口；调用方直接 import 叶子（main.mjs/run.mjs 都可达）"
+    },
+    {
+      "file": "product/config-schema.mjs",
+      "class": "by-design",
+      "reason": "同上"
+    },
+    {
+      "file": "product/diagnostics/crash-report.mjs",
+      "class": "gap",
+      "reason": "PRT-906/903：崩溃报告没有生产入口"
+    },
+    {
+      "file": "product/index.mjs",
+      "class": "by-design",
+      "reason": "产品层公开出口；进程入口走 product/launcher/cli.mjs"
+    },
+    {
+      "file": "product/launcher/first-run.mjs",
+      "class": "gap",
+      "reason": "PRT-707 死的那份实现（§5.3.1 / §5 第 17 条）"
+    },
+    {
+      "file": "product/launcher/index.mjs",
+      "class": "by-design",
+      "reason": "同上（cli.mjs 直接 import ./launcher.mjs）"
+    },
+    {
+      "file": "product/lifecycle/data-classes.mjs",
+      "class": "gap",
+      "reason": "阶段 9 产品动作：模块 + 用例齐备，没有 CLI 面（§5 第 16 条）"
+    },
+    {
+      "file": "product/lifecycle/data-export.mjs",
+      "class": "gap",
+      "reason": "同上"
+    },
+    {
+      "file": "product/lifecycle/retention.mjs",
+      "class": "gap",
+      "reason": "同上"
+    },
+    {
+      "file": "product/lifecycle/uninstall.mjs",
+      "class": "gap",
+      "reason": "同上"
+    },
+    {
+      "file": "product/metrics-source.mjs",
+      "class": "gap",
+      "reason": "PRT-712：台账自己写了\"还没有界面/CLI 消费者\""
+    },
+    {
+      "file": "product/release/checklist.mjs",
+      "class": "gap",
+      "reason": "同上"
+    },
+    {
+      "file": "product/release/privacy.mjs",
+      "class": "gap",
+      "reason": "同上"
+    },
+    {
+      "file": "product/support/runbook.mjs",
+      "class": "gap",
+      "reason": "同上"
+    },
+    {
+      "file": "product/upgrade/audit.mjs",
+      "class": "deliberate",
+      "reason": "同上（升级链的一环）"
+    },
+    {
+      "file": "product/upgrade/backup.mjs",
+      "class": "deliberate",
+      "reason": "同上（升级链的一环）"
+    },
+    {
+      "file": "product/upgrade/channels.mjs",
+      "class": "deliberate",
+      "reason": "同上（升级链的一环）"
+    },
+    {
+      "file": "product/upgrade/index.mjs",
+      "class": "deliberate",
+      "reason": "runtime-install.mjs: 注释写明 Launcher **刻意不 import** 升级链（进程卫生）"
+    },
+    {
+      "file": "product/upgrade/migration.mjs",
+      "class": "deliberate",
+      "reason": "同上（升级链的一环）"
+    },
+    {
+      "file": "product/upgrade/package.mjs",
+      "class": "deliberate",
+      "reason": "同上（升级链的一环）"
+    },
+    {
+      "file": "product/upgrade/preflight.mjs",
+      "class": "deliberate",
+      "reason": "同上（升级链的一环）"
+    },
+    {
+      "file": "product/upgrade/switchover.mjs",
+      "class": "deliberate",
+      "reason": "同上（升级链的一环）"
+    },
+    {
+      "file": "runtime/adapters/dsh/parity.mjs",
+      "class": "by-design",
+      "reason": "PRT-210 的交付物**就是**对拍本身；它的产品是用例"
+    },
+    {
+      "file": "runtime/config-schema.mjs",
+      "class": "by-design",
+      "reason": "同上"
+    },
+    {
+      "file": "runtime/connectors/registry.mjs",
+      "class": "gap",
+      "reason": "§4.2：F-21 判定面零生产调用方"
+    },
+    {
+      "file": "runtime/context/index.mjs",
+      "class": "by-design",
+      "reason": "re-export 出口"
+    },
+    {
+      "file": "runtime/dsh-composition/execution-scope.mjs",
+      "class": "gap",
+      "reason": "§5.2：连端口都没有"
+    },
+    {
+      "file": "runtime/dsh-composition/external-api-scope.mjs",
+      "class": "gap",
+      "reason": "§5.2：连端口都没有"
+    },
+    {
+      "file": "runtime/dsh-composition/path-scope.mjs",
+      "class": "gap",
+      "reason": "§5.2：生产不注入 pathScope（`tool-request.mjs` 在 null 时放行）"
+    },
+    {
+      "file": "runtime/dsh-composition/plugins/runtime-contract-server-row.mjs",
+      "class": "in-flight",
+      "reason": "同上；它把 Runtime 契约服务挂进组合"
+    },
+    {
+      "file": "runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs",
+      "class": "in-flight",
+      "reason": "工作树里由另一个 agent 进程修改中；它按 Run 安装身份/下限"
+    },
+    {
+      "file": "runtime/dsh-composition/run-floor.mjs",
+      "class": "in-flight",
+      "reason": "唯一的 import 者是上面的 registrar row（传递不可达）"
+    },
+    {
+      "file": "runtime/dsh-composition/runtime-contract-publication.mjs",
+      "class": "in-flight",
+      "reason": "唯一的 import 者是上面的 contract-server row（传递不可达）"
+    },
+    {
+      "file": "runtime/dsh-composition/runtime-contract-server.mjs",
+      "class": "in-flight",
+      "reason": "唯一的 import 者是上面的 contract-server row（传递不可达）"
+    },
+    {
+      "file": "runtime/employee/role-pack.mjs",
+      "class": "gap",
+      "reason": "F-19 的**执行面**一半：hub 侧 role-pack-store 已接（server.mjs 可达），执行面这一半没有路径"
+    },
+    {
+      "file": "runtime/experience/friction.mjs",
+      "class": "gap",
+      "reason": "F-18 的**执行面**一半：hub 侧 experience-store 已接，摩擦分没有任何生产调用方"
+    },
+    {
+      "file": "runtime/experience/graph.mjs",
+      "class": "gap",
+      "reason": "F-18 同上：图只被自己的用例驱动"
+    },
+    {
+      "file": "runtime/packs/authority.mjs",
+      "class": "gap",
+      "reason": "PRT-1005：同上（唯一的 import 者是内置包）"
+    },
+    {
+      "file": "runtime/packs/builtin/software-delivery.mjs",
+      "class": "gap",
+      "reason": "PRT-1006「首个内置能力包」：零导入者；它的 ✅ 由自己的用例驱动"
+    },
+    {
+      "file": "runtime/packs/compiled-plan.mjs",
+      "class": "gap",
+      "reason": "PRT-1004：同上"
+    },
+    {
+      "file": "runtime/packs/store.mjs",
+      "class": "gap",
+      "reason": "PRT-1003：唯一的 import 者是下面的内置包（传递不可达）⇒ 生产里没有任何安装/升级记录产生"
+    },
+    {
+      "file": "security/config-schema.mjs",
+      "class": "by-design",
+      "reason": "同上"
+    },
+    {
+      "file": "team-hub/approval-fixture.mjs",
+      "class": "by-design",
+      "reason": "用例夹具（PRT-615）"
+    },
+    {
+      "file": "team-hub/chat-l1-smoke.mjs",
+      "class": "by-design",
+      "reason": "L1 冒烟脚本，被 run-ci 的 smoke 组按路径跑"
+    },
+    {
+      "file": "team-hub/context-fixture.mjs",
+      "class": "by-design",
+      "reason": "用例夹具（PRT-411）"
+    }
+  ]
+}

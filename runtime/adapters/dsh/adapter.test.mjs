@@ -31,6 +31,7 @@ import { validateRunRequest, validateRunEvent, assertTerminalContract, RUN_EVENT
 //   换成常量之后，升版只需要动一个地方，而这条套件测的仍然是它本来要测的
 //   那件事（"形状合法的载荷原样过线"）。
 import { RUN_FLOOR_WIRE_VERSION } from '../../contracts/run-floor.mjs'
+import { RUN_IDENTITY_WIRE_VERSION } from '../../contracts/run-identity.mjs'
 
 // ------------------------------------------------------------------ 测试夹具
 
@@ -459,6 +460,89 @@ test('③′ 请求里的下限**解释不了** → 拒收这次 Run，**连 sta
       })
     assert.equal(host.calls.startRun.length, 0,
       `坏载荷 ${JSON.stringify(bad)} 已经把 Run 起跑了 —— 那等于"派生失败"照跑`)
+  }
+})
+
+// ================================================================ ③‴ PRT-214 缺口②：授权身份过线
+
+test('③‴ 请求里**没有** `enforcementIdentity` → 端口收到 `{state:"absent"}`，**不是**空覆盖', async () => {
+  // ★ 与上面那一条 ③′ 的形状逐字相同，但**语义相反**，这正是它值得单列的理由：
+  //   下限的 `absent` 在安装点被落成"拒绝一切"（fail closed）；
+  //   身份的 `absent` 是"沿用**进程级**身份"——一个接线之前就存在的合法语义。
+  //   两者都必须是**显式的**一个对象，否则端口分不出
+  //   "这次没有覆盖"与"调用我的人不支持覆盖"。
+  const host = hostOk()
+  const a = await readyAdapter(host)
+  await collect(a, makeRequest())
+  const payload = host.calls.startRun[0].options.enforcementIdentity
+  assert.deepEqual(payload, { state: 'absent' })
+  assert.equal('identity' in payload, false, '缺席不许带一份 identity——那正是"空覆盖"的形状')
+})
+
+test('③‴ 请求里**有** `enforcementIdentity` → 原样过线（三个字段一个不少）', async () => {
+  const host = hostOk()
+  const a = await readyAdapter(host)
+  await collect(a, makeRequest({
+    enforcementIdentity: {
+      version: RUN_IDENTITY_WIRE_VERSION, scope: 'gf001', taskId: 'T-9', cwd: 'D:/proj',
+    },
+  }))
+  const payload = host.calls.startRun[0].options.enforcementIdentity
+  assert.equal(payload.state, 'installed')
+  assert.deepEqual(payload.identity, { scope: 'gf001', taskId: 'T-9', cwd: 'D:/proj' },
+    '身份必须原样过线，不许在这里加字段或改名')
+
+  // 最小一份：只有 `scope`。`taskId` / `cwd` 缺席是"这次没提这件事"，不是 `null`。
+  const minHost = hostOk()
+  const minAdapter = await readyAdapter(minHost)
+  await collect(minAdapter, makeRequest({
+    enforcementIdentity: { version: RUN_IDENTITY_WIRE_VERSION, scope: 'ozon' },
+  }))
+  const min = minHost.calls.startRun[0].options.enforcementIdentity
+  assert.equal(min.state, 'installed')
+  assert.deepEqual(min.identity, { scope: 'ozon' })
+  assert.equal('taskId' in min.identity, false, '没提 taskId 却给了一个 null / undefined 键')
+})
+
+test('③‴ ★★★ 两个空间的两次 Run → 端口收到的是**两个不同的** `scope`', async () => {
+  // 适配器这一跳是"一个 Runtime 进程服务多个空间"的唯一入口：
+  // 它必须把**这一次**的空间交出去，而不是让端口去猜。
+  const host = hostOk()
+  const a = await readyAdapter(host)
+  await collect(a, makeRequest({
+    runId: 'run-a', attemptId: 'att-a',
+    enforcementIdentity: { version: RUN_IDENTITY_WIRE_VERSION, scope: 'gf001' },
+  }))
+  await collect(a, makeRequest({
+    runId: 'run-b', attemptId: 'att-b',
+    enforcementIdentity: { version: RUN_IDENTITY_WIRE_VERSION, scope: 'ozon' },
+  }))
+  const [first, second] = host.calls.startRun.map((c) => c.options.enforcementIdentity)
+  assert.equal(first.identity.scope, 'gf001')
+  assert.equal(second.identity.scope, 'ozon')
+  // ★ 两个载荷是**两个不同的对象**：载体按对象身份配对靠的就是这一点。
+  //   共用一份（比如在别处缓存/复用）会让并发两次派工互相改对方的身份。
+  assert.notEqual(first, second, '两个 Run 共用了同一份身份载荷对象')
+})
+
+test('③‴ 请求里的身份**解释不了** → 拒收这次 Run，**连 startRun 都不叫**', async () => {
+  // 一份解释不了的身份不是政策，是一次接线错误：照跑等于把它伪装成"沿用进程级身份"，
+  // 而那正是本缺口要消灭的形状——不报错，只是把甲空间的事记在乙空间名下。
+  for (const bad of [
+    { version: RUN_IDENTITY_WIRE_VERSION, scope: null },
+    { version: RUN_IDENTITY_WIRE_VERSION, scope: 'gf001', actor: 'someone-else' },
+    { version: 99, scope: 'gf001' },
+    null,
+  ]) {
+    const host = hostOk()
+    const a = await readyAdapter(host)
+    await assert.rejects(async () => { await collect(a, makeRequest({ enforcementIdentity: bad })) },
+      (err) => {
+        assert.equal(err.code, 'INVALID_RESULT', `坏身份 ${JSON.stringify(bad)} 的错误码不对`)
+        return true
+      })
+    assert.equal(host.calls.startRun.length, 0,
+      `坏身份 ${JSON.stringify(bad)} 已经把 Run 起跑了 —— 那等于"想覆盖却写坏了"被洗成"沿用进程级"`)
   }
 })
 

@@ -7,7 +7,7 @@
 | 插件 | 类型 | 状态 | 用途 |
 | --- | --- | --- | --- |
 | `@deepseek-ai/dsh-tool-mesh` | host 工具插件 | ✅ 已发布 | 角色寻址消息总线：`mesh_register` / `mesh_send` / `mesh_recv`，士兵内容直连 |
-| `@dsh-external/dsh-scrum-board`（client 半） | client UI 插件 | ✅ 已实现 | GUI 内嵌：`conversation.view` 看板面板 + **`shell.overlay` 左下角常驻入口**（圆点守护心跳，点击新标签打开军团总指挥部独立页面） |
+| `@dsh-external/dsh-scrum-board` | host 插件（+ 空 client 半） | ✅ 已实现 | 在 DSH webServer 上自托管 `/scrum-board`（kanban.html / api / SSE）。**GUI 内嵌面已移出**：会话内 `conversation.view` 看板面板与侧栏「总指挥部」常驻块均已移除，看板与指挥总览由 Legion 指挥台（workbench 任务中心）承载 |
 | `@deepseek-ai/dsh-tool-taskctl` | host 工具插件 | ✅ 已实现 | 任务库工具化：`task_create` / `task_claim` / `task_transition` / `task_comment` / `task_link` / `task_list`，模型直接调用（复用 taskctl 状态机/乐观锁/认领/依赖纪律） |
 | `@dsh-external/dsh-scrum-worker` | host 守护插件 | ✅ 已实现 | 士兵轮询守护：认领 todo → 派 worker → in_review；退回纠错；解阻续做；worktree 隔离 / 动态流 / 认领租约 / 依赖环检测 / 任务 TTL+幂等认领 / 进度心跳（0%/10% 遥测）/ `daemon.json` 能力自述 |
 

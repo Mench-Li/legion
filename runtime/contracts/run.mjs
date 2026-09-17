@@ -16,6 +16,7 @@ import { createHash } from 'node:crypto'
 // 一个**契约上的形状**。形状与三种处境（没给 / 给清楚了 / 解释不了）的判定都在
 // `./run-floor.mjs`——与 `permissions` 一样，本模块只调用它，不重写一份。
 import { RUN_FLOOR_STATES, RUN_FLOOR_WIRE_FIELD, readRunFloor } from './run-floor.mjs'
+import { RUN_IDENTITY_STATES, RUN_IDENTITY_WIRE_FIELD, readRunIdentity } from './run-identity.mjs'
 
 /** 全部 RunEvent 类型（spec §6.1，共 13 种）。 */
 export const RUN_EVENT_TYPES = Object.freeze([
@@ -188,6 +189,18 @@ export function validateRunRequest(req) {
     const floorReading = readRunFloor(req[RUN_FLOOR_WIRE_FIELD])
     if (floorReading.state === RUN_FLOOR_STATES.REFUSED) {
       errors.push(...floorReading.errors)
+    }
+  }
+  // 授权身份（PRT-214 缺口②）：**可选**，但给了就必须解释得通。
+  //
+  // 与上限那一段逐字同一个形状、同一个理由（判定整体委托，不重写第二份检查）。
+  // 而"可选"在这里的含义要说清：缺了它**不是**"这次没有身份"，
+  // 而是"沿用进程级身份"——一个接线之前就存在的合法语义。
+  // 所以 `absent` 合法、`installed` 合法，只有 `refused` 是错误。
+  if (req[RUN_IDENTITY_WIRE_FIELD] !== undefined) {
+    const identityReading = readRunIdentity(req[RUN_IDENTITY_WIRE_FIELD])
+    if (identityReading.state === RUN_IDENTITY_STATES.REFUSED) {
+      errors.push(`enforcementIdentity：${identityReading.code} ${identityReading.message}`)
     }
   }
   // 预期输出契约：schema 与验收提示必须同时给出

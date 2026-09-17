@@ -28,6 +28,7 @@
 import { join } from 'node:path'
 
 import { readStatusFile, STATUS_RELPATH, writeStatusFile } from './status-file.mjs'
+import { resolveRunInputs } from './run-inputs.mjs'
 
 /** worker 状态机的取值。 */
 export const WORKER_STATES = Object.freeze([
@@ -179,6 +180,23 @@ export function createWorker({
   //   > 与一个"装了一个恒真的闸门"的默认值，是同一个东西——
   //   > 只不过前者在代码里看起来像是一个中立的、没有做决定的默认值。
   claimGate = null,
+  // ── PRT-253 续批：运行输入（`workspaceId` / `modelProfileRef` / `workdir`）──
+  //
+  // 这三项是 `RunRequest` 的必填字段，而 `defaultRequestFor` 明确拒绝猜它们。
+  // 此前**没有任何东西给**：认领响应不带、`WORKER_ENV` 不带、`product/` 一处未引用。
+  // 生产链路的读数是 `EXECUTOR_BAD_WIRING missing=["workspaceId","modelProfileRef","workdir"]`。
+  //
+  // 这里给它们接上权威来源（见 `run-inputs.mjs` 的表）：
+  //   · `workspaceId` —— 租约上的 `scope`（效果命名空间必须按 Attempt 稳定且唯一）；
+  //   · `workdir`     —— worktree 的 `slotDir`，原地执行时是被授权的项目目录；
+  //   · `modelProfileRef` —— 调用方给的 `modelProfileRefFor()`（员工的模型绑定，PRT-502）。
+  //
+  // ★ `modelProfileRefFor` 是**注入的异步端口**而不是这里直接去连 hub：
+  //   本模块不认识 HTTP，也不该认识（它整条路径都能在不起进程的情况下被测到）。
+  //   缺省 `null` = "没有这个端口"，那时 `modelProfileRef` 只能来自租约，
+  //   否则这次 Attempt 以具名错误停下——**不猜一个模型**。
+  projectDir = null,
+  modelProfileRefFor = null,
   logger = () => {},
   now = () => Date.now(),
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
@@ -189,6 +207,11 @@ export function createWorker({
   if (claimGate !== null && typeof claimGate !== 'function') {
     throw new TypeError('createWorker 的 claimGate 必须是函数（每轮调用一次）或 null：'
       + '一个"装上了但从不被调用"的闸门，与没装闸门是同一个东西')
+  }
+  if (modelProfileRefFor !== null && typeof modelProfileRefFor !== 'function') {
+    throw new TypeError('createWorker 的 modelProfileRefFor 必须是异步函数 (lease) => string|null 或 null：'
+      + '一个"装上了但从不被调用"的解析端口，与没有端口是同一个东西——'
+      + '而它的缺席会让每一次 Run 都以"缺 modelProfileRef"停下')
   }
   const gateInstalled = claimGate !== null
   // 最近一次闸门裁决。写进状态文件——**"为什么现在不认领"必须能从盘上读到**，
@@ -404,7 +427,7 @@ export function createWorker({
    * 最可能发生的那一种（epoch 已前进 = 我们被接管了），那不是异常情况，是正确结果。
    * 两个调用方因此都可以直接 await，不必各自再包一层（各自包一层就会漂移）。
    */
-  async function submitFailure({ claimed, failureCode, detail, runResult = null }) {
+  async function submitFailure({ claimed, failureCode, detail, runResult = null, runEvents = null, runEventsTruncated = false }) {
     let reported = null
     try {
       // `fail` 还负责算退避并写进队列（`next_attempt_at_ms`），
@@ -419,6 +442,10 @@ export function createWorker({
         // 那就原样送上去，让 hub 侧那一行是 `source: 'engine'` 而不是 `'report-only'`
         // ——后者答不出"引擎当时说了什么"，而状态迁移全都还是对的。
         runResult,
+        // F-05 前半：失败路径的事件明细同样上报。没有它，"它在炸之前做了什么"
+        // 在库里没有任何痕迹（失败路径只在极少数情况下才会同时有 runResult）。
+        runEvents,
+        runEventsTruncated,
       })
       lastError.disposition = reported?.action ?? null
       lastError.nextAttemptAtMs = reported?.nextAttemptAtMs ?? null
@@ -533,6 +560,9 @@ export function createWorker({
     // PRT-411：`buildContext` 到底做成了什么。初值**不是** `null` 而是"还没走到"，
     // 这样"阶段没跑到"与"阶段跑了但没冻结快照"不会被同一个 `null` 混为一谈。
     let contextEvidence = { contextFrozen: false, kind: 'not-reached' }
+    // PRT-253 续批：这次 Attempt 的三个运行输入**从哪来的**。
+    // 初值 `null` = 还没算到那一步（与"算了但没有来源"分开，同 `contextEvidence` 的理由）。
+    let lastRunInputs = null
     try {
       /**
        * §6.4 的流水线：**先持久化意图，再做副作用**。
@@ -564,17 +594,85 @@ export function createWorker({
        * 不打的话，`prepareWorkspace` 的异常会被上报成 `stage: 'execute'`——
        * 于是失败码变成 `runtime-unavailable`（可重试），而真实原因是
        * 「工作区没能建起来」。两者对运维的意义完全不同，而错误分类决定了要不要重试。
+       *
+       * ★ `...args` 而不是 `(lease)`：**转发必须是全量的**。
+       *   写成一个具名形参时，多出来的实参会被静默丢掉——
+       *   而调用点（`execute(claimed, runInputs)`）看起来完全正常。
+       *
+       *     > 一个"转发时只接一个参数"的包装，
+       *     > 与一个"那个参数根本没被传"的实现，在调用点上是同一个东西——
+       *     > 只不过前者的排障会指向调用点，而调用点是对的。
        */
-      const tagStage = (stageName, fn) => async (lease) => {
+      const tagStage = (stageName, fn) => async (...args) => {
         try {
-          return await fn(lease)
+          return await fn(...args)
         } catch (err) {
           if (err !== null && typeof err === 'object' && err.stage === undefined) err.stage = stageName
           throw err
         }
       }
 
-      await step('PreparingWorkspace', tagStage('prepareWorkspace', stageImpl.prepareWorkspace), 'prepareWorkspace')
+      // ── 运行输入：`modelProfileRef` 要**先**问，排在建工作区之前 ────────────
+      //
+      // 位置是刻意的：解析员工的模型绑定是一次**纯读**，而 `prepareWorkspace`
+      // 会在磁盘上建一个真的 worktree（有副作用）。顺序反过来时，
+      // "这个岗位没有模型绑定"这条**配置**错误会在留下一个 worktree 之后才暴露——
+      // 而那个 worktree 没有任何人会用，只能等回收。
+      //
+      //   > 一个"先做副作用、再发现配置错了"的顺序，
+      //   > 与一个"先做副作用、然后照样跑下去"的顺序，
+      //   > 在磁盘上留下的是同一个东西。
+      let modelProfileRef = null
+      if (modelProfileRefFor !== null) {
+        const reading = await modelProfileRefFor(claimed)
+        // 端口可以返回字符串（简单形态），也可以返回判别式联合（要带理由时）。
+        // 两种都收，但**只有明确为成功**时才取值——一个"读到个对象就当能用"的写法，
+        // 会在端口返回 `{ok:false, message:…}` 时把整个对象当成模型 id 传下去。
+        if (typeof reading === 'string') modelProfileRef = reading
+        else if (reading !== null && typeof reading === 'object' && reading.ok === true) {
+          modelProfileRef = reading.modelProfileRef ?? null
+        }
+      }
+
+      const workspaceStep = await step('PreparingWorkspace', tagStage('prepareWorkspace', stageImpl.prepareWorkspace), 'prepareWorkspace')
+      // ★ 这一步的结果此前**被丢掉**（`step()` 返回了它，没人接）。
+      //   而 `workdir` 正是"这次 Attempt 在哪个目录里干活"的唯一权威来源：
+      //   有隔离时那是独立的 worktree 槽位，原地执行时是被授权的项目目录。
+      //   丢掉它，就等于让执行引擎去猜自己该改哪个目录。
+      const workspaceDetail = workspaceStep.detail ?? null
+
+      const runInputs = resolveRunInputs({
+        lease: claimed,
+        workspace: workspaceDetail,
+        projectDir,
+        modelProfileRef,
+      })
+      // ★ 装配不齐**不在本层判死**，而是原样交给执行引擎。
+      //
+      // 第一版在这里抛了具名错。那个写法是错的，理由不是"更麻烦"，而是**分工**：
+      // "这次请求需要哪些字段"是执行引擎的事——调用方可以给自己一条 `requestFor`
+      // （`can-read-authorization-source.test.mjs` 例② 就是那么做的），
+      // 它完全可能从别处装出请求来。本层擅自判死，等于替执行引擎决定它需要什么。
+      //
+      // 于是判据只有一处：`defaultRequestFor()` 自己那次具名拒绝
+      // （"缺 3 个必填字段" + 现在会一并说清**装配为什么拒绝**）。
+      // 本层做的是另一件事——**把出处记下来**，因为只有这里知道
+      // "哪个值是从哪来的"。
+      //
+      //   > 一个"本层也判一次"的实现，与一个"判据只有一处"的实现，
+      //   > 在两边都写对了的时候是同一个东西——只不过前者会在某一处
+      //   > 先漂移，而漂移的那一次表现为"执行引擎说缺字段、而值就在旁边"。
+      if (runInputs.ok !== true) {
+        logger(`[worker] ⚠ 运行输入装配不完整（${runInputs.code}）：缺 ${runInputs.missing.join('、') || '（无）'}`
+          + '——原样交给执行引擎判（判据只有那一处）；若引擎拒绝，原因会在它的报错里')
+      }
+      lastRunInputs = {
+        ok: runInputs.ok,
+        code: runInputs.code,
+        missing: [...runInputs.missing],
+        sources: { ...runInputs.sources },
+      }
+
       // PRT-411：把 buildContext 的结果**留下来**。
       //
       // 它此前被 `step` 返回、然后**被丢掉**。于是无论这个阶段做没做、做了什么，
@@ -599,7 +697,11 @@ export function createWorker({
         note: contextDetail?.note ?? null,
       }
       await step('Running', async () => null, 'running')
-      const result = await tagStage('execute', stageImpl.execute)(claimed)
+      // ★ 第二个实参：运行输入随这次调用一起交给执行引擎。
+      //   不并进 `claimed` 是刻意的（见 `execute()` 的 JSDoc）：租约是控制面给的凭据，
+      //   而这三项是**本进程**推导出来的——混成一个对象之后，
+      //   "控制面这次没给"这件事就再也查不出来了。
+      const result = await tagStage('execute', stageImpl.execute)(claimed, runInputs)
       const outcome = result?.outcome ?? 'failed'
       if (outcome === 'completed') counters.completed += 1
       else if (outcome === 'outcome_unknown') counters.unknownOutcome += 1
@@ -622,6 +724,11 @@ export function createWorker({
           failureCode: classifyStageFailure('execute'),
           detail: result?.detail ?? 'execute-failed',
           runResult: result?.runResult ?? null,
+          // F-05 前半：**失败的 Run 同样要带事件明细上去**。
+          // "它在失败之前做了什么"正是最需要复盘的一次；只给成功的 Run 记明细，
+          // 会让每一次失败都变成一段空白，而复盘的人无从下手。
+          runEvents: result?.runEvents ?? null,
+          runEventsTruncated: result?.runEventsTruncated === true,
         })
         stopHeartbeat()
         currentLease = null
@@ -650,7 +757,22 @@ export function createWorker({
         // 就永远到不了库里，那条声明也就永远只是事件流里的一句话。
         // 注意这与 `detail` **不是**二选一：`detail` 是给人看的一句话摘要，
         // `runResult` 是给机器判的凭据（机器验收要按它判判据）。
-        context: { detail: result?.detail ?? null, runResult: result?.runResult ?? null, trace, frozen: contextEvidence },
+        context: {
+          detail: result?.detail ?? null, runResult: result?.runResult ?? null, trace, frozen: contextEvidence,
+          // PRT-253 续批：运行输入的**出处**随终态一起上去。
+          //
+          // 为什么出处也要上报，而不是只上报值：这三个值里哪几个是控制面给的、
+          // 哪几个是本进程从"空间 / worktree 槽位 / 员工模型绑定"推出来的，
+          // 是"下一次该往哪修"的唯一线索。只留合并后的值，等于把
+          // "控制面这次没给"这件事永久地从证据里抹掉。
+          runInputs: lastRunInputs,
+          // F-05 前半：事件明细随**同一次**终态迁移上去。放在 `context` 里而不是
+          // 单独一个请求，是为了让"终态"与"明细"在同一个事务里落地——
+          // 分成两次请求时，崩在中间会留下一条没有明细的终态，而读的人
+          // 无法区分"这次 Run 没有明细"与"明细丢在路上了"。
+          runEvents: result?.runEvents ?? null,
+          runEventsTruncated: result?.runEventsTruncated === true,
+        },
       })
       stopHeartbeat()
       currentLease = null
@@ -684,6 +806,10 @@ export function createWorker({
         // 抛错这条路**手里没有**引擎产出（根本没收到的终态事件），如实给 null：
         // hub 侧那一行会是 `source: 'report-only'`，而不是伪造一个空结果。
         runResult: null,
+        // F-05 前半：但**事件明细可能有**——`executor` 在抛出时把已经收到的事件
+        // 挂在错误对象上（见那里的注释）。那正是"它在炸之前做了什么"的唯一来源。
+        runEvents: Array.isArray(e?.runEvents) ? e.runEvents : null,
+        runEventsTruncated: e?.runEventsTruncated === true,
       })
       currentLease = null
       publish('idle')

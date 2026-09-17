@@ -372,11 +372,26 @@ describe('PRT-257 Launcher 用上装好的运行时（接线）', () => {
     assert.equal(seams.captured.length, 1, `spawn 次数不对：${seams.captured.length}`)
     const rt = seams.captured[0]
     const overlayArg = join(f.installDir, 'runtime', 'dsh-composition', 'legion-host.patch.yml')
-    assert.deepEqual(rt.args, [i.active.entryPath, '--profile', DEFAULT_DSH_PROFILE, '--patch', overlayArg])
+    // ★ PRT-251 续：argv 末尾多了一段 `--port <本次端口>`。
+    //
+    //   这一条同时是本批最硬的一份证据：**生产 argv 的真实形状**就是
+    //   `… --profile web --patch <legion-host.patch.yml> --port <n>`——
+    //   强制面覆盖层在 launcher 段里、端口在 app 段里，两段各归各位。
+    //   如果端口被放进 `argsTemplate`，这里会变成 `… --patch … --port …`
+    //   的顺序被打破（`--port` 在前），而 DSH 会把 `--patch <文件>` 当成 app 参数
+    //   **静默丢掉整个强制面**——而这次启动照样成功。
+    const runtimePort = L.status().processes.find((p) => p.key === 'runtime').port
+    assert.deepEqual(rt.args,
+      [i.active.entryPath, '--profile', DEFAULT_DSH_PROFILE, '--patch', overlayArg, '--port', String(runtimePort)])
     assert.equal(rt.file, process.execPath)
     // 次序：`--profile` 在 `--patch` **之前**。DSH 的参数解析对这两段的次序敏感
     // （profile 是父命令的参数），而"两段都在命令行里"在次序错了的时候照样成立。
     assert.ok(rt.args.indexOf('--profile') < rt.args.indexOf('--patch'))
+    // ★ 而且 `--patch`（launcher 段）必须在 `--port`（app 段）**之前**：
+    //   DSH 遇到第一个不认识的 token 就停止解析自己的旗标，所以反过来的话
+    //   覆盖层就不再是 launcher 参数了。
+    assert.ok(rt.args.indexOf('--patch') < rt.args.indexOf('--port'),
+      `--patch 落到了 --port 后面，覆盖层变成 app 参数：${JSON.stringify(rt.args)}`)
     await L.stop({ graceMs: 100 })
   })
 

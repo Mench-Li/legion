@@ -107,6 +107,47 @@ export const SCHEMA = defineSchema({
       key: 'readinessTimeoutMs', env: 'LEGION_READINESS_TIMEOUT_MS', type: 'int', default: 30000, min: 1,
       doc: '单进程就绪判据超时（ms）。判据本身在进程清单里，这里只覆盖超时',
     },
+    // ── PRT-253 续批：`product/orchestrator/worker.mjs` 读的两个 hub 坐标 ──
+    //
+    // ★ 这两个键**不在产品配置面上**（它们的值由 Launcher 从 `ports.team-hub`
+    //   派生后注入，见本文档 §processEnv），但 `scan --check` 的判据是
+    //   `SCHEMA.envNames()`，而那是**从 `fields` 推出来的**——
+    //   只写 `foreignEnv` 门禁照样红。实测过：先只加了 `foreignEnv`，
+    //   `scan` 仍然报「未声明 env 键（2）」。
+    //
+    //   于是这里有两条登记说的是两件事，两条都必须真：
+    //     · `fields`     —— 「本模块确实从环境读这个键」（门禁读这一条）
+    //     · `foreignEnv` —— 「这个键归谁拥有、读错了会怎样」（人读这一条）
+    //   把 ownership 理由塞进 `fields` 的 `doc` 会让两种信息混在一处，
+    //   而它们的读者不同：前者是门禁，后者是下一个准备改这里的人。
+    //
+    // `default: ''` 且**不是**必填：空串是一个**合法取值**（未配鉴权的 hub、
+    // 或没有 hub 可问的离线 worker）。把它做成必填会让无鉴权部署起不来，
+    // 而"没配"与"配错了"是两件不同的事。
+    {
+      key: 'teamHubUrl', env: 'TEAM_HUB_URL', type: 'string', default: '',
+      doc: '本进程要问的那个 team-hub 的基地址（由 Launcher 从 ports.team-hub 派生后注入）。'
+        + '取值只在这里被 `product/orchestrator/worker.mjs` 读一次，用来建 `hubIo` 并解析岗位的模型绑定（PRT-502）。'
+        + '空值 ⇒ **不建**那个端口，绝不猜一个默认 8787：猜出来的地址可能指向另一个 hub，'
+        + '而那个 hub 上可能恰好有同名岗位——于是这次运行会用某个没人给这个岗位选过的模型花用户的钱',
+    },
+    // ★ `sensitive: true` **不是**装饰：不标它时 `config check --json` 会把这个值
+    //   原样打进 `processes.product.values.teamHubToken`，而 `config.test.mjs`
+    //   那条"JSON 不得泄漏明文 token"的用例当场抓到了
+    //   （"JSON 泄漏明文 fixture-hub-token"）。
+    //
+    //   它此前不泄漏，只是因为 product 这一侧**从来没有声明过**这个键 ——
+    //   `scan --check` 逼着声明之后，同一个值就多了一条出口。
+    //   这正是「声明一个键」与「声明它的敏感级别」必须一起做的那件事：
+    //   只声明键而不标级别，就是**给一个秘密开了一扇新窗**，而门禁只会因为
+    //   键已声明而变绿。
+    {
+      key: 'teamHubToken', env: 'TEAM_HUB_TOKEN', type: 'string', default: '', sensitive: true,
+      doc: '同一个 `hubIo` 的鉴权令牌（由 Launcher 注入）。空串是合法取值（hub 未开鉴权的部署），'
+        + '所以判据在调用方而不是解析器里——把"没配 token"当成"配置错了"会让无鉴权部署起不来。'
+        + '★ 必须以 `sensitive: true` 声明：否则 `config check --json` 会把值原样打进'
+        + '产品进程的 `values` 里',
+    },
   ],
   // ── 动态下标读取（本批起 `scan --check` 强制登记）────────────────────
   //
@@ -232,6 +273,35 @@ export const SCHEMA = defineSchema({
       owner: 'DeepSeek Harness（DSH）',
       reason: 'DSH 用它定位自己的 $DSH_HOME/.credentials.yaml。Legion **只读**该文件作为凭证回退来源（PRT-509 路线 A′），'
         + '只在 Legion 自己的密钥库里没有那条引用时才去读，结果里带出处；不写它、不迁移、不猜路径',
+    },
+    // PRT-253 续批：`product/orchestrator/worker.mjs` **也**读这两个键
+    // （`workerHubUrl = process.env.TEAM_HUB_URL`、`hubIo({hubToken: process.env.TEAM_HUB_TOKEN})`），
+    // 用来把"模型档案解析端口"接到真正的 hub 上。
+    //
+    // 为什么必须登记在这里，而不是只留在上面的 `CHILD_ENV_NAMES` 里：
+    // 那一份说的是「注入目标的变量名」，注释里明写"本进程从不读它们"。
+    // 现在这句话对**这个文件**不成立了——它虽然是被 Launcher 拉起来的子进程，
+    // 但它属于 `product/`，于是它出现在 product 这一次扫描里。
+    //
+    //   > 一份"注入目标的名字清单"与一份"谁在读它"的清单，
+    //   > 在只有一个读者、而且那个读者恰好就是注入方时是同一个东西。
+    //
+    // 归属写在 team-hub（`TEAM_HUB_URL` 由 Launcher 从 `ports.team-hub`
+    // 派生后注入，见本文档的 processEnv 段），所以它归 `foreignEnv`
+    // 而不是 `fields`——它不是**产品配置项**，而是"这次是哪个 hub"这个事实。
+    {
+      name: 'TEAM_HUB_URL',
+      owner: 'team-hub（由 Launcher 从 ports.team-hub 派生后注入）',
+      reason: '`product/orchestrator/worker.mjs` 用它建 `hubIo`，再据 (scope, role) 解析岗位的模型绑定（PRT-502/253）。'
+        + '★ 没有它时**不建**那个端口（返回 `null`）而不是猜一个默认 8787：'
+        + '猜出来的地址会把模型绑定解析接到**另一个** hub 上，而那个 hub 上可能恰好有同名岗位——'
+        + '于是这次运行会用某个没人给这个岗位选过的模型花用户的钱',
+    },
+    {
+      name: 'TEAM_HUB_TOKEN',
+      owner: 'team-hub（由 Launcher 注入）',
+      reason: '同一个 `hubIo` 的鉴权。空串是**合法**取值（hub 未开鉴权的部署），'
+        + '所以读取点在调用方而不是解析器里——把"没配 token"当成"配置错了"会让无鉴权部署起不来',
     },
     // PRT-257：本进程**也**读它——`product/launcher/cli.mjs` 的
     // `underNodeTestRunner()`。
@@ -662,6 +732,17 @@ export const SCHEMA = defineSchema({
     // 是不同的事实，必须分开——新装机器上每次启动都会碰到它，若归成"未验证"，
     // 那条告警会每次都出现而每次都说得不对（没有文件就没有暴露面）。
     'ACL_NOT_CREATED',
+    // PRT-509 缺口 B1：ACL 的 runner 与 owner 接上生产之后新增的一条诊断码。
+    //
+    // 它单独存在（而不是并进 `SECRETS_CHECK_FAILED`）的理由，正是那条缺口
+    // 得以长期存活的原因：笼统的一句"密钥库自检未完成"会把两件完全不同的事
+    // 说成同一件——
+    //   · **问不出当前用户身份**（环境问题：`whoami` 不在 PATH、被策略拦住）
+    //     → 修法是查环境，而文件其实**没有被加固**；
+    //   · **加固真的失败了**（权限问题：`icacls` 返回非零）
+    //     → 修法是看 icacls 的输出。
+    // 读诊断的人靠这一行才知道该去看哪里。
+    'SECRETS_ACL_OWNER_UNRESOLVED',
     // 密钥库内部码（security/secrets/errors.mjs）经 product/secrets.mjs 转成自检码时被引用。
     'SECRET_STORE_UNPROTECTED', 'SECRET_STORE_UNSUPPORTED_PLATFORM',
     'EACCES', 'EADDRINUSE', 'ECONNREFUSED',
@@ -834,6 +915,43 @@ export const SCHEMA = defineSchema({
     'TRAY_ICON_UNKNOWN_MESSAGE',
     'TRAY_ICON_UNSUPPORTED_PLATFORM',
     'TRAY_ICON_WRITE_REFUSED',
+    // ── PRT-251 续 ④ 旧数据接管（安装目录 → DataDir）的**逐项**诊断码 ──────
+    //
+    // `product/launcher/legacy-data-adoption.mjs` 的 `ADOPTION_CODES` 的值。
+    // 同样是**输出**用的码，不是配置键：进程不"读"它们，而是把逐项结论放进
+    // `launcher.allDiagnostics()` 的 `adoptionDiagnostics` 给用户看。
+    //
+    // ★ 与下面那组 `LEGACY_ADOPTION*` **分开**：那两条是**一次启动一行**的结论，
+    //   这七条是**逐项**的失败原因。合成一套的话，"四个落点里有几个没接成"
+    //   要靠读那行汇总去猜，而"哪一项、为什么没接成"才是要照着修的东西。
+    'ADOPTION_SOURCE_MISSING',
+    'ADOPTION_TARGET_EXISTS',
+    'ADOPTION_SOURCE_UNREADABLE',
+    'ADOPTION_COPY_FAILED',
+    'ADOPTION_VERIFY_FAILED',
+    'ADOPTION_NO_DATA_DIR',
+    'ADOPTION_TARGET_INSIDE_INSTALL',
+
+    // ── PRT-251 续 ④ 接管**结论**（`launcher.adoptLegacyData()`）─────────
+    //
+    // `LEGACY_ADOPTION` 是一行汇总（运维最常问的是"这次启动有没有接管"，
+    // 而它不该靠拼四条逐项记录才能答出来）；`LEGACY_ADOPTION_<STATE>` 由
+    // `LEGACY_ADOPTION_${state.toUpperCase()}` 拼出。
+    //
+    // ★ `RUNNING` 是**结论还没算出来**那一刻的替身：日志回调在 `runLegacyAdoption()`
+    //   运行**期间**就在跑，而那时 `state` 还不存在。它不是 `ADOPTION_STATES`
+    //   的成员，正是因为它表达的是"还没有状态"——把它登记成状态之一，
+    //   会让"跑着呢"与"跑完了、结果是这个"在读数上同形。
+    'LEGACY_ADOPTION',
+    'RUNNING',
+
+    // ── PRT-251 续：`ports.runtime` 的**权威冲突**（阻塞启动）─────────────
+    //
+    // `product/process-manifest.mjs` 在 `runtime.command` 自带的 argv 里已经含
+    // `--port` 时产出它。名字是 SCREAMING_SNAKE，但它不是 env 键：
+    // 它是一条 **error 级诊断**的码，产品靠它决定"这次启动不许继续"。
+    'PORT_AUTHORITY_CONFLICT',
+
     // `product/launcher/tray-wiring.mjs` 的 `iconNoticeOf()` 在一份探测读数
     // 连 `code` 都没有时的兜底文案。它不是诊断码，是一个**占位**——
     // 一个说不出是哪种原因的读数也必须能印出来，而不是印出 `undefined`。

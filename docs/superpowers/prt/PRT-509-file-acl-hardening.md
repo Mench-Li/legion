@@ -170,11 +170,21 @@ C:\Users\11150\AppData\Local\Temp\f.json Amench\CodexSandboxUsers:(I)(M)
 
 ## 8. 未交付
 
-- **还没有接到启动路径上。** `inspectFileAcl` / `hardenFileAcl` 已从
-  `security/secrets/index.mjs` 出口，但**没有一处启动代码调用它们**。
-  也就是说：今天没有人会因为密钥库文件权限过宽而被拦下。
-  这与本批反复出现的"尚无生产调用方"是同一类缺口，
-  真正的接线位置是 PRT-253/254（Runtime 启动与适配器装配）。
+> **已关闭的两条（2026-09-17 续批）**：
+> · 第 1 条「还没有接到启动路径上」已由**缺口 B1** 关闭
+>   （`product/launcher/secrets-acl-runner.mjs`：真 runner + 真 owner 接进 Launcher，
+>   12 例含三条真 `whoami` / 真 `icacls`）。
+> · 新增关闭**缺口 B2**：`product/secrets.mjs` 的 `inspectSecretsAcl` 曾是
+>   **死代码**（定义在、零调用方），因为它比调用点少 `owner` / `exists`
+>   两个参数，于是 `openProductSecrets` 自己内联了两次 `inspectFileAcl`。
+>   现在它是**唯一**的读取点，两次读数（加固前 ④ / 加固后 ④′）都走它。
+>   判据见 `product/secrets.test.mjs` 用例 ⑧（1 条结构级 + 2 条行为级，
+>   两条行为级都做过变异验证）。详见 `PRT-PROGRESS.md` 的 B2 条目。
+
+- ~~**还没有接到启动路径上。**~~（已由缺口 B1 关闭，见上）
+  `inspectFileAcl` / `hardenFileAcl` 已从
+  `security/secrets/index.mjs` 出口，且 Launcher 的启动自检会调用它们。
+  也就是说：今天**会**因为密钥库文件权限过宽而被拦下。
 - **`fileBackend` 自己不检查权限。** 它只负责读写文件；ACL 是外挂的一步。
   更彻底的写法是 `fileBackend` 在**创建**文件时就带上正确的 ACL
   （而不是创建完之后再去收紧）——后者之间有一个短暂窗口，文件是宽权限的。

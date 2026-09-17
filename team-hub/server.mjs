@@ -159,6 +159,64 @@ import {
 // "接口说有下一岗位、交接时却按链尾收口"这种不一致。
 import { resolveNextPost } from '../orchestrator/pipeline/index.mjs'
 import { columnExists as columnExistsImpl, ensureColumn as ensureColumnImpl } from './schema-util.mjs'
+import { createEventDeliveryStore } from './event-delivery.mjs'
+import {
+  AUTOMATION_ERRORS,
+  createAutomationStore,
+  ensureAutomationSchema,
+  projectOccurrences,
+} from './automation-store.mjs'
+import { createCompactionStore, ensureCompactionSchema } from './compaction-store.mjs'
+import {
+  appendExperienceRecord,
+  draftCounts,
+  ensureExperienceSchema,
+  experienceAccount,
+  experienceRecords,
+  exportExperience,
+  settleDraft,
+} from './experience-store.mjs'
+import {
+  appendIncident,
+  connectorCounts,
+  connectorIncidents,
+  connectorRegistrations,
+  ensureConnectorSchema,
+  exportConnectors,
+  freezeDeclaration,
+  getDeclaration,
+} from './connector-store.mjs'
+import {
+  ROLE_PACK_STORE_ERRORS,
+  ensureRolePackSchema,
+  exportRolePacks,
+  freezeRolePack,
+  getRolePack,
+  listRolePacks,
+  rolePackCounts,
+} from './role-pack-store.mjs'
+import {
+  DECISION_SOURCES,
+  SOURCE_DECISIONS,
+  SOURCE_REPAIR_ACTIONS,
+  TOOL_CALL_TABLE,
+  countBySource,
+  ensureToolCallSchema,
+  explainRejection,
+  readToolCall,
+  toolCallIdempotencyKey,
+  toolCallLogEvidence,
+} from './tool-call-log.mjs'
+import {
+  PACK_FACT_ERRORS,
+  appendPackFact,
+  ensurePackFactSchema,
+  exportPackFacts,
+  packAccount,
+  packFactCounts,
+  packFacts,
+} from './pack-facts.mjs'
+import { ROLLUP_DIMENSIONS, rollupBy, usageTotals } from './usage-rollup.mjs'
 import { loadConfig } from '../packages/shared/src/config.mjs'
 import { SCHEMA as CONFIG_SCHEMA } from './config-schema.mjs'
 
@@ -395,6 +453,212 @@ const runStore = createRunStore({
     }
   },
 })
+
+/**
+ * F-16 自动化计划仓储（MULTI-AGENT-FEATURE-OPTIMIZATION.md §4.4）。
+ *
+ * 与 `runStore` 同一个库、同一个连接，理由也同一个：物化一次运行会去建
+ * 任务/Attempt（或至少要在同一个事务域里推进"计划的 next"），
+ * 分成两个库就不可能做到"一条计划在同一时刻只物化一次"。
+ *
+ * 本对象只**持有**仓储。真正的调度 tick 与 HTTP 路由在下面各自的段落里，
+ * 因为"什么时候该 tick"是进程生命周期的事，不是仓储语义的事。
+ */
+const automationStore = (() => {
+  // 建表**显式**放在这里，不像 `runStore` 那样藏在构造函数里：
+  // 自动化那两张表有一条 `UNIQUE(schedule_id, planned_at_ms)` 与三条
+  // 老库补列，而"表在不在"是排查"为什么物化不生效"时的第一个问题。
+  // 显式一行让它在这份文件里可 grep 到。
+  ensureAutomationSchema(db)
+  return createAutomationStore({ db })
+})()
+
+/**
+ * F-16 调度 tick 的**唯一**实现，供 HTTP 路由（显式 `POST /api/automation/tick`）
+ * 与 `isMain` 下的定时器共用。
+ *
+ * 为什么两处共用一个函数而不是各写一遍：定时器那条路**在生产上没人看着**，
+ * 而路由那条路是有人在测的。两份实现里的任何一处漂移（比如定时器那份忘了
+ * 传 `scope`）都会表现为"手动 tick 是对的、自动 tick 是错的"，
+ * 而后者只在生产上发生。
+ *
+ * **不抛**：一个把整个 team-hub 主循环带死的调度 tick，比"这一次没物化"
+ * 坏得多——而"这一次没物化"是下一轮 tick 会自己修好的。
+ */
+/**
+ * 到点的计划 → 物化运行 → **可领取的任务**。
+ *
+ * 这是 `wired:false` 的收口。在此之前本函数返回
+ * `{ wired: false, note: '……需要计划→目标的映射（未接线）' }`：它建出了
+ * `scheduled` 状态的运行行，而没有任何东西会去跑它们。那个读数是对的，
+ * 但一个"记录了一堆没人执行的运行"的日历，与一个真正的调度器，
+ * 在运行历史里长得一样——都是每天一行。
+ *
+ * 现在补上那一步，方法有两条**都要守住**的纪律：
+ *
+ * ① **物化与建任务是两步，且各自幂等**。
+ *    `materializeDue()` 靠 `UNIQUE(schedule_id, planned_at_ms)` 幂等；
+ *    建任务靠 `bindTask` 的 CAS（`WHERE task_id IS NULL`）幂等。
+ *    把两步合成一个事务会让"任务建好了但运行行没写上"变成一个
+ *    无法自愈的状态；分开之后，下一轮 tick 会看到那条运行仍然
+ *    `task_id IS NULL` 并把它补上。
+ *
+ * ② **一条计划没配 payload 时就只物化、不建任务**，且这不是错误。
+ *    纯提醒型的计划是合法用法。**绝不**建一个标题为空的占位任务：
+ *    那会让 worker 领到一张写着"要做点什么"的卡——而它只能靠猜。
+ *
+ * ★ 建任务走 `createTask()`（`server.mjs` 里那个**唯一**的对外入口），
+ *   不自己拼 INSERT。任务的验收标准、目标归属、状态词表校验都在那里；
+ *   绕过它去写 `tasks` 表就是让第二份校验规则开始漂移。
+ */
+function automationTick({ scope = null, nowMs = null, limit = null } = {}) {
+  try {
+    const r = automationStore.materializeDue({
+      scope,
+      nowMs,
+      ...(Number.isSafeInteger(limit) && limit > 0 ? { limit: Math.min(limit, 2000) } : {}),
+    })
+    if (r.ok !== true) return { ...r, wired: true, tasksCreated: 0, taskErrors: [] }
+
+    let tasksCreated = 0
+    const taskErrors = []
+    // 只处理**刚物化出来**的那些（`action === 'materialized'`）。
+    // 不去扫全表补建历史遗留：那会让一次 tick 顺手建出几百张卡，
+    // 而那些卡对应的运行可能早就过期了。
+    for (const item of r.results ?? []) {
+      if (item.action !== 'materialized' || item.runId === undefined) continue
+      const run = automationStore.runOf(item.runId)
+      if (run === null || run.taskId !== null) continue
+      const sched = automationStore.scheduleOf(run.scheduleId)
+      const payload = sched?.payload ?? null
+      if (payload === null) continue   // 纯提醒型计划：只物化，不建任务
+      try {
+        // scope 取**计划的 scope**，不取调用方传的：一条计划属于哪个空间
+        // 在它被创建时就定了，而 tick 的 scope 只是"这一轮扫哪些空间"。
+        const task = createTask({
+          title: payload.title,
+          description: payload.description ?? '',
+          role: payload.role ?? null,
+          priority: payload.priority ?? 'medium',
+          status: 'todo',
+          scope: sched.scope,
+          goalId: payload.goalId ?? null,
+        })
+        const b = automationStore.bindTask(item.runId, task.id)
+        if (b.bound === true) tasksCreated += 1
+        else {
+          // 没绑上：要么并发已经绑了（不是错误，报出来即可），
+          // 要么 CAS 抢输了。两种情况都要让调用方看得见——
+          // 静默当作成功会让"这条运行永远不会被执行"没有任何痕迹。
+          taskErrors.push({ runId: item.runId, taskId: task.id, code: 'BIND_NOT_APPLIED', reason: b.reason })
+        }
+      } catch (e) {
+        // ★ 建任务失败**不中断整轮 tick**：一个坏 payload 不该让
+        //   这一批里其它计划全部不物化。逐条记账，下一轮会重试。
+        taskErrors.push({
+          runId: item.runId,
+          code: e?.code ?? 'SCHEDULE_TASK_CREATE_FAILED',
+          error: e instanceof Error ? e.message : String(e),
+        })
+      }
+    }
+    return {
+      ...r,
+      // ★ `wired: true` 的含义是"物化出来的运行**有机会**被执行"，
+      //   不是"它们都跑起来了"。真正的执行仍要 worker 去认领那些任务。
+      wired: true,
+      tasksCreated,
+      taskErrors,
+      note: r.results?.some((x) => x.action === 'materialized')
+        ? '物化的运行已按计划的任务模板建出可领取任务'
+        : '本轮没有物化出新运行',
+    }
+  } catch (e) {
+    return { ok: false, atMs: nowMs ?? Date.now(), code: e?.code ?? 'AUTOMATION_TICK_FAILED', error: e instanceof Error ? e.message : String(e), results: [] }
+  }
+}
+
+/**
+ * F-17 长会话压缩仓储（§4.3「不可变原文 + 版本化摘要 + 引用回原文」）。
+ *
+ * 与 `contextStore` 的分工（这一条决定了它不能合并进那一个）：
+ * `context-store` 存的是**一次 Run 的上下文快照**（按 attemptId 定位、
+ * 不可变、带哈希）；本对象存的是**一段会话的压缩产物**（按 session 定位、
+ * 有版本、原文永久保留）。合成一个会让"压缩把快照改了"变成可能——
+ * 而快照的第一条纪律就是不可变。
+ */
+const compactionStore = (() => {
+  ensureCompactionSchema(db)
+  return createCompactionStore({ db })
+})()
+
+/**
+ * 能力包安装事实（F-20 缺口③，spec §4.4）。
+ *
+ * 这张表存的是 `runtime/packs/store.mjs` 产出的**记录**，不是"当前装了什么"。
+ * 那一层已经定下"记录是唯一的账、`stateOf()` 是账的推导"，所以控制面这边
+ * 再存一份推导结果就会有两份真相——而它们漂移的那一天，
+ * "账上写着装了、表上写着没装"没有任何东西能判定谁对。
+ *
+ * 于是这里只做两件事：**追加**记录，以及**把整本账交出去**
+ * （`packAccount()` 的形态就是 `createPackStore({ history })` 认的那个）。
+ * 推导只有一处实现。
+ */
+ensurePackFactSchema(db)
+
+/**
+ * F-19：冻结的岗位包。
+ *
+ * 主键 `(scope, role_pack_id, version)` —— **多版本共存**是"冻结"的全部含义。
+ * 它与 `employee_manifests`（主键 `(scope, role)`、就地更新、"这个岗位**现在**
+ * 是什么"）是两张表，因为"现在是什么"与"当时是哪一版"是两个问题：
+ * 把后者塞进前者，第二次修改就会把第一次的答案覆盖掉。
+ */
+ensureRolePackSchema(db)
+
+/**
+ * F-18：经验图谱 / 摩擦学习。
+ *
+ * 一本**只追加**的记录流（`experience_records`），事件种类封闭：
+ * node / edge / retract / draft / promote / discard。
+ * "图现在长什么样"与"这条草稿现在是什么状态"都是它的**推导**——
+ * 所以这张表没有 UPDATE 路径，也没有"保存整张图"的接口。
+ */
+ensureExperienceSchema(db)
+
+/**
+ * F-21 连接器登记表。
+ *
+ * 两张表，都是**只追加**：`connector_registrations`（按内容哈希冻结的声明）
+ * 与 `connector_incidents`（点名的熔断事件）。
+ *
+ * ★ 这里**不**去 import 执行面的 `runtime/connectors/registry.mjs` 来校验：
+ * 单向产品边界不允许，而且"放不放过去"是执行面的判断——
+ * 控制面只负责记住"当时声明的是什么"。
+ * 两边的词表由 `connector-store.test.mjs` 用例①**从执行面源码里抽出来**
+ * 逐字比对钉住（再抄一遍互相核对时，两边一起写错它全绿）。
+ */
+ensureConnectorSchema(db)
+
+/**
+ * PRT-610 工具调用账（`tool_calls`）。
+ *
+ * ★★ 这张表此前**从来没有在生产进程里被建起来过**：`ensureToolCallSchema` 写得很完整
+ * （表 + 4 个索引 + 三个写入函数 + 两个状态机守卫），`release-gate.mjs` 也早就有一项
+ * 就绪判据在等它（`decisionSourceRecorded`），而 `server.mjs` 这里**一行都不调**——
+ * 全仓对 `tool_calls` 的引用只有注释与用例。
+ *
+ *   > 一个「模块写好了、判据也留好了」的表，
+ *   > 与一个「从来没有被 CREATE 过」的表，在"决定来源有没有被记录"上是同一个东西——
+ *   > 只不过前者的证据看起来更充分。
+ *
+ * 而且它的创建位置**本身就是一条判据**：表只在这里建 ⇒ 没有别的模块能先在
+ * 别处建一张同名的、少几列的表，让这三条索引与那三个写入函数悄悄对不上。
+ *
+ * ⚠️ 这里只建表，**不**在这里写记录：写入方是执行面（它才知道一次调用被谁拦下）。
+ * 本进程负责的是"这笔账有地方可记、且有 HTTP 面能读"（见下面的 `/api/tool-calls*`）。
+ */
+ensureToolCallSchema(db)
 
 /**
  * 模型档案仓储（PRT-501，spec §6.6）。
@@ -654,6 +918,19 @@ const budgetLedger = createBudgetLedger({
 })
 
 /**
+ * F-15 用量汇总（§4.4）。
+ *
+ * 与账本**共用同一个库**但**不共用闸门**：`budgetLedger` 是"能不能花"，
+ * 本模块是"花了多少、花在哪"。两者刻意不合并——闸门的判据必须是
+ * "当下这一笔"，而报表的判据是"到现在为止的全部"。
+ * 把报表接进闸门，会让一次全表统计出现在每一次预留的热路径上；
+ * 把闸门接进报表，会让"读一下总额"变成一次可能被拒绝的写。
+ *
+ * 只读：本模块没有任何写路径（它读 `usage_records` 与 `run_attempts`）。
+ */
+const usageRollup = Object.freeze({ rollupBy, usageTotals })
+
+/**
  * 运行面路由的公共外壳。
  *
  * 不复用 `handleWrite`：那条路径要求 `by`（看板成员），而运行面的主体是 **worker**，
@@ -699,6 +976,10 @@ async function handleRun(req, res, run) {
       // 别处"具名码原样交给调用方"的口径不一致，而且一旦措辞改了，调用方的
       // 判断会**静默失效**——它不报错，只是永远匹配不上。
       missing: e?.missing ?? null,
+      // F-18：草稿"已经处置过"时必须带上**现状**（状态 + 谁 + 什么理由）。
+      // 不带的话调用方只能再查一次，而两步之间那条草稿的状态可能已经变了
+      // ——于是它据此做的判断是在回答一个过期的问题。
+      currentSettlement: e?.currentSettlement ?? null,
       currentEpoch: e?.currentEpoch,
       currentWorkerId: e?.currentWorkerId,
       leaseExpiresAtMs: e?.leaseExpiresAtMs,
@@ -4181,6 +4462,104 @@ function inboxCount({ role, soldier, scope }) {
 // ── SSE ──
 const eventClients = new Set()
 
+// ============================================================================
+// F-05 投递状态机（`team-hub/event-delivery.mjs`）
+//
+// 改动前这里只有 `eventClients` 一个内存 Set 与下面那句静默 `continue`：
+//
+//     if (client.scope === undefined || client.scope === entry.scope) writeEventFrame(client.res, entry)
+//
+// 两个出口没有记录：① scope 不匹配（一个 `continue`）；② `res.write` 失败
+// （返回值被丢掉，异常被事件循环吞掉）。**"发不出去也不说"与"从没打算发"
+// 在"用户有没有看到"上是同一个东西。**
+//
+// 现在每一次投递都落一行可查的状态。两条纪律决定了下面对 `broadcastAudit` 的改写：
+//
+//   · **记账不许拖垮广播**。SSE 是热路径，而投递记账要写库。所以整段包在
+//     一次 `withTx` 里（一次事务，不是每条事件一次），并且**任何异常都不许
+//     冒泡到 `audit()`**——审计是业务操作的诊断，不是它的前置条件。
+//     但失败**要被数出来**（`deliveryBookkeepingFailures`），不能静默。
+//   · **拆不开的两种情况要拆开**。投递失败 = `markFailed`（可重试）；
+//     取走被拒 = 两个投递者抢同一行（CAS 让一个赢），**不是失败**，
+//     所以不记 `failed`——记了会把"正常并发"读成"投递坏了"。
+// ============================================================================
+const deliveryStore = createEventDeliveryStore({ db, clock: () => Date.now() })
+/** 记账本身失败的次数。它**不**进审计、不抛错，但必须在 `/api/config` 上看得见。 */
+let deliveryBookkeepingFailures = 0
+
+/**
+ * 订阅者的稳定身份。
+ *
+ * 一个订阅者 = 一个 `(scope, kind, clientId)` 三元组。`clientId` 由前端生成并
+ * 存在 localStorage 里（与它已经存着的游标成对），**不**用连接序号——
+ * 刷新页面必须仍是同一个订阅者，否则游标永远从 0 开始，整段历史每次重连都重投。
+ *
+ * 三项都缺失（比如 `curl` 直接连）时退化成 `anonymous:<连接序号>`：
+ * 一个不声称自己是谁的连接**不该**冒用别人的游标，那会让真正的那个订阅者
+ * 的游标被一次匿名连接带偏。
+ */
+let anonymousSeq = 0
+function subscriberIdFor({ clientId, kind, scope }) {
+  const k = typeof kind === 'string' && kind.trim() !== '' ? kind.trim() : 'anonymous'
+  const c = typeof clientId === 'string' && clientId.trim() !== '' ? clientId.trim() : null
+  if (c === null) {
+    anonymousSeq += 1
+    return `anonymous:${k}:${anonymousSeq}`
+  }
+  // scope 进 id：同一个浏览器在两个 scope 页签里是**两个订阅者**，
+  // 各有自己的游标（它们的可见集合不同，合成一个会让另一边的洞把它卡住）。
+  return `${k}:${scope === undefined ? '*' : scope}:${c}`
+}
+
+/** 把一个 SSE 连接登记进投递仓储。**登记失败不阻止连接**（只读面必须继续可用）。 */
+function registerEventClient(client) {
+  try {
+    deliveryStore.registerSubscriber({ subscriberId: client.subscriberId, kind: client.kind, scope: client.scope ?? null })
+  } catch {
+    deliveryBookkeepingFailures += 1
+  }
+}
+
+/**
+ * F-05 前半：把终态请求里带来的一次 Run 事件明细**尽力**落库。
+ *
+ * ## 为什么是"尽力"，以及为什么这个措辞**不等于**静默
+ *
+ * 明细是**复盘材料**，不是状态迁移的证据。它写失败时唯一正确的处置是
+ * **让终态照常成立**并把失败如实带出来：
+ *
+ *   · 让它回滚终态 → 一次真实的运行结果因为一段日志没写成而作废，
+ *     接着会被重试——而重试是**真的再花一次钱、再写一次外部系统**。
+ *     这个方向本仓反复禁止。
+ *   · 静默吞掉 → "明细写失败了"与"这次运行没有明细"长得一样，
+ *     而后者是完全正常的（更老的 worker 不上报 `runEvents`）。
+ *
+ * 所以：**不抛错、不改判定，但把读数放进返回值**。三态分得开：
+ *   · `null`  —— 这次请求**没有**带明细（老调用方 / 非终态路径），不是失败；
+ *   · `{ok:false, code}` —— 带了但没写成，带具名原因；
+ *   · `{ok:true, written, …}` —— 写成功。
+ */
+function recordRunEventsBestEffort({ attemptId, context, leaseEpoch }) {
+  const raw = context && typeof context === 'object' ? context.runEvents : null
+  if (!Array.isArray(raw)) return null
+  try {
+    // `known` 由**仓储**按契约判定（`run-store.mjs` 的 `isKnownEventType`）。
+    // 这里**不**再判一次：两处都判，就会有两份会漂移的名单，而漂移的表现是
+    // "新事件被标成未知"或"未知被标成已知"——两者都不会报错。
+    const events = raw.map((e) => ({ seq: e?.seq, type: e?.type, event: e?.event ?? e }))
+    const r = runStore.recordRunEvents({ attemptId, events, leaseEpoch: leaseEpoch ?? null })
+    return { ok: true, ...r, truncated: context.runEventsTruncated === true }
+  } catch (e) {
+    return {
+      ok: false,
+      code: 'RUN_EVENTS_NOT_RECORDED',
+      error: e instanceof Error ? e.message : String(e),
+      // 条数照样报出来：调用方要能判断"丢了多少"。
+      offered: raw.length,
+    }
+  }
+}
+
 function parseEventScope(raw) {
   if (raw === null || raw === undefined) return undefined
   const scope = String(raw).trim()
@@ -4211,15 +4590,90 @@ function auditEvent(r) {
   return { seq, ts, scope, event: action, action, taskId, member: r.member, goalId, id: seq, payload: detail, detail }
 }
 
-/** 推一条完整 SSE data 帧：id: 行（seq，供 EventSource Last-Event-ID 断线续传）+ data JSON。 */
+/**
+ * 推一条完整 SSE data 帧：id: 行（seq，供 EventSource Last-Event-ID 断线续传）+ data JSON。
+ *
+ * 返回值是**这次写有没有被接受**——`res.write` 返回 `false` 表示内核缓冲区已满
+ * （背压），那不是失败但也**不是"已经发出去了"**；`res.destroyed` / 抛错才是失败。
+ * 调用方按这个布尔决定记 `delivered` 还是 `failed`。
+ *
+ * 改动前这个函数的返回值被整个丢掉，于是**浏览器已经走了、连接被 RST、
+ * 缓冲区撑爆……一律表现为"发过了"**。
+ */
 function writeEventFrame(res, entry) {
-  res.write(`id: ${entry.seq}\n`)
-  res.write(`data: ${JSON.stringify(entry)}\n\n`)
+  try {
+    if (res.destroyed === true || res.writableEnded === true) return { ok: false, reason: 'socket-closed' }
+    res.write(`id: ${entry.seq}\n`)
+    const accepted = res.write(`data: ${JSON.stringify(entry)}\n\n`)
+    // `accepted === false` 只是背压，字节已经进了内核缓冲 —— 记成**成功**但把
+    // 背压信号带出去，让调用方能在诊断页看到"这个订阅者在被推着走"。
+    return { ok: true, backpressure: accepted === false }
+  } catch (e) {
+    return { ok: false, reason: e instanceof Error ? e.message : String(e) }
+  }
 }
 
+/**
+ * 广播一条审计事件，并**为每个订阅者落一行投递状态**。
+ *
+ * 三种结局各自有出口，一个都不静默：
+ *   · 不匹配该订阅者   → `suppressed` + 原因 `'scope-mismatch'`（由 `plan()` 落）；
+ *   · 写了至少一个 socket → `delivered`（带 `fanout` = 真实写过的连接数）；
+ *   · 一个都没写成功   → `failed` + 具体错误（`markFailed` 不推进游标，所以可重试）。
+ *
+ * 整段包一次 `withTx`：**一次事件一个事务**，不是每个订阅者一个。
+ * 异常绝不冒泡到 `audit()`——但被数进 `deliveryBookkeepingFailures`。
+ */
 function broadcastAudit(entry) {
+  if (eventClients.size === 0) return
+  // 按订阅者分组：同一订阅者可能有多个活连接（多个标签页）。
+  const bySubscriber = new Map()
   for (const client of eventClients) {
-    if (client.scope === undefined || client.scope === entry.scope) writeEventFrame(client.res, entry)
+    const s = bySubscriber.get(client.subscriberId)
+    if (s === undefined) bySubscriber.set(client.subscriberId, [client])
+    else s.push(client)
+  }
+  const subscriberIds = [...bySubscriber.keys()]
+  try {
+    withTx(() => {
+      // ① 落投递意图。scope 不匹配的在这里变成 `suppressed` + 原因。
+      for (const sid of subscriberIds) {
+        const client = bySubscriber.get(sid)[0]
+        deliveryStore.plan({
+          subscriberId: sid,
+          events: [{ seq: entry.seq, scope: entry.scope ?? null, event: entry.event }],
+        })
+        void client
+      }
+      // ② 取走（CAS）。抢不到的那一个**不是失败** —— 另一个投递者正在做同一件事。
+      for (const sid of subscriberIds) {
+        const taken = deliveryStore.takeUp({ subscriberId: sid, seqs: [entry.seq] })
+        if (taken.claimed.length === 0) {
+          // 已经被别的路径投过了，或者这一行是 suppressed（终态）。
+          continue
+        }
+        // ③ 真的写。
+        let fanout = 0
+        let lastError = null
+        for (const client of bySubscriber.get(sid)) {
+          const r = writeEventFrame(client.res, entry)
+          if (r.ok === true) fanout += 1
+          else lastError = r.reason
+        }
+        if (fanout > 0) {
+          deliveryStore.markDelivered({ subscriberId: sid, seqs: [entry.seq], fanout })
+        } else {
+          deliveryStore.markFailed({
+            subscriberId: sid,
+            seqs: [entry.seq],
+            error: lastError ?? '所有连接都写失败（没有可用的 socket）',
+          })
+        }
+      }
+    })
+  } catch {
+    // 记账失败**不许**影响审计与分析。数出来，让它在 `/api/config` 上可见。
+    deliveryBookkeepingFailures += 1
   }
 }
 
@@ -4303,6 +4757,24 @@ function requireString(body, field) {
     throw Object.assign(new Error(`缺少参数 ${field}`), { code: 'MISSING_PARAM', statusCode: 400 })
   }
   return v.trim()
+}
+
+/**
+ * 可选的整数查询参数。**读不出来时返回 `null`，而不是 0**。
+ *
+ * 为什么必须分开：时间窗与上限这类参数的 `0` 是一个**合法且极端**的取值
+ * （`sinceMs=0` 是"从纪元开始"，`limit=0` 是"一条都不要"）。
+ * 把 `?sinceMs=abc` 或缺失都折叠成 `0`，会让"我没传这个参数"
+ * 变成"我要看全部历史"——而那是一次可能扫全表的查询。
+ *
+ * 非法值同样返回 `null`（=不设限），理由与仓库里其它读入口一致：
+ * 一个拼错的参数名不该让请求失败，但更不该被当成一个**别的**取值。
+ */
+function optionalIntParam(url, name) {
+  const raw = url.searchParams.get(name)
+  if (raw === null || raw.trim() === '') return null
+  const n = Number(raw)
+  return Number.isSafeInteger(n) ? n : null
 }
 
 async function handleWrite(req, res, run) {
@@ -4632,8 +5104,24 @@ async function handle(req, res, stripPrefix) {
     }
     if (req.method === 'POST' && path === '/api/runtime/transition') {
       await handleRun(req, res, (body) => {
+        const attemptId = requireString(body, 'attemptId')
+        // F-05 前半：终态迁移与事件明细**同一个请求**。
+        //
+        // ★ 顺序是**明细先写、迁移后做**，这个顺序是实质的：
+        //   明细带 `leaseEpoch`，而迁移会把 epoch 推进（终态之后这条租约就不再有效）。
+        //   反过来写在失败路径上是**必然**的：`failAndRetry` 会推进 epoch，
+        //   于是"用同一个 epoch 写明细"会被 epoch 闸门拒掉——
+        //   而那个拒绝看起来像"明细功能坏了"，实际是"探针/顺序错了"。
+        //
+        //   明细属于**这次运行**，所以它必须用**这次运行**的 epoch 去写。
+        //
+        // 它**不**参与迁移判定：明细写失败不该让一次已经成功的终态回滚——
+        // 那会把"复盘材料缺了一点"升级成"这次运行的结果不成立"，
+        // 接着会被重试（真的再花一次钱）。方向是反的。
+        // 但失败**要被看见**：读数放进返回值。
+        const evOutcome = recordRunEventsBestEffort({ attemptId, context: body.context, leaseEpoch: body.leaseEpoch })
         const r = runStore.transition({
-          attemptId: requireString(body, 'attemptId'),
+          attemptId,
           leaseEpoch: body.leaseEpoch,
           workerId: body.workerId,
           to: body.to ?? null,
@@ -4645,7 +5133,9 @@ async function handle(req, res, stripPrefix) {
         // 状态迁移后可能收尾目标链（与看板 /api/transition 的行为对齐，
         // 否则运行面完成的任务与看板完成的任务对目标的结算不一致）
         try { settleGoalsOfScope(getTask(r.attempt.taskId).scope) } catch { /* 任务不存在时不结算 */ }
-        return r
+        // ★ 键**恒在**（没带明细时是 `null`）：`undefined` 在 JSON 里会被丢掉，
+        //   于是"这次请求没带明细"与"这个字段还没上线"在响应上长得一样。
+        return { ...r, runEvents: evOutcome }
       })
       return
     }
@@ -4691,8 +5181,22 @@ async function handle(req, res, stripPrefix) {
       // 漏掉第二步的后果是任务永远停在 RetryableFailure——它既没有可领的队列，
       // 也不在等人工列表里，从任何界面看都只是"失败了"，而没有人会去处理它。
       await handleRun(req, res, (body) => {
+        const attemptId = requireString(body, 'attemptId')
+        // F-05 前半：**失败路径的明细最要紧**——"它在炸之前做了什么"。
+        //
+        // ★ 必须先于 `failAndRetry` 写：那一步会推进 `lease_epoch`，
+        //   而明细用**这次运行**的 epoch 写。反过来写会被 epoch 闸门拒掉，
+        //   而那个拒绝看起来像"明细功能坏了"。
+        //
+        // 明细放在 body 顶层（不是 `context` 里）：`fail` 与 `transition`
+        // 的 body 形状本就不同，让两处共用一个嵌套键只会诱使下一个调用方去猜。
+        const evOutcome = recordRunEventsBestEffort({
+          attemptId,
+          context: { runEvents: body.runEvents, runEventsTruncated: body.runEventsTruncated },
+          leaseEpoch: body.leaseEpoch ?? null,
+        })
         const r = runStore.failAndRetry({
-          attemptId: requireString(body, 'attemptId'),
+          attemptId,
           leaseEpoch: body.leaseEpoch ?? null,
           actor: requireString(body, 'workerId'),
           failureCode: body.failureCode ?? null,
@@ -4707,7 +5211,8 @@ async function handle(req, res, stripPrefix) {
           nowMs: body.nowMs ?? null,
         })
         try { settleGoalsOfScope(getTask(r.attempt.taskId).scope) } catch { /* 任务不存在时不结算 */ }
-        return r
+        // 与 `transition` 同形：键恒在。
+        return { ...r, runEvents: evOutcome }
       })
       return
     }
@@ -6121,6 +6626,789 @@ async function handle(req, res, stripPrefix) {
       const attemptId = url.searchParams.get('attemptId')
       if (attemptId === null || attemptId.length === 0) { json(res, 400, { ok: false, error: '缺少 attemptId', code: 'MISSING_PARAM' }); return }
       json(res, 200, { ok: true, attemptId, runResults: runStore.runResultsOf(attemptId), serverTimeMs: Date.now() })
+      return
+    }
+    if (req.method === 'GET' && path === '/api/runtime/run-events') {
+      // F-05 前半的读面：**运行明细**（13 种 RunEvent，按契约序号升序）。
+      //
+      // 这条路由存在的理由与 `/api/runtime/run-results` 完全相同，只是粒度更细：
+      // `run_results` 回答"这次运行**结局**是什么"，`run_events` 回答
+      // "这次运行**过程**里发生了什么"——用了哪个模型、请求了哪些工具、
+      // 工具是成了还是败了、模型说了什么。
+      //
+      // 两条只读参数：
+      //   · `type`  —— 只看某一类（"这次调了哪些工具"用 `tool.requested`）；
+      //   · `counts=1` —— 只要按类型的计数（13 种事件逐个数），不要正文。
+      //
+      // `known` 必须透出去：`known: false` 的行说明**上游产生了一种本控制面
+      // 不认识的事件**。那是一个要被看见的信号；过滤掉它会让"上游新增了事件
+      // 但我们不记"与"上游什么都没产生"长得一样。
+      const attemptId = url.searchParams.get('attemptId')
+      if (attemptId === null || attemptId.length === 0) { json(res, 400, { ok: false, error: '缺少 attemptId', code: 'MISSING_PARAM' }); return }
+      if (url.searchParams.get('counts') === '1') {
+        json(res, 200, { ok: true, ...runStore.runEventCountsOf(attemptId), serverTimeMs: Date.now() })
+        return
+      }
+      const type = url.searchParams.get('type')
+      const limitRaw = url.searchParams.get('limit')
+      json(res, 200, {
+        ok: true,
+        attemptId,
+        events: runStore.runEventsOf(attemptId, {
+          type: type === null || type.length === 0 ? null : type,
+          limit: limitRaw === null ? 1000 : Number(limitRaw),
+        }),
+        serverTimeMs: Date.now(),
+      })
+      return
+    }
+    // ── F-16 自动化计划 / 运行历史 ──────────────────────────────────────
+    //
+    // 五条路由，刻意把**写**与**投影**分开：
+    //   · `GET  /api/automation/calendar`  纯投影，不写任何行（"日历只做投影"）
+    //   · `GET  /api/automation/schedules` 计划清单
+    //   · `POST /api/automation/schedules` 建计划
+    //   · `POST /api/automation/schedules/update` 改计划（含启停）
+    //   · `POST /api/automation/tick`      显式物化（与生产定时器共用同一个函数）
+    //   · `GET  /api/automation/runs`      运行历史
+    //   · `GET  /api/automation/summary`   汇总
+    if (path === '/api/automation/summary' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const scope = url.searchParams.get('scope')
+      json(res, 200, { ok: true, ...automationStore.summary({ scope: scope !== null && scope.length > 0 ? scope : null }) })
+      return
+    }
+    if (path === '/api/automation/schedules' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const scope = url.searchParams.get('scope')
+      const enabledRaw = url.searchParams.get('enabled')
+      const limitRaw = url.searchParams.get('limit')
+      json(res, 200, {
+        ok: true,
+        schedules: automationStore.listSchedules({
+          scope: scope !== null && scope.length > 0 ? scope : null,
+          enabled: enabledRaw === null ? null : enabledRaw === '1' || enabledRaw === 'true',
+          limit: limitRaw === null ? 200 : Number(limitRaw),
+        }),
+      })
+      return
+    }
+    if (path === '/api/automation/schedules' && req.method === 'POST') {
+      await handleRun(req, res, (body) => ({
+        ok: true,
+        schedule: automationStore.createSchedule({
+          id: requireString(body, 'id'),
+          scope: requireString(body, 'scope'),
+          name: requireString(body, 'name'),
+          spec: body.spec,
+          timezone: requireString(body, 'timezone'),
+          enabled: body.enabled !== false,
+          overlapPolicy: body.overlapPolicy ?? 'skip',
+          catchUpPolicy: body.catchUpPolicy ?? 'once',
+          createdBy: body.by ?? null,
+          note: body.note ?? null,
+          // 任务模板：给了就"到点建一张可领的任务卡"，省略就只物化运行。
+          // **不写成 `body.payload ?? null`** —— 那会把"没给"与"显式给 null"
+          // 折成同一个值，而它们在建计划时语义相同（都不建任务），
+          // 到了 `update` 那一侧就必须分开（见 `updateSchedule` 的三态说明）。
+          ...(body.payload === undefined ? {} : { payload: body.payload }),
+        }),
+      }))
+      return
+    }
+    if (path === '/api/automation/schedules/update' && req.method === 'POST') {
+      await handleRun(req, res, (body) => ({
+        ok: true,
+        schedule: automationStore.updateSchedule({
+          id: requireString(body, 'id'),
+          enabled: body.enabled === undefined ? null : body.enabled === true,
+          overlapPolicy: body.overlapPolicy ?? null,
+          catchUpPolicy: body.catchUpPolicy ?? null,
+          spec: body.spec ?? null,
+          timezone: body.timezone ?? null,
+          name: body.name ?? null,
+          note: body.note ?? null,
+          // 三态：不传 = 不改 / `null` = 显式清掉（此后不再建任务）/ 对象 = 换掉。
+          // 用 `body.payload ?? null` 会让"清掉"与"不改"同形——用户想把
+          // 一条计划从"建任务"改成"只提醒"，调用返回成功，而计划继续建任务。
+          ...(body.payload === undefined ? {} : { payload: body.payload }),
+        }),
+      }))
+      return
+    }
+    if (path === '/api/automation/calendar' && req.method === 'GET') {
+      // ★ **纯投影**：这条路由是一段只读计算，库里一行都不会多。
+      //
+      // 参数里没有 `persist` / `materialize` 这种开关，是刻意的：
+      // 一个"顺手把投影落库"的选项，会在某一次翻页之后让运行历史里
+      // 多出一批**因为有人看了一眼**而产生的行。
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const id = url.searchParams.get('id')
+      if (id === null || id.length === 0) { json(res, 400, { ok: false, error: '缺少 id', code: 'MISSING_PARAM' }); return }
+      const sched = automationStore.scheduleOf(id)
+      if (sched === null) { json(res, 404, { ok: false, error: `没有这条计划：${id}`, code: AUTOMATION_ERRORS.SCHEDULE_NOT_FOUND }); return }
+      const fromRaw = Number(url.searchParams.get('fromMs'))
+      const toRaw = Number(url.searchParams.get('toMs'))
+      const fromMs = Number.isSafeInteger(fromRaw) ? fromRaw : Date.now()
+      const toMs = Number.isSafeInteger(toRaw) ? toRaw : fromMs + 7 * 24 * 3600 * 1000
+      const capRaw = Number(url.searchParams.get('max'))
+      try {
+        json(res, 200, {
+          ok: true,
+          scheduleId: id,
+          // `projected: true` 是一个**能力发现位**：读的人要能一眼看出
+          // 这些时刻不是运行记录，而是算出来的。
+          projected: true,
+          occurrences: projectOccurrences(sched, {
+            fromMs, toMs,
+            maxOccurrences: Number.isSafeInteger(capRaw) && capRaw > 0 ? Math.min(capRaw, 2000) : 500,
+          }),
+          serverTimeMs: Date.now(),
+        })
+      } catch (e) {
+        json(res, Number(e?.statusCode) || 400, { ok: false, error: e instanceof Error ? e.message : String(e), code: e?.code ?? AUTOMATION_ERRORS.BAD_WINDOW })
+      }
+      return
+    }
+    if (path === '/api/automation/runs' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const scheduleId = url.searchParams.get('scheduleId')
+      const scope = url.searchParams.get('scope')
+      const state = url.searchParams.get('state')
+      const limitRaw = url.searchParams.get('limit')
+      json(res, 200, {
+        ok: true,
+        runs: automationStore.runsOf({
+          scheduleId: scheduleId !== null && scheduleId.length > 0 ? scheduleId : null,
+          scope: scope !== null && scope.length > 0 ? scope : null,
+          state: state !== null && state.length > 0 ? state : null,
+          limit: limitRaw === null ? 200 : Number(limitRaw),
+        }),
+      })
+      return
+    }
+    if (path === '/api/automation/tick' && req.method === 'POST') {
+      // 显式 tick。与生产定时器**共用 `automationTick`**——两条实现漂移的
+      // 表现是"手动 tick 对、自动 tick 错"，而后者只在生产上发生。
+      await handleRun(req, res, (body) => automationTick({
+        scope: typeof body.scope === 'string' && body.scope.length > 0 ? body.scope : null,
+        nowMs: body.nowMs ?? null,
+        limit: body.limit ?? null,
+      }))
+      return
+    }
+    // ── F-17 长会话压缩 ────────────────────────────────────────────────
+    //
+    // 四条路由，**没有任何一条会删原文**——这是本模块的核心纪律：
+    //   · `POST /api/compaction/messages`    追加原文（只追加，重复 seq 拒绝）
+    //   · `POST /api/compaction/summarize`   写入一版摘要（baseVersion 是 CAS）
+    //   · `GET  /api/compaction/context`     拼出"现在该给模型看什么"
+    //   · `GET  /api/compaction/state`       压缩程度读数
+    //
+    // `POST /api/compaction/summarize` **接受已经算好的摘要文本**，本层不调用
+    // 任何模型：决定"什么时候压、压多少"是产品策略（在这里），
+    // 决定"这段文字怎么概括"是执行面能力。混在一起会让一次"摘要没写好"
+    // 表现为"压缩功能坏了"，而修法完全不同。
+    if (path === '/api/compaction/messages' && req.method === 'POST') {
+      await handleRun(req, res, (body) => ({
+        ok: true,
+        message: compactionStore.appendMessage({
+          sessionId: requireString(body, 'sessionId'),
+          seq: body.seq,
+          role: requireString(body, 'role'),
+          content: typeof body.content === 'string' ? body.content : '',
+        }),
+      }))
+      return
+    }
+    if (path === '/api/compaction/summarize' && req.method === 'POST') {
+      await handleRun(req, res, (body) => compactionStore.proposeSummary({
+        sessionId: requireString(body, 'sessionId'),
+        coversFromSeq: body.coversFromSeq,
+        coversToSeq: body.coversToSeq,
+        summary: requireString(body, 'summary'),
+        author: body.author ?? 'model',
+        // `baseVersion` **原样透传，包括 `undefined`**：把它折叠成 `null`
+        // 会让"我以为还没有摘要"与"我没传这个参数"变成同一件事，
+        // 而后者是一个应该被报出来的调用错误（否则并发压缩会静默通过）。
+        baseVersion: body.baseVersion === undefined ? null : body.baseVersion,
+        createdBy: requireString(body, 'by'),
+        reason: body.reason ?? null,
+      }))
+      return
+    }
+    if (path === '/api/compaction/context' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const sessionId = url.searchParams.get('sessionId')
+      if (sessionId === null || sessionId.length === 0) { json(res, 400, { ok: false, error: '缺少 sessionId', code: 'MISSING_PARAM' }); return }
+      const maxRaw = Number(url.searchParams.get('maxTokens'))
+      try {
+        const ctx = compactionStore.effectiveContext(sessionId, {
+          maxTokens: Number.isSafeInteger(maxRaw) && maxRaw > 0 ? maxRaw : null,
+        })
+        json(res, 200, { ok: true, sessionId, ...ctx })
+      } catch (e) {
+        json(res, Number(e?.statusCode) || 400, { ok: false, error: e instanceof Error ? e.message : String(e), code: e?.code ?? 'COMPACTION_FAILED' })
+      }
+      return
+    }
+    if (path === '/api/compaction/state' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const sessionId = url.searchParams.get('sessionId')
+      if (sessionId === null || sessionId.length === 0) { json(res, 400, { ok: false, error: '缺少 sessionId', code: 'MISSING_PARAM' }); return }
+      json(res, 200, { ok: true, ...compactionStore.compactionState(sessionId) })
+      return
+    }
+    if (path === '/api/compaction/summaries' && req.method === 'GET') {
+      // 版本史：**每个版本都可读**，因为"曾经有过一个更好的摘要"这件事
+      // 只有在旧版还在的时候才能被证明。
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const sessionId = url.searchParams.get('sessionId')
+      if (sessionId === null || sessionId.length === 0) { json(res, 400, { ok: false, error: '缺少 sessionId', code: 'MISSING_PARAM' }); return }
+      json(res, 200, { ok: true, sessionId, summaries: compactionStore.summariesOf(sessionId) })
+      return
+    }
+    // ── F-20 能力包安装事实 ────────────────────────────────────────────
+    //
+    // 四条路由，围绕着**一本只追加的账**：
+    //   · `POST /api/packs/facts`          追加一条记录（seq 由 CAS 算出来）
+    //   · `GET  /api/packs/facts`          读账（可按包 / 按 seq 增量）
+    //   · `GET  /api/packs/account`        整本账，形态直接喂给 `createPackStore`
+    //   · `GET  /api/packs/export`         导出成可提交进 Git 的文本
+    //
+    // **刻意没有"改一条记录"或"删一条记录"的路由**：账是"只追加、记录不可变"的，
+    // 而一次"顺手修正"会让"这条记录是谁改的"永远无法回答。
+    // 写路径只有一条，且它不接受"当前状态"这种入参——那条状态是**推导**出来的，
+    // 由 hub 存一份就等于有第二份真相。
+    if (path === '/api/packs/facts' && req.method === 'POST') {
+      await handleRun(req, res, (body) => ({
+        ok: true,
+        ...appendPackFact({
+          db,
+          record: {
+            at: body.at,
+            kind: body.kind,
+            packId: body.packId,
+            version: body.version,
+            packType: body.packType ?? null,
+            packProtocolVersion: body.packProtocolVersion ?? null,
+            contentHash: body.contentHash ?? null,
+            declaredContentHash: body.declaredContentHash ?? null,
+            trust: body.trust ?? null,
+            fromVersion: body.fromVersion ?? null,
+            fromContentHash: body.fromContentHash ?? null,
+            preflightVersion: body.preflightVersion ?? null,
+            verdictCodes: body.verdictCodes ?? [],
+          },
+        }),
+      }))
+      return
+    }
+    if (path === '/api/packs/facts' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const packId = url.searchParams.get('packId')
+      json(res, 200, {
+        ok: true,
+        packId: packId === null || packId.length === 0 ? null : packId,
+        records: packFacts({
+          db,
+          packId,
+          sinceSeq: optionalIntParam(url, 'sinceSeq') ?? 0,
+          limit: optionalIntParam(url, 'limit'),
+        }),
+        counts: packFactCounts({ db }),
+      })
+      return
+    }
+    if (path === '/api/packs/account' && req.method === 'GET') {
+      // 这一条的形状**就是** `createPackStore({ history })` 认的那个：
+      // 重启之后控制面不必自己再推一遍状态，而"两份推导"是这一层最想避免的事。
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      json(res, 200, { ok: true, ...packAccount({ db }) })
+      return
+    }
+    if (path === '/api/packs/export' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const { text } = exportPackFacts({ db })
+      // 返回**文本**而不是 JSON 对象：这份东西的用途是进 diff、被人审阅，
+      // 而一个被包在 HTTP JSON 里的对象到了调用方手里又要被 `JSON.stringify`
+      // 一次——那一次与这一份的缩进、键序都可能不同，于是"审阅的是哪一份"就成了问题。
+      res.writeHead(200, {
+        'content-type': 'application/json; charset=utf-8',
+        'content-disposition': 'attachment; filename="legion-pack-install-facts.json"',
+      })
+      res.end(text)
+      return
+    }
+    // ── F-19 冻结的岗位包 ──────────────────────────────────────────────
+    //
+    // 三条路由，围绕着**只追加的版本化冻结**：
+    //   · `POST /api/role-packs`            冻结一版（幂等或 409，没有第三种）
+    //   · `GET  /api/role-packs`            列各版本 / 取一版（不传 version = 最新）
+    //   · `GET  /api/role-packs/export`     导出成可提交进 Git 的审阅文本
+    //
+    // ★ **刻意没有"改一版"或"删一版"的路由**：冻结的全部含义就是"当时是哪一版"，
+    // 而一条改/删的路由会让那个问题在**写的那一刻**失去答案。
+    // 确实改了内容就再冻一版——`freezeRolePack` 会拒绝"同版本换内容"。
+    //
+    // 与 F-20 那组的分工：那一组存的是**能力包**的安装事实（装了什么），
+    // 这一组存的是**岗位**的冻结描述（这个岗位当时是哪一版）。两者都不做推导。
+    if (path === '/api/role-packs' && req.method === 'POST') {
+      await handleRun(req, res, (body) => {
+        const r = freezeRolePack({
+          db,
+          scope: typeof body.scope === 'string' && body.scope.trim() !== '' ? body.scope.trim() : 'default',
+          record: {
+            // `pack` 原样收下（见 `role-pack-store.mjs` 文件头 ③）：
+            // 控制面不挑字段、不重排、不补默认值——挑字段就是一份多余的转写。
+            pack: body.pack,
+            frozenAtMs: body.frozenAtMs,
+            frozenBy: body.frozenBy ?? null,
+          },
+        })
+        return {
+          ok: true,
+          frozen: r.frozen,
+          // `created:false` 是**幂等重放**，不是"已经有一模一样的了所以不算数"。
+          // 调用方需要能分清"我冻了新的一版"与"这一版早就冻过"。
+          created: r.created,
+          rolePackId: r.record.projected.rolePackId,
+          version: r.record.projected.version,
+          contentHash: r.record.projected.contentHash,
+          frozenAtMs: r.record.frozenAtMs,
+        }
+      })
+      return
+    }
+    if (path === '/api/role-packs' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const rolePackId = url.searchParams.get('rolePackId')
+      const version = url.searchParams.get('version')
+      const role = url.searchParams.get('role')
+      const scope = url.searchParams.get('scope') ?? 'default'
+      // ★ **形状不随查询参数变**：永远是 `records`（一个清单）+ `latest`（可能是 null）。
+      //
+      //   早先的写法是"给了 rolePackId 就返回单条 `record`，否则返回 `records`"——
+      //   于是调用方必须知道"我刚才给没给 rolePackId"才知道该读哪个字段，
+      //   而一份"读哪个字段取决于我传了什么参数"的响应，与一份随机的响应
+      //   在调用方代码里是同一个东西（它只能两个都试一遍）。
+      //
+      //   `version` 只是**过滤**这个清单，不改变它的形状。
+      const all = listRolePacks({ db, role, rolePackId, scope, limit: optionalIntParam(url, 'limit') })
+      const records = version === null || version === ''
+        ? all
+        : all.filter((r) => r.pack?.version === version)
+      json(res, 200, {
+        ok: true,
+        records,
+        // "这个 id 现在该用哪一版"是另一个问题，同一个请求一并回答——
+        // 但它按 `frozen_at_ms DESC, version DESC` 定序，**不依赖数组顺序**。
+        latest: rolePackId === null || rolePackId === ''
+          ? null
+          : getRolePack({ db, rolePackId, scope }),
+        counts: rolePackCounts({ db, scope }),
+      })
+      return
+    }
+    if (path === '/api/role-packs/export' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const scope = url.searchParams.get('scope') ?? 'default'
+      const text = exportRolePacks({ db, scope })
+      // 与包事实的导出同一条理由：返回**文本**，因为这份东西的用途是进 diff。
+      res.writeHead(200, {
+        'content-type': 'application/json; charset=utf-8',
+        'content-disposition': 'attachment; filename="legion-role-packs-frozen.json"',
+      })
+      res.end(text)
+      return
+    }
+    // ── F-18 经验图谱 / 摩擦学习 ────────────────────────────────────────
+    //
+    // 四条路由，全部围绕**一本只追加的记录流**：
+    //   · `POST /api/experience/records`  追加一条（node/edge/retract/draft）
+    //   · `GET  /api/experience/records`  读流（可按草稿/边/种类、支持 sinceSeq）
+    //   · `POST /api/experience/drafts/:id/settle`  处置一条草稿（promote/discard）
+    //   · `GET  /api/experience/export`   导出成可提交进 Git 的审阅文本
+    //   · `GET  /api/experience/account`  整本账（重启后供控制面重建）
+    //
+    // ★ **刻意没有"改一条记录"或"删一条记录"的路由**，也**没有**"保存整张图"
+    //   的路由：记录是唯一的真相，"图现在长什么样"与"这条草稿现在是什么状态"
+    //   都是从记录流**推导**出来的。存一份推导出来的状态，就等于有第二份真相，
+    //   而它与记录流不一致时**没有任何东西能判定谁对**。
+    //
+    // ★ 处置单独一条路由（而不是往记录流里 POST 一条 `promote`）：
+    //   那个检查是"这条草稿现在是不是还没被处置"，而它必须**在同一处**完成，
+    //   否则调用方要先读一次再写一次，两步之间另一个进程可以插进来。
+    if (path === '/api/experience/records' && req.method === 'POST') {
+      await handleRun(req, res, (body) => ({
+        ok: true,
+        ...appendExperienceRecord({
+          db,
+          scope: typeof body.scope === 'string' && body.scope.trim() !== '' ? body.scope.trim() : 'default',
+          record: {
+            kind: body.kind,
+            atMs: body.atMs,
+            draftId: body.draftId,
+            subject: body.subject ?? null,
+            score: body.score ?? null,
+            payload: body.payload ?? null,
+            edgeId: body.edgeId,
+            from: body.from,
+            to: body.to,
+            edgeKind: body.edgeKind,
+            source: body.source,
+            by: body.by,
+            reason: body.reason ?? null,
+            nodeKind: body.nodeKind,
+            id: body.id,
+          },
+        }),
+      }))
+      return
+    }
+    if (path === '/api/experience/records' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const scope = url.searchParams.get('scope') ?? 'default'
+      const records = experienceRecords({
+        db,
+        scope,
+        draftId: url.searchParams.get('draftId'),
+        edgeId: url.searchParams.get('edgeId'),
+        kind: url.searchParams.get('kind'),
+        sinceSeq: optionalIntParam(url, 'sinceSeq') ?? 0,
+        limit: optionalIntParam(url, 'limit'),
+      })
+      json(res, 200, { ok: true, records, counts: draftCounts({ db, scope }) })
+      return
+    }
+    if (path === '/api/experience/account' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const scope = url.searchParams.get('scope') ?? 'default'
+      json(res, 200, { ok: true, ...experienceAccount({ db, scope }) })
+      return
+    }
+    // `/api/experience/drafts/<id>/settle`
+    //
+    // ★ 形状刻意与 PRT-507 的 `/api/model-profiles/<id>/probe` 一致：
+    //   `startsWith` + `endsWith` 配**字面量**，而不是一个正则守卫。
+    //   原因不是风格：`scripts/prt/baseline-snapshot.mjs` 的抽取器只认
+    //   字面量（`path === '…'` / `path.startsWith('…')`），而它用
+    //   `findOpaqueRouteGuards` **主动拒绝**用常量做守卫的写法。
+    //   一个正则守卫两条都躲得过——于是这条路由会**悄悄**不进平台契约，
+    //   而 `--record` 会写下一份"看起来正常、少了一条端点"的基线。
+    //
+    //   这正是本仓库记过的最贵的一条：**一道看不见某类改动的闸门，
+    //   比没有闸门更危险**——它给人"已经守住了"的错觉。
+    //   所以这里按既有约定写成字面量 + startsWith/endsWith。
+    if (req.method === 'POST' && path.startsWith('/api/experience/drafts/') && path.endsWith('/settle')) {
+      const rawId = path.slice('/api/experience/drafts/'.length, path.length - '/settle'.length)
+      // 中间那段必须是**一段** id，不能为空、也不能再带 `/`：
+      // 否则 `/api/experience/drafts/a/b/settle` 会被当成一个合法 id，
+      // 而那个 id 永远不会有对应的草稿——报出来的是"来源丢了"，
+      // 而不是"你的路径写错了"，于是调用方会去查一条根本不存在的草稿。
+      if (rawId === '' || rawId.includes('/')) {
+        json(res, 400, {
+          error: `草稿 id 必须是一段路径（收到 ${JSON.stringify(rawId)}），` +
+            '带 `/` 的 id 永远不会对应到一条草稿',
+          code: 'EXPERIENCE_RECORD_MALFORMED',
+        })
+        return
+      }
+      const draftId = decodeURIComponent(rawId)
+      await handleRun(req, res, (body) => ({
+        ok: true,
+        ...settleDraft({
+          db,
+          scope: typeof body.scope === 'string' && body.scope.trim() !== '' ? body.scope.trim() : 'default',
+          draftId,
+          action: body.action,
+          // 理由原样交给下面的层去校验封闭词表：在这里再存一份词表
+          // 就是第二份会各自漂移的词表。
+          by: body.by,
+          reason: body.reason,
+          atMs: Number.isInteger(body.atMs) ? body.atMs : Date.now(),
+        }),
+      }))
+      return
+    }
+    if (path === '/api/experience/export' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const scope = url.searchParams.get('scope') ?? 'default'
+      const { text } = exportExperience({ db, scope })
+      res.writeHead(200, {
+        'content-type': 'application/json; charset=utf-8',
+        'content-disposition': 'attachment; filename="legion-experience.json"',
+      })
+      res.end(text)
+      return
+    }
+    // ── F-21 连接器登记表 ──────────────────────────────────────────────
+    //
+    // 四条路由，围绕**按内容哈希冻结的声明** + **点名的故障事件**：
+    //   · `POST /api/connectors`             冻结一份声明（幂等或 409，没有第三种）
+    //   · `GET  /api/connectors`             列登记（可按 connectorId / sinceSeq）
+    //   · `GET  /api/connectors/incidents`   读熔断事件（点名是哪一个连接器）
+    //   · `GET  /api/connectors/export`      导出成可提交进 Git 的审阅文本
+    //
+    // ★ **刻意没有"改一份声明"或"删一个连接器"的路由**：连接器声明说的是
+    //   "一个外部进程能拿到什么权限"，而一条改/删的路由会让"当时放行了哪些工具"
+    //   在**写的那一刻**失去答案。确实改了内容就递增版本号再冻一版——
+    //   `freezeDeclaration` 会拒绝"同版本换内容"。
+    //
+    // ★ 事件路由的 `connectorId` 是**必填**的：只记"某处发生了故障"时，
+    //   一次隔离良好的单点故障与一次大面积故障长得一样。这一层不做默认值
+    //   填充（填一个 'default' 会让"忘了传"与"就是那个连接器"同形）。
+    if (path === '/api/connectors' && req.method === 'POST') {
+      await handleRun(req, res, (body) => {
+        const r = freezeDeclaration({
+          db,
+          scope: typeof body.scope === 'string' && body.scope.trim() !== '' ? body.scope.trim() : 'default',
+          // `declaration` 原样收下（与 F-19 的 `pack` 同一条理由）：
+          // 控制面不挑字段、不重排、不补默认值——挑字段就是一份多余的转写，
+          // 而转写会漂移，漂移之后"当时声明的是什么"就没有唯一的答案了。
+          declaration: body.declaration,
+          version: body.version,
+          frozenAtMs: Number.isInteger(body.frozenAtMs) ? body.frozenAtMs : Date.now(),
+          frozenBy: body.frozenBy ?? null,
+        })
+        return {
+          ok: true,
+          frozen: r.frozen,
+          // `created:false` 是**幂等重放**，不是"已经有一模一样的了所以不算数"。
+          created: r.created,
+          connectorId: r.connectorId,
+          version: r.version,
+          contentHash: r.contentHash,
+          toolCount: r.toolCount,
+          frozenAtMs: r.frozenAtMs,
+        }
+      })
+      return
+    }
+    if (path === '/api/connectors' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const scope = url.searchParams.get('scope') ?? 'default'
+      const connectorId = url.searchParams.get('connectorId')
+      const version = url.searchParams.get('version')
+      const sinceSeq = optionalIntParam(url, 'sinceSeq') ?? 0
+      // ★ 形状不随查询参数变（与 F-19 同一条）：永远是 `records` + `registration`
+      //   + `counts`。一份"读哪个字段取决于我传了什么参数"的响应，
+      //   与一份随机的响应在调用方代码里是同一个东西。
+      //
+      // ★★ `version` **必须真的被用上**。第一版收了这个参数却只把它丢在一边
+      //   （`getDeclaration` 没收到它），于是"不传 version = 最新"这条默认
+      //   静默地覆盖了每一次带版本的查询：调用方问"1.0.0 当时放行了哪些工具"，
+      //   拿回的是 2.0.0 的工具清单——**答案来自另一版，而响应里没有任何地方
+      //   提示这件事**。这个坑比"不支持 version"深得多：不支持时会报错或者
+      //   返回 null，而静默忽略会给出一个看起来完全正常的答案。
+      const filtered = version === null
+        ? connectorRegistrations({ db, scope, connectorId, sinceSeq })
+        : connectorRegistrations({ db, scope, connectorId, sinceSeq }).filter((r) => r.version === version)
+      json(res, 200, {
+        ok: true,
+        scope,
+        records: filtered,
+        // 不传 connectorId 或那一版还没冻过时是 null——而"还没冻过"与"这行坏了"
+        // 是两件事，所以 `readable` 一并带出去。
+        registration: connectorId === null ? null : getDeclaration({ db, connectorId, version, scope }),
+        counts: connectorCounts({ db, scope }),
+      })
+      return
+    }
+    if (path === '/api/connectors/incidents' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const scope = url.searchParams.get('scope') ?? 'default'
+      const connectorId = url.searchParams.get('connectorId')
+      const sinceSeq = optionalIntParam(url, 'sinceSeq') ?? 0
+      json(res, 200, {
+        ok: true,
+        scope,
+        records: connectorIncidents({ db, scope, connectorId, sinceSeq }),
+        counts: connectorCounts({ db, scope }),
+      })
+      return
+    }
+    if (path === '/api/connectors/export' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const scope = url.searchParams.get('scope') ?? 'default'
+      const { text } = exportConnectors({ db, scope })
+      res.writeHead(200, {
+        'content-type': 'application/json; charset=utf-8',
+        'content-disposition': 'attachment; filename="legion-connectors.json"',
+      })
+      res.end(text)
+      return
+    }
+    // `/api/connectors/<id>/incidents` —— 记一条熔断事件
+    //
+    // ★ 与 F-18 的 settle 同形：**字面量** + `startsWith`/`endsWith`，
+    //   而不是正则守卫。理由见上面那段长注释（`baseline-snapshot.mjs` 的
+    //   抽取器只认字面量，正则守卫会**悄悄**不进平台契约）。
+    if (req.method === 'POST' && path.startsWith('/api/connectors/') && path.endsWith('/incidents')) {
+      const rawId = path.slice('/api/connectors/'.length, path.length - '/incidents'.length)
+      // 中间那段必须是**一段** id（同 F-18 的 settle）：否则
+      // `/api/connectors/a/b/incidents` 会被当成一个合法 id，
+      // 而那个 id 永远不会有对应的连接器。
+      if (rawId === '' || rawId.includes('/')) {
+        json(res, 400, {
+          error: `连接器 id 必须是一段路径（收到 ${JSON.stringify(rawId)}），` +
+            '带 `/` 的 id 永远不会对应到一个连接器',
+          code: 'CONNECTOR_EVENT_MALFORMED',
+        })
+        return
+      }
+      const connectorId = decodeURIComponent(rawId)
+      await handleRun(req, res, (body) => ({
+        ok: true,
+        ...appendIncident({
+          db,
+          scope: typeof body.scope === 'string' && body.scope.trim() !== '' ? body.scope.trim() : 'default',
+          connectorId,
+          kind: body.kind,
+          circuitState: body.circuitState,
+          // `atMs` 必填且必须是整数：`undefined` 与"当时就是 0"同形。
+          atMs: body.atMs,
+          reason: body.reason ?? null,
+          actor: body.actor ?? null,
+        }),
+      }))
+      return
+    }
+    // ── PRT-610 工具调用账（`tool_calls`）───────────────────────────────
+    //
+    // spec §6.8 line 480：「`tool_calls` 必须记录决定来源；否则事后无法区分
+    // 策略拒绝与沙箱兜底拒绝，而这两类的**修复动作不同**。」
+    //
+    // 三条路由，形状与只读统计面一致：
+    //   · `GET  /api/tool-calls`              按来源分组统计（"两类拒绝"的最直接读法）
+    //   · `GET  /api/tool-calls/evidence`     ★ 就绪判据 `decisionSourceRecorded` 的**产出点**
+    //   · `GET  /api/tool-calls/repair`       拿一条拒绝，直接读出"该去改哪里"
+    //
+    // ★★ **刻意没有写路径。** 与 F-15 的用量路由同一个理由，而且这里更硬：
+    // 一次工具调用的账要记「原始输入 + canonical 输入 + 哈希 + 决定来源 + 结果状态」，
+    // 其中 `rawInput`/`canonicalInput` 必须来自**那一次真实的执行**（它们要被对起来，
+    // 见 `assertCanonicalMatchesRaw`）。放一条"手工记一笔"的 HTTP 写口，等于允许
+    // 控制面凭空造出一条"执行过"的记录——
+    //
+    //   > 一个「可以由外部直接写入」的执行账，
+    //   > 与一个「审计里的执行历史可以是任意值」的账，是同一个东西。
+    //
+    // 所以写侧只有一个入口：执行面调 `recordToolCall`。本进程只提供**读**与建表。
+    if (path === '/api/tool-calls' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      // `decision` 可筛（只看拒绝），但**不**给"按 runId 筛"——那需要给
+      // `countBySource` 加一个它今天没有的参数，而加参数就会引入"两个地方各算一遍"。
+      const decision = url.searchParams.get('decision')
+      json(res, 200, {
+        ok: true,
+        table: TOOL_CALL_TABLE,
+        // 每个来源各自可能的决定（审计口径）：让人能看出"这一栏里缺少哪一类"
+        sourceDecisions: Object.fromEntries(
+          DECISION_SOURCES.map((s) => [s, [...SOURCE_DECISIONS[s]]]),
+        ),
+        // 每个来源该去改哪里——§6.8 line 480 那句"修复动作不同"的落地
+        sourceRepairActions: Object.fromEntries(
+          DECISION_SOURCES.map((s) => [s, SOURCE_REPAIR_ACTIONS[s]]),
+        ),
+        counts: countBySource({ db, decision: decision === null || decision === '' ? null : decision }),
+      })
+      return
+    }
+    // ★★★ `/api/tool-calls/evidence` —— **就绪判据的产出点**（放在 `/api/tool-calls` 之后，
+    // 否则前缀会先把这个更长的路径吃掉；这个顺序本身就是一处会安静失效的地方）。
+    //
+    // 它存在之前，`release-gate.mjs` 的 `decisionSourceRecorded` 在全仓**没有任何产出者**：
+    // 那一项写得很谨慎（"缺失的证据不是证据"），于是它永远判否——
+    //
+    //   > 一个「判据说缺少证据、而没有任何地方能提供证据」的判据，
+    //   > 与一个「永远判否」的判据，是同一个东西——只不过前者看起来更谨慎。
+    //
+    // 证据**从库里读**，不由调用方传一个它自己相信的布尔：这一项问的是生产事实。
+    if (path === '/api/tool-calls/evidence' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const ev = toolCallLogEvidence({ db })
+      json(res, 200, {
+        ok: true,
+        ...ev,
+        // 就绪判据直接吃这个字段。★ 严格布尔比较（不是 truthy）：
+        // `'false'` 这个字符串是 truthy，而这正是"把没记录读成记录"的形状。
+        decisionSourceRecorded: ev.recorded === true,
+      })
+      return
+    }
+    // `/api/tool-calls/repair` —— 拿一条拒绝，直接读出修复动作。
+    //
+    // 这是 §6.8 line 480 最终要服务的那个人：值班的人拿着一条拒绝记录，
+    // 要能立刻知道"该去改哪里"。缺了它，那条"两类修复动作不同"就只是文档里的一句话。
+    if (path === '/api/tool-calls/repair' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const callId = url.searchParams.get('callId')
+      if (callId === null || callId.trim() === '') {
+        json(res, 400, {
+          error: 'repair 需要 callId——一条拒绝的修复动作由**它的来源**决定，'
+            + '没有 callId 就只能靠猜，而猜错的修复动作会把人指向错误的文件',
+          code: 'TOOL_CALL_REPAIR_NEEDS_CALL_ID',
+        })
+        return
+      }
+      // ★ 键是 `callId`（§6.5 line 478：执行身份是"这一次调用"，不是内容哈希）。
+      //   这里复用 `toolCallIdempotencyKey` 而不是自己 trim：两处各归一化一次
+      //   就会出现"用 A 的键写、用 B 的键读"——而那样查不到与没记录过长得一样。
+      const row = readToolCall({ db, idempotencyKey: toolCallIdempotencyKey({ callId }) })
+      if (row === null) {
+        json(res, 404, {
+          error: `没有 callId=${JSON.stringify(callId)} 的记录`,
+          code: 'TOOL_CALL_NOT_FOUND',
+        })
+        return
+      }
+      // `explainRejection` 对非拒绝行返回 ok:false 而不是抛——照原样透出去。
+      json(res, 200, { ok: true, call: row, repair: explainRejection(row) })
+      return
+    }
+    // ── F-15 用量汇总 ──────────────────────────────────────────────────
+    //
+    // 两条只读路由。**刻意没有写路径**：这张报表读的是已经记下的账，
+    // 而"记一笔账"是 `budget-ledger` 的 `reserve/observe/settle`——
+    // 那条链是闸门，需要 attemptId + leaseEpoch，不该有一条"手工记一笔"
+    // 的后门（那会让账本里的钱与实际花掉的钱脱钩，而两者看起来一样）。
+    if (path === '/api/usage/totals' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      json(res, 200, {
+        ok: true,
+        ...usageRollup.usageTotals({
+          db,
+          sinceMs: optionalIntParam(url, 'sinceMs'),
+          untilMs: optionalIntParam(url, 'untilMs'),
+          scope: url.searchParams.get('scope'),
+        }),
+      })
+      return
+    }
+    if (path === '/api/usage/rollup' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const dimension = url.searchParams.get('dimension')
+      try {
+        json(res, 200, {
+          ok: true,
+          ...usageRollup.rollupBy({
+            db,
+            dimension,
+            sinceMs: optionalIntParam(url, 'sinceMs'),
+            untilMs: optionalIntParam(url, 'untilMs'),
+            scope: url.searchParams.get('scope'),
+          }),
+        })
+      } catch (e) {
+        // 未知维度是**调用方的错**，所以 400 + 具名码，并把可选值列出来——
+        // 只说"不认识的维度"会让调用方去翻源码。
+        json(res, Number(e?.statusCode) || 400, {
+          ok: false,
+          error: e instanceof Error ? e.message : String(e),
+          code: e?.code ?? 'ROLLUP_FAILED',
+          dimensions: ROLLUP_DIMENSIONS,
+        })
+      }
       return
     }
     if (req.method === 'GET' && path === '/api/runtime/reconciliations') {
@@ -7582,12 +8870,24 @@ async function handle(req, res, stripPrefix) {
         json(res, 400, { error: e instanceof Error ? e.message : String(e) })
         return
       }
+      // 订阅者身份三项：`clientId` 由前端持久化（与它自己的游标成对），
+      // `kind` 区分来源（workbench / board / 未来的外部渠道）。
+      const clientId = url.searchParams.get('clientId')
+      const clientKind = url.searchParams.get('kind') ?? 'workbench'
+      const subscriberId = subscriberIdFor({ clientId, kind: clientKind, scope: eventScope })
       res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache', connection: 'keep-alive' })
       res.write('retry: 2000\n\n')
-      const client = { res, scope: eventScope }
+      const client = { res, scope: eventScope, subscriberId, kind: typeof clientKind === 'string' ? clientKind : 'workbench' }
       eventClients.add(client)
+      // 登记进投递仓储（失败不阻止连接：只读面必须继续可用）。
+      registerEventClient(client)
       // Last-Event-ID 断线续传（P2-3 S2）：带合法序号则只回放 seq > N 的增量；
       // 无/非法则回放最近 30 条（契约 §6.2：seq 单调，配合 id: 行 EventSource 原生续传）。
+      //
+      // ★ F-05：`Last-Event-ID` 头**只是客户端的一面之词**，所以它不推进服务端游标。
+      //   服务端游标由**真的写成功过**的投递推进（`markDelivered` → `advanceCursor`），
+      //   那是唯一一个"字节确实出去了"的证据。两者是不同的东西：
+      //   头部说的是"我收到过哪一条"，游标说的是"我们确实投到了哪一条"。
       const lastEventId = Number.parseInt(String(req.headers['last-event-id'] ?? ''), 10)
       const cursor = Number.isFinite(lastEventId) ? lastEventId : sinceSeq
       const where = []
@@ -7604,9 +8904,76 @@ async function handle(req, res, stripPrefix) {
       } else {
         replay = db.prepare(`SELECT * FROM audit${where.length > 0 ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY seq DESC LIMIT 30`).all(...params).reverse()
       }
-      for (const r of replay) writeEventFrame(res, auditEvent(r))
+      // 回放帧**同样要走投递记账**：回放是投递的一种，把历史的洞补上也算投出去。
+      // 这里逐条写而不是走 `broadcastAudit`（那条路径是"广播给所有人"，
+      // 而回放只写给**这一个**订阅者）。一条回放失败不影响其余条目。
+      for (const r of replay) {
+        const entry = auditEvent(r)
+        let frame = { ok: false, reason: 'not-attempted' }
+        try {
+          withTx(() => {
+            deliveryStore.plan({ subscriberId, events: [{ seq: entry.seq, scope: entry.scope ?? null, event: entry.event }] })
+            const taken = deliveryStore.takeUp({ subscriberId, seqs: [entry.seq] })
+            if (taken.claimed.length === 1) {
+              frame = writeEventFrame(res, entry)
+              if (frame.ok === true) deliveryStore.markDelivered({ subscriberId, seqs: [entry.seq] })
+              else deliveryStore.markFailed({ subscriberId, seqs: [entry.seq], error: frame.reason ?? '回放写失败' })
+            } else {
+              // 已经是终态（投过了/被抑制）——补投会被 CAS 拒，这正是想要的。
+              frame = { ok: true, skipped: true }
+            }
+          })
+        } catch {
+          deliveryBookkeepingFailures += 1
+          // 记账失败时仍然把帧写出去：**宁可少一条记录，不可少一帧**。
+          frame = writeEventFrame(res, entry)
+        }
+        if (frame.ok !== true && frame.reason !== undefined && frame.reason !== 'not-attempted') {
+          // 连接已经不可写：继续回放没有意义，直接收尾。
+          break
+        }
+      }
       const heartbeat = setInterval(() => res.write(':hb\n\n'), 15000)
       req.on('close', () => { clearInterval(heartbeat); eventClients.delete(client) })
+      return
+    }
+    if (req.method === 'GET' && path === '/api/event-delivery') {
+      // F-05 投递读数（只读）：**"发不出去也不说"这件事本身要能被看见**。
+      //
+      // 三种问法：
+      //   · 不带 subscriberId → 全部订阅者的六态汇总（诊断页用）；
+      //   · 带 subscriberId   → 这一个订阅者的完整读数（含 `oldestOutstandingSeq`）；
+      //   · `?recover=1`      → 顺手回收租约过期的 `delivering` → `unknown`。
+      //
+      // `recover` 做成**显式动作而不是每次读都顺手做**：回收会把 `delivering`
+      // 写死成 `unknown`（终态、不可自动重投），那是一个会改变后续行为的写操作，
+      // 不该藏在一次 GET 里。谁要它，谁说出来。
+      const subscriberId = url.searchParams.get('subscriberId')
+      const wantRecover = url.searchParams.get('recover') === '1'
+      const recovered = wantRecover ? deliveryStore.recoverExpired() : { recovered: [] }
+      if (subscriberId !== null && subscriberId.length > 0) {
+        const st = deliveryStore.stateOf(subscriberId)
+        if (st.exists !== true) {
+          json(res, 404, { ok: false, error: `订阅者不存在：${subscriberId}`, code: 'SUBSCRIBER_NOT_FOUND', serverTimeMs: Date.now() })
+          return
+        }
+        json(res, 200, {
+          ok: true,
+          subscriber: st,
+          rows: deliveryStore.rowsOf(subscriberId, { limit: 200 }),
+          recovered: recovered.recovered,
+          bookkeepingFailures: deliveryBookkeepingFailures,
+          serverTimeMs: Date.now(),
+        })
+        return
+      }
+      json(res, 200, {
+        ok: true,
+        ...deliveryStore.summary(),
+        recovered: recovered.recovered,
+        bookkeepingFailures: deliveryBookkeepingFailures,
+        liveConnections: eventClients.size,
+      })
       return
     }
     if (req.method === 'GET' && path === '/api/config') {
@@ -7619,9 +8986,19 @@ async function handle(req, res, stripPrefix) {
       // 这里把它变成可探测的。★ `status()` **不读盘、不抛错**，
       // 所以这个免鉴权的探测端点不会因为一个坏词表目录而变慢或 500
       // （真正的读盘发生在第一次需要 tokenizer 时，失败会在那次请求上抛出）。
+      //
+      // F-05 加一栏 `eventDelivery`：投递记账是**旁路**，它的失败被刻意设计成
+      // 不影响审计。一个被刻意设计成"不影响主流程"的失败，若没有任何地方能看见，
+      // 就会永远没人知道——所以它必须在这里有一个读数。
       json(res, 200, {
         auth: TOKEN !== '', db: DB_FILE, port: PORT, runPlane: true,
         tokenizer: tokenizerRegistryStatus(),
+        eventDelivery: {
+          // 能力发现位：老客户端不认识它就不传 `clientId`，退化成匿名订阅者（不共用游标）。
+          subscribers: true,
+          bookkeepingFailures: deliveryBookkeepingFailures,
+          liveConnections: eventClients.size,
+        },
       })
       return
     }
@@ -7653,6 +9030,12 @@ const server = http.createServer((req, res) => {
 /**
  * P1-1 宿主集成：dispose 当前 v2 实例的 SSE 客户端（宿主插件 teardown 时调用；
  * 心跳 interval 随各连接 req close 自清；附件清理 interval 仅独立进程 isMain 时存在且 unref）。
+ *
+ * F-05：连接断开**不再等于**没投出去。`res.end()` 只是把 socket 关掉——
+ * 此刻若有 `delivering` 的行，它们会一直挂到租约过期。这里**不**顺手把它们
+ * 标成 `delivered` 或 `failed`：进程退出时我们同样不知道字节到没到，
+ * 唯一诚实的处置是留给租约回收（→ `unknown`）。
+ * 所以本函数只做"关连接 + 清集合"，并**不**推进任何投递状态。
  */
 export function disposeHub() {
   for (const client of eventClients) client.res.end()
@@ -7680,6 +9063,31 @@ if (isMain) {
   // `unref()`：一个会阻止进程退出的定时器，与一个**关不掉的**后台任务，是同一个东西
   // （测试进程会因此永远不结束——PRT-708 那次"测试卡住"就是这么来的）。
   setInterval(() => { sweepApprovalsLazily() }, Math.max(5000, Math.floor(APPROVAL_TTL_MS / 5))).unref()
+  // F-05：投递租约回收。
+  //
+  // 覆盖的是「取走了一条事件去投，然后那个进程死了/连接断了，再也没有人说话」
+  // 那段时间。**正确性不靠它**——读到投递读数时也可以显式 `?recover=1`；
+  // 这个定时器只保证"不放着不管"。回收把 `delivering` 写成 `unknown`
+  // （终态、不可自动重投），因此**不会**造成重复投递。
+  //
+  // 判据是**租约**而不是进程自述：本仓库的部署形态是两个进程同时打开同一个库，
+  // "启动时把所有 delivering 清掉"会让后启动的进程收掉另一个进程正在投的行。
+  setInterval(() => {
+    try { deliveryStore.recoverExpired() } catch { /* 回收失败不崩主服务，下一轮再试 */ }
+  }, 30000).unref()
+  // F-16：自动化计划的物化 tick。
+  //
+  // 与投递回收同一个形状，但**这一条是功能本身**，不是兜底：
+  // 计划到点之后必须有人去把它变成运行行，而"有没有人打开页面"不能是
+  // 那个条件（那正是"日历只做投影"要禁止的）。
+  //
+  // 30s 一次：比 `validateSpec` 允许的最短间隔（60s）快一倍，
+  // 于是"每分钟一次"的计划不会被 tick 频率拖成 90s 一次。
+  // 更密没有意义——计划的最小粒度就是分钟。
+  //
+  // `unref()`：与上面那条同一个理由，一个会阻止进程退出的定时器会让
+  // 测试进程永远不结束（PRT-708 那次"测试卡住"就是这么来的）。
+  setInterval(() => { automationTick() }, 30000).unref()
 }
 
 export { db, server, handle, registerSkill, reviewSkill, listSkills, grantSkill, revokeSkill, getSkill,

@@ -52,7 +52,7 @@
       ],
       "envReadCount": 14,
       "undeclaredEnvKeys": [],
-      "filesScanned": 35
+      "filesScanned": 39
     },
     {
       "name": "workbench",
@@ -230,8 +230,10 @@
       "managedBy": "用户/Desktop 直接启动（spec §6.10 的「客户唯一启动入口」）",
       "protocol": "进程内调度 + 按波次 spawn 五进程（PRT-251）",
       "ports": [],
-      "sensitiveEnv": [],
-      "declaredFieldCount": 9,
+      "sensitiveEnv": [
+        "TEAM_HUB_TOKEN"
+      ],
+      "declaredFieldCount": 11,
       "envReadKeys": [
         "LEGION_CACHE_DIR",
         "LEGION_DATA_DIR",
@@ -240,11 +242,13 @@
         "LEGION_LOG_DIR",
         "LEGION_PRODUCT_CONFIG",
         "LEGION_READINESS_TIMEOUT_MS",
-        "LEGION_WORKSPACE_DIR"
+        "LEGION_WORKSPACE_DIR",
+        "TEAM_HUB_TOKEN",
+        "TEAM_HUB_URL"
       ],
-      "envReadCount": 8,
+      "envReadCount": 10,
       "undeclaredEnvKeys": [],
-      "filesScanned": 64
+      "filesScanned": 65
     },
     {
       "name": "orchestrator",
@@ -277,7 +281,7 @@
       ],
       "envReadCount": 6,
       "undeclaredEnvKeys": [],
-      "filesScanned": 20
+      "filesScanned": 21
     },
     {
       "name": "runtime",
@@ -337,6 +341,7 @@
         "workbench",
         "board-plugin",
         "services-plugin",
+        "product",
         "orchestrator",
         "runtime"
       ],

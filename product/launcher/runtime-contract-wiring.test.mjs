@@ -303,6 +303,7 @@ async function boot({ tag, noPublish = false, seedStalePublication = null, over 
     resolved: L.runtimeContract(),
     codes: L.allDiagnostics().map((d) => d.code),
     envOf: (key) => L.envSurface().find((s) => s.process === key)?.values ?? null,
+    argsOf: (key) => L.commandSurface().find((s) => s.process === key)?.args ?? null,
     async stop() {
       await L.stop({ graceMs: 2000 })
       rmSync(root, { recursive: true, force: true })
@@ -381,6 +382,108 @@ test('①b ★★ Launcher 也把 `LEGION_DATA_DIR` 交给 worker（否则 worke
   assert.equal(b.envOf('runtime').LEGION_DATA_DIR, b.layout.dataDir)
   // 反向锚：宿主环境**故意**带一个不同的值，注入的那个必须赢
   assert.notEqual(b.layout.dataDir, process.env.LEGION_DATA_DIR)
+})
+
+// ═══════════════════════════════════════════ ①b′ 同一个形状的反面
+
+test('①b′ ★★★ Launcher 把 `LEGION_WORKSPACE_DIR` 交给 worker（否则一个任务都不认领）', async (t) => {
+  const b = await boot({ tag: 'workspacedir' })
+  t.after(() => b.stop())
+  assert.equal(b.started.ok, true, `启动失败：${JSON.stringify(b.started.failures)}`)
+
+  /**
+   * ★ 这一条与 ①b 是**同一个形状的反面**，两个都要有：
+   *
+   * ```
+   * LEGION_DATA_DIR       声明了，但 Launcher 从不给值  ⇒ 起来就退 8（崩溃循环）
+   * LEGION_WORKSPACE_DIR  连声明都没有                  ⇒ 宿主环境里配了也传不下去
+   * ```
+   *
+   * 第二种更安静：`buildChildEnv()` 只放行目标进程 `envNames` 里声明过的键，
+   * 于是 `LEGION_WORKSPACE_DIR` 被**丢掉**，子进程读到 `undefined`。
+   * 再往下走：`readWorkerEnv().workspaceDir === null`
+   * ⇒ `resolveWorkspaceStages()` 返回 `{ stages: null }`
+   * ⇒ worker 状态 `no-stages`，**一个任务都不认领**。
+   *
+   * 而它的外部表现只有状态文件里那一个词——没有错误、没有告警、
+   * 没有任何一条日志说"我少了一个变量"。从产品上看就是"任务一直没人做"。
+   *
+   *   > 一个"没声明所以被白名单丢掉"的变量，
+   *   > 与一个"根本没配"的变量，在子进程里是同一个读数（`undefined`）——
+   *   > 只不过前者的部署方会反复确认自己明明配过了。
+   */
+  assert.equal(b.envOf('orchestrator').LEGION_WORKSPACE_DIR, b.layout.workspaceDir,
+    `worker 的项目目录不是 Launcher 给的：${JSON.stringify(b.envOf('orchestrator'))}`)
+
+  // 反向锚①：宿主环境**故意**带一个不同的值，注入的那个必须赢
+  // （否则这一条断的只是"宿主碰巧有那个键"，与真的注入是两件事）
+  assert.notEqual(b.layout.workspaceDir, process.env.LEGION_WORKSPACE_DIR)
+
+  // 反向锚②：**只有 worker** 拿到它。hub / workbench / 白板不需要项目目录，
+  // 放行给它们会让"这个进程能读到什么"重新变成一件要猜的事。
+  // （runtime 也不需要：它的目录是**逐 Run** 由 `RunRequest.workdir` 给的。）
+  for (const key of ['team-hub', 'workbench', 'whiteboard', 'runtime']) {
+    const env = b.envOf(key)
+    if (env === null || env === undefined) continue
+    assert.equal('LEGION_WORKSPACE_DIR' in env, false,
+      `进程 ${key} 不该拿到 LEGION_WORKSPACE_DIR：${JSON.stringify(env)}`)
+  }
+})
+
+// ═══════════════════════════════════════════ ①d 端口真的到达 runtime 的 argv
+
+test('①d ★★★ PRT-251 续：`ports.runtime` 到达 DSH 的 argv，且**在所有 launcher 旗标之后**', async (t) => {
+  // 本缺口原来的一句话说：`ports.runtime` 收下、进计划、进诊断，**到不了 DSH**
+  // （runtime 的 `argsTemplate` 是 `[]`，`envNames` 里也没有端口键）。
+  //
+  // ★ 这一条断的是**顺序**，不是「argv 里有没有 --port」。
+  //   DSH 的命令行是「launcher 旗标段 + app 旗标段」，解析器遇到第一个不认识的
+  //   token 就停止解析自己的旗标。所以 `--port` 一旦跑到 `--patch` **前面**，
+  //   `--patch <覆盖层>` 就落进 app 段——**强制面补丁层静默消失**，
+  //   而这次启动照样成功、端口照样生效。
+  //
+  //   > 一个「端口修好了但强制面没了」的启动，
+  //   > 与一个「端口没修好、强制面还在」的启动，在**启动成功**这个读数上是
+  //   > 同一个东西——只不过前者看起来更像一次成功的修复。
+  //
+  //   而那条 argv 的观察口在此之前**不存在**（`envSurface()` 只看环境），
+  //   所以「覆盖层还在 launcher 段里」只能靠读代码相信。本批补了
+  //   `L.commandSurface()`。
+  const b = await boot({ tag: 'runtimeport' })
+  t.after(() => b.stop())
+
+  const args = b.argsOf('runtime')
+  assert.notEqual(args, null, 'runtime 没有命令（入口没解析出来）')
+
+  // ① 端口真的到了 argv，且值是**本次计划**那个端口
+  const runtimeStatus = b.L.status().processes.find((s) => s.key === 'runtime')
+  const expectedPort = runtimeStatus?.port
+  assert.ok(args.includes('--port'), `runtime 的 argv 里没有 --port：${JSON.stringify(args)}`)
+  assert.equal(args[args.indexOf('--port') + 1], String(expectedPort),
+    `--port 后面不是本次计划的端口：${JSON.stringify(args)}`)
+
+  // ② ★ 覆盖层仍在 **launcher 段**里：`--patch <文件>` 必须早于 `--port`
+  const patchAt = args.indexOf('--patch')
+  if (patchAt >= 0) {
+    assert.ok(patchAt < args.indexOf('--port'),
+      `--patch 跑到了 --port 后面，于是它变成 app 参数、强制面覆盖层静默失效：${JSON.stringify(args)}`)
+    // 覆盖层后面紧跟的就是那个文件（不是随便一个值）
+    assert.match(String(args[patchAt + 1]), /\.ya?ml$/, `--patch 后面不是一个补丁层文件：${JSON.stringify(args)}`)
+  }
+
+  // ③ 反向锚：**端口不进环境**。两条路径都能决定同一件事时，
+  //    「实际生效的是哪一个」会变成每次排障都要重新确认的问题
+  //    （与 workbench 那句理由逐字相同，见 launcher.mjs 的 PORT_ENV_KEYS）。
+  const env = b.envOf('runtime') ?? {}
+  for (const k of ['PORT', 'LEGION_RUNTIME_PORT']) {
+    assert.equal(k in env, false, `runtime 的环境里出现了端口键 ${k}：端口应当只有一个来源`)
+  }
+
+  // ④ 它的就绪 URL 用的是同一个端口（否则"探测的"与"监听的"是两个数）
+  if (runtimeStatus?.url) {
+    assert.match(runtimeStatus.url, new RegExp(`:${expectedPort}$`),
+      `就绪 URL 与 argv 的端口不一致：${runtimeStatus.url}`)
+  }
 })
 
 // ═══════════════════════════════════════════ ①c 真入口（不是探针）

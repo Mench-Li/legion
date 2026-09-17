@@ -97,6 +97,71 @@ const SCHEMA_SOURCES = [
   // 与 `employee_manifests.version`（"边界变过没有"——`sources.mjs` 拿它当来源版本，
   // 于是它决定快照哈希）。少任何一列，那两句话都无从回答。
   'contextPlanStore',
+  // F-05 后半（§4.1）：`event_subscribers` / `event_deliveries`。
+  //
+  // 这两张表进基线，是因为**它们就是"投递状态机"这件事本身**：
+  // `event_deliveries.state` 的取值集合就是那六态，`carrier_deadline_ms`
+  // （租约）就是"崩溃收敛为 unknown"的判据，`fanout` 就是"多个活连接
+  // 属于同一个订阅者"的落地。少任何一列，同一句 spec 都无从核对。
+  'eventDelivery',
+  // F-16（§4.4）：`automation_schedules` / `automation_runs`。
+  //
+  // ★ 这里有一条**必须进基线**的判据：`automation_runs` 上的
+  //   `UNIQUE(schedule_id, planned_at_ms)`。它不是索引偏好——它是
+  //   "同一个计划在同一时刻只能物化一次"的落地。只在应用层查重时，
+  //   两个进程会各查一次、各写一行，而那是**并发下的必然**。
+  //   唯一约束不在契约基线里，这件事就没有任何地方能核。
+  'automationStore',
+  // F-17（§4.3）：`compaction_messages` / `compaction_summaries`。
+  //
+  // 同样，表结构就是那三条要求在的落地：
+  //   · `compaction_messages.content` 只追加（无 UPDATE/DELETE 路径）⇒ "不可变原文"
+  //   · `compaction_summaries` 的 `PRIMARY KEY(session_id, version)` ⇒ "版本化"
+  //   · `covers_from_seq` / `covers_to_seq` ⇒ "引用回原文"
+  // 把 `version` 从主键里拿掉，第二条就会变成"改摘要"——而那是一次
+  // 静默的信息丢失，正是这三列要防的事。
+  'compactionStore',
+  // F-20 缺口③（§4.4）：`pack_install_facts`。
+  //
+  // 这张表进基线，是因为**它自己就是"team-hub 保存安装事实"这句话的落地**，
+  // 而它的形状承载了三条必须能核的要求：
+  //   · `seq` 是 PRIMARY KEY ⇒ "账只追加、顺序就是发生顺序"（重号即写入失败）
+  //   · `kind` 的取值集合里有 `rollback` ⇒ "安装可回滚"在账上有一条**自己的**
+  //     方向，而不是伪装成 install / upgrade
+  //   · `content_hash` / `declared_content_hash` 两列并存 ⇒ "账上记的是算出来的
+  //     那一个，不是作者声明的那个"
+  // 把 `seq` 从主键里拿掉，第一条就没有任何地方能核——而它是这份账唯一
+  // 能证明"没有静默重排"的东西。
+  'packFacts',
+  // F-19（§4.4）：`role_packs`（冻结的岗位包）。
+  //
+  // ★ 它与 `employee_manifests` **必须**是两张表，而这条正是要进基线的判据：
+  //   后者主键 `(scope, role)` 且就地更新，回答"这个岗位**现在**是什么"；
+  //   前者主键 `(scope, role_pack_id, version)`，回答"**当时**是哪一版"。
+  //   把后者塞进前者，第二次修改就把第一次的答案覆盖掉了——
+  //   而 `version` 进主键这件事**没有别的地方能核**：少了它，
+  //   "冻结"与"只保留最近一版"在 schema 上长得一模一样。
+  'rolePackStore',
+  // F-18（§4.4）：`experience_records`（经验图谱 + 摩擦草稿的**只追加**记录流）。
+  //
+  // ★ 进基线的判据是"这张表**没有** UPDATE 路径"这件事本身：
+  //   "图现在长什么样"与"这条草稿现在是什么状态"都是从记录流**推导**出来的。
+  //   一旦有人给它加上一段就地更新，推导就变成了第二份真相，
+  //   而它与记录流不一致时**没有任何东西能判定谁对**。
+  //   这条性质在 schema 上只体现为"只有一张表、没有状态列"——
+  //   正是那种"改坏了也看不出来"的契约，所以必须钉住。
+  'experienceStore',
+  // F-21（§4.4）：`connector_registrations`（按内容哈希冻结的连接器声明）
+  // 与 `connector_incidents`（点名的熔断事件）。两张都是**只追加**。
+  //
+  // ★ 进基线的判据与 F-18/F-19 同源，但这一处更重：
+  //   连接器声明说的是"一个**外部进程**能拿到什么权限"。
+  //   一旦有人给它加上一段就地更新（"把策略改一下"），
+  //   "当时放行了哪些工具"这个问题就在**写的那一刻**失去唯一答案——
+  //   而这正是事后复盘唯一要问的问题。
+  //   这条性质在 schema 上只体现为"没有状态列、没有 UPDATE 路径"，
+  //   正是那种"改坏了也看不出来"的契约，所以必须钉住。
+  'connectorStore',
 ]
 
 // 这些模块也一并纳入 sources 哈希：它们变了，基线里的表清单就可能过期。
@@ -115,6 +180,13 @@ SOURCES.toolCallLog = join(ROOT, 'team-hub', 'tool-call-log.mjs')
 //   不登记的后果正是这道门禁存在的理由——表在真实 schema 里多出来，
 //   而 `--check` 兴高采烈地说"无漂移"。
 SOURCES.contextPlanStore = join(ROOT, 'team-hub', 'context-plan-store.mjs')
+SOURCES.eventDelivery = join(ROOT, 'team-hub', 'event-delivery.mjs')
+SOURCES.automationStore = join(ROOT, 'team-hub', 'automation-store.mjs')
+SOURCES.compactionStore = join(ROOT, 'team-hub', 'compaction-store.mjs')
+SOURCES.packFacts = join(ROOT, 'team-hub', 'pack-facts.mjs')
+SOURCES.connectorStore = join(ROOT, 'team-hub', 'connector-store.mjs')
+SOURCES.rolePackStore = join(ROOT, 'team-hub', 'role-pack-store.mjs')
+SOURCES.experienceStore = join(ROOT, 'team-hub', 'experience-store.mjs')
 
 /**
  * 采集 schema 的目录。

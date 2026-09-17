@@ -1,0 +1,50 @@
+{
+  "mode": "worker",
+  "role": "soldier-auto",
+  "provider": "spawn",
+  "maxWorkers": 1,
+  "isolate": true,
+  "intervalMs": 15000,
+  "workerTimeoutMs": 1500000,
+  "staleMinutes": 40,
+  "taskTtlMinutes": 0,
+  "scope": "gf001",
+  "paused": false,
+  "pipeline": {
+    "name": "gf001",
+    "source": "hub",
+    "version": "95ae6bfd103cdcef",
+    "stages": [
+      "planner",
+      "implementer",
+      "reviewer"
+    ]
+  },
+  "inbox": 0,
+  "lastSweepAt": "2026-09-11T15:38:54.188Z",
+  "uptimeMs": 11309843,
+  "model": {
+    "provider": "custom-ds",
+    "model": "deepseek-v4-flash-vision-openai"
+  },
+  "repo": {
+    "root": "D:/project/DSH/gf001-scratch",
+    "binding": "space:gf001",
+    "localDir": "D:\\project\\DSH\\gf001-scratch",
+    "remoteUrl": ""
+  },
+  "chat": {
+    "lastReplyAt": null,
+    "lastFailAt": null,
+    "lastFailReason": ""
+  },
+  "rulesDoctor": {
+    "ok": true,
+    "truncated": false,
+    "removedSources": [],
+    "total": 0,
+    "present": 0,
+    "missing": [],
+    "checkedAt": "2026-09-11T15:38:54.188Z"
+  }
+}

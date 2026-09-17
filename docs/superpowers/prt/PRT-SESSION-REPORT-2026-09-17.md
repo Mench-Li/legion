@@ -585,6 +585,8 @@ node scratch/probe-identity-loop.mjs                                         # �
 node scripts/config/scan.mjs --check                                         # PASS（1129 条）
 node scripts/prt/reachability.mjs --diff                                     # 与基线一致（46 条）
 node scratch/verify-reachability-entry.mjs                                   # 破验 2/2 咬住、还原逐字节一致
+node scratch/verify-credential-resolver.mjs                                  # 破验 ㉙ 咬住、还原逐字节一致
+node scratch/probe-real-declaration-chain.mjs                                # 真 DSH：解析 → 声明 ['DEEPSEEK_API_KEY']
 node scripts/prt/progress-check.mjs ; node scripts/prt/spec-progress.mjs --check
 ```
 
@@ -666,7 +668,98 @@ board-plugin/src/index.ts:18 同一个模块（编成 board-plugin/lib/index.js�
 "已变异"状态，随后被 `git add -A` 收进索引）。这里的还原写在 `finally` 里，
 **从"跑完之后"改成"无论如何"**，并把"还原逐字节一致"也打印出来当读数。
 
-### 10.8 本轮的诚实边界
+### 10.8 ★★★ 本轮**第二处、也是更要紧的一处**真缺陷：自动映射在生产里恒不工作
+
+§10.7 那处是**探针**误报（产品是好的）。这一处相反：**产品真的坏了**，
+而所有既有判据都是绿的。
+
+#### 缺口挂在台账上，但被记成了"边界"而不是"未验证的假设"
+
+`docs/superpowers/prt/PRT-PROGRESS.md` 的 PRT-509 行末尾一直写着三条 🟡，其中第 ② 条是：
+
+> ② **生产默认句柄工厂**（走 `resolveDshBaseBundlePatchPath` 解析器那条路）
+> **只有注入式覆盖**，真实调用没跑过
+
+这一句读起来像一条**诚实的保留**——"我们知道这里没验证过"。而它不是：
+**真实调用不是"没跑过"，是跑不了**。这两件事在台账上写成同一句话，
+但一个是"待补验证"，另一个是**恒失效的接线**。
+
+> 一个「只有注入式覆盖 ⇒ 真实调用没跑过」的记录，
+> 与一个「生产里恒不工作」的记录，在台账上是同一句话——
+> 只不过前者等的是一次验证，而后者等的是一次修复。
+
+#### 那处缺陷本身
+
+`resolveDshBaseBundlePatchPath()` 里写着（`product/launcher/run-credential-materialization.mjs`）：
+
+```js
+const usable = (r) => r !== null && typeof r === 'object' && typeof r.resolve === 'function'
+```
+
+而**生产走的是不注入那条路**，它拿到的 `req = createRequire(entry)` 是一个**函数**：
+
+```text
+typeof createRequire(entry)          = 'function'   ← 不是 'object'
+typeof createRequire(entry).resolve  = 'function'
+usable() per 旧判据                   = false        ← 被当成"没注入"
+```
+
+于是 `return null` → 调用方翻成 `DSH_DECLARATION_UNLOCATABLE` → 覆盖层退回**空操作**。
+**自动映射这条路在生产里一次都没有成功过**，而它的读数是一条看起来完全正常的具名降级。
+
+★ 而这行代码**上面三行就是一段注释**，逐字写着要防的正是这一类错误：
+
+```js
+// 判据按"有没有那个方法"来，而不是按"是不是函数"：一个按后者写的判据会把
+// 所有以对象形状注入的替代实现（用例最自然的注入形状）当成"没注入"……
+```
+
+**注释防的是"按是不是函数来判"，实现加的是"必须是对象"**——同一个错误的镜像，
+而后者的后果更重（前者会把用例的注入形状判错，后者会把**生产**的形状判错）。
+
+#### 为什么用例看不见：注入的形状与生产拿到的形状**不是同一个**
+
+| 形状 | 来源 | 旧判据 |
+|---|---|---|
+| `{ resolve }`（对象） | **只有用例** | ✅ 通过 |
+| 函数带 `.resolve` | **只有生产** | ❌ 被当成"没注入" |
+
+> 一个"只在用例注入的那个形状下能跑"的解析器，
+> 与一个"在生产里恒不工作"的解析器，是同一个东西——
+> 只不过前者的用例是绿的，而绿的理由恰恰是
+> **用例注入的形状与生产拿到的形状不是同一个**。
+
+#### 修法与实测
+
+判据收成一句：**有 `.resolve` 就能用**（对象或函数都行）。
+新增用例**必须用函数**钉（用对象再测一遍是重复，而重复正是原缺陷藏身的方式），
+外加两条反向（函数但无 `.resolve` ⇒ 仍不可用；字符串 ⇒ 不可用）。
+
+真 DSH 检出上的实测（`scratch/probe-patch-resolution-precise.mjs` /
+`scratch/probe-real-declaration-chain.mjs`，入口 `apps/cli/lib/bin.js`，
+即 DSH 自己的 `package.json` 里 `bin.dsh` 指的那个文件）：
+
+| 步骤 | 修前 | 修后 |
+|---|---|---|
+| 生产函数（**不注入任何东西**） | `null` | `…\packages\bundle\base\cordis.patch.yml` |
+| 读回 `apiKeyEnv` 声明 | （走不到） | `['DEEPSEEK_API_KEY']`（20193 字节） |
+| 对照：`createRequire(entry).resolve(…)` | 解析得到 | 解析得到 |
+
+破坏性验证 **㉙ 咬住**：把判据还原成"必须是对象" ⇒ 新增那条用例**精确变红**；
+还原后与提交版**逐字节相同**。
+
+★★ 这一步还咬出了 harness 自己的一个坑：第一版变异脚本报"**没咬住**"，
+而真相是**锚点锚到了注释上**——那段注释里逐字抄了一遍旧代码，于是脚本改的是注释，
+真代码一个字没动。
+
+> 一条"改了注释所以行为不变"的变异，
+> 与一条"靶子根本没被改到"的变异，在读数上是同一个"没咬住"——
+> 只不过前者的结论是"这段代码没有对应判据"，而后者是"我的锚点写错了"。
+
+修法是把锚点钉在新代码**独有**的那半句上（`r !== null && r !== undefined`），
+注释里抄的是 `typeof r === 'object'`，两者再也匹配不到一起。
+
+### 10.9 本轮的诚实边界
 
 1. **上一批的三条缺口，本轮的验证是在它们的用例与探针上复跑的**，
    不是在一次**真实多空间部署**里目击的——`scope` 对不上 `permission_rules`
@@ -688,3 +781,12 @@ board-plugin/src/index.ts:18 同一个模块（编成 board-plugin/lib/index.js�
    而 §5.4 的正文只点名了另外几族）——这不是"所以它不重要"，
    而是"它下次可能会被点名"。**一条误报的代价不是这一次错了，
    是下一次有人照着它去查一个正在跑的服务。**
+9. §10.8 修掉的是**真代码**，但**没有**因此把 PRT-509 从 🟡 改成 ✅：
+   它剩下的第 ① 条（win32 上 0600 不可证）与第 ③ 条（不是一次真进程端到端）
+   **照旧**。本轮只关掉了第 ② 条——而那条被关掉的方式是**修了一个缺陷**，
+   不是补了一次验证。★ 口径由项目方定（同 §5 第 18 条的处理）。
+10. §10.8 的实测用的是 `D:\project\DSH\dsh\deepseek-harness` 这份**开发检出**上的
+   `apps/cli/lib/bin.js`。我**没有**在路线 C（npm 装进
+   `<DataDir>/runtime/dsh/versions/<版本>/`）的目录形状上跑过——
+   那条路正是这个函数用 `createRequire` 而不是拼路径的**理由**，
+   但"理由说得对"与"那条布局上验过"是两件事。

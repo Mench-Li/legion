@@ -1,0 +1,23 @@
+﻿=== node scripts/ci/check-docs.mjs  ===
+check-docs: PASS（README.md + docs/FEATURES.md 结构/链接/索引一致，8 类校验项全绿）
+
+=== node scripts/ci/check-docs.mjs --help ===
+check-docs.mjs — Legion 文档新鲜度机器校验（零第三方依赖，仅 node:fs/re/path）
+
+校验对象：README.md（总览）+ docs/FEATURES.md（功能手册）
+校验项：
+  1. 功能索引提取（>=18 行 / 0 坏列 / 状态枚举）
+  2. 功能索引锚点（锚点=真实标题）
+  3. 功能正文非空（>=5 行且含入口/操作）
+  4. README→手册互链（锚点 0 失效）
+  5. 段落去重（>=3 行同文块=0）
+  6. 关键项不丢（三件套/DSH Desktop/三分钟循环）
+  7. 无过程叙事（P1/P2/P3·已交付 / 切片 Sx·已交付 = 0）
+  8. 内联锚点链接（[t](#anchor) 的锚点必须是本文件真实标题）
+
+用法：
+  node scripts/ci/check-docs.mjs            # 校验当前文档，满足则 exit 0
+  node scripts/ci/check-docs.mjs --help     # 本说明（exit 0）
+
+失败时输出 FAIL: <文件>:<行> … 并 exit 非 0；只判结构/链接/索引一致，不判语义。
+

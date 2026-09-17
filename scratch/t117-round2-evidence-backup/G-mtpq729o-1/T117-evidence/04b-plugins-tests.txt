@@ -1,0 +1,19 @@
+== TC-S4-12 plugins typecheck（依赖就位：junction main plugins/node_modules + lib 复制）==
+
+A. 干净提交树（worktree plugins/src，== HEAD ca9b45c）：
+   命令: node D:/project/DSH/legion/workbench/node_modules/typescript/bin/tsc -p plugins/tsconfig.json --noEmit
+   exit=2  错误: plugins/src/index.ts(29,10): error TS2305: Module '"./skillsCache.js"' has no exported member 'formatSkill'.
+
+B. main 工作树（含未提交 skillsCache.ts：bundle/formatSkill 47 行 WIP）：
+   命令同 A（cwd=main）→ exit=0，0 诊断。
+
+→ 差异定位：ca9b45c 提交了 plugins/src/index.ts 的 formatSkill import+用法（:29/:1427），
+  但 skillsCache.ts 的 formatSkill/SkillBundle 实现只在 main 工作树未提交（git diff HEAD -- plugins/src/index.ts = 空；
+  git log -S formatSkill 仅 ca9b45c 命中且只改 index.ts）→ 提交树自洽性破坏（V-1，P0 类）。
+  归属：ca9b45c（RC-2 修复提交混入脏工作树 formatSkill 改动，未同批提交 skillsCache.ts）。
+  复现：任何 fresh checkout + cd plugins && tsc -p tsconfig.json --noEmit → TS2305。
+  建议（供将军裁决）：①提交 main 工作树 skillsCache.ts 的 bundle/formatSkill 实现；或②在 index.ts 还原 sharedSkills 拼接（去掉 formatSkill 引用）。
+
+== TC-S4-13 plugins 既有套件回归（node --test tests/*.test.mjs，worktree plugins，junction 依赖 + lib）==
+  结果：tests=52 pass=52 fail=0 cancelled=0（全绿）
+  关键套件命中：doc-contract（docSync 契约路径断言 ✔）、artifact-register（契约登记/缺失停 in_review/补全重跑/M1 回归 ✔）、worker-regression、norms、chat-responder、goal-context、slice-orchestration、skills-fingerprint。

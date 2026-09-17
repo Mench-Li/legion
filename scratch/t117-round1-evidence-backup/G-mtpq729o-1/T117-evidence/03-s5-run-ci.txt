@@ -1,0 +1,38 @@
+== TC-S5-01 阶段清单（源码 STAGES 数组）==
+STAGES = env, deps, build, test, smoke, stage, doc（共 7 个；doc 末位）
+期望 env,deps,build,test,smoke,stage,doc → 一致 PASS
+
+== TC-S5-02 当前 CRLF checkout：--only doc ==
+(exit 1)
+===== [doc] 文档新鲜度校验（check-docs.mjs） =====
+doc: 文档新鲜度校验（check-docs.mjs）exit=1
+  输出要点：FAIL: D:\project\DSH\legion\.legion-worktrees\T-117\README.md:107 — 互链锚点失效：docs/FEATURES.md#315-任务收尾审计 | FAIL: D:\project\DSH\legion\.legion-worktrees\T-117\README.md:110 — 互链锚点失效：docs/FEATURES.md#316-team-hub-数据与接口一览 | FAIL: D:\project\DSH\legion\.legion-worktrees\T-117\README.md:113 — 互链锚点失效：docs/FEATURES.md#317-v1-遗留与迁移 | FAIL: D:\project\DSH\legion\.legion-worktrees\T-117\README.md:156 — 互链锚点失效：docs/FEATURES.md#51-故障排查
+→ doc FAIL（44 处 CRLF 假红，根因见 02/04；LF 镜像下 exit 0 → 内容本身无问题）
+
+== TC-S5-03/09 --skip doc --only env ==
+(exit 0)
+selected: env
+===== [env] 环境自检 =====
+[env] -> PASS (86ms)
+
+== TC-S5-02 LF 镜像正向 --only doc ==
+(exit 0)
+===== [doc] 文档新鲜度校验（check-docs.mjs） =====
+doc: 文档新鲜度校验（check-docs.mjs）exit=0
+
+== TC-S5-04 LF 负向（README 坏锚点）--only doc ==
+(exit 1)
+  输出要点：check-docs: FAIL（1 处问题，详见上方 FAIL 行） | FAIL: D:\project\DSH\legion\.legion-worktrees\T-117\scratch\t117-lf-mirror\README.md:63 — 互链锚点失效：docs/FEATURES.md#bad-anchor-xyz
+[doc] -> FAIL (105ms)
+
+== TC-S5-13 坏锚点 + --skip doc --only env ==
+(exit 0)（doc 被跳过不阻塞）
+
+== 还原后 --only doc ==
+(exit 0)
+===== [doc] 文档新鲜度校验（check-docs.mjs） =====
+doc: 文档新鲜度校验（check-docs.mjs）exit=0
+
+== TC-S5-06/12 失败证据可查 ==
+summary.json stages: [{"name":"doc","status":"FAIL","ms":105}]
+ci.log: ===== [doc] 文档新鲜度校验（check-docs.mjs） ===== | [doc] -> FAIL (122ms) | ===== [doc] 文档新鲜度校验（check-docs.mjs） ===== | [doc] -> FAIL (105ms)

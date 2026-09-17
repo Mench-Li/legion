@@ -1,0 +1,28 @@
+== TC-S3-05 坏内联锚点注入（LF 镜像）==
+(exit 1)
+FAIL: D:\project\DSH\legion\.legion-worktrees\T-117\scratch\t117-lf-mirror\docs\FEATURES.md:4 — 内联锚点失效：#no-such-heading-xyz
+check-docs: FAIL（1 处问题，详见上方 FAIL 行）
+还原后 (exit 0): check-docs: PASS（README.md + docs/FEATURES.md 结构/链接/索引一致，8 类校验项全绿）
+
+== TC-S3-06 索引坏列注入（LF 镜像）==
+(exit 1)
+FAIL: D:\project\DSH\legion\.legion-worktrees\T-117\scratch\t117-lf-mirror\docs\FEATURES.md:233 — 索引行列数=4（需 5 列）：F-18 | 故障排查 | 5.1 故障排查 | 已上线
+check-docs: FAIL（1 处问题，详见上方 FAIL 行）
+还原后 (exit 0): check-docs: PASS（README.md + docs/FEATURES.md 结构/链接/索引一致，8 类校验项全绿）
+
+== TC-S3-07 README 断链注入（LF 镜像）==
+(exit 1)
+FAIL: D:\project\DSH\legion\.legion-worktrees\T-117\scratch\t117-lf-mirror\README.md:63 — 互链锚点失效：docs/FEATURES.md#nope-bad-anchor
+check-docs: FAIL（1 处问题，详见上方 FAIL 行）
+还原后 (exit 0): check-docs: PASS（README.md + docs/FEATURES.md 结构/链接/索引一致，8 类校验项全绿）
+
+== TC-S3-04/10 零第三方依赖：脚本 import 区 ==
+import { readFileSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+== TC-S3-03 覆盖项（--help 列出 8 项，≥3 且含 README→手册锚点/索引提取/索引锚点）==
+覆盖项清单见上方 --help 输出 1..8。
+
+== TC-S3-08 scope ==
+脚本注释与 --help 明示：只判结构/链接/索引一致，不判语义（AC-R5 scope / I-6）。

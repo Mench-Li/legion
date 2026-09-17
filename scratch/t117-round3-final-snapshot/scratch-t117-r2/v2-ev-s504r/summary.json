@@ -1,0 +1,13 @@
+{
+  "root": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-117",
+  "outDir": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-117\\scratch\\t117-r2\\v2-ev-s504r",
+  "finishedAt": "2026-09-07T09:24:39.424Z",
+  "stages": [
+    {
+      "name": "doc",
+      "status": "PASS",
+      "ms": 111
+    }
+  ],
+  "failed": 0
+}

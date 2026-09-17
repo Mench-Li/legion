@@ -52,7 +52,7 @@
       ],
       "envReadCount": 14,
       "undeclaredEnvKeys": [],
-      "filesScanned": 38
+      "filesScanned": 39
     },
     {
       "name": "workbench",
@@ -230,7 +230,9 @@
       "managedBy": "用户/Desktop 直接启动（spec §6.10 的「客户唯一启动入口」）",
       "protocol": "进程内调度 + 按波次 spawn 五进程（PRT-251）",
       "ports": [],
-      "sensitiveEnv": [],
+      "sensitiveEnv": [
+        "TEAM_HUB_TOKEN"
+      ],
       "declaredFieldCount": 11,
       "envReadKeys": [
         "LEGION_CACHE_DIR",
@@ -339,6 +341,7 @@
         "workbench",
         "board-plugin",
         "services-plugin",
+        "product",
         "orchestrator",
         "runtime"
       ],

@@ -1,0 +1,15 @@
+﻿=== per-slice declared cases ===
+S1: count=15 contiguous=true cat={"normal":9,"boundary":1,"exception":5} pri={"0":14,"1":1}
+S2: count=13 contiguous=true cat={"normal":8,"boundary":3,"exception":2} pri={"0":10,"1":2,"2":1}
+S3: count=10 contiguous=true cat={"normal":4,"exception":4,"boundary":2} pri={"0":8,"1":2}
+S4: count=15 contiguous=true cat={"normal":8,"exception":5,"boundary":2} pri={"0":12,"1":3}
+S5: count=13 contiguous=true cat={"normal":5,"exception":4,"boundary":4} pri={"0":6,"1":5,"2":2}
+=== totals ===
+declaredTotal=66 uniqueIds=66 dup=0
+categoryTotal={"normal":34,"boundary":12,"exception":20}
+priorityTotal={"0":50,"1":13,"2":3}
+referencedDistinctIds=66
+danglingRefs=0
+unknownCategory=0
+=== verdict ===
+PASS

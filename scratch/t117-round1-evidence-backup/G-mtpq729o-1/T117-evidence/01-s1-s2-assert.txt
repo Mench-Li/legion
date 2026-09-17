@@ -1,0 +1,48 @@
+== run: node docs/G-mtpq729o-1/T117-evidence/assert-docs.mjs ==
+(exit 1)
+== S1 docs/FEATURES.md ==
+  [PASS] TC-S1-01 存在非空且首行 # 标题
+  [PASS] TC-S1-02 标题行含「功能使用介绍」
+  [PASS] TC-S1-03 六类章节标题: 一句话定位
+  [PASS] TC-S1-03 「一句话定位」章节域非空（正文行=6）
+  [PASS] TC-S1-03 六类章节标题: 面向读者
+  [PASS] TC-S1-03 「面向读者」章节域非空（正文行=4）
+  [PASS] TC-S1-03 六类章节标题: 快速开始
+  [PASS] TC-S1-03 「快速开始」章节域非空（正文行=19）
+  [PASS] TC-S1-03 六类章节标题: 模块章节
+  [PASS] TC-S1-03 「模块章节」章节域非空（正文行=99）
+  [PASS] TC-S1-03 六类章节标题: 功能索引
+  [PASS] TC-S1-03 「功能索引」章节域非空（正文行=21）
+  [PASS] TC-S1-03 六类章节标题: 故障排查与术语附录
+  [PASS] TC-S1-03 「故障排查与术语附录」章节域非空（正文行=35）
+  [PASS] TC-S1-04 索引行数=18 >= 18
+  [PASS] TC-S1-04 0 坏列（bad=0）
+  [PASS] TC-S1-07 状态枚举合法（bad=0）
+  [PASS] TC-S1-05 索引锚点 0 失效（bad=0）
+  [PASS] TC-S1-06 索引对应小节 >=5 行（short=0）
+  [PASS] TC-S1-06 小节含入口/操作（miss=0）
+  [PASS] TC-S1-07/13 无过程叙事（count=0）
+  [PASS] TC-S1-13(反) 注入叙事可检出
+  [PASS] TC-S1-11(反) 4 列坏行可检出
+  [PASS] TC-S1-12(反) 失效锚点可检出
+  [PASS] TC-S1-08 手册 3.x 小节(17)>=README 引导数(12)
+  [PASS] TC-S1-08 README §2 细节承接
+  [PASS] TC-S1-09 18 功能域索引登记齐全（missing=[]）
+  [PASS] TC-S1-15 无目标级目录路径书写
+== S2 README.md ==
+  [PASS] TC-S2-01 README 非空 MD
+  [PASS] TC-S2-02 互链数=20 >= 8
+  [PASS] TC-S2-03 互链锚点 0 失效（bad=[]）
+  [PASS] TC-S2-11(反) 无目标级路径漂移
+  [PASS] TC-S2-04 逐字重复块=0（dup=0）
+  [PASS] TC-S2-05 三件套/DSH Desktop/三分钟 在二文件之一
+  [PASS] TC-S2-05 README §6 排障主题仍在（miss=[]）
+  [PASS] TC-S2-10(反) 删除关键项可检出
+  [PASS] TC-S2-06 README 无过程叙事
+  [PASS] TC-S2-06 附录互链历史记录文档
+  [PASS] TC-S2-06 正文（除附录）无 P0-P3/已交付 叙事
+  [PASS] TC-S2-07 README 围栏配对
+  [PASS] TC-S2-07 README 表格分隔行存在
+  [PASS] TC-S2-07 README 表头存在
+  [FAIL] TC-S2-13 FEATURES→README 反向关键链接 >=1（实际=0）
+RESULT: pass=42 fail=1

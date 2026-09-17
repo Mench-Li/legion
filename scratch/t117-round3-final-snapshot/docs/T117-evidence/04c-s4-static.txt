@@ -1,0 +1,28 @@
+== S4 静态审计（源码级，HEAD=ca9b45c）==
+
+-- TC-S4-02 D1：stage-standards.mjs coder/devops「用户可见行为变更须同步功能手册+README」验收项 --
+HEAD:team-hub/stage-standards.mjs:102:      '用户可见行为变更（feature/docSync）须同步功能手册 docs/FEATURES.md 对应小节 + 功能索引 + README 引导段；纯重构/测试可豁免',
+HEAD:team-hub/stage-standards.mjs:148:      '用户可见行为变更（feature/docSync）须同步功能手册 docs/FEATURES.md 对应小节 + 功能索引 + README 引导段；纯重构可豁免',
+
+-- TC-S4-02 roles.json 未被本批改动（I-5：只增不改岗位语义）--
+  git diff cba1fb7..HEAD -- roles.json 输出: 空（0 改动）
+
+-- TC-S4-03 D3：plugins/src/index.ts buildWorkerPrompt docSync 提示词注入分支 --
+HEAD:plugins/src/index.ts:1397:            '文档同步（doc-sync，R-4/D3）**必须**：本任务是「用户可见行为变更」——请同步更新功能手册 `docs/FEATURES.md` 对应小节 + §4 功能索引（F-xx 行）+ README 引导段（模块导航互链）。若该功能手册尚无对应小节，请新增并登记进功能索引。',
+
+-- TC-S4-03/08 I-3：GOAL_DOC_NAMES 白名单不含 docs/FEATURES.md 与 README.md（不被 goalize 改写进目标目录）--
+HEAD:plugins/src/index.ts:466:  const GOAL_DOC_NAMES = ['REQUIREMENTS.md', 'RESEARCH.md', 'TASK_BREAKDOWN.md', 'TEST_CASES.md', 'TEST_REPORT.md', 'DEPLOY.md']
+HEAD:plugins/src/index.ts:483:  const goalizeContractPath = (goal: GoalCtx | null | undefined, p: string): string => {
+HEAD:plugins/src/index.ts:1218:      const rel = goalizeContractPath(goal, rawRel)
+
+-- TC-S4-01/08 契约路径=绝对仓库相对路径硬编码 docs/FEATURES.md + README.md（resolveStageDocPathsWithDocSync 纯函数，I-2）--
+HEAD:plugins/src/index.ts:418:    for (const p of ['docs/FEATURES.md', 'README.md']) if (!paths.includes(p)) paths.push(p)
+
+-- TC-S4-10 幂等：登记 digest 比对不重复登记 + settle 评论不刷屏 --
+  plugins/src/index.ts 登记幂等：字节未变 continue 跳过（fileDigest 比对），见 registerContractDocs 源码与 04b artifact-register 套件断言
+
+-- TC-S4-11/15 M2 catch：登记写失败绝不并入 missing、单路径失败不中断整批（进程存活）--
+  registerContractDocs 逐路径 try/catch：existsSync 缺失 → missing.push + continue；登记抛错 → log 后继续下一条（见 04 源码走查）
+
+-- TC-S4-14 I-1 零新增运行时依赖 --
+  本批 git diff f0261fc~1..HEAD 无 package.json/pnpm-lock 变更（见证据 02）；plugins/src/index.ts 无新第三方 import

@@ -1,0 +1,20 @@
+== 迁移语义（mini sqlite，= ensureColumn ADD COLUMN docSync INTEGER DEFAULT 0）==
+legacy 行读回: docSync=0（现存行默认 0，不丢数据）
+新插入行 docSync=1 读回=1
+→ server.mjs ensureColumn(goal/tasks, docSync) 迁移对老库安全（与 fileDomain/context 等既有列同机制）
+
+== 回归范围（本批合入内容 = f0261fc T-115 + ca9b45c RC1-3，对照 cba1fb7 T-114 基线）==
+涉及文件: README.md, docs/FEATURES.md, docs/G-mtpq729o-1/T115-evidence/01-check-docs.txt, docs/G-mtpq729o-1/T115-evidence/02-s1-s2-verify.txt, docs/G-mtpq729o-1/T115-evidence/03-run-ci-doc.txt, docs/G-mtpq729o-1/T115-evidence/04-negative-injection.txt, docs/G-mtpq729o-1/T115-evidence/05-s4-sim.txt, docs/G-mtpq729o-1/T115-evidence/06-syntax.txt, docs/G-mtpq729o-1/T115-evidence/07-s5-negative.txt, docs/G-mtpq729o-1/T115-evidence/README.md, docs/goals/G-mtpq729o-1.md, docs/review/T-116-REVIEW.md, plugins/src/index.ts, plugins/tests/artifact-register.test.mjs, plugins/tests/doc-contract.test.mjs, plugins/tests/worker-regression.test.mjs, scratch/s4-docsync-sim.mjs, scratch/scan-links.mjs, scratch/verify-docs.mjs, scripts/ci/check-docs.mjs, scripts/ci/run-ci.mjs, team-hub/server.mjs, team-hub/stage-standards.mjs, workbench/src/App.tsx, workbench/src/components/ChatView.tsx, workbench/src/components/RulesPanel.tsx, workbench/src/components/SkillsPanel.tsx, workbench/src/index.css
+
+== 静态回归结论 ==
+1. roles.json：cba1fb7..HEAD 0 改动 → 岗位/契约数据模型不变（doc-contract EXPECTED 断言通过）。
+2. stage-standards.mjs：仅追加 coder/devops 各 1 条 acceptance（:102/:148 带豁免条款），岗位 do/dont 语义未改。
+3. team-hub/server.mjs：RC-2 为纯增量（+goal/tasks docSync 列、insertGoalTask/createTask/rowToTask/rowToGoal 读写、/api/goal 与 /api/create 透传、expandGoalSlices 读目标声明）；既有任务/目标读写路径行为不变（hub E2E 中默认 false、幂等 boolean、读回正常佐证）。
+4. plugins/src/index.ts：docSync 消费改为纯函数 resolveStageDocPathsWithDocSync（既有 stage.docs 语义不变：非 docSync 原样返回）；T-107 登记/预览路径 M1 回归在 artifact-register 套件 52/52 通过。
+5. run-ci.mjs：仅 stageDoc 失败态输出增强 + doc 阶段保持；STAGES 六阶段+doc 顺序与 --only/--skip 语义实测保持。
+6. 行尾事实（00-env）：README/FEATURES/check-docs/run-ci 均 i/lf w/crlf（core.autocrlf=true）；check-docs RC-1 归一化后真实 CRLF checkout 全绿。
+
+== 已知残留 ==
+A. V-1（新发现，P0 类）：ca9b45c 提交树 plugins 不可 typecheck —— index.ts import formatSkill 但 skillsCache.ts 无导出（实现仅在 main 工作树未提交）→ TC-S4-12 干净树 FAIL。见证据 04b。
+B. TC-S2-13（RC-4，P2）：手册→README 反向锚链仍为 0——将军裁决记 backlog，本期不补、不阻塞。
+C. 环境受限（R-18，不冒充通过）：run-ci 全量五阶段（deps/build/test/smoke/stage）与 S4 真实守护 worker 闭环需宿主/CI（node_modules + 可用端口），见 TC-S5-02 说明。

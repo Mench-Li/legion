@@ -1,0 +1,195 @@
+== T-117 round-2（复测，HEAD=ca9b45c 含 RC1-3 修复）S5 run-ci.mjs doc 门禁验证 ==
+--- 执行环境：run_code 宿主进程直跑（pwsh 沙箱 spawn pipe 捕获 EPERM——R-18/T-093 先例；宿主跑与普通终端等价）。真实 CRLF checkout。 ---
+
+[TC-S5-02/06/12 正向] --only doc
+[cmd] node D:\project\DSH\legion\.legion-worktrees\T-117\scripts\ci\run-ci.mjs --only doc --out D:\project\DSH\legion\.legion-worktrees\T-117\scratch\t117-r2\v2-ev-s502
+exit=0
+Legion CI run: root=D:\project\DSH\legion\.legion-worktrees\T-117 node=24.19.0
+all stages: env,deps,build,test,smoke,stage,doc | out=D:\project\DSH\legion\.legion-worktrees\T-117\scratch\t117-r2\v2-ev-s502
+selected: doc
+
+===== [doc] 文档新鲜度校验（check-docs.mjs） =====
+doc: 文档新鲜度校验（check-docs.mjs）exit=0
+  输出要点：check-docs: PASS（README.md + docs/FEATURES.md 结构/链接/索引一致，8 类校验项全绿）
+[doc] -> PASS (115ms)
+
+===== SUMMARY =====
+  doc    PASS (114ms)
+summary.json -> D:\project\DSH\legion\.legion-worktrees\T-117\scratch\t117-r2\v2-ev-s502\summary.json
+
+summary.json:   "root": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-117",
+  "outDir": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-117\\scratch\\t117-r2\\v2-ev-s502",
+  "finishedAt": "2026-09-07T09:24:38.844Z",
+  "stages": [
+    {
+      "name": "doc",
+      "status": "PASS",
+      "ms": 114
+    }
+  ],
+  "failed": 0
+
+ci.log [doc] 行: ===== [doc] 文档新鲜度校验（check-docs.mjs） ===== || [doc] -> PASS (115ms)
+
+[TC-S5-04 负例] README 注入坏互链锚点 -> --only doc
+[cmd] node D:\project\DSH\legion\.legion-worktrees\T-117\scripts\ci\run-ci.mjs --only doc --out D:\project\DSH\legion\.legion-worktrees\T-117\scratch\t117-r2\v2-ev-s504
+exit=1
+Legion CI run: root=D:\project\DSH\legion\.legion-worktrees\T-117 node=24.19.0
+all stages: env,deps,build,test,smoke,stage,doc | out=D:\project\DSH\legion\.legion-worktrees\T-117\scratch\t117-r2\v2-ev-s504
+selected: doc
+
+===== [doc] 文档新鲜度校验（check-docs.mjs） =====
+doc: 文档新鲜度校验（check-docs.mjs）exit=1
+  失败明细：
+  FAIL: D:\project\DSH\legion\.legion-worktrees\T-117\README.md:179 — 互链锚点失效：docs/FEATURES.md#s5-r2-bad-anchor
+[doc] -> FAIL (104ms)
+
+===== SUMMARY =====
+  doc    FAIL (103ms)
+summary.json -> D:\project\DSH\legion\.legion-worktrees\T-117\scratch\t117-r2\v2-ev-s504\summary.json
+
+[TC-S5-13] 坏锚点态 --skip doc --only env（doc 可跳不阻塞）
+[cmd] node D:\project\DSH\legion\.legion-worktrees\T-117\scripts\ci\run-ci.mjs --skip doc --only env --out D:\project\DSH\legion\.legion-worktrees\T-117\scratch\t117-r2\v2-ev-s513
+exit=0
+Legion CI run: root=D:\project\DSH\legion\.legion-worktrees\T-117 node=24.19.0
+all stages: env,deps,build,test,smoke,stage,doc | out=D:\project\DSH\legion\.legion-worktrees\T-117\scratch\t117-r2\v2-ev-s513
+selected: env
+
+===== [env] 环境自检 =====
+env 自检：
+  root=D:\project\DSH\legion\.legion-worktrees\T-117
+  node=24.19.0（要求 >= 22.5，node:sqlite）
+  platform=win32 x64
+  git head=ca9b45c
+[env] -> PASS (86ms)
+
+===== SUMMARY =====
+  env    PASS (85ms)
+summary.json -> D:\project\DSH\legion\.legion-worktrees\T-117\scratch\t117-r2\v2-ev-s513\summary.json
+
+[TC-S5-04 还原后]
+[cmd] node D:\project\DSH\legion\.legion-worktrees\T-117\scripts\ci\run-ci.mjs --only doc --out D:\project\DSH\legion\.legion-worktrees\T-117\scratch\t117-r2\v2-ev-s504r
+exit=0
+Legion CI run: root=D:\project\DSH\legion\.legion-worktrees\T-117 node=24.19.0
+all stages: env,deps,build,test,smoke,stage,doc | out=D:\project\DSH\legion\.legion-worktrees\T-117\scratch\t117-r2\v2-ev-s504r
+selected: doc
+
+===== [doc] 文档新鲜度校验（check-docs.mjs） =====
+doc: 文档新鲜度校验（check-docs.mjs）exit=0
+  输出要点：check-docs: PASS（README.md + docs/FEATURES.md 结构/链接/索引一致，8 类校验项全绿）
+[doc] -> PASS (112ms)
+
+===== SUMMARY =====
+  doc    PASS (111ms)
+summary.json -> D:\project\DSH\legion\.legion-worktrees\T-117\scratch\t117-r2\v2-ev-s504r\summary.json
+
+[TC-S5-07a 负例] check-docs.mjs 临时改名缺失 -> --only doc（可读错误=模块级错误栈尾）
+[cmd] node D:\project\DSH\legion\.legion-worktrees\T-117\scripts\ci\run-ci.mjs --only doc --out D:\project\DSH\legion\.legion-worktrees\T-117\scratch\t117-r2\v2-ev-s507a
+exit=1
+Legion CI run: root=D:\project\DSH\legion\.legion-worktrees\T-117 node=24.19.0
+all stages: env,deps,build,test,smoke,stage,doc | out=D:\project\DSH\legion\.legion-worktrees\T-117\scratch\t117-r2\v2-ev-s507a
+selected: doc
+
+===== [doc] 文档新鲜度校验（check-docs.mjs） =====
+doc: 文档新鲜度校验（check-docs.mjs）exit=1
+  失败明细：
+      at wrapResolveFilename (node:internal/modules/cjs/loader:1071:27)
+      at defaultResolveImplForCJSLoading (node:internal/modules/cjs/loader:1095:10)
+      at resolveForCJSWithHooks (node:internal/modules/cjs/loader:1122:12)
+      at Module._load (node:internal/modules/cjs/loader:1294:5)
+      at wrapModuleLoad (node:internal/modules/cjs/loader:255:19)
+      at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)
+      at node:internal/main/run_main_module:33:47 {
+    code: 'MODULE_NOT_FOUND',
+    requireStack: []
+  }
+  
+  Node.js v24.19.0
+[doc] -> FAIL (105ms)
+
+===== SUMMARY =====
+  doc    FAIL (104ms)
+summary.json -> D:\project\DSH\legion\.legion-worktrees\T-117\scratch\t117-r2\v2-ev-s507a\summary.json
+
+[TC-S5-07a 还原后]
+[cmd] node D:\project\DSH\legion\.legion-worktrees\T-117\scripts\ci\run-ci.mjs --only doc --out D:\project\DSH\legion\.legion-worktrees\T-117\scratch\t117-r2\v2-ev-s507ar
+exit=0
+Legion CI run: root=D:\project\DSH\legion\.legion-worktrees\T-117 node=24.19.0
+all stages: env,deps,build,test,smoke,stage,doc | out=D:\project\DSH\legion\.legion-worktrees\T-117\scratch\t117-r2\v2-ev-s507ar
+selected: doc
+
+===== [doc] 文档新鲜度校验（check-docs.mjs） =====
+doc: 文档新鲜度校验（check-docs.mjs）exit=0
+  输出要点：check-docs: PASS（README.md + docs/FEATURES.md 结构/链接/索引一致，8 类校验项全绿）
+[doc] -> PASS (119ms)
+
+===== SUMMARY =====
+  doc    PASS (118ms)
+summary.json -> D:\project\DSH\legion\.legion-worktrees\T-117\scratch\t117-r2\v2-ev-s507ar\summary.json
+
+[TC-S5-07b 负例] check-docs.mjs 注入语法错 -> --only doc（可读错误=SyntaxError 栈尾）
+[cmd] node D:\project\DSH\legion\.legion-worktrees\T-117\scripts\ci\run-ci.mjs --only doc --out D:\project\DSH\legion\.legion-worktrees\T-117\scratch\t117-r2\v2-ev-s507b
+exit=1
+Legion CI run: root=D:\project\DSH\legion\.legion-worktrees\T-117 node=24.19.0
+all stages: env,deps,build,test,smoke,stage,doc | out=D:\project\DSH\legion\.legion-worktrees\T-117\scratch\t117-r2\v2-ev-s507b
+selected: doc
+
+===== [doc] 文档新鲜度校验（check-docs.mjs） =====
+doc: 文档新鲜度校验（check-docs.mjs）exit=1
+  失败明细：
+      at compileSourceTextModule (node:internal/modules/esm/utils:318:16)
+      at ModuleLoader.moduleStrategy (node:internal/modules/esm/translators:89:18)
+      at #translate (node:internal/modules/esm/loader:434:20)
+      at afterLoad (node:internal/modules/esm/loader:502:29)
+      at ModuleLoader.loadAndTranslate (node:internal/modules/esm/loader:507:12)
+      at #getOrCreateModuleJobAfterResolve (node:internal/modules/esm/loader:560:36)
+      at afterResolve (node:internal/modules/esm/loader:607:52)
+      at ModuleLoader.getOrCreateModuleJob (node:internal/modules/esm/loader:613:12)
+      at node:internal/modules/esm/loader:632:32
+      at TracingChannel.tracePromise (node:diagnostics_channel:362:14)
+  
+  Node.js v24.19.0
+[doc] -> FAIL (97ms)
+
+===== SUMMARY =====
+  doc    FAIL (96ms)
+summary.json -> D:\project\DSH\legion\.legion-worktrees\T-117\scratch\t117-r2\v2-ev-s507b\summary.json
+
+[TC-S5-07b 还原后]
+[cmd] node D:\project\DSH\legion\.legion-worktrees\T-117\scripts\ci\run-ci.mjs --only doc --out D:\project\DSH\legion\.legion-worktrees\T-117\scratch\t117-r2\v2-ev-s507br
+exit=0
+Legion CI run: root=D:\project\DSH\legion\.legion-worktrees\T-117 node=24.19.0
+all stages: env,deps,build,test,smoke,stage,doc | out=D:\project\DSH\legion\.legion-worktrees\T-117\scratch\t117-r2\v2-ev-s507br
+selected: doc
+
+===== [doc] 文档新鲜度校验（check-docs.mjs） =====
+doc: 文档新鲜度校验（check-docs.mjs）exit=0
+  输出要点：check-docs: PASS（README.md + docs/FEATURES.md 结构/链接/索引一致，8 类校验项全绿）
+[doc] -> PASS (103ms)
+
+===== SUMMARY =====
+  doc    PASS (102ms)
+summary.json -> D:\project\DSH\legion\.legion-worktrees\T-117\scratch\t117-r2\v2-ev-s507br\summary.json
+
+[TC-S5-05/08] --only env,doc 阶段选择
+exit=0
+all stages: env,deps,build,test,smoke,stage,doc | out=D:\project\DSH\legion\.legion-worktrees\T-117\scratch\t117-r2\v2-ev-s508
+selected: env -> doc
+===== [env] 环境自检 =====
+[env] -> PASS (88ms)
+===== [doc] 文档新鲜度校验（check-docs.mjs） =====
+doc: 文档新鲜度校验（check-docs.mjs）exit=0
+[doc] -> PASS (102ms)
+===== SUMMARY =====
+
+[TC-S5-09] --skip doc --only env（默认全量含 doc；skip 剔除 doc 且其余保持）
+exit=0
+all stages: env,deps,build,test,smoke,stage,doc | out=D:\project\DSH\legion\.legion-worktrees\T-117\scratch\t117-r2\v2-ev-s509
+selected: env
+===== [env] 环境自检 =====
+[env] -> PASS (90ms)
+===== SUMMARY =====
+
+[TC-S5-10 依赖/顺序] STAGES 注册序=[env,deps,build,test,smoke,stage,doc]（doc 末位）；doc 依赖 check-docs 存在（S5-07a 缺失即 FAIL 实测）；无循环依赖。
+
+[TC-S5-11 零新增依赖] run-ci.mjs import 区：import { spawn } from 'node:child_process' import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync, copyFileSync, statSync, rmSync, symlinkSync, appendFileSync } from 'node:fs' import { dirname, join, resolve } from 'node:path' import { fileURLToPath } from 'node:url' import { createHash } from 'node:crypto'

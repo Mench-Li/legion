@@ -1,0 +1,22 @@
+== 回归范围：本批（目标 G-mtpq729o-1 的 S1~S5）改动文件域 ==
+git show --stat f0261fc（T-115 coder 提交）文件清单：
+  README.md / docs/FEATURES.md（新建）/ scripts/ci/check-docs.mjs（新建）/ scripts/ci/run-ci.mjs /
+  team-hub/stage-standards.mjs / plugins/src/index.ts / docs/G-mtpq729o-1/T115-evidence/* / scratch/*
+后续 ce87364（promote T-116 mediator resolve）另带入 plugins/tests、workbench 等**其他链**改动（非本目标文件域）。
+
+== 零新增依赖断言（TC-S1-15/S2-12/S3-04/10/S4-14/S5-11）==
+- f0261fc stat 无任何 package.json / pnpm-lock 变更；
+- check-docs.mjs import 区：仅 node:fs / node:path / node:url（证据 02）；
+- run-ci.mjs import 区：node:child_process / node:fs / node:path / node:url / node:crypto（全 node: 内置）；
+- plugins/src/index.ts：T-115 改动 16 行（docSync 消费/追加/提示词/注释），无新增 import；
+- FEATURES.md / README.md 为纯 Markdown 无构建链。
+
+== 回归证据 ==
+- run-ci 阶段数组仍为既有六阶段+doc（env,deps,build,test,smoke,stage,doc），--only/--skip 语义保持（证据 03）；
+- roles.json 未被本目标改动（f0261fc stat 无 roles.json），岗位语义/契约不变（doc-contract.test.mjs EXPECTED coder 无 docs 与现状一致）；
+- team-hub/stage-standards.mjs 仅追加 2 条 acceptance（102/148），岗位 do/dont 语义不变；
+- S4 docSync 三处改动均为“新增分支”，不改既有 registerContractDocs/结算主路径；既有 stage.docs 产物登记（T-107/T-109 面）逻辑未动。
+- plugins/tests 8 文件与 workbench 等宿主侧套件：本沙箱无 node_modules 不可执行 → 环境受限记录（R-18），未跑通不冒充通过。
+
+== git 状态确认 ==
+（T-117 交付前工作区新增：docs/G-mtpq729o-1/TEST_REPORT.md + T117-evidence/*；其余保持 HEAD 清洁）

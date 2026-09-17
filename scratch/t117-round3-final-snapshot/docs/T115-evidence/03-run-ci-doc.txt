@@ -1,0 +1,29 @@
+Legion CI run: root=D:\project\DSH\legion\.legion-worktrees\T-115 node=24.19.0
+all stages: env,deps,build,test,smoke,stage,doc | out=D:\project\DSH\legion\.legion-worktrees\T-115\.ci\2026-09-07T05-52-44-198Z
+selected: doc
+
+===== [doc] 文档新鲜度校验（check-docs.mjs） =====
+doc: 文档新鲜度校验（check-docs.mjs）exit=0
+  输出要点：check-docs: PASS（README.md + docs/FEATURES.md 结构/链接/索引一致，8 类校验项全绿）
+[doc] -> PASS (136ms)
+
+===== SUMMARY =====
+  doc    PASS (135ms)
+summary.json -> D:\project\DSH\legion\.legion-worktrees\T-115\.ci\2026-09-07T05-52-44-198Z\summary.json
+
+--- skip ---
+Legion CI run: root=D:\project\DSH\legion\.legion-worktrees\T-115 node=24.19.0
+all stages: env,deps,build,test,smoke,stage,doc | out=D:\project\DSH\legion\.legion-worktrees\T-115\.ci\2026-09-07T05-52-44-433Z
+selected: env
+
+===== [env] 环境自检 =====
+env 自检：
+  root=D:\project\DSH\legion\.legion-worktrees\T-115
+  node=24.19.0（要求 >= 22.5，node:sqlite）
+  platform=win32 x64
+  git head=cba1fb7
+[env] -> PASS (80ms)
+
+===== SUMMARY =====
+  env    PASS (80ms)
+summary.json -> D:\project\DSH\legion\.legion-worktrees\T-115\.ci\2026-09-07T05-52-44-433Z\summary.json

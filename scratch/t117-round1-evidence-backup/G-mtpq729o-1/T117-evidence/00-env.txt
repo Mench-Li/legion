@@ -1,0 +1,6 @@
+== T-117 测试执行环境基线 ==
+node v24.19.0
+git head: ce87364 (w/T-117)
+core.autocrlf=true（仓库无 .gitattributes）——关键文件 i/lf w/crlf（git ls-files --eol）
+node_modules：仓库根与 plugins 均不存在（不随 git 分发）
+pwsh 沙箱限制：子进程 pipe 捕获 EPERM（errno -4048）→ run-ci 等经 run_code 宿主进程直跑（T-093 先例）

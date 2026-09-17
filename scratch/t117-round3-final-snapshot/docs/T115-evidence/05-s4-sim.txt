@@ -1,0 +1,4 @@
+﻿== run: node scratch/s4-docsync-sim.mjs ==
+RESULT: pass=7 fail=0 (AC-R4-1/4 + 幂等 + 路径命名空间)
+(exit 0 — AC-R4-1/4 + 幂等 + 路径命名空间)
+

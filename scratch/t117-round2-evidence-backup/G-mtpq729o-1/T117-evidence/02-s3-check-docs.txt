@@ -1,0 +1,42 @@
+== T-117 round-3 re-test (HEAD=ca9b45c incl RC1-3 fixes) — S3 check-docs.mjs ==
+run env: real CRLF checkout (core.autocrlf=true, no .gitattributes, files w/crlf) — RC-1 fix (CRLF->LF normalize before parse) verified
+
+[TC-S3-01] --help exit 0:
+check-docs.mjs — Legion 文档新鲜度机器校验（零第三方依赖，仅 node:fs/re/path）
+
+校验对象：README.md（总览）+ docs/FEATURES.md（功能手册）
+校验项：
+  1. 功能索引提取（>=18 行 / 0 坏列 / 状态枚举）
+  2. 功能索引锚点（锚点=真实标题）
+  3. 功能正文非空（>=5 行且含入口/操作）
+  4. README→手册互链（锚点 0 失效）
+  5. 段落去重（>=3 行同文块=0）
+  6. 关键项不丢（三件套/DSH Desktop/三分钟循环）
+  7. 无过程叙事（P1/P2/P3·已交付 / 切片 Sx·已交付 = 0）
+  8. 内联锚点链接（[t](#anchor) 的锚点必须是本文件真实标题）
+
+用法：
+  node scripts/ci/check-docs.mjs            # 校验当前文档，满足则 exit 0
+  node scripts/ci/check-docs.mjs --help     # 本说明（exit 0）
+
+失败时输出 FAIL: <文件>:<行> … 并 exit 非 0；只判结构/链接/索引一致，不判语义。
+
+[TC-S3-02 POS] node scripts/ci/check-docs.mjs
+exit=0
+check-docs: PASS（README.md + docs/FEATURES.md 结构/链接/索引一致，8 类校验项全绿）
+
+[TC-S3-03] coverage = 8 items (>=3; includes AC-R2-2 README->manual anchors / AC-R3-1 index extract / AC-R3-2 index anchors; dedup & key-items also in-script) — see --help list
+[TC-S3-04/TC-S3-10] imports: only node:fs / node:path / node:url (zero third-party); offline run OK
+[TC-S3-08] scope: structure/links/index only, no semantic judgment (header comment + --help tail)
+
+[TC-S3-05 NEG bad inline anchor] exit=1 -> FAIL: docs/FEATURES.md:284 — 内联锚点失效：#no-such-heading-xyz | restore -> exit=0 PASS
+[TC-S3-06 NEG 4-col index row] exit=1 -> FAIL: docs/FEATURES.md:216 — 索引行列数=4（需 5 列）: F-01 | x | y | z | restore -> exit=0 PASS
+[TC-S3-07 NEG README dead cross-anchor] exit=1 -> FAIL: README.md:179 — 互链锚点失效：docs/FEATURES.md#nope-bad-anchor-r3 | restore -> exit=0 PASS
+[TC-S3-09 boundary] 0 bad anchors -> exit 0 (POS); 1 bad anchor -> exit 1 (NEG 05/07) — no false positives
+
+原始命令输出（宿主直跑）:
+[POS] exit=0 check-docs: PASS
+[NEG05] exit=1 FAIL: ...docs\FEATURES.md:284 — 内联锚点失效：#no-such-heading-xyz
+[NEG06] exit=1 FAIL: ...docs\FEATURES.md:216 — 索引行列数=4（需 5 列）：F-01 | x | y | z
+[NEG07] exit=1 FAIL: ...README.md:179 — 互链锚点失效：docs/FEATURES.md#nope-bad-anchor-r3
+restore after each injection via git blob 字节级还原; 还原后均 exit=0 PASS; git diff 空

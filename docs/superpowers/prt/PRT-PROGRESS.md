@@ -775,3 +775,105 @@ applier **抛错**的项不参与复核改写（它没有成功执行过，「�
   是哪条"）。**一条过严的规则会制造"为了过关而撒谎"的压力**，所以判据收敛成
   "不许把 `MAX(seq)` 当作自己的序号回读"，并补了一条**行为**断言（连写两条，
   序号必须分别是 1 与 2）——结构断言容易被绕过，行为断言不会。
+- **★★★ 三道范围检查在生产里从来没有跑过（PRT-603/604/605/606 与生产装配之间的落差）**
+  （不属于上表任何一条任务号，因此**不改本表状态与计数**）。
+
+  本轮在盘点"能力已建、但没有生产调用方"这一类形状时，得到一条此前没有记过的读数：
+
+  ```text
+  生产组合根 enforcementSurfaces() =
+    { hardFloor: true, pathScope: false, whitelist: false, policy: true, approval: true }
+  ```
+
+  `pathScope:false` / `whitelist:false` 意味着这两道检查**在生产里没有被注入**；
+  而 `execution-scope.mjs`（PRT-605）与 `external-api-scope.mjs`（PRT-606）
+  **连端口都没有**——桥的参数表里没有它们的位置。
+
+  核出来的链条（逐环节有行号）：
+
+  | 环节 | 位置 | 读数 |
+  |---|---|---|
+  | 生产装配的**唯一**入口 | `plugins/root-row.mjs:485-509` | `installEnforcementRoot({ env, decide, createRequestApproval })`——**只有三个键** |
+  | 组合根透传 | `root.mjs:465-466` | `whitelist: input.whitelist, pathScope: input.pathScope` ⇒ 均 `undefined` |
+  | 装配默认值 | `assemble.mjs:135-136` | `whitelist = null, pathScope = null` |
+  | 桥的行为 | `tool-request.mjs:638-651` | `if (pathScope === null) return undefined`——**返回 undefined 即放行** |
+  | 三个检查器的 import 者 | `grep "from .*(path-scope\|execution-scope\|external-api-scope)"` | **只有它们自己的 `.test.mjs`** |
+
+  ### 为什么这三个套件全绿也说明不了这件事
+
+  `path-scope` / `execution-scope` / `external-api-scope` 三个套件验的都是
+  "**检查器对不对**"（`path-scope` 那 22 例把"字符串比包含关系"的三个放行方向
+  逐条钉住，质量很高），而"**它在生产里跑不跑**"是另一个问题——
+  每一道检查器自己的套件都**结构上问不到**它：
+
+  > 一个「端口没接上、而没接上时检查自动放行」的组合根，
+  > 与一个「路径范围限制没有生效」的组合根，是同一个东西——
+  > 只不过前者的证据里有一行诚实的 `pathScope:false`。
+
+  这与本表反复出现的那句告警是同一个家族（「有用例」≠「已生效」），
+  只是它落在**注入式**的检查上：注入点的存在让"没接"变成了一个**可选**状态，
+  而可选状态没有调用方。
+
+  ### 本轮做了什么：把这句话变成读数（**没有接线**）
+
+  接线被刻意搁置，理由不是时间，而是**接了就是编造**：要注入 `pathScope`，
+  得先有**这一次 Run 的范围表**（读根/写根/平台）。它今天不在任何随请求到达的
+  载荷里——这与 PRT-253 那篇论证 `canRead`「答案不在这边」是**同一个形状**，
+  而凭空造一份范围表正是那篇 §3 明令禁止的"不发明任何默认值、替身或暂时放行"。
+  真要接，改的是 `root-row.mjs` → `runtime-host-registrar-row.mjs` 这条
+  **按 Run 安装载荷**的链（下限 / 授权身份已经走这条路）。
+
+  ★ 顺带记一条并发事实：`runtime-host-registrar-row.mjs` 当轮正被另一个 agent
+  进程改着（未提交，PRT-214 缺口②"授权身份"）。往一个承重的强制面模块里做
+  跨边界并发编辑，风险高于收益。
+
+  所以本轮的交付是**判据**，即 PRT-253 自己立下的标准
+  （「把这句话从"作者当时相信"变成"再多加一个键就会红的读数"」）：
+
+  新增 `runtime/dsh-composition/production-scope-wiring.test.mjs`（**5 例**，
+  已登记进 `run-ci.mjs` 的 `production-scope-wiring` 套件）：
+
+  · ① 以 `root-row.mjs` 的**同一组入参**装配真组合根，断言 `enforcementSurfaces()`
+    恰好是那五个键的读数；**并且**断言生产入参键集里不出现 `pathScope`/`whitelist`
+    ——这条让"是谁接的线"在红的时候直接可见。
+  · ② 桥的参数表里没有 `executionScope`/`externalApiScope`，且强制面的**键集**
+    恰好是那五个（键集是契约，不是便利方法）。
+  · ③ ★ **后果是真的**：同一路越界调用（`C:/etc/passwd`）——没接 = `allow`，
+    接上 = `deny`。少了这一条，①② 可能只是无害的读数。
+  · ④ **反向对照**：显式传上两个键，读数翻成 `true`。少了这一条，① 可能只是
+    "这个读数恒为 false"——*一个恒 false 的读数与一个正确报出"没接"的读数，
+    在 ① 的断言下是同一条绿。*
+  · ⑤ 生产装配入口没有搬家（`root-row.mjs` 仍是全仓唯一调
+    `installEnforcementRoot` 的生产文件）。
+
+  ★ **变异验证 5/5 全部咬住**：①a 给生产装配加 `pathScope:`、①b 加 `whitelist:`、
+  ② 给桥加 `executionScope` 端口、③ 让 `pathScope` 缺席时**拒绝**（不再放行）、
+  ④ 让 `enforcementSurfaces()` 恒报 `pathScope:true`——每一条都当场变红。
+
+  ★ ★ 变异是在**副本**上做的（整棵 `runtime/` + 跨目录依赖复制到 `.mut-rt/`），
+  活树全程只被**读**，前后 sha256 相同。理由：
+
+  > 一次成功的破坏与一次成功的还原，在事后的 `git diff` 里长得一样。
+  > 而活树上另一个 agent 进程正持着未提交的改动。
+
+  ★ 这一步在过程中被自己的**正对照**救了一次：第一版只复制 `runtime/`，
+  于是副本**根本 import 不起来**（`runtime/` 有 `../../orchestrator/...` 这样的
+  跨目录 import），而整套变异验证报的是"**没咬住**"——
+
+  > 一个加载失败的测试文件，与一个"变异改在了没人看的地方"的测试文件，
+  > 在"变红了吗"这个读数上是同一个东西，只不过前者的红与变异无关。
+
+  补齐跨目录副本后 5/5 全红。第二版改用整目录 `cpSync` 又**直接崩了**
+  （`0xC0000409`，`team-hub/node_modules` 那种体量），且崩得**没有任何输出**——
+  同一族的第二个坑：*沉默与成功在我这边的读数上是同一个东西。*
+  最终按扩展名筛 + 跳过 `node_modules`。
+
+  ### 留给台账的一条口径问题
+
+  PRT-604 的交付说明里写了"给 PRT-602 的桥加了 `pathScope` 端口"，PRT-605/606
+  的说明里只写"新增模块 + 套件"——三者都是 ✅。而本表 §0 那条告警明写
+  「只有自己的用例驱动的原语一律 🟡」。**这两条口径今天不一致**：
+  纯模块 + 自己用例（PRT-605/606）按告警应当是 🟡，而它们挂着 ✅。
+  本轮**没有**擅自改这三行的状态——因为 ✅/🟡 的口径由台账的读者（项目方）定，
+  而"改状态"与"补证据"是两件事。已记入
+  `MULTI-AGENT-FEATURE-STATUS.md` §5 第 14 条，请一并裁决。

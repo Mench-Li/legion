@@ -60,7 +60,7 @@
 | F-08 | 模型档案与绑定 | ✅ | `team-hub/model-store.mjs`、`binding-store.mjs`、`probe-service.mjs` | PRT-501/502/506/507 | — |
 | F-09 | 密钥库与 Run 凭证 | 🟡 | `security/secrets/*`、`product/secrets.mjs`、`product/launcher/{secrets-check,run-credential*,secrets-acl-runner}.mjs` | PRT-505/509；`secrets-acl-runner.test.mjs`（12 例，含真 `whoami`+`icacls`） | 见 §2「本轮已关掉的」；**C1～C4 是产品裁决**，属 ⏸ |
 | F-10 | 权限、审批与审计 | ✅ | `team-hub/permission-engine.mjs`、`approval-*.mjs`、`context-plan-store.mjs` | PRT-601～607 | — |
-| F-11 | DSH 强制面（hard floor / sandbox / preset） | 🟡 | `runtime/dsh-composition/*` | PRT-213/214/253 的一部分 | 见 §2；G1/G4、G2/G3/G4/G6 需人裁决 |
+| F-11 | DSH 强制面（hard floor / sandbox / preset） | 🟡 | `runtime/dsh-composition/*` | PRT-213/214/253 的一部分 | 见 §2；G1/G4、G2/G3/G4/G6 需人裁决。★★ **另有一条本轮新发现（§5.2）：三道范围检查在生产里从未被注入**——`enforcementSurfaces()` 实测 `pathScope:false` / `whitelist:false`，`execution-scope`/`external-api-scope` 连端口都没有。这不是"F-11 没做"，而是"做了但没装上"；裁决见 §5 第 14 条 |
 | F-12 | Product Launcher | ✅ | `product/launcher/*` | PRT-701～713 | — |
 | F-13 | 配置与诊断 | ✅ | `product/config-schema.mjs`、`scripts/config/scan.mjs` | `scan --check`（1065 个疑似字面量）、`config sync`、`encoding-check` | — |
 | F-14 | 安装、升级、回滚 | ✅ | `product/launcher/runtime-install.mjs`、`runtime/packs/*` | PRT-801～813、PRT-1001～1006 | — |
@@ -347,6 +347,7 @@ deny 会被宽松的默认静默盖掉，而他写那条正是为了拦住一样
 | 11 | **PRT-509 剩余三条** | 环境 + 项目方 | ① win32 上 `0600` **本机无法证明**；② **生产默认句柄工厂**（走 `resolveDshBaseBundlePatchPath` 解析器）**只有注入式覆盖**，真实调用没跑过；③ 已证明的是"**DSH 的凭据提供方**从 Legion 材料化的文件里读到了值"，**不是**"一个真 DSH 进程启动时把那份覆盖层文档解析出来了" | 三条都**如实记为 🟡 的剩余**，不冒充已闭合。②③ 需要一次**真 DSH 进程启动**的现场（有 `DSH_CHECKOUT` 时可跑，但没有覆盖层真实生效的那条路径） |
 | 12 | **F-19 Role Pack 的"七类版本"范围确认** | 产品 | 七类（prompt / skills / tools / permissions / model / connectors / budget）是否就是这个岗位包的全部版本面 | 若产品认为还缺一类（例如"环境"或"路由"），现在加是**新增一节**；等到有真实岗位包在库里之后再改，就要处理"旧包缺这一节"的兼容问题（而现在按设计**拒绝缺节**的包） |
 | 13 | **F-21 判定面的接线资格** | 项目主（只需确认"现在可以动 `tool-request.mjs`"） | 把连接器判定接进 `createEnforcementBridge().preExecute`（DSH `tools/pre-execute` 瀑布，见 §4.2）。**本轮唯一没做的原因是并发**：同一工作树上另一个 agent 进程正在改那个文件 | 不接则 F-21 停在 🟡：登记、冻结、审计、导出都能用，但**没有任何一次真调用被它拦过**——"闸门写好了、还没装到门上"。★ 若产品认为"现在产品里没有 MCP 客户端，接线是给不存在的东西装门"，**请显式说明**，那我就把 F-21 的定位改成"控制面已就绪、判定面随 MCP 客户端一起做"，并在文档里这么写 |
+| 14 | ★★★ **三道范围检查的生产接线（PRT-603/604/605/606）** | 产品 + 项目主 | **这三道检查今天在生产里一次都不跑**（读数见 §5.2）。要决定的是：**这一次 Run 的范围表（读根/写根/平台、命令/网络/MCP 授权、外部 API 读写端点）从哪来、挂在哪一层**。可选方向：(A) 随 Run 的载荷到达，像 PRT-214 的下限/授权身份那样由 `runtime-host-registrar-row.mjs` 按 Run 安装；(B) 由岗位包（F-19 的 `permissions` 一节）派生，装配期算一次；(C) 仍留在 hub 侧判（那 `path-scope.mjs` 这类执行面检查器就应当明确废弃，而不是挂在桥上当"可选端口"） | 不决定则**越界路径今天拦不住**：`tool-request.mjs:639` 在 `pathScope === null` 时返回"放行"，而生产从不注入。★★ 我**没有**擅自接线，因为凭空造一份范围表正是 PRT-253 §3 明令禁止的"不发明任何默认值、替身或暂时放行"——那会让"没接线"与"接好了"在读数上同形。本轮的处置是把读数钉住（`production-scope-wiring.test.mjs` 5 例 + 5/5 变异），所以**接上了它会红**。★ 另注意：三个台账行（PRT-604/605/606）的 ✅ 依据是"模块 + 自己那套用例"——按本表 §0 那条告警（"只有自己的用例驱动的原语一律 🟡"），它们的口径需要在台账里对齐 |
 
 ---
 
@@ -361,6 +362,87 @@ deny 会被宽松的默认静默盖掉，而他写那条正是为了拦住一样
 | F-18 图 | 只记不推断、撤销是追加、带环遍历不挂死 | **没有任何真实调用方**在跑它（§0 那条告警照旧：只有自己的用例驱动的原语一律 🟡 的邻居）——落盘面与 HTTP 都已接上，但"谁在生产里写第一条记录"还没发生 |
 | F-19 岗位包 | 七节齐全、版本与内容两种漂移分开、冻结改不动、幂等不碰冻结时刻 | 包里的 `skills`/`tools` 等**引用**是否指向世界里真实存在的东西，只做到"引用形状合法"；`REF_MISSING_IN_WORLD` 需要一份真实世界清单才能判 |
 | F-21 连接器 | 未声明即拒绝、风险只上抬、密钥只许引用、熔断有截止时间、隔离互不牵连 | **没有连过任何一个真的 MCP server**：`transport: 'stdio'`/`http` 的**实际握手**不在这套用例里（这一层判的是"放不放过去"，不是"连得上吗"）。以及 `resolveSecretRef` 的真实实现（接 `SecretStore`）尚未接线——没接线时它如实报 `checked:false` 而不是假装查过 |
+
+---
+
+## 5.2 ★★★ 本轮新发现：**三道范围检查在生产里从来没有跑过**
+
+这是本轮最大的一条，而且它不属于 F-01～F-25 里任何一条——它是 PRT-603/604/605/606
+（台账里**都是 ✅**）与生产装配之间的一段落差。
+
+### 读数
+
+```text
+生产组合根 enforcementSurfaces() = {
+  hardFloor: true, pathScope: false, whitelist: false, policy: true, approval: true
+}
+```
+
+`pathScope:false` 与 `whitelist:false` 意味着：**这两道检查在生产里没有被注入**。
+而 `execution-scope.mjs`（PRT-605）与 `external-api-scope.mjs`（PRT-606）
+**连端口都没有**——桥的参数表里没有它们的位置，所以连"没接"这个读数都表达不出来。
+
+### 怎么核出来的
+
+| 环节 | 位置 | 读数 |
+|---|---|---|
+| 生产装配的**唯一**入口 | `runtime/dsh-composition/plugins/root-row.mjs:485-509` | `installEnforcementRoot({ env, decide, createRequestApproval })` —— **只有三个键** |
+| 组合根透传 | `runtime/dsh-composition/root.mjs:465-466` | `whitelist: input.whitelist, pathScope: input.pathScope` ⇒ 两者都是 `undefined` |
+| 装配默认值 | `runtime/dsh-composition/assemble.mjs:135-136` | `whitelist = null, pathScope = null` |
+| 桥的行为 | `runtime/dsh-composition/tool-request.mjs:638-651` | `if (pathScope === null) return undefined` —— **返回 undefined 就是放行** |
+| 两个检查器的 import 者 | `grep 'from .*(path-scope\|execution-scope\|external-api-scope)'` | **只有它们自己的 `.test.mjs`**（零生产 import 者） |
+
+### 这条落差为什么危险
+
+三道检查**各自**都写得很硬（`path-scope.test.mjs` 的 22 例把"字符串比包含关系"
+的三种放行方向逐条钉住），而"它们在生产里跑不跑"是**另一个问题**——
+每一道检查器的套件都**结构上问不到**它：
+
+> 一个「端口没接上、而没接上时检查自动放行」的组合根，
+> 与一个「路径范围限制没有生效」的组合根，是同一个东西——
+> 只不过前者的证据里有一行诚实的 `pathScope:false`。
+>
+> 而这三个套件（`path-scope` / `execution-scope` / `external-api-scope`）
+> 即使全绿，也说明不了那一行。
+
+### 本轮做了什么
+
+**没有接线。** 理由不是"没时间"，而是**接了就是编造**：
+
+- 要注入 `pathScope`，得先有**这一次 Run 的范围表**（读根/写根/平台）。
+  它今天不在任何随请求到达的载荷里——这与 PRT-253 那篇论证 `canRead`
+  "答案不在这边"是**同一个形状**。凭空造一份范围表正是那篇明令禁止的
+  "不发明任何默认值、替身或暂时放行"（该文 §3「明确不做的事」）。
+- 真要接，要改的是 `root-row.mjs` 与 `runtime-host-registrar-row.mjs`
+  这条按 Run 安装载荷的链（下限/授权身份已经走这条路）——
+  而**后一个文件当轮正被另一个 agent 进程改着**（未提交 +56 行，PRT-214 缺口②）。
+
+所以本轮做的是**把这句话变成读数**（PRT-253 自己立的标准：
+「把这句话从"作者当时相信"变成"再多加一个键就会红的读数"」）：
+
+`runtime/dsh-composition/production-scope-wiring.test.mjs`（**5 例**，已进 `run-ci.mjs`）：
+
+| 用例 | 钉住的读数 |
+|---|---|
+| ① | 以 root-row.mjs 的**同一组入参**装配真组合根，`enforcementSurfaces()` 恰好是 `{hardFloor:true, pathScope:false, whitelist:false, policy:true, approval:true}`；**且**生产入参键集里不许出现 `pathScope`/`whitelist` |
+| ② | 桥的参数表里没有 `executionScope`/`externalApiScope`，且强制面键集恰好是那五个（键集是**契约**） |
+| ③ | ★ **后果是真的**：同一路越界调用（`C:/etc/passwd`），没接 = `allow`，接上 = `deny` |
+| ④ | **反向对照**：显式传上两个键，读数翻成 `true`（证明 ① 的 false 是"没人给"，不是"这个读数恒 false"） |
+| ⑤ | 生产装配入口没有搬家（`root-row.mjs` 仍是唯一调 `installEnforcementRoot` 的生产文件） |
+
+★ 变异验证 **5/5 全部咬住**：①a 给生产装配加 `pathScope:`、①b 加 `whitelist:`、
+② 给桥加 `executionScope` 端口、③ 让 `pathScope` 缺席时**拒绝**（不再是放行）、
+④ 让 `enforcementSurfaces()` 恒报 `pathScope:true`——每一条都当场变红。
+
+★ 变异是在**副本**上做的（`.mut-rt/`），不是活树：活树全程只被读，
+前后 sha256 相同（`d788f16e…`）。理由写在那份脚本的注释里——
+
+> 一次成功的破坏与一次成功的还原，在事后的 `git diff` 里长得一样。
+> 而活树上另一个 agent 进程正持着未提交的改动。
+
+### 需要人裁决的一条
+
+**这三道检查应当在哪一层拿到范围数据？** 见 §5 第 14 条。
 
 
 ## 6. 怎么复跑这份对照表里的每一条
@@ -383,6 +465,7 @@ node --test team-hub/pack-facts.test.mjs team-hub/pack-facts-http.test.mjs
 node --test runtime/employee/role-pack.test.mjs team-hub/role-pack-store.test.mjs team-hub/role-pack-http.test.mjs
 node --test runtime/experience/friction.test.mjs runtime/experience/graph.test.mjs team-hub/experience-store.test.mjs team-hub/experience-http.test.mjs
 node --test runtime/connectors/registry.test.mjs team-hub/connector-store.test.mjs team-hub/connector-http.test.mjs
+node --test runtime/dsh-composition/production-scope-wiring.test.mjs
 node --test runtime/packs/store.test.mjs
 node --test product/secrets.test.mjs
 node --test product/launcher/secrets-acl-runner.test.mjs

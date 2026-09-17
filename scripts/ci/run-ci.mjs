@@ -962,6 +962,25 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // ★★★ 「这三道范围检查在生产里到底有没有跑」——把一句话变成读数。
+      //
+      // PRT-604/605/606 在台账里都是 ✅，而它们各自的套件验的是"检查器对不对"。
+      // 这三道检查**都是注入式的**（桥的可选端口 / 独立模块），于是有一个
+      // 前面那些套件**结构上问不到**的问题：生产装配到底注入了没有？
+      //
+      //   > 一个「端口没接上、而没接上时检查自动放行」的组合根，
+      //   > 与一个「路径范围限制没有生效」的组合根，是同一个东西——
+      //   > 只不过前者的证据里有一行诚实的 `pathScope:false`。
+      //
+      // 读数（本轮实测）：生产组合根报 `pathScope:false` / `whitelist:false`，
+      // 而 `execution-scope` / `external-api-scope` 连端口都没有。
+      // 本套件把这个读数钉住：**接上了它会红**（提醒一起改账），
+      // 而"没接"这件事从此不再是"作者当时相信"。
+      label: 'production-scope-wiring（PRT-604/605/606：检查器对不对 ≠ 生产里跑没跑）',
+      files: ['runtime/dsh-composition/production-scope-wiring.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-604：文件与工作目录范围限制（spec line 926、§6.6 line 449/454/460）。
       //
       // 盯四件事：

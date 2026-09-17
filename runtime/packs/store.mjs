@@ -37,8 +37,21 @@ import { compareSemver, isSemver, PACK_MANIFEST_VERSION, PACK_TRUST_LEVELS } fro
 /** 记录账本的形态版本。账的形状变了，读账的人要能看出来。 */
 export const PACK_STORE_VERSION = 'legion/pack-store@1'
 
-/** 四类记录。**没有第五类**——"更新一下元数据"这种操作不在首版协议里。 */
-export const PACK_RECORD_KINDS = Object.freeze(['install', 'enable', 'disable', 'upgrade'])
+/**
+ * 五类记录。
+ *
+ * ★ 「没有第五类」曾经写在这里，而 `rollback` 恰恰是需要的那第五类。
+ * 原文的理由是"降级不是首版协议"，但 §4.4 对 F-20 的要求是
+ * **「安装可回滚」**——于是"回滚"这件事要么有一条自己的记录，
+ * 要么它只能被塞进 `upgrade` 或伪装成一次 `install`。
+ *
+ *   > 一个「升级与降级共用一条记录」的账，
+ *   > 与一个「值班的人看不出这次变动是前进还是后退」的账，是同一个东西。
+ *
+ * 所以补上 `rollback`：它与 `install`/`upgrade` 同属"改了生效版本"的那一类，
+ * 但**方向相反**，而这个方向必须留在账上。
+ */
+export const PACK_RECORD_KINDS = Object.freeze(['install', 'enable', 'disable', 'upgrade', 'rollback'])
 
 export const STORE_CODES = Object.freeze({
   /** 安装/升级没有带预检结论。 */
@@ -57,6 +70,16 @@ export const STORE_CODES = Object.freeze({
   UPGRADE_NO_CHANGE: 'pack-store-upgrade-no-change',
   /** 目标版本不比当前版本高。降级是另一个操作（回滚），不走这里。 */
   NOT_AN_UPGRADE: 'pack-store-not-an-upgrade',
+  /** 回滚目标不是"更低的版本"。往回走才是回滚。 */
+  NOT_A_ROLLBACK: 'pack-store-not-a-rollback',
+  /** 回滚目标从来没有被安装过——那是一次 install，不是回滚。 */
+  ROLLBACK_TARGET_UNKNOWN: 'pack-store-rollback-target-unknown',
+  /** 回滚目标就是当前版本——没有状态变化，不该写记录。 */
+  ROLLBACK_NO_CHANGE: 'pack-store-rollback-no-change',
+  /** 回滚目标版本在账里找不到内容哈希。 */
+  ROLLBACK_TARGET_UNREADABLE: 'pack-store-rollback-target-unreadable',
+  /** 重建时喂进来的账不是一本合法的账。 */
+  BAD_SNAPSHOT: 'pack-store-bad-snapshot',
   /** 记录不合法（调用方直接喂了坏数据）。 */
   BAD_RECORD: 'pack-store-bad-record',
 })
@@ -131,7 +154,7 @@ function metaFrom({ manifest, verdict, at, kind, fromVersion = null, fromContent
  * **不可变性**做出来并被用例钉住；持久化接线是另一件事，接到那一层时
  * 这里的每一条拒绝码都还要成立。
  */
-export function createPackStore({ now = () => Date.now() } = {}) {
+export function createPackStore({ now = () => Date.now(), history = null } = {}) {
   if (typeof now !== 'function') throw storeError(STORE_CODES.BAD_RECORD, 'now 必须是函数')
   /** 唯一的账。只追加，元素冻结。 */
   const records = []
@@ -143,6 +166,53 @@ export function createPackStore({ now = () => Date.now() } = {}) {
     records.push(record)
     return record
   }
+
+  /**
+   * ★ F-20 缺口②：用一本**已存在的账**重建存储。
+   *
+   * 这个入口存在的理由是那句自陈——"它是纯内存的"。一份重启就失忆的安装账，
+   * 在生产上等价于**每次启动都认为什么都没装**：`enabledPacks()` 返回空、
+   * `installedList()` 返回空，而依赖预检会拿这份空基线去判"依赖缺失"，
+   * 于是重启之后每一个包都突然有了"缺依赖"的问题，而它们其实都装着。
+   *
+   *   > 一本重启即失忆的账，与一本从来没有写过的账，
+   *   > 在"现在装了什么"这个问题上是同一个回答。
+   *
+   * ## 为什么坏账**整本拒绝**，而不是跳过坏的那几条
+   *
+   * 跳过的读数是"剩下的都是好的"。但调用方问的是"现在装了什么"——
+   * 一份被跳掉三条 install 的账，会安静地回答"这三个包没装过"，
+   * 而那与"这三个包真的没装过"**长得一模一样**。
+   * 一半的账比没有账更坏：没有账时至少没有人会信它。
+   *
+   * 所以这里逐条校验，任一条不合法就抛 `BAD_SNAPSHOT` 并说明是第几条。
+   */
+  const restore = (incoming) => {
+    const list = Array.isArray(incoming) ? incoming : incoming?.records
+    if (!Array.isArray(list)) {
+      throw storeError(STORE_CODES.BAD_SNAPSHOT, '重建要一份记录数组（或一个含 records 的快照）')
+    }
+    let prevSeq = 0
+    for (let i = 0; i < list.length; i += 1) {
+      const r = list[i]
+      const bad = (why) => {
+        throw storeError(STORE_CODES.BAD_SNAPSHOT, `第 ${i + 1} 条记录不合法（${why}），` +
+          '整本账被拒绝——跳过坏记录会让"这几个包没装过"与"这几条记录坏了"变成同一个读数')
+      }
+      if (r === null || typeof r !== 'object') bad('不是对象')
+      if (!PACK_RECORD_KINDS.includes(r.kind)) bad(`未知的记录类型 ${JSON.stringify(r.kind)}`)
+      if (typeof r.packId !== 'string' || r.packId.trim() === '') bad('packId 为空')
+      if (typeof r.version !== 'string' || r.version === '') bad('version 为空')
+      if (!Number.isInteger(r.seq) || r.seq !== prevSeq + 1) {
+        bad(`seq 必须是连续递增的整数（期望 ${prevSeq + 1}，实际 ${JSON.stringify(r.seq)}）`)
+      }
+      prevSeq = r.seq
+      records.push(Object.freeze({ ...r }))
+    }
+    seq = prevSeq
+  }
+
+  if (history !== null && history !== undefined) restore(history)
 
   /** 账的推导：一个包的全部状态。 */
   const stateOf = (packId) => {
@@ -163,7 +233,7 @@ export function createPackStore({ now = () => Date.now() } = {}) {
     let contentHash = null
     let trust = null
     for (const r of mine) {
-      if (r.kind === 'install' || r.kind === 'upgrade') {
+      if (r.kind === 'install' || r.kind === 'upgrade' || r.kind === 'rollback') {
         activeVersion = r.version
         contentHash = r.contentHash
         trust = r.trust
@@ -198,6 +268,11 @@ export function createPackStore({ now = () => Date.now() } = {}) {
 
   return Object.freeze({
     version: PACK_STORE_VERSION,
+
+    /** 一个包当前的**推导**状态（`installed` / `enabled` / `activeVersion` / …）。 */
+    stateOf,
+    /** 一个包的全部记录（时间序）。 */
+    recordsOf: (packId) => stateOf(packId).records,
 
     /** 安装一个版本。同版本重复安装拒绝（不是幂等吞掉）。 */
     install({ manifest, verdict } = {}) {
@@ -283,9 +358,108 @@ export function createPackStore({ now = () => Date.now() } = {}) {
       }))
     },
 
-    stateOf,
-    /** 一个包的全部记录（时间序）。 */
-    recordsOf: (packId) => stateOf(packId).records,
+    /**
+     * ★ F-20 缺口①：回滚到一个**装过的、更低的**版本。
+     *
+     * `upgrade()` 的注释此前写着"降级是另一个操作（回滚）"——而那个操作
+     * **不存在**。于是"安装可回滚"这条要求，在代码里没有任何落点：
+     * 需要回滚的人只能去调 `install()`（会被 `ALREADY_INSTALLED` 拒掉，
+     * 因为目标版本装过）或者 `upgrade()`（会被 `NOT_AN_UPGRADE` 拒掉，
+     * 因为目标版本更低）。**两条路都堵着，而读数上说"升级接口存在"。**
+     *
+     * ## 四条拒绝，各自对应一个真实的失效方向
+     *
+     * · 目标**没装过** → `ROLLBACK_TARGET_UNKNOWN`。回滚是"回到一个曾经验过的
+     *   版本"，不是"装一个我从没有过的版本"。把后者接受下来，"回滚"就变成了一条
+     *   绕过安装预检的通道——它带着"回到已知安全版本"的名义装上一个**新的**内容。
+     * · 目标**就是当前版本** → `ROLLBACK_NO_CHANGE`。与 `enable/disable` 同一条
+     *   纪律：没有状态变化就不写记录，否则"这个包被回滚过几次"会变成一个
+     *   没人能解释的数字。
+     * · 目标**更高** → `NOT_A_ROLLBACK`。那是升级，走 `upgrade()`；
+     *   两者合成一个 `setVersion()` 会让账上看不出方向，而认错方向正是
+     *   事故复盘里最贵的那一步。
+     * · 目标版本的**内容哈希从账里读**，**不接受调用方传 manifest**。
+     *   这是这一条里最要紧的一处：接受一份新 manifest 就等于允许
+     *   "同样的版本号配不同的内容"，而版本号是账上唯一的身份。
+     */
+    rollback({ packId, toVersion } = {}) {
+      const state = requireInstalled(packId, '回滚')
+      const target = String(toVersion ?? '').trim()
+      if (target === '') {
+        throw storeError(STORE_CODES.BAD_RECORD, '回滚必须给出目标版本')
+      }
+      if (target === state.activeVersion) {
+        throw storeError(
+          STORE_CODES.ROLLBACK_NO_CHANGE,
+          `能力包 ${state.packId} 当前就是 ${target}，回滚它没有任何状态变化`,
+        )
+      }
+      if (!state.installedVersions.includes(target)) {
+        throw storeError(
+          STORE_CODES.ROLLBACK_TARGET_UNKNOWN,
+          `能力包 ${state.packId} 从来没有装过 ${target}，不能"回滚"到它。` +
+          '回滚是回到一个**已经验过**的版本；接受一个没装过的版本，等于开着一条' +
+          '绕过安装预检的通道，而它看起来叫"回滚到已知安全版本"',
+        )
+      }
+      if (!isSemver(target)) {
+        throw storeError(STORE_CODES.BAD_RECORD, `回滚目标版本不是语义版本：${JSON.stringify(target)}`)
+      }
+      if (compareSemver(target, state.activeVersion) >= 0) {
+        throw storeError(
+          STORE_CODES.NOT_A_ROLLBACK,
+          `能力包 ${state.packId} 的回滚目标 ${target} 不低于当前 ${state.activeVersion}。` +
+          '往前进是升级（走 upgrade），把它当回滚记会让账上的方向反过来',
+        )
+      }
+      // 从**账**里取那一版的内容哈希，而不是从调用方手里。
+      const source = [...state.records].reverse().find(
+        (r) => (r.kind === 'install' || r.kind === 'upgrade') && r.version === target,
+      )
+      if (source === undefined) {
+        throw storeError(
+          STORE_CODES.ROLLBACK_TARGET_UNREADABLE,
+          `能力包 ${state.packId} 的 ${target} 在账上没有留下内容哈希，无法回滚到它`,
+        )
+      }
+      const at = now()
+      return append({
+        at, kind: 'rollback', packId: state.packId, version: target,
+        packType: source.packType, packProtocolVersion: source.packProtocolVersion,
+        contentHash: source.contentHash, declaredContentHash: source.declaredContentHash,
+        trust: source.trust,
+        fromVersion: state.activeVersion, fromContentHash: state.contentHash,
+        verdictCodes: Object.freeze([]), preflightVersion: source.preflightVersion,
+      })
+    },
+
+    /**
+     * 可以回滚到哪些版本（降序）。给界面/CLI 一个**读出口**。
+     *
+     * 没有它，每个调用方都要自己从 `recordsOf()` 里推一遍——而"目标必须是
+     * 装过的、更低的版本"这件事只要有第二个人实现，就会有两个版本，
+     * 它们今天一致而没有人维持。
+     */
+    rollbackTargets: (packId) => {      const state = stateOf(packId)
+      if (!state.installed) return Object.freeze([])
+      return Object.freeze(
+        state.installedVersions
+          .filter((v) => isSemver(v) && compareSemver(v, state.activeVersion) < 0)
+          .sort((a, b) => compareSemver(b, a)),
+      )
+    },
+
+    /**
+     * ★ F-20 缺口②的另一半：把账交出去，以便持久化。
+     *
+     * 形态带 `version`：账的形状变了，读账的人要能**看出来**，
+     * 而不是把一本按旧规则写的账读成"记录少了"。
+     */
+    snapshot: () => Object.freeze({
+      version: PACK_STORE_VERSION,
+      seq,
+      records: Object.freeze([...records]),
+    }),
     /** 整本账。返回的是**副本**，改它不影响账。 */
     history: () => Object.freeze([...records]),
     /** 当前处于启用状态的包（账的推导，不是另一份表）。 */

@@ -66,9 +66,13 @@ const PACK_ID = V1.manifest.packId
 
 // --------------------------------------------------------------- 形状
 
-test('① 账的形态版本与四类记录是常量，且没有第五类', () => {
+test('① 账的形态版本与**五类**记录是常量；第五类正是 `rollback`', () => {
   assert.equal(PACK_STORE_VERSION, 'legion/pack-store@1')
-  assert.deepEqual(PACK_RECORD_KINDS, ['install', 'enable', 'disable', 'upgrade'])
+  // ★ 这条用例曾经断言"没有第五类"。那条断言与 §4.4 对 F-20 的要求
+  //   「安装可回滚」直接矛盾：回滚要么有自己的记录类型，要么只能伪装成
+  //   一次 install / upgrade —— 而那样账上就看不出方向。
+  //   现在它断言的是"恰好这五类"，把"随便加第六类"仍然堵住。
+  assert.deepEqual(PACK_RECORD_KINDS, ['install', 'enable', 'disable', 'upgrade', 'rollback'])
   const store = createPackStore({ now: () => 0 })
   assert.equal(store.version, PACK_STORE_VERSION)
 })
@@ -352,4 +356,190 @@ test('⑥ 账的形态版本进记录：未来读账的人要能看出形状变�
   const rec = store.install({ manifest: V1.manifest, verdict: V1.verdict })
   assert.equal(rec.preflightVersion, V1.verdict.version ?? null)
   assert.equal(V1.manifest.manifestVersion, PACK_MANIFEST_VERSION)
+})
+
+// ───────────────────────── ⑦ F-20 缺口①：回滚 ─────────────────────────
+
+/** 装 1.0.0 → 升 1.1.0 的标准前缀，回滚用例都从这里出发。 */
+function installedThenUpgraded() {
+  const store = createPackStore({ now: () => 0 })
+  const r1 = store.install({ manifest: V1.manifest, verdict: V1.verdict })
+  const r2 = store.upgrade({ manifest: V2.manifest, verdict: V2.verdict })
+  return { store, r1, r2 }
+}
+
+test('⑦ ★★★ 回滚回到装过的低版本，且账上留下**方向**', () => {
+  const { store } = installedThenUpgraded()
+  assert.equal(store.stateOf(PACK_ID).activeVersion, '1.1.0')
+  const rec = store.rollback({ packId: PACK_ID, toVersion: '1.0.0' })
+  // ★ 判据一：它是一条**独立的**记录类型。回滚被记成 upgrade 或 install 时，
+  //   "这次变动是前进还是后退"在账上就看不出来了。
+  assert.equal(rec.kind, 'rollback')
+  assert.equal(rec.version, '1.0.0')
+  // ★ 判据二：账上同时留着"从哪来"和"到哪去"。
+  assert.equal(rec.fromVersion, '1.1.0')
+  assert.equal(rec.fromContentHash, V2.manifest.contentHash)
+  // ★ 判据三：内容哈希取自**账**（1.0.0 装进来时算出来的那个），
+  //   不是调用方再喂一份 manifest 的结果。
+  assert.equal(rec.contentHash, V1.manifest.contentHash)
+  const s = store.stateOf(PACK_ID)
+  assert.equal(s.activeVersion, '1.0.0')
+  assert.equal(s.contentHash, V1.manifest.contentHash)
+  // ★ 判据四：回滚**不新增** installedVersions——1.0.0 本来就在里面。
+  assert.deepEqual([...s.installedVersions].sort(), ['1.0.0', '1.1.0'])
+})
+
+test('⑦ 回滚**不改变**启用状态（和升级同一条纪律：它是版本变动，不是开关）', () => {
+  const { store } = installedThenUpgraded()
+  store.enable(PACK_ID)
+  assert.equal(store.stateOf(PACK_ID).enabled, true)
+  store.rollback({ packId: PACK_ID, toVersion: '1.0.0' })
+  assert.equal(store.stateOf(PACK_ID).enabled, true, '回滚把一个启用中的包停用了')
+})
+
+test('⑦ ★★★ 没装过的版本**不能**"回滚"过去（那是一条绕过预检的通道）', () => {
+  const { store } = installedThenUpgraded()
+  // 1.2.0 从来没装过。接受它就是让"回滚到已知安全版本"这句话
+  // 变成"装一个我从没有过、也没验过的版本"。
+  assert.equal(
+    codeOf(() => store.rollback({ packId: PACK_ID, toVersion: '1.2.0' })),
+    'pack-store-rollback-target-unknown',
+  )
+})
+
+test('⑦ ★★ 回滚目标必须**更低**：更高是升级，相等是没有变化', () => {
+  const { store } = installedThenUpgraded()
+  assert.equal(
+    codeOf(() => store.rollback({ packId: PACK_ID, toVersion: '1.1.0' })),
+    'pack-store-rollback-no-change',
+  )
+  const fresh = createPackStore({ now: () => 0 })
+  fresh.install({ manifest: V1.manifest, verdict: V1.verdict })
+  fresh.upgrade({ manifest: V2.manifest, verdict: V2.verdict })
+  // 2.0.0 没装过 → 先撞 TARGET_UNKNOWN；改用装过再升级的序列才测得到方向。
+  const third = packAt('2.0.0')
+  fresh.upgrade({ manifest: third.manifest, verdict: third.verdict })
+  fresh.rollback({ packId: PACK_ID, toVersion: '1.0.0' })
+  // 现在 active=1.0.0，往 1.1.0/2.0.0 都是"前进"，不是回滚。
+  assert.equal(
+    codeOf(() => fresh.rollback({ packId: PACK_ID, toVersion: '2.0.0' })),
+    'pack-store-not-a-rollback',
+  )
+})
+
+test('⑦ ★★ 没装过的包不能回滚；目标版本不是语义版本要拒', () => {
+  const store = createPackStore({ now: () => 0 })
+  assert.equal(codeOf(() => store.rollback({ packId: PACK_ID, toVersion: '1.0.0' })), 'pack-store-not-installed')
+  const { store: s2 } = installedThenUpgraded()
+  assert.equal(codeOf(() => s2.rollback({ packId: PACK_ID, toVersion: 'not-a-version' })), 'pack-store-rollback-target-unknown')
+  assert.equal(codeOf(() => s2.rollback({ packId: PACK_ID })), 'pack-store-bad-record')
+})
+
+test('⑦ ★ 回滚之后可以再升回去（方向由账决定，不由"曾经到过"决定）', () => {
+  const { store } = installedThenUpgraded()
+  store.rollback({ packId: PACK_ID, toVersion: '1.0.0' })
+  // 1.1.0 装过、也到过——但 upgrade 判的是"比当前高"，1.1.0 > 1.0.0，成立。
+  // 若这里改成"装过就不许再升"，回滚过一次的包就永远回不到新版本了。
+  const rec = store.upgrade({ manifest: V2.manifest, verdict: V2.verdict })
+  assert.equal(rec.kind, 'upgrade')
+  assert.equal(store.stateOf(PACK_ID).activeVersion, '1.1.0')
+})
+
+test('⑦ ★ `rollbackTargets` 只列装过的、更低的版本，且降序', () => {
+  const store = createPackStore({ now: () => 0 })
+  store.install({ manifest: V1.manifest, verdict: V1.verdict })
+  const mid = packAt('1.0.5')
+  store.upgrade({ manifest: mid.manifest, verdict: mid.verdict })
+  store.upgrade({ manifest: V2.manifest, verdict: V2.verdict })
+  assert.deepEqual(store.rollbackTargets(PACK_ID), ['1.0.5', '1.0.0'])
+  assert.deepEqual(store.rollbackTargets('legion.nothing'), [])
+  store.rollback({ packId: PACK_ID, toVersion: '1.0.0' })
+  assert.deepEqual(store.rollbackTargets(PACK_ID), [])
+})
+
+// ───────────────────── ⑧ F-20 缺口②：账的重建 ─────────────────────
+
+test('⑧ ★★★ 快照 → 重建：重启之后"现在装了什么"不变', () => {
+  const { store } = installedThenUpgraded()
+  store.enable(PACK_ID)
+  const before = store.stateOf(PACK_ID)
+
+  // 模拟"进程重启"：账从快照里回来，其余什么都不带。
+  const revived = createPackStore({ now: () => 0, history: store.snapshot() })
+  const after = revived.stateOf(PACK_ID)
+
+  // ★ 全部可观察字段都要一致。少比一个，"重启即失忆"就能从某个没人比的
+  //   字段上溜过去——而 `enabledPacks()` / `installedList()` 正是依赖预检
+  //   的基线：基线空了，每个包都会突然报"缺依赖"。
+  assert.equal(after.installed, before.installed)
+  assert.equal(after.enabled, before.enabled)
+  assert.equal(after.activeVersion, before.activeVersion)
+  assert.equal(after.contentHash, before.contentHash)
+  assert.equal(after.trust, before.trust)
+  assert.deepEqual([...after.installedVersions], [...before.installedVersions])
+  assert.deepEqual(revived.enabledPacks(), store.enabledPacks())
+  assert.deepEqual(revived.installedList(), store.installedList())
+  assert.equal(revived.history().length, store.history().length)
+})
+
+test('⑧ ★★★ 重建之后 `seq` 接着走，不是从 1 重来', () => {
+  const { store } = installedThenUpgraded()
+  const revived = createPackStore({ now: () => 0, history: store.snapshot() })
+  const rec = revived.rollback({ packId: PACK_ID, toVersion: '1.0.0' })
+  // seq 从 1 重来的话，两条不同的记录会共用同一个 seq，
+  // 而 seq 是"账只追加、记录不可变"这条保证唯一的凭据。
+  assert.equal(rec.seq, store.snapshot().seq + 1)
+  assert.equal(new Set(revived.history().map((r) => r.seq)).size, revived.history().length)
+})
+
+test('⑧ ★★★ 坏账**整本拒绝**，不是跳过坏的那几条', () => {
+  const { store } = installedThenUpgraded()
+  const good = [...store.snapshot().records]
+
+  // ① 未知记录类型
+  assert.equal(
+    codeOf(() => createPackStore({ history: [...good, { ...good[0], seq: 3, kind: 'sideways' }] })),
+    'pack-store-bad-snapshot',
+  )
+  // ② seq 不连续（少了一条）
+  assert.equal(
+    codeOf(() => createPackStore({ history: good.map((r, i) => ({ ...r, seq: i === 1 ? 7 : r.seq })) })),
+    'pack-store-bad-snapshot',
+  )
+  // ③ packId 为空
+  assert.equal(
+    codeOf(() => createPackStore({ history: [{ ...good[0], packId: '' }] })),
+    'pack-store-bad-snapshot',
+  )
+  // ④ 根本不是数组
+  assert.equal(codeOf(() => createPackStore({ history: { nope: true } })), 'pack-store-bad-snapshot')
+  // ★ 判据的要害：拒绝的是**整本**。跳过坏记录的实现会安静地返回一本
+  //   少了三条 install 的账，于是"这几个包没装过"与"这几条记录坏了"
+  //   变成同一个读数。
+  assert.equal(codeOf(() => createPackStore({ history: [...good.slice(0, 1), { kind: 'bogus', seq: 2, packId: 'x', version: '1.0.0' }] })), 'pack-store-bad-snapshot')
+})
+
+test('⑧ ★ 快照带形态版本，且改它不影响账', () => {
+  const { store } = installedThenUpgraded()
+  const snap = store.snapshot()
+  assert.equal(snap.version, PACK_STORE_VERSION)
+  assert.equal(snap.records.length, 2)
+  assert.deepEqual(Object.keys(snap).sort(), ['records', 'seq', 'version'])
+  assert.equal(Object.isFrozen(snap), true)
+  assert.equal(Object.isFrozen(snap.records), true)
+})
+
+test('⑧ ★★ 重建后仍能拒绝非法操作（账回来了，纪律也回来了）', () => {
+  const { store } = installedThenUpgraded()
+  const revived = createPackStore({ now: () => 0, history: store.snapshot() })
+  // 同版本重复安装
+  assert.equal(
+    codeOf(() => revived.install({ manifest: V1.manifest, verdict: V1.verdict })),
+    'pack-store-already-installed',
+  )
+  // 不是升级的升级
+  assert.equal(
+    codeOf(() => revived.upgrade({ manifest: V1.manifest, verdict: V1.verdict })),
+    'pack-store-not-an-upgrade',
+  )
 })

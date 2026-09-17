@@ -319,6 +319,22 @@ export const SCHEMA = defineSchema({
     //   逐条记账、**不中断整轮 tick**：一个坏模板不该让这一批里
     //   其它计划全部不物化，而下一轮 tick 会自己重试。
     'BAD_SCHEDULE_PAYLOAD', 'BIND_NOT_APPLIED', 'SCHEDULE_TASK_CREATE_FAILED',
+    // F-20 缺口③ 安装事实的具名码（team-hub/pack-facts.mjs）。
+    //
+    // 账这一层的每一个拒绝都必须能说清**是哪一种坏**，因为它们的修法完全不同：
+    // `PACK_FACT_MALFORMED` —— 记录本身缺字段/字段类型不对（调用方的问题）。
+    // `PACK_FACT_UNKNOWN_KIND` —— 记录类型读不出来。**单独一个码**的理由：
+    //   账里出现一个不认识的类型时，整本账的可信度取决于读的人敢不敢说
+    //   "我不知道"；把它并进 MALFORMED，等于把一个未来的格式变化
+    //   当成一次手滑。
+    // `PACK_FACT_SEQ_CONFLICT` —— 另一个写入者抢先占了那个 seq（409）。
+    //   文案必须说清"这次写入**没有**发生"，而且**绝不重编号**：
+    //   重编号会静默改掉记录的顺序，而顺序是复盘时唯一能确定因果的东西。
+    // `PACK_FACT_WRITE_FAILED` / `PACK_FACT_READ_FAILED` —— 兜底。
+    //   写失败是 5xx、seq 冲突是 409：把磁盘错误报成 409 会让调用方
+    //   **无限重试**同一个坏盘。
+    'PACK_FACT_MALFORMED', 'PACK_FACT_UNKNOWN_KIND', 'PACK_FACT_SEQ_CONFLICT',
+    'PACK_FACT_WRITE_FAILED', 'PACK_FACT_READ_FAILED',
     // spec §6.7 凭证管理的**写**一半（team-hub/secret-admin.mjs）。
     //
     // 在它之前，`security/secrets/store.mjs` 的 put/rotate/remove 在整个仓库里

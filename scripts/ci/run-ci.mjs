@@ -1589,6 +1589,25 @@ async function stageTest() {
       files: ['team-hub/usage-rollup.test.mjs', 'team-hub/usage-rollup-http.test.mjs'],
       cwd: ROOT,
     },
+    // F-20 缺口③：能力包安装事实的**持久化**。
+    //
+    // 这一组存在的理由与 F-15 那组同源，方向相反：F-15 是"记录了却读不出来"，
+    // 这一条是"算得出来却存不下去"。`runtime/packs/store.mjs` 的账**纯内存**
+    // （它自己第 129 行写着），于是"安装事实"在重启之后什么都不剩——
+    // 而 `enabledPacks()` / `installedList()` 正是依赖预检的基线：
+    // 基线空了，每个包都会突然报"缺依赖"，而它们其实都装着。
+    //
+    //   > 一本重启即失忆的账，与一本从来没有写过的账，
+    //   > 在"现在装了什么"这个问题上是同一个回答。
+    //
+    // 两个文件分工：`pack-facts.test.mjs` 钉账本自身的纪律（seq 的 CAS、
+    // 只追加、坏账整本拒绝），`pack-facts-http.test.mjs` 钉**跨模块实例**
+    // 的重建——而"同一个实例里再读一次永远是对的"，所以后者才是真判据。
+    {
+      label: 'pack-facts（F-20：安装事实落盘、跨重启重建、可导出给 Git 审阅）',
+      files: ['team-hub/pack-facts.test.mjs', 'team-hub/pack-facts-http.test.mjs'],
+      cwd: ROOT,
+    },
     // PRT-314：多 worker 并发语义。竞争者是真的**操作系统进程**，
     // 不是同一进程里的两条连接——同一事件循环里两条 BEGIN IMMEDIATE
     // 不可能真的同时发出，因此那种测法证明不了「两个进程抢的时候不会都赢」。
@@ -3167,6 +3186,13 @@ async function stageTest() {
         // 一个"整组被跳过、计数里什么都不显示"的套件，与一个压根不存在的套件，
         // 在"这次到底跑了什么"上是同一个东西。
         'product/launcher/dsh-overlay.test.mjs',
+        // PRT-251 续 ④：旧数据接管（安装目录内的 `team.db` → DataDir）。
+        //
+        // 缺口的形状是"写路径已经指到 DataDir、而 DataDir 里没有数据"，
+        // 所以这一组的判据必须落在**两端之间**：计划三态、真 SQLite 快照、
+        // 幂等、以及 Launcher 在"该接却没接成"时**拒绝启动**。
+        // 其中 ⑥ 用真 WAL 把两条路径并排比一次——那是本模块存在的全部理由。
+        'product/launcher/legacy-data-adoption.test.mjs',
         // PRT-509：Run 凭证的**材料化接线**（`launcher.start()` 里那次调用）。
         //
         // 这一条存在的理由与上面那组同源：`openRunCredentials()` 与

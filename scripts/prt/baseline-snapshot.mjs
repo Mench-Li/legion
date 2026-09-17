@@ -121,6 +121,18 @@ const SCHEMA_SOURCES = [
   // 把 `version` 从主键里拿掉，第二条就会变成"改摘要"——而那是一次
   // 静默的信息丢失，正是这三列要防的事。
   'compactionStore',
+  // F-20 缺口③（§4.4）：`pack_install_facts`。
+  //
+  // 这张表进基线，是因为**它自己就是"team-hub 保存安装事实"这句话的落地**，
+  // 而它的形状承载了三条必须能核的要求：
+  //   · `seq` 是 PRIMARY KEY ⇒ "账只追加、顺序就是发生顺序"（重号即写入失败）
+  //   · `kind` 的取值集合里有 `rollback` ⇒ "安装可回滚"在账上有一条**自己的**
+  //     方向，而不是伪装成 install / upgrade
+  //   · `content_hash` / `declared_content_hash` 两列并存 ⇒ "账上记的是算出来的
+  //     那一个，不是作者声明的那个"
+  // 把 `seq` 从主键里拿掉，第一条就没有任何地方能核——而它是这份账唯一
+  // 能证明"没有静默重排"的东西。
+  'packFacts',
 ]
 
 // 这些模块也一并纳入 sources 哈希：它们变了，基线里的表清单就可能过期。
@@ -142,6 +154,7 @@ SOURCES.contextPlanStore = join(ROOT, 'team-hub', 'context-plan-store.mjs')
 SOURCES.eventDelivery = join(ROOT, 'team-hub', 'event-delivery.mjs')
 SOURCES.automationStore = join(ROOT, 'team-hub', 'automation-store.mjs')
 SOURCES.compactionStore = join(ROOT, 'team-hub', 'compaction-store.mjs')
+SOURCES.packFacts = join(ROOT, 'team-hub', 'pack-facts.mjs')
 
 /**
  * 采集 schema 的目录。

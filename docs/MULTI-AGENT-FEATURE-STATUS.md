@@ -67,6 +67,13 @@
 
 ## 2. 本轮（2026-09-17）关掉的缺口
 
+> ⚠️ **一次自我更正**：本表此前把 F-20 记成 ✅、把 F-19 的名字写成"知识库"。
+> 两条都是错的——F-19 的原文是 **Employee / Role Pack**（§4.4），而 F-20 的
+> "安装可回滚 + team-hub 保存安装事实"**一件都没有**（`rollback` 在
+> `store.mjs` 里明写"不走这里"，store 自陈纯内存，hub 侧无表无路由）。
+> 这正是本表存在的理由：**一份把"有用例"读成"已生效"的进度表，
+> 与一份把未完成读成完成的进度表，是同一个东西。** 现已按读数改正。
+
 这几条的共同形状是 **"能力齐全、用例全绿、而生产调用方数为 0"**：
 
 | 缺口 | 改动前的实际读数 | 关掉它的判据 |
@@ -77,6 +84,10 @@
 | F-17 | 能力**完全不存在**（grep `compact` 零命中） | `compaction-store.test.mjs` 14 例 + `compaction-http.test.mjs` 5 例 |
 | F-15 | 闸门齐全而**汇总不存在**（grep `evidenceAggregate`/`rollup` 零命中）：`budget-ledger` 记了 `usage_records`，但"按员工花了多少"没有一个读出口 | `usage-rollup.test.mjs` 12 例 + `usage-rollup-http.test.mjs` 6 例 |
 | PRT-509 B1 | `secretsRun`/`secretsOwner` 全仓只有声明与传参两处，**没有生产调用方** ⇒ 恒为 `ACL_NO_RUNNER` | `secrets-acl-runner.test.mjs` 12 例（含真 `whoami`+真 `icacls`） |
+| PRT-509 B2 | `inspectSecretsAcl` **定义在、有注释、零调用方**（比调用点少 `owner`/`exists` 两参 ⇒ 调用点各内联一份 `inspectFileAcl`） | `secrets.test.mjs` 用例 ⑧：1 条结构级 + 2 条行为级，两条行为级已**变异验证** |
+| F-20 缺口① | 账里**没有回滚**：`upgrade()` 注释写着"降级是另一个操作（回滚）"，而那个操作不存在——需要回滚的人两条路都被堵（`install` 报 `ALREADY_INSTALLED`、`upgrade` 报 `NOT_AN_UPGRADE`） | `store.test.mjs` 用例⑦（8 条），两条关键守卫已**变异验证** |
+| F-20 缺口② | 账**纯内存**（`store.mjs` 第 129 行自陈）⇒ 重启即失忆，"现在装了什么"永远回答"什么都没装" | `store.test.mjs` 用例⑧（5 条）：快照/重建/seq 接着走/坏账整本拒绝；"整本拒绝"已**变异验证** |
+| F-20 缺口③ | team-hub **没有安装事实**（无表、无路由）⇒ 控制面重启后依赖预检拿一份空基线，每个包都突然报"缺依赖" | `pack-facts.test.mjs` 19 例 + `pack-facts-http.test.mjs` 8 例（含**跨模块实例**重建、seq 的 CAS、账只追加）；seq 的 CAS 已**变异验证** |
 
 一条值得单独记下的判据：**F-05 后半的三条设计纪律各自对应一个真实的失效方向**，
 因此它们在用例里是**分开**验的，而不是合并成一句"投递可靠"：
@@ -120,25 +131,27 @@
 
 ### 2.1 关于"基线漂移"这件事
 
-本轮新增 3 张业务表 + 9 张（含 F-05 的 2 张）协议表与 16 条路由，
+本轮新增 4 张业务表 + 10 张（含 F-05 的 2 张）协议表与 20 条路由，
 因此 `scripts/prt/baseline-snapshot.mjs` 的契约基线**必须刷新**——
 运行 `--diff` 得到的漂移清单是**且仅是**本轮有意新增的那些：
 
 ```text
 + 数据表: automation_runs / automation_schedules / compaction_messages /
-          compaction_summaries / event_deliveries / event_subscribers / run_events
+          compaction_summaries / event_deliveries / event_subscribers /
+          run_events / pack_install_facts
 + 路由:   GET/POST /api/automation/*（6）、/api/compaction/*（5）、
           GET /api/event-delivery、GET /api/runtime/run-events、
-          GET /api/usage/{totals,rollup}（2）
+          GET /api/usage/{totals,rollup}（2）、
+          GET/POST /api/packs/facts、GET /api/packs/{account,export}（4）
 ~ 源文件已变更：team-hub/server.mjs、team-hub/run-store.mjs、
-                team-hub/automation-store.mjs
+                team-hub/automation-store.mjs、team-hub/pack-facts.mjs
 ```
 
 `team-hub/automation-store.mjs` 与 `team-hub/usage-rollup.mjs` 的列变化
 （`automation_schedules.payload_json`）走 `ensureColumn`，
 因此是**老库可平滑升级**的加列，不是破坏性迁移。
 
-★ 这三个建表模块**是被门禁自己要求登记的**：`prt-baseline` 的用例⑤
+★ 这四个建表模块**是被门禁自己要求登记的**：`prt-baseline` 的用例⑤
 （"每个建表模块都登记进了 schema 采集"）当场报出
 「它们的表对平台契约基线**不可见**」。不登记的后果正是那道门禁存在的理由——
 表在真实 schema 里多出来，而 `--check` 兴高采烈地说"无漂移"。
@@ -150,9 +163,9 @@
 | F-15 | 用量/费用与预算 | 🟡 | `team-hub/budget-ledger.mjs`、`team-hub/usage-rollup.mjs`、`runtime/contracts/price-table.mjs` | PRT-503/510/511 已落地；**成本刻已采**（$0.045086 实测）；本轮补上**五维度汇总**（`usage-rollup.test.mjs` 12 例 + `usage-rollup-http.test.mjs` 6 例真 HTTP）。`peak-resource` 仍缺（PRT-009 🟡，阻塞于 PRT-011 平台裁决） |
 | F-16 | 自动化计划 | ✅ | `team-hub/automation-store.mjs`、`server.mjs`（6 条路由 + 30s tick） | `automation-store.test.mjs`（27 例）+ `automation-http.test.mjs`（9 例真 HTTP）。★ 本轮补上 `payload` 任务模板与 `bindTask`，`automationTick` 从 `wired:false` 变为 **`wired:true`**：物化出的运行会按计划模板建出一张**可领取**的任务卡 |
 | F-17 | 长会话压缩 | ✅ | `team-hub/compaction-store.mjs`、`server.mjs`（5 条路由） | `compaction-store.test.mjs`（14 例）+ `compaction-http.test.mjs`（5 例真 HTTP）。★ 刻意**不调用模型**：收的是已算好的摘要文本 |
-| F-18 | 经验/上下文召回 | 🟡 | `plugins/src/experienceRecall.ts` | 属 `plugins/` 旧路径，未纳入 Product Runtime |
-| F-19 | 知识库 | 🟡 | 同上 | 同上 |
-| F-20 | 能力包 | ✅ | `runtime/packs/*` | PRT-1001～1006 |
+| F-18 | 经验图谱/摩擦学习 | 🟡 | `plugins/src/experience.ts`、`experienceVotes.ts`、`experienceRecall.ts` | 摩擦打分/草稿/投票/晋升门限**都已实现且有用例**，但落在**旧的 `plugins/` 路径**上，未纳入 Product Runtime。§8 给的落点是「Context、Compaction、Knowledge」——三者都已就绪，缺的是把这一族搬过来 |
+| F-19 | Employee / Role Pack | 🟡 | 无独立落点 | 需要一份把 **Prompt / 技能 / 工具 / 权限 / 模型 / 连接器 / 预算** 七类版本一起固化的产物。今天 `EmployeeManifest` 只作为**上下文来源**存在（`runtime/context/sources.mjs`），没有任何模块承载"这个岗位被冻结成哪一版" |
+| F-20 | Pack Manager | 🟡→✅ | `runtime/packs/{manifest,authority,store,compiled-plan}.mjs`、`team-hub/pack-facts.mjs` | 校验面**齐全**：签名三级（`builtin/signed/unsigned`，无验证器即 `unsigned`——"没法验"不是"验过了"）、依赖与权限（`authority.mjs`）、Runtime Contract、预检结论**必填**。★ **本轮关掉三处缺**（此前本表误记为 ✅）：① **`rollback` 已实现**——账上多一类**自己的**记录（不与 upgrade 混），四条拒绝各有具名码；② **账可持久化**——`snapshot()` / `createPackStore({history})`，坏账**整本拒绝**（跳过坏记录会让"这几个包没装过"与"这几条记录坏了"变成同一个读数）；③ **team-hub 保存安装事实**——`pack_install_facts` 表 + 4 条路由，`GET /api/packs/account` 的形状**原样**能喂回 `createPackStore`，`GET /api/packs/export` 给出可提交进 Git 的审阅文本（不含包内容/凭证） |
 
 ## 4. P2：扩展面
 
@@ -192,7 +205,7 @@ node scripts/ci/run-ci.mjs
 
 # 只跑本轮新增的套
 node scripts/ci/run-ci.mjs --only test   # 然后在输出里找：
-#   run-events / event-delivery / automation / compaction / usage-rollup
+#   run-events / event-delivery / automation / compaction / usage-rollup / pack-facts
 
 # 单独复跑
 node --test team-hub/run-events.test.mjs
@@ -200,6 +213,9 @@ node --test team-hub/event-delivery.test.mjs team-hub/event-delivery-wiring.test
 node --test team-hub/automation-store.test.mjs team-hub/automation-http.test.mjs
 node --test team-hub/compaction-store.test.mjs team-hub/compaction-http.test.mjs
 node --test team-hub/usage-rollup.test.mjs team-hub/usage-rollup-http.test.mjs
+node --test team-hub/pack-facts.test.mjs team-hub/pack-facts-http.test.mjs
+node --test runtime/packs/store.test.mjs
+node --test product/secrets.test.mjs
 node --test product/launcher/secrets-acl-runner.test.mjs
 
 # 配置面（新增字面量必须登记）

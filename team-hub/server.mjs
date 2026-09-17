@@ -167,6 +167,15 @@ import {
   projectOccurrences,
 } from './automation-store.mjs'
 import { createCompactionStore, ensureCompactionSchema } from './compaction-store.mjs'
+import {
+  PACK_FACT_ERRORS,
+  appendPackFact,
+  ensurePackFactSchema,
+  exportPackFacts,
+  packAccount,
+  packFactCounts,
+  packFacts,
+} from './pack-facts.mjs'
 import { ROLLUP_DIMENSIONS, rollupBy, usageTotals } from './usage-rollup.mjs'
 import { loadConfig } from '../packages/shared/src/config.mjs'
 import { SCHEMA as CONFIG_SCHEMA } from './config-schema.mjs'
@@ -542,6 +551,20 @@ const compactionStore = (() => {
   ensureCompactionSchema(db)
   return createCompactionStore({ db })
 })()
+
+/**
+ * 能力包安装事实（F-20 缺口③，spec §4.4）。
+ *
+ * 这张表存的是 `runtime/packs/store.mjs` 产出的**记录**，不是"当前装了什么"。
+ * 那一层已经定下"记录是唯一的账、`stateOf()` 是账的推导"，所以控制面这边
+ * 再存一份推导结果就会有两份真相——而它们漂移的那一天，
+ * "账上写着装了、表上写着没装"没有任何东西能判定谁对。
+ *
+ * 于是这里只做两件事：**追加**记录，以及**把整本账交出去**
+ * （`packAccount()` 的形态就是 `createPackStore({ history })` 认的那个）。
+ * 推导只有一处实现。
+ */
+ensurePackFactSchema(db)
 
 /**
  * 模型档案仓储（PRT-501，spec §6.6）。
@@ -6745,6 +6768,78 @@ async function handle(req, res, stripPrefix) {
       const sessionId = url.searchParams.get('sessionId')
       if (sessionId === null || sessionId.length === 0) { json(res, 400, { ok: false, error: '缺少 sessionId', code: 'MISSING_PARAM' }); return }
       json(res, 200, { ok: true, sessionId, summaries: compactionStore.summariesOf(sessionId) })
+      return
+    }
+    // ── F-20 能力包安装事实 ────────────────────────────────────────────
+    //
+    // 四条路由，围绕着**一本只追加的账**：
+    //   · `POST /api/packs/facts`          追加一条记录（seq 由 CAS 算出来）
+    //   · `GET  /api/packs/facts`          读账（可按包 / 按 seq 增量）
+    //   · `GET  /api/packs/account`        整本账，形态直接喂给 `createPackStore`
+    //   · `GET  /api/packs/export`         导出成可提交进 Git 的文本
+    //
+    // **刻意没有"改一条记录"或"删一条记录"的路由**：账是"只追加、记录不可变"的，
+    // 而一次"顺手修正"会让"这条记录是谁改的"永远无法回答。
+    // 写路径只有一条，且它不接受"当前状态"这种入参——那条状态是**推导**出来的，
+    // 由 hub 存一份就等于有第二份真相。
+    if (path === '/api/packs/facts' && req.method === 'POST') {
+      await handleRun(req, res, (body) => ({
+        ok: true,
+        ...appendPackFact({
+          db,
+          record: {
+            at: body.at,
+            kind: body.kind,
+            packId: body.packId,
+            version: body.version,
+            packType: body.packType ?? null,
+            packProtocolVersion: body.packProtocolVersion ?? null,
+            contentHash: body.contentHash ?? null,
+            declaredContentHash: body.declaredContentHash ?? null,
+            trust: body.trust ?? null,
+            fromVersion: body.fromVersion ?? null,
+            fromContentHash: body.fromContentHash ?? null,
+            preflightVersion: body.preflightVersion ?? null,
+            verdictCodes: body.verdictCodes ?? [],
+          },
+        }),
+      }))
+      return
+    }
+    if (path === '/api/packs/facts' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const packId = url.searchParams.get('packId')
+      json(res, 200, {
+        ok: true,
+        packId: packId === null || packId.length === 0 ? null : packId,
+        records: packFacts({
+          db,
+          packId,
+          sinceSeq: optionalIntParam(url, 'sinceSeq') ?? 0,
+          limit: optionalIntParam(url, 'limit'),
+        }),
+        counts: packFactCounts({ db }),
+      })
+      return
+    }
+    if (path === '/api/packs/account' && req.method === 'GET') {
+      // 这一条的形状**就是** `createPackStore({ history })` 认的那个：
+      // 重启之后控制面不必自己再推一遍状态，而"两份推导"是这一层最想避免的事。
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      json(res, 200, { ok: true, ...packAccount({ db }) })
+      return
+    }
+    if (path === '/api/packs/export' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const { text } = exportPackFacts({ db })
+      // 返回**文本**而不是 JSON 对象：这份东西的用途是进 diff、被人审阅，
+      // 而一个被包在 HTTP JSON 里的对象到了调用方手里又要被 `JSON.stringify`
+      // 一次——那一次与这一份的缩进、键序都可能不同，于是"审阅的是哪一份"就成了问题。
+      res.writeHead(200, {
+        'content-type': 'application/json; charset=utf-8',
+        'content-disposition': 'attachment; filename="legion-pack-install-facts.json"',
+      })
+      res.end(text)
       return
     }
     // ── F-15 用量汇总 ──────────────────────────────────────────────────

@@ -616,3 +616,32 @@ node scripts/prt/baseline-snapshot.mjs --record   # 仅在确认漂移都是有�
 ```
 
 证据目录：`.ci/<timestamp>/`（每次 `run-ci` 一份 `summary.json`）。
+
+### 6.1 ★ 读 CI 红之前先看这一节：`prt-churn` 可能与你的改动**无关**
+
+`--only test` 里有一组会**偶发**变红：`prt-churn`（热点文件改动节奏探针）。
+本轮实测到过一次，`fail=2`，两条都在 ③。**它不是回归**，机制已经被钉住：
+
+- `scripts/prt/hot-file-churn.test.mjs:84` 在**模块加载时**跑一次
+  `const churn = collectChurn({ size: 40, windows: 3 })`；
+- 全套件 13 条用例里，**只有两条**读这个快照（③ 的 `assert.equal(churn.ok, true)`
+  与 ③ 的遍历 `churn.files`）——所以快照一旦取不到，**恰好两条**变红；
+- `collectChurn()` 内部用 `git rev-parse HEAD` / `git rev-list HEAD` 起手，
+  取不到就返回 `{ok:false}`（那是它的设计：非 git 目录要给出可读原因）。
+  于是在一个**有另一个 agent 进程每 ~60s 提交**的共享工作树上，
+  一次瞬时争用就能让 `ok:false`，而那两条用例跟着红。
+
+★ **怎么区分"偶发"与"真回归"**：把那个计数打出来。
+
+```bash
+node scripts/prt/hot-file-churn.mjs --json
+# 看每个文件的各窗口计数与窗口大小（默认 40）。
+```
+
+本轮实测 `max=14 / 40`（`team-hub/server.mjs` 的峰值窗口），**离阈值很远**——
+也就是说 ③ 报出"计数 > 窗口大小"是**不可能的**，红的那次只可能是 `churn.ok === false`。
+单独复跑该套件即 13/13 通过。
+
+> 一个「共享工作树上 git 瞬时争用导致的红」，
+> 与一个「这次改动真的破坏了闸门」的红，在 `FAIL prt-churn` 这一行上是同一个东西——
+> 而 ③ 的**两条**用例（不是一条、也不是十三条）同时红，正是前者的指纹。

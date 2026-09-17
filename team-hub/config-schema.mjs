@@ -365,6 +365,29 @@ export const SCHEMA = defineSchema({
     'EXPERIENCE_RECORD_MALFORMED', 'EXPERIENCE_KIND_UNKNOWN',
     'EXPERIENCE_DRAFT_NOT_FOUND', 'EXPERIENCE_DRAFT_ALREADY_SETTLED',
     'EXPERIENCE_WRITE_FAILED', 'EXPERIENCE_READ_FAILED',
+    // F-21 连接器登记表的具名码（team-hub/connector-store.mjs）。
+    //
+    // `CONNECTOR_VERSION_CONFLICT` —— **409**，与 `ROLE_PACK_VERSION_CONFLICT`
+    //   同一条理由，但后果更重：连接器声明说的是"一个**外部进程**能拿到什么权限"。
+    //   报 400 会让调用方以为请求格式不对，于是永远不去递增版本号；
+    //   而"同一个版本号对应两份权限不同的声明"意味着事后复盘时
+    //   "当时放行了哪些工具"这个问题**不再有唯一答案**。
+    // `CONNECTOR_TRANSPORT_UNKNOWN` / `CONNECTOR_TOOLS_EMPTY` /
+    //   `CONNECTOR_TOOL_DUPLICATE` / `CONNECTOR_RECORD_MALFORMED` /
+    //   `CONNECTOR_EVENT_MALFORMED` / `CONNECTOR_CIRCUIT_STATE_UNKNOWN`
+    //   —— 400：调用方写错了请求（形状、封闭词表、必填项）。
+    //   `CONNECTOR_EVENT_MALFORMED` 里有一条刻意的话：事件**必须点名**是哪个
+    //   连接器。只记"某处发生了故障"时，一次隔离良好的单点故障与一次大面积
+    //   故障长得一样。
+    // `CONNECTOR_WRITE_FAILED` / `CONNECTOR_READ_FAILED` —— 500：
+    //   本表没登记的内部码收敛到这里（不猜状态码）。
+    //   ★ 这里**没有** `CONNECTOR_NOT_FOUND`：`getDeclaration` 找不到时返回
+    //   `null`——那是一个正常读数（"这个连接器还没登记过"），不是错误。
+    //   登记一个永远抛不出的码，与登记一段被注释掉的代码是同一个东西。
+    'CONNECTOR_RECORD_MALFORMED', 'CONNECTOR_TRANSPORT_UNKNOWN',
+    'CONNECTOR_VERSION_CONFLICT', 'CONNECTOR_TOOL_DUPLICATE', 'CONNECTOR_TOOLS_EMPTY',
+    'CONNECTOR_EVENT_MALFORMED', 'CONNECTOR_CIRCUIT_STATE_UNKNOWN',
+    'CONNECTOR_WRITE_FAILED', 'CONNECTOR_READ_FAILED',
     // spec §6.7 凭证管理的**写**一半（team-hub/secret-admin.mjs）。
     //
     // 在它之前，`security/secrets/store.mjs` 的 put/rotate/remove 在整个仓库里

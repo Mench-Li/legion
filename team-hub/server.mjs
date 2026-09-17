@@ -177,6 +177,16 @@ import {
   settleDraft,
 } from './experience-store.mjs'
 import {
+  appendIncident,
+  connectorCounts,
+  connectorIncidents,
+  connectorRegistrations,
+  ensureConnectorSchema,
+  exportConnectors,
+  freezeDeclaration,
+  getDeclaration,
+} from './connector-store.mjs'
+import {
   ROLE_PACK_STORE_ERRORS,
   ensureRolePackSchema,
   exportRolePacks,
@@ -603,6 +613,20 @@ ensureRolePackSchema(db)
  * 所以这张表没有 UPDATE 路径，也没有"保存整张图"的接口。
  */
 ensureExperienceSchema(db)
+
+/**
+ * F-21 连接器登记表。
+ *
+ * 两张表，都是**只追加**：`connector_registrations`（按内容哈希冻结的声明）
+ * 与 `connector_incidents`（点名的熔断事件）。
+ *
+ * ★ 这里**不**去 import 执行面的 `runtime/connectors/registry.mjs` 来校验：
+ * 单向产品边界不允许，而且"放不放过去"是执行面的判断——
+ * 控制面只负责记住"当时声明的是什么"。
+ * 两边的词表由 `connector-store.test.mjs` 用例①**从执行面源码里抽出来**
+ * 逐字比对钉住（再抄一遍互相核对时，两边一起写错它全绿）。
+ */
+ensureConnectorSchema(db)
 
 /**
  * 模型档案仓储（PRT-501，spec §6.6）。
@@ -7084,6 +7108,138 @@ async function handle(req, res, stripPrefix) {
         'content-disposition': 'attachment; filename="legion-experience.json"',
       })
       res.end(text)
+      return
+    }
+    // ── F-21 连接器登记表 ──────────────────────────────────────────────
+    //
+    // 四条路由，围绕**按内容哈希冻结的声明** + **点名的故障事件**：
+    //   · `POST /api/connectors`             冻结一份声明（幂等或 409，没有第三种）
+    //   · `GET  /api/connectors`             列登记（可按 connectorId / sinceSeq）
+    //   · `GET  /api/connectors/incidents`   读熔断事件（点名是哪一个连接器）
+    //   · `GET  /api/connectors/export`      导出成可提交进 Git 的审阅文本
+    //
+    // ★ **刻意没有"改一份声明"或"删一个连接器"的路由**：连接器声明说的是
+    //   "一个外部进程能拿到什么权限"，而一条改/删的路由会让"当时放行了哪些工具"
+    //   在**写的那一刻**失去答案。确实改了内容就递增版本号再冻一版——
+    //   `freezeDeclaration` 会拒绝"同版本换内容"。
+    //
+    // ★ 事件路由的 `connectorId` 是**必填**的：只记"某处发生了故障"时，
+    //   一次隔离良好的单点故障与一次大面积故障长得一样。这一层不做默认值
+    //   填充（填一个 'default' 会让"忘了传"与"就是那个连接器"同形）。
+    if (path === '/api/connectors' && req.method === 'POST') {
+      await handleRun(req, res, (body) => {
+        const r = freezeDeclaration({
+          db,
+          scope: typeof body.scope === 'string' && body.scope.trim() !== '' ? body.scope.trim() : 'default',
+          // `declaration` 原样收下（与 F-19 的 `pack` 同一条理由）：
+          // 控制面不挑字段、不重排、不补默认值——挑字段就是一份多余的转写，
+          // 而转写会漂移，漂移之后"当时声明的是什么"就没有唯一的答案了。
+          declaration: body.declaration,
+          version: body.version,
+          frozenAtMs: Number.isInteger(body.frozenAtMs) ? body.frozenAtMs : Date.now(),
+          frozenBy: body.frozenBy ?? null,
+        })
+        return {
+          ok: true,
+          frozen: r.frozen,
+          // `created:false` 是**幂等重放**，不是"已经有一模一样的了所以不算数"。
+          created: r.created,
+          connectorId: r.connectorId,
+          version: r.version,
+          contentHash: r.contentHash,
+          toolCount: r.toolCount,
+          frozenAtMs: r.frozenAtMs,
+        }
+      })
+      return
+    }
+    if (path === '/api/connectors' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const scope = url.searchParams.get('scope') ?? 'default'
+      const connectorId = url.searchParams.get('connectorId')
+      const version = url.searchParams.get('version')
+      const sinceSeq = optionalIntParam(url, 'sinceSeq') ?? 0
+      // ★ 形状不随查询参数变（与 F-19 同一条）：永远是 `records` + `registration`
+      //   + `counts`。一份"读哪个字段取决于我传了什么参数"的响应，
+      //   与一份随机的响应在调用方代码里是同一个东西。
+      //
+      // ★★ `version` **必须真的被用上**。第一版收了这个参数却只把它丢在一边
+      //   （`getDeclaration` 没收到它），于是"不传 version = 最新"这条默认
+      //   静默地覆盖了每一次带版本的查询：调用方问"1.0.0 当时放行了哪些工具"，
+      //   拿回的是 2.0.0 的工具清单——**答案来自另一版，而响应里没有任何地方
+      //   提示这件事**。这个坑比"不支持 version"深得多：不支持时会报错或者
+      //   返回 null，而静默忽略会给出一个看起来完全正常的答案。
+      const filtered = version === null
+        ? connectorRegistrations({ db, scope, connectorId, sinceSeq })
+        : connectorRegistrations({ db, scope, connectorId, sinceSeq }).filter((r) => r.version === version)
+      json(res, 200, {
+        ok: true,
+        scope,
+        records: filtered,
+        // 不传 connectorId 或那一版还没冻过时是 null——而"还没冻过"与"这行坏了"
+        // 是两件事，所以 `readable` 一并带出去。
+        registration: connectorId === null ? null : getDeclaration({ db, connectorId, version, scope }),
+        counts: connectorCounts({ db, scope }),
+      })
+      return
+    }
+    if (path === '/api/connectors/incidents' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const scope = url.searchParams.get('scope') ?? 'default'
+      const connectorId = url.searchParams.get('connectorId')
+      const sinceSeq = optionalIntParam(url, 'sinceSeq') ?? 0
+      json(res, 200, {
+        ok: true,
+        scope,
+        records: connectorIncidents({ db, scope, connectorId, sinceSeq }),
+        counts: connectorCounts({ db, scope }),
+      })
+      return
+    }
+    if (path === '/api/connectors/export' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const scope = url.searchParams.get('scope') ?? 'default'
+      const { text } = exportConnectors({ db, scope })
+      res.writeHead(200, {
+        'content-type': 'application/json; charset=utf-8',
+        'content-disposition': 'attachment; filename="legion-connectors.json"',
+      })
+      res.end(text)
+      return
+    }
+    // `/api/connectors/<id>/incidents` —— 记一条熔断事件
+    //
+    // ★ 与 F-18 的 settle 同形：**字面量** + `startsWith`/`endsWith`，
+    //   而不是正则守卫。理由见上面那段长注释（`baseline-snapshot.mjs` 的
+    //   抽取器只认字面量，正则守卫会**悄悄**不进平台契约）。
+    if (req.method === 'POST' && path.startsWith('/api/connectors/') && path.endsWith('/incidents')) {
+      const rawId = path.slice('/api/connectors/'.length, path.length - '/incidents'.length)
+      // 中间那段必须是**一段** id（同 F-18 的 settle）：否则
+      // `/api/connectors/a/b/incidents` 会被当成一个合法 id，
+      // 而那个 id 永远不会有对应的连接器。
+      if (rawId === '' || rawId.includes('/')) {
+        json(res, 400, {
+          error: `连接器 id 必须是一段路径（收到 ${JSON.stringify(rawId)}），` +
+            '带 `/` 的 id 永远不会对应到一个连接器',
+          code: 'CONNECTOR_EVENT_MALFORMED',
+        })
+        return
+      }
+      const connectorId = decodeURIComponent(rawId)
+      await handleRun(req, res, (body) => ({
+        ok: true,
+        ...appendIncident({
+          db,
+          scope: typeof body.scope === 'string' && body.scope.trim() !== '' ? body.scope.trim() : 'default',
+          connectorId,
+          kind: body.kind,
+          circuitState: body.circuitState,
+          // `atMs` 必填且必须是整数：`undefined` 与"当时就是 0"同形。
+          atMs: body.atMs,
+          reason: body.reason ?? null,
+          actor: body.actor ?? null,
+        }),
+      }))
       return
     }
     // ── F-15 用量汇总 ──────────────────────────────────────────────────

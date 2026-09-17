@@ -151,6 +151,17 @@ const SCHEMA_SOURCES = [
   //   这条性质在 schema 上只体现为"只有一张表、没有状态列"——
   //   正是那种"改坏了也看不出来"的契约，所以必须钉住。
   'experienceStore',
+  // F-21（§4.4）：`connector_registrations`（按内容哈希冻结的连接器声明）
+  // 与 `connector_incidents`（点名的熔断事件）。两张都是**只追加**。
+  //
+  // ★ 进基线的判据与 F-18/F-19 同源，但这一处更重：
+  //   连接器声明说的是"一个**外部进程**能拿到什么权限"。
+  //   一旦有人给它加上一段就地更新（"把策略改一下"），
+  //   "当时放行了哪些工具"这个问题就在**写的那一刻**失去唯一答案——
+  //   而这正是事后复盘唯一要问的问题。
+  //   这条性质在 schema 上只体现为"没有状态列、没有 UPDATE 路径"，
+  //   正是那种"改坏了也看不出来"的契约，所以必须钉住。
+  'connectorStore',
 ]
 
 // 这些模块也一并纳入 sources 哈希：它们变了，基线里的表清单就可能过期。
@@ -173,6 +184,7 @@ SOURCES.eventDelivery = join(ROOT, 'team-hub', 'event-delivery.mjs')
 SOURCES.automationStore = join(ROOT, 'team-hub', 'automation-store.mjs')
 SOURCES.compactionStore = join(ROOT, 'team-hub', 'compaction-store.mjs')
 SOURCES.packFacts = join(ROOT, 'team-hub', 'pack-facts.mjs')
+SOURCES.connectorStore = join(ROOT, 'team-hub', 'connector-store.mjs')
 SOURCES.rolePackStore = join(ROOT, 'team-hub', 'role-pack-store.mjs')
 SOURCES.experienceStore = join(ROOT, 'team-hub', 'experience-store.mjs')
 

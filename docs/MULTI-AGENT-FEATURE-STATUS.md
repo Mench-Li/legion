@@ -90,6 +90,7 @@
 | F-20 缺口③ | team-hub **没有安装事实**（无表、无路由）⇒ 控制面重启后依赖预检拿一份空基线，每个包都突然报"缺依赖" | `pack-facts.test.mjs` 19 例 + `pack-facts-http.test.mjs` 8 例（含**跨模块实例**重建、seq 的 CAS、账只追加）；seq 的 CAS 已**变异验证** |
 | F-19 缺口① | 七类版本**没有落点**：`EmployeeManifest` 只是上下文来源，没有任何模块承载"这个岗位被冻结成哪一版" | `role-pack.test.mjs` 40 例（含对账两种漂移、嵌套强制面、连接器凭证），6 处守卫已**变异验证** |
 | F-19 缺口② | 冻结产物**算完即丢**（纯内存）⇒ "上周那个岗位是哪一版"永远回答不了 | `role-pack-store.test.mjs` 25 例 + `role-pack-http.test.mjs` 10 例（含 409 **真的走得到网络上**）；6 处守卫已**变异验证** |
+| F-21 | 四条能力**全部不存在**（grep `connector`/`mcp` 在产品代码里零命中）：没有工具级策略、没有风险分级、没有密钥引用、没有故障隔离 | `registry.test.mjs` 31 例 + `connector-store.test.mjs` 22 例 + `connector-http.test.mjs` 11 例真 HTTP；**30 处守卫全部变异验证**。★ 途中抓到 4 个真缺陷（能力名兜底成最严、凭证检查只看自己认识的字段、刚失败却报 healthy、`version` 参数被静默忽略），详见 §4.1 |
 
 一条值得单独记下的判据：**F-05 后半的三条设计纪律各自对应一个真实的失效方向**，
 因此它们在用例里是**分开**验的，而不是合并成一句"投递可靠"：
@@ -147,10 +148,13 @@
           GET/POST /api/packs/facts、GET /api/packs/{account,export}（4）、
           GET/POST /api/role-packs、GET /api/role-packs/export（3）、
           GET/POST /api/experience/records、GET /api/experience/{account,export}、
-          POST /api/experience/drafts/（6）
+          POST /api/experience/drafts/（6）、
+          GET/POST /api/connectors、GET /api/connectors/{incidents,export}（4）、
+          POST /api/connectors/（1）
 ~ 源文件已变更：team-hub/server.mjs、team-hub/run-store.mjs、
                 team-hub/automation-store.mjs、team-hub/pack-facts.mjs、
-                team-hub/role-pack-store.mjs、team-hub/experience-store.mjs
+                team-hub/role-pack-store.mjs、team-hub/experience-store.mjs、
+                team-hub/connector-store.mjs
 ```
 
 `team-hub/automation-store.mjs` 与 `team-hub/usage-rollup.mjs` 的列变化
@@ -180,11 +184,99 @@
 
 | 编号 | 名称 | 状态 | 依据 |
 |---|---|---|---|
-| F-21 | Connector / MCP 注册表 | ⬜ | 无代码。需要"服务/工具策略、风险分级、密钥引用、故障隔离"四件一起设计 |
+| F-21 | Connector / MCP 注册表 | ⬜→✅ | 本轮落地：执行面 `runtime/connectors/registry.mjs`（未声明即拒绝、风险只上抬、密钥只许引用、熔断带截止时间）、落盘面 `team-hub/connector-store.mjs`、5 条路由。**64 例、30 处变异全部咬住**——详见 §4.1 |
 | F-22 | 后端与工作区 | 🟡 | `orchestrator/workspace/*`（git worktree）。§2 明写「不把 worktree 当安全沙箱」 |
 | F-23 | 多 Harness 路由 | ⏸ | §2 明写「**不在契约稳定前同时支持多个 Harness**」——这一条**是设计决定，不是缺口** |
 | F-24 | ACL 与安全姿态 | 🟡 | `team-hub/read-auth.test.mjs`、`read-open-loopback.test.mjs` 已覆盖读面矩阵；多用户写面 ACL 未做 |
 | F-25 | 外部渠道 | ⏸ | §9 明写「多用户、多 Harness、远程后端和外部渠道**按真实客户需求推进**」 |
+
+### 4.1 F-21 详情：四件事各自"看起来能用、其实在撒谎"的写法
+
+§4.4 要求的是四件一起（**服务/工具策略、风险分级、SecretStore、故障隔离**）。
+判据就是照着这四种坏写法写的：
+
+★ **未声明的工具必须拒绝。** 最自然的写法
+`if (declared === undefined) return 'allow'`（"没见过，交给下游判断"）的含义其实是
+"只要有人往 MCP server 上加一个工具，它自动获得授权"——连接器是**外部**的，
+对方可以在它那一侧加工具而控制面毫不知情。所以"没被显式声明过的，一律拒绝"。
+
+★ **风险只能往上抬**（与 `dsh-composition/tool-capability.mjs` 的 `maxRisk` 同源），
+且**不认识的能力名 / 风险等级要报错**。`riskFloorOf` 对不认识的能力会兜底成
+`critical`——看起来安全，实际最坏：整个连接器莫名其妙全要人批，而**没有任何一处**
+指出原因是能力名拼错了，作者会去查一个根本没问题的权限配置。
+★ 一个真 bug 当场暴露了这个：我最初猜的能力名（`read`/`write`/`delete`）
+全不在词表里，于是三个工具**全部**变成 `critical`——正是"兜底成最严"的现场。
+
+★ **工具级 `deny` 优先于 server 级 `allow`。** 反过来写时，一个人专门写下的那条
+deny 会被宽松的默认静默盖掉，而他写那条正是为了拦住一样具体的东西。
+策略词表**刻意没有** `allow-once` / `allow-for-task`——那是"一次具体调用"的
+一次性状态（F-10 管的），混进登记表会让一次性批准变成**永久策略**。
+
+★ **密钥只许引用**：声明里递归检查凭证**值**（键名大小写与下划线都认）。
+★ 这里抓到一个真 bug——第一版只检查自己解构出来的 `command/url/description`，
+于是 `declareConnector({ ..., token: 'ghp_…' })` 里那个 `token` 被解构**丢掉**、
+从未被检查过。失败模式很具体：今天那个多出来的键被静默忽略，某天有人
+"支持一下 token 直填"把它加进解构列表时，它就变成一条**从来没有被任何检查拦过**
+的凭证通道。已改成检查**整个入参**。
+
+★ **引用要对得上号。** "指向不存在的密钥"与"密钥值恰好是空字符串"在调用时
+表现得一模一样，而只有一个可以修。诊断版（`secretStatus`/`secretReport`，
+一次说完哪几个有问题、**不抛**）与闸门版（`assertSecretsResolvable`，调用前抛）
+的分工是刻意的。没传解析器时**不装作查过了**（`checked:false`、
+`resolvable:null`——"没查"不等于"缺"）；解析器抛按"拿不到"处理（fail closed）；
+每个引用**只调一次**（有状态解析器会在两次调用之间给出不同答案）。
+
+★ **故障隔离**：
+· 开路**必须带截止时间**——不带时一次临时故障会变成**永久**停用，
+  而"永久"与"临时"在状态读数上长得一样，值班的人会一直等一个永远不会到来的恢复。
+· 半开**只放一个探针**——放所有请求过去时，探针这一步本身就在打你正在保护的那个
+  东西，而熔断的整个意义是减少对它的压力。
+· 探针失败**立刻重新计时**——不重新计时，冷却窗口会随每次失败被"用掉"，
+  于是探针越来越密，正好与熔断的目的相反。
+· 一个连接器失败**不牵连**别的（"隔离"就是这一节标题）。
+· `unknown`（一次都没探过）**不是** healthy。
+★ 这里又抓到一个真 bug：`health` 最初从 `circuit` 推导
+（`closed ? healthy : unhealthy`），于是**一个刚刚失败的连接器报 `healthy`**——
+因为熔断要连续失败三次才跳闸，前两次失败时 circuit 还是 `closed`。
+`circuit` 回答"现在还放不放调用过去"，`health` 回答"最近观察到的状态好不好"，
+两者**不能互相推导**。
+
+★ **落盘面**：声明按**内容哈希**冻结（同版本换内容 **409**）。与 F-19 同一条纪律，
+但这一处更重——岗位包描述的是"这个岗位能做什么"，而连接器声明说的是
+"一个**外部进程**能拿到什么权限"。事件**必须点名**是哪一个连接器（不接"全局"
+这种值：一个能表达"全局故障"的字段，会让"三个连接器各挂了一次"与"全部同时挂"
+写成同一条记录）；`openCircuits` 给的是**哪几个**开着，而不是"有故障"这一个布尔。
+★ 两条**只在生产上错**的坑在这里修掉：`seq` 用 `lastInsertRowid` 而非
+`SELECT MAX(seq)` 回读（两个进程共用一个 SQLite 文件时，A 会把 B 的号报成自己的）；
+`atMs` 必填且必须是整数（`undefined` 与"当时就是 0"同形）。
+★ 还抓到一处**规范化不幂等**：`normalizeDeclaration` 读的是 `input.version`，
+而对一份已经规范化过的记录再规范化一次会把**记录格式版本**当成声明版本号，
+于是同一个逻辑声明算出来的**身份**取决于"你传进来的是原始输入还是规范化后的对象"
+（`freezeDeclaration` 内部先规范化，所以调用方事前自己算哈希去比对时必然对不上）。
+
+★ **三条一致性性质**（这一组最容易被"看起来对"糊弄过去的地方）：
+· 控制面**不 import 执行面**（单向产品边界），词表副本由用例①
+  **从执行面源码里抽出来**逐字比对——再抄一遍互相核对时，两边一起写错它全绿。
+· 路由守卫写成**字面量** + `startsWith`/`endsWith`，由用例⑤钉住：
+  正则守卫会**悄悄**不进平台契约（`baseline-snapshot.mjs` 的抽取器只认字面量），
+  而 `--record` 会写下一份"看起来正常、少了一条端点"的基线（PRT-507 的坑）。
+· `version` 查询参数**必须真的被用上**：一个被静默忽略的 `version` 比"不支持"
+  深得多——调用方问"1.0.0 当时放行了哪些工具"会拿回 2.0.0 的清单，
+  而响应里没有任何地方提示这件事（这个 bug 被用例②当场抓到）。
+
+| F-21 缺口 | 坏写法 | 判据 |
+|---|---|---|
+| ① | 未声明的工具放行（"没见过就放行"＝对方加一个工具就等于加一个后门） | `registry.test.mjs` ①②：未声明的工具 / 未注册的连接器 / 空名字三种都断言 `deny` + 具名码 |
+| ② | 风险可被作者压低；不认识的能力名静默兜底成最严 | `registry.test.mjs` ②：`declaredRisk:'low'` 遇 `repo:push` 必抬到 `critical` 且留痕；拼错能力名必须**报错** |
+| ③ | 凭证值可写进登记表；密钥引用对不上号时无人报出 | `registry.test.mjs` ③（含嵌套路径 `$.description.deep[0].apiKey`）；诊断版/闸门版分工 |
+| ④ | 没有熔断：外部故障被无限重试，且"没探过"读成"一切正常" | `registry.test.mjs` ④⑤：开路带 `untilMs`、半开只放一个探针、失败重新计时、互不牵连、`unknown ≠ healthy` |
+| ⑤ | 声明在落盘面可被就地修改，"当时放行了哪些工具"在写的那一刻失去答案 | `connector-store.test.mjs`：内容哈希冻结、同版本换内容 409、坏行 `readable:false`、拿不到读数报 `null` 不是 `0`、事件必须点名 |
+
+判据合计 **64 例**（`registry.test.mjs` 31 + `connector-store.test.mjs` 22 +
+`connector-http.test.mjs` 11 例真 HTTP），**30 处变异全部咬住**（15 + 15）。
+★ 期间还删掉了一个 `CONNECTOR_NOT_FOUND`：`getDeclaration` 找不到时返回 `null`，
+那是一个**正常读数**（"这个连接器还没登记过"），不是错误——登记一个永远抛不出的
+码与登记一段被注释掉的代码是同一个东西，只不过前者让错误码清单看起来更完整。
 
 ---
 

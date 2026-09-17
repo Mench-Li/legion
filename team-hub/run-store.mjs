@@ -39,6 +39,10 @@ import {
 import { ensureColumn as ensureColumnImpl } from './schema-util.mjs'
 import { AcceptanceError, acceptanceTarget, evaluateAcceptance } from '../orchestrator/acceptance/index.mjs'
 import { buildHandoffTask, resolveNextPost } from '../orchestrator/pipeline/index.mjs'
+// F-05 前半：`run_events.known` 的默认值由**契约**判定，不在这里再抄一份事件名单。
+// 抄一份的失效形态很安静：契约新增一种事件时，新事件会被标成"未知"
+// （或者反过来，一个真未知的事件被标成已知），两处都不会报错。
+import { isKnownEventType } from '../runtime/contracts/run.mjs'
 // PRT-304：任务扫描与认领的**资格规则**提取成了独立模块，两条候选路径
 // 由同一份 `TASK_GATES` 生成。见 `claim-policy.mjs` 顶部那段注释：
 // 让两条 SQL 各写一遍资格条件，与"被将军拦下的任务照样会被领走"是同一个东西。
@@ -438,7 +442,63 @@ export function ensureRunSchema(db) {
   // 重试是**新** Attempt）。这条唯一索引是"一条尝试不会有两份互相矛盾的运行结果"
   // 在数据库层面的保证——只在应用层查重时，两个并发写入会各查一次、各写一行。
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_run_results_attempt ON run_results(attempt_id)')
+
+  // ── F-05 前半：运行明细作为可持久化 RunEvent 写入控制面 ──
+  //
+  // MULTI-AGENT-FEATURE-OPTIMIZATION.md §4.1 F-05：
+  // 「运行明细作为可持久化 RunEvent 写入控制面，不新增第二条公开 SSE。」
+  //
+  // 在此之前 `orchestrator/worker/executor.mjs` 的事件循环是：
+  //
+  //     for await (const ev of adapter.execute(request)) {
+  //       if (isTerminalEventType(ev.type)) terminal = ev          // 留下终态
+  //       else if (…usage.updated / artifact.produced…) budgetGate.observe(…)  // 留下用量
+  //       // 其余 11 种事件**读完即弃**
+  //     }
+  //
+  // 于是一个 Run 的 13 种事件里只有两类能落地（终态 → `run_results`，
+  // 用量/产物 → 预算账本）。`message.delta` / `tool.*` / `model.selected`
+  // 全部**只活在那一次迭代里**——"这次运行到底调了哪些工具、用了哪个模型"
+  // 这个问题在事后**没有任何地方**能回答。
+  //
+  //   > 一个"事件流里有 13 种事件"的契约，
+  //   > 与一个"事后只有两种查得到"的部署，在"能不能复盘一次运行"上是两个东西——
+  //   > 只不过前者的契约测试是绿的（契约验的是形状，不是它有没有被落地）。
+  //
+  // 三条纪律：
+  //
+  //   ① **只追加**。本模块不提供任何 UPDATE/DELETE `run_events` 的路径
+  //      （与 `run_attempt_events` / `run_validations` 同一条纪律）。
+  //   ② **`event_seq` 是契约里的序号，不是自增主键**。契约（`runtime/contracts/run.mjs`）
+  //      已经给每条 RunEvent 分配了单调序号，重生一遍会得到两个可能不一致的号。
+  //      主键是 `(attempt_id, event_seq)`：同一个 Attempt 里序号唯一，
+  //      重复投递（重试、补写）走 `INSERT OR IGNORE` 天然幂等。
+  //   ③ **未被认识的事件类型照收不误**，但带上 `known = 0`。
+  //      因为这份明细的用途是**事后复盘**，而"上游新增了一种事件"恰恰是最该被看见的：
+  //      丢掉它会让"模型说了话但我们没记"与"模型什么都没说"长得一样。
+  //      `known` 由**契约**判定（`isKnownEventType`），不由本模块或调用方各写一份名单——
+  //      两份名单会漂移，而漂移的表现是"新事件被标成未知"或"未知被标成已知"，
+  //      两者都不会报错。调用方可以显式覆盖（`known: false`）以表达"我确知这是未知的"。
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS run_events (
+      attempt_id TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      event_seq INTEGER NOT NULL,
+      type TEXT NOT NULL,
+      known INTEGER NOT NULL DEFAULT 1,
+      at_ms INTEGER NOT NULL,
+      event_json TEXT NOT NULL,
+      lease_epoch INTEGER,
+      PRIMARY KEY (attempt_id, event_seq)
+    )
+  `)
+  db.exec('CREATE INDEX IF NOT EXISTS idx_run_events_attempt ON run_events(attempt_id, event_seq)')
+  // 按类型复盘（"这次用了哪些工具"）走这个索引。
+  db.exec('CREATE INDEX IF NOT EXISTS idx_run_events_type ON run_events(attempt_id, type)')
 }
+
+/** `run_events.event_json` 的体积上界。一行事件明细不该把一个库撑爆。 */
+export const MAX_RUN_EVENT_JSON_BYTES = 64 * 1024
 
 // ---------------------------------------------------------------- 内部工具
 
@@ -2538,8 +2598,135 @@ export function createRunStore({
   }
 
   /**
-   * 交接（PRT-308，spec 第 333 行）：当前 Task 收口并**原子创建**下一岗位任务。
+   * F-05 前半：把一次 Run 的事件明细**落库**（只追加）。
    *
+   * 调用方（`orchestrator/worker/executor.mjs`）在执行过程中收集事件，
+   * 在事件流结束后**一次性**提交。为什么不是逐条写：
+   *
+   *   · 逐条写 = 每条事件一次写事务，而事件流是热路径（`message.delta` 可以很多条）；
+   *   · 更重要的是**崩溃语义**。逐条写时，"进程在事件 7 崩了"会留下 1..6，
+   *     读的人无法区分"这次运行只产生了 6 条"与"第 7 条在写的路上丢了"。
+   *     一次性写让落库的原子性跟着 **Run 的生命周期**走：要么这个 Attempt
+   *     的明细是完整的，要么一条都没有（并且那次 Attempt 会进恢复判断）。
+   *
+   * 幂等：主键 `(attempt_id, event_seq)` + `INSERT OR IGNORE`。同一次运行
+   * 被重放（崩后重扫、人工补写）不会产生第二份明细，也不会报错。
+   *
+   * @param {object} p
+   * @param {string} p.attemptId
+   * @param {Array<{seq:number, type:string, known?:boolean, event?:object}>} p.events
+   * @param {number|null} [p.leaseEpoch] 写入时的租约纪元（与其它写入口同一纪律：
+   *        过期 worker 的写入被拒，否则一次崩溃重启后旧进程还能补一份明细）。
+   */
+  function recordRunEvents({ attemptId, events, leaseEpoch = null }) {
+    if (typeof attemptId !== 'string' || attemptId.trim() === '') {
+      throw new ContractError(RUN_ERRORS.ATTEMPT_NOT_FOUND, 'recordRunEvents 需要 attemptId')
+    }
+    if (!Array.isArray(events)) throw new TypeError('recordRunEvents 的 events 必须是数组')
+    return withTx(() => {
+      const atMs = clock()
+      const row = rowOf(db, attemptId)
+      if (row === null) throw new ContractError(RUN_ERRORS.ATTEMPT_NOT_FOUND, `没有这条尝试：${attemptId}`)
+      if (leaseEpoch !== null && leaseEpoch !== undefined && row.lease_epoch !== leaseEpoch) {
+        throw fail(RUN_ERRORS.LEASE_EPOCH_STALE,
+          `leaseEpoch 不符：请求 ${leaseEpoch}，实际 ${row.lease_epoch}——拒绝写入过期 worker 的事件明细`,
+          { currentEpoch: row.lease_epoch, currentWorkerId: row.worker_id })
+      }
+      const insert = db.prepare(
+        `INSERT INTO run_events (attempt_id, task_id, event_seq, type, known, at_ms, event_json, lease_epoch)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (attempt_id, event_seq) DO NOTHING`,
+      )
+      let written = 0
+      let skipped = 0
+      let oversized = 0
+      for (const ev of events) {
+        if (ev === null || typeof ev !== 'object') throw new TypeError('每条事件必须是对象')
+        const seq = ev.seq
+        if (!Number.isSafeInteger(seq) || seq < 0) {
+          // **不**替调用方编号：契约里的序号是权威的，重生一遍会得到两个可能
+          // 不一致的号，而"哪一个是当时那个"事后无法回答。
+          throw new TypeError(`事件的 seq 必须是非负安全整数（收到 ${JSON.stringify(seq)}）`)
+        }
+        if (typeof ev.type !== 'string' || ev.type.trim() === '') {
+          throw new TypeError(`事件的 type 必须是非空字符串（seq=${seq}）`)
+        }
+        // 体积上界。超限时**如实记账**（`oversized`）而不是截断后当成完整明细：
+        // 一份被截断的 JSON 读出来会是一段"看起来合法"的东西，而它已经不是原文了。
+        const json = JSON.stringify(ev.event ?? ev)
+        // `known` 的默认值来自**契约**，不是这里手写的一份类型名单。
+        const known = ev.known === undefined || ev.known === null
+          ? isKnownEventType(ev.type)
+          : ev.known !== false
+        if (Buffer.byteLength(json, 'utf8') > MAX_RUN_EVENT_JSON_BYTES) {
+          oversized += 1
+          const r = insert.run(attemptId, row.task_id, seq, ev.type, known ? 1 : 0, atMs,
+            JSON.stringify({ truncatedByStore: true, limitBytes: MAX_RUN_EVENT_JSON_BYTES, type: ev.type }), leaseEpoch)
+          if (r.changes === 1) written += 1
+          else skipped += 1
+          continue
+        }
+        const r = insert.run(attemptId, row.task_id, seq, ev.type, known ? 1 : 0, atMs, json, leaseEpoch)
+        if (r.changes === 1) written += 1
+        else skipped += 1
+      }
+      return Object.freeze({
+        ok: true, attemptId, written, skipped, oversized,
+        // 「重复的被跳过了」与「一条都没写进去」是两件事，读的人要能分开。
+        total: events.length,
+        serverTimeMs: atMs,
+      })
+    })
+  }
+
+  /**
+   * F-05 前半的读面：一次 Attempt 的事件明细（按契约序号升序）。
+   *
+   * `known` 原样返回：库里出现一条 `known = 0` 的行说明**上游产生了一种
+   * 本控制面不认识的事件**。那是一个要被看见的信号，不是要被过滤掉的噪声——
+   * 过滤掉会让"上游新增了事件但我们不记"与"上游什么都没产生"长得一样。
+   */
+  function runEventsOf(attemptId, { type = null, limit = 1000 } = {}) {
+    if (typeof attemptId !== 'string' || attemptId.trim() === '') {
+      throw new ContractError(RUN_ERRORS.ATTEMPT_NOT_FOUND, 'runEventsOf 需要 attemptId')
+    }
+    if (!Number.isSafeInteger(limit) || limit <= 0) throw new TypeError('limit 必须是正安全整数')
+    const rows = type === null
+      ? db.prepare('SELECT * FROM run_events WHERE attempt_id = ? ORDER BY event_seq ASC LIMIT ?').all(attemptId, limit)
+      : db.prepare('SELECT * FROM run_events WHERE attempt_id = ? AND type = ? ORDER BY event_seq ASC LIMIT ?')
+        .all(attemptId, type, limit)
+    return Object.freeze(rows.map((r) => Object.freeze({
+      seq: Number(r.event_seq),
+      attemptId: r.attempt_id,
+      taskId: r.task_id,
+      type: r.type,
+      known: Number(r.known) === 1,
+      atMs: Number(r.at_ms),
+      event: JSON.parse(r.event_json),
+      leaseEpoch: r.lease_epoch === null ? null : Number(r.lease_epoch),
+    })))
+  }
+
+  /** 一次 Attempt 的事件明细统计（按类型计数）。"调了哪些工具"靠它一眼看到。 */
+  function runEventCountsOf(attemptId) {
+    const rows = db.prepare(
+      'SELECT type, known, COUNT(*) AS n FROM run_events WHERE attempt_id = ? GROUP BY type, known ORDER BY type',
+    ).all(attemptId)
+    const byType = {}
+    let unknownTypeCount = 0
+    for (const r of rows) {
+      byType[r.type] = Number(r.n)
+      if (Number(r.known) !== 1) unknownTypeCount += Number(r.n)
+    }
+    return Object.freeze({
+      attemptId,
+      byType: Object.freeze(byType),
+      total: Object.values(byType).reduce((a, b) => a + b, 0),
+      unknownTypeCount,
+    })
+  }
+
+  /**
+   * 交接（PRT-308，spec 第 333 行）：当前 Task 收口并**原子创建**下一岗位任务。
    * 一次事务里做完三件事：建后继任务 → 记交接记录 → 把本尝试终结为 `Completed`。
    * 分成两步（先建任务、再改状态）在崩在中间时会留下一条孤儿后继：
    * 本任务还在 `HandingOff`，而下一岗位已经在跑了——重扫时会**再建一条**。
@@ -2759,6 +2946,9 @@ export function createRunStore({
     // PRT-312：运行结果（`Running` 三条出边要的证据）。写入点有两处（`transition`
     // 的引擎路径与 `failAndRetry` 的合成路径），读只有这一处。
     runResultsOf,
+    // F-05 前半：运行明细（13 种 RunEvent）的写与读。在此之前只有终态与用量
+    // 两类能落地，其余 11 种读完即弃。
+    recordRunEvents, runEventsOf, runEventCountsOf,
     // PRT-307：机器验收的唯一入口（核判据 → 落库 → 按结论推进状态）
     recordValidation, validationsOf, criteriaOf,
     // PRT-308：交接（原子创建下一岗位任务 + 收口）

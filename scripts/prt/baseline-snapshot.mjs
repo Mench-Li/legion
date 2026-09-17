@@ -97,6 +97,30 @@ const SCHEMA_SOURCES = [
   // 与 `employee_manifests.version`（"边界变过没有"——`sources.mjs` 拿它当来源版本，
   // 于是它决定快照哈希）。少任何一列，那两句话都无从回答。
   'contextPlanStore',
+  // F-05 后半（§4.1）：`event_subscribers` / `event_deliveries`。
+  //
+  // 这两张表进基线，是因为**它们就是"投递状态机"这件事本身**：
+  // `event_deliveries.state` 的取值集合就是那六态，`carrier_deadline_ms`
+  // （租约）就是"崩溃收敛为 unknown"的判据，`fanout` 就是"多个活连接
+  // 属于同一个订阅者"的落地。少任何一列，同一句 spec 都无从核对。
+  'eventDelivery',
+  // F-16（§4.4）：`automation_schedules` / `automation_runs`。
+  //
+  // ★ 这里有一条**必须进基线**的判据：`automation_runs` 上的
+  //   `UNIQUE(schedule_id, planned_at_ms)`。它不是索引偏好——它是
+  //   "同一个计划在同一时刻只能物化一次"的落地。只在应用层查重时，
+  //   两个进程会各查一次、各写一行，而那是**并发下的必然**。
+  //   唯一约束不在契约基线里，这件事就没有任何地方能核。
+  'automationStore',
+  // F-17（§4.3）：`compaction_messages` / `compaction_summaries`。
+  //
+  // 同样，表结构就是那三条要求在的落地：
+  //   · `compaction_messages.content` 只追加（无 UPDATE/DELETE 路径）⇒ "不可变原文"
+  //   · `compaction_summaries` 的 `PRIMARY KEY(session_id, version)` ⇒ "版本化"
+  //   · `covers_from_seq` / `covers_to_seq` ⇒ "引用回原文"
+  // 把 `version` 从主键里拿掉，第二条就会变成"改摘要"——而那是一次
+  // 静默的信息丢失，正是这三列要防的事。
+  'compactionStore',
 ]
 
 // 这些模块也一并纳入 sources 哈希：它们变了，基线里的表清单就可能过期。
@@ -115,6 +139,9 @@ SOURCES.toolCallLog = join(ROOT, 'team-hub', 'tool-call-log.mjs')
 //   不登记的后果正是这道门禁存在的理由——表在真实 schema 里多出来，
 //   而 `--check` 兴高采烈地说"无漂移"。
 SOURCES.contextPlanStore = join(ROOT, 'team-hub', 'context-plan-store.mjs')
+SOURCES.eventDelivery = join(ROOT, 'team-hub', 'event-delivery.mjs')
+SOURCES.automationStore = join(ROOT, 'team-hub', 'automation-store.mjs')
+SOURCES.compactionStore = join(ROOT, 'team-hub', 'compaction-store.mjs')
 
 /**
  * 采集 schema 的目录。

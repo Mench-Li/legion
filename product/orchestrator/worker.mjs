@@ -15,8 +15,37 @@
 // ============================================================================
 
 import { runWorkerProcess } from '../../orchestrator/worker/run.mjs'
-import { productionExecutorProviderFromEnv } from '../../orchestrator/worker/executor-binding.mjs'
+import { hubIo, productionExecutorProviderFromEnv } from '../../orchestrator/worker/executor-binding.mjs'
+import { createModelProfileRefResolver } from '../../orchestrator/worker/run-inputs.mjs'
 import { claimGateFromExecutor } from './claim-gate.mjs'
+
+// ── PRT-253 续批：`modelProfileRef` 的生产来源 ──────────────────────────────
+//
+// `RunRequest` 的三个必填字段里，`workspaceId` 与 `workdir` 由 worker 外壳
+// 自己就能算（租约的 scope / 工作区阶段的产物），而**模型档案**必须问 team-hub：
+// 它是 `(scope, role)` 上的员工模型绑定（PRT-502），租约上没有、环境变量里也不该有。
+//
+//   > 一个"从环境变量读一个模型名"的接线，
+//   > 与一个"用某个没人给这个岗位选过的模型花用户的钱"的接线，
+//   > 在配置一直正确的时候是同一个东西。
+//
+// 所以这里按 hub 的真实契约去读：先从任务取岗位（`task.role`——岗位**不在**租约上），
+// 再解析该岗位的模型绑定。读不到就返回具名拒绝，由执行引擎在装配请求时停下。
+//
+// ⚠️ 没有 `TEAM_HUB_URL` 时**不建**这个端口：`hubIo` 会抛，而抛在建实例之前
+//    会让 worker 连状态文件都写不出来（那样运维只能看到"进程退出了"）。
+//    返回 `null` 时模型那一项只能来自租约，该失败会在执行引擎那里具名报出来。
+const workerHubUrl = process.env.TEAM_HUB_URL ?? null
+let modelProfileRefFor = null
+if (typeof workerHubUrl === 'string' && workerHubUrl.trim() !== '') {
+  try {
+    const workerIo = hubIo({ hubUrl: workerHubUrl, hubToken: process.env.TEAM_HUB_TOKEN ?? '' })
+    modelProfileRefFor = createModelProfileRefResolver({ get: workerIo.get })
+  } catch (e) {
+    process.stderr.write(`⚠ [worker] 模型绑定解析端口未建立：${e?.message ?? e}——`
+      + '本次运行不会用任何默认模型顶替\n')
+  }
+}
 
 // PRT-253：把生产执行引擎的**提供者**交给 worker。
 //
@@ -57,6 +86,8 @@ const startup = await runWorkerProcess({
   // PRT-711：认领闸门。**这是 `mayClaimTasks()` 的生产调用点**——
   // 没有它，"正在升级"与"Runtime 不可用"都不会阻止 worker 领走任务。
   claimGateFromExecutor,
+  // PRT-253 续批：模型档案的生产来源（见文件头）。
+  modelProfileRefFor,
 })
 
 // 起不来时必须**以非零码退出**。

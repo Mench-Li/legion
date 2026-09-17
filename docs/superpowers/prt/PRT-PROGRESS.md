@@ -274,3 +274,102 @@ applier **抛错**的项不参与复核改写（它没有成功执行过，「�
 > 计数口径：**部分**计入「已有交付物但完成标准未全部满足」，
 > 因此不能与「已完成」相加后宣称完成度。真实完成度按**完成标准**判定：
 > 阶段 0～2 的完成标准已满足或已写明未满足项，阶段 2.5 及其后均未达标。
+
+---
+
+## 缺口记录（2026-09-17 产品体检产生，**不改本表任何状态与计数**）
+
+下面两条是**既有任务内部**发现的缺口，**不新建任务号**（spec §12 的 145 项是权威清单），
+因此它们只是 PRT-214 / PRT-253 的续篇，不进明细行、不改汇总：
+
+- `PRT-214-per-run-enforcement-identity.md` —— 授权身份（`scope` / `actor` / `action`）
+  仍是**进程级**的：一个 Runtime 进程服务多个空间时，别的空间的执行会被盖上
+  这一个空间的身份（**不报错，只是错标**）。同一份代码里 hard floor 早已有
+  per-Run 落点（`runtime/dsh-composition/run-floor.mjs`）可照抄。
+- `PRT-253-run-request-input-wiring.md` —— 生产入口没有给
+  `workspaceId` / `modelProfileRef` / `workdir`：用真实认领形状实测，
+  `defaultRequestFor()` 以 `EXECUTOR_BAD_WIRING` 拒绝，即 product-runtime
+  的执行链今天**还通不了电**。
+  — **2026-09-17 已修**：新增 `orchestrator/worker/run-inputs.mjs`（三个字段的唯一
+  取值处：租约 → 空间 / worktree 槽位 / 员工模型绑定），接上 executor、worker 外壳
+  与生产入口；套件 `run-inputs` 25 例，8 条破坏性验证 8/8 咬住。
+  ⚠️ 但 **`canRead` 仍未接**（另一条独立缺口：`PRT-253-can-read-authorization.md`
+  §3.1 写明合它要改 wire 契约），故执行引擎**仍然不会接上**——
+  本表状态与计数不变。
+
+---
+
+## 优化清单（F-01～F-25）已闭合的缺口（2026-09-17，**不改本表状态与计数**）
+
+下面这些来自 `docs/MULTI-AGENT-FEATURE-OPTIMIZATION.md`，而它们在 spec §12 的
+145 项里**没有任务号**。这正是它们能长期存活的原因：一份"没有编号"的缺口
+不会出现在任何进度表的"未完成"栏里，于是每一轮盘点都会看见它、然后跳过它。
+
+因此本节**不新建任务号、不改上表任何状态与计数**，只记录"它被关掉了"以及
+"判据在哪"。完整对照见 `docs/MULTI-AGENT-FEATURE-STATUS.md`。
+
+- **F-05 前半｜运行明细作为可持久化 RunEvent 写入控制面**
+  （文档 line 84「不新增第二条公开 SSE」）。
+  改动前 `orchestrator/worker/executor.mjs` 的事件循环只留终态与用量/产物，
+  13 种契约事件里 **11 种读完即弃**——"这次用了哪个模型、调了哪些工具"
+  事后无从回答。
+  判据：`team-hub/run-events.test.mjs`（18 例）、`run_events` 表（只追加，
+  `UNIQUE(attempt_id, event_seq)` 幂等）、`recordRunEvents`/`runEventsOf`/
+  `runEventCountsOf`、`GET /api/runtime/run-events`（含 `?counts=1`）。
+  三条出口（成功/返回失败/抛出）都带明细；**明细写失败不回滚终态**
+  （复盘材料缺一点 ≠ 这次运行不成立，回滚会让它被重试——真的再花一次钱），
+  但失败读数回给调用方（`runEvents: {ok:false, code:'RUN_EVENTS_NOT_RECORDED'}`）。
+  ★ **仍未做的**：物化出来的明细**不会**进 `/api/events` 的 SSE 流
+  （那是 F-05 前半刻意不做的事：控制面只读，不新增第二条公开流）。
+- **F-05 后半｜可靠事件与投递状态机**（文档 line 84）。
+  改动前 `broadcastAudit` 丢掉 `res.write` 的返回值、异常被事件循环吞掉，
+  读数是"发过了"。
+  判据：`team-hub/event-delivery.mjs` + `event-delivery.test.mjs`（31 例）+
+  `event-delivery-wiring.test.mjs`（7 例真 HTTP）。六态
+  （`pending/delivering/delivered/suppressed/failed/unknown`）；
+  `delivered` **只能**由 CAS 从 `delivering` 得到；`suppressed` 必须带封闭
+  词表原因；崩溃收敛为 `unknown`（既不说 `delivered` 谎报可见性，也不回
+  `pending` 重投一个可能已经到达的事件）；`recoverExpired` 是**租约**驱动
+  （两个进程同开一个库，启动扫描会收掉另一个进程在投的行）。
+  `GET /api/event-delivery`；`/api/config` 暴露 `eventDelivery.bookkeepingFailures`。
+- **F-16｜自动化计划 / 运行历史**（§4.4「日历只做投影；新增计划、运行、
+  时区、skip-on-overlap、补跑和审批暂停状态」）。**改动前这个能力完全不存在**
+  （全仓 grep `skipOnOverlap` / `scheduleStore` 零命中）。
+  判据：`team-hub/automation-store.mjs` + `automation-store.test.mjs`（22 例，
+  含**真 `Intl`** 的时区换算与 DST 边界）+ `automation-http.test.mjs`
+  （7 例真 hub HTTP）。`projectOccurrences` 是纯函数（打 50 次投影运行表
+  一行都不多）；时区名写错**具名拒绝、绝不回落服务器时区**；跳过**留下行**
+  且带封闭词表原因；补跑三策略（默认 `once`，因为 `all` 是"停机三天之后
+  一次性重放三天的工作"）；`awaiting-approval` 是独立状态且必须带
+  `approvalId`（没有它就是一条永远醒不过来的行）。
+  ★ **仍未做的**：`automationTick` 返回 `wired: false` —— 物化出来的运行是
+  `scheduled`，把它们变成可领任务需要"计划 → 目标"的映射，那属于编排面。
+  这一条**如实回给调用方**，不让"建出来"被读成"跑起来了"。
+- **F-17｜长会话压缩：不可变原文 + 版本化摘要 + 引用回原文**
+  （§4.3）。**改动前这个能力完全不存在**（全仓 grep `compact` 零命中）。
+  判据：`team-hub/compaction-store.mjs` + `compaction-store.test.mjs`（14 例）
+  + `compaction-http.test.mjs`（5 例真 hub HTTP）。
+  三件事各自对应一个**不可逆**的失效方向，所以分开验：
+  · 原文可改写 ⇒ "摘要读起来不对"这件事**无法被证伪**（没有东西可以对）；
+  · 摘要不版本化 ⇒ 一次更差的摘要会**盖掉**上一个好摘要且无痕迹；
+  · 没有回引 ⇒ 摘要是一段**无法复核**的文本，读者只能选择相信它。
+  另两条并发判据：`baseVersion` CAS（不检查时两个进程会各写一份"版本 1"）、
+  区间不许重叠（重叠时同一条消息会被两版摘要代表，拼上下文时会算两次）。
+  ★ **仍刻意不做的**：本模块**不调用任何模型**——`proposeSummary()` 收的
+  是**已经算好的**摘要文本。"什么时候压、压多少"是产品策略（在这里），
+  "这段文字怎么概括"是执行面能力。混在一起会让一次"摘要没写好"
+  表现为"压缩功能坏了"，而两者的修法完全不同。
+- **PRT-509 缺口 B1｜密钥库 ACL 的 runner 与 owner 接上生产**
+  （属于 PRT-509 的续篇，故不进上表）。
+  改动前 `product/launcher/launcher.mjs` 的 `secretsRun` / `secretsOwner`
+  两个入参**全仓只有"声明"与"传参"两处**，没有任何生产调用方给过值，
+  于是生产上恒为 `ACL_NO_RUNNER` + 「不知道文件所有者」——两条都不拦启动，
+  于是变成诊断里**永远出现、永远说同一句**的告警。
+  判据：`product/launcher/secrets-acl-runner.mjs` +
+  `secrets-acl-runner.test.mjs`（12 例，含三条**真 `whoami` + 真 `icacls`** 的
+  inspect → harden → 独立复验）。owner 问的是**操作系统本人**（`whoami`），
+  **不读 `USERNAME`/`USERDOMAIN`**：环境变量可以被继承/覆盖，而用猜出来的
+  主体去 `icacls /grant:r` 是"把权限给错人"，那个动作没有返回值能告诉你给错了。
+  问不出来时返回 `null` 并新增独立诊断码 `SECRETS_ACL_OWNER_UNRESOLVED`
+  （笼统的 `SECRETS_CHECK_FAILED` 会把"环境里问不出身份"与"加固真的失败了"
+  说成同一件事，而两者的修法完全不同）。

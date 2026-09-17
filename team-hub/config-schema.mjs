@@ -255,6 +255,52 @@ export const SCHEMA = defineSchema({
     'CONTEXT_SNAPSHOT_PURGED', 'CONTEXT_PURGE_BAD_REQUEST',
     'RETENTION_POLICY_REQUIRED', 'RETENTION_POLICY_INVALID',
     'RETENTION_DRYRUN_REQUIRED', 'RETENTION_ACTOR_REQUIRED', 'RETENTION_REASON_REQUIRED',
+    // F-05（MULTI-AGENT-FEATURE-OPTIMIZATION.md §4.1）——投递状态机与运行明细。
+    //
+    // 这一组码刻意**逐个**存在，而不是折成一个 `DELIVERY_FAILED` 之类的东西：
+    // 它们各自指向**不同的修法**，而折起来之后读的人只会去查同一个地方。
+    //
+    //   · SUBSCRIBER_NOT_FOUND    — 问了一个仓储里没有的订阅者（404）。
+    //     与"这个订阅者存在但什么都没有"**必须**分开：后者是一个正常的空读数
+    //     （它刚登记、还没有事件），而前者是**调用方搞错了身份**。
+    //     两者都给空数组时，「订阅根本没接上」会伪装成「暂时没有事件」。
+    //   · DELIVERY_ROW_MISSING    — 想标一条投递，但那一行不存在。
+    //     这是**内部不一致**（plan 没跑、或序号算错了），不是调用方的错。
+    //   · DELIVERY_NOT_SUPPRESSIBLE — 想抑制一条投递，但它的状态已经不允许抑制
+    //     （已经 delivered / 已经 suppressed）。一个可以静默改写的抑制
+    //     会让"这条到底有没有投出去"事后无法回答。
+    //   · RUN_EVENTS_NOT_RECORDED  — 终态请求带了事件明细但**没写成**。
+    //     它**不**让终态回滚（复盘材料缺一点 ≠ 这次运行不成立），
+    //     但必须让调用方读得到——否则"明细丢在路上"与"这次没有明细"同形。
+    'SUBSCRIBER_NOT_FOUND', 'DELIVERY_ROW_MISSING', 'DELIVERY_NOT_SUPPRESSIBLE',
+    'RUN_EVENTS_NOT_RECORDED',
+    // F-16（§4.4）自动化计划的具名码。逐个存在的理由同上一组：
+    //   · BAD_SCHEDULE_SPEC  — spec 不是三种形状之一（**包括 cron 字符串**：
+    //     它没有被实现，而"看不懂就当每小时"会让一条计划静默变成另一种语义）
+    //   · BAD_TIMEZONE       — 时区名认不出来。**绝不回落服务器本地时区**：
+    //     回落时计划每天都会成功，只不过跑在错的时间上
+    //   · BAD_OVERLAP_POLICY / BAD_CATCH_UP_POLICY — 策略不在封闭词表里。
+    //     自由文本会让"重叠时怎么办"退化成一句备注，而它是要被机器执行的分支
+    //   · SCHEDULE_ID_REQUIRED / SCHEDULE_NOT_FOUND / SCHEDULE_RUN_NOT_FOUND
+    //   · ILLEGAL_RUN_TRANSITION / RUN_ALREADY_FINISHED — 终态不可改写
+    //   · APPROVAL_ID_REQUIRED — 进 awaiting-approval 必须带审批 id，
+    //     否则那是一条**永远醒不过来**的行（没有任何东西会把它推回 running）
+    //   · BAD_CALENDAR_WINDOW — 投影窗口不合法
+    //   · AUTOMATION_TICK_FAILED — tick 自己坏了（它**不抛**，因为把主循环
+    //     带死比"这一次没物化"坏得多；下一轮 tick 会自己修好）
+    'BAD_SCHEDULE_SPEC', 'BAD_TIMEZONE', 'BAD_OVERLAP_POLICY', 'BAD_CATCH_UP_POLICY',
+    'SCHEDULE_ID_REQUIRED', 'SCHEDULE_NOT_FOUND', 'SCHEDULE_RUN_NOT_FOUND',
+    'ILLEGAL_RUN_TRANSITION', 'RUN_ALREADY_FINISHED', 'APPROVAL_ID_REQUIRED',
+    'BAD_CALENDAR_WINDOW', 'AUTOMATION_TICK_FAILED',
+    // F-17（§4.3）压缩的具名码。核心是 `COMPACTION_DANGLING_REFERENCE`：
+    // 它说的是"摘要引用了一段库里不存在的原文"，那是**内容完整性**问题
+    // 而不是参数问题——读的人会因此以为摘要代表了一段并不存在的历史。
+    // `COMPACTION_RANGE_ALREADY_COVERED` 同理：区间重叠时同一条消息会被
+    // 两版摘要同时代表，拼上下文的人会把它算两次。
+    'COMPACTION_SESSION_REQUIRED', 'COMPACTION_ACTOR_REQUIRED', 'COMPACTION_BAD_RANGE',
+    'COMPACTION_SUMMARY_REQUIRED', 'COMPACTION_DANGLING_REFERENCE', 'COMPACTION_SESSION_NOT_FOUND',
+    'COMPACTION_VERSION_NOT_FOUND', 'COMPACTION_VERSION_CONFLICT', 'COMPACTION_RANGE_ALREADY_COVERED',
+    'COMPACTION_FAILED',
     // spec §6.7 凭证管理的**写**一半（team-hub/secret-admin.mjs）。
     //
     // 在它之前，`security/secrets/store.mjs` 的 put/rotate/remove 在整个仓库里

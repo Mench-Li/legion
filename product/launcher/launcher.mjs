@@ -301,6 +301,19 @@ export function createLauncher({
   allowPortInUse = [],
   include = null,
   secretsCheck = null,
+  // PRT-509 缺口 B1：ACL 的 runner 与 owner。
+  //
+  // 两者都保持默认 `null`，但**语义变了**：`null` 现在意思是
+  // 「调用方没有指定 ⇒ 用生产默认」，而生产默认由 `collectSecretsDiagnostics`
+  // 延迟解析（`secrets-acl-runner.mjs`：`spawnSync` runner + `whoami` owner）。
+  //
+  // 在此之前 `null` 意思是「没有 runner、不知道所有者」——而**没有任何生产
+  // 调用方给过值**，于是那两句告警在生产上恒久为真。一个"永远说同一句"
+  // 的告警与没有告警是同一件事（用户学会忽略它，于是真的越权那天同样被忽略）。
+  //
+  // 显式注入仍然优先：用例要验"没有 runner 时会怎样"时传一个非 null 的值
+  // 表达它要的场景（传 `undefined` 也会被当成"没指定"，所以**不要**用
+  // `undefined` 表达"没有 runner"——用 `resolveSecretsAcl` 的假 runner）。
   secretsRun = null,
   secretsOwner = null,
   requireProtected = true,
@@ -712,18 +725,69 @@ export function createLauncher({
         return secretsCheck.diagnostics
       }
       const { runSecretsCheck } = await import('./secrets-check.mjs')
+      // ── PRT-509 缺口 B1：真 runner 与真 owner ────────────────────────────
+      //
+      // 上面两个入参（`secretsRun` / `secretsOwner`）在这之前**恒为 `null`**：
+      // 全仓只有"声明"与"传参"两处引用，没有任何生产调用方给过值。
+      // 于是 `inspectFileAcl` 每次都走 `ACL_NO_RUNNER` 分支、
+      // `hardenFileAcl` 每次都报"不知道文件所有者"——两条都不拦启动，
+      // 于是它们变成诊断里**永远出现、永远说同一句**的告警。
+      //
+      // 这里补上"没注入就用生产默认"的那一步。三条纪律：
+      //
+      //   ① **只有两者都是 `null` 时才解析**。任一被显式注入（用例）就原样用，
+      //      于是"注入假 runner"这件事不会与"又一次真 whoami"混在一起。
+      //   ② 解析**失败不抛**：`resolveSecretsAcl` 内部把失败折成
+      //      `owner: null` / 一个连命令都跑不起来的 runner，结果仍然是
+      //      既有的具名告警（`ACL_NO_RUNNER` / `HARDEN_FAILED`）。
+      //      一个体检程序崩溃不该让产品起不来——这条上面的 catch 已经在守，
+      //      这里再守一次是因为**这是新增的一次外部进程调用**。
+      //   ③ 延迟到**这里**而不是 `launcherOptionsFrom`：那个函数是同步的，
+      //      而 `whoami` 必须等一次进程返回。放在这里也顺带保证了
+      //      "只在真的走到密钥库自检时才 spawn"。
+      let effectiveRun = secretsRun
+      let effectiveOwner = secretsOwner
+      let aclResolution = null
+      if (effectiveRun === null && effectiveOwner === null) {
+        try {
+          const { resolveSecretsAcl } = await import('./secrets-acl-runner.mjs')
+          aclResolution = await resolveSecretsAcl({ platform: layout.platform })
+          effectiveRun = aclResolution.run
+          effectiveOwner = aclResolution.owner
+        } catch (e) {
+          aclResolution = {
+            owner: null, ownerSource: 'resolve-failed',
+            ownerReason: `解析 ACL runner/owner 失败：${e?.name ?? 'Error'}`,
+          }
+        }
+      }
       const r = await runSecretsCheck({
         layout,
         platform: layout.platform,
-        run: secretsRun,
-        owner: secretsOwner,
+        run: effectiveRun,
+        owner: effectiveOwner,
         requireProtected,
         // PRT-509 路线 A′：把**只读**回退来源的位置一起交给自检，
         // 这样"DSH 的凭证文件在不在、读不读得懂"会出现在启动诊断里，
         // 而不是只在某一次解析失败时才被发现。
         dshCredentialsFile,
       })
-      return r.diagnostics
+      // ★ owner **没问出来**这件事必须自己占一行。
+      //
+      //   否则读数会是"ACL 检查：HARDEN_FAILED（不知道文件所有者）"——
+      //   那句话说得没错，但它把两件完全不同的事说成了同一件：
+      //     · "这台机器上问不出当前用户"（环境问题，修法是查 PATH / 权限）
+      //     · "问出来了，但加固真的失败了"（权限问题，修法是看 icacls 输出）
+      //   分开之后，读诊断的人才知道该去看哪里。
+      const extra = []
+      if (aclResolution !== null && effectiveOwner === null && aclResolution.ownerReason !== null) {
+        extra.push({
+          severity: 'warn',
+          code: 'SECRETS_ACL_OWNER_UNRESOLVED',
+          message: `问不出当前用户身份，密钥库 ACL 无法收紧到"仅所有者"（**未加固**）：${aclResolution.ownerReason}`,
+        })
+      }
+      return extra.length === 0 ? r.diagnostics : [...extra, ...r.diagnostics]
     } catch (err) {
       // 自检自身出错只降级为一条 warn：**一个体检程序崩溃不该让产品起不来**，
       // 但它必须被看见（不能静默）。

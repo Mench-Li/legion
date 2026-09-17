@@ -16,6 +16,23 @@ Runtime Contract → DshRuntimeAdapter → Orchestrator
 → Launcher/Config/Upgrade → Pack Manager/商业交付
 ```
 
+> 编号说明：本文的 F-01～F-25 是产品优化清单编号；历史实现中的 F-01（可靠事件流）和 F-02（team-hub 权限 API）是其中的已落地子能力，不与本文的 Runtime Contract / Adapter 编号混用。
+
+## 1.1 当前仓库状态校准（2026-09-16）
+
+以下状态以当前 `main` 可见代码和 CI 套件为准，不把其他 worktree 或未合入分支的提交算作完成：
+
+| 架构阶段 | 当前状态 | 可核对落点 |
+|---|---|---|
+| 阶段 0：基线、拓扑、边界、备份、黄金流程 | 基线与门禁已建立，真实模型用量/费用/峰值资源仍有待采集 | `scripts/prt/`、`docs/superpowers/prt/`、`scripts/ci/run-ci.mjs` |
+| 阶段 1：Runtime Contract / Fake Adapter | 已落地并纳入测试 | `runtime/contracts/`、`runtime/contracts/*test.mjs` |
+| 阶段 2：DshRuntimeAdapter 与 DSH 强制面 | 主体和强制面测试已落地；后续生产接线仍需按规格逐项核验 | `runtime/adapters/dsh/`、`runtime/dsh-composition/` |
+| 阶段 2.5：商业薄垂直切片 | 尚未形成可对外宣称的一键安装→BYOK→单员工→重启恢复闭环 | 需以 Product Launcher、SecretStore 和真实黄金流程证据为准 |
+| 阶段 3：Orchestrator Core | 尚未完成大规模提取；`plugins/src/index.ts` 仍是主要编排热点 | `plugins/src/index.ts` |
+| 阶段 4～10：上下文、模型/密钥、权限全量接线、Launcher、升级、Alpha、能力包 | 规格已定义，部分基础模块可能已在开发中；未形成完整里程碑证据前按未完成处理 | 以 `docs/STATUS.md` 和 PRT 任务证据为准 |
+
+因此当前最准确的产品判断是：**Runtime 边界已经从设计进入可测试实现，但 Product Runtime 尚未完成商业化闭环。** 后续功能应优先围绕阶段 2 收口和阶段 2.5 薄垂直切片，而不是把 P1/P2 功能全部提前扩张。
+
 ## 2. 架构基线
 
 | 层 | Legion 应拥有的语义 | 首版落点 |
@@ -44,25 +61,25 @@ Runtime Contract → DshRuntimeAdapter → Orchestrator
 
 ### 4.1 P0：执行契约与编排
 
-#### F-01 Runtime Contract
+#### F-01 Runtime Contract（基础已落地，收口中）
 
 定义唯一接口：`getHealth`、`getCapabilities`、`listModels`、`validateProfile`、`execute`、`cancel`、`recover`。`RunRequest` 必须包含 `runId`、`attemptId`、`idempotencyKey`、workspace/goal/task/employee、TeamPlan、Context Snapshot、模型、预算、工作目录、环境变量白名单和工具权限。
 
 `RunEvent` 固定为 `run.started`、`model.selected`、`message.delta`、`tool.*`、`usage.updated`、`artifact.produced` 和终态事件。未知错误不得静默归类为成功或普通可重试。
 
-#### F-02 DshRuntimeAdapter
+#### F-02 DshRuntimeAdapter（主体已落地，生产接线收口中）
 
 封装 `ctx.subagents`、`ctx.agentDefaultModel`、Session 和 DSH 流式事件；统一取消、超时、崩溃、恢复、用量和密钥脱敏；除 Adapter 和迁移期兼容代码外，禁止新增 DSH API 直接调用。
 
-#### F-03 Runtime Manager
+#### F-03 Runtime Manager（规格已定义，产品级闭环待补）
 
 启动时校验产品清单、DSH 版本、契约版本和能力；提供单一 Adapter 引用；Runtime 未就绪时禁止 Orchestrator 认领新任务。
 
-#### F-04 Orchestrator Core
+#### F-04 Orchestrator Core（尚未完成大规模提取）
 
 将 worker 逻辑提取为 `Task → Attempt → Lease(epoch) → Run → Outcome → Verification → Task transition`。重试创建新 Attempt；Lease 使用 epoch fencing；Orchestrator 不保存第二套任务状态。
 
-#### F-05 可靠事件与投递
+#### F-05 可靠事件与投递（事件流已落地，投递状态机待补）
 
 延续 F-01 的 scope、seq、Last-Event-ID、持久游标和去重。运行明细作为可持久化 RunEvent 写入控制面，不新增第二条公开 SSE。投递状态区分 `pending/delivering/delivered/suppressed/failed/unknown`。
 
@@ -72,7 +89,7 @@ Runtime Contract → DshRuntimeAdapter → Orchestrator
 
 ### 4.2 P0：上下文、模型与安全
 
-#### F-07 Context Assembler / Snapshot
+#### F-07 Context Assembler / Snapshot（部分基础已存在，完整 Run 快照待收口）
 
 按固定顺序组装规则、TeamPlan、任务、依赖、技能、历史、用户输入和工具限制；生成不可变 Snapshot、hash、token 估算、裁剪边界和来源引用。
 
@@ -84,7 +101,7 @@ Runtime Contract → DshRuntimeAdapter → Orchestrator
 
 密钥只进入 OS Credential Store/SecretStore；提示词、业务正文、日志、审计导出和能力包不得出现 token；缺失、不可解密、账户不匹配和供应商拒绝分别映射标准错误码。
 
-#### F-10 Permission Engine
+#### F-10 Permission Engine（控制面基础已落地，DSH 工具全量接线待收口）
 
 在现有 F-02 基础上接入 DSH 工具执行：模式为 `deny/ask/allow-once/allow-for-task/allow-by-policy`；规则绑定 `scope + actor + action + exact target`；`ctx.tools.guard()` 负责不可撤销 hard floor；`tools/pre-execute` 负责动态检查；`ctx.approval` 将人工请求路由到 team-hub Inbox。首批纳管代码合并/推送、文件删除/覆盖、跨空间读写、外部网络/连接器、自动化变更、凭证和高风险命令。
 
@@ -94,7 +111,7 @@ Runtime Contract → DshRuntimeAdapter → Orchestrator
 
 ### 4.3 P0：产品化交付
 
-#### F-12 Product Launcher
+#### F-12 Product Launcher（产品级 Launcher 待完成）
 
 提供 Windows 一键安装、配置、启动/停止/重启、健康诊断和日志收集，管理 team-hub、Workbench、Worker、DSH Runtime 生命周期。
 
@@ -136,8 +153,15 @@ F-04 Orchestrator ← F-07 Snapshot ← F-08 Model / F-09 Secret
                          ↓
           F-15 Usage + F-16 Scheduler → F-17~F-20
                          ↓
-                       F-21~F-25
+                      F-21~F-25
 ```
+
+当前执行顺序应校正为：
+
+1. 收口 Runtime Contract 与 DshRuntimeAdapter 的真实生产边界（包括版本/能力检查、取消恢复、强制面自检）。
+2. 完成阶段 2.5 的最小商业闭环：Product Launcher、per-user DataDir、SecretStore、单员工黄金任务和重启恢复。
+3. 通过 M1.5 停止条件后，再继续 Orchestrator 的大规模切片提取。
+4. 只有在上述闭环稳定后，才扩展用量预算、自动化运行历史、连接器、多 Harness 和多用户 ACL。
 
 1. **阶段 0：冻结基线**：保留 legacy；建立契约、错误码、迁移和新旧对拍。
 2. **阶段 1：执行契约**：Runtime Contract、Fake Adapter、DshRuntimeAdapter、Runtime Manager。

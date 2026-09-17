@@ -159,6 +159,14 @@ import {
 // "接口说有下一岗位、交接时却按链尾收口"这种不一致。
 import { resolveNextPost } from '../orchestrator/pipeline/index.mjs'
 import { columnExists as columnExistsImpl, ensureColumn as ensureColumnImpl } from './schema-util.mjs'
+import { createEventDeliveryStore } from './event-delivery.mjs'
+import {
+  AUTOMATION_ERRORS,
+  createAutomationStore,
+  ensureAutomationSchema,
+  projectOccurrences,
+} from './automation-store.mjs'
+import { createCompactionStore, ensureCompactionSchema } from './compaction-store.mjs'
 import { loadConfig } from '../packages/shared/src/config.mjs'
 import { SCHEMA as CONFIG_SCHEMA } from './config-schema.mjs'
 
@@ -395,6 +403,69 @@ const runStore = createRunStore({
     }
   },
 })
+
+/**
+ * F-16 自动化计划仓储（MULTI-AGENT-FEATURE-OPTIMIZATION.md §4.4）。
+ *
+ * 与 `runStore` 同一个库、同一个连接，理由也同一个：物化一次运行会去建
+ * 任务/Attempt（或至少要在同一个事务域里推进"计划的 next"），
+ * 分成两个库就不可能做到"一条计划在同一时刻只物化一次"。
+ *
+ * 本对象只**持有**仓储。真正的调度 tick 与 HTTP 路由在下面各自的段落里，
+ * 因为"什么时候该 tick"是进程生命周期的事，不是仓储语义的事。
+ */
+const automationStore = (() => {
+  // 建表**显式**放在这里，不像 `runStore` 那样藏在构造函数里：
+  // 自动化那两张表有一条 `UNIQUE(schedule_id, planned_at_ms)` 与三条
+  // 老库补列，而"表在不在"是排查"为什么物化不生效"时的第一个问题。
+  // 显式一行让它在这份文件里可 grep 到。
+  ensureAutomationSchema(db)
+  return createAutomationStore({ db })
+})()
+
+/**
+ * F-16 调度 tick 的**唯一**实现，供 HTTP 路由（显式 `POST /api/automation/tick`）
+ * 与 `isMain` 下的定时器共用。
+ *
+ * 为什么两处共用一个函数而不是各写一遍：定时器那条路**在生产上没人看着**，
+ * 而路由那条路是有人在测的。两份实现里的任何一处漂移（比如定时器那份忘了
+ * 传 `scope`）都会表现为"手动 tick 是对的、自动 tick 是错的"，
+ * 而后者只在生产上发生。
+ *
+ * **不抛**：一个把整个 team-hub 主循环带死的调度 tick，比"这一次没物化"
+ * 坏得多——而"这一次没物化"是下一轮 tick 会自己修好的。
+ */
+function automationTick({ scope = null, nowMs = null, limit = null } = {}) {
+  try {
+    const r = automationStore.materializeDue({
+      scope,
+      nowMs,
+      ...(Number.isSafeInteger(limit) && limit > 0 ? { limit: Math.min(limit, 2000) } : {}),
+    })
+    // 物化出来的运行是**计划触发的**，它们必须能被 agent 领走。
+    // 但"建出来"与"变成一条可领的任务"是两步：本批只做前者，
+    // 后者（建 Task + 绑 goalId + 记 scheduleRunId）需要一个计划->目标的
+    // 映射，那属于 PRT 编排面，不在 F-16 的范围内。**如实返回这个边界**，
+    // 不让调用方以为"物化了 = 跑起来了"。
+    return { ...r, wired: false, note: '物化的运行是 scheduled；把它们变成可领任务需要计划→目标的映射（未接线）' }
+  } catch (e) {
+    return { ok: false, atMs: nowMs ?? Date.now(), code: e?.code ?? 'AUTOMATION_TICK_FAILED', error: e instanceof Error ? e.message : String(e), results: [] }
+  }
+}
+
+/**
+ * F-17 长会话压缩仓储（§4.3「不可变原文 + 版本化摘要 + 引用回原文」）。
+ *
+ * 与 `contextStore` 的分工（这一条决定了它不能合并进那一个）：
+ * `context-store` 存的是**一次 Run 的上下文快照**（按 attemptId 定位、
+ * 不可变、带哈希）；本对象存的是**一段会话的压缩产物**（按 session 定位、
+ * 有版本、原文永久保留）。合成一个会让"压缩把快照改了"变成可能——
+ * 而快照的第一条纪律就是不可变。
+ */
+const compactionStore = (() => {
+  ensureCompactionSchema(db)
+  return createCompactionStore({ db })
+})()
 
 /**
  * 模型档案仓储（PRT-501，spec §6.6）。
@@ -4181,6 +4252,104 @@ function inboxCount({ role, soldier, scope }) {
 // ── SSE ──
 const eventClients = new Set()
 
+// ============================================================================
+// F-05 投递状态机（`team-hub/event-delivery.mjs`）
+//
+// 改动前这里只有 `eventClients` 一个内存 Set 与下面那句静默 `continue`：
+//
+//     if (client.scope === undefined || client.scope === entry.scope) writeEventFrame(client.res, entry)
+//
+// 两个出口没有记录：① scope 不匹配（一个 `continue`）；② `res.write` 失败
+// （返回值被丢掉，异常被事件循环吞掉）。**"发不出去也不说"与"从没打算发"
+// 在"用户有没有看到"上是同一个东西。**
+//
+// 现在每一次投递都落一行可查的状态。两条纪律决定了下面对 `broadcastAudit` 的改写：
+//
+//   · **记账不许拖垮广播**。SSE 是热路径，而投递记账要写库。所以整段包在
+//     一次 `withTx` 里（一次事务，不是每条事件一次），并且**任何异常都不许
+//     冒泡到 `audit()`**——审计是业务操作的诊断，不是它的前置条件。
+//     但失败**要被数出来**（`deliveryBookkeepingFailures`），不能静默。
+//   · **拆不开的两种情况要拆开**。投递失败 = `markFailed`（可重试）；
+//     取走被拒 = 两个投递者抢同一行（CAS 让一个赢），**不是失败**，
+//     所以不记 `failed`——记了会把"正常并发"读成"投递坏了"。
+// ============================================================================
+const deliveryStore = createEventDeliveryStore({ db, clock: () => Date.now() })
+/** 记账本身失败的次数。它**不**进审计、不抛错，但必须在 `/api/config` 上看得见。 */
+let deliveryBookkeepingFailures = 0
+
+/**
+ * 订阅者的稳定身份。
+ *
+ * 一个订阅者 = 一个 `(scope, kind, clientId)` 三元组。`clientId` 由前端生成并
+ * 存在 localStorage 里（与它已经存着的游标成对），**不**用连接序号——
+ * 刷新页面必须仍是同一个订阅者，否则游标永远从 0 开始，整段历史每次重连都重投。
+ *
+ * 三项都缺失（比如 `curl` 直接连）时退化成 `anonymous:<连接序号>`：
+ * 一个不声称自己是谁的连接**不该**冒用别人的游标，那会让真正的那个订阅者
+ * 的游标被一次匿名连接带偏。
+ */
+let anonymousSeq = 0
+function subscriberIdFor({ clientId, kind, scope }) {
+  const k = typeof kind === 'string' && kind.trim() !== '' ? kind.trim() : 'anonymous'
+  const c = typeof clientId === 'string' && clientId.trim() !== '' ? clientId.trim() : null
+  if (c === null) {
+    anonymousSeq += 1
+    return `anonymous:${k}:${anonymousSeq}`
+  }
+  // scope 进 id：同一个浏览器在两个 scope 页签里是**两个订阅者**，
+  // 各有自己的游标（它们的可见集合不同，合成一个会让另一边的洞把它卡住）。
+  return `${k}:${scope === undefined ? '*' : scope}:${c}`
+}
+
+/** 把一个 SSE 连接登记进投递仓储。**登记失败不阻止连接**（只读面必须继续可用）。 */
+function registerEventClient(client) {
+  try {
+    deliveryStore.registerSubscriber({ subscriberId: client.subscriberId, kind: client.kind, scope: client.scope ?? null })
+  } catch {
+    deliveryBookkeepingFailures += 1
+  }
+}
+
+/**
+ * F-05 前半：把终态请求里带来的一次 Run 事件明细**尽力**落库。
+ *
+ * ## 为什么是"尽力"，以及为什么这个措辞**不等于**静默
+ *
+ * 明细是**复盘材料**，不是状态迁移的证据。它写失败时唯一正确的处置是
+ * **让终态照常成立**并把失败如实带出来：
+ *
+ *   · 让它回滚终态 → 一次真实的运行结果因为一段日志没写成而作废，
+ *     接着会被重试——而重试是**真的再花一次钱、再写一次外部系统**。
+ *     这个方向本仓反复禁止。
+ *   · 静默吞掉 → "明细写失败了"与"这次运行没有明细"长得一样，
+ *     而后者是完全正常的（更老的 worker 不上报 `runEvents`）。
+ *
+ * 所以：**不抛错、不改判定，但把读数放进返回值**。三态分得开：
+ *   · `null`  —— 这次请求**没有**带明细（老调用方 / 非终态路径），不是失败；
+ *   · `{ok:false, code}` —— 带了但没写成，带具名原因；
+ *   · `{ok:true, written, …}` —— 写成功。
+ */
+function recordRunEventsBestEffort({ attemptId, context, leaseEpoch }) {
+  const raw = context && typeof context === 'object' ? context.runEvents : null
+  if (!Array.isArray(raw)) return null
+  try {
+    // `known` 由**仓储**按契约判定（`run-store.mjs` 的 `isKnownEventType`）。
+    // 这里**不**再判一次：两处都判，就会有两份会漂移的名单，而漂移的表现是
+    // "新事件被标成未知"或"未知被标成已知"——两者都不会报错。
+    const events = raw.map((e) => ({ seq: e?.seq, type: e?.type, event: e?.event ?? e }))
+    const r = runStore.recordRunEvents({ attemptId, events, leaseEpoch: leaseEpoch ?? null })
+    return { ok: true, ...r, truncated: context.runEventsTruncated === true }
+  } catch (e) {
+    return {
+      ok: false,
+      code: 'RUN_EVENTS_NOT_RECORDED',
+      error: e instanceof Error ? e.message : String(e),
+      // 条数照样报出来：调用方要能判断"丢了多少"。
+      offered: raw.length,
+    }
+  }
+}
+
 function parseEventScope(raw) {
   if (raw === null || raw === undefined) return undefined
   const scope = String(raw).trim()
@@ -4211,15 +4380,90 @@ function auditEvent(r) {
   return { seq, ts, scope, event: action, action, taskId, member: r.member, goalId, id: seq, payload: detail, detail }
 }
 
-/** 推一条完整 SSE data 帧：id: 行（seq，供 EventSource Last-Event-ID 断线续传）+ data JSON。 */
+/**
+ * 推一条完整 SSE data 帧：id: 行（seq，供 EventSource Last-Event-ID 断线续传）+ data JSON。
+ *
+ * 返回值是**这次写有没有被接受**——`res.write` 返回 `false` 表示内核缓冲区已满
+ * （背压），那不是失败但也**不是"已经发出去了"**；`res.destroyed` / 抛错才是失败。
+ * 调用方按这个布尔决定记 `delivered` 还是 `failed`。
+ *
+ * 改动前这个函数的返回值被整个丢掉，于是**浏览器已经走了、连接被 RST、
+ * 缓冲区撑爆……一律表现为"发过了"**。
+ */
 function writeEventFrame(res, entry) {
-  res.write(`id: ${entry.seq}\n`)
-  res.write(`data: ${JSON.stringify(entry)}\n\n`)
+  try {
+    if (res.destroyed === true || res.writableEnded === true) return { ok: false, reason: 'socket-closed' }
+    res.write(`id: ${entry.seq}\n`)
+    const accepted = res.write(`data: ${JSON.stringify(entry)}\n\n`)
+    // `accepted === false` 只是背压，字节已经进了内核缓冲 —— 记成**成功**但把
+    // 背压信号带出去，让调用方能在诊断页看到"这个订阅者在被推着走"。
+    return { ok: true, backpressure: accepted === false }
+  } catch (e) {
+    return { ok: false, reason: e instanceof Error ? e.message : String(e) }
+  }
 }
 
+/**
+ * 广播一条审计事件，并**为每个订阅者落一行投递状态**。
+ *
+ * 三种结局各自有出口，一个都不静默：
+ *   · 不匹配该订阅者   → `suppressed` + 原因 `'scope-mismatch'`（由 `plan()` 落）；
+ *   · 写了至少一个 socket → `delivered`（带 `fanout` = 真实写过的连接数）；
+ *   · 一个都没写成功   → `failed` + 具体错误（`markFailed` 不推进游标，所以可重试）。
+ *
+ * 整段包一次 `withTx`：**一次事件一个事务**，不是每个订阅者一个。
+ * 异常绝不冒泡到 `audit()`——但被数进 `deliveryBookkeepingFailures`。
+ */
 function broadcastAudit(entry) {
+  if (eventClients.size === 0) return
+  // 按订阅者分组：同一订阅者可能有多个活连接（多个标签页）。
+  const bySubscriber = new Map()
   for (const client of eventClients) {
-    if (client.scope === undefined || client.scope === entry.scope) writeEventFrame(client.res, entry)
+    const s = bySubscriber.get(client.subscriberId)
+    if (s === undefined) bySubscriber.set(client.subscriberId, [client])
+    else s.push(client)
+  }
+  const subscriberIds = [...bySubscriber.keys()]
+  try {
+    withTx(() => {
+      // ① 落投递意图。scope 不匹配的在这里变成 `suppressed` + 原因。
+      for (const sid of subscriberIds) {
+        const client = bySubscriber.get(sid)[0]
+        deliveryStore.plan({
+          subscriberId: sid,
+          events: [{ seq: entry.seq, scope: entry.scope ?? null, event: entry.event }],
+        })
+        void client
+      }
+      // ② 取走（CAS）。抢不到的那一个**不是失败** —— 另一个投递者正在做同一件事。
+      for (const sid of subscriberIds) {
+        const taken = deliveryStore.takeUp({ subscriberId: sid, seqs: [entry.seq] })
+        if (taken.claimed.length === 0) {
+          // 已经被别的路径投过了，或者这一行是 suppressed（终态）。
+          continue
+        }
+        // ③ 真的写。
+        let fanout = 0
+        let lastError = null
+        for (const client of bySubscriber.get(sid)) {
+          const r = writeEventFrame(client.res, entry)
+          if (r.ok === true) fanout += 1
+          else lastError = r.reason
+        }
+        if (fanout > 0) {
+          deliveryStore.markDelivered({ subscriberId: sid, seqs: [entry.seq], fanout })
+        } else {
+          deliveryStore.markFailed({
+            subscriberId: sid,
+            seqs: [entry.seq],
+            error: lastError ?? '所有连接都写失败（没有可用的 socket）',
+          })
+        }
+      }
+    })
+  } catch {
+    // 记账失败**不许**影响审计与分析。数出来，让它在 `/api/config` 上可见。
+    deliveryBookkeepingFailures += 1
   }
 }
 
@@ -4632,8 +4876,24 @@ async function handle(req, res, stripPrefix) {
     }
     if (req.method === 'POST' && path === '/api/runtime/transition') {
       await handleRun(req, res, (body) => {
+        const attemptId = requireString(body, 'attemptId')
+        // F-05 前半：终态迁移与事件明细**同一个请求**。
+        //
+        // ★ 顺序是**明细先写、迁移后做**，这个顺序是实质的：
+        //   明细带 `leaseEpoch`，而迁移会把 epoch 推进（终态之后这条租约就不再有效）。
+        //   反过来写在失败路径上是**必然**的：`failAndRetry` 会推进 epoch，
+        //   于是"用同一个 epoch 写明细"会被 epoch 闸门拒掉——
+        //   而那个拒绝看起来像"明细功能坏了"，实际是"探针/顺序错了"。
+        //
+        //   明细属于**这次运行**，所以它必须用**这次运行**的 epoch 去写。
+        //
+        // 它**不**参与迁移判定：明细写失败不该让一次已经成功的终态回滚——
+        // 那会把"复盘材料缺了一点"升级成"这次运行的结果不成立"，
+        // 接着会被重试（真的再花一次钱）。方向是反的。
+        // 但失败**要被看见**：读数放进返回值。
+        const evOutcome = recordRunEventsBestEffort({ attemptId, context: body.context, leaseEpoch: body.leaseEpoch })
         const r = runStore.transition({
-          attemptId: requireString(body, 'attemptId'),
+          attemptId,
           leaseEpoch: body.leaseEpoch,
           workerId: body.workerId,
           to: body.to ?? null,
@@ -4645,7 +4905,9 @@ async function handle(req, res, stripPrefix) {
         // 状态迁移后可能收尾目标链（与看板 /api/transition 的行为对齐，
         // 否则运行面完成的任务与看板完成的任务对目标的结算不一致）
         try { settleGoalsOfScope(getTask(r.attempt.taskId).scope) } catch { /* 任务不存在时不结算 */ }
-        return r
+        // ★ 键**恒在**（没带明细时是 `null`）：`undefined` 在 JSON 里会被丢掉，
+        //   于是"这次请求没带明细"与"这个字段还没上线"在响应上长得一样。
+        return { ...r, runEvents: evOutcome }
       })
       return
     }
@@ -4691,8 +4953,22 @@ async function handle(req, res, stripPrefix) {
       // 漏掉第二步的后果是任务永远停在 RetryableFailure——它既没有可领的队列，
       // 也不在等人工列表里，从任何界面看都只是"失败了"，而没有人会去处理它。
       await handleRun(req, res, (body) => {
+        const attemptId = requireString(body, 'attemptId')
+        // F-05 前半：**失败路径的明细最要紧**——"它在炸之前做了什么"。
+        //
+        // ★ 必须先于 `failAndRetry` 写：那一步会推进 `lease_epoch`，
+        //   而明细用**这次运行**的 epoch 写。反过来写会被 epoch 闸门拒掉，
+        //   而那个拒绝看起来像"明细功能坏了"。
+        //
+        // 明细放在 body 顶层（不是 `context` 里）：`fail` 与 `transition`
+        // 的 body 形状本就不同，让两处共用一个嵌套键只会诱使下一个调用方去猜。
+        const evOutcome = recordRunEventsBestEffort({
+          attemptId,
+          context: { runEvents: body.runEvents, runEventsTruncated: body.runEventsTruncated },
+          leaseEpoch: body.leaseEpoch ?? null,
+        })
         const r = runStore.failAndRetry({
-          attemptId: requireString(body, 'attemptId'),
+          attemptId,
           leaseEpoch: body.leaseEpoch ?? null,
           actor: requireString(body, 'workerId'),
           failureCode: body.failureCode ?? null,
@@ -4707,7 +4983,8 @@ async function handle(req, res, stripPrefix) {
           nowMs: body.nowMs ?? null,
         })
         try { settleGoalsOfScope(getTask(r.attempt.taskId).scope) } catch { /* 任务不存在时不结算 */ }
-        return r
+        // 与 `transition` 同形：键恒在。
+        return { ...r, runEvents: evOutcome }
       })
       return
     }
@@ -6121,6 +6398,237 @@ async function handle(req, res, stripPrefix) {
       const attemptId = url.searchParams.get('attemptId')
       if (attemptId === null || attemptId.length === 0) { json(res, 400, { ok: false, error: '缺少 attemptId', code: 'MISSING_PARAM' }); return }
       json(res, 200, { ok: true, attemptId, runResults: runStore.runResultsOf(attemptId), serverTimeMs: Date.now() })
+      return
+    }
+    if (req.method === 'GET' && path === '/api/runtime/run-events') {
+      // F-05 前半的读面：**运行明细**（13 种 RunEvent，按契约序号升序）。
+      //
+      // 这条路由存在的理由与 `/api/runtime/run-results` 完全相同，只是粒度更细：
+      // `run_results` 回答"这次运行**结局**是什么"，`run_events` 回答
+      // "这次运行**过程**里发生了什么"——用了哪个模型、请求了哪些工具、
+      // 工具是成了还是败了、模型说了什么。
+      //
+      // 两条只读参数：
+      //   · `type`  —— 只看某一类（"这次调了哪些工具"用 `tool.requested`）；
+      //   · `counts=1` —— 只要按类型的计数（13 种事件逐个数），不要正文。
+      //
+      // `known` 必须透出去：`known: false` 的行说明**上游产生了一种本控制面
+      // 不认识的事件**。那是一个要被看见的信号；过滤掉它会让"上游新增了事件
+      // 但我们不记"与"上游什么都没产生"长得一样。
+      const attemptId = url.searchParams.get('attemptId')
+      if (attemptId === null || attemptId.length === 0) { json(res, 400, { ok: false, error: '缺少 attemptId', code: 'MISSING_PARAM' }); return }
+      if (url.searchParams.get('counts') === '1') {
+        json(res, 200, { ok: true, ...runStore.runEventCountsOf(attemptId), serverTimeMs: Date.now() })
+        return
+      }
+      const type = url.searchParams.get('type')
+      const limitRaw = url.searchParams.get('limit')
+      json(res, 200, {
+        ok: true,
+        attemptId,
+        events: runStore.runEventsOf(attemptId, {
+          type: type === null || type.length === 0 ? null : type,
+          limit: limitRaw === null ? 1000 : Number(limitRaw),
+        }),
+        serverTimeMs: Date.now(),
+      })
+      return
+    }
+    // ── F-16 自动化计划 / 运行历史 ──────────────────────────────────────
+    //
+    // 五条路由，刻意把**写**与**投影**分开：
+    //   · `GET  /api/automation/calendar`  纯投影，不写任何行（"日历只做投影"）
+    //   · `GET  /api/automation/schedules` 计划清单
+    //   · `POST /api/automation/schedules` 建计划
+    //   · `POST /api/automation/schedules/update` 改计划（含启停）
+    //   · `POST /api/automation/tick`      显式物化（与生产定时器共用同一个函数）
+    //   · `GET  /api/automation/runs`      运行历史
+    //   · `GET  /api/automation/summary`   汇总
+    if (path === '/api/automation/summary' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const scope = url.searchParams.get('scope')
+      json(res, 200, { ok: true, ...automationStore.summary({ scope: scope !== null && scope.length > 0 ? scope : null }) })
+      return
+    }
+    if (path === '/api/automation/schedules' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const scope = url.searchParams.get('scope')
+      const enabledRaw = url.searchParams.get('enabled')
+      const limitRaw = url.searchParams.get('limit')
+      json(res, 200, {
+        ok: true,
+        schedules: automationStore.listSchedules({
+          scope: scope !== null && scope.length > 0 ? scope : null,
+          enabled: enabledRaw === null ? null : enabledRaw === '1' || enabledRaw === 'true',
+          limit: limitRaw === null ? 200 : Number(limitRaw),
+        }),
+      })
+      return
+    }
+    if (path === '/api/automation/schedules' && req.method === 'POST') {
+      await handleRun(req, res, (body) => ({
+        ok: true,
+        schedule: automationStore.createSchedule({
+          id: requireString(body, 'id'),
+          scope: requireString(body, 'scope'),
+          name: requireString(body, 'name'),
+          spec: body.spec,
+          timezone: requireString(body, 'timezone'),
+          enabled: body.enabled !== false,
+          overlapPolicy: body.overlapPolicy ?? 'skip',
+          catchUpPolicy: body.catchUpPolicy ?? 'once',
+          createdBy: body.by ?? null,
+          note: body.note ?? null,
+        }),
+      }))
+      return
+    }
+    if (path === '/api/automation/schedules/update' && req.method === 'POST') {
+      await handleRun(req, res, (body) => ({
+        ok: true,
+        schedule: automationStore.updateSchedule({
+          id: requireString(body, 'id'),
+          enabled: body.enabled === undefined ? null : body.enabled === true,
+          overlapPolicy: body.overlapPolicy ?? null,
+          catchUpPolicy: body.catchUpPolicy ?? null,
+          spec: body.spec ?? null,
+          timezone: body.timezone ?? null,
+          name: body.name ?? null,
+          note: body.note ?? null,
+        }),
+      }))
+      return
+    }
+    if (path === '/api/automation/calendar' && req.method === 'GET') {
+      // ★ **纯投影**：这条路由是一段只读计算，库里一行都不会多。
+      //
+      // 参数里没有 `persist` / `materialize` 这种开关，是刻意的：
+      // 一个"顺手把投影落库"的选项，会在某一次翻页之后让运行历史里
+      // 多出一批**因为有人看了一眼**而产生的行。
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const id = url.searchParams.get('id')
+      if (id === null || id.length === 0) { json(res, 400, { ok: false, error: '缺少 id', code: 'MISSING_PARAM' }); return }
+      const sched = automationStore.scheduleOf(id)
+      if (sched === null) { json(res, 404, { ok: false, error: `没有这条计划：${id}`, code: AUTOMATION_ERRORS.SCHEDULE_NOT_FOUND }); return }
+      const fromRaw = Number(url.searchParams.get('fromMs'))
+      const toRaw = Number(url.searchParams.get('toMs'))
+      const fromMs = Number.isSafeInteger(fromRaw) ? fromRaw : Date.now()
+      const toMs = Number.isSafeInteger(toRaw) ? toRaw : fromMs + 7 * 24 * 3600 * 1000
+      const capRaw = Number(url.searchParams.get('max'))
+      try {
+        json(res, 200, {
+          ok: true,
+          scheduleId: id,
+          // `projected: true` 是一个**能力发现位**：读的人要能一眼看出
+          // 这些时刻不是运行记录，而是算出来的。
+          projected: true,
+          occurrences: projectOccurrences(sched, {
+            fromMs, toMs,
+            maxOccurrences: Number.isSafeInteger(capRaw) && capRaw > 0 ? Math.min(capRaw, 2000) : 500,
+          }),
+          serverTimeMs: Date.now(),
+        })
+      } catch (e) {
+        json(res, Number(e?.statusCode) || 400, { ok: false, error: e instanceof Error ? e.message : String(e), code: e?.code ?? AUTOMATION_ERRORS.BAD_WINDOW })
+      }
+      return
+    }
+    if (path === '/api/automation/runs' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const scheduleId = url.searchParams.get('scheduleId')
+      const scope = url.searchParams.get('scope')
+      const state = url.searchParams.get('state')
+      const limitRaw = url.searchParams.get('limit')
+      json(res, 200, {
+        ok: true,
+        runs: automationStore.runsOf({
+          scheduleId: scheduleId !== null && scheduleId.length > 0 ? scheduleId : null,
+          scope: scope !== null && scope.length > 0 ? scope : null,
+          state: state !== null && state.length > 0 ? state : null,
+          limit: limitRaw === null ? 200 : Number(limitRaw),
+        }),
+      })
+      return
+    }
+    if (path === '/api/automation/tick' && req.method === 'POST') {
+      // 显式 tick。与生产定时器**共用 `automationTick`**——两条实现漂移的
+      // 表现是"手动 tick 对、自动 tick 错"，而后者只在生产上发生。
+      await handleRun(req, res, (body) => automationTick({
+        scope: typeof body.scope === 'string' && body.scope.length > 0 ? body.scope : null,
+        nowMs: body.nowMs ?? null,
+        limit: body.limit ?? null,
+      }))
+      return
+    }
+    // ── F-17 长会话压缩 ────────────────────────────────────────────────
+    //
+    // 四条路由，**没有任何一条会删原文**——这是本模块的核心纪律：
+    //   · `POST /api/compaction/messages`    追加原文（只追加，重复 seq 拒绝）
+    //   · `POST /api/compaction/summarize`   写入一版摘要（baseVersion 是 CAS）
+    //   · `GET  /api/compaction/context`     拼出"现在该给模型看什么"
+    //   · `GET  /api/compaction/state`       压缩程度读数
+    //
+    // `POST /api/compaction/summarize` **接受已经算好的摘要文本**，本层不调用
+    // 任何模型：决定"什么时候压、压多少"是产品策略（在这里），
+    // 决定"这段文字怎么概括"是执行面能力。混在一起会让一次"摘要没写好"
+    // 表现为"压缩功能坏了"，而修法完全不同。
+    if (path === '/api/compaction/messages' && req.method === 'POST') {
+      await handleRun(req, res, (body) => ({
+        ok: true,
+        message: compactionStore.appendMessage({
+          sessionId: requireString(body, 'sessionId'),
+          seq: body.seq,
+          role: requireString(body, 'role'),
+          content: typeof body.content === 'string' ? body.content : '',
+        }),
+      }))
+      return
+    }
+    if (path === '/api/compaction/summarize' && req.method === 'POST') {
+      await handleRun(req, res, (body) => compactionStore.proposeSummary({
+        sessionId: requireString(body, 'sessionId'),
+        coversFromSeq: body.coversFromSeq,
+        coversToSeq: body.coversToSeq,
+        summary: requireString(body, 'summary'),
+        author: body.author ?? 'model',
+        // `baseVersion` **原样透传，包括 `undefined`**：把它折叠成 `null`
+        // 会让"我以为还没有摘要"与"我没传这个参数"变成同一件事，
+        // 而后者是一个应该被报出来的调用错误（否则并发压缩会静默通过）。
+        baseVersion: body.baseVersion === undefined ? null : body.baseVersion,
+        createdBy: requireString(body, 'by'),
+        reason: body.reason ?? null,
+      }))
+      return
+    }
+    if (path === '/api/compaction/context' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const sessionId = url.searchParams.get('sessionId')
+      if (sessionId === null || sessionId.length === 0) { json(res, 400, { ok: false, error: '缺少 sessionId', code: 'MISSING_PARAM' }); return }
+      const maxRaw = Number(url.searchParams.get('maxTokens'))
+      try {
+        const ctx = compactionStore.effectiveContext(sessionId, {
+          maxTokens: Number.isSafeInteger(maxRaw) && maxRaw > 0 ? maxRaw : null,
+        })
+        json(res, 200, { ok: true, sessionId, ...ctx })
+      } catch (e) {
+        json(res, Number(e?.statusCode) || 400, { ok: false, error: e instanceof Error ? e.message : String(e), code: e?.code ?? 'COMPACTION_FAILED' })
+      }
+      return
+    }
+    if (path === '/api/compaction/state' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const sessionId = url.searchParams.get('sessionId')
+      if (sessionId === null || sessionId.length === 0) { json(res, 400, { ok: false, error: '缺少 sessionId', code: 'MISSING_PARAM' }); return }
+      json(res, 200, { ok: true, ...compactionStore.compactionState(sessionId) })
+      return
+    }
+    if (path === '/api/compaction/summaries' && req.method === 'GET') {
+      // 版本史：**每个版本都可读**，因为"曾经有过一个更好的摘要"这件事
+      // 只有在旧版还在的时候才能被证明。
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const sessionId = url.searchParams.get('sessionId')
+      if (sessionId === null || sessionId.length === 0) { json(res, 400, { ok: false, error: '缺少 sessionId', code: 'MISSING_PARAM' }); return }
+      json(res, 200, { ok: true, sessionId, summaries: compactionStore.summariesOf(sessionId) })
       return
     }
     if (req.method === 'GET' && path === '/api/runtime/reconciliations') {
@@ -7582,12 +8090,24 @@ async function handle(req, res, stripPrefix) {
         json(res, 400, { error: e instanceof Error ? e.message : String(e) })
         return
       }
+      // 订阅者身份三项：`clientId` 由前端持久化（与它自己的游标成对），
+      // `kind` 区分来源（workbench / board / 未来的外部渠道）。
+      const clientId = url.searchParams.get('clientId')
+      const clientKind = url.searchParams.get('kind') ?? 'workbench'
+      const subscriberId = subscriberIdFor({ clientId, kind: clientKind, scope: eventScope })
       res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache', connection: 'keep-alive' })
       res.write('retry: 2000\n\n')
-      const client = { res, scope: eventScope }
+      const client = { res, scope: eventScope, subscriberId, kind: typeof clientKind === 'string' ? clientKind : 'workbench' }
       eventClients.add(client)
+      // 登记进投递仓储（失败不阻止连接：只读面必须继续可用）。
+      registerEventClient(client)
       // Last-Event-ID 断线续传（P2-3 S2）：带合法序号则只回放 seq > N 的增量；
       // 无/非法则回放最近 30 条（契约 §6.2：seq 单调，配合 id: 行 EventSource 原生续传）。
+      //
+      // ★ F-05：`Last-Event-ID` 头**只是客户端的一面之词**，所以它不推进服务端游标。
+      //   服务端游标由**真的写成功过**的投递推进（`markDelivered` → `advanceCursor`），
+      //   那是唯一一个"字节确实出去了"的证据。两者是不同的东西：
+      //   头部说的是"我收到过哪一条"，游标说的是"我们确实投到了哪一条"。
       const lastEventId = Number.parseInt(String(req.headers['last-event-id'] ?? ''), 10)
       const cursor = Number.isFinite(lastEventId) ? lastEventId : sinceSeq
       const where = []
@@ -7604,9 +8124,76 @@ async function handle(req, res, stripPrefix) {
       } else {
         replay = db.prepare(`SELECT * FROM audit${where.length > 0 ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY seq DESC LIMIT 30`).all(...params).reverse()
       }
-      for (const r of replay) writeEventFrame(res, auditEvent(r))
+      // 回放帧**同样要走投递记账**：回放是投递的一种，把历史的洞补上也算投出去。
+      // 这里逐条写而不是走 `broadcastAudit`（那条路径是"广播给所有人"，
+      // 而回放只写给**这一个**订阅者）。一条回放失败不影响其余条目。
+      for (const r of replay) {
+        const entry = auditEvent(r)
+        let frame = { ok: false, reason: 'not-attempted' }
+        try {
+          withTx(() => {
+            deliveryStore.plan({ subscriberId, events: [{ seq: entry.seq, scope: entry.scope ?? null, event: entry.event }] })
+            const taken = deliveryStore.takeUp({ subscriberId, seqs: [entry.seq] })
+            if (taken.claimed.length === 1) {
+              frame = writeEventFrame(res, entry)
+              if (frame.ok === true) deliveryStore.markDelivered({ subscriberId, seqs: [entry.seq] })
+              else deliveryStore.markFailed({ subscriberId, seqs: [entry.seq], error: frame.reason ?? '回放写失败' })
+            } else {
+              // 已经是终态（投过了/被抑制）——补投会被 CAS 拒，这正是想要的。
+              frame = { ok: true, skipped: true }
+            }
+          })
+        } catch {
+          deliveryBookkeepingFailures += 1
+          // 记账失败时仍然把帧写出去：**宁可少一条记录，不可少一帧**。
+          frame = writeEventFrame(res, entry)
+        }
+        if (frame.ok !== true && frame.reason !== undefined && frame.reason !== 'not-attempted') {
+          // 连接已经不可写：继续回放没有意义，直接收尾。
+          break
+        }
+      }
       const heartbeat = setInterval(() => res.write(':hb\n\n'), 15000)
       req.on('close', () => { clearInterval(heartbeat); eventClients.delete(client) })
+      return
+    }
+    if (req.method === 'GET' && path === '/api/event-delivery') {
+      // F-05 投递读数（只读）：**"发不出去也不说"这件事本身要能被看见**。
+      //
+      // 三种问法：
+      //   · 不带 subscriberId → 全部订阅者的六态汇总（诊断页用）；
+      //   · 带 subscriberId   → 这一个订阅者的完整读数（含 `oldestOutstandingSeq`）；
+      //   · `?recover=1`      → 顺手回收租约过期的 `delivering` → `unknown`。
+      //
+      // `recover` 做成**显式动作而不是每次读都顺手做**：回收会把 `delivering`
+      // 写死成 `unknown`（终态、不可自动重投），那是一个会改变后续行为的写操作，
+      // 不该藏在一次 GET 里。谁要它，谁说出来。
+      const subscriberId = url.searchParams.get('subscriberId')
+      const wantRecover = url.searchParams.get('recover') === '1'
+      const recovered = wantRecover ? deliveryStore.recoverExpired() : { recovered: [] }
+      if (subscriberId !== null && subscriberId.length > 0) {
+        const st = deliveryStore.stateOf(subscriberId)
+        if (st.exists !== true) {
+          json(res, 404, { ok: false, error: `订阅者不存在：${subscriberId}`, code: 'SUBSCRIBER_NOT_FOUND', serverTimeMs: Date.now() })
+          return
+        }
+        json(res, 200, {
+          ok: true,
+          subscriber: st,
+          rows: deliveryStore.rowsOf(subscriberId, { limit: 200 }),
+          recovered: recovered.recovered,
+          bookkeepingFailures: deliveryBookkeepingFailures,
+          serverTimeMs: Date.now(),
+        })
+        return
+      }
+      json(res, 200, {
+        ok: true,
+        ...deliveryStore.summary(),
+        recovered: recovered.recovered,
+        bookkeepingFailures: deliveryBookkeepingFailures,
+        liveConnections: eventClients.size,
+      })
       return
     }
     if (req.method === 'GET' && path === '/api/config') {
@@ -7619,9 +8206,19 @@ async function handle(req, res, stripPrefix) {
       // 这里把它变成可探测的。★ `status()` **不读盘、不抛错**，
       // 所以这个免鉴权的探测端点不会因为一个坏词表目录而变慢或 500
       // （真正的读盘发生在第一次需要 tokenizer 时，失败会在那次请求上抛出）。
+      //
+      // F-05 加一栏 `eventDelivery`：投递记账是**旁路**，它的失败被刻意设计成
+      // 不影响审计。一个被刻意设计成"不影响主流程"的失败，若没有任何地方能看见，
+      // 就会永远没人知道——所以它必须在这里有一个读数。
       json(res, 200, {
         auth: TOKEN !== '', db: DB_FILE, port: PORT, runPlane: true,
         tokenizer: tokenizerRegistryStatus(),
+        eventDelivery: {
+          // 能力发现位：老客户端不认识它就不传 `clientId`，退化成匿名订阅者（不共用游标）。
+          subscribers: true,
+          bookkeepingFailures: deliveryBookkeepingFailures,
+          liveConnections: eventClients.size,
+        },
       })
       return
     }
@@ -7653,6 +8250,12 @@ const server = http.createServer((req, res) => {
 /**
  * P1-1 宿主集成：dispose 当前 v2 实例的 SSE 客户端（宿主插件 teardown 时调用；
  * 心跳 interval 随各连接 req close 自清；附件清理 interval 仅独立进程 isMain 时存在且 unref）。
+ *
+ * F-05：连接断开**不再等于**没投出去。`res.end()` 只是把 socket 关掉——
+ * 此刻若有 `delivering` 的行，它们会一直挂到租约过期。这里**不**顺手把它们
+ * 标成 `delivered` 或 `failed`：进程退出时我们同样不知道字节到没到，
+ * 唯一诚实的处置是留给租约回收（→ `unknown`）。
+ * 所以本函数只做"关连接 + 清集合"，并**不**推进任何投递状态。
  */
 export function disposeHub() {
   for (const client of eventClients) client.res.end()
@@ -7680,6 +8283,31 @@ if (isMain) {
   // `unref()`：一个会阻止进程退出的定时器，与一个**关不掉的**后台任务，是同一个东西
   // （测试进程会因此永远不结束——PRT-708 那次"测试卡住"就是这么来的）。
   setInterval(() => { sweepApprovalsLazily() }, Math.max(5000, Math.floor(APPROVAL_TTL_MS / 5))).unref()
+  // F-05：投递租约回收。
+  //
+  // 覆盖的是「取走了一条事件去投，然后那个进程死了/连接断了，再也没有人说话」
+  // 那段时间。**正确性不靠它**——读到投递读数时也可以显式 `?recover=1`；
+  // 这个定时器只保证"不放着不管"。回收把 `delivering` 写成 `unknown`
+  // （终态、不可自动重投），因此**不会**造成重复投递。
+  //
+  // 判据是**租约**而不是进程自述：本仓库的部署形态是两个进程同时打开同一个库，
+  // "启动时把所有 delivering 清掉"会让后启动的进程收掉另一个进程正在投的行。
+  setInterval(() => {
+    try { deliveryStore.recoverExpired() } catch { /* 回收失败不崩主服务，下一轮再试 */ }
+  }, 30000).unref()
+  // F-16：自动化计划的物化 tick。
+  //
+  // 与投递回收同一个形状，但**这一条是功能本身**，不是兜底：
+  // 计划到点之后必须有人去把它变成运行行，而"有没有人打开页面"不能是
+  // 那个条件（那正是"日历只做投影"要禁止的）。
+  //
+  // 30s 一次：比 `validateSpec` 允许的最短间隔（60s）快一倍，
+  // 于是"每分钟一次"的计划不会被 tick 频率拖成 90s 一次。
+  // 更密没有意义——计划的最小粒度就是分钟。
+  //
+  // `unref()`：与上面那条同一个理由，一个会阻止进程退出的定时器会让
+  // 测试进程永远不结束（PRT-708 那次"测试卡住"就是这么来的）。
+  setInterval(() => { automationTick() }, 30000).unref()
 }
 
 export { db, server, handle, registerSkill, reviewSkill, listSkills, grantSkill, revokeSkill, getSkill,

@@ -52,7 +52,7 @@
       ],
       "envReadCount": 14,
       "undeclaredEnvKeys": [],
-      "filesScanned": 35
+      "filesScanned": 38
     },
     {
       "name": "workbench",
@@ -231,7 +231,7 @@
       "protocol": "进程内调度 + 按波次 spawn 五进程（PRT-251）",
       "ports": [],
       "sensitiveEnv": [],
-      "declaredFieldCount": 9,
+      "declaredFieldCount": 11,
       "envReadKeys": [
         "LEGION_CACHE_DIR",
         "LEGION_DATA_DIR",
@@ -240,11 +240,13 @@
         "LEGION_LOG_DIR",
         "LEGION_PRODUCT_CONFIG",
         "LEGION_READINESS_TIMEOUT_MS",
-        "LEGION_WORKSPACE_DIR"
+        "LEGION_WORKSPACE_DIR",
+        "TEAM_HUB_TOKEN",
+        "TEAM_HUB_URL"
       ],
-      "envReadCount": 8,
+      "envReadCount": 10,
       "undeclaredEnvKeys": [],
-      "filesScanned": 64
+      "filesScanned": 65
     },
     {
       "name": "orchestrator",
@@ -277,7 +279,7 @@
       ],
       "envReadCount": 6,
       "undeclaredEnvKeys": [],
-      "filesScanned": 20
+      "filesScanned": 21
     },
     {
       "name": "runtime",

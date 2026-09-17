@@ -1513,6 +1513,62 @@ async function stageTest() {
       files: ['team-hub/run-store-policy.test.mjs'],
       cwd: ROOT,
     },
+    // F-05（MULTI-AGENT-FEATURE-OPTIMIZATION.md §4.1）——当时**没有** PRT 编号的一条缺口，
+    // 因此这一组是它唯一的判据。它分两半，理由不同：
+    //
+    //   前半「运行明细作为可持久化 RunEvent 写入控制面」：
+    //     改动前 `executor.mjs` 的事件循环只留终态与用量/产物，13 种契约事件里
+    //     **11 种读完即弃**。于是"这次用了哪个模型、调了哪些工具"事后无从回答。
+    //     用例分三层（仓储 / executor 接线 / 真 hub HTTP），因为它们失效的方式不同：
+    //     仓储层全绿也可能没有任何调用方，而"有用例"不等于"已生效"。
+    //
+    //   后半「可靠投递状态机」：
+    //     改动前 `broadcastAudit` 丢掉 `res.write` 的返回值、异常被事件循环吞掉，
+    //     读数是"发过了"。用具例锁住三件事——`delivered` 只能由 CAS 从
+    //     `delivering` 得到、`suppressed` 必须带封闭词表里的原因、崩了只能落
+    //     `unknown`（既不许说 `delivered` 谎报可见性，也不许回 `pending` 重投
+    //     一个可能已经到达的事件）。
+    {
+      label: 'run-events（F-05 前半：13 种 RunEvent 明细落控制面，三条出口都带明细）',
+      files: ['team-hub/run-events.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      label: 'event-delivery（F-05 后半：投递六态、CAS 交付、封闭抑制原因、崩溃收敛为 unknown）',
+      files: ['team-hub/event-delivery.test.mjs', 'team-hub/event-delivery-wiring.test.mjs'],
+      cwd: ROOT,
+    },
+    // F-16（MULTI-AGENT-FEATURE-OPTIMIZATION.md §4.4）——自动化计划 / 运行历史。
+    //
+    // spec 那一行是"日历只做投影；新增计划、运行、时区、skip-on-overlap、
+    // 补跑和审批暂停状态"，而它点出的六件事每一件都对应一个**不会报错的失效**：
+    //   · 日历不是投影 → 翻页产生运行行（"上个月跑了 400 次"里 380 次是有人看过）
+    //   · 时区回落本地 → 每天都成功，只不过跑在错的时间上
+    //   · 跳过不记账 → "没被触发"与"被跳过了"同形
+    //   · 补跑默认 all → 停机三天之后一次性重放三天的工作
+    //   · 等待审批合进 running → 这条计划从此永远不再触发（静默停摆）
+    //
+    // 两套用例的失效方式不同，都要有：仓储层（22 例，含**真 Intl** 的时区
+    // 换算与 DST 边界）+ 真 hub HTTP 接线层（7 例，含"投影端点打 50 次
+    // 运行表一行都不多"）。
+    {
+      label: 'automation（F-16：日历只做投影、真时区、skip-on-overlap、补跑三策略、审批暂停）',
+      files: ['team-hub/automation-store.test.mjs', 'team-hub/automation-http.test.mjs'],
+      cwd: ROOT,
+    },
+    // F-17（§4.3）——长会话压缩：**不可变原文 + 版本化摘要 + 引用回原文**。
+    //
+    // 三件事各自的失效方向都是**不可逆**的，所以它们是分开验的：
+    //   · 原文可改写 → "摘要读起来不对"这件事无法被证伪（没有东西可以对）
+    //   · 摘要不版本化 → 一次更差的摘要会盖掉上一个好摘要，且无痕迹
+    //   · 没有回引 → 摘要是一段无法复核的文本，读者只能选择相信它
+    // 加上 baseVersion CAS（不检查时两个进程会各写一份"版本 1"）、
+    // 区间不许重叠（重叠时同一条消息会被算两次）这两条并发判据。
+    {
+      label: 'compaction（F-17：不可变原文、版本化摘要、回引完整性、baseVersion CAS）',
+      files: ['team-hub/compaction-store.test.mjs', 'team-hub/compaction-http.test.mjs'],
+      cwd: ROOT,
+    },
     // PRT-314：多 worker 并发语义。竞争者是真的**操作系统进程**，
     // 不是同一进程里的两条连接——同一事件循环里两条 BEGIN IMMEDIATE
     // 不可能真的同时发出，因此那种测法证明不了「两个进程抢的时候不会都赢」。
@@ -1586,6 +1642,15 @@ async function stageTest() {
     {
       label: 'workspace-wiring（PRT-306：工作区阶段接入 worker，隔离模式可见）',
       files: ['orchestrator/worker/workspace-wiring.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      // PRT-253 续批：`RunRequest` 那三个"猜不出来"的必填字段的来源。
+      // 本套件同时钉住三层：纯装配（`resolveRunInputs`）、模型绑定的解析链
+      // （任务上的岗位 → `(scope, role)` 绑定）、以及**生产入口真的交出了端口**
+      // （源级钉子——那个入口有顶层 await，import 不进来）。
+      label: 'run-inputs（PRT-253 续批：workspaceId/modelProfileRef/workdir 的来源与接线）',
+      files: ['orchestrator/worker/run-inputs.test.mjs'],
       cwd: ROOT,
     },
     {
@@ -3083,6 +3148,22 @@ async function stageTest() {
         // 盘上真的有一份 `.credentials.yaml`、而那份文件在**产品家目录**下
         // 而不是 operator 的真实 home 里。
         'product/launcher/run-credential-materialization.test.mjs',
+        // PRT-509 缺口 B1：ACL 的 **runner 与 owner** 的生产接线。
+        //
+        // 与上面那条是**同一类**缺口，而且它更隐蔽一点：`security/secrets/acl.mjs`
+        // 判据齐全、用例全绿，而 `launcher.mjs` 里 `secretsRun` / `secretsOwner`
+        // 两个入参**从来没有生产调用方给过值**（全仓只有"声明"与"传参"两处）。
+        // 于是生产上恒为 `ACL_NO_RUNNER` + 「不知道文件所有者」——两条都不拦启动，
+        // 于是变成诊断里**永远出现、永远说同一句**的告警。
+        //
+        //   > 一份"判据齐全、28 条用例全绿、而生产里每次都说'没有 runner'"
+        //   > 的访问控制检查，与一份不存在的访问控制检查，在被保护的文件上
+        //   > 是同一个东西——只不过它看起来**像查过了**。
+        //
+        // 本组除了纯函数读数，还包含三条**真 `whoami` + 真 `icacls`** 的用例
+        // （inspect → harden → 独立复验）。前一层全绿也可能 runner 根本不在 PATH 上，
+        // 而那种情况下生产读数与"没接线"完全一样。
+        'product/launcher/secrets-acl-runner.test.mjs',
         // PRT-257 的**另一半**：修复入口（spec `line 275`        // 「禁止自动执行，**提示修复或回滚**」）。
         //
         // `REPAIR_ACTIONS` / `repairPlanFor()` 早在 `runtime/dsh-composition/

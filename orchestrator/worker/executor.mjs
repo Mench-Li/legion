@@ -330,8 +330,13 @@ export async function createProductionExecutor(deps = {}) {
      * 执行一次 Attempt。
      *
      * **提示词就是快照里的正文**，不重新拼装——这是本模块存在的理由。
+     *
+     * `runInputs`（可选）是 worker 用 `resolveRunInputs()` 装出来的运行输入
+     * （`{ok, inputs, missing, sources}`）。**第二个参数而不是并进 lease**：
+     * 租约是控制面给的凭据，而这几个值是**本进程**推导出来的，
+     * 混成一个对象之后，"控制面这次没给"这件事就再也查不出来了。
      */
-    async execute(lease) {
+    async execute(lease, runInputs = null) {
       if (lease === null || typeof lease !== 'object') {
         throw new ExecutorError(EXECUTOR_CODES.BAD_WIRING, 'execute 必须拿到 lease')
       }
@@ -342,7 +347,10 @@ export async function createProductionExecutor(deps = {}) {
         : defaultRequestFor
       let request
       try {
-        request = buildRequest(lease, snapshot)
+        // 第三个参数对调用方自己的 `requestFor` 是**可选**的：
+        // 只接两个参数的实现照旧工作（JS 忽略多余实参），
+        // 而真要用它的实现（默认那条）能拿到。
+        request = buildRequest(lease, snapshot, runInputs)
       } catch (e) {
         // ★ 具名错误**不许**被压成笼统的接线码。
         //
@@ -454,8 +462,43 @@ export async function createProductionExecutor(deps = {}) {
       }
 
       let terminal = null
+      // ── F-05 前半：把这次 Run 的**事件明细**带出去 ──
+      //
+      // 改动前这个循环只留两样东西：终态事件（→ `run_results`）与
+      // 用量/产物（→ 预算账本）。其余 11 种事件**读完即弃**，于是
+      // "这次用了哪个模型、调了哪些工具、说了什么"在事后没有任何地方能回答。
+      //
+      // 这里改成**收集**（不在这里落库）：落库由 hub 侧在事件流结束后
+      // 一次性完成，这样明细的原子性跟着 Attempt 的生命周期走，而不是跟着
+      // 一堆各写各的 HTTP 请求走。
+      //
+      // 三条边界：
+      //   · **有上界**（`MAX_COLLECTED_RUN_EVENTS`）。一个长会话可以产生极多的
+      //     `message.delta`；无界收集会把 worker 的内存交给上游的流长度决定。
+      //     超出时**停止收集并如实标记**（`runEventsTruncated`），不静默丢。
+      //   · **序号缺失不补**。契约给每条事件分配 `seq`；没有 `seq` 的事件仍要收
+      //     （它可能来自一个更老的适配器），但按到达顺序给一个**负序号**，
+      //     与真实序号天然不冲突，读的人一眼能看出这一条不是契约给的号。
+      //   · **这里不判断已知/未知**。`known` 由 hub 侧用契约判定——
+      //     在这里再判一次就是把同一件事写两遍（`isKnownEventType` 的第二个副本）。
+      const collectedEvents = []
+      let eventsTruncated = false
+      let synthesizedSeq = -1
       try {
         for await (const ev of adapter.execute(request)) {
+          if (ev !== null && typeof ev === 'object') {
+            if (collectedEvents.length < MAX_COLLECTED_RUN_EVENTS) {
+              const hasSeq = Number.isSafeInteger(ev.seq) && ev.seq >= 0
+              collectedEvents.push(Object.freeze({
+                seq: hasSeq ? ev.seq : synthesizedSeq--,
+                type: typeof ev.type === 'string' ? ev.type : 'unknown',
+                // 原样带上事件本身；落库方决定怎么存（含体积上界）。
+                event: ev,
+              }))
+            } else {
+              eventsTruncated = true
+            }
+          }
           // 适配器发的是**真实事件类型**（`run.completed` 等），不是抽象的 'terminal'。
           // 用契约里的判定函数而不是在这里再写一遍那四个字符串：
           // 抄一遍就是给"新增终态时忘了一处"留门。
@@ -478,9 +521,16 @@ export async function createProductionExecutor(deps = {}) {
         const settlement = budgetGate === null
           ? null
           : await budgetGate.settle(lease, 'outcome_unknown', terminal)
+        // ★ 抛错路径上**也要把已经收到的事件带出去**：那正是最需要复盘的一次
+        //   （"它在炸之前做了什么"）。丢掉它们会让每一次失败都变成一段空白。
+        //   带在错误对象上而不是返回值里——这条路径没有返回值。
         throw new ExecutorError(EXECUTOR_CODES.RUN_NOT_COMPLETED,
           `执行引擎抛错：${e?.message ?? e}`,
-          { attemptId: lease.attemptId, cause: e, budgetState, settlement })
+          {
+            attemptId: lease.attemptId, cause: e, budgetState, settlement,
+            runEvents: Object.freeze([...collectedEvents]),
+            runEventsTruncated: eventsTruncated,
+          })
       }
 
       const outcome = terminal === null
@@ -519,6 +569,12 @@ export async function createProductionExecutor(deps = {}) {
         budgetState,
         reservation,
         settlement,
+        // F-05 前半：这次 Run 的事件明细（只读、按到达顺序）。
+        // 由 worker 随终态一起上报给 hub，hub 一次性落库（见 `run_events`）。
+        runEvents: Object.freeze([...collectedEvents]),
+        // 「收集被上界截断了」必须是一个**能被读出来的**事实，不能靠
+        // "事件数刚好等于上界"去猜（那正好也是真产生那么多事件时的读数）。
+        runEventsTruncated: eventsTruncated,
       }
       if (cancelRequested !== null) base.cancelRequested = cancelRequested
       // 下限告诫出口坏掉的痕迹：**成功**的 Run 也要能说出"有一条告诫没能被记录"。
@@ -559,6 +615,20 @@ export const UNSUPPLIED_PERMISSIONS = Object.freeze({
   preset: 'legion-attended',
   tools: Object.freeze([]),
 })
+
+/**
+ * F-05 前半：一次 Run 最多收集多少条事件明细。
+ *
+ * 为什么必须有上界：一个长会话可以产生极多的 `message.delta`（逐 token 一条）。
+ * 无界收集等于把 worker 的内存交给**上游流的长度**决定——而那个长度由模型的
+ * 输出决定，不由我们决定。
+ *
+ * 取 5000：足够覆盖一次正常 Run 的全部 `tool.*` / `model.selected` / 终态，
+ * 又远小于"会把进程撑坏"的量级。超出时**停止收集并如实标记**
+ * （`runEventsTruncated: true`），而不是静默丢——一个"明细刚好 5000 条"的读数
+ * 与一个"被截断在 5000 条"的读数必须分得开，否则复盘的人会以为那就是全部。
+ */
+export const MAX_COLLECTED_RUN_EVENTS = 5000
 
 /**
  * ★ PRT-214 第二步：**租约上的权限档位 → `RunRequest.permissions`**。
@@ -833,13 +903,30 @@ export function deriveRunFloorCarrier(request, {
  * **fail closed** 的，一次"没声明输出形状"的执行会在**跑完之后**才发现，
  * 而那时 token 已经花掉了。
  */
-export function defaultRequestFor(lease, snapshot) {
+export function defaultRequestFor(lease, snapshot, runInputs = null) {
   const assoc = snapshot?.associations ?? {}
+  // ── 运行输入（PRT-253 续批）──────────────────────────────────────────────
+  //
+  // `workspaceId` / `modelProfileRef` / `workdir` 是"在哪个工作集里、用哪个模型、
+  // 在哪个目录里跑"，猜不出来。此前它们**只能**来自租约，而认领响应不带这三项，
+  // 于是生产链路上它们恒缺（实测：`missing=["workspaceId","modelProfileRef","workdir"]`）。
+  //
+  // 现在多了一条**显式**的来源：worker 用 `resolveRunInputs()` 从权威来源
+  // （工作区阶段的结果、员工模型绑定、空间 id）装出来的那一份。
+  //
+  // ★ 只在 `ok === true` 时采纳。一个被**拒绝**的联合里 `inputs` 是 `null`——
+  //   而如果这里写成"有 inputs 就用"，那么某天有人改成"拒绝时也带回部分值"，
+  //   这条接线就会安静地把一份**不完整的**输入当成完整的用。
+  //   判据取联合自己的结论，不取"字段看起来有没有值"。
+  const supplied = runInputs !== null && typeof runInputs === 'object' && runInputs.ok === true
+    && runInputs.inputs !== null && typeof runInputs.inputs === 'object'
+    ? runInputs.inputs
+    : null
   const request = {
     runId: lease.runId ?? `run:${lease.attemptId}`,
     attemptId: lease.attemptId,
     idempotencyKey: lease.idempotencyKey ?? `idem:${lease.taskId ?? lease.attemptId}`,
-    workspaceId: lease.workspaceId,
+    workspaceId: lease.workspaceId ?? supplied?.workspaceId,
     goalId: lease.goalId ?? assoc.goalId,
     taskId: lease.taskId ?? assoc.taskId,
     employeeId: lease.employeeId ?? assoc.employeeId,
@@ -847,10 +934,10 @@ export function defaultRequestFor(lease, snapshot) {
     // **这一行是本模块的全部要点**：执行引用的就是那份被冻结、被哈希、
     // 被审计的快照，而不是"执行时再拼一遍"。
     contextSnapshotRef: lease.attemptId,
-    modelProfileRef: lease.modelProfileRef,
+    modelProfileRef: lease.modelProfileRef ?? supplied?.modelProfileRef,
     budget: lease.budget ?? {},
     timeoutMs: lease.timeoutMs ?? 600_000,
-    workdir: lease.workdir,
+    workdir: lease.workdir ?? supplied?.workdir,
     // ★ 三条来源，优先级从高到低（`??` 短路，所以只会算到需要的那一条）：
     //    ① 租约上**已经有一份**显式的 `permissions`——调用方自己造的请求
     //       （`requestFor` 那条路），它比清单更具体，以它为准；
@@ -873,9 +960,24 @@ export function defaultRequestFor(lease, snapshot) {
     if (v === undefined || v === null || v === '') missing.push(field)
   }
   if (missing.length > 0) {
+    // ★ 两种"缺"必须分得开（PRT-253 续批）：
+    //
+    //   · `runInputs` **从来没被给**（或给了但被拒绝）——"没人给"；
+    //   · 给了、也 `ok` 了，可这三项里仍然缺——"给了但不全"。
+    //
+    // 第一版的文案对两种处境说的是同一句"它们既不在 lease 里，也不在
+    // 快照的 associations 里"。接上 `resolveRunInputs` 之后，那句话在
+    // "装配明明拒绝了、只是没人看它的结论"这种情况下是**错的**——
+    // 而排障的人会照着它去查租约，真因却在装配那一步的 `missing` 里。
+    //
+    //   > 一条指向错误位置的报错，与一条什么都不说的报错，
+    //   > 在"下一次要改哪里"这件事上是同一个东西。
+    const why = runInputs !== null && typeof runInputs === 'object' && runInputs.ok !== true
+      ? `运行输入装配**拒绝了**它们（${runInputs.code ?? '无码'}）：${runInputs.message ?? ''}`
+        + `（装配自己列出的缺项：${(runInputs.missing ?? []).join('、') || '（无）'}）`
+      : '它们既不在 lease 里，也不在快照的 associations 里，也没有一份可用的运行输入装配'
     throw new ExecutorError(EXECUTOR_CODES.BAD_WIRING,
-      `这次 Attempt 的 RunRequest 缺 ${missing.length} 个必填字段：${missing.join('、')}。` +
-      '它们既不在 lease 里，也不在快照的 associations 里。' +
+      `这次 Attempt 的 RunRequest 缺 ${missing.length} 个必填字段：${missing.join('、')}。${why}。` +
       '在这里说清，好过让适配器在两跳之外报一句"必填"——那时排障会指向适配器而不是输入',
       { attemptId: lease.attemptId, missing })
   }

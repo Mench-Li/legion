@@ -351,6 +351,7 @@ deny 会被宽松的默认静默盖掉，而他写那条正是为了拦住一样
 | 15 | ★★ **PRT-610 执行面的落账点** | 项目主 + 产品 | `tool_calls` 的**表、读面、就绪证据的产出点**已经接上（本轮），而**写入方仍然是 0**：要接 `recordToolCall`/`markDispatched` 得先定"一次工具调用在哪一层落账"——`tools/pre-execute` 是**判定**点，而 `markDispatched` 必须在**真的派发之前**落库，那个位置比判定点更靠下 | 不接则这笔账永远是空的：表建好了、三条路由能读、就绪判据能回答"在不在记"，而**一条记录都不会有**。★ 这与第 14 条是**同一个决定**（执行面的载荷里今天没有这些字段），不是代码量问题。★★ 另：`release-gate.mjs` 的 `evaluateReadiness` **本身也零生产调用方**，所以"证据有了产出点"之后仍没有人在**发布决策**里读它——本轮只补齐了能被代码单独关闭的那一半 |
 | 16 | ★★ **阶段 9 产品动作的 CLI 面（PRT-903/904/905/908/909、PRT-712、PRT-707）** | 产品 | 这批模块（发布检查清单、隐私说明、保留策略、数据导出、卸载、支持手册、首次运行向导、指标数据源）**全部自带用例、全部 ✅、全部零生产入口**（系统盘点见 §5.3）。要决定的是：**这些"产品级动作"由谁触发**——`legion` 的子命令？一个独立的发布/运维 CLI？还是只作为发布流程里人工跑的一次性脚本？ | 不决定则它们**对用户不存在**。台账自己为 PRT-509 写过这句话：「一个功能没有入口，与这个功能不存在，对用户来说是同一件事」。★ 其中 `metrics-source.mjs` 的台账行已如实写了"还没有界面/CLI 消费者"，另外六个没有写。★★ 另：PRT-801～813 的升级执行链**看起来**也在这个清单里，但它**不是**缺口——`runtime-install.mjs` 的注释写明 Launcher **刻意不 import** 它（进程卫生：Launcher 要在那些依赖起来之前先把进程看好）。**不要**给 Launcher 补这个 import，见 §5.3。它的执行者同样取决于第 1 条（PRT-011 DSH 分发形态） |
 | 17 | ★★★ **PRT-707 的两份实现用两个不同的模型密钥引用名** | 产品 + 项目主 | PRT-707（首次运行向导）在仓库里有**两份实现**：**活的**是 `cli.mjs` 的 `--wizard` 分支（内联，写 `model/api-key`），**死的**是 `first-run.mjs`（636 行 + 一整套用例，算 `legion/model/<profileId>`）。要裁决的是：**模型密钥的引用名用哪一个**——Legion 自己的三段式（`legion/model/<id>`，与 `credential-materializer.mjs` 文件头那句"Legion 的模型引用是 `legion/model/<profileId>`"一致，但 `planDshLookup()` 实测 `addressable:false`），还是运行时物化的那一段（`model/api-key`，端到端通、被 drift 用例钉着）？**或者**：两份实现留哪一份、另一份删掉还是明确废弃？ | ★★ **不要**把 `first-run.mjs` 直接接上去。它写进 hub 档案的 `secretRef` 是 `legion/model/<id>`——**三段**，而 `security/secrets/credential-materializer.mjs` 的 `planDshLookup()` 对三段引用返回 `{addressable:false, space:null}`（在 `refs` 与 `records` 两个键空间里**都没有位置**）。接上它的后果**不报错**：向导报"模型已配置"，而运行时拿不到钥匙——正是该模块文件头点破的那种失效（"文件看起来完整、就是少了最要紧那一把钥匙"）。★ 本轮**没有**替任何一方改代码：两份**各自都自洽**，裁决它需要产品决定。已把它变成读数：`product/launcher/wizard-wiring.test.mjs`（5 例，**今天全绿**，7/7 变异成立）——它红的那天，正是有人接线或对齐的那天 |
+| 18 | ★★★ **F-18 / F-19 的"执行面一半"要谁来调用**（可达性探针新读数，见 §5.4） | 产品 + 项目主 | 从**真实入口**跑 import 图，`runtime/experience/{friction,graph}.mjs`（F-18）与 `runtime/employee/role-pack.mjs`（F-19）**从任何生产入口都到不了**——只被自己的用例驱动。hub 侧**是**接上的（`experience-store`/`role-pack-store` 经 `server.mjs` 可达），缺的是**产出者**：没有任何东西算摩擦分、没有任何东西记图边、没有任何东西建岗位包。要裁决的是：**这三件事由谁在什么时候调用**——执行面在 Run 结束时算（那要定"从哪拿到 validations/attempts"）？还是控制面在写账之前算？★ 同一族：PRT-610 的 `recordToolCall` 写入方（第 15 条）、三道范围表（第 14 条）——**三条都卡在"执行面的载荷里今天没有这些字段"这同一个决定上** | 不决定则这三块能力**对用户不存在**：账能读、读数是干净的、用例全绿，而**一行都不会被写进去**。★ 这三行的 ✅ 依据是"模块 + 自己那套用例"，与台账 §0 自己那条告警（「只有自己的用例驱动的原语一律 🟡」）**口径不一致**。★★ 本轮**没有**改这三行的状态——✅/🟡 的口径由台账的读者（项目方）定，"改状态"与"补证据"是两件事。★★ 另：另有 5 个不可达模块归 `in-flight`（`runtime-host-registrar-row.mjs`、`runtime-contract-server-row.mjs` 及其传递依赖），因为**另一个 agent 进程当轮正持着它们**；其中两行**不在任何清单里**（`PATCH_LAYER_ROWS` 只声明 4 行、`legion-host.patch.yml` 只有 2 行），接线的决定与第 14 条是同一个 |
 
 ---
 
@@ -578,6 +579,105 @@ DEEPSEEK_API_KEY             {"addressable":true,"space":"refs"}      ← 正对
 
 已补上第三种装法，并让那一处变异专门用这种形态——它咬住了，也就证明补漏**有效**。
 
+
+## 5.4 ★★★ 可达性探针：**48 个生产模块从任何入口都到不了**（本轮新增读数）
+
+§5.2 与 §5.3 都是**逐个模块**数的（"它有几个非测试导入者"）。那个读数有一个
+**传递**盲点，本轮实测到了：
+
+> `runtime/packs/store.mjs`（PRT-1003 安装/启用/停用/升级记录，**✅**）
+> 有 **1** 个非测试导入者 ⇒ 看起来是活的。
+> 而那 1 个是 `runtime/packs/builtin/software-delivery.mjs`，它有 **0** 个导入者。
+>
+> **一个「唯一的导入者也是死的」的模块，
+> 与一个「真的有人在用」的模块，在"有几个非测试导入者"上是同一个东西。**
+
+所以本轮换了个问法——**从真实进程入口出发，顺着 import 边走得到它吗**——
+并把它做成一个可复跑的探针：`scripts/prt/reachability.mjs`
+（`--json` 机器读 / `--diff` 与基线比对 / `--record` 重写）。
+门禁 `scripts/prt/reachability.test.mjs`（5 例，已登记进 `run-ci.mjs`），
+基线 `docs/superpowers/prt/prt-reachability-baseline.json`（48 条，逐条带 class 与 reason）。
+
+### 读数
+
+**513 个 `.mjs`（不含用例）里，48 个从任何生产入口都到不了。** 分类：
+
+| class | 条数 | 含义 | 正确动作 |
+|---|---|---|---|
+| `by-design` | 13 | 按设计不被 import：`*/config-schema.mjs`（被 `scan.mjs` 读**源码**）、barrel/公开出口、`*-fixture.mjs`、按路径跑的开发脚本 | 不动 |
+| `deliberate` | 8 | 升级链 `product/upgrade/*`：`runtime-install.mjs` 注释写明 Launcher **刻意不 import**（进程卫生） | **别动**（见 §5.3） |
+| `in-flight` | 5 | 另一个 agent 进程当轮正在接线（工作树未提交） | 等 |
+| **`gap`** | **22** | ★ **台账/对照表说它已交付，而生产里没有路径** | **见 §5 第 14/15/16/17/18 条** |
+
+### ★★ 最要紧的两条新读数（都在 `gap` 里）
+
+**① F-18 与 F-19 的「执行面一半」全都到不了。**
+
+| 模块 | 台账/对照表 | 现实 |
+|---|---|---|
+| `runtime/experience/friction.mjs`（487 行：`collectFriction`/`frictionScore`/`shouldDraft`/`buildDraft`…） | F-18 **✅** | 只被自己的用例驱动 ⇒ **生产里没有任何地方算过一个摩擦分** |
+| `runtime/experience/graph.mjs`（`createGraph`，节点/边全封闭） | F-18 **✅** | 同上：**没有任何地方记过一条边** |
+| `runtime/employee/role-pack.mjs`（756 行：`buildRolePack`/`verifyRolePack`/`diffRolePacks`…） | F-19 **✅** | 只被自己的用例驱动 ⇒ **生产里没有任何地方建出或校验过一个岗位包** |
+
+★ 注意这**不是**说 hub 侧没接：`team-hub/experience-store.mjs` /
+`role-pack-store.mjs` **是**可达的（经 `server.mjs` 的路由）。缺的是**产出者**——
+账和读面都在，而**没有任何东西往里面写**。这与 PRT-610 那条是同一种形状
+（"表建好了、能读，而一条记录都不会有"）。
+
+★ 这也正是台账 §0 自己那条告警的字面含义：「只有自己的用例驱动的原语一律 🟡」。
+**本轮没有改这两行的状态**——✅/🟡 的口径由台账的读者定，见下。
+
+**② 组合行 `runtime-host-registrar-row.mjs` 与 `runtime-contract-server-row.mjs`
+不在任何清单里。** `PATCH_LAYER_ROWS` 只声明 4 行（硬下限 / 审批登记 / pre-execute /
+approval-answerer），`legion-host.patch.yml` 只有 2 行；而这两行**只有用例引用**
+（那些 `*-dsh-process.test.mjs` 自己拼补丁文件把它们挂起来）。
+它们归 `in-flight`——**另一个 agent 进程当轮正持着这两个文件**（未提交），
+所以本轮不把它们记为缺口，只记录读数。
+
+### ★ 两个过程教训（都是"探针自己坏了"）
+
+**① 漏一种入口 = 把正在跑的进程报成死代码。** 第一版只认「进程入口 / `scripts/` /
+`package.json`」，于是：
+
+· `product/orchestrator/worker.mjs` 被报成不可达——而 `product/process-manifest.mjs`
+  里明写着 `entry: {kind:'node-file', path:'product/orchestrator/worker.mjs'}`，
+  **Launcher 真的会把它 spawn 起来**；
+· 全部 `plugins/*-row.mjs` 被报成死代码——它们由 `patch-layer.mjs` 的
+  `module:` / `runtimeModule:` **字符串**加载。
+
+> 一个「漏了一种入口」的探针，
+> 与一个「那个模块真的没人用」的探针，在输出上是同一个东西——
+> 只不过前者会把**正在跑的进程**报成死代码。
+
+（同一类错犯了两次：先只按**仓库相对**解析清单路径，漏了 `./` 开头的；
+再只按**文件相对**解析，漏了仓库相对的。两种约定**同时存在**。）
+
+**② ★★ 把用例算成入口，整个探针当场反转。** 第二版为了"`scripts/` 下的都算入口"
+顺手把 `*.test.mjs` 也加了进去，于是**每一个只被自己用例 import 的模块都变成了可达**——
+恰好就是本探针要查的那一类。读数从 48 掉到 0 而**报告看起来一切正常**。
+
+> 一个「把用例也算成入口」的可达性探针，
+> 与一个「什么都没查」的探针，在输出上是同一个东西。
+
+这两条都由**正对照**挡住，而正对照本身也修过一次：第一版的四条对照全在
+`runtime/`+`team-hub/`，**恰好不需要 `scripts/`**（见 §5.3）。
+现在 ① 里有五条，覆盖四种接线方式 + 两条清单写法。
+
+### 判据与变异
+
+门禁 5 条，**变异验证 10/10 成立**（9 处咬住 + 1 处等价变异如期不红）：
+让 `resolveSpec` 空转 / 不再认清单的仓库相对路径 / 不再认 `module:` 键 /
+★ 把用例算成入口 / 新建一个没人 import 的模块 / 往基线塞不存在的文件 /
+★ 把 `path-scope` 接上（读数用例必须红）/ class 改成词表外的值 / reason 清空 /
+只改注释。
+
+★ 一条**刻意的取舍**：基线**过期（模块变成可达）不判红**，只报警。
+
+> 一个「把别人正在接线的好消息判成回归」的闸门，
+> 与一个「逼着人把好消息 `--record` 确认一遍」的闸门，是同一个东西——
+> 只不过前者会在**共享工作树上天天红**。
+
+新增不可达（新的"到不了"）仍然判红——那才是本探针要挡的方向。
 
 ## 6. 怎么复跑这份对照表里的每一条
 

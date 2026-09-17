@@ -1246,6 +1246,21 @@ async function stageTest() {
     // 阶段 3 评审闸门：热点文件改动节奏。本套件直接锁定「正确写法 vs 错误写法」的差异——
     // `git log -n 40 -- <file>` 会先按路径过滤再截断，恒返回 40，把「该开工」读成「不能开工」。
     { label: 'prt-churn（阶段 3 评审闸门：热点文件改动节奏探针）', files: ['scripts/prt/hot-file-churn.test.mjs'], cwd: ROOT },
+  // ★ PRT-611 续：**可达性**探针 —— "这个模块在生产里到得了吗？"
+  //
+  // 台账与对照表的 ✅ 口径是「有代码落点 + 可复跑的判据」，里面**没有**"到得了"这一格。
+  // 于是"唯一的导入者也是死的"这种传递死亡读不出来：
+  //
+  //   `runtime/packs/store.mjs`（PRT-1003，✅）有 1 个非测试导入者 ⇒ 看起来是活的，
+  //   而那 1 个是 `runtime/packs/builtin/software-delivery.mjs`，它有 0 个导入者。
+  //
+  //   > 一个「唯一的导入者也是死的」的模块，
+  //   > 与一个「真的有人在用」的模块，在"有几个非测试导入者"上是同一个东西。
+  //
+  // 本组从**真实入口**（进程入口 / scripts / package.json / **清单字符串**）出发跑 BFS，
+  // 断言：正对照成立（探针活着）、没有未分类的不可达模块、基线里没有已删除的文件、
+  // 四族 gap 的读数仍在。**基线过期（模块变可达）不判红**——那是好消息，不是回归。
+  { label: 'reachability（PRT-611 续：可达性探针——已交付但生产里到不了）', files: ['scripts/prt/reachability.test.mjs'], cwd: ROOT },
     // 阶段 2：DshRuntimeAdapter。全部用假宿主端口，覆盖真实 DSH 无法稳定复现的故障
     // （run.result 永不结算、abort 无效、畸形结果、事件流中断）。
     { label: 'dsh-adapter（PRT-201~209：DSH 适配器契约、脱敏、看门狗与取消/恢复）', files: ['runtime/adapters/dsh/adapter.test.mjs'], cwd: ROOT },

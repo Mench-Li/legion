@@ -351,6 +351,20 @@ export const SCHEMA = defineSchema({
     'ROLE_PACK_RECORD_MALFORMED', 'ROLE_PACK_SECTIONS_MISMATCH',
     'ROLE_PACK_VERSION_CONFLICT', 'ROLE_PACK_NOT_FOUND',
     'ROLE_PACK_WRITE_FAILED', 'ROLE_PACK_READ_FAILED',
+    // F-18 经验图谱 / 摩擦学习的具名码（team-hub/experience-store.mjs）。
+    //
+    // ★ 这里**没有** `EXPERIENCE_SEQ_CONFLICT`（F-20 的账有）。
+    //   F-20 的 seq 是应用层 `MAX(seq)+1` 算的，两个进程会抢同一个号；
+    //   这一本用 `INTEGER PRIMARY KEY AUTOINCREMENT`——数据库分配，
+    //   由 SQLite 自己串行化，所以"号被抢"不可能发生。
+    //   登记一个永远抛不出的码，与登记一段被注释掉的代码是同一个东西，
+    //   只不过前者让错误码清单看起来更完整。
+    // `EXPERIENCE_DRAFT_ALREADY_SETTLED` —— **409**。它不是"请求写错了"，
+    //   而是"这条草稿已经处置过了"。报 400 会让调用方去改请求体，
+    //   而它该做的是去读那条草稿现在是什么状态。
+    'EXPERIENCE_RECORD_MALFORMED', 'EXPERIENCE_KIND_UNKNOWN',
+    'EXPERIENCE_DRAFT_NOT_FOUND', 'EXPERIENCE_DRAFT_ALREADY_SETTLED',
+    'EXPERIENCE_WRITE_FAILED', 'EXPERIENCE_READ_FAILED',
     // spec §6.7 凭证管理的**写**一半（team-hub/secret-admin.mjs）。
     //
     // 在它之前，`security/secrets/store.mjs` 的 put/rotate/remove 在整个仓库里

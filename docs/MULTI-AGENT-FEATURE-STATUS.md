@@ -140,15 +140,17 @@
 ```text
 + 数据表: automation_runs / automation_schedules / compaction_messages /
           compaction_summaries / event_deliveries / event_subscribers /
-          run_events / pack_install_facts / role_packs
+          run_events / pack_install_facts / role_packs / experience_records
 + 路由:   GET/POST /api/automation/*（6）、/api/compaction/*（5）、
           GET /api/event-delivery、GET /api/runtime/run-events、
           GET /api/usage/{totals,rollup}（2）、
           GET/POST /api/packs/facts、GET /api/packs/{account,export}（4）、
-          GET/POST /api/role-packs、GET /api/role-packs/export（3）
+          GET/POST /api/role-packs、GET /api/role-packs/export（3）、
+          GET/POST /api/experience/records、GET /api/experience/{account,export}、
+          POST /api/experience/drafts/（6）
 ~ 源文件已变更：team-hub/server.mjs、team-hub/run-store.mjs、
                 team-hub/automation-store.mjs、team-hub/pack-facts.mjs、
-                team-hub/role-pack-store.mjs
+                team-hub/role-pack-store.mjs、team-hub/experience-store.mjs
 ```
 
 `team-hub/automation-store.mjs` 与 `team-hub/usage-rollup.mjs` 的列变化
@@ -167,7 +169,10 @@
 | F-15 | 用量/费用与预算 | 🟡 | `team-hub/budget-ledger.mjs`、`team-hub/usage-rollup.mjs`、`runtime/contracts/price-table.mjs` | PRT-503/510/511 已落地；**成本刻已采**（$0.045086 实测）；本轮补上**五维度汇总**（`usage-rollup.test.mjs` 12 例 + `usage-rollup-http.test.mjs` 6 例真 HTTP）。`peak-resource` 仍缺（PRT-009 🟡，阻塞于 PRT-011 平台裁决） |
 | F-16 | 自动化计划 | ✅ | `team-hub/automation-store.mjs`、`server.mjs`（6 条路由 + 30s tick） | `automation-store.test.mjs`（27 例）+ `automation-http.test.mjs`（9 例真 HTTP）。★ 本轮补上 `payload` 任务模板与 `bindTask`，`automationTick` 从 `wired:false` 变为 **`wired:true`**：物化出的运行会按计划模板建出一张**可领取**的任务卡 |
 | F-17 | 长会话压缩 | ✅ | `team-hub/compaction-store.mjs`、`server.mjs`（5 条路由） | `compaction-store.test.mjs`（14 例）+ `compaction-http.test.mjs`（5 例真 HTTP）。★ 刻意**不调用模型**：收的是已算好的摘要文本 |
-| F-18 | 经验图谱/摩擦学习 | 🟡 | `plugins/src/experience.ts`、`experienceVotes.ts`、`experienceRecall.ts` | 摩擦打分/草稿/投票/晋升门限**都已实现且有用例**，但落在**旧的 `plugins/` 路径**上，未纳入 Product Runtime。§8 给的落点是「Context、Compaction、Knowledge」——三者都已就绪，缺的是把这一族搬过来 |
+| F-18 | 经验图谱/摩擦学习 | 🟡→✅ | `runtime/experience/{friction,graph}.mjs`、`team-hub/experience-store.mjs`、`server.mjs`（5 条路由） | 本轮落地。★ 与旧 `plugins/src/experience.ts` 最要紧的分歧：旧实现从**评论散文**里数信号（正则匹配"打回"/"退回："/"将军验收"），于是有人改了措辞分数就变——而"因为改词变成 0"与"这段时间确实没有摩擦"在报表上是同一个 0。新实现**只从结构化字段取值**（拒绝 = `run_validations.decision`，重做 = 同一任务的第 2 次 attempt），并有一条**结构级**用例断言模块源码里不出现正则字面量。★ **缺失的输入是"不知道"、不是 0**：缺任何一维 ⇒ `complete:false`、`score` **抛**；要部分分必须显式 `allowPartial`，且返回的分数自报 `partial:true`——把缺失当 0 求和会得到一个**看起来完全正常**的低分。★ **草稿不是知识**：`draft → promoted | discarded`，两个终点都要人 + **封闭词表**的理由（丢弃也要写理由，因为"这条教训被谁按什么理由扔了"正是它消失的方式），没有自动晋升路径。★ 关系图**只记不推断**：边不隐式创建节点、必须署名，**撤销是追加记录不是删除**（"这条边存在过、被谁按什么理由收了"永远能答），遍历带 visited（这张图天然有环，没 visited 会在真实图上挂死）。旧 `plugins/src/experience*` 仍在，但不再是这一能力的落点 |
+| F-18 缺口① | 摩擦分无法被证伪：信号来自评论散文的正则匹配，措辞一改分数就变 | `friction.test.mjs` 23 例（含"换一段无关评论分数必须一样"与结构级"不许出现正则"），8 处守卫已**变异验证** |
+| F-18 缺口② | 关系图**不存在**：没有任务/文件/技能/错误的关系结构，也没有任何地方记"这条边是谁加的" | `graph.test.mjs` 15 例（含带环图遍历不挂死、撤销是追加），6 处守卫已**变异验证** |
+| F-18 缺口③ | 草稿**算完即丢**（纯内存），且落盘面会把"现在的状态"存成第二份真相 | `experience-store.test.mjs` 23 例 + `experience-http.test.mjs` 14 例（含 409 走真网络、`seq` 用 `lastInsertRowid`），10 处守卫已**变异验证** |
 | F-19 | Employee / Role Pack | ✅ | `runtime/employee/role-pack.mjs`、`team-hub/role-pack-store.mjs`、`server.mjs`（3 条路由） | 本轮落地。★ **七类版本一个不少**（prompt / skills / tools / permissions / model / connectors / budget），缺一类**不给默认空值**——`connectors: []`（显式"就是不用"）合法，**没写这一节**非法：一个"缺连接器就当没有连接器"的包与一个"作者忘了写、而它静默地没有连接器"的包在运行结果上是同一个东西。★ **版本号是标签、内容哈希才是身份**：承载内容的四类必须带 `hash`，而对账把两种漂移**分开报**——版本变了（`VERSION_DRIFT`，显眼）与版本没变而内容变了（`CONTENT_DRIFT`，阴险到按版本号比对会报"一致"）。★ 岗位包属于 **agent 平面**（`EMPLOYEE_PRESET_CONTRACT.mayCarryEnforcement:false`），强制面字段在**每一层嵌套对象**上都被拒，连接器一节只许出现引用、出现凭证字段单独成码。★ 冻结**改不动**：主键 `(scope, role_pack_id, version)` 让多版本同时存在（塞进就地更新的 `employee_manifests` 会让第二次修改覆盖第一次的答案），同版本同内容幂等、同版本不同内容 **409** |
 | F-20 | Pack Manager | 🟡→✅ | `runtime/packs/{manifest,authority,store,compiled-plan}.mjs`、`team-hub/pack-facts.mjs` | 校验面**齐全**：签名三级（`builtin/signed/unsigned`，无验证器即 `unsigned`——"没法验"不是"验过了"）、依赖与权限（`authority.mjs`）、Runtime Contract、预检结论**必填**。★ **本轮关掉三处缺**（此前本表误记为 ✅）：① **`rollback` 已实现**——账上多一类**自己的**记录（不与 upgrade 混），四条拒绝各有具名码；② **账可持久化**——`snapshot()` / `createPackStore({history})`，坏账**整本拒绝**（跳过坏记录会让"这几个包没装过"与"这几条记录坏了"变成同一个读数）；③ **team-hub 保存安装事实**——`pack_install_facts` 表 + 4 条路由，`GET /api/packs/account` 的形状**原样**能喂回 `createPackStore`，`GET /api/packs/export` 给出可提交进 Git 的审阅文本（不含包内容/凭证） |
 
@@ -209,7 +214,7 @@ node scripts/ci/run-ci.mjs
 
 # 只跑本轮新增的套
 node scripts/ci/run-ci.mjs --only test   # 然后在输出里找：
-#   run-events / event-delivery / automation / compaction / usage-rollup / pack-facts / role-pack
+#   run-events / event-delivery / automation / compaction / usage-rollup / pack-facts / role-pack / experience
 
 # 单独复跑
 node --test team-hub/run-events.test.mjs
@@ -219,6 +224,7 @@ node --test team-hub/compaction-store.test.mjs team-hub/compaction-http.test.mjs
 node --test team-hub/usage-rollup.test.mjs team-hub/usage-rollup-http.test.mjs
 node --test team-hub/pack-facts.test.mjs team-hub/pack-facts-http.test.mjs
 node --test runtime/employee/role-pack.test.mjs team-hub/role-pack-store.test.mjs team-hub/role-pack-http.test.mjs
+node --test runtime/experience/friction.test.mjs runtime/experience/graph.test.mjs team-hub/experience-store.test.mjs team-hub/experience-http.test.mjs
 node --test runtime/packs/store.test.mjs
 node --test product/secrets.test.mjs
 node --test product/launcher/secrets-acl-runner.test.mjs

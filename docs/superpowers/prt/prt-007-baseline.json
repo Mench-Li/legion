@@ -2,7 +2,7 @@
   "$comment": "PRT-007 旧系统平台契约基线。由 scripts/prt/baseline-snapshot.mjs 生成；不含时间戳以便逐字节 diff。漂移由 sources 的 sha256 归因。",
   "version": 1,
   "sources": {
-    "team-hub/server.mjs": "fce2e9a3d7be869afab1600b2ce4f0dbaf1ffef8a3dc2e5a6c0840b46c067360",
+    "team-hub/server.mjs": "9d051633fac96a5a03ced4cbcaa215e63395815253cd2817a6a9518f0d3c0281",
     "team-hub/permission-engine.mjs": "d7295dc90aca0056790f332f50b47afa6847cf08ace6cabb677f0f8ab9329fc6",
     "team-hub/run-store.mjs": "c4cea87ef5c0216460c3cd6a12fbf18696fca5d23738aba9d4ac597f265cce92",
     "team-hub/model-store.mjs": "1ab1a5b548740ca5f6810de6fe25658e79aea9d95fd6382ccff5facf6613d779",
@@ -17,7 +17,8 @@
     "team-hub/automation-store.mjs": "dcc9bd53268eb776c8f96631e14a6d9669a3d044a356be1f89ee5c9289b74320",
     "team-hub/compaction-store.mjs": "91a2ca37efd7d114e380026a131383ca81abb15871e4d2e6b11cf8b65351b37c",
     "team-hub/pack-facts.mjs": "c0d2254e615a80613417c01d59aeb701e578720fa0c67fe15ff9435efa916d69",
-    "team-hub/role-pack-store.mjs": "685f776d55ec84d56b876b5207a5d913e6dc226cd371f3fc332d4f4941c5209f"
+    "team-hub/role-pack-store.mjs": "685f776d55ec84d56b876b5207a5d913e6dc226cd371f3fc332d4f4941c5209f",
+    "team-hub/experience-store.mjs": "6b10c0b844a02fa4bd60e2acdaefca2193d385a4c294e0655800d63c2509bdd0"
   },
   "httpRoutes": [
     "DELETE /api/model-bindings/",
@@ -58,6 +59,9 @@
     "GET /api/exec",
     "GET /api/exec/queue",
     "GET /api/exec/requests",
+    "GET /api/experience/account",
+    "GET /api/experience/export",
+    "GET /api/experience/records",
     "GET /api/goal",
     "GET /api/inbox",
     "GET /api/members",
@@ -138,6 +142,8 @@
     "POST /api/employee-manifests",
     "POST /api/exec",
     "POST /api/exec/request",
+    "POST /api/experience/drafts/",
+    "POST /api/experience/records",
     "POST /api/goal",
     "POST /api/goal/context",
     "POST /api/goal/slices",
@@ -215,6 +221,7 @@
     "event_subscribers",
     "exec_requests",
     "exec_state",
+    "experience_records",
     "goal",
     "members",
     "messages",

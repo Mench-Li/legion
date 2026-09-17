@@ -142,6 +142,15 @@ const SCHEMA_SOURCES = [
   //   而 `version` 进主键这件事**没有别的地方能核**：少了它，
   //   "冻结"与"只保留最近一版"在 schema 上长得一模一样。
   'rolePackStore',
+  // F-18（§4.4）：`experience_records`（经验图谱 + 摩擦草稿的**只追加**记录流）。
+  //
+  // ★ 进基线的判据是"这张表**没有** UPDATE 路径"这件事本身：
+  //   "图现在长什么样"与"这条草稿现在是什么状态"都是从记录流**推导**出来的。
+  //   一旦有人给它加上一段就地更新，推导就变成了第二份真相，
+  //   而它与记录流不一致时**没有任何东西能判定谁对**。
+  //   这条性质在 schema 上只体现为"只有一张表、没有状态列"——
+  //   正是那种"改坏了也看不出来"的契约，所以必须钉住。
+  'experienceStore',
 ]
 
 // 这些模块也一并纳入 sources 哈希：它们变了，基线里的表清单就可能过期。
@@ -165,6 +174,7 @@ SOURCES.automationStore = join(ROOT, 'team-hub', 'automation-store.mjs')
 SOURCES.compactionStore = join(ROOT, 'team-hub', 'compaction-store.mjs')
 SOURCES.packFacts = join(ROOT, 'team-hub', 'pack-facts.mjs')
 SOURCES.rolePackStore = join(ROOT, 'team-hub', 'role-pack-store.mjs')
+SOURCES.experienceStore = join(ROOT, 'team-hub', 'experience-store.mjs')
 
 /**
  * 采集 schema 的目录。

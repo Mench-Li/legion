@@ -1631,6 +1631,27 @@ async function stageTest() {
       ],
       cwd: ROOT,
     },
+    // F-18 经验图谱 / 摩擦学习。
+    //
+    // ★ 这一组里最要紧的是**执行面与旧实现的分歧**：
+    //   `plugins/src/experience.ts` 从评论**散文**里数信号（正则匹配"打回"、
+    //   "退回："这类中文短语）。它有用例、也能跑，但它无法被证伪——
+    //   有人改了措辞，分数就变了，而"因为改词变成 0"与"确实没有摩擦"是同一个 0。
+    //   新架构里这些信号本来就是结构化的（拒绝是 `run_validations.decision`，
+    //   重做是同一任务的第 2 次 attempt），所以 `friction.test.mjs` 里有一条
+    //   **结构级**用例断言模块源码中不出现正则字面量。
+    // 另一条主线是"缺失的输入是**不知道**、不是 0"——把缺失当 0 求和会得到
+    // 一个看起来完全正常的低分，而"数据没到"与"没有摩擦"于是同形。
+    {
+      label: 'experience（F-18：摩擦只从结构化字段算、草稿不是知识、图只记不推断）',
+      files: [
+        'runtime/experience/friction.test.mjs',
+        'runtime/experience/graph.test.mjs',
+        'team-hub/experience-store.test.mjs',
+        'team-hub/experience-http.test.mjs',
+      ],
+      cwd: ROOT,
+    },
     // PRT-314：多 worker 并发语义。竞争者是真的**操作系统进程**，
     // 不是同一进程里的两条连接——同一事件循环里两条 BEGIN IMMEDIATE
     // 不可能真的同时发出，因此那种测法证明不了「两个进程抢的时候不会都赢」。

@@ -3500,6 +3500,89 @@
 
 ---
 
+## 2026-09-17　PRT-509 那两个「可动的」缺口关掉了：默认分支真的被走过一遍，真 DSH 进程真的读到了
+
+PRT-509（DSH 凭证文件的**只读**读桥）落地时留了三个缺口。本批把其中**两个可动的**各自用一条
+不撒谎的读数关上；第三个（win32 `0600` 不可证）**原样留着**，理由不变。
+
+> 顶部「最近一次全量基线」那一行（2026-09-15）**早于 2026-09-16 的合并**，它下面那段
+> 「5700 → 5712」的对比也随之过期。本批**没有**改写那一行——那是全局基线账，不是本批的交付物；
+> 本次实测数记在下面「验证」一节。
+
+▍缺口 ②：默认分支从「写在模块里」变成「真的有人走过」
+
+`productRunCredentialOpener()` 的默认分支是 `await import('../secrets.mjs')` +
+`openProductSecrets(...)`，而此前**三条**用例**全部**注入 `openSecrets`——那条 `await import`
+从来没有被求值过。**实测**：把那两行换成一句 `throw`，**19 条仍然全绿，只有新加的那条红**。
+
+> 一个"默认实现写在模块里"的分支，与一个"真的有人走过"的分支，在注入式用例上是同一个读数
+> ——只不过前者的用例是绿的，而那条 `await import` 从来没有被任何一次运行求值过。
+
+新用例**不注入任何东西**：真动态 import、真 `openProductSecrets`、真 `createProductSecretStore`
+（真 DPAPI + 真 `icacls`）、真 `openRunCredentials()`；值先按**真实写入路径**写进 Legion 自己的
+受保护库，再从默认分支读回。反向对照：库里没有的引用必须 `held() === false`（否则它没在读那个库）。
+
+▍缺口 ③：判据从「我们那个类读得到」挪到「真进程读到了」
+
+原有那条 ★★★★★ 是**进程内**的（手工 `new Context()` + DSH 的 `LocalCredentialProvider` 类）。
+它排除了"我们自己再解析一遍 YAML"，但**绕过了两样真东西**：
+
+① DSH 的 profile 装载——`--patch` 覆盖层必须在 base bundle 层与 profile 层**之后**按 id 命中
+`credentials` 那一行；没命中时 DSH 是 **warn-and-skip**，而"文件写好了、覆盖层也写好了"
+在那种情况下**逐字成立**。② `$DSH_HOME` 与启动顺序（提供方是在树挂载期装载并首次读文件的）。
+
+新增 `product/launcher/run-credential-dsh-process.test.mjs`：真 `apps/cli` 入口、真 profile、
+真 `--patch` 覆盖层、真 `dsh-credentials-local`，读数由**挂进那棵树**的探针插件写回
+（`product/launcher/fixtures/prt509-credentials-probe.mjs`，`file://` 行 + `config`，
+与 `tests/p13-fixture/control-plugin.mjs` 同一形态）。四条判据各自堵一条假绿：
+
+- `configured === true` —— "进程起来了"不等于"读到了"；
+- **`source === 'file'`** —— 值可能是**继承的环境变量**里来的，那种情况下提供方照样答得出来，
+  而文件根本没被读过；
+- `valueSha256` 相等 —— "读到了某个字符串"不等于"读到了材料化时那一把"；
+- `otherResolved === false` —— 反向对照：Legion 的引用名**不是** DSH 的寻址名。
+
+**反向对照实测**：把覆盖层换成空补丁表 `[]`，真进程**仍然**起来、探针**仍然**挂上，而读数是
+`{configured:false, source:null, valueSha256:null}`——此时 DSH 读的是它自己那份不存在的
+`$DSH_HOME/.credentials.yaml`。这条反例证明用例真的在验「覆盖层有没有被这棵树吃进去」，
+而不是在验「DSH 能不能起来」。
+
+▍两处取舍
+
+- **探针的参数走组合行的 `config`，不走进程环境。** 起初用了三个 `PRT509_PROBE_*` 环境变量，
+  `scan --check` 立刻要求把它们登记进 `product/config-schema.mjs`——那等于把测试的引线登记进了
+  **产品的** env schema，而那份 schema 的用途是"这个产品认哪些环境变量"，不是"今天哪个夹具需要
+  几个旋钮"。改成 `apply(ctx, config)`（与 `@dsh-external/dsh-scrum-worker` 同一形态）之后，
+  探针零 env 读取，schema 一个字都没动。
+- **探针写的是 sha256、长度与 `source`，不是值。** 一条把密钥写进日志的探针，会在下一次有人贴
+  日志时变成一次泄漏；而它要回答的问题用 sha256 就答完了。整条用例的值也不入断言。
+
+▍仍未关的那一条（措辞与理由不变）
+
+`win32 0600 不可证`：`security/secrets/credential-materializer.test.mjs` 里那条**显式 skip**
+并写明理由（Windows 上 Node 的 chmod 只影响只读位、`stat().mode` 不反映 POSIX 权限位；
+而机制那一半——chmod 在 rename **之前**——在所有平台上都数得出来）。
+**够不到就说够不到**，不把它算进"已关的三条"里。
+
+▍另一个发现：这个检出里有一个**正在写代码**的 worker
+
+收尾时发现 `scrum/daemon-software.json` 是 `mode: worker / role: soldier-auto / paused: false`，
+而 `team-hub/event-delivery.mjs` 与 `team-hub/event-delivery.test.mjs` 在**两分钟内**被新建并
+再次改写（当时无人在手工编辑），`team-hub/server.mjs` 也随之变成「已修改」。
+也就是说主检出里的 WIP **是一个移动靶**：任何"当时的 WIP 清单"都会在几分钟内过期。
+本批的改动**不在**主检出上落地——它们在 `codex/prt-509-closure` 上，主检出已还原回 `main`。
+
+▍验证
+
+- `product/launcher/run-credential-materialization.test.mjs`：**20 例全绿**（新增 1 例）
+- `product/launcher/run-credential-dsh-process.test.mjs`：**1 例全绿、0 skip**（真起宿主）
+- 十道门禁 **10/10 exit=0**（含 `scan --check`：新 fixture 无 env 读取点）
+- 全量 `run-ci` **9 阶段全 PASS**：`test` **204 套件 / 6248 用例 / 0 fail**，747681ms，exit 0
+  （其中 `product-launcher` **352 例**、`run-credential-dsh-process` **1 例**、
+  `套件清单完备` **305 个 `*.test.mjs` 全部有归属**）
+
+---
+
 ## 2026-09-16　两条线合并：main 的流水线修复与这条线的 PRT 工作第一次见面
 
 **这一节是 `codex/prt-integration` 合并时补记的**，专门记 **main 那一侧**发生过、而这条线

@@ -21,8 +21,10 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync } from 'node:fs'
 import * as realFs from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
+import { probeDpapi } from '../../security/secrets/dpapi.mjs'
+import { createProductSecretStore } from '../../security/secrets/store.mjs'
 import { resolveLayout } from '../paths.mjs'
 import {
   DEFAULT_RUNTIME_CREDENTIAL_REFS,
@@ -45,6 +47,19 @@ const WIRING_SOURCE = new URL('./run-credential-materialization.mjs', import.met
 function tempRoot(tag) {
   return mkdtempSync(join(tmpdir(), `legion-prt509-${tag}-`))
 }
+
+/**
+ * 真实受保护库那条用例用的假密钥。**它绝不允许出现在断言或日志里**（本文件纪律：
+ * 值不入断言）——只用来验"写进去的那一把"与"读回来的那一把"是同一把。
+ */
+const REAL_PATH_SECRET = 'sk-DO-NOT-LEAK-real-default-path-0123456789'
+
+// 真实 DPAPI 在非 Windows 或受限环境下不可用；不可用时**显式跳过**，
+// 而不是让"默认分支没走到"这件事被一次绿盖住。
+const dpapiProbe = probeDpapi()
+const dpapiSkip = dpapiProbe.available
+  ? false
+  : `本机不可用真实 DPAPI：${dpapiProbe.reason}（${dpapiProbe.hint}）`
 
 function layoutIn(root) {
   const { layout } = resolveLayout({
@@ -377,6 +392,45 @@ test('生产默认的句柄工厂：密钥库打不开 ⇒ 抛**具名码**（�
     })
 })
 
+
+test('★★★ 生产默认的句柄工厂：**不注入任何东西**，真的走一遍 `openProductSecrets`', { skip: dpapiSkip }, async () => {
+  // 上面那三条把 `openSecrets` 注入掉了。它们守的是**接线**（哪条来源先答、
+  // 库里没有时具名拒绝、库打不开时只带码），但注入本身让另一件事**从来没有被执行**：
+  // `productRunCredentialOpener` 自己的默认分支——
+  //
+  //     const mod = await import('../secrets.mjs')
+  //     return mod.openProductSecrets({ layout, requireProtected, dshCredentialsFile })
+  //
+  //   > 一个"默认实现写在模块里"的分支，与一个"真的有人走过"的分支，
+  //   > 在注入式用例上是同一个读数——只不过前者的用例是绿的，
+  //   > 而那条 `await import` 从来没有被任何一次运行求值过。
+  //
+  // 本文件头的第 ① 条纪律（"接线在"要能被证明）在这个分支上原本是**空缺**的：
+  // 注入式的三条全绿，而删掉那个默认分支、让它直接抛错，它们也全绿。
+  //
+  // 所以这一条**不传** `openSecrets`、也不传 `openRunCredentialsImpl`：真动态 import、
+  // 真 `openProductSecrets`、真 `createProductSecretStore`（真 DPAPI）、真 `openRunCredentials`。
+  // 值先按**真实写入路径**写进 Legion 自己的受保护库，再从默认分支读回来。
+  const root = tempRoot('default-real')
+  try {
+    const layout = layoutIn(root)
+    // 受保护库的父目录要存在（真实实现不会替调用方建目录）。
+    mkdirSync(dirname(layout.secretsFile), { recursive: true })
+    const store = createProductSecretStore({ file: layout.secretsFile })
+    await store.put(RUNTIME_MODEL_KEY_REF, REAL_PATH_SECRET, { purpose: 'model-credential' })
+
+    const opener = productRunCredentialOpener({ layout })
+    const handle = await opener({ refs: [RUNTIME_MODEL_KEY_REF], runId: 'launch-real-default' })
+
+    assert.equal(handle.held(RUNTIME_MODEL_KEY_REF), true,
+      '默认分支没能把库里那条引用开出来——这条路径此前没有任何用例走过')
+    // 反向对照：默认分支**不是**"对任何名字都开出一把钥匙"。
+    assert.equal(handle.held('model/not-in-the-store'), false,
+      '默认分支对库里没有的引用也说 held —— 那它没在读那个库')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
 
 test('漂移：`RUNTIME_MODEL_KEY_REF` 必须与向导写进密钥库的那个引用名**逐字相等**', () => {
   // 两份手写的常量会漂移，而漂移的表现是"向导存了、运行时拿不到"——

@@ -2419,6 +2419,25 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-509 缺口 ③ 的**真进程**那一半：真 `apps/cli` 入口 + 真 profile +
+      // 真 `--patch` 覆盖层 + 真 `dsh-credentials-local`，起点是 Legion 材料化的
+      // 那份 `.credentials.yaml`，读数由挂进那棵树的探针插件写回。
+      //
+      // ★ 它与 `run-credential-materialization.test.mjs` 里那条 ★★★★★ 是**两件事**，
+      //   缺一不可：那条是**进程内**手工 `new Context()` 去问 DSH 的提供方类，
+      //   它绕过了 profile 装载与启动顺序——而"我们指过去了"与"它读到了"之间的
+      //   那一截恰好就在那里（覆盖层按 id 没命中时 DSH 是 warn-and-skip，
+      //   而"文件写好了、覆盖层也写好了"在那种情况下逐字成立）。
+      //   判据里有 `source === 'file'`：值从继承的环境变量里来也算绿的话，
+      //   这条用例就答不出"文件到底有没有被读"。
+      //
+      // 未设 `DSH_CHECKOUT` 或缺 CLI 构建产物时**整条 skip**（并说明原因）；
+      // 起一个真宿主约 25s，超时 120s。
+      label: 'run-credential-dsh-process（PRT-509 缺口 ③：真 DSH 进程启动期从材料化文件读到值）',
+      files: ['product/launcher/run-credential-dsh-process.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-252：Workbench 模型配置的产品化校验。三个**很容易被合并成一个**的区别：
       // 「校验不了」≠「配置错了」、「一个档案都没有」≠「未知供应商」、「合法」≠「能跑」。
       label: 'model-config（PRT-252：校验不了 ≠ 配置错了 / 合法 ≠ 能跑 / 配置错误要在配置时说出来）',

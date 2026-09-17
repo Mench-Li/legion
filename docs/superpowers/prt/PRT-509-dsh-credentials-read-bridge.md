@@ -474,16 +474,90 @@ node scripts/ci/dsh-boundary.mjs --check
 
 ### 已知的待办（交给集成者）
 
-`scripts/ci/run-ci.mjs` 的 `stageTest().suites` 里**没有**
-`security/secrets/dsh-credentials.test.mjs`，而 stageTest 末尾有一条
-「套件清单完备性」检查会因此报 FAIL。本批**刻意没有改** `run-ci.mjs`
-（另一个 agent 正在并发编辑它，由操作员在集成时登记）。
-登记方式与既有条目一致：
+**已登记（2026-09-17）**：`security/secrets/dsh-credentials.test.mjs` 现在在
+`run-ci.mjs` 的 `stageTest().suites` 里（label 为
+`dsh-credentials（PRT-509 A′：只读子集读取器 + 与 DSH 真解析器的交叉核对）`），
+`套件清单完备` 现在报「**305 个 `*.test.mjs` 全部有归属**」。
+原先"刻意没改 `run-ci.mjs`"的那个理由（另一个 agent 正在并发编辑它）已经不成立——
+那一批已经合进 `main`。
 
-```js
-{
-  label: 'dsh-credentials-read-bridge（PRT-509 路线 A′：只读子集读取器 + 与 DSH 真解析器的交叉核对）',
-  files: ['security/secrets/dsh-credentials.test.mjs'],
-  cwd: ROOT,
-},
+---
+
+## 11. 缺口 ② 与 ③ 的收口（2026-09-17）
+
+本批把 PRT-509 留下的三个缺口里**两个可动的**关上；第三个（win32 `0600`）原样留着。
+
+### 11.1 缺口 ②：默认分支从「写在模块里」变成「真的有人走过」
+
+`product/launcher/run-credential-materialization.mjs` 里 `productRunCredentialOpener()`
+的默认分支（`await import('../secrets.mjs')` + `openProductSecrets(...)`）此前**没有**
+任何用例走过：三条注入式用例**全部**传 `openSecrets`。
+
+> 一个"默认实现写在模块里"的分支，与一个"真的有人走过"的分支，
+> 在注入式用例上是同一个读数——只不过前者的用例是绿的，
+> 而那条 `await import` 从来没有被任何一次运行求值过。
+
+**实测**：把那两行换成一句 `throw`，**19 条仍然全绿、只有新加的那条红**。
+
+新用例（`run-credential-materialization.test.mjs` 里 ★★★ 那条）**不注入任何东西**：
+真动态 import、真 `openProductSecrets`、真 `createProductSecretStore`（真 DPAPI + 真 `icacls`）、
+真 `openRunCredentials()`。值先按**真实写入路径**写进 Legion 自己的受保护库，再从默认分支读回；
+反向对照是"库里没有的引用必须 `held() === false`"（否则它没在读那个库）。
+真实 DPAPI 不可用时**显式 skip**，不把"没走到"伪装成绿。
+
+### 11.2 缺口 ③：判据从「我们那个类读得到」挪到「真进程读到了」
+
+原 ★★★★★ 那条是**进程内**的：手工 `new Context()` 再造 DSH 的 `LocalCredentialProvider`。
+它排除了"我们自己再解析一遍 YAML"，但**绕过了两样真东西**：
+
+1. **DSH 的 profile 装载。** `--patch` 覆盖层必须在 base bundle 层与 profile 层**之后**
+   按 id 命中 `credentials` 那一行；没命中时 DSH 是 **warn-and-skip**，
+   而"文件写好了、覆盖层也写好了"在那种情况下**逐字成立**。
+2. **`$DSH_HOME` 与启动顺序。** 提供方是在树挂载期装载并首次读文件的。
+
+新增 `product/launcher/run-credential-dsh-process.test.mjs`：真 `apps/cli` 入口、真 profile、
+真 `--patch` 覆盖层、真 `dsh-credentials-local`，读数由**挂进那棵树**的探针
+（`product/launcher/fixtures/prt509-credentials-probe.mjs`）写回。四条判据：
+
+| 判据 | 它堵的那条假绿 |
+| --- | --- |
+| `configured === true` | "进程起来了"不等于"读到了" |
+| **`source === 'file'`** | 值可能是**继承的环境变量**里来的——那种情况下提供方照样答得出来，而文件根本没被读过 |
+| `valueSha256` 相等 | "读到了某个字符串"不等于"读到了材料化时那一把" |
+| `otherResolved === false` | 反向对照：Legion 的引用名**不是** DSH 的寻址名 |
+
+**反向对照实测**：把覆盖层换成空补丁表 `[]`，真进程**仍然**起来、探针**仍然**挂上，
+而读数是 `{configured:false, source:null, valueSha256:null}`——因为此时 DSH 读的是它自己那份
+不存在的 `$DSH_HOME/.credentials.yaml`。这条反例证明用例验的是"覆盖层有没有被这棵树吃进去"，
+而不是"DSH 能不能起来"。
+
+探针写的是 **sha256、长度与 `source`，不是值**：一条把密钥写进日志的探针，会在下一次有人贴
+日志时变成一次泄漏；而它要回答的问题用 sha256 就答完了。整条用例的值也不入断言。
+探针的参数走**组合行的 `config`**（`apply(ctx, config)`）而不是进程环境——否则那把测试的引线
+要登记进 `product/config-schema.mjs`，而那份 schema 的用途是"这个产品认哪些环境变量"，
+不是"今天哪个夹具需要几个旋钮"。
+
+### 11.3 仍未关的那一条（措辞与理由不变）
+
+`win32 0600 不可证`：`security/secrets/credential-materializer.test.mjs` 里那条**显式 skip**
+并写明理由（Windows 上 Node 的 chmod 只影响只读位、`stat().mode` 不反映 POSIX 权限位），
+而机制那一半——chmod 在 rename **之前**——在所有平台上都数得出来。
+**够不到就说够不到**，不把它算进"已关的三条"里。
+
+### 11.4 怎么自己跑一遍
+
+```bash
+# 缺口 ② 的默认分支（要真实 DPAPI；非 Windows/受限环境会显式 skip）
+node --test product/launcher/run-credential-materialization.test.mjs
+
+# 缺口 ③ 的真进程（要 DSH_CHECKOUT 且有构建好的 CLI；起一个真宿主约 7–25s）
+DSH_CHECKOUT=/path/to/deepseek-harness node --test product/launcher/run-credential-dsh-process.test.mjs
 ```
+
+两条都已登记进 `scripts/ci/run-ci.mjs` 的 `stageTest().suites`
+（前者在 `product-launcher` 那一条的多文件列表里）。
+
+> **与 §8.7 的关系**：那里说"**没有端到端的产品级走查**"（没跑 `legion --wizard`、
+> 没让 `$DSH_HOME/.credentials.yaml` 回答一次真实请求）。§11.2 把其中**一半**补上了——
+> 现在有一个**真 DSH 进程**在启动期真的读到了材料化的那份文件；
+> 但"经向导配置 + 回答一次真实模型请求"仍然**没有**验过，§8.7 那句话依然成立。

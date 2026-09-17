@@ -1,0 +1,343 @@
+{
+  "$comment": "GF-001 黄金流程真实执行证据。由 scripts/prt/gf001-evidence.mjs 从 team-hub 只读提取；验收四项由 gf001-run.mjs 在结果仓库上独立重算。不含 token/费用/峰值资源——旧路径不记录这些量。",
+  "version": 1,
+  "flow": {
+    "id": "GF-001",
+    "task": "GF-001-T1",
+    "title": "为 gf001-cli 新增 greet 子命令"
+  },
+  "scope": "gf001",
+  "goal": {
+    "id": "G-mtwxx7an-2",
+    "objective": "为 gf001-cli 新增 greet 子命令。给 gf001-cli 增加 `greet <name>` 子命令，输出 `Hello, <name>!`；补充单元测试与 README。",
+    "status": "done",
+    "createdAt": "2026-09-11T12:36:31.919Z",
+    "endedAt": "2026-09-11T12:43:13.895Z",
+    "docsDir": "docs/G-mtwxx7an-2"
+  },
+  "pipeline": {
+    "stages": [
+      "planner",
+      "implementer",
+      "reviewer"
+    ],
+    "handoffs": 3
+  },
+  "attempts": {
+    "count": 3,
+    "items": [
+      {
+        "id": "G-mtwt8vg7-1",
+        "status": "canceled",
+        "createdAt": "2026-09-11T10:25:38.359Z",
+        "endedAt": "2026-09-11T12:32:18.010Z"
+      },
+      {
+        "id": "G-mtwxs5no-1",
+        "status": "canceled",
+        "createdAt": "2026-09-11T12:32:36.516Z",
+        "endedAt": "2026-09-11T12:36:26.707Z"
+      },
+      {
+        "id": "G-mtwxx7an-2",
+        "status": "done",
+        "createdAt": "2026-09-11T12:36:31.919Z",
+        "endedAt": "2026-09-11T12:43:13.895Z"
+      }
+    ],
+    "succeededOn": 3
+  },
+  "tasks": [
+    {
+      "id": "T-144",
+      "role": "planner",
+      "status": "done",
+      "states": [
+        "in_progress",
+        "advanced"
+      ],
+      "stateMarks": [
+        {
+          "state": "in_progress",
+          "action": "claim",
+          "at": "2026-09-11T12:36:44.476Z",
+          "member": "soldier-auto"
+        },
+        {
+          "state": "advanced",
+          "action": "advance",
+          "at": "2026-09-11T12:40:24.624Z",
+          "member": "planner"
+        }
+      ],
+      "latencyMs": 220148,
+      "auditRows": 9,
+      "unmappedActions": [],
+      "malformedDetails": 0
+    },
+    {
+      "id": "T-145",
+      "role": "implementer",
+      "status": "done",
+      "states": [
+        "in_progress",
+        "advanced"
+      ],
+      "stateMarks": [
+        {
+          "state": "in_progress",
+          "action": "claim",
+          "at": "2026-09-11T12:40:29.697Z",
+          "member": "soldier-auto"
+        },
+        {
+          "state": "advanced",
+          "action": "advance",
+          "at": "2026-09-11T12:41:23.927Z",
+          "member": "implementer"
+        }
+      ],
+      "latencyMs": 54230,
+      "auditRows": 8,
+      "unmappedActions": [],
+      "malformedDetails": 0
+    },
+    {
+      "id": "T-146",
+      "role": "reviewer",
+      "status": "done",
+      "states": [
+        "in_progress",
+        "advanced"
+      ],
+      "stateMarks": [
+        {
+          "state": "in_progress",
+          "action": "claim",
+          "at": "2026-09-11T12:41:29.888Z",
+          "member": "soldier-auto"
+        },
+        {
+          "state": "advanced",
+          "action": "advance",
+          "at": "2026-09-11T12:43:13.890Z",
+          "member": "reviewer"
+        }
+      ],
+      "latencyMs": 104002,
+      "auditRows": 9,
+      "unmappedActions": [],
+      "malformedDetails": 0
+    }
+  ],
+  "fixtures": {
+    "repo": "D:/project/DSH/gf001-scratch",
+    "hash": "2ad47fc49233d62a1ee586ea5da0a2fb422883606c8cd2e9f6cf5335251d38ea"
+  },
+  "acceptance": {
+    "filesChanged": [
+      "README.md",
+      "docs/G-mtwxs5no-1/PLAN.md",
+      "docs/G-mtwxx7an-2/TASK_BREAKDOWN.md",
+      "docs/G-mtwxx7an-2/TEST_REPORT.md",
+      "docs/experience/drafts/T-146.md",
+      "docs/goals/G-mtwxx7an-2.md",
+      "docs/review/T-146-REVIEW.md",
+      "src/cli.mjs",
+      "test/cli.test.mjs"
+    ],
+    "testCommand": "npm test",
+    "testPassed": true,
+    "readmeUpdated": true,
+    "detail": {
+      "added": [
+        "docs/G-mtwxs5no-1/PLAN.md",
+        "docs/G-mtwxx7an-2/TASK_BREAKDOWN.md",
+        "docs/G-mtwxx7an-2/TEST_REPORT.md",
+        "docs/experience/drafts/T-146.md",
+        "docs/goals/G-mtwxx7an-2.md",
+        "docs/review/T-146-REVIEW.md"
+      ],
+      "modified": [
+        "README.md",
+        "src/cli.mjs",
+        "test/cli.test.mjs"
+      ],
+      "unchanged": [
+        "package.json"
+      ]
+    },
+    "accepted": true
+  },
+  "acceptanceError": null,
+  "sequenceComparison": [
+    {
+      "id": "T-144",
+      "role": "planner",
+      "observed": [
+        "in_progress",
+        "done"
+      ],
+      "specSequence": [
+        "todo",
+        "in_progress",
+        "in_review",
+        "done"
+      ],
+      "matchedPrefixLength": 0,
+      "fullyMatches": false,
+      "missingStates": [
+        "todo",
+        "in_review"
+      ]
+    },
+    {
+      "id": "T-145",
+      "role": "implementer",
+      "observed": [
+        "in_progress",
+        "done"
+      ],
+      "specSequence": [
+        "todo",
+        "in_progress",
+        "in_review",
+        "done"
+      ],
+      "matchedPrefixLength": 0,
+      "fullyMatches": false,
+      "missingStates": [
+        "todo",
+        "in_review"
+      ]
+    },
+    {
+      "id": "T-146",
+      "role": "reviewer",
+      "observed": [
+        "in_progress",
+        "done"
+      ],
+      "specSequence": [
+        "todo",
+        "in_progress",
+        "in_review",
+        "done"
+      ],
+      "matchedPrefixLength": 0,
+      "fullyMatches": false,
+      "missingStates": [
+        "todo",
+        "in_review"
+      ]
+    }
+  ],
+  "findings": {
+    "tasksMissingInReview": 3,
+    "inReviewNote": "黄金流程三段任务**均未经过 in_review**：流水线在产物登记后自动 advance 到下一阶段，不经过人工验收闸门。§14.2 的预期序列把它当作必经状态，与本次实测不符——对拍时必须先确认新路径走的是「自动推进」还是「人工闸门」，否则会对拍出一个二者都不走的过程。"
+  },
+  "measurementCaveats": {
+    "todoNotObservable": "per-task 审计无 create 行（链任务由 goal 发布批量创建）→ 序列起点为 in_progress；“缺 todo”是审计口径限制，不是任务真的跳过了 todo。",
+    "inReviewGenuinelyAbsent": "三段任务的全部审计行中没有任何 transition→in_review；这是流水线自动 advance 的行为事实。"
+  },
+  "humanInterventions": {
+    "total": 1,
+    "perTaskMean": 0.33,
+    "byAction": {
+      "goal:publish": 1
+    },
+    "actions": [
+      {
+        "ts": "2026-09-11T12:36:31.921Z",
+        "action": "goal:publish",
+        "taskId": "G-mtwxx7an-2"
+      }
+    ],
+    "systemAttributed": {
+      "total": 1,
+      "byAction": {
+        "goal:done": 1
+      },
+      "note": "以 member=general 记账的系统动作（自动收尾），不计入人工介入。照搬「member=general 即人工」会把全自动流程算成有人介入。"
+    },
+    "acceptanceActions": 0,
+    "note": "黄金链三段由流水线自动 advance 推进，因此没有人工验收动作；人工只做了发布目标这一步。"
+  },
+  "measurements": {
+    "end-to-end-latency": {
+      "value": 401976,
+      "unit": "ms",
+      "note": "目标创建（goal:publish）→ 链末任务 done 的墙钟耗时。",
+      "samples": 1,
+      "caveat": "n=1：PRT-009 要求取 3 次中位数以抵消冷启动，本次只有一次真实执行，未取中位数。"
+    },
+    "old-path-task-state-sequence": {
+      "value": [
+        {
+          "role": "planner",
+          "taskId": "T-144",
+          "sequence": [
+            "in_progress",
+            "done"
+          ]
+        },
+        {
+          "role": "implementer",
+          "taskId": "T-145",
+          "sequence": [
+            "in_progress",
+            "done"
+          ]
+        },
+        {
+          "role": "reviewer",
+          "taskId": "T-146",
+          "sequence": [
+            "in_progress",
+            "done"
+          ]
+        }
+      ],
+      "note": "逐任务实测（advanced 归一为 done）；spec 预期序列一并给出以便对照。",
+      "expected": [
+        "todo",
+        "in_progress",
+        "in_review",
+        "done"
+      ],
+      "matchesSpec": false
+    },
+    "human-intervention-rate": {
+      "value": {
+        "total": 1,
+        "perTaskMean": 0.33
+      },
+      "unit": "次 / 任务",
+      "note": "member=general 且非系统代记动作（已排除自动收尾 goal:done），范围为本次黄金执行的链任务与目标。",
+      "caveat": "单次运行的比率不足以描述分布；此处只作为「这一次实际介入了几次」的实测记录。"
+    }
+  },
+  "notRecorded": [
+    {
+      "key": "token-usage",
+      "why": "team-hub schema 无 token 列；worker 用量未落库"
+    },
+    {
+      "key": "estimated-cost",
+      "why": "依赖 token-usage；PRICING.asOf 仍为 UNSET"
+    },
+    {
+      "key": "peak-resource",
+      "why": "旧路径不采样内存/CPU；需在目标平台单独采集"
+    }
+  ],
+  "provenance": {
+    "source": "D:/project/DSH/legion/team-hub/team.db",
+    "readOnly": true,
+    "collectedBy": "scripts/prt/gf001-evidence.mjs",
+    "note": "审计行按 taskId 归属提取（不按 audit.scope 过滤，避免漏行）。",
+    "resultRepo": "D:/project/DSH/gf001-scratch",
+    "resultRepoExists": true,
+    "acceptanceRecomputed": true
+  }
+}

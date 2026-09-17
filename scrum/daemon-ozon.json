@@ -1,0 +1,62 @@
+{
+  "mode": "worker",
+  "role": "soldier-auto",
+  "provider": "spawn",
+  "maxWorkers": 1,
+  "isolate": true,
+  "intervalMs": 20000,
+  "workerTimeoutMs": 1500000,
+  "staleMinutes": 40,
+  "taskTtlMinutes": 0,
+  "scope": "ozon",
+  "paused": false,
+  "pipeline": {
+    "name": "ozon",
+    "source": "hub",
+    "version": "776121ce269a21d2",
+    "stages": [
+      "soldier-research",
+      "soldier-selection",
+      "soldier-compliance",
+      "soldier-profit",
+      "soldier-sourcing",
+      "soldier-listing",
+      "soldier-ops-store",
+      "soldier-market",
+      "soldier-ops-social",
+      "soldier-ad-creative",
+      "soldier-ad-delivery"
+    ]
+  },
+  "inbox": 0,
+  "lastSweepAt": "2026-09-17T02:43:43.923Z",
+  "uptimeMs": 71720439,
+  "model": {
+    "provider": "custom-ds",
+    "model": "deepseek-v4-flash-openai"
+  },
+  "repo": {
+    "root": "D:/project/DSH/shop",
+    "binding": "space:ozon",
+    "localDir": "D:\\project\\DSH\\shop",
+    "remoteUrl": "git@github.com:Mench-Li/shop.git"
+  },
+  "chat": {
+    "lastReplyAt": null,
+    "lastFailAt": null,
+    "lastFailReason": ""
+  },
+  "foreman": {
+    "ok": true,
+    "down": []
+  },
+  "rulesDoctor": {
+    "ok": true,
+    "truncated": false,
+    "removedSources": [],
+    "total": 0,
+    "present": 0,
+    "missing": [],
+    "checkedAt": "2026-09-17T02:43:43.923Z"
+  }
+}

@@ -6,7 +6,9 @@
 > **结论先说**：优化清单里**可以在代码侧单独完成的部分已经做完了**；
 > 剩下的每一条都指向一个**代码之外的决定**（产品裁决、另一台机器、真实用户、排期日期），
 > 或指向另一个 agent 进程**当轮正持着未提交改动**的文件。
-> 详见 §5 的 **16** 条人工介入清单。
+> ★ **续批（§10）把这件事收得更紧了**：第 13/14/15/18 条其实是**一条**决定
+> （执行面需要的数据进不进 `RunRequest`），而这个问题**已经有两个跑通的答案**。
+> 详见 §5 的 **19** 条人工介入清单与 §10.5。
 >
 > **本报告随每次续批更新**（§1 的提交表与 §3 的缺口清单是活的）。
 
@@ -26,6 +28,7 @@
 | `7ad5c8b` | **PRT-604/605/606** 三道范围检查在生产里从未跑过 → 变成读数 | **5 例** + **5 处变异** |
 | `9a56e77` | 本报告初版 | — |
 | `1b0ade3` | **PRT-610 续批** 建表 + 三条只读路由 + 就绪证据的**产出点** | **41 例**（31+10）+ **10 处变异** |
+| `f291f9c` | **§10 续批**：PRT-214 缺口② 授权身份按 Run 生效 / PRT-251 续 旧库接管 + `ports.runtime` 到达 DSH / PRT-253 续 `LEGION_WORKSPACE_DIR` | 28 文件 **+4046/−215**；`run-identity` 20 例、`legacy-data-adoption` 15 例；**变异 ⑪–⑰ 7/7、㉑–㉖ 6/6、⑱–⑳ 3/3** |
 
 新增生产/测试文件 **18 个**（`git diff --name-status`）：
 
@@ -249,6 +252,7 @@ DEEPSEEK_API_KEY             {"addressable":true,"space":"refs"}      ← 正对
 | **16** | ★★ **阶段 9 产品动作的 CLI 面**（PRT-903/904/905/908/909、712、707） | 产品 | 这批模块**全部自带用例、全部 ✅、全部零生产入口**。不决定则它们**对用户不存在**（台账自己的话："一个功能没有入口，与这个功能不存在，对用户来说是同一件事"）。★ 见 §3 阶段 B′——**PRT-801～813 的升级链不在这一条里**，它刻意不接 |
 | **17** | ★★★ **PRT-707 的两份实现用两个不同的模型密钥引用名** | 产品 + 项目主 | **活的**：`cli.mjs --wizard`（内联，`model/api-key`，端到端通）；**死的**：`first-run.mjs`（636 行，`legion/model/<profileId>`，`planDshLookup()` 实测 `addressable:false`——在两个键空间里都没有位置）。要裁决：引用名用哪一个？还是留一份、废弃另一份？★★ **不要**把 `first-run.mjs` 直接接上去：它写进 hub 档案的 `secretRef` 运行时**既不读、也读不到**，而后果**不报错**（向导报"模型已配置"）。★ 本轮没替任何一方改代码——两份**各自都自洽**——而是把它变成读数：`wizard-wiring.test.mjs` 5 例**今天全绿**、7/7 变异成立 |
 | **18** | ★★★ **F-18 / F-19 的"执行面一半"由谁调用**（可达性探针新读数，见 §9） | 产品 + 项目主 | 从**真实入口**跑 import 图，`runtime/experience/{friction,graph}.mjs`（F-18）与 `runtime/employee/role-pack.mjs`（F-19）**从任何生产入口都到不了**——只被自己的用例驱动。hub 侧**是**接上的（`experience-store`/`role-pack-store` 经 `server.mjs` 可达），缺的是**产出者**：没有东西算摩擦分、没有东西记图边、没有东西建岗位包。要裁决：这三件事**由谁在什么时候调用**？★ 与第 14 条（范围表）、第 15 条（PRT-610 写入方）**是同一个决定**——三条都卡在"执行面的载荷里今天没有这些字段"。★ 另：本轮**没有**改这三行的 ✅/🟡（口径由项目方定），只把落差记成读数 |
+| **19** | ★★★ **第 13/14/15/18 条其实是**一条**决定**（续批新读数，见 §5.5） | 项目主 + 产品（**只需回答一个问题**） | 三条机器读数把它钉死了：① **`runtime` 进程故意没有 `TEAM_HUB_TOKEN`**（`product/process-manifest.mjs:203-215`——只有 `TEAM_HUB_URL` 这个地址；漏声明会被 `buildChildEnv()` 直接抛，所以这是刻意的）；② **`RunRequest.permissions` 只有 `{preset, tools, deniedTools?}`**，没有范围表、没有 host surface（`runtime/contracts/run.mjs:158-181`）；③ **`runtime/packs/*` 零生产入口**（`store`/`compiled-plan`/`authority` 的唯一 import 者是 `builtin/software-delivery.mjs`，而它**零 import 者**；`createPackStore` 生产调用点 **0 处**，hub 的 `/api/packs/account` 把账交出去而**没人接住**）。**要回答的只有一个问题**：把执行面需要的数据（连接器声明 / 范围表 / 落账端点 / 摩擦与岗位包的输入）放进 `RunRequest`，**还是**给执行面开一个控制面入口（注入 `TEAM_HUB_TOKEN`）？★★ 前者**已经有先例，而且跑通了两遍**（PRT-214 缺口①`enforcementFloor`、缺口②`enforcementIdentity`：专属线上字段 → 按 Run 安装 → 对象身份配对 → 可 `dispose()` → 装不上具名拒绝），照抄是纯代码工作量；后者会让 spec §2「Runtime 不看业务状态」那条不可突破边界消失，而且执行面一旦有 token，"读声明"与"改状态"只差一次调用。★★ 本轮**没有**擅自补接线：`RunRequest` 里没有范围表字段，凭空造一份（"读根=写根=`workdir`"）正是 PRT-253 §3 禁止的"发明默认值"，且方向是**放行**——而"反正它更严"这个辩护**不成立**，收成 `workdir` 会同时拒掉合法的越目录读，表现成"工具莫名其妙失败" |
 
 ## 6. 诚实边界（本轮**没有**证明的东西）
 
@@ -298,7 +302,9 @@ node scripts/config/scan.mjs --check
 **"任务全部完成"这句话需要限定，而限定本身就是本轮最重要的交付之一。**
 
 - 清单里**可以在代码侧单独关闭**的：已关闭（F-18 / F-19 / F-21 落地；F-16/F-17/F-20 等前序批次已在）。
-- 清单里**代码侧关不掉的**：**16 条**，全部指向人、机器、时间或真实用户（§5）。
+- 清单里**代码侧关不掉的**：**19 条**，全部指向人、机器、时间或真实用户（§5）。
+  ★ 其中第 **19** 条是续批新加的：它把第 13/14/15/18 条**收成一条**决定，
+  所以"19 条"里**真正要回答的问题比条数少**——详见 §10.5。
 - 以及**三条不在清单里**的真实缺口，都是同一族（"模块全绿、而生产里没接"）：
   1. 三道范围检查在生产里从未跑过（§3.4）；
   2. `tool_calls` 从来没有被建起来过、就绪判据没有产出者（§3 阶段 B 第 4 条）；
@@ -430,3 +436,187 @@ by-design 13 / deliberate 8 / in-flight 5 / **gap 22**。
   契约基线与拓扑清单**零漂移**；`--only test` 里本组 6/6 PASS。
   ★ 全量 `--only test` 仍只在 daemon 的 `config` 组红
   （`actual: ['RUNTIME_HOST_REGISTRAR_IDENTITY_UNREADABLE']` 等未登记字面量），与本轮无关。
+
+---
+
+## 10 续批（2026-09-17 下午）：把上一批的收尾做完，并回答"为什么剩下的不是代码问题"
+
+> 本节是**续批**记录。上一批把三条缺口的代码写完了，却把工作树留在
+> **未提交**状态（另一个 agent 进程当轮持着文件）。续批做三件事：
+> ① 把那一批**验证后提交**；② 修掉它留下的一处**门禁红**，
+> 并且在这一步咬出**一个真缺陷**；③ 把人工介入清单里
+> 第 13/14/15/18 条**收成一条**读得出的架构事实。
+
+### 10.1 提交 `f291f9c`（三条缺口一起落库）
+
+上一批的文件在工作树里、**没有提交**。续批先做核对，再提交：
+
+| 步骤 | 读数 |
+|---|---|
+| 六套相关用例在提交前跑过 | `run-identity` **20/20**、`legacy-data-adoption` + `runtime-contract-wiring` **26/26**、registrar + run-inputs **78/78** |
+| 端到端探针 | `scratch/probe-identity-loop.mjs`：租约的空间名一路走到授权哈希，两个空间得到**两个不同的 `canonicalHash`** |
+| 破坏性验证 | ⑪–⑰ **5/6**（⑩ 那条见 §10.3）、㉑–㉖ **6/6**、⑱–⑳ **3/3** |
+
+提交 `f291f9c`：**28 个文件、+4046 / −215**。
+
+★ **提交前的一处必要性处理**：`scrum/daemon-ozon.json` 是守护进程**每次心跳都在写**的
+文件（`lastSweepAt` / `uptimeMs`），把它卷进这次提交等于让每一个提交都带上
+"提交那一刻这个守护跑了多久"。已从暂存区移出，**没进**这个提交。
+
+### 10.2 ★★★ 破坏性验证 harness 被中途杀掉，留下一个**已变异的靶文件**
+
+`scratch/mutate.mjs` 的 ①–⑨ 那一跑被外部超时**在 ⑩ 处杀掉**
+（实测：`MUTATE_ONLY=⑩` 单独跑也会超时——它要起真子进程，一条就超过 120s 窗口）。
+而 `mutate.mjs` 的还原写在"跑完之后"，于是 `product/process-manifest.mjs`
+**停在"已变异"状态**：`LEGION_WORKSPACE_DIR` 那一行声明**整个消失**。
+
+紧接着的批量 `git add -A` 把那个状态**收进了索引**——也就是说，
+`f291f9c` 的**第一版暂存内容**里，PRT-253 续批五那个修复是**缺失**的，
+而我自己在几个工具调用之前刚把它当成"已交付"读过一遍。
+
+抓到它的方式是**继续跑那条变异**：⑩ 报 `锚点没找到，跳过`。
+
+> 一条"锚点没找到"的破坏性验证，读起来像"这条性质没被守住"；
+> 而实情是**靶子被人拿走了**——只不过拿走它的是上一条被中断的验证。
+> 而 `git status` 对这两种处境**完全沉默**：它只知道有个文件变了。
+
+**处置**：按文档 §10 复原那一行，`git checkout` 复核，再单独复跑一次确认
+（见 §10.3）。★ 过程教训记在这里而不是只写在提交信息里，因为
+**这是这套 harness 的一个真实失效模式**：`mutate.mjs` 的还原是
+"跑完之后"而不是"无论如何"，所以**任何**中断（超时、杀进程、Ctrl+C）
+都会留下一个改过的源码文件，而它下一步会被 `git add -A` 收走。
+
+### 10.3 复核 ⑩（那条被中断的变异）——**在隔离 worktree 里跑**
+
+不敢再在共享工作树上动那个文件（另一个 agent 进程正在改它），
+所以用 `git worktree add --detach _verify-f291f9c f291f9c` 开了一棵
+**只含这次提交**的树来跑：
+
+```bash
+node scratch/verify-commit-f291f9c.mjs     # 基线 → 变异 → 还原，全程在隔离树里
+```
+
+读数：
+
+| 阶段 | 结果 |
+|---|---|
+| 基线（未变异） | `tests 1 / pass 1 / fail 0` —— ①b′ 绿 |
+| 变异 ⑩（删掉 `'LEGION_WORKSPACE_DIR',` 声明） | **✖ ①b′ 变红**（`Launcher 把 LEGION_WORKSPACE_DIR 交给 worker`） |
+| 还原 | `restored identical = true`（逐字节） |
+
+★ 所以 ⑩ **咬住**，而它的期望靶子就是 ①b′——与 `mutate.mjs` 里写的 `expect` 一致。
+（`mutate.mjs` 自己的汇总把这一条读成"没咬住"，只是因为它的判据锚在
+`ℹ fail N` 上，而 `--test-name-pattern` 把输出收成一条用例后没有那一行；
+这不影响"①b′ 确实红了"这个读数。）
+
+### 10.4 修门禁：21 条字面量未登记，而其中一条**不该被登记**
+
+上一批没有登记新字面量，所以 `scan --check` 是红的，`config` 组两条用例跟着红。
+登记完之后（`runtime/` 11 条 + `product/` 10 条）门禁转绿。
+
+★ 但**第一版登记里有一条是错的**，而且错的方式值得单独写下来：
+
+`product/launcher/launcher.mjs` 当时写着
+
+```js
+code: `LEGACY_ADOPTION_${String(adoptionReading?.state ?? 'RUNNING').toUpperCase()}`
+```
+
+而那个回调是在 `runLegacyAdoption()` **运行期间**触发的——
+`adoptionReading` 在那一刻**必然是 `undefined`**（它正是被这次调用的返回值赋值的）。
+于是逐项那几行**每一行**都叫 `LEGACY_ADOPTION_RUNNING`：一项接管成功、一项失败，
+码完全一样。
+
+门禁报的是"`RUNNING` 未登记"。我照着报错把它登记成**一个"进度态"**，
+还在注释里替它写了一段理由（"它表达的是'还没有状态'"）。
+
+**这是把门禁从"发现了一个错误码"变成了"给这个错误盖章"**：
+
+> 登记一条字面量之前必须先问**它是不是对的**；
+> 一个"照着报错把缺陷登记成有意的设计"的处置，
+> 与一个"根本没有这道门禁"的处置，在文件里的读数上是同一个东西——
+> 只不过前者把那个缺陷变成了**有文档背书的**缺陷。
+
+**改正**：`RUNNING` 不登记，换成 `LEGACY_ADOPTION_ITEM`，并把上面这段历史
+连同"为什么"写进 `product/config-schema.mjs` 的注释里（§10.5 的读数来自
+另一个 agent 进程的同一批修复——它把那个恒为 `RUNNING` 的码换成了
+不带总体状态的 `LEGACY_ADOPTION_ITEM`）。
+
+> ★ 顺带一条本轮的诚实边界：**上面这个修正是与另一个 agent 进程协同的结果**。
+> 它改了 `launcher.mjs`（我**没有**碰那个文件），我改的是 `config-schema.mjs`
+> 里的登记与注释。所以 `LEGACY_ADOPTION_ITEM` 这一条**在当前工作树上是绿的，
+> 但它依赖尚未提交的那份改动**——这也是我**没有**单独把 `config-schema.mjs`
+> 提交出去的原因：那样提交出来的快照里，这个字面量在源码中**不存在**，
+> 而 `scan` 自己的判据写着「多一条是编造，少一条是漏登」。
+
+### 10.5 ★★★ 新读数：第 13/14/15/18 条是**一条**决定（详见 STATUS §5.5）
+
+三条机器读数：
+
+| # | 读数 | 坐标 |
+|---|---|---|
+| ① | `runtime` 进程的 `envNames` **故意没有 `TEAM_HUB_TOKEN`**（只有 `TEAM_HUB_URL` 这个地址） | `product/process-manifest.mjs:203-215` |
+| ② | `RunRequest.permissions` 只有 `{preset, tools, deniedTools?}`——没有范围表、没有 host surface | `runtime/contracts/run.mjs:158-181` |
+| ③ | `runtime/packs/*` 四个模块**零生产入口**；`createPackStore` 生产调用点 **0 处** | 可达性探针 §5.4 + `grep` |
+
+读数 ① 是最要紧的一条，因为它把"漏了一个环境变量"与"刻意的边界"分开了：
+`buildChildEnv()` 对**未声明**的键直接抛（PRT-253 续批四实测过），
+所以 `TEAM_HUB_TOKEN` 不在 `runtime` 的清单里**不是漏写**——
+它是「Runtime 不看业务状态」这条 spec §2 不可突破边界的**实现方式**。
+
+于是这四处（F-21 判定面、三道范围表、PRT-610 落账点、F-18/F-19 执行面一半）
+**不是四个问题**，而是同一个问题的四个面：
+**执行面需要的数据进不进 `RunRequest`。** 而这个问题**已经有两个跑通的答案**：
+PRT-214 缺口① 的 `enforcementFloor` 与缺口② 的 `enforcementIdentity`——
+专属线上字段 → 按 Run 安装 → 对象身份配对 → 可 `dispose()` → 装不上具名拒绝。
+
+★ 本轮**没有**替它们接线，理由见 STATUS §5.5 末段（凭空造范围表是
+PRT-253 §3 明禁的"发明默认值"，且方向是放行）。
+
+### 10.6 本轮判据（可复跑）
+
+```bash
+node --test runtime/dsh-composition/run-identity.test.mjs                    # 20/20
+node --test product/launcher/legacy-data-adoption.test.mjs \
+            product/launcher/runtime-contract-wiring.test.mjs                # 26/26
+node --test product/launcher/runtime-manifest.test.mjs                       # 9/9
+node --test scripts/config/config.test.mjs                                   # 52/52（修前 50/52）
+node scratch/probe-identity-loop.mjs                                         # 两空间两哈希
+node scripts/config/scan.mjs --check                                         # PASS（1129 条）
+node scripts/prt/reachability.mjs --diff                                     # 与基线一致（47 条）
+node scripts/prt/progress-check.mjs ; node scripts/prt/spec-progress.mjs --check
+```
+
+CI（隔离 worktree 内全量 `run-ci.mjs`，提交 `f291f9c`）：
+
+| 阶段 | 结果 |
+|---|---|
+| syntax / env / boundary / deps / build / smoke / stage / doc | **PASS**（`env` 由红转绿：修前 `4 项未在 schema 中处理`，修后 PASS） |
+| test | 只剩两处，**都只在隔离 worktree 里红、主树全绿**（见下） |
+
+★ 那两处**不是回归**，是"隔离 worktree 缺构建产物"：
+`product-launcher` 的 `runtime-manifest` 用例读 `releases/*/MANIFEST.json`
+（主树 8 份、worktree 只有本次 `stage` 刚生成的那 1 份）；
+`p13-host-injection` 要 `team-hub/lib/index.js`（**未跟踪的构建产物**，
+主树有、worktree 没有）。主树单独复跑：`runtime-manifest` **9/9**、
+`p13` 两套件 **39/39**。
+
+> 一个"干净检出里必红"的用例，与一个"真的坏了"的用例，
+> 在 CI 输出里是同一行 `FAIL`——只不过前者的修法是
+> **在跑之前把产物建出来**。这与台账里 PRT-707 那条
+> "该套件只能在本机恰好残留 `lib/` 时通过"是同一类记录。
+
+### 10.7 本轮的诚实边界
+
+1. **上一批的三条缺口，本轮的验证是在它们的用例与探针上复跑的**，
+   不是在一次**真实多空间部署**里目击的——`scope` 对不上 `permission_rules`
+   时匹配器的失败方向仍未端到端验证（PRT-214 续 §6 第 3 条照旧）。
+2. **用户那份旧库仍未被动过**：`team-hub/team.db` 与它 4.3 MB 的 `-wal`
+   原样未动，`DataDir` 未写。
+3. **没有起过一个由 Launcher 完整启动的部署**（用户在跑的 DSH 在 3080 上）。
+4. **`product/config-schema.mjs` 的修正未提交**，理由见 §10.4 末段——
+   它依赖另一个 agent 进程尚未提交的 `launcher.mjs`。
+5. **`runtime/packs/*` 零生产入口这一条是静态读数**（import 图 + `grep`），
+   不是"跑起来看到的"——我没有构造一次真实的包安装去证明它装不上。
+6. 本轮**不主张**新建任务号：三条续篇都记在 PRT-214 / PRT-251 / PRT-253 之下，
+   与 `PRT-214-*.md` 的其余续篇同例。

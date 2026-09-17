@@ -352,6 +352,7 @@ deny 会被宽松的默认静默盖掉，而他写那条正是为了拦住一样
 | 16 | ★★ **阶段 9 产品动作的 CLI 面（PRT-903/904/905/908/909、PRT-712、PRT-707）** | 产品 | 这批模块（发布检查清单、隐私说明、保留策略、数据导出、卸载、支持手册、首次运行向导、指标数据源）**全部自带用例、全部 ✅、全部零生产入口**（系统盘点见 §5.3）。要决定的是：**这些"产品级动作"由谁触发**——`legion` 的子命令？一个独立的发布/运维 CLI？还是只作为发布流程里人工跑的一次性脚本？ | 不决定则它们**对用户不存在**。台账自己为 PRT-509 写过这句话：「一个功能没有入口，与这个功能不存在，对用户来说是同一件事」。★ 其中 `metrics-source.mjs` 的台账行已如实写了"还没有界面/CLI 消费者"，另外六个没有写。★★ 另：PRT-801～813 的升级执行链**看起来**也在这个清单里，但它**不是**缺口——`runtime-install.mjs` 的注释写明 Launcher **刻意不 import** 它（进程卫生：Launcher 要在那些依赖起来之前先把进程看好）。**不要**给 Launcher 补这个 import，见 §5.3。它的执行者同样取决于第 1 条（PRT-011 DSH 分发形态） |
 | 17 | ★★★ **PRT-707 的两份实现用两个不同的模型密钥引用名** | 产品 + 项目主 | PRT-707（首次运行向导）在仓库里有**两份实现**：**活的**是 `cli.mjs` 的 `--wizard` 分支（内联，写 `model/api-key`），**死的**是 `first-run.mjs`（636 行 + 一整套用例，算 `legion/model/<profileId>`）。要裁决的是：**模型密钥的引用名用哪一个**——Legion 自己的三段式（`legion/model/<id>`，与 `credential-materializer.mjs` 文件头那句"Legion 的模型引用是 `legion/model/<profileId>`"一致，但 `planDshLookup()` 实测 `addressable:false`），还是运行时物化的那一段（`model/api-key`，端到端通、被 drift 用例钉着）？**或者**：两份实现留哪一份、另一份删掉还是明确废弃？ | ★★ **不要**把 `first-run.mjs` 直接接上去。它写进 hub 档案的 `secretRef` 是 `legion/model/<id>`——**三段**，而 `security/secrets/credential-materializer.mjs` 的 `planDshLookup()` 对三段引用返回 `{addressable:false, space:null}`（在 `refs` 与 `records` 两个键空间里**都没有位置**）。接上它的后果**不报错**：向导报"模型已配置"，而运行时拿不到钥匙——正是该模块文件头点破的那种失效（"文件看起来完整、就是少了最要紧那一把钥匙"）。★ 本轮**没有**替任何一方改代码：两份**各自都自洽**，裁决它需要产品决定。已把它变成读数：`product/launcher/wizard-wiring.test.mjs`（5 例，**今天全绿**，7/7 变异成立）——它红的那天，正是有人接线或对齐的那天 |
 | 18 | ★★★ **F-18 / F-19 的"执行面一半"要谁来调用**（可达性探针新读数，见 §5.4） | 产品 + 项目主 | 从**真实入口**跑 import 图，`runtime/experience/{friction,graph}.mjs`（F-18）与 `runtime/employee/role-pack.mjs`（F-19）**从任何生产入口都到不了**——只被自己的用例驱动。hub 侧**是**接上的（`experience-store`/`role-pack-store` 经 `server.mjs` 可达），缺的是**产出者**：没有任何东西算摩擦分、没有任何东西记图边、没有任何东西建岗位包。要裁决的是：**这三件事由谁在什么时候调用**——执行面在 Run 结束时算（那要定"从哪拿到 validations/attempts"）？还是控制面在写账之前算？★ 同一族：PRT-610 的 `recordToolCall` 写入方（第 15 条）、三道范围表（第 14 条）——**三条都卡在"执行面的载荷里今天没有这些字段"这同一个决定上** | 不决定则这三块能力**对用户不存在**：账能读、读数是干净的、用例全绿，而**一行都不会被写进去**。★ 这三行的 ✅ 依据是"模块 + 自己那套用例"，与台账 §0 自己那条告警（「只有自己的用例驱动的原语一律 🟡」）**口径不一致**。★★ 本轮**没有**改这三行的状态——✅/🟡 的口径由台账的读者（项目方）定，"改状态"与"补证据"是两件事。★★ 另：另有 5 个不可达模块归 `in-flight`（`runtime-host-registrar-row.mjs`、`runtime-contract-server-row.mjs` 及其传递依赖），因为**另一个 agent 进程当轮正持着它们**；其中两行**不在任何清单里**（`PATCH_LAYER_ROWS` 只声明 4 行、`legion-host.patch.yml` 只有 2 行），接线的决定与第 14 条是同一个 |
+| 19 | ★★★ **第 13/14/15/18 条其实是**一条**决定，而且执行面拿不到控制面凭证**（本轮新读数，见 §5.5） | 项目主 + 产品（**只需回答一个问题**） | §5.5 的三条机器读数：① `runtime` 进程的 `envNames` **故意没有 `TEAM_HUB_TOKEN`**（`product/process-manifest.mjs:203-215`）；② `RunRequest.permissions` 只有 `{preset, tools, deniedTools?}`，**没有**范围表 / host surface（`runtime/contracts/run.mjs:158-181`）；③ `runtime/packs/*` 四个模块（`store` / `compiled-plan` / `authority` / `builtin/software-delivery`）**零生产入口**，`createPackStore` 生产调用点 **0 处**（hub 的 `/api/packs/account` 把账交出去，**没有任何生产代码接住**）。要裁决的**只有一个问题**：把执行面需要的那几份数据（连接器声明 / 范围表 / 落账端点 / 摩擦与岗位包的输入）放进 `RunRequest`，**还是**给执行面开一个控制面入口（注入 `TEAM_HUB_TOKEN`）？ | ★ 选**前者**：形状已经跑通**两遍**（PRT-214 缺口①的 `enforcementFloor`、缺口②的 `enforcementIdentity`——都是"专属线上字段 + 按 Run 安装 + 对象身份配对 + 可 dispose + 装不上具名拒绝"），照抄即可，是纯代码工作量。★ 选**后者**会让「Runtime 不看业务状态」这条 spec §2 的不可突破边界消失，并且执行面一旦有 token，"读声明"与"改状态"就只差一次调用的距离。**不决定**则这四处继续各记一行 🟡：登记了、能审、能冻，而**没有任何一次真调用被它们拦过 / 记过 / 算过**。★★ 本轮**没有**擅自补任何一行接线：`RunRequest` 里今天没有范围表字段，凭空造一份（例如"读根=写根=`workdir`"）正是 PRT-253 §3 明令禁止的"发明默认值"，且方向是**放行**；而"反正它更严"这个辩护**不成立**——收成 `workdir` 会同时拒掉合法的越目录读，表现成"工具莫名其妙失败" |
 
 ---
 
@@ -607,7 +608,7 @@ DEEPSEEK_API_KEY             {"addressable":true,"space":"refs"}      ← 正对
 | `by-design` | 13 | 按设计不被 import：`*/config-schema.mjs`（被 `scan.mjs` 读**源码**）、barrel/公开出口、`*-fixture.mjs`、按路径跑的开发脚本 | 不动 |
 | `deliberate` | 8 | 升级链 `product/upgrade/*`：`runtime-install.mjs` 注释写明 Launcher **刻意不 import**（进程卫生） | **别动**（见 §5.3） |
 | `in-flight` | 5 | 另一个 agent 进程当轮正在接线（工作树未提交） | 等 |
-| **`gap`** | **22** | ★ **台账/对照表说它已交付，而生产里没有路径** | **见 §5 第 14/15/16/17/18 条** |
+| **`gap`** | **22** | ★ **台账/对照表说它已交付，而生产里没有路径** | **见 §5 第 14/15/16/17/18 条，与 §5.5 的那一条决定** |
 
 ### ★★ 最要紧的两条新读数（都在 `gap` 里）
 
@@ -706,6 +707,102 @@ const sourceExists = deps.sourceExists ?? ((p) => existsSync(join(REPO, p)))
 > 只不过前者会在**共享工作树上天天红**。
 
 新增不可达（新的"到不了"）仍然判红——那才是本探针要挡的方向。
+
+## 5.5 ★★★ 把 §5 第 13/14/15/18 条收成**一条**决定：执行面**没有**任何控制面入口
+
+> 本节是 2026-09-17 续批的记录。它不改任何 ✅/🟡，只把**四张分开的清单**
+> 换成**一条**读得出的架构事实——因为分开记会让人以为要开四次会。
+
+### 读数：执行面进程**故意**拿不到控制面凭证
+
+`product/process-manifest.mjs` 里 `runtime` 那一行的 `envNames`，
+逐字是（`product/process-manifest.mjs:203-215`）：
+
+```text
+DSH_HOME, LEGION_DATA_DIR, LEGION_LOG_DIR,
+TEAM_HUB_URL,                                        ← 只有地址
+LEGION_ACTOR, LEGION_SCOPE, LEGION_ENFORCEMENT_ACTION, LEGION_CWD, LEGION_TASK_ID,
+LEGION_APPROVAL_POLICY, LEGION_ATTENDED, LEGION_PERMISSION_PRESET,
+LEGION_RUNTIME_TOKEN,
+```
+
+**`TEAM_HUB_TOKEN` 不在里面。** 这不是漏声明（漏声明会被
+`buildChildEnv()` 直接抛，见 §5.2 与 PRT-253 续批四）——它是**刻意的**：
+Runtime 进程是执行面，给它控制面凭证等于让执行面能读、能在最坏情况下改业务状态。
+
+于是下面这四件事**同时**成立，而且它们不是四个问题：
+
+| # | 那件事 | 它要的输入 | 为什么拿不到 |
+|---|---|---|---|
+| 13 | F-21 连接器判定面接进 `preExecute` | 连接器声明（`connector-store`，hub 侧） | 声明在 hub 上，而 Runtime 进程**没有 token**；`TEAM_HUB_URL` 只是一个地址 |
+| 14 | 三道范围表注入 `pathScope` / `whitelist` / `execution-scope` | 这一次 Run 的读根/写根/平台、命令/网络/MCP 授权、外部 API 端点 | `RunRequest.permissions` 只有 `{preset, tools, deniedTools?}`（`runtime/contracts/run.mjs:158-181`）——**没有**范围表字段，也没有 host surface |
+| 15 | PRT-610 `recordToolCall` 的**写入方** | 一次工具调用在哪一层落账 | 落账要走 hub（同样没有 token），或走一条**逐 Run 的**载荷 |
+| 18 | F-18 / F-19 的执行面一半（算摩擦分、记图边、建岗位包） | validations / attempts / 岗位包内容 | 都在 hub 上，同上 |
+
+> 一个"因为没有凭证所以读不到声明"的执行面，
+> 与一个"因为没人写载荷所以读不到声明"的执行面，
+> 在这四处的读数上完全同形——**都是"那件事没有发生"**。
+> 只不过前者去加一个环境变量就会**把执行面变成控制面客户端**，
+> 而后者要动的是契约。**这就是为什么不能靠"把 token 也注入过去"来关掉它们。**
+
+### 该走的方向已经有**两份**可复制的先例
+
+PRT-214 缺口①（静态 hard floor）与缺口②（授权身份）**各自**走完了同一条路，
+而且都已经是**已交付、有判据**的实现：
+
+```text
+hub / worker 侧算出这份数据
+  → 挂到 RunRequest 的一个**专属线上字段**上
+    （enforcementFloor / enforcementIdentity，都是**可选**字段）
+  → runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
+     在**每次 Run 只过一次**的缝上按 Run 安装
+  → 安装点用**对象身份**配对，装完可 `dispose()`（Run 之间不串台）
+  → 装不上 fail closed / 具名拒绝，不静默回落
+```
+
+所以第 14 条的候选 (A)（"随 Run 的载荷到达，像下限/授权身份那样按 Run 安装"）
+**不再是一个提议，而是一个已经跑通两遍的形状**。本节的结论只有一句：
+
+> **13 / 14 / 15 / 18 是同一个决定：把执行面需要的那几份数据放进 `RunRequest`，
+> 还是给执行面开一个控制面入口。** 前者已经有先例与判据，后者会把
+> 「Runtime 不看业务状态」这条边界去掉，而它正是 spec §2 那条不可突破的边界。
+
+### 为什么不"顺手接线"
+
+**本轮没有**给这四处补任何一行接线，理由与 §5.2 那句逐字相同：
+`RunRequest` 里今天**没有**范围表字段，凭空造一份范围表（比如
+"读根=写根=`workdir`"）正是 PRT-253 §3 明令禁止的"不发明任何默认值、替身或
+暂时放行"——而它会让"没接线"与"接好了"在读数上同形，且方向是**放行**。
+
+★ 注意这条**不能**用"反正它更严"来自我辩护：把范围收成 `workdir` 会同时
+**拒掉**合法的越目录读（真实岗位要读依赖、读配置），于是它会表现成
+"工具莫名其妙失败"，而值班的人会去查工具、不会来查这里。
+
+### 顺带一条被这次核对咬出来的读数：F-20 的安装链也**零生产入口**
+
+可达性探针（§5.4）的 22 条 `gap` 里有 4 条是**同一条链**：
+
+```text
+runtime/packs/store.mjs              唯一 import 者 = builtin/software-delivery.mjs
+runtime/packs/compiled-plan.mjs      同上
+runtime/packs/authority.mjs          同上
+runtime/packs/builtin/software-delivery.mjs   **零 import 者**
+```
+
+实测确认：`createPackStore` 全仓库的生产调用点是 **0 处**——只有它自己的用例
+（`runtime/packs/store.test.mjs` 27 处）、以及 hub 的
+`/api/packs/account` **把账交出去**（`team-hub/pack-facts.mjs:228` 的注释写着
+"交给 `createPackStore({ history })`"），而**没有任何生产代码接住那本账**。
+
+> 一本"能导出、形状正确、喂回去就能重建"的账，
+> 与一本"生产里从来没有人往里记过一笔"的账，
+> 在 `GET /api/packs/account` 的读数上是同一个东西——**都是空数组**。
+
+这一条与第 15 条（`tool_calls` 写入方 0 处）**逐字同形**，且同样是"决定谁在
+什么时候调用"，所以也归到上面的**一条决定**里，不另开一节。
+⚠️ **本表没有因此把 F-20 从 ✅ 改回 🟡**——口径由项目方定（同第 18 条的处理），
+这里只把读数钉住：`releases` 之外，`runtime/packs/*` 在生产里
+**至今没有被任何入口调用过**。
 
 ## 6. 怎么复跑这份对照表里的每一条
 

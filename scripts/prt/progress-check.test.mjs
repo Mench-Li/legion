@@ -182,3 +182,92 @@ test('④ 缺汇总行的阶段会被报出来，而不是静默跳过', () => {
   assert.ok(kinds(r.problems).includes('SUMMARY_ROW_MISSING'),
     `缺行必须报出来：${JSON.stringify(r.problems)}`)
 })
+
+// ============================================================================
+// ⑤⑥ 《F-01～F-25 对照表》也带数字，而它**此前完全没有门禁**。
+//
+// `check-docs.mjs` 的校验对象只有 `README.md` 与 `docs/FEATURES.md`，
+// `progress-check.mjs` 只管 PRT-PROGRESS 自己的派生数字——
+// 于是 `docs/MULTI-AGENT-FEATURE-STATUS.md` 里手抄的任何数字
+// **没有任何东西会去核对**。实测后果：F-04 那一行写着
+// 「已完成 143、部分 19、未开始 1、需外部输入 2」，而台账当时是
+// 「145 行 = 138 / 4 / 1 / 2」——**它对不上**，而且它在那里放了很久，
+// 因为**没有任何门禁看得见这一类改动**。
+//
+//   > 一道看不见某类改动的闸门，比没有闸门更危险——它给人"已经守住了"的错觉。
+//   > 而这里更糟的是：**连闸门都没有**，于是读者默认"这份表被核对过"。
+// ============================================================================
+
+/** 两份进度文档的绝对路径。 */
+async function paths() {
+  const { dirname, join, resolve } = await import('node:path')
+  const { fileURLToPath } = await import('node:url')
+  const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
+  return {
+    ROOT,
+    status: join(ROOT, 'docs', 'MULTI-AGENT-FEATURE-STATUS.md'),
+    ledger: join(ROOT, 'docs', 'superpowers', 'prt', 'PRT-PROGRESS.md'),
+  }
+}
+
+test('⑤ ★★★ 对照表**不许手抄台账的四列合计**（手抄件没人核对，就会漂）', async () => {
+  const { readFileSync } = await import('node:fs')
+  const p = await paths()
+  const status = readFileSync(p.status, 'utf8')
+  // ★ 判据刻意**窄**：只禁台账那一种形状（四个状态标记按序、带斜杠的合计），
+  //   因为那正是"复制台账的权威读数"的形状。
+  //   不禁"16 项全部 ✅"这类**子范围**的说法——那是另一件事，不是这份台账的读数。
+  //   ★ 这条判据的**已知边界**（写在这里以免下一个人以为它覆盖了更多）：
+  //   用别的措辞手抄同一组数字（例如写成"已完成 138、部分 4…"）它**看不见**。
+  //   所以配套的是 ⑥：数字可以不给，但**引用必须对得上号**。
+  const tuples = [...status.matchAll(/\d+\s*✅\s*\/\s*\d+\s*🟡\s*\/\s*\d+\s*⬜\s*\/\s*\d+\s*⏸/g)]
+  assert.deepEqual(
+    tuples.map((m) => m[0]), [],
+    '对照表里出现了手抄的台账四列合计。台账是唯一权威，'
+    + '这里要么不写数字，要么由脚本从台账读——不要手抄一份没人核对的副本',
+  )
+})
+
+test('⑥ ★★★ 对照表引用的每个 PRT 号都必须在台账里真实存在', async () => {
+  const { readFileSync } = await import('node:fs')
+  const p = await paths()
+  const status = readFileSync(p.status, 'utf8')
+  const ledger = readFileSync(p.ledger, 'utf8')
+  const inLedger = new Set([...ledger.matchAll(/^\|\s*(PRT-\d+)/gm)].map((m) => m[1]))
+  assert.equal(inLedger.size, 145, `台账行数变了（解析到 ${inLedger.size} 行），这条判据的基准要一起复核`)
+  // 引用一个**不存在**的任务号是最坏的一种：读者会去找那一条，
+  // 找不到时会以为是自己看错了，而不是"这份文档编了一个号"。
+  const cited = [...new Set([...status.matchAll(/PRT-(\d+)/g)].map((m) => `PRT-${m[1]}`))]
+  assert.ok(cited.length > 10, `只解析到 ${cited.length} 个引用，锚点可能变了`)
+  const missing = cited.filter((id) => !inLedger.has(id))
+  assert.deepEqual(missing, [], `对照表引用了台账里不存在的任务号：${missing.join(', ')}`)
+})
+
+test('⑥ ★★ 对照表里每个 F-行都必须用图例里的状态标记', async () => {
+  const { readFileSync } = await import('node:fs')
+  const p = await paths()
+  const lines = readFileSync(p.status, 'utf8').split(/\r?\n/)
+  // 图例（本文件开头那段引用块）声明了四个标记。用别的写法时读者无法判断
+  // 这一条到底做完了没有，而"状态"这一列的全部意义就是回答那个问题。
+  const legend = ['✅', '🟡', '⬜', '⏸']
+  const okStatus = (s) => legend.includes(s) || /^[✅🟡⬜⏸]+→[✅🟡⬜⏸]+$/.test(s)
+  const bad = []
+  for (const [i, l] of lines.entries()) {
+    // ★ 只读 `| F-xx | 名称 | 状态 | …` 这个形状的行。
+    //   §2 的缺口表列序不同（第二列是"改动前的实际读数"、第三列是判据），
+    //   按同一个形状去读它会把**判据**当成状态——那会让这条判据
+    //   在真正的状态写错时保持沉默，同时对着一段正确的判据喊红。
+    const m = /^\|\s*(F-\d\d)\s*\|\s*([^|]+?)\s*\|\s*([^|]*?)\s*\|/.exec(l)
+    if (m === null) continue
+    const st = m[3]
+    // 缺口表那类的第三列以数字或反引号开头（判据/用例名），不是状态。
+    if (st === '' || /^[\d`]/.test(st)) continue
+    if (!okStatus(st)) bad.push(`L${i + 1} ${m[1]} 状态=${JSON.stringify(st)}`)
+  }
+  assert.deepEqual(bad, [],
+    `状态标记不在图例词表里（读者无法判断它到底做完了没有）：\n  ${bad.join('\n  ')}`)
+  // 反向确认这条判据**真的读到了** §1 总表，而不是被上面那些过滤条件全部跳过。
+  const seen = lines.filter((l) => /^\|\s*F-\d\d\s*\|/.test(l)).length
+  assert.ok(seen >= 20, `只读到 ${seen} 行 F-行，锚点可能变了`)
+})
+

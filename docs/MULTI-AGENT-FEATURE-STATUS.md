@@ -52,7 +52,7 @@
 | F-01 | Runtime Contract | ✅ | `runtime/contracts/adapter.mjs`、`run.mjs`、`errors.mjs` | PRT-101～109；套件 `runtime-contract`（13 例）、`contract.test.mjs` | — |
 | F-02 | DshRuntimeAdapter | ✅ | `runtime/adapters/dsh/*` | PRT-201～206；套件 `dsh-adapter`（25 例） | — |
 | F-03 | Runtime Manager | ✅ | `product/runtime-state.mjs` | `RUNTIME_STATES` / `CLAIM_POLICY` / `runtimeStatusReport()`；PRT-711 认领闸门 | — |
-| F-04 | Orchestrator Core | 🟡 | `orchestrator/worker/*`、`team-hub/run-store.mjs`、`orchestrator/{acceptance,pipeline,workspace}/` | PRT-301～316（143 ✅ / 19 🟡 / 1 ⬜ / 2 ⏸） | `plugins/src/index.ts` 仍是主要编排热点（§1.1 的判断）；PRT-316 未开始 |
+| F-04 | Orchestrator Core | 🟡 | `orchestrator/worker/*`、`team-hub/run-store.mjs`、`orchestrator/{acceptance,pipeline,workspace}/` | PRT-301～316。★ **不在这里复制那份计数**——逐条状态见 [`superpowers/prt/PRT-PROGRESS.md`](./superpowers/prt/PRT-PROGRESS.md) 台账（那是权威）。此处曾写着一份手抄的四列合计（已完成 143、部分 19、未开始 1、需外部输入 2），而台账当时的真实读数是 **145 行 = 已完成 138、部分 4、未开始 1、需外部输入 2**：**它对不上**，且**没有任何门禁会去核对它**（`check-docs` 只管 `README.md` 与 `docs/FEATURES.md`）。一个手抄的计数与一份会漂移的计数是同一个东西，只不过前者的读者会以为它被核对过——现已改为不复制，并由 `scripts/prt/progress-check.test.mjs` 用例 ⑥ 钉住 | `plugins/src/index.ts` 仍是主要编排热点（§1.1 的判断）；**PRT-316 是台账里唯一的 ⬜**，且它是**排期规则**没到（`0db37af` = 2026-09-10，一个发布周期 = 14 天 ⇒ 最早 **2026-09-24** 可启动），不是"没事可做" |
 | F-05 前半 | 运行明细作为可持久化 RunEvent | ✅ | `team-hub/run-store.mjs`（`run_events`）、`orchestrator/worker/{executor,main}.mjs`、`server.mjs` | `team-hub/run-events.test.mjs`（18 例） | 明细**不进** `/api/events`（刻意：不新增第二条公开流） |
 | F-05 后半 | 可靠事件与投递状态机 | ✅ | `team-hub/event-delivery.mjs`、`server.mjs`（`broadcastAudit` 重写、 `/api/event-delivery`） | `event-delivery.test.mjs`（31 例）+ `event-delivery-wiring.test.mjs`（7 例真 HTTP） | — |
 | F-06 | Run 状态机 / 验收 / 交接 | ✅ | `team-hub/run-store.mjs`、`orchestrator/acceptance/`、`orchestrator/pipeline/` | PRT-307/308/309/310/311/312 | — |
@@ -295,8 +295,25 @@ deny 会被宽松的默认静默盖掉，而他写那条正是为了拦住一样
 | 6 | **PRT-509 C1～C4** | 产品 | 凭证的产品决策（轮换、多档案、失败姿态、运维出口） | B1 已关（真 runner/owner）；C 系列是产品形态问题 |
 | 7 | **真实凭据 / 另一台机器** | 项目方 | 提供 DPAPI 可用的 Windows 机器、真实模型 API key | F-09 的"真进程读到了值"已在本机验证；跨机器证据仍缺 |
 | 8 | **F-23 / F-25 是否要做** | 产品 | §2 与 §9 已明确"契约稳定前不做多 Harness""按真实客户需求推进" | 目前按**设计决定**归档，不按缺口处理——若产品要提前做，请显式说明 |
+| 9 | **PRT-316 的开工资格（台账里唯一的 ⬜）** | 项目主（时间到点即可，无人需裁决） | 前置条件是**排期规则**而非缺失能力：`0db37af` = 2026-09-10，一个发布周期 = 14 天（`PRT-909-release-checklist.md:63`）⇒ 最早 **2026-09-24** 可开工；两个条件里"热点文件争用"那条**已过**（`hot-file-churn.mjs` exit 0，当前 2/40、峰值 14/40） | 这一天之前**没有**"再等一个人拍板"的事，只是**时间没到**；到期后可按 PRT-315 那七刀的先例逐片提取 `team-hub` 模块。★ 若产品要求**提前**开工，请显式说明——那等于自愿放弃那个发布周期的冷却理由 |
+| 10 | **F-22 / F-24 是否按客户需求推进** | 产品 | F-22 的**远程后端**与 F-24 的**多用户写面 ACL** 都属 §9「按真实客户需求推进」；当前落地范围（worktree 工作区 + 只读面 ACL 矩阵）**按设计已完成** | 不推进则这两条长期停在 🟡（**这是设计决定，不是缺陷**）。★ 注意 §2 明写「**不把 worktree 当安全沙箱**」——若某天真要跑不可信代码，那不是"补 ACL"，而是换隔离机制 |
+| 11 | **PRT-509 剩余三条** | 环境 + 项目方 | ① win32 上 `0600` **本机无法证明**；② **生产默认句柄工厂**（走 `resolveDshBaseBundlePatchPath` 解析器）**只有注入式覆盖**，真实调用没跑过；③ 已证明的是"**DSH 的凭据提供方**从 Legion 材料化的文件里读到了值"，**不是**"一个真 DSH 进程启动时把那份覆盖层文档解析出来了" | 三条都**如实记为 🟡 的剩余**，不冒充已闭合。②③ 需要一次**真 DSH 进程启动**的现场（有 `DSH_CHECKOUT` 时可跑，但没有覆盖层真实生效的那条路径） |
+| 12 | **F-19 Role Pack 的"七类版本"范围确认** | 产品 | 七类（prompt / skills / tools / permissions / model / connectors / budget）是否就是这个岗位包的全部版本面 | 若产品认为还缺一类（例如"环境"或"路由"），现在加是**新增一节**；等到有真实岗位包在库里之后再改，就要处理"旧包缺这一节"的兼容问题（而现在按设计**拒绝缺节**的包） |
 
 ---
+
+## 5.1 本轮（F-18/F-19/F-21）自己发现的、需要记账的边界
+
+这几条**不是**要人裁决，而是**如实写下的"这一套没有证明什么"**，
+以免下一个人把绿色摘要读成超出它范围的结论：
+
+| 事项 | 已经证明的 | **没有**证明的 |
+|---|---|---|
+| F-18 摩擦分 | 只从结构化字段取值；缺输入是"不知道"不是 0；草稿要人 + 封闭理由；图只记不推断 | 这些**信号本身**来自 `run_validations`/attempt/`run_reconciliations`——它们在真实运行里**是否被写得足够全**，属于上游数据质量问题，不在这套用例里 |
+| F-18 图 | 只记不推断、撤销是追加、带环遍历不挂死 | **没有任何真实调用方**在跑它（§0 那条告警照旧：只有自己的用例驱动的原语一律 🟡 的邻居）——落盘面与 HTTP 都已接上，但"谁在生产里写第一条记录"还没发生 |
+| F-19 岗位包 | 七节齐全、版本与内容两种漂移分开、冻结改不动、幂等不碰冻结时刻 | 包里的 `skills`/`tools` 等**引用**是否指向世界里真实存在的东西，只做到"引用形状合法"；`REF_MISSING_IN_WORLD` 需要一份真实世界清单才能判 |
+| F-21 连接器 | 未声明即拒绝、风险只上抬、密钥只许引用、熔断有截止时间、隔离互不牵连 | **没有连过任何一个真的 MCP server**：`transport: 'stdio'`/`http` 的**实际握手**不在这套用例里（这一层判的是"放不放过去"，不是"连得上吗"）。以及 `resolveSecretRef` 的真实实现（接 `SecretStore`）尚未接线——没接线时它如实报 `checked:false` 而不是假装查过 |
+
 
 ## 6. 怎么复跑这份对照表里的每一条
 
@@ -306,7 +323,7 @@ node scripts/ci/run-ci.mjs
 
 # 只跑本轮新增的套
 node scripts/ci/run-ci.mjs --only test   # 然后在输出里找：
-#   run-events / event-delivery / automation / compaction / usage-rollup / pack-facts / role-pack / experience
+#   run-events / event-delivery / automation / compaction / usage-rollup / pack-facts / role-pack / experience / connectors
 
 # 单独复跑
 node --test team-hub/run-events.test.mjs
@@ -317,6 +334,7 @@ node --test team-hub/usage-rollup.test.mjs team-hub/usage-rollup-http.test.mjs
 node --test team-hub/pack-facts.test.mjs team-hub/pack-facts-http.test.mjs
 node --test runtime/employee/role-pack.test.mjs team-hub/role-pack-store.test.mjs team-hub/role-pack-http.test.mjs
 node --test runtime/experience/friction.test.mjs runtime/experience/graph.test.mjs team-hub/experience-store.test.mjs team-hub/experience-http.test.mjs
+node --test runtime/connectors/registry.test.mjs team-hub/connector-store.test.mjs team-hub/connector-http.test.mjs
 node --test runtime/packs/store.test.mjs
 node --test product/secrets.test.mjs
 node --test product/launcher/secrets-acl-runner.test.mjs

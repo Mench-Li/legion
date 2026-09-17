@@ -583,7 +583,8 @@ node --test product/launcher/runtime-manifest.test.mjs                       # 9
 node --test scripts/config/config.test.mjs                                   # 52/52（修前 50/52）
 node scratch/probe-identity-loop.mjs                                         # 两空间两哈希
 node scripts/config/scan.mjs --check                                         # PASS（1129 条）
-node scripts/prt/reachability.mjs --diff                                     # 与基线一致（47 条）
+node scripts/prt/reachability.mjs --diff                                     # 与基线一致（46 条）
+node scratch/verify-reachability-entry.mjs                                   # 破验 2/2 咬住、还原逐字节一致
 node scripts/prt/progress-check.mjs ; node scripts/prt/spec-progress.mjs --check
 ```
 
@@ -606,7 +607,66 @@ CI（隔离 worktree 内全量 `run-ci.mjs`，提交 `f291f9c`）：
 > **在跑之前把产物建出来**。这与台账里 PRT-707 那条
 > "该套件只能在本机恰好残留 `lib/` 时通过"是同一类记录。
 
-### 10.7 本轮的诚实边界
+### 10.7 ★★★ 本轮唯一的一处**功能代码**改动：可达性探针的一处假阳性
+
+上一节的结论是"剩下的都要人裁决"。收尾核对那 22 条 `gap` 时，
+发现了**一条不属于任何裁决**的——它根本不是缺口，是**探针报错了**。
+
+`packages/shared/src/artifact-policy.mjs` 被列成
+`[gap] 只被自己的用例 import（产物路径规范化）`。而它**有两个真实消费者**：
+
+```text
+scrum/serve.mjs:38          import { normalizeArtifactPath } from '../packages/shared/src/artifact-policy.mjs'
+board-plugin/src/index.ts:18 同一个模块（编成 board-plugin/lib/index.js，**未跟踪产物**，import 图扫不到）
+```
+
+根因是**两层叠加**，缺一层都不会出这个读数：
+
+| 层 | 事实 |
+|---|---|
+| 扫不到 | `scrum/` **整个目录不在 `SCAN_DIRS` 里** |
+| 认不出 | 即使扫到，`scrum/serve.mjs` 也不匹配任何一条入口规则（它既不 `scripts/` 开头、也不含 `/scripts/`，而 `PROCESS_ENTRIES` 里没有它） |
+
+**权威来源不是猜的**：`scripts/ci/run-ci.mjs:3748` 的 `tracked` 清单
+（stage 阶段算 `SHA256SUMS.txt` 的那一份）逐字列着 `scrum/serve.mjs`
+——也就是说，**打包发布的人一直知道它是要按路径跑的那个文件**。
+
+> 一个"把在跑的服务报成死代码"的探针，
+> 比一个"什么都没查"的探针更坏——因为**它的结论会被当成读数用**，
+> 而读的人会去查那个服务。
+
+**修法**（三处，都在 `scripts/prt/`）：
+
+| 改动 | 内容 |
+|---|---|
+| `SCAN_DIRS` | 收 `scrum`（并写明它与被排除的旧 GUI `workbench/` **不是同一个情况**：`scrum/` 是 v1 看板服务本体，`tests/contract/v1v2-contract.test.mjs` 把它当契约面在测） |
+| `PROCESS_ENTRIES` | 收 `scrum/serve.mjs`，以及它**按路径 `spawn`** 的两个子进程 `scrum/taskctl.mjs`（`serve.mjs:153`）与 `scrum/render.mjs`（`:176`）——它们**不可能**出现在任何 import 图里 |
+| `reachability.test.mjs` ①-5 | 新增正对照钉住这一族（同 ①-3 的理由：**每一类入口写法各要一条对照**，因为实测已经漏过两种） |
+
+读数变化：
+
+```text
+改前  513 个 .mjs；入口 52 个；可达 211 个；不可达 47 个   by-design=12 gap=22 deliberate=8 in-flight=5
+改后  518 个 .mjs；入口 55 个；可达 215 个；不可达 46 个   by-design=12 gap=21 deliberate=8 in-flight=5
+```
+
+**唯一的一条变化就是那处假阳性消失**（`artifact-policy.mjs` 从 `gap` 变成可达），
+没有任何新模块变成不可达——也就是说 `scrum/` 收进来之后，
+那个目录里的模块本来就都是活的。
+
+破坏性验证 **2/2 咬住**（`scratch/verify-reachability-entry.mjs`）：
+
+| # | 变异 | 结果 |
+|---|---|---|
+| ㉗ | 从 `PROCESS_ENTRIES` 删掉 `scrum/serve.mjs` | ✔ 红 **3** 条（① / ② / ⑤） |
+| ㉘ | 从 `SCAN_DIRS` 删掉 `scrum` | ✔ 红 **3** 条（同上） |
+
+★ 这个 harness **刻意不复用** `scratch/mutate.mjs`：那个文件的还原写在
+"跑完之后"，而本轮已经实测过它的失效模式（§10.2——被超时杀掉，靶文件留在
+"已变异"状态，随后被 `git add -A` 收进索引）。这里的还原写在 `finally` 里，
+**从"跑完之后"改成"无论如何"**，并把"还原逐字节一致"也打印出来当读数。
+
+### 10.8 本轮的诚实边界
 
 1. **上一批的三条缺口，本轮的验证是在它们的用例与探针上复跑的**，
    不是在一次**真实多空间部署**里目击的——`scope` 对不上 `permission_rules`
@@ -620,3 +680,11 @@ CI（隔离 worktree 内全量 `run-ci.mjs`，提交 `f291f9c`）：
    不是"跑起来看到的"——我没有构造一次真实的包安装去证明它装不上。
 6. 本轮**不主张**新建任务号：三条续篇都记在 PRT-214 / PRT-251 / PRT-253 之下，
    与 `PRT-214-*.md` 的其余续篇同例。
+7. §10.7 修掉的是**探针**，不是产品：`scrum/serve.mjs` 与
+   `packages/shared/src/artifact-policy.mjs` 一直都是活的，
+   改的只是"探针能不能看见它们"。所以这一节**不新增任何功能**，
+   它消掉的是一条**读起来像缺口、实际是误报**的读数。
+8. 那处假阳性**存在了很久而没有人被它误导**（它在 22 条 `gap` 里排第一，
+   而 §5.4 的正文只点名了另外几族）——这不是"所以它不重要"，
+   而是"它下次可能会被点名"。**一条误报的代价不是这一次错了，
+   是下一次有人照着它去查一个正在跑的服务。**

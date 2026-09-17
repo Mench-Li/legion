@@ -85,6 +85,38 @@ test('① ★★★ 正对照：入口认得出、已知接上的可达、清单
   assert.deepEqual(testEntries, [],
     `★ 用例被当成了入口：${testEntries.join(', ')}。` +
     '用例按定义就是"被按路径跑、不被 import"，把它们算进去会让本探针什么也查不出来')
+
+  // ①-5 ★★★ 第五种入口写法：**不在 `scripts/` 下的按路径启动的服务**。
+  //
+  //  前四种（进程入口表 / `scripts/` / package.json bin·main / 清单声明）都覆盖到了，
+  //  而 `scrum/serve.mjs` 一种都不占——它既不 `scripts/` 开头、也不含 `/scripts/`，
+  //  而且 `scrum/` 当时**整个不在 SCAN_DIRS 里**。
+  //
+  //  代价是一处**假阳性**，方向正是本探针最忌讳的那一种：
+  //  `scrum/serve.mjs:38` import 的 `packages/shared/src/artifact-policy.mjs`
+  //  被报成 `[gap] 只被自己的用例 import`——而它有两个真实消费者
+  //  （另一个是 `board-plugin/src/index.ts:18`，编成未跟踪的 `lib/`）。
+  //
+  //  权威来源不是猜的：`scripts/ci/run-ci.mjs:3748` 的 `tracked` 清单
+  //  （stage 阶段算 SHA256SUMS 的那一份）逐字列着 `scrum/serve.mjs`。
+  //
+  //  > 一个"把在跑的服务报成死代码"的探针，
+  //  > 比一个"什么都没查"的探针更坏——因为**它的结论会被当成读数用**。
+  for (const [f, why] of [
+    ['scrum/serve.mjs', '不在 scripts/ 下、按路径启动的服务（run-ci 的 SHA256SUMS 清单里）'],
+    ['scrum/taskctl.mjs', '被 serve.mjs 按路径 spawn（`:153`）——不可能出现在 import 图里'],
+    ['scrum/render.mjs', '同上（`:176`）'],
+  ]) {
+    assert.ok(a.known.has(f),
+      `★ 正对照失败：${f}（${why}）根本**没有被扫描**——它所在的目录不在 SCAN_DIRS 里。` +
+      '\n一个漏扫整个目录的探针，会把那个目录里的模块全报成死代码')
+    assert.ok(a.entries.has(f), `★ 正对照失败：${f}（${why}）没有被算作入口`)
+  }
+  // 而它 import 的那个共享策略模块**必须**因此可达：这是上面那条假阳性的**具体形态**，
+  // 也是唯一一条能证明"补上入口之后读数真的变了"的断言。
+  assert.equal(a.reach.has('packages/shared/src/artifact-policy.mjs'), true,
+    '★ `packages/shared/src/artifact-policy.mjs` 不可达——`scrum/serve.mjs` 这条入口又丢了，' +
+    '它会以 `[gap] 只被自己的用例 import` 的形式出现在报告里（而它明明有两个真实消费者）')
 })
 
 // ══════════════════════════════════════════════════════════════════════════

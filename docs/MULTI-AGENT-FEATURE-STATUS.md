@@ -581,7 +581,41 @@ DEEPSEEK_API_KEY             {"addressable":true,"space":"refs"}      ← 正对
 已补上第三种装法，并让那一处变异专门用这种形态——它咬住了，也就证明补漏**有效**。
 
 
-## 5.4 ★★★ 可达性探针：**48 个生产模块从任何入口都到不了**（本轮新增读数）
+## 5.4 ★★★ 可达性探针：**生产模块从任何入口都到不了**的那些（本轮新增读数）
+
+> ★★ **读数订正（2026-09-17 续批）**：本节标题与读数原为「48 个」，
+> 而探针当前报的是 **46 个**。两次变化各有原因，都写在这里，
+> 因为"数字变小了"与"探针漏报了"在只看数字时是同一个东西：
+>
+> | 变化 | 原因 |
+> |---|---|
+> | 48 → **47** | `in-flight` 那 5 条随另一个 agent 进程的提交落地，其中一条已可达；`by-design` 13 → 12。**不是**本轮改的 |
+> | 47 → **46** | ★ **本轮改的，而且是一处假阳性的消除**——见下 |
+>
+> ★★★ **`scrum/` 整个目录当时不在 `SCAN_DIRS` 里**，而 `scrum/serve.mjs`
+> 是一个**按路径启动的产品服务**（`scripts/ci/run-ci.mjs:3748` 的 `tracked`
+> 清单——stage 阶段算 SHA256SUMS 的那一份——逐字列着它）。
+> 后果不是"少扫几个文件"，而是一处**假阳性**：
+> `scrum/serve.mjs:38` import 的 `packages/shared/src/artifact-policy.mjs`
+> 被报成 `[gap] 只被自己的用例 import`，而它**有两个真实消费者**
+> （另一个是 `board-plugin/src/index.ts:18`，编成未跟踪的 `lib/`，import 图扫不到）。
+>
+> > 一个"把在跑的服务报成死代码"的探针，
+> > 比一个"什么都没查"的探针更坏——因为**它的结论会被当成读数用**，
+> > 而读的人会去查那个服务。
+>
+> 修法：`SCAN_DIRS` 收 `scrum`；`PROCESS_ENTRIES` 收 `scrum/serve.mjs`
+> 与它按路径 `spawn` 的两个子进程（`taskctl.mjs` / `render.mjs`，
+> `serve.mjs:153`、`:176`——它们**不可能**出现在任何 import 图里）。
+> 新增正对照 `reachability.test.mjs` ①-5 钉住这一族
+> （同 ①-3 的理由：每一类入口写法各要一条对照，因为实测漏过两种）。
+> 破坏性验证 **2/2 咬住**（㉗ 删掉 `scrum/serve.mjs` 入口 / ㉘ 删掉 `SCAN_DIRS`
+> 里的 `scrum`，两条都让 ① 变红）。
+>
+> ⚠️ **`workbench/` 与它不是同一个情况**，所以本轮**没有**把它一起收进来：
+> 那是被 145 项明确排除的**旧 GUI**，而 `scrum/` 是 v1 看板服务本体
+> （`tests/contract/v1v2-contract.test.mjs` 把它当契约面在测）。
+> "没收"与"不该收"是两件事，不能共用一条理由。
 
 §5.2 与 §5.3 都是**逐个模块**数的（"它有几个非测试导入者"）。那个读数有一个
 **传递**盲点，本轮实测到了：
@@ -596,19 +630,19 @@ DEEPSEEK_API_KEY             {"addressable":true,"space":"refs"}      ← 正对
 所以本轮换了个问法——**从真实进程入口出发，顺着 import 边走得到它吗**——
 并把它做成一个可复跑的探针：`scripts/prt/reachability.mjs`
 （`--json` 机器读 / `--diff` 与基线比对 / `--record` 重写）。
-门禁 `scripts/prt/reachability.test.mjs`（5 例，已登记进 `run-ci.mjs`），
-基线 `docs/superpowers/prt/prt-reachability-baseline.json`（48 条，逐条带 class 与 reason）。
+门禁 `scripts/prt/reachability.test.mjs`（**7 例**，已登记进 `run-ci.mjs`），
+基线 `docs/superpowers/prt/prt-reachability-baseline.json`（**46** 条，逐条带 class 与 reason）。
 
 ### 读数
 
-**513 个 `.mjs`（不含用例）里，48 个从任何生产入口都到不了。** 分类：
+**518 个 `.mjs`（不含用例）里，46 个从任何生产入口都到不了**，入口 55 个。分类：
 
 | class | 条数 | 含义 | 正确动作 |
 |---|---|---|---|
-| `by-design` | 13 | 按设计不被 import：`*/config-schema.mjs`（被 `scan.mjs` 读**源码**）、barrel/公开出口、`*-fixture.mjs`、按路径跑的开发脚本 | 不动 |
+| `by-design` | 12 | 按设计不被 import：`*/config-schema.mjs`（被 `scan.mjs` 读**源码**）、barrel/公开出口、`*-fixture.mjs`、按路径跑的开发脚本 | 不动 |
 | `deliberate` | 8 | 升级链 `product/upgrade/*`：`runtime-install.mjs` 注释写明 Launcher **刻意不 import**（进程卫生） | **别动**（见 §5.3） |
 | `in-flight` | 5 | 另一个 agent 进程当轮正在接线（工作树未提交） | 等 |
-| **`gap`** | **22** | ★ **台账/对照表说它已交付，而生产里没有路径** | **见 §5 第 14/15/16/17/18 条，与 §5.5 的那一条决定** |
+| **`gap`** | **21** | ★ **台账/对照表说它已交付，而生产里没有路径** | **见 §5 第 14/15/16/17/18 条，与 §5.5 的那一条决定** |
 
 ### ★★ 最要紧的两条新读数（都在 `gap` 里）
 
@@ -780,7 +814,7 @@ hub / worker 侧算出这份数据
 
 ### 顺带一条被这次核对咬出来的读数：F-20 的安装链也**零生产入口**
 
-可达性探针（§5.4）的 22 条 `gap` 里有 4 条是**同一条链**：
+可达性探针（§5.4）的 `gap` 里有 4 条是**同一条链**：
 
 ```text
 runtime/packs/store.mjs              唯一 import 者 = builtin/software-delivery.mjs

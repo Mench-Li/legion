@@ -62,9 +62,27 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 export const REPO = join(HERE, '..', '..')
 export const BASELINE_PATH = join(REPO, 'docs', 'superpowers', 'prt', 'prt-reachability-baseline.json')
 
-/** 参与可达性分析的目录。`workbench/` 是**旧 GUI**，不在 145 项范围内，故不收。 */
+/** 参与可达性分析的目录。`workbench/` 是**旧 GUI**，不在 145 项范围内，故不收。
+ *
+ * ★★ `scrum/` 曾经**不在这张表里**，而它是**产品面**、而且**随发布物发出去**：
+ *    `scripts/ci/run-ci.mjs:3748` 的 `tracked` 清单（stage 阶段算 SHA256SUMS 的那一份）
+ *    逐字列着 `scrum/serve.mjs`。
+ *
+ *    不在表里的后果不是"少扫几个文件"，而是**一处假阳性**：
+ *    `scrum/serve.mjs:38` import 的 `packages/shared/src/artifact-policy.mjs`
+ *    因此被报成 `[gap] 只被自己的用例 import`——而它有两个真实消费者
+ *    （另一个是 `board-plugin/src/index.ts:18`，编成未跟踪的 `lib/`）。
+ *    这正是本探针最容易被信以为真的那一种结论：**把在跑的东西报成死的**。
+ *
+ *   > 一个"漏扫了一整个产品目录"的探针，
+ *   > 与一个"那个目录里的模块真的没人加载"的探针，在输出上是同一个东西。
+ *
+ *    `workbench/` 与它**不是**同一个情况：那是被 145 项明确排除的旧 GUI，
+ *    而 `scrum/` 是 v1 看板服务本体（`tests/contract/v1v2-contract.test.mjs`
+ *    把它当契约面在测）。"没收"与"不该收"是两件事，不能共用一条理由。
+ */
 export const SCAN_DIRS = Object.freeze([
-  'runtime', 'team-hub', 'orchestrator', 'product', 'security', 'scripts', 'packages',
+  'runtime', 'team-hub', 'orchestrator', 'product', 'security', 'scripts', 'packages', 'scrum',
 ])
 
 /** 不进去的目录。`node_modules` 与产物目录都不算源码面。 */
@@ -72,12 +90,45 @@ export const SKIP_DIRS = Object.freeze([
   'node_modules', '.git', 'releases', '.worktrees', 'scratch', '.ci', 'dist', 'build', 'coverage',
 ])
 
-/** 按路径启动的进程入口。多写一条只会多一个入口（保守），漏一条会把在跑的进程报成死的。 */
+/** 按路径启动的进程入口。多写一条只会多一个入口（保守），漏一条会把在跑的进程报成死的。
+ *
+ * ★★ `scrum/serve.mjs` 曾经**不在这张表里**，而它一直都在跑。后果不是"少一个入口"
+ *    这么轻——它是一处**假阳性**，而且是本探针最忌讳的那一类：
+ *
+ *      `scrum/serve.mjs` 这个名字既不 `scripts/` 开头、也不含 `/scripts/`，
+ *      所以上面那条"任何一层 `scripts/` 都算"的规则**够不着它**；
+ *      而它 import 的 `packages/shared/src/artifact-policy.mjs`
+ *      因此被报成 `[gap] 只被自己的用例 import`。
+ *
+ *    而那个文件**有两个真实消费者**：`scrum/serve.mjs:38` 与
+ *    `board-plugin/src/index.ts:18`（后者编成 `board-plugin/lib/index.js`，
+ *    未跟踪产物，import 图扫不到）。于是"谁在用它"这个问题，
+ *    探针答错了一次——**而它答错的方向是"报成死代码"**，
+ *    正好是这张表最容易被信以为真的那一种结论。
+ *
+ *    权威来源不是猜的：`scripts/ci/run-ci.mjs:3748` 的 `tracked` 清单
+ *    （stage 阶段算 SHA256SUMS 的那一份）逐字列着 `scrum/serve.mjs`——
+ *    也就是说，**打包发布的人一直知道它是要按路径跑的那个文件**。
+ *
+ *    > 一个"漏了一个进程入口"的探针，
+ *    > 与一个"那些模块真的没人加载"的探针，在输出上是同一个东西——
+ *    > 只不过前者会把一个正在跑的服务报成死代码，而读的人会去查那个服务。
+ *
+ *    钉住它的是 `reachability.test.mjs` ①-5 那条正对照（同 ①-3 的理由：
+ *    两次实测都是"漏了一种入口写法"，所以每一种都要有一条对照）。
+ */
 export const PROCESS_ENTRIES = Object.freeze([
   'team-hub/server.mjs',
   'product/launcher/cli.mjs',
   'product/launcher/wizard-cli.mjs',
   'product/launcher/log-policy-cli.mjs',
+  'scrum/serve.mjs',
+  // 后两个由 `scrum/serve.mjs` **按路径 spawn** 起来
+  //（`:153` `spawn(process.execPath, [TASKCTL, ...argv])`、
+  //  `:176` 同一个写法跑 RENDER）——与"人工按路径启动"是同一个判据：
+  //  它们**不可能**出现在任何 import 图里，而它们确实在跑。
+  'scrum/taskctl.mjs',
+  'scrum/render.mjs',
 ])
 
 /** 三种 import 写法都要认：`from '…'`、`import('…')`、纯副作用的 `import '…'`。 */

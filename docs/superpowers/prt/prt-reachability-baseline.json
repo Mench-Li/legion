@@ -13,11 +13,6 @@
       "reason": "re-export 出口；调用方直接 import 叶子（main.mjs/run.mjs 都可达）"
     },
     {
-      "file": "packages/shared/src/artifact-policy.mjs",
-      "class": "gap",
-      "reason": "只被自己的用例 import（产物路径规范化）"
-    },
-    {
       "file": "product/config-schema.mjs",
       "class": "by-design",
       "reason": "同上"

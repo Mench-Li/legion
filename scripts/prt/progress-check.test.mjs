@@ -252,22 +252,33 @@ test('⑥ ★★ 对照表里每个 F-行都必须用图例里的状态标记', 
   const legend = ['✅', '🟡', '⬜', '⏸']
   const okStatus = (s) => legend.includes(s) || /^[✅🟡⬜⏸]+→[✅🟡⬜⏸]+$/.test(s)
   const bad = []
+  let checked = 0
+  // ★ 锚点不是"看起来像 F-行"，而是**表的表头**：只有第三列恰好写着「状态」的
+  //   那张表，第三列才是状态。
+  //   第一版按行形状读，于是 §2 的缺口表（`| 缺口 | 改动前的实际读数 | 关掉它的判据 |`）
+  //   也被读了进去——那三列里第三列是**判据**。后果不是"漏报"，而是更糟的一种：
+  //   *这条判据会在真正的状态写错时保持沉默，同时对着一段正确的判据喊红。*
+  //   （第一次跑就撞上了：F-21 刚改成 `⬜→🟡`，它报的却是 §2 里那段判据文本。）
+  let header = null
   for (const [i, l] of lines.entries()) {
-    // ★ 只读 `| F-xx | 名称 | 状态 | …` 这个形状的行。
-    //   §2 的缺口表列序不同（第二列是"改动前的实际读数"、第三列是判据），
-    //   按同一个形状去读它会把**判据**当成状态——那会让这条判据
-    //   在真正的状态写错时保持沉默，同时对着一段正确的判据喊红。
-    const m = /^\|\s*(F-\d\d)\s*\|\s*([^|]+?)\s*\|\s*([^|]*?)\s*\|/.exec(l)
+    if (!/^\s*\|/.test(l)) { header = null; continue }
+    // 分隔行（`| --- | --- |`）不改变当前表头。
+    if (/^\s*\|[\s|:-]+\|\s*$/.test(l) && l.includes('-')) continue
+    const cells = l.split('|').map((c) => c.trim())
+    if (header === null) { header = cells; continue }
+    // 表头第三列（split 后下标 3）必须是「状态」。
+    if ((header[3] ?? '') !== '状态') continue
+    const m = /^\|\s*(F-\d\d)\s*\|/.exec(l)
     if (m === null) continue
-    const st = m[3]
-    // 缺口表那类的第三列以数字或反引号开头（判据/用例名），不是状态。
-    if (st === '' || /^[\d`]/.test(st)) continue
+    checked += 1
+    const st = cells[3] ?? ''
     if (!okStatus(st)) bad.push(`L${i + 1} ${m[1]} 状态=${JSON.stringify(st)}`)
   }
   assert.deepEqual(bad, [],
     `状态标记不在图例词表里（读者无法判断它到底做完了没有）：\n  ${bad.join('\n  ')}`)
-  // 反向确认这条判据**真的读到了** §1 总表，而不是被上面那些过滤条件全部跳过。
-  const seen = lines.filter((l) => /^\|\s*F-\d\d\s*\|/.test(l)).length
-  assert.ok(seen >= 20, `只读到 ${seen} 行 F-行，锚点可能变了`)
+  // 反向确认这条判据**真的读到了**那三张状态表（§1 的 13 条 + §3 的 6 条 +
+  // §4 的 5 条 = 24），而不是被表头锚点全部跳过——一条"什么都没检查"的
+  // 判据永远是绿的，这正是它最危险的地方。
+  assert.ok(checked >= 24, `只检查了 ${checked} 行状态，锚点可能变了`)
 })
 

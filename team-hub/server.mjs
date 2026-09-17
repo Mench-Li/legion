@@ -196,6 +196,18 @@ import {
   rolePackCounts,
 } from './role-pack-store.mjs'
 import {
+  DECISION_SOURCES,
+  SOURCE_DECISIONS,
+  SOURCE_REPAIR_ACTIONS,
+  TOOL_CALL_TABLE,
+  countBySource,
+  ensureToolCallSchema,
+  explainRejection,
+  readToolCall,
+  toolCallIdempotencyKey,
+  toolCallLogEvidence,
+} from './tool-call-log.mjs'
+import {
   PACK_FACT_ERRORS,
   appendPackFact,
   ensurePackFactSchema,
@@ -627,6 +639,26 @@ ensureExperienceSchema(db)
  * 逐字比对钉住（再抄一遍互相核对时，两边一起写错它全绿）。
  */
 ensureConnectorSchema(db)
+
+/**
+ * PRT-610 工具调用账（`tool_calls`）。
+ *
+ * ★★ 这张表此前**从来没有在生产进程里被建起来过**：`ensureToolCallSchema` 写得很完整
+ * （表 + 4 个索引 + 三个写入函数 + 两个状态机守卫），`release-gate.mjs` 也早就有一项
+ * 就绪判据在等它（`decisionSourceRecorded`），而 `server.mjs` 这里**一行都不调**——
+ * 全仓对 `tool_calls` 的引用只有注释与用例。
+ *
+ *   > 一个「模块写好了、判据也留好了」的表，
+ *   > 与一个「从来没有被 CREATE 过」的表，在"决定来源有没有被记录"上是同一个东西——
+ *   > 只不过前者的证据看起来更充分。
+ *
+ * 而且它的创建位置**本身就是一条判据**：表只在这里建 ⇒ 没有别的模块能先在
+ * 别处建一张同名的、少几列的表，让这三条索引与那三个写入函数悄悄对不上。
+ *
+ * ⚠️ 这里只建表，**不**在这里写记录：写入方是执行面（它才知道一次调用被谁拦下）。
+ * 本进程负责的是"这笔账有地方可记、且有 HTTP 面能读"（见下面的 `/api/tool-calls*`）。
+ */
+ensureToolCallSchema(db)
 
 /**
  * 模型档案仓储（PRT-501，spec §6.6）。
@@ -7240,6 +7272,98 @@ async function handle(req, res, stripPrefix) {
           actor: body.actor ?? null,
         }),
       }))
+      return
+    }
+    // ── PRT-610 工具调用账（`tool_calls`）───────────────────────────────
+    //
+    // spec §6.8 line 480：「`tool_calls` 必须记录决定来源；否则事后无法区分
+    // 策略拒绝与沙箱兜底拒绝，而这两类的**修复动作不同**。」
+    //
+    // 三条路由，形状与只读统计面一致：
+    //   · `GET  /api/tool-calls`              按来源分组统计（"两类拒绝"的最直接读法）
+    //   · `GET  /api/tool-calls/evidence`     ★ 就绪判据 `decisionSourceRecorded` 的**产出点**
+    //   · `GET  /api/tool-calls/repair`       拿一条拒绝，直接读出"该去改哪里"
+    //
+    // ★★ **刻意没有写路径。** 与 F-15 的用量路由同一个理由，而且这里更硬：
+    // 一次工具调用的账要记「原始输入 + canonical 输入 + 哈希 + 决定来源 + 结果状态」，
+    // 其中 `rawInput`/`canonicalInput` 必须来自**那一次真实的执行**（它们要被对起来，
+    // 见 `assertCanonicalMatchesRaw`）。放一条"手工记一笔"的 HTTP 写口，等于允许
+    // 控制面凭空造出一条"执行过"的记录——
+    //
+    //   > 一个「可以由外部直接写入」的执行账，
+    //   > 与一个「审计里的执行历史可以是任意值」的账，是同一个东西。
+    //
+    // 所以写侧只有一个入口：执行面调 `recordToolCall`。本进程只提供**读**与建表。
+    if (path === '/api/tool-calls' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      // `decision` 可筛（只看拒绝），但**不**给"按 runId 筛"——那需要给
+      // `countBySource` 加一个它今天没有的参数，而加参数就会引入"两个地方各算一遍"。
+      const decision = url.searchParams.get('decision')
+      json(res, 200, {
+        ok: true,
+        table: TOOL_CALL_TABLE,
+        // 每个来源各自可能的决定（审计口径）：让人能看出"这一栏里缺少哪一类"
+        sourceDecisions: Object.fromEntries(
+          DECISION_SOURCES.map((s) => [s, [...SOURCE_DECISIONS[s]]]),
+        ),
+        // 每个来源该去改哪里——§6.8 line 480 那句"修复动作不同"的落地
+        sourceRepairActions: Object.fromEntries(
+          DECISION_SOURCES.map((s) => [s, SOURCE_REPAIR_ACTIONS[s]]),
+        ),
+        counts: countBySource({ db, decision: decision === null || decision === '' ? null : decision }),
+      })
+      return
+    }
+    // ★★★ `/api/tool-calls/evidence` —— **就绪判据的产出点**（放在 `/api/tool-calls` 之后，
+    // 否则前缀会先把这个更长的路径吃掉；这个顺序本身就是一处会安静失效的地方）。
+    //
+    // 它存在之前，`release-gate.mjs` 的 `decisionSourceRecorded` 在全仓**没有任何产出者**：
+    // 那一项写得很谨慎（"缺失的证据不是证据"），于是它永远判否——
+    //
+    //   > 一个「判据说缺少证据、而没有任何地方能提供证据」的判据，
+    //   > 与一个「永远判否」的判据，是同一个东西——只不过前者看起来更谨慎。
+    //
+    // 证据**从库里读**，不由调用方传一个它自己相信的布尔：这一项问的是生产事实。
+    if (path === '/api/tool-calls/evidence' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const ev = toolCallLogEvidence({ db })
+      json(res, 200, {
+        ok: true,
+        ...ev,
+        // 就绪判据直接吃这个字段。★ 严格布尔比较（不是 truthy）：
+        // `'false'` 这个字符串是 truthy，而这正是"把没记录读成记录"的形状。
+        decisionSourceRecorded: ev.recorded === true,
+      })
+      return
+    }
+    // `/api/tool-calls/repair` —— 拿一条拒绝，直接读出修复动作。
+    //
+    // 这是 §6.8 line 480 最终要服务的那个人：值班的人拿着一条拒绝记录，
+    // 要能立刻知道"该去改哪里"。缺了它，那条"两类修复动作不同"就只是文档里的一句话。
+    if (path === '/api/tool-calls/repair' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const callId = url.searchParams.get('callId')
+      if (callId === null || callId.trim() === '') {
+        json(res, 400, {
+          error: 'repair 需要 callId——一条拒绝的修复动作由**它的来源**决定，'
+            + '没有 callId 就只能靠猜，而猜错的修复动作会把人指向错误的文件',
+          code: 'TOOL_CALL_REPAIR_NEEDS_CALL_ID',
+        })
+        return
+      }
+      // ★ 键是 `callId`（§6.5 line 478：执行身份是"这一次调用"，不是内容哈希）。
+      //   这里复用 `toolCallIdempotencyKey` 而不是自己 trim：两处各归一化一次
+      //   就会出现"用 A 的键写、用 B 的键读"——而那样查不到与没记录过长得一样。
+      const row = readToolCall({ db, idempotencyKey: toolCallIdempotencyKey({ callId }) })
+      if (row === null) {
+        json(res, 404, {
+          error: `没有 callId=${JSON.stringify(callId)} 的记录`,
+          code: 'TOOL_CALL_NOT_FOUND',
+        })
+        return
+      }
+      // `explainRejection` 对非拒绝行返回 ok:false 而不是抛——照原样透出去。
+      json(res, 200, { ok: true, call: row, repair: explainRejection(row) })
       return
     }
     // ── F-15 用量汇总 ──────────────────────────────────────────────────

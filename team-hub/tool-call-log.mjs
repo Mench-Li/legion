@@ -491,6 +491,111 @@ export function countBySource({ db, decision = null } = {}) {
   }))
 }
 
+// ------------------------------------------------------------------ 就绪证据
+
+/**
+ * ★★★ 产出「`tool_calls` 到底在不在记 `decisionSource`」的**就绪证据**。
+ *
+ * ## 为什么需要这个函数（而不是让调用方自己看一眼）
+ *
+ * `runtime/dsh-composition/release-gate.mjs` 有一项就绪判据：
+ *
+ *     record('decision-source', evidence.decisionSourceRecorded === true, …)
+ *
+ * 它的注释写着「`undefined`（没人告诉我们）按**否**处理：这一项问的是"有没有证据"，
+ * 而缺失的证据不是证据」。可是在本次改动之前，**全仓没有任何一处产出这个字段**：
+ * 生产链上唯一的取值点是 `release-gate.mjs:362`，而那是 `NOT_READY` 那个**测试
+ * 夹具常量**里写死的 `false`。
+ *
+ *   > 一个「判据说缺少证据、而没有任何地方能提供证据」的判据，
+ *   > 与一个「永远判否」的判据，是同一个东西——只不过前者看起来更谨慎。
+ *
+ * 更要紧的是，这一项**不是**靠"模块写没写好"能回答的，它问的是**生产事实**：
+ * 这张表在这套部署里建起来了没有、写进去的行有没有 `decisionSource`。
+ * 所以证据必须**从库里读**，不能由调用方传一个自己相信的布尔。
+ *
+ * ## 三态：`absent` / `unreadable` / `readable`
+ *
+ *   · `absent`      —— 表还不存在。这是**全新部署的正常状态**，不是故障。
+ *   · `unreadable`  —— 表在，但这次读失败了（库文件被锁、被换掉、schema 中途变过）。
+ *                      **必须**与 `absent` 分开：
+ *
+ *       > 一个「把读失败报成『表还没建』」的读数，
+ *       > 与一个「把库损坏报成『全新部署』」的读数，是同一个东西——
+ *       > 而它的表现是安全项被**跳过**，并且没人会去查。
+ *
+ * ## `recorded` 的判定：**结构**要求，不是计数要求
+ *
+ * 只要表在、且 `decisionSource` 非空的行**存在一条**，就是 `true`。
+ * 不要求"至少 N 条"：这验的是"这条列真的在写"，不是"有多少流量"。
+ * 但 `0 行` 表与 `不知道` 必须分得开，所以 `recorded` 是**布尔**、而上面三态是
+ * **字符串**，两者同时给出，调用方与人都读得到各自那份。
+ *
+ * ## 不抛错
+ *
+ * 它读的是**证据**，不是判据。就绪判据在 `release-gate.mjs`；把判断塞进这里
+ * 会让"两处对同一件事的判断"再次出现——它们迟早不一样。
+ */
+export function toolCallLogEvidence({ db } = {}) {
+  if (db === null || typeof db !== 'object' || typeof db.prepare !== 'function') {
+    throw new TypeError('toolCallLogEvidence 需要 db（且必须有 prepare）')
+  }
+  // 表存不存在：查 sqlite_master，不靠"试着 SELECT 然后 catch"——
+  // catch 会把"表不存在"和"库损坏"混成一个分支，而那正是本函数要分开的两件事。
+  let tablePresent
+  try {
+    const hit = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
+      .get(TOOL_CALL_TABLE)
+    tablePresent = hit !== undefined && hit !== null
+  } catch (err) {
+    return Object.freeze({
+      state: 'unreadable',
+      table: TOOL_CALL_TABLE,
+      recorded: false,
+      reason: `读 sqlite_master 失败：${err?.message ?? String(err)}`,
+    })
+  }
+  if (!tablePresent) {
+    return Object.freeze({
+      state: 'absent',
+      table: TOOL_CALL_TABLE,
+      recorded: false,
+      reason: '表尚未建立（全新部署的正常状态，不是故障）',
+    })
+  }
+  try {
+    // 只要**一条**有来源的行就够。用 COUNT 而不是 LIMIT 1 是为了同时给出规模，
+    // 而规模本身**不**参与 recorded 的判定（见上）。
+    const row = db
+      .prepare(
+        `SELECT COUNT(*) AS total,
+                SUM(CASE WHEN decisionSource IS NOT NULL AND decisionSource <> '' THEN 1 ELSE 0 END) AS sourced
+         FROM ${TOOL_CALL_TABLE}`,
+      )
+      .get()
+    const total = Number(row?.total ?? 0)
+    const sourced = Number(row?.sourced ?? 0)
+    return Object.freeze({
+      state: 'readable',
+      table: TOOL_CALL_TABLE,
+      recorded: sourced > 0,
+      total,
+      sourced,
+      reason: sourced > 0
+        ? `已有 ${sourced} 条记录带着决定来源（共 ${total} 条）`
+        : `表在，但 ${total} 条记录里没有一条带着决定来源`,
+    })
+  } catch (err) {
+    return Object.freeze({
+      state: 'unreadable',
+      table: TOOL_CALL_TABLE,
+      recorded: false,
+      reason: `表在，但读取失败：${err?.message ?? String(err)}`,
+    })
+  }
+}
+
 // ---------------------------------------------------------------- 装载时自检
 
 /**

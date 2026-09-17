@@ -388,6 +388,22 @@ export const SCHEMA = defineSchema({
     'CONNECTOR_VERSION_CONFLICT', 'CONNECTOR_TOOL_DUPLICATE', 'CONNECTOR_TOOLS_EMPTY',
     'CONNECTOR_EVENT_MALFORMED', 'CONNECTOR_CIRCUIT_STATE_UNKNOWN',
     'CONNECTOR_WRITE_FAILED', 'CONNECTOR_READ_FAILED',
+    // PRT-610 工具调用账的读面（`GET /api/tool-calls*`，team-hub/server.mjs）。
+    //
+    // 这两个码是**读**路径上的，而读路径之所以需要具名码，是因为它们各自
+    // 对应一个**不同的动作**：
+    //
+    // `TOOL_CALL_REPAIR_NEEDS_CALL_ID` —— **400**。值班的人问"这条拒绝该去改哪里"，
+    //   而修复动作由**它的来源**决定（§6.8 line 480：策略拒绝与沙箱兜底的修法不同）。
+    //   没有 callId 时唯一能做的就是猜，而猜错的修复动作会把人指向错误的文件。
+    //   ★ 这里**不是** 404：404 的意思是"你要的那条记录不存在"，
+    //   而这件事是"你没说是哪一条"——两者的下一步动作完全不同。
+    //
+    // `TOOL_CALL_NOT_FOUND` —— **404**。这次是"确实没有这条记录"，
+    //   与上面那个码刻意分开：`0 与不知道必须分得开`。
+    //   把它写成 400 会让调用方去改请求体，而它该做的是去查为什么这次调用
+    //   根本没有落账（那本身就是一个应该被追的问题）。
+    'TOOL_CALL_REPAIR_NEEDS_CALL_ID', 'TOOL_CALL_NOT_FOUND',
     // spec §6.7 凭证管理的**写**一半（team-hub/secret-admin.mjs）。
     //
     // 在它之前，`security/secrets/store.mjs` 的 put/rotate/remove 在整个仓库里

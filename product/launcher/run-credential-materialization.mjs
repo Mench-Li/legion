@@ -295,7 +295,39 @@ export function resolveDshBaseBundlePatchPath({ runtimeCommand = null, requireFn
     // 判据按"有没有那个方法"来，而不是按"是不是函数"：一个按后者写的判据会把
     // 所有以对象形状注入的替代实现（用例最自然的注入形状）当成"没注入"，
     // 于是走进 `createRequire` 那条真实路径去解析一个不存在的入口。
-    const usable = (r) => r !== null && typeof r === 'object' && typeof r.resolve === 'function'
+    //
+    // ★★★ 第一版把这条注释**写反着实现了**，而它是一处**真实的生产缺陷**：
+    //
+    //        const usable = (r) => r !== null && typeof r === 'object' && typeof r.resolve === 'function'
+    //                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^ 这一段
+    //
+    //   上面那句注释防的是"按**是不是函数**来判"，而这一行加的是
+    //   **"必须是对象"**——它正好是同一个错误的镜像，而后者的后果更重：
+    //
+    //     | 注入方 | 形状 | 旧判据 |
+    //     |---|---|---|
+    //     | 用例 | `{ resolve }`（对象） | ✅ 通过 |
+    //     | **生产**（`createRequire(entry)`） | **函数**带 `.resolve` | ❌ **被当成"没注入"** |
+    //
+    //   而它被拒之后的走向不是"报错"，是 `return null` ⇒ 调用方翻成
+    //   `DSH_DECLARATION_UNLOCATABLE` ⇒ 覆盖层退回**空操作**。
+    //   也就是说：**自动映射这条路在生产里一次都没有成功过**，
+    //   而它的读数是一条看起来完全正常的具名降级。
+    //
+    //   > 一个"只在用例注入的那个形状下能跑"的解析器，
+    //   > 与一个"在生产里恒不工作"的解析器，是同一个东西——
+    //   > 只不过前者的用例是绿的，而绿的理由恰恰是
+    //   > **用例注入的形状与生产拿到的形状不是同一个**。
+    //
+    //   实测（`scratch/probe-patch-resolution-precise.mjs`，真 DSH 检出）：
+    //   同一个入口，`createRequire(entry).resolve('@deepseek-ai/dsh-base/cordis.patch.yml')`
+    //   明明解析得到 `packages/bundle/base/cordis.patch.yml`，
+    //   而走这个函数返回 `null`。
+    //
+    //   所以判据收成一句：**有 `.resolve` 就能用**（对象或函数都行）。
+    const usable = (r) => r !== null && r !== undefined
+      && (typeof r === 'object' || typeof r === 'function')
+      && typeof r.resolve === 'function'
     if (!usable(req)) {
       if (!isAbsolute(entry)) return null
       req = createRequire(entry)

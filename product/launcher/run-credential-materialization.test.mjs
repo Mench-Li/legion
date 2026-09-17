@@ -189,6 +189,61 @@ test('定位：`createRequire(入口)` 的替代可注入；认不出入口时�
   }), null)
 })
 
+// ══════════════════════════════════════════════════════════════════════════
+// 定位 · 续：**生产真的会传进来的那个形状**
+// ══════════════════════════════════════════════════════════════════════════
+
+test('定位 · 续 ★★★ 生产的形状是**函数**（`createRequire()` 的产物），不是对象', () => {
+  // 这一条是从下面那个真实缺陷里长出来的，所以它必须写清**为什么原来没被发现**：
+  //
+  //   上面那条用例注入的是 `{ resolve }`——一个**对象**。而生产走到
+  //   "不注入"那条路时拿到的是 `createRequire(entry)`，它的产物**是一个函数**，
+  //   只不过带着 `.resolve` 方法。第一版的判据写着 `typeof r === 'object'`，
+  //   于是：
+  //
+  //     | 形状 | 来源 | 旧判据 |
+  //     |---|---|---|
+  //     | `{ resolve }` | **只有用例** | ✅ |
+  //     | 函数带 `.resolve` | **只有生产** | ❌ 被当成"没注入" ⇒ `return null` |
+  //
+  //   后果不是报错，是 `DSH_DECLARATION_UNLOCATABLE` ⇒ 覆盖层退回空操作：
+  //   **自动映射这条路在生产里一次都没有成功过**，而它的读数是一条
+  //   看起来完全正常的具名降级。
+  //
+  //  > 一个"只在用例注入的那个形状下能跑"的解析器，
+  //  > 与一个"在生产里恒不工作"的解析器，是同一个东西——
+  //  > 只不过前者的用例是绿的，而绿的理由恰恰是
+  //  > **用例注入的形状与生产拿到的形状不是同一个**。
+  //
+  // 所以这一条**必须**用一个函数（而不是对象）来钉。用对象再测一遍是重复，
+  // 而重复正是原来那处缺陷藏身的方式。
+  const seen = []
+  function fakeRequire() { /* createRequire() 的产物是函数 */ }
+  fakeRequire.resolve = (spec) => { seen.push(spec); return '/tmp/prod-shaped/cordis.patch.yml' }
+  assert.equal(typeof fakeRequire, 'function', '前提：这个替身必须**是函数**，否则本用例证明不了那一处')
+
+  const got = resolveDshBaseBundlePatchPath({
+    runtimeCommand: { file: 'node', args: ['/tmp/dsh/lib/bin.js'] },
+    requireFn: fakeRequire,
+  })
+  assert.equal(got, '/tmp/prod-shaped/cordis.patch.yml',
+    '★ 函数形状的 `requireFn` 被拒了——生产的 `createRequire(entry)` 正是这个形状，' +
+    '于是自动映射在生产里恒返回 null（表现是一条看起来正常的 DSH_DECLARATION_UNLOCATABLE）')
+  assert.deepEqual(seen, ['@deepseek-ai/dsh-base/cordis.patch.yml'],
+    '要解析的说明符必须**逐字**是 DSH 那个包的导出子路径——写成别的名字会让"读不到声明"看起来像"DSH 没声明"')
+
+  // 反向：函数形状但**没有** `.resolve` ⇒ 仍然不可用（不是"凡函数皆可"）。
+  const naked = () => {}
+  assert.equal(resolveDshBaseBundlePatchPath({
+    runtimeCommand: { file: 'node', args: ['/tmp/dsh/lib/bin.js'] },
+    requireFn: naked,
+  }), null, '一个没有 `.resolve` 的函数不该被当成可用——那会让下一步抛在 resolve 上，而不是这里')
+  assert.equal(resolveDshBaseBundlePatchPath({
+    runtimeCommand: { file: 'node', args: ['/tmp/dsh/lib/bin.js'] },
+    requireFn: 'not-a-require',
+  }), null, '字符串同样不可用（判据是"有没有 .resolve"，不是"是不是真值"）')
+})
+
 // ---------------------------------------------------------------- 完整一步
 
 /** 造一份"像真的"的 base bundle 补丁文件，供 `requireFn` 指过去。 */

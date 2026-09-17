@@ -73,8 +73,9 @@
 |---|---|---|
 | F-05 前半 | 13 种契约事件里 **11 种读完即弃**（`executor.mjs` 的 `else` 什么都不做） | `run-events.test.mjs` 18 例；三条出口都带明细 |
 | F-05 后半 | `broadcastAudit` 丢掉 `res.write` 返回值 ⇒ 读数是"发过了" | `event-delivery*.test.mjs` 38 例；`delivered` 只能 CAS 得到 |
-| F-16 | 能力**完全不存在**（grep `skipOnOverlap`/`scheduleStore` 零命中） | `automation-store.test.mjs` 22 例 + `automation-http.test.mjs` 7 例 |
+| F-16 | 能力**完全不存在**（grep `skipOnOverlap`/`scheduleStore` 零命中） | `automation-store.test.mjs` 27 例 + `automation-http.test.mjs` 9 例 |
 | F-17 | 能力**完全不存在**（grep `compact` 零命中） | `compaction-store.test.mjs` 14 例 + `compaction-http.test.mjs` 5 例 |
+| F-15 | 闸门齐全而**汇总不存在**（grep `evidenceAggregate`/`rollup` 零命中）：`budget-ledger` 记了 `usage_records`，但"按员工花了多少"没有一个读出口 | `usage-rollup.test.mjs` 12 例 + `usage-rollup-http.test.mjs` 6 例 |
 | PRT-509 B1 | `secretsRun`/`secretsOwner` 全仓只有声明与传参两处，**没有生产调用方** ⇒ 恒为 `ACL_NO_RUNNER` | `secrets-acl-runner.test.mjs` 12 例（含真 `whoami`+真 `icacls`） |
 
 一条值得单独记下的判据：**F-05 后半的三条设计纪律各自对应一个真实的失效方向**，
@@ -96,9 +97,30 @@
   `state = 'active'` —— 那会命中 `WHERE` 读屏障，一条会对着正确代码报警的守卫，
   与一条不存在的守卫，在被人手动关掉之后是同一个东西）。
 
+**F-15 与 F-16 各有一个"看起来更好读、实际更坏"的写法**，两条都写进了判据：
+
+- **F-15**：五个维度里每一个数字都有一个**"不知道"的邻居**，而把它们合并成
+  一个读数是这类报表最典型的失效——`SUM()` 把 `NULL` 当 0 加进去之后，
+  "这次运行没采集到 token"与"这次运行确实用了 0 个 token"在同一格里；
+  缺价的金额被算成 0 会**低估总成本**，而总额看上去完全正常。
+  所以每一行都带 `tokensUnknownRecords` / `amountUnknownRecords`，
+  未结束的 Attempt 单列 `inFlightAttempts`（用 `now - created` 顶替会把
+  "卡住了"画成"正在跑"），混币种时 `currency` 报 `null` 且 `mixedCurrency:true`
+  （替调用方换算需要汇率，而汇率是一个会随时间变的外部事实）。
+  另有一条**第一版真的写错**的：耗时按 Attempt 算，不许 JOIN 到
+  `usage_records`——一条 Attempt 记 N 笔账就会被算 N 次，
+  而"每条恰好记一笔"的那个月里完全看不出来（用例⑦与结构级用例⑫钉住它）。
+- **F-16**：`payload` 的**三态**必须分开。`null` 同时表示"不改"与"清掉"时，
+  用户想把一条计划从"建任务"改成"只提醒"，那次调用**什么都没改**、
+  界面显示成功、计划继续建任务；而 `payload` 透传会开一条绕过
+  `createTaskInTx` 的路（`payload.status='done'` 直接写进任务行，
+  那里"初始状态只能 backlog/todo"的校验被跳过）。
+  没配 `payload` 时**只物化、不建任务**，且这不是错误——
+  建一个标题为空的占位任务会让 worker 领到一张只能靠猜的卡。
+
 ### 2.1 关于"基线漂移"这件事
 
-本轮新增 3 张业务表 + 7 张（含 F-05 的 2 张）协议表与 14 条路由，
+本轮新增 3 张业务表 + 9 张（含 F-05 的 2 张）协议表与 16 条路由，
 因此 `scripts/prt/baseline-snapshot.mjs` 的契约基线**必须刷新**——
 运行 `--diff` 得到的漂移清单是**且仅是**本轮有意新增的那些：
 
@@ -106,9 +128,15 @@
 + 数据表: automation_runs / automation_schedules / compaction_messages /
           compaction_summaries / event_deliveries / event_subscribers / run_events
 + 路由:   GET/POST /api/automation/*（6）、/api/compaction/*（5）、
-          GET /api/event-delivery、GET /api/runtime/run-events
-~ 源文件已变更：team-hub/server.mjs、team-hub/run-store.mjs
+          GET /api/event-delivery、GET /api/runtime/run-events、
+          GET /api/usage/{totals,rollup}（2）
+~ 源文件已变更：team-hub/server.mjs、team-hub/run-store.mjs、
+                team-hub/automation-store.mjs
 ```
+
+`team-hub/automation-store.mjs` 与 `team-hub/usage-rollup.mjs` 的列变化
+（`automation_schedules.payload_json`）走 `ensureColumn`，
+因此是**老库可平滑升级**的加列，不是破坏性迁移。
 
 ★ 这三个建表模块**是被门禁自己要求登记的**：`prt-baseline` 的用例⑤
 （"每个建表模块都登记进了 schema 采集"）当场报出
@@ -119,8 +147,8 @@
 
 | 编号 | 名称 | 状态 | 代码落点 | 还差什么 |
 |---|---|---|---|---|
-| F-15 | 用量/费用与预算 | 🟡 | `team-hub/budget-ledger.mjs`、`runtime/contracts/price-table.mjs` | PRT-503/510/511 已落地；**成本刻已采**（$0.045086 实测），`peak-resource` 仍缺（PRT-009 🟡，阻塞于 PRT-011 平台裁决） |
-| F-16 | 自动化计划 | ✅ | `team-hub/automation-store.mjs`、`server.mjs`（6 条路由 + 30s tick） | ★ `automationTick` 返回 `wired:false`——**物化 ≠ 跑起来**：把 `scheduled` 变成可领任务需要"计划 → 目标"的映射（编排面，未接线） |
+| F-15 | 用量/费用与预算 | 🟡 | `team-hub/budget-ledger.mjs`、`team-hub/usage-rollup.mjs`、`runtime/contracts/price-table.mjs` | PRT-503/510/511 已落地；**成本刻已采**（$0.045086 实测）；本轮补上**五维度汇总**（`usage-rollup.test.mjs` 12 例 + `usage-rollup-http.test.mjs` 6 例真 HTTP）。`peak-resource` 仍缺（PRT-009 🟡，阻塞于 PRT-011 平台裁决） |
+| F-16 | 自动化计划 | ✅ | `team-hub/automation-store.mjs`、`server.mjs`（6 条路由 + 30s tick） | `automation-store.test.mjs`（27 例）+ `automation-http.test.mjs`（9 例真 HTTP）。★ 本轮补上 `payload` 任务模板与 `bindTask`，`automationTick` 从 `wired:false` 变为 **`wired:true`**：物化出的运行会按计划模板建出一张**可领取**的任务卡 |
 | F-17 | 长会话压缩 | ✅ | `team-hub/compaction-store.mjs`、`server.mjs`（5 条路由） | `compaction-store.test.mjs`（14 例）+ `compaction-http.test.mjs`（5 例真 HTTP）。★ 刻意**不调用模型**：收的是已算好的摘要文本 |
 | F-18 | 经验/上下文召回 | 🟡 | `plugins/src/experienceRecall.ts` | 属 `plugins/` 旧路径，未纳入 Product Runtime |
 | F-19 | 知识库 | 🟡 | 同上 | 同上 |
@@ -164,13 +192,14 @@ node scripts/ci/run-ci.mjs
 
 # 只跑本轮新增的套
 node scripts/ci/run-ci.mjs --only test   # 然后在输出里找：
-#   run-events / event-delivery / automation / compaction
+#   run-events / event-delivery / automation / compaction / usage-rollup
 
 # 单独复跑
 node --test team-hub/run-events.test.mjs
 node --test team-hub/event-delivery.test.mjs team-hub/event-delivery-wiring.test.mjs
 node --test team-hub/automation-store.test.mjs team-hub/automation-http.test.mjs
 node --test team-hub/compaction-store.test.mjs team-hub/compaction-http.test.mjs
+node --test team-hub/usage-rollup.test.mjs team-hub/usage-rollup-http.test.mjs
 node --test product/launcher/secrets-acl-runner.test.mjs
 
 # 配置面（新增字面量必须登记）

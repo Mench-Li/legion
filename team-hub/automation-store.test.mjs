@@ -41,6 +41,7 @@ import {
   isRunState,
   nextOccurrenceAfter,
   projectOccurrences,
+  validatePayload,
   validateSpec,
   wallTimeToUtcMs,
   zonedParts,
@@ -511,4 +512,119 @@ test('㉒ 接线：schema 由 server 建，且 run 状态词表与判定函数�
     assert.equal(project.includes(forbidden), false,
       `projectOccurrences 里出现了 ${forbidden} —— 投影必须是纯函数`)
   }
+})
+
+// ---------------------------------------------------------------- ⑦ payload / bindTask
+
+test('㉓ ★ payload：省略是合法的（不建任务），给了就必须有非空 title', () => {
+  // 省略 / null ⇒ 不建任务，且**不是错误**。纯提醒型计划是合法用法。
+  assert.equal(validatePayload(undefined), null)
+  assert.equal(validatePayload(null), null)
+  const env = makeEnv()
+  try {
+    const s = env.store.createSchedule({
+      id: 's1', scope: 'software', name: 'x', spec: daily(9), timezone: TZ,
+    })
+    assert.equal(s.payload, null, '没给 payload 却造出了一个模板')
+    // 空标题必须被拒绝 —— 标题为空的卡在任务板上与"还没起名"同形，
+    // 而领走它的 worker 无从知道这次要做什么。
+    assert.throws(() => env.store.createSchedule({
+      id: 's2', scope: 'software', name: 'x', spec: daily(9), timezone: TZ,
+      payload: { title: '   ' },
+    }), (e) => e.code === AUTOMATION_ERRORS.BAD_PAYLOAD)
+    assert.throws(() => env.store.createSchedule({
+      id: 's2', scope: 'software', name: 'x', spec: daily(9), timezone: TZ, payload: 'nope',
+    }), (e) => e.code === AUTOMATION_ERRORS.BAD_PAYLOAD)
+    assert.throws(() => env.store.createSchedule({
+      id: 's2', scope: 'software', name: 'x', spec: daily(9), timezone: TZ,
+      payload: { title: 'ok', priority: 'whatever' },
+    }), (e) => e.code === AUTOMATION_ERRORS.BAD_PAYLOAD)
+    // ★ 坏模板的计划**一行都不留**：到点才发现模板是坏的，
+    //   那一次运行（scheduled 行）已经产生了，于是坏模板变成一批
+    //   永远建不出任务的孤儿运行行。
+    assert.equal(env.db.prepare('SELECT COUNT(*) AS n FROM automation_schedules').get().n, 1)
+  } finally { env.dispose() }
+})
+
+test('㉔ ★ payload 只收封闭字段，其余**原样丢掉并报出来**（不做透传）', () => {
+  const v = validatePayload({ title: 'ok', description: 'd', role: 'soldier', priority: 'high', status: 'done', evil: 1 })
+  assert.equal(v.title, 'ok')
+  assert.equal(v.priority, 'high')
+  // `status` 不在允许清单里 ⇒ 被丢掉。做 payload 透传会开一条绕过
+  // `createTaskInTx` 的路：`payload.status='done'` 会直接写进任务行，
+  // 而那里"初始状态只能 backlog/todo"的校验就被跳过了。
+  assert.equal(v.status, undefined, 'payload 被透传了 —— 能绕过建任务入口的状态校验')
+  assert.deepEqual([...v.droppedKeys].sort(), ['evil', 'status'], '丢掉的键没有被报出来')
+  // 默认优先级。
+  assert.equal(validatePayload({ title: 'ok' }).priority, 'medium')
+  // role / goalId 的空串归一成 null（不是空串）。
+  const v2 = validatePayload({ title: 'ok', role: '  ', goalId: '' })
+  assert.equal(v2.role, null)
+  assert.equal(v2.goalId, null)
+})
+
+test('㉕ ★ updateSchedule 的 payload 三态：不改 / 显式清掉 / 换掉', () => {
+  const env = makeEnv()
+  try {
+    const s = env.store.createSchedule({
+      id: 's1', scope: 'software', name: 'x', spec: daily(9), timezone: TZ,
+      payload: { title: '第一版' },
+    })
+    assert.equal(s.payload.title, '第一版')
+    // ① 不传 ⇒ 保持原样。
+    assert.equal(env.store.updateSchedule({ id: 's1', name: '改名' }).payload.title, '第一版',
+      '没传 payload 却把它改了')
+    // ② 对象 ⇒ 换掉。
+    assert.equal(env.store.updateSchedule({ id: 's1', payload: { title: '第二版' } }).payload.title, '第二版')
+    // ③ `null` ⇒ **显式清掉**（此后这条计划只物化、不建任务）。
+    const cleared = env.store.updateSchedule({ id: 's1', payload: null })
+    assert.equal(cleared.payload, null,
+      '显式传 null 没有清掉 —— 用户想把一条计划从"建任务"改成"只提醒"，'
+      + '调用返回成功而计划继续建任务，而它什么时候会停下来没人知道')
+    // 清掉之后再"不传"仍然是清掉的状态（不会被旧值复活）。
+    assert.equal(env.store.updateSchedule({ id: 's1', name: '再改名' }).payload, null)
+    // 清掉之后可以再装上。
+    assert.equal(env.store.updateSchedule({ id: 's1', payload: { title: '第三版' } }).payload.title, '第三版')
+  } finally { env.dispose() }
+})
+
+test('㉖ ★ bindTask：只许绑一次，第二次**报出来**而不是覆盖', () => {
+  const env = makeEnv()
+  try {
+    env.store.createSchedule({
+      id: 's1', scope: 'software', name: 'x', spec: { kind: 'interval', everyMs: 60_000 }, timezone: TZ,
+      payload: { title: '巡检' },
+    })
+    const at = env.store.scheduleOf('s1').nextRunAtMs + 1000
+    env.setNow(at)
+    const run = env.store.materializeDue().results.find((x) => x.action === 'materialized')
+    assert.ok(run !== undefined)
+    assert.equal(env.store.runOf(run.runId).taskId, null, '物化时就该是未绑定')
+    const first = env.store.bindTask(run.runId, 'T-1')
+    assert.equal(first.bound, true)
+    assert.equal(first.run.taskId, 'T-1')
+    // ★ 第二次**不覆盖**：允许覆盖会让"这条运行对应哪个任务"变成一个
+    //   可以改的字段，而重跑一次 tick 会把上一轮已经建好、可能已经被
+    //   worker 领走的任务替换成一条新的——那条被替换的任务在任务板上
+    //   仍然存在，只是再没有任何运行记录指向它。
+    const second = env.store.bindTask(run.runId, 'T-2')
+    assert.equal(second.bound, false, '重复绑定被当成了成功')
+    assert.equal(second.reason, 'already-bound')
+    assert.equal(second.previousTaskId, 'T-1')
+    assert.equal(env.store.runOf(run.runId).taskId, 'T-1', 'task_id 被覆盖了')
+    // 空 taskId 与未知运行都具名拒绝。
+    assert.throws(() => env.store.bindTask(run.runId, '  '),
+      (e) => e.code === AUTOMATION_ERRORS.RUN_NOT_FOUND)
+    assert.throws(() => env.store.bindTask('nope', 'T-9'),
+      (e) => e.code === AUTOMATION_ERRORS.RUN_NOT_FOUND)
+  } finally { env.dispose() }
+})
+
+test('㉗ ★ bindTask 的 CAS 写死在 SQL 里（`WHERE task_id IS NULL`），不是应用层判断', () => {
+  const src = readFileSync(join(HERE, 'automation-store.mjs'), 'utf8')
+  const fn = src.slice(src.indexOf('function bindTask'), src.indexOf('function runsOf'))
+  assert.match(fn, /WHERE id = \? AND task_id IS NULL/,
+    'bindTask 只做了应用层判空 —— 两个并发调用会各查一次、各写一次，都以为自己赢了')
+  // 绑定的"事实"必须落在运行行上，而不是只回给调用方。
+  assert.match(fn, /UPDATE automation_runs SET task_id/)
 })

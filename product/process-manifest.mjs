@@ -183,6 +183,22 @@ export const PROCESS_SPECS = Object.freeze([
     envNames: Object.freeze([
       'TEAM_HUB_URL', 'TEAM_HUB_TOKEN', 'LEGION_DATA_DIR',
       'LEGION_RUNTIME_URL', 'LEGION_RUNTIME_TOKEN',
+      // ★ PRT-253 续批五：`LEGION_WORKSPACE_DIR` 是 worker **唯一**的项目目录来源。
+      //
+      // 缺了它，`readWorkerEnv()` 的 `workspaceDir` 是 `null`，
+      // `resolveWorkspaceStages()` 返回 `{ stages: null }`，于是 worker 的状态是
+      // `no-stages`——**一个任务都不认领**。而它的外部表现只有状态文件里那一个词，
+      // 没有任何错误：从产品上看，就是"任务一直没人做"。
+      //
+      // 这里的情况与上一个 PRT-253 续批**互为反面**，两个形状都要防：
+      //   · `LEGION_DATA_DIR` 声明了、但 Launcher 从不给值 ⇒ 起来就退 8（崩溃循环）；
+      //   · `LEGION_WORKSPACE_DIR` 连声明都没有 ⇒ `buildChildEnv()` 把宿主环境里
+      //     的同名值也**丢掉**，于是它明明配了却传不到子进程。
+      //
+      //   > 一个"没声明所以被白名单丢掉"的变量，
+      //   > 与一个"根本没配"的变量，在子进程里是同一个读数（`undefined`）——
+      //   > 只不过前者的部署方会反复确认自己明明配过了。
+      'LEGION_WORKSPACE_DIR',
     ]),
     milestone: 'PRT-301',
   }),

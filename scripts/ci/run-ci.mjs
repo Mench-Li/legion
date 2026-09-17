@@ -1569,6 +1569,26 @@ async function stageTest() {
       files: ['team-hub/compaction-store.test.mjs', 'team-hub/compaction-http.test.mjs'],
       cwd: ROOT,
     },
+    // F-15（§4.4）——用量/成本汇总：按 scope、goal、task、employee、model
+    // 记录 token、调用次数、耗时和成本。
+    //
+    // 闸门那一半（reserve/observe/settle、硬阻止、暂停、锁）已由
+    // `budget-ledger` 与 `budget-gate` 覆盖。本组补的是另一半：**把已经
+    // 记下来的事实按五个维度读出来**，而它的全部难点在于"每一个数字都有
+    // 一个'不知道'的邻居"：
+    //   · NULL token 不是 0（`SUM` 会把它当 0 加进去）
+    //   · 缺价的金额不是 0（算进去会**低估**总成本，而报表看着正常）
+    //   · 未结束的 Attempt 没有耗时（用 now-created 顶替会把"卡住"画成"在跑"）
+    //   · 未归属维度要进显式桶（丢掉它们会让各维度之和不等于总额）
+    //   · 混币种的金额之和没有意义（必须报出来，不许替调用方换算）
+    //   · 耗时**不许按记账次数重复计算**（本模块第一版真的写错了这一处：
+    //     JOIN 到 usage_records 之后一条 Attempt 被算了 N 遍，
+    //     而"每条恰好记一笔"的时候完全看不出来）
+    {
+      label: 'usage-rollup（F-15：五个维度 × 四个量，且"不知道"必须与 0 分得开）',
+      files: ['team-hub/usage-rollup.test.mjs', 'team-hub/usage-rollup-http.test.mjs'],
+      cwd: ROOT,
+    },
     // PRT-314：多 worker 并发语义。竞争者是真的**操作系统进程**，
     // 不是同一进程里的两条连接——同一事件循环里两条 BEGIN IMMEDIATE
     // 不可能真的同时发出，因此那种测法证明不了「两个进程抢的时候不会都赢」。
@@ -1651,6 +1671,19 @@ async function stageTest() {
       // （源级钉子——那个入口有顶层 await，import 不进来）。
       label: 'run-inputs（PRT-253 续批：workspaceId/modelProfileRef/workdir 的来源与接线）',
       files: ['orchestrator/worker/run-inputs.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      // PRT-214 缺口②：授权身份（`scope` / `taskId` / `cwd`）按 **Run** 生效。
+      //
+      // 这一套里最要紧的几条都是**成对**的：一个 Run 用甲空间、另一个用乙空间，
+      // 断言两边的授权哈希真的不同；再拿"没有覆盖时两边必须相同"作反面控制。
+      //
+      //   *一个"用进程级身份服务所有 Run"的实现，
+      //   与一个"每次 Run 各带各的空间身份"的实现，
+      //   在只有一个空间的那些用例里是同一个东西。*
+      label: 'run-identity（PRT-214 续：授权身份按 Run 生效，多空间不错标）',
+      files: ['runtime/dsh-composition/run-identity.test.mjs'],
       cwd: ROOT,
     },
     {

@@ -60,12 +60,24 @@ async function get(path) {
 const runCount = () => mod.db.prepare('SELECT COUNT(*) AS n FROM automation_runs').get().n
 
 let seq = 0
+/**
+ * `makeSchedule` 默认**带** payload —— 即"到点要建一张可领的任务卡"。
+ *
+ * 把它作为默认是有意的：不带 payload 的计划（纯提醒型）是**例外**，
+ * 而它自己有一条用例（④b）专门盯着"不许建占位任务"。
+ * 反过来把"不建任务"做成默认，会让绝大多数计划到点后什么也不发生，
+ * 而那种"沉默"正是本组用例要防的东西。
+ */
+const PAYLOAD = Object.freeze({ title: '计划触发的巡检', description: '由计划自动创建', role: 'soldier', priority: 'medium' })
+
 async function makeSchedule(overrides = {}) {
   seq += 1
   const id = `sched-${seq}`
   const r = await post('/api/automation/schedules', {
     id, scope: 'software', name: `计划 ${seq}`,
     spec: { kind: 'daily', hour: 9, minute: 0 }, timezone: TZ,
+    // 标题带 id，避免多条计划的卡在 `tasks` 里同名而互相干扰断言。
+    payload: { ...PAYLOAD, title: `${PAYLOAD.title} ${id}` },
     ...overrides,
   })
   assert.equal(r.status, 200, JSON.stringify(r.body))
@@ -121,10 +133,29 @@ test('④ ★ tick 物化 + skip-on-overlap 走真 HTTP，并且**与定时器�
   assert.equal(first.body.ok, true)
   const made = first.body.results.find((x) => x.action === 'materialized')
   assert.ok(made !== undefined, `没物化：${JSON.stringify(first.body.results)}`)
-  // ★ 诚实边界必须回给调用方：物化 ≠ 跑起来。
-  assert.equal(first.body.wired, false,
-    'tick 声称已接线 —— 物化出来的运行还是 scheduled，把"建出来"说成"跑起来了"'
-    + '会让界面显示有任务在跑而实际没有')
+  // ★ `wired: true` 的含义是"物化出来的运行**有机会**被执行"，
+  //   不是"它们都跑起来了"——真正的执行仍要 worker 去认领那些任务。
+  assert.equal(first.body.wired, true,
+    'tick 没有接线 —— 物化出来的运行是 scheduled，而没有任何东西会去跑它们：'
+    + '一个"记录了一堆没人执行的运行"的日历与一个真正的调度器，'
+    + '在运行历史里长得一样，都是每天一行')
+  assert.equal(first.body.tasksCreated, 1,
+    '这条计划配了 payload，物化时应该建出恰好一张任务卡')
+  // ★ 运行行必须被追到那张具体的任务卡上（`task_id`）。
+  assert.ok(made.taskId === undefined || made.taskId === null || typeof made.taskId === 'string')
+  const boundRun = mod.db.prepare('SELECT task_id AS t FROM automation_runs WHERE id = ?').get(made.runId)
+  assert.ok(typeof boundRun.t === 'string' && boundRun.t.length > 0,
+    '运行行没有 task_id —— 这张卡从"计划触发"来的这件事在任务上没有任何痕迹')
+  const task = mod.db.prepare('SELECT * FROM tasks WHERE id = ?').get(boundRun.t)
+  assert.ok(task !== undefined, 'task_id 指向了一张不存在的任务卡')
+  assert.equal(task.status, 'todo', '计划建出来的任务必须是**可领取**的（todo），否则 worker 永远看不到它')
+  assert.equal(task.scope, s.scope, '任务的 scope 必须取**计划的** scope')
+  assert.equal(task.title, `${PAYLOAD.title} ${s.id}`, '任务标题没有用计划里的 payload')
+  // ★ 幂等：再 tick 一次（同一个时刻）不会建出第二张卡。
+  const again = await post('/api/automation/tick', { nowMs: at })
+  assert.equal(again.body.tasksCreated, 0,
+    '重复 tick 又建了一张卡 —— 物化是幂等的，建任务也必须幂等')
+  assert.equal(mod.db.prepare('SELECT COUNT(*) AS n FROM tasks WHERE title = ?').get(`${PAYLOAD.title} ${s.id}`).n, 1)
 
   // 让它变成 running（占住这条计划），再 tick 一次 → 应该 skip + 留行。
   mod.db.prepare("UPDATE automation_runs SET state = 'running' WHERE id = ?").run(made.runId)
@@ -142,6 +173,55 @@ test('④ ★ tick 物化 + skip-on-overlap 走真 HTTP，并且**与定时器�
     'isMain 下没有调度定时器 —— 计划到点后没有任何人会去物化它，'
     + '而"有没有人打开页面"不能是那个条件')
   assert.match(src, /automationStore\.materializeDue/, '没有调用仓储的物化入口')
+  // ★ 建任务必须走 `createTask()` 那个**唯一**的对外入口，不许自己拼 INSERT。
+  //   任务的验收标准、目标归属、状态词表校验都在那里；绕过它去写
+  //   `tasks` 表就是让第二份校验规则开始漂移。
+  const tickFn = src.slice(src.indexOf('function automationTick'), src.indexOf('function automationTick') + 3000)
+  assert.match(tickFn, /createTask\(\{/, 'automationTick 没有通过 createTask() 建任务')
+  assert.equal(/INSERT\s+INTO\s+tasks/i.test(tickFn), false,
+    'automationTick 自己拼了 INSERT INTO tasks —— 第二份校验规则会开始漂移')
+})
+
+test('④b ★ 没配 payload 的计划只物化、**不建占位任务**（纯提醒型是合法用法）', async () => {
+  const s = await post('/api/automation/schedules', {
+    id: 'sched-nopayload', scope: 'software', name: '只提醒',
+    spec: { kind: 'interval', everyMs: 60_000 }, timezone: 'UTC',
+    // 刻意不给 payload
+  })
+  assert.equal(s.status, 200, JSON.stringify(s.body))
+  assert.equal(s.body.schedule.payload, null, '没给 payload 却造出了一个模板')
+  const before = mod.db.prepare('SELECT COUNT(*) AS n FROM tasks').get().n
+  const t = await post('/api/automation/tick', { nowMs: s.body.schedule.nextRunAtMs + 1000 })
+  assert.equal(t.body.ok, true)
+  const made = t.body.results.find((x) => x.action === 'materialized' && x.scheduleId === 'sched-nopayload')
+  assert.ok(made !== undefined, '这条计划没有被物化')
+  assert.equal(t.body.tasksCreated, 0, '没配 payload 的计划建出了任务')
+  assert.equal(mod.db.prepare('SELECT COUNT(*) AS n FROM tasks').get().n, before,
+    '建了一个标题为空的占位任务 —— worker 领到它只能靠猜，'
+    + '而"计划没配 payload"与"计划配了一个空任务"在任务板上同形')
+})
+
+test('④c ★ payload 非法在**建计划时**就被具名拒绝（不留孤儿运行行）', async () => {
+  const bad = await post('/api/automation/schedules', {
+    id: 'sched-badpayload', scope: 'software', name: 'x',
+    spec: { kind: 'interval', everyMs: 60_000 }, timezone: 'UTC',
+    payload: { title: '   ' },   // 空标题
+  })
+  assert.equal(bad.status, 400, JSON.stringify(bad.body))
+  assert.equal(bad.body.code, 'BAD_SCHEDULE_PAYLOAD')
+  assert.equal(mod.db.prepare("SELECT COUNT(*) AS n FROM automation_schedules WHERE id = 'sched-badpayload'").get().n, 0,
+    '坏模板的计划被建出来了 —— 到点后它会物化出一批永远建不出任务的孤儿运行行')
+  // 未知键被**丢掉并报出来**，不做 payload 透传。
+  const dropped = await post('/api/automation/schedules', {
+    id: 'sched-drop', scope: 'software', name: 'y',
+    spec: { kind: 'interval', everyMs: 60_000 }, timezone: 'UTC',
+    payload: { title: 'ok', status: 'done', evil: true },
+  })
+  assert.equal(dropped.status, 200, JSON.stringify(dropped.body))
+  assert.deepEqual(dropped.body.schedule.payload.droppedKeys.sort(), ['evil', 'status'],
+    '未知键既没有生效也没有被报出来 —— payload 透传会开一条绕过建任务入口的路'
+    + '（`payload.status="done"` 会直接写进任务行，跳过后面的状态校验）')
+  assert.equal(dropped.body.schedule.payload.status, undefined)
 })
 
 test('⑤ 运行历史与汇总走真 HTTP，含未登记状态', async () => {

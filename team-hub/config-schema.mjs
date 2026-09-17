@@ -301,6 +301,24 @@ export const SCHEMA = defineSchema({
     'COMPACTION_SUMMARY_REQUIRED', 'COMPACTION_DANGLING_REFERENCE', 'COMPACTION_SESSION_NOT_FOUND',
     'COMPACTION_VERSION_NOT_FOUND', 'COMPACTION_VERSION_CONFLICT', 'COMPACTION_RANGE_ALREADY_COVERED',
     'COMPACTION_FAILED',
+    // F-15（§4.4）用量汇总的具名码。只有两个，因为这块**只有读**：
+    // `BAD_ROLLUP_DIMENSION` —— 维度名不在封闭词表里。它必须被具名拒绝，
+    // 否则"按员工看"会落进一个永远为空的桶，而报表仍然显示成功。
+    // `ROLLUP_FAILED` —— 兜底的读失败（它不该发生；留着是为了让
+    // "算不出来"有一个具名出口，而不是一个空的 200）。
+    'BAD_ROLLUP_DIMENSION', 'ROLLUP_FAILED',
+    // F-16 收口（物化 → 可领取任务）：
+    // `BAD_SCHEDULE_PAYLOAD` —— 计划的任务模板非法。**在建计划时就拒绝**，
+    //   而不是等到物化时才失败：到点才发现模板是坏的，那一次运行
+    //   （`scheduled` 行）已经产生了，于是坏模板变成一批永远建不出任务的
+    //   孤儿运行行。
+    // `BIND_NOT_APPLIED` —— 运行行已经有主了（CAS 没生效）。它不是错误，
+    //   而是"我绑了"与"早就绑了别的"必须分得开；静默当作成功会让
+    //   "这条运行永远不会被执行"没有任何痕迹。
+    // `SCHEDULE_TASK_CREATE_FAILED` —— 由 payload 建任务时失败。
+    //   逐条记账、**不中断整轮 tick**：一个坏模板不该让这一批里
+    //   其它计划全部不物化，而下一轮 tick 会自己重试。
+    'BAD_SCHEDULE_PAYLOAD', 'BIND_NOT_APPLIED', 'SCHEDULE_TASK_CREATE_FAILED',
     // spec §6.7 凭证管理的**写**一半（team-hub/secret-admin.mjs）。
     //
     // 在它之前，`security/secrets/store.mjs` 的 put/rotate/remove 在整个仓库里

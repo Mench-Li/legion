@@ -71,6 +71,8 @@ export const AUTOMATION_ERRORS = Object.freeze({
   RUN_FINISHED: 'RUN_ALREADY_FINISHED',
   APPROVAL_ID_REQUIRED: 'APPROVAL_ID_REQUIRED',
   BAD_WINDOW: 'BAD_CALENDAR_WINDOW',
+  // 计划的任务模板（payload）非法。见 `validatePayload()`。
+  BAD_PAYLOAD: 'BAD_SCHEDULE_PAYLOAD',
 })
 
 /** 一次计划的**运行**状态。终态见 `TERMINAL_RUN_STATES`。 */
@@ -127,6 +129,63 @@ function fail(code, message, extra = {}, statusCode = 400) {
 }
 
 // ---------------------------------------------------------------- 时区
+
+/** payload 允许的优先级。与 `server.mjs` 的 `PRIORITIES` 同一组值。 */
+export const AUTOMATION_PAYLOAD_PRIORITIES = Object.freeze(['low', 'medium', 'high', 'urgent'])
+
+/**
+ * 校验并规范化"这条计划到点了要建什么任务"。
+ *
+ * ★ **`null` / 缺省是合法的**，含义是"这条计划不建任务"。
+ *   只有**给了** payload 才校验它——把"没给"当成"给错了"会让
+ *   纯提醒型的计划建不出来，而它本来是完全合理的用法。
+ *
+ * ★ **`title` 必填且非空**。一个标题为空的计划任务在任务板上
+ *   与"某个任务还没起名"同形，而 worker 领走它之后没有任何东西
+ *   能告诉它这次要做的是哪件事——那正是"计划到点了，
+ *   但没人知道要做什么"这个失效的样子。
+ *
+ * ★ 只收**封闭的四个字段**（title / description / role / priority），
+ *   并**原样丢掉**其余键。做 payload 透传会开一条绕过建任务入口的路：
+ *   `payload.status='done'` 之类的东西会直接写进任务行，
+ *   而 `createTaskInTx` 对 `status` 的校验（只能 backlog/todo）就被跳过了。
+ *   丢掉的键**报出来**（`droppedKeys`），不静默。
+ */
+export function validatePayload(payload) {
+  if (payload === null || payload === undefined) return null
+  if (typeof payload !== 'object' || Array.isArray(payload)) {
+    throw fail(AUTOMATION_ERRORS.BAD_PAYLOAD, 'payload 必须是一个对象（或省略 = 不建任务）')
+  }
+  const title = typeof payload.title === 'string' ? payload.title.trim() : ''
+  if (title === '') {
+    throw fail(AUTOMATION_ERRORS.BAD_PAYLOAD,
+      'payload.title 必填且非空——标题为空的计划任务在任务板上与"还没起名"同形，'
+      + '而领走它的 worker 无从知道这次要做什么')
+  }
+  const description = typeof payload.description === 'string' ? payload.description : ''
+  const role = typeof payload.role === 'string' && payload.role.trim() !== '' ? payload.role.trim() : null
+  const priority = payload.priority === undefined || payload.priority === null ? 'medium' : payload.priority
+  if (!AUTOMATION_PAYLOAD_PRIORITIES.includes(priority)) {
+    throw fail(AUTOMATION_ERRORS.BAD_PAYLOAD,
+      `payload.priority 必须是 ${AUTOMATION_PAYLOAD_PRIORITIES.join(' / ')}（收到 ${JSON.stringify(priority)}）`)
+  }
+  const goalId = typeof payload.goalId === 'string' && payload.goalId.trim() !== '' ? payload.goalId.trim() : null
+  const allowed = ['title', 'description', 'role', 'priority', 'goalId']
+  const droppedKeys = Object.keys(payload).filter((k) => !allowed.includes(k))
+  return Object.freeze({ title, description, role, priority, goalId, droppedKeys: Object.freeze(droppedKeys) })
+}
+
+/** 从库里读出 payload（坏 JSON 视为"没配"而不是让整个列表挂掉）。 */
+function parsePayload(json) {
+  try {
+    const v = JSON.parse(json)
+    return v === null || typeof v !== 'object' ? null : Object.freeze(v)
+  } catch {
+    // 一行坏 JSON 不该让 `listSchedules()` 整体 500——那会让
+    // "有 200 条计划，其中 1 条的 payload 写坏了"表现为"计划列表打不开"。
+    return null
+  }
+}
 
 /**
  * 校验 IANA 时区名。
@@ -400,6 +459,24 @@ export function ensureAutomationSchema(db) {
   ensureColumn(db, 'automation_runs', 'catch_up_of_ms', 'INTEGER')
   ensureColumn(db, 'automation_runs', 'coalesced_count', 'INTEGER NOT NULL DEFAULT 1')
   ensureColumn(db, 'automation_runs', 'approval_id', 'TEXT')
+
+  // ── 物化的运行要变成**可领取的任务**（`wired:false` 的收口）──────
+  //
+  // 在此之前 `automationTick()` 如实返回 `wired: false`：
+  // 它建出了 `scheduled` 状态的运行行，而**没有任何东西会去跑它们**。
+  // 那个读数是对的，但一个"记录了一堆没人执行的运行"的日历，
+  // 与一个真正的调度器，在运行历史里长得一样——都是每天一行。
+  //
+  // 收口需要"这次运行到底要做什么"，而计时规格（interval/daily/weekly）
+  // 只描述**什么时候**。所以计划多一列 `payload_json`：
+  // 建任务所需的模板（title / description / role / priority / goalId）。
+  //
+  // ★ 默认 `NULL` = **不建任务**，而不是建一个标题为空的占位任务。
+  //   一条没有 payload 的计划仍然是合法的（它的用途可能只是"到点提醒"，
+  //   或者由外部系统读 `GET /api/automation/runs` 自己去兑现）。
+  //   用一个空任务顶替，会让"计划没配 payload"与"计划配了一个空任务"
+  //   在任务板上同形——而后者应当被拒绝，不该被造出来。
+  ensureColumn(db, 'automation_schedules', 'payload_json', 'TEXT')
 }
 
 // ---------------------------------------------------------------- 仓储
@@ -444,6 +521,10 @@ export function createAutomationStore({ db, clock = () => Date.now(), idFactory 
     updatedAtMs: Number(r.updated_at_ms),
     createdBy: r.created_by ?? null,
     note: r.note ?? null,
+    // 任务模板。`null` = 这条计划**不建任务**（不是"建一个空任务"）。
+    payload: r.payload_json === null || r.payload_json === undefined
+      ? null
+      : parsePayload(r.payload_json),
   })
 
   const shapeRun = (r) => r === undefined || r === null ? null : Object.freeze({
@@ -479,12 +560,16 @@ export function createAutomationStore({ db, clock = () => Date.now(), idFactory 
    * `nextRunAtMs = 某个 14:37`。两处不一致时没有任何东西会报错，
    * 计划会先按 14:37 跑一次，然后才回到 09:00。
    */
-  function createSchedule({ id, scope, name, spec, timezone, enabled = true, overlapPolicy = 'skip', catchUpPolicy = 'once', createdBy = null, note = null, nowMs = null }) {
+  function createSchedule({ id, scope, name, spec, timezone, enabled = true, overlapPolicy = 'skip', catchUpPolicy = 'once', createdBy = null, note = null, payload = null, nowMs = null }) {
     if (typeof id !== 'string' || id.trim() === '') throw fail(AUTOMATION_ERRORS.BAD_ID, '计划需要 id')
     if (typeof scope !== 'string' || scope.trim() === '') throw fail(AUTOMATION_ERRORS.BAD_ID, '计划需要 scope')
     if (typeof name !== 'string' || name.trim() === '') throw fail(AUTOMATION_ERRORS.BAD_ID, '计划需要 name')
     const vSpec = validateSpec(spec)
     const tz = assertTimezone(timezone)
+    // payload 在**建计划时**就校验，而不是等到物化时：到点才发现
+    // "这条计划的任务模板是坏的"，那一次的运行已经产生了（`scheduled` 行），
+    // 于是坏模板变成一批永远建不出任务的孤儿运行行。
+    const vPayload = validatePayload(payload)
     if (!isOverlapPolicy(overlapPolicy)) {
       throw fail(AUTOMATION_ERRORS.BAD_POLICY,
         `不认识的 overlapPolicy：${JSON.stringify(overlapPolicy)}。支持 ${OVERLAP_POLICIES.join(' / ')}——`
@@ -504,10 +589,10 @@ export function createAutomationStore({ db, clock = () => Date.now(), idFactory 
       db.prepare(
         `INSERT INTO automation_schedules
            (id, scope, name, spec_json, timezone, enabled, overlap_policy, catch_up_policy,
-            next_run_at_ms, last_run_at_ms, created_at_ms, updated_at_ms, created_by, note)
-         VALUES (?,?,?,?,?,?,?,?,?,NULL,?,?,?,?)`,
+            next_run_at_ms, last_run_at_ms, created_at_ms, updated_at_ms, created_by, note, payload_json)
+         VALUES (?,?,?,?,?,?,?,?,?,NULL,?,?,?,?,?)`,
       ).run(id, scope, name, JSON.stringify(vSpec), tz, enabled ? 1 : 0, overlapPolicy, catchUpPolicy,
-        next, at, at, createdBy, note)
+        next, at, at, createdBy, note, vPayload === null ? null : JSON.stringify(vPayload))
       return scheduleOf(id)
     })
   }
@@ -529,13 +614,30 @@ export function createAutomationStore({ db, clock = () => Date.now(), idFactory 
    * 保留旧值会让"改了时区"这件事在下次触发前看不出效果——而"改了没生效"
    * 与"改了但还没到点"在界面上是同一个读数。
    */
-  function updateSchedule({ id, enabled = null, overlapPolicy = null, catchUpPolicy = null, spec = null, timezone = null, name = null, note = null, nowMs = null }) {
+  /**
+   * 改计划。`payload` 的**三态**必须区分开：
+   *
+   *   · 不传（`undefined`）⇒ 保持原样；
+   *   · `payload: null`    ⇒ **显式清掉**（这条计划从此不建任务）；
+   *   · 给一个对象          ⇒ 换成新的模板。
+   *
+   * 用 `null` 同时表示"不改"与"清掉"是一个真实的失效：用户想把
+   * 一条计划从"建任务"改成"只提醒"，而那次调用**什么都没改**，
+   * 界面显示成功，计划继续建任务——而它什么时候会停下来，没人知道。
+   *
+   * 其余字段保持原来的 `null = 不改` 语义（它们是值，不是可有可无的存在性）。
+   */
+  function updateSchedule({ id, enabled = null, overlapPolicy = null, catchUpPolicy = null, spec = null, timezone = null, name = null, note = null, payload = undefined, nowMs = null }) {
     const at = nowMs ?? clock()
     return withTx(() => {
       const row = scheduleRow(id)
       if (row === null) throw fail(AUTOMATION_ERRORS.SCHEDULE_NOT_FOUND, `没有这条计划：${id}`, {}, 404)
       const vSpec = spec === null ? JSON.parse(row.spec_json) : validateSpec(spec)
       const tz = timezone === null ? assertTimezone(row.timezone) : assertTimezone(timezone)
+      // 三态：undefined = 不改 / null = 清掉 / 对象 = 换掉。
+      const payloadJson = payload === undefined
+        ? (row.payload_json ?? null)
+        : (validatePayload(payload) === null ? null : JSON.stringify(validatePayload(payload)))
       if (overlapPolicy !== null && !isOverlapPolicy(overlapPolicy)) {
         throw fail(AUTOMATION_ERRORS.BAD_POLICY, `不认识的 overlapPolicy：${JSON.stringify(overlapPolicy)}`)
       }
@@ -547,12 +649,12 @@ export function createAutomationStore({ db, clock = () => Date.now(), idFactory 
       db.prepare(
         `UPDATE automation_schedules
             SET name = ?, spec_json = ?, timezone = ?, enabled = ?, overlap_policy = ?,
-                catch_up_policy = ?, next_run_at_ms = ?, updated_at_ms = ?, note = ?
+                catch_up_policy = ?, next_run_at_ms = ?, updated_at_ms = ?, note = ?, payload_json = ?
           WHERE id = ?`,
       ).run(
         name ?? row.name, JSON.stringify(vSpec), tz, nextEnabled ? 1 : 0,
         overlapPolicy ?? row.overlap_policy, catchUpPolicy ?? row.catch_up_policy,
-        next, at, note ?? row.note, id,
+        next, at, note ?? row.note, payloadJson, id,
       )
       return scheduleOf(id)
     })
@@ -767,6 +869,59 @@ export function createAutomationStore({ db, clock = () => Date.now(), idFactory 
   const pauseForApproval = (runId, { approvalId, nowMs = null } = {}) => transitionRun(runId, 'awaiting-approval', { approvalId, nowMs })
   const skipRun = (runId, { reason, error = null, nowMs = null } = {}) => transitionRun(runId, 'skipped', { skipReason: reason, error, nowMs })
 
+  /**
+   * 把一次物化的运行接到它建出来的任务上（`task_id`）。
+   *
+   * 这是 `wired:false` 的收口点：`materializeDue()` 只产生
+   * `scheduled` 运行行，**没有任何东西会去跑它们**。这个方法把
+   * "这次运行 → 那条任务"这一步记账，于是
+   * `GET /api/automation/runs` 里的每一行都能被追到一张具体的任务卡。
+   *
+   * ★ **只允许写一次**（CAS：`WHERE task_id IS NULL`）。
+   *   允许覆盖会让"这条运行对应哪个任务"变成一个可以改的字段，
+   *   而重跑一次 tick 时会把上一轮已经建好、可能已经被 worker 领走的
+   *   任务**替换成一条新的**——那条被替换的任务在任务板上仍然存在，
+   *   只是再没有任何运行记录指向它。重复绑定时**报出来**（返回 `bound:false`
+   *   与当前值），因为"我绑了"与"早就绑了别的"是两件事。
+   *
+   * ★ 任务的**创建**不在这里：建任务要读 `tasks` 表的一整套约束
+   *   （`assertGoalOpen`、状态词表、验收标准生成），那是 `server.mjs` 的
+   *   `createTaskInTx` 的职责。本模块只记账，不越界去写别人的表——
+   *   "在哪建任务"必须只有一处，否则两处的校验迟早漂移。
+   */
+  function bindTask(runId, taskId, { nowMs = null } = {}) {
+    if (typeof taskId !== 'string' || taskId.trim() === '') {
+      throw fail(AUTOMATION_ERRORS.RUN_NOT_FOUND, 'bindTask 需要一个非空的 taskId')
+    }
+    const at = nowMs ?? clock()
+    return withTx(() => {
+      const row = runRow(runId)
+      if (row === null) throw fail(AUTOMATION_ERRORS.RUN_NOT_FOUND, `没有这次运行：${runId}`, {}, 404)
+      if (row.task_id !== null && row.task_id !== undefined) {
+        return Object.freeze({
+          bound: false,
+          reason: 'already-bound',
+          previousTaskId: row.task_id,
+          run: shapeRun(row),
+        })
+      }
+      const info = db.prepare(
+        'UPDATE automation_runs SET task_id = ?, updated_at_ms = ? WHERE id = ? AND task_id IS NULL',
+      ).run(taskId, at, runId)
+      if (Number(info.changes) !== 1) {
+        // CAS 没生效 = 有人在这中间绑上了。**报出来**，不静默当作成功。
+        const after = runRow(runId)
+        return Object.freeze({
+          bound: false,
+          reason: 'lost-race',
+          previousTaskId: after?.task_id ?? null,
+          run: shapeRun(after),
+        })
+      }
+      return Object.freeze({ bound: true, reason: null, previousTaskId: null, run: shapeRun(runRow(runId)) })
+    })
+  }
+
   function runsOf({ scheduleId = null, scope = null, state = null, limit = 200 } = {}) {
     const where = []
     const p = []
@@ -821,6 +976,8 @@ export function createAutomationStore({ db, clock = () => Date.now(), idFactory 
     createSchedule, updateSchedule, listSchedules, scheduleOf,
     missedOccurrences, materializeDue,
     startRun, finishRun, pauseForApproval, skipRun, transitionRun,
+    // 物化的运行 → 可领取的任务（`wired:false` 的收口）。
+    bindTask,
     runsOf, runOf, summary,
     withTx,
     /** 供测试与诊断：合法的运行迁移表（只读）。 */

@@ -167,6 +167,7 @@ import {
   projectOccurrences,
 } from './automation-store.mjs'
 import { createCompactionStore, ensureCompactionSchema } from './compaction-store.mjs'
+import { ROLLUP_DIMENSIONS, rollupBy, usageTotals } from './usage-rollup.mjs'
 import { loadConfig } from '../packages/shared/src/config.mjs'
 import { SCHEMA as CONFIG_SCHEMA } from './config-schema.mjs'
 
@@ -435,6 +436,32 @@ const automationStore = (() => {
  * **不抛**：一个把整个 team-hub 主循环带死的调度 tick，比"这一次没物化"
  * 坏得多——而"这一次没物化"是下一轮 tick 会自己修好的。
  */
+/**
+ * 到点的计划 → 物化运行 → **可领取的任务**。
+ *
+ * 这是 `wired:false` 的收口。在此之前本函数返回
+ * `{ wired: false, note: '……需要计划→目标的映射（未接线）' }`：它建出了
+ * `scheduled` 状态的运行行，而没有任何东西会去跑它们。那个读数是对的，
+ * 但一个"记录了一堆没人执行的运行"的日历，与一个真正的调度器，
+ * 在运行历史里长得一样——都是每天一行。
+ *
+ * 现在补上那一步，方法有两条**都要守住**的纪律：
+ *
+ * ① **物化与建任务是两步，且各自幂等**。
+ *    `materializeDue()` 靠 `UNIQUE(schedule_id, planned_at_ms)` 幂等；
+ *    建任务靠 `bindTask` 的 CAS（`WHERE task_id IS NULL`）幂等。
+ *    把两步合成一个事务会让"任务建好了但运行行没写上"变成一个
+ *    无法自愈的状态；分开之后，下一轮 tick 会看到那条运行仍然
+ *    `task_id IS NULL` 并把它补上。
+ *
+ * ② **一条计划没配 payload 时就只物化、不建任务**，且这不是错误。
+ *    纯提醒型的计划是合法用法。**绝不**建一个标题为空的占位任务：
+ *    那会让 worker 领到一张写着"要做点什么"的卡——而它只能靠猜。
+ *
+ * ★ 建任务走 `createTask()`（`server.mjs` 里那个**唯一**的对外入口），
+ *   不自己拼 INSERT。任务的验收标准、目标归属、状态词表校验都在那里；
+ *   绕过它去写 `tasks` 表就是让第二份校验规则开始漂移。
+ */
 function automationTick({ scope = null, nowMs = null, limit = null } = {}) {
   try {
     const r = automationStore.materializeDue({
@@ -442,12 +469,61 @@ function automationTick({ scope = null, nowMs = null, limit = null } = {}) {
       nowMs,
       ...(Number.isSafeInteger(limit) && limit > 0 ? { limit: Math.min(limit, 2000) } : {}),
     })
-    // 物化出来的运行是**计划触发的**，它们必须能被 agent 领走。
-    // 但"建出来"与"变成一条可领的任务"是两步：本批只做前者，
-    // 后者（建 Task + 绑 goalId + 记 scheduleRunId）需要一个计划->目标的
-    // 映射，那属于 PRT 编排面，不在 F-16 的范围内。**如实返回这个边界**，
-    // 不让调用方以为"物化了 = 跑起来了"。
-    return { ...r, wired: false, note: '物化的运行是 scheduled；把它们变成可领任务需要计划→目标的映射（未接线）' }
+    if (r.ok !== true) return { ...r, wired: true, tasksCreated: 0, taskErrors: [] }
+
+    let tasksCreated = 0
+    const taskErrors = []
+    // 只处理**刚物化出来**的那些（`action === 'materialized'`）。
+    // 不去扫全表补建历史遗留：那会让一次 tick 顺手建出几百张卡，
+    // 而那些卡对应的运行可能早就过期了。
+    for (const item of r.results ?? []) {
+      if (item.action !== 'materialized' || item.runId === undefined) continue
+      const run = automationStore.runOf(item.runId)
+      if (run === null || run.taskId !== null) continue
+      const sched = automationStore.scheduleOf(run.scheduleId)
+      const payload = sched?.payload ?? null
+      if (payload === null) continue   // 纯提醒型计划：只物化，不建任务
+      try {
+        // scope 取**计划的 scope**，不取调用方传的：一条计划属于哪个空间
+        // 在它被创建时就定了，而 tick 的 scope 只是"这一轮扫哪些空间"。
+        const task = createTask({
+          title: payload.title,
+          description: payload.description ?? '',
+          role: payload.role ?? null,
+          priority: payload.priority ?? 'medium',
+          status: 'todo',
+          scope: sched.scope,
+          goalId: payload.goalId ?? null,
+        })
+        const b = automationStore.bindTask(item.runId, task.id)
+        if (b.bound === true) tasksCreated += 1
+        else {
+          // 没绑上：要么并发已经绑了（不是错误，报出来即可），
+          // 要么 CAS 抢输了。两种情况都要让调用方看得见——
+          // 静默当作成功会让"这条运行永远不会被执行"没有任何痕迹。
+          taskErrors.push({ runId: item.runId, taskId: task.id, code: 'BIND_NOT_APPLIED', reason: b.reason })
+        }
+      } catch (e) {
+        // ★ 建任务失败**不中断整轮 tick**：一个坏 payload 不该让
+        //   这一批里其它计划全部不物化。逐条记账，下一轮会重试。
+        taskErrors.push({
+          runId: item.runId,
+          code: e?.code ?? 'SCHEDULE_TASK_CREATE_FAILED',
+          error: e instanceof Error ? e.message : String(e),
+        })
+      }
+    }
+    return {
+      ...r,
+      // ★ `wired: true` 的含义是"物化出来的运行**有机会**被执行"，
+      //   不是"它们都跑起来了"。真正的执行仍要 worker 去认领那些任务。
+      wired: true,
+      tasksCreated,
+      taskErrors,
+      note: r.results?.some((x) => x.action === 'materialized')
+        ? '物化的运行已按计划的任务模板建出可领取任务'
+        : '本轮没有物化出新运行',
+    }
   } catch (e) {
     return { ok: false, atMs: nowMs ?? Date.now(), code: e?.code ?? 'AUTOMATION_TICK_FAILED', error: e instanceof Error ? e.message : String(e), results: [] }
   }
@@ -723,6 +799,19 @@ const budgetLedger = createBudgetLedger({
   writeAudit: ({ action, attemptId, scope, taskId, detail }) =>
     audit('system', scope ?? '*', action, attemptId ?? taskId ?? '*', detail),
 })
+
+/**
+ * F-15 用量汇总（§4.4）。
+ *
+ * 与账本**共用同一个库**但**不共用闸门**：`budgetLedger` 是"能不能花"，
+ * 本模块是"花了多少、花在哪"。两者刻意不合并——闸门的判据必须是
+ * "当下这一笔"，而报表的判据是"到现在为止的全部"。
+ * 把报表接进闸门，会让一次全表统计出现在每一次预留的热路径上；
+ * 把闸门接进报表，会让"读一下总额"变成一次可能被拒绝的写。
+ *
+ * 只读：本模块没有任何写路径（它读 `usage_records` 与 `run_attempts`）。
+ */
+const usageRollup = Object.freeze({ rollupBy, usageTotals })
 
 /**
  * 运行面路由的公共外壳。
@@ -4549,6 +4638,24 @@ function requireString(body, field) {
   return v.trim()
 }
 
+/**
+ * 可选的整数查询参数。**读不出来时返回 `null`，而不是 0**。
+ *
+ * 为什么必须分开：时间窗与上限这类参数的 `0` 是一个**合法且极端**的取值
+ * （`sinceMs=0` 是"从纪元开始"，`limit=0` 是"一条都不要"）。
+ * 把 `?sinceMs=abc` 或缺失都折叠成 `0`，会让"我没传这个参数"
+ * 变成"我要看全部历史"——而那是一次可能扫全表的查询。
+ *
+ * 非法值同样返回 `null`（=不设限），理由与仓库里其它读入口一致：
+ * 一个拼错的参数名不该让请求失败，但更不该被当成一个**别的**取值。
+ */
+function optionalIntParam(url, name) {
+  const raw = url.searchParams.get(name)
+  if (raw === null || raw.trim() === '') return null
+  const n = Number(raw)
+  return Number.isSafeInteger(n) ? n : null
+}
+
 async function handleWrite(req, res, run) {
   try {
     if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
@@ -6479,6 +6586,11 @@ async function handle(req, res, stripPrefix) {
           catchUpPolicy: body.catchUpPolicy ?? 'once',
           createdBy: body.by ?? null,
           note: body.note ?? null,
+          // 任务模板：给了就"到点建一张可领的任务卡"，省略就只物化运行。
+          // **不写成 `body.payload ?? null`** —— 那会把"没给"与"显式给 null"
+          // 折成同一个值，而它们在建计划时语义相同（都不建任务），
+          // 到了 `update` 那一侧就必须分开（见 `updateSchedule` 的三态说明）。
+          ...(body.payload === undefined ? {} : { payload: body.payload }),
         }),
       }))
       return
@@ -6495,6 +6607,10 @@ async function handle(req, res, stripPrefix) {
           timezone: body.timezone ?? null,
           name: body.name ?? null,
           note: body.note ?? null,
+          // 三态：不传 = 不改 / `null` = 显式清掉（此后不再建任务）/ 对象 = 换掉。
+          // 用 `body.payload ?? null` 会让"清掉"与"不改"同形——用户想把
+          // 一条计划从"建任务"改成"只提醒"，调用返回成功，而计划继续建任务。
+          ...(body.payload === undefined ? {} : { payload: body.payload }),
         }),
       }))
       return
@@ -6629,6 +6745,51 @@ async function handle(req, res, stripPrefix) {
       const sessionId = url.searchParams.get('sessionId')
       if (sessionId === null || sessionId.length === 0) { json(res, 400, { ok: false, error: '缺少 sessionId', code: 'MISSING_PARAM' }); return }
       json(res, 200, { ok: true, sessionId, summaries: compactionStore.summariesOf(sessionId) })
+      return
+    }
+    // ── F-15 用量汇总 ──────────────────────────────────────────────────
+    //
+    // 两条只读路由。**刻意没有写路径**：这张报表读的是已经记下的账，
+    // 而"记一笔账"是 `budget-ledger` 的 `reserve/observe/settle`——
+    // 那条链是闸门，需要 attemptId + leaseEpoch，不该有一条"手工记一笔"
+    // 的后门（那会让账本里的钱与实际花掉的钱脱钩，而两者看起来一样）。
+    if (path === '/api/usage/totals' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      json(res, 200, {
+        ok: true,
+        ...usageRollup.usageTotals({
+          db,
+          sinceMs: optionalIntParam(url, 'sinceMs'),
+          untilMs: optionalIntParam(url, 'untilMs'),
+          scope: url.searchParams.get('scope'),
+        }),
+      })
+      return
+    }
+    if (path === '/api/usage/rollup' && req.method === 'GET') {
+      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
+      const dimension = url.searchParams.get('dimension')
+      try {
+        json(res, 200, {
+          ok: true,
+          ...usageRollup.rollupBy({
+            db,
+            dimension,
+            sinceMs: optionalIntParam(url, 'sinceMs'),
+            untilMs: optionalIntParam(url, 'untilMs'),
+            scope: url.searchParams.get('scope'),
+          }),
+        })
+      } catch (e) {
+        // 未知维度是**调用方的错**，所以 400 + 具名码，并把可选值列出来——
+        // 只说"不认识的维度"会让调用方去翻源码。
+        json(res, Number(e?.statusCode) || 400, {
+          ok: false,
+          error: e instanceof Error ? e.message : String(e),
+          code: e?.code ?? 'ROLLUP_FAILED',
+          dimensions: ROLLUP_DIMENSIONS,
+        })
+      }
       return
     }
     if (req.method === 'GET' && path === '/api/runtime/reconciliations') {

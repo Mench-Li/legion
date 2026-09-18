@@ -484,6 +484,30 @@ export const SCHEMA = defineSchema({
     // 而加 `TEAM_PLAN_` 前缀会让它看起来像 store 的错误码——
     // 那会让调用方以为要去看 store 的实现，而它只需改 URL。
     'BAD_VERSION',
+
+    // ── 第 23 轮（F-15 告警 / 降级）：`team-hub/budget-alert.mjs` 的码与理由 ──
+    //
+    // 两组，都是**对外可见的字符串常量**，不是配置键：进程不"读"它们，
+    // 而是把它们放进 HTTP 响应（`code` / `reasons`）与错误消息里给调用方看。
+    // 名字是 SCREAMING_SNAKE，所以扫描器会怀疑它们是环境变量——不是。
+    //
+    // ① `BUDGET_ALERT_CODES`（9 个）：`evaluateBudgetAlert()` 抛出的具名码。
+    //    调用方据此分支（改 URL 的 400 vs 改上限的 400 vs 改币种的 400）。
+    // ② `BUDGET_ALERT_REASONS`（6 个）：出现在读数 `reasons[]` 里的**封闭集合**。
+    //    它们是"这个告警为什么长这样"的可检索名字——写成中文描述
+    //    在按理由统计时是查不到的（与 PRT-615 那条失败码同一个理由）。
+    //
+    // ★ 有一条**故意不登记在这里**：`BUDGET_ALERT_FAILED`（上面已登记的
+    //   `BUDGET_ALERT_FAILED` 是路由的兜底码，与 `ROLLUP_FAILED` 同族）。
+    //
+    // ★ 为什么"未知查询参数"复用的是 `THRESHOLDS_INVALID` 而不是一个新码：
+    //   那条拒绝的**后果**与"阈值名拼错"完全一样（配置者以为配了，实际没配），
+    //   而两个码会让调用方以为有两种修法。语义写在错误消息里，不在码里。
+    'LIMIT_REQUIRED', 'LIMIT_INVALID', 'THRESHOLDS_INVALID',
+    'THRESHOLD_OUT_OF_RANGE', 'THRESHOLDS_UNORDERED', 'CURRENCY_MISMATCH',
+    'TOTALS_INVALID', 'PREVIOUS_LEVEL_INVALID', 'BUDGET_ALERT_FAILED',
+    'NOT_CONFIGURED', 'SPEND_UNKNOWN', 'SPEND_PARTIAL', 'MIXED_CURRENCY',
+    'LIMIT_CROSSED', 'DEGRADE_TARGET_UNSET',
   ],
   // team-hub 的 CHAT_ 前缀覆盖了插件的提示词预算变量（CHAT_CTX_*）：它们是**插件**读的配置，
   // team-hub 不读，登记为外来变量，避免误报成「拼写错误」（P3-4）。

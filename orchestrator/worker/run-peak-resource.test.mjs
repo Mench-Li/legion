@@ -13,7 +13,12 @@
 // ============================================================================
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
+import { publishRuntimeContractEndpoint } from '../../runtime/dsh-composition/runtime-contract-publication.mjs'
 import {
   DEFAULT_RUN_PEAK_SAMPLE_MS,
   RUN_PEAK_CODES,
@@ -21,6 +26,7 @@ import {
   parseRuntimeEndpoint,
   readRuntimePublication,
   resolveRuntimePidForSampling,
+  resolveRuntimePidFromEnv,
   withRunPeakResource,
 } from './run-peak-resource.mjs'
 
@@ -289,6 +295,92 @@ test('★★ attachRunPeakResource：没有出口时**同一个引用**返回（
   // 没有 onReading ⇒ withRunPeakResource 原样返回 executor ⇒ 这里也该原样返回。
   const out = attachRunPeakResource(orig, { resolvePid: okResolve })
   assert.equal(out, orig)
+})
+
+// ── ★★★ 端到端：真写发布、真读发布、对**真**进程采一次 ──────────────────────
+//
+// 上面每一条用的都是替身。这一条**不**：它用**生产的写入方**
+// （`publishRuntimeContractEndpoint`）把发布写到临时 DataDir，用本模块的
+// `resolveRuntimePidFromEnv` 去读，再对一台**真子进程**采一次，最后经
+// `attachRunPeakResource` 的出口把读数交出来。
+//
+// 它补的是别处都没有的那一段：**"写入方 → 读取方 → 身份核对 → 真采样 → 出口"
+// 这条链整体是通的**。少了它，"两边各自有测试"完全可以掩盖
+// "两边的路径约定不一致"——而那种故障的表现恰好是"永远采不到"。
+//
+// 与 supervisor 那条真进程用例同一条纪律：**采不到就如实红**，不 skip 成绿。
+test('★★★ 端到端：生产写入方 → 本模块读取 → 对真子进程采一次 → 经出口交出读数', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'legion-peak-e2e-'))
+  // 让子进程活久一点并真的占内存：采样的窗口要跨过它的存活期。
+  const child = spawn(process.execPath, [
+    '-e',
+    'const a=[];for(let i=0;i<120;i++)a.push(Buffer.alloc(1024*1024,7));setTimeout(()=>{},20000)',
+  ], { stdio: 'ignore', windowsHide: true })
+  try {
+    // ① 生产写入方：真写一份发布，pid 就是这台真子进程。
+    const wrote = publishRuntimeContractEndpoint({
+      dataDir,
+      host: '127.0.0.1',
+      port: 45671,
+      pid: child.pid,
+    })
+    assert.equal(wrote.ok, true, `发布应当写成功：${wrote.code ?? ''} ${wrote.message ?? ''}`)
+
+    // ② 本模块的读取入口（读的是 worker 的两个环境键）。
+    const env = { LEGION_DATA_DIR: dataDir, LEGION_RUNTIME_URL: 'http://127.0.0.1:45671' }
+    const resolved = resolveRuntimePidFromEnv(env)
+    assert.equal(resolved.ok, true, `应当认出这份发布：${resolved.code ?? ''}`)
+    assert.equal(resolved.pid, child.pid, 'pid 必须就是那台真子进程')
+
+    // ③ 对真进程采样，并经出口交出来。
+    const seen = []
+    const wrapped = attachRunPeakResource(
+      { ok: true, executor: { buildContext: async () => {}, execute: async () => {
+        // 让窗口跨过子进程把内存占上去的那段时间（真等，不是替身）。
+        await new Promise((r) => setTimeout(r, 1500))
+        return { outcome: 'completed' }
+      } } },
+      {
+        onReading: (reading, ctx) => seen.push([reading, ctx]),
+        resolvePid: () => resolveRuntimePidFromEnv(env),
+        // 周期压短，让这次短 Run 也能采到不止一次。
+        sampleMs: 200,
+      },
+    )
+    const out = await wrapped.executor.execute()
+    assert.deepEqual(out, { outcome: 'completed' }, '执行的返回值必须原样透传')
+
+    assert.equal(seen.length, 1, '一次 Run 应当恰好交一次读数')
+    const [reading, ctx] = seen[0]
+    assert.ok(reading !== null, '应当真的采到了读数，实得 null')
+    assert.equal(reading.ok, true, `对真进程一次都没采到：${reading.lastCode ?? ''}`)
+    assert.equal(reading.pid, child.pid)
+    assert.ok(reading.samples > 0, '至少采到一次')
+    assert.equal(ctx.pid, child.pid)
+    assert.equal(ctx.host, '127.0.0.1')
+    // ★ 真有读数：一台 node 子进程的 RSS 远大于 5MB。
+    //   不断言具体数值（那是机器相关的），只断言"它是一个真的正数"。
+    assert.ok(reading.peakRssBytes > 5 * 1024 * 1024 || reading.peakWorkingSetBytes > 5 * 1024 * 1024,
+      `应当读到真内存：rss=${reading.peakRssBytes} ws=${reading.peakWorkingSetBytes}`)
+  } finally {
+    try { child.kill() } catch { /* 已经退了 */ }
+    try { rmSync(dataDir, { recursive: true, force: true }) } catch { /* 尽力而为 */ }
+  }
+})
+
+test('★★★ 端到端：发布不在时，worker 侧报**具名**缺口感（不是一个空读数）', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'legion-peak-absent-'))
+  try {
+    const r = resolveRuntimePidFromEnv({
+      LEGION_DATA_DIR: dataDir,
+      LEGION_RUNTIME_URL: 'http://127.0.0.1:45671',
+    })
+    assert.equal(r.ok, false)
+    assert.equal(r.code, RUN_PEAK_CODES.PUBLICATION_ABSENT)
+    assert.ok(r.message.includes(dataDir), '消息里要能看见它去哪儿找了')
+  } finally {
+    try { rmSync(dataDir, { recursive: true, force: true }) } catch { /* 尽力而为 */ }
+  }
 })
 
 test('默认采样周期与 supervisor 那份取同一个数（0 表示不采样）', () => {

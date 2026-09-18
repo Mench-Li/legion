@@ -1347,6 +1347,21 @@ async function stageTest() {
   // 两者治的都是"两份清单之间没人交叉核对"。本仓为此漏过两次
   // （§5 第 20 条、第 21 条），两次都是"一条待办谁也没在看"。
   { label: 'intervention-coverage（PRT-611 续：台账非 ✅ 的行必须被 §5 点到名——治“没有任何人在等它”）', files: ['scripts/prt/intervention-coverage.test.mjs'], cwd: ROOT },
+  // ★ 第三套，同一个形状的**第三个方向**：前两套核的是"两份**清单**"，
+  //   这一套核的是"**文档里声称的数字** ↔ **产物里真实的值**"。
+  //
+  //   起因是 2026-09-18 实测到的一处漂移：`docs/MULTI-AGENT-FEATURE-STATUS.md`
+  //   写 `PATCH_LAYER_ROWS` **4** 行、枚举里也漏了第 5 行，而产物是 **5** 行
+  //   （第 5 行 2026-09-15 就加了，读数没人跟着改）。
+  //
+  //     > 一个"当时数对过"的数字，与一个"现在还是对的"数字，
+  //     > 在文档里长得一样——区别只在有没有人回去数第二遍。
+  //
+  //   锚点找不到（`ANCHOR_MISSING`）与锚点命中多于一处（`ANCHOR_AMBIGUOUS`）
+  //   **都判红**：前者防止判据静默失去检查对象，后者防止判据靠文档行序选数字。
+  //   套件里对**每一条**文档锚点做反面控制（改掉声称 ⇒ 必须红），
+  //   并对 `runtime` 进程不得持有 `TEAM_HUB_TOKEN` 这条边界做**对称**载荷控制。
+  { label: 'boundary-facts（PRT-611 续：文档声称的数字 ↔ 产物真实的值，含执行面凭证边界）', files: ['scripts/prt/boundary-facts.test.mjs'], cwd: ROOT },
     // 阶段 2：DshRuntimeAdapter。全部用假宿主端口，覆盖真实 DSH 无法稳定复现的故障
     // （run.result 永不结算、abort 无效、畸形结果、事件流中断）。
     { label: 'dsh-adapter（PRT-201~209：DSH 适配器契约、脱敏、看门狗与取消/恢复）', files: ['runtime/adapters/dsh/adapter.test.mjs'], cwd: ROOT },

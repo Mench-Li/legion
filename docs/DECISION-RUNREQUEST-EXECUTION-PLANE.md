@@ -920,3 +920,110 @@ F-21 的剩余阻塞**全在包层 / 部署配置层**。
 5. ⚠️ 套件 ⑦ 只证明「两个名字空间不相交」**在今天的目录上**成立；
    目录一改（新增工具、改 `LEGION_TOOL_ROUTING`），那条断言会红——
    这是**设计**，不是遗漏。
+---
+
+## 14. 第 22 轮：第 15 项的**出站车道**已建、环已证，而"车道放在哪"是一个未决契约
+
+> §4 那张表里第 15 项写的是「落账端点（PRT-610）：表、读面、就绪证据的产出点已接上，
+> **写入方仍是 0**」。本轮把"写入方"这条缝**造出了能走通的两半**，
+> 并且把最后那个真正的阻塞**量成了一个位置决定**。
+
+### 14.1 缝在哪：一句写在库里的需求，与一个刻意的缺席
+
+`team-hub/server.mjs:7296` 逐字写着：
+
+> 所以写侧只有一个入口：执行面调 `recordToolCall`。本进程只提供**读**与建表。
+
+而执行面**调不了**它——`runtime` 进程的 `envNames` 里**故意没有** `TEAM_HUB_TOKEN`
+（§5.5 ①，`product/process-manifest.mjs`）。两条都是刻意的，合起来的结果是：
+
+```text
+toolCallLogEvidence().recorded  === false        ← 永远
+release-gate.mjs 的 decisionSourceRecorded       ← 全仓没有任何产出者
+```
+
+★ 注意它**看起来不像坏了**：`toolCallLogEvidence` 返回
+`{state:'readable', table:'tool_calls', recorded:false, total:0, reason:'表在，但 0 条记录里没有一条带着决定来源'}`
+——一句**很谨慎、很正确**的话，于是发布门禁永远判否而没人觉得哪里不对。
+
+*一个「写侧唯一入口在一个拿不到凭证的进程里」的设计，
+与一个「就绪判据永远没有产出者」的设计，是同一个东西——
+只不过前者的每一半读起来都是对的。*
+
+### 14.2 交付物：两半，各自可单独跑绿
+
+| 文件 | 角色 | 套件 |
+| --- | --- | --- |
+| `runtime/toolcall/spool.mjs` | **写入侧**（执行面，无凭证）：逐 Run 落盘 | `toolcall-spool`，14 例 |
+| `orchestrator/worker/toolcall-drain.mjs` | **收账侧**（有凭证）：收进 `tool_calls` | `toolcall-drain`，13 例 |
+
+车道形状：
+
+```text
+  执行面（无 token）                         收账侧（有 token）
+  toolCallRowOf(projection, {...})   ──▶   drainToolCallSpool()
+    → appendSpoolRecord({kind:'decision'})     → recordToolCall()
+    → appendSpoolRecord({kind:'dispatched'})   → markDispatched()
+    → appendSpoolRecord({kind:'result'})       → recordResult()
+                                               → 真库里的 tool_calls 行
+```
+
+★ **两半分开登记为两个 CI 套件**，因为它们各自能被单独跑出一个"绿"而合起来仍然不通
+——而那种绿，正是本轮之前**全部**有关工具账的绿的样子。
+
+### 14.3 ★★★ 环本身在真库上走通了
+
+`toolcall-drain` ① 逐字断言这条链：
+
+1. 收账之前：`toolCallLogEvidence({db})` = `{state:'readable', total:0, recorded:false}`；
+2. 执行面三次追加（`decision` / `dispatched` / `result`）——**全程没有任何 hub 访问**；
+3. 收账侧 `drainToolCallSpool({db, file})` → `applied = {decision:1, dispatched:1, result:1}`，`complete:true`；
+4. 真 SQLite 里那一行：`decisionSource='pre-execute'`、`resultStatus='ok'`、`dispatchedAt` 落上、
+   `rawInput`/`canonicalInput` 原样；
+5. **`toolCallLogEvidence().recorded` 由 `false` 翻成 `true`**。
+
+并有一条**否定对照** ①b：同样的 spool、**不跑收账**，则 `recorded` 仍然是 `false`。
+（没有这条对照，"翻成 true"无法与"表自己变成那样"区分开。）
+
+### 14.4 为什么这仍然**不**等于第 15 条已关
+
+⚠️ **生产里还没有人调这两半。** 本轮**不**声称第 15 条已关，理由不是谦虚，是一条具名读数：
+
+| 缺什么 | 读数 |
+| --- | --- |
+| 收账方**拿不到** spool 的目录 | hub 的库是 `team-hub/team.db`（`server.mjs:279`），它**不读** `LEGION_DATA_DIR` |
+| 生产者**拿不到** Run 维度 | `onDecision` 是**装配期**参数（`root.mjs:400/486`），而 runId 是**按 Run** 到的 |
+
+而"猜一个两边都同意的路径"（比如"就放 `<repo>/team-hub/` 下面吧"）正是
+PRT-253 §3 明令禁止的**发明默认值**——它的后果是让"没接线"与"接好了"在读数上**同形**，
+而这正是过去 21 輪反复付代价的那件事。⇒ 已立为决策表**第 28 条**。
+
+### 14.5 生产接线的两个候选接缝（都读出来了，没有采用）
+
+1. **收账侧**：hub 进程（`team-hub/server.mjs`）——它**就是**那个拥有 `db` 的一方，
+   而且 §14.1 那句"本进程只提供读与建表"针对的是 **HTTP 写口**，
+   不是"本进程不许调 `recordToolCall`"。需要先有第 28 条的路径契约。
+2. **写入侧**：`runtime/dsh-composition/plugins/root-row.mjs:591`
+   （`installEnforcementRoot` 全仓**唯一**的生产调用方）通过 `onDecision` 接观察点。
+   ★ 但 `onDecision` 是**装配期**给的，而 spool 是**逐 Run** 一份 ⇒ 观察点必须从
+   **按 Run 安装**的那个缝（`runtime-host-registrar-row.mjs`，即 PRT-214 两遍先例的形状）
+   读当前 runId，而不是在装配期绑死一个 Run。
+
+*一个「把观察点绑在装配期的 Run id 上」的接线，
+与一个「整个进程只往第一个 Run 的账本里写」的接线，是同一个东西——
+只不过后者的表现是"第二个 Run 的工具账不见了"。*
+
+### 14.6 本轮**没有**做（如实）
+
+1. ⚠️ **没有**给 spool 定目录（第 28 条）——不发明默认值；
+2. ⚠️ **没有**动 `team-hub/server.mjs`（9097 行、别的会话的在制品风险区）；
+3. ⚠️ **没有**把 `runtime/toolcall/spool.mjs` 接进任何生产进程——所以它今天
+   **也**是一个"没人调"的模块，**本轮把它记成"车道已建、环已证、位置未决"，
+   不记成又一次"模块全绿而零生产入口"**：差别在于这次缺的是**一个决定**，
+   而且那个决定的名字已经写在第 28 条里；
+4. ⚠️ **没有**做车道文件的裁剪（旋转 / 归档）。车道是**只追加**的，
+   所以它会一直长——这是 14.2 那张表刻意换来的代价（收账必须能安全重跑，
+   而"收完就删"会在崩溃后把没落账的几条当成"已经收过了"）；
+5. ⚠️ 收账侧**不**校验 `decisionSource` 的语义（那是它的设计：词表只有
+   `tool-call-log.mjs` 那一份），所以一次**语义**不合法会表现为一次**落账期**具名拒绝
+   ——带行号，但不是"格式坏了"。

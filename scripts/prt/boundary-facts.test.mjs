@@ -24,6 +24,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { resolve } from 'node:path'
 
 import {
   FACTS, checkFacts, defaultContext, patchYmlRepresentedRows,
@@ -374,4 +375,81 @@ test('⑪g ★ 纯数字串**不许**被当成提交哈希（判据键太宽的�
   // ★ 而真哈希必须**仍然**被抓到（否则这个"收紧"就把判据关掉了）
   const real = '见 `de89ff3`。\n'
   assert.equal(scanCommitCitations(real, 'HEAD').total, 1, '收紧之后真哈希反而抓不到了')
+})
+
+/**
+ * ⑪h ★★ **DSH 检出不在**时，DSH 侧引用必须记 `external`，**不许**报成坏引用。
+ *
+ * 这是实测出来的：把 `DSH_CHECKOUT` 指到一个不存在的目录，第一版报出
+ * **18 条"找不到这个文件"**——而那 18 条全是 `packages/…` / `apps/…` 的
+ * DSH 侧引用，**一条都没坏**。
+ *
+ *   > 一个"引用坏了"与一个"我没法查"，在只有同一条红的时候长得一模一样
+ *   > ——而前者要求我改文档，后者要求我改**判据**。
+ *
+ * ⇒ 用一个**合成的小树**来测（不碰真磁盘），把两种情形都钉住。
+ *
+ * ⚠️ 合成树里的**值必须是真实可读的绝对路径**：第一版我写成了相对名
+ * （`legion-only.mjs`），于是 `readFileSync` 读不出来、判据报"读不出来"——
+ * **测试红得对，但红的是我的替身而不是判据**。这与 ⑪b–⑪e 那次是同一个教训的第二次。
+ */
+function syntheticTree(files) {
+  const byPath = new Map()
+  const bySuffix = new Map()
+  // 一律指向一个真实存在、行数足够的文件（用台账自己）
+  const real = resolve(REPO, LEDGER_DOC)
+  for (const f of files) {
+    const key = f.toLowerCase()
+    byPath.set(key, real)
+    const parts = key.split('/')
+    for (let i = parts.length - 1, n = 0; i >= 0 && n < 6; i--, n++) {
+      const suf = parts.slice(i).join('/')
+      if (!bySuffix.has(suf)) bySuffix.set(suf, [])
+      bySuffix.get(suf).push(real)
+    }
+  }
+  return { byPath, bySuffix }
+}
+
+test('⑪h DSH 检出不在 ⇒ DSH 侧引用记 external，**不算坏**（实测 18 条假红的回归）', () => {
+  const text = '见 `packages/credentials/credentials-local/src/index.ts:585` 与 `legion-only.mjs:1`。\n'
+  // DSH 侧文件在 Legion 索引里找不到，而 DSH 树不在 ⇒ 应记 external
+  const noDsh = { legion: syntheticTree(['legion-only.mjs']), dsh: null }
+  const a = scanLineCitations(text, noDsh)
+  assert.equal(a.broken.length, 0,
+    `DSH 不在时报了坏引用：${JSON.stringify(a.broken)} ⇒ `
+    + '这会把"我没法查"渲染成"引用坏了"，然后每个没有 DSH 检出的环境都会假红')
+  assert.ok(a.external.some((x) => x.includes('credentials-local')),
+    `DSH 侧那条没被记成 external（external=${JSON.stringify(a.external)}）`)
+  assert.equal(a.checked, 1, 'Legion 侧那条应当被判定')
+
+  // ★ 反向：DSH 树**在**（且里面有那个文件）时，同一条引用必须能落到实处
+  const withDsh = {
+    legion: syntheticTree(['legion-only.mjs']),
+    dsh: syntheticTree(['packages/credentials/credentials-local/src/index.ts']),
+  }
+  const b = scanLineCitations(text, withDsh)
+  assert.equal(b.broken.length, 0, `DSH 在时反而报坏：${JSON.stringify(b.broken)}`)
+  assert.equal(b.external.length, 0, 'DSH 在时不该有 external（应当已经判定过了）')
+  assert.equal(b.checked, 2, `应当两条都判定，实际 ${b.checked}`)
+
+  // ★★ 而"DSH 在"时真的找不到 ⇒ **必须**是坏引用（收紧不能把这一支关掉）
+  const withDshButMissing = {
+    legion: syntheticTree(['legion-only.mjs']),
+    dsh: syntheticTree(['packages/other/thing.ts']),
+  }
+  const c = scanLineCitations(text, withDshButMissing)
+  assert.equal(c.broken.length, 1,
+    'DSH 在、文件却真的不在 ⇒ 应当判坏引用（否则这条判据在 DSH 在时恒绿）')
+  assert.match(c.broken[0], /找不到这个文件/)
+})
+
+test('⑪i 覆盖面不许静默空掉：Legion 里一条都没落到实处 ⇒ 必须红', () => {
+  // 引用解析得出来，但 Legion 索引是空的（模拟"索引坏了"）
+  const text = '见 `legion-only.mjs:1`。\n'
+  const emptyLegion = { legion: syntheticTree([]), dsh: null }
+  const r = scanLineCitations(text, emptyLegion)
+  assert.ok(r.broken.length > 0,
+    '解析到引用、却一条都没落到实处，居然没红 ⇒ 索引坏掉时这一面会整个空掉，'
+    + '而"空面"与"全绿"在输出里长得一样')
 })

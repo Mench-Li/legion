@@ -209,6 +209,7 @@ export function scanLineCitations(text, treeSet = null) {
   }
   const broken = []
   const ambiguous = []
+  const external = []
   let checked = 0
   for (const c of uniq.values()) {
     const key = c.path.toLowerCase()
@@ -230,7 +231,24 @@ export function scanLineCitations(text, treeSet = null) {
       if (u.length === 1) real = u[0]
       else if (u.length > 1) { ambiguous.push(c.path); continue }
     }
-    if (real === null) { broken.push(`${c.path}:${c.from}（找不到这个文件）`); continue }
+    if (real === null) {
+      // ★★ 关键区分：**"找不到"有两种，而它们的处置必须相反。**
+      //
+      //   · DSH 检出**在**，还是找不到 ⇒ 那是真的引用坏了（改名/删了/写错了）；
+      //   · DSH 检出**不在** ⇒ 这条可能本来就在那边，我们**无从判断**。
+      //
+      //   本脚本第一版把两者都算成 broken。实测：把 `DSH_CHECKOUT` 指到一个不存在的
+      //   目录，它会报出 **18 条"找不到这个文件"** ——而那 18 条全是
+      //   `packages/…` / `apps/…` 的 DSH 侧引用，**一条都没坏**。
+      //
+      //   > 一个"引用坏了"与一个"我没法查"，在只有同一条红的时候长得一模一样
+      //   > ——而前者要求我改文档，后者要求我改**判据**。
+      //
+      //   ⇒ DSH 不在时记 `external`（如实列出、**不判定**），且它**不算 broken**。
+      if (t.dsh === null) { external.push(`${c.path}:${c.from}`); continue }
+      broken.push(`${c.path}:${c.from}（找不到这个文件）`)
+      continue
+    }
     let lines = 0
     try { lines = readFileSync(real, 'utf8').split('\n').length } catch {
       broken.push(`${c.path}:${c.from}（读不出来）`); continue
@@ -243,7 +261,13 @@ export function scanLineCitations(text, treeSet = null) {
   // ★ "解析到 0 条"必须是**红**的：否则改了引用格式之后这条判据会静默变绿，
   //   而那与"所有引用都是好的"是同一个输出。
   if (uniq.size === 0) broken.push('（解析到 0 条 `file:line` 引用——锚点或格式变了？）')
-  return { checked, broken, ambiguous, total: uniq.size }
+  // ★ 同理："在 Legion 里一条都没解析到"也要红——否则 DSH 不在时这一面可能整个空掉，
+  //   而"空面"与"全绿"在输出里长得一样。
+  if (uniq.size > 0 && checked === 0) {
+    broken.push(`（解析到 ${uniq.size} 条引用，但在 Legion 仓里**一条都没落到实处**——`
+      + `索引坏了，或引用格式变了；另有 ${external.length} 条因 DSH 检出不在而无法判定）`)
+  }
+  return { checked, broken, ambiguous, external, total: uniq.size }
 }
 
 const COMMIT_CITATION_RE = /`([0-9a-f]{7,40})`/g
@@ -531,7 +555,8 @@ export const FACTS = Object.freeze([
       + '`enforcement-mapping.mjs:266`、`credentials-local/src/index.ts:585`）逐条读过，都在。'
       + '⚠️ 这条**只**判"落到实处"，**不**判"那一行支撑那句话"——'
       + '后者要读上下文，机械判不了。',
-    source: LEDGER_DOC + ' 正文里的 `path:line`，按 Legion 仓 + DSH 检出的后缀表解析',
+    source: LEDGER_DOC + ' 正文里的 `path:line`，按 Legion 仓 + DSH 检出的后缀表解析'
+      + '（DSH 检出不在时，无法判定的引用记 `external`，**不**算坏）',
     derive: (ctx) => ctx.lineCitations().broken.slice().sort().join(' '),
     expect: '', // 空串 = 一条坏引用都没有
   }),
@@ -653,6 +678,23 @@ function main() {
   if (r.ok) {
     const n = defaultContext().generatedArtifacts().length
     console.log(`  其中类级扫描面：自称"生成物"的文件 ${n} 个（跳过 .worktrees / node_modules 等）`)
+  }
+  // ★★ 坐标判据的覆盖面必须**每轮都印出来**，因为"没能判定"与"判定通过"
+  //   在只有一个 PASS 的时候长得一样。
+  //
+  //   实测过：把 `DSH_CHECKOUT` 指到一个不存在的目录时，第一版会报
+  //   **18 条"找不到这个文件"**——而那 18 条全是 DSH 侧引用，一条都没坏。
+  //   修好之后它们转成"无法判定"，而这一行就是让那个**无法判定**不再静默。
+  const lc = defaultContext().lineCitations()
+  const cc = defaultContext().commitCitations()
+  console.log(`  坐标判据覆盖面：\`file:line\` 解析到 ${lc.total} 条`
+    + `（落到实处 ${lc.checked} / 后缀多候选 ${lc.ambiguous.length} / `
+    + `**因 DSH 检出不在而无法判定 ${lc.external.length}**）；`
+    + `提交哈希 ${cc.total} 个（判定 ${cc.checked}）`)
+  if (lc.external.length > 0) {
+    console.log('  ⚠️ 有引用**没能判定**（DSH 检出不在 ⇒ 不判它坏）：'
+      + `${lc.external.slice(0, 4).join(', ')}${lc.external.length > 4 ? ' …' : ''}`)
+    console.log('     ⇒ 这一轮里"那些引用是对的"这句话**没有证据**；它只是没被证伪。')
   }
   process.exit(r.ok && r.checked === r.total ? 0 : 1)
 }

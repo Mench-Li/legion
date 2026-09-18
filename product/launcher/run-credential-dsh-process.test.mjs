@@ -65,7 +65,25 @@ const DSH_NAME = 'PROBE_API_KEY'
 /** 材料化时写进去的那把值（假值；本文件只比它的 sha256）。 */
 const PROBE_VALUE = 'probe-value-0'
 const PROFILE = 'prt509probe'
-const HOST_TIMEOUT_MS = 120000
+/**
+ * 真 DSH 宿主的启动 + 退出看门狗。
+ *
+ * ★ 2026-09-18 从 **120s 提到 240s**，依据是一次**实测到的 CI 假红**：
+ *   同一次 `run-ci --only=test` 连跑两遍——第一遍本套件在 120s 被看门狗杀掉，
+ *   并且是那一遍 test 阶段**唯一**的一条红；第二遍同一提交、同一台机器、同一阶段全绿
+ *   （`run-credential-dsh-process: exit=0 tests=1 pass=1`）。
+ *   单独跑只要 **3.1s**，7 个真进程套件并发 5.2s，27 个并发也全绿。
+ *   所以 120s 不是"它需要的时间"，而是**它单独跑所需时间的 40 倍**——
+ *   在满负载（近两百个套件 / 8 路并发）下，这个倍数仍然不够。
+ *
+ * ★ 它此前是本仓**唯一**把预算卡在 120s 的真进程套件：同类套件要么不设预算
+ *   （无限等），要么给 180s（`run-floor-dsh-process`、`subagents-surface-real-process`）。
+ *   于是"只有它会因为机器忙而变红"——一个**把机器负载读成产品缺陷**的判据。
+ *
+ * ★ 这里**不**改成"超时即通过"：真挂起仍然要红。改的是两件事——
+ *   预算够宽，以及超时时**说清是哪一条主张不成立**（见文件末尾那条断言）。
+ */
+const HOST_TIMEOUT_MS = 240000
 
 const sha256 = (text) => createHash('sha256').update(text, 'utf8').digest('hex')
 const yamlPath = (p) => p.replace(/\\/g, '/')
@@ -92,6 +110,7 @@ function probeHandle(refs = [RUNTIME_MODEL_KEY_REF]) {
 
 /** 起一个真 DSH 进程，等它自己退出（探针里调 `appExit`）；超时则杀掉。 */
 function runHost({ cliBin, cwd, env, args, timeoutMs }) {
+  const startedAt = Date.now()
   const child = spawn(process.execPath, [cliBin, ...args], {
     cwd,
     env,
@@ -110,7 +129,7 @@ function runHost({ cliBin, cwd, env, args, timeoutMs }) {
     child.once('close', (code) => { clearTimeout(timer); resolve(code) })
     child.once('error', (e) => { clearTimeout(timer); resolve(`SPAWN-ERROR:${e?.code ?? e?.name}`) })
   })
-  return done.then((code) => ({ code, out, err }))
+  return done.then((code) => ({ code, out, err, ms: Date.now() - startedAt }))
 }
 
 test('★★★★★ 缺口 ③（真进程）：一个真 DSH 进程在启动期从 Legion 那份文件里读到了值', async (t) => {
@@ -234,7 +253,28 @@ test('★★★★★ 缺口 ③（真进程）：一个真 DSH 进程在启动�
     assert.equal(reading.otherResolved, false,
       `DSH 竟然能用 Legion 的引用名（${RUNTIME_MODEL_KEY_REF}）取到值——`
       + '那说明写进文档的键不是 DSH 的可寻址名，而是我们的内部引用名')
-    assert.equal(result.code, 0, `真 DSH 进程应以 0 退出（实际 ${result.code}）：\n${tail}`)
+    // ★ 这条断言与上面几条**不是同一件事**，超时时必须说清是哪一条不成立。
+    //
+    //   关键时序：探针的读数文件是在**进程退出之前**写的，所以"读到了值"
+    //   （也就是 PRT-509 缺口 ③ 的那条证据）在超时的情形下**往往已经成立**。
+    //   上一句 `assert.ok(existsSync(outFile))` 就是用来把这两件事分开的：
+    //   真的一条都没读到，报的是"没有留下探针读数"。
+    //
+    //   2026-09-18 那次 CI 假红**恰好**是这一条：读数文件在、值也读到了、
+    //   `source === 'file'` 也成立，只是宿主进程没在 120s 内退出。
+    //   旧文案统一写成"真 DSH 进程应以 0 退出"，读起来像"这次读不到凭证"——
+    //   而实际不成立的是**退出**这件事，不是证据的获取。
+    assert.equal(result.code, 0,
+      result.code === 'TIMEOUT'
+        ? `宿主进程在 ${HOST_TIMEOUT_MS / 1000}s 内没有退出（看门狗杀了它；实测 ${Math.round(result.ms / 1000)}s）。\n`
+          + '★ 这一条失败**不等于**"凭证没读到"：读数文件是退出之前写的，'
+          + `本次它${existsSync(outFile) ? '**已经写出**（值也读到了）' : '没有写出'}。`
+          + '不成立的是「宿主能干净退出」这条**另一条主张**。\n'
+          + '★ 满负载下 DSH 的启动 + 退出会远慢于单独跑（本仓实测：单独约 3s，'
+          + '近两百个套件 / 8 路并发时可超过 120s）。若这里**经常**超时，'
+          + '要查的是宿主退出路径上挂住的句柄 / 定时器，而不是继续调大预算。\n'
+          + `日志尾部：\n${tail}`
+        : `真 DSH 进程应以 0 退出（实际 ${result.code}）：\n${tail}`)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

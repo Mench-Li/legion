@@ -914,6 +914,32 @@ export DSH_CHECKOUT=D:/project/DSH/dsh/deepseek-harness
 node scripts/ci/run-ci.mjs --only test     # 看 skipped 是否降下来
 ```
 
+### ★★★ 这一处修好之后的**第一次读数**就抓到一个真回归
+
+修完当天把 `DSH_CHECKOUT` 指上，读数从 `skipped=232` 变成 `skipped=1`，
+而**多跑出来的那 231 条里有一条是红的**：
+
+```text
+FAIL product-launcher: exit=1 tests=397 pass=396 fail=1 skipped=0
+  ✖ ★★★★★ 用 Launcher 拼出的 argv，真 DSH CLI 接受并把行装进组合树（120075ms）
+```
+
+它自 `f291f9c`（2026-09-13 之后不久）起就是坏的，而**所有门禁都是绿的**——
+因为那条用例需要 `DSH_CHECKOUT`，而它一直没被设过。
+
+根因是**根选项与 app 选项的段顺序**：DSH 用 `passThroughOptions()`
+（`apps/cli/src/args.ts:142`）——一旦遇到第一个不认识的 token，**从那里往后全归 app**。
+`f291f9c` 给 argv 末尾补了 `--host`/`--port`/`--no-open`（**产品侧是对的**），
+而用例把 `--dump-config` 追加在**它们之后**，于是 DSH 没进 dump 模式、
+去启动 web app 然后挂到 120s 超时。
+
+> 产品代码里逐字论证过同一件事的反面（`process-manifest.mjs` 那段：
+> 「`--port` 跑到 `--patch` 前面 ⇒ 覆盖层静默消失」）；
+> 产品修好了，而**夹具**踩在了同一个坑的另一侧——
+> 两者红起来的样子**完全一样**，只不过一个要改用例、一个要改实现。
+
+详见 `docs/superpowers/prt/PRT-SESSION-REPORT-2026-09-17.md` §10.12。
+
 ## 6. 怎么复跑这份对照表里的每一条
 
 ```bash

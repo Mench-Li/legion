@@ -17,6 +17,7 @@ import assert from 'node:assert/strict'
 import {
   DEFAULT_RUN_PEAK_SAMPLE_MS,
   RUN_PEAK_CODES,
+  attachRunPeakResource,
   parseRuntimeEndpoint,
   readRuntimePublication,
   resolveRuntimePidForSampling,
@@ -236,6 +237,58 @@ test('withRunPeakResource：采样器抛错被吞掉，Run 不受影响', async 
   })
   const out = await wrapped.execute()
   assert.deepEqual(out, { outcome: 'completed' })
+})
+
+// ── 接在 executorProvider 上的那条策略（会**静默失效**的那一处） ────────────
+
+/** `executor.mjs:614` 的真实成功形状。 */
+const PROVIDED_OK = (execute) => ({ ok: true, executor: { buildContext: async () => {}, execute }, selfCheck: { ok: true } })
+
+const opts = () => ({
+  onReading: () => {},
+  resolvePid: okResolve,
+  createSampler: fakeSamplerFactory().create,
+  setIntervalImpl: () => ({ unref() {} }),
+  clearIntervalImpl: () => {},
+})
+
+test('★★★ attachRunPeakResource：成功形状必须被**真的包上**（否则就是"接上了但一条读数都没有"）', async () => {
+  const orig = PROVIDED_OK(async () => ({ outcome: 'completed' }))
+  const out = attachRunPeakResource(orig, opts())
+  assert.equal(out.ok, true)
+  assert.notEqual(out.executor, orig.executor, 'executor 必须是**新的**（被包过的）那个')
+  assert.notEqual(out, orig, '外壳也应当是一个新对象')
+  // 包过之后仍然保留其余字段（selfCheck 不能被吃掉）。
+  assert.deepEqual(out.selfCheck, { ok: true })
+  // 而且真的能跑。
+  assert.deepEqual(await out.executor.execute(), { outcome: 'completed' })
+})
+
+test('★★★ attachRunPeakResource：失败形状**原样**返回——不合成一个新的拒绝', () => {
+  for (const bad of [
+    { ok: false, code: 'EXECUTOR_HOST_PORT_REQUIRED', message: 'm', reasons: [] },
+    { ok: false, code: 'EXECUTOR_BAD_WIRING', message: 'm', reasons: [] },
+  ]) {
+    const out = attachRunPeakResource(bad, opts())
+    assert.equal(out, bad, '失败形状必须**同一个引用**返回：调用方那句具名拒绝才是该报出来的')
+    assert.equal(out.code, bad.code, '码不能被顶掉')
+  }
+})
+
+test('★★ attachRunPeakResource：形状不对（缺 executor / 不是对象）也不炸、也不改', () => {
+  // `ok: true` 但没有 executor —— 这正是"形状判断写错就会静默不生效"的那一类。
+  const noExec = { ok: true, selfCheck: {} }
+  assert.equal(attachRunPeakResource(noExec, opts()), noExec)
+  assert.equal(attachRunPeakResource(null, opts()), null)
+  assert.equal(attachRunPeakResource(undefined, opts()), undefined)
+  assert.equal(attachRunPeakResource(42, opts()), 42)
+})
+
+test('★★ attachRunPeakResource：没有出口时**同一个引用**返回（不换壳，免得不生效被新 identity 盖住）', () => {
+  const orig = PROVIDED_OK(async () => ({}))
+  // 没有 onReading ⇒ withRunPeakResource 原样返回 executor ⇒ 这里也该原样返回。
+  const out = attachRunPeakResource(orig, { resolvePid: okResolve })
+  assert.equal(out, orig)
 })
 
 test('默认采样周期与 supervisor 那份取同一个数（0 表示不采样）', () => {

@@ -410,3 +410,36 @@ export function withRunPeakResource(executor, {
   }
   return Object.freeze(wrapped)
 }
+
+/**
+ * 把一个 `executorProvider` 的**判别式联合**结果接上每 Run 窗口。
+ *
+ * `productionExecutorProvider` 的成功形状是
+ * `{ ok: true, executor: { buildContext, execute }, selfCheck }`
+ * （`executor.mjs:614`），失败形状是 `{ ok: false, code, message, reasons }`。
+ *
+ * ★ 为什么这条策略必须住在**本模块**、而不是写在外壳里：
+ *   外壳是一个顶层 `await` 的脚本（导入即启动 worker），**测不到**。
+ *   而这里恰恰是最该被钉住的一处——它有一个会**静默失效**的失败模式：
+ *
+ *   > 一个形状判断写错的接线，会原样返回那个没被包过的 provider。
+ *   > 于是它看起来"接上了"（没有报错、没有拒绝、Run 照跑），
+ *   > 只是一条读数都没有——而"一条读数都没有"与"这台机器上没接采样"
+ *   > 是完全同形的。
+ *
+ *   所以下面那三条早退**各有各的用例**（见同名 `.test.mjs`），
+ *   而不是靠"读起来显然对"。
+ */
+export function attachRunPeakResource(provided, options = {}) {
+  // 失败形状（或根本不是判别式联合）原样返回：**不合成**一个新的拒绝。
+  // 调用方那条既有的具名拒绝（`HOST_PORT_REQUIRED` / `BAD_WIRING`…）才是
+  // 该被报出来的那句话——在这里盖一个"采样不可用"会把它顶掉。
+  if (provided === null || typeof provided !== 'object' || provided.ok !== true || provided.executor == null) {
+    return provided
+  }
+  const executor = withRunPeakResource(provided.executor, options)
+  // `withRunPeakResource` 拒绝包装时返回的是**同一个引用**。
+  // 那种情况下也不该换一个外壳对象——否则"没包上"会被一个新的 identity 盖住。
+  if (executor === provided.executor) return provided
+  return Object.freeze({ ...provided, executor })
+}

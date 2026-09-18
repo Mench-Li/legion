@@ -465,28 +465,33 @@ is `mcp__<serverName>__<rawName>`, normalized to the DeepSeek function-name
 **④ 声明该写哪个名字**（§5 第 22 条——功能上已两可，但**约定**仍要定，
 否则下一个写声明的人不知道写哪个）。
 
-### 4.3 ★★★ 第 19 轮：**三道范围检查**的账（PRT-604 / 605 / 606）
+### 4.3 ★★★ 第 19–20 轮：**三道范围检查**的账（PRT-604 / 605 / 606）
 
-§5.2 早先记过一句话：**"三道范围检查在生产里从来没有跑过"**。本轮把其中
-**第二道**接上了，而接的过程本身产生了两份更值钱的读数。
+§5.2 早先记过一句话：**"三道范围检查在生产里从来没有跑过"**。第 19 轮接上了
+**第二道**、第 20 轮接上了**第三道**——至此三道的账全部结清。而接的过程本身
+产生了比"接上了"更值钱的读数。
 
 | 道 | 检查器 | 端口 | 生产读数 | 为什么停在这里 |
 | --- | --- | --- | --- | --- |
 | PRT-604 路径范围 | `path-scope.mjs` | `scope-port.mjs`（`LEGION_PATH_SCOPE`） | ✅ 已接（第 19 条 §9.2 第 4 步） | 缺**投递**（§5 第 19 条，已裁决为"放进 `RunRequest`"，待施工） |
-| **PRT-605 命令/网络/MCP** | `execution-scope.mjs` | **`execution-scope-port.mjs`（`LEGION_EXECUTION_SCOPE`，本轮新建）** | ✅ 已接 | 同上；★ 且 **MCP 那一条刻意未接**，见下 |
-| PRT-606 外部 API | `external-api-scope.mjs` | **仍然没有** | ❌ 连位置都没有 | 它要的 `request` 是六字段对象，需要事实表先立起来（本轮完成了 `scope-facts.mjs`），接线本身是下一步 |
+| PRT-605 命令/网络/MCP | `execution-scope.mjs` | `execution-scope-port.mjs`（`LEGION_EXECUTION_SCOPE`，第 19 轮新建） | ✅ 已接（第 19 轮） | 同上；★ 且 **MCP 那一条刻意未接**，见下 |
+| **PRT-606 外部 API** | `external-api-scope.mjs` | **`external-api-scope-port.mjs`（`LEGION_EXTERNAL_API_SCOPE`，第 20 轮新建）** | ✅ 已接（第 20 轮） | 同上；★★ 且 **scheme 不在它的职责里**，见第 20 轮边界 ① |
 
-**① `enforcementSurfaces()` 从 7 格变 8 格，而"多一格"与"多一道检查"不是同一件事。**
+**① `enforcementSurfaces()` 从 7 格长到 9 格，而"多一格"与"多一道检查"不是同一件事。**
 
-第 19 轮之前，这两道**连位置都没有**。而"没有位置"比"有位置但没人给值"更糟：
+第 19 轮之前，后两道**连位置都没有**。而"没有位置"比"有位置但没人给值"更糟：
 
 > 一个「端口在、没人给它值」的强制面，
 > 与一个「端口根本不存在」的强制面，在 `enforcementSurfaces()` 上是
 > `false` 与**什么都没有**——而后者连"我该配点什么"都问不出来。
 
-所以本轮的"接上"分成两条**分开取**的读数，缺一条都不能算数：
+所以每一次"接上"都分成两条**分开取**的读数，缺一条都不能算数：
 键在（`productionRootInputs()` 的文本解析）+ 行为读数（`env` 没配 ⇒ `false`；配了 ⇒ `true`；
-**并且**同一路越权命令在真实 `preExecute` 上真的被拒，而授权表之内的命令照旧放行）。
+**并且**同一路越界调用在真实 `preExecute` 上真的被拒，而授权表之内的照旧放行）。
+
+★ 而三格**必须独立**：它们是三份**不同**的配置（`LEGION_PATH_SCOPE` /
+`LEGION_EXECUTION_SCOPE` / `LEGION_EXTERNAL_API_SCOPE`）。一个共用布尔会让
+"只配了路径范围"与"三道全配了"在读数上同形。
 
 **② ★★★ 事实只算一次，这是本轮的架构决定。**
 
@@ -549,6 +554,82 @@ is `mcp__<serverName>__<rawName>`, normalized to the DeepSeek function-name
   能挡住"换个名字就用熟悉的参数起进程"，但挡不住"换个名字**也换一套参数名**"
   ——那一格仍然只能靠政策门（未登记工具一律 `write` + 要人批）。
 
+**⑥ ★★★ 第 20 轮（PRT-606）抓到的：把 URL 交给解析器，等于让三道检查**从不触发**。**
+
+`checkExternalApi` 要的是 `{host, method, path, headers, query, body}` 六项**分开**的
+请求形状，而事实表里只有一个 `url` 字符串。所以适配器的职责是把 URL 拆开——
+而**怎么拆**，决定 `external-api-scope.mjs` 那 24 例里的三条检查是"会触发"
+还是"从不触发"。本批**实测**了两个洞：
+
+| 写法 | 输入 | `new URL()` 给出来的 | 后果 |
+| --- | --- | --- | --- |
+| `u.hostname` | `https://api.example.com:8443/v1` | `api.example.com` | **端口被丢掉** ⇒ `HOST_HAS_PORT` **从不触发** |
+| `u.pathname` | `https://api.example.com/api/items/../admin` | `/api/admin` | **`..` 被折叠** ⇒ `PATH_ESCAPE` **从不触发**，而折叠后的路径还可能命中一条它本来不匹配的授权 |
+| `u.hostname` | `https://api.example.com@evil.com/x` | `evil.com` | **userinfo 被解析掉** ⇒ 具名的 `HOST_HAS_USERINFO` 退化成"这个 host 没被授权" |
+
+★ 第三个洞在 **query** 上，形态不同但同族：按 `&`/`=` 手切时
+`?%6dethod=DELETE` 切出来的键是 `%6dethod`，而 `METHOD_OVERRIDE_KEYS` 里只有
+`method` ⇒ 那条"能覆盖方法的东西一律拒绝"的检查**从不触发**，一次 DELETE 被按**读**判。
+⇒ 用 `URLSearchParams`（会百分号解码）。
+
+> 一个「在解析之后才检查 `..`」的检查，
+> 与一个「解析器已经悄悄把它们折叠掉了、所以这条检查从不触发」的检查，
+> 是同一个东西——而它的方向是放行。
+
+⇒ 端口**从原始串上取**（`host` 用 `parseEgressUrl` 的 `rawAuthority`，
+`path`/`query` 用一条**只切不改**的正则）。
+
+★★ 而这三个洞**红的方式很特殊**：退回 `new URL()` 时它们会变成
+`ENDPOINT_NOT_GRANTED`（"不匹配任何端点"）——**方向仍然是拒**。
+所以一个只看 `allowed === false` 的用例**抓不到它**；套件断言的是**码**。
+
+> 一个「只看 allowed 是不是 false」的用例，
+> 与一个「分不清"端口与 userinfo 没被检查"与"这个端点没被授权"」的用例，
+> 是同一个东西——只不过前者在适配器退回解析器之后**照样是绿的**。
+
+**⑦ ★★★ 第 20 轮由判据顶出来的两个真缺陷（都不是我推断的，是跑出来的）。**
+
+1. ★★★ **`normalizeApiGrant` 不幂等，而三个端口长着同一副样子。**
+   `fromEnv` 归一化一次、`create*Port` 再归一化一次——这在 PRT-604/605 上是绿的，
+   在 PRT-606 上是**装配期就抛**（`api-scope-malformed`："出现了不认识的字段 [`parsed`]"）。
+   根因是 `normalizeApiGrant` 会在每个端点上挂一个**派生字段** `parsed`
+   （让 `checkExternalApi` 不必每次重新解析模式），而 `parsed` **不在**
+   `ENDPOINT_FIELDS` 里。实测：`normalizeGrant`（605）**幂等** ✓、
+   `normalizeApiGrant`（606）**不幂等** ✗。
+   ⇒ 而最值得记的不是这个 bug，是**"这个归一化器幂等吗"这件事在三个端口的代码里
+   一个字都没写**。三个长得一样的端口，其中两个的同一段接线是对的、第三个是错的。
+2. ★★★ **可达性基线只被单边守。** `reachability.test.mjs` 的 ② 只管
+   "当前不可达的必须有分类"、③ 只管"基线里的文件必须还在"——
+   **没有一条判据管"基线里判成 `gap` 的模块后来被接上了"**。
+   实测有**两条**这样的过期条目：`external-api-scope.mjs`（第 20 轮接上）
+   与 **`execution-scope.mjs`（第 19 轮就接上了，而它的基线条目一直留到今天）**。
+   ⇒ 第 19 轮做过正确的事（从 READINGS 删条目、按规矩补替身、更新 §5.2），
+   **却没有任何判据要求它动基线**。已新增用例 **③b** 补上这个方向。
+
+> 一个「只检查'有没有漏掉'的基线闸」，
+> 与一个「可以无限积累过期条目、而每一条都长得像一条读数」的基线闸，
+> 是同一个东西——只不过后者会让"死代码还有多少"这个数**只会涨不会跌**。
+
+**⑧ 诚实的成果边界：三道范围检查现在是"配了才跑"，不是"默认就拦"。**
+
+三次接线（604/605/606）都是同一个形状：**没配** ⇒ `port` 是 `null` ⇒ 那一行是放行。
+所以"接上了"精确地等于**从"一次都不跑"变成"配了才跑"**。
+
+**⑨ 第 20 轮的诚实边界**（这几条**没有**被证明过）：
+
+- ★★ **本端口不看 scheme**（`checkExternalApi` 也不看）：那一条 `SCHEME_DENIED`
+  归 `checkNetwork`。⇒ 一个 `ftp://api.example.com/api/items/1` 只要 host 与模式
+  对得上就会被**放行**。本批**没有**顺手加"必须 http(s)"——那是**发明策略**
+  （PRT-253 §3 明令禁止发明默认值）。它是一处**需要裁决的如实读数**，见 §5 第 26 条。
+- `idempotencyKey` 恒为 `null`（事实表里没有它）⇒ `IDEMPOTENCY_NOT_HONORED`
+  在当前接线里**不会触发**——重试语义还没有数据来源。
+- `LEGION_EXTERNAL_API_SCOPE` 同样**不在** `product/process-manifest.mjs` 的
+  runtime `envNames` 里 ⇒ 真实部署里 `externalApiScope` 仍是 `false`。
+  ★ 它是**同一个缺口（一个数组）的第四个受害者**，不是第四处要修的地方。
+  ⚠️ 而这个数**连续两轮都在涨**：每接一道范围检查，就有一把新键落进同一个没修的数组。
+- `runtime/dsh-composition/runtime-contract-server.mjs` 一族（服务端 + 挂载行 +
+  `run-floor.mjs`）仍然不可达，且**消费侧已经在等它**（见 §5 第 20 条）。
+
 ---
 
 ## 5. 需人工介入清单（汇总给到项目方）
@@ -582,7 +663,7 @@ is `mcp__<serverName>__<rawName>`, normalized to the DeepSeek function-name
 | 22 | ★★ **连接器声明里的工具名该写「公开名」还是「裸名」**（第 17 轮**新查出**；第 18 轮**功能上已两可**） | 产品 + 项目主（**只需定约定**，不再是功能阻塞） | 第 17 轮接上 DSH 的 MCP 命名契约（`mcp__<serverName>__<rawName>`，逐字读 `packages/mcp/mcp-client/src/tools.ts`）后照出来的一件事：**声明里写的是裸名**（`list_issues`）而**线上来的永远是公开名**。实测（第 17 轮）：`github` 声明 `list_issues` 时，调 `mcp__github__list_issues` ⇒ **`deny`「没有声明工具」** ⇒ **一个正确声明过的工具，在真 DSH 进程里会被拒**。★★ **第 18 轮已修**：`registry.mjs` 的 `declaredToolNames` 让登记表**同时**认两个名字（归属与判定共用**一份**实现），实测该调用在连接器层从 `deny` 变成 **`allow`**。⇒ **要裁决的只剩「写哪个」这个约定** | ★ 功能上**两种写法现在都能工作**（写裸名 ⇒ 由 `declaredToolNames` 推导公开名；写公开名 ⇒ 字面命中）。**不要**为了"统一"删掉裸名那一半——它兜住"连接器声明一个 DSH 核心工具名"那一类合法用法。★ 也**不许**在归属时"把命名空间剥掉"：DSH 的公开名在归一化/截断时会被替换成 12 位 SHA-256 后缀（`mcp__github__a b` ⇒ `mcp__github__a_b_200f08ef849a`），那时**剥不出** rawName；`tools.ts:9-10` 逐字写着 "the public name is never parsed to recover it"。★ 建议**按连接器自己那一侧的名字写**（可读，且是唯一总能写对的形式），由登记表负责换算 |
 | 23 | ★★ **命名空间"认不出来"的那一类要不要按教义拒**（第 17 轮**新查出**，见 §4.2 第三次末段） | 产品 + 项目主 | `mcp__evil__x`：一个 MCP 公开名，而它那个命名空间**没有任何已知连接器**占着（一次漏配，或一次**未经声明的挂载**）。它今天落到**政策门**（不是登记表）。按 `registry.mjs` 文件头 ① 的头号教义，它应当**被拒**——而做不到的原因是**端口形状**：`resolveConnectorId` 的值域是 `string|null`，**装不下"拒"**。要裁决的是：**要不要**新增一个端口（例如 `connectorShape` 谓词）让"连接器形状、但命名空间不认识"能被表达成一次**具名的拒绝** | ★ 这一格与第 22 条是**相反方向**的两个缺口，别合并：第 22 条是"**已登记的**连接器把**合法**工具拒了"（过严），本条是"**未登记的** MCP 服务器把工具放过去"（过松）。★ 不裁决则：一个未声明的 MCP 服务器挂上来，它的工具走政策门——未知工具在那里是 fail closed，所以**今天不致命**；但**一旦某个名字在政策门眼里是已知的低风险读工具**，它就会被放行，而登记表连问都没被问过。★ 本批**没有**偷偷加这个端口，也没有把它塞进 `resolveConnectorId` 的返回值里凑合。★ 它与第 24 条的关系：**两条都是"过松"方向**（都该拒而没拒），而第 24 条更根本——**今天即使它被拒了，理由也会是政策门而不是登记表** |
 | 24 | ★★★ **政策门要不要从连接器声明里读「能力」**（第 18 轮**新查出**，见 §4.2 第四次） | 产品 + 架构 | 第 18 轮修好"声明名 vs 公开名"之后，**最终判决仍然是 `deny`，理由是 `[政策门]`**：`tool-capability.mjs` 的 `resolveTool` 对不在它目录里的名字一律给 `direction: 'write'`、`requiresApproval: true`（fail closed），而 MCP 工具的公开名**不在那个目录里**。⇒ 一句必须说清的话：**连接器层今天只能让事情更严，永远不能让它更松**——一个"连接器声明了 `allow`、而每次调用都要人批"的系统，与一个"连接器层根本没接上"的系统，在**最终判决**上是同一个 `deny`（只不过前者的理由里写着 `[政策门]`）。要裁决的是：**政策门要不要（以及怎么）从声明里取能力/风险**，从而让连接器层的 `allow` 真的生效 | ★ 这**不是**一个明显的 bug：`deny > ask > allow` 的取严合并正是为了让连接器层成为**额外**约束而不是替代品；让政策门从**声明**读能力会把两层耦合成一层，并打开一个新方向——**一条写错的声明可以下调政策门的评估**（层内"风险只能往上抬"那条纪律管不到跨层）。⇒ 三条路各有代价：**(a)** 保持现状（MCP 工具一律要人批，最安全，但连接器策略事实上只用于**收紧**）；**(b)** 让声明向政策门提供能力（连接器策略真正生效，但引入跨层下调的口子）；**(c)** 折中：只允许声明**抬升**，政策门对声明来的能力取 `max(静态评估, 声明)`。★ 本批**没有**动 `tool-capability.mjs`，也没有把这个口子偷偷打开 |
-| 25 | ★★★ **「这个岗位能调哪些 MCP 工具」该由哪张表说了算**（第 19 轮**新查出**，见 §4.3） | 产品 + 架构 | 第 19 轮给 PRT-605 接了端口时，`execution-scope.mjs` 的 `mcp` 段与 F-21 的**连接器登记表**第一次同时出现在生产路径上——**两张表都声称自己决定"哪些 MCP 工具可用"**，而且两道检查接在**同一个** `preExecute` 上（`connectorJudgment` 与新的 `executionScope`）。要裁决的是：**哪一张是权威**——是 PRT-605 的 `mcp.servers[].tools`（岗位授权表，按 `server__tool` 对），还是 F-21 的连接器声明（按连接器自己的名字 + DSH 公开名，`declaredToolNames` 两个都认）？ | ★ 本轮**没有**替它做决定，而是把它做成一次**具名的拒绝**（`execution-scope-port-mcp-limb-unwired`）：配了 `mcp` 段 ⇒ 拒，理由逐字写清"权威在连接器登记表，两份表不许并存"。★ 为什么不"顺手接上"：DSH 送上来的公开名是 `mcp__<server>__<rawName>`（**两个** `__`），而 `splitMcpTool` 要求**恰好一个**——把线上名字直接喂进去会以 `MCP_AMBIGUOUS_NAME` 拒，*方向是安全的（拒），而**理由是错的**，且后果是"每一个 MCP 调用都被拒"——一个"配置笔误"与"这道检查坏了"会表现成同一句话*；而靠**拆开公开名**还原是堵死的（截断后带 12 位 SHA-256 后缀，`tools.ts:9-10` 逐字 *the public name is never parsed to recover it*）。★ 不裁决则两种坏结果各占一半：接上去 ⇒ 两道检查对同一个 MCP 工具给出**两个**结论（而 `deny > ask > allow` 的取严会让严的那张永远赢，于是另一张表**写了等于没写**，但账上记着"配了"）；不接 ⇒ `mcp` 段今天只能表达"这个岗位没有任何 MCP 授权"（拒绝靠的是**段缺席**，不是**段内容**）。★ 与第 24 条的关系：第 24 条问"政策门要不要读声明里的能力"，本条问"**两张 MCP 表**谁是权威"——两条都会让"配了却没生效"变成一件读不出来的事，但**改的文件完全不同**。★ 建议方向：**F-21 的连接器登记表为权威**（它已经认两个名字、已经有熔断与反馈面、已经接在同一个 `preExecute` 上），而 `execution-scope.mjs` 的 `mcp` 段**降级为"这个岗位允不允许调 MCP"这一个布尔**（或直接删除该段并写进废弃说明）——但这是**裁决**，不是本轮能单方面关掉的 |
+| 26 | ★★★ **外部 API 授权表要不要管 scheme**（第 20 轮**新查出**，见 §4.3 第 ⑨ 条） | 产品 + 架构 | 第 20 轮给 PRT-606 接上端口之后，`checkExternalApi` 的**输入**第一次真的从线上来了。而它**不看 scheme**——`normalizeHost` 只取 host、`normalizeUrlPath` 只取 path，`scheme` 从头到尾没被读过（`SCHEME_DENIED` 那一条归 PRT-605 的 `checkNetwork`）。⇒ 精确读数是：**一个 `ftp://api.example.com/api/items/1` 只要 host 与模式对得上，就会被 `externalApiScope` 放行**；它**不会**因此就真的发得出去（`executionScope` 的 `checkNetwork` 会拦 scheme），但"外部 API 读/写授权"这一道自己给的是 `allow`。要裁决的是：**(a)** 保持现状（scheme 只由 `checkNetwork` 管，两道各管一段）；**(b)** 让 `checkExternalApi` 也拒非 http(s)（一道能自洽，但从此两道对同一个 URL 有两套 scheme 规则）；**(c)** 在端口适配器里拒（**最坏**：把策略写进适配器，而适配器本该只做形状转换） | ★ 本轮**没有**顺手加"必须 http(s)"，因为那是**发明策略**——PRT-253 §3 明令禁止发明默认值，而"哪些 scheme 算外部 API"是一个产品决定（`ftp`/`file`/`gopher` 各不相同）。★ 为什么它**今天不致命**：端口为 `null` 时是放行，所以真实部署里 `externalApiScope` 仍是 `false`（见第 ⑨ 条最后一段的 `envNames` 缺口）；而且这一道与 `checkNetwork` 接在**同一个** `preExecute` 上，取严的合并会让 `checkNetwork` 的 `SCHEME_DENIED` 先赢。★ 为什么仍然要记：**这两道今天谁先谁后没有判据钉着**——`externalApiGuard` 在 `executionGuard` **之后**跑（顺序有注释、有用例，但用例钉的是"包装在 code 里对得上"），而"取严"这件事在 `preExecute` 上是**短路**（先拒的说了算），不是真的一次取严合并。⇒ 一旦那个顺序被改，`ftp://` 这种 URL 的处置就跟着变，而**没有任何读数会发现** |
 
 ---
 
@@ -663,6 +744,32 @@ is `mcp__<serverName>__<rawName>`, normalized to the DeepSeek function-name
 与一个"这份配置根本不存在"的模块，在"范围表配了没有"这个问题上给出同一个答案：没配*），
 归属第 19 条，已裁决、待施工。
 
+### ★★★ 2026-09-18 第 20 轮更新：**第三道（PRT-606）也接上了**——三道结清
+
+新增 `runtime/dsh-composition/external-api-scope-port.mjs`（`LEGION_EXTERNAL_API_SCOPE`），
+`enforcementSurfaces()` 从 **8 格变 9 格**：
+
+| 部署配置 | `pathScope` | `executionScope` | `externalApiScope` | 含义 |
+| --- | --- | --- | --- | --- |
+| 都没配（**今天的默认**） | `false` | `false` | `false` | 与本节最早那张表同形——没配就是没配 |
+| 只配了路径范围 | `true` | `false` | `false` | ★ 三格**独立**：一格读数下这几种状态是同一个 |
+| 只配了执行面 | `false` | `true` | `false` | 同上 |
+| 都配了 | `true` | `true` | `true` | 三道都真的会拦人（各用真实 `preExecute` 验过） |
+
+★★ 而**第三次接线同样是判据叫来的**，这一点现在有了三轮的证据：
+`production-scope-wiring.test.mjs` ② 在每一轮结束时都会改写自己的对象，
+并在失败消息里逐字要求"把台账、docs 与本套件一起更新"。
+⇒ 第 19 轮它指向 `externalApiScope`，第 20 轮照做；而它**第三次换对象**——
+现在守 `whitelist`，那是一个**不同形状**的缺口：
+
+> 三道范围检查是"**桥里没有位置**"（连一格 `false` 都读不出来）；
+> `whitelist` 是"**位置在、而生产装配从不给它值**"。
+> 前者连"我该配什么"都问不出来，后者问得出来却**没有任何人**在问。
+
+★ 三道**全部**接上之后，这一族里剩下的最后一个成员就是 `whitelist`（PRT-603）。
+**没有任何一条判据会去问"谁该给 `whitelist` 一个值"**——它有一格 `false`、
+有一份套件、有一份台账 ✅，而生产装配里那个键从来不存在。
+
 ### 怎么核出来的
 
 | 环节 | 位置 | 读数 |
@@ -671,7 +778,7 @@ is `mcp__<serverName>__<rawName>`, normalized to the DeepSeek function-name
 | 组合根透传 | `runtime/dsh-composition/root.mjs:465-466` | `whitelist: input.whitelist, pathScope: input.pathScope` ⇒ 两者都是 `undefined` |
 | 装配默认值 | `runtime/dsh-composition/assemble.mjs:135-136` | `whitelist = null, pathScope = null` |
 | 桥的行为 | `runtime/dsh-composition/tool-request.mjs:638-651` | `if (pathScope === null) return undefined` —— **返回 undefined 就是放行** |
-| 两个检查器的 import 者 | `grep 'from .*(path-scope\|execution-scope\|external-api-scope)'` | **只有它们自己的 `.test.mjs`**（零生产 import 者） ★ **[2026-09-18 订正]** 这句话对 `path-scope.mjs` **已经不成立**：它现在有两个**生产** import 者（`scope-port.mjs:50`、`scope-table-binding.mjs:72`），而 `scope-port.mjs:169` 真的调 `checkPathScope(...)`。**仍然成立**的是 `external-api-scope.mjs`（零个生产 import 者）。⇒ 本行那句"零生产 import 者"只该读作"对 606 成立"。 ★ 订正方法是**可达性探针的红**，不是重跑这行 grep——*一个写在表格里的读数，与一个被测的东西，差别在于前者不会自己变红。* ★★ **[2026-09-18 第 19 轮再订正]** `execution-scope.mjs` 也**不再**成立：它现在有一个生产 import 者（`execution-scope-port.mjs:44`），而那个端口在 `executionGuard` 里真的调 `checkCommand` / `checkNetwork` / `checkMcp`。⇒ 本行现在只对 `external-api-scope.mjs` 成立。★ 而这次订正**同样是可达性探针的红**顶出来的（`reachability.test.mjs` ④ 报"execution-scope.mjs 已经变成可达了"）——两次订正走了同一条路，这本身就是这条注释值得留在这里的证据 |
+| 两个检查器的 import 者 | `grep 'from .*(path-scope\|execution-scope\|external-api-scope)'` | **只有它们自己的 `.test.mjs`**（零生产 import 者） ★ **[2026-09-18 订正]** 这句话对 `path-scope.mjs` **已经不成立**：它现在有两个**生产** import 者（`scope-port.mjs:50`、`scope-table-binding.mjs:72`），而 `scope-port.mjs:169` 真的调 `checkPathScope(...)`。**仍然成立**的是 `external-api-scope.mjs`（零个生产 import 者）。⇒ 本行那句"零生产 import 者"只该读作"对 606 成立"。 ★ 订正方法是**可达性探针的红**，不是重跑这行 grep——*一个写在表格里的读数，与一个被测的东西，差别在于前者不会自己变红。* ★★ **[2026-09-18 第 19 轮再订正]** `execution-scope.mjs` 也**不再**成立：它现在有一个生产 import 者（`execution-scope-port.mjs:44`），而那个端口在 `executionGuard` 里真的调 `checkCommand` / `checkNetwork` / `checkMcp`。⇒ 本行现在只对 `external-api-scope.mjs` 成立。★ 而这次订正**同样是可达性探针的红**顶出来的（`reachability.test.mjs` ④ 报"execution-scope.mjs 已经变成可达了"）——两次订正走了同一条路，这本身就是这条注释值得留在这里的证据 ★★★ **[2026-09-18 第 20 轮第三次订正]** `external-api-scope.mjs` **也不再成立**：它现在有一个生产 import 者（`external-api-scope-port.mjs`），而那个端口在 `externalApiGuard` 里真的调 `checkExternalApi`。⇒ **这一行整个作废**：三道范围检查器现在**各自都有生产 import 者**，"零生产 import 者"这句话在本节里已经没有对象了。★★ 而第三次订正**还是**可达性探针的红顶出来的（`reachability.test.mjs` ④ 报"external-api-scope.mjs 已经变成可达了"）——三次订正、三次同一条路。★★★ 第三次还多顶出一件事：`reachability.test.mjs` 的基线闸**只守一个方向**（② 管"当前不可达的要有分类"、③ 管"基线里的文件要还在"），**没有一条管"基线里判成 gap 的模块后来被接上了"**。实测有**两条**过期条目——`external-api-scope.mjs`（本轮）与 `execution-scope.mjs`（**第 19 轮**就接上了，一直留到今天）。⇒ 已新增用例 ③b 补上那个方向，基线 46 → 44 条。*一个只能涨不能跌的"死代码清单"，与一个读数，是同一个东西——只不过前者会让人以为缺口在变多。* |
 
 ### 这条落差为什么危险
 

@@ -483,3 +483,71 @@ verdict = pathScope(projection)
   给部署配置的键**已经登记好了**（`runtime.pathScope`，§9.4），
   且 `product/execution-plane-config.mjs` 就是为它准备的读取点（仍记为 `gap`）。
 - `whitelist`（岗位白名单）与 `execution-scope` / `external-api-scope` 两道**仍未接**。
+
+
+---
+
+## 10. ★★★ 施工前的第二次复核：连接器那一条**也不只是"加一个端口"**（2026-09-18 第三批）
+
+§9.5 的「仍未做」把这一条写成 `whitelist` 与另两道**只是"仍未接"**。
+开工前按 §3 的硬约束再核一遍"接上去之后它**会**按设计动作吗"，
+量到一件与前几批**同形**、但方向更坏的事。
+
+### 10.1 读数（跑出来的，不是推理）
+
+| 要核的东西 | 实测 |
+| --- | --- |
+| `decide()` 会不会读**熔断器状态** | **会**：`registry.mjs:556` `const circuit = circuits.get(id)`；`:565` 开路时直接 `deny`（`connector-circuit-open`）；`:573-585` 半开时只放行一次探针 |
+| 熔断器状态**谁能改** | 只有 `recordOutcome({connectorId, ok, error, atMs})`（`registry.mjs:607`，阈值 `CIRCUIT_FAILURE_THRESHOLD = 3` / 冷却 `CIRCUIT_COOLDOWN_MS = 30_000`） |
+| `recordOutcome` 的**生产调用方** | **0 处**。全仓 `git grep recordOutcome` 只命中 `registry.mjs`（定义）与 `registry.test.mjs`（自己的用例） |
+| 强制面桥有没有**执行后**的钩子 | **没有**。`createEnforcementBridge()` 的返回对象（`tool-request.mjs:876-901`）只有：`project` / `projectionFor` / `guard` / `preExecute` / `answerer` / `ledgerOf` / `ledgerHashes` / `contradictions` / `assertNoContradiction` / `enforcementSurfaces` —— `preExecute` 是**判定**点，`onDecision` 是**事后通知**（那时决定已经作出去了），**没有任何一处**能看到"这次调用最后成功了没有" |
+| `enforcementSurfaces()` 里有连接器的位置吗 | **没有**：`tool-request.mjs:894-900` 恰好 5 个面（`hardFloor` / `pathScope` / `whitelist` / `policy` / `approval`），**没有** `connector` |
+
+### 10.2 这说明什么
+
+把 `decide()` 接进 `preExecute`，`decide()` **读得到**熔断器状态，
+但**没有任何一条路径**能把失败喂回 `recordOutcome`。于是：
+
+> 一个"接了连接器判定"的强制面，与一个"接了一个**永远合闸**的熔断器"的强制面，
+> 在读数上是同一个东西——而它的方向是放行。
+
+★ 这与 §7 那次是**同一个形状的第二次**（`§7.3`：照抄形状会让 `declareConnector`
+在运行时具名拒绝），但**更难发现**：§7 那次会**当场报错**（具名码，看得见），
+这一次**一行错都不报**——注册表建起来了、`decide()` 答得出来、用例全绿、
+`enforcementSurfaces()` 也不会告诉任何人少了什么（它压根没有这一格）。
+
+> **"没接线看得出来，接错了看不出来"（§7.4 末句）在这里要再往前一步：
+> 接了一半，也看不出来。**
+
+### 10.3 后果：这一条的施工分成两半，而第二半**没有接缝**
+
+| 半 | 状态 |
+| --- | --- |
+| **判定面**（port：投影 → `decide()` → 放行/拒绝） | 可以照 `scope-port.mjs` 的形状做，**并且可以钉住**（注入式用例 + 对照） |
+| **反馈面**（一次调用的成败 → `recordOutcome`） | **今天还没有落点**。要接它得先决定：执行结果在哪一层可见（DSH 有"工具执行后"的钩子吗？还是走 PRT-610 的落账写入方？） |
+
+★ 第二半与**第 15 条**（`tool_calls` 写入方 0）是**同一个缺口**：
+两条都要"一次工具调用的**结果**"到达某一层。它们不是两个问题。
+
+### 10.4 因此本批**没有**动这一条
+
+不是"来不及"，是 §3 那条硬约束的直接后果：
+
+> **不许凭空造。** 这里能造的不是数据，是一个**看起来完整、永远不会跳闸**的接缝。
+
+**开工的顺序应当是**：先定反馈面落在哪（第 15 条那条决定），再一次性接两半。
+只接判定面会让"熔断器存在"变成一句**无法证伪**的自述。
+
+### 10.5 本批钉住了什么
+
+本节四条读数**都不需要新代码**就能复核（两条 `grep` + 一处返回对象 + 一处 5 元素冻结对象）。
+把"接了一半看不出来"这件事写在这里，是为了让下一个拿到这一条的人
+**在写 port 之前**先看到第二半没有接缝——而不是在写完 port、用例全绿之后。
+
+### 10.6 诚实边界
+
+1. 我**没有**去核 DSH `tools/` 那一侧有没有"执行后"的钩子（`pre-execute` 是**前置**瀑布，
+   名字就说清了它的位置）。所以"反馈面没有接缝"这句话精确的意思是
+   **"本仓的强制面桥没有这个接缝"**，不是"DSH 不提供任何钩子"。
+2. 我**没有**动任何代码，也没有改 `registry.mjs` / `tool-request.mjs`。
+3. 阈值与冷却（3 次 / 30 s）是既有常量，本批只是引用，**不评价**它们选得对不对。

@@ -64,38 +64,51 @@ function productionRootInputs() {
   return { keys: [...new Set(keys)], body }
 }
 
-test('① ★★★ 生产组合根读出来恰好是 pathScope:false / whitelist:false（不是"以为接上了"）', async () => {
+test('① ★★★ 生产组合根**接上了** pathScope 端口；env 没配时读数仍是 false（没接 ≠ 接了个空的）', async () => {
   const { keys } = productionRootInputs()
 
-  // 先钉住"生产那一组入参里有没有这两个键"——这条断言让改动的**责任人**直接可见：
-  // 谁加了 `pathScope:`，这条和下面那条会同时红。
-  assert.equal(keys.includes('pathScope'), false,
-    `生产装配竟然传了 pathScope（keys=${JSON.stringify(keys)}）——`
-    + '那本套件 ②③ 的结论、以及 docs 里"三道范围检查未接生产"的记账都要一起更新')
+  // ★★★ 2026-09-18 更新（第 19 条 §9.2 第 4 步，**有意接线**）。
+  //
+  //   本断言原来钉的是 `keys.includes('pathScope') === false`，也就是
+  //   "生产装配压根不传这个键"。那正是 §9.3 量出来的洞：端口恒为 `null`，
+  //   而 `tool-request.mjs:639` 在 `null` 上是**放行**。
+  //
+  //   现在 root-row.mjs 会从环境读 `LEGION_PATH_SCOPE` 并接上端口。
+  //   所以这一条改成钉**新的**两件事：
+  //     · 键在（接线存在，不是"文件里有这个 import"）；
+  //     · **env 没配时读数仍是 `false`** —— 没配不等于"接了个空的"。
+  //       ★ 这一半比原来那条更强：原来只证明"没接"，现在还证明
+  //         "接上了、但没配 = 读起来仍与没接一样"，那才是诚实的读数。
+  assert.equal(keys.includes('pathScope'), true,
+    `生产装配没有传 pathScope（keys=${JSON.stringify(keys)}）——`
+    + '第 19 条 §9.2 第 4 步的接线被去掉了？那会让越界路径重新变成放行')
+  // `whitelist`（岗位白名单）**仍然**没接——那是另一条缺口，不在本批范围。
   assert.equal(keys.includes('whitelist'), false,
-    `生产装配竟然传了 whitelist（keys=${JSON.stringify(keys)}）——同上`)
-  // 正向确认这组键确实被解析出来了（否则上面两个 false 可能只是解析失败）。
-  for (const must of ['env', 'decide', 'createRequestApproval']) {
+    `生产装配竟然传了 whitelist（keys=${JSON.stringify(keys)}）——`
+    + '那本套件 ②③ 的结论、以及 docs 里"岗位白名单未接生产"的记账都要一起更新')
+  // 正向确认这组键确实被解析出来了（否则上面的断言可能只是解析失败）。
+  for (const must of ['env', 'decide', 'createRequestApproval', 'pathScope']) {
     assert.ok(keys.includes(must),
       `生产装配的键集里没有 ${must}（keys=${JSON.stringify(keys)}）——解析锚点坏了`)
   }
 
-  // ★ 行为读数：用**生产那一组入参**装配真正的组合根，读它自己报的强制面。
+  // ★ 行为读数（一）：env 里**没有**范围表 ⇒ 端口为 null ⇒ 读数仍是 false。
   //   不启动 DSH：`installEnforcementRoot` 是纯装配（它只造桥 + 造两行插件）。
-  //   env 用一份**合格的最小配置**——空对象会以 `ENFORCEMENT_ROOT_CONFIG_EMPTY`
-  //   被拒，那验的是"配置解析"而不是本套件要问的那个问题。
   const { installEnforcementRoot, resetEnforcementRoot } = await import('./root.mjs')
+  const minEnv = {
+    TEAM_HUB_URL: 'http://hub.invalid:8787',
+    LEGION_ACTOR: 'alice',
+    LEGION_SCOPE: 'space-1',
+    LEGION_ENFORCEMENT_ACTION: 'write',
+    LEGION_CWD: 'C:/work',
+  }
   resetEnforcementRoot() // 进程级单例：先清，否则第二次装配会被 ALREADY_INSTALLED 挡掉
   const installed = installEnforcementRoot({
-    env: {
-      TEAM_HUB_URL: 'http://hub.invalid:8787',
-      LEGION_ACTOR: 'alice',
-      LEGION_SCOPE: 'space-1',
-      LEGION_ENFORCEMENT_ACTION: 'write',
-      LEGION_CWD: 'C:/work',
-    },
+    env: { ...minEnv },
     decide: () => ({ kind: 'allow' }),
     createRequestApproval: () => (async () => 'rejected'),
+    // ★ 与生产同一组入参：没配时 `scopePortFromEnv` 给的就是 `null`。
+    pathScope: null,
   })
   assert.equal(installed.ok, true,
     `生产形状的组合根装不起来，夹具不成立：${installed.code} ${installed.message}`)
@@ -108,9 +121,42 @@ test('① ★★★ 生产组合根读出来恰好是 pathScope:false / whitelis
     policy: true,
     approval: true,
   }, '生产强制面的读数变了。★ 如果这次改动是**有意接线**，请同时更新 '
-    + 'docs/MULTI-AGENT-FEATURE-STATUS.md 与 PRT-PROGRESS 里"三道范围检查未接生产"那段记账——'
+    + 'docs/MULTI-AGENT-FEATURE-STATUS.md 与 PRT-PROGRESS 里"范围检查未接生产"那段记账——'
     + '一条只在代码里变、账上不动的接线，会让下一个人照着旧账做判断')
 
+  resetEnforcementRoot()
+})
+
+test('①b ★★★ 同一个组合根，env 里配上范围表 ⇒ 读数翻成 true（file 没配 ≠ 配了没用）', async () => {
+  // 少了这一条，上面那个 `pathScope: false` 可能只是"这个读数永远是 false"——
+  // 而一个恒 false 的读数与一个正确报出"没配"的读数，在上面那条断言下是同一条绿。
+  const { installEnforcementRoot, resetEnforcementRoot } = await import('./root.mjs')
+  const { scopePortFromEnv } = await import('./scope-port.mjs')
+  const { SCOPE_PORT_ENV_KEY } = await import('./scope-port.mjs')
+  const env = {
+    TEAM_HUB_URL: 'http://hub.invalid:8787',
+    LEGION_ACTOR: 'alice',
+    LEGION_SCOPE: 'space-1',
+    LEGION_ENFORCEMENT_ACTION: 'write',
+    LEGION_CWD: 'C:/work',
+    [SCOPE_PORT_ENV_KEY]: JSON.stringify({
+      platform: process.platform === 'win32' ? 'win32' : 'linux',
+      read: ['C:/work'], write: [],
+    }),
+  }
+  const scope = scopePortFromEnv({ env })
+  assert.equal(scope.state, 'configured', '配了却没有被解析出来')
+
+  resetEnforcementRoot()
+  const installed = installEnforcementRoot({
+    env,
+    decide: () => ({ kind: 'allow' }),
+    createRequestApproval: () => (async () => 'rejected'),
+    pathScope: scope.port,
+  })
+  assert.equal(installed.ok, true, `${installed.code} ${installed.message}`)
+  assert.equal(installed.root.enforcementSurfaces().pathScope, true,
+    '配了范围表却仍报 false——① 那条"没配"的读数就不能用来判断了')
   resetEnforcementRoot()
 })
 

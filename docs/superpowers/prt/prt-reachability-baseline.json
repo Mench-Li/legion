@@ -163,11 +163,6 @@
       "reason": "§5.2：连端口都没有 ⇒ 裁决处：§5 第 14 条（三道范围检查的生产接线）"
     },
     {
-      "file": "runtime/dsh-composition/path-scope.mjs",
-      "class": "gap",
-      "reason": "§5.2：生产不注入 pathScope（tool-request.mjs 在 null 时放行）⇒ 裁决处：§5 第 14 条（三道范围检查的生产接线）"
-    },
-    {
       "file": "runtime/dsh-composition/plugins/runtime-contract-server-row.mjs",
       "class": "gap",
       "reason": "★★ 2026-09-18 由 in-flight 改判为 gap。理由：`in-flight` 的判据是「另一个 agent 当轮正在接线（**工作树未提交**）」，而那几个文件**已经提交了**（e0b83af / 69da8fd / 5c1d698），而这几个模块**仍然不可达** ⇒ 前提已过期，它不再是“正在接线”，是“接不上”。真实状态是**已经记录在案的诚实阻塞**：该行把 Runtime 契约服务挂进组合，但它不在 `PATCH_LAYER_ROWS` 里；而补上它需要 `runtimeHost` 的 `probeRuntime` 报 version + 四项必需能力，**全仓没有生产实现**（真 DSH 进程里实测：没有版本服务、也没有能力服务）。给一张全 true 的能力表就是**编**——它会让 `checkCompatibility` 在一个从未验过的引擎上判“兼容”。见 `docs/STATUS.md`「本轮明确不做的两件」§四 ⇒ 属需要 **§5 裁决**的人工介入项，不是能靠写代码绕过去的东西。⇒ 裁决处：§5 第 20 条"
@@ -186,11 +181,6 @@
       "file": "runtime/dsh-composition/runtime-contract-server.mjs",
       "class": "gap",
       "reason": "唯一的 import 者是上面的 contract-server row（传递不可达）⇒ 随那条一起由 in-flight 改判 gap。★ 这意味着**服务端没有生产挂点**：消费侧（`product/launcher/runtime-contract-endpoint.mjs` 读回发布并注入 `LEGION_RUNTIME_URL`/`LEGION_RUNTIME_TOKEN`）已接线，没有它，真实部署里那份发布永远不会被写出来。⇒ 裁决处：§5 第 20 条"
-    },
-    {
-      "file": "runtime/dsh-composition/scope-table-binding.mjs",
-      "class": "gap",
-      "reason": "PRT-604 的**装配点**：判定逻辑（`path-scope.mjs`，863 行）早已齐备，缺的是那份表的出处——全仓 `narrowScopeToWorkspace` **零生产调用方**。本模块把\"部署配置给的那张表\"装成 `pathScope` 端口能收的一份，并按业主 2026-09-18 裁决把表的来源定为**运维/部署配置**；而配置键那一半尚未落地（`product/process-manifest.mjs` 与 `product/config-schema.mjs` 当时有别的会话的在制品）。⇒ 裁决处：§5 第 19 条（`docs/DECISION-RUNREQUEST-EXECUTION-PLANE.md` §9）"
     },
     {
       "file": "runtime/employee/role-pack.mjs",

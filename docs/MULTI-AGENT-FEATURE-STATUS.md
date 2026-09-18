@@ -390,6 +390,27 @@ deny 会被宽松的默认静默盖掉，而他写那条正是为了拦住一样
 而 `execution-scope.mjs`（PRT-605）与 `external-api-scope.mjs`（PRT-606）
 **连端口都没有**——桥的参数表里没有它们的位置，所以连"没接"这个读数都表达不出来。
 
+### ★★★ 2026-09-18 更新：`pathScope` 那一道**已经接上了**
+
+第 19 条 §9.2 第 4 步落地（`runtime/dsh-composition/scope-port.mjs` +
+`root-row.mjs` 从环境读 `LEGION_PATH_SCOPE`）。所以上面那张读数表要按**条件**读：
+
+| 部署配置 | `enforcementSurfaces().pathScope` | 含义 |
+| --- | --- | --- |
+| 没配 `LEGION_PATH_SCOPE`（**今天的默认**） | `false` | 与上面那张表**一字不差**——没配就是没配 |
+| 配了 | `true` | 端口真的接上了 |
+
+★ 「没配」读数不变**是有意的**：把"没配"改成一个看起来像接上了的读数，
+就是本轮反复记的那个形状（缺席被读成一个不可区分的读数）。
+
+**仍未接的**：`whitelist`（岗位白名单）与 `execution-scope` / `external-api-scope`
+两道。所以本节标题"三道范围检查"仍然成立，只是**第一道**有了一条能走通的路。
+
+配套的可达性读数（同一次改动，机器可核）：
+`runtime/dsh-composition/path-scope.mjs` 与 `scope-table-binding.mjs`
+从"不可达"变成**可达**（基线 49 → 47 条）——那正是"判定写好了、只是没人给它一份表"
+这句话消失的形式。
+
 ### 怎么核出来的
 
 | 环节 | 位置 | 读数 |

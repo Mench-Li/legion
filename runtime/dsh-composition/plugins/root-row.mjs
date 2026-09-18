@@ -139,6 +139,7 @@
 // ============================================================================
 
 import { APPROVAL_POLICIES, decideApproval } from '../approval-policy.mjs'
+import { SCOPE_PORT_ENV_KEY, scopePortFromEnv } from '../scope-port.mjs'
 import {
   ENFORCEMENT_ROOT_CODES,
   enforcementInstallation,
@@ -482,9 +483,35 @@ export function createRootRow({
       const inputs = decideInputsFromEnv(effectiveEnv)
       const effectiveDecide = decide ?? createPolicyDecide(inputs)
 
+      // ★ 第 19 条 §9.2 第 4 步：执行面的**路径范围表**。
+      //
+      //   在此之前 `installEnforcementRoot` 的入参里**没有** `pathScope`，
+      //   于是桥的端口恒为 `null`，而 `tool-request.mjs:639`
+      //   （`if (pathScope === null) return undefined`）**放行一切路径**。
+      //   ⇒ 那次缺席落到的是"放行"，不是"拒绝"。
+      //
+      //   现在：配了就接上；**没配仍然是没配**（`port` 为 `null`）。
+      //   不补默认值——一个"凭空造出来的空表"会让这次放行看起来像"有范围表"。
+      let scope
+      try {
+        scope = scopePortFromEnv({ env: effectiveEnv })
+      } catch (err) {
+        // 配了却解释不通 ⇒ **拦装配**，与"根本没配"分开。
+        //   > 一个"读不出来就当作没配"的组合根，
+        //   > 与一个"这个部署确实没有范围限制"的部署，在强制面读数上长得一样。
+        throw rowError(ROOT_ROW_CODES.CONFIG_UNRESOLVED,
+          `${ROOT_ROW_PLUGIN_NAME} 读不出路径范围表「${SCOPE_PORT_ENV_KEY}」：` +
+          `${err?.message ?? err}。**不**按"没配"处理——` +
+          '那会让一次配置错误与一次真实的"无范围限制"在强制面读数上同形')
+      }
+
       const installed = installEnforcementRoot({
         env: effectiveEnv,
         decide: effectiveDecide,
+        // ★ 缺席时这里是 `null`，而"传了 null"与"没传"在组合根那一侧的读数相同
+        //   （`assemble.mjs` 的默认值就是 `null`）——所以这一行**不改变**没配时的行为，
+        //   它只让"配了"这件事有了一条能走通的路。
+        pathScope: scope.port,
         // ★ 传的是**工厂**，不是端口：端口的真实实现住在 team-hub 那一侧，
         //   而组合根在装配期拿到的是一份解析好的身份配置。
         createRequestApproval: (resolved) => {

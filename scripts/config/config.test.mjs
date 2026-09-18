@@ -781,11 +781,15 @@ test('★★ PRT-254：声明的 env 键必须等于 runtime 源码里两张键�
   //   · fields 里编了一个键 → 红（那是往配置面声明里塞假话）。
   const { DECIDE_ENV_KEYS } = await import('../../runtime/dsh-composition/plugins/root-row.mjs')
   const { ENFORCEMENT_CONFIG_FIELDS, } = await import('../../runtime/dsh-composition/root.mjs')
+  // 第 19 条 §9.2 第 4 步：执行面的路径范围表（LEGION_PATH_SCOPE + LEGION_CWD）。
+  // ★ 仍然**从源码取**，不手抄——这张表就是它自己那份读取声明。
+  const { SCOPE_PORT_ENV_KEYS } = await import('../../runtime/dsh-composition/scope-port.mjs')
   const expected = [...new Set([
     ...Object.values(DECIDE_ENV_KEYS),
     ...Object.values(ENFORCEMENT_CONFIG_FIELDS).flatMap((f) => [...f.envKeys]),
+    ...SCOPE_PORT_ENV_KEYS,
   ])].sort()
-  assert.equal(expected.length, 10, `两张键名表共 ${expected.length} 个键（复核基线 10）：数量变了就要重新审一遍这份声明`)
+  assert.equal(expected.length, 11, `三张键名表共 ${expected.length} 个键（复核基线 11）：数量变了就要重新审一遍这份声明`)
   assert.deepEqual(RUNTIME.envNames().sort(), expected,
     'runtime/config-schema.mjs 的 fields 与源码里的键名表不一致（多一个=编了一个环境变量，少一个=门禁看不见它）')
 
@@ -905,13 +909,17 @@ test('★★ Trap 1：只按**精确 schema 路径**排除自身登记文本（�
   assert.deepEqual(cov.self.map((d) => d.file), ['demo/config-schema.mjs'], 'schema 文件自身必须被排除，且只排除它一个')
 })
 
-test('★ Trap 1 实测：runtime 7 处 = 5 处 schema 自身登记文本 + 2 处真实源（product 声明后自身文本变 8）', () => {
+test('★ Trap 1 实测：runtime 11 处 = 7 处 schema 自身登记文本 + 4 处真实源（product 声明后自身文本变 8）', () => {
   // 这组数字是"重数一遍"的锚点：数量变了就要重新审这份声明，而不是改数字让它变绿。
   const rt = scanProcess('runtime', { includeTests: false })
   const rtCov = dynamicCoverage(rt, RUNTIME, { schemaFile: SCHEMA_FILES.runtime, processName: 'runtime' })
-  assert.equal(rt.dynamic.length, 7, 'runtime 动态命中数变了（基线 7）')
-  assert.equal(rtCov.self.length, 5, 'runtime 的 5 处自身登记文本必须被排除，而不是当成 5 处待登记读取')
-  assert.equal(rtCov.source.length, 2, 'runtime 的真实源动态读取是 2 处（root-row.mjs 同一行两处 env[k]）')
+  // ★ 基线 7 → 11（2026-09-18，第 19 条 §9.2 第 4 步）：
+  //   +2 处**真实源**（scope-port.mjs 的 env[SCOPE_PORT_ENV_KEY] / env[SCOPE_PORT_CWD_ENV_KEY]）
+  //   +2 处**自身登记文本**（runtime/config-schema.mjs 的 dynamicEnvReads 里那两条，
+  //       扫到的正是登记文本本身——这就是 Trap 1 的真身）
+  assert.equal(rt.dynamic.length, 11, 'runtime 动态命中数变了（基线 11）')
+  assert.equal(rtCov.self.length, 7, 'runtime 的 7 处自身登记文本必须被排除，而不是当成待登记读取')
+  assert.equal(rtCov.source.length, 4, 'runtime 的真实源动态读取是 4 处（root-row.mjs 2 处 env[k] + scope-port.mjs 2 处）')
   assert.ok(rtCov.self.every((d) => d.file === SCHEMA_FILES.runtime))
   assert.deepEqual(rtCov.uncovered, [], 'runtime 的 2 处真实源必须被现有 dynamicEnvReads 覆盖：' + JSON.stringify(rtCov.uncovered))
 
@@ -1036,7 +1044,8 @@ test('★ 端到端：scan --check 必须 PASS，且把「schema 自身登记文
   const r = runScan(['--check'])
   assert.equal(r.code, 0, r.out)
   assert.match(r.out, /scan: PASS（全部 env 读取点、疑似字面量与动态读取均已处理/)
-  assert.match(r.out, /runtime\/config-schema\.mjs 命中 5 处/)
+  // 5 → 7（2026-09-18）：dynamicEnvReads 新增两条，它们的登记文本本身又被同一条规则扫到。
+  assert.match(r.out, /runtime\/config-schema\.mjs 命中 7 处/)
   assert.match(r.out, /product\/config-schema\.mjs 命中 11 处/)
   assert.match(r.out, /allowlist\.mjs[\s\S]{0,60}write-target/)
   assert.match(r.out, /dsh-credentials\.mjs[\s\S]{0,60}foreign-object/)

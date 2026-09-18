@@ -1098,10 +1098,11 @@ async function stageTest() {
       //   > 与一个「路径范围限制没有生效」的组合根，是同一个东西——
       //   > 只不过前者的证据里有一行诚实的 `pathScope:false`。
       //
-      // 读数（本轮实测）：生产组合根报 `pathScope:false` / `whitelist:false`，
-      // 而 `execution-scope` / `external-api-scope` 连端口都没有。
-      // 本套件把这个读数钉住：**接上了它会红**（提醒一起改账），
-      // 而"没接"这件事从此不再是"作者当时相信"。
+      // 读数（2026-09-18 更新）：第 19 条 §9.2 第 4 步**已经接线**，
+      // 所以本套件 ① 现在钉的是**两件事**：键在（接线存在），
+      // 而 **env 没配 `LEGION_PATH_SCOPE` 时读数仍是 `pathScope:false`**
+      // ——没配不等于"接了个空的"；配上了则 ①b 翻成 true。
+      // `whitelist` 与 `execution-scope` / `external-api-scope` 仍未接。
       label: 'production-scope-wiring（PRT-604/605/606：检查器对不对 ≠ 生产里跑没跑）',
       files: ['runtime/dsh-composition/production-scope-wiring.test.mjs'],
       cwd: ROOT,
@@ -1126,6 +1127,12 @@ async function stageTest() {
         //   ★ 缺表那一条的要害：`tool-request.mjs:639` 在 `pathScope === null` 时**放行**，
         //   所以"没配上"在今天的表现是**放行一切**，不是拒绝一切。
         'runtime/dsh-composition/scope-table-binding.test.mjs',
+        // ★ 同族的**投递点**（2026-09-18，第 19 条 §9.2 第 4 步）：表装配好了，
+        //   但 `tool-request.mjs:639` 要的是一个**函数**（`pathScope(projection)`），
+        //   而全仓到它之前没有任何地方把表变成那个函数 ⇒ 端口恒为 `null` ⇒ 放行。
+        //   它盯三个 fail-closed 决定（方向未知按 write / 目标缺失拒绝 /
+        //   表在装配期就校验）与"缺席如实是 absent 且落到执行面就是放行"。
+        'runtime/dsh-composition/scope-port.test.mjs',
       ],
       cwd: ROOT,
     },

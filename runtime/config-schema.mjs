@@ -63,6 +63,9 @@ export const ENV_NAMES = Object.freeze([
   'LEGION_ENFORCEMENT_ACTION',
   'LEGION_CWD',
   'LEGION_TASK_ID',
+  // 第 19 条 §9.2 第 4 步：执行面的路径范围表（`scope-port.mjs`）。
+  // 走环境而不是补丁 YAML，因为归一化后的表装不进 `PatchOptions.config`（那是数据）。
+  'LEGION_PATH_SCOPE',
 ])
 
 /** 不是本进程读取的环境变量、但写法上形如 env 键的字面量（错误码 / 契约字符串 / 动作名）。 */
@@ -531,9 +534,31 @@ export const SCHEMA = defineSchema({
       key: 'permissionPreset', env: 'LEGION_PERMISSION_PRESET', type: 'string', default: '',
       doc: '权限预设（`decide` 的第三个输入）。**没有默认值**',
     },
+    {
+      key: 'pathScope', env: 'LEGION_PATH_SCOPE', type: 'string', default: '',
+      doc: '执行面的**路径范围表**（JSON 文本：`{platform, read[], write[]}`）。'
+        + '「没有默认值」在这里有一层额外含义：**空串 = 没配**，而没配在执行面是**放行**'
+        + '（`tool-request.mjs:639` 的 `pathScope === null`）——所以缺席必须由一个显式状态承载，'
+        + '不能靠一个默认表把它填上。装配规则只有一处：'
+        + '`runtime/dsh-composition/scope-port.mjs` → `scope-table-binding.mjs`',
+    },
   ],
   foreignEnv: FOREIGN_ENV_NAMES.map((name) => ({ name, owner: FOREIGN_ENV_OWNER, reason: FOREIGN_ENV_REASON })),
   dynamicEnvReads: [
+    {
+      file: 'runtime/dsh-composition/scope-port.mjs',
+      expr: 'env[SCOPE_PORT_ENV_KEY]',
+      reason: '范围表按导出的常量键名下标读取（`SCOPE_PORT_ENV_KEY` = LEGION_PATH_SCOPE，已在上面 fields 声明）。'
+        + '**故意用常量而不是字面量**：读取点、用例、以及未来 Launcher 那一侧要指同一处，'
+        + '两处各写一遍字面量就会漂移；扫描器看不见这一处正是本登记存在的理由。',
+    },
+    {
+      file: 'runtime/dsh-composition/scope-port.mjs',
+      expr: 'env[SCOPE_PORT_CWD_ENV_KEY]',
+      reason: '收窄写范围要的工作区根：常量 `SCOPE_PORT_CWD_ENV_KEY` = LEGION_CWD（已在上面 fields 声明）。'
+        + '**只在 `workspaceRoot` 参数没给时才读**——调用方（组合根）可以显式传，'
+        + '那时这一处下标不会被执行，但源码里它在，所以照样登记。',
+    },
     {
       file: 'runtime/dsh-composition/plugins/root-row.mjs',
       expr: 'env[k]',

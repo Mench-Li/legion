@@ -281,6 +281,14 @@
 4. ★ 但配置键仍被 `product/process-manifest.mjs` / `product/config-schema.mjs`
    的**他人在制品**挡着（§8.3）——那是唯一的外部依赖。
 
+> **★ 上面第 3、4 条已被订正**：第 3 条读作"挂上 `RunRequest`"，而实测下来
+> **`RunRequest` 里根本没有放范围表的地方**（`runtime/contracts/run.mjs` 的
+> `RUN_REQUEST_REQUIRED` 与投影字段里都没有 `pathScope`）。真正的接缝是
+> **组合根的入参**：`installEnforcementRoot({pathScope})`，而它要的是一个**函数**
+> （`tool-request.mjs:642` 的 `pathScope(projection)`），不是一份表。
+> 第 4 条的两条理由在 §8.3.1 已证伪。落地见 §9.4（读取点）与 §9.5（端口 + 生产接线）。
+
+
 ### 9.3 ★ 装配点里量出来的一件事：缺表 = **放行**，不是拒绝
 
 `tool-request.mjs:639` 是：
@@ -386,3 +394,92 @@ verdict = pathScope(projection)
   本轮我为"别人的在制品"停下来问过一次，而那次停下的前提在我问出口时就已经过期了。
   上一节 §8.3.1 那两条错误的阻塞理由，是同一个形状。
 
+
+---
+
+## 9.5 第 4 步落地：**范围表 → 执行面端口**，并接进生产组合根（2026-09-18）
+
+### 先订正一处框架错误
+
+§9.2 第 3 条写的是"再挂上 `RunRequest`"。**那是错的**——量下来：
+
+| 想找的东西 | 实测 |
+| --- | --- |
+| `runtime/contracts/run.mjs` 里的 `pathScope` 字段 | **0 处**（`RUN_REQUEST_REQUIRED` 与投影字段里都没有） |
+| `pathScope` 的生产消费者 | `tool-request.mjs:642` 的 `pathScope(projection)`，来源是**组合根入参** |
+| 生产组合根传给 `installEnforcementRoot` 的键 | `{ env, decide, createRequestApproval }` —— **只有三个**（`:485`） |
+
+⇒ 真正的接缝是 **`installEnforcementRoot({pathScope})`**，而且它要的是一个
+**函数**（表 + 一次投影 → 一个判定），不是一份表。
+
+> 一个"挂上 RunRequest"的施工计划，与一个"接线其实在组合根入参上"的现实，
+> 在文档里长得一样——只不过前者会让你去改一个**根本不该装这个数据的契约**。
+
+（这与 §8.3.1 是同一个形状：**框架写错了，而写错的那一版看起来更像计划**。）
+
+### 交付物
+
+| 文件 | 内容 |
+| --- | --- |
+| `runtime/dsh-composition/scope-port.mjs` | 表 + 解析器 → `pathScope(projection)` 端口；`scopePortFromEnv()` 从环境取表 |
+| `runtime/dsh-composition/scope-port.test.mjs` | 16 例；7 条变异全部咬住、每次还原逐字节相同 |
+| `runtime/dsh-composition/plugins/root-row.mjs` | 生产组合根：读 `LEGION_PATH_SCOPE` → 接上端口；读不出来则**拦装配** |
+| `runtime/config-schema.mjs` | 登记新 env 键 `LEGION_PATH_SCOPE` + 两条动态读取（`scan --check` 逼出来的） |
+| `runtime/dsh-composition/production-scope-wiring.test.mjs` | ① 改钉"键在 + 没配仍是 false"，新增 ①b"配了翻成 true" |
+| `scripts/config/config.test.mjs` | 四条**数出来的**锚点跟着改（env 键基线 10→11，Trap 1 计数 7→11 / 5→7 / 2→4） |
+
+### ★ 这一截填的是哪个洞（一句话）
+
+`tool-request.mjs:639` 是 `if (pathScope === null) return undefined`（**放行**），
+而在此之前**全仓没有任何地方**把一份范围表变成那个函数：
+
+- `path-scope.mjs` 有判定（`checkPathScope`），要的是一份表 + 一次具体调用；
+- `scope-table-binding.mjs` 把**部署配置**装配成那份表；
+- **中间那一步原先不存在** ⇒ 端口恒为 `null` ⇒ 每次工具调用都从那一行放行。
+
+### 三个 fail-closed 决定（都不是新发明，是别处已经定过的）
+
+| 决定 | 依据 |
+| --- | --- |
+| 方向未知 ⇒ 按 `write` 判 | `tool-request.mjs:365`："`unknown` 工具的方向是 `write`（fail closed）"；用 `=== 'write'` 会让未登记工具被读成"不是写" |
+| 目标缺失 ⇒ 拒绝 | 投影成功时目标一定在（`deriveTarget()` 推不出来就**抛**）⇒ 这个分支只可能是接线坏了，而"证明不了它在范围内"必须是拒绝 |
+| 表在**装配期**就校验 | 一个"第一次工具调用时才炸"的表，把错误推迟到**已经有副作用的那一刻** |
+
+★ 还有一处**不推导**：本模块**只读** `projection.canonicalTarget` 与
+`projection.direction`，绝不从 `arguments` 里再找一遍路径。依据是
+`tool-request.mjs:378` 那条原话：
+
+> 一个「在适配器里顺手补一次字段兜底」的桥，
+> 与一个「两个强制点看到两个不同目标」的桥，是同一个东西。
+
+### ★★ 一个与"跳过"有关的实测（值得单独记）
+
+链接逃逸那条用例，我第一版写成"建不了符号链接就 `return`"。实测 Windows 上
+`symlinkSync` **EPERM** ⇒ 它**静默跳过**了，而摘要是 `fail 0`。
+那正是本仓反复记账的陷阱：**"跳过"在摘要里与"通过"长得一样。**
+
+改成两条之后：
+
+1. **确定性**用例（注入式解析器 + POSIX 路径）——**永远跑**，不依赖平台能建链接；
+2. 真 fs 那条，建不了链接时**打一行可见的警告**并说明"逃逸判定由第 1 条覆盖，不靠这条"。
+
+顺带量到一条我之前不知道的机制：`checkPathScope` **只在 `exists` 报真时才调
+`realpath`**。所以那条例外用例里 `exists = () => true` 是**必须的**——
+否则解析器根本不被调用，用例会以"放行"失败，看起来像判据坏了，其实是用例坏了。
+
+### ★★ 接线做对了的一个机器可核证据
+
+可达性基线 **49 → 47**：`runtime/dsh-composition/path-scope.mjs` 与
+`scope-table-binding.mjs` 从**不可达**变成**可达**。
+
+> "它的判定写好了，只是没人给它一份表"这句话，
+> 现在有了一条能自动红的读数——它不再是一句自述。
+
+### 仍未做（如实）
+
+- **Launcher 那一侧**：`LEGION_PATH_SCOPE` 谁来**写**进 Runtime 子进程的环境。
+  今天只有 Runtime 侧会**读**它。所以这条链要真正跑起来还差"部署配置 →
+  `buildChildEnv`"那一步；而 `product/launcher/launcher.mjs` 此刻是**别人的在制品**。
+  给部署配置的键**已经登记好了**（`runtime.pathScope`，§9.4），
+  且 `product/execution-plane-config.mjs` 就是为它准备的读取点（仍记为 `gap`）。
+- `whitelist`（岗位白名单）与 `execution-scope` / `external-api-scope` 两道**仍未接**。

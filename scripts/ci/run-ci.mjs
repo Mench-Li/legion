@@ -1124,11 +1124,11 @@ async function stageTest() {
         //   它盯三条装配期拒绝（缺表 / 无读根 / 有写根却没工作区根）+ 一条**往返**
         //   （产物必须能被**真** `checkPathScope` 吃下去——只看自己字段清单的断言
         //   抓不到"多带一个字段"，而那正是我写第一版时犯的真错）。
-        //   ★ 缺表那一条的要害：`tool-request.mjs:639` 在 `pathScope === null` 时**放行**，
+        //   ★ 缺表那一条的要害：`tool-request.mjs:731` 在 `pathScope === null` 时**放行**，
         //   所以"没配上"在今天的表现是**放行一切**，不是拒绝一切。
         'runtime/dsh-composition/scope-table-binding.test.mjs',
         // ★ 同族的**投递点**（2026-09-18，第 19 条 §9.2 第 4 步）：表装配好了，
-        //   但 `tool-request.mjs:639` 要的是一个**函数**（`pathScope(projection)`），
+        //   但 `tool-request.mjs:731` 要的是一个**函数**（`pathScope(projection)`），
         //   而全仓到它之前没有任何地方把表变成那个函数 ⇒ 端口恒为 `null` ⇒ 放行。
         //   它盯三个 fail-closed 决定（方向未知按 write / 目标缺失拒绝 /
         //   表在装配期就校验）与"缺席如实是 absent 且落到执行面就是放行"。
@@ -1937,12 +1937,23 @@ async function stageTest() {
     //   **永远合闸**的熔断器。这一套里 ① 是**端到端**的（真调 decide 看跳闸），
     //   ② 钉住"判不出来"是**第三个桶**（折成成功让坏连接器隐身、折成失败冤枉好连接器），
     //   ④ 钉住**永不抛**（宿主兜异常不算数），①a 钉住"探针不回来不许永久卡死"。
+    // ★ `decision-port.test.mjs`（2026-09-18）是**判定面**那一半：
+    //   把 `registry.decide()` 织进强制面桥的 `decide` 端口。三条最要紧的：
+    //   ① 连接器层的 `allow` **不许短路政策门**（取名太像"总开关"，
+    //      而它只是"这个连接器允许这个工具"）；② 连接器层的 `ask`
+    //      **不许把政策门的 `deny` 降级**成一次"可以被人批准"的调用；
+    //   ⑩ 与 `outcome-port`/`registry` 合起来跑一条**闭环**——探针 ask 出去、
+    //      结果永远不回来时，靠 `CIRCUIT_COOLDOWN_MS` 那个窗口放一条新的。
+    //   ⚠️ 另有一处**两套词汇表**：桥读 `kind`、注册表读 `decision`
+    //      （与 `declaredRisk`/`risk` 是同一类）。⑨a 专门用交叉喂**钉住**
+    //      "两边都收"这种好心兼容不许出现。
     {
-      label: 'connectors（F-21：未声明即拒绝、风险只能上抬、密钥只许引用、熔断的开路与探针**都**有截止时间、反馈面永不抛）',
+      label: 'connectors（F-21：未声明即拒绝、风险只能上抬、密钥只许引用、熔断的开路与探针**都**有截止时间、反馈面永不抛、判定面取严且永不短路政策门）',
       files: [
         'runtime/connectors/registry.test.mjs',
         'runtime/connectors/target-binding.test.mjs',
         'runtime/connectors/outcome-port.test.mjs',
+        'runtime/connectors/decision-port.test.mjs',
         'team-hub/connector-store.test.mjs',
         'team-hub/connector-http.test.mjs',
       ],

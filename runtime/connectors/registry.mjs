@@ -107,6 +107,17 @@ function fail(code, message) {
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
 
 /**
+ * 一条工具声明**允许**出现的键（封闭键集，见 `normalizeTool` 里那段守卫）。
+ *
+ * `declaredRisk` 是**输入**名，`risk` 是**输出**名 —— 两个名字指的是同一件事，
+ * 但只有前者能写在声明里。把它们并成两个都收，会把"写错了字段名"这件事
+ * 永远藏起来；而它藏起来的正是"作者已经把风险抬到 critical"这个事实。
+ */
+export const TOOL_DECLARATION_KEYS = Object.freeze(
+  new Set(['name', 'capabilities', 'declaredRisk', 'policy']),
+)
+
+/**
  * 不许出现在登记表里的键（凭证值）。
  *
  * 与 F-19 的 `FORBIDDEN_CONNECTOR_KEYS` 同源：登记表会被导出、提交进 Git、
@@ -144,6 +155,43 @@ function declareTool({ connectorId, tool }) {
       '所以列出一条条真名，而不是一条能覆盖所有东西的',
     )
   }
+  // ★★★ 工具声明的键集是**封闭**的 —— 不认识的键在这里就拒。
+  //
+  //   起因是一个**只差一个字母的字段名**：
+  //
+  //     输入字段叫 `declaredRisk`（作者的建议值）
+  //     输出字段叫 `risk`（`normalizeTool` 与 `decide()` 交出去的有效风险）
+  //
+  //   于是作者照着**输出**的样子写 `risk: 'critical'` 时，登记表**一声不响**
+  //   地把它丢掉，`risk` 落回能力下限（`low`），`decide()` 接着答
+  //   "策略是 allow 且风险低于 high" ⇒ 一个**作者明确标成 critical** 的工具
+  //   被自动放行。既没有报错，也没有计数，`declaredRisk` 读数是 `null`。
+  //
+  //   > 一个"把作者写的最严风险静默丢掉"的登记表，
+  //   > 与一个"作者根本没声明风险"的登记表，在 `decide()` 的读数上是
+  //   > 同一个 `risk: 'low'`——只不过前者**有人明确写过 `critical`**。
+  //
+  //   ★ 而这**不是**"假设作者会写错"：`target-binding.test.mjs` 里就同时写着
+  //     `declaredRisk: 'low', risk: null` —— 一个自己人写的、真实的混淆样本。
+  //
+  //   ★ 与上面那条 `declaredRisk: 'none'` ⇒ 拒（`BAD_RISK`）是同一条纪律：
+  //     拼错的值要拒，**拼错的键名更要拒**——值拼错至少还有个值，
+  //     键名拼错是整条声明**看起来生效、实际没生效**。
+  for (const key of Object.keys(tool)) {
+    if (TOOL_DECLARATION_KEYS.has(key)) continue
+    // `risk` 值得单独说一句：它不是"多写了个无关字段"，它是**输出字段名**。
+    const because = key === 'risk'
+      ? '`risk` 是**输出**字段（`normalizeTool` / `decide()` 交出去的有效风险，' +
+        '等于 `max(declaredRisk, 能力下限)`）。声明里要写的是 `declaredRisk`。' +
+        '**写 `risk` 不会有任何效果**，而它的读数看起来像"作者没声明风险"'
+      : `不认识的键 ${JSON.stringify(key)}（工具声明只认：${[...TOOL_DECLARATION_KEYS].join(' / ')}）`
+    throw fail(
+      CONNECTOR_CODES.BAD_DECLARATION,
+      `连接器 ${connectorId} 的工具「${name}」声明里有不认识的字段：${because}。` +
+      '**不静默忽略**：一个被静默丢掉的最严声明与一个没写过的声明，在读数是同一个东西',
+    )
+  }
+
   // ★ 能力必须显式声明：与 `describeTool` 一致，"没有能力"与"能力未知"
   //   在登记表上长得一样，而后者必须按最严处理。
   const raw = Array.isArray(tool.capabilities) ? tool.capabilities : []

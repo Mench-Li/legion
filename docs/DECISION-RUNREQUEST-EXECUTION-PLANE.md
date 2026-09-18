@@ -44,7 +44,7 @@
 | 项 | 今天的读数 | 出处 |
 | --- | --- | --- |
 | 连接器声明（F-21） | 能力已建（64 例、30 处变异），**判定面零生产调用方** | `runtime/connectors/registry.mjs` 的 `decide()` |
-| 范围表（PRT-603/604/605/606） | **生产里一次都不跑**；`tool-request.mjs:639` 在 `pathScope === null` 时返回"放行"，而生产从不注入 | `runtime/dsh-composition/path-scope.mjs` 等 |
+| 范围表（PRT-603/604/605/606） | **生产里一次都不跑**；`tool-request.mjs:731` 在 `pathScope === null` 时返回"放行"，而生产从不注入 | `runtime/dsh-composition/path-scope.mjs` 等 |
 | 落账端点（PRT-610） | 表、读面、就绪证据的产出点已接上，**写入方仍是 0** | `recordToolCall` / `markDispatched` |
 | 摩擦与岗位包输入（F-18/F-19） | `runtime/packs/*` 四个模块**零生产入口**，`createPackStore` 生产调用点 **0 处** | `runtime/packs/*` |
 
@@ -225,7 +225,7 @@
 
 | 实测 | 读数 |
 | --- | --- |
-| 执行面 `pathScope` | **可选端口**；没注入时 `tool-request.mjs:639` 直接返回**放行** |
+| 执行面 `pathScope` | **可选端口**；没注入时 `tool-request.mjs:731` 直接返回**放行** |
 | 岗位清单 `MANIFEST_FIELDS` | **闭合白名单**，里面**只有** `workspaceRoot`，没有读/写根 |
 | `FORBIDDEN_MANIFEST_FIELDS` | **明列** `denyPathPrefixes`，注释：*"一个能写强制面字段的清单，就是一个能给自己发权限的清单"* |
 
@@ -291,7 +291,7 @@
 
 ### 9.3 ★ 装配点里量出来的一件事：缺表 = **放行**，不是拒绝
 
-`tool-request.mjs:639` 是：
+`tool-request.mjs:731` 是：
 
 ```js
 if (pathScope === null) return undefined      // ← 放行
@@ -346,7 +346,7 @@ verdict = pathScope(projection)
 | `configured` | 键在，且形状解释得通 | —— |
 | `absent` | 键**压根不在**配置里 | **消费点**（不是读取点） |
 
-★ 为什么"没配"必须是**可读出来的状态**而不是 `null`：`tool-request.mjs:639` 是
+★ 为什么"没配"必须是**可读出来的状态**而不是 `null`：`tool-request.mjs:731` 是
 `if (pathScope === null) return undefined`（**放行**）。所以把"没配"读成"没有范围表"
 就是**放行一切**（§9.3）。反过来把"没配"读成"拒绝一切"也不对——那让一个还没配过的
 部署整个起不来，于是操作者学会的做法是"随便填一张表让它闭嘴"。
@@ -430,7 +430,7 @@ verdict = pathScope(projection)
 
 ### ★ 这一截填的是哪个洞（一句话）
 
-`tool-request.mjs:639` 是 `if (pathScope === null) return undefined`（**放行**），
+`tool-request.mjs:731` 是 `if (pathScope === null) return undefined`（**放行**），
 而在此之前**全仓没有任何地方**把一份范围表变成那个函数：
 
 - `path-scope.mjs` 有判定（`checkPathScope`），要的是一份表 + 一次具体调用；

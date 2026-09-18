@@ -581,6 +581,29 @@ export function createEnforcementBridge({
    * `enforcementSurfaces()` 报 `false`——把一次**写错**读成一次**没配**。
    */
   connectorFeedback = null,
+  /**
+   * ★★★ F-21 的**第一半**（判定面，2026-09-18 加）：把连接器层的判定
+   * 织进 `decide` 的那一层端口（`runtime/connectors/decision-port.mjs`
+   * 的 `createConnectorDecisionPort`）。
+   *
+   * ## 为什么是**独立参数**，而不是让组合方自己把 `decide` 包一层
+   *
+   * 因为"包没包"必须**看得见**。组合方自己在外面包一层时，
+   * `enforcementSurfaces().policy` 照样是 `true`——
+   * 而一个"连接器判定从来没插上话"的强制面，
+   * 与一个"策略门照常工作、只是连接器那一层不存在"的强制面，
+   * 在那一格上是同一个读数。
+   *
+   * ## ★ 它与 `connectorFeedback` **成对但要分别给**
+   *
+   * 两者共用**一份** registry（判定读熔断器、反馈写熔断器），
+   * 所以只有两份都装上，熔断器才是一条**环**。
+   * 但本参数**不**替组合方检查"你的 `decide` 里是不是已经含了它"——
+   * 那种检查只能靠猜；两格读数分开报，才是能查得动的那一种。
+   *
+   * 传 `null` 时行为与本批之前逐字相同（`decide` 就是组合方给的那个）。
+   */
+  connectorJudgment = null,
   connectTimeoutMs = 2000,
   responseTimeoutMs = 3000,
   approvalConnectTimeoutMs = 2000,
@@ -598,6 +621,33 @@ export function createEnforcementBridge({
       `connectorFeedback 要么不给（null），要么是 (exec, result) => void 的监听器` +
       `（收到 ${typeof connectorFeedback}）。**不静默当成"没给"**：` +
       '那会让"接线写错"与"这一道没配"在 enforcementSurfaces() 上同形')
+  }
+  // ★ 判定面同一条口径（见上面 `connectorJudgment`）。
+  if (connectorJudgment !== null && typeof connectorJudgment !== 'function') {
+    throw fail(PROJECTION_CODES.BAD_REQUEST,
+      `connectorJudgment 要么不给（null），要么是 (projection) => Promise<{kind,reason}> 的判定端口` +
+      `（收到 ${typeof connectorJudgment}）。**不静默当成"没给"**：` +
+      '那会把一次"接线写错"读成一次"连接器没接"')
+  }
+  // ★★★ 能查的就查：`createConnectorDecisionPort` 会把它的 `inner`（政策门）
+  //     挂在返回的函数上（不可枚举）。既然它自己说了"我包的是谁"，
+  //     而组合方同时给了 `decide`，那就**必须**是同一个函数。
+  //
+  //   查不出来的部分（手写的端口、没暴露 `inner` 的端口）**不猜**：
+  //   那种情况下本参数就当"组合方说它包好了"，两格读数分开报。
+  //
+  //   > 一个"报得出自己包的是谁"的端口，与一个"包的是别人、但看起来
+  //   > 一样在决策路径上"的端口，在一次真的调用上是同一个读数——
+  //   > 只不过后者让政策门被**绕过去**，而 `enforcementSurfaces().policy`
+  //   > 照样是 `true`。
+  if (connectorJudgment !== null && connectorJudgment.inner !== undefined
+      && connectorJudgment.inner !== decide) {
+    throw fail(PROJECTION_CODES.BAD_REQUEST,
+      'connectorJudgment 的 inner（它内部调的那个政策门）与本桥的 `decide` **不是同一个函数**。' +
+      '**这会把政策门整个绕过去**：判定面在决策路径上，而它调的却是另一个函数，' +
+      '于是 enforceSurfaces().policy 报 true 而实际那一层没跑。' +
+      '要么把 `decide` 传给 `createConnectorDecisionPort({ inner: decide })`，' +
+      '要么别给 `connectorJudgment`')
   }
 
   const ledger = new Map()
@@ -735,6 +785,13 @@ export function createEnforcementBridge({
     return reason
   }
 
+  // ★★★ F-21 判定面：装了就**替**在决策路径上（它内部会调 `decide` 作为 `inner`），
+  //     没装就逐字等于本批之前的行为。
+  //
+  //     为什么"替"而不是"再包一层"：端口自己已经负责"连接器层意见 ⊕ 政策门意见
+  //     取严"。在这里再包一层，就会有两处合并逻辑，而它们迟早会分叉。
+  const effectiveDecide = connectorJudgment ?? decide
+
   const preExecute = decide === null ? null : createPreExecutePolicy({
     connectTimeoutMs,
     responseTimeoutMs,
@@ -799,7 +856,7 @@ export function createEnforcementBridge({
           }
         }
       }
-      const decision = await decide(got.projection)
+      const decision = await effectiveDecide(got.projection)
       // pre-execute **不允许改写工具参数**（PRT-613 / spec §6.5 line 468）。
       //
       // 检查必须在**这里**（返回之前），不能在 `onDecision` 里：`onDecision` 是事后的
@@ -936,6 +993,27 @@ export function createEnforcementBridge({
      */
     connectorFeedback,
     /**
+     * ★★★ F-21 **判定面**：组合方把它交给 `createEnforcementBridge` 的
+     * `connectorJudgment`（也就是这里——它已经是决策路径上的那一层）。
+     *
+     * `null` ⇒ 没装，`decide` 就是组合方给的那个（逐字等于本批之前）。
+     * 非 `null` ⇒ 决策路径上跑的是**它**，而它内部调 `decide` 作为政策门。
+     *
+     * ★ 暴露出来是为了让"装的是哪一个端口"可被断言，而不是让组合方
+     *   对着自己传的参数断言——与 `connectorFeedback` 同一条理由。
+     */
+    connectorJudgment,
+    /**
+     * 本桥实际使用的**政策门**（组合方传进来的那个 `decide`）。
+     *
+     * ★ 暴露出来只为一件事：`connectorJudgment.inner` 必须**就是**它。
+     *   判定面在决策路径上，而它内部调的那个函数如果不是本桥的政策门，
+     *   政策门就被**绕过去了**——而 `enforcementSurfaces().policy` 照样是 `true`。
+     *   构造期已经拦了这种接法（见上面那段），这里把它露出来是为了
+     *   让用例能**直接**断言，而不是只能靠"装成功了说明没拦"。
+     */
+    decide,
+    /**
      * 强制面到底挂了几道。**证据是"装上了什么"，不是"配置里写了什么"**——
      * PRT-604 的 pathScope 与 PRT-603 的 whitelist 都是可选端口，一个没接上的
      * 端口在运行时与"从不拒绝"无法区分。
@@ -962,6 +1040,26 @@ export function createEnforcementBridge({
        * 不是**效果**，两者分开才查得动。
        */
       connectorFeedback: connectorFeedback !== null,
+      /**
+       * ★★★ F-21 的**第一半**（判定面，2026-09-18 加）。
+       *
+       * 上面那一格只报"结果回得来"，这一格只报"判定插得上话"。**两格必须分开**：
+       *
+       *   > 一个"反馈面装了、判定面没装"的强制面，与一个"连接器失败被记下来了、
+       *   > 但记下来之后**谁也不看**"的强制面，是同一个东西——
+       *   > 只不过前者在 `enforcementSurfaces()` 里的读数是 `connectorFeedback: true`，
+       *   > 看起来像"F-21 接好了"。
+       *
+       * ★ `policy` 那一格**不能**代替它：`policy` 报的是"有没有策略门"，
+       *   而判定面是**接在策略门外面**的一层（它还会把连接器层的意见
+       *   与策略门的意见**取严**合并）。两者都存在时 `policy` 与这一格同时为
+       *   `true`——这正好说明它们不是同一件事。
+       *
+       * ⚠️ 同样只回答"装配"，不回答"效果"：装了判定面但
+       * `resolveConnectorId` 每次都认不出，这一格照样是 `true`。
+       * 效果要让 `createConnectorDecisionPort(...).receipts()` 去答。
+       */
+      connectorJudgment: connectorJudgment !== null,
     }),
   })
 }

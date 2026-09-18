@@ -291,5 +291,13 @@ export function createOutcomeListener({
     value: () => Object.freeze({ ...counters, version: OUTCOME_PORT_VERSION }),
     enumerable: false,
   })
+  // ★ 与 `decision-port.mjs` 对称：把 `registry` 也挂出来（不可枚举）。
+  //
+  //   理由很具体：判定面与反馈面**必须**共用同一份 registry，否则
+  //   判定面读的熔断器永远合闸（没人写它），而反馈面写的那个没人读。
+  //   那件事在读数上不可见——除非有人能问"你到底在写哪一本账"。
+  //   挂在**监听器自己**上（而不是让组合方对着自己传的参数断言），
+  //   与 `receipts` 是同一条理由。
+  Object.defineProperty(listener, 'registry', { value: registry, enumerable: false })
   return listener
 }

@@ -51,7 +51,7 @@ function decl(over = {}) {
     version: '1.0.0',
     transport: 'stdio',
     policy: 'allow',
-    tools: [{ name: 'list_issues', capabilities: ['repo:read'], risk: 'low', policy: 'allow' }],
+    tools: [{ name: 'list_issues', capabilities: ['repo:read'], declaredRisk: 'low', policy: 'allow' }],
     secretRefs: ['mcp.github.token'],
     ...over,
   }
@@ -119,7 +119,7 @@ test('② ★★★ 同 (id, version) **不同内容** ⇒ 409，且这一次写
   freezeDeclaration({ db, declaration: decl() })
   // 加上一个"能删库"的工具——这正是"同版本换内容"最危险的形状。
   const dangerous = decl({
-    tools: [...decl().tools, { name: 'delete_repo', capabilities: ['repo:write'], risk: 'high', policy: 'allow' }],
+    tools: [...decl().tools, { name: 'delete_repo', capabilities: ['repo:write'], declaredRisk: 'high', policy: 'allow' }],
   })
   assert.notEqual(declarationContentHash(dangerous), declarationContentHash(decl()))
   const err = throwsCode(
@@ -141,7 +141,7 @@ test('② ★★★ 多版本**同时存在**（"当时放行了哪些工具"要
   freezeDeclaration({ db, declaration: decl({ version: '1.0.0' }), frozenAtMs: 1000 })
   freezeDeclaration({
     db,
-    declaration: decl({ version: '1.1.0', tools: [{ name: 'list_issues', capabilities: ['repo:read'], risk: 'low', policy: 'allow' }, { name: 'ping', capabilities: ['mcp:call'], risk: 'high', policy: 'ask' }] }),
+    declaration: decl({ version: '1.1.0', tools: [{ name: 'list_issues', capabilities: ['repo:read'], declaredRisk: 'low', policy: 'allow' }, { name: 'ping', capabilities: ['mcp:call'], declaredRisk: 'high', policy: 'ask' }] }),
     frozenAtMs: 2000,
   })
   // 两版都在。
@@ -197,16 +197,49 @@ test('② ★★★ 哈希在**规范化前后一致**（否则身份取决于"�
   assert.match(err.message, /记录长什么样/)
 })
 
-test('② ★★★ 存的每个权限字段都进哈希（改了 `risk` 不能报"内容没变"）', () => {
-  // 不覆盖 `risk` 时：把某工具的 risk 从 high 改成 low，哈希不变，
+test('② ★★★ 存的每个权限字段都进哈希（改了 `declaredRisk` 不能报"内容没变"）', () => {
+  // 不覆盖该字段时：把某工具的 `declaredRisk` 从 high 改成 low，哈希不变，
   // 于是这次冻结被当成"重放"收下并**静默丢弃**，
   // 而调用方得到一句"内容相同、无需重冻"。
-  const high = decl({ tools: [{ name: 't', capabilities: ['repo:read'], risk: 'high', policy: 'allow' }] })
-  const low = decl({ tools: [{ name: 't', capabilities: ['repo:read'], risk: 'low', policy: 'allow' }] })
+  //
+  // ★★★ 这条用例**原来一直是绿的，但它什么都没验到**。
+  //
+  //   它把两个声明写成 `risk: 'high'` / `risk: 'low'` —— 而 `risk` 是
+  //   `normalizeTool` / `decide()` 交出去的**输出**字段，声明里的输入字段
+  //   叫 `declaredRisk`。`declareConnector` 当时**静默忽略** `risk`，
+  //   所以这两个声明在权限上**完全一样**（有效风险都落回能力下限 `low`）。
+  //
+  //   哈希之所以还是不同，是因为 `declarationContentHash` 把那个**无效**字段
+  //   也读进了载荷（`connector-store.mjs:267` 的 `risk: t.risk ?? null`）。
+  //   也就是说：这条"证明 declaredRisk 进哈希"的用例，
+  //   靠的恰恰是一个**永远不生效的字段**。
+  //
+  //   > 一个"用错字段名写、但断言碰巧也成立"的用例，
+  //   > 与一个"真的验过 declaredRisk"的用例，在套件读数上是同一个 ✔。
+  //
+  //   现在 `declareTool` 的键集是封闭的（多写 `risk` 直接具名拒），
+  //   所以这里改成 `declaredRisk` —— 这才是它一开始想验的东西。
+  const high = decl({ tools: [{ name: 't', capabilities: ['repo:read'], declaredRisk: 'high', policy: 'allow' }] })
+  const low = decl({ tools: [{ name: 't', capabilities: ['repo:read'], declaredRisk: 'low', policy: 'allow' }] })
   assert.notEqual(declarationContentHash(high), declarationContentHash(low))
-  // declaredRisk 与 policy 同理（前面已覆盖，这里一并钉住）。
-  const dr = decl({ tools: [{ name: 't', capabilities: ['repo:read'], declaredRisk: 'high', policy: 'allow' }] })
-  assert.notEqual(declarationContentHash(high), declarationContentHash(dr))
+
+  // ★ 前置对照：这两个声明在**有效风险**上必须真的不同。
+  //
+  //   上面那个"什么都没验到"的版本缺的正是这一条断言——少了它，
+  //   "两个声明其实一模一样"也能绿。
+  // ▲ 这里给 `command`：`createRegistry` 真的会建表，而 transport=stdio 必须带命令。
+  //   （`decl()` 的夹具不带它——那正是测试 ⑧ 说的"喂不进"缺的那一样。）
+  assert.notEqual(
+    createRegistry({ connectors: [{ ...high, command: 'npx x' }] })
+      .decide({ connectorId: 'github', toolName: 't' }).risk,
+    createRegistry({ connectors: [{ ...low, command: 'npx x' }] })
+      .decide({ connectorId: 'github', toolName: 't' }).risk,
+    '前提：改 declaredRisk 必须真的改变有效风险，否则上面那条哈希断言还是白测的',
+  )
+
+  // `policy` 是另一个存下来的权限字段，同理钉住。
+  const ask = decl({ tools: [{ name: 't', capabilities: ['repo:read'], declaredRisk: 'high', policy: 'ask' }] })
+  assert.notEqual(declarationContentHash(high), declarationContentHash(ask))
 })
 
 test('② ★★ 撞上另一个写入者 ⇒ 同哈希幂等、不同哈希 409（不是 500）', () => {
@@ -419,7 +452,7 @@ test('⑤ ★★ 导出是可提交进 Git 的文本：含权限面与引用**�
   // ★ 权限面必须在（那正是这个文件存在的理由）。
   assert.equal(doc.registrations[0].policy, 'allow')
   assert.deepEqual(doc.registrations[0].tools, [
-    { name: 'list_issues', capabilities: ['repo:read'], policy: 'allow', risk: 'low' },
+    { name: 'list_issues', capabilities: ['repo:read'], policy: 'allow', declaredRisk: 'low' },
   ])
   // ★ 引用的**名字**要在（它告诉审阅的人这个连接器要拿哪类凭证），
   //   而凭证值本身不可能在这里——声明里就装不下。

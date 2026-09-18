@@ -20,7 +20,17 @@ function policy(over = {}) {
     version_label: '1.0.0',
     transport: 'stdio',
     policy: 'allow',
-    tools: [{ name: 'list_issues', capabilities: ['repo:read'], declaredRisk: 'low', risk: null, policy: 'allow' }],
+    // ★ 这里原来同时写着 `declaredRisk: 'low', risk: null`。
+    //
+    //   上面那个 `risk` **从来没有被读过**：声明里的输入字段叫 `declaredRisk`，
+    //   而 `risk` 是 `normalizeTool` / `decide()` 交出去的**输出**字段。
+    //   它当时被静默忽略，所以这条用例一直绿着，还顺带掩盖了
+    //   "照着输出字段的样子写声明 = 整条声明看起来生效、实际没生效"这件事。
+    //
+    //   现在 `declareTool` 的键集是封闭的：多写一个 `risk` 会被具名拒掉
+    //   （`connector-declaration-malformed`，理由直接点名 `declaredRisk`）。
+    //   所以这个多余字段删掉——**不是**为了迁就新守卫，而是它本来就是错的。
+    tools: [{ name: 'list_issues', capabilities: ['repo:read'], declaredRisk: 'low', policy: 'allow' }],
     secretRefs: ['mcp.github.token'],
     ...over,
   }

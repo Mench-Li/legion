@@ -43,6 +43,7 @@ import { createPreExecutePlugin } from './plugins/pre-execute.mjs'
 import { createConnectorFeedbackPlugin } from './plugins/connector-feedback.mjs'
 import { createRegistry } from '../connectors/registry.mjs'
 import { createOutcomeListener } from '../connectors/outcome-port.mjs'
+import { createConnectorDecisionPort } from '../connectors/decision-port.mjs'
 import { createInFlightRegistry } from './inflight.mjs'
 import { createEnforcementBridge } from './tool-request.mjs'
 
@@ -235,10 +236,31 @@ export function assembleEnforcement({
       projectionFor: (exec) => bridge.projectionFor(exec),
     })
 
+  // ★★★ 判定面（F-21 第一半）：**替**在决策路径上，内部调 `decide` 当政策门。
+  //
+  //   到这里，两半才第一次共用**同一份** registry：
+  //     · `decide()`    读熔断器（判定面）
+  //     · `recordOutcome()` 写熔断器（反馈面）
+  //   在 `connectorRegistry === null` 时两者都是 `null`，行为逐字不变。
+  const connectorDecisionPort = connectorRegistry === null
+    ? null
+    : createConnectorDecisionPort({
+      registry: connectorRegistry,
+      // ★ 判定面只拿得到 `projection`（这是 `decide` 端口唯一的入参），
+      //   所以这里传一个**只吃 projection** 的适配器；`exec` 是反馈面才有的。
+      //
+      //   传两参的原始 resolver 也照样能用（多出来的那个参数被忽略），
+      //   而"需要 exec 才能认出连接器"的 resolver 在判定面上会抛 ⇒
+      //   端口把它算作**认不出** ⇒ 原样交给政策门（不是放行）。
+      resolveConnectorId: (projection) => resolveConnectorId(projection, null),
+      inner: decide,
+    })
+
   const bridge = createEnforcementBridge({
     context,
     ...(floor === undefined ? {} : { floor }),
     decide,
+    ...(connectorDecisionPort === null ? {} : { connectorJudgment: connectorDecisionPort }),
     requestApproval,
     whitelist,
     pathScope,

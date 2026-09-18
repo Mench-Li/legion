@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url'
 import {
   CIRCUIT_COOLDOWN_MS, CIRCUIT_FAILURE_THRESHOLD, CIRCUIT_STATES, CONNECTOR_CODES,
   CONNECTOR_DECISIONS, CONNECTOR_REGISTRY_VERSION, CONNECTOR_TRANSPORTS,
-  FORBIDDEN_SECRET_KEYS, declareConnector, createRegistry,
+  FORBIDDEN_SECRET_KEYS, TOOL_DECLARATION_KEYS, declareConnector, createRegistry,
 } from './registry.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -122,6 +122,59 @@ test('② ★★ 不认识的**风险等级**也报错，不当成 low 也不当
     CONNECTOR_CODES.BAD_RISK,
   )
   assert.match(err.message, /当成 low 会放行/)
+})
+
+test('② ★★★ 工具声明里多写 `risk` ⇒ 具名拒（它是**输出**字段，静默忽略会让最严声明消失）', () => {
+  // ── 先钉住那个"静默"本身：`declaredRisk` 才有效。
+  const withDeclared = createRegistry({
+    connectors: [{
+      connectorId: 'c1', transport: 'stdio', command: 'x',
+      tools: [{ name: 't', capabilities: ['repo:read'], declaredRisk: 'critical', policy: 'allow' }],
+    }],
+  })
+  const d1 = withDeclared.decide({ connectorId: 'c1', toolName: 't' })
+  assert.equal(d1.risk, 'critical', '前提：declaredRisk 确实被读到')
+  assert.equal(d1.decision, 'ask', '前提：critical 风险必须问人')
+
+  // ── 关键：写 `risk` 必须**拒**，而不是被丢掉。
+  //
+  //   修之前，下面这条声明会建出一个 `risk: 'low'`（能力下限）的连接器，
+  //   `decide()` 答 allow —— 作者明确标了 critical 的工具被自动放行，
+  //   而且没有任何一处报错。
+  const err = throwsCode(
+    () => declareConnector({
+      connectorId: 'c1', transport: 'stdio', command: 'x',
+      tools: [{ name: 't', capabilities: ['repo:read'], risk: 'critical' }],
+    }),
+    CONNECTOR_CODES.BAD_DECLARATION,
+  )
+  assert.match(err.message, /declaredRisk/, '理由必须告诉作者要写哪个字段名')
+  assert.match(err.message, /输出/, '理由必须点破"它是输出字段"这件事')
+
+  // ★ 反向对照：四个**合法**键一个都不许被误伤。
+  const ok = declareConnector({
+    connectorId: 'c2', transport: 'stdio', command: 'x',
+    tools: [{ name: 't', capabilities: ['repo:read'], declaredRisk: 'low', policy: 'ask' }],
+  })
+  assert.equal(ok.tools.length, 1)
+  // 反向对照②：**不给** `declaredRisk`（合法，落回能力下限）也不许被误伤。
+  assert.equal(declareConnector({
+    connectorId: 'c3', transport: 'stdio', command: 'x',
+    tools: [{ name: 't', capabilities: ['repo:read'] }],
+  }).tools[0].risk, 'low')
+
+  // 其它拼错的键名也一样拒（不只 `risk` 这一个名字）。
+  const other = throwsCode(
+    () => declareConnector({
+      connectorId: 'c4', transport: 'stdio', command: 'x',
+      tools: [{ name: 't', capabilities: ['repo:read'], declaredrisk: 'critical' }],
+    }),
+    CONNECTOR_CODES.BAD_DECLARATION,
+  )
+  assert.match(other.message, /declaredrisk/, '大小写写错也是一种"看起来生效、实际没生效"')
+
+  // ★ 键集本身是冻结的契约：它必须恰好是这四个。
+  assert.deepEqual([...TOOL_DECLARATION_KEYS].sort(), ['capabilities', 'declaredRisk', 'name', 'policy'])
 })
 
 test('② ★★ 工具一个能力都不声明 ⇒ 拒绝（"没有能力"与"能力未知"同形）', () => {

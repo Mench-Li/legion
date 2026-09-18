@@ -71,7 +71,7 @@ test('① ★★★ 生产组合根**接上了** pathScope 端口；env 没配�
   //
   //   本断言原来钉的是 `keys.includes('pathScope') === false`，也就是
   //   "生产装配压根不传这个键"。那正是 §9.3 量出来的洞：端口恒为 `null`，
-  //   而 `tool-request.mjs:639` 在 `null` 上是**放行**。
+  //   而 `tool-request.mjs:731` 在 `null` 上是**放行**。
   //
   //   现在 root-row.mjs 会从环境读 `LEGION_PATH_SCOPE` 并接上端口。
   //   所以这一条改成钉**新的**两件事：
@@ -125,6 +125,13 @@ test('① ★★★ 生产组合根**接上了** pathScope 端口；env 没配�
     //    让"没装"**读得出来**（本批之前这一格**根本不存在**，
     //    于是"接了判定面、反馈面没装"在读数上与"全接好了"同形）。
     connectorFeedback: false,
+    // ★★★ F-21 **第一半**（2026-09-18 加）：判定面。
+    //
+    //    同样 `false`，同样**不是"漏了"**——生产组合根这一层没有连接器登记表。
+    //    它必须与上面那一格**分开报**：一个"反馈面装了、判定面没装"的强制面，
+    //    与一个"连接器失败被记下来了、但记下来之后谁也不看"的强制面，
+    //    在只有一格的读数里是同一个东西。
+    connectorJudgment: false,
   }, '生产强制面的读数变了。★ 如果这次改动是**有意接线**，请同时更新 '
     + 'docs/MULTI-AGENT-FEATURE-STATUS.md 与 PRT-PROGRESS 里"范围检查未接生产"那段记账——'
     + '一条只在代码里变、账上不动的接线，会让下一个人照着旧账做判断')
@@ -183,17 +190,23 @@ test('② ★★★ 命令/网络/MCP 与外部 API 两道范围检查**连端�
   }
   // 行为读数：强制面的键集里没有这两个名字。
   const surfaces = createEnforcementBridge({ context: CTX }).enforcementSurfaces()
-  // ★ 2026-09-18：键集里**多了** `connectorFeedback`（F-21 第二半）。
+  // ★ 2026-09-18：键集里**多了** `connectorJudgment`（F-21 第一半）。
   //   这个键集仍然是一份**契约**：它变了就必须在这里显式改，
-  //   而不是让它悄悄多一格。它现在有 6 格，而"两半都在场"是 6 格里的事。
+  //   而不是让它悄悄多一格。它现在有 **7** 格，而"两半都在场"是 7 格里的事。
+  //
+  //   ★ 为什么是**两格**而不是一格：`connectorFeedback` 只报"结果回得来"，
+  //     `connectorJudgment` 只报"判定插得上话"。只有一格时，
+  //     "判定面装了、反馈面没装"（熔断器只合不开）与反过来
+  //     （只开不合）都是同一个读数。
   assert.deepEqual(Object.keys(surfaces).sort(),
-    ['approval', 'connectorFeedback', 'hardFloor', 'pathScope', 'policy', 'whitelist'],
+    ['approval', 'connectorFeedback', 'connectorJudgment', 'hardFloor', 'pathScope', 'policy', 'whitelist'],
     '强制面的键集变了——这个键集是**契约**，不是便利方法')
   assert.equal('executionScope' in surfaces, false)
   assert.equal('externalApiScope' in surfaces, false)
-  // ★ 反向对照：默认造出来的桥**没有**反馈面（`null` ⇒ false）。
+  // ★ 反向对照：默认造出来的桥**两半都没有**（`null` ⇒ false）。
   //   少了这条，上面那个键集断言无法区分"这一格报了 true"与"这一格恒 true"。
   assert.equal(surfaces.connectorFeedback, false, '没传 listener ⇒ 必须是 false（没接 ≠ 接了个空的）')
+  assert.equal(surfaces.connectorJudgment, false, '没传判定端口 ⇒ 必须是 false')
 })
 
 test('③ ★★★ 后果是真的：同一路越界调用，接了 pathScope 拒绝、没接就通过', async () => {

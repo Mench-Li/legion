@@ -179,7 +179,7 @@ export function checkManifestImpersonation({ dir = CRITERIA_DIR } = {}) {
 // ★ 起因：`boundary-facts` 原来只钉"文档声称的**数字** ↔ 产物真实的值"，
 //   也就是只管**计数**，不管**位置**。而本仓的论证大量依赖坐标：
 //
-//     `tool-request.mjs:639`（缺表 = 放行）、
+//     `tool-request.mjs:731`（缺表 = 放行）、
 //     `runtime-contract-server.mjs:599`（`wireChecked: true` 是写死的字面量）、
 //     `credentials-local/src/index.ts:585` / `:611`（watcher 的创建点/关闭点）
 //
@@ -390,14 +390,26 @@ export function scanLineCitations(text, treeSet = null) {
 const PINNED_CITATIONS = Object.freeze([
   Object.freeze({
     file: 'runtime/dsh-composition/tool-request.mjs',
-    // ★ 2026-09-18 位移：本批往这个文件里加了 42 行（`connectorFeedback` 端口
+    // ★ 2026-09-18 位移（第一次）：本批往这个文件里加了 42 行（`connectorFeedback` 端口
     //   的签名注释、构造期守卫、返回项与 `enforcementSurfaces()` 那一格），
     //   全都在这一行之上 ⇒ 它从 **639 挪到 681**。
     //
     //   坐标是**手钉**的，所以位移必须在这里改**一次**——而这次是判据自己在
     //   CI 里报了三红（①/⑫a/⑫c）把它顶出来的：那条"引用会随插入位移"的
     //   立论（见本节开头那段）**又成立了一次**，这次是我自己触发的。
-    line: 681,
+    //
+    // ★★ 2026-09-18 位移（第二次，同一批内）：加了 F-21 **判定面**那一层
+    //   （`connectorJudgment` 的签名注释 + 构造期守卫 + `effectiveDecide`
+    //   + 返回项 + `enforcementSurfaces()` 里第 7 格），又都在这一行之上
+    //   ⇒ 它从 **681 挪到 731**。
+    //
+    //   > 一个"手钉行号"的判据，在文件**只增不改**的时候，
+    //   > 与一个"每次都重新数一遍"的判据，读数只差一个常数——
+    //   > 只不过前者在常数变了的那天会红，而红本身就是它的价值。
+    //
+    //   ★ 这次它又是**判据自己报出来的**（`--only boundary` 那一阶段不含本套件，
+    //     是 `test` 阶段抓到的）——所以第二次位移同样是"判据在工作"，不是"判据坏了"。
+    line: 731,
     text: 'if (pathScope === null) return undefined',
     why: '本会话多次引为「缺表 = 放行」——这句话就是那条边界的**全部依据**',
   }),
@@ -755,7 +767,7 @@ export const FACTS = Object.freeze([
     why: '坐标是最脆的证据形式：在它上面插一行注释，它就指到别处去了，'
       + '而**句子一个字都没变**。'
       + '★ 实测（2026-09-18）：101 条唯一引用，**0 条坏**；'
-      + '那 5 条本会话的结论所依赖的引用（`tool-request.mjs:639`、'
+      + '那 5 条本会话的结论所依赖的引用（`tool-request.mjs:731`、'
       + '`runtime-contract-server.mjs:599`、`external-api-scope.mjs:1061`、'
       + '`enforcement-mapping.mjs:266`、`credentials-local/src/index.ts:585`）逐条读过，都在。'
       + '⚠️ 这条**只**判"落到实处"，**不**判"那一行支撑那句话"——'

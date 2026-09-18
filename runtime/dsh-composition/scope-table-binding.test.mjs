@@ -93,7 +93,7 @@ test('② ★★★ 没有表 ⇒ 具名拒绝，**不是**"没有范围表"（�
 
 test('② ★★★ 拒绝的理由是**真的**：null 端口在 `tool-request` 那一侧就是放行', () => {
   // 这条把 ② 的"为什么"钉在**行为**上，而不是钉在我的说法上。
-  // `tool-request.mjs:639` 的形状是 `if (pathScope === null) return undefined`（放行）。
+  // `tool-request.mjs:731` 的形状是 `if (pathScope === null) return undefined`（放行）。
   // 这里用**同一个形状**复现它：证明"送出 null"确实等于"什么都不限制"。
   const decisionWith = (pathScope) => {
     if (pathScope === null) return 'allow'          // ← 生产里那一行的形状

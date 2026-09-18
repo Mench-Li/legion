@@ -768,3 +768,92 @@ test('★★★ PRT-212：自报了连接才算**响应阶段**超时，不自�
   assert.equal(silent.seen[0].connected, false)
 })
 
+// ---------------------------------------------------------------------------
+// ⑨ ★★★ F-21 **判定面**在桥这一层的契约（2026-09-18 加）
+// ---------------------------------------------------------------------------
+
+test('⑨① ★★★ `connectorJudgment` 装了就**替**在决策路径上，没装则逐字不变', async () => {
+  const policySeen = []
+  let connectorCalls = 0
+  const decide = (projection) => {
+    policySeen.push(projection.toolName)
+    return { kind: 'allow' }
+  }
+  const execution = { name: 'write-file', callId: 'cj-1', arguments: { path: 'C:/work/a.txt' } }
+
+  // ── 没装：政策门照常被调，读数 false。
+  const bare = createEnforcementBridge({ context: CTX, decide })
+  assert.equal(bare.enforcementSurfaces().connectorJudgment, false)
+  assert.equal((await bare.preExecute(execution)).kind, 'allow')
+  assert.deepEqual(policySeen, ['write-file'])
+  assert.equal(bare.connectorJudgment, null)
+
+  // ── 装了：决策路径上跑的是**端口**，而端口内部调政策门。
+  const port = async (projection) => {
+    connectorCalls += 1
+    // ★ 端口自己负责"连接器层意见 ⊕ 政策门意见取严"；这里模拟取严。
+    const inner = await decide(projection)
+    return inner.kind === 'deny'
+      ? inner
+      : { kind: 'deny', reason: '连接器层拒绝（模拟）' }
+  }
+  Object.defineProperty(port, 'inner', { value: decide, enumerable: false })
+  const withPort = createEnforcementBridge({ context: CTX, decide, connectorJudgment: port })
+  assert.equal(withPort.enforcementSurfaces().connectorJudgment, true)
+  assert.equal(withPort.connectorJudgment, port, '桥没有拿着那个端口')
+  assert.equal(withPort.decide, decide, '桥的 `decide` 被换掉了 —— 那会让 policy 那一格失去意义')
+
+  const r = await withPort.preExecute(execution)
+  assert.equal(r.kind, 'deny', `判定面没有替在决策路径上（实得 ${r.kind}）`)
+  assert.match(r.reason, /连接器层/, '拒绝不是判定面给的')
+  assert.equal(connectorCalls, 1, '判定面**一次都没被调** —— 它只是被记下来了')
+})
+
+test('⑨② ★★★ `connectorJudgment` 的 `inner` 不是本桥的 `decide` ⇒ 构造期拒（这会绕过政策门）', () => {
+  const decide = () => ({ kind: 'allow' })
+  const otherGate = () => ({ kind: 'allow' })
+  const bad = async () => ({ kind: 'allow' })
+  Object.defineProperty(bad, 'inner', { value: otherGate, enumerable: false })
+
+  assert.throws(
+    () => createEnforcementBridge({ context: CTX, decide, connectorJudgment: bad }),
+    (err) => {
+      assert.match(err.message, /不是同一个函数/, `理由没说清问题：${err.message}`)
+      assert.match(err.message, /绕过去/, '理由必须点破后果是政策门被绕过')
+      return true
+    },
+  )
+  // ★ 反向对照：`inner` **就是**本桥的 `decide` ⇒ 正常构造。
+  const good = async () => ({ kind: 'allow' })
+  Object.defineProperty(good, 'inner', { value: decide, enumerable: false })
+  assert.equal(
+    createEnforcementBridge({ context: CTX, decide, connectorJudgment: good }).enforcementSurfaces().connectorJudgment,
+    true,
+  )
+  // ★ 查不出来的部分**不猜**：没有暴露 `inner` 的端口照样能装（组合方说它包好了）。
+  assert.equal(
+    createEnforcementBridge({ context: CTX, decide, connectorJudgment: async () => ({ kind: 'allow' }) })
+      .enforcementSurfaces().connectorJudgment,
+    true,
+  )
+})
+
+test('⑨③ ★★ `connectorJudgment` 既不是函数也不是 null ⇒ 具名拒（"接线写错"≠"没接"）', () => {
+  for (const bad of ['x', {}, 42, [], true]) {
+    assert.throws(
+      () => createEnforcementBridge({ context: CTX, decide: () => ({ kind: 'allow' }), connectorJudgment: bad }),
+      (err) => {
+        assert.match(err.message, /connectorJudgment 要么不给/, `收到 ${JSON.stringify(bad)} 时理由不对：${err.message}`)
+        assert.match(err.message, /接线写错/, '理由必须点破"写错"与"没配"不能同形')
+        return true
+      },
+    )
+  }
+  // ★ 反向对照：`undefined`（等于不给）是**合法**的。
+  assert.equal(
+    createEnforcementBridge({ context: CTX, decide: () => ({ kind: 'allow' }), connectorJudgment: undefined })
+      .enforcementSurfaces().connectorJudgment,
+    false,
+  )
+})
+

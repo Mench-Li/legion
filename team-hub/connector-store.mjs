@@ -205,11 +205,33 @@ export function normalizeDeclaration(input) {
         `连接器 ${connectorId} 的工具「${name}」没有声明 capabilities`,
       )
     }
+    // ★★★ 存下来的工具形状**必须**与 `declareConnector` 的**输入**形状一致。
+    //
+    //   第一版这里还多存了一个 `risk: t.risk ?? null`。两个毛病：
+    //
+    //   ① 它是**输出**字段名。声明里的输入字段叫 `declaredRisk` ——
+    //      记录里带着一个 `risk`，就意味着这份记录**喂不回执行面**
+    //      （`declareTool` 现在会具名拒掉不认识的键）。
+    //      ★ 而测试 ⑧ 的整个论点正是"记录喂不进去**只差连接目标**"：
+    //        留着 `risk` 会让那句话变成假的——差的不止连接目标。
+    //
+    //   ② `risk` 是**推导值**（`max(declaredRisk, 能力下限)`）。
+    //      把推导值也存一份，等于把"作者声明的"与"我们算出来的"混成同一个数，
+    //      而 `capabilities` 就在同一个对象里 ⇒ 读的人本来就能自己算。
+    //      存推导值的第二个代价：推导规则一变（比如能力下限调整），
+    //      存下来的那一份**立刻变成过期的事实**，而它看起来像一份记录。
+    //
+    //   > 一个"把推导值也存一份"的记录，
+    //   > 与一个"存了作者原话、推导交给读的人"的记录，
+    //   > 在今天的读数上是同一个数——只不过前者在规则改变那天开始撒谎。
+    //
+    //   ★ 哈希那边（`:266` 一带）**不跟着删**：它要覆盖的是"曾经可能被存下来的
+    //     每一个字段"，包括本改动之前写下的记录。那边留着 `risk` 是有理由的，
+    //     这边留着没有。
     return Object.freeze({
       name,
       capabilities: Object.freeze(capabilities),
       declaredRisk: t.declaredRisk ?? null,
-      risk: t.risk ?? null,
       policy: toolPolicy,
     })
   })
@@ -557,8 +579,28 @@ export function exportConnectors({ db, scope = 'default', exportedAtMs = Date.no
       policy: r.declaration?.policy ?? null,
       // ★ 只出工具的**名字与策略**，不出 capabilities/risk 的细节？
       //   不：权限就是这个文件存在的理由。审阅的人要看的正是"这个工具是干嘛的"。
+      //
+      // ★★★ 这里出的是 `declaredRisk`（**输入**名），不是 `risk`（**输出**名）。
+      //
+      //   第一版出的是 `risk: t.risk ?? null`，于是导出的文本**喂不回去**：
+      //   `declareConnector` 的输入字段叫 `declaredRisk`，`risk` 会被它
+      //   静默忽略——而"静默"是最坏的一种：把导出的文件拿回来重新冻结，
+      //   得到的是一份**风险全落回能力下限**的声明，且没有任何提示。
+      //
+      //   > 一个"导出时写输出字段名"的导出面，
+      //   > 与一个"导出的文件被喂回去之后声明悄悄变松"的导出面，是同一个东西——
+      //   > 只不过前者的文件看起来完全正常，还经过了人的审阅。
+      //
+      //   ★ 用 `declaredRisk` 不丢信息：有效风险 = `max(declaredRisk, 能力下限)`，
+      //     而 `capabilities` 就在同一个对象里 ⇒ 读的人能自己算出来。
+      //     出 `risk` 反而会把"作者声明的值"与"推导出的值"混成同一个数。
+      //
+      //   ★ 与 `declarationContentHash`（`:266-267`）那边**刻意不同**：
+      //     哈希要覆盖**存下来的每一个字段**（含历史遗留的 `risk`），
+      //     所以它两个都读；而导出面必须只出**能再喂回去的**形状。
       tools: (r.declaration?.tools ?? []).map((t) => ({
-        name: t.name, capabilities: t.capabilities, policy: t.policy, risk: t.risk ?? null,
+        name: t.name, capabilities: t.capabilities, policy: t.policy,
+        declaredRisk: t.declaredRisk ?? null,
       })),
       // ★ 只出引用的**名字**。引用的名字不是凭证，但它会告诉审阅的人
       //   "这个连接器要拿哪一类凭证"——那正是要看的东西。

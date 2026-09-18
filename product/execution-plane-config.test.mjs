@@ -124,7 +124,7 @@ test('② ★★★ 范围表没配 ⇒ `state: "absent"`，而不是一个"没�
 })
 
 test('② ★★★ 拒绝的理由是**真的**：null 传到执行面那一侧就是**放行一切**', () => {
-  // 把 §9.3 那条要防范的形状复现出来：`tool-request.mjs:639` 的形状是
+  // 把 §9.3 那条要防范的形状复现出来：`tool-request.mjs:731` 的形状是
   //   `if (pathScope === null) return undefined`（放行）。
   const verdict = (pathScope) => {
     if (pathScope === null) return 'allow'          // ← 生产里那一行的形状

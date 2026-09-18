@@ -885,3 +885,151 @@ test('⑨③ ★★★ 端到端：挂上之后，连续失败的**真结果**�
   resetEnforcementRoot()
 })
 
+// ---------------------------------------------------------------------------
+// ⑨ ★★★ F-21 **判定面**那一半（2026-09-18 加）
+//
+//   上面 ⑨①～⑨③ 建起了**反馈**那一半。这一组建起**判定**那一半，
+//   并证明两半终于在**同一份 registry** 上接成一条环。
+//
+//   ★ 夹具必须用 `tool-capability.mjs` **认识**的工具名（下面 `JUDGE_DECL` 用
+//     `git-status`）。用不认识的名字时**投影这一步**就失败了
+//     （`tool-request-target-missing`），根本走不到连接器判定——
+//     我第一版就写了 `list_issues`，于是"拒绝"读起来像判定面在起作用，
+//     其实是**投影失败**。那是本批第二个"看起来在工作"。
+// ---------------------------------------------------------------------------
+
+/** 判定面用的声明：工具名是执行面**认识**的那一个。 */
+const JUDGE_DECL = Object.freeze({
+  connectorId: 'github',
+  transport: 'stdio',
+  command: 'npx mcp-github',
+  policy: 'allow',
+  tools: Object.freeze([
+    Object.freeze({ name: 'git-status', capabilities: Object.freeze(['repo:read']) }),
+  ]),
+  secretRefs: Object.freeze([]),
+})
+
+/** 一次能**投影成功**的调用（有 cwd、有目标）。 */
+const judgeCall = (name, callId) => ({ name, callId, arguments: { path: `${CWD}/x` } })
+
+test('⑨④ ★★★ 装齐之后 `connectorJudgment` 翻成 true，且判定面**真的**在决策路径上', async () => {
+  // ── 前提：不装连接器时两格都是 false。
+  const bare = installEnforcementRoot(inputOk({}))
+  assert.equal(bare.ok, true, JSON.stringify(bare))
+  assert.equal(bare.root.enforcementSurfaces().connectorJudgment, false)
+  assert.equal(bare.root.enforcementSurfaces().connectorFeedback, false)
+  assert.equal(bare.root.bridge.connectorJudgment, null, '没给连接器 ⇒ 决策路径上不该多一层')
+  // ★ 前提对照：**没有**判定面时，一次未声明的工具调用是**放行**的
+  //   （政策门说 allow，而没有别人说话）。少了这条，下面那个 deny
+  //   无法区分"判定面拒的"与"别处本来就会拒"。
+  const bareAllow = await bare.root.bridge.preExecute(judgeCall('git-commit', 'b1'))
+  assert.equal(bareAllow.kind, 'allow', `前提：没接判定面时应当放行，实得 ${bareAllow.kind}`)
+  resetEnforcementRoot()
+
+  const installed = installEnforcementRoot(inputOk({
+    connectorDeclarations: [JUDGE_DECL],
+    resolveConnectorId: () => 'github',
+  }))
+  assert.equal(installed.ok, true, JSON.stringify(installed))
+  const root = installed.root
+
+  // ── 读数：两格**同时**翻成 true（它们是一对，但分别报）。
+  assert.equal(root.enforcementSurfaces().connectorJudgment, true,
+    '装了连接器登记表，判定面却没上 —— 登记的 policy 就永远不生效')
+  assert.equal(root.enforcementSurfaces().connectorFeedback, true)
+  // ★ 而 `policy` 那一格**照旧**是 true：判定面是接在政策门**外面**的一层，
+  //   不是它的替代品。两格同时 true 正说明它们不是同一件事。
+  assert.equal(root.enforcementSurfaces().policy, true)
+
+  // ── 结构：桥真的拿着那个端口，且它包的**就是**本桥的 `decide`。
+  const port = root.bridge.connectorJudgment
+  assert.notEqual(port, null, '判定面没有被交给桥')
+  assert.equal(typeof port, 'function')
+  assert.equal(port.inner, root.bridge.decide,
+    '判定面包的不是本桥的政策门 —— 那会把政策门整个绕过去')
+
+  // ── ★★★ 后果是真的：一次**本连接器未声明**的工具调用被拒，
+  //    而同一个调用在没有判定面时是放行的（见上面那条前提对照）。
+  const fake = fakeContext()
+  await root.mount(fake.ctx)
+  const decision = await root.bridge.preExecute(judgeCall('git-commit', 'c-x'))
+  assert.equal(decision.kind, 'deny',
+    `未声明的工具被放行了（实得 ${decision.kind}）—— 判定面没接上`
+    + '（"没见过就放行"等于任何人在外部加一个工具就等于加一个后门）')
+  assert.match(decision.reason, /没有声明工具/, `拒绝不是连接器层给的：${decision.reason}`)
+  assert.match(decision.reason, /git-commit/, `理由没说清是哪个工具：${decision.reason}`)
+  // ★ 反向对照：**本连接器声明过**的那个工具照旧放行。
+  const declared = await root.bridge.preExecute(judgeCall('git-status', 'c-y'))
+  assert.equal(declared.kind, 'allow', `声明过的工具被拒了：${JSON.stringify(declared)}`)
+  assert.equal(root.bridge.connectorJudgment.receipts().connectorDecided, 1,
+    '连接器层更严的次数必须是 1（那是"连接器策略真的起作用"的唯一读数）')
+  resetEnforcementRoot()
+})
+
+test('⑨⑤ ★★★ 端到端闭环：**判定面**因熔断开路而拒绝 ⇒ **反馈面**把结果记回去 ⇒ 熔断器合闸', async () => {
+  const installed = installEnforcementRoot(inputOk({
+    connectorDeclarations: [JUDGE_DECL],
+    resolveConnectorId: () => 'github',
+  }))
+  assert.equal(installed.ok, true, JSON.stringify(installed))
+  const root = installed.root
+  const fake = fakeContext()
+  await root.mount(fake.ctx)
+  const fire = fake.listeners.get('tools/result')[0]
+  const port = root.bridge.connectorJudgment
+  const listener = root.rows.connectorFeedback.listener
+
+  // ── ① 合闸时放行（前提，否则下面"开路"不能说明任何事）。
+  const first = await root.bridge.preExecute(judgeCall('git-status', 'c1'))
+  assert.equal(first.kind, 'allow', `前提：一开始应当放行，实得 ${first.kind}`)
+
+  // ── ② 三次失败经**反馈面**记进去 ⇒ 熔断器开路。
+  for (let i = 0; i < 3; i += 1) {
+    fire({ name: 'git-status', callId: `f${i}` }, { isError: true, error: { message: 'refused' }, content: [] })
+  }
+  assert.equal(listener.receipts().recorded, 3, '反馈面没把失败记进去')
+
+  // ── ③ 判定面**立刻**改口：开路期间拒绝，且理由说的是熔断（不是策略）。
+  const denied = await root.bridge.preExecute(judgeCall('git-status', 'c2'))
+  assert.equal(denied.kind, 'deny',
+    `熔断开路之后仍然放行（实得 ${denied.kind}）—— 两半各记各的账，不是一条环`)
+  assert.match(denied.reason, /熔断|开路/, `理由没说清是熔断拒的：${denied.reason}`)
+  assert.equal(port.receipts().connectorDecided >= 1, true,
+    '更严的是连接器层 ⇒ 必须记在 connectorDecided')
+
+  // ── ④ 闭合：探针成功 ⇒ 熔断器合闸 ⇒ 判定面恢复放行。
+  //     ★ 这一步是"环"的定义：没有它，上面③只证明"开了就永远不开"。
+  port.registry.recordOutcome({ connectorId: 'github', ok: true })
+  const healed = await root.bridge.preExecute(judgeCall('git-status', 'c3'))
+  assert.equal(healed.kind, 'allow',
+    `探针成功之后应当恢复放行，实得 ${healed.kind}（熔断器没合闸 = 只开不合）`)
+  resetEnforcementRoot()
+})
+
+test('⑨⑥ ★★ 判定面与反馈面共用**同一份** registry（否则两半各记各的账）', async () => {
+  const installed = installEnforcementRoot(inputOk({
+    connectorDeclarations: [JUDGE_DECL],
+    resolveConnectorId: () => 'github',
+  }))
+  assert.equal(installed.ok, true, JSON.stringify(installed))
+  const root = installed.root
+
+  // ★ 两半必须指着**同一个对象**。指着两份的后果很具体：
+  //   判定面读的熔断器永远合闸（没人写它），而反馈面写的那个没人读
+  //   —— 于是"连接器失败会被拦下"这件事**永远不发生**，
+  //   而两边的读数各自看起来都很正常。
+  assert.equal(root.bridge.connectorJudgment.registry, root.rows.connectorFeedback.listener.registry,
+    '判定面与反馈面指着两份 registry —— 熔断器永远不会被读到同一个状态')
+  assert.equal(root.rows.connectorFeedback.listener.registry, root.bridge.connectorJudgment.registry)
+
+  // ── 反证：在同一本账上记三次失败，**判定面**立刻看得见。
+  const registry = root.bridge.connectorJudgment.registry
+  for (let i = 0; i < 3; i += 1) registry.recordOutcome({ connectorId: 'github', ok: false })
+  const fake = fakeContext()
+  await root.mount(fake.ctx)
+  const d = await root.bridge.preExecute(judgeCall('git-status', 'c1'))
+  assert.equal(d.kind, 'deny', '在同一本账上记的失败，判定面却没看见')
+  resetEnforcementRoot()
+})
+

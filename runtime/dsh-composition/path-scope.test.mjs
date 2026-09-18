@@ -518,6 +518,12 @@ test('⑥ ★★ 没接上的强制面必须能被读出来（配置里写了 �
   assert.deepEqual(bare.enforcementSurfaces(), {
     hardFloor: true, pathScope: false, whitelist: false, policy: false, approval: false,
     connectorFeedback: false,
+    // ★ 2026-09-18：又多了 `connectorJudgment` 一格（F-21 **第一半**）。
+    //
+    //   为什么它必须与上面那一格**分开**：一个"反馈面装了、判定面没装"的强制面，
+    //   与一个"连接器失败被记下来了、但记下来之后谁也不看"的强制面，
+    //   在只有 `connectorFeedback` 一格的读数里是同一个东西。
+    connectorJudgment: false,
   })
   const full = createEnforcementBridge({
     context: CTX,
@@ -531,6 +537,10 @@ test('⑥ ★★ 没接上的强制面必须能被读出来（配置里写了 �
     // ★ 没传 listener ⇒ 仍然是 `false`。这不是"漏了"，是**如实**：
     //   上面那条桥给了四个端口但没给连接器声明。
     connectorFeedback: false,
+    // ★ 同上：`policy: true` **不能**代替这一格。
+    //   判定面是接在策略门**外面**的一层（它把连接器层的意见与政策门的意见取严合并），
+    //   所以两者都存在时 `policy` 与这一格同时为 `true` —— 它们不是同一件事。
+    connectorJudgment: false,
   })
   // 而硬 floor 永远是挂着的（它不是可选端口）
   assert.equal(bare.enforcementSurfaces().hardFloor, true)

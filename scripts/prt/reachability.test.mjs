@@ -188,7 +188,7 @@ test('④ ★★ 读数：四族 gap 仍然不可达（谁把它们接上，这�
     //       → `scope-port.mjs:169` 调 `checkPathScope({ target, scope, direction, … })`
     //   ⇒ `path-scope.mjs` 的判据在**生产装配路径上真的会跑**。
     //   ⚠️ 仍然成立的边界：**没配**范围表时 `port` 是 `null`，
-    //      而 `tool-request.mjs:639` 那句 `if (pathScope === null) return undefined`
+    //      而 `tool-request.mjs:731` 那句 `if (pathScope === null) return undefined`
     //      ⇒ 那次缺席落到的是**放行**。所以「三道范围检查」里这一道
     //      **从"一次都不跑"变成了"配了才跑"**，不是"默认就拦"。
     ['runtime/dsh-composition/execution-scope.mjs', '§5.2'],

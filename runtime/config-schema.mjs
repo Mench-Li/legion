@@ -555,7 +555,7 @@ export const SCHEMA = defineSchema({
       key: 'pathScope', env: 'LEGION_PATH_SCOPE', type: 'string', default: '',
       doc: '执行面的**路径范围表**（JSON 文本：`{platform, read[], write[]}`）。'
         + '「没有默认值」在这里有一层额外含义：**空串 = 没配**，而没配在执行面是**放行**'
-        + '（`tool-request.mjs:639` 的 `pathScope === null`）——所以缺席必须由一个显式状态承载，'
+        + '（`tool-request.mjs:731` 的 `pathScope === null`）——所以缺席必须由一个显式状态承载，'
         + '不能靠一个默认表把它填上。装配规则只有一处：'
         + '`runtime/dsh-composition/scope-port.mjs` → `scope-table-binding.mjs`',
     },

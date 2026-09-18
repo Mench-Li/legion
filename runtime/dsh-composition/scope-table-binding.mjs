@@ -9,7 +9,7 @@
 // （含符号链接逃逸、设备命名空间、UNC、ADS、大小写规则）。
 //
 // 缺的**不是判定，是那份表的出处**：全仓 `narrowScopeToWorkspace` **零生产调用方**
-// （只有它自己的自证段与用例）。而 `tool-request.mjs:639` 是：
+// （只有它自己的自证段与用例）。而 `tool-request.mjs:731` 是：
 //
 //     if (pathScope === null) return undefined      // ← 放行
 //     verdict = pathScope(projection)

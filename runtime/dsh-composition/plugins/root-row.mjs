@@ -486,7 +486,7 @@ export function createRootRow({
       // ★ 第 19 条 §9.2 第 4 步：执行面的**路径范围表**。
       //
       //   在此之前 `installEnforcementRoot` 的入参里**没有** `pathScope`，
-      //   于是桥的端口恒为 `null`，而 `tool-request.mjs:639`
+      //   于是桥的端口恒为 `null`，而 `tool-request.mjs:731`
       //   （`if (pathScope === null) return undefined`）**放行一切路径**。
       //   ⇒ 那次缺席落到的是"放行"，不是"拒绝"。
       //

@@ -551,3 +551,98 @@ verdict = pathScope(projection)
    **"本仓的强制面桥没有这个接缝"**，不是"DSH 不提供任何钩子"。
 2. 我**没有**动任何代码，也没有改 `registry.mjs` / `tool-request.mjs`。
 3. 阈值与冷却（3 次 / 30 s）是既有常量，本批只是引用，**不评价**它们选得对不对。
+
+
+---
+
+## 11. ★★★ 第二道也不是"有位无值"——**它的产出者本身没在跑**（2026-09-18 第三批）
+
+§9.5 的「仍未做」与 §10 都把这一道写成 `whitelist`「**位置在、没人给它值**」
+（那句话本身是对的，2026-09-18 那条订正订掉的只是"连端口都没有"）。
+本批继续往下量了一层：**那个值该由谁算出来，而那个谁是活的吗？**
+
+### 11.1 读数（四条，全是 grep 出来的）
+
+| # | 要核的东西 | 实测 |
+| --- | --- | --- |
+| ① | 桥要的 `whitelist` 端口是什么形状 | `tool-request.mjs:751` `const verdict = whitelist(got.projection)`，再判 `verdict.allowed !== true`，理由取 `verdict.rule` / `verdict.reason` ⇒ **`(projection) => {allowed, rule, reason}`** |
+| ② | 有没有**已经写好**的产出者 | **有**：`employee-manifest.mjs:317` 的 `permitsTool({permit, toolName, capabilities})`，返回 `{allowed, rule, reason, riskRaised}`（L315 的 JSDoc 逐字写着这个形状）——**与端口要的完全同形** |
+| ③ | `permitsTool` 的**生产调用方** | **0 处**。全仓 `grep permitsTool(` 只命中 `employee-manifest.mjs`（定义）与它自己的用例 |
+| ④ | 它要的 `permit` 谁产出 | 只有 `narrowToGrant({manifest, grant})`；而后者的**生产调用点只有一处**：`runtime/packs/authority.mjs:759` |
+
+★ 还量到一条：`normalizeManifest()` 的生产调用方**只有**
+`runtime/packs/authority.mjs:752` 与 `runtime/packs/compiled-plan.mjs:313`——**两个都是 `[gap]`**。
+
+### 11.2 结论：这一道的值只能由**包层**算出来，而包层不跑
+
+`runtime/packs/authority.mjs` 在基线里是 **`[gap]`**（零生产 importer）。
+于是那条链是：
+
+```
+runtime/packs/authority.mjs   ← [gap]：零生产 importer，不跑
+        │  narrowToGrant({manifest, grant})   （生产里唯一的一处调用）
+        ▼
+     permit  ──→  permitsTool({permit, …})   ← 零生产调用方
+                        │
+                        ▼
+             {allowed, rule, reason}  ──→  桥的 whitelist 端口（恒为 null）
+```
+
+⇒ 这一道**不是**"有位无值、等人配一个"，
+而是"**算这个位的那个模块自己没有生产路径**"。
+
+> 一个"没人给端口赋值"的端口，
+> 与一个"给它赋值的那个模块自己就不可达"的端口，
+> 在 `enforcementSurfaces()` 的读数里是同一个 `false`——
+> 只不过前者的修法在**配置**里，后者的修法在**另一条线上**。
+
+### 11.3 ★ 这修正了第 14 条那一格的**框架**（但只修正了一半，另一半我没量）
+
+决策表第 14 条把三件事写成一件事：
+「**这三道检查今天在生产里一次都不跑**……要决定的是：**这一次 Run 的范围表
+（读根/写根/平台、命令/网络/MCP 授权、外部 API 读写端点）从哪来、挂在哪一层**」。
+
+量出来它们**不是同一种缺口**：
+
+| 道 | 缺的是 | 结论 |
+| --- | --- | --- |
+| `pathScope`（PRT-604） | **已接**：表从部署配置来（`LEGION_PATH_SCOPE`） | 不再属于本条（`40d2d60`） |
+| `whitelist`（PRT-603） | 端口在；**算它的模块（包层）不跑** | **至少**要等第 19 条的 `runtime/packs/*` 那一半 |
+| `execution-scope`（PRT-605）/ `external-api-scope`（PRT-606） | 连端口都没有；**数据无处安放** | 这才是本条真正在问的"从哪来、挂哪一层" |
+
+★ 为什么 `whitelist` 不可能靠"配一个键"解决：它要的是
+`narrowToGrant({ manifest, grant })` 的结论，而 **`manifest` 是一个岗位包产物**
+（`normalizeManifest` / `narrowToGrant` 的生产调用点**全在 `runtime/packs/*` 里**）。
+⇒ 一个配置项能给出 `grant`（宿主授予的那一半），**给不出** `manifest` 那一半。
+
+⚠️ **我只量了一半，所以只改一半的话**：`permit` 的另一半（`grant` / `hostGrant`）
+从哪来、算不算"部署配置"，本批**没有量**。所以本批的处置是
+**在第 14 条那一格里加一句"这三道不是同一种缺口，`whitelist` 至少还压着包层"**，
+而**不是**擅自把它整条改判到第 19 条——那需要把 `hostGrant` 的出处也量清楚。
+
+> 一个"把三道合并成一条"的决策格，与一个"其中一道压着另一条线"的现实，
+> 在**只读那一格**的时候是同一个东西——只不过前者会让两件事一起停。
+
+★ 反过来说，这一格**今天读起来是含糊的**，这本身就是一条要落账的读数：
+它把一个"等施工"（包层）与一个"待裁决"（数据放哪）写成了同一句话。
+
+### 11.4 ★★ 一条与本仓既有记账对上的机制：**可达性是逐模块测的**
+
+基线的 `$comment` 自己就写着这条警告（原文）：
+
+> 可达性是**逐模块**测的，而一条链是**端到端**才通的：
+> 一个模块可以只因为有人 import 了它的两个常量而变成「可达」，
+> 而那条链的另一头从未被挂上。
+
+★ 本批这一次是它的一个**具体实例**：`employee-manifest.mjs` 在基线里**是可达的**
+（不在 47 条里），而它里面那个正是端口要用的函数（`permitsTool`）**零生产调用方**。
+⇒ **"模块可达"与"这条链通了"是两件事**，这一次有了一个可以指名的例子。
+
+### 11.5 本批没有做什么
+
+- **没有动代码**：`permitsTool` 的入参要从哪来（哪个 Run 的哪份清单）确实还要有人定，
+  但它**不是**第 14 条那句话在问的事——它是"包层什么时候接上"。
+- **没有**改第 14 条的裁决需求，只是**拆出了一条被它误并的**。
+- ⚠️ 边界：我没有核"包层接上之后 `permit` 是否能原样喂进 `permitsTool`"——
+  两边形状看着一致（都源自 `narrowToGrant`），但**我没有跑过一次**，
+  所以这句话在本文件里不成立、也不该被引用。

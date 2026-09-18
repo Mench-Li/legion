@@ -159,18 +159,23 @@ import { join, resolve, sep } from 'node:path'
 import { createInterface } from 'node:readline'
 import { after, describe, test } from 'node:test'
 
+// ★ 检出用**共享解析器**找（理由见下面可跑性判定那段）。
+import { resolveDshCheckout } from '../../scripts/lib/dsh-checkout.mjs'
+
 // ── 可跑性判定（沿用同目录 `headless-real-tool.test.mjs` 的口径）────────────
-const DSH = process.env.DSH_CHECKOUT ?? null
+// ★ 检出用**共享解析器**找。此前手写 `process.env.DSH_CHECKOUT ?? null`，
+//   实测后果：变量没导出时本套件 **9 条全跳**，
+//   CI 报 `PASS tests=9 pass=0 skipped=9`——"跑了 0 条"报绿。
+const DSH_FOUND = resolveDshCheckout({ need: 'cli' })
+const DSH = DSH_FOUND.checkout
 const CLI = DSH === null ? null : join(DSH, 'apps', 'cli', 'lib', 'bin.js')
 
-/** 缺 DSH / 缺 CLI / 非 win32 时整组逐条 `t.skip(原因)`，**不失败**。 */
+/** 缺 DSH / 非 win32 时整组逐条 `t.skip(原因)`，**不失败**。 */
 const DSH_SKIP = DSH === null
-  ? '未配置 DSH_CHECKOUT'
-  : !existsSync(CLI)
-    ? `DSH 检出里找不到 CLI（${CLI}）——未构建？`
-    : process.platform !== 'win32'
-      ? `本套件只在 win32 上被观测过（工具面是 pwsh）；当前平台 ${process.platform}`
-      : false
+  ? DSH_FOUND.reason
+  : process.platform !== 'win32'
+    ? `本套件只在 win32 上被观测过（工具面是 pwsh）；当前平台 ${process.platform}`
+    : false
 
 /** 缺 DSH 时 `t.skip(原因)`；跑不了就不算跑过。 */
 const guarded = (name, fn) => test(name, { timeout: 300_000 }, (t) => {

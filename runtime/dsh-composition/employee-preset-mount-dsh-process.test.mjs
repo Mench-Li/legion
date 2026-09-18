@@ -96,19 +96,22 @@ import { installEmployeePreset, renderEmployeePreset } from './employee-preset.m
 import { narrowToGrant, normalizeManifest } from './employee-manifest.mjs'
 import { TOOL_CATALOG } from './tool-capability.mjs'
 
+// ★ 检出用**共享解析器**找（理由见下面那段可跑性判定）。
+import { resolveDshCheckout } from '../../scripts/lib/dsh-checkout.mjs'
+
 // ── 可跑性判定（沿用 `employee-preset.test.mjs` 的 guardedDsh 口径）──────
-const DSH = process.env.DSH_CHECKOUT ?? null
+// ★ 检出用**共享解析器**找，不在这里手写 `process.env.DSH_CHECKOUT ?? null`。
+const DSH_FOUND = resolveDshCheckout({ need: 'cli' })
+const DSH = DSH_FOUND.checkout
 const CLI = DSH === null ? null : join(DSH, 'apps', 'cli', 'lib', 'bin.js')
 const AGENT_PRESETS_LIB = DSH === null
   ? null
   : join(DSH, 'packages', 'preset', 'agent-presets', 'lib', 'index.js')
 const DSH_SKIP = DSH === null
-  ? '未配置 DSH_CHECKOUT'
-  : !existsSync(CLI)
-    ? `DSH 检出里找不到 CLI（${CLI}）——未构建？`
-    : !existsSync(AGENT_PRESETS_LIB)
-      ? `DSH 检出里找不到 agent-presets 的构建产物（${AGENT_PRESETS_LIB}）——未构建？`
-      : false
+  ? DSH_FOUND.reason
+  : !existsSync(AGENT_PRESETS_LIB)
+    ? `DSH 检出里找不到 agent-presets 的构建产物（${AGENT_PRESETS_LIB}）——未构建？`
+    : false
 
 /**
  * 每一条真进程用例都走这里：缺 DSH 时 `t.skip(原因)`，**不失败**。

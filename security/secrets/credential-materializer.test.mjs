@@ -78,6 +78,17 @@ import { createSecretStore, memoryBackend, nullProtector } from './store.mjs'
 // （`scan --check` 用的就是它），比本文件里手写的正则可信。
 import { extractEnvReads } from '../../scripts/config/scan.mjs'
 
+// ★ 检出用**共享解析器**找（`tests/dsh-checkout.mjs`）。
+//
+//   这里 `need` 取 `packages` 而不是各条用例自己那一份编译产物：
+//   本文件要的两样东西（凭据解析器、`bundle/base/cordis.patch.yml`）在
+//   **不同**的 DSH 包下，而它们各自的"在不在"已经由每条用例里的
+//   `existsSync` 精确判过了。解析器在这里回答的是另一个问题——
+//   **这台机器上到底有没有一份检出**——所以它就该只问到那一层。
+import { resolveDshCheckout } from '../../scripts/lib/dsh-checkout.mjs'
+
+const DSH_FOUND = resolveDshCheckout({ need: 'packages' })
+
 const CODES = CREDENTIAL_MATERIALIZER_CODES
 
 /** 显然是假的、一次性的值。**它们绝不允许出现在任何诊断/元数据里。** */
@@ -267,16 +278,18 @@ test('① ★★★★★ 写出去的文件被 Legion 的**真实读取器**读
   assert.equal(JSON.stringify(result).includes(SECRETS.MODEL), false)
 })
 
-test('① ★★★★ 反向交叉核对：写出器 → **DSH 自己的 parseCredentialsDocument**（$DSH_CHECKOUT 可达时才跑）', {
-  skip: process.env.DSH_CHECKOUT === undefined || process.env.DSH_CHECKOUT === ''
-    ? '未配置 DSH_CHECKOUT：本机看不到 DSH 的编译产物，"DSH 自己读得回来"这一步就跳过了——'
-      + '注意跳过的是这**一半**，Legion 的真实读取器那一半（上一条）在任何机器上都跑'
+test('① ★★★★ 反向交叉核对：写出器 → **DSH 自己的 parseCredentialsDocument**（检出可达时才跑）', {
+  // ★ 检出用**共享解析器**找（`tests/dsh-checkout.mjs`）：它会区分
+  //   「没找到」/「找到了但没构建」/「变量指错了」，而下面那句手写的
+  //   以前只会说第一种。
+  skip: DSH_FOUND.checkout === null
+    ? DSH_FOUND.reason
     : false,
 }, async (t) => {
   // 与 `dsh-credentials.test.mjs` 的交叉核对走同一个入口（DSH 的编译产物）。
-  const parserPath = join(process.env.DSH_CHECKOUT, 'packages', 'credentials', 'credentials-local', 'lib', 'index.js')
+  const parserPath = join(DSH_FOUND.checkout, 'packages', 'credentials', 'credentials-local', 'lib', 'index.js')
   if (!existsSync(parserPath)) {
-    return t.skip('DSH_CHECKOUT 可达，但编译产物不在预期路径（先 pnpm build）——跳过，而不是假装通过')
+    return t.skip(`找到了检出（${DSH_FOUND.checkout}），但凭据解析器的编译产物不在预期路径：${parserPath}——先把 DSH 构建出来`)
   }
   const { parseCredentialsDocument } = await import(pathToFileURL(parserPath).href)
 
@@ -726,12 +739,12 @@ test('⑥ ★★★ 诚实边界：本模块里没有 provider → 名字的表�
   // 的 $DSH_CHECKOUT 交叉核对管）。
 })
 
-test('⑥ ★★ 映射目标名来自 DSH 自己的声明，而不是本模块编的（$DSH_CHECKOUT 可达时才核对）', {
-  skip: process.env.DSH_CHECKOUT === undefined || process.env.DSH_CHECKOUT === ''
-    ? '未配置 DSH_CHECKOUT：本机看不到 DSH 的检出，"这个名字是 DSH 声明的"就**证不出来**——跳过，而不是假装通过'
+test('⑥ ★★ 映射目标名来自 DSH 自己的声明，而不是本模块编的（检出可达时才核对）', {
+  skip: DSH_FOUND.checkout === null
+    ? `${DSH_FOUND.reason}（"这个名字是 DSH 声明的"因此**证不出来**——跳过，而不是假装通过）`
     : false,
 }, (t) => {
-  const checkout = process.env.DSH_CHECKOUT
+  const checkout = DSH_FOUND.checkout
   const patchFile = join(checkout, 'packages', 'bundle', 'base', 'cordis.patch.yml')
   // ★ 扫整个包的 `src/**/*.ts`，**不钉文件名**。
   //

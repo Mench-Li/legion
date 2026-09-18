@@ -41,6 +41,9 @@ import {
   runCredentialPaths,
 } from './run-credential-materialization.mjs'
 
+// ★ 检出用**共享解析器**找（理由见文件尾部那条需要真检出的用例）。
+import { resolveDshCheckout } from '../../scripts/lib/dsh-checkout.mjs'
+
 const REPO_ROOT = new URL('../../', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
 const WIRING_SOURCE = new URL('./run-credential-materialization.mjs', import.meta.url)
 
@@ -515,11 +518,14 @@ test('★★★★★ 缺口 ③：**DSH 自己的凭据提供方**真的从 Leg
   // 需要 DSH 检出：没有 `DSH_CHECKOUT` 时**逐条 skip**，不伪造通过。
   // 一条"因为环境不在所以绿了"的用例，与一条"真的验过了"的用例，
   // 在摘要里都是 pass——所以这里显式 skip，让"这次到底跑了什么"看得见。
-  const checkout = (process.env.DSH_CHECKOUT ?? '').trim()
-  if (checkout === '') {
-    t.skip('未配置 DSH_CHECKOUT：这一条要 DSH 自己的 dsh-credentials-local 才能验')
+  // ★ 检出用**共享解析器**找：它会区分「没找到」/「找到了但没构建」/
+  //   「变量指错了」。
+  const found = resolveDshCheckout({ need: 'credentials' })
+  if (found.checkout === null) {
+    t.skip(found.reason)
     return
   }
+  const checkout = found.checkout
   // 从检出里解析 DSH 自己的凭据提供方（**不是**我们的复刻）。
   const { createRequire } = await import('node:module')
   const { pathToFileURL } = await import('node:url')

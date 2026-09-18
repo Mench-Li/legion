@@ -114,6 +114,12 @@ import { dirname, join, resolve, sep } from 'node:path'
 import { after, test } from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
+// ★ 检出用**共享解析器**找，不在这里手写 `process.env.DSH_CHECKOUT ?? null`。
+//   手写的后果是实测过的：变量没导出 ⇒ 本套件**整组 6 条跳过**，
+//   而 CI 报的是 `PASS tests=6 pass=0 skipped=6`（一个跑了 0 条、报绿的套件）。
+//   共享解析器还会说出"为什么没有"（没找到 / 找到了但没构建 / 变量指错了）。
+import { resolveDshCheckout } from '../../scripts/lib/dsh-checkout.mjs'
+
 // 判定与路径归一都取自**产品模块**，不在用例里另抄一份：
 // 抄一份的话，产品改了规范化规则而用例还绿着，"断言的是那个拒绝"就变成了一句注释。
 import { canonicalizePath } from './enforcement.mjs'
@@ -124,7 +130,8 @@ import { HIGH_RISK_TOOL_NAMES } from './tool-capability.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO = resolve(HERE, '..', '..')
-const DSH = process.env.DSH_CHECKOUT ?? null
+const DSH_FOUND = resolveDshCheckout({ need: 'cli' })
+const DSH = DSH_FOUND.checkout
 const CLI = DSH === null ? null : join(DSH, 'apps', 'cli', 'lib', 'bin.js')
 
 /**
@@ -139,12 +146,8 @@ const STUB_TOOL_NAME = HIGH_RISK_TOOL_NAMES[0]
 const REGISTRAR_URL = pathToFileURL(join(REPO, 'runtime', 'dsh-composition', 'plugins', 'runtime-host-registrar-row.mjs')).href
 const RUN_FLOOR_URL = pathToFileURL(join(REPO, 'runtime', 'dsh-composition', 'run-floor.mjs')).href
 
-/** 为什么没跑。写清楚缺哪一样，而不是笼统的"环境不支持"。 */
-const UNAVAILABLE = DSH === null
-  ? '未配置 DSH_CHECKOUT'
-  : !existsSync(CLI)
-    ? `DSH 检出里找不到 CLI（${CLI}）——未构建？`
-    : false
+/** 为什么没跑。理由来自共享解析器，它会说清缺哪一样、以及"该怎么办"。 */
+const UNAVAILABLE = DSH === null ? DSH_FOUND.reason : false
 const SKIP = UNAVAILABLE === false ? false : `SKIP：${UNAVAILABLE}`
 
 const PROFILE_NAME = 'acp'

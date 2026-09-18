@@ -89,18 +89,22 @@ import { createInterface } from 'node:readline'
 import { after, test } from 'node:test'
 import { DSH_CONTINUABLE_SURFACE } from '../adapters/dsh/session-boundary.mjs'
 
-const CHECKOUT = process.env.DSH_CHECKOUT
+// ★ 检出用**共享解析器**找。此前手写 `process.env.DSH_CHECKOUT`，
+//   实测后果：变量没导出时本套件 **12 条全跳**，
+//   CI 报 `PASS tests=12 pass=0 skipped=12`——一个"一条断言都没验过"的绿。
+import { resolveDshCheckout } from '../../scripts/lib/dsh-checkout.mjs'
+
+const DSH_FOUND = resolveDshCheckout({ need: 'cli' })
+const CHECKOUT = DSH_FOUND.checkout ?? undefined
 const CLI = CHECKOUT === undefined ? null : join(CHECKOUT, 'apps', 'cli', 'lib', 'bin.js')
 
 /**
- * 条件式套件：没有 `DSH_CHECKOUT`、或它指向的检出里没有 CLI 入口，就**逐条跳过**。
+ * 条件式套件：没有可用检出时**逐条跳过**。
  * 跳过的理由是**写出来的**——一条静默的绿与一条伪装成通过的跳过是同一个东西。
+ * ★ 而"写出来"这件事此前只做对了一半：那句话是**这里**手写的一个常量，
+ *   它不知道检出其实在盘上（只是变量没导出）。现在理由来自解析器。
  */
-const SKIP = CHECKOUT === undefined || CHECKOUT === ''
-  ? 'DSH_CHECKOUT 未设置：本套件需要一个真 DSH 检出才能起进程，缺它就跳过'
-  : !existsSync(CLI)
-    ? `DSH_CHECKOUT 指向的检出里没有 CLI 入口：${CLI}`
-    : false
+const SKIP = CHECKOUT === undefined ? DSH_FOUND.reason : false
 
 /** 条件式用例：`test()` 的第三个参数让每条用例各自的跳过理由可读。 */
 const guarded = (name, fn) => test(name, { skip: SKIP, timeout: 300_000 }, fn)

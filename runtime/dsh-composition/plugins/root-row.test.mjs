@@ -69,6 +69,8 @@ import { APPROVAL_ANSWERER_PLUGIN_NAME } from './approval-answerer.mjs'
 // 抄一个字面量 `2` 会让"判据说改了而用例还绿着"变成可能。
 import { ACTIVE_FIBER_STATE, observeComposition } from './runtime-host-row.mjs'
 
+import { resolveDshCheckout } from '../../../scripts/lib/dsh-checkout.mjs'
+
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CWD = process.platform === 'win32' ? 'C:\\work' : '/work'
 
@@ -870,12 +872,16 @@ test('★★★ 挂载失败 → 具名码 + **服务被收回**（不装半根�
 //   · 根行**最先**加载 → 两行立即激活（反面控制）。
 // 只跑一个方向的话，一个"要求根行必须先加载"的实现照样全绿。
 
-const DSH = process.env.DSH_CHECKOUT ?? null
+// ★ 检出用**共享解析器**找（`tests/dsh-checkout.mjs`），不在这里手写
+//   `process.env.DSH_CHECKOUT ?? null`。手写的后果实测过：变量没导出时
+//   本套件整组跳过，而 CI 报的是 `PASS`——一个「跑了 0 条」的绿。
+const DSH_FOUND = resolveDshCheckout({ need: 'cli' })
+const DSH = DSH_FOUND.checkout
 const CORDIS = DSH === null ? null : join(
   DSH, 'packages', 'core', 'tools', 'node_modules', '@deepseek-ai', 'cordis', 'lib', 'index.js',
 )
 const UNAVAILABLE = DSH === null
-  ? '未配置 DSH_CHECKOUT'
+  ? DSH_FOUND.reason
   : !existsSync(CORDIS)
     ? `DSH 检出里找不到 cordis（${CORDIS}）——依赖未安装？`
     : false

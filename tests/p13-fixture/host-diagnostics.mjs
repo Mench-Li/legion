@@ -33,8 +33,13 @@ export const PACKAGE_DIRS = Object.freeze({
 /** 已知的「入口文件不存在」提示：这些包必须先用构建脚本产出 lib/（脚本的键即目录名）。 */
 function buildHint(name) {
   const dir = PACKAGE_DIRS[name]
+  // ★ 提示里**不再**要求 `$env:DSH_CHECKOUT=...`：构建脚本与这里用的是同一个
+  //   解析器（`scripts/lib/dsh-checkout.mjs`），它自己就找得到按本项目布局
+  //   摆放的检出。写死"你必须先设这个变量"，是把一条**可选**的指定
+  //   说成了一条**必需**的前提。
   return dir
-    ? `入口产物缺失：先构建该插件包 —— $env:DSH_CHECKOUT=<dsh checkout>; node scripts/ci/build-external-package.mjs ${dir}`
+    ? `入口产物缺失：先构建该插件包 —— node scripts/ci/build-external-package.mjs ${dir}` +
+      '（找不到 DSH 检出时再设 `DSH_CHECKOUT` 指向它）'
     : '入口文件不存在：确认组合行里的 name 指向已构建的插件入口'
 }
 

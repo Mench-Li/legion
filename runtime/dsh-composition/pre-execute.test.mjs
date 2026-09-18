@@ -28,7 +28,13 @@ import { createInFlightRegistry } from './inflight.mjs'
 import { PRE_EXECUTE_CODES, PRE_EXECUTE_PLUGIN_NAME, createPreExecutePlugin } from './plugins/pre-execute.mjs'
 import { createEnforcementBridge } from './tool-request.mjs'
 
-const DSH = process.env.DSH_CHECKOUT ?? null
+import { resolveDshCheckout } from '../../scripts/lib/dsh-checkout.mjs'
+
+// ★ 检出用**共享解析器**找（`tests/dsh-checkout.mjs`），不在这里手写
+//   `process.env.DSH_CHECKOUT ?? null`。手写的后果实测过：变量没导出时
+//   本套件整组跳过，而 CI 报的是 `PASS`——一个「跑了 0 条」的绿。
+const DSH_FOUND = resolveDshCheckout({ need: 'cli' })
+const DSH = DSH_FOUND.checkout
 const CORDIS = DSH === null ? null : join(DSH, 'packages', 'core', 'tools', 'node_modules', '@deepseek-ai', 'cordis', 'lib', 'index.js')
 const TOOLS = DSH === null ? null : join(DSH, 'packages', 'core', 'tools', 'lib', 'index.js')
 
@@ -41,7 +47,7 @@ if (DSH !== null && existsSync(CORDIS) && existsSync(TOOLS)) {
 }
 
 const NO_RUNTIME = DSH === null
-  ? '未配置 DSH_CHECKOUT'
+  ? DSH_FOUND.reason
   : !existsSync(CORDIS) || !existsSync(TOOLS)
     ? 'DSH 检出里找不到 cordis / dsh-tools 构建产物'
     : false

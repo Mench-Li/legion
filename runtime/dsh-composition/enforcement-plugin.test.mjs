@@ -34,15 +34,21 @@ import { pathToFileURL } from 'node:url'
 
 import { HARD_FLOOR_CODES, HARD_FLOOR_PLUGIN_NAME, HARD_FLOOR_PLUGIN_VERSION, createHardFloorPlugin } from './plugins/hard-floor.mjs'
 
+import { resolveDshCheckout } from '../../scripts/lib/dsh-checkout.mjs'
+
 const ROOT = resolve(import.meta.dirname, '..', '..')
-const DSH = process.env.DSH_CHECKOUT ?? null
+// ★ 检出用**共享解析器**找（`tests/dsh-checkout.mjs`），不在这里手写
+//   `process.env.DSH_CHECKOUT ?? null`。手写的后果实测过：变量没导出时
+//   本套件整组跳过，而 CI 报的是 `PASS`——一个「跑了 0 条」的绿。
+const DSH_FOUND = resolveDshCheckout({ need: 'cli' })
+const DSH = DSH_FOUND.checkout
 
 // 这些路径都是 **DSH 检出里的构建产物**。找不到就 SKIP，不退回本仓库的替身。
 const CORDIS = DSH === null ? null : join(DSH, 'packages', 'core', 'tools', 'node_modules', '@deepseek-ai', 'cordis', 'lib', 'index.js')
 const TOOLS = DSH === null ? null : join(DSH, 'packages', 'core', 'tools', 'lib', 'index.js')
 
 const UNAVAILABLE = DSH === null
-  ? '未配置 DSH_CHECKOUT'
+  ? DSH_FOUND.reason
   : !existsSync(CORDIS)
     ? `DSH 检出里找不到 cordis（${CORDIS}）——依赖未安装？`
     : !existsSync(TOOLS)

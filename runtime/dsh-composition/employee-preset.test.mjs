@@ -45,6 +45,8 @@ import { TOOL_CATALOG } from './tool-capability.mjs'
 import { narrowToGrant, normalizeManifest } from './employee-manifest.mjs'
 import { EMPLOYEE_PRESET_CONTRACT } from './patch-layer.mjs'
 
+import { resolveDshCheckout } from '../../scripts/lib/dsh-checkout.mjs'
+
 describe('executionDenialFor：一个 Legion 工具 → 要在执行面上禁哪些名字', () => {
   test('★★★★★ 可表达的那一个：`git-push` → `bash`/`pwsh`，且连带代价被算出来', () => {
     const d = executionDenialFor('git-push')
@@ -119,7 +121,11 @@ describe('executionDenialFor：一个 Legion 工具 → 要在执行面上禁哪
 })
 
 // ── DSH 侧（可 SKIP） ────────────────────────────────────────────────────
-const DSH = process.env.DSH_CHECKOUT ?? null
+// ★ 检出用**共享解析器**找（`tests/dsh-checkout.mjs`），不在这里手写
+//   `process.env.DSH_CHECKOUT ?? null`。手写的后果实测过：变量没导出时
+//   本套件整组跳过，而 CI 报的是 `PASS`——一个「跑了 0 条」的绿。
+const DSH_FOUND = resolveDshCheckout({ need: 'cli' })
+const DSH = DSH_FOUND.checkout
 const INCLUDE_JS = DSH === null ? null : join(
   DSH, 'packages', 'boot', 'app-boot', 'node_modules',
   '@deepseek-ai', 'cordis-plugin-include', 'lib', 'index.js',
@@ -128,7 +134,7 @@ const JS_YAML_JS = DSH === null ? null : join(
   DSH, 'packages', 'boot', 'app-boot', 'node_modules', 'js-yaml', 'index.js',
 )
 const DSH_SKIP = DSH === null
-  ? '未配置 DSH_CHECKOUT'
+  ? DSH_FOUND.reason
   : !existsSync(INCLUDE_JS)
     ? `DSH 检出里找不到 cordis-plugin-include（${INCLUDE_JS}）`
     : !existsSync(JS_YAML_JS)

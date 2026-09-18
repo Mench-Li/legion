@@ -26,6 +26,9 @@
 
 import assert from 'node:assert/strict'
 import { after, before, describe, test } from 'node:test'
+
+// ★ 检出用**共享解析器**找（理由见 ⑥ 那一段）。
+import { resolveDshCheckout } from '../../scripts/lib/dsh-checkout.mjs'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -606,15 +609,17 @@ describe('⑤ 引用名 → DSH 键空间', () => {
 //   · 那份"我们拒绝、DSH 接受"的清单是**实测**出来的：它证明从严是
 //     刻意的一小片，而不是到处都是。
 
-const DSH_CHECKOUT = process.env.DSH_CHECKOUT ?? null
+// ★ 检出用**共享解析器**找（`tests/dsh-checkout.mjs`），不在这里手写
+//   `process.env.DSH_CHECKOUT ?? null`。实测后果：变量没导出时下面整段
+//   **72 条交叉核对全跳**，而 CI 报 `PASS tests=165 pass=93 skipped=72`
+//   ——那 72 条是"本读取器唯一能防『自己和自己一致地错』"的东西，
+//   它跳了，剩下的 93 条就只是在证明"我和我自己的另一份实现一致"。
+const DSH_FOUND = resolveDshCheckout({ need: 'credentials' })
+const DSH_CHECKOUT = DSH_FOUND.checkout
 const DSH_PARSER = DSH_CHECKOUT === null
   ? null
   : join(DSH_CHECKOUT, 'packages', 'credentials', 'credentials-local', 'lib', 'index.js')
-const DSH_UNAVAILABLE = DSH_CHECKOUT === null
-  ? '未配置 DSH_CHECKOUT'
-  : !existsSync(DSH_PARSER)
-    ? `DSH 检出里找不到编译产物（${DSH_PARSER}）——DSH 未构建？`
-    : false
+const DSH_UNAVAILABLE = DSH_CHECKOUT === null ? DSH_FOUND.reason : false
 const SKIP = DSH_UNAVAILABLE === false ? false : DSH_UNAVAILABLE
 
 const guarded = (name, fn) => test(name, (t) => {

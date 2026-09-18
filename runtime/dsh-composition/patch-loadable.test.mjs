@@ -44,11 +44,16 @@ import { patchDocument } from './render.mjs'
 import { PATCH_YAML_PATH, renderPatchYaml, renderPatchReport } from './render.mjs'
 import { PATCH_LAYER_ROWS } from './patch-layer.mjs'
 
+// ★ 检出用**共享解析器**找（理由见下面那段可跑性判定）。
+import { resolveDshCheckout } from '../../scripts/lib/dsh-checkout.mjs'
+
 const ROOT = resolve(import.meta.dirname, '..', '..')
 
 // ── 外部 DSH 检出：不可用时整组 SKIP，不伪造通过 ──────────────────────────
-
-const DSH = process.env.DSH_CHECKOUT ?? null
+// ★ 检出用**共享解析器**找（`tests/dsh-checkout.mjs`），不在这里手写
+//   `process.env.DSH_CHECKOUT ?? null`：手写的后果是变量没导出时整组跳过。
+const DSH_FOUND = resolveDshCheckout({ need: 'packages' })
+const DSH = DSH_FOUND.checkout
 const INCLUDE_JS = DSH === null ? null : join(
   DSH, 'packages', 'boot', 'app-boot', 'node_modules',
   '@deepseek-ai', 'cordis-plugin-include', 'lib', 'index.js',
@@ -58,9 +63,9 @@ const JS_YAML_JS = DSH === null ? null : join(
 )
 const BASE_PATCH = DSH === null ? null : join(DSH, 'packages', 'bundle', 'base', 'cordis.patch.yml')
 
-/** 为什么没跑。写清楚是缺哪一样，而不是笼统的"环境不支持"。 */
+/** 为什么没跑。缺哪一样就写哪一样——起点是解析器给出的理由。 */
 const UNAVAILABLE = DSH === null
-  ? '未配置 DSH_CHECKOUT'
+  ? DSH_FOUND.reason
   : !existsSync(INCLUDE_JS)
     ? `DSH 检出里找不到 cordis-plugin-include（${INCLUDE_JS}）——依赖未安装？`
     : !existsSync(JS_YAML_JS)

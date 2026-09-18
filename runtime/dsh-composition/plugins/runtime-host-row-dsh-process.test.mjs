@@ -61,6 +61,8 @@ import { EXECUTOR_CODES } from '../../../orchestrator/worker/executor.mjs'
 import { REQUIRED_CAPABILITIES } from '../../contracts/adapter.mjs'
 import { SUPPORTED_RUNTIME } from '../../adapters/dsh/probe.mjs'
 
+import { resolveDshCheckout } from '../../../scripts/lib/dsh-checkout.mjs'
+
 const HERE = dirname(fileURLToPath(import.meta.url))
 const COMPOSITION = resolve(HERE, '..')
 const ROOT_DIR = resolve(HERE, '..', '..', '..')
@@ -75,10 +77,14 @@ const fileUrl = (p) => pathToFileURL(p).href
 
 // ─────────────────────────────────────────── 可跑性判定（沿用既有口径）
 
-const DSH = process.env.DSH_CHECKOUT ?? null
+// ★ 检出用**共享解析器**找（`tests/dsh-checkout.mjs`），不在这里手写
+//   `process.env.DSH_CHECKOUT ?? null`。手写的后果实测过：变量没导出时
+//   本套件整组跳过，而 CI 报的是 `PASS`——一个「跑了 0 条」的绿。
+const DSH_FOUND = resolveDshCheckout({ need: 'cli' })
+const DSH = DSH_FOUND.checkout
 const CLI = DSH === null ? null : join(DSH, 'apps', 'cli', 'lib', 'bin.js')
 const UNAVAILABLE = DSH === null
-  ? '未配置 DSH_CHECKOUT'
+  ? DSH_FOUND.reason
   : !existsSync(CLI)
     ? `DSH 检出里找不到 CLI（${CLI}）——未构建？`
     : false

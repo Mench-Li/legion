@@ -123,8 +123,15 @@ import { tmpdir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import { after, describe, test } from 'node:test'
 
+// ★ 检出用**共享解析器**找（理由见下面可跑性判定那段）。
+import { resolveDshCheckout } from '../../scripts/lib/dsh-checkout.mjs'
+
 // ── 可跑性判定（沿用同目录 `employee-preset-mount-dsh-process.test.mjs` 的口径）──
-const DSH = process.env.DSH_CHECKOUT ?? null
+// ★ 检出用**共享解析器**找（`tests/dsh-checkout.mjs`）。此前手写
+//   `process.env.DSH_CHECKOUT ?? null`，实测后果：变量没导出时本套件
+//   **4 条全跳**，CI 报 `PASS tests=4 pass=0 skipped=4`。
+const DSH_FOUND = resolveDshCheckout({ need: 'cli' })
+const DSH = DSH_FOUND.checkout
 const CLI = DSH === null ? null : join(DSH, 'apps', 'cli', 'lib', 'bin.js')
 
 /**
@@ -134,11 +141,9 @@ const CLI = DSH === null ? null : join(DSH, 'apps', 'cli', 'lib', 'bin.js')
  * 与其把它塞进 CI 赌一次绿，不如让它显式地出现在 `skipped: N` 里。
  */
 const DSH_SKIP = DSH === null
-  ? '未配置 DSH_CHECKOUT'
-  : !existsSync(CLI)
-    ? `DSH 检出里找不到 CLI（${CLI}）——未构建？`
-    : process.platform !== 'win32'
-      ? `本套件只在 win32 上被观测过（工具面是 pwsh）；当前平台 ${process.platform}`
+  ? DSH_FOUND.reason
+  : process.platform !== 'win32'
+    ? `本套件只在 win32 上被观测过（工具面是 pwsh）；当前平台 ${process.platform}`
       : false
 
 /**

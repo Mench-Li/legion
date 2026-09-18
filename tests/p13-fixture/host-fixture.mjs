@@ -19,14 +19,27 @@ import http from 'node:http'
 
 import { diagnoseHostLogs, formatDiagnosis, hostBootError, PACKAGE_DIRS, parseCompositionRows, preflightEntries } from './host-diagnostics.mjs'
 
+// ★ 检出用**共享解析器**找（理由见下面 `requireDshCheckout`）。
+import { resolveDshCheckout } from '../../scripts/lib/dsh-checkout.mjs'
+
 export const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
+/**
+ * P1-3 门禁要一个真 DSH 检出。
+ *
+ * ★ 改用**共享解析器**（`tests/dsh-checkout.mjs`）。此前这里是**第三份**
+ *   候选列表——与 `scripts/ci/build-external-package.mjs`、
+ *   `scripts/prt/dsh-pin-drift.mjs` 各写一份，而前两处的那个 Windows
+ *   字面量**大小写都不同**（`DSH` vs `dsh`）。
+ *
+ * ★ 这里**刻意仍然抛错**，不回退到"跳过"：本套件验的是"宿主插件导入失败时
+ *   诊断点不点得出名字"，它自己跑不起来是**门禁配置错了**，不是"这台机器
+ *   没装 DSH"。把配置错误变成一次跳过，正是这一轮在清理的那件事。
+ */
 export function requireDshCheckout() {
-  const candidate = process.env.DSH_CHECKOUT || ''
-  if (candidate !== '' && existsSync(join(candidate, 'packages'))) return candidate
-  const alt = 'D:/project/DSH/dsh/deepseek-harness'
-  if (existsSync(join(alt, 'packages'))) return alt
-  throw new Error('P1-3 gate requires DSH_CHECKOUT (a dsh harness checkout with packages/)')
+  const found = resolveDshCheckout({ need: 'cli' })
+  if (found.checkout !== null) return found.checkout
+  throw new Error(`P1-3 gate requires a dsh harness checkout with packages/ and a built CLI. ${found.reason}`)
 }
 
 const DSH = requireDshCheckout()

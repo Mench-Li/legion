@@ -940,6 +940,198 @@ FAIL product-launcher: exit=1 tests=397 pass=396 fail=1 skipped=0
 
 详见 `docs/superpowers/prt/PRT-SESSION-REPORT-2026-09-17.md` §10.12。
 
+## 5.7 ★★★ 第三处缺陷修好之后暴露的**第四处**：232 条跳过里有一整批"本该跑"
+
+§5.6 把跳过数变成了读数。**读数一出来就指向了下一个缺陷**——
+而这一处比 §5.6 更根本：它不是"跳过看不见"，是**跳过本来就不该发生**。
+
+### 读数
+
+按套件把 `skipped` 摊开（`scratch/skip-breakdown.mjs`，读的是 `.ci/*/ci.log`）：
+
+```text
+套件数 215，跳过合计 232
+
+★ 报 PASS 而**一条断言都没验过**（pass=0）：
+   dsh-composition-run-floor-dsh-process        tests=  6 skipped=6
+   runtime-contract-cross-process               tests= 19 skipped=19
+   headless-real-tool                           tests=  4 skipped=4
+   enforcement-real-process                     tests=  5 skipped=5
+   session-boundary-real-process                tests=  9 skipped=9
+   subagents-surface-real-process               tests= 12 skipped=12
+   小计：6 个套件 / 55 条断言
+
+★ 跳过**多于**通过的套件：
+   dsh-composition-root-row-dsh-process         pass=  1 skipped=10
+   dsh-composition-runtime-host-row-dsh-process pass=  1 skipped=10
+   approval-answerer                            pass=  6 skipped=12
+   pre-execute                                  pass=  3 skipped=15
+   小计：7 个套件 / 68 条跳过
+```
+
+> 一个「跑了 0 条、报绿」的套件，与一个「跑完 19 条全过、报绿」的套件，
+> 在 CI 摘要上是**同一个东西**。
+
+### 根因：21 个套件各自手写了同一个判定
+
+```js
+const DSH = process.env.DSH_CHECKOUT ?? null
+const SKIP = DSH === null ? '未配置 DSH_CHECKOUT' : false
+```
+
+而那份检出**完整地在盘上**（`apps/cli/lib/bin.js`、
+`packages/credentials/credentials-local/lib/index.js` 都在），只是环境变量没导出。
+**55 条真进程断言**（覆盖 PRT-211/212/214/253 最要紧的那几条）因此从未在这台机器上跑过。
+
+### 处置：一份解析器，而不是二十一份
+
+新增 `scripts/lib/dsh-checkout.mjs`，21 个套件改为从它取检出。
+
+| 它回答的问题 | 为什么单独回答 |
+|---|---|
+| **没找到** | 合法跳过；理由里带上候选列表，"找过哪里"是可读的 |
+| **找到了但没构建** | 与上一条**不同的话**——"克隆了没 build"不等于"这台机器上没有 DSH" |
+| **变量设了、底下不对** | **不回退**。静默换一份检出跑绿，会把一个配置错误变成一次"通过" |
+| **用了哪一份** | `source: 'env' \| 'candidate'` + 完整路径，所以"显式指定的"与"推测出来的"可分 |
+
+候选列表里第一条是**结构性**的 `<ROOT>/../dsh/deepseek-harness`（两个检出在本项目布局里平级），
+不是硬编码的绝对路径；win32 字面量按平台收窄。
+
+### 顺带发现：同一个候选列表此前有**三份**，且已经不一致
+
+| 位置 | 候选 |
+|---|---|
+| `tests/p13-fixture/host-fixture.mjs` | `D:/project/DSH/dsh/deepseek-harness` |
+| `scripts/ci/build-external-package.mjs` | `D:/project/dsh/deepseek-harness` |
+| `scripts/prt/dsh-pin-drift.mjs` | 同上一份 |
+
+前两处的 Windows 字面量**大小写不同**。win32 路径不区分大小写，所以**今天看不出来**。
+
+> 一个只在大小写不敏感的文件系统上成立的巧合，
+> 与一条真正的规则，在"它今天能解析"这个读数上是同一个东西。
+
+★ 解析器第一版我放在 `tests/` 下，于是 `scripts/` 那两份**继续独立漂着**——
+因为本仓的依赖方向是 **tests → scripts**（`credential-materializer.test.mjs` import
+`scripts/config/scan.mjs` 等），**scripts → tests 一处都没有**。所以它现在住在
+`scripts/lib/`。判据见 `tests/dsh-checkout.test.mjs` ⑱（并带反向控制）。
+
+> 一个"统一了候选列表、但留在只有一半调用方能 import 的位置"的模块，
+> 与三个各自独立的列表，在**今天**的读数上是同一个东西。
+
+### 结果（逐套件实测，`node --test <file>`）
+
+| 套件 | 改之前 | 改之后 |
+|---|---|---|
+| `run-floor-dsh-process` | `pass=0 skipped=6` | **6/6** |
+| `runtime-contract-cross-process` | `pass=0 skipped=19` | **19/19** |
+| `headless-real-tool` | `pass=0 skipped=4` | **4/4** |
+| `enforcement-real-process` | `pass=0 skipped=5` | **5/5** |
+| `session-boundary-real-process` | `pass=0 skipped=9` | **9/9** |
+| `subagents-surface-real-process` | `pass=0 skipped=12` | **12/12** |
+| 11 个 dsh-composition 套件（一次跑） | 跳过 98 条 | **203/203，跳过 0** |
+| `dsh-credentials` | `tests=165 pass=93 skipped=72` | **164/164，跳过 0** |
+
+★ `dsh-credentials` 的 `tests` 从 165 变 164 **不是丢了用例**：那个套件在
+"DSH 不可用"时会**另外注册**一条占位用例（`dsh-credentials.test.mjs:708`，
+`assert.ok(true, ...)`，只为把跳过理由印出来）。检出可用时它不注册——
+所以两条路径的 `tests` 本来就差 1。这个数我用"显式 `DSH_CHECKOUT` 跑一遍旧代码"
+对过（旧代码 + 显式变量 = `tests=164 pass=164 skipped=0`，与新代码逐字相同）。
+
+### ★★★ 全量 CI 的读数（`node scripts/ci/run-ci.mjs`）
+
+```text
+  syntax PASS (3891ms)
+  env    PASS (3809ms)
+  boundary PASS (811ms)
+  deps   PASS (3ms)
+  build  PASS (32582ms)
+  test   PASS (746311ms)  ⚠ skipped=2        ← 改之前：skipped=232
+  smoke  PASS (9266ms)
+  stage  PASS (124ms)
+  doc    PASS (272ms)
+
+  failed=0   skippedTotal=2
+  ⚠ 跳过 2 条断言（2 个套件）：1/33、1/52
+```
+
+★ **`test` 阶段从 535s 涨到 746s（+211s）**，那正是这个修法的代价、
+也是它唯一的证据：**232 条断言从"没跑"变成了"跑了"**，而它们跑的是
+真 DSH 进程（下限拦截、跨进程契约、可续接子会话）。
+一次 CI 多花 3 分半，换来 232 条真进程断言 —— 这笔账本身不需要裁决。
+
+★ 而 `skipped=2` 那一行现在**点名了是哪两个套件**（`1/33`、`1/52`），
+这是 §5.6 那个修法的直接红利：改之前，这 232 条在摘要里是**一个字都没有**。
+
+### 破坏性验证
+
+`scratch/verify-dsh-resolver.mjs`：逐条把解析器改坏（**只改语义、不改成语法错误**
+——语法错误会被 `--check` 拦下，那样验的是 Node 不是判据），跑判据套件要求它红，
+再逐字节还原。
+
+```text
+㊸ 删掉结构性候选         咬住（8 条红）
+㊹ 静默回退               咬住（4 条红）
+㊺ 抹掉「找到但没构建」    咬住（4 条红）
+㊾ 把「路径不存在」并进「没构建」  咬住（2 条红）   ← 我第一版的那个错
+㊻ isDir 说了不算         咬住（2 条红）
+㊼ 调换候选顺序           咬住（6 条红）
+㊽ win32 字面量不收窄     咬住（2 条红）
+
+咬住 7 / 7　　还原逐字节一致：是
+```
+
+★ 每条变异都对应**一种下一个人真会犯的错**，而不是"把函数名拼错"——
+后者会咬住任何判据，**不构成证据**。
+
+### ★★★ 我自己在这个模块里写错过一次，而且错在**它存在的理由**上
+
+第一版把「`$DSH_CHECKOUT` 指向一个**不存在**的路径」与
+「找到了一棵树、但缺构建产物」并成了一支。于是：
+
+```text
+$DSH_CHECKOUT=D:/typo/nope
+→ 「找到一个 DSH 检出（D:/typo/nope），但它缺少 packages……
+    那多半是『克隆了但没构建』」
+```
+
+**那句话是错的**：那里根本没有东西，谈不上"没构建"。后果是具体的——
+它会让下一个人去跑 `pnpm build`，而真正该做的是改那个变量。
+
+> 这个模块的全部价值就是"三种情况说三句话"，
+> 而它自己一开始就会把三种并成两种。
+> 一个自己都分不清的模块，比没有它更糟——
+> 因为它的**名字**承诺了它分得清。
+
+修法：加 `kind`（`env-not-a-dir` / `unbuilt` / `not-found`），三条出口。
+判据是 `tests/dsh-checkout.test.mjs` ⑲——它断言**三句话两两不同**，
+并断言"路径不存在"那一句里**不许出现 `pnpm build`**。
+
+### 这一处暴露的**新**缺陷
+
+迁移过程中，`product/launcher/run-credential-dsh-process.test.mjs` 的
+`★★★★★ 缺口 ③（真进程）` 在我改完后**报了一个 `ReferenceError`**：
+我删掉手写判定时，把后面还在用的 `cliBin` 一起删了。
+
+> 这条不是"迁移引入的 bug"值得单独记，而是它说明**这套件此前从没执行到那一行**——
+> 一个从未跑过的用例，它的上下文里少一个变量是**看不见**的。
+
+### 诚实边界
+
+1. **这 6 个套件从"全跳"变成"真跑"，是这一轮最实质的收益，也是最该被怀疑的地方。**
+   它们此前从没在本机跑过，所以它们**第一次真跑就绿**这件事本身需要解释。
+   我逐条看过失败面：真正暴露出来的只有上面那个 `ReferenceError`，
+   其余 55 条一次通过。我**没有**去做"故意破坏产品模块看它们会不会红"的变异验证——
+   那是这 55 条自己的变异套件该做的事，不是这一轮做的。**记在这里，不冒充已做。**
+2. `skipped=232` 这个数**我只把它降下来了，没有逐条归类**。剩下的跳过里至少包括：
+   win32 平台分支（`④ 0600 POSIX 权限位`，合法）、浏览器 e2e（缺 Edge/Chrome）、
+   以及 `dsh-credentials` 那 72 条之外的其他条件式套件。**没有逐条确认剩下的都是合法的。**
+3. `DSH_CHECKOUT` 用的是**候选回退**而不是"必须显式指定"。这在合法检出存在时
+   让读数变**准**；但如果一台机器上存在**两份**检出，它会取候选顺序里的第一份，
+   而"取了哪一份"只体现在 `source`/`reason` 里——**CI 摘要不会说**。
+4. `dsh-pin-drift` 与 `build-external-package` 的行为差异是**刻意保留**的
+   （前者找不到返回 `null`＝未观察，后者 `exit 1`＝构建门禁）。这两条口径
+   **没有**被任何用例钉住，只有注释。
+
 ## 6. 怎么复跑这份对照表里的每一条
 
 ```bash

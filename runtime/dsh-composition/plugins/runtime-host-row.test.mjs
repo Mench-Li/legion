@@ -41,6 +41,8 @@ import runtimeHostRow, {
 import { ENFORCEMENT_ROOT_SERVICE } from './root-row.mjs'
 import { PATCH_LAYER_ROWS, RUNTIME_ONLY_ROW_IDS } from '../patch-layer.mjs'
 
+import { resolveDshCheckout } from '../../../scripts/lib/dsh-checkout.mjs'
+
 /**
  * 声明里的行 id 与那条 `patch-over` 行 —— **从产品声明推导**，不在用例里另抄一份。
  * 抄一份的话，补丁层加一行而用例还绿着，这些断言就会静默地少验一行。
@@ -65,12 +67,16 @@ function treeEntriesOk(presets = { 'legion-attended': {}, 'legion-unattended': {
   }))
 }
 
-const DSH = process.env.DSH_CHECKOUT ?? null
+// ★ 检出用**共享解析器**找（`tests/dsh-checkout.mjs`），不在这里手写
+//   `process.env.DSH_CHECKOUT ?? null`。手写的后果实测过：变量没导出时
+//   本套件整组跳过，而 CI 报的是 `PASS`——一个「跑了 0 条」的绿。
+const DSH_FOUND = resolveDshCheckout({ need: 'cli' })
+const DSH = DSH_FOUND.checkout
 const CORDIS = DSH === null ? null : join(
   DSH, 'packages', 'core', 'tools', 'node_modules', '@deepseek-ai', 'cordis', 'lib', 'index.js',
 )
 const UNAVAILABLE = DSH === null
-  ? '未配置 DSH_CHECKOUT'
+  ? DSH_FOUND.reason
   : !existsSync(CORDIS)
     ? `DSH 检出里找不到 cordis（${CORDIS}）——依赖未安装？`
     : false

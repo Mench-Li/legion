@@ -91,6 +91,9 @@ import { basename, dirname, join, resolve, sep } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
+// ★ 检出用**共享解析器**找（理由见下面可跑性判定那段）。
+import { resolveDshCheckout } from '../../scripts/lib/dsh-checkout.mjs'
+
 // 判定与路径归一都取自**产品模块**，不在用例里另抄一份：
 // 抄一份的话，产品改了规范化规则而用例还绿着，"断言的是那个拒绝"就变成了一句注释。
 import { canonicalizePath } from './enforcement.mjs'
@@ -101,18 +104,20 @@ import { PATCH_YAML_PATH } from './render.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = resolve(HERE, '..', '..')
-const DSH = process.env.DSH_CHECKOUT ?? null
+// ★ 检出用**共享解析器**找。此前手写 `process.env.DSH_CHECKOUT ?? null`，
+//   实测后果：变量没导出时本套件 **5 条全跳**，
+//   CI 报 `PASS tests=5 pass=0 skipped=5`——"跑了 0 条"报绿。
+const DSH_FOUND = resolveDshCheckout({ need: 'cli' })
+const DSH = DSH_FOUND.checkout
 const CLI = DSH === null ? null : join(DSH, 'apps', 'cli', 'lib', 'bin.js')
 const LEGION_PATCH = join(REPO_ROOT, PATCH_YAML_PATH)
 
-/** 为什么没跑。写清楚是缺哪一样，而不是笼统的"环境不支持"。 */
+/** 为什么没跑。缺哪一样就写哪一样——理由来自共享解析器，不是笼统一句。 */
 const UNAVAILABLE = DSH === null
-  ? '未配置 DSH_CHECKOUT'
-  : !existsSync(CLI)
-    ? `DSH 检出里找不到 CLI（${CLI}）——未构建？`
-    : !existsSync(LEGION_PATCH)
-      ? `仓库里找不到 Legion 补丁层（${LEGION_PATCH}）`
-      : false
+  ? DSH_FOUND.reason
+  : !existsSync(LEGION_PATCH)
+    ? `仓库里找不到 Legion 补丁层（${LEGION_PATCH}）`
+    : false
 const SKIP = UNAVAILABLE === false ? false : UNAVAILABLE
 
 /**

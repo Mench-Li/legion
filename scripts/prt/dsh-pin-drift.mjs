@@ -36,6 +36,8 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { PIN_STATUS, checkDshPins, pinnedSources } from '../../runtime/adapters/dsh/pin-drift.mjs'
+// ★ 候选列表只有**一份**（见下面 `resolveCheckout`）。
+import { resolveDshCheckout as resolveDshCheckoutShared } from '../lib/dsh-checkout.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(HERE, '..', '..')
@@ -43,23 +45,17 @@ const ROOT = resolve(HERE, '..', '..')
 /**
  * 找 DSH 检出。
  *
- * 与 `scripts/ci/build-external-package.mjs` 同一套候选：这个脚本不该是
- * "只有作者那台机器能跑"的东西。找不到就是**未观察**，不是失败。
+ * ★ 这里以前是**自己一份**候选列表——与 `scripts/ci/build-external-package.mjs`、
+ *   `tests/p13-fixture/host-fixture.mjs` 各写一份，三份的 Windows 字面量
+ *   **大小写都不同**（`D:/project/dsh/...` vs `D:/project/DSH/...`）。
+ *   现在统一到 `scripts/lib/dsh-checkout.mjs`。
+ *
+ * ★ 行为上**刻意**保留一处差异：这里找不到就是 `null`（**未观察**），
+ *   而不是抛错。本脚本是一条**核对**命令，它在这一仓的定位是
+ *   "核不了就说核不了"，不是门禁。
  */
 export function resolveCheckout(env = process.env) {
-  const candidates = [
-    env.DSH_CHECKOUT,
-    join(homedir(), 'dsh-harness'),
-    join(homedir(), 'dsh'),
-    join(homedir(), '.dsh', 'dsh-harness'),
-    'D:/project/dsh/deepseek-harness',
-  ].filter(Boolean)
-  for (const c of candidates) {
-    try {
-      if (existsSync(c) && statSync(c).isDirectory() && existsSync(join(c, 'packages'))) return c
-    } catch { /* 下一个候选 */ }
-  }
-  return null
+  return resolveDshCheckoutShared({ env, need: 'packages' }).checkout
 }
 
 const isMain = process.argv[1] !== undefined &&

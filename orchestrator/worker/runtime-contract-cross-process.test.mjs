@@ -57,6 +57,11 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
+// ★ 检出用**共享解析器**找。此前手写 `process.env.DSH_CHECKOUT ?? null`，
+//   实测后果：变量没导出时本套件 **19 条全跳**，而 CI 报
+//   `PASS tests=19 pass=0 skipped=19`——一个"一条断言都没验过"的绿。
+import { resolveDshCheckout } from '../../scripts/lib/dsh-checkout.mjs'
+
 import { RUNTIME_CONTRACT_VERSION } from '../../runtime/contracts/adapter.mjs'
 import {
   RUNTIME_CONTRACT_ROW_CODES,
@@ -79,11 +84,10 @@ import {
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO = resolve(HERE, '..', '..')
-const DSH = process.env.DSH_CHECKOUT ?? null
+const DSH_FOUND = resolveDshCheckout({ need: 'cli' })
+const DSH = DSH_FOUND.checkout
 const CLI = DSH === null ? null : join(DSH, 'apps', 'cli', 'lib', 'bin.js')
-const UNAVAILABLE = DSH === null
-  ? '没有设置 DSH_CHECKOUT'
-  : (existsSync(CLI) ? null : `DSH_CHECKOUT 指向的检出里没有 CLI：${CLI}`)
+const UNAVAILABLE = DSH === null ? DSH_FOUND.reason : null
 const SKIP = UNAVAILABLE
 
 const guarded = (name, fn) => test(name, { timeout: 300_000 }, (t) => {

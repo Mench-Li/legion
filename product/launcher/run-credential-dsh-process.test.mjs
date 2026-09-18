@@ -54,6 +54,9 @@ import {
   runCredentialPaths,
 } from './run-credential-materialization.mjs'
 
+// ★ 检出用**共享解析器**找（理由见下面那条用例里）。
+import { resolveDshCheckout } from '../../scripts/lib/dsh-checkout.mjs'
+
 const HERE = fileURLToPath(new URL('.', import.meta.url))
 const PROBE_PLUGIN = join(HERE, 'fixtures', 'prt509-credentials-probe.mjs')
 
@@ -111,17 +114,19 @@ function runHost({ cliBin, cwd, env, args, timeoutMs }) {
 }
 
 test('★★★★★ 缺口 ③（真进程）：一个真 DSH 进程在启动期从 Legion 那份文件里读到了值', async (t) => {
-  const checkout = (process.env.DSH_CHECKOUT ?? '').trim()
-  if (checkout === '') {
-    t.skip('未配置 DSH_CHECKOUT：这一条要一个真的 DSH 检出才能起进程')
+  // ★ 检出用**共享解析器**找：它自己会区分「没找到」/「找到了但没构建」/
+  //   「变量指错了」，而此前这里手写的那句只会说第一种。
+  const found = resolveDshCheckout({ need: 'cli' })
+  if (found.checkout === null) {
+    t.skip(found.reason)
     return
   }
+  const checkout = found.checkout
+  // ★ 解析器已经保证过 CLI 在（`need: 'cli'`），所以这里直接拼路径。
+  //   改之前这里有一次额外的 `existsSync` 检查——它保留也合理，
+  //   但那时**两处**都在判断同一件事，而"判断的地方多一处"与
+  //   "判断得更严"在读数上是同一个东西。
   const cliBin = join(checkout, 'apps', 'cli', 'lib', 'bin.js')
-  if (!existsSync(cliBin)) {
-    // 检出在但没有构建产物：**skip 并说明**，不伪造通过。
-    t.skip(`DSH 检出里没有构建好的 CLI（${cliBin}）——先构建 DSH 再跑这一条`)
-    return
-  }
 
   const root = mkdtempSync(join(tmpdir(), 'legion-prt509-dshproc-'))
   // 安全断言：整套东西必须落在临时目录里，绝不碰真实的 `$DSH_HOME`。

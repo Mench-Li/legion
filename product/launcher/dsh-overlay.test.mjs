@@ -39,6 +39,9 @@ import { reserveEphemeralPort } from './ports.mjs'
 import { resolveLayout } from '../paths.mjs'
 import { PATCH_YAML_PATH } from '../../runtime/dsh-composition/render.mjs'
 
+// ★ 检出用**共享解析器**找（理由见下面 DSH 侧那段）。
+import { resolveDshCheckout } from '../../scripts/lib/dsh-checkout.mjs'
+
 const REPO_ROOT = resolve(new URL('../../', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'))
 
 /** 合法但独立的布局。`installDir` 可覆写成"没有补丁层"的目录。 */
@@ -80,13 +83,13 @@ const codesOf = (ds) => ds.map((d) => d.code)
 const byCode = (ds, code) => ds.filter((d) => d.code === code)
 
 // ── DSH 侧（可 SKIP） ────────────────────────────────────────────────────
-const DSH = process.env.DSH_CHECKOUT ?? null
+// ★ 检出用**共享解析器**找（`tests/dsh-checkout.mjs`）。此前手写
+//   `process.env.DSH_CHECKOUT ?? null`——而这份文件自己的 `★★★★★`
+//   就是被那套口径漏掉了**四天**（见 §10.12）。
+const DSH_FOUND = resolveDshCheckout({ need: 'cli' })
+const DSH = DSH_FOUND.checkout
 const DSH_BIN = DSH === null ? null : join(DSH, 'apps', 'cli', 'lib', 'bin.js')
-const DSH_SKIP = DSH === null
-  ? '未配置 DSH_CHECKOUT'
-  : !existsSync(DSH_BIN)
-    ? `DSH 检出里没有构建好的 CLI（${DSH_BIN}）`
-    : false
+const DSH_SKIP = DSH === null ? DSH_FOUND.reason : false
 
 /**
  * 逐条 SKIP，而不是整组 `describe({skip})`：`describe` 级的 skip 不把里面的

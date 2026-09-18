@@ -586,6 +586,46 @@ DSH_CHECKOUT=/path/to/deepseek-harness node --test product/launcher/run-credenti
 它需要单独一次带检出的运行，读数来自 `product/launcher/run-credential-dsh-process.test.mjs`。
 
 > **与 §8.7 的关系**：那里说"**没有端到端的产品级走查**"（没跑 `legion --wizard`、
-> 没让 `$DSH_HOME/.credentials.yaml` 回答一次真实请求）。§11.2 把其中**一半**补上了——
-> 现在有一个**真 DSH 进程**在启动期真的读到了材料化的那份文件；
-> 但"经向导配置 + 回答一次真实模型请求"仍然**没有**验过，§8.7 那句话依然成立。
+> 没让 `$DSH_HOME/.credentials.yaml` 回答一次真实请求）。§11.2 补上了**前半**——
+> 现在有一个**真 DSH 进程**在启动期真的读到了材料化的那份文件。
+> **§11.6 把后半也量掉了**：`.credentials.yaml` 回答了一次真实模型请求。
+> §8.7 剩下**唯一**没做的只有 `legion --wizard` 那一步，而它现在有一个具名理由（见 §11.6）。
+
+### 11.6 缺口「`.credentials.yaml` 回答一次真实请求」：已量到（2026-09-18）
+
+§8.7 那句话的后半——"没让 `$DSH_HOME/.credentials.yaml` 回答一次真实请求"——**现在不成立了**。
+
+**做法**（一次真实调用，从临时目录跑，不碰本仓）：
+
+```
+node D:\project\DSH\dsh\deepseek-harness\apps\cli\lib\bin.js --profile headless "Reply with exactly one word and nothing else: PONG"
+```
+
+**读数**：`exit=0`，**9.2s**，输出 `PONG`。
+
+**★ 判据不在"它答了"，而在"那把密钥只可能来自 `.credentials.yaml`"**：
+
+| 事 | 读数 |
+| --- | --- |
+| 这条路用的凭证 | `settings.yaml` 的 `agent-default-model: provider: custom-ds`（`model: deepseek-v4-flash-openai`）|
+| 该 provider 的键名 | `apiKeyEnv: CUSTOM_DS_API_KEY` |
+| `CUSTOM_DS_API_KEY` 在 **Process** 作用域 | **空** |
+| 同上，**User** 作用域 | **空** |
+| 同上，**Machine** 作用域 | **空** |
+
+三个作用域全空、而请求成功 ⇒ 密钥**不可能**来自环境，
+只能是启动期从 `$DSH_HOME/.credentials.yaml` 解析出来的。
+这正是「凭证读取桥」要证明的那件事，而且它证明的是一个**真实模型真的回答了**，
+不是"读到了材料"。
+
+⚠️ **诚实边界（三条）**：
+① 它证明的是**凭证解析 → 真实模型回答**这条路，**不是** Legion 全链路
+  （worker → Runtime 契约 → DSH → 模型）。后者要一次真的自动执行，见下条；
+② 它是一次**平凡请求**（一个词），刻意压到最小——量的是"路通不通"，不是性能或质量；
+③ `legion --wizard` 那一步**仍未跑**，理由有三，且都在本节之外：
+  · 它是**交互式**的（模型密钥按设计只从 stdin 读，`cli.mjs:1153`）；
+  · 它会**改动真实部署**（那是业主的数据目录，不是我该自己动的东西）；
+  · 它的最后一步是**「实测」**，即一次自动执行——而**Windows 上不会有自动执行**
+    （`docs/STATUS.md` §4 第 15 条，2026-09-18 裁定的永久平台边界）。
+    所以向导在本机**到不了「完成」**，这不是"还没做"，是"这台机器上做不到"。
+

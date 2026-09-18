@@ -407,7 +407,7 @@ verdict = pathScope(projection)
 | --- | --- |
 | `runtime/contracts/run.mjs` 里的 `pathScope` 字段 | **0 处**（`RUN_REQUEST_REQUIRED` 与投影字段里都没有） |
 | `pathScope` 的生产消费者 | `tool-request.mjs:642` 的 `pathScope(projection)`，来源是**组合根入参** |
-| 生产组合根传给 `installEnforcementRoot` 的键 | `{ env, decide, createRequestApproval }` —— **只有三个**（`:485`） |
+| 生产组合根传给 `installEnforcementRoot` 的键 | `{ env, decide, createRequestApproval }` —— **只有三个**（接线前 `:485`，现在 `:508`） |
 
 ⇒ 真正的接缝是 **`installEnforcementRoot({pathScope})`**，而且它要的是一个
 **函数**（表 + 一次投影 → 一个判定），不是一份表。

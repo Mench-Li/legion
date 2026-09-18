@@ -184,7 +184,7 @@
 
 | 编号 | 名称 | 状态 | 依据 |
 |---|---|---|---|
-| F-21 | Connector / MCP 注册表 | ⬜→🟡 | **登记面、落盘面、判定面、反馈面四面俱在**：登记与落盘（`team-hub/connector-store.mjs` 的 `freezeDeclaration`/`connectorIncidents`/`exportConnectors` 都接在真 HTTP 路由上）；**判定面已接进生产组合根**（`runtime/connectors/decision-port.mjs` → `assemble.mjs` → `tool-request.mjs` 的 `connectorJudgment`）；**反馈面已接**（`outcome-port.mjs` → `plugins/connector-feedback.mjs`，订阅 DSH `tools/result`）。★ **`enforcementSurfaces()` 从 6 格 → 7 格**（新增 `connectorJudgment`，与 `connectorFeedback` 分开报——只有一格时"判定面装了、反馈面没装"与反过来是同一个读数）。★ 隔离真拦下过：`root.test.mjs` ⑨④「未声明工具 `git-commit` ⇒ deny（政策门说 allow）」、⑨⑤「开路 ⇒ deny ⇒ 反馈面记回 ⇒ 探针成功 ⇒ 恢复 allow」的**闭环**、⑨⑥ 两半共用**同一份** registry。★★ **投递面也建好了**（`runtime/dsh-composition/connector-port.mjs` → `root-row.mjs`，第 19 条 §9.2 第 5 步）：配了 ⇒ 上面那一格**真的**翻 `true`（在真生产路径上验的，`root-row.test.mjs` 五条：配了/没配/空表/坏 JSON/真拦下，含**前提对照**"没配时同一次调用是 allow"）；缺席**如实**是 `absent`（不许折成空表——空表会让组合根建一份**零连接器**登记表 ⇒ 那一格报 `true` 而它**一次判定都不会做**）；显式 `[]` **具名拒绝**；重名工具**装配期**就停。273 例（decision-port 19 + connector-port 14 + root 3 + root-row 5 + tool-request 3 + registry 32 + connector-store 23 … + public-name 14） | ★ **仍差三条，且三条都不是"再写点代码"**。**① 投递**：`LEGION_CONNECTOR_DECLARATIONS` 与 `LEGION_PATH_SCOPE` 一样，**在 schema 的 `fields` 里而不在 `process-manifest.mjs` 的 runtime `envNames` 里** ⇒ `buildChildEnv()` 对未声明的键**直接抛**（`values`）或**静默丢掉**（`baseEnv`）。这一条与第 19 条**同生共死**（同一个文件、同一个数组，且是另一条工作线的在制品）。★★ **② 归属的来源——第 17 轮已解决**（原记"本仓没有这条源信号"是**错的**：约定不在本仓，在执行引擎那边）。新增 `runtime/connectors/public-name.mjs` 逐字镜像 DSH 的 `publicToolName`（`mcp__<serverName>__<rawName>`，含归一化/截断时的 12 位 SHA-256 后缀），并接成归属的**第一条**依据（命名空间与"有没有被声明过"**无关**）⇒ **那条「未声明就拒绝」第一次在生产路径上真的拦下了东西**：`mcp__github__delete_repo` 从 **`allow` → `deny`**，理由 `[连接器 github] …没有声明工具「…」`。判据含**一条把 DSH 真源码切片求值对跑 18 组**的用例（18/18 一致）。★★ 而它**同时照出第三处缺口**：声明里写**裸名**（`list_issues`）而线上来的是**公开名** ⇒ `mcp__github__list_issues` 被拒 ⇒ 一个**正确声明过**的工具在真部署里不可用（§5 第 22 条）；以及命名空间**认不出**的一类仍落政策门（§5 第 23 条）。★ 本批另修掉一个**静默**缺陷：输入字段叫 `declaredRisk` 而**输出**字段叫 `risk`，照着输出写 `risk: 'critical'` 会被**静默丢掉**、落回能力下限 `low` ⇒ 一个作者标成 critical 的工具被自动放行；`declareTool` 的键集已改成**封闭**（不认识的键具名拒）。全仓共撞到 **9 处**用错字段名的真样本 |
+| F-21 | Connector / MCP 注册表 | ⬜→🟡 | **登记面、落盘面、判定面、反馈面四面俱在**：登记与落盘（`team-hub/connector-store.mjs` 的 `freezeDeclaration`/`connectorIncidents`/`exportConnectors` 都接在真 HTTP 路由上）；**判定面已接进生产组合根**（`runtime/connectors/decision-port.mjs` → `assemble.mjs` → `tool-request.mjs` 的 `connectorJudgment`）；**反馈面已接**（`outcome-port.mjs` → `plugins/connector-feedback.mjs`，订阅 DSH `tools/result`）。★ **`enforcementSurfaces()` 从 6 格 → 7 格**（新增 `connectorJudgment`，与 `connectorFeedback` 分开报——只有一格时"判定面装了、反馈面没装"与反过来是同一个读数）。★ 隔离真拦下过：`root.test.mjs` ⑨④「未声明工具 `git-commit` ⇒ deny（政策门说 allow）」、⑨⑤「开路 ⇒ deny ⇒ 反馈面记回 ⇒ 探针成功 ⇒ 恢复 allow」的**闭环**、⑨⑥ 两半共用**同一份** registry。★★ **投递面也建好了**（`runtime/dsh-composition/connector-port.mjs` → `root-row.mjs`，第 19 条 §9.2 第 5 步）：配了 ⇒ 上面那一格**真的**翻 `true`（在真生产路径上验的，`root-row.test.mjs` 五条：配了/没配/空表/坏 JSON/真拦下，含**前提对照**"没配时同一次调用是 allow"）；缺席**如实**是 `absent`（不许折成空表——空表会让组合根建一份**零连接器**登记表 ⇒ 那一格报 `true` 而它**一次判定都不会做**）；显式 `[]` **具名拒绝**；重名工具**装配期**就停。273 例（decision-port 19 + connector-port 14 + root 3 + root-row 5 + tool-request 3 + registry 32 + connector-store 23 … + public-name 14） | ★ **仍差四条，且四条都不是"再写点代码"**。**① 投递**：`LEGION_CONNECTOR_DECLARATIONS` 与 `LEGION_PATH_SCOPE` 一样，**在 schema 的 `fields` 里而不在 `process-manifest.mjs` 的 runtime `envNames` 里** ⇒ `buildChildEnv()` 对未声明的键**直接抛**（`values`）或**静默丢掉**（`baseEnv`）。这一条与第 19 条**同生共死**（同一个文件、同一个数组，且是另一条工作线的在制品）。★★ **② 归属的来源——第 17 轮已解决**（原记"本仓没有这条源信号"是**错的**：约定不在本仓，在执行引擎那边）。新增 `runtime/connectors/public-name.mjs` 逐字镜像 DSH 的 `publicToolName`（`mcp__<serverName>__<rawName>`，含归一化/截断时的 12 位 SHA-256 后缀），接成归属的**第一条**依据 ⇒ 那条「未声明就拒绝」第一次在生产路径上真的拦下了东西（`mcp__github__delete_repo` 从 **`allow` → `deny`**）。判据含**一条把 DSH 真源码切片求值对跑 18 组**的用例（18/18 一致）。★★ **③ 声明名 vs 线上名——第 18 轮已解决一半**：`registry.mjs` 新增 `declaredToolNames`，登记表**同时**认声明名与 DSH 公开名（归属与判定共用**一份**实现）。实测：`mcp__github__list_issues`（第 17 轮 **`deny`「没有声明工具」** ⇒ 一个**正确声明过**的工具在真部署里不可用）现在连接器层答 **`allow`**。★ 剩下的**约定**（写哪个名字）记 §5 第 22 条。★★★ **④ 而最终判决仍然是 `deny`——理由是 `[政策门]`**（第 18 轮新查出，**本条最要紧**）：`tool-capability.mjs` 的 `resolveTool` 对不在它目录里的名字一律给 `direction: 'write'`、`requiresApproval: true`（fail closed），而 MCP 公开名**不在那个目录里** ⇒ **连接器层今天只能让事情更严，永远不能让它更松**。要不要让政策门从声明里读能力，是 §5 第 24 条。★ 另有命名空间**认不出**的一类仍落政策门（§5 第 23 条）。★ 本批另修掉一个**静默**缺陷：输入字段叫 `declaredRisk` 而**输出**字段叫 `risk`，照着输出写 `risk: 'critical'` 会被**静默丢掉**、落回能力下限 `low` ⇒ 一个作者标成 critical 的工具被自动放行；`declareTool` 的键集已改成**封闭**（不认识的键具名拒）。全仓共撞到 **9 处**用错字段名的真样本 |
 | F-22 | 后端与工作区 | 🟡 | `orchestrator/workspace/*`（git worktree）。§2 明写「不把 worktree 当安全沙箱」 |
 | F-23 | 多 Harness 路由 | ⏸ | §2 明写「**不在契约稳定前同时支持多个 Harness**」——这一条**是设计决定，不是缺口** |
 | F-24 | ACL 与安全姿态 | 🟡 | `team-hub/read-auth.test.mjs`、`read-open-loopback.test.mjs` 已覆盖读面矩阵；多用户写面 ACL 未做 |
@@ -423,11 +423,47 @@ is `mcp__<serverName>__<rawName>`, normalized to the DeepSeek function-name
 占着的 MCP 命名空间）仍落政策门。按教义它该被拒，而 `resolveConnectorId` 的值域
 是 `string|null`，**装不下"拒"**。这件事没有被偷偷做掉。
 
+#### 第四次（2026-09-18 第 18 轮）：**声明名 vs 线上名**关掉一半，而另一半更值得说
+
+第 17 轮照出的那条缺口（声明写裸名、线上来公开名 ⇒ **正确声明过的工具被拒**）
+本批关掉了一半：`registry.mjs` 新增 `declaredToolNames(connectorId, toolName)`，
+让登记表**同时**认这两个名字，归属与判定共用**一份**实现。
+
+**实测（同一次调用、显式 `target`、策略门是放行的桩）：**
+
+| 调用名 | 第 17 轮 | 第 18 轮 |
+| --- | --- | --- |
+| `list_issues`（声明里写的） | `allow` | `allow`（未变） |
+| `mcp__github__list_issues`（DSH 真会送的） | **`deny`「没有声明工具」** | **连接器层 `allow`**（不再说"没声明"） |
+| `mcp__github__delete_repo`（未声明） | `deny` | `deny`（教义照旧） |
+
+★ 修法**不是**剥命名空间（公开名被截断后带 12 位哈希，剥不出原名），
+也**不是**把推导名存进声明体（那是"又一份记录"，规则一变就成了过期的事实）。
+两个名字**都留**：裸名兜住既有夹具与"声明了一个 DSH 核心工具名"那一类。
+
+★★★ **而另一半更值得说：最终判决仍然是 `deny`，理由是 `[政策门]`。**
+
+`tool-capability.mjs` 的 `resolveTool` 对不在它目录里的名字一律给
+`direction: 'write'`、`requiresApproval: true`（fail closed），而 MCP 工具的公开名
+**不在那个目录里**。取严是设计（`deny > ask > allow`），后果是一句必须说清的话：
+
+> **连接器层今天只能让事情更严，永远不能让它更松。**
+
+一个"连接器声明了 `allow`、而每次调用都要人批"的系统，与一个"连接器层根本没接上"
+的系统，在**最终判决**上是同一个 `deny`——只不过前者的理由里写着 `[政策门]`，
+而后者连理由都没有。要不要让政策门从**声明**里读能力（那会把两层耦合成一层，
+而取严的合并正是为了让连接器层成为**额外**约束）是裁决项，见 §5 第 24 条。
+
+★ 判据把两条读数**分开取**（`outerAllow` vs 最终的 `kind`），
+免得"公开名已支持"被读成"一次真的 MCP 调用今天就能按声明跑通"。
+
 #### 为什么仍记 🟡（更新）
 
-三条，都写明了：**① 投递**（键到不了进程，与第 19 条同一根线）；
-**② 声明命名**（`§5` 新增裁决项）；**③ 认不出的命名空间**（需要一个新端口，
-`resolveConnectorId` 装不下"拒"）。
+四条，都写明了：**① 投递**（键到不了进程，与第 19 条同一根线）；
+**② 政策门不认识 MCP 工具**（连接器层只能更严、不能更松，§5 第 24 条）；
+**③ 命名空间"认不出来"的那一类**（需要一个新端口，§5 第 23 条）；
+**④ 声明该写哪个名字**（§5 第 22 条——功能上已两可，但**约定**仍要定，
+否则下一个写声明的人不知道写哪个）。
 
 ---
 
@@ -459,8 +495,9 @@ is `mcp__<serverName>__<rawName>`, normalized to the DeepSeek function-name
 | 19 | ★★★ **第 13/14/15/18 条其实是**一条**决定，而且执行面拿不到控制面凭证**（本轮新读数，见 §5.5） | ★★ **已裁决（2026-09-18）**——不再是"待裁决"，而是**待施工**（纯代码工作量） | §5.5 的三条机器读数：① `runtime` 进程的 `envNames` **故意没有 `TEAM_HUB_TOKEN`**（`product/process-manifest.mjs:203-215`）；② `RunRequest.permissions` 只有 `{preset, tools, deniedTools?}`，**没有**范围表 / host surface（`runtime/contracts/run.mjs:158-181`）；③ `runtime/packs/*` 四个模块（`store` / `compiled-plan` / `authority` / `builtin/software-delivery`）**零生产入口**，`createPackStore` 生产调用点 **0 处**（hub 的 `/api/packs/account` 把账交出去，**没有任何生产代码接住**）。要裁决的**只有一个问题**：把执行面需要的那几份数据（连接器声明 / 范围表 / 落账端点 / 摩擦与岗位包的输入）放进 `RunRequest`，**还是**给执行面开一个控制面入口（注入 `TEAM_HUB_TOKEN`）？ | ★★★ **业主 2026-09-18 裁定：选前者。** 把执行面需要的那几份数据**放进 `RunRequest`**，照抄 PRT-214 已跑通两遍的形状（专属线上字段 / 按 Run 安装 / 对象身份配对 / 可 dispose / 装不上具名拒绝）。**不**给执行面开控制面入口、**不**注入 `TEAM_HUB_TOKEN`。⇒ 本条与它合并的第 13/14/15/18 条从「待裁决」变成「**待施工**」。★ 完整裁决单独成文：`docs/DECISION-RUNREQUEST-EXECUTION-PLANE.md`（含"**不许凭空造范围表**"这条**硬约束**、四项待搬运数据、三条复核读数；单独立文的原因是当时这一行上有别的会话的在制品）。**以下是裁决之前记下的两个选项，保留以备查**：★ 选**前者**：形状已经跑通**两遍**（PRT-214 缺口①的 `enforcementFloor`、缺口②的 `enforcementIdentity`——都是"专属线上字段 + 按 Run 安装 + 对象身份配对 + 可 dispose + 装不上具名拒绝"），照抄即可，是纯代码工作量。★ 选**后者**会让「Runtime 不看业务状态」这条 spec §2 的不可突破边界消失，并且执行面一旦有 token，"读声明"与"改状态"就只差一次调用的距离。**不决定**则这四处继续各记一行 🟡：登记了、能审、能冻，而**没有任何一次真调用被它们拦过 / 记过 / 算过**。★★ 本轮**没有**擅自补任何一行接线：`RunRequest` 里今天没有范围表字段，凭空造一份（例如"读根=写根=`workdir`"）正是 PRT-253 §3 明令禁止的"发明默认值"，且方向是**放行**；而"反正它更严"这个辩护**不成立**——收成 `workdir` 会同时拒掉合法的越目录读，表现成"工具莫名其妙失败" |
 | 20 | ★★★ **Runtime 契约服务端那一行要不要进补丁层**（本批新提，见 §5.8） | 产品 + 项目主 | 可达性探针（2026-09-18）：`runtime/dsh-composition/plugins/runtime-contract-server-row.mjs` 与 `runtime-host-registrar-row.mjs` **不在 `PATCH_LAYER_ROWS` 里**，也不在 `legion-host.patch.yml` 里，也没有任何生产 importer ⇒ **Runtime 契约服务端没有生产挂点**。而**消费侧已经接好了**：`product/launcher/runtime-contract-endpoint.mjs` 会去 DataDir 读那份发布、把 `LEGION_RUNTIME_URL`/`LEGION_RUNTIME_TOKEN` 注入 worker。**没有服务端，那份发布永远不会被写出来。** 要裁决的是：这一行**现在**要不要挂进补丁层——以及挂上去之后 `probeRuntime` 报什么（它要报 version + 四项必需能力，而**全仓没有生产实现**：真 DSH 进程里实测没有版本服务、也没有能力服务） | ★ 两条路都不许"编"：给一张**全 true** 的能力表会让 `checkCompatibility` 在一个**从未验过**的引擎上判"兼容"——那比不接更坏，因为**它会以"已兼容"的样子通过**。可选的是：① 挂行但让 `probeRuntime` **如实报 unknown** 并以具名码拒绝（fail closed，等价于今天"没挂"的效果，但**读数变成"查过且拒了"而不是"没人挂"**）；② 明确本阶段只走**同进程绑定**（`bindDshRuntime`）这一条路，把跨进程契约**显式降级为未启用**并写进产品边界。★ 无论选哪条，都**不要**把这一项继续留在"等另一个 agent 接线"里——那份工作已经提交了（`e0b83af` 等），而模块仍然不可达（本批已把 4 条 `in-flight` 改判 `gap`）。★★ **本批新读数（2026-09-18，见会话报告 §10.24）**：该模块 `state()`（`runtime-contract-server.mjs:592-601`）的**七个**字段里**六个是算出来的**（`listening` / `address` / `tokenConfigured` / `enforcementConfigured` / `probed`，`wireVersion` 是版本常量），**只有 `wireChecked: true` 是写死的字面量**，且全仓库**没有任何地方读它**（连用例都不读）——一个状态面上"线核过没有"的结论，实际是一个常量。⚠️ 我**没有**改它：这个字段的**本意**我判不出来（该服务端**确实**校验请求信封的 `wireVersion`，见 `:469-470`，所以它也可能只是在陈述"本服务端会核信封"这么一句真话）。含义不明时改字段，正是 PRT-253 §3 禁的那种"发明默认值"。**留作该行接线时一并裁决。** |
 | 21 | ★★ **两条 ⏸ 要的不是机器、也不是凭据：是**真实的**外部用户 / 真实项目**（PRT-256、PRT-910；本批新提，见 §5.8） | 项目方 | 台账里两条 ⏸ 的"缺口"那一列逐字写着：**`需真实外部用户`**（PRT-256「设计伙伴独立完成真实低风险任务」）与 **`需真实用户项目`**（PRT-910「内部与金丝雀真实项目验证」）。**它们此前不在本清单上**——于是它们与"没有任何人在等它"是同一种东西（**同第 20 条那次的形状**，见 §5.8 与 §10.19）。要的东西与第 7 条**不同**：第 7 条要的是"DPAPI 可用的 Windows 机器 + 真实模型 API key"（**凭据与机器**），这一条要的是**一个愿意用它的人 / 一个真实的项目**。★ 本批把这条交叉核对做成了门禁（`scripts/prt/intervention-coverage.test.mjs`）：台账里**每一条非 ✅ 的行**都必须被 §5 的某一格点到名 | 不提供则这两条**永远是 ⏸**：能力已在、用例全绿，而**没有一次真实使用**。★ 这也是"任务是否完成"这句话**最大的限定**：产品侧能单独关掉的都已关掉，而这两条**按定义**关不掉——它们要的是**使用**，不是实现。★ 请不要把它们当成"还差一点代码"：把它们当成"还差一个用户" |
-| 22 | ★★★ **连接器声明里的工具名该写「公开名」还是「裸名」**（第 17 轮**新查出**，见 §4.2 第三次） | 产品 + 项目主 | 第 17 轮接上 DSH 的 MCP 命名契约（`mcp__<serverName>__<rawName>`，逐字读 `packages/mcp/mcp-client/src/tools.ts`）之后照出来的一件事：**声明里写的是裸名**（`list_issues`）或 **DSH 核心工具名**（`git-status`，今天全部夹具都是这种），而**线上来的永远是公开名**（`mcp__github__list_issues`）。实测：`github` 声明 `list_issues` 时，调 `list_issues` ⇒ `allow`；调 `mcp__github__list_issues` ⇒ **`deny`「没有声明工具」** ⇒ **一个正确声明过的工具，在真 DSH 进程里会被拒**。要裁决的是：**声明按公开名写**（用已导出的 `publicToolName(connectorId, rawName)` 算），还是**声明按裸名写、由某处负责换算**？ | ★ **不许**在归属时"把命名空间剥掉"来兼容裸名：DSH 的公开名在归一化/截断时会被替换成 12 位 SHA-256 后缀（`mcp__github__a b` ⇒ `mcp__github__a_b_200f08ef849a`），那时**剥不出** rawName；`tools.ts:9-10` 逐字写着 "the public name is never parsed to recover it"。⇒ 只有"声明侧写公开名"这一条路是**可判**的。不裁决则：所有按裸名写的声明在真部署里**把合法工具拒掉**（fail closed，安全但功能不可用）；而修法涉及**契约变更 + 既有夹具全要动**，所以本批没有擅自做——已把规则写进 `connector-port.mjs` 文件头 ⑨ |
-| 23 | ★★ **命名空间"认不出来"的那一类要不要按教义拒**（第 17 轮**新查出**，见 §4.2 第三次末段） | 产品 + 项目主 | `mcp__evil__x`：一个 MCP 公开名，而它那个命名空间**没有任何已知连接器**占着（一次漏配，或一次**未经声明的挂载**）。它今天落到**政策门**（不是登记表）。按 `registry.mjs` 文件头 ① 的头号教义，它应当**被拒**——而做不到的原因是**端口形状**：`resolveConnectorId` 的值域是 `string|null`，**装不下"拒"**。要裁决的是：**要不要**新增一个端口（例如 `connectorShape` 谓词）让"连接器形状、但命名空间不认识"能被表达成一次**具名的拒绝** | ★ 这一格与第 22 条是**相反方向**的两个缺口，别合并：第 22 条是"**已登记的**连接器把**合法**工具拒了"（过严），本条是"**未登记的** MCP 服务器把工具放过去"（过松）。★ 不裁决则：一个未声明的 MCP 服务器挂上来，它的工具走政策门——未知工具在那里是 fail closed，所以**今天不致命**；但**一旦某个名字在政策门眼里是已知的低风险读工具**，它就会被放行，而登记表连问都没被问过。★ 本批**没有**偷偷加这个端口，也没有把它塞进 `resolveConnectorId` 的返回值里凑合 |
+| 22 | ★★ **连接器声明里的工具名该写「公开名」还是「裸名」**（第 17 轮**新查出**；第 18 轮**功能上已两可**） | 产品 + 项目主（**只需定约定**，不再是功能阻塞） | 第 17 轮接上 DSH 的 MCP 命名契约（`mcp__<serverName>__<rawName>`，逐字读 `packages/mcp/mcp-client/src/tools.ts`）后照出来的一件事：**声明里写的是裸名**（`list_issues`）而**线上来的永远是公开名**。实测（第 17 轮）：`github` 声明 `list_issues` 时，调 `mcp__github__list_issues` ⇒ **`deny`「没有声明工具」** ⇒ **一个正确声明过的工具，在真 DSH 进程里会被拒**。★★ **第 18 轮已修**：`registry.mjs` 的 `declaredToolNames` 让登记表**同时**认两个名字（归属与判定共用**一份**实现），实测该调用在连接器层从 `deny` 变成 **`allow`**。⇒ **要裁决的只剩「写哪个」这个约定** | ★ 功能上**两种写法现在都能工作**（写裸名 ⇒ 由 `declaredToolNames` 推导公开名；写公开名 ⇒ 字面命中）。**不要**为了"统一"删掉裸名那一半——它兜住"连接器声明一个 DSH 核心工具名"那一类合法用法。★ 也**不许**在归属时"把命名空间剥掉"：DSH 的公开名在归一化/截断时会被替换成 12 位 SHA-256 后缀（`mcp__github__a b` ⇒ `mcp__github__a_b_200f08ef849a`），那时**剥不出** rawName；`tools.ts:9-10` 逐字写着 "the public name is never parsed to recover it"。★ 建议**按连接器自己那一侧的名字写**（可读，且是唯一总能写对的形式），由登记表负责换算 |
+| 23 | ★★ **命名空间"认不出来"的那一类要不要按教义拒**（第 17 轮**新查出**，见 §4.2 第三次末段） | 产品 + 项目主 | `mcp__evil__x`：一个 MCP 公开名，而它那个命名空间**没有任何已知连接器**占着（一次漏配，或一次**未经声明的挂载**）。它今天落到**政策门**（不是登记表）。按 `registry.mjs` 文件头 ① 的头号教义，它应当**被拒**——而做不到的原因是**端口形状**：`resolveConnectorId` 的值域是 `string|null`，**装不下"拒"**。要裁决的是：**要不要**新增一个端口（例如 `connectorShape` 谓词）让"连接器形状、但命名空间不认识"能被表达成一次**具名的拒绝** | ★ 这一格与第 22 条是**相反方向**的两个缺口，别合并：第 22 条是"**已登记的**连接器把**合法**工具拒了"（过严），本条是"**未登记的** MCP 服务器把工具放过去"（过松）。★ 不裁决则：一个未声明的 MCP 服务器挂上来，它的工具走政策门——未知工具在那里是 fail closed，所以**今天不致命**；但**一旦某个名字在政策门眼里是已知的低风险读工具**，它就会被放行，而登记表连问都没被问过。★ 本批**没有**偷偷加这个端口，也没有把它塞进 `resolveConnectorId` 的返回值里凑合。★ 它与第 24 条的关系：**两条都是"过松"方向**（都该拒而没拒），而第 24 条更根本——**今天即使它被拒了，理由也会是政策门而不是登记表** |
+| 24 | ★★★ **政策门要不要从连接器声明里读「能力」**（第 18 轮**新查出**，见 §4.2 第四次） | 产品 + 架构 | 第 18 轮修好"声明名 vs 公开名"之后，**最终判决仍然是 `deny`，理由是 `[政策门]`**：`tool-capability.mjs` 的 `resolveTool` 对不在它目录里的名字一律给 `direction: 'write'`、`requiresApproval: true`（fail closed），而 MCP 工具的公开名**不在那个目录里**。⇒ 一句必须说清的话：**连接器层今天只能让事情更严，永远不能让它更松**——一个"连接器声明了 `allow`、而每次调用都要人批"的系统，与一个"连接器层根本没接上"的系统，在**最终判决**上是同一个 `deny`（只不过前者的理由里写着 `[政策门]`）。要裁决的是：**政策门要不要（以及怎么）从声明里取能力/风险**，从而让连接器层的 `allow` 真的生效 | ★ 这**不是**一个明显的 bug：`deny > ask > allow` 的取严合并正是为了让连接器层成为**额外**约束而不是替代品；让政策门从**声明**读能力会把两层耦合成一层，并打开一个新方向——**一条写错的声明可以下调政策门的评估**（层内"风险只能往上抬"那条纪律管不到跨层）。⇒ 三条路各有代价：**(a)** 保持现状（MCP 工具一律要人批，最安全，但连接器策略事实上只用于**收紧**）；**(b)** 让声明向政策门提供能力（连接器策略真正生效，但引入跨层下调的口子）；**(c)** 折中：只允许声明**抬升**，政策门对声明来的能力取 `max(静态评估, 声明)`。★ 本批**没有**动 `tool-capability.mjs`，也没有把这个口子偷偷打开 |
 
 ---
 

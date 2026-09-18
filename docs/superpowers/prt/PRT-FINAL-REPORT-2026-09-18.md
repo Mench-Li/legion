@@ -5,11 +5,16 @@
 - 权威台账：[`PRT-PROGRESS.md`](./PRT-PROGRESS.md) —— **145 行 = 140 ✅ / 1 ⬜ / 4 ⏸**
 - 对照表：[`MULTI-AGENT-FEATURE-STATUS.md`](../../MULTI-AGENT-FEATURE-STATUS.md) —— F-01…F-25
 - 目标文档：[`MULTI-AGENT-FEATURE-OPTIMIZATION.md`](../../MULTI-AGENT-FEATURE-OPTIMIZATION.md)
-- 最近一轮 CI：`.ci/r16b`（本轮改动后重跑）／上一轮 `.ci/r15b` —— **9/9 阶段 PASS，exit 0**（`test` ≈ 800–842s，`skipped=1` 为已知的 secret-store）
-- 相关提交：`502b636`（F-21 判定面，29 文件）、`c567791`、`d2168a2`、本轮（F-21 **投递面**，13 文件）
+- 最近一轮 CI：`.ci/r18`（本轮改动后重跑）／上一轮 `.ci/r17`、`.ci/r16b` —— **9/9 阶段 PASS，exit 0**（`test` ≈ 800–852s，`skipped=1` 为已知的 secret-store）
+- 相关提交：`2816b34`（第 17 轮记账）、`ed2518d`（**DSH 公开名契约**）、`75ea3e1`（F-21 投递面）、`8ba5609`（**第 18 轮：登记表同时认声明名与公开名**）
 
-> ★ 本报告第 16 轮**追加**了一节「三、本轮又做了什么」的最后一小节与第二节的三条新裁决项；
-> 结论那一段（"剩余 5 项本机不可关闭"）**没有变**，变的是**为什么**——见 §2.1 的 A 项与新加的 D/E 两项。
+> ★ 本报告已**追加到第 18 轮**。结论那一段（"剩余 5 项本机不可关闭"）**没有变**——
+> 那 5 项是**台账**里的非 ✅ 行（1 ⬜ + 4 ⏸）；变的是**为什么**，
+> 以及 §2.1 那张**裁决项**表（A…H）的成员。
+>
+> ★★ 第 18 轮新查出的一条值得单独点名（§2.1 的 **H**）：
+> 把"声明名 vs 线上名"修好之后，**最终判决仍然是 `deny`，理由是 `[政策门]`** ——
+> **连接器层今天只能让事情更严，永远不能让它更松。**
 
 ---
 
@@ -35,6 +40,11 @@
 
 ### 2.1 需要您决策的（有具体动作，但归属不在我手里）
 
+> ★ 这张表列的是**裁决项**，不是台账行——两者的条数**不同**，也不该相同：
+> 一个裁决项可能挡住多条台账行（比如 **A** 同时挡住"连接器声明"与"路径范围"），
+> 而一条 ⏸ 台账行也可能**不需要任何裁决**（比如 PRT-316 只是**日期未到**）。
+> 标题里的"5 项"是**台账**的非 ✅ 行数（1 ⬜ + 4 ⏸）。
+
 | # | 项 | 状态 | 精确的最后一根线 | 为什么我没做 |
 | --- | --- | --- | --- | --- |
 | **A** | **第 19 条**：部署配置键 → 组合根 | ★ **本轮已推进一大步**：投递面建好了（`connector-port.mjs` → `root-row.mjs`），`connectorJudgment` 在有那个键时**真的**是 `true` | 剩下的那一根线**只剩一处，而且与 `LEGION_PATH_SCOPE` 是同一处**：`LEGION_CONNECTOR_DECLARATIONS` 在 `runtime/config-schema.mjs` 的 `fields` 里，却**不在** `product/process-manifest.mjs` 的 runtime `envNames` 里。决定性实测：`buildChildEnv()` 对未声明的键在 `values` 里**抛**、在 `baseEnv` 里**静默丢掉** | `product/process-manifest.mjs` 是**另一会话的在制品**（`git status` 显示 M）。加一行到那个数组即可，但按纪律不碰 |
@@ -42,8 +52,9 @@
 | **C** | **第 16 条**：死代码处置 | 待裁决 | 模块级探针：**9** 个不可达模块；函数级探针：**43** 条（其中 `product/` 一簇 **23** 个）。9 vs 43 的差本身就是裁决依据 | 这是"要不要删/要不要接"的**产品决定**，不是代码问题 |
 | **D** | ★★ **`TEAM_HUB_TOKEN` 到底该不该进 runtime 的 `envNames`**（本轮**新查出**，早于本轮且**没有任何归属**） | 待裁决 | `runtime/dsh-composition/root.mjs` 的 `readString(source, keys)` **确实**会读它（`ENFORCEMENT_CONFIG_FIELDS.hubToken`），但它**不在** `product/process-manifest.mjs` 的 runtime `envNames` 里 ⇒ **配了也传不到进程**。不致命的原因是它**可选**（`MISSING_FIELD_CODES` 里没有它，缺了不拦装配） | 两条路都行、但必须选一条：**①** 加进 runtime 的 `envNames`（那就真的能配了）；**②** 从 `runtime/config-schema.mjs` 的 `fields` 里**拿掉**它（那就别再声称本进程能配它）。"这个进程能配它"与"它能拿到它"必须有一处让步——★ 我**没有**替您选 |
 | **E** | ★★★ **F-21 那条「未声明就拒绝」的教义要不要在生产里生效** | ★ **第 17 轮已解决**（原记"需要一条本仓没有的源信号"是**错**的——约定在执行引擎那边） | 新增 `runtime/connectors/public-name.mjs` 逐字镜像 DSH 的 MCP 公开名契约（`mcp__<serverName>__<rawName>`，逐字读 `packages/mcp/mcp-client/src/tools.ts`），并接成归属的**第一条**依据 ⇒ **`mcp__github__delete_repo` 从 `allow` → `deny`**，理由 `[连接器 github] …没有声明工具「…」`。判据含**一条把 DSH 真源码切片求值对跑 18 组**的用例（18/18 一致） | 本条已不需裁决。★ 而它**照出了两条新的**，见下面的 F/G |
-| **F** | ★★★ **连接器声明里的工具名该写「公开名」还是「裸名」**（第 17 轮**新查出**） | 待裁决 | 声明里写的是**裸名**（`list_issues`）或 **DSH 核心工具名**（`git-status`，今天全部夹具都是这种），而**线上来的永远是公开名**（`mcp__github__list_issues`）。实测：`github` 声明 `list_issues` 时，调 `list_issues` ⇒ `allow`，调 `mcp__github__list_issues` ⇒ **`deny`「没有声明工具」** ⇒ **一个正确声明过的工具，在真 DSH 进程里会被拒** | ★ **不许**在归属时"把命名空间剥掉"来兼容裸名：DSH 的公开名在归一化/截断时会被替换成 12 位 SHA-256 后缀（`mcp__github__a b` ⇒ `mcp__github__a_b_200f08ef849a`），那时**剥不出** rawName；`tools.ts:9-10` 逐字写着 "the public name is never parsed to recover it"。⇒ 只有"声明侧写公开名（用已导出的 `publicToolName`）"这一条路是**可判**的。不裁决则所有按裸名写的声明在真部署里**把合法工具拒掉**（fail closed，安全但功能不可用）；修法涉及契约变更 + 既有夹具全要动，所以本批没有擅自做 |
-| **G** | ★★ **命名空间"认不出来"的那一类要不要按教义拒**（第 17 轮**新查出**） | 待裁决 | `mcp__evil__x`：一个 MCP 公开名，而它那个命名空间**没有任何已知连接器**占着（一次漏配，或一次**未经声明的挂载**）。按头号教义它应当被拒，而做不到的原因是**端口形状**：`resolveConnectorId` 的值域是 `string 或 null`，**装不下"拒"** | ★ 本条与 **F** 方向**相反**，**不许合并**：F 是**已登记**的连接器把**合法**工具拒了（过严），本条是**未登记**的 MCP 服务器把工具放过去（过松）。不裁决则今天**不致命**（未知工具在政策门是 fail closed），但**一旦某个名字在政策门眼里是已知的低风险读工具**，它就会被放行，而登记表连问都没被问过 |
+| **F** | ★★★ **连接器声明里的工具名该写「公开名」还是「裸名」**（第 17 轮**新查出**；第 18 轮**功能上已两可**，只剩约定要定） | 只需定约定 | 声明里写的是**裸名**（`list_issues`），而**线上来的永远是公开名**（`mcp__github__list_issues`）。第 17 轮实测：调 `mcp__github__list_issues` ⇒ **`deny`「没有声明工具」** ⇒ **一个正确声明过的工具，在真 DSH 进程里会被拒**。★★ **第 18 轮已修**：`registry.mjs` 的 `declaredToolNames` 让登记表**同时**认两个名字（归属与判定共用一份实现），实测该调用在**连接器层**从 `deny` 变成 **`allow`** | ★ 功能上**两种写法现在都能工作**。**不要**为"统一"删掉裸名那一半——它兜住"连接器声明一个 DSH 核心工具名"那一类合法用法。★ 也**不许**在归属时"把命名空间剥掉"：公开名在归一化/截断时会被替换成 12 位 SHA-256 后缀（`mcp__github__a b` ⇒ `mcp__github__a_b_200f08ef849a`），那时**剥不出**原名；`tools.ts:9-10` 逐字写着 "the public name is never parsed to recover it"。★ 建议**按连接器自己那一侧的名字写**（可读，且是唯一总能写对的形式），由登记表负责换算 |
+| **G** | ★★ **命名空间"认不出来"的那一类要不要按教义拒**（第 17 轮**新查出**） | 待裁决 | `mcp__evil__x`：一个 MCP 公开名，而它那个命名空间**没有任何已知连接器**占着（一次漏配，或一次**未经声明的挂载**）。按头号教义它应当被拒，而做不到的原因是**端口形状**：`resolveConnectorId` 的值域是 `string 或 null`，**装不下"拒"** | ★ 本条与 **F** 方向相反，**不许合并**：F 是**已登记**的连接器把**合法**工具拒了（过严），本条是**未登记**的 MCP 服务器把工具放过去（过松）。不裁决则今天**不致命**（未知工具在政策门是 fail closed），但**一旦某个名字在政策门眼里是已知的低风险读工具**，它就会被放行，而登记表连问都没被问过 |
+| **H** | ★★★ **政策门要不要从连接器声明里读「能力」**（第 18 轮**新查出**，**本表最要紧的一条**） | 待裁决 | 第 18 轮修好 F 之后，**最终判决仍然是 `deny`，理由是 `[政策门]`**：`tool-capability.mjs` 的 `resolveTool` 对不在它目录里的名字一律给 `direction: 'write'`、`requiresApproval: true`（fail closed），而 MCP 工具的公开名**不在那个目录里**。⇒ **连接器层今天只能让事情更严，永远不能让它更松**——一个"连接器声明了 `allow`、而每次调用都要人批"的系统，与一个"连接器层根本没接上"的系统，在**最终判决**上是同一个 `deny`（只不过前者的理由里写着 `[政策门]`） | ★ 这**不是**明显的 bug：`deny > ask > allow` 的取严合并正是为了让连接器层成为**额外**约束而不是替代品。⇒ 三条路各有代价：**(a)** 保持现状（MCP 工具一律要人批，最安全，但连接器策略事实上只用于**收紧**）；**(b)** 让声明向政策门提供能力（连接器策略真正生效，但引入**跨层下调**的口子——层内"风险只能往上抬"那条纪律管不到跨层）；**(c)** 折中：只允许声明**抬升**，政策门取 `max(静态评估, 声明)`。★ 本批**没有**动 `tool-capability.mjs`，也没把这个口子偷偷打开 |
 
 > **A 与 B 都可以由另一会话收尾，或由您在它提交后让我收尾。** 两处都精确到一处调用点。
 
@@ -65,7 +76,7 @@
 
 ## 三、第 15 轮做了什么
 
-### 3.0 第 16 轮（本轮）：F-21 的**投递面**——那份声明**从哪来**
+### 3.0 第 16 轮：F-21 的**投递面**——那份声明**从哪来**
 
 第 15 轮把判定面接进了组合根，但末尾如实留了一句「生产入参里没有连接器声明表」。
 本轮补的就是那个"没有"：新增 `runtime/dsh-composition/connector-port.mjs`（+14 例）+
@@ -156,6 +167,44 @@ is `mcp__<serverName>__<rawName>`, normalized to the DeepSeek function-name
 
 ---
 
+### 3.0c 第 18 轮：声明名 vs 线上名关掉一半——**而修好之后最终判决仍然是 deny**
+
+第 17 轮照出的缺口（声明写**裸名**、线上来**公开名** ⇒ 一个**正确声明过**的工具
+在真 DSH 进程里被拒）本轮关掉了一半：`registry.mjs` 新增 `declaredToolNames`，
+让登记表**同时**认得这两个名字，**归属与判定共用一份实现**。
+
+| 调用名 | 第 17 轮 | 第 18 轮 |
+| --- | --- | --- |
+| `list_issues`（声明里写的） | `allow` | `allow`（未变） |
+| `mcp__github__list_issues`（DSH 真会送的） | **`deny`「没有声明工具」** | **连接器层 `allow`** |
+| `mcp__github__delete_repo`（未声明） | `deny` | `deny`（教义照旧） |
+
+★ 推导出的公开名是**算**出来的、**不存**进声明体——存一份就是"又一份记录"，
+命名规则一变就成了**过期的事实**，而它看起来像作者写下的内容
+（与 `registry.mjs` 文件头 ② 删掉 `risk` 是同一条纪律）。
+
+★★★ **而这一轮更值得说的是修完之后的事**：**最终判决仍然是 `deny`，理由是 `[政策门]`。**
+`tool-capability.mjs` 的 `resolveTool` 对不在它目录里的名字一律给
+`direction: 'write'`、`requiresApproval: true`，而 **MCP 公开名不在那个目录里**。
+
+> **连接器层今天只能让事情更严，永远不能让它更松。**
+
+一个"连接器声明了 `allow`、而每次调用都要人批"的系统，与一个"连接器层根本没接上"
+的系统，在**最终判决**上是同一个 `deny`——只不过前者的理由里写着 `[政策门]`，
+而后者连理由都没有。见 §2.1 的 **H**。
+
+★ 判据把两条读数**分开取**（`outerAllow`/`outerDeny` vs 最终的 `kind`），
+免得"公开名已支持"被读成"一次真的 MCP 调用今天就能按声明跑通"。
+
+★ 一个"把归属键扩宽"的改动还安静地撞翻了**两件事**：
+**①** 派生名与字面名撞车（`gitlab` 逐字声明 `mcp__github__list_issues` 而 `github`
+声明 `list_issues`）⇒ 装配期具名拒绝——*那不是回归：那是两条声明**本来就**在抢
+同一个名字，而之前没有任何一处能把这件事说出来*；
+**②** `connector-port.mjs` 的 `toolCount` 数的是"**拥有的名字**"，键一扩宽就从 1
+**翻倍**成 2，三条既有判据当场红 ⇒ 改成数**声明的工具**。
+
+---
+
 ### 3.1 第 15 轮：F-21 的**判定面**
 
 台账 F-21 那一行自己点名的阻塞**已经过期**——它写着
@@ -226,14 +275,15 @@ is `mcp__<serverName>__<rawName>`, normalized to the DeepSeek function-name
 
 | 项 | 读数 |
 | --- | --- |
-| 全量 CI（`502b636`，`.ci/r15b`） | **9/9 PASS，exit 0**；`test` 801030ms；`skipped=1`（secret-store，已知） |
-| 受影响面（connectors + composition + connector-store + connector-http） | **239/239** |
-| connectors 套件（含本批新注册 `decision-port.test.mjs`） | **75/75** |
-| dsh-composition 套件 | **115/115** |
-| `team-hub/connector-store.test.mjs` | **23/23**（测试⑧那句"缺的是连接目标，不是策略"**第一次成为真的**） |
+| 全量 CI（`8ba5609`，`.ci/r18`） | **9/9 PASS，exit 0**；`test` ≈ 852s；`skipped=1`（secret-store，已知） |
+| connectors 套件（含 `public-name` / `registry` / `decision-port` / `target-binding` / `outcome-port`） | **123**（第 17 轮）→ 本批 `registry` +5 ⇒ **128** |
+| 受影响面（connectors + dsh-composition + connector-store + connector-http + config + prt） | **1331/1331** |
+| `connector-port.test.mjs` | **18/18**（含 ④d 重设计、④d2 撞车、④f 自我撞车） |
+| `root-row.test.mjs` | **42/42**（含"公开名按声明判定"+两条读数分开取的新用例） |
 | `boundary-facts`（手钉坐标） | **34/34** |
-| `feature-table` / `progress-check` / `intervention-coverage` / `reachability` | 52/52 |
-| 可达性 | 不可达 **46**（未增加）；`decision-port.mjs` 等 5 个模块**全部可达** |
+| `feature-table` / `progress-check` / `intervention-coverage` / `reachability` | 77/77 |
+| 可达性 | 不可达 **46**（未增加）；`public-name.mjs` 经 `connector-port.mjs` **可达** |
+| 全量 CI（`502b636`，`.ci/r15b`） | **9/9 PASS，exit 0**；`test` 801030ms |
 
 ★ 有一处**必须说清**：`--only boundary` 那一快阶段**不含** `boundary-facts` 套件
 （它在 `test` 阶段），所以坐标位移是**`test` 阶段抓到的**——快阶段绿**不代表**坐标对。
@@ -254,7 +304,18 @@ is `mcp__<serverName>__<rawName>`, normalized to the DeepSeek function-name
    没有在真 DSH 进程里跑过（它们不在补丁层里）。
 4. ⚠️ 半开探针那个修复的生产效果**仍未被观察**：今天没有任何生产路径会调 `recordOutcome`，
    所以熔断器在跑着的系统里永远合闸；⑨⑤ 是在**测试里**把它推起来的。
-5. ⚠️ 函数级审计的 **106 条死条目里 98 条未逐条核实**，是文本分析的**下界**。
+5. ⚠️ **函数级审计的 **106 条死条目里 98 条未逐条核实**，是文本分析的**下界**。
+6. ⚠️ ★★★ **第 18 轮：修好"声明名 vs 线上名"之后，最终判决仍然是 `deny`**
+   （理由是 `[政策门]`）——`tool-capability.mjs` 的 `resolveTool` 对不在它目录里的名字
+   一律给 `direction: 'write'`、`requiresApproval: true`，而 MCP 公开名**不在那个目录里**。
+   ⇒ **连接器层今天只能让事情更严，永远不能让它更松**（见 §2.1 的 **H**）。
+   判据把两条读数**分开取**（`outerAllow` vs 最终的 `kind`），
+   免得"公开名已支持"被读成"一次真的 MCP 调用今天就能按声明跑通"。
+7. ⚠️ ★★ **那条命名契约是"读源码"得到的，不是在真进程里观察到的**：
+   `public-name.test.mjs` ①a 把 DSH 的 `publicToolName`**源码切片求值**对跑 18 组
+   （18/18 一致），但**没有**一次真的 MCP server 端到端跑过，
+   也**没有**在跑着的 DSH 进程里观察过一次 `tools/call` 的公开名。
+   `serverName == connectorId` 仍是**部署契约**，本仓无法验证。
 
 ---
 

@@ -339,10 +339,9 @@ export function trackedFiles() {
 }
 
 /**
- * §5「需人工介入清单」里**真实的条号**集合。
+ * §5「需人工介入清单」那一段的**正文**。
  *
- * 取法是**按位置**而不是按形状：从 `## 5.` 那个标题往后，到下一个 `## ` 标题为止，
- * 这个区间里 `| N | … |` 形式的编号就是这张清单的条号。
+ * 取法是**按位置**：从 `## 5.` 那个标题往后，到下一个 `## ` 标题为止。
  *
  * ## 为什么不按"全文档所有 `| N |`"来取（试过，会错）
  *
@@ -352,16 +351,31 @@ export function trackedFiles() {
  * 按全文档取，`§5 第 3 条` 会解析**成功**，而它指向的是优先级表——
  * 一个会"解析成功但指错地方"的判据，比一个解析失败的判据更坏。
  *
+ * ★ 本函数是 §5 正文的**唯一**取法：`matrixItems()` 与
+ *   `scripts/prt/intervention-coverage.mjs` 的 `sectionFive()` 都走它，
+ *   免得两处各写一遍区间规则、然后慢慢漂移。
+ */
+export function sectionFiveText(path = MATRIX_PATH) {
+  const lines = readFileSync(path, 'utf8').split('\n')
+  const start = lines.findIndex((l) => /^##\s*5\.\s/.test(l))
+  if (start < 0) return ''
+  let out = ''
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^##\s/.test(lines[i])) break
+    out += lines[i] + '\n'
+  }
+  return out
+}
+
+/**
+ * §5「需人工介入清单」里**真实的条号**集合。
+ *
  * @returns {Set<number>} 条号
  */
 export function matrixItems(path = MATRIX_PATH) {
-  const lines = readFileSync(path, 'utf8').split('\n')
-  const start = lines.findIndex((l) => /^##\s*5\.\s/.test(l))
-  if (start < 0) return new Set()
   const items = new Set()
-  for (let i = start + 1; i < lines.length; i++) {
-    if (/^##\s/.test(lines[i])) break
-    const m = /^\|\s*(\d+)\s*\|/.exec(lines[i].trim())
+  for (const line of sectionFiveText(path).split('\n')) {
+    const m = /^\|\s*(\d+)\s*\|/.exec(line.trim())
     if (m) items.add(Number(m[1]))
   }
   return items

@@ -1341,6 +1341,12 @@ async function stageTest() {
   // 断言：正对照成立（探针活着）、没有未分类的不可达模块、基线里没有已删除的文件、
   // 四族 gap 的读数仍在。**基线过期（模块变可达）不判红**——那是好消息，不是回归。
   { label: 'reachability（PRT-611 续：可达性探针——已交付但生产里到不了）', files: ['scripts/prt/reachability.test.mjs'], cwd: ROOT },
+  // ★ 这一套与上一套是**同一个形状**的两个方向，分开注册是有意的：
+  //   · reachability —— 基线里每条 `gap` 必须写得出**裁决处指针**（§5 第 N 条，且 N 存在）
+  //   · intervention-coverage —— 台账里每一条**非 ✅** 的行必须被 §5 **点名**
+  // 两者治的都是"两份清单之间没人交叉核对"。本仓为此漏过两次
+  // （§5 第 20 条、第 21 条），两次都是"一条待办谁也没在看"。
+  { label: 'intervention-coverage（PRT-611 续：台账非 ✅ 的行必须被 §5 点到名——治“没有任何人在等它”）', files: ['scripts/prt/intervention-coverage.test.mjs'], cwd: ROOT },
     // 阶段 2：DshRuntimeAdapter。全部用假宿主端口，覆盖真实 DSH 无法稳定复现的故障
     // （run.result 永不结算、abort 无效、畸形结果、事件流中断）。
     { label: 'dsh-adapter（PRT-201~209：DSH 适配器契约、脱敏、看门狗与取消/恢复）', files: ['runtime/adapters/dsh/adapter.test.mjs'], cwd: ROOT },

@@ -1814,10 +1814,15 @@ async function stageTest() {
     // 词表逐字比对（再抄一遍互相核对时，两边一起写错它全绿），
     // `connector-http.test.mjs` ⑤ 断言路由守卫写成**字面量**
     // （正则守卫会悄悄不进平台契约——PRT-507 那个坑）。
+    // ★ `target-binding.test.mjs`（2026-09-18）是**跨两半**的那一组：
+    //   策略在控制面、连接目标在部署配置，两边在 `bindConnectorTargets` 汇合。
+    //   它同时盯三条 fail-closed 拒绝——少了它们，"漏配"与"这个连接器没配"
+    //   在读数上同形。
     {
       label: 'connectors（F-21：未声明即拒绝、风险只能上抬、密钥只许引用、熔断有截止时间）',
       files: [
         'runtime/connectors/registry.test.mjs',
+        'runtime/connectors/target-binding.test.mjs',
         'team-hub/connector-store.test.mjs',
         'team-hub/connector-http.test.mjs',
       ],

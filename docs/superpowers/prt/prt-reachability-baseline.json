@@ -138,6 +138,11 @@
       "reason": "§4.2：F-21 判定面零生产调用方。⇒ 裁决处：§5 第 13 条"
     },
     {
+      "file": "runtime/connectors/target-binding.mjs",
+      "class": "gap",
+      "reason": "F-21 的**组装点**：策略那一半在控制面（已冻结、可审计），连接目标那一半按业主 2026-09-18 裁决归**运维/部署配置**——而配置键尚未落地，因为 `product/process-manifest.mjs` 与 `product/config-schema.mjs` 当时有别的会话的在制品。⇒ 裁决处：§5 第 19 条（`docs/DECISION-RUNREQUEST-EXECUTION-PLANE.md` §8）"
+    },
+    {
       "file": "runtime/context/index.mjs",
       "class": "by-design",
       "reason": "re-export 出口"

@@ -415,7 +415,7 @@ deny 会被宽松的默认静默盖掉，而他写那条正是为了拦住一样
 
 | 环节 | 位置 | 读数 |
 |---|---|---|
-| 生产装配的**唯一**入口 | `runtime/dsh-composition/plugins/root-row.mjs:485-509` | `installEnforcementRoot({ env, decide, createRequestApproval })` —— **只有三个键** |
+| 生产装配的**唯一**入口 | `runtime/dsh-composition/plugins/root-row.mjs:508-536`（§9.5 接线前是 485-509） | `installEnforcementRoot({ env, decide, createRequestApproval })` —— **只有三个键** |
 | 组合根透传 | `runtime/dsh-composition/root.mjs:465-466` | `whitelist: input.whitelist, pathScope: input.pathScope` ⇒ 两者都是 `undefined` |
 | 装配默认值 | `runtime/dsh-composition/assemble.mjs:135-136` | `whitelist = null, pathScope = null` |
 | 桥的行为 | `runtime/dsh-composition/tool-request.mjs:638-651` | `if (pathScope === null) return undefined` —— **返回 undefined 就是放行** |

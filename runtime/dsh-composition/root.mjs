@@ -56,7 +56,7 @@
 //
 //   · `decide`（策略门）由调用方注入。★ 本行**曾经**写着"全仓库只有测试实现，
 //     没有生产实现"——**那句话现在是错的**：`plugins/root-row.mjs` 的
-//     `createPolicyDecide()` 就是生产实现，而 `root-row.mjs:483` 在没显式给
+//     `createPolicyDecide()` 就是生产实现，而 `root-row.mjs:484` 在没显式给
 //     `decide` 时用它。留这段订正记录是因为它不是一处笔误，而是本仓库
 //     反复出现的形状：
 //

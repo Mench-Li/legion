@@ -104,7 +104,7 @@ spec §4.4 要求四件事一起做（**服务/工具策略、风险分级、Sec
 
    | 环节 | 位置 | 读数 |
    |---|---|---|
-   | 生产装配唯一入口 | `plugins/root-row.mjs:485-509` | `installEnforcementRoot({env, decide, createRequestApproval})`——只有三个键 |
+   | 生产装配唯一入口 | `plugins/root-row.mjs:485-509`（⚠️ 这是 09-17 当天的坐标；§9.5 接线后该调用位移到 508-536） | `installEnforcementRoot({env, decide, createRequestApproval})`——只有三个键 |
    | 组合根透传 | `root.mjs:465-466` | `whitelist`/`pathScope` ⇒ `undefined` |
    | 装配默认值 | `assemble.mjs:135-136` | 均为 `null` |
    | 桥的行为 | `tool-request.mjs:638-651` | `null` ⇒ 返回 `undefined` ⇒ **放行** |

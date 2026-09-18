@@ -1194,7 +1194,7 @@ applier **抛错**的项不参与复核改写（它没有成功执行过，「�
 
   | 环节 | 位置 | 读数 |
   |---|---|---|
-  | 生产装配的**唯一**入口 | `plugins/root-row.mjs:485-509` | `installEnforcementRoot({ env, decide, createRequestApproval })`——**只有三个键** |
+  | 生产装配的**唯一**入口 | `plugins/root-row.mjs:508-536`（§9.5 接线前是 485-509） | `installEnforcementRoot({ env, decide, createRequestApproval })`——**只有三个键** |
   | 组合根透传 | `root.mjs:465-466` | `whitelist: input.whitelist, pathScope: input.pathScope` ⇒ 均 `undefined` |
   | 装配默认值 | `assemble.mjs:135-136` | `whitelist = null, pathScope = null` |
   | 桥的行为 | `tool-request.mjs:638-651` | `if (pathScope === null) return undefined`——**返回 undefined 即放行** |

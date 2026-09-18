@@ -135,7 +135,34 @@ function probeHandle(refs = [RUNTIME_MODEL_KEY_REF]) {
 }
 
 /** 起一个真 DSH 进程，等它自己退出（探针里调 `appExit`）；超时则杀掉。 */
-function runHost({ cliBin, cwd, env, args, timeoutMs }) {
+/**
+ * 起一次宿主，并在**拿到证据之后**就不再无限等它退出。
+ *
+ * ## 为什么要"拿到证据就收手"（2026-09-18 加，依据是实测出来的分布）
+ *
+ * 本套件此前是"一直等到进程退出，超时才算输"。而 `scratch/prt509-flake-rate.mjs`
+ * 量出来的是**双峰**：正常 3.1–3.7s 退出，出问题的那一半**永远不退出**
+ * （240s 预算下同样挂满）。根因也已经定位（见本文件末尾的说明）：
+ * 宿主残留了 5 个 chokidar `FSWatcher`，事件循环永远不空。
+ *
+ * ⇒ 在"永远不会退出"的情形下，那 240s **纯粹是白等**：
+ *   证据文件（= PRT-509 缺口③ 的读数）在 ~3.3s 就已经写好了。
+ *
+ *   > 判据需要的证据已经到了，而测试还在等一个**已被证明不会发生的事情**。
+ *
+ * ## 做法
+ *
+ * 轮询证据文件；它一出现就给 `graceMs` 的宽限（等一次**自然**退出），
+ * 宽限内没退就杀掉并记成 `killed-after-evidence`。
+ * `timeoutMs` **原样保留**，作为"证据始终没出现"时的外部兜底。
+ *
+ * ★ 两条边界，写清楚免得被误读：
+ *   · 这**不是**"把超时调小到能过"——超时早就不判失败了（见 `e217982`），
+ *     这里改的是**等待成本**，不是通过条件；
+ *   · `timeoutMs` **没有**被调小（仍是 240s）。一个"出问题就调小超时"的改动
+ *     会被下一个读到它的人当成"他们把它调到不红了"，而这不是本改动做的事。
+ */
+function runHost({ cliBin, cwd, env, args, timeoutMs, evidenceFile = null, graceMs = 15000 }) {
   const startedAt = Date.now()
   const child = spawn(process.execPath, [cliBin, ...args], {
     cwd,
@@ -147,15 +174,39 @@ function runHost({ cliBin, cwd, env, args, timeoutMs }) {
   let err = ''
   child.stdout.on('data', (d) => { out += d.toString('utf8') })
   child.stderr.on('data', (d) => { err += d.toString('utf8') })
+
+  let evidenceAtMs = null
+  let killTimer = null
+  let pollTimer = null
   const done = new Promise((resolve) => {
+    const finish = (code, kind) => {
+      clearTimeout(timer)
+      if (killTimer !== null) clearTimeout(killTimer)
+      if (pollTimer !== null) clearInterval(pollTimer)
+      resolve({ code, kind, evidenceAtMs, out, err, ms: Date.now() - startedAt })
+    }
     const timer = setTimeout(() => {
       try { child.kill() } catch { /* already gone */ }
-      resolve('TIMEOUT')
+      finish('TIMEOUT', 'timeout')
     }, timeoutMs)
-    child.once('close', (code) => { clearTimeout(timer); resolve(code) })
-    child.once('error', (e) => { clearTimeout(timer); resolve(`SPAWN-ERROR:${e?.code ?? e?.name}`) })
+    // 证据一到手就开始宽限倒计时。
+    if (evidenceFile !== null) {
+      pollTimer = setInterval(() => {
+        if (evidenceAtMs !== null) return
+        if (!existsSync(evidenceFile)) return
+        evidenceAtMs = Date.now() - startedAt
+        clearInterval(pollTimer)
+        pollTimer = null
+        killTimer = setTimeout(() => {
+          try { child.kill() } catch { /* already gone */ }
+          finish('KILLED-AFTER-EVIDENCE', 'killed-after-evidence')
+        }, graceMs)
+      }, 250)
+    }
+    child.once('close', (code) => finish(code, 'natural'))
+    child.once('error', (e) => finish(`SPAWN-ERROR:${e?.code ?? e?.name}`, 'spawn-error'))
   })
-  return done.then((code) => ({ code, out, err, ms: Date.now() - startedAt }))
+  return done
 }
 
 test('★★★★★ 缺口 ③（真进程）：一个真 DSH 进程在启动期从 Legion 那份文件里读到了值', async (t) => {
@@ -253,6 +304,8 @@ test('★★★★★ 缺口 ③（真进程）：一个真 DSH 进程在启动�
       env,
       args: ['--profile', PROFILE, '--patch', paths.overlayFile],
       timeoutMs: HOST_TIMEOUT_MS,
+      // ★ 证据文件一出现就不再干等（见 `runHost` 上方那段说明）。
+      evidenceFile: outFile,
     })
 
     const tail = `${result.out}\n${result.err}`.slice(-1500)
@@ -278,11 +331,18 @@ test('★★★★★ 缺口 ③（真进程）：一个真 DSH 进程在启动�
     //       行首 `MEASURE ` 是 `scripts/ci/run-ci.mjs` 认的约定，
     //       它把这样的行**成败都**带进那一条套件的摘要里
     //       （否则通过时摘要只有 `tests=1 pass=1`，读不到任何数）。
-    console.log(`[PRT-509] 宿主进程退出耗时 ${(result.ms / 1000).toFixed(1)}s`
-      + `（退出码 ${result.code}，预算 ${HOST_TIMEOUT_MS / 1000}s，`
-      + `探针读数 ${existsSync(outFile) ? '已写出' : '未写出'}）`)
+    //
+    //   ★★ `kind` 这一格是 2026-09-18 新加的，它区分三种**读数相同、含义不同**的收场：
+    //     · `natural` —— 宿主自己退了；
+    //     · `killed-after-evidence` —— 证据到手后宽限期内没退，我们收的手；
+    //     · `timeout` —— 证据**一直没出现**，外部兜底杀的（这一种才是坏消息）。
+    //   此前这三种在读数里长得一样（都是一个耗时数字），
+    //   而"它其实退不了"这件事只在第一种缺席时才看得出来。
+    console.log(`[PRT-509] 宿主进程耗时 ${(result.ms / 1000).toFixed(1)}s`
+      + `（收场 ${result.kind}，退出码 ${result.code}，预算 ${HOST_TIMEOUT_MS / 1000}s，`
+      + `证据落盘于 ${result.evidenceAtMs === null ? '未落盘' : `${(result.evidenceAtMs / 1000).toFixed(1)}s`}）`)
     console.log(`MEASURE prt509.host_exit_seconds=${(result.ms / 1000).toFixed(1)}`
-      + ` budget_seconds=${HOST_TIMEOUT_MS / 1000} exit_code=${result.code}`)
+      + ` budget_seconds=${HOST_TIMEOUT_MS / 1000} exit_code=${result.code} settle=${result.kind}`)
 
     // ① 真进程、真启动期：读数里带着那个进程的 pid。
     assert.equal(typeof reading.pid, 'number', '读数里应带探针进程的 pid')
@@ -337,11 +397,35 @@ test('★★★★★ 缺口 ③（真进程）：一个真 DSH 进程在启动�
     //     ② 降级为**读数**（上面那行 `MEASURE`），并作为**一个具名的、
     //     尚未修的缺陷**记在文档里，而不是靠一条红/绿必失真的断言来承载。
     //     **这不是"把判据放松到能过"**：②没有任何一刻被断言过"通过"，
-    //     它每轮都以 `MEASURE … exit_code=TIMEOUT` 原样出现在 CI 摘要里。
+    //     它每轮都以 `MEASURE … exit_code=…` 原样出现在 CI 摘要里。
+    //
+    //   ★★★ 根因（2026-09-18 当天晚些时候量出来的，见 `scratch/prt509-handle-probe.mjs`
+    //     / `prt509-timeline.mjs`）。**从进程内部**读 `process._getActiveHandles()`：
+    //
+    //     挂死那一轮：handles=7 [Socket×2 **FSWatcher×5**]（一直保持到被杀）
+    //     正常那一轮：退出瞬间 handles=2 [Socket×2]（**watcher 已全部关闭**）
+    //     对照：`node --test` worker 那一侧是 Socket×5 + ChildProcess×1，**零 FSWatcher**
+    //
+    //   把 `fs.watch` 打上补丁记下调用栈 ⇒ 5 个全部来自 **chokidar**，
+    //   监视对象是宿主自己的 `dsh-home/profiles/prt509probe`（含 4 个 profile 文件），
+    //   外加 Legion 那份 `/…/Legion/runtime-credentials/.credentials.yaml`。
+    //
+    //   创建点在 **DSH 侧**：`packages/credentials/credentials-local/src/index.ts:585`
+    //   的 `chokidarWatch(...)`，关闭点在 `:611` 的 `watcher.close()`（disposer 里）。
+    //   ⇒ 出问题时那个 disposer 没有把 watcher 关掉，
+    //   于是**事件循环永远非空**，Node 不会自然退出。
+    //
+    //   > 这解释了双峰为什么没有中间态：不是"慢"，而是**清理这一步成功或失败**。
+    //
+    //   ⚠️ 我**没有**去看 chokidar/DSH 那一段代码为什么有时不调 disposer，
+    //   也**没有**改 DSH（那是另一个检出的代码，`packages/credentials/…`）。
+    //   本批交付的是：**读数 → 率 → 根因定位**，以及让本套件不再为一件
+    //   已被证明不会发生的事白等（见 `runHost` 里的证据轮询）。
     if (result.code !== 0) {
-      console.log(`[PRT-509] ⚠️ 宿主进程没有干净退出（${result.code}，`
+      console.log(`[PRT-509] ⚠️ 宿主进程没有干净退出（${result.kind}，退出码 ${result.code}，`
         + `${(result.ms / 1000).toFixed(1)}s）——**这不算本用例失败**（凭证读数已取得），`
-        + '但它是一个**未修的缺陷**：约 50% 的运行里宿主根本不退出（双峰：3.3s 或永不）。')
+        + '但它是一个**未修的缺陷**：约 50% 的运行里宿主残留下 5 个 chokidar FSWatcher，'
+        + '事件循环永不空，因此从不自然退出（双峰：3.3s 或永不）。')
     }
     // ① 的证据断言：读数在（上面已 assert），值、来源、sha 都对（上面已 assert）。
     //    唯一附加的要求是"这一轮确实取到了数"——它每轮都成立。

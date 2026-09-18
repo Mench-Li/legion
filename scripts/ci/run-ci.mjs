@@ -1220,6 +1220,31 @@ async function stageTest() {
       files: ['scripts/prt/whitelist-limb.test.mjs'],
       cwd: ROOT,
     },
+    // PRT-610 的**出站车道**（决策表第 19 条 / 第 15 项的施工）。两半分开登记，
+    // 因为它们各自能被单独跑出一个"绿"而合起来仍然不通——而那种绿是本轮之前
+    // 全部有关工具账的绿的样子。
+    //
+    // ★ 环的证据在 `toolcall-drain` ①：执行面（无 token）写 spool →
+    //   worker（有 token）收账 → **真 SQLite** 里出现带 `decisionSource` 的行 →
+    //   `toolCallLogEvidence().recorded` 由 `false` 翻成 `true`。
+    //   在那之前，`release-gate.mjs` 的 `decisionSourceRecorded` 在全仓
+    //   **没有任何产出者**：它写得很谨慎（"缺失的证据不是证据"），于是永远判否。
+    //
+    // ★ 两半的判据都刻意断言**码与行号**，而不是"跑通了"：
+    //   · 写入侧 ①：Run id 含分隔符时**拒绝而不消毒**（消毒会让 `a/b` 与 `a_b`
+    //     落进同一个目录 ⇒ 两个 Run 合流成一本账）；①c 挡的是 win32 会静默去掉的
+    //     尾部点/空格——它与"消毒"是同一个后果，而一个字符都没被替换；
+    //   · 写入侧 ②：中间一行坏掉时，好的照常读回、坏的**带行号具名**、
+    //     `complete:false`——而"跳过派"读出的**记录数完全一样**，
+    //     差别只在 `complete` 上，所以只看 `records.length` 的人分不出这两者；
+    //   · 写入侧 ⑤：**不**校验 `decisionSource` 的语义（词表只有
+    //     `team-hub/tool-call-log.mjs` 那一份），并有一条断言**读源码**确认
+    //     这里没有抄第二份来源名单；
+    //   · 收账侧 ③：收两遍行还是一行（崩溃后重跑必须安全），且有一条断言确认
+    //     本模块**不出现** `unlinkSync`/`writeFileSync`——"收完就删 + 记游标"
+    //     会在崩溃后把没落账的几条当成"已经收过了"。
+    { label: 'toolcall-spool（PRT-610 出站车道·写入侧：执行面无凭证时怎么把账带出去）', files: ['runtime/toolcall/spool.test.mjs'], cwd: ROOT },
+    { label: 'toolcall-drain（PRT-610 出站车道·收账侧：整条环走到真库，把 decisionSourceRecorded 翻成 true）', files: ['orchestrator/worker/toolcall-drain.test.mjs'], cwd: ROOT },
     { label: 'calendar（日程日历契约）', files: ['team-hub/calendar.test.mjs'], cwd: ROOT },
     { label: 'calendar-ui（P2-5 日历前端纯函数：周视图/重复文案/关联跳转/表单校验）', files: ['workbench/scripts/calendar-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'chat-ui（P2-6 对话前端纯函数：健康判定/AI 三态/合并/断线补齐）', files: ['workbench/scripts/chat-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },

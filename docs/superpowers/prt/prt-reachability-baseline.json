@@ -148,16 +148,6 @@
       "reason": "re-export 出口"
     },
     {
-      "file": "runtime/dsh-composition/execution-scope.mjs",
-      "class": "gap",
-      "reason": "§5.2：连端口都没有 ⇒ 裁决处：§5 第 14 条（三道范围检查的生产接线）"
-    },
-    {
-      "file": "runtime/dsh-composition/external-api-scope.mjs",
-      "class": "gap",
-      "reason": "§5.2：连端口都没有 ⇒ 裁决处：§5 第 14 条（三道范围检查的生产接线）"
-    },
-    {
       "file": "runtime/dsh-composition/plugins/runtime-contract-server-row.mjs",
       "class": "gap",
       "reason": "★★ 2026-09-18 由 in-flight 改判为 gap。理由：`in-flight` 的判据是「另一个 agent 当轮正在接线（**工作树未提交**）」，而那几个文件**已经提交了**（e0b83af / 69da8fd / 5c1d698），而这几个模块**仍然不可达** ⇒ 前提已过期，它不再是“正在接线”，是“接不上”。真实状态是**已经记录在案的诚实阻塞**：该行把 Runtime 契约服务挂进组合，但它不在 `PATCH_LAYER_ROWS` 里；而补上它需要 `runtimeHost` 的 `probeRuntime` 报 version + 四项必需能力，**全仓没有生产实现**（真 DSH 进程里实测：没有版本服务、也没有能力服务）。给一张全 true 的能力表就是**编**——它会让 `checkCompatibility` 在一个从未验过的引擎上判“兼容”。见 `docs/STATUS.md`「本轮明确不做的两件」§四 ⇒ 属需要 **§5 裁决**的人工介入项，不是能靠写代码绕过去的东西。⇒ 裁决处：§5 第 20 条"

@@ -95,6 +95,11 @@ test('① ★★★ 生产组合根**接上了** pathScope 端口；env 没配�
   assert.equal(keys.includes('executionScope'), true,
     `生产装配没有传 executionScope（keys=${JSON.stringify(keys)}）——`
     + 'PRT-605 的接线被去掉了？那会让越权命令重新变成放行')
+  // ★★★ 2026-09-18 第 20 轮：`externalApiScope`（PRT-606）——**最后一道**。
+  //   至此三道范围检查在生产装配里**形状一致**（都是"键恒在、缺席为 null"）。
+  assert.equal(keys.includes('externalApiScope'), true,
+    `生产装配没有传 externalApiScope（keys=${JSON.stringify(keys)}）——`
+    + 'PRT-606 的接线被去掉了？那会让"一次读权限变成写"重新变成放行')
 
   // ★ 行为读数（一）：env 里**没有**范围表 ⇒ 端口为 null ⇒ 读数仍是 false。
   //   不启动 DSH：`installEnforcementRoot` 是纯装配（它只造桥 + 造两行插件）。
@@ -126,6 +131,10 @@ test('① ★★★ 生产组合根**接上了** pathScope 端口；env 没配�
     //    这一格**本批之前根本不存在**——而"不存在"比 `false` 更糟：
     //    `false` 至少能让运维问一句"我该配什么"。
     executionScope: false,
+    // ★★★ PRT-606（2026-09-18 第 20 轮加）：外部 API 读/写范围。
+    //    组合根这一层的生产入参里没有外部 API 授权表 ⇒ `false`。
+    //    它**独立于相邻两格**：三格是三份不同的配置。
+    externalApiScope: false,
     whitelist: false,
     policy: true,
     approval: true,
@@ -236,53 +245,127 @@ test('①c ★★★ 同一个组合根，env 里配上执行面授权表 ⇒ `e
   resetEnforcementRoot()
 })
 
-test('② ★★★ PRT-605 已接；而 PRT-606（外部 API）**仍然连端口都没有**', () => {
-  // ★★★ 2026-09-18 第 19 轮：这一条**改了要钉的东西**，而且是按它自己的指示改的。
+test('①d ★★★ 同一个组合根，env 里配上外部 API 授权表 ⇒ `externalApiScope` 翻成 true，且**真的会拦人**', async () => {
+  // ★ 与 ①b/①c 完全同一个形状，换到 PRT-606 那一条上。三道范围检查至此
+  //   **各有一条**"配了就翻 true、且真的会拦人"的读数。
+  const { installEnforcementRoot, resetEnforcementRoot } = await import('./root.mjs')
+  const { externalApiScopePortFromEnv, EXTERNAL_API_SCOPE_PORT_ENV_KEY } =
+    await import('./external-api-scope-port.mjs')
+  const env = {
+    TEAM_HUB_URL: 'http://hub.invalid:8787',
+    LEGION_ACTOR: 'alice',
+    LEGION_SCOPE: 'space-1',
+    LEGION_ENFORCEMENT_ACTION: 'write',
+    LEGION_CWD: 'C:/work',
+    [EXTERNAL_API_SCOPE_PORT_ENV_KEY]: JSON.stringify({
+      endpoints: [{ host: 'api.example.com', pattern: '/api/items/{id}', effects: ['read'], idempotent: true }],
+    }),
+  }
+  const apiScope = externalApiScopePortFromEnv({ env })
+  assert.equal(apiScope.state, 'configured', '配了却没有被解析出来')
+
+  resetEnforcementRoot()
+  const installed = installEnforcementRoot({
+    env,
+    decide: () => ({ kind: 'allow' }),
+    createRequestApproval: () => (async () => 'rejected'),
+    pathScope: null,
+    externalApiScope: apiScope.port,
+  })
+  assert.equal(installed.ok, true, `${installed.code} ${installed.message}`)
+  const surfaces = installed.root.enforcementSurfaces()
+  assert.equal(surfaces.externalApiScope, true,
+    '配了外部 API 授权表却仍报 false——① 那条"没配"的读数就不能用来判断了')
+  // ★ 而另外两道**仍然**是 false：三格是**独立**的读数。
+  assert.equal(surfaces.pathScope, false, '只配了外部 API 却把 pathScope 也报成 true——三格必须独立')
+  assert.equal(surfaces.executionScope, false, '只配了外部 API 却把 executionScope 也报成 true——三格必须独立')
+
+  // ★★ 真实裁决：同一个组合根造出的桥，未被授权的端点必须被拒。
+  const bridge = installed.root.bridge
+  if (bridge !== undefined) {
+    const denyVerdict = await bridge.preExecute({
+      name: 'call-api', callId: 'c1',
+      arguments: { url: 'https://api.example.com/api/other/1' },
+    })
+    assert.equal(denyVerdict.kind, 'deny',
+      `未被授权的外部 API 端点被放行了：${JSON.stringify(denyVerdict)}——`
+      + '组合根"接上了"就只是接了个摆设')
+    assert.match(denyVerdict.reason, /外部 API 越界/)
+    // ★ 授权表里的端点放行。少了这条，这个端口可能在"全拒"。
+    const allowVerdict = await bridge.preExecute({
+      name: 'call-api', callId: 'c2',
+      arguments: { url: 'https://api.example.com/api/items/1' },
+    })
+    assert.equal(allowVerdict.kind, 'allow',
+      `授权表里的端点被拒了——那这个端口就是在"全拒"：${allowVerdict.reason}`)
+  }
+  resetEnforcementRoot()
+})
+
+test('② ★★★ PRT-604/605/606 三道都接了；而 `whitelist` **有位置却没人给值**', () => {
+  // ★★★ 2026-09-18 第 20 轮：这一条**第三次**改了要钉的东西，而且三次都按它自己的指示改。
   //
-  //   它上一版逐字写着："桥现在有了 executionScope 端口。★ 这是好事——但请把
-  //   PRT-605/606 的台账状态、docs 里的记账、以及本套件的 ①② 一起更新；
-  //   一条'接上了而账上还写着没接'的记录与一条'没接而账上写着接上了'，
-  //   同样不能用来做判断。"
+  //   版本史：
+  //     · 初版钉 `executionScope` / `externalApiScope` **都不在**桥的参数表里；
+  //     · 第 19 轮（PRT-605 接上）→ 转成钉 `externalApiScope` 不在，
+  //       并在失败消息里逐字写着"请把 PRT-606 的台账状态、docs 里的记账、
+  //       以及本套件的 ①③ 一起更新"；
+  //     · 第 20 轮（PRT-606 接上）→ 就是现在这一次。
   //
-  //   ⇒ 本轮照做了：`executionScope` 接上了（PRT-605），账也动了。
-  //     而**外部 API 那一道（PRT-606）仍然没有端口**，所以这条判据**没有变成空断言**
-  //     ——它换了一个对象继续守着，而不是被删掉。
+  //   ⇒ 三道范围检查**全部**接了。而这条判据**没有变成空断言**，也**没有被删掉**：
+  //     它换到了同一族里**仍然成立**的那个形状上——`whitelist`。
   //
   //   > 一条判据在它守的东西被修好之后**不该消失**，它该指向下一件同类的事——
   //   > 否则"修好了"与"这条判据本来就是空的"在覆盖率报告里长得一样。
+  //
+  //   ★ 而 `whitelist` 与前三道**不是同一个形状**，这一点值得写清楚：
+  //     前三道是"**桥里没有位置**"（连一格 `false` 都读不出来），
+  //     `whitelist` 是"**位置在、而生产装配从不给它值**"——它在
+  //     `enforcementSurfaces()` 里已经有一格 `false`，所以这个缺口**读得出来**，
+  //     只是没有任何一处会去问"谁该给它值"。
+  //
+  //     > 一个"没有位置的能力"与一个"有位置而没人给值的能力"，
+  //     > 在**这一次**的读数上是 `false` 与 `false`——只不过前者连"我该配什么"
+  //     > 都问不出来，而后者问得出来却**没有任何人**在问。
   const src = readFileSync(TOOL_REQUEST, 'utf8')
   const m = /export function createEnforcementBridge\(\{([\s\S]*?)\n\}\)/.exec(src)
   assert.notEqual(m, null, 'tool-request.mjs 里找不到 createEnforcementBridge 的参数表——锚点没了')
   const params = [...m[1].matchAll(/^\s*([A-Za-z_$][\w$]*)\s*[=,]/gm)].map((x) => x[1])
   assert.ok(params.includes('pathScope'),
     `参数表解析失败（没读到 pathScope）：${JSON.stringify(params)}`)
-  // ★ 第一半已经接上：这条现在是**正向**断言，而不是"它不该在"。
-  assert.equal(params.includes('executionScope'), true,
-    'PRT-605 的端口不见了。★ 这不可能是"回滚"——本套件 ① 与 '
-    + '`execution-scope-port.test.mjs` 都指着它；先查是不是参数被改名了')
-  // ★ 而 PRT-606 仍然是那个形状：**连位置都没有**。
-  for (const absent of ['externalApiScope', 'scope']) {
-    assert.equal(params.includes(absent), false,
-      `桥现在有了 ${absent} 端口。★ 这是好事——但请把 PRT-606 的台账状态、`
-      + 'docs 里的记账、以及本套件的 ①③ 一起更新；'
-      + '一条"接上了而账上还写着没接"的记录与一条"没接而账上写着接上了"，同样不能用来做判断')
+  // ★★ 三道范围检查**现在都是正向断言**，不再是"它们不该在"。
+  for (const wired of ['pathScope', 'executionScope', 'externalApiScope']) {
+    assert.equal(params.includes(wired), true,
+      `PRT 的范围端口 ${wired} 不见了。★ 这不可能是"回滚"——本套件 ① 与`
+      + '对应的 *-port.test.mjs 都指着它；先查是不是参数被改名了')
   }
-  // 行为读数：强制面的键集里 `executionScope` **在**，`externalApiScope` **不在**。
+  // ★ 而 `whitelist`（PRT-603）是这一族里**仍然没接**的那一个。
+  assert.equal(params.includes('whitelist'), true,
+    '载具：`whitelist` 必须在参数表里——本条的结论是"**有位置**而没人给值"，'
+    + '不是"没有位置"。若它连参数都没有了，本条要重写成另一件事')
+
+  // 行为读数：强制面的键集里三道范围**都在**（键集是一份契约）。
   const surfaces = createEnforcementBridge({ context: CTX }).enforcementSurfaces()
-  // ★ 2026-09-18 第 19 轮：键集 7 → **8**（多了 `executionScope`）。
-  //   这个键集仍然是一份**契约**：它变了就必须在这里显式改，
-  //   而不是让它悄悄多一格。
+  // ★ 2026-09-18 第 19 轮：键集 7 → 8（`executionScope`）；
+  //   第 20 轮：8 → **9**（`externalApiScope`）。
   assert.deepEqual(Object.keys(surfaces).sort(),
     ['approval', 'connectorFeedback', 'connectorJudgment',
-      'executionScope', 'hardFloor', 'pathScope', 'policy', 'whitelist'],
+      'executionScope', 'externalApiScope', 'hardFloor', 'pathScope', 'policy', 'whitelist'],
     '强制面的键集变了——这个键集是**契约**，不是便利方法')
-  assert.equal('externalApiScope' in surfaces, false,
-    'PRT-606 的那一格出现了——请把这一条、§5 的裁决项与台账一起更新')
   // ★ 反向对照：默认造出来的桥**全都没接**（`null` ⇒ false）。
   //   少了这条，上面那个键集断言无法区分"这一格报了 true"与"这一格恒 true"。
   assert.equal(surfaces.executionScope, false, '没传执行面端口 ⇒ 必须是 false（没接 ≠ 接了个空的）')
+  assert.equal(surfaces.externalApiScope, false, '没传外部 API 端口 ⇒ 必须是 false（同上）')
   assert.equal(surfaces.connectorFeedback, false, '没传 listener ⇒ 必须是 false（没接 ≠ 接了个空的）')
   assert.equal(surfaces.connectorJudgment, false, '没传判定端口 ⇒ 必须是 false')
+  // ★★ 而 `whitelist` 在**生产装配**里同样是 `false`——它不是"桥没接"，
+  //    是"装配那一侧从来不给它值"。这一格读得出来，却没有任何门禁会问它。
+  assert.equal(surfaces.whitelist, false, '岗位白名单今天仍然没接（PRT-603 那一族的剩余项）')
+  const { keys } = productionRootInputs()
+  assert.equal(keys.includes('whitelist'), false,
+    '生产装配竟然传了 whitelist ⇒ 这一族的最后一个缺口被关了。'
+    + '★ 那是好事——请把本条**再换一个对象**（或明确写成"这一族已全接"），'
+    + '而不是把它删掉；同时更新 docs 里"岗位白名单未接生产"的记账')
 })
 
 test('③ ★★★ 后果是真的：同一路越界调用，接了 pathScope 拒绝、没接就通过', async () => {
@@ -387,6 +470,73 @@ test('③b ★★★ PRT-605 的后果是真的：同一路越界命令，接了
   const okVerdict = await wired.preExecute(okExecution)
   assert.equal(okVerdict.kind, 'allow',
     `授权表里的命令被拒了——那这个端口就是在"全拒"，② 证明不了任何事：${okVerdict.reason}`)
+})
+
+test('③d ★★★ PRT-606 的后果是真的：同一次未被授权的调用，接了外部 API 端口就拒、没接就通过', async () => {
+  // ★ 与 ③/③b 同一个形状，换到 PRT-606 上——三道范围检查至此**各有一条**
+  //   "没接就放行"的读数。这是最要紧的一类断言：
+  //
+  //   > 一个「端口没接上、而没接上时检查自动放行」的组合根，
+  //   > 与一个「那道范围限制没有生效」的组合根，是同一个东西。
+  const { externalApiScopePortFromEnv } = await import('./external-api-scope-port.mjs')
+  const scope = externalApiScopePortFromEnv({
+    env: {
+      LEGION_EXTERNAL_API_SCOPE: JSON.stringify({
+        endpoints: [{ host: 'api.example.com', pattern: '/api/items/{id}', effects: ['read'], idempotent: true }],
+      }),
+    },
+  })
+  assert.equal(scope.state, 'configured', '配了却没有被解析出来')
+
+  // `call-api` 是登记过的工具，能力集含 `external-api:read`/`external-api:write`
+  //   ⇒ 按能力查表落进 `external-api` 那一类。
+  const execution = {
+    name: 'call-api', callId: 'c1',
+    arguments: { url: 'https://evil.example.com/api/items/1' },
+  }
+
+  // ① 没接端口 —— 生产在本批之前的形状。
+  const bare = createEnforcementBridge({ context: CTX, decide: () => ({ kind: 'allow' }) })
+  const bareVerdict = await bare.preExecute(execution)
+  assert.equal(bareVerdict.kind, 'allow',
+    '没接 externalApiScope 时竟然拒绝了——那么"没接"至少是 fail closed 的，'
+    + '本套件的 ① 就该换个说法（这也会是个好消息）')
+
+  // ② 接上端口 —— 同一个调用立刻被拒，而且理由是**这一道**给的。
+  const wired = createEnforcementBridge({
+    context: CTX,
+    externalApiScope: scope.port,
+    decide: () => ({ kind: 'allow' }),
+  })
+  const wiredVerdict = await wired.preExecute(execution)
+  assert.equal(wiredVerdict.kind, 'deny', '接了外部 API 端口反而放行——端口没被用上')
+  assert.match(wiredVerdict.reason, /外部 API 越界/,
+    `拒绝理由必须写明是外部 API 那一道（不是路径、不是执行面、不是策略）：${wiredVerdict.reason}`)
+  assert.match(wiredVerdict.reason, /api-scope-endpoint-not-granted/,
+    `理由里要带判定器的码，值班的人才知道改哪张表：${wiredVerdict.reason}`)
+
+  // ③ guard 那一层同样复核（spec §6.6 line 449：两处都查）。
+  const guardReason = wired.guard(execution)
+  assert.ok(typeof guardReason === 'string', 'guard 没有复核外部 API 范围')
+  assert.match(guardReason, /外部 API 越界/)
+
+  // ④ ★ 前提对照（反向）：**授权表之内**的调用必须照旧放行。
+  //    少了它，② 可能只是"这个端口对什么都拒"。
+  const okVerdict = await wired.preExecute({
+    name: 'call-api', callId: 'c2',
+    arguments: { url: 'https://api.example.com/api/items/42' },
+  })
+  assert.equal(okVerdict.kind, 'allow',
+    `授权表里的端点被拒了——那这个端口就是在"全拒"，② 证明不了任何事：${okVerdict.reason}`)
+
+  // ⑤ ★★ 而三道**互不串台**：同一个桥接了外部 API 端口，一条**越权命令**
+  //    仍然要放行（执行面没接），一条**越界路径**也仍然要放行（路径范围没接）。
+  //    少了这条，"接一道就等于三道都生效"与"三道各自独立"在①-④下同形。
+  const cmdVerdict = await wired.preExecute({
+    name: 'run-command', callId: 'c3', arguments: { command: ['rm', '-rf', '/'] },
+  })
+  assert.equal(cmdVerdict.kind, 'allow',
+    '接了外部 API 端口却把越权命令也拦了——三道的端口**不能**互相顶替')
 })
 
 test('③c ★★★ MCP 那一条**未接**，而它必须是**具名**的拒绝，不是"名字有歧义"', async () => {

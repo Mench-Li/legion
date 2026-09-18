@@ -143,6 +143,9 @@ import { SCOPE_PORT_ENV_KEY, scopePortFromEnv } from '../scope-port.mjs'
 import {
   EXECUTION_SCOPE_PORT_ENV_KEY, executionScopePortFromEnv,
 } from '../execution-scope-port.mjs'
+import {
+  EXTERNAL_API_SCOPE_PORT_ENV_KEY, externalApiScopePortFromEnv,
+} from '../external-api-scope-port.mjs'
 import { CONNECTOR_PORT_ENV_KEY, connectorPortFromEnv } from '../connector-port.mjs'
 import {
   ENFORCEMENT_ROOT_CODES,
@@ -536,6 +539,30 @@ export function createRootRow({
           '那会让一次配置错误与一次真实的"无执行面限制"在强制面读数上同形')
       }
 
+      // ★★★ 第 20 轮：外部 API 读/写范围（PRT-606）——三道范围检查的**最后一道**。
+      //
+      //   第 19 轮把 `executionScope` 接上之后，`production-scope-wiring.test.mjs` ②
+      //   又换了一次对象继续守（这正是那条判据被设计成"会红"的用处）：
+      //   它当时逐字写着"桥现在有了 executionScope 端口。★ 这是好事——但请把
+      //   PRT-606 的台账状态、docs 里的记账、以及本套件的 ①③ 一起更新"。
+      //   本轮就是那一次。
+      //
+      //   接法与上面两道**逐字相同**：配了就接上，没配仍然是没配（`port` 为 `null`），
+      //   不补默认值——一个"凭空造出来的空端点表"会让这一格报 `true`
+      //   而它一条端点都没有（`normalizeApiGrant` 允许 `endpoints: []`）。
+      let apiScope
+      try {
+        apiScope = externalApiScopePortFromEnv({ env: effectiveEnv })
+      } catch (err) {
+        // 配了却解释不通 ⇒ **拦装配**，与"根本没配"分开。
+        //   > 一个"读不出来就当作没配"的组合根，
+        //   > 与一个"这个部署确实没有外部 API 限制"的部署，在强制面读数上长得一样。
+        throw rowError(ROOT_ROW_CODES.CONFIG_UNRESOLVED,
+          `${ROOT_ROW_PLUGIN_NAME} 读不出外部 API 授权表「${EXTERNAL_API_SCOPE_PORT_ENV_KEY}」：` +
+          `${err?.message ?? err}。**不**按"没配"处理——` +
+          '那会让一次配置错误与一次真实的"无外部 API 限制"在强制面读数上同形')
+      }
+
       // ★ 第 19 条 §9.2 第 5 步：执行面的**连接器声明**（F-21 判定面的最后一条缝）。
       //
       //   在此之前 `installEnforcementRoot` 的两个连接器参数
@@ -572,6 +599,10 @@ export function createRootRow({
         //   键恒在、缺席时值是 `null`（理由见下面那段"条件展开"的注释——
         //   那一条教训在这里同样适用，且这次我是**先**读到了它才写的）。
         executionScope: execScope.port,
+        // ★★★ PRT-606：外部 API 读/写范围。与上面两道**同一个形状**：
+        //   键恒在、缺席时值是 `null`。★ 这里**没有**用条件展开——理由就是
+        //   下面那一段（文本解析要能把这组键读成一份清单）。
+        externalApiScope: apiScope.port,
         // ★ 与上面 `pathScope` **同一个形状**：键恒在，缺席时值是 `null`。
         //
         //   ⚠️ 我第一版写的是条件展开（`...(configured ? {a,b} : {})`）。

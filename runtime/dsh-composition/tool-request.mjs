@@ -555,6 +555,23 @@ export function createEnforcementBridge({
    */
   executionScope = null,
   /**
+   * ★★★ PRT-606 的外部 API 读/写范围：`(projection) => {allowed, code, reason}`。
+   *
+   * ★ 与 `pathScope` / `executionScope` **同一个形状、同一个时点**
+   *   （pre-execute 与 guard 两处都查）。三道范围检查至此**全部**有了位置。
+   *
+   * ★★★ 而它与前两道的**输入不同**：它要的 `request` 是
+   *   `{host, method, path, headers, query, body}` 六项分开的请求形状，
+   *   而事实表里只有一个 `url` 字符串。把 URL 拆成那几项是**适配器**的活，
+   *   而怎么拆决定了 `external-api-scope.mjs` 里三条检查是"会触发"还是
+   *   "从不触发"——`new URL()` 会把端口从 hostname 上摘掉、会把 `..` 折叠掉。
+   *   拆分**只做一次**，在 `external-api-scope-port.mjs` 里（见那份文件头）。
+   *
+   * ★★ `null` 时那一行是放行（沿用 `scopeGuard` 的既有语义）；
+   *   `enforcementSurfaces().externalApiScope` 就是那个读数的来源。
+   */
+  externalApiScope = null,
+  /**
    * ★ PRT-214 缺口②：**按 Run** 取授权身份覆盖。
    *
    * `(execution) => overlay | undefined`。缺省就是
@@ -799,6 +816,35 @@ export function createEnforcementBridge({
     return undefined
   }
 
+  /**
+   * ★★★ PRT-606：外部 API 读/写范围的强制点（与上面两道同一个时点、同一个形状）。
+   *
+   * ★ 第三个函数而不是复用前两个的闭包，理由与 `executionGuard` 当初一样：
+   *   **拒绝理由前缀**必须能分清是哪一份配置拒的。现在是三份配置
+   *   （`LEGION_PATH_SCOPE` / `LEGION_EXECUTION_SCOPE` / `LEGION_EXTERNAL_API_SCOPE`），
+   *   三句一模一样的话会让"配错了哪一张表"变成一件要读代码才能回答的事。
+   *
+   *   > 一个「所有范围拒绝都写成同一句话」的桥，
+   *   > 与一个「配置表接错了也看不出来」的桥，是同一个东西。
+   *
+   * ★ 本函数**只**负责形状与 fail-closed；"URL 怎么拆"在端口的模块里
+   *   （那里是唯一一处，且它不许用 `new URL()`——见那份文件头）。
+   */
+  function externalApiGuard(projection) {
+    if (externalApiScope === null) return undefined
+    let verdict
+    try {
+      verdict = externalApiScope(projection)
+    } catch (err) {
+      return `外部 API 范围检查本身出错（${err?.code ?? 'unknown'}）：${err?.message ?? String(err)}。按拒绝处理`
+    }
+    if (verdict === null || typeof verdict !== 'object' || verdict.allowed !== true) {
+      const code = verdict?.code ?? 'external-api-scope-unspecified'
+      return `外部 API 越界（${code}）：${verdict?.reason ?? '没有给出理由'}`
+    }
+    return undefined
+  }
+
   function guard(execution) {
     const got = projectionFor(execution)
     if (!got.ok) {
@@ -826,6 +872,12 @@ export function createEnforcementBridge({
     if (execReason !== undefined) {
       record(projection.canonicalHash, { source: 'guard', decision: 'deny', reason: execReason, at: now() })
       return execReason
+    }
+    // ★★★ PRT-606：外部 API 读/写范围**也在 guard 复核**（同一条理由）。
+    const apiReason = externalApiGuard(got.projection)
+    if (apiReason !== undefined) {
+      record(projection.canonicalHash, { source: 'guard', decision: 'deny', reason: apiReason, at: now() })
+      return apiReason
     }
     const reason = guarded(guardInputOf(projection))
     const hash = projection.canonicalHash
@@ -910,6 +962,14 @@ export function createEnforcementBridge({
       //   后者的拒绝理由里带 `rule`（要改的是岗位清单）。
       const execOut = executionGuard(got.projection)
       if (execOut !== undefined) return { kind: 'deny', reason: execOut }
+
+      // ★★★ PRT-606：外部 API 读/写范围。放在执行面**之后**、白名单之前——
+      //   理由与 605 当初同一条：前两道管"能不能出去、能起什么进程"，
+      //   这一道管"这次出去的读/写效果在不在授权里"，而白名单管的是
+      //   "这个岗位能干哪些事"（它的拒绝理由里带 `rule`，要改的是岗位清单）。
+      //   三道都拒时，先说前两道——它们的修复动作更靠上游。
+      const apiOut = externalApiGuard(got.projection)
+      if (apiOut !== undefined) return { kind: 'deny', reason: apiOut }
 
       // ★ 岗位白名单在**策略端口之前**跑，拒绝即定案（PRT-603）。
       //
@@ -1103,6 +1163,16 @@ export function createEnforcementBridge({
        *   > `false` 与**什么都没有**——而后者连"我该配点什么"都问不出来。
        */
       executionScope: executionScope !== null,
+      /**
+       * ★★★ PRT-606（2026-09-18 第 20 轮加）。这是三道范围检查里**最后一个**
+       * 拿到位置的——在它之前，`externalApiScope` 与 `executionScope` 是同一个形状：
+       * 桥的参数表里没有它，所以"没接"这件事连一格 `false` 都表达不出来。
+       *
+       * ★ 与相邻两格**独立**：三格读数是三份**不同**的配置
+       * （`LEGION_PATH_SCOPE` / `LEGION_EXECUTION_SCOPE` / `LEGION_EXTERNAL_API_SCOPE`）。
+       * 一个共用布尔会让"只配了路径范围"与"三道全配了"在读数上同形。
+       */
+      externalApiScope: externalApiScope !== null,
       whitelist: whitelist !== null,
       policy: decide !== null,
       approval: requestApproval !== null,

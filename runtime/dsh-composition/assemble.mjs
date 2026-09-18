@@ -122,6 +122,8 @@ function assembleError(code, message) {
  * @param {object} [cfg.floor] 静态下限。
  * @param {(p: object) => object} [cfg.whitelist] 岗位白名单（PRT-603）。
  * @param {(p: object) => object} [cfg.pathScope] 路径范围（PRT-604）。
+ * @param {(p: object) => object} [cfg.executionScope] 命令/网络/MCP 范围（PRT-605）。
+ * @param {(p: object) => object} [cfg.externalApiScope] 外部 API 读/写范围（PRT-606）。
  * @param {number} [cfg.connectTimeoutMs]
  * @param {number} [cfg.responseTimeoutMs]
  * @param {number} [cfg.approvalConnectTimeoutMs]
@@ -154,6 +156,15 @@ export function assembleEnforcement({
    * 缺省 `null` ⇒ 桥那一格是放行，而 `enforcementSurfaces().executionScope` 读成 `false`。
    */
   executionScope = null,
+  /**
+   * ★★★ PRT-606 的外部 API 读/写范围（2026-09-18 第 20 轮加）。
+   *
+   * 与 `pathScope` / `executionScope` **同一个形状、同一条投递路线**：
+   * `(projection) => {allowed, code, reason}`，由 `external-api-scope-port.mjs`
+   * 从 `LEGION_EXTERNAL_API_SCOPE` 造出来。
+   * 缺省 `null` ⇒ 桥那一格是放行，而 `enforcementSurfaces().externalApiScope` 读成 `false`。
+   */
+  externalApiScope = null,
   connectTimeoutMs = 2000,
   responseTimeoutMs = 3000,
   approvalConnectTimeoutMs = 2000,
@@ -273,6 +284,7 @@ export function assembleEnforcement({
     whitelist,
     pathScope,
     executionScope,
+    externalApiScope,
     connectTimeoutMs,
     responseTimeoutMs,
     approvalConnectTimeoutMs,

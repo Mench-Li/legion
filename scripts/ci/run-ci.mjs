@@ -1015,8 +1015,24 @@ async function stageTest() {
       //
       // 而且它**刻意不复用** PRT-604 的文件系统路径规范化器——URL 路径没有盘符、
       // 永远大小写敏感，那是两件事。套件里有一条用例专门钉住这个区别。
+      // ★ 2026-09-18 第 20 轮：`external-api-scope` 这一组也多一个文件，
+      //   守的是**与 605 那一组同形**的另一半——判定器对了，不等于生产里跑得起来：
+      //
+      //   · `external-api-scope-port`：把 URL 拆成 `{host, method, path, query, …}`
+      //     给 `checkExternalApi`。★ 而"怎么拆"决定了那 24 例里的三条检查是
+      //     **会触发**还是**从不触发**——`new URL()` 会把端口从 hostname 上摘掉
+      //     （`HOST_HAS_PORT` 永不触发）、会把 `..` 折叠掉（`PATH_ESCAPE` 永不触发）、
+      //     会把 userinfo 解析掉。套件 ④a/④b/④c 就是那三条的反向读数。
+      //     ★★ 而它们红的方式很特殊：退回 `new URL()` 时那三条会变成
+      //     `ENDPOINT_NOT_GRANTED`——**方向仍然是拒**，所以一个只看 `allowed` 的
+      //     用例抓不到它。⇒ 那三条断言的是**码**。
+      //     还包括"归一化器不幂等"（⑩：`normalizeApiGrant` 在端点上挂派生字段
+      //     `parsed`，所以已归一化的表再喂一次会抛）。
       label: 'external-api-scope（PRT-606：读权限的六种变写形态）',
-      files: ['runtime/dsh-composition/external-api-scope.test.mjs'],
+      files: [
+        'runtime/dsh-composition/external-api-scope.test.mjs',
+        'runtime/dsh-composition/external-api-scope-port.test.mjs',
+      ],
       cwd: ROOT,
     },
     {

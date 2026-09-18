@@ -784,6 +784,15 @@ const NOT_FORWARDED_YET = Object.freeze({
     + '但"配了也传不到进程"这件事与另两条一模一样。'
     + '⇒ 需要裁决：要么把它加进 runtime 的 `envNames`，要么从 schema 的 fields 里拿掉'
     + '（"这个进程能配它"与"它能拿到它"必须有一处让步）。',
+  LEGION_EXTERNAL_API_SCOPE:
+    '★★ 第 20 轮（PRT-606 外部 API 读/写范围）。读取点 `external-api-scope-port.mjs` 已建、'
+    + '装配点 `root-row.mjs` 已接、生产路径用例已在 `production-scope-wiring.test.mjs` '
+    + '①d/③d 与 `external-api-scope-port.test.mjs` 验过（含真实 `preExecute` 的拒与放）。'
+    + '最后一根线**与前三把键完全是同一处**（同一个文件、同一个数组）。'
+    + '★ 它是同一个缺口的**第四个受害者**，不是第四处要修的地方——'
+    + '三把键产自三条不同的排期、却又多出第四把，而它们在同一个数组里一起卡住；'
+    + '补那一个数组时**四把键一起通**。'
+    + '⚠️ 这个数从 3 涨到 4 说明缺口的**面积**在扩大：每接一道范围检查就多一把键进来。',
 })
 
 test('★★★ runtime 的 schema `fields` 与清单的 runtime `envNames` 必须对得上（第四处缺口不能悄悄出现）', async () => {
@@ -825,9 +834,17 @@ test('★★★ runtime 的 schema `fields` 与清单的 runtime `envNames` 必�
   //     ⇒ 这个数从 3 变 4 的正确读法是"同一个缺口的第三个受害者"，
   //     而不是"又多了一处要修的地方"：
   //     补那一个数组时**三把键一起通**。
+  //
+  //   ★★ 4 → 5（2026-09-18，第 20 轮）：`LEGION_EXTERNAL_API_SCOPE` 进来。
+  //     ⇒ **同一个缺口的第四个受害者。**
+  //     ⚠️ 而这个数**连续两轮都在涨**，这件事本身就是一条读数：
+  //       每接一道范围检查，就有一把新键落进同一个没修的数组。
+  //       "四把键一起通"这句话仍然成立，但它成立的前提是**有人去修那个数组**——
+  //       在那之前，接得越多、卡住的越多，而每一道自己的用例都是绿的。
   const missing = schemaEnvs.filter((e) => !forwarded.has(e)).sort()
   assert.deepEqual(missing, [
-    'LEGION_CONNECTOR_DECLARATIONS', 'LEGION_EXECUTION_SCOPE', 'LEGION_PATH_SCOPE', 'TEAM_HUB_TOKEN',
+    'LEGION_CONNECTOR_DECLARATIONS', 'LEGION_EXECUTION_SCOPE', 'LEGION_EXTERNAL_API_SCOPE',
+    'LEGION_PATH_SCOPE', 'TEAM_HUB_TOKEN',
   ], `schema 有而清单没有的键变了（实的 ${JSON.stringify(missing)}）—— 重新审一遍这一节`)
 })
 
@@ -887,12 +904,15 @@ test('★★ PRT-254：声明的 env 键必须等于 runtime 源码里两张键�
   const { CONNECTOR_PORT_ENV_KEYS } = await import('../../runtime/dsh-composition/connector-port.mjs')
   // ★ 第 19 轮（PRT-605）：执行面的命令/网络/MCP 授权表（LEGION_EXECUTION_SCOPE）。
   const { EXECUTION_SCOPE_PORT_ENV_KEYS } = await import('../../runtime/dsh-composition/execution-scope-port.mjs')
+  // ★ 第 20 轮（PRT-606）：外部 API 读/写授权表（LEGION_EXTERNAL_API_SCOPE）。
+  const { EXTERNAL_API_SCOPE_PORT_ENV_KEYS } = await import('../../runtime/dsh-composition/external-api-scope-port.mjs')
   const expected = [...new Set([
     ...Object.values(DECIDE_ENV_KEYS),
     ...Object.values(ENFORCEMENT_CONFIG_FIELDS).flatMap((f) => [...f.envKeys]),
     ...SCOPE_PORT_ENV_KEYS,
     ...CONNECTOR_PORT_ENV_KEYS,
     ...EXECUTION_SCOPE_PORT_ENV_KEYS,
+    ...EXTERNAL_API_SCOPE_PORT_ENV_KEYS,
   ])].sort()
   // ★ 13 = 12 + `LEGION_EXECUTION_SCOPE`（第 19 轮，PRT-605）。
   //   这个数**不是**为了方便改的常量：它一变就要求复核"多出来的那个键
@@ -906,7 +926,14 @@ test('★★ PRT-254：声明的 env 键必须等于 runtime 源码里两张键�
   //     ⇒ 本轮的"多出来的那个键"有生产读取点（`execution-scope-port.mjs`），
   //     所以这里的数量变更是**被复核过的**；它的投递缺口由
   //     `NOT_FORWARDED_YET` 那条（上面）如实登记。
-  assert.equal(expected.length, 13, `四张键名表共 ${expected.length} 个键（复核基线 13）：数量变了就要重新审一遍这份声明`)
+  //
+  // ★ 13 → 14（2026-09-18，第 20 轮，PRT-606）：`LEGION_EXTERNAL_API_SCOPE`。
+  //   复核过同样的两件事：① 它有一个**真的**生产读取点
+  //   （`external-api-scope-port.mjs` 的 `env[EXTERNAL_API_SCOPE_PORT_ENV_KEY]`，
+  //   由上面 Trap 1 那条 `source.length` 7 处中的一处作证）；
+  //   ② 它同样**没有**进 `product/process-manifest.mjs` 的 runtime `envNames`
+  //   （同一个数组），由 `NOT_FORWARDED_YET` 如实登记。
+  assert.equal(expected.length, 14, `四张键名表共 ${expected.length} 个键（复核基线 14）：数量变了就要重新审一遍这份声明`)
   assert.deepEqual(RUNTIME.envNames().sort(), expected,
     'runtime/config-schema.mjs 的 fields 与源码里的键名表不一致（多一个=编了一个环境变量，少一个=门禁看不见它）')
 
@@ -1057,9 +1084,33 @@ test('★ Trap 1 实测：runtime 13 处 = 8 处 schema 自身登记文本 + 5 �
   //   > 一个是"登记了一条不存在的读取点"）。
   //   > 所以下面那两条 `self` / `source` 不是补充说明，它们是**唯一**
   //   > 能把这两种原因分开的读数。
-  assert.equal(rt.dynamic.length, 15, 'runtime 动态命中数变了（基线 15）')
-  assert.equal(rtCov.self.length, 9, 'runtime 的 9 处自身登记文本必须被排除，而不是当成待登记读取')
-  assert.equal(rtCov.source.length, 6, 'runtime 的真实源动态读取是 6 处（root-row.mjs 2 + scope-port.mjs 2 + connector-port.mjs 1 + execution-scope-port.mjs 1）')
+  //
+  // ★ 15 → 17（2026-09-18，第 20 轮，PRT-606 的外部 API 读/写授权表）：
+  //   **+1 处自身登记文本**（`config-schema.mjs` 里 `externalApiScope` 那条 fields
+  //     的 `env:` 行，以及它对应的 dynamicEnvReads 登记）
+  //   **+1 处真实源**（新文件 `external-api-scope-port.mjs` 的
+  //     `env[EXTERNAL_API_SCOPE_PORT_ENV_KEY]`）
+  //
+  //   ★★ 而这一次有一个**新的**读数值得记下来：`dynamic.length` 连续两轮以
+  //   "+2" 的步长走（11→13→15→17），形态完全一样。而"每接一道范围检查"这件事
+  //   恰好**同时**产生一条登记文本与一处真实源——所以这条判据在两种情况下都长得一样：
+  //   真的接了一道（+1 self +1 source），与"照抄上一轮的登记、真实源其实没写"
+  //   （+2 self +0 source）。⇒ `source` 那条断言仍然是唯一能分开它们的读数。
+  //
+  //   ★★★ 实测踩到的一个顺序陷阱（值得留在这里，因为它会重复发生）：
+  //   本轮我先按预测写了 17/10/7，跑出来是 **16**（10 self + **6** source）——
+  //   而差的正是那一处真实源。原因不是数错了，是**新文件还没 `git add`**：
+  //   这个扫描器的模式是 `git-tracked`（`scan.mjs` 用 `git ls-files`），
+  //   所以 `external-api-scope-port.mjs` 在被跟踪之前**根本不在扫描面里**。
+  //   ⇒ `git add` 之后同一条断言立刻是 17/10/7。
+  //
+  //     而这件事本身是个读数：**这个文件里的数字断言，在 `git add` 之前
+  //     与之后可以完全不同，而两次跑都是"绿/红得很自然"。**
+  //     扫描器自己会打出"这些文件不在配置面里，请 git add 后重跑"，
+  //     所以正确的应对是读那行输出，而不是把数字改成 16。
+  assert.equal(rt.dynamic.length, 17, 'runtime 动态命中数变了（基线 17）')
+  assert.equal(rtCov.self.length, 10, 'runtime 的 10 处自身登记文本必须被排除，而不是当成待登记读取')
+  assert.equal(rtCov.source.length, 7, 'runtime 的真实源动态读取是 7 处（root-row.mjs 2 + scope-port.mjs 2 + connector-port.mjs 1 + execution-scope-port.mjs 1 + external-api-scope-port.mjs 1）')
   assert.ok(rtCov.self.every((d) => d.file === SCHEMA_FILES.runtime))
   assert.deepEqual(rtCov.uncovered, [], 'runtime 的 3 处真实源必须被现有 dynamicEnvReads 覆盖：' + JSON.stringify(rtCov.uncovered))
 
@@ -1194,7 +1245,8 @@ test('★ 端到端：scan --check 必须 PASS，且把「schema 自身登记文
   //     > 在只看分类的那条判据下是同一个绿。
   // ★ 8 → 9（2026-09-18，第 19 轮，PRT-605）：执行面授权表那条登记，
   //   同样是它**自己的**登记文本被同一条规则扫到。
-  assert.match(r.out, /runtime\/config-schema\.mjs 命中 9 处/)
+  // ★ 9 → 10（2026-09-18，第 20 轮，PRT-606）：外部 API 授权表那条登记，同上。
+  assert.match(r.out, /runtime\/config-schema\.mjs 命中 10 处/)
   assert.match(r.out, /product\/config-schema\.mjs 命中 11 处/)
   assert.match(r.out, /allowlist\.mjs[\s\S]{0,60}write-target/)
   assert.match(r.out, /dsh-credentials\.mjs[\s\S]{0,60}foreign-object/)

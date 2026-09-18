@@ -72,6 +72,10 @@ export const ENV_NAMES = Object.freeze([
   // 第 19 轮（PRT-605）：执行面的**命令/网络/MCP 授权表**。
   // 与上面两条同一个理由：`normalizeGrant` 之后是冻结结构，YAML 装不下。
   'LEGION_EXECUTION_SCOPE',
+  // 第 20 轮（PRT-606）：执行面的**外部 API 读/写授权表**。
+  // 与上面三条同一个理由：`normalizeApiGrant` 之后是冻结结构、还带派生字段
+  // `parsed`，YAML 既装不下也表达不了。三道范围检查至此各有自己的键。
+  'LEGION_EXTERNAL_API_SCOPE',
 ])
 
 /** 不是本进程读取的环境变量、但写法上形如 env 键的字面量（错误码 / 契约字符串 / 动作名）。 */
@@ -589,6 +593,19 @@ export const SCHEMA = defineSchema({
         + '见 `execution-scope-port.mjs` 文件头 ③。'
         + '装配规则只有一处：`runtime/dsh-composition/execution-scope-port.mjs`',
     },
+    {
+      key: 'externalApiScope', env: 'LEGION_EXTERNAL_API_SCOPE', type: 'string', default: '',
+      doc: '执行面的**外部 API 读/写授权表**（JSON 文本：`{endpoints:[...]}`，PRT-606）。'
+        + '在它之前 `external-api-scope.mjs` 的 `checkExternalApi` **连端口都没有**'
+        + '（`production-scope-wiring.test.mjs` ② 钉着这件事）。'
+        + '三道范围检查（路径 / 执行面 / 外部 API）至此**各有自己的键**——'
+        + '⚠️ 三合一会让"只配了一道"与"三道全配了"在 `enforcementSurfaces()` 上同形。'
+        + '「没有默认值」在这里有一层额外含义：**空串 = 没配**，而没配是**放行**'
+        + '——所以缺席必须由一个显式状态承载，不能靠一个默认端点表把它填上。'
+        + '⚠️ 本表**不是**"这台机器能连哪些 host"（那是 `checkNetwork` / `LEGION_EXECUTION_SCOPE`），'
+        + '而是"这个岗位能对**哪些服务**做读或写"；两者拒绝的修复动作不同。'
+        + '装配规则只有一处：`runtime/dsh-composition/external-api-scope-port.mjs`',
+    },
   ],
   foreignEnv: FOREIGN_ENV_NAMES.map((name) => ({ name, owner: FOREIGN_ENV_OWNER, reason: FOREIGN_ENV_REASON })),
   dynamicEnvReads: [
@@ -620,6 +637,15 @@ export const SCHEMA = defineSchema({
       reason: '执行面授权表按导出的常量键名下标读取（`EXECUTION_SCOPE_PORT_ENV_KEY` = LEGION_EXECUTION_SCOPE，'
         + '已在上面 fields 声明）。**故意用常量而不是字面量**，与 `scope-port.mjs` / `connector-port.mjs`'
         + '那两条同一个理由：读取点、用例、`root-row.mjs` 的失败消息要指同一处。'
+        + '扫描器看不见这一处正是本登记存在的理由。',
+    },
+    {
+      file: 'runtime/dsh-composition/external-api-scope-port.mjs',
+      expr: 'env[EXTERNAL_API_SCOPE_PORT_ENV_KEY]',
+      reason: '外部 API 授权表按导出的常量键名下标读取（`EXTERNAL_API_SCOPE_PORT_ENV_KEY` = '
+        + 'LEGION_EXTERNAL_API_SCOPE，已在上面 fields 声明）。**故意用常量而不是字面量**，'
+        + '与 `scope-port.mjs` / `connector-port.mjs` / `execution-scope-port.mjs` 那三条同一个理由：'
+        + '读取点、用例、`root-row.mjs` 的失败消息要指同一处，两处各写一遍字面量就会漂移。'
         + '扫描器看不见这一处正是本登记存在的理由。',
     },
     {

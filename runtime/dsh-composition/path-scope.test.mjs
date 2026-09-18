@@ -532,6 +532,15 @@ test('⑥ ★★ 没接上的强制面必须能被读出来（配置里写了 �
     //   一格读数下，"路径范围配好了、执行面授权表漏了"与"两道都配好了"是同一个东西——
     //   而值班的人要修的配置完全不同。
     executionScope: false,
+    // ★★★ 2026-09-18 第 20 轮：又多了 `externalApiScope` 一格（PRT-606 的外部 API 读/写）。
+    //
+    //   它必须**再分一格**，理由与上面那一段一字不差：这是**第三份**配置
+    //   （`LEGION_EXTERNAL_API_SCOPE`）。三合一的话，"路径范围配好了、
+    //   执行面与外部 API 都漏了"与"三道全配好了"读起来是同一个东西。
+    //
+    //   ★ 三道范围检查至此**全部**有了位置——这个键集从 7 格长到 9 格，
+    //     每一次长一格都是被"接上了而读数读不出来"逼出来的。
+    externalApiScope: false,
   })
   const full = createEnforcementBridge({
     context: CTX,
@@ -553,6 +562,9 @@ test('⑥ ★★ 没接上的强制面必须能被读出来（配置里写了 �
     //   ★★ 这一格与 `pathScope: true` 同时出现，正是"两格必须分开"的**活证据**：
     //     路径范围配好了、执行面没配，两种状态都在这一行里读得出来。
     executionScope: false,
+    // ★ 同上：这条桥给了四个端口，但**没有**给外部 API 授权表 ⇒ `false`。
+    //   三道范围检查在这里同时出现"一道 true、两道 false"——这就是分格的用处。
+    externalApiScope: false,
   })
   // 而硬 floor 永远是挂着的（它不是可选端口）
   assert.equal(bare.enforcementSurfaces().hardFloor, true)

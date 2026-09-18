@@ -335,6 +335,15 @@ export function readRunFloorPortPayload(payload) {
  * 表现成"产品起不来了"。所以选"工具一个都跑不了"这一档：它保住 `:479` 的禁止，
  * 又不把一次接线遗漏伪装成一次运行期崩溃。**这条选择写在报告里，不藏在代码里。**
  *
+ *   ⚠️ **2026-09-18 订正：上面那句"今天没有任何生产调用方生产这份下限
+ *   （`deriveRunFloor()` 一个调用点都没有）"**已过期**。** 它现在**有**生产调用路径：
+ *   `product/orchestrator/worker.mjs:18`（生产装配点）→
+ *   `orchestrator/worker/executor.mjs:386`（对**每一个**请求）→
+ *   `:868` 的 `deriveRunFloor()`。原文保留。
+ *   ★ 本节**结论**（选"拒绝工具调用"而不是"拒收这次 Run"）**没有被本轮改动**：
+ *   前提过期不等于结论就错，而"结论是否仍然成立"是一次**新的裁决**，属于这条政策的
+ *   所有者。本轮只记下前提过期，并给出可核的调用链。
+ *
  * @param {unknown} payload 适配器交给端口的已解析载荷
  * @returns {{state: string, code: string|null, message: string|null, floor: object|null,
  *            guard: Function, denyTools: number, denyPathPrefixes: number}}

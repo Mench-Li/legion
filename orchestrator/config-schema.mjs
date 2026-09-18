@@ -144,6 +144,17 @@ export const NON_ENV_LITERALS = Object.freeze([
   //
   // 这一条与 `EXECUTOR_HOST_PORT_REQUIRED` 必须**分开**，虽然两者今天都会让
   // 每一次 Run 停下：
+  // 这一条与 `EXECUTOR_HOST_PORT_REQUIRED` 必须**分开**——两者的触发面不同，
+  // 于是"这一次为什么停下、该去查什么"也不同：
+  //
+  //   ⚠️ 2026-09-18 订正：这里原文写的是"虽然两者**今天**都会让**每一次** Run
+  //   停下"。**那句已过期**（PRT-214 的 🟡 依据被证伪，见 `934b0b7`）：权限档位
+  //   现在**有**生产来源（`team-hub/server.mjs:438` 的 `resolveRunPermissions`），
+  //   正常员工的 Run 不再停在派发前。今天**仍会**以本条停下的只剩"这个员工
+  //   没有清单"（端口返回 `null` ⇒ `UNSUPPLIED_PERMISSIONS`）那一类——
+  //   那是**一部分** Run，不是"每一次"。
+  //   *两句话读起来都像"有保护"，但排查方向相反：前者让人去查接线，
+  //   后者让人去查那一个员工的清单里有没有那一行。*
   //
   //   · `EXECUTOR_HOST_PORT_REQUIRED` —— 这一次部署**没有**把引擎接上来。
   //     修法是"接线"（绑定宿主端口或配端点）。

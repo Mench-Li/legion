@@ -2157,7 +2157,9 @@ async function stageTest() {
       //
       //   > 一个按号码去杀的清理动作，与一个随机杀进程的动作，
       //   > 在"会不会误伤"上是同一个东西——只是前者看起来有理有据。
-      label: 'run-record（PRT-705 孤儿进程：PID 会被回收，映像名对不上的一律不动手）',
+      label: 'run-record（PRT-705 孤儿进程：PID 会被回收，映像名对不上的一律不动手；'
+        + '并含 PRT-009 那半条"峰值读数落盘读得回"——字段分「必须有/可以有」两档，'
+        + '"没采到"必须写 null 不许写 0）',
       files: ['product/launcher/run-record.test.mjs'],
       cwd: ROOT,
     },

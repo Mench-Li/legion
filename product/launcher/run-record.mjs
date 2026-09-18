@@ -100,6 +100,76 @@ export const RUN_RECORD_CODES = Object.freeze({
  */
 export const RUN_RECORD_FIELDS = Object.freeze(['key', 'pid', 'image'])
 
+/**
+ * 记录里每个进程**可以有、但可以没有**的字段。
+ *
+ * ★★★ 新读数一律加在**这里**，**不要**加进 `RUN_RECORD_FIELDS`。
+ *
+ *   上面那张表的语义是「**必须有**」（`validateRunRecord` 里
+ *   `!(f in p) ⇒ 坏记录`）。把 `peakResource` 加进去，就要求**上一个** launcher
+ *   写下的记录也必须有它——而那条记录写下的时候这个字段**还不存在**
+ *   ⇒ 读取方判「记录坏了、不知道上次起了什么」
+ *   ⇒ **孤儿进程不被清理**。
+ *
+ *   也就是说：加进 `RUN_RECORD_FIELDS` 会让这个模块**正好犯下它自己
+ *   上面那段注释警告过的事**（旧读取方拒绝更富的记录）。
+ *
+ *   > 一个"缺了这个字段所以记录不可用"的校验，与一个"这条记录本来就没有这个读数"的记录，
+ *   > 在"上一轮起的进程还活着吗"这个问题上是**同一个东西**：
+ *   > 都得到"不知道"，而"不知道"的处置是**不动手**。
+ *
+ *   ★ 同理**不动 `RUN_RECORD_VERSION`**：`validateRunRecord` 里
+ *   `value.version !== RUN_RECORD_VERSION ⇒ 坏记录`，所以抬版本号等于把
+ *   磁盘上所有更旧的记录一次性判死。两个字段的处置必须一致——
+ *   一边说"多余字段容忍"、一边抬版本号，是自相矛盾的。
+ *
+ *   ⚠️ 后果是**前向兼容靠"容忍"、不靠版本号**：新写入方写的更富记录，
+ *   旧读取方照常按 `{key,pid,image}` 清理；旧记录落到新读取方上，
+ *   `peakResource` 缺席 ⇒ **不算坏记录**（见 `run-record.test.mjs` ②'）。
+ */
+export const RUN_RECORD_OPTIONAL_FIELDS = Object.freeze(['peakResource'])
+
+/** `peakResource` 里三个**测量值**。判别"没采到"看的就是它们。 */
+const PEAK_RESOURCE_MEASURE_FIELDS = Object.freeze([
+  'peakWorkingSetBytes', 'peakRssBytes', 'cpuMs',
+])
+
+/**
+ * 把一份采样读数规范成记录里的形状。纯函数。
+ *
+ * ★ 读数的形状来自 `product/launcher/peak-resource.mjs` 的 `window()`：
+ *   `{ ok, pid, platform, samples, startedAtMs, endedAtMs, lastOkAtMs, lastCode,
+ *      peakWorkingSetBytes, peakRssBytes, cpuMs }`。
+ *
+ * ★ `null` 是**一等公民**：它表示"从未采样"，与 `ok:false`（采过但采不到）
+ *   和 `ok:true`（采到了）是**三种**不同的事。三者都不许塌缩成第四种。
+ *
+ * ⚠️ 这个函数**不做**"把不合形状的值静默丢掉"以外的事——静默丢掉正是本模块
+ *   要避免的那件事（见 `buildRunRecord` 的注释）。所以：
+ *   · 传进来 `null`/`undefined` ⇒ 返回 `null`（**从未采样**，如实）；
+ *   · 传进来非对象（数字、字符串、数组）⇒ 返回 `null`；
+ *   · `validateRunRecord` 会在**读**的那一侧把坏形状报出来，不靠这里拦。
+ */
+export function normalizePeakResource(v) {
+  if (v === null || v === undefined) return null
+  if (typeof v !== 'object' || Array.isArray(v)) return null
+  const num = (x) => (typeof x === 'number' && Number.isFinite(x) ? x : null)
+  const txt = (x) => (typeof x === 'string' && x !== '' ? x : null)
+  return Object.freeze({
+    ok: v.ok === true,
+    pid: num(v.pid),
+    platform: txt(v.platform),
+    samples: num(v.samples) ?? 0,
+    startedAtMs: num(v.startedAtMs),
+    endedAtMs: num(v.endedAtMs),
+    lastOkAtMs: num(v.lastOkAtMs),
+    lastCode: txt(v.lastCode),
+    peakWorkingSetBytes: num(v.peakWorkingSetBytes),
+    peakRssBytes: num(v.peakRssBytes),
+    cpuMs: num(v.cpuMs),
+  })
+}
+
 /** 记录路径。`dataDir` 为空时返回 null——**不猜位置**。 */
 export function runRecordPath(dataDir) {
   if (typeof dataDir !== 'string' || dataDir === '') return null
@@ -113,16 +183,24 @@ export function runRecordPath(dataDir) {
  * 它是本模块里唯一能用来区分"我们的进程"与一个碰巧拿到同一个号码的
  * 别的程序"的东西——没有它，整个模块就退化成"按号码杀"。
  *
- * ★★ 这是一个**闭合映射**：每个进程只挑 `{key, pid, image}`，
- *   **传进来的别的字段会被静默丢掉**（不是报错，是不出现）。
+ * ★★ 这是一个**闭合映射**：每个进程只挑 `{key, pid, image}` 加
+ *   `RUN_RECORD_OPTIONAL_FIELDS` 里认的那几个，**传进来的别的字段会被静默丢掉**
+ *   （不是报错，是不出现）。
  *
  *   这一条是有后果的，所以单独写明：想给记录加一个新读数（例如 `peakResource`），
  *   **只改调用方那一处 `map()` 是不够的** —— 值会在这一层被丢掉，
  *   而且没有任何报错，于是记录里那个字段的读数永远是"没有"，
- *   看起来像"采样没采到"。至少还要改这里，以及 `RUN_RECORD_FIELDS`。
+ *   看起来像"采样没采到"。至少还要改这里，以及 `RUN_RECORD_OPTIONAL_FIELDS`。
  *
  *   （PRT-009 的记账曾经写着"接上只是加一行"，那句是错的；订正见 `run-record.test.mjs`
  *   那条 `buildRunRecord 是闭合映射` 的用例。）
+ *
+ * ★★★ 续（2026-09-18）：`peakResource` 现在**已经**在这一层被带上——
+ *   加在 `RUN_RECORD_OPTIONAL_FIELDS`，**不是** `RUN_RECORD_FIELDS`（理由见那里）。
+ *   于是上面那句"至少还要改这里，以及 `RUN_RECORD_FIELDS`"里的**后半句是错的**：
+ *   加进 `RUN_RECORD_FIELDS` 反而会让旧记录判死、孤儿进程清不掉。
+ *   这是这一条记账里**第二处**"看起来像同一件事、其实处置相反"的地方
+ *   （第一处是"接上只是加一行"）。
  */
 export function buildRunRecord({ runId, launcherPid = null, startedAt, processes, now = () => new Date().toISOString() } = {}) {
   return Object.freeze({
@@ -134,6 +212,10 @@ export function buildRunRecord({ runId, launcherPid = null, startedAt, processes
       key: String(p?.key ?? ''),
       pid: typeof p?.pid === 'number' ? p.pid : null,
       image: typeof p?.image === 'string' && p.image !== '' ? p.image : null,
+      // ★ 缺席与 `null` 是**同一个意思**（"这个写入方没有这个读数"），
+      //   所以统一落成 `null`，不用"字段在不在这"再表达一次。
+      //   于是读取方只有一件事要判：`peakResource` 是 null 还是有形状。
+      peakResource: normalizePeakResource(p?.peakResource),
     }))),
   })
 }
@@ -163,6 +245,43 @@ export function validateRunRecord(value) {
       }
       if ('pid' in p && p.pid !== null && !Number.isInteger(p.pid)) {
         problems.push(`processes[${i}].pid 不是整数：${JSON.stringify(p.pid)}`)
+      }
+      // ★★ 可选字段：**缺席不算坏**（那是上一个版本的写入方，见
+      //   `RUN_RECORD_OPTIONAL_FIELDS`）；但**在了就要有形状**。
+      //
+      //   > 一个"缺席"与一个"有但是坏的"，在只判"字段在不在"的校验里
+      //   > 是同一个东西——而前者必须放行（否则旧记录判死、孤儿进程清不掉），
+      //   > 后者必须报出来（否则一个新写入方的 bug 会伪装成"这个读数没有"）。
+      if ('peakResource' in p && p.peakResource !== null && p.peakResource !== undefined) {
+        const pr = p.peakResource
+        if (typeof pr !== 'object' || Array.isArray(pr)) {
+          problems.push(`processes[${i}].peakResource 既不是 null 也不是对象：`
+            + JSON.stringify(pr))
+        } else {
+          if (typeof pr.ok !== 'boolean') {
+            problems.push(`processes[${i}].peakResource.ok 不是布尔：${JSON.stringify(pr.ok)}`)
+          }
+          for (const f of PEAK_RESOURCE_MEASURE_FIELDS) {
+            const v = pr[f]
+            if (v !== null && !(typeof v === 'number' && Number.isFinite(v))) {
+              problems.push(`processes[${i}].peakResource.${f} 既不是 null 也不是有限数：`
+                + JSON.stringify(v))
+            }
+          }
+          // ★★★ 本模块要守的那条纪律，落成一条**可判**的不变式：
+          //   `ok=false`（采过但采不到）时，三个测量值**必须都是 null**。
+          //
+          //   0 是一个**测量结论**（"一个字节都没用"），不是"不知道"。
+          //   一个 `ok:false` 却带着 0 的记录，会让"这台机器很省内存"
+          //   与"这台机器根本没采到"在事后读记录时同形。
+          if (pr.ok === false) {
+            const notNull = PEAK_RESOURCE_MEASURE_FIELDS.filter((f) => pr[f] !== null)
+            if (notNull.length > 0) {
+              problems.push(`processes[${i}].peakResource 声明 ok=false，却带着测量值 `
+                + `${notNull.join('/')}——"没采到"必须写 null，**不许写 0**`)
+            }
+          }
+        }
       }
     }
   }

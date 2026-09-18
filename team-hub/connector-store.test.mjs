@@ -22,6 +22,12 @@ import {
   normalizeDeclaration,
 } from './connector-store.mjs'
 
+// ★ 执行面的注册表：F-21 的**判定面**。控制面**不** import 它（见文件头 ①），
+//   但**用例**要 import —— 因为这里要量的是一条**跨平面**的读数：
+//   "控制面冻结下来的那份记录，执行面到底用不用得上"。
+//   理由与上面"字面量从执行面源码里抽出来比对"同源：两边必须放在一起量。
+import { createRegistry } from '../runtime/connectors/registry.mjs'
+
 const HERE = dirname(fileURLToPath(import.meta.url))
 
 function freshDb() {
@@ -456,4 +462,48 @@ test('⑤ ★ 每个码都至少被一个用例触达', () => {
   const testSrc = readFileSync(join(HERE, 'connector-store.test.mjs'), 'utf8')
   const unreachable = declared.filter((n) => !testSrc.includes(`CONNECTOR_STORE_ERRORS.${n}`))
   assert.deepEqual(unreachable, [], `这些码没有用例触达：${unreachable.join(', ')}`)
+})
+
+// ---------------------------------------------------------------------------
+// ⑧ ★★★ 控制面的记录能不能喂进执行面的注册表
+// ---------------------------------------------------------------------------
+
+test('⑧ ★★★ 控制面冻结的记录**喂不进**执行面的注册表——缺的是**连接目标**，不是策略', () => {
+  // 这条读数决定了一件很具体的事：F-21 的判定面能不能"照抄 PRT-214 的形状，
+  // 把控制面的连接器声明挂到 `RunRequest` 上、由执行面装成一份注册表"。
+  //
+  // 结论：**不能**。而且原因不是"没人接线"，是**控制面根本没有那两个字段**——
+  // 于是任何"照抄形状"的施工都会在 `declareConnector` 这一步具名拒绝。
+  // 想让它通过，唯一的办法是**编一个连接目标**，那正是"发明默认值"。
+  const record = normalizeDeclaration(decl())
+
+  // ① 控制面存的是**策略**那一半：id / transport / policy / tools / secretRefs。
+  //    它**不**存连接目标。这是设计使然，但后果很具体：执行面靠这两个字段
+  //    才认得出"连去哪儿"。
+  assert.equal('command' in record, false, '控制面竟然存了 command——读数过期了，重写本节')
+  assert.equal('url' in record, false, '控制面竟然存了 url——读数过期了，重写本节')
+
+  // ② 把那份记录**原样**喂进执行面的注册表 → **具名拒绝**。
+  //
+  //   静默成功才是最坏的一种：一个"注册成功但永远连不上"的连接器，
+  //   与一个"连上了但没有工具"的连接器，在读数上长得一模一样。
+  const err = throwsCode(
+    () => createRegistry({ connectors: [record] }),
+    'connector-transport-target-missing',
+  )
+  assert.match(err.message, /必须给 command/)
+
+  // ③ 反向对照：**只**补上连接目标，它就能建起来。
+  //    少了这条，② 无法排除"其实是别的地方也不对"——那样本节就只是
+  //    "这条路走不通"，而不是"**只差**连接目标"。
+  const reg = createRegistry({ connectors: [{ ...record, command: 'npx' }] })
+  assert.equal(reg.connectors().length, 1)
+
+  // ④ 不是 stdio 独有：http/sse 缺的是 url，同一个具名码。
+  //    少了这条，一个"只为 stdio 补了 command"的施工会在 http 上继续静默失败。
+  const httpErr = throwsCode(
+    () => createRegistry({ connectors: [normalizeDeclaration(decl({ transport: 'http' }))] }),
+    'connector-transport-target-missing',
+  )
+  assert.match(httpErr.message, /必须给 url/)
 })

@@ -44,8 +44,8 @@
 // 所以锚点取不到 ⇒ `ANCHOR_MISSING`，同样是红。
 // ============================================================================
 
-import { readFileSync } from 'node:fs'
-import { resolve, dirname } from 'node:path'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { resolve, dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { specFor, PROCESS_KEYS } from '../../product/process-manifest.mjs'
@@ -97,7 +97,65 @@ export function defaultContext() {
     processKeys: () => PROCESS_KEYS,
     patchRows: () => PATCH_LAYER_ROWS,
     patchYml: () => patchYmlRepresentedRows(doc(PATCH_YML)),
+    generatedArtifacts: () => scanSelfDeclaredGenerated(),
   }
+}
+
+// ── 类级扫描：自称"生成物"的文件里不许有"任务状态断言" ─────────────────────
+//
+// ★ 起因见 `patch-yml-asserts-no-task-status`：生成物去复述状态就一定会漂。
+//   但那条判据只钉住**一个**文件。这一条把**整类**钉住。
+//
+// ★ 第一版普查我漏了 `.worktrees` / `.legion-worktrees`，于是扫了 30916 个文件、
+//   报出 8 个"必红"——而**那 8 个全在别的工作树的旧副本里**，与这个仓库无关。
+//   > 一个把"别人的旧 checkout"算进结论的普查，量的是**磁盘**而不是**仓库**。
+//
+// ⚠️ 边界：这只覆盖**自称**是生成物的文件（6 个）。不自称的生成物不在扫描面内。
+const GENERATED_SELF = Object.freeze([
+  /本文件由[^\n]{0,40}生成/,
+  /\bGENERATED\b/,
+  /不要手改|请勿手改|不要手工编辑|请勿手工编辑/,
+  /\bDO NOT EDIT\b/i,
+  /此文件(?:由|是)[^\n]{0,30}生成/,
+])
+const STATUS_VOCAB = Object.freeze(['未完成', '已完成', '待完成', '未开始', '部分完成'])
+const SCAN_SKIP = new Set([
+  '.git', 'node_modules', '.ci', 'scratch', 'dist', 'build', '.dsh', 'coverage',
+  '.worktrees', '.legion-worktrees',
+])
+const SCAN_EXT = /\.(mjs|js|cjs|ts|json|md|yml|yaml|txt|patch|sql)$/i
+
+function scanSelfDeclaredGenerated() {
+  const out = []
+  const walk = (dir) => {
+    let names
+    try { names = readdirSync(dir) } catch { return }
+    for (const name of names) {
+      if (SCAN_SKIP.has(name)) continue
+      const p = join(dir, name)
+      let st
+      try { st = statSync(p) } catch { continue }
+      if (st.isDirectory()) { walk(p); continue }
+      if (!SCAN_EXT.test(name) || st.size > 2_000_000) continue
+      let text
+      try { text = readFileSync(p, 'utf8') } catch { continue }
+      const head = text.slice(0, 3000)
+      if (!GENERATED_SELF.some((re) => re.test(head))) continue
+      // 找"任务号附近 60 字符内有状态词"的位置
+      const offences = []
+      for (const w of STATUS_VOCAB) {
+        let idx = text.indexOf(w)
+        while (idx !== -1) {
+          const around = text.slice(Math.max(0, idx - 60), idx + w.length + 60)
+          if (/PRT-\d+/.test(around)) offences.push({ word: w, around: around.replace(/\s+/g, ' ').trim() })
+          idx = text.indexOf(w, idx + 1)
+        }
+      }
+      out.push({ rel: relative(REPO, p).replace(/\\/g, '/'), offences })
+    }
+  }
+  walk(REPO)
+  return out
 }
 
 /**
@@ -242,6 +300,25 @@ export const FACTS = Object.freeze([
     expect: '', // 空串 = 生成物正文里一个状态词都没有
   }),
   Object.freeze({
+    id: 'no-generated-artifact-asserts-task-status',
+    what: '**类级**：任何自称"生成物"的文件里都不许出现"任务号 + 状态词"',
+    why: '上一条只钉住 `legion-host.patch.yml` **一个**文件。这一条钉住**整类**——'
+      + '因为我这一批做了一次普查（=`scratch/census-generated-status.mjs`），'
+      + '结论是**本仓（不含别的工作树）里这一类只有 1 个实例，且已修**。'
+      + '普查是"顺路发现"的解毒剂：'
+      + '「发现了一处」与「只有一处」在此之前一直是两件事。'
+      + '★ 存这条判据的理由不是"今天有 1 个"，而是"**它还会再长出来**"——'
+      + '生成器每跑一次就把手写状态重印一遍。'
+      + '⚠️ 边界：只覆盖**自称**是生成物的文件；不自称的不在扫描面内。',
+    source: '全仓（跳过 .worktrees / .legion-worktrees / node_modules 等）自称生成物的文件正文',
+    derive: (ctx) => ctx.generatedArtifacts()
+      .filter((g) => g.offences.length > 0)
+      .map((g) => `${g.rel}[${g.offences.map((o) => o.word).join(',')}]`)
+      .sort()
+      .join(' '),
+    expect: '', // 空串 = 一个违规的生成物都没有
+  }),
+  Object.freeze({
     id: 'ledger-total-doc-count',
     what: '台账标题声称"全 N 项"',
     why: '台账总数是它的读者最先看到的数字。',
@@ -356,6 +433,10 @@ function main() {
   }
   console.log('')
   console.log(`boundary-facts: ${r.ok ? 'PASS' : 'FAIL'}（参与比对 ${r.checked}/${r.total}，红 ${r.violations.length}）`)
+  if (r.ok) {
+    const n = defaultContext().generatedArtifacts().length
+    console.log(`  其中类级扫描面：自称"生成物"的文件 ${n} 个（跳过 .worktrees / node_modules 等）`)
+  }
   process.exit(r.ok && r.checked === r.total ? 0 : 1)
 }
 

@@ -237,15 +237,33 @@ test('⑨b 生成器与生成物**同步**（改了 render.mjs 就必须重新�
   assert.equal(code, 0, '`render.mjs --check` 不是 0 ⇒ 生成物与生成器漂了（跑 `render.mjs --write`）')
 })
 
-test('⑨b 生成器与生成物**同步**（改了 render.mjs 就必须重新生成）', async () => {
-  const { execFileSync } = await import('node:child_process')
-  // `--check` 的语义就是"文档与声明/生成器是否一致"：exit 0 ⇒ 同步
-  let code = 0
-  try {
-    execFileSync(process.execPath, ['runtime/dsh-composition/render.mjs', '--check'],
-      { cwd: REPO, stdio: 'ignore' })
-  } catch (err) {
-    code = err.status ?? 1
-  }
-  assert.equal(code, 0, '`render.mjs --check` 不是 0 ⇒ 生成物与生成器漂了（跑 `render.mjs --write`）')
+// ── ⑩ 类级扫描：普查的可执行形态 ──────────────────────────────────────────
+test('⑩ 类级扫描：正整数对照——扫描面不许是空的', () => {
+  const arts = defaultContext().generatedArtifacts()
+  assert.ok(arts.length > 0,
+    '一个自称生成物的文件都没扫到 ⇒ 扫描器坏了（不是"仓库里没有生成物"）。'
+    + '★ 一个"扫了 0 个文件"的普查与一个"一个违规都没有"的普查，输出长得一样')
+  // 至少要有运行期真正会生成的那个进面子里，否则扫描面跑偏了
+  assert.ok(arts.some((a) => a.rel === PATCH_YML),
+    `${PATCH_YML} 不在扫描面里 ⇒ 扫描器没覆盖到它该覆盖的东西`)
+})
+
+test('⑩b 载荷：让一个生成物说"某任务未完成" ⇒ 类级判据必须红', () => {
+  const base = defaultContext()
+  const poisoned = [
+    ...base.generatedArtifacts(),
+    { rel: 'FAKE-generated.md', offences: [{ word: '未完成', around: 'PRT-999 因此仍是未完成状态' }] },
+  ]
+  const r = checkFacts({ ctx: { ...base, generatedArtifacts: () => poisoned } })
+  const v = r.violations.find((x) => x.id === 'no-generated-artifact-asserts-task-status')
+  assert.ok(v !== undefined, '往扫描面里放了一个违规生成物却没红 ⇒ 这条类级判据是装饰')
+  assert.match(String(v.actual), /FAKE-generated\.md/)
+})
+
+test('⑩c 载荷：生成物里只提任务号、**不作**状态判断 ⇒ 不许红（避免狼来了）', () => {
+  const base = defaultContext()
+  const benign = base.generatedArtifacts().map((a) => ({ ...a, offences: [] }))
+  const r = checkFacts({ ctx: { ...base, generatedArtifacts: () => benign } })
+  assert.ok(!idsOf(r).includes('no-generated-artifact-asserts-task-status'),
+    '没有违规却报红 ⇒ 判据会成为狼来了，然后被人关掉')
 })

@@ -223,11 +223,29 @@
 
 ### 9.2 下一个施工点（供接手者）
 
-1. `runtime/connectors/target-binding.mjs` 的三个拒绝（**已落地**）是这条纪律的**第一份实现**；
-2. 范围表照同一形状做：一个纯函数 + 三条拒绝（缺表 / 表为空 / 表里出现工作区外的根）；
-3. 两处汇合到**同一个**部署配置读取点，再挂上 `RunRequest`；
+★ **订正（同日）：本节的第 2 条我写错了。** 我原写"范围表照 `target-binding` 的同一形状
+做一个纯函数 + 三条拒绝"——**但那个纯函数已经存在**：
+
+`runtime/dsh-composition/path-scope.mjs`，**863 行**，导出 `normalizeScope` /
+`narrowScopeToWorkspace` / `checkPathScope` / `createResolver` / `contains` /
+`resolveReal`，外加一整套自证（`PATH_SCOPE_CHECKED`、`assertBoundaryNotPrefix`、
+`assertSymlinkEscapeCaught`、`assertWriteScopeNarrowed`…）。**再写一个就是重复建设。**
+
+> 于是范围表缺的**不是判定逻辑，是那份表的出处**——而这与连接目标是**同一个缺口**。
+> 一句话：**它的 `checkPathScope` 写好了，只是没人给它一份表。**
+
+真正剩下的施工点：
+
+1. `runtime/connectors/target-binding.mjs` 的三个拒绝（**已落地**，`a3c0800`）
+   是这条纪律的**第一份实现**；
+2. 范围表**不**新写判定，而是：把部署配置给的 `{readRoots, writeRoots}` 经
+   `normalizeScope()` / `narrowScopeToWorkspace()` **校验后**交出去——
+   要补的只是"表缺席 / 表为空 / 表里出现工作区外的根"这三条**装配期**拒绝
+   （判定期那三条 `path-scope.mjs` 里已有）；
+3. 两处（连接目标 + 范围表）汇合到**同一个**部署配置读取点，再挂上 `RunRequest`；
 4. ★ 但配置键仍被 `product/process-manifest.mjs` / `product/config-schema.mjs`
    的**他人在制品**挡着（§8.3）——那是唯一的外部依赖。
+
 
 
 

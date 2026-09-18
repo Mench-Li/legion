@@ -338,9 +338,22 @@ test('★★★★★ 缺口 ③（真进程）：一个真 DSH 进程在启动�
     //     · `timeout` —— 证据**一直没出现**，外部兜底杀的（这一种才是坏消息）。
     //   此前这三种在读数里长得一样（都是一个耗时数字），
     //   而"它其实退不了"这件事只在第一种缺席时才看得出来。
+    //
+    //   ⚠️ `evidenceAtMs === null` **不等于**"证据没落盘"——它只等于
+    //   "**轮询没看见**它落盘"（轮询 250ms 一次，而正常那一轮 3.1s 落盘、
+    //   3.3s 就退出了，本来就可能错过）。
+    //
+    //     > 一个"我没观测到"与一个"它没发生"，在只有同一个 `null` 的时候
+    //     > 长得一模一样——**而前者不该被写成后者。**
+    //
+    //   ⇒ 所以这里分两种说法：轮询看见过就说时刻，只看见文件在就说"落盘（未被轮询捕获）"，
+    //   真的不在才说"未落盘"。
+    const evidenceNote = result.evidenceAtMs !== null
+      ? `${(result.evidenceAtMs / 1000).toFixed(1)}s`
+      : (existsSync(outFile) ? '落盘（未被轮询捕获）' : '未落盘')
     console.log(`[PRT-509] 宿主进程耗时 ${(result.ms / 1000).toFixed(1)}s`
       + `（收场 ${result.kind}，退出码 ${result.code}，预算 ${HOST_TIMEOUT_MS / 1000}s，`
-      + `证据落盘于 ${result.evidenceAtMs === null ? '未落盘' : `${(result.evidenceAtMs / 1000).toFixed(1)}s`}）`)
+      + `证据 ${evidenceNote}）`)
     console.log(`MEASURE prt509.host_exit_seconds=${(result.ms / 1000).toFixed(1)}`
       + ` budget_seconds=${HOST_TIMEOUT_MS / 1000} exit_code=${result.code} settle=${result.kind}`)
 

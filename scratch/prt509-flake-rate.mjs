@@ -51,13 +51,15 @@ function once(i) {
     child.stderr.on('data', (d) => { all += d.toString() })
     child.on('exit', (code) => {
       const secs = (Date.now() - t0) / 1000
-      const m = /MEASURE\s+prt509\.host_exit_seconds=([\d.]+)[^\n]*exit_code=(\S+)/.exec(all)
-      const probeWritten = /探针读数 已写出|探针读数已写出/.test(all)
+      const m = /MEASURE\s+prt509\.host_exit_seconds=([\d.]+)[^\n]*?exit_code=(\S+)(?:\s+settle=(\S+))?/.exec(all)
+      // ⚠️ 这一格以前靠匹配 `探针读数 已写出` 那句中文——**那句话 2026-09-18 被改了措辞**，
+      //    于是这一列静默地全变成"未写出"，而它与"真的没写出"看起来一样。
+      //    ⇒ 改判 `settle`（机读约定，由 run-ci 的提取器背书），不再靠一句会变的中文。
       res({
         i, code, secs,
         hostSecs: m ? Number(m[1]) : null,
         exitCode: m ? m[2] : '(无读数行)',
-        probeWritten,
+        settle: m && m[3] ? m[3] : '(无 settle 格)',
         nodeProcs: countNodeProcs(),
       })
     })
@@ -71,24 +73,34 @@ for (let i = 1; i <= ROUNDS; i++) {
   const mark = r.exitCode === '0' ? '✔' : '✖'
   console.log(`${mark} 第 ${String(i).padStart(2)} 轮：套件退出码 ${String(r.code).padStart(4)}  `
     + `宿主 ${String(r.hostSecs).padStart(6)}s  墙钟 ${r.secs.toFixed(1).padStart(6)}s  `
-    + `探针读数${r.probeWritten ? '已写出' : '未写出'}  node 进程数 ${r.nodeProcs}`)
+    + `收场 ${String(r.settle).padEnd(23)} node 进程数 ${r.nodeProcs}`)
 }
 
 const hangs = rows.filter((r) => r.exitCode !== '0')
 console.log('\n' + '='.repeat(70))
 console.log(`预算 ${BUDGET_MS / 1000}s × ${ROUNDS} 轮`)
-console.log(`  正常 ${rows.length - hangs.length} 轮 / 挂死 ${hangs.length} 轮`
-  + ` ⇒ 偶发率 ${(hangs.length / rows.length * 100).toFixed(0)}%`)
+console.log(`  自然退出 ${rows.length - hangs.length} 轮 / 未自然退出 ${hangs.length} 轮`
+  + ` ⇒ ${(hangs.length / rows.length * 100).toFixed(0)}%`)
 const ok = rows.filter((r) => r.exitCode === '0').map((r) => r.hostSecs).filter((x) => x !== null)
 if (ok.length) {
-  console.log(`  正常那几轮的宿主耗时：${ok.join('s / ')}s`
+  console.log(`  自然退出那几轮的宿主耗时：${ok.join('s / ')}s`
     + `（min ${Math.min(...ok)} / max ${Math.max(...ok)}）`)
 }
-if (hangs.length) {
-  console.log(`  挂死那几轮探针读数：${hangs.map((r) => (r.probeWritten ? '已写出' : '未写出')).join(' / ')}`)
-}
+const settles = {}
+for (const r of rows) settles[r.settle] = (settles[r.settle] ?? 0) + 1
+console.log(`  收场分布：${Object.entries(settles).map(([k, v]) => `${k}×${v}`).join(', ')}`)
+console.log(`  ⚠️ 本脚本只量"这一台机器、这一段时间"的率——**离开这个条件，这个数不作数**。`)
+console.log(`  ⚠️ 2026-09-18 实测：同一个文件在空闲机器上 0/25、并发 4×4 下 0/16、`)
+console.log(`     CI 在跑时 0/10 ⇒ 当时那个"≈50%"已作废（见 PRT-PROGRESS 的第二次订正）。`)
+// ⚠️ 这一段以前会推断"进程数在变 ⇒ 挂死会留下累积的孤儿"。**那条推断是错的，已作废。**
+//
+//   反例就在本脚本自己的输出里：一跑 25 轮、**0 轮未退出**的那一次，
+//   进程数照样在 6 与 7 之间跳。⇒ 进程数变化与"有没有挂死"**没有**那个关系
+//   ——它多半来自 `countNodeProcs()` 自己起 PowerShell 的时序，以及同机的其他活动。
+//
+//   > 我当初是从**一次**并排的观测里读出那条因果的，
+//   > 而它在"全部没挂"的数据里立刻不成立。
 const procSeries = rows.map((r) => r.nodeProcs).join(' → ')
-console.log(`  每轮后的 node 进程数：${procSeries}`)
-console.log(`  ⇒ ${new Set(rows.map((r) => r.nodeProcs)).size === 1
-  ? '进程数恒定 ⇒ 挂死**不**留下累积的孤儿'
-  : '★ 进程数在变 ⇒ 挂死**会**留下东西，下一轮可能受上一轮影响'}`)
+console.log(`  node 进程数采样（仅供参考）：${procSeries}`)
+console.log('  ⚠️ 此前这里写着"进程数在变 ⇒ 挂死会留下孤儿"——**那条推断已作废**：'
+  + '在 0 轮未退出的那次里它照样在变。进程数不是挂死的判据。')

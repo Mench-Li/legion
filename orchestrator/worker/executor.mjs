@@ -619,9 +619,24 @@ export async function createProductionExecutor(deps = {}) {
  *
  * ## 为什么它是一个**有身份的常量**，而不是一段字面量
  *
- * `RunRequest.permissions` 是契约必填，而 `lease` 上今天**根本没有** `permissions`：
- * 真 `claim()` 回来的对象只有 8 个键（见 `can-read-authorization-source.test.mjs`），
- * 于是 `defaultRequestFor` 一直在**编**一份 `{preset:'legion-attended', tools: []}`。
+ * `RunRequest.permissions` 是契约必填，而 `lease` 上**可以没有**权限档位，
+ * 于是 `defaultRequestFor` 一度一直在**编**一份 `{preset:'legion-attended', tools: []}`。
+ *
+ * ★ 2026-09-18 订正：这里原先写的是"`lease` 上今天**根本没有** `permissions`：
+ *   真 `claim()` 回来的对象只有 8 个键"。**那句话已经过期**，而且过期的方式值得记——
+ *   它是**偏保守**方向的错，于是比一个乐观的错更难被发现：*它读起来像有人在谨慎*。
+ *
+ *   今天它是**按接线与否分叉**的，不是一句全局事实：
+ *
+ *   · **接了线**的 `createRunStore`（生产：`team-hub/server.mjs` 给了
+ *     `resolveRunPermissions`）在有岗位清单时，会往租约上加
+ *     `allowedTools` / `deniedTools` / `approvalPolicy` **三个键** ⇒ 共 11 个键，
+ *     档位**在**这一侧，走 `permissionsFromLease()`。
+ *   · **没接线**的 store（`can-read-authorization-source.test.mjs` ①②③④
+ *     刻意跑的那一半）仍然恰好 8 个键——它证明的是"档位**不会自己长出来**"。
+ *
+ *   ⇒ "8 个键"是这个分叉的一边，不是全局状态。把它当全局状态读，
+ *     会让这条 JSDoc 在功能接上之后**继续报平安**。
  *
  * 编出来的这一份与"这个员工不能用任何工具"在**形状上**完全一样，而
  * `deriveRunFloor()` 的输入契约里写着「空数组是合法的，意思是这个员工不能用任何工具」。
@@ -798,12 +813,27 @@ export function permissionsFromLease(lease) {
  *      所以这里就地用 `RUN_FLOOR_NOT_DERIVED` 停下，把**每个拒绝码**原样带在
  *      `refusals` 上——`run-floor-permissions-missing` 这类码就是修法的名字。
  *
- * ## 今天生产上的读数（不夸大）
+ * ## 生产上的读数（不夸大）—— ★ 2026-09-18 订正：这一节**曾经**夸大过
  *
- * 真 `lease` 上没有 `permissions`（`claim()` 只回 8 个键），于是**每一个** Run 都走 ③：
- * `run-floor-permissions-missing`。这是本次接线**第一次**让这个缺口变得可读——
- * 在此之前，同一件事的表现是"Run 照跑、请求上没有下限"，而缺席那一档在传输层落到
- * 「拒绝一切」的发布前姿态上：*看起来像有保护，实际上一个真工具也没有被这份下限拦过*。
+ * 这一节此前写的是"真 `lease` 上没有 `permissions`（`claim()` 只回 8 个键），
+ * 于是**每一个** Run 都走 ③"。**那句话现在是错的**，且错在**偏保守**方向——
+ * 所以它比一个乐观的错更难被发现：*它读起来像有人在谨慎*。
+ *
+ * 今天真实的分叉（两边都有用例钉着）：
+ *
+ *   · **有岗位清单**（生产主路径）⇒ 租约带 `allowedTools` / `deniedTools` /
+ *     `approvalPolicy` ⇒ `permissionsFromLease()` 产出档位 ⇒ `permissions` 不是哨兵
+ *     ⇒ 下限 `installed`、guard **真的拦**。证据：`team-hub/run-plane-e2e.test.mjs` ⑧
+ *     （清单里的 `git-push` 一路变成 guard 真拒掉的 `bash` / `pwsh`）。
+ *   · **没有岗位清单**（或 store 没接线）⇒ 那三个键缺席 ⇒ 走 ③
+ *     `run-floor-permissions-missing`。这是**按设计**的 fail closed，
+ *     不是"接线还没做"。
+ *
+ * ⇒ ③ 从"每一个 Run 都走这里"收窄成"**没拿到档位的那一类**走这里"。
+ *   "没拿到"与"给了一份空名单"仍然按**引用**分得开——那正是
+ *   `UNSUPPLIED_PERMISSIONS` 存在的理由，也是本次接线**第一次**让这个缺口可读的地方：
+ *   在此之前，同一件事的表现是"Run 照跑、请求上没有下限"，而缺席那一档在传输层落到
+ *   「拒绝一切」的发布前姿态上：*看起来像有保护，实际上一个真工具也没有被这份下限拦过*。
  *
  * @param {object} request 已构造好的 `RunRequest`
  * @param {object} [options]

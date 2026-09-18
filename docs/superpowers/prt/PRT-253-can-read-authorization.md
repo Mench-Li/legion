@@ -206,6 +206,26 @@ MEASURE-DONE
   本地路径的 ctx）用 `/read|auth|grant|permit|acl|visib/i` 筛，**全空**。
 - `D-CLAIMED-KEYS` —— 真 `claim()` 返回**恰好** 8 个键，同样全空。
 
+> ★★★ **订正（2026-09-18，PRT-214 第二步之后）：上面这一行作为"全局读数"已经过期。**
+>
+> 它当时成立，而且**今天是按接线与否分叉**的：
+>
+> | store | 租约上的键 | 档位 |
+> | --- | --- | --- |
+> | **接了线**（生产：`team-hub/server.mjs` 给了 `resolveRunPermissions`）+ 有岗位清单 | **11** 个（多 `allowedTools` / `deniedTools` / `approvalPolicy`） | **在**这一侧 |
+> | **没接线**（本文件 ①②③④ 刻意跑的那一半） | 恰好 **8** 个 | 不在 |
+>
+> 于是"8 个键"是**分叉的一边**，不是全局状态。
+> 生产证据：`team-hub/run-plane-e2e.test.mjs` ⑧ —— 清单里的 `git-push`
+> 一路变成 guard **真的拒掉**的 `bash` / `pwsh`。
+>
+> ★ 本文件下面的原始输出**一字未改**：它是那次批次的证据，改它等于伪造证据。
+> 这条订正只负责说明"它今天该怎么读"。
+>
+> ★ 这也是为什么`orchestrator/worker/executor.mjs` 里那两处
+> "`claim()` 只回 8 个键、于是**每一个** Run 都走 ③" 的 JSDoc 同批被订正——
+> **一个偏保守方向的过期读数比一个偏乐观的更难被发现，因为它读起来像有人在谨慎。**
+
 ### 2.2 两个入库套件（原始输出）
 
 `runtime/dsh-composition/can-read-authorization-boundary.test.mjs`（**新增**）

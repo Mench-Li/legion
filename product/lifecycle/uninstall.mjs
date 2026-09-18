@@ -125,9 +125,14 @@ export function planUninstall({ stores = [], mode, layout = {} } = {}) {
       continue
     }
 
-    // ★ `ask` 类（密钥）：模式**必须**对它有明确表态。
-    //   三种模式都显式列了 secret 或不列，因此这里的表态是清楚的；
-    //   若某个模式两边都没写，那才是问题——台账自检已经拦住那种情况。
+    // ★ `ask` 类（密钥）：模式**必须**对它有明确表态——表态写在
+    //   `UNINSTALL_MODES[mode].keepsSecrets` 里（`planUninstall` 自己不看它，
+    //   它只按 `removes` 执行）。
+    //   ★★ 而"每个模式都表态了、且与 `removes` 不矛盾"这条判据**不在本文件里**，
+    //   在 `data-classes.mjs` 的 `auditLedger()`（①②③ 那一块）——
+    //   本文件此前那句"台账自检已经拦住那种情况"是**不成立的**：
+    //   `keepsSecrets` 声明了三处、被读了零处，`ask` 这个词在本文件里
+    //   只出现在这段注释里。现在它成立了，而且是从 `classesChecked` 走出来的（见下）。
     if (chosen) {
       remove.push(Object.freeze({
         path: store.path, classId, note: store.note ?? null,
@@ -202,8 +207,15 @@ export function renderUninstallPlan(plan) {
  * 台账自检的再导出：卸载计划建立在台账自洽的前提上。
  *
  * 留下算出来的值（每模式删哪些类、密钥去留），不是一个布尔。
+ *
+ * @param {object} [deps]
+ * @param {{ok: boolean, problems: ReadonlyArray<string>}} [deps.classesChecked]
+ *   **可注入**，只为让"台账坏掉时本自检会不会红"这条边界能被用例钉住
+ *   （真表今天是自洽的，只用真表验等于用"没有反例"证明"没有反例"）。
+ * @returns {{ok: boolean, problems: ReadonlyArray<string>, classesChecked: boolean,
+ *            classProblems: ReadonlyArray<string>, ...}}
  */
-export function uninstallSelfCheck() {
+export function uninstallSelfCheck({ classesChecked = DATA_CLASSES_CHECKED } = {}) {
   const problems = []
   // 三种模式的**观察结果**必须两两不同——否则"明确区分"只是三个名字。
   const observed = UNINSTALL_MODE_IDS.map((id) => {
@@ -257,14 +269,22 @@ export function uninstallSelfCheck() {
   if (bogus.remove.length !== 0) problems.push('未知卸载模式仍然删了东西')
 
   return Object.freeze({
-    ok: problems.length === 0,
+    // ★★ `classesChecked` 必须并进 `ok`，否则它就是**第二个读数**：
+    //   台账不自洽（例如 `keepsSecrets` 与 `removes` 相反）时，
+    //   这里会报 `classesChecked: false` 而 `ok: true`——只看 `ok` 的调用方
+    //   会得到一个"没问题"，而那个"没问题"建立在一份自相矛盾的台账上。
+    //
+    //   > 一个"报了两个读数、只把一个当结论"的自检，与一个"只报了那个
+    //   > 好看的读数"的自检，在调用方眼里是同一个东西。
+    ok: problems.length === 0 && classesChecked.ok,
     problems: Object.freeze(problems),
     version: UNINSTALL_VERSION,
     modeObservations: Object.freeze(observed.map((o) => Object.freeze({
       mode: o.mode, removes: Object.freeze(o.removes), keeps: Object.freeze(o.keeps),
       secretsKept: o.secretsKept, workspaceKept: o.workspaceKept,
     }))),
-    classesChecked: DATA_CLASSES_CHECKED.ok,
+    classesChecked: classesChecked.ok,
+    classProblems: classesChecked.problems,
   })
 }
 

@@ -206,6 +206,89 @@ export function classifyPath(store, layout = {}) {
 }
 
 /**
+ * 台账（每类的 `onUninstall`）与模式表（每个模式的 `removes` / `keepsSecrets`）
+ * 之间的**交叉**判据。
+ *
+ * ## 这一整块此前**一条都没有**
+ *
+ * 两个表都是手写的、都在同一个文件里、都带着"为什么这么定"的说明——
+ * 于是它们**看起来**像已经互相核对过了。
+ *
+ *   > 两份都写得很认真的表，与两份已经互相对过的表，在只读其中一份时
+ *   > 是同一个东西——只不过前者会在有人只改了一边的时候安静地错下去。
+ *
+ * 最尖锐的一处是 `keepsSecrets`：它声明了**三处**、被读了**零处**
+ * （`git grep keepsSecrets` 只有那三行声明）。而它正是"`ask` 类（密钥）
+ * 被明确表态过"的唯一表达方式——`planUninstall` 自己只按 `removes` 执行。
+ * 于是"有人忘了写"与"决定了要保留"在数据上完全一样。
+ *
+ * ## 四种动作的**强制力是不一样的**（有意的，写下来免得下一个人以为漏了）
+ *
+ *   · `never` —— **硬底**：任何模式的 `removes` 里都不许出现它。
+ *   · `remove` —— **硬**：卸载的定义就是删掉它，所以**每个**模式都得删。
+ *   · `ask`    —— **必须被明确表态**：由该模式自己的 `keepsSecrets` 表达。
+ *   · `keep`   —— **只是默认值，可以被模式显式推翻**。`purge` 就推翻了
+ *                config/database/log/event/artifact 五个 `keep` 类。
+ *                ⇒ 这里**故意不查** `keep`：查它会让 `purge` 变成非法，
+ *                  而"彻底删除全部产品数据"正是 spec line 749 要的那一档。
+ *                  不写清这一条，下一个人会把它当成漏掉的一条判据补上，
+ *                  然后发现 `purge` 红了。
+ *
+ * ## 为什么是纯函数
+ *
+ * 真表今天是自洽的。只用真表验，等于用"没有反例"证明"没有反例"。
+ * 拆出来之后，用例可以拿**人造表**逐条把边界钉红。
+ *
+ * @param {object} [classes] `DATA_CLASSES` 形状
+ * @param {object} [modes] `UNINSTALL_MODES` 形状
+ * @param {ReadonlyArray<string>} [covered] 已经有**更具体**判据的类 id。
+ *   `auditLedger` 会传 `['program','workspace']`（它那两句带具体理由的话更有用），
+ *   于是同一个缺陷不会被报成两条。**默认空**——人造表要能逐条全查，
+ *   否则"跳过某几类"会让本该红的用例安静地绿。
+ * @returns {ReadonlyArray<string>} 问题清单（空 = 自洽）
+ */
+export function crossCheckLedger(
+  { classes = DATA_CLASSES, modes = UNINSTALL_MODES, covered = [] } = {},
+) {
+  const problems = []
+
+  for (const [id, m] of Object.entries(modes)) {
+    const removes = m.removes ?? []
+    // ① `keepsSecrets` 必须是一个**真布尔**——它是 `ask` 类的表态。
+    if (typeof m.keepsSecrets !== 'boolean') {
+      problems.push(`模式 ${id} 的 keepsSecrets 是 ${JSON.stringify(m.keepsSecrets)}，不是布尔——`
+        + '而"ask 类（密钥）被明确表态过"这句话就是靠它表达的。缺了它，'
+        + '"有人忘了写"与"决定了要保留"在数据上完全一样')
+    } else {
+      // ② 声明必须与 `removes` 一致——否则读声明的人（报表、确认框）
+      //    会得到与即将发生的事**相反**的结论。
+      const actual = !removes.includes('secret')
+      if (m.keepsSecrets !== actual) {
+        problems.push(`模式 ${id} 声明 keepsSecrets=${m.keepsSecrets}，而 removes `
+          + `${actual ? '不含' : '含'} secret——声明与行为相反时，`
+          + '读声明的人（报表、确认框）会得到与即将发生的事相反的结论')
+      }
+    }
+
+    for (const [cid, c] of Object.entries(classes)) {
+      // 已经有更具体判据的类跳过（免得同一个缺陷被报成两条）。
+      if (covered.includes(cid)) continue
+      // ③ `remove` 的类每个模式都得删。
+      if (c.onUninstall === 'remove' && !removes.includes(cid)) {
+        problems.push(`分类 ${cid} 的 onUninstall 是 remove（${c.why}），而模式 ${id} 不删它——`
+          + '台账说卸载就该删它，模式却留下了，两边只有一个是对的')
+      }
+      // ④ `never` 的类任何模式都不许删。
+      if (c.onUninstall === 'never' && removes.includes(cid)) {
+        problems.push(`分类 ${cid} 的 onUninstall 是 never（${c.why}），而模式 ${id} 要删它`)
+      }
+    }
+  }
+
+  return Object.freeze(problems)
+}
+
+/**
  * 台账自检：每一类都要有去留动作，且三种模式都要**能被表达**。
  *
  * 留下算出来的值（每类的动作、每模式删哪些），不是一个 `ok` 布尔。
@@ -229,6 +312,15 @@ function auditLedger() {
     // 每个模式都必须保留工作区。
     if (m.removes.includes('workspace')) problems.push(`模式 ${id} 会删工作区——那是用户的代码`)
   }
+
+  // ── 台账（`onUninstall`）与模式表（`removes`）之间的**交叉**判据 ──────
+  // 实现在下面那个纯函数里；`auditLedger` 只是拿**真表**调它一次。
+  // 拆出来是为了让边界能被**人造表**钉住（真表今天是自洽的，
+  // 只用真表验，等于用"没有反例"验"没有反例"）。
+  // ★ `covered` 里是上面已经有**更具体**判据的两个类——它们那两句带着
+  //   "否则'卸载'什么也没卸"与"那是用户的代码"，比通用句子有用，
+  //   所以通用判据跳过它们，避免同一个缺陷被报成两条。
+  problems.push(...crossCheckLedger({ covered: ['program', 'workspace'] }))
   // 密钥那一类的去留必须是 `ask`：它是"保留数据"与"彻底删除"之间那条线。
   if (DATA_CLASSES.secret.onUninstall !== 'ask') {
     problems.push('secret 类的 onUninstall 必须是 ask——否则"保留数据"会静默地留下凭据，或静默地删掉它')

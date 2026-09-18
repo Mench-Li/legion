@@ -16,7 +16,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { UNINSTALL_MODES } from './data-classes.mjs'
+import { DATA_CLASSES_CHECKED, UNINSTALL_MODES, crossCheckLedger } from './data-classes.mjs'
 import {
   UNINSTALL_CHECKED,
   UNINSTALL_CODES,
@@ -202,4 +202,98 @@ test('④ ★ 返回对象被冻结', () => {
   assert.ok(Object.isFrozen(p))
   assert.ok(Object.isFrozen(p.remove))
   assert.throws(() => { 'use strict'; p.remove = [] }, TypeError)
+})
+
+// ------------------------------------------------- 台账 ↔ 模式表的**交叉**判据
+//
+// 这一组治的是"两个表都在同一个文件里、都写得很认真，于是看起来已经互相对过"。
+// 最尖锐的一处是 `keepsSecrets`：它声明了**三处**、被读了**零处**。
+//
+// ★ 全部用**人造表**。真表今天是自洽的，只用真表验，等于用"没有反例"证明"没有反例"。
+
+/** 造一份自洽的最小表；每个用例只动它一处。 */
+const fixture = (over = {}) => ({
+  classes: {
+    program: { id: 'program', onUninstall: 'remove', why: '卸载就是删它' },
+    cache: { id: 'cache', onUninstall: 'remove', why: '可重建' },
+    data: { id: 'data', onUninstall: 'keep', why: '业务事实' },
+    secret: { id: 'secret', onUninstall: 'ask', why: '凭据' },
+    workspace: { id: 'workspace', onUninstall: 'never', why: '用户的代码' },
+    ...(over.classes ?? {}),
+  },
+  modes: {
+    small: { id: 'small', removes: ['program', 'cache'], keepsSecrets: true },
+    big: { id: 'big', removes: ['program', 'cache', 'secret', 'data'], keepsSecrets: false },
+    ...(over.modes ?? {}),
+  },
+})
+
+test('⑤ ★★★ 自洽的人造表必须**一条都不报**（否则下面的"报出来"没有参照）', () => {
+  assert.deepEqual(crossCheckLedger(fixture()), [])
+})
+
+test('⑤ ★★★ 模式声明 keepsSecrets 与它的 removes **相反** ⇒ 必须报出来', () => {
+  // small 不删 secret（=保留），却声称自己不保留
+  const p = crossCheckLedger(fixture({ modes: { small: { id: 'small', removes: ['program', 'cache'], keepsSecrets: false } } }))
+  assert.equal(p.length, 1, JSON.stringify(p))
+  assert.match(p[0], /small/)
+  assert.match(p[0], /keepsSecrets=false/)
+  assert.match(p[0], /相反/)
+})
+
+test('⑤ ★★★ 模式**没写** keepsSecrets ⇒ 必须报出来（"忘了写"与"决定保留"不可区分）', () => {
+  const p = crossCheckLedger(fixture({ modes: { small: { id: 'small', removes: ['program', 'cache'] } } }))
+  assert.equal(p.length, 1, JSON.stringify(p))
+  assert.match(p[0], /不是布尔/)
+})
+
+test('⑤ ★★ `onUninstall: remove` 的类，**每个**模式都必须真的删它', () => {
+  const p = crossCheckLedger(fixture({ modes: { small: { id: 'small', removes: ['program'], keepsSecrets: true } } }))
+  assert.equal(p.length, 1, JSON.stringify(p))
+  assert.match(p[0], /cache/)
+  assert.match(p[0], /remove/)
+})
+
+test('⑤ ★★ `onUninstall: never` 的类，**任何**模式都不许删它', () => {
+  const p = crossCheckLedger(fixture({ modes: { small: { id: 'small', removes: ['program', 'cache', 'workspace'], keepsSecrets: true } } }))
+  assert.equal(p.length, 1, JSON.stringify(p))
+  assert.match(p[0], /workspace/)
+  assert.match(p[0], /never/)
+})
+
+test('⑤ ★★★ `keep` **故意不受**这条判据管（`purge` 就是靠推翻它才成立）', () => {
+  // big 删掉 `data`（onUninstall: keep）——这是合法的，不许报。
+  const p = crossCheckLedger(fixture())
+  assert.deepEqual(p, [])
+  const bigRemoves = fixture().modes.big.removes
+  assert.ok(bigRemoves.includes('data'), '夹具本身要能表达"模式推翻 keep"')
+  // 真表里 `purge` 推翻了 5 个 keep 类——如果哪天有人补了"不许删 keep"的判据，
+  // `DATA_CLASSES_CHECKED.ok` 会立刻变红（这一条是那个人的提示）。
+  assert.equal(DATA_CLASSES_CHECKED.ok, true, JSON.stringify(DATA_CLASSES_CHECKED.problems))
+})
+
+test('⑥ ★★★ 真表今天自洽，且 `keepsSecrets` 真的被读了（不再是死声明）', () => {
+  assert.deepEqual(crossCheckLedger(), [], '真表的台账与模式表必须自洽')
+  // 逐个模式核一遍声明与行为一致——这一条如果红，说明有人只改了一边。
+  for (const [id, m] of Object.entries(UNINSTALL_MODES)) {
+    assert.equal(typeof m.keepsSecrets, 'boolean', `模式 ${id} 缺 keepsSecrets`)
+    assert.equal(m.keepsSecrets, !m.removes.includes('secret'),
+      `模式 ${id} 声明的 keepsSecrets 与 removes 相反`)
+  }
+})
+
+test('⑥ ★★★ 台账坏掉时 `uninstallSelfCheck().ok` 必须跟着红（不能只报不判）', () => {
+  // ★ 这一条是这一批的核心：`classesChecked` 此前**一直在报**，却从来没进 `ok`。
+  //   于是台账自相矛盾时，只看 `ok` 的调用方会拿到一个"没问题"。
+  const broken = { ok: false, problems: ['模式 small 声明 keepsSecrets=false，而 removes 不含 secret'] }
+  const sc = uninstallSelfCheck({ classesChecked: broken })
+  assert.equal(sc.classesChecked, false)
+  assert.deepEqual(sc.classProblems, broken.problems, '台账的问题原文要带出来，不只是个布尔')
+  assert.equal(sc.ok, false, '★ 台账不自洽时 ok 必须是 false——否则"报了两个读数、只把一个当结论"')
+  // 反方向：台账好时必须不影响 ok（别把它写成恒 false）
+  assert.equal(uninstallSelfCheck({ classesChecked: { ok: true, problems: [] } }).ok, true)
+  // 真表读数
+  const real = uninstallSelfCheck()
+  assert.equal(real.classesChecked, true)
+  assert.equal(real.ok, true)
 })

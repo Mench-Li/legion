@@ -70,7 +70,34 @@ export const RUN_RECORD_CODES = Object.freeze({
   SWEEP_FAILED: 'SWEEP_FAILED',
 })
 
-/** 记录里每个进程必须有的字段。多一个少一个都算坏记录。 */
+/**
+ * 记录里每个进程**必须有的**字段。少一个算坏记录；**多一个不算**。
+ *
+ * ★ 原文写的是「多一个少一个都算坏记录」——**那句话是不对的**。实测
+ *   （`run-record.test.mjs` 那两条"多一个/少一个"用例）：
+ *
+ *     多一个 `peakResource` ⇒ `validateRunRecord` ok=true
+ *     少一个 `image`        ⇒ `validateRunRecord` ok=false
+ *
+ *   下面 `validateRunRecord` 里只有 `for (const f of RUN_RECORD_FIELDS)` 配合
+ *   `!(f in p)`，**没有任何地方拒绝多余字段**。
+ *
+ * ★★ 而"多余字段必须继续被容忍"是**有意的**，不能把这个注释"补成真的"：
+ *   记录由**上一个** launcher 进程写下、由**这一个**读出来清理孤儿进程，
+ *   所以写入方与读取方**可能不是同一个版本**。一条更富的新记录落到一个更旧的
+ *   读取方上时，两种处置的后果相反：
+ *
+ *     · 容忍多余字段 ⇒ 旧读取方照常按 `{key,pid,image}` 清理；
+ *     · 拒绝多余字段 ⇒ 旧读取方报"记录坏了、不知道上次起了什么"
+ *                      ⇒ **孤儿进程不被清理**。
+ *
+ *   > 一个"记录更富了所以我不读"的读取方，
+ *   > 与一个"上一轮起的进程泄漏在机器上"的守护进程，是同一个东西——
+ *   > 只不过前者的日志里有一行诚实的"记录格式不认识"。
+ *
+ *   所以本模块的形状是刻意不对称的：**写入方闭合**（`buildRunRecord` 只挑
+ *   这三个字段）、**读取方宽容**（多出来的不认、也不拒）。
+ */
 export const RUN_RECORD_FIELDS = Object.freeze(['key', 'pid', 'image'])
 
 /** 记录路径。`dataDir` 为空时返回 null——**不猜位置**。 */
@@ -83,8 +110,19 @@ export function runRecordPath(dataDir) {
  * 造一条记录。纯函数。
  *
  * `image` 是**映像名**（Windows 上 `tasklist` 那一列的 `node.exe` 之类）。
- * 它是本模块里唯一能用来区分"我们的进程"与"一个碰巧拿到同一个号码的
+ * 它是本模块里唯一能用来区分"我们的进程"与一个碰巧拿到同一个号码的
  * 别的程序"的东西——没有它，整个模块就退化成"按号码杀"。
+ *
+ * ★★ 这是一个**闭合映射**：每个进程只挑 `{key, pid, image}`，
+ *   **传进来的别的字段会被静默丢掉**（不是报错，是不出现）。
+ *
+ *   这一条是有后果的，所以单独写明：想给记录加一个新读数（例如 `peakResource`），
+ *   **只改调用方那一处 `map()` 是不够的** —— 值会在这一层被丢掉，
+ *   而且没有任何报错，于是记录里那个字段的读数永远是"没有"，
+ *   看起来像"采样没采到"。至少还要改这里，以及 `RUN_RECORD_FIELDS`。
+ *
+ *   （PRT-009 的记账曾经写着"接上只是加一行"，那句是错的；订正见 `run-record.test.mjs`
+ *   那条 `buildRunRecord 是闭合映射` 的用例。）
  */
 export function buildRunRecord({ runId, launcherPid = null, startedAt, processes, now = () => new Date().toISOString() } = {}) {
   return Object.freeze({

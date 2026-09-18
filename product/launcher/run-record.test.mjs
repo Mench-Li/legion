@@ -70,6 +70,51 @@ test('① `pid: null` 是**合法**的（起进程失败的条目要能如实记
   assert.equal(r.ok, true, JSON.stringify(r.problems))
 })
 
+test('① ★★★ 多一个字段**不算**坏记录 —— 而这是有意的（前向兼容），不是漏了', () => {
+  // ★ 与 `run-record.mjs` 里 `RUN_RECORD_FIELDS` 的注释成对：那里原文写
+  //   「多一个少一个都算坏记录」，实测**只有"少一个"被强制**。
+  //
+  //   为什么"多一个"必须继续被容忍：记录由**上一个** launcher 写下、由**这一个**
+  //   读出来清理孤儿进程，写入方与读取方可能不是同一个版本。拒绝了多余字段，
+  //   旧读取方就会说"记录坏了、不知道上次起了什么"⇒ 孤儿进程不被清理。
+  const r = validateRunRecord({
+    version: RUN_RECORD_VERSION, runId: 'x', launcherPid: null, startedAt: 'x',
+    processes: [{ key: 'a', pid: 1, image: NODE, peakResource: { peakWorkingSetBytes: 99 } }],
+  })
+  assert.equal(r.ok, true, `多一个字段竟然被拒了：${JSON.stringify(r.problems)}`)
+  // ★ 反向对照：同一份记录**少**一个字段必须红。
+  //   少了这一条，"校验器恒 ok" 也能让上面那条绿。
+  const missing = validateRunRecord({
+    version: RUN_RECORD_VERSION, runId: 'x', processes: [{ key: 'a', pid: 1 }],
+  })
+  assert.equal(missing.ok, false, '少一个字段竟然通过了——那本组①的"不能用"那条就是假的')
+  assert.ok(missing.problems.some((p) => p.includes('image')), JSON.stringify(missing.problems))
+})
+
+test('① ★★★ `buildRunRecord` 是**闭合**映射：不认识的字段被静默丢掉（"只加一行"接不上）', () => {
+  // 这一条钉的是一个会让人**白干一轮**的机制。
+  //   把新读数加进调用方 `persistRunRecord()` 那处 `supervisor.status().map(...)`
+  //   是**不够的** —— 值会在 `buildRunRecord` 这一层被丢掉，而且不报错，
+  //   于是记录里那个字段的读数永远是"没有"，看起来像"采样没采到"。
+  //
+  //   PRT-009 的记账写着「接上只是加一行」，那句是错的。本用例就是那句的读数。
+  const rec = buildRunRecord({
+    runId: 'r1', startedAt: '2026-01-01T00:00:00.000Z',
+    processes: [{
+      key: 'runtime', pid: 4321, image: NODE,
+      peakResource: { ok: true, samples: 7, peakWorkingSetBytes: 64 * 1024 * 1024 },
+    }],
+  })
+  const p = rec.processes[0]
+  assert.deepEqual(Object.keys(p).sort(), ['image', 'key', 'pid'],
+    'buildRunRecord 不再是闭合映射了。★ 如果这是**有意**加字段，'
+    + '请一并改 `RUN_RECORD_FIELDS`、判断要不要动 `RUN_RECORD_VERSION`'
+    + '（动了它，磁盘上更旧的记录会被判"版本不认识"而拒绝读——那会让孤儿进程清不掉），'
+    + '并更新 PRT-009 里"接上只是加一行"那句记账')
+  assert.equal(JSON.stringify(rec).includes('peakWorkingSetBytes'), false,
+    '峰值数字竟然出现在记录里了——那么本用例与 PRT-009 的记账都要一起改')
+})
+
 // ── 读：三种失败是三件事 ────────────────────────────────────────────────────
 
 test('② `runRecordPath` 在 dataDir 为空时返回 null（**不猜位置**）', () => {

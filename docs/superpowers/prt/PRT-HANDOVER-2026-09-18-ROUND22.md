@@ -36,8 +36,9 @@
 | 台账 | **145 行 = 140 ✅ / 4 ⏸ / 1 ⬜** | `node scripts/prt/spec-progress.mjs --check` → `140/145，未完成 5` |
 | 4 条 ⏸ | PRT-009 / PRT-253 / PRT-256 / PRT-910 | 需要一台执行期外的机器 / 一次真的自动执行 / 真实外部用户 / 真实用户项目 |
 | 1 条 ⬜ | PRT-316 | **日期闸门**：最早 **2026-09-24**（评审闸门已过） |
-| 全量 CI（第 23 轮） | **9/9 PASS，exit 0**（HEAD `3624e96`，`.ci/r23b`） | `test` 807541ms、`skipped=1`（secret-store，已知） |
-| 全量 CI（第 22 轮，上一读数） | **9/9 PASS，exit 0**（HEAD `466239d`，`.ci/r22a`） | `test` 811934ms |
+| 全量 CI（**交付 HEAD**） | **9/9 PASS，exit 0**（HEAD `a6ee270`，`.ci/r23final`） | `test` 800727ms、`skipped=1`（secret-store，已知） |
+| 全量 CI（第 23 轮代码收口） | **9/9 PASS，exit 0**（HEAD `3624e96`，`.ci/r23b`） | `test` 807541ms |
+| 全量 CI（第 22 轮，上一轮读数） | **9/9 PASS，exit 0**（HEAD `466239d`，`.ci/r22a`） | `test` 811934ms |
 | 套件清单完备 | **359 个 `*.test.mjs` 全部有归属**（357 → 359：第 23 轮两套） | `stageTest` |
 | 第 23 轮新套件 | `budget-alert` **29/29**（20 例求值 + 9 例真 HTTP；**9 处变异逐条咬住**） | `team-hub/budget-alert{,-http}.test.mjs` |
 | 可达性 | 不可达 **46** 条，**全部已定性**（`by-design` / `deliberate` / `gap` / `in-flight`） | `scripts/prt/reachability.mjs --diff` |

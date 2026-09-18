@@ -17,6 +17,7 @@
 import { runWorkerProcess } from '../../orchestrator/worker/run.mjs'
 import { hubIo, productionExecutorProviderFromEnv } from '../../orchestrator/worker/executor-binding.mjs'
 import { createModelProfileRefResolver } from '../../orchestrator/worker/run-inputs.mjs'
+import { resolveRuntimePidFromEnv, withRunPeakResource } from '../../orchestrator/worker/run-peak-resource.mjs'
 import { claimGateFromExecutor } from './claim-gate.mjs'
 
 // ── PRT-253 续批：`modelProfileRef` 的生产来源 ──────────────────────────────
@@ -56,6 +57,61 @@ if (typeof workerHubUrl === 'string' && workerHubUrl.trim() !== '') {
 // 今天它大概会返回 `EXECUTOR_HOST_PORT_REQUIRED`：DSH 宿主端口的绑定
 // 由 `runtime/dsh-composition/` 在 DSH 进程内完成（PRT-214/215），
 // 而 worker 是独立进程。装上之后，**这个入口不需要改一行代码**就开始真的执行。
+// PRT-009 `peak-resource` 的**每 Run 窗口**接在生产入口上。
+//
+// 为什么接在这里而不是深处：`withRunPeakResource` 要的是一个"每次 Run 都经过"
+// 的窄腰，而**本入口是全产品唯一一处 executor 的诞生点**——往里放，两处构造
+// 路径（同进程绑定 / 跨进程契约）**都**自动被包上；放进任一条路径里，
+// 另一条就会静默地没有读数，而两条路径在 diff 上只差一行。
+//
+// ★ 采的是**另一个进程**。worker 与 DSH Runtime 不是同一个（`host` 端口只在
+//   后者里），而 worker 拿不到 pid，只有 `LEGION_RUNTIME_URL`。所以这里先拿
+//   `resolveRuntimePidForSampling` 用 host/port **认领那份发布**，
+//   对不上就一个数都不采——照一份属于上一次运行的发布去采 pid，
+//   不会报错也不会采到 0，它会**采到别人的数**。
+//
+// ★ 采样失败**永远不许**让一次 Run 失败（`withRunPeakResource` 内部吞掉全部
+//   采样异常）；这里只负责把读数送到一个**有人读**的地方——stderr，
+//   与上面的下限告诫同一条流，于是启动告警与运行期读数在收集端不分家。
+//
+// `withRunPeakResource` 在没有出口时**原样返回** executor，所以下面那个
+// 「出口是空的」分支不是防御性代码：它保证"没接出口"与"接了出口但不读"
+// 不会变成同一种东西。
+function attachRunPeakResource(provided) {
+  if (provided === null || typeof provided !== 'object' || provided.ok !== true || provided.executor == null) {
+    // 引擎没接上 ⇒ 没有可包的 executor，也**没有**可以归因的资源读数。
+    // 原样返回，让调用方那条既有的具名拒绝继续说话（不要去合成一个新的）。
+    return provided
+  }
+  const executor = withRunPeakResource(provided.executor, {
+    onReading: (reading, ctx) => {
+      if (reading === null || reading === undefined) {
+        // ★ 「没采到」与「采到 0」必须不同形（与 `describePeakResource` 同一条纪律）。
+        process.stderr.write(`[worker] peak-resource pid=${ctx?.pid ?? '?'}：这次 Run 从未采到读数\n`)
+        return
+      }
+      process.stderr.write(
+        `[worker] peak-resource pid=${reading.pid ?? '?'} samples=${reading.samples ?? 0}`
+        + ` peakWorkingSet=${reading.peakWorkingSetBytes ?? '不可得'}`
+        + ` peakRss=${reading.peakRssBytes ?? '不可得'}`
+        + ` cpuMs=${reading.cpuMs ?? '不可得'}`
+        + `${reading.lastCode === null || reading.lastCode === undefined ? '' : ` lastCode=${reading.lastCode}`}`
+        + `（窗口 ${reading.startedAtMs ?? '?'}→${reading.endedAtMs ?? '?'}ms，端点 ${ctx?.host}:${ctx?.port}）\n`,
+      )
+    },
+    // ★ 每次 Run 重新解析：Runtime 可能在这两次之间重启过，pid 就变了。
+    //   缓存一次会让我们继续采**上一个** pid——而那正是本模块要防的那件事。
+    //
+    // ★ 这里**不读 `process.env`**：那两个键（`LEGION_DATA_DIR` /
+    //   `LEGION_RUNTIME_URL`）属于 orchestrator 进程的配置面，
+    //   在 product 进程里读它们会被 `topology-inventory --diff` 正确地报成
+    //   `product.envReadKeys += LEGION_RUNTIME_URL`。由模块自己读自己的键。
+    resolvePid: () => resolveRuntimePidFromEnv(),
+    logger: (message) => process.stderr.write(`${message}\n`),
+  })
+  return { ...provided, executor }
+}
+
 const startup = await runWorkerProcess({
   executorProvider: () => productionExecutorProviderFromEnv({
     // ★ PRT-214 续：静态下限派生成功时那些"必须被记录"的告诫的**生产出口**。
@@ -82,7 +138,7 @@ const startup = await runWorkerProcess({
         + '\n',
       )
     },
-  }),
+  }).then(attachRunPeakResource),
   // PRT-711：认领闸门。**这是 `mayClaimTasks()` 的生产调用点**——
   // 没有它，"正在升级"与"Runtime 不可用"都不会阻止 worker 领走任务。
   claimGateFromExecutor,

@@ -322,6 +322,23 @@ export const SCHEMA = defineSchema({
   ],
   nonEnvLiterals: [
 
+    // ── PRT-009 `peak-resource` 采不到时的具名码 ─────────────────────────
+    //
+    // 它们是 `product/launcher/peak-resource.mjs` 的 `PEAK_RESOURCE_CODES`
+    // 的值，不是配置键：没有哪个进程"读"它们，它们是**采样失败的原因**。
+    //
+    // ★ 这一组与上面 DSH_OVERLAY 那四条是**同一条路径**来的——也是被
+    //   `scan --check` 咬出来的（全大写下划线连写，形如 env 键）。而按本文件
+    //   记下的那条纪律，登记之前先问了一句：**这几个码对不对？**
+    //   对的，而且它们**必须**分开：把五种"采不到"归并成一个 `FAILED`，
+    //   会让"进程已经没了"与"这个平台没实现"在读数上同形——前者一个字节
+    //   都不用改，后者要新写一个平台的采样实现。
+    'PEAK_RESOURCE_NO_PID',
+    'PEAK_RESOURCE_PROCESS_GONE',
+    'PEAK_RESOURCE_UNSUPPORTED_PLATFORM',
+    'PEAK_RESOURCE_UNPARSEABLE',
+    'PEAK_RESOURCE_SAMPLE_FAILED',
+
     // ── PRT-257 DSH 强制面覆盖层的诊断码 ────────────────────────────────
     //
     // 它们是 `product/launcher/dsh-overlay.mjs` 的 `DSH_OVERLAY_CODES` 的值，

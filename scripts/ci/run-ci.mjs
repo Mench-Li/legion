@@ -1194,6 +1194,32 @@ async function stageTest() {
       files: ['runtime/dsh-composition/employee-manifest.test.mjs'],
       cwd: ROOT,
     },
+    {
+      // PRT-603 的**接线侧**那一半（2026-09-18 第 21 轮）。
+      //
+      // 上面那一组证明"清单只能收窄"，但它喂的全是 **Legion 能力名**；
+      // 生产里那个端口拿到的是**执行面（DSH）的工具名**。两者**结构上不相交**，
+      // 于是"每一条规则都能触发"与"真名字进来时它放行过谁"是两件事：
+      //
+      //   > 一个「用 Legion 名字把每一条规则都走到拒绝」的套件，
+      //   > 与一个「真名字进来时这道检查到底放行过谁」的套件，
+      //   > 在摘要里都是绿的——只不过前者的绿是**词汇表自己对自己**的绿。
+      //
+      // ★★★ 跑出来的读数（这是 `DECISION-RUNREQUEST-EXECUTION-PLANE.md` §11.5
+      //   逐字留下的"我没有跑过一次"）：把一份**真实算出来**的 permit 喂进
+      //   `permitsTool`，喂 Legion 名字 ⇒ 放行；喂 DSH 名字 ⇒ **一个都不放行**，
+      //   而且把 `maxRisk` 抬到最高也救不了（从"风险超上限"挪到"未知工具必须点名"）。
+      //   两条"修复动作"互相指错方向——所以这一道**不能**靠加一个映射接上：
+      //   反向映射在 `bash` / `pwsh` / `web_fetch` 上是一对多（④），
+      //   而 `bash` 那一堆里同时塌着低风险的 `git-status` 与高风险的 `git-push`。
+      //
+      // 另两件：§11.3 留下的"`grant` 从哪来"（①：宿主显式注入，不给就抛，
+      // 而 `preset` 那一半来自 host 组合的补丁层表）、以及本轮新查出的
+      // **两个同名 EmployeeManifest**（⑤：一个方向抛、另一个方向丢字段）。
+      label: 'whitelist-limb（PRT-603 的另一半：真名字进来时这道白名单放行过谁）',
+      files: ['scripts/prt/whitelist-limb.test.mjs'],
+      cwd: ROOT,
+    },
     { label: 'calendar（日程日历契约）', files: ['team-hub/calendar.test.mjs'], cwd: ROOT },
     { label: 'calendar-ui（P2-5 日历前端纯函数：周视图/重复文案/关联跳转/表单校验）', files: ['workbench/scripts/calendar-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'chat-ui（P2-6 对话前端纯函数：健康判定/AI 三态/合并/断线补齐）', files: ['workbench/scripts/chat-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },

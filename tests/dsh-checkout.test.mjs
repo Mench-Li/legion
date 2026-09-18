@@ -26,7 +26,7 @@ import { existsSync, globSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, resolve, sep } from 'node:path'
 
-import { DSH_NEEDS, dshCheckoutCandidates, dshSkipReason, resolveDshCheckout } from '../scripts/lib/dsh-checkout.mjs'
+import { DSH_NEEDS, REPO_ROOT, dshCheckoutCandidates, dshSkipReason, resolveDshCheckout } from '../scripts/lib/dsh-checkout.mjs'
 
 /**
  * 人造文件系统。
@@ -273,6 +273,58 @@ test('⑮ ★★ 真机上：`$DSH_CHECKOUT` 未设也能解析到那份检出�
   assert.equal(r.envPresent, false, '本机 `$DSH_CHECKOUT` 应当是未设的（否则这条测的不是候选路径）')
   assert.equal(r.source, 'candidate')
   assert.equal(r.missing.length, 0)
+})
+
+test('⑳ ★★★ `REPO_ROOT` 必须是**仓库根**，而结构性候选必须**不靠** win32 字面量也能成立', () => {
+  // ★ 这一条是补的：它本该在第一次就存在。
+  //
+  //   第一版 `REPO_ROOT = resolve(HERE, '..')`，而本文件在 `scripts/lib/` 下
+  //   ⇒ `REPO_ROOT` 变成了 `<root>/scripts` ⇒ 结构性候选变成
+  //   `<root>/dsh/deepseek-harness`（一个不存在的地方）。
+  //
+  //   **所有判据都通过**——因为 win32 字面量 `D:/project/DSH/dsh/deepseek-harness`
+  //   把结果救了回来。而下面这条断言之所以当时不存在，是因为
+  //   **判据自己也把 `ROOT` 写死了**：
+  //
+  //     const ROOT = 'D:/project/DSH/legion'     // ← 测试文件里的字面量
+  //
+  //   于是"模块算出来的 root 对不对"这件事，那两条读数**问都没问**。
+  //
+  //   > 一个"用自己写死的根去核对别人算出来的根"的判据，
+  //   > 与没有这条判据，在作者那台机器上是同一个东西。
+  //
+  //   所以这里**从模块自己的 `REPO_ROOT` 出发**去比对，不看任何字面量。
+
+  // ① 仓库根一定含有这些顶层目录（本仓的事实，不依赖任何路径字面量）
+  for (const marker of ['scripts', 'runtime', 'product', 'docs']) {
+    assert.equal(existsSync(resolve(REPO_ROOT, marker)), true,
+      `REPO_ROOT 里没有 ${marker}/ ⇒ REPO_ROOT 算错了：${REPO_ROOT}`)
+  }
+  assert.equal(existsSync(resolve(REPO_ROOT, 'scripts', 'lib', 'dsh-checkout.mjs')), true,
+    `REPO_ROOT/scripts/lib/dsh-checkout.mjs 不存在 ⇒ REPO_ROOT 算错了：${REPO_ROOT}`)
+
+  // ② ★ 核心：结构性候选 = `<REPO_ROOT>/../dsh/deepseek-harness`
+  const structural = resolve(REPO_ROOT, '..', 'dsh', 'deepseek-harness')
+  const got = dshCheckoutCandidates({ env: noEnv, platform: 'linux', root: REPO_ROOT })[0]
+  assert.equal(normalize(got), normalize(structural),
+    '候选列表第一条应当是从传入的 root 推出来的结构性候选')
+
+  // ③ ★★ 决定性的一条：**把 win32 字面量整个拿掉**，posix 平台上
+  //    仍然要能解析到检出。第一版在这里会返回 `null`。
+  const posix = resolveDshCheckout({ env: noEnv, need: 'cli', platform: 'linux', root: REPO_ROOT })
+  if (posix.checkout === null) {
+    // 一台真的没有 DSH 的机器：那就不该"装作能解析"。
+    // 但**主工作树与隔离 worktree 上都不该走到这里**——本机检出在盘上。
+    assert.equal(posix.kind, 'not-found')
+    return
+  }
+  assert.equal(posix.source, 'candidate')
+  assert.equal(normalize(posix.checkout), normalize(structural),
+    `posix 上应当**只能**靠结构性候选解析到 ${structural}，实际拿到 ${posix.checkout}`)
+  // 而它确实不等于任何硬编码字面量路径（除了恰好相等——那种情况下
+  // 上面那条 `structural` 比对已经把它钉住了）
+  assert.equal(posix.candidates.some((c) => /^D:\//i.test(c)), false,
+    'posix 候选列表里不该出现盘符字面量')
 })
 
 test('⑲ ★★★ 「变量指向的路径不存在」与「找到了一棵树但没构建」必须是两句不同的话', () => {

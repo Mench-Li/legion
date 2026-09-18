@@ -35,6 +35,9 @@ import { dirname, join, resolve, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 
+// ★ DSH 检出的**唯一**一份判定（见 `stageTest` 里那段 `dshFound`）。
+import { resolveDshCheckout } from '../lib/dsh-checkout.mjs'
+
 const SELF_DIR = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(SELF_DIR, '..', '..')            // 仓库根（本 worktree）
 const WORKBENCH = join(ROOT, 'workbench')
@@ -1045,6 +1048,18 @@ async function stageTest() {
       //   > 一个「只在有 DSH 的机器上才验得了」的解析器用例，
       //   > 与一个真的验过它的用例，在最需要它的那台机器上是同一个东西：
       //   > 都是"整组跳过"。
+      //
+      // ★★ 而**这一组自己**也踩过一次同形的坑，值得写在这里：
+      //   用例当时用自己写死的 `ROOT = 'D:/project/DSH/legion'` 去核对
+      //   模块算出来的 `REPO_ROOT`，于是"模块算得对不对"这件事
+      //   两条读数**问都没问**——而模块第一版确实算错了
+      //   （`resolve(HERE, '..')`，少了在 `scripts/lib/` 下该有的那一级），
+      //   只在 win32 上被那条硬编码字面量救成绿的。
+      //   判据 ⑳ 因此改成**从模块自己的 `REPO_ROOT` 出发**比对，
+      //   并要求 posix 上（无盘符字面量）也解析得出来。
+      //
+      //   > 一个"用自己写死的根去核对别人算出来的根"的判据，
+      //   > 与没有这条判据，在作者那台机器上是同一个东西。
       label: 'dsh-checkout（检出解析器：没找到 / 找到了但没构建 / 变量指错了 是三句话）',
       files: ['tests/dsh-checkout.test.mjs'],
       cwd: ROOT,
@@ -3581,13 +3596,35 @@ async function stageTest() {
   let allOk = true
   /** 跳过了断言的套件（`{label, skipped, tests}`）。见下面汇总那一段。 */
   const skippedSuites = []
-  const dsh = process.env.DSH_CHECKOUT
-  if (dsh && existsSync(join(dsh, 'packages'))) {
+  /**
+   * ★ 这一支的判据改用**共享解析器**（`scripts/lib/dsh-checkout.mjs`），
+   *   不再手写 `process.env.DSH_CHECKOUT`。
+   *
+   *   为什么这一处也要改：它的注释写着目的是"**使该套件可从零复现**"，
+   *   而手写判定做不到那件事——`DSH_CHECKOUT` 没导出的机器上，这一段整个不执行，
+   *   于是 p13 / plugins / board-plugin 三套只有在**产物恰好已经躺在盘上**时才跑得起来。
+   *   （实测：本机 `DSH_CHECKOUT` 未设，而这三套当轮都是绿的——
+   *    绿的原因是产物残留，**不是**这段构建真的跑了。）
+   *
+   *   > 一个"可从零复现"的门禁，与一个"在产物恰好还在时能过"的门禁，
+   *   > 在作者那台机器上是同一个东西——因为作者的产物恰好还在。
+   *
+   *   解析器自己会区分"没找到"与"找到了但没构建"，所以这一段现在
+   *   在检出可达的任何机器上都真的会去构建。
+   *
+   *   ★ `need` 取 `packages`（与这一段原来的 `existsSync(join(dsh,'packages'))`
+   *     同一个粒度）。**不收紧成 `cli`**：这一段做的是"构建外部包"，
+   *     而缺 CLI 时那三套件会用自己的 `need: 'cli'` 各自具名跳过——
+   *     在门禁侧顺手收紧判据，只会让"为什么没构建"变得看不见。
+   */
+  const dshFound = resolveDshCheckout({ need: 'packages' })
+  const dsh = dshFound.checkout
+  if (dsh !== null) {
     // p13-host-injection 需要 `@dsh-external/dsh-team-hub` 的**构建产物**：
     // team-hub/package.json 的 main 指向 ./lib/index.js，而 lib/ 是未跟踪产物。
     // 此前没有任何阶段构建它 → 该套件只能在本机恰好残留 lib/ 时通过，干净检出必失败
     // （真实表现：宿主 60s 未就绪，因为 loader 报 `Cannot find module .../team-hub/lib/index.js`）。
-    // 这里显式构建，使该套件可从零复现；同时 p13 在没有可用 DSH_CHECKOUT 时仍按纪律 SKIP。
+    // 这里显式构建，使该套件可从零复现；同时 p13 在没有可用 DSH 检出时仍按纪律 SKIP。
     const th = await exec(process.execPath, [join(ROOT, 'scripts', 'ci', 'build-external-package.mjs'), 'team-hub'], { cwd: ROOT, env: { DSH_CHECKOUT: dsh } })
     if (th.code !== 0) {
       return { ok: false, detail: `  FAIL team-hub build（exit=${th.code}）：${(th.err || th.out).slice(-1200)}` }
@@ -3751,7 +3788,21 @@ async function stageTest() {
   const totalSkipped = skippedSuites.reduce((n, x) => n + x.skipped, 0)
   if (totalSkipped > 0) {
     detail.push(`  ⚠ 跳过 ${totalSkipped} 条断言（${skippedSuites.length} 个套件）：`
-      + skippedSuites.slice(0, 6).map((x) => `${x.skipped}/${x.tests}`).join('、')
+      // ★ 点名**套件**，不是只给 `1/33`。
+      //
+      //   第一版写的是 `${x.skipped}/${x.tests}`，于是汇总行长这样：
+      //
+      //     ⚠ 跳过 2 条断言（2 个套件）：1/33、1/52
+      //
+      //   那两个数字**告诉不了你任何事**：要知道"1/33"是哪个套件，
+      //   得往上翻 200 多行去找哪个套件的细节行里有 `skipped=1 tests=33`。
+      //   而这一行存在的**全部意义**就是省掉那次翻找。
+      //
+      //   > 一个要求读者自己去交叉引用的"汇总"，
+      //   > 与没有这一行，在"我得翻多少行才能知道是哪两个套件"上是同一个东西。
+      //
+      //   标签取 `（` 之前那一段（后面的说明太长，汇总行放不下）。
+      + skippedSuites.slice(0, 6).map((x) => `${String(x.label).split('（')[0]}(${x.skipped})`).join('、')
       + (skippedSuites.length > 6 ? ` …共 ${skippedSuites.length} 个` : ''))
     // 有检出、而且是**本机就在盘上**的那种时，把话说到底：机器明明有，
     // 而这些断言还是跳过了 —— 那是环境配置问题，不是环境缺失。

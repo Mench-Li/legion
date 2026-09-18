@@ -85,8 +85,31 @@ function defaultIsDir(p) {
   try { return statSync(p).isDirectory() } catch { return false }
 }
 
-/** 仓库根（本文件在 `tests/` 下）。 */
-export const REPO_ROOT = resolve(HERE, '..')
+/**
+ * 仓库根。
+ *
+ * ★★★ 本文件在 `scripts/lib/` 下，所以是**两级** `..`。
+ *   第一版只写了一级（`resolve(HERE, '..')`），于是 `REPO_ROOT` 变成了
+ *   `<root>/scripts`，结构性候选随之变成 `<root>/dsh/deepseek-harness`
+ *   ——一个不存在的地方。
+ *
+ *   而**所有判据都通过**：因为 win32 上那条硬编码字面量
+ *   （`D:/project/DSH/dsh/deepseek-harness`）把结果救了回来。
+ *
+ *   > 我写这个模块是为了让"结构性候选"取代"作者那台机器上的绝对路径"，
+ *   > 而它第一版恰恰**只有那条绝对路径在工作**——
+ *   > 一个只在作者机器上成立的模块，用"我把它改成结构性的了"这句话
+ *   > 是验不出来的。
+ *
+ *   更糟的是**判据自己也复制了同一个错误**：`tests/dsh-checkout.test.mjs`
+ *   当时用的是测试文件里自己写死的 `ROOT = 'D:/project/DSH/legion'`，
+ *   于是"模块的 `REPO_ROOT` 对不对"这件事，两条读数**问都没问**。
+ *
+ *   ★ 这个坑是**在隔离 worktree 里复核 HEAD 时**才暴露的：
+ *     主工作树上那条字面量永远命中，所以主工作树**永远看不到**它。
+ *     判据见 `tests/dsh-checkout.test.mjs` ⑳。
+ */
+export const REPO_ROOT = resolve(HERE, '..', '..')
 
 /**
  * 各种需求的相对路径。调用方用**名字**而不是自己去拼：

@@ -40,6 +40,9 @@ import {
   ownershipCheckScope,
 } from './session-boundary.mjs'
 
+// ★ 检出用**共享解析器**找（理由见下面 ⑥ 那一组前的那段）。
+import { resolveDshCheckout } from '../../../scripts/lib/dsh-checkout.mjs'
+
 const CAPS_OK = Object.freeze({
   'tool-permission-enforcement': true,
   'cancel-and-timeout': true,
@@ -400,10 +403,15 @@ test('⑤ 归属判定：三个入参只认 `live === true`（不许把"有值"�
 // 一个永远说"锚点都在"的核对器，与没有核对器，读起来一模一样。
 // ============================================================================
 
-const DSH_ROOT = process.env.DSH_CHECKOUT ?? null
-const SKIP_PINS = DSH_ROOT === null || DSH_ROOT === ''
-  ? '未配置 DSH_CHECKOUT'
-  : (!existsSync(join(DSH_ROOT, 'packages')) ? `DSH_CHECKOUT 下没有 packages/：${DSH_ROOT}` : false)
+// ★ 检出用**共享解析器**找（`scripts/lib/dsh-checkout.mjs`）。
+//
+//   这里此前是本轮**最后一处**漏网的手写判定——而它正是这一轮在清的那件事：
+//   变量没导出 ⇒ 这条（"六条结论的锚点逐字命中"）静默跳过，
+//   而那份检出**完整地在盘上**。它能被发现，靠的是这一轮把
+//   `skipped=N` 变成读数之后，汇总行**点名了是哪两个套件**。
+const DSH_FOUND = resolveDshCheckout({ need: 'packages' })
+const DSH_ROOT = DSH_FOUND.checkout
+const SKIP_PINS = DSH_ROOT === null ? DSH_FOUND.reason : false
 
 test('⑥ ★★ 每条结论都必须声明锚点（否则核对会**静默跳过**它）', () => {
   // 这一条不是关于 DSH 的，是关于**机制自己的**：没有它，

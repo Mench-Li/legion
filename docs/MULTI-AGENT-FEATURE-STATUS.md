@@ -184,7 +184,7 @@
 
 | 编号 | 名称 | 状态 | 依据 |
 |---|---|---|---|
-| F-21 | Connector / MCP 注册表 | ⬜→🟡 | **登记面、落盘面、判定面、反馈面四面俱在**：登记与落盘（`team-hub/connector-store.mjs` 的 `freezeDeclaration`/`connectorIncidents`/`exportConnectors` 都接在真 HTTP 路由上）；**判定面已接进生产组合根**（`runtime/connectors/decision-port.mjs` → `assemble.mjs` → `tool-request.mjs` 的 `connectorJudgment`）；**反馈面已接**（`outcome-port.mjs` → `plugins/connector-feedback.mjs`，订阅 DSH `tools/result`）。★ **`enforcementSurfaces()` 从 6 格 → 7 格**（新增 `connectorJudgment`，与 `connectorFeedback` 分开报——只有一格时"判定面装了、反馈面没装"与反过来是同一个读数）。★ 隔离真拦下过：`root.test.mjs` ⑨④「未声明工具 `git-commit` ⇒ deny（政策门说 allow）」、⑨⑤「开路 ⇒ deny ⇒ 反馈面记回 ⇒ 探针成功 ⇒ 恢复 allow」的**闭环**、⑨⑥ 两半共用**同一份** registry。★★ **投递面也建好了**（`runtime/dsh-composition/connector-port.mjs` → `root-row.mjs`，第 19 条 §9.2 第 5 步）：配了 ⇒ 上面那一格**真的**翻 `true`（在真生产路径上验的，`root-row.test.mjs` 五条：配了/没配/空表/坏 JSON/真拦下，含**前提对照**"没配时同一次调用是 allow"）；缺席**如实**是 `absent`（不许折成空表——空表会让组合根建一份**零连接器**登记表 ⇒ 那一格报 `true` 而它**一次判定都不会做**）；显式 `[]` **具名拒绝**；重名工具**装配期**就停。273 例（decision-port 19 + connector-port 14 + root 3 + root-row 5 + tool-request 3 + registry 32 + connector-store 23 … + public-name 14） | ★ **仍差四条，且四条都不是"再写点代码"**。**① 投递**：`LEGION_CONNECTOR_DECLARATIONS` 与 `LEGION_PATH_SCOPE` 一样，**在 schema 的 `fields` 里而不在 `process-manifest.mjs` 的 runtime `envNames` 里** ⇒ `buildChildEnv()` 对未声明的键**直接抛**（`values`）或**静默丢掉**（`baseEnv`）。这一条与第 19 条**同生共死**（同一个文件、同一个数组，且是另一条工作线的在制品）。★★ **② 归属的来源——第 17 轮已解决**（原记"本仓没有这条源信号"是**错的**：约定不在本仓，在执行引擎那边）。新增 `runtime/connectors/public-name.mjs` 逐字镜像 DSH 的 `publicToolName`（`mcp__<serverName>__<rawName>`，含归一化/截断时的 12 位 SHA-256 后缀），接成归属的**第一条**依据 ⇒ 那条「未声明就拒绝」第一次在生产路径上真的拦下了东西（`mcp__github__delete_repo` 从 **`allow` → `deny`**）。判据含**一条把 DSH 真源码切片求值对跑 18 组**的用例（18/18 一致）。★★ **③ 声明名 vs 线上名——第 18 轮已解决一半**：`registry.mjs` 新增 `declaredToolNames`，登记表**同时**认声明名与 DSH 公开名（归属与判定共用**一份**实现）。实测：`mcp__github__list_issues`（第 17 轮 **`deny`「没有声明工具」** ⇒ 一个**正确声明过**的工具在真部署里不可用）现在连接器层答 **`allow`**。★ 剩下的**约定**（写哪个名字）记 §5 第 22 条。★★★ **④ 而最终判决仍然是 `deny`——理由是 `[政策门]`**（第 18 轮新查出，**本条最要紧**）：`tool-capability.mjs` 的 `resolveTool` 对不在它目录里的名字一律给 `direction: 'write'`、`requiresApproval: true`（fail closed），而 MCP 公开名**不在那个目录里** ⇒ **连接器层今天只能让事情更严，永远不能让它更松**。要不要让政策门从声明里读能力，是 §5 第 24 条。★ 另有命名空间**认不出**的一类仍落政策门（§5 第 23 条）。★ 本批另修掉一个**静默**缺陷：输入字段叫 `declaredRisk` 而**输出**字段叫 `risk`，照着输出写 `risk: 'critical'` 会被**静默丢掉**、落回能力下限 `low` ⇒ 一个作者标成 critical 的工具被自动放行；`declareTool` 的键集已改成**封闭**（不认识的键具名拒）。全仓共撞到 **9 处**用错字段名的真样本 |
+| F-21 | Connector / MCP 注册表 | ⬜→🟡 | **登记面、落盘面、判定面、反馈面四面俱在**：登记与落盘（`team-hub/connector-store.mjs` 的 `freezeDeclaration`/`connectorIncidents`/`exportConnectors` 都接在真 HTTP 路由上）；**判定面已接进生产组合根**（`runtime/connectors/decision-port.mjs` → `assemble.mjs` → `tool-request.mjs` 的 `connectorJudgment`）；**反馈面已接**（`outcome-port.mjs` → `plugins/connector-feedback.mjs`，订阅 DSH `tools/result`）。★ **`enforcementSurfaces()` 从 6 格 → 7 格**（新增 `connectorJudgment`，与 `connectorFeedback` 分开报——只有一格时"判定面装了、反馈面没装"与反过来是同一个读数）。★ 隔离真拦下过：`root.test.mjs` ⑨④「未声明工具 `git-commit` ⇒ deny（政策门说 allow）」、⑨⑤「开路 ⇒ deny ⇒ 反馈面记回 ⇒ 探针成功 ⇒ 恢复 allow」的**闭环**、⑨⑥ 两半共用**同一份** registry。★★ **投递面也建好了**（`runtime/dsh-composition/connector-port.mjs` → `root-row.mjs`，第 19 条 §9.2 第 5 步）：配了 ⇒ 上面那一格**真的**翻 `true`（在真生产路径上验的，`root-row.test.mjs` 五条：配了/没配/空表/坏 JSON/真拦下，含**前提对照**"没配时同一次调用是 allow"）；缺席**如实**是 `absent`（不许折成空表——空表会让组合根建一份**零连接器**登记表 ⇒ 那一格报 `true` 而它**一次判定都不会做**）；显式 `[]` **具名拒绝**；重名工具**装配期**就停。273 例（decision-port 19 + connector-port 14 + root 3 + root-row 5 + tool-request 3 + registry 32 + connector-store 23 … + public-name 14） | ★ **仍差四条，且四条都不是"再写点代码"**。**① 投递**：`LEGION_CONNECTOR_DECLARATIONS` 与 `LEGION_PATH_SCOPE` 一样，**在 schema 的 `fields` 里而不在 `process-manifest.mjs` 的 runtime `envNames` 里** ⇒ `buildChildEnv()` 对未声明的键**直接抛**（`values`）或**静默丢掉**（`baseEnv`）。这一条与第 19 条**同生共死**（同一个文件、同一个数组，且是另一条工作线的在制品）。★★ **② 归属的来源——第 17 轮已解决**（原记"本仓没有这条源信号"是**错的**：约定不在本仓，在执行引擎那边）。新增 `runtime/connectors/public-name.mjs` 逐字镜像 DSH 的 `publicToolName`（`mcp__<serverName>__<rawName>`，含归一化/截断时的 12 位 SHA-256 后缀），接成归属的**第一条**依据 ⇒ 那条「未声明就拒绝」第一次在生产路径上真的拦下了东西（`mcp__github__delete_repo` 从 **`allow` → `deny`**）。判据含**一条把 DSH 真源码切片求值对跑 18 组**的用例（18/18 一致）。★★ **③ 声明名 vs 线上名——第 18 轮已解决一半**：`registry.mjs` 新增 `declaredToolNames`，登记表**同时**认声明名与 DSH 公开名（归属与判定共用**一份**实现）。实测：`mcp__github__list_issues`（第 17 轮 **`deny`「没有声明工具」** ⇒ 一个**正确声明过**的工具在真部署里不可用）现在连接器层答 **`allow`**。★ 剩下的**约定**（写哪个名字）记 §5 第 22 条。★★★ **④ 而最终判决仍然是 `deny`——理由是 `[政策门]`**（第 18 轮新查出，**本条最要紧**）：`tool-capability.mjs` 的 `resolveTool` 对不在它目录里的名字一律给 `direction: 'write'`、`requiresApproval: true`（fail closed），而 MCP 公开名**不在那个目录里** ⇒ **连接器层今天只能让事情更严，永远不能让它更松**。要不要让政策门从声明里读能力，是 §5 第 24 条。★ 另有命名空间**认不出**的一类仍落政策门（§5 第 23 条）。★ 本批另修掉一个**静默**缺陷：输入字段叫 `declaredRisk` 而**输出**字段叫 `risk`，照着输出写 `risk: 'critical'` 会被**静默丢掉**、落回能力下限 `low` ⇒ 一个作者标成 critical 的工具被自动放行；`declareTool` 的键集已改成**封闭**（不认识的键具名拒）。全仓共撞到 **9 处**用错字段名的真样本。★★ **第 19 轮新增一条**：PRT-605 的执行面授权表也有一个 `mcp` 段，它**同样**声称决定"哪些 MCP 工具可用"⇒ 第一次出现**两张表管同一件事**、而两道检查接在**同一个** `preExecute` 上。本轮**没有**选边，而是把"配了 `mcp` 段"做成一次**具名的拒绝**（`execution-scope-port-mcp-limb-unwired`，理由里写清权威在连接器登记表）——*一个"未接"与一个"检查不通过"，在最终 `deny` 上是同一个读数，而它们指向的修复动作完全相反*。裁决项见 §5 第 25 条，详细账见 §4.3 |
 | F-22 | 后端与工作区 | 🟡 | `orchestrator/workspace/*`（git worktree）。§2 明写「不把 worktree 当安全沙箱」 |
 | F-23 | 多 Harness 路由 | ⏸ | §2 明写「**不在契约稳定前同时支持多个 Harness**」——这一条**是设计决定，不是缺口** |
 | F-24 | ACL 与安全姿态 | 🟡 | `team-hub/read-auth.test.mjs`、`read-open-loopback.test.mjs` 已覆盖读面矩阵；多用户写面 ACL 未做 |
@@ -465,6 +465,90 @@ is `mcp__<serverName>__<rawName>`, normalized to the DeepSeek function-name
 **④ 声明该写哪个名字**（§5 第 22 条——功能上已两可，但**约定**仍要定，
 否则下一个写声明的人不知道写哪个）。
 
+### 4.3 ★★★ 第 19 轮：**三道范围检查**的账（PRT-604 / 605 / 606）
+
+§5.2 早先记过一句话：**"三道范围检查在生产里从来没有跑过"**。本轮把其中
+**第二道**接上了，而接的过程本身产生了两份更值钱的读数。
+
+| 道 | 检查器 | 端口 | 生产读数 | 为什么停在这里 |
+| --- | --- | --- | --- | --- |
+| PRT-604 路径范围 | `path-scope.mjs` | `scope-port.mjs`（`LEGION_PATH_SCOPE`） | ✅ 已接（第 19 条 §9.2 第 4 步） | 缺**投递**（§5 第 19 条，已裁决为"放进 `RunRequest`"，待施工） |
+| **PRT-605 命令/网络/MCP** | `execution-scope.mjs` | **`execution-scope-port.mjs`（`LEGION_EXECUTION_SCOPE`，本轮新建）** | ✅ 已接 | 同上；★ 且 **MCP 那一条刻意未接**，见下 |
+| PRT-606 外部 API | `external-api-scope.mjs` | **仍然没有** | ❌ 连位置都没有 | 它要的 `request` 是六字段对象，需要事实表先立起来（本轮完成了 `scope-facts.mjs`），接线本身是下一步 |
+
+**① `enforcementSurfaces()` 从 7 格变 8 格，而"多一格"与"多一道检查"不是同一件事。**
+
+第 19 轮之前，这两道**连位置都没有**。而"没有位置"比"有位置但没人给值"更糟：
+
+> 一个「端口在、没人给它值」的强制面，
+> 与一个「端口根本不存在」的强制面，在 `enforcementSurfaces()` 上是
+> `false` 与**什么都没有**——而后者连"我该配点什么"都问不出来。
+
+所以本轮的"接上"分成两条**分开取**的读数，缺一条都不能算数：
+键在（`productionRootInputs()` 的文本解析）+ 行为读数（`env` 没配 ⇒ `false`；配了 ⇒ `true`；
+**并且**同一路越权命令在真实 `preExecute` 上真的被拒，而授权表之内的命令照旧放行）。
+
+**② ★★★ 事实只算一次，这是本轮的架构决定。**
+
+两个检查器需要的输入（`argv` / `url` / `method` / `tool`）投影里一个都没有。
+最容易的写法是**在端口里**从 `arguments` 兜底取值——而那就是六份独立的兜底链：
+
+> 一个「六处各自推导、今天恰好一致」的组合，
+> 与一个「一处推导、六处引用」的组合，在**今天的用例**上是同一片 ✔——
+> 只不过前者的下一次不一致会表现为"某个强制点没拦住"，
+> 而那个现象看起来像"那条规则没生效"。
+
+⇒ 新增 `scope-facts.mjs`，事实**只算一次**、落成 `projection.scopeFacts`，
+端口**只读**。判据把它钉成一对反向读数（端口拿到 `scopeFacts: null` 而 `arguments`
+里躺着 `command: ['rm','-rf','/']` 时**必须放行**；补上同一份 facts 后**立刻拒**）。
+
+**③ ★★★ 一个刻意的**未接**，因为它该被裁决而不是被实现。**
+
+`execution-scope.mjs` 的 MCP 授权与 F-21 的连接器登记表**都声称自己决定
+"哪些 MCP 工具可用"**，而两道检查接在**同一个** `preExecute` 上。
+本轮没有替产品方选边，而是做成一次**具名的拒绝**（`execution-scope-port-mcp-limb-unwired`）：
+
+| 授权表的 `mcp` 段 | 端口的处置 | 码 |
+| --- | --- | --- |
+| **没有** | 拒绝——这一条**真的在判**（不需要拆名字） | `exec-scope-mcp-server-denied`（判定器的码） |
+| **有** | 拒绝——而这是**未接**，不是"不通过" | `execution-scope-port-mcp-limb-unwired`（本模块的码） |
+
+两种都拒，而**理由完全不同**：一个说"去裁决两张表谁是权威"，一个说"改授权表"。
+值班的人照着改，改错方向。⇒ 裁决项见 §5 第 25 条。
+
+**④ 本轮抓到的三个真问题**（都是先有判据、后被顶出来的）：
+
+1. ★★★ **"换一个没登记过的工具名"能绕过执行面。** 未登记工具能力集是空的
+   （`resolveTool` 对不认识的名字给 `capabilities: []`），于是按能力查表时
+   类别也是空的 ⇒ 事实为 `null` ⇒ 端口"无话可说" ⇒ **放行**。
+   而**同一份投影里**，政策门对它的处置是 fail closed（`direction: 'write'`、
+   `requiresApproval: true`）——同一个 `resolveTool` 的两个读者给出相反结论，
+   而两边各自的用例都是绿的。修法照抄投影自己 `GENERIC_TARGET_ARGUMENTS` 的纪律
+   （未登记＝"我不知道它会干什么"，任何已知的这类参数都算证据）。
+   ★ 但**刻意与目标那一条相反**：目标撞上多个候选是**抛**（不猜），
+   事实撞上多个候选**全部采用**——事实是一组**检查**，多过一道是严格更严的方向。
+2. ★ **归因记录在最需要它的那条路上缺席**：`sources.url` 第一版写在 `network`
+   分支里，于是"只走外部 API 表"的调用读不到来源——一个看起来像
+   "这个字段没有来源"的记录，比没有它更糟。
+3. ★ **我自己内联了一个 `/^mcp__/` 正则**，而 `connectors/public-name.mjs` 里
+   已经有一条**对着 DSH 真实源码逐字核过（18/18）**的 `isMcpPublicName`：
+   一个"对着真实源码核过的判据"与一个"照着印象写的判据"，在所有**今天**的用例上
+   是同一条绿——直到命名规则变一次。改成 import 之后，顺带把那一条从
+   "只有自己的用例在调"变成生产可达。
+
+**⑤ 本轮的诚实边界**（这几条**没有**被证明过）：
+
+- `LEGION_EXECUTION_SCOPE` 与 `LEGION_PATH_SCOPE`、`LEGION_CONNECTOR_DECLARATIONS`
+  卡在**同一个数组**里（`product/process-manifest.mjs` 的 runtime `envNames`，
+  另一会话的在制品）⇒ 在**真的** Launcher 启动的部署里，这一格**仍然是 `false`**。
+  ★ 而它是**同一个缺口的第三个受害者**，不是"第四个缺口"——
+  补那一个数组时三把键一起通。
+- `guard` / `preExecute` 两处都用真实组合根验过，但**没有**端到端跑过一次
+  Launcher 启动的部署（用户的 DSH 在 3080 端口）。
+- 事实表对**未登记**工具的通用识别是**启发式**的：它按参数名反推，
+  能挡住"换个名字就用熟悉的参数起进程"，但挡不住"换个名字**也换一套参数名**"
+  ——那一格仍然只能靠政策门（未登记工具一律 `write` + 要人批）。
+
 ---
 
 ## 5. 需人工介入清单（汇总给到项目方）
@@ -498,6 +582,7 @@ is `mcp__<serverName>__<rawName>`, normalized to the DeepSeek function-name
 | 22 | ★★ **连接器声明里的工具名该写「公开名」还是「裸名」**（第 17 轮**新查出**；第 18 轮**功能上已两可**） | 产品 + 项目主（**只需定约定**，不再是功能阻塞） | 第 17 轮接上 DSH 的 MCP 命名契约（`mcp__<serverName>__<rawName>`，逐字读 `packages/mcp/mcp-client/src/tools.ts`）后照出来的一件事：**声明里写的是裸名**（`list_issues`）而**线上来的永远是公开名**。实测（第 17 轮）：`github` 声明 `list_issues` 时，调 `mcp__github__list_issues` ⇒ **`deny`「没有声明工具」** ⇒ **一个正确声明过的工具，在真 DSH 进程里会被拒**。★★ **第 18 轮已修**：`registry.mjs` 的 `declaredToolNames` 让登记表**同时**认两个名字（归属与判定共用**一份**实现），实测该调用在连接器层从 `deny` 变成 **`allow`**。⇒ **要裁决的只剩「写哪个」这个约定** | ★ 功能上**两种写法现在都能工作**（写裸名 ⇒ 由 `declaredToolNames` 推导公开名；写公开名 ⇒ 字面命中）。**不要**为了"统一"删掉裸名那一半——它兜住"连接器声明一个 DSH 核心工具名"那一类合法用法。★ 也**不许**在归属时"把命名空间剥掉"：DSH 的公开名在归一化/截断时会被替换成 12 位 SHA-256 后缀（`mcp__github__a b` ⇒ `mcp__github__a_b_200f08ef849a`），那时**剥不出** rawName；`tools.ts:9-10` 逐字写着 "the public name is never parsed to recover it"。★ 建议**按连接器自己那一侧的名字写**（可读，且是唯一总能写对的形式），由登记表负责换算 |
 | 23 | ★★ **命名空间"认不出来"的那一类要不要按教义拒**（第 17 轮**新查出**，见 §4.2 第三次末段） | 产品 + 项目主 | `mcp__evil__x`：一个 MCP 公开名，而它那个命名空间**没有任何已知连接器**占着（一次漏配，或一次**未经声明的挂载**）。它今天落到**政策门**（不是登记表）。按 `registry.mjs` 文件头 ① 的头号教义，它应当**被拒**——而做不到的原因是**端口形状**：`resolveConnectorId` 的值域是 `string|null`，**装不下"拒"**。要裁决的是：**要不要**新增一个端口（例如 `connectorShape` 谓词）让"连接器形状、但命名空间不认识"能被表达成一次**具名的拒绝** | ★ 这一格与第 22 条是**相反方向**的两个缺口，别合并：第 22 条是"**已登记的**连接器把**合法**工具拒了"（过严），本条是"**未登记的** MCP 服务器把工具放过去"（过松）。★ 不裁决则：一个未声明的 MCP 服务器挂上来，它的工具走政策门——未知工具在那里是 fail closed，所以**今天不致命**；但**一旦某个名字在政策门眼里是已知的低风险读工具**，它就会被放行，而登记表连问都没被问过。★ 本批**没有**偷偷加这个端口，也没有把它塞进 `resolveConnectorId` 的返回值里凑合。★ 它与第 24 条的关系：**两条都是"过松"方向**（都该拒而没拒），而第 24 条更根本——**今天即使它被拒了，理由也会是政策门而不是登记表** |
 | 24 | ★★★ **政策门要不要从连接器声明里读「能力」**（第 18 轮**新查出**，见 §4.2 第四次） | 产品 + 架构 | 第 18 轮修好"声明名 vs 公开名"之后，**最终判决仍然是 `deny`，理由是 `[政策门]`**：`tool-capability.mjs` 的 `resolveTool` 对不在它目录里的名字一律给 `direction: 'write'`、`requiresApproval: true`（fail closed），而 MCP 工具的公开名**不在那个目录里**。⇒ 一句必须说清的话：**连接器层今天只能让事情更严，永远不能让它更松**——一个"连接器声明了 `allow`、而每次调用都要人批"的系统，与一个"连接器层根本没接上"的系统，在**最终判决**上是同一个 `deny`（只不过前者的理由里写着 `[政策门]`）。要裁决的是：**政策门要不要（以及怎么）从声明里取能力/风险**，从而让连接器层的 `allow` 真的生效 | ★ 这**不是**一个明显的 bug：`deny > ask > allow` 的取严合并正是为了让连接器层成为**额外**约束而不是替代品；让政策门从**声明**读能力会把两层耦合成一层，并打开一个新方向——**一条写错的声明可以下调政策门的评估**（层内"风险只能往上抬"那条纪律管不到跨层）。⇒ 三条路各有代价：**(a)** 保持现状（MCP 工具一律要人批，最安全，但连接器策略事实上只用于**收紧**）；**(b)** 让声明向政策门提供能力（连接器策略真正生效，但引入跨层下调的口子）；**(c)** 折中：只允许声明**抬升**，政策门对声明来的能力取 `max(静态评估, 声明)`。★ 本批**没有**动 `tool-capability.mjs`，也没有把这个口子偷偷打开 |
+| 25 | ★★★ **「这个岗位能调哪些 MCP 工具」该由哪张表说了算**（第 19 轮**新查出**，见 §4.3） | 产品 + 架构 | 第 19 轮给 PRT-605 接了端口时，`execution-scope.mjs` 的 `mcp` 段与 F-21 的**连接器登记表**第一次同时出现在生产路径上——**两张表都声称自己决定"哪些 MCP 工具可用"**，而且两道检查接在**同一个** `preExecute` 上（`connectorJudgment` 与新的 `executionScope`）。要裁决的是：**哪一张是权威**——是 PRT-605 的 `mcp.servers[].tools`（岗位授权表，按 `server__tool` 对），还是 F-21 的连接器声明（按连接器自己的名字 + DSH 公开名，`declaredToolNames` 两个都认）？ | ★ 本轮**没有**替它做决定，而是把它做成一次**具名的拒绝**（`execution-scope-port-mcp-limb-unwired`）：配了 `mcp` 段 ⇒ 拒，理由逐字写清"权威在连接器登记表，两份表不许并存"。★ 为什么不"顺手接上"：DSH 送上来的公开名是 `mcp__<server>__<rawName>`（**两个** `__`），而 `splitMcpTool` 要求**恰好一个**——把线上名字直接喂进去会以 `MCP_AMBIGUOUS_NAME` 拒，*方向是安全的（拒），而**理由是错的**，且后果是"每一个 MCP 调用都被拒"——一个"配置笔误"与"这道检查坏了"会表现成同一句话*；而靠**拆开公开名**还原是堵死的（截断后带 12 位 SHA-256 后缀，`tools.ts:9-10` 逐字 *the public name is never parsed to recover it*）。★ 不裁决则两种坏结果各占一半：接上去 ⇒ 两道检查对同一个 MCP 工具给出**两个**结论（而 `deny > ask > allow` 的取严会让严的那张永远赢，于是另一张表**写了等于没写**，但账上记着"配了"）；不接 ⇒ `mcp` 段今天只能表达"这个岗位没有任何 MCP 授权"（拒绝靠的是**段缺席**，不是**段内容**）。★ 与第 24 条的关系：第 24 条问"政策门要不要读声明里的能力"，本条问"**两张 MCP 表**谁是权威"——两条都会让"配了却没生效"变成一件读不出来的事，但**改的文件完全不同**。★ 建议方向：**F-21 的连接器登记表为权威**（它已经认两个名字、已经有熔断与反馈面、已经接在同一个 `preExecute` 上），而 `execution-scope.mjs` 的 `mcp` 段**降级为"这个岗位允不允许调 MCP"这一个布尔**（或直接删除该段并写进废弃说明）——但这是**裁决**，不是本轮能单方面关掉的 |
 
 ---
 
@@ -546,13 +631,37 @@ is `mcp__<serverName>__<rawName>`, normalized to the DeepSeek function-name
 ★ 「没配」读数不变**是有意的**：把"没配"改成一个看起来像接上了的读数，
 就是本轮反复记的那个形状（缺席被读成一个不可区分的读数）。
 
-**仍未接的**：`whitelist`（岗位白名单）与 `execution-scope` / `external-api-scope`
-两道。所以本节标题"三道范围检查"仍然成立，只是**第一道**有了一条能走通的路。
+**仍未接的**：`whitelist`（岗位白名单）与 `external-api-scope`（PRT-606）两道。
+所以本节标题"三道范围检查"仍然成立，只是**前两道**各有一条能走通的路。
 
 配套的可达性读数（同一次改动，机器可核）：
 `runtime/dsh-composition/path-scope.mjs` 与 `scope-table-binding.mjs`
 从"不可达"变成**可达**（基线 49 → 47 条）——那正是"判定写好了、只是没人给它一份表"
 这句话消失的形式。
+
+### ★★★ 2026-09-18 第 19 轮更新：**第二道（PRT-605）也接上了**——而它是被自己的判据叫来的
+
+新增 `runtime/dsh-composition/execution-scope-port.mjs`（`LEGION_EXECUTION_SCOPE`）
+＋ `scope-facts.mjs`（**事实只算一次**），`enforcementSurfaces()` 从 **7 格变 8 格**：
+
+| 部署配置 | `pathScope` | `executionScope` | 含义 |
+| --- | --- | --- | --- |
+| 都没配（**今天的默认**） | `false` | `false` | 与本节最早那张表同形——没配就是没配 |
+| 只配了路径范围 | `true` | `false` | ★ 两格**独立**：一格读数下这两种状态是同一个 |
+| 都配了 | `true` | `true` | 两道都真的会拦人（已用真实 `preExecute` 验过） |
+
+★ 而这次接线**最早是被一条判据叫来的**，不是被"该做了"叫来的：
+`runtime/dsh-composition/production-scope-wiring.test.mjs` ② 从本轮之前就逐字钉着
+"桥的参数表里没有 `executionScope`"，并在失败消息里写着
+*一条"接上了而账上还写着没接"的记录与一条"没接而账上写着接上了"，同样不能用来做判断*。
+⇒ 本轮照做了，而**那条判据没有被删掉、也没有被放宽**——它换了一个对象继续守
+（`externalApiScope` 仍不许出现）。
+
+★★ 同一族还有一条**仍然不可达**的模块被本轮补进可达性读数：
+`product/execution-plane-config.mjs`（`readExecutionPlaneConfig` 零生产导入方）——
+它与三道范围表是**同一族**（*一个"读取器写好了、而没有生产调用方"的模块，
+与一个"这份配置根本不存在"的模块，在"范围表配了没有"这个问题上给出同一个答案：没配*），
+归属第 19 条，已裁决、待施工。
 
 ### 怎么核出来的
 
@@ -562,7 +671,7 @@ is `mcp__<serverName>__<rawName>`, normalized to the DeepSeek function-name
 | 组合根透传 | `runtime/dsh-composition/root.mjs:465-466` | `whitelist: input.whitelist, pathScope: input.pathScope` ⇒ 两者都是 `undefined` |
 | 装配默认值 | `runtime/dsh-composition/assemble.mjs:135-136` | `whitelist = null, pathScope = null` |
 | 桥的行为 | `runtime/dsh-composition/tool-request.mjs:638-651` | `if (pathScope === null) return undefined` —— **返回 undefined 就是放行** |
-| 两个检查器的 import 者 | `grep 'from .*(path-scope\|execution-scope\|external-api-scope)'` | **只有它们自己的 `.test.mjs`**（零生产 import 者） ★ **[2026-09-18 订正]** 这句话对 `path-scope.mjs` **已经不成立**：它现在有两个**生产** import 者（`scope-port.mjs:50`、`scope-table-binding.mjs:72`），而 `scope-port.mjs:169` 真的调 `checkPathScope(...)`。**仍然成立**的是 `execution-scope.mjs` 与 `external-api-scope.mjs`（各零个生产 import 者）。⇒ 本行那句"零生产 import 者"只该读作"对 605/606 成立"。 ★ 订正方法是**可达性探针的红**，不是重跑这行 grep——*一个写在表格里的读数，与一个被测的东西，差别在于前者不会自己变红。* |
+| 两个检查器的 import 者 | `grep 'from .*(path-scope\|execution-scope\|external-api-scope)'` | **只有它们自己的 `.test.mjs`**（零生产 import 者） ★ **[2026-09-18 订正]** 这句话对 `path-scope.mjs` **已经不成立**：它现在有两个**生产** import 者（`scope-port.mjs:50`、`scope-table-binding.mjs:72`），而 `scope-port.mjs:169` 真的调 `checkPathScope(...)`。**仍然成立**的是 `external-api-scope.mjs`（零个生产 import 者）。⇒ 本行那句"零生产 import 者"只该读作"对 606 成立"。 ★ 订正方法是**可达性探针的红**，不是重跑这行 grep——*一个写在表格里的读数，与一个被测的东西，差别在于前者不会自己变红。* ★★ **[2026-09-18 第 19 轮再订正]** `execution-scope.mjs` 也**不再**成立：它现在有一个生产 import 者（`execution-scope-port.mjs:44`），而那个端口在 `executionGuard` 里真的调 `checkCommand` / `checkNetwork` / `checkMcp`。⇒ 本行现在只对 `external-api-scope.mjs` 成立。★ 而这次订正**同样是可达性探针的红**顶出来的（`reachability.test.mjs` ④ 报"execution-scope.mjs 已经变成可达了"）——两次订正走了同一条路，这本身就是这条注释值得留在这里的证据 |
 
 ### 这条落差为什么危险
 

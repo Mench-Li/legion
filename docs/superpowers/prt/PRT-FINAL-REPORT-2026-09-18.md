@@ -645,6 +645,9 @@ CommonMark 的代码跨度里反斜杠**不**转义（`` `a\|b` `` 原样渲染�
 
 | 项 | 读数 |
 | --- | --- |
+| 全量 CI（HEAD `466239d`，**`.ci/r22a`**，第 22 轮收口） | **9/9 PASS，exit 0**；`test` **811934ms**；`skipped=1`（secret-store，已知）；**357 个 `*.test.mjs` 全部有归属**；新增两套 `toolcall-spool` 14/14 与 `toolcall-drain` 13/13、新增一套 `doc-table` 10/10；`doc` 读到 **140/145，未完成 5** ——★ 这一次跑在一棵**冻住**的树上（`test` 阶段那 812 秒里工作树的**代码与文档都没动**） |
+| 第 22 轮新增/受影响套件 | `toolcall-spool` **14/14**、`toolcall-drain` **13/13**、`doc-table` **10/10**、`reachability` **10/10**（分类之后）、`dsh-boundary` **22/22**、`production-scope-wiring` **11/11**、`intervention-coverage`+`boundary-facts`+`feature-table`+`silent-declarations`+`prt-progress` 合计 **60/60** |
+| 可达性（第 22 轮） | 不可达 **46**（44 → 46：本轮两个新模块**按设计定性为 `gap`**，指针指向 §5 第 28 条）——★ 这**不是回归**，是门禁逼着人对新模块说出"属于哪一类" |
 | 全量 CI（HEAD `c2e650f`，**`.ci/r18b`**） | **9/9 PASS，exit 0**；`test` 815741ms；`skipped=1`（secret-store，已知）；**350 个套件全绿** |
 | 全量 CI（`.ci/r18`，与文档编辑重叠的那次） | **9/9 PASS，exit 0**；`test` 820062ms —— 见下面第 2 条 |
 | connectors 套件（含 `public-name` / `registry` / `decision-port` / `target-binding` / `outcome-port`） | **123**（第 17 轮）→ 本批 `registry` +5、`connector-port` +2 ⇒ **128/128** |

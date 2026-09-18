@@ -392,6 +392,8 @@ function rememberRefusal(code, message, extra = {}) {
  *   住在 `team-hub/`，而 `runtime/` import 它会成环（见文件头）。
  * @param {object} [input.floor] / [input.whitelist] / [input.pathScope]
  *   透传给 `assembleEnforcement` 的静态下限 / 岗位白名单 / 路径范围。
+ * @param {(p: object) => object} [input.executionScope]
+ *   PRT-605 的命令/网络/MCP 范围端口（与 `pathScope` 同形）。
  * @param {() => number} [input.now] 时间源（用例要能拨表）。
  * @param {(e: object) => void} [input.onDecision] 观测点，**不参与判定**。
  * @param {number} [input.connectTimeoutMs] / [input.responseTimeoutMs]
@@ -464,6 +466,8 @@ export function installEnforcementRoot(input = {}) {
       floor: input.floor,
       whitelist: input.whitelist,
       pathScope: input.pathScope,
+      // ★★★ PRT-605（第 19 轮加）：与 `pathScope` 同一条路线透传。
+      executionScope: input.executionScope,
       // ★★ F-21 连接器那一半（2026-09-18 加）：**成对**透传。
       //   两个都缺省 `undefined` ⇒ 桥那边收 `null` ⇒ 不装，且
       //   `enforcementSurfaces().connectorFeedback` 读成 false。

@@ -524,6 +524,14 @@ test('⑥ ★★ 没接上的强制面必须能被读出来（配置里写了 �
     //   与一个"连接器失败被记下来了、但记下来之后谁也不看"的强制面，
     //   在只有 `connectorFeedback` 一格的读数里是同一个东西。
     connectorJudgment: false,
+    // ★★★ 2026-09-18 第 19 轮：又多了 `executionScope` 一格（PRT-605 的命令/网络/MCP）。
+    //
+    //   为什么它必须与 `pathScope` **分格**（它们形状相同、时点相同）：
+    //   两道范围检查对应**两份不同的配置**（`LEGION_PATH_SCOPE` /
+    //   `LEGION_EXECUTION_SCOPE`）。
+    //   一格读数下，"路径范围配好了、执行面授权表漏了"与"两道都配好了"是同一个东西——
+    //   而值班的人要修的配置完全不同。
+    executionScope: false,
   })
   const full = createEnforcementBridge({
     context: CTX,
@@ -541,6 +549,10 @@ test('⑥ ★★ 没接上的强制面必须能被读出来（配置里写了 �
     //   判定面是接在策略门**外面**的一层（它把连接器层的意见与政策门的意见取严合并），
     //   所以两者都存在时 `policy` 与这一格同时为 `true` —— 它们不是同一件事。
     connectorJudgment: false,
+    // ★ 同上：这条桥给了四个端口，但**没有**给执行面授权表 ⇒ `false`。
+    //   ★★ 这一格与 `pathScope: true` 同时出现，正是"两格必须分开"的**活证据**：
+    //     路径范围配好了、执行面没配，两种状态都在这一行里读得出来。
+    executionScope: false,
   })
   // 而硬 floor 永远是挂着的（它不是可选端口）
   assert.equal(bare.enforcementSurfaces().hardFloor, true)

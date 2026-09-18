@@ -88,6 +88,7 @@ import {
 } from './enforcement.mjs'
 import { CAPABILITY_IDS, CAPABILITY_KINDS, resolveTool } from './tool-capability.mjs'
 import { freezeToolArguments, resolvePreExecuteResult } from './tool-args.mjs'
+import { deriveScopeFacts } from './scope-facts.mjs'
 // patch-layer 是纯数据模块（零 import），所以这一条依赖是单向的、不会成环。
 import { PATCH_LAYER_ROWS } from './patch-layer.mjs'
 // PRT-214 缺口②：身份覆盖的取用缝与叠加。单向依赖（它只 import contracts），不成环。
@@ -341,6 +342,19 @@ export function projectToolRequest({ request, context } = {}) {
   for (const key of SUBJECT_KEYS) ordered[key] = subject[key]
   const canonicalHash = canonicalOperationHash(ordered, { cwd, platform })
 
+  // ★★★ 执行面事实**在这里算一次**，落进投影，供所有下游**只读**引用
+  //   （`execution-scope-port.mjs` / 将来的 `external-api-scope-port.mjs`）。
+  //
+  //   理由见 `scope-facts.mjs` 的文件头：六处各自 `arguments.command ?? arguments.cmd`
+  //   兜底，今天恰好一致，而下一次不一致会表现为"某个强制点没拦住"。
+  //
+  //   ★ 它**不参与**授权哈希（`SUBJECT_KEYS` 里没有它）：事实是从
+  //     `arguments` **推导**出来的，而归档原则是"推导值不落盘、不进身份"。
+  //     把它算进哈希只会让"同一件事的两种等价写法"变成两个身份。
+  const scopeFacts = deriveScopeFacts({
+    capabilities, args: frozenBody.arguments, toolName, known: facts.known,
+  })
+
   return Object.freeze({
     version: TOOL_REQUEST_VERSION,
     schemaVersion: CANONICAL_OP_SCHEMA_VERSION,
@@ -351,6 +365,7 @@ export function projectToolRequest({ request, context } = {}) {
     frozenHash: frozenBody.canonicalHash,
     subject: Object.freeze(ordered),
     canonicalHash,
+    scopeFacts,
     target: derived.target,
     canonicalTarget,
     targetFrom: derived.from,
@@ -522,6 +537,23 @@ export function createEnforcementBridge({
    * 只在一处查的写法在"只经过一个强制点"的用例里是绿的。
    */
   pathScope = null,
+  /**
+   * ★★★ PRT-605 的命令/网络/MCP 范围：`(projection) => {allowed, code, reason}`。
+   *
+   * ★ 与 `pathScope` **同一个形状、同一个时点**（pre-execute 与 guard 两处都查）。
+   *   形状相同是有意的：多一道检查不该多一种接线方式，
+   *   否则"接了哪几道"会变成一件要读六处才能回答的事。
+   *
+   * ★ 它读的是 `projection.scopeFacts`（投影里算好的那一份），
+   *   而**不**自己从 `arguments` 里找命令 —— 见 `scope-facts.mjs` 文件头。
+   *
+   * ★★ `pathScope === null` 时那一行是放行（`scopeGuard` 的既有语义）。
+   *   本端口**沿用**同一个形状，所以它也是"没接就放行"：
+   *   `enforcementSurfaces().executionScope` 就是那个读数的来源。
+   *   一个"没接就拒"的端口会让所有工具调用在没配授权表时全挂——
+   *   那是把"没配"变成"坏了"，而不是更安全。
+   */
+  executionScope = null,
   /**
    * ★ PRT-214 缺口②：**按 Run** 取授权身份覆盖。
    *
@@ -742,6 +774,31 @@ export function createEnforcementBridge({
     return undefined
   }
 
+  /**
+   * ★★★ PRT-605：命令/网络/MCP 范围的强制点（与 `scopeGuard` 同一个时点、同一个形状）。
+   *
+   * ★ 单独一个函数而不是复用 `scopeGuard` 的闭包：两条端口的**拒绝理由前缀**
+   *   必须不同——值班的人要能一眼分清"是路径越界"还是"起进程/出网越界"，
+   *   因为它们对应**两份不同的配置**（`LEGION_PATH_SCOPE` / `LEGION_EXECUTION_SCOPE`）。
+   *
+   *   > 一个「所有范围拒绝都写成同一句话」的桥，
+   *   > 与一个「配置表接错了也看不出来」的桥，是同一个东西。
+   */
+  function executionGuard(projection) {
+    if (executionScope === null) return undefined
+    let verdict
+    try {
+      verdict = executionScope(projection)
+    } catch (err) {
+      return `执行面范围检查本身出错（${err?.code ?? 'unknown'}）：${err?.message ?? String(err)}。按拒绝处理`
+    }
+    if (verdict === null || typeof verdict !== 'object' || verdict.allowed !== true) {
+      const code = verdict?.code ?? 'execution-scope-unspecified'
+      return `执行面越界（${code}）：${verdict?.reason ?? '没有给出理由'}`
+    }
+    return undefined
+  }
+
   function guard(execution) {
     const got = projectionFor(execution)
     if (!got.ok) {
@@ -761,6 +818,14 @@ export function createEnforcementBridge({
     if (scopeReason !== undefined) {
       record(projection.canonicalHash, { source: 'guard', decision: 'deny', reason: scopeReason, at: now() })
       return scopeReason
+    }
+    // ★★★ PRT-605：命令/网络/MCP 范围**也在 guard 复核**（与路径范围同一个理由：
+    //   spec §6.6 line 449 的"guard 只做同步、确定性拒绝；后续流程不可撤销"）。
+    //   只把这道放在 pre-execute 的写法，在"只经过 guard"的调用上是绿的。
+    const execReason = executionGuard(got.projection)
+    if (execReason !== undefined) {
+      record(projection.canonicalHash, { source: 'guard', decision: 'deny', reason: execReason, at: now() })
+      return execReason
     }
     const reason = guarded(guardInputOf(projection))
     const hash = projection.canonicalHash
@@ -838,6 +903,13 @@ export function createEnforcementBridge({
       // 而岗位清单是"这个岗位能干哪些事"，两者拒绝的理由不同、修复动作也不同。
       const outOfScope = scopeGuard(got.projection)
       if (outOfScope !== undefined) return { kind: 'deny', reason: outOfScope }
+
+      // ★★★ PRT-605：命令/网络/MCP 范围。放在路径范围**之后**、白名单之前——
+      //   顺序有理由：越界路径是 hard floor 的一部分（spec §6.6 line 449），
+      //   而"这个岗位能不能起进程/出网"与"这个岗位能干哪些事"是两件事，
+      //   后者的拒绝理由里带 `rule`（要改的是岗位清单）。
+      const execOut = executionGuard(got.projection)
+      if (execOut !== undefined) return { kind: 'deny', reason: execOut }
 
       // ★ 岗位白名单在**策略端口之前**跑，拒绝即定案（PRT-603）。
       //
@@ -1021,6 +1093,16 @@ export function createEnforcementBridge({
     enforcementSurfaces: () => Object.freeze({
       hardFloor: true,
       pathScope: pathScope !== null,
+      /**
+       * ★★★ PRT-605（2026-09-18 第 19 轮加）。原来这一格**不存在**——
+       * 而"不存在"比 `false` 更糟：`false` 至少能让运维问一句"我该配什么"，
+       * 一格都没有的时候，连"这里本该有一道检查"都读不出来。
+       *
+       *   > 一个「端口在、没人给它值」的强制面，
+       *   > 与一个「端口根本不存在」的强制面，在 `enforcementSurfaces()` 上是
+       *   > `false` 与**什么都没有**——而后者连"我该配点什么"都问不出来。
+       */
+      executionScope: executionScope !== null,
       whitelist: whitelist !== null,
       policy: decide !== null,
       approval: requestApproval !== null,

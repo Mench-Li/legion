@@ -191,7 +191,23 @@ test('④ ★★ 读数：四族 gap 仍然不可达（谁把它们接上，这�
     //      而 `tool-request.mjs:731` 那句 `if (pathScope === null) return undefined`
     //      ⇒ 那次缺席落到的是**放行**。所以「三道范围检查」里这一道
     //      **从"一次都不跑"变成了"配了才跑"**，不是"默认就拦"。
-    ['runtime/dsh-composition/execution-scope.mjs', '§5.2'],
+    // ── `execution-scope.mjs` 为什么也可以从这里删掉（第 19 轮，2026-09-18）──
+    //   与 `path-scope.mjs` **同一形状的端到端链**（不是"有人 import 了它"）：
+    //     `patch-layer.mjs`（PATCH_LAYER_ROWS）加载 `plugins/pre-execute-row.mjs`
+    //       → `plugins/root-row.mjs` 调 `executionScopePortFromEnv({ env })`（**真调用**）
+    //       → 失败时 `throw`（**fail closed**，不按"没配"处理）
+    //       → `installEnforcementRoot({ executionScope: execScope.port })`
+    //       → `tool-request.mjs` 的 `executionGuard(projection)`
+    //       → `execution-scope-port.mjs` 调 `checkCommand` / `checkNetwork` / `checkMcp`
+    //   ⇒ `execution-scope.mjs` 的三个判定器在**生产装配路径上真的会跑**。
+    //   ⚠️ 同一条边界照旧成立：**没配**授权表时 `port` 是 `null`，
+    //      而 `executionGuard` 那句 `if (executionScope === null) return undefined`
+    //      ⇒ 那次缺席落到的是**放行**。所以它也是**从"一次都不跑"变成"配了才跑"**。
+    //   ★★ 而**本表这一格最初是红的**——红得对，且那条红**本身就是本轮的验收**：
+    //      它是 2026-09-18 设计的"谁把这道接上，这条就红，于是接线的人**必然**
+    //      会经过这里改一次分类"。⇒ 改动落在**两处**：本表删一行，以及
+    //      `docs/MULTI-AGENT-FEATURE-STATUS.md` §5.2 的读数。
+    //   *** 一条只在代码里变、账上不动的接线，会让下一个人照着旧账做判断。 ***
     ['runtime/dsh-composition/external-api-scope.mjs', '§5.2'],
     // 族二：能力包这一条链（PRT-1002..1006，台账 ✅）
     ['runtime/packs/store.mjs', 'PRT-1003 安装/升级记录'],
@@ -224,6 +240,26 @@ test('④ ★★ 读数：四族 gap 仍然不可达（谁把它们接上，这�
     //    ⇒ 所以这一条**不是**"F-21 接好了"，而是"这个模块不再零 import 了"。
     //    剩下的并进第 19 条。详见 `PRT-SESSION-REPORT-2026-09-17.md` §10.43。
     ['product/launcher/first-run.mjs', '§5.3.1 PRT-707 死的那份'],
+    // 族五（第 19 轮补入）：**执行面那几份数据的投递读取器**。
+    //
+    //   ★ 为什么把它补进来：本轮把 `execution-scope.mjs` 从本表删掉之后
+    //     `READINGS.length` 掉到 9，下面那条 `>= 10` 当场红了。
+    //     那条红是**对的**——它问的是"本用例是不是正在被一点点掏空"。
+    //     而正确的应对**不是**把阈值改小（那正是掏空的读法），
+    //     是去问"这一族里还有没有同样真实、同样没人接的成员"——有，而且不止一个。
+    //
+    //   `product/execution-plane-config.mjs`：`readExecutionPlaneConfig` 的
+    //   生产导入方**零处**。这不是我猜的——`root-row.mjs` 自己那段注释
+    //   （连接器声明那一步）逐字写着"declarations 从哪来是第 14 条那个决定
+    //   （`product/execution-plane-config.mjs` 今天零生产导入方）"。
+    //
+    //   它与本轮的三道范围表是**同一族**：*一个"读取器写好了、而没有任何生产
+    //   调用方"的模块，与一个"这份配置根本不存在"的模块，在"范围表配了没有"
+    //   这个问题上给出同一个答案：没配。* 差别只在前者的账上写着"已交付"。
+    //
+    //   ⇒ 归属第 19 条（执行面数据的投递：放进 `RunRequest`，已裁决、待施工）；
+    //     与 §5.2 的三道范围检查是同一个决定的不同面。
+    ['product/execution-plane-config.mjs', '§5 第 19 条 / §5.2（执行面数据投递，已裁决待施工）'],
   ]
 
   const stillUnreachable = []

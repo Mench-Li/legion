@@ -140,6 +140,9 @@
 
 import { APPROVAL_POLICIES, decideApproval } from '../approval-policy.mjs'
 import { SCOPE_PORT_ENV_KEY, scopePortFromEnv } from '../scope-port.mjs'
+import {
+  EXECUTION_SCOPE_PORT_ENV_KEY, executionScopePortFromEnv,
+} from '../execution-scope-port.mjs'
 import { CONNECTOR_PORT_ENV_KEY, connectorPortFromEnv } from '../connector-port.mjs'
 import {
   ENFORCEMENT_ROOT_CODES,
@@ -506,6 +509,33 @@ export function createRootRow({
           '那会让一次配置错误与一次真实的"无范围限制"在强制面读数上同形')
       }
 
+      // ★★★ 第 19 轮：执行面的**命令/网络/MCP 范围表**（PRT-605 的最后一条缝）。
+      //
+      //   在此之前 `execution-scope.mjs` 的三个判定器**连端口都没有**：
+      //   `createEnforcementBridge` 的参数表里没有 `executionScope`，
+      //   `enforcementSurfaces()` 的键集里也没有它。
+      //   `production-scope-wiring.test.mjs` ② 把这件事**钉住**了，
+      //   而它钉的方式很值得留：那条判据会在端口出现时**红**，并逐字要求
+      //   "把 PRT-605 的台账、docs 与本套件的 ①② 一起更新"——
+      //   *一条"接上了而账上还写着没接"的记录，
+      //   与一条"没接而账上写着接上了"，同样不能用来做判断。*
+      //
+      //   现在：配了就接上；**没配仍然是没配**（`port` 为 `null`）。
+      //   不补默认值——一个"凭空造出来的空授权表"会让这一格报 `true`
+      //   而它一条规则都没有（`normalizeGrant` 允许三个段全 `null`）。
+      let execScope
+      try {
+        execScope = executionScopePortFromEnv({ env: effectiveEnv })
+      } catch (err) {
+        // 配了却解释不通 ⇒ **拦装配**，与"根本没配"分开。
+        //   > 一个"读不出来就当作没配"的组合根，
+        //   > 与一个"这个部署确实没有执行面限制"的部署，在强制面读数上长得一样。
+        throw rowError(ROOT_ROW_CODES.CONFIG_UNRESOLVED,
+          `${ROOT_ROW_PLUGIN_NAME} 读不出执行面授权表「${EXECUTION_SCOPE_PORT_ENV_KEY}」：` +
+          `${err?.message ?? err}。**不**按"没配"处理——` +
+          '那会让一次配置错误与一次真实的"无执行面限制"在强制面读数上同形')
+      }
+
       // ★ 第 19 条 §9.2 第 5 步：执行面的**连接器声明**（F-21 判定面的最后一条缝）。
       //
       //   在此之前 `installEnforcementRoot` 的两个连接器参数
@@ -538,6 +568,10 @@ export function createRootRow({
         //   （`assemble.mjs` 的默认值就是 `null`）——所以这一行**不改变**没配时的行为，
         //   它只让"配了"这件事有了一条能走通的路。
         pathScope: scope.port,
+        // ★★★ PRT-605：命令/网络/MCP 范围。与 `pathScope` **同一个形状**：
+        //   键恒在、缺席时值是 `null`（理由见下面那段"条件展开"的注释——
+        //   那一条教训在这里同样适用，且这次我是**先**读到了它才写的）。
+        executionScope: execScope.port,
         // ★ 与上面 `pathScope` **同一个形状**：键恒在，缺席时值是 `null`。
         //
         //   ⚠️ 我第一版写的是条件展开（`...(configured ? {a,b} : {})`）。

@@ -91,6 +91,10 @@ test('① ★★★ 生产组合根**接上了** pathScope 端口；env 没配�
     assert.ok(keys.includes(must),
       `生产装配的键集里没有 ${must}（keys=${JSON.stringify(keys)}）——解析锚点坏了`)
   }
+  // ★★★ 2026-09-18 第 19 轮：`executionScope`（PRT-605）与 `pathScope` 同一个形状。
+  assert.equal(keys.includes('executionScope'), true,
+    `生产装配没有传 executionScope（keys=${JSON.stringify(keys)}）——`
+    + 'PRT-605 的接线被去掉了？那会让越权命令重新变成放行')
 
   // ★ 行为读数（一）：env 里**没有**范围表 ⇒ 端口为 null ⇒ 读数仍是 false。
   //   不启动 DSH：`installEnforcementRoot` 是纯装配（它只造桥 + 造两行插件）。
@@ -117,6 +121,11 @@ test('① ★★★ 生产组合根**接上了** pathScope 端口；env 没配�
   assert.deepEqual(surfaces, {
     hardFloor: true,
     pathScope: false,
+    // ★★★ PRT-605（2026-09-18 第 19 轮加）：命令/网络/MCP 范围。
+    //    组合根这一层的生产入参里没有执行面授权表 ⇒ `false`。
+    //    这一格**本批之前根本不存在**——而"不存在"比 `false` 更糟：
+    //    `false` 至少能让运维问一句"我该配什么"。
+    executionScope: false,
     whitelist: false,
     policy: true,
     approval: true,
@@ -172,39 +181,106 @@ test('①b ★★★ 同一个组合根，env 里配上范围表 ⇒ 读数翻�
   resetEnforcementRoot()
 })
 
-test('② ★★★ 命令/网络/MCP 与外部 API 两道范围检查**连端口都没有**', () => {
-  // PRT-605 与 PRT-606 的检查器是纯函数模块，而桥的端口表里没有它们的位置。
-  // 后果比 ① 更重：`pathScope` 至少还有一个"没接"的读数，
-  // 而这两道**读不出来**——因为没有任何地方能表达"它应该在这里"。
+test('①c ★★★ 同一个组合根，env 里配上执行面授权表 ⇒ `executionScope` 翻成 true，且**真的会拦人**', async () => {
+  // ★ 与 ①b 完全同一个形状，换到 PRT-605 那一条上。
+  //   少了它，① 那个 `executionScope: false` 可能只是"这一格恒 false"——
+  //   而一个恒 false 的读数与一个正确报出"没配"的读数，在 ① 的断言下是同一条绿。
+  //
+  //   ★★ 而"报 true"还不够：本批之前的教训正是**"那一格对了"与"这一道真的会拦人"
+  //      被读成同一件事**。所以这条一路走到 `preExecute`，看真实裁决。
+  const { installEnforcementRoot, resetEnforcementRoot } = await import('./root.mjs')
+  const { executionScopePortFromEnv, EXECUTION_SCOPE_PORT_ENV_KEY } = await import('./execution-scope-port.mjs')
+  const env = {
+    TEAM_HUB_URL: 'http://hub.invalid:8787',
+    LEGION_ACTOR: 'alice',
+    LEGION_SCOPE: 'space-1',
+    LEGION_ENFORCEMENT_ACTION: 'write',
+    LEGION_CWD: 'C:/work',
+    [EXECUTION_SCOPE_PORT_ENV_KEY]: JSON.stringify({ command: { programs: ['git'] } }),
+  }
+  const execScope = executionScopePortFromEnv({ env })
+  assert.equal(execScope.state, 'configured', '配了却没有被解析出来')
+
+  resetEnforcementRoot()
+  const installed = installEnforcementRoot({
+    env,
+    decide: () => ({ kind: 'allow' }),
+    createRequestApproval: () => (async () => 'rejected'),
+    pathScope: null,
+    executionScope: execScope.port,
+  })
+  assert.equal(installed.ok, true, `${installed.code} ${installed.message}`)
+  const surfaces = installed.root.enforcementSurfaces()
+  assert.equal(surfaces.executionScope, true,
+    '配了执行面授权表却仍报 false——① 那条"没配"的读数就不能用来判断了')
+  // ★ 而路径范围**仍然**是 false：两格是**独立**的读数。
+  //   一个"两道范围检查共用一个布尔"的实现，会让"只配了一道"读成"两道都配了"。
+  assert.equal(surfaces.pathScope, false,
+    '只配了执行面却把 pathScope 也报成 true——两格必须独立')
+
+  // ★★ 真实裁决：同一个组合根造出的桥，越权命令必须被拒。
+  const bridge = installed.root.bridge
+  if (bridge !== undefined) {
+    const denyVerdict = await bridge.preExecute({
+      name: 'run-command', callId: 'c1', arguments: { command: ['rm', '-rf', '/'] },
+    })
+    assert.equal(denyVerdict.kind, 'deny',
+      `越权命令被放行了：${JSON.stringify(denyVerdict)}——组合根"接上了"就只是接了个摆设`)
+    assert.match(denyVerdict.reason, /执行面越界/)
+    const allowVerdict = await bridge.preExecute({
+      name: 'run-command', callId: 'c2', arguments: { command: ['git', 'status'] },
+    })
+    assert.equal(allowVerdict.kind, 'allow',
+      `授权表里的命令被拒了——那这个端口就是在"全拒"：${allowVerdict.reason}`)
+  }
+  resetEnforcementRoot()
+})
+
+test('② ★★★ PRT-605 已接；而 PRT-606（外部 API）**仍然连端口都没有**', () => {
+  // ★★★ 2026-09-18 第 19 轮：这一条**改了要钉的东西**，而且是按它自己的指示改的。
+  //
+  //   它上一版逐字写着："桥现在有了 executionScope 端口。★ 这是好事——但请把
+  //   PRT-605/606 的台账状态、docs 里的记账、以及本套件的 ①② 一起更新；
+  //   一条'接上了而账上还写着没接'的记录与一条'没接而账上写着接上了'，
+  //   同样不能用来做判断。"
+  //
+  //   ⇒ 本轮照做了：`executionScope` 接上了（PRT-605），账也动了。
+  //     而**外部 API 那一道（PRT-606）仍然没有端口**，所以这条判据**没有变成空断言**
+  //     ——它换了一个对象继续守着，而不是被删掉。
+  //
+  //   > 一条判据在它守的东西被修好之后**不该消失**，它该指向下一件同类的事——
+  //   > 否则"修好了"与"这条判据本来就是空的"在覆盖率报告里长得一样。
   const src = readFileSync(TOOL_REQUEST, 'utf8')
   const m = /export function createEnforcementBridge\(\{([\s\S]*?)\n\}\)/.exec(src)
   assert.notEqual(m, null, 'tool-request.mjs 里找不到 createEnforcementBridge 的参数表——锚点没了')
   const params = [...m[1].matchAll(/^\s*([A-Za-z_$][\w$]*)\s*[=,]/gm)].map((x) => x[1])
   assert.ok(params.includes('pathScope'),
     `参数表解析失败（没读到 pathScope）：${JSON.stringify(params)}`)
-  for (const absent of ['executionScope', 'externalApiScope', 'scope']) {
+  // ★ 第一半已经接上：这条现在是**正向**断言，而不是"它不该在"。
+  assert.equal(params.includes('executionScope'), true,
+    'PRT-605 的端口不见了。★ 这不可能是"回滚"——本套件 ① 与 '
+    + '`execution-scope-port.test.mjs` 都指着它；先查是不是参数被改名了')
+  // ★ 而 PRT-606 仍然是那个形状：**连位置都没有**。
+  for (const absent of ['externalApiScope', 'scope']) {
     assert.equal(params.includes(absent), false,
-      `桥现在有了 ${absent} 端口。★ 这是好事——但请把 PRT-605/606 的台账状态、`
-      + 'docs 里的记账、以及本套件的 ①② 一起更新；'
+      `桥现在有了 ${absent} 端口。★ 这是好事——但请把 PRT-606 的台账状态、`
+      + 'docs 里的记账、以及本套件的 ①③ 一起更新；'
       + '一条"接上了而账上还写着没接"的记录与一条"没接而账上写着接上了"，同样不能用来做判断')
   }
-  // 行为读数：强制面的键集里没有这两个名字。
+  // 行为读数：强制面的键集里 `executionScope` **在**，`externalApiScope` **不在**。
   const surfaces = createEnforcementBridge({ context: CTX }).enforcementSurfaces()
-  // ★ 2026-09-18：键集里**多了** `connectorJudgment`（F-21 第一半）。
+  // ★ 2026-09-18 第 19 轮：键集 7 → **8**（多了 `executionScope`）。
   //   这个键集仍然是一份**契约**：它变了就必须在这里显式改，
-  //   而不是让它悄悄多一格。它现在有 **7** 格，而"两半都在场"是 7 格里的事。
-  //
-  //   ★ 为什么是**两格**而不是一格：`connectorFeedback` 只报"结果回得来"，
-  //     `connectorJudgment` 只报"判定插得上话"。只有一格时，
-  //     "判定面装了、反馈面没装"（熔断器只合不开）与反过来
-  //     （只开不合）都是同一个读数。
+  //   而不是让它悄悄多一格。
   assert.deepEqual(Object.keys(surfaces).sort(),
-    ['approval', 'connectorFeedback', 'connectorJudgment', 'hardFloor', 'pathScope', 'policy', 'whitelist'],
+    ['approval', 'connectorFeedback', 'connectorJudgment',
+      'executionScope', 'hardFloor', 'pathScope', 'policy', 'whitelist'],
     '强制面的键集变了——这个键集是**契约**，不是便利方法')
-  assert.equal('executionScope' in surfaces, false)
-  assert.equal('externalApiScope' in surfaces, false)
-  // ★ 反向对照：默认造出来的桥**两半都没有**（`null` ⇒ false）。
+  assert.equal('externalApiScope' in surfaces, false,
+    'PRT-606 的那一格出现了——请把这一条、§5 的裁决项与台账一起更新')
+  // ★ 反向对照：默认造出来的桥**全都没接**（`null` ⇒ false）。
   //   少了这条，上面那个键集断言无法区分"这一格报了 true"与"这一格恒 true"。
+  assert.equal(surfaces.executionScope, false, '没传执行面端口 ⇒ 必须是 false（没接 ≠ 接了个空的）')
   assert.equal(surfaces.connectorFeedback, false, '没传 listener ⇒ 必须是 false（没接 ≠ 接了个空的）')
   assert.equal(surfaces.connectorJudgment, false, '没传判定端口 ⇒ 必须是 false')
 })
@@ -252,7 +328,106 @@ test('④ ★★ 反向对照：显式传上这两个键，读数就翻成 true�
   assert.equal(s.pathScope, true, '传了 pathScope 却仍报 false——① 的结论不成立')
 })
 
-test('⑤ ★★ 生产装配的**唯一**入口是组合根插件行（别处造桥就不在生产链上）', () => {
+test('③b ★★★ PRT-605 的后果是真的：同一路越界命令，接了执行面端口就拒、没接就通过', async () => {
+  // ★ 与 ③ 同一个形状，换到 PRT-605 那一条上。少了它，"executionScope 接上了"
+  //   只是"`enforcementSurfaces()` 里多了一格"——而那一格与"这一道真的会拦人"
+  //   是两件事（本项目反复撞到的正是这两件事被读成同一件）。
+  //
+  //   这一条的**前提**必须是真的越界：授权表只许 `git status`，
+  //   而这次调用起的是 `rm`。
+  const { executionScopePortFromEnv } = await import('./execution-scope-port.mjs')
+  const env = {
+    LEGION_EXECUTION_SCOPE: JSON.stringify({
+      command: { programs: ['git'] },
+    }),
+  }
+  const scope = executionScopePortFromEnv({ env })
+  assert.equal(scope.state, 'configured', '配了却没有被解析出来')
+
+  // `run-command` **是登记过的**工具，能力集 = `['command:exec','process:spawn']`
+  //   （`tool-capability.mjs:327`）⇒ 按能力查表就落进 `command` 那一类。
+  //   ★ 未登记工具走的是**另一条**路（按参数证据反推），
+  //     由 `scope-facts.test.mjs` ② 单独立据；这里要证的是**能力驱动**那条路。
+  const execution = {
+    name: 'run-command', callId: 'c1',
+    arguments: { command: ['rm', '-rf', '/'] },
+  }
+
+  // ① 没接端口 —— 就是生产在本批之前的形状。
+  const bare = createEnforcementBridge({ context: CTX, decide: () => ({ kind: 'allow' }) })
+  const bareVerdict = await bare.preExecute(execution)
+  assert.equal(bareVerdict.kind, 'allow',
+    '没接 executionScope 时竟然拒绝了——那么"没接"至少是 fail closed 的，'
+    + '本套件的 ① 就该换个说法（这也会是个好消息）')
+
+  // ② 接上端口 —— 同一个调用立刻被拒，而且理由是**这一道**给的。
+  const wired = createEnforcementBridge({
+    context: CTX,
+    executionScope: scope.port,
+    decide: () => ({ kind: 'allow' }),
+  })
+  const wiredVerdict = await wired.preExecute(execution)
+  assert.equal(wiredVerdict.kind, 'deny', '接了执行面端口反而放行——端口没被用上')
+  assert.match(wiredVerdict.reason, /执行面越界/,
+    `拒绝理由必须写明是执行面那一道（不是路径、不是策略）：${wiredVerdict.reason}`)
+  assert.match(wiredVerdict.reason, /exec-scope-program-not-allowed/,
+    `理由里要带判定器的码，值班的人才知道改哪张表：${wiredVerdict.reason}`)
+
+  // ③ guard 那一层同样复核（spec §6.6 line 449：两处都查）。
+  const guardReason = wired.guard(execution)
+  assert.ok(typeof guardReason === 'string', 'guard 没有复核执行面范围')
+  assert.match(guardReason, /执行面越界/)
+
+  // ④ ★ 前提对照（反向）：**授权表之内**的命令必须照旧放行。
+  //    少了它，② 可能只是"这个端口对什么都拒"。
+  const okExecution = {
+    name: 'run-command', callId: 'c2',
+    arguments: { command: ['git', 'status'] },
+  }
+  const okVerdict = await wired.preExecute(okExecution)
+  assert.equal(okVerdict.kind, 'allow',
+    `授权表里的命令被拒了——那这个端口就是在"全拒"，② 证明不了任何事：${okVerdict.reason}`)
+})
+
+test('③c ★★★ MCP 那一条**未接**，而它必须是**具名**的拒绝，不是"名字有歧义"', async () => {
+  // ★★ 本批刻意**没有**接 MCP 那一条（理由见 `execution-scope-port.mjs` 文件头 ③：
+  //    DSH 的公开名有两个 `__`，`splitMcpTool` 要求恰好一个；而"哪些 MCP 工具可用"
+  //    在生产里**已经有一个权威**——F-21 的连接器登记表）。
+  //
+  //    这一条钉的是"未接"这件事**读得出来**：
+  //    一个"未接"与一个"检查不通过"，在最终 `deny` 上是同一个读数——
+  //    只不过前者的理由里写着"未接"，而后者写着"不在授权列表之内"。
+  const { executionScopePortFromEnv, EXECUTION_SCOPE_PORT_CODES } = await import('./execution-scope-port.mjs')
+
+  // ① 授权表里**没有** `mcp` 段 ⇒ 这一条是**真的在判**（不需要拆名字）。
+  const noMcp = executionScopePortFromEnv({
+    env: { LEGION_EXECUTION_SCOPE: JSON.stringify({ command: { programs: ['git'] } }) },
+  })
+  const v1 = noMcp.port({
+    scopeFacts: { version: 'legion/scope-facts@1', kinds: ['mcp'], mcp: { tool: 'mcp__github__list_issues', from: 'toolName' } },
+  })
+  assert.equal(v1.allowed, false)
+  assert.equal(v1.code, 'exec-scope-mcp-server-denied', `理由必须是"没有 MCP 授权"，而不是别的：${v1.code}`)
+
+  // ② 授权表里**有** `mcp` 段 ⇒ **未接**，而且要具名。
+  const withMcp = executionScopePortFromEnv({
+    env: {
+      LEGION_EXECUTION_SCOPE: JSON.stringify({
+        mcp: { servers: [{ server: 'github', tools: ['list_issues'] }] },
+      }),
+    },
+  })
+  const v2 = withMcp.port({
+    scopeFacts: { version: 'legion/scope-facts@1', kinds: ['mcp'], mcp: { tool: 'mcp__github__list_issues', from: 'toolName' } },
+  })
+  assert.equal(v2.allowed, false, 'MCP 绝不能被静默放行')
+  assert.equal(v2.code, EXECUTION_SCOPE_PORT_CODES.MCP_LIMB_UNWIRED,
+    `这一条必须是"未接"这个码，而不是判定器的某个码——`
+    + `两者都拒，但一个说"去裁决"，一个说"改授权表"：${v2.code}`)
+  assert.match(v2.reason, /连接器登记表/, '理由必须点名权威在哪，否则下一个人只会去改授权表')
+})
+
+test('⑥ ★★ 生产装配的**唯一**入口是组合根插件行（别处造桥就不在生产链上）', () => {
   // 这一条防的是"接线接在了另一个地方"：如果有人另起一条装配路径去接范围检查，
   // 那么 ① 仍然绿（root-row 没变），而生产其实已经接上了——
   // 一条只钉住一个位置的判据，与一条"接线位置可以有好几个"的现实，必须在这里对齐。

@@ -478,32 +478,40 @@ test('⑫a 真实仓库：5 条手钉引用逐字都对，且一条都没被跳�
 })
 
 test('⑫b ★★ 控制：把**历史上那次真实位移的旧坐标**钉上去 ⇒ 必须红', () => {
-  // 真实事件（**两次**）：
+  // 真实事件（**三次**）：
   //   ① `plugins/root-row.mjs:485-509` → `:508-536`（另一会话 §9.5 接线后订正）。
   //   ② `:508-536` → `:534-562`（本会话 2026-09-18，第 19 条 §9.2 第 5 步：
   //      在同一个调用点**前**插入"连接器声明"那一块 +25 行，另在文件头 +1 行 import）。
-  //   而那个文件有 700+ 行 ⇒ 旧区间**在范围内**，上一批那两条坐标判据**看不见**。
+  //   ③ `:534-562` → `:564-592`（本会话 2026-09-18 **第 19 轮**：在同一个调用点**前**
+  //      插入 PRT-605 的"执行面授权表"那一块 +30 行 —— 连"读表并拦装配"那一整段
+  //      带注释都插在它上面）。
+  //   而那个文件有 790+ 行 ⇒ 旧区间**在范围内**，上一批那两条坐标判据**看不见**。
   //   这里用**真实文件、真实行**，只把行号换成位移前的旧值。
   //
-  // ★ 第二次位移是**判据自己顶出来的**：本会话改完 `root-row.mjs` 之后
-  //   这一条立刻红在载具断言上（"第 508 行不再是那个调用点"）。
+  // ★ 第二、三次位移都是**判据自己顶出来的**：改完 `root-row.mjs` 之后
+  //   这一条立刻红在载具断言上（"第 N 行不再是那个调用点"）。
   //   一个"手钉行号"的判据，在文件只增不改的时候，与一个"每次都重新数一遍"
   //   的判据，读数只差一个常数——只不过前者在常数变了的那天**会红**，
   //   而红本身就是它的价值。
+  //
+  //   ★★ 而"旧坐标"这个东西**每次都要重新指认**：第二次的旧坐标是 508，
+  //      第三次的旧坐标就是**第二次认为正确的那一个（534）**。
+  //      这一条控制因此有一个漂亮的性质——它**从不腐坏**：
+  //      每次位移之后，新的旧坐标就是上一轮的正确答案。
   const real = resolve(REPO, 'runtime/dsh-composition/plugins/root-row.mjs')
   const lines = readFileSync(real, 'utf8').split('\n')
   // 先核载具本身（载具坏了，下面的结论就不成立）
-  assert.match(lines[533], /installEnforcementRoot\(\{/,
-    '第 534 行不再是那个调用点 ⇒ 载具失效，先重写这个控制')
-  assert.equal(lines[507].trim(), '',
-    '第 508 行不再是空白 ⇒ 旧引用的性质变了，先重写这个控制')
-  assert.ok(535 <= lines.length,
+  assert.match(lines[563], /installEnforcementRoot\(\{/,
+    '第 564 行不再是那个调用点 ⇒ 载具失效，先重写这个控制')
+  assert.ok(!/installEnforcementRoot\(\{/.test(lines[533]),
+    '第 534 行**又**是那个调用点了 ⇒ 旧坐标这一层失去对象，先重写这个控制')
+  assert.ok(565 <= lines.length,
     '旧行号居然超范围了 ⇒ 那上一批的判据本来就能抓到，这一节的立论要改')
 
-  // ★ 用**同一份**核法（不重抄逻辑）去钉旧坐标
+  // ★ 用**同一份**核法（不重抄逻辑）去钉旧坐标（= 上一轮的正确答案）
   const injected = Object.freeze([Object.freeze({
     file: 'runtime/dsh-composition/plugins/root-row.mjs',
-    line: 508,
+    line: 534,
     text: 'const installed = installEnforcementRoot({',
   })])
   const r = checkPinnedCitations(injected)
@@ -515,7 +523,7 @@ test('⑫b ★★ 控制：把**历史上那次真实位移的旧坐标**钉上�
   //    少了这一条，"永远报红"的实现也能通过上面那个断言。
   const good = Object.freeze([Object.freeze({
     file: 'runtime/dsh-composition/plugins/root-row.mjs',
-    line: 534,
+    line: 564,
     text: 'const installed = installEnforcementRoot({',
   })])
   const g = checkPinnedCitations(good)
@@ -527,18 +535,23 @@ test('⑫b ★★ 控制：把**历史上那次真实位移的旧坐标**钉上�
 test('⑫c 控制：钉的内容差一个字符 ⇒ 必须红（逐字比对真的在逐字比）', () => {
   const real = resolve(REPO, 'runtime/dsh-composition/tool-request.mjs')
   const lines = readFileSync(real, 'utf8').split('\n')
-  // ★ 2026-09-18 位移（两次）：先加 42 行（`connectorFeedback`）⇒ 639 → 681；
-  //   再加 F-21 判定面那一层（`connectorJudgment` + `effectiveDecide`）⇒ 681 → 731。
-  //   两次都在这一行之上，两次都是**判据自己报出来的**（第一次是 ①/⑫a/⑫c
-  //   三红，第二次是同一个三红——`--only boundary` 那一阶段不含本套件）。
+  // ★ 2026-09-18 位移（**三次**）：先加 42 行（`connectorFeedback`）⇒ 639 → 681；
+  //   再加 F-21 判定面那一层（`connectorJudgment` + `effectiveDecide`）⇒ 681 → 731；
+  //   第 19 轮再加 PRT-605 的强制点（`executionGuard` + 参数 + **两处**调用）⇒ 731 → 763。
+  //   三次都在这一行之上，三次都是**判据自己报出来的**（每次都是 ①/⑫a/⑫c 三红——
+  //   `--only boundary` 那一阶段不含本套件，是 `test` 阶段抓到的）。
   //   坐标手钉，所以位移必须在这里改一次；这正是它存在的意义。
-  const lineNow = lines[730].trim()
-  assert.equal(lineNow, 'if (pathScope === null) return undefined', '第 731 行变了，先核它')
+  //
+  //   ★★ 三次之后值得写下的一句：漂的三次来自**三个不同的功能**，
+  //      而它们都往同一个文件里插代码。⇒ 手钉坐标的成本随"这个文件被改过几次"
+  //      增长，而不是随它的规模增长——这条判据红得越多，越说明它**不是**碰巧对上的。
+  const lineNow = lines[762].trim()
+  assert.equal(lineNow, 'if (pathScope === null) return undefined', '第 763 行变了，先核它')
 
   // 差一个字符
   const off = Object.freeze([Object.freeze({
     file: 'runtime/dsh-composition/tool-request.mjs',
-    line: 731,
+    line: 763,
     text: 'if (pathScope === null) return undefined;', // 多个分号
   })])
   assert.equal(checkPinnedCitations(off).broken.length, 1,
@@ -548,7 +561,7 @@ test('⑫c 控制：钉的内容差一个字符 ⇒ 必须红（逐字比对真�
   //   这是一条**写下来的**边界，不是意外。
   const trailing = Object.freeze([Object.freeze({
     file: 'runtime/dsh-composition/tool-request.mjs',
-    line: 731,
+    line: 763,
     text: 'if (pathScope === null) return undefined   ',
   })])
   assert.equal(checkPinnedCitations(trailing).broken.length, 0,
@@ -556,7 +569,7 @@ test('⑫c 控制：钉的内容差一个字符 ⇒ 必须红（逐字比对真�
   // ⚠️ 已知边界：`trim()` 也吸收了**缩进**，所以缩进变化不会红。
   const indent = Object.freeze([Object.freeze({
     file: 'runtime/dsh-composition/tool-request.mjs',
-    line: 731,
+    line: 763,
     text: '        if (pathScope === null) return undefined',
   })])
   assert.equal(checkPinnedCitations(indent).broken.length, 0,

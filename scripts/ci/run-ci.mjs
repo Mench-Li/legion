@@ -1028,8 +1028,21 @@ async function stageTest() {
       //   > 与一个「检查完之后字符串才被解释成动作」的权限门，是同一个东西。
       //
       // 所以每条规则都是"不解释"：命令必须已分词 argv，URL 必须真解析器拆，MCP 必须成对。
+      //
+      // ★ 2026-09-18 第 19 轮：这一组现在多两个文件，它们守的是**同一件事的另一半**
+      //   ——判定器对了，不等于**生产里跑得起来**：
+      //
+      //   · `scope-facts`：事实**只算一次**（在投影里），端口只读不推。
+      //     六处各自兜底"今天恰好一致"，用例全绿——而那正是不一致藏身的地方。
+      //     还包括"未登记工具按参数证据反推"（否则换个没登记的名字就能绕开执行面）。
+      //   · `execution-scope-port`：装配期就归一化（坏表**现在**抛，不留到第一次调用）；
+      //     端口只读 `projection.scopeFacts`；★ 以及 **MCP 那一条未接、且具名地说未接**。
       label: 'execution-scope（PRT-605：命令/网络/MCP 的字符串匹配是放行）',
-      files: ['runtime/dsh-composition/execution-scope.test.mjs'],
+      files: [
+        'runtime/dsh-composition/execution-scope.test.mjs',
+        'runtime/dsh-composition/scope-facts.test.mjs',
+        'runtime/dsh-composition/execution-scope-port.test.mjs',
+      ],
       cwd: ROOT,
     },
     {
@@ -1098,11 +1111,18 @@ async function stageTest() {
       //   > 与一个「路径范围限制没有生效」的组合根，是同一个东西——
       //   > 只不过前者的证据里有一行诚实的 `pathScope:false`。
       //
-      // 读数（2026-09-18 更新）：第 19 条 §9.2 第 4 步**已经接线**，
-      // 所以本套件 ① 现在钉的是**两件事**：键在（接线存在），
-      // 而 **env 没配 `LEGION_PATH_SCOPE` 时读数仍是 `pathScope:false`**
-      // ——没配不等于"接了个空的"；配上了则 ①b 翻成 true。
-      // `whitelist` 与 `execution-scope` / `external-api-scope` 仍未接。
+      // 读数（2026-09-18 第 19 轮更新）：PRT-605（命令/网络/MCP）**已经接线**，
+      // 而 PRT-606（外部 API）**仍然连端口都没有**。
+      //
+      //   ① 现在钉三件事：`pathScope` 键在、`executionScope` 键在、
+      //   而 **env 没配时两格读数都是 `false`**——没配不等于"接了个空的"；
+      //   配上了则 ①b / ①c 各自翻成 true，且 ①c 一路走到 `preExecute`
+      //   看真实裁决（★ "那一格对了"与"这一道真的会拦人"不是同一件事）。
+      //
+      //   ② **没有**变成空断言：它换了一个对象——`externalApiScope` 仍不许出现，
+      //   而它上一版自己写着"端口出现时请把台账与记账一起更新"，
+      //   本轮照做了（PRT-605 的账动了，PRT-606 的没动）。
+      // `whitelist` 与 `external-api-scope` 仍未接。
       label: 'production-scope-wiring（PRT-604/605/606：检查器对不对 ≠ 生产里跑没跑）',
       files: ['runtime/dsh-composition/production-scope-wiring.test.mjs'],
       cwd: ROOT,

@@ -69,6 +69,9 @@ export const ENV_NAMES = Object.freeze([
   // 第 19 条 §9.2 第 5 步：执行面的**连接器声明**（`connector-port.mjs`，F-21）。
   // 与上一条同一个理由：`resolveConnectorId` 是个函数，YAML 装不下。
   'LEGION_CONNECTOR_DECLARATIONS',
+  // 第 19 轮（PRT-605）：执行面的**命令/网络/MCP 授权表**。
+  // 与上面两条同一个理由：`normalizeGrant` 之后是冻结结构，YAML 装不下。
+  'LEGION_EXECUTION_SCOPE',
 ])
 
 /** 不是本进程读取的环境变量、但写法上形如 env 键的字面量（错误码 / 契约字符串 / 动作名）。 */
@@ -574,6 +577,18 @@ export const SCHEMA = defineSchema({
         + '那个给"连去哪儿"，这个给"策略声明"；两者由 `runtime/connectors/target-binding.mjs` 合起来。'
         + '装配规则只有一处：`runtime/dsh-composition/connector-port.mjs`',
     },
+    {
+      key: 'executionScope', env: 'LEGION_EXECUTION_SCOPE', type: 'string', default: '',
+      doc: '执行面的**命令/网络/MCP 授权表**（JSON 文本：`{command, network, mcp}`，PRT-605）。'
+        + '在它之前 `execution-scope.mjs` 的三个判定器**连端口都没有**'
+        + '（`production-scope-wiring.test.mjs` ② 钉着这件事）。'
+        + '「没有默认值」在这里有一层额外含义：**空串 = 没配**，而没配在执行面是**放行**'
+        + '——所以缺席必须由一个显式状态承载，不能靠一个默认表把它填上。'
+        + '⚠️ 本表里的 `mcp` 段**本批未接**（权威在 F-21 的连接器登记表），'
+        + '配了 `mcp` 段会得到一次**具名的**拒绝而不是静默放行，'
+        + '见 `execution-scope-port.mjs` 文件头 ③。'
+        + '装配规则只有一处：`runtime/dsh-composition/execution-scope-port.mjs`',
+    },
   ],
   foreignEnv: FOREIGN_ENV_NAMES.map((name) => ({ name, owner: FOREIGN_ENV_OWNER, reason: FOREIGN_ENV_REASON })),
   dynamicEnvReads: [
@@ -597,6 +612,14 @@ export const SCHEMA = defineSchema({
       reason: '连接器声明按导出的常量键名下标读取（`CONNECTOR_PORT_ENV_KEY` = LEGION_CONNECTOR_DECLARATIONS，'
         + '已在上面 fields 声明）。**故意用常量而不是字面量**，与 `scope-port.mjs` 那条同一个理由：'
         + '读取点、用例、`root-row.mjs` 的失败消息要指同一处，两处各写一遍字面量就会漂移。'
+        + '扫描器看不见这一处正是本登记存在的理由。',
+    },
+    {
+      file: 'runtime/dsh-composition/execution-scope-port.mjs',
+      expr: 'env[EXECUTION_SCOPE_PORT_ENV_KEY]',
+      reason: '执行面授权表按导出的常量键名下标读取（`EXECUTION_SCOPE_PORT_ENV_KEY` = LEGION_EXECUTION_SCOPE，'
+        + '已在上面 fields 声明）。**故意用常量而不是字面量**，与 `scope-port.mjs` / `connector-port.mjs`'
+        + '那两条同一个理由：读取点、用例、`root-row.mjs` 的失败消息要指同一处。'
         + '扫描器看不见这一处正是本登记存在的理由。',
     },
     {

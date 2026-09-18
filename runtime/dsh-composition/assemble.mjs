@@ -146,6 +146,14 @@ export function assembleEnforcement({
   floor,
   whitelist = null,
   pathScope = null,
+  /**
+   * ★★★ PRT-605 的命令/网络/MCP 范围（2026-09-18 第 19 轮加）。
+   *
+   * 与 `pathScope` **同一个形状、同一条投递路线**：`(projection) => {allowed, code, reason}`，
+   * 由 `execution-scope-port.mjs` 从 `LEGION_EXECUTION_SCOPE` 造出来。
+   * 缺省 `null` ⇒ 桥那一格是放行，而 `enforcementSurfaces().executionScope` 读成 `false`。
+   */
+  executionScope = null,
   connectTimeoutMs = 2000,
   responseTimeoutMs = 3000,
   approvalConnectTimeoutMs = 2000,
@@ -264,6 +272,7 @@ export function assembleEnforcement({
     requestApproval,
     whitelist,
     pathScope,
+    executionScope,
     connectTimeoutMs,
     responseTimeoutMs,
     approvalConnectTimeoutMs,

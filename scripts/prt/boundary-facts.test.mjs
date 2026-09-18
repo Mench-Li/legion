@@ -23,9 +23,11 @@
 // ============================================================================
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 
 import {
   FACTS, checkFacts, defaultContext, patchYmlRepresentedRows,
+  scanCommitCitations, scanLineCitations,
   STATUS_DOC, LEDGER_DOC, PATCH_YML, REPO, HUB_TOKEN_ENV, WORKBENCH_TOKEN_ENV,
 } from './boundary-facts.mjs'
 
@@ -44,6 +46,29 @@ function withSpec(key, transform) {
 }
 
 const idsOf = (r) => r.violations.map((v) => v.id)
+
+/**
+ * 把台账正文换成 `transform(真实正文)`，并让**坐标扫描器也跟着换**。
+ *
+ * ★ 第一版我**只**替了 `doc`，于是 ⑪b/⑪c/⑪d/⑪e 四条全红——而它们红得**对**：
+ *   `lineCitations` / `commitCitations` 是在 `defaultContext()` 里闭包捕获的，
+ *   它们读的仍是**磁盘上那份真台账**，于是喂进去的毒根本没到判据手里。
+ *
+ *   > 一个"替身没生效"与一个"判据没在查"，在测试输出里都是同一条红——
+ *   > 而修法**完全相反**（一个改测试、一个改判据）。
+ *
+ *   ⇒ 这个替身必须同时换掉"输入"与"由输入派生的那两个口"。
+ */
+function withLedgerText(transform) {
+  const base = defaultContext()
+  const poisoned = transform(base.doc(LEDGER_DOC))
+  return {
+    ...base,
+    doc: (r) => (r === LEDGER_DOC ? poisoned : base.doc(r)),
+    lineCitations: () => scanLineCitations(poisoned),
+    commitCitations: () => scanCommitCitations(poisoned),
+  }
+}
 
 // ── ① 正向：真实仓库上全部通过，且**一条都没被跳过** ──────────────────────
 test('① 真实仓库：全部通过，且参与比对的条数等于事实总数（不许静默跳过）', () => {
@@ -266,4 +291,87 @@ test('⑩c 载荷：生成物里只提任务号、**不作**状态判断 ⇒ 不
   const r = checkFacts({ ctx: { ...base, generatedArtifacts: () => benign } })
   assert.ok(!idsOf(r).includes('no-generated-artifact-asserts-task-status'),
     '没有违规却报红 ⇒ 判据会成为狼来了，然后被人关掉')
+})
+
+// ── ⑪ 台账坐标：`file:line` 与提交哈希 ──────────────────────────────────────
+//
+// ★ 这一组存在的理由：这两条事实判的是"台账里的坐标还在不在实处"。
+//   没有下面这些控制，它们就是**没人验过的谓词**——
+//   而"一个恒绿的谓词"与"一个真的在查的谓词"，在 CI 摘要里都是 `✔`。
+
+test('⑪a 正整数对照：真实台账里解析到的引用条数 > 0（扫描面不许是空的）', () => {
+  const lc = defaultContext().lineCitations()
+  const cc = defaultContext().commitCitations()
+  assert.ok(lc.total > 50, `只解析到 ${lc.total} 条 file:line 引用 ⇒ 解析器跑偏了`)
+  assert.ok(cc.total > 10, `只解析到 ${cc.total} 个提交哈希 ⇒ 解析器跑偏了`)
+  assert.equal(lc.broken.length, 0, `有坏引用：${JSON.stringify(lc.broken)}`)
+  assert.equal(cc.broken.length, 0, `有坏哈希：${JSON.stringify(cc.broken)}`)
+})
+
+test('⑪b 载荷：把一条引用的行号推到文件之外 ⇒ 该条事实必须红', () => {
+  const ctx = withLedgerText((doc) => {
+    // 取一条真实存在的引用，把行号改成一个绝不存在的大数
+    const m = /(`[^`]*?\.mjs):(\d+)/.exec(doc)
+    assert.ok(m !== null, '台账里没找到任何 `.mjs:行号` 引用 ⇒ 这个载具失效了')
+    return doc.replace(m[0], `${m[1]}:999999`)
+  })
+  const r = checkFacts({ ctx })
+  const v = r.violations.find((x) => x.id === 'ledger-line-citations-resolve')
+  assert.ok(v !== undefined, '行号已超出文件范围却没红 ⇒ 这条判据没在查')
+  assert.match(String(v.actual), /文件共 \d+ 行/)
+})
+
+test('⑪c 载荷：引用一个不存在的文件 ⇒ 该条事实必须红', () => {
+  const ctx = withLedgerText((doc) => `${doc}\n见 \`no/such/dir/ghost-file-xyz.mjs:12\`。\n`)
+  const r = checkFacts({ ctx })
+  const v = r.violations.find((x) => x.id === 'ledger-line-citations-resolve')
+  assert.ok(v !== undefined, '引用了一个不存在的文件却没红')
+  assert.match(String(v.actual), /ghost-file-xyz/)
+})
+
+test('⑪d 锚点消失：台账里一条引用都解析不出来 ⇒ 必须红（不许静默变绿）', () => {
+  const ctx = withLedgerText(() => '# 空台账，没有任何引用\n')
+  const r = checkFacts({ ctx })
+  const lv = r.violations.find((x) => x.id === 'ledger-line-citations-resolve')
+  const cv = r.violations.find((x) => x.id === 'ledger-commit-citations-on-line')
+  assert.ok(lv !== undefined, '解析到 0 条引用却没红 ⇒ 改了引用格式这条判据会静默失效')
+  assert.match(String(lv.actual), /解析到 0 条/)
+  assert.ok(cv !== undefined, '解析到 0 个哈希却没红')
+  assert.match(String(cv.actual), /解析到 0 个/)
+})
+
+test('⑪e 载荷：一个不存在的提交哈希 ⇒ 该条事实必须红', () => {
+  const ctx = withLedgerText((doc) => `${doc}\n已落地，见 \`deadbee\`。\n`)
+  const r = checkFacts({ ctx })
+  const v = r.violations.find((x) => x.id === 'ledger-commit-citations-on-line')
+  assert.ok(v !== undefined, '一个不存在的哈希却没红')
+  assert.match(String(v.actual), /deadbee/)
+})
+
+test('⑪f ★ 提交存在但**不在 HEAD 线上** ⇒ 必须红（这是另一种坏法）', () => {
+  // ★ 直接用导出的扫描器并把 `head` 换成**一个很老的提交**：
+  //   那样近期的提交就都不是它的祖先了，于是"不是祖先"这一支被真正走到。
+  //   ——不在负数上做手脚，而是造出一个真实的"另一条线"。
+  const base = defaultContext()
+  const doc = base.doc(LEDGER_DOC)
+  const head = execFileSync('git', ['rev-list', '--max-parents=0', 'HEAD'], { cwd: REPO, encoding: 'utf8' }).trim().split('\n')[0]
+  const r = scanCommitCitations(doc, head)
+  assert.ok(r.broken.length > 0,
+    '把 head 换成了根提交，却没有任何哈希被判"不是祖先" ⇒ "NOT-ANCESTOR" 这一支从未被走到，'
+    + '而一条只覆盖两种坏法里一种的判据会在另一种上恒绿')
+  assert.ok(r.broken.some((b) => /不是 HEAD 的祖先/.test(b)),
+    `红的原因不是"不是祖先"：${JSON.stringify(r.broken.slice(0, 3))}`)
+})
+
+test('⑪g ★ 纯数字串**不许**被当成提交哈希（判据键太宽的回归）', () => {
+  // 台账里真实存在两处纯数字反引号串：`1234567890`（YAML 标量取值测试）
+  // 与 `1000000100`（字节数 100 + 10 GB）。第一版正则把它们都当成了哈希。
+  const fake = '见 `1234567890` 与 `1000000100` 两处纯数字。\n'
+  const r = scanCommitCitations(fake, 'HEAD')
+  assert.equal(r.total, 0,
+    `纯数字串被当成了提交哈希（解析到 ${r.total} 个）⇒ `
+    + '一个"引用的提交不存在"与一个"我把数字串当成了提交"会变得无法区分')
+  // ★ 而真哈希必须**仍然**被抓到（否则这个"收紧"就把判据关掉了）
+  const real = '见 `de89ff3`。\n'
+  assert.equal(scanCommitCitations(real, 'HEAD').total, 1, '收紧之后真哈希反而抓不到了')
 })

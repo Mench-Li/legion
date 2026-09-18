@@ -1401,7 +1401,7 @@ async function stageTest() {
   //   **都判红**：前者防止判据静默失去检查对象，后者防止判据靠文档行序选数字。
   //   套件里对**每一条**文档锚点做反面控制（改掉声称 ⇒ 必须红），
   //   并对 `runtime` 进程不得持有 `TEAM_HUB_TOKEN` 这条边界做**对称**载荷控制。
-  { label: 'boundary-facts（PRT-611 续：文档声称的数字 ↔ 产物真实的值，含执行面凭证边界）', files: ['scripts/prt/boundary-facts.test.mjs'], cwd: ROOT },
+  { label: 'boundary-facts（PRT-611 续：文档**数字**与**坐标**↔ 产物真实的值，含执行面凭证边界）', files: ['scripts/prt/boundary-facts.test.mjs'], cwd: ROOT },
     // 阶段 2：DshRuntimeAdapter。全部用假宿主端口，覆盖真实 DSH 无法稳定复现的故障
     // （run.result 永不结算、abort 无效、畸形结果、事件流中断）。
     { label: 'dsh-adapter（PRT-201~209：DSH 适配器契约、脱敏、看门狗与取消/恢复）', files: ['runtime/adapters/dsh/adapter.test.mjs'], cwd: ROOT },

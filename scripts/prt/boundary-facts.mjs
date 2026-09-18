@@ -44,9 +44,10 @@
 // 所以锚点取不到 ⇒ `ANCHOR_MISSING`，同样是红。
 // ============================================================================
 
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs'
 import { resolve, dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { execFileSync } from 'node:child_process'
 
 import { specFor, PROCESS_KEYS } from '../../product/process-manifest.mjs'
 import { PATCH_LAYER_ROWS } from '../../runtime/dsh-composition/patch-layer.mjs'
@@ -98,7 +99,194 @@ export function defaultContext() {
     patchRows: () => PATCH_LAYER_ROWS,
     patchYml: () => patchYmlRepresentedRows(doc(PATCH_YML)),
     generatedArtifacts: () => scanSelfDeclaredGenerated(),
+    lineCitations: () => scanLineCitations(doc(LEDGER_DOC)),
+    commitCitations: () => scanCommitCitations(doc(LEDGER_DOC)),
   }
+}
+
+// ── C. 台账里的**坐标**（`file:line` 与提交哈希）─────────────────────────────
+//
+// ★ 起因：`boundary-facts` 原来只钉"文档声称的**数字** ↔ 产物真实的值"，
+//   也就是只管**计数**，不管**位置**。而本仓的论证大量依赖坐标：
+//
+//     `tool-request.mjs:639`（缺表 = 放行）、
+//     `runtime-contract-server.mjs:599`（`wireChecked: true` 是写死的字面量）、
+//     `credentials-local/src/index.ts:585` / `:611`（watcher 的创建点/关闭点）
+//
+//   坐标是最**脆**的证据形式：在它上面插一行注释，它就指到别处去了，
+//   而**句子本身一个字都没变**。
+//
+//   > 一个"引用了某文件第 639 行"的论断，与一个"引用了那个文件里某处"的论断，
+//   > 在读者眼里强度完全不同——而两者在文件被改动一行之后，**看起来仍然一样**。
+//
+// ⚠️ 边界（重要）：这里只判**坐标是否落在实处**——文件在不在、行号在不在范围内、
+//   提交在不在线上。**不判**"那一行的内容支撑那句话"。后者要逐条读上下文，
+//   机械判不了；把前者当成后者，正是本会话反复记的那个错。
+
+const CITATION_SKIP = new Set([
+  '.git', 'node_modules', '.ci', 'scratch', 'dist', 'build', '.dsh', 'coverage',
+  '.worktrees', '.legion-worktrees', 'releases', '.skills-cache', '.turbo',
+])
+
+/** 把一棵树索引成 `相对路径(小写)` → 绝对路径，并建后缀表。 */
+function indexTree(root, depthCap) {
+  const byPath = new Map()
+  const bySuffix = new Map()
+  const walk = (dir, rel, depth) => {
+    if (depth > depthCap) return
+    let ents = []
+    try { ents = readdirSync(dir, { withFileTypes: true }) } catch { return }
+    for (const e of ents) {
+      if (CITATION_SKIP.has(e.name)) continue
+      const r = rel === '' ? e.name : `${rel}/${e.name}`
+      if (e.isDirectory()) { walk(resolve(dir, e.name), r, depth + 1); continue }
+      const key = r.toLowerCase()
+      byPath.set(key, resolve(dir, e.name))
+      const parts = key.split('/')
+      for (let i = parts.length - 1, n = 0; i >= 0 && n < 6; i--, n++) {
+        const suf = parts.slice(i).join('/')
+        if (!bySuffix.has(suf)) bySuffix.set(suf, [])
+        bySuffix.get(suf).push(resolve(dir, e.name))
+      }
+    }
+  }
+  walk(root, '', 0)
+  return { byPath, bySuffix }
+}
+
+/**
+ * DSH 检出：本仓的产物依赖它，而它**不在本仓里**（可能整个不存在）。
+ * 用环境变量覆盖，默认取同级目录下的约定位置。
+ */
+export function dshCheckoutRoot() {
+  const fromEnv = process.env.DSH_CHECKOUT
+  if (typeof fromEnv === 'string' && fromEnv !== '') return fromEnv
+  return resolve(REPO, '..', 'dsh', 'deepseek-harness')
+}
+
+let TREE_CACHE = null
+function trees() {
+  if (TREE_CACHE === null) {
+    TREE_CACHE = { legion: indexTree(REPO, 8), dsh: null }
+    const dshRoot = dshCheckoutRoot()
+    if (existsSync(dshRoot)) TREE_CACHE.dsh = indexTree(dshRoot, 12)
+  }
+  return TREE_CACHE
+}
+
+/** 测试用：丢掉索引缓存（换了替身目录之后必须调）。 */
+export function resetTreeCache() { TREE_CACHE = null }
+
+const LINE_CITATION_RE = /(?:^|[\s`（(【\[])((?:[\w.@-]+[\\/])*[\w.@-]+\.(?:mjs|cjs|js|ts|tsx|json|yml|yaml|md)):(\d+)(?:-(\d+))?/g
+
+/**
+ * 扫描台账里的 `file:line` 引用。返回
+ * `{ checked, broken, ambiguous, unresolved, detail }`。
+ *
+ * ★★ 第一版（`scratch/scan-line-citations.mjs`）报出 7 条 `PATH-MISSING`
+ *   + 2 条 `LINE-OUT-OF-RANGE`，逐条看过之后**9 条全是解析器的错**：
+ *
+ *     · 那 7 条是**后缀片段**（`plugins/root-row.mjs` 实为
+ *       `runtime/dsh-composition/plugins/root-row.mjs`）；
+ *     · 那 2 条按**裸文件名**撞上同名文件，于是"行号超范围"报的是**另一个文件**。
+ *
+ *   > 一个"引用坏了"与一个"我的解析器只认得三种写法"，
+ *   > 在第一版的输出里长得一模一样——**而且后者还带着一个看起来很具体的数字。**
+ *
+ * ⇒ 所以这里：先索引、再**后缀**匹配；多个候选命中时如实记 `ambiguous`
+ *   （不挑一个算数），且 `ambiguous` **不算 broken**（定夺不了就不下结论）。
+ */
+export function scanLineCitations(text, treeSet = null) {
+  const t = treeSet ?? trees()
+  const uniq = new Map()
+  for (const m of text.matchAll(LINE_CITATION_RE)) {
+    const key = `${m[1].replace(/\\/g, '/')}:${m[2]}${m[4] ? `-${m[4]}` : ''}`
+    uniq.set(key, {
+      path: m[1].replace(/\\/g, '/'),
+      from: Number(m[2]),
+      to: m[4] ? Number(m[4]) : Number(m[2]),
+    })
+  }
+  const broken = []
+  const ambiguous = []
+  let checked = 0
+  for (const c of uniq.values()) {
+    const key = c.path.toLowerCase()
+    const direct = []
+    for (const tree of [t.legion, t.dsh]) {
+      if (tree !== null && tree.byPath.has(key)) direct.push(tree.byPath.get(key))
+    }
+    let real = null
+    if (direct.length === 1) real = direct[0]
+    else if (direct.length > 1) { ambiguous.push(c.path); continue }
+    if (real === null) {
+      const cands = []
+      for (const tree of [t.legion, t.dsh]) {
+        if (tree === null) continue
+        const hit = tree.bySuffix.get(key)
+        if (hit) cands.push(...hit)
+      }
+      const u = [...new Set(cands)]
+      if (u.length === 1) real = u[0]
+      else if (u.length > 1) { ambiguous.push(c.path); continue }
+    }
+    if (real === null) { broken.push(`${c.path}:${c.from}（找不到这个文件）`); continue }
+    let lines = 0
+    try { lines = readFileSync(real, 'utf8').split('\n').length } catch {
+      broken.push(`${c.path}:${c.from}（读不出来）`); continue
+    }
+    checked++
+    if (c.from > lines || c.to > lines) {
+      broken.push(`${c.path}:${c.from}${c.to !== c.from ? `-${c.to}` : ''}（文件共 ${lines} 行）`)
+    }
+  }
+  // ★ "解析到 0 条"必须是**红**的：否则改了引用格式之后这条判据会静默变绿，
+  //   而那与"所有引用都是好的"是同一个输出。
+  if (uniq.size === 0) broken.push('（解析到 0 条 `file:line` 引用——锚点或格式变了？）')
+  return { checked, broken, ambiguous, total: uniq.size }
+}
+
+const COMMIT_CITATION_RE = /`([0-9a-f]{7,40})`/g
+
+/**
+ * 扫描台账里以**反引号**写出的提交哈希，判它①存在②是 HEAD 的祖先。
+ *
+ * ★★ 只收**至少含一个 a–f 字母**的十六进制串。第一版写 `[0-9a-f]{7,40}`，
+ *   于是抓出两个根本不是哈希的东西：`1234567890`（一处 YAML 标量取值测试里的
+ *   **数字串**）与 `1000000100`（一处用例里的**字节数**：100 字节 + 10 GB）。
+ *
+ *   > 一个"引用的提交不存在"与一个"我的正则把数字串当成了提交"，
+ *   > 在第一版的输出里长得一模一样——而且后者带着两条看起来很具体的哈希。
+ *
+ * ⇒ 这是"判据键太宽"这个老形状的又一例。（真实短哈希几乎总带字母。）
+ */
+export function scanCommitCitations(text, head = null) {
+  const uniq = new Set()
+  for (const m of text.matchAll(COMMIT_CITATION_RE)) {
+    const s = m[1].toLowerCase()
+    if (!/[a-f]/.test(s)) continue
+    uniq.add(s)
+  }
+  const broken = []
+  let checked = 0
+  const git = (args) => {
+    try {
+      return { out: execFileSync('git', args, { cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(), code: 0 }
+    } catch (e) { return { out: '', code: e.status ?? 1 } }
+  }
+  const headSha = head ?? git(['rev-parse', 'HEAD']).out
+  for (const sha of uniq) {
+    checked++
+    if (git(['cat-file', '-e', `${sha}^{commit}`]).code !== 0) {
+      broken.push(`${sha}（不是本仓的一个提交）`); continue
+    }
+    // 0 = 是祖先；1 = 不是
+    if (git(['merge-base', '--is-ancestor', sha, headSha]).code !== 0) {
+      broken.push(`${sha}（存在，但**不是 HEAD 的祖先**——东西在别的线上）`)
+    }
+  }
+  if (uniq.size === 0) broken.push('（解析到 0 个提交哈希——锚点或格式变了？）')
+  return { checked, broken, total: uniq.size }
 }
 
 // ── 类级扫描：自称"生成物"的文件里不许有"任务状态断言" ─────────────────────
@@ -329,6 +517,35 @@ export const FACTS = Object.freeze([
       re: /全\s*(\d+)\s*项/,
       note: '台账标题「# PRT 任务进度表（全 145 项）」',
     }),
+  }),
+
+  // ── C. 台账里的**坐标**（见上面那一大段说明与边界）──────────────────────
+  Object.freeze({
+    id: 'ledger-line-citations-resolve',
+    what: '台账里每条 `文件:行` 引用都指向一个**存在且在行数范围内**的位置',
+    why: '坐标是最脆的证据形式：在它上面插一行注释，它就指到别处去了，'
+      + '而**句子一个字都没变**。'
+      + '★ 实测（2026-09-18）：101 条唯一引用，**0 条坏**；'
+      + '那 5 条本会话的结论所依赖的引用（`tool-request.mjs:639`、'
+      + '`runtime-contract-server.mjs:599`、`external-api-scope.mjs:1061`、'
+      + '`enforcement-mapping.mjs:266`、`credentials-local/src/index.ts:585`）逐条读过，都在。'
+      + '⚠️ 这条**只**判"落到实处"，**不**判"那一行支撑那句话"——'
+      + '后者要读上下文，机械判不了。',
+    source: LEDGER_DOC + ' 正文里的 `path:line`，按 Legion 仓 + DSH 检出的后缀表解析',
+    derive: (ctx) => ctx.lineCitations().broken.slice().sort().join(' '),
+    expect: '', // 空串 = 一条坏引用都没有
+  }),
+  Object.freeze({
+    id: 'ledger-commit-citations-on-line',
+    what: '台账里反引号写出的每个提交哈希都**存在**且**是 HEAD 的祖先**',
+    why: '记账一条 ✅ 的惯例是写出闭包证据（"已落地，见 `de89ff3`"）。'
+      + '哈希是做不了假的坐标，但它有两种坏法、而**两种都不改变句子**：'
+      + '① 哈希不存在（打错一位／那条提交被丢弃或只在别的分支上）；'
+      + '② 哈希存在但**不在我们这条线上**——读的人会以为主线里有它。'
+      + '★ 实测（2026-09-18）：26 个哈希，26 个都在线上。',
+    source: LEDGER_DOC + ' 正文里 `反引号包着的十六进制串`（要求至少含一个 a–f 字母）',
+    derive: (ctx) => ctx.commitCitations().broken.slice().sort().join(' '),
+    expect: '', // 空串 = 每个哈希都在线上
   }),
 ])
 

@@ -1637,7 +1637,15 @@ async function stageTest() {
     //      不得写进安装目录、不得替用户创建工作区、不得覆盖已有配置。
     {
       label: 'product-config（PRT-253/259/706：配置分层读取、诊断、首次运行初始化）',
-      files: ['product/config.test.mjs', 'product/init.test.mjs'],
+      files: [
+      'product/config.test.mjs',
+      'product/init.test.mjs',
+      // ★ 第 19 条 §9.2 第 3 步：执行面两半数据的**同一个**读取点。
+      //   它把"这个键压根没配"与"配了但解释不通"分开——
+      //   前者如实记成 `absent`（因为 `pathScope === null` 在执行面是**放行**），
+      //   后者由两半各自的模块具名上抛，不压成"读取失败"。
+      'product/execution-plane-config.test.mjs',
+    ],
       cwd: ROOT,
     },
     // PRT-301：持久化运行状态机 + Orchestrator worker 入口。

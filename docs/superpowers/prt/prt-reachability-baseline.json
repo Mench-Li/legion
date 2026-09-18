@@ -23,6 +23,11 @@
       "reason": "PRT-906/903：崩溃报告没有生产入口。⇒ 裁决处：§5 第 16 条"
     },
     {
+      "file": "product/execution-plane-config.mjs",
+      "class": "gap",
+      "reason": "第 19 条 §9.2 第 3 步的**部署配置读取点**：把\"这个键压根没配\"与\"配了但解释不通\"分开（前者如实记 `absent`，后者由两半各自的模块具名上抛）。**还没有生产调用方**——把两半挂上 `RunRequest` 是第 4 步，尚未做。⇒ 裁决处：§5 第 19 条（`docs/DECISION-RUNREQUEST-EXECUTION-PLANE.md` §9.4）"
+    },
+    {
       "file": "product/index.mjs",
       "class": "by-design",
       "reason": "产品层公开出口；进程入口走 product/launcher/cli.mjs"

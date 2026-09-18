@@ -185,6 +185,37 @@
 **已落地**：`runtime/connectors/target-binding.mjs` + 9 例用例（4 条变异全部咬住），
 已登记进 CI 的 `connectors` 套件，可达性基线里分类为 `gap`（指向本条）。
 
+### 8.3.1 ★★★ 订正：上表那两条理由**都是错的**（2026-09-18 复核）
+
+上面那张表是我的**印象**，不是量出来的。逐条量过之后，两条都不成立：
+
+| 我原写的理由 | 实测读数 | 判定 |
+| --- | --- | --- |
+| "新键必须在 `product/process-manifest.mjs` 声明 `envNames`" | 该文件里 **`envNames:` 声明 0 处**（只在字段说明的注释里被提到）；而**已存在的**配置键（`runtime.enforcementOverlay` / `runtime.secretRefs` / `launcher.backoffBaseMs` / `ports.team-hub` / `components.whiteboard.enabled`）在那里出现 **0 次** | **假** |
+| "新键必须登记进 `product/config-schema.mjs`，否则 `scan --check` 报未登记字面量" | 该文件里 `KNOWN_CONFIG_KEYS` 出现 **0 次**、`nonEnvsLiterals` 出现 **0 次**；而 `nonEnvsLiterals` **全仓都不存在**（`git grep` 无命中） | **假** |
+
+**真正登记 `product.config.json` 键的地方是 `product/config.mjs` 的 `KNOWN_CONFIG_KEYS`**
+——它在 2026-09-18 是**干净的**。那个文件的 `SCHEMA.fields` 装的是**进程级设置**
+（`home` / `installDir` / `dataDir` / … / `teamHubToken`），与本条要的键不是一回事。
+
+★ 两点顺带量出来的事实：
+
+1. `validateConfigValues` **只**在"键没登记"那一支递归。所以把
+   `runtime.pathScope` 登记成 `object` 之后，它内部的 `platform` / `read` / `write`
+   **不会**各自报 `CONFIG_UNKNOWN_KEY`（`runtime.secretRefs` 用的是同一机制）。
+2. 未登记的键只报 **warn**（`CONFIG_UNKNOWN_KEY`），不报 error——
+   原话是"向前兼容是真实场景……但它必须被**看见**"。
+
+> 一个"照印象写下的阻塞理由"，与一个"量出来的阻塞理由"，
+> 在计划文档里长得一模一样——只不过前者会让整整一轮工作**停在其实没堵的地方**。
+
+**结论**：§8.3 的"配置键那一半暂停"**取消**。这一半可以在只碰干净文件的前提下开工，
+本轮的落地见 §9.4。
+
+⚠️ 仍然被挡住的**不是**配置键，而是**把新用例登记进 CI**：
+`scripts/ci/run-ci.mjs` 在 2026-09-18 变成**别人的在制品**（一个 `MEASURE` 读数机制，
++23 行），而我这边需要往它的套件清单里加一行。详见 §9.4 的边界一节。
+
 ---
 
 ## 9. 路径范围表放哪：**同样归运维 / 部署配置**（业主裁决，2026-09-18）
@@ -272,7 +303,86 @@ verdict = pathScope(projection)
 ★ 因此 `scope-table-binding` 的**第一职责不是算范围，是把"没配上"变成一件必须处置的事**
 ——这也是它必须**抛**而不是返回 `scope: null` 的原因（§9.2 第 2 条）。
 
+---
 
+## 9.4 第 3 步落地：**同一个部署配置读取点**（2026-09-18）
 
+§9.2 第 3 步（"两处汇合到**同一个**部署配置读取点"）本轮落地，
+**只碰干净文件**（§8.3.1 已证明原以为的阻塞不存在）。
 
+### 交付物
+
+| 文件 | 内容 |
+| --- | --- |
+| `product/config.mjs` | `KNOWN_CONFIG_KEYS` 新增两个键（**这就是键的登记处**，见 §8.3.1） |
+| `product/execution-plane-config.mjs` | 读取点：`readExecutionPlaneConfig()` + `joinExecutionPlane()` |
+| `product/execution-plane-config.test.mjs` | 17 例；4 条变异全部咬住、每次还原逐字节相同 |
+
+两个键（键名导出成常量，免得字符串散落）：
+
+- `runtime.pathScope` → `{platform, read[], write[]}`，交给 `bindScopeTable()`
+- `runtime.connectorTargets` → `{connectorId: {transport?, command?, url?}}`，
+  与控制面的连接器声明交给 `bindConnectorTargets()` **配对**
+
+### ★ 读取点加的那一层：把"没配"与"配了但解释不通"分开
+
+这条不是新发明，是 `runtime/contracts/run.mjs:97-125` 给 `enforcementFloor`
+定的**同一条纪律**：
+
+> 给了就必须解释得通，不给就如实缺席。
+
+所以两半各返回一个 `state`：
+
+| 状态 | 何时 | 处置归谁 |
+| --- | --- | --- |
+| `configured` | 键在，且形状解释得通 | —— |
+| `absent` | 键**压根不在**配置里 | **消费点**（不是读取点） |
+
+★ 为什么"没配"必须是**可读出来的状态**而不是 `null`：`tool-request.mjs:639` 是
+`if (pathScope === null) return undefined`（**放行**）。所以把"没配"读成"没有范围表"
+就是**放行一切**（§9.3）。反过来把"没配"读成"拒绝一切"也不对——那让一个还没配过的
+部署整个起不来，于是操作者学会的做法是"随便填一张表让它闭嘴"。
+
+> 一个"没配就当作没有限制"的读取点，
+> 与一个"没配就当作全部禁止"的读取点，
+> 在汇总表里都很干脆——只不过前者把漏配洗成了放行，后者把漏配洗成了严格。
+
+### ★★ 本轮我自己的一个真错（被用例抓住）
+
+第一版只判 `isPlainObject(merged)`。而 `configValueAt()` 走的是 **`merged.value`**
+（它收的是 `loadProductConfig()` 的产物）。于是调用方传一份**裸配置对象**时，
+两半**都**读成 `absent`：
+
+> 一个"传错了形状"的输入，与一个"这次部署确实没配"的输入，
+> 在 `absent` 上长得一样——只不过前者会安静地把执行面两半都判成缺席，
+> 而它的报错方式（如果有）是"没配"，不是"你传错了"。
+
+**抓住它的是夹具**：我按 `loadProductConfig()` 的真实形状写夹具时，6 条用例变红。
+修法是把 `value` 也要求为普通对象 ⇒ 变成一次**具名拒绝**。
+用例 ③ 现在钉住"传裸配置 ⇒ 具名拒绝"，并有一条反向对照（包上 `value` 之后
+**同一份内容**就正常了 ⇒ 拒绝的理由确实是那一层，不是配置内容有问题）。
+
+★ 顺带一条同形状的读数：修这条时我还写错过一处用例断言（把 `tools` 写成字符串数组、
+把 `policy` 写成对象），三次变红都是**注册表**给出的具名拒绝
+（`connector-declaration-malformed` / `connector-capability-unknown` / `connector-policy-unknown`）。
+那是**好事**：它说明"落到真读者上"这条纪律真的在起作用——
+只对着自己产出的对象断言，这三个错一个都不会被发现。
+
+### 边界（如实）
+
+- **还没有生产调用方**。把两半挂上 `RunRequest` 是§9.2 的第 4 步，本轮没做。
+  所以可达性基线里 `product/execution-plane-config.mjs` 分类为 `gap`（指向本节）。
+- **用例登记一度被挡，但登记本身做成了**。经过：我准备往
+  `scripts/ci/run-ci.mjs` 的套件清单加一行时，那个文件正带着**别的会话的在制品**
+  （一个 `MEASURE` 读数机制，+23 行）。按纪律不碰，我停下来问了业主；
+  业主同意"只暂存我那一块"。**而在动手的那一刻，那个会话已经把它的改动提交了**
+  （`e217982`）⇒ 阻塞自己消失了，按常规方式登记即可。已登记进 `product-config` 套件。
+
+  ★ 这一段值得留着，因为它是**同一个形状的第三次**：
+
+  > 一个"我现在被挡住了"的判断，与一个"我五分钟前被挡住了"的判断，
+  > 在计划文档里长得一样——只不过前者会让人等，而后者只该让人**再量一次**。
+
+  本轮我为"别人的在制品"停下来问过一次，而那次停下的前提在我问出口时就已经过期了。
+  上一节 §8.3.1 那两条错误的阻塞理由，是同一个形状。
 

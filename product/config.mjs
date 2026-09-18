@@ -75,6 +75,32 @@ export const KNOWN_CONFIG_KEYS = Object.freeze({
     doc: '是否把 Legion 的 DSH 强制面覆盖层（hard floor + permission preset 表）'
       + '作为 `--patch` 交给 DSH Runtime。默认 true；设为 false 会留下一条 warn 诊断',
   }),
+  // ── 第 19 条 / §9：执行面的两半数据（业主裁决：都归**运维 / 部署配置**）──
+  //
+  // 这两个键是**同一个读取点**（`product/execution-plane-config.mjs`）读的。
+  // 为什么它们在这里而不是在岗位清单里：
+  //
+  //   > 一个能写强制面字段的清单，就是一个能给自己发权限的清单。
+  //
+  // （`runtime/dsh-composition/employee-manifest.mjs` 的 `FORBIDDEN_MANIFEST_FIELDS`
+  //  明列 `denyPathPrefixes`，把那条路从设计上堵死了。）
+  //
+  // ★ 两个都是 `type: 'object'`，而 `validateConfigValues` **不会**递归走
+  //   **已登记**的对象键 ⇒ 内部字段（`platform` / `read` / `write`、
+  //   以及每个 connectorId）不会各自报 `CONFIG_UNKNOWN_KEY`。
+  //   `runtime.secretRefs` 用的就是同一个机制。
+  'runtime.pathScope': Object.freeze({
+    type: 'object',
+    doc: '这次部署的路径读/写范围表（`{platform, read[], write[]}`，**只收窄**，'
+      + '写范围必须是读范围的子集）。缺了它**不等于没有限制**——'
+      + '执行面在 `pathScope === null` 时是放行，所以"没配"由消费点显式处置',
+  }),
+  'runtime.connectorTargets': Object.freeze({
+    type: 'object',
+    doc: '连接器的连接目标（`{connectorId: {transport?, command?, url?}}`）。'
+      + '只给**目标**这一半：策略那一半来自控制面的连接器记录，'
+      + '两者由 `bindConnectorTargets` 配对，配不上是**部分失败**（进 refusals），不静默跳过',
+  }),
   // ── PRT-709 日志轮转与磁盘保护 ──
   //
   // 这四个键是**必须**能被用户改的，不是"以后再说"：`DEFAULT_LOG_POLICY` 里的

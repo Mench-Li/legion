@@ -3638,6 +3638,10 @@ const okStatus = (s) => legend.includes(s) || /^[✅🟡⬜⏸]+→[✅🟡⬜�
 
 ### 10.42 ★★★ 我继续往下量了一层：第二道也**不是"有位无值"**——算它的那个模块自己没在跑
 
+> **★★★ 2026-09-18 第 21 轮再往下一层：见 §10.51。** 本节量出的是"算它的那个模块
+> 自己没在跑"；第 21 轮量出的是**它跑起来也接不上**——那个产出者与桥要的输入
+> **词汇表不相交**（Legion 能力名 vs 执行面 DSH 名）。
+
 #### 一、起因：上一节的结论只说到"位置在、没人给它值"
 
 §10.41 量出 `whitelist` 那一道"**有位无值**"（端口在，没人给它值）。
@@ -4982,9 +4986,141 @@ api-scope-malformed: endpoints[0] 出现了不认识的字段 ["parsed"]
 6. ⚠️ 这一轮**同样**没有产生任何"真 DSH 进程里观察到的读数"：
    全部证据来自真实组合根 + 假 Context。
 
-### 10.14 本轮的诚实边界
+### 10.51 ★★★ 第 21 轮：`whitelist` 这一道**不是配置项**——产出者与桥的词汇表不相交
 
-### 10.14 本轮的诚实边界
+#### 一、这一轮只做一件事：把 §11 留下的两处「我没有量」量掉
+
+§10.42 与 §10.44 都把这一道记成"**有位无值**"（端口在、没人给它值）。
+而 `docs/DECISION-RUNREQUEST-EXECUTION-PLANE.md` §11 在那句话下面留了两条**明写的**边界：
+
+> ⚠️ §11.3 `permit` 的另一半（`grant` / `hostGrant`）从哪来、算不算「部署配置」，
+> 本批**没有量**。
+>
+> ⚠️ §11.5 我没有核"包层接上之后 `permit` 是否能原样喂进 `permitsTool`"——
+> 两边形状看着一致（都源自 `narrowToGrant`），但**我没有跑过一次**。
+
+本轮就是那"**一次**"。交付 `scripts/prt/whitelist-limb.test.mjs`（7 例），
+登记为 `run-ci` 套件 `whitelist-limb`。
+
+#### 二、★ 先说这一套件**不**做什么
+
+`employee-manifest.test.mjs` 已经有 20 例把每一条规则都走到过拒绝，
+还有 `proveEveryRuleFires` 逐条比对理由锚点。那些用例**全绿，而且绿得对**——
+但它们证明不了本轮要问的事，因为它们的夹具喂的是 **Legion 能力名**：
+
+> 一个「用 Legion 名字把每一条规则都走到拒绝」的套件，
+> 与一个「真名字进来时这道检查到底放行过谁」的套件，
+> 在摘要里都是绿的——只不过前者的绿是**词汇表自己对自己**的绿。
+
+#### 三、① §11.3 的答案：`grant` 是**宿主显式注入**的
+
+| # | 要核的 | 实测 |
+| --- | --- | --- |
+| ① | 不给 `grant` 会怎样 | **抛** `pack-authority-host-surface-unresolved` |
+| ② | `preset` 那一半从哪来 | `patch-layer.mjs` 的 `LEGION_PERMISSION_PRESETS`＝ **host 组合** |
+| ③ | 给了之后用的是哪一份 | **调用方注入的那一份**（不从这里推） |
+
+⇒ 与三道范围表**同族**（部署侧数据）的是 `grant` 那一半；**`manifest` 那一半不是**。
+§11.3 那句"一个配置项给得出 `grant`、给不出 `manifest`"成立，而且现在有机器判据了。
+
+#### 四、★★★ ② §11.5 的答案：形状**对得上**，词汇表**对不上**
+
+§10.42 与 §11 都只说到"两边形状看着一致"。跑了之后要**分成两句**说：
+
+| # | 问题 | 实测 |
+| --- | --- | --- |
+| ① | `permitsTool` 装得下桥要的三个键吗 | **装得下**：`{allowed, rule, reason, riskRaised}` ⊇ `{allowed, rule, reason}` |
+| ② | 桥交进来的工具名，它认得吗 | ★★★ **一个都不认得** |
+
+② 是新的。同一份 permit、同一个函数，差异**只来自词汇表**：
+
+| 喂进去的名字 | 属于哪套词汇表 | 结果 |
+| --- | --- | --- |
+| `read-file` / `git-status` | **Legion 能力名** | 放行 |
+| `read` / `write` / `bash` / `web_fetch` | **执行面 DSH 名**（桥真正交进来的） | **一个都不放行** |
+
+而**抬 `maxRisk` 到最高也救不了**：拒因从 `risk-above-ceiling` 挪到
+`unknown-tool-not-named`，**还是拒**。⇒ 只要喂进来的是 DSH 名，这道白名单
+**永远只能拒、不可能放行**。
+
+> 一个「拒得对、而理由是错的」的检查，
+> 与一个「放行了它该拒的」的检查，在今天的行为上是同一个东西——
+> 只不过照着理由去改的人会改错地方，而改完仍然是拒的，
+> 于是没有人会发现理由本身是错的。
+
+★ 具体到两条"修复动作"：照"风险超上限"去改岗位清单的 `maxRisk` ⇒ 落到"必须点名"；
+照"必须点名"去点 ⇒ 点的是 Legion 名，而线上来的永远不是它。
+
+#### 五、★ 而这不是新知识 —— 是本仓**已经写过**的那一条，没被搬过来
+
+`runtime/dsh-composition/tool-capability.mjs:465-492`（`HIGH_RISK_TOOL_NAMES` 头上）
+逐字写着同一件事："两个名字空间**不相交**……作为 `denyTools` 它是**空的**"。
+那条讲的是**静态下限**（`createHardFloorGuard` 只看 `execution.name`、中间没有翻译）。
+本轮量的是**同一件事在白名单那一道上的形态**——而它此前**一个字都没被写过**：
+
+> 一个「在生产里零调用方、于是它的名字空间问题从没被量过」的检查，
+> 与一个「量过了、并且把结论写在了定义点上」的检查，
+> 在今天的行为上是同一个东西——只不过接线的那天只有一个是对的。
+
+#### 六、★★ 「那就加一个反向映射」也不行
+
+量 `LEGION_TOOL_ROUTING` 的反推（DSH 名 → Legion 名）：
+
+| DSH 名 | 反推出的 Legion 名 | |
+| --- | --- | --- |
+| `read` / `write` | 各 1 个 | 一对一，可以翻 |
+| `bash` | `run-command` / `git-status` / `git-commit` / `git-push` | **一对四** |
+| `pwsh` | 同上四个 | **一对四** |
+| `web_fetch` | `fetch-url` / `call-external-api` | **一对二** |
+
+★ 而 `bash` 那一堆里**同时塌着**低风险的 `git-status` 与高风险的 `git-push`
+⇒ 翻译**不是一个可以顺手加的映射**：它需要一个决定（取严？看参数？还是让
+`permitsTool` 直接收 DSH 名 + 一份 DSH 侧的能力表）。**裁决项，不是施工项**
+（`MULTI-AGENT-FEATURE-STATUS.md` §5 第 **27** 条）。
+
+#### 七、★★★ 顺带查出的第三件：仓库里有**两个同名 `EmployeeManifest`**
+
+| | 强制面那一份 | 上下文那一份 |
+| --- | --- | --- |
+| 位置 | `dsh-composition/employee-manifest.mjs` | `context/sources.mjs` 的 `employeeManifestSource` |
+| 字段 | `MANIFEST_FIELDS` **10** 个 | `stableRecord` 写死 **11** 个键 |
+
+两边都认 `employeeId` / `role` / `displayName` / `allowedTools`，所以**看起来是同一个东西**。
+实测**两个方向都不可转换**：
+
+- **context 形状 → 强制面：抛** `employee-manifest-enforcement-on-agent-plane`
+  （`approvalPolicy` 正躺在 `FORBIDDEN_MANIFEST_FIELDS` 里）。
+  ★ **拒得对**——把它加进名单才是错的。
+- **强制面形状 → context：接受但丢字段**（`allowedCapabilities` / `maxRisk` /
+  `workspaceRoot` / `unattended` 一个都不进正文，正文里是 `null`）。
+
+> 一个「两个同名对象、一个抛一个丢字段」的仓库，
+> 与一个「它们只是同一个东西的两个视图」的仓库，
+> 在只读其中一侧的时候是同一个东西——只不过前者的接线人会在第一次
+> 把 hub 里那份员工清单喂进强制面时拿到一个**具名拒绝**，
+> 而那个拒绝看起来像「这份清单写错了」。
+
+#### 八、★ 顺带修掉一处**我第 20 轮自己造出来的**文档缺陷
+
+第 20 轮往 `MULTI-AGENT-FEATURE-STATUS.md` §5 追加第 26 条时，
+**误删了第 25 条**（MCP 两张表的权威裁决）。而全仓有 **7 处**指针指着"§5 第 25 条"
+（本文件 §10.42/§10.50、`STATUS` §4.3、`PRT-FINAL-REPORT` §2.1 等）。
+本轮已**逐字还原**第 25 条，并在 `§5` 表上核对编号连续 `1..27`（无缺号、无重复）。
+
+> 一条"被删掉、而指针还在"的裁决项，
+> 与一条"写在表里、但没人引用"的裁决项，在**读表**的时候是同一个东西——
+> 只不过前者会让照着指针去找的人**找不到**，而那看起来像"这条已经做完了"。
+
+#### 九、诚实边界（如实）
+
+1. ⚠️ **没有接线**：`enforcementSurfaces().whitelist` 今天仍然是 `false`；
+   本批只把"为什么不接"从推测变成了读数。
+2. ⚠️ **没有改任何生产判定路径**（`tool-request.mjs` 一行没动）。
+3. ⚠️ **没有决定**第六节那个取舍；**没有量**第七节那两个清单该不该合并。
+4. ⚠️ 第七节的读数取自**直接调用**（`assertPackAuthority` / `permitsTool` /
+   `employeeManifestSource`），**没有**经过一次真实的包安装或真实 DSH 进程。
+5. ⚠️ 套件 ⑦ 只证明"两个名字空间不相交"**在今天的目录上**成立；
+   目录一改（新增工具、改 `LEGION_TOOL_ROUTING`）那条断言会红——这是**设计**。
 
 ### 10.14 本轮的诚实边界
 
@@ -6115,3 +6251,45 @@ api-scope-malformed: endpoints[0] 出现了不认识的字段 ["parsed"]
      ★ 而那条测试**没有**改：**我没有观察到它的失败机理**；
      把 260ms 那次改成"失败就重试一次"是把一个还没读懂的读数**掩盖**掉。
      ⇒ 两次读数**都**留在账上；等第三次同样形状出现时才有可查的样本。
+214. §10.51 ★★★ **第 21 轮：`whitelist` 这一道不是配置项**——把
+     `DECISION-RUNREQUEST-EXECUTION-PLANE.md` §11 明写的两处"我没有量"量掉了。
+     交付 `scripts/prt/whitelist-limb.test.mjs`（7 例，`run-ci` 套件 `whitelist-limb`）。
+     ★ 它**不重复** `employee-manifest.test.mjs` 那 20 例"每条规则都能触发"：
+     那些用例喂的是 **Legion 能力名**，而生产端口拿到的是**执行面 DSH 名**。
+215. §10.51 ① **§11.3 的答案**：`grant` 是**宿主显式注入**的（不给就抛
+     `pack-authority-host-surface-unresolved`），`preset` 那一半来自 host 组合的
+     `LEGION_PERMISSION_PRESETS` ⇒ 与三道范围表同族的是 `grant` 那一半，
+     而 `manifest` 那一半只能由包层算。
+216. §10.51 ② ★★★ **§11.5 的答案（本轮最重的一条）**：形状**对得上**
+     （`permitsTool` 返回 `{allowed, rule, reason, riskRaised}` ⊇ 桥要的三个键），
+     而**词汇表对不上**——同一份 permit，喂 Legion 名（`read-file` / `git-status`）
+     **放行**，喂 DSH 名（`read` / `write` / `bash` / `web_fetch`）**一个都不放行**；
+     **抬 `maxRisk` 到最高也救不了**（拒因从 `risk-above-ceiling` 挪到
+     `unknown-tool-not-named`，还是拒）⇒ 这道白名单**永远只能拒、不可能放行**。
+     ⇒ *一个「拒得对、而理由是错的」的检查，与一个「放行了它该拒的」的检查，
+     在今天的行为上是同一个东西，只不过照着理由去改的人会改错地方，
+     而改完仍然是拒的，于是没有人会发现理由本身是错的。*
+     ★ 而这不是新知识：`tool-capability.mjs:465-492` 早就逐字写着"两个名字空间
+     不相交、作为 `denyTools` 它是空的"——那条讲的是**静态下限**，本轮量的是
+     **同一件事在白名单那一道上的形态**，而它此前一个字都没被写过，
+     因为 `permitsTool` 在生产里**零调用方**。
+217. §10.51 ③ ★★ **"加一个反向映射"也不行**：`LEGION_TOOL_ROUTING` 的反推不是
+     一一对应——`bash` / `pwsh` 各对应 4 个 Legion 名、`web_fetch` 对应 2 个，
+     而 `bash` 那一堆里**同时塌着**低风险的 `git-status` 与高风险的 `git-push`
+     ⇒ 翻译需要一个**取舍决定**（取严？看参数？还是换词汇表），
+     已立为 `MULTI-AGENT-FEATURE-STATUS.md` §5 第 **27** 条。
+218. §10.51 ④ ★★★ **顺带查出的第三件**：仓库里有**两个同名 `EmployeeManifest`**
+     ——强制面一份（`dsh-composition/employee-manifest.mjs`，`MANIFEST_FIELDS` 10 个）、
+     上下文一份（`context/sources.mjs` 的 `employeeManifestSource`，`stableRecord` 写死 11 键），
+     两边都认 `employeeId` / `role` / `displayName` / `allowedTools`；
+     实测**两个方向都不可转换**：context 形状 → 强制面**抛**
+     `employee-manifest-enforcement-on-agent-plane`（`approvalPolicy` 在
+     `FORBIDDEN_MANIFEST_FIELDS` 里——**拒得对**），强制面形状 → context
+     **接受但丢字段**（`allowedCapabilities` / `maxRisk` / `workspaceRoot` / `unattended`
+     一个都不进正文）。★ **并且修掉一处我第 20 轮自己造的缺陷**：那轮追加第 26 条时
+     **误删了第 25 条**（MCP 两张表的权威裁决），而全仓有 **7 处**指针指着它；
+     本轮已逐字还原，`§5` 编号核对连续 `1..27`（无缺号、无重复）。
+219. §10.51 ⚠️ **诚实边界**：本批**没有接线**（`enforcementSurfaces().whitelist`
+     今天仍是 `false`）、**没有改任何生产判定路径**（`tool-request.mjs` 一行没动）、
+     **没有决定**上面那个取舍、**没有量**那两个清单该不该合并；
+     第七节的读数取自**直接调用**，没有经过一次真实包安装或真实 DSH 进程。

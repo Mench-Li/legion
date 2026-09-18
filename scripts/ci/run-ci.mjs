@@ -125,6 +125,18 @@ function describeDescendants(pid) {
  *  真正该做的是让测试自己回收句柄（见 notify-hub-smoke 的泄漏自检），外加这条超时兜底。 */
 const TEST_SUITE_TIMEOUT_MS = 300000
 
+/**
+ * 有跳过时跟在汇总行后面的那句话。
+ *
+ * ★ 它说的是**怎么自己判断**，而不是"跳过是坏的"：跳过的合法理由有三种
+ *   （干净检出上没有 DSH、posix 上跑不了 win32 分支、机器上没有浏览器），
+ *   而**不合法**的那一种是"机器上明明有，只是环境变量没设"。
+ *   这两者在 `skipped=N` 这一个数字上完全同形，所以必须把话说到能分辨为止。
+ */
+const SKIPPED_NOTE = '跳过可能是合法的（干净检出上没有 DSH 检出 / posix 上跑不了 win32 分支 / '
+  + '没有浏览器），也可能是**环境没配上**（检出就在盘上而 DSH_CHECKOUT 没设）。'
+  + '分辨方法：把 DSH_CHECKOUT 指向那份检出再跑一次，看 skipped 是否降下来。'
+
 async function runNodeTests(label, files, cwd, nodeArgs = []) {
   const t0 = Date.now()
   const r = await exec(process.execPath, [...nodeArgs, '--test', ...files], { cwd, timeoutMs: TEST_SUITE_TIMEOUT_MS })
@@ -135,12 +147,32 @@ async function runNodeTests(label, files, cwd, nodeArgs = []) {
   // 无法知道到底是哪些后代进程没退（本次排查正是缺这份证据）。
   const raw = timedOut && r.tree ? all + '\n\n[超时现场] 运行器仍存活的后代进程：\n' + r.tree + '\n' : all
   const num = (re) => { const m = re.exec(all); return m ? Number(m[1]) : NaN }
-  const counts = { tests: num(/\btests\s+(\d+)/), pass: num(/\bpass\s+(\d+)/), fail: num(/\bfail\s+(\d+)/) }
+  const counts = {
+    tests: num(/\btests\s+(\d+)/),
+    pass: num(/\bpass\s+(\d+)/),
+    fail: num(/\bfail\s+(\d+)/),
+    // ★★★ `skipped` 曾经**没有被解析**，而本文件的四处注释都写着
+    //   「`skipped: N` 看得见」「摘要里留下 `skipped: N`」——那两句话是**假的**：
+    //   摘要行里只有 `tests/pass/fail`，跳过数只能靠 `tests - pass - fail` 的
+    //   算术**反推**，而"反推"与"看见"不是同一件事（一个整数减法不会告诉你
+    //   跳过的是哪一批，也不会在任何地方留下痕迹）。
+    //
+    //   实测代价（2026-09-17，本机 `DSH_CHECKOUT` 未设而检出就在盘上）：
+    //   四个真进程套件 **38 条断言里跳过 20 条**，而 CI 那四行的读数是
+    //   `exit=0 tests=38 pass=18 fail=0` —— 摘要里一个字都没说"有 20 条没跑"。
+    //   把 `DSH_CHECKOUT` 指向那份检出后，同一批变成 **36 pass / 1 skip**。
+    //
+    //   > 一个"跳过了 20 条真进程断言"的 PASS，
+    //   > 与一个"全部跑过"的 PASS，在摘要行上是同一个东西——
+    //   > 只不过前者的绿来自**没跑**，而注释还在替它保证"看得见"。
+    skipped: num(/\bskipped\s+(\d+)/),
+  }
   const ok = r.code === 0 && (Number.isNaN(counts.fail) || counts.fail === 0)
   const failLines = all.split('\n').filter(l => /^not ok|# fail|^✖/.test(l)).slice(0, 8).join(' | ')
   const detail = label + ': exit=' + r.code + ' tests=' + counts.tests + ' pass=' + counts.pass + ' fail=' + counts.fail
+    + ' skipped=' + (Number.isNaN(counts.skipped) ? 0 : counts.skipped)
     + (timedOut ? '（套件超过 ' + Math.round(TEST_SUITE_TIMEOUT_MS / 1000) + 's 被杀（已连后代进程一起清理）：可能存在泄漏句柄或死锁）' : '')
-  return { ok, code: r.code, detail: ok ? detail : detail + ' FAIL: ' + (failLines || '(see ci.log)'), raw }
+  return { ok, code: r.code, detail: ok ? detail : detail + ' FAIL: ' + (failLines || '(see ci.log)'), raw, counts }
 }
 
 function sha256File(file) { return createHash('sha256').update(readFileSync(file)).digest('hex') }
@@ -982,6 +1014,20 @@ async function stageTest() {
       // 它自己的判据（哪一类判失败、哪一类只记账、什么不可能出现）必须是被钉住的。
       label: 'encoding-check（源文件编码完整性的判据）',
       files: ['scripts/ci/encoding-check.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      // ★★★ 门禁自己的一条判据：**"跳过了多少条断言"必须出现在摘要里**。
+      //
+      // 本文件的四处注释此前都写着「`skipped: N` 看得见」，而实现里
+      // `counts` 只解析了 tests/pass/fail —— `skipped` **从来没被解析过**。
+      // 代价是实测到的：四个真进程套件 38 条里跳过 20 条，而 CI 四行读数是
+      // `exit=0 tests=38 pass=18 fail=0`，摘要里一个字都没说。
+      //
+      // 这一组的对象是**本文件写下的那几行**（源码级断言），所以它必须与
+      // 它验的东西一起被跑 —— 否则"跳过看得见"这件事本身也会悄悄失效。
+      label: 'skip-visibility（门禁摘要必须说出跳过了多少条断言）',
+      files: ['scripts/ci/skip-visibility.test.mjs'],
       cwd: ROOT,
     },
     {
@@ -3514,6 +3560,8 @@ async function stageTest() {
   suites.push({ label: 'whiteboard（' + wbTests.length + ' 文件含真实服务 e2e、P3-1 治理端到端、P4-5 审计归档跨重启、P4-6 单实例目录锁与前端静态契约）', files: wbTests, cwd: wbDir })
   const detail = []
   let allOk = true
+  /** 跳过了断言的套件（`{label, skipped, tests}`）。见下面汇总那一段。 */
+  const skippedSuites = []
   const dsh = process.env.DSH_CHECKOUT
   if (dsh && existsSync(join(dsh, 'packages'))) {
     // p13-host-injection 需要 `@dsh-external/dsh-team-hub` 的**构建产物**：
@@ -3656,6 +3704,9 @@ async function stageTest() {
     const r = await runNodeTests(s.label, s.files.map(f => join(cwd, f)), cwd, s.nodeArgs || [])
     allOk = allOk && r.ok
     detail.push('  ' + (r.ok ? 'PASS' : 'FAIL') + ' ' + r.detail)
+    if (!Number.isNaN(r.counts?.skipped) && r.counts.skipped > 0) {
+      skippedSuites.push({ label: s.label, skipped: r.counts.skipped, tests: r.counts.tests })
+    }
     if (!r.ok) {
       // 失败套件的**原始输出**必须落盘：只留 6 行摘要曾导致事后无法定性偶发失败
       // （实测：一次 dual-write 偶发失败只留下「文件级失败」摘要，断言原文已丢失）。
@@ -3669,7 +3720,25 @@ async function stageTest() {
       detail.push('  ' + (r.raw.split('\n').filter(l => /^not ok|^✖/.test(l)).slice(0, 6).join('\n  ')))
     }
   }
-  return { ok: allOk, detail: detail.join('\n') }
+  // ★★ 跳过断言**单独汇总一行**。理由见 `runNodeTests` 里 `skipped` 那一段：
+  //   不汇总时，"这批断言一条都没跑"只会散落在几十行 `skipped=N` 里，
+  //   而摘要只有一行 `test PASS`。
+  //
+  //   ⚠️ 这一行**不判红**。跳过在本仓是**合法**的（干净检出上没有 DSH 检出、
+  //   posix 上跑不了 win32 分支），把它判红会用一个大得多的故障
+  //   （"在所有没装 DSH 的机器上 CI 全红"）去换一个小得多的故障。
+  //   它做的是**把它变成读数**：`test PASS` 那一行旁边跟着
+  //   `跳过 21 条（3 个套件）`，读的人自己判断这台机器该不该有这些跳过。
+  const totalSkipped = skippedSuites.reduce((n, x) => n + x.skipped, 0)
+  if (totalSkipped > 0) {
+    detail.push(`  ⚠ 跳过 ${totalSkipped} 条断言（${skippedSuites.length} 个套件）：`
+      + skippedSuites.slice(0, 6).map((x) => `${x.skipped}/${x.tests}`).join('、')
+      + (skippedSuites.length > 6 ? ` …共 ${skippedSuites.length} 个` : ''))
+    // 有检出、而且是**本机就在盘上**的那种时，把话说到底：机器明明有，
+    // 而这些断言还是跳过了 —— 那是环境配置问题，不是环境缺失。
+    if (totalSkipped > 0) detail.push('      环境里有 DSH 检出时请看上面每一行的 skipped=：' + SKIPPED_NOTE)
+  }
+  return { ok: allOk, detail: detail.join('\n'), counts: { skipped: totalSkipped, suites: skippedSuites.length } }
 }
 
 // ---------- L1 冒烟（复用仓库既有冒烟脚本 + 白板真实进程 + v1 看板） ----------
@@ -3937,19 +4006,35 @@ async function main() {
       const res = await s.fn()
       const status = res.ok ? 'PASS' : 'FAIL'
       if (!res.ok) failed += 1
-      stageResults.push({ name: s.name, status, ms: Date.now() - t0 })
+      stageResults.push({ name: s.name, status, ms: Date.now() - t0, skipped: res?.counts?.skipped ?? 0 })
       tee(res.detail)
       tee('[' + s.name + '] -> ' + status + ' (' + (Date.now() - t0) + 'ms)')
     } catch (e) {
       failed += 1
-      stageResults.push({ name: s.name, status: 'FAIL', ms: Date.now() - t0 })
+      stageResults.push({ name: s.name, status: 'FAIL', ms: Date.now() - t0, skipped: 0 })
       tee('[' + s.name + '] exception: ' + (e && e.message ? e.message : String(e)))
     }
   }
   tee('')
   tee('===== SUMMARY =====')
-  for (const r of stageResults) tee('  ' + r.name.padEnd(6) + ' ' + r.status + ' (' + r.ms + 'ms)')
-  writeFileSync(join(OUT_DIR, 'summary.json'), JSON.stringify({ root: ROOT, outDir: OUT_DIR, finishedAt: new Date().toISOString(), stages: stageResults, failed }, null, 2) + '\n', 'utf8')
+  // ★ 跳过数进 SUMMARY：这一行是**唯一**会被贴进对话/工单/提交信息的地方，
+  //   而"跳过了多少条"此前只存在于 detail 的几十行里（而且 `skipped` 根本没被解析，
+  //   见 `runNodeTests`）。一个不显示跳过的 SUMMARY 会让
+  //   「38 条里跳过 20 条」与「38 条全跑」印出同一行 `test PASS`。
+  for (const r of stageResults) {
+    tee('  ' + r.name.padEnd(6) + ' ' + r.status + ' (' + r.ms + 'ms)'
+      + (r.skipped > 0 ? '  ⚠ skipped=' + r.skipped : ''))
+  }
+  const skippedTotal = stageResults.reduce((n, r) => n + (r.skipped || 0), 0)
+  if (skippedTotal > 0) {
+    tee('')
+    tee('  ⚠ 本次共跳过 ' + skippedTotal + ' 条断言。跳过可以是合法的（缺 DSH 检出 / 缺浏览器 / '
+      + 'posix 上跑不了 win32 分支），也可以是环境没配上 —— SUMMARY 里这一行就是为了让这两者不再同形。')
+  }
+  writeFileSync(join(OUT_DIR, 'summary.json'), JSON.stringify({
+    root: ROOT, outDir: OUT_DIR, finishedAt: new Date().toISOString(),
+    stages: stageResults, failed, skippedTotal,
+  }, null, 2) + '\n', 'utf8')
   tee('summary.json -> ' + join(OUT_DIR, 'summary.json'))
   process.exit(failed === 0 ? 0 : 1)
 }

@@ -976,6 +976,23 @@ export function createEnforcementBridge({
       //   > 一个「先问策略、策略说 allow 就放行」的桥，
       //   > 与一个「岗位清单只在策略也说不的时候才生效」的桥，是同一个东西。
       //
+      //
+      // ★★★ 2026-09-18 第 21 轮：**这个端口今天在生产里恒为 `null`，而那不是
+      //   "等人配一个"**——是**配了也接不上**。唯一那个产出者
+      //   （`employee-manifest.mjs` 的 `permitsTool`）读的工具名是
+      //   **Legion 能力名**（`read-file` / `git-push` / …），而这里交出去的是
+      //   `got.projection` 里那个**执行面（DSH）名**
+      //   （`read` / `write` / `bash` / `web_fetch` / …）。两个空间
+      //   **结构上不相交**（`tool-capability.mjs:465-492` 早就写过同一件事，
+      //   那条讲的是静态下限）。实测：同一份 permit，喂 Legion 名**放行**、
+      //   喂 DSH 名**一个都不放行**，把 `maxRisk` 抬到最高也救不了
+      //   （拒因从 `risk-above-ceiling` 挪到 `unknown-tool-not-named`，**还是拒**）。
+      //
+      //   ⇒ **不要**为了"把这一格点亮"而随手接一个产出者：接上去得到的不是
+      //     "强制面生效了"，是一个**全拒**的强制面。要接它，先裁决
+      //     「岗位清单说的是 Legion 能力名还是执行面工具名」
+      //     （`MULTI-AGENT-FEATURE-STATUS.md` §5 第 27 条）。
+      //     读数与判据：`scripts/prt/whitelist-limb.test.mjs`。
       // 拒绝理由里带上 `rule`：岗位清单与策略规则是**两处不同的配置**，
       // 值班的人要能分清该改哪一个。
       if (whitelist !== null) {

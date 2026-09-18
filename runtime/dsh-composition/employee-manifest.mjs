@@ -312,6 +312,30 @@ export function narrowToGrant({ manifest, grant } = {}) {
  * 这一点很重要：说明书 §6.8 要求拒绝可归因，而"岗位清单"与"策略规则"是
  * **两处不同的配置**，值班的人要能分清该改哪一个。
  *
+ * ## ★★★ 2026-09-18 第 21 轮：这个函数的输入是 **Legion 能力名**，不是执行面名
+ *
+ * `toolName` 走 `resolveTool()`，也就是**本仓的能力目录**
+ * （`read-file` / `write-file` / `git-push` / `run-command` / …）。
+ * 而强制面桥那一侧交进来的名字是**执行面（DSH）的工具名**
+ * （`read` / `write` / `bash` / `web_fetch` / …）——两个空间**结构上不相交**
+ * （同一件事在**静态下限**上早就写着：`tool-capability.mjs:465-492`）。
+ *
+ * 实测（第 21 轮，`scripts/prt/whitelist-limb.test.mjs` ③）：同一份 `permit`，
+ * 喂 Legion 名 ⇒ **放行**；喂 DSH 名 ⇒ **一个都不放行**。而把 `maxRisk`
+ * 抬到最高也**救不了**——拒因从 `risk-above-ceiling` 挪到
+ * `unknown-tool-not-named`，**还是拒**。
+ *
+ *   > 一个「拒得对、而理由是错的」的检查，
+ *   > 与一个「放行了它该拒的」的检查，在今天的行为上是同一个东西——
+ *   > 只不过照着理由去改的人会改错地方，而改完仍然是拒的，
+ *   > 于是没有人会发现理由本身是错的。
+ *
+ * ⇒ 于是**"用 DSH 名调这个函数"是一条走不通的路**，而它走不通的方式是"全拒"，
+ * 不是"报错"：接进桥只会得到一个**全拒**的强制面，看起来像"岗位清单写错了"。
+ * 要走通需先裁决「岗位清单说的是哪套名字」（`MULTI-AGENT-FEATURE-STATUS.md`
+ * §5 第 27 条）；而**翻译不是机械的**——`LEGION_TOOL_ROUTING` 的反推在
+ * `bash` / `pwsh`（各 4 个）与 `web_fetch`（2 个）上**一对多**，
+ * 而 `bash` 那一堆里同时塌着低风险的 `git-status` 与高风险的 `git-push`。
  * @returns {{allowed: boolean, rule: string|null, reason: string|null, riskRaised: boolean}}
  */
 export function permitsTool({ permit, toolName, capabilities = null } = {}) {

@@ -351,12 +351,108 @@ describe('PRT-257 DSH 强制面覆盖层：真 DSH 管线', () => {
         ports: { runtime: await reserveEphemeralPort() },
       })
       const rt = L.plan.processes.find((p) => p.key === 'runtime')
-      const args = [...rt.command.args, '--dump-config']
+      // ══════════════════════════════════════════════════════════════════════
+      // ★★★ `--dump-config` **必须**插在 app 段之前，不能追加在 argv 末尾
+      // ══════════════════════════════════════════════════════════════════════
+      //
+      // DSH 的根部命令用了 `.passThroughOptions()` + `[args...]`
+      // （`apps/cli/src/args.ts:142`），语义是：
+      //
+      //   > 一旦遇到第一个不认识的 token，**从那里往后全都归 app**。
+      //
+      // 而 `--profile` / `--patch` / `--dump-config` 是**根**选项，
+      // `--host` / `--port` / `--no-open` 是 **app** 选项。Launcher 现在的 argv
+      // 末尾就带着 app 段（`process-manifest.mjs`：`[…args, …extras, …appArgs]`），
+      // 于是 `[…rt.command.args, '--dump-config']` 拼出来的是：
+      //
+      //     dsh --profile legiontest --patch P --host 127.0.0.1 --port N --no-open --dump-config
+      //                                                            ↑ app 段从这里开始
+      //                                                                ↑ 于是这个也归 app
+      //
+      // 结果是 DSH **根本没进 dump-config 模式**，它会去启动 web app、绑端口、然后
+      // 一直不退出 —— 实测表现是 `spawnSync ETIMEDOUT` / 120s 后被杀。
+      //
+      // ★ 这条不是"夹具写错了所以改夹具"这么轻：它正是 `f291f9c` 那批
+      //   在**产品代码**里逐字论证过的同一件事的反面。那批的注释写着：
+      //
+      //   > 把 `--port` 放进 `argsTemplate` 会拼出 `… --port 3081 --patch X`，
+      //   > 其中 **`--patch X` 落进了 app 段**：DSH 照常启动、照常绑 3081、
+      //   > 照常打印 URL——**强制面补丁层静默消失**。
+      //
+      //   产品侧把 `--port` 挪到最后解决了它；而**夹具**从那一刻起就踩在
+      //   同一个坑的另一侧：它把自己的根选项插到了 app 段后面。
+      //
+      //   > 一个"产品把根选项和 app 选项的顺序搞对了、
+      //   > 而夹具把自己的根选项插错了段"的用例，红起来的样子
+      //   > 与"产品把覆盖层弄丢了"**完全一样**（都是启动不起来 / 行没进树）——
+      //   > 只不过前者要改的是用例，后者要改的是实现。
+      //
+      // 所以这里分两步：① 在**生产 argv 上**断言两段的顺序；② 把 app 段摘掉之后
+      // 再追加 `--dump-config`（见下面 `dumpArgs` 那段）。
+      const args = [...rt.command.args]
       // 顺序断言：`--patch` 在 `--profile` **之后**
       assert.ok(args.indexOf('--profile') < args.indexOf(DSH_OVERLAY_FLAG),
         `--patch 跑到 runtime.command 前面去了：${JSON.stringify(args)}`)
 
-      const out = execFileSync(process.execPath, args, {
+      // ★★ 不变式：**所有根选项都在所有 app 选项之前**。
+      //   这条是"覆盖层不会静默消失"的机器判据——DSH 一旦进了 app 段，
+      //   后面再出现 `--patch` 也不会被当成根选项，而**启动照样成功**。
+      //   本仓的 app 族旗标是 `--host` / `--port` / `--no-open`
+      //   （`process-manifest.mjs` 的 `hostArgv` / `portArgv` / `boolArgv`）。
+      const APP_VALUE_FLAGS = ['--host', '--port']
+      const APP_BOOL_FLAGS = ['--no-open']
+      const firstApp = [...APP_VALUE_FLAGS, ...APP_BOOL_FLAGS]
+        .map((f) => args.indexOf(f))
+        .filter((i) => i >= 0)
+        .reduce((a, b) => Math.min(a, b), Number.POSITIVE_INFINITY)
+      const lastRoot = [DSH_OVERLAY_FLAG, '--profile']
+        .map((f) => args.indexOf(f))
+        .filter((i) => i >= 0)
+        .reduce((a, b) => Math.max(a, b), -1)
+      assert.ok(Number.isFinite(firstApp),
+        `生产 argv 里一个 app 族旗标都没有，这条不变式今天没有对象：${JSON.stringify(args)}`)
+      assert.ok(lastRoot < firstApp,
+        `根选项出现在 app 段之后：argv=${JSON.stringify(args)}。`
+        + 'DSH 用 `passThroughOptions()`，app 段一旦开始，后面的根选项（含 `--patch`）'
+        + '会被当成 app 参数 ⇒ 强制面覆盖层**静默消失**而启动成功。')
+
+      // ══════════════════════════════════════════════════════════════════════
+      // ★★★ 为什么必须**摘掉** app 段，而不是把 `--dump-config` 挪个位置
+      // ══════════════════════════════════════════════════════════════════════
+      //
+      // 把 `--dump-config` 插到 app 段之前之后，DSH 报的是：
+      //
+      //     error: config dumps take no app arguments,
+      //            got "--host" "127.0.0.1" "--port" "51718" "--no-open"
+      //
+      // 也就是说 `--dump-config` 与 app 参数**语义上互斥**——它不是"位置没放对"，
+      // 而是"这两件事不能同时要求"。于是夹具只能二选一：
+      //
+      //   · 要 dump（根选项那条链成不成立）      ⇒ 不能带 app 段；
+      //   · 要 app 段（端口/地址/不弹浏览器）    ⇒ 不能 dump。
+      //
+      // 本用例要证的是**前者**：「Launcher 拼出的 argv 被真 DSH 接受，并且
+      // Legion 的行真的进了组合树」。app 段的位置由上面那条不变式盯着，
+      // 不需要靠这一条来证。
+      //
+      //   > 一个"把 app 段留在 dump 命令里"的夹具，
+      //   > 与一个"app 段多了一个非法旗标"的部署，报的是同一条 DSH 错误——
+      //   > 只不过前者要改的是用例，后者要改的是清单。
+      const dumpArgs = []
+      for (let i = 0; i < args.length; i++) {
+        if (APP_BOOL_FLAGS.includes(args[i])) continue
+        if (APP_VALUE_FLAGS.includes(args[i])) { i++; continue }
+        dumpArgs.push(args[i])
+      }
+      assert.ok(APP_VALUE_FLAGS.some((f) => args.includes(f)),
+        `生产 argv 里没有端口旗标，这条用例就没有证明"app 段被摘掉了"：${JSON.stringify(args)}`)
+      assert.equal(dumpArgs.some((a) => APP_VALUE_FLAGS.includes(a) || APP_BOOL_FLAGS.includes(a)), false,
+        'app 族旗标没被摘干净')
+      // 摘掉之后仍然是**根选项那一段**原样：`--profile` 与 `--patch` 都在
+      assert.ok(dumpArgs.includes('--profile') && dumpArgs.includes(DSH_OVERLAY_FLAG),
+        `摘掉 app 段后根选项不该消失：${JSON.stringify(dumpArgs)}`)
+
+      const out = execFileSync(process.execPath, [...dumpArgs, '--dump-config'], {
         encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
         env: { ...process.env, DSH_HOME: home },
         timeout: 120_000,

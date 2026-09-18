@@ -877,7 +877,105 @@ stdout 上那行 `dsh web: <url>`——而上面那 3 条失败的用例恰好�
 因为原套件只有「计数 ≤ 窗口大小」这一条约束，而"每次都答窗口大小"满足它。
 *一条只写下"不许超过 40"的规矩，管不住"每次都答 40"。*
 
-### 10.11 本轮的诚实边界
+### 10.12 ★★★ 第四批：修好跳过可见性之后，**第一次读数就抓到一个真回归**
+
+这一条是 §10.10① 的直接回报，单独记，因为它是"把一句话变成读数"这句话的实证。
+
+#### 环境一改，读数就变
+
+```text
+DSH_CHECKOUT 未设（默认）：--only test → test PASS，⚠ skipped=232
+DSH_CHECKOUT 指向盘上那份检出：--only test → test FAIL，⚠ skipped=1
+                                FAIL product-launcher: tests=397 pass=396 fail=1
+                                  ✖ ★★★★★ 用 Launcher 拼出的 argv，真 DSH CLI 接受并把行装进组合树（120075ms）
+```
+
+**232 条跳过里，有 231 条是真能跑的**——同一批断言在配好环境后 `pass` 了
+（例如四个真进程套件单独跑是 **32/32**）。而剩下那一条，是一个**真回归**。
+
+#### 这个回归已经坏了四天，而所有门禁都是绿的
+
+判据（隔离 worktree，把未跟踪的 `team-hub/lib` 复制进去）：
+
+```text
+6c65752（2026-09-13 引入这条用例那次）  17/17 全绿   ← 它当年是过的
+1d3ee25^ / 1d3ee25                      17/17 全绿
+f291f9c^                                17/17 全绿
+f291f9c                                 16/17  ✖     ← 首次变红
+```
+
+`f291f9c` 是本轮开头落库的那一批（PRT-214/251/253）。`git bisect` 与手工复核一致。
+
+#### 根因：**根选项与 app 选项的段顺序**
+
+DSH 的根部命令用了 `passThroughOptions()`
+（`apps/cli/src/args.ts:142`），语义是：**一旦遇到第一个不认识的 token，
+从那里往后全都归 app**。而：
+
+| 段 | 旗标 | 谁给的 |
+|---|---|---|
+| 根 | `--profile <名>`、`--patch <覆盖层>`、`--dump-config` | 用户命令 / Launcher / 用例 |
+| app | `--host <值>`、`--port <值>`、`--no-open` | `process-manifest.mjs`（PRT-251 续批新增） |
+
+`f291f9c` 给 argv 末尾补了 `--host`/`--port`/`--no-open`（**产品侧是对的**），
+而用例原来是 `[...rt.command.args, '--dump-config']`——把自己的根选项追加在
+**app 段之后**，于是 `--dump-config` 被当成 app 参数，DSH **根本没进 dump 模式**，
+它去启动 web app 然后一直不退出 ⇒ `spawnSync ETIMEDOUT` / 120s 被杀。
+
+★★ 讽刺的是，**产品代码里逐字论证过同一件事的反面**：
+
+> 把 `--port` 放进 `argsTemplate` 会拼出 `… --port 3081 --patch X`，
+> 其中 **`--patch X` 落进了 app 段**：DSH 照常启动、照常绑 3081、
+> 照常打印 URL——**强制面补丁层静默消失**。
+
+产品把 `--port` 挪到最后解决了它；而**夹具**从那一刻起踩在这个坑的另一侧。
+
+> 一个"产品把两段顺序搞对了、而夹具把自己的根选项插错了段"的用例，
+> 红起来的样子与"产品把覆盖层弄丢了"**完全一样**——
+> 只不过前者要改的是用例，后者要改的是实现。
+
+#### 修法用的是 DSH 自己的报错，不是我的推断
+
+第一版修法是"把 `--dump-config` 插到 app 段之前"。DSH 直接给出：
+
+```text
+error: config dumps take no app arguments, got "--host" "127.0.0.1" "--port" "51718" "--no-open"
+```
+
+也就是说这不是"位置没放对"，而是**这两件事不能同时要求**。于是夹具只能二选一：
+要 dump（验根选项那条链）就不能带 app 段。改成**摘掉 app 段再 dump**，并在
+**生产 argv 上**单独断言两段的顺序。
+
+#### 顺带咬出一个覆盖缺口
+
+新加的那条不变式（"所有根选项都在所有 app 选项之前"）在 `dsh-overlay` 上
+只覆盖 `runtimeCommand` 分支。把 `node-file` 分支的 `extras`/`appArgs` 对调，
+**两个套件全绿**——因为清单读数显示：
+
+```text
+team-hub / workbench / orchestrator / whiteboard   entry=node-file  portArgv=null hostArgv=null boolArgv=null
+runtime                                            entry=configured 三族齐全
+```
+
+**只有 `runtime` 声明了 app 族旗标，而它走的是另一条分支** ⇒ `node-file` 分支上
+`appArgs` 恒为空 ⇒ 那条规矩**今天没有可观察的对象**。于是在
+`process-manifest.test.mjs` 里补了一条**源码级**断言把顺序钉住，并**同时**断言
+"今天没有 node-file 进程声明 app 族旗标"——后者的作用是：等哪天有人给 team-hub
+加了一个 `--port`，**它会红**，提醒把源码断言换成真跑一遍 argv 的断言。
+
+#### 判据
+
+```bash
+export DSH_CHECKOUT=D:/project/DSH/dsh/deepseek-harness
+node --test product/launcher/dsh-overlay.test.mjs      # 17/17
+node --test product/process-manifest.test.mjs          # 21/21
+node scratch/verify-overlay-argv.mjs                   # 4/4 咬住，两个套件一起跑
+```
+
+★ 那个验证脚本第一版**只跑 `dsh-overlay`**，于是锚在 `node-file` 分支上的变异
+报"没咬住"——那不是用例的问题，是**验证脚本选错了靶场**。
+
+### 10.13 本轮的诚实边界
 
 1. **上一批的三条缺口，本轮的验证是在它们的用例与探针上复跑的**，
    不是在一次**真实多空间部署**里目击的——`scope` 对不上 `permission_rules`
@@ -926,3 +1024,13 @@ stdout 上那行 `dsh web: <url>`——而上面那 3 条失败的用例恰好�
    我没有把它在前后的相邻提交上扫一遍；而且 `PRT-315-slice1-mediation.md` 里
    记的 `server.mjs` 那两个数（2 和 7）**我复算不出来**（精确值 0 和 10）——
    所以"没被污染"这句话的适用范围是"最近窗口"，不是"那两个历史峰值"。
+16. §10.12 那 231 条"配好环境就能跑"的结论，我只对**四个真进程套件**（32/32）
+   与**整条 test 阶段**（`skipped` 232→1）验过。我没有逐条去分辨
+   "那 1 条剩下的跳过是合法的"——它是什么、该不该跳，我没有查。
+17. §10.12 的修法改的是**用例**（摘掉 app 段再 dump），**不是产品代码**。
+   我的依据是"DSH 报 `config dumps take no app arguments`"与"产品 argv 的两段
+   顺序是对的"这两条读数。**我没有**独立验证过"产品意图就是让
+   `--dump-config` 与 app 段互斥"——那是 DSH 的设计，不是本仓的。
+18. §10.12 的新不变式只在 `runtime` 进程上跑过一次真 argv。`team-hub` /
+   `workbench` / `orchestrator` / `whiteboard` 四个进程的 argv **今天没有
+   app 段**，所以它们那条路径上的段顺序只有源码级断言，**没有行为证据**。

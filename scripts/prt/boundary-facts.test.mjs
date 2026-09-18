@@ -24,11 +24,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 import {
   FACTS, checkFacts, defaultContext, patchYmlRepresentedRows,
-  scanCommitCitations, scanLineCitations,
+  scanCommitCitations, scanLineCitations, checkPinnedCitations,
   STATUS_DOC, LEDGER_DOC, PATCH_YML, REPO, HUB_TOKEN_ENV, WORKBENCH_TOKEN_ENV,
 } from './boundary-facts.mjs'
 
@@ -452,4 +453,103 @@ test('⑪i 覆盖面不许静默空掉：Legion 里一条都没落到实处 ⇒ 
   assert.ok(r.broken.length > 0,
     '解析到引用、却一条都没落到实处，居然没红 ⇒ 索引坏掉时这一面会整个空掉，'
     + '而"空面"与"全绿"在输出里长得一样')
+})
+
+// ── ⑫ 手钉判据：那几行**逐字**就必须是那句话 ────────────────────────────────
+//
+// ★ 这一组的存在理由：上一批那两条坐标判据**结构上够不着**"在范围内但内容已经不是
+//   那个东西了"这个形状。**实测**：另一会话把 `plugins/root-row.mjs:485-509`
+//   订正成 `:508-536`，而那个文件有 **719 行**，旧区间稳稳在范围内。
+//
+// ★★ 而"内容锚"（拿旁边的标识符去猜）**已被我自己否掉**：
+//   ① 103 条引用里只有 38 条（37%）取得到锚词；
+//   ② 真例子里我打算拿 `installEnforcementRoot` 当锚，**它在旧区间内也有**
+//      （`L488` 那句注释"在此之前 `installEnforcementRoot` 的入参里没有 `pathScope`"）
+//      ⇒ **修复者解释这次位移的注释，正好把锚词种在了旧坐标上**，判据会在真漂移上变绿。
+//   ⇒ 所以这里做**断言**，不做启发式。
+
+test('⑫a 真实仓库：5 条手钉引用逐字都对，且一条都没被跳过', () => {
+  const pc = defaultContext().pinnedCitations()
+  assert.equal(pc.broken.length, 0, `有钉不住的：${JSON.stringify(pc.broken)}`)
+  assert.equal(pc.checked + pc.external.length, pc.total,
+    `核过 ${pc.checked} + 跳过 ${pc.external.length} ≠ 手钉 ${pc.total} 条 ⇒ 有被静默漏掉的`)
+  assert.ok(pc.total >= 5, `手钉表只剩 ${pc.total} 条 ⇒ 这一层被清空了`)
+})
+
+test('⑫b ★★ 控制：把**历史上那次真实位移的旧坐标**钉上去 ⇒ 必须红', () => {
+  // 真实事件：`plugins/root-row.mjs:485-509` → `:508-536`（另一会话 §9.5 接线后订正）。
+  // 而那个文件有 700+ 行 ⇒ 旧区间**在范围内**，上一批那两条坐标判据**看不见**。
+  // 这里用**真实文件、真实行**，只把行号换成位移前的旧值。
+  const real = resolve(REPO, 'runtime/dsh-composition/plugins/root-row.mjs')
+  const lines = readFileSync(real, 'utf8').split('\n')
+  // 先核载具本身（载具坏了，下面的结论就不成立）
+  assert.match(lines[507], /installEnforcementRoot\(\{/,
+    '第 508 行不再是那个调用点 ⇒ 载具失效，先重写这个控制')
+  assert.equal(lines[484].trim(), '',
+    '第 485 行不再是空白 ⇒ 旧引用的性质变了，先重写这个控制')
+  assert.ok(509 <= lines.length,
+    '旧行号居然超范围了 ⇒ 那上一批的判据本来就能抓到，这一节的立论要改')
+
+  // ★ 用**同一份**核法（不重抄逻辑）去钉旧坐标
+  const injected = Object.freeze([Object.freeze({
+    path: 'runtime/dsh-composition/plugins/root-row.mjs',
+    line: 485,
+    text: 'const installed = installEnforcementRoot({',
+  })])
+  const r = checkPinnedCitations(injected)
+  assert.equal(r.broken.length, 1,
+    `旧坐标居然没红（broken=${JSON.stringify(r.broken)}）⇒ `
+    + '这条判据抓不到那次真实位移，这一层就是装饰')
+
+  // ★★ 正面对照：同一份核法钉**位移后**的坐标 ⇒ 必须绿。
+  //    少了这一条，"永远报红"的实现也能通过上面那个断言。
+  const good = Object.freeze([Object.freeze({
+    path: 'runtime/dsh-composition/plugins/root-row.mjs',
+    line: 508,
+    text: 'const installed = installEnforcementRoot({',
+  })])
+  const g = checkPinnedCitations(good)
+  assert.equal(g.broken.length, 0,
+    `位移后的正确坐标反而报红：${JSON.stringify(g.broken)} ⇒ 这个控制只会一种结果，是假的`)
+  assert.equal(g.checked, 1, '正面对照应当真的核到 1 条')
+})
+
+test('⑫c 控制：钉的内容差一个字符 ⇒ 必须红（逐字比对真的在逐字比）', () => {
+  const real = resolve(REPO, 'runtime/dsh-composition/tool-request.mjs')
+  const lines = readFileSync(real, 'utf8').split('\n')
+  const line639 = lines[638].trim()
+  assert.equal(line639, 'if (pathScope === null) return undefined', '第 639 行变了，先核它')
+
+  // 差一个字符
+  const off = Object.freeze([Object.freeze({
+    path: 'runtime/dsh-composition/tool-request.mjs',
+    line: 639,
+    text: 'if (pathScope === null) return undefined;', // 多个分号
+  })])
+  assert.equal(checkPinnedCitations(off).broken.length, 1,
+    '只差一个字符却没事 ⇒ 逐字比对没在逐字比')
+
+  // ★ 而**行尾空白**差异被 `trim()` 吸收（有意：CRLF/尾空格不该假红）——
+  //   这是一条**写下来的**边界，不是意外。
+  const trailing = Object.freeze([Object.freeze({
+    path: 'runtime/dsh-composition/tool-request.mjs',
+    line: 639,
+    text: 'if (pathScope === null) return undefined   ',
+  })])
+  assert.equal(checkPinnedCitations(trailing).broken.length, 0,
+    '行尾空白造成了假红 ⇒ 会在 CRLF 检出上乱叫')
+  // ⚠️ 已知边界：`trim()` 也吸收了**缩进**，所以缩进变化不会红。
+  const indent = Object.freeze([Object.freeze({
+    path: 'runtime/dsh-composition/tool-request.mjs',
+    line: 639,
+    text: '        if (pathScope === null) return undefined',
+  })])
+  assert.equal(checkPinnedCitations(indent).broken.length, 0,
+    '缩进居然红了 —— 如果哪天这里变成红，说明口径改了，这条注释要同步改')
+})
+
+test('⑫d 控制：手钉表被清空 ⇒ 必须红（不许变成"零条都通过"）', () => {
+  const r = checkPinnedCitations(Object.freeze([]))
+  assert.ok(r.broken.length > 0,
+    '手钉表清空了却没红 ⇒ "一层被删掉"与"一层全绿"在输出里长得一样')
 })

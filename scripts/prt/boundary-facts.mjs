@@ -101,6 +101,7 @@ export function defaultContext() {
     generatedArtifacts: () => scanSelfDeclaredGenerated(),
     lineCitations: () => scanLineCitations(doc(LEDGER_DOC)),
     commitCitations: () => scanCommitCitations(doc(LEDGER_DOC)),
+    pinnedCitations: () => checkPinnedCitations(),
   }
 }
 
@@ -270,8 +271,136 @@ export function scanLineCitations(text, treeSet = null) {
   return { checked, broken, ambiguous, external, total: uniq.size }
 }
 
-const COMMIT_CITATION_RE = /`([0-9a-f]{7,40})`/g
+// ── C2. **手钉**的关键引用：那几行就必须是那句话 ────────────────────────────
+//
+// ★ 为什么需要这一层（上一批那两条判据**结构上够不着**这个形状）：
+//
+//   2026-09-18，另一会话自己订正了四处引用：
+//   `plugins/root-row.mjs:485-509` → `:508-536`（"§9.5 接线前是 485-509"）。
+//   我第一反应是"我的新判据抓到了"——**核过之后：没有。**
+//   那个文件现在 **719 行**，`485-509` 稳稳在范围内。
+//
+//   > 我差一点把"别人用推理找到的"记成"我的判据找到的"。
+//   > 一个判据抓到与一个人抓到，在**结果**上一样，在**它值多少**上完全不一样。
+//
+// ★ 然后我试了"内容锚"（`scratch/probe-content-anchor.mjs`）：
+//   拿引用旁边的反引号标识符，看它是否出现在附近 ±20 行。**它不成立**，两个原因：
+//
+//   ① **覆盖率就不够**：103 条引用里只有 **38 条**（37%）旁边取得到一个标识符；
+//   ② **更要命的是它会在真漂移上变绿**。上面那个真例子里，我本来打算拿
+//      `installEnforcementRoot` 当锚——而它在旧区间 `485-509` **里面**也有：
+//      `L488` 那句注释写着"在此之前 `installEnforcementRoot` 的入参里**没有** `pathScope`"。
+//      也就是说，**修复者解释这次位移的那句注释，正好把锚词种在了旧坐标上**。
+//
+//   > 一个用标识符当"内容锚"的判据，会在**修复者解释了这次漂移**的地方变绿——
+//   > 而"解释这次漂移"恰恰是修复时最自然会发生的事。
+//
+//   （这与本模块里那条"只认一种句式的判据会在有人**引用**它时失效"是同一个形状，
+//   只是这次的"引用"发生在**代码注释**里、而它在旧坐标上。）
+//
+// ⇒ 所以这一层**不做启发式**，做**断言**：把本会话结论所依赖的那几行**逐字钉住**。
+//   代价是行号一动就红——而那正是我们要的：**让位移可见**，然后人来更新这个钉。
+//   ⚠️ 边界：这一层**只覆盖我逐字读过的那几行**，不是"整个台账的内容都是对的"。
+//
+// ★★★ 而且这一层**上线第一次就抓到了我自己**：DSH 那条我钉的是
+//   `awaitWriteFinish: {`，而第 585 行其实是
+//   `const watcher = chokidarWatch(…)`。**我记错了那一行的内容。**
+//
+//   ★ 更值得记的是：我此前是用 `Get-Content` 去读的，而**那个读数与 git/node 不一致**——
+//   同一个文件，`Get-Content` 说 **932** 行，`git grep -n` 与 `readFileSync().split('\n')`
+//   都说 **936** 行（实测：CRLF 0、孤立 CR 0、孤立 LF 935、纯 LF）。
+//   于是"第 585 行"在两种读法下**不是同一行**。
+//
+//   > 我用一个**只对某些文件**会错的仪器，去核对那些**给别的仪器看**的行号。
+//   > 而且它错的时候不报错——它给出一行**内容正常、行号正确、就是位置不对**的东西。
+//
+//   ⇒ 本仓的规矩因此是：**核 `file:line` 一律用 `git grep -n` 或 node**，
+//   不要用 shell 的 `Get-Content` + 下标——它与判据、与仓、与编辑器都不是同一个口径。
+//   （我这一整轮用 `Get-Content` 核过 5 条引用，其中 4 条恰好一致、1 条不一致。
+//   **"4 次对"在这里建立不了任何东西**：我不知道哪一类文件会不一致。）
+const PINNED_CITATIONS = Object.freeze([
+  Object.freeze({
+    path: 'runtime/dsh-composition/tool-request.mjs',
+    line: 639,
+    text: 'if (pathScope === null) return undefined',
+    why: '本会话多次引为「缺表 = 放行」——这句话就是那条边界的**全部依据**',
+  }),
+  Object.freeze({
+    path: 'runtime/dsh-composition/runtime-contract-server.mjs',
+    line: 599,
+    text: 'wireChecked: true,',
+    why: '状态面七个字段里**唯一写死的字面量**，且全仓没有地方读它（§5 第 20 条）',
+  }),
+  Object.freeze({
+    path: 'runtime/dsh-composition/external-api-scope.mjs',
+    line: 1061,
+    text: 'literalWouldMatchNothing: true,',
+    why: '一处**无声声明**：规则只会匹配到与自己端点相同的东西（触发时不会报红）',
+  }),
+  Object.freeze({
+    path: 'runtime/dsh-composition/enforcement-mapping.mjs',
+    line: 266,
+    text: 'whenUnattended: true,',
+    why: '另一处**无声声明**：值守缺失时禁止询问（触发时不会报错）',
+  }),
+  Object.freeze({
+    path: 'packages/credentials/credentials-local/src/index.ts',
+    line: 585,
+    text: 'const watcher = chokidarWatch(await canonicalizeWatchPath(this.spec.filename), {',
+    why: 'PRT-509 关停缺陷的**根因位置之一**：chokidar watcher 的创建点',
+    dsh: true,
+  }),
+])
 
+/**
+ * 逐条核对手钉引用。返回 `{ checked, broken, external }`。
+ *
+ * ★ `pinned` 可注入：测试要用**同一份**核法去钉"历史上那次真实位移的旧坐标"
+ *   （见 `.test.mjs` ⑫b）。**测试绝不自己重抄一遍核对逻辑**——
+ *   抄一遍就变成"测我的副本"，而副本与本体一起错的时候是全绿的。
+ *
+ * ★ DSH 侧文件在检出不在时记 `external`（与 `scanLineCitations` 同一口径）。
+ */
+export function checkPinnedCitations(pinned = PINNED_CITATIONS) {
+  const broken = []
+  const external = []
+  let checked = 0
+  const dshRoot = dshCheckoutRoot()
+  const dshMissing = !existsSync(dshRoot)
+  for (const p of pinned) {
+    const base = p.dsh === true ? dshRoot : REPO
+    const full = resolve(base, p.path)
+    if (!existsSync(full)) {
+      // ★ "文件不在"有两种：DSH 侧且检出不在 ⇒ 无法判定；否则 ⇒ 真的坏了
+      if (p.dsh === true && dshMissing) { external.push(p.path); continue }
+      broken.push(`${p.path}:${p.line}（文件不在）`); continue
+    }
+    let lines = []
+    try { lines = readFileSync(full, 'utf8').split('\n') } catch {
+      broken.push(`${p.path}:${p.line}（读不出来）`); continue
+    }
+    if (p.line > lines.length) {
+      broken.push(`${p.path}:${p.line}（文件只有 ${lines.length} 行）`); continue
+    }
+    checked++
+    // ★ 两侧都 `trim()`：**钉的文本自己的格式不该影响比对**。
+    //
+    //   第一版只 trim 了磁盘那一侧，于是"钉里带了个行尾空格"会假红——
+    //   而那是**我写钉时的手滑**，不是被引用代码的问题。（⑫c 抓到的。）
+    const actual = lines[p.line - 1].trim()
+    if (actual !== p.text.trim()) {
+      broken.push(`${p.path}:${p.line} 现在是 ${JSON.stringify(actual)}，`
+        + `而钉的是 ${JSON.stringify(p.text.trim())}`)
+    }
+  }
+  if (pinned.length === 0) broken.push('（手钉表是空的——这一层被清空了？）')
+  if (checked === 0 && !dshMissing && pinned.length > 0) {
+    broken.push('（一条都没核到——手钉表或路径解析坏了）')
+  }
+  return { checked, broken, external, total: pinned.length, dshMissing }
+}
+
+const COMMIT_CITATION_RE = /`([0-9a-f]{7,40})`/g
 /**
  * 扫描台账里以**反引号**写出的提交哈希，判它①存在②是 HEAD 的祖先。
  *
@@ -572,6 +701,24 @@ export const FACTS = Object.freeze([
     derive: (ctx) => ctx.commitCitations().broken.slice().sort().join(' '),
     expect: '', // 空串 = 每个哈希都在线上
   }),
+  Object.freeze({
+    id: 'pinned-citations-verbatim',
+    what: '★ **手钉**的那几行关键引用，逐字还是原来那句话（本会话结论的全部依据）',
+    why: '上一批那两条坐标判据**结构上够不着**这个形状。实测（2026-09-18）：'
+      + '另一会话把 `plugins/root-row.mjs:485-509` 订正成 `:508-536`——'
+      + '而那个文件有 **719 行**，旧区间稳稳在范围内，判据看不见。'
+      + '★ 我试过"内容锚"（`scratch/probe-content-anchor.mjs`）但它**不成立**：'
+      + '① 103 条引用里只有 38 条（37%）取得到锚词；'
+      + '② 更要命——真例子里我打算拿 `installEnforcementRoot` 当锚，'
+      + '而它在**旧区间内**也有（`L488` 那句注释"在此之前 `installEnforcementRoot` '
+      + '的入参里没有 `pathScope`"）。**修复者解释这次位移的注释，正好把锚词种在了旧坐标上。**'
+      + '⇒ 所以这一层**不做启发式**，做**断言**：逐字钉住那几行。'
+      + '代价是行号一动就红，而那正是要的——**让位移可见**。'
+      + '⚠️ 边界：只覆盖我逐字读过的这几行，**不是**"整个台账的内容都是对的"。',
+    source: '手钉表（模块内 `PINNED_CITATIONS`）：5 条，4 条在 Legion 仓、1 条在 DSH 检出',
+    derive: (ctx) => ctx.pinnedCitations().broken.slice().sort().join(' '),
+    expect: '', // 空串 = 每一行都还是原来那句话
+  }),
 ])
 
 /**
@@ -687,10 +834,12 @@ function main() {
   //   修好之后它们转成"无法判定"，而这一行就是让那个**无法判定**不再静默。
   const lc = defaultContext().lineCitations()
   const cc = defaultContext().commitCitations()
+  const pc = defaultContext().pinnedCitations()
   console.log(`  坐标判据覆盖面：\`file:line\` 解析到 ${lc.total} 条`
     + `（落到实处 ${lc.checked} / 后缀多候选 ${lc.ambiguous.length} / `
     + `**因 DSH 检出不在而无法判定 ${lc.external.length}**）；`
-    + `提交哈希 ${cc.total} 个（判定 ${cc.checked}）`)
+    + `提交哈希 ${cc.total} 个（判定 ${cc.checked}）；`
+    + `手钉引用 ${pc.total} 条（逐字核过 ${pc.checked} / 因 DSH 不在跳过 ${pc.external.length}）`)
   if (lc.external.length > 0) {
     console.log('  ⚠️ 有引用**没能判定**（DSH 检出不在 ⇒ 不判它坏）：'
       + `${lc.external.slice(0, 4).join(', ')}${lc.external.length > 4 ? ' …' : ''}`)

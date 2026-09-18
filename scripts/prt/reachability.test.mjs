@@ -35,7 +35,7 @@ import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { analyze, ignoredFiles, loadBaseline, REPO, SCAN_DIRS, PROCESS_ENTRIES } from './reachability.mjs'
+import { analyze, ignoredFiles, loadBaseline, REPO, SCAN_DIRS, PROCESS_ENTRIES, dirtyFiles, inFlightViolations } from './reachability.mjs'
 
 const a = analyze()
 const baseline = loadBaseline()
@@ -347,4 +347,65 @@ test('⑥ ★★ `evidenceFrom:` 只是存在性断言，不是加载指令（�
     assert.equal(why === undefined || !String(why).includes('evidenceFrom'), true,
       `${p} 被当成入口了（${why}）——evidenceFrom 是存在性断言，不是加载指令`)
   }
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// ⑦ ★★★ `in-flight` 是**带到期日**的断言：文件提交了却仍标 in-flight ⇒ 红
+// ══════════════════════════════════════════════════════════════════════════
+
+test('⑦ ★★★ in-flight 只在文件**确实还有未提交改动**时成立（否则必须改判 gap）', () => {
+  // ## 这条规则是被一次真实的过期标签逼出来的
+  //
+  // 2026-09-18：4 条 `in-flight` 条目（`runtime-contract-server-row.mjs` /
+  // `runtime-host-registrar-row.mjs` / `run-floor.mjs` / `runtime-contract-server.mjs`）
+  // 的文件在 `e0b83af` / `69da8fd` / `5c1d698` 里**已经提交**，而模块**仍然不可达**。
+  // 于是基线在说"另一个 agent 正在接线"，而事实是"那条线接不上、并且正等人裁决"。
+  //
+  //   > 一个把"已经停工"写成"正在进行"的标签，比一个写错的标签更坏：
+  //   > 它会让人**不去催**——而这一条本来正等人裁决。
+  //
+  // ★ 而这条规则**不能**只对着当前基线断言。本批把 in-flight 清成了 0 条，
+  //   于是"逐条检查 in-flight"是一句空话——一个什么都不检查的用例
+  //   与一个检查通过了的用例，在输出上是同一个东西。
+  //   所以先用**人造条目**证明这条规则真的会红，再拿它去查真实基线。
+
+  // ── 正对照：规则函数本身必须有牙齿 ─────────────────────────────────
+  const FIXTURE = [
+    { file: 'a.mjs', class: 'in-flight' },
+    { file: 'b.mjs', class: 'gap' },
+    { file: 'c.mjs', class: 'in-flight' },
+  ]
+  // ① 两个 in-flight 文件都干净 ⇒ 两条都要被报出来（红）
+  assert.deepEqual(inFlightViolations(FIXTURE, new Set()), ['a.mjs', 'c.mjs'],
+    '规则没有报出"干净却仍标 in-flight"的条目——这条用例无论查什么都恒绿')
+  // ② 只有一个干净 ⇒ 只报那一个（不是"要么全报要么不报"）
+  assert.deepEqual(inFlightViolations(FIXTURE, new Set(['a.mjs'])), ['c.mjs'],
+    '规则不能逐条分辨：它把干净的与脏的一起放过或一起报，等于没有判据')
+  // ③ 两个都脏 ⇒ 一条都不报。★ 这一条防的是**过严**：
+  //    真有人接线时判红，就是惩罚正在接线的人（本探针文件头明令禁止那一类）
+  assert.deepEqual(inFlightViolations(FIXTURE, new Set(['a.mjs', 'c.mjs'])), [],
+    '规则在"确实有人未提交地接线"时也报红——那会惩罚正在接线的人')
+  // ④ `gap` 不受本规则管辖（它是另一个判据的事）
+  assert.equal(inFlightViolations(FIXTURE, new Set()).includes('b.mjs'), false)
+
+  // ── 读数：真实基线 ────────────────────────────────────────────────
+  const dirty = dirtyFiles()
+  assert.notEqual(dirty, null,
+    '`git status --porcelain` 读不出来——本仓库应当始终是 git 仓库。读不出来时从严，不许跳过')
+  const violations = inFlightViolations(baseline.unreachable, dirty)
+  assert.deepEqual(violations, [],
+    `★ 基线里有 ${violations.length} 条 in-flight 的文件**已经干净了**（改动已提交或已还原）：\n` +
+    violations.map((f) => `    ${f}`).join('\n') +
+    '\n  `in-flight` 的判据是「另一个 agent 当轮正在接线（工作树未提交）」。' +
+    '\n  文件已提交而模块仍不可达 ⇒ 前提过期，它**不是"正在接"，是"接不上"**。' +
+    '\n  请改判为 `gap` 并把真实阻塞原因写进 reason（这一条通常正等人裁决）。' +
+    '\n  改完运行：node scripts/prt/reachability.mjs --diff 复核。')
+
+  // ★ 本仓真的有过未提交改动时，`dirtyFiles()` 必须非空——
+  //   否则上面的检查是在"空集上检查"，那与不检查同形。
+  //   （本仓有另一个 agent 进程在并发提交，所以改动几乎总是存在；
+  //     真出现全干净的工作树时这条会红，那时要人来确认这是不是正常状态。）
+  assert.ok(dirty.size > 0,
+    '`git status --porcelain` 一条改动都没有——要么工作树真的全干净（罕见），' +
+    '要么这个读数坏了。无论哪种，上面的"逐条检查"都失去了意义，需要人看一眼')
 })

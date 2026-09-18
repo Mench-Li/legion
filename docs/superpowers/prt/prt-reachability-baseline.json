@@ -1,5 +1,5 @@
 {
-  "$comment": "可达性基线：从**真实入口**出发顺 import 图，走不到的模块（scripts/prt/reachability.mjs）。\n\n不可达**不等于**缺陷。每条都带 class 与 reason，四类动作完全不同：\n  · by-design   —— 按设计不被 import（config-schema 被 scan 读源码、barrel、夹具、按路径跑的脚本）\n  · deliberate  —— 刻意不接，理由写在代码注释里（例：升级链不 import 进 Launcher）\n  · gap         —— 真的没有生产路径，且台账/对照表说它已交付 ⇒ 需要在 §5 里裁决\n  · in-flight   —— 另一个 agent 进程当轮正在接线（工作树未提交）\n\n门禁（scripts/prt/reachability.test.mjs）只断言两件事：没有**未分类**的不可达模块、\n以及正对照成立。**基线过期（模块变可达）只报警不改红**——\n模块变成可达从来不是回归，把它判红等于惩罚正在接线的人。\n`node scripts/prt/reachability.mjs` 出人读报告；`--diff` 与基线比对；`--record` 重写（会保留已有分类）。",
+  "$comment": "可达性基线：从**真实入口**出发顺 import 图，走不到的模块（scripts/prt/reachability.mjs）。\n\n不可达**不等于**缺陷。每条都带 class 与 reason，四类动作完全不同：\n  · by-design   —— 按设计不被 import（config-schema 被 scan 读源码、barrel、夹具、按路径跑的脚本）\n  · deliberate  —— 刻意不接，理由写在代码注释里（例：升级链不 import 进 Launcher）\n  · gap         —— 真的没有生产路径，且台账/对照表说它已交付 ⇒ 需要在 §5 里裁决\n  · in-flight   —— 另一个 agent 进程当轮正在接线（工作树未提交）\n\n门禁（scripts/prt/reachability.test.mjs）只断言两件事：没有**未分类**的不可达模块、\n以及正对照成立。**基线过期（模块变可达）只报警不改红**——\n模块变成可达从来不是回归，把它判红等于惩罚正在接线的人。\n`node scripts/prt/reachability.mjs` 出人读报告；`--diff` 与基线比对；`--record` 重写（会保留已有分类）。\n\n★★ `in-flight` 是一个**带到期日的断言**，不是一种永久分类（2026-09-18 立此规则）：\n它的判据是「工作树里**未提交**」，所以它只在该文件**确实还有未提交改动**时成立。\n文件一旦提交、而模块仍然不可达，前提就过期了——此时正确的分类是 `gap`，\n因为那条线**不是“正在接”，是“接不上”**。\n\n  > 一个把“已经停工”写成“正在进行”的标签，比一个写错的标签更坏：\n  > 它会让人**不去催**——而这一条本来正等人裁决。\n\n实测过这一次：4 条 `in-flight` 的文件在 e0b83af / 69da8fd / 5c1d698 里已经提交，\n而模块仍然不可达；本批把它们改判为 `gap`（理由逐条写在下面）。\n本条规则现由 reachability.test.mjs 的 ⑦ 号用例钉住（文件干净却仍标 in-flight ⇒ 红）。\n\n★★ 一处**好消息的误读**要一起记下来：`runtime/dsh-composition/runtime-contract-publication.mjs`\n本批从不可达变成**可达**，`--diff` 会把它报成「基线过期，好消息」。\n但那**不是**因为写侧接上了——它是被 `orchestrator/worker/run-peak-resource.mjs` import 的，\n也就是说它现在只被**读侧**碰到（格式常量）。写那份发布的**服务端行仍然没有挂点**\n（见下面 `runtime-contract-server-row.mjs` 那条 `gap`）。\n\n  > 可达性是**逐模块**测的，而一条链是**端到端**才通的：\n  > 一个模块可以只因为有人 import 了它的两个常量而变成'可达'，\n  > 而那条链的另一头从未被挂上。\n\n所以「publication 变可达」不构成「Runtime 契约链有进展」的读数。",
   "version": 1,
   "unreachable": [
     {
@@ -159,28 +159,23 @@
     },
     {
       "file": "runtime/dsh-composition/plugins/runtime-contract-server-row.mjs",
-      "class": "in-flight",
-      "reason": "同上；它把 Runtime 契约服务挂进组合"
+      "class": "gap",
+      "reason": "★★ 2026-09-18 由 in-flight 改判为 gap。理由：`in-flight` 的判据是「另一个 agent 当轮正在接线（**工作树未提交**）」，而那几个文件**已经提交了**（e0b83af / 69da8fd / 5c1d698），而这几个模块**仍然不可达** ⇒ 前提已过期，它不再是“正在接线”，是“接不上”。真实状态是**已经记录在案的诚实阻塞**：该行把 Runtime 契约服务挂进组合，但它不在 `PATCH_LAYER_ROWS` 里；而补上它需要 `runtimeHost` 的 `probeRuntime` 报 version + 四项必需能力，**全仓没有生产实现**（真 DSH 进程里实测：没有版本服务、也没有能力服务）。给一张全 true 的能力表就是**编**——它会让 `checkCompatibility` 在一个从未验过的引擎上判“兼容”。见 `docs/STATUS.md`「本轮明确不做的两件」§四 ⇒ 属需要 **§5 裁决**的人工介入项，不是能靠写代码绕过去的东西。"
     },
     {
       "file": "runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs",
-      "class": "in-flight",
-      "reason": "工作树里由另一个 agent 进程修改中；它按 Run 安装身份/下限"
+      "class": "gap",
+      "reason": "同上，随那条一起由 in-flight 改判 gap：它按 Run 安装身份/下限，而它的挂载需要上面那一行的组合根 ⇒ 同一条断链的两个环节。文件已提交，工作树干净。"
     },
     {
       "file": "runtime/dsh-composition/run-floor.mjs",
-      "class": "in-flight",
-      "reason": "唯一的 import 者是上面的 registrar row（传递不可达）"
-    },
-    {
-      "file": "runtime/dsh-composition/runtime-contract-publication.mjs",
-      "class": "in-flight",
-      "reason": "唯一的 import 者是上面的 contract-server row（传递不可达）"
+      "class": "gap",
+      "reason": "唯一的 import 者是上面的 registrar row（传递不可达）⇒ 随那条一起由 in-flight 改判 gap。★ 注意它的可达性**不能**由别的读者证明：`scripts/prt/hot-file-churn.mjs` 之类只是名字里含 run-floor，不是这条模块的导入者。"
     },
     {
       "file": "runtime/dsh-composition/runtime-contract-server.mjs",
-      "class": "in-flight",
-      "reason": "唯一的 import 者是上面的 contract-server row（传递不可达）"
+      "class": "gap",
+      "reason": "唯一的 import 者是上面的 contract-server row（传递不可达）⇒ 随那条一起由 in-flight 改判 gap。★ 这意味着**服务端没有生产挂点**：消费侧（`product/launcher/runtime-contract-endpoint.mjs` 读回发布并注入 `LEGION_RUNTIME_URL`/`LEGION_RUNTIME_TOKEN`）已接线，没有它，真实部署里那份发布永远不会被写出来。"
     },
     {
       "file": "runtime/employee/role-pack.mjs",

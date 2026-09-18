@@ -336,8 +336,58 @@ export function trackedFiles() {
   }
 }
 
-/** 一次算完。
+/**
+ * `in-flight` 是一个**带到期日的断言**，不是一种永久分类。
  *
+ * 它的判据是「另一个 agent 当轮正在接线（**工作树未提交**）」——所以它
+ * **只在该文件确实还有未提交改动时成立**。文件一旦提交、而模块仍然不可达，
+ * 前提就过期了，此时正确的分类是 `gap`。
+ *
+ * ## 为什么这条规则必须存在（本仓实测过一次）
+ *
+ * 2026-09-18：4 条 `in-flight` 条目（contract-server-row / host-registrar-row /
+ * run-floor / runtime-contract-server）的文件在 `e0b83af` / `69da8fd` / `5c1d698`
+ * 里**已经提交**，而模块**仍然不可达**。于是基线在说"另一个 agent 正在接线"，
+ * 而事实是"那条线接不上、并且正等人裁决"。
+ *
+ *   > 一个把"已经停工"写成"正在进行"的标签，比一个写错的标签更坏：
+ *   > 它会让人**不去催**——而这一条本来正等人裁决。
+ *
+ * ★ 反过来也一样坏：如果规则太松（比如只要求"文件被跟踪"），它会在真的
+ *   有人接线时判红，那就是惩罚正在接线的人——本探针文件头明令禁止那一类。
+ *   所以判据取的是 `git status --porcelain` 里的**改动**，不是"是否存在"。
+ *
+ * @param {Array<{file: string, class: string}>} entries 基线条目
+ * @param {Set<string>} dirty `git status --porcelain` 里有改动的文件
+ * @returns {string[]} 违反该规则的条目（文件干净却仍标 in-flight）
+ */
+export function inFlightViolations(entries, dirty) {
+  return entries
+    .filter((x) => x.class === 'in-flight')
+    .filter((x) => !dirty.has(x.file))
+    .map((x) => x.file)
+}
+
+/** 工作树里有未提交改动（含已暂存）的文件。读不出来时返回 `null`（调用方须从严）。 */
+export function dirtyFiles() {
+  try {
+    const out = execFileSync('git', ['status', '--porcelain'], { cwd: REPO, encoding: 'utf8', maxBuffer: 1 << 26 })
+    const set = new Set()
+    for (const line of out.split('\n')) {
+      if (line.trim() === '') continue
+      // 形状：`XY <path>`（XY 两列状态码）。重命名是 `R  old -> new`，取新名。
+      const rest = line.slice(3).trim()
+      const arrow = rest.indexOf(' -> ')
+      const p = arrow >= 0 ? rest.slice(arrow + 4) : rest
+      set.add(p.replace(/^"|"$/g, ''))
+    }
+    return set
+  } catch {
+    return null
+  }
+}
+
+/** 一次算完。 *
  * ★ `unreachable` **只报生产模块**，且**只报被 git 跟踪的**。用例按定义就是
  *   "被按路径跑、不被 import"，把它们算进来会让名单里全是 `*.test.mjs`——
  *   而那份名单的用途是找"已交付但生产里到不了"的模块，混进用例等于把信号淹掉。

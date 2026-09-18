@@ -353,6 +353,7 @@ deny 会被宽松的默认静默盖掉，而他写那条正是为了拦住一样
 | 17 | ★★★ **PRT-707 的两份实现用两个不同的模型密钥引用名** | 产品 + 项目主 | PRT-707（首次运行向导）在仓库里有**两份实现**：**活的**是 `cli.mjs` 的 `--wizard` 分支（内联，写 `model/api-key`），**死的**是 `first-run.mjs`（636 行 + 一整套用例，算 `legion/model/<profileId>`）。要裁决的是：**模型密钥的引用名用哪一个**——Legion 自己的三段式（`legion/model/<id>`，与 `credential-materializer.mjs` 文件头那句"Legion 的模型引用是 `legion/model/<profileId>`"一致，但 `planDshLookup()` 实测 `addressable:false`），还是运行时物化的那一段（`model/api-key`，端到端通、被 drift 用例钉着）？**或者**：两份实现留哪一份、另一份删掉还是明确废弃？ | ★★ **不要**把 `first-run.mjs` 直接接上去。它写进 hub 档案的 `secretRef` 是 `legion/model/<id>`——**三段**，而 `security/secrets/credential-materializer.mjs` 的 `planDshLookup()` 对三段引用返回 `{addressable:false, space:null}`（在 `refs` 与 `records` 两个键空间里**都没有位置**）。接上它的后果**不报错**：向导报"模型已配置"，而运行时拿不到钥匙——正是该模块文件头点破的那种失效（"文件看起来完整、就是少了最要紧那一把钥匙"）。★ 本轮**没有**替任何一方改代码：两份**各自都自洽**，裁决它需要产品决定。已把它变成读数：`product/launcher/wizard-wiring.test.mjs`（5 例，**今天全绿**，7/7 变异成立）——它红的那天，正是有人接线或对齐的那天 |
 | 18 | ★★★ **F-18 / F-19 的"执行面一半"要谁来调用**（可达性探针新读数，见 §5.4） | 产品 + 项目主 | 从**真实入口**跑 import 图，`runtime/experience/{friction,graph}.mjs`（F-18）与 `runtime/employee/role-pack.mjs`（F-19）**从任何生产入口都到不了**——只被自己的用例驱动。hub 侧**是**接上的（`experience-store`/`role-pack-store` 经 `server.mjs` 可达），缺的是**产出者**：没有任何东西算摩擦分、没有任何东西记图边、没有任何东西建岗位包。要裁决的是：**这三件事由谁在什么时候调用**——执行面在 Run 结束时算（那要定"从哪拿到 validations/attempts"）？还是控制面在写账之前算？★ 同一族：PRT-610 的 `recordToolCall` 写入方（第 15 条）、三道范围表（第 14 条）——**三条都卡在"执行面的载荷里今天没有这些字段"这同一个决定上** | 不决定则这三块能力**对用户不存在**：账能读、读数是干净的、用例全绿，而**一行都不会被写进去**。★ 这三行的 ✅ 依据是"模块 + 自己那套用例"，与台账 §0 自己那条告警（「只有自己的用例驱动的原语一律 🟡」）**口径不一致**。★★ 本轮**没有**改这三行的状态——✅/🟡 的口径由台账的读者（项目方）定，"改状态"与"补证据"是两件事。★★ 另：另有 5 个不可达模块归 `in-flight`（`runtime-host-registrar-row.mjs`、`runtime-contract-server-row.mjs` 及其传递依赖），因为**另一个 agent 进程当轮正持着它们**；其中两行**不在任何清单里**（`PATCH_LAYER_ROWS` 只声明 4 行、`legion-host.patch.yml` 只有 2 行），接线的决定与第 14 条是同一个 |
 | 19 | ★★★ **第 13/14/15/18 条其实是**一条**决定，而且执行面拿不到控制面凭证**（本轮新读数，见 §5.5） | 项目主 + 产品（**只需回答一个问题**） | §5.5 的三条机器读数：① `runtime` 进程的 `envNames` **故意没有 `TEAM_HUB_TOKEN`**（`product/process-manifest.mjs:203-215`）；② `RunRequest.permissions` 只有 `{preset, tools, deniedTools?}`，**没有**范围表 / host surface（`runtime/contracts/run.mjs:158-181`）；③ `runtime/packs/*` 四个模块（`store` / `compiled-plan` / `authority` / `builtin/software-delivery`）**零生产入口**，`createPackStore` 生产调用点 **0 处**（hub 的 `/api/packs/account` 把账交出去，**没有任何生产代码接住**）。要裁决的**只有一个问题**：把执行面需要的那几份数据（连接器声明 / 范围表 / 落账端点 / 摩擦与岗位包的输入）放进 `RunRequest`，**还是**给执行面开一个控制面入口（注入 `TEAM_HUB_TOKEN`）？ | ★ 选**前者**：形状已经跑通**两遍**（PRT-214 缺口①的 `enforcementFloor`、缺口②的 `enforcementIdentity`——都是"专属线上字段 + 按 Run 安装 + 对象身份配对 + 可 dispose + 装不上具名拒绝"），照抄即可，是纯代码工作量。★ 选**后者**会让「Runtime 不看业务状态」这条 spec §2 的不可突破边界消失，并且执行面一旦有 token，"读声明"与"改状态"就只差一次调用的距离。**不决定**则这四处继续各记一行 🟡：登记了、能审、能冻，而**没有任何一次真调用被它们拦过 / 记过 / 算过**。★★ 本轮**没有**擅自补任何一行接线：`RunRequest` 里今天没有范围表字段，凭空造一份（例如"读根=写根=`workdir`"）正是 PRT-253 §3 明令禁止的"发明默认值"，且方向是**放行**；而"反正它更严"这个辩护**不成立**——收成 `workdir` 会同时拒掉合法的越目录读，表现成"工具莫名其妙失败" |
+| 20 | ★★★ **Runtime 契约服务端那一行要不要进补丁层**（本批新提，见 §5.6） | 产品 + 项目主 | 可达性探针（2026-09-18）：`runtime/dsh-composition/plugins/runtime-contract-server-row.mjs` 与 `runtime-host-registrar-row.mjs` **不在 `PATCH_LAYER_ROWS` 里**，也不在 `legion-host.patch.yml` 里，也没有任何生产 importer ⇒ **Runtime 契约服务端没有生产挂点**。而**消费侧已经接好了**：`product/launcher/runtime-contract-endpoint.mjs` 会去 DataDir 读那份发布、把 `LEGION_RUNTIME_URL`/`LEGION_RUNTIME_TOKEN` 注入 worker。**没有服务端，那份发布永远不会被写出来。** 要裁决的是：这一行**现在**要不要挂进补丁层——以及挂上去之后 `probeRuntime` 报什么（它要报 version + 四项必需能力，而**全仓没有生产实现**：真 DSH 进程里实测没有版本服务、也没有能力服务） | ★ 两条路都不许"编"：给一张**全 true** 的能力表会让 `checkCompatibility` 在一个**从未验过**的引擎上判"兼容"——那比不接更坏，因为**它会以"已兼容"的样子通过**。可选的是：① 挂行但让 `probeRuntime` **如实报 unknown** 并以具名码拒绝（fail closed，等价于今天"没挂"的效果，但**读数变成"查过且拒了"而不是"没人挂"**）；② 明确本阶段只走**同进程绑定**（`bindDshRuntime`）这一条路，把跨进程契约**显式降级为未启用**并写进产品边界。★ 无论选哪条，都**不要**把这一项继续留在"等另一个 agent 接线"里——那份工作已经提交了（`e0b83af` 等），而模块仍然不可达（本批已把 4 条 `in-flight` 改判 `gap`）。
 
 ---
 
@@ -639,10 +640,16 @@ DEEPSEEK_API_KEY             {"addressable":true,"space":"refs"}      ← 正对
 
 | class | 条数 | 含义 | 正确动作 |
 |---|---|---|---|
-| `by-design` | 12 | 按设计不被 import：`*/config-schema.mjs`（被 `scan.mjs` 读**源码**）、barrel/公开出口、`*-fixture.mjs`、按路径跑的开发脚本 | 不动 |
+| `by-design` | 13 | 按设计不被 import：`*/config-schema.mjs`（被 `scan.mjs` 读**源码**）、barrel/公开出口、`*-fixture.mjs`、按路径跑的开发脚本 | 不动 |
 | `deliberate` | 8 | 升级链 `product/upgrade/*`：`runtime-install.mjs` 注释写明 Launcher **刻意不 import**（进程卫生） | **别动**（见 §5.3） |
-| `in-flight` | 5 | 另一个 agent 进程当轮正在接线（工作树未提交） | 等 |
-| **`gap`** | **21** | ★ **台账/对照表说它已交付，而生产里没有路径** | **见 §5 第 14/15/16/17/18 条，与 §5.5 的那一条决定** |
+| `in-flight` | **0** | ★ **本批清空**：它只在该文件**确实还有未提交改动**时成立，而剩下 5 条里有 4 条的文件**已经提交**了 | 见 §5.6（本批新增） |
+| **`gap`** | **25** | ★ **台账/对照表说它已交付，而生产里没有路径** | **见 §5 第 14/15/16/17/18/20 条，与 §5.5 的那一条决定** |
+
+> ★ 两处数字订正，都记在这里，因为"数字变了"与"探针漏报了"在只看数字时是同一个东西：
+> · `by-design` 这一格写的原是 **12**，而**探针与基线在 HEAD 上就都是 13**。
+>   这不是本批改的，是**文档旧了**——已按机器读数改成 13。
+> · `in-flight` 5 → **0**、`gap` 21 → **25**：**本批改的**，逐条见 §5.6。
+>   合计 47 → 46（少的那一条是 `runtime-contract-publication.mjs`，它**变成可达**了）。
 
 ### ★★ 最要紧的两条新读数（都在 `gap` 里）
 
@@ -668,6 +675,49 @@ approval-answerer），`legion-host.patch.yml` 只有 2 行；而这两行**只�
 （那些 `*-dsh-process.test.mjs` 自己拼补丁文件把它们挂起来）。
 它们归 `in-flight`——**另一个 agent 进程当轮正持着这两个文件**（未提交），
 所以本轮不把它们记为缺口，只记录读数。
+
+> ★★★ **2026-09-18 续批：这个"等"已经等到了，答案是"接不上"。**
+>
+> 上面那句判据被兑现了：那几个文件在 `e0b83af` / `69da8fd` / `5c1d698` 里
+> **已经提交**，而探针复核——**模块仍然不可达**。
+> 于是 `in-flight` 的前提（"工作树未提交"）**过期**，正确的分类是 `gap`。
+>
+> | 文件 | 原 class | 现 class |
+> |---|---|---|
+> | `runtime/dsh-composition/plugins/runtime-contract-server-row.mjs` | in-flight | **`gap`** |
+> | `runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs` | in-flight | **`gap`** |
+> | `runtime/dsh-composition/run-floor.mjs` | in-flight | **`gap`** |
+> | `runtime/dsh-composition/runtime-contract-server.mjs` | in-flight | **`gap`** |
+> | `runtime/dsh-composition/runtime-contract-publication.mjs` | in-flight | **删掉（已可达）** |
+>
+> > 一个把"已经停工"写成"正在进行"的标签，比一个写错的标签更坏：
+> > 它会让人**不去催**——而这一条本来正等人裁决。
+>
+> 那份"接不上"的理由早就写在 `docs/STATUS.md`「本轮明确不做的两件」§四：
+> 补上这一行需要 `runtimeHost` 的 `probeRuntime` 报 version + 四项必需能力，
+> 而**全仓没有生产实现**（真 DSH 进程里实测：没有版本服务、也没有能力服务）。
+> 给一张全 true 的能力表就是**编**——它会让 `checkCompatibility` 在一个
+> **从未验过**的引擎上判"兼容"。
+>
+> ⇒ 因此本批把它提升为 **§5 第 20 条**（此前它只在 `STATUS.md` 的记录里，
+> **不在**这张待裁决清单上——于是它没有任何一处会被人读到）。
+>
+> ★★ **一处"好消息"的误读，必须一起记下来。**
+> `runtime-contract-publication.mjs` 变成可达，`--diff` 会把它报成
+> 「基线过期 1 条（好消息）」。但那**不是**因为写侧接上了——
+> 它是被 `orchestrator/worker/run-peak-resource.mjs` import 的，
+> 也就是说它现在只被**读侧**碰到（格式常量）。
+> 写那份发布的**服务端行仍然没有挂点**（就是上表第一条 `gap`）。
+>
+> > 可达性是**逐模块**测的，而一条链是**端到端**才通的：
+> > 一个模块可以只因为有人 import 了它的两个常量而变成"可达"，
+> > 而那条链的另一头从未被挂上。
+>
+> 所以「publication 变可达」**不**构成「Runtime 契约链有进展」的读数。
+>
+> ★ 并且本批给 `in-flight` 加了一条**到期判据**（`reachability.test.mjs` ⑦）：
+> 文件干净却仍标 `in-flight` ⇒ **红**。破坏性验证 1/1 咬住
+> （往基线里塞一条干净文件的 `in-flight` 条目，红的正是 ⑦）。
 
 ### ★ 三个过程教训（都是"探针自己坏了"）
 

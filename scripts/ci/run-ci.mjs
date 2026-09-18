@@ -1245,6 +1245,25 @@ async function stageTest() {
     //     会在崩溃后把没落账的几条当成"已经收过了"。
     { label: 'toolcall-spool（PRT-610 出站车道·写入侧：执行面无凭证时怎么把账带出去）', files: ['runtime/toolcall/spool.test.mjs'], cwd: ROOT },
     { label: 'toolcall-drain（PRT-610 出站车道·收账侧：整条环走到真库，把 decisionSourceRecorded 翻成 true）', files: ['orchestrator/worker/toolcall-drain.test.mjs'], cwd: ROOT },
+    // 文档**表格列数一致性**（第 22 轮顺带建立）。修第 23 条那个"单元格里有未转义
+    // 竖线"时发现在全仓是**一类**问题，于是把它变成可复跑的读数而不是一次性修。
+    //
+    // ★ 两半：① 八份**权威文档**（承载裁决/台账/报告的那几份）必须 **0 处**——
+    //   那张表里错一格，就是"把**后果**当成**决定**来读"；
+    //   ② 全仓已跟踪 md 走**棘轮**（基线 87，全在历史评审记录里）——
+    //   新增判红，**减少只报警**（与可达性探针同一条纪律：把别人修好的事
+    //   判成回归的闸门，会在共享工作树上天天红）。
+    //
+    // ★ ② 是**假阳性护栏**，不是顺手多写一条：第一版检查器没处理 `\|`
+    //   （CommonMark 的代码跨度里它**是**字面竖线），于是全仓报出 934 处、
+    //   其中 847 处是假的——一个"到处都是假红"的检查与一个"找不出真的那一处"
+    //   的检查，在"它能不能挡住回归"上是同一个东西。
+    //
+    // ★ ④b 是本轮**自己踩到**的一处：`git ls-files` 默认按 `core.quotePath`
+    //   把非 ASCII 路径转义并加引号，于是本仓 8 个
+    //   `whiteboard/docs/adr/ADR-*.md` 打不开、被记成 `missing`——
+    //   总数虚高，而它们自己的缺陷**一处都数不到**。改用 `-z`。
+    { label: 'doc-table（文档表格列数一致性：八份权威文档 0 处 + 全仓棘轮不许涨）', files: ['scripts/prt/doc-table-integrity.test.mjs'], cwd: ROOT },
     { label: 'calendar（日程日历契约）', files: ['team-hub/calendar.test.mjs'], cwd: ROOT },
     { label: 'calendar-ui（P2-5 日历前端纯函数：周视图/重复文案/关联跳转/表单校验）', files: ['workbench/scripts/calendar-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'chat-ui（P2-6 对话前端纯函数：健康判定/AI 三态/合并/断线补齐）', files: ['workbench/scripts/chat-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },

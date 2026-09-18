@@ -37,6 +37,7 @@ const CHECKS = [
   '内联锚点链接（[t](#anchor) 的锚点必须是本文件真实标题）',
   '当前状态入口（docs/STATUS.md 存在且含基线/CI 证据/复跑命令，README 已链接）',
   '历史 evidence 治理（证据快照目录的顶层 md 均带历史快照 banner）',
+  '表格行形状（docs/ 下每个表行以 | 收尾、无「只有管符」的孤儿行）',
 ]
 
 if (process.argv.includes('--help')) {
@@ -252,6 +253,67 @@ for (const dir of snapshotDirs(join(ROOT, 'docs'))) {
   }
 }
 if (snapMissing === 0) console.log('  历史 evidence banner 覆盖完整（docs/ 下证据快照目录全部标注）')
+
+// 11. 表格行形状（结构，不判语义）—— docs/ 下每个 md 的表格块内：
+//     (a) 每一行都必须以 `|` 收尾；
+//     (b) 不得出现「只有管符」的孤儿行（/^\s*\|\s*$/）。
+//
+//     ★★ 为什么只加这两条、**不加**看起来更自然的「列数必须一致」：实测过。
+//     全仓 279 个 docs md 里，**列数不一致的行有 58 处是合法的**——本仓大量使用
+//     「不齐的表格」（父行 6 格、其下的缺口子行 4 格，故意用少几列表达从属关系，
+//     例：MULTI-AGENT-FEATURE-STATUS.md §4 里 F-18 的三条缺口）。一条「列数一致」
+//     的检查今天会凭空红 58 行，所以它**不是一条能加的规则**，就不加。
+//     > 一条会把 58 处正确写法判成错误的规则，与一条没有规则，在"保护了什么"上是
+//     > 同一个东西——只不过前者会让人去改那 58 处。
+//     而 (a)(b) 两条实测在全仓 **0 处**命中（`docs/` + README）。
+//
+//     ★ 加这两条的理由是一次**真实的静默失效**（2026-09-18）：给
+//     `docs/MULTI-AGENT-FEATURE-STATUS.md` §5 决策表第 14 格追加一段话时，
+//     正文末尾的换行把该表格行切成了两行，收尾的 `|` 落到下一行成了孤儿行 ——
+//     表格渲染坏了，而**当时 10 道门禁全绿**。孤儿管符行在 markdown 里没有任何
+//     合法含义，所以这一条是无歧义的。
+const mdFilesIn = (abs, out = []) => {
+  let entries = []
+  try { entries = readdirSync(abs, { withFileTypes: true }) } catch { return out }
+  for (const e of entries) {
+    if (e.name === 'node_modules' || e.name.startsWith('.')) continue
+    const child = join(abs, e.name)
+    if (e.isDirectory()) mdFilesIn(child, out)
+    else if (e.name.toLowerCase().endsWith('.md')) out.push(child)
+  }
+  return out
+}
+
+const isTableRow = (l) => /^\s*\|/.test(l)
+let tableRows = 0
+let tableBad = 0
+for (const file of [...mdFilesIn(join(ROOT, 'docs')), README]) {
+  let body = ''
+  try { body = LF(readFileSync(file, 'utf8')) } catch { continue }
+  const ls = body.split('\n')
+  let inFence = false
+  for (let i = 0; i < ls.length; i++) {
+    if (/^\s*```/.test(ls[i])) { inFence = !inFence; continue }
+    if (inFence) continue
+    const row = ls[i]
+    const prevIsRow = isTableRow(ls[i - 1] ?? '')
+    if (isTableRow(row)) {
+      tableRows += 1
+      // (a) 只在「块内」判（前后至少一个是表行），避免把孤立的 | 行误判
+      const inBlock = prevIsRow || isTableRow(ls[i + 1] ?? '')
+      if (inBlock && !row.trimEnd().endsWith('|')) {
+        tableBad += 1
+        fail(file, i + 1, '表格行未以 | 收尾（表格行被换行切断？）：' + row.trim().slice(0, 90))
+      }
+    }
+    // (b) 孤儿管符行：紧跟在表行之后的、只有管符的一行
+    if (/^\s*\|\s*$/.test(row) && prevIsRow) {
+      tableBad += 1
+      fail(file, i + 1, '孤儿管符行（表格行被换行切断的残留）')
+    }
+  }
+}
+if (tableBad === 0) console.log('  表格行形状完整（docs/ + README 共 ' + tableRows + ' 个表行，收尾与孤儿行 0 处异常）')
 
 if (fails === 0) {
   console.log('check-docs: PASS（README.md + docs/FEATURES.md 结构/链接/索引一致，' + CHECKS.length + ' 类校验项全绿）')

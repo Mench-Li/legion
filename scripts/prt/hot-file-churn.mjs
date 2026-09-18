@@ -196,7 +196,25 @@ export function collectChurn({ files = HOT_FILES, size = 40, windows = 6, cwd = 
   const head = tryGit(['rev-parse', 'HEAD'], cwd)
   if (!head) return { ok: false, reason: '不是 git 仓库，或 HEAD 无法解析' }
 
-  const all = git(['rev-list', 'HEAD'], cwd).split('\n').filter(Boolean)
+  /**
+   * ★★★ 用**刚解析出来的那个哈希**，而不是再写一次 `HEAD`。
+   *
+   * 这里此前是 `git rev-list HEAD`——于是本函数内部就有一次竞态：
+   * `rev-parse HEAD` 与 `rev-list HEAD` 之间若有新提交落地，
+   * 两次读到的就是**两个不同的历史**，而本函数会把它们当成同一个
+   * （`head` 报的是旧的、`all` 数的是新的）。
+   *
+   * 这不是理论问题：本仓有**另一个会话在同时提交**。实测一次 CI（2026-09-18
+   * 04:23–04:36 UTC）期间落了 3 个提交（`69da8fd`/`5c1d698`/`4046dd4`），
+   * 于是 `hot-file-churn.test.mjs` 的用例 ③ 红了——它红的原因与
+   * "窗口切分对不对"毫无关系，只是**两次读之间有人提交**。
+   *
+   *   > 一个在模块加载时读一次仓库、在用例里再读一次的判据，
+   *   > 在有人同时提交的仓库里，测的是"这两次读之间有没有人提交"。
+   *
+   * 快照必须是一个**具体的提交**；`HEAD` 是一个会动的名字，不是快照。
+   */
+  const all = git(['rev-list', head], cwd).split('\n').filter(Boolean)
   const ranges = windowRanges(all.length, size, windows)
 
   const perFile = {}
@@ -245,6 +263,15 @@ export function collectChurn({ files = HOT_FILES, size = 40, windows = 6, cwd = 
   return {
     ok: true,
     head: head.slice(0, 7),
+    /**
+     * ★ 本次采集**实际用的那个提交**（完整哈希）与它展开的提交表。
+     *
+     * 交出去是为了让"交叉核对"的调用方对着**同一份快照**核，
+     * 而不是自己再读一次 `HEAD`。见上面 `all` 那段：
+     * 在共享工作树上，两次读 `HEAD` 之间随时可能有人提交。
+     */
+    headFull: head,
+    revList: Object.freeze(all.slice()),
     totalCommits: all.length,
     windowSize: size,
     files: perFile,

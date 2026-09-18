@@ -332,7 +332,31 @@ export const PENDING_ITEMS = Object.freeze([
     key: 'peak-resource',
     what: '峰值内存与 CPU',
     how: '执行期间外部采样各进程 RSS/CPU（Windows 可用 Get-Process 的 PeakWorkingSet64）',
-    blockedBy: '会话转录不记录进程资源；需在执行期外部采样，且目标平台取决于 PRT-011 分发形态裁决（Task 4 待业主裁决）',
+    // ★★ 2026-09-18 订正。上一版的理由是两句，**两句都过期了**：
+    //
+    //   ① 「会话转录不记录进程资源；需在执行期外部采样」
+    //      —— 采样器**已交付**：`product/launcher/peak-resource.mjs`，
+    //         并且真的接进了 `supervisor.mjs` 的 spawn/interval/exit 生命周期。
+    //   ② 「目标平台取决于 PRT-011 分发形态裁决（Task 4 待业主裁决）」
+    //      —— PRT-011 早已裁决（2026-09-11：路线 C），**而它裁的是分发形态
+    //         （依赖 npm 上的 @deepseek-ai/dsh），不是目标平台**。
+    //         拿一个已经做完、且与平台无关的裁决当阻塞理由，
+    //         会让这一项看起来"在等一个外部决定"，而其实没有人在等它。
+    //
+    //   本轮另外补了一个更要紧的洞：`supervisor.peakResource()` 此前
+    //   **零调用方**（整个仓库只出现一次：它自己的定义）。也就是说
+    //   *就算跑一次真实执行，那个数也会被算出来然后丢掉*。
+    //   现在退出路径会经 `describePeakResource()` 把读数交出去
+    //   （4+2 条变异钉住，见 `scratch/verify-peak-resource-wired.mjs`）。
+    //
+    //   于是**剩下的是真的缺一个读数**：缺一次黄金任务真实执行留下的数，
+    //   以及承接它的证据文件。本轮**不伪造**那个文件——
+    //   阶段 3 会拿这些数字判断新路径是否性能回退，一个编造的基线
+    //   会让回退看起来正常，比没有基线更糟（§4 原话）。
+    blockedBy: '外部采样器**已交付并接线**（`product/launcher/peak-resource.mjs`，'
+      + '`supervisor.mjs` 在进程退出路径上经 `describePeakResource()` 交出读数），'
+      + '不再是"没有采样机制"。仍缺的是**一次黄金任务真实执行留下的读数**，'
+      + '以及承接这个读数的证据文件——本项在拿到那个数之前保持阻塞，不伪造。',
     resolvedBy: null,
   }),
   Object.freeze({

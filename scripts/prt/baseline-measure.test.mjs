@@ -170,6 +170,30 @@ test('真实待采集清单：GF-001 执行后应有五项结清、一项仍阻�
     assert.ok(!x.blockedBy.includes('需要一次真实执行'), `${x.key} 的阻塞原因应已更新：${x.blockedBy}`)
   }
 
+  // ★★ 而"不许写某句话"这条规则**本身不够**——它可以被绕过去：
+  //   把「需要一次真实执行」改写成「仍缺一次真实执行留下的读数」，
+  //   字面不匹配、意思一模一样，判据全绿。
+  //
+  //   > 一条"禁止某个措辞"的判据，挡不住任何一次**换词**的重述；
+  //   > 它挡住的只是偷懒，挡不住误解。
+  //
+  //   所以这里再加一条**正面**要求：阻塞原因必须说出**机制现在到哪一步了**。
+  //   `peak-resource` 这一项的机制（外部采样器 + 退出路径交出读数）已经交付，
+  //   理由里就必须写明"不再是缺机制"，否则读的人会以为还在等采样器。
+  //   本轮之前它写的正是过期的「需在执行期外部采样」+ 一个与平台无关的
+  //   PRT-011 裁决——两项都是"在等一个其实没有人在等的东西"。
+  for (const x of out.filter((i) => i.status !== 'measured')) {
+    assert.match(x.blockedBy, /已交付|已接线|不再是/,
+      `${x.key} 的阻塞理由必须说明机制到哪一步了，而不是只重复"还缺一个数"：${x.blockedBy}`)
+  }
+
+  // 而 `peak-resource` 的理由要**点名**那个采样器文件——
+  // 否则"已交付"是一句没有指涉的话，读的人无从核对。
+  const peak = out.find((x) => x.key === 'peak-resource')
+  assert.ok(peak, 'peak-resource 必须在清单里')
+  assert.match(peak.blockedBy, /peak-resource\.mjs/)
+  assert.match(peak.blockedBy, /describePeakResource/)
+
   // 结清项必须能回指到具体证据文件，而不是只写「已采集」。
   for (const x of out.filter((i) => i.status === 'measured')) {
     assert.ok(x.evidence, `${x.key} 应给出证据文件路径`)

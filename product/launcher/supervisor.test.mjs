@@ -425,3 +425,200 @@ test('peak-resource：对一台**真**进程采样（win32 走 Get-Process；采
   }
 })
 
+// ============================================================================
+// ★★★ 这根线**有没有人在看**——本组是补的，补的是一个已经发生过的洞
+//
+// 上面那些用例证明的是"采样器本身对"（喂字符串 → 解析对）。
+// 而它们**全都**直接 `new` 采样器，绕过了 `supervisor.mjs` 的接线。
+// 于是有一件事谁都没问过：
+//
+//   > `supervisor` 采出来的那个读数，**有没有任何消费者**？
+//
+// 实测答案（`scratch/verify-peak-resource-wired.mjs`，4 条变异**全部没咬住**）：
+//
+//   · 让 `peakResource()` 恒返回 `null`   → launcher 四套件全绿
+//   · 把 `peakResource()` **整个删掉**     → 全绿
+//   · 关掉周期采样                        → 全绿
+//   · 让它谎报"采到了，是 0"               → 全绿
+//
+// 也就是说：采样器每 5 秒真采一次（win32 上起一台 PowerShell），
+// 窗口维护得好好的，**而把这个数丢掉不会有任何判据发现**。
+// 这正是 `peak-resource.mjs` 文件头第 32～34 行警告过的那种接线：
+//
+//   > 按它写采样器，会得到一个永远采不到东西、却看起来接好了的接线。
+//
+// 它还挡住了一件具体的事：PRT-009 的 `peak-resource` 缺一个读数，
+// 而**就算真跑一次执行，那个数也会被算出来然后丢掉**——
+// 那一项于是永远关不掉，理由还不是"没跑"，是"跑了也没人接"。
+//
+// 下面三条判据把消费者钉住：拔掉它，这里必须红。
+// ============================================================================
+
+/** 一个**注定采得到**的替身 io：不碰真进程，只喂一条合法的 win32 JSON。 */
+function makePeakIo(initial = {}) {
+  let t = 1_000
+  const state = {
+    workingSetBytes: 8 * 1024 * 1024,
+    peakWorkingSetBytes: 64 * 1024 * 1024,
+    cpuSeconds: 2.5,
+    ...initial,
+  }
+  return {
+    /** 让"被测进程"的内存**长上去**——周期采样的意义就在这里。 */
+    set(next) { Object.assign(state, next) },
+    platform: 'win32',
+    now: () => (t += 100),
+    readFile: () => { throw new Error('win32 路径不该读文件') },
+    exec: () => ({
+      ok: true,
+      error: null,
+      stdout: JSON.stringify({
+        WorkingSet64: state.workingSetBytes,
+        PeakWorkingSet64: state.peakWorkingSetBytes,
+        CPU: state.cpuSeconds,
+      }),
+    }),
+  }
+}
+
+test('★★★ peak-resource：进程退出时，读数必须真的**被交出去**（消费者存在）', () => {
+  const logs = []
+  const child = makeFakeChild({ pid: 5150 })
+  const h = createSupervisedProcess(SPEC, {
+    spawnImpl: () => child,
+    envFor: () => ENV,
+    logger: (e) => logs.push(e),
+    peakIo: makePeakIo(),
+    peakSampleMs: 1000,
+    backoff: { baseMs: 10, factor: 2, maxMs: 100, healthyAfterMs: 1, circuitThreshold: 3 },
+  })
+  h.start()
+  child.exitNow(0)
+
+  const lines = logs.map((e) => e.message).filter((m) => typeof m === 'string' && m.includes('peak-resource'))
+  assert.equal(lines.length, 1,
+    `退出时应当**恰好一条** peak-resource 日志，实得 ${lines.length} 条：${JSON.stringify(lines)}`)
+  // 读数要真是那个数，不是一句"有采样"的废话
+  assert.match(lines[0], /peakWorkingSet=64MiB/)
+  assert.match(lines[0], /cpu=2500ms/)
+  assert.match(lines[0], /pid=5150/)
+
+  // ★ 而 `status()` 上也拿得到——**结构性**的消费者，不只那一条日志
+  assert.equal(h.status().peakResource.peakWorkingSetBytes, 64 * 1024 * 1024)
+  // ★ 句柄上那个方法**自己**也得在：只断言 `status()` 的话，把
+  //   `peakResource` 从句柄上摘掉是发现不了的（变异 ㊁ 实测全绿）。
+  //   调用方是按 `handle.peakResource()` 拿的。
+  assert.equal(h.peakResource().peakWorkingSetBytes, 64 * 1024 * 1024)
+  assert.equal(h.peakResource().ok, true)
+})
+
+test('★★ peak-resource：周期采样**真的在推进**（不是只在 spawn 那一次采）', () => {
+  // ★ 这一条补的是变异 ㊂：关掉 `setInterval` 那一段，本组原先**全绿**。
+  //   原因是替身子进程立刻退出，周期根本没机会跑——
+  //   于是"周期采样在推进"这件事，没有一条判据问过。
+  //   而它恰恰是长驻进程（生产里的 DSH Runtime 活很久）唯一有用的那部分。
+  let tick = null
+  let cleared = 0
+  const io = makePeakIo({ peakWorkingSetBytes: 4 * 1024 * 1024, cpuSeconds: 0.5 })
+  const child = makeFakeChild({ pid: 5160 })
+  const h = createSupervisedProcess(SPEC, {
+    spawnImpl: () => child,
+    envFor: () => ENV,
+    peakIo: io,
+    peakSampleMs: 1000,
+    setIntervalImpl: (fn) => { tick = fn; return { unref() {} } },
+    clearIntervalImpl: () => { cleared += 1; tick = null },
+    backoff: { baseMs: 10, factor: 2, maxMs: 100, healthyAfterMs: 1, circuitThreshold: 3 },
+  })
+  h.start()
+
+  assert.equal(h.peakResource().samples, 1, 'spawn 之后应当**立刻**采过一次')
+  assert.equal(h.peakResource().peakWorkingSetBytes, 4 * 1024 * 1024)
+  assert.ok(typeof tick === 'function', '应当注册了周期采样定时器')
+
+  // 让"被测进程"长到 16MB，然后走一个采样周期
+  io.set({ peakWorkingSetBytes: 16 * 1024 * 1024, cpuSeconds: 3 })
+  tick()
+
+  const w = h.peakResource()
+  assert.equal(w.samples, 2, `一个周期之后 samples 必须是 2，实得 ${w.samples}`)
+  // ★ 窗口取**最大**：后来采到更大的要反映出来，早先的小读数不能被顶替掉
+  assert.equal(w.peakWorkingSetBytes, 16 * 1024 * 1024, '窗口要取最大，不是取最后一次')
+  assert.equal(w.cpuMs, 3000)
+
+  // 而"关闭"真的把它关了（否则 unref 之后还可能继续采，白开 PowerShell）
+  h.dispose()
+  assert.equal(cleared >= 1, true, 'dispose 必须清掉采样定时器')
+})
+
+test('★★★ peak-resource：**采不到时不许印 0**（"不知道"与"零"必须不同形）', () => {
+  const logs = []
+  const child = makeFakeChild({ pid: 5151 })
+  // 采不到的 io：PowerShell 起不来（进程没了、权限、解释器不在）
+  const deadIo = {
+    platform: 'win32',
+    now: () => 1,
+    readFile: () => { throw new Error('nope') },
+    exec: () => ({ ok: false, stdout: '', error: new Error('Get-Process: 找不到进程') }),
+  }
+  const h = createSupervisedProcess(SPEC, {
+    spawnImpl: () => child,
+    envFor: () => ENV,
+    logger: (e) => logs.push(e),
+    peakIo: deadIo,
+    peakSampleMs: 1000,
+    backoff: { baseMs: 10, factor: 2, maxMs: 100, healthyAfterMs: 1, circuitThreshold: 3 },
+  })
+  h.start()
+  child.exitNow(0)
+
+  const lines = logs.map((e) => e.message).filter((m) => typeof m === 'string' && m.includes('peak-resource'))
+  assert.equal(lines.length, 1, '采不到**也要报**——安静地不报会让"采不到"与"压根没接线"同形')
+  assert.match(lines[0], /采不到/)
+  assert.match(lines[0], /PEAK_RESOURCE_/)
+  // ★ 核心：这一行里**不许出现任何看起来像读数的 0**
+  assert.equal(/\b0MiB\b|\bcpu=0ms\b|\bsamples=0 采到/.test(lines[0]), false,
+    `采不到时印了一个像读数的 0：${lines[0]}`)
+  assert.match(lines[0], /不是 0/)
+  // 窗口本身也不许被零填充
+  assert.equal(h.status().peakResource.ok, false)
+  assert.equal(h.status().peakResource.peakWorkingSetBytes, null)
+})
+
+test('★★ peak-resource：**没开采样**时不写那条日志（配置不同 ≠ 采不到）', () => {
+  const logs = []
+  const child = makeFakeChild({ pid: 5152 })
+  const h = createSupervisedProcess(SPEC, {
+    spawnImpl: () => child,
+    envFor: () => ENV,
+    logger: (e) => logs.push(e),
+    peakSampleMs: 0,                 // ← 明确关掉
+    backoff: { baseMs: 10, factor: 2, maxMs: 100, healthyAfterMs: 1, circuitThreshold: 3 },
+  })
+  h.start()
+  child.exitNow(0)
+  const lines = logs.map((e) => e.message).filter((m) => typeof m === 'string' && m.includes('peak-resource'))
+  // ★ 与上一条**成对**：那一条要求"采不到必须报"，这一条要求"没开采样不必报"。
+  //   两条都在，才说明写的人分得清这两种情况——
+  //   只有一条的话，"安静地不报"既能表示"没开"也能表示"漏了"，又回到同形。
+  assert.equal(lines.length, 0, `关掉采样后不该有 peak-resource 日志：${JSON.stringify(lines)}`)
+  assert.equal(h.status().peakResource, null)
+})
+
+test('★★ peak-resource：`describePeakResource` 把"从未采样"与"采不到"分开说', async () => {
+  const { describePeakResource } = await import('./supervisor.mjs')
+  assert.match(describePeakResource(null), /从未采样/)
+  const failed = describePeakResource({ ok: false, pid: 7, samples: 3, lastCode: PEAK_RESOURCE_CODES.PROCESS_GONE })
+  assert.match(failed, /PEAK_RESOURCE_PROCESS_GONE/)
+  assert.match(failed, /unknown/)
+  const okd = describePeakResource({
+    ok: true, pid: 7, samples: 2, peakWorkingSetBytes: 3 * 1024 * 1024, peakRssBytes: null, cpuMs: 250,
+  })
+  assert.match(okd, /peakWorkingSet=3MiB/)
+  assert.match(okd, /peakRss=unknown/)       // 分量各自判空
+  assert.match(okd, /cpu=250ms/)
+  // ★ 三句话两两不同——与检出解析器那组同一条纪律：
+  //   一个把三种情况说成两句的渲染器，会让读日志的人分不清该去修什么。
+  assert.equal(new Set([describePeakResource(null), failed, okd]).size, 3)
+})
+

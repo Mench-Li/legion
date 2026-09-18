@@ -2257,6 +2257,29 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-009 `peak-resource` 的**每 Run 窗口**（worker 侧那一半）。
+      //
+      // ★★ 这一条是 2026-09-18 补登记的，而它记的正是本仓最那类缺陷：
+      //    `e0b83af` 把这个套件文件提交了，**却没把它登记进任何套件**——
+      //    于是 21 条断言一次都不会跑，而 CI 摘要上看不出任何异常。
+      //    发现它靠的不是谁去读代码，是 `stageTest` 里那道
+      //    **套件清单完备性**门禁：
+      //
+      //      FAIL 套件清单不完备：1 个 *.test.mjs 不会被任何套件执行（等于不存在的断言）
+      //        orchestrator/worker/run-peak-resource.test.mjs
+      //
+      //    > 「写了一个用例」与「那个用例会被执行」，在 `git log` 上是同一件事。
+      //    > 前者只留下一行记录，后者才留下一条判据——
+      //    > 而两者在提交信息里长得一样。
+      //
+      //    ⚠️ 登记时**不要**把它并进 `runtime-contract-cross-process` 那一行：
+      //    两件事的失败面不同（一个是跨进程契约，一个是资源采样），
+      //    合并之后一次失败会同时指向两个套件名，排障时反而多一层猜测。
+      label: 'run-peak-resource（PRT-009：每 Run 一个窗口，采的是另一个进程——先认端点再信 pid）',
+      files: ['orchestrator/worker/run-peak-resource.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-410（收尾）：以**真实运行**为起点的端到端回放 + 跨进程重放 + 跨进程重算。
       //
       // `context-e2e.test.mjs` 那条路的起点是**直接 POST 装配接口**——

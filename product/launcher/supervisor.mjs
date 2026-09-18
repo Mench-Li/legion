@@ -67,6 +67,52 @@ export const DEFAULT_BACKOFF = Object.freeze({
  */
 export const DEFAULT_PEAK_SAMPLE_MS = 5000
 
+/**
+ * 把一次 `peak-resource` 窗口渲染成**一行可读、也可解析**的文字。
+ *
+ * ## 为什么需要它——这个函数补的是一个"**读数没人看**"的洞
+ *
+ * `peakResource()` 此前在**整个仓库里只出现一次**：它自己的定义。
+ * 采样器每 5 秒真采一次（win32 上每次起一台 PowerShell），窗口也维护得好好的，
+ * 而**没有任何东西读它**。实测（`scratch/verify-peak-resource-wired.mjs`，
+ * 变异 4 条）：
+ *
+ *   · 让 `peakResource()` 恒返回 `null`        → 全绿
+ *   · 把 `peakResource()` **整个删掉**          → 全绿
+ *   · 关掉周期采样                            → 全绿
+ *   · 让它谎报"采到了，是 0"                   → 全绿
+ *
+ * 也就是说这根线**拔掉也不会有人发现**——而这正是 `peak-resource.mjs`
+ * 自己的文件头警告过的那种接线：
+ *
+ *   > 按它写采样器，会得到一个永远采不到东西、却看起来接好了的接线。
+ *
+ * 更要紧的是它挡住了一件事：PRT-009 的 `peak-resource` 一直缺一个读数，
+ * 而**就算跑一次真实执行，那个数也会被算出来然后丢掉**——
+ * 于是那一项永远关不掉，理由还不是"没跑"，是"跑了也没人接"。
+ *
+ * ## 一条纪律：采不到时**不打印 0**
+ *
+ * 与 `peak-resource.mjs` 文件头那条同源：`0` 是一个**测量结论**
+ * （"一个字节都没用"），不是"不知道"。
+ *
+ *   > 一个把"没采到"渲染成 0 的日志行，会让"这台机器很省内存"
+ *   > 与"这台机器根本没采到"在事后读日志时同形。
+ */
+export function describePeakResource(reading) {
+  if (reading === null || reading === undefined) return 'peak-resource：从未采样'
+  const mib = (b) => (typeof b === 'number' && Number.isFinite(b)
+    ? `${Math.round((b / 1024 / 1024) * 10) / 10}MiB` : 'unknown')
+  const ms = (v) => (typeof v === 'number' && Number.isFinite(v) ? `${Math.round(v)}ms` : 'unknown')
+  const head = `peak-resource pid=${reading.pid ?? '?'} samples=${reading.samples ?? 0}`
+  if (reading.ok !== true) {
+    return `${head} 采不到（lastCode=${reading.lastCode ?? '未知'}）：`
+      + '峰值内存与 CPU 都是 unknown——**不是 0**'
+  }
+  return `${head} peakWorkingSet=${mib(reading.peakWorkingSetBytes)}`
+    + ` peakRss=${mib(reading.peakRssBytes)} cpu=${ms(reading.cpuMs)}`
+}
+
 function isAlive(child) {
   if (child === null || child === undefined) return false
   if (child.exitCode !== null && child.exitCode !== undefined) return false
@@ -124,6 +170,14 @@ export function createSupervisedProcess(spec, {
    * 窗口读数要留下来——否则"峰值是多少"会在进程死掉的那一刻变成"采不到"。
    */
   let lastPeakResource = null
+  /**
+   * ★ 这次 spawn 的读数**报过了没有**。
+   *
+   * `dispose()` 与 `exit` 都会走到收采样那一步，而读数只有一份；
+   * 不记这个标志的话，同一次运行的峰值会在日志里出现两行，
+   * 读的人会以为采了两轮（或者以为有两个进程）。
+   */
+  let peakReported = false
 
   const listeners = new Set()
 
@@ -167,6 +221,7 @@ export function createSupervisedProcess(spec, {
     if (!(peakSampleMs > 0)) return
     if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return
     peakSampler = createPeakResourceSampler(peakIo === null ? { pid } : { pid, io: peakIo })
+    peakReported = false
     // 立刻先采一次：只靠定时器的话，一个活不过一个采样周期的进程
     // 会连一个读数都没有——而那恰恰是最需要读数的那一类。
     peakSampler.sample()
@@ -189,6 +244,45 @@ export function createSupervisedProcess(spec, {
       lastPeakResource = peakSampler.window()
       peakSampler = null
     }
+  }
+
+  /**
+   * 读当前峰值窗口：活着 → 采样器当前窗口；已退出 → 退出前最后一次窗口。
+   *
+   * ★ 抽成一个**局部函数**而不是只作为句柄上的方法：句柄里的
+   *   `peakResource()` 是对象字面量的方法简写，**不构成局部绑定**——
+   *   在 `status()` 或 `reportPeakResource()` 里写 `peakResource()`
+   *   会抛 `ReferenceError`。（第一版就是这么写的，被套件当场咬住。）
+   */
+  function readPeakResource() {
+    if (peakSampler !== null) return peakSampler.window()
+    return lastPeakResource
+  }
+
+  /**
+   * PRT-009 `peak-resource`：把这次 spawn 的窗口读数**交出去**。
+   *
+   * ★ 这是那根线唯一的消费者。此前 `peakResource()` 零调用方，
+   *   于是采样器白采（见 `describePeakResource` 的注释里那 4 条变异）。
+   *
+   * 放在退出路径上、且**只报一次**，理由：
+   *   · 此刻窗口才是终值（进程一走，外部采样只剩 `PROCESS_GONE`）；
+   *   · 与那条「退出」日志同一个时刻，读日志的人一眼能对上；
+   *   · `dispose()` 之后调用方很可能已经关掉 sink（见 `dispose()` 的注释），
+   *     所以**不**在 dispose 路径上写日志。
+   *
+   * 采不到也照报——报的是"采不到 + 具名原因"。**安静地不报**会让
+   * "采不到"与"这台进程根本没接过采样"在日志里同形。
+   */
+  function reportPeakResource() {
+    if (peakReported) return
+    const reading = readPeakResource()
+    peakReported = true
+    if (reading === null) {
+      // 压根没有采样器（没开采样 / 没有真 pid）：这是**配置**，不是失败，不刷屏。
+      return
+    }
+    log('info', describePeakResource(reading))
   }
 
   function handleExit(code, signal) {
@@ -214,6 +308,8 @@ export function createSupervisedProcess(spec, {
     const uptime = startedAt === null ? 0 : now() - startedAt
     lastExit = Object.freeze({ code: code ?? null, signal: signal ?? null, at: now(), uptimeMs: uptime })
     log('warn', `退出 code=${code ?? ''} signal=${signal ?? ''}（存活 ${uptime}ms）`)
+    // PRT-009 `peak-resource`：这个时刻窗口才是终值，把它记下来。
+    reportPeakResource()
 
     if (uptime >= cfg.healthyAfterMs) {
       // 跑够久了：这次算「正常运行后偶发退出」，退避归零，立即重启
@@ -400,6 +496,16 @@ export function createSupervisedProcess(spec, {
         lastExit,
         lastError,
         backoffMs: Math.min(cfg.baseMs * (cfg.factor ** Math.max(0, consecutiveFastFailures - 1)), cfg.maxMs),
+        /**
+         * PRT-009 `peak-resource`：随快照一起给出的峰值读数。
+         *
+         * ★ 放进 `status()` 是为了让**结构性**的消费者也能拿到它，而不只有
+         *   那一条日志。`launcher.mjs` 的 `persistRunRecord()` 已经在遍历
+         *   `supervisor.status()`——它今天只挑了 `key/pid/image` 三个字段，
+         *   所以这一项**暂时还不会**自动流进运行记录；但快照里有它之后，
+         *   接上只是加一行的事，而不是"要再去动采样器"。
+         */
+        peakResource: readPeakResource(),
       })
     },
 
@@ -416,10 +522,7 @@ export function createSupervisedProcess(spec, {
      * **不返回一个零填充的对象**：`0` 是"一个字节都没用"这个测量结论，
      * 不是"不知道"。
      */
-    peakResource() {
-      if (peakSampler !== null) return peakSampler.window()
-      return lastPeakResource
-    },
+    peakResource: readPeakResource,
 
     /** 供测试与 Launcher 判断进程是否存活。 */
     isAlive: () => isAlive(child),

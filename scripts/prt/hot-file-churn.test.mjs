@@ -380,7 +380,27 @@ test('③ ★★★ 每个窗口的计数**逐格等于**独立算出的精确�
   // 与 `exactWindowCount` 用另一条路径（`--no-walk --name-only` + 自己解析）
   // 算出的值逐一对上。两条路径没有共用任何假设，所以它们同时错得一样的
   // 概率极低。
-  const all = git(['rev-list', 'HEAD']).split('\n').filter(Boolean)
+  //
+  // ★★★ 用 `churn.revList`（本次采集**实际用的**那份快照），
+  //   而**不是**再 `git rev-list HEAD` 读一次。
+  //
+  //   这里此前是 `git(['rev-list', 'HEAD'])`，于是本用例在共享工作树上会
+  //   **随机红**：`churn` 在模块加载时算出，而这一行在十几分钟后才跑，
+  //   中间只要有人提交，两次读到的历史就不同——窗口随之后移一格，
+  //   逐格比对全线错位。
+  //
+  //   实测：2026-09-18 04:23–04:36 UTC 那次 CI 期间落了 3 个提交
+  //   （`69da8fd`/`5c1d698`/`4046dd4`），本用例红了，而红的理由与
+  //   "窗口切分对不对"毫无关系。
+  //
+  //   > 一个在模块加载时读一次仓库、在用例里再读一次的判据，
+  //   > 在有人同时提交的仓库里，测的是"这两次读之间有没有人提交"。
+  //
+  //   ⚠️ 共用同一份**提交表**不会削弱本用例：它要钉的是
+  //   "窗口切分 + 路径过滤"对不对，而那仍然由**另一条路径**
+  //   （`exactWindowCount` 的 `--no-walk --name-only` + 自己解析）独立算出。
+  //   共用的是"查哪个提交"，不是"怎么数"。
+  const all = [...churn.revList]
   const size = churn.windowSize
   let cells = 0
   for (const v of Object.values(churn.files)) {
@@ -398,6 +418,99 @@ test('③ ★★★ 每个窗口的计数**逐格等于**独立算出的精确�
   }
   assert.ok(cells > 0, '一格都没核对到——这条用例什么都没验')
   console.log(`  ✔ ③ 交叉核对：${cells} 格（${Object.keys(churn.files).length} 个文件 × ${size} 窗口）逐格一致`)
+})
+
+test('③ ★★★ 快照必须对「核对期间又有人提交」免疫（模拟共享工作树）', () => {
+  // ## 这一条钉的是一个**真实发生过**的红
+  //
+  // 2026-09-18 04:23–04:36 UTC 那次 CI，`test` 阶段报
+  // `FAIL prt-churn … ✖ ③ 每个窗口的计数逐格等于独立算出的精确值`。
+  // 而那次失败**与窗口切分毫无关系**：本仓有另一个会话在同时提交，
+  // 那 13 分钟里落了 3 个提交（`69da8fd`/`5c1d698`/`4046dd4`）。
+  //
+  // `churn` 在**模块加载时**算出，而用例 ③ 在十几分钟后才自己
+  // `git rev-list HEAD` 再读一次——两次读到的是**两个不同的历史**，
+  // 窗口随之后移一格，逐格比对全线错位。
+  //
+  //   > 一个在模块加载时读一次仓库、在用例里再读一次的判据，
+  //   > 在有人同时提交的仓库里，测的是"这两次读之间有没有人提交"。
+  //
+  // 修法：`collectChurn` 用**刚解析出来的那个哈希**展开提交表
+  // （`rev-list <hash>`，而不是 `rev-list HEAD`），并把那份快照
+  // 作为 `revList` 交出来；核对方对着**同一份快照**核。
+  //
+  //   > 快照必须是一个**具体的提交**；`HEAD` 是一个会动的名字，不是快照。
+  //
+  // ## 为什么这条用例必须有**反向对照**
+  //
+  // 只断言"核对通过"是不够的——把 `all` 写死成空数组也能让某些断言通过。
+  // 所以这里同时证明：**用移动过的 `HEAD` 去核，一定对不上**。
+  // 那才说明这条用例真的在区分"快照"与"会动的名字"。
+  const dir = mkdtempSync(join(tmpdir(), 'prt-churn-snapshot-'))
+  const g = (args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8' }).trim()
+  try {
+    g(['init', '-q'])
+    g(['config', 'user.email', 'churn@test'])
+    g(['config', 'user.name', 'churn'])
+    // 5 个提交，每个都碰 hot.txt ⇒ 任一窗口的计数都非零，逐格比对才有意义
+    for (let i = 1; i <= 5; i++) {
+      writeFileSync(join(dir, 'hot.txt'), `v${i}\n`)
+      g(['add', '-A'])
+      g(['commit', '-q', '-m', `c${i}`])
+    }
+
+    const c = collectChurn({ files: ['hot.txt'], size: 2, windows: 2, cwd: dir })
+    assert.equal(c.ok, true)
+    const snapshotLen = [...c.revList].length
+    assert.equal(snapshotLen, 5, `夹具前提：快照应有 5 个提交，实得 ${snapshotLen}`)
+
+    // ── 模拟"核对期间又有人提交" ────────────────────────────────────
+    writeFileSync(join(dir, 'hot.txt'), 'v6\n')
+    g(['add', '-A'])
+    g(['commit', '-q', '-m', 'c6'])
+    const movedHead = g(['rev-parse', 'HEAD'])
+    assert.notEqual(movedHead, c.headFull, '夹具前提：HEAD 必须真的动了')
+    assert.equal(g(['rev-list', 'HEAD']).split('\n').filter(Boolean).length, 6,
+      '夹具前提：历史必须真的长了一条')
+
+    // ── ① 快照不随 HEAD 移动 ────────────────────────────────────────
+    assert.equal([...c.revList].length, snapshotLen,
+      '`revList` 必须是**快照**：HEAD 动了它不许跟着动')
+    assert.equal(c.revList[0], c.headFull, '快照的第一个提交就是采集时的 HEAD')
+
+    // ── ② 对着快照逐格核对：仍然对得上 ──────────────────────────────
+    const wins = c.files['hot.txt'].windows
+    assert.ok(wins.length > 0, '夹具前提：应当有窗口')
+    let checked = 0
+    for (const w of wins) {
+      const slice = [...c.revList].slice(w.from - 1, w.to)
+      assert.equal(slice.length, w.to - w.from + 1, '窗口切片长度应与报告范围一致')
+      assert.equal(w.count, exactWindowCount(slice, 'hot.txt', dir),
+        `窗口 ${w.rank} 与独立路径算出的值不一致`)
+      checked += 1
+    }
+    assert.ok(checked > 0, '一格都没核到——这条用例什么都没验')
+
+    // ── ③ ★ 反向对照：用**移动过的** HEAD 去核，必须对不上 ────────────
+    //
+    //   没有这一段，本用例可能是恒真的（比如 `all` 被写死）。
+    const moved = g(['rev-list', 'HEAD']).split('\n').filter(Boolean)
+    const w0 = wins[0]
+    const movedSlice = moved.slice(w0.from - 1, w0.to)
+    const movedCount = exactWindowCount(movedSlice, 'hot.txt', dir)
+    // 6 个提交、窗口 2：移动后同一格覆盖的是**不同的两个提交**，
+    // 于是计数应当与快照那一格不同（或至少切片内容不同）。
+    assert.notDeepEqual(movedSlice, [...c.revList].slice(w0.from - 1, w0.to),
+      '★ 反向对照失效：移动 HEAD 之后同一格切出来的提交竟然一样，'
+      + '那说明这条用例区分不出"快照"与"会动的名字"')
+    // 6 个提交全都是 `hot.txt`，所以计数恰好相等——这里断言的是**切片不同**，
+    // 而不是计数不同。两件事要分开说，否则这条反向对照是假的。
+    assert.equal(movedCount, w0.count,
+      '夹具事实：本夹具里每个提交都碰 hot.txt，所以计数恰好相等——'
+      + '这正是为什么上面断言的是**切片**而不是计数')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('③ ★★ 路径必须**精确相等**才算碰上（`endsWith` 会把同名的子路径算进来）', () => {

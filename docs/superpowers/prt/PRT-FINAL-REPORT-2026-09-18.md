@@ -280,8 +280,15 @@ is `mcp__<serverName>__<rawName>`, normalized to the DeepSeek function-name
 **⑥ 闸门读数**：`runtime/dsh-composition` 全域 **970/970**；新套件
 `scope-facts` 6/6、`execution-scope-port` 8/8；`production-scope-wiring` 7 → **9**；
 `scripts/config/config.test.mjs` **53/53**；`scripts/prt` **331/331**；
-`--only syntax,env,boundary,deps,build,stage,doc` 全 PASS；`scan --check` PASS；
+全量 CI `.ci/r19c` **九个阶段全 PASS**（含 `test`，810s）；`scan --check` PASS；
 `runtime/` → `product/` imports **0**。
+
+★ 而**第一次**全量 CI（`.ci/r19b`）在跑满 803s 后红了**一条**：
+`p13-host-injection` ④（SSE 宿主形态）以 `SyntaxError: Unexpected end of JSON input`
+失败、耗时 260ms（通过时 4097ms）；重跑全绿、该套件 39/39、单独跑 6 次全绿。
+**两次读数都留在账上**，且那条测试**没有被改**——详见会话报告 §10.49 ⑦。
+*一条被重试盖住的偶发，与一条被修好的偶发，在摘要上是同一个绿；
+差别在于前者会回来，而且回来时没人再看得见它。*
 
 ---
 

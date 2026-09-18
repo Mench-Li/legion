@@ -33,6 +33,11 @@
       "reason": "PRT-707 死的那份实现（§5.3.1 / §5 第 17 条）"
     },
     {
+      "file": "product/launcher/fixtures/prt509-credentials-probe.mjs",
+      "class": "by-design",
+      "reason": "PRT-509 真 DSH 进程用例的覆盖层夹具，按路径使用，不由模块 import"
+    },
+    {
       "file": "product/launcher/index.mjs",
       "class": "by-design",
       "reason": "同上（cli.mjs 直接 import ./launcher.mjs）"

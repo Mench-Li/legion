@@ -68,9 +68,12 @@ test('① ★★★ 正对照：入口认得出、已知接上的可达、清单
   }
 
   // ①-3 ★ 清单声明的行必须可达。两种路径写法各一条：
-  //      `module: './plugins/hard-floor.mjs'`（相对声明文件）
-  //      `path: 'product/orchestrator/worker.mjs'`（仓库相对）
+  //      `module` 的**文件相对**写法（`./` 开头）
+  //      `entry.path` 的**仓库相对**写法
   //      两次实测都是漏了其中一种，把正在跑的进程/行报成死代码。
+  // ★★ 这两行原来把形状**连真路径一起照抄**了——而 `MANIFEST_PATTERNS` 读的是
+  //      源码文本、分不清注释 ⇒ **注释里的例子变成了真声明**，给它多加了一个假入口。
+  //      （判据 `criteria-files-do-not-impersonate-manifests` 现在盯着这件事。）
   for (const [f, why] of [
     ['runtime/dsh-composition/plugins/hard-floor.mjs', 'patch-layer 的 module:（文件相对）'],
     ['product/orchestrator/worker.mjs', 'process-manifest 的 entry.path（仓库相对）'],
@@ -157,7 +160,37 @@ test('④ ★★ 读数：四族 gap 仍然不可达（谁把它们接上，这�
   // 一个会变红的断言，所以接线的人**必然**会经过这里改一次分类。
   const READINGS = [
     // 族一：PRT-604/605/606 的三道范围检查（台账 ✅；见状态文档 §5.2）
-    ['runtime/dsh-composition/path-scope.mjs', '§5.2 三道范围检查之一'],
+    //
+    // ★★ 2026-09-18 本条红过一次——而那次红**一半是真的、一半是我自己造的**：
+    //   报告说 path-scope 与 external-api-scope **都**被接上了。
+    //   · `path-scope.mjs` —— **真的接上了**（见下），故从本表删除；
+    //   · `external-api-scope.mjs` —— **假的**：`scripts/prt/boundary-facts.mjs` 里的
+    //     「手钉坐标表」用的键名正好是 `reachability.mjs` 的 `MANIFEST_PATTERNS`
+    //     认得的那一种，于是**一张记账表被读成了清单**，把一个**零生产 importer**
+    //     的模块报成"已接线"。⇒ 那个键名已改，并在 `boundary-facts` 里加了判据
+    //     「我方判据文件不得冒充清单」（借用**同一份** `MANIFEST_PATTERNS`）。
+    //
+    //   > 一个"某处声明了这个模块会被加载"与一个"某处**提到了**这个模块的坐标"，
+    //   > 在只看那个键名 + `.mjs` 的判据里是同一个东西——
+    //   > 而前者是**接线**，后者是**记账**；两者的处置**相反**。
+    //
+    //   ★ 这次的教训之所以值得写在**这一行**上：那条假消息的形状是**好消息**，
+    //   而它下面的四条指示会让人**删掉本行、更新裁决、清基线**——
+    //   也就是把一个没接的模块记成接上了。**判据说谎比判据变瞎更贵。**
+    //
+    // ── `path-scope.mjs` 为什么可以从这里删掉（① 端到端，不是只加了个 import）──
+    //   实测的调用链（不是"有人 import 了它"）：
+    //     `patch-layer.mjs`（PATCH_LAYER_ROWS）加载 `plugins/pre-execute-row.mjs`
+    //       → `plugins/root-row.mjs:497` 调 `scopePortFromEnv({ env })`（**真调用**）
+    //       → 失败时 `throw`（**fail closed**，不按"没配"处理）
+    //       → `root-row.mjs:508-514` 把 `scope.port` 传进
+    //         `installEnforcementRoot({ pathScope: scope.port })`
+    //       → `scope-port.mjs:169` 调 `checkPathScope({ target, scope, direction, … })`
+    //   ⇒ `path-scope.mjs` 的判据在**生产装配路径上真的会跑**。
+    //   ⚠️ 仍然成立的边界：**没配**范围表时 `port` 是 `null`，
+    //      而 `tool-request.mjs:639` 那句 `if (pathScope === null) return undefined`
+    //      ⇒ 那次缺席落到的是**放行**。所以「三道范围检查」里这一道
+    //      **从"一次都不跑"变成了"配了才跑"**，不是"默认就拦"。
     ['runtime/dsh-composition/execution-scope.mjs', '§5.2'],
     ['runtime/dsh-composition/external-api-scope.mjs', '§5.2'],
     // 族二：能力包这一条链（PRT-1002..1006，台账 ✅）

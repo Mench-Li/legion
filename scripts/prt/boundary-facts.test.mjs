@@ -24,12 +24,13 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 import {
   FACTS, checkFacts, defaultContext, patchYmlRepresentedRows,
   scanCommitCitations, scanLineCitations, checkPinnedCitations,
+  checkManifestImpersonation,
   STATUS_DOC, LEDGER_DOC, PATCH_YML, REPO, HUB_TOKEN_ENV, WORKBENCH_TOKEN_ENV,
 } from './boundary-facts.mjs'
 
@@ -492,7 +493,7 @@ test('⑫b ★★ 控制：把**历史上那次真实位移的旧坐标**钉上�
 
   // ★ 用**同一份**核法（不重抄逻辑）去钉旧坐标
   const injected = Object.freeze([Object.freeze({
-    path: 'runtime/dsh-composition/plugins/root-row.mjs',
+    file: 'runtime/dsh-composition/plugins/root-row.mjs',
     line: 485,
     text: 'const installed = installEnforcementRoot({',
   })])
@@ -504,7 +505,7 @@ test('⑫b ★★ 控制：把**历史上那次真实位移的旧坐标**钉上�
   // ★★ 正面对照：同一份核法钉**位移后**的坐标 ⇒ 必须绿。
   //    少了这一条，"永远报红"的实现也能通过上面那个断言。
   const good = Object.freeze([Object.freeze({
-    path: 'runtime/dsh-composition/plugins/root-row.mjs',
+    file: 'runtime/dsh-composition/plugins/root-row.mjs',
     line: 508,
     text: 'const installed = installEnforcementRoot({',
   })])
@@ -522,7 +523,7 @@ test('⑫c 控制：钉的内容差一个字符 ⇒ 必须红（逐字比对真�
 
   // 差一个字符
   const off = Object.freeze([Object.freeze({
-    path: 'runtime/dsh-composition/tool-request.mjs',
+    file: 'runtime/dsh-composition/tool-request.mjs',
     line: 639,
     text: 'if (pathScope === null) return undefined;', // 多个分号
   })])
@@ -532,7 +533,7 @@ test('⑫c 控制：钉的内容差一个字符 ⇒ 必须红（逐字比对真�
   // ★ 而**行尾空白**差异被 `trim()` 吸收（有意：CRLF/尾空格不该假红）——
   //   这是一条**写下来的**边界，不是意外。
   const trailing = Object.freeze([Object.freeze({
-    path: 'runtime/dsh-composition/tool-request.mjs',
+    file: 'runtime/dsh-composition/tool-request.mjs',
     line: 639,
     text: 'if (pathScope === null) return undefined   ',
   })])
@@ -540,7 +541,7 @@ test('⑫c 控制：钉的内容差一个字符 ⇒ 必须红（逐字比对真�
     '行尾空白造成了假红 ⇒ 会在 CRLF 检出上乱叫')
   // ⚠️ 已知边界：`trim()` 也吸收了**缩进**，所以缩进变化不会红。
   const indent = Object.freeze([Object.freeze({
-    path: 'runtime/dsh-composition/tool-request.mjs',
+    file: 'runtime/dsh-composition/tool-request.mjs',
     line: 639,
     text: '        if (pathScope === null) return undefined',
   })])
@@ -552,4 +553,102 @@ test('⑫d 控制：手钉表被清空 ⇒ 必须红（不许变成"零条都通
   const r = checkPinnedCitations(Object.freeze([]))
   assert.ok(r.broken.length > 0,
     '手钉表清空了却没红 ⇒ "一层被删掉"与"一层全绿"在输出里长得一样')
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// ⑬ 我方判据文件**不得冒充清单**（2026-09-18 实测事故的守卫）
+// ══════════════════════════════════════════════════════════════════════════
+//
+// 事故本身：`boundary-facts.mjs` 的手钉表用了 `MANIFEST_PATTERNS` 认得的那种键名，
+// 于是**一张记账表被可达性探针读成了清单**，把 4 个模块（其中
+// `external-api-scope.mjs` **零个**生产 importer）报成"生产入口"。
+// 而那条假消息的形状是**好消息**：它教人去删 READINGS、更新裁决、清基线 ⇒
+// **把一个没接线的模块记成已接线**。
+//
+// ★ 这几条控制的意义不在于"再跑一遍真文件"（⑬a 就干那个），
+//   而在于**证明这条判据会咬**——因为它的正常输出是"零条"，
+//   而"零条"与"根本没扫"在输出上长得一模一样。
+
+const IMP_DIR = 'scratch/_impersonate_probe'
+
+function withImpFixture(files, fn) {
+  const dir = resolve(REPO, IMP_DIR)
+  rmSync(dir, { recursive: true, force: true })
+  mkdirSync(dir, { recursive: true })
+  try {
+    for (const [name, text] of Object.entries(files)) writeFileSync(resolve(dir, name), text, 'utf8')
+    return fn(checkManifestImpersonation({ dir: IMP_DIR }))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+test('⑬a 真文件：`scripts/prt/` 今天没有一处"冒充清单"', () => {
+  const r = checkManifestImpersonation()
+  assert.ok(r.scanned > 0, `扫了 ${r.scanned} 个文件 ⇒ 这条其实什么也没检查`)
+  assert.deepEqual(r.bad, [],
+    '★ 下面这些写法会被可达性探针读成"这个模块会被加载"：\n  ' + r.bad.join('\n  ')
+    + '\n⇒ 描述形状时用**占位路径**，不要照抄带真路径的例子。'
+    + '\n   一次实测：这行注释让 `external-api-scope.mjs`（零生产 importer）'
+    + '\n   看起来"已接线"，而探针的红会教人去清基线、更新裁决。')
+})
+
+test('⑬b ★ 控制：写了 `清单键 + 真模块路径` ⇒ 必须红', () => {
+  // ★★ 这个 fixture 的**源码本身**也在判据的扫描面里（判据读的是**文本**，不是 AST）。
+  //   我第一版直接把那个形状写进了字符串字面量里 ⇒ **这条控制把真判据弄红了**
+  //   （`① 真实仓库：全部通过` 跟着一起红）。**同一形状，本会话第三次**：
+  //   前两次是 `wireChecked`（手钉文本）、`external-api-scope`（reachability 的说明注释）。
+  //
+  //   > 一个"我写下这个坏形状"与一个"我这个文件里有这个坏形状"，
+  //   > 在只读文本的判据里是同一个东西——**而写控制的时候这两者必然同时成立。**
+  //
+  //   ⇒ 用拼接把形状拆开：源码里就不出现它，而运行时落到 fixture 里的还是它。
+  const KEY = 'path'
+  const MOD = 'runtime/dsh-composition/path-scope.mjs'
+  withImpFixture({
+    'fake.mjs': [
+      '// 下面这个形状会被探针读成清单声明',
+      `const t = { ${KEY}: '${MOD}' }`,
+      '',
+    ].join('\n'),
+  }, (r) => {
+    assert.equal(r.bad.length, 1, `期望命中 1 处，实际 ${r.bad.length}：${r.bad.join(' | ')}`)
+    assert.match(r.bad[0], /fake\.mjs:2/, `行号不对：${r.bad[0]}`)
+    assert.match(r.bad[0], /path-scope\.mjs/)
+  })
+})
+
+test('⑬c ★ 控制：占位路径（不是一个真模块）⇒ 不许红', () => {
+  withImpFixture({
+    // ★ 这正是"描述形状而不照抄"的写法：键名还在，但引号里不是仓库里的模块
+    'ok.mjs': [
+      '// 那种形状长这样（用占位，不照抄真路径）',
+      "//   path: '<某个 .mjs 仓库路径>'",
+      '',
+    ].join('\n'),
+  }, (r) => {
+    assert.deepEqual(r.bad, [],
+      '占位路径被误报了 ⇒ 这条判据会把"正确地描述形状"也判红，'
+      + '而一条**红在正确地方**的判据比没有更坏：它会教人删掉那句说明。')
+  })
+})
+
+test('⑬d ★ 控制：改成 `entry.path` 的说法（没有 冒号+引号 的形状）⇒ 不许红', () => {
+  withImpFixture({
+    'prose.mjs': [
+      '// `process-manifest.mjs` 的 `entry.path` 是**仓库相对**的写法',
+      '// 例：`product/orchestrator/worker.mjs` 就是这样被加载的',
+      '',
+    ].join('\n'),
+  }, (r) => {
+    assert.deepEqual(r.bad, [],
+      '单纯提到路径、没有清单形状，也被误报了 ⇒ 判据的键太宽'
+      + '（本会话已因此栽过五次，每一次都是"把自己的噪声报成别人的缺陷"）')
+  })
+})
+
+test('⑬e 控制：扫描面为空 ⇒ `scanned` 必须是 0（不许假装"没问题"）', () => {
+  const r = checkManifestImpersonation({ dir: 'scratch/_definitely_not_here' })
+  assert.equal(r.scanned, 0, '目录不存在时 scanned 应该是 0，而不是悄悄报"全绿"')
+  assert.deepEqual(r.bad, [])
 })

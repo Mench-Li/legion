@@ -51,6 +51,8 @@ import { execFileSync } from 'node:child_process'
 
 import { specFor, PROCESS_KEYS } from '../../product/process-manifest.mjs'
 import { PATCH_LAYER_ROWS } from '../../runtime/dsh-composition/patch-layer.mjs'
+// ★ 借用**同一份**「清单形状」正则（见下面 D2 一节）：两份会漂的键表就是本仓的旧账。
+import { MANIFEST_PATTERNS } from './reachability.mjs'
 
 export const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
@@ -102,7 +104,74 @@ export function defaultContext() {
     lineCitations: () => scanLineCitations(doc(LEDGER_DOC)),
     commitCitations: () => scanCommitCitations(doc(LEDGER_DOC)),
     pinnedCitations: () => checkPinnedCitations(),
+    manifestImpersonation: () => checkManifestImpersonation(),
   }
+}
+
+// ── D2. ★★★ 我方判据文件**不得冒充清单**（2026-09-18 实测事故）─────────────
+//
+// ★ 起因是一个**好消息形状**的假信号，比"漏报"贵得多：
+//
+//   CI 里 `reachability` 探针报"两族 gap 已经变成可达"（好消息），
+//   而它下面写着四条指示：确认接线 → **从 READINGS 删掉本条** →
+//   **更新状态文档 §5 的裁决** → **跑 `--record` 清基线**。
+//   照做就是**把一个没接线的模块记成已接线**。
+//
+//   追下去：`external-api-scope.mjs` 有**零个**生产 importer，
+//   它成为"入口"的理由是 —— **`清单声明（scripts/prt/boundary-facts.mjs）`**。
+//   也就是**我上一轮加的那张手钉坐标表**：它的键名正好是
+//   `reachability.mjs` 的 `MANIFEST_PATTERNS` 认得的那一种。
+//
+//   > 一个"某处声明了这个模块会被加载"与一个"某处**提到了**这个模块的坐标"，
+//   > 在只看那个键名 + `.mjs` 字面量的判据里是同一个东西——
+//   > 而前者是**接线**，后者是**记账**；两者的处置**相反**。
+//
+//   ★★ 而且它**遮掩了一个已知缺口**：同一张表还让
+//   `runtime-contract-server.mjs` 看起来可达，而 §5 第 20 条说的正是
+//   「Runtime 契约服务端**没有生产挂点**」。一张记账表同时干了两件事：
+//   报了一个假的"接上了"，捂了一个真的"没接上"。
+//
+// ★★ 修的时候我又踩了一次（本会话同一形状第五次）：在 `reachability.mjs` 的
+//   说明里**照样写出**了那个键名 + 一个真路径当例子 ⇒ 探针把
+//   **`reachability.mjs` 自己**记成了该模块的入口。**解释这个 bug 的注释复现了这个 bug。**
+//
+// ⇒ 这条判据借用 `reachability.mjs` **导出的同一份** `MANIFEST_PATTERNS`：
+//   两份会漂的键表就是本仓的旧账，所以**只留一份**。
+//
+// ⚠️ 边界：只扫 `scripts/prt/`（判据与记账所在的地方）。
+//   **不能**扫全仓——`patch-layer.mjs` / `process-manifest.mjs` 是**真清单**，
+//   它们那样写是**对的**。*一条"所有 .mjs 都不许写清单形状"的判据会红在正确的地方。*
+const CRITERIA_DIR = 'scripts/prt'
+
+/** 我方判据文件里有没有"看起来像清单声明、而且指着一个真实模块"的写法。 */
+export function checkManifestImpersonation({ dir = CRITERIA_DIR } = {}) {
+  const bad = []
+  let scanned = 0
+  const dshRoot = dshCheckoutRoot()
+  const bases = [REPO]
+  if (existsSync(dshRoot)) bases.push(dshRoot)
+  let names = []
+  try { names = readdirSync(resolve(REPO, dir)) } catch { return { scanned: 0, bad: [] } }
+  for (const n of names.sort()) {
+    if (!n.endsWith('.mjs')) continue
+    const rel = `${dir}/${n}`
+    let text = ''
+    try { text = readFileSync(resolve(REPO, dir, n), 'utf8') } catch { continue }
+    scanned++
+    for (const re of MANIFEST_PATTERNS) {
+      for (const m of text.matchAll(new RegExp(re.source, 'g'))) {
+        const captured = m[1]
+        // ★ 只有"抓到的路径**真的是一个模块**"才会被探针当成入口。
+        //   占位写法（`'<某个 .mjs 路径>'`）抓不到，也不算问题。
+        const hit = bases.some((b) => existsSync(resolve(b, captured)))
+        if (!hit) continue
+        const line = text.slice(0, m.index).split('\n').length
+        bad.push(`${rel}:${line} 的 ${JSON.stringify(captured)} 会被可达性探针读成"清单声明"`
+          + `（它会把这个模块当成**生产入口**）`)
+      }
+    }
+  }
+  return { scanned, bad: bad.sort() }
 }
 
 // ── C. 台账里的**坐标**（`file:line` 与提交哈希）─────────────────────────────
@@ -320,31 +389,31 @@ export function scanLineCitations(text, treeSet = null) {
 //   **"4 次对"在这里建立不了任何东西**：我不知道哪一类文件会不一致。）
 const PINNED_CITATIONS = Object.freeze([
   Object.freeze({
-    path: 'runtime/dsh-composition/tool-request.mjs',
+    file: 'runtime/dsh-composition/tool-request.mjs',
     line: 639,
     text: 'if (pathScope === null) return undefined',
     why: '本会话多次引为「缺表 = 放行」——这句话就是那条边界的**全部依据**',
   }),
   Object.freeze({
-    path: 'runtime/dsh-composition/runtime-contract-server.mjs',
+    file: 'runtime/dsh-composition/runtime-contract-server.mjs',
     line: 599,
     text: 'wireChecked: true,',
     why: '状态面七个字段里**唯一写死的字面量**，且全仓没有地方读它（§5 第 20 条）',
   }),
   Object.freeze({
-    path: 'runtime/dsh-composition/external-api-scope.mjs',
+    file: 'runtime/dsh-composition/external-api-scope.mjs',
     line: 1061,
     text: 'literalWouldMatchNothing: true,',
     why: '一处**无声声明**：规则只会匹配到与自己端点相同的东西（触发时不会报红）',
   }),
   Object.freeze({
-    path: 'runtime/dsh-composition/enforcement-mapping.mjs',
+    file: 'runtime/dsh-composition/enforcement-mapping.mjs',
     line: 266,
     text: 'whenUnattended: true,',
     why: '另一处**无声声明**：值守缺失时禁止询问（触发时不会报错）',
   }),
   Object.freeze({
-    path: 'packages/credentials/credentials-local/src/index.ts',
+    file: 'packages/credentials/credentials-local/src/index.ts',
     line: 585,
     text: 'const watcher = chokidarWatch(await canonicalizeWatchPath(this.spec.filename), {',
     why: 'PRT-509 关停缺陷的**根因位置之一**：chokidar watcher 的创建点',
@@ -369,18 +438,18 @@ export function checkPinnedCitations(pinned = PINNED_CITATIONS) {
   const dshMissing = !existsSync(dshRoot)
   for (const p of pinned) {
     const base = p.dsh === true ? dshRoot : REPO
-    const full = resolve(base, p.path)
+    const full = resolve(base, p.file)
     if (!existsSync(full)) {
       // ★ "文件不在"有两种：DSH 侧且检出不在 ⇒ 无法判定；否则 ⇒ 真的坏了
-      if (p.dsh === true && dshMissing) { external.push(p.path); continue }
-      broken.push(`${p.path}:${p.line}（文件不在）`); continue
+      if (p.dsh === true && dshMissing) { external.push(p.file); continue }
+      broken.push(`${p.file}:${p.line}（文件不在）`); continue
     }
     let lines = []
     try { lines = readFileSync(full, 'utf8').split('\n') } catch {
-      broken.push(`${p.path}:${p.line}（读不出来）`); continue
+      broken.push(`${p.file}:${p.line}（读不出来）`); continue
     }
     if (p.line > lines.length) {
-      broken.push(`${p.path}:${p.line}（文件只有 ${lines.length} 行）`); continue
+      broken.push(`${p.file}:${p.line}（文件只有 ${lines.length} 行）`); continue
     }
     checked++
     // ★ 两侧都 `trim()`：**钉的文本自己的格式不该影响比对**。
@@ -389,7 +458,7 @@ export function checkPinnedCitations(pinned = PINNED_CITATIONS) {
     //   而那是**我写钉时的手滑**，不是被引用代码的问题。（⑫c 抓到的。）
     const actual = lines[p.line - 1].trim()
     if (actual !== p.text.trim()) {
-      broken.push(`${p.path}:${p.line} 现在是 ${JSON.stringify(actual)}，`
+      broken.push(`${p.file}:${p.line} 现在是 ${JSON.stringify(actual)}，`
         + `而钉的是 ${JSON.stringify(p.text.trim())}`)
     }
   }
@@ -718,6 +787,33 @@ export const FACTS = Object.freeze([
     source: '手钉表（模块内 `PINNED_CITATIONS`）：5 条，4 条在 Legion 仓、1 条在 DSH 检出',
     derive: (ctx) => ctx.pinnedCitations().broken.slice().sort().join(' '),
     expect: '', // 空串 = 每一行都还是原来那句话
+  }),
+
+  // ── D2. ★★★ 我方判据文件不得**冒充清单** ────────────────────────────────
+  Object.freeze({
+    id: 'criteria-files-do-not-impersonate-manifests',
+    what: '`scripts/prt/` 里的判据文件**没有**被可达性探针读成"清单声明"的写法',
+    why: '★ 这是一次**好消息形状**的假信号，比"漏报"贵得多：'
+      + 'CI 报"两族 gap 已经变成可达"，而它下面的指示是'
+      + '**删 READINGS 条目、更新状态文档裁决、清基线**——照做就是'
+      + '**把一个没接线的模块记成已接线**。'
+      + '追下去：`external-api-scope.mjs` 有**零个**生产 importer，'
+      + '它成为"入口"的理由是`清单声明（scripts/prt/boundary-facts.mjs）`——'
+      + '**正是我上一轮加的那张手钉坐标表**（键名落在 `MANIFEST_PATTERNS` 里）。'
+      + '★ 同一张表还**遮掩了一个已知缺口**：它让 `runtime-contract-server.mjs` 看起来可达，'
+      + '而 §5 第 20 条说的正是"Runtime 契约服务端**没有生产挂点**"。'
+      + '⇒ 一张记账表同时报了一个假的"接上了"、捂了一个真的"没接上"。'
+      + '⚠️ 修的时候我又踩了一次（同一形状第五次）：在 `reachability.mjs` 的说明里'
+      + '照样写出了那个键名 + 一个真路径当例子，于是探针把 `reachability.mjs` **自己**'
+      + '记成了入口——**解释这个 bug 的注释复现了这个 bug**。'
+      + '⚠️ 边界：只扫 `scripts/prt/`。**不能**扫全仓——'
+      + '`patch-layer.mjs` / `process-manifest.mjs` 是**真清单**，那样写是**对的**；'
+      + '一条"所有 .mjs 都不许写清单形状"的判据会**红在正确的地方**。',
+    source: '`scripts/prt/*.mjs` 的源码文本 × 借用 `reachability.mjs` **导出的同一份**'
+      + ' `MANIFEST_PATTERNS`（两份会漂的键表就是本仓的旧账，所以只留一份）；'
+      + '只有"抓到的路径**真的是一个模块**"才算问题',
+    derive: (ctx) => ctx.manifestImpersonation().bad.join(' | '),
+    expect: '', // 空串 = 没有一处冒充
   }),
 ])
 

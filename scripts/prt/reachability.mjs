@@ -29,8 +29,17 @@
 //
 // ★ 第 ④ 条是**实测**补上的：第一版只有 ①②③，于是
 //   `product/orchestrator/worker.mjs` 被报成不可达——而
-//   `product/process-manifest.mjs` 里明写着 `entry: {kind:'node-file', path:'product/orchestrator/worker.mjs'}`，
+//   `product/process-manifest.mjs` 里明写着 worker 的 `entry`（`kind:'node-file'`
+//   ＋ 一个**仓库相对**的 `path`；那种形状见下面的 `MANIFEST_PATTERNS`），
 //   它是 Launcher 真的会 spawn 起来的进程。
+//
+//   ★★ 这一行原来把那种形状**照抄**在注释里。而 `MANIFEST_PATTERNS` 读的是
+//   **源码文本**、分不清代码与注释 ⇒ **注释里的例子也被当成了真声明**
+//   （`product/orchestrator/worker.mjs` 因此多了一个假入口）。
+//   今天它恰好还有一个**真**声明（`process-manifest.mjs:278`），所以读数没变；
+//   可一旦那条真声明被删，**这行注释会继续把它撑着看起来"有人加载"**。
+//   ⇒ 所以这里只描述形状、不照抄带真路径的例子。
+//   *一条只在"真声明也被删掉"时才显形的假信号，是这类 bug 里最贵的一种。*
 //
 //   > 一个「漏了一种入口」的探针，
 //   > 与一个「那个模块真的没人用」的探针，在输出上是同一个东西——
@@ -139,10 +148,14 @@ const SPEC = /\bfrom\s*['"]([^'"]+)['"]|\bimport\s*\(\s*['"]([^'"]+)['"]|\bimpor
 /** 清单里声明"这个文件会被加载"的写法。
  *
  * ★ 同一类清单里**两种路径写法并存**，两种都要认：
- *   · `patch-layer.mjs` 的 `runtimeModule: './plugins/pre-execute-row.mjs'`
- *     —— `./` 开头，**相对声明它的那个文件**；
- *   · `process-manifest.mjs` 的 `path: 'product/orchestrator/worker.mjs'`
- *     —— 仓库相对。
+ *   · `patch-layer.mjs` 的 `runtimeModule` —— `./` 开头，**相对声明它的那个文件**；
+ *   · `process-manifest.mjs` 的 `entry.path` —— **仓库相对**（那条真的声明在
+ *     `product/process-manifest.mjs:278`，写的是 `product/orchestrator/worker.mjs`）。
+ *
+ * ★★ 这一行原来把两种形状**连真路径一起照抄**在注释里。而这份正则读的是
+ *   **源码文本**、分不清代码与注释 ⇒ **注释里的例子变成了真声明**。
+ *   ⇒ 描述形状时**不要照抄带真路径的例子**；真要给例子，就用占位路径。
+ *   （判据 `criteria-files-do-not-impersonate-manifests` 现在就盯着这件事。）
  *
  *   第一版只按仓库相对解析，于是全部组合行（`*-row.mjs`）被报成死代码；
  *   另一次只按文件相对解析，于是 `product/orchestrator/worker.mjs` 被报成死代码。
@@ -157,6 +170,38 @@ const MANIFEST_PATTERNS = Object.freeze([
   /\bpath:\s*'([^']+\.mjs)'/g,          // process-manifest.mjs 的 entry
   /\bentryFile:\s*'([^']+\.mjs)'/g,
 ])
+
+/**
+ * ★★★ 导出这份形状清单，让**别的判据能借用同一份**（2026-09-18 实测事故）。
+ *
+ * 起因：`scripts/prt/boundary-facts.mjs` 里加了一张「手钉坐标表」，而那张表里
+ * 每一条都有个**键名**，当时取的键名正好是**下面第 3 条正则认的那个**；
+ * 于是 `path: '<某个 .mjs 仓库路径>'` 被读成「**清单声明：这个模块会被加载**」
+ * ⇒ **一张记账用的表，把 4 个模块假装成了生产入口。**
+ * 后果有两个方向，都实测到了：
+ *   · `external-api-scope.mjs`（**零个**生产 importer）被报成"已接线"⇒
+ *     探针的红还**指导人去清基线、更新裁决**，等于把一个没接的模块记成接上了；
+ *   · `runtime-contract-server.mjs`（§5 第 20 条说的正是"没有生产挂点"）
+ *     被同一张表**遮掩**——它看起来可达，于是这个缺口不会再有人被提醒。
+ *
+ *   > 一个"某处声明了这个模块会被加载"与一个"某处**提到了**这个模块的坐标"，
+ *   > 在只看那种键名 + `.mjs` 字面量的判据里是同一个东西——
+ *   > 而前者是**接线**，后者是**记账**。
+ *
+ * ⇒ 修法两条：① 那张表改键名（不用清单里那几种）；
+ *   ② 把这份形状清单**导出**，让"我方判据文件不得冒充清单"这条判据
+ *   借用**同一份**正则——否则两份键表迟早不同步，而"两份会漂的名单"正是本仓的旧账。
+ *
+ * ★★ 记一笔**修这个 bug 时又踩了一次**（同一形状第五次）：
+ *   我在上面这段说明里**照样写出了**那个键名 + 一个真 `.mjs` 路径做例子，
+ *   于是 `findEntries` 把 **`scripts/prt/reachability.mjs` 自己**记成了
+ *   `external-api-scope.mjs` 的入口——**解释这个 bug 的注释，原样复现了这个 bug**。
+ *   所以上面这段文字里那个例子用的是**占位路径**，不是真路径。
+ *
+ *   > 与 §10.35 那条同形：*修复者解释这次位移的那句注释，
+ *   > 正好把锚词种在了旧坐标上。*
+ */
+export { MANIFEST_PATTERNS }
 
 /** 在**给定的候选路径**里，哪些被 `.gitignore` 排除。
  *

@@ -1401,7 +1401,8 @@ async function stageTest() {
   //   **都判红**：前者防止判据静默失去检查对象，后者防止判据靠文档行序选数字。
   //   套件里对**每一条**文档锚点做反面控制（改掉声称 ⇒ 必须红），
   //   并对 `runtime` 进程不得持有 `TEAM_HUB_TOKEN` 这条边界做**对称**载荷控制。
-  { label: 'boundary-facts（PRT-611 续：文档**数字**与**坐标**↔ 产物真实的值，含执行面凭证边界）', files: ['scripts/prt/boundary-facts.test.mjs'], cwd: ROOT },
+  { label: 'boundary-facts（PRT-611 续：文档**数字**与**坐标**↔ 产物真实的值，含执行面凭证边界；'
+    + '并含"我方判据文件不得冒充清单"——一张记账表曾被可达性探针读成清单，把 4 个模块假装成生产入口）', files: ['scripts/prt/boundary-facts.test.mjs'], cwd: ROOT },
   // PRT-611 续：「声明了却没人读」的扫描**接进 CI**。
   //   ★ 起因：台账引用了 `scratch/scan-silent-declarations3.mjs` 的读数
   //   （"还剩 3 个，一个都没改"），而**没有任何东西在跑它** ⇒

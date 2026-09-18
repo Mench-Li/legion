@@ -5,8 +5,11 @@
 - 权威台账：[`PRT-PROGRESS.md`](./PRT-PROGRESS.md) —— **145 行 = 140 ✅ / 1 ⬜ / 4 ⏸**
 - 对照表：[`MULTI-AGENT-FEATURE-STATUS.md`](../../MULTI-AGENT-FEATURE-STATUS.md) —— F-01…F-25
 - 目标文档：[`MULTI-AGENT-FEATURE-OPTIMIZATION.md`](../../MULTI-AGENT-FEATURE-OPTIMIZATION.md)
-- 本批 CI：`.ci/r15b` —— **9/9 阶段 PASS，exit 0**（`test` 801030ms，`skipped=1`）
-- 本批提交：`502b636`（代码，29 文件 +1805/−58）、`c567791`（文档订正）
+- 最近一轮 CI：`.ci/r16b`（本轮改动后重跑）／上一轮 `.ci/r15b` —— **9/9 阶段 PASS，exit 0**（`test` ≈ 800–842s，`skipped=1` 为已知的 secret-store）
+- 相关提交：`502b636`（F-21 判定面，29 文件）、`c567791`、`d2168a2`、本轮（F-21 **投递面**，13 文件）
+
+> ★ 本报告第 16 轮**追加**了一节「三、本轮又做了什么」的最后一小节与第二节的三条新裁决项；
+> 结论那一段（"剩余 5 项本机不可关闭"）**没有变**，变的是**为什么**——见 §2.1 的 A 项与新加的 D/E 两项。
 
 ---
 
@@ -34,9 +37,11 @@
 
 | # | 项 | 状态 | 精确的最后一根线 | 为什么我没做 |
 | --- | --- | --- | --- | --- |
-| **A** | **第 19 条**：部署配置键 → 组合根 | F-21 生产闭合 | `product/execution-plane-config.mjs` 已落地（`805affe`，第 19 条 §9.2 第 3 步），`joinExecutionPlane({ plane, connectorDeclarations })` 已能承载声明——**但全仓零生产导入方**。缺的一步是：把它的产物送进 `installEnforcementRoot` / `assemble.mjs` | `product/config-schema.mjs` 是**另一会话的在制品**（`git status` 显示 M），且这一步本身是第 19 条的排期内容 |
+| **A** | **第 19 条**：部署配置键 → 组合根 | ★ **本轮已推进一大步**：投递面建好了（`connector-port.mjs` → `root-row.mjs`），`connectorJudgment` 在有那个键时**真的**是 `true` | 剩下的那一根线**只剩一处，而且与 `LEGION_PATH_SCOPE` 是同一处**：`LEGION_CONNECTOR_DECLARATIONS` 在 `runtime/config-schema.mjs` 的 `fields` 里，却**不在** `product/process-manifest.mjs` 的 runtime `envNames` 里。决定性实测：`buildChildEnv()` 对未声明的键在 `values` 里**抛**、在 `baseEnv` 里**静默丢掉** | `product/process-manifest.mjs` 是**另一会话的在制品**（`git status` 显示 M）。加一行到那个数组即可，但按纪律不碰 |
 | **B** | **PRT-009 的最后一根线** | 峰值资源落盘 | `launcher.mjs` 的 `persistRunRecord()` 要把 `peakResource` 传进来（记录层已能带、能校验、能落盘、能读回，判据 47 例、变异 6/6） | `product/launcher/launcher.mjs` 是**另一会话的在制品**，按纪律不碰 |
 | **C** | **第 16 条**：死代码处置 | 待裁决 | 模块级探针：**9** 个不可达模块；函数级探针：**43** 条（其中 `product/` 一簇 **23** 个）。9 vs 43 的差本身就是裁决依据 | 这是"要不要删/要不要接"的**产品决定**，不是代码问题 |
+| **D** | ★★ **`TEAM_HUB_TOKEN` 到底该不该进 runtime 的 `envNames`**（本轮**新查出**，早于本轮且**没有任何归属**） | 待裁决 | `runtime/dsh-composition/root.mjs` 的 `readString(source, keys)` **确实**会读它（`ENFORCEMENT_CONFIG_FIELDS.hubToken`），但它**不在** `product/process-manifest.mjs` 的 runtime `envNames` 里 ⇒ **配了也传不到进程**。不致命的原因是它**可选**（`MISSING_FIELD_CODES` 里没有它，缺了不拦装配） | 两条路都行、但必须选一条：**①** 加进 runtime 的 `envNames`（那就真的能配了）；**②** 从 `runtime/config-schema.mjs` 的 `fields` 里**拿掉**它（那就别再声称本进程能配它）。"这个进程能配它"与"它能拿到它"必须有一处让步——★ 我**没有**替您选 |
+| **E** | ★★★ **F-21 那条「未声明就拒绝」的教义要不要在生产里生效**（本轮**新查出**，见 §4.2 的 ②） | 待裁决 | 登记表**模块层是好的**（直接问它确实拒未声明的工具），但**推导式**归属让一个没被声明过的工具名**归属不到任何连接器** ⇒ 登记表**根本不会被问到**。今天净效果仍是拒绝，但功劳在**政策门**；真正剩下的一格是**一个名字撞上已知核心工具**的未声明连接器工具 ⇒ `allow` | 要补上它需要一条**本仓没有的源信号**：归属必须基于**来源**（这次调用是不是走连接器发出去的），而不是**名字**。`grep` `mcp__`／工具前缀在生产代码里**零命中** ⇒ 这需要 DSH 侧的信息或一次产品裁决，**不是能靠写代码绕过去的** |
 
 > **A 与 B 都可以由另一会话收尾，或由您在它提交后让我收尾。** 两处都精确到一处调用点。
 
@@ -56,9 +61,51 @@
 
 ---
 
-## 三、本批（第 15 轮）做了什么
+## 三、第 15 轮做了什么
 
-### 3.1 主线：F-21 的**判定面**
+### 3.0 第 16 轮（本轮）：F-21 的**投递面**——那份声明**从哪来**
+
+第 15 轮把判定面接进了组合根，但末尾如实留了一句「生产入参里没有连接器声明表」。
+本轮补的就是那个"没有"：新增 `runtime/dsh-composition/connector-port.mjs`（+14 例）+
+`plugins/root-row.mjs` 的真生产调用方，于是 `enforcementSurfaces().connectorJudgment`
+在环境里有那个键时**真的**是 `true`。
+
+三条纪律（都写进了文件头，各有真用例）：
+
+| 纪律 | 坏写法为什么危险 |
+| --- | --- |
+| **缺席 ≠ 空表** | `env[KEY] ?? '[]'` 会让组合根建出一份**零连接器**登记表 ⇒ 那一格报 `true`，而它**一次判定都不会做**。而 `assemble.mjs` 只判 `=== null` |
+| **显式空表具名拒绝** | 写 `[]` 的人要么想表达"不许任何连接器工具"（那需要**拒绝语义**），要么是生成配置的代码出错了。静默接受让"我配了"与"我配错了"同形 |
+| **重名工具在装配期停** | `none` 与 `ambiguous` 在判定面那个 `string 或 null` 端口上折成同一个 `null`，而 `null` 的含义是"交给政策门" ⇒ 一次**新增重名声明**就能把那几个工具的策略**静默免掉** |
+
+证据是**在真生产路径上**的五条（`root-row.test.mjs`）：配了 ⇒ 七格全对；
+**没配** ⇒ 如实 `false`；显式 `[]` ⇒ 拦住装配；坏 JSON ⇒ 拦住装配；
+配上之后一次**连接器策略是 deny** 的调用被**连接器层**拦下（`connectorDecided === 1`），
+而**同一次调用没配时是 `allow`**（前提对照）。
+
+★ 本轮最重要的产出其实是**两条边界**（详见 `docs/MULTI-AGENT-FEATURE-STATUS.md` §4.2 与
+会话报告 §10.46）：
+
+1. **登记表的头号教义在生产里不可达**——推导式归属要求"先被声明才能归属"，
+   而未声明的工具正是那条教义要拒的东西。⇒ 报告 §2.1 的 **E** 项。
+2. **两张声明面之间原本没有任何闸**——`runtime/config-schema.mjs` 的 `fields`
+   与 `product/process-manifest.mjs` 的 runtime `envNames` 各自都有门禁，
+   而"schema 里声明了、清单里没放行"是**两处都绿**的。实测三处缺口
+   （含一处**早于本轮、没有任何归属**的 `TEAM_HUB_TOKEN`）⇒ 报告 §2.1 的 **D** 项。
+   已加闸并**变异实测**过。
+
+★ 全量 CI 在本轮**抓到我自己的一次回归**（`production-scope-wiring` ①）：我把那组新入参
+写成了**条件展开**，而那条判据是**文本解析**这组键的 ⇒ 解析器中途停下。
+修法是回到这一行既有的形状（`pathScope: scope.port`：**键恒在、缺席为 `null`**），
+**行为逐字不变**。
+
+> 一个"用条件展开来表达缺席"的装配点，与一个"键恒在、缺席为 null"的装配点，
+> 在**行为上**完全相同——只不过前者的键集**不可文本化**，
+> 于是任何"数一数传了哪几个键"的判据都会静静地少看见几个。
+
+---
+
+### 3.1 主线：F-21 的**判定面**（第 15 轮）
 
 台账 F-21 那一行自己点名的阻塞**已经过期**——它写着
 

@@ -478,23 +478,32 @@ test('⑫a 真实仓库：5 条手钉引用逐字都对，且一条都没被跳�
 })
 
 test('⑫b ★★ 控制：把**历史上那次真实位移的旧坐标**钉上去 ⇒ 必须红', () => {
-  // 真实事件：`plugins/root-row.mjs:485-509` → `:508-536`（另一会话 §9.5 接线后订正）。
-  // 而那个文件有 700+ 行 ⇒ 旧区间**在范围内**，上一批那两条坐标判据**看不见**。
-  // 这里用**真实文件、真实行**，只把行号换成位移前的旧值。
+  // 真实事件（**两次**）：
+  //   ① `plugins/root-row.mjs:485-509` → `:508-536`（另一会话 §9.5 接线后订正）。
+  //   ② `:508-536` → `:534-562`（本会话 2026-09-18，第 19 条 §9.2 第 5 步：
+  //      在同一个调用点**前**插入"连接器声明"那一块 +25 行，另在文件头 +1 行 import）。
+  //   而那个文件有 700+ 行 ⇒ 旧区间**在范围内**，上一批那两条坐标判据**看不见**。
+  //   这里用**真实文件、真实行**，只把行号换成位移前的旧值。
+  //
+  // ★ 第二次位移是**判据自己顶出来的**：本会话改完 `root-row.mjs` 之后
+  //   这一条立刻红在载具断言上（"第 508 行不再是那个调用点"）。
+  //   一个"手钉行号"的判据，在文件只增不改的时候，与一个"每次都重新数一遍"
+  //   的判据，读数只差一个常数——只不过前者在常数变了的那天**会红**，
+  //   而红本身就是它的价值。
   const real = resolve(REPO, 'runtime/dsh-composition/plugins/root-row.mjs')
   const lines = readFileSync(real, 'utf8').split('\n')
   // 先核载具本身（载具坏了，下面的结论就不成立）
-  assert.match(lines[507], /installEnforcementRoot\(\{/,
-    '第 508 行不再是那个调用点 ⇒ 载具失效，先重写这个控制')
-  assert.equal(lines[484].trim(), '',
-    '第 485 行不再是空白 ⇒ 旧引用的性质变了，先重写这个控制')
-  assert.ok(509 <= lines.length,
+  assert.match(lines[533], /installEnforcementRoot\(\{/,
+    '第 534 行不再是那个调用点 ⇒ 载具失效，先重写这个控制')
+  assert.equal(lines[507].trim(), '',
+    '第 508 行不再是空白 ⇒ 旧引用的性质变了，先重写这个控制')
+  assert.ok(535 <= lines.length,
     '旧行号居然超范围了 ⇒ 那上一批的判据本来就能抓到，这一节的立论要改')
 
   // ★ 用**同一份**核法（不重抄逻辑）去钉旧坐标
   const injected = Object.freeze([Object.freeze({
     file: 'runtime/dsh-composition/plugins/root-row.mjs',
-    line: 485,
+    line: 508,
     text: 'const installed = installEnforcementRoot({',
   })])
   const r = checkPinnedCitations(injected)
@@ -506,7 +515,7 @@ test('⑫b ★★ 控制：把**历史上那次真实位移的旧坐标**钉上�
   //    少了这一条，"永远报红"的实现也能通过上面那个断言。
   const good = Object.freeze([Object.freeze({
     file: 'runtime/dsh-composition/plugins/root-row.mjs',
-    line: 508,
+    line: 534,
     text: 'const installed = installEnforcementRoot({',
   })])
   const g = checkPinnedCitations(good)

@@ -90,7 +90,7 @@
 | F-20 缺口③ | team-hub **没有安装事实**（无表、无路由）⇒ 控制面重启后依赖预检拿一份空基线，每个包都突然报"缺依赖" | `pack-facts.test.mjs` 19 例 + `pack-facts-http.test.mjs` 8 例（含**跨模块实例**重建、seq 的 CAS、账只追加）；seq 的 CAS 已**变异验证** |
 | F-19 缺口① | 七类版本**没有落点**：`EmployeeManifest` 只是上下文来源，没有任何模块承载"这个岗位被冻结成哪一版" | `role-pack.test.mjs` 40 例（含对账两种漂移、嵌套强制面、连接器凭证），6 处守卫已**变异验证** |
 | F-19 缺口② | 冻结产物**算完即丢**（纯内存）⇒ "上周那个岗位是哪一版"永远回答不了 | `role-pack-store.test.mjs` 25 例 + `role-pack-http.test.mjs` 10 例（含 409 **真的走得到网络上**）；6 处守卫已**变异验证** |
-| F-21 | 四条能力**全部不存在**（grep `connector`/`mcp` 在产品代码里零命中）：没有工具级策略、没有风险分级、没有密钥引用、没有故障隔离 | 能力已建（`registry.test.mjs` 32 例 + `connector-store.test.mjs` 23 例 + `connector-http.test.mjs` 11 例真 HTTP；**30 处守卫全部变异验证**）。★ 途中抓到 4 个真缺陷（能力名兜底成最严、凭证检查只看自己认识的字段、刚失败却报 healthy、`version` 参数被静默忽略），详见 §4.1。★★ **2026-09-18 续批：上面那句「判定面仍没有生产调用方」已经过期了。** 判定面建起来了（`runtime/connectors/decision-port.mjs`）并接进组合根（`assemble.mjs` 一次造齐两半、共用**同一份** registry；`tool-request.mjs` 新增 `connectorJudgment`；`enforcementSurfaces()` 6 格 → **7 格**）。证据不是"接上了"，而是**真调用被拦下**：`root.test.mjs` ⑨④ 里不装 ⇒ `preExecute(git-commit)` = `allow`（前提对照），装了 ⇒ `deny`（理由「连接器 github 没有声明工具「git-commit」」），而本连接器声明过的 `git-status` 照旧 `allow`；⑨⑤ 是**闭环**（开路 ⇒ deny ⇒ 反馈面记回 ⇒ 探针成功 ⇒ 恢复 allow）。★ 同一批还修掉一个**静默**缺陷：输入字段叫 `declaredRisk` 而**输出**字段叫 `risk`，照着输出写 `risk: 'critical'` 会被**静默丢掉**、落回能力下限 `low` ⇒ 一个作者标成 critical 的工具被自动放行；`declareTool` 的键集已改成**封闭**（全仓 9 处真样本用错字段名，其中一条用例**一直是绿的但什么都没验到**）。⚠️ **还差的一条不再是接线**：生产入参里没有连接器声明表 ⇒ `connectorJudgment` 在生产里仍是 `false`；"声明从哪来"归第 19 条那个配置键。精确读数：**从「没人接线」变成「接好了、且真调用被它拦下」**，而**不是**"生产里已经在拦" |
+| F-21 | 四条能力**全部不存在**（grep `connector`/`mcp` 在产品代码里零命中）：没有工具级策略、没有风险分级、没有密钥引用、没有故障隔离 | 能力已建（`registry.test.mjs` 32 例 + `connector-store.test.mjs` 23 例 + `connector-http.test.mjs` 11 例真 HTTP；**30 处守卫全部变异验证**）。★ 途中抓到 4 个真缺陷（能力名兜底成最严、凭证检查只看自己认识的字段、刚失败却报 healthy、`version` 参数被静默忽略），详见 §4.1。★★ **2026-09-18 续批：上面那句「判定面仍没有生产调用方」已经过期了。** 判定面建起来了（`runtime/connectors/decision-port.mjs`）并接进组合根（`assemble.mjs` 一次造齐两半、共用**同一份** registry；`tool-request.mjs` 新增 `connectorJudgment`；`enforcementSurfaces()` 6 格 → **7 格**）。证据不是"接上了"，而是**真调用被拦下**：`root.test.mjs` ⑨④ 里不装 ⇒ `preExecute(git-commit)` = `allow`（前提对照），装了 ⇒ `deny`（理由「连接器 github 没有声明工具「git-commit」」），而本连接器声明过的 `git-status` 照旧 `allow`；⑨⑤ 是**闭环**（开路 ⇒ deny ⇒ 反馈面记回 ⇒ 探针成功 ⇒ 恢复 allow）。★ 同一批还修掉一个**静默**缺陷：输入字段叫 `declaredRisk` 而**输出**字段叫 `risk`，照着输出写 `risk: 'critical'` 会被**静默丢掉**、落回能力下限 `low` ⇒ 一个作者标成 critical 的工具被自动放行；`declareTool` 的键集已改成**封闭**（全仓 9 处真样本用错字段名，其中一条用例**一直是绿的但什么都没验到**）。⚠️ **还差的一条不再是接线**：生产入参里没有连接器声明表 ⇒ `connectorJudgment` 在生产里仍是 `false`；"声明从哪来"归第 19 条那个配置键。精确读数：**从「没人接线」变成「接好了、且真调用被它拦下」**，而**不是**"生产里已经在拦"。★★ **2026-09-18 第 5 步续：投递面也建起来了**（`runtime/dsh-composition/connector-port.mjs` → `root-row.mjs` 的真生产调用方），于是上面那句"生产入参里没有连接器声明表"也**过期了**——配了 `LEGION_CONNECTOR_DECLARATIONS` 之后那一格**真的**翻 `true`，且一次**连接器策略是 deny** 的调用被连接器层拦下（`connectorDecided === 1`），前提对照是"没配时同一次调用 `allow`"。⇒ **仍差的两条换了位置**：**①** 那个键在 schema 的 `fields` 里却**不在** `product/process-manifest.mjs` 的 runtime `envNames` 里（与 `LEGION_PATH_SCOPE` **同一处**，`buildChildEnv()` 对未声明的键直接抛或静默丢掉）⇒ 与第 19 条同生共死；**②** 归属是**推导式**的（按声明），于是登记表那条「未声明就拒绝」**在生产里不可达**——真正的洞是"名字撞上已知核心工具"的未声明连接器工具。两条都写进了 §4.2 与人工介入清单 |
 
 一条值得单独记下的判据：**F-05 后半的三条设计纪律各自对应一个真实的失效方向**，
 因此它们在用例里是**分开**验的，而不是合并成一句"投递可靠"：
@@ -184,7 +184,7 @@
 
 | 编号 | 名称 | 状态 | 依据 |
 |---|---|---|---|
-| F-21 | Connector / MCP 注册表 | ⬜→🟡 | **登记面、落盘面、判定面、反馈面四面俱在**：登记与落盘（`team-hub/connector-store.mjs` 的 `freezeDeclaration`/`connectorIncidents`/`exportConnectors` 都接在真 HTTP 路由上）；**判定面已接进生产组合根**（`runtime/connectors/decision-port.mjs` → `assemble.mjs` → `tool-request.mjs` 的 `connectorJudgment`）；**反馈面已接**（`outcome-port.mjs` → `plugins/connector-feedback.mjs`，订阅 DSH `tools/result`）。★ **`enforcementSurfaces()` 从 6 格 → 7 格**（新增 `connectorJudgment`，与 `connectorFeedback` 分开报——只有一格时"判定面装了、反馈面没装"与反过来是同一个读数）。★ 隔离真拦下过：`root.test.mjs` ⑨④「未声明工具 `git-commit` ⇒ deny（政策门说 allow）」、⑨⑤「开路 ⇒ deny ⇒ 反馈面记回 ⇒ 探针成功 ⇒ 恢复 allow」的**闭环**、⑨⑥ 两半共用**同一份** registry。256 例（含本批新增 decision-port 19 例 + root 3 例 + tool-request 3 例），30 处变异仍全部咬住 | ★ **还差一条，而且它不再是接线**：生产入参（`root.mjs`/`assemble.mjs` 的 `config`）里**没有连接器声明表**，所以 `enforcementSurfaces().connectorJudgment` 在生产里仍是 `false`——那句话是"**声明从哪来**"，归**第 19 条**那个配置键（`product/execution-plane-config.mjs` 今天零生产导入方）。精确读数：**从「没人接线」变成「接好了、且两条真调用被它拦下」**，而**不是**"生产里已经在拦"。★ 本批同时修掉一个**静默**缺陷：输入字段叫 `declaredRisk` 而**输出**字段叫 `risk`，照着输出写 `risk: 'critical'` 会被**静默丢掉**、落回能力下限 `low` ⇒ 一个作者标成 critical 的工具被自动放行；`declareTool` 的键集已改成**封闭**（不认识的键具名拒）。全仓共撞到 **9 处**用错字段名的真样本 |
+| F-21 | Connector / MCP 注册表 | ⬜→🟡 | **登记面、落盘面、判定面、反馈面四面俱在**：登记与落盘（`team-hub/connector-store.mjs` 的 `freezeDeclaration`/`connectorIncidents`/`exportConnectors` 都接在真 HTTP 路由上）；**判定面已接进生产组合根**（`runtime/connectors/decision-port.mjs` → `assemble.mjs` → `tool-request.mjs` 的 `connectorJudgment`）；**反馈面已接**（`outcome-port.mjs` → `plugins/connector-feedback.mjs`，订阅 DSH `tools/result`）。★ **`enforcementSurfaces()` 从 6 格 → 7 格**（新增 `connectorJudgment`，与 `connectorFeedback` 分开报——只有一格时"判定面装了、反馈面没装"与反过来是同一个读数）。★ 隔离真拦下过：`root.test.mjs` ⑨④「未声明工具 `git-commit` ⇒ deny（政策门说 allow）」、⑨⑤「开路 ⇒ deny ⇒ 反馈面记回 ⇒ 探针成功 ⇒ 恢复 allow」的**闭环**、⑨⑥ 两半共用**同一份** registry。★★ **投递面也建好了**（`runtime/dsh-composition/connector-port.mjs` → `root-row.mjs`，第 19 条 §9.2 第 5 步）：配了 ⇒ 上面那一格**真的**翻 `true`（在真生产路径上验的，`root-row.test.mjs` 五条：配了/没配/空表/坏 JSON/真拦下，含**前提对照**"没配时同一次调用是 allow"）；缺席**如实**是 `absent`（不许折成空表——空表会让组合根建一份**零连接器**登记表 ⇒ 那一格报 `true` 而它**一次判定都不会做**）；显式 `[]` **具名拒绝**；重名工具**装配期**就停。273 例（decision-port 19 + connector-port 14 + root 3 + root-row 5 + tool-request 3 + registry 32 + connector-store 23 …） | ★ **仍差两条，且两条都不是"再写点代码"**。**① 投递**：`LEGION_CONNECTOR_DECLARATIONS` 与 `LEGION_PATH_SCOPE` 一样，**在 schema 的 `fields` 里而不在 `process-manifest.mjs` 的 runtime `envNames` 里** ⇒ `buildChildEnv()` 对未声明的键**直接抛**（`values`）或**静默丢掉**（`baseEnv`）。这一条与第 19 条**同生共死**（同一个文件、同一个数组，且是另一条工作线的在制品）。精确读数：**从「没人接线」变成「接好了、且两条真调用被它拦下；而键进不了那个进程」**。**② 归属的来源**：推导式 `resolveConnectorId` 按"工具名在不在某份声明里"归属 ⇒ 登记表那条「未声明就拒绝」**在生产里不可达**（要触发它得先归属，而归属要求已声明）；净效果仍是拒绝，但功劳在政策门。真正剩下的一格是**名字撞上已知核心工具**的未声明连接器工具 ⇒ `allow`。见 §4.2。★ 本批另修掉一个**静默**缺陷：输入字段叫 `declaredRisk` 而**输出**字段叫 `risk`，照着输出写 `risk: 'critical'` 会被**静默丢掉**、落回能力下限 `low` ⇒ 一个作者标成 critical 的工具被自动放行；`declareTool` 的键集已改成**封闭**（不认识的键具名拒）。全仓共撞到 **9 处**用错字段名的真样本 |
 | F-22 | 后端与工作区 | 🟡 | `orchestrator/workspace/*`（git worktree）。§2 明写「不把 worktree 当安全沙箱」 |
 | F-23 | 多 Harness 路由 | ⏸ | §2 明写「**不在契约稳定前同时支持多个 Harness**」——这一条**是设计决定，不是缺口** |
 | F-24 | ACL 与安全姿态 | 🟡 | `team-hub/read-auth.test.mjs`、`read-open-loopback.test.mjs` 已覆盖读面矩阵；多用户写面 ACL 未做 |
@@ -278,11 +278,13 @@ deny 会被宽松的默认静默盖掉，而他写那条正是为了拦住一样
 那是一个**正常读数**（"这个连接器还没登记过"），不是错误——登记一个永远抛不出的
 码与登记一段被注释掉的代码是同一个东西，只不过前者让错误码清单看起来更完整。
 
-### 4.2 ★ F-21 为什么记 🟡 而不是 ✅：判定面没有生产调用方
+### 4.2 ★ F-21 为什么仍记 🟡 而不是 ✅：**最后一根线换了两处，但没有消失**
 
-这是本轮**自己推翻自己**的一条，值得单独写下：
+这一条本轮**被自己推翻了两次**，两次都值得单独写下来。
 
-四处 `grep` `createRegistry` / `declareConnector` 的结果是——**只有
+#### 第一次（早前）：四处 `grep` 的结果是"零生产调用方"
+
+四周 `grep` `createRegistry` / `declareConnector` 的结果是——**只有
 `runtime/connectors/registry.test.mjs`**，全仓**零生产调用方**。
 
 这正是本文 §2 那句开场白说的形状：
@@ -297,33 +299,80 @@ deny 会被宽松的默认静默盖掉，而他写那条正是为了拦住一样
 > 一个"写得很对但没人调用"的闸门，与一个不存在的闸门，
 > 在"这次调用被拦住了吗"这个问题上给出同一个答案：没有。
 
-**正确的执行点已经找到**：`runtime/dsh-composition/plugins/pre-execute.mjs`
-挂在 DSH 的 `tools/pre-execute` **瀑布**上，把判定全部交给
-`tool-request.mjs` 的 `createEnforcementBridge().preExecute`——每一次真工具调用
-都过那里，所以连接器判定应该在那条桥里（**而不是**在 `pre-execute.mjs` 里：
-那个文件的文件头明写「判定逻辑**不在这里**」，把一段判定塞进去会让
-"强制面在哪"这个问题的答案变成两处）。
+**正确的执行点**是 `runtime/dsh-composition/plugins/pre-execute.mjs` 挂的
+DSH `tools/pre-execute` 瀑布 → `tool-request.mjs` 的
+`createEnforcementBridge().preExecute`（判定**不该**塞进 `pre-execute.mjs`：
+那个文件的文件头明写「判定逻辑**不在这里**」，塞进去会让"强制面在哪"的答案变成两处）。
 
-**本轮没有落在那里的原因**是并发的：同一工作树上另一个 agent 进程**正在改
-`tool-request.mjs`**（`git status` 里它是 M）。往一个承重的强制面模块里做
-跨边界并发编辑，风险高于它带来的收益——尤其当"改错了"的后果是
-**放行或拦截错一次真实的工具调用**。所以按仓库的纪律如实记 🟡：
+#### 第二次（2026-09-18）：判定面接好了，**投递面**是新的最后一根线
+
+判定面已经接进生产组合根并**在真生产路径上验过**（`root-row.test.mjs` 五条）：
+配了 ⇒ `enforcementSurfaces()` 七格全对且 `connectorJudgment === true`；**没配** ⇒ 如实 `false`；
+显式给 `[]` ⇒ 拦住装配；坏 JSON ⇒ 拦住装配；配上之后一次**连接器策略是 deny** 的调用
+被连接器层拦下（`connectorDecided === 1`），而**同一次调用没配时是 `allow`**。
+
+但那条链上还剩**两处**，各自的性质不同：
+
+**① 部署配置到不了那个进程（与 `LEGION_PATH_SCOPE` 是同一处）**
+
+新增的读取点 `runtime/dsh-composition/connector-port.mjs` 从 Runtime 子进程的
+环境里读 `LEGION_CONNECTOR_DECLARATIONS`。而
+`runtime/config-schema.mjs` 的 `fields`（"这个进程**可以**被配成什么"）与
+`product/process-manifest.mjs` 的 runtime `envNames`（"Launcher 会**转发**什么"）
+**两张声明面各自都有门禁，却没有一条判据把它们对起来** ⇒
+"schema 里声明了、清单里没放行"是**两处都绿**的。
+
+实测有**三处**这样的键，其中一处**早于本轮、没有任何归属**：
+
+| 键 | 归属 |
+| --- | --- |
+| `LEGION_PATH_SCOPE` | 第 19 条 §9.2 第 4 步 |
+| `LEGION_CONNECTOR_DECLARATIONS` | 第 19 条 §9.2 第 5 步（本轮） |
+| `TEAM_HUB_TOKEN` | ★ **无归属**：`root.mjs` 的 `readString` 确实读它，只是**可选**（`MISSING_FIELD_CODES` 里没有它）⇒ 今天不致命，但"配了也传不到进程"与另两条一样 |
+
+后果很具体：`buildChildEnv()` 对未声明的键，在 `values` 里**直接抛**、
+在 `baseEnv` 里**静默丢掉**——两种都让"我配了"与"我没配"在那个进程里同形。
+本轮已在 `scripts/config/config.test.mjs` 新增那道闸（三条 + 理由 + **查旧**），
+并**变异实测**过：塞第 4 个未放行的键 ⇒ 判据红且点名它。
+
+⇒ 所以精确读数是：**`enforcementSurfaces().connectorJudgment` 在"环境里有那个键"时为 `true`，
+而"谁把那个键放进去"这一根线仍断着**（同一个文件、同一个数组，
+且那个文件是另一条工作线的在制品）。这一条仍与第 19 条**同生共死**。
+
+**② 归属只能覆盖"已声明"的工具（登记表的头号教义在生产里不可达）**
+
+`registry.mjs` 文件头 ① 的头号教义是「未声明的工具**必须拒绝**——没见过就放行，
+等于任何人在外部加一个工具就等于加一个后门」。直接问登记表它**确实**拒
+（`decision: 'deny'`, `code: 'connector-tool-not-declared'`）。
+
+但本轮交付的 `resolveConnectorId` 是**推导式**的（按"工具名在不在某份声明里"归属）
+⇒ 一个**没被声明**的工具名归属不到任何连接器 ⇒ **登记表根本不会被问到**。
+实测：`github__delete_repo` / `totally-made-up` 走桥时 `unattributed++`、
+`connectorDecided === 0`；净效果**仍是拒绝**——但功劳在**政策门**
+（未知工具 direction=`write`、`requiresApproval` 真 ⇒ fail closed），不是登记表。
+
+> 一个"要触发『未声明就拒绝』、得先把这个工具归属到某个连接器，
+> 而归属本身要求它已经被声明"的接线，
+> 与一个"从来没有那条教义"的接线，在每一次真调用的读数上
+> 都是同一个 `unattributed`——只不过前者的文件头里**明确写着**不许这样。
+
+★ 这正好是**本文件上面那份到期接法的第 2 条**（"★ **没给端口时，连接器形状的工具
+必须 deny**（fail closed），而不是放行"）——**它至今没有实现**。
+而且不是忘了做：**"连接器形状"这件事今天判不了**。要判它，归属必须基于
+**来源**（这次调用是不是走连接器发出去的），而不是基于名字；那需要一条
+本仓**没有**的源信号（DSH 那侧的 MCP 工具命名/路由）。
+
+剩下真正可被利用的那一格是：**一个名字撞上已知核心工具**的未声明连接器工具——
+那种名字在本层眼里"不在任何声明里"、在政策门眼里是**已知的低风险工具** ⇒ `allow`。
+这条边界写在 `connector-port.mjs` 文件头 ⑦，并在
+`connector-port.test.mjs` ④c 与 `root-row.test.mjs`「归属的**边界**」两处钉住。
+
+#### 为什么仍记 🟡
 
 > ✅ 要求"有代码落点 + 可复跑的判据"，而 🟡 要求**写明缺哪一条**。
-> 这一条的缺法很具体：**判定面还没有被任何一次真调用驱动过**。
 
-到期的接法（留给下一轮或另一条工作线）：
-
-1. 在 `createEnforcementBridge({...})` 上开一个**可选**的 `connectorRegistry` 端口，
-   并使用**字面量**守卫（`path.startsWith(...)` 那一条约定同样适用于工具名匹配的登记，
-   任何"看不见某类改动"的匹配都会重演 PRT-507）。
-2. ★ **没给端口时，连接器形状的工具必须 deny**（fail closed），而不是放行。
-   这一条是承重的：它让"忘了接线"变成**可见的失败**——一个连接器工具
-   在没接线时静默放行，与一个"后门一直在那儿"是同一个东西，
-   而前者的表现只是"暂时没人用连接器"。
-3. 判据要写成 `decide()` 的**返回值真的改变了瀑布的结论**，而不是
-   "桥里出现了对 `decide()` 的调用"——*一个"含不含"的断言对"用不用"的缺陷
-   完全不敏感*（这是 PRT-253 那一行用真实代价学到的）。
+缺的是两条，都写明了：**投递**（键到不了进程，与第 19 条同一根线）与
+**归属的来源信号**（本仓没有，需 DSH 侧或产品裁决）。两条都不是"再写点代码"能关的。
 
 ---
 

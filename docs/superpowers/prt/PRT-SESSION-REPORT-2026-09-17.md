@@ -4205,6 +4205,184 @@ connectorDeclarations ──► createRegistry ──┬──► createOutcomeL
 5. ⚠️ 我**没有**核第 19 条那个配置键该长什么样，也**没有**动
    `product/config-schema.mjs`（那是另一会话的在制品）。
 
+### 10.46 ★★★ 第 19 条 §9.2 第 5 步：F-21 判定面的**最后一根线**——那份声明**从哪来**
+
+§10.45 把判定面接进了组合根，并在末尾如实写下一句：「生产组合根这一层仍然没有连接器」。
+本节补的就是那个"没有"：**投递面**。
+
+#### 一句话
+
+新增 `runtime/dsh-composition/connector-port.mjs`（+14 例），它从 Runtime 子进程的
+环境里读 `LEGION_CONNECTOR_DECLARATIONS`、校验、**推导**出 `resolveConnectorId`，
+由 `plugins/root-row.mjs`（**真生产调用方**）送进 `installEnforcementRoot`。
+`enforcementSurfaces().connectorJudgment` 因此在环境里有那个键时**真的**是 `true`。
+
+#### 为什么这一节不是"又加了一个端口"
+
+§10.45 结束后，那条链的读数是这样的：
+
+| 层 | 状态 |
+| --- | --- |
+| `registry.mjs` 的 `decide()` | 已建 |
+| `decision-port.mjs`（织进桥） | 已建 |
+| `assemble.mjs`（成对校验 + 共用一份 registry） | 已建 |
+| **生产入参里有没有那两样东西** | **没有** |
+
+这正是本文档反复出现的那句开场白的**第三次**出现：
+**"能力齐全、用例全绿、而生产调用方数为 0"**。
+而这一次它落在第 19 条**自己的交付物**上（`product/execution-plane-config.mjs`
+落地之后仍然零生产导入方）。
+
+> 一个"每一层都建好了、而最上面那一层没人交数据"的链，
+> 与一个"整条链都不存在"的链，在生产读数上是同一个 `connectorJudgment: false`——
+> 只不过前者的用例是**全绿**的。
+
+#### 三条纪律（都写进了文件头）
+
+**① 缺席 ≠ 空表**。最自然的写法 `JSON.parse(env[KEY] ?? '[]')` 的含义是
+"**装了一个零连接器的登记表**"。而 `assemble.mjs` 只判 `connectorDeclarations === null`
+⇒ 传 `[]` 会建出一份**零连接器**的 registry ⇒ `connectorJudgment` 翻成 `true`
+⇒ **"判定面装好了"，而它一次判定都不会做**。
+
+> 一个"装了一份零连接器登记表"的组合根，与一个"连接器层根本不存在"的组合根，
+> 在**行为上完全相同**——只不过前者的 `enforcementSurfaces()` 看起来是接好的。
+
+所以：缺席 ⇒ `declarations: null`（读数如实 `false`）；显式给 `[]` ⇒ **具名拒绝**。
+
+**② 显式空表要响亮地拒绝**。写 `[]` 的人要么想表达"这个部署不许任何连接器工具"
+（那需要的是**拒绝语义**，不是空表），要么是生成配置的代码出错了。两种情况下
+静默接受都让"我配了"与"我配错了"同形。拒绝的理由里写清了可修复动作
+（"想表达没有连接器就**别设这个键**"）。
+
+**③ 重名工具在装配期停**。`none`（真的没人声明）与 `ambiguous`（有人声明但说不清是谁）
+在判定面那个 `string 或 null` 端口上**折成同一个 `null`**，而 `null` 的含义是
+"交给政策门"——也就是**连接器层对那个工具名不再有意见**。于是：
+
+> 一次"新增了一个重名工具"的声明，
+> 与一次"这些工具从来就不归连接器管"的配置，
+> 在判定面的读数上是同一个 `unattributed`——
+> 只不过前者的后果是那几个工具的连接器策略**被静默免掉**。
+
+归属算法只有一处（`registry.mjs` 新导出的 `toolOwnershipOf()`）。两处各写一份的后果
+不是"其中一处会慢慢漂"，而是更糟的一种：装配期那份算出"没有重名"、判定期那份却按
+登记顺序挑了一个——**拒绝没触发，策略也已经用错了，而两边的读数都是绿的**。
+
+#### 证据：在**真生产路径**上验的五条（`root-row.test.mjs`）
+
+| # | 读数 |
+| --- | --- |
+| ① | env 里配上声明 ⇒ `enforcementSurfaces()` 七格全对，`connectorJudgment === true` **且** `connectorFeedback === true`（两半共用同一份 registry：判定面读的那本账与反馈面写的那本是**同一本**） |
+| ② | **没配** ⇒ 那一格如实 `false`，而**其余各格不受影响** |
+| ③ | 显式给 `[]` ⇒ 拦住装配，码是 `connector-port-empty-list`，**不发布服务**（不装一行空壳） |
+| ④ | 坏 JSON ⇒ 拦住装配，理由里点破"**不**按没配处理" |
+| ⑤ | 配上之后，一次**连接器策略是 deny** 的调用被**连接器层**拦下（`connectorDecided === 1`，理由带 `[连接器 github]`），而**同一次调用没配时是 `allow`** |
+
+⑤ 的**前提对照**是关键：少了它，一个"把一切都拒掉"的坏接线也能让断言绿。
+
+#### ★★★ 本节最重要的一条：归属的**边界**
+
+`registry.mjs` 文件头 ① 的头号教义是「未声明的工具**必须拒绝**——
+没见过就放行，等于任何人在外部加一个工具就等于加一个后门」。
+直接问登记表它**确实**拒（`decision: 'deny'`, `code: 'connector-tool-not-declared'`）。
+
+**但投递面交付的 `resolveConnectorId` 是推导式的**（按"工具名在不在某份声明里"归属）
+⇒ 一个**没被声明**的工具名归属不到任何连接器 ⇒ **登记表根本不会被问到**。
+
+实测（`scratch/_dbg-unknown-tool-reach.mjs`，不提交）：
+
+| 工具名 | 走桥的结果 | `attributed` | `connectorDecided` |
+| --- | --- | --- | --- |
+| `list_issues`（github 声明过） | 按 github 的策略 | ✔ | 视两侧取严 |
+| `git-status` / `write-file`（DSH 核心，没人声明） | 政策门说话 | ✖ | 0 |
+| `github__delete_repo` / `totally-made-up` | **仍是拒绝**，但功劳在**政策门** | ✖ | **0** |
+
+> 一个"要触发『未声明就拒绝』、得先把这个工具归属到某个连接器，
+> 而归属本身要求它已经被声明"的接线，
+> 与一个"从来没有那条教义"的接线，在每一次真调用的读数上
+> 都是同一个 `unattributed`——只不过前者的文件头里**明确写着**不许这样。
+
+★ 这恰好是本文档 §4.2 那份**到期接法的第 2 条**（"★ **没给端口时，连接器形状的工具
+必须 deny**（fail closed）"）——**它至今没有实现**，而且不是忘了做：
+**"连接器形状"今天判不了**。要判它，归属必须基于**来源**（这次调用是不是走连接器
+发出去的），而不是基于名字；那需要一条本仓**没有**的源信号
+（DSH 那侧的 MCP 工具命名/路由）。
+
+净效果今天仍然是拒绝，因为未知工具在 `tool-capability.mjs` 里 direction 是 `write`
+（fail closed）、`requiresApproval` 为真。真正剩下的一格是
+**一个名字撞上已知核心工具**的未声明连接器工具 ⇒ `allow`。
+
+三点一起说清（免得被读成"没有洞"或"全完了"）：**(a)** 教义在模块层是好的；
+**(b)** 用**显式**解析器（`() => 'github'`）能在生产路径上触发它——`root.test.mjs` ⑨④
+就是这么测的——代价是部署侧得自己知道归属，而**推导式解析器把这个前提吃掉了**；
+**(c)** 判据钉在 `connector-port.test.mjs` ④c 与 `root-row.test.mjs`「归属的**边界**」。
+
+#### ★★ 本节新查出的第二处缺口：两张**声明面**之间没有闸
+
+`runtime/config-schema.mjs` 的 `fields`（"这个进程**可以**被配成什么"）与
+`product/process-manifest.mjs` 的 runtime `envNames`（"Launcher 会**转发**什么"）
+**各自都有门禁，却没有一条判据把它们对起来** ⇒ "schema 里声明了、清单里没放行"
+是**两处都绿**的。
+
+实测**三处**：
+
+| 键 | 归属 |
+| --- | --- |
+| `LEGION_PATH_SCOPE` | 第 19 条 §9.2 第 4 步 |
+| `LEGION_CONNECTOR_DECLARATIONS` | 第 19 条 §9.2 第 5 步（本节） |
+| `TEAM_HUB_TOKEN` | ★ **早于本节、没有任何归属** |
+
+`TEAM_HUB_TOKEN` 那一格值得单独说：`root.mjs` 的 `readString(source, keys)`
+**确实**会读它（`ENFORCEMENT_CONFIG_FIELDS.hubToken`），只是它是**可选**的
+（`MISSING_FIELD_CODES` 里没有它，缺了不拦装配）⇒ 今天**不致命**，
+但"配了也传不到进程"这件事与另两条**一模一样**。
+
+后果很具体，而且是**决定性实测**过的（`scratch/_probe-childenv-keys.mjs`）：
+
+```
+values 里给 LEGION_PATH_SCOPE             ⇒ ★★ 抛：键未在进程 runtime 的 envNames 中声明
+values 里给 LEGION_CONNECTOR_DECLARATIONS ⇒ ★★ 抛：同上
+values 里给 TEAM_HUB_TOKEN                ⇒ ★★ 抛：同上
+values 里给 LEGION_ACTOR                  ⇒ 不抛，env 里出现了（对照）
+baseEnv 里带 LEGION_PATH_SCOPE            ⇒ ★ 被丢掉，dropped=["LEGION_PATH_SCOPE"]
+```
+
+⇒ 两条路都让"我配了"与"我没配"在那个进程里**同形**。
+
+★ 顺带订正本文档 §8.3.1 的一处**过度概括**：那一节量出"新键必须在这里声明 `envNames`"
+是**假**的（该文件里 `envNames:` 出现 0 次指的是 `product/config-schema.mjs`，
+而"配置键"那条线走的是 `product/config.mjs` 的 `KNOWN_CONFIG_KEYS`）。
+那个结论对**配置键**是对的，但**不能外推到环境变量注入**：
+runtime 进程的 `envNames` 在 `product/process-manifest.mjs:255` 确实存在，
+而 `buildChildEnv()` 对未声明的键是**抛**（`values`）或**丢**（`baseEnv`）。
+两件事在不同的层上，**都不许用对方来否证**。
+
+#### 已加的闸（并**变异实测**过）
+
+`scripts/config/config.test.mjs` 新增一节：`NOT_FORWARDED_YET` 三条 + 每条的归属理由 +
+**查旧**（键一旦真的放行了，名单不删就红）。变异：往 `fields` 里塞第 4 个未放行的键 ⇒
+判据红且点名 `LEGION_MUTANT_PROBE`（跑完已还原）。
+
+#### 途中被闸门顶出来的三件事
+
+1. **`config.test.mjs` 的 Trap 1 计数**：我按"只多了一条登记文本"猜了 `12/8/4`，
+   实测是 `13/8/5`——**新读取点自己也是一个命中**。它值得记，因为这个数**最容易读错**：
+   `dynamic.length` 从 11 变 13，与"只多了一条登记文本所以变 12"，在**总数这一个数**上
+   分不出两种完全相反的原因（"多了一个真的读取点" vs "登记了一条不存在的读取点"）；
+   `self`/`source` 那两条**不是补充说明，是唯一能把两者分开的读数**。
+2. **新文件必须先 `git add`**：`scan --check` 在 `connector-port.mjs` 未跟踪时明说
+   「1 个文件已写好但尚未纳入版本控制，因此本次扫描没有覆盖它们」并判红。
+3. **全量 CI 抓到我自己的一个回归**（`test` 阶段唯一一条 FAIL：`production-scope-wiring` ①）。
+   我把那组新入参写成了**条件展开**，而那条判据是**文本解析**这组键的
+   （`productionRootInputs()`，它要能回答"生产装配**到底传了哪几个键**"），
+   条件展开让解析器中途停下 ⇒ 报「解析锚点坏了」。**而它红得对**：这一行的既有形状
+   本来就是 `pathScope: scope.port`——**键恒在、缺席为 `null`**，`assemble.mjs:219`
+   也正是这么读的。改成同形状之后 6/6 绿，**行为逐字不变**。
+
+   > 一个"用条件展开来表达缺席"的装配点，
+   > 与一个"键恒在、缺席为 null"的装配点，在**行为上**完全相同——
+   > 只不过前者的键集**不可文本化**，于是任何"数一数传了哪几个键"的判据
+   > 都会静静地少看见几个。
+
 ### 10.14 本轮的诚实边界
 
 ### 10.14 本轮的诚实边界
@@ -5009,3 +5187,70 @@ connectorDeclarations ──► createRegistry ──┬──► createOutcomeL
      会调 `recordOutcome`，所以熔断器在跑着的系统里永远合闸；⑨⑤ 是在**测试里**把它推起来的。
 159. §10.45 ⚠️ 我**没有**核第 19 条那个配置键该长什么样，也**没有**动
      `product/config-schema.mjs`（那是另一会话的在制品，`git status` 显示为 M）。
+
+160. §10.46 ★★★ **投递面建起来了，而它把那条链的最后一根线**换了个位置**，没有消掉**。
+     新增 `connector-port.mjs`（+14 例）读 `LEGION_CONNECTOR_DECLARATIONS` 并推导归属，
+     `root-row.mjs` 是真生产调用方，`connectorJudgment` 在环境里有那个键时**真的**是 `true`。
+     ⚠️ 但精确读数必须这样写：**"从「没人接线」变成「接好了、且真调用被它拦下；
+     而那个键进不了那个进程」"**——`LEGION_CONNECTOR_DECLARATIONS` 与
+     `LEGION_PATH_SCOPE` 一样，在 `runtime/config-schema.mjs` 的 `fields` 里
+     却**不在** `product/process-manifest.mjs` 的 runtime `envNames` 里，
+     而那个文件是**另一条工作线的在制品**。与第 19 条**同生共死**。
+161. §10.46 ★★★ **登记表的头号教义在生产里不可达**（本节最重要的边界）。
+     `registry.mjs` 文件头 ①：「未声明的工具**必须拒绝**」——直接问登记表它确实拒，
+     但**推导式** `resolveConnectorId`（按"工具名在不在某份声明里"归属）
+     让一个没被声明过的工具名**归属不到任何连接器** ⇒ 登记表**根本不会被问到**。
+     实测：`github__delete_repo` / `totally-made-up` 走桥时 `attributed` 不增、
+     `connectorDecided === 0`；净效果**仍是拒绝**，但功劳在**政策门**。
+     ⇒ 这与本文档 §4.2 那份到期接法的**第 2 条**（"没给端口时连接器形状的工具必须 deny"）
+     是同一条——**它至今没有实现**。真正剩下的一格：
+     **一个名字撞上已知核心工具**的未声明连接器工具 ⇒ `allow`。
+     ★ 我**没有**改任何判定逻辑去"顺手补上"：**"连接器形状"今天判不了**。
+162. §10.46 ⚠️ **要补上第 161 条需要一条本仓没有的源信号**：
+     归属必须基于**来源**（这次调用是不是走连接器发出去的），而不是**名字**。
+     本仓今天没有那个信号——没有 MCP 工具命名/路由约定（`grep` `mcp__` / 工具前缀
+     在生产代码里零命中）。⇒ 这是**需裁决/需 DSH 侧信息**的一件事，不是能靠写代码绕过去的。
+163. §10.46 ★★ **两张声明面之间原本没有任何闸**。`runtime/config-schema.mjs` 的 `fields`
+     与 `product/process-manifest.mjs` 的 runtime `envNames` 各自都有门禁，
+     而**"schema 里声明了、清单里没放行"是两处都绿**的。已加闸并**变异实测**过。
+     实测三处缺口：`LEGION_PATH_SCOPE`、`LEGION_CONNECTOR_DECLARATIONS`、
+     以及 **`TEAM_HUB_TOKEN`——早于本轮、没有任何归属**（`root.mjs` 的 `readString`
+     确实读它，只是**可选**，缺了不拦装配）⇒ 它**需要裁决**：要么加进 runtime 的 `envNames`，
+     要么从 schema 的 `fields` 里拿掉。"这个进程能配它"与"它能拿到它"必须有一处让步。
+164. §10.46 ★★ **决定性实测**（`scratch/_probe-childenv-keys.mjs`，不提交）：
+     `buildChildEnv()` 对这三个键，在 `values` 里**抛**（"键未在进程 runtime 的
+     envNames 中声明：先补清单，再写入"），在 `baseEnv` 里**静默丢掉**
+     （`dropped=["LEGION_PATH_SCOPE"]`）；对照 `LEGION_ACTOR` 则正常放行。
+     ★ 两种后果都让"我配了"与"我没配"在那个进程里**同形**。
+165. §10.46 ★★ **订正本文档 §8.3.1 的一处过度概括**：那一节量出
+     "新键必须在这里声明 `envNames`"是**假**的——那个结论对**配置键**是对的
+     （配置键走 `product/config.mjs` 的 `KNOWN_CONFIG_KEYS`），但**不能外推到环境变量注入**：
+     runtime 进程的 `envNames` 在 `product/process-manifest.mjs:255` 确实存在。
+     两件事在不同的层上，**都不许用对方来否证**。
+166. §10.46 ⚠️ **本节仍然没有做的事**：没有起过一个由 Launcher 完整启动的部署
+     （用户那个在 3080 上）；`connector-port.mjs` 的**端到端**读数是在组合根夹具上取的，
+     不是在一次真实 spawn 里；`product/process-manifest.mjs` 的修正**没做**
+     （另一会话在制品）；`TEAM_HUB_TOKEN` 那一格**没有裁决**。
+167. §10.46 ★★ **`config.test.mjs` 的 Trap 1 计数把"我猜的数"顶掉了**：
+     我按"只多了一条登记文本"猜 `12/8/4`，实测 `13/8/5`（新读取点自己也是一个命中）。
+     这个数**最容易读错**：总数从 11 变 13，与"只多了一条登记文本所以变 12"，
+     在**总数这一个数**上分不出两种完全相反的原因；`self`/`source` 才是能分开它们的那两条。
+168. §10.46 ★ **新文件必须先 `git add` 才进扫描**：`scan --check` 在
+     `connector-port.mjs` 未跟踪时明说「1 个文件已写好但尚未纳入版本控制，
+     因此本次扫描没有覆盖它们」并判红。一个"扫 git 已跟踪集合"的闸门与一个
+     "扫工作树"的闸门，在文件**碰巧已提交**时是同一个全绿。
+169. §10.46 ★★★ **全量 CI 抓到我自己的一个回归，而它红得比"用例失败"更有价值**：
+     `production-scope-wiring` ① 用**文本解析**读那组键，而我写的**条件展开**让解析器
+     中途停下。修法是回到这一行既有的形状（`pathScope: scope.port`：**键恒在、缺席为 null**），
+     行为**逐字不变**。*一个"用条件展开来表达缺席"的装配点，与一个"键恒在、缺席为 null"
+     的装配点，在行为上完全相同——只不过前者的键集**不可文本化**，
+     于是任何"数一数传了哪几个键"的判据都会静静地少看见几个。*
+170. §10.46 ★★ **同一个锚点在同一天里被人动过两次，而判据只该红一次**：
+     `installEnforcementRoot({` 从 **485 → 508**（另一会话，**人**推理出来的）再到 508 → **仍 534**
+     （本节，我只改了锚点**之后**的行 ⇒ 锚点没动 ⇒ `boundary-facts` ⑫b **没有**需要更新）。
+     两次读数放在一起才说明那一层在干什么：它**不是**"每次都红"，
+     它是"锚点真动了就红"。
+171. §10.46 ★ **`connector-port.mjs` 的可达性不需要人工登记**：它作为 `root-row.mjs`
+     的 import 自动可达（不可达数仍是 **46**，它不在其中）。
+     ⇒ 一个"接线做对了"的模块，在可达性探针上的读数是"**不见了**"——
+     而"不见了"与"被漏掉没扫"在只看计数的摘要里同形，所以要回落差（46 未变）。

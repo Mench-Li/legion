@@ -732,6 +732,89 @@ test('★ PRT-254：runtime/ 与 security/ 真的被扫到了（不是"扫了 0 
   assert.ok(sec.suspicious.size >= 59, `security/ 的疑似字面量应 ≥59，实际 ${sec.suspicious.size}`)
 })
 
+// ────────────── ⑦ 两张**声明面**之间的那道闸（2026-09-18 补） ──────────────
+//
+// 本仓有两处各自声明"runtime 进程会读哪些环境键"，而**在此之前没有一条判据
+// 把它们对起来**：
+//
+//   · `runtime/config-schema.mjs` 的 `fields` —— "这个进程**可以**被配成什么"
+//   · `product/process-manifest.mjs` 的 runtime `envNames` —— "Launcher 会**转发**什么"
+//
+// 两处各自都有门禁（前者由本文件上面那条反查、后者由 `product/launcher/*` 的用例盯着），
+// 于是**"schema 里声明了、清单里没放行"是两处都绿的**。而它的后果很具体：
+// `buildChildEnv()` 对未声明的键，在 `values` 里**直接抛**、在 `baseEnv` 里**静默丢掉**
+// ——两种都让"我配了"与"我没配"在那个进程里同形。
+//
+//   > 一个"两处声明各自都对、而没有任何判据把它们对起来"的仓库，
+//   > 与一个"只有一处声明"的仓库，在 CI 的读数上是同一个全绿——
+//   > 只不过前者的缺口要等到**有人在真实部署里配了那个键**才暴露。
+//
+// 实测（2026-09-18）有**三处**这样的缺口，其中一处早于本轮、且**没有任何归属**。
+// 这一节把那三处变成**列得出来的**，并让第四处不能悄悄出现。
+
+/**
+ * schema 声明了、而清单还没放行的键。
+ *
+ * ★ 每一条都必须写明**为什么**以及**归谁**——一个只写"已知问题"的名单
+ *   与一个"从来没人看过的名单"没有区别。
+ * ★ 而它**必须**能被查旧：键一旦真的放行了，这个条目就成了假话，
+ *   下面那条判据会逼着人把它删掉（见 `stale` 那段）。
+ */
+const NOT_FORWARDED_YET = Object.freeze({
+  LEGION_PATH_SCOPE:
+    '第 19 条 §9.2 第 4 步（路径范围表投递）。读取点 `scope-port.mjs` 已建、'
+    + '装配点 `root-row.mjs:540` 已接。最后一根线在 `product/process-manifest.mjs` 的 runtime '
+    + '`envNames` —— 而那个文件是**另一会话的在制品**。归第 19 条排期。',
+  LEGION_CONNECTOR_DECLARATIONS:
+    '第 19 条 §9.2 第 5 步（F-21 连接器声明投递）。读取点 `connector-port.mjs` 已建、'
+    + '装配点 `root-row.mjs:545` 已接、生产路径用例已在 `root-row.test.mjs` 验过。'
+    + '最后一根线**与上一条完全是同一处**（同一个文件、同一个数组）。',
+  TEAM_HUB_TOKEN:
+    '★ 早于本轮、**没有任何归属**的一处同形缺口。`root.mjs` 的 `readString(source, keys)` '
+    + '确实会读它（`ENFORCEMENT_CONFIG_FIELDS.hubToken`），只是它是**可选**的'
+    + '（`MISSING_FIELD_CODES` 里没有它，缺了不拦装配）⇒ 今天**不致命**，'
+    + '但"配了也传不到进程"这件事与另两条一模一样。'
+    + '⇒ 需要裁决：要么把它加进 runtime 的 `envNames`，要么从 schema 的 fields 里拿掉'
+    + '（"这个进程能配它"与"它能拿到它"必须有一处让步）。',
+})
+
+test('★★★ runtime 的 schema `fields` 与清单的 runtime `envNames` 必须对得上（第四处缺口不能悄悄出现）', async () => {
+  const { SCHEMA } = await import('../../runtime/config-schema.mjs')
+  const { PROCESS_SPECS } = await import('../../product/process-manifest.mjs')
+
+  const rtSpec = PROCESS_SPECS.find((s) => s.key === 'runtime')
+  assert.ok(rtSpec, 'process-manifest 里没有 runtime 进程 —— 这道闸失去对象')
+  const forwarded = new Set(rtSpec.envNames)
+
+  // ① schema 的每个 env 键：要么清单会转发它，要么必须在名单里写明。
+  const schemaEnvs = SCHEMA.fields.map((f) => f.env).filter(Boolean)
+  assert.ok(schemaEnvs.length >= 12, `schema fields 的 env 键数异常：${schemaEnvs.length}`)
+  const unexplained = schemaEnvs.filter((e) => !forwarded.has(e) && NOT_FORWARDED_YET[e] === undefined)
+  assert.deepEqual(unexplained, [],
+    '这些键在 runtime 的 schema `fields` 里声明了"本进程可以配"，'
+    + '而清单的 `envNames` 不会转发它们 —— 配了也到不了进程，'
+    + `而两处各自的判据都是绿的。要么加进清单，要么写进 NOT_FORWARDED_YET 并写明归属：${JSON.stringify(unexplained)}`)
+
+  // ② 名单不许变旧：键一旦真的放行了，那个条目就成了假话。
+  const stale = Object.keys(NOT_FORWARDED_YET).filter((e) => forwarded.has(e))
+  assert.deepEqual(stale, [],
+    '这些键**已经**被清单转发了，而 NOT_FORWARDED_YET 里还写着"没放行" —— '
+    + `那是名单在说谎。★ 好消息：把它们从名单里删掉即可：${JSON.stringify(stale)}`)
+
+  // ③ 名单里的每一条都要写明理由（不许留一个光秃秃的键名）。
+  for (const [k, why] of Object.entries(NOT_FORWARDED_YET)) {
+    assert.ok(typeof why === 'string' && why.length >= 40, `${k} 的理由太短，等于没写`)
+  }
+
+  // ④ 三个缺口的**实测读数**（不是从名单推的）——数字变了就要重新审这一节。
+  //    ★ 这一条与 ①② 不重复：①② 读的是**集合关系**，这一条读的是**计数**。
+  //      计数是唯一能让人一眼看出"从 3 个变成 4 个"的读数。
+  const missing = schemaEnvs.filter((e) => !forwarded.has(e)).sort()
+  assert.deepEqual(missing, [
+    'LEGION_CONNECTOR_DECLARATIONS', 'LEGION_PATH_SCOPE', 'TEAM_HUB_TOKEN',
+  ], `schema 有而清单没有的键变了（实的 ${JSON.stringify(missing)}）—— 重新审一遍这一节`)
+})
+
 test('★★ PRT-254：nonEnvLiterals 与**源码**逐条对账——多一条是编造，少一条是漏登', () => {
   // 344 个字面量正是"人会开始编"的量级，而编造与真实在名单里**长得一模一样**：
   //   · 漏一条 → 门禁红（可见，代价小）；
@@ -784,12 +867,20 @@ test('★★ PRT-254：声明的 env 键必须等于 runtime 源码里两张键�
   // 第 19 条 §9.2 第 4 步：执行面的路径范围表（LEGION_PATH_SCOPE + LEGION_CWD）。
   // ★ 仍然**从源码取**，不手抄——这张表就是它自己那份读取声明。
   const { SCOPE_PORT_ENV_KEYS } = await import('../../runtime/dsh-composition/scope-port.mjs')
+  // 第 19 条 §9.2 第 5 步：执行面的连接器声明（LEGION_CONNECTOR_DECLARATIONS，F-21）。
+  const { CONNECTOR_PORT_ENV_KEYS } = await import('../../runtime/dsh-composition/connector-port.mjs')
   const expected = [...new Set([
     ...Object.values(DECIDE_ENV_KEYS),
     ...Object.values(ENFORCEMENT_CONFIG_FIELDS).flatMap((f) => [...f.envKeys]),
     ...SCOPE_PORT_ENV_KEYS,
+    ...CONNECTOR_PORT_ENV_KEYS,
   ])].sort()
-  assert.equal(expected.length, 11, `三张键名表共 ${expected.length} 个键（复核基线 11）：数量变了就要重新审一遍这份声明`)
+  // ★ 12 = 11 + `LEGION_CONNECTOR_DECLARATIONS`（第 19 条 §9.2 第 5 步）。
+  //   这个数**不是**为了方便改的常量：它一变就要求复核"多出来的那个键
+  //   是不是真的有一个生产读取点"——加一个键而没加读取点，
+  //   与加一个键又加了读取点，在下面的 `deepEqual` 里都是绿的
+  //   （因为两边都从源码取），所以数量这一条是唯一的护栏。
+  assert.equal(expected.length, 12, `四张键名表共 ${expected.length} 个键（复核基线 12）：数量变了就要重新审一遍这份声明`)
   assert.deepEqual(RUNTIME.envNames().sort(), expected,
     'runtime/config-schema.mjs 的 fields 与源码里的键名表不一致（多一个=编了一个环境变量，少一个=门禁看不见它）')
 
@@ -909,7 +1000,7 @@ test('★★ Trap 1：只按**精确 schema 路径**排除自身登记文本（�
   assert.deepEqual(cov.self.map((d) => d.file), ['demo/config-schema.mjs'], 'schema 文件自身必须被排除，且只排除它一个')
 })
 
-test('★ Trap 1 实测：runtime 11 处 = 7 处 schema 自身登记文本 + 4 处真实源（product 声明后自身文本变 8）', () => {
+test('★ Trap 1 实测：runtime 13 处 = 8 处 schema 自身登记文本 + 5 处真实源（product 声明后自身文本变 8）', () => {
   // 这组数字是"重数一遍"的锚点：数量变了就要重新审这份声明，而不是改数字让它变绿。
   const rt = scanProcess('runtime', { includeTests: false })
   const rtCov = dynamicCoverage(rt, RUNTIME, { schemaFile: SCHEMA_FILES.runtime, processName: 'runtime' })
@@ -917,9 +1008,21 @@ test('★ Trap 1 实测：runtime 11 处 = 7 处 schema 自身登记文本 + 4 �
   //   +2 处**真实源**（scope-port.mjs 的 env[SCOPE_PORT_ENV_KEY] / env[SCOPE_PORT_CWD_ENV_KEY]）
   //   +2 处**自身登记文本**（runtime/config-schema.mjs 的 dynamicEnvReads 里那两条，
   //       扫到的正是登记文本本身——这就是 Trap 1 的真身）
-  assert.equal(rt.dynamic.length, 11, 'runtime 动态命中数变了（基线 11）')
-  assert.equal(rtCov.self.length, 7, 'runtime 的 7 处自身登记文本必须被排除，而不是当成待登记读取')
-  assert.equal(rtCov.source.length, 4, 'runtime 的真实源动态读取是 4 处（root-row.mjs 2 处 env[k] + scope-port.mjs 2 处）')
+  //
+  // ★ 11 → 13（2026-09-18，第 19 条 §9.2 第 5 步，F-21 的连接器声明）：
+  //   **+1 处真实源**（新文件 `connector-port.mjs` 的 `env[CONNECTOR_PORT_ENV_KEY]`）
+  //   **+1 处自身登记文本**（config-schema.mjs 里那条对应的登记）
+  //
+  //   > ⚠️ 这是本组数字最容易读错的地方：`dynamic.length` 从 11 变 13，
+  //   > 与"只多了一条登记文本所以变 12"，在**总数这一个数**上分不开——
+  //   > 而两者是完全相反的结论（一个是"多了一个真的读取点"，
+  //   > 一个是"登记了一条不存在的读取点"）。
+  //   > 所以下面那两条 `self` / `source` 不是补充说明，它们是**唯一**
+  //   > 能把这两种原因分开的读数。★ 我这一批就先写错了它们
+  //   > （按"只有登记文本 +1"猜了 12/8/4），是判据把实测的 13/8/5 顶出来的。
+  assert.equal(rt.dynamic.length, 13, 'runtime 动态命中数变了（基线 13）')
+  assert.equal(rtCov.self.length, 8, 'runtime 的 8 处自身登记文本必须被排除，而不是当成待登记读取')
+  assert.equal(rtCov.source.length, 5, 'runtime 的真实源动态读取是 5 处（root-row.mjs 2 + scope-port.mjs 2 + connector-port.mjs 1）')
   assert.ok(rtCov.self.every((d) => d.file === SCHEMA_FILES.runtime))
   assert.deepEqual(rtCov.uncovered, [], 'runtime 的 2 处真实源必须被现有 dynamicEnvReads 覆盖：' + JSON.stringify(rtCov.uncovered))
 
@@ -1045,7 +1148,14 @@ test('★ 端到端：scan --check 必须 PASS，且把「schema 自身登记文
   assert.equal(r.code, 0, r.out)
   assert.match(r.out, /scan: PASS（全部 env 读取点、疑似字面量与动态读取均已处理/)
   // 5 → 7（2026-09-18）：dynamicEnvReads 新增两条，它们的登记文本本身又被同一条规则扫到。
-  assert.match(r.out, /runtime\/config-schema\.mjs 命中 7 处/)
+  // 7 → 8（2026-09-18，第 19 条 §9.2 第 5 步）：连接器声明那条登记，同样是它自己的登记文本。
+  //   ★ 这个数就是上面 Trap 1 那条 `rtCov.self.length` 的**同一个数**，
+  //     只是从扫描器的输出里再读一遍——两条判据看同一件事不是冗余：
+  //     一条读的是**算出来的**分类结果，一条读的是**打给人看的**那行日志。
+  //     > 一个"分类对了但日志里没写"的扫描器，
+  //     > 与一个"分类错了且日志里也没写"的扫描器，
+  //     > 在只看分类的那条判据下是同一个绿。
+  assert.match(r.out, /runtime\/config-schema\.mjs 命中 8 处/)
   assert.match(r.out, /product\/config-schema\.mjs 命中 11 处/)
   assert.match(r.out, /allowlist\.mjs[\s\S]{0,60}write-target/)
   assert.match(r.out, /dsh-credentials\.mjs[\s\S]{0,60}foreign-object/)

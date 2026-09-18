@@ -1082,6 +1082,208 @@ describe('PRT-214 root-row（真 cordis Context：`mount()` 的生产调用方�
   })
 })
 
+// ───────────────────────────────────────────────────────────────────────────
+// ★★★ F-21 判定面的**最后一根线**（第 19 条 §9.2 第 5 步，2026-09-18）
+//
+//   这一组是本行**唯一**能回答下面这句话的地方：
+//
+//     "`connectorDeclarations` / `resolveConnectorId` 到底有没有
+//      一个**真的**生产调用方？"
+//
+//   在它之前，那两个参数在 `assemble.mjs` / `root.mjs` 里收着、也成对校验，
+//   而 `root-row.mjs` **从不传它们** ⇒ 生产里 `connectorJudgment` 恒为 `false`。
+//   那正是台账 F-21 那一行点名的形状：能力齐全、用例全绿、生产调用方数为 0。
+// ───────────────────────────────────────────────────────────────────────────
+
+/** 一份合法的连接器声明（放进 `LEGION_CONNECTOR_DECLARATIONS` 的那份 JSON）。 */
+const CONNECTOR_DECL_FOR_ROW = Object.freeze({
+  connectorId: 'github',
+  transport: 'stdio',
+  command: 'npx mcp-github',
+  policy: 'allow',
+  tools: Object.freeze([Object.freeze({ name: 'git-status', capabilities: Object.freeze(['repo:read']) })]),
+  secretRefs: Object.freeze([]),
+})
+
+test('★★★ 生产路径：env 里配上连接器声明 ⇒ 行**真的**把它交给组合根（判定面翻成 true）', async () => {
+  const { ctx } = fakeContext()
+  const { factory } = portFactory()
+  const env = { ...ENV_OK, LEGION_CONNECTOR_DECLARATIONS: JSON.stringify([CONNECTOR_DECL_FOR_ROW]) }
+
+  await ctx.plugin(createRootRow({ env, createRequestApproval: factory }))
+
+  const surfaces = enforcementRoot().enforcementSurfaces()
+  // ★★★ 这就是 F-21 那一格第一次在生产路径上翻成 true。
+  assert.equal(surfaces.connectorJudgment, true,
+    'env 里配了连接器声明，判定面却没上 —— 那两个参数仍然没有生产调用方')
+  // ★ 而反馈面**同时**翻成 true：两半共用同一份 registry（`assemble.mjs` 造的）。
+  assert.equal(surfaces.connectorFeedback, true, '判定面上去了而反馈面没有 —— 熔断器只开不合')
+  // ★ 反向对照：`policy` 那一格**不因**这件事而改变语义。
+  assert.equal(surfaces.policy, true)
+})
+
+test('★★★ 生产路径：**没配**连接器声明 ⇒ 那一格如实是 false（没配 ≠ 空表）', async () => {
+  //   > 一个"没配就当作空表"的读取点，与一个"装了一份零连接器登记表"的组合根，
+  //   > 在 `connectorJudgment` 那一格上是同一个 `true`——
+  //   > 只不过后者**一次判定都不会做**。
+  const { ctx } = fakeContext()
+  const { factory } = portFactory()
+  await ctx.plugin(createRootRow({ env: ENV_OK, createRequestApproval: factory }))
+  const surfaces = enforcementRoot().enforcementSurfaces()
+  assert.equal(surfaces.connectorJudgment, false, '没配却报 true —— 那就是"看起来接好了"')
+  assert.equal(surfaces.connectorFeedback, false)
+  // ★ 而**其余各格不受影响**：这一格的缺席不该让别的闸门跟着变。
+  assert.equal(surfaces.policy, true)
+  assert.equal(surfaces.hardFloor, true)
+  assert.equal(surfaces.approval, true)
+})
+
+test('★★★ 生产路径：显式给**空表** ⇒ 拦住装配（不许变成一个"装好的空壳"）', async () => {
+  const { ctx, services } = fakeContext()
+  const { factory } = portFactory()
+  await assert.rejects(
+    async () => {
+      await ctx.plugin(createRootRow({
+        env: { ...ENV_OK, LEGION_CONNECTOR_DECLARATIONS: '[]' },
+        createRequestApproval: factory,
+      }))
+    },
+    (e) => {
+      assert.equal(e.code, ROOT_ROW_CODES.CONFIG_UNRESOLVED)
+      assert.match(e.message, /connector-port-empty-list/,
+        '消息要带着端口那一层的具名码，否则排查要翻两层')
+      assert.match(e.message, /connectorJudgment/, '理由要点破它会读成 true')
+      return true
+    },
+  )
+  assert.equal(services.has(ENFORCEMENT_ROOT_SERVICE), false, '拒绝了却把服务发出去 = 一行装好的空壳')
+})
+
+test('★★★ 生产路径：配了坏 JSON ⇒ 拦住装配，**不**当作"没配"', async () => {
+  //   > 一个"读不出来就当作没配"的组合根，
+  //   > 与一个"这个部署确实没有连接器策略"的部署，在强制面读数上长得一样。
+  const { ctx, services } = fakeContext()
+  const { factory } = portFactory()
+  await assert.rejects(
+    async () => {
+      await ctx.plugin(createRootRow({
+        env: { ...ENV_OK, LEGION_CONNECTOR_DECLARATIONS: 'not json{' },
+        createRequestApproval: factory,
+      }))
+    },
+    (e) => {
+      assert.equal(e.code, ROOT_ROW_CODES.CONFIG_UNRESOLVED)
+      assert.match(e.message, /connector-port-bad-text/)
+      assert.match(e.message, /不.*按"没配"处理/, '理由必须点破这个二分')
+      return true
+    },
+  )
+  assert.equal(services.has(ENFORCEMENT_ROOT_SERVICE), false)
+})
+
+test('★★★ 生产路径：配上之后，一次**连接器策略是 deny** 的调用真的被连接器层拦下', async () => {
+  // ★ 前四条验的是"读数翻对了"。这一条验的是**后果**：
+  //   装了判定面，而它真的拒了一次调用、且**拒绝来自连接器层**。
+  //   少了它，上面那些 `true` 可能只是"某一格被赋了 true"。
+  //
+  // ★ 夹具的选择是有讲究的：`git-status` 是 DSH **认识的**低风险读工具，
+  //   所以政策门对它是 `allow`。于是"结果变成 deny"只可能来自连接器层——
+  //   这就是"连接器策略真的接进来了"的唯一无歧义读数。
+  const { ctx } = fakeContext()
+  const { factory } = portFactory()
+  const env = {
+    ...ENV_OK,
+    LEGION_CONNECTOR_DECLARATIONS: JSON.stringify([
+      { ...CONNECTOR_DECL_FOR_ROW, policy: 'deny' },
+    ]),
+  }
+  await ctx.plugin(createRootRow({ env, createRequestApproval: factory }))
+
+  const root = enforcementRoot()
+  const port = root.bridge.connectorJudgment
+  assert.notEqual(port, null, '判定面没有被交给桥')
+
+  const d = await root.bridge.preExecute({
+    name: 'git-status', callId: 'c-1', arguments: { path: `${CWD}/x` },
+  })
+  assert.equal(d.kind, 'deny', `连接器策略是 deny，结果却是 ${d.kind} —— 声明没有抵达判定面`)
+  assert.match(d.reason, /连接器 github/, `拒绝不是连接器层给的：${d.reason}`)
+  // ★★ 更严的那一侧**是连接器层**（不是政策门）——`connectorDecided` 只在
+  //    连接器的判定**严格更严**时才加一。这一格是"连接器策略真的起作用了"的判据。
+  assert.equal(port.receipts().connectorDecided, 1,
+    `连接器层没有成为更严的那一侧（实得 ${port.receipts().connectorDecided}）`)
+  assert.equal(port.receipts().attributed, 1, '这次调用没有被归属到连接器')
+})
+
+test('★★★ 生产路径：**同一次调用**没配连接器声明时是 allow（前提对照）', async () => {
+  // ★ 上一条断言"deny"。若没有这一条，一个"把一切都拒掉"的坏接线
+  //   也能让上一条绿——而"配了就变 deny"必须**只是因为**配了东西。
+  const { ctx } = fakeContext()
+  const { factory } = portFactory()
+  await ctx.plugin(createRootRow({ env: ENV_OK, createRequestApproval: factory }))
+  const d = await enforcementRoot().bridge.preExecute({
+    name: 'git-status', callId: 'c-1', arguments: { path: `${CWD}/x` },
+  })
+  assert.equal(d.kind, 'allow', `没配连接器声明时 git-status 应当 allow，实得 ${d.kind}（${d.reason}）`)
+})
+
+test('★★★ 归属的**边界**：推导式解析器触发不了登记表那条「未声明就拒绝」', async () => {
+  // ⚠️ 这一条钉的是一个**已知的、结构性的**限度，不是待办。它必须在这里，
+  //    否则下一个读到"判定面已接线"的人会以为那条教义在生产里也生效了。
+  //
+  //   登记表（`registry.mjs` 文件头 ①）的头号教义是：
+  //     「未声明的工具**必须拒绝**——没见过就放行，等于任何人在外部加一个
+  //       工具就等于加一个后门」
+  //
+  //   而**推导式**解析器（本行现在用的那个）是按**工具名在不在某份声明里**
+  //   来归属的。于是一个没被声明的工具名**归属不到任何连接器** ⇒
+  //   登记表根本不会被问到 ⇒ 那条教义**不可达**。
+  //
+  //   > 一个"要触发『未声明就拒绝』、得先把这个工具归属到某个连接器，
+  //   > 而归属本身要求它已经被声明"的接线，
+  //   > 与一个"从来没有那条教义"的接线，在每一次真调用的读数上
+  //   > 都是同一个 `unattributed`——只不过前者的文件头里**明确写着**不许这样。
+  const { ctx } = fakeContext()
+  const { factory } = portFactory()
+  const env = {
+    ...ENV_OK,
+    LEGION_CONNECTOR_DECLARATIONS: JSON.stringify([CONNECTOR_DECL_FOR_ROW]),
+  }
+  await ctx.plugin(createRootRow({ env, createRequestApproval: factory }))
+
+  const root = enforcementRoot()
+  const port = root.bridge.connectorJudgment
+
+  // ① 模块口径：教义**是**实现的（直接问登记表，用同一个工具名）。
+  const { createRegistry } = await import('../../../runtime/connectors/registry.mjs')
+  const reg = createRegistry({ connectors: [{ ...CONNECTOR_DECL_FOR_ROW }] })
+  const direct = reg.decide({ connectorId: 'github', toolName: 'github__delete_repo' })
+  assert.equal(direct.decision, 'deny', '登记表本身必须拒未声明的工具')
+  assert.equal(direct.code, 'connector-tool-not-declared')
+
+  // ② 生产口径：同一个工具名走桥 ⇒ **归属不到**连接器 ⇒ 登记表没被问到。
+  const before = port.receipts()
+  await root.bridge.preExecute({
+    name: 'github__delete_repo', callId: 'c-x', arguments: { path: `${CWD}/x` },
+  })
+  const after = port.receipts()
+  assert.equal(after.attributed, before.attributed,
+    '未声明的工具名**不该**被归属到连接器（归属是按声明推导的）')
+  assert.equal(after.unattributed, before.unattributed + 1, '这一次调用必须记在 unattributed 上')
+  assert.equal(after.connectorDecided, before.connectorDecided,
+    '⚠️ 连接器层**没有**成为更严的那一侧 —— 这正是上面那条教义不可达的读数')
+
+  // ③ 而**后果**仍然是被拒的——但拒绝来自政策门对未知工具的 fail closed，
+  //    不是来自登记表。两者的区别不是学术的：一个**名字撞上已知核心工具**
+  //    的未声明连接器工具，会走到政策门的 `allow` 上去。
+  const d = await root.bridge.preExecute({
+    name: 'github__delete_repo2', callId: 'c-y', arguments: { path: `${CWD}/x` },
+  })
+  assert.equal(d.kind, 'deny', '未知工具应当被拒（政策门 fail closed）')
+  assert.ok(!/连接器 github/.test(String(d.reason)),
+    `这次拒绝**不该**归功于连接器层（它没被问到）：${d.reason}`)
+})
+
 if (SKIP !== false) {
   test('PRT-214 root-row 的真运行时部分本次未运行', () => {
     assert.ok(true, `SKIP 原因：${SKIP}。外部宿主测试不伪造通过——跑不了就不算跑过。`)

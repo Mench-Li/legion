@@ -1133,6 +1133,16 @@ async function stageTest() {
         //   它盯三个 fail-closed 决定（方向未知按 write / 目标缺失拒绝 /
         //   表在装配期就校验）与"缺席如实是 absent 且落到执行面就是放行"。
         'runtime/dsh-composition/scope-port.test.mjs',
+        // ★ 同族的**第二份投递点**（2026-09-18，第 19 条 §9.2 第 5 步，F-21）：
+        //   与上面那条是**同一个形状**——`registry.mjs` 的 `decide()` 早就写好了，
+        //   织进桥的 `decision-port.mjs` 也写好了，而"那份声明从哪来"**零生产调用方**
+        //   ⇒ `enforcementSurfaces().connectorJudgment` 恒为 `false`。
+        //   它盯四件事：缺席**如实**是 `absent`（不许折成空表，否则读数说"装好了"
+        //   而一次判定都不做）/ 显式空表**具名拒绝** / 重名工具**装配期**就停 /
+        //   配坏了**抛**而不是当作没配。
+        //   ⚠️ 连同**已知限度**：推导式归属触发不了登记表那条「未声明就拒绝」
+        //   （`connector-port.mjs` 文件头 ⑦），判据在 ④c。
+        'runtime/dsh-composition/connector-port.test.mjs',
       ],
       cwd: ROOT,
     },

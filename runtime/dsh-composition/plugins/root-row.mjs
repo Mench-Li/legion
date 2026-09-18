@@ -140,6 +140,7 @@
 
 import { APPROVAL_POLICIES, decideApproval } from '../approval-policy.mjs'
 import { SCOPE_PORT_ENV_KEY, scopePortFromEnv } from '../scope-port.mjs'
+import { CONNECTOR_PORT_ENV_KEY, connectorPortFromEnv } from '../connector-port.mjs'
 import {
   ENFORCEMENT_ROOT_CODES,
   enforcementInstallation,
@@ -505,6 +506,31 @@ export function createRootRow({
           '那会让一次配置错误与一次真实的"无范围限制"在强制面读数上同形')
       }
 
+      // ★ 第 19 条 §9.2 第 5 步：执行面的**连接器声明**（F-21 判定面的最后一条缝）。
+      //
+      //   在此之前 `installEnforcementRoot` 的两个连接器参数
+      //   （`connectorDeclarations` + `resolveConnectorId`）**从来没有任何
+      //   生产调用方**——`assemble.mjs` 收它们、也成对校验，而生产入参里
+      //   一个都没有 ⇒ `enforcementSurfaces().connectorJudgment` 恒为 `false`。
+      //   那正是台账 F-21 那一行点名的形状：能力齐全、用例全绿、生产调用方 0。
+      //
+      //   现在：配了就接上；**没配仍然是没配**（`declarations` 为 `null`，
+      //   两个参数一起不给）。不补默认值——一个"凭空造出来的空表"会让
+      //   组合根建出一份**零连接器**的登记表，于是那一格报 `true`
+      //   而它一次判定都不会做（`connector-port.mjs` 文件头 ①/② 记的就是这条）。
+      let connectors
+      try {
+        connectors = connectorPortFromEnv({ env: effectiveEnv })
+      } catch (err) {
+        // 配了却解释不通 ⇒ **拦装配**，与"根本没配"分开。
+        //   > 一个"读不出来就当作没配"的组合根，
+        //   > 与一个"这个部署确实没有连接器策略"的部署，在强制面读数上长得一样。
+        throw rowError(ROOT_ROW_CODES.CONFIG_UNRESOLVED,
+          `${ROOT_ROW_PLUGIN_NAME} 读不出连接器声明「${CONNECTOR_PORT_ENV_KEY}」：` +
+          `${err?.message ?? err}。**不**按"没配"处理——` +
+          '那会让一次配置错误与一次真实的"此部署没有连接器"在强制面读数上同形')
+      }
+
       const installed = installEnforcementRoot({
         env: effectiveEnv,
         decide: effectiveDecide,
@@ -512,6 +538,23 @@ export function createRootRow({
         //   （`assemble.mjs` 的默认值就是 `null`）——所以这一行**不改变**没配时的行为，
         //   它只让"配了"这件事有了一条能走通的路。
         pathScope: scope.port,
+        // ★ 与上面 `pathScope` **同一个形状**：键恒在，缺席时值是 `null`。
+        //
+        //   ⚠️ 我第一版写的是条件展开（`...(configured ? {a,b} : {})`）。
+        //   那是**错**的，而且错得有价值：`production-scope-wiring.test.mjs` ①
+        //   用**文本解析**读这组键（它要能回答"生产装配到底传了哪几个键"），
+        //   条件展开会让解析器在中途停下 ⇒ 判据红在"解析锚点坏了"。
+        //   ⇒ 而它红得对：这一行的既有形状（`pathScope: scope.port`）本来就是
+        //     "键恒在、缺席为 null"，`assemble.mjs` 也正是这么读的
+        //     （`:219` 两个都为 `null` 时才不建登记表）。条件展开不但多余，
+        //     还让这组键**不再是一份可被读出来的清单**。
+        //
+        //   > 一个"用条件展开来表达缺席"的装配点，
+        //   > 与一个"键恒在、缺席为 null"的装配点，在**行为上**完全相同——
+        //   > 只不过前者的键集**不可文本化**，于是任何"数一数传了哪几个键"的
+        //   > 判据都会静静地少看见几个。
+        connectorDeclarations: connectors.declarations,
+        resolveConnectorId: connectors.resolveConnectorId,
         // ★ 传的是**工厂**，不是端口：端口的真实实现住在 team-hub 那一侧，
         //   而组合根在装配期拿到的是一份解析好的身份配置。
         createRequestApproval: (resolved) => {

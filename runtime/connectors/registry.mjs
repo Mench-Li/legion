@@ -445,6 +445,32 @@ function freshCircuit() {
  * `now` 可注入（测试与诊断用）。**没有**任何"从外部改策略"的接口——
  * 策略来自声明，声明是不可变的（见 `declareConnector` 的冻结返回值）。
  */
+/**
+ * 工具名 → 声明了它的连接器 id 们（**唯一一处**归属算法）。
+ *
+ * ★ 提成顶层导出，是因为它有两个调用方，而它们**必须**用同一份实现：
+ *   · `createRegistry()` —— 判定时用；
+ *   · `runtime/dsh-composition/connector-port.mjs` —— 装配期用它在
+ *     环境里那份声明上**先算出重名**，再决定拒不拒。
+ *
+ *   两处各写一份的后果不是"其中一处会慢慢漂"，而是更糟的一种：
+ *   装配期那份算出"没有重名"、判定期那份却按登记顺序挑了一个——
+ *   于是**拒绝没触发，策略也已经用错了**，而两边的读数都是绿的。
+ *
+ * @param {Map<string, object>} byId 已经归一化过的声明（`declareConnector` 的产物）
+ * @returns {Map<string, string[]>}
+ */
+export function toolOwnershipOf(byId) {
+  const owners = new Map()
+  for (const [id, decl] of byId) {
+    for (const tool of decl.tools) {
+      if (!owners.has(tool.name)) owners.set(tool.name, [])
+      owners.get(tool.name).push(id)
+    }
+  }
+  return owners
+}
+
 export function createRegistry({ connectors = [], now = () => Date.now(), resolveSecretRef = null } = {}) {
   if (!Array.isArray(connectors)) {
     throw fail(CONNECTOR_CODES.BAD_DECLARATION, 'connectors 必须是数组')
@@ -463,6 +489,23 @@ export function createRegistry({ connectors = [], now = () => Date.now(), resolv
     byId.set(decl.connectorId, decl)
   }
   const circuits = new Map([...byId.keys()].map((id) => [id, freshCircuit()]))
+
+  /**
+   * 工具名 → 声明了它的连接器 id（见 `attributeTool`）。
+   *
+   * ★ 为什么这张表要**在登记时**建，而不是在判定时现扫一遍：
+   *   判定路径上每一次调用都会问它，而"扫一遍所有连接器的所有工具"
+   *   是 O(连接器数 × 工具数) 次字符串比较——那条路径在**每次**真调用上都跑。
+   *
+   * ★ 而更要紧的是第二件事：这张表让"**一个工具名被两个连接器声明**"
+   *   成为一个**可以查**的事实（`ambiguousTools()`），而不是一个
+   *   在判定时被"谁先谁赢"（`Map` 的插入顺序）静默决定的巧合。
+   *
+   *   > 一个"两个连接器都声明了同名工具、于是按登记顺序挑一个"的归属，
+   *   > 与一个"按调用方身份挑对的"归属，在**任何单条**调用的读数上
+   *   > 都可能看起来正常——只不过前者会把 A 的策略用在 B 的调用上。
+   */
+  const toolOwners = toolOwnershipOf(byId)
 
   /**
    * 密钥引用是否对得上号（见文件头 ③）。
@@ -564,6 +607,80 @@ export function createRegistry({ connectors = [], now = () => Date.now(), resolv
         )
       }
       return status
+    },
+
+    /**
+     * 把一次调用的**工具名**归属到连接器。
+     *
+     * ★ 这是"判定面要求一个 `resolveConnectorId(projection)`"那个端口
+     *   在**本模块**这一侧的答案来源。之所以由登记表自己答，而不是让部署
+     *   再配一份 `{工具名: 连接器 id}`：那份映射**已经在声明里了**
+     *   （每个连接器都列了自己的工具），再配一份就是同一件事写两遍——
+     *   而两份写法迟早会分叉，分叉那天表现为"策略按另一份生效"。
+     *
+     * ★★ 三种结果**必须分得开**，所以这里返回判别式而不是裸 id：
+     *
+     *   · `unique`    —— 恰好一个连接器声明了它 ⇒ 归属确定
+     *   · `none`      —— 没有任何连接器声明它 ⇒ 本次调用**不归连接器层管**
+     *   · `ambiguous` —— **两个及以上**连接器声明了同名工具
+     *
+     *   第三种最危险，因为它**看起来像**第二种：两者都"说不清是谁"，
+     *   于是都很容易被折成"那就不归连接器管，交给策略门"。而它们的
+     *   真实含义正相反——`none` 是真的不归它管，`ambiguous` 是
+     *   **归它管但说不清归谁**，折成 `none` 就等于给那个工具名
+     *   **静默地免掉了连接器层的全部策略**（只因为有人加了个重名工具）。
+     *
+     *   > 一个"重名工具静默绕过连接器策略"的登记表，
+     *   > 与一个"从没声明过这个工具、所以不归它管"的登记表，
+     *   > 在 `unattributed` 这一个读数上是同一个东西——
+     *   > 只不过前者是被一次**新增声明**触发的。
+     */
+    attributeTool(toolName) {
+      const name = String(toolName ?? '').trim()
+      const owners = toolOwners.get(name) ?? []
+      if (owners.length === 0) {
+        return Object.freeze({
+          state: 'none', toolName: name,
+          connectorId: null, candidates: Object.freeze([]),
+        })
+      }
+      if (owners.length > 1) {
+        return Object.freeze({
+          state: 'ambiguous', toolName: name,
+          connectorId: null, candidates: Object.freeze([...owners]),
+        })
+      }
+      return Object.freeze({
+        state: 'unique', toolName: name,
+        connectorId: owners[0], candidates: Object.freeze([...owners]),
+      })
+    },
+
+    /**
+     * 归属的唯一确定答案（`string | null`）——**就是**判定面那个端口要的形状。
+     *
+     * ★ `ambiguous` 与 `none` 在这里都折成 `null`。这是**有意的**，
+     *   但它意味着这个函数的调用方**看不见**两者之别——所以要看得见时
+     *   用 `attributeTool()`，用 `ambiguousTools()` 在装配期把它们全列出来。
+     *   把判据写在函数名里（`connectorForTool`）而不是写在返回值的形状里，
+     *   正是"折平"这件事容易藏起来的地方。
+     */
+    connectorForTool(toolName) {
+      const owners = toolOwners.get(String(toolName ?? '').trim()) ?? []
+      return owners.length === 1 ? owners[0] : null
+    },
+
+    /**
+     * 被**两个及以上**连接器声明过的工具名（排序、冻结）。
+     *
+     * 存在的理由：上面那个 `ambiguous` 折平之后就没有别的读出了。
+     * 装配期拿它做 fail-closed 拒绝，可以让一次重名**在装配时**就停下来，
+     * 而不是变成"这几个工具悄悄地不走连接器策略"。
+     */
+    ambiguousTools() {
+      return Object.freeze(
+        [...toolOwners.entries()].filter(([, ids]) => ids.length > 1).map(([n]) => n).sort(),
+      )
     },
 
     /**

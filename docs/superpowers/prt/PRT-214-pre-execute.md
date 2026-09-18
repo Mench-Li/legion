@@ -213,6 +213,8 @@ ctx.provide('approval', { async request() { return 'allowed-once' } })   // ❌
 
 **四行实现全部完成。** 但 PRT-214 仍是 🟡，原因**不在实现**：
 
+> ⚠️ **2026-09-18 注**：本任务**现已 ✅**（见 `docs/superpowers/prt/PRT-PROGRESS.md` 的状态列）。上面这段是该批次结束时的口径，**原文保留**——*一个"当时写对了"的边界说明，与一个"现在仍然成立"的边界说明，读起来是同一句话。*
+
 1. `PATCH_LAYER_ROWS` 里那两行仍是 `module: null`，`reconcilePatchLayer()`
    仍报两条 `ROW_MISSING`，启动自检仍拒绝注册（fail closed）。
    这是**刻意**的——那两行需要函数，YAML 装不下。

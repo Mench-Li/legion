@@ -32,6 +32,7 @@
 
 import { spawn as nodeSpawn } from 'node:child_process'
 import { attachDrain } from '../logging/sink.mjs'
+import { createPeakResourceSampler } from './peak-resource.mjs'
 
 /** 监督状态。`circuit-open` 与 `failed` 的区别：前者可以 reset 后重试，后者是已放弃。 */
 export const SUPERVISOR_STATES = Object.freeze([
@@ -54,6 +55,17 @@ export const DEFAULT_BACKOFF = Object.freeze({
   /** 连续快速失败多少次后熔断。 */
   circuitThreshold: 5,
 })
+
+/**
+ * PRT-009 `peak-resource` 的默认采样周期。
+ *
+ * 为什么是 5 秒而不是"每帧"：采样在 win32 上是**起一次 PowerShell**（约 100–300ms），
+ * 所以周期太短会让采样器本身变成被测对象的一部分（`Get-Process` 自己的开销
+ * 落进被采进程所在机器的 CPU 账单里）。5 秒对"峰值内存"够用——
+ * `PeakWorkingSet64` 是**进程生命周期内的单调峰值**，不是瞬时值，
+ * 所以采样频率只影响"多久之后能看到它"，不影响那个数准不准。
+ */
+export const DEFAULT_PEAK_SAMPLE_MS = 5000
 
 function isAlive(child) {
   if (child === null || child === undefined) return false
@@ -82,6 +94,14 @@ export function createSupervisedProcess(spec, {
   // 子进程输出的**消费者**。不提供时**仍然排空管道**——见下面那段说明。
   onOutput = null,
   onOutputError = null,
+  // ── PRT-009 `peak-resource`：执行期外部采样 ──────────────────────────
+  // 采的是**这个被监督的进程**（生产里就是 Launcher 起的那台长驻 DSH Runtime，
+  // 也就是真正在干活的那台——见 `peak-resource.mjs` 文件头那段"采的是哪个进程"）。
+  // `peakSampleMs <= 0` 时完全不采：连采样器都不建。
+  peakSampleMs = DEFAULT_PEAK_SAMPLE_MS,
+  peakIo = null,
+  setIntervalImpl = setInterval,
+  clearIntervalImpl = clearInterval,
 } = {}) {
   const cfg = { ...DEFAULT_BACKOFF, ...(backoff ?? {}) }
   let state = 'pending'
@@ -96,6 +116,14 @@ export function createSupervisedProcess(spec, {
   let pendingTimer = null
   let stopping = false
   let disposed = false
+  /** PRT-009：当前子进程的峰值资源采样器（没有真 pid 时为 null）。 */
+  let peakSampler = null
+  let peakTimer = null
+  /**
+   * 进程退出后外部采样只会拿到 `PROCESS_GONE`，所以**退出前最后一次**
+   * 窗口读数要留下来——否则"峰值是多少"会在进程死掉的那一刻变成"采不到"。
+   */
+  let lastPeakResource = null
 
   const listeners = new Set()
 
@@ -128,7 +156,45 @@ export function createSupervisedProcess(spec, {
     if (typeof pendingTimer?.unref === 'function') pendingTimer.unref()
   }
 
+  /**
+   * PRT-009：给这个被监督的进程开一个峰值资源采样窗口。
+   *
+   * ★ 没有真 pid（测试里的替身 child）时**什么都不做**，不建采样器：
+   *   一条对着假 pid 采样的路径，会以"接好了"的样子存在，而它永远采不到东西。
+   */
+  function startPeakSampling(pid) {
+    stopPeakSampling()
+    if (!(peakSampleMs > 0)) return
+    if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return
+    peakSampler = createPeakResourceSampler(peakIo === null ? { pid } : { pid, io: peakIo })
+    // 立刻先采一次：只靠定时器的话，一个活不过一个采样周期的进程
+    // 会连一个读数都没有——而那恰恰是最需要读数的那一类。
+    peakSampler.sample()
+    lastPeakResource = peakSampler.window()
+    peakTimer = setIntervalImpl(() => {
+      if (peakSampler === null) return
+      peakSampler.sample()
+      lastPeakResource = peakSampler.window()
+    }, peakSampleMs)
+    // 采样**不该把这个进程钉住不退出**。
+    if (peakTimer !== null && typeof peakTimer.unref === 'function') peakTimer.unref()
+  }
+
+  function stopPeakSampling() {
+    if (peakTimer !== null) {
+      try { clearIntervalImpl(peakTimer) } catch { /* 尽力而为 */ }
+      peakTimer = null
+    }
+    if (peakSampler !== null) {
+      lastPeakResource = peakSampler.window()
+      peakSampler = null
+    }
+  }
+
   function handleExit(code, signal) {
+    // ★ 必须在把 child 置空**之前**收采样器：进程一退出，外部采样就只剩
+    //   `PROCESS_GONE`——那是"采不到"，不是"峰值是多少"。
+    stopPeakSampling()
     child = null
     // **这里刻意不 detach。**
     //
@@ -195,6 +261,7 @@ export function createSupervisedProcess(spec, {
     }
     startedAt = now()
     setState('starting', `pid=${child.pid ?? '?'}`)
+    startPeakSampling(child.pid)
     // ── 排空 stdout/stderr。**这一段与"有没有配置日志"无关。** ──
     //
     // 在这之前，整个 `product/launcher/` 没有任何地方读 `child.stdout`，
@@ -309,6 +376,7 @@ export function createSupervisedProcess(spec, {
 
     dispose() {
       disposed = true
+      stopPeakSampling()
       if (pendingTimer !== null) {
         clearTimeoutImpl(pendingTimer)
         pendingTimer = null
@@ -338,6 +406,19 @@ export function createSupervisedProcess(spec, {
     on(fn) {
       listeners.add(fn)
       return () => listeners.delete(fn)
+    },
+
+    /**
+     * PRT-009 `peak-resource`：这台进程的峰值内存与 CPU。
+     *
+     * 进程还活着 → 当前窗口（随采样推进）；已退出 → **退出前最后一次**窗口。
+     * 返回 `null` 只表示"从来没有采过"（没开采样、或压根没有真 pid）——
+     * **不返回一个零填充的对象**：`0` 是"一个字节都没用"这个测量结论，
+     * 不是"不知道"。
+     */
+    peakResource() {
+      if (peakSampler !== null) return peakSampler.window()
+      return lastPeakResource
     },
 
     /** 供测试与 Launcher 判断进程是否存活。 */

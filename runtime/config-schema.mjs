@@ -194,8 +194,15 @@ export const NON_ENV_LITERALS = Object.freeze([
   'RUNTIME_CONTRACT_UNAUTHORIZED', // runtime/contracts/wire.mjs
   'RUNTIME_CONTRACT_UNKNOWN_ROUTE', // runtime/contracts/wire.mjs
   'RUNTIME_CONTRACT_UNREACHABLE', // runtime/contracts/wire.mjs
-  // ── runtime/dsh-composition/assemble.mjs（3 条）
+  // ── runtime/dsh-composition/assemble.mjs（4 条）
+  //
+  // ★ 2026-09-18 新增第 4 条。这一条**不是**"像 env 键的错误码"里顺手加的一条：
+  //   它正是**成对守卫**（给了 `connectorDeclarations` 就必须给 `resolveConnectorId`）
+  //   抛出来的那个码。门禁在这里起到了它该起的作用——我加了三个新错误码，
+  //   扫描器把 SCREAMING_SNAKE 的字面量当成"疑似 env 键"，
+  //   于是**必须先声明它不是环境变量**才能让门禁变绿。
   'ASSEMBLE_NO_APPROVAL_PORT', // runtime/dsh-composition/assemble.mjs
+  'ASSEMBLE_NO_CONNECTOR_RESOLVER', // runtime/dsh-composition/assemble.mjs
   'ASSEMBLE_NO_CONTEXT', // runtime/dsh-composition/assemble.mjs
   'ASSEMBLE_NO_DECIDE', // runtime/dsh-composition/assemble.mjs
   // ── runtime/dsh-composition/bootstrap.mjs（6 条）
@@ -245,6 +252,16 @@ export const NON_ENV_LITERALS = Object.freeze([
   'APPROVAL_ANSWERER_NEEDS_RUNTIME_CONFIG', // runtime/dsh-composition/plugins/approval-answerer.mjs
   'APPROVAL_ANSWERER_NO_EVENT_SEAM', // runtime/dsh-composition/plugins/approval-answerer.mjs
   'APPROVAL_ANSWERER_NO_PORT', // runtime/dsh-composition/plugins/approval-answerer.mjs
+  // ── runtime/dsh-composition/plugins/connector-feedback.mjs（3 条）
+  //
+  // ★ 2026-09-18 新增的一整节（F-21 第二半）。三条与 approval-answerer.mjs 的三条
+  //   **是同一组形状**（`*_NEEDS_RUNTIME_CONFIG` / `*_NO_EVENT_SEAM` / 缺端口的那一条），
+  //   因为这一行与那一行做的是同一件事：把"桥上的一个口"变成"DSH 上的一行插件"。
+  //   `NO_LISTENER` 是`NO_PORT` 在这一行的别名——它缺的**不是**审批箱，
+  //   而是一条"从结果反查连接器"的 listener。
+  'CONNECTOR_FEEDBACK_NEEDS_RUNTIME_CONFIG', // runtime/dsh-composition/plugins/connector-feedback.mjs
+  'CONNECTOR_FEEDBACK_NO_EVENT_SEAM', // runtime/dsh-composition/plugins/connector-feedback.mjs
+  'CONNECTOR_FEEDBACK_NO_LISTENER', // runtime/dsh-composition/plugins/connector-feedback.mjs
   // ── runtime/dsh-composition/plugins/hard-floor.mjs（2 条）
   'HARD_FLOOR_BAD_FLOOR', // runtime/dsh-composition/plugins/hard-floor.mjs
   'HARD_FLOOR_NO_GUARD_SEAM', // runtime/dsh-composition/plugins/hard-floor.mjs

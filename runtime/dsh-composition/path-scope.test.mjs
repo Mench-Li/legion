@@ -509,8 +509,15 @@ test('⑥ ★★ 没接上的强制面必须能被读出来（配置里写了 �
   //   > 一个「端口是可选的、但没有任何地方能看出它没接」的桥，
   //   > 与一个「以为范围限制在生效、其实那道检查根本没挂」的桥，是同一个东西。
   const bare = createEnforcementBridge({ context: CTX })
+  // ★ 2026-09-18：多了 `connectorFeedback` 一格（F-21 第二半）。
+  //   这一格**必须**在这里显式写出来——它报的是"反馈面装了没有"，
+  //   而"没装"（`false`）正是这条用例存在的理由：
+  //   > 一个「端口是可选的、但没有任何地方能看出它没接」的桥，
+  //   > 与一个「以为范围限制在生效、其实那道检查根本没挂」的桥，是同一个东西。
+  //   本批之前这一格**根本不存在**，所以"连接器反馈面没装"**读不出来**。
   assert.deepEqual(bare.enforcementSurfaces(), {
     hardFloor: true, pathScope: false, whitelist: false, policy: false, approval: false,
+    connectorFeedback: false,
   })
   const full = createEnforcementBridge({
     context: CTX,
@@ -521,6 +528,9 @@ test('⑥ ★★ 没接上的强制面必须能被读出来（配置里写了 �
   })
   assert.deepEqual(full.enforcementSurfaces(), {
     hardFloor: true, pathScope: true, whitelist: true, policy: true, approval: true,
+    // ★ 没传 listener ⇒ 仍然是 `false`。这不是"漏了"，是**如实**：
+    //   上面那条桥给了四个端口但没给连接器声明。
+    connectorFeedback: false,
   })
   // 而硬 floor 永远是挂着的（它不是可选端口）
   assert.equal(bare.enforcementSurfaces().hardFloor, true)

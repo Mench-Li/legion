@@ -320,14 +320,14 @@ docs/<goalId>/
 
 | 域 | 代表接口 |
 | --- | --- |
-| 任务 | `GET /api/board`、`GET /api/task`、`POST /api/create|claim|transition|advance|reassign|comment|heartbeat` |
+| 任务 | `GET /api/board`、`GET /api/task`、`POST /api/{create,claim,transition,advance,reassign,comment,heartbeat}` |
 | 目标 | `GET/POST /api/goal`、`POST /api/goal/status`、`POST /api/goal/slices` |
 | 审计 | `GET /api/activity`、`POST /api/patch`、`POST /api/review-notes`、`GET /api/overlaps` |
-| 空间与编队 | `GET /api/spaces|roster|agents`、`POST /api/spaces`、`POST /api/spaces/delete` |
+| 空间与编队 | `GET /api/{spaces,roster,agents}`、`POST /api/spaces`、`POST /api/spaces/delete` |
 | 空间流水线 | `GET/POST /api/pipeline`、`GET /api/spaces/provision`（开通预检） |
 | 执行与模型 | `GET/POST /api/exec`、`GET /api/exec/queue`、`GET/POST /api/models` |
 | 对话 | `/api/chat/conversations`、`/messages`、`/replies`、`/reply-settings`、`/health`、`/attachments` |
-| 规范与技能 | `GET/POST /api/rules`、`GET /api/skills`、`POST /api/skills/register|review|grant|revoke` |
+| 规范与技能 | `GET/POST /api/rules`、`GET /api/skills`、`POST /api/skills/{register,review,grant,revoke}` |
 | 日历 | `GET/POST /api/calendar/events`、`POST /api/calendar/events/delete` |
 | 事件 | `GET /api/events`（统一 SSE 审计流） |
 

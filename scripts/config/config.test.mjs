@@ -763,15 +763,18 @@ test('★ PRT-254：runtime/ 与 security/ 真的被扫到了（不是"扫了 0 
 const NOT_FORWARDED_YET = Object.freeze({
   LEGION_PATH_SCOPE:
     '第 19 条 §9.2 第 4 步（路径范围表投递）。读取点 `scope-port.mjs` 已建、'
-    + '装配点 `root-row.mjs:540` 已接。最后一根线在 `product/process-manifest.mjs` 的 runtime '
+    + '装配点 `scopePortFromEnv()`（`root-row.mjs`）已接。最后一根线在 '
+    + '`product/process-manifest.mjs` 的 runtime '
     + '`envNames` —— 而那个文件是**另一会话的在制品**。归第 19 条排期。',
   LEGION_CONNECTOR_DECLARATIONS:
     '第 19 条 §9.2 第 5 步（F-21 连接器声明投递）。读取点 `connector-port.mjs` 已建、'
-    + '装配点 `root-row.mjs:545` 已接、生产路径用例已在 `root-row.test.mjs` 验过。'
+    + '装配点 `connectorPortFromEnv()`（`root-row.mjs`）已接、'
+    + '生产路径用例已在 `root-row.test.mjs` 验过。'
     + '最后一根线**与上一条完全是同一处**（同一个文件、同一个数组）。',
   LEGION_EXECUTION_SCOPE:
     '★ 第 19 轮（PRT-605 命令/网络/MCP 范围）。读取点 `execution-scope-port.mjs` 已建、'
-    + '装配点 `root-row.mjs` 已接、生产路径用例已在 `production-scope-wiring.test.mjs` 与 '
+    + '装配点 `executionScopePortFromEnv()`（`root-row.mjs`）已接、'
+    + '生产路径用例已在 `production-scope-wiring.test.mjs` 与 '
     + '`execution-scope-port.test.mjs` 验过。'
     + '最后一根线**与前两条完全是同一处**（同一个文件、同一个数组）。'
     + '★ 注意它**不是**"又多了一个缺口"：它是同一个缺口（`product/process-manifest.mjs` 的 '
@@ -786,13 +789,62 @@ const NOT_FORWARDED_YET = Object.freeze({
     + '（"这个进程能配它"与"它能拿到它"必须有一处让步）。',
   LEGION_EXTERNAL_API_SCOPE:
     '★★ 第 20 轮（PRT-606 外部 API 读/写范围）。读取点 `external-api-scope-port.mjs` 已建、'
-    + '装配点 `root-row.mjs` 已接、生产路径用例已在 `production-scope-wiring.test.mjs` '
+    + '装配点 `externalApiScopePortFromEnv()`（`root-row.mjs`）已接、'
+    + '生产路径用例已在 `production-scope-wiring.test.mjs` '
     + '①d/③d 与 `external-api-scope-port.test.mjs` 验过（含真实 `preExecute` 的拒与放）。'
     + '最后一根线**与前三把键完全是同一处**（同一个文件、同一个数组）。'
     + '★ 它是同一个缺口的**第四个受害者**，不是第四处要修的地方——'
     + '三把键产自三条不同的排期、却又多出第四把，而它们在同一个数组里一起卡住；'
     + '补那一个数组时**四把键一起通**。'
     + '⚠️ 这个数从 3 涨到 4 说明缺口的**面积**在扩大：每接一道范围检查就多一把键进来。',
+})
+
+/**
+ * ★★★ 每条"没放行"的理由所指的**装配点锚点**（2026-09-18 第 23 轮加）。
+ *
+ * ## 为什么需要它：上面那份理由**当时是错的**
+ *
+ * 复核时量出来：`LEGION_PATH_SCOPE` 的理由写着"装配点 `root-row.mjs:540` 已接"，
+ * 而 `root-row.mjs` 第 540 行是一个 `}`；`LEGION_CONNECTOR_DECLARATIONS` 写的是
+ * `root-row.mjs:545`，那一行是一段与它无关的注释。真正的装配点分别是
+ * 第 504 行（`scopePortFromEnv()`）与第 580 行（`connectorPortFromEnv()`）。
+ *
+ * ⇒ 而**没有任何判据会去核对理由的内容**：下面的测试只要求理由 `length >= 40`。
+ *   一份"写得够长、而指向一个不存在的地方"的理由，与一份正确的理由，
+ *   在这道闸眼里是同一个东西——而前者会让下一个查这条缝的人**去读错的那一行**。
+ *
+ *   > 一个只检查"理由写没写"的门禁，
+ *   > 与一个检查"理由对不对"的门禁，在"下一个人的时间花在哪"上不是同一个东西。
+ *
+ * ## 锚点为什么是**符号**而不是行号
+ *
+ * 行号会**漂移**：同一处装配点在本仓的记录里先后被写作 `485-509` → `508-536` →
+ * `540`/`545`，而每一次都是"代码长了、号变了、没人回头看理由"。
+ * 符号（函数名）不漂移：它搬走或改名时，下面第 ⑤ 条会红。
+ */
+const ASSEMBLY_ANCHORS = Object.freeze({
+  LEGION_PATH_SCOPE: {
+    file: 'runtime/dsh-composition/plugins/root-row.mjs',
+    symbol: 'scopePortFromEnv(',
+  },
+  LEGION_CONNECTOR_DECLARATIONS: {
+    file: 'runtime/dsh-composition/plugins/root-row.mjs',
+    symbol: 'connectorPortFromEnv(',
+  },
+  LEGION_EXECUTION_SCOPE: {
+    file: 'runtime/dsh-composition/plugins/root-row.mjs',
+    symbol: 'executionScopePortFromEnv(',
+  },
+  LEGION_EXTERNAL_API_SCOPE: {
+    file: 'runtime/dsh-composition/plugins/root-row.mjs',
+    symbol: 'externalApiScopePortFromEnv(',
+  },
+  // 这一把的"读取点"不在 root-row：它由 `root.mjs` 的字段表解析，
+  // 所以锚点指那里 —— 理由里写的就是这个符号。
+  TEAM_HUB_TOKEN: {
+    file: 'runtime/dsh-composition/root.mjs',
+    symbol: 'ENFORCEMENT_CONFIG_FIELDS',
+  },
 })
 
 test('★★★ runtime 的 schema `fields` 与清单的 runtime `envNames` 必须对得上（第四处缺口不能悄悄出现）', async () => {
@@ -822,6 +874,48 @@ test('★★★ runtime 的 schema `fields` 与清单的 runtime `envNames` 必�
   for (const [k, why] of Object.entries(NOT_FORWARDED_YET)) {
     assert.ok(typeof why === 'string' && why.length >= 40, `${k} 的理由太短，等于没写`)
   }
+
+  // ⑤ ★★★ 理由的**内容**也要核对：它指的装配点必须真的在。
+  //
+  // 这一条是补 ③ 的：③ 只问"理由写没写"，不问"理由对不对"。
+  // 实测（2026-09-18 复核）当时有**两条**理由指错了行号
+  // （`LEGION_PATH_SCOPE` 指 `root-row.mjs:540`——那是一行 `}`；
+  //   `LEGION_CONNECTOR_DECLARATIONS` 指 `:545`——那是一段无关注释），
+  // 而 ③ 对它们**全绿**。
+  //
+  //   > 一个只检查"理由写没写"的门禁，与一个检查"理由对不对"的门禁，
+  //   > 在"下一个人的时间花在哪"上不是同一个东西。
+  //
+  // ★ 判据取的是"**被指的那个符号在那个文件里还在不在**"，不是"行号对不对"——
+  //   行号本身就会漂移（同一处装配点被记过 `485-509` → `508-536` → `540/545`），
+  //   把行号写进判据等于把一个会动的东西做成闸门。
+  for (const [k, anchor] of Object.entries(ASSEMBLY_ANCHORS)) {
+    assert.ok(NOT_FORWARDED_YET[k] !== undefined,
+      `ASSEMBLY_ANCHORS 里的 ${k} 不在 NOT_FORWARDED_YET 里 —— 它已经放行了，锚点该删`)
+    const abs = join(ROOT, anchor.file)
+    assert.ok(existsSync(abs), `${k} 的锚点文件不存在：${anchor.file}`)
+    const src = readFileSync(abs, 'utf8')
+    assert.ok(src.includes(anchor.symbol),
+      `★ ${k} 的理由里指的那个装配点**已经不在了**：`
+      + `${anchor.file} 里找不到 ${JSON.stringify(anchor.symbol)}。`
+      + '两种可能，处置相反：① 它搬走或改名了 ⇒ 更新锚点与理由；'
+      + '② 它被删了 ⇒ **这条理由成了假话**，那道缝的定性要重审。'
+      + '（这正是"写完没人回头看"那一族：理由写够了 40 字，而它指的地方是空的。）')
+    // 理由正文里必须**逐字出现**那个符号 —— 否则锚点与理由是两份互不相干的东西，
+    // 上面那条"符号还在"就对理由的正确性什么都没说。
+    assert.ok(NOT_FORWARDED_YET[k].includes(anchor.symbol.replace(/\($/, '')),
+      `${k} 的理由正文里没有出现它自己的锚点符号 `
+      + `${JSON.stringify(anchor.symbol.replace(/\($/, ''))} —— `
+      + '锚点表与理由是两份东西，那等于没核对理由')
+  }
+  // 反向：NOT_FORWARDED_YET 里除了 TEAM_HUB_TOKEN（它的理由本来就是"要裁决"）
+  // 都必须有锚点。★ 这条防的是"新加一把键、理由随便写、忘了配锚点"——
+  // 没有它，上面那个循环只核对**已存在**的锚点，新条目可以绕过去。
+  const NEEDS_ANCHOR = Object.keys(NOT_FORWARDED_YET)
+  const noAnchor = NEEDS_ANCHOR.filter((k) => ASSEMBLY_ANCHORS[k] === undefined)
+  assert.deepEqual(noAnchor, [],
+    '这些键在 NOT_FORWARDED_YET 里没有装配点锚点 —— 理由里指的地方于是没有任何东西核对它：'
+    + JSON.stringify(noAnchor))
 
   // ④ 三个缺口的**实测读数**（不是从名单推的）——数字变了就要重新审这一节。
   //    ★ 这一条与 ①② 不重复：①② 读的是**集合关系**，这一条读的是**计数**。

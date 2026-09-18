@@ -172,8 +172,31 @@ async function runNodeTests(label, files, cwd, nodeArgs = []) {
   }
   const ok = r.code === 0 && (Number.isNaN(counts.fail) || counts.fail === 0)
   const failLines = all.split('\n').filter(l => /^not ok|# fail|^✖/.test(l)).slice(0, 8).join(' | ')
+  // ★ 机读读数行：套件可以打印 `MEASURE <名字>=<值> …`，摘要**成败都带上它**。
+  //
+  //   为什么需要这个机制（2026-09-18）：
+  //   `product/launcher/run-credential-dsh-process.test.mjs`（PRT-509 缺口③）
+  //   的超时只把**实测耗时**写进 `FAIL` 分支的文案里。于是：
+  //
+  //     一次**通过**的运行 ⇒ 摘要只有 `exit=0 tests=1 pass=1`
+  //     一次**刚好卡进预算**的运行 ⇒ **同一行**
+  //
+  //   > 一条只在失败时报告读数的时间判据，无法区分「很快」与「刚刚卡进预算」——
+  //   > 而这两种情形对"这个看门狗该设多大"给出的是**相反**的建议。
+  //
+  //   实测方差有多大：同一个套件，单独跑 **3.4s / 3.6s**，
+  //   而 2026-09-18 那次 CI 里 **>240s**（被看门狗杀）⇒ 约 **70 倍**。
+  //   所以这里要的不是"把预算调大一点"，而是**让每一次运行都留下一个数**。
+  //
+  //   约定：行首 `MEASURE ` 之后是 `key=value` 对（空格分隔）。不做解析，
+  //   原样带进摘要——CI 不该理解业务读数的语义，只负责**不让它消失**。
+  const measureLines = all.split('\n')
+    .map(l => l.trim())
+    .filter(l => l.startsWith('MEASURE '))
+    .slice(0, 4)
   const detail = label + ': exit=' + r.code + ' tests=' + counts.tests + ' pass=' + counts.pass + ' fail=' + counts.fail
     + ' skipped=' + (Number.isNaN(counts.skipped) ? 0 : counts.skipped)
+    + (measureLines.length ? ' | ' + measureLines.join(' | ') : '')
     + (timedOut ? '（套件超过 ' + Math.round(TEST_SUITE_TIMEOUT_MS / 1000) + 's 被杀（已连后代进程一起清理）：可能存在泄漏句柄或死锁）' : '')
   return { ok, code: r.code, detail: ok ? detail : detail + ' FAIL: ' + (failLines || '(see ci.log)'), raw, counts }
 }

@@ -3404,6 +3404,77 @@ const okStatus = (s) => legend.includes(s) || /^[✅🟡⬜⏸]+→[✅🟡⬜�
 5. 我**没有**系统性地找过"还有哪些形状已经有别的所有者在判"——
    本批只撞见了一次（状态词表）。**这一类冲突目前只靠 CI 事后发现**，
    下一次加判据之前应当先 `grep` 一遍判据名。
+### 10.40 ★ 我本来要加第二条判据，查了一下——**它已经有人管了**
+
+#### 一、起因：刚学到的那一课，正好用在自己身上
+
+§10.39 最贵的一课是*一个形状只能有一个所有者*（我抄了一份状态词表，
+把别人的判据弄红了）。紧接着我想做下一件事：
+
+> F-11 那格写着"三道范围检查在生产里**从未**被注入"，我订正了它——
+> **可是"到底哪几道接了线"这件事，有机器在管吗？**
+> 如果没有，就该给 `boundary-facts` 加一条事实，否则它**还会漂回去**。
+
+看起来完全合理。但按刚学的纪律，**加之前先查一遍"这件事有没有人管"**。
+
+#### 二、有。而且它的读数与我的订正**逐条吻合**
+
+所有者是 `docs/superpowers/prt/prt-reachability-baseline.json`
+（47 条：`by-design` 13 / `gap` 26 / `deliberate` 8）＋
+`reachability --diff` **必须与基线一致**那道门禁 ——
+它管的就是"**这个模块有没有生产 importer**"。
+
+| 文件 | 基线分类 | 含义 |
+|---|---|---|
+| `runtime/dsh-composition/path-scope.mjs` | **—** | 有生产 importer ⇒ **已接线** |
+| `runtime/dsh-composition/scope-port.mjs` | **—** | 有生产 importer ⇒ **已接线** |
+| `runtime/dsh-composition/scope-table-binding.mjs` | **—** | 有生产 importer ⇒ **已接线** |
+| `runtime/dsh-composition/execution-scope.mjs` | `gap` | 零生产 importer ⇒ **未接线** |
+| `runtime/dsh-composition/external-api-scope.mjs` | `gap` | 零生产 importer ⇒ **未接线** |
+| `runtime/connectors/registry.mjs` | `gap` | 零生产 importer ⇒ **未接线** |
+| `runtime/connectors/target-binding.mjs` | `gap` | 零生产 importer ⇒ **未接线** |
+| `product/execution-plane-config.mjs` | `gap` | 零生产 importer ⇒ **未接线** |
+
+**已接线 3 个 / 未接线 5 个** —— 与 §10.39 的订正**逐条吻合**：
+
+- **第一道**（`pathScope` / PRT-604，经 `path-scope.mjs` + `scope-port.mjs`
+  + `scope-table-binding.mjs`）**确实已接**；
+- **PRT-605**（`execution-scope`）/ **PRT-606**（`external-api-scope`）
+  **确实未接**；
+- §5 第 13 条那句"F-21 判定面**零调用方**"也被
+  `runtime/connectors/registry.mjs` 的 `[gap]` **独立复核**了一遍；
+- 还多量到一条：**`product/execution-plane-config.mjs` 也是 `[gap]`** ——
+  它是裁决文档 §9.4 指定的**读点**，⇒ 那个读点**至今没有生产调用方**，
+  与"决策已裁、施工未做"（第 19 条）一致。
+
+#### 三、★★ 于是处置是"**不加**"，而理由比"加"更值得写下来
+
+`reachability` 已经在管"哪些文件零 importer"。我在旁边再加一条
+`boundary-facts` 事实，就是**给同一个形状造第二个所有者**——
+而*两份会漂的读数是本仓的旧账*（§10.39 那三格箭头就是活例子：
+一份说合法、另一份说非法）。
+
+> 一个"我再加一道保险"的直觉，与一个"我给同一件事造了第二个真相"，
+> 在只看"判据变多了"的输出里是同一个东西。
+
+⇒ 本条**只登记"所有者是谁、读数是什么"**，不新增判据。
+将来真要加，应当加在 `reachability` 那一侧（它已经有基线与 `--diff` 机制），
+而**不是**在旁边再抄一份。
+
+★ 附带的好处：这把 §10.39 的订正从"**我改了文档**"升级为
+"**我改了文档，且一个既有的机器所有者独立地同意这个改法**"——
+这两句话的说服力不一样，而前一句本来就是我这次差点满足于的。
+
+#### 四、诚实边界
+
+1. 基线是 **2026-09-18 之前**记录的；`--diff` 保证它**今天仍然成立**
+   （本批跑过：`与基线一致`）。
+2. ★ 基线只回答"**有没有**生产 importer"，**不回答**那个 importer
+   是不是**真的走到了**强制面 —— 这正是 PRT-611 续批量出的
+   "一个进程内通 / 两个进程之间不通"那一类。
+   ⇒ 本条**不能**被读成"路径范围在生产里真的拦得住"。
+3. 本批**没有**动基线、**没有**跑 `--record`。读的是磁盘上已有的那一份。
+
 ### 10.14 本轮的诚实边界
 
 1. **上一批的三条缺口，本轮的验证是在它们的用例与探针上复跑的**，
@@ -3887,3 +3958,19 @@ const okStatus = (s) => legend.includes(s) || /^[✅🟡⬜⏸]+→[✅🟡⬜�
 103. §10.39 ⚠️ **我没有系统性地找过"还有哪些形状已经有别的所有者在判"**——
     本批只撞见一次（状态词表），而那是**靠 CI 事后发现**的。
     ⇒ 下一次加判据之前应当先 `grep` 一遍判据名。
+104. §10.40 ★ **我本来要给 `boundary-facts` 加一条"哪几道范围检查接了线"的事实，
+    查了一下——它已经有人管了**：`prt-reachability-baseline.json` +
+    `reachability --diff` 那道门禁。读数与 §10.39 的订正**逐条吻合**：
+    **已接线 3 个**（`path-scope.mjs` / `scope-port.mjs` / `scope-table-binding.mjs`
+    都不在基线里）、**未接线 5 个**（都 `[gap]`：`execution-scope.mjs` /
+    `external-api-scope.mjs` / `connectors/registry.mjs` / `connectors/target-binding.mjs` /
+    `execution-plane-config.mjs`）。
+    ⇒ 处置是"**不加**"：再加一条就是给同一形状造**第二个所有者**。
+    > 一个"我再加一道保险"的直觉，与一个"我给同一件事造了第二个真相"，
+    > 在只看"判据变多了"的输出里是同一个东西。
+    ★ 这把 §10.39 的订正从"我改了文档"升级为"**我改了文档，且一个既有的
+    机器所有者独立地同意这个改法**"。
+105. §10.40 ⚠️ 基线只回答"**有没有**生产 importer"，**不回答**那个 importer
+    是不是**真的走到了**强制面——那正是本行续批量出的"一个进程内通 /
+    两个进程之间不通"那一类。⇒ **不能**读成"路径范围在生产里真的拦得住"。
+    ★ 本批**没有**动基线、**没有**跑 `--record`，读的是磁盘上已有的那一份。

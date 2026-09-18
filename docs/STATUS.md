@@ -2525,7 +2525,7 @@
 > 本批实测核对了这条指令：支持复用的一面是 DSH 的 `CredentialKey` 语法
 > `<scope>/<id>` 与 Legion 的 `secretRef` **正好相容**，且 `credentials-local`
 > 已实现 `assertOwnerOnly`（**"复用"在这里是真的复用**）；反对直接复用的一面是
-> **它是明文的**（本机实测 `refs: { DEEPSEEK_API_KEY: sk-be96… }` 直接就是明文），
+> **它是明文的**（本机实测 `refs: { DEEPSEEK_API_KEY: sk-… }` 直接就是明文），
 > 而复用会把保护等级从 DPAPI 降到明文；且 Legion 有**零第三方依赖**纪律而 DSH 用
 > `yaml` 包解析它，自己写 YAML 解析器意味着**解析错一个凭证文件是安全事件**。
 > 文档给出两条候选路线（**读桥** / **一次性迁移**）并指出**两者都需要产品决策

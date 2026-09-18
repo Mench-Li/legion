@@ -18,7 +18,9 @@ import {
   CIRCUIT_COOLDOWN_MS, CIRCUIT_FAILURE_THRESHOLD, CIRCUIT_STATES, CONNECTOR_CODES,
   CONNECTOR_DECISIONS, CONNECTOR_REGISTRY_VERSION, CONNECTOR_TRANSPORTS,
   FORBIDDEN_SECRET_KEYS, TOOL_DECLARATION_KEYS, declareConnector, createRegistry,
+  declaredToolNames,
 } from './registry.mjs'
+import { publicToolName } from './public-name.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -66,6 +68,85 @@ test('① ★★★ 未声明的工具 ⇒ deny（"没见过就放行"等于对�
   assert.equal(r2.decide({ connectorId: 'github', toolName: 'list_issues' }).decision, 'allow')
   // 工具名是**按连接器**分域的：gitlab 的工具不会让 github 的同类工具多出来。
   assert.equal(r2.decide({ connectorId: 'gitlab', toolName: 'create_pr' }).code, CONNECTOR_CODES.UNKNOWN_TOOL)
+})
+
+// ---------------------------------------------------------------------------
+// ①b ★★★ 线上来的名字是 DSH 的**公开名**，不是声明里那个裸名
+// ---------------------------------------------------------------------------
+
+test('①b ★★★ 声明写裸名、调用用**公开名** ⇒ 按声明的策略判定（不是"未声明"）', () => {
+  // ★ 第 17 轮实测到的缺口：DSH 注册 MCP 工具时用的是
+  //   `mcp__<serverName>__<rawName>`（`packages/mcp/mcp-client/src/tools.ts`），
+  //   而声明里写的是连接器**自己那一侧**的名字。
+  //
+  //   > 一个"声明写裸名、判定按裸名比"的登记表，
+  //   > 与一个"声明根本对不上任何一次真调用"的登记表，
+  //   > 在**套件读数**上是同一片 ✔——只不过前者从来没验过
+  //   > "DSH 真的会送来的那个名字"。
+  const r = createRegistry({ connectors: [github()] })
+  const raw = r.decide({ connectorId: 'github', toolName: 'list_issues' })
+  const wire = r.decide({ connectorId: 'github', toolName: publicToolName('github', 'list_issues') })
+  assert.equal(wire.decision, raw.decision,
+    '公开名与裸名的判定不一致 ⇒ 一个**正确声明过**的工具在真部署里会被拒')
+  assert.equal(wire.decision, 'allow')
+  assert.equal(wire.risk, raw.risk, '两条名字必须给出同一个有效风险')
+  assert.equal(wire.toolName, 'mcp__github__list_issues', '报出来的应当是**线上那个**名字')
+  // ★ 工具级 deny 也要照旧生效（不是"公开名一律 allow"）
+  assert.equal(r.decide({ connectorId: 'github', toolName: publicToolName('github', 'delete_branch') }).decision, 'deny')
+})
+
+test('①c ★★★ 头号教义**仍然成立**：未声明的公开名还是 deny（少这条，①b 可能只是"全放行"）', () => {
+  // 没有这一条，①b 可以被一个"把公开名一律当已声明"的实现骗过去。
+  const r = createRegistry({ connectors: [github()] })
+  const d = r.decide({ connectorId: 'github', toolName: publicToolName('github', 'delete_repo') })
+  assert.equal(d.decision, 'deny', '在连接器命名空间里但**没声明过**的工具必须拒')
+  assert.equal(d.code, CONNECTOR_CODES.UNKNOWN_TOOL)
+  assert.match(d.reason, /后门/)
+  // ★ 而它与"裸名未声明"是**同一条**码——两条路都走 `UNKNOWN_TOOL`。
+  assert.equal(r.decide({ connectorId: 'github', toolName: 'delete_repo' }).code, CONNECTOR_CODES.UNKNOWN_TOOL)
+})
+
+test('①d ★★ 归属面（`attributeTool` / `connectorForTool`）也认公开名', () => {
+  const r = createRegistry({ connectors: [github()] })
+  const wire = publicToolName('github', 'list_issues')
+  assert.equal(r.connectorForTool(wire), 'github')
+  assert.deepEqual({ ...r.attributeTool(wire) },
+    { state: 'unique', toolName: wire, connectorId: 'github', candidates: ['github'] })
+  // 未声明的公开名归属不到（`none`，不是 `unique`）——
+  // 归属面必须与判定面给出**同一个**答案，否则桥会把调用送给一个不认它的连接器。
+  assert.equal(r.attributeTool(publicToolName('github', 'delete_repo')).state, 'none')
+})
+
+test('①e ★★★ 推导出来的名字**不进**声明体（推导值不落盘）', () => {
+  // ★ 存一份 `wireName` 会让它变成"又一份记录"：命名规则一变，声明里那一份
+  //   就成了**过期的事实**，而它看起来像作者写下的内容。这与文件头 ② 删掉
+  //   `risk` 是同一条纪律。
+  const decl = github()
+  for (const t of decl.tools) {
+    assert.deepEqual(Object.keys(t).sort(),
+      ['capabilities', 'declaredRisk', 'name', 'policy', 'risk', 'riskFloor', 'riskRaised'],
+      `工具「${t.name}」的字段集变了——若新加的是**推导值**，它不该存进声明`)
+    assert.equal(t.wireName, undefined)
+    assert.equal(t.publicName, undefined)
+  }
+  // 而 `declaredToolNames` **算**得出来
+  assert.deepEqual([...declaredToolNames('github', 'list_issues')],
+    ['list_issues', 'mcp__github__list_issues'])
+})
+
+test('①f ★★ `declaredToolNames` 的契约：冻结、去重、空名给空表', () => {
+  const two = declaredToolNames('github', 'list_issues')
+  assert.ok(Object.isFrozen(two))
+  assert.equal(two.length, 2)
+  // 空 id ⇒ 算不出公开名 ⇒ **只有**裸名（不吞成空表，也不抛）
+  assert.deepEqual([...declaredToolNames('', 'x')], ['x'])
+  assert.deepEqual([...declaredToolNames('github', '')], [])
+  assert.deepEqual([...declaredToolNames(null, null)], [])
+  // 名字**已经**是公开名时，公开名那个分支与裸名相同 ⇒ 去重成一条
+  const already = declaredToolNames('github', 'mcp__github__x')
+  assert.equal(already.length, 2, '`mcp__github__mcp__github__x` 与裸名不同 ⇒ 仍然是两条')
+  assert.equal(already[0], 'mcp__github__x')
+  assert.equal(already[1], 'mcp__github__mcp__github__x')
 })
 
 test('① ★★★ 未注册的连接器 ⇒ deny（不是"没有策略所以放行"）', () => {

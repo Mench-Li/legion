@@ -1288,18 +1288,23 @@ test('★★★ 归属的**边界**：命名空间让登记表那条「未声明
   assert.match(String(d.reason), /没有声明工具/,
     `理由要说清是"没声明"：${d.reason}`)
 
-  // ③ ★ 前提对照：**另一个**同样没被逐字声明的公开名，也必须走到同一条路上。
-  //    少了它，② 可能只是"这个名字碰巧被声明推导命中了"。
+  // ③ ★★ 前提对照：**另一个**公开名（`list_issues`）也归属得到——它证明 ②
+  //    不是"这个名字碰巧被声明推导命中了"。
+  //
+  //    ⚠️ 本批（第 18 轮）**订正了这条的注释**：它原先写着
+  //       "声明里写的是裸名 `list_issues`，两者对不上 ⇒ 按未声明拒"——
+  //       而本夹具声明的其实是 `git-status`，`list_issues` **从来就没被声明过**。
+  //       拒绝的真正原因是"github 没声明它"，不是"名字形式对不上"。
+  //       名字形式那一件事由 ⑤ 单独验（那才是第 17 轮查出的缺口）。
   const mid = port.receipts()
   const d2 = await root.bridge.preExecute({
     name: 'mcp__github__list_issues', callId: 'c-z', arguments: { target: `${CWD}/x` },
   })
   const afterDeclaredRaw = port.receipts()
   assert.equal(afterDeclaredRaw.attributed, mid.attributed + 1,
-    '同样靠**命名空间**归属——而声明里写的是裸名 `list_issues`，两者对不上')
+    '同样靠**命名空间**归属（与"有没有被声明过"无关）')
   assert.equal(d2.kind, 'deny',
-    '声明里写的是**裸名** `list_issues`，而线上来的是**公开名**——'
-    + '两者对不上 ⇒ 按"未声明"拒。★ 这正是下一批要做的那件事（见 ④）')
+    '本夹具只声明了 `git-status`，`list_issues` 从来没被声明过 ⇒ 必须拒')
 
   // ④ ⚠️ **仍未关**的那一半：命名空间**认不出来**的名字，仍然交给政策门。
   //    它必须留在这里，否则下一个读到"教义可达了"的人会以为**所有**
@@ -1315,6 +1320,88 @@ test('★★★ 归属的**边界**：命名空间让登记表那条「未声明
     '认不出的命名空间**不该**被归属到任何一个连接器上')
   assert.ok(!/连接器 evil/.test(String(foreign.reason ?? '')),
     `不该出现一个不存在的连接器的理由：${foreign.reason}`)
+})
+
+test('★★★ 生产路径：声明写**裸名**、调用用 DSH **公开名** ⇒ 按声明的策略判定', async () => {
+  // ★★★ 2026-09-18 第 18 轮：这条钉的是**第 17 轮查出的那个缺口现在关了**。
+  //
+  //   第 17 轮接上 DSH 的命名契约后照出一件事：声明里写的是**连接器自己那一侧**
+  //   的名字（`list_issues`），而线上来的是**公开名**（`mcp__github__list_issues`）
+  //   ⇒ 一个**正确声明过**的工具被判"没有声明" ⇒ 在真 DSH 进程里**会被拒**。
+  //
+  //   > 一组"声明写裸名、用例写裸名"的夹具，与一组"声明与线上名字对得上"的夹具，
+  //   > 在**套件读数**上是同一片 ✔——只不过前者从来没验过
+  //   > "DSH 真的会送来的那个名字"。
+  //
+  //   ★ 修法**不是**剥命名空间（公开名在归一化/截断时会被换成 12 位哈希后缀，
+  //     那时剥不出原名），而是让登记表**同时**认这两个名字
+  //     （`registry.mjs` 的 `declaredToolNames`）。
+  const { ctx } = fakeContext()
+  const { factory } = portFactory()
+  const env = {
+    ...ENV_OK,
+    // 一个**MCP 形状**的声明：工具名是连接器那一侧的名字，与 DSH 的公开名不同。
+    LEGION_CONNECTOR_DECLARATIONS: JSON.stringify([{
+      connectorId: 'github', transport: 'stdio', command: 'npx mcp-github',
+      policy: 'allow',
+      tools: [{ name: 'list_issues', capabilities: ['repo:read'] }],
+      secretRefs: [],
+    }]),
+  }
+  await ctx.plugin(createRootRow({ env, createRequestApproval: factory }))
+
+  const root = enforcementRoot()
+  const port = root.bridge.connectorJudgment
+
+  // ① 线上**真的会送来**的那个名字 ⇒ 连接器层**认得出它是已声明的**。
+  //
+  //    ⚠️ 读数必须**分开取**：连接器层说什么（`outerAllow` / `outerDeny`）
+  //       与最后合并出来什么（`d.kind`）不是同一件事。
+  const before = port.receipts()
+  const d = await root.bridge.preExecute({
+    name: 'mcp__github__list_issues', callId: 'c-f1', arguments: { target: `${CWD}/x` },
+  })
+  const after = port.receipts()
+  assert.equal(after.attributed, before.attributed + 1, '公开名必须归属得到')
+  assert.equal(after.outerAllow, before.outerAllow + 1,
+    '连接器层必须**认这条工具为已声明**并答 allow —— 第 17 轮时它答的是"没有声明工具"')
+  assert.equal(after.outerDeny, before.outerDeny,
+    '连接器层不该拒一条**已声明**的工具')
+  assert.ok(!/没有声明工具/.test(String(d.reason ?? '')),
+    `连接器层把公开名当成"未声明"了 ⇒ 一个正确声明过的工具在真部署里不可用：${d.reason}`)
+
+  // ② ★★★ **仍未关**的另一半：政策门**不认识 MCP 工具**，所以最终仍然是 deny。
+  //
+  //    `tool-capability.mjs` 的 `resolveTool` 对不在它目录里的名字一律给
+  //    `direction: 'write'`、`requiresApproval: true`（fail closed）。
+  //    于是连接器层的 `allow` 被政策门那一侧盖掉——**取严**是设计（`deny > ask > allow`），
+  //    而它的后果是：**连接器层今天只能让事情更严，永远不能让它更松**。
+  //
+  //    > 一个"连接器声明了 allow、而每次调用都要人批"的系统，
+  //    > 与一个"连接器层根本没接上"的系统，在**最终判决**上是同一个 deny——
+  //    > 只不过前者的理由里写着 `[政策门]`，而后者连理由都没有。
+  //
+  //    ★ 这一条必须留在这里：少了它，下一个读到"公开名已支持"的人会以为
+  //      一次真的 MCP 工具调用今天就能按声明跑通。
+  assert.equal(d.kind, 'deny',
+    '政策门对未知（MCP）工具 fail closed ⇒ 合并之后仍是 deny；'
+    + '若这里变成了 allow，说明政策门学会了 MCP 工具——那是**另一件事**，本条要重写')
+  assert.match(String(d.reason), /政策门/, `这次拒绝来自政策门那一侧：${d.reason}`)
+
+  // ③ 前提对照（**反向**）：同一个连接器里**没**声明的公开名，连接器层自己要拒。
+  //    少了它，① 可以被一个"公开名一律 allow"的坏接线骗过去。
+  const d2 = await root.bridge.preExecute({
+    name: 'mcp__github__delete_repo', callId: 'c-f2', arguments: { target: `${CWD}/x` },
+  })
+  assert.equal(d2.kind, 'deny', `未声明的连接器工具必须被拒，实得 ${d2.kind}`)
+  assert.match(String(d2.reason), /没有声明工具/,
+    '这一条必须由**连接器层**拒（它与上一条的 deny 理由不同）')
+
+  // ④ 裸名照旧（既有夹具那种形状没被这次改动打掉）
+  const d3 = await root.bridge.preExecute({
+    name: 'list_issues', callId: 'c-f3', arguments: { target: `${CWD}/x` },
+  })
+  assert.ok(!/没有声明工具/.test(String(d3.reason ?? '')), '裸名那条路必须照旧认得出')
 })
 
 if (SKIP !== false) {

@@ -369,7 +369,17 @@ export function connectorPortFromEnv({ env } = {}) {
     )
   }
 
-  const toolCount = [...owners.values()].reduce((n, ids) => n + ids.length, 0)
+  // ★ `toolCount` 数的是**声明了几条工具**，不是"认得几个名字"。
+  //
+  //   ⚠️ 第 18 轮踩过：原来写的是 `[...owners.values()].reduce((n, ids) => n + ids.length, 0)`,
+  //      而 `owners` 的键在第 18 轮从"只有声明名"扩成了 `declaredToolNames`
+  //      （声明名 **+** DSH 公开名）⇒ 同一个 `toolCount` 从 1 变成 2。
+  //
+  //   > 一个"数拥有的名字"的计数器，与一个"数声明的工具"的计数器，
+  //   > 在**每条工具只有一个名字时**是同一个数——
+  //   > 只不过前者会在"一条工具被两个名字认得"的那天翻倍，
+  //   > 而那个数字看起来仍然像个工具数。
+  const toolCount = declarations.reduce((n, d) => n + d.tools.length, 0)
   const knownIds = [...byId.keys()]
 
   return Object.freeze({

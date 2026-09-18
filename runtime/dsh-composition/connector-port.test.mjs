@@ -241,15 +241,62 @@ test('④c ★★★ 归属的**两条**依据：命名空间在前（让「未�
 })
 
 test('④d ★★ 顺序不可颠倒：命名空间**优先于**声明推导（否则未声明的那一类又被漏掉）', () => {
-  // 造一个"两条依据都命中、但答案不同"的场景是不可能的（同一个 id 才能占命名空间），
-  // 所以这里钉的是**后果**而不是实现：一个连接器**声明了** `foo`，
-  // 而线上来的是 `mcp__<另一个已登记连接器>__foo` ⇒ 必须归到命名空间那个。
+  // 造一个"两条依据给出**不同**答案"的场景——
+  // 少了它，"命名空间在前"这句话没有任何读数支持。
+  //
+  //   · `github` 的命名空间是 `mcp__github__`（github 声明了 `list_issues`
+  //     ⇒ 它还认 `mcp__github__list_issues`）
+  //   · `gitlab` **逐字**声明了一条叫 `mcp__github__tools` 的工具
+  //     ⇒ 那一条在**声明推导**眼里归 gitlab，而在**命名空间**眼里归 github
   const p = connectorPortFromEnv({ env: withEnv(JSON.stringify([
     decl({ connectorId: 'github', tools: [{ name: 'list_issues', capabilities: ['repo:read'] }] }),
-    decl({ connectorId: 'gitlab', tools: [{ name: 'mcp__github__list_issues', capabilities: ['repo:read'] }] }),
+    decl({ connectorId: 'gitlab', tools: [{ name: 'mcp__github__tools', capabilities: ['repo:read'] }] }),
   ])) })
-  assert.equal(p.resolveConnectorId({ toolName: 'mcp__github__list_issues' }), 'github',
-    '归属被声明推导**抢先**了 ⇒ 一个连接器可以用"声明别人的公开名"来把调用认领走')
+  assert.equal(p.resolveConnectorId({ toolName: 'mcp__github__tools' }), 'github',
+    '归属被声明推导**抢先**了 ⇒ 一个连接器只要声明一条带别人命名空间的名字，'
+    + '就能把**别人命名空间里的**调用认领走（而那条声明的策略是它自己写的）')
+  // 反向对照：命名空间认不出的名字仍然走声明推导（两条依据都在）
+  assert.equal(p.resolveConnectorId({ toolName: 'list_issues' }), 'github')
+})
+
+test('④d2 ★★★ 一条**字面**声明与别人的**推导**名字撞车 ⇒ 装配期具名拒绝', () => {
+  // ★ 这是 ④d 那组夹具的**冲突版**：`gitlab` 逐字声明了 `mcp__github__list_issues`，
+  //   而 `github` 声明 `list_issues` ⇒ 推导出**同一个**名字。
+  //
+  //   第 18 轮之前这种撞车**看不出来**（`owners` 只有字面名 ⇒ `mcp__github__list_issues`
+  //   只归 gitlab）。现在它被装配期拦下——而这条读数很值得留：
+  //
+  //   > 一个"把归属键从字面名扩到公开名"的改动，
+  //   > 会在**没改任何声明**的情况下让某些既有配置从"能启动"变成"启动不了"。
+  //   > 那不是回归：那是两条声明**本来就**在抢同一个名字，
+  //   > 而之前没有任何一处能把这件事说出来。
+  assert.throws(
+    () => connectorPortFromEnv({ env: withEnv(JSON.stringify([
+      decl({ connectorId: 'github', tools: [{ name: 'list_issues', capabilities: ['repo:read'] }] }),
+      decl({ connectorId: 'gitlab', tools: [{ name: 'mcp__github__list_issues', capabilities: ['repo:read'] }] }),
+    ])) }),
+    (e) => e.code === CONNECTOR_PORT_CODES.AMBIGUOUS_TOOLS
+      && /mcp__github__list_issues/.test(e.message)
+      && /github/.test(e.message) && /gitlab/.test(e.message),
+    '字面名与推导名撞车必须在装配期停下来，并**报出那个名字与两个连接器**',
+  )
+})
+
+test('④f ★★ 同一个连接器的裸名与公开名**不会**被算成"两个连接器在抢"', () => {
+  // 自我撞车：`github` 同时声明 `x` 与 `mcp__github__x`
+  // ⇒ 两个名字都归 `github`，`owners` 里是 `['github']` 而不是 `['github','github']`。
+  const p = connectorPortFromEnv({ env: withEnv(JSON.stringify([
+    decl({
+      connectorId: 'github',
+      tools: [
+        { name: 'x', capabilities: ['repo:read'] },
+        { name: 'mcp__github__x', capabilities: ['repo:read'] },
+      ],
+    }),
+  ])) })
+  assert.equal(p.state, 'configured', '同一个连接器的两个名字不该被判成重名冲突')
+  assert.equal(p.resolveConnectorId({ toolName: 'mcp__github__x' }), 'github')
+  assert.equal(p.resolveConnectorId({ toolName: 'x' }), 'github')
 })
 
 test('④e ★★ 嵌套命名空间：`connectorId` 自己含 `__` 时也要认得出', () => {

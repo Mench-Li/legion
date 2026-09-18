@@ -61,6 +61,7 @@
 // ============================================================================
 
 import { CAPABILITY_IDS, CAPABILITY_KINDS, RISK_RANK, riskFloorOf, maxRisk } from '../dsh-composition/tool-capability.mjs'
+import { publicToolName } from './public-name.mjs'
 
 /** 登记表的形态版本。 */
 export const CONNECTOR_REGISTRY_VERSION = 'legion/connector-registry@1'
@@ -460,12 +461,85 @@ function freshCircuit() {
  * @param {Map<string, object>} byId 已经归一化过的声明（`declareConnector` 的产物）
  * @returns {Map<string, string[]>}
  */
+/**
+ * ★★★ 一条已声明的工具在**本进程**里被认得的**全部**名字。
+ *
+ * ---------------------------------------------------------------------------
+ * 为什么需要它：声明的名字与线上来的名字**不是同一个字符串**
+ *
+ * 声明里写的是**连接器自己那一侧**的工具名（`list_issues`）。而 DSH 把 MCP 工具
+ * 注册进 ToolRuntime 时用的是**公开名** `mcp__<serverName>__<rawName>`
+ * （`packages/mcp/mcp-client/src/tools.ts`，逐字镜像在 `./public-name.mjs`）。
+ * 于是桥上收到的是 `mcp__github__list_issues`，而声明里写着 `list_issues`。
+ *
+ *   > 一个"声明写裸名、判定按裸名比"的登记表，
+ *   > 与一个"声明根本对不上任何一次真调用"的登记表，
+ *   > 在**套件读数**上是同一片 ✔——只不过前者从来没验过
+ *   > "DSH 真的会送来的那个名字"。
+ *
+ * 实测（`scratch/_probe-mcp-namespace.mjs`）：`github` 声明 `list_issues` 时，
+ * 调 `list_issues` ⇒ `allow`，调 `mcp__github__list_issues` ⇒ **`deny`**
+ * 「没有声明工具」——一个**正确声明过**的工具在真进程里被拒。
+ *
+ * ---------------------------------------------------------------------------
+ * ★★ 为什么是**算**出来的，而不是**存**在声明里
+ *
+ * 存一份 `wireName` 会让它变成"又一份记录"：命名规则一变（DSH 改了归一化、
+ * 或 `serverName` 与 `connectorId` 的关系变了），声明里那一份就成了**过期的
+ * 事实**，而它看起来像作者写下的内容。这与本文件头 ② 删掉 `risk` 是**同一条
+ * 纪律**（推导值不落盘）。
+ *
+ * ★ 所以本函数**只算**，两个调用点（`toolOwnershipOf` 与 `decide`）都用它
+ *   ——**一份**实现。两处各写一份的后果不是"慢慢漂"，而是"装配期算出归属、
+ *   判定期却按另一个名字找不着"：*拒绝没触发，策略也已经用错了，
+ *   而两边读数都是绿的*。
+ *
+ * ★ 两个名字都留：裸名兜住既有夹具与"连接器声明了一个 DSH 核心工具名"那一类，
+ *   公开名兜住**真的 MCP 工具**。**不去猜哪个是"对的"**——一个名字在某些部署里
+ *   对、在另一些里错，而删掉任一都会让一类合法声明静默失效。
+ *
+ * @param {string} connectorId 连接器 id（部署契约里等于 DSH 的 `serverName`）
+ * @param {string} toolName 声明里写的名字
+ * @returns {readonly string[]} 去重、冻结；顺序是 `[声明名, 公开名]`
+ */
+export function declaredToolNames(connectorId, toolName) {
+  const raw = String(toolName ?? '').trim()
+  const id = String(connectorId ?? '').trim()
+  if (raw === '') return Object.freeze([])
+  // ★ 公开名算不出来时**不吞**成"只有裸名"也不抛：`publicToolName` 只在
+  //   id/name 为空时抛，而上面已经挡掉了空名。留一条 try 是因为本函数
+  //   被 `decide()`（决策路径）间接复用，那里的任何抛出都会变成一次
+  //   被 `decision-port` 兜成 deny 的"登记表判定失败"——而那不是这里的真相。
+  let wire = null
+  try {
+    wire = publicToolName(id, raw)
+  } catch {
+    wire = null
+  }
+  return Object.freeze(wire === null || wire === raw ? [raw] : [raw, wire])
+}
+
+/**
+ * 工具名 ⇒ 声明了它的连接器（**一份**归属算法，`connector-port` 与 `createRegistry` 共用）。
+ *
+ * ★ 2026-09-18 第 18 轮：键从"只有声明名"扩到 `declaredToolNames`（声明名 + 公开名）。
+ *   少了这一步，`mcp__github__list_issues` 这样一个**合法**的调用在归属期就
+ *   认不出来 ⇒ 落到政策门，而政策门把它当**未知工具**（`direction: 'write'`）
+ *   ⇒ 一个已声明的工具被拒。
+ */
 export function toolOwnershipOf(byId) {
   const owners = new Map()
   for (const [id, decl] of byId) {
     for (const tool of decl.tools) {
-      if (!owners.has(tool.name)) owners.set(tool.name, [])
-      owners.get(tool.name).push(id)
+      for (const name of declaredToolNames(id, tool.name)) {
+        if (!owners.has(name)) owners.set(name, [])
+        const list = owners.get(name)
+        // ★ 去重：同一个连接器可能**同时**以裸名与公开名声明同一条工具
+        //   （比如它声明了 `x`，而 `mcp__github__x` 恰好是它另一条工具的字面名）。
+        //   不去重会让 `attributeTool` 报 `ambiguous` 而候选是 `['github','github']`
+        //   ——一句读起来像"两个连接器打架"、实际是"一个连接器两个名字"的话。
+        if (!list.includes(id)) list.push(id)
+      }
     }
   }
   return owners
@@ -704,7 +778,14 @@ export function createRegistry({ connectors = [], now = () => Date.now(), resolv
         })
       }
       const name = String(toolName ?? '').trim()
-      const tool = decl.tools.find((t) => t.name === name)
+      // ★★★ 2026-09-18 第 18 轮：认的是 `declaredToolNames`（声明名**或**公开名），
+      //     而不是 `t.name === name`。
+      //
+      //     线上来的是 DSH 的**公开名**（`mcp__<serverName>__<rawName>`），
+      //     声明里写的是**连接器自己那一侧**的名字。逐字比对会让一个
+      //     **正确声明过**的工具在这里被判"没有声明"——见 `declaredToolNames`
+      //     的文档与 `scratch/_probe-mcp-namespace.mjs` 的实测。
+      const tool = decl.tools.find((t) => declaredToolNames(id, t.name).includes(name))
       if (tool === undefined) {
         // ★ 见文件头 ①：这里放行等于"对方加一个工具就等于加一个后门"。
         return Object.freeze({

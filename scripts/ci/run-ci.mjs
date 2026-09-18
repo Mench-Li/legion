@@ -1402,6 +1402,17 @@ async function stageTest() {
   //   套件里对**每一条**文档锚点做反面控制（改掉声称 ⇒ 必须红），
   //   并对 `runtime` 进程不得持有 `TEAM_HUB_TOKEN` 这条边界做**对称**载荷控制。
   { label: 'boundary-facts（PRT-611 续：文档**数字**与**坐标**↔ 产物真实的值，含执行面凭证边界）', files: ['scripts/prt/boundary-facts.test.mjs'], cwd: ROOT },
+  // PRT-611 续：「声明了却没人读」的扫描**接进 CI**。
+  //   ★ 起因：台账引用了 `scratch/scan-silent-declarations3.mjs` 的读数
+  //   （"还剩 3 个，一个都没改"），而**没有任何东西在跑它** ⇒
+  //   它的读数从 3 漂到 0 没人发现，原因是**有人把那三个字段的名字写进了文档**
+  //   （含 `boundary-facts.mjs` 里的手钉），纯词频就把"提及"当成了"读者"。
+  //   > 一份被引用、但**没有任何东西在跑**的读数，
+  //   > 与一份"已经不再成立"的读数，在台账里长得一模一样。
+  //   ★ 扫描器内部已有两重断言：**已知集合一致**（新出现/少一个都红）
+  //   + **五种字段的正对照**（含"只在注释/字符串里被提到"与
+  //   "含引号的正则之后的真读者"这两种——正是它自己栽过的两个坑）。
+  { label: 'silent-declarations（PRT-611 续：哑声明扫描 + 五种字段正对照，防"判据被弄瞎"）', files: ['scripts/prt/silent-declarations.test.mjs'], cwd: ROOT },
     // 阶段 2：DshRuntimeAdapter。全部用假宿主端口，覆盖真实 DSH 无法稳定复现的故障
     // （run.result 永不结算、abort 无效、畸形结果、事件流中断）。
     { label: 'dsh-adapter（PRT-201~209：DSH 适配器契约、脱敏、看门狗与取消/恢复）', files: ['runtime/adapters/dsh/adapter.test.mjs'], cwd: ROOT },

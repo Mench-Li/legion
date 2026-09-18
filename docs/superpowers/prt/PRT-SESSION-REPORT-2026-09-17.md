@@ -975,7 +975,90 @@ node scratch/verify-overlay-argv.mjs                   # 4/4 咬住，两个套�
 ★ 那个验证脚本第一版**只跑 `dsh-overlay`**，于是锚在 `node-file` 分支上的变异
 报"没咬住"——那不是用例的问题，是**验证脚本选错了靶场**。
 
-### 10.13 本轮的诚实边界
+### 10.13 ★★★ 我自己造成的一次事故：`git add` 一个**共享**文件
+
+这一条记的是**我的错**，不是探针的错也不是别人的错。写在这里是因为
+它的形状与本报告反复讲的那个形状**一模一样**，只不过这次犯错的是我。
+
+#### 事实
+
+`6eb7004` 那批我 `git add product/process-manifest.test.mjs`。
+那是一次**显式路径**的 add——但那个路径当时是**共享**的：并发 agent
+在这个文件里有一批在途改动（readiness 的 stdout 判据、`--host`/`--no-open`
+的期待值），而他们的 **source 那一半还没提交**。
+
+读数（逐提交数关键词）：
+
+```text
+f291f9c  288 行  --no-open=0   expectMatch=0  LOOPBACK_HOSTS=0
+6eb7004  486 行  --no-open=28  expectMatch=5  LOOPBACK_HOSTS=2   ← 我提交了他们的测试
+HEAD     486 行  同上
+工作区   504 行  （+ 他们未提交的 source 改动）
+```
+
+而 HEAD 的 `process-manifest.mjs` 里 `hostArgv`/`boolArgv` 各出现 **0** 次
+（工作区里 **14** 次）。于是：
+
+```text
+git worktree add --detach w HEAD && cd w && node --test product/process-manifest.test.mjs
+  ✖ runtime 入口由配置提供：未配置必须报错，而不是「跳过该进程」
+  ✖ ★★★ PRT-251 续：端口进 argv，且**在所有 launcher 旗标之后**
+  …（共 8 条）
+```
+
+**HEAD 单独检出是红的，而我把它弄红的。**
+
+> 一个"显式路径"的 `git add`，与一个"把别人半成品一起提交"的 `git add`，
+> 在命令历史里是同一个东西——只不过后者的那个路径恰好是**共享**的。
+> 而"我每次都写显式路径、从不 `git add -A`"这条纪律，
+> 对**共享文件**这一种情况**完全没有保护作用**。
+
+#### 修法
+
+不改写历史（`fd619f1` 已压在 `6eb7004` 上，rebase 会动别人的提交），
+追加 `d88a60a`：把 HEAD 的测试文件还原成「基线 + 只有我的两处」，
+并把他们的改动**写回工作区**——也就是我插手之前他们本就处于的状态。
+
+#### 顺带咬出：我那条断言**原来也依赖他们的变量名**
+
+那条用例原本断言 `deepEqual(order, ['...args','...extras','...appArgs'])`，
+而基线的形状是：
+
+```text
+f291f9c / HEAD 的 process-manifest.mjs:
+  Object.freeze([entryAbs, ...args, ...extras, ...portArgs])    appArgs 出现 0 次
+```
+
+**写死 `appArgs` 的断言在 HEAD 上根本过不了**——它之所以是绿的，是因为
+工作区里跑的是对方的在途重构。也就是说：我那条"钉住不变式"的用例，
+本身并不独立。改成钉**不变式**之后才真独立：
+
+- `extras`（含 `--patch`）必须排在**任何** app 段 spread 之前；
+- 且这条分支上**必须**至少有一个 app 段，否则那个循环是空转——
+  *而"空转的循环"与"检查通过了"在读数上是同一个东西*。
+
+#### 判据
+
+```bash
+# 只有我的那一份，跑在**基线 source** 上
+git worktree add --detach /tmp/w f291f9c
+cp scratch/_mineonly-test.mjs /tmp/w/product/process-manifest.test.mjs
+cd /tmp/w && node --test product/process-manifest.test.mjs    # 15/15
+
+# HEAD 单独检出（修正后）
+git worktree add --detach /tmp/w2 HEAD && cd /tmp/w2
+node --test product/process-manifest.test.mjs                 # 15/15
+
+# 工作区（我的 + 他们的）
+node --test product/process-manifest.test.mjs                 # 21/21
+```
+
+★ 拼装时踩的坑也记一笔：`String.replace(anchor, anchor + myTest)` 会多出
+260 多行——替换串里的 `` $` `` / `$'` / `$&` 有特殊语义，会把"匹配前后那段"
+插进来。而它报的错是"混进了他们的内容"，看起来像**内容**问题、
+其实是**替换语义**问题。改用 `replace(a, () => ...)` 即可。
+
+### 10.14 本轮的诚实边界
 
 1. **上一批的三条缺口，本轮的验证是在它们的用例与探针上复跑的**，
    不是在一次**真实多空间部署**里目击的——`scope` 对不上 `permission_rules`
@@ -1034,3 +1117,10 @@ node scratch/verify-overlay-argv.mjs                   # 4/4 咬住，两个套�
 18. §10.12 的新不变式只在 `runtime` 进程上跑过一次真 argv。`team-hub` /
    `workbench` / `orchestrator` / `whiteboard` 四个进程的 argv **今天没有
    app 段**，所以它们那条路径上的段顺序只有源码级断言，**没有行为证据**。
+19. §10.13 的修补只做了一半：我把他们的测试改动退回了工作区，但**没有**
+   通知对方。如果他们此刻正在别处（另一个 worktree 或另一台机器）检查
+   `6eb7004`/`fd619f1` 的检出，他们看到的仍然是那一版的中间态。
+   我无法从这个会话里联系到他们——这是需要人转达的一条。
+20. §10.13 里"工作区那份 = 他们的全部在途改动"是我的推断（依据：把他们的
+   测试改动退回后，工作区那个文件与 `6eb7004` 的差异正好是那四类关键词）。
+   我**没有**逐行核对过他们是否还有第五类改动被我漏掉。

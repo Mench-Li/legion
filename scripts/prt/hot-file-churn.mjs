@@ -85,10 +85,112 @@ function tryGit(args, cwd = ROOT) {
 }
 
 /**
- * 采集改动节奏。
+ * 与 `git` 相同，但把**一批提交哈希从 stdin 喂进去**。
  *
- * 每个窗口内的计数用 `<oldest>^..<newest> -- <file>`：这是一个**提交区间**上的
- * 路径过滤，语义正是「这 40 个提交里有几个碰了该文件」。
+ * 为什么要 stdin 而不是把它们拼进 argv：窗口大小是命令行给的
+ * （`--window=N`），N 大起来（几百到几千）时 40 字符一个哈希会撑爆
+ * Windows 的 argv 上限，而**那时的表现是 `git` 报一个与本次测量毫无关系的
+ * 错误**（"文件名或扩展名太长"），读的人会去查那个不存在的文件。
+ *
+ * `stdio` 的 stdin 设成 `pipe`（要喂数据），stdout 照常、stderr 也留着
+ * （这一条不吞 stderr：它只在"窗口的哈希真的不在这个仓库里"时才失败，
+ * 而那是一种**我们想知道**的失败，不是一个预期分支）。
+ */
+function gitWithStdin(args, input, cwd = ROOT) {
+  return execFileSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+    input,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+}
+
+/**
+ * 数「窗口里的这 N 个提交」有几个碰了某个文件。
+ *
+ * ## 为什么不能写成 `<oldest>^..<newest> -- <file>`
+ *
+ * 那是本探针的第一版，注释写着「语义正是『这 40 个提交里有几个碰了该文件』」。
+ * **那句话在带合并的历史上是错的**，而本仓的历史**满是合并提交**
+ * （`--merges` 数出 101 个）。原因是 `A^..B` 的语义是「B 可达且 A^ 不可达」，
+ * 于是 **B 经过合并的第二个父亲能带进来一大批不在窗口里的提交**。
+ *
+ * 实测（2026-09-17，`HEAD=eed4058`，窗口 40，本仓）：
+ *
+ * ```text
+ * 窗口 1  plugins/src/index.ts   区间写法 9  / 精确 1     ← 多算 9 倍
+ * 窗口 1  team-hub/server.mjs    区间写法 41 / 精确 9     ← 超过窗口大小
+ * 窗口 6  team-hub/server.mjs    区间写法 9  / 精确 10    ← 这个方向又少算
+ * 区间里的提交数（窗口 1）        217（而窗口只有 40）
+ * ```
+ *
+ * 两个方向都错。而**多算那一边正是本文件头警告过的那件事**：
+ *
+ *   > 一个会把「该开工」读成「不能开工」的测量方法，比没有测量更糟。
+ *
+ * 窗口 1 的真实答案是 1（该文件已经降温），区间写法却说 9；
+ * 而 9 会把 `recentMax <= 2` 的判据推成「没降温，不能开工」。
+ * 第一版手工发现的那个"结论正好相反"的坑，**换了个地方又长回来了**。
+ *
+ * 而且它还会触发 `hot-file-churn.test.mjs` 那条守卫
+ * （`count <= windowSize`）并给出**完全错误的诊断**：
+ *
+ * ```text
+ * team-hub/server.mjs 第 1 窗口计数 41 > 40：可能又改成错误写法了
+ * ```
+ *
+ * 它把一个**测量方法的缺陷**说成了一次**实现回归**。
+ *
+ * ## 为什么也不能写成 `git log --no-walk --stdin -- <file>`
+ *
+ * 这是本轮的**第二次**修法，它同样是错的——而且错得更隐蔽：
+ * `--no-walk` 让 git 不再做历史行走，于是**路径过滤整个失效**，
+ * 输出恒等于喂进去的那 N 个提交。实测：本仓每个窗口每个文件都恒返回
+ * `40/40`，两条漂亮的满格条形图，而窗口 2 的真实答案是 0。
+ *
+ *   > 一个"每个格子都是 40/40"的探针，看起来像一份**最坏**的报告，
+ *   > 于是它骗人的方向是"让人不敢开工"——
+ *   > 而它其实什么都没测，因为路径过滤被那面 `--no-walk` 的旗子关掉了。
+ *
+ * ## 正确写法：让 git 自己说出每个提交动了哪些文件
+ *
+ * ```text
+ * git log --no-walk --format=%x1f%h --stdin --name-only    ← 哈希从 stdin 喂
+ * ```
+ *
+ * `--no-walk` 保证**只**看喂进去的这 N 个提交（这正是我们要的集合），
+ * `--name-only` 让 git 逐个提交列出它改动的文件——**路径过滤交给我们自己做**，
+ * 于是它不会再被 `--no-walk` 关掉。
+ *
+ * 用 `%x1f`（unit separator）而不是换行做提交分隔：文件名里可以出现任何
+ * 非 NUL 字节（包括形如短哈希的字符串），拿"第一行是哈希"去解析会在
+ * 某个恰好这么命名的文件上崩掉。`\x1f` 不会出现在路径里。
+ *
+ * ⚠️ 边界：这一条数的是"**这次提交本身**改了这个文件"。
+ * 合并提交在默认 diff 下不显示改动，因此**不计入**——这既是我们想要的
+ * （一次合并不是一次"改动"），也与「先按路径过滤再截断」那种写法在
+ * 合并上的行为一致。它**不能**用来回答"这个文件历史上被改过多少次"：
+ * 那个量是 `lifetimeCommits`，由另一条命令（全 history 的 `git log -- <file>`）算。
+ */
+function countWindowTouches(slice, file, cwd = ROOT) {
+  const out = gitWithStdin(
+    ['log', '--no-walk', '--format=%x1f%h', '--stdin', '--name-only'],
+    slice.join('\n') + '\n',
+    cwd,
+  )
+  let n = 0
+  for (const chunk of out.split('\x1f')) {
+    const lines = chunk.split('\n').map((l) => l.trim()).filter((l) => l !== '')
+    if (lines.length === 0) continue
+    // 第一行是这个提交的哈希，其余是它改动的文件路径
+    if (lines.slice(1).includes(file)) n++
+  }
+  return n
+}
+
+/**
+ * 采集改动节奏。
  */
 export function collectChurn({ files = HOT_FILES, size = 40, windows = 6, cwd = ROOT } = {}) {
   const head = tryGit(['rev-parse', 'HEAD'], cwd)
@@ -107,11 +209,9 @@ export function collectChurn({ files = HOT_FILES, size = 40, windows = 6, cwd = 
       : null
 
     const perWindow = ranges.map((r) => {
-      const newest = all[r.from]
-      const oldest = all[r.to - 1]
-      const count = git(['log', '--format=%h', `${oldest}^..${newest}`, '--', f], cwd)
-        .split('\n')
-        .filter(Boolean).length
+      // 窗口的**那 N 个哈希本身**（就是切出来的那一片），逐个交给 git。
+      const slice = all.slice(r.from, r.to)
+      const count = countWindowTouches(slice, f, cwd)
       return { rank: r.rank, from: r.from + 1, to: r.to, count, complete: r.complete }
     })
 

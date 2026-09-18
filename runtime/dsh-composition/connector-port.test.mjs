@@ -198,30 +198,65 @@ test('④b ★★ 认不出的工具 ⇒ `null`（"管不着"要交给策略门�
   assert.equal(p.resolveConnectorId({ toolName: 'never_declared' }), null)
 })
 
-test('④c ★★★ 已知限度：推导式归属**只能**归属已声明的工具（登记表那条教义因此不可达）', () => {
-  // ⚠️ 这一条钉的是 `connector-port.mjs` 文件头 ⑦ 那条边界——
-  //    不是待办，是"读到判定面已接线的人最容易误解的那件事"。
+test('④c ★★★ 归属的**两条**依据：命名空间在前（让「未声明就拒绝」可达），声明推导兜底', () => {
+  // ★★★ 2026-09-18 第 17 轮：这一条**改了要钉的东西**。
   //
-  //    它必须在这里（而不是只在组合根那一层）被钉住，因为**这个模块
-  //    就是那个限度本身**：`resolveConnectorId` 是推导出来的，
-  //    而推导的输入**只有声明**。
+  //   原先它钉的是"推导式归属只能归属已声明的工具 ⇒ 登记表那条教义不可达"。
+  //   现在 `resolveConnectorId` **先**看命名空间（`mcp__<connectorId>__`），
+  //   而命名空间与"这个名字有没有被声明过"**无关** ⇒ 教义可达了。
+  //
+  //   > 一个"命名空间明明认得出来、却因为名字没被逐字声明过而把它当作不认识"
+  //   > 的归属，与一个"根本没有连接器层"的归属，在这一次调用的读数是同一个
+  //   > `allow`——只不过前者**刚好把一个已登记的连接器的工具放过去了**。
   const p = connectorPortFromEnv({ env: withEnv(JSON.stringify([
     decl({ connectorId: 'github', tools: [{ name: 'list_issues', capabilities: ['repo:read'] }] }),
   ])) })
 
-  // ★ 三个读数放在一起，才能把"限度"与"坏了"分开：
-  //   ① 声明过的 ⇒ 归属得到（功能是好的）
+  // ① **命名空间**路径：声明里**没有**这个名字，照样归属得到。
+  //    ⇒ 这就是"登记表会被问到"的前提，于是它答"没声明" ⇒ 拒。
+  assert.equal(p.resolveConnectorId({ toolName: 'mcp__github__list_issues' }), 'github',
+    '公开名没有被逐字声明过 ⇒ 若这里拿到 null，那条教义就又不可达了')
+  assert.equal(p.resolveConnectorId({ toolName: 'mcp__github__delete_repo' }), 'github',
+    '★ 未声明的连接器工具必须**归属得到**——否则登记表没机会拒它')
+  assert.equal(p.resolveConnectorId({ toolName: 'mcp__github__whatever_at_all' }), 'github')
+
+  // ② **声明推导**路径（兜住"声明了一个 DSH 核心工具名"那一类，今天夹具全是这种）。
   assert.equal(p.resolveConnectorId({ toolName: 'list_issues' }), 'github')
-  //   ② 没声明的连接器风格名字 ⇒ `null`（**这就是限度**）
-  assert.equal(p.resolveConnectorId({ toolName: 'github__delete_repo' }), null,
-    '未声明的工具名被归属到了连接器 —— 那说明归属不再只依据声明（这条判据要重写）')
-  //   ③ 已知核心工具 ⇒ 也是 `null`（与 ② **同一个读数**）
+
+  // ③ ★ **仍未关**的那一半：命名空间认不出来 ⇒ `null` ⇒ 交给政策门。
+  //    按教义 `mcp__evil__rm_rf` 也该被拒，而 `resolveConnectorId` 的值域
+  //    是 `string|null`，**装不下"拒"**。这件事没有被本批偷偷做掉。
+  assert.equal(p.resolveConnectorId({ toolName: 'mcp__evil__rm_rf' }), null,
+    '一个没有任何已知连接器占着的命名空间不该被归属——但它也**没有**被拒，'
+    + '只是交给政策门；要改成拒需要一个新的端口（见文件头 ⑦末段）')
+
+  // ④ 已知 DSH 核心工具 ⇒ `null`（那条教义管不着它）
   assert.equal(p.resolveConnectorId({ toolName: 'git-status' }), null)
-  //   ⇒ ② 与 ③ 同形，正是"按名字归属"分不开"来源"的证据。
-  //
-  //   > 一个"连接器新加的工具"与一个"DSH 本来就有的核心工具"，
-  //   > 在归属这一格上是同一个 `null`——只不过前者本该被拒绝，
-  //   > 而 `null` 的含义是"交给政策门"。
+
+  // ⑤ 单下划线**不是**命名空间（`mcp__` 是两个下划线）——反向对照，
+  //    少了它会让我们以为"任何带 github 字样的名字都归属得到"。
+  assert.equal(p.resolveConnectorId({ toolName: 'github__delete_repo' }), null,
+    '`github__delete_repo` 没有 `mcp__` 前缀 ⇒ 不是 DSH 公开名 ⇒ 认不出')
+  assert.equal(p.resolveConnectorId({ toolName: 'mcp_github_x' }), null)
+})
+
+test('④d ★★ 顺序不可颠倒：命名空间**优先于**声明推导（否则未声明的那一类又被漏掉）', () => {
+  // 造一个"两条依据都命中、但答案不同"的场景是不可能的（同一个 id 才能占命名空间），
+  // 所以这里钉的是**后果**而不是实现：一个连接器**声明了** `foo`，
+  // 而线上来的是 `mcp__<另一个已登记连接器>__foo` ⇒ 必须归到命名空间那个。
+  const p = connectorPortFromEnv({ env: withEnv(JSON.stringify([
+    decl({ connectorId: 'github', tools: [{ name: 'list_issues', capabilities: ['repo:read'] }] }),
+    decl({ connectorId: 'gitlab', tools: [{ name: 'mcp__github__list_issues', capabilities: ['repo:read'] }] }),
+  ])) })
+  assert.equal(p.resolveConnectorId({ toolName: 'mcp__github__list_issues' }), 'github',
+    '归属被声明推导**抢先**了 ⇒ 一个连接器可以用"声明别人的公开名"来把调用认领走')
+})
+
+test('④e ★★ 嵌套命名空间：`connectorId` 自己含 `__` 时也要认得出', () => {
+  const p = connectorPortFromEnv({ env: withEnv(JSON.stringify([
+    decl({ connectorId: 'a__b', tools: [{ name: 'x', capabilities: ['repo:read'] }] }),
+  ])) })
+  assert.equal(p.resolveConnectorId({ toolName: 'mcp__a__b__tool' }), 'a__b')
 })
 
 // ---------------------------------------------------------------------------

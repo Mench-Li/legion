@@ -1227,22 +1227,23 @@ test('★★★ 生产路径：**同一次调用**没配连接器声明时是 al
   assert.equal(d.kind, 'allow', `没配连接器声明时 git-status 应当 allow，实得 ${d.kind}（${d.reason}）`)
 })
 
-test('★★★ 归属的**边界**：推导式解析器触发不了登记表那条「未声明就拒绝」', async () => {
-  // ⚠️ 这一条钉的是一个**已知的、结构性的**限度，不是待办。它必须在这里，
-  //    否则下一个读到"判定面已接线"的人会以为那条教义在生产里也生效了。
+test('★★★ 归属的**边界**：命名空间让登记表那条「未声明就拒绝」**在生产里可达了**', async () => {
+  // ★★★ 2026-09-18 第 17 轮：这一条**改了要钉的东西**。
   //
-  //   登记表（`registry.mjs` 文件头 ①）的头号教义是：
-  //     「未声明的工具**必须拒绝**——没见过就放行，等于任何人在外部加一个
-  //       工具就等于加一个后门」
+  //   原先它钉的是"那条教义**不可达**"：归属只按"工具名在不在某份声明里"推导，
+  //   于是没被声明的工具名归属不到任何连接器 ⇒ 登记表根本不会被问到。
   //
-  //   而**推导式**解析器（本行现在用的那个）是按**工具名在不在某份声明里**
-  //   来归属的。于是一个没被声明的工具名**归属不到任何连接器** ⇒
-  //   登记表根本不会被问到 ⇒ 那条教义**不可达**。
+  //   现在 `connector-port.mjs` 的 `resolveConnectorId` **先**看**命名空间**
+  //   （`mcp__<connectorId>__`，契约来自 DSH 的 `publicToolName`），
+  //   而那与"这个名字有没有被声明过"**无关**。
   //
-  //   > 一个"要触发『未声明就拒绝』、得先把这个工具归属到某个连接器，
-  //   > 而归属本身要求它已经被声明"的接线，
-  //   > 与一个"从来没有那条教义"的接线，在每一次真调用的读数上
-  //   > 都是同一个 `unattributed`——只不过前者的文件头里**明确写着**不许这样。
+  //   > 一个"命名空间明明认得出来、却因为名字没被逐字声明过而把它当作不认识"
+  //   > 的归属，与一个"根本没有连接器层"的归属，在这一次调用的读数是同一个
+  //   > `allow`——只不过前者**刚好把一个已登记的连接器的工具放过去了**。
+  //
+  //   ★ 本条的**前提对照**是 `mcp__github__list_issues` 那一格（③）：
+  //     它证明"命名空间认得出来"这条依据**单独**就足以让登记表被问到，
+  //     而不是靠声明推导碰巧命中。
   const { ctx } = fakeContext()
   const { factory } = portFactory()
   const env = {
@@ -1254,34 +1255,66 @@ test('★★★ 归属的**边界**：推导式解析器触发不了登记表那
   const root = enforcementRoot()
   const port = root.bridge.connectorJudgment
 
-  // ① 模块口径：教义**是**实现的（直接问登记表，用同一个工具名）。
+  // ① 模块口径：教义**是**实现的（直接问登记表）。
   const { createRegistry } = await import('../../../runtime/connectors/registry.mjs')
   const reg = createRegistry({ connectors: [{ ...CONNECTOR_DECL_FOR_ROW }] })
-  const direct = reg.decide({ connectorId: 'github', toolName: 'github__delete_repo' })
+  const direct = reg.decide({ connectorId: 'github', toolName: 'mcp__github__delete_repo' })
   assert.equal(direct.decision, 'deny', '登记表本身必须拒未声明的工具')
   assert.equal(direct.code, 'connector-tool-not-declared')
 
-  // ② 生产口径：同一个工具名走桥 ⇒ **归属不到**连接器 ⇒ 登记表没被问到。
+  // ② ★★★ 生产口径：**同一个**工具名走桥 ⇒ 归属得到（命名空间）⇒ 登记表**被问到** ⇒ 拒。
+  //    这是那条教义第一次在生产路径上真的拦下东西。
   const before = port.receipts()
-  await root.bridge.preExecute({
-    name: 'github__delete_repo', callId: 'c-x', arguments: { path: `${CWD}/x` },
+  const d = await root.bridge.preExecute({
+    name: 'mcp__github__delete_repo', callId: 'c-x', arguments: { target: `${CWD}/x` },
   })
   const after = port.receipts()
-  assert.equal(after.attributed, before.attributed,
-    '未声明的工具名**不该**被归属到连接器（归属是按声明推导的）')
-  assert.equal(after.unattributed, before.unattributed + 1, '这一次调用必须记在 unattributed 上')
-  assert.equal(after.connectorDecided, before.connectorDecided,
-    '⚠️ 连接器层**没有**成为更严的那一侧 —— 这正是上面那条教义不可达的读数')
+  assert.equal(after.attributed, before.attributed + 1,
+    '`mcp__<已知连接器>__<任意>` 必须归属得到——命名空间与"有没有被声明过"无关')
+  // ★★★ 这一格才是"登记表被问到、而且答了拒"的**直接**读数。
+  //
+  //   ⚠️ 用 `connectorDecided` 会读错：它量的是"连接器层是不是**更严的那一侧**"，
+  //      而这里两侧都是 deny（政策门对未知工具本来就 fail closed）⇒ **平局** ⇒
+  //      那个计数器是 0，而教义**确实**在被执行。
+  //
+  //   > 一个"连接器层被问到了、而且答了拒"的接线，与一个"连接器层根本没被问到、
+  //   > 由政策门独立地拒掉"的接线，在 `connectorDecided` 上是同一个 0——
+  //   > 只不过前者的理由里写着连接器的名字。
+  assert.equal(after.outerDeny, before.outerDeny + 1,
+    '连接器层必须**真的答了拒**（这是它被问到的直接读数）')
+  assert.equal(d.kind, 'deny', `未声明的连接器工具必须被拒，实得 ${d.kind}`)
+  assert.match(String(d.reason), /连接器 github/,
+    `这次拒绝必须**归功于连接器层**：${d.reason}`)
+  assert.match(String(d.reason), /没有声明工具/,
+    `理由要说清是"没声明"：${d.reason}`)
 
-  // ③ 而**后果**仍然是被拒的——但拒绝来自政策门对未知工具的 fail closed，
-  //    不是来自登记表。两者的区别不是学术的：一个**名字撞上已知核心工具**
-  //    的未声明连接器工具，会走到政策门的 `allow` 上去。
-  const d = await root.bridge.preExecute({
-    name: 'github__delete_repo2', callId: 'c-y', arguments: { path: `${CWD}/x` },
+  // ③ ★ 前提对照：**另一个**同样没被逐字声明的公开名，也必须走到同一条路上。
+  //    少了它，② 可能只是"这个名字碰巧被声明推导命中了"。
+  const mid = port.receipts()
+  const d2 = await root.bridge.preExecute({
+    name: 'mcp__github__list_issues', callId: 'c-z', arguments: { target: `${CWD}/x` },
   })
-  assert.equal(d.kind, 'deny', '未知工具应当被拒（政策门 fail closed）')
-  assert.ok(!/连接器 github/.test(String(d.reason)),
-    `这次拒绝**不该**归功于连接器层（它没被问到）：${d.reason}`)
+  const afterDeclaredRaw = port.receipts()
+  assert.equal(afterDeclaredRaw.attributed, mid.attributed + 1,
+    '同样靠**命名空间**归属——而声明里写的是裸名 `list_issues`，两者对不上')
+  assert.equal(d2.kind, 'deny',
+    '声明里写的是**裸名** `list_issues`，而线上来的是**公开名**——'
+    + '两者对不上 ⇒ 按"未声明"拒。★ 这正是下一批要做的那件事（见 ④）')
+
+  // ④ ⚠️ **仍未关**的那一半：命名空间**认不出来**的名字，仍然交给政策门。
+  //    它必须留在这里，否则下一个读到"教义可达了"的人会以为**所有**
+  //    连接器形状的工具都被登记表管住了。
+  const foreign = await root.bridge.preExecute({
+    name: 'mcp__evil__rm_rf', callId: 'c-w', arguments: { target: `${CWD}/x` },
+  })
+  const afterForeign = port.receipts()
+  assert.equal(afterForeign.unattributed, afterDeclaredRaw.unattributed + 1,
+    '`mcp__evil__x`（一个没有任何已知连接器占着的命名空间）**不该**被归属——'
+    + '按教义它该被拒，而 `resolveConnectorId` 的值域装不下"拒"，所以它落到政策门')
+  assert.equal(afterForeign.attributed, afterDeclaredRaw.attributed,
+    '认不出的命名空间**不该**被归属到任何一个连接器上')
+  assert.ok(!/连接器 evil/.test(String(foreign.reason ?? '')),
+    `不该出现一个不存在的连接器的理由：${foreign.reason}`)
 })
 
 if (SKIP !== false) {

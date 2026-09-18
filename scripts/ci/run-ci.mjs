@@ -1958,12 +1958,19 @@ async function stageTest() {
     //      （与 `declaredRisk`/`risk` 是同一类）。⑨a 专门用交叉喂**钉住**
     //      "两边都收"这种好心兼容不许出现。
     {
-      label: 'connectors（F-21：未声明即拒绝、风险只能上抬、密钥只许引用、熔断的开路与探针**都**有截止时间、反馈面永不抛、判定面取严且永不短路政策门）',
+      label: 'connectors（F-21：未声明即拒绝、风险只能上抬、密钥只许引用、熔断的开路与探针**都**有截止时间、反馈面永不抛、判定面取严且永不短路政策门、DSH 公开名逐字镜像）',
       files: [
         'runtime/connectors/registry.test.mjs',
         'runtime/connectors/target-binding.test.mjs',
         'runtime/connectors/outcome-port.test.mjs',
         'runtime/connectors/decision-port.test.mjs',
+        // ★ 2026-09-18 第 17 轮：DSH 公开名的镜像 + 命名空间归属。
+        //   它是 `registry.mjs` 那条「未声明就拒绝」在生产里**唯一**可达的路径
+        //   （判定面靠命名空间归属，而命名空间与"有没有被声明过"无关）。
+        //   本套件里 ①a 那一条**对着 DSH 真源码切片求值**对跑 18 组——
+        //   少了它，这个镜像只是"读起来很像 DSH"，而"很像"与"逐字等价"
+        //   在干净名字上是同一个字符串。
+        'runtime/connectors/public-name.test.mjs',
         'team-hub/connector-store.test.mjs',
         'team-hub/connector-http.test.mjs',
       ],

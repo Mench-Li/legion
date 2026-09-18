@@ -548,6 +548,39 @@ export function createEnforcementBridge({
    * 的机会。要**关掉**覆盖才需要显式传 `null`——那在读代码时是看得见的。
    */
   identityFor = identityOverlayForExecution,
+  /**
+   * ★★ F-21 / 第 19 条：连接器熔断器的**反馈面**（2026-09-18 加）。
+   *
+   * 类型：`(exec, result) => void`——`runtime/connectors/outcome-port.mjs` 的
+   * `createOutcomeListener()` 造出来的那个监听器，**由组合方挂到 DSH 的
+   * `tools/result` 事件上**（桥自己不订阅事件——理由与 preExecute 那一行相同：
+   * 事件的订阅属于"行"，判定与记录的逻辑属于桥）。
+   *
+   * ## 为什么桥必须**知道**它，而不是只让组合方自己拿着
+   *
+   * 因为 §10 量出来的那个缺口正是：**少装了什么都看不出来**。
+   * `runtime/connectors/registry.mjs` 的 `decide()` 读熔断器，
+   * 而改它的 `recordOutcome()` 生产调用方是 0 处——只接判定面会得到
+   * **一个永远合闸、且一行错都不报**的熔断器。`enforcementSurfaces()`
+   * 是"到底挂了几道"的**唯一**读数，所以反馈面必须在那一格里出现：
+   *
+   *   > 一个"接了连接器判定、但反馈面没装"的强制面，
+   *   > 与一个"连接器从来不会因为失败而被拦下"的强制面，是同一个东西——
+   *   > 只不过前者的 `enforcementSurfaces()` 看起来是接好的。
+   *
+   * ## 为什么默认可为空（`null` 就是不装）
+   *
+   * 与 `whitelist` / `pathScope` 同一条口径：既有调用点（装配级用例、
+   * 诊断页）里绝大多数验的**不是**连接器，让签名变硬会把它们全改一遍。
+   * 传 `null` 时行为与本批之前逐字相同。**但**它会在
+   * `enforcementSurfaces().connectorFeedback` 上读成 `false`——
+   * "没装"是**看得见**的，这正是本参数存在的意义。
+   *
+   * ★ 非 `null` 又不是函数 ⇒ **构造期抛**（见下面）：一个既不是端口
+   * 也不是"没给"的值，只可能是接线写错了，而静默当成"没给"会让
+   * `enforcementSurfaces()` 报 `false`——把一次**写错**读成一次**没配**。
+   */
+  connectorFeedback = null,
   connectTimeoutMs = 2000,
   responseTimeoutMs = 3000,
   approvalConnectTimeoutMs = 2000,
@@ -557,6 +590,15 @@ export function createEnforcementBridge({
   onContradiction,
 } = {}) {
   if (context === null || typeof context !== 'object') throw new Error('createEnforcementBridge 需要 Legion 上下文')
+  // ★ 反馈面：要么不给，要么是函数。一个"既不是端口也不是没给"的值
+  //   在 `enforcementSurfaces()` 上会读成 `false`——于是"接线写错了"
+  //   与"这一道没配"变成同一个读数，而两者的修法完全不同。
+  if (connectorFeedback !== null && typeof connectorFeedback !== 'function') {
+    throw fail(PROJECTION_CODES.BAD_REQUEST,
+      `connectorFeedback 要么不给（null），要么是 (exec, result) => void 的监听器` +
+      `（收到 ${typeof connectorFeedback}）。**不静默当成"没给"**：` +
+      '那会让"接线写错"与"这一道没配"在 enforcementSurfaces() 上同形')
+  }
 
   const ledger = new Map()
   const contradictions = []
@@ -887,6 +929,13 @@ export function createEnforcementBridge({
     contradictions: () => Object.freeze([...contradictions]),
     assertNoContradiction,
     /**
+     * ★★ F-21 反馈面：组合方把这个监听器挂到 DSH 的 `tools/result` 上。
+     *
+     * `null` ⇒ 没装。**读得出 `null` 本身就是信息**——本批之前，
+     * "反馈面没装"在整个桥的读数里**一格都没有**。
+     */
+    connectorFeedback,
+    /**
      * 强制面到底挂了几道。**证据是"装上了什么"，不是"配置里写了什么"**——
      * PRT-604 的 pathScope 与 PRT-603 的 whitelist 都是可选端口，一个没接上的
      * 端口在运行时与"从不拒绝"无法区分。
@@ -897,6 +946,22 @@ export function createEnforcementBridge({
       whitelist: whitelist !== null,
       policy: decide !== null,
       approval: requestApproval !== null,
+      /**
+       * ★★ F-21 的**第二半**（2026-09-18 加）。原来这一格**不存在**。
+       *
+       * 为什么它必须在这里，而不是"组合方自己知道就行"：
+       *
+       *   > 一个"接了连接器判定、但反馈面没装"的强制面，
+       *   > 与一个"连接器从来不会因为失败而被拦下"的强制面，是同一个东西——
+       *   > 只不过前者的 `enforcementSurfaces()` 看起来是接好的。
+       *
+       * ⚠️ 这一格只回答"**监听器在不在**"，**不**回答
+       * "它认不认得出连接器"（那个要让 `createOutcomeListener` 的
+       * `receipts()` 去答）。一个装上了、但每次都记不上账的监听器
+       * 在这一格里是 `true`——那是**有意的**：这一格报的是**装配**，
+       * 不是**效果**，两者分开才查得动。
+       */
+      connectorFeedback: connectorFeedback !== null,
     }),
   })
 }

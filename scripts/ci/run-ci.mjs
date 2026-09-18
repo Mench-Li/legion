@@ -1931,11 +1931,18 @@ async function stageTest() {
     //   策略在控制面、连接目标在部署配置，两边在 `bindConnectorTargets` 汇合。
     //   它同时盯三条 fail-closed 拒绝——少了它们，"漏配"与"这个连接器没配"
     //   在读数上同形。
+    // ★ `outcome-port.test.mjs`（2026-09-18）是那一组的**反馈面**：
+    //   `registry.mjs` 的 `decide()` 读熔断器，而在此之前改它的
+    //   `recordOutcome()` **生产调用方是 0 处**——于是判定面接上去会得到一个
+    //   **永远合闸**的熔断器。这一套里 ① 是**端到端**的（真调 decide 看跳闸），
+    //   ② 钉住"判不出来"是**第三个桶**（折成成功让坏连接器隐身、折成失败冤枉好连接器），
+    //   ④ 钉住**永不抛**（宿主兜异常不算数），①a 钉住"探针不回来不许永久卡死"。
     {
-      label: 'connectors（F-21：未声明即拒绝、风险只能上抬、密钥只许引用、熔断有截止时间）',
+      label: 'connectors（F-21：未声明即拒绝、风险只能上抬、密钥只许引用、熔断的开路与探针**都**有截止时间、反馈面永不抛）',
       files: [
         'runtime/connectors/registry.test.mjs',
         'runtime/connectors/target-binding.test.mjs',
+        'runtime/connectors/outcome-port.test.mjs',
         'team-hub/connector-store.test.mjs',
         'team-hub/connector-http.test.mjs',
       ],
@@ -2983,6 +2990,24 @@ async function stageTest() {
       //      全部用例照样绿（两次 `ctx.plugin` 都 `await` 到底，没有窗口）。
       label: 'pre-execute（PRT-214：策略门 × 真 pre-execute 瀑布 + 全链路集成）',
       files: ['runtime/dsh-composition/pre-execute.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      // ★★ F-21 **第二半**（2026-09-18）：把 `tools/result` 接到连接器熔断器的
+      //    反馈面。这一行与 pre-execute 那一行的分工必须**在套件层面**也看得出：
+      //
+      //      pre-execute 订的是 `tools/pre-execute`（水瀑，`(exec, next)`，**判定**）
+      //      本行        订的是 `tools/result`      （emit，`(exec, result)`，**观测**）
+      //
+      //    ★ 写成水瀑签名（带 `next`）时 `next` 是 `undefined`，每次结果都抛；
+      //      而 DSH 契约承诺**兜住** listener 的异常 ⇒ 什么都记不上、什么都不报。
+      //      所以 ①a 是**结构级**的：它直接盯签名。
+      //
+      //    ★ 卸载（③）不是洁癖：留着第二个监听器会让失败被记**两遍**，
+      //      而熔断阈值是 3 ⇒ **两次**真失败就跳闸。慢一倍地跳闸与快一倍地
+      //      跳闸，在"它拦住了一次该拦的调用"上看不出来。
+      label: 'connector-feedback（F-21 第二半：tools/result 只观测不判定，且卸载真的卸掉）',
+      files: ['runtime/dsh-composition/plugins/connector-feedback.test.mjs'],
       cwd: ROOT,
     },
     {

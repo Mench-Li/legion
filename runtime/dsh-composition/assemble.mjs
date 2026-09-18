@@ -40,6 +40,9 @@
 
 import { createApprovalAnswererPlugin } from './plugins/approval-answerer.mjs'
 import { createPreExecutePlugin } from './plugins/pre-execute.mjs'
+import { createConnectorFeedbackPlugin } from './plugins/connector-feedback.mjs'
+import { createRegistry } from '../connectors/registry.mjs'
+import { createOutcomeListener } from '../connectors/outcome-port.mjs'
 import { createInFlightRegistry } from './inflight.mjs'
 import { createEnforcementBridge } from './tool-request.mjs'
 
@@ -84,6 +87,14 @@ export function bindingOf(row) {
 
 /** 装配期的失败码。 */
 export const ASSEMBLE_CODES = Object.freeze({
+  /**
+   * ★★ F-21：给了 `connectorDeclarations` 却没给 `resolveConnectorId`。
+   *
+   * 两者必须**同时**给，理由见 `assembleEnforcement` 里那一段：连接器那一半
+   * 的**判定面与反馈面是同一条链的两端**，只来一半会得到一个"永远合闸、
+   * 而且一行错都不报"的熔断器。
+   */
+  NO_CONNECTOR_RESOLVER: 'ASSEMBLE_NO_CONNECTOR_RESOLVER',
   /** 没给 Legion 上下文（scope/actor/action/taskId/cwd）。 */
   NO_CONTEXT: 'ASSEMBLE_NO_CONTEXT',
   /** 没给策略端口 `decide`。**不给默认值**：默认放行是静默降级，默认拒绝是静默停摆。 */
@@ -141,6 +152,41 @@ export function assembleEnforcement({
   now = () => Date.now(),
   registry = null,
   onDecision = null,
+  /**
+   * ★★ F-21 的**连接器那一半**（2026-09-18 加）。
+   *
+   * `connectorDeclarations`：`runtime/connectors/target-binding.mjs` 的
+   * `bindConnectorTargets()` 产出的 `declarations`（**执行面只读的字段**那一片）。
+   * `resolveConnectorId`：`(projection, exec) => string | null`——
+   * 这一次调用属于哪一条连接器。
+   *
+   * ## 为什么这两个参数必须**成对**给
+   *
+   * `registry.mjs` 的 `decide()` **读**熔断器，改它的只有 `recordOutcome()`。
+   * 只接判定面（给 declarations、不给反馈）得到的是
+   * **一个永远合闸的熔断器**：注册表建得起来、`decide()` 答得出来、
+   * 用例全绿，而 `enforcementSurfaces()` 里**连"连接器"这一格都没有**。
+   *
+   *   > 一个"接了连接器判定、但反馈面没装"的强制面，
+   *   > 与一个"连接器从来不会因为失败而被拦下"的强制面，是同一个东西——
+   *   > 只不过前者的组合树看起来是接好的。
+   *
+   * 所以本函数把它们做成**同一段代码的两半**：给了一个而不给另一个 ⇒
+   * **抛具名码**，而不是"装一半、另一半悄悄缺席"。
+   * 于是"两半一起上"是**结构**，不是文档里的一句话。
+   *
+   * ## 缺省 `null`：不装，且读得出来
+   *
+   * 两个都不给时行为与本批之前逐字相同，`enforcementSurfaces().connectorFeedback`
+   * 读成 `false`——"没装"是**看得见**的。
+   *
+   * ⚠️ **本参数不会自己去读部署配置**：declarations 从哪来是第 14 条那个
+   * 决定（`product/execution-plane-config.mjs` 今天**零生产导入方**）。
+   * 这里只把"拿到 declarations 之后怎么装"这一段做好，
+   * 并保证它**一次装齐两半**。
+   */
+  connectorDeclarations = null,
+  resolveConnectorId = null,
 } = {}) {
   if (context === null || typeof context !== 'object') {
     throw assembleError(ASSEMBLE_CODES.NO_CONTEXT,
@@ -157,8 +203,37 @@ export function assembleEnforcement({
       'assembleEnforcement 需要 requestApproval 端口（team-hub 审批箱）')
   }
 
+  // ★★ F-21：连接器那一半。**成对校验**——给了一个不给另一个是接线写错。
+  if ((connectorDeclarations === null) !== (resolveConnectorId === null)) {
+    throw assembleError(ASSEMBLE_CODES.NO_CONNECTOR_RESOLVER,
+      'connectorDeclarations 与 resolveConnectorId 必须**一起**给。' +
+      '只给 declarations 会装出一个**永远合闸**的熔断器（决定读得到、反馈没人写），' +
+      '而它在 enforcementSurfaces() 里看起来是接好的；' +
+      '只给 resolver 则没有任何连接器可记。**不给就两个都不给**（那就是本批之前的行为）')
+  }
+  if (resolveConnectorId !== null && typeof resolveConnectorId !== 'function') {
+    throw assembleError(ASSEMBLE_CODES.NO_CONNECTOR_RESOLVER,
+      `resolveConnectorId 必须是 (projection, exec) => string | null（收到 ${typeof resolveConnectorId}）`)
+  }
+  const connectorRegistry = connectorDeclarations === null
+    ? null
+    : createRegistry({ connectors: [...connectorDeclarations] })
+
   // ★ **一份**登记簿，两行共用。这是它们唯一的会合点。
   const sharedRegistry = registry ?? createInFlightRegistry()
+
+  // ★ 反馈面的 listener：**先造**，因为桥要拿着它去填
+  //   `enforcementSurfaces().connectorFeedback` 那一格。桥自己不订阅事件
+  //   （订阅属于"行"，见 `plugins/connector-feedback.mjs`）。
+  const connectorOutcomeListener = connectorRegistry === null
+    ? null
+    : createOutcomeListener({
+      registry: connectorRegistry,
+      resolveConnectorId,
+      // ★ 与强制面**同一份**投影（桥按 callId 记忆）——两个点看两个目标
+      //   正是 `tool-request.mjs` 记过的坑。
+      projectionFor: (exec) => bridge.projectionFor(exec),
+    })
 
   const bridge = createEnforcementBridge({
     context,
@@ -173,10 +248,19 @@ export function assembleEnforcement({
     approvalResponseTimeoutMs,
     now,
     ...(onDecision === null ? {} : { onDecision }),
+    ...(connectorOutcomeListener === null ? {} : { connectorFeedback: connectorOutcomeListener }),
   })
 
   const rows = Object.freeze({
     preExecute: createPreExecutePlugin({ bridge, registry: sharedRegistry, onDecision }),
+    /**
+     * ★★ F-21 第二半那一行。`null` ⇒ 没有连接器登记表，**不挂**——
+     * 而 `enforcementSurfaces().connectorFeedback` 同时读成 `false`，
+     * 所以"没挂"在组合树的读数里是**看得见**的。
+     */
+    connectorFeedback: connectorOutcomeListener === null
+      ? null
+      : createConnectorFeedbackPlugin({ listener: connectorOutcomeListener }),
     approvalAnswerer: createApprovalAnswererPlugin({
       port: requestApproval,
       registry: sharedRegistry,
@@ -316,7 +400,7 @@ export function assembleEnforcement({
       }
       // 覆盖账在这里写（第一个 `await` 之前）——它是**诊断**读数，不是证据。
       coveredRowNames.length = 0
-      for (const row of [rows.approvalAnswerer, rows.preExecute]) {
+      for (const row of [rows.approvalAnswerer, rows.preExecute, rows.connectorFeedback]) {
         if (typeof row?.name === 'string' && row.name !== '') coveredRowNames.push(row.name)
       }
       settledRowNames.length = 0
@@ -331,6 +415,14 @@ export function assembleEnforcement({
           mounted.push(await ctx.plugin(rows.preExecute))
           if (typeof rows.preExecute?.name === 'string' && rows.preExecute.name !== '') {
             settledRowNames.push(rows.preExecute.name)
+          }
+          // ★ F-21 第二半：**有才挂**。没有时连 `ctx.plugin` 都不调——
+          //   挂一个"什么都不记"的空行，会让组合树里多一行**看起来装好的**行。
+          if (rows.connectorFeedback !== null) {
+            mounted.push(await ctx.plugin(rows.connectorFeedback))
+            if (typeof rows.connectorFeedback?.name === 'string' && rows.connectorFeedback.name !== '') {
+              settledRowNames.push(rows.connectorFeedback.name)
+            }
           }
         } catch (error) {
           // 挂了、但没挂成：证据账上不能留下"它挂过"的痕迹（fail closed 的方向是少报）。

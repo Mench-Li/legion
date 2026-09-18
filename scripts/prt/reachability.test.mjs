@@ -203,7 +203,26 @@ test('④ ★★ 读数：四族 gap 仍然不可达（谁把它们接上，这�
     ['runtime/experience/graph.mjs', 'F-18 关系图'],
     ['runtime/employee/role-pack.mjs', 'F-19 岗位包'],
     // 族四：F-21 判定面 + PRT-707 死的那份实现
-    ['runtime/connectors/registry.mjs', '§4.2 F-21 判定面零调用方'],
+    //
+    // ★★ 2026-09-18：`runtime/connectors/registry.mjs` **已从这张表里删掉**——
+    //    本批建了 F-21 的**第二半（反馈面）**（`runtime/connectors/outcome-port.mjs`
+    //    ＋ `runtime/dsh-composition/plugins/connector-feedback.mjs`），
+    //    由 `assemble.mjs` 在拿到连接器声明时**一次装齐两半**，
+    //    于是它有了生产 importer，探针读数 47/26 → **46/25**。
+    //
+    //    ⚠️ **但上面那条"确认接线端到端真的通（不是只加了个 import）"没通过**，
+    //    而且这一点必须写在这里，不能只写"已接线"：
+    //    `createRegistry()` 在 `assembleEnforcement` 里是**条件调用**，
+    //    而**今天没有任何生产路径**给 `connectorDeclarations`
+    //    （来源是 §5 第 19 条那个部署配置键，`product/execution-plane-config.mjs`
+    //    仍是零生产导入方）。
+    //
+    //      > 精确读数是：**从"没人 import"变成了"被 import、但那个函数从不被调用"。**
+    //      > 一个"模块可达"的读数，与一个"这条链真的跑了"的读数，
+    //      > 在只看探针汇总的时候是同一个东西——只不过前者会让一格归零。
+    //
+    //    ⇒ 所以这一条**不是**"F-21 接好了"，而是"这个模块不再零 import 了"。
+    //    剩下的并进第 19 条。详见 `PRT-SESSION-REPORT-2026-09-17.md` §10.43。
     ['product/launcher/first-run.mjs', '§5.3.1 PRT-707 死的那份'],
   ]
 

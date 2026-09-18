@@ -464,6 +464,14 @@ export function installEnforcementRoot(input = {}) {
       floor: input.floor,
       whitelist: input.whitelist,
       pathScope: input.pathScope,
+      // ★★ F-21 连接器那一半（2026-09-18 加）：**成对**透传。
+      //   两个都缺省 `undefined` ⇒ 桥那边收 `null` ⇒ 不装，且
+      //   `enforcementSurfaces().connectorFeedback` 读成 false。
+      //   ⚠️ 这两个参数**不从部署配置里读**：declarations 从哪来是第 14 条
+      //   那个决定（`product/execution-plane-config.mjs` 今天零生产导入方）。
+      //   根这一层只负责"拿到之后怎么装"，并保证**一次装齐两半**。
+      ...(input.connectorDeclarations === undefined ? {} : { connectorDeclarations: input.connectorDeclarations }),
+      ...(input.resolveConnectorId === undefined ? {} : { resolveConnectorId: input.resolveConnectorId }),
       now: input.now,
       onDecision: input.onDecision,
       connectTimeoutMs: input.connectTimeoutMs,

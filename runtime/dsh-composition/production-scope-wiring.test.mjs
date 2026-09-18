@@ -120,6 +120,11 @@ test('① ★★★ 生产组合根**接上了** pathScope 端口；env 没配�
     whitelist: false,
     policy: true,
     approval: true,
+    // ★★ F-21 第二半（2026-09-18 加）：反馈面。组合根这一层的生产入参里
+    //    **没有**连接器登记表，所以它是 `false`——而这一格存在的意义正是
+    //    让"没装"**读得出来**（本批之前这一格**根本不存在**，
+    //    于是"接了判定面、反馈面没装"在读数上与"全接好了"同形）。
+    connectorFeedback: false,
   }, '生产强制面的读数变了。★ 如果这次改动是**有意接线**，请同时更新 '
     + 'docs/MULTI-AGENT-FEATURE-STATUS.md 与 PRT-PROGRESS 里"范围检查未接生产"那段记账——'
     + '一条只在代码里变、账上不动的接线，会让下一个人照着旧账做判断')
@@ -178,11 +183,17 @@ test('② ★★★ 命令/网络/MCP 与外部 API 两道范围检查**连端�
   }
   // 行为读数：强制面的键集里没有这两个名字。
   const surfaces = createEnforcementBridge({ context: CTX }).enforcementSurfaces()
+  // ★ 2026-09-18：键集里**多了** `connectorFeedback`（F-21 第二半）。
+  //   这个键集仍然是一份**契约**：它变了就必须在这里显式改，
+  //   而不是让它悄悄多一格。它现在有 6 格，而"两半都在场"是 6 格里的事。
   assert.deepEqual(Object.keys(surfaces).sort(),
-    ['approval', 'hardFloor', 'pathScope', 'policy', 'whitelist'],
+    ['approval', 'connectorFeedback', 'hardFloor', 'pathScope', 'policy', 'whitelist'],
     '强制面的键集变了——这个键集是**契约**，不是便利方法')
   assert.equal('executionScope' in surfaces, false)
   assert.equal('externalApiScope' in surfaces, false)
+  // ★ 反向对照：默认造出来的桥**没有**反馈面（`null` ⇒ false）。
+  //   少了这条，上面那个键集断言无法区分"这一格报了 true"与"这一格恒 true"。
+  assert.equal(surfaces.connectorFeedback, false, '没传 listener ⇒ 必须是 false（没接 ≠ 接了个空的）')
 })
 
 test('③ ★★★ 后果是真的：同一路越界调用，接了 pathScope 拒绝、没接就通过', async () => {

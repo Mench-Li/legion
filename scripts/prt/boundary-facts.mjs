@@ -390,7 +390,14 @@ export function scanLineCitations(text, treeSet = null) {
 const PINNED_CITATIONS = Object.freeze([
   Object.freeze({
     file: 'runtime/dsh-composition/tool-request.mjs',
-    line: 639,
+    // ★ 2026-09-18 位移：本批往这个文件里加了 42 行（`connectorFeedback` 端口
+    //   的签名注释、构造期守卫、返回项与 `enforcementSurfaces()` 那一格），
+    //   全都在这一行之上 ⇒ 它从 **639 挪到 681**。
+    //
+    //   坐标是**手钉**的，所以位移必须在这里改**一次**——而这次是判据自己在
+    //   CI 里报了三红（①/⑫a/⑫c）把它顶出来的：那条"引用会随插入位移"的
+    //   立论（见本节开头那段）**又成立了一次**，这次是我自己触发的。
+    line: 681,
     text: 'if (pathScope === null) return undefined',
     why: '本会话多次引为「缺表 = 放行」——这句话就是那条边界的**全部依据**',
   }),

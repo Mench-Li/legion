@@ -518,13 +518,16 @@ test('⑫b ★★ 控制：把**历史上那次真实位移的旧坐标**钉上�
 test('⑫c 控制：钉的内容差一个字符 ⇒ 必须红（逐字比对真的在逐字比）', () => {
   const real = resolve(REPO, 'runtime/dsh-composition/tool-request.mjs')
   const lines = readFileSync(real, 'utf8').split('\n')
-  const line639 = lines[638].trim()
-  assert.equal(line639, 'if (pathScope === null) return undefined', '第 639 行变了，先核它')
+  // ★ 2026-09-18 位移：本批往 `tool-request.mjs` 里加了 42 行（都在原 639 之上）
+  //   ⇒ 那个调用点从 **639 挪到 681**。坐标是**手钉**的，所以位移必须在这里改一次；
+  //   判据自己在 CI 里报了三红（①/⑫a/⑫c），这正是它存在的意义。
+  const lineNow = lines[680].trim()
+  assert.equal(lineNow, 'if (pathScope === null) return undefined', '第 681 行变了，先核它')
 
   // 差一个字符
   const off = Object.freeze([Object.freeze({
     file: 'runtime/dsh-composition/tool-request.mjs',
-    line: 639,
+    line: 681,
     text: 'if (pathScope === null) return undefined;', // 多个分号
   })])
   assert.equal(checkPinnedCitations(off).broken.length, 1,
@@ -534,7 +537,7 @@ test('⑫c 控制：钉的内容差一个字符 ⇒ 必须红（逐字比对真�
   //   这是一条**写下来的**边界，不是意外。
   const trailing = Object.freeze([Object.freeze({
     file: 'runtime/dsh-composition/tool-request.mjs',
-    line: 639,
+    line: 681,
     text: 'if (pathScope === null) return undefined   ',
   })])
   assert.equal(checkPinnedCitations(trailing).broken.length, 0,
@@ -542,7 +545,7 @@ test('⑫c 控制：钉的内容差一个字符 ⇒ 必须红（逐字比对真�
   // ⚠️ 已知边界：`trim()` 也吸收了**缩进**，所以缩进变化不会红。
   const indent = Object.freeze([Object.freeze({
     file: 'runtime/dsh-composition/tool-request.mjs',
-    line: 639,
+    line: 681,
     text: '        if (pathScope === null) return undefined',
   })])
   assert.equal(checkPinnedCitations(indent).broken.length, 0,

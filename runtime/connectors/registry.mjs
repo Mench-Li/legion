@@ -363,6 +363,26 @@ function freshCircuit() {
     openedAtMs: null,
     /** 半开时是否已经放过一次探针——见 `admit`。 */
     probeInFlight: false,
+    /**
+     * 那一次探针**什么时候**放出去的。
+     *
+     * ★★ 这个字段与 `untilMs` 是**同一条不变式**的两半（2026-09-18 补）：
+     * `untilMs` 防的是"开路永远不结束"，它防的是"探针永远不回来"。
+     *
+     *   探针被 admit 成 `ask`（`:587`）而**没有任何结果回来**时
+     *   （审批没批、调用没派发、进程在做别的事），`probeInFlight` 会一直是 `true`。
+     *   而转半开之后 `state === 'open'` 那一支**再也不可达**，
+     *   于是那个"开路带截止时间"的救援**永远进不去**——连接器被**永久**停用。
+     *
+     *   > 一个"探针出去了、结果永远不回来"的熔断器，
+     *   > 与一个"这次调用确实该被拒绝"的熔断器，在 `decide()` 的读数上
+     *   > 是同一个 `deny`——只不过前者的状态**再也不会变**，
+     *   > 而它看起来在工作（它确实一直在拒绝）。
+     *
+     * 实测（`--probe-halfopen`）：冷却 30 s 之后第一次 ask 拿到探针，
+     * 之后每再等 10 分钟都还是 `deny connector-circuit-open`，`state=half-open` 不变。
+     */
+    probeStartedAtMs: null,
     /** 从未探过 ⇒ `health === 'unknown'`，**不是** healthy。 */
     probed: false,
     lastOkAtMs: null,
@@ -560,6 +580,7 @@ export function createRegistry({ connectors = [], now = () => Date.now(), resolv
           // 冷却到了 ⇒ 转半开，**只放一次**探针（见下面 `admit`）。
           circuit.state = 'half-open'
           circuit.probeInFlight = false
+          circuit.probeStartedAtMs = null
         } else {
           return Object.freeze({
             decision: 'deny', code: CONNECTOR_CODES.CIRCUIT_OPEN,
@@ -576,13 +597,34 @@ export function createRegistry({ connectors = [], now = () => Date.now(), resolv
           //
           //   放所有排队请求过去时，探针这一步本身就在打你正在保护的那个东西
           //   ——而"熔断"的整个意义是减少对它的压力。
-          return Object.freeze({
-            decision: 'deny', code: CONNECTOR_CODES.CIRCUIT_OPEN,
-            connectorId: id, toolName: name, risk, untilMs: circuit.untilMs,
-            reason: '连接器正在半开探针中，只放一个探针过去',
-          })
+          //
+          // ★★ 但"只放一个"**必须带一个期限**（2026-09-18 补，见 `probeStartedAtMs`）。
+          //
+          //   一个**永远不会回来**的探针（审批没批 / 没派发）与一个**正在飞**的探针，
+          //   在 `probeInFlight` 上是同一个 `true`——于是这个 `return deny`
+          //   会把连接器停到进程结束。而它不会有任何报错：它**一直在正常地拒绝**。
+          //
+          //   判据用**同一个冷却窗口**，不是新发明的一个数：
+          //   一个 `CIRCUIT_COOLDOWN_MS` 之内回来的探针才有资格代表连接器；
+          //   超过它的，我们**已经无法区分**"它还在飞"与"它丢了"，
+          //   而在这两者之间继续拒绝是**赌**——赌一个可能永远不来的结果。
+          //
+          //   > 一个"等一个可能永远不来的结果"的熔断器，
+          //   > 与一个"永久停用"的熔断器，是同一个东西——
+          //   > 只不过前者每次被问到都答"正在探"。
+          const probeAge = circuit.probeStartedAtMs === null ? null : t - circuit.probeStartedAtMs
+          const probeLost = probeAge !== null && probeAge >= CIRCUIT_COOLDOWN_MS
+          if (!probeLost) {
+            return Object.freeze({
+              decision: 'deny', code: CONNECTOR_CODES.CIRCUIT_OPEN,
+              connectorId: id, toolName: name, risk, untilMs: circuit.untilMs,
+              reason: '连接器正在半开探针中，只放一个探针过去',
+            })
+          }
+          // 探针超期未归 ⇒ 当作丢了，**放一条新的**（下面共用同一段 admit）。
         }
         circuit.probeInFlight = true
+        circuit.probeStartedAtMs = t
         return Object.freeze({
           decision: 'ask', code: null, connectorId: id, toolName: name, risk,
           probe: true,
@@ -616,6 +658,7 @@ export function createRegistry({ connectors = [], now = () => Date.now(), resolv
         circuit.lastOkAtMs = t
         circuit.consecutiveFailures = 0
         circuit.probeInFlight = false
+        circuit.probeStartedAtMs = null
         circuit.untilMs = null
         circuit.openedAtMs = null
         circuit.state = 'closed'
@@ -625,6 +668,7 @@ export function createRegistry({ connectors = [], now = () => Date.now(), resolv
         circuit.lastFailureAtMs = t
         circuit.lastError = error === null ? null : String(error)
         circuit.probeInFlight = false
+        circuit.probeStartedAtMs = null
         circuit.consecutiveFailures += 1
         // 半开探针失败 ⇒ **立刻**回到开路并重新计时。
         // 不重新计时的话，冷却窗口会随着每次失败被"用掉"，

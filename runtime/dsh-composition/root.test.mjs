@@ -725,3 +725,163 @@ test('★★ 报告：模块"不存在"与"存在但静态层装不了"是两种
   // 这一层仍然**不完整**：那两行确实还没进文档。
   assert.equal(report.complete, false)
 })
+
+// ===========================================================================
+// ⑨ ★★★ F-21 连接器那一半：**两半一起上，或者两半都不上**
+//
+// 这一组存在的原因是 §10 量出来的那件事：`registry.mjs` 的 `decide()` 读熔断器，
+// 而改它的 `recordOutcome()` 生产调用方是 0 处。于是"只接判定面"得到的是
+// **一个永远合闸、且一行错都不报**的熔断器。
+//
+//   > 一个"接了连接器判定、但反馈面没装"的强制面，
+//   > 与一个"连接器从来不会因为失败而被拦下"的强制面，是同一个东西——
+//   > 只不过前者的组合树看起来是接好的。
+//
+// 所以 ⑨① 断言的是**结构**（一个不给另一个 ⇒ 抛具名码），
+// ⑨② 断言的是**读数**（装齐之后 `connectorFeedback` 真的翻成 true），
+// ⑨③ 是**端到端**的：真挂上、真跑一次失败、熔断器真的开路。
+// ===========================================================================
+
+/** 一条最小的连接器声明（只含执行面会读的字段）。 */
+const CONNECTOR_DECL = Object.freeze({
+  connectorId: 'github',
+  transport: 'stdio',
+  command: 'npx mcp-github',
+  policy: 'allow',
+  tools: Object.freeze([Object.freeze({ name: 'list_issues', capabilities: Object.freeze(['repo:read']) })]),
+  secretRefs: Object.freeze([]),
+})
+
+test('⑨① ★★★ `connectorDeclarations` 与 `resolveConnectorId` **必须成对**给（否则抛具名码）', () => {
+  // 只给 declarations ⇒ 装出一个永远合闸的熔断器。必须**响亮地拒绝**。
+  // ★ 组合根把装配期错误**包**成 `ASSEMBLY_FAILED`（那是它的记账口径：它
+  //   记的是"装失败了"，真因透传在 `reasons[0]`）。所以这里断的是**两层**——
+  //   只断外层会让"为什么失败"变成不可区分，只断内层则绕过了组合根的记账。
+  const wrapped = (r) => {
+    assert.equal(r.ok, false, '竟然装成功了——那正是"永远合闸的熔断器"')
+    assert.equal(r.code, 'ENFORCEMENT_ROOT_ASSEMBLY_FAILED')
+    return r.reasons[0]
+  }
+
+  const onlyDecl = installEnforcementRoot(inputOk({
+    connectorDeclarations: [CONNECTOR_DECL], resolveConnectorId: null,
+  }))
+  assert.equal(wrapped(onlyDecl), 'ASSEMBLE_NO_CONNECTOR_RESOLVER',
+    '只给 declarations 必须被拒（它正是"永远合闸的熔断器"）')
+
+  resetEnforcementRoot()
+  // 只给 resolver ⇒ 没有任何连接器可记。
+  const onlyRes = installEnforcementRoot(inputOk({
+    connectorDeclarations: null, resolveConnectorId: () => 'github',
+  }))
+  assert.equal(wrapped(onlyRes), 'ASSEMBLE_NO_CONNECTOR_RESOLVER')
+
+  resetEnforcementRoot()
+  // 给了个不是函数的 resolver ⇒ 同上（不静默当成"没给"）。
+  const badFn = installEnforcementRoot(inputOk({
+    connectorDeclarations: [CONNECTOR_DECL], resolveConnectorId: 'github',
+  }))
+  assert.equal(wrapped(badFn), 'ASSEMBLE_NO_CONNECTOR_RESOLVER')
+
+  resetEnforcementRoot()
+  // ★ 反向对照：**两个都不给**是合法的（就是本批之前的行为），
+  //   而且读数如实报 false。少了这一条，上面三条无法区分
+  //   "成对校验在工作"与"这个参数根本装不上"。
+  const neither = installEnforcementRoot(inputOk())
+  assert.equal(neither.ok, true, JSON.stringify(neither))
+  assert.equal(neither.root.enforcementSurfaces().connectorFeedback, false,
+    '没给连接器 ⇒ 反馈面读数必须是 false（"没装"要看得见）')
+  assert.equal(neither.root.rows.connectorFeedback, null, '没给连接器 ⇒ 不该造出一个空行')
+
+  resetEnforcementRoot()
+  // ★★ 成对给了 ⇒ 装得起来，且两半**都在**。
+  const both = installEnforcementRoot(inputOk({
+    connectorDeclarations: [CONNECTOR_DECL],
+    resolveConnectorId: () => 'github',
+  }))
+  assert.equal(both.ok, true, JSON.stringify(both))
+  assert.equal(both.root.enforcementSurfaces().connectorFeedback, true,
+    '装齐了两半，反馈面读数却是 false')
+  assert.notEqual(both.root.rows.connectorFeedback, null, '装齐了两半，却没有那一行')
+  resetEnforcementRoot()
+})
+
+test('⑨② ★★ 反馈面那一行**真的**被 mount 挂上，并且订阅的是 `tools/result`', async () => {
+  const installed = installEnforcementRoot(inputOk({
+    connectorDeclarations: [CONNECTOR_DECL],
+    resolveConnectorId: () => 'github',
+  }))
+  assert.equal(installed.ok, true, JSON.stringify(installed))
+  const root = installed.root
+
+  const fake = fakeContext()
+  await root.mount(fake.ctx)
+
+  // ★ 身份：挂上来的必须**就是**组合根那一行。
+  assert.equal(fake.seen.plugins.includes(root.rows.connectorFeedback), true,
+    'mount 没有把反馈面那一行挂上')
+  assert.equal(fake.listeners.get('tools/result')?.length, 1, '挂上了却没有订阅 tools/result')
+  assert.equal(fake.listeners.get('tools/pre-execute')?.length, 1, '判定面照旧（两半都在）')
+
+  // ★ 挂载账要**同时**包含三行——两半都在场这件事，在这里也要读得出来。
+  // ★ 组合根上的读法叫 `mountedEnforcementRows()`（不是 assemble 内部的
+  //   `mountedRowNames()`——那个在 root 上不暴露）。
+  const names = root.mountedEnforcementRows()
+  assert.equal(names.includes(root.rows.connectorFeedback.name), true,
+    `挂载账里没有反馈行：${JSON.stringify(names)}`)
+  assert.equal(names.includes(root.rows.preExecute.name), true)
+
+  // 反向对照：没给连接器时，**不许**挂那一行、也不许订阅。
+  resetEnforcementRoot()
+  const bare = installEnforcementRoot(inputOk())
+  assert.equal(bare.ok, true)
+  const bareFake = fakeContext()
+  await bare.root.mount(bareFake.ctx)
+  assert.equal(bareFake.listeners.get('tools/result'), undefined,
+    '没给连接器却订阅了 tools/result —— 那是一个"挂了但什么都不记"的空行')
+  assert.equal(bare.root.mountedEnforcementRows().includes('legion-enforcement-connector-feedback'), false)
+  resetEnforcementRoot()
+})
+
+test('⑨③ ★★★ 端到端：挂上之后，连续失败的**真结果**会让熔断器开路（这就是接线在干什么）', async () => {
+  const installed = installEnforcementRoot(inputOk({
+    connectorDeclarations: [CONNECTOR_DECL],
+    resolveConnectorId: () => 'github',
+  }))
+  assert.equal(installed.ok, true, JSON.stringify(installed))
+  const root = installed.root
+  const fake = fakeContext()
+  await root.mount(fake.ctx)
+
+  const fire = fake.listeners.get('tools/result')[0]
+
+  // ★ 先钉住前提：**在收结果之前**，熔断器是合闸的（否则下面那三条绿不了
+  //   也不能说明是反馈起了作用）。
+  const listenerOfRoot = root.rows.connectorFeedback.listener
+  assert.equal(listenerOfRoot.receipts().recorded, 0, '前提：还没有任何结果被记过')
+
+  // 喂进真正的 DSH 形状（`ToolExecutionResult`：判别子是必填字面量 `isError`）。
+  for (let i = 0; i < 3; i += 1) {
+    fire({ name: 'list_issues', callId: `c${i}` }, { isError: true, error: { message: 'refused' }, content: [] })
+  }
+  assert.equal(listenerOfRoot.receipts().failed, 3, '三次失败没有被记上——反馈面是空的')
+  assert.equal(listenerOfRoot.receipts().recorded, 3)
+
+  // 而登记的**效果**必须能从那半边的读数里看出来。
+  //   ⚠️ 这里不直接读 `decide()`——那需要连接器 id 的解析器与登记表在
+  //      `root` 上的引用，而 `root` 只暴露 `rows`/`bridge`。
+  //      所以这一条断的是"反馈真的被记进了那一本账"，
+  //      而"记进去之后 decide() 会 deny"由 `outcome-port.test.mjs` ① 端到端钉住。
+  //      两条合起来才是完整的一条链，任一条单独都不够。
+  const okFire = fake.listeners.get('tools/result')[0]
+  okFire({ name: 'list_issues', callId: 'c9' }, { isError: false, value: {}, content: [] })
+  assert.equal(listenerOfRoot.receipts().ok, 1, '成功结果没有被记上')
+  assert.equal(listenerOfRoot.receipts().failed, 3, '成功不许清掉失败计数（那是 registry 的事，不是计数器的）')
+
+  // ★ 读不懂的输入**一条都不记**（第三个桶），而且要在计数里分得开。
+  okFire({ name: 'list_issues', callId: 'c10' }, { isError: undefined })
+  assert.equal(listenerOfRoot.receipts().unclassifiable, 1)
+  assert.equal(listenerOfRoot.receipts().recorded, 4, '读不懂的输入不许被记进熔断器')
+  resetEnforcementRoot()
+})
+

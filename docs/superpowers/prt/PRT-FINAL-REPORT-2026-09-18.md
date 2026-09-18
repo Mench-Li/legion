@@ -275,18 +275,28 @@ is `mcp__<serverName>__<rawName>`, normalized to the DeepSeek function-name
 
 | 项 | 读数 |
 | --- | --- |
-| 全量 CI（`8ba5609`，`.ci/r18`） | **9/9 PASS，exit 0**；`test` ≈ 852s；`skipped=1`（secret-store，已知） |
-| connectors 套件（含 `public-name` / `registry` / `decision-port` / `target-binding` / `outcome-port`） | **123**（第 17 轮）→ 本批 `registry` +5 ⇒ **128** |
+| 全量 CI（HEAD `c2e650f`，**`.ci/r18b`**） | **9/9 PASS，exit 0**；`test` 815741ms；`skipped=1`（secret-store，已知）；**350 个套件全绿** |
+| 全量 CI（`.ci/r18`，与文档编辑重叠的那次） | **9/9 PASS，exit 0**；`test` 820062ms —— 见下面第 2 条 |
+| connectors 套件（含 `public-name` / `registry` / `decision-port` / `target-binding` / `outcome-port`） | **123**（第 17 轮）→ 本批 `registry` +5、`connector-port` +2 ⇒ **128/128** |
 | 受影响面（connectors + dsh-composition + connector-store + connector-http + config + prt） | **1331/1331** |
 | `connector-port.test.mjs` | **18/18**（含 ④d 重设计、④d2 撞车、④f 自我撞车） |
 | `root-row.test.mjs` | **42/42**（含"公开名按声明判定"+两条读数分开取的新用例） |
+| 套件清单完备 | **350 个 `*.test.mjs` 全部有归属** |
 | `boundary-facts`（手钉坐标） | **34/34** |
-| `feature-table` / `progress-check` / `intervention-coverage` / `reachability` | 77/77 |
+| `feature-table` / `progress-check` / `intervention-coverage` / `reachability` / `silent-declarations` | **331/331** |
 | 可达性 | 不可达 **46**（未增加）；`public-name.mjs` 经 `connector-port.mjs` **可达** |
 | 全量 CI（`502b636`，`.ci/r15b`） | **9/9 PASS，exit 0**；`test` 801030ms |
 
-★ 有一处**必须说清**：`--only boundary` 那一快阶段**不含** `boundary-facts` 套件
-（它在 `test` 阶段），所以坐标位移是**`test` 阶段抓到的**——快阶段绿**不代表**坐标对。
+★ 有两处**必须说清**：
+
+1. `--only boundary` 那一快阶段**不含** `boundary-facts` 套件（它在 `test` 阶段），
+   所以坐标位移是**`test` 阶段抓到的**——快阶段绿**不代表**坐标对。
+2. ⚠️ `.ci/r18` 那一次**跑在一棵没有冻住的树上**：我在它跑 `test`（约 820s）的过程中
+   改并提交了**文档**与 `connector-port.mjs` 的**文件头注释**。
+   ⇒ 那一份读数对**代码**有效（改的是注释，且改完后单独跑过受影响面 **97/97**），
+   但严格说**不是**一次"提交即冻结"的全量读数。为此在冻结点上补跑了
+   **`.ci/r18b`**（HEAD = `c2e650f`）——那一次 `test` 阶段读到的代码与状态文档
+   **一个字节都没动过**，**9/9 PASS，exit 0**。
 
 ---
 

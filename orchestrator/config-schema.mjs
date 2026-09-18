@@ -89,6 +89,21 @@ export const NON_ENV_LITERALS = Object.freeze([
   // 与"失败成什么样"，因为前者决定看哪份日志，后者决定能不能重试。
   'CONTEXT_INPUT_UNAVAILABLE', 'CONTEXT_ASSEMBLY_FAILED', 'CONTEXT_PERSIST_FAILED',
   'CONTEXT_BAD_WIRING', 'frozen', 'not-reached',
+  // PRT-009 `peak-resource` 的每 Run 窗口具名码（`worker/run-peak-resource.mjs`）。
+  //
+  // 逐个列出而不是归成一个 `RUN_PEAK_FAILED`：这六条**修法各不相同**，
+  // 而它们的共同点是"这次 Run 没有资源读数"——那恰恰是唯一不该合并的部分。
+  //   · NO_DATA_DIR / BAD_RUNTIME_URL ⇒ 接线错，去看 worker 的环境；
+  //   · PUBLICATION_ABSENT ⇒ Runtime 那一行没挂上，或它没拿到 DataDir；
+  //   · PUBLICATION_UNREADABLE ⇒ 文件在而读不动（权限/盘），与"不在"不同；
+  //   · PUBLICATION_INVALID ⇒ 内容坏了或版本漂了，去查写入方；
+  //   · PUBLICATION_FOREIGN ⇒ ★ 发布说的是**别的**进程（host/port 对不上）。
+  //     这一条最要紧：它意味着照那份发布采 pid 会**采到别人的数**。
+  'RUN_PEAK_NO_DATA_DIR', 'RUN_PEAK_BAD_RUNTIME_URL', 'RUN_PEAK_PUBLICATION_ABSENT',
+  'RUN_PEAK_PUBLICATION_UNREADABLE', 'RUN_PEAK_PUBLICATION_INVALID', 'RUN_PEAK_PUBLICATION_FOREIGN',
+  // Windows 的 errno：`readRuntimePublication` 用它把"文件不在"与"读不动"分开。
+  // 它是 `err.code` 的值，不是本仓的码——同理见 `runtime/config-schema.mjs` 的 ENOENT。
+  'ENOENT',
   // 装配器自己的超限码。远程路径上它从 hub 的响应体里回来，被提升为
   // `CONTEXT_ASSEMBLY_FAILED.assemblyCode`——**两个都要认得**：
   // 前者回答"哪个阶段失败"，后者回答"失败成什么样"（能不能靠精简输入解决）。

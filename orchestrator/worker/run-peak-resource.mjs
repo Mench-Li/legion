@@ -339,7 +339,10 @@ export function withRunPeakResource(executor, {
     // ★ 解析失败**不是**这次 Run 的错误，是一条读数。
     const resolved = resolvePid()
     if (resolved === null || resolved.ok !== true) {
-      note(`[peak-resource] 这次 Run 采不到：${resolved?.code ?? 'RESOLVE_EMPTY'} —— ${resolved?.message ?? ''}`)
+      // ★ 用 `'(无码)'` 而不是编一个像码的字符串：那个占位符会进日志、
+      //   看起来像一条可检索的具名码，而它在任何注册表里都不存在——
+      //   "一个没人登记过的码"与"一个真码"在下一次有人按码排查时是两件事。
+      note(`[peak-resource] 这次 Run 采不到：${resolved?.code ?? '(无码)'} —— ${resolved?.message ?? ''}`)
       return null
     }
     if (!(sampleMs > 0)) return null

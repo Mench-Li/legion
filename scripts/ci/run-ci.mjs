@@ -1093,7 +1093,17 @@ async function stageTest() {
       //   ③ Windows 的那些坑：盘符相对、无盘符、设备命名空间、设备名、UNC
       //   ④ 范围表只能收窄；pre-execute 与 guard **两处**都查
       label: 'path-scope（PRT-604：越界路径的字符串比较是放行）',
-      files: ['runtime/dsh-composition/path-scope.test.mjs'],
+      files: [
+        'runtime/dsh-composition/path-scope.test.mjs',
+        // ★ 同族的**装配点**（2026-09-18）：`path-scope.mjs` 的判定逻辑早就齐了，
+        //   缺的是"那份表从哪来"——全仓 `narrowScopeToWorkspace` 零生产调用方。
+        //   它盯三条装配期拒绝（缺表 / 无读根 / 有写根却没工作区根）+ 一条**往返**
+        //   （产物必须能被**真** `checkPathScope` 吃下去——只看自己字段清单的断言
+        //   抓不到"多带一个字段"，而那正是我写第一版时犯的真错）。
+        //   ★ 缺表那一条的要害：`tool-request.mjs:639` 在 `pathScope === null` 时**放行**，
+        //   所以"没配上"在今天的表现是**放行一切**，不是拒绝一切。
+        'runtime/dsh-composition/scope-table-binding.test.mjs',
+      ],
       cwd: ROOT,
     },
     {

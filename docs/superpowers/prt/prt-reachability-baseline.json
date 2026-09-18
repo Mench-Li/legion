@@ -183,6 +183,11 @@
       "reason": "唯一的 import 者是上面的 contract-server row（传递不可达）⇒ 随那条一起由 in-flight 改判 gap。★ 这意味着**服务端没有生产挂点**：消费侧（`product/launcher/runtime-contract-endpoint.mjs` 读回发布并注入 `LEGION_RUNTIME_URL`/`LEGION_RUNTIME_TOKEN`）已接线，没有它，真实部署里那份发布永远不会被写出来。⇒ 裁决处：§5 第 20 条"
     },
     {
+      "file": "runtime/dsh-composition/scope-table-binding.mjs",
+      "class": "gap",
+      "reason": "PRT-604 的**装配点**：判定逻辑（`path-scope.mjs`，863 行）早已齐备，缺的是那份表的出处——全仓 `narrowScopeToWorkspace` **零生产调用方**。本模块把\"部署配置给的那张表\"装成 `pathScope` 端口能收的一份，并按业主 2026-09-18 裁决把表的来源定为**运维/部署配置**；而配置键那一半尚未落地（`product/process-manifest.mjs` 与 `product/config-schema.mjs` 当时有别的会话的在制品）。⇒ 裁决处：§5 第 19 条（`docs/DECISION-RUNREQUEST-EXECUTION-PLANE.md` §9）"
+    },
+    {
       "file": "runtime/employee/role-pack.mjs",
       "class": "gap",
       "reason": "F-19 的**执行面**一半：hub 侧 role-pack-store 已接（server.mjs 可达），执行面这一半没有路径。⇒ 裁决处：§5 第 18 条"

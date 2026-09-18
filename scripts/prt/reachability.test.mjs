@@ -35,7 +35,7 @@ import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { analyze, ignoredFiles, loadBaseline, REPO, SCAN_DIRS, PROCESS_ENTRIES, dirtyFiles, inFlightViolations } from './reachability.mjs'
+import { analyze, ignoredFiles, loadBaseline, REPO, SCAN_DIRS, PROCESS_ENTRIES, dirtyFiles, inFlightViolations, matrixItems, gapPointerViolations } from './reachability.mjs'
 
 const a = analyze()
 const baseline = loadBaseline()
@@ -408,4 +408,78 @@ test('⑦ ★★★ in-flight 只在文件**确实还有未提交改动**时成�
   assert.ok(dirty.size > 0,
     '`git status --porcelain` 一条改动都没有——要么工作树真的全干净（罕见），' +
     '要么这个读数坏了。无论哪种，上面的"逐条检查"都失去了意义，需要人看一眼')
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// ⑧ ★★★ 每一条 `gap` 都必须写出**能解析的裁决处指针**（§5 第 N 条）
+// ══════════════════════════════════════════════════════════════════════════
+
+test('⑧ ★★★ gap 必须指向一个**真实存在**的 §5 条号（治"没人会裁决它"）', () => {
+  // ## 这条判据的由来（本仓实测过一次）
+  //
+  // `gap` 的 class 定义逐字是「真的没有生产路径，且台账/对照表说它已交付
+  // **⇒ 需要在 §5 里裁决**」。所以一条 `gap` 的 reason 必须回答一个反问：
+  //
+  //   > 那么，**谁**在**哪一条**上裁决它？
+  //
+  // 2026-09-18 发现：`runtime-contract-server-row.mjs` 那一族被标着 `in-flight`
+  // ——正确动作那一格写的是一个字「**等**」——而真实内容是"接不上、要人裁决"，
+  // 且**不在** §5 的清单上。于是没有任何一处会被人读到，藏了三天。
+  //
+  // ⑦ 号用例治的是"标签过期"；本用例治的是另一半：
+  // **标签正确、而这条缺口没有任何人在看**。
+  //
+  // ## 两种违反，都要能红
+  //
+  //   · 没有具体指针（只说"§5 裁决"不算——那没告诉人去**哪一条**）
+  //   · 指针指向一个**不存在**的条号（表改了、指针没跟着改）
+  //
+  // 后者是指针**腐烂**：一个指向不存在条号的引用，与没有引用，
+  // 对读的人是同一个结果——只不过前者看起来像已经归档过了。
+
+  const items = matrixItems()
+  // ★ 先钉住解析器本身：认不出条号的解析器会让下面的检查在空集上通过。
+  assert.ok(items.size >= 20,
+    `§5 里只解析出 ${items.size} 个条号（期望 ≥20）。` +
+    '要么是清单被挪走了，要么是 `matrixItems()` 的位置规则失效了（标题不再是 `## 5. `？）。' +
+    '解析不出条号时，"指针能解析"这句检查会**恒真**，等于没有这条用例')
+  // ★ 反向：解析器**不许**把 §5 之前那张优先级表（1..5）当成 §5 的条号。
+  //   本仓的教训：一个"会解析成功但指错地方"的判据比一个解析失败的判据更坏。
+  //   两张表条号重叠，所以这里用**位置**性质验证：清单必须能解析出 20（只有它有 20）。
+  assert.equal(items.has(20), true,
+    '§5 里没有第 20 条——本判据的锚点没了。若清单被重排过，先确认本用例的取法')
+
+  // ── 正对照：规则函数必须有牙齿（三种情形各一次）────────────────────
+  const FIX = [
+    { file: 'g1.mjs', class: 'gap', reason: '只说了 "§5 裁决"，没写第几条' },
+    { file: 'g2.mjs', class: 'gap', reason: 'xxx ⇒ 裁决处：§5 第 999 条' },
+    { file: 'g3.mjs', class: 'gap', reason: 'xxx ⇒ 裁决处：§5 第 20 条' },
+    { file: 'g4.mjs', class: 'by-design', reason: 'by-design 不受本判据管辖' },
+  ]
+  const fv = gapPointerViolations(FIX, new Set([20]))
+  // ① 没有具体指针 ⇒ missing
+  assert.deepEqual(fv.missing, ['g1.mjs'],
+    '规则没有报出"reason 里没有具体第几条"的 gap——这条用例无论查什么都恒绿')
+  // ② 指向不存在的条号 ⇒ dangling（**不是** missing：两种违反分开报）
+  assert.deepEqual(fv.dangling, [{ file: 'g2.mjs', item: 999 }],
+    '规则没有报出"指针指向不存在的条号"——指针腐烂会一直烂下去')
+  // ③ 指向真实条号 ⇒ 放过
+  assert.equal(fv.missing.includes('g3.mjs') || fv.dangling.some((d) => d.file === 'g3.mjs'), false,
+    '规则把一条**合法**的指针判红了——那会让人不敢写指针')
+  // ④ 别的 class 不受管辖
+  assert.equal(fv.missing.includes('g4.mjs'), false, 'by-design 也被要求写 §5 指针了')
+
+  // ── 读数：真实基线 ────────────────────────────────────────────────
+  const real = gapPointerViolations(baseline.unreachable, items)
+  assert.deepEqual(real.missing, [],
+    `★ 有 ${real.missing.length} 条 gap 没写出裁决处指针：\n` +
+    real.missing.map((f) => `    ${f}`).join('\n') +
+    '\n  `gap` 的定义就是"需要在 §5 里裁决"。写不出指针 ⇒ 它和"永远不会被裁决"是同一种东西。' +
+    '\n  请在 reason 末尾补上：⇒ 裁决处：§5 第 N 条（N 必须是 §5 清单里真实存在的条号）。')
+  assert.deepEqual(real.dangling, [],
+    `★ 有 ${real.dangling.length} 条 gap 的指针指向不存在的条号：\n` +
+    real.dangling.map((d) => `    ${d.file} → §5 第 ${d.item} 条`).join('\n') +
+    '\n  这就是指针腐烂：§5 的清单改了（重排/删条），而引用没跟着改。' +
+    '\n  一个指向不存在条号的引用，与没有引用，对读的人是同一个结果——' +
+    '\n  只不过前者看起来像已经归档过了。')
 })

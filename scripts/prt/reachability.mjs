@@ -61,6 +61,8 @@ import { fileURLToPath } from 'node:url'
 const HERE = dirname(fileURLToPath(import.meta.url))
 export const REPO = join(HERE, '..', '..')
 export const BASELINE_PATH = join(REPO, 'docs', 'superpowers', 'prt', 'prt-reachability-baseline.json')
+/** 人工介入清单（§5）所在的那份文档。`gap` 的裁决处指针要能在这里解析。 */
+export const MATRIX_PATH = join(REPO, 'docs', 'MULTI-AGENT-FEATURE-STATUS.md')
 
 /** 参与可达性分析的目录。`workbench/` 是**旧 GUI**，不在 145 项范围内，故不收。
  *
@@ -337,7 +339,78 @@ export function trackedFiles() {
 }
 
 /**
- * `in-flight` 是一个**带到期日的断言**，不是一种永久分类。
+ * §5「需人工介入清单」里**真实的条号**集合。
+ *
+ * 取法是**按位置**而不是按形状：从 `## 5.` 那个标题往后，到下一个 `## ` 标题为止，
+ * 这个区间里 `| N | … |` 形式的编号就是这张清单的条号。
+ *
+ * ## 为什么不按"全文档所有 `| N |`"来取（试过，会错）
+ *
+ * 文档里至少还有三张带编号的表：
+ *   · `| 1 |…| 5 |` —— 是**优先级**那一张（在 §5 之前）；
+ *   · `| 13 |…| 18 |` —— 是 §5.5 的"同一决定的四个下游"那张。
+ * 按全文档取，`§5 第 3 条` 会解析**成功**，而它指向的是优先级表——
+ * 一个会"解析成功但指错地方"的判据，比一个解析失败的判据更坏。
+ *
+ * @returns {Set<number>} 条号
+ */
+export function matrixItems(path = MATRIX_PATH) {
+  const lines = readFileSync(path, 'utf8').split('\n')
+  const start = lines.findIndex((l) => /^##\s*5\.\s/.test(l))
+  if (start < 0) return new Set()
+  const items = new Set()
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^##\s/.test(lines[i])) break
+    const m = /^\|\s*(\d+)\s*\|/.exec(lines[i].trim())
+    if (m) items.add(Number(m[1]))
+  }
+  return items
+}
+
+/**
+ * 每一条 `gap` 都必须写出**能解析的裁决处指针**。
+ *
+ * ## 为什么这是 `gap` 的定义本身要求的
+ *
+ * `gap` 的 class 定义逐字是「真的没有生产路径，且台账/对照表说它已交付
+ * ⇒ **需要在 §5 里裁决**」。所以一条 `gap` 的 reason 必须回答一个反问：
+ *
+ *   > 那么，**谁**在**哪一条**上裁决它？
+ *
+ * 回答不了 ⇒ 它和"永远不会被裁决"是同一种东西。
+ *
+ * ## 这治的是哪一种真实失效（本仓实测过）
+ *
+ * 2026-09-18 发现：`runtime-contract-server-row.mjs` 那一族被标着 `in-flight`
+ * ——正确动作那一格写的是一个字「**等**」——而真实内容是"接不上、要人裁决"，
+ * 且**不在** §5 的清单上。于是它没有任何一处会被人读到，藏了三天。
+ *
+ * ⑦ 号用例治的是"标签过期"；本函数治的是另一半：
+ * **标签正确、而这条缺口没有任何人在看**。
+ *
+ * ## 两种违反，分开报
+ *
+ *   · `missing`  —— reason 里没有具体指针（只说"§5 裁决"不算，那没告诉人去哪一条）
+ *   · `dangling` —— 指针写了，但那个条号在 §5 里**不存在**（表改了、指针没跟着改）
+ *
+ * 后者是**指针腐烂**：一个指向不存在的条号的引用，与没有引用，
+ * 对读的人是同一个结果——只不过前者看起来像已经归档过了。
+ */
+export function gapPointerViolations(entries, items) {
+  const SPECIFIC = /§5\s*第\s*(\d+)\s*条/
+  const missing = []
+  const dangling = []
+  for (const e of entries) {
+    if (e.class !== 'gap') continue
+    const m = SPECIFIC.exec(e.reason ?? '')
+    if (!m) { missing.push(e.file); continue }
+    const n = Number(m[1])
+    if (!items.has(n)) dangling.push({ file: e.file, item: n })
+  }
+  return { missing, dangling }
+}
+
+/** `in-flight` 是一个**带到期日的断言**，不是一种永久分类。
  *
  * 它的判据是「另一个 agent 当轮正在接线（**工作树未提交**）」——所以它
  * **只在该文件确实还有未提交改动时成立**。文件一旦提交、而模块仍然不可达，

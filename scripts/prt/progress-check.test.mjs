@@ -282,3 +282,67 @@ test('⑥ ★★ 对照表里每个 F-行都必须用图例里的状态标记', 
   assert.ok(checked >= 24, `只检查了 ${checked} 行状态，锚点可能变了`)
 })
 
+// ── 表格行的**格子数**：与「有没有收尾 |」是两种不同的损伤 ──────────────────
+//
+// 这一组来自一次真实误读：本仓的一次会话按 `|` 切分读 PRT-214 那一行的正文，
+// 读到的是被截断的半句，并据此写下了错误结论。当时表里这样的行有 **15 条**，
+// 而它们**全都通过了**当时所有门禁——因为旧判据只查"有没有收尾 `|`"，
+// 而多余的那条竖线在**正文靠后**，`cells[1]`/`cells[2]` 照样是对的。
+
+test('① 正文里的裸竖线必须被具名报出来（旧的「未收尾」判据发现不了它）', () => {
+  const text = doc().replace('| ✅ | 证据 |', '| ✅ | 证据 `a | b` 续 |')
+  const r = checkProgress(text)
+  const p = r.problems.find((x) => x.kind === 'ROW_PIPE_UNESCAPED')
+  assert.ok(p !== undefined, `应当报裸竖线：${JSON.stringify(kinds(r.problems))}`)
+  assert.match(p.message, /未转义的 `\|`/)
+  // ★ 这一条是**关键的对照**：那一行的收尾 `|` 是**完好的**，
+  //   所以旧判据（ROW_NOT_CLOSED）必须**不**报——否则说明我没把两种损伤分开。
+  assert.ok(!kinds(r.problems).includes('ROW_NOT_CLOSED'),
+    '收尾竖线是好的，不该报 ROW_NOT_CLOSED')
+  // 而且 ID/状态两格仍然读得对——这正是"门禁旧判据读不出来"的机理。
+  const t = parseProgress(text).phases[0].tasks[0]
+  assert.equal(t.id, 'PRT-000')
+  assert.equal(t.status, '✅')
+})
+
+test('① 转义成 `\\|` 之后必须**不**报（证明判据数的是未转义竖线，不是 split 的段数）', () => {
+  // ★ 这条最要紧：`\|` 里**仍然有一个 `|` 字符**，所以
+  //   `line.split('|').length` 依旧是 6——如果判据写成"段数 ≠ 5"，修法就永远关不掉它。
+  //   判据必须自己数前导反斜杠的奇偶。
+  const broken = doc().replace('| ✅ | 证据 |', '| ✅ | 证据 `a | b` 续 |')
+  const fixed = broken.replace('`a | b`', '`a \\| b`')
+  assert.equal(fixed.split('\n').find((l) => l.includes('a \\| b')).split('|').length, 6,
+    '前提校验：转义后按 split 数**仍然**是 6 段')
+  assert.deepEqual(checkProgress(fixed).problems, [],
+    '转义之后应当一致——否则修法关不掉这条判据')
+})
+
+test('① 收尾正常但格子不够时必须报出来，且**不**与「未收尾」重复报', () => {
+  const short = doc().replace('| ✅ | 证据 |', '| ✅ 证据 |')
+  const r = checkProgress(short)
+  assert.ok(kinds(r.problems).includes('ROW_CELLS_MISSING'),
+    `应当报格子不够：${JSON.stringify(kinds(r.problems))}`)
+  assert.ok(!kinds(r.problems).includes('ROW_PIPE_UNESCAPED'))
+})
+
+test('① 少了收尾竖线时只报「未收尾」，不再叠加报格子数（一个缺陷不报成两个）', () => {
+  const unclosed = doc().replace('| ✅ | 证据 |', '| ✅ | 证据')
+  const r = checkProgress(unclosed)
+  assert.ok(kinds(r.problems).includes('ROW_NOT_CLOSED'))
+  assert.ok(!kinds(r.problems).includes('ROW_CELLS_MISSING'),
+    '没收尾的行按切分天然少一条，不该再报格子数')
+  assert.ok(!kinds(r.problems).includes('ROW_PIPE_UNESCAPED'))
+})
+
+test('① 真实台账里没有裸竖线，也没有格子数不对的行', async () => {
+  // 判据对着**真文件**跑一次：合成夹具永远是对的，而这条判据要防的
+  // 恰恰是真实台账在多年追加中长出来的形状。
+  const { readFileSync } = await import('node:fs')
+  const { fileURLToPath } = await import('node:url')
+  const path = fileURLToPath(new URL('../../docs/superpowers/prt/PRT-PROGRESS.md', import.meta.url))
+  const r = checkProgress(readFileSync(path, 'utf8'))
+  const bad = r.problems.filter((p) => p.kind === 'ROW_PIPE_UNESCAPED' || p.kind === 'ROW_CELLS_MISSING')
+  assert.deepEqual(bad, [], `真实台账里有形状不对的行：\n${bad.map((p) => p.message).join('\n')}`)
+})
+
+

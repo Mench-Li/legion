@@ -98,4 +98,107 @@ export function uncoveredLedgerRows(notDone, section) {
   return notDone.filter((r) => !section.includes(r.prt))
 }
 
+// ── 第二格：§5 的裁决项条数 ↔ 决策简报里写的那个数 ──────────────────────────
+//
+// ★ 第 32 轮加。起因是这一族自己：`docs/DECISION-BRIEF.md` 是一页纸，
+//   开头写着「§5 里那 **29 条**裁决项」。§5 哪天多出一条（第 30 轮就多过一条：
+//   第 29 条），这一页纸**不会红**——它会继续对读者说"29 条"，而读者信它，
+//   因为它是**专门为这件事写的那一页**。
+//
+//   > 一份"专门给人做决定用"的摘要，一旦与它的来源脱钩，
+//   > 比来源本身更难发现——因为读者是**因为不想读来源**才去读它的。
+//
+// ## 为什么按**表头**定位，不按行号或"§5 里第几张表"
+//
+// 行号会漂（本仓的记录里同一处先后是 485-509 → 508-536 → 540/545）。
+// §5 里还有别的编号表（开头那张 1～5 的优先级表、后面 13/14/15/18 的缺口表），
+// 按"编号行"取会把它们一起吃进来。表头是那张表**唯一**稳的锚点。
+
+export const DECISION_BRIEF_PATH = join(REPO, 'docs', 'DECISION-BRIEF.md')
+
+/** §5 里"裁决项"那张表的表头（前三个表头格）。 */
+export const DECISION_TABLE_HEADER = '| # | 事项 | 需要谁 |'
+
+/**
+ * §5 那张裁决表的编号序列。
+ *
+ * @returns {{found: boolean, numbers: number[]}}
+ */
+export function decisionItemNumbers(section) {
+  const lines = String(section).split(/\r?\n/)
+  let start = -1
+  for (const [i, l] of lines.entries()) {
+    if (l.trim().startsWith(DECISION_TABLE_HEADER)) { start = i; break }
+  }
+  if (start === -1) return { found: false, numbers: [] }
+  const numbers = []
+  for (let i = start + 1; i < lines.length; i += 1) {
+    const t = lines[i].trim()
+    if (t === '' || !t.startsWith('|')) break
+    const m = /^\|\s*(\d+)\s*\|/.exec(t)
+    if (m !== null) numbers.push(Number(m[1]))
+  }
+  return { found: true, numbers }
+}
+
+/** 简报里声明的条数（`**29 条**裁决项` 这类写法）。返回全部说法，供"互相矛盾"检查。 */
+export function briefStatedCounts(briefText) {
+  const out = []
+  for (const m of String(briefText).matchAll(/(\d+)\s*条\*{0,2}\s*裁决项/g)) out.push(Number(m[1]))
+  return out
+}
+
+/**
+ * 核对：简报声明的条数 = §5 裁决表的条数，且编号连续无缺号。
+ *
+ * ★ 扫到 0 种说法 ⇒ 失败（"没声明"与"声明对了"在只看结论时是同一个东西）。
+ */
+export function checkBriefCount({ section, briefText }) {
+  const violations = []
+  const { found, numbers } = decisionItemNumbers(section)
+  if (!found) {
+    violations.push({
+      id: 'decision-table-missing',
+      message: `§5 里找不到裁决表（表头应为 \`${DECISION_TABLE_HEADER}\`）⇒ 这条判据**什么都没查**。`,
+    })
+    return { ok: false, count: 0, stated: [], violations }
+  }
+  const gaps = []
+  for (let i = 1; i <= numbers.length; i += 1) if (numbers[i - 1] !== i) gaps.push(i)
+  if (gaps.length !== 0) {
+    violations.push({
+      id: 'decision-numbers-not-contiguous',
+      message: `§5 裁决表的编号不连续（第 ${gaps.join('、')} 位对不上）—— `
+        + '一份"编号连续"的清单被插入/删除过而没重排，读者按号找会找不到。',
+    })
+  }
+
+  const stated = briefStatedCounts(briefText)
+  if (stated.length === 0) {
+    violations.push({
+      id: 'brief-states-no-count',
+      message: '`docs/DECISION-BRIEF.md` **一处都没写**"N 条裁决项" ⇒ 这条判据什么都没查。',
+    })
+    return { ok: violations.length === 0, count: numbers.length, stated, violations }
+  }
+  for (const n of stated) {
+    if (n !== numbers.length) {
+      violations.push({
+        id: 'brief-count-stale',
+        message: `决策简报写着「${n} 条裁决项」，而 §5 那张表有 **${numbers.length}** 条 ⇒ `
+          + '一份专门给人做决定用的摘要已经与它的来源脱钩了。',
+      })
+    }
+  }
+  return { ok: violations.length === 0, count: numbers.length, stated, violations }
+}
+
+/** 从磁盘按真实仓库核对。 */
+export function checkBrief({ briefPath = DECISION_BRIEF_PATH, matrixPath = MATRIX_PATH } = {}) {
+  return checkBriefCount({
+    section: sectionFive(matrixPath),
+    briefText: readFileSync(briefPath, 'utf8'),
+  })
+}
+
 

@@ -28,7 +28,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
 
-import { ledgerRows, ledgerNotDone, sectionFive, uncoveredLedgerRows, NON_DONE_STATUSES } from './intervention-coverage.mjs'
+import { ledgerRows, ledgerNotDone, sectionFive, uncoveredLedgerRows, NON_DONE_STATUSES,
+  checkBrief, checkBriefCount, decisionItemNumbers } from './intervention-coverage.mjs'
 
 const rows = ledgerRows()
 const notDone = ledgerNotDone()
@@ -133,4 +134,75 @@ test('④ ★ 台账与 §5 的来源文件都存在，且台账是被跟踪的'
   // ★ 这一条防的是"文件缺失被读成干净"：
   //   如果 `ledgerRows()` 哪天改成 catch 后返回 `[]`，② 会变成恒真。
   //   本用例把它钉在这里：文件必须在，且解析必须有内容（① 已断言 ≥100）。
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// ⑤–⑨ 第二格：§5 的裁决项条数 ↔ 决策简报里写的那个数（第 32 轮加）
+//
+// ★ 加它的原因就是它当天抓到的那件事：第 30 轮我往 §5 加第 29 条时，
+//   把它插在了一个**空行之后**——于是那一行在 Markdown 里**不属于那张表**
+//   （空行结束表格）。行在、编号对、内容对，而**它不是表的一行**。
+//   已有的那道闸（②）查的是 `section.includes('PRT-…')`——
+//   子串在不在，与"它是不是表的一行"无关，所以它绿灯放行。
+//
+//   > 一行"插在表格外面"的裁决项，与一行"插在表格里面"的裁决项，
+//   > 在读者用 Ctrl-F 找它的编号时，是同一个东西。
+// ══════════════════════════════════════════════════════════════════════════
+
+/** 造一段 §5：一张 5 列裁决表。 */
+const sectionOf = (nums) => [
+  '## 5. 需要裁决的清单',
+  '',
+  '| # | 事项 | 需要谁 | 具体决定 | 不决定的后果 |',
+  '|---|---|---|---|---|',
+  ...nums.map((n) => `| ${n} | 事项${n} | 产品 | 决定${n} | 后果${n} |`),
+  '',
+  '## 5.1 边界',
+  '',
+].join('\n')
+
+test('⑤ ★★ 正对照：真 §5 与真简报对得上（29 条），且编号连续', () => {
+  const r = checkBrief()
+  assert.equal(r.ok, true, '真文档红了：' + JSON.stringify(r.violations))
+  assert.equal(r.count, 29, `§5 裁决表应 29 条，实际 ${r.count} ⇒ 解析器跑偏或表格被拆开了`)
+  assert.deepEqual(r.stated, [29])
+})
+
+test('⑥ ★★★ 回归：§5 的第 29 条**必须在那张表里**（不许被空行隔开）', () => {
+  // 这正是第 30 轮犯的错：把第 29 条插在一个空行之后 ⇒ 它在表外面。
+  // ★ 断言的是"解析器数到 29"，而不是"第 754 行长什么样"——
+  //   行号会漂，而"表里有几条"是这个判据真正关心的事。
+  const { found, numbers } = decisionItemNumbers(sectionFive())
+  assert.equal(found, true, '§5 的裁决表头没找到')
+  assert.equal(numbers.length, 29, `表里只有 ${numbers.length} 条 ⇒ 有一条掉到表外面了`)
+  assert.equal(numbers.at(-1), 29, `表里最大的编号是 ${numbers.at(-1)}，不是 29`)
+})
+
+test('⑦ ★★★ 正向控制：简报写的条数与 §5 不符 ⇒ 必须红', () => {
+  const r = checkBriefCount({ section: sectionOf([1, 2, 3]), briefText: '把 §5 里那 **5 条**裁决项读一遍' })
+  assert.equal(r.ok, false, '简报写了 5、§5 有 3，却没红 ⇒ 摘要可以和来源脱钩')
+  assert.ok(r.violations.some((v) => v.id === 'brief-count-stale'), JSON.stringify(r.violations))
+})
+
+test('⑧ ★★ 正向控制：编号有缺号 ⇒ 必须红（读者按号找会找不到）', () => {
+  const r = checkBriefCount({ section: sectionOf([1, 2, 4]), briefText: '**3 条**裁决项' })
+  assert.ok(r.violations.some((v) => v.id === 'decision-numbers-not-contiguous'),
+    '编号 1,2,4 没被报成缺号：' + JSON.stringify(r.violations))
+})
+
+test('⑨ ★★ "什么都没查"不许报绿：表头找不到 / 简报一处都没声明', () => {
+  const noHeader = checkBriefCount({ section: '## 5. 什么表都没有\n', briefText: '**29 条**裁决项' })
+  assert.equal(noHeader.ok, false)
+  assert.ok(noHeader.violations.some((v) => v.id === 'decision-table-missing'))
+
+  const noCount = checkBriefCount({ section: sectionOf([1, 2]), briefText: '这份简报没写条数' })
+  assert.equal(noCount.ok, false, '简报没声明条数却报绿 ⇒ 判据可以靠沉默通过')
+  assert.ok(noCount.violations.some((v) => v.id === 'brief-states-no-count'))
+})
+
+test('⑨b ★★ 反向控制：条数一致时**不许**红（含表头/分隔行不被当成条目）', () => {
+  const r = checkBriefCount({ section: sectionOf([1, 2, 3]), briefText: '那 3 条裁决项 / 另有 3 条裁决项' })
+  assert.deepEqual(r.violations, [], '一致时被判红：' + JSON.stringify(r.violations))
+  assert.equal(r.count, 3, '`|---|---|` 分隔行被当成了一条裁决项')
+  assert.deepEqual(r.stated, [3, 3], '同一条数写两遍应当都被收进来（它们必须一致）')
 })

@@ -54,9 +54,11 @@
 | 第 28 轮（读数的适用范围） | 新判据 `ci-reading-integrity` **16/16**；**当场红在自己报告的那一行上**；`run-ci.mjs` 开始把**树的状态**记进 `summary.json` | `scripts/prt/ci-reading-integrity{.test,}.mjs` |
 | 第 29 轮（跨文档校准） | 新判据 `spec-status-calibration` **13/13**；**目标点名的输入文档**里 **7 条**过期状态注记已建校准表；变异 **8/8** | `scripts/prt/spec-status-calibration{.test,}.mjs` |
 | 第 31 轮（落点可解析） | 新判据 `feature-landing-paths` **13/13**；**恰好 1 处**真缺陷（F-21 的短路径）已订正；变异 **7/7** | `scripts/prt/feature-landing-paths{.test,}.mjs` |
+| 第 32 轮（决策摘要） | 交付 `docs/DECISION-BRIEF.md`（29 条压成一页纸）；`intervention-coverage` 加"简报条数 ↔ §5 裁决表"判据 → **10/10**（原 4 例 + 新 6 例）；★ 它**当天抓到我自己第 30 轮**把第 29 条插在**空行之后**（掉到表外）；变异 **7/7** | `scripts/prt/intervention-coverage{.test,}.mjs` |
 | 注释里的坐标引用 | 坏引用 **9 → 0**（另 2 处属别的会话在制品） | `scratch/_audit-citations.mjs` |
 | 可达性 | 不可达 **46** 条，**全部已定性**（`by-design` / `deliberate` / `gap` / `in-flight`） | `scripts/prt/reachability.mjs --diff` |
 | 裁决项 | §5 清单 **1～29**（编号连续、无缺号、无重复；第 30 轮新增第 29 条） | `MULTI-AGENT-FEATURE-STATUS.md` §5 |
+| 决策摘要 | `docs/DECISION-BRIEF.md` —— 条数由判据与 §5 裁决表双向核对 | `scripts/prt/intervention-coverage.mjs` |
 | 文档表格 | 八份权威文档 **0 处**列错位；全仓棘轮 **87**（只许降） | 套件 `doc-table` |
 
 ★ 这一次全量 CI 也跑在一棵**冻住**的树上：`test` 阶段那 875 秒里，

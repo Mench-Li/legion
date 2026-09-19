@@ -36,10 +36,11 @@
 | 台账 | **145 行 = 140 ✅ / 4 ⏸ / 1 ⬜** | `node scripts/prt/spec-progress.mjs --check` → `140/145，未完成 5` |
 | 4 条 ⏸ | PRT-009 / PRT-253 / PRT-256 / PRT-910 | 需要一台执行期外的机器 / 一次真的自动执行 / 真实外部用户 / 真实用户项目 |
 | 1 条 ⬜ | PRT-316 | **日期闸门**：最早 **2026-09-24**（评审闸门已过） |
-| 全量 CI（**交付 HEAD**） | **9/9 PASS，exit 0**（HEAD `3d921c9`，`.ci/r24`） | `test` 801677ms、`skipped=1`（secret-store，已知） |
+| 全量 CI（**交付 HEAD**） | **9/9 PASS，exit 0**（HEAD `bacd407`，`.ci/r25`） | `test` 824992ms、`skipped=1`（secret-store，已知） |
+| 全量 CI（第 24 轮代码收口） | **9/9 PASS，exit 0**（HEAD `3d921c9`，`.ci/r24`） | `test` 801677ms |
 | 全量 CI（第 23 轮代码收口） | **9/9 PASS，exit 0**（HEAD `3624e96`，`.ci/r23b`） | `test` 807541ms |
 | 全量 CI（第 22 轮，上一轮读数） | **9/9 PASS，exit 0**（HEAD `466239d`，`.ci/r22a`） | `test` 811934ms |
-| 套件清单完备 | **359 个 `*.test.mjs` 全部有归属**（357 → 359：第 23 轮两套） | `stageTest` |
+| 套件清单完备 | **360 个 `*.test.mjs` 全部有归属**（357 → 359 → **360**：第 23 轮两套、第 25 轮一套） | `stageTest` |
 | 第 23 轮新套件 | `budget-alert` **29/29**（20 例求值 + 9 例真 HTTP；**9 处变异逐条咬住**） | `team-hub/budget-alert{,-http}.test.mjs` |
 | 第 24 轮（坐标判据） | `boundary-facts` **PASS** + 自身套件 **36/36**（34 → 36） | `scripts/prt/boundary-facts{.test,}.mjs` |
 | 注释里的坐标引用 | 坏引用 **9 → 0**（另 2 处属别的会话在制品） | `scratch/_audit-citations.mjs` |
@@ -577,12 +578,14 @@ node scripts/prt/reachability.mjs --diff        # → 与基线比对（46 条�
 
 | 项 | 读数 |
 | --- | --- |
-| 第 25 轮提交 | 见下（本节与判据、账各一笔） |
-| `suite-counts` 判据 | **32/32 已核、0 跳过、ok** |
+| 第 25 轮提交 | `bacd407`（判据 + 10 例 + 登记 + 三个数 + §5.9 + 本节） |
+| `suite-counts` 判据 | **32/32 已核、0 跳过、ok**（`node scripts/prt/suite-counts.mjs`，exit 0） |
 | 判据自己的套件 | **10/10** |
 | 变异 | **4/4 咬住**，还原**逐字相同** |
 | 主表计数声明 | 33 处 → **0 处不符** |
 | 全仓其余 ~106 处 | **故意不动**（历史读数，见 11.3） |
+| 全量 CI | **9/9 PASS，exit 0**（HEAD `bacd407`，`.ci/r25`，`test` 824992ms） |
+| 套件总数 | **360**（359 → 360） |
 
 
 

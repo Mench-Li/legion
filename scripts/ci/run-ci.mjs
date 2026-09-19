@@ -248,6 +248,42 @@ async function runPackageScript(cwd, script) {
 const stageResults = []
 
 // ---------- 阶段 ----------
+// ★★★ 第 28 轮：`summary.json` 此前只记 `HEAD` 这个**名字**，不记**树的状态**。
+//
+//   本轮实测发现：我这一天跑的全量 CI **每一次都跑在一棵脏树上**
+//   （另一个会话在本工作树里留了 13 个已改文件 + 441 个未跟踪文件），
+//   而我把它们逐条写成"**交付 HEAD** `xxxxxxx`，9/9 PASS，exit 0"。
+//
+//   `git head=<sha>` 回答的是"**哪个提交**"，不是"**跑的哪棵树**"。
+//   这两个问题在同一份绿报告里长得一模一样，而读者会把前者当成后者。
+//
+//   ⇒ 把树的状态**记进产物**并**警告**。这样
+//     「这次 CI 跑的是一棵干净的交付树」与
+//     「它跑在一棵混着别人在制品的树上」就不再同形。
+async function readTreeState() {
+  const headR = await exec('git', ['rev-parse', '--short', 'HEAD'])
+  const head = headR.code === 0 ? headR.out.trim() : '(git 不可用)'
+  const r = await exec('git', ['status', '--porcelain'])
+  if (r.code !== 0) {
+    // ★ 读不出来就说"读不出来"，**不说"干净"**——
+    //   "没法判断"与"没问题"不能印成同一行（本仓的老规矩）。
+    return { known: false, reason: 'git status 不可用', dirty: null, head }
+  }
+  const entries = r.out.split('\n').filter((l) => l.trim() !== '')
+  // 前两列是 XY 状态码；未跟踪是 `??`，已改/已暂存是别的组合。
+  const modified = entries.filter((l) => !l.startsWith('??'))
+  const untracked = entries.filter((l) => l.startsWith('??'))
+  return {
+    known: true,
+    head,
+    dirty: entries.length > 0,
+    modifiedCount: modified.length,
+    untrackedCount: untracked.length,
+    // 指纹只取"改了什么"的路径清单的哈希，不落盘具体路径（可能上千条）
+    fingerprint: createHash('sha256').update(entries.join('\n')).digest('hex').slice(0, 16),
+  }
+}
+
 async function stageEnv() {
   const lines = []
   lines.push('  root=' + ROOT)
@@ -1568,6 +1604,29 @@ async function stageTest() {
   { label: 'feature-table-status（功能表「状态」格与「还差什么」格必须相容：'
     + '🟡/⬜ 配空占位 = 没做完却说不差什么；✅/⏸ 豁免）',
     files: ['scripts/prt/feature-table-status.test.mjs'], cwd: ROOT },
+  // ★★ 第七套，同一族的**第六种形态**：这次是**读数的适用范围**。
+  //
+  //   第 24～27 轮我跑了 5 次全量 CI，逐条写成
+  //     「全量 CI（**交付 HEAD**）| 9/9 PASS，exit 0（HEAD `dd6eb8f`，`.ci/r27b`）」
+  //   而 `summary.json` 里当时只有 `git head=<sha>` —— **提交的名字，不是树的状态**。
+  //   本轮实测：那一天**每一次**全量 CI 都跑在一棵脏树上
+  //   （同一工作树里还有另一个会话的在制品）。
+  //
+  //   > `git head` 回答"哪个提交"，读者读成"哪棵树"。
+  //   > 在一份 9/9 PASS 的报告里，这两个问题**长得一模一样**。
+  //
+  //   ⇒ 「交付 HEAD」那一行必须用**封闭词表**写出树的状态：
+  //       `干净树`  或  `脏树 <N> 改 + <M> 未跟踪`
+  //     自由文本（"已确认工作树"）不算 —— 那种形状与真的提了树，
+  //     在正则下的区别是猜出来的。
+  //
+  //   ⚠️ 本条只跑**文档层**。第二层（真读 `.ci/*/summary.json` 交叉核对）
+  //   在同一个模块里，但**不能**进 CI：`.ci/` 在 `.gitignore:43`、
+  //   tracked 文件数 0 ⇒ 全新检出里那份产物根本不存在，
+  //   在 CI 里它会永远"没有可核对的产物"，而**那种绿是假的**。
+  { label: 'ci-reading-integrity（「全量 CI 9/9 PASS @ <sha>」必须写出**跑在哪棵树**上：'
+    + '`git head` 是提交的名字、不是树的状态；封闭词表 干净树 / 脏树 N 改 + M 未跟踪）',
+    files: ['scripts/prt/ci-reading-integrity.test.mjs'], cwd: ROOT },
   // ★ 第四套，同一个形状的**第四个方向**：前三套核的是"两份**清单**之间"或
   //   "**数字**↔产物"，这一套核的是"**对照表自己**"。
   //
@@ -4486,9 +4545,26 @@ async function main() {
     tee('  ⚠ 本次共跳过 ' + skippedTotal + ' 条断言。跳过可以是合法的（缺 DSH 检出 / 缺浏览器 / '
       + 'posix 上跑不了 win32 分支），也可以是环境没配上 —— SUMMARY 里这一行就是为了让这两者不再同形。')
   }
+
+  // ★★★ 第 28 轮：把**树的状态**记进产物。见 `readTreeState` 上方的长注释。
+  const tree = await readTreeState()
+  if (tree.known && tree.dirty) {
+    tee('')
+    tee('  ⚠⚠ 本次 CI 跑在一棵**脏树**上：已改 ' + tree.modifiedCount
+      + ' 个文件 + 未跟踪 ' + tree.untrackedCount + ' 个（指纹 ' + tree.fingerprint + '）。')
+    tee('     ⇒ 这次读数证明的是「**这棵树**是绿的」，**不是**「提交 '
+      + tree.head + ' 是绿的」。')
+    tee('     引用它时请连树一起引用；`git head=` 回答的是"哪个提交"，不是"跑的哪棵树"。')
+  } else if (!tree.known) {
+    tee('')
+    tee('  ⚠ 无法判断本次 CI 跑在哪棵树上（' + tree.reason + '）——'
+      + '"读不出来"不等于"干净"。')
+  }
+
   writeFileSync(join(OUT_DIR, 'summary.json'), JSON.stringify({
     root: ROOT, outDir: OUT_DIR, finishedAt: new Date().toISOString(),
     stages: stageResults, failed, skippedTotal,
+    tree,
   }, null, 2) + '\n', 'utf8')
   tee('summary.json -> ' + join(OUT_DIR, 'summary.json'))
   process.exit(failed === 0 ? 0 : 1)

@@ -814,27 +814,36 @@ test('⑭d ★★ 双向控制：改**表里**那个毫秒数也必须红（不�
   // 测试 ③ 只改**声称**（散文那侧）。若这条事实的 derive 也来自同一句话，
   // 它就恒等地绿 —— 那是一个**看着像判据的同义反复**。
   // 所以这里改**表里**那一行，散文一个字不动。
+  //
+  // ★★ 第一版这条**写死了 825/826**，而第 26 轮收官时交付 HEAD 换成
+  //    第 26 轮那次 CI（868769ms ⇒ 869s）——于是这条控制自己红了。
+  //    那不是判据坏了，是**控制把当时的读数抄进了断言**：
+  //    > 一条把当前读数写进断言的测试，会在读数**正常更新**时红，
+  //    > 而那与"判据坏了"是同一条红。
+  //    ⇒ 改成从真文档现算，读数怎么变这条都成立。
   const before = defaultContext().doc(HANDOVER_DOC)
+  const m = /全量 CI（\*\*交付 HEAD\*\*）[^\n]*?`test` (\d+)ms/.exec(before)
+  assert.ok(m !== null, '真文档里找不到"交付 HEAD"那一行，控制写不出来')
+  const realSec = Math.round(Number(m[1]) / 1000)
+
   const corrupted = before.replace(/(全量 CI（\*\*交付 HEAD\*\*）[^\n]*?`test` )(\d+)(ms)/,
     (_, a, ms, c) => a + (Number(ms) + 1000) + c)
   assert.notEqual(corrupted, before, '改表那一行没生效，这条控制是假的')
-  assert.doesNotMatch(corrupted.replace(/`test` 阶段那 \d+ 秒里[\s\S]*/, ''), /交付 HEAD[\s\S]*`test` 825ms/,
-    '表那一行没被改动')
 
   const r = checkFacts({ ctx: withDoc(HANDOVER_DOC, () => corrupted) })
   const v = r.violations.find((x) => x.id === 'handover-ci-prose-matches-table')
   assert.ok(v !== undefined,
     '改了表里的毫秒数却没红 ⇒ derive 与 claim 同源（同义反复），这条判据没有信息量')
   assert.equal(v.code, 'MISMATCH')
-  assert.equal(v.claimed, 825, '声称侧应当是散文里的 825')
-  assert.equal(v.actual, 826, '实际侧应当是表里 825992ms 取整后的 826')
+  assert.equal(v.claimed, realSec, `声称侧应当是散文里的 ${realSec}`)
+  assert.equal(v.actual, realSec + 1, `实际侧应当是表里加 1000ms 后取整的 ${realSec + 1}`)
 })
 
 test('⑭e ★★ 反向控制：把两处**一起**改成同一个新值 ⇒ 必须绿（证明它在比对，不是在钉常量）', () => {
-  // ★ 第一版这条是**退化**的：散文本来就已经是 825，所以"改成 825"是个空操作，
+  // ★ 第一版这条是**退化**的：散文本来就已经是那个值，所以"改成那个值"是个空操作，
   //   测试通过得毫无信息量——它证明不了这条判据在比对两侧。
   //   ⇒ 正确做法是：把**表和散文一起**改成一个**新**值，仍然必须绿。
-  //      如果判据是"钉住 825 这个常量"，这里就会红。
+  //      如果判据是"钉住某个常量"，这里就会红。
   const before = defaultContext().doc(HANDOVER_DOC)
   const both = before
     .replace(/(全量 CI（\*\*交付 HEAD\*\*）[^\n]*?`test` )(\d+)(ms)/, (_, a, _ms, c) => `${a}777000${c}`)
@@ -845,27 +854,45 @@ test('⑭e ★★ 反向控制：把两处**一起**改成同一个新值 ⇒ �
   const r = checkFacts({ ctx: withDoc(HANDOVER_DOC, () => both) })
   const v = r.violations.find((x) => x.id === 'handover-ci-prose-matches-table')
   assert.equal(v, undefined,
-    '两侧一起改成一致的新值却红了 ⇒ 这条判据钉的是常量 825 而不是"两侧相等"：'
+    '两侧一起改成一致的新值却红了 ⇒ 这条判据钉的是常量而不是"两侧相等"：'
     + JSON.stringify(v))
 })
 
 test('⑭e2 反向控制：只改**散文**（表不动）⇒ 必须红', () => {
   const before = defaultContext().doc(HANDOVER_DOC)
-  const proseOnly = before.replace(/`test` 阶段那 \d+ 秒里/, '`test` 阶段那 800 秒里')
+  const m = /全量 CI（\*\*交付 HEAD\*\*）[^\n]*?`test` (\d+)ms/.exec(before)
+  const realSec = Math.round(Number(m[1]) / 1000)
+  // ★ 不许写死一个"看起来不一样"的数：用 realSec 现算，
+  //   否则真读数哪天正好等于那个写死的数，这条控制会**静默退化**成空操作。
+  const other = realSec + 1
+  const proseOnly = before.replace(/`test` 阶段那 \d+ 秒里/, `\`test\` 阶段那 ${other} 秒里`)
   assert.notEqual(proseOnly, before, '改写没生效，这条控制是假的')
   const r = checkFacts({ ctx: withDoc(HANDOVER_DOC, () => proseOnly) })
-  assert.ok(idsOf(r).includes('handover-ci-prose-matches-table'),
-    '只改散文那一侧却没红 ⇒ 这一侧没被查')
+  const v = r.violations.find((x) => x.id === 'handover-ci-prose-matches-table')
+  assert.ok(v !== undefined, '只改散文那一侧却没红 ⇒ 这一侧没被查')
+  assert.equal(v.actual, realSec)
+  assert.equal(v.claimed, other)
 })
 
-test('⑭f 诚实边界：取整规则写在明处（秒 = round(毫秒/1000)）', () => {
-  // 这条钉住"怎么从毫秒得到秒"，否则下次有人改成 floor 会有 1 秒的缝隙，
-  // 而 1 秒的缝隙在报告里看不出来。
+test('⑭f 取整规则钉在 round 上：`realSec*1000 - 1` 必须仍算作 realSec（floor 会差 1 秒）', () => {
+  // 这条钉住"怎么从毫秒得到秒"。秒 = round(毫秒/1000)。
+  // 取一个 round 与 floor **不同**的毫秒数：realSec*1000 - 1。
+  //   round((realSec*1000 - 1)/1000) = realSec   ← 实现是 round ⇒ 绿
+  //   floor(同上)                    = realSec-1 ← 实现改成 floor ⇒ 红
+  // ★ 这样"round vs floor"这个 1 秒的缝隙才真的被测到；
+  //   否则它藏在读数里，谁也看不出来。
   const before = defaultContext().doc(HANDOVER_DOC)
-  const floored = before.replace(/`test` (\d+)ms/, (_, ms) => '`test` ' + (Math.floor(Number(ms) / 1000) * 1000 + 999) + 'ms')
-  // 824999ms ⇒ round = 825（与散文 825 一致），floor = 824
-  const r = checkFacts({ ctx: withDoc(HANDOVER_DOC, () => floored) })
-  assert.ok(!idsOf(r).includes('handover-ci-prose-matches-table'),
-    '824999ms 取整应当是 825 ⇒ 与散文 825 一致，不该红')
+  const m = /全量 CI（\*\*交付 HEAD\*\*）[^\n]*?`test` (\d+)ms/.exec(before)
+  const realSec = Math.round(Number(m[1]) / 1000)
+  const edge = realSec * 1000 - 1
+  const patched = before.replace(/(全量 CI（\*\*交付 HEAD\*\*）[^\n]*?`test` )\d+(ms)/, `$1${edge}$2`)
+  assert.notEqual(patched, before, '改写没生效，这条控制是假的')
+  assert.ok(Math.round(edge / 1000) === realSec && Math.floor(edge / 1000) !== realSec,
+    `取的 ${edge}ms 没能把 round 与 floor 分开，这条控制是无效的`)
+
+  const r = checkFacts({ ctx: withDoc(HANDOVER_DOC, () => patched) })
+  const v = r.violations.find((x) => x.id === 'handover-ci-prose-matches-table')
+  assert.equal(v, undefined,
+    `${edge}ms 应当取整成 ${realSec}（与散文一致）；红了说明实现用的是 floor：` + JSON.stringify(v))
 })
 

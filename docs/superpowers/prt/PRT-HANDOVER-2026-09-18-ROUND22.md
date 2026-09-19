@@ -44,7 +44,7 @@
 | 全量 CI（第 25 轮代码收口） | **9/9 PASS，exit 0**（HEAD `bacd407`，`.ci/r25`） | `test` 824992ms |
 | 全量 CI（第 23 轮代码收口） | **9/9 PASS，exit 0**（HEAD `3624e96`，`.ci/r23b`） | `test` 807541ms |
 | 全量 CI（第 22 轮，上一轮读数） | **9/9 PASS，exit 0**（HEAD `466239d`，`.ci/r22a`） | `test` 811934ms |
-| 套件清单完备 | **363 个 `*.test.mjs` 全部有归属**（357 → 359 → 360 → 361 → 362 → **363**：第 23 轮两套、第 25 轮一套、第 26 轮零套、第 27/28/29 轮各一套） | `stageTest` |
+| 套件清单完备 | **364 个 `*.test.mjs` 全部有归属**（357 → 359 → 360 → 361 → 362 → 363 → **364**：第 23 轮两套、第 25 轮一套、第 26 轮零套、第 27/28/29/31 轮各一套） | `stageTest` |
 | 第 23 轮新套件 | `budget-alert` **29/29**（20 例求值 + 9 例真 HTTP；**9 处变异逐条咬住**） | `team-hub/budget-alert{,-http}.test.mjs` |
 | 第 24 轮（坐标判据） | `boundary-facts` **PASS** + 自身套件 **36/36**（34 → 36） | `scripts/prt/boundary-facts{.test,}.mjs` |
 | 第 25 轮（计数判据） | 新判据 `suite-counts` **PASS**；主表计数声明 **32 处已核、0 处不符**；自身套件 **10/10**；变异 **4/4** | `scripts/prt/suite-counts{.test,}.mjs` |
@@ -52,6 +52,7 @@
 | 第 27 轮（表内自洽） | 新判据 `feature-table-status` **8/8**；功能表 **2 行**「没做完却说不差什么」已订正（F-22 / F-24）；变异 **5/5** | `scripts/prt/feature-table-status{.test,}.mjs` |
 | 第 28 轮（读数的适用范围） | 新判据 `ci-reading-integrity` **16/16**；**当场红在自己报告的那一行上**；`run-ci.mjs` 开始把**树的状态**记进 `summary.json` | `scripts/prt/ci-reading-integrity{.test,}.mjs` |
 | 第 29 轮（跨文档校准） | 新判据 `spec-status-calibration` **13/13**；**目标点名的输入文档**里 **7 条**过期状态注记已建校准表；变异 **8/8** | `scripts/prt/spec-status-calibration{.test,}.mjs` |
+| 第 31 轮（落点可解析） | 新判据 `feature-landing-paths` **13/13**；**恰好 1 处**真缺陷（F-21 的短路径）已订正；变异 **7/7** | `scripts/prt/feature-landing-paths{.test,}.mjs` |
 | 注释里的坐标引用 | 坏引用 **9 → 0**（另 2 处属别的会话在制品） | `scratch/_audit-citations.mjs` |
 | 可达性 | 不可达 **46** 条，**全部已定性**（`by-design` / `deliberate` / `gap` / `in-flight`） | `scripts/prt/reachability.mjs --diff` |
 | 裁决项 | §5 清单 **1～29**（编号连续、无缺号、无重复；第 30 轮新增第 29 条） | `MULTI-AGENT-FEATURE-STATUS.md` §5 |
@@ -614,7 +615,7 @@ node scripts/prt/reachability.mjs --diff        # → 与基线比对（46 条�
 | 主表计数声明 | 33 处 → **0 处不符** |
 | 全仓其余 ~106 处 | **故意不动**（历史读数，见 11.3） |
 | 全量 CI | **9/9 PASS，exit 0**（HEAD `bacd407`，`.ci/r25`，`test` 824992ms） |
-| 套件总数 | **363**（359 → 360 → 361 → 362 → 363） |
+| 套件总数 | **364**（359 → 360 → 361 → 362 → 363 → 364） |
 
 ---
 

@@ -184,7 +184,7 @@
 
 | 编号 | 名称 | 状态 | 依据 | 还差什么 |
 |---|---|---|---|---|
-| F-21 | Connector / MCP 注册表 | ⬜→🟡 | **登记面、落盘面、判定面、反馈面四面俱在**：登记与落盘（`team-hub/connector-store.mjs` 的 `freezeDeclaration`/`connectorIncidents`/`exportConnectors` 都接在真 HTTP 路由上）；**判定面已接进生产组合根**（`runtime/connectors/decision-port.mjs` → `assemble.mjs` → `tool-request.mjs` 的 `connectorJudgment`）；**反馈面已接**（`outcome-port.mjs` → `plugins/connector-feedback.mjs`，订阅 DSH `tools/result`）。★ **`enforcementSurfaces()` 从 6 格 → 7 格**（新增 `connectorJudgment`，与 `connectorFeedback` 分开报——只有一格时"判定面装了、反馈面没装"与反过来是同一个读数）。★ 隔离真拦下过：`root.test.mjs` ⑨④「未声明工具 `git-commit` ⇒ deny（政策门说 allow）」、⑨⑤「开路 ⇒ deny ⇒ 反馈面记回 ⇒ 探针成功 ⇒ 恢复 allow」的**闭环**、⑨⑥ 两半共用**同一份** registry。★★ **投递面也建好了**（`runtime/dsh-composition/connector-port.mjs` → `root-row.mjs`，第 19 条 §9.2 第 5 步）：配了 ⇒ 上面那一格**真的**翻 `true`（在真生产路径上验的，`root-row.test.mjs` 五条：配了/没配/空表/坏 JSON/真拦下，含**前提对照**"没配时同一次调用是 allow"）；缺席**如实**是 `absent`（不许折成空表——空表会让组合根建一份**零连接器**登记表 ⇒ 那一格报 `true` 而它**一次判定都不会做**）；显式 `[]` **具名拒绝**；重名工具**装配期**就停。273 例（decision-port 19 + connector-port 14 + root 3 + root-row 5 + tool-request 3 + registry 32 + connector-store 23 … + public-name 14） | ★ **仍差四条，且四条都不是"再写点代码"**。**① 投递**：`LEGION_CONNECTOR_DECLARATIONS` 与 `LEGION_PATH_SCOPE` 一样，**在 schema 的 `fields` 里而不在 `process-manifest.mjs` 的 runtime `envNames` 里** ⇒ `buildChildEnv()` 对未声明的键**直接抛**（`values`）或**静默丢掉**（`baseEnv`）。这一条与第 19 条**同生共死**（同一个文件、同一个数组，且是另一条工作线的在制品）。★★ **② 归属的来源——第 17 轮已解决**（原记"本仓没有这条源信号"是**错的**：约定不在本仓，在执行引擎那边）。新增 `runtime/connectors/public-name.mjs` 逐字镜像 DSH 的 `publicToolName`（`mcp__<serverName>__<rawName>`，含归一化/截断时的 12 位 SHA-256 后缀），接成归属的**第一条**依据 ⇒ 那条「未声明就拒绝」第一次在生产路径上真的拦下了东西（`mcp__github__delete_repo` 从 **`allow` → `deny`**）。判据含**一条把 DSH 真源码切片求值对跑 18 组**的用例（18/18 一致）。★★ **③ 声明名 vs 线上名——第 18 轮已解决一半**：`registry.mjs` 新增 `declaredToolNames`，登记表**同时**认声明名与 DSH 公开名（归属与判定共用**一份**实现）。实测：`mcp__github__list_issues`（第 17 轮 **`deny`「没有声明工具」** ⇒ 一个**正确声明过**的工具在真部署里不可用）现在连接器层答 **`allow`**。★ 剩下的**约定**（写哪个名字）记 §5 第 22 条。★★★ **④ 而最终判决仍然是 `deny`——理由是 `[政策门]`**（第 18 轮新查出，**本条最要紧**）：`tool-capability.mjs` 的 `resolveTool` 对不在它目录里的名字一律给 `direction: 'write'`、`requiresApproval: true`（fail closed），而 MCP 公开名**不在那个目录里** ⇒ **连接器层今天只能让事情更严，永远不能让它更松**。要不要让政策门从声明里读能力，是 §5 第 24 条。★ 另有命名空间**认不出**的一类仍落政策门（§5 第 23 条）。★ 本批另修掉一个**静默**缺陷：输入字段叫 `declaredRisk` 而**输出**字段叫 `risk`，照着输出写 `risk: 'critical'` 会被**静默丢掉**、落回能力下限 `low` ⇒ 一个作者标成 critical 的工具被自动放行；`declareTool` 的键集已改成**封闭**（不认识的键具名拒）。全仓共撞到 **9 处**用错字段名的真样本。★★ **第 19 轮新增一条**：PRT-605 的执行面授权表也有一个 `mcp` 段，它**同样**声称决定"哪些 MCP 工具可用"⇒ 第一次出现**两张表管同一件事**、而两道检查接在**同一个** `preExecute` 上。本轮**没有**选边，而是把"配了 `mcp` 段"做成一次**具名的拒绝**（`execution-scope-port-mcp-limb-unwired`，理由里写清权威在连接器登记表）——*一个"未接"与一个"检查不通过"，在最终 `deny` 上是同一个读数，而它们指向的修复动作完全相反*。裁决项见 §5 第 25 条，详细账见 §4.3 |
+| F-21 | Connector / MCP 注册表 | ⬜→🟡 | **登记面、落盘面、判定面、反馈面四面俱在**：登记与落盘（`team-hub/connector-store.mjs` 的 `freezeDeclaration`/`connectorIncidents`/`exportConnectors` 都接在真 HTTP 路由上）；**判定面已接进生产组合根**（`runtime/connectors/decision-port.mjs` → `assemble.mjs` → `tool-request.mjs` 的 `connectorJudgment`）；**反馈面已接**（`outcome-port.mjs` → `runtime/dsh-composition/plugins/connector-feedback.mjs`，订阅 DSH `tools/result`）。★ **`enforcementSurfaces()` 从 6 格 → 7 格**（新增 `connectorJudgment`，与 `connectorFeedback` 分开报——只有一格时"判定面装了、反馈面没装"与反过来是同一个读数）。★ 隔离真拦下过：`root.test.mjs` ⑨④「未声明工具 `git-commit` ⇒ deny（政策门说 allow）」、⑨⑤「开路 ⇒ deny ⇒ 反馈面记回 ⇒ 探针成功 ⇒ 恢复 allow」的**闭环**、⑨⑥ 两半共用**同一份** registry。★★ **投递面也建好了**（`runtime/dsh-composition/connector-port.mjs` → `root-row.mjs`，第 19 条 §9.2 第 5 步）：配了 ⇒ 上面那一格**真的**翻 `true`（在真生产路径上验的，`root-row.test.mjs` 五条：配了/没配/空表/坏 JSON/真拦下，含**前提对照**"没配时同一次调用是 allow"）；缺席**如实**是 `absent`（不许折成空表——空表会让组合根建一份**零连接器**登记表 ⇒ 那一格报 `true` 而它**一次判定都不会做**）；显式 `[]` **具名拒绝**；重名工具**装配期**就停。273 例（decision-port 19 + connector-port 14 + root 3 + root-row 5 + tool-request 3 + registry 32 + connector-store 23 … + public-name 14） | ★ **仍差四条，且四条都不是"再写点代码"**。**① 投递**：`LEGION_CONNECTOR_DECLARATIONS` 与 `LEGION_PATH_SCOPE` 一样，**在 schema 的 `fields` 里而不在 `process-manifest.mjs` 的 runtime `envNames` 里** ⇒ `buildChildEnv()` 对未声明的键**直接抛**（`values`）或**静默丢掉**（`baseEnv`）。这一条与第 19 条**同生共死**（同一个文件、同一个数组，且是另一条工作线的在制品）。★★ **② 归属的来源——第 17 轮已解决**（原记"本仓没有这条源信号"是**错的**：约定不在本仓，在执行引擎那边）。新增 `runtime/connectors/public-name.mjs` 逐字镜像 DSH 的 `publicToolName`（`mcp__<serverName>__<rawName>`，含归一化/截断时的 12 位 SHA-256 后缀），接成归属的**第一条**依据 ⇒ 那条「未声明就拒绝」第一次在生产路径上真的拦下了东西（`mcp__github__delete_repo` 从 **`allow` → `deny`**）。判据含**一条把 DSH 真源码切片求值对跑 18 组**的用例（18/18 一致）。★★ **③ 声明名 vs 线上名——第 18 轮已解决一半**：`registry.mjs` 新增 `declaredToolNames`，登记表**同时**认声明名与 DSH 公开名（归属与判定共用**一份**实现）。实测：`mcp__github__list_issues`（第 17 轮 **`deny`「没有声明工具」** ⇒ 一个**正确声明过**的工具在真部署里不可用）现在连接器层答 **`allow`**。★ 剩下的**约定**（写哪个名字）记 §5 第 22 条。★★★ **④ 而最终判决仍然是 `deny`——理由是 `[政策门]`**（第 18 轮新查出，**本条最要紧**）：`tool-capability.mjs` 的 `resolveTool` 对不在它目录里的名字一律给 `direction: 'write'`、`requiresApproval: true`（fail closed），而 MCP 公开名**不在那个目录里** ⇒ **连接器层今天只能让事情更严，永远不能让它更松**。要不要让政策门从声明里读能力，是 §5 第 24 条。★ 另有命名空间**认不出**的一类仍落政策门（§5 第 23 条）。★ 本批另修掉一个**静默**缺陷：输入字段叫 `declaredRisk` 而**输出**字段叫 `risk`，照着输出写 `risk: 'critical'` 会被**静默丢掉**、落回能力下限 `low` ⇒ 一个作者标成 critical 的工具被自动放行；`declareTool` 的键集已改成**封闭**（不认识的键具名拒）。全仓共撞到 **9 处**用错字段名的真样本。★★ **第 19 轮新增一条**：PRT-605 的执行面授权表也有一个 `mcp` 段，它**同样**声称决定"哪些 MCP 工具可用"⇒ 第一次出现**两张表管同一件事**、而两道检查接在**同一个** `preExecute` 上。本轮**没有**选边，而是把"配了 `mcp` 段"做成一次**具名的拒绝**（`execution-scope-port-mcp-limb-unwired`，理由里写清权威在连接器登记表）——*一个"未接"与一个"检查不通过"，在最终 `deny` 上是同一个读数，而它们指向的修复动作完全相反*。裁决项见 §5 第 25 条，详细账见 §4.3 |
 | F-22 | 后端与工作区 | 🟡 | `orchestrator/workspace/*`（git worktree）。§2 明写「不把 worktree 当安全沙箱」 | **核心已交付**：`orchestrator/workspace/index.mjs`（472 行，真 `git worktree`）+ worker 接线（`LEGION_WORKSPACE_DIR`、`resolveWorkspaceStages`、状态文件 `workspaceMode`），套件 `workspace` **24 例** + `workspace-wiring` **9 例**；PRT-306 ✅、可达、已接线。**未做**：Docker / SSH / remote worker 扩展——spec 第 138 行明写「**后续**扩展 Docker/SSH/remote worker」，且 §218 把「远程后端」列进「按真实客户需求推进」，与 F-23/F-25 同属一类。★ **[2026-09-18 第 27 轮订正]** 本格此前是 `—`：一个 🟡 行说「不差什么」，与「已做完」在表里长得一模一样（见 §5.11） |
 | F-23 | 多 Harness 路由 | ⏸ | §2 明写「**不在契约稳定前同时支持多个 Harness**」——这一条**是设计决定，不是缺口** | — |
 | F-24 | ACL 与安全姿态 | 🟡 | `team-hub/read-auth.test.mjs`、`read-open-loopback.test.mjs` 已覆盖读面矩阵；多用户写面 ACL 未做 | **读面已交付**：读权限矩阵由 `read-auth.test.mjs` + `read-open-loopback.test.mjs` 覆盖（含环回地址的读开放边界）。**未做**：多用户**写**面 ACL——即身份贯穿 API、SSE、附件、技能、聊天与审计的写侧；§218 把「多用户」列进「按真实客户需求推进」，与 F-23/F-25 同属一类。★ **[2026-09-18 第 27 轮订正]** 本格此前是 `—`，而「多用户写面 ACL 未做」那句**写在「依据」格里**——同一份信息放错格子，按「还差什么」读表的机器与人都读不到（见 §5.11） |
@@ -2261,6 +2261,97 @@ ESM 的**模块缓存**让它仍用改之前那份。
 - 它查"两份文档**对不对得上**"，**不查**"那份注记当年的判断**对不对**"。
 - 它也**不**替你决定 F-22/F-24 这类"设计范围已完成、其余按客户需求"的行
   该记 🟡 还是 ⏸——那是产品裁决（见 §5 第 10 条）。
+
+## 5.14 ★★★ 第 31 轮：**我报了一次假发现，而且是两次叠加的**
+
+这一节与前面几节形状不同：它记的不是"发现了一处坏引用"，而是
+**"我差点报出 23 处，而真缺陷只有 1 处"**。
+
+### 起因
+
+第 25 轮就发现 F-21 那格引的是 `plugins/connector-feedback.mjs`，而文件实际在
+`runtime/dsh-composition/plugins/connector-feedback.mjs`——当时判断
+「代码落点正确性归第 27 轮那种判据管」，**没有**顺手改。第 31 轮把它量完。
+
+### 第一版读数：**49 个引用里 23 个"解不开"** —— 假的，两层原因
+
+**① 遍历没排 worktree 副本。** 我扫全仓同名文件时只跳了 `node_modules` 等，
+于是 `.legion-worktrees/*/team-hub/server.mjs` 这些**同名副本**把
+`server.mjs` 的计数撑成 **38**。看起来像"这个名字有歧义"，实际是我的遍历没排干净。
+（排除后：**唯一**。）
+
+**② 我把每个名字独立拼路径，而这一列有惯例。** 正确惯例是：
+
+    一格里的**第一个带目录的路径**确立目录，其后的**裸文件名**继承那个目录。
+    例：`runtime/contracts/adapter.mjs`、`run.mjs`、`errors.mjs`
+        ⇒ 后两个是 runtime/contracts/run.mjs 与 runtime/contracts/errors.mjs
+
+按惯例重扫：**原样解得开 36 + 沿本格继承解得开 12 = 48**，剩下 1 个也在
+**全仓唯一的同名文件**里找得到。⇒ **0 个真缺陷。**
+
+> 一个"23 处坏引用"的读数，与一个"**我的解析器不懂这列的惯例**"的读数，
+> 在只看那一行输出的屏幕上，是同一个东西。
+
+★ 这与 §5.12（读数的适用范围）是同一族，但方向相反：那一次是**读数被过度解读**，
+这一次是**我的探针本身错了**——而它报出来的数字比我预期的更"像发现"。
+
+### 真缺陷：**恰好 1 处**，就是第 25 轮看见的那一处
+
+把规则收紧成"**带 `/` 就必须原样存在**"（而不是"沿别的目录也许能找到"）之后：
+
+    ✖ 第 187 行（F-21）的「代码落点」引了带目录的路径 `plugins/connector-feedback.mjs`，
+      而它**不在被跟踪的文件里**。
+
+★ 为什么这条规则是对的：`plugins/connector-feedback.mjs` 以 `plugins/` 开头，
+**读起来就是顶层 `plugins/`**——而顶层 `plugins/` 里没有它。
+"沿本格继承"能救它，但读者不会那么读。⇒ 已改成全路径。
+
+### 判据：`feature-landing-paths`（新套件，13 例）
+
+| 规则 | 内容 |
+| --- | --- |
+| R1 | 带目录的路径（含 `/`）⇒ **必须存在** |
+| R2 | 裸文件名 ⇒ 必须在全仓**恰好一个**同名文件 |
+| R3 | 裸名先试沿本格已确立的目录继承，再试全仓唯一 |
+
+★★ **R2 才是这条判据存在的理由**：`run.mjs` 能当简写用，是因为全仓只有一个
+`run.mjs`。哪天多出第二个，那个简写就变成**读者无法解析**的引用——
+而它**今天仍然"看起来是对的"**（名字没错、文件也都在）。
+这与 §5.11（🟡 配 `—`）是同一个形状：**一个字面为真、而读者会读错的写法**。
+
+★ 扫描面用 `git ls-files`（只看被跟踪的文件），理由与套件计数那条一致。
+
+### 变异：7/7 咬住，还原逐字相同
+
+| 方向 | 变异 | 谁捉住 |
+| --- | --- | --- |
+| 文档 | M1 把 F-21 改回短路径（就是当天那处） | 门禁（点名） |
+| 文档 | M2 把带目录的落点改成不存在的路径 | 门禁（点名） |
+| 文档 | **M3 删掉一格里的第一个带目录路径**（后续裸名失去继承目录） | 门禁（点名） |
+| 代码 | M4 去掉 R2（只留"存在就行"） | 套件 |
+| 代码 | M5 去掉 R3（继承） | 套件 |
+| 代码 | M6 去掉"扫到 0 个路径也失败" | 套件 |
+| 代码 | M7 把通配符重新排除出"像路径"（`globbed` 会永远 0） | 套件 |
+
+★ **M3 是最值得记的一条**：它打的是**惯例本身**。删掉一格里第一个带目录的路径，
+后面那些裸名就失去继承目录——这正是第一版探针没理解的机制。
+
+### 一处被用例抓到的真缺陷（我自己的）
+
+第一版的 `PATH_RE` 字符集里**没有通配符**，于是 `approval-*.mjs` 在进入
+"跳过通配"那条分支**之前**就被过滤掉了 ⇒ `globbed` **永远是 0**。
+即"**跳过了 0 个通配**"与"**这一列根本没有通配**"是同一个读数——
+正是本报告反复在说的那种形状，只不过这次出现在我的判据自己身上。
+用例 ⑧ 抓住了它（`实际 0，期望 1`）。订正后真读数：**跳过通配 2**。
+
+### 诚实边界
+
+- 它查"读者**找不找得到**这个引用"，**不查**"被引的那个文件**是不是**这句话的落点"。
+  后者是语义判断（`boundary-facts` 那条的边界也一样）。
+- 它**只覆盖「代码落点」那一列**（第 4 格）。同一张表的「判据 / 证据」列里
+  还有大量路径引用，不在覆盖内。
+- 它**不**要求每一格都写全路径——**简写是允许的**，前提是全仓唯一。
+  这个设计是刻意的：要求全路径会把表变得很长，而唯一简写同样让读者找得到。
 
 ## 6. 怎么复跑这份对照表里的每一条
 

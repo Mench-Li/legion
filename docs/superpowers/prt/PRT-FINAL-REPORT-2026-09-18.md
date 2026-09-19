@@ -6,9 +6,9 @@
 - 对照表：[`MULTI-AGENT-FEATURE-STATUS.md`](../../MULTI-AGENT-FEATURE-STATUS.md) —— F-01…F-25，**裁决项 1～29**
 - ★ **决策摘要**：[`DECISION-BRIEF.md`](../../DECISION-BRIEF.md) —— 把那 29 条压成「**你要说的那一句话**」，**按 §9 链排序**；★ **§0A 就是那条链唯一的硬断（第 20 条）**
 - 目标文档：[`MULTI-AGENT-FEATURE-OPTIMIZATION.md`](../../MULTI-AGENT-FEATURE-OPTIMIZATION.md) —— §1.2 状态注记校准 / §1.3 正文级偏离
-- 最近一轮 CI：**`.ci/r32b`**（HEAD `89590fc`，**这一行就是被那次 CI 跑过的那棵树**）—— **9/9 阶段 PASS，exit 0**
-  （`test` **873289ms**，`skipped=1` 为已知的 secret-store；套件 **365** 个全部有归属；
-  树指纹 `2a2eacac472f13d1` —— **脏树 14 改 + 443 未跟踪**，见 §3.0j 第 28 轮）
+- 最近一轮 CI：**`.ci/r33`**（HEAD `af3a440`，**这一行就是被那次 CI 跑过的那棵树**）—— **9/9 阶段 PASS，exit 0**
+  （`test` **877363ms**，`skipped=1` 为已知的 secret-store；套件 **365** 个全部有归属；
+  树指纹 `fa237b2dc8e353bc` —— **脏树 14 改 + 444 未跟踪**，见 §3.0j 第 28 轮）
 - 相关提交：（第 33 轮：§9 链逐节投影 —— **L5 硬断** + 序数/计数判据修正）、
   （第 32 轮：独立核对目标文档 + `DECISION-BRIEF.md` + 条数判据）、
   `741d037`（**第 31 轮：落点可解析判据 + 订正 F-21 的短路径**）、

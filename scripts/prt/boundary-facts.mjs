@@ -179,7 +179,7 @@ export function checkManifestImpersonation({ dir = CRITERIA_DIR } = {}) {
 // ★ 起因：`boundary-facts` 原来只钉"文档声称的**数字** ↔ 产物真实的值"，
 //   也就是只管**计数**，不管**位置**。而本仓的论证大量依赖坐标：
 //
-//     `tool-request.mjs:731`（缺表 = 放行）、
+//     `tool-request.mjs` 的 `scopeGuard`（缺表 = 放行）、
 //     `runtime-contract-server.mjs:599`（`wireChecked: true` 是写死的字面量）、
 //     `credentials-local/src/index.ts:585` / `:611`（watcher 的创建点/关闭点）
 //
@@ -270,11 +270,26 @@ export function scanLineCitations(text, treeSet = null) {
   const t = treeSet ?? trees()
   const uniq = new Map()
   for (const m of text.matchAll(LINE_CITATION_RE)) {
-    const key = `${m[1].replace(/\\/g, '/')}:${m[2]}${m[4] ? `-${m[4]}` : ''}`
+    // ★★★ 2026-09-18 第 23 轮修一处**一直存在**的 off-by-one：
+    //   这个正则只有 **3** 个捕获组（1=path / 2=from / 3=to），
+    //   而这里原来读的是 **`m[4]`** ⇒ `m[4]` 恒为 `undefined` ⇒
+    //   **范围终点永远等于起点**（`to: Number(m[2])`）。
+    //
+    //   实测后果（`scratch/_prove-range-bug.mjs`）：
+    //   `run-floor.mjs:600-9999`（那个文件 614 行）**不报 broken**——
+    //   它被判成"只引了第 600 行"。而单行 `:9999` 是报的。
+    //
+    //   ⇒ 台账里 `run-floor.mjs:544-559` 与 `executor-binding.mjs:254-261`
+    //     两个范围引用**从来没有被当成范围查过**；`total` 也把范围当单行数。
+    //
+    //   > 一个"范围引用检查器"与一个"单行引用检查器"，
+    //   > 在**所有范围引用都恰好从合法行开始时**是同一个东西——
+    //   > 而这条判据的全部价值就在那个区间的**末端**。
+    const key = `${m[1].replace(/\\/g, '/')}:${m[2]}${m[3] ? `-${m[3]}` : ''}`
     uniq.set(key, {
       path: m[1].replace(/\\/g, '/'),
       from: Number(m[2]),
-      to: m[4] ? Number(m[4]) : Number(m[2]),
+      to: m[3] ? Number(m[3]) : Number(m[2]),
     })
   }
   const broken = []
@@ -319,13 +334,51 @@ export function scanLineCitations(text, treeSet = null) {
       broken.push(`${c.path}:${c.from}（找不到这个文件）`)
       continue
     }
-    let lines = 0
-    try { lines = readFileSync(real, 'utf8').split('\n').length } catch {
+    // ★ 这里必须留下**内容**，不能只留行数：下面那条"这一段是不是空的"判据
+    //   要逐行读。第一版我就是在这里踩的——原来只有
+    //   `lines = readFileSync(...).split('\n').length`（一个**数字**），
+    //   我照样写 `lines[i - 1]` ⇒ `undefined ?? ''` ⇒ 空串 ⇒
+    //   **132 条引用全部被报成"指到空行"**，其中包含
+    //   `runtime-contract-server.mjs:599` 这种我刚亲手核过、明明有内容的引用。
+    //
+    //   > 一个"判据写错了"与一个"文档里有 132 处坏引用"，
+    //   > 在输出里长得一模一样——而且后者看起来**更像个发现**。
+    //   > 处置却完全相反：前者要改判据，后者要改文档。
+    let content = null
+    try { content = readFileSync(real, 'utf8') } catch {
       broken.push(`${c.path}:${c.from}（读不出来）`); continue
     }
+    const lines = content.split('\n')
     checked++
-    if (c.from > lines || c.to > lines) {
-      broken.push(`${c.path}:${c.from}${c.to !== c.from ? `-${c.to}` : ''}（文件共 ${lines} 行）`)
+    if (c.from > lines.length || c.to > lines.length) {
+      broken.push(`${c.path}:${c.from}${c.to !== c.from ? `-${c.to}` : ''}（文件共 ${lines.length} 行）`)
+      continue
+    }
+    // ★★★ 2026-09-18 第 23 轮加：**范围判据只查了"行在不在"，没查"那行是不是空的"**。
+    //
+    //   实测（同一轮）：`tool-request.mjs:731` 在台账与状态文档里共出现 5 次，
+    //   没有一次越界，而第 731 行是一个**空行**；真正那句话
+    //   （`if (pathScope === null) return undefined`）在 **780** 行（`scopeGuard` 内）。
+    //   另一处 `orchestrator/worker/executor.mjs:439` 也是空行。
+    //
+    //   为什么空行是**确定性**的坏引用，而不是"我猜它在胡扯"：
+    //   一条 `file:line` 引用存在的唯一理由是"**这一行**承载了我要的那句话"。
+    //   空行、以及 `}` / `})` / `);` 这类**纯收尾符**，不可能承载任何主张。
+    //   ⇒ 在这里报"空"**不会**误伤正文：它只否证"这一行有内容"。
+    //
+    //   ★ 边界（写下来免得下一轮有人把它当成更强的判据）：
+    //     它**不**检查"那一行的内容与文档里说的对不对"——那个要读懂语义，
+    //     做不了。所以绿不等于引用正确，只等于"它指向的地方**不是空的**"。
+    //
+    //   > 一个"引用指到空行"与一个"引用指到一张真实的表"，
+    //   > 在只查行号范围的判据里长得一样——而前者会让下一个人
+    //   > **打开文件、滚到那一行、看见空白、然后开始怀疑自己**。
+    const seg = []
+    for (let i = c.from; i <= c.to; i += 1) seg.push((lines[i - 1] ?? '').trim())
+    if (seg.every((s) => s === '' || /^[)}\];,]+$/.test(s))) {
+      broken.push(`${c.path}:${c.from}${c.to !== c.from ? `-${c.to}` : ''}`
+        + `（这一${c.to !== c.from ? '段' : '行'}是空的，或只有收尾符——`
+        + `引用指的地方没有内容：${JSON.stringify(seg[0] ?? '')}）`)
     }
   }
   // ★ "解析到 0 条"必须是**红**的：否则改了引用格式之后这条判据会静默变绿，

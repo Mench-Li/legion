@@ -16,7 +16,8 @@
 // 原计划写的验收项是「audit seq 连续性」。**实测真实库有 1 个缺口**（seq 4501–4502，
 // 夹在两条相隔 30s 的 release-stale 之间），而 `PRAGMA integrity_check` 为 ok。
 // 原因是分配器本身：`audit()` 在 BEGIN IMMEDIATE 里取 `MAX(seq)+1`
-// （team-hub/server.mjs:1197）——**它对回滚是容忍的**：事务回滚后该号被作废，
+// （`team-hub/server.mjs` 的 `audit()`：`SELECT COALESCE(MAX(seq),0) AS m FROM audit`）
+// ——**它对回滚是容忍的**：事务回滚后该号被作废，
 // 下一个写入者拿到的是「当前 MAX+1」，于是留下空洞。
 // 这不是缺陷，是「不回填已作废号」的设计。因此正确的验收项是
 // **「恢复前后缺口集合完全一致」**，而不是「没有缺口」。

@@ -28,7 +28,7 @@
 // 那里的 `absent` 由安装点（`run-floor.mjs`）fail closed 处置；
 // 这里的 `absent` 同样只负责**如实**，处置留给消费点。理由是同一个：
 //
-//   · `tool-request.mjs:731` 是 `if (pathScope === null) return undefined`（**放行**）。
+//   · `tool-request.mjs` 的 `scopeGuard`（`if (pathScope === null) return undefined`）**放行**。
 //     所以把"没配"读成"没有范围表"就是**放行一切**。
 //   · 而把"没配"读成"拒绝一切"也不对——那会让一个还没配过的部署**整个起不来**，
 //     于是操作者学会的做法是"随便填一张表让它闭嘴"。

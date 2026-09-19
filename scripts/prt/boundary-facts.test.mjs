@@ -332,6 +332,68 @@ test('⑪c 载荷：引用一个不存在的文件 ⇒ 该条事实必须红', (
   assert.match(String(v.actual), /ghost-file-xyz/)
 })
 
+// ── ⑪j / ⑪k：两条**一直存在**的漏洞（2026-09-18 第 23 轮补）──────────────────
+//
+// 两条都不是"新功能没写"，而是**既有判据少查了一样东西**，而且两次
+// 都表现为"这条判据是绿的，所以那些引用没问题"：
+//
+//   ⑪j  `LINE_CITATION_RE` 有 3 个捕获组，而代码读的是 `m[4]`（恒 undefined）
+//        ⇒ **范围终点永远等于起点** ⇒ `file:9999-99999` 这类越界范围静默放过。
+//   ⑪k  只查"行在不在"，不查"那一行是不是空的" ⇒ `tool-request.mjs:731`
+//        （**空行**，真话在 780 行）在台账与状态文档里共存了 5 处而全绿。
+
+test('⑪j ★★ 范围引用的**终点**真的在查：越界范围必须红（`m[4]`/`m[3]` off-by-one 的回归）', () => {
+  // 正向：起点合法、**终点越界**。若终点被读成 undefined（= 起点），
+  // 这条会静默通过 —— 那正是修复前的行为。
+  const r = scanLineCitations('见 `runtime/dsh-composition/tool-request.mjs:10-999999`。')
+  assert.ok(r.broken.some((b) => /999999|共 \d+ 行/.test(b)),
+    `★ 范围终点越界却没红 —— 范围被当成单行了：${JSON.stringify(r.broken)}`)
+
+  // 反向控制：**起点与终点都合法**的范围不许红。
+  // ★ 没有它，上面那条可以用"凡范围必红"满足 —— 那是另一种坏（狼来了）。
+  const ok = scanLineCitations('见 `runtime/dsh-composition/tool-request.mjs:10-20`。')
+  assert.deepEqual(ok.broken, [], `合法范围被误报：${JSON.stringify(ok.broken)}`)
+
+  // ★ 计数也要对：范围是**一条**引用，不是两条、也不是零条。
+  assert.equal(ok.total, 1, `范围引用被数成了 ${ok.total} 条`)
+  assert.equal(ok.checked, 1, `范围引用没有落到实处（checked=${ok.checked}）`)
+})
+
+test('⑪k ★★ 引用指到**空行/纯收尾符**必须红；指到真内容必须绿', () => {
+  // 正向：找一个真的空行，引它。
+  const src = readFileSync(resolve(REPO, 'runtime/dsh-composition/tool-request.mjs'), 'utf8').split('\n')
+  const blankAt = src.findIndex((l) => l.trim() === '') + 1
+  assert.ok(blankAt > 0, '这个文件里居然没有空行 ⇒ 载具失效')
+  const r = scanLineCitations(`见 \`runtime/dsh-composition/tool-request.mjs:${blankAt}\`。`)
+  assert.ok(r.broken.some((b) => /空的|收尾符/.test(b)),
+    `★ 引用指向第 ${blankAt} 行（空行）却没红：${JSON.stringify(r.broken)}`)
+
+  // 反向控制 ①：指到一行**有内容**的必须绿。
+  const contentAt = src.findIndex((l) => l.trim().startsWith('function scopeGuard')) + 1
+  assert.ok(contentAt > 0, '找不到 scopeGuard ⇒ 载具失效')
+  const okc = scanLineCitations(`见 \`runtime/dsh-composition/tool-request.mjs:${contentAt}\`。`)
+  assert.deepEqual(okc.broken, [],
+    `指到真内容却被误报：${JSON.stringify(okc.broken)}`)
+
+  // 反向控制 ②：**纯收尾符**那一类也要咬住（它比空行更常见：
+  // `})` / `}` / `);` 这三种在真实文件里到处都是）。
+  const braceAt = src.findIndex((l) => /^[)}\];,]+$/.test(l.trim())) + 1
+  if (braceAt > 0) {
+    const rb = scanLineCitations(`见 \`runtime/dsh-composition/tool-request.mjs:${braceAt}\`。`)
+    assert.ok(rb.broken.some((b) => /收尾符|空的/.test(b)),
+      `引用指向第 ${braceAt} 行（纯收尾符）却没红：${JSON.stringify(rb.broken)}`)
+  }
+
+  // ★ 反向控制 ③（这一条是防"判据变成狼来了"的关键）：
+  //   **范围跨越一个空行**不许红 —— 只有"整段都是空/收尾符"才算坏。
+  //   台账里 `run-floor.mjs:544-559` / `executor-binding.mjs:254-261`
+  //   正是这种"起点是收尾符、后面有真内容"的形状；把它们误报成坏引用
+  //   会让这条判据在真实台账上直接红，从而被人整体关掉。
+  const spanning = scanLineCitations('见 `runtime/dsh-composition/tool-request.mjs:730-740`。')
+  assert.deepEqual(spanning.broken, [],
+    `跨空行的合法范围被误报（判据变成狼来了）：${JSON.stringify(spanning.broken)}`)
+})
+
 test('⑪d 锚点消失：台账里一条引用都解析不出来 ⇒ 必须红（不许静默变绿）', () => {
   const ctx = withLedgerText(() => '# 空台账，没有任何引用\n')
   const r = checkFacts({ ctx })

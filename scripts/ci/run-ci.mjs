@@ -1160,11 +1160,11 @@ async function stageTest() {
         //   它盯三条装配期拒绝（缺表 / 无读根 / 有写根却没工作区根）+ 一条**往返**
         //   （产物必须能被**真** `checkPathScope` 吃下去——只看自己字段清单的断言
         //   抓不到"多带一个字段"，而那正是我写第一版时犯的真错）。
-        //   ★ 缺表那一条的要害：`tool-request.mjs:731` 在 `pathScope === null` 时**放行**，
+        //   ★ 缺表那一条的要害：`tool-request.mjs` 的 `scopeGuard` 在 `pathScope === null` 时**放行**，
         //   所以"没配上"在今天的表现是**放行一切**，不是拒绝一切。
         'runtime/dsh-composition/scope-table-binding.test.mjs',
         // ★ 同族的**投递点**（2026-09-18，第 19 条 §9.2 第 4 步）：表装配好了，
-        //   但 `tool-request.mjs:731` 要的是一个**函数**（`pathScope(projection)`），
+        //   但 `tool-request.mjs` 的 `scopeGuard` 要的是一个**函数**（`pathScope(projection)`），
         //   而全仓到它之前没有任何地方把表变成那个函数 ⇒ 端口恒为 `null` ⇒ 放行。
         //   它盯三个 fail-closed 决定（方向未知按 write / 目标缺失拒绝 /
         //   表在装配期就校验）与"缺席如实是 absent 且落到执行面就是放行"。

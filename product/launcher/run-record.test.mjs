@@ -28,6 +28,7 @@ import {
   orphanDiagnostics,
   parseImage,
   readRunRecord,
+  recordWiring,
   runRecordPath,
   sweepOrphans,
   validateRunRecord,
@@ -659,4 +660,129 @@ test('⑧ 记录可以被序列化（它要落盘，不能含任何活对象）'
   assert.deepEqual(JSON.parse(text).processes,
     [{ key: 'a', pid: 1, image: NODE, peakResource: null }])
   assert.equal(Object.isFrozen(r), true)
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// 接线（第 40 轮）：声明的那两张表**必须真的有消费者**
+//
+// 这一组盯的不是"某一次转换对不对"，而是一件结构上的事：
+// `RUN_RECORD_OPTIONAL_FIELDS` 的注释写着「新读数一律加在**这里**」。
+// 在加这一组之前，**照做一次**的后果是静默丢掉（反向证据见 接线③）。
+// ══════════════════════════════════════════════════════════════════════════
+
+test('接线① ★★★ 声明与接线必须逐项对齐（新增读数唯一的机械门禁）', () => {
+  const w = recordWiring()
+  assert.equal(w.ok, true, `声明与接线对不上：${JSON.stringify(w)}`)
+  assert.deepEqual(w.missingReader, [])
+  assert.deepEqual(w.missingOptionalReader, [])
+  assert.deepEqual(w.missingValidator, [])
+  assert.deepEqual(w.undeclared, [])
+  // ★ 门禁自己也要能被证伪：声明一个没人登记取法的字段，它必须报出来。
+  const injected = recordWiring({
+    optionalFields: [...RUN_RECORD_OPTIONAL_FIELDS, '从未登记过'],
+  })
+  assert.equal(injected.ok, false, '声明了一个没登记取法的字段，门禁却没报')
+  assert.deepEqual(injected.missingOptionalReader, ['从未登记过'])
+  assert.deepEqual(injected.missingValidator, ['从未登记过'])
+})
+
+test('接线② ★★★ 加一项到声明里并登记取法 ⇒ 它**真的**被带过去（扩展点是真的）', () => {
+  // 模拟"下一个人照着 `RUN_RECORD_OPTIONAL_FIELDS` 那行 ★★★ 注释加一个新读数"
+  const optionalFields = [...RUN_RECORD_OPTIONAL_FIELDS, 'diskUsageBytes']
+  const optionalReaders = {
+    peakResource: (p) => normalizePeakResource(p?.peakResource),
+    diskUsageBytes: (p) => (typeof p?.diskUsageBytes === 'number' ? p.diskUsageBytes : null),
+  }
+  const r = buildRunRecord({
+    runId: 'r', startedAt: 'T', optionalFields, optionalReaders,
+    processes: [{ key: 'hub', pid: 7, image: NODE, peakResource: null, diskUsageBytes: 512 }],
+  })
+  assert.equal(r.processes[0].diskUsageBytes, 512,
+    '★ 新声明并登记的读数**没有**被带过去——那正是编辑这一类注释时最坏的结果')
+  assert.deepEqual(Object.keys(r.processes[0]), [...RUN_RECORD_FIELDS, ...optionalFields])
+})
+
+test('接线③ ★★★ 声明了却没登记取法 ⇒ **具名上抛**，不是静默丢掉', () => {
+  let thrown = null
+  try {
+    buildRunRecord({
+      runId: 'r', startedAt: 'T',
+      processes: [{ key: 'hub', pid: 1, image: NODE }],
+      optionalFields: [...RUN_RECORD_OPTIONAL_FIELDS, 'neverRegistered'],
+    })
+  } catch (e) { thrown = e }
+  assert.ok(thrown !== null, '未登记的声明被**静默跳过**了——这正是修复前那种失效')
+  assert.equal(thrown.code, RUN_RECORD_CODES.FIELD_NOT_WIRED)
+  assert.deepEqual(thrown.fields, ['neverRegistered'])
+  // 同一个方向，必填字段也一样
+  let thrown2 = null
+  try {
+    buildRunRecord({
+      runId: 'r', startedAt: 'T',
+      processes: [{ key: 'hub', pid: 1, image: NODE }],
+      requiredFields: [...RUN_RECORD_FIELDS, 'neverRegistered2'],
+    })
+  } catch (e) { thrown2 = e }
+  assert.equal(thrown2?.code, RUN_RECORD_CODES.FIELD_NOT_WIRED)
+  assert.deepEqual(thrown2.fields, ['neverRegistered2'])
+})
+
+test('接线④ ★★ 可选字段的新成员也**真的会被校验**（坏形状必须报出来）', () => {
+  const optionalFields = [...RUN_RECORD_OPTIONAL_FIELDS, 'diskUsageBytes']
+  const optionalReaders = {
+    peakResource: (p) => normalizePeakResource(p?.peakResource),
+    diskUsageBytes: (p) => (typeof p?.diskUsageBytes === 'number' ? p.diskUsageBytes : null),
+  }
+  const optionalValidators = {
+    peakResource: () => {},
+    diskUsageBytes: (v, where, problems) => {
+      if (v !== null && !(v >= 0)) problems.push(`${where}.diskUsageBytes 是负数`)
+    },
+  }
+  const opts = { optionalFields, optionalReaders, optionalValidators }
+  const good = buildRunRecord({
+    runId: 'r', startedAt: 'T', ...opts,
+    processes: [{ key: 'hub', pid: 1, image: NODE, diskUsageBytes: 0 }],
+  })
+  assert.deepEqual(validateRunRecord(good, opts).problems, [])
+  const bad = buildRunRecord({
+    runId: 'r', startedAt: 'T', ...opts,
+    processes: [{ key: 'hub', pid: 1, image: NODE, diskUsageBytes: -1 }],
+  })
+  assert.deepEqual(validateRunRecord(bad, opts).problems, ['processes[0].diskUsageBytes 是负数'],
+    '★ 新加的可选字段没有被校验——写入方的 bug 会静默通过')
+})
+
+test('接线⑤ ★★ 登记了却没人声明 ⇒ 同样报出来（另一个方向的静默）', () => {
+  const w = recordWiring({
+    optionalReaders: { peakResource: () => null, obsoleteProbe: () => null },
+  })
+  assert.equal(w.ok, false)
+  assert.deepEqual(w.undeclared, ['obsoleteProbe'],
+    '一条永远不会被执行的读取登记，与一条写错的登记，是同一个东西')
+})
+
+test('接线⑥ ★★★ 写出的字段集合**恰好等于**声明的两张表', () => {
+  // 这条是"闭合映射"那段的机械版：多一个、少一个都不行。
+  const r = record([{ key: 'a', pid: 1, image: NODE, peakResource: null, 多余的: 1 }])
+  assert.deepEqual(Object.keys(r.processes[0]),
+    [...RUN_RECORD_FIELDS, ...RUN_RECORD_OPTIONAL_FIELDS])
+  // ★ 反向控制：**旧**记录（没有可选字段）必须仍然算好记录——
+  //   否则上一个 launcher 写下的记录会被判死，孤儿进程清不掉。
+  const legacy = { version: RUN_RECORD_VERSION, runId: 'r', launcherPid: null, startedAt: 'T',
+    processes: [{ key: 'a', pid: 1, image: NODE }] }
+  assert.deepEqual(validateRunRecord(legacy), { ok: true, problems: [] })
+  // 而"在了但是坏的"必须报出来。
+  // ★ 夹具要**填满**三个测量值：漏填的字段是 `undefined`，而 `undefined !== null`
+  //   ⇒ 校验器会多报两条"既不是 null 也不是有限数"。那两条**是对的**，
+  //   但它们会让"我到底在测哪条规则"变得不可读（第一版就是这么写错的）。
+  const record1 = (pr) => ({ ...legacy,
+    processes: [{ key: 'a', pid: 1, image: NODE, peakResource: pr }] })
+  const filled = { ok: false, peakWorkingSetBytes: null, peakRssBytes: null, cpuMs: null }
+  assert.deepEqual(validateRunRecord(record1(filled)).problems, [],
+    'ok=false 且三个测量值都是 null ⇒ 这是合法的"采过但采不到"')
+  const zeroed = { ...filled, peakRssBytes: 0 }
+  const problems = validateRunRecord(record1(zeroed)).problems
+  assert.equal(problems.length, 1, `只该报"0 不许冒充没采到"这一条，实测 ${JSON.stringify(problems)}`)
+  assert.match(problems[0], /ok=false/)
 })

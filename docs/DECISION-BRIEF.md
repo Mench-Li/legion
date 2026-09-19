@@ -149,6 +149,27 @@ worker（orchestrator 进程）与 DSH Runtime 是**两个进程**，所以同�
 记录层已能带、能校验、能落盘、能读回 ⇒ **缺的是生产者的那一行**。
 修法与第 0 条同理（在另一个会话的在制品文件里，1 行）。
 
+★★ **第 40 轮把这根链逐段走完了，结论是"真的只差那一行"**（此前是推断，现在是读数）：
+
+| 段 | 位置 | 状态 |
+| --- | --- | --- |
+| 生产者 | `supervisor.mjs:508` `status()` 每行带 `peakResource: readPeakResource()` | ★ **已经在产出** |
+| 记录层收不收 | `run-record.mjs` `buildRunRecord` 遍历 `RUN_RECORD_OPTIONAL_FIELDS` | ★ **收**（第 40 轮改成机械的） |
+| 校验层认不认 | `run-record.mjs` `validateRunRecord` 遍历同一张表 | ★ **认** |
+| **中间那一跳** | `launcher.mjs:1261-1267` 把 `status()` 的行映射成三个字段 | ★★ **就是这里丢的** |
+
+★ 第 40 轮**顺手修掉了记录层一个真缺陷**（`launcher.mjs` 那一行没动，不属于我）：
+`RUN_RECORD_OPTIONAL_FIELDS` 那张声明表在加这条判据之前**没有任何机械消费者**——
+`buildRunRecord` 与 `validateRunRecord` **各自手写** `'peakResource'` 这个名字。
+于是照那张表的 ★★★ 注释"新读数一律加在这里"**照做一次**的后果是：
+新字段**写不出去**、也**不被校验**，而记录**看起来完全正常**
+（实测：生产者交 `diskUsageBytes` ⇒ 写出没有它、`problems` 为 `[]`）。
+现在两侧都遍历声明，声明了没登记 ⇒ **具名上抛**（`RUN_RECORD_FIELD_NOT_WIRED`），
+并且 `recordWiring()` 把"声明 ↔ 接线"的四个方向都报出来（套件 `run-record` +6 例，**53/53**）。
+
+> 一张只写在注释里的扩展点，与一条真的能扩展的通路，
+> 在"下一个人照做之后会不会发现问题"这个读数上是同一个东西：都不会发现。
+
 ---
 
 ## 4. 您点了头之后，我立刻能做的（**按"它挡着产品完成标准"排序**）

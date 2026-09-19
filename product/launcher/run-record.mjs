@@ -68,6 +68,13 @@ export const RUN_RECORD_CODES = Object.freeze({
   SWEEP_REFUSED: 'SWEEP_REFUSED',
   /** 清理时杀失败。 */
   SWEEP_FAILED: 'SWEEP_FAILED',
+  /**
+   * ★★★ 声明了一个进程字段，却没人登记"怎么取它/怎么校验它"。
+   *
+   *   **这是一个编程错误，不是一个数据状况**——所以它必须**上抛**，
+   *   绝不能"跳过这个字段继续写"。跳过就是静默丢掉那个读数。
+   */
+  FIELD_NOT_WIRED: 'RUN_RECORD_FIELD_NOT_WIRED',
 })
 
 /**
@@ -170,6 +177,111 @@ export function normalizePeakResource(v) {
   })
 }
 
+/**
+ * ★★★ 必填字段**怎么从生产者那一行取出来**。
+ *
+ *   这张登记表必须与 `RUN_RECORD_FIELDS` **逐项对齐**——由 `recordWiring()` 判，
+ *   由 `run-record.test.mjs` 钉住。`buildRunRecord` **遍历声明**去取，
+ *   **不再手写字段名**（见下面"第三处"那段）。
+ *
+ *   > 一张"新读数写在这里"的登记表，与一条真的会把新读数带过去的通路，
+ *   > 只差这几行——只不过缺少它们时，下一个照做的人会得到一个**静默丢掉**的读数。
+ */
+const REQUIRED_FIELD_READERS = Object.freeze({
+  key: (p) => String(p?.key ?? ''),
+  pid: (p) => (typeof p?.pid === 'number' ? p.pid : null),
+  image: (p) => (typeof p?.image === 'string' && p.image !== '' ? p.image : null),
+})
+
+/** ★★★ 可选字段怎么规范化。同样必须与 `RUN_RECORD_OPTIONAL_FIELDS` 逐项对齐。 */
+const OPTIONAL_FIELD_READERS = Object.freeze({
+  peakResource: (p) => normalizePeakResource(p?.peakResource),
+})
+
+/**
+ * ★★★ 可选字段的**形状校验器**。
+ *
+ *   与 `OPTIONAL_FIELD_READERS` **分开**，因为"写出去的样子"与"读回来什么样算坏"
+ *   是两个方向的问题：写的一方要**宽容**（不合形状的落成 null），
+ *   读的一方要**报出来**。
+ *
+ *   > 一个"写入方把坏形状静默落成 null"的模块，配上一个"读取方永远看不到坏形状"的
+ *   > 模块，合起来得到的是「这个读数一直是好的」——而它可能**从来没有过值**。
+ */
+const OPTIONAL_FIELD_VALIDATORS = Object.freeze({
+  peakResource: (pr, where, problems) => {
+    if (typeof pr !== 'object' || Array.isArray(pr)) {
+      problems.push(`${where}.peakResource 既不是 null 也不是对象：${JSON.stringify(pr)}`)
+      return
+    }
+    if (typeof pr.ok !== 'boolean') {
+      problems.push(`${where}.peakResource.ok 不是布尔：${JSON.stringify(pr.ok)}`)
+    }
+    for (const f of PEAK_RESOURCE_MEASURE_FIELDS) {
+      const v = pr[f]
+      if (v !== null && !(typeof v === 'number' && Number.isFinite(v))) {
+        problems.push(`${where}.peakResource.${f} 既不是 null 也不是有限数：${JSON.stringify(v)}`)
+      }
+    }
+    // ★★★ 本模块要守的那条纪律，落成一条**可判**的不变式：
+    //   `ok=false`（采过但采不到）时，三个测量值**必须都是 null**。
+    //
+    //   0 是一个**测量结论**（"一个字节都没用"），不是"不知道"。
+    //   一个 `ok:false` 却带着 0 的记录，会让"这台机器很省内存"
+    //   与"这台机器根本没采到"在事后读记录时同形。
+    if (pr.ok === false) {
+      const notNull = PEAK_RESOURCE_MEASURE_FIELDS.filter((f) => pr[f] !== null)
+      if (notNull.length > 0) {
+        problems.push(`${where}.peakResource 声明 ok=false，却带着测量值 `
+          + `${notNull.join('/')}——"没采到"必须写 null，**不许写 0**`)
+      }
+    }
+  },
+})
+
+/**
+ * ★★★ 声明与接线**对不对得上**。这是本模块"新增进程读数"唯一一处**机械门禁**。
+ *
+ *   为什么要有它：这个文件里已经有一张 ★★★ 的登记表（`RUN_RECORD_OPTIONAL_FIELDS`），
+ *   注释写着「新读数一律加在**这里**」。而在加这条判据之前，**照做一次**的后果是：
+ *
+ *     · `buildRunRecord` 只把**它自己手写的那几个**名字抄过去 ⇒ 新字段**静默丢掉**；
+ *     · `validateRunRecord` 只校验**它自己手写的那几个**名字 ⇒ 新字段**静默不校验**；
+ *     · 于是记录看起来**完全正常**，而那个读数从来没到过磁盘。
+ *
+ *   实测（`scratch/_probe-record-drop.mjs`）：生产者交上 `diskUsageBytes`，
+ *   写出的记录里没有它，`validateRunRecord(...).problems` 为 **`[]`**。
+ *
+ *   > 一张只写在注释里的扩展点，与一条真的能扩展的通路，
+ *   > 在"下一个人照做之后会不会发现问题"这个读数上是**同一个东西**：
+ *   > 都不会发现。
+ *
+ *   可注入是为了让**用例能造一个第二字段**去证明这条通路真的通——
+ *   不然这条判据只能证明"当下这一个字段恰好是通的"。
+ */
+export function recordWiring({
+  requiredFields = RUN_RECORD_FIELDS,
+  optionalFields = RUN_RECORD_OPTIONAL_FIELDS,
+  requiredReaders = REQUIRED_FIELD_READERS,
+  optionalReaders = OPTIONAL_FIELD_READERS,
+  optionalValidators = OPTIONAL_FIELD_VALIDATORS,
+} = {}) {
+  const missingReader = requiredFields.filter((f) => typeof requiredReaders[f] !== 'function')
+  const missingOptionalReader = optionalFields.filter((f) => typeof optionalReaders[f] !== 'function')
+  const missingValidator = optionalFields.filter((f) => typeof optionalValidators[f] !== 'function')
+  // 反向：登记了却没人声明 ⇒ 一条**永远不会被执行**的读取/校验（同样的静默，另一个方向）
+  const undeclared = [...Object.keys(requiredReaders), ...Object.keys(optionalReaders)]
+    .filter((f) => !requiredFields.includes(f) && !optionalFields.includes(f))
+  return Object.freeze({
+    ok: missingReader.length + missingOptionalReader.length
+      + missingValidator.length + undeclared.length === 0,
+    missingReader: Object.freeze(missingReader),
+    missingOptionalReader: Object.freeze(missingOptionalReader),
+    missingValidator: Object.freeze(missingValidator),
+    undeclared: Object.freeze(undeclared),
+  })
+}
+
 /** 记录路径。`dataDir` 为空时返回 null——**不猜位置**。 */
 export function runRecordPath(dataDir) {
   if (typeof dataDir !== 'string' || dataDir === '') return null
@@ -201,22 +313,55 @@ export function runRecordPath(dataDir) {
  *   加进 `RUN_RECORD_FIELDS` 反而会让旧记录判死、孤儿进程清不掉。
  *   这是这一条记账里**第二处**"看起来像同一件事、其实处置相反"的地方
  *   （第一处是"接上只是加一行"）。
+ *
+ * ★★★ 续 2（2026-09-18 第 40 轮）：上面那段"闭合映射"的告警当时**仍然成立**，
+ *   只不过它把代价说成"至少要改这里"——而"改这里"是个**手写名字**的动作。
+ *   也就是说：`RUN_RECORD_OPTIONAL_FIELDS` 那张表**没有任何机械消费者**，
+ *   照它的注释加一个字段，得到的是**静默丢掉**（实测见 `recordWiring` 的注释）。
+ *
+ *   现在这一层**遍历声明**去取：`RUN_RECORD_FIELDS` 走 `REQUIRED_FIELD_READERS`，
+ *   `RUN_RECORD_OPTIONAL_FIELDS` 走 `OPTIONAL_FIELD_READERS`。
+ *   声明了却没登记 ⇒ **具名上抛**（`FIELD_NOT_WIRED`），不是跳过。
+ *
+ *   > 这是本条记账里**第三处**"看起来像同一件事、其实处置相反"：
+ *   > 前两处是"接上只是加一行"（其实不止）与"加进 `RUN_RECORD_FIELDS`"（其实要加可选表），
+ *   > 这一处是"照着注释加一个字段"（其实会被丢掉）。
  */
-export function buildRunRecord({ runId, launcherPid = null, startedAt, processes, now = () => new Date().toISOString() } = {}) {
+export function buildRunRecord({
+  runId, launcherPid = null, startedAt, processes,
+  requiredFields = RUN_RECORD_FIELDS,
+  optionalFields = RUN_RECORD_OPTIONAL_FIELDS,
+  requiredReaders = REQUIRED_FIELD_READERS,
+  optionalReaders = OPTIONAL_FIELD_READERS,
+  now = () => new Date().toISOString(),
+} = {}) {
+  const unwired = requiredFields.filter((f) => typeof requiredReaders[f] !== 'function')
+    .concat(optionalFields.filter((f) => typeof optionalReaders[f] !== 'function'))
+  if (unwired.length > 0) {
+    const err = new Error(`RunRecord 声明了字段却没有登记取法：${unwired.join('、')}`
+      + '——这一层**不**跳过未登记的字段（跳过就是把它静默丢掉）')
+    err.code = RUN_RECORD_CODES.FIELD_NOT_WIRED
+    err.fields = Object.freeze([...unwired])
+    throw err
+  }
   return Object.freeze({
     version: RUN_RECORD_VERSION,
     runId: String(runId ?? ''),
     launcherPid: typeof launcherPid === 'number' ? launcherPid : null,
     startedAt: startedAt ?? now(),
-    processes: Object.freeze((Array.isArray(processes) ? processes : []).map((p) => Object.freeze({
-      key: String(p?.key ?? ''),
-      pid: typeof p?.pid === 'number' ? p.pid : null,
-      image: typeof p?.image === 'string' && p.image !== '' ? p.image : null,
-      // ★ 缺席与 `null` 是**同一个意思**（"这个写入方没有这个读数"），
-      //   所以统一落成 `null`，不用"字段在不在这"再表达一次。
-      //   于是读取方只有一件事要判：`peakResource` 是 null 还是有形状。
-      peakResource: normalizePeakResource(p?.peakResource),
-    }))),
+    processes: Object.freeze((Array.isArray(processes) ? processes : []).map((p) => {
+      // ★ 遍历**声明**，不手写名字：声明里加一项就自动被带过去（或具名上抛）。
+      //   键的顺序 = 先必填、后可选，与历史记录逐字相同。
+      const row = {}
+      for (const f of requiredFields) row[f] = requiredReaders[f](p)
+      for (const f of optionalFields) {
+        // ★ 缺席与 `null` 是**同一个意思**（"这个写入方没有这个读数"），
+        //   所以统一落成 `null`，不用"字段在不在这"再表达一次。
+        //   于是读取方只有一件事要判：它是 null 还是有形状。
+        row[f] = optionalReaders[f](p)
+      }
+      return Object.freeze(row)
+    })),
   })
 }
 
@@ -227,7 +372,11 @@ export function buildRunRecord({ runId, launcherPid = null, startedAt, processes
  * 以为"只有两个进程要清"，而实际上有五个。宁可报"记录坏了、不知道上次
  * 起了什么"，也不要按一条残缺记录去清理。
  */
-export function validateRunRecord(value) {
+export function validateRunRecord(value, {
+  requiredFields = RUN_RECORD_FIELDS,
+  optionalFields = RUN_RECORD_OPTIONAL_FIELDS,
+  optionalValidators = OPTIONAL_FIELD_VALIDATORS,
+} = {}) {
   const problems = []
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     return { ok: false, problems: ['记录不是一个对象'] }
@@ -240,7 +389,7 @@ export function validateRunRecord(value) {
   } else {
     for (const [i, p] of value.processes.entries()) {
       if (p === null || typeof p !== 'object') { problems.push(`processes[${i}] 不是对象`); continue }
-      for (const f of RUN_RECORD_FIELDS) {
+      for (const f of requiredFields) {
         if (!(f in p)) problems.push(`processes[${i}] 缺少字段「${f}」`)
       }
       if ('pid' in p && p.pid !== null && !Number.isInteger(p.pid)) {
@@ -252,36 +401,13 @@ export function validateRunRecord(value) {
       //   > 一个"缺席"与一个"有但是坏的"，在只判"字段在不在"的校验里
       //   > 是同一个东西——而前者必须放行（否则旧记录判死、孤儿进程清不掉），
       //   > 后者必须报出来（否则一个新写入方的 bug 会伪装成"这个读数没有"）。
-      if ('peakResource' in p && p.peakResource !== null && p.peakResource !== undefined) {
-        const pr = p.peakResource
-        if (typeof pr !== 'object' || Array.isArray(pr)) {
-          problems.push(`processes[${i}].peakResource 既不是 null 也不是对象：`
-            + JSON.stringify(pr))
-        } else {
-          if (typeof pr.ok !== 'boolean') {
-            problems.push(`processes[${i}].peakResource.ok 不是布尔：${JSON.stringify(pr.ok)}`)
-          }
-          for (const f of PEAK_RESOURCE_MEASURE_FIELDS) {
-            const v = pr[f]
-            if (v !== null && !(typeof v === 'number' && Number.isFinite(v))) {
-              problems.push(`processes[${i}].peakResource.${f} 既不是 null 也不是有限数：`
-                + JSON.stringify(v))
-            }
-          }
-          // ★★★ 本模块要守的那条纪律，落成一条**可判**的不变式：
-          //   `ok=false`（采过但采不到）时，三个测量值**必须都是 null**。
-          //
-          //   0 是一个**测量结论**（"一个字节都没用"），不是"不知道"。
-          //   一个 `ok:false` 却带着 0 的记录，会让"这台机器很省内存"
-          //   与"这台机器根本没采到"在事后读记录时同形。
-          if (pr.ok === false) {
-            const notNull = PEAK_RESOURCE_MEASURE_FIELDS.filter((f) => pr[f] !== null)
-            if (notNull.length > 0) {
-              problems.push(`processes[${i}].peakResource 声明 ok=false，却带着测量值 `
-                + `${notNull.join('/')}——"没采到"必须写 null，**不许写 0**`)
-            }
-          }
-        }
+      //
+      // ★★★ 第 40 轮：这里过去**手写**了 `'peakResource'`，于是
+      //   `RUN_RECORD_OPTIONAL_FIELDS` 里新加一项**不会**被校验到——
+      //   一个新写入方的坏形状会**静默通过**。现在遍历声明。
+      for (const f of optionalFields) {
+        if (!(f in p) || p[f] === null || p[f] === undefined) continue
+        optionalValidators[f](p[f], `processes[${i}]`, problems)
       }
     }
   }

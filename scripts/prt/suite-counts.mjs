@@ -96,7 +96,23 @@ export function parseCountClaims(docText) {
     const row = MAIN_ROW_RE.exec(line)
     if (row === null) return
     for (const m of line.matchAll(CLAIM)) {
-      out.push({ row: row[1], line: i + 1, name: m[1].split('/').pop(), claim: Number(m[2]) })
+      // ★★★ 第 36 轮订正：这里此前是 `m[1].split('/').pop()`——**把目录丢掉了**。
+      //
+      //   正则本来**认**路径（`[\w./-]*`），而这一行又把路径砍回文件名。后果：
+      //   一条**写得很准**的全路径引用（`runtime/contracts/contract.test.mjs 45 例`）
+      //   被当成裸名 `contract.test.mjs` 去解析 ⇒ 撞上另一个同名文件
+      //   （`whiteboard/packages/shared/test/contract.test.mjs`）⇒ 记 `ambiguous` ⇒
+      //   **静默跳过**，而跳过是"没能核对"，不是"文档写错了"。
+      //
+      //   实测（2026-09-19）：主表 F-01 那一格写全路径之后，本判据**仍然**报
+      //   `F-01 \`contract.test.mjs\`（ambiguous）`——**它看不见刚补上的目录**。
+      //
+      //   > 一个把路径砍成文件名的判据，
+      //   > 会把「这条引用很准，只是我读不出目录」报成「这条引用有歧义」——
+      //   > 于是**修文档永远消不掉这个告警**，而下一个读的人会以为文档还有问题。
+      //
+      //   保留完整名字。`resolveTargets()` 先按**全路径**找，再按裸名找。
+      out.push({ row: row[1], line: i + 1, name: m[1], claim: Number(m[2]) })
     }
   })
   return out
@@ -111,12 +127,35 @@ export function parseCountClaims(docText) {
  */
 export function resolveTargets(claims, trackedTests, suiteFiles = new Map()) {
   const byBase = new Map()
+  const byPath = new Set()
   for (const f of trackedTests) {
-    const b = f.replace(/\\/g, '/').split('/').pop()
+    const norm = f.replace(/\\/g, '/')
+    byPath.add(norm)
+    const b = norm.split('/').pop()
     if (!byBase.has(b)) byBase.set(b, [])
-    byBase.get(b).push(f.replace(/\\/g, '/'))
+    byBase.get(b).push(norm)
   }
   return claims.map((c) => {
+    // ★ 第 36 轮：**带目录的引用先按全路径解**（原样存在就是它，无需再猜）。
+    //   这一步必须在裸名解析**之前**——否则一条准确的全路径会被同名文件撞成
+    //   `ambiguous`，而那个告警**改文档消不掉**（判据自己把目录丢了）。
+    if (c.name.includes('/')) {
+      if (byPath.has(c.name)) return { ...c, kind: 'file', files: [c.name] }
+      // ★★ 带目录的**模块名**（`team-hub/budget-alert.mjs（20 例）`）：同目录下的
+      //    `budget-alert.test.mjs` 才是那 20 例的所在。这一步与下面裸名分支的
+      //    归一化**同一规则**，只是多了目录。
+      //    ⚠️ 少了它，`team-hub/budget-alert.mjs` 会落进 `unresolved`——
+      //    而修之前它靠 `split('/').pop()` 侥幸解对了（`budget-alert.mjs` → 裸名归一化）。
+      //    **修一处"看不见目录"，顺手把另一处"靠丢目录才解对"的地方打断了**，
+      //    所以两条路都要在。
+      const sib = c.name.endsWith('.test.mjs')
+        ? null
+        : `${c.name.replace(/\.(mjs|cjs|js|ts)$/, '')}.test.mjs`
+      if (sib !== null && byPath.has(sib)) return { ...c, kind: 'file', files: [sib] }
+      const sf0 = suiteFiles.get(c.name)
+      if (sf0 !== undefined) return { ...c, kind: 'suite', files: sf0 }
+      return { ...c, kind: 'unresolved', files: [] }
+    }
     // 归一化声明里的名字 → 候选文件名。三种写法都要认：
     //   `run-events.test.mjs`（**已经**是文件名）
     //   `budget-alert.mjs`   （带扩展名的模块名）

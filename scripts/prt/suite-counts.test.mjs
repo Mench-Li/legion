@@ -183,3 +183,64 @@ test('⑨ 从 `run-ci.mjs` 读套件→文件：套件名后面**不带**括号�
   assert.deepEqual(m.get('plain-suite'), ['a/plain-suite.test.mjs'])
   assert.deepEqual(m.get('with-paren'), ['b/x.test.mjs', 'b/y.test.mjs'])
 })
+
+test('⑩ ★★★ 回归（第 36 轮的真缺陷）：**全路径**引用不许被砍成裸名', () => {
+  // 提取器此前是 `m[1].split('/').pop()`——正则本来**认**路径，而那一行又把
+  // 路径砍回文件名。后果：一条写得很准的全路径
+  // （`runtime/contracts/contract.test.mjs 45 例`）被当成裸名去解析，
+  // 撞上另一个同名文件 ⇒ 记 `ambiguous` ⇒ **静默跳过**。
+  //
+  //   实测：主表 F-01 那一格改成全路径之后，本判据**仍然**报
+  //   `F-01 \`contract.test.mjs\`（ambiguous）`——**它看不见刚补上的目录**，
+  //   于是**修文档永远消不掉这个告警**。
+  const claims = parseCountClaims(docWith([
+    '| F-01 | 甲 | ✅ | `x.mjs` | 套件 `runtime-contract`（64 例）、'
+    + '`runtime/contracts/contract.test.mjs`（45 例） | — |',
+  ]))
+  const names = claims.map((c) => c.name)
+  assert.ok(names.includes('runtime/contracts/contract.test.mjs'),
+    `目录被砍掉了：${JSON.stringify(names)}`)
+
+  // ★ 而解析必须**按全路径**解到它自己，哪怕全仓另有同名文件
+  const twoSame = ['runtime/contracts/contract.test.mjs', 'whiteboard/packages/shared/test/contract.test.mjs']
+  const r = resolveTargets(
+    [{ row: 'F-01', line: 1, name: 'runtime/contracts/contract.test.mjs', claim: 45 }],
+    twoSame, new Map(),
+  )
+  assert.equal(r[0].kind, 'file', `全路径没解到文件：${r[0].kind}`)
+  assert.deepEqual(r[0].files, ['runtime/contracts/contract.test.mjs'])
+})
+
+test('⑪ ★★ 对称控制：带目录的**模块名**仍要落到同目录的 `.test.mjs`', () => {
+  // ⚠️ 修"看不见目录"时，**顺手打断了另一处"靠丢目录才解对"的地方**：
+  //   `team-hub/budget-alert.mjs（20 例）` 的 20 例在 `team-hub/budget-alert.test.mjs`，
+  //   而新加的全路径分支不认识它 ⇒ 落进 `unresolved`（修之前靠 `pop()` 侥幸解对）。
+  //   两条路都要在：全路径优先，然后**带目录的归一化**。
+  // ⚠️ `trackedTests` 只含 `*.test.mjs`（见 `trackedTests()`）——**模块本身不在里面**。
+  //   我的第一版夹具把 `team-hub/budget-alert.mjs`（模块）也塞了进去，于是全路径分支
+  //   先命中了它、返回了**模块**而不是测试文件 ⇒ 用例假红。
+  //   **夹具必须与生产给的是同一种输入**，否则测的是另一件事。
+  const tracked = ['team-hub/budget-alert.test.mjs', 'x/other.test.mjs']
+  const r = resolveTargets(
+    [{ row: 'F-15', line: 1, name: 'team-hub/budget-alert.mjs', claim: 20 }],
+    tracked, new Map(),
+  )
+  assert.equal(r[0].kind, 'file', `模块名带目录没解到：${r[0].kind}`)
+  assert.deepEqual(r[0].files, ['team-hub/budget-alert.test.mjs'])
+  // ★ 而**真的**不存在的路径仍然是 `unresolved`（不许猜）
+  const bad = resolveTargets(
+    [{ row: 'F-01', line: 1, name: 'no/such/module.mjs', claim: 3 }],
+    tracked, new Map(),
+  )
+  assert.equal(bad[0].kind, 'unresolved', '不存在的路径被猜出来了')
+})
+
+test('⑫ ★★ 真仓库：33 条声明**全部**被核对，一条都不许静默跳过', () => {
+  // ★ 这是修 ⑩ 的**动力**：修之前读数是「已核 32、跳过 1」，而那 1 条
+  //   （F-01 的全路径）**恰好是最清楚的那一条**。
+  //   > 一个"跳过一条"的判据与一个"全对"的判据，在只报 `ok` 的输出里一样。
+  const r = checkRepo()
+  assert.equal(r.skipped.length, 0, `仍有静默跳过：${JSON.stringify(r.skipped)}`)
+  assert.equal(r.checked, r.total, `已核 ${r.checked} / 共 ${r.total}`)
+  assert.deepEqual(r.violations, [], JSON.stringify(r.violations))
+})

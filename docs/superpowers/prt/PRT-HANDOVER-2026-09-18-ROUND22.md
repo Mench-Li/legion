@@ -36,7 +36,7 @@
 | 台账 | **145 行 = 140 ✅ / 4 ⏸ / 1 ⬜** | `node scripts/prt/spec-progress.mjs --check` → `140/145，未完成 5` |
 | 4 条 ⏸ | PRT-009 / PRT-253 / PRT-256 / PRT-910 | 需要一台执行期外的机器 / 一次真的自动执行 / 真实外部用户 / 真实用户项目 |
 | 1 条 ⬜ | PRT-316 | **日期闸门**：最早 **2026-09-24**（评审闸门已过） |
-| 全量 CI（**交付 HEAD**） | **9/9 PASS，exit 0**（HEAD `3cce191`，`.ci/r38`，**脏树 14 改 + 456 未跟踪**，指纹 `2bfe87f2dcd9bfd3`） | `test` 904084ms、`skipped=1`（secret-store，已知） |
+| 全量 CI（**交付 HEAD**） | **9/9 PASS，exit 0**（HEAD `b5062e1`，`.ci/r39b`，**脏树 14 改 + 459 未跟踪**，指纹 `0962ddffbe7889b2`） | `test` 906452ms、`skipped=1`（secret-store，已知） |
 | 全量 CI（第 34 轮收口） | **9/9 PASS，exit 0**（HEAD `ff8d9f7`，`.ci/r34`，脏树 14 改 + 446 未跟踪） | `test` 873594ms |
 | 全量 CI（第 33 轮收口） | **9/9 PASS，exit 0**（HEAD `af3a440`，`.ci/r33`，脏树 14 改 + 444 未跟踪） | `test` 877363ms |
 | 全量 CI（第 32 轮收口） | **9/9 PASS，exit 0**（HEAD `89590fc`，`.ci/r32b`，脏树 14 改 + 443 未跟踪） | `test` 873289ms |
@@ -72,7 +72,7 @@
 | 决策摘要 | `docs/DECISION-BRIEF.md` —— 条数由判据与 §5 裁决表双向核对 | `scripts/prt/intervention-coverage.mjs` |
 | 文档表格 | 八份权威文档 **0 处**列错位；全仓棘轮 **87**（只许降） | 套件 `doc-table` |
 
-★ 这一次全量 CI 也跑在一棵**冻住**的树上：`test` 阶段那 904 秒里，
+★ 这一次全量 CI 也跑在一棵**冻住**的树上：`test` 阶段那 906 秒里，
 工作树的代码与文档**一个字节都没动过**——所以它是一次"提交即冻结"的读数。
 （`.ci/r35b/summary.json` 的 `tree.fingerprint = 1648c0f71901ba2a` 就是这句话的凭据：
 它是对 `git status --porcelain` 整份清单取的哈希，冻结意味着这个指纹在跑的过程中不变。）

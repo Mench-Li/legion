@@ -6,9 +6,9 @@
 - 对照表：[`MULTI-AGENT-FEATURE-STATUS.md`](../../MULTI-AGENT-FEATURE-STATUS.md) —— F-01…F-25，**裁决项 1～29**
 - ★ **决策摘要**：[`DECISION-BRIEF.md`](../../DECISION-BRIEF.md) —— 把那 29 条压成「**你要说的那一句话**」，**按 §9 链排序**；★ **§0A 就是那条链唯一的硬断（第 20 条）**
 - 目标文档：[`MULTI-AGENT-FEATURE-OPTIMIZATION.md`](../../MULTI-AGENT-FEATURE-OPTIMIZATION.md) —— §1.2 状态注记校准 / §1.3 正文级偏离
-- 最近一轮 CI：**`.ci/r38`**（HEAD `3cce191`，**这一行就是被那次 CI 跑过的那棵树**）—— **9/9 阶段 PASS，exit 0**
-  （`test` **904084ms**，`skipped=1` 为已知的 secret-store；套件 **372** 个全部有归属；
-  树指纹 `2bfe87f2dcd9bfd3` —— **脏树 14 改 + 456 未跟踪**，见 §3.0j 第 28 轮）
+- 最近一轮 CI：**`.ci/r39b`**（HEAD `b5062e1`，**这一行就是被那次 CI 跑过的那棵树**）—— **9/9 阶段 PASS，exit 0**
+  （`test` **906452ms**，`skipped=1` 为已知的 secret-store；套件 **372** 个全部有归属；
+  树指纹 `0962ddffbe7889b2` —— **脏树 14 改 + 459 未跟踪**，见 §3.0j 第 28 轮）
 - 相关提交：（第 35 轮：台账 **140 条 ✅ 的可复跑证据**判据 + `--only <阶段>` 范围判据）、
   （第 34 轮：断点**归属**判据 —— 链上每个断点都必须有人认领）、
   （第 33 轮：§9 链逐节投影 —— **L5 硬断** + 序数/计数判据修正）、

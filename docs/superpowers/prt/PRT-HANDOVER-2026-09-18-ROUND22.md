@@ -48,7 +48,7 @@
 | 全量 CI（第 25 轮代码收口） | **9/9 PASS，exit 0**（HEAD `bacd407`，`.ci/r25`） | `test` 824992ms |
 | 全量 CI（第 23 轮代码收口） | **9/9 PASS，exit 0**（HEAD `3624e96`，`.ci/r23b`） | `test` 807541ms |
 | 全量 CI（第 22 轮，上一轮读数） | **9/9 PASS，exit 0**（HEAD `466239d`，`.ci/r22a`） | `test` 811934ms |
-| 套件清单完备 | **367 个 `*.test.mjs` 全部有归属**（357 → 359 → 360 → 361 → 362 → 363 → **364**：第 23 轮两套、第 25 轮一套、第 26 轮零套、第 27/28/29/31 轮各一套） | `stageTest` |
+| 套件清单完备 | **368 个 `*.test.mjs` 全部有归属**（357 → 359 → 360 → 361 → 362 → 363 → **364**：第 23 轮两套、第 25 轮一套、第 26 轮零套、第 27/28/29/31 轮各一套） | `stageTest` |
 | 第 23 轮新套件 | `budget-alert` **29/29**（20 例求值 + 9 例真 HTTP；**9 处变异逐条咬住**） | `team-hub/budget-alert{,-http}.test.mjs` |
 | 第 24 轮（坐标判据） | `boundary-facts` **PASS** + 自身套件 **36/36**（34 → 36） | `scripts/prt/boundary-facts{.test,}.mjs` |
 | 第 25 轮（计数判据） | 新判据 `suite-counts` **PASS**；主表计数声明 **32 处已核、0 处不符**；自身套件 **10/10**；变异 **4/4** | `scripts/prt/suite-counts{.test,}.mjs` |
@@ -57,7 +57,7 @@
 | 第 28 轮（读数的适用范围） | 新判据 `ci-reading-integrity` **16/16**；**当场红在自己报告的那一行上**；`run-ci.mjs` 开始把**树的状态**记进 `summary.json` | `scripts/prt/ci-reading-integrity{.test,}.mjs` |
 | 第 29 轮（跨文档校准） | 新判据 `spec-status-calibration` **13/13**；**目标点名的输入文档**里 **7 条**过期状态注记已建校准表；变异 **8/8** | `scripts/prt/spec-status-calibration{.test,}.mjs` |
 | 第 31 轮（落点可解析） | 新判据 `feature-landing-paths` **13/13**；**恰好 1 处**真缺陷（F-21 的短路径）已订正；变异 **7/7** | `scripts/prt/feature-landing-paths{.test,}.mjs` |
-| 第 35 轮（✅ 的证据） | 台账 **140 条 ✅ 的"可复跑证据"必须解得开**（套件别名要真的是一行 CI 套件 / 带目录路径原样存在 / 裸名全仓唯一）：读数 套件 96 + 路径 33 + 裸名 39，抓出 **3 处歧义裸名**（已修文档）；★★ 顺带抓出并修掉**我自己**的两个坑：① 探针把"套件别名"当文件名 ⇒ **40 个假发现**（本族第 6 次误报）；② `--only boundary` **不跑** `boundary-facts` ⇒ 第 34 轮的收尾把一个**红的**判据发了出去 + 新判据 `stage-scope`（判据上线第一次就抓住了自己）。套件 **365 → 367** | `scripts/prt/ledger-evidence.mjs`、`scripts/prt/stage-scope.mjs` |
+| 第 35 轮（✅ 的证据） | 台账 **140 条 ✅ 的"可复跑证据"必须解得开**（套件别名要真的是一行 CI 套件 / 带目录路径原样存在 / 裸名全仓唯一）：读数 套件 96 + 路径 33 + 裸名 39，抓出 **3 处歧义裸名**（已修文档）；★★ 顺带抓出并修掉**我自己**的两个坑：① 探针把"套件别名"当文件名 ⇒ **40 个假发现**（本族第 6 次误报）；② `--only boundary` **不跑** `boundary-facts` ⇒ 第 34 轮的收尾把一个**红的**判据发了出去 + 新判据 `stage-scope`（判据上线第一次就抓住了自己）。套件 **365 → 368**；★★★ 还咬出**我自己制造的假读数**：一个用例的**名字**改写了 CI 的读数（`tests=21 pass=20 skipped=1`，真值 10/10/0/0）⇒ 解析抽成 `scripts/ci/parse-suite-output.mjs` 取**最后**一个匹配 + 摘要行报 `⚠计数被输出干扰` + 根因守卫扫全部用例名 | `scripts/prt/ledger-evidence.mjs`、`scripts/prt/stage-scope.mjs`、`scripts/ci/parse-suite-output.mjs` |
 | 第 34 轮（断点归属） | 链上每个断点必须**声明**一个 §5 条目编号，判据核它解得开：①断点无归属 ②指到空处 ③已过期 ④没写理由 ⑤表读不出。读数：**全部有归属**（L5→20 / L7→28 / L9→16）；★ 起因是我的探针**误报**（§5 用中文名「保留策略」指 `retention.mjs`）——本族**第 5 次**误报；`alpha-chain-trace` 8→**14/14**，变异 8→**15/15** | `scripts/prt/alpha-chain-trace.mjs` |
 | 第 33 轮（§9 链投影） | 新判据 `alpha-chain-trace` **8/8**：把目标文档 §9 那条九节链逐节投影 → **L5 硬断**（= §5 第 20 条）、L7/L9 软缺口；★ 顺带修掉我自己那条判据的**序数/计数**误报（`intervention-coverage` 10→**11/11**）；变异 **8/8** + **9/9** | `scripts/prt/alpha-chain-trace{.test,}.mjs` |
 | 第 32 轮（决策摘要） | 交付 `docs/DECISION-BRIEF.md`（29 条压成一页纸）；`intervention-coverage` 加"简报条数 ↔ §5 裁决表"判据 → **10/10**（原 4 例 + 新 6 例）；★ 它**当天抓到我自己第 30 轮**把第 29 条插在**空行之后**（掉到表外）；变异 **7/7** | `scripts/prt/intervention-coverage{.test,}.mjs` |
@@ -624,7 +624,7 @@ node scripts/prt/reachability.mjs --diff        # → 与基线比对（46 条�
 | 主表计数声明 | 33 处 → **0 处不符** |
 | 全仓其余 ~106 处 | **故意不动**（历史读数，见 11.3） |
 | 全量 CI | **9/9 PASS，exit 0**（HEAD `bacd407`，`.ci/r25`，`test` 824992ms） |
-| 套件总数 | **367**（362 → 363 → 364 → 365 → **366** → **367**：第 35 轮新增 `ledger-evidence` 与 `stage-scope`） |
+| 套件总数 | **368**（363 → 364 → 365 → 366 → 367 → **368**：第 35 轮新增 `ledger-evidence`、`stage-scope`、`parse-suite-output`） |
 
 ---
 

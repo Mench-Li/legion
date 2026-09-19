@@ -70,11 +70,17 @@ test('⑦ ★★ 只判 ✅ 行：🟡/⏸/⬜ 的证据栏不受这条判据约
   assert.deepEqual(res.violations, [], '非 ✅ 行被判红：' + JSON.stringify(res.violations))
 })
 
-test('⑧ ★ "套件 `tests 21 / pass 20 / skipped 1`" 不是套件名（自然中文里的一句话）', () => {
-  // 真例：PRT-509 那句「同套件 `tests 21 / pass 20 / skipped 1`」
-  const m = extractMentions('同套件 `tests 21 / pass 20 / skipped 1`。**故…**')
+test('⑧ ★ 运行器摘要那句话不是套件名（自然中文里的一句话）', () => {
+  // 真例：PRT-509 那句「同套件 `<运行器摘要>`」。
+  // ★★ 而这条用例的**名字**里曾经真的写了那句话的字面量——node 会把用例名
+  //    打进 stdout，于是 CI 的摘要解析器（当时取的是**第一个**匹配）把这一行
+  //    读成了那句字面量里的数字，而它真实是 10/10/0。
+  //    **一个用例的名字改写了一次 CI 的读数。** 故这里只留一句话，不留字面量；
+  //    夹具放在**函数体**里（成功时不会被打进输出）。
+  const fixture = '同套件 `' + ['tests', '21', '/', 'pass', '20', '/', 'skipped', '1'].join(' ') + '`。**故…**'
+  const m = extractMentions(fixture)
   assert.deepEqual(m.suites, [], `把运行器摘要当成了套件名：${JSON.stringify(m.suites)}`)
-  assert.deepEqual(m.proseSpans, ['tests 21 / pass 20 / skipped 1'])
+  assert.equal(m.proseSpans.length, 1)
   // 而正常的套件名要被认出来
   assert.deepEqual(extractMentions('套件 `product-secrets`（23 例）').suites, ['product-secrets'])
   // ★ 名字形状：字母开头、只含 [\w./-]

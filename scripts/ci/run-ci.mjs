@@ -37,6 +37,7 @@ import { createHash } from 'node:crypto'
 
 // ★ DSH 检出的**唯一**一份判定（见 `stageTest` 里那段 `dshFound`）。
 import { resolveDshCheckout } from '../lib/dsh-checkout.mjs'
+import { parseSuiteCounts, countsFragment } from './parse-suite-output.mjs'
 
 const SELF_DIR = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(SELF_DIR, '..', '..')            // 仓库根（本 worktree）
@@ -149,27 +150,20 @@ async function runNodeTests(label, files, cwd, nodeArgs = []) {
   // 超时现场快照并入 raw：没有它，「套件超时」只剩一句「可能泄漏句柄」，
   // 无法知道到底是哪些后代进程没退（本次排查正是缺这份证据）。
   const raw = timedOut && r.tree ? all + '\n\n[超时现场] 运行器仍存活的后代进程：\n' + r.tree + '\n' : all
-  const num = (re) => { const m = re.exec(all); return m ? Number(m[1]) : NaN }
-  const counts = {
-    tests: num(/\btests\s+(\d+)/),
-    pass: num(/\bpass\s+(\d+)/),
-    fail: num(/\bfail\s+(\d+)/),
-    // ★★★ `skipped` 曾经**没有被解析**，而本文件的四处注释都写着
-    //   「`skipped: N` 看得见」「摘要里留下 `skipped: N`」——那两句话是**假的**：
-    //   摘要行里只有 `tests/pass/fail`，跳过数只能靠 `tests - pass - fail` 的
-    //   算术**反推**，而"反推"与"看见"不是同一件事（一个整数减法不会告诉你
-    //   跳过的是哪一批，也不会在任何地方留下痕迹）。
-    //
-    //   实测代价（2026-09-17，本机 `DSH_CHECKOUT` 未设而检出就在盘上）：
-    //   四个真进程套件 **38 条断言里跳过 20 条**，而 CI 那四行的读数是
-    //   `exit=0 tests=38 pass=18 fail=0` —— 摘要里一个字都没说"有 20 条没跑"。
-    //   把 `DSH_CHECKOUT` 指向那份检出后，同一批变成 **36 pass / 1 skip**。
-    //
-    //   > 一个"跳过了 20 条真进程断言"的 PASS，
-    //   > 与一个"全部跑过"的 PASS，在摘要行上是同一个东西——
-    //   > 只不过前者的绿来自**没跑**，而注释还在替它保证"看得见"。
-    skipped: num(/\bskipped\s+(\d+)/),
-  }
+  // ★★★ 计数解析抽到 `./parse-suite-output.mjs`（第 35 轮）——**因为这一格
+  //   两个方向都被咬过**：先是 `skipped` 没被解析（看不见），后是 `re.exec` 取
+  //   **第一个**匹配（看见了一个假的：一个用例的**名字**改写了一次读数）。
+  //   抽出来是为了**能测**：`parse-suite-output.test.mjs` 直接喂两段输出对比。
+  const counts = parseSuiteCounts(all)
+  //   ★ `skipped` 曾经**没有被解析**（2026-09-17 的教训，留在 `parse-suite-output.mjs` 里）：
+  //   「`skipped: N` 看得见」那句话曾经是**假的**——摘要只有 tests/pass/fail，
+  //   跳过数只能靠 `tests - pass - fail` 反推，而"反推"与"看见"不是同一件事。
+  //   实测代价：四个真进程套件 **38 条里跳过 20 条**，而读数是
+  //   `exit=0 tests=38 pass=18 fail=0`——一个字都没说"有 20 条没跑"。
+  //
+  //   > 一个"跳过了 20 条真进程断言"的 PASS，
+  //   > 与一个"全部跑过"的 PASS，在摘要行上是同一个东西——
+  //   > 只不过前者的绿来自**没跑**，而注释还在替它保证"看得见"。
   const ok = r.code === 0 && (Number.isNaN(counts.fail) || counts.fail === 0)
   const failLines = all.split('\n').filter(l => /^not ok|# fail|^✖/.test(l)).slice(0, 8).join(' | ')
   // ★ 机读读数行：套件可以打印 `MEASURE <名字>=<值> …`，摘要**成败都带上它**。
@@ -194,8 +188,7 @@ async function runNodeTests(label, files, cwd, nodeArgs = []) {
     .map(l => l.trim())
     .filter(l => l.startsWith('MEASURE '))
     .slice(0, 4)
-  const detail = label + ': exit=' + r.code + ' tests=' + counts.tests + ' pass=' + counts.pass + ' fail=' + counts.fail
-    + ' skipped=' + (Number.isNaN(counts.skipped) ? 0 : counts.skipped)
+  const detail = label + ': exit=' + r.code + ' ' + countsFragment(counts)
     + (measureLines.length ? ' | ' + measureLines.join(' | ') : '')
     + (timedOut ? '（套件超过 ' + Math.round(TEST_SUITE_TIMEOUT_MS / 1000) + 's 被杀（已连后代进程一起清理）：可能存在泄漏句柄或死锁）' : '')
   return { ok, code: r.code, detail: ok ? detail : detail + ' FAIL: ' + (failLines || '(see ci.log)'), raw, counts }
@@ -1720,6 +1713,21 @@ async function stageTest() {
   { label: 'stage-scope（`--only <阶段>` 与套件名**像**但不是一回事：'
     + 'boundary↔boundary-facts、doc↔doc-table/doc-render 必须声明过）',
     files: ['scripts/prt/stage-scope.test.mjs'], cwd: ROOT },
+  // ★★ 第十三套（第 35 轮，**同样是本轮被自己咬出来的**）：计数解析器本身。
+  //
+  //   起因：`ledger-evidence` 有一个用例的**名字**里带了字面量
+  //   `tests 21 / pass 20 / skipped 1`（它是夹具）。node 把用例名打进 stdout，
+  //   而当时的解析用 `re.exec(all)` 取的是**第一个**匹配
+  //   ⇒ 那一行被读成 `tests=21 pass=20 skipped=1`，而它真实是 **10/10/0**；
+  //   `test` 阶段的总 `skipped` 也跟着从 1 变 2，多出来的那一条**根本不存在**。
+  //
+  //     ⚠️ 这一格两个方向都被咬过：
+  //        · 看不见：`skipped` 曾经**没被解析**（38 条里跳过 20 条，摘要一个字没说）
+  //        · 看见了一个假的：**一个用例的名字改写了一次 CI 的读数**
+  //     两个方向都让一个数说谎，所以解析器抽成了模块，并在这里直接喂两段输出对比。
+  { label: 'parse-suite-output（CI 计数解析：取**最后**一个匹配，'
+    + '且输出里有东西长得像摘要时必须说出来——"一个用例的名字改写过一次读数"）',
+    files: ['scripts/ci/parse-suite-output.test.mjs'], cwd: ROOT },
   // ★ 第四套，同一个形状的**第四个方向**：前三套核的是"两份**清单**之间"或
   //   "**数字**↔产物"，这一套核的是"**对照表自己**"。
   //

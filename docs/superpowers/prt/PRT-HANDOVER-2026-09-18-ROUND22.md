@@ -36,7 +36,7 @@
 | 台账 | **145 行 = 140 ✅ / 4 ⏸ / 1 ⬜** | `node scripts/prt/spec-progress.mjs --check` → `140/145，未完成 5` |
 | 4 条 ⏸ | PRT-009 / PRT-253 / PRT-256 / PRT-910 | 需要一台执行期外的机器 / 一次真的自动执行 / 真实外部用户 / 真实用户项目 |
 | 1 条 ⬜ | PRT-316 | **日期闸门**：最早 **2026-09-24**（评审闸门已过） |
-| 全量 CI（**交付 HEAD**） | **9/9 PASS，exit 0**（HEAD `e9a5a4c`，`.ci/r29`，**脏树 23 改 + 434 未跟踪**，指纹 `afaa10b9dd0d996f`） | `test` 870305ms、`skipped=1`（secret-store，已知） |
+| 全量 CI（**交付 HEAD**） | **9/9 PASS，exit 0**（HEAD `cef163b`，`.ci/r29b`，**脏树 14 改 + 436 未跟踪**，指纹 `81b9529dc4c87dc7`） | `test` 870442ms、`skipped=1`（secret-store，已知） |
 | 全量 CI（第 28 轮收口） | **9/9 PASS，exit 0**（HEAD `5aa61df`，`.ci/r28b`，脏树 14 改 + 433 未跟踪） | `test` 872428ms |
 | 全量 CI（第 27 轮收口） | **9/9 PASS，exit 0**（HEAD `dd6eb8f`，`.ci/r27b`） | `test` 873171ms |
 | 全量 CI（第 26 轮收口） | **9/9 PASS，exit 0**（HEAD `4ccdf86`，`.ci/r26b`） | `test` 937905ms |
@@ -58,7 +58,7 @@
 
 ★ 这一次全量 CI 也跑在一棵**冻住**的树上：`test` 阶段那 870 秒里，
 工作树的代码与文档**一个字节都没动过**——所以它是一次"提交即冻结"的读数。
-（`.ci/r29/summary.json` 的 `tree.fingerprint = afaa10b9dd0d996f` 就是这句话的凭据：
+（`.ci/r29b/summary.json` 的 `tree.fingerprint = 81b9529dc4c87dc7` 就是这句话的凭据：
 它是对 `git status --porcelain` 整份清单取的哈希，冻结意味着这个指纹在跑的过程中不变。）
 
 ★★ **"冻住"与"干净"是两件事，别看串**：
@@ -887,8 +887,8 @@ ESM 的**模块缓存**让它仍然用改之前那份 ⇒ **5 个变异全部报
 `modifiedCount`/`untrackedCount`/`fingerprint` 写进 `summary.json`，
 **脏树时红字警告**（下面是 `.ci/r28` 的真实输出）：
 
-    ⚠⚠ 本次 CI 跑在一棵**脏树**上：已改 23 个文件 + 未跟踪 434 个（指纹 afaa10b9dd0d996f）。
-       ⇒ 这次读数证明的是「**这棵树**是绿的」，**不是**「提交 e9a5a4c 是绿的」。
+    ⚠⚠ 本次 CI 跑在一棵**脏树**上：已改 14 个文件 + 未跟踪 436 个（指纹 81b9529dc4c87dc7）。
+       ⇒ 这次读数证明的是「**这棵树**是绿的」，**不是**「提交 cef163b 是绿的」。
 
 ★ 读不出来时报 `known:false` 并说"读不出来"——**"没法判断"不等于"干净"**。
 

@@ -78,6 +78,16 @@
       "reason": "PRT-712：台账自己写了\"还没有界面/CLI 消费者\"。⇒ 裁决处：§5 第 16 条"
     },
     {
+      "file": "product/metrics-spec7.mjs",
+      "class": "gap",
+      "reason": "第 39 轮：spec §7 第 6 条那六格指标的**口径**。与 `metrics-source.mjs` 是**同一个决定**——\"这些产品级动作由谁触发\"，不是本机能定的。★ 刻意**不**接进远程心跳（PRT-713 的载荷走允许名单，加键=加数据外流，该由人点头）。⇒ 裁决处：§5 第 16 条"
+    },
+    {
+      "file": "product/metrics-spec7-source.mjs",
+      "class": "gap",
+      "reason": "第 39 轮：那六格指标的**真 SQL 生产者**（`event_deliveries`/`run_attempts`/`permission_requests`/`budget_reservations` + 升级审计）。数据在库里、读出口也写好了，缺的是\"谁来看\"。同 `metrics-source.mjs`。⇒ 裁决处：§5 第 16 条"
+    },
+    {
       "file": "product/release/checklist.mjs",
       "class": "gap",
       "reason": "同上。⇒ 裁决处：§5 第 16 条"

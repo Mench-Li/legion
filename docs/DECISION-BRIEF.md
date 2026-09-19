@@ -179,7 +179,7 @@ worker（orchestrator 进程）与 DSH Runtime 是**两个进程**，所以同�
     `team-hub/approval-ttl.mjs`（PRT-615，**40 例**）——**代码里说的是 TTL，不是超时**；
   - §1/§8 引的**路径逐个解得开**（含 §8 引的 **11 个仓外文件**，
     以及 **16 处** `file:line` 引用、合计 **22 个行号**——**全部在范围内，0 处越界**）；
-  - `reachability` 的 **46 项**不可达，每一项都带分类（`by-design=13 / gap=25 / deliberate=8`）
+  - `reachability` 的 **48 项**不可达，每一项都带分类（`by-design=13 / gap=27 / deliberate=8`）
     与一个裁决处编号。
 - **这一轮我自己报过 4 次假发现**（worktree 副本把 `server.mjs` 撑成 38 个同名、
   两次"零命中"其实是拼写变体、一次是我的解析器不懂表格惯例）。

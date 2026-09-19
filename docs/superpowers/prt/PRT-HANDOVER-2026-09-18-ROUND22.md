@@ -67,7 +67,7 @@
 | 第 33 轮（§9 链投影） | 新判据 `alpha-chain-trace` **8/8**：把目标文档 §9 那条九节链逐节投影 → **L5 硬断**（= §5 第 20 条）、L7/L9 软缺口；★ 顺带修掉我自己那条判据的**序数/计数**误报（`intervention-coverage` 10→**11/11**）；变异 **8/8** + **9/9** | `scripts/prt/alpha-chain-trace{.test,}.mjs` |
 | 第 32 轮（决策摘要） | 交付 `docs/DECISION-BRIEF.md`（29 条压成一页纸）；`intervention-coverage` 加"简报条数 ↔ §5 裁决表"判据 → **10/10**（原 4 例 + 新 6 例）；★ 它**当天抓到我自己第 30 轮**把第 29 条插在**空行之后**（掉到表外）；变异 **7/7** | `scripts/prt/intervention-coverage{.test,}.mjs` |
 | 注释里的坐标引用 | 坏引用 **9 → 0**（另 2 处属别的会话在制品） | `scratch/_audit-citations.mjs` |
-| 可达性 | 不可达 **46** 条，**全部已定性**（`by-design` / `deliberate` / `gap` / `in-flight`） | `scripts/prt/reachability.mjs --diff` |
+| 可达性 | 不可达 **48** 条，**全部已定性**（`by-design=13` / `gap=27` / `deliberate=8`）。★ 第 39 轮 +2：新增的 §7 指标口径与生产者**自己**被这条门禁拦下——它们出自用例、零生产入口，与 `metrics-source.mjs` 是**同一个决定**（§5 第 16 条）。**门禁逼着人对新模块说出"属于哪一类"，而不是让它悄悄可达或悄悄不可达** | `scripts/prt/reachability.mjs --diff` |
 | 裁决项 | §5 清单 **1～29**（编号连续、无缺号、无重复；第 30 轮新增第 29 条） | `MULTI-AGENT-FEATURE-STATUS.md` §5 |
 | 决策摘要 | `docs/DECISION-BRIEF.md` —— 条数由判据与 §5 裁决表双向核对 | `scripts/prt/intervention-coverage.mjs` |
 | 文档表格 | 八份权威文档 **0 处**列错位；全仓棘轮 **87**（只许降） | 套件 `doc-table` |

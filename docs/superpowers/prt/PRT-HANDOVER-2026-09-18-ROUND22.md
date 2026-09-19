@@ -36,7 +36,7 @@
 | 台账 | **145 行 = 140 ✅ / 4 ⏸ / 1 ⬜** | `node scripts/prt/spec-progress.mjs --check` → `140/145，未完成 5` |
 | 4 条 ⏸ | PRT-009 / PRT-253 / PRT-256 / PRT-910 | 需要一台执行期外的机器 / 一次真的自动执行 / 真实外部用户 / 真实用户项目 |
 | 1 条 ⬜ | PRT-316 | **日期闸门**：最早 **2026-09-24**（评审闸门已过） |
-| 全量 CI（**交付 HEAD**） | **9/9 PASS，exit 0**（HEAD `caf24e7`，`.ci/r35b`，**脏树 14 改 + 450 未跟踪**，指纹 `1648c0f71901ba2a`） | `test` 874998ms、`skipped=1`（secret-store，已知） |
+| 全量 CI（**交付 HEAD**） | **9/9 PASS，exit 0**（HEAD `5e83e23`，`.ci/r36`，**脏树 16 改 + 452 未跟踪**，指纹 `b55813d278c26d55`） | `test` 901613ms、`skipped=1`（secret-store，已知） |
 | 全量 CI（第 34 轮收口） | **9/9 PASS，exit 0**（HEAD `ff8d9f7`，`.ci/r34`，脏树 14 改 + 446 未跟踪） | `test` 873594ms |
 | 全量 CI（第 33 轮收口） | **9/9 PASS，exit 0**（HEAD `af3a440`，`.ci/r33`，脏树 14 改 + 444 未跟踪） | `test` 877363ms |
 | 全量 CI（第 32 轮收口） | **9/9 PASS，exit 0**（HEAD `89590fc`，`.ci/r32b`，脏树 14 改 + 443 未跟踪） | `test` 873289ms |
@@ -59,6 +59,7 @@
 | 第 29 轮（跨文档校准） | 新判据 `spec-status-calibration` **13/13**；**目标点名的输入文档**里 **7 条**过期状态注记已建校准表；变异 **8/8** | `scripts/prt/spec-status-calibration{.test,}.mjs` |
 | 第 31 轮（落点可解析） | 新判据 `feature-landing-paths` **13/13**；**恰好 1 处**真缺陷（F-21 的短路径）已订正；变异 **7/7** | `scripts/prt/feature-landing-paths{.test,}.mjs` |
 | 第 35 轮（✅ 的证据） | 台账 **140 条 ✅ 的"可复跑证据"必须解得开**（套件别名要真的是一行 CI 套件 / 带目录路径原样存在 / 裸名全仓唯一）：读数 套件 96 + 路径 33 + 裸名 39，抓出 **3 处歧义裸名**（已修文档）；★★ 顺带抓出并修掉**我自己**的两个坑：① 探针把"套件别名"当文件名 ⇒ **40 个假发现**（本族第 6 次误报）；② `--only boundary` **不跑** `boundary-facts` ⇒ 第 34 轮的收尾把一个**红的**判据发了出去 + 新判据 `stage-scope`（判据上线第一次就抓住了自己）。套件 **365 → 368**；★★★ 还咬出**我自己制造的假读数**：一个用例的**名字**改写了 CI 的读数（`tests=21 pass=20 skipped=1`，真值 10/10/0/0）⇒ 解析抽成 `scripts/ci/parse-suite-output.mjs` 取**最后**一个匹配 + 摘要行报 `⚠计数被输出干扰` + 根因守卫扫全部用例名 | `scripts/prt/ledger-evidence.mjs`、`scripts/prt/stage-scope.mjs`、`scripts/ci/parse-suite-output.mjs` |
+| 第 36 轮（目标文档自己的表） | **F-01～F-25 那张实现投影表**此前没有任何判据：新判据 `feature-evidence` **10/10**（变异 9/9）核「点名的 PRT / 套件 / 用例文件解得开」+ ★ R4「**🟡 行不许说『不差什么』**」（§5.11 记的那个真形状）；真读数 29 行 / 57 指针，抓出 **1 处真的**（F-01 的裸名歧义，全仓 2 个同名）已订正。★★ 而**同一处缺陷被第二套判据又犯了一次**：`suite-counts.mjs` 的 `name: m[1].split('/')` **把目录砍掉** ⇒ 一条准确的全路径被当成裸名 ⇒ 记 `ambiguous` ⇒ **静默跳过**（`已核 32、跳过 1`）⇒ **修文档永远消不掉那个告警**；修法是全路径优先 + 带目录归一化 ⇒ **已核 33、跳过 0**。★ 我自己的两处错也记下来：判据第一版读到 **0 行却报绿**（已补下限）、R5 削限定词去重造出 **4 处假阳性** | `scripts/prt/feature-evidence.mjs`、`scripts/prt/suite-counts.mjs`（补 3 例回归） |
 | 第 34 轮（断点归属） | 链上每个断点必须**声明**一个 §5 条目编号，判据核它解得开：①断点无归属 ②指到空处 ③已过期 ④没写理由 ⑤表读不出。读数：**全部有归属**（L5→20 / L7→28 / L9→16）；★ 起因是我的探针**误报**（§5 用中文名「保留策略」指 `retention.mjs`）——本族**第 5 次**误报；`alpha-chain-trace` 8→**14/14**，变异 8→**15/15** | `scripts/prt/alpha-chain-trace.mjs` |
 | 第 33 轮（§9 链投影） | 新判据 `alpha-chain-trace` **8/8**：把目标文档 §9 那条九节链逐节投影 → **L5 硬断**（= §5 第 20 条）、L7/L9 软缺口；★ 顺带修掉我自己那条判据的**序数/计数**误报（`intervention-coverage` 10→**11/11**）；变异 **8/8** + **9/9** | `scripts/prt/alpha-chain-trace{.test,}.mjs` |
 | 第 32 轮（决策摘要） | 交付 `docs/DECISION-BRIEF.md`（29 条压成一页纸）；`intervention-coverage` 加"简报条数 ↔ §5 裁决表"判据 → **10/10**（原 4 例 + 新 6 例）；★ 它**当天抓到我自己第 30 轮**把第 29 条插在**空行之后**（掉到表外）；变异 **7/7** | `scripts/prt/intervention-coverage{.test,}.mjs` |
@@ -68,7 +69,7 @@
 | 决策摘要 | `docs/DECISION-BRIEF.md` —— 条数由判据与 §5 裁决表双向核对 | `scripts/prt/intervention-coverage.mjs` |
 | 文档表格 | 八份权威文档 **0 处**列错位；全仓棘轮 **87**（只许降） | 套件 `doc-table` |
 
-★ 这一次全量 CI 也跑在一棵**冻住**的树上：`test` 阶段那 875 秒里，
+★ 这一次全量 CI 也跑在一棵**冻住**的树上：`test` 阶段那 902 秒里，
 工作树的代码与文档**一个字节都没动过**——所以它是一次"提交即冻结"的读数。
 （`.ci/r35b/summary.json` 的 `tree.fingerprint = 1648c0f71901ba2a` 就是这句话的凭据：
 它是对 `git status --porcelain` 整份清单取的哈希，冻结意味着这个指纹在跑的过程中不变。）

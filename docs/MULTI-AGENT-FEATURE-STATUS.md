@@ -49,8 +49,8 @@
 
 | 编号 | 名称 | 状态 | 代码落点 | 判据 / 证据 | 还差什么 |
 |---|---|---|---|---|---|
-| F-01 | Runtime Contract | ✅ | `runtime/contracts/adapter.mjs`、`run.mjs`、`errors.mjs` | PRT-101～109；套件 `runtime-contract`（13 例）、`contract.test.mjs` | — |
-| F-02 | DshRuntimeAdapter | ✅ | `runtime/adapters/dsh/*` | PRT-201～206；套件 `dsh-adapter`（25 例） | — |
+| F-01 | Runtime Contract | ✅ | `runtime/contracts/adapter.mjs`、`run.mjs`、`errors.mjs` | PRT-101～109；套件 `runtime-contract`（64 例）、`contract.test.mjs` | — |
+| F-02 | DshRuntimeAdapter | ✅ | `runtime/adapters/dsh/*` | PRT-201～206；套件 `dsh-adapter`（98 例） | — |
 | F-03 | Runtime Manager | ✅ | `product/runtime-state.mjs` | `RUNTIME_STATES` / `CLAIM_POLICY` / `runtimeStatusReport()`；PRT-711 认领闸门 | — |
 | F-04 | Orchestrator Core | 🟡 | `orchestrator/worker/*`、`team-hub/run-store.mjs`、`orchestrator/{acceptance,pipeline,workspace}/` | PRT-301～316。★ **不在这里复制那份计数**——逐条状态见 [`superpowers/prt/PRT-PROGRESS.md`](./superpowers/prt/PRT-PROGRESS.md) 台账（那是权威）。此处曾写着一份手抄的四列合计（已完成 143、部分 19、未开始 1、需外部输入 2），而台账当时的真实读数是 **145 行 = 已完成 138、部分 4、未开始 1、需外部输入 2**：**它对不上**，且**没有任何门禁会去核对它**（`check-docs` 只管 `README.md` 与 `docs/FEATURES.md`）。一个手抄的计数与一份会漂移的计数是同一个东西，只不过前者的读者会以为它被核对过——现已改为不复制，并由 `scripts/prt/progress-check.test.mjs` 用例 ⑥ 钉住 | `plugins/src/index.ts` 仍是主要编排热点（§1.1 的判断）；**PRT-316 是台账里唯一的 ⬜**，且它是**排期规则**没到（`0db37af` = 2026-09-10，一个发布周期 = 14 天 ⇒ 最早 **2026-09-24** 可启动），不是"没事可做" |
 | F-05 前半 | 运行明细作为可持久化 RunEvent | ✅ | `team-hub/run-store.mjs`（`run_events`）、`orchestrator/worker/{executor,main}.mjs`、`server.mjs` | `team-hub/run-events.test.mjs`（18 例） | 明细**不进** `/api/events`（刻意：不新增第二条公开流） |
@@ -90,7 +90,7 @@
 | F-20 缺口③ | team-hub **没有安装事实**（无表、无路由）⇒ 控制面重启后依赖预检拿一份空基线，每个包都突然报"缺依赖" | `pack-facts.test.mjs` 19 例 + `pack-facts-http.test.mjs` 8 例（含**跨模块实例**重建、seq 的 CAS、账只追加）；seq 的 CAS 已**变异验证** |
 | F-19 缺口① | 七类版本**没有落点**：`EmployeeManifest` 只是上下文来源，没有任何模块承载"这个岗位被冻结成哪一版" | `role-pack.test.mjs` 40 例（含对账两种漂移、嵌套强制面、连接器凭证），6 处守卫已**变异验证** |
 | F-19 缺口② | 冻结产物**算完即丢**（纯内存）⇒ "上周那个岗位是哪一版"永远回答不了 | `role-pack-store.test.mjs` 25 例 + `role-pack-http.test.mjs` 10 例（含 409 **真的走得到网络上**）；6 处守卫已**变异验证** |
-| F-21 | 四条能力**全部不存在**（grep `connector`/`mcp` 在产品代码里零命中）：没有工具级策略、没有风险分级、没有密钥引用、没有故障隔离 | 能力已建（`registry.test.mjs` 32 例 + `connector-store.test.mjs` 23 例 + `connector-http.test.mjs` 11 例真 HTTP；**30 处守卫全部变异验证**）。★ 途中抓到 4 个真缺陷（能力名兜底成最严、凭证检查只看自己认识的字段、刚失败却报 healthy、`version` 参数被静默忽略），详见 §4.1。★★ **2026-09-18 续批：上面那句「判定面仍没有生产调用方」已经过期了。** 判定面建起来了（`runtime/connectors/decision-port.mjs`）并接进组合根（`assemble.mjs` 一次造齐两半、共用**同一份** registry；`tool-request.mjs` 新增 `connectorJudgment`；`enforcementSurfaces()` 6 格 → **7 格**）。证据不是"接上了"，而是**真调用被拦下**：`root.test.mjs` ⑨④ 里不装 ⇒ `preExecute(git-commit)` = `allow`（前提对照），装了 ⇒ `deny`（理由「连接器 github 没有声明工具「git-commit」」），而本连接器声明过的 `git-status` 照旧 `allow`；⑨⑤ 是**闭环**（开路 ⇒ deny ⇒ 反馈面记回 ⇒ 探针成功 ⇒ 恢复 allow）。★ 同一批还修掉一个**静默**缺陷：输入字段叫 `declaredRisk` 而**输出**字段叫 `risk`，照着输出写 `risk: 'critical'` 会被**静默丢掉**、落回能力下限 `low` ⇒ 一个作者标成 critical 的工具被自动放行；`declareTool` 的键集已改成**封闭**（全仓 9 处真样本用错字段名，其中一条用例**一直是绿的但什么都没验到**）。⚠️ **还差的一条不再是接线**：生产入参里没有连接器声明表 ⇒ `connectorJudgment` 在生产里仍是 `false`；"声明从哪来"归第 19 条那个配置键。精确读数：**从「没人接线」变成「接好了、且真调用被它拦下」**，而**不是**"生产里已经在拦"。★★ **2026-09-18 第 5 步续：投递面也建起来了**（`runtime/dsh-composition/connector-port.mjs` → `root-row.mjs` 的真生产调用方），于是上面那句"生产入参里没有连接器声明表"也**过期了**——配了 `LEGION_CONNECTOR_DECLARATIONS` 之后那一格**真的**翻 `true`，且一次**连接器策略是 deny** 的调用被连接器层拦下（`connectorDecided === 1`），前提对照是"没配时同一次调用 `allow`"。⇒ **仍差的两条换了位置**：**①** 那个键在 schema 的 `fields` 里却**不在** `product/process-manifest.mjs` 的 runtime `envNames` 里（与 `LEGION_PATH_SCOPE` **同一处**，`buildChildEnv()` 对未声明的键直接抛或静默丢掉）⇒ 与第 19 条同生共死；**②** 归属是**推导式**的（按声明），于是登记表那条「未声明就拒绝」**在生产里不可达**——真正的洞是"名字撞上已知核心工具"的未声明连接器工具。两条都写进了 §4.2 与人工介入清单 |
+| F-21 | 四条能力**全部不存在**（grep `connector`/`mcp` 在产品代码里零命中）：没有工具级策略、没有风险分级、没有密钥引用、没有故障隔离 | 能力已建（`registry.test.mjs` 37 例 + `connector-store.test.mjs` 23 例 + `connector-http.test.mjs` 11 例真 HTTP；**30 处守卫全部变异验证**）。★ 途中抓到 4 个真缺陷（能力名兜底成最严、凭证检查只看自己认识的字段、刚失败却报 healthy、`version` 参数被静默忽略），详见 §4.1。★★ **2026-09-18 续批：上面那句「判定面仍没有生产调用方」已经过期了。** 判定面建起来了（`runtime/connectors/decision-port.mjs`）并接进组合根（`assemble.mjs` 一次造齐两半、共用**同一份** registry；`tool-request.mjs` 新增 `connectorJudgment`；`enforcementSurfaces()` 6 格 → **7 格**）。证据不是"接上了"，而是**真调用被拦下**：`root.test.mjs` ⑨④ 里不装 ⇒ `preExecute(git-commit)` = `allow`（前提对照），装了 ⇒ `deny`（理由「连接器 github 没有声明工具「git-commit」」），而本连接器声明过的 `git-status` 照旧 `allow`；⑨⑤ 是**闭环**（开路 ⇒ deny ⇒ 反馈面记回 ⇒ 探针成功 ⇒ 恢复 allow）。★ 同一批还修掉一个**静默**缺陷：输入字段叫 `declaredRisk` 而**输出**字段叫 `risk`，照着输出写 `risk: 'critical'` 会被**静默丢掉**、落回能力下限 `low` ⇒ 一个作者标成 critical 的工具被自动放行；`declareTool` 的键集已改成**封闭**（全仓 9 处真样本用错字段名，其中一条用例**一直是绿的但什么都没验到**）。⚠️ **还差的一条不再是接线**：生产入参里没有连接器声明表 ⇒ `connectorJudgment` 在生产里仍是 `false`；"声明从哪来"归第 19 条那个配置键。精确读数：**从「没人接线」变成「接好了、且真调用被它拦下」**，而**不是**"生产里已经在拦"。★★ **2026-09-18 第 5 步续：投递面也建起来了**（`runtime/dsh-composition/connector-port.mjs` → `root-row.mjs` 的真生产调用方），于是上面那句"生产入参里没有连接器声明表"也**过期了**——配了 `LEGION_CONNECTOR_DECLARATIONS` 之后那一格**真的**翻 `true`，且一次**连接器策略是 deny** 的调用被连接器层拦下（`connectorDecided === 1`），前提对照是"没配时同一次调用 `allow`"。⇒ **仍差的两条换了位置**：**①** 那个键在 schema 的 `fields` 里却**不在** `product/process-manifest.mjs` 的 runtime `envNames` 里（与 `LEGION_PATH_SCOPE` **同一处**，`buildChildEnv()` 对未声明的键直接抛或静默丢掉）⇒ 与第 19 条同生共死；**②** 归属是**推导式**的（按声明），于是登记表那条「未声明就拒绝」**在生产里不可达**——真正的洞是"名字撞上已知核心工具"的未声明连接器工具。两条都写进了 §4.2 与人工介入清单 |
 
 一条值得单独记下的判据：**F-05 后半的三条设计纪律各自对应一个真实的失效方向**，
 因此它们在用例里是**分开**验的，而不是合并成一句"投递可靠"：
@@ -1849,6 +1849,99 @@ $DSH_CHECKOUT=D:/typo/nope
 - §5 第 16 条的枚举里补上了**崩溃报告**（`product/diagnostics/crash-report.mjs`）
   与**数据分类**（`product/lifecycle/data-classes.mjs`）：它们与本项其余模块
   是同一族（阶段 9 产品动作、自带用例、零生产入口），原文的枚举漏了这两个名字。
+
+## 5.9 ★★★ 第 25 轮：**数字也会烂** —— 主表 33 处计数声明里 3 处与实测不符
+
+§5.8 的标题是"标签会烂，指针也会烂"。这一节是同一族的**第三个成员**：
+**计数也会烂**——而且它是三者里**最可机器核对**的一个
+（CI 每一行套件都带 `tests=N`，声明就在文档里，两者本可以自动对上）。
+
+### 读数（`node scripts/prt/suite-counts.mjs` 可复跑）
+
+主表（`F-01..F-25` 那 15 行）里共 **33** 处"套件 X（N 例）"声明：
+
+| 项 | 修复前 | 实测 | 判读 |
+| --- | --- | --- | --- |
+| `runtime-contract`（F-01） | 13 | **64** | 套件两级文件之和（`contract` 45 + `fake-adapter` 19） |
+| `dsh-adapter`（F-02） | 25 | **98** | 同一个文件，长了 73 例 |
+| `registry.test.mjs`（F-21） | 32 | **37** | 同一个文件，长了 5 例 |
+
+**其余 30 处全对。** ★ 这个"30 对 3 错"的分布本身就是一条读数：
+三个数**都不是**"写的时候算错了"（§5.8 那两处的成因），而是
+**写完之后用例还在长**——而那三格描述的是**今天的状态**。
+
+> 一个"写的时候数对了"的数字，与一个"昨天数对了"的数字，
+> 在文档里长得一模一样——而后者是**借来的**权威。
+
+### ★★ 为什么**不**把全仓的"N 例"都做成判据
+
+全仓扫下来有 **106 处**与实测不符。而其中绝大多数是**历史读数**
+（"本轮…5 例"、evidence 日志里当时的数）——**那些必须留着旧值**，
+改它们就是**篡改历史**。
+
+> 一条"当时的读数"与一条"现在的读数"，在文本里长得一样——
+> 而前者**必须**冻结、后者**必须**跟着代码走。
+> 所以一条"全仓 N 例都不许过期"的判据会**红在正确的地方**。
+
+⇒ 判据**只查主表**（`| F-NN … |` 那 15 行，与 §2 描述的当前状态），
+并且测试 ④ 专门钉住这一点：拿一条非主表的历史读数去喂，它必须**不**报。
+
+### ★★ 为什么**不**复用 CI 的套件行计数
+
+CI 一行**聚合多个文件**：`path-scope` 那一行 = 4 个文件 ⇒ `tests=67`，
+而声明说的 `path-scope` 22 例指的是**其中那一个文件**。两个数都真，
+只是**分母不同**。
+
+我第一版就是拿聚合总数去比单个数，得到 **135 处假发现**——
+那与第 23 轮"拿窗口聚合去比单次上限"是同一类错
+（见 §5.9 末尾的诚实边界）。⇒ 判据**真跑文件**（32 个，串行 ≈ 18s）。
+
+### 判据与变异
+
+- 新套件 `scripts/prt/suite-counts.test.mjs`：**10 例**，已登记进 `run-ci.mjs`；
+- 变异（`scratch/_mutate-counts.mjs`）：把上面三个数**逐个改回去**，
+  再加一个"漂亮但错的数"，**4/4 逐条咬住**，还原后**逐字相同**；
+- 关键断言不是 `ok`，而是 **`skipped` 必须为 0** —— 见下。
+
+### ★★★ 写这道判据时踩的两个坑（都是"门禁瞎掉而看起来是绿的"）
+
+**坑 A：提取器只认到 20 条，而实际 33 条。**
+行首正则写成 `/^\|\s*(F-\d+)\s*\|/`，于是
+`| F-05 前半 |`、`| F-19 缺口① |` 这样的主表行**一条都没被认出来**
+（漏掉的 13 条里含 `run-events.test.mjs` 18 例、`event-delivery.test.mjs` 31 例）。
+
+> 一个"只认 20 条、而这 20 条全对"的门禁，与一个"33 条全对"的门禁，
+> 在只有 `ok: true` 的输出里是同一个东西——而前者**看起来更可信**：
+> 它还报了一个具体的条数。
+
+**坑 B：在测试运行器里 spawn 测试运行器，子进程一个字都不输出。**
+这道判据自己是套件，它要 spawn `node --test <别的文件>`。父进程带着
+`NODE_TEST_CONTEXT` 时，子 node 认为自己是测试 worker：
+
+```text
+父进程在 test runner 里 + 不清 env   ⇒ len=0        ℹ tests 读不到
+父进程在 test runner 里 + 清 env     ⇒ len=1169     读得到
+父进程不在 test runner 里           ⇒ len=1166     读得到（所以直接跑 CLI 时看不出问题）
+```
+
+⇒ 32 条声明**全部**落进 `skipped`，返回体是 `{ ok: true, checked: 0, skipped: 32 }`。
+
+> 一个**完全瞎掉**的门禁，与一个"32 条全对"的门禁，
+> 在只看 `ok` 的输出里是同一个东西。
+
+抓住它的是测试 ① 里那条 **`skipped === 0`** 的断言——
+这条断言就是为这种形状写的（与第 23 轮 F-15 的 `confidence` 同一个设计）：
+**"跳过多少条"必须与"都对"分开报**。
+
+### 诚实边界
+
+- 它查的是**用例条数**，**不**查"这些用例测的东西对不对"。
+  绿只等于"声明与实测的条数一致"，**不等于**那一格的证据够用。
+- 它认不出**语义**上过期而**数字**恰好不变的声明
+  （例：换了实现、条数没变）。那要读懂内容，做不了。
+- `runtime-contract` 那一档是**套件级**（两级文件求和）。
+  如果哪一天 CI 那一行拆成两行，这个数会从 64 变 45 —— 判据会红，
+  那正是"分账变了要有人看一眼"的正确表现。
 
 ## 6. 怎么复跑这份对照表里的每一条
 

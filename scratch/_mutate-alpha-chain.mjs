@@ -77,6 +77,24 @@ try {
     + "      + '这一行就是那条缝上唯一的监听器 ⇒ 不挂 = worker 报 `EXECUTOR_HOST_PORT_REQUIRED`、'\n"
     + "      + '**不认领任何任务**（`同文件:24`）。',",
     "    coreWhy: '短',")
+
+  // ── 第二格：断点归属（第 34 轮）──────────────────────────────────────
+  mut('M9 去掉"有断点却没归属"那条规则（回到没有归属概念）',
+    "    if (hasBreak && declared === undefined) {", '    if (false) {')
+  mut('M10 去掉"归属指到空处"那条规则',
+    '    if (hasBreak && !itemNumbers.has(declared)) {', '    if (false) {')
+  mut('M11 去掉"归属已过期"那条规则',
+    '    if (!hasBreak && declared !== undefined) {', '    if (false) {')
+  mut('M12 去掉"§5 表解析不出来就失败"的守卫',
+    '  if (itemNumbers === null) {', '  if (false) {')
+  mut('M13 L7 的归属改指一条不存在的 §5 条目',
+    '    owner: 28,\n    ownerWhy: \'第 28 条逐字点名了',
+    '    owner: 77,\n    ownerWhy: \'第 28 条逐字点名了')
+  mut('M14 L9 的归属整条删掉（那一节就没人认领了）',
+    "    owner: 16,\n    ownerWhy: '第 16 条把这一批模块列成",
+    "    ownerWhy: '第 16 条把这一批模块列成")
+  mut('M15 归属改成文件路径（不是条目编号）',
+    '    owner: 20,', "    owner: 'runtime/dsh-composition/plugins/runtime-contract-server-row.mjs',")
 } finally {
   writeFileSync(MOD, orig, 'utf8')
   writeFileSync(BASELINE, baseOrig, 'utf8')

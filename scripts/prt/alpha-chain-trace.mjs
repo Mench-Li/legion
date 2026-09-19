@@ -52,7 +52,11 @@ import { readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { REPO, BASELINE_PATH } from './reachability.mjs'
+import { REPO, BASELINE_PATH, MATRIX_PATH } from './reachability.mjs'
+// ★ 转手 §5 正文的区间规则与裁决表解析器——**不重写**。
+//   两份各写一遍、然后漂移到"一个说从 `## 5.` 起、另一个说从 `## 5 ` 起"，
+//   是本仓见过的失效形状（`intervention-coverage.mjs` 的文件头记着这条）。
+import { sectionFive, decisionItemNumbers } from './intervention-coverage.mjs'
 
 export { REPO }
 
@@ -119,6 +123,10 @@ export const ALPHA_CHAIN = Object.freeze([
       + '（`runtime-contract-server-row.mjs:9-10` 逐字写着这句）。'
       + '这一行就是那条缝上唯一的监听器 ⇒ 不挂 = worker 报 `EXECUTOR_HOST_PORT_REQUIRED`、'
       + '**不认领任何任务**（`同文件:24`）。',
+    // ★ 断点归属：这一节的断点由 §5 第 20 条认领。
+    owner: 20,
+    ownerWhy: '第 20 条逐字写着这一行"不在 `PATCH_LAYER_ROWS` 里…也没有任何生产 importer"'
+      + '并给了两个选项（挂上但如实报 unknown / 显式降级为未启用）。',
   }),
   Object.freeze({
     id: 'L6',
@@ -150,6 +158,10 @@ export const ALPHA_CHAIN = Object.freeze([
     coreWhy: '验收是这一节的名字。★ `spool`/`toolcall-drain` 是**支撑**：'
       + '它们管的是「一次工具调用在哪一层落账」那条车道（§5 第 28 条），'
       + '缺了它 Run 照跑，缺的是**审计的完整性**——两者不该用同一个词报。',
+    owner: 28,
+    ownerWhy: '第 28 条逐字点名了 `runtime/toolcall/spool.mjs` 与 '
+      + '`orchestrator/worker/toolcall-drain.mjs` 两个文件，并说明它们'
+      + '"在**真 SQLite** 上把整条环走通"而"生产里还没人调它们"。',
   }),
   Object.freeze({
     id: 'L8',
@@ -176,6 +188,11 @@ export const ALPHA_CHAIN = Object.freeze([
       + '它们由 CLI 按路径调用，不由模块 import）。'
       + '★ `retention.mjs` 是**支撑**：它是生命周期产品动作（§5 第 16 条），'
       + '不是"回滚"本身。',
+    owner: 16,
+    ownerWhy: '第 16 条把这一批模块列成"**全部自带用例、全部 ✅、全部零生产入口**"，'
+      + '其中「保留策略」就是 `product/lifecycle/retention.mjs`。'
+      + '★ 注意 §5 用**中文名**（保留策略）指它，不用文件名——'
+      + '所以归属必须是**声明**的，不能靠正则去散文里找文件名（见 `checkOwners` 的说明）。',
   }),
 ])
 
@@ -237,6 +254,115 @@ export function traceChain({ classMap = loadClassMap(), exists = (p) => existsSy
   return { sections, firstHardBreak, softGaps, allGreen }
 }
 
+// ============================================================================
+// ★★★ 第二格（第 34 轮）：链上的**每一个断点都必须有人认领**
+//
+// ---------------------------------------------------------------------------
+// ## 它补的是哪一格
+//
+// §5 回答"哪些要人回答"，链投影回答"断在哪一节"。而**两者之间没有任何东西交叉核对**——
+// 于是这条形状可以长期存在：**链上一个断点，而 §5 里没有任何一条在管它**。
+// 它的处境与 `intervention-coverage` 治的那种完全一样，只是**高了一层**：
+//
+//   > 一个"谁也没在看"的断链，与一个"已经排上日程"的断链，
+//   > 在只看那条链的投影时是同一个东西。
+//
+// ## ★★ 为什么归属必须是**声明的**，不能靠正则去散文里找文件名
+//
+// 第一版探针（`scratch/_probe-break-owners.mjs`）就是在 §5 每一格里搜文件名，
+// 结果它报出 `product/lifecycle/retention.mjs` **"没有归属"**——**错的**：
+// 第 16 条管着它，只是 §5 用的是**中文名**「保留策略」。
+//
+//   > 一个靠"文件名在不在散文里"判定的归属，
+//   > 与一个靠"§5 里那个词恰好是中文还是英文"判定的归属，是同一个东西——
+//   > 只不过前者会输出一个数字。
+//
+// 这正是本仓反复记过的那条：**闭集词表**是必需的，而"散文里找词"不是判据。
+// ⇒ 归属写成 **§5 的条目编号**（唯一的、机器可核的最小单位），
+//   与 `NOT_FORWARDED_YET` ↔ `ASSEMBLY_ANCHORS` 是同一种记账法：
+//   一个**声明出来的指针**，由判据去核它**解得开**。
+//
+// ## 三条规则
+//
+//   ① `断点无归属` —— 有断点却没有 `owner` 的那一节，红。
+//   ② `归属指到空处` —— `owner` 不是一个**存在**的 §5 条目号，红。
+//   ③ `归属已过期` —— 没有断点、却还写着 `owner`，红（与 `NOT_FORWARDED_YET`
+//      的 stale 那条同形：`ASSEMBLY_ANCHORS` 里留着一个已经放行的键）。
+// ============================================================================
+
+/** §5 裁决表里**存在**的条目号。 */
+export function sectionFiveItemNumbers(path = MATRIX_PATH) {
+  const { found, numbers } = decisionItemNumbers(sectionFive(path))
+  return found ? new Set(numbers) : null
+}
+
+/**
+ * 核对链上每个断点的归属。
+ *
+ * @param {{sections: Array, itemNumbers: Set|null}} input
+ */
+export function checkOwners({ sections, itemNumbers }) {
+  const violations = []
+  if (itemNumbers === null) {
+    violations.push({
+      id: 'decision-table-missing',
+      message: '§5 的裁决表解析不出来 ⇒ 归属无法核对（这条判据**什么都没查**）。',
+    })
+    return { ok: false, violations }
+  }
+  for (const s of sections) {
+    const hasBreak = s.hardBroken || s.softGap
+    const declared = s.owner
+    if (hasBreak && declared === undefined) {
+      violations.push({
+        id: 'break-without-owner',
+        message: `${s.id}「${s.title}」有断点（${s.hardBroken ? '硬断' : '软缺口'}：`
+          + `${[...s.brokenCore, ...s.brokenSupport].map((m) => m.module).join('、')}），`
+          + '而它**没有声明归属** ⇒ 这个断点**没有任何人在等它**。'
+          + '要么在 §5 里给它立一条，要么把 `owner` 指到已经管它的那一条。',
+      })
+      continue
+    }
+    if (hasBreak && !Number.isInteger(declared)) {
+      violations.push({
+        id: 'owner-not-an-item-number',
+        message: `${s.id} 的 \`owner\` 是 ${JSON.stringify(declared)}——`
+          + '它必须是 §5 的**条目编号**（整数），不是一个文件路径或一句散文。',
+      })
+      continue
+    }
+    if (hasBreak && !itemNumbers.has(declared)) {
+      violations.push({
+        id: 'owner-item-missing',
+        message: `${s.id} 的归属写着 §5 第 **${declared}** 条，而那张表里没有这一条 ⇒ `
+          + '指针指到空处。' + (s.ownerWhy === undefined ? '（它也没写"为什么是这一条"）' : ''),
+      })
+      continue
+    }
+    if (hasBreak && (typeof s.ownerWhy !== 'string' || s.ownerWhy.length < 20)) {
+      violations.push({
+        id: 'owner-why-missing',
+        message: `${s.id} 声明了归属却没写清**为什么是那一条**——`
+          + '没有理由的归属标记，与"我随手指了一条"是同一个东西。',
+      })
+    }
+    if (!hasBreak && declared !== undefined) {
+      violations.push({
+        id: 'owner-stale',
+        message: `${s.id} 今天**没有断点**，却还写着归属第 ${declared} 条 ⇒ `
+          + '这一节已经通了，那个指针该删（与 `NOT_FORWARDED_YET` 的 stale 同形）。',
+      })
+    }
+  }
+  return { ok: violations.length === 0, violations }
+}
+
+/** 从磁盘按真实仓库核对（链 + §5 一起读）。 */
+export function checkChainOwners({ matrixPath = MATRIX_PATH, classMap, exists } = {}) {
+  const { sections } = traceChain({ ...(classMap ? { classMap } : {}), ...(exists ? { exists } : {}) })
+  return checkOwners({ sections, itemNumbers: sectionFiveItemNumbers(matrixPath) })
+}
+
 // ── CLI ─────────────────────────────────────────────────────────────────────
 const isMain = process.argv[1] !== undefined
   && fileURLToPath(import.meta.url).replace(/\\/g, '/') === process.argv[1].replace(/\\/g, '/')
@@ -247,7 +373,8 @@ if (isMain) {
   for (const s of sections) {
     const mark = s.hardBroken ? '✖' : s.softGap ? '△' : '✔'
     const tag = s.hardBroken ? '硬断（核心模块没人挂）' : s.softGap ? '软缺口（支撑模块没人挂）' : '有活实现'
-    console.log(`${mark} ${s.id}  ${s.title}  —— ${tag}`)
+    const own = s.owner === undefined ? '' : `  ⇒ 归属 §5 第 ${s.owner} 条`
+    console.log(`${mark} ${s.id}  ${s.title}  —— ${tag}${own}`)
     if (s.hardBroken) console.log(`      核心依据：${s.coreWhy}`)
     for (const m of s.modules) {
       const why = !m.present ? '**文件不存在**'
@@ -260,5 +387,9 @@ if (isMain) {
   console.log(`\n最先**硬断**的一节：${firstHardBreak === null ? '（没有）' : `${firstHardBreak.id} ${firstHardBreak.title}`}`)
   console.log(`软缺口：${softGaps.length === 0 ? '（没有）' : softGaps.map((s) => s.id).join('、')}`)
   console.log(`整条链全绿：${allGreen ? '是' : '**否**'}`)
-  process.exit(0)
+
+  const owners = checkChainOwners()
+  console.log(`\n断点归属（每个断点都必须有人认领）：${owners.ok ? '**全部有归属**' : '有问题'}`)
+  for (const v of owners.violations) console.log(`  ✖ [${v.id}] ${v.message}`)
+  process.exit(owners.ok ? 0 : 1)
 }

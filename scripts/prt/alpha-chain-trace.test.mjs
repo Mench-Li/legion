@@ -26,7 +26,7 @@ import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { ALPHA_CHAIN, REPO, loadClassMap, traceChain } from './alpha-chain-trace.mjs'
+import { ALPHA_CHAIN, REPO, loadClassMap, traceChain, checkOwners, checkChainOwners } from './alpha-chain-trace.mjs'
 
 /** 造一个假的 classMap。 */
 const classOf = (obj) => new Map(Object.entries(obj))
@@ -134,4 +134,106 @@ test('⑧ ★ 基线读取：classMap 认得出被跟踪的不可达文件，且
   for (const want of ['gap', 'by-design', 'deliberate']) {
     assert.ok(classes.has(want), `基线里一类 ${want} 都没有——分类词表变了？`)
   }
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// ⑨–⑭ 第二格：**链上每一个断点都必须有人认领**（第 34 轮加）
+//
+// ★ 加它的起因是一次**误报**：第一版探针去 §5 的每一格里搜**文件名**，
+//   于是报出 `product/lifecycle/retention.mjs` "没有归属"——而第 16 条管着它，
+//   只是 §5 用的是**中文名**「保留策略」。
+//
+//   > 一个靠"文件名在不在散文里"判定的归属，
+//   > 与一个靠"§5 里那个词恰好是中文还是英文"判定的归属，是同一个东西——
+//   > 只不过前者会输出一个数字。
+//
+// ⇒ 归属必须是**声明的 §5 条目编号**（唯一、机器可核的最小单位），
+//   与 `NOT_FORWARDED_YET` ↔ `ASSEMBLY_ANCHORS` 是同一种记账法。
+// ══════════════════════════════════════════════════════════════════════════
+
+/** 造一节。`breaks` 是坏掉的模块名数组。 */
+const sec = (id, { breaks = [], core = [], owner, ownerWhy } = {}) => ({
+  id,
+  title: `节 ${id}`,
+  hardBroken: breaks.some((b) => core.includes(b)),
+  softGap: breaks.length > 0 && breaks.every((b) => !core.includes(b)),
+  brokenCore: breaks.filter((b) => core.includes(b)).map((m) => ({ module: m })),
+  brokenSupport: breaks.filter((b) => !core.includes(b)).map((m) => ({ module: m })),
+  ...(owner === undefined ? {} : { owner }),
+  ...(ownerWhy === undefined ? {} : { ownerWhy }),
+})
+
+const WHY = '这一条逐字点名了这个文件，并给了两个可选的处置动作。'
+
+test('⑨ ★★ 正对照：真仓库里**全部断点都有归属**，且恰有三节声明了归属', () => {
+  const r = checkChainOwners()
+  assert.equal(r.ok, true, '真仓库的断点归属有问题：' + JSON.stringify(r.violations))
+  // 链上今天有三处断点（L5 硬断 + L7/L9 软缺口），它们都必须带归属
+  const t = traceChain()
+  const withOwner = t.sections.filter((s) => s.owner !== undefined).map((s) => s.id)
+  assert.deepEqual(withOwner, ['L5', 'L7', 'L9'],
+    `声明了归属的节变了：${JSON.stringify(withOwner)}`)
+  // ★ 反向：每一节**有断点**的都必须在那三个里面（否则 ⑩ 那条规则漏了）
+  const broken = t.sections.filter((s) => s.hardBroken || s.softGap).map((s) => s.id)
+  assert.deepEqual(broken, withOwner, '有断点的节与声明了归属的节对不上——判据有缝')
+})
+
+test('⑩ ★★★ 正向控制：有断点却没声明归属 ⇒ 必须红（"谁也没在看"的那个断链）', () => {
+  const sections = [sec('L5', { breaks: ['a/x.mjs'], core: ['a/x.mjs'] })]
+  const r = checkOwners({ sections, itemNumbers: new Set([20]) })
+  assert.equal(r.ok, false, '有断点、没归属，却报绿 ⇒ 断链可以没有任何人在等')
+  assert.ok(r.violations.some((v) => v.id === 'break-without-owner'), JSON.stringify(r.violations))
+  // 只报"缺归属"，不该顺手报别的
+  assert.equal(r.violations.length, 1, JSON.stringify(r.violations))
+})
+
+test('⑪ ★★★ 正向控制：归属指到一条不存在的 §5 条目 ⇒ 必须红（指针指到空处）', () => {
+  const sections = [sec('L7', { breaks: ['a/y.mjs'], owner: 99, ownerWhy: WHY })]
+  const r = checkOwners({ sections, itemNumbers: new Set([16, 28]) })
+  assert.equal(r.ok, false)
+  assert.ok(r.violations.some((v) => v.id === 'owner-item-missing'), JSON.stringify(r.violations))
+})
+
+test('⑫ ★★★ 反向控制：归属**已过期**（没有断点却还写着归属）⇒ 必须红', () => {
+  // 与 `NOT_FORWARDED_YET` 的 stale 那条同形：那一节已经通了，指针该删。
+  const sections = [sec('L7', { owner: 28, ownerWhy: WHY })] // 无断点
+  const r = checkOwners({ sections, itemNumbers: new Set([28]) })
+  assert.equal(r.ok, false, '已经通了的节还挂着归属指针，却没红')
+  assert.ok(r.violations.some((v) => v.id === 'owner-stale'), JSON.stringify(r.violations))
+})
+
+test('⑬ ★★ "什么都没查"不许报绿：§5 表解析不出来 / 归属不是编号 / 没写理由', () => {
+  const noTable = checkOwners({ sections: [], itemNumbers: null })
+  assert.equal(noTable.ok, false, '§5 表解析不出来却报绿 ⇒ 归属判据可以靠"没数据"通过')
+  assert.ok(noTable.violations.some((v) => v.id === 'decision-table-missing'))
+
+  const notInt = checkOwners({
+    sections: [sec('L7', { breaks: ['a/y.mjs'], owner: 'runtime/toolcall/spool.mjs', ownerWhy: WHY })],
+    itemNumbers: new Set([28]),
+  })
+  assert.equal(notInt.ok, false, '归属写成文件路径却通过了')
+  assert.ok(notInt.violations.some((v) => v.id === 'owner-not-an-item-number'), JSON.stringify(notInt.violations))
+
+  const noWhy = checkOwners({
+    sections: [sec('L7', { breaks: ['a/y.mjs'], owner: 28, ownerWhy: '短' })],
+    itemNumbers: new Set([28]),
+  })
+  assert.equal(noWhy.ok, false, '归属没写理由却通过了——"我随手指了一条"与"它真的归那一条"同形')
+  assert.ok(noWhy.violations.some((v) => v.id === 'owner-why-missing'))
+})
+
+test('⑭ ★★ 反向控制：归属正确时**不许**红；且逐节分辨（不是"要么全红要么全绿"）', () => {
+  const good = [
+    sec('L5', { breaks: ['a/x.mjs'], core: ['a/x.mjs'], owner: 20, ownerWhy: WHY }),
+    sec('L7', { breaks: ['a/y.mjs'], owner: 28, ownerWhy: WHY }),
+    sec('L1', {}), // 通了、没归属 ⇒ 正常
+  ]
+  const r = checkOwners({ sections: good, itemNumbers: new Set([16, 20, 28]) })
+  assert.deepEqual(r.violations, [], '正确时被判红：' + JSON.stringify(r.violations))
+
+  // 只把第三节弄坏 ⇒ 应当**只**报它那一节
+  const mixed = [good[0], good[1], sec('L9', { breaks: ['a/z.mjs'] })]
+  const r2 = checkOwners({ sections: mixed, itemNumbers: new Set([16, 20, 28]) })
+  assert.equal(r2.violations.length, 1, JSON.stringify(r2.violations))
+  assert.match(r2.violations[0].message, /L9/, '报错了节')
 })

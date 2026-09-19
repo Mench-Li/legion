@@ -2810,6 +2810,43 @@ function mut(name, find, repl, file = MOD, original = orig)
 ★ 形状是：**一个什么都没做的变异，与一个变异了但没被咬住的变异，在输出里只差一个字**。
 改成对象解构后 P6 立刻咬住。
 
+### 九、★★ 而全量 CI 里，**既有的一道判据**把我这次重构拦下了
+
+把解析搬进模块之后，全量 CI 的 `test` 阶段红了 **3 条**，全部来自 `skip-visibility`：
+
+```text
+FAIL skip-visibility（门禁摘要必须说出跳过了多少条断言）: exit=1 tests=6 pass=3 fail=3
+  ✖ ① run-ci.mjs 真的解析了 skipped，而不是只解析 tests/pass/fail
+  ✖ ② 摘要行里带 skipped=（跳过数不再是"要靠减法才知道"的那个数）
+  ✖ ⑥ 反向：本组自己不能是"读注释就算过"的那种判据
+```
+
+★ 它是**源码级**判据（读 `run-ci.mjs` 的文本，不 import 它——因为 import 会跑整个 CLI），
+所以代码一搬家，它就找不到锚点了。**这是它该有的行为**：
+一道"锚在具体那几行上"的判据，本来就该在代码搬走时喊出来。
+
+⇒ 修法是让锚点**跟着代码走**，而不是把判据放松：
+
+| 判据 | 原来锚在 | 现在锚在 |
+| --- | --- | --- |
+| ① 解析了四个计数 | `run-ci.mjs` 的 `counts = {` | `parse-suite-output.mjs` 的 `pick()` 段 |
+| ② 摘要里有 `skipped=` | `run-ci.mjs` 的 detail 行 | `parse-suite-output.mjs` 的 `countsFragment()` |
+| ⑥ 锚点不在注释里 | 两条旧锚点 | 四条新锚点 |
+
+★★ **而搬家的动作本身带来一个新风险——"代码搬走了、没人调它"**，
+那正是本仓反复抓的那种形状。所以**新增一条判据 ①b**：
+
+```text
+①b ★★★ 接线：run-ci.mjs 必须**真的调用**那个模块（搬走了不等于接上了）
+```
+
+它断言 `run-ci.mjs` 里 `import … parseSuiteCounts …`、`const counts = parseSuiteCounts(all)`、
+以及 detail 行用的是 `countsFragment(counts)`。
+⇒ 搬完之后这一组**比原来更严**，而不是更松。变异 **P7 / P8** 各咬住一条：
+
+    P7 摘要行改回手写那几个数（不再调 countsFragment）      ✓ 咬住
+    P8 去掉 parseSuiteCounts 的 import（搬走了、没人调它）   ✓ 咬住
+
 ## 6. 怎么复跑这份对照表里的每一条
 
 ```bash

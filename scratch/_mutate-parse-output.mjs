@@ -16,6 +16,27 @@ const green = () => {
   } catch (e) { return /ℹ fail 0/.test(String(e.stdout ?? '') + String(e.stderr ?? '')) }
 }
 
+/** ★ 接线断言住在 `skip-visibility.test.mjs` 里——它读 run-ci 的**源码文本**。 */
+const greenSkipVis = () => {
+  try {
+    return /ℹ fail 0/.test(execFileSync('node', ['--test', 'scripts/ci/skip-visibility.test.mjs'],
+      { cwd: ROOT, encoding: 'utf8' }))
+  } catch (e) { return /ℹ fail 0/.test(String(e.stdout ?? '') + String(e.stderr ?? '')) }
+}
+
+const RUNCI = `${ROOT}/scripts/ci/run-ci.mjs`
+const runciOrig = readFileSync(RUNCI, 'utf8')
+
+/** 变异 run-ci.mjs，用 skip-visibility 那一组来判它咬不咬。 */
+function mutRunci(name, find, repl) {
+  if (!runciOrig.includes(find)) { console.log(`⚠ ${name}: 变异串没找到`); all = false; return }
+  writeFileSync(RUNCI, runciOrig.replace(find, repl), 'utf8')
+  const g = greenSkipVis()
+  if (g) all = false
+  console.log(`${g ? '✖ 漏网' : '✓ 咬住'} ${name}`)
+  writeFileSync(RUNCI, runciOrig, 'utf8')
+}
+
 // ★★ 注意这个签名：`file`/`original` 是**对象解构**。
 //    第一版写成位置参数 `(name, find, repl, file = MOD, original = orig)`，
 //    而 P6 传的是 `{ file: VICTIM, original: victimOrig }` ⇒ 那个对象整个落进了
@@ -58,11 +79,17 @@ try {
     "test('② ★★★ 正向控制：未声明的碰撞",
     "test('② ★★★ tests 21 / pass 20 正向控制：未声明的碰撞",
     { file: VICTIM, original: victimOrig })
+  // ★ 接线：搬走了不等于接上了（`skip-visibility` 新加的 ①b 负责咬这两条）
+  mutRunci('P7 摘要行改回手写那几个数（不再调 `countsFragment`）',
+    "' ' + countsFragment(counts)", "' tests=' + counts.tests + ' pass=' + counts.pass")
+  mutRunci('P8 去掉 `parseSuiteCounts` 的 import（代码搬走了、没人调它）',
+    "import { parseSuiteCounts, countsFragment } from './parse-suite-output.mjs'", '')
 } finally {
   writeFileSync(MOD, orig, 'utf8')
   writeFileSync(VICTIM, victimOrig, 'utf8')
+  writeFileSync(RUNCI, runciOrig, 'utf8')
 }
 
 console.log(`\n全部咬住 ? ${all}`)
-console.log(`两处逐字还原 ? ${readFileSync(MOD, 'utf8') === orig} ${readFileSync(VICTIM, 'utf8') === victimOrig}`)
-console.log(`还原后套件仍绿 ? ${green()}`)
+console.log(`三处逐字还原 ? ${readFileSync(MOD, 'utf8') === orig} ${readFileSync(VICTIM, 'utf8') === victimOrig} ${readFileSync(RUNCI, 'utf8') === runciOrig}`)
+console.log(`还原后套件仍绿 ? ${green()} ${greenSkipVis()}`)

@@ -31,6 +31,11 @@
 //   那个文件在被 import 时会跑整个 CLI（顶层有 main），而本组要验的是
 //   它**写下的那几行**，不是它跑一次的结果。这与 `encoding-check.test.mjs`
 //   是同一个形状。
+//
+// ★★ 第 35 轮：解析与那半行摘要**搬了家**（搬进 `scripts/ci/parse-suite-output.mjs`），
+//   所以本组读**两份**源码。搬家本身带一个风险——**代码搬走了、没人调它**
+//   （那正是本仓反复抓的那种"声明了但没接上"），所以额外多一条**接线**断言：
+//   `run-ci.mjs` 必须**真的调用**那个模块。搬走之后这一组比原来更严，而不是更松。
 // ============================================================================
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -39,27 +44,44 @@ import { join } from 'node:path'
 
 const REPO_ROOT = new URL('../../', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
 const SRC = readFileSync(join(REPO_ROOT, 'scripts', 'ci', 'run-ci.mjs'), 'utf8')
+/** ★ 第 35 轮起：计数解析与摘要片段在这里。 */
+const MOD_SRC = readFileSync(join(REPO_ROOT, 'scripts', 'ci', 'parse-suite-output.mjs'), 'utf8')
 
-test('① ★★★ `run-ci.mjs` 真的解析了 `skipped`，而不是只解析 tests/pass/fail', () => {
-  // 判据必须落在**解析那一行**上。只断言"文件里出现过 skipped"是不够的：
+test('① ★★★ 真的解析了 `skipped`，而不是只解析 tests/pass/fail', () => {
+  // 判据必须落在**解析那几行**上。只断言"文件里出现过 skipped"是不够的：
   // 那几句话（"`skipped: N` 看得见"）本来就是注释，而正是它们让这处缺口
   // 看起来像已经处理过了。
-  const m = /const counts = \{[\s\S]*?\n  \}/.exec(SRC)
-  assert.ok(m !== null, '找不到 counts 那段——本组要验的对象已经不在了，先更新这一组')
+  // ★ 第 35 轮：解析在 `parse-suite-output.mjs` 的 `pick()` 那几行里。
+  const m = /const tests = pick\([\s\S]*?return \{ tests: tests\.last[^\n]*/.exec(MOD_SRC)
+  assert.ok(m !== null, '找不到 pick 那段——本组要验的对象已经不在了，先更新这一组')
   const block = m[0]
   for (const key of ['tests', 'pass', 'fail', 'skipped']) {
-    assert.match(block, new RegExp(`\\b${key}:\\s*num\\(`),
-      `counts 里没有解析 ${key}（` + '`skipped` 漏掉时，摘要行无法说出"有几条没跑"）')
+    assert.match(block, new RegExp(`\\b${key}:\\s*${key}\\.last`),
+      `没有解析 ${key}（` + '`skipped` 漏掉时，摘要行无法说出"有几条没跑"）')
+    assert.match(block, new RegExp(`const ${key} = pick\\(/\\\\b${key}\\\\s`),
+      `${key} 的取值正则不在——解析器改形状了`)
   }
   // 反向：`skipped` **不能**是用 `tests - pass - fail` 算出来的。
   // 算出来的读数与解析出来的读数，在"跳过的是哪一批"上不是同一件事。
-  assert.doesNotMatch(block, /skipped:\s*[^,]*-\s*counts\.pass/,
+  assert.doesNotMatch(MOD_SRC, /skipped:\s*[^,]*-\s*counts\.pass/,
     '`skipped` 是反推出来的——反推不会告诉你跳过的是哪一批，也不该冒充解析')
 })
 
+test('①b ★★★ 接线：`run-ci.mjs` 必须**真的调用**那个模块（搬走了不等于接上了）', () => {
+  // 没有这一条，"解析器存在"与"CI 用它解析"就分开了：
+  // 把代码搬进一个没人 import 的文件里，①② 可以照样绿，而 CI 的读数回到原样。
+  assert.match(SRC, /import \{[^}]*parseSuiteCounts[^}]*\} from '\.\/parse-suite-output\.mjs'/,
+    '`run-ci.mjs` 没有 import 计数解析器（代码搬走了、没人调它）')
+  assert.match(SRC, /const counts = parseSuiteCounts\(all\)/,
+    '`run-ci.mjs` 没有真的调用 `parseSuiteCounts(all)`')
+  assert.match(SRC, /label \+ ': exit=' \+ r\.code \+ ' ' \+ countsFragment\(counts\)/,
+    'detail 行没有用 `countsFragment(counts)`——摘要行又回到手写那几个数了')
+})
+
 test('② ★★ 摘要行里带 `skipped=`（跳过数不再是"要靠减法才知道"的那个数）', () => {
-  assert.match(SRC, /skipped=' \+ \(Number\.isNaN\(counts\.skipped\)/,
-    'detail 行里没有 skipped= —— 于是 `tests=38 pass=18 fail=0` 这一行既可以说'
+  // ★ 第 35 轮：那半行搬进了 `countsFragment()`。
+  assert.match(MOD_SRC, /skipped=' \+ \(Number\.isNaN\(counts\.skipped\)/,
+    '摘要片段里没有 skipped= —— 于是 `tests=38 pass=18 fail=0` 这一行既可以说'
     + '"20 条跳过了"，也可以说"这 38 条就是这么分类的"，而读的人只能自己减')
 })
 
@@ -112,15 +134,16 @@ test('⑥ ★ 反向：本组自己不能是"读注释就算过"的那种判据'
   // 自检：上面每一条都必须能**具体地**失败。做法是验它们用的锚点
   // 在文件里真实存在且**不是**注释行——`①` 第一次写时就踩过这个坑
   // （锚点命中了注释里抄的那份旧代码）。
-  const lineOf = (re) => SRC.split('\n').findIndex((l) => re.test(l))
-  for (const [re, what] of [
-    [/const counts = \{/, 'counts 声明'],
-    [/skipped=' \+ \(Number\.isNaN/, 'detail 的 skipped='],
-    [/const totalSkipped = skippedSuites\.reduce/, '跳过总数'],
+  const lineOf = (src, re) => src.split('\n').findIndex((l) => re.test(l))
+  for (const [src, re, what] of [
+    [MOD_SRC, /const tests = pick\(/, '解析器（pick 段）'],
+    [MOD_SRC, /skipped=' \+ \(Number\.isNaN/, '摘要片段的 skipped='],
+    [SRC, /const counts = parseSuiteCounts\(all\)/, 'run-ci 的接线'],
+    [SRC, /const totalSkipped = skippedSuites\.reduce/, '跳过总数'],
   ]) {
-    const i = lineOf(re)
+    const i = lineOf(src, re)
     assert.ok(i >= 0, `${what} 找不到`)
-    assert.doesNotMatch(SRC.split('\n')[i].trim(), /^\/\//,
+    assert.doesNotMatch(src.split('\n')[i].trim(), /^\/\//,
       `${what} 的锚点落在**注释**里（第 ${i + 1} 行）——` +
       '一个锚在注释上的判据会在代码改坏之后仍然全绿')
   }

@@ -153,9 +153,14 @@ export const SPEC7_PROJECTION = Object.freeze([
       + '（`run_reconciliations`、`usage_records`、升级记录、投递状态机）已经在库里，'
       + '缺的是**汇总读出口**而不是数据。把这条读成完成标准，会用"指标没做"'
       + '否掉一个已达标的发布；把它读成不存在，则没人会去补那五个读出口。',
-    evidence: '部分有落点：套件 `usage-rollup`（按五维读用量）、套件 `budget-alert`（告警与降级）；'
-      + '`product/heartbeat.mjs` 是**脱敏健康心跳**（PRT-713，默认关闭），不是指标出口',
-    covered: '⚠️ **本条尚未全部实现**，且它**不是**完成标准——'
+    evidence: '★ **第 39 轮已落地**：`product/metrics-spec7.mjs`（6 条要求 → 8 格指标，'
+      + '口径/未知档/不适用齐全）与 `product/metrics-spec7-source.mjs`（真 SQL 生产者：'
+      + '`event_deliveries` / `run_attempts` / `permission_requests` / `budget_reservations` + 升级审计）。'
+      + '指标框架与升级读数早就在：`product/metrics.mjs`（spec §6.6 的 9 格）、'
+      + '`product/metrics-source.mjs`、套件 `usage-rollup`、套件 `budget-alert`。'
+      + '★ 唯一仍无生产者的一格是 `alpha-cycle-days`（需真实用户项目），已具名列出',
+    covered: '⚠️ **本条尚未全部实现**：8 格指标里 7 格有真生产者，'
+      + '`alpha-cycle-days` 没有（要真实用户项目，PRT-910 同样卡在这里）——'
       + '这是一处如实记录的缺口，不是一处已关掉的缺口',
   }),
 ])

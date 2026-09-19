@@ -136,6 +136,49 @@ const ACTION_FLOOR_FOR_CONFIDENCE = Object.freeze({
   unknown: 'review',
 })
 
+/**
+ * ★★★ 上面那张表与 `BUDGET_ALERT_CONFIDENCE` **必须逐项对齐**。
+ *
+ *   这条不变式是**机械的**，因为它们的漂移是**静默**的：
+ *   `ACTION_FLOOR_FOR_CONFIDENCE[confidence]` 在遇到一个未登记的置信度时
+ *   返回 `undefined`，而 `strictestAction(fromLevel, undefined)` 会把它
+ *   当作一个新的动作档位——于是**动作下限凭空消失**，而一行错都没有。
+ *
+ *   > 一张把置信度映射到动作下限的表，与一张**少了一行**的同名表，
+ *   > 在"这次告警该不该拦住"这个读数上是同一个东西：都不会报错。
+ *
+ *   所以：**声明一个置信度而不给它动作下限**必须是一个**构造期就炸**的编程错误，
+ *   不是一个运行期才可能显形的空值。（这与 `RUN_RECORD_FIELD_NOT_WIRED` 同族。）
+ */
+export function confidenceFloorsAligned({ vocabulary = BUDGET_ALERT_CONFIDENCE, floors = ACTION_FLOOR_FOR_CONFIDENCE } = {}) {
+  const missingFloor = vocabulary.filter((c) => floors[c] === undefined)
+  const undeclared = Object.keys(floors).filter((c) => !vocabulary.includes(c))
+  return Object.freeze({
+    ok: missingFloor.length === 0 && undeclared.length === 0,
+    missingFloor: Object.freeze(missingFloor),
+    undeclared: Object.freeze(undeclared),
+  })
+}
+
+{
+  // ★ 这里**直接遍历那两张表本身**（而不是遍历一个形参）——因为"这张表有没有
+  //   机械消费者"是一个可被读出来的事实，而不是一句注释里的承诺。
+  //   （第 40 轮 `RUN_RECORD_OPTIONAL_FIELDS` 的教训：声明表 + 手写名字 = 装饰。）
+  for (const confidence of BUDGET_ALERT_CONFIDENCE) {
+    if (ACTION_FLOOR_FOR_CONFIDENCE[confidence] === undefined) {
+      throw new Error(`budget-alert：置信度「${confidence}」**没有动作下限**。`
+        + '`ACTION_FLOOR_FOR_CONFIDENCE[它]` 是 `undefined` ⇒ `strictestAction` 会把它当成'
+        + '一个新档位 ⇒ **动作下限凭空消失，而一行错都没有**。')
+    }
+  }
+  for (const key of Object.keys(ACTION_FLOOR_FOR_CONFIDENCE)) {
+    if (!BUDGET_ALERT_CONFIDENCE.includes(key)) {
+      throw new Error(`budget-alert：动作下限表里的「${key}」不在置信度词表里——`
+        + '一条永远不会被走到的下限规则，与一条写错的规则是同一个东西。')
+    }
+  }
+}
+
 /** 取更严的那个动作。 */
 const strictestAction = (a, b) => (actionIndex(a) >= actionIndex(b) ? a : b)
 

@@ -1806,6 +1806,21 @@ async function stageTest() {
   { label: 'metrics-spec7（目标文档 §7 第 6 条：六条「持续观察」要求 → 8 格指标 + 真 SQL 生产者；'
     + '"零"与"没有"不许同形、分子分母必须同源）',
     files: ['product/metrics-spec7.test.mjs'], cwd: ROOT },
+  // ★ 第五套，形状是**第 40 轮那个真缺陷**的可证伪化：**一张声明表，与它自己被
+  //   手写复述的那一份，是不是同一个东西**。
+  //
+  //   起因：`product/launcher/run-record.mjs` 里 `RUN_RECORD_OPTIONAL_FIELDS` 的
+  //   注释写着"新读数一律加在**这里**"，而 `buildRunRecord` / `validateRunRecord`
+  //   **各自手写** `'peakResource'` 这个名字 ⇒ 那张表**没有任何机械消费者**。
+  //   照注释加一个字段的实测后果是**写不出去 + 不被校验 + 记录看起来完全正常**。
+  //
+  //   判据只认**键位**复述（`member:` / `, member,`），不认"这个字符串出现过"
+  //   ——后者会把整仓的枚举表全报成装饰（第一版报了 **17 张**，几乎全是误报：
+  //   枚举值出现在**值位**是正常使用）。并且带**自证**：一份修复前的真实形状
+  //   必须被报出、一份修复后的必须被放行。
+  { label: 'declaration-mirrors（声明表 ↔ 手写复述：照注释加一项会不会被静默丢掉；'
+  + '键位口径 + 自证 + 豁免必须写理由）',
+  files: ['scripts/prt/declaration-mirrors.test.mjs'], cwd: ROOT },
   // ★ 第四套，同一个形状的**第四个方向**：前三套核的是"两份**清单**之间"或
   //   "**数字**↔产物"，这一套核的是"**对照表自己**"。
   //

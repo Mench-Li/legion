@@ -2788,7 +2788,7 @@ const num = (re) => { const m = re.exec(all); return m ? Number(m[1]) : NaN }
 | 3 | 干扰**静默** | 首个 ≠ 最后 ⇒ 摘要行里写出 `⚠计数被输出干扰:tests(21→10),…`——**不静默** |
 
 ★ 抽出模块是为了**能测**：`parse-suite-output.test.mjs` 直接喂两段输出对比，
-并加了一道**根因守卫**——`git ls-files '*.test.mjs'` 扫**全部 369 个套件**的用例名，
+并加了一道**根因守卫**——`git ls-files '*.test.mjs'` 扫**全部 370 个套件**的用例名，
 **任何**用例名都不许出现 `tests N` / `pass N` / `skipped N` 这种形状
 （夹具要放函数体里）。实测：**0 处违规**，而扫描本身有 `files.length > 300` 的下限守卫
 （一条"扫了 0 个文件也算过"的判据与没有判据是同一个东西）。
@@ -2967,6 +2967,74 @@ out.push({ row: row[1], line: i + 1, name: m[1].split('/').pop(), claim: Number(
 | `suite-counts`（补 3 例回归） | 13/13 | **5/5** | ★★★ 全路径被砍成裸名（已修判据） |
 
 ★ 套件 **368 → 369**。
+
+## 5.20 第 37 轮：目标文档 **§7「测试与指标」** 此前没有任何判据，也没有任何文档引用它
+
+前几轮核过：台账（140 条 ✅ 的证据）、F 表（F-01～F-25）、§9 那条九节链。
+而 **§7** —— `git grep '§7'` 在整仓里只命中**别的东西**，没有任何判据、
+也没有任何文档引用过它。于是"§7 满足了没有"这一问**无法回答**，
+而它是目标文档自己的一节要求。
+
+**逐条读下来的结论是：§7 的 5 条可核对要求全部已满足，第 6 条不是完成标准。**
+
+| §7 条 | 内容 | 归属（§6 退出条件 / 观测） | 落点 | 核到的读数 |
+| --- | --- | --- | --- | --- |
+| 1 | Fake Adapter 覆盖 health/execute/cancel/recover/终态/错误码 | P0「Fake/真实 Adapter 对拍通过；并发、重试、崩溃可恢复」 | `runtime/contracts/fake-adapter.test.mjs`、`runtime/contracts/contract.test.mjs`、套件 `runtime-contract` | **六项各有具名用例**；其中"错误码"那一条的用例名就叫「故障矩阵无缺口」 |
+| 2 | 新旧对拍只在隔离库/worktree/非生产空间 | 同上 | `scripts/ci/dual-write-smoke.test.mjs`、套件 `runtime-contract-cross-process` | 用 `mkdtempSync(tmpdir())` 的**临时库**，起两个真进程并发写；不指向任何客户库 |
+| 3 | 故障注入 7 类 | 同上 | 5 个用例文件（见下） | **7 类各有落点** |
+| 4 | 安全测试 5 项 | P0「输入和权限可复现、可审计，hard floor 不可绕过」 | 5 个用例文件 | 全仓命中用例文件 **25 / 17 / 8 / 25 / 38** 个 |
+| 5 | 静态检查禁止 Adapter 外调 DSH API | P0「对拍通过；并发、重试、崩溃可恢复」 | `scripts/ci/dsh-boundary.mjs`、`scripts/ci/dsh-boundary.test.mjs` | ★ **已有**：PRT-002 依赖清单 / PRT-108 执行面边界**棘轮**（`--check` 在 CI 的 `boundary` 阶段），适配层是唯一豁免 |
+| 6 | 持续观察 6 个指标 | ★ **不是退出条件** | 部分：套件 `usage-rollup`、套件 `budget-alert` | ⚠️ **尚未全部实现**，如实记录 |
+
+§7 第 3 条的 7 类逐类落点（**每一类都打开文件读过具名用例，不是关键词命中**）：
+
+| 故障 | 落点 | 读了什么 |
+| --- | --- | --- |
+| Runtime 崩溃 | `runtime/contracts/fake-adapter.test.mjs` | `crash` 场景 → `RUNTIME_CRASHED`，并入"故障矩阵无缺口" |
+| 网络中断 | `product/launcher/readiness.test.mjs` | 「连接被拒 → 可重试」，**含真 undici 的 `TypeError('fetch failed')+cause.code` 形态**（该用例自己的注释说：不是只认我们伪造的） |
+| 重复事件 | `team-hub/event-delivery.test.mjs` | 「plan 幂等：已投过的行不会被重新 plan 成 pending（**重启不重投**）」、`takeUp` 二次取走被拒、`markDelivered` 只能从 `delivering` 来 |
+| 审批超时 | `team-hub/approval-ttl.test.mjs` | 40+ 条，含「越期的审批**不能被批准**」「到期扫描是**幂等**的」「结束态的行不会被改判成过期」 |
+| 凭证缺失 | `runtime/contracts/fake-adapter.test.mjs` | `secret-unavailable` 场景 → `SECRET_UNAVAILABLE` |
+| 预算耗尽 | `runtime/contracts/fake-adapter.test.mjs` | `budget-exceeded` 场景 → `BUDGET_EXCEEDED` |
+| 升级失败 | `product/upgrade/upgrade.test.mjs` | 四档失败点（下载损坏 / 迁移失败 / 启动失败 / 健康检查失败）**各自**验"恢复到已知兼容状态且数据不丢失"，另有第五条 contract 迁移后的回滚 |
+
+### ★★★ 这一格真正值钱的那条：**观测性要求不是完成标准**
+
+§6 那五条退出条件**逐字读**过，**没有一条**提到指标。而 §7 第 6 条那 6 个
+「持续观察」指标在代码里几乎**没有读出口**（4 个零命中，也没有 `/api/metrics`）。
+
+> 一条**观测性**要求与一条**完成标准**，在"未实现"这个读数下长得一模一样——
+> 而前者不该拦发布，后者该。把它们混起来，要么永远关不掉，
+> 要么用"指标没做"去否掉一个已经达标的发布。
+
+而且它诚实的读数是**两半**：其中「商业 Alpha 交付周期」必须有**真实用户项目**
+才量得出来（PRT-910 需真实用户项目，属 ⏸）；另外五个所需的原始数据
+（`run_reconciliations`、`usage_records`、升级记录、投递状态机）**已经在库里**，
+缺的是**汇总读出口**而不是数据。⇒ 我把它记成**观测档 + 一处如实记录的缺口**，
+而不是把它做成一个新的"红"——**把一个非退出条件做成红，等于用一个假的未完成
+去换一个真的告警**。
+
+### ★★ 而我的表第一版就栽在"看起来是证据、实际谁都没查"上
+
+`budget-alert` 那一处漏写了 `套件 ` 前缀 ⇒ 解析器不把它当指针 ⇒
+**它看起来是证据、实际永远不会被核对**（探针读数那一行 `suites=1`，而它写了两个套件）。
+
+⇒ 补了一条守卫：**后引号里像套件别名、而又真的是一行 CI 套件、却没写 `套件 ` 前缀的
+token，必须红**。修完读数 **17 → 18 处落点**（被漏掉的那一处回到了核对里）。
+
+★ 并订正我自己的**一处误报**：我当时以为 `runtime-contract-cross-process` 也漏了前缀，
+那是**探针输出被截断**造成的误读——它带着前缀、也被核对了。注释里已改成"一处"。
+
+### 这一轮的判据读数
+
+| 判据 | 用例 | 变异 | 说明 |
+| --- | --- | --- | --- |
+| `spec-tests-7`（新，CI 第 15 套） | 13/13 | **10/10** | 6 条要求 → 6 行投影（5 退出条件 + 1 观测）、18 处落点 |
+
+★ 变异 M10 是**改真文档**：把 §7 第 6 条从 `MULTI-AGENT-FEATURE-OPTIMIZATION.md` 里删掉
+⇒ 那一行投影立刻过期、判据必须红。**判据与目标文档是活的对照，不是一份抄件。**
+
+★ 套件 **369 → 370**。
 
 ## 6. 怎么复跑这份对照表里的每一条
 

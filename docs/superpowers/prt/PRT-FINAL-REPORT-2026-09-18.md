@@ -5,10 +5,11 @@
 - 权威台账：[`PRT-PROGRESS.md`](./PRT-PROGRESS.md) —— **145 行 = 140 ✅ / 1 ⬜ / 4 ⏸**
 - 对照表：[`MULTI-AGENT-FEATURE-STATUS.md`](../../MULTI-AGENT-FEATURE-STATUS.md) —— F-01…F-25，**裁决项 1～29**
 - 目标文档：[`MULTI-AGENT-FEATURE-OPTIMIZATION.md`](../../MULTI-AGENT-FEATURE-OPTIMIZATION.md) —— §1.2 状态注记校准 / §1.3 正文级偏离
-- 最近一轮 CI：**`.ci/r29b`**（HEAD `cef163b`）—— **9/9 阶段 PASS，exit 0**
-  （`test` **870442ms**，`skipped=1` 为已知的 secret-store；套件 **363** 个全部有归属；
-  树指纹 `81b9529dc4c87dc7` —— **脏树 14 改 + 436 未跟踪**，见 §3.0j 第 28 轮）
-- 相关提交：`cef163b` / `e9a5a4c`（**第 29 轮：跨文档校准判据 + 7 条过期注记**）、
+- 最近一轮 CI：**`.ci/r30`**（HEAD `35214c8`，**这一行就是被那次 CI 跑过的那棵树**）—— **9/9 阶段 PASS，exit 0**
+  （`test` **875135ms**，`skipped=1` 为已知的 secret-store；套件 **363** 个全部有归属；
+  树指纹 `60035e99adeccee2` —— **脏树 14 改 + 438 未跟踪**，见 §3.0j 第 28 轮）
+- 相关提交：`35214c8`（**第 30 轮：第八种形态 + 最终报告追到第 30 轮**）、
+  `cef163b` / `e9a5a4c`（**第 29 轮：跨文档校准判据 + 7 条过期注记**）、
   `9277ced` / `5aa61df`（**第 28 轮：读数适用范围判据 + `run-ci` 记录树状态**）、
   `c746e80` → `dd6eb8f`（第 27 轮）、`f991d9d` → `4ccdf86`（第 26 轮）、`bacd407`（第 25 轮）、
   `2816b34`（第 17 轮记账）、`ed2518d`（**DSH 公开名契约**）、`75ea3e1`（F-21 投递面）、`8ba5609`（**第 18 轮：登记表同时认声明名与公开名**）

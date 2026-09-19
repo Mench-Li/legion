@@ -42,6 +42,89 @@ export const DIR_ROLES = Object.freeze(['install', 'data', 'workspace', 'cache',
 export const WRITABLE_ROLES = Object.freeze(['data', 'workspace', 'cache', 'log'])
 
 /**
+ * 角色 → 布局字段的**取法表**。★★★ 它是 `DIR_ROLES` 与 `WRITABLE_ROLES` 唯一的机械消费者。
+ *
+ * ---------------------------------------------------------------------------
+ * 这两张声明表原先**各有一份手写复述**，而两份都有静默失效路径（第 42 轮实测，
+ * 见 `scratch/_probe-path-roles.mjs`）：
+ *
+ *   ① `for (const role of DIR_ROLES)` 里是一个嵌套三元，**兜底那支是 `layout?.logDir`**：
+ *
+ *          role === 'install' ? install : role === 'data' ? layout?.dataDir : ...
+ *            : role === 'cache' ? layout?.cacheDir : layout?.logDir
+ *
+ *      ⇒ 往 `DIR_ROLES` 里加一个角色，它会被**当成 logDir** 去检查。实测输出：
+ *
+ *          PATH_NOT_ABSOLUTE [role=backup] → backup 必须是绝对路径，当前为「relative-log」
+ *
+ *      ——**角色名是对的、文案是对的、值是别人的**，而真正的 `backupDir` 从未被看过。
+ *      > 一条报在正确名字下、引用着另一个值的诊断，与一条正确的诊断，
+ *      > 在"这一项检查过了"这个读数上是同一个东西。
+ *
+ *   ② 安装目录那条检查干脆**自己手写了一个对象**当角色清单：
+ *
+ *          const writable = { data: layout.dataDir, workspace: ..., cache: ..., log: ... }
+ *          for (const [role, value] of Object.entries(writable))
+ *
+ *      ⇒ `WRITABLE_ROLES` 声明了却不被读；往它里面加一个角色，那条
+ *      **"可写目录不得落在安装目录内"**的安全检查就不会查它（实测：不报）。
+ *
+ * 所以取法收敛到这一张表，两侧都**遍历声明**；声明了却没取法 ⇒ 一进模块就抛
+ * （与 `RUN_RECORD_FIELD_NOT_WIRED` / `ACTION_FLOOR_FOR_CONFIDENCE` 同族）。
+ */
+export const DIR_ROLE_READERS = Object.freeze({
+  install: (l) => l?.installDir ?? null,
+  data: (l) => l?.dataDir ?? null,
+  workspace: (l) => l?.workspaceDir ?? null,
+  cache: (l) => l?.cacheDir ?? null,
+  log: (l) => l?.logDir ?? null,
+})
+
+/**
+ * ★★ 三张表之间的接线检查（**可注入**，好让用例能造出"加一个角色"那个形状）。
+ *
+ *   与 `recordWiring()` / `confidenceFloorsAligned()` 同族：把"这张表与那张表
+ *   对不对得上"做成一个**能被证伪的纯函数**，而不是只写成一个模块级的 if。
+ *
+ *   > 一条只在模块加载时跑一次的守卫，与一个"能被人拿坏输入去试"的守卫，
+ *   > 在"它到底拦不拦得住"这个读数上是同一个东西——
+ *   > 只不过前者只能靠**改动源码**来验证，而改源码的人正是它要防的那个人。
+ */
+export function dirRoleWiring({
+  dirRoles = DIR_ROLES, writableRoles = WRITABLE_ROLES, readers = DIR_ROLE_READERS,
+} = {}) {
+  const declared = new Set(dirRoles)
+  const unwired = dirRoles.filter((r) => typeof readers[r] !== 'function')
+  const orphanReader = Object.keys(readers).filter((r) => !declared.has(r))
+  const notADirRole = writableRoles.filter((r) => !declared.has(r))
+  return Object.freeze({
+    ok: unwired.length === 0 && orphanReader.length === 0 && notADirRole.length === 0,
+    unwired: Object.freeze(unwired),
+    orphanReader: Object.freeze(orphanReader),
+    notADirRole: Object.freeze(notADirRole),
+  })
+}
+
+{
+  const wiring = dirRoleWiring()
+  if (!wiring.ok) {
+    throw new Error('paths：目录角色表与取法表**不对齐**——'
+      + `声明了却没取法的 ${JSON.stringify(wiring.unwired)}、`
+      + `有取法却没声明的 ${JSON.stringify(wiring.orphanReader)}、`
+      + `可写角色里不是目录角色的 ${JSON.stringify(wiring.notADirRole)}。`
+      + '角色没有取法时，那条检查会**报在正确的角色名下、引用着另一个角色的值**，'
+      + '而真正的目录从未被检查过。')
+  }
+}
+
+/** 解析出 角色 → 路径。★ 唯一一处把角色映射到布局字段的地方。 */
+function dirRoleValues(layout) {
+  const out = {}
+  for (const role of DIR_ROLES) out[role] = DIR_ROLE_READERS[role](layout)
+  return out
+}
+
+/**
  * 本模块认的全部环境变量（spec §6.11「所有环境变量必须在配置 Schema 中声明」）。
  * 只登记键名，任何值都不进版本库。
  */
@@ -226,6 +309,43 @@ export function resolveLayout({
 }
 
 /**
+ * ★★★ 可写角色里，哪些落在安装目录内。**角色清单与取法都可注入。**
+ *
+ *   为什么要把这一小段单独做成函数：那条检查的**关键性质**是"它跟随
+ *   `WRITABLE_ROLES` 这个声明"，而不是"它恰好查了那四个目录"。
+ *   两者在今天——声明正好是四个角色——**行为完全相同**，任何用例都分不开
+ *   （破验 M3/M4 一开始就是漏网的，查下来正是这个原因）。
+ *
+ *   ⇒ 把它做成可注入的，用例就能拿**五个**角色去试，于是"跟随声明"这件事
+ *   从"不可证伪"变成"可证伪"。
+ *
+ *   > 一条"恰好查对了四个目录"的检查，与一条"跟随声明查目录"的检查，
+ *   > 在声明正好是四个角色的那一天是同一个东西——
+ *   > 只不过前者会在有人加第五个角色的那一天开始静悄悄地少查一个。
+ */
+export function writableDirsInsideInstall({
+  layout, installDir, writableRoles = WRITABLE_ROLES, readers = DIR_ROLE_READERS,
+  platform = layout?.platform ?? process.platform,
+} = {}) {
+  const out = []
+  if (installDir === null || installDir === undefined) return out
+  for (const role of writableRoles) {
+    const reader = readers[role]
+    // 没有取法 ⇒ **不静默跳过**：那是"接线断了"，必须让人看见。
+    if (typeof reader !== 'function') {
+      throw new Error(`paths：可写角色「${role}」没有取法——`
+        + '静默跳过它，等于这条安全检查从没查过这个目录。')
+    }
+    const value = reader(layout)
+    if (value === null || value === undefined) continue
+    if (isPathInside(installDir, value, platform) || samePath(installDir, value, platform)) {
+      out.push(Object.freeze({ role, value }))
+    }
+  }
+  return out
+}
+
+/**
  * 布局不变量判定（spec §6.11 / §9.4）。
  *
  * 每条诊断都带 `code`（机器可判）与 `message`（用户可读），`role` 指出是哪个角色出的问题。
@@ -265,11 +385,11 @@ export function layoutDiagnostics(layout) {
       '这一条才是根因，后面关于密钥库的诊断都是它的后果。')
   }
 
+  // ★ 遍历 `DIR_ROLES`（不是手写一份三元链）——见 `DIR_ROLE_READERS` 上面那段：
+  //   手写版本的兜底分支会把任何新角色**当成 logDir** 检查。
+  const roleValues = dirRoleValues(layout)
   for (const role of DIR_ROLES) {
-    const value = role === 'install' ? install
-      : role === 'data' ? layout?.dataDir
-        : role === 'workspace' ? layout?.workspaceDir
-          : role === 'cache' ? layout?.cacheDir : layout?.logDir
+    const value = roleValues[role]
     if (value === null || value === undefined) continue
     const api = pathApi(platform)
     if (!api.isAbsolute(value)) {
@@ -283,14 +403,12 @@ export function layoutDiagnostics(layout) {
   }
 
   // ① 安装目录内不得有任何可写角色（PRT-003 实测的 4 处越界写入就是这条的反面）。
+  // ★ 遍历 `WRITABLE_ROLES` 而不是手写一个 `{ data, workspace, cache, log }` 对象：
+  //   后者让这张声明表**不被读**，往它里面加角色就静默漏检（第 42 轮实测）。
   if (install !== null) {
-    const writable = { data: layout.dataDir, workspace: layout.workspaceDir, cache: layout.cacheDir, log: layout.logDir }
-    for (const [role, value] of Object.entries(writable)) {
-      if (value === null || value === undefined) continue
-      if (isPathInside(install, value, platform) || samePath(install, value, platform)) {
-        add('error', 'WRITABLE_DIR_INSIDE_INSTALL_DIR', role,
-          `${role}（${value}）位于安装目录（${install}）内。安装目录会被升级原子替换，业务状态写进去会在升级时丢失或被覆盖。`)
-      }
+    for (const { role, value } of writableDirsInsideInstall({ layout, installDir: install, platform })) {
+      add('error', 'WRITABLE_DIR_INSIDE_INSTALL_DIR', role,
+        `${role}（${value}）位于安装目录（${install}）内。安装目录会被升级原子替换，业务状态写进去会在升级时丢失或被覆盖。`)
     }
     if (layout.productConfigPath !== null && layout.productConfigPath !== undefined &&
         (isPathInside(install, layout.productConfigPath, platform) || samePath(install, layout.productConfigPath, platform))) {

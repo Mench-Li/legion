@@ -15,10 +15,14 @@ import assert from 'node:assert/strict'
 
 import {
   CONFIG_LAYERS,
+  DIR_ROLE_READERS,
+  DIR_ROLES,
   LEGION_ENV,
+  WRITABLE_ROLES,
   assertConfigWritable,
   assertLayoutUsable,
   defaultProductHome,
+  dirRoleWiring,
   findPlaintextSecretsInConfig,
   hasBlockingDiagnostic,
   isPathInside,
@@ -27,6 +31,7 @@ import {
   normalizePath,
   pathsOverlap,
   provenanceOf,
+  writableDirsInsideInstall,
   resolveLayout,
   samePath,
 } from './paths.mjs'
@@ -241,6 +246,169 @@ test('assertConfigWritable：普通配置文件不得含明文密钥，只允许
   const hits = findPlaintextSecretsInConfig({ teamHubToken: 'abc', teamHubTokenRef: 'legion/hub' })
   assert.deepEqual(hits, ['$.teamHubToken'])
   assert.doesNotThrow(() => assertConfigWritable({ secretRef: 'legion/openai', model: 'x' }))
+})
+
+// ---------------------------------------------------------------- 目录角色接线
+//
+// 第 42 轮：这两张声明表原先**各有一份手写复述**，两条静默失效路径都实测到了
+// （`scratch/_probe-path-roles.mjs`）。这一组把"声明表 → 检查"这条通路钉住。
+//
+// ★ 为什么值得单独一组：这两条检查是**安全检查**（可写目录不得落在会被升级
+//   原子替换的安装目录里），而它们的失效方式是"报一条看起来正确的诊断"。
+//   > 一条报在正确名字下、引用着另一个值的诊断，与一条正确的诊断，
+//   > 在"这一项检查过了"这个读数上是同一个东西。
+
+const DIRS = ['data', 'workspace', 'cache', 'log']
+const fieldOf = { data: 'dataDir', workspace: 'workspaceDir', cache: 'cacheDir', log: 'logDir' }
+
+test('接线① ★★★ 绝对路径检查**覆盖到每一个** DIR_ROLES 成员（声明即被检查）', () => {
+  // 全部置成相对路径 ⇒ 每个角色都该报一条 PATH_NOT_ABSOLUTE
+  const layout = { platform: WIN, installDir: 'relative-install', homeDir: 'C:\\Users\\me' }
+  for (const role of DIRS) layout[fieldOf[role]] = `relative-${role}`
+  const roles = layoutDiagnostics(layout).filter((d) => d.code === 'PATH_NOT_ABSOLUTE').map((d) => d.role)
+  assert.deepEqual([...roles].sort(), ['install', ...DIRS].sort(),
+    `PATH_NOT_ABSOLUTE 只覆盖了 ${roles.join(',')}——声明了却没被检查的角色会静默漏检`)
+})
+
+test('接线② ★★★ 每条诊断引用的是**它自己那个角色**的值（不许张冠李戴）', () => {
+  // 这是修之前那个真缺陷的形状：新角色被**当成 logDir** 检查 ⇒
+  // 报在正确的角色名下、引用着别人的值。
+  const layout = { platform: WIN, installDir: 'relative-install', homeDir: 'C:\\Users\\me' }
+  for (const role of DIRS) layout[fieldOf[role]] = `relative-${role}`
+  const diags = layoutDiagnostics(layout).filter((d) => d.code === 'PATH_NOT_ABSOLUTE')
+  for (const role of ['install', ...DIRS]) {
+    const d = diags.find((x) => x.role === role)
+    assert.ok(d !== undefined, `${role} 没有被检查到`)
+    const quoted = d.message.match(/「([^」]*)」/)?.[1]
+    const expected = role === 'install' ? 'relative-install' : `relative-${role}`
+    assert.equal(quoted, expected, `${role} 名下引用的是「${quoted}」，而它自己的值是「${expected}」`)
+  }
+})
+
+test('接线③ ★★★ 安装目录包含检查**覆盖到每一个** WRITABLE_ROLES 成员', () => {
+  // 全部放进安装目录 ⇒ 每个可写角色都该报一条
+  const layout = { platform: WIN, installDir: 'C:\\Legion', homeDir: 'C:\\Users\\me' }
+  for (const role of DIRS) layout[fieldOf[role]] = `C:\\Legion\\${role}`
+  const roles = layoutDiagnostics(layout)
+    .filter((d) => d.code === 'WRITABLE_DIR_INSIDE_INSTALL_DIR').map((d) => d.role)
+  assert.deepEqual([...roles].sort(), [...DIRS].sort(),
+    `这条安全检查只覆盖了 ${roles.join(',')}——往 WRITABLE_ROLES 加角色会静默漏检`)
+})
+
+test('接线④ ★★ 可写角色必须是目录角色的子集（两张表不许各说各话）', () => {
+  for (const r of WRITABLE_ROLES) {
+    assert.ok(DIR_ROLES.includes(r), `可写角色「${r}」不在 DIR_ROLES 里`)
+  }
+  // 反向控制：安装目录**不可写**，所以它不该出现在可写表里
+  assert.equal(WRITABLE_ROLES.includes('install'), false,
+    'install 被列成了可写角色——那"安装目录内不得有可写角色"会自相矛盾')
+})
+
+test('接线⑤ ★★ 反向控制：一个完全合法的布局**不许**报这两类错（别矫枉过正）', () => {
+  const layout = {
+    platform: WIN,
+    installDir: 'C:\\Legion',
+    homeDir: 'C:\\Users\\me',
+    dataDir: 'C:\\Users\\me\\data',
+    workspaceDir: 'D:\\Projects',
+    cacheDir: 'C:\\Users\\me\\cache',
+    logDir: 'C:\\Users\\me\\log',
+  }
+  const codes = layoutDiagnostics(layout).map((d) => d.code)
+  assert.equal(codes.includes('PATH_NOT_ABSOLUTE'), false, `误报：${codes.join(',')}`)
+  assert.equal(codes.includes('WRITABLE_DIR_INSIDE_INSTALL_DIR'), false, `误报：${codes.join(',')}`)
+})
+
+test('接线⑥ ★★★ 接线守卫**可注入**：造一个"加了角色却没补取法"的形状，必须被指名', () => {
+  // ★ 为什么这一条必须是"注入"而不是"读模块加载时的行为"：
+  //   那条守卫只在模块加载时跑一次，而**加载时一切正常**。想验证它拦不拦得住，
+  //   唯一的办法是拿坏输入去试——否则只能靠改源码，而改源码的人正是它要防的人。
+  //   （破验 M5/M6 一开始就是**漏网**的，本用例是补上来的。）
+  const base = { dirRoles: DIR_ROLES, writableRoles: WRITABLE_ROLES }
+  const readers = Object.fromEntries(DIR_ROLES.map((r) => [r, () => null]))
+
+  // ① 全绿
+  assert.equal(dirRoleWiring({ ...base, readers }).ok, true)
+
+  // ② 声明了却没取法 ⇒ 指名报出（这正是"新角色冒充 logDir"的前置状态）
+  const w1 = dirRoleWiring({ ...base, dirRoles: [...DIR_ROLES, 'backup'], readers })
+  assert.equal(w1.ok, false)
+  assert.deepEqual(w1.unwired, ['backup'], '新角色没有取法却没被指名——那它会被当成别的角色检查')
+
+  // ③ 有取法却没声明 ⇒ 另一个方向的静默（一条永远不会被走到的取法）
+  const w2 = dirRoleWiring({ ...base, readers: { ...readers, ghost: () => null } })
+  assert.equal(w2.ok, false)
+  assert.deepEqual(w2.orphanReader, ['ghost'])
+
+  // ④ 可写角色不在目录角色里 ⇒ 那条安全检查会用一个查不到的取法
+  const w3 = dirRoleWiring({ ...base, writableRoles: [...WRITABLE_ROLES, 'ghost'] })
+  assert.equal(w3.ok, false)
+  assert.deepEqual(w3.notADirRole, ['ghost'])
+
+  // ★ ⑤ 真仓当下必须是绿的（否则上面三条只是在测一个坏表）
+  assert.equal(dirRoleWiring({}).ok, true, '真仓的目录角色表当前就不对齐')
+})
+
+test('接线⑦ ★★★ 每一个角色都**真的**有自己的取法（两两不同，不许共用）', () => {
+  // ★ 这一条抓的是"取法表里两个角色指向同一个字段"（破验 M2 的形状）：
+  //   那样两个角色会读到同一个目录，而**两条检查都会报**、都看起来正常。
+  const probe = {
+    installDir: 'P-install', dataDir: 'P-data', workspaceDir: 'P-workspace',
+    cacheDir: 'P-cache', logDir: 'P-log',
+  }
+  const seen = new Map()
+  for (const [role, expected] of Object.entries({
+    install: 'P-install', data: 'P-data', workspace: 'P-workspace', cache: 'P-cache', log: 'P-log',
+  })) {
+    const layout = { platform: WIN, ...probe }
+    // 把**只有**该角色置成相对路径，其余置成绝对路径 ⇒ 只有它该报，
+    // 且报出来的值必须是它自己那个字段。
+    for (const k of Object.keys(probe)) layout[k] = `C:\\abs\\${k}`
+    layout[{ install: 'installDir', data: 'dataDir', workspace: 'workspaceDir', cache: 'cacheDir', log: 'logDir' }[role]] = `rel-${role}`
+    const d = layoutDiagnostics(layout).find((x) => x.code === 'PATH_NOT_ABSOLUTE')
+    assert.ok(d !== undefined, `只把 ${role} 置成相对路径时没有人报——它的取法可能是空的`)
+    assert.equal(d.role, role, `报的是 ${d.role}，而只有 ${role} 是相对路径 ⇒ 有角色共用了取法`)
+    const quoted = d.message.match(/「([^」]*)」/)?.[1]
+    assert.equal(quoted, `rel-${role}`, `${role} 引用的是「${quoted}」`)
+    assert.equal(seen.has(quoted), false, `「${quoted}」被两个角色引用了`)
+    seen.set(quoted, role)
+    assert.equal(expected.length > 0, true)
+  }
+})
+
+test('接线⑧ ★★★ 安装目录那条检查**跟随声明**——注入第五个角色，它必须被查', () => {
+  // ★★★ 这一条是本轮**唯一**能分开"跟随声明"与"恰好查了那四个"的用例。
+  //   二者在今天（声明正好是四个可写角色）行为**完全相同**——破验 M3/M4
+  //   一开始就是漏网的，查下来正是这个原因，不是判据漏了。
+  //   ⇒ 把角色清单做成可注入的，这件事才从"不可证伪"变成"可证伪"。
+  const layout = { platform: WIN, installDir: 'C:\\Legion', backupDir: 'C:\\Legion\\backup' }
+  // ★ 必须**在真表基础上**加，而不是拿一张只有 backup 的表去替换——
+  //   第一版我就是那么写的，于是 `data` 等角色成了「没有取法」、守卫当场抛。
+  //   （那条错误文案正是为此写的：它把我这个错误叫了出来，而不是静默少查。）
+  const readers = { ...DIR_ROLE_READERS, backup: (l) => l?.backupDir ?? null }
+
+  const base = writableDirsInsideInstall({ layout, installDir: 'C:\\Legion' })
+  assert.deepEqual(base.map((x) => x.role), [], '没有角色落在安装目录里时不该报（本夹具的其余目录都为空）')
+
+  const withBackup = writableDirsInsideInstall({
+    layout, installDir: 'C:\\Legion',
+    writableRoles: [...WRITABLE_ROLES, 'backup'], readers,
+  })
+  assert.deepEqual(withBackup.map((x) => x.role), ['backup'],
+    '注入了第五个可写角色，这条检查却没查它——那它"查对四个"只是巧合，不是跟随声明')
+  assert.equal(withBackup[0].value, 'C:\\Legion\\backup')
+
+  // ★ 反向控制：新角色**不在**安装目录里时不许报（别把"注入"变成"凡注入必报"）
+  const outside = writableDirsInsideInstall({
+    layout: { ...layout, backupDir: 'D:\\Elsewhere' }, installDir: 'C:\\Legion',
+    writableRoles: [...WRITABLE_ROLES, 'backup'], readers,
+  })
+  assert.deepEqual(outside, [], '新角色在安装目录之外，却被报了')
+
+  // ★ 接线断了要**抛**，不是静默跳过（静默跳过 = 这个目录从没被查过）
+  assert.throws(() => writableDirsInsideInstall({
+    layout, installDir: 'C:\\Legion', writableRoles: [...WRITABLE_ROLES, 'ghost'],
+  }), /没有取法/)
 })
 
 // ---------------------------------------------------------------- 公共出口

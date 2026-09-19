@@ -29,7 +29,7 @@ import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
 
 import { ledgerRows, ledgerNotDone, sectionFive, uncoveredLedgerRows, NON_DONE_STATUSES,
-  checkBrief, checkBriefCount, decisionItemNumbers } from './intervention-coverage.mjs'
+  checkBrief, checkBriefCount, decisionItemNumbers, briefStatedCounts } from './intervention-coverage.mjs'
 
 const rows = ledgerRows()
 const notDone = ledgerNotDone()
@@ -205,4 +205,24 @@ test('⑨b ★★ 反向控制：条数一致时**不许**红（含表头/分隔
   assert.deepEqual(r.violations, [], '一致时被判红：' + JSON.stringify(r.violations))
   assert.equal(r.count, 3, '`|---|---|` 分隔行被当成了一条裁决项')
   assert.deepEqual(r.stated, [3, 3], '同一条数写两遍应当都被收进来（它们必须一致）')
+})
+
+test('⑨c ★★★ 序数不是计数：「第 20 条裁决项」不许被读成"有 20 条"', () => {
+  // ★ 这是第 33 轮**真发生过**的误报：我在简报里加了一句指路的话
+  //   （「它正好就是第 20 条裁决项」），判据立刻报「简报写着 20 条、§5 有 29 条」。
+  //
+  //   > 一个分不清"第 20 条"与"20 条"的计数器，
+  //   > 会在**引用**某一条的时候，报出一个**条数**上的错误。
+  assert.deepEqual(briefStatedCounts('它正好就是第 20 条裁决项'), [],
+    '序数被读成了计数')
+  assert.deepEqual(briefStatedCounts('第20条裁决项'), [], '不带空格的序数也被读成了计数')
+  assert.deepEqual(briefStatedCounts('§5 里那 29 条裁决项'), [29], '真正的计数没被读出来')
+  // 序数与计数在同一段里并存时，只收计数那一个
+  assert.deepEqual(briefStatedCounts('第 20 条裁决项 与 §5 里那 29 条裁决项'), [29])
+  // ★ `\s*` 会吃换行 ⇒ 隔着空行的序数也必须仍然被排除
+  assert.deepEqual(briefStatedCounts('第 20\n\n条裁决项'), [], '跨行的序数没被排除')
+  // 而真文档必须仍然对得上（否则这次修正就变成了"把判据关掉"）
+  const r = checkBrief()
+  assert.equal(r.ok, true, '真文档红了：' + JSON.stringify(r.violations))
+  assert.deepEqual(r.stated, [29])
 })

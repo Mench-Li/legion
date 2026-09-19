@@ -52,6 +52,13 @@ try {
     "  if (stated.length === 0) {", '  if (false) {')
   codeMutation('M6 去掉"表头找不到也失败"守卫',
     "  if (!found) {", '  if (false) {')
+  // ★★ M7/M8：第 33 轮那条**序数 vs 计数**的修正。M7 回到第一版正则（会误报），
+  //    M8 矫枉过正（把真计数也排除掉）—— 两个方向都要咬住。
+  codeMutation('M7 去掉"序数不算计数"的排除（回到第一版正则）',
+    "    if (m[1] !== undefined) continue // 「第 N 条裁决项」是指路，不是计数",
+    '    if (false) continue')
+  codeMutation('M8 矫枉过正：把真计数也一起排除掉',
+    'if (m[1] !== undefined) continue', 'if (m[2] !== undefined) continue')
 } finally {
   writeFileSync(BRIEF, briefOrig, 'utf8')
   writeFileSync(STATUS, statusOrig, 'utf8')

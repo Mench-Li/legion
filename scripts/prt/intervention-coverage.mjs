@@ -141,10 +141,28 @@ export function decisionItemNumbers(section) {
   return { found: true, numbers }
 }
 
-/** 简报里声明的条数（`**29 条**裁决项` 这类写法）。返回全部说法，供"互相矛盾"检查。 */
+/**
+ * 简报里声明的条数（`**29 条**裁决项` 这类写法）。返回全部说法，供"互相矛盾"检查。
+ *
+ * ★★ 第 33 轮补的区分：**序数**不是**计数**。
+ *
+ * 简报里那句话自然的中文写法是「它正好就是**第 20 条裁决项**」——那是在**指第 20 条**，
+ * 不是"有 20 条"。而第一版的正则 `/(\d+)\s*条\s*裁决项/` 把两者读成同一个东西，
+ * 于是我在简报里**加了一句指路的话**，判据就报「简报写着 20 条、§5 有 29 条」。
+ *
+ *   > 一个分不清"第 20 条"与"20 条"的计数器，
+ *   > 会在**引用**某一条的时候，报出一个**条数**上的错误。
+ *
+ * ⇒ 前面带「第」（允许中间有空白）的一律**不算计数**。
+ *   注意 `\s*` 会吃掉换行，所以"第 20 条"与"裁决项"之间若隔着空行也会被连起来——
+ *   这正是第一版误报能发生的条件之一。
+ */
 export function briefStatedCounts(briefText) {
   const out = []
-  for (const m of String(briefText).matchAll(/(\d+)\s*条\*{0,2}\s*裁决项/g)) out.push(Number(m[1]))
+  for (const m of String(briefText).matchAll(/(?:(第)\s*)?(\d+)\s*条\*{0,2}\s*裁决项/g)) {
+    if (m[1] !== undefined) continue // 「第 N 条裁决项」是指路，不是计数
+    out.push(Number(m[2]))
+  }
   return out
 }
 

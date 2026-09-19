@@ -53,6 +53,7 @@ import { specFor, PROCESS_KEYS } from '../../product/process-manifest.mjs'
 import { PATCH_LAYER_ROWS } from '../../runtime/dsh-composition/patch-layer.mjs'
 // ★ 借用**同一份**「清单形状」正则（见下面 D2 一节）：两份会漂的键表就是本仓的旧账。
 import { MANIFEST_PATTERNS } from './reachability.mjs'
+import { REPO_WIDE_BASELINE } from './doc-table-integrity.mjs'
 
 export const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
@@ -105,7 +106,78 @@ export function defaultContext() {
     commitCitations: () => scanCommitCitations(doc(LEDGER_DOC)),
     pinnedCitations: () => checkPinnedCitations(),
     manifestImpersonation: () => checkManifestImpersonation(),
+    // ── E. 交接报告 §二 自称"机器读数，可复跑"的那张表（第 26 轮）────────────
+    ledgerTallies: () => tallyLedger(doc(LEDGER_DOC)),
+    trackedTestCount: () => trackedTestFiles().length,
+    unreachableTallies: () => tallyUnreachable(),
+    docRatchet: () => REPO_WIDE_BASELINE,
   }
+}
+
+// ── E. ★★★ 交接报告 §二 那张表自称「都是机器读数，可复跑」（2026-09-18 第 26 轮）──
+//
+// ★ 起因：那句话本身就是**一句没有任何东西核对的断言** —— 而且它出现在
+//   **一份专门用来汇总"哪些读数可信"的报告**里，位置比前面那三种都更靠前：
+//   读者正是**因为**它写着"可复跑"才不去跑。
+//
+//   我把它逐行重算了一遍（`scratch/_verify-readings.mjs`）：**大部分对**，
+//   但抓到一处真漂移 —— 正文写着
+//
+//       "`test` 阶段那 808 秒里，工作树的代码与文档一个字节都没动过"
+//
+//   而 808s 是**第 23 轮**那次 CI 的读数。这番话是第 22 轮写的，
+//   第 23 轮改表时**没跟着改句子**。
+//
+//   > 一张表里已经写了三轮新的读数，而紧挨着它的那句话还记着第一轮的那个数。
+//   > 两者在报告里长得都像"机器读数"。
+//
+// ★ 这几条只需要读文件与读 git，**不开子进程**（CI 那几行由
+//   `suite-counts` 真跑去核，见 `scripts/prt/suite-counts.mjs`）。
+
+/** 交接报告里那张「最终读数」表的文件路径。 */
+export const HANDOVER_DOC = 'docs/superpowers/prt/PRT-HANDOVER-2026-09-18-ROUND22.md'
+/** 可达性基线的文件路径。 */
+export const REACHABILITY_BASELINE = 'docs/superpowers/prt/prt-reachability-baseline.json'
+
+/** 数台账每一档状态。★/⏸/⬜ 三个都要数——只数 ✅ 会把"4 条暂停"读成"都完了"。 */
+export function tallyLedger(text) {
+  let done = 0; let paused = 0; let todo = 0; let total = 0
+  for (const line of String(text).split(/\r?\n/)) {
+    if (!/^\|\s*PRT-\d+/.test(line)) continue
+    const cells = line.replace(/^\|/, '').replace(/\|$/, '').split(/(?<!\\)\|/)
+    if (cells.length < 2) continue
+    // ★ 不看固定下标，**扫**第一格带状态标记的。
+    //
+    //   我第一版写死 `cells[2]`，于是报出 `0 ✅ / 3 ⏸ / 2 ⬜`——
+    //   而那是**错的**：去掉首尾竖线之后状态落在 `cells[1]`（表头是
+    //   `| 任务 | 状态 | 证据 | …`）。写死下标的版本会安静地多数一个、
+    //   少算一个，而输出仍然是一个**看起来完全合理**的分布。
+    //
+    //   > 一个"下标差了一位"的解析器，与一个"台账真的有几条没做完"，
+    //   > 在报告里长得一模一样——而后者看起来更像个发现。
+    const st = cells.map((c) => c.trim()).find((c) => /^(✅|⏸|⬜)/.test(c))
+    if (st === undefined) continue
+    total += 1
+    if (st.startsWith('✅')) done += 1
+    else if (st.includes('⏸')) paused += 1
+    else if (st.includes('⬜')) todo += 1
+  }
+  return { total, done, paused, todo }
+}
+
+/** 已跟踪的 `*.test.mjs`。★ 用 `-z`：非 ASCII 路径会被 C-quote 成打不开的名字。 */
+export function trackedTestFiles({ cwd = REPO } = {}) {
+  return execFileSync('git', ['ls-files', '-z', '*.test.mjs'], { cwd, encoding: 'utf8' })
+    .split('\0').filter(Boolean)
+}
+
+/** 可达性基线的读数：不可达总数与各分类条数。 */
+export function tallyUnreachable({ cwd = REPO } = {}) {
+  const base = JSON.parse(readFileSync(resolve(cwd, REACHABILITY_BASELINE), 'utf8'))
+  const list = base.unreachable ?? []
+  const byClass = {}
+  for (const e of list) byClass[e.class] = (byClass[e.class] ?? 0) + 1
+  return { total: list.length, byClass }
 }
 
 // ── D2. ★★★ 我方判据文件**不得冒充清单**（2026-09-18 实测事故）─────────────
@@ -845,6 +917,96 @@ export const FACTS = Object.freeze([
       doc: LEDGER_DOC,
       re: /全\s*(\d+)\s*项/,
       note: '台账标题「# PRT 任务进度表（全 145 项）」',
+    }),
+  }),
+
+  // ── E. ★★★ 交接报告 §二 那张自称「机器读数，可复跑」的表（第 26 轮）────────
+  //
+  //   这几条的**两侧独立**是天然的：一侧是报告正文里人写的中文句子里的数字，
+  //   另一侧是从产物里推出来的（读台账 / `git ls-files` / 基线 JSON / 常量）。
+  Object.freeze({
+    id: 'handover-ledger-tallies',
+    what: '交接报告 §二 说台账"145 行 = 140 ✅ / 4 ⏸ / 1 ⬜"',
+    why: '★ 三个数都必须核：只核 ✅ 的话，把 4 条暂停误写成完成、'
+      + '或反过来把完成误写成暂停，都读不出来。'
+      + '（我自己写这条的**探针**时就把台账解析写错过一次：按第 3 列取状态，'
+      + '而真实格式下它报出 `0 ✅ / 3 ⏸ / 2 ⬜` —— 一个**看起来像发现**的错。）',
+    source: LEDGER_DOC + ' 每行第 3 格的状态列',
+    derive: (ctx) => JSON.stringify(ctx.ledgerTallies()),
+    claim: Object.freeze({
+      doc: HANDOVER_DOC,
+      re: /台账 \| \*\*(\d+) 行 = (\d+) ✅ \/ (\d+) ⏸ \/ (\d+) ⬜\*\*/,
+      parse: (m) => JSON.stringify({
+        total: Number(m[1]), done: Number(m[2]), paused: Number(m[3]), todo: Number(m[4]),
+      }),
+      note: '「台账 | **145 行 = 140 ✅ / 4 ⏸ / 1 ⬜**」',
+    }),
+  }),
+  Object.freeze({
+    id: 'handover-tracked-suites',
+    what: '交接报告 §二 说"套件清单完备：N 个 `*.test.mjs` 全部有归属"',
+    why: '★ 这是**产物侧**的数（`git ls-files`），报告里的 N 是人在第 25 轮写下的。'
+      + '每一轮新增套件都会让它过期 —— 而它旁边那句"全部有归属"是'
+      + '`stage` 阶段**当场**判的，两者挨在一起，看起来一样权威。',
+    source: '`git ls-files -z "*.test.mjs"` 的条数',
+    derive: (ctx) => ctx.trackedTestCount(),
+    claim: Object.freeze({
+      doc: HANDOVER_DOC,
+      re: /套件清单完备 \| \*\*(\d+) 个/,
+      note: '「套件清单完备 | **360 个 `*.test.mjs` 全部有归属**」',
+    }),
+  }),
+  Object.freeze({
+    id: 'handover-unreachable-total',
+    what: '交接报告 §二 说可达性"不可达 **N** 条"',
+    why: '★ 与 `reachability.mjs --diff` 同源，但**不同侧**：'
+      + '一侧是报告正文里的数，另一侧是基线 JSON 里数组的长度。',
+    source: REACHABILITY_BASELINE + ' → `unreachable.length`',
+    derive: (ctx) => ctx.unreachableTallies().total,
+    claim: Object.freeze({
+      doc: HANDOVER_DOC,
+      re: /不可达 \*\*(\d+)\*\* 条/,
+      note: '「不可达 **46** 条，全部已定性」',
+    }),
+  }),
+  Object.freeze({
+    id: 'handover-doc-ratchet',
+    what: '交接报告 §二 说全仓表格棘轮 **N**（只许降）',
+    why: '★ 棘轮的语义是"只许减少"。常量与报告里的数**都**可能不跟着走：'
+      + '常量留在旧值（棘轮失效），报告留在旧值（读数过期）。'
+      + '这条把两侧绑在一起，任一侧不动都会红。',
+    source: '`scripts/prt/doc-table-integrity.mjs` → `REPO_WIDE_BASELINE`',
+    derive: (ctx) => ctx.docRatchet(),
+    claim: Object.freeze({
+      doc: HANDOVER_DOC,
+      re: /全仓棘轮 \*\*(\d+)\*\*/,
+      note: '「全仓棘轮 **87**（只许降）」',
+    }),
+  }),
+  Object.freeze({
+    id: 'handover-ci-prose-matches-table',
+    what: '交接报告里正文那句"`test` 阶段那 N 秒"**必须等于**同一份报告表里最新一次 CI 的毫秒数',
+    why: '★★ 这是本轮抓到的**真漂移**：表里写着四轮 CI 的读数，'
+      + '而紧挨着表的正文说"`test` 阶段那 **808** 秒里，工作树的代码与文档'
+      + '一个字节都没动过"——**808s 是第 23 轮**那次 CI 的数。'
+      + '那句话是第 22 轮写的，第 23 轮加了一行表却**没改句子**。'
+      + '⇒ 表说 825s、正文说 808s，两者都自称机器读数。'
+      + '★ 判据的**两侧**：一侧是正文散文里的秒数，另一侧是表里最新那行的毫秒数。'
+      + '两侧都在这份文档里，但这**不是**"手抄件互核"——'
+      + '表里的毫秒数是每轮从 `summary.json` 抄进来的实测，'
+      + '而散文那句是**对表的概括**；概括与表不一致本身就是缺陷。'
+      + '★ 秒 = round(毫秒/1000)：报告里写的是取整后的秒。',
+    source: HANDOVER_DOC + ' §二 表里最新一行 CI 的 `test` 毫秒数 ÷ 1000（四舍五入）',
+    derive: (ctx) => {
+      const text = ctx.doc(HANDOVER_DOC)
+      const m = /全量 CI（\*\*交付 HEAD\*\*）[^\n]*?`test` (\d+)ms/.exec(text)
+      if (m === null) throw new Error('在交接报告里找不到"交付 HEAD"那一行 CI 读数')
+      return Math.round(Number(m[1]) / 1000)
+    },
+    claim: Object.freeze({
+      doc: HANDOVER_DOC,
+      re: /`test` 阶段那 (\d+) 秒里/,
+      note: '「`test` 阶段那 808 秒里…」',
     }),
   }),
 

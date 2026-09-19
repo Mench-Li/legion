@@ -30,8 +30,9 @@ import { resolve } from 'node:path'
 import {
   FACTS, checkFacts, defaultContext, patchYmlRepresentedRows,
   scanCommitCitations, scanLineCitations, checkPinnedCitations,
-  checkManifestImpersonation,
+  checkManifestImpersonation, tallyLedger, tallyUnreachable,
   STATUS_DOC, LEDGER_DOC, PATCH_YML, REPO, HUB_TOKEN_ENV, WORKBENCH_TOKEN_ENV,
+  HANDOVER_DOC,
 } from './boundary-facts.mjs'
 
 const REAL = checkFacts()
@@ -70,6 +71,13 @@ function withLedgerText(transform) {
     doc: (r) => (r === LEDGER_DOC ? poisoned : base.doc(r)),
     lineCitations: () => scanLineCitations(poisoned),
     commitCitations: () => scanCommitCitations(poisoned),
+    // ★★ 第 26 轮补上这一口。`ledgerTallies` 与上面两口**同一个形状**：
+    //    它在 `defaultContext` 里闭包捕获了**真的** `doc`，所以只替 `doc`
+    //    的替身根本到不了它手里——喂进去的毒会让"台账计数"那条事实
+    //    **读真台账而绿**，于是这条控制是**假**的。
+    //    （这正是本函数上面那段注释写的形状，我又踩了一次：
+    //      *"一个替身没生效"与"判据没在查"，在输出里是同一条红，修法相反。*）
+    ledgerTallies: () => tallyLedger(poisoned),
   }
 }
 
@@ -752,3 +760,112 @@ test('⑬e 控制：扫描面为空 ⇒ `scanned` 必须是 0（不许假装"没
   assert.equal(r.scanned, 0, '目录不存在时 scanned 应该是 0，而不是悄悄报"全绿"')
   assert.deepEqual(r.bad, [])
 })
+
+// ── ⑭ E 组：交接报告 §二 那张自称"机器读数，可复跑"的表（第 26 轮）────────────
+test('⑭a 五条新事实都真的参与了比对（不许有一条静默不查）', () => {
+  const ids = ['handover-ledger-tallies', 'handover-tracked-suites',
+    'handover-unreachable-total', 'handover-doc-ratchet', 'handover-ci-prose-matches-table']
+  for (const id of ids) {
+    const f = FACTS.find((x) => x.id === id)
+    assert.ok(f !== undefined, `事实表里没有 ${id}`)
+    assert.ok(!idsOf(REAL).includes(id), `真实仓库上 ${id} 红了：`
+      + JSON.stringify(REAL.violations.find((v) => v.id === id)))
+  }
+})
+
+test('⑭b ★★ 回归：台账状态**不许**按固定下标取（我第一版写死 `cells[2]`）', () => {
+  // 真实台账：145 = 140 ✅ / 4 ⏸ / 1 ⬜
+  const real = tallyLedger(defaultContext().doc(LEDGER_DOC))
+  assert.deepEqual(real, { total: 145, done: 140, paused: 4, todo: 1 },
+    `真实台账实算 ${JSON.stringify(real)}，与 145/140/4/1 不符`)
+
+  // ★ 反向控制：状态列**不在**第 3 格时也必须数得对。
+  //   写死 `cells[2]` 的版本在这种表上会数出别的分布——
+  //   而"下标差一位"与"台账真的有几条没做完"在报告里长得一模一样。
+  const shifted = [
+    '| 任务 | 状态 | 证据 |',
+    '| --- | --- | --- |',
+    '| PRT-001 甲 | ✅ | `a.md` |',
+    '| PRT-002 乙 | ⏸ | `b.md` |',
+    '| PRT-003 丙 | ⬜ | `c.md` |',
+  ].join('\n')
+  assert.deepEqual(tallyLedger(shifted), { total: 3, done: 1, paused: 1, todo: 1 },
+    '状态不在固定下标上时数错了 ⇒ 解析器靠的是位置而不是标记')
+
+  // ★ 三档**分开**数：把 ⏸ 折进 ✅（或反之）会让"4 条暂停"读成"都完成了"
+  const allDone = shifted.replace('⏸', '✅').replace('⬜', '✅')
+  assert.deepEqual(tallyLedger(allDone), { total: 3, done: 3, paused: 0, todo: 0 })
+})
+
+test('⑭c 载荷：台账里少一个 ✅ ⇒ 那条事实必须红（钳住"三个数都要核"）', () => {
+  const r = checkFacts({
+    ctx: withLedgerText((t) => {
+      // 只在**第一处**把 ✅ 改成 ⏸（模拟"有一行状态被改错"）
+      const i = t.indexOf('| ✅ |')
+      assert.notEqual(i, -1, '台账里找不到 `| ✅ |`，控制写不出来')
+      return t.slice(0, i) + '| ⏸ |' + t.slice(i + '| ✅ |'.length)
+    }),
+  })
+  assert.ok(idsOf(r).includes('handover-ledger-tallies'),
+    `把一条 ✅ 改成 ⏸ 之后没红（红的是 ${JSON.stringify(idsOf(r))}）⇒ 这条只核了总数`)
+})
+
+test('⑭d ★★ 双向控制：改**表里**那个毫秒数也必须红（不只查"散文被改"）', () => {
+  // 测试 ③ 只改**声称**（散文那侧）。若这条事实的 derive 也来自同一句话，
+  // 它就恒等地绿 —— 那是一个**看着像判据的同义反复**。
+  // 所以这里改**表里**那一行，散文一个字不动。
+  const before = defaultContext().doc(HANDOVER_DOC)
+  const corrupted = before.replace(/(全量 CI（\*\*交付 HEAD\*\*）[^\n]*?`test` )(\d+)(ms)/,
+    (_, a, ms, c) => a + (Number(ms) + 1000) + c)
+  assert.notEqual(corrupted, before, '改表那一行没生效，这条控制是假的')
+  assert.doesNotMatch(corrupted.replace(/`test` 阶段那 \d+ 秒里[\s\S]*/, ''), /交付 HEAD[\s\S]*`test` 825ms/,
+    '表那一行没被改动')
+
+  const r = checkFacts({ ctx: withDoc(HANDOVER_DOC, () => corrupted) })
+  const v = r.violations.find((x) => x.id === 'handover-ci-prose-matches-table')
+  assert.ok(v !== undefined,
+    '改了表里的毫秒数却没红 ⇒ derive 与 claim 同源（同义反复），这条判据没有信息量')
+  assert.equal(v.code, 'MISMATCH')
+  assert.equal(v.claimed, 825, '声称侧应当是散文里的 825')
+  assert.equal(v.actual, 826, '实际侧应当是表里 825992ms 取整后的 826')
+})
+
+test('⑭e ★★ 反向控制：把两处**一起**改成同一个新值 ⇒ 必须绿（证明它在比对，不是在钉常量）', () => {
+  // ★ 第一版这条是**退化**的：散文本来就已经是 825，所以"改成 825"是个空操作，
+  //   测试通过得毫无信息量——它证明不了这条判据在比对两侧。
+  //   ⇒ 正确做法是：把**表和散文一起**改成一个**新**值，仍然必须绿。
+  //      如果判据是"钉住 825 这个常量"，这里就会红。
+  const before = defaultContext().doc(HANDOVER_DOC)
+  const both = before
+    .replace(/(全量 CI（\*\*交付 HEAD\*\*）[^\n]*?`test` )(\d+)(ms)/, (_, a, _ms, c) => `${a}777000${c}`)
+    .replace(/`test` 阶段那 \d+ 秒里/, '`test` 阶段那 777 秒里')
+  assert.notEqual(both, before, '改写没生效，这条控制是假的')
+  assert.match(both, /`test` 777000ms/, '表那一行没被改到 777000')
+
+  const r = checkFacts({ ctx: withDoc(HANDOVER_DOC, () => both) })
+  const v = r.violations.find((x) => x.id === 'handover-ci-prose-matches-table')
+  assert.equal(v, undefined,
+    '两侧一起改成一致的新值却红了 ⇒ 这条判据钉的是常量 825 而不是"两侧相等"：'
+    + JSON.stringify(v))
+})
+
+test('⑭e2 反向控制：只改**散文**（表不动）⇒ 必须红', () => {
+  const before = defaultContext().doc(HANDOVER_DOC)
+  const proseOnly = before.replace(/`test` 阶段那 \d+ 秒里/, '`test` 阶段那 800 秒里')
+  assert.notEqual(proseOnly, before, '改写没生效，这条控制是假的')
+  const r = checkFacts({ ctx: withDoc(HANDOVER_DOC, () => proseOnly) })
+  assert.ok(idsOf(r).includes('handover-ci-prose-matches-table'),
+    '只改散文那一侧却没红 ⇒ 这一侧没被查')
+})
+
+test('⑭f 诚实边界：取整规则写在明处（秒 = round(毫秒/1000)）', () => {
+  // 这条钉住"怎么从毫秒得到秒"，否则下次有人改成 floor 会有 1 秒的缝隙，
+  // 而 1 秒的缝隙在报告里看不出来。
+  const before = defaultContext().doc(HANDOVER_DOC)
+  const floored = before.replace(/`test` (\d+)ms/, (_, ms) => '`test` ' + (Math.floor(Number(ms) / 1000) * 1000 + 999) + 'ms')
+  // 824999ms ⇒ round = 825（与散文 825 一致），floor = 824
+  const r = checkFacts({ ctx: withDoc(HANDOVER_DOC, () => floored) })
+  assert.ok(!idsOf(r).includes('handover-ci-prose-matches-table'),
+    '824999ms 取整应当是 825 ⇒ 与散文 825 一致，不该红')
+})
+

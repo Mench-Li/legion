@@ -454,6 +454,9 @@ export const SCHEMA = defineSchema({
     'RUN_RECORD_UNREADABLE',
     'RUN_RECORD_CORRUPT',
     'RUN_RECORD_WRITE_FAILED',
+    // 第 40 轮：声明了一个进程字段却没人登记取法 ⇒ **具名上抛**（不静默丢掉）。
+    // 它是一个诊断码，与上面三个同族——**不是**配置键。
+    'RUN_RECORD_FIELD_NOT_WIRED',
     'ORPHANS_FOUND',
     'PID_RECYCLED',
     'SWEEP_REFUSED',

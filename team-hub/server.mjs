@@ -244,6 +244,7 @@ import { createMembersRoutes } from './routes/members.mjs'
 import { createExecRoutes } from './routes/exec.mjs'
 import { createModelsRoutes } from './routes/models.mjs'
 import { createWebRoutes } from './routes/web.mjs'
+import { createModelBindingsByPathRoutes } from './routes/model-bindings-by-path.mjs'
 import { createModelBindingsRoutes } from './routes/model-bindings.mjs'
 import { createTaskLifecycleRoutes } from './routes/task-lifecycle.mjs'
 import { createReadModelsRoutes } from './routes/read-models.mjs'
@@ -5141,6 +5142,10 @@ const router = createRouter([
     json,
     bindingStore, handleRun, BINDING_STORE_ERRORS,
   }),
+  createModelBindingsByPathRoutes({
+    json,
+    bindingStore, handleRun, BINDING_STORE_ERRORS,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -5531,40 +5536,10 @@ async function handle(req, res, stripPrefix) {
     // ── 迁移老的非敏感模型配置（算一份计划 / 按确认过的指纹执行） —— 已提取到 `./routes/model-migration.mjs`（PRT-316 第 27 族 / 切片 28）──
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/model-migration` 路由，该命名空间只住一个地方。
     if (await router.dispatch(req, res, { path, url })) return
-    if (path.startsWith('/api/model-bindings/')) {
-      const BINDING_PREFIX = '/api/model-bindings/'
-      const parts = () => {
-        // `/api/model-bindings/<scope>/<role>`：两段都允许被百分号编码，
-        // 各自单独解码（整段解码会把 scope 里的 `/` 也解出来，于是切错位置）。
-        const raw = path.slice(BINDING_PREFIX.length)
-        const segs = raw.split('/')
-        if (segs.length !== 2) return null
-        try {
-          return [decodeURIComponent(segs[0]), decodeURIComponent(segs[1])]
-        } catch {
-          return 'BAD_ENCODING'
-        }
-      }
-      if (req.method === 'GET' && path.startsWith('/api/model-bindings/')) {
-        const segs = parts()
-        if (segs === 'BAD_ENCODING') { json(res, 400, { ok: false, code: 'BAD_ID_ENCODING', error: '绑定路径不是合法的 URL 编码' }); return }
-        if (segs === null) { json(res, 400, { ok: false, code: 'MISSING_PARAM', error: '路径应为 /api/model-bindings/<scope>/<role>' }); return }
-        const b = bindingStore.get(segs[0], segs[1])
-        if (b === null) {
-          json(res, 404, { ok: false, code: BINDING_STORE_ERRORS.BINDING_NOT_FOUND, error: `没有这个岗位绑定：${segs[0]}/${segs[1]}` })
-          return
-        }
-        json(res, 200, { ok: true, binding: b, serverTimeMs: Date.now() })
-        return
-      }
-      if (req.method === 'DELETE' && path.startsWith('/api/model-bindings/')) {
-        const segs = parts()
-        if (segs === 'BAD_ENCODING') { json(res, 400, { ok: false, code: 'BAD_ID_ENCODING', error: '绑定路径不是合法的 URL 编码' }); return }
-        if (segs === null) { json(res, 400, { ok: false, code: 'MISSING_PARAM', error: '路径应为 /api/model-bindings/<scope>/<role>' }); return }
-        await handleRun(req, res, (body) => bindingStore.remove(segs[0], segs[1], { actor: body.actor }))
-        return
-      }
-    }
+    // ── 岗位模型绑定（GET 读一个绑定 / DELETE 删一个绑定） —— 已提取到 `./routes/model-bindings-by-path.mjs`（PRT-316 第 34 族 / 切片 36）──
+    // 本族这 2 条已全部搬进模块，`server.mjs` 里不再有它们。
+    // 归属 /api/model-bindings 的那 2 条都在这里了。
+    if (await router.dispatch(req, res, { path, url })) return
     // ── 配置包导出/导入（PRT-5xx，spec §6.6） —— 已提取到 `./routes/config-bundle.mjs`（PRT-316 第 16 族 / 切片 17）──
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/config-bundle` 路由，该命名空间只住一个地方。
     if (await router.dispatch(req, res, { path, url })) return

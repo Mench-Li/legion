@@ -248,6 +248,9 @@ SOURCES.routesUsage = join(ROOT, 'team-hub', 'routes', 'usage.mjs')
 // ★ 切片 16（context-snapshots）是**子分隔符最多**的族（4 个），
 //   而且 `assemble` 那条上面没有分隔符 —— "有的路由有说明、有的没有"两种都要对。
 SOURCES.routesContextSnapshots = join(ROOT, 'team-hub', 'routes', 'context-snapshots.mjs')
+// ★ 切片 17（config-bundle）：这一族逼出了生成器两个"前十六族恰好都成立"的假定 ——
+//   `instanceof` 不沾"被调用/取成员"两种形态；`ALWAYS` 只放行、不注入。
+SOURCES.routesConfigBundle = join(ROOT, 'team-hub', 'routes', 'config-bundle.mjs')
 
 /** 已提取出去的路由族模块（值 = 该文件里**声明式**路由的归属名）。 */
 export const ROUTE_FAMILY_SOURCES = Object.freeze([
@@ -266,6 +269,7 @@ export const ROUTE_FAMILY_SOURCES = Object.freeze([
   { module: 'routesModelProfiles', family: 'model-profiles', factory: 'createModelProfilesRoutes' },
   { module: 'routesUsage', family: 'usage', factory: 'createUsageRoutes' },
   { module: 'routesContextSnapshots', family: 'context-snapshots', factory: 'createContextSnapshotsRoutes' },
+  { module: 'routesConfigBundle', family: 'config-bundle', factory: 'createConfigBundleRoutes' },
 ])
 SOURCES.experienceStore = join(ROOT, 'team-hub', 'experience-store.mjs')
 

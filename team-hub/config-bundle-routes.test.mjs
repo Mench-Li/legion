@@ -336,3 +336,101 @@ test('④ 整条链路上**任何响应体**都不含密钥字面量（在原始
     assert.ok(!text.includes('legion/leak'), `响应体里出现了引用名：${text}`)
   }
 })
+
+// ============================================================================
+// PRT-316 切片 17 · 契约块 —— 破验量出来"没人问过"的五件事
+//
+// 第一轮破验（改坏 20 处行为）只咬住 15 处。那 5 条"没咬住"**全是真缺口**，
+// 而且其中两条的成因特别值得记：
+//
+//   ★★ M1/M3：`kind` 过滤**在空库上不可观测**。
+//     既有用例确实请求了 `?kind=model-profiles` 并且断言 `bindings` 为空 ——
+//     但那时绑定库**本来就是空的**，于是"过滤生效"与"过滤没生效"
+//     在那个断言眼里是同一个东西：
+//
+//       > 一个"过滤掉了它"的判据，与一个"库里本来就没有它"的判据，
+//       > 在库是空的时候是同一个东西。
+//
+//     所以下面这两条**先造出一条绑定**，再断言过滤 —— 让这件事可观测。
+//
+//   · M8：计划不合法时 `applicable` 必须是 `null`（拿一份坏计划判"能不能应用"
+//     会让前端把"计划本身不合法"读成"不可以应用"）；
+//   · M14：apply 收到坏包的具名码（实测是 `BUNDLE_PROFILE_INVALID`，**不是** `PROFILE_INVALID`）；
+//   · M20：成功 apply 的 `applied` 字段没人断言过。
+//
+// ★ 期望值全部**先量出来**再写死（`.worktrees/_prt-handoff/probe-slice17-gaps.mjs`）。
+//   量出来的两件事改了草稿：档案的体是 `{ actor, profile: {...} }`
+//   （顶层并列，不是 `{...profile, actor}`），而绑定要 `actor` 在**自己这一层**。
+// ============================================================================
+
+/** 造一条"一定存在"的档案 + 一条指向它的绑定，并返回两者的标识。 */
+async function seedBundleContents(tag) {
+  const pid = uniq(`${tag}-prof`)
+  const role = uniq(`${tag}-role`)
+  const cp = await call('POST', '/api/model-profiles', { actor: tag, profile: PROFILE(pid) })
+  assert.equal(cp.status, 200, `建档案失败：${JSON.stringify(cp.body).slice(0, 200)}`)
+  const cb = await call('POST', '/api/model-bindings', {
+    scope: 'default', employeeRole: role, primaryProfile: pid, fallbackProfiles: [], actor: tag,
+  })
+  assert.equal(cb.status, 200, `建绑定失败：${JSON.stringify(cb.body).slice(0, 200)}`)
+  return { pid, role }
+}
+
+test('⑤ ★★ 不给 `kind` 时默认导**全量**（不是某个只读子集）', async () => {
+  await seedBundleContents('slice17def')
+  const r = await call('GET', '/api/config-bundle')
+  assert.equal(r.status, 200)
+  assert.equal(r.body.bundle.kind, 'full', '不给 kind 必须等价于 kind=full')
+  // 全量 ⇒ 档案与绑定**都**在。库此时非空，所以这两条断言是**可观测**的。
+  assert.ok(r.body.bundle.profiles.length > 0, '默认全量必须带上档案')
+  assert.ok(r.body.bundle.bindings.length > 0,
+    '默认全量必须带上绑定 —— 少了它，"导出一份完整配置"这件事就是假的')
+})
+
+test('⑥ ★★★ 按 kind 过滤**在有内容时才可观测**（空库上的 [] 什么也证明不了）', async () => {
+  const { pid, role } = await seedBundleContents('slice17filter')
+
+  const onlyProfiles = await call('GET', '/api/config-bundle?kind=model-profiles')
+  assert.equal(onlyProfiles.status, 200)
+  assert.ok(onlyProfiles.body.bundle.profiles.some((p) => p.id === pid), '前提：档案要在包里')
+  assert.deepEqual([...onlyProfiles.body.bundle.bindings], [],
+    '只要档案时，绑定必须被清空 —— 否则"只要模型"会顺手把绑定也搬走')
+
+  const onlyBindings = await call('GET', '/api/config-bundle?kind=model-bindings')
+  assert.equal(onlyBindings.status, 200)
+  assert.ok(onlyBindings.body.bundle.bindings.length > 0, '前提：绑定要在包里')
+  assert.deepEqual([...onlyBindings.body.bundle.profiles], [],
+    '只要绑定时，档案必须被清空 —— 否则一份"只导绑定"的包会覆盖掉别处的档案')
+  assert.ok(onlyBindings.body.bundle.bindings.some((b) => b.employeeRole === role || b.primaryProfile === pid),
+    '要的是**这一条**绑定，不是"随便有一条"')
+})
+
+test('⑦ ★ 计划本身不合法时 `applicable` 必须是 `null`（不是"算出来不可以"）', async () => {
+  const r = await call('POST', '/api/config-bundle/plan', { bundle: { version: 99, kind: 'full' } })
+  assert.equal(r.status, 200)
+  assert.equal(r.body.plan.ok, false, '前提：版本不兼容的计划本身就不合法')
+  assert.equal(r.body.applicable, null,
+    '"计划不合法"与"计划可以但当前状态不允许"是两件事；都回一个对象会让前端分不清')
+})
+
+test('⑧ 导入坏包 ⇒ 400 具名码 `BUNDLE_PROFILE_INVALID`', async () => {
+  const r = await call('POST', '/api/config-bundle/apply', { bundle: { version: 99, kind: 'full' }, actor: 'route-test' })
+  assert.equal(r.status, 400)
+  assert.equal(r.body.code, 'BUNDLE_PROFILE_INVALID',
+    '一条没有具名码的 400 让调用方只能去翻源码；也不该把"包不合法"与"状态不允许"混成一个码')
+})
+
+test('⑨ ★ 成功导入必须自报 `applied: true`（回执不能含糊）', async () => {
+  const id = uniq('slice17applied')
+  const r = await call('POST', '/api/config-bundle/apply', {
+    actor: 'route-test',
+    bundle: {
+      version: 1, kind: 'full', containsSecrets: false, credentialRefsIncluded: false,
+      profiles: [{ ...PROFILE(id), credentialRequired: false }], bindings: [],
+    },
+  })
+  assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 240))
+  assert.equal(r.body.applied, true,
+    '一份"请求成功但什么都没应用"的回执与一份"真的应用了"的回执，在只看 status 的人眼里是同一个东西')
+  assert.ok(r.body.written.profiles.some((p) => p.id === id), '写进去的档案要在回执里列出来')
+})

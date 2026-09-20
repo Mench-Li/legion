@@ -244,6 +244,7 @@ import { createMembersRoutes } from './routes/members.mjs'
 import { createExecRoutes } from './routes/exec.mjs'
 import { createModelsRoutes } from './routes/models.mjs'
 import { createWebRoutes } from './routes/web.mjs'
+import { createTeamPlanReadRoutes } from './routes/team-plan-read.mjs'
 import { createAgentIntakeRoutes } from './routes/agent-intake.mjs'
 import { createSpaceConfigRoutes } from './routes/space-config.mjs'
 import { createFeedbackHeartbeatRoutes } from './routes/feedback-heartbeat.mjs'
@@ -5209,6 +5210,10 @@ const router = createRouter([
     db, handleWrite, withTx,
     audit, contextPlanStore,
   }),
+  createTeamPlanReadRoutes({
+    json,
+    contextPlanStore, CONTEXT_PLAN_ERRORS,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -5259,57 +5264,10 @@ async function handle(req, res, stripPrefix) {
     // ── 上下文快照（PRT-407 / PRT-409，spec §6.5） —— 已提取到 `./routes/context-snapshots.mjs`（PRT-316 第 15 族 / 切片 16）──
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/context-snapshots` 路由，该命名空间只住一个地方。
     if (await router.dispatch(req, res, { path, url })) return
-    // ── PRT-402：TeamPlan 与 EmployeeManifest 的读面 ────────────────────────
-    //
-    // 这两条来源在 `runtime/context/sources.mjs` 里都是 `required: true`，
-    // 而 hub 一直没有读端点，于是 `sources-loader.mjs` 只能传 `null`——
-    // **每次运行**都产出两条 `missing` 候选。那两条不是"世界就是这样"，
-    // 是"产品的这一块还没做"；而两者在账本上长得一模一样。
-    //
-    //    > 一个"每次运行都缺两条必需来源"的产品，
-    //    > 与一个"这次运行确实没有团队计划"的运行，在快照上长得一模一样——
-    //    > 只不过前者的那两条缺失**永远**不会消失，于是没有人会去看它们。
-    //
-    // 缺席一律 **404**（不是 200 带 null）：装配器把 404 翻成 `null`，
-    // 再由 `sources.mjs` 产出一条**带原因**的 `missing` 候选。若这里回 200 + null，
-    // "读到了、它是空的"与"读不到"就分不开了——而那正是整个装载器要防的事。
-    if (req.method === 'GET' && path === '/api/team-plan') {
-      const scope = url.searchParams.get('scope')
-      if (scope === null || scope.trim() === '') {
-        json(res, 400, { ok: false, code: 'MISSING_PARAM', error: '缺少 scope：计划是挂在空间上的' })
-        return
-      }
-      const versionRaw = url.searchParams.get('version')
-      let version = null
-      if (versionRaw !== null && versionRaw.trim() !== '') {
-        version = Number(versionRaw)
-        if (!Number.isInteger(version) || version < 1) {
-          json(res, 400, { ok: false, code: 'BAD_VERSION', error: 'version 必须是 >= 1 的整数' })
-          return
-        }
-      }
-      const plan = contextPlanStore().readTeamPlan(
-        url.searchParams.get('id'),
-        { scope, version, goalId: url.searchParams.get('goalId') },
-      )
-      if (plan === null) {
-        // 说清是**哪一种**缺席：没有这个 id，还是没有这个目标下的计划。
-        // 两者的修复动作不同（建一份计划 vs 把目标接上计划）。
-        const askId = url.searchParams.get('id')
-        const askGoal = url.searchParams.get('goalId')
-        json(res, 404, {
-          ok: false,
-          code: CONTEXT_PLAN_ERRORS.TEAM_PLAN_NOT_FOUND,
-          error: askId !== null && askId.trim() !== ''
-            ? `空间 ${scope} 里没有团队计划 ${askId}${version === null ? '' : ` 的第 ${version} 版`}`
-            : `空间 ${scope} 里没有挂在目标 ${askGoal} 下的团队计划`,
-          serverTimeMs: Date.now(),
-        })
-        return
-      }
-      json(res, 200, { ok: true, plan, serverTimeMs: Date.now() })
-      return
-    }
+    // ── 团队计划的读面（缺席一律 404、两种缺席分开报、version 可选） —— 已提取到 `./routes/team-plan-read.mjs`（PRT-316 第 45 族 / 切片 47）──
+    // 本族这 1 条已全部搬进模块，`server.mjs` 里不再有它们。
+    // 归属 /api/team-plan 的那 1 条都在这里了。
+    if (await router.dispatch(req, res, { path, url })) return
     // ── 团队计划（读：列出一版；写：冻结一版，PRT-402 的写一半） —— 已提取到 `./routes/team-plans.mjs`（PRT-316 第 21 族 / 切片 22）──
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/team-plans` 路由，该命名空间只住一个地方。
     if (await router.dispatch(req, res, { path, url })) return

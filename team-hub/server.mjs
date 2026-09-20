@@ -244,6 +244,7 @@ import { createMembersRoutes } from './routes/members.mjs'
 import { createExecRoutes } from './routes/exec.mjs'
 import { createModelsRoutes } from './routes/models.mjs'
 import { createWebRoutes } from './routes/web.mjs'
+import { createFeedbackHeartbeatRoutes } from './routes/feedback-heartbeat.mjs'
 import { createContentReadsRoutes } from './routes/content-reads.mjs'
 import { createTeamViewsRoutes } from './routes/team-views.mjs'
 import { createTaskRecordsRoutes } from './routes/task-records.mjs'
@@ -5189,6 +5190,11 @@ const router = createRouter([
     json,
     getSkill, listSkills, listDocuments,
   }),
+  createFeedbackHeartbeatRoutes({
+    json,
+    db, parseJson, handleWrite,
+    touchMember,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -5382,65 +5388,10 @@ async function handle(req, res, stripPrefix) {
     // ── 追加批注（评论 / 证据 / 用户反馈三条路径共用一个写入口） —— 已提取到 `./routes/comment.mjs`（PRT-316 第 20 族 / 切片 21）──
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/comment` 路由，该命名空间只住一个地方。
     if (await router.dispatch(req, res, { path, url })) return
-    if (req.method === 'GET' && path === '/api/task-feedback') {
-      // PRT-404：用户反馈的**独立读端点**。
-      //
-      // 为什么不是"读 /api/task 然后自己挑"：`/api/task` 回来的是整行任务，
-      // 里面有几个不同性质的批注列（comments / evidence / feedback）。
-      // 让每个消费者自己去挑，等于把"哪一列是用户反馈"这件事复制到每个读点——
-      // 而 PRT-404 全部的意义就是让它**只有一个答案**。
-      //
-      //   > 一个"从任务行里自己挑反馈"的读法，
-      //   > 与一个"问专门那个端点"的读法，在只有一种批注的时候是同一个东西——
-      //   > 只不过前者会在有人忘了挑、顺手把 `comments` 也当反馈时，
-      //   > 把"同事说了一句话"读成"用户要求调整"。
-      const askId = url.searchParams.get('taskId')
-      if (askId === null || askId.trim() === '') {
-        json(res, 400, { ok: false, code: 'MISSING_PARAM', error: '缺少参数 taskId', serverTimeMs: Date.now() })
-        return
-      }
-      const scopeParam = url.searchParams.get('scope')
-      const task = db.prepare('SELECT id, scope, feedback FROM tasks WHERE id = ?').get(askId.trim())
-      if (task === undefined || task === null) {
-        // 404 而不是 `{feedback: []}`：**"任务不存在"与"这个任务没有反馈"是两件事**，
-        // 而一个空数组会让两者在调用方那里长得一样。装配器把 404 翻成 `null`，
-        // 再由 `sources.mjs` 决定这是不是致命。
-        json(res, 404, {
-          ok: false,
-          code: 'TASK_NOT_FOUND',
-          error: `任务 ${askId.trim()} 不存在`,
-          serverTimeMs: Date.now(),
-        })
-        return
-      }
-      // 空间必须对得上：任务 id 是全库唯一的，但拿别空间的 id 来问
-      // 仍然是一次越权读取（装配是**按空间**做的）。调用方给了 scope 就校验。
-      if (scopeParam !== null && scopeParam.trim() !== '' && task.scope !== scopeParam.trim()) {
-        json(res, 404, {
-          ok: false,
-          code: 'TASK_NOT_FOUND',
-          error: `任务 ${askId.trim()} 不在空间 ${scopeParam.trim()} 里`,
-          serverTimeMs: Date.now(),
-        })
-        return
-      }
-      const feedback = parseJson(task.feedback, [])
-      json(res, 200, { ok: true, taskId: task.id, count: feedback.length, feedback, serverTimeMs: Date.now() })
-      return
-    }
-    if (req.method === 'POST' && path === '/api/heartbeat') {
-      await handleWrite(req, res, (body, by, scope) => {
-        // S2/R-1（决策 B1）：kind=worker 的心跳可附带 model {provider,model}（守护当前选用模型），
-        // 供 GET /api/chat/health 的模型解析链聚合展示（members.model 列，可空）。
-        const m = body?.model && typeof body.model === 'object' && body.model !== null ? body.model : null
-        const modelText = m && (typeof m.model === 'string' || typeof m.provider === 'string')
-          ? JSON.stringify({ provider: typeof m.provider === 'string' ? m.provider : '', model: typeof m.model === 'string' ? m.model : '' })
-          : undefined
-        touchMember(by, scope, typeof body.kind === 'string' ? body.kind : 'unknown', modelText)
-        return { member: by, scope, online: true }
-      })
-      return
-    }
+    // ── 用户反馈的独立读端点（PRT-404，含跨空间越权防线）与 worker 心跳 —— 已提取到 `./routes/feedback-heartbeat.mjs`（PRT-316 第 42 族 / 切片 44）──
+    // 本族这 2 条已全部搬进模块，`server.mjs` 里不再有它们。
+    // 归属 /api/heartbeat , /api/task-feedback 的那 2 条都在这里了。
+    if (await router.dispatch(req, res, { path, url })) return
 
     // ── 自动执行开关与请求队列（开关读/写 + 待执行队列 + 请求登记/查看） —— 已提取到 `./routes/exec.mjs`（PRT-316 第 24 族 / 切片 25）──
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/exec` 路由，该命名空间只住一个地方。

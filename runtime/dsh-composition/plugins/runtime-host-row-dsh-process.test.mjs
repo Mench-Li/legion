@@ -177,7 +177,29 @@ export default {
         }
       },
     })
-    note('SERVICES-PROVIDED tools,approval,sandbox')
+    // ★ 真 DSH 进程**有** subagents（startRun 的唯一真来源），而本假件此前缺它 ⇒
+    //   runtime-host-registrar-row 按设计拒了（RUNTIME_HOST_REGISTRAR_NO_SUBAGENTS_PORT），
+    //   于是自检把"假件不完整"读成了"行已挂载但未激活（等待依赖服务）"。
+    //   补它是为了让**假件与真 DSH 同形**——不是为了让断言变绿。
+    //
+    //   ⚠️ 能力表里只报 outputSchema: true：另外三项必需能力在真产品里也是 false
+    //   （见 runtime-host-registrar-row.mjs 文件头），本假件不替它们做主。
+    //
+    //   ⚠️⚠️ 本段整体在一个模板字面量里：**不许出现反引号**（反引号会提前结束它）。
+    const PROVIDER_NAME = 'prt253rt-stub-provider'
+    const HANDLE = { dispose() {} }
+    ctx.provide('subagents', {
+      list: () => [PROVIDER_NAME],
+      getProvider: (n) => (n === PROVIDER_NAME
+        ? {
+          name: PROVIDER_NAME,
+          capabilities: { outputSchema: true },
+          async start() { return HANDLE },
+        }
+        : undefined),
+      async start() { return HANDLE },
+    })
+    note('SERVICES-PROVIDED tools,approval,sandbox,subagents')
   },
 }
 `

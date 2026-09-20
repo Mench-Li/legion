@@ -36,7 +36,7 @@
 | 台账 | **145 行 = 140 ✅ / 4 ⏸ / 1 ⬜** | `node scripts/prt/spec-progress.mjs --check` → `140/145，未完成 5` |
 | 4 条 ⏸ | PRT-009 / PRT-253 / PRT-256 / PRT-910 | 需要一台执行期外的机器 / 一次真的自动执行 / 真实外部用户 / 真实用户项目 |
 | 1 条 ⬜ | PRT-316 | **日期闸门**：最早 **2026-09-24**（评审闸门已过） |
-| 全量 CI（**交付 HEAD**） | **9/9 PASS，exit 0**（HEAD `af93c31`，`.ci/r41b`，**脏树 14 改 + 467 未跟踪**，指纹 `773ec43882f60c7b`） | `test` 904430ms、`skipped=1`（secret-store，已知） |
+| 全量 CI（**交付 HEAD**） | **9/9 PASS，exit 0**（HEAD `df8ade7`，`.ci/r42`，**脏树 14 改 + 469 未跟踪**，指纹 `efe0627790707638`） | `test` 903622ms、`skipped=1`（secret-store，已知） |
 | 全量 CI（第 34 轮收口） | **9/9 PASS，exit 0**（HEAD `ff8d9f7`，`.ci/r34`，脏树 14 改 + 446 未跟踪） | `test` 873594ms |
 | 全量 CI（第 33 轮收口） | **9/9 PASS，exit 0**（HEAD `af3a440`，`.ci/r33`，脏树 14 改 + 444 未跟踪） | `test` 877363ms |
 | 全量 CI（第 32 轮收口） | **9/9 PASS，exit 0**（HEAD `89590fc`，`.ci/r32b`，脏树 14 改 + 443 未跟踪） | `test` 873289ms |

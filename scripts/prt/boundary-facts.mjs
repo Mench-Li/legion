@@ -1364,7 +1364,14 @@ export const FACTS = Object.freeze([
     derive: (ctx) => {
       const text = ctx.doc(INTERVENTION_DOC)
       // 家族表的行形如 `| 50 | ★★★ …`（§四）
-      const rounds = [...text.matchAll(/^\| (\d{2}) \|/gm)].map((m) => Number(m[1]))
+      // ★★★★★ 第 100 轮修：原来是 `\d{2}`（**恰好两位**），而家族表跨到第 100 行时
+      //   那一行是 `| 100 |` —— **三位** ⇒ 派生量**看不见它** ⇒ max 停在 99，
+      //   而文档里的声明已经写成 100 ⇒ ⑰/⑰c/⑰e **同时判红**。
+      //   ★ 这个洞**只有第 100 行能翻出来**：两位数的年代里它一直是对的。
+      //   ★★ 而**不能**图省事改成 `\d+`：那样会把这个文档里**别的表**的第一格也捞进来
+      //   （实测 `\d+` 命中 77 处 vs `\d{2,3}` 的 65 处 —— 多出来的 12 处是本文档自己那张
+      //   "九个阶段" 表里的 `| 1 |`…`| 9 |`）。⇒ 用 `\d{2,3}`：既含三位数，又不含一位数。
+      const rounds = [...text.matchAll(/^\| (\d{2,3}) \|/gm)].map((m) => Number(m[1]))
       if (rounds.length === 0) throw new Error('在人工介入清单里找不到家族表（`| NN |` 行）')
       return Math.max(...rounds)
     },
@@ -1415,7 +1422,14 @@ export const FACTS = Object.freeze([
     source: INTERVENTION_DOC + ' 家族表里最大的 `| NN |` 轮次（与 ⑰ 同一个派生量）',
     derive: (ctx) => {
       const text = ctx.doc(INTERVENTION_DOC)
-      const rounds = [...text.matchAll(/^\| (\d{2}) \|/gm)].map((m) => Number(m[1]))
+      // ★★★★★ 第 100 轮修：原来是 `\d{2}`（**恰好两位**），而家族表跨到第 100 行时
+      //   那一行是 `| 100 |` —— **三位** ⇒ 派生量**看不见它** ⇒ max 停在 99，
+      //   而文档里的声明已经写成 100 ⇒ ⑰/⑰c/⑰e **同时判红**。
+      //   ★ 这个洞**只有第 100 行能翻出来**：两位数的年代里它一直是对的。
+      //   ★★ 而**不能**图省事改成 `\d+`：那样会把这个文档里**别的表**的第一格也捞进来
+      //   （实测 `\d+` 命中 77 处 vs `\d{2,3}` 的 65 处 —— 多出来的 12 处是本文档自己那张
+      //   "九个阶段" 表里的 `| 1 |`…`| 9 |`）。⇒ 用 `\d{2,3}`：既含三位数，又不含一位数。
+      const rounds = [...text.matchAll(/^\| (\d{2,3}) \|/gm)].map((m) => Number(m[1]))
       if (rounds.length === 0) throw new Error('在人工介入清单里找不到家族表（`| NN |` 行）')
       return Math.max(...rounds)
     },
@@ -1483,7 +1497,14 @@ export const FACTS = Object.freeze([
     source: INTERVENTION_DOC + ' 家族表里最大的 `| NN |` 轮次',
     derive: (ctx) => {
       const text = ctx.doc(INTERVENTION_DOC)
-      const rounds = [...text.matchAll(/^\| (\d{2}) \|/gm)].map((m) => Number(m[1]))
+      // ★★★★★ 第 100 轮修：原来是 `\d{2}`（**恰好两位**），而家族表跨到第 100 行时
+      //   那一行是 `| 100 |` —— **三位** ⇒ 派生量**看不见它** ⇒ max 停在 99，
+      //   而文档里的声明已经写成 100 ⇒ ⑰/⑰c/⑰e **同时判红**。
+      //   ★ 这个洞**只有第 100 行能翻出来**：两位数的年代里它一直是对的。
+      //   ★★ 而**不能**图省事改成 `\d+`：那样会把这个文档里**别的表**的第一格也捞进来
+      //   （实测 `\d+` 命中 77 处 vs `\d{2,3}` 的 65 处 —— 多出来的 12 处是本文档自己那张
+      //   "九个阶段" 表里的 `| 1 |`…`| 9 |`）。⇒ 用 `\d{2,3}`：既含三位数，又不含一位数。
+      const rounds = [...text.matchAll(/^\| (\d{2,3}) \|/gm)].map((m) => Number(m[1]))
       if (rounds.length === 0) throw new Error('在人工介入清单里找不到家族表（`| NN |` 行）')
       return Math.max(...rounds)
     },

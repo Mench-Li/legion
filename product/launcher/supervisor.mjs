@@ -303,6 +303,27 @@ export function createSupervisedProcess(spec, {
     // 确实已经没人要了。所以这里留着它是**有意的**，不是漏了。
     if (stopping || disposed) {
       setState('stopped', `主动停止（code=${code ?? ''} signal=${signal ?? ''}）`)
+      // ★★★ 主动停止**也要报**（第 44 轮补的那一行）。
+      //
+      // 这里原先直接 `return`，于是 `reportPeakResource()` **只在非主动退出时**才走到。
+      // 而"主动停止"正是一次**成功** Run 的正常结束方式（Launcher 关停 Runtime 走的就是它）。
+      // 后果是反的：峰值读数是**崩溃那一次**会印，**正常那一次**不印——
+      // 而资源基线要的恰恰是正常那次。
+      //
+      //   > 只在崩溃时印出峰值、在正常结束时把它丢掉，
+      //   > 与"只测量出问题的那一次运行"是同一个东西。
+      //
+      // 而 `reportPeakResource()` 自己那条理由在**这条路上同样成立**：
+      // 进程已经走了，外部采样只剩 `PROCESS_GONE`，此刻窗口才是终值。
+      //
+      // ★ 唯一仍然不报的是 `disposed`：那条路径上调用方很可能已经关掉 sink
+      //   （`dispose()` 下面那句注释就是写这件事的），继续送只会往关掉的 sink 里写。
+      //   ⇒ 所以判据是 `!disposed`，不是无条件报。
+      //
+      // ★ 加上这一段之后，"成功 Run 的峰值读数两处都不留"这件事才闭合：
+      //   日志这一行现在有了；另一处（`launcher.mjs` 的 `forgetRunRecord()`
+      //   在正常停止后删掉运行记录）是紧挨着的第二件事，见那里的说明。
+      if (!disposed) reportPeakResource()
       return
     }
     const uptime = startedAt === null ? 0 : now() - startedAt
@@ -500,10 +521,17 @@ export function createSupervisedProcess(spec, {
          * PRT-009 `peak-resource`：随快照一起给出的峰值读数。
          *
          * ★ 放进 `status()` 是为了让**结构性**的消费者也能拿到它，而不只有
-         *   那一条日志。`launcher.mjs` 的 `persistRunRecord()` 已经在遍历
-         *   `supervisor.status()`——它今天只挑了 `key/pid/image` 三个字段，
-         *   所以这一项**暂时还不会**自动流进运行记录；但快照里有它之后，
-         *   接上只是加一行的事，而不是"要再去动采样器"。
+         *   那一条日志。
+         *
+         * ★★ 这里原先写的是「`launcher.mjs` 的 `persistRunRecord()` 今天只挑了
+         *   `key/pid/image` 三个字段，所以这一项**暂时还不会**自动流进运行记录」。
+         *   **那句话已经过期**：`launcher.mjs:1270` 现在是
+         *   `peakResource: x.peakResource ?? null,`（`buildRunRecord` 是**闭合映射**，
+         *   少了那一行落盘的永远是 `null`，而它与"采样器坏了"在磁盘上是同一个东西）。
+         *
+         *   > 一句"这个字段暂时还没人用"的注释，与一句"已经接上了"，
+         *   > 在**只读注释**的时候是同一个东西——
+         *   > 只不过前者会让下一个人**不去**找那个已经存在的消费者。
          */
         peakResource: readPeakResource(),
       })

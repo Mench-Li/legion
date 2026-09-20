@@ -605,6 +605,101 @@ test('★★ peak-resource：**没开采样**时不写那条日志（配置不�
   assert.equal(h.status().peakResource, null)
 })
 
+// ============================================================================
+// ★★★ PRT-009 `peak-resource`：**主动停止**也要报（第 44 轮补）
+//
+// 上面那三条退出用例**全都**用 `child.exitNow(0)` 触发，也就是**非主动退出**
+// （`stopping === false`）。于是"主动停止"这条路上发生了什么，没有一条判据问过。
+//
+// 实测（`scratch/_probe-peak-on-stop.mjs`，同一替身、同一 io，只差是不是主动停止）：
+//
+//     A 主动停止   → status() 上有 64MiB 读数，而那条日志 **0 条**
+//     B 非主动退出 → 同样 64MiB，日志 **1 条**
+//
+// 而"主动停止"正是一次**成功** Run 的正常结束方式（Launcher 关停 Runtime 走的就是它）。
+// 所以读数是反的：**崩溃那一次会印，正常那一次不印**。
+//
+//   > 只在崩溃时印出峰值、在正常结束时把它丢掉，
+//   > 与"只测量出问题的那一次运行"是同一个东西——
+//   > 而资源基线要的恰恰是**正常那次**。
+//
+// 同一条路上还有第二件事：`launcher.mjs` 的 `forgetRunRecord()` 在正常停止后
+// 会删掉落盘记录（五处调用）。⇒ 这段补上之后，"成功 Run 的峰值两处都不留"才闭合。
+//
+// ★ 仍然保持沉默的只有 `dispose()`：那条路径上调用方很可能已经关掉 sink。
+//   下面三条把"该报的报、该静的静"两侧都钉住。
+// ============================================================================
+
+test('★★★ peak-resource：**主动停止**时也必须印出那一条（成功 Run 的正常结束方式）', () => {
+  const logs = []
+  const child = makeFakeChild({ pid: 5170 })
+  const h = createSupervisedProcess(SPEC, {
+    spawnImpl: () => child,
+    envFor: () => ENV,
+    logger: (e) => logs.push(e),
+    peakIo: makePeakIo(),
+    peakSampleMs: 1000,
+    backoff: { baseMs: 10, factor: 2, maxMs: 100, healthyAfterMs: 1, circuitThreshold: 3 },
+  })
+  h.start()
+  // ★ 先 `stop()`（同步地把 `stopping` 置真），再让替身退出——
+  //   顺序反过来就成了"非主动退出"，测的就不是这条路了。
+  const p = h.stop({ graceMs: 50 })
+  child.exitNow(0)
+  return p.then(() => {
+    const lines = logs.map((e) => e.message).filter((m) => typeof m === 'string' && m.includes('peak-resource'))
+    assert.equal(lines.length, 1,
+      `主动停止应当**恰好一条** peak-resource 日志，实得 ${lines.length} 条：${JSON.stringify(lines)}`)
+    // 必须真是那个数，不是一句"有采样"的废话
+    assert.match(lines[0], /peakWorkingSet=64MiB/)
+    assert.match(lines[0], /pid=5170/)
+    assert.equal(h.status().state, 'stopped')
+  })
+})
+
+test('★★ peak-resource：`dispose()` 之后**不**再往 sink 里写（那条边界仍然在）', () => {
+  const logs = []
+  const child = makeFakeChild({ pid: 5171 })
+  const h = createSupervisedProcess(SPEC, {
+    spawnImpl: () => child,
+    envFor: () => ENV,
+    logger: (e) => logs.push(e),
+    peakIo: makePeakIo(),
+    peakSampleMs: 1000,
+    backoff: { baseMs: 10, factor: 2, maxMs: 100, healthyAfterMs: 1, circuitThreshold: 3 },
+  })
+  h.start()
+  h.dispose() // ← 调用方此刻很可能已经 close() 了 sink
+  child.exitNow(0)
+  const lines = logs.map((e) => e.message).filter((m) => typeof m === 'string' && m.includes('peak-resource'))
+  assert.equal(lines.length, 0,
+    `dispose() 之后不该再写 sink（那时它可能已经关了），实得 ${JSON.stringify(lines)}`)
+  // 反向控制：读数本身**不该**因为不写日志而消失——它还在快照上
+  assert.equal(h.status().peakResource.peakWorkingSetBytes, 64 * 1024 * 1024)
+})
+
+test('★★ peak-resource：主动停止 + **没开采样** ⇒ 仍然不写（"没开"与"漏了"不同形）', () => {
+  const logs = []
+  const child = makeFakeChild({ pid: 5172 })
+  const h = createSupervisedProcess(SPEC, {
+    spawnImpl: () => child,
+    envFor: () => ENV,
+    logger: (e) => logs.push(e),
+    peakSampleMs: 0, // ← 明确关掉
+    backoff: { baseMs: 10, factor: 2, maxMs: 100, healthyAfterMs: 1, circuitThreshold: 3 },
+  })
+  h.start()
+  const p = h.stop({ graceMs: 50 })
+  child.exitNow(0)
+  return p.then(() => {
+    const lines = logs.map((e) => e.message).filter((m) => typeof m === 'string' && m.includes('peak-resource'))
+    // ★ 与第一条成对：那一条要求"主动停止**要**报"，这一条要求"没开采样**不必**报"。
+    //   两条都在，"主动停止 0 条"才不再是一个歧义读数。
+    assert.equal(lines.length, 0, `关掉采样后主动停止也不该有日志：${JSON.stringify(lines)}`)
+    assert.equal(h.status().peakResource, null)
+  })
+})
+
 test('★★ peak-resource：`describePeakResource` 把"从未采样"与"采不到"分开说', async () => {
   const { describePeakResource } = await import('./supervisor.mjs')
   assert.match(describePeakResource(null), /从未采样/)

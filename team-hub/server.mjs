@@ -244,6 +244,7 @@ import { createMembersRoutes } from './routes/members.mjs'
 import { createExecRoutes } from './routes/exec.mjs'
 import { createModelsRoutes } from './routes/models.mjs'
 import { createWebRoutes } from './routes/web.mjs'
+import { createModelMigrationRoutes } from './routes/model-migration.mjs'
 import { createEmployeeManifestsRoutes } from './routes/employee-manifests.mjs'
 import { createTeamPlansRoutes } from './routes/team-plans.mjs'
 import { createPriceTablesRoutes } from './routes/price-tables.mjs'
@@ -5093,6 +5094,12 @@ const router = createRouter([
     json,
     db, readBody,
   }),
+  createModelMigrationRoutes({
+    json,
+    db, modelStore, bindingStore,
+    planModelMigration, describeMigration, applyModelMigration,
+    handleRun,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -5528,61 +5535,9 @@ async function handle(req, res, stripPrefix) {
       json(res, 200, { ok: true, resolution: r, serverTimeMs: Date.now() })
       return
     }
-    // ── PRT-506：迁移老的非敏感模型配置 ──
-    //
-    // 计划与执行**分开**，而且执行时**服务端重新算一遍**再比对用户确认过的指纹。
-    // 理由：客户端送回来的计划可能已经过期（别的窗口改了配置、上次跑过一半），
-    // 而服务端自己重算又会让"用户确认的"和"实际执行的"变成两件事。
-    // 所以两者必须逐字节一致才动手。
-    if (req.method === 'GET' && path === '/api/model-migration/plan') {
-      // runtimeType 不在查询串里时**不报 400**：这是一个只读的"报告"，
-      // 而"必须选一种协议"正是报告要告诉用户的第一件事。返回 200 + 计划本身，
-      // 前端才能据此渲染一个选择器，而不是先撞一个错误再猜该传什么。
-      const runtimeType = (url.searchParams.get('runtimeType') ?? '').trim()
-      const legacyRows = db.prepare('SELECT scope, role, provider, model FROM agent_models').all()
-      const plan = planModelMigration({
-        legacyRows,
-        runtimeType,
-        existingProfiles: modelStore.list().map((x) => x.id),
-        existingBindings: bindingStore.list(null),
-      })
-      // 顶层刻意**不放** `ok`：计划自己有一个 `ok`，两个 `ok` 在不同层级上
-      // 是真正会读错的东西（一个说"这次查询成功了"，一个说"这份计划能不能执行"）。
-      json(res, 200, { plan, summary: describeMigration(plan), legacyRowCount: legacyRows.length, serverTimeMs: Date.now() })
-      return
-    }
-    if (req.method === 'POST' && path === '/api/model-migration/apply') {
-      await handleRun(req, res, async (body) => {
-        const legacyRows = db.prepare('SELECT scope, role, provider, model FROM agent_models').all()
-        const plan = planModelMigration({
-          legacyRows,
-          runtimeType: body.runtimeType,
-          existingProfiles: modelStore.list().map((x) => x.id),
-          existingBindings: bindingStore.list(null),
-          actor: body.actor,
-        })
-        if (plan.ok !== true) {
-          const err = new Error(plan.message ?? '这份迁移计划不可执行')
-          // 409：请求本身没问题，是**当前状态**不允许执行（比如没给协议、源里有密钥）。
-          err.statusCode = 409
-          err.code = plan.code
-          err.plan = plan
-          throw err
-        }
-        const result = await applyModelMigration(plan, {
-          modelStore, bindingStore, actor: body.actor, expectedDigest: body.expectedDigest ?? null,
-        })
-        if (result.ok !== true) {
-          const err = new Error(result.message ?? '迁移未完成')
-          err.statusCode = 409
-          err.code = result.code
-          err.migration = result
-          throw err
-        }
-        return { migration: result, plan }
-      })
-      return
-    }
+    // ── 迁移老的非敏感模型配置（算一份计划 / 按确认过的指纹执行） —— 已提取到 `./routes/model-migration.mjs`（PRT-316 第 27 族 / 切片 28）──
+    // 整段搬走：`server.mjs` 里现在**不再有** `/api/model-migration` 路由，该命名空间只住一个地方。
+    if (await router.dispatch(req, res, { path, url })) return
     if (path.startsWith('/api/model-bindings/')) {
       const BINDING_PREFIX = '/api/model-bindings/'
       const parts = () => {

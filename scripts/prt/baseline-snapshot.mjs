@@ -269,6 +269,7 @@ SOURCES.routesModelMigration = join(ROOT, 'team-hub', 'routes', 'model-migration
 SOURCES.routesSkillSource = join(ROOT, 'team-hub', 'routes', 'skill-source.mjs')
 SOURCES.routesRunBudget = join(ROOT, 'team-hub', 'routes', 'run-budget.mjs')
 SOURCES.routesSkillsDocuments = join(ROOT, 'team-hub', 'routes', 'skills-documents.mjs')
+SOURCES.routesReadModels = join(ROOT, 'team-hub', 'routes', 'read-models.mjs')
 
 /** 已提取出去的路由族模块（值 = 该文件里**声明式**路由的归属名）。 */
 export const ROUTE_FAMILY_SOURCES = Object.freeze([
@@ -302,6 +303,7 @@ export const ROUTE_FAMILY_SOURCES = Object.freeze([
   { module: 'routesSkillSource', family: 'skill-source', factory: 'createSkillSourceRoutes' },
   { module: 'routesRunBudget', family: 'run-budget', factory: 'createRunBudgetRoutes' },
   { module: 'routesSkillsDocuments', family: 'skills-documents', factory: 'createSkillsDocumentsRoutes' },
+  { module: 'routesReadModels', family: 'read-models', factory: 'createReadModelsRoutes' },
 ])
 SOURCES.experienceStore = join(ROOT, 'team-hub', 'experience-store.mjs')
 

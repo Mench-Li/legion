@@ -244,6 +244,7 @@ import { createMembersRoutes } from './routes/members.mjs'
 import { createExecRoutes } from './routes/exec.mjs'
 import { createModelsRoutes } from './routes/models.mjs'
 import { createWebRoutes } from './routes/web.mjs'
+import { createReadModelsRoutes } from './routes/read-models.mjs'
 import { createSkillsDocumentsRoutes } from './routes/skills-documents.mjs'
 import { createRunBudgetRoutes } from './routes/run-budget.mjs'
 import { createSkillSourceRoutes } from './routes/skill-source.mjs'
@@ -5119,6 +5120,13 @@ const router = createRouter([
     getSkill, checkPermission, getDocument,
     audit, handleWrite,
   }),
+  createReadModelsRoutes({
+    json,
+    db, listTasks, rowToTask,
+    pipelineLabels, now, settleGoalsOfScope,
+    listGoals, goalView, SCOPE_KEY_RE,
+    readPipeline,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -5994,136 +6002,10 @@ async function handle(req, res, stripPrefix) {
     if (await router.dispatch(req, res, { path, url })) return
 
     // 读接口
-    if (req.method === 'GET' && path === '/api/board') {
-      json(res, 200, listTasks({
-        status: url.searchParams.get('status') ?? undefined,
-        soldier: url.searchParams.get('soldier') ?? undefined,
-        role: url.searchParams.get('role') ?? undefined,
-        scope: url.searchParams.get('scope') ?? undefined,
-      }))
-      return
-    }
-    if (req.method === 'GET' && path === '/api/task') {
-      // 单任务详情（任务详情视图数据源）。
-      const id = url.searchParams.get('id')
-      if (!id) { json(res, 400, { error: '缺少参数 id' }); return }
-      const row = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id)
-      if (!row) { json(res, 404, { error: `未知任务 ${id}` }); return }
-      json(res, 200, rowToTask(row))
-      return
-    }
-    if (req.method === 'GET' && path === '/api/missions') {
-      // 真 scope 分区：按 tasks.scope 过滤聚合（与 serve.mjs /api/missions 响应同构，scopeAware=true）。
-      const scopeParam = url.searchParams.get('scope') ?? undefined
-      const rows = listTasks({ scope: scopeParam })
-      const labels = pipelineLabels()
-      const byRole = new Map()
-      for (const t of rows) {
-        if (t.status === 'canceled') continue
-        const role = t.role ?? t.soldier ?? 'unassigned'
-        const arr = byRole.get(role) ?? []
-        arr.push(t)
-        byRole.set(role, arr)
-      }
-      const missions = [...byRole.entries()].map(([role, list]) => {
-        const done = list.filter(t => t.status === 'done').length
-        const inProgress = list.filter(t => t.status === 'in_progress').length
-        const inReview = list.filter(t => t.status === 'in_review').length
-        const blocked = list.filter(t => t.status === 'blocked').length
-        const waiting = list.filter(t => t.status === 'todo' || t.status === 'backlog').length
-        const total = list.length
-        const percent = total === 0 ? 0 : Math.round((done / total) * 100)
-        let status = 'running'
-        if (blocked > 0) status = 'blocked'
-        else if (done === total) status = 'done'
-        else if (inProgress === 0 && inReview === 0) status = 'waiting'
-        return {
-          role,
-          name: labels[role] ?? role,
-          total,
-          done,
-          inProgress,
-          inReview,
-          blocked,
-          waiting,
-          percent,
-          status,
-          tasks: list.map(t => ({ id: t.id, title: t.title, status: t.status })),
-        }
-      })
-      const rank = { running: 0, waiting: 1, blocked: 2, done: 3 }
-      missions.sort((a, b) => rank[a.status] - rank[b.status] || b.percent - a.percent)
-      json(res, 200, { generatedAt: now(), scope: scopeParam ?? null, scopeAware: true, missions })
-      return
-    }
-    if (req.method === 'GET' && path === '/api/scopes') {
-      // 真实存在的分区：任务 + 成员表中的 distinct scope。
-      const fromTasks = db.prepare("SELECT DISTINCT scope FROM tasks WHERE scope IS NOT NULL AND scope != '' ORDER BY scope").all()
-      const fromMembers = db.prepare("SELECT DISTINCT scope FROM members WHERE scope IS NOT NULL AND scope != '' ORDER BY scope").all()
-      const scopes = [...new Set([...fromTasks, ...fromMembers].map(r => r.scope))]
-      json(res, 200, { scopes })
-      return
-    }
-    if (req.method === 'GET' && path === '/api/spaces') {
-      // 工作空间列表：spaces 表注册名 + 未注册的既有 scope（roster/tasks）推导合并。
-      const known = db.prepare('SELECT * FROM spaces ORDER BY id').all()
-      const fromRoster = db.prepare("SELECT DISTINCT scope FROM roster WHERE scope != '' ORDER BY scope").all().map(r => r.scope)
-      const fromTasks = db.prepare("SELECT DISTINCT scope FROM tasks WHERE scope IS NOT NULL AND scope != '' ORDER BY scope").all().map(r => r.scope)
-      const byId = new Map(known.map(k => [k.id, k]))
-      const ids = [...new Set([...byId.keys(), ...fromRoster, ...fromTasks])]
-      const countStmt = db.prepare('SELECT COUNT(*) AS c FROM roster WHERE scope = ?')
-      const spaces = ids.map(id => {
-        const k = byId.get(id)
-        return {
-          id, name: k?.name ?? id, private: !!k?.private,
-          localDir: k?.local_dir ?? '', remoteUrl: k?.remote_url ?? '',
-          agentCount: countStmt.get(id).c,
-        }
-      })
-      json(res, 200, { spaces })
-      return
-    }
-    if (req.method === 'GET' && path === '/api/goal') {
-      // 目标列表（多目标并发模型）：scope 全部目标，每行 = 目标记录 + 按该目标链任务（goalId）实时算的进度。
-      // objective/done/total/percent = 汇总兼容字段（未取消目标的任务合计；objective = 最新 active 目标文案）。
-      const scopeParam = url.searchParams.get('scope') ?? ''
-      if (scopeParam) settleGoalsOfScope(scopeParam) // 链全部完成 → 目标自动 done（幂等，只有状态变化才写）
-      const goals = scopeParam ? listGoals(scopeParam).map(goalView) : []
-      const counted = goals.filter(g => g.status !== 'canceled')
-      const done = counted.reduce((a, g) => a + g.done, 0)
-      const total = counted.reduce((a, g) => a + g.total, 0)
-      const latestActive = goals.find(g => g.status === 'active') ?? null
-      json(res, 200, {
-        scope: scopeParam,
-        goals,
-        objective: latestActive?.objective ?? null,
-        done, total,
-        percent: total > 0 ? Math.round((done / total) * 100) : 0,
-        updatedAt: latestActive?.updatedAt ?? null,
-      })
-      return
-    }
-    if (req.method === 'GET' && path === '/api/pipeline') {
-      // SP-P0：空间流水线（数据面单源）。守护每轮扫单读这里（hub 优先，部署面 rolesFile 兜底）；
-      // 指挥台用它渲染岗位契约。version = 内容指纹：未变化时守护零成本跳过重建。
-      const scopeParam = (url.searchParams.get('scope') ?? '').trim()
-      if (!SCOPE_KEY_RE.test(scopeParam)) { json(res, 400, { error: 'scope 非法（字母/数字/下划线/连字符，≤64 字符）' }); return }
-      const includeDisabled = (url.searchParams.get('include') ?? '') !== 'active'
-      json(res, 200, readPipeline(scopeParam, { includeDisabled }))
-      return
-    }
-    if (req.method === 'GET' && path === '/api/agents') {
-      // 全局智能体目录：所有空间编队的并集（按 role 去重，标注来源空间），供选人入编。
-      const rows = db.prepare('SELECT scope, role, name, kind, avatar FROM roster ORDER BY role, scope').all()
-      const byRole = new Map()
-      for (const r of rows) {
-        const e = byRole.get(r.role) ?? { role: r.role, name: r.name, kind: r.kind, avatar: r.avatar, scopes: [] }
-        e.scopes.push(r.scope)
-        byRole.set(r.role, e)
-      }
-      json(res, 200, { agents: [...byRole.values()] })
-      return
-    }
+    // ── 读接口 —— 已提取到 `./routes/read-models.mjs`（PRT-316 第 31 族 / 切片 33）──
+    // 本族这 8 条已全部搬进模块，`server.mjs` 里不再有它们。
+    // ★ **同名不同法**的这几条不属本族、仍留在下面，别顺手搬走：POST /api/spaces , POST /api/pipeline , POST /api/goal , POST /api/agents
+    if (await router.dispatch(req, res, { path, url })) return
     // ── 成员名册（GET：按最近出现倒序列出，带 60 秒在线判定） —— 已提取到 `./routes/members.mjs`（PRT-316 第 22 族 / 切片 23）──
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/members` 路由，该命名空间只住一个地方。
     if (await router.dispatch(req, res, { path, url })) return

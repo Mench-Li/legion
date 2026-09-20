@@ -26,6 +26,7 @@ import { reserveEphemeralPort } from './ports.mjs'
 import { createLauncher, expandExpectation, productStateOf, withRunCredentialPatch } from './launcher.mjs'
 import { launcherOptionsFrom } from './cli.mjs'
 import { runCredentialPaths } from './run-credential-materialization.mjs'
+import { RUN_RECORD_FIELDS, RUN_RECORD_OPTIONAL_FIELDS } from './run-record.mjs'
 
 const REPO_ROOT = new URL('../../', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
 
@@ -606,6 +607,51 @@ test('真实进程：入口缺失（orchestrator worker 尚未创建）被如实
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+
+// ------------------------------------------------- G. PRT-009 峰值读数的那一跳
+//
+// `run-record.mjs` 那边已经有两组用例证明"记录层收、校验层认、落盘往返一致"。
+// 这一条问的是**另一半**：生产里那个把 `supervisor.status()` 的行**映射**成
+// 记录字段的地方，有没有把新读数带过去。
+//
+//   > 一个"记录层收得住"的读数，与一个"生产真的会把它放进去"的读数，
+//   > 在只跑记录层用例的时候是同一个东西——只不过前者在生产者漏掉那一行时照样全绿。
+//
+// ★ 判据不是写死某个字段名，而是**对着声明表**判：`RUN_RECORD_OPTIONAL_FIELDS`
+//   里每声明一项，映射就必须转出同名的键。于是将来再加一个可选读数时，
+//   若只加声明、不改生产者，这一条会**当场变红**（而那正是这个模块自己
+//   用 `RUN_RECORD_FIELD_NOT_WIRED` 在另一侧防的同一件事）。
+
+test('PRT-009：生产那一跳把记录层的**每一个可选读数**都带上了（对着声明表判）', () => {
+  const src = readFileSync(new URL('./launcher.mjs', import.meta.url), 'utf8')
+  // 定位 persistRunRecord 里那段进程行映射
+  const at = src.indexOf('function persistRunRecord(')
+  assert.notEqual(at, -1, 'launcher.mjs 里找不到 persistRunRecord——锚点坏了，这条判据要重判')
+  const tail = src.slice(at)
+  const mapAt = tail.indexOf('supervisor.status().map(')
+  assert.notEqual(mapAt, -1, 'persistRunRecord 里找不到 supervisor.status().map(——锚点坏了')
+  // 取到该对象字面量的收尾 `}))`
+  const endAt = tail.indexOf('}))', mapAt)
+  assert.notEqual(endAt, -1, '找不到那段对象字面量的收尾')
+  const block = tail.slice(mapAt, endAt)
+
+  // 正对照：必填那三个必须在（否则"块是空的"也会让下面全过）
+  for (const f of RUN_RECORD_FIELDS) {
+    assert.match(block, new RegExp(`\\b${f}:`),
+      `进程行映射里没有必填字段 ${f}——那不是"少带一个读数"，是记录本身坏了`)
+  }
+  // 承重：可选读数逐个必须在
+  for (const f of RUN_RECORD_OPTIONAL_FIELDS) {
+    assert.match(block, new RegExp(`\\b${f}:`),
+      `进程行映射里没有带上可选读数 ${f}：\`supervisor.status()\` 每一行都带它，`
+      + '而记录层是**闭合映射**——少了这一行，落盘的永远是 null，'
+      + '而它与"采样器坏了"在磁盘上是同一个东西')
+  }
+  // 至少得有一个可选读数，否则这条判据是空转
+  assert.ok(RUN_RECORD_OPTIONAL_FIELDS.length > 0,
+    'RUN_RECORD_OPTIONAL_FIELDS 是空的——那样上面那个循环什么都不查，这条判据就成了装饰')
 })
 
 // ------------------------------------------------------------ F. PRT-705 孤儿进程

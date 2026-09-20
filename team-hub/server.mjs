@@ -234,6 +234,7 @@ import { createCompactionRoutes } from './routes/compaction.mjs'
 import { createSecretsRoutes } from './routes/secrets.mjs'
 import { createAutomationRoutes } from './routes/automation.mjs'
 import { createExperienceRoutes } from './routes/experience.mjs'
+import { createPacksRoutes } from './routes/packs.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -4978,6 +4979,12 @@ const router = createRouter([
     experienceAccount, settleDraft, exportExperience,
     db,
   }),
+  createPacksRoutes({
+    json,
+    authorized, handleRun, appendPackFact,
+    packFacts, optionalIntParam, packFactCounts,
+    packAccount, exportPackFacts, db,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -6615,78 +6622,9 @@ async function handle(req, res, stripPrefix) {
     // ── 上下文压缩（compaction）：只追加原文 + CAS 摘要 + 有效上下文读数 —— 已提取到 `./routes/compaction.mjs`（PRT-316 切片 5）──
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/compaction/*` 路由，该命名空间只住一个地方。
     if (await router.dispatch(req, res, { path, url })) return
-    // ── F-20 能力包安装事实 ────────────────────────────────────────────
-    //
-    // 四条路由，围绕着**一本只追加的账**：
-    //   · `POST /api/packs/facts`          追加一条记录（seq 由 CAS 算出来）
-    //   · `GET  /api/packs/facts`          读账（可按包 / 按 seq 增量）
-    //   · `GET  /api/packs/account`        整本账，形态直接喂给 `createPackStore`
-    //   · `GET  /api/packs/export`         导出成可提交进 Git 的文本
-    //
-    // **刻意没有"改一条记录"或"删一条记录"的路由**：账是"只追加、记录不可变"的，
-    // 而一次"顺手修正"会让"这条记录是谁改的"永远无法回答。
-    // 写路径只有一条，且它不接受"当前状态"这种入参——那条状态是**推导**出来的，
-    // 由 hub 存一份就等于有第二份真相。
-    if (path === '/api/packs/facts' && req.method === 'POST') {
-      await handleRun(req, res, (body) => ({
-        ok: true,
-        ...appendPackFact({
-          db,
-          record: {
-            at: body.at,
-            kind: body.kind,
-            packId: body.packId,
-            version: body.version,
-            packType: body.packType ?? null,
-            packProtocolVersion: body.packProtocolVersion ?? null,
-            contentHash: body.contentHash ?? null,
-            declaredContentHash: body.declaredContentHash ?? null,
-            trust: body.trust ?? null,
-            fromVersion: body.fromVersion ?? null,
-            fromContentHash: body.fromContentHash ?? null,
-            preflightVersion: body.preflightVersion ?? null,
-            verdictCodes: body.verdictCodes ?? [],
-          },
-        }),
-      }))
-      return
-    }
-    if (path === '/api/packs/facts' && req.method === 'GET') {
-      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
-      const packId = url.searchParams.get('packId')
-      json(res, 200, {
-        ok: true,
-        packId: packId === null || packId.length === 0 ? null : packId,
-        records: packFacts({
-          db,
-          packId,
-          sinceSeq: optionalIntParam(url, 'sinceSeq') ?? 0,
-          limit: optionalIntParam(url, 'limit'),
-        }),
-        counts: packFactCounts({ db }),
-      })
-      return
-    }
-    if (path === '/api/packs/account' && req.method === 'GET') {
-      // 这一条的形状**就是** `createPackStore({ history })` 认的那个：
-      // 重启之后控制面不必自己再推一遍状态，而"两份推导"是这一层最想避免的事。
-      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
-      json(res, 200, { ok: true, ...packAccount({ db }) })
-      return
-    }
-    if (path === '/api/packs/export' && req.method === 'GET') {
-      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
-      const { text } = exportPackFacts({ db })
-      // 返回**文本**而不是 JSON 对象：这份东西的用途是进 diff、被人审阅，
-      // 而一个被包在 HTTP JSON 里的对象到了调用方手里又要被 `JSON.stringify`
-      // 一次——那一次与这一份的缩进、键序都可能不同，于是"审阅的是哪一份"就成了问题。
-      res.writeHead(200, {
-        'content-type': 'application/json; charset=utf-8',
-        'content-disposition': 'attachment; filename="legion-pack-install-facts.json"',
-      })
-      res.end(text)
-      return
-    }
+    // ── 能力包安装事实（packs）：只追加的账 —— 追加/读账/整本账/审阅文本导出 —— 已提取到 `./routes/packs.mjs`（PRT-316 第 9 族 / 切片 9）──
+    // 整段搬走：`server.mjs` 里现在**不再有** `/api/packs` 路由，该命名空间只住一个地方。
+    if (await router.dispatch(req, res, { path, url })) return
     // ── F-19 冻结的岗位包 ──────────────────────────────────────────────
     //
     // 三条路由，围绕着**只追加的版本化冻结**：

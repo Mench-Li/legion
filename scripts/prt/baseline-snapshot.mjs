@@ -231,6 +231,7 @@ SOURCES.routesCompaction = join(ROOT, 'team-hub', 'routes', 'compaction.mjs')
 SOURCES.routesSecrets = join(ROOT, 'team-hub', 'routes', 'secrets.mjs')
 SOURCES.routesAutomation = join(ROOT, 'team-hub', 'routes', 'automation.mjs')
 SOURCES.routesExperience = join(ROOT, 'team-hub', 'routes', 'experience.mjs')
+SOURCES.routesPacks = join(ROOT, 'team-hub', 'routes', 'packs.mjs')
 
 /** 已提取出去的路由族模块（值 = 该文件里**声明式**路由的归属名）。 */
 export const ROUTE_FAMILY_SOURCES = Object.freeze([
@@ -242,6 +243,7 @@ export const ROUTE_FAMILY_SOURCES = Object.freeze([
   { module: 'routesSecrets', family: 'secrets', factory: 'createSecretsRoutes' },
   { module: 'routesAutomation', family: 'automation', factory: 'createAutomationRoutes' },
   { module: 'routesExperience', family: 'experience', factory: 'createExperienceRoutes' },
+  { module: 'routesPacks', family: 'packs', factory: 'createPacksRoutes' },
 ])
 SOURCES.experienceStore = join(ROOT, 'team-hub', 'experience-store.mjs')
 

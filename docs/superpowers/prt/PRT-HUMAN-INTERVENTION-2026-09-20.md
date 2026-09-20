@@ -4,7 +4,7 @@
 > 本文件只回答一件事：**剩下的、本机做不动的，具体是哪几件、为什么、需要谁做什么。**
 >
 > 口径：HEAD `8cd812e`（树含 `eeedd21`）；`.ci/r43` 全量 CI **9/9 PASS，exit 0**。
-> 台账 `docs/superpowers/prt/PRT-PROGRESS.md`：**145 行 = 140 ✅ / 4 ⏸ / 1 ⬜**。
+> 台账 `docs/superpowers/prt/PRT-PROGRESS.md`：**144 行 = 140 ✅ / 4 ⏸ / 0 ⬜**。
 
 ---
 
@@ -48,6 +48,46 @@
 
 ★ 另：PRT-009 的 `estimated-cost` 也已结清（实测 **$0.045086 USD**，
 数字**不抄进代码**，由 `scripts/prt/baseline-measure.mjs --pending` 从证据文件 × 记录的价目表重算）。
+
+---
+
+## 二之二、⚠️ 第 44 轮新量出来的：另一个会话的 `2f5a4b3` **引入了 4 个套件回归**
+
+这不是"要你裁决"，是**要你知道有一批红不在我这边**，而且我**没有**去改它（会撞车）。
+
+**先量，不先信。** 第 44 轮第三次用 `git worktree add --detach <commit>` 把**只有某一个提交**的树
+单独签出来跑，于是把"哪一族红是谁造成的"分开了：
+
+| 套件 | `d470687`（`2f5a4b3` **之前**） | `1ce5b90`（现在，**净树**） | 判定 |
+| --- | --- | --- | --- |
+| `runtime-host-row-dsh-process` | **10/10** | **4/10** | ✖ 回归 |
+| `runtime-host-binding-unblocked-dsh-process` | **7/7** | **3/7** | ✖ 回归 |
+| `runtime-host-registrar-row-dsh-process` | **6/6** | **4/6** | ✖ 回归 |
+| `runtime-contract-cross-process` | **19/19** | **10/19** | ✖ 回归 |
+| `model-api` | 15/15 | **15/15** ✅ | ★ **不是这个提交** |
+
+⇒ 前四族共 **57 → 21**，是 `2f5a4b3`（§5 第 20 条 · 甲那条断链挂上去）引入的，**在净树上复现**。
+
+★★ **`model-api` 是这一格最值钱的地方**：CI 日志里五族**同时**红、看着像同一个原因，
+**按日志写就会把它也栽给那个提交**。分树复跑才发现它只在**脏树**上红——
+是某个会话**未提交的在制品**造成的。**"同时红"不等于"同一个原因"。**
+
+失败机理（`runtime-host-row-dsh-process` A 的原文）：
+
+```text
+service "legionRuntimeHostBinding" has been registered a...
+补丁层 v1 未完全生效：legion-enforcement-runtime-host-registrar:
+  行已挂载但未激活（等待依赖服务），不产生任何强制效果
+```
+
+即：那一行**挂上了**（`PATCH_LAYER_ROWS` 5 → **7** 行确实生效），但**没激活**
+⇒ 补丁层没完全生效 ⇒ 真 DSH 进程里的读数与"没挂"仍不同形。
+
+**为什么不我去修**：那是另一个会话**正在做的同一件事**（他们此刻还有
+`product/process-manifest.mjs`、`product/launcher/*` 等十余个文件在改），
+我动同一个面会撞车；而且这四族本来就是**回归判据**——它们红着，正是判据在说
+"这一行挂上了但没真的生效"。⇒ **记进度、留给那个会话收口。**
+（★ 也正因为如此，本轮**不能**给出"全量 CI 9/9 PASS"的读数：`test` 阶段红。）
 
 ---
 

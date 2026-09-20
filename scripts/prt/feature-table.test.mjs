@@ -227,8 +227,22 @@ test('②a ★★ 所有者那条判据**在 CI 里真的会跑**（"谁判"不�
     const code = stripComments(readFileSync(join(dir, f), 'utf8'))
     assert.ok(!/STATUS_RE = \/\^/.test(code),
       `「${f}」里出现了一份**字面量**状态正则 ⇒ 两份词表并存`)
-    assert.ok(/STATUS_RE = FEATURE_STATUS_RE/.test(code),
-      `「${f}」的 \`STATUS_RE\` 不再是所有者那一份 ⇒ 它抄了一份自己的`)
+    // ★★★ 第 47 轮：这条断言原来要求每个生产消费者都写出**本地别名**
+    //   `STATUS_RE = FEATURE_STATUS_RE`。
+    //
+    //   第 47 轮 `spec-status-calibration.mjs` 成了新消费者，而它**直接**用
+    //   `FEATURE_STATUS_RE.test(...)` —— 比本地别名**更直接**地从所有者取，
+    //   却因为没有那个别名而报红：
+    //
+    //     > 一条钉住**写法**的断言，会在写法被换成一个**更好**的写法时变红。
+    //     > 它红的原因不是"行为坏了"，是"它认识的那句话不在了"。
+    //
+    //   ⇒ 改成钉**性质**："这个文件从所有者那里 import 了那张词表"。
+    //     写法（本地别名 / 直接用 / 解构后改名）随便，取到就行。
+    assert.ok(
+      /import\s*\{[^}]*FEATURE_STATUS_(?:RE|MARKS|MUST_SAY_MISSING)[^}]*\}\s*from\s*'\.\/progress-check\.mjs'/.test(code),
+      `「${f}」没有从所有者（\`./progress-check.mjs\`）import 那张词表 ⇒ 它要么抄了一份自己的，`
+      + '要么从别处转手 —— 两种都会漂')
   }
 })
 

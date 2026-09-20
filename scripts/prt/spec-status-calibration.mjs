@@ -50,6 +50,10 @@
 import { readFileSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+// ★★★ 第 47 轮：功能对照表的**状态词表所有者**是 `progress-check.mjs`。
+//   本模块此前自己读状态格、认不出就归进 `aggregate` 的"其余 ⇒ 🟡"那一支
+//   ⇒ "读不出来"与"部分完成"在汇总里同形。现在**取**它、并把认不出改成抛。
+import { FEATURE_STATUS_MARKS, FEATURE_STATUS_RE } from './progress-check.mjs'
 
 export const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 export const SPEC_DOC = 'docs/MULTI-AGENT-FEATURE-OPTIMIZATION.md'
@@ -103,13 +107,47 @@ export function parseSpecHeadings(specText) {
  * 返回 `Map<F-NN, {rows, statuses, aggregate}>`。
  *
  * `aggregate`：全部 ✅ ⇒ `✅`；全部 ⏸ ⇒ `⏸`；其余 ⇒ `🟡`。
+ *
+ * ★★★ 第 47 轮：本函数此前是**功能对照表的第三个手写解析器** ——
+ *   自己判行、自己分格、**自己定格子数**（`≠5 且 ≠6 ⇒ continue`）、
+ *   自己取状态；而"认不出的状态"会安静地落进 `aggregate` 的
+ *   **"其余 ⇒ 🟡"** 那一支。
+ *
+ *   > 一个"认不出就算部分完成"的默认值，与一份"真的有一部分没做完"的表，
+ *   > 在汇总里是同一个读数——
+ *   > 只不过前者会把**读不出来的东西**报成一个**看起来需要关注**的数。
+ *
+ *   实测（`scratch/_probe-status-table-owner.mjs`）：
+ *
+ *   | 输入 | 旧 `parseStatusTable` | 所有者（`featureRows`）|
+ *   | --- | --- | --- |
+ *   | 状态格 = `🔵` | 静默算成 **🟡** | **抛** |
+ *   | 4 格 / 7 格的状态行 | **静默跳过** | 收下 |
+ *   | 真文档 | 25 个 F-NN / 29 行 | 25 个 F-NN / 29 行（**一致**）|
+ *
+ *   ⇒ 差异**今天不显形**（真文档里没有 🔵、也没有 4/7 格的状态行），
+ *     而这正是修它的时候。
+ *
+ *   ★ 另有一个**就在本文件里**的旁证：`parseCalibration()` 用的是
+ *     `cells.length < 4 ⇒ continue`，而本函数用的是 `≠5 且 ≠6` ——
+ *     **同一个文件里两个函数对同一张表用了两条不同的接受规则**。
+ *     现在两者都对齐到所有者那条**量出来的**阈值（`>= 4`）。
  */
 export function parseStatusTable(statusText) {
   const map = new Map()
   for (const line of String(statusText).split(/\r?\n/)) {
     if (!/^\|\s*F-\d+/.test(line)) continue
     const cells = line.replace(/^\|/, '').replace(/\|$/, '').split(/(?<!\\)\|/).map((c) => c.trim())
-    if (cells.length !== 5 && cells.length !== 6) continue
+    // ★ 阈值 `< 4` 与 `parseCalibration()` 及所有者一致（见上面那段）。
+    if (cells.length < 4) continue
+    // ★★ 状态格必须是所有者许可的形状之一 —— **认不出就抛**，不再默认成 🟡。
+    if (!FEATURE_STATUS_RE.test(cells[2] ?? '')) {
+      throw new Error(`功能对照表的状态格不是已知形状：`
+        + `第 1 格 "${cells[0].slice(0, 30)}"，第 3 格是 "${cells[2]}"，`
+        + `而许可的是 ${FEATURE_STATUS_MARKS.join(' ')}，或其中任意两个用 \`→\` 相连。`
+        + `★ 这里**抛**而不是归进"其余 ⇒ 🟡"：那样会把"读不出来"报成"部分完成"，`
+        + `两者在汇总里同形（第 47 轮实测形状）。`)
+    }
     const key = /^(F-\d+)/.exec(cells[0])[1]
     if (!map.has(key)) map.set(key, { rows: [], statuses: [] })
     const e = map.get(key)

@@ -244,6 +244,7 @@ import { createMembersRoutes } from './routes/members.mjs'
 import { createExecRoutes } from './routes/exec.mjs'
 import { createModelsRoutes } from './routes/models.mjs'
 import { createWebRoutes } from './routes/web.mjs'
+import { createContentReadsRoutes } from './routes/content-reads.mjs'
 import { createTeamViewsRoutes } from './routes/team-views.mjs'
 import { createTaskRecordsRoutes } from './routes/task-records.mjs'
 import { createGoalLifecycleRoutes } from './routes/goal-lifecycle.mjs'
@@ -5184,6 +5185,10 @@ const router = createRouter([
     json,
     db, listTasks,
   }),
+  createContentReadsRoutes({
+    json,
+    getSkill, listSkills, listDocuments,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -5684,51 +5689,10 @@ async function handle(req, res, stripPrefix) {
       })
       return
     }
-    if (req.method === 'GET' && path === '/api/skills') {
-      // include=pending 收口（AC-R1-7）：仅 member=general（复审身份）可看 pending/rejected 及其 prompt；
-      // 其余任何查询（含 scope/member 全缺省的「全部空间」视图）一律只返回 published，草稿不外泄。
-      const reviewerView = url.searchParams.get('member') === 'general'
-      const wantPending = reviewerView && url.searchParams.get('include') === 'pending'
-      const skillId = url.searchParams.get('id')
-      if (skillId) {
-        try {
-          const s = getSkill(skillId)
-          // 未发布且非复审视角 → 对普通成员按「不存在」处理，不泄露待审内容
-          if (s.status !== 'published' && !wantPending) {
-            json(res, 404, { error: `skill_not_found: ${skillId}` })
-            return
-          }
-          json(res, 200, s)
-        } catch (e) {
-          json(res, 404, { error: e instanceof Error ? e.message : String(e) })
-        }
-        return
-      }
-      json(res, 200, listSkills({
-        scope: url.searchParams.get('scope') ?? undefined,
-        member: url.searchParams.get('member') ?? undefined,
-        includePending: wantPending,
-      }))
-      return
-    }
-    if (req.method === 'GET' && path === '/api/documents') {
-      // ★ PRT-406：显式文档读端点（`document` 来源族的唯一出处）。
-      //
-      //   形状与 `/api/skills` **刻意不同**：技能返回 `prompt`（会被当指令执行的
-      //   那一段），文档返回 `body`（参考资料）。两者都带 `origin`，于是装配侧
-      //   可以**逐条**判可信性，而不是整批一刀切。
-      //
-      //   ⚠️ `origin` 是**服务端写死**的字段（见 registerDocument / installDocument），
-      //   客户端改不动——这正是它能被用来做判定前提的原因。
-      //
-      //   与 `/api/skills` 的另一个不同：**没有 status 过滤**。文档不走向导机
-      //   （理由见 listDocuments 的注释）。
-      json(res, 200, listDocuments({
-        scope: url.searchParams.get('scope') ?? undefined,
-        id: url.searchParams.get('id') ?? undefined,
-      }))
-      return
-    }
+    // ── 两个只读视图：技能目录（含 pending 收口）/ 显式文档读（PRT-406） —— 已提取到 `./routes/content-reads.mjs`（PRT-316 第 41 族 / 切片 43）──
+    // 本族这 2 条已全部搬进模块，`server.mjs` 里不再有它们。
+    // 归属 /api/documents , /api/skills 的那 2 条都在这里了。
+    if (await router.dispatch(req, res, { path, url })) return
     if (req.method === 'GET' && path === '/api/events') {
       let eventScope
       let sinceSeq

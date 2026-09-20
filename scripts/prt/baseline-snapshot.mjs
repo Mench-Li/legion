@@ -279,6 +279,7 @@ SOURCES.routesSpaceOperations = join(ROOT, 'team-hub', 'routes', 'space-operatio
 SOURCES.routesGoalLifecycle = join(ROOT, 'team-hub', 'routes', 'goal-lifecycle.mjs')
 SOURCES.routesTaskRecords = join(ROOT, 'team-hub', 'routes', 'task-records.mjs')
 SOURCES.routesTeamViews = join(ROOT, 'team-hub', 'routes', 'team-views.mjs')
+SOURCES.routesContentReads = join(ROOT, 'team-hub', 'routes', 'content-reads.mjs')
 
 /** 已提取出去的路由族模块（值 = 该文件里**声明式**路由的归属名）。 */
 export const ROUTE_FAMILY_SOURCES = Object.freeze([
@@ -322,6 +323,7 @@ export const ROUTE_FAMILY_SOURCES = Object.freeze([
   { module: 'routesGoalLifecycle', family: 'goal-lifecycle', factory: 'createGoalLifecycleRoutes' },
   { module: 'routesTaskRecords', family: 'task-records', factory: 'createTaskRecordsRoutes' },
   { module: 'routesTeamViews', family: 'team-views', factory: 'createTeamViewsRoutes' },
+  { module: 'routesContentReads', family: 'content-reads', factory: 'createContentReadsRoutes' },
 ])
 SOURCES.experienceStore = join(ROOT, 'team-hub', 'experience-store.mjs')
 

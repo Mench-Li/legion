@@ -139,8 +139,15 @@ export const HANDOVER_DOC = 'docs/superpowers/prt/PRT-HANDOVER-2026-09-18-ROUND2
 /** 可达性基线的文件路径。 */
 export const REACHABILITY_BASELINE = 'docs/superpowers/prt/prt-reachability-baseline.json'
 
-/** 数台账每一档状态。★/⏸/⬜ 三个都要数——只数 ✅ 会把"4 条暂停"读成"都完了"。 */
-/** 台账里出现的**全部**状态标记。★ 少写一个，那一条就会被安静地丢掉。 */
+/**
+ * 台账里出现的**全部**状态标记。★ 少写一个，那一条就会被安静地丢掉。
+ *
+ * 各档都要数——只数 ✅ 会把"4 条暂停"读成"都完了"。
+ * ★★★ 第 44 轮：这里原来是 `✅|⏸|⬜` **三个**（写在 `tallyLedger` 里），
+ * 而台账现在还有 **🟡**（"部分"）⇒ 少一个标记 = 少算一条，
+ * 而少算出来的那个数**正好**能过 `handover-ledger-tallies`（见该事实的 `why`）。
+ * ⇒ 提到模块级单独声明，并且**认不出来就抛**（`tallyLedger` 里）。
+ */
 export const LEDGER_STATUS_MARKERS = Object.freeze(['✅', '🟡', '⏸', '⬜'])
 
 export function tallyLedger(text) {

@@ -100,7 +100,24 @@ test('⑩ ★★ 台账解析：145 行、状态口径与"第一格以 PRT- 开�
   assert.equal(rows.length, 145, `台账读到 ${rows.length} 行（期望 145）`)
   const by = {}
   for (const r of rows) by[r.status] = (by[r.status] ?? 0) + 1
-  assert.deepEqual(by, { '✅': 140, '⏸': 4, '⬜': 1 }, JSON.stringify(by))
+  // ★★★ 第 44 轮：这里曾经断言 `{ '✅': 140, '⏸': 4, '⬜': 1 }`。
+  //   `PRT-316` 由 ⬜ 转 **🟡**（切片 1 落地）之后，`ledger-evidence.mjs:76` 的
+  //   口径**已经**跟着改成 `^(✅|🟡|⏸|⬜)$`，而**这一行期望没跟着改** ⇒ 判红。
+  //
+  //   > 一个"口径改了、期望没改"的陈旧断言，与"台账真的变了"，
+  //   > 在 CI 上都是**同一条红**——
+  //   > 只不过前者要改的是这一行，后者要查的是台账。
+  //
+  //   ★ 与同一批 `boundary-facts` 的 `tallyLedger` 是**同一个形状**：
+  //   那边是**代码**认不出 🟡（连期望也一起写错，所以门禁替它背书）；
+  //   这边是**代码**认得出、**期望**认不出。两处都因为 🟡 而在同一轮露出来。
+  //
+  //   ⇒ 期望改成真实分布，并把"四档之和 == 行数"写成一条**显式**判据：
+  //   这样任何"某一档被漏数"都会红，而"某一档的数值合法地变了"只需改这一行。
+  assert.deepEqual(by, { '✅': 140, '🟡': 1, '⏸': 4 }, JSON.stringify(by))
+  const sum = Object.values(by).reduce((a, b) => a + b, 0)
+  assert.equal(sum, rows.length,
+    `四档之和 ${sum} 与台账行数 ${rows.length} 不符——有一档被漏数了`)
   // 证据栏必须非空——空证据栏的 ✅ 是"自称完成"
   for (const r of rows) {
     assert.ok(r.evidence.length > 0, `${r.prt} 的证据栏是空的`)

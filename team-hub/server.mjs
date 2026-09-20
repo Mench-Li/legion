@@ -244,6 +244,7 @@ import { createMembersRoutes } from './routes/members.mjs'
 import { createExecRoutes } from './routes/exec.mjs'
 import { createModelsRoutes } from './routes/models.mjs'
 import { createWebRoutes } from './routes/web.mjs'
+import { createRuntimeVerificationRoutes } from './routes/runtime-verification.mjs'
 import { createRuntimeLeaseRoutes } from './routes/runtime-lease.mjs'
 import { createModelBindingsByPathRoutes } from './routes/model-bindings-by-path.mjs'
 import { createModelBindingsRoutes } from './routes/model-bindings.mjs'
@@ -5152,6 +5153,11 @@ const router = createRouter([
     handleRun, runStore, requireString,
     getTask, settleGoalsOfScope, recordRunEventsBestEffort,
   }),
+  createRuntimeVerificationRoutes({
+    json,
+    handleRun, runStore, requireString,
+    getTask, settleGoalsOfScope,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -5417,123 +5423,10 @@ async function handle(req, res, stripPrefix) {
       })
       return
     }
-    if (req.method === 'POST' && path === '/api/runtime/validate') {
-      // 机器验收（PRT-307）：执行成功之后的**独立关卡**。
-      //
-      // `criteria` 是可选覆盖：不传时按任务契约（`tasks.acceptance`）判，
-      // 传了则以传入的为准（人工复审给出机器判据的场景）。覆盖是**显式**的，
-      // 因为"当时按什么验的"必须能从事后记录里读回来（结论与判据一起落库）。
-      //
-      // `hasNextPost` 不在这里给默认值：它决定验收通过后是 Completed 还是 HandingOff，
-      // 而这两个方向猜错的后果（静默掐断任务链 / 创建没有承接方的任务）都不报错。
-      // 状态机与仓储都会在缺它时拒绝，这里只负责**不替调用方做主**。
-      await handleRun(req, res, (body) => {
-        const r = runStore.recordValidation({
-          attemptId: requireString(body, 'attemptId'),
-          leaseEpoch: body.leaseEpoch ?? null,
-          actor: requireString(body, 'actor'),
-          runResult: body.runResult,
-          criteria: body.criteria ?? null,
-          hasNextPost: body.hasNextPost,
-          nextPost: body.nextPost ?? null,
-          reason: body.reason ?? null,
-        })
-        try { settleGoalsOfScope(getTask(runStore.getAttempt(body.attemptId).taskId).scope) } catch { /* 任务不存在时不结算 */ }
-        return r
-      })
-      return
-    }
-    if (req.method === 'GET' && path === '/api/runtime/validations') {
-      // 验收结论与**当时用的判据**一起读回来。
-      // 只回结论是不够的：判据可以被人工复审覆盖，因此"不通过"到底是
-      // 按契约判的还是按复审判的，不看判据就分不清。
-      const attemptId = url.searchParams.get('attemptId')
-      if (attemptId === null || attemptId.length === 0) { json(res, 400, { ok: false, error: '缺少 attemptId', code: 'MISSING_PARAM' }); return }
-      json(res, 200, { ok: true, attemptId, validations: runStore.validationsOf(attemptId), serverTimeMs: Date.now() })
-      return
-    }
-    if (req.method === 'POST' && path === '/api/runtime/handoff') {
-      // 交接（PRT-308，spec 第 333 行）：当前 Task 收口并**原子创建**下一岗位任务。
-      //
-      // `prevSummary` 是上一阶段的收口结论（一行）；缺它时交接描述里会明说
-      // 「上一阶段未留下收口结论」，而不是省略整行——省略会让下一岗位以为
-      // 交接没发生过，于是它不会去问"上一环到底做完了什么"。
-      //
-      // 这里**不**接受调用方指定下一岗位：下一岗位由流水线决定。
-      // 让调用方指定等于让执行者自己决定流水线怎么走。
-      await handleRun(req, res, (body) => {
-        const r = runStore.handoff({
-          attemptId: requireString(body, 'attemptId'),
-          leaseEpoch: body.leaseEpoch ?? null,
-          actor: requireString(body, 'actor'),
-          prevSummary: body.prevSummary ?? null,
-          reason: body.reason ?? null,
-        })
-        try {
-          const scope = getTask(runStore.getAttempt(body.attemptId).taskId).scope
-          settleGoalsOfScope(scope)
-        } catch { /* 任务不存在时不结算 */ }
-        return r
-      })
-      return
-    }
-    if (req.method === 'GET' && path === '/api/runtime/handoffs') {
-      // 交接记录（只读）：后继是谁、谁交的、什么时候。
-      // 这条记录同时是 `HandingOff → Completed` 要的证据，因此排查
-      // 「为什么收不了口」时要能直接看到它。
-      const attemptId = url.searchParams.get('attemptId')
-      if (attemptId === null || attemptId.length === 0) { json(res, 400, { ok: false, error: '缺少 attemptId', code: 'MISSING_PARAM' }); return }
-      json(res, 200, { ok: true, attemptId, handoffs: runStore.handoffsOf(attemptId), serverTimeMs: Date.now() })
-      return
-    }
-    if (req.method === 'GET' && path === '/api/runtime/run-results') {
-      // 运行结果（只读）：这次运行**产出了什么**。
-      //
-      // 它同时是 `Running → Validating / RetryableFailure / UnknownOutcome` 要的证据，
-      // 因此排查"为什么它推不动 / 当初到底跑出了什么"时要能直接看到。
-      //
-      // `source` 必须透出去：`'engine'`（有引擎产出的原文）与
-      // `'report-only'`（没有引擎产出，只有"谁报的、结局是什么"，`result` 为 null）
-      // 是**两个不同的事实**，读成同一个会让人以为"引擎当时输出了 null"。
-      const attemptId = url.searchParams.get('attemptId')
-      if (attemptId === null || attemptId.length === 0) { json(res, 400, { ok: false, error: '缺少 attemptId', code: 'MISSING_PARAM' }); return }
-      json(res, 200, { ok: true, attemptId, runResults: runStore.runResultsOf(attemptId), serverTimeMs: Date.now() })
-      return
-    }
-    if (req.method === 'GET' && path === '/api/runtime/run-events') {
-      // F-05 前半的读面：**运行明细**（13 种 RunEvent，按契约序号升序）。
-      //
-      // 这条路由存在的理由与 `/api/runtime/run-results` 完全相同，只是粒度更细：
-      // `run_results` 回答"这次运行**结局**是什么"，`run_events` 回答
-      // "这次运行**过程**里发生了什么"——用了哪个模型、请求了哪些工具、
-      // 工具是成了还是败了、模型说了什么。
-      //
-      // 两条只读参数：
-      //   · `type`  —— 只看某一类（"这次调了哪些工具"用 `tool.requested`）；
-      //   · `counts=1` —— 只要按类型的计数（13 种事件逐个数），不要正文。
-      //
-      // `known` 必须透出去：`known: false` 的行说明**上游产生了一种本控制面
-      // 不认识的事件**。那是一个要被看见的信号；过滤掉它会让"上游新增了事件
-      // 但我们不记"与"上游什么都没产生"长得一样。
-      const attemptId = url.searchParams.get('attemptId')
-      if (attemptId === null || attemptId.length === 0) { json(res, 400, { ok: false, error: '缺少 attemptId', code: 'MISSING_PARAM' }); return }
-      if (url.searchParams.get('counts') === '1') {
-        json(res, 200, { ok: true, ...runStore.runEventCountsOf(attemptId), serverTimeMs: Date.now() })
-        return
-      }
-      const type = url.searchParams.get('type')
-      const limitRaw = url.searchParams.get('limit')
-      json(res, 200, {
-        ok: true,
-        attemptId,
-        events: runStore.runEventsOf(attemptId, {
-          type: type === null || type.length === 0 ? null : type,
-          limit: limitRaw === null ? 1000 : Number(limitRaw),
-        }),
-        serverTimeMs: Date.now(),
-      })
-      return
-    }
+    // ── 机器验收与交接（PRT-307）：验收一条 / 列验收 / 交接一条 / 列交接 + 运行产物读取（结果 / 事件计数） —— 已提取到 `./routes/runtime-verification.mjs`（PRT-316 第 36 族 / 切片 38）──
+    // 本族这 6 条已全部搬进模块，`server.mjs` 里不再有它们。
+    // ⚠️ **前缀下还有不属于本族的**（别顺手搬走）：POST /api/runtime/run-budget/may-switch-model
+    if (await router.dispatch(req, res, { path, url })) return
     // ── 自动化计划（automation）：计划清单/建改 + 运行历史 + 汇总 + 日历投影 + 显式 tick —— 已提取到 `./routes/automation.mjs`（PRT-316 第 7 族 / 切片 7）──
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/automation` 路由，该命名空间只住一个地方。
     if (await router.dispatch(req, res, { path, url })) return

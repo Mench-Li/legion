@@ -233,6 +233,7 @@ import { createCalendarRoutes } from './routes/calendar.mjs'
 import { createCompactionRoutes } from './routes/compaction.mjs'
 import { createSecretsRoutes } from './routes/secrets.mjs'
 import { createAutomationRoutes } from './routes/automation.mjs'
+import { createExperienceRoutes } from './routes/experience.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -4970,6 +4971,13 @@ const router = createRouter([
     automationStore, projectOccurrences, automationTick,
     AUTOMATION_ERRORS,
   }),
+  createExperienceRoutes({
+    json,
+    authorized, handleRun, appendExperienceRecord,
+    experienceRecords, draftCounts, optionalIntParam,
+    experienceAccount, settleDraft, exportExperience,
+    db,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -6761,126 +6769,9 @@ async function handle(req, res, stripPrefix) {
       res.end(text)
       return
     }
-    // ── F-18 经验图谱 / 摩擦学习 ────────────────────────────────────────
-    //
-    // 四条路由，全部围绕**一本只追加的记录流**：
-    //   · `POST /api/experience/records`  追加一条（node/edge/retract/draft）
-    //   · `GET  /api/experience/records`  读流（可按草稿/边/种类、支持 sinceSeq）
-    //   · `POST /api/experience/drafts/:id/settle`  处置一条草稿（promote/discard）
-    //   · `GET  /api/experience/export`   导出成可提交进 Git 的审阅文本
-    //   · `GET  /api/experience/account`  整本账（重启后供控制面重建）
-    //
-    // ★ **刻意没有"改一条记录"或"删一条记录"的路由**，也**没有**"保存整张图"
-    //   的路由：记录是唯一的真相，"图现在长什么样"与"这条草稿现在是什么状态"
-    //   都是从记录流**推导**出来的。存一份推导出来的状态，就等于有第二份真相，
-    //   而它与记录流不一致时**没有任何东西能判定谁对**。
-    //
-    // ★ 处置单独一条路由（而不是往记录流里 POST 一条 `promote`）：
-    //   那个检查是"这条草稿现在是不是还没被处置"，而它必须**在同一处**完成，
-    //   否则调用方要先读一次再写一次，两步之间另一个进程可以插进来。
-    if (path === '/api/experience/records' && req.method === 'POST') {
-      await handleRun(req, res, (body) => ({
-        ok: true,
-        ...appendExperienceRecord({
-          db,
-          scope: typeof body.scope === 'string' && body.scope.trim() !== '' ? body.scope.trim() : 'default',
-          record: {
-            kind: body.kind,
-            atMs: body.atMs,
-            draftId: body.draftId,
-            subject: body.subject ?? null,
-            score: body.score ?? null,
-            payload: body.payload ?? null,
-            edgeId: body.edgeId,
-            from: body.from,
-            to: body.to,
-            edgeKind: body.edgeKind,
-            source: body.source,
-            by: body.by,
-            reason: body.reason ?? null,
-            nodeKind: body.nodeKind,
-            id: body.id,
-          },
-        }),
-      }))
-      return
-    }
-    if (path === '/api/experience/records' && req.method === 'GET') {
-      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
-      const scope = url.searchParams.get('scope') ?? 'default'
-      const records = experienceRecords({
-        db,
-        scope,
-        draftId: url.searchParams.get('draftId'),
-        edgeId: url.searchParams.get('edgeId'),
-        kind: url.searchParams.get('kind'),
-        sinceSeq: optionalIntParam(url, 'sinceSeq') ?? 0,
-        limit: optionalIntParam(url, 'limit'),
-      })
-      json(res, 200, { ok: true, records, counts: draftCounts({ db, scope }) })
-      return
-    }
-    if (path === '/api/experience/account' && req.method === 'GET') {
-      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
-      const scope = url.searchParams.get('scope') ?? 'default'
-      json(res, 200, { ok: true, ...experienceAccount({ db, scope }) })
-      return
-    }
-    // `/api/experience/drafts/<id>/settle`
-    //
-    // ★ 形状刻意与 PRT-507 的 `/api/model-profiles/<id>/probe` 一致：
-    //   `startsWith` + `endsWith` 配**字面量**，而不是一个正则守卫。
-    //   原因不是风格：`scripts/prt/baseline-snapshot.mjs` 的抽取器只认
-    //   字面量（`path === '…'` / `path.startsWith('…')`），而它用
-    //   `findOpaqueRouteGuards` **主动拒绝**用常量做守卫的写法。
-    //   一个正则守卫两条都躲得过——于是这条路由会**悄悄**不进平台契约，
-    //   而 `--record` 会写下一份"看起来正常、少了一条端点"的基线。
-    //
-    //   这正是本仓库记过的最贵的一条：**一道看不见某类改动的闸门，
-    //   比没有闸门更危险**——它给人"已经守住了"的错觉。
-    //   所以这里按既有约定写成字面量 + startsWith/endsWith。
-    if (req.method === 'POST' && path.startsWith('/api/experience/drafts/') && path.endsWith('/settle')) {
-      const rawId = path.slice('/api/experience/drafts/'.length, path.length - '/settle'.length)
-      // 中间那段必须是**一段** id，不能为空、也不能再带 `/`：
-      // 否则 `/api/experience/drafts/a/b/settle` 会被当成一个合法 id，
-      // 而那个 id 永远不会有对应的草稿——报出来的是"来源丢了"，
-      // 而不是"你的路径写错了"，于是调用方会去查一条根本不存在的草稿。
-      if (rawId === '' || rawId.includes('/')) {
-        json(res, 400, {
-          error: `草稿 id 必须是一段路径（收到 ${JSON.stringify(rawId)}），` +
-            '带 `/` 的 id 永远不会对应到一条草稿',
-          code: 'EXPERIENCE_RECORD_MALFORMED',
-        })
-        return
-      }
-      const draftId = decodeURIComponent(rawId)
-      await handleRun(req, res, (body) => ({
-        ok: true,
-        ...settleDraft({
-          db,
-          scope: typeof body.scope === 'string' && body.scope.trim() !== '' ? body.scope.trim() : 'default',
-          draftId,
-          action: body.action,
-          // 理由原样交给下面的层去校验封闭词表：在这里再存一份词表
-          // 就是第二份会各自漂移的词表。
-          by: body.by,
-          reason: body.reason,
-          atMs: Number.isInteger(body.atMs) ? body.atMs : Date.now(),
-        }),
-      }))
-      return
-    }
-    if (path === '/api/experience/export' && req.method === 'GET') {
-      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
-      const scope = url.searchParams.get('scope') ?? 'default'
-      const { text } = exportExperience({ db, scope })
-      res.writeHead(200, {
-        'content-type': 'application/json; charset=utf-8',
-        'content-disposition': 'attachment; filename="legion-experience.json"',
-      })
-      res.end(text)
-      return
-    }
+    // ── 经验图谱（experience）：记录流追加/读 + 整本账 + 草稿处置 + 审阅文本导出 —— 已提取到 `./routes/experience.mjs`（PRT-316 第 8 族 / 切片 8）──
+    // 整段搬走：`server.mjs` 里现在**不再有** `/api/experience` 路由，该命名空间只住一个地方。
+    if (await router.dispatch(req, res, { path, url })) return
     // ── F-21 连接器登记表 ──────────────────────────────────────────────
     //
     // 四条路由，围绕**按内容哈希冻结的声明** + **点名的故障事件**：

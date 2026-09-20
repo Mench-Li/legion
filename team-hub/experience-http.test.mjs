@@ -275,3 +275,258 @@ test('⑬ 未授权一律 401（读面与写面都是）', async () => {
     assert.equal(res.status, 401, `${method} ${path} 没有鉴权`)
   }
 })
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ④ PRT-316 切片 8：experience 族搬进 `routes/experience.mjs` 之后的**缝上契约**
+//
+// 为什么补：破验 14 条变异，第一轮咬住 7 条、漏网 7 条。逐条查过之后，
+// 那 7 条分成**三类**，而三类的处置完全不同：
+//
+//   ① 真缺口（用例从没喂过那个输入）—— 补判据：
+//        K2  空 id：`/api/experience/drafts//settle` 从没被请求过。
+//        K3  百分号编码：从没请求过带 `%2F` 的 id。
+//        K10 空白 scope：只喂过"没给 scope"与"给了正常 scope"。
+//        K13/K14 匹配边界：只喂过**刚刚好正确**的路径。
+//
+//   ② **可证等价**（我改坏的那处与原文在任何输入上都同结果）—— 不补判据，只记录证明：
+//        K11 `sinceSeq`: `optionalIntParam` 缺参返回 `null`，而 store 里是
+//            `sinceSeq = 0` 默认参数 + `Number(sinceSeq) || 0` ⇒ `null` 与 `0` 同结果。
+//        K12 `atMs`：store 里是 `atMs ?? nowMs`，`nowMs = Date.now()` 是默认参数
+//            ⇒ `undefined` 与"显式 `Date.now()`"同结果。
+//
+//        > 一个"我改坏了但行为没变"的变异，与一个"我没测出来"的变异，
+//        > 在破验报告里都是同一行"没咬住"。
+//
+//        这两条**不能被判据"修好"**——它们不是缺口，是等价。硬写一条断言
+//        （比如断言传给 store 的实参必须是 0）只会把**实现细节**钉死，
+//        而下一个合理的重构会因此变红。
+//
+//   ③ 已由既有用例覆盖、本轮也咬住了（K1/K4/K5/K6/K7/K8/K9）—— 不重复。
+//
+// ▲ 既有 13 例仍在**真 hub** 上验（不替换、不删除）。
+// ▲ 追加而非新建文件：`git ls-files "*.test.mjs"` 的条数被 `boundary-facts` 钉着。
+// ══════════════════════════════════════════════════════════════════════════════
+
+import { createExperienceRoutes } from './routes/experience.mjs'
+// K11/K12 的等价性要**钉住 store 端的前提**（见那两条测试的说明），所以需要读源码。
+import { readFileSync } from 'node:fs'
+
+/** 会记录调用的假依赖 + 假 `res`（export 那条自己写响应头，不走 `json`）。 */
+function expSpy(over = {}) {
+  const calls = []
+  const sent = []
+  const written = []
+  const res = {
+    writeHead: (code, headers) => { written.push([code, headers]) },
+    end: (body) => { written.push(['end', body]) },
+  }
+  const body = over.body ?? { kind: 'draft', action: 'promote', draftId: 'd1', atMs: 7, by: 'me', reason: 'r' }
+  const deps = {
+    json: (_res, code, obj) => { sent.push([code, obj]) },
+    authorized: over.authorized ?? (() => true),
+    handleRun: async (_req, _res, fn) => {
+      const out = await fn(body, 'me')
+      sent.push([200, out])
+      return out
+    },
+    appendExperienceRecord: (a) => { calls.push(['append', a]); return { appended: true, seq: 1, kind: a?.record?.kind } },
+    experienceRecords: (a) => { calls.push(['records', a]); return [] },
+    draftCounts: (a) => { calls.push(['counts', a]); return { draft: 1 } },
+    // 与 `server.mjs` 里的实现逐字一致（缺参 ⇒ null，非整数 ⇒ null）
+    optionalIntParam: (url, name) => {
+      const raw = url.searchParams.get(name)
+      if (raw === null || raw.trim() === '') return null
+      const n = Number(raw)
+      return Number.isSafeInteger(n) ? n : null
+    },
+    experienceAccount: (a) => { calls.push(['account', a]); return { records: [], counts: {} } },
+    settleDraft: (a) => { calls.push(['settle', a]); return { settled: true, state: 'promoted', draftId: a?.draftId } },
+    exportExperience: (a) => { calls.push(['export', a]); return { text: 'EXPORT-TEXT' } },
+    db: { __db: true },
+  }
+  const fam = createExperienceRoutes(deps)
+  const dispatch = (method, target) => {
+    const url = new URL(`http://x${target}`)
+    return fam.dispatch({ method, headers: {} }, res, { path: url.pathname, url })
+  }
+  return { dispatch, calls, sent, written, res }
+}
+const names = (calls) => calls.map((c) => c[0])
+const last = (calls, n) => calls.filter((c) => c[0] === n).at(-1)
+
+test('④ ★★ K14：`exact` 不许退化成前缀 —— 邻接命名空间一个都不许被吃掉', async () => {
+  // 既有用例只请求过**刚刚好正确**的路径，于是"精确匹配"与"前缀匹配"
+  // 在它眼里完全一样。
+  //
+  //   > 一个"精确匹配"的实现，与一个"前缀匹配"的实现，
+  //   > 在用例只喂过**恰好等于**那些前缀的路径时是同一个东西。
+  const s = expSpy()
+  for (const [m, p] of [['GET', '/api/experience/recordsX'], ['GET', '/api/experience/account/x'],
+    ['GET', '/api/experience/export/x'], ['POST', '/api/experience/recordsZ'],
+    ['GET', '/api/experienc/records'], ['GET', '/api/experienceX']]) {
+    assert.equal(await s.dispatch(m, p), false, `${m} ${p} 被本族接住了 —— exact 退化了？`)
+  }
+  assert.deepEqual(s.calls, [], '未匹配的请求却碰了仓储')
+  // 正面控制：三条正路径必须被接住（否则"一律不接"也能让上面通过）
+  for (const [m, p, fn] of [['GET', '/api/experience/records', 'records'],
+    ['GET', '/api/experience/account', 'account'],
+    ['GET', '/api/experience/export', 'export']]) {
+    const ok = expSpy()
+    assert.equal(await ok.dispatch(m, p), true, `${m} ${p} 没被接住`)
+    assert.ok(last(ok.calls, fn), `${m} ${p} 没走到 ${fn}`)
+  }
+})
+
+test('④ ★★ K13：`prefix+suffix` 必须**两段都对**才命中', async () => {
+  // 丢掉 `endsWith` 之后，`POST /api/experience/drafts/<任意>` 都会被当成
+  // 一次草稿处置 —— 而既有用例只打过**以 `/settle` 结尾**的路径。
+  for (const p of ['/api/experience/drafts/d1', '/api/experience/drafts/d1/settleX',
+    '/api/experience/drafts/d1/settl', '/api/experience/draftsX/d1/settle']) {
+    const s = expSpy()
+    assert.equal(await s.dispatch('POST', p), false, `POST ${p} 被当成了一次处置`)
+    assert.deepEqual(s.calls, [], `POST ${p} 未命中却碰了仓储`)
+  }
+  // 正面控制：真正的处置路径必须命中，且 id 切得对
+  const ok = expSpy()
+  assert.equal(await ok.dispatch('POST', '/api/experience/drafts/d1/settle'), true)
+  assert.equal(last(ok.calls, 'settle')?.[1]?.draftId, 'd1', 'id 没有从 URL 里切对')
+})
+
+test('④ ★★ K2：空 id 必须被本路由**自己**拒掉（具名码），不能下传', async () => {
+  // `/api/experience/drafts//settle` 的 id 是空串。原判据在**这一层**就挡住它，
+  // 报 `EXPERIENCE_RECORD_MALFORMED`；去掉之后它会一路走到 store，
+  // 报的是"来源丢了"（DRAFT_NOT_FOUND）—— 而那是**另一回事**：
+  // 前者说"你的路径写错了"，后者说"这条草稿不存在"。
+  //
+  //   > 一个"路径写错"与一个"草稿不存在"，
+  //   > 在只看状态码是不是 400 的用例上是同一个东西。
+  const s = expSpy()
+  assert.equal(await s.dispatch('POST', '/api/experience/drafts//settle'), true)
+  assert.equal(s.sent.at(-1)?.[0], 400, JSON.stringify(s.sent))
+  assert.equal(s.sent.at(-1)[1].code, 'EXPERIENCE_RECORD_MALFORMED', '空 id 落到了下游的"草稿不存在"')
+  assert.deepEqual(s.calls, [], '空 id 却调了 settleDraft')
+})
+
+test('④ ★ K3：id 的 URL 段**必须解码**后再下传（且解码在形状校验之后）', async () => {
+  // 注意顺序：`includes('/')` 判据看的是**解码前**的段。
+  // 所以 `a%2Fb` 是**合法**的（解码前只有一段），解码后交给 store 的是 `a/b`。
+  // 把解码去掉，store 收到的就是字面量 `a%2Fb` —— 一条永远不存在的草稿 id。
+  const s = expSpy()
+  assert.equal(await s.dispatch('POST', '/api/experience/drafts/a%2Fb/settle'), true)
+  assert.equal(last(s.calls, 'settle')?.[1]?.draftId, 'a/b', 'URL 段没有被解码')
+  // 反面对照：**解码前**带 `/` 的必须仍被拒（多段路径不是合法 id）
+  const slash = expSpy()
+  assert.equal(await slash.dispatch('POST', '/api/experience/drafts/a/b/settle'), true)
+  assert.equal(slash.sent.at(-1)?.[1]?.code, 'EXPERIENCE_RECORD_MALFORMED')
+  assert.deepEqual(slash.calls, [])
+})
+
+test('④ ★★ K10：`scope` 必须**规整**（空白 ⇒ default，两侧空白去掉）', async () => {
+  // 只喂过"没给 scope"（`undefined` ⇒ store 的默认参数兜住，看不出差别）
+  // 与"给了正常 scope"。于是"规整"这一层整个没被验过。
+  //
+  //   为什么它是**真行为差异**而不是等价：`scope: '  '` 会把这批记录写进
+  //   字面量 `'  '` 这个空间 —— 之后任何正常的按 scope 查询都找不到它们。
+  //   记录没丢，但**读不回来**，而账看起来完全正常。
+  const CASES = [[undefined, 'default'], ['', 'default'], ['   ', 'default'],
+    ['  x  ', 'x'], ['software', 'software']]
+  for (const [given, want] of CASES) {
+    const body = { kind: 'draft', atMs: 1, ...(given === undefined ? {} : { scope: given }) }
+    const s = expSpy({ body })
+    await s.dispatch('POST', '/api/experience/records')
+    assert.equal(last(s.calls, 'append')?.[1]?.scope, want,
+      `写入 scope ${JSON.stringify(given)} 得到 ${JSON.stringify(last(s.calls, 'append')?.[1]?.scope)}`)
+    // 处置那一侧同一条规则
+    const t = expSpy({ body: { action: 'promote', atMs: 1, ...(given === undefined ? {} : { scope: given }) } })
+    await t.dispatch('POST', '/api/experience/drafts/d1/settle')
+    assert.equal(last(t.calls, 'settle')?.[1]?.scope, want,
+      `处置 scope ${JSON.stringify(given)} 得到 ${JSON.stringify(last(t.calls, 'settle')?.[1]?.scope)}`)
+  }
+})
+
+test('④ ★ K11 / K12：这两处**故意不设判据** —— 它们是**可证等价**，不是缺口', async () => {
+  // 写下来是为了让下一个人知道"这里破验没咬住"是**查过的结论**，不是漏看。
+  //
+  // K11（`sinceSeq` 的 `?? 0` 被去掉）：
+  //   `optionalIntParam` 缺参返回 `null`；store 的签名是
+  //   `sinceSeq = 0` 默认参数 + SQL 里 `Number(sinceSeq) || 0`。
+  //   `null` 不是 `undefined` ⇒ 默认参数不生效；但 `Number(null) || 0 === 0`。
+  //   ⇒ `0` 与 `null` 在 store 里**落到同一个 SQL 参数**。
+  const asSeq = (v) => Number(v) || 0
+  assert.equal(asSeq(0), asSeq(null), '0 与 null 在 store 里必须落到同一个值')
+  assert.equal(asSeq(0), 0)
+  //   反过来说：如果谁把 store 改成 `sinceSeq = null` 或 `Number.isInteger(sinceSeq)` 判据，
+  //   这两者就**不再**等价，届时必须补一条判据。所以这里顺手钉住 **store 端的**前提
+  //   （不是路由端的实参）—— 前提若变，这条会红。
+  const storeSrc = readFileSync('team-hub/experience-store.mjs', 'utf8')
+  assert.ok(/sinceSeq = 0/.test(storeSrc.replace(/\s+/g, ' ')),
+    'store 的 `sinceSeq = 0` 默认参数不见了 —— K11 的等价性前提失效，请补一条路由端判据')
+  assert.ok(/Number\(sinceSeq\) \|\| 0/.test(storeSrc.replace(/\s+/g, ' ')),
+    'store 的 `Number(sinceSeq) || 0` 不见了 —— K11 的等价性前提失效')
+  //
+  // K12（`atMs` 的 `: Date.now()` 被去掉）：
+  //   store 里是 `atMs: atMs ?? nowMs`，而 `nowMs = Date.now()` 是**默认参数**。
+  //   ⇒ 路由端给 `undefined` 与给 `Date.now()` 得到的是同一个时刻来源。
+  const asAt = (routeAt, storeNow) => routeAt ?? storeNow
+  assert.equal(asAt(undefined, 100), asAt(100, 999), 'undefined 与显式 now 必须落到同一个值')
+  assert.ok(/atMs \?\? nowMs/.test(storeSrc.replace(/\s+/g, ' ')),
+    'store 的 `atMs ?? nowMs` 不见了 —— K12 的等价性前提失效，请补一条路由端判据')
+})
+
+test('④ 三条读路由：未授权 401 且**不查仓储**', async () => {
+  for (const p of ['/api/experience/records', '/api/experience/account']) {
+    const s = expSpy({ authorized: () => false })
+    assert.equal(await s.dispatch('GET', p), true)
+    assert.equal(s.sent.at(-1)?.[0], 401, `${p} 没有 401`)
+    assert.deepEqual(s.calls, [], `${p} 在未授权时仍然查了仓储`)
+  }
+  const e = expSpy({ authorized: () => false })
+  assert.equal(await e.dispatch('GET', '/api/experience/export'), true)
+  assert.equal(e.sent.at(-1)?.[0], 401)
+  assert.deepEqual(e.calls, [])
+  assert.deepEqual(e.written, [], '未授权却已经写了响应头')
+})
+
+test('④ 两条写路由**不**做 authorized 前置（鉴权在 `handleRun` 里，与既有语义一致）', async () => {
+  for (const [m, p] of [['POST', '/api/experience/records'], ['POST', '/api/experience/drafts/d1/settle']]) {
+    const s = expSpy({ authorized: () => false })
+    await s.dispatch(m, p)
+    assert.notEqual(s.sent.at(-1)?.[0], 401, `${m} ${p} 在路由头做了 401 —— 与既有语义不符`)
+  }
+})
+
+test('④ ★ export 是**附件**且正文来自 `exportExperience`（自己写响应头，不走 json）', async () => {
+  // 既有用例 ⑪ 验的是正文内容；响应头（"这是个附件"）没被验过。
+  // `attachment` 与 `inline` 的差别是"点一下下载"还是"在浏览器里渲染"。
+  const s = expSpy()
+  assert.equal(await s.dispatch('GET', '/api/experience/export'), true)
+  assert.deepEqual(s.sent, [], 'export 不该走 json（它自己写响应头）')
+  const [code, headers] = s.written[0] ?? []
+  assert.equal(code, 200)
+  assert.equal(headers?.['content-disposition'],
+    'attachment; filename="legion-experience.json"', '导出不再是附件')
+  assert.equal(headers?.['content-type'], 'application/json; charset=utf-8')
+  assert.equal(s.written.at(-1)?.[0], 'end')
+  assert.equal(s.written.at(-1)?.[1], 'EXPORT-TEXT', '导出的正文不是 store 给的那份')
+})
+
+test('④ 五条路由各自接到正确的方法上（动作不许串）', async () => {
+  const table = [
+    ['POST', '/api/experience/records', 'append'],
+    ['GET', '/api/experience/records', 'records'],
+    ['GET', '/api/experience/account', 'account'],
+    ['POST', '/api/experience/drafts/d1/settle', 'settle'],
+    ['GET', '/api/experience/export', 'export'],
+  ]
+  for (const [m, p, fn] of table) {
+    const s = expSpy()
+    assert.equal(await s.dispatch(m, p), true, `${m} ${p} 没被接住`)
+    assert.ok(last(s.calls, fn), `${m} ${p} 没有走到 ${fn}（走了 ${names(s.calls).join(',') || '无'}）`)
+  }
+  // `GET records` 必须同时给出**积压读数**（`counts`），且与列表用**同一个 scope**
+  const s = expSpy()
+  await s.dispatch('GET', '/api/experience/records?scope=sp')
+  assert.equal(last(s.calls, 'records')?.[1]?.scope, 'sp')
+  assert.equal(last(s.calls, 'counts')?.[1]?.scope, 'sp', 'counts 与 records 用了不同的 scope')
+  assert.equal(s.sent.at(-1)?.[1]?.counts?.draft, 1, '响应里没有 counts')
+})

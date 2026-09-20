@@ -214,6 +214,21 @@ SOURCES.compactionStore = join(ROOT, 'team-hub', 'compaction-store.mjs')
 SOURCES.packFacts = join(ROOT, 'team-hub', 'pack-facts.mjs')
 SOURCES.connectorStore = join(ROOT, 'team-hub', 'connector-store.mjs')
 SOURCES.rolePackStore = join(ROOT, 'team-hub', 'role-pack-store.mjs')
+
+// ── PRT-316：已从 `handle()` 提取出去的路由族 ────────────────────────────────
+//
+// ★ 这些文件里的路由**不在** `server.mjs` 的字面量 if 链里，所以主抽取器看不见它们。
+//   不登记的话，"把一条路由搬进族模块"会在 `--check` 里报成"这条路由被删了"——
+//   而那正是本片第一次跑门禁时真的发生的事。
+//
+// ★ 逐个列名，与上面 `SCHEMA_SOURCES` 同一纪律（glob 会漏掉新文件，而漏掉是静默的）。
+//   列名是否齐全由 `assertRouteFamilyCoverage()` 以 `server.mjs` 的装配处为权威核对。
+SOURCES.routesRules = join(ROOT, 'team-hub', 'routes', 'rules.mjs')
+
+/** 已提取出去的路由族模块（值 = 该文件里**声明式**路由的归属名）。 */
+export const ROUTE_FAMILY_SOURCES = Object.freeze([
+  { module: 'routesRules', family: 'rules', factory: 'createRulesRoutes' },
+])
 SOURCES.experienceStore = join(ROOT, 'team-hub', 'experience-store.mjs')
 
 /**
@@ -357,6 +372,58 @@ export function extractRoutes(source, options = {}) {
  *
  * 返回 `[{ route, count }]`，按出现次数降序（重复的排前面）。
  */
+/**
+ * 提取**声明式**路由（PRT-316 提取出去的路由族用的形态）：
+ *
+ *   { method: 'GET', path: '/api/rules', async run(...) {} }
+ *
+ * ★ 与 `extractRoutes` 分开写而不是塞进它的 patterns：那个函数带着 `MIN_ROUTES`
+ *   护栏（"抽取规则是否已与源码脱节"），而族模块天然只有个位数条路由——
+ *   把两种量级塞进同一条下限，护栏会在正确的时候报错。
+ *
+ * ★ 两种书写顺序都认（`method` 在前 / `path` 在前），否则换一下顺序就少扫一半，
+ *   而少扫一半在这里的表现是"路由被删了"。
+ */
+export function extractDeclaredRoutes(source) {
+  const routes = new Set()
+  const pairs = [
+    /method:\s*'([A-Z]+)'\s*,\s*path:\s*'([^']+)'/g,
+    /path:\s*'([^']+)'\s*,\s*method:\s*'([A-Z]+)'/g,
+  ]
+  const isMethodFirst = [true, false]
+  pairs.forEach((re, i) => {
+    let m
+    while ((m = re.exec(source)) !== null) {
+      const [method, path] = isMethodFirst[i] ? [m[1], m[2]] : [m[2], m[1]]
+      if (!path.startsWith('/api/')) continue
+      routes.add(`${method} ${path}`)
+    }
+  })
+  return [...routes].sort()
+}
+
+/**
+ * ★★★ 列名齐全性：`server.mjs` 的 `createRouter([...])` 装配处是**权威**。
+ *
+ * 装配里调用了哪些 `createXxxRoutes(`，就必须在 `ROUTE_FAMILY_SOURCES` 里逐个列到，
+ * 且登记的 `factory` 必须与之同名。少了 ⇒ 那个族的路由对基线**完全不可见**，
+ * `--check` 会说"与基线一致"。
+ */
+export function assertRouteFamilyCoverage(serverSource) {
+  const block = /createRouter\(\[([\s\S]*?)\]\)/.exec(serverSource)
+  must(block !== null, "`server.mjs` 里找不到 `createRouter([...])` 装配处：路由族的列名无从核对")
+  const wired = [...block[1].matchAll(/(\w+)\(/g)].map((m) => m[1]).filter((n) => n.startsWith('create') && n.endsWith('Routes'))
+  const listed = ROUTE_FAMILY_SOURCES.map((x) => x.factory)
+  const unlisted = wired.filter((f) => !listed.includes(f))
+  const stale = listed.filter((f) => !wired.includes(f))
+  must(unlisted.length === 0,
+    `server.mjs 装配了未登记的路由族：${unlisted.join('、')} ⇒ 它们的路由对基线不可见。`
+    + "请加进 `ROUTE_FAMILY_SOURCES`（并补 `SOURCES`）。")
+  must(stale.length === 0,
+    `ROUTE_FAMILY_SOURCES 登记了未装配的族：${stale.join('、')} ⇒ 列名已过期，请删掉。`)
+  return wired
+}
+
 export function extractRouteOccurrences(source) {
   const counts = new Map()
   const patterns = [
@@ -570,6 +637,7 @@ export function buildSnapshot() {
   // `schemaText`，所以"先采再查"会让快照本身少一张表——而少的那张正是
   // 检查要发现的那一张。
   assertSchemaCoverage()
+  assertRouteFamilyCoverage(readFileSync(SOURCES.server, 'utf8'))
   for (const [name, p] of Object.entries(SOURCES)) {
     must(existsSync(p), `源文件不存在：${rel(p)}（${name}）`)
   }
@@ -587,7 +655,10 @@ export function buildSnapshot() {
     sources: Object.fromEntries(
       Object.entries(SOURCES).map(([name, p]) => [rel(p), sha256(readFileSync(p, 'utf8'))]),
     ),
-    httpRoutes: extractRoutes(server),
+    httpRoutes: [
+      ...extractRoutes(server),
+      ...ROUTE_FAMILY_SOURCES.flatMap(({ module }) => extractDeclaredRoutes(readFileSync(SOURCES[module], 'utf8'))),
+    ].sort(),
     dbTables: extractTables(schemaText),
     taskStatuses: extractStringArray(server, 'STATUSES'),
     taskTransitions: extractTransitions(server, 'TRANSITIONS'),

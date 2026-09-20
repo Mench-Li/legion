@@ -133,6 +133,11 @@ describe('TC-S4-02 GET 默认值', () => {
     assert.equal(s.json.rules.content, '')
     const bad = await get('/api/rules?scope=BAD_Scope!')
     assert.equal(bad.status, 400, '非法 scope 400')
+    // ★ 2026-09-20（PRT-316 第一片）：原来只钉了**状态码**，没钉**响应包**。
+    //   搬走这条路由时的破验发现的：把这个 400 的 body 换成 {error: 'err'} 竟然**全绿**——
+    //   *一个只断言"400"的用例，与一个断言"400 且说清了哪个字段"的用例，
+    //   在只看状态码时是同一个东西；只不过前者放行了一个说不出原因的 400。*
+    assert.ok(bad.json && bad.json.error && /scope/.test(bad.json.error), '400 要说明是 scope 的问题：' + bad.text)
   })
 })
 

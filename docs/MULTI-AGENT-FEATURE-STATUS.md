@@ -1987,7 +1987,7 @@ CI 一行**聚合多个文件**：`path-scope` 那一行 = 4 个文件 ⇒ `test
 
 | 判据 id | 两侧分别是什么 |
 | --- | --- |
-| `handover-ledger-tallies` | 散文里的 `145 = 140 ✅ / 4 ⏸ / 1 ⬜` ↔ 台账每行的状态标记（**三个数都核**） |
+| `handover-ledger-tallies` | 散文里的 `145 = 140 ✅ / 1 🟡 / 4 ⏸ / 0 ⬜` ↔ 台账每行的状态标记（**四个数都核**） |
 | `handover-tracked-suites` | 散文里的套件数 ↔ `git ls-files '*.test.mjs'` |
 | `handover-unreachable-total` | 散文里的不可达条数 ↔ 基线 JSON 的数组长度 |
 | `handover-doc-ratchet` | 散文里的棘轮 ↔ `doc-table-integrity.mjs` 的 `REPO_WIDE_BASELINE` |

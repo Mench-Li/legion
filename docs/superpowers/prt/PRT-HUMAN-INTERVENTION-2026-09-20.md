@@ -4,7 +4,7 @@
 > 本文件只回答一件事：**剩下的、本机做不动的，具体是哪几件、为什么、需要谁做什么。**
 >
 > 口径：HEAD `8cd812e`（树含 `eeedd21`）；`.ci/r43` 全量 CI **9/9 PASS，exit 0**。
-> 台账 `docs/superpowers/prt/PRT-PROGRESS.md`：**144 行 = 140 ✅ / 4 ⏸ / 0 ⬜**。
+> 台账 `docs/superpowers/prt/PRT-PROGRESS.md`：**145 行 = 140 ✅ / 1 🟡 / 4 ⏸ / 0 ⬜**。
 
 ---
 

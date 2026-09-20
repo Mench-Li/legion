@@ -27,6 +27,9 @@ import {
   SCHEMA_SOURCE_FOR,
   SCHEMA_SOURCE_PATHS,
   findOpaqueRouteGuards,
+  assertRouteFamilyCoverage,
+  extractDeclaredRoutes,
+  ROUTE_FAMILY_SOURCES,
 } from './baseline-snapshot.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -311,5 +314,73 @@ test('④ 基线含源文件哈希，可把漂移归因到文件', () => {  cons
   assert.ok(Object.keys(recorded.sources).length >= 2)
   for (const [file, hash] of Object.entries(recorded.sources)) {
     assert.match(hash, /^[0-9a-f]{64}$/, `${file} 的哈希形态不对`)
+  }
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// ⑧⑨⑩ PRT-316：路由**被提取出去**之后，基线还得看得见它们
+//
+// 起因是真的：把 GET/POST `/api/rules` 搬进 `team-hub/routes/rules.mjs` 之后，
+// `--check` 报这两条路由**被删了**——抽取器只扫 `server.mjs` 的字面量 if 链，
+// 于是"搬家"在它眼里等于"删除"。
+//
+//   > 一个只认识"路由长什么样"的抽取器，与一个认识"路由住在哪里"的抽取器，
+//   > 在被提取之前是同一个东西——只不过前者会把每一次提取都报成一次删除。
+// ══════════════════════════════════════════════════════════════════════════
+
+test('⑧ 声明式路由（提取出去的族）能被提取，且两种书写顺序都认', () => {
+  const mf = [
+    "export function createXRoutes() {",
+    '  const routes = [',
+    "    { method: 'GET', path: '/api/aaa', async run() {} },",
+    "    { path: '/api/bbb', method: 'POST', async run() {} },",
+    '  ]',
+    '}',
+  ].join('\n')
+  assert.deepEqual(extractDeclaredRoutes(mf), ['GET /api/aaa', 'POST /api/bbb'],
+    '声明式路由没被提全（换一下 method/path 的顺序就少扫一半）')
+
+  // 非 /api/ 不进平台契约（与字面量抽取器同一口径）
+  const nonApi = "{ method: 'GET', path: '/health', async run() {} }"
+  assert.deepEqual(extractDeclaredRoutes(nonApi), [], '非 /api/ 路径混进了平台契约')
+
+  // 识别不了时返回空数组（由下面的覆盖判据负责报红，而不是在这里猜）
+  assert.deepEqual(extractDeclaredRoutes('const x = 1'), [])
+})
+
+test('⑨ ★★★ 装配了未登记的路由族 ⇒ 必须抛错（否则那个族的路由对基线不可见）', () => {
+  const wired = "const router = createRouter([\n  createRulesRoutes({}),\n  createChatRoutes({}),\n])"
+  // 只登记了 rules，却装配了 chat ⇒ 红，且必须点名 chat
+  assert.throws(() => assertRouteFamilyCoverage(wired), /createChatRoutes/,
+    '装配了未登记的族却报绿 ⇒ 那个族的路由对基线完全不可见，而 --check 会说"一致"')
+  // 反过来：登记了却没装配 ⇒ 也要红（列名过期）
+  assert.throws(
+    () => assertRouteFamilyCoverage("createRouter([\n  createRulesRoutes({}),\n])".replace('createRulesRoutes({}),', '')),
+    /找不到|createRulesRoutes/,
+  )
+})
+
+test('⑩ 真仓库：装配处与实际登记**互相齐全**，且族的声明式路由真的进了快照', () => {
+  const server = readFileSync(join(REPO_ROOT, 'team-hub/server.mjs'), 'utf8')
+  const wired = assertRouteFamilyCoverage(server) // 不齐就抛
+  assert.deepEqual(wired, ROUTE_FAMILY_SOURCES.map((x) => x.factory),
+    '装配处与 ROUTE_FAMILY_SOURCES 不一致')
+
+  // 每个族的模块必须存在，且它声明的路由都在快照里
+  const snap = buildSnapshot()
+  for (const { module, family } of ROUTE_FAMILY_SOURCES) {
+    const p = SCHEMA_SOURCE_FOR[module]
+    assert.ok(p && existsSync(p), `路由族 ${family} 的模块不存在：${p}`)
+    const declared = extractDeclaredRoutes(readFileSync(p, 'utf8'))
+    assert.ok(declared.length > 0, `路由族 ${family} 一条声明式路由都没提出来（形态变了？）`)
+    for (const r of declared) {
+      assert.ok(snap.httpRoutes.includes(r), `${family} 的路由 ${r} 不在快照的 httpRoutes 里`)
+    }
+  }
+
+  // ★ 已记录基线也必须含它们——否则 --check 会把搬家报成删除
+  const base = JSON.parse(readFileSync(BASELINE, 'utf8'))
+  for (const r of ['GET /api/rules', 'POST /api/rules']) {
+    assert.ok(base.httpRoutes.includes(r), `基线里没有 ${r}（--check 会把搬家报成删除）`)
   }
 })

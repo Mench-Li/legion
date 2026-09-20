@@ -12,7 +12,7 @@
 
 ## 一、一句话结论
 
-功能实现**已完成到"代码侧能做的都做了"这一步**：台账 **145 行 = 140 ✅ / 4 ⏸ / 1 ⬜**，
+功能实现**已完成到"代码侧能做的都做了"这一步**：台账 **145 行 = 140 ✅ / 1 🟡 / 4 ⏸ / 0 ⬜**，
 全量门禁 **9/9 PASS**。
 
 ★ 第 23 轮补上了 spec 里**最后一块真的没写的东西**（F-15 的「告警 / 降级」——
@@ -33,9 +33,9 @@
 
 | 项 | 读数 | 出处 |
 | --- | --- | --- |
-| 台账 | **145 行 = 140 ✅ / 4 ⏸ / 1 ⬜** | `node scripts/prt/spec-progress.mjs --check` → `140/145，未完成 5` |
+| 台账 | **145 行 = 140 ✅ / 1 🟡 / 4 ⏸ / 0 ⬜** | `node scripts/prt/spec-progress.mjs --check` → `140/145，未完成 5` |
 | 4 条 ⏸ | PRT-009 / PRT-253 / PRT-256 / PRT-910 | 需要一台执行期外的机器 / 一次真的自动执行 / 真实外部用户 / 真实用户项目 |
-| 1 条 ⬜ | PRT-316 | **日期闸门**：最早 **2026-09-24**（评审闸门已过） |
+| 1 条 🟡 | PRT-316 | **日期闸门**：最早 **2026-09-24**（评审闸门已过） |
 | 全量 CI（**交付 HEAD**） | **9/9 PASS，exit 0**（HEAD `eeedd21`，`.ci/r43`，**脏树 14 改 + 471 未跟踪**，指纹 `cacda41048a5a459`） | `test` 1088879ms、`skipped=1`（secret-store，已知） |
 | 全量 CI（第 34 轮收口） | **9/9 PASS，exit 0**（HEAD `ff8d9f7`，`.ci/r34`，脏树 14 改 + 446 未跟踪） | `test` 873594ms |
 | 全量 CI（第 33 轮收口） | **9/9 PASS，exit 0**（HEAD `af3a440`，`.ci/r33`，脏树 14 改 + 444 未跟踪） | `test` 877363ms |
@@ -676,7 +676,7 @@ node scripts/prt/reachability.mjs --diff        # → 与基线比对（46 条�
 
 | 判据 id | 核的是 |
 | --- | --- |
-| `handover-ledger-tallies` | 台账 **145 = 140 ✅ / 4 ⏸ / 1 ⬜**（三个数**都**核） |
+| `handover-ledger-tallies` | 台账 **145 = 140 ✅ / 1 🟡 / 4 ⏸ / 0 ⬜**（**四个**数**都**核） |
 | `handover-tracked-suites` | 套件总数 ↔ `git ls-files '*.test.mjs'` |
 | `handover-unreachable-total` | 不可达条数 ↔ 基线 JSON |
 | `handover-doc-ratchet` | 全仓棘轮 ↔ `REPO_WIDE_BASELINE` 常量 |

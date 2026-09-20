@@ -2,7 +2,7 @@
 
 - 日期：2026-09-18（**追加至第 43 轮**）
 - 仓库：`D:\project\DSH\legion`（DSH 检出 `D:\project\DSH\dsh\deepseek-harness\`）
-- 权威台账：[`PRT-PROGRESS.md`](./PRT-PROGRESS.md) —— **144 行 = 140 ✅ / 0 ⬜ / 4 ⏸**
+- 权威台账：[`PRT-PROGRESS.md`](./PRT-PROGRESS.md) —— **145 行 = 140 ✅ / 1 🟡 / 4 ⏸ / 0 ⬜**
 - 对照表：[`MULTI-AGENT-FEATURE-STATUS.md`](../../MULTI-AGENT-FEATURE-STATUS.md) —— F-01…F-25，**裁决项 1～29**
 - ★ **决策摘要**：[`DECISION-BRIEF.md`](../../DECISION-BRIEF.md) —— 把那 29 条压成「**你要说的那一句话**」，**按 §9 链排序**；★ **§0A 当初就是那条链唯一的硬断（第 20 条）** —— ★★★ **第 44 轮已落地**（2f5a4b3，选甲），那条链**不再有硬断**，见 §3.0z.2
 - 目标文档：[`MULTI-AGENT-FEATURE-OPTIMIZATION.md`](../../MULTI-AGENT-FEATURE-OPTIMIZATION.md) —— §1.2 状态注记校准 / §1.3 正文级偏离

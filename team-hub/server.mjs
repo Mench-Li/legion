@@ -225,6 +225,8 @@ import {
 } from './budget-alert.mjs'
 import { loadConfig } from '../packages/shared/src/config.mjs'
 import { SCHEMA as CONFIG_SCHEMA } from './config-schema.mjs'
+import { createRouter } from './router.mjs'
+import { createRulesRoutes } from './routes/rules.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -4924,6 +4926,13 @@ export function artifactContent(taskId, rawI) {
   return { status: 200, body }
 }
 
+// ── 路由层（PRT-316）：`handle` 里已提取出去的路由族在这里装配。──
+// 依赖由本文件注入（各族自己不 import hub 内部件）。新族加进这个数组即可，
+// 不需要再往下面那条 if 链里抄一遍同样的形状。
+const router = createRouter([
+  createRulesRoutes({ json, handleWrite, validRuleScope, getRule, saveRule }),
+])
+
 async function handle(req, res, stripPrefix) {
   const url = new URL(req.url ?? '/', 'http://x')
   let path = url.pathname
@@ -8207,21 +8216,9 @@ async function handle(req, res, stripPrefix) {
       return
     }
 
-    // ── 规范（rules）：GET/POST /api/rules（全局层维护；写走 handleWrite：by 必填 + audit rules:update + SSE）──
-    if (req.method === 'GET' && path === '/api/rules') {
-      try {
-        const scopeParam = url.searchParams.get('scope') ?? 'global'
-        if (!validRuleScope(scopeParam)) throw new Error('scope 非法：global 或小写字母/数字开头的空间 id')
-        json(res, 200, { ok: true, rules: getRule(scopeParam) })
-      } catch (e) {
-        json(res, 400, { error: e instanceof Error ? e.message : String(e) })
-      }
-      return
-    }
-    if (req.method === 'POST' && path === '/api/rules') {
-      await handleWrite(req, res, (body, by) => saveRule({ scope: body.scope, content: body.content, by }))
-      return
-    }
+    // ── 规范（rules）：GET/POST /api/rules —— 已提取到 `./routes/rules.mjs`（PRT-316 第一片）──
+    // 语义与原来那两条 `if` 逐条相同：等值匹配、GET 先于 POST、命中即 return。
+    if (await router.dispatch(req, res, { path, url })) return
 
     // ── 权限治理（F-02）：策略、检查与审批箱 ──
     if (req.method === 'POST' && path === '/api/permissions/check') {

@@ -26,10 +26,13 @@
 // ============================================================================
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { ledgerRows, ledgerNotDone, sectionFive, uncoveredLedgerRows, NON_DONE_STATUSES,
-  checkBrief, checkBriefCount, decisionItemNumbers, briefStatedCounts } from './intervention-coverage.mjs'
+  checkBrief, checkBriefCount, decisionItemNumbers, briefStatedCounts,
+  boundaryCoverageGaps, ledgerRowTexts, BOUNDARY_CITE, BOUNDARY_LIST_MARKER } from './intervention-coverage.mjs'
 
 const rows = ledgerRows()
 const notDone = ledgerNotDone()
@@ -225,4 +228,88 @@ test('⑨c ★★★ 序数不是计数：「第 20 条裁决项」不许被读�
   const r = checkBrief()
   assert.equal(r.ok, true, '真文档红了：' + JSON.stringify(r.violations))
   assert.deepEqual(r.stated, [29])
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// ⑩ ★ 第三格：§4 第 15 条那份"还对谁成立"的名单 ↔ 台账里引用它的行
+//
+// 起因与本文件开头那两次**同形**，但这次漏人的是**名单自己**：
+// `docs/STATUS.md` §4 第 15 条自带一份名单，2026-09-20 发现它漏了 `PRT-253`，
+// 而那一行的"缺口"栏逐字写着"§4 第 15 条……与 PRT-009 是同一条"。
+// 漏掉的代价是可量化的：有人照着名单读了一遍，得出"PRT-253 不归它管"，
+// 于是去查别的原因——**白查一轮**。
+// ══════════════════════════════════════════════════════════════════════════
+
+/** 造一对最小的台账 / 状态文档，用来把"名单漏人"这一种形状钉住。 */
+function boundaryFixture({ ledgerRows: rows, list }) {
+  const dir = mkdtempSync(join(tmpdir(), 'icov-boundary-'))
+  const ledgerPath = join(dir, 'LEDGER.md')
+  const statusPath = join(dir, 'STATUS.md')
+  writeFileSync(ledgerPath, rows.join('\n') + '\n', 'utf8')
+  writeFileSync(statusPath, `15. 边界\n\n⇒ 所以正确的读法是：**${BOUNDARY_LIST_MARKER} ${list} 那半仍然成立**\n`, 'utf8')
+  return { ledgerPath, statusPath }
+}
+
+/** 一条引用了 §4 第 15 条的台账行（形状与真台账一致）。 */
+const citingRow = (prt, status) =>
+  `| ${prt} 某个任务 | ${status} | 缺口：卡在 \`docs/STATUS.md\` ${BOUNDARY_CITE}（Windows 上不会有自动执行） |`
+
+test('⑩ ★★★ 真仓库读数：台账里每一条"引用本条边界且非 ✅"的行都被名单点到名', () => {
+  const r = boundaryCoverageGaps()
+  assert.equal(r.ok, true, '真仓库红了：' + JSON.stringify(r.violations, null, 2))
+  // ★ 正对照：两侧都必须**非空**，否则这条判据在空集上通过
+  assert.ok(r.cited.length >= 1, '台账里没有一行引用这条边界 ⇒ 判据在空集上通过')
+  assert.ok(r.named.length >= 1, `名单里一个编号都没解析出来（锚点 \`${BOUNDARY_LIST_MARKER}\` 还在吗）`)
+  for (const p of r.cited) assert.ok(r.named.includes(p), `${p} 引用了本条边界却不在名单里`)
+})
+
+test('⑪ ★★★ 破验：名单漏掉一个引用它的非 ✅ 行 ⇒ 必须红（2026-09-20 真发生过的形状）', () => {
+  // 复现订正前的名单：只点 PRT-009 与 PRT-257，而 PRT-253 引用了它却没被点到。
+  const f = boundaryFixture({
+    ledgerRows: [citingRow('PRT-009', '⏸'), citingRow('PRT-253', '⏸')],
+    list: 'PRT-009 与 PRT-257',
+  })
+  const r = boundaryCoverageGaps(f)
+  assert.equal(r.ok, false, '名单漏了 PRT-253 却报绿 ⇒ 下一个人还会白查一轮')
+  assert.deepEqual(r.cited.sort(), ['PRT-009', 'PRT-253'])
+  assert.ok(r.violations.some((v) => v.id === 'boundary-item-unnamed' && v.message.includes('PRT-253')),
+    JSON.stringify(r.violations))
+})
+
+test('⑫ ★★★ 反向控制：✅ 的行引用了本条边界 ⇒ **不**要求被点名（判据只管辖未完成）', () => {
+  // 真仓库里 PRT-214 / PRT-509 / PRT-610 / PRT-611 都引用过这条边界但已是 ✅。
+  // 判据若把它们也拖进来，就会逼着名单去点一堆**已经做完**的事——
+  // 名单会被稀释到没人读，而那正是它失效的方式。
+  const f = boundaryFixture({
+    ledgerRows: [citingRow('PRT-009', '⏸'), citingRow('PRT-509', '✅')],
+    list: 'PRT-009',
+  })
+  const r = boundaryCoverageGaps(f)
+  assert.deepEqual(r.violations, [], '✅ 的行被要求点名了：' + JSON.stringify(r.violations))
+  assert.deepEqual(r.cited, ['PRT-009'], '✅ 的行不该进 cited')
+})
+
+test('⑬ ★★ "什么都没查"不许报绿：锚点找不到 / 台账里一条都不引用', () => {
+  // ① 锚点找不到（名单被改写或搬走）
+  const dir = mkdtempSync(join(tmpdir(), 'icov-nomarker-'))
+  const lp = join(dir, 'L.md'); const sp = join(dir, 'S.md')
+  writeFileSync(lp, citingRow('PRT-009', '⏸') + '\n', 'utf8')
+  writeFileSync(sp, '15. 边界\n\n这句话里没有那个锚点。\n', 'utf8')
+  const noMarker = boundaryCoverageGaps({ ledgerPath: lp, statusPath: sp })
+  assert.equal(noMarker.ok, false, '锚点找不到却报绿 ⇒ 判据可以靠沉默通过')
+  assert.ok(noMarker.violations.some((v) => v.id === 'boundary-list-missing'))
+
+  // ② 左侧空集（没有一行引用它）
+  const f2 = boundaryFixture({ ledgerRows: ['| PRT-999 无关任务 | ⏸ | 缺口：等日期 |'], list: 'PRT-009' })
+  const empty = boundaryCoverageGaps(f2)
+  assert.equal(empty.ok, false, '空集上通过 ⇒ 与没写这条判据长得一样')
+  assert.ok(empty.violations.some((v) => v.id === 'boundary-nobody-cites'))
+})
+
+test('⑬b ★★ 台账行取法：ledgerRowTexts 与 ledgerRows 认出同一批 PRT 编号', () => {
+  // ★ 两个取法各写一遍就会漂移——这正是本模块文件头警告的形状。
+  //   这里把"同一批编号"钉住：形状变了就红，而不是让引用检查悄悄少看几行。
+  const a = ledgerRowTexts().map((r) => r.prt).sort()
+  const b = rows.map((r) => r.prt).sort()
+  assert.deepEqual(a, b, 'ledgerRowTexts 与 ledgerRows 认出的编号集合不同')
 })

@@ -35,6 +35,18 @@
 //   > 一个靠"名字有没有出现在散文里"判定的覆盖度，
 //   > 与一个靠"我读没读懂那段散文"判定的覆盖度，是同一个东西——
 //   > 只不过前者会输出一个数字。
+//
+// ## ⚠️ 本模块**没有 CLI**
+//
+// 它是一份库，判据跑在 `intervention-coverage.test.mjs` 里（`run-ci` 按那个文件注册）。
+// 所以 `node scripts/prt/intervention-coverage.mjs` **什么都不做、并且 exit 0**。
+//
+//   > 一个"没有入口、跑起来静默退出 0"的脚本，
+//   > 与一道"查过了、全过"的门禁，在 CI 日志里是同一个东西——
+//   > 只不过前者从来没查过任何东西。
+//
+// ★ 2026-09-20 记：本仓常跑的那十道门禁里**只有这一个**没有 CLI（其余九个都有）。
+//   这条读数是在它被人列进门禁清单、连着跑了很多轮之后才被发现的。
 // ============================================================================
 
 import { readFileSync } from 'node:fs'
@@ -96,6 +108,100 @@ export function ledgerNotDone(path = LEDGER_PATH) {
  */
 export function uncoveredLedgerRows(notDone, section) {
   return notDone.filter((r) => !section.includes(r.prt))
+}
+
+// ── 第三格：§4 第 15 条（Windows 平台边界）的名单 ↔ 台账里引用它的行 ─────────
+//
+// ★ 2026-09-20 加。起因与本模块上面那两次**同形**，但这次漏人的是**名单自己**：
+//
+//   `docs/STATUS.md` §4 第 15 条（"Windows 上不会有自动执行"）自带一份
+//   "这条边界还对谁成立"的名单。那份名单**改过两次**（本节里就记着第一次），
+//   而 2026-09-20 又发现它漏了 `PRT-253`——那一行的"缺口"栏逐字写着
+//   「`docs/STATUS.md` §4 第 15 条……**与 PRT-009 是同一条**」。
+//
+//   漏掉的代价是**可量化**的：有人（就是我）照着那份名单读了一遍，得出
+//   "`PRT-253` 不在这条边界名下"，于是去查它是不是被别的批次解开了——**白查一轮**。
+//
+//   > 一份"名单里没有它"的边界，与一份"它其实不受这条边界管"的边界，
+//   > 对读的人是同一个东西——区别只在读完之后他去干了什么。
+
+/** 状态文档（`docs/STATUS.md`）。 */
+export const STATUS_PATH = join(REPO, 'docs', 'STATUS.md')
+
+/** 这条边界在正文里的引用写法（台账行里逐字出现的那个串）。 */
+export const BOUNDARY_CITE = '§4 第 15 条'
+
+/** 那句"这条边界还对谁成立"的名单起头。 */
+export const BOUNDARY_LIST_MARKER = '这条 15 只对'
+
+/**
+ * 台账每一行的**原文**。
+ *
+ * ★ 与 `ledgerRows()` 分开写：那个只留 `{prt, status, line, desc}`，
+ *   而"这一行有没有引用某条边界"要查**整行**。取法（`split('|')` + 状态词表）
+ *   与它逐字相同——两处各写一遍取法，正是本模块文件头警告的那种漂移。
+ */
+export function ledgerRowTexts(path = LEDGER_PATH) {
+  const out = []
+  const lines = readFileSync(path, 'utf8').split('\n')
+  for (const [i, line] of lines.entries()) {
+    const t = line.trim()
+    if (!t.startsWith('|')) continue
+    const cells = t.split('|').slice(1, -1).map((c) => c.trim())
+    if (cells.length < 3) continue
+    const m = /^(PRT-\d+)/.exec(cells[0])
+    if (!m) continue
+    if (!/^(✅|🟡|⏸|⬜)$/.test(cells[1])) continue
+    out.push({ prt: m[1], status: cells[1], line: i + 1, text: line })
+  }
+  return out
+}
+
+/**
+ * 对账：**台账里引用了这条边界、且还没做完的行**，必须被 §4 第 15 条那句名单点到名。
+ *
+ * 口径两侧都取"能被机器核的最小单位"：
+ *   · 左侧 = 台账行的**原文里出现** `§4 第 15 条` 且状态非 ✅；
+ *   · 右侧 = 那句名单（`BOUNDARY_LIST_MARKER` 起到第一个句号）里出现的 `PRT-\d+`。
+ *
+ * ★ 两个方向都堵：锚点找不到 ⇒ 失败（"没查到"与"查过了"不许同形）；
+ *   左侧为空集 ⇒ 失败（判据在空集上通过时，它与没写这条判据长得一样）。
+ */
+export function boundaryCoverageGaps({ ledgerPath = LEDGER_PATH, statusPath = STATUS_PATH } = {}) {
+  const violations = []
+  const rows = ledgerRowTexts(ledgerPath).filter(
+    (r) => NON_DONE_STATUSES.includes(r.status) && r.text.includes(BOUNDARY_CITE),
+  )
+  const status = readFileSync(statusPath, 'utf8')
+  const at = status.indexOf(BOUNDARY_LIST_MARKER)
+  if (at < 0) {
+    violations.push({
+      id: 'boundary-list-missing',
+      message: `找不到那句名单（锚点 \`${BOUNDARY_LIST_MARKER}\`）⇒ 这条判据**什么都没查**。`
+        + '名单被改写/移动时，"查不到"必须红，而不是安静地放行。',
+    })
+    return { ok: false, cited: rows.map((r) => r.prt), named: [], violations }
+  }
+  const dot = status.indexOf('。', at)
+  const sentence = status.slice(at, dot < 0 ? Math.min(at + 400, status.length) : dot + 1)
+  const named = new Set([...sentence.matchAll(/PRT-\d+/g)].map((m) => m[0]))
+  if (rows.length === 0) {
+    violations.push({
+      id: 'boundary-nobody-cites',
+      message: '台账里**一条**非 ✅ 的行都没引用这条边界 ⇒ 判据在空集上通过。'
+        + '请确认这条边界是否已被解除——若已解除，本节名单与这条判据都该一起删掉。',
+    })
+  }
+  for (const r of rows) {
+    if (named.has(r.prt)) continue
+    violations.push({
+      id: 'boundary-item-unnamed',
+      message: `${r.prt}（台账第 ${r.line} 行，状态 ${r.status}）在"缺口"栏里引用了 `
+        + `\`${BOUNDARY_CITE}\`，而 §4 第 15 条那句名单（"${BOUNDARY_LIST_MARKER}…"）**没有**点到它 ⇒ `
+        + '下一个人会以为这一条不受这条边界管，于是去查它为什么还卡着——白查一轮。',
+    })
+  }
+  return { ok: violations.length === 0, cited: rows.map((r) => r.prt), named: [...named], violations }
 }
 
 // ── 第二格：§5 的裁决项条数 ↔ 决策简报里写的那个数 ──────────────────────────

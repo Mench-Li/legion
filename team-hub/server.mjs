@@ -239,6 +239,7 @@ import { createConnectorsRoutes } from './routes/connectors.mjs'
 import { createUsageRoutes } from './routes/usage.mjs'
 import { createConfigRoutes } from './routes/config.mjs'
 import { createCreateRoutes } from './routes/create.mjs'
+import { createCommentRoutes } from './routes/comment.mjs'
 import { createPriceTablesRoutes } from './routes/price-tables.mjs'
 import { createConfigBundleRoutes } from './routes/config-bundle.mjs'
 import { createContextSnapshotsRoutes } from './routes/context-snapshots.mjs'
@@ -5055,6 +5056,10 @@ const router = createRouter([
     json,
     createTask, audit, handleWrite,
   }),
+  createCommentRoutes({
+    json,
+    appendTaskNote, audit, handleWrite,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -6090,22 +6095,9 @@ async function handle(req, res, stripPrefix) {
       }
       return
     }
-    if (req.method === 'POST' && path === '/api/comment') {
-      await handleWrite(req, res, (body, by, scope) => {
-        const id = body.id
-        const text = body.text
-        if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
-        if (typeof text !== 'string' || text.trim().length === 0) throw new Error('缺少参数 text')
-        // PRT-404：`kind: 'feedback'` 写的是**用户反馈**列，与评论、证据分开存。
-        // 三条路径共用一个写入口是有意的：它们都是"往任务的某个批注列追加一条"，
-        // 分成三个路由只会把同一段校验抄三遍。
-        const kind = body.kind === 'feedback' ? 'feedback' : body.isEvidence === true ? 'evidence' : 'comments'
-        const task = appendTaskNote(id, by, text.trim(), kind)
-        audit(by, scope, kind === 'evidence' ? 'evidence' : kind === 'feedback' ? 'feedback' : 'comment', id, {}, task.goalId)
-        return task
-      })
-      return
-    }
+    // ── 追加批注（评论 / 证据 / 用户反馈三条路径共用一个写入口） —— 已提取到 `./routes/comment.mjs`（PRT-316 第 20 族 / 切片 21）──
+    // 整段搬走：`server.mjs` 里现在**不再有** `/api/comment` 路由，该命名空间只住一个地方。
+    if (await router.dispatch(req, res, { path, url })) return
     if (req.method === 'GET' && path === '/api/task-feedback') {
       // PRT-404：用户反馈的**独立读端点**。
       //

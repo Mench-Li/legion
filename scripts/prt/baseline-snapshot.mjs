@@ -258,6 +258,7 @@ SOURCES.routesPriceTables = join(ROOT, 'team-hub', 'routes', 'price-tables.mjs')
 //   在宿主里是 `let` 且三处 `+= 1`，按值注入会永久陈旧。
 SOURCES.routesConfig = join(ROOT, 'team-hub', 'routes', 'config.mjs')
 SOURCES.routesCreate = join(ROOT, 'team-hub', 'routes', 'create.mjs')
+SOURCES.routesComment = join(ROOT, 'team-hub', 'routes', 'comment.mjs')
 
 /** 已提取出去的路由族模块（值 = 该文件里**声明式**路由的归属名）。 */
 export const ROUTE_FAMILY_SOURCES = Object.freeze([
@@ -280,6 +281,7 @@ export const ROUTE_FAMILY_SOURCES = Object.freeze([
   { module: 'routesPriceTables', family: 'price-tables', factory: 'createPriceTablesRoutes' },
   { module: 'routesConfig', family: 'config', factory: 'createConfigRoutes' },
   { module: 'routesCreate', family: 'create', factory: 'createCreateRoutes' },
+  { module: 'routesComment', family: 'comment', factory: 'createCommentRoutes' },
 ])
 SOURCES.experienceStore = join(ROOT, 'team-hub', 'experience-store.mjs')
 

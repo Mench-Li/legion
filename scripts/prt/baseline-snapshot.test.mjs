@@ -77,8 +77,33 @@ test('① 同一路由重复声明只记一次', () => {
   assert.deepEqual(extractRoutes(src, { min: 1 }), ['GET /api/same'])
 })
 
-test('① 路由数量崩到阈值以下必须抛错（抽取规则脱节的早期信号）', () => {
-  assert.throws(() => extractRoutes("if (req.method === 'GET' && path === '/api/only') {}"), /抽取规则可能已与源码脱节/)
+test('① 数量下限这道**机制**仍然可用（显式给 min 时照样抛）', () => {
+  assert.throws(() => extractRoutes("if (req.method === 'GET' && path === '/api/only') {}", { min: 5 }),
+    /抽取规则可能已与源码脱节/)
+})
+
+// ★★★★★ 2026-09-20（切片 49）：下面这条**取代**了原来那条
+//   「路由数量崩到阈值以下必须抛错」——它断言的是**默认下限**，而那个默认下限
+//   被 PRT-316 自己追上了**两次**（切片 45 剩 9 条撞下限 10；切片 49 剩 4 条撞下限 5），
+//   于是默认值改成 **0**（不再设绝对下限），那道断言必然不再成立。
+//
+//   ★★★ 但**不能**因此就把这条判据删掉充数：真正要守的是"搬家没搬丢"。
+//     接替它的判据在下面这条 —— 抽取器脱节时，`server.mjs` 那部分会**塌**，
+//     而这个并集（`snapshot()` 里 `httpRoutes` 的拼法）就会**少掉**那些路由。
+//     这道判据**不依赖任何魔数，剩下 0 条时也成立**。
+test('① ★★★ 抽取器脱节时：默认**不抛**，但并集能照出"少掉的路由"', () => {
+  // 默认不再有绝对下限 —— 这是**有意的**（任何正数都会被迁移追上）
+  assert.deepEqual(extractRoutes("if (req.method === 'GET' && path === '/api/only') {}"), ['GET /api/only'])
+  assert.deepEqual(extractRoutes('// 抽取规则完全失配'), [], '★ 一条都认不出时返回空数组，而不是抛')
+
+  // ★★★ 而"搬家没搬丢"由**并集**守：把 server 侧塌成空，并集就会少掉它那一份。
+  const server = "if (req.method === 'GET' && path === '/api/from-server') {}"
+  const family = "export function createX() { return { routes: [{ method: 'GET', path: '/api/from-family', run() {} }] } }"
+  const union = (s, f) => [...extractRoutes(s), ...extractDeclaredRoutes(f)].sort()
+  assert.deepEqual(union(server, family), ['GET /api/from-family', 'GET /api/from-server'])
+  assert.deepEqual(union('// 脱节', family), ['GET /api/from-family'],
+    '★★★ server 侧塌掉 ⇒ 并集里**少了** `/api/from-server` ⇒ diffSnapshots 会报 `- 路由: GET /api/from-server`')
+  assert.deepEqual(union('// 脱节', '// 也脱节'), [], '★ 两侧都塌 ⇒ 并集空 ⇒ 基线上 188 条全被报成删除，一眼可见')
 })
 
 // ---------------------------------------------------------------- ② 失败要响

@@ -244,6 +244,7 @@ import { createMembersRoutes } from './routes/members.mjs'
 import { createExecRoutes } from './routes/exec.mjs'
 import { createModelsRoutes } from './routes/models.mjs'
 import { createWebRoutes } from './routes/web.mjs'
+import { createRunBudgetMaySwitchModelRoutes } from './routes/run-budget-may-switch-model.mjs'
 import { createGoalSlicesRoutes } from './routes/goal-slices.mjs'
 import { createTeamPlanReadRoutes } from './routes/team-plan-read.mjs'
 import { createAgentIntakeRoutes } from './routes/agent-intake.mjs'
@@ -5219,6 +5220,11 @@ const router = createRouter([
     json,
     handleWrite, expandGoalSlices,
   }),
+  createRunBudgetMaySwitchModelRoutes({
+    json,
+    handleRun, budgetPriceTables, budgetLedger,
+    BUDGET_ERRORS,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -5297,37 +5303,16 @@ async function handle(req, res, stripPrefix) {
     if (await router.dispatch(req, res, { path, url })) return
     // ── 单次运行预算账本与价目表（PRT-503 / PRT-510 / PRT-511，spec §6.6） —— 已提取到 `./routes/run-budget.mjs`（PRT-316 第 29 族 / 切片 31）──
     // 本族这 6 条已全部搬进模块，`server.mjs` 里不再有它们。
-    // ★ **同名前缀**的 `POST /api/runtime/run-budget/may-switch-model` **不属本族**、仍留在下面，别顺手搬走。
     if (await router.dispatch(req, res, { path, url })) return
     // ── 价目表（PRT-503 / PRT-510，spec §6.6） —— 已提取到 `./routes/price-tables.mjs`（PRT-316 第 17 族 / 切片 18）──
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/price-tables` 路由，该命名空间只住一个地方。
     if (await router.dispatch(req, res, { path, url })) return
-    if (req.method === 'POST' && path === '/api/runtime/run-budget/may-switch-model') {
-      await handleRun(req, res, (body) => {
-        const priceTable = budgetPriceTables.get(body.priceTableVersion)
-        if (priceTable === null) {
-          // 没有价目表就**无法比较**贵不贵，因此无法批准——这是 409 而不是 400：
-          // 请求本身没错，是缺一张表。而且绝不能因为"查不清"就放行。
-          json(res, 409, {
-            ok: false, code: BUDGET_ERRORS.PRICE_TABLE_GONE,
-            error: `没有价目表版本 ${JSON.stringify(body.priceTableVersion)}：` +
-              '不比较费用就无法判断是否更贵，而"不得在未获用户批准时自动切换到更昂贵模型"' +
-              '不能靠"查不清"来满足',
-            serverTimeMs: Date.now(),
-          })
-          return
-        }
-        const d = budgetLedger.maySwitchModel({
-          from: body.from, to: body.to, priceTable,
-          tokensIn: body.tokensIn, tokensOut: body.tokensOut, approved: body.approved === true,
-        })
-        return { allowed: d.allowed, code: d.code, fromAmount: d.fromAmount, toAmount: d.toAmount, currency: d.currency }
-      })
-      return
-    }
+    // ── 换模型前的费用闸（缺价目表 409、其余交域层判 allowed） —— 已提取到 `./routes/run-budget-may-switch-model.mjs`（PRT-316 第 47 族 / 切片 49）──
+    // 本族这 1 条已全部搬进模块，`server.mjs` 里不再有它们。
+    // 归属 /api/runtime 的那 1 条都在这里了。
+    if (await router.dispatch(req, res, { path, url })) return
     // ── 机器验收与交接（PRT-307）：验收一条 / 列验收 / 交接一条 / 列交接 + 运行产物读取（结果 / 事件计数） —— 已提取到 `./routes/runtime-verification.mjs`（PRT-316 第 36 族 / 切片 38）──
     // 本族这 6 条已全部搬进模块，`server.mjs` 里不再有它们。
-    // ⚠️ **前缀下还有不属于本族的**（别顺手搬走）：POST /api/runtime/run-budget/may-switch-model
     if (await router.dispatch(req, res, { path, url })) return
     // ── 自动化计划（automation）：计划清单/建改 + 运行历史 + 汇总 + 日历投影 + 显式 tick —— 已提取到 `./routes/automation.mjs`（PRT-316 第 7 族 / 切片 7）──
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/automation` 路由，该命名空间只住一个地方。
@@ -5376,7 +5361,6 @@ async function handle(req, res, stripPrefix) {
     // 读接口
     // ── 读接口 —— 已提取到 `./routes/read-models.mjs`（PRT-316 第 31 族 / 切片 33）──
     // 本族这 8 条已全部搬进模块，`server.mjs` 里不再有它们。
-    // ★ **同名不同法**的这几条不属本族、仍留在下面，别顺手搬走：POST /api/spaces , POST /api/pipeline , POST /api/goal , POST /api/agents
     if (await router.dispatch(req, res, { path, url })) return
     // ── 成员名册（GET：按最近出现倒序列出，带 60 秒在线判定） —— 已提取到 `./routes/members.mjs`（PRT-316 第 22 族 / 切片 23）──
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/members` 路由，该命名空间只住一个地方。
@@ -5419,7 +5403,6 @@ async function handle(req, res, stripPrefix) {
 
     // ── 技能仓库与文档库的写入面（注册 / 复审 / 授权 / 撤销；建文 / 删文） —— 已提取到 `./routes/skills-documents.mjs`（PRT-316 第 30 族 / 切片 32）──
     // 本族这 6 条已全部搬进模块，`server.mjs` 里不再有它们。
-    // ★ **同名不同法**的这几条不属本族、仍留在下面，别顺手搬走：GET /api/documents
     if (await router.dispatch(req, res, { path, url })) return
     // ── 每个空间绑定的团队技能仓库（github url + 分支，供一键拉取同步） —— 已提取到 `./routes/skill-source.mjs`（PRT-316 第 28 族 / 切片 29）──
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/skill-source` 路由，该命名空间只住一个地方。

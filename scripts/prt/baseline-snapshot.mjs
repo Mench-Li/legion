@@ -285,6 +285,7 @@ SOURCES.routesSpaceConfig = join(ROOT, 'team-hub', 'routes', 'space-config.mjs')
 SOURCES.routesAgentIntake = join(ROOT, 'team-hub', 'routes', 'agent-intake.mjs')
 SOURCES.routesTeamPlanRead = join(ROOT, 'team-hub', 'routes', 'team-plan-read.mjs')
 SOURCES.routesGoalSlices = join(ROOT, 'team-hub', 'routes', 'goal-slices.mjs')
+SOURCES.routesRunBudgetMaySwitchModel = join(ROOT, 'team-hub', 'routes', 'run-budget-may-switch-model.mjs')
 
 /** 已提取出去的路由族模块（值 = 该文件里**声明式**路由的归属名）。 */
 export const ROUTE_FAMILY_SOURCES = Object.freeze([
@@ -334,6 +335,7 @@ export const ROUTE_FAMILY_SOURCES = Object.freeze([
   { module: 'routesAgentIntake', family: 'agent-intake', factory: 'createAgentIntakeRoutes' },
   { module: 'routesTeamPlanRead', family: 'team-plan-read', factory: 'createTeamPlanReadRoutes' },
   { module: 'routesGoalSlices', family: 'goal-slices', factory: 'createGoalSlicesRoutes' },
+  { module: 'routesRunBudgetMaySwitchModel', family: 'run-budget-may-switch-model', factory: 'createRunBudgetMaySwitchModelRoutes' },
 ])
 SOURCES.experienceStore = join(ROOT, 'team-hub', 'experience-store.mjs')
 
@@ -380,25 +382,40 @@ function must(cond, message) {
 /** 提取 HTTP 路由。四种书写顺序都要认，否则会漏掉一半端点。 */
 /**
  * 抽取规则与源码脱节的护栏阈值。
- * 真实源码远高于阈值；单测用小型夹具时通过 `min` 覆盖，以免为了测试而拆掉护栏。
+ * 单测用小型夹具时通过 `min` 覆盖，以免为了测试而拆掉护栏。
  *
- * ★★★ 2026-09-20（PRT-316 切片 45）：**这个数被它自己守护的那件事追上了。**
+ * ★★★★★ 2026-09-20（PRT-316 切片 49）：**同一个魔数被追上了第二次 —— 这次把形状改对。**
  *
  *   `MIN_ROUTES` 原本是 10，写在 `server.mjs` 里还有 **191** 条路由的时候。
  *   PRT-316 逐片把路由搬进 `team-hub/routes/*` 之后，`server.mjs` 里**应当**剩下的
- *   条数一路降到 **9** —— 于是这道"抽取器是不是坏了"的护栏，在**做得对**的那一次
- *   报了红：`HTTP 路由只提取到 9 条（下限 10）`。
+ *   条数一路往下走，**每一步都在朝阈值走一步**：
  *
- *   > 一个「阈值 10 离真实值 191 很远，永远不会误报」的印象，
- *   > 与一个「它守护的那件事每成功一步，真实值就朝阈值走一步」的事实，
- *   > 在这个迁移快做完的时候是同一个东西。
+ *     切片 45：剩下 **9** 条 ⇒ 报红（下限 10）⇒ **当时的处置是"降到 5"**。
+ *     切片 49：剩下 **4** 条 ⇒ **又报红**（下限 5）。
  *
- *   ⇒ 降到 5：仍然能抓住"抽取器彻底脱节"（提取到 0 或个位数），
- *     但不再把**迁移接近完成**误判成**抽取器损坏**。
- *     ★ 真正该守的"搬家没搬丢"，由 `assertRouteFamilyCoverage` 用
- *     `ROUTE_FAMILY_SOURCES` 逐族核对 —— 那道判据不依赖这个魔数。
+ *   ★★★ 切片 45 的处置**重复了它自己刚诊断出的那个错误**：
+ *     它说"降到 5 仍然能抓住抽取器彻底脱节（提取到 0 或个位数）"——
+ *     可 `server.mjs` 里剩下的条数**正要走到 0**，所以 5 只是把同一个问题
+ *     往后推了四片。**任何正数下限都会被追上。**
+ *
+ *   > 一个「10 太高了，降到 5 就安全了」的印象，
+ *   > 与一个「它守护的那件事每成功一步，真实值就朝阈值走一步，所以**任何**正数
+ *   > 都会被走到」的事实，在我第二次撞上同一道红之前是同一个东西。
+ *
+ *   ⇒ **不再用绝对条数当护栏。** 真正该守的是"搬家的账要对得上"：
+ *     `extractRoutes(server.mjs)` **加上** 各族的 `extractDeclaredRoutes`
+ *     必须等于基线里的 `httpRoutes` —— 这一条写在 `diffSnapshots` 两侧的并集里
+ *     （见 `snapshot()` 里 `httpRoutes` 的拼法）。
+ *
+ *     ★ 那道判据**更强**：抽取器若脱节，`server.mjs` 那部分塌成 0，
+ *       并集就会**少掉那些路由**，`listDiff` 会**逐条把名字列出来**
+ *       （`- 路由: GET /api/activity` …），比"只提取到 4 条"有用得多。
+ *     ★ 而且它不依赖任何魔数：**剩下 0 条时它照样成立**。
+ *
+ *   `MIN_ROUTES` 因此归 0（等于不再设绝对下限），保留这个名字只为
+ *   `extractRoutes(source, { min })` 的单测接口不破。
  */
-const MIN_ROUTES = 5
+const MIN_ROUTES = 0
 const MIN_TABLES = 10
 
 /**
@@ -783,6 +800,9 @@ export function buildSnapshot() {
     sources: Object.fromEntries(
       Object.entries(SOURCES).map(([name, p]) => [rel(p), sha256(readFileSync(p, 'utf8'))]),
     ),
+    // ★★★ 这个**并集**就是"搬家没搬丢"的真正护栏（见 `MIN_ROUTES` 上方的说明）：
+    //   `extractRoutes` 若与源码脱节，这里会**少掉**那部分路由，`diffSnapshots`
+    //   便会逐条报 `- 路由: …`。它不依赖任何绝对条数，**剩下 0 条时也成立**。
     httpRoutes: [
       ...extractRoutes(server),
       ...ROUTE_FAMILY_SOURCES.flatMap(({ module }) => extractDeclaredRoutes(readFileSync(SOURCES[module], 'utf8'))),

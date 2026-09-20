@@ -34,7 +34,16 @@
 //
 // ## `result` 可能永不结算
 //
-// plugins/src/index.ts:2241 现场注释原文：「subagent 可能挂死且 run.result 永不结算
+// ★★★★★ 第 104 轮订正：这一行原来写 `plugins/src/index.ts:2241`，而那句原文**在 `:1827`**
+//   （第 104 轮实测：`git show HEAD:plugins/src/index.ts` 的第 2241 行是 `const focus = lastFocus`，
+//   与本节毫无关系；而 `abort 不保证杀死子代理` 出现在 `:1827` 与 `:2019`）。
+//   ⚠ 这条引用**漂了 414 行**，而且**没有任何判据看着它** ——
+//   本仓的 `ledger-line-citations-resolve` 只读**台账**（`PRT-PROGRESS.md`），源码注释里的 `文件:行` 不在它视野里。
+//   > ★ 一个"指针写错 414 行"的注释，与一个"指针指对了"的注释，在**读的人**眼里是同一个东西：
+//   > 他会照那个行号去看，看到 `const focus = lastFocus`，然后**不再相信这段注释**。
+//   ⇒ 第 104 轮同时给它立了判据（`boundary-facts` 的 ㉓「源码里的『原文』引用都还指向那句话」），
+//     免得下一班人只能靠"碰巧读到"来发现下一次漂移。
+// plugins/src/index.ts:1827 现场注释原文：「subagent 可能挂死且 run.result 永不结算
 // （abort 不保证杀死子代理）」。这不是理论风险，是已发生的生产故障。
 // 因此端口约定：`result` 是**可能不结算**的 promise，适配器必须自带看门狗
 // （见 index.mjs 的 WATCHDOG_GRACE_MS 与 execute 实现）。

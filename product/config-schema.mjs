@@ -52,6 +52,13 @@ export const CHILD_ENV_NAMES = Object.freeze([
   //   白板）即使宿主环境里有同名值也拿不到：`buildChildEnv()` 只放行目标进程
   //   声明过的键。这就是"凭证只注入需要它的进程"的判据本身。
   'LEGION_RUNTIME_URL', 'LEGION_RUNTIME_TOKEN',
+  // ★★★ 2026-09-20：四道范围检查的**授权表**。
+  //   它们此前只登记在 `runtime/config-schema.mjs` 的 `fields` 与四个
+  //   `*PortFromEnv()` 装配点里，而 `product/process-manifest.mjs` 的 runtime
+  //   `envNames` 没有它们 ⇒ `buildChildEnv()` 在 `baseEnv` 那一侧**静默丢掉**。
+  //   本批两边一起补——本表与清单 `envNames` 的并集必须一致（`scan --check` 判）。
+  'LEGION_PATH_SCOPE', 'LEGION_CONNECTOR_DECLARATIONS',
+  'LEGION_EXECUTION_SCOPE', 'LEGION_EXTERNAL_API_SCOPE',
 ])
 
 /** Launcher 从环境读取、但**不属于**产品配置面的键（操作系统必需键，见 allowlist.mjs）。 */

@@ -181,6 +181,23 @@ export const PROCESS_SPECS = Object.freeze([
       //   发布到 DataDir 下（`runtime/dsh-composition/runtime-contract-publication.mjs`），
       //   消费侧读回——所以没有一个"端口环境变量"可声明。
       'LEGION_RUNTIME_TOKEN',
+      // ★★★ 2026-09-20（业主裁决「那个文件我可以动」）：四道范围检查的授权表。
+      //
+      //   这四把键此前**只**登记在 `runtime/config-schema.mjs` 的 `fields` 里
+      //   （用户配得进去），四个装配点 `*PortFromEnv()` 在
+      //   `runtime/dsh-composition/plugins/root-row.mjs` 里也都接好了 ——
+      //   而本数组没有它们 ⇒ `buildChildEnv()` 在 `baseEnv` 那一侧**静默丢掉**
+      //   ⇒ 真实部署里那四道范围检查一次都不跑，而两处各自的判据都是绿的。
+      //
+      //   > 一个"能配、也接好了"的键，与一个"真的能到子进程"的键，
+      //   > 在只读配置表的时候是同一个东西。
+      //
+      //   ⚠️ **`TEAM_HUB_TOKEN` 不在这里，这是刻意的**：执行面拿不到控制面凭证
+      //   （§5 第 19 条已裁决"不注入"），且有一条边界不变量逐字守着
+      //   （`allowlist.test.mjs` 要求 `runtime` 只持有 `LEGION_RUNTIME_TOKEN`）。
+      //   把"5 把键一起通"照字面执行会**打开一扇被明令关上的门**。
+      'LEGION_PATH_SCOPE', 'LEGION_CONNECTOR_DECLARATIONS',
+      'LEGION_EXECUTION_SCOPE', 'LEGION_EXTERNAL_API_SCOPE',
     ]),
     milestone: 'PRT-257',
   }),

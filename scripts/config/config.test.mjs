@@ -761,25 +761,17 @@ test('★ PRT-254：runtime/ 与 security/ 真的被扫到了（不是"扫了 0 
  *   下面那条判据会逼着人把它删掉（见 `stale` 那段）。
  */
 const NOT_FORWARDED_YET = Object.freeze({
-  LEGION_PATH_SCOPE:
-    '第 19 条 §9.2 第 4 步（路径范围表投递）。读取点 `scope-port.mjs` 已建、'
-    + '装配点 `scopePortFromEnv()`（`root-row.mjs`）已接。最后一根线在 '
-    + '`product/process-manifest.mjs` 的 runtime '
-    + '`envNames` —— 而那个文件是**另一会话的在制品**。归第 19 条排期。',
-  LEGION_CONNECTOR_DECLARATIONS:
-    '第 19 条 §9.2 第 5 步（F-21 连接器声明投递）。读取点 `connector-port.mjs` 已建、'
-    + '装配点 `connectorPortFromEnv()`（`root-row.mjs`）已接、'
-    + '生产路径用例已在 `root-row.test.mjs` 验过。'
-    + '最后一根线**与上一条完全是同一处**（同一个文件、同一个数组）。',
-  LEGION_EXECUTION_SCOPE:
-    '★ 第 19 轮（PRT-605 命令/网络/MCP 范围）。读取点 `execution-scope-port.mjs` 已建、'
-    + '装配点 `executionScopePortFromEnv()`（`root-row.mjs`）已接、'
-    + '生产路径用例已在 `production-scope-wiring.test.mjs` 与 '
-    + '`execution-scope-port.test.mjs` 验过。'
-    + '最后一根线**与前两条完全是同一处**（同一个文件、同一个数组）。'
-    + '★ 注意它**不是**"又多了一个缺口"：它是同一个缺口（`product/process-manifest.mjs` 的 '
-    + 'runtime `envNames` 缺三个键）的**第三个受害者**——三把键产自三条不同的排期，'
-    + '却在同一个数组里卡住。',
+  // ★★★ 2026-09-20：四把键**已经放行**（业主裁决「那个文件我可以动」）。
+  //   它们已加进 `product/process-manifest.mjs` 的 runtime `envNames`，
+  //   于是四道范围检查 + 连接器判定在真实部署里开始生效。
+  //   下面那一条判据 ② 会逼着人删条目——本批就是它逼出来的。
+  //
+  //   ⚠️ **只剩 `TEAM_HUB_TOKEN`，而且它不该按"加进数组"来解决**：
+  //   §5 第 19 条已裁决**不注入**控制面凭证到执行面，且有一条边界不变量
+  //   逐字守着（`allowlist.test.mjs`：`runtime` 只持有 `LEGION_RUNTIME_TOKEN`）。
+  //   ⇒ 它要走的另一条路是**从 schema 的 `fields` 里拿掉**（"这个进程能配它"
+  //   与"它能拿到它"必须有一处让步），那是一次独立的、会改配置面的改动，
+  //   本批**没有**替它决定。
   TEAM_HUB_TOKEN:
     '★ 早于本轮、**没有任何归属**的一处同形缺口。`root.mjs` 的 `readString(source, keys)` '
     + '确实会读它（`ENFORCEMENT_CONFIG_FIELDS.hubToken`），只是它是**可选**的'
@@ -787,16 +779,6 @@ const NOT_FORWARDED_YET = Object.freeze({
     + '但"配了也传不到进程"这件事与另两条一模一样。'
     + '⇒ 需要裁决：要么把它加进 runtime 的 `envNames`，要么从 schema 的 fields 里拿掉'
     + '（"这个进程能配它"与"它能拿到它"必须有一处让步）。',
-  LEGION_EXTERNAL_API_SCOPE:
-    '★★ 第 20 轮（PRT-606 外部 API 读/写范围）。读取点 `external-api-scope-port.mjs` 已建、'
-    + '装配点 `externalApiScopePortFromEnv()`（`root-row.mjs`）已接、'
-    + '生产路径用例已在 `production-scope-wiring.test.mjs` '
-    + '①d/③d 与 `external-api-scope-port.test.mjs` 验过（含真实 `preExecute` 的拒与放）。'
-    + '最后一根线**与前三把键完全是同一处**（同一个文件、同一个数组）。'
-    + '★ 它是同一个缺口的**第四个受害者**，不是第四处要修的地方——'
-    + '三把键产自三条不同的排期、却又多出第四把，而它们在同一个数组里一起卡住；'
-    + '补那一个数组时**四把键一起通**。'
-    + '⚠️ 这个数从 3 涨到 4 说明缺口的**面积**在扩大：每接一道范围检查就多一把键进来。',
 })
 
 /**
@@ -823,22 +805,6 @@ const NOT_FORWARDED_YET = Object.freeze({
  * 符号（函数名）不漂移：它搬走或改名时，下面第 ⑤ 条会红。
  */
 const ASSEMBLY_ANCHORS = Object.freeze({
-  LEGION_PATH_SCOPE: {
-    file: 'runtime/dsh-composition/plugins/root-row.mjs',
-    symbol: 'scopePortFromEnv(',
-  },
-  LEGION_CONNECTOR_DECLARATIONS: {
-    file: 'runtime/dsh-composition/plugins/root-row.mjs',
-    symbol: 'connectorPortFromEnv(',
-  },
-  LEGION_EXECUTION_SCOPE: {
-    file: 'runtime/dsh-composition/plugins/root-row.mjs',
-    symbol: 'executionScopePortFromEnv(',
-  },
-  LEGION_EXTERNAL_API_SCOPE: {
-    file: 'runtime/dsh-composition/plugins/root-row.mjs',
-    symbol: 'externalApiScopePortFromEnv(',
-  },
   // 这一把的"读取点"不在 root-row：它由 `root.mjs` 的字段表解析，
   // 所以锚点指那里 —— 理由里写的就是这个符号。
   TEAM_HUB_TOKEN: {
@@ -936,10 +902,10 @@ test('★★★ runtime 的 schema `fields` 与清单的 runtime `envNames` 必�
   //       "四把键一起通"这句话仍然成立，但它成立的前提是**有人去修那个数组**——
   //       在那之前，接得越多、卡住的越多，而每一道自己的用例都是绿的。
   const missing = schemaEnvs.filter((e) => !forwarded.has(e)).sort()
-  assert.deepEqual(missing, [
-    'LEGION_CONNECTOR_DECLARATIONS', 'LEGION_EXECUTION_SCOPE', 'LEGION_EXTERNAL_API_SCOPE',
-    'LEGION_PATH_SCOPE', 'TEAM_HUB_TOKEN',
-  ], `schema 有而清单没有的键变了（实的 ${JSON.stringify(missing)}）—— 重新审一遍这一节`)
+  // ★★★ 2026-09-20：从 5 把降到 **1 把**。四把范围键已放行；
+  //   剩下的 `TEAM_HUB_TOKEN` **不是漏了**，而是它不该走这条路（见上面那段）。
+  assert.deepEqual(missing, ['TEAM_HUB_TOKEN'],
+    `schema 有而清单没有的键变了（实的 ${JSON.stringify(missing)}）—— 重新审一遍这一节`)
 })
 
 test('★★ PRT-254：nonEnvLiterals 与**源码**逐条对账——多一条是编造，少一条是漏登', () => {

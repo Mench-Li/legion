@@ -263,6 +263,7 @@ SOURCES.routesTeamPlans = join(ROOT, 'team-hub', 'routes', 'team-plans.mjs')
 SOURCES.routesMembers = join(ROOT, 'team-hub', 'routes', 'members.mjs')
 SOURCES.routesEmployeeManifests = join(ROOT, 'team-hub', 'routes', 'employee-manifests.mjs')
 SOURCES.routesExec = join(ROOT, 'team-hub', 'routes', 'exec.mjs')
+SOURCES.routesModels = join(ROOT, 'team-hub', 'routes', 'models.mjs')
 
 /** 已提取出去的路由族模块（值 = 该文件里**声明式**路由的归属名）。 */
 export const ROUTE_FAMILY_SOURCES = Object.freeze([
@@ -290,6 +291,7 @@ export const ROUTE_FAMILY_SOURCES = Object.freeze([
   { module: 'routesMembers', family: 'members', factory: 'createMembersRoutes' },
   { module: 'routesEmployeeManifests', family: 'employee-manifests', factory: 'createEmployeeManifestsRoutes' },
   { module: 'routesExec', family: 'exec', factory: 'createExecRoutes' },
+  { module: 'routesModels', family: 'models', factory: 'createModelsRoutes' },
 ])
 SOURCES.experienceStore = join(ROOT, 'team-hub', 'experience-store.mjs')
 

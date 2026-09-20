@@ -242,6 +242,7 @@ import { createCreateRoutes } from './routes/create.mjs'
 import { createCommentRoutes } from './routes/comment.mjs'
 import { createMembersRoutes } from './routes/members.mjs'
 import { createExecRoutes } from './routes/exec.mjs'
+import { createModelsRoutes } from './routes/models.mjs'
 import { createEmployeeManifestsRoutes } from './routes/employee-manifests.mjs'
 import { createTeamPlansRoutes } from './routes/team-plans.mjs'
 import { createPriceTablesRoutes } from './routes/price-tables.mjs'
@@ -5081,6 +5082,12 @@ const router = createRouter([
     db, audit, now,
     listTasks, NON_AUTO_ROLES, handleWrite,
   }),
+  createModelsRoutes({
+    json,
+    db, audit, now,
+    modelStore, validateAgentModelSelection, modelConfigErrorFor,
+    handleWrite,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -6121,49 +6128,9 @@ async function handle(req, res, stripPrefix) {
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/exec` 路由，该命名空间只住一个地方。
     if (await router.dispatch(req, res, { path, url })) return
 
-    // 智能体默认模型配置
-    if (req.method === 'GET' && path === '/api/models') {
-      const scopeParam = url.searchParams.get('scope') ?? undefined
-      const rows = scopeParam
-        ? db.prepare('SELECT scope, role, provider, model FROM agent_models WHERE scope = ?').all(scopeParam)
-        : db.prepare('SELECT scope, role, provider, model FROM agent_models').all()
-      json(res, 200, rows)
-      return
-    }
-    if (req.method === 'POST' && path === '/api/models') {
-      await handleWrite(req, res, (body, by, scope) => {
-        const role = typeof body.role === 'string' ? body.role.trim() : ''
-        if (!role) throw new Error('缺少参数 role')
-        const targetScope = typeof body.scope === 'string' && body.scope.trim().length > 0 ? body.scope.trim() : scope
-        const provider = typeof body.provider === 'string' ? body.provider.trim() : ''
-        const model = typeof body.model === 'string' ? body.model.trim() : ''
-        if (!provider || !model) throw new Error('缺少 provider 或 model')
-        // 产品化校验（PRT-252）：**配置错误必须在配置的那一刻、用用户能看懂的话说出来**。
-        // 校验不过 → 400 + 结构化字段（code/field/hint/candidates），前端据此落到具体输入框。
-        //
-        // 顺带说明为什么这里**不**降级成"只警告"：写出一个跑不起来的绑定，
-        // 代价是用户在一次真实运行失败之后才回头怀疑配置；而拒绝的代价
-        // 只是他改一下下拉框。两者不对称，所以拒绝。
-        const verdict = validateAgentModelSelection({ provider, model, profiles: modelStore.list() })
-        if (verdict.ok !== true) throw modelConfigErrorFor(verdict)
-        db.prepare('INSERT INTO agent_models (scope, role, provider, model, updatedAt) VALUES (?, ?, ?, ?, ?) ON CONFLICT(scope, role) DO UPDATE SET provider=excluded.provider, model=excluded.model, updatedAt=excluded.updatedAt')
-          .run(targetScope, role, provider, model, now())
-        audit(by, targetScope, 'model:set', null, { role, provider, model })
-        return { scope: targetScope, role, provider, model }
-      })
-      return
-    }
-    if (req.method === 'POST' && path === '/api/models/clear') {
-      await handleWrite(req, res, (body, by, scope) => {
-        const role = typeof body.role === 'string' ? body.role.trim() : ''
-        if (!role) throw new Error('缺少参数 role')
-        const targetScope = typeof body.scope === 'string' && body.scope.trim().length > 0 ? body.scope.trim() : scope
-        db.prepare('DELETE FROM agent_models WHERE scope = ? AND role = ?').run(targetScope, role)
-        audit(by, targetScope, 'model:clear', null, { role })
-        return { scope: targetScope, role }
-      })
-      return
-    }
+    // ── 智能体默认模型配置（按空间×角色读一版 / 配一个 / 清一个） —— 已提取到 `./routes/models.mjs`（PRT-316 第 25 族 / 切片 26）──
+    // 整段搬走：`server.mjs` 里现在**不再有** `/api/models` 路由，该命名空间只住一个地方。
+    if (await router.dispatch(req, res, { path, url })) return
 
     // 读接口
     if (req.method === 'GET' && path === '/api/board') {

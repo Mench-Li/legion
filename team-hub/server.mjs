@@ -244,6 +244,7 @@ import { createMembersRoutes } from './routes/members.mjs'
 import { createExecRoutes } from './routes/exec.mjs'
 import { createModelsRoutes } from './routes/models.mjs'
 import { createWebRoutes } from './routes/web.mjs'
+import { createRunBudgetRoutes } from './routes/run-budget.mjs'
 import { createSkillSourceRoutes } from './routes/skill-source.mjs'
 import { createModelMigrationRoutes } from './routes/model-migration.mjs'
 import { createEmployeeManifestsRoutes } from './routes/employee-manifests.mjs'
@@ -5105,6 +5106,11 @@ const router = createRouter([
     json,
     getSkillSource, setSkillSource, handleWrite,
   }),
+  createRunBudgetRoutes({
+    json,
+    budgetLedger, budgetPriceTables, BUDGET_ERRORS,
+    handleRun,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -5580,127 +5586,9 @@ async function handle(req, res, stripPrefix) {
     // ── 配置包导出/导入（PRT-5xx，spec §6.6） —— 已提取到 `./routes/config-bundle.mjs`（PRT-316 第 16 族 / 切片 17）──
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/config-bundle` 路由，该命名空间只住一个地方。
     if (await router.dispatch(req, res, { path, url })) return
-    // ── 单次运行预算账本与价目表（PRT-503 / PRT-510 / PRT-511，spec §6.6） ──
-    //
-    // 这是全仓唯一一处"花的是真钱"的接口面。它的错误都比别处贵：
-    // 预留漏了 → 超支；预留重复 → 余额被占两次；结算两次 → 余额释放两次；
-    // 锁定被结算 → 结果未知的那笔钱被当成已结清。
-    //
-    // 因此这里的原则是**宁可拒绝，不可猜**：状态码要能让调用方分辨
-    // 「参数不对（400）」「状态不符（409）」「根本没有这笔预留（404）」。
-    if (req.method === 'POST' && path === '/api/runtime/run-budget/reserve') {
-      await handleRun(req, res, (body) => {
-        // ── 参数校验**必须**排在状态检查之前 ──
-        //
-        // 顺序错了会把"你没传 attemptId"（400，改请求）报成
-        // "没有价目表版本 undefined"（409，去发布一张表）——
-        // 调用方会去修一个不存在的问题。
-        if (typeof body.attemptId !== 'string' || body.attemptId.trim() === '') {
-          json(res, 400, {
-            ok: false, code: BUDGET_ERRORS.ATTEMPT_REQUIRED,
-            error: '缺少 attemptId：账本的键是一次 Attempt，没有它无法定位预留',
-            serverTimeMs: Date.now(),
-          })
-          return
-        }
-        // 没有预算 = 显式 unbounded，此时**不需要**价目表（不预留就不用算钱）。
-        // 有预算但价目表取不到时给一条运维看得懂的错，而不是把
-        // `createPriceTable` 的开发者断言漏出去。
-        const needsPrice = body.budget !== null && body.budget !== undefined
-        const priceTable = needsPrice ? budgetPriceTables.get(body.priceTableVersion) : null
-        if (needsPrice && priceTable === null) {
-          json(res, 409, {
-            ok: false, code: BUDGET_ERRORS.PRICE_TABLE_GONE,
-            error: `没有价目表版本 ${JSON.stringify(body.priceTableVersion)}：` +
-              '有预算就必须有价目表——否则"上限"没有办法换算成钱，预留也就无从谈起',
-            serverTimeMs: Date.now(),
-          })
-          return
-        }
-        const r = budgetLedger.reserve({
-          attemptId: body.attemptId, scope: body.scope, taskId: body.taskId,
-          modelProfileId: body.modelProfileId,
-          budget: body.budget ?? null,
-          priceTable,
-          tokensIn: body.tokensIn, tokensOut: body.tokensOut,
-        })
-        return { reservation: r.reservation, budgetState: r.budgetState }
-      })
-      return
-    }
-    if (req.method === 'POST' && path === '/api/runtime/run-budget/observe') {
-      await handleRun(req, res, (body) => {
-        const r = budgetLedger.observe({
-          attemptId: body.attemptId,
-          tokensIn: body.tokensIn, tokensOut: body.tokensOut,
-          modelProfileId: body.modelProfileId,
-        })
-        return {
-          cancel: r.cancel, kind: r.kind, used: r.used, limit: r.limit,
-          currency: r.currency, message: r.message, estimateOk: r.estimateOk,
-        }
-      })
-      return
-    }
-    if (req.method === 'POST' && path === '/api/runtime/run-budget/settle') {
-      await handleRun(req, res, (body) => {
-        const r = budgetLedger.settle({
-          attemptId: body.attemptId, tokensIn: body.tokensIn, tokensOut: body.tokensOut,
-          outcome: body.outcome, actor: body.actor,
-          modelProfileId: body.modelProfileId, reason: body.reason,
-        })
-        return { reservation: r.reservation, locked: r.locked === true, overrun: r.overrun ?? null }
-      })
-      return
-    }
-    if (req.method === 'POST' && path === '/api/runtime/run-budget/resolve') {
-      // 人工处置 / 恢复：解开 locked 的**唯一**出口。
-      await handleRun(req, res, (body) => budgetLedger.resolveLocked({
-        attemptId: body.attemptId,
-        disposition: body.disposition,
-        actor: body.actor,
-        tokensIn: body.tokensIn, tokensOut: body.tokensOut,
-        reason: body.reason,
-      }))
-      return
-    }
-    if (req.method === 'GET' && path === '/api/runtime/run-budget') {
-      const r = budgetLedger.list({ scope: url.searchParams.get('scope'), state: url.searchParams.get('state') })
-      json(res, 200, {
-        ok: true, reservations: r, held: budgetLedger.heldAmount(url.searchParams.get('scope')),
-        serverTimeMs: Date.now(),
-      })
-      return
-    }
-    if (req.method === 'GET' && path.startsWith('/api/runtime/run-budget/')) {
-      // `/api/runtime/run-budget/<attemptId>`：Attempt id 形如 `att:T-1:1`，
-      // 含冒号，因此必须百分号编码。这里**整段解码**（不像绑定那样按段切）——
-      // 路径里只有一段。
-      const BUDGET_PREFIX = '/api/runtime/run-budget/'
-      const rawId = path.slice(BUDGET_PREFIX.length)
-      let attemptId = null
-      try {
-        attemptId = decodeURIComponent(rawId)
-      } catch {
-        json(res, 400, { ok: false, code: 'BAD_ID_ENCODING', error: '预算路径不是合法的 URL 编码' })
-        return
-      }
-      if (attemptId.trim() === '') {
-        json(res, 400, { ok: false, code: 'MISSING_PARAM', error: '路径应为 /api/runtime/run-budget/<attemptId>' })
-        return
-      }
-      const reservation = budgetLedger.get(attemptId)
-      if (reservation === null) {
-        json(res, 404, {
-          ok: false, code: BUDGET_ERRORS.RESERVATION_NOT_FOUND,
-          error: `Attempt ${attemptId} 没有预算预留（未配置预算的运行不会留下预留——那是显式的 unbounded，不是遗漏）`,
-          serverTimeMs: Date.now(),
-        })
-        return
-      }
-      json(res, 200, { ok: true, reservation, usage: budgetLedger.usageOf(attemptId), serverTimeMs: Date.now() })
-      return
-    }
+    // ── 单次运行预算账本与价目表（PRT-503 / PRT-510 / PRT-511，spec §6.6） —— 已提取到 `./routes/run-budget.mjs`（PRT-316 第 29 族 / 切片 31）──
+    // 整段搬走：`server.mjs` 里现在**不再有** `/api/runtime/run-budget` 路由，该命名空间只住一个地方。
+    if (await router.dispatch(req, res, { path, url })) return
     // ── 价目表（PRT-503 / PRT-510，spec §6.6） —— 已提取到 `./routes/price-tables.mjs`（PRT-316 第 17 族 / 切片 18）──
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/price-tables` 路由，该命名空间只住一个地方。
     if (await router.dispatch(req, res, { path, url })) return

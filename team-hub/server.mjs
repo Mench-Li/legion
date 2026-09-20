@@ -244,6 +244,7 @@ import { createMembersRoutes } from './routes/members.mjs'
 import { createExecRoutes } from './routes/exec.mjs'
 import { createModelsRoutes } from './routes/models.mjs'
 import { createWebRoutes } from './routes/web.mjs'
+import { createTeamViewsRoutes } from './routes/team-views.mjs'
 import { createTaskRecordsRoutes } from './routes/task-records.mjs'
 import { createGoalLifecycleRoutes } from './routes/goal-lifecycle.mjs'
 import { createSpaceOperationsRoutes } from './routes/space-operations.mjs'
@@ -5179,6 +5180,10 @@ const router = createRouter([
     handleWrite, getTask, db,
     now, parseJson, audit,
   }),
+  createTeamViewsRoutes({
+    json,
+    db, listTasks,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -5448,109 +5453,10 @@ async function handle(req, res, stripPrefix) {
     // ── 成员名册（GET：按最近出现倒序列出，带 60 秒在线判定） —— 已提取到 `./routes/members.mjs`（PRT-316 第 22 族 / 切片 23）──
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/members` 路由，该命名空间只住一个地方。
     if (await router.dispatch(req, res, { path, url })) return
-    if (req.method === 'GET' && path === '/api/roster') {
-      // 工作空间专属编队：scope 的智能体队伍 + 每人当前状态/任务（按该空间任务实时投影）。
-      // 合流：编队岗位（roster.role 匹配任务的 role/soldier）之外，未入编队但认领了该空间
-      // 任务的执行者（如旧士兵名）也一并返回，避免切换空间后信息丢失。
-      // scope 缺省(或空)= 聚合全部空间（供「全部空间」视图），每个智能体带 scope 标注。
-      const scopeParam = (url.searchParams.get('scope') ?? '').trim()
-      const scopes = scopeParam
-        ? [scopeParam]
-        : [...new Set([
-            ...db.prepare("SELECT DISTINCT scope FROM roster WHERE scope != '' ORDER BY scope").all().map(r => r.scope),
-            ...db.prepare("SELECT DISTINCT scope FROM tasks WHERE scope IS NOT NULL AND scope != '' ORDER BY scope").all().map(r => r.scope),
-          ])]
-      const agents = []
-      for (const scope of scopes) {
-        const roster = db.prepare('SELECT * FROM roster WHERE scope = ? ORDER BY sort, role').all(scope)
-        const rosterRoles = new Set(roster.map(r => r.role))
-        const tasks = listTasks({ scope })
-        const bySoldier = new Map()
-        for (const t of tasks) {
-          if (t.status === 'canceled' || !t.soldier) continue
-          if (rosterRoles.has(t.role ?? t.soldier)) continue
-          const arr = bySoldier.get(t.soldier) ?? []
-          arr.push(t)
-          bySoldier.set(t.soldier, arr)
-        }
-        const summarize = (id, label, list, kind = '', avatar = '🤖', external = false) => {
-          const mine = list.filter(t => t.status !== 'done')
-          const done = list.filter(t => t.status === 'done').length
-          const inProgress = mine.filter(t => t.status === 'in_progress').length
-          const inReview = mine.filter(t => t.status === 'in_review').length
-          const blocked = mine.filter(t => t.status === 'blocked').length
-          const waiting = mine.filter(t => t.status === 'todo' || t.status === 'backlog').length
-          let mode = 'idle'
-          if (blocked > 0) mode = 'blocked'
-          else if (inReview > 0) mode = 'review'
-          else if (inProgress > 0) mode = 'busy'
-          const chips = []
-          if (inProgress > 0) chips.push({ label: `进行中 ${inProgress}`, cls: 'green' })
-          if (inReview > 0) chips.push({ label: `待验收 ${inReview}`, cls: 'yellow' })
-          if (blocked > 0) chips.push({ label: `受阻 ${blocked}`, cls: 'red' })
-          if (waiting > 0) chips.push({ label: `待命 ${waiting}`, cls: '' })
-          if (chips.length === 0) {
-            // 无在办任务：有历史则「已完成 N」，否则「待命」
-            if (done > 0) chips.push({ label: `已完成 ${done}`, cls: '' })
-            else chips.push({ label: '待命', cls: '' })
-          }
-          return {
-            role: id, name: label, kind, avatar, mode, chips, done, total: list.length,
-            external, scope,
-            tasks: mine.map(t => ({ id: t.id, title: t.title, status: t.status })),
-          }
-        }
-        // 编队岗位优先，再追加未入编队的活跃执行者
-        for (const r of roster) {
-          const mine = tasks.filter(t => t.status !== 'canceled' && (t.role ?? t.soldier) === r.role)
-          agents.push(summarize(r.role, r.name, mine, r.kind, r.avatar, false))
-        }
-        for (const [soldier, list] of bySoldier) {
-          agents.push(summarize(soldier, `${soldier} · 执行中`, list, '', '⚙️', true))
-        }
-      }
-      json(res, 200, { scope: scopeParam || 'all', agents })
-      return
-    }
-    if (req.method === 'GET' && path === '/api/overlaps') {
-      // L3 跨任务改动重叠审计：扫描空间内所有有补丁记录的任务，按「改到同一文件」分组。
-      // 8 波次并行合入场景下，两个任务改同一文件 = 潜在冲突/语义重叠，供将军决定验收与合入顺序。
-      const scopeParam = url.searchParams.get('scope')
-      const only = url.searchParams.get('id')
-      const minTasks = Math.max(2, Number(url.searchParams.get('min') ?? 2) || 2)
-      const tasks = listTasks(scopeParam ? { scope: scopeParam } : {}).filter(t => t.status !== 'canceled')
-      const updatedAt = new Map(tasks.map(t => [t.id, t.updatedAt ?? t.createdAt ?? '']))
-      const patchFilesOf = (p) => {
-        if (!p) return []
-        if (typeof p === 'string') return [p] // 旧库：纯文件名条目
-        if (Array.isArray(p.files)) return p.files.map(f => (f && typeof f.path === 'string' ? f.path : '')).filter(Boolean)
-        if (typeof p.files === 'string') return p.files.split(',').map(s => s.trim()).filter(Boolean)
-        return []
-      }
-      const byFile = new Map()
-      for (const t of tasks) {
-        const set = new Set()
-        for (const p of t.patches ?? []) for (const f of patchFilesOf(p)) set.add(f)
-        if (set.size === 0) continue
-        for (const f of set) {
-          const arr = byFile.get(f) ?? []
-          arr.push({ id: t.id, title: t.title, status: t.status, updatedAt: updatedAt.get(t.id) ?? '' })
-          byFile.set(f, arr)
-        }
-      }
-      let groups = [...byFile].map(([file, list]) => ({
-        file,
-        tasks: list.sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true })),
-      })).filter(g => g.tasks.length >= minTasks)
-      if (only) groups = groups.filter(g => g.tasks.some(x => x.id === only))
-      groups.sort((a, b) => {
-        const ra = Math.max(...a.tasks.map(t => new Date(t.updatedAt || 0).getTime()))
-        const rb = Math.max(...b.tasks.map(t => new Date(t.updatedAt || 0).getTime()))
-        return rb - ra || a.file.localeCompare(b.file)
-      })
-      json(res, 200, { scope: scopeParam || 'all', groups })
-      return
-    }
+    // ── 编队投影与改动重叠审计（两条只读视图：空间里每个智能体的状态 / 改到同一文件的任务） —— 已提取到 `./routes/team-views.mjs`（PRT-316 第 40 族 / 切片 42）──
+    // 本族这 2 条已全部搬进模块，`server.mjs` 里不再有它们。
+    // 归属 /api/overlaps , /api/roster 的那 2 条都在这里了。
+    if (await router.dispatch(req, res, { path, url })) return
     // ── 浏览器助手抓取历史（入表/累加 + 读一版带统计 + 清一个或清一空间） —— 已提取到 `./routes/web.mjs`（PRT-316 第 26 族 / 切片 27）──
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/web` 路由，该命名空间只住一个地方。
     if (await router.dispatch(req, res, { path, url })) return

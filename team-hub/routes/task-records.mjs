@@ -33,6 +33,27 @@
 //
 // 5 条路由的函数体与 `server.mjs` 原文逐字节相同（仅缩进 +2）。
 // 依赖全部由调用方注入，本模块不 import 任何 hub 内部件。
+//
+// ## ★★★ 有一处**签名**偏离（函数体没有）
+//
+// `POST /api/artifact` 的 `run`，生成出来时是
+// `async run(req, res, { path, url })` —— **两个都没用**：
+//
+//   · `path` 在函数体第 8 行就被 `const path = body.path` **遮蔽**了；
+//   · `url` 从头到尾没出现 —— 生成器是从**字符串字面量** `kind !== 'url'` 里认出它的。
+//
+// 生成器 `usedCtx` 只剥注释、**没剥字符串字面量**（而它**下一行**的 `usedPro` 早就用了
+// `blankLiterals`）⇒ `check-free-identifiers` 报出 `url` 未绑定。
+//
+// > 一个「剥掉注释就够了」的印象，
+// > 与一个「它是从**字符串字面量** `'url'` 里认出来的」的事实，
+// > 在我看到下一行早就写了 `blankLiterals` 之前是同一个东西。
+//
+// ★ 已把 `usedCtx` 也接上 `blankLiterals`（生成器侧修掉）。
+// ★ 这一处签名改成 `async run(req, res)`（**函数体一个字没动**）——
+//   逐字对拍比的是**体**，所以它仍然 ✔。
+// ⚠️ `path` 那一半**仍未修**：它是**本体内局部绑定**，剥字面量治不了，
+//   要连"本体内声明过的名字"一起排除。
 // ============================================================================
 
 /**
@@ -140,11 +161,6 @@ export function createTaskRecordsRoutes({
       path: '/api/artifact',
       async run(req, res) {
         // hub 版产物登记（html/file/url），与 v1 taskctl artifact 等价。
-        // ★★★ 这里原本生成成了 `async run(req, res, { path, url })` —— **两个都没用**：
-        //   `path` 下面第 8 行就被 `const path = body.path` **遮蔽**了，
-        //   而 `url` 从头到尾没出现 —— 它只出现在**下行那句注释**的「html/file/url」里。
-        //   生成器解析标识符时**没有剥掉注释**，于是把一个注释里的词当成了真正的依赖。
-        //   `check-free-identifiers` 抓到了它（`node --check` 与逐字对拍都看不见）。
         await handleWrite(req, res, (body, by, scope) => {
           const id = body.id
           if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')

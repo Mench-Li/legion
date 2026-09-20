@@ -667,3 +667,97 @@ test('★ 错误码是具名的，且 purge 的三种缺参互不相同', () => 
   assert.notEqual(CONTEXT_STORE_ERRORS.PURGED, CONTEXT_STORE_ERRORS.NOT_FOUND,
     '★ "被清掉了"与"没找到"必须是两个码——合成一个就丢掉了整个墓碑设计的理由')
 })
+
+// ============================================================================
+// PRT-316 切片 16 · 契约块 —— 六条路由里"从来没人问过"的那几件事
+//
+// 第一轮破验（改坏 25 处行为）只咬住 16 处。那 9 条"没咬住"里，
+// **1 条是我瞄错了**（M5：套件测的是 `maxAgeDays=0`，我放宽的是 `maxBytes` 那一支），
+// 另外 8 条是真的没人问过：
+//
+//   · 列表那条路由 **一条判据都没有**（`count` / `snapshots` 都没人断言过）；
+//   · `/retention` 的 200 里 `policy` 回显没人断言过
+//     —— "我按什么策略算的这张表"看不见，就没法复核这张表；
+//   · `activeRunId` **只**在领域函数 `planSnapshotRetention()` 那侧被测过，
+//     **路由有没有把它透传下去**没人问过（这正是"领域面测了、接口面没测"那种形状）；
+//   · `assemble` 的两个具名码、export 的空白 `by`、id 里的 `%2F`。
+//
+// ★ 期望值全部**先量出来**再写死（`.worktrees/_prt-handoff/probe-slice16-gaps.mjs`）。
+// ============================================================================
+
+test('⑥ ★ 列表：`count` 与 `snapshots` 的长度一致，且每条都带 `snapshotHash`', async () => {
+  await freeze('att:slice16:list')
+  const r = await get('/api/context-snapshots')
+  assert.equal(r.status, 200)
+  assert.equal(r.body.ok, true)
+  assert.ok(Array.isArray(r.body.snapshots), '列表要在体里说出来')
+  assert.equal(r.body.count, r.body.snapshots.length,
+    'count 与列表长度对不上时，看的人会以为"还有更多没显示出来"')
+  const first = r.body.snapshots[0]
+  assert.ok(typeof first.attemptId === 'string' && first.attemptId !== '')
+  assert.match(String(first.snapshotHash), /^sha256:/,
+    '一份清单若不给哈希，就没法回答"这一条还是不是我当初存的那一条"')
+})
+
+test('⑦ ★ `/retention` 的 200 必须回显它**按什么策略**算的这张表', async () => {
+  const r = await get('/api/context-snapshots/retention?maxAgeDays=30&maxBytes=null')
+  assert.equal(r.status, 200)
+  assert.deepEqual(r.body.policy, { maxAgeDays: 30, maxBytes: null },
+    '不回显策略 ⇒ 一张"要清掉这些"的表无法被复核：看的人不知道它是按哪条线算的')
+})
+
+test('⑧ ★★★ `activeRunId` 必须真的透传到计划里 —— 领域面测过 ≠ 接口面接上了', async () => {
+  // 领域函数 `planSnapshotRetention({… activeRunIds})` 在本文件里被测得很足，
+  // 而**路由有没有把查询串里的 activeRunId 传下去**，此前没人问过。
+  //   > 一个"领域函数尊重被引用的 Run"的判据，与一个"接口把这件事实传下去了"的判据，
+  //   > 在只看领域那一侧的时候是同一个东西。
+  const id = 'att:slice16:pin'
+  await freeze(id, 1_600_000_000_000)   // 很旧 ⇒ 按年龄必然在清理名单里
+  const q = encodeURIComponent(id)
+
+  const unpinned = await get('/api/context-snapshots/retention?maxAgeDays=1&maxBytes=null')
+  assert.ok(unpinned.body.purge.some((p) => p.attemptId === id),
+    '前提：不带 activeRunId 时，这份旧快照**本来会被清掉**（否则这条判据测不出东西）')
+
+  const pinned = await get(`/api/context-snapshots/retention?maxAgeDays=1&maxBytes=null&activeRunId=${q}`)
+  assert.equal(pinned.status, 200)
+  assert.equal(pinned.body.purge.some((p) => p.attemptId === id), false,
+    '声明"这一次运行还在跑"之后，它的证据不能被清 —— 删掉活着的证据是不可逆的')
+  assert.ok(pinned.body.findings.some((f) => f.code === SNAPSHOT_RETENTION_CODES.PINNED && f.attemptId === id),
+    '留下必须**说出理由**，而不是默默留着')
+})
+
+test('⑨ assemble 缺 attemptId ⇒ 400 具名码 `CONTEXT_BAD_REQUEST`（不是 500、不是 code:null）', async () => {
+  const r = await post('/api/context-snapshots/assemble', { runId: 'r', frozenAtMs: 1, candidates: [] })
+  assert.equal(r.status, 400)
+  assert.equal(r.body.code, 'CONTEXT_BAD_REQUEST',
+    '快照以 attemptId 为主键；一条 code 为 null 的 400 让调用方只能去翻源码')
+})
+
+test('⑩ assemble 的 candidate 形状不对 ⇒ 400 具名码 `CONTEXT_BAD_CANDIDATE`', async () => {
+  const r = await post('/api/context-snapshots/assemble', {
+    attemptId: 'att:slice16:badcand', runId: 'r', frozenAtMs: 1, scope: 'default', canReadAll: true,
+    candidates: [{}],
+  })
+  assert.equal(r.status, 400)
+  assert.equal(r.body.code, 'CONTEXT_BAD_CANDIDATE',
+    '"候选形状不对"必须与"请求格式不对"分开报：前者说的是调用方给的**内容**有问题')
+})
+
+test('⑪ export 的 `by` 只给空白 ⇒ 400 `EXPORT_BY_REQUIRED`（空白名 = 无名）', async () => {
+  const id = await freeze('att:slice16:by')
+  const q = encodeURIComponent(id)
+  for (const bad of ['%20', '']) {
+    const r = await get(`/api/context-snapshots/${q}/export?by=${bad}&atMs=1700000001000`)
+    assert.equal(r.status, 400, `by=${JSON.stringify(bad)} 被接受了`)
+    assert.equal(r.body.code, 'EXPORT_BY_REQUIRED',
+      '一个空白名的导出与一份匿名证据是同一种东西 —— 它与"没给 by"是同一件事')
+  }
+})
+
+test('⑫ 单条的 id 里带 `%2F` ⇒ 400 `MISSING_PARAM`（不是 404，也不是 500）', async () => {
+  const r = await get('/api/context-snapshots/att%2Fwith%2Fslash')
+  assert.equal(r.status, 400, '解码后带斜杠的 id 必须被当成**路径不对**，而不是"查无此快照"')
+  assert.equal(r.body.code, 'MISSING_PARAM',
+    '回 404 会让调用方以为"这份快照不存在"，而真实情况是"你这个路径根本不是这个形状"')
+})

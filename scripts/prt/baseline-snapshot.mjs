@@ -245,6 +245,9 @@ SOURCES.routesModelProfiles = join(ROOT, 'team-hub', 'routes', 'model-profiles.m
 //   `// ── F-15 用量汇总 ──` 下面是 totals/rollup，又一个 `// ── F-15 告警与降级 ──`
 //   下面是 alert。抽取器对此同样是透明的（它按声明式条目逐条认，不看注释）。
 SOURCES.routesUsage = join(ROOT, 'team-hub', 'routes', 'usage.mjs')
+// ★ 切片 16（context-snapshots）是**子分隔符最多**的族（4 个），
+//   而且 `assemble` 那条上面没有分隔符 —— "有的路由有说明、有的没有"两种都要对。
+SOURCES.routesContextSnapshots = join(ROOT, 'team-hub', 'routes', 'context-snapshots.mjs')
 
 /** 已提取出去的路由族模块（值 = 该文件里**声明式**路由的归属名）。 */
 export const ROUTE_FAMILY_SOURCES = Object.freeze([
@@ -262,6 +265,7 @@ export const ROUTE_FAMILY_SOURCES = Object.freeze([
   { module: 'routesConnectors', family: 'connectors', factory: 'createConnectorsRoutes' },
   { module: 'routesModelProfiles', family: 'model-profiles', factory: 'createModelProfilesRoutes' },
   { module: 'routesUsage', family: 'usage', factory: 'createUsageRoutes' },
+  { module: 'routesContextSnapshots', family: 'context-snapshots', factory: 'createContextSnapshotsRoutes' },
 ])
 SOURCES.experienceStore = join(ROOT, 'team-hub', 'experience-store.mjs')
 

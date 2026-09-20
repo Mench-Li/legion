@@ -1,12 +1,20 @@
 # 最终报告：MULTI-AGENT-FEATURE-OPTIMIZATION 功能实现
 
-- 日期：2026-09-18（**追加至第 45 轮**）
+- 日期：2026-09-18 起，**追加至第 79 轮**（2026-09-20 之后仍在增补）
+  - ★ **第 80 轮更正**：这一行原来写「追加至第 **45** 轮」。第 46～79 轮的留档**不在本报告 §三**，
+    而在 [`PRT-HUMAN-INTERVENTION-2026-09-20.md`](./PRT-HUMAN-INTERVENTION-2026-09-20.md) §三之三（第 63 轮起）
+    与它的家族表（逐轮到第 77 行）——**读数在那里，不在这里**。
 - 仓库：`D:\project\DSH\legion`（DSH 检出 `D:\project\DSH\dsh\deepseek-harness\`）
 - 权威台账：[`PRT-PROGRESS.md`](./PRT-PROGRESS.md) —— **145 行 = 140 ✅ / 1 🟡 / 4 ⏸ / 0 ⬜**
 - 对照表：[`MULTI-AGENT-FEATURE-STATUS.md`](../../MULTI-AGENT-FEATURE-STATUS.md) —— F-01…F-25，**裁决项 1～29**
 - ★ **决策摘要**：[`DECISION-BRIEF.md`](../../DECISION-BRIEF.md) —— 把那 29 条压成「**你要说的那一句话**」，**按 §9 链排序**；★ **§0A 当初就是那条链唯一的硬断（§5 第 20 条）** —— ★★★ **第 44 轮已落地**（2f5a4b3，选甲），那条链**不再有硬断**，见 §3.0z.2
 - 目标文档：[`MULTI-AGENT-FEATURE-OPTIMIZATION.md`](../../MULTI-AGENT-FEATURE-OPTIMIZATION.md) —— §1.2 状态注记校准 / §1.3 正文级偏离
-- 最近一轮 CI：**`.ci/r45c`**（HEAD `1a62c38`，**这一行就是被那次 CI 跑过的那棵树**）—— ⚠️ **7/9，exit 1**
+- 最近一轮 CI：**`.ci/r51`**（2026-09-20 **19:33**，当时是 `.ci` 下最新的存档；HEAD 见 `acffc8d`）—— ⚠️ **`test` 与 `smoke` 两阶段 FAIL**
+  - ★ **第 80 轮更正**：这一行原来写「最近一轮 CI：**`.ci/r45c`**」。`.ci` 下按**修改时间**排序，最新的**不是** `r45c`（它是更早那次）⇒ 那一行让读者以为红的是 r45c 那棵树。
+  - ★★ 而 r51 那次的红，**第 63～77 轮已经追到底**（收窄后是**真的 1 簇**）：
+    根因是启动自检**恒**判不兼容（四项必需能力里**三项是写死的 `false`**）⇒ `autoExecutionForbidden` 恒 true
+    ⇒ **21 条端到端用例红**。其余"被杀"的套件在空载下 1～3 秒即绿 ⇒ **资源争用的假红**。
+    逐层证据见 `./PRT-HUMAN-INTERVENTION-2026-09-20.md` §三之三（第 63～77 轮）。
   （`test` **1254292ms** + `doc` 红，`skipped=1` 为已知的 secret-store；树指纹 `ab3a77b49ee6a67e` ——
   **脏树 20 改 + 511 未跟踪**）
   - ⚠️ **8 个红族没有一族在本会话的改动上**：`config`(52/53)、`prt-baseline`(23/25)、

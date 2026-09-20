@@ -9,6 +9,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import * as httpMod from 'node:http'
+// ★ PRT-316 切片 4：calendar 族已搬进独立模块——本文件末尾按**缝上契约**补判据。
+import { createCalendarRoutes } from './routes/calendar.mjs'
 
 const tmpRoot = mkdtempSync(join(tmpdir(), 'legion-cal-'))
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -670,5 +672,157 @@ describe('P2-5-e 时间语义与列表兼容（字面本地时间，零时区换
   it('老库补列幂等：重复执行 ALTER 不报错（表结构含 taskId/goalId/recurrence）', () => {
     const cols = mod.db.prepare('PRAGMA table_info(calendar_events)').all().map(c => c.name)
     for (const c of ['taskId', 'goalId', 'recurrence']) assert.ok(cols.includes(c), '列存在：' + c)
+  })
+})
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PRT-316 切片 4：搬走的 calendar 族的**缝上契约**
+//
+// 为什么补：破验 10 条变异，第一轮咬住 6 条。逐条查清后**两条是真缺口、一条是等价**：
+//
+//   ★ K3（conflicts 去掉 scope 护栏）**不是等价，是真的跨空间泄漏**。
+//     用两个空间各造一条同窗事件，实测（独立进程，避免 ESM 缓存）：
+//
+//        护栏在   不带 scope → 400「缺少参数 scope」   空 scope → 400「缺少参数 scope」
+//        护栏去掉 不带 scope → 400（但**别的原因**：null.trim() 抛错）
+//                 空 scope → **200，且同时返回 leak-a 与 leak-b 两个空间的事件**
+//
+//     既有用例只打 `?start=`（null 那一条），而那条恰好仍会 400 ⇒ 断言 `status===400` 通过。
+//     `?scope=`（**空串**）那一条**从来没人打过**，而它就是泄漏口。
+//
+//     > 一个"护栏没了、但因为另一处 null 解引用恰好还是 400"的读数，
+//     > 与一个"护栏还在"的读数，在 `assert.equal(status, 400)` 上是同一个东西——
+//     > 只不过前者把跨空间查询放行了。
+//
+//   · K4（allDay 判定写反）按代码判定为**观测等价**：`allDay` 只影响候选窗的**取宽**
+//     （`server.mjs`：`winFrom = allDay ? dayStart : addDays(dayStart,-1)`），
+//     多取到的候选随后仍要过内存里的重叠判定 ⇒ 结论不变。这一条**未做实验证明**，
+//     是读代码得出的，标明为推断；本片只把"透传忠实"钉住（见下 ④）。
+//
+// ★ 判据打在**缝**上（注入桩）：本片改动引入的正是缝。既有 29 例仍在**真 hub** 上验。
+// ★ 追加而非新建文件：`git ls-files "*.test.mjs"` 的条数被 `boundary-facts` 钉着。
+// ══════════════════════════════════════════════════════════════════════════════
+
+const CAL_DEPS = ['listCalendarEvents', 'findCalendarConflicts', 'listCalendarEventsByLink',
+  'createCalendarEvent', 'updateCalendarEvent', 'deleteCalendarEvent']
+
+/** 造一个 calendar 族：记录每个注入点的调用；`overrides` 可覆写。 */
+function calSpy(overrides = {}) {
+  const calls = { sent: [], writeArgs: [], dep: {} }
+  for (const d of CAL_DEPS) calls.dep[d] = []
+  const deps = {
+    json: (_res, code, obj) => { calls.sent.push([code, obj]) },
+    handleWrite: async (_req, _res, fn) => { calls.writeArgs.push(fn({}, 'general')) },
+  }
+  for (const d of CAL_DEPS) deps[d] = (...a) => { calls.dep[d].push(a); return [] }
+  Object.assign(deps, overrides)
+  return { fam: createCalendarRoutes(deps), calls }
+}
+
+/** 按真实 `handle()` 的约定派发：path 是 pathname，url 带查询串。 */
+function calDispatch(fam, method, target) {
+  const url = new URL(`http://x${target}`)
+  return fam.dispatch({ method, headers: {} }, {}, { path: url.pathname, url })
+}
+const cn = (a) => a.length
+
+describe('PRT-316 切片 4：calendar 族 6 条路由的**接线**契约（缝上）', () => {
+  it('① 6 条路由每一条都接到正确的注入依赖上（正向 + 反向）', async () => {
+    const table = [
+      ['GET', '/api/calendar/events?scope=s', 'listCalendarEvents'],
+      ['GET', '/api/calendar/conflicts?scope=s&start=2026-10-01T10:00', 'findCalendarConflicts'],
+      ['GET', '/api/calendar/events/by-link?taskId=T-1', 'listCalendarEventsByLink'],
+      ['POST', '/api/calendar/events', 'createCalendarEvent'],
+      ['POST', '/api/calendar/events/update', 'updateCalendarEvent'],
+      ['POST', '/api/calendar/events/delete', 'deleteCalendarEvent'],
+    ]
+    assert.equal(table.length, 6, '路由表条数与族声明不符——加了路由就要来这里登记')
+    for (const [method, target, dep] of table) {
+      const { fam, calls } = calSpy()
+      assert.equal(await calDispatch(fam, method, target), true, `${method} ${target} 没被本族接住`)
+      assert.equal(cn(calls.dep[dep]), 1, `${method} ${target} 没有走到 ${dep}（走了 ${CAL_DEPS.filter((d) => cn(calls.dep[d])).join(',') || '无'}）`)
+      const others = CAL_DEPS.filter((d) => d !== dep && cn(calls.dep[d]) > 0)
+      assert.deepEqual(others, [], `${method} ${target} 额外碰了 ${others.join(',')}`)
+    }
+  })
+
+  it('② 方法或路径不匹配 ⇒ 返回 false（交回 if 链；等值路由不吞前缀）', async () => {
+    const { fam } = calSpy()
+    assert.equal(await calDispatch(fam, 'GET', '/api/calendar/events'), true)
+    assert.equal(await calDispatch(fam, 'DELETE', '/api/calendar/events'), false)
+    assert.equal(await calDispatch(fam, 'GET', '/api/calendar/nope'), false)
+    assert.equal(await calDispatch(fam, 'GET', '/api/calendar/events/extra'), false, '等值路由不该吞前缀')
+    assert.equal(await calDispatch(fam, 'POST', '/api/calendar/conflicts'), false, 'conflicts 只读')
+  })
+
+  it('③ ★★★ 空 scope（`?scope=`）必须 400，且**绝不允许**跨空间返回', async () => {
+    // 这一条是破验 K3 量出来的**真缺口**：既有用例只打不带 scope（null），
+    // 而那条即使护栏没了也会因为成功路径里的 `scopeParam.trim()` 抛错而 400，
+    // 于是 `assert.equal(status, 400)` 照样通过——**空串那一条从来没人打过**。
+    for (const target of [
+      '/api/calendar/conflicts?scope=&start=2026-10-01T10:00&end=2026-10-01T11:00',
+      '/api/calendar/conflicts?start=2026-10-01T10:00&end=2026-10-01T11:00',
+      '/api/calendar/conflicts?scope=%20&start=2026-10-01T10:00&end=2026-10-01T11:00',
+    ]) {
+      const d = calSpy()
+      assert.equal(await calDispatch(d.fam, 'GET', target), true)
+      assert.equal(d.calls.sent[0]?.[0], 400, `${target} 没有 400：` + JSON.stringify(d.calls.sent))
+      assert.match(d.calls.sent[0][1].error, /scope/, `${target} 的错误信息不可读`)
+      // ★ 关键：护栏生效时**根本没有发起查询**，所以不可能跨空间返回
+      assert.equal(cn(d.calls.dep.findCalendarConflicts), 0
+        , `${target} 仍然去查了冲突 —— 护栏失效，空 scope 会返回**所有空间**的事件`)
+    }
+    // 反面控制：正常 scope 必须真的查
+    const ok = calSpy()
+    await calDispatch(ok.fam, 'GET', '/api/calendar/conflicts?scope=team-a&start=2026-10-01T10:00')
+    assert.equal(cn(ok.calls.dep.findCalendarConflicts), 1, '正常 scope 没有发起查询')
+    assert.equal(ok.calls.dep.findCalendarConflicts[0][0].scope, 'team-a')
+  })
+
+  it('④ allDay 从查询串**忠实透传**（1/true ⇒ true；其余 ⇒ false）', async () => {
+    const cases = [['allDay=1', true], ['allDay=true', true], ['allDay=0', false], ['allDay=false', false], ['', false]]
+    for (const [q, want] of cases) {
+      const d = calSpy()
+      const qs = q === '' ? '' : `&${q}`
+      await calDispatch(d.fam, 'GET', `/api/calendar/conflicts?scope=s&start=2026-10-01T10:00${qs}`)
+      const got = d.calls.dep.findCalendarConflicts[0][0].allDay
+      assert.equal(got, want, `${q || '(无 allDay)'} ⇒ 期望 ${want}，实际 ${got}`)
+    }
+  })
+
+  it('⑤ events 列表：scope 透传，from/to 缺省为 undefined；by-link 透传 taskId/goalId/from/to', async () => {
+    const a = calSpy()
+    await calDispatch(a.fam, 'GET', '/api/calendar/events?scope=software&from=2026-10-01&to=2026-10-31')
+    assert.deepEqual(
+      { scope: a.calls.dep.listCalendarEvents[0][0].scope, from: a.calls.dep.listCalendarEvents[0][0].from, to: a.calls.dep.listCalendarEvents[0][0].to },
+      { scope: 'software', from: '2026-10-01', to: '2026-10-31' })
+    const b = calSpy()
+    await calDispatch(b.fam, 'GET', '/api/calendar/events?scope=software')
+    // ★ 必须是 undefined 而不是 null/''：`listCalendarEvents` 只对**非空**字符串加窗，
+    //   传 undefined 与传 '' 在这里恰好同义，但传 null 会走到 parseCalendarTime 的判空分支。
+    assert.equal(b.calls.dep.listCalendarEvents[0][0].from, undefined, 'from 缺省不是 undefined')
+    assert.equal(b.calls.dep.listCalendarEvents[0][0].to, undefined, 'to 缺省不是 undefined')
+
+    const c = calSpy()
+    await calDispatch(c.fam, 'GET', '/api/calendar/events/by-link?taskId=T-9&goalId=G-9&from=2026-11-01&to=2026-11-30')
+    assert.deepEqual(
+      { taskId: c.calls.dep.listCalendarEventsByLink[0][0].taskId, goalId: c.calls.dep.listCalendarEventsByLink[0][0].goalId, from: c.calls.dep.listCalendarEventsByLink[0][0].from, to: c.calls.dep.listCalendarEventsByLink[0][0].to },
+      { taskId: 'T-9', goalId: 'G-9', from: '2026-11-01', to: '2026-11-30' })
+  })
+
+  it('⑥ 三条写路由：`by` 由 handleWrite 注入、body 原样展开，且各自落到**不同**的 DAO', async () => {
+    for (const [target, dep] of [
+      ['/api/calendar/events', 'createCalendarEvent'],
+      ['/api/calendar/events/update', 'updateCalendarEvent'],
+      ['/api/calendar/events/delete', 'deleteCalendarEvent'],
+    ]) {
+      const d = calSpy()
+      await calDispatch(d.fam, 'POST', target)
+      assert.equal(cn(d.calls.writeArgs), 1, `${target} 没有走 handleWrite`)
+      // handleWrite 桩把 body 传成 {}、by 传成 'general' ⇒ 路由必须把 by 并进参数
+      assert.equal(d.calls.dep[dep][0][0].by, 'general', `${target} 没有把 by 注入给 ${dep}`)
+      const others = CAL_DEPS.filter((x) => x !== dep && cn(d.calls.dep[x]) > 0)
+      assert.deepEqual(others, [], `${target} 额外碰了 ${others.join(',')}`)
+    }
   })
 })

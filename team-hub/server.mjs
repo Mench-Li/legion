@@ -229,6 +229,7 @@ import { createRouter } from './router.mjs'
 import { createRulesRoutes } from './routes/rules.mjs'
 import { createPermissionsRoutes } from './routes/permissions.mjs'
 import { createChatRoutes } from './routes/chat.mjs'
+import { createCalendarRoutes } from './routes/calendar.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -4945,6 +4946,11 @@ const router = createRouter([
     getReplySettings, saveReplySettings, listAwaitingReplies, postAiReply,
     failAiReply, retryAiReply,
   }),
+  createCalendarRoutes({
+    json, handleWrite,
+    listCalendarEvents, findCalendarConflicts, listCalendarEventsByLink,
+    createCalendarEvent, updateCalendarEvent, deleteCalendarEvent,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -8373,63 +8379,9 @@ async function handle(req, res, stripPrefix) {
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/chat/*` 路由，该命名空间只住一个地方。
     if (await router.dispatch(req, res, { path, url })) return
 
-    // ── 日程日历（calendar）：事件 REST（scope 必填写纪律 + audit/SSE；写走 handleWrite，见 S5/R-B1 数据面）──
-    // P2-5：+ 更新（局部）/ 冲突检测（只读提示，不阻断）/ 关联查询（taskId|goalId，供任务详情双向展示）；
-    //       列表带日期窗时对重复事件做**实例展开**（occurrenceDate/recurring）。
-    if (req.method === 'GET' && path === '/api/calendar/events') {
-      try {
-        const scopeParam = url.searchParams.get('scope') ?? undefined
-        const from = url.searchParams.get('from') ?? undefined
-        const to = url.searchParams.get('to') ?? undefined
-        json(res, 200, { scope: scopeParam ?? null, events: listCalendarEvents({ scope: scopeParam, from, to }) })
-      } catch (e) {
-        json(res, 400, { error: e instanceof Error ? e.message : String(e) })
-      }
-      return
-    }
-    if (req.method === 'GET' && path === '/api/calendar/conflicts') {
-      try {
-        const scopeParam = url.searchParams.get('scope')
-        if (!scopeParam || scopeParam.trim().length === 0) throw new Error('缺少参数 scope')
-        const conflicts = findCalendarConflicts({
-          scope: scopeParam.trim(),
-          start: url.searchParams.get('start'),
-          end: url.searchParams.get('end'),
-          allDay: url.searchParams.get('allDay') === '1' || url.searchParams.get('allDay') === 'true',
-          excludeId: url.searchParams.get('excludeId'),
-        })
-        json(res, 200, { scope: scopeParam.trim(), conflicts })
-      } catch (e) {
-        json(res, 400, { error: e instanceof Error ? e.message : String(e) })
-      }
-      return
-    }
-    if (req.method === 'GET' && path === '/api/calendar/events/by-link') {
-      try {
-        const events = listCalendarEventsByLink({
-          taskId: url.searchParams.get('taskId'),
-          goalId: url.searchParams.get('goalId'),
-          from: url.searchParams.get('from') ?? undefined,
-          to: url.searchParams.get('to') ?? undefined,
-        })
-        json(res, 200, { taskId: url.searchParams.get('taskId') ?? null, goalId: url.searchParams.get('goalId') ?? null, events })
-      } catch (e) {
-        json(res, 400, { error: e instanceof Error ? e.message : String(e) })
-      }
-      return
-    }
-    if (req.method === 'POST' && path === '/api/calendar/events') {
-      await handleWrite(req, res, (body, by) => createCalendarEvent({ ...body, by }))
-      return
-    }
-    if (req.method === 'POST' && path === '/api/calendar/events/update') {
-      await handleWrite(req, res, (body, by) => updateCalendarEvent({ ...body, by }))
-      return
-    }
-    if (req.method === 'POST' && path === '/api/calendar/events/delete') {
-      await handleWrite(req, res, (body, by) => deleteCalendarEvent({ ...body, by }))
-      return
-    }
+    // ── 日程日历（calendar）：事件 REST + 冲突检测 + 关联查询 —— 已提取到 `./routes/calendar.mjs`（PRT-316 切片 4）──
+    // 整段搬走：`server.mjs` 里现在**不再有** `/api/calendar/*` 路由，该命名空间只住一个地方。
+    if (await router.dispatch(req, res, { path, url })) return
 
     // ── 工作空间 + 编队管理 ──
     if (req.method === 'POST' && path === '/api/spaces') {

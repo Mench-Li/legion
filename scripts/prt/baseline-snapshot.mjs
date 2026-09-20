@@ -275,6 +275,7 @@ SOURCES.routesModelBindings = join(ROOT, 'team-hub', 'routes', 'model-bindings.m
 SOURCES.routesModelBindingsByPath = join(ROOT, 'team-hub', 'routes', 'model-bindings-by-path.mjs')
 SOURCES.routesRuntimeLease = join(ROOT, 'team-hub', 'routes', 'runtime-lease.mjs')
 SOURCES.routesRuntimeVerification = join(ROOT, 'team-hub', 'routes', 'runtime-verification.mjs')
+SOURCES.routesSpaceOperations = join(ROOT, 'team-hub', 'routes', 'space-operations.mjs')
 
 /** 已提取出去的路由族模块（值 = 该文件里**声明式**路由的归属名）。 */
 export const ROUTE_FAMILY_SOURCES = Object.freeze([
@@ -314,6 +315,7 @@ export const ROUTE_FAMILY_SOURCES = Object.freeze([
   { module: 'routesModelBindingsByPath', family: 'model-bindings-by-path', factory: 'createModelBindingsByPathRoutes' },
   { module: 'routesRuntimeLease', family: 'runtime-lease', factory: 'createRuntimeLeaseRoutes' },
   { module: 'routesRuntimeVerification', family: 'runtime-verification', factory: 'createRuntimeVerificationRoutes' },
+  { module: 'routesSpaceOperations', family: 'space-operations', factory: 'createSpaceOperationsRoutes' },
 ])
 SOURCES.experienceStore = join(ROOT, 'team-hub', 'experience-store.mjs')
 

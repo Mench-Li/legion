@@ -5603,7 +5603,8 @@ async function handle(req, res, stripPrefix) {
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/config-bundle` 路由，该命名空间只住一个地方。
     if (await router.dispatch(req, res, { path, url })) return
     // ── 单次运行预算账本与价目表（PRT-503 / PRT-510 / PRT-511，spec §6.6） —— 已提取到 `./routes/run-budget.mjs`（PRT-316 第 29 族 / 切片 31）──
-    // 整段搬走：`server.mjs` 里现在**不再有** `/api/runtime/run-budget` 路由，该命名空间只住一个地方。
+    // 本族这 6 条已全部搬进模块，`server.mjs` 里不再有它们。
+    // ★ **同名前缀**的 `POST /api/runtime/run-budget/may-switch-model` **不属本族**、仍留在下面，别顺手搬走。
     if (await router.dispatch(req, res, { path, url })) return
     // ── 价目表（PRT-503 / PRT-510，spec §6.6） —— 已提取到 `./routes/price-tables.mjs`（PRT-316 第 17 族 / 切片 18）──
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/price-tables` 路由，该命名空间只住一个地方。

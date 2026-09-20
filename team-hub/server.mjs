@@ -241,6 +241,7 @@ import { createConfigRoutes } from './routes/config.mjs'
 import { createCreateRoutes } from './routes/create.mjs'
 import { createCommentRoutes } from './routes/comment.mjs'
 import { createMembersRoutes } from './routes/members.mjs'
+import { createEmployeeManifestsRoutes } from './routes/employee-manifests.mjs'
 import { createTeamPlansRoutes } from './routes/team-plans.mjs'
 import { createPriceTablesRoutes } from './routes/price-tables.mjs'
 import { createConfigBundleRoutes } from './routes/config-bundle.mjs'
@@ -5070,6 +5071,10 @@ const router = createRouter([
     json,
     db,
   }),
+  createEmployeeManifestsRoutes({
+    json,
+    contextPlanStore, CONTEXT_PLAN_ERRORS, handleRun,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -5443,53 +5448,9 @@ async function handle(req, res, stripPrefix) {
     // ── 团队计划（读：列出一版；写：冻结一版，PRT-402 的写一半） —— 已提取到 `./routes/team-plans.mjs`（PRT-316 第 21 族 / 切片 22）──
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/team-plans` 路由，该命名空间只住一个地方。
     if (await router.dispatch(req, res, { path, url })) return
-    if (req.method === 'GET' && path === '/api/employee-manifest') {
-      const scope = url.searchParams.get('scope')
-      if (scope === null || scope.trim() === '') {
-        json(res, 400, { ok: false, code: 'MISSING_PARAM', error: '缺少 scope：岗位边界是按空间定的' })
-        return
-      }
-      const role = url.searchParams.get('role')
-      const employeeId = url.searchParams.get('employeeId')
-      if ((role === null || role.trim() === '') && (employeeId === null || employeeId.trim() === '')) {
-        // 两个都不给就**不猜**：返回"任意一份清单"会让模型读到别人的边界，
-        // 而它看起来完全正常。
-        json(res, 400, {
-          ok: false, code: 'MISSING_PARAM',
-          error: '缺少 role 或 employeeId：不指定身份就取不到"我的边界"，'
-            + '而随便给一份会让模型照着一个不是它的岗位约束干活',
-        })
-        return
-      }
-      const manifest = contextPlanStore().readEmployeeManifest({ scope, role, employeeId })
-      if (manifest === null) {
-        json(res, 404, {
-          ok: false, code: CONTEXT_PLAN_ERRORS.EMPLOYEE_MANIFEST_NOT_FOUND,
-          error: `空间 ${scope} 里没有 ${role ?? employeeId} 的岗位清单`,
-          serverTimeMs: Date.now(),
-        })
-        return
-      }
-      json(res, 200, { ok: true, manifest, serverTimeMs: Date.now() })
-      return
-    }
-    if (req.method === 'GET' && path === '/api/employee-manifests') {
-      const scope = url.searchParams.get('scope')
-      const limitRaw = url.searchParams.get('limit')
-      const limit = limitRaw === null ? 100 : Math.min(Math.max(Number(limitRaw) || 0, 1), 500)
-      const items = contextPlanStore().listEmployeeManifests({ scope, limit })
-      json(res, 200, { ok: true, manifests: items, count: items.length, serverTimeMs: Date.now() })
-      return
-    }
-    if (req.method === 'POST' && path === '/api/employee-manifests') {
-      await handleRun(req, res, (body) => {
-        const r = contextPlanStore().putEmployeeManifest(body.manifest ?? body, {
-          scope: body.scope, actor: body.actor ?? body.by ?? null,
-        })
-        return { manifest: r.manifest, created: r.created }
-      })
-      return
-    }
+    // ── 岗位清单（读一份 / 列一版 / 存一版） —— 已提取到 `./routes/employee-manifests.mjs`（PRT-316 第 23 族 / 切片 24）──
+    // 整段搬走：`server.mjs` 里现在**不再有** `/api/employee-manifest` 路由，该命名空间只住一个地方。
+    if (await router.dispatch(req, res, { path, url })) return
     // ── 密钥库（secrets）：状态只读 + 列表 + 写入 + 轮换 + 删除（引用名走 URL） —— 已提取到 `./routes/secrets.mjs`（PRT-316 第 6 族 / 切片 6）──
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/secrets` 路由，该命名空间只住一个地方。
     if (await router.dispatch(req, res, { path, url })) return

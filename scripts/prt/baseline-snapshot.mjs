@@ -224,10 +224,12 @@ SOURCES.rolePackStore = join(ROOT, 'team-hub', 'role-pack-store.mjs')
 // ★ 逐个列名，与上面 `SCHEMA_SOURCES` 同一纪律（glob 会漏掉新文件，而漏掉是静默的）。
 //   列名是否齐全由 `assertRouteFamilyCoverage()` 以 `server.mjs` 的装配处为权威核对。
 SOURCES.routesRules = join(ROOT, 'team-hub', 'routes', 'rules.mjs')
+SOURCES.routesPermissions = join(ROOT, 'team-hub', 'routes', 'permissions.mjs')
 
 /** 已提取出去的路由族模块（值 = 该文件里**声明式**路由的归属名）。 */
 export const ROUTE_FAMILY_SOURCES = Object.freeze([
   { module: 'routesRules', family: 'rules', factory: 'createRulesRoutes' },
+  { module: 'routesPermissions', family: 'permissions', factory: 'createPermissionsRoutes' },
 ])
 SOURCES.experienceStore = join(ROOT, 'team-hub', 'experience-store.mjs')
 

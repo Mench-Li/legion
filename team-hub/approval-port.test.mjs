@@ -39,6 +39,8 @@ import {
 } from './approval-port.mjs'
 import { BRIDGE_CODES } from './tool-request-bridge.mjs'
 import { APPROVAL_OUTCOMES } from '../runtime/dsh-composition/enforcement.mjs'
+// ★ PRT-316 切片 2：permissions/审批箱 族已搬进独立模块——本文件末尾按**缝上契约**补判据。
+import { createPermissionsRoutes } from './routes/permissions.mjs'
 // ★ 副作用导入：**注册那一步就发生在这里**。注册方在模块求值期调
 //   `setApprovalPortFactory()`，把工厂放进 `root-row` 的注册缝。
 //   不导入它，注册缝就是空的——而"空注册缝"与"链没接通"在读数上分不开，
@@ -768,4 +770,113 @@ test('★★★ 生产两行之间真的会合：pre-execute 留投影 → appro
     , '审批行上没有绑定哈希——说明投影没有经过登记簿')
 })
 
+// ══════════════════════════════════════════════════════════════════════════════
+// PRT-316 切片 2：搬走的 permissions/审批箱 族的**缝上契约**
+//
+// 为什么要补：破验（`.worktrees/_prt-handoff/mutate-slice2.mjs`）量出既有 HTTP 套件
+// 只咬住 6 条里的 1 条。逐条查过之后，**另外 4 条是"从来没人测过"**，
+// 不是"我的变异等价"：
+//
+//   - `DELETE /api/permissions/rules/<id>`：全仓 **0 个套件**碰过（带 id 的前缀路由）；
+//   - `GET /api/permissions/inbox?scope=`：全仓 **0 个套件**带过 scope；
+//   - `POST /api/permissions/check` 不带 `actor`：没有套件走过那条回退。
+//
+//   > 一个"所有用例都绿"的路由族，与一个"有一半行为从来没人问过"的路由族，
+//   > 在测试报告上是同一个读数。
+//
+// ★ 补在**这个文件**里而不是新建文件，是有意的：新建 `*.test.mjs` 会改变
+//   `git ls-files "*.test.mjs"` 的条数，而那个数被 `boundary-facts` 的
+//   `handover-tracked-suites` 钉着（另一会话正在同一处工作）。
+//
+// ★ 判据打在**缝**上（注入桩）：本片改动引入的正是缝——
+//   "路由把注入的依赖用对了没有"。既有 23 例仍在**真 hub** 上验
+//   "hub 会怎么答"，两层互补。
+// ══════════════════════════════════════════════════════════════════════════════
 
+/** 造一个记录所有注入点调用的族；`overrides` 可覆写任意注入点。 */
+function spyFamily(overrides = {}) {
+  const calls = { inbox: [], delete: [], upsert: [], check: [], decide: [], sent: [] }
+  const fam = createPermissionsRoutes({
+    json: (_res, code, obj) => { calls.sent.push([code, obj]) },
+    handleWrite: async (_req, _res, fn) => { fn({}, 'general', 'global') },
+    authorized: () => true,
+    readBody: async () => ({}),
+    requireMember: () => 'general',
+    listPermissionInbox: (scope) => { calls.inbox.push(scope); return [] },
+    decidePermission: (a) => { calls.decide.push(a); return a },
+    checkPermission: (a) => { calls.check.push(a); return { status: 'ask' } },
+    upsertPermissionRule: (a) => { calls.upsert.push(a); return a },
+    deletePermissionRule: (id, by) => { calls.delete.push([id, by]); return { scope: id, by } },
+    ...overrides,
+  })
+  return { fam, calls }
+}
+
+// ★ `path` 必须是 **pathname**（不带查询串）——真实 `handle()` 就是这么传的
+//   （`let path = url.pathname`）。把 `?scope=` 一起传进 path 会让**等值路由匹配不上**，
+//   而那正是我第一版夹具的错：读数是"scope 没透传"，真相是"路由根本没被调用"。
+const dispatchPerm = (fam, method, target) => {
+  const url = new URL(`http://x${target}`)
+  return fam.dispatch({ method, headers: {} }, {}, { path: url.pathname, url })
+}
+
+test('切片2 ① inbox 的鉴权真的来自注入的 authorized（取掉它必须 401，且不许读审批箱）', async () => {
+  const { fam, calls } = spyFamily({ authorized: () => false })
+  const handled = await dispatchPerm(fam, 'GET', '/api/permissions/inbox')
+  assert.equal(handled, true, 'inbox 没被本族接住')
+  assert.deepEqual(calls.sent, [[401, { error: '未授权：Bearer token 无效' }]]
+    , '未授权时没有回 401（鉴权被取掉了）')
+  assert.deepEqual(calls.inbox, [], '未授权时仍然把审批箱读出来了')
+
+  // 反面控制：授权通过时必须真的读，否则上面那条会退化成"恒 401 也算过"
+  //   ⚠️ 成功路径**也会**调 `json`（200），所以不能断言 `sent` 为空——
+  //   要断言的是"没有 401"，不是"没有响应"。
+  const ok = spyFamily()
+  await dispatchPerm(ok.fam, 'GET', '/api/permissions/inbox')
+  assert.deepEqual(ok.calls.inbox, [null], '授权通过时没有读审批箱')
+  assert.ok(ok.calls.sent.length > 0 && ok.calls.sent.every(([code]) => code === 200)
+    , '授权通过时出现了非 200 的响应：' + JSON.stringify(ok.calls.sent))
+})
+
+test('切片2 ② inbox 的 scope 是**透传**的（不带时必须是 null，不是空串）', async () => {
+  const { fam, calls } = spyFamily()
+  await dispatchPerm(fam, 'GET', '/api/permissions/inbox?scope=software')
+  await dispatchPerm(fam, 'GET', '/api/permissions/inbox')
+  assert.deepEqual(calls.inbox, ['software', null]
+    , 'scope 没有从 url 透传下去（或空值没归成 null）——审批箱会把别的空间的行混进来')
+})
+
+test('切片2 ③ check 缺 actor 时回落成 by；显式给了 actor 就不许被覆盖', async () => {
+  const absent = spyFamily()
+  await dispatchPerm(absent.fam, 'POST', '/api/permissions/check')
+  assert.equal(absent.calls.check.length, 1, 'check 路由没被接住')
+  assert.equal(absent.calls.check[0].actor, 'general'
+    , '缺 actor 时没有回落成 by（这次判定会落在一个空主体上）')
+
+  const explicit = spyFamily({
+    handleWrite: async (_req, _res, fn) => { fn({ actor: 'someone-else' }, 'general') },
+  })
+  await dispatchPerm(explicit.fam, 'POST', '/api/permissions/check')
+  assert.equal(explicit.calls.check[0].actor, 'someone-else', '显式 actor 被 by 覆盖了')
+})
+
+test('切片2 ④ 带 id 的删除是**前缀**路由：id 逐字传出，且不吃掉 POST rules', async () => {
+  const { fam, calls } = spyFamily()
+  const hit = await dispatchPerm(fam, 'DELETE', '/api/permissions/rules/rule-abc')
+  assert.equal(hit, true, '带 id 的 DELETE 没被接住（前缀路由退化成了等值比较）')
+  assert.deepEqual(calls.delete, [['rule-abc', 'general']]
+    , 'id 没有被逐字切出来（切多或切少都会删错行）')
+
+  // 不带 id（无尾斜杠）⇒ 不该命中
+  assert.equal(await dispatchPerm(fam, 'DELETE', '/api/permissions/rules'), false
+    , 'DELETE 不带 id 也被接住了')
+
+  // POST /api/permissions/rules 必须走 upsert，而不是被删除那条吃掉
+  await dispatchPerm(fam, 'POST', '/api/permissions/rules')
+  assert.equal(calls.upsert.length, 1, 'POST rules 没走 upsert')
+  assert.equal(calls.delete.length, 1, 'POST rules 被删除那条吃掉了')
+
+  // 方法不匹配 ⇒ 不命中
+  assert.equal(await dispatchPerm(fam, 'GET', '/api/permissions/rules/rule-abc'), false
+    , 'GET 也被删除路由接住了')
+})

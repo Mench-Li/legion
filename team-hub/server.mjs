@@ -227,6 +227,7 @@ import { loadConfig } from '../packages/shared/src/config.mjs'
 import { SCHEMA as CONFIG_SCHEMA } from './config-schema.mjs'
 import { createRouter } from './router.mjs'
 import { createRulesRoutes } from './routes/rules.mjs'
+import { createPermissionsRoutes } from './routes/permissions.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -4931,6 +4932,11 @@ export function artifactContent(taskId, rawI) {
 // 不需要再往下面那条 if 链里抄一遍同样的形状。
 const router = createRouter([
   createRulesRoutes({ json, handleWrite, validRuleScope, getRule, saveRule }),
+  createPermissionsRoutes({
+    json, handleWrite, authorized, readBody, requireMember,
+    listPermissionInbox, decidePermission, checkPermission,
+    upsertPermissionRule, deletePermissionRule,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -8220,32 +8226,9 @@ async function handle(req, res, stripPrefix) {
     // 语义与原来那两条 `if` 逐条相同：等值匹配、GET 先于 POST、命中即 return。
     if (await router.dispatch(req, res, { path, url })) return
 
-    // ── 权限治理（F-02）：策略、检查与审批箱 ──
-    if (req.method === 'POST' && path === '/api/permissions/check') {
-      await handleWrite(req, res, (body, by) => checkPermission({ ...body, actor: body.actor ?? by }))
-      return
-    }
-    if (req.method === 'GET' && path === '/api/permissions/inbox') {
-      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
-      json(res, 200, { ok: true, requests: listPermissionInbox(url.searchParams.get('scope') || null) })
-      return
-    }
-    if (req.method === 'POST' && path === '/api/permissions/decide') {
-      await handleWrite(req, res, (body, by) => decidePermission({ ...body, by }))
-      return
-    }
-    if (req.method === 'POST' && path === '/api/permissions/rules') {
-      await handleWrite(req, res, (body, by) => upsertPermissionRule({ ...body, by }))
-      return
-    }
-    if (req.method === 'DELETE' && path.startsWith('/api/permissions/rules/')) {
-      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
-      const body = await readBody(req)
-      const by = requireMember(body)
-      try { json(res, 200, { ok: true, rule: deletePermissionRule(path.slice('/api/permissions/rules/'.length), by) }) }
-      catch (e) { json(res, 400, { error: e instanceof Error ? e.message : String(e) }) }
-      return
-    }
+    // ── 权限治理（F-02）：策略、检查与审批箱 —— 已提取到 `./routes/permissions.mjs`（PRT-316 切片 2）──
+    // 这正是 PRT-212「真实审批箱接线」要落脚的那一族（inbox + decide）。
+    if (await router.dispatch(req, res, { path, url })) return
 
     // ── 技能（scope-owned + grant，借鉴 QM shared skills）──
     if (req.method === 'POST' && path === '/api/skills/register') {

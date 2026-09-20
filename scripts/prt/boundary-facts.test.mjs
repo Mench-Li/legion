@@ -1335,3 +1335,97 @@ test('⑯ ★★ 交付物里每一处台账分档抄写都要等于台账（以
   const stray = frozen.filter((x) => !/^### 3\.0/.test(sectionHeading(lines, x.line)))
   assert.deepEqual(stray.map((x) => x.line), [], '留档区里有不在 `### 3.0*` 小节内的台账抄写 ⇒ 可能是被挪进去规避判据的')
 })
+
+// ── 第 59 轮：台账分档的 **10 处抄写**，逐个登记为「现行」或「历史」──────────
+//
+//   第 58 轮只覆盖了交付物自己的 2 处（靠 `## 三、逐轮留档` 这个由文档自己声明的边界）。
+//   本轮把全部 10 处登记出来：
+//
+//     现行（必须等于台账）  交付物开头摘要 · 交接报告 §一 · 交接报告 §二 · 人工清单抬头
+//     历史（只登记，不核值）交付物 §三 留档 · 交接报告 §12.3 · 状态文档 3 处
+//
+//   > "10 处里只有 2 处被盯"这件事，不能靠"多盯 2 处"来修 ——
+//   > 只要还剩下一处没人登记，同一个缺陷下次就换个地方复现。
+//
+//   ⇒ 判据要求分类**完整**：每一处要么被核值，要么被显式登记为历史。
+//     新增第 11 处 ⇒ 报红，并在消息里说明"去 TALLY_LIVE / TALLY_FROZEN 登记它"。
+const TALLY_COPY = /(?:\d+)\s*✅\s*[/／]\s*(?:\d+)\s*🟡\s*[/／]\s*(?:\d+)\s*⏸\s*[/／]\s*(?:\d+)\s*⬜/
+const TALLY_DOCS = [
+  'docs/superpowers/prt/PRT-FINAL-REPORT-2026-09-18.md',
+  'docs/superpowers/prt/PRT-HANDOVER-2026-09-18-ROUND22.md',
+  'docs/superpowers/prt/PRT-HUMAN-INTERVENTION-2026-09-20.md',
+  'docs/MULTI-AGENT-FEATURE-STATUS.md',
+]
+const TALLY_LIVE = [
+  { doc: TALLY_DOCS[0], starts: '- 权威台账：', what: '交付物开头那句现行摘要' },
+  { doc: TALLY_DOCS[1], starts: '功能实现**已完成到', what: '交接报告 §一 一句话结论' },
+  { doc: TALLY_DOCS[1], starts: '| 台账 | **145 行 =', what: '交接报告 §二 最终读数' },
+  { doc: TALLY_DOCS[2], starts: '> 台账 `docs/', what: '人工清单抬头' },
+]
+const TALLY_FROZEN = [
+  { doc: TALLY_DOCS[0], starts: '| 「145 行 =', where: '交付物 §三 逐轮留档' },
+  { doc: TALLY_DOCS[1], starts: '| `handover-ledger-tallies` |', where: '交接报告 §12.3（第 26 轮留档）' },
+  { doc: TALLY_DOCS[3], starts: '| `handover-ledger-tallies` |', where: '状态文档（第 26 轮留档）' },
+  { doc: TALLY_DOCS[3], starts: '| 「145 行 =', where: '状态文档 5.27.2（留档）' },
+  { doc: TALLY_DOCS[3], starts: '| **真台账** |', where: '状态文档 5.28.7（第 46 轮留档）' },
+]
+
+test('⑰ ★★★ 台账分档的每一处抄写都被登记过：现行的必须等于台账，历史的必须显式列出', () => {
+  const ledger = readFileSync(resolve(REPO, 'docs/superpowers/prt/PRT-PROGRESS.md'), 'utf8')
+  const real = tallyLedger(ledger)
+  const want = [real.done, real.partial, real.paused, real.todo].join('/')
+  // 每份文档里「带台账分档的行」
+  const copies = []
+  for (const doc of TALLY_DOCS) {
+    const lines = readFileSync(resolve(REPO, doc), 'utf8').split('\n')
+    lines.forEach((l, i) => { if (TALLY_COPY.test(l)) copies.push({ doc, line: i + 1, text: l.trim() }) })
+  }
+  // ① 现行清单：锚点必须**恰好**命中一处，且那一处的值必须等于台账
+  const liveHits = []
+  for (const spec of TALLY_LIVE) {
+    const hit = copies.filter((c) => c.doc === spec.doc && c.text.startsWith(spec.starts))
+    assert.equal(hit.length, 1, `${spec.what}：锚点命中 ${hit.length} 处（应 1）—— ${spec.doc}`)
+    const m = TALLY_COPY.exec(hit[0].text)
+    const v = m[0].match(/\d+/g).join('/')
+    assert.equal(v, want, `${spec.what} 写的是 ${v}，台账是 ${want}`)
+    liveHits.push(hit[0])
+  }
+  // ② 历史清单：锚点也必须**恰好**命中一处
+  const frozenHits = []
+  for (const spec of TALLY_FROZEN) {
+    const hit = copies.filter((c) => c.doc === spec.doc && c.text.startsWith(spec.starts))
+    assert.equal(hit.length, 1, `${spec.where}：锚点命中 ${hit.length} 处（应 1）—— ${spec.doc}`)
+    frozenHits.push(hit[0])
+  }
+  // ③ ★★ 分类必须**完整**：每一处抄写恰好落进一份清单
+  const key = (c) => `${c.doc}#${c.line}`
+  const declared = new Map()
+  for (const c of [...liveHits, ...frozenHits]) declared.set(key(c), (declared.get(key(c)) ?? 0) + 1)
+  // ★★★ 第 59 轮：人工清单 §四 那张**家族表**的编号行，按构造就是历史留档。
+  //
+  //   这一条是被判据自己逼出来的：我在第 58 轮往家族表写了第 58 行，
+  //   而那一段正文**把台账分档又引了一遍**（`140 ✅ / 1 🟡 / 4 ⏸ / 0 ⬜`）——
+  //   于是本判据第一次跑就报"有 1 处没有登记"，
+  //   抓到的正是那条**刚刚记录"抄了 10 处"的家族行**。
+  //
+  //   > 记录"同一个数被抄了 10 遍"这件事，本身又抄了第 11 遍 ——
+  //   > 而抓住它的，正是那条**刚刚为这件事写的判据**。
+  //
+  //   ★ 不逐条登记家族行（那会每轮都要补一次，且"补一下"正是这类缺陷的来源），
+  //     而是给它一条**规则**：家族表的编号行 = 历史。
+  const isFamilyHistoryRow = (c) => c.doc === TALLY_DOCS[2] && /^\|\s*\d{1,2}\s*\|/.test(c.text)
+  for (const c of copies.filter(isFamilyHistoryRow)) declared.set(key(c), (declared.get(key(c)) ?? 0) + 1)
+  const unregistered = copies.filter((c) => !declared.has(key(c)))
+  assert.deepEqual(unregistered.map((c) => `${key(c)}  ${c.text.slice(0, 60)}`), [],
+    `有 ${unregistered.length} 处台账分档抄写**没有登记** ⇒ 去 boundary-facts.test.mjs 的 `
+    + `TALLY_LIVE / TALLY_FROZEN 里登记它（现行就核值，历史就写明出处）`)
+  const dup = [...declared.entries()].filter(([, n]) => n > 1)
+  assert.deepEqual(dup, [], `同一处被登记了两次：${JSON.stringify(dup)}`)
+  // ④ 数量对得上（防止"清单少一条而恰好也没人发现"）
+  //    ★ 用 `declared.size`（**已被分类的不同条目数**），不要用两个清单的长度相加 ——
+  //      家族表那条走的是**规则**、不在任何一份清单里，相加就会少算它。
+  assert.equal(declared.size, copies.length,
+    `已分类 ${declared.size} 处 vs 实存 ${copies.length} 处（现行 ${liveHits.length} · 显式历史 ${frozenHits.length} · 家族行规则 ${copies.filter(isFamilyHistoryRow).length}）`)
+  assert.equal(liveHits.length, TALLY_LIVE.length, '现行清单里出现了重复锚点')
+  assert.equal(frozenHits.length, TALLY_FROZEN.length, '历史清单里出现了重复锚点')
+})

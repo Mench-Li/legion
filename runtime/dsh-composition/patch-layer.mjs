@@ -255,6 +255,56 @@ export const PATCH_LAYER_ROWS = Object.freeze([
     runtimeModule: './plugins/approval-answerer-row.mjs',
   }),
   Object.freeze({
+    id: `${LEGION_ROW_PREFIX}runtime-host-registrar`,
+    plane: 'host',
+    kind: 'runtime-inputs-registrar',
+    purpose: '生产 probeRuntime 的输入（版本 / 四项能力 / 模型选择）：一项有真来源、三项按未确认如实报，自检不可兼容时 provide 具名拒绝并禁止自动执行',
+    mount: Object.freeze({ anchor: 'insert', after: 'tools' }),
+    registrations: Object.freeze([
+      "setDshRuntimeInputsFactory()（模块求值期注册）",
+      "ctx.provide('legionRuntimeHostBinding')",
+    ]),
+    // ★★ 2026-09-20（业主裁决甲）：本行是 §5 第 20 条那条断链的**第一个环节**。
+    //   它默认导出**真的那个** `runtime-host-row` 插件对象（`===`，不是替身），
+    //   所以挂上它 = 那个启动自检真的在真 DSH 进程里跑一次。
+    //
+    //   ⚠️ 安全性已实测（`runtime-host-row.mjs:744-789`）：自检判**不兼容**时
+    //   本行走的是 `ctx.provide({ok:false, code:SELF_CHECK_INCOMPATIBLE,
+    //   autoExecutionForbidden:true})` + `return`，**不是** throw。
+    //   只有**我们自己的接线错误**（BAD_WIRING / PORT_INCOMPLETE /
+    //   COMPOSITION_UNOBSERVED）才当场抛——那条区分是那个文件写明的取舍。
+    //
+    //   ⇒ 真实部署里的读数：四项必需能力里三项**如实报未确认**
+    //   （`usage-reporting` 的理由是硬的：引擎的 `SubagentResult` 契约**没有**用量字段）
+    //   ⇒ 自检不兼容 ⇒ `autoExecutionForbidden: true` ⇒ **禁止自动执行**。
+    //   挂与不挂的**行为等价**，区别只在拒绝从"没人挂"变成"查过、且拒了"。
+    module: './plugins/runtime-host-registrar-row.mjs',
+  }),
+  Object.freeze({
+    id: `${LEGION_ROW_PREFIX}runtime-contract-server`,
+    plane: 'host',
+    kind: 'runtime-contract-exit',
+    purpose: '跨进程 Runtime Contract 服务端：把进程内那台执行引擎暴露给 worker；挂不上时降级为具名码，永不拒绝启动',
+    mount: Object.freeze({ anchor: 'insert', after: 'tools' }),
+    registrations: Object.freeze([
+      "ctx.provide('legionRuntimeContractServer')",
+    ]),
+    // ★★ 2026-09-20（业主裁决甲）：这是 §5 第 20 条的**题面那一行**。
+    //
+    //   它的取舍与上面那行**故意相反**（两份文件各自写了自己的理由）：
+    //   本行**不是强制面**，是**出口**。出口挂不上时产品照常起、worker 明说
+    //   自己干不了活（`EXECUTOR_HOST_PORT_REQUIRED`、不认领任何任务）——
+    //   那是**可见的降级**，不是静默失效。所以你在这里读不到 `throw`：
+    //   它一律 `ctx.provide({ok:false, code, ...})`（文件头 L34）。
+    //
+    //   ⚠️ 诚实的边界：本行今天**没有生产输入工厂**
+    //   （`setRuntimeContractInputsFactory()` 全仓只有定义与注释，没有调用方）
+    //   ⇒ 它 apply 之后报的具名码是 `RUNTIME_CONTRACT_ROW_NO_INPUTS_FACTORY`。
+    //   这也正是本条要的读数：从"这一行根本不在树里"变成
+    //   "它在树里、它 apply 过、它按一个具名码拒绝了"。
+    module: './plugins/runtime-contract-server-row.mjs',
+  }),
+  Object.freeze({
     id: `${LEGION_ROW_PREFIX}permission-presets`,
     plane: 'host',
     kind: 'config-override',

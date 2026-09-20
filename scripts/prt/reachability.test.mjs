@@ -349,7 +349,11 @@ test('④ ★★ 读数：四族 gap 仍然不可达（谁把它们接上，这�
     //   ⇒ 归属 §5 第 20 条（与 registrar row / run-floor 同一条断链的三个环节）；
     //     基线里它已被判为 `gap` 而不是 `in-flight`（那几个文件早已提交、
     //     而模块仍不可达 ⇒ "正在接线"的前提过期了）。
-    ['runtime/dsh-composition/runtime-contract-server.mjs', '§5 第 20 条（Runtime 契约服务端没有生产挂点）'],
+    // ★★★ 2026-09-20：§5 第 20 条那一条**已接上**（`patch-layer.mjs` 把 registrar row 与
+    //   contract-server row 挂进补丁层），所以它按本用例的规矩**从 READINGS 里删掉**，
+    //   并换上一个同族的真实成员——否则 READINGS 掉到 9 条，下面那条 `>= 10` 会红，
+    //   而那条红问的是"这一层是不是正在被掏空"。
+    ['runtime/experience/friction.mjs', '§5 第 18 条（F-18 执行面一半：写好了、没有生产调用方）'],
   ]
 
   const stillUnreachable = []

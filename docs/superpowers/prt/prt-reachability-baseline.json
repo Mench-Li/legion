@@ -78,14 +78,14 @@
       "reason": "PRT-712：台账自己写了\"还没有界面/CLI 消费者\"。⇒ 裁决处：§5 第 16 条"
     },
     {
-      "file": "product/metrics-spec7.mjs",
-      "class": "gap",
-      "reason": "第 39 轮：spec §7 第 6 条那六格指标的**口径**。与 `metrics-source.mjs` 是**同一个决定**——\"这些产品级动作由谁触发\"，不是本机能定的。★ 刻意**不**接进远程心跳（PRT-713 的载荷走允许名单，加键=加数据外流，该由人点头）。⇒ 裁决处：§5 第 16 条"
-    },
-    {
       "file": "product/metrics-spec7-source.mjs",
       "class": "gap",
       "reason": "第 39 轮：那六格指标的**真 SQL 生产者**（`event_deliveries`/`run_attempts`/`permission_requests`/`budget_reservations` + 升级审计）。数据在库里、读出口也写好了，缺的是\"谁来看\"。同 `metrics-source.mjs`。⇒ 裁决处：§5 第 16 条"
+    },
+    {
+      "file": "product/metrics-spec7.mjs",
+      "class": "gap",
+      "reason": "第 39 轮：spec §7 第 6 条那六格指标的**口径**。与 `metrics-source.mjs` 是**同一个决定**——\"这些产品级动作由谁触发\"，不是本机能定的。★ 刻意**不**接进远程心跳（PRT-713 的载荷走允许名单，加键=加数据外流，该由人点头）。⇒ 裁决处：§5 第 16 条"
     },
     {
       "file": "product/release/checklist.mjs",
@@ -161,26 +161,6 @@
       "file": "runtime/context/index.mjs",
       "class": "by-design",
       "reason": "re-export 出口"
-    },
-    {
-      "file": "runtime/dsh-composition/plugins/runtime-contract-server-row.mjs",
-      "class": "gap",
-      "reason": "★★ 2026-09-18 由 in-flight 改判为 gap。理由：`in-flight` 的判据是「另一个 agent 当轮正在接线（**工作树未提交**）」，而那几个文件**已经提交了**（e0b83af / 69da8fd / 5c1d698），而这几个模块**仍然不可达** ⇒ 前提已过期，它不再是“正在接线”，是“接不上”。真实状态是**已经记录在案的诚实阻塞**：该行把 Runtime 契约服务挂进组合，但它不在 `PATCH_LAYER_ROWS` 里；而补上它需要 `runtimeHost` 的 `probeRuntime` 报 version + 四项必需能力，**全仓没有生产实现**（真 DSH 进程里实测：没有版本服务、也没有能力服务）。给一张全 true 的能力表就是**编**——它会让 `checkCompatibility` 在一个从未验过的引擎上判“兼容”。见 `docs/STATUS.md`「本轮明确不做的两件」§四 ⇒ 属需要 **§5 裁决**的人工介入项，不是能靠写代码绕过去的东西。⇒ 裁决处：§5 第 20 条"
-    },
-    {
-      "file": "runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs",
-      "class": "gap",
-      "reason": "同上，随那条一起由 in-flight 改判 gap：它按 Run 安装身份/下限，而它的挂载需要上面那一行的组合根 ⇒ 同一条断链的两个环节。文件已提交，工作树干净。⇒ 裁决处：§5 第 20 条"
-    },
-    {
-      "file": "runtime/dsh-composition/run-floor.mjs",
-      "class": "gap",
-      "reason": "唯一的 import 者是上面的 registrar row（传递不可达）⇒ 随那条一起由 in-flight 改判 gap。★ 注意它的可达性**不能**由别的读者证明：`scripts/prt/hot-file-churn.mjs` 之类只是名字里含 run-floor，不是这条模块的导入者。⇒ 裁决处：§5 第 20 条"
-    },
-    {
-      "file": "runtime/dsh-composition/runtime-contract-server.mjs",
-      "class": "gap",
-      "reason": "唯一的 import 者是上面的 contract-server row（传递不可达）⇒ 随那条一起由 in-flight 改判 gap。★ 这意味着**服务端没有生产挂点**：消费侧（`product/launcher/runtime-contract-endpoint.mjs` 读回发布并注入 `LEGION_RUNTIME_URL`/`LEGION_RUNTIME_TOKEN`）已接线，没有它，真实部署里那份发布永远不会被写出来。⇒ 裁决处：§5 第 20 条"
     },
     {
       "file": "runtime/employee/role-pack.mjs",

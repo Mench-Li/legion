@@ -841,6 +841,8 @@ export const FACTS = Object.freeze([
         'pre-execute': 'pre-execute',
         'approval-answerer': 'approval-answerer',
         'permission-presets': 'permission-presets',
+        'runtime-host-registrar': 'runtime-host-registrar',
+        'runtime-contract-server': 'runtime-contract-server',
       })
       return ctx.patchRows()
         .map((r) => String(r.id).replace(/^legion-enforcement-/, ''))

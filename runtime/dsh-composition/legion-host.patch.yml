@@ -49,6 +49,10 @@
       name: "./plugins/hard-floor.mjs"
     - id: "legion-enforcement-root"
       name: "../../team-hub/approval-registrar-row.mjs"
+    - id: "legion-enforcement-runtime-host-registrar"
+      name: "./plugins/runtime-host-registrar-row.mjs"
+    - id: "legion-enforcement-runtime-contract-server"
+      name: "./plugins/runtime-contract-server-row.mjs"
 - id: "permission"
   config:
     presets:

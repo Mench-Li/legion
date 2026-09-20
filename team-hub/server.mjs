@@ -244,6 +244,7 @@ import { createMembersRoutes } from './routes/members.mjs'
 import { createExecRoutes } from './routes/exec.mjs'
 import { createModelsRoutes } from './routes/models.mjs'
 import { createWebRoutes } from './routes/web.mjs'
+import { createGoalSlicesRoutes } from './routes/goal-slices.mjs'
 import { createTeamPlanReadRoutes } from './routes/team-plan-read.mjs'
 import { createAgentIntakeRoutes } from './routes/agent-intake.mjs'
 import { createSpaceConfigRoutes } from './routes/space-config.mjs'
@@ -5214,6 +5215,10 @@ const router = createRouter([
     json,
     contextPlanStore, CONTEXT_PLAN_ERRORS,
   }),
+  createGoalSlicesRoutes({
+    json,
+    handleWrite, expandGoalSlices,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -5248,15 +5253,10 @@ async function handle(req, res, stripPrefix) {
     // 本族这 5 条已全部搬进模块，`server.mjs` 里不再有它们。
     // ⚠️ **前缀下还有不属于本族的**（别顺手搬走）：GET /api/artifact/content
     if (await router.dispatch(req, res, { path, url })) return
-    if (req.method === 'POST' && path === '/api/goal/slices') {
-      // 切片展开：守护在 test-designer done 后解析 TASK_BREAKDOWN.md 并注册切片（见 ORCHESTRATION-V3）。
-      await handleWrite(req, res, (body, by, scope) => {
-        const testDesignerTaskId = body.testDesignerTaskId
-        if (typeof testDesignerTaskId !== 'string' || testDesignerTaskId.length === 0) throw new Error('缺少参数 testDesignerTaskId')
-        return expandGoalSlices({ testDesignerTaskId, slices: body.slices, by })
-      })
-      return
-    }
+    // ── 切片展开（testDesignerTaskId 必填，其余交给 expandGoalSlices） —— 已提取到 `./routes/goal-slices.mjs`（PRT-316 第 46 族 / 切片 48）──
+    // 本族这 1 条已全部搬进模块，`server.mjs` 里不再有它们。
+    // 归属 /api/goal 的那 1 条都在这里了。
+    if (await router.dispatch(req, res, { path, url })) return
     // ── 运行面（PRT-302/303/313）：带权威时间与 leaseEpoch 的领取 / 续租 / 提交 / 放弃 / 恢复 / 失败 / 挂起 / 决议 —— 已提取到 `./routes/runtime-lease.mjs`（PRT-316 第 35 族 / 切片 37）──
     // 本族这 9 条已全部搬进模块，`server.mjs` 里不再有它们。
     // 归属 /api/runtime 的那 9 条都在这里了。
@@ -5440,7 +5440,6 @@ async function handle(req, res, stripPrefix) {
     if (await router.dispatch(req, res, { path, url })) return
     // ── 目标的发布与生命周期：发布（含阶段任务链）/ 读取目标上下文 / 暂停·恢复·取消 —— 已提取到 `./routes/goal-lifecycle.mjs`（PRT-316 第 38 族 / 切片 40）──
     // 本族这 3 条已全部搬进模块，`server.mjs` 里不再有它们。
-    // ⚠️ **前缀下还有不属于本族的**（别顺手搬走）：POST /api/goal/slices
     if (await router.dispatch(req, res, { path, url })) return
     // ── 智能体登记（含 PRT-402 编队与岗位清单同事务）与选人入编（prefix+suffix 形状） —— 已提取到 `./routes/agent-intake.mjs`（PRT-316 第 44 族 / 切片 46）──
     // 本族这 2 条已全部搬进模块，`server.mjs` 里不再有它们。

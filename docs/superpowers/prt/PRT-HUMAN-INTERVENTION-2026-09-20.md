@@ -207,6 +207,56 @@ composition-patch-layer: legion-enforcement-runtime-contract-server: 同形
 ★ **我选的是"不动、报上来"**：让这两行豁免，是在我不知道的地方把一个自检变松；
 而"变绿"与"变可用"是两件事 —— 这条路我判不了，也不该替您判。
 
+#### ★★★★ 第 76 轮：#28 的施工清单钉到**三个改点** —— 而这三个文件**现在被另一会话占着**
+
+第 75 轮说"下一轮做它"。本轮先把改点读到**行**，然后发现**我做不了**（原因见末尾）。
+
+**① 缺的那一样是"白名单里没有它"** —— 本仓**自己**把这条规律写在 `process-manifest.mjs:328`：
+
+> 一个"没声明所以被白名单丢掉"的变量，与一个"根本没配"的变量，在子进程里是**同一个读数**（`undefined`）
+
+而 `LEGION_DATA_DIR` **在谁的白名单里**，逐条读出来是：
+
+| 进程 | `LEGION_DATA_DIR` 在 `envNames` 里？ | 行 |
+|---|---|---|
+| `runtime` | ★ **在** | `process-manifest.mjs:255` |
+| `orchestrator` | ★ **在** | `process-manifest.mjs:314` |
+| `team-hub` | ★★ **不在** | 它的 `envNames` 在 `:135` 一带 |
+
+★ 而同一条规律，本仓**已经**为**同一个变量**栽过一次 ——`process-manifest.mjs:324` 逐字写着：
+「`LEGION_DATA_DIR` 声明了、但 Launcher 从不给值 ⇒ 起来就退 8（崩溃循环）」。
+
+**② 施工清单（三处，缺一不可）**
+
+| # | 文件 | 改什么 |
+|---|---|---|
+| 1 | `product/process-manifest.mjs` | 把 `'LEGION_DATA_DIR'` 加进 **team-hub** 的 `envNames` |
+| 2 | `product/launcher/launcher.mjs` | 给 team-hub 也设 `out.LEGION_DATA_DIR = layout.dataDir`（照 `:875`/`:882` 给 runtime / orchestrator 的写法） |
+| 3 | `product/config-schema.mjs` | 在派生表里补一行 `{ target: 'team-hub', env: 'LEGION_DATA_DIR', via: 'env', from: 'layout.dataDir', … }` |
+
+做完这三处，hub 才**拿得到** `layout.dataDir`，才能把 `toolcall-spool` 落在它下面 ——
+而**生产方与收账方用的是同一个 `layout.dataDir`，不是猜出来的**。
+
+**③ ★★ 本轮没做，因为这三个文件现在被并行的那个会话占着**
+
+```
+M product/config-schema.mjs      M product/launcher/launcher.mjs      M product/process-manifest.mjs
+```
+
+⇒ 它们**正是**上面清单里的三个。既定纪律是**绝不**动另一会话正在改的文件
+（改坏了是对**两个人**的破坏，而且会在我看不见的地方冲突）。
+
+★★ 所以本轮**没有卡在一个决定上** —— 它卡的是一件**临时**的事：
+
+| | 第 75 轮之前 | 第 76 轮之后 |
+|---|---|---|
+| #28 缺什么 | 「要业主选一个落点」 | **三处明确的改动**，改点已钉到行 |
+| 谁挡着 | 一个**不存在**的裁决 | 一个**真实且临时**的占用（另一会话的工作树） |
+
+> 一个"等人裁决"的缺口，会让它永远停在原地；
+> 而把它读成"三处改动 + 一次占用"之后，它就只是一件**排期**的事。
+
+★ 下一轮先看这三个文件是否已释放；已释放就照清单做，未释放就绕开做别的。
 #### ★★★★★ 第 75 轮：**§5 第 28 条不是"待裁决"，是"待施工"**
 
 §5 第 28 条从第 20 轮起一直挂着，写法是「那条"出站车道"的**文件落点**（甲/乙/丙三个选项）」，
@@ -648,8 +698,9 @@ SVCCHECKS [{"name":"composition-patch-layer","ok":false,
 | 72 | ★★★★★ **更正我自己第 66 轮的一个过度概括，而它把 Ⅰ 缩小了** —— 第 66 轮我写过「**没有**任何一个文件提供 `subagents`」。**那句话是错的。**它怎么来的：`git grep -ln "provide('subagents'\|…"` 的 shell 转义把模式弄坏了，`git grep` 打了 `fatal: unable to resolve revision`，而我的脚本把**报错**当成了**空结果** ⇒ 我读到的"零"其实是"没查成"。> ★ 这正是我第 63 轮自己记下的陷阱：**"查不到"与"查出错"是同一个空数组** ——> 而一个空数组读起来就像"一次都没有"。**我隔了九轮又踩了同一个。**★ 用对的方式重查：**有两个文件确实提供了 `subagents`**（`runtime-host-registrar-row-dsh-process.test.mjs:187`、`runtime-host-binding-unblocked-dsh-process.test.mjs:186`）。⇒ 那 21 条红分成**两簇**：**A** 不含 `subagents` 的 ⇒ **假件不完整**（★ **我修**：给 fixture 补上）；**B** 含 `subagents` 的那两个 ⇒ 实测 **6 红**（registrar `4/2`、binding-unblocked `3/4`）⇒ **自检恒不兼容**（第 67/68 轮那条）⇒ ★ 裁决 **Ⅰ**。★★★★★ **有用的收窄：需要你裁决的不是 21 条，是 6 条。**> 一个被报成 21 的缺口，和一个被报成 6 的缺口，> 收到的人的**下一步动作完全不同** —— 而它们此前是同一个数字。★ 本轮**没有动代码**：补 fixture 要连同那几个文件自己的断言一起核。**下一轮做 A 簇。** |
 | 74 | ★★★★★ **撤回"A 簇"，并更正我把 no-op 报成了进展** —— 第 72 轮我把 21 条红分成 A 簇（缺 `subagents` 的假件，我修）与 B 簇（自检恒不兼容，裁决 Ⅰ）；第 73 轮去修 A 簇、补上 `subagents`，并写下"**5 通过 / 5 失败**"——**那句话读起来像进展**。★ 第 74 轮量了【改之前】的基线：`runtime-host-row-dsh-process` **5/5 → 5/5**、`runtime-contract-cross-process` **10/9 → 10/9** ⇒ **两个文件都一模一样，补 `subagents` 一个读数都没改。**★ 第 73 轮我**没有先量基线**就把它写成了进展 —— 正是我自己记过的那条陷阱：**两个行为等价的版本分不开**，而"改之前"没量的时候"改之后"读起来总是像成果。★ 撤回两件：① 第 66 轮"最内层的因：假件不提供 `subagents`"对**报错文本**是对的（工厂确实抛了 `NO_SUBAGENTS_PORT`），但**不是那些用例变红的原因**；② **"A 簇"不存在** —— 21 条红**全是同一个因**（启动自检恒不兼容）。★★★★★ **这对要裁的那件事是个简化**：两件 → **一件**（就是 **Ⅰ**）；我要做的施工 → **没有**。> 一条被切成两半的缺口，会让收的人以为"有一半是可以自己好起来的"；> 而把它合成一条之后，那件事反而**更好裁**了 —— 因为它只有一个答案。★ 两个文件的改动**已 revert**（不改任何读数，留着就是装饰性改动）。 |
 | 75 | ★★★★★ **§5 第 28 条不是"待裁决"，是"待施工"** —— 它从第 20 轮起写作「那条"出站车道"的**文件落点**（甲/乙/丙 三个选项）」，读起来像一个位置决定。★ 本轮去读"这个产品里还有几个 DataDir 派生处"：`product/config-schema.mjs:88` 定义唯一的 `dataDir`（env `LEGION_DATA_DIR`），`:1043` / `:1045` 已把 `from: 'layout.dataDir'` 派给 **runtime** 与 **orchestrator**，**表里没有 team-hub 这一行**；而 `product/process-manifest.mjs:111` 显示 `team-hub` 就是同一份进程清单里的兄弟进程（`node-file team-hub/server.mjs`）。⇒ **这个产品只有一个 `dataDir`，落点由冻结布局定死，已有两个消费者拿到它，hub 只是没被登记。**⇒ **结论翻转**：位置决定 → **接线遗漏**；要业主裁决 → **我施工**；"猜一个两边都同意的路径"**不必猜**（两边同一个 `layout.dataDir`）。★ 那三个选项里"新登记一个键"正是**唯一**与其余两处不一致的做法 ⇒ 不需要选。★ 本轮没直接改：那张表的 `target` **取值闭集**要先核（表里只出现过 runtime / orchestrator），并连带 `product/launcher/allowlist` 那一侧。**下一轮做它。**> 一个被写成"位置决定"的缺口，会让它一直停在"等人选一个地方"；> 而它真正缺的，常常只是**把已经定死的位置告诉第三个读者**。 |
+| 76 | ★★★★ **#28 的施工清单钉到三个改点 —— 而这三个文件现在被另一会话占着** —— 第 75 轮说"下一轮做它"，本轮先把改点读到**行**：**①** 缺的是"白名单里没有它"（本仓自己在 `process-manifest.mjs:328` 写着「一个'没声明所以被白名单丢掉'的变量，与一个'根本没配'的变量，在子进程里是同一个读数（`undefined`）」）——逐条读出 `LEGION_DATA_DIR` 在 `runtime`(`:255`) 与 `orchestrator`(`:314`) 的白名单里，**`team-hub` 不在**；而同一条规律本仓**已经为同一个变量**栽过一次（`:324`「`LEGION_DATA_DIR` 声明了、但 Launcher 从不给值 ⇒ 起来就退 8」）。**② 施工清单（三处，缺一不可）**：① `process-manifest.mjs` 把 `LEGION_DATA_DIR` 加进 team-hub 的 `envNames`；② `launcher.mjs` 给 team-hub 也设 `out.LEGION_DATA_DIR = layout.dataDir`（照 `:875`/`:882`）；③ `config-schema.mjs` 派生表补一行 team-hub。做完 hub 才**拿得到** `layout.dataDir`，才能把 `toolcall-spool` 落在它下面 —— 两边用**同一个** `layout.dataDir`，不是猜的。**③ ★★ 本轮没做，因为这三个文件正被并行的那个会话占着**（`M product/config-schema.mjs`、`M product/launcher/launcher.mjs`、`M product/process-manifest.mjs` —— **正是清单里的三个**）。★ 既定纪律是**绝不**动另一会话正在改的文件。★★ 所以本轮**没有卡在一个决定上**，它卡的是一件**临时**的事：> 一个"等人裁决"的缺口，会让它永远停在原地；> 而把它读成"三处改动 + 一次占用"之后，它就只是一件**排期**的事。 |
 
-**第 75 轮结束时的读数**（全部可复跑）：
+**第 76 轮结束时的读数**（全部可复跑）：
 
     declaration-mirrors   238 张冻结表 / 判为装饰 0 张 / 豁免 0 条
     progress-check        20 → **29/29**      intervention-coverage 16 → **18/18**

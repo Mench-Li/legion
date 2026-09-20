@@ -293,3 +293,223 @@ test('③ 凭证管理的路由都进了平台契约基线（漏一条端点却�
       `平台契约里缺 ${route}：路由加了但基线没记录，等于它能不经评审地增删`)
   }
 })
+
+// ============================================================================
+// ④ PRT-316 切片 6：secrets 族搬进 `routes/secrets.mjs` 之后的**缝上契约**
+//
+// 为什么补：破验 11 条变异，第一轮只咬住 9 条，两条漏网（其中一条还先报"锚点没命中"）：
+//
+//   ★★ K2「rotate 的 `endsWith('/rotate')` 判据失效（只要前缀对就算命中）」没被咬住。
+//      `POST /api/secrets/<任意东西>` 会被**当成一次轮换请求**，而既有 15 例
+//      一条都没说过这件事 —— 它们只打过 `POST /api/secrets//rotate`（空 ref），
+//      从没打过一个"前缀对、后缀不对"的路径。
+//
+//      > 一个"前缀 + 后缀"的匹配，与一个"只有前缀"的匹配，
+//      > 在用例只喂过**后缀刚好正确**的那些输入时是同一个东西。
+//
+//      ★ 本族是本仓库第一次出现**前缀**路由。前五族全是等值路由，
+//        "匹配方式"这一维在它们身上根本不存在，所以这一类洞到现在才有机会露出来。
+//
+//   ★ K6 / K8 / K10 三条漏网有**同一个根因**，值得单独写下来：
+//     运行中的 hub 里 `secretAdmin()` 是**懒构造 + 无注入点**的
+//     （`server.mjs` 里写死 `createHubSecretAdmin({ env: process.env })`），
+//     所以 CI 上它一定打不开 ⇒ 三条**写**路由一律 503 ⇒
+//     "删除该调 remove 还是 list"、"响应里有没有夹带明文"在 **HTTP 面**上不可观测。
+//
+//      > 一个"写路径全都 503"的环境，与一个"写路径的语义都正确"的实现，
+//      > 在只看状态码的用例上是同一个东西。
+//
+//      ⇒ 判据改打在**缝**上：直接构造 `createSecretsRoutes` 并注入**计数桩**
+//        （与切片 4/5 同一手法）。缝以下不需要真实密钥库，所以这一次它们**是可观测的**。
+//
+// ▲ 既有 15 例仍在**真 hub** 上验（不替换、不删除）。
+// ▲ 追加而非新建文件：`git ls-files "*.test.mjs"` 的条数被 `boundary-facts` 钉着。
+// ============================================================================
+
+import { createSecretsRoutes } from './routes/secrets.mjs'
+
+/** 真 hub 对"没有路由认领"的路径给出的答复（`server.mjs` 末尾那条兜底）。 */
+const isRouted = (r) => !(r.status === 404 && String(r.body?.error ?? '').startsWith('not found:'))
+const isUnrouted = (r) => r.status === 404 && String(r.body?.error ?? '').startsWith('not found:')
+
+test('④ ★ 前缀 + 后缀：`POST /api/secrets/<ref>`（**没有** /rotate）不许被当成轮换', async () => {
+  // 这一条就是 K2 的正解：如果 `matches()` 丢掉 `endsWith`，它会是 503（路由认领了，
+  // 只是密钥库打不开），而不是兜底 404。
+  //
+  // ★ 我第一版把 `/api/secrets/rotate` 也列进来了，它**是错的**：
+  //   前缀 `/api/secrets/` 与后缀 `/rotate` 都命中，切出来的 ref 恰好是空串
+  //   → 400 MISSING_PARAM。这是一个**合法匹配**，不是越界。
+  //   （*一个"看起来像后缀本身"的路径，与一个"前缀加一个空 ref"的路径，
+  //   在字符串上是同一个东西* —— 只有真跑一遍才知道它归谁。）
+  for (const p of ['/api/secrets/some-ref', '/api/secrets/some-ref/rotateX']) {
+    const r = await call('POST', p)
+    assert.ok(isUnrouted(r),
+      `${p} 被某条路由认领了（status=${r.status} body=${JSON.stringify(r.body).slice(0, 120)}）`
+      + ' —— 它既不是 /api/secrets 也不是以 /rotate 结尾的轮换路径，必须落到兜底 404')
+  }
+  // 正面确认那条"看起来像后缀"的路径确实归本族（且落到空 ref 的 400）
+  const bare = await call('POST', '/api/secrets/rotate')
+  assert.equal(bare.status, 400)
+  assert.equal(bare.body.code, 'MISSING_PARAM', '`/api/secrets/rotate` 是一个**空前缀 ref**，不是越界')
+})
+
+test('④ 前缀 + 后缀：**合法**的轮换路径必须真的被认领（正面对照）', async () => {
+  // 与上一条配对的正面控制：没有它，"一律不认领"也能让上一条通过。
+  const r = await call('POST', '/api/secrets/some-ref/rotate', { value: 'v' })
+  assert.ok(isRouted(r), `轮换路径没有被认领（status=${r.status}）`)
+})
+
+test('④ 前缀：`DELETE /api/secrets/<ref>` 被认领，而 `DELETE /api/secrets` 不被认领', async () => {
+  // 前缀是 `/api/secrets/`（**带**尾斜杠）：`/api/secrets` 不匹配。
+  // 少了这条，"把 prefix 写成 /api/secrets"（少一个斜杠）这种改动不会被发现 ——
+  // 那会让 `DELETE /api/secrets` 被当成 `ref = ''` 的删除，而不是兜底 404。
+  const bare = await call('DELETE', '/api/secrets')
+  assert.ok(isUnrouted(bare), `DELETE /api/secrets 被认领了（status=${bare.status}）—— 前缀不该匹配它`)
+  const withRef = await call('DELETE', '/api/secrets/some-ref')
+  assert.ok(isRouted(withRef), `DELETE /api/secrets/<ref> 没有被认领（status=${withRef.status}）`)
+})
+
+test('④ 两条 GET 必须各归各的：`/api/secrets/status` 不是列表，`/api/secrets` 不是状态', async () => {
+  const st = await call('GET', '/api/secrets/status')
+  assert.equal(st.status, 200)
+  assert.ok(!('secrets' in st.body), `状态端点回了列表形状：${JSON.stringify(st.body).slice(0, 120)}`)
+  const list = await call('GET', '/api/secrets')
+  assert.ok(!('status' in list.body),
+    `列表端点回了状态形状（status=${list.status}）：${JSON.stringify(list.body).slice(0, 120)}`)
+})
+
+test('④ ★ 记录既有不对称：轮换**不**拒绝多段 ref，删除**拒绝**（本片不改，只钉住）', async () => {
+  // 这是搬运**之前**就有的行为差异，不是本片引入的：
+  //   · `POST .../rotate` 没有 `includes('/')` 判据 ⇒ `a/b` 会被原样交给密钥库；
+  //   · `DELETE /api/secrets/a/b` 有 ⇒ 400 BAD_ID_ENCODING。
+  // 本片只搬路由、不改语义，所以把它钉成契约；否则下一个人会把
+  // "删除会拒多段" 顺手推广到轮换，或者反过来，而两者都是行为变更。
+  const rot = await call('POST', '/api/secrets/a/b/rotate', { value: 'v' })
+  assert.ok(isRouted(rot), `轮换没认领多段 ref（status=${rot.status}）—— 既有行为是被认领`)
+  assert.notEqual(rot.status, 400, '轮换对多段 ref 不该报 400（它没有那道教判据）')
+  const del = await call('DELETE', '/api/secrets/a/b')
+  assert.equal(del.status, 400)
+  assert.equal(del.body.code, 'BAD_ID_ENCODING')
+})
+
+test('④ 段的边界：别的命名空间不许被本族吃掉', async () => {
+  // 前缀路由最容易越界。这几条都在 `/api/secrets` 的"邻接"位置：
+  // `/api/secret`（少一个 s）、`/api/secretsX`（多一个字符）、
+  // `/api/secrets/status/x`（状态端点后面还有一段）。
+  for (const [m, p] of [['GET', '/api/secret'], ['GET', '/api/secretsX'], ['GET', '/api/secrets/status/x'],
+    ['GET', '/api/secrets/statusx']]) {
+    const r = await call(m, p)
+    assert.ok(isUnrouted(r), `${m} ${p} 被认领了（status=${r.status}）`)
+  }
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// ⑤ 缝上的**注入桩**判据 —— 补 K6 / K8 / K10
+//
+// 为什么必须下到这一层：真 hub 里 `secretAdmin()` 没有注入点，CI 上必然打不开，
+// 于是三条写路由一律 503，"调了哪个方法"与"回了什么字段"在 HTTP 面**不可观测**。
+// 注入桩把这两件事变回可观测的。
+// ══════════════════════════════════════════════════════════════════════════
+
+/** 会记录调用的假管理面 + 假 `handleRun`（body 里带一个可辨认的明文）。 */
+function secSpy(over = {}) {
+  const calls = []
+  const admin = {
+    describe: async () => { calls.push(['describe']); return { ok: true, code: 'C', message: 'm', aclVerified: true, count: 0 } },
+    list: async () => { calls.push(['list']); return { entries: [{ ref: 'leaked-ref' }], aclVerified: true } },
+    put: async (a) => { calls.push(['put', a]); return { meta: { ref: a.ref }, aclVerified: true, acl: { ok: true }, aclNote: 'n' } },
+    rotate: async (a) => { calls.push(['rotate', a]); return { meta: { ref: a.ref }, aclVerified: true, acl: { ok: true }, aclNote: 'n' } },
+    remove: async (r) => { calls.push(['remove', r]); return { removed: true, aclVerified: true, acl: { ok: true }, aclNote: 'n' } },
+  }
+  Object.assign(admin, over.admin ?? {})
+  const sent = []
+  const deps = {
+    json: (_res, code, obj) => { sent.push([code, obj]) },
+    secretAdmin: () => admin,
+    // 与真 `handleRun(req, res, fn)` 同形：路由体的 `fn` 收到 (body, by)。
+    // ★★ `handleRun` **本身就是应答方** —— 它把回调返回的对象序列化出去
+    //    （路由体里只有 `await handleRun(...)` + `return`，没有 `json(res, 200, …)`）。
+    //    所以桩必须把返回值记成 200，否则"响应里有没有夹带明文"这一条
+    //    会看到**空响应**，而空响应会让 `includes('SECRETVALUE') === false` **恒真**
+    //    —— 那正好是要防的那种假绿（*一个"没观测到"，与一个"观测到没有"，在断言上是同一个 false*）。
+    handleRun: async (_req, _res, fn) => {
+      calls.push(['handleRun'])
+      const out = await fn({ actor: 'me', ref: 'spy-ref', value: 'SECRETVALUE', purpose: 'spy-purpose' }, 'me')
+      sent.push([200, out])
+      return out
+    },
+    audit: (...a) => { calls.push(['audit', ...a]) },
+    readScope: () => 'general',
+  }
+  Object.assign(deps, over.deps ?? {})
+  const fam = createSecretsRoutes(deps)
+  const dispatch = (method, target) => {
+    const url = new URL(`http://x${target}`)
+    return fam.dispatch({ method, headers: {} }, {}, { path: url.pathname, url })
+  }
+  return { dispatch, calls, sent }
+}
+const last = (calls, n) => calls.filter((c) => c[0] === n).at(-1)
+
+test('⑤ ★ K8：`DELETE` 必须调 `remove(ref)`，**不是** `list`', async () => {
+  const s = secSpy()
+  assert.equal(await s.dispatch('DELETE', '/api/secrets/spy-ref'), true)
+  assert.ok(last(s.calls, 'remove'), `DELETE 没有调 remove（调了：${s.calls.map((c) => c[0]).join(',')}）`)
+  assert.equal(last(s.calls, 'remove')[1], 'spy-ref', 'ref 没有从 URL 里切对')
+  assert.equal(s.calls.filter((c) => c[0] === 'list').length, 0, 'DELETE 碰到了 list —— 写路径挂到了只读动作上')
+  assert.equal(s.calls.filter((c) => c[0] === 'describe').length, 0, 'DELETE 碰到了 describe')
+})
+
+test('⑤ ★ K10：写入响应里**永远没有值**（元数据照给，明文一个字节都不许出现）', async () => {
+  for (const [m, p] of [['POST', '/api/secrets'], ['POST', '/api/secrets/spy-ref/rotate']]) {
+    const s = secSpy()
+    assert.equal(await s.dispatch(m, p), true)
+    const [code, body] = s.sent.at(-1) ?? []
+    assert.equal(code, 200, `${m} ${p} 没有 200：${JSON.stringify(s.sent)}`)
+    assert.equal(JSON.stringify(body).includes('SECRETVALUE'), false,
+      `${m} ${p} 的响应里出现了明文：${JSON.stringify(body).slice(0, 200)}`)
+    // 正面：元数据必须照给，且 aclVerified / aclNote 一起给
+    //（"没核验过"不能看起来像"已确认安全"）
+    for (const k of ['secret', 'aclVerified', 'acl', 'aclNote']) {
+      assert.ok(k in body, `${m} ${p} 的响应缺 ${k}`)
+    }
+  }
+})
+
+test('⑤ ★ K6：轮换会对 URL 段做解码，非法编码 → 400（不是把原串下传）', async () => {
+  const bad = secSpy()
+  assert.equal(await bad.dispatch('POST', '/api/secrets/%E0%A4%A/rotate'), true)
+  assert.equal(bad.sent.at(-1)?.[0], 400, `非法编码没有 400：${JSON.stringify(bad.sent)}`)
+  assert.equal(bad.sent.at(-1)?.[1]?.code, 'BAD_ID_ENCODING')
+  assert.equal(bad.calls.filter((c) => c[0] === 'rotate').length, 0, '非法编码仍然调了轮换')
+  // 正面：合法的百分号编码要被**解码**后下传
+  const ok = secSpy()
+  assert.equal(await ok.dispatch('POST', '/api/secrets/a%2Fb/rotate'), true)
+  assert.equal(last(ok.calls, 'rotate')?.[1]?.ref, 'a/b', 'URL 段没有被解码')
+})
+
+test('⑤ 轮换调的是 `rotate`、写入调的是 `put`（动作不许串）', async () => {
+  const r = secSpy()
+  await r.dispatch('POST', '/api/secrets/spy-ref/rotate')
+  assert.ok(last(r.calls, 'rotate'), '轮换没有调 rotate')
+  assert.equal(r.calls.filter((c) => c[0] === 'remove').length, 0)
+  const w = secSpy()
+  await w.dispatch('POST', '/api/secrets')
+  assert.ok(last(w.calls, 'put'), '写入没有调 put')
+  // 审计必须发出来（写动作静默发生是最坏的一种）
+  assert.ok(last(r.calls, 'audit')?.includes('secret:rotate'), '轮换没有留审计')
+  assert.ok(last(w.calls, 'audit')?.includes('secret:put'), '写入没有留审计')
+})
+
+test('⑤ 状态/列表两条只读路由不许互换（引用名不能漏进自检形态）', async () => {
+  const st = secSpy()
+  await st.dispatch('GET', '/api/secrets/status')
+  assert.ok(last(st.calls, 'describe'), 'status 没有调 describe')
+  assert.equal(st.calls.filter((c) => c[0] === 'list').length, 0, 'status 碰到了 list')
+  assert.equal(JSON.stringify(st.sent.at(-1)?.[1] ?? {}).includes('leaked-ref'), false,
+    'status 的响应里出现了引用名')
+  const li = secSpy()
+  await li.dispatch('GET', '/api/secrets')
+  assert.ok(last(li.calls, 'list'), 'GET /api/secrets 没有调 list')
+  assert.equal(li.calls.filter((c) => c[0] === 'describe').length, 0)
+})

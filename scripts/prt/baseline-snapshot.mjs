@@ -228,6 +228,7 @@ SOURCES.routesPermissions = join(ROOT, 'team-hub', 'routes', 'permissions.mjs')
 SOURCES.routesChat = join(ROOT, 'team-hub', 'routes', 'chat.mjs')
 SOURCES.routesCalendar = join(ROOT, 'team-hub', 'routes', 'calendar.mjs')
 SOURCES.routesCompaction = join(ROOT, 'team-hub', 'routes', 'compaction.mjs')
+SOURCES.routesSecrets = join(ROOT, 'team-hub', 'routes', 'secrets.mjs')
 
 /** 已提取出去的路由族模块（值 = 该文件里**声明式**路由的归属名）。 */
 export const ROUTE_FAMILY_SOURCES = Object.freeze([
@@ -236,6 +237,7 @@ export const ROUTE_FAMILY_SOURCES = Object.freeze([
   { module: 'routesChat', family: 'chat', factory: 'createChatRoutes' },
   { module: 'routesCalendar', family: 'calendar', factory: 'createCalendarRoutes' },
   { module: 'routesCompaction', family: 'compaction', factory: 'createCompactionRoutes' },
+  { module: 'routesSecrets', family: 'secrets', factory: 'createSecretsRoutes' },
 ])
 SOURCES.experienceStore = join(ROOT, 'team-hub', 'experience-store.mjs')
 

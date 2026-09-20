@@ -23,9 +23,14 @@ import {
   PREFLIGHT_CHECKED,
   PREFLIGHT_CHECKS,
   PREFLIGHT_CODES,
+  PREFLIGHT_VERDICT_KINDS,
+  PREFLIGHT_VERDICTS,
   checkCompatibility,
   checkDiskSpace,
   checkInFlightTasks,
+  classifyPreflightChecks,
+  preflightVerdictAlignment,
+  preflightVerdictKind,
   requiredBytes,
   runPreflight,
 } from '../../product/upgrade/preflight.mjs'
@@ -275,4 +280,116 @@ test('⑤ ★★ 补丁层成对关系只认 `match`：`unverified` 与任何认
   }
   assert.equal(runPreflight({ ...base, patchPair: 'match' }).ok, true)
   assert.equal(runPreflight({ ...base, patchPair: 'mismatch' }).ok, false)
+})
+
+// ---------------------------------------------------------------------------
+// 裁决词表接线（第 43 轮）
+//
+// ★★★ 补的是**汇总里那处手写复述**：
+//
+//     export const PREFLIGHT_VERDICTS = Object.freeze(['ok', 'blocked', 'unknown'])
+//     const blockedChecks = checks.filter((c) => c.verdict === 'blocked')   ← 手写
+//     const unknownChecks = checks.filter((c) => c.verdict === 'unknown')   ← 手写
+//
+//   往词表里加第四个裁决 ⇒ 它**既不进 blocked、也不进 unknown**
+//   ⇒ `ok` 仍然是 `true`。（实测 `scratch/_probe-preflight-verdict.mjs`：
+//   裁决 `degraded`、`ok = true`、`blocked = []`、`unknown = []`、`reasons = []`，
+//   而**同一份返回值**里 `remedies.disk` 还在给处置建议。）
+//
+//   > 一条"不是 ok、也不是 blocked"的裁决，与一条 ok 的裁决，
+//   > 在"这次升级该不该放行"这个读数上是同一个东西：都说可以走。
+// ---------------------------------------------------------------------------
+
+test('接线① ★★★ 归类表**覆盖每一个**声明的裁决（没有"没归类"这一档）', () => {
+  for (const v of PREFLIGHT_VERDICTS) {
+    assert.equal(typeof PREFLIGHT_VERDICT_KINDS[v], 'string',
+      `裁决「${v}」没有归类——它会被汇总静默当成"没问题"`)
+  }
+  // 反向控制：归类表里不许有词表里没有的裁决（那是一条永远走不到的归类）
+  for (const v of Object.keys(PREFLIGHT_VERDICT_KINDS)) {
+    assert.ok(PREFLIGHT_VERDICTS.includes(v), `归类了却没声明：「${v}」`)
+  }
+})
+
+test('接线② ★★★ 未声明的裁决 ⇒ **当场抛**，不静默放行', () => {
+  assert.throws(() => preflightVerdictKind('half-broken'), /未声明的裁决/)
+  assert.throws(() => preflightVerdictKind(undefined), /未声明的裁决/)
+  // 反向控制：声明过的都要能归类，且恰好一个归到 clear
+  for (const v of PREFLIGHT_VERDICTS) assert.ok(preflightVerdictKind(v).length > 0)
+  assert.equal(PREFLIGHT_VERDICTS.filter((v) => PREFLIGHT_VERDICT_KINDS[v] === 'clear').length, 1,
+    '"通行"的裁决必须恰好一个——多于一个等于放宽了放行条件')
+})
+
+test('接线③ ★★★ 对齐检查**可注入**：造一个"加了裁决却没归类"的形状，必须被指名', () => {
+  // ★ 为什么必须注入：那条守卫只在模块加载时跑一次，而**加载时一切正常**。
+  //   想验证它拦不拦得住，唯一的办法是拿坏输入去试——否则只能靠改源码，
+  //   而改源码的人正是它要防的那个人。（第 42 轮 M5/M6 就是因此漏网的。）
+  const base = { verdicts: PREFLIGHT_VERDICTS, kinds: PREFLIGHT_VERDICT_KINDS }
+  assert.equal(preflightVerdictAlignment(base).ok, true, '真仓当下就不对齐')
+
+  const a1 = preflightVerdictAlignment({ ...base, verdicts: [...PREFLIGHT_VERDICTS, 'degraded'] })
+  assert.equal(a1.ok, false)
+  assert.deepEqual(a1.unclassified, ['degraded'], '新裁决没归类却没被指名')
+
+  const a2 = preflightVerdictAlignment({ ...base, kinds: { ...PREFLIGHT_VERDICT_KINDS, ghost: 'unknown' } })
+  assert.equal(a2.ok, false)
+  assert.deepEqual(a2.orphan, ['ghost'])
+
+  // ★ 两个裁决同时归到 clear ⇒ 放行条件被放宽
+  const a3 = preflightVerdictAlignment({ ...base, kinds: { ...PREFLIGHT_VERDICT_KINDS, blocked: 'clear' } })
+  assert.equal(a3.ok, false)
+  assert.equal(a3.clear.length, 2)
+})
+
+test('接线⑤ ★★★ 分桶**跟随归类表**——注入第四个裁决，它必须被处置（不许算 ok）', () => {
+  // ★★★ 这一条是分开"跟随归类表"与"恰好认 blocked/unknown 两个词"的**唯一**办法。
+  //   二者在今天（词表正好是 ok/blocked/unknown）行为**完全相同**；
+  //   破验 A1（把汇总改回手写两行）最初就是**漏网**的，查下来正是这个原因。
+  //   ⇒ 把归类表做成可注入的，用例才能拿**第四个**裁决去试。
+  const mk = (verdict) => [{ check: 'disk', verdict, code: null, reasons: [] }]
+
+  // ① 归类成 blocking ⇒ 必须进 blocked
+  const kinds1 = { ok: 'clear', blocked: 'blocking', unknown: 'unknown', degraded: 'blocking' }
+  const r1 = classifyPreflightChecks(mk('degraded'), { kinds: kinds1 })
+  assert.deepEqual(r1.blockedChecks.map((c) => c.check), ['disk'],
+    '新的非通行裁决归类成 blocking，却没被分进 blocked ⇒ 它会从放行条件里漏过去')
+
+  // ② 归类成 unknown ⇒ 必须进 unknown
+  const kinds2 = { ok: 'clear', blocked: 'blocking', unknown: 'unknown', degraded: 'unknown' }
+  const r2 = classifyPreflightChecks(mk('degraded'), { kinds: kinds2 })
+  assert.deepEqual(r2.unknownChecks.map((c) => c.check), ['disk'])
+
+  // ③ 归类成**第三类**（既不是 clear、也不是 blocking/unknown）⇒ 必须抛，不许当成没问题
+  const kinds3 = { ok: 'clear', blocked: 'blocking', unknown: 'unknown', degraded: 'degraded-kind' }
+  assert.throws(() => classifyPreflightChecks(mk('degraded'), { kinds: kinds3 }), /没有任何处置/,
+    '一个没有处置的归类被静默放过去了——那就是"可以升级"的缝')
+
+  // ④ 未声明的裁决 ⇒ 抛（不是返回 undefined）
+  assert.throws(() => classifyPreflightChecks(mk('half-broken')), /未声明的裁决/)
+
+  // ⑤ 反向控制：通行裁决不许进任何桶
+  const r5 = classifyPreflightChecks(mk('ok'))
+  assert.deepEqual([r5.blockedChecks.length, r5.unknownChecks.length], [0, 0], 'ok 被分进了桶里')
+})
+test('接线④ ★★★ 每一项裁决都被**真的**算进汇总（三档不许压成两档）', () => {
+  // ★ 反证：把磁盘那一项的裁决换成 `unknown`（另一个**声明过的**裁决），
+  //   它必须出现在 `unknown` 里，且 pre-switch 阶段 `ok=false`。
+  //   如果实现是手写 `=== 'blocked'` / `=== 'unknown'` 的两行，这里仍然能过；
+  //   所以真正咬住"跟随声明"的是接线③的注入用例与接线②的抛。
+  const base = { current: CURRENT, target: target(), stage: 'pre-switch', freeBytes: 10, packageBytes: 10 ** 9, tasks: [] }
+  const r = runPreflight({ ...base, patchPair: 'match' })
+  assert.equal(r.ok, false)
+  const disk = r.checks.find((c) => c.check === 'disk')
+  assert.equal(disk.verdict, 'blocked')
+  assert.ok(r.blocked.includes('disk'), '磁盘被拦了，却没出现在 blocked 里')
+  assert.equal(r.reasons.length > 0, true, '被拦了却没有理由')
+  // 每一项都要么 ok、要么在 blocked/unknown 里——不许有"哪儿都不在"的裁决
+  for (const c of r.checks) {
+    const kind = PREFLIGHT_VERDICT_KINDS[c.verdict]
+    assert.ok(kind !== undefined, `${c.check} 的裁决「${c.verdict}」没有归类`)
+    if (kind === 'clear') continue
+    const listed = r.blocked.includes(c.check) || r.unknown.includes(c.check)
+    assert.equal(listed, true,
+      `${c.check} 的裁决是「${c.verdict}」（归类 ${kind}），却既不在 blocked 也不在 unknown 里——这就是"可以升级"的缝`)
+  }
 })

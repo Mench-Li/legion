@@ -1,6 +1,6 @@
 # 最终报告：MULTI-AGENT-FEATURE-OPTIMIZATION 功能实现
 
-- 日期：2026-09-18（**追加至第 42 轮**）
+- 日期：2026-09-18（**追加至第 43 轮**）
 - 仓库：`D:\project\DSH\legion`（DSH 检出 `D:\project\DSH\dsh\deepseek-harness\`）
 - 权威台账：[`PRT-PROGRESS.md`](./PRT-PROGRESS.md) —— **145 行 = 140 ✅ / 1 ⬜ / 4 ⏸**
 - 对照表：[`MULTI-AGENT-FEATURE-STATUS.md`](../../MULTI-AGENT-FEATURE-STATUS.md) —— F-01…F-25，**裁决项 1～29**
@@ -20,9 +20,9 @@
   `c746e80` → `dd6eb8f`（第 27 轮）、`f991d9d` → `4ccdf86`（第 26 轮）、`bacd407`（第 25 轮）、
   `2816b34`（第 17 轮记账）、`ed2518d`（**DSH 公开名契约**）、`75ea3e1`（F-21 投递面）、`8ba5609`（**第 18 轮：登记表同时认声明名与公开名**）
 
-> ★ 本报告已**追加到第 42 轮**。结论那一段（"剩余 5 项本机不可关闭"）**没有变**——
+> ★ 本报告已**追加到第 43 轮**。结论那一段（"剩余 5 项本机不可关闭"）**没有变**——
 > 那 5 项是**台账**里的非 ✅ 行（1 ⬜ + 4 ⏸）；变的是**为什么**、
-> §2.1 那张**裁决项**表的成员（新增第 **29** 条），以及**第 24～42 轮做了什么**（§3.0j～§3.0x）。
+> §2.1 那张**裁决项**表的成员（新增第 **29** 条），以及**第 24～43 轮做了什么**（§3.0j～§3.0y）。
 >
 > ★ 第 24～38 轮的产物**全部是判据，不是功能**。这不是跑偏，是**如实**：
 > 那 5 项与 29 条裁决项没有一条是本机能推进的，于是把力气换到
@@ -1219,6 +1219,83 @@ worktree 与安全边界并列，边界确实建在强制面（PRT-603～606 与
 **M10** 往 `orchestrator/worker/run.mjs` **真的塞一处 `agentLoop`**（边界被破 ⇒ 判据必须红）；
 **M11** 从**真文档**删掉一条边界（声明立刻过期 ⇒ 必须红）。三个被改的文件逐字还原核对过。
 
+### 3.0y 第 43 轮：**豁免表空了**——三次豁免，三次都以"修好代码"收场
+
+第 41 轮建 `declaration-mirrors` 时留了 3 条豁免，理由都是"这张表其实**被用了**，只是没被遍历"。
+第 42 轮收回 1 条，这一轮收回剩下 2 条 ⇒ **`DECLARED_MIRRORS` 空了**。
+
+**先量，不先信。** 判据只看得见"有没有被**遍历**"，分不出"被人手写重建"（真缺陷）、
+"被用了但没遍历"（我的说法）、"根本没有任何读者"（死声明）。于是 `git grep` 数读者点
+（`scratch/_probe-exempt-consumers.mjs`）：
+
+| 名字 | 读者点 | 判定 |
+| --- | --- | --- |
+| `PREFLIGHT_VERDICTS` | **1** | 那唯一一个读者**就是我自己的豁免条目** |
+| `BPE_ARTIFACT_FIELDS` | 4 | 再导出 + 断言"名字在不在"，**没人读它的成员** |
+| `DIR_ROLES` / `WRITABLE_ROLES` | 36 / 41 | 对照：真被遍历 |
+
+> 一条"它其实被用来做 X"的豁免理由，与一条"从来没发生过"的豁免理由，
+> 在**只读那句理由**的时候是同一个东西——所以理由必须能指出**做 X 的那一行代码**。
+
+#### ① `BPE_ARTIFACT_FIELDS`：清单**少一个字段**，且没人校验
+
+声明 6 个字段，产物 7 个 —— **`ranks` 没被声明**。而这张表**没有任何读者**：
+`index.mjs` 只再导出，`bpe.test.mjs` 只断言名字在不在。⇒"它声明的是产物的字段清单"是**空话**。
+
+> 一张"描述产物形状"的清单，与一张"真的校验产物形状"的清单，
+> 在清单恰好写对的那一天是同一个东西。
+
+**处置**：清单升格成唯一形状判据，构造处校验（少了/多了都抛），并可注入。
+`bpe` **27 → 32**。
+
+#### ② `PREFLIGHT_VERDICTS`：汇总里两行**手写复述**
+
+加第四个裁决 `degraded` 并让磁盘返回它，实测汇总给出：
+
+    ok = true    blocked = []    unknown = []    reasons = []
+    checks = compatibility:ok, disk:degraded, in-flight-tasks:ok
+    remedies.disk = "清理缓存或更换目标盘；**不要**在原盘上重试"
+
+⇒ 一项**不是 ok** 的裁决被报成"可以升级"，而**同一份返回值里**还在给处置建议：
+系统知道磁盘有问题，同时说 ok。
+
+> 一条"不是 ok、也不是 blocked"的裁决，与一条 ok 的裁决，
+> 在"这次升级该不该放行"这个读数上是同一个东西：都说可以走。
+
+**处置**：`PREFLIGHT_VERDICT_KINDS` + `preflightVerdictKind()` + `classifyPreflightChecks()`
+（归类表可注入），未声明 / 无处置的归类当场抛。`preflight` **16 → 21**。
+★ 修完后 `PREFLIGHT_VERDICTS` 有了真消费者 ⇒ R2 把最后一条豁免判成过期。
+
+### ★★★ 两句"行为等价"的代码，破验分不开
+
+破验第一轮 **10/12**，两条漏网，**原因一模一样**：
+
+| 漏网 | 为什么分不开 |
+| --- | --- |
+| A1 汇总改回手写两行 | 今天词表正好是 `ok/blocked/unknown`，两版**结果完全相同** |
+| B2 删掉构造处那句校验 | 产物与清单今天**恰好一致**，校验跑没跑**观测不到差别** |
+
+**处置不是加断言**（加多少条都分不开），而是**把被跟随的那张表做成可注入的参数**：
+`classifyPreflightChecks(checks, { kinds })`、`parseTokenizerArtifact(raw, { fields })`。
+用例于是能拿**第四个裁决**、**一份坏清单**去试 ⇒ **12/12 咬住、0 漏网**。
+
+★ 与第 42 轮同出一辙：**当两版实现行为等价时，唯一出路是让"被跟随的那张声明"能被注入。**
+
+### ★ 我自己新写的表，被 R1 当场判成装饰
+
+我顺手加了 `PREFLIGHT_VERDICT_KIND_NAMES = ['clear','blocking','unknown']`，
+R1 **立刻报**"声明了却没有任何遍历点，而同文件里把它的成员手写了 2 次"。
+它确实没有消费者 ⇒ **删掉，而不是给它写第四条豁免。**
+
+### 读数
+
+    node --test product/upgrade/preflight.test.mjs            # 16 → **21/21**
+    node --test runtime/context/bpe.test.mjs                  # 27 → **32/32**
+    node scratch/_mutate-r43.mjs                              # **12/12** 咬住、0 漏网、逐字节还原
+    node scripts/prt/declaration-mirrors.mjs                  # 238 张表 / 装饰 0 张 / **豁免 0 条**
+    node --test scripts/prt/declaration-mirrors.test.mjs       # 12/12
+    node scratch/_probe-exempt-consumers.mjs                   # 豁免表的读者点实测
+    node scratch/_probe-preflight-verdict.mjs                  # 修前/修后三格对照
 ### 3.0x 第 42 轮：把**我自己上一轮发的豁免**收回
 
 第 41 轮我建 `declaration-mirrors` 时，把 `WRITABLE_ROLES` 列进豁免表，

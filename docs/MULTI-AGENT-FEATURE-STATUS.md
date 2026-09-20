@@ -3454,6 +3454,108 @@ M3（把角色清单改回手写的四元对象）与 M4（改成 `DIR_ROLES.sli
 ★ 如果当时写的是"没有取法就 `continue`"，我这次会得到一个**少查了四个目录**的绿。
 那条文案就是为这一幕写的。
 
+### 5.26 第 43 轮：**豁免表空了**——三次豁免，三次都以"修好代码"收场
+
+第 41 轮我新建 `declaration-mirrors` 时留了 **3 条豁免**，理由都是同一句话的变体：
+"这张表其实是**被用了**的，只是用法特殊（不是遍历）。" 第 42 轮收回 1 条。这一轮把剩下 2 条也收回。
+
+**做法是先量，不先信。** 判据只能看见"有没有被**遍历**"，它分不出三件事：
+
+    ① 这张表被人手写重建了一遍        ← 真缺陷（第 40 轮那个形状）
+    ② 这张表被用了，只是没被遍历      ← 我三条豁免都这么写
+    ③ 这张表根本没有任何读者          ← 死声明
+
+于是我 `git grep` 取回每个名字的**全部**命中行，减去声明自己那一行，得到读者点数
+（`scratch/_probe-exempt-consumers.mjs`）：
+
+| 名字 | 读者点 | 其中遍历 | 判定 |
+| --- | --- | --- | --- |
+| `PREFLIGHT_VERDICTS` | **1** | 0 | 那唯一一个读者**就是我自己的豁免条目** |
+| `BPE_ARTIFACT_FIELDS` | 4 | 0 | 再导出 + 断言"名字在不在"，**没人读它的成员** |
+| `DIR_ROLES` / `WRITABLE_ROLES` | 36 / 41 | 11 / 7 | 对照：真被遍历 |
+| `RUN_RECORD_CODES` / `BUDGET_ALERT_CODES` | 26 / 32 | 0 | 对照：真被按字典取值（合法的"未遍历"） |
+
+> 一条"它其实被用来做 X"的豁免理由，与一条"从来没发生过"的豁免理由，
+> 在**只读那句理由**的时候是同一个东西——所以理由必须能指出**做 X 的那一行代码**。
+
+#### ① `BPE_ARTIFACT_FIELDS`：清单**少一个字段**，而没人校验
+
+    声明: ['name','model','pattern','vocab','merges','evidence']      ← 6 个
+    产物: { name, model, evidence, vocab, merges, ranks, pattern }    ← 7 个（ranks 没声明）
+
+`runtime/context/index.mjs` 只是再导出，`bpe.test.mjs` 只断言 `idx[name] !== undefined`
+（**名字在不在**），**从不比对内容**。所以"它声明的是产物的字段清单"这句话，
+在"有没有人拿它校验过产物"这个读数上是**空话**。
+
+> 一张"描述产物形状"的清单，与一张"真的校验产物形状"的清单，
+> 在清单恰好写对的那一天是同一个东西——
+> 只不过前者会在产物多一个字段的那一天开始静悄悄地不描述它。
+
+**处置**：清单升格成**唯一的形状判据**，产物构造完那一刻就校验（少了/多了都抛），
+并做成可注入的（`parseTokenizerArtifact(raw, { fields })`）好让用例拿坏清单去试。
+`bpe` 套件 **27 → 32**。
+
+#### ② `PREFLIGHT_VERDICTS`：汇总里那两行**手写复述**
+
+```js
+export const PREFLIGHT_VERDICTS = Object.freeze(['ok', 'blocked', 'unknown'])
+const blockedChecks = checks.filter((c) => c.verdict === 'blocked')   ← 手写
+const unknownChecks = checks.filter((c) => c.verdict === 'unknown')   ← 手写
+return { ok: blockedChecks.length === 0 && fatalUnknown.length === 0, ... }
+```
+
+往词表里加第四个裁决 `degraded`、并让磁盘那一项返回它，汇总给出（实测
+`scratch/_probe-preflight-verdict.mjs`）：
+
+    ok = true    blocked = []    unknown = []    reasons = []
+    checks = compatibility:ok, disk:degraded, in-flight-tasks:ok
+    remedies.disk = "清理缓存或更换目标盘；**不要**在原盘上重试"
+
+⇒ 一项**不是 ok** 的裁决被报成了"可以升级"，而**同一份返回值里**还在给处置建议：
+系统知道磁盘有问题，同时说 ok。
+
+> 一条"不是 ok、也不是 blocked"的裁决，与一条 ok 的裁决，
+> 在"这次升级该不该放行"这个读数上是同一个东西：都说可以走。
+
+**处置**：归类总函数化（`PREFLIGHT_VERDICT_KINDS` + `preflightVerdictKind()`），
+分桶走 `classifyPreflightChecks()`（**归类表可注入**），未声明 / 无处置的归类**当场抛**。
+`preflight` 套件 **16 → 21**。
+
+★ 修完之后，`PREFLIGHT_VERDICTS` 有了**真的**消费者 ⇒ R2 立刻把最后一条豁免判成过期。
+**豁免表空了。**
+
+### 5.26.1 ★★★ 两句"行为等价"的代码，破验分不开——这是本轮第二次遇到同一个性质
+
+破验（`scratch/_mutate-r43.mjs`）第一轮 **10/12**，两条漏网，而**两条的原因一模一样**：
+
+| 漏网 | 为什么分不开 |
+| --- | --- |
+| A1 把汇总改回手写的两行 | 今天词表正好是 `ok/blocked/unknown`，手写两行与遍历归类表**结果完全相同** |
+| B2 删掉构造处那句校验 | 产物与清单**今天恰好一致**，校验跑了与没跑**观测不到差别** |
+
+> 一个"恰好认对了两种裁决"的汇总，与一个"跟随归类表分桶"的汇总，
+> 在词表正好只有那两种非通行裁决的那一天是同一个东西。
+> 一个"真的校验了形状"的构造，与一个"恰好没校验也没出事"的构造，
+> 在清单恰好写对的那一天是同一个东西。
+
+⇒ 处置**不是**加断言（加多少条都分不开），而是**把被跟随的那张表做成可注入的参数**：
+`classifyPreflightChecks(checks, { kinds })`、`parseTokenizerArtifact(raw, { fields })`。
+于是用例可以拿**第四个裁决**、**一份坏清单**去试，"跟随声明"从**不可证伪**变成**可证伪**。
+改完之后 **12/12 咬住、0 漏网**。
+
+★ 这与第 42 轮同出一辙（`writableDirsInsideInstall({ writableRoles, readers })`）：
+**当两版实现行为等价时，唯一的出路是让"被跟随的那张声明"能被注入。**
+
+### 5.26.2 ★ 我自己新写的表，被 R1 当场判成装饰
+
+写 `preflight` 归类检查时，我顺手加了
+
+    export const PREFLIGHT_VERDICT_KIND_NAMES = Object.freeze(['clear','blocking','unknown'])
+
+`declaration-mirrors` 的 **R1 立刻报**：`声明了却没有任何遍历点，而同文件里把它的成员手写了 2 次`。
+它确实没有消费者——归类的封闭性由 `PREFLIGHT_VERDICT_KINDS` 的值 + 运行期兜底守卫保证。
+**删掉，而不是给它写第四条豁免。**
+
 ## 6. 怎么复跑这份对照表里的每一条
 
 ```bash

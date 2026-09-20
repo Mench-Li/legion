@@ -40,6 +40,129 @@ export const PREFLIGHT_CHECKS = Object.freeze(['compatibility', 'disk', 'in-flig
 /** 单项裁决。`unknown` 与 `ok` 是**不同**的读数——见 `checkInFlightTasks`。 */
 export const PREFLIGHT_VERDICTS = Object.freeze(['ok', 'blocked', 'unknown'])
 
+/**
+ * ★★★ 每个裁决**算哪一类**。这是 `PREFLIGHT_VERDICTS` 唯一的机械消费者。
+ *
+ * ---------------------------------------------------------------------------
+ * 第 43 轮实测到的缺陷（`scratch/_probe-preflight-verdict.mjs`）：
+ *
+ *     export const PREFLIGHT_VERDICTS = Object.freeze(['ok', 'blocked', 'unknown'])
+ *     ...
+ *     const blockedChecks = checks.filter((c) => c.verdict === 'blocked')   ← 手写
+ *     const unknownChecks = checks.filter((c) => c.verdict === 'unknown')   ← 手写
+ *     return { ok: blockedChecks.length === 0 && fatalUnknown.length === 0, ... }
+ *
+ * 往词表里加第四个词 `degraded`、并让磁盘那一项返回它，汇总会给出：
+ *
+ *     ok = true     blocked = []     unknown = []     reasons = []
+ *     checks = compatibility:ok, disk:degraded, in-flight-tasks:ok
+ *     remedies.disk = "清理缓存或更换目标盘；**不要**在原盘上重试"
+ *
+ * ⇒ 一项**不是 ok** 的裁决被报成了"可以升级"，而**同一份返回值**里
+ *   `remedies.disk` 还在给处置建议——系统知道磁盘有问题，同时说 ok。
+ *
+ *   > 一条"不是 ok、也不是 blocked"的裁决，与一条 ok 的裁决，
+ *   > 在"这次升级该不该放行"这个读数上是同一个东西：都说可以走。
+ *
+ * 所以：分类**总函数化** —— 每个声明的裁决都必须在这里有归类（否则一进模块就抛），
+ * 每个用到的裁决都必须是声明过的（否则当场抛），而**不存在"既不是 ok 又不拦人"的归类**。
+ */
+export const PREFLIGHT_VERDICT_KINDS = Object.freeze({
+  ok: 'clear',
+  blocked: 'blocking',
+  unknown: 'unknown',
+})
+
+/**
+ * ★★ 词表 ↔ 归类表 的对齐检查（**可注入**，好让用例能造出"加了第四个裁决"那个形状）。
+ *
+ *   与 `dirRoleWiring()` / `recordWiring()` / `confidenceFloorsAligned()` 同族。
+ *   一条"只在加载时跑一次的守卫"，与一个"能被人拿坏输入去试的守卫"，
+ *   在"它到底拦不拦得住"这个读数上是同一个东西——只不过前者只能靠改源码来验证，
+ *   而改源码的人正是它要防的那个人。
+ *
+ * ★ 这里**刻意不设**第二张"归类名清单"：第一版我写了
+ *   `PREFLIGHT_VERDICT_KIND_NAMES = ['clear','blocking','unknown']`，被
+ *   `declaration-mirrors` 的 R1 当场判成**装饰表**（声明了却没人遍历，
+ *   而同文件里把它的成员手写了 2 次）。它确实没有消费者——
+ *   归类的封闭性由 `PREFLIGHT_VERDICT_KINDS` 的值本身 + 运行期那条兜底守卫保证。
+ *   ⇒ 删掉，而不是给它写一条豁免。
+ */
+export function preflightVerdictAlignment({
+  verdicts = PREFLIGHT_VERDICTS, kinds = PREFLIGHT_VERDICT_KINDS,
+} = {}) {
+  const declared = new Set(verdicts)
+  const unclassified = verdicts.filter((v) => kinds[v] === undefined)
+  const orphan = Object.keys(kinds).filter((v) => !declared.has(v))
+  // ★ 恰好一个归类是"通行"——多于一个就有两条裁决都算没问题，等于放宽了放行条件。
+  const clear = verdicts.filter((v) => kinds[v] === 'clear')
+  return Object.freeze({
+    ok: unclassified.length === 0 && orphan.length === 0 && clear.length === 1,
+    unclassified: Object.freeze(unclassified),
+    orphan: Object.freeze(orphan),
+    clear: Object.freeze(clear),
+  })
+}
+
+{
+  const a = preflightVerdictAlignment()
+  if (!a.ok) {
+    throw new Error('preflight：裁决词表与归类表**不对齐**——'
+      + `声明了却没归类的 ${JSON.stringify(a.unclassified)}、`
+      + `归类了却没声明的 ${JSON.stringify(a.orphan)}、`
+      + `"clear" 类的裁决有 ${a.clear.length} 个（必须恰好 1 个）。`
+      + '没有归类的裁决会**既不进 blocked、也不进 unknown**，'
+      + '于是被汇总报成"可以升级"——而它明明不是 ok。')
+  }
+}
+
+/** 裁决 → 归类。★ 未声明的裁决在这里**当场抛**，不返回 undefined。 */
+export function preflightVerdictKind(verdict, kinds = PREFLIGHT_VERDICT_KINDS) {
+  const kind = kinds[verdict]
+  if (kind === undefined) {
+    throw preflightError(PREFLIGHT_CODES.VERDICT_UNKNOWN,
+      `未声明的裁决 ${JSON.stringify(verdict)}：它既不是 ${JSON.stringify(Object.keys(kinds))} 中的任何一个。`
+      + '未归类的裁决会被汇总静默当成"没问题"，所以这里必须抛。')
+  }
+  return kind
+}
+
+/**
+ * ★★★ 把三项检查分到 `blocked` / `unknown` 两个桶里。**归类表可注入。**
+ *
+ *   为什么要把这一小段单独做成函数：它的**关键性质**是"它跟随归类表"，
+ *   而不是"它恰好认 blocked 与 unknown 这两个词"。
+ *   两者在今天——词表正好是 `['ok','blocked','unknown']`——**行为完全相同**，
+ *   任何行为用例都分不开（破验 A1 一开始就是漏网的，查下来正是这个原因）。
+ *
+ *   ⇒ 做成可注入的，用例就能拿**第四个**裁决去试，于是"跟随归类表"这件事
+ *   从"不可证伪"变成"可证伪"。
+ *
+ *   > 一个"恰好认对了两种裁决"的汇总，与一个"跟随归类表分桶"的汇总，
+ *   > 在词表正好只有那两种非通行裁决的那一天是同一个东西——
+ *   > 只不过前者会在有人加第三种非通行裁决的那一天，
+ *   > 把那一项**既不算拦人、也不算没结论**，于是说"可以升级"。
+ */
+export function classifyPreflightChecks(checks, { kinds = PREFLIGHT_VERDICT_KINDS } = {}) {
+  const blockedChecks = []
+  const unknownChecks = []
+  const unhandled = []
+  for (const c of checks) {
+    const kind = preflightVerdictKind(c.verdict, kinds)
+    if (kind === 'clear') continue
+    if (kind === 'blocking') { blockedChecks.push(c); continue }
+    if (kind === 'unknown') { unknownChecks.push(c); continue }
+    // ★ 既不是通行、也不是拦人、也不算没结论 ⇒ 没有处置。**不许当成没问题。**
+    unhandled.push({ check: c.check, verdict: c.verdict, kind })
+  }
+  if (unhandled.length > 0) {
+    throw preflightError(PREFLIGHT_CODES.VERDICT_UNKNOWN,
+      `这些裁决的归类没有任何处置：${unhandled.map((u) => `${u.check}:${u.verdict}(${u.kind})`).join(', ')}。`
+      + '把它们当成"没问题"会让体检说可以升级。')
+  }
+  return Object.freeze({ blockedChecks: Object.freeze(blockedChecks), unknownChecks: Object.freeze(unknownChecks) })
+}
+
 export const PREFLIGHT_CODES = Object.freeze({
   COMPATIBLE: 'preflight-compatible',
   /** N-1 窗口外（N-2、更旧或降级）。 */
@@ -68,6 +191,14 @@ export const PREFLIGHT_CODES = Object.freeze({
   TASKS_IN_FLIGHT: 'preflight-tasks-in-flight',
   /** 没有任务状态读数——**不是**"没有在途任务"。 */
   TASKS_UNOBSERVED: 'preflight-tasks-unobserved',
+
+  /**
+   * 出现了一个**没有归类**的裁决。
+   *
+   * 它是一条**编程错误**，不是一种体检结论：声明了裁决却没在
+   * `PREFLIGHT_VERDICT_KINDS` 里归类，汇总就会把它当成"没问题"。
+   */
+  VERDICT_UNKNOWN: 'preflight-verdict-unknown',
 })
 
 function preflightError(code, message) {
@@ -386,8 +517,11 @@ export function runPreflight({
   const inFlight = checkInFlightTasks({ tasks, nowMs, oldestLeaseExpiryMs })
 
   const checks = Object.freeze([compatibility, disk, inFlight])
-  const blockedChecks = checks.filter((c) => c.verdict === 'blocked')
-  const unknownChecks = checks.filter((c) => c.verdict === 'unknown')
+  // ★ 按**归类**分桶（`classifyPreflightChecks`），不按手写的裁决字面量分。
+  //   手写 `=== 'blocked'` / `=== 'unknown'` 的版本会漏掉任何新的非通行裁决，
+  //   而漏掉的那一项**既不算拦人、也不算没结论** ⇒ 汇总说"可以升级"（第 43 轮实测）。
+  //   每个裁决都先过归类表：未声明的裁决当场抛，没有处置的归类也当场抛。
+  const { blockedChecks, unknownChecks } = classifyPreflightChecks(checks)
 
   // `pre-download` 阶段磁盘没读数是可以接受的（此时还没有包）；
   // 但"读不到任务状态"在任何阶段都不可接受。

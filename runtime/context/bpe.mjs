@@ -21,8 +21,64 @@
 
 import { defineExactTokenizer } from './tokenizer.mjs'
 
-/** 分词产物里"有东西没被词表覆盖"的记号——见 `encode` 的 `misses`。 */
-export const BPE_ARTIFACT_FIELDS = Object.freeze(['name', 'model', 'pattern', 'vocab', 'merges', 'evidence'])
+/**
+ * 分词产物的字段清单。★★★ 它**机械校验**产物形状，不是一句说明。
+ *
+ * ---------------------------------------------------------------------------
+ * 第 43 轮实测到的缺陷（`scratch/_probe-exempt-consumers.mjs` 量出来的）：
+ *
+ *     声明: ['name', 'model', 'pattern', 'vocab', 'merges', 'evidence']   ← 6 个
+ *     产物: { name, model, evidence, vocab, merges, ranks, pattern }      ← 7 个
+ *
+ * **`ranks` 没被声明。** 而这张表在整仓里**没有任何读者**——
+ * `runtime/context/index.mjs` 只是把名字再导出，`bpe.test.mjs` 只断言
+ * `idx[name] !== undefined`（名字在不在），**从不比对内容**。
+ * 所以那句"它声明的是产物的字段清单"在"有没有人拿它校验过产物"这个读数上
+ * 是**空话**：清单少了 `ranks`，没有一条判据会红。
+ *
+ *   > 一张"描述产物形状"的清单，与一张"真的校验产物形状"的清单，
+ *   > 在清单恰好写对的那一天是同一个东西——
+ *   > 只不过前者会在产物多一个字段的那一天开始静悄悄地不描述它。
+ *
+ * ⇒ 处置：清单升格成**唯一的形状判据**，在产物构造完的那一刻就校验它
+ *   （少了/多了都抛），并做成可注入的纯函数好让用例拿坏形状去试。
+ */
+export const BPE_ARTIFACT_FIELDS = Object.freeze([
+  'name', 'model', 'pattern', 'vocab', 'merges', 'ranks', 'evidence',
+])
+
+/**
+ * ★★ 产物形状 ↔ 字段清单 的对齐检查（**可注入**，好让用例能造出"多了/少了字段"的形状）。
+ *
+ *   与 `dirRoleWiring()` / `recordWiring()` / `confidenceFloorsAligned()` 同族。
+ *   一条只在模块加载时跑一次的守卫，与一个"能被人拿坏输入去试"的守卫，
+ *   在"它到底拦不拦得住"这个读数上是同一个东西——只不过前者只能靠改源码来验证，
+ *   而改源码的人正是它要防的那个人。
+ */
+export function bpeArtifactWiring({ artifact, fields = BPE_ARTIFACT_FIELDS } = {}) {
+  const actual = artifact === null || typeof artifact !== 'object' ? [] : Object.keys(artifact)
+  const declared = new Set(fields)
+  const seen = new Set(actual)
+  const missing = fields.filter((f) => !seen.has(f))
+  const extra = actual.filter((f) => !declared.has(f))
+  return Object.freeze({
+    ok: missing.length === 0 && extra.length === 0,
+    missing: Object.freeze(missing),
+    extra: Object.freeze(extra),
+  })
+}
+
+/** 校验一个产物——字段少了或多了都抛。★ 由 `parseTokenizerArtifact` 在构造处调用。 */
+export function assertBpeArtifactShape(artifact, { fields = BPE_ARTIFACT_FIELDS } = {}) {
+  const w = bpeArtifactWiring({ artifact, fields })
+  if (!w.ok) {
+    throw new Error('parseTokenizerArtifact：产物形状与 BPE_ARTIFACT_FIELDS 不符——'
+      + `少了 ${JSON.stringify(w.missing)}、多了 ${JSON.stringify(w.extra)}。`
+      + '这张清单是产物的**形状判据**；不在这里拦住，'
+      + '它就会退回成一句没人校验的说明（`ranks` 曾经就是这样漏掉的）。')
+  }
+  return artifact
+}
 
 /**
  * GPT-2/CL100K 系列的字节↔字符映射。
@@ -87,7 +143,7 @@ export function fromByteLevel(s) {
  * 会让预算基于错的 token 数——而 token 数错了的表现是"运行到一半超限"，
  * 那时已经花掉钱了。宁可在加载期就拒绝。
  */
-export function parseTokenizerArtifact(raw) {
+export function parseTokenizerArtifact(raw, { fields = BPE_ARTIFACT_FIELDS } = {}) {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new TypeError('tokenizer 产物必须是一个对象')
   }
@@ -126,7 +182,9 @@ export function parseTokenizerArtifact(raw) {
     pattern = raw.pattern
   }
 
-  return Object.freeze({ name, model, evidence, vocab, merges: raw.merges, ranks, pattern })
+  return assertBpeArtifactShape(
+    Object.freeze({ name, model, evidence, vocab, merges: raw.merges, ranks, pattern }), { fields },
+  )
 }
 
 /**

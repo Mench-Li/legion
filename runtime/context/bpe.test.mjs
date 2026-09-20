@@ -19,6 +19,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
+  BPE_ARTIFACT_FIELDS,
+  assertBpeArtifactShape,
+  bpeArtifactWiring,
   bytesToUnicode,
   createBpeTokenizer,
   exactTokenizerFromArtifact,
@@ -367,5 +370,80 @@ describe('⑥ 接线：入口真的导出（否则与不存在一样）', () => 
     const t = idx.createBpeTokenizer(art)
     assert.equal(t.count('hello'), 2)
     assert.equal(idx.fromByteLevel(idx.toByteLevel('往返')), '往返')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 产物形状接线（第 43 轮）
+//
+// ★ 这一组补的是**原来那句断言的缺口**：`bpe.test.mjs` 只断言
+//   `idx[name] !== undefined`（**名字在不在**），从不比对内容。
+//   于是 `BPE_ARTIFACT_FIELDS` 少了 `ranks` 也没人红——
+//   而那张表当时在整仓里**没有任何读者**。
+//
+//   > 一句"名字导出出来了"的断言，与一句"这个清单真的描述了产物"的断言，
+//   > 在清单恰好写对的那一天是同一个东西——
+//   > 只不过前者会在产物多一个字段的那一天继续保持绿色。
+// ---------------------------------------------------------------------------
+
+describe('BPE 产物形状：BPE_ARTIFACT_FIELDS 真的校验产物', () => {
+  test('接线① ★★★ 真产物的键**恰好等于**声明的清单（多一个少一个都算错）', () => {
+    const art = parseTokenizerArtifact(SMALL)
+    const keys = Object.keys(art).sort()
+    assert.deepEqual(keys, [...BPE_ARTIFACT_FIELDS].sort(),
+      `产物实际字段 ${JSON.stringify(keys)}，而清单声明的是 ${JSON.stringify([...BPE_ARTIFACT_FIELDS])}`)
+    // 反向控制：`ranks` 曾经是漏掉的那一个，这里点名钉住它
+    assert.ok(BPE_ARTIFACT_FIELDS.includes('ranks'),
+      'ranks 不在清单里——它曾经就是这样漏掉的（产物有、清单没有）')
+    assert.equal(typeof art.ranks, 'object', '产物里的 ranks 不是对象')
+  })
+
+  test('接线② ★★★ 少了字段 ⇒ 判据报出，且构造处当场抛（不静默）', () => {
+    const good = { name: 'a', model: 'b', pattern: null, vocab: {}, merges: [], ranks: {}, evidence: 'e' }
+    assert.equal(bpeArtifactWiring({ artifact: good }).ok, true, '正确形状被判成错')
+
+    const { ranks, ...missingRanks } = good
+    assert.equal(ranks === undefined, false, '夹具没构造出"少了 ranks"的形状')
+    const w = bpeArtifactWiring({ artifact: missingRanks })
+    assert.equal(w.ok, false)
+    assert.deepEqual(w.missing, ['ranks'], '少了 ranks 没被指出来')
+    assert.throws(() => assertBpeArtifactShape(missingRanks), /少了 \["ranks"\]/)
+  })
+
+  test('接线③ ★★ 多了字段 ⇒ 同样报出（清单不是"至少要有"）', () => {
+    const good = { name: 'a', model: 'b', pattern: null, vocab: {}, merges: [], ranks: {}, evidence: 'e' }
+    const w = bpeArtifactWiring({ artifact: { ...good, diskUsageBytes: 1 } })
+    assert.equal(w.ok, false)
+    assert.deepEqual(w.extra, ['diskUsageBytes'], '多出来的字段没被指出来')
+    assert.throws(() => assertBpeArtifactShape({ ...good, diskUsageBytes: 1 }), /多了 \["diskUsageBytes"\]/)
+  })
+
+  test('接线⑤ ★★★ 构造处**真的**拿清单校验了——注入一份坏清单，构造必须抛', () => {
+    // ★★★ 这一条是证明"那句 `assertBpeArtifactShape(...)` 真的在跑"的**唯一**办法。
+    //   若只是"产物恰好与清单一致"，那么把那个调用整个删掉，用例**依然全绿**
+    //   ——破验 B2（删掉构造处的校验）最初就是**漏网**的，正是这个原因。
+    //   ⇒ 把清单做成可注入的，构造路径的行为才变得**可观测**：
+    //     注入一份与产物不符的清单，构造就该抛；不抛 ⇒ 那句校验没在跑。
+    assert.throws(
+      () => parseTokenizerArtifact(SMALL, { fields: [...BPE_ARTIFACT_FIELDS, 'ghost'] }),
+      /少了 \["ghost"\]/,
+      '注入了一份多出 ghost 的清单，构造却没抛 ⇒ 构造处那句校验没在跑（清单又退回成一句说明）',
+    )
+    assert.throws(
+      () => parseTokenizerArtifact(SMALL, { fields: BPE_ARTIFACT_FIELDS.filter((f) => f !== 'ranks') }),
+      /多了 \["ranks"\]/,
+      '注入了一份少了 ranks 的清单，构造却没抛 ⇒ 构造处没有比对清单',
+    )
+    // 反向控制：真清单必须能构造出产物（别把"注入"变成"凡注入必抛"）
+    assert.equal(Object.keys(parseTokenizerArtifact(SMALL, { fields: BPE_ARTIFACT_FIELDS })).length,
+      BPE_ARTIFACT_FIELDS.length)
+  })
+  test('接线④ ★★ 列清单却没人校验 = 空话：构造处**必须**真的调了它', () => {
+    // ★ 反证法：把清单改坏（注入），校验就该红。
+    //   如果"清单"只是一句说明，那么改坏清单不会有任何反应——这里要证明有反应。
+    const art = parseTokenizerArtifact(SMALL)
+    const w = bpeArtifactWiring({ artifact: art, fields: [...BPE_ARTIFACT_FIELDS, 'ghost'] })
+    assert.equal(w.ok, false, '清单里多一个不存在的字段，校验却没反应 ⇒ 清单没被用')
+    assert.deepEqual(w.missing, ['ghost'])
   })
 })

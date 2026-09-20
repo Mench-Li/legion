@@ -254,6 +254,9 @@ SOURCES.routesConfigBundle = join(ROOT, 'team-hub', 'routes', 'config-bundle.mjs
 // ★ 切片 18（price-tables）：第一族**被夹在别人的区间里**的 —— 逼出了搬运脚本
 //   上边界的真 bug（往上找分隔符时可能找到**别人**的分隔符）。
 SOURCES.routesPriceTables = join(ROOT, 'team-hub', 'routes', 'price-tables.mjs')
+// ★ 切片 19（config）：第一族走**活绑定** —— 它读的 `deliveryBookkeepingFailures`
+//   在宿主里是 `let` 且三处 `+= 1`，按值注入会永久陈旧。
+SOURCES.routesConfig = join(ROOT, 'team-hub', 'routes', 'config.mjs')
 
 /** 已提取出去的路由族模块（值 = 该文件里**声明式**路由的归属名）。 */
 export const ROUTE_FAMILY_SOURCES = Object.freeze([
@@ -274,6 +277,7 @@ export const ROUTE_FAMILY_SOURCES = Object.freeze([
   { module: 'routesContextSnapshots', family: 'context-snapshots', factory: 'createContextSnapshotsRoutes' },
   { module: 'routesConfigBundle', family: 'config-bundle', factory: 'createConfigBundleRoutes' },
   { module: 'routesPriceTables', family: 'price-tables', factory: 'createPriceTablesRoutes' },
+  { module: 'routesConfig', family: 'config', factory: 'createConfigRoutes' },
 ])
 SOURCES.experienceStore = join(ROOT, 'team-hub', 'experience-store.mjs')
 

@@ -237,6 +237,7 @@ import { createExperienceRoutes } from './routes/experience.mjs'
 import { createPacksRoutes } from './routes/packs.mjs'
 import { createConnectorsRoutes } from './routes/connectors.mjs'
 import { createUsageRoutes } from './routes/usage.mjs'
+import { createConfigRoutes } from './routes/config.mjs'
 import { createPriceTablesRoutes } from './routes/price-tables.mjs'
 import { createConfigBundleRoutes } from './routes/config-bundle.mjs'
 import { createContextSnapshotsRoutes } from './routes/context-snapshots.mjs'
@@ -5043,6 +5044,12 @@ const router = createRouter([
     budgetPriceTables, createPriceTable, BUDGET_ERRORS,
     handleRun,
   }),
+  createConfigRoutes({
+    json,
+    TOKEN, DB_FILE, PORT,
+    tokenizerRegistryStatus, eventClients,
+    live: () => ({ deliveryBookkeepingFailures }),
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -7281,32 +7288,9 @@ async function handle(req, res, stripPrefix) {
       })
       return
     }
-    if (req.method === 'GET' && path === '/api/config') {
-      // `runPlane: true` 是能力发现位（PRT-301 起）：worker 用它判断「这个 hub 支不支持
-      // 带 epoch 的运行面」。没有这个位时，一个升级了一半的部署（hub 还是旧的）
-      // 会让 worker 收到 404，而 404 的文案无法区分「路由不存在」与「路径拼错」。
-      //
-      // PRT-413 加一栏 `tokenizer`：**"配了目录"与"真的用上了"是两件事**，
-      // 而它们只在 `tokens.kind` 里分得开——那个字段没人会去看，除非已经超限。
-      // 这里把它变成可探测的。★ `status()` **不读盘、不抛错**，
-      // 所以这个免鉴权的探测端点不会因为一个坏词表目录而变慢或 500
-      // （真正的读盘发生在第一次需要 tokenizer 时，失败会在那次请求上抛出）。
-      //
-      // F-05 加一栏 `eventDelivery`：投递记账是**旁路**，它的失败被刻意设计成
-      // 不影响审计。一个被刻意设计成"不影响主流程"的失败，若没有任何地方能看见，
-      // 就会永远没人知道——所以它必须在这里有一个读数。
-      json(res, 200, {
-        auth: TOKEN !== '', db: DB_FILE, port: PORT, runPlane: true,
-        tokenizer: tokenizerRegistryStatus(),
-        eventDelivery: {
-          // 能力发现位：老客户端不认识它就不传 `clientId`，退化成匿名订阅者（不共用游标）。
-          subscribers: true,
-          bookkeepingFailures: deliveryBookkeepingFailures,
-          liveConnections: eventClients.size,
-        },
-      })
-      return
-    }
+    // ── 能力发现（免鉴权探测：auth / db / port / runPlane / tokenizer / eventDelivery） —— 已提取到 `./routes/config.mjs`（PRT-316 第 18 族 / 切片 19）──
+    // 整段搬走：`server.mjs` 里现在**不再有** `/api/config` 路由，该命名空间只住一个地方。
+    if (await router.dispatch(req, res, { path, url })) return
 
     if (req.method === 'GET' && path === '/api/artifact/content') {
       // R-3/S3 只读内容端点：任务登记产物文件内容（task + i；i 缺省取最新一条）。

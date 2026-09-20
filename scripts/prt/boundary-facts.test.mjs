@@ -1214,6 +1214,33 @@ test('⑰c ★★★★★ 真仓库：清单**开头那句口径**的"复核到
     '把口径的轮次改小却没红 ⇒ 这条判据测不出"第一屏过期"')
 })
 
+// ★★★★★ 第 97 轮：交付物头部那句**指路坐标**「与它的家族表（**逐轮到第 N 行**）」
+//   —— 它当时写着 77，而真实是 96（落后 19 轮）。而同一处声明**散在两处**，本轮先去重再钉住。
+test('⑰d ★★★★★ 真仓库：交付物说"家族表逐轮到第 N 行" = 那份清单家族表的最大轮次', () => {
+  const r = checkFacts({ ctx: defaultContext() })
+  const v = r.violations.find((x) => x.id === 'report-family-rows-round')
+  assert.equal(v, undefined,
+    '★ 交付物那句指路坐标与清单家族表脱节：' + JSON.stringify(v)
+    + '\n  那句的作用是"读数在那里，不在这里"；'
+    + '\n  而一个过期的坐标会让读者以为**那份文档也只有那么长** —— 于是不去看它。')
+  // ★ 反向控制：把那个数改小 ⇒ 必须红（证明上面那条不是恒绿）
+  const text = defaultContext().doc(FINAL_REPORT_DOC)
+  const ANCHOR = /逐轮到第 (\d+) 行/
+  const m = ANCHOR.exec(text)
+  assert.notEqual(m, null, '找不到那句坐标 —— 本用例的锚点没了')
+  const lower = text.replace(ANCHOR, (all, a) => `逐轮到第 ${Number(a) - 1} 行`)
+  assert.notEqual(lower, text, '改写没生效，这条控制是假的')
+  const r2 = checkFacts({ ctx: withDoc(FINAL_REPORT_DOC, () => lower) })
+  assert.ok(r2.violations.some((x) => x.id === 'report-family-rows-round'),
+    '把坐标的行数改小却没红 ⇒ 这条判据测不出"指路坐标过期"')
+  // ★★ 附带钉住"锚点唯一"：本套件对多处命中直接判红（`ANCHOR_AMBIGUOUS`），
+  //    而本轮之所以能立这条，是因为先把**重复的那处声明去掉了数字**。
+  //    ★ 这里**另用**一个带 `g` 的写法：`matchAll` 不接受非全局正则
+  //      （第一版拿上面那个非全局的 `ANCHOR` 去 `matchAll`，当场 `TypeError`）。
+  assert.equal([...text.matchAll(/逐轮到第 (\d+) 行/g)].length, 1,
+    '那句坐标在交付物里出现了多处 ⇒ 本轮的去重被撤销了（判据会以 ANCHOR_AMBIGUOUS 红）')
+})
+
 // ══════════════════════════════════════════════════════════════════════════
 // ★★★ 第 52 轮：**最终报告**（交付物本身）的 §三 此前零判据
 //

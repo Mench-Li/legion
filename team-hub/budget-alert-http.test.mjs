@@ -247,3 +247,79 @@ test('⑤ 只读：POST /api/usage/alert 不是 200（没有"手工改一笔告�
   const { body } = await get('/api/usage/alert?limit=100&warn=0.5')
   assert.equal(body.records, 8, 'POST 之后库里的用量行变了')
 })
+// ============================================================================
+// PRT-316 切片 14 · 契约块 —— 告警接口的"输入面"读数
+//
+// 同样是被破验逼出来的：④b 已经钉住了"不认识的参数 ⇒ 400"，
+// 但**没人断言过那个 400 里到底列了哪些可选参数** —— 少列一项，
+// 调用方就会以为那一项不存在（等于把"我配了它"变成"我没配"）。
+// ============================================================================
+test('⑥ ★ 不认识的参数 400 里，`allowedParams` 必须**逐个**列全（含三个阈值名）', async () => {
+  const r = await get('/api/usage/alert?limit=100&bogus=1')
+  assert.equal(r.status, 400)
+  assert.equal(r.body.code, 'THRESHOLDS_INVALID')
+  assert.deepEqual(r.body.allowedParams,
+    ['limit', 'currency', 'degradeTo', 'scope', 'sinceMs', 'untilMs', 'warn', 'degrade', 'block'],
+    '三个阈值名必须在里面 —— 少了它们，调用方看到"参数不认识"却看不到正确的名字')
+  assert.deepEqual(r.body.rungs, ['warn', 'degrade', 'block'])
+})
+
+test('⑦ ★ `degradeTo` 原样透传；没给就是 `null`（不发明一个默认降级目标）', async () => {
+  const withIt = await get('/api/usage/alert?limit=100&degradeTo=cheap')
+  assert.equal(withIt.status, 200)
+  assert.equal(withIt.body.degradeTo, 'cheap')
+  const without = await get('/api/usage/alert?limit=100')
+  assert.equal(without.status, 200)
+  assert.equal(without.body.degradeTo, null, '没给就是 null —— 默认目标会让降级动作指向一个没人选过的档位')
+})
+
+test('⑧ ★★★ 空串阈值 `warn=` 是"**没配**"，不是"配了 0"', async () => {
+  // ★ 一个"没配所以按 0 处理"的实现，会让每一道预算告警在**没配**的时候报绿。
+  //   空库上量到的真行为：configured:false + thresholds:{} + reasons:['NOT_CONFIGURED']。
+  const r = await get('/api/usage/alert?limit=100&warn=')
+  assert.equal(r.status, 200)
+  assert.equal(r.body.configured, false, '空串必须仍然算"没配"')
+  assert.deepEqual(r.body.thresholds, {}, '不得把空串变成 0 塞进阈值')
+  // ★ 只断言"含 NOT_CONFIGURED"，**不**断言 reasons 恰好等于它：
+  //   本套件的夹具里有 7 条金额未知的账，所以还会带上 SPEND_PARTIAL。
+  //   （第一版写死了恰好相等 ⇒ 红的是**我的断言**，不是产品。）
+  assert.ok(r.body.reasons.includes('NOT_CONFIGURED'),
+    `reasons 里必须有 NOT_CONFIGURED，实际 ${JSON.stringify(r.body.reasons)}`)
+})
+
+test('⑨ ★ 阈值非法的 400 里 `levels`/`rungs` 必须列全（不只给一个码）', async () => {
+  const r = await get('/api/usage/alert?limit=100&warn=0.90&degrade=0.80&block=0.70')
+  assert.equal(r.status, 400)
+  assert.equal(r.body.ok, false)
+  assert.equal(r.body.code, 'THRESHOLDS_UNORDERED')
+  assert.deepEqual(r.body.levels, ['ok', 'warn', 'degrade', 'block'])
+  assert.deepEqual(r.body.rungs, ['warn', 'degrade', 'block'])
+})
+
+test('⑩ 缝级：求值抛**无 code** 的错时兜底码是 `BUDGET_ALERT_FAILED`，且 `levels`/`rungs` 仍在', async () => {
+  // 真 HTTP 走不到这条路：`evaluateBudgetAlert` 抛的每个错都带具名码。
+  const { createUsageRoutes } = await import('./routes/usage.mjs')
+  const res = {}
+  let called = 0
+  const fam = createUsageRoutes({
+    json: (_res, status, body) => { _res.status = status; _res.body = body },
+    authorized: () => true,
+    db: {},
+    optionalIntParam: () => undefined,
+    ROLLUP_DIMENSIONS: ['scope'],
+    BUDGET_ALERT_CODES: { THRESHOLDS_INVALID: 'THRESHOLDS_INVALID' },
+    BUDGET_ALERT_LEVELS: ['ok', 'warn', 'degrade', 'block'],
+    BUDGET_ALERT_RUNGS: ['warn', 'degrade', 'block'],
+    usageRollup: { usageTotals: () => ({}), rollupBy: () => ({}) },
+    evaluateBudgetAlert: () => { called++; throw new Error('没有 code 的错') },
+  })
+  const url = new URL('http://x/api/usage/alert?limit=100')
+  const hit = await fam.dispatch({ method: 'GET' }, res, { path: '/api/usage/alert', url })
+  assert.equal(hit, true)
+  assert.equal(called, 1, '桩必须真的被调用过')
+  assert.equal(res.status, 400)
+  assert.equal(res.body.ok, false)
+  assert.equal(res.body.code, 'BUDGET_ALERT_FAILED')
+  assert.deepEqual(res.body.levels, ['ok', 'warn', 'degrade', 'block'])
+  assert.deepEqual(res.body.rungs, ['warn', 'degrade', 'block'])
+})

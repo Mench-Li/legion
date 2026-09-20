@@ -206,3 +206,59 @@ test('⑥ 空库：全 0 且 complete:true（0 在这里是真的 0）', async (
   assert.equal(roll.body.buckets.length, 0)
   assert.deepEqual([...roll.body.mixedCurrencyBuckets], [])
 })
+// ============================================================================
+// PRT-316 切片 14 · 契约块 —— 只读报表的两条"从来没人断言过"的读数
+//
+// 这一块是被**破验**逼出来的：把 20 处行为逐条改坏，既有 6 例只咬住 13 处。
+// 那 7 条真缺口里有几条的形状是"这条读数从来没人断言过"。
+//
+// ★ **量过再写**：先跑 `.worktrees/_prt-handoff/probe-slice14-gaps.mjs` 把真实响应
+//   打出来，再照着**观察到的**行为写死。本会话已经四次栽在"照着脑子里的实现写断言"。
+//   例：`dimension=day` **也是 400**（认得的维度只有 scope/goal/task/employee/model），
+//   这一条是量出来的，不是猜的。
+// ============================================================================
+test('⑦ ★ totals 回 `ok:true` 与 `serverTimeMs` —— "成功"要在响应里说出来，不然只能靠 HTTP 200 暗示', async () => {
+  const r = await get('/api/usage/totals')
+  assert.equal(r.status, 200)
+  assert.equal(r.body.ok, true, '成功必须在体里说，而不是只靠状态码')
+  assert.equal(typeof r.body.serverTimeMs, 'number',
+    '读数要带时间戳，否则"这是什么时候的数"无从判断')
+})
+
+test('⑧ ★ 未知维度 400 里的可选值清单必须**逐个**列全（只回一句"不认识"等于让调用方去翻源码）', async () => {
+  const r = await get('/api/usage/rollup?dimension=day')
+  assert.equal(r.status, 400)
+  assert.equal(r.body.ok, false)
+  assert.equal(r.body.code, 'BAD_ROLLUP_DIMENSION')
+  assert.deepEqual(r.body.dimensions, ['scope', 'goal', 'task', 'employee', 'model'],
+    '清单少一项，调用方就会以为那一项不存在')
+})
+
+test('⑨ 缝级：rollup 抛**无 code** 的错时，兜底码是 `ROLLUP_FAILED`（不在 200 里假装成功）', async () => {
+  // 这一条**只能**在缝上判：真 HTTP 走不到"抛一个没有 code 的错"那条路
+  // （`rollupBy` 唯一的错都带 `BAD_ROLLUP_DIMENSION`）。
+  // ★ 与切片 13 的 ⑦ 同一个手法：把桩**直接注进工厂**，而不是去改产品。
+  const { createUsageRoutes } = await import('./routes/usage.mjs')
+  const seen = []
+  const res = {}
+  const fam = createUsageRoutes({
+    json: (_res, status, body) => { _res.status = status; _res.body = body },
+    authorized: () => true,
+    db: {},
+    optionalIntParam: () => undefined,
+    ROLLUP_DIMENSIONS: ['scope'],
+    BUDGET_ALERT_CODES: {}, BUDGET_ALERT_LEVELS: [], BUDGET_ALERT_RUNGS: [],
+    evaluateBudgetAlert: () => ({}),
+    usageRollup: {
+      usageTotals: () => ({}),
+      rollupBy: () => { seen.push('rollupBy'); throw new Error('没有 code 的错') },
+    },
+  })
+  const url = new URL('http://x/api/usage/rollup?dimension=scope')
+  const hit = await fam.dispatch({ method: 'GET' }, res, { path: '/api/usage/rollup', url })
+  assert.equal(hit, true, '这条路由必须被认领（不然判据测的是别的东西）')
+  assert.deepEqual(seen, ['rollupBy'], '桩必须真的被调用过 —— 否则这条判据测的是它自己')
+  assert.equal(res.status, 400)
+  assert.equal(res.body.ok, false)
+  assert.equal(res.body.code, 'ROLLUP_FAILED', '没有具名码时给兜底码，而不是把 code 留空')
+})

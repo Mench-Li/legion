@@ -241,6 +241,10 @@ SOURCES.routesConnectors = join(ROOT, 'team-hub', 'routes', 'connectors.mjs')
 //   对它是透明的 —— 但这一点值得在这里写一句，因为下一个人遇到"路由在块里"
 //   时会先怀疑抽取器，而它其实没问题（`findOpaqueRouteGuards` 也不响）。
 SOURCES.routesModelProfiles = join(ROOT, 'team-hub', 'routes', 'model-profiles.mjs')
+// ★ 切片 14（usage）是第一个**被内部子分隔符切成两段**的族：
+//   `// ── F-15 用量汇总 ──` 下面是 totals/rollup，又一个 `// ── F-15 告警与降级 ──`
+//   下面是 alert。抽取器对此同样是透明的（它按声明式条目逐条认，不看注释）。
+SOURCES.routesUsage = join(ROOT, 'team-hub', 'routes', 'usage.mjs')
 
 /** 已提取出去的路由族模块（值 = 该文件里**声明式**路由的归属名）。 */
 export const ROUTE_FAMILY_SOURCES = Object.freeze([
@@ -257,6 +261,7 @@ export const ROUTE_FAMILY_SOURCES = Object.freeze([
   { module: 'routesToolCalls', family: 'tool-calls', factory: 'createToolCallsRoutes' },
   { module: 'routesConnectors', family: 'connectors', factory: 'createConnectorsRoutes' },
   { module: 'routesModelProfiles', family: 'model-profiles', factory: 'createModelProfilesRoutes' },
+  { module: 'routesUsage', family: 'usage', factory: 'createUsageRoutes' },
 ])
 SOURCES.experienceStore = join(ROOT, 'team-hub', 'experience-store.mjs')
 

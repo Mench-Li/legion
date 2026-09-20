@@ -60,17 +60,17 @@
     {
       "file": "product/lifecycle/data-export.mjs",
       "class": "gap",
-      "reason": "同上。⇒ 裁决处：§5 第 16 条"
+      "reason": "阶段 9 产品动作：模块 + 用例齐备，零生产 import 者（同 `product/lifecycle/data-classes.mjs`）。⇒ 裁决处：§5 第 16 条"
     },
     {
       "file": "product/lifecycle/retention.mjs",
       "class": "gap",
-      "reason": "同上。⇒ 裁决处：§5 第 16 条"
+      "reason": "阶段 9 产品动作：模块 + 用例齐备，零生产 import 者（同 `product/lifecycle/data-classes.mjs`）。⇒ 裁决处：§5 第 16 条"
     },
     {
       "file": "product/lifecycle/uninstall.mjs",
       "class": "gap",
-      "reason": "同上。⇒ 裁决处：§5 第 16 条"
+      "reason": "阶段 9 产品动作：模块 + 用例齐备，零生产 import 者（同 `product/lifecycle/data-classes.mjs`）。⇒ 裁决处：§5 第 16 条"
     },
     {
       "file": "product/metrics-source.mjs",
@@ -90,17 +90,17 @@
     {
       "file": "product/release/checklist.mjs",
       "class": "gap",
-      "reason": "同上。⇒ 裁决处：§5 第 16 条"
+      "reason": "零生产 import 者。⇒ 裁决处：§5 第 16 条"
     },
     {
       "file": "product/release/privacy.mjs",
       "class": "gap",
-      "reason": "同上。⇒ 裁决处：§5 第 16 条"
+      "reason": "零生产 import 者。⇒ 裁决处：§5 第 16 条"
     },
     {
       "file": "product/support/runbook.mjs",
       "class": "gap",
-      "reason": "同上。⇒ 裁决处：§5 第 16 条"
+      "reason": "零生产 import 者。⇒ 裁决处：§5 第 16 条"
     },
     {
       "file": "product/upgrade/audit.mjs",
@@ -110,12 +110,12 @@
     {
       "file": "product/upgrade/backup.mjs",
       "class": "deliberate",
-      "reason": "同上（升级链的一环）"
+      "reason": "同 `product/upgrade/index.mjs`：升级链的一环（Launcher 刻意不 import，进程卫生）"
     },
     {
       "file": "product/upgrade/channels.mjs",
       "class": "deliberate",
-      "reason": "同上（升级链的一环）"
+      "reason": "同 `product/upgrade/index.mjs`：升级链的一环（Launcher 刻意不 import，进程卫生）"
     },
     {
       "file": "product/upgrade/index.mjs",
@@ -125,22 +125,22 @@
     {
       "file": "product/upgrade/migration.mjs",
       "class": "deliberate",
-      "reason": "同上（升级链的一环）"
+      "reason": "同 `product/upgrade/index.mjs`：升级链的一环（Launcher 刻意不 import，进程卫生）"
     },
     {
       "file": "product/upgrade/package.mjs",
       "class": "deliberate",
-      "reason": "同上（升级链的一环）"
+      "reason": "同 `product/upgrade/index.mjs`：升级链的一环（Launcher 刻意不 import，进程卫生）"
     },
     {
       "file": "product/upgrade/preflight.mjs",
       "class": "deliberate",
-      "reason": "同上（升级链的一环）"
+      "reason": "同 `product/upgrade/index.mjs`：升级链的一环（Launcher 刻意不 import，进程卫生）"
     },
     {
       "file": "product/upgrade/switchover.mjs",
       "class": "deliberate",
-      "reason": "同上（升级链的一环）"
+      "reason": "同 `product/upgrade/index.mjs`：升级链的一环（Launcher 刻意不 import，进程卫生）"
     },
     {
       "file": "runtime/adapters/dsh/parity.mjs",
@@ -175,7 +175,7 @@
     {
       "file": "runtime/experience/graph.mjs",
       "class": "gap",
-      "reason": "F-18 同上：图只被自己的用例驱动。⇒ 裁决处：§5 第 18 条"
+      "reason": "F-18：图只被自己的用例驱动，零生产 import 者。⇒ 裁决处：§5 第 18 条"
     },
     {
       "file": "runtime/packs/authority.mjs",
@@ -190,7 +190,7 @@
     {
       "file": "runtime/packs/compiled-plan.mjs",
       "class": "gap",
-      "reason": "PRT-1004：同上。⇒ 裁决处：§5 第 19 条"
+      "reason": "PRT-1004：唯一 import 者是 `runtime/packs/authority.mjs` 与 `runtime/packs/builtin/software-delivery.mjs`（两者自己也不可达 ⇒ 传递不可达）。⇒ 裁决处：§5 第 19 条"
     },
     {
       "file": "runtime/packs/store.mjs",

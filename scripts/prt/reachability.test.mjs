@@ -682,50 +682,48 @@ test('⑧ ★★★ gap 必须指向一个**真实存在**的 §5 条号（治"�
 //   > JSON 仍然合法、class 没变、条数没变 —— 没有东西会报。
 // ══════════════════════════════════════════════════════════════════════════
 
-test('★ 位置指称：三种指不上（无前驱 / 类不同 / 裁决处不同）都要报出来', () => {
+test('★★ 位置指称：严格规则 —— **任何**一条都要报出来（含"合法同组"那一种）', () => {
   const FIX = [
-    { file: 'a.mjs', class: 'gap', reason: '同上。⇒ 裁决处：§5 第 20 条' },           // ① 第一条，无前驱
+    // ① 第一条，没有"上一条"可指
+    { file: 'a.mjs', class: 'gap', reason: '同上。⇒ 裁决处：§5 第 20 条' },
     { file: 'b.mjs', class: 'gap', reason: '自己写了理由。⇒ 裁决处：§5 第 20 条' },
-    // ★★★ ② 同类、但裁决处**不同** —— 这一条是**单独**需要的：
-    //   本用例第一版只有下面那个 `f.mjs` 来测"裁决处不同"，而它上一条是
-    //   `by-design` ⇒ 它**先**被"类不同"那条规则抓住，
-    //   于是"裁决处不同"这一支**从来没有被任何用例碰到过**。
-    //   变异 X2（摘掉那一支）当时**没咬住** —— 是变异把它翻出来的。
-    //
-    //   > 一条"顺便也被另一种情形覆盖"的用例，
-    //   > 与一条"真的覆盖了这一种情形"的用例，在绿灯下没有区别。
-    { file: 'g.mjs', class: 'gap', reason: '同上。⇒ 裁决处：§5 第 21 条' },
-    { file: 'c.mjs', class: 'by-design', reason: '同上' },                            // ③ 上一条是 gap
+    // ② 相邻、同类、裁决处**相同** —— 第一版**放过**的正是这一种
+    { file: 'g.mjs', class: 'gap', reason: '同上。⇒ 裁决处：§5 第 20 条' },
+    // ③ 上一条是另一类
+    { file: 'c.mjs', class: 'by-design', reason: '同上' },
     { file: 'd.mjs', class: 'by-design', reason: '自己写了理由' },
-    { file: 'e.mjs', class: 'by-design', reason: '同上（同一组）' },                  // 合法：同类、无裁决处
-    { file: 'f.mjs', class: 'gap', reason: '同上。⇒ 裁决处：§5 第 999 条' },          // 上一条是 by-design
+    // ④ ★ 7 条 product/upgrade/* 那种"真的同组"的写法 —— **第一版放行、现在也报**
+    { file: 'e.mjs', class: 'by-design', reason: '同上（同一组）' },
+    // ⑤ 点名写法 ⇒ 放行
+    { file: 'h.mjs', class: 'gap', reason: '同 `g.mjs`：同一组。⇒ 裁决处：§5 第 20 条' },
   ]
   const bad = positionalReasonViolations(FIX)
   const files = bad.map((b) => b.file)
-  assert.deepEqual(files, ['a.mjs', 'g.mjs', 'c.mjs', 'f.mjs'],
-    `规则报出的是 ${JSON.stringify(files)} ⇒ 三种情形没有各自被抓住`)
-  assert.match(bad[0].why, /第一条/, '第一种情形（无前驱）的理由没说清')
-  assert.match(bad[1].why, /§5 第 21 条/, '第二种情形（裁决处不同）的理由没说清')
-  assert.match(bad[2].why, /by-design|gap/, '第三种情形（类不同）的理由没说清')
-  assert.equal(files.includes('e.mjs'), false,
-    '★ 反向控制失败：同类的合法"同上"被判红了 ⇒ 会让人不敢写"同上"，'
-    + '而它本来是这 44 条里最有用的写法（7 条 product/upgrade/* 就是一组）')
+  assert.deepEqual(files, ['a.mjs', 'g.mjs', 'c.mjs', 'e.mjs'],
+    `规则报出的是 ${JSON.stringify(files)} ⇒ 位置指称没有被一律抓住`)
+  assert.equal(files.includes('h.mjs'), false,
+    '★ 反向控制失败：**点了名**的写法被判红了 ⇒ 那会让人连正确写法也不敢用。'
+    + '点名与次序无关，正是本规则要人改成的样子。')
+  for (const b of bad) {
+    assert.match(b.why, /次序|路径/, `对 ${b.file} 的理由没有说清"该怎么改"`)
+  }
 })
 
-test('★★★ 真基线：**没有一条**位置指称指不上（本轮修掉 5 条）', () => {
+test('★★★ 真基线：**一条位置指称都没有**（第 49 轮 21 条 → 第 50 轮 0 条）', () => {
   const bad = positionalReasonViolations(baseline.unreachable)
   assert.deepEqual(bad, [],
-    `★ 有 ${bad.length} 条 reason 的"同上/上面那条"指不上：\n`
-    + bad.map((b) => `    ${b.file} —— ${b.why}`).join('\n')
+    `★ 有 ${bad.length} 条 reason 用"同上/上面那条"说话：\n`
+    + bad.map((b) => `    ${b.file}`).join('\n')
     + '\n  它们的含义由**数组次序**决定：在表里插进一行无关条目，'
-    + '\n  就会改变这些话的意思，而不改变任何一个字。')
+    + '\n  就会改变这些话的意思，而不改变任何一个字。'
+    + '\n  改法：把所指文件的路径写出来（同 `x/y.mjs`：…），或把理由写全。')
 })
 
-test('★ 位置指称的正对照：把收账侧移到 spool **上面** ⇒ 它不再被报', () => {
-  // ★ 这条证明上面那条断言**测的是相邻关系**，不是"它恒绿"。
-  const moved = baseline.unreachable.filter((e) => e.file !== 'orchestrator/worker/toolcall-drain.mjs')
-  const drain = baseline.unreachable.find((e) => e.file === 'orchestrator/worker/toolcall-drain.mjs')
-  moved.splice(moved.findIndex((e) => e.file === 'runtime/toolcall/spool.mjs'), 0, drain)
-  assert.equal(positionalReasonViolations(moved).some((b) => b.file === 'runtime/toolcall/spool.mjs'),
-    false, '把收账侧移到 spool 上面之后仍被报 ⇒ 本规则测的不是相邻关系')
+test('★ 严格规则确实**能**报出旧的写法（把第 49 轮修掉的一条放回去）', () => {
+  // ★ 这条是**正对照**：证明上面那条"真基线 0 条"**不是因为它恒绿**。
+  const withOld = baseline.unreachable.map((e) => (e.file === 'product/upgrade/backup.mjs'
+    ? { ...e, reason: '同上（升级链的一环）' }
+    : e))
+  assert.equal(positionalReasonViolations(withOld).some((b) => b.file === 'product/upgrade/backup.mjs'),
+    true, '把"同上"放回去之后仍不被报 ⇒ 本规则测不出旧的写法')
 })

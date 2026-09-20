@@ -470,70 +470,59 @@ export function gapPointerViolations(entries, items) {
 }
 
 /**
- * `reason` 里的**位置指称**（"同上" / "上面那条" / "上一条"）必须真的指得上。
+ * `reason` 必须**自足**：不许用"同上 / 上面那条 / 上一条"这类**位置指称**。
  *
- * ## 为什么有这条规则（第 49 轮实测到一次**已经发生**的错位）
+ * ## 为什么有这条规则（第 49 轮量出来，第 50 轮量到它**已经错了一次**）
  *
- * 44 条 baseline 里 **18 条**的 `reason` 以「同上」开头 —— 它是一个
- * **相对指针**（"和上面那条一样"），而不是内容。于是它的含义
- * **由数组次序决定**，而数组次序不承担语义、也没有任何判据看着它。
+ * 44 条 baseline 里 **21 条**的 `reason` 用位置指称 —— 它是**相对指针**
+ * （"和上面那条一样"），含义**由数组次序决定**，而数组次序不承担语义、
+ * 也没有任何判据看着它。
  *
- * ★ 而这**不是理论风险**：`runtime/toolcall/spool.mjs` 的 reason 写着
- *
- *     同上（那条缝的**写入侧**：执行面没有 TEAM_HUB_TOKEN …）。
- *     它的消费者就是**上面那条收账侧**，因此两条的阻塞是**同一个**位置决定 …
- *
- *   而"上面那条"今天是 `runtime/packs/store.mjs`（`gap`，裁决处 **§5 第 19 条**）。
- *   真正的收账侧 `orchestrator/worker/toolcall-drain.mjs` 在下标 **2**，与它**不相邻**。
- *   ⇒ 那句话里"上面那条"从它被写下时的收账侧，**悄悄变成了另一个子系统的条目**，
- *     而它的文字**一个字都没改**。JSON 仍然合法、class 没变、条数没变 —— 没有东西会报。
+ * ★ 第 49 轮实测到的那一处：`runtime/toolcall/spool.mjs` 写着
+ *   「它的消费者就是**上面那条**收账侧」，而"上面那条"今天是
+ *   `runtime/packs/store.mjs`（`gap`，裁决处 **§5 第 19 条**）——
+ *   真正的收账侧 `orchestrator/worker/toolcall-drain.mjs` 在下标 **2**。
  *
  *   > 一条相对指称在表里插进一行无关条目之后，
  *   > 会**改变另一行说的话**，而不改变那一行的任何一个字。
  *
- * ## 规则（两条，都能在今天的表上跑）
+ * ## ★★ 第 49 轮的第一版规则**太松**，它自己写下的残留当场就兑现了
  *
- *   · `no-predecessor` —— 它是第一条，"上一条"不存在；
- *   · `class-mismatch` —— 上一条与它**不是同一类**（`by-design`/`deliberate`/`gap`
- *     混在一起时，"同上"继承的是另一类条目的理由）；
- *   · `owner-mismatch` —— 本条声明了裁决处，而上一条声明的是**另一个**条号
- *     （或者上一条没声明）。这正是 `spool.mjs` 那一条。
+ * 第一版允许"同类、且裁决处相同的相邻条目"用"同上"（想保住 7 条
+ * `product/upgrade/*` 那种**真的同组**的写法）。它报出 5 条违规，
+ * 并留下一句诚实的残留：
  *
- * ★ 放过的：同一类、且裁决处相同的连续条目（例如 7 条 `product/upgrade/*`
- *   都写「同上（升级链的一环）」）——那是**同一组**，指针是对的。
+ *     两条相邻、同类、都不声明裁决处的条目，若"同上"其实不是同一组，看不出来。
  *
- * @param {Array<{file: string, class: string, reason?: string}>} entries 基线条目（**按数组次序**）
+ * **那句话在同一天就变成了一个真的错**：`product/release/checklist.mjs`
+ * 的"同上"紧挨着 `product/metrics-spec7.mjs` —— 一个**指标口径**模块，
+ * 两者仅因为"都是 gap、都写 §5 第 16 条"而被放行；
+ * 而它真正该继承的是 `product/lifecycle/*` 那一组。
+ *
+ *   > 一条判据的"已知残留"如果**当天就能兑现**，
+ *   > 那它不是残留，是它**允许**的一种错。
+ *
+ * ⇒ 这一版是**严格**的：**一条位置指称都不许**，没有残留 ——
+ *   因为它不再需要回答"这两条是不是同一组"（那正是只能靠次序回答的问题）。
+ *
+ * ★ 放行的那一种写法：**把所指文件的路径写出来**
+ *   （如"同 `product/upgrade/index.mjs`：升级链的一环"）。点名与次序无关；
+ *   它与"同上"在**今天的输出里长得一样**（都是一句话）——
+ *   差别只在**插入一行之后**还成不成立。
+ *
+ * @param {Array<{file: string, class: string, reason?: string}>} entries 基线条目
  * @returns {Array<{file: string, why: string}>}
  */
 export function positionalReasonViolations(entries) {
   const POSITIONAL = /同上|上面那条|上一条/
-  const itemOf = (e) => {
-    const m = /§5\s*第\s*(\d+)\s*条/.exec(e.reason ?? '')
-    return m === null ? null : Number(m[1])
-  }
-  const bad = []
-  entries.forEach((e, i) => {
-    if (!POSITIONAL.test(e.reason ?? '')) return
-    const prev = entries[i - 1]
-    if (prev === undefined) {
-      bad.push({ file: e.file, why: '它是第一条，没有"上一条"可指' })
-      return
-    }
-    if (prev.class !== e.class) {
-      bad.push({ file: e.file, why: `上一条（${prev.file}）是 ${prev.class}，本条是 ${e.class}` })
-      return
-    }
-    const mine = itemOf(e)
-    const theirs = itemOf(prev)
-    if (mine !== null && mine !== theirs) {
-      bad.push({
-        file: e.file,
-        why: `本条说"同上"并声明 §5 第 ${mine} 条，而上一条（${prev.file}）是 `
-          + (theirs === null ? '**未写裁决处**' : `§5 第 ${theirs} 条`),
-      })
-    }
-  })
-  return bad
+  return entries
+    .filter((e) => POSITIONAL.test(e.reason ?? ''))
+    .map((e) => ({
+      file: e.file,
+      why: 'reason 里有"同上 / 上面那条"这类位置指称 —— 它的含义由数组次序决定。'
+        + '请把所指文件的路径写出来（例如：同 `product/upgrade/index.mjs`：…），'
+        + '或直接把那句理由写全。',
+    }))
 }
 
 /** `in-flight` 是一个**带到期日的断言**，不是一种永久分类。

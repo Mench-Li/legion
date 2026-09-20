@@ -244,6 +244,7 @@ import { createMembersRoutes } from './routes/members.mjs'
 import { createExecRoutes } from './routes/exec.mjs'
 import { createModelsRoutes } from './routes/models.mjs'
 import { createWebRoutes } from './routes/web.mjs'
+import { createTaskRecordsRoutes } from './routes/task-records.mjs'
 import { createGoalLifecycleRoutes } from './routes/goal-lifecycle.mjs'
 import { createSpaceOperationsRoutes } from './routes/space-operations.mjs'
 import { createRuntimeVerificationRoutes } from './routes/runtime-verification.mjs'
@@ -5173,6 +5174,11 @@ const router = createRouter([
     handleWrite, publishGoalRecord, setGoalContext,
     setGoalState,
   }),
+  createTaskRecordsRoutes({
+    json,
+    handleWrite, getTask, db,
+    now, parseJson, audit,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -5203,117 +5209,10 @@ async function handle(req, res, stripPrefix) {
     // ── 建任务（写接口：title 必填、其余字段透传，落审计） —— 已提取到 `./routes/create.mjs`（PRT-316 第 19 族 / 切片 20）──
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/create` 路由，该命名空间只住一个地方。
     if (await router.dispatch(req, res, { path, url })) return
-    if (req.method === 'POST' && path === '/api/progress') {
-      // 守护进度心跳（v1 遗留缺口补平，见 docs/P0-CONFIRMATION.md §5）：租约保鲜 + 遥测。
-      await handleWrite(req, res, (body, by, scope) => {
-        const id = body.id
-        if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
-        const t = getTask(id)
-        if (t.status !== 'in_progress') throw new Error(`仅 in_progress 任务可上报进度（当前 ${t.status}）`)
-        db.prepare('UPDATE tasks SET claimedAt=?, updatedAt=?, version=version+1 WHERE id=?').run(now(), now(), id)
-        audit(by, t.scope, 'progress', id, { percent: Number.isFinite(Number(body.percent)) ? Number(body.percent) : 0 }, t.goalId)
-        return getTask(id)
-      })
-      return
-    }
-    if (req.method === 'POST' && path === '/api/patch') {
-      // hub 版 diff 登记（v1 taskctl patch 的等价物）：守护 recordPatch 在 hub 模式下调用。
-      // L1 审计：files 支持结构化数组 [{path,status,add,del}]（守护 numstat 解析）；兼容旧 string。
-      await handleWrite(req, res, (body, by, scope) => {
-        const id = body.id
-        if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
-        const t = getTask(id)
-        const diff = typeof body.diff === 'string' ? body.diff : ''
-        if (diff.length > 200000) throw new Error('diff 过大（>200KB），拒绝登记')
-        let files
-        if (Array.isArray(body.files)) {
-          files = body.files.slice(0, 200).map(f => {
-            const path = typeof f?.path === 'string' ? f.path.slice(0, 500) : ''
-            if (!path) return null
-            const status = typeof f.status === 'string' && /^[AMDRCUX]$/.test(f.status) ? f.status : 'M'
-            const add = Number.isFinite(Number(f.add)) ? Math.max(0, Number(f.add)) : 0
-            const del = Number.isFinite(Number(f.del)) ? Math.max(0, Number(f.del)) : 0
-            return { path, status, add, del }
-          }).filter(Boolean)
-        } else {
-          files = (typeof body.files === 'string' ? body.files.slice(0, 2000) : '')
-            .split(',').map(s => s.trim()).filter(Boolean)
-            .map(path => ({ path, status: 'M', add: 0, del: 0 }))
-        }
-        const list = parseJson(t.patches ?? '[]', [])
-        list.push({ by, at: now(), summary: typeof body.summary === 'string' ? body.summary.slice(0, 200) : '', files, diff })
-        if (list.length > 40) list.splice(0, list.length - 40)
-        db.prepare('UPDATE tasks SET patches=?, version=version+1, updatedAt=? WHERE id=?').run(JSON.stringify(list), now(), id)
-        audit(by, t.scope, 'patch', id, { files: files.map(f => f.path).join(',') }, t.goalId)
-        return getTask(id)
-      })
-      return
-    }
-    if (req.method === 'POST' && path === '/api/review-notes') {
-      // L2 审计批注：任务（或任务内某文件）的 OK/问题 标记。file='*' = 整体结论；verdict=clear 清除。
-      await handleWrite(req, res, (body, by, scope) => {
-        const id = body.id
-        if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
-        const t = getTask(id)
-        if (!t) throw new Error(`未知任务 ${id}`)
-        const file = typeof body.file === 'string' && body.file.trim() ? body.file.trim().slice(0, 500) : '*'
-        const verdict = body.verdict
-        if (verdict !== 'ok' && verdict !== 'issue' && verdict !== 'clear') throw new Error('verdict 必须是 ok|issue|clear')
-        if (typeof body.note !== 'string') throw new Error('缺少参数 note')
-        const note = body.note.trim().slice(0, 2000)
-        const list = parseJson(t.review_notes ?? '[]', [])
-        const others = list.filter(x => x.file !== file)
-        if (verdict !== 'clear') others.push({ file, verdict, note, by, at: now() })
-        db.prepare('UPDATE tasks SET review_notes=?, version=version+1, updatedAt=? WHERE id=?')
-          .run(JSON.stringify(others), now(), id)
-        audit(by, t.scope, 'review-note', id, { file, verdict, note: note.slice(0, 200) }, t.goalId)
-        return getTask(id)
-      })
-      return
-    }
-    if (req.method === 'POST' && path === '/api/artifact') {
-      // hub 版产物登记（html/file/url），与 v1 taskctl artifact 等价。
-      await handleWrite(req, res, (body, by, scope) => {
-        const id = body.id
-        if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
-        const t = getTask(id)
-        const kind = body.kind
-        const path = body.path
-        if (typeof kind !== 'string' || (kind !== 'html' && kind !== 'file' && kind !== 'url')) throw new Error('kind 必须是 html|file|url')
-        if (typeof path !== 'string' || path.length === 0) throw new Error('缺少产物路径 path')
-        const list = parseJson(t.artifacts ?? '[]', [])
-        const entry = { by, at: now(), kind, path, title: typeof body.title === 'string' ? body.title.slice(0, 120) : '' }
-        // S2 契约登记幂等：守护登记时带内容 sha256 digest，服务端原样落库（v1 无 digest → 读取期缺省不比对）。
-        if (typeof body.digest === 'string' && /^[0-9a-f]{16,}$/.test(body.digest)) entry.digest = body.digest
-        list.push(entry)
-        db.prepare('UPDATE tasks SET artifacts=?, version=version+1, updatedAt=? WHERE id=?').run(JSON.stringify(list), now(), id)
-        audit(by, t.scope, 'artifact', id, { kind, path, digest: entry.digest ? 1 : 0 }, t.goalId)
-        return getTask(id)
-      })
-      return
-    }
-    if (req.method === 'POST' && path === '/api/test-report') {
-      // tester worker 结构化报告（D7' 机器闸门的输入，见 docs/ORCHESTRATION-V3.md §4/§10）：仅 tester 任务可写。
-      await handleWrite(req, res, (body, by, scope) => {
-        const id = body.id
-        if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
-        const t = getTask(id)
-        if (t.role !== 'tester') throw new Error(`test-report 仅 tester 任务可写（role=${t.role}）`)
-        if (t.status !== 'in_progress' && t.status !== 'in_review') throw new Error(`仅 in_progress/in_review 可写报告（当前 ${t.status}）`)
-        const passed = body.passed === true
-        const failures = Array.isArray(body.failures)
-          ? body.failures.map(f => (f && typeof f === 'object')
-              ? { name: String(f.name ?? '').slice(0, 200), log: String(f.log ?? '').slice(0, 4000), repro: String(f.repro ?? '').slice(0, 2000) }
-              : { name: String(f).slice(0, 200), log: '', repro: '' }).slice(0, 200)
-          : []
-        if (!passed && failures.length === 0) throw new Error('passed=false 时必须给出 failures')
-        const report = { passed, failures, summary: typeof body.summary === 'string' ? body.summary.slice(0, 2000) : '', at: now(), by }
-        db.prepare('UPDATE tasks SET testReport=?, version=version+1, updatedAt=? WHERE id=?').run(JSON.stringify(report), now(), id)
-        audit(by, t.scope, 'test-report', id, { passed, failures: failures.length }, t.goalId)
-        return getTask(id)
-      })
-      return
-    }
+    // ── 任务上的五张记录表：进度 / 改动补丁 / 逐文件验收意见 / 产物 / 测试报告（都走 handleWrite，都 version+1） —— 已提取到 `./routes/task-records.mjs`（PRT-316 第 39 族 / 切片 41）──
+    // 本族这 5 条已全部搬进模块，`server.mjs` 里不再有它们。
+    // ⚠️ **前缀下还有不属于本族的**（别顺手搬走）：GET /api/artifact/content
+    if (await router.dispatch(req, res, { path, url })) return
     if (req.method === 'POST' && path === '/api/goal/slices') {
       // 切片展开：守护在 test-designer done 后解析 TASK_BREAKDOWN.md 并注册切片（见 ORCHESTRATION-V3）。
       await handleWrite(req, res, (body, by, scope) => {

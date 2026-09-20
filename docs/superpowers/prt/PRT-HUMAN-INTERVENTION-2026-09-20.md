@@ -183,6 +183,54 @@ composition-patch-layer: legion-enforcement-runtime-contract-server: 同形
 ★ **我选的是"不动、报上来"**：让这两行豁免，是在我不知道的地方把一个自检变松；
 而"变绿"与"变可用"是两件事 —— 这条路我判不了，也不该替您判。
 
+#### ★★★★★ 第 66 轮：追到最内层的因 —— 并把"修哪儿"钉死
+
+第 65 轮我说"下一轮去修 ①（工厂为什么抛）"。修完了 —— 下面是最内层那一条。
+
+**逐层剥开（每一层都是产物自己打出来的，不是我推的）**
+
+```
+dsh: warning: 2 entries did not activate
+  ← legion-runtime-host 拒绝装配（code=RUNTIME_HOST_ROW_INPUTS_FACTORY_THREW）
+    ← 宿主端口工厂抛了：runtime-host-registrar 拒绝
+      ← （code=RUNTIME_HOST_REGISTRAR_NO_SUBAGENTS_PORT）
+        ← 进程里没有可用的 `subagents` 服务
+```
+
+而同一个测试的 fixture 自己打出来的服务清单是：
+
+```
+SERVICES-PROVIDED tools,approval,sandbox          ← 没有 subagents
+```
+
+⇒ **最内层的因：测试用的那台"假 DSH"不提供 `subagents` 服务。**
+
+#### ⇒ 于是"修哪儿"是一个可以判的问题，不是取舍
+
+`runtime-host-registrar-row.mjs` 拒绝的理由写在码名里：`subagents` 是
+`startRun` 的**唯一真来源**，拿不到就**必须**拒（不补假端口）。**这个拒绝是对的。**
+
+而真 DSH 进程**有** `subagents` —— 缺它的是那台**假 DSH**。
+
+| 路 | 判断 |
+|---|---|
+| **给 fixture 补上 `subagents` 服务**（与真 DSH 同形） | ★ **这一条是faithful的**：假 DSH 缺一件真 DSH 有的东西，那是假件的不完整，不是产品的缺陷 |
+| 改那 21 条用例的期望值 | 也能变绿，但**掩盖了"假件不完整"**这件事，下次换个行还会再撞一次 |
+
+★ 还有一条**副产品**发现，比上面那条更值得记：
+
+> 有一条用例断言的是 `/RUNTIME_HOST_ROW_NO_INPUTS_FACTORY/`（"没人注册工厂"），
+> 而它现在拿到的是 `INPUTS_FACTORY_THREW`。
+> 原因是 `runtime-host-registrar-row.mjs` **在模块求值期就注册了工厂**
+> （`patch-layer.mjs:264` 明写 `setDshRuntimeInputsFactory()（模块求值期注册）`）——
+> ⇒ **只要这一行被挂上，"没有人注册工厂"这个处境就构造不出来了。**
+
+★★★★ **一个被新增的行从构造上删掉的处境，它的用例会以"期望值过时"的样子红，
+而不是以"这个处境没了"的样子红。** 两种红的修法完全不同 ——
+前者是改期望值，后者是**重新想清楚那个处境还有没有意义**。
+
+★ 本轮**没有改代码**：我把因追到了底，但"补 fixture 的 `subagents`"是一次真实的改动，
+要连同跨进程那条路一起验，不能在本轮的余量里顺手做。**下一轮做它。**
 #### ★★★ 第 65 轮：那条缺口**不是**一个取舍 —— 是一处抛错的接线 + 一条说谎的读数
 
 第 63/64 轮我说"要不要豁免这两行，得您裁"。第 65 轮把真进程里的**逐条读数**抓出来之后，
@@ -334,8 +382,9 @@ SVCCHECKS [{"name":"composition-patch-layer","ok":false,
 | 63 | ★★★★★ **端到端门禁（整套 CI）是红的 —— 而台账说 140/145 已完成** —— 前 6 轮我都在核"文档说的与产物是否一致"，这一轮去读**真正的端到端门禁**怎么说的。`.ci/r51`（`acffc8d`，我第 51 轮那次）9 阶段里 **`test` 与 `smoke` 两阶段 FAIL**，逐套件 **13 条套件级 FAIL** + 1 条 smoke FAIL。★★ 我没停在存档上：**在当前的 HEAD 上直接复跑**，确认它**今天仍然红**：`runtime-contract-cross-process` **9 红**、三个 `dsh-composition-runtime-host-*` 合计 **11 红**、`model-api` **1 红** ⇒ 实测 **21 条红**。★★★ 根因钉到证据上（`scratch/_probe-r63-selfcheck.mjs`）：执行器自检报 `EXECUTOR_SELF_CHECK_INCOMPATIBLE`，`reasons` 逐字是「`composition-patch-layer: legion-enforcement-runtime-host-registrar: 行已挂载但未激活（等待依赖服务），不产生任何强制效果`」和 `…runtime-contract-server…` 同形。而 `patch-layer.mjs:319-333` 的 `isRuntimeOnlyRow` 判据是「`module === null` 且有 `runtimeModule`」，这两行的 `module` **都不是 null**（`./plugins/runtime-host-registrar-row.mjs` / `./plugins/runtime-contract-server-row.mjs`）⇒ **不在** `RUNTIME_ONLY_ROW_IDS` 里 ⇒ 被按"强制面行"对账。而 `runtime-host-row.mjs:587` 写着 `inject: [ENFORCEMENT_ROOT_SERVICE]` —— 它**在等一个依赖服务**。★★★★ **这是 `2f5a4b3`（§5 第 20 条 · 业主选甲，2026-09-20 另一会话落地）的落地后果。**而那两行自己的注释（`patch-layer.mjs:267-304`）**明说这是设计**：「真实部署里四项必需能力里三项**如实报未确认** ⇒ 自检不兼容 ⇒ `autoExecutionForbidden: true`」、「挂与不挂的**行为等价**，区别只在拒绝从"没人挂"变成"查过、且拒了"」。⇒ **按产品设计，执行器今天在真部署上就是拒绝自动执行的。**★ 所以这**不是**一个我该自己"修"的缺陷：让这两行走"非强制面"的豁免，等于**把一个 fail-closed 的自检放宽** —— 那正是这个项目一直在防的那类改动。**⇒ 列为裁决项（见 §三之三），我不动它。**★ 一条顺带的好消息：存档里 `boundary-facts` 那时是 `pass=48 fail=3`，而**现在 HEAD 上 61/61 全绿** —— 那一处已经自愈，不用管。★ 另一件要说清的：`.ci` 下**几百个**存档里，最后 5 个**没有一个是 9 阶段全绿**的。> "台账 140/145 ✅"与"端到端门禁全绿"是**两支不同的账** ——> 前 6 轮我一直在核对前一支的内部一致性，而没人去看后一支。 |
 | 64 | ★★★ **把"13 条红"收窄成"1 簇真红"** —— 第 63 轮报的是"逐套件 13 条 FAIL"。本轮把每一条**单独复跑**：`event-delivery` **7/7 绿（1.4s）**、`run-plane` **20/20 绿**、`context-tokenizer-wiring` 绿、`chat-l1-smoke` **35/35 绿 exit=0**、`suite-counts` 绿、`boundary-facts` **61/61 绿**（已自愈）、`launcher.test.mjs` **35/35 绿**；`p13-host-injection` 需 `@dsh-external/dsh-team-hub` 构建产物（未测）。⇒ **13 条里 9 条是资源争用的假红；真的只有 1 簇（4 套件 21 红），就在自动执行那条路上。**★ 那些"被杀"的条目在存档里写的是「套件超过 300s 被杀（已连后代进程一起清理）：可能存在泄漏句柄或死锁」——**它把"因资源争用被杀"与"真的挂住"记成同一句话**，于是 8 条假红把 1 条真红淹掉了。> 一个把「因资源争用被杀」与「真的挂住」记成同一个读数的阶段，> 会让**八条假红把一条真红淹掉** —— 而报告的人只会说"CI 是红的"。★ 这一条**修正**了第 63 轮的措辞：不是"CI 大面积红"，而是**"恰好一簇红，而它正是自动执行那条路"** —— 后者比前者**更严重**，因为它精确。★ 同时提醒：`test` 阶段那一次跑了 **2486 秒**（>40 分钟）——在那个负载下"300s 被杀"是**预期的**，把它当产品缺陷读会指向错的方向。 |
 | 65 | ★★★★★ **那条缺口不是取舍，是一处抛错的接线 + 一条说谎的读数** —— 第 63/64 轮我把"要不要豁免那两行"报成需要业主裁决。本轮在**真 DSH 子进程**里抓逐条读数，拿到：`dsh: warning: 2 entries did not activate`、`legion-runtime-host 拒绝装配（code=RUNTIME_HOST_ROW_INPUTS_FACTORY_THREW）`。⇒ 真链条是：**输入工厂被调用并抛出** ⇒ 行拒绝装配 ⇒ 对账把它记成 `ROW_NOT_ACTIVATED`「**行已挂载但未激活（等待依赖服务）**」⇒ 自检不兼容 ⇒ 禁止自动执行 ⇒ 21 红。★★★★ **而"等待依赖服务"这句话是假的** —— 那一行没有在等任何服务，它**抛了**。这正是那条用例的原有断言在说的：「缺席被说成了"等待依赖服务"——那句话把人指向一个不存在的服务依赖」。★ 它**真的**把我指到了不存在的依赖上：我为此查了 `ENFORCEMENT_ROOT_SERVICE`、`isRuntimeOnlyRow`、两行的 `kind` —— **全部沿着那句假话走**。⇒ 原来那三条路（甲/乙/丙）**全都不需要了**，它们都建立在"那两行在等服务"这个**假前提**上。缺口缩成两件更小的事：① 修那处接线（工厂为什么抛）；② 修那条读数（`patch-layer.mjs:577-586` 把"抛了"与"在等服务"记成同一句）。★ 两件都属本批一直在修的那一族：**两种不同的处境被记成一个读数**。> 一条把人指向不存在的依赖的读数，会让下一个人（本轮就是我）> 沿着它把整条链重新走一遍，并且**一路都觉得自己在靠近**。 |
+| 66 | ★★★★★ **追到最内层的因，并把"修哪儿"钉死** —— 第 65 轮说"下一轮修①（工厂为什么抛）"，本轮修完：逐层是 `INPUTS_FACTORY_THREW` → 「宿主端口工厂抛了：runtime-host-registrar 拒绝」→ `RUNTIME_HOST_REGISTRAR_NO_SUBAGENTS_PORT` → **「进程里没有可用的 `subagents` 服务」**。而同一个 fixture 自己打出来的清单是 `SERVICES-PROVIDED tools,approval,sandbox` —— **没有 subagents**。⇒ **最内层的因是"那台假 DSH 不提供 `subagents`"，而真 DSH 有。**★ 于是"修哪儿"可以判：**给 fixture 补上 `subagents`（与真 DSH 同形）**，而不是改那 21 条用例的期望值 —— 后者会**掩盖"假件不完整"**，下次换个行还会再撞。而 `runtime-host-registrar-row` 那个拒绝**是对的**（`subagents` 是 `startRun` 的唯一真来源，不补假端口）。★★ 副产品发现（更值得记）：有一条用例断言 `/RUNTIME_HOST_ROW_NO_INPUTS_FACTORY/`（"没人注册工厂"），而它现在拿到 `INPUTS_FACTORY_THREW` —— 因为 `runtime-host-registrar-row.mjs` **在模块求值期就注册了工厂**（`patch-layer.mjs:264`）⇒ **只要这一行被挂上，"没有人注册工厂"这个处境就构造不出来了。**★★★★ **一个被新增的行从构造上删掉的处境，它的用例会以"期望值过时"的样子红，而不是以"这个处境没了"的样子红** —— 两种红的修法完全不同。★ 本轮**没有改代码**：因追到了底，但"补 fixture"是一次真实改动，要连同跨进程那条路一起验，不能在本轮余量里顺手做。**下一轮做它。** |
 
-**第 65 轮结束时的读数**（全部可复跑）：
+**第 66 轮结束时的读数**（全部可复跑）：
 
     declaration-mirrors   238 张冻结表 / 判为装饰 0 张 / 豁免 0 条
     progress-check        20 → **29/29**      intervention-coverage 16 → **18/18**

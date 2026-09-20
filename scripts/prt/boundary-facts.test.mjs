@@ -1429,3 +1429,37 @@ test('⑰ ★★★ 台账分档的每一处抄写都被登记过：现行的必
   assert.equal(liveHits.length, TALLY_LIVE.length, '现行清单里出现了重复锚点')
   assert.equal(frozenHits.length, TALLY_FROZEN.length, '历史清单里出现了重复锚点')
 })
+
+// ── 第 60 轮：**散文形状**的分档说法（`唯一的 ⬜`、`1 ⬜ + 4 ⏸`）────────────
+//
+//   前几轮的判据只认「四档连写」（`140 ✅ / 1 🟡 / 4 ⏸ / 0 ⬜`），于是 §2 里
+//   「台账里唯一的 ⬜」与「（1 ⬜ + 4 ⏸）」这两处**一直没人管** ——
+//   而它们与第 57 轮修掉的 §一 那个错，是**同一个错信念**：把 PRT-316（🟡）写成 ⬜。
+//
+//   > 同一个错信念写进两节，改了一节不等于改掉了它。
+//
+//   ⇒ 在**现行区**（`## 三、逐轮留档` 之前）里核两种散文形状：
+//     ① `N <标记>` 的 N 必须等于台账那一档；
+//     ② `唯一的 <标记>` 的标记必须是台账里**恰好为 1** 的那一档。
+test('⑱ ★★ 交付物现行区里每一处分档说法都要等于台账（含散文形状）', () => {
+  const lines = readFileSync(resolve(REPO, FINAL_REPORT_DOC), 'utf8').split('\n')
+  const iArch = lines.findIndex((l) => /^## 三、逐轮留档/.test(l))
+  assert.ok(iArch > 0, '找不到 §三 边界')
+  const ledger = readFileSync(resolve(REPO, 'docs/superpowers/prt/PRT-PROGRESS.md'), 'utf8')
+  const real = tallyLedger(ledger)
+  const want = { '✅': real.done, '🟡': real.partial, '⏸': real.paused, '⬜': real.todo }
+  const bad = []
+  for (let i = 0; i < iArch; i += 1) {
+    const l = lines[i]
+    // ① `N <标记>`
+    for (const m of l.matchAll(/(\d+)\s*(✅|🟡|⏸|⬜)/g)) {
+      const got = Number(m[1])
+      if (got !== want[m[2]]) bad.push(`L${i + 1} 写「${m[0]}」，而台账 ${m[2]} = ${want[m[2]]}`)
+    }
+    // ② `唯一的 <标记>`（标记必须恰好是台账里为 1 的那一档）
+    for (const m of l.matchAll(/唯一的\s*\*{0,2}(✅|🟡|⏸|⬜)/g)) {
+      if (want[m[1]] !== 1) bad.push(`L${i + 1} 说「唯一的 ${m[1]}」，而台账 ${m[1]} = ${want[m[1]]}`)
+    }
+  }
+  assert.deepEqual(bad, [], `现行区里的分档说法与台账不符：\n${bad.join('\n')}`)
+})

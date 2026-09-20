@@ -52,11 +52,17 @@ import { featureTableRow } from './progress-check.mjs'
 export const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 export const STATUS_DOC = 'docs/MULTI-AGENT-FEATURE-STATUS.md'
 
-/** 功能行：第一格以 `F-NN` 开头。
- *  ★★★ 第 48 轮：**本模块不再自己认行** —— 交给所有者（见下面的 `parseLandingCells`）。 */
-export const FEATURE_ROW_RE = /^\|\s*F-\d+/
+/**
+ * ★★★ 第 48 轮：这里原来有一个 `FEATURE_ROW_RE = /^\|\s*F-\d+/`。
+ *   交出**行识别权**之后它**一个使用者都没有了**（`git grep FEATURE_ROW_RE` 只剩定义）
+ *   ⇒ 删掉。
+ *
+ *   ★ 留着它就是本批一直在处理的那个形状："**声明还在，用它的人没了**"。
+ *     而它与"这份声明真的在被遵守"在阅读代码时长得一样 ——
+ *     一个空的承诺比没有承诺更难发现。
+ */
 
-/** 「代码落点」是第 4 格（下标 3）。列数不是 5/6 的行（§2 投影表等）不归这条判据管。 */
+/** 「代码落点」是第 4 格（下标 3）。★ 行的**识别**归 `progress-check.featureTableRow`。 */
 export const LANDING_COLUMN = 3
 
 /** 看起来像"一个文件路径"的 token。★ 含通配符的也算——它们要被**数出来**再跳过，

@@ -244,6 +244,7 @@ import { createMembersRoutes } from './routes/members.mjs'
 import { createExecRoutes } from './routes/exec.mjs'
 import { createModelsRoutes } from './routes/models.mjs'
 import { createWebRoutes } from './routes/web.mjs'
+import { createGoalLifecycleRoutes } from './routes/goal-lifecycle.mjs'
 import { createSpaceOperationsRoutes } from './routes/space-operations.mjs'
 import { createRuntimeVerificationRoutes } from './routes/runtime-verification.mjs'
 import { createRuntimeLeaseRoutes } from './routes/runtime-lease.mjs'
@@ -5167,6 +5168,11 @@ const router = createRouter([
     existsSync, readFileSync, join,
     rmSync,
   }),
+  createGoalLifecycleRoutes({
+    json,
+    handleWrite, publishGoalRecord, setGoalContext,
+    setGoalState,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -5764,31 +5770,10 @@ async function handle(req, res, stripPrefix) {
     // 本族这 3 条已全部搬进模块，`server.mjs` 里不再有它们。
     // ⚠️ **前缀下还有不属于本族的**（别顺手搬走）：POST /api/spaces , POST /api/spaces/
     if (await router.dispatch(req, res, { path, url })) return
-    if (req.method === 'POST' && path === '/api/goal') {
-      // 发布目标（多目标并发）：每次都**新建**一个目标记录（G-xxx，status=active，version=1），
-      // 并为其生成独立阶段任务链（链任务全部挂 goalId）。**不取消**该空间既有目标/旧链任务——
-      // 多个目标可并存、各自的链由守护并行推进；将军可对单个目标 暂停/恢复/取消（/api/goal/status）。
-      await handleWrite(req, res, (body, by, scope) => {
-        const objective = body.objective
-        if (typeof objective !== 'string' || objective.trim().length === 0) throw new Error('缺少参数 objective')
-        const targetScope = typeof body.scope === 'string' && body.scope.trim().length > 0 ? body.scope.trim() : scope
-        // RC-2：body.docSync / body.feature=true → 目标级 docSync 声明（链上 coder 任务承接，见 createGoalChain）
-        const docSync = body.docSync === true || body.feature === true
-        return publishGoalRecord(targetScope, objective, body.mode === 'slice' ? 'slice' : 'chain', by, docSync)
-      })
-      return
-    }
-    if (req.method === 'POST' && path === '/api/goal/context') {
-      // 目标级上下文（同目标共享上下文）：仅将军；bump contextVersion；审计 + SSE。
-      // 语义 = 下一派工对齐：正在跑的 worker 不打断，下一次派工注入最新 context/版本（守护写镜像 docs/goals/<id>.md）。
-      await handleWrite(req, res, (body, by) => setGoalContext(body.id, body.text, by, body.forceGeneral === true))
-      return
-    }
-    if (req.method === 'POST' && path === '/api/goal/status') {
-      // 目标状态生命周期（仅将军）：active ↔ paused；done/canceled 终态（见 setGoalState）。
-      await handleWrite(req, res, (body, by) => setGoalState(body.id, body.status, by, body.forceGeneral === true))
-      return
-    }
+    // ── 目标的发布与生命周期：发布（含阶段任务链）/ 读取目标上下文 / 暂停·恢复·取消 —— 已提取到 `./routes/goal-lifecycle.mjs`（PRT-316 第 38 族 / 切片 40）──
+    // 本族这 3 条已全部搬进模块，`server.mjs` 里不再有它们。
+    // ⚠️ **前缀下还有不属于本族的**（别顺手搬走）：POST /api/goal/slices
+    if (await router.dispatch(req, res, { path, url })) return
     if (req.method === 'POST' && path === '/api/agents') {
       await handleWrite(req, res, (body, by, scope) => {
         const role = body.role

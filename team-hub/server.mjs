@@ -244,6 +244,7 @@ import { createMembersRoutes } from './routes/members.mjs'
 import { createExecRoutes } from './routes/exec.mjs'
 import { createModelsRoutes } from './routes/models.mjs'
 import { createWebRoutes } from './routes/web.mjs'
+import { createSpaceConfigRoutes } from './routes/space-config.mjs'
 import { createFeedbackHeartbeatRoutes } from './routes/feedback-heartbeat.mjs'
 import { createContentReadsRoutes } from './routes/content-reads.mjs'
 import { createTeamViewsRoutes } from './routes/team-views.mjs'
@@ -5195,6 +5196,13 @@ const router = createRouter([
     db, parseJson, handleWrite,
     touchMember,
   }),
+  createSpaceConfigRoutes({
+    json,
+    db, now, audit,
+    handleWrite, SCOPE_KEY_RE, normalizeStages,
+    normalizeRuntime, withTx, readPipeline,
+    pipelineWarnings,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -5460,76 +5468,13 @@ async function handle(req, res, stripPrefix) {
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/calendar/*` 路由，该命名空间只住一个地方。
     if (await router.dispatch(req, res, { path, url })) return
 
-    // ── 工作空间 + 编队管理 ──
-    if (req.method === 'POST' && path === '/api/spaces') {
-      // 注册/更新工作空间（幂等 upsert：id + name 必填）。除 private 外支持仓库绑定：
-      // localDir = 本地文件夹（该空间对应的本机目录），remoteUrl = 远程仓库 URL（空 = 仅本地/不进共享仓库）。
-      await handleWrite(req, res, (body, by, scope) => {
-        const id = body.id
-        const name = body.name
-        if (typeof id !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(id)) throw new Error('空间 id 非法：小写字母/数字开头，可含连字符，≤64 字符')
-        if (typeof name !== 'string' || name.trim().length === 0) throw new Error('缺少参数 name')
-        const localDir = typeof body.localDir === 'string' ? body.localDir.trim() : ''
-        const remoteUrl = typeof body.remoteUrl === 'string' ? body.remoteUrl.trim() : ''
-        if (localDir.length > 512) throw new Error('localDir 过长（≤512 字符）')
-        if (remoteUrl.length > 1024) throw new Error('remoteUrl 过长（≤1024 字符）')
-        const existed = db.prepare('SELECT id FROM spaces WHERE id = ?').get(id)
-        db.prepare(`INSERT INTO spaces (id, name, private, local_dir, remote_url, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(id) DO UPDATE SET name=excluded.name, private=excluded.private, local_dir=excluded.local_dir, remote_url=excluded.remote_url, updatedAt=excluded.updatedAt`)
-          .run(id, name.trim(), body.private ? 1 : 0, localDir, remoteUrl, now(), now())
-        const count = db.prepare('SELECT COUNT(*) AS c FROM roster WHERE scope = ?').get(id).c
-        audit(by, scope, existed ? 'space:update' : 'space:create', null, { space: id, name: name.trim(), private: !!body.private, localDir, remoteUrl })
-        return { id, name: name.trim(), private: !!body.private, localDir, remoteUrl, agentCount: count }
-      })
-      return
-    }
-    if (req.method === 'POST' && path === '/api/pipeline') {
-      // SP-P0：写入空间流水线（阶段契约 + 执行配置）。整批 upsert（含删除未提交的旧阶段）。
-      // 校验在写入期完成：role 形状/唯一性、next 可达、gate 必须有 artifact、docs 必须是仓库相对路径。
-      // 编队与流水线的一致性**不在此处硬拦**（便于先配流水线后选人入编），由 GET /api/spaces/provision 报给将军。
-      await handleWrite(req, res, (body, by, scope) => {
-        const targetScope = typeof body.scope === 'string' && body.scope.trim().length > 0 ? body.scope.trim() : scope
-        if (!SCOPE_KEY_RE.test(targetScope)) throw new Error('scope 非法（字母/数字/下划线/连字符，≤64 字符）')
-        if (body.by !== 'general' && by !== 'general' && body.forceGeneral !== true) throw new Error('流水线配置仅允许 general 执行（body.by 或操作者身份须为 general）')
-        const stages = normalizeStages(targetScope, body.stages)
-        const runtime = body.runtime === undefined ? null : normalizeRuntime(body.runtime)
-        const result = withTx(() => {
-          const prevRoles = new Set(db.prepare('SELECT role FROM space_stages WHERE scope = ?').all(targetScope).map(r => r.role))
-          const upsert = db.prepare(`INSERT INTO space_stages (scope, role, label, prompt, next, gate, artifact, docs, sort, enabled, updatedAt)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(scope, role) DO UPDATE SET label=excluded.label, prompt=excluded.prompt, next=excluded.next,
-              gate=excluded.gate, artifact=excluded.artifact, docs=excluded.docs, sort=excluded.sort, enabled=excluded.enabled, updatedAt=excluded.updatedAt`)
-          const ts = now()
-          for (const s of stages) {
-            upsert.run(targetScope, s.role, s.label, s.prompt, s.next, s.gate, s.artifact, s.docs === null ? null : JSON.stringify(s.docs), s.sort, s.enabled, ts)
-          }
-          const keep = stages.map(s => s.role)
-          const dropped = [...prevRoles].filter(r => !keep.includes(r))
-          if (dropped.length > 0) {
-            const del = db.prepare('DELETE FROM space_stages WHERE scope = ? AND role = ?')
-            for (const r of dropped) del.run(targetScope, r)
-          }
-          if (runtime !== null) {
-            db.prepare(`INSERT INTO space_runtime (scope, enabled, maxWorkers, isolate, updatedAt) VALUES (?, ?, ?, ?, ?)
-              ON CONFLICT(scope) DO UPDATE SET enabled=excluded.enabled, maxWorkers=excluded.maxWorkers, isolate=excluded.isolate, updatedAt=excluded.updatedAt`)
-              .run(targetScope, runtime.enabled ? 1 : 0, runtime.maxWorkers, runtime.isolate ? 1 : 0, ts)
-          }
-          audit(by, targetScope, 'pipeline:update', null, {
-            stages: stages.length,
-            added: stages.filter(s => !prevRoles.has(s.role)).map(s => s.role),
-            dropped,
-            runtime,
-          })
-          return { scope: targetScope, stages: stages.length, dropped, added: stages.filter(s => !prevRoles.has(s.role)).length, runtime }
-        })
-        const view = readPipeline(targetScope)
-        return { ...result, version: view.version, activeRoles: view.activeRoles, warnings: pipelineWarnings(targetScope, view) }
-      })
-      return
-    }
+    // ── 工作空间注册/更新与空间流水线配置（含"仅 general 可改流水线"那道权限闸） —— 已提取到 `./routes/space-config.mjs`（PRT-316 第 43 族 / 切片 45）──
+    // 本族这 2 条已全部搬进模块，`server.mjs` 里不再有它们。
+    // ⚠️ **前缀下还有不属于本族的**（别顺手搬走）：POST /api/spaces/
+    if (await router.dispatch(req, res, { path, url })) return
     // ── 工作空间的运维面：删除预检（影响面，只读）/ 开通 / 删除（含附件目录清理） —— 已提取到 `./routes/space-operations.mjs`（PRT-316 第 37 族 / 切片 39）──
     // 本族这 3 条已全部搬进模块，`server.mjs` 里不再有它们。
-    // ⚠️ **前缀下还有不属于本族的**（别顺手搬走）：POST /api/spaces , POST /api/spaces/
+    // ⚠️ **前缀下还有不属于本族的**（别顺手搬走）：POST /api/spaces/
     if (await router.dispatch(req, res, { path, url })) return
     // ── 目标的发布与生命周期：发布（含阶段任务链）/ 读取目标上下文 / 暂停·恢复·取消 —— 已提取到 `./routes/goal-lifecycle.mjs`（PRT-316 第 38 族 / 切片 40）──
     // 本族这 3 条已全部搬进模块，`server.mjs` 里不再有它们。

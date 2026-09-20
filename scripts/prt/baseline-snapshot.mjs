@@ -281,6 +281,7 @@ SOURCES.routesTaskRecords = join(ROOT, 'team-hub', 'routes', 'task-records.mjs')
 SOURCES.routesTeamViews = join(ROOT, 'team-hub', 'routes', 'team-views.mjs')
 SOURCES.routesContentReads = join(ROOT, 'team-hub', 'routes', 'content-reads.mjs')
 SOURCES.routesFeedbackHeartbeat = join(ROOT, 'team-hub', 'routes', 'feedback-heartbeat.mjs')
+SOURCES.routesSpaceConfig = join(ROOT, 'team-hub', 'routes', 'space-config.mjs')
 
 /** 已提取出去的路由族模块（值 = 该文件里**声明式**路由的归属名）。 */
 export const ROUTE_FAMILY_SOURCES = Object.freeze([
@@ -326,6 +327,7 @@ export const ROUTE_FAMILY_SOURCES = Object.freeze([
   { module: 'routesTeamViews', family: 'team-views', factory: 'createTeamViewsRoutes' },
   { module: 'routesContentReads', family: 'content-reads', factory: 'createContentReadsRoutes' },
   { module: 'routesFeedbackHeartbeat', family: 'feedback-heartbeat', factory: 'createFeedbackHeartbeatRoutes' },
+  { module: 'routesSpaceConfig', family: 'space-config', factory: 'createSpaceConfigRoutes' },
 ])
 SOURCES.experienceStore = join(ROOT, 'team-hub', 'experience-store.mjs')
 
@@ -373,8 +375,24 @@ function must(cond, message) {
 /**
  * 抽取规则与源码脱节的护栏阈值。
  * 真实源码远高于阈值；单测用小型夹具时通过 `min` 覆盖，以免为了测试而拆掉护栏。
+ *
+ * ★★★ 2026-09-20（PRT-316 切片 45）：**这个数被它自己守护的那件事追上了。**
+ *
+ *   `MIN_ROUTES` 原本是 10，写在 `server.mjs` 里还有 **191** 条路由的时候。
+ *   PRT-316 逐片把路由搬进 `team-hub/routes/*` 之后，`server.mjs` 里**应当**剩下的
+ *   条数一路降到 **9** —— 于是这道"抽取器是不是坏了"的护栏，在**做得对**的那一次
+ *   报了红：`HTTP 路由只提取到 9 条（下限 10）`。
+ *
+ *   > 一个「阈值 10 离真实值 191 很远，永远不会误报」的印象，
+ *   > 与一个「它守护的那件事每成功一步，真实值就朝阈值走一步」的事实，
+ *   > 在这个迁移快做完的时候是同一个东西。
+ *
+ *   ⇒ 降到 5：仍然能抓住"抽取器彻底脱节"（提取到 0 或个位数），
+ *     但不再把**迁移接近完成**误判成**抽取器损坏**。
+ *     ★ 真正该守的"搬家没搬丢"，由 `assertRouteFamilyCoverage` 用
+ *     `ROUTE_FAMILY_SOURCES` 逐族核对 —— 那道判据不依赖这个魔数。
  */
-const MIN_ROUTES = 10
+const MIN_ROUTES = 5
 const MIN_TABLES = 10
 
 /**

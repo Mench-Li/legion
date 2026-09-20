@@ -149,6 +149,38 @@ worker（orchestrator 进程）与 DSH Runtime 是**两个进程**，所以同�
 > - **乙**：「**继续等**」⇒ 我记下"等待无完成信号"这个读数就停手；
 >   但它不会自己变好——需要有人去推那个会话，或把 `envNames` 拆出来让两处不再互相挡。
 
+
+> ✅ **2026-09-20：甲案已执行完毕（`6ff673d`）。** 那一页至此可以按"已办"读。
+>
+> **改了三处，不是两处**（上面那行只写了清单 + `config.test.mjs`）：
+>
+> | 文件 | 改动 |
+> | --- | --- |
+> | `product/process-manifest.mjs` | runtime `envNames` +4 把（13 → 17） |
+> | `product/config-schema.mjs` | `CHILD_ENV_NAMES` +4 把（它 == 清单 `envNames` 的并集） |
+> | `scripts/config/config.test.mjs` | `NOT_FORWARDED_YET` 删 4 条、`ASSEMBLY_ANCHORS` 删 4 条、计数 5 → 1 |
+>
+> **第三处是动手时才暴露的**：只改前两处的话，`scan --check` 会报出 **4 个未处理字面量**
+> ——扫描器在 **product 那一层**看见了 4 个没人认领的 env 字面量，因为
+> `CHILD_ENV_NAMES` 没有同步。*"清单和 schema 两张表"这种事，只有在真的动第一张时才会发现。*
+>
+> ★★ **加的是 4 把，不是 5 把。** 上面把 5 把键写成"一起通、一起不通"——**第 5 把
+> `TEAM_HUB_TOKEN` 不能这么做**：§5 第 19 条已裁决不把控制面凭证注入执行面，
+> 且 `allowlist.test.mjs` 有一条边界不变量逐字要求 `runtime` 只持有
+> `LEGION_RUNTIME_TOKEN`。照字面执行"5 把一起通"会**破坏一条有测试守着的安全边界**。
+> 它要走的另一条路是**从 schema 的 `fields` 里拿掉**（会改配置面），**留给单独一次裁决**——
+> `NOT_FORWARDED_YET` 里现在只剩它一条，且把这一点写明了。
+>
+> **行为读数（不是集合读数）**：用真的 `buildChildEnv()` + 真的 `PROCESS_SPECS`，
+> 在 `baseEnv` 里配好这 4 把键 ⇒ **四把全部进了 runtime 子进程环境**；
+> 负对照 `TEAM_HUB_TOKEN` **仍进不去**（`dropped` 里就是它）。
+> ⇒ 四道范围检查 + 连接器判定在真实部署里**开始生效**，而执行面依旧拿不到控制面凭证。
+>
+> **提交里只有我这几行**：那两个文件都是另一会话的在制品（157 行 / 40 行未提交）。
+> 做法是 `hash-object` + `update-index --cacheinfo` 造「`HEAD` + 我这几行」的 blob，
+> 再**不带 pathspec** 提交；实测索引里 3 个文件、`7 0` / `17 0` / `15 49`，
+> 对方两个 diff 的**内容行逐字未动、仍未提交**。
+
 ---
 
 ## 1. 需要「产品 / 架构」裁决的（**定语义**，不定语义就会猜）

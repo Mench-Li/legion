@@ -35,7 +35,7 @@ import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { analyze, ignoredFiles, loadBaseline, REPO, SCAN_DIRS, PROCESS_ENTRIES, dirtyFiles, inFlightViolations, matrixItems, gapPointerViolations, positionalReasonViolations } from './reachability.mjs'
+import { analyze, ignoredFiles, loadBaseline, REPO, SCAN_DIRS, PROCESS_ENTRIES, dirtyFiles, inFlightViolations, matrixItems, gapPointerViolations, positionalReasonViolations, MATRIX_PATH, decisionStateRows, decisionStateIndex, decisionStateViolations } from './reachability.mjs'
 
 const a = analyze()
 const baseline = loadBaseline()
@@ -726,4 +726,47 @@ test('★ 严格规则确实**能**报出旧的写法（把第 49 轮修掉的�
     : e))
   assert.equal(positionalReasonViolations(withOld).some((b) => b.file === 'product/upgrade/backup.mjs'),
     true, '把"同上"放回去之后仍不被报 ⇒ 本规则测不出旧的写法')
+})
+
+// ── 第 55 轮：§5 决策表的**状态索引** ──────────────────────────────────
+//   §5 决策表是写给人照做的那张清单（29 行 × 5 列）而**没有状态列**，
+//   于是"某一行还开不开着"只能靠通读散文判出来。索引表是它的派生视图，
+//   判据盯的是**陈旧**（派生值变了、索引没跟上）——不要求任何一行变成已裁决。
+test('⑭ ★★ 真仓库：§5 状态索引等于今天派生出来的值，且覆盖每一条', () => {
+  const doc = readFileSync(MATRIX_PATH, 'utf8')
+  const derived = decisionStateRows(doc)
+  const index = decisionStateIndex(doc)
+  // ★ 先证明扫到了：0 条与"压根没找到决策表"是同一个读数
+  assert.ok(derived.length >= 29, `决策表只派生到 ${derived.length} 条（应 >= 29）⇒ 扫描面可能没落在表上`)
+  assert.equal(index.length, derived.length, `索引 ${index.length} 条 vs 派生 ${derived.length} 条`)
+  assert.deepEqual(decisionStateViolations(doc), [],
+    '§5 状态索引与今天派生出来的值不一致 ⇒ 有人补了标记却没重生成索引')
+})
+
+test('⑭b ★ 反面控制：把索引里某一条改成别的状态 ⇒ 必须报 INDEX_STALE', () => {
+  const doc = readFileSync(MATRIX_PATH, 'utf8')
+  const mutated = doc.replace('| 19 | ', '| 19 | ')  // 先确认锚点
+  assert.equal(mutated, doc, '锚点不在，控制写不出来')
+  const i = doc.indexOf('决策表状态索引')
+  const head = doc.slice(0, i)
+  const tail = doc.slice(i)
+  // 把索引表里第一条「已裁决」改成「未标注」
+  const tail2 = tail.replace(/(\| 1 \| [^|]+ \| )已裁决( \|)/, '$1**未标注**$2')
+  assert.notEqual(tail2, tail, '索引表里没改到东西 —— 这个反面控制是假的')
+  const bad = decisionStateViolations(head + tail2)
+  assert.ok(bad.some((x) => x.code === 'INDEX_STALE'),
+    `判据没报陈旧：${JSON.stringify(bad)}`)
+})
+
+test('⑭c ★ 反面控制：删掉索引里的一条 ⇒ 必须报 INDEX_GAP', () => {
+  const doc = readFileSync(MATRIX_PATH, 'utf8')
+  const i = doc.indexOf('决策表状态索引')
+  const head = doc.slice(0, i)
+  const tail = doc.slice(i).split('\n')
+  const k = tail.findIndex((l) => /^\| 7 \| /.test(l))
+  assert.ok(k > 0, '索引表里找不到第 7 条')
+  tail.splice(k, 1)
+  const bad = decisionStateViolations(head + tail.join('\n'))
+  assert.ok(bad.some((x) => x.code === 'INDEX_GAP'),
+    `判据没报缺条目：${JSON.stringify(bad)}`)
 })

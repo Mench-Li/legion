@@ -426,6 +426,153 @@ export function matrixItems(path = MATRIX_PATH) {
   return items
 }
 
+// ── §5 决策表的**状态索引**（第 55 轮）─────────────────────────────────────
+//
+// 起因：§5 决策表是**写给人照做的那张清单**，而它有 **29 行、5 列、没有状态列**
+// ⇒ 某一行**还开不开着**，此前只能靠通读散文判出来。
+//
+//   > 一张"状态写在散文里"的清单，与一张"状态写在列里"的清单，
+//   > 在**读者从头读到尾**的时候是同一个东西 ——
+//   > 而清单存在的理由，正是**没有人会从头读到尾**。
+//
+// ★★ 而"扫哪一格"这个选择**真的会改答案**（实测三次）：
+//
+//     只扫 事项+需要谁+具体决定   ⇒ 已裁决 3 · 未标注 **26**
+//     扫前 4 格（不含后果那格）   ⇒ 已裁决 3 · 未标注 **26**
+//     扫整行 5 格                ⇒ 已裁决 5 · 待裁决 4 · 未标注 **20**
+//
+//   > 一个"状态"读数会**随扫描面**在 20 与 26 之间变动，
+//   > 说明它当时还不是一个读数，只是一个印象。
+//
+//   ⇒ 定为**整行 5 格**：标记的位置本身不一致（`已裁决` 有时在 `需要谁` 格，
+//     而 `不决定则…` 那种开口径**只**出现在 `不决定的后果` 格）。
+//     掐掉后果格 ⇒ 4 条"待裁决"全部消失 ——**那是把读数改小，不是把表变准**。
+//   ⇒ 规则写在这里**一处**；索引表由它派生，下面的判据核对"索引 = 今天派生出来的值"。
+export const DECISION_STATE_VOCAB = Object.freeze(['已裁决', '待施工', '待裁决', '未标注'])
+
+const DECISION_STATE_MARKS = Object.freeze({
+  // ★★ 第 55 轮·订正：第一版是 `/已裁决|已执行|…/`，于是 **#28 被误判成「已裁决」**。
+  //
+  //   #28 那一行里写的是「各自与**已裁决事项**的关系都写清了」——
+  //   `已裁决` 在这里是**名词短语的一部分**（"已裁决的事项"，指的是**别的行**），
+  //   不是对**这一行**的裁决。而判据把它读成了本行的状态。
+  //
+  //   > 一个认不出"这一行**提到**了已裁决"与"这一行**是**已裁决"的模式，
+  //   > 报出来的是"这一行已裁决" —— 而它读起来跟真的一样。
+  //
+  //   ★ 这与 `suite-counts` 那个坑同形（他们代码里记着：`peakResource` 是**字段名**，
+  //     "判据 47 例"说的是**另一套**判据，却被提取成一条计数声明）。
+  //   ⇒ 加一条否定前瞻：`已裁决` **后面不许紧跟 `事项` 或 `的`**
+  //     （那两种写法都是在**指别人**）。其余形态照收：`已裁决（2026-09-18）`、`**已裁决**` 等。
+  已裁决: /已裁决(?!事项|的)|已执行|已定|业主\s*20\d\d-\d\d-\d\d\s*(裁定|给)|裁定：/,
+  待施工: /待施工/,
+  待裁决: /待裁决|待裁|仍未接|尚未|不决定则/,
+})
+
+/** 决策表的行区间（表头 `| # | 事项 |` 起，连续消费 `|` 行）。 */
+function decisionTableSpan(lines) {
+  const h = lines.findIndex((l) => /^\|\s*#\s*\|\s*事项\s*\|/.test(l))
+  if (h < 0) return null
+  let e = h + 1
+  while (e < lines.length && /^\|/.test(lines[e])) e += 1
+  return { h, e }
+}
+
+/**
+ * 从决策表**派生**每一行的状态（只认该行自己写下的显式标记）。
+ *
+ * ★ 返回体里连 `name` / `who` 一起给：索引表是**由它渲染**的，
+ *   而"渲染"与"判定"必须是**同一份实现** —— 否则一个"自己再抄一遍"的生成器
+ *   与这条判据会在**某一次**口径不一致时开始互相打架，而那时两边都自称是读数。
+ * @returns {{ no: number, state: string, name: string, who: string }[]}
+ */
+export function decisionStateRows(docText) {
+  const lines = docText.split('\n').map((l) => l.replace(/\r$/, ''))
+  const span = decisionTableSpan(lines)
+  if (span === null) return []
+  const out = []
+  for (let i = span.h + 2; i < span.e; i += 1) {
+    const cells = lines[i].split('|').slice(1, -1).map((c) => c.trim())
+    if (cells.length < 5 || /^-+$/.test(cells[0])) continue
+    const all = cells.join(' ')
+    let state = '未标注'
+    for (const k of DECISION_STATE_VOCAB) {
+      if (k !== '未标注' && DECISION_STATE_MARKS[k].test(all)) { state = k; break }
+    }
+    // 短名：去加粗与行内标记，切在第一个全角括号/冒号前
+    const name = (cells[1] ?? '')
+      .replace(/\*\*/g, '')
+      .replace(/^[★\s]+/, '')
+      .split(/（|：|;|；/)[0]
+      .replace(/[`]/g, '')
+      .trim()
+      .slice(0, 46)
+    const who = (cells[2] ?? '').replace(/\*\*/g, '').split(/（|★/)[0].trim()
+    out.push({ no: Number(cells[0]), state, name, who })
+  }
+  return out
+}
+
+/** 把状态索引渲成 markdown 行（生成器与判据共用同一份派生）。 */
+export function renderDecisionStateIndex(docText) {
+  const rows = decisionStateRows(docText)
+  const t = { 已裁决: 0, 待施工: 0, 待裁决: 0, 未标注: 0 }
+  for (const r of rows) t[r.state] += 1
+  return [
+    ...rows.map((r) => `| ${r.no} | ${r.name} | ${r.state === '未标注' ? '**未标注**' : r.state} | ${r.who} |`),
+    '',
+    `⇒ **合计**：已裁决 **${t.已裁决}** · 待施工 **${t.待施工}** · 待裁决 **${t.待裁决}** · **未标注 ${t.未标注}**（共 ${rows.length} 行）。`,
+  ].join('\n')
+}
+
+/** 解析**索引表**里逐行写下的状态。 */
+export function decisionStateIndex(docText) {
+  const lines = docText.split('\n').map((l) => l.replace(/\r$/, ''))
+  const h = lines.findIndex((l) => /决策表状态索引/.test(l))
+  if (h < 0) return []
+  const out = []
+  for (let i = h; i < lines.length; i += 1) {
+    if (/^##\s/.test(lines[i])) break
+    const m = /^\|\s*(\d{1,2})\s*\|[^|]*\|\s*\*{0,2}(已裁决|待施工|待裁决|未标注)\*{0,2}\s*\|/.exec(lines[i])
+    if (m !== null) out.push({ no: Number(m[1]), state: m[2] })
+  }
+  return out
+}
+
+/**
+ * 索引表必须**等于**今天派生出来的值，且覆盖**每一条**。
+ *
+ * ★ 索引表是**派生视图**，所以它唯一的真实失效是"陈旧"：
+ *   有人给某行补了 `已裁决`，索引还写着 `未标注`。判据就是盯这个。
+ * ★ 而它**不**要求任何一行变成"已裁决" —— 那 20 条 `未标注` 是**如实读数**，
+ *   不是待修的缺陷（替业主判定状态是裁决，不是抄写）。
+ * @returns {{ code: string, detail: string }[]}
+ */
+export function decisionStateViolations(docText) {
+  const derived = decisionStateRows(docText)
+  const index = decisionStateIndex(docText)
+  if (derived.length === 0) return [{ code: 'TABLE_MISSING', detail: '§5 决策表没找到' }]
+  if (index.length === 0) return [{ code: 'INDEX_MISSING', detail: '§5 决策表状态索引没找到' }]
+  const bad = []
+  const byNo = new Map(index.map((x) => [x.no, x.state]))
+  for (const d of derived) {
+    if (!byNo.has(d.no)) { bad.push({ code: 'INDEX_GAP', detail: `#${d.no} 在索引表里没有条目` }); continue }
+    const got = byNo.get(d.no)
+    if (got !== d.state) {
+      bad.push({
+        code: 'INDEX_STALE',
+        detail: `#${d.no}：索引写「${got}」，而按今天该行的显式标记派生出来是「${d.state}」`
+          + ' ⇒ 有人补了标记却没重生成索引（或反过来）',
+      })
+    }
+  }
+  const derivedNos = new Set(derived.map((d) => d.no))
+  for (const no of byNo.keys()) {
+    if (!derivedNos.has(no)) bad.push({ code: 'INDEX_EXTRA', detail: `#${no} 在索引表里，但决策表里没有这一行` })
+  }
+  return bad
+}
+
 /**
  * 每一条 `gap` 都必须写出**能解析的裁决处指针**。
  *

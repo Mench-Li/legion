@@ -39,6 +39,8 @@
 import { readFileSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+// ★★★ 第 48 轮：功能表的**数据行识别**归 `progress-check.mjs` 所有（本仓第五份手写已删除）。
+import { featureTableRow } from './progress-check.mjs'
 
 export const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 export const STATUS_DOC = 'docs/MULTI-AGENT-FEATURE-STATUS.md'
@@ -66,27 +68,45 @@ const PAUSED = '⏸'
  *
  * ★ `skipped` 要**报出来**：一个"扫到 0 行"的门禁与一个"全部相容"的门禁，
  *   在只有 `ok: true` 的输出里是同一个东西。
+ *
+ * ★★★ 第 48 轮：**"哪一行算功能行"交给所有者**（`progress-check.featureTableRow`）。
+ *
+ *   本函数此前自己判行、自己分格、**自己定宽度**（`≠5 且 ≠6 ⇒ 跳过`）——
+ *   是同一张功能表在本仓的**第五份**手写解析。
+ *
+ *   ★ 而它是这五份里**唯一做对了一件事**的：它把跳过**报出来**
+ *     （`skipped`，第 23 轮 F-15 那一课的成果）——
+ *     所以它的缺陷不是"静默少读"，而是"把 4 格 / 7 格的功能行**归错类**"：
+ *     报成"另一张表"，于是那一行的状态与「还差什么」都不再被这条规则管。
+ *
+ *     > 一份"跳过并报出来"的清单，比一份"静默跳过"好得多——
+ *     > 但它仍然可能把**自己看不懂的东西**说成**别人的东西**。
+ *
+ *   ⇒ 现在：**所有者说是行，就是行**；所有者说不是，而它看起来像功能行
+ *     （`FEATURE_ROW_RE`），才记进 `skipped` 并说明原因。
  */
 export function parseFeatureRows(text) {
   const rows = []
   const skipped = []
   String(text).split(/\r?\n/).forEach((line, i) => {
-    const m = FEATURE_ROW_RE.exec(line)
-    if (m === null) return
-    const cells = line.replace(/^\|/, '').replace(/\|$/, '').split(/(?<!\\)\|/).map((c) => c.trim())
-    // 功能表只有两种宽度：主表 6 列、P1/P2 表 5 列。别的宽度是别的表 = 跳过。
-    if (cells.length !== 5 && cells.length !== 6) {
-      skipped.push({ line: i + 1, id: m[1], cols: cells.length })
+    const row = featureTableRow(line)
+    if (row !== null) {
+      rows.push({
+        line: i + 1,
+        id: row.id,
+        status: row.status,
+        end: endState(row.status),
+        gap: row.cells[row.cells.length - 1],
+        cols: row.cells.length,
+      })
       return
     }
-    rows.push({
-      line: i + 1,
-      id: m[1],
-      status: cells[2],
-      end: endState(cells[2]),
-      gap: cells[cells.length - 1],
-      cols: cells.length,
-    })
+    // ★ 所有者不收，但它看起来**像**一个功能行 ⇒ 这是"跳过了"，必须报出来。
+    const m = FEATURE_ROW_RE.exec(line)
+    if (m !== null) {
+      const cells = line.replace(/^\|/, '').replace(/\|$/, '').split(/(?<!\\)\|/).map((c) => c.trim())
+      skipped.push({ line: i + 1, id: m[1], cols: cells.length })
+    }
   })
   return { rows, skipped }
 }

@@ -32,7 +32,9 @@ import {
   scanCommitCitations, scanLineCitations, checkPinnedCitations,
   checkManifestImpersonation, tallyLedger, tallyUnreachable,
   STATUS_DOC, LEDGER_DOC, PATCH_YML, REPO, HUB_TOKEN_ENV, WORKBENCH_TOKEN_ENV,
-  HANDOVER_DOC, INTERVENTION_DOC, GENERATED_STATUS_VOCAB, GENERATED_STATUS_RE, canonicalJson,
+  HANDOVER_DOC, INTERVENTION_DOC, FINAL_REPORT_DOC,
+  reportSectionRounds, roundOrderViolations,
+  GENERATED_STATUS_VOCAB, GENERATED_STATUS_RE, canonicalJson,
 } from './boundary-facts.mjs'
 import { LEDGER_STATUS_MARKS, STATUS_MARKS, ledgerTaskRow } from './progress-check.mjs'
 
@@ -1167,5 +1169,55 @@ test('⑰b ★★ 真仓库：读数块声明的总数 = 同一块里各套件�
   assert.ok(v2 !== undefined, '只改总数却没红 ⇒ 这一侧没被查')
   assert.equal(v2.claimed, other)
   assert.equal(v2.actual, Number(m[1]))
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// ★★★ 第 52 轮：**最终报告**（交付物本身）的 §三 此前零判据
+//
+// 实测：§三 是**逐轮留档**（第 16 轮起），34 个小节按轮次编号，
+// 而其中的 **39～43 是倒着放的**（43、42、41、40、39），44/45 又跳到 39 前面。
+//
+//   > 一份"看起来按编号排好了"的文档，与一份真的排好了的文档，
+//   > 在**只看前几节**的时候是同一个读数 ——
+//   > 读者从 16 一路看到 38 都是升序，**合理地**假设后面也是。
+//
+// ★ 这一族的老形状又出现了一次：**清单的含义由位置决定**。
+//   只是这次的清单是**交付物自己的目录**。
+// ══════════════════════════════════════════════════════════════════════════
+
+test('⑱ ★★★ 真仓库：最终报告 §三 的轮次**全序递增**（39～43 曾经是倒的）', () => {
+  const rows = reportSectionRounds(defaultContext().doc(FINAL_REPORT_DOC))
+  assert.ok(rows.length >= 20, `§三 里只认出 ${rows.length} 个带轮次的小节，覆盖面太小`)
+  const bad = roundOrderViolations(rows)
+  assert.deepEqual(bad, [],
+    '§三 的小节轮次出现倒序：' + JSON.stringify(bad)
+    + '\n  一份"看起来按编号排好了"的文档，与一份真的排好了的文档，'
+    + '\n  在只看前几节的时候是同一个读数。')
+  // ★ 起点与终点是有意义的：起点是"逐轮留档从第几轮开始"，终点是最新轮
+  assert.equal(rows[0].round, 16, `§三 的第一个带轮次小节是第 ${rows[0].round} 轮`)
+})
+
+test('⑱b ★★ 反面控制：把真实小节**倒过来** ⇒ 必须报出倒序（否则这条判据是恒绿的）', () => {
+  const rows = reportSectionRounds(defaultContext().doc(FINAL_REPORT_DOC))
+  assert.ok(rows.length >= 4, '小节太少，控制写不出来')
+  // ★ 取一段真实的连续小节，**整段反转**（正是本轮修掉的那个形状）
+  const seg = rows.slice(10, 15).map((r) => ({ ...r }))
+  const reversed = [...seg].reverse()
+  assert.notDeepEqual(reversed.map((r) => r.round), seg.map((r) => r.round),
+    '取到的这一段本身就是回文，控制无效')
+  const bad = roundOrderViolations(reversed)
+  assert.ok(bad.length > 0, '把真实小节反转了却没报倒序 ⇒ 这条判据测不出倒序')
+  assert.equal(bad[0].to, seg[3].round)
+})
+
+test('⑱c ★★★ 区间写法**必须被认出来**：`第 24～29 轮` 不许被静默跳过', () => {
+  // ★ 第一版用的是 `第 (\d+) 轮` ⇒ 区间那行一个都没匹配上、`3.0j` 被**静默跳过**，
+  //   而输出里看起来"该查的都查了"。（同一个坑第 51 轮刚踩过。）
+  const rows = reportSectionRounds(defaultContext().doc(FINAL_REPORT_DOC))
+  const range = rows.find((r) => /第 \d+～\d+ 轮/.test(r.heading))
+  assert.notEqual(range, undefined,
+    '§三 里那个区间小节没被认出来 —— 认不出某种写法的模式，'
+    + '报出来的是"这种写法不存在"，而它在输出里和"这种写法没问题"长得一样')
+  assert.ok(range.round >= 24, `区间小节解析出的轮次是 ${range.round}`)
 })
 

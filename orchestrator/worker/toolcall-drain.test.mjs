@@ -4,8 +4,13 @@
 //
 // 这一套件的存在理由是一句可以在库里读出来的话：
 //
-//   `team-hub/server.mjs:7296`  「写侧只有一个入口：执行面调 `recordToolCall`。
+//   `team-hub/routes/tool-calls.mjs:61`  「写侧只有一个入口：执行面调 `recordToolCall`。
 //                                  本进程只提供**读**与建表。」
+//
+//   ★ 第 52 轮改指：这句话原来在 `team-hub/server.mjs:7296`，
+//     而 PRT-316 的模块提取把它搬进了 `routes/tool-calls.mjs`。
+//     ⇒ 一条**行号引用**与它指的东西之间隔着一份**别人正在改的文件**，
+//       而"引用漂了"与"被引用的东西没了"在读数上长得一样。
 //
 // 而在第 21 轮之前，那个入口的**生产调用方是 0 处** ⇒
 // `toolCallLogEvidence().recorded` 永远 `false` ⇒ 发布就绪判据

@@ -167,6 +167,63 @@ export const HANDOVER_DOC = 'docs/superpowers/prt/PRT-HANDOVER-2026-09-18-ROUND2
  *   同一块的标题还写着"第 45～47 轮结束时的读数"，而家族表已经到第 50 轮。
  */
 export const INTERVENTION_DOC = 'docs/superpowers/prt/PRT-HUMAN-INTERVENTION-2026-09-20.md'
+
+/**
+ * ★★★ 第 52 轮：**最终报告**（`PRT-FINAL-REPORT-*.md`）—— 交付物本身 —— 零判据。
+ *
+ * 实测：它的 §三 是**逐轮留档**（第 16 轮起），34 个小节按轮次编号，
+ * 而其中的 **39～43 是倒着放的**（43、42、41、40、39），
+ * 44/45 又跳到了 39 前面；顶层标题还写着「第 15 轮做了什么」。
+ *
+ *   > 一份"看起来按编号排好了"的文档，与一份真的排好了的文档，
+ *   > 在**只看前几节**的时候是同一个读数 ——
+ *   > 读者从 16 一路看到 38 都是升序，**合理地**假设后面也是。
+ *
+ * ★ 这一族的老形状又出现了一次：**清单的含义由位置决定**。
+ *   只是这次的清单是**交付物自己的目录**。
+ */
+export const FINAL_REPORT_DOC = 'docs/superpowers/prt/PRT-FINAL-REPORT-2026-09-18.md'
+
+/**
+ * §三 里带轮次的小节，按文件次序返回 `[{ round, heading }]`。
+ *
+ * ★ 必须认**区间**写法（`### 3.0j 第 24～29 轮`）：
+ *   第一版用 `第 (\d+) 轮` ⇒ 区间那行**一个都没匹配上**、`3.0j` **被静默跳过**，
+ *   而输出里看起来"该查的都查了"。
+ *   （同一个坑第 51 轮刚踩过：区间标题 `第 45～50 轮`。）
+ */
+export function reportSectionRounds(text) {
+  const lines = String(text).split('\n')
+  const start = lines.findIndex((l) => /^## 三、/.test(l))
+  const end = lines.findIndex((l, i) => i > start && /^## /.test(l))
+  if (start < 0 || end < 0) return []
+  const rows = []
+  for (let i = start + 1; i < end; i += 1) {
+    const l = lines[i]
+    if (!/^#{3,4} 3\.0/.test(l)) continue
+    const rounds = [...l.matchAll(/第 (\d+)(?:[～~\-–](\d+))? 轮/g)]
+      .map((m) => (m[2] === undefined ? Number(m[1]) : Number(m[2])))
+    if (rounds.length === 0) continue
+    rows.push({ round: Math.max(...rounds), heading: l.trim().slice(0, 60) })
+  }
+  return rows
+}
+
+/**
+ * 轮次**非递减**的违反点。返回 `[{ at, from, to }]`，空数组 = 全序递增。
+ *
+ * ★ 这是**纯不变式**，不依赖任何文档里的数：一个"看起来有序"的清单，
+ *   要么全序递增，要么有违反点 —— 中间没有第三种状态。
+ */
+export function roundOrderViolations(rows) {
+  const bad = []
+  let prev = null
+  rows.forEach((r, i) => {
+    if (prev !== null && r.round < prev.round) bad.push({ at: i, from: prev.round, to: r.round })
+    prev = r
+  })
+  return bad
+}
 /** 可达性基线的文件路径。 */
 export const REACHABILITY_BASELINE = 'docs/superpowers/prt/prt-reachability-baseline.json'
 
@@ -1234,6 +1291,31 @@ export const FACTS = Object.freeze([
       //   ⇒ 用那块独有后缀 `（全部可复跑）` 把它钉死。
       re: /第 (\d+) 轮结束时的读数\*\*（全部可复跑）/,
       note: '「**第 50 轮结束时的读数**（全部可复跑）：」—— 那个数必须等于家族表的最大轮次',
+    }),
+  }),
+  Object.freeze({
+    id: 'report-section-three-max-round',
+    what: '最终报告 §三 的标题说"截至第 N 轮"，N 必须等于 §三 里**带轮次小节的轮次最大值**',
+    why: '★★ 这条抓的是一个**已经发生**的缺陷：§三 的小节已经到第 51 轮，'
+      + '而标题还写着"第 15 轮做了什么"。'
+      + '⇒ 一份**逐轮留档**的目录，标题是读者判断"这东西新不新"的**唯一**依据；'
+      + '而每一轮都会往 §三 里加一节，标题却没有任何东西催它跟上。'
+      + '★★ 锚点**刻意只圈一个数**：`截至第 N 轮`。'
+      + '第一版想把"第 16 轮起，截至第 51 轮"整句都钉住，'
+      + '而本套件的**通用反面控制**（把 `m[0]` 里第一个数字 +1）会去改**起点**那个数，'
+      + '判据却不看它 ⇒ **控制不红**（第 51 轮在同一形状上踩过一次）。'
+      + '★ 顺序不变式（轮次必须非递减）由 `roundOrderViolations` 承担、'
+      + '在 `boundary-facts.test.mjs` 里逐条验，见 ⑱。',
+    source: FINAL_REPORT_DOC + ' §三 里 `### 3.0*` 小节的轮次最大值',
+    derive: (ctx) => {
+      const rows = reportSectionRounds(ctx.doc(FINAL_REPORT_DOC))
+      if (rows.length === 0) throw new Error('在最终报告 §三 里一个小节都没认出来 —— 本判据的输入空了')
+      return Math.max(...rows.map((r) => r.round))
+    },
+    claim: Object.freeze({
+      doc: FINAL_REPORT_DOC,
+      re: /截至第 (\d+) 轮/,
+      note: '「## 三、逐轮留档：第 16 轮起，截至第 51 轮」—— 只圈"截至"这个数',
     }),
   }),
   Object.freeze({

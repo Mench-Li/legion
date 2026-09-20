@@ -240,6 +240,7 @@ import { createUsageRoutes } from './routes/usage.mjs'
 import { createConfigRoutes } from './routes/config.mjs'
 import { createCreateRoutes } from './routes/create.mjs'
 import { createCommentRoutes } from './routes/comment.mjs'
+import { createTeamPlansRoutes } from './routes/team-plans.mjs'
 import { createPriceTablesRoutes } from './routes/price-tables.mjs'
 import { createConfigBundleRoutes } from './routes/config-bundle.mjs'
 import { createContextSnapshotsRoutes } from './routes/context-snapshots.mjs'
@@ -5060,6 +5061,10 @@ const router = createRouter([
     json,
     appendTaskNote, audit, handleWrite,
   }),
+  createTeamPlansRoutes({
+    json,
+    contextPlanStore, handleRun,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -5430,27 +5435,9 @@ async function handle(req, res, stripPrefix) {
       json(res, 200, { ok: true, plan, serverTimeMs: Date.now() })
       return
     }
-    if (req.method === 'GET' && path === '/api/team-plans') {
-      const scope = url.searchParams.get('scope')
-      const limitRaw = url.searchParams.get('limit')
-      const limit = limitRaw === null ? 100 : Math.min(Math.max(Number(limitRaw) || 0, 1), 500)
-      const items = contextPlanStore().listTeamPlans({ scope, limit })
-      json(res, 200, { ok: true, plans: items, count: items.length, serverTimeMs: Date.now() })
-      return
-    }
-    // 冻结一版团队计划（PRT-402 的**写**一半）。
-    //
-    // 没有这条路由，读面永远返回 404，而"读面做好了"与"库里永远为空"
-    // 在用户那里是同一件事（与 PRT-505 的 `store.put` 零调用方同源）。
-    if (req.method === 'POST' && path === '/api/team-plans') {
-      await handleRun(req, res, (body) => {
-        const r = contextPlanStore().putTeamPlan(body.plan ?? body, {
-          scope: body.scope, actor: body.actor ?? body.by ?? null,
-        })
-        return { plan: r.plan, idempotent: r.idempotent }
-      })
-      return
-    }
+    // ── 团队计划（读：列出一版；写：冻结一版，PRT-402 的写一半） —— 已提取到 `./routes/team-plans.mjs`（PRT-316 第 21 族 / 切片 22）──
+    // 整段搬走：`server.mjs` 里现在**不再有** `/api/team-plans` 路由，该命名空间只住一个地方。
+    if (await router.dispatch(req, res, { path, url })) return
     if (req.method === 'GET' && path === '/api/employee-manifest') {
       const scope = url.searchParams.get('scope')
       if (scope === null || scope.trim() === '') {

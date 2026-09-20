@@ -259,6 +259,7 @@ SOURCES.routesPriceTables = join(ROOT, 'team-hub', 'routes', 'price-tables.mjs')
 SOURCES.routesConfig = join(ROOT, 'team-hub', 'routes', 'config.mjs')
 SOURCES.routesCreate = join(ROOT, 'team-hub', 'routes', 'create.mjs')
 SOURCES.routesComment = join(ROOT, 'team-hub', 'routes', 'comment.mjs')
+SOURCES.routesTeamPlans = join(ROOT, 'team-hub', 'routes', 'team-plans.mjs')
 
 /** 已提取出去的路由族模块（值 = 该文件里**声明式**路由的归属名）。 */
 export const ROUTE_FAMILY_SOURCES = Object.freeze([
@@ -282,6 +283,7 @@ export const ROUTE_FAMILY_SOURCES = Object.freeze([
   { module: 'routesConfig', family: 'config', factory: 'createConfigRoutes' },
   { module: 'routesCreate', family: 'create', factory: 'createCreateRoutes' },
   { module: 'routesComment', family: 'comment', factory: 'createCommentRoutes' },
+  { module: 'routesTeamPlans', family: 'team-plans', factory: 'createTeamPlansRoutes' },
 ])
 SOURCES.experienceStore = join(ROOT, 'team-hub', 'experience-store.mjs')
 

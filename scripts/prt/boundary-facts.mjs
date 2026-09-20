@@ -224,6 +224,58 @@ export function roundOrderViolations(rows) {
   })
   return bad
 }
+
+/**
+ * ★★ 交付物 §四「验证与禁门」里那些**读起来像"当前值"**的行。
+ *
+ * 第 54 轮实测：§四 有四行是**别处已经有人盯着的数**的第二份声明 ——
+ *
+ *   文档说 / 真值 / 唯一持有者
+ *   套件清单完备 **350** / **379** / `PRT-HANDOVER` §二（`handover-tracked-suites`）
+ *   `boundary-facts` **34/34** / **54/54** / 人工介入清单读数块
+ *   五个套件 **331/331** / **82** / 同上
+ *   可达性 不可达 **46** / **44** / `PRT-HANDOVER` §二（`handover-unreachable-total`）
+ *
+ * ——**抄的那一份没人盯，于是它飘了 30 轮**。
+ *
+ *   > 一个被两处声明的数，与一个被一处声明的数，
+ *   > 在**两处恰好还相等**的那些天里是同一个读数。
+ *
+ * ★ 判据不是"§四 不许有数字"，而是"§四 **不许裸着**声明这些数"：
+ *   §四 的立意是一份**冻结读数表**（第一行本来就写着"（第 22 轮收口）"），
+ *   所以**标了轮次 / `HEAD` / `.ci/` 目录**的行是合法历史证据，
+ *   而**没标的**会被读成当前值。⇒ 只认后者。以对称控制钉住这条分别：
+ *   `（第 22 轮）` 那行**不许**被报出来（否则判据在惩罚合法的历史）。
+ *
+ * @param {string} text 交付物全文
+ * @returns {{ line: number, cell: string }[]} 违反项（空数组 = 干净）
+ */
+export function sectionFourBareCurrentReadings(text) {
+  // §四 的区间：`## 四、` 到下一个同级标题
+  const lines = text.split('\n').map((l) => l.replace(/\r$/, ''))
+  const start = lines.findIndex((l) => /^##\s*四[、.]/.test(l))
+  if (start < 0) return []
+  let end = lines.length
+  for (let i = start + 1; i < lines.length; i += 1) {
+    if (/^##\s/.test(lines[i])) { end = i; break }
+  }
+  // ★ 被别处持有的"当前读数"行首：只认这几个名字（不猜别的数字）
+  const OWNED = [/^套件清单完备$/, /^可达性$/]
+  // ★ 冻结标记：轮次 / HEAD / CI 目录。有一个就说明这一行**自称是历史**。
+  const FROZEN = /第\s*\d+\s*轮|`[0-9a-f]{7,}`|\.ci\//
+  const bad = []
+  for (let i = start + 1; i < end; i += 1) {
+    const line = lines[i]
+    if (!/^\|/.test(line)) continue
+    const cells = line.split('|').slice(1, -1).map((c) => c.trim())
+    if (cells.length < 2) continue
+    if (cells.every((c) => /^-+$/.test(c) || c === '')) continue // 分隔行
+    if (!OWNED.some((re) => re.test(cells[0]))) continue
+    if (FROZEN.test(cells[0])) continue
+    bad.push({ line: i + 1, cell: cells[0] })
+  }
+  return bad
+}
 /** 可达性基线的文件路径。 */
 export const REACHABILITY_BASELINE = 'docs/superpowers/prt/prt-reachability-baseline.json'
 
@@ -1180,15 +1232,21 @@ export const FACTS = Object.freeze([
   Object.freeze({
     id: 'handover-tracked-suites',
     what: '交接报告 §二 说"套件清单完备：N 个 `*.test.mjs` 全部有归属"',
-    why: '★ 这是**产物侧**的数（`git ls-files`），报告里的 N 是人在第 25 轮写下的。'
-      + '每一轮新增套件都会让它过期 —— 而它旁边那句"全部有归属"是'
-      + '`stage` 阶段**当场**判的，两者挨在一起，看起来一样权威。',
-    source: '`git ls-files -z "*.test.mjs"` 的条数',
+    why: '★ 报告里的 N 是人在第 25 轮写下的，而**另一个会话在持续落新套件** ⇒ '
+      + '实测两轮内它红了 **7** 次、真缺陷 **0** 次（374→375→376→378→379→380→381，'
+      + '最后一次只隔几分钟 —— 红得比提交还快）。'
+      + '⇒ 第 54 轮把它从"等于当前值"改成**下限**（`relation: atLeast`）：'
+      + '报告里的数成了"截至第 54 轮实测 380，此后只增不减"。'
+      + '★ 而它旁边那句"全部有归属"是 `run-ci.mjs` 的 `stage` 阶段**当场**判的'
+      + '（每次都打印真值）—— 那才是这条判据真正要守的东西；'
+      + '下限只挡住"套件被删到下限以下"这个会真正破坏该说法的方向。',
+    source: '`git ls-files -z "*.test.mjs"` 的条数（只需**不少于**报告里的下限）',
     derive: (ctx) => ctx.trackedTestCount(),
+    relation: 'atLeast',
     claim: Object.freeze({
       doc: HANDOVER_DOC,
-      re: /套件清单完备 \| \*\*(\d+) 个/,
-      note: '「套件清单完备 | **360 个 `*.test.mjs` 全部有归属**」',
+      re: /套件清单完备 \| \*\*≥ (\d+) 个/,
+      note: '「套件清单完备 | **≥ 380 个 `*.test.mjs` 全部有归属**（截至第 54 轮实测，此后只增不减）」',
     }),
   }),
   Object.freeze({
@@ -1489,10 +1547,30 @@ export function checkFacts({ ctx = defaultContext() } = {}) {
     }
 
     checked++
-    if (!Object.is(actual, claimed)) {
+    // ★★ 第 54 轮：加 `atLeast` 关系。
+    //
+    //   缘由是**实测出来的**，不是审美：
+    //   `handover-tracked-suites` 在**两轮之内红了 7 次、其中真缺陷 0 次**
+    //   （另一个会话持续落新套件 —— 374→375→376→378→379→380→381，
+    //   最后一次只隔了几分钟，**红得比提交还快**）。
+    //
+    //   > 一条在正常工作流里**必然**变红、而每次都不是缺陷的判据，
+    //   > 产出的不是信号，是**训练人忽略它**。
+    //
+    //   ——本仓自己写过同一句话（`suite-counts.test.mjs` ④ 的立意：
+    //     「非主表的行**不许**被查，否则会红在历史上，**然后被人关掉**」）。
+    //
+    //   ★ 而这条判据**真正**要守的东西由 `run-ci.mjs` 的 `stage` 阶段当场判
+    //     （"每个 `*.test.mjs` 都必须有归属"），每次都打印真值。
+    //     报告里那个数只是**下限**：`atLeast` 只挡住"套件被删到下限以下"，
+    //     这正是会真正破坏"全部有归属"这个说法方向。
+    const relation = fact.relation ?? 'equal'
+    const bad = relation === 'atLeast' ? actual < claimed : !Object.is(actual, claimed)
+    if (bad) {
       violations.push({
         id: fact.id,
         code: 'MISMATCH',
+        relation,
         what: fact.what,
         source: fact.source,
         actual,

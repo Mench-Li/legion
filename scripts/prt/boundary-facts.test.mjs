@@ -33,7 +33,7 @@ import {
   checkManifestImpersonation, tallyLedger, tallyUnreachable,
   STATUS_DOC, LEDGER_DOC, PATCH_YML, REPO, HUB_TOKEN_ENV, WORKBENCH_TOKEN_ENV,
   HANDOVER_DOC, INTERVENTION_DOC, FINAL_REPORT_DOC,
-  reportSectionRounds, roundOrderViolations,
+  reportSectionRounds, roundOrderViolations, sectionFourBareCurrentReadings,
   GENERATED_STATUS_VOCAB, GENERATED_STATUS_RE, canonicalJson,
 } from './boundary-facts.mjs'
 import { LEDGER_STATUS_MARKS, STATUS_MARKS, ledgerTaskRow } from './progress-check.mjs'
@@ -126,8 +126,25 @@ test('③ 反面控制：改动文档里那个声称，**那一条**必须红（
     //   ⇒ 一个只会做一种破坏的控制，对另一种形状的锚点是**假**控制。
     let corrupted
     if (/\d/.test(m[0])) {
+      // ★★ 第 54 轮订正：原来一律写 `+1`。这对 `equal` 够用，
+      //   但对 `atLeast`（下限）**不必然**构成违反 ——
+      //   实测：`handover-tracked-suites` 的真实值为 381、文档写 `≥ 380`，
+      //   而 `+1` 恰好把 380 改成 **381** ⇒ `381 < 381` 为假 ⇒ **控制不红**。
+      //   ⇒ 报出来的是「文档声称被改掉了它却没红」，而坏的是**控制**，不是判据。
+      //
+      //   > 一个按"声称值 +1"来造假的对照，
+      //   > 在**真实值已经比声称值高**的那些天里，造出来的恰好是**真话**。
+      //
+      //   ⇒ 改成"**按真实值 +1** 造假"：它对两种关系都必然违反，
+      //     而且它更强 —— 造假的目标从"改一个数"变成"说出一个已知为假的值"。
+      let realValue = null
+      try {
+        const got = f.derive(defaultContext())
+        if (typeof got === 'number' && Number.isFinite(got)) realValue = got
+      } catch { /* 取不到就退回 +1 */ }
+      const bump = (d) => String(realValue === null ? Number(d) + 1 : realValue + 1)
       corrupted = before.slice(0, m.index)
-        + m[0].replace(/\d+/, (d) => String(Number(d) + 1))
+        + m[0].replace(/\d+/, bump)
         + before.slice(m.index + m[0].length)
     } else {
       // 结构性锚点：删掉最后一个 `/` 分隔项
@@ -1221,3 +1238,48 @@ test('⑱c ★★★ 区间写法**必须被认出来**：`第 24～29 轮` 不�
   assert.ok(range.round >= 24, `区间小节解析出的轮次是 ${range.round}`)
 })
 
+// ── 第 54 轮：交付物 §四「验证与门禁」不许**裸着**声明别处持有的当前读数 ──
+//   实测：§四 有四行是别处已经有人盯着的数的**第二份声明**，而它飘了 30 轮
+//   （套件数 350 vs 379、boundary-facts 34 vs 54、五个套件 331 vs 82、不可达 46 vs 44）。
+//   ★ 判据只认**没有冻结标记**的行：§四 的立意是冻结读数表，
+//     标了轮次 / HEAD / `.ci/` 的是合法历史证据。
+test('⑲ ★★ 交付物 §四：不许裸着声明别处已经有人盯着的当前读数', () => {
+  const text = defaultContext().doc(FINAL_REPORT_DOC)
+  // ★ 先证明**扫到了**：没有这条，下面的 0 条与"压根没扫到 §四"是同一个读数。
+  assert.ok(/^\| 可达性（第 \d+ 轮） \|/m.test(text),
+    '§四 里那条带轮次的「可达性」行不见了 ⇒ 本用例的扫描面可能已经不是 §四')
+  const bad = sectionFourBareCurrentReadings(text)
+  assert.deepEqual(bad, [],
+    `§四 有裸着声明的当前读数：${JSON.stringify(bad)}`
+    + ' ⇒ 一个被两处声明的数，与一个被一处声明的数，'
+    + '在**两处恰好还相等**的那些天里是同一个读数；而抄的那一份没人盯')
+})
+
+test('⑲b ★ 反面控制：把冻结标记拿掉 ⇒ 必须报出来', () => {
+  const text = defaultContext().doc(FINAL_REPORT_DOC)
+  const mutated = text.replace('| 可达性（第 22 轮） |', '| 可达性 |')
+  assert.notEqual(mutated, text, '锚点没改到 —— 这个反面控制是假的')
+  const bad = sectionFourBareCurrentReadings(mutated)
+  assert.ok(bad.some((b) => b.cell === '可达性'),
+    `判据测不出"裸声明"：${JSON.stringify(bad)}`)
+})
+
+test('⑲c ★★ 对称控制：标了冻结标记的同一行不许被报（判据不许惩罚合法的历史）', () => {
+  const head = '## 四、验证与门禁'
+  const mk = (row) => [head, '', '| 项 | 读数 |', '| --- | --- |', row, '', '## 五、x'].join('\n')
+  for (const row of [
+    '| 可达性（第 22 轮） | 不可达 **44** 条 |',
+    '| 套件清单完备（第 18 轮） | **350 个 `*.test.mjs`** |',
+    '| 可达性（`.ci/r51`） | 不可达 **44** 条 |',
+  ]) {
+    assert.deepEqual(sectionFourBareCurrentReadings(mk(row)), [],
+      `带冻结标记的行被误报 ⇒ 判据把历史证据当成了重复声明：${row}`)
+  }
+  // ★ 而没有标记的那一行**必须**被报出来，否则上面三条全是假绿
+  assert.equal(sectionFourBareCurrentReadings(mk('| 可达性 | 不可达 **44** 条 |')).length, 1,
+    '没有冻结标记的行没被报出来 ⇒ ⑲c 的三条对称控制是假绿')
+  // ★ 而且 §四 **之外**的同名行不许被扫（否则会红在 §一/§五 的散文上）
+  const outside = ['## 一、结论', '', '| 可达性 | 不可达 **44** 条 |', '', '## 四、验证与门禁', '', '| 项 | 读数 |', '| --- | --- |', '| 可达性（第 22 轮） | 不可达 **44** 条 |'].join('\n')
+  assert.equal(sectionFourBareCurrentReadings(outside).length, 0,
+    '§四 之外的行被扫进来了 ⇒ 扫描面比声称的宽')
+})

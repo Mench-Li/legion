@@ -2178,21 +2178,28 @@ import 者自己也不可达（传递不可达）。
 
 ## 四、验证与门禁
 
+★ 本表是**第 15～22 轮的冻结读数**（每行自带 `HEAD` + `.ci/` 目录或轮次）。
+**当前读数不在此处复述** —— 每个数各有**一个持有者**，且都有判据盯着：
+套件数与可达性在 `PRT-HANDOVER-2026-09-18-ROUND22.md` §二，
+`boundary-facts` 条数与逐套件读数在 `PRT-HUMAN-INTERVENTION-2026-09-20.md` 的读数块。
+
+> 一个被两处声明的数，与一个被一处声明的数，
+> 在**两处恰好还相等**的那些天里是同一个读数 ——
+> 而交付物 §四 里那四个数就是这么飘了 30 轮的。
+
 | 项 | 读数 |
 | --- | --- |
 | 全量 CI（HEAD `466239d`，**`.ci/r22a`**，第 22 轮收口） | **9/9 PASS，exit 0**；`test` **811934ms**；`skipped=1`（secret-store，已知）；**357 个 `*.test.mjs` 全部有归属**；新增两套 `toolcall-spool` 14/14 与 `toolcall-drain` 13/13、新增一套 `doc-table` 10/10；`doc` 读到 **140/145，未完成 5** ——★ 这一次跑在一棵**冻住**的树上（`test` 阶段那 812 秒里工作树的**代码与文档都没动**） |
 | 第 22 轮新增/受影响套件 | `toolcall-spool` **14/14**、`toolcall-drain` **13/13**、`doc-table` **10/10**、`reachability` **10/10**（分类之后）、`dsh-boundary` **22/22**、`production-scope-wiring` **11/11**、`intervention-coverage`+`boundary-facts`+`feature-table`+`silent-declarations`+`prt-progress` 合计 **60/60** |
-| 可达性（第 22 轮） | 不可达 **46**（44 → 46：本轮两个新模块**按设计定性为 `gap`**，指针指向 §5 第 28 条）——★ 这**不是回归**，是门禁逼着人对新模块说出"属于哪一类" |
+| 可达性（第 22 轮） | 不可达 **46**（44 → 46：本轮两个新模块**按设计定性为 `gap`**，指针指向 §5 第 28 条）——★ 这**不是回归**，是门禁逼着人对新模块说出"属于哪一类"；`public-name.mjs` 经 `connector-port.mjs` **可达** |
 | 全量 CI（HEAD `c2e650f`，**`.ci/r18b`**） | **9/9 PASS，exit 0**；`test` 815741ms；`skipped=1`（secret-store，已知）；**350 个套件全绿** |
 | 全量 CI（`.ci/r18`，与文档编辑重叠的那次） | **9/9 PASS，exit 0**；`test` 820062ms —— 见下面第 2 条 |
 | connectors 套件（含 `public-name` / `registry` / `decision-port` / `target-binding` / `outcome-port`） | **123**（第 17 轮）→ 本批 `registry` +5、`connector-port` +2 ⇒ **128/128** |
 | 受影响面（connectors + dsh-composition + connector-store + connector-http + config + prt） | **1331/1331** |
 | `connector-port.test.mjs` | **18/18**（含 ④d 重设计、④d2 撞车、④f 自我撞车） |
 | `root-row.test.mjs` | **42/42**（含"公开名按声明判定"+两条读数分开取的新用例） |
-| 套件清单完备 | **350 个 `*.test.mjs` 全部有归属** |
-| `boundary-facts`（手钉坐标） | **34/34** |
-| `feature-table` / `progress-check` / `intervention-coverage` / `reachability` / `silent-declarations` | **331/331** |
-| 可达性 | 不可达 **46**（未增加）；`public-name.mjs` 经 `connector-port.mjs` **可达** |
+| `boundary-facts`（手钉坐标，**第 22 轮**那次的读数） | **34/34** —— ★ 当前条数**不复述**，见 `PRT-HUMAN-INTERVENTION-2026-09-20.md` 的读数块（该数的**唯一持有者**，有判据盯着） |
+| `feature-table` / `progress-check` / `intervention-coverage` / `reachability` / `silent-declarations`（**第 22 轮**那次） | **331/331** —— ★ 当前逐套件读数**不复述**，见 `PRT-HUMAN-INTERVENTION-2026-09-20.md` 的读数块（**唯一持有者**，有判据盯着） |
 | 全量 CI（`502b636`，`.ci/r15b`） | **9/9 PASS，exit 0**；`test` 801030ms |
 
 ★ 有两处**必须说清**：

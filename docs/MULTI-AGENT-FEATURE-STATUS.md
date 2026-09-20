@@ -1164,14 +1164,29 @@ DEEPSEEK_API_KEY             {"addressable":true,"space":"refs"}      ← 正对
 **本轮没有改这两行的状态**——✅/🟡 的口径由台账的读者定，见下。
 
 **② 组合行 `runtime-host-registrar-row.mjs` 与 `runtime-contract-server-row.mjs`
-不在任何清单里。** `PATCH_LAYER_ROWS` 只声明 **5** 行（硬下限 / 审批登记 / pre-execute /
-approval-answerer / **permission-presets**），`legion-host.patch.yml` 里有 **3 行**的落点
-（2 行 `insert` + 1 行 `patch-over` 覆盖 `permission` 的 preset 表）；而这两行**只有用例引用**
+不在任何清单里。** `PATCH_LAYER_ROWS` 只声明 **7** 行（硬下限 / 审批登记 / pre-execute /
+approval-answerer / **runtime-host-registrar** / **runtime-contract-server** /
+**permission-presets**），`legion-host.patch.yml` 里有 **5 行**的落点
+（4 行 `insert` + 1 行 `patch-over` 覆盖 `permission` 的 preset 表）。
 （那些 `*-dsh-process.test.mjs` 自己拼补丁文件把它们挂起来）。
 ★★ **2026-09-18 订正**：这里原写"只声明 **4** 行"并把第 5 行漏在枚举外——
 `legion-enforcement-permission-presets` 是 **2026-09-15** 由 `ed60213` 加进声明的，
 而这句读数**没人跟着改**。（*一个"当时数对过"的数字，与一个"现在还是对的"的数字，
 在文档里长得一样——区别只在有没有人回去数第二遍。*）
+★★★ **2026-09-20 订正（业主裁决甲，`patch-layer.mjs` 本批）**：上面 §② 说这两行
+"**不在任何清单里**""**只有用例引用**"——**两句都已不成立**。它们现在**都在**
+`PATCH_LAYER_ROWS` 里、也**都在** `legion-host.patch.yml` 里（这就是本节问的那个裁决）。
+可达性探针的读数随之改变：`runtime-contract-server-row.mjs` /
+`runtime-host-registrar-row.mjs` / `run-floor.mjs` / `runtime-contract-server.mjs`
+**四条一起变成可达**（基线 48 → 44，`gap` 27 → 23）。
+
+★ 而**行为与接线前等价，这一点必须写清楚**，否则这条订正会被读成"产品终于能执行了"：
+两行都不是强制面（`runtime-host-row.mjs` 只在**接线错误**时抛）；启动自检判不兼容时它
+`provide` 一个 `{ok:false, code:SELF_CHECK_INCOMPATIBLE, autoExecutionForbidden:true}`
+并 `return`——**禁止自动执行**；契约服务端那一行今天没有生产输入工厂，apply 之后报
+`RUNTIME_CONTRACT_ROW_NO_INPUTS_FACTORY`。所以真实部署的读数仍是 worker 明说自己干不了活。
+换来的是：那条断链从**一声不响地缺席**变成**在树里、apply 过、按具名码拒绝**。
+
 ★ 顺带记一条**容易数错的地方**（`patch-layer.mjs:273-277` 自己写着警告）：
 `permission-presets` 的 `module` **也是 `null`**，但它**不是**运行期行——
 `patch-over` 不需要模块（按 id 覆盖既有行的 config），它生效与否的判据是
@@ -3555,6 +3570,102 @@ return { ok: blockedChecks.length === 0 && fatalUnknown.length === 0, ... }
 `declaration-mirrors` 的 **R1 立刻报**：`声明了却没有任何遍历点，而同文件里把它的成员手写了 2 次`。
 它确实没有消费者——归类的封闭性由 `PREFLIGHT_VERDICT_KINDS` 的值 + 运行期兜底守卫保证。
 **删掉，而不是给它写第四条豁免。**
+
+### 5.27 第 44 轮：PRT-009 `peak-resource` 的**剩下那一半**切开了一半
+
+第 43 轮收尾时，PRT-009 的 `peak-resource` 卡在两句话上：
+"接线都在"与"**每次 Run 真的印出一行**还没被观测过"。
+这一轮把那两句话各推进一步，并在第三步上踩了一个**我自己的**坑。
+
+**（一）先补上那次端到端真读数。** 此前两条证据**都不是端到端**：
+
+| 已有证据 | 覆盖到哪 | 没覆盖 |
+| --- | --- | --- |
+| `supervisor.test.mjs:396` | 对**真**进程采样（win32 `Get-Process`） | 只到采样器，**没走 `status()`** |
+| `supervisor.test.mjs:484` | 读数被交出去（那条日志） | 用的是**假 io**（`makePeakIo`） |
+
+`scratch/_probe-peak-e2e.mjs` 起一台**真**子进程走了一次：
+
+```text
+真进程 pid=27312  peakWorkingSet=194.5 MiB  cpuMs=47  samples=1  window.ok=true
+退出时那条日志：peak-resource pid=27312 samples=1 peakWorkingSet=194.5MiB peakRss=unknown cpu=47ms
+落盘 → 读回：writeRunRecord.ok=true  诊断 0 条
+         磁盘 peakResource = 194.5 MiB / cpuMs=47（与内存里**逐字段相等**）
+```
+
+⇒ ① 真进程 → `status()` 有真读数；② 退出印出**恰好一条**；③ 同一读数**原样**落到磁盘。
+⚠️ 覆盖的是**机制**不是产品基线：那台子进程是探针造的，**不是**黄金任务那一次 Run。
+
+**（二）★★★ 而"每次 Run 真的印出一行"当时还**不成立**。**
+`product/launcher/supervisor.mjs` 的 `handleExit` 在"主动停止"那条分支里**直接 return**，
+`reportPeakResource()` 只在**非主动退出**时走到。并排实测（同一替身、同一 io，只差是不是主动停止）：
+
+| | `status()` 上的读数 | 那条日志 |
+| --- | --- | --- |
+| A 主动停止 | 64 MiB | **0 条** |
+| B 非主动退出 | 64 MiB | **1 条** |
+
+⇒ 读数是**反的**：**崩溃那一次**会印，**正常那一次**不印——而主动停止正是一次**成功** Run 的
+正常结束方式。再叠加 `forgetRunRecord()` 在正常停止后删记录（那条是**有意**的）
+⇒ **一次成功 Run 的峰值读数，两处都不留。**
+**修法**：那条分支补一句，判据 `!disposed`（`dispose()` 那条路上 sink 可能已关，只有它仍不报）。
+读数：`supervisor.test.mjs` **22 → 25/25**；破验 `scratch/_mutate-r44.mjs` **5/5 咬住 0 漏网**。
+
+**（三）★ 我自己的门禁，抓住了我自己的缺陷。**
+我往台账 PRT-009 那一格里**引用了一行代码**：`if (stopping || disposed)`。
+而**表格单元格里的 `|` 就是表格语法**，包在反引号里也一样。全量 CI 当场判红：
+
+```text
+[ROW_PIPE_UNESCAPED] 第 33 行有 6 条未转义的 |（应为 4 条，即 5 个格子）：
+正文里混进了裸竖线，任何按 | 切分读**正文**的人都会在第一个裸竖线处被截断。
+```
+
+> 一句"引用一段代码"的写法，与一句"把表格切开"的写法，
+> 在渲染器看来是同一个东西——
+> 只不过写的人只想着那段代码，而读的人拿到的是半句话。
+
+定责用的是可核对的读数：`git worktree add --detach` 把**我那个提交**单独签出、
+在那棵**只有我的提交**的树上复现同样的 2 红 ⇒ 红的是我，不是当时也在改文件的另一个会话。
+
+### 5.27.1 ★★★ 更严重的那一条：我**没有核对就下结论**，而且判错了别人的修法
+
+修那个竖线时，我看到另一个会话在工作树里已经把它转义成了 `\|\|`，于是我在提交消息里写：
+
+> 但在**反引号里**，反斜杠是**字面字符**：渲染出来是 `if (stopping \|\| disposed)`
+> ⇒ "修好了表格"换来"引用错了代码"。**两者都不对。**
+
+**这句话是错的。** 我当时**凭印象**断言，没查规范、也没找一个渲染器试。
+
+核过之后的事实（GFM 规范《Tables (extension)》逐字）：
+
+> Include a pipe in a cell's content by escaping it, **including inside other inline spans**:
+
+```text
+| f\|oo  |
+| ------ |
+| b `\|` az |
+| b **\|** im |
+```
+
+规范给出的渲染结果：`<td>b <code>|</code> az</td>`、`<td>b <strong>|</strong> im</td>`。
+⇒ **反斜杠被去掉**，单元格里显示的就是一个 `|`。⇒ `\|\|` 渲染成 `||`，**正是那段代码本来的样子**。
+
+⇒ 所以另一个会话的修法**本来就是对的，而且是规范推荐的做法**，被我判成了错的。
+
+> 一次"我看着它像是错的"的判断，与一次"我核过它确实是错的"的判断，
+> 在**我自己的口气里**是同一个东西——
+> 只不过前者会让一个**本来正确**的修改被我改掉。
+
+★ **这一条与本节前两段是同一个形状，只是对象换成了我自己**：表格被切开是**产物**错了；
+这一条是**判断**错了——而它正好发生在我修一个"没有核对就下结论"的缺陷的同一批里。
+
+★★ 而且**判据早就告诉我了**：`progress-check` 有一条用例写的就是
+"转义成 `\|` 之后必须**不**报（证明判据数的是未转义竖线）"，它当时是绿的。
+我读了它的**失败信息**，却没读那条**本来就绿的**用例——判据里早就有答案。
+
+⇒ 最终产物保留"不放竖线"的写法（`stopping` 或 `disposed` 为真时）：
+它**不依赖渲染器行为**，少一个依赖；但**理由**已按上面更正。
+两种写法都正确，详见 [`PRT-PROGRESS.md`](superpowers/prt/PRT-PROGRESS.md) 那一格。
 
 ## 6. 怎么复跑这份对照表里的每一条
 

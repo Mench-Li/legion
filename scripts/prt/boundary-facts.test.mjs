@@ -1283,3 +1283,55 @@ test('⑲c ★★ 对称控制：标了冻结标记的同一行不许被报（�
   assert.equal(sectionFourBareCurrentReadings(outside).length, 0,
     '§四 之外的行被扫进来了 ⇒ 扫描面比声称的宽')
 })
+/** 第 58 轮：取某一行所属的最近一个 markdown 标题（用于"这行在哪个小节里"）。 */
+function sectionHeading(lines, lineNo) {
+  for (let i = lineNo - 1; i >= 0; i -= 1) {
+    if (/^#{2,4} /.test(lines[i])) return lines[i]
+  }
+  return ''
+}
+
+// ── 第 58 轮：台账分档被抄了几处，就核几处 ──────────────────────────────
+//
+//   `140 ✅ / 1 🟡 / 4 ⏸ / 0 ⬜` 在仓库 5 份文档里被抄了 **10 处**，此前只有 2 处有判据。
+//
+//   ★ 而"哪处现行、哪处历史"**没有本地信号**：按 ±2 行找轮次/提交号，
+//     会把交付物**第 5 行**（开头那句现行摘要）判成历史 —— "第 45 轮"恰好在它附近。
+//
+//   > 一个按"附近有没有轮次标记"分类的探针，会把文档**开头那句现行摘要**
+//   > 判成历史留档 —— 而它离真正的历史段落还有 40 行。
+//
+//   ⇒ 用**文档自己声明的结构边界**：`## 三、逐轮留档` 之前 = 现行（必须等于台账），
+//     之后 = 历史（免检）。并 **fail closed**：标题之后若有抄写不在 `### 3.0*` 小节里，也报红。
+test('⑯ ★★ 交付物里每一处台账分档抄写都要等于台账（以它自己声明的「逐轮留档」为界）', () => {
+  const doc = readFileSync(resolve(REPO, 'docs/superpowers/prt/PRT-FINAL-REPORT-2026-09-18.md'), 'utf8')
+  const lines = doc.split('\n')
+  const iArchive = lines.findIndex((l) => /^## 三、逐轮留档/.test(l))
+  assert.ok(iArchive > 0, '找不到交付物 §三「逐轮留档」标题 ⇒ 判据的边界没了，不能静默免检')
+  const ledger = readFileSync(resolve(REPO, 'docs/superpowers/prt/PRT-PROGRESS.md'), 'utf8')
+  const real = tallyLedger(ledger)
+  const want = [real.done, real.partial, real.paused, real.todo].join('/')
+  const TALLY = /(\d+)\s*✅\s*[/／]\s*(\d+)\s*🟡\s*[/／]\s*(\d+)\s*⏸\s*[/／]\s*(\d+)\s*⬜/g
+  const live = []
+  const frozen = []
+  for (let i = 0; i < lines.length; i += 1) {
+    for (const m of lines[i].matchAll(TALLY)) {
+      const v = [m[1], m[2], m[3], m[4]].join('/')
+      if (i < iArchive) { live.push({ line: i + 1, v }) } else { frozen.push({ line: i + 1, v, text: lines[i] }) }
+    }
+  }
+  // ★ 期望值是 **1**，不是 2 —— 交付物把**同一个数**写了**两种形状**：
+  //   开头那句是「四档连写」（`140 ✅ / 1 🟡 / 4 ⏸ / 0 ⬜`），
+  //   而 §一 那张表是**每格一个数**（`| ✅ 已完成 | **140** |`）。
+  //
+  //   > 同一个数在同一份文档里用两种形状写着，
+  //   > 而任何**一条**正则只认其中一种。
+  //
+  //   ⇒ §一 那种由 `report-section-one-ledger-tallies` 单独管；本条管「四档连写」那些。
+  assert.ok(live.length >= 1, `§三 之前只找到 ${live.length} 处「四档连写」形式的台账分档（应 >= 1：开头那句现行摘要）`)
+  const bad = live.filter((x) => x.v !== want)
+  assert.deepEqual(bad, [], `现行读数里与台账不符：${JSON.stringify(bad)}（台账真值 ${want}）`)
+  // ★ fail closed：留档区里的抄写必须落在 `### 3.0*` 小节内，否则报红
+  const stray = frozen.filter((x) => !/^### 3\.0/.test(sectionHeading(lines, x.line)))
+  assert.deepEqual(stray.map((x) => x.line), [], '留档区里有不在 `### 3.0*` 小节内的台账抄写 ⇒ 可能是被挪进去规避判据的')
+})

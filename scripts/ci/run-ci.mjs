@@ -4235,6 +4235,20 @@ async function stageTest() {
   /** 跳过了断言的套件（`{label, skipped, tests}`）。见下面汇总那一段。 */
   const skippedSuites = []
   /**
+   * ★★★★★ 第 102 轮：**套件登记闸门**的结果 —— 它此前是"当场 return"，
+   *   于是 `test` 阶段在 ~5 秒就退出、**一个用例都没跑**。
+   *
+   *   ⇒ 后果（第 100 轮实测）：`test` 报 FAIL，而那个 FAIL **不含任何产品信息** ——
+   *   产品侧当时有 **22 条**红用例，全被这扇门挡在门外，一次都没被这批 CI 看到。
+   *
+   *   > 一个"清单不完备所以整个阶段不跑"的设计，与一个"清单不完备、但**产品照样量一遍**"的设计，
+   *   > 在"这次 CI 说明了产品什么"这件事上不是同一个东西：
+   *   > 前者只说明**清单**错了，后者同时说明**产品现在什么样**。
+   *
+   *   ★ 判定**不变**：登记不全 ⇒ 本阶段仍然 FAIL。改的只是"不许它把后面的测量一起吞掉"。
+   */
+  let listingIncomplete = false
+  /**
    * ★ 这一支的判据改用**共享解析器**（`scripts/lib/dsh-checkout.mjs`），
    *   不再手写 `process.env.DSH_CHECKOUT`。
    *
@@ -4383,15 +4397,19 @@ async function stageTest() {
       .filter((f) => !EXEMPT.has(f))
     if (missing.length > 0) {
       const listing = missing.map((f) => `      ${f}`).join('\n')
-      return {
-        ok: false,
-        detail: detail.join('\n') + '\n' +
-          `  FAIL 套件清单不完备：${missing.length} 个 *.test.mjs 不会被任何套件执行（等于不存在的断言）\n` +
-          listing + '\n' +
-          '      把它们加进 stageTest 的 suites（或放进某个套件的 cwd 相对路径下 / 登记到 EXEMPT 并写明理由）。',
-      }
+      // ★★★★★ 第 102 轮：**不再当场 return** —— 记下这条失败，继续把 suites 跑完。
+      //   判定不变（本阶段仍然 FAIL），变的是**这次运行也会说明产品现在什么样**。
+      listingIncomplete = true
+      detail.push(
+        `  FAIL 套件清单不完备：${missing.length} 个 *.test.mjs 不会被任何套件执行（等于不存在的断言）\n` +
+        listing + '\n' +
+        '      把它们加进 stageTest 的 suites（或放进某个套件的 cwd 相对路径下 / 登记到 EXEMPT 并写明理由）。\n' +
+        '      ★ 这一条**不阻止**下面的套件继续跑：登记不全说明的是**清单**错了，\n' +
+        '        而下面的读数是"**产品现在什么样**" —— 第 100 轮实测，从前这条 return\n' +
+        '        让 `test` 在 ~5 秒就退出，把产品侧那 22 条红全部挡在门外、一次都没被看到。')
+    } else {
+      detail.push(`  PASS 套件清单完备（${all.length} 个 *.test.mjs 全部有归属）`)
     }
-    detail.push(`  PASS 套件清单完备（${all.length} 个 *.test.mjs 全部有归属）`)
   }
   for (const s of suites) {
     const cwd = s.cwd || ROOT
@@ -4446,7 +4464,13 @@ async function stageTest() {
     // 而这些断言还是跳过了 —— 那是环境配置问题，不是环境缺失。
     if (totalSkipped > 0) detail.push('      环境里有 DSH 检出时请看上面每一行的 skipped=：' + SKIPPED_NOTE)
   }
-  return { ok: allOk, detail: detail.join('\n'), counts: { skipped: totalSkipped, suites: skippedSuites.length } }
+  // ★★★★★ 第 102 轮：登记闸门的失败**并进**结论 —— 判定与从前一致（登记不全 ⇒ FAIL），
+  //   区别只在它**不再把后面的测量一起吞掉**。
+  return {
+    ok: allOk && !listingIncomplete,
+    detail: detail.join('\n'),
+    counts: { skipped: totalSkipped, suites: skippedSuites.length },
+  }
 }
 
 // ---------- L1 冒烟（复用仓库既有冒烟脚本 + 白板真实进程 + v1 看板） ----------

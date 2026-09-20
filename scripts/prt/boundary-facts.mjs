@@ -113,6 +113,11 @@ export function defaultContext() {
     generatedArtifacts: () => scanSelfDeclaredGenerated(),
     lineCitations: () => scanLineCitations(doc(LEDGER_DOC)),
     commitCitations: () => scanCommitCitations(doc(LEDGER_DOC)),
+    // ★★★★★ 第 104/105 轮：**源码注释**里那些 `路径:行 …原文：「…」` 的引用。
+    //   与上面的 `lineCitations` 是**两层**，别混：
+    //     `lineCitations`  读**台账**（`PRT-PROGRESS.md`），只判"落点在不在范围内"；
+    //     这一层          读**源码**（`runtime/` `product/` …），判的是"**那句话在不在那个行号上**"。
+    originalCitations: () => scanOriginalCitations(),
     pinnedCitations: () => checkPinnedCitations(),
     manifestImpersonation: () => checkManifestImpersonation(),
     // ── E. 交接报告 §二 自称"机器读数，可复跑"的那张表（第 26 轮）────────────
@@ -691,6 +696,137 @@ export function scanLineCitations(text, treeSet = null) {
   }
   return { checked, broken, ambiguous, external, total: uniq.size }
 }
+
+// ── C3. ★★★★★ 第 104/105 轮：**源码注释**里的 `路径:行 …原文：「…」` 引用 ──────
+//
+// ★ 为什么需要第三层（前两层**结构上够不着**这个形状）：
+//
+//   2026-09-21（第 104 轮）我核 `cancel-and-timeout` 报"未确认"的证据时读到
+//   `runtime/adapters/dsh/port.mjs` 引的 `plugins/src/index.ts:2241`：
+//
+//     HEAD 的 :2241  =  const focus = lastFocus
+//     那句原文「abort 不保证杀死子代理」在  :1827
+//
+//   ⇒ 指针**漂了 414 行**，文件干净，**HEAD 上就是错的**。
+//
+//   ★ 而它为什么活了这么久：
+//     · 上面那层 `scanLineCitations` 读的是**台账**（`PRT-PROGRESS.md`）——台账之外不看；
+//     · `dsh-pin-drift` 只读 DSH 检出的 **3 个文件 / 6 条结论**（全在 `packages/` 下）——引的不是那三份。
+//   ⇒ **`runtime/` 里注释写的 `文件:行` 引用，从前一条都不在门禁视野里。**
+//
+//   > ★ 一个"指针写错 414 行"的注释，与一个"指针指对了"的注释，在**读的人**眼里是同一个东西：
+//   > 他会照那个行号去看，看到 `const focus = lastFocus`，然后**不再相信这段注释** ——
+//   > 而那段注释正是那条能力报"未确认"的**证据本身**。
+//
+// ★ 这一层比上一层**强**，因为注释里**逐字抄了原句**（"原文：『…』"）：
+//   于是"引文出现在那个行号上"是一个**可机械判定的**命题 —— 不像 `lineCitations`
+//   只能判"落点不是空的"、判不了"那一行支撑那句话"。
+//
+// ⚠️ 诚实的边界：只覆盖**同时写了行号又抄了原文**的那种注释。
+//   本仓多数 `文件:行` 引用**没有**抄原文（它们只给坐标），那些这一层看不见 ——
+//   要判它们必须读语义，做不了。**所以绿不等于"所有引用都对"。**
+const ORIGINAL_CITATION_RE =
+  /([A-Za-z0-9_./-]+\.[a-z]{2,3}):(\d+)(?:-(\d+))?[^\n]*?(?:原文|原句)[^\n]*?[：:]\s*([「『“"])/g
+
+/** 源码里要扫的顶层目录（按"哪些目录会写这种注释"取，不扫全仓）。 */
+const ORIGINAL_CITATION_ROOTS = ['runtime', 'product', 'orchestrator', 'team-hub', 'scripts', 'plugins']
+const ORIGINAL_CITATION_SKIP = new Set(['node_modules', '.git', 'dist', 'releases', '.ci'])
+const QUOTE_CLOSERS = { '「': '」', '『': '』', '“': '”' }
+
+/**
+ * ★ 第 105 轮抽出来的**纯判定**：引文 `quote` 是否落在 `lines` 的第 `lineNo` 行上。
+ *
+ * 抽出来是为了**能被单元测试直接喂输入** —— 否则那层"源码里扫一遍目录"的逻辑
+ * 只能靠"改真文件"来测，而那种测法**改坏了会留下残骸**（第 101 轮真的发生过一次）。
+ *
+ * ★ 取引文前 14 个字符做包含判断，是**故意**往前缀取的：注释里常把引文折行或截断，
+ * 要求整句逐字命中会把正当的折行判成坏引用。代价是**短前缀**可能撞上巧合 ——
+ * 14 个字的中文几乎不会，而这个取舍是明确的：**宁少判，不误判**。
+ */
+export function originalQuoteOnLine(lines, lineNo, quote) {
+  if (!Number.isInteger(lineNo) || lineNo < 1) return false
+  const needle = quote.slice(0, 14)
+  if (needle.length === 0) return false
+  return (lines[lineNo - 1] ?? '').includes(needle)
+}
+
+/**
+ * 扫源码注释里的 `路径:行 …原文：「…」`，判"那句引文在不在那个行号上"。
+ *
+ * @returns {{total:number, ok:number, broken:string[], unresolved:string[]}}
+ */
+export function scanOriginalCitations() {
+  const dshRoot = (() => {
+    for (const c of [process.env.DSH_CHECKOUT, 'D:/project/DSH/dsh/deepseek-harness',
+      resolve(REPO, '../dsh/deepseek-harness')]) {
+      if (c && existsSync(c)) return c
+    }
+    return null
+  })()
+
+  const files = []
+  const walk = (dir) => {
+    let ents = []
+    try { ents = readdirSync(dir, { withFileTypes: true }) } catch { return }
+    for (const e of ents) {
+      if (ORIGINAL_CITATION_SKIP.has(e.name)) continue
+      const p = resolve(dir, e.name)
+      if (e.isDirectory()) { walk(p); continue }
+      if (/\.(mjs|js|ts)$/.test(e.name)) files.push(p)
+    }
+  }
+  for (const r of ORIGINAL_CITATION_ROOTS) {
+    const d = resolve(REPO, r)
+    if (existsSync(d)) walk(d)
+  }
+
+  const broken = []
+  const unresolved = []
+  let total = 0
+  let ok = 0
+
+  for (const f of files) {
+    let text = ''
+    try { text = readFileSync(f, 'utf8') } catch { continue }
+    if (!text.includes('原文') && !text.includes('原句')) continue
+    const rel = relative(REPO, f).split('\\').join('/')
+    for (const m of text.matchAll(ORIGINAL_CITATION_RE)) {
+      const open = m[4]
+      const start = m.index + m[0].length
+      const end = text.indexOf(QUOTE_CLOSERS[open], start)
+      if (end < 0) continue
+      const quote = text.slice(start, end).replace(/\s+/g, ' ').trim()
+      if (quote.length < 6) continue
+      const lineNo = text.slice(0, m.index).split('\n').length
+      const path = m[1].replace(/\\/g, '/')
+      total++
+
+      // 目标解析顺序：相对**引用它的那个文件** → 相对仓库根 → 相对 DSH 检出。
+      //   ★ 顺序不能反：本仓里 `launcher.mjs:108` 这种是**同目录**相对引用，
+      //     而 `plugins/src/index.ts` 是**仓库根**相对引用（Legion 自己的插件）。
+      const cands = [resolve(dirname(f), path), resolve(REPO, path)]
+      if (dshRoot !== null) cands.push(resolve(dshRoot, path))
+      const abs = cands.find((c) => existsSync(c))
+      if (abs === undefined) {
+        // ★ 三个候选都找不到 ⇒ **如实记，不判坏**：目标可能在别处（另一棵检出），
+        //   判坏了会逼人改一条其实是对的引用。与 `scanLineCitations` 的 `external` 同一处置。
+        unresolved.push(`${rel}:${lineNo} → ${path}:${m[2]}`)
+        continue
+      }
+
+      const lines = readFileSync(abs, 'utf8').split('\n')
+      if (originalQuoteOnLine(lines, Number(m[2]), quote)) { ok += 1; continue }
+      broken.push(`${rel}:${lineNo} → ${path}:${m[2]}`
+        + `（引文不在这一行；该行是 ${JSON.stringify((lines[Number(m[2]) - 1] ?? '').trim().slice(0, 40))}）`)
+    }
+  }
+
+  // ★ "解析到 0 条"必须是**红**的：否则下一班人改了注释格式之后，
+  //   这一层会**静默变绿** —— 而"它再也不检查任何东西"与"它检查通过了"是同一个输出。
+  if (total === 0) broken.push('（解析到 0 条 `路径:行 …原文：「…」` 引用——锚点或格式变了？）')
+  return { total, ok, broken: broken.sort(), unresolved: unresolved.sort() }
+}
+
 
 // ── C2. **手钉**的关键引用：那几行就必须是那句话 ────────────────────────────
 //
@@ -1594,6 +1730,57 @@ export const FACTS = Object.freeze([
     source: '手钉表（模块内 `PINNED_CITATIONS`）：5 条，4 条在 Legion 仓、1 条在 DSH 检出',
     derive: (ctx) => ctx.pinnedCitations().broken.slice().sort().join(' '),
     expect: '', // 空串 = 每一行都还是原来那句话
+  }),
+  // ── C3. ★★★★★ 源码注释里"抄了原文"的引用（第 105 轮）────────────────────
+  Object.freeze({
+    id: 'source-original-citations-on-line',
+    what: '源码注释里每条 `路径:行 …原文：「…」` 的**引文**都必须出现在它写的那个行号上',
+    why: '★ 这条抓的是一个**已经发生**的缺陷（2026-09-21 第 104 轮）：'
+      + '`runtime/adapters/dsh/port.mjs` 引 `plugins/src/index.ts:2241`，'
+      + '而 HEAD 的 :2241 是 `const focus = lastFocus` —— 那句原文在 **:1827**，'
+      + '⇒ **指针漂了 414 行**，文件干净、**HEAD 上就是错的**。'
+      + '★★★ 它活了这么久是因为**没有任何判据读源码注释**：'
+      + '`ledger-line-citations-resolve` 只读**台账**（`PRT-PROGRESS.md`）、'
+      + '`dsh-pin-drift` 只读 DSH 检出的 **3 个文件 / 6 条结论**（全在 `packages/` 下）'
+      + '⇒ **`runtime/` 里注释写的 `文件:行` 一条都不在门禁视野里**。'
+      + '> ★ 一个"指针写错 414 行"的注释，与一个"指针指对了"的注释，在**读的人**眼里是同一个东西：'
+      + '> 他会照那个行号去看，看到 `const focus = lastFocus`，然后**不再相信这段注释** ——'
+      + '> 而那段注释正是那条能力（`cancel-and-timeout` 报"未确认"）的**证据本身**。'
+      + '★ 为什么这一层能做机械判定而上一层不能：注释里**逐字抄了原句**，'
+      + '于是"引文出现在那个行号上"是个可判的命题；'
+      + '而多数 `文件:行` 引用**只给坐标、不抄原文**，要判它们必须读语义，做不了。'
+      + '⚠️ 边界：**只覆盖同时写了行号又抄了原文的那种**。所以绿 ≠ "所有引用都对"。'
+      + '★ 目标解析顺序（不能反）：相对**引用它的那个文件** → 相对仓库根 → 相对 DSH 检出。'
+      + '本仓里 `launcher.mjs:108` 是同目录相对引用，而 `plugins/src/index.ts` 是仓库根相对引用'
+      + '（那是 Legion 自己的 DSH 插件，2853 行，**不是** DSH 检出的文件）。'
+      + '★ 三个候选都找不到时记 `unresolved`、**不判坏** —— 与 `scanLineCitations` 的 `external` 同一处置：'
+      + '判坏了会逼人去改一条其实是对的引用。',
+    source: '源码注释（`runtime/` `product/` `orchestrator/` `team-hub/` `scripts/` `plugins/`）里'
+      + '形如 `路径:行 …原文：「…」` 的引用，目标按"引用文件自身 → 仓库根 → DSH 检出"解析',
+    derive: (ctx) => ctx.originalCitations().broken.slice().sort().join(' '),
+    // ★★★★★ 登记在案的两处（2026-09-21 第 105 轮实测）——**不是**"这条判据可以容忍两处坏引用"，
+    //   而是"这两处**今天不归我改**"，所以把它们**写进读数**而不是让判据一直红：
+    //
+    //     product/launcher/legacy-data-adoption.mjs:130       → launcher.mjs:108
+    //     product/launcher/legacy-data-adoption.test.mjs:77   → launcher.mjs:108
+    //
+    //   ★ 实测（不是推断）：那句引文「这些键的**代码默认值落在安装目录内**」
+    //     · 在 **HEAD** 的 `launcher.mjs` 里是 **`:113`**；
+    //     · 在工作区里是 **`:118`**（该文件此刻是 ` M `，并行会话正在编辑）。
+    //   ⇒ **`108` 处从来就不是那句话** —— 它在两处都是错的，**不是**这次编辑造成的。
+    //     （`:108` 那一行是**另一段**注释「每个键都必须在进程清单的 `envNames` 里声明过」，
+    //       属于 `PORT_ENV_KEYS` 那张表。）
+    //
+    //   ★ 为什么**不动手改**：引用它们的两个文件（`legacy-data-adoption.mjs` 与它的 `.test.mjs`）
+    //     **都是 ` M `** —— 并行会话正在编辑。此刻去改会与他们的在制品撞车。
+    //
+    //   > ★★ 一条"把已知坏引用写进读数"的判据，与一条"因为它坏所以一直红"的判据，
+    //   > 区别在于**下一处新漂移**能不能被看见：
+    //   > 后者会被人**习惯性忽略**（一直是红的），而前者一有新东西就变。
+    expect: 'product/launcher/legacy-data-adoption.mjs:130 → launcher.mjs:108（引文不在这一行；'
+      + '该行是 "* 每个键都必须在进程清单的 `envNames` 里声明过（否则 `build"） '
+      + 'product/launcher/legacy-data-adoption.test.mjs:77 → launcher.mjs:108（引文不在这一行；'
+      + '该行是 "* 每个键都必须在进程清单的 `envNames` 里声明过（否则 `build"）',
   }),
 
   // ── D2. ★★★ 我方判据文件不得**冒充清单** ────────────────────────────────

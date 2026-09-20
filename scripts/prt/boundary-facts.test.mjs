@@ -35,6 +35,7 @@ import {
   HANDOVER_DOC, INTERVENTION_DOC, FINAL_REPORT_DOC,
   reportSectionRounds, roundOrderViolations, sectionFourBareCurrentReadings,
   GENERATED_STATUS_VOCAB, GENERATED_STATUS_RE, canonicalJson,
+  scanOriginalCitations, originalQuoteOnLine,
 } from './boundary-facts.mjs'
 import { LEDGER_STATUS_MARKS, STATUS_MARKS, ledgerTaskRow } from './progress-check.mjs'
 import { matrixItems, MATRIX_PATH } from './reachability.mjs'
@@ -1613,4 +1614,48 @@ test('⑲ ★★ 交付物现行区里的 `第 N 条` 必须带限定词，且�
   }
   assert.deepEqual(bare, [], `现行区里有不带限定词的 \`第 N 条\`（同一节里 §5 项与"先看排名"会撞）：\n${bare.join('\n')}`)
   assert.deepEqual(oob, [], `现行区里引用了**不存在**的条号：\n${oob.join('\n')}`)
+})
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ★★★★★ 第 105 轮：源码注释里"抄了原文"的引用（第 104 轮那个漂 414 行的洞的**机制修复**）
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// 第 104 轮实测到一条：`runtime/adapters/dsh/port.mjs` 引 `plugins/src/index.ts:2241`，
+// 而那句原文在 **`:1827`** ⇒ 指针漂了 414 行，`HEAD` 上就是错的。
+//
+// ★ 而它活了那么久，是因为**没有任何判据读源码注释**：
+//   · `ledger-line-citations-resolve` 只读**台账**（`PRT-PROGRESS.md`）；
+//   · `dsh-pin-drift` 只读 DSH 检出的 **3 个文件 / 6 条结论**（全在 `packages/` 下）。
+//
+// ★ 所以本轮**不只修那一处实例**，还修**产生它的机制** —— 后者才是不再复发的那个。
+test('㉓ ★★★★★ 源码注释里的「原文」引用：引文必须落在它写的那个行号上', () => {
+  // ── ① 真仓：解析得到，且至少有一条对得上（防"扫描面变空却全绿"）
+  const r = scanOriginalCitations()
+  assert.ok(r.total >= 3,
+    `只解析到 ${r.total} 条"路径:行 … 原文：「…」"引用 ⇒ 扫描面塌了或注释格式变了（这条判据会静默失去检查对象）`)
+  assert.ok(r.ok >= 1, `解析到 ${r.total} 条却一条都没对上 ⇒ 判据本身坏了`)
+
+  // ── ② 已知的两处坏引用：**必须还是那两处**（多一处少一处都要人来看）
+  //    ★ 这两处登记在 FACTS 的 `expect` 里，此处再钉一遍，免得有人"顺手清空 expect 让它绿"。
+  const known = [
+    'product/launcher/legacy-data-adoption.mjs:130 → launcher.mjs:108',
+    'product/launcher/legacy-data-adoption.test.mjs:77 → launcher.mjs:108',
+  ]
+  for (const k of known) {
+    assert.ok(r.broken.some((b) => b.startsWith(k)),
+      `登记在案的那处坏引用不见了：${k} ⇒ 要么它被修好了（**好事**，但要把 FACTS 的 expect 同步改掉，`
+      + '否则那条记录会变成一句不再成立的旧话），要么扫描器漏掉了它')
+  }
+  assert.equal(r.broken.length, known.length,
+    `坏引用数变了（${r.broken.length} vs 登记的 ${known.length}）⇒ 有新漂移，或有一处被修好了：\n`
+    + r.broken.join('\n'))
+
+  // ── ③ 纯判定函数：**正反两个方向都钉住**（这才是"判据咬不咬得住"的那一半）
+  const lines = ['', '// 前言', '// plugins/src/index.ts:1827 现场注释原文：「subagent 可能挂死且 run.result 永不结算', '// 收尾']
+  const quote = 'subagent 可能挂死且 run.result 永不结算'
+  assert.equal(originalQuoteOnLine(lines, 3, quote), true, '引文就在第 3 行，却判成不在 ⇒ 判据**漏判**（最坏的一种：它永远绿）')
+  assert.equal(originalQuoteOnLine(lines, 2, quote), false, '引文不在第 2 行，却判成在 ⇒ 判据**误判**（会逼人改一条对的引用）')
+  assert.equal(originalQuoteOnLine(lines, 1827, quote), false, '越界的行号必须判 false，不许抛出或当成命中')
+  assert.equal(originalQuoteOnLine(lines, 0, quote), false, '行号 0 必须判 false')
+  assert.equal(originalQuoteOnLine(lines, 3, ''), false, '空引文必须判 false（否则空串会被任何行"包含"）')
 })

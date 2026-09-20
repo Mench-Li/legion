@@ -145,6 +145,28 @@ export function defaultContext() {
 
 /** 交接报告里那张「最终读数」表的文件路径。 */
 export const HANDOVER_DOC = 'docs/superpowers/prt/PRT-HANDOVER-2026-09-18-ROUND22.md'
+
+/**
+ * ★★★ 第 51 轮：**人工介入清单**（`PRT-HUMAN-INTERVENTION-*.md`）此前**零判据**。
+ *
+ * 量出来的事实（第 51 轮）：`git grep -l PRT-HUMAN-INTERVENTION -- '*.mjs'` **零命中** ——
+ * 而它是这批产物里**唯一一份写给人照做**的文档：
+ *
+ *     PRT-PROGRESS.md          ← spec-progress --check / ledger-evidence / intervention-coverage
+ *     PRT-HANDOVER-*.md        ← boundary-facts（5 条）
+ *     MULTI-AGENT-FEATURE-*.md ← feature-table / feature-evidence / feature-landing-paths / …
+ *     prt-reachability-*.json  ← reachability / alpha-chain-trace
+ *     **PRT-HUMAN-INTERVENTION-*.md ← （无）**
+ *
+ *   > 一份**要人照着做**的清单，如果它自己没有人核，
+ *   > 那它错的时候只有**读它的人**会发现 ——
+ *   > 而那个人正是**因为不知道答案才来读它**的。
+ *
+ * ★ 而它**已经错了**：清单里那句"十一个套件合计 **201 通过**"是第 48 轮写的，
+ *   第 49 轮加了 `reachability`（+13 例）之后**没有人改** —— 真值是 **214**。
+ *   同一块的标题还写着"第 45～47 轮结束时的读数"，而家族表已经到第 50 轮。
+ */
+export const INTERVENTION_DOC = 'docs/superpowers/prt/PRT-HUMAN-INTERVENTION-2026-09-20.md'
 /** 可达性基线的文件路径。 */
 export const REACHABILITY_BASELINE = 'docs/superpowers/prt/prt-reachability-baseline.json'
 
@@ -1163,6 +1185,83 @@ export const FACTS = Object.freeze([
       doc: HANDOVER_DOC,
       re: /`test` 阶段那 (\d+) 秒里/,
       note: '「`test` 阶段那 808 秒里…」',
+    }),
+  }),
+  // ══════════════════════════════════════════════════════════════════════════
+  // ★★★ 第 51 轮：给**人工介入清单**加上它此前一条都没有的判据
+  //
+  // 为什么是这两条：它们是**便宜**（都只读那份文档本身）而**真的会红**的。
+  //   · 新鲜度：那块读数标题写"第 A～B 轮"，B 必须等于家族表的最大轮次
+  //     ⇒ 每轮往家族表加一行却不更新读数块 ⇒ 红。**今天就是红的。**
+  //   · 自洽：声明的总数必须等于同一块里列出的各套件之和
+  //     ⇒ 改了列表没改总数（或反过来）⇒ 红。
+  //
+  // ★ 而"某个套件**被漏掉**"这一种，这两条都抓不到（列表本身是手写的子集，
+  //   没有便宜的权威来源）—— 诚实地记在 `why` 里，不假装覆盖。
+  //   实践中漏掉发生在"某一轮加了套件"，而那正是新鲜度那条要人回来改块的时刻。
+  // ══════════════════════════════════════════════════════════════════════════
+  Object.freeze({
+    id: 'intervention-readings-round',
+    what: '人工介入清单里那块读数的标题说"第 N 轮结束时的读数"，N 必须等于**家族表的最大轮次**',
+    why: '★★ 这条抓的是一个**已经发生**的缺陷：家族表已经排到第 50 轮，'
+      + '而读数的标题还写着"第 45～47 轮结束时的读数"。'
+      + '⇒ 一块**自称某个轮次**的读数，与一块**真的**属于那个轮次的读数，'
+      + '在一页文档里长得一样；而它上面那张表**每一轮都会长一行**，'
+      + '读数块却没有任何东西催它跟上。'
+      + '★★ 标题**刻意只写一个数**（"第 N 轮"，不写"第 A～N 轮"）：'
+      + '第一版写的是区间，而本套件的**通用反面控制**（把锚点里第一个数字 +1）'
+      + '把 `第 45～50` 改成了 `第 46～50` —— **判据没红**，'
+      + '因为 claim 只钉住了右端那个数，左端纯粹是装饰。'
+      + '⇒ 一头说法只留一个数，锚点与派生量才对得上。'
+      + '★ 留的残留（不假装覆盖）：某个套件**被漏在列表外**这一种抓不到 —— '
+      + '列表是手写的子集，没有便宜的权威来源。实践中漏掉发生在"某一轮加了套件"，'
+      + '而那正是这条要人回来改块的时刻。',
+    source: INTERVENTION_DOC + ' 家族表里最大的 `| NN |` 轮次',
+    derive: (ctx) => {
+      const text = ctx.doc(INTERVENTION_DOC)
+      // 家族表的行形如 `| 50 | ★★★ …`（§四）
+      const rounds = [...text.matchAll(/^\| (\d{2}) \|/gm)].map((m) => Number(m[1]))
+      if (rounds.length === 0) throw new Error('在人工介入清单里找不到家族表（`| NN |` 行）')
+      return Math.max(...rounds)
+    },
+    claim: Object.freeze({
+      doc: INTERVENTION_DOC,
+      // ★ 必须**唯一**：这份文档里有**两块**"第 N 轮结束时的读数"
+      //   （第 43 轮那块是**历史快照**，第 50 轮那块是**当前**的）。
+      //   ★★ 只写 `第 (\d+) 轮结束时的读数` 时，框架的 `ANCHOR_AMBIGUOUS`
+      //   当场报了"命中了 2 处 ⇒ 判据说的是哪一个数字取决于文档行序"——
+      //   那正是本批一直在处理的那种"含义由位置决定"。
+      //   ⇒ 用那块独有后缀 `（全部可复跑）` 把它钉死。
+      re: /第 (\d+) 轮结束时的读数\*\*（全部可复跑）/,
+      note: '「**第 50 轮结束时的读数**（全部可复跑）：」—— 那个数必须等于家族表的最大轮次',
+    }),
+  }),
+  Object.freeze({
+    id: 'intervention-suite-total',
+    what: '人工介入清单里"⇒ N 个套件合计 **M 通过 / 0 失败**"的 M，必须等于同一块里列出的各套件之和',
+    why: '★ 这一块是**手写的读数**：每个套件写一个 `x/y`，末行写一个总数。'
+      + '总数是**对上面那几行的概括**，而概括与它概括的东西不一致，本身就是缺陷'
+      + '（与 `handover-ci-prose-matches-table` 同一类）。'
+      + '★ 两侧都在这份文档里，所以这**不是**"手抄件互核"：'
+      + '左侧是逐个套件的读数，右侧是对它们的求和 —— 而求和是**算出来的**。',
+    source: INTERVENTION_DOC + ' 读数块里每个 `N/N` 的分母之和',
+    derive: (ctx) => {
+      const text = ctx.doc(INTERVENTION_DOC)
+      const m = /⇒ \S*套件合计 \*\*(\d+) 通过 \/ 0 失败\*\*/.exec(text)
+      if (m === null) throw new Error('在人工介入清单里找不到"⇒ …套件合计 **N 通过 / 0 失败**"那一句')
+      // ★ 该句**上方**那几行里逐个套件的读数：`名字  → **29/29**` 或 `名字 **14/14**`
+      const head = text.slice(0, m.index)
+      const blockStart = head.lastIndexOf('结束时的读数')
+      const block = blockStart < 0 ? head : head.slice(blockStart)
+      let sum = 0
+      for (const x of block.matchAll(/\*\*(\d+)\/(\d+)\*\*/g)) sum += Number(x[1])
+      if (sum === 0) throw new Error('读数块里一行 `**N/N**` 都没找到 —— 本判据的输入空了')
+      return sum
+    },
+    claim: Object.freeze({
+      doc: INTERVENTION_DOC,
+      re: /⇒ \S*套件合计 \*\*(\d+) 通过 \/ 0 失败\*\*/,
+      note: '「⇒ 十一个套件合计 **201 通过 / 0 失败**」',
     }),
   }),
 

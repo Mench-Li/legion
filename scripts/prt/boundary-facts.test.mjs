@@ -32,7 +32,7 @@ import {
   scanCommitCitations, scanLineCitations, checkPinnedCitations,
   checkManifestImpersonation, tallyLedger, tallyUnreachable,
   STATUS_DOC, LEDGER_DOC, PATCH_YML, REPO, HUB_TOKEN_ENV, WORKBENCH_TOKEN_ENV,
-  HANDOVER_DOC, GENERATED_STATUS_VOCAB, GENERATED_STATUS_RE, canonicalJson,
+  HANDOVER_DOC, INTERVENTION_DOC, GENERATED_STATUS_VOCAB, GENERATED_STATUS_RE, canonicalJson,
 } from './boundary-facts.mjs'
 import { LEDGER_STATUS_MARKS, STATUS_MARKS, ledgerTaskRow } from './progress-check.mjs'
 
@@ -1101,5 +1101,71 @@ test('⑯b ★★ 真仓库：生成物里今天**没有任何**状态词（并�
   assert.equal(cls, undefined, '生成物里出现了状态词：' + JSON.stringify(cls))
   const one = r.violations.find((x) => x.id === 'patch-yml-asserts-no-task-status')
   assert.equal(one, undefined, 'patch.yml 里出现了状态词：' + JSON.stringify(one))
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// ★★★ 第 51 轮：给**人工介入清单**加上它此前一条都没有的判据
+//
+// 量出来的事实：`git grep -l PRT-HUMAN-INTERVENTION -- '*.mjs'` **零命中** ——
+// 而它是这批产物里**唯一一份写给人照做**的文档。
+//
+//   > 一份**要人照着做**的清单，如果它自己没有人核，
+//   > 那它错的时候只有**读它的人**会发现 ——
+//   > 而那个人正是**因为不知道答案才来读它**的。
+//
+// ★ 而它**已经错了**：那句"十一个套件合计 201 通过"是第 48 轮写的，
+//   第 49 轮加了 `reachability`（+13 例）后没人改（真值 214）；
+//   同一块的标题还写"第 45～47 轮结束时的读数"，而家族表已到第 50 轮。
+// ══════════════════════════════════════════════════════════════════════════
+
+test('⑰ ★★★ 真仓库：人工介入清单的读数块**新鲜**（标题轮次 = 家族表最大轮次）', () => {
+  const r = checkFacts({ ctx: defaultContext() })
+  const v = r.violations.find((x) => x.id === 'intervention-readings-round')
+  assert.equal(v, undefined,
+    '★ 人工介入清单的读数块与家族表脱节：' + JSON.stringify(v)
+    + '\n  一块**自称某个轮次**的读数，与一块**真的**属于那个轮次的读数，'
+    + '\n  在一页文档里长得一样；而它上面那张表每一轮都会长一行，'
+    + '\n  读数块却没有任何东西催它跟上 —— 直到有人读它。')
+  // ★ 反向控制：把标题的轮次改小 ⇒ 必须红（证明上面那条不是恒绿）
+  //
+  // ★★ 而第一版的标题写的是**区间**（`第 45～50 轮`），本套件的**通用反面控制**
+  //    （把锚点里第一个数字 +1）只改到左端 ⇒ **判据不红**。
+  //    ⇒ 标题改成只写一个数，锚点与派生量才对得上。
+  //      这个"只钉住一端"的洞是**通用控制**翻出来的，不是我读出来的。
+  const text = defaultContext().doc(INTERVENTION_DOC)
+  // ★★ 锚点必须与判据**同一处**：这份文档有**两块**"第 N 轮结束时的读数"
+  //    （第 43 轮那块是历史快照）。第一版这里只写 `第 (\d+) 轮结束时的读数`
+  //    ⇒ `String.replace` 改的是**第一处**（第 43 轮那块），
+  //    而判据看的是**带 `（全部可复跑）` 后缀**的那块 ⇒ 判据不红，
+  //    报的是"把标题的轮次改小却没红"。
+  //
+  //    > 一条"改了一处、断言另一处"的控制，报出来的错是
+  //    > 「判据测不出过期」——**而坏的是控制，不是判据**。
+  const ANCHOR = /第 (\d+) 轮结束时的读数(\*\*（全部可复跑）)/
+  const m = ANCHOR.exec(text)
+  assert.notEqual(m, null, '找不到读数块的标题 —— 本用例的锚点没了')
+  const lower = text.replace(ANCHOR, (all, a, tail) => `第 ${Number(a) - 1} 轮结束时的读数${tail}`)
+  assert.notEqual(lower, text, '改写没生效，这条控制是假的')
+  const r2 = checkFacts({ ctx: withDoc(INTERVENTION_DOC, () => lower) })
+  assert.ok(r2.violations.some((x) => x.id === 'intervention-readings-round'),
+    '把标题的轮次改小却没红 ⇒ 这条判据测不出"过期"')
+})
+
+test('⑰b ★★ 真仓库：读数块声明的总数 = 同一块里各套件之和', () => {
+  const r = checkFacts({ ctx: defaultContext() })
+  const v = r.violations.find((x) => x.id === 'intervention-suite-total')
+  assert.equal(v, undefined, '★ 读数块的总数与它自己列出的各套件对不上：' + JSON.stringify(v))
+  // ★ 反向控制：只改**总数**（列表不动）⇒ 必须红
+  const text = defaultContext().doc(INTERVENTION_DOC)
+  const m = /⇒ \S*套件合计 \*\*(\d+) 通过 \/ 0 失败\*\*/.exec(text)
+  assert.notEqual(m, null, '找不到总数那一句 —— 本用例的锚点没了')
+  const other = Number(m[1]) + 1
+  const patched = text.replace(/⇒ (\S*套件合计 \*\*)\d+( 通过 \/ 0 失败\*\*)/, `⇒ $1${other}$2`)
+  assert.notEqual(patched, text, '改写没生效，这条控制是假的')
+  const r2 = checkFacts({ ctx: withDoc(INTERVENTION_DOC, () => patched) })
+  const v2 = r2.violations.find((x) => x.id === 'intervention-suite-total')
+  assert.ok(v2 !== undefined, '只改总数却没红 ⇒ 这一侧没被查')
+  assert.equal(v2.claimed, other)
+  assert.equal(v2.actual, Number(m[1]))
 })
 

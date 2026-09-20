@@ -69,6 +69,35 @@ export const STATUS_MARKS = Object.freeze([
 /** 台账状态标记的**集合**（唯一所有者）。★ 加第 5 个状态只改 `STATUS_MARKS`。 */
 export const LEDGER_STATUS_MARKS = Object.freeze(STATUS_MARKS.map((s) => s.mark))
 
+/**
+ * 词表里代表**已完成**的那一个。
+ *
+ * ★ 别处要判"这一条是不是完成"时**取它**，不要再写一遍 `'✅'`——
+ *   第 45 轮实测的形状就是"同一个标记在四个地方各被写了一遍，
+ *   改到第四处才认全"。
+ *
+ * ★ 取下标 0 是有依据的：`STATUS_MARKS` 的顺序**就是**汇总表四列的顺序
+ *   （见上面那句注释），而第一列是「已完成」。
+ */
+export const DONE_STATUS_MARK = STATUS_MARKS[0].mark
+
+/**
+ * 从一张词表里取"还没完"的那些（= 去掉完成的那一个）。
+ *
+ * ★★★ `marks` **可注入**，这是本函数存在的**主要**理由。
+ *
+ *   一个"从词表算出来"的实现，与一个"把三个标记手写一遍"的实现，
+ *   在词表**没变**的时候结果**完全一样** ⇒ 任何行为用例都分不开它们
+ *   （第 44/45 轮反复遇到的那个形状）。把它做成可注入的**纯函数**之后，
+ *   用例才能拿一张**多一个标记**的词表去试：
+ *   "词表加一个状态，这张表**必须**跟着加" —— 这条只有真派生才可能通过。
+ *
+ * @param {readonly string[]} [marks] 词表（默认台账那张）
+ */
+export function nonDoneStatuses(marks = LEDGER_STATUS_MARKS) {
+  return Object.freeze(marks.filter((m) => m !== DONE_STATUS_MARK))
+}
+
 /** 状态格必须**整格**等于一个已知标记。★ 由 `LEDGER_STATUS_MARKS` 派生。 */
 export const STATUS_CELL_RE = new RegExp(`^(?:${LEDGER_STATUS_MARKS.join('|')})$`)
 

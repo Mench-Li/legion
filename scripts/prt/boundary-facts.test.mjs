@@ -32,8 +32,9 @@ import {
   scanCommitCitations, scanLineCitations, checkPinnedCitations,
   checkManifestImpersonation, tallyLedger, tallyUnreachable,
   STATUS_DOC, LEDGER_DOC, PATCH_YML, REPO, HUB_TOKEN_ENV, WORKBENCH_TOKEN_ENV,
-  HANDOVER_DOC,
+  HANDOVER_DOC, GENERATED_STATUS_VOCAB, GENERATED_STATUS_RE,
 } from './boundary-facts.mjs'
+import { LEDGER_STATUS_MARKS } from './progress-check.mjs'
 
 const REAL = checkFacts()
 
@@ -947,5 +948,61 @@ test('⑭f 取整规则钉在 round 上：`realSec*1000 - 1` 必须仍算作 rea
   const v = r.violations.find((x) => x.id === 'handover-ci-prose-matches-table')
   assert.equal(v, undefined,
     `${edge}ms 应当取整成 ${realSec}（与散文一致）；红了说明实现用的是 floor：` + JSON.stringify(v))
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// ★★★ 第 45 轮：生成物那两条判据的词表**只有一份**，且它 **⊇** 台账词表
+//
+// 起因：同一个模块里两条判据各用一份**互不相等**的表，而给它们背书的普查
+// 用的是**第三份**（并集）：
+//
+//   判据 A（文件级，只钉 patch.yml）  `未完成|已完成|✅|🟡|⏸|⬜`   6 项
+//   判据 B（类级，全部自称生成物）    `STATUS_VOCAB`                5 项
+//   普查（"只有 1 个实例"的来源）     并集                          9 项
+//
+//   ⇒ 判据 A 漏 3 个散文写法；判据 B 漏**四个标记全部**。
+//   实测今天两边读数都是 0（`scratch/_probe-generated-status-vocab.mjs`），
+//   差异**只存在于理论上** —— 而这正是最该修的时候。
+//
+//     > 一次用**更大的网**做的普查，与一条用**更小的网**执行的判据，
+//     > 在"结论是 0 违规"的时候是同一个读数——
+//     > 只不过前者证明的是一件**更强**的事，而后者才是每天在跑的那一条。
+// ══════════════════════════════════════════════════════════════════════════
+
+test('⑯ ★★★ 生成物词表 **⊇** 台账词表：一份表，两条判据共用', () => {
+  // ★ 核心（**包含**关系，而不是"结果相等"）：
+  //   一个只认散文写法、不认标记的表，与一个**正确**的表，
+  //   在"今天没有生成物写标记"的仓库上读数**完全一样**。
+  for (const m of LEDGER_STATUS_MARKS) {
+    assert.ok(GENERATED_STATUS_VOCAB.includes(m),
+      `生成物词表漏了台账标记 ${m} —— 那么"生成物里出现 ${m}"这一条今天不会被任何判据看见`)
+  }
+  // ★ 散文写法也得在（它们是"同一个状态的另一种写法"）。
+  for (const w of ['未完成', '已完成', '待完成', '未开始', '部分完成']) {
+    assert.ok(GENERATED_STATUS_VOCAB.includes(w), `生成物词表漏了散文写法「${w}」`)
+  }
+  // ★ 派生量不许是空集/残缺（一条"什么都没查"的判据永远是绿的）。
+  assert.ok(GENERATED_STATUS_VOCAB.length >= 9,
+    `词表只有 ${GENERATED_STATUS_VOCAB.length} 项，比并集小 ⇒ 有人又抄了一份子集`)
+
+  // ★ 正则与数组同源：词表里每一个，正则都必须认。
+  for (const w of GENERATED_STATUS_VOCAB) {
+    assert.equal(GENERATED_STATUS_RE.test(w), true, `正则认不出词表成员「${w}」`)
+  }
+  // ★ 反面控制：不在词表里的不许认（否则这条正则在验"它认得一切"）。
+  assert.equal(GENERATED_STATUS_RE.test('进行中'), false)
+  assert.equal(GENERATED_STATUS_RE.test('🔵'), false)
+})
+
+test('⑯b ★★ 真仓库：生成物里今天**没有任何**状态词（并集口径）', () => {
+  // ★ 这条对着**真文件**跑一次并集口径。它红了有两种可能：
+  //   ① 真的有一处生成物复述了状态（那正是这两条判据存在的理由）；
+  //   ② 判据的词表比并集窄了（那就是本轮修掉的那个形状又回来了）。
+  //   两种都必须有人看一眼，所以不给它留"静默变绿"的余地。
+  const r = checkFacts({ ctx: defaultContext() })
+  const cls = r.violations.find((x) => x.id === 'no-generated-artifact-asserts-task-status')
+  assert.equal(cls, undefined, '生成物里出现了状态词：' + JSON.stringify(cls))
+  const one = r.violations.find((x) => x.id === 'patch-yml-asserts-no-task-status')
+  assert.equal(one, undefined, 'patch.yml 里出现了状态词：' + JSON.stringify(one))
 })
 

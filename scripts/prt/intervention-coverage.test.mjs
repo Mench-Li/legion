@@ -33,6 +33,7 @@ import { join } from 'node:path'
 import { ledgerRows, ledgerNotDone, sectionFive, uncoveredLedgerRows, NON_DONE_STATUSES,
   checkBrief, checkBriefCount, decisionItemNumbers, briefStatedCounts,
   boundaryCoverageGaps, ledgerRowTexts, BOUNDARY_CITE, BOUNDARY_LIST_MARKER } from './intervention-coverage.mjs'
+import { DONE_STATUS_MARK, LEDGER_STATUS_MARKS, nonDoneStatuses } from './progress-check.mjs'
 
 const rows = ledgerRows()
 const notDone = ledgerNotDone()
@@ -56,7 +57,10 @@ test('① ★★★ 正对照：台账与 §5 都解析得出来（否则下面�
 
   // 状态必须落在封闭词表里（否则 `notDone` 的分母是错的）
   for (const r of rows) {
-    assert.ok(['✅', ...NON_DONE_STATUSES].includes(r.status),
+    // ★★★ 第 45 轮：这里原来是 `['✅', ...NON_DONE_STATUSES]`——
+    //   那是词表的**第三种**手写形式（"完成的那一个" + "其余的一张表"），
+    //   而它同样会漏掉新加的状态。⇒ 直接取词表本身。
+    assert.ok(LEDGER_STATUS_MARKS.includes(r.status),
       `${r.prt} 的状态是 ${JSON.stringify(r.status)}，不在词表里`)
   }
 
@@ -108,7 +112,6 @@ test('③ ★★ ✅ 的行不受本判据管辖（否则人工清单会被稀�
   // ★ 这里同时钉住 `NON_DONE_STATUSES` 的内容：它必须**不含** ✅。
   assert.equal(NON_DONE_STATUSES.includes('✅'), false,
     '`NON_DONE_STATUSES` 里含 ✅ —— 那会把已完成的拖进人工清单')
-
   const asNotDone = FIXTURE.filter((r) => NON_DONE_STATUSES.includes(r.status))
   assert.deepEqual(asNotDone.map((r) => r.prt), ['PRT-901', 'PRT-902', 'PRT-903'],
     '非 ✅ 的过滤把 ✅ 也留下了，或者漏掉了某一种非 ✅ 状态')
@@ -354,4 +357,41 @@ test('⑬c ★★★ 认不出的状态格必须**抛**——两个取法都不�
     'ledgerRows 认不出就跳过 ⇒ 那一行安静地消失')
   assert.throws(() => ledgerRowTexts(write('🔵')), /状态格不是已知标记/,
     'ledgerRowTexts 认不出就跳过 ⇒ 引用检查会悄悄少看一行')
+})
+
+test('⑬d ★★★ `NON_DONE_STATUSES` 是**派生**的：词表加一个，它立刻跟着加', () => {
+  // ★★ 为什么这条值得单独钉：
+  //   `NON_DONE_STATUSES` 原来是 `Object.freeze(['🟡', '⏸', '⬜'])` —— 手写的。
+  //   它漏一个标记的后果是**具体的**：`ledgerNotDone()` 少收一条 ⇒
+  //   那条非 ✅ 的任务**不出现在人工介入清单里** ⇒
+  //   **"清单里没有它"与"它已经完成了"读数同形**。
+  //
+  // ★★★ 而"派生"这件事**不能**靠"读一遍结果"确认：
+  //   `Object.freeze(['🟡','⬜','⏸'])`（手写、同序）与派生结果**逐字节相等**，
+  //   任何只比结果的判据都分不开它们。
+  //   ⇒ 钉**可注入的那个函数**：拿一张**多一个标记**的词表去试。
+  const withFifth = [...LEDGER_STATUS_MARKS, '🔵']
+  assert.deepEqual([...nonDoneStatuses(withFifth)],
+    ['🟡', '⬜', '⏸', '🔵'],
+    '给一张多一个标记的词表，派生结果没有跟着加 ⇒ 它不是派生的')
+  // ★ 反面控制：完成的那一个**必须**被排除，加多少个都不行。
+  assert.ok(!nonDoneStatuses(withFifth).includes(DONE_STATUS_MARK),
+    '完成的那一个没被排除 ⇒ 已完成的会被拖进人工清单')
+  // ★ 而且注入一张**只有完成标记**的词表 ⇒ 结果必须是空（不是"照抄一份"）。
+  assert.deepEqual([...nonDoneStatuses([DONE_STATUS_MARK])], [],
+    '只给一个完成标记却派生出东西 ⇒ 它没有真的在过滤')
+
+  // ★ 现在钉"这个导出的常量**就是**那个函数的结果"（不是另抄的一份）。
+  assert.deepEqual([...NON_DONE_STATUSES], [...nonDoneStatuses()],
+    '`NON_DONE_STATUSES` ≠ `nonDoneStatuses()` ⇒ 它被抄成了一份子集表')
+
+  // ★ 正对照：两者之和**恰好**是词表，一个不多一个不少。
+  assert.deepEqual([...NON_DONE_STATUSES, DONE_STATUS_MARK].sort(), [...LEDGER_STATUS_MARKS].sort(),
+    '非完成 + 完成 ≠ 全部词表 ⇒ 有一档落在两者之外（会被静默漏掉）')
+
+  // ★ 反面控制：它**必须**含全部三种非完成标记（否则"派生"可能只是碰巧）。
+  for (const m of ['🟡', '⏸', '⬜']) {
+    assert.ok(NON_DONE_STATUSES.includes(m), `${m} 是非完成状态，却不在表里`)
+  }
+  assert.equal(NON_DONE_STATUSES.length, LEDGER_STATUS_MARKS.length - 1)
 })

@@ -752,7 +752,37 @@ const GENERATED_SELF = Object.freeze([
   /\bDO NOT EDIT\b/i,
   /此文件(?:由|是)[^\n]{0,30}生成/,
 ])
-const STATUS_VOCAB = Object.freeze(['未完成', '已完成', '待完成', '未开始', '部分完成'])
+// ★★★ 第 45 轮：状态词表**只有一份**——由台账词表（`progress-check.mjs` 的
+//   `LEDGER_STATUS_MARKS`）**派生**，加上"同一批状态的散文写法"。
+//
+//   此前这里有**三份**各不相同的表，而且它们互不相等：
+//
+//     | 处 | 内容 | 项数 |
+//     | --- | --- | --- |
+//     | 判据 A（文件级，只钉 `legion-host.patch.yml`）| `未完成\|已完成\|✅\|🟡\|⏸\|⬜` | 6 |
+//     | 判据 B（类级，全部自称生成物的文件）| `STATUS_VOCAB` | 5 |
+//     | 普查（`scratch/census-generated-status.mjs`，"只有 1 个实例"那句话的来源）| 9（**并集**）| 9 |
+//
+//   ⇒ 判据 A 漏 `待完成/未开始/部分完成`；判据 B 漏**四个标记全部**。
+//
+//   实测（`scratch/_probe-generated-status-vocab.mjs`）：今天两边读数**都是 0**，
+//   差异**只存在于理论上**。但——
+//
+//     > 一次用**更大的网**做的普查，与一条用**更小的网**执行的判据，
+//     > 在"结论是 0 违规"的时候是同一个读数——
+//     > 只不过前者证明的是一件**更强**的事，而后者才是每天在跑的那一条。
+//
+//   ⇒ 一处所有：`GENERATED_STATUS_VOCAB` = 词表标记 + 散文写法。两条判据都用它，
+//     普查也 import 它（不然"普查说只有 1 处"与"判据守住 1 处"仍然是两件事）。
+const STATUS_WORD_FORMS = Object.freeze(['未完成', '已完成', '待完成', '未开始', '部分完成'])
+export const GENERATED_STATUS_VOCAB = Object.freeze([
+  ...LEDGER_STATUS_MARKS,
+  ...STATUS_WORD_FORMS,
+])
+/** 转义正则元字符（词表将来若含 `(` 之类也不会静默失配）。 */
+const reEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+/** 词表 → 一条"任取其一"的正则（**次序无关**，但案底里按词表原序）。 */
+export const GENERATED_STATUS_RE = new RegExp(`(${GENERATED_STATUS_VOCAB.map(reEsc).join('|')})`)
 const SCAN_SKIP = new Set([
   '.git', 'node_modules', '.ci', 'scratch', 'dist', 'build', '.dsh', 'coverage',
   '.worktrees', '.legion-worktrees',
@@ -777,7 +807,7 @@ function scanSelfDeclaredGenerated() {
       if (!GENERATED_SELF.some((re) => re.test(head))) continue
       // 找"任务号附近 60 字符内有状态词"的位置
       const offences = []
-      for (const w of STATUS_VOCAB) {
+      for (const w of GENERATED_STATUS_VOCAB) {
         let idx = text.indexOf(w)
         while (idx !== -1) {
           const around = text.slice(Math.max(0, idx - 60), idx + w.length + 60)
@@ -928,9 +958,9 @@ export const FACTS = Object.freeze([
       + '于是判据当场把**我自己的说明**判成违规。'
       + '*一个只认一种句式的判据，会在"有人引用了那句话"时失效——'
       + '而引用恰恰是修复时最容易发生的事。*',
-    source: PATCH_YML + '（生成物）正文里是否出现 未完成/已完成/✅/🟡/⏸/⬜',
+    source: PATCH_YML + '（生成物）正文里是否出现状态词（词表见 GENERATED_STATUS_VOCAB，由台账词表派生）',
     derive: (ctx) => {
-      const m = /(未完成|已完成|✅|🟡|⏸|⬜)/.exec(ctx.doc(PATCH_YML))
+      const m = GENERATED_STATUS_RE.exec(ctx.doc(PATCH_YML))
       return m === null ? '' : m[1]
     },
     expect: '', // 空串 = 生成物正文里一个状态词都没有
@@ -945,7 +975,14 @@ export const FACTS = Object.freeze([
       + '「发现了一处」与「只有一处」在此之前一直是两件事。'
       + '★ 存这条判据的理由不是"今天有 1 个"，而是"**它还会再长出来**"——'
       + '生成器每跑一次就把手写状态重印一遍。'
-      + '⚠️ 边界：只覆盖**自称**是生成物的文件；不自称的不在扫描面内。',
+      + '★★★ 第 45 轮：这条判据的词表原来**比它引用的那次普查窄**——'
+      + '普查用 9 项（并集），这里只有 5 项、**漏掉四个标记全部**。'
+      + '今天两边读数都是 0（`scratch/_probe-generated-status-vocab.mjs`），'
+      + '差异只存在于理论上；但"用更大的网普查、用更小的网执法"这件事本身'
+      + '必须消失 ⇒ 两条判据与普查现在共用一份 `GENERATED_STATUS_VOCAB`。'
+      + '⚠️ 边界：只覆盖**自称**是生成物的文件；不自称的不在扫描面内。'
+      + '⚠️ 且要求任务号在状态词**附近 60 字符内**——'
+      + '状态词离任务号更远时这条不报（那是宽恕，不是漏，但它有明确边界）。',
     source: '全仓（跳过 .worktrees / .legion-worktrees / node_modules 等）自称生成物的文件正文',
     derive: (ctx) => ctx.generatedArtifacts()
       .filter((g) => g.offences.length > 0)

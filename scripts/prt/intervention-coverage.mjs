@@ -56,7 +56,19 @@ import { REPO, MATRIX_PATH, sectionFiveText } from './reachability.mjs'
 // ★ 台账状态词表与"任务行长什么样"的**唯一所有者**是 `progress-check.mjs`。
 //   本模块此前把同一条状态正则写了**三**遍（`ledgerRows`、`ledgerRowTexts`，
 //   外加 `NON_DONE_STATUSES` 那张子集表），而它自己的文件头就在警告这件事。
-import { ledgerTaskRow } from './progress-check.mjs'
+//
+// ★★★ 第 45 轮：三处**全部**改成取它。⚠️ 中途我犯过一次——
+//   改完前两处，上面这段注释**已经**把第三处（`NON_DONE_STATUSES`）写成
+//   "已收敛"，而那一行**还是** `Object.freeze(['🟡', '⏸', '⬜'])` 的手写表。
+//
+//     > 一段写着"这个词表只有一处"的注释，与一段**真的**只有一处的代码，
+//     > 在读者眼里是同一件事——
+//     > 只不过前者在下一次加状态时**不会**跟着变。
+//
+//   这张表漏一个标记的后果是**具体的**：`ledgerNotDone()` 会少收一条，
+//   于是那条非 ✅ 的任务**不会出现在人工介入清单里**——
+//   而"清单里没有它"与"它已经完成了"读数同形。
+import { DONE_STATUS_MARK, LEDGER_STATUS_MARKS, ledgerTaskRow, nonDoneStatuses } from './progress-check.mjs'
 
 /**
  * §5 的正文（转手 `reachability.mjs` 的解析器）。
@@ -71,8 +83,17 @@ export function sectionFive(path = MATRIX_PATH) {
 
 export const LEDGER_PATH = join(REPO, 'docs', 'superpowers', 'prt', 'PRT-PROGRESS.md')
 
-/** 台账里的状态标记。非 ✅ 的都要有人认领。 */
-export const NON_DONE_STATUSES = Object.freeze(['🟡', '⏸', '⬜'])
+/**
+ * 台账里"还没完"的状态标记 —— **由词表派生**，不手写一份。
+ *
+ * ★★★ 第 45 轮：这里原来是 `Object.freeze(['🟡', '⏸', '⬜'])`。
+ *   它就是 `progress-check.mjs` 那段注释里列的"四处各写一遍"中的一处，
+ *   而我改完另外两处时**漏了它**（注释却已经宣称改完了）。
+ *
+ * ★ 用 `nonDoneStatuses()` 而不是在这里 `filter`：派生规则（"去掉完成的那一个"）
+ *   也只该有一份，而且它**可注入**——用例能拿一张多一个标记的词表去试。
+ */
+export const NON_DONE_STATUSES = nonDoneStatuses()
 
 /**
  * 台账里所有 **PRT 行**（`| PRT-XXX … | 状态 | 证据 |`）。

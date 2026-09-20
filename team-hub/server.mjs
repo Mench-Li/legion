@@ -244,6 +244,7 @@ import { createMembersRoutes } from './routes/members.mjs'
 import { createExecRoutes } from './routes/exec.mjs'
 import { createModelsRoutes } from './routes/models.mjs'
 import { createWebRoutes } from './routes/web.mjs'
+import { createSkillSourceRoutes } from './routes/skill-source.mjs'
 import { createModelMigrationRoutes } from './routes/model-migration.mjs'
 import { createEmployeeManifestsRoutes } from './routes/employee-manifests.mjs'
 import { createTeamPlansRoutes } from './routes/team-plans.mjs'
@@ -5100,6 +5101,10 @@ const router = createRouter([
     planModelMigration, describeMigration, applyModelMigration,
     handleRun,
   }),
+  createSkillSourceRoutes({
+    json,
+    getSkillSource, setSkillSource, handleWrite,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -6477,21 +6482,9 @@ async function handle(req, res, stripPrefix) {
       })
       return
     }
-    // ── 技能来源（skill-source）：每个空间绑定的团队技能仓库（github url + 分支，供一键拉取同步）──
-    if (req.method === 'GET' && path === '/api/skill-source') {
-      try {
-        const scopeParam = url.searchParams.get('scope') ?? 'default'
-        json(res, 200, { ok: true, source: getSkillSource(scopeParam) })
-      } catch (e) {
-        json(res, 400, { error: e instanceof Error ? e.message : String(e) })
-      }
-      return
-    }
-    if (req.method === 'POST' && path === '/api/skill-source') {
-      // 写入走统一 handleWrite（by 必填 + 审计 + SSE）；不设 general 门禁（只是 URL 配置，拉取时另行白名单校验）。
-      await handleWrite(req, res, (body, by) => setSkillSource({ scope: body.scope, url: body.url, branch: body.branch }))
-      return
-    }
+    // ── 每个空间绑定的团队技能仓库（github url + 分支，供一键拉取同步） —— 已提取到 `./routes/skill-source.mjs`（PRT-316 第 28 族 / 切片 29）──
+    // 整段搬走：`server.mjs` 里现在**不再有** `/api/skill-source` 路由，该命名空间只住一个地方。
+    if (await router.dispatch(req, res, { path, url })) return
     // ── 对话中心（chat）：会话/消息/附件/健康/AI 回复 —— 已提取到 `./routes/chat.mjs`（PRT-316 切片 3）──
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/chat/*` 路由，该命名空间只住一个地方。
     if (await router.dispatch(req, res, { path, url })) return

@@ -58,7 +58,11 @@ import { REPO_WIDE_BASELINE } from './doc-table-integrity.mjs'
 //   本模块第 44 轮自己手抄过一份"三个标记"的表（`✅|⏸|⬜`），
 //   于是认不出 🟡、报 144 而台账有 145——而那个错数正好能过门禁。
 //   ⇒ 现在**取**它，不再抄它（见 `LEDGER_STATUS_MARKERS` 那一段）。
-import { LEDGER_STATUS_MARKS } from './progress-check.mjs'
+//
+// ★★★ 第 46 轮：连**行怎么认**与**标记归哪一档**也一起取回来。
+//   第 45 轮只收敛了"有哪些标记"，`tallyLedger` 仍然自己判行（`/^\|\s*PRT-\d+/`）、
+//   自己分格、**自己写四个 `if` 分档**。实测出两处会走偏的地方（见 `tallyLedger`）。
+import { LEDGER_STATUS_MARKS, STATUS_MARKS, ledgerTaskRow } from './progress-check.mjs'
 
 export const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
@@ -145,6 +149,19 @@ export const HANDOVER_DOC = 'docs/superpowers/prt/PRT-HANDOVER-2026-09-18-ROUND2
 export const REACHABILITY_BASELINE = 'docs/superpowers/prt/prt-reachability-baseline.json'
 
 /**
+ * 对象 → 字符串，**键的次序由排序决定**，不由插入顺序决定。
+ *
+ * ★★★ 第 46 轮：`handover-ledger-tallies` 两侧原来都是 `JSON.stringify(对象)`，
+ *   于是**对象的键插入顺序**变成了一条没人打算立的规矩（见那条事实的注释）。
+ *   凡是"比较两个对象"的地方都该用这个，而不是 `JSON.stringify`。
+ */
+export function canonicalJson(obj) {
+  const sorted = {}
+  for (const k of Object.keys(obj).sort()) sorted[k] = obj[k]
+  return JSON.stringify(sorted)
+}
+
+/**
  * 台账里出现的**全部**状态标记。★ 少写一个，那一条就会被安静地丢掉。
  *
  * 各档都要数——只数 ✅ 会把"4 条暂停"读成"都完了"。
@@ -155,60 +172,94 @@ export const REACHABILITY_BASELINE = 'docs/superpowers/prt/prt-reachability-base
  * ★★ 第 45 轮：**不再在这里列**，改为取 `progress-check.mjs` 的那张表——
  * 它是台账格式（含状态词表）的唯一所有者。★ 这一行原本是该模块第 **5** 处
  * 手抄的词表，而"手抄一份"正是第 44 轮那个缺陷的**形状**本身。
+ *
+ * ★ 第 46 轮起 `tallyLedger` 走 `ledgerTaskRow`，不再自己认行，
+ * 所以这个别名现在只是"本模块对那张词表的叫法"（保留以兼容既有引用）。
  */
 export const LEDGER_STATUS_MARKERS = LEDGER_STATUS_MARKS
 
-export function tallyLedger(text) {
-  let done = 0; let partial = 0; let paused = 0; let todo = 0; let total = 0
+/**
+ * 台账各档计数（`✅ / 🟡 / ⏸ / ⬜` + 总数）。
+ *
+ * ★★★ 第 46 轮：**行怎么认**与**标记归哪一档**都取回所有者，
+ *   本函数不再自己判行、不再自己写分档的 `if`。
+ *
+ *   第 45 轮只收敛了"有哪些标记"（`LEDGER_STATUS_MARKERS`），
+ *   而行规则与分档仍是本地手写的。实测出两处会走偏的地方
+ *   （`scratch/_probe-tally-owner.mjs`）：
+ *
+ *   | 症状 | 实测 |
+ *   | --- | --- |
+ *   | **接受规则比所有者宽** | `✅🟡` / `✅（待复核）` / `⏸→🟡` 三种格子：`ledgerTaskRow` **抛**，本函数**照收**（判成 done/paused）⇒ 两个"台账解析器"对**同一行**给出不同读数 |
+ *   | **分档是四个手写 `if`** | 词表加第 5 个标记 ⇒ `total` 照加、四档谁都不动 ⇒ `total` 与「四档之和」**悄悄不再相等**（影子验证：`total=5`，四档之和 `4`）。而返回值里**没有任何字段**说"有一条没归到档里" |
+ *
+ *   > 一个"总数 = 5、四档之和 = 4"的返回值，与一个"台账真的只有 4 条"，
+ *   > 在下游（它只是拿去和报告里那行数字比）是同一个读数。
+ *
+ *   ★ `marks` **可注入**（第 46 轮）：用例能拿一张**多一个标记**的词表来试，
+ *     从而验证"它真的在读那张表"，而不是"它今天恰好认得这四个字"。
+ *     —— 这与第 42/43/45 轮三次遇到"两版实现行为等价 ⇒ 破验分不开"时的
+ *     出路是同一条：**把被跟随的那张声明做成可注入的参数**。
+ *
+ * @param {string} text 台账全文
+ * @param {{marks?: readonly {mark: string, tallyKey: string}[]}} [opts]
+ */
+export function tallyLedger(text, { marks = STATUS_MARKS } = {}) {
+  const counts = new Map(marks.map((m) => [m.mark, 0]))
+  let total = 0
   const lines = String(text).split(/\r?\n/)
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
-    if (!/^\|\s*PRT-\d+/.test(line)) continue
-    const cells = line.replace(/^\|/, '').replace(/\|$/, '').split(/(?<!\\)\|/)
-    if (cells.length < 2) continue
-    // ★ 不看固定下标，**扫**第一格带状态标记的。
-    //
-    //   我第一版写死 `cells[2]`，于是报出 `0 ✅ / 3 ⏸ / 2 ⬜`——
-    //   而那是**错的**：去掉首尾竖线之后状态落在 `cells[1]`（表头是
-    //   `| 任务 | 状态 | 证据 | …`）。写死下标的版本会安静地多数一个、
-    //   少算一个，而输出仍然是一个**看起来完全合理**的分布。
-    //
-    //   > 一个"下标差了一位"的解析器，与一个"台账真的有几条没做完"，
-    //   > 在报告里长得一模一样——而后者看起来更像个发现。
-    //
-    // ★★★ 第 44 轮：原来这里只认 `✅|⏸|⬜`，认不出就 `continue`。
-    //
-    //   `PRT-316` 转成 **🟡** 之后，那一条就既不计入 `total`、也不计入任何一档
-    //   ⇒ 本函数对真实台账报 **144**，而台账有 **145** 条（实测
-    //   `scratch/_probe-tally-ledger.mjs`：140 ✅ + 4 ⏸ + 1 🟡 = 145，
-    //   而台账自己的合计行写的是「140 / **1** / 0 / 4 / **145**」）。
-    //
-    //   最坏的地方不是"少算一条"，而是**它少算出来的那个数正好能过门禁**：
-    //   `derive` 给出 144，报告里若写「144 行 = 140 ✅ / 4 ⏸ / 0 ⬜」，
-    //   这条事实就**判绿**——一条把 145 说成 144 的绿。
-    //
-    //   > 一个"不认识的标记就跳过"的解析器，与一个"台账真的只有 144 行"的台账，
-    //   > 在报告里长得一模一样——
-    //   > 只不过前者会随着**每一个新状态**安静地少算一条，
-    //   > 而它的少算**恰好**是门禁会接受的那个值。
-    //
-    //   ⇒ 两处一起改：① 🟡 计入 `partial`（台账汇总行本来就有"部分"这一列）；
-    //     ② **认不出来就抛**，不再静默跳过——这一族已经在
-    //     `scripts/prt/progress-check.mjs` 那边学过一遍了（"认不出的状态标记
-    //     必须报「读不出来」，而**不是**默认成未开始"），这里是同一个道理。
-    const st = cells.map((c) => c.trim()).find((c) => LEDGER_STATUS_MARKERS.some((m) => c.startsWith(m)))
-    if (st === undefined) {
-      throw new Error(`台账第 ${i + 1} 行是一个 \`| PRT-\` 行，但没有任何可识别的状态标记`
-        + `（认得的是 ${LEDGER_STATUS_MARKERS.join(' ')}）：${line.slice(0, 80)}`)
+    // ★ 行怎么认、状态格长什么样 —— 全部转手给所有者。
+    let row = null
+    try {
+      row = ledgerTaskRow(line, { marks: marks.map((m) => m.mark) })
+    } catch (e) {
+      throw new Error(`台账第 ${i + 1} 行：${e.message}`)
     }
+    if (row === null) continue
     total += 1
-    if (st.startsWith('✅')) done += 1
-    else if (st.startsWith('🟡')) partial += 1
-    else if (st.includes('⏸')) paused += 1
-    else if (st.includes('⬜')) todo += 1
+    counts.set(row.status, counts.get(row.status) + 1)
   }
-  return { total, done, partial, paused, todo }
+  // ★ 分档**派生**：`tallyKey` 也写在所有者那张表里（第 46 轮）。
+  const out = { total }
+  for (const { tallyKey } of marks) out[tallyKey] = 0
+  for (const { mark, tallyKey } of marks) out[tallyKey] += counts.get(mark)
+  // ★ 平衡自检：本函数**不返回**一个"总数与四档之和不等"的结果。
+  //   加了这一条之后，"漏了一档"不再是一个能悄悄往下游走的数。
+  const sum = marks.reduce((a, m) => a + out[m.tallyKey], 0)
+  if (sum !== total) {
+    throw new Error(`台账分档不平衡：total=${total}，而各档之和=${sum}。`
+      + `⇒ 有 ${total - sum} 条行落进了没有任何一档接住的状态。`
+      + `★ 这通常意味着"词表加了一个标记、而分档没跟着加"——`
+      + `第 46 轮实测过这个形状（tallyKey 未派生时 total=5、四档之和=4）。`)
+  }
+  return out
 }
+
+// ── 沿革：这个函数是怎么被找到的（两句话留着，它们比代码活得更久）────────────
+//
+// ★ 第 44 轮：它曾经只认 `✅|⏸|⬜`，认不出就 `continue`。
+//   `PRT-316` 转成 **🟡** 之后，那一条就既不计入 `total`、也不计入任何一档
+//   ⇒ 它对真实台账报 **144**，而台账有 **145** 条。
+//   最坏的地方不是"少算一条"，而是**它少算出来的那个数正好能过门禁**：
+//   `derive` 给出 144，报告里若写「144 行 = 140 ✅ / 4 ⏸ / 0 ⬜」，这条事实就**判绿**。
+//
+//   > 一个"不认识的标记就跳过"的解析器，与一个"台账真的只有 144 行"的台账，
+//   > 在报告里长得一模一样——
+//   > 只不过前者会随着**每一个新状态**安静地少算一条，
+//   > 而它的少算**恰好**是门禁会接受的那个值。
+//
+// ★ 再早：它曾经写死 `cells[2]`，于是报出 `0 ✅ / 3 ⏸ / 2 ⬜`——
+//   而去掉首尾竖线之后状态落在 `cells[1]`。写死下标的版本会安静地多数一个、
+//   少算一个，而输出仍然是一个**看起来完全合理**的分布。
+//
+//   > 一个"下标差了一位"的解析器，与一个"台账真的有几条没做完"，
+//   > 在报告里长得一模一样——而后者看起来更像个发现。
+//
+// ★ 第 46 轮（本轮）：上面两次都是"某一处写错了"，而**这一次是"谁说了算"**——
+//   同一个问题在本仓被回答了**两遍**（行怎么认、标记归哪一档），
+//   于是两个答案可以各自正确而**互相不一致**。⇒ 收敛到一个所有者。
 
 /** 已跟踪的 `*.test.mjs`。★ 用 `-z`：非 ASCII 路径会被 C-quote 成打不开的名字。 */
 export function trackedTestFiles({ cwd = REPO } = {}) {
@@ -1021,12 +1072,26 @@ export const FACTS = Object.freeze([
       + '⇒ 少算一个数与台账真的少一条，在报告里长得一样；'
       + '而只要**少算出来的那个数**被写进报告，门禁就替它背书。',
     source: LEDGER_DOC + ' 每行第 3 格的状态列',
-    derive: (ctx) => JSON.stringify(ctx.ledgerTallies()),
+    // ★★★ 第 46 轮：比较改用**键序无关**的规范化序列化。
+    //
+    //   原来两侧都是 `JSON.stringify(对象)`，于是**对象的键插入顺序**成了
+    //   一条没人打算立的规矩：`tallyLedger` 的返回对象一旦按词表顺序建键
+    //   （`✅ 🟡 ⬜ ⏸` ⇒ `done partial todo paused`），这条事实当场报
+    //   「文档说 {"total":145,...}，产物是 {"total":145,"done":140,"partial":1,"todo":0,...}」
+    //   —— 而**五个数一个都没变**。
+    //
+    //   > 一次"数字全对但键的次序不同"的报红，
+    //   > 与一次"数字真的错了"的报红，在输出里只差几个字符的位置。
+    //
+    //   ★ 而键序本来就不该是这条事实的内容：它要核的是**五个数**。
+    //     文档侧那行 `total / ✅ / 🟡 / ⏸ / ⬜` 的**书写次序**由下面的正则
+    //     逐字钉住（那是给人读的），与被核的值分开。
+    derive: (ctx) => canonicalJson(ctx.ledgerTallies()),
     claim: Object.freeze({
       doc: HANDOVER_DOC,
-      // ★ 顺序与 `derive` 的字段顺序一致，人读的时候两句能逐字对上。
+      // ★ 正则按文档的**书写次序**捕获（total / ✅ / 🟡 / ⏸ / ⬜）——那部分保持逐字。
       re: /台账 \| \*\*(\d+) 行 = (\d+) ✅ \/ (\d+) 🟡 \/ (\d+) ⏸ \/ (\d+) ⬜\*\*/,
-      parse: (m) => JSON.stringify({
+      parse: (m) => canonicalJson({
         total: Number(m[1]), done: Number(m[2]), partial: Number(m[3]),
         paused: Number(m[4]), todo: Number(m[5]),
       }),

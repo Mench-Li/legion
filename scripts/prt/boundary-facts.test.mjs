@@ -32,9 +32,9 @@ import {
   scanCommitCitations, scanLineCitations, checkPinnedCitations,
   checkManifestImpersonation, tallyLedger, tallyUnreachable,
   STATUS_DOC, LEDGER_DOC, PATCH_YML, REPO, HUB_TOKEN_ENV, WORKBENCH_TOKEN_ENV,
-  HANDOVER_DOC, GENERATED_STATUS_VOCAB, GENERATED_STATUS_RE,
+  HANDOVER_DOC, GENERATED_STATUS_VOCAB, GENERATED_STATUS_RE, canonicalJson,
 } from './boundary-facts.mjs'
-import { LEDGER_STATUS_MARKS } from './progress-check.mjs'
+import { LEDGER_STATUS_MARKS, STATUS_MARKS, ledgerTaskRow } from './progress-check.mjs'
 
 const REAL = checkFacts()
 
@@ -822,14 +822,26 @@ test('⑭b-2 ★★★ 认不出的状态标记必须**抛**，不许静默少�
   //   而消失之后算出来的 144 看起来完全正常（✔ 与"台账刚好 144 条"同形）。
   //
   //   ⇒ 现在改成抛。断言分两半：**认不出的要抛**、**认得的一个都不许丢**。
+  //
+  //   ★★★ 第 46 轮：抛的**措辞**改了 —— 因为"认不出"这件事现在由**所有者**
+  //   （`ledgerTaskRow`）判定并抛出，本函数只负责加上行号。
+  //   ⇒ 正则跟着改成所有者那句话。这一步值得留一句：
+  //
+  //     > 一个钉住**错误措辞**的断言，会在"把判定权交给所有者"的那一刻变红——
+  //     > 而它红的原因不是"行为坏了"，是"说话的人换了"。
+  //     > 这类红必须**改断言**（而不是把措辞改回去），
+  //     > 否则等于要求每个消费者都复述所有者的原话。
   const withUnknown = [
     '| 任务 | 状态 | 证据 |',
     '| --- | --- | --- |',
     '| PRT-001 甲 | ✅ | `a.md` |',
     '| PRT-002 乙 | 🚧 | `b.md` |',
   ].join('\n')
-  assert.throws(() => tallyLedger(withUnknown), /没有任何可识别的状态标记/,
+  assert.throws(() => tallyLedger(withUnknown), /状态格不是已知标记/,
     '一个不认识的状态标记被静默跳过了 ⇒ 那个数会随每个新状态安静地少一条')
+  // ★ 而且报出来的必须是**台账里的行号**（否则在 1000+ 行的台账里等于没报）。
+  assert.throws(() => tallyLedger(withUnknown), /台账第 4 行/,
+    '抛了但没带行号 ⇒ 在真台账里定位不到是哪一行')
 
   // ★ 反向控制：**四档都认得**，而且四档**互不吞并**。
   const allFour = [
@@ -849,6 +861,91 @@ test('⑭b-2 ★★★ 认不出的状态标记必须**抛**，不许静默少�
   const rows = text.split(/\r?\n/).filter((l) => /^\|\s*PRT-\d+/.test(l)).length
   assert.equal(tallyLedger(text).total, rows,
     `台账里 ${rows} 个 \`| PRT-\` 行，但只数出 ${tallyLedger(text).total} 条`)
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// ★★★ 第 46 轮：`tallyLedger` 是**第二个所有者**吗？
+//
+// 第 45 轮只收敛了"有哪些标记"；行怎么认、标记归哪一档仍是本地手写的。
+// 实测出两处会走偏的地方（`scratch/_probe-tally-owner.mjs`）：
+//
+//   ① **接受规则比所有者宽**：`✅🟡` / `✅（待复核）` / `⏸→🟡` 三种格子，
+//      `ledgerTaskRow` **抛**，`tallyLedger` **照收**（判成 done/paused）
+//      ⇒ 两个"台账解析器"对**同一行**给出不同读数。
+//   ② **分档是四个手写 `if`**：词表加第 5 个标记 ⇒ `total` 照加、
+//      四档谁都不动 ⇒ `total` 与「四档之和」**悄悄不再相等**。
+//
+// 修法不是"再加两条断言"，而是**把判定权交回所有者**、
+// 并把 `tallyKey`（归哪一档）也放进所有者那张表。
+// ══════════════════════════════════════════════════════════════════════════
+
+test('⑯c ★★★ `tallyLedger` 与所有者**对同一行同判**（接受规则不许比所有者宽）', () => {
+  // ★ 这四种格子，所有者今天全**抛**（状态格必须整格等于一个已知标记）。
+  //   旧 `tallyLedger` 用 `startsWith` 扫，于是前三种它**照收**。
+  const JUNK = [
+    ['| PRT-006 己 | ✅🟡 | `f.md` |', '状态格是两个标记'],
+    ['| PRT-008 辛 | ✅（待复核） | `h.md` |', '状态格带后缀'],
+    ['| PRT-009 壬 | ⏸→🟡 | `i.md` |', '箭头写法'],
+  ]
+  for (const [row, label] of JUNK) {
+    // 所有者抛 ⇒ 消费者也必须抛（不能自己判成某一档）
+    assert.throws(() => ledgerTaskRow(row), /状态格不是已知标记/,
+      `所有者竟认下了「${label}」——控制写错了`)
+    assert.throws(() => tallyLedger(['| 任务 | 状态 |', '| --- | --- |', row, ''].join('\n')),
+      /状态格不是已知标记/,
+      `「${label}」：所有者抛而 \`tallyLedger\` 收下了 ⇒ 两个解析器对同一行读数不同`)
+  }
+  // ★ 反向控制：**合法**的行两边都必须收（否则上面那三条可能只是"它什么都抛"）。
+  const ok = '| PRT-007 庚 |  ⏸  | `g.md` |'
+  assert.equal(ledgerTaskRow(ok)?.status, '⏸', '控制失效：合法行没被认下')
+  assert.equal(tallyLedger(['| 任务 | 状态 |', '| --- | --- |', ok, ''].join('\n')).paused, 1,
+    '合法行带空格时没归到 ⏸ 档')
+})
+
+test('⑯d ★★★ 词表加第 5 个标记 ⇒ 各档**必须**跟着加（`tallyKey` 派生）', () => {
+  // ★★ 为什么必须**注入**一张词表才验得出来：
+  //   在**今天**这张四标记词表上，"分档派生"与"四个手写 if"的返回值**完全一样**，
+  //   任何只比结果的断言都分不开它们。
+  //   ⇒ 注入一张多一个标记的表 —— 这正是第 42/43/45 轮三次用过的同一条出路。
+  const SYNTH = ['| 任务 | 状态 |', '| --- | --- |',
+    '| PRT-001 甲 | ✅ | `a.md` |',
+    '| PRT-002 乙 | 🟡 | `b.md` |',
+    '| PRT-003 丙 | ⏸ | `c.md` |',
+    '| PRT-004 丁 | ⬜ | `d.md` |',
+    '| PRT-005 戊 | 🔵 | `e.md` |'].join('\n')
+
+  // ① 今天这张词表**不认识** 🔵 ⇒ 必须抛（不是少算一条）。
+  assert.throws(() => tallyLedger(SYNTH), /状态格不是已知标记/,
+    '🔵 不在词表里却被收下了 ⇒ 又是"认不出就跳过"')
+
+  // ② 把 🔵 **加进词表**（并给它一个档）⇒ 5 条行必须全部有归属。
+  const withFifth = [...STATUS_MARKS, { mark: '🔵', label: '第五档', tallyKey: 'fifth' }]
+  const r = tallyLedger(SYNTH, { marks: withFifth })
+  assert.equal(r.total, 5, '加了第 5 档之后 total 不是 5')
+  assert.equal(r.fifth, 1, '★ 第 5 档收到了 0 条 ⇒ 分档不是派生的（漏了一档也照样返回）')
+  const sum = withFifth.reduce((a, m) => a + r[m.tallyKey], 0)
+  assert.equal(sum, r.total, `total=${r.total} 而各档之和=${sum} ⇒ 有行落进了没人接住的档`)
+
+  // ③ 反面控制：**档名撞车**必须被抓到（两条状态共用一个 tallyKey ⇒ 重复计数）。
+  const collision = [...STATUS_MARKS, { mark: '🔵', label: '撞名', tallyKey: 'done' }]
+  assert.throws(() => tallyLedger(SYNTH, { marks: collision }), /不平衡/,
+    '两条状态共用一个档名 ⇒ 该档被重复计数，而 total 对不上时**必须**抛')
+})
+
+test('⑯e ★★ `canonicalJson`：键序无关（这条事实不许再依赖对象的插入顺序）', () => {
+  // ★★★ 起因是一次**我自己制造**的报红：`tallyLedger` 改成按词表顺序建键之后，
+  //   `handover-ledger-tallies` 报「文档说 {"total":145,...}，产物是
+  //   {"total":145,"done":140,"partial":1,"todo":0,...}」—— 而**五个数一个都没变**。
+  //
+  //   > 一次"数字全对但键的次序不同"的报红，
+  //   > 与一次"数字真的错了"的报红，在输出里只差几个字符的位置。
+  assert.equal(canonicalJson({ b: 1, a: 2 }), canonicalJson({ a: 2, b: 1 }),
+    '同一组值、不同插入顺序给出了不同的串 ⇒ 这条事实仍然依赖键序')
+  assert.equal(canonicalJson({ b: 1, a: 2 }), '{"a":2,"b":1}')
+  // ★ 反面控制：**值**不同必须仍能分开（否则规范化把内容也抹平了）。
+  assert.notEqual(canonicalJson({ a: 1, b: 2 }), canonicalJson({ a: 1, b: 3 }))
+  assert.notEqual(canonicalJson({ a: 1 }), canonicalJson({ a: 1, b: 0 }),
+    '多一个键却给出同一个串 ⇒ 规范化把结构性差异抹平了')
 })
 
 test('⑭c 载荷：台账里少一个 ✅ ⇒ 那条事实必须红（钳住"三个数都要核"）', () => {

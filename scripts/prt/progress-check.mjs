@@ -27,12 +27,24 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(HERE, '..', '..')
 const PROGRESS = join(ROOT, 'docs', 'superpowers', 'prt', 'PRT-PROGRESS.md')
 
-/** 状态标记 → 汇总列的次序。顺序即汇总表四列的顺序。 */
+/**
+ * 状态标记 → 汇总列的次序。顺序即汇总表四列的顺序。
+ *
+ * ★★★ 第 46 轮：每一项多了一个 `tallyKey` —— **"这个标记数进哪一档"**。
+ *
+ *   `boundary-facts.tallyLedger` 此前自己写了四个 `if`（`✅`→done、
+ *   `🟡`→partial、`⏸`→paused、`⬜`→todo）。那就是词表的**第四种**手写形式：
+ *   词表本身早已"只改一处"，但**分档**还得改四处 —— 而漏改的那一处
+ *   **不报错**：`total` 照加，四档不跟着动，于是"总数"与"四档之和"
+ *   悄悄不再相等（实测：词表加第 5 个标记 ⇒ `total=5` 而四档之和 `4`）。
+ *
+ *   ⇒ 把"归到哪一档"也放进这一张表：**加一个状态 = 只改这一处**。
+ */
 export const STATUS_MARKS = Object.freeze([
-  { mark: '✅', label: '已完成' },
-  { mark: '🟡', label: '部分' },
-  { mark: '⬜', label: '未开始' },
-  { mark: '⏸', label: '需外部输入' },
+  { mark: '✅', label: '已完成', tallyKey: 'done' },
+  { mark: '🟡', label: '部分', tallyKey: 'partial' },
+  { mark: '⬜', label: '未开始', tallyKey: 'todo' },
+  { mark: '⏸', label: '需外部输入', tallyKey: 'paused' },
 ])
 
 // ── ★★★ 台账状态**词表的唯一所有者**（第 45 轮）──────────────────────────────

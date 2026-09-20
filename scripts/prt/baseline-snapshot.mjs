@@ -286,6 +286,7 @@ SOURCES.routesAgentIntake = join(ROOT, 'team-hub', 'routes', 'agent-intake.mjs')
 SOURCES.routesTeamPlanRead = join(ROOT, 'team-hub', 'routes', 'team-plan-read.mjs')
 SOURCES.routesGoalSlices = join(ROOT, 'team-hub', 'routes', 'goal-slices.mjs')
 SOURCES.routesRunBudgetMaySwitchModel = join(ROOT, 'team-hub', 'routes', 'run-budget-may-switch-model.mjs')
+SOURCES.routesActivity = join(ROOT, 'team-hub', 'routes', 'activity.mjs')
 
 /** 已提取出去的路由族模块（值 = 该文件里**声明式**路由的归属名）。 */
 export const ROUTE_FAMILY_SOURCES = Object.freeze([
@@ -336,6 +337,7 @@ export const ROUTE_FAMILY_SOURCES = Object.freeze([
   { module: 'routesTeamPlanRead', family: 'team-plan-read', factory: 'createTeamPlanReadRoutes' },
   { module: 'routesGoalSlices', family: 'goal-slices', factory: 'createGoalSlicesRoutes' },
   { module: 'routesRunBudgetMaySwitchModel', family: 'run-budget-may-switch-model', factory: 'createRunBudgetMaySwitchModelRoutes' },
+  { module: 'routesActivity', family: 'activity', factory: 'createActivityRoutes' },
 ])
 SOURCES.experienceStore = join(ROOT, 'team-hub', 'experience-store.mjs')
 

@@ -244,6 +244,7 @@ import { createMembersRoutes } from './routes/members.mjs'
 import { createExecRoutes } from './routes/exec.mjs'
 import { createModelsRoutes } from './routes/models.mjs'
 import { createWebRoutes } from './routes/web.mjs'
+import { createActivityRoutes } from './routes/activity.mjs'
 import { createRunBudgetMaySwitchModelRoutes } from './routes/run-budget-may-switch-model.mjs'
 import { createGoalSlicesRoutes } from './routes/goal-slices.mjs'
 import { createTeamPlanReadRoutes } from './routes/team-plan-read.mjs'
@@ -5225,6 +5226,10 @@ const router = createRouter([
     handleRun, budgetPriceTables, budgetLedger,
     BUDGET_ERRORS,
   }),
+  createActivityRoutes({
+    json,
+    db, auditEvent,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -5372,26 +5377,10 @@ async function handle(req, res, stripPrefix) {
     // ── 浏览器助手抓取历史（入表/累加 + 读一版带统计 + 清一个或清一空间） —— 已提取到 `./routes/web.mjs`（PRT-316 第 26 族 / 切片 27）──
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/web` 路由，该命名空间只住一个地方。
     if (await router.dispatch(req, res, { path, url })) return
-    if (req.method === 'GET' && path === '/api/activity') {
-      const limit = Math.min(Number(url.searchParams.get('limit') ?? 50) || 50, 500)
-      const scopeParam = url.searchParams.get('scope')
-      const taskIdParam = url.searchParams.get('taskId')
-      const goalIdParam = url.searchParams.get('goalId')
-      let rows
-      if (goalIdParam) {
-        // per-goal 活动视图：goal 事件（audit.goalId）+ 该目标链任务的 task 事件（反查 tasks.goalId）。
-        rows = db.prepare(`SELECT * FROM audit WHERE goalId = ? OR (taskId IN (SELECT id FROM tasks WHERE goalId = ?)) ORDER BY seq DESC LIMIT ?`)
-          .all(goalIdParam, goalIdParam, limit)
-      } else if (taskIdParam) {
-        rows = db.prepare('SELECT * FROM audit WHERE taskId = ? ORDER BY seq').all(taskIdParam)
-      } else if (scopeParam) {
-        rows = db.prepare('SELECT * FROM audit WHERE scope = ? ORDER BY seq DESC LIMIT ?').all(scopeParam, limit)
-      } else {
-        rows = db.prepare('SELECT * FROM audit ORDER BY seq DESC LIMIT ?').all(limit)
-      }
-      json(res, 200, rows.map(auditEvent))
-      return
-    }
+    // ── 活动流水（四个分支按 goalId > taskId > scope > 全量排优先级） —— 已提取到 `./routes/activity.mjs`（PRT-316 第 48 族 / 切片 50）──
+    // 本族这 1 条已全部搬进模块，`server.mjs` 里不再有它们。
+    // 归属 /api/activity 的那 1 条都在这里了。
+    if (await router.dispatch(req, res, { path, url })) return
 
     // ── 规范（rules）：GET/POST /api/rules —— 已提取到 `./routes/rules.mjs`（PRT-316 第一片）──
     // 语义与原来那两条 `if` 逐条相同：等值匹配、GET 先于 POST、命中即 return。

@@ -2,7 +2,7 @@
   "$comment": "PRT-007 旧系统平台契约基线。由 scripts/prt/baseline-snapshot.mjs 生成；不含时间戳以便逐字节 diff。漂移由 sources 的 sha256 归因。",
   "version": 1,
   "sources": {
-    "team-hub/server.mjs": "c5bf6a5e3ab37b1a1a551226fa34637a8bb9e8f2a4662f32dcad4b8f273e166f",
+    "team-hub/server.mjs": "3b3e224a55c63ad397946907baabbdd760596d218bb4634b90c71bf9c751e26d",
     "team-hub/permission-engine.mjs": "ad399442a1bb50f5a5796126caf402f114462e6b9f60735e24380d7a8672350f",
     "team-hub/run-store.mjs": "2ab3bce1e2cbc457415f303796bcc27bb1852629eb30d83aa75ccc001297d8d8",
     "team-hub/model-store.mjs": "2d2cc90f9a4d357e9138b7e9933ce68215fd32d4d5cfe7179d63cf8f015d78e8",
@@ -66,6 +66,7 @@
     "team-hub/routes/team-plan-read.mjs": "f023df776d48bb93a44d9b38a2312cf87af3dea58dba6768f3a09facb50b617a",
     "team-hub/routes/goal-slices.mjs": "d3b5c8437f9b6bfb332b9e28d29b841a4c1e9fc549404a6bd61d415eddd0bf2f",
     "team-hub/routes/run-budget-may-switch-model.mjs": "8c81697c2ab4155ab6e488b9c66c152868e0ded80eccb1bad60bedb6cc0621ac",
+    "team-hub/routes/activity.mjs": "b9bf0ba113f5cd316ea76bda4b138c0ddb8611cde4a8114881048ceff96748ba",
     "team-hub/experience-store.mjs": "6b10c0b844a02fa4bd60e2acdaefca2193d385a4c294e0655800d63c2509bdd0"
   },
   "httpRoutes": [

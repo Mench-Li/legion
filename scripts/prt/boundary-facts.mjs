@@ -53,6 +53,7 @@ import { specFor, PROCESS_KEYS } from '../../product/process-manifest.mjs'
 import { PATCH_LAYER_ROWS } from '../../runtime/dsh-composition/patch-layer.mjs'
 // ★ 借用**同一份**「清单形状」正则（见下面 D2 一节）：两份会漂的键表就是本仓的旧账。
 import { MANIFEST_PATTERNS } from './reachability.mjs'
+import { checkRepo } from './design-boundaries.mjs'
 import { REPO_WIDE_BASELINE } from './doc-table-integrity.mjs'
 // ★ 台账状态词表的**唯一所有者**是 `progress-check.mjs`。
 //   本模块第 44 轮自己手抄过一份"三个标记"的表（`✅|⏸|⬜`），
@@ -125,6 +126,9 @@ export function defaultContext() {
     trackedTestCount: () => trackedTestFiles().length,
     unreachableTallies: () => tallyUnreachable(),
     docRatchet: () => REPO_WIDE_BASELINE,
+    // ★★★★★ 第 107 轮：`design-boundaries.mjs` 每条机械边界**今天扫了多少文件**。
+    //   文档（交付物 §四那张表）写的是**下限** ⇒ 这个派生量要跟 `relation: 'atLeast'` 配对用。
+    designBoundaryScans: () => checkRepo().reading.scanned,
   }
 }
 
@@ -1757,8 +1761,7 @@ export const FACTS = Object.freeze([
       + '判坏了会逼人去改一条其实是对的引用。',
     source: '源码注释（`runtime/` `product/` `orchestrator/` `team-hub/` `scripts/` `plugins/`）里'
       + '形如 `路径:行 …原文：「…」` 的引用，目标按"引用文件自身 → 仓库根 → DSH 检出"解析',
-    derive: (ctx) => ctx.originalCitations().broken.slice().sort().join(' '),
-    // ★★★★★ 登记在案的两处（2026-09-21 第 105 轮实测）——**不是**"这条判据可以容忍两处坏引用"，
+    derive: (ctx) => ctx.originalCitations().broken.slice().sort().join(' '),    // ★★★★★ 登记在案的两处（2026-09-21 第 105 轮实测）——**不是**"这条判据可以容忍两处坏引用"，
     //   而是"这两处**今天不归我改**"，所以把它们**写进读数**而不是让判据一直红：
     //
     //     product/launcher/legacy-data-adoption.mjs:130       → launcher.mjs:108
@@ -1781,6 +1784,81 @@ export const FACTS = Object.freeze([
       + '该行是 "* 每个键都必须在进程清单的 `envNames` 里声明过（否则 `build"） '
       + 'product/launcher/legacy-data-adoption.test.mjs:77 → launcher.mjs:108（引文不在这一行；'
       + '该行是 "* 每个键都必须在进程清单的 `envNames` 里声明过（否则 `build"）',
+  }),
+
+  // ── C4. ★★★★★ 第 107 轮：交付物 §四 那张表里每条机械边界**扫了多少文件** ──────
+  //
+  // ★ 为什么需要四条（而不是一条"四个数一起比"）：`relation: 'atLeast'` 的比较是
+  //   **标量对标注**（见本文件 `checkFacts`：`actual < claimed`）——
+  //   四个数打包成一个字符串就没法比大小了。所以**一条边界一条事实**。
+  //
+  // ★ 为什么要 `atLeast` 而不是 `equal`，见交付物 §四里那一段：照抄第 54 轮的决定。
+  Object.freeze({
+    id: 'design-boundary-scan-agent-loop',
+    what: '交付物 §四说 ① 不自研第二套 Agent Loop 那条机械边界"扫了 ≥ N 个文件"',
+    why: '★ 这个数**曾经是"等于"**，第 107 轮实测已经过期：报告写 `296`，真值 **381**。'
+      + '★★ 而它会涨的原因**不是缺陷**：「另一个会话在持续落新文件」（那两轮里 `team-hub/routes/*.mjs` 就有 49 个），'
+      + '而这条判据是**全仓按 glob 数文件**的。'
+      + '★★★★★ 同一个形状本仓**已经栽过也已经定过处置**：交接报告里那句"套件清单完备：N 个"，'
+      + '实测**两轮内红了 7 次、真缺陷 0 次**（374→375→376→378→379→380→381，**红得比提交还快**），'
+      + '第 54 轮把它从"等于当前值"改成**下限**。本轮**沿用**那个处置，不另发明一套。'
+      + '★ 这个数的真实作用是"证明扫描面不是空的"：`design-boundaries.mjs` 本来就有一条空转守卫'
+      + '（`scanned > 0` 否则报 `check-scanned-nothing`）—— 下限守的是**同一个方向**，'
+      + '只是把"不是 0"收紧到"不少于第 107 轮实测的那个规模"。**文件被删到下限以下**才是会真正破坏该说法的方向。',
+    source: '`design-boundaries.mjs` 的 `checkRepo().reading.scanned["no-second-agent-loop"]`',
+    derive: (ctx) => ctx.designBoundaryScans()['no-second-agent-loop'],
+    relation: 'atLeast',
+    claim: Object.freeze({
+      doc: FINAL_REPORT_DOC,
+      re: /不自研第二套 Agent Loop \| 机械 \| ★ \*\*≥ (\d+)\*\* 个文件/,
+      note: '「① 不自研第二套 Agent Loop | 机械 | ★ **≥ 381** 个文件 |」（截至第 107 轮实测，此后只增不减）',
+    }),
+  }),
+  Object.freeze({
+    id: 'design-boundary-scan-control-plane-db',
+    what: '交付物 §四说 ② 不复制任务/审批/审计数据库 那条机械边界"扫了 ≥ N 个文件"',
+    why: '★ 与 ① 同源同形（`relation: atLeast` 的理由见 `design-boundary-scan-agent-loop`）。'
+      + '报告原写 `38`，第 107 轮实测 **88**。',
+    source: '`design-boundaries.mjs` 的 `checkRepo().reading.scanned["single-control-plane-db"]`',
+    derive: (ctx) => ctx.designBoundaryScans()['single-control-plane-db'],
+    relation: 'atLeast',
+    claim: Object.freeze({
+      doc: FINAL_REPORT_DOC,
+      re: /不复制任务\/审批\/审计数据库 \| 机械 \| ★ \*\*≥ (\d+)\*\* 个文件/,
+      note: '「② 不复制任务/审批/审计数据库 | 机械 | ★ **≥ 88** 个文件 |」',
+    }),
+  }),
+  Object.freeze({
+    id: 'design-boundary-scan-single-harness',
+    what: '交付物 §四说 ④ 不在契约稳定前同时支持多个 Harness 那条机械边界"扫了 ≥ N 个文件"',
+    why: '★ 与 ① 同源同形（`relation: atLeast` 的理由见 `design-boundary-scan-agent-loop`）。'
+      + '★★ 这条是四条里**唯一没有过期**的：报告原写 `15`，第 107 轮实测**仍是 15** ——'
+      + '因为它扫的是 `runtime/adapters/` 这一小块，而那一块没人动。'
+      + '⇒ 把"恰好没过期"也一并纳入判据：否则下一次它过期时，**只有恰好读到的人会发现**。',
+    source: '`design-boundaries.mjs` 的 `checkRepo().reading.scanned["single-harness"]`',
+    derive: (ctx) => ctx.designBoundaryScans()['single-harness'],
+    relation: 'atLeast',
+    claim: Object.freeze({
+      doc: FINAL_REPORT_DOC,
+      re: /不在契约稳定前同时支持多个 Harness \| 机械 \| ★ \*\*≥ (\d+)\*\* 个文件/,
+      note: '「④ 不在契约稳定前同时支持多个 Harness | 机械 | ★ **≥ 15** 个文件 |」',
+    }),
+  }),
+  Object.freeze({
+    id: 'design-boundary-scan-no-dsh-installer',
+    what: '交付物 §四说 ⑤ 客户不需要单独安装或升级 DSH 那条机械边界"扫了 ≥ N 个文件"',
+    why: '★ 与 ① 同源同形（`relation: atLeast` 的理由见 `design-boundary-scan-agent-loop`）。'
+      + '报告原写 `162`，第 107 轮实测 **164**。'
+      + '★ 它只涨了 2 —— 而那 2 个就够让"等于"式的判据红一次，'
+      + '**而那一次红会被归到"又是那个爱涨的数"上，于是没人再看它第二次**。',
+    source: '`design-boundaries.mjs` 的 `checkRepo().reading.scanned["no-dsh-installer"]`',
+    derive: (ctx) => ctx.designBoundaryScans()['no-dsh-installer'],
+    relation: 'atLeast',
+    claim: Object.freeze({
+      doc: FINAL_REPORT_DOC,
+      re: /客户不需要单独安装或升级 DSH \| 机械 \| ★ \*\*≥ (\d+)\*\* 个文件/,
+      note: '「⑤ 客户不需要单独安装或升级 DSH | 机械 | ★ **≥ 164** 个文件 |」',
+    }),
   }),
 
   // ── D2. ★★★ 我方判据文件不得**冒充清单** ────────────────────────────────

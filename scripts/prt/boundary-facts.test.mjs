@@ -1659,3 +1659,61 @@ test('㉓ ★★★★★ 源码注释里的「原文」引用：引文必须落
   assert.equal(originalQuoteOnLine(lines, 0, quote), false, '行号 0 必须判 false')
   assert.equal(originalQuoteOnLine(lines, 3, ''), false, '空引文必须判 false（否则空串会被任何行"包含"）')
 })
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ★★★★★ 第 107 轮：交付物 §四 那四个**扫描规模下限**（第 54 轮那个处置的沿用）
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// 那四个数原来写 `296/38/15/162`，第 107 轮实测 `381/88/15/164` ⇒ **四个里三个已过期**。
+// ★ 而它们会涨**不是缺陷**：扫描是**全仓按 glob 数文件**的，而另一个会话在持续落新文件。
+//
+// ★★ 同一个形状本仓**已经栽过也定过处置**：交接报告那句"套件清单完备：N 个"，
+//    实测**两轮内红了 7 次、真缺陷 0 次**（374→…→381，**红得比提交还快**），
+//    第 54 轮把它从"等于"改成**下限**。本轮沿用，不另发明一套。
+test('㉔ ★★★★★ §四那四条机械边界的扫描规模：必须是**下限**，且四条各判各的', () => {
+  const scans = defaultContext().designBoundaryScans()
+  const keys = ['no-second-agent-loop', 'single-control-plane-db', 'single-harness', 'no-dsh-installer']
+  for (const k of keys) {
+    assert.ok(Number.isInteger(scans[k]) && scans[k] > 0,
+      `扫描量 ${k} = ${scans[k]} ⇒ 空转守卫（scanned > 0）或派生坏了`)
+  }
+
+  // ── ① 四条事实必须都在，且**方向必须是下限**（把"等于"重新装上是最容易犯的错）
+  const ids = FACTS.map((f) => f.id)
+  const want = [
+    'design-boundary-scan-agent-loop',
+    'design-boundary-scan-control-plane-db',
+    'design-boundary-scan-single-harness',
+    'design-boundary-scan-no-dsh-installer',
+  ]
+  for (const id of want) {
+    const f = FACTS.find((x) => x.id === id)
+    assert.ok(f, `缺了这条事实：${id}`)
+    assert.equal(f.relation, 'atLeast',
+      `${id} 的 relation 是 \`${f.relation ?? 'equal'}\` ⇒ 它又变回"等于当前值"了，`
+      + '而那个形状**两轮内红过 7 次、真缺陷 0 次**（第 54 轮的实测）⇒ 它会被人习惯性忽略')
+    // ★ 反向对照的**同一锚点**：同一条事实的 expect 必须是空（扫描量不在 expect 里，
+    //   走的是 claim/derive 那条路）——两条路各判各的，别把扫描量也塞进 expect。
+    assert.equal(f.expect, undefined, `${id} 同时用了 expect ⇒ 两条路会互相掩盖`)
+  }
+  assert.equal(new Set(ids).size, ids.length, '事实 id 有重复')
+
+  // ── ② 下限的**语义**验证：改大必红、改小不该红（这才是"它是下限"的定义）
+  const scan = scans['single-harness']
+  const docOf = (n) => `不在契约稳定前同时支持多个 Harness | 机械 | ★ **≥ ${n}** 个文件`
+  const re = FACTS.find((f) => f.id === 'design-boundary-scan-single-harness').claim.re
+  const claimed = (n) => Number(re.exec(docOf(n))[1])
+  assert.equal(claimed(scan), scan, `文档写 ≥ ${scan} 时必须解得开（锚点不能只认某一个数）`)
+  // ★ 逐条核对"改大 ⇒ 违反下限"，不依赖 checkFacts 的实现细节
+  assert.ok(scan < claimed(scan + 1),
+    `把下限改成 ${scan + 1} 之后，实际值 ${scan} 必须**小于**它 ⇒ 这条判据会红`)
+  assert.ok(scan >= claimed(scan - 1),
+    `把下限改成 ${scan - 1} 之后，实际值 ${scan} 必须**不小于**它 ⇒ 这条判据**不该**红（下限语义）`)
+
+  // ── ③ 真仓：四条今天都必须是绿的（并与 §四表里的数同源）
+  const r = checkFacts()
+  const redIds = (r.rows ?? r.facts ?? []).filter((x) => x.ok === false).map((x) => x.id)
+  for (const id of want) {
+    assert.ok(!redIds.includes(id), `${id} 在今天这棵树上红了 ⇒ 扫描规模掉到了下限以下（或文档被改大）`)
+  }
+})

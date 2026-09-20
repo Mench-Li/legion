@@ -239,10 +239,16 @@ test('②a ★★ 所有者那条判据**在 CI 里真的会跑**（"谁判"不�
     //
     //   ⇒ 改成钉**性质**："这个文件从所有者那里 import 了那张词表"。
     //     写法（本地别名 / 直接用 / 解构后改名）随便，取到就行。
+    //
+    //   ★★★ 第 48 轮再放宽一格：所有者现在还导出**数据行识别器**
+    //     `featureTableRow` —— 一个消费者只 import 它也**同样**是"从所有者取"
+    //     （而且更彻底：连"哪一行是数据行"都不自己判了）。
+    //     ⇒ 把它也算作证据之一。
     assert.ok(
-      /import\s*\{[^}]*FEATURE_STATUS_(?:RE|MARKS|MUST_SAY_MISSING)[^}]*\}\s*from\s*'\.\/progress-check\.mjs'/.test(code),
-      `「${f}」没有从所有者（\`./progress-check.mjs\`）import 那张词表 ⇒ 它要么抄了一份自己的，`
-      + '要么从别处转手 —— 两种都会漂')
+      /import\s*\{[^}]*FEATURE_STATUS_(?:RE|MARKS|MUST_SAY_MISSING)[^}]*\}\s*from\s*'\.\/progress-check\.mjs'/.test(code)
+      || /import\s*\{[^}]*featureTableRow[^}]*\}\s*from\s*'\.\/progress-check\.mjs'/.test(code),
+      `「${f}」没有从所有者（\`./progress-check.mjs\`）import 那张词表或那个行识别器 `
+      + '⇒ 它要么抄了一份自己的，要么从别处转手 —— 两种都会漂')
   }
 })
 

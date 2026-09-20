@@ -46,11 +46,14 @@ import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+// ★★★ 第 48 轮：功能表**数据行的识别**归 `progress-check.mjs` 所有。
+import { featureTableRow } from './progress-check.mjs'
 
 export const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 export const STATUS_DOC = 'docs/MULTI-AGENT-FEATURE-STATUS.md'
 
-/** 功能行：第一格以 `F-NN` 开头。 */
+/** 功能行：第一格以 `F-NN` 开头。
+ *  ★★★ 第 48 轮：**本模块不再自己认行** —— 交给所有者（见下面的 `parseLandingCells`）。 */
 export const FEATURE_ROW_RE = /^\|\s*F-\d+/
 
 /** 「代码落点」是第 4 格（下标 3）。列数不是 5/6 的行（§2 投影表等）不归这条判据管。 */
@@ -73,16 +76,30 @@ export function expandBraces(p) {
   return out
 }
 
-/** 抽出功能表每一行的「代码落点」格。返回 `[{line, id, cell}]`。 */
+/**
+ * 抽出功能表每一行的「代码落点」格。返回 `[{line, id, cell}]`。
+ *
+ * ★★★ 第 48 轮：**行识别交给所有者**（`progress-check.featureTableRow`）。
+ *
+ *   本函数此前自己判行、自己分格、**自己定格子数**（`≠5 且 ≠6 ⇒ continue`）。
+ *   实测（`scratch/_probe-landing-owner.mjs`）：真文档上四个解析器**一致**
+ *   （都是 29 行），但**4 格与 7 格的行被它静默跳过**，而所有者收下。
+ *
+ *   ★★ 后果比第 47 轮那次**更重**：本模块的职责是
+ *     "功能表声明的代码落点必须指向**存在的文件**"。
+ *     一行被跳过 ⇒ **它声明的路径一个都不会被核**，而门禁报"全部通过"。
+ *
+ *   > 一个"这一行我没看懂所以跳过"的默认动作，
+ *   > 与"这一行真的没问题"，在输出里都是"没有报错"。
+ *   > 区别只在于：前者会让你**以为**你核过了。
+ */
 export function parseLandingCells(statusText) {
   const out = []
   const lines = String(statusText).split(/\r?\n/)
   for (let i = 0; i < lines.length; i += 1) {
-    const l = lines[i]
-    if (!FEATURE_ROW_RE.test(l)) continue
-    const cells = l.replace(/^\|/, '').replace(/\|$/, '').split(/(?<!\\)\|/).map((c) => c.trim())
-    if (cells.length !== 5 && cells.length !== 6) continue
-    out.push({ line: i + 1, id: cells[0], cell: cells[LANDING_COLUMN] ?? '' })
+    const row = featureTableRow(lines[i])
+    if (row === null) continue
+    out.push({ line: i + 1, id: row.label, cell: row.cells[LANDING_COLUMN] ?? '' })
   }
   return out
 }

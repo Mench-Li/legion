@@ -24,6 +24,9 @@ import {
   parseProgress,
   parseSummary,
   tally,
+  // ★★★ 第 48 轮：功能表**数据行**的识别器（本模块是它的唯一所有者）。
+  FEATURE_ROW_MIN_CELLS,
+  featureTableRow,
 } from './progress-check.mjs'
 
 /** 造一份最小但结构完整的进度表。 */
@@ -519,6 +522,82 @@ test('⑯b ★★★ 真实对照表里**没有**"恰好 3 格且第 3 格是状
       `这些行恰好 3 格、第 3 格又是状态 ⇒ featureRows 会跳过它们：\n  ${bad.join('\n  ')}\n`
       + '⇒ 要么把它们补成完整的功能行，要么把 featureRows 的阈值改成按表头锚点。')
   })()
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// ★★★ 第 48 轮：功能对照表的**数据行识别器** —— 本模块是它的唯一所有者
+//
+// 第 45～48 轮，这张表被**四个**模块各自手写解析过：
+//
+//   feature-evidence.featureRows   ·  spec-status-calibration.parseStatusTable
+//   spec-status-calibration.parseCalibration  ·  feature-landing-paths.parseLandingCells
+//
+// 而其中三个的答案比第一个**弱**（`≠5 且 ≠6 ⇒ continue` / `其余 ⇒ 🟡`）。
+// 弱的那几个不会报错，它们只是**安静地少读几行** ——
+// 对 `feature-landing-paths` 来说，"少读一行"意味着
+// **那一行声明的代码落点一个都不会被核**，而门禁报"全部通过"。
+//
+//   > 一个"这一行我没看懂所以跳过"的默认动作，
+//   > 与"这一行真的没问题"，在输出里都是"没有报错"。
+//   > 区别只在于：前者会让你**以为**你核过了。
+// ══════════════════════════════════════════════════════════════════════════
+
+/** 造一行功能表数据行，指定格数与状态。 */
+const fRow = (n, status = '✅') => {
+  const cells = ['F-99', '名称', status, '`scripts/prt/progress-check.mjs`', '证据', '—', '附注'].slice(0, n)
+  return `| ${cells.join(' | ')} |`
+}
+
+test('⑦ 所有者：`featureTableRow` 的三种返回值（不是行 / 是行 / 是坏行）', () => {
+  // ① 不是本表的行 ⇒ `null`（**不抛** —— 另一种表确实存在，不是缺陷）
+  for (const notRow of ['', '不是表格', '| 缺口 | 读数 | 判据 |', '| 别的表 | a | b | c | d |']) {
+    assert.equal(featureTableRow(notRow), null, `「${notRow}」被判成了功能表数据行`)
+  }
+  // ② 是行 ⇒ 给出 id / label / status / cells
+  const r = featureTableRow(fRow(6))
+  assert.equal(r.id, 'F-99')
+  assert.equal(r.status, '✅')
+  assert.equal(r.cells.length, 6)
+  assert.equal(r.name, '名称')
+  // `F-05 前半` ⇒ id 只取前缀，label 是全格
+  const sub = featureTableRow('| F-05 前半 | a | ✅ | `x.mjs` | 证据 | — |')
+  assert.equal(sub.id, 'F-05', 'id 没取前缀 ⇒ 子项行会被当成另一个功能号')
+  assert.equal(sub.label, 'F-05 前半')
+  // ③ 是行、但状态格不认识 ⇒ **抛**（不许自己猜一个）
+  assert.throws(() => featureTableRow(fRow(6, '🔵')), /状态格不是已知形状/,
+    '认不出的状态格被静默收下了 ⇒ "写错了"与"没有这一行"读数同形')
+  // 箭头写法是合法的
+  assert.equal(featureTableRow(fRow(6, '🟡→✅')).status, '🟡→✅')
+})
+
+test('⑧ ★★★ 格数阈值 `>= 4`：4/7 格要收，3 格要放（"另一张表"）', () => {
+  // ★ 这条钉的是第 48 轮那个真缺陷：`≠5 且 ≠6 ⇒ continue`
+  //   把 **4 格与 7 格** 静默丢掉了 —— 而它们确实是功能表的数据行。
+  for (const n of [FEATURE_ROW_MIN_CELLS, 5, 6, 7]) {
+    assert.notEqual(featureTableRow(fRow(n)), null,
+      `${n} 格的功能行被跳过了 ⇒ 它声明的代码落点一个都不会被核`)
+  }
+  // ★ 反面控制：**3 格**是**另一张表**，必须仍然放过去（否则阈值放宽过头 =
+  //   把"| 缺口 | 读数 | 判据 |"当功能行，那会**假红**）。
+  assert.equal(featureTableRow('| F-21 缺口 | 读数 | 判据 |'), null,
+    '把另一张 3 格表当成了功能表 ⇒ 阈值放宽过头')
+  assert.equal(FEATURE_ROW_MIN_CELLS, 4, '阈值改了？它是**量出来的**，改之前先重量一次')
+})
+
+test('⑨ ★★★ `marks` 可注入：加第 5 个标记 ⇒ 所有者必须立刻认它（派生，不是抄一份）', () => {
+  // ★ 为什么必须**注入**才验得出来：在**今天**这张四标记词表上，
+  //   "派生"与"写死一份"的返回值**完全一样**，任何只比结果的断言都分不开。
+  //   ⇒ 这与第 42/43/45/46/47 轮用到的是**同一条**出路。
+  const withFifth = [...FEATURE_STATUS_MARKS, '🔵']
+  const line = fRow(6, '🔵')
+  // ① 今天这张词表不认识它
+  assert.throws(() => featureTableRow(line), /状态格不是已知形状/)
+  // ② 注入一张多一个标记的表 ⇒ 它必须**当场**认
+  assert.equal(featureTableRow(line, { marks: withFifth }).status, '🔵',
+    '★ 注入了第 5 个标记却仍不认 ⇒ 它是**自己抄了一份**词表，不是取所有者的')
+  // ③ `minCells` 也可注入（阈值同样不是写死的魔数）
+  assert.equal(featureTableRow(fRow(3), { minCells: 3 }).id, 'F-99',
+    '`minCells` 注入了却没用 ⇒ 阈值是写死的')
 })
 
 

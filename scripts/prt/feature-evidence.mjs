@@ -48,6 +48,8 @@ import {
   FEATURE_STATUS_MARKS,
   FEATURE_STATUS_MUST_SAY_MISSING,
   FEATURE_STATUS_RE,
+  // ★★★ 第 48 轮：**数据行**的识别权也在所有者那里（本模块不再自己判行/分格）。
+  featureTableRow,
 } from './progress-check.mjs'
 
 export const FEATURE_DOC = join(REPO, 'docs', 'MULTI-AGENT-FEATURE-STATUS.md')
@@ -82,56 +84,30 @@ export const MUST_SAY_MISSING = FEATURE_STATUS_MUST_SAY_MISSING
 /** 一个"像名字"的后引号 token（与 `ledger-evidence.mjs` 同形）。 */
 export const NAME_RE = /^[A-Za-z][\w./-]*$/
 
-/** 抽出所有**状态行**（只认状态列落在封闭词表里的那些）。 */
+/**
+ * 抽出所有**状态行**（只认状态列落在封闭词表里的那些）。
+ *
+ * ★★★ 第 48 轮：**行识别交给所有者**（`progress-check.featureTableRow`）。
+ *   本函数此前自己判行、自己分格、自己定格子数、自己抛 —— 而
+ *   `spec-status-calibration` 与 `feature-landing-paths` **各自又抄了一份**。
+ *   第 45 轮在这里补的"认不出就抛"是对的，但它只补了**这一个**消费者。
+ *
+ *   ⇒ 认出来之后，本函数只负责**它自己这一层的形状**
+ *     （`line` 行号、`citers`、`missing`）——行是什么，由所有者说了算。
+ */
 export function featureRows(path = FEATURE_DOC) {
   const rows = []
+  // ★ 换行兼容：CRLF 文件按 `\n` 切，行尾会留一个 `\r`——
+  //   `featureTableRow` 内有 `trim()`，所以这里不必先处理。
   const lines = readFileSync(path, 'utf8').split('\n')
   for (const [i, line] of lines.entries()) {
-    const t = line.trim()
-    if (!t.startsWith('|')) continue
-    const cells = t.split('|').slice(1, -1).map((c) => c.trim())
-    // ★ 哨兵行与别的表：至少 3 格才可能是"编号 | 名字 | 状态 …"。
-    //   ★ 一条"恰好 3 格"的行**不是**本模块管的（量过：16 行全是另一张表），
-    //     所以这里用 `< 3` 而不是 `< 4`——`< 4` 的判断在下面单独做，
-    //     并带上"为什么不是它"的理由。分成两步是为了让**两个问题**各自有位子：
-    //     这一步问"这是不是一张表的数据行"，下一步问"这是不是**状态**列"。
-    if (cells.length < 3) continue
-    if (!/^F-\d+/.test(cells[0])) continue
-    // ★ 列序（第一版写成 cells[1]，于是**一行都没读到、却报绿**）：
-    //   [0] = `F-05 前半`（编号+子项名）  [1] = 名称  [2] = 状态  [3..] = 依据/证据 …
-    // ★★★ 第 45 轮：**认不出来就抛**（原来是 `continue`）。
-    //
-    //   "这个形状我不认识"与"这一行不是功能行"是**两件事**，
-    //   而 `continue` 把它们当成了同一件 ⇒ 一个被写错的状态格
-    //   与"那一行真的不存在"读数同形。
-    //
-    //   ★ 阈值为什么是 **4**（这是**量出来的**，不是猜的，
-    //     探针：`scratch/_probe-f-colcount.mjs` + `scratch/_probe-f-row-safety.mjs`）：
-    //     · 本模块收下的 29 行**全部 ≥ 4 格**（14 行 5 格 + 15 行 6 格）；
-    //     · 文档里第 3 格**不是**状态格的 `| F-` 行有 16 行，**全部恰好 3 格**
-    //       —— 它们是**另一张表**（`| 缺口 | 改动前的实际读数 | 关掉它的判据 |`，
-    //       以及 `| F-21 缺口 | … | 判据 |`），不是"功能表里状态写错了"；
-    //     · **3 格且第 3 格是状态的行：0 行**。
-    //   ⇒ `>= 4` 恰好把"另一张表"与"功能表里状态写错"分开。
-    //     ⚠️ 残留限制：一条**恰好 3 格**的功能表状态行仍会被跳过。
-    //        它由 `feature-evidence.test.mjs` 里一条**对着真文档**的用例守着
-    //        （"3 格且第 3 格是状态的行必须是 0"）——真出现那种行时会红，
-    //        而不是静默地少一行。
-    if (cells.length < 4) continue
-    if (!STATUS_RE.test(cells[2] ?? '')) {
-      throw new Error(`功能对照表的状态格不是已知形状：第 ${i + 1} 行`
-        + `第 1 格 "${cells[0].slice(0, 40)}"、第 3 格是 "${String(cells[2]).slice(0, 60)}"，`
-        + `而认得的是 ${FEATURE_STATUS_MARKS.join(' ')}，或其中任意两个用 \`→\` 相连。`
-        + `★ 这里**抛**而不是跳过：跳过会让"状态写错了"与"那一行不存在"读数同形。`)
-    }
+    const row = featureTableRow(line)
+    if (row === null) continue
     rows.push({
-      id: cells[0].split(/\s+/)[0], // `F-05 前半` → `F-05`
-      label: cells[0],
-      name: cells[1],
-      status: cells[2],
+      ...row,
       line: i + 1,
-      citers: cells.slice(3),
-      missing: cells[cells.length - 1] ?? '',
+      citers: row.citations,
+      missing: row.cells[row.cells.length - 1] ?? '',
     })
   }
   return rows

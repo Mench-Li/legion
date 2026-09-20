@@ -50,10 +50,15 @@
 import { readFileSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-// ★★★ 第 47 轮：功能对照表的**状态词表所有者**是 `progress-check.mjs`。
+// ★★★ 第 47/48 轮：功能对照表的**状态词表**与**数据行识别**都归 `progress-check.mjs`。
 //   本模块此前自己读状态格、认不出就归进 `aggregate` 的"其余 ⇒ 🟡"那一支
-//   ⇒ "读不出来"与"部分完成"在汇总里同形。现在**取**它、并把认不出改成抛。
-import { FEATURE_STATUS_MARKS, FEATURE_STATUS_RE } from './progress-check.mjs'
+//   ⇒ "读不出来"与"部分完成"在汇总里同形。
+//   第 48 轮进一步：**连"哪一行是数据行"也不再自己判**（原来本文件里有**两处**各写了一份）。
+//
+//   ★ 本模块现在**只**从所有者取这一个识别器：词表与判形状都在它内部。
+//     （第 47 轮这里还 import 过 `FEATURE_STATUS_MARKS`/`FEATURE_STATUS_RE`，
+//      第 48 轮交出识别权之后它们**没用了** —— 留着就是"声明还在、用它的人没了"。）
+import { featureTableRow } from './progress-check.mjs'
 
 export const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 export const SPEC_DOC = 'docs/MULTI-AGENT-FEATURE-OPTIMIZATION.md'
@@ -136,23 +141,15 @@ export function parseSpecHeadings(specText) {
 export function parseStatusTable(statusText) {
   const map = new Map()
   for (const line of String(statusText).split(/\r?\n/)) {
-    if (!/^\|\s*F-\d+/.test(line)) continue
-    const cells = line.replace(/^\|/, '').replace(/\|$/, '').split(/(?<!\\)\|/).map((c) => c.trim())
-    // ★ 阈值 `< 4` 与 `parseCalibration()` 及所有者一致（见上面那段）。
-    if (cells.length < 4) continue
-    // ★★ 状态格必须是所有者许可的形状之一 —— **认不出就抛**，不再默认成 🟡。
-    if (!FEATURE_STATUS_RE.test(cells[2] ?? '')) {
-      throw new Error(`功能对照表的状态格不是已知形状：`
-        + `第 1 格 "${cells[0].slice(0, 30)}"，第 3 格是 "${cells[2]}"，`
-        + `而许可的是 ${FEATURE_STATUS_MARKS.join(' ')}，或其中任意两个用 \`→\` 相连。`
-        + `★ 这里**抛**而不是归进"其余 ⇒ 🟡"：那样会把"读不出来"报成"部分完成"，`
-        + `两者在汇总里同形（第 47 轮实测形状）。`)
-    }
-    const key = /^(F-\d+)/.exec(cells[0])[1]
-    if (!map.has(key)) map.set(key, { rows: [], statuses: [] })
-    const e = map.get(key)
-    e.rows.push(cells[0])
-    e.statuses.push(endState(cells[2]))
+    // ★★★ 第 48 轮：**行识别交给所有者**（`progress-check.featureTableRow`）。
+    //   本函数原来自己判行、自己分格、自己定格子数、自己判状态格 ——
+    //   而第 47 轮我只把它的**阈值**对齐了，**识别权**还在它手里。
+    const row = featureTableRow(line)
+    if (row === null) continue
+    if (!map.has(row.id)) map.set(row.id, { rows: [], statuses: [] })
+    const e = map.get(row.id)
+    e.rows.push(row.label)
+    e.statuses.push(endState(row.status))
   }
   for (const e of map.values()) {
     e.aggregate = e.statuses.every((s) => s === '✅') ? '✅'
@@ -175,10 +172,12 @@ export function parseCalibration(specText) {
       continue
     }
     if (!inSection) continue
-    if (!/^\|\s*F-\d+/.test(line)) continue
-    const cells = line.replace(/^\|/, '').replace(/\|$/, '').split(/(?<!\\)\|/).map((c) => c.trim())
-    if (cells.length < 4) continue
-    out.push({ id: /^(F-\d+)/.exec(cells[0])[1], note: cells[1], status: endState(cells[2]), basis: cells[3] })
+    // ★★★ 第 48 轮：同一个文件里**第二次**手写的行识别 —— 一并交给所有者。
+    //   （上一版这里用 `< 4`、`parseStatusTable` 用 `≠5 且 ≠6`；
+    //    第 47 轮我只对齐了阈值，没动"谁来认行"。）
+    const row = featureTableRow(line)
+    if (row === null) continue
+    out.push({ id: row.id, note: row.name, status: endState(row.status), basis: row.cells[3] ?? '' })
   }
   return out
 }

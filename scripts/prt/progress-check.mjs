@@ -197,6 +197,76 @@ export const FEATURE_STATUS_RE = new RegExp(`^(?:${_FM}|(?:${_FM})→(?:${_FM}))
 export const FEATURE_STATUS_MUST_SAY_MISSING = Object.freeze(['🟡', '🟡→✅', '✅→🟡'])
 
 /**
+ * 功能对照表数据行的**最少格数**。★ 这是**量出来的**，不是猜的。
+ *
+ * · 真的功能状态行 29 条**全部 ≥ 4 格**（14 行 5 格 + 15 行 6 格）；
+ * · 文档里第 1 格以 `F-` 开头、但**第 3 格不是状态格**的行有 16 条，
+ *   **全部恰好 3 格** —— 它们是**另一张表**
+ *   （`| 缺口 | 改动前的实际读数 | 关掉它的判据 |`、`| F-21 缺口 | … | 判据 |`）；
+ * · **3 格且第 3 格是状态的行：0 条**。
+ *
+ * ⇒ `>= 4` 恰好把"另一张表"与"功能表里写坏了"分开。
+ * ★ 用 `< minCells ⇒ 不是功能行`（返回 `null`）而**不是**抛：
+ *   3 格那种**确实存在**，它是另一张表，不是缺陷。
+ *   ⚠️ 残留限制：一条**恰好 3 格**的功能状态行仍会被当成"另一张表"。
+ *      它由 `feature-evidence.test.mjs` 里一条**对着真文档**的用例守着
+ *      （"3 格且第 3 格是状态的行必须是 0"）——真出现时会红。
+ */
+export const FEATURE_ROW_MIN_CELLS = 4
+
+/**
+ * ★★★ 功能对照表的**数据行识别器** —— 本模块是它的**唯一所有者**。
+ *
+ * 第 45～48 轮，这张表被**四个**模块各自手写解析过：
+ *
+ * | 模块 | 它自己那份 |
+ * | --- | --- |
+ * | `feature-evidence.featureRows()` | 判行 + `< 3` + `< 4` + 认不出就抛（第 45 轮补的）|
+ * | `spec-status-calibration.parseStatusTable()` | 判行 + `≠5 且 ≠6 ⇒ continue` + `其余 ⇒ 🟡`（第 47 轮修）|
+ * | `spec-status-calibration.parseCalibration()` | 判行 + `< 4` |
+ * | `feature-landing-paths.parseLandingCells()` | 判行 + `≠5 且 ≠6 ⇒ continue`（第 48 轮修）|
+ *
+ * > 同一张表、同一份列序、同一个"几格才算数据行"的问题，
+ * > 被回答了**四遍**；而其中三遍的答案比第一遍**弱**
+ * > —— 弱的那几遍不会报错，它们只是**安静地少读几行**。
+ *
+ * ⇒ 与台账那边（`ledgerTaskRow`）**同一个结构**：所有者导出识别器，消费者转手。
+ *
+ * 返回 `null` = **不是**本表的数据行（另一种表、表头、分隔线…）；
+ * 抛 = **是**本表的数据行，但状态格不是许可形状（**不许**自己猜一个）。
+ *
+ * @param {string} line 一行原文
+ * @param {{marks?: readonly string[], minCells?: number}} [opts] `marks` 可注入
+ *   —— 这是"派生 vs 抄一份"唯一能验出来的办法（第 42/43/45/46/47 轮五次同一条）。
+ */
+export function featureTableRow(line, { marks = FEATURE_STATUS_MARKS, minCells = FEATURE_ROW_MIN_CELLS } = {}) {
+  const t = String(line).trim()
+  if (!t.startsWith('|')) return null
+  // ★ 分格用**转义感知**的版本（`\|` 不算分隔），与消费者原来的做法一致。
+  const cells = t.replace(/^\|/, '').replace(/\|$/, '').split(/(?<!\\)\|/).map((c) => c.trim())
+  if (cells.length < 3) return null          // 哨兵行 / 不是数据行
+  if (!/^F-\d+/.test(cells[0])) return null  // 第 1 格不是 F-NN
+  if (cells.length < minCells) return null   // 另一张表（见 FEATURE_ROW_MIN_CELLS）
+  const status = cells[2] ?? ''
+  const fm = marks.join('|')
+  const re = new RegExp(`^(?:${fm}|(?:${fm})→(?:${fm}))$`)
+  if (!re.test(status)) {
+    throw new Error(`功能对照表的状态格不是已知形状：`
+      + `第 1 格 "${cells[0].slice(0, 40)}"、第 3 格是 "${status.slice(0, 60)}"，`
+      + `而认得的是 ${marks.join(' ')}，或其中任意两个用 \`→\` 相连。`
+      + `★ 这里**抛**而不是跳过：跳过会让"状态写错了"与"那一行不存在"读数同形。`)
+  }
+  return {
+    id: cells[0].split(/\s+/)[0],   // `F-05 前半` → `F-05`
+    label: cells[0],
+    name: cells[1],
+    status,
+    cells,
+    citations: cells.slice(3),
+  }
+}
+
+/**
  * 数一行的**未转义**竖线条数（正确的任务行恰好 4 条，即 5 个格子）。
  *
  * ★ 为什么不能直接用 `line.split('|').length`：`String.split` **不认识转义**，

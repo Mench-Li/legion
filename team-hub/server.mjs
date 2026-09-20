@@ -230,6 +230,7 @@ import { createRulesRoutes } from './routes/rules.mjs'
 import { createPermissionsRoutes } from './routes/permissions.mjs'
 import { createChatRoutes } from './routes/chat.mjs'
 import { createCalendarRoutes } from './routes/calendar.mjs'
+import { createCompactionRoutes } from './routes/compaction.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -4951,6 +4952,11 @@ const router = createRouter([
     listCalendarEvents, findCalendarConflicts, listCalendarEventsByLink,
     createCalendarEvent, updateCalendarEvent, deleteCalendarEvent,
   }),
+  createCompactionRoutes({
+    json,
+    handleRun, requireString, authorized,
+    compactionStore,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -6832,77 +6838,9 @@ async function handle(req, res, stripPrefix) {
       }))
       return
     }
-    // ── F-17 长会话压缩 ────────────────────────────────────────────────
-    //
-    // 四条路由，**没有任何一条会删原文**——这是本模块的核心纪律：
-    //   · `POST /api/compaction/messages`    追加原文（只追加，重复 seq 拒绝）
-    //   · `POST /api/compaction/summarize`   写入一版摘要（baseVersion 是 CAS）
-    //   · `GET  /api/compaction/context`     拼出"现在该给模型看什么"
-    //   · `GET  /api/compaction/state`       压缩程度读数
-    //
-    // `POST /api/compaction/summarize` **接受已经算好的摘要文本**，本层不调用
-    // 任何模型：决定"什么时候压、压多少"是产品策略（在这里），
-    // 决定"这段文字怎么概括"是执行面能力。混在一起会让一次"摘要没写好"
-    // 表现为"压缩功能坏了"，而修法完全不同。
-    if (path === '/api/compaction/messages' && req.method === 'POST') {
-      await handleRun(req, res, (body) => ({
-        ok: true,
-        message: compactionStore.appendMessage({
-          sessionId: requireString(body, 'sessionId'),
-          seq: body.seq,
-          role: requireString(body, 'role'),
-          content: typeof body.content === 'string' ? body.content : '',
-        }),
-      }))
-      return
-    }
-    if (path === '/api/compaction/summarize' && req.method === 'POST') {
-      await handleRun(req, res, (body) => compactionStore.proposeSummary({
-        sessionId: requireString(body, 'sessionId'),
-        coversFromSeq: body.coversFromSeq,
-        coversToSeq: body.coversToSeq,
-        summary: requireString(body, 'summary'),
-        author: body.author ?? 'model',
-        // `baseVersion` **原样透传，包括 `undefined`**：把它折叠成 `null`
-        // 会让"我以为还没有摘要"与"我没传这个参数"变成同一件事，
-        // 而后者是一个应该被报出来的调用错误（否则并发压缩会静默通过）。
-        baseVersion: body.baseVersion === undefined ? null : body.baseVersion,
-        createdBy: requireString(body, 'by'),
-        reason: body.reason ?? null,
-      }))
-      return
-    }
-    if (path === '/api/compaction/context' && req.method === 'GET') {
-      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
-      const sessionId = url.searchParams.get('sessionId')
-      if (sessionId === null || sessionId.length === 0) { json(res, 400, { ok: false, error: '缺少 sessionId', code: 'MISSING_PARAM' }); return }
-      const maxRaw = Number(url.searchParams.get('maxTokens'))
-      try {
-        const ctx = compactionStore.effectiveContext(sessionId, {
-          maxTokens: Number.isSafeInteger(maxRaw) && maxRaw > 0 ? maxRaw : null,
-        })
-        json(res, 200, { ok: true, sessionId, ...ctx })
-      } catch (e) {
-        json(res, Number(e?.statusCode) || 400, { ok: false, error: e instanceof Error ? e.message : String(e), code: e?.code ?? 'COMPACTION_FAILED' })
-      }
-      return
-    }
-    if (path === '/api/compaction/state' && req.method === 'GET') {
-      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
-      const sessionId = url.searchParams.get('sessionId')
-      if (sessionId === null || sessionId.length === 0) { json(res, 400, { ok: false, error: '缺少 sessionId', code: 'MISSING_PARAM' }); return }
-      json(res, 200, { ok: true, ...compactionStore.compactionState(sessionId) })
-      return
-    }
-    if (path === '/api/compaction/summaries' && req.method === 'GET') {
-      // 版本史：**每个版本都可读**，因为"曾经有过一个更好的摘要"这件事
-      // 只有在旧版还在的时候才能被证明。
-      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
-      const sessionId = url.searchParams.get('sessionId')
-      if (sessionId === null || sessionId.length === 0) { json(res, 400, { ok: false, error: '缺少 sessionId', code: 'MISSING_PARAM' }); return }
-      json(res, 200, { ok: true, sessionId, summaries: compactionStore.summariesOf(sessionId) })
-      return
-    }
+    // ── 上下文压缩（compaction）：只追加原文 + CAS 摘要 + 有效上下文读数 —— 已提取到 `./routes/compaction.mjs`（PRT-316 切片 5）──
+    // 整段搬走：`server.mjs` 里现在**不再有** `/api/compaction/*` 路由，该命名空间只住一个地方。
+    if (await router.dispatch(req, res, { path, url })) return
     // ── F-20 能力包安装事实 ────────────────────────────────────────────
     //
     // 四条路由，围绕着**一本只追加的账**：

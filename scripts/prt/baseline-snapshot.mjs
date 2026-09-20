@@ -227,6 +227,7 @@ SOURCES.routesRules = join(ROOT, 'team-hub', 'routes', 'rules.mjs')
 SOURCES.routesPermissions = join(ROOT, 'team-hub', 'routes', 'permissions.mjs')
 SOURCES.routesChat = join(ROOT, 'team-hub', 'routes', 'chat.mjs')
 SOURCES.routesCalendar = join(ROOT, 'team-hub', 'routes', 'calendar.mjs')
+SOURCES.routesCompaction = join(ROOT, 'team-hub', 'routes', 'compaction.mjs')
 
 /** 已提取出去的路由族模块（值 = 该文件里**声明式**路由的归属名）。 */
 export const ROUTE_FAMILY_SOURCES = Object.freeze([
@@ -234,6 +235,7 @@ export const ROUTE_FAMILY_SOURCES = Object.freeze([
   { module: 'routesPermissions', family: 'permissions', factory: 'createPermissionsRoutes' },
   { module: 'routesChat', family: 'chat', factory: 'createChatRoutes' },
   { module: 'routesCalendar', family: 'calendar', factory: 'createCalendarRoutes' },
+  { module: 'routesCompaction', family: 'compaction', factory: 'createCompactionRoutes' },
 ])
 SOURCES.experienceStore = join(ROOT, 'team-hub', 'experience-store.mjs')
 
@@ -263,7 +265,10 @@ export const SCHEMA_SOURCE_FOR = Object.freeze({ ...SOURCES })
 export const REPO_ROOT = ROOT
 
 const rel = (p) => relative(ROOT, p).split(sep).join('/')
-const sha256 = (text) => createHash('sha256').update(text, 'utf8').digest('hex')
+// ★ 先归一化 EOL 再哈希：`core.autocrlf=true` 下仓库存 LF、工作区落 CRLF，
+//   不归一化的话，一次 `git checkout` 就会让"源文件已变更"凭空出现
+//   （而 `git status` 干净、`git diff` 为空——两边量的不是同一个东西）。
+const sha256 = (text) => createHash('sha256').update(text.replace(/\r\n/g, '\n'), 'utf8').digest('hex')
 
 /**
  * 提取失败必须抛错，而不是安静地记录一个空基线。
@@ -392,9 +397,12 @@ export function extractRoutes(source, options = {}) {
  */
 export function extractDeclaredRoutes(source) {
   const routes = new Set()
+  // ★ 允许 method 与 path **之间夹着别的键**（如切片 5 起的 `match:` / `suffix:`），
+  //   但 `[^}]*?` 保证不跨过对象边界（对象里没有 `}`）。
+  //   写成"要求相邻"会让新形态的路由对抽取器不可见 ⇒ 搬家被报成删除。
   const pairs = [
-    /method:\s*'([A-Z]+)'\s*,\s*path:\s*'([^']+)'/g,
-    /path:\s*'([^']+)'\s*,\s*method:\s*'([A-Z]+)'/g,
+    /method:\s*'([A-Z]+)',[^}]*?path:\s*'([^']+)'/g,
+    /path:\s*'([^']+)',[^}]*?method:\s*'([A-Z]+)'/g,
   ]
   const isMethodFirst = [true, false]
   pairs.forEach((re, i) => {

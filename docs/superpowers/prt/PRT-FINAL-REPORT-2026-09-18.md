@@ -6,16 +6,20 @@
 - 对照表：[`MULTI-AGENT-FEATURE-STATUS.md`](../../MULTI-AGENT-FEATURE-STATUS.md) —— F-01…F-25，**裁决项 1～29**
 - ★ **决策摘要**：[`DECISION-BRIEF.md`](../../DECISION-BRIEF.md) —— 把那 29 条压成「**你要说的那一句话**」，**按 §9 链排序**；★ **§0A 当初就是那条链唯一的硬断（第 20 条）** —— ★★★ **第 44 轮已落地**（2f5a4b3，选甲），那条链**不再有硬断**，见 §3.0z.2
 - 目标文档：[`MULTI-AGENT-FEATURE-OPTIMIZATION.md`](../../MULTI-AGENT-FEATURE-OPTIMIZATION.md) —— §1.2 状态注记校准 / §1.3 正文级偏离
-- 最近一轮 CI：**`.ci/r45`**（HEAD `60810c4`，**这一行就是被那次 CI 跑过的那棵树**）—— ⚠️ **8/9，exit 1**
-  （`test` **974483ms**，`skipped=1` 为已知的 secret-store；树指纹 `c61b4d166631338d` ——
-  **脏树 18 改 + 498 未跟踪**）
-  - ⚠️ **`test` 红，而红的那 5 族不在本会话的面上**：`*-dsh-process` × 3（PRT-253）
-    + `runtime-contract-cross-process`（PRT-253）是**另一会话的 `2f5a4b3` 引入的回归**、
-    **净树复现**（第 44 轮用 `git worktree` 分树复跑定责）；`model-api` 则只在**脏树**上红，
-    是那边**未提交的在制品**造成的 ⇒ **"同时红 ≠ 同一个原因"**。详见
-    [`PRT-HUMAN-INTERVENTION-2026-09-20.md`](./PRT-HUMAN-INTERVENTION-2026-09-20.md) §二之二
-  - ★ `env` 那次报 FAIL 是**瞬时**的（另一会话正在改文件，CI 从它们中间跑过去）——
-    单独复跑 `--only env` 是 **PASS（3684ms）**。⇒ **"CI 报红"与"代码是红的"也是两个读数**
+- 最近一轮 CI：**`.ci/r45c`**（HEAD `1a62c38`，**这一行就是被那次 CI 跑过的那棵树**）—— ⚠️ **7/9，exit 1**
+  （`test` **1254292ms** + `doc` 红，`skipped=1` 为已知的 secret-store；树指纹 `ab3a77b49ee6a67e` ——
+  **脏树 20 改 + 511 未跟踪**）
+  - ⚠️ **8 个红族没有一族在本会话的改动上**：`config`(52/53)、`prt-baseline`(23/25)、
+    `suite-counts`（`compaction-http.test.mjs` claim **5** real **13**）、
+    `*-dsh-process` × 3 + `runtime-contract-cross-process`（另一会话的 `2f5a4b3` 回归、
+    **净树复现**）、`model-api`（只在**脏树**上红）—— 全是那边；
+    `doc` 报的是 `docs/PRT-316-evidence/slice-07-automation-family.md` **缺历史 banner**（它的切片 7）。
+    ⇒ **"同时红 ≠ 同一个原因"**，而"同时红"也**不等于**"这些红里有我的"。
+    定责方法：`git show --stat <我每个提交>` + `git grep "<我改的每个套件>（"`（全部没被声明计数）。
+    详见 [`PRT-HUMAN-INTERVENTION-2026-09-20.md`](./PRT-HUMAN-INTERVENTION-2026-09-20.md) §二之二
+  - ★ `env` 在第 45 轮前后两次报 FAIL 都是**瞬时**的（另一次报的是
+    `team-hub/routes/secrets.mjs` —— 那边新建、还没 `git add`），
+    单独复跑 `--only env` 均为 **PASS** ⇒ **"CI 报红"与"代码是红的"也是两个读数**
 - 最近一次 **9/9 PASS**：**`.ci/r43`**（HEAD `eeedd21`，**这一行就是被那次 CI 跑过的那棵树**）
   （`test` **1088879ms**，`skipped=1` 为已知的 secret-store；套件 **373** 个全部有归属；
   树指纹 `cacda41048a5a459` —— **脏树 14 改 + 471 未跟踪**，见 §3.0j 第 28 轮）

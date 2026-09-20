@@ -147,3 +147,72 @@ test('⑩ ★ 只认**状态列落在封闭词表里**的行（文档里还有�
     assert.ok(ids.has(want), `主表里的 ${want} 没读到`)
   }
 })
+
+// ══════════════════════════════════════════════════════════════════════════
+// ★★★ 第 45 轮：词表**不再抄在这里**，且**认不出来就抛**
+//
+// 本模块原来自己写了一份 7 种的状态正则，而所有者
+// （`progress-check.mjs` 的 `FEATURE_STATUS_RE`，由 `FEATURE_STATUS_MARKS` 派生）
+// 许可 **20** 种 ⇒ **13 种被静默丢掉**，因为第 69 行是 `continue`。
+//
+//   实测（`scratch/_probe-feature-status.mjs`）：喂 `🟡→⏸` ⇒ 收 **0** 行、**不报错**。
+//   而真文档今天只用 5 种、全在交集中 ⇒ 这个差异当时**只存在于理论上**。
+//
+//   > 一份"词表归别人管"的声明，与一份**真的**跟着它走的实现，
+//   > 在今天不会露出差别——只要今天那份文档里恰好只用双方都认的写法。
+// ══════════════════════════════════════════════════════════════════════════
+
+test('⑪ ★★★ 词表**就是所有者那一份**：20 种全认，含曾被丢掉的 13 种', () => {
+  // ★ 正对照：四个终态 + **全部 16 种**箭头写法。
+  for (const a of ['✅', '🟡', '⬜', '⏸']) {
+    assert.equal(STATUS_RE.test(a), true, `${a} 应当被认下`)
+    for (const b of ['✅', '🟡', '⬜', '⏸']) {
+      assert.equal(STATUS_RE.test(`${a}→${b}`), true, `${a}→${b} 曾被静默丢掉`)
+    }
+  }
+  // ★ 反面控制：不在图例里的、以及"一侧多个标记"的，都必须不认。
+  assert.equal(STATUS_RE.test('🔵'), false, '认了一个不在图例里的标记')
+  assert.equal(STATUS_RE.test('✅🟡→⬜'), false, '一侧两个标记不是任何一种状态')
+  assert.equal(STATUS_RE.test('`run-events.test.mjs` 18 例；三条出口都带明细'), false)
+  assert.equal(STATUS_RE.test('判据'), false)
+})
+
+test('⑫ ★★★ `featureRows` 对认不出的状态格**抛**，而不是少一行', async () => {
+  // ★ 本仓是 ESM ⇒ 用 `await import`，不是 `require`。
+  const { mkdtempSync, writeFileSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const withRows = (rowsText) => {
+    const p = join(mkdtempSync(join(tmpdir(), 'fe-')), 'd.md')
+    writeFileSync(p, [
+      '# 对照表',
+      '',
+      '| 功能 | 名字 | 状态 | 依据 |',
+      '| --- | --- | --- | --- |',
+      ...rowsText,
+    ].join('\n'))
+    return p
+  }
+
+  // ★ 正对照：认得的形状要收下（否则下面那条"抛"可能是"它什么都抛"）。
+  for (const st of ['✅', '🟡→✅', '🟡→⏸', '⏸→✅']) {
+    const got = featureRows(withRows([`| F-30 探针 | probe | ${st} | PRT-101 |`]))
+    assert.equal(got.length, 1, `"${st}" 是合法状态，却没被收下`)
+    assert.equal(got[0].status, st)
+  }
+
+  // ★ 核心：4 格行的第 3 格认不出 ⇒ **抛**。
+  assert.throws(
+    () => featureRows(withRows(['| F-30 探针 | probe | 进行中 | PRT-101 |'])),
+    /状态格不是已知形状/,
+    '认不出的状态被跳过了 ⇒ "状态写错了"与"那一行不存在"读数同形')
+
+  // ★★ 反向控制：**3 格**的另一张表必须**不**抛。
+  //   文档里这样的行有 16 行（`| 缺口 | 改动前的实际读数 | 关掉它的判据 |`），
+  //   它们的第 3 格是**判据**而不是状态——把它们判成"状态写错了"是误伤。
+  const other = featureRows(withRows([
+    '| F-21 缺口 | 没人接线 | 判据 |',
+    '| F-05 前半 | 名字 | `run-events.test.mjs` 18 例 |',
+  ]))
+  assert.deepEqual(other, [], '另一张 3 列的表被读成了状态行')
+})

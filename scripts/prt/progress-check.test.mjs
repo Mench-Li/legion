@@ -13,6 +13,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  FEATURE_STATUS_MARKS,
+  FEATURE_STATUS_RE,
   LEDGER_STATUS_MARKS,
   STATUS_CELL_RE,
   STATUS_MARKS,
@@ -252,8 +254,23 @@ test('⑥ ★★ 对照表里每个 F-行都必须用图例里的状态标记', 
   const lines = readFileSync(p.status, 'utf8').split(/\r?\n/)
   // 图例（本文件开头那段引用块）声明了四个标记。用别的写法时读者无法判断
   // 这一条到底做完了没有，而"状态"这一列的全部意义就是回答那个问题。
-  const legend = ['✅', '🟡', '⬜', '⏸']
-  const okStatus = (s) => legend.includes(s) || /^[✅🟡⬜⏸]+→[✅🟡⬜⏸]+$/.test(s)
+  //
+  // ★★★ 第 45 轮：词表**不再写在用例里**，改从 `progress-check.mjs` 取。
+  //
+  //   原来这一行是 `const legend = ['✅', '🟡', '⬜', '⏸']` + 一条
+  //   `[✅🟡⬜⏸]+→[✅🟡⬜⏸]+` 的箭头判据——而 `feature-table.mjs:59` 把这个
+  //   **用例**当成词表的所有者。那句话是对的，但**一个测试用例没法被生产脚本
+  //   引用**：`feature-evidence.mjs:49` 只好自己又抄一份（只认 7 种，
+  //   而这里许可 20 种），于是**这里许可的形状在那边被静默丢掉**。
+  //
+  //   > 一个"所有者"如果**只以文本形式**存在（"词表在某个测试的第 255 行"），
+  //   > 那它就不是一个所有者，而是一份**关于**所有者的说明——
+  //   > 而说明是可以被无视的，且无视之后不会有任何读数变化。
+  //
+  //   ⇒ 词表提到 `progress-check.mjs`（两个模块都在用的那个 leaf 模块），
+  //     本用例与 `feature-evidence.mjs` 都**取**它。
+  const legend = FEATURE_STATUS_MARKS
+  const okStatus = (s) => FEATURE_STATUS_RE.test(s)
   const bad = []
   let checked = 0
   // ★ 锚点不是"看起来像 F-行"，而是**表的表头**：只有第三列恰好写着「状态」的
@@ -440,6 +457,68 @@ test('⑮ ★★★ `marks` 可注入：它跟着**给它的那张表**走，而
   assert.throws(() => ledgerTaskRow('| PRT-003 丙 | ⬜ | `c.md` |', { marks: withoutTodo }),
     /状态格不是已知标记/,
     '抽掉 ⬜ 之后仍认 ⇒ 它跟的不是这张表（是写死的四个字面量）')
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// ★★★ 第 45 轮（续）：**第二张**词表 —— 功能对照表的状态列
+//
+// `feature-table.mjs:59` 明写「状态词表**已经有一个所有者**」并把所有者指到
+// 本文件用例 ⑥。**那句话是对的**——但一个测试用例**没法被生产脚本引用**，
+// 于是 `feature-evidence.mjs:49` 自己又抄了一份（7 种），
+// 而用例 ⑥ 许可 **20** 种 ⇒ **13 种被静默丢掉**。
+//
+// ★ 两次用的**是同一个修法**：词表提到模块 + 认不出来就抛 + 词表可注入。
+//   这不是巧合——"一个形状应该只有一个所有者"这件事，
+//   在这两份文档上遇到了两次。
+// ══════════════════════════════════════════════════════════════════════════
+
+test('⑯ ★★★ `FEATURE_STATUS_RE` 由 `FEATURE_STATUS_MARKS` 派生：4 终态 + **16** 种箭头', () => {
+  // ★ 派生性：把 marks 拿掉一个，正则必须跟着不认（而不是"它自己写死了 20 种"）。
+  for (const m of FEATURE_STATUS_MARKS) {
+    assert.equal(FEATURE_STATUS_RE.test(m), true, `${m} 是图例成员，但正则不认`)
+    for (const n of FEATURE_STATUS_MARKS) {
+      assert.equal(FEATURE_STATUS_RE.test(`${m}→${n}`), true, `${m}→${n} 应当许可`)
+    }
+  }
+  // ★ 这几个正是**向量差**：用例 ⑥ 原来许可它们，而 `feature-evidence` 不认。
+  //   钉住它们，是因为"13 种被静默丢掉"这个缺陷正是从它们开始的。
+  for (const s of ['🟡→⏸', '⬜→✅', '⏸→⏸', '✅→✅']) {
+    assert.equal(FEATURE_STATUS_RE.test(s), true, `${s} 曾被消费者静默丢掉`)
+  }
+  // ★ 反面控制：不在图例里的、以及"一侧多个标记"的，都必须不认。
+  assert.equal(FEATURE_STATUS_RE.test('🔵'), false, '认了一个不在图例里的标记')
+  assert.equal(FEATURE_STATUS_RE.test('✅🟡→⬜'), false,
+    '一侧两个标记不是任何一种状态（旧判据的 `[..]+→[..]+` 会放它过去）')
+  assert.equal(FEATURE_STATUS_RE.test('🟡->✅'), false, '半角箭头不是图例里的写法')
+  assert.equal(FEATURE_STATUS_RE.test(' 🟡 '), false, '它要求**整格**相等')
+})
+
+test('⑯b ★★★ 真实对照表里**没有**"恰好 3 格且第 3 格是状态"的行', () => {
+  // ★ 这条守的是 `feature-evidence.featureRows` 的一个**残留限制**：
+  //   它把"恰 3 格"当作**另一张表**（实测 16 行全是 `| 缺口 | … | 判据 |` 之类），
+  //   所以**恰好 3 格**的功能表状态行仍会被跳过。
+  //
+  //   ★ 与其写一句注释说"这不会发生"，不如**对着真文档量它**：
+  //     真出现那种行时这条会红，而不是静默地少一行。
+  //
+  //     > 一个"已知限制"如果只写在注释里，它与"没有这个限制"长得一样；
+  //     > 只有一条会红的判据能让它在下一次发生时**出声**。
+  return (async () => {
+    const { readFileSync } = await import('node:fs')
+    const p = await paths()
+    const lines = readFileSync(p.status, 'utf8').split(/\r?\n/)
+    const bad = []
+    for (const [i, l] of lines.entries()) {
+      if (!/^\s*\|\s*F-\d+/.test(l)) continue
+      const cells = l.split('|').slice(1, -1).map((c) => c.trim())
+      if (cells.length !== 3) continue
+      if (!FEATURE_STATUS_RE.test(cells[2] ?? '')) continue
+      bad.push(`L${i + 1} ${cells[0]}`)
+    }
+    assert.deepEqual(bad, [],
+      `这些行恰好 3 格、第 3 格又是状态 ⇒ featureRows 会跳过它们：\n  ${bad.join('\n  ')}\n`
+      + '⇒ 要么把它们补成完整的功能行，要么把 featureRows 的阈值改成按表头锚点。')
+  })()
 })
 
 

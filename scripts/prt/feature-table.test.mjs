@@ -15,7 +15,9 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync, existsSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import {
   FEATURE_IDS, STATUS_DOC, OPTIMIZATION_DOC,
@@ -111,12 +113,51 @@ test('①b ★ 真文档的落点判定**确实开着**（不许"因为没文件
 //        *两份词表并存必然漂移，而漂移的那一天没人知道该信哪一份。*
 
 /** 状态词表的**所有者**：那个文件 + 它必须仍然含有的判据文本。 */
-const OWNER = 'scripts/prt/progress-check.test.mjs'
+// ★★★ 第 45 轮：所有者从**用例**（`progress-check.test.mjs` 用例 ⑥）
+//   改成**模块**（`progress-check.mjs`）。
+//
+//   为什么必须改：`feature-evidence.mjs` 是一个**生产脚本**，它需要那张词表，
+//   而**生产脚本没法 `import` 一个 `.test.mjs`** ⇒ 它只好自己抄一份
+//   （只认 7 种，而用例 ⑥ 许可 20 种）⇒ **13 种被静默丢掉**（实测：
+//   喂 `🟡→⏸` ⇒ 收 0 行、不报错）。
+//
+//   > 一个"所有者"如果**只以文本形式**存在（"词表在某个测试的第 255 行"），
+//   > 那它就不是一个所有者，而是一份**关于**所有者的说明——
+//   > 而说明是可以被无视的，且无视之后不会有任何读数变化。
+//
+//   ⇒ 所有者是一个**模块**，本模块与 `feature-evidence.mjs` 都**取**它。
+const OWNER = 'scripts/prt/progress-check.mjs'
 const OWNER_MARKERS = [
-  '对照表里每个 F-行都必须用图例里的状态标记', // 用例名
-  "const legend = ['✅', '🟡', '⬜', '⏸']", // 词表本身
-  '^[✅🟡⬜⏸]+→[✅🟡⬜⏸]+$', // 箭头写法的许可形状
+  'export const FEATURE_STATUS_MARKS', // 词表本身
+  "Object.freeze(['✅', '🟡', '⬜', '⏸'])", // 它的四个成员
+  'export const FEATURE_STATUS_RE', // 箭头写法的许可形状
+  'FEATURE_STATUS_MARKS.join', // ★ 它**派生**自词表，而不是另写一份
 ]
+/**
+ * 词表的**消费者**——**扫出来的**，不是手写的一张名单。
+ *
+ * ★★ 为什么不写名单：手写名单是**本批反复出现的那个形状**——
+ *    "一份承诺覆盖面的声明，而真实代码把名字一个个手写下来"。
+ *    名单会漏掉新加的消费者，而**漏掉的那一个不会报错**，
+ *    它只是安静地不受管。扫目录则**新消费者自动被覆盖**。
+ *
+ * ★★ 另一条更硬的教训：第一版名单里**照抄了真路径**，于是
+ *    `criteria-files-do-not-impersonate-manifests` 当场报红——
+ *
+ *      判据文件里出现 `"scripts/prt/feature-evidence.mjs"` 这样的**真路径字符串**，
+ *      可达性探针会把它读成"这个模块被清单声明了" ⇒ 把它当成**生产入口**。
+ *
+ *    > 一个用来**描述**形状的例子，如果写成真实路径，
+ *    > 就会被别的判据读成**关于那个真实文件的主张**。
+ *    > （⇒ 描述形状时用占位路径；这里干脆不写路径字面量，改为运行时扫。）
+ */
+function featureVocabConsumers() {
+  const dir = dirname(fileURLToPath(import.meta.url))
+  return readdirSync(dir)
+    .filter((f) => f.endsWith('.mjs') && f !== 'progress-check.mjs')
+    .filter((f) => /\bFEATURE_STATUS_(?:RE|MARKS|MUST_SAY_MISSING)\b/.test(readFileSync(join(dir, f), 'utf8')))
+    .sort()
+}
 
 test('② ★★★ 状态词表的**所有者**还在（本模块不判它，但要知道谁判）', () => {
   const src = readFileSync(OWNER, 'utf8')
@@ -136,13 +177,59 @@ test('②a ★★ 所有者那条判据**在 CI 里真的会跑**（"谁判"不�
   //     > 一个"嵌套套件跑绿了"的读数，与一个"它根本没在打印"的读数，
   //     > 在只看 `execFileSync` 没抛异常的判据里是同一个东西。
   //
-  //   ⇒ 两条更稳的替代：① ② 已经核了所有者文件的**判据文本还在**；
-  //     ② 这里核**它被登记进 run-ci** ⇒ 它不会静默停止运行。
-  //     而"它现在对真文档是绿的"由**全量 CI 自己**回答（两套都在里面跑）。
+  //   ⇒ 三条更稳的替代：① ② 已经核了所有者文件的**判据文本还在**；
+  //     ② 这里核**每个消费者都被 CI 跑到** ⇒ 词表不会静默停止被使用；
+  //     ③（第 45 轮新增）核**每个消费者真的 import 了它**——那正是旧设计
+  //       缺的那一环：词表在**用例**里，于是生产脚本只能自己抄一份。
+  //     而"它现在对真文档是绿的"由**全量 CI 自己**回答（都在里面跑）。
+  const consumers = featureVocabConsumers()
+  // ★ 正对照：消费者集合**不许是空的**——空集上通过 = 与没写这条判据同形。
+  assert.ok(consumers.length >= 2,
+    `词表的消费者只有 ${consumers.length} 个（${consumers.join(' ')}）⇒ `
+    + '要么词表没人用了，要么扫描面坏了')
+
   const ci = readFileSync('scripts/ci/run-ci.mjs', 'utf8')
-  assert.ok(ci.includes(`'${OWNER}'`),
-    `所有者「${OWNER}」没被登记进 run-ci ⇒ 它**不会跑**，`
-    + '那么状态列实际上仍然没有任何东西在管（而 ② 会因为文件里还留着那几行字而继续变绿）')
+  const dir = dirname(fileURLToPath(import.meta.url))
+  for (const f of consumers) {
+    // ★ 每个消费者都必须**在 CI 里被跑到**：
+    //   生产模块（非 `.test.mjs`）由它的同名套件回答；套件本身必须直接登记。
+    const suiteName = f.endsWith('.test.mjs') ? f : f.replace(/\.mjs$/, '.test.mjs')
+    assert.ok(existsSync(join(dir, suiteName)),
+      `消费者「${f}」没有对应的套件「${suiteName}」⇒ 它不会在任何地方被跑到`)
+    assert.ok(ci.includes(`'scripts/prt/${suiteName}'`),
+      `消费者「${f}」的套件「${suiteName}」没被登记进 run-ci ⇒ 它**不会跑**，`
+      + '那么状态列实际上仍然没有任何东西在管（而 ② 会因为文件里还留着那几行字而继续变绿）')
+  }
+
+  // ★★★ 第 45 轮的核心一条：**生产脚本必须真的从所有者那里取**。
+  //   只核"所有者的文件里有那几个字"是不够的——`feature-evidence.mjs` 的
+  //   旧版本**也**写着"词表归别人管"，同时**自己抄了一份**。
+  //   ⇒ 判据是"消费者真的 import 了它"，而不是"它们说了什么"。
+  //
+  //   ⚠️ 而"抄了一份"最直接的样子是一条**字面量**状态正则。
+  //      本判据第一版直接对源文本正则匹配，**当场红了**——因为
+  //      `feature-evidence.mjs` 的注释里**逐字引用了旧那一行**。
+  //
+  //      > 一条扫描源码的判据，会**先扫到记录这个缺陷的注释**，
+  //      > 于是"把缺陷写进注释留档"这个好习惯会让判据报假红；
+  //      > 而如果注释里写的是**修复后**的代码，它还会让判据报假绿。
+  //
+  //   ⇒ 先剥注释，再判——并且对**生产**消费者（非套件）做正面断言：
+  //     要的不是"没有那份字面量"，而是"它的 `STATUS_RE` 就是所有者那一份"。
+  const stripComments = (s) => s
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n')
+    .filter((l) => !/^\s*\/\//.test(l))
+    .join('\n')
+  const prod = consumers.filter((f) => !f.endsWith('.test.mjs'))
+  assert.ok(prod.length >= 1, '没有任何**生产**消费者 ⇒ 词表只剩判据自己在用')
+  for (const f of prod) {
+    const code = stripComments(readFileSync(join(dir, f), 'utf8'))
+    assert.ok(!/STATUS_RE = \/\^/.test(code),
+      `「${f}」里出现了一份**字面量**状态正则 ⇒ 两份词表并存`)
+    assert.ok(/STATUS_RE = FEATURE_STATUS_RE/.test(code),
+      `「${f}」的 \`STATUS_RE\` 不再是所有者那一份 ⇒ 它抄了一份自己的`)
+  }
 })
 
 test('②b 本模块**确实不判**状态词表（否则两份词表会漂移）', () => {

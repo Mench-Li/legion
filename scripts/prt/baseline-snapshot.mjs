@@ -251,6 +251,9 @@ SOURCES.routesContextSnapshots = join(ROOT, 'team-hub', 'routes', 'context-snaps
 // ★ 切片 17（config-bundle）：这一族逼出了生成器两个"前十六族恰好都成立"的假定 ——
 //   `instanceof` 不沾"被调用/取成员"两种形态；`ALWAYS` 只放行、不注入。
 SOURCES.routesConfigBundle = join(ROOT, 'team-hub', 'routes', 'config-bundle.mjs')
+// ★ 切片 18（price-tables）：第一族**被夹在别人的区间里**的 —— 逼出了搬运脚本
+//   上边界的真 bug（往上找分隔符时可能找到**别人**的分隔符）。
+SOURCES.routesPriceTables = join(ROOT, 'team-hub', 'routes', 'price-tables.mjs')
 
 /** 已提取出去的路由族模块（值 = 该文件里**声明式**路由的归属名）。 */
 export const ROUTE_FAMILY_SOURCES = Object.freeze([
@@ -270,6 +273,7 @@ export const ROUTE_FAMILY_SOURCES = Object.freeze([
   { module: 'routesUsage', family: 'usage', factory: 'createUsageRoutes' },
   { module: 'routesContextSnapshots', family: 'context-snapshots', factory: 'createContextSnapshotsRoutes' },
   { module: 'routesConfigBundle', family: 'config-bundle', factory: 'createConfigBundleRoutes' },
+  { module: 'routesPriceTables', family: 'price-tables', factory: 'createPriceTablesRoutes' },
 ])
 SOURCES.experienceStore = join(ROOT, 'team-hub', 'experience-store.mjs')
 

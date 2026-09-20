@@ -237,6 +237,7 @@ import { createExperienceRoutes } from './routes/experience.mjs'
 import { createPacksRoutes } from './routes/packs.mjs'
 import { createConnectorsRoutes } from './routes/connectors.mjs'
 import { createUsageRoutes } from './routes/usage.mjs'
+import { createPriceTablesRoutes } from './routes/price-tables.mjs'
 import { createConfigBundleRoutes } from './routes/config-bundle.mjs'
 import { createContextSnapshotsRoutes } from './routes/context-snapshots.mjs'
 import { createModelProfilesRoutes } from './routes/model-profiles.mjs'
@@ -5037,6 +5038,11 @@ const router = createRouter([
     planImport, validateBundle, assertApplicable,
     BUNDLE_ERRORS, BundleError, handleRun,
   }),
+  createPriceTablesRoutes({
+    json,
+    budgetPriceTables, createPriceTable, BUDGET_ERRORS,
+    handleRun,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -5760,44 +5766,9 @@ async function handle(req, res, stripPrefix) {
       json(res, 200, { ok: true, reservation, usage: budgetLedger.usageOf(attemptId), serverTimeMs: Date.now() })
       return
     }
-    if (req.method === 'POST' && path === '/api/price-tables') {
-      await handleRun(req, res, (body) => {
-        // 版本只增不改：同版本再发布是 409，不是 200 覆盖。
-        const table = createPriceTable({
-          version: body.version, currency: body.currency,
-          effectiveAtMs: body.effectiveAtMs, models: body.models ?? {},
-        })
-        const saved = budgetPriceTables.publish(table, { actor: body.actor })
-        return { priceTable: { version: saved.version, currency: saved.currency, effectiveAtMs: saved.effectiveAtMs, models: Object.keys(saved.models) } }
-      })
-      return
-    }
-    if (req.method === 'GET' && path === '/api/price-tables') {
-      json(res, 200, { ok: true, priceTables: budgetPriceTables.list(), serverTimeMs: Date.now() })
-      return
-    }
-    if (req.method === 'GET' && path.startsWith('/api/price-tables/')) {
-      const version = path.slice('/api/price-tables/'.length)
-      if (version.trim() === '') {
-        json(res, 400, { ok: false, code: 'MISSING_PARAM', error: '路径应为 /api/price-tables/<version>' })
-        return
-      }
-      const table = budgetPriceTables.get(version)
-      if (table === null) {
-        json(res, 404, { ok: false, code: BUDGET_ERRORS.PRICE_TABLE_GONE, error: `没有价目表版本 ${version}` })
-        return
-      }
-      // 只回结构与单价，**不回**任何与密钥相关的东西（价目表本来就没有，但保持同一条纪律）
-      json(res, 200, {
-        ok: true,
-        priceTable: {
-          version: table.version, currency: table.currency,
-          effectiveAtMs: table.effectiveAtMs, models: table.models,
-        },
-        serverTimeMs: Date.now(),
-      })
-      return
-    }
+    // ── 价目表（PRT-503 / PRT-510，spec §6.6） —— 已提取到 `./routes/price-tables.mjs`（PRT-316 第 17 族 / 切片 18）──
+    // 整段搬走：`server.mjs` 里现在**不再有** `/api/price-tables` 路由，该命名空间只住一个地方。
+    if (await router.dispatch(req, res, { path, url })) return
     if (req.method === 'POST' && path === '/api/runtime/run-budget/may-switch-model') {
       await handleRun(req, res, (body) => {
         const priceTable = budgetPriceTables.get(body.priceTableVersion)

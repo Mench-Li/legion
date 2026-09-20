@@ -53,6 +53,10 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { REPO, MATRIX_PATH, sectionFiveText } from './reachability.mjs'
+// ★ 台账状态词表与"任务行长什么样"的**唯一所有者**是 `progress-check.mjs`。
+//   本模块此前把同一条状态正则写了**三**遍（`ledgerRows`、`ledgerRowTexts`，
+//   外加 `NON_DONE_STATUSES` 那张子集表），而它自己的文件头就在警告这件事。
+import { ledgerTaskRow } from './progress-check.mjs'
 
 /**
  * §5 的正文（转手 `reachability.mjs` 的解析器）。
@@ -82,14 +86,9 @@ export function ledgerRows(path = LEDGER_PATH) {
   const rows = []
   const lines = readFileSync(path, 'utf8').split('\n')
   for (const [i, line] of lines.entries()) {
-    const t = line.trim()
-    if (!t.startsWith('|')) continue
-    const cells = t.split('|').slice(1, -1).map((c) => c.trim())
-    if (cells.length < 3) continue
-    const m = /^(PRT-\d+)/.exec(cells[0])
-    if (!m) continue
-    if (!/^(✅|🟡|⏸|⬜)$/.test(cells[1])) continue
-    rows.push({ prt: m[1], status: cells[1], line: i + 1, desc: cells[0].slice(0, 80) })
+    const r = ledgerTaskRow(line)
+    if (r === null) continue
+    rows.push({ prt: r.prt, status: r.status, line: i + 1, desc: r.cells[0].slice(0, 80) })
   }
   return rows
 }
@@ -145,14 +144,9 @@ export function ledgerRowTexts(path = LEDGER_PATH) {
   const out = []
   const lines = readFileSync(path, 'utf8').split('\n')
   for (const [i, line] of lines.entries()) {
-    const t = line.trim()
-    if (!t.startsWith('|')) continue
-    const cells = t.split('|').slice(1, -1).map((c) => c.trim())
-    if (cells.length < 3) continue
-    const m = /^(PRT-\d+)/.exec(cells[0])
-    if (!m) continue
-    if (!/^(✅|🟡|⏸|⬜)$/.test(cells[1])) continue
-    out.push({ prt: m[1], status: cells[1], line: i + 1, text: line })
+    const r = ledgerTaskRow(line)
+    if (r === null) continue
+    out.push({ prt: r.prt, status: r.status, line: i + 1, text: line })
   }
   return out
 }

@@ -49,6 +49,11 @@ import { fileURLToPath } from 'node:url'
 
 import { REPO } from './reachability.mjs'
 import { suiteFilesFromCi, trackedTests } from './suite-counts.mjs'
+// ★ 台账状态词表与"任务行长什么样"的**唯一所有者**是 `progress-check.mjs`
+//   （它是台账格式的所有者）。本模块**不再**自己写一份 `^(✅|🟡|⏸|⬜)$`——
+//   第 44～45 轮实测：手抄的那一份在 🟡 出现时**静默丢行**
+//   （`scratch/_probe-status-poison.mjs`：毒药行数 4 → 3，一声不响）。
+import { ledgerTaskRow } from './progress-check.mjs'
 
 export const LEDGER_PATH = join(REPO, 'docs', 'superpowers', 'prt', 'PRT-PROGRESS.md')
 export const CI_PATH = join(REPO, 'scripts', 'ci', 'run-ci.mjs')
@@ -62,19 +67,17 @@ export const NAME_RE = /^[A-Za-z][\w./-]*$/
  * ★ 与 `intervention-coverage.mjs` 的 `ledgerRows()` 同形——但那个只取
  *   `prt/status/line/desc`，这一格要的是**证据栏**。两处都从同一个文件读、
  *   用同一条"第一格以 `PRT-` 开头"的判据，所以形状不会漂。
+ *
+ * ★★ 第 45 轮：取法收敛到 `progress-check.ledgerTaskRow()`（状态词表的唯一所有者）。
+ *   认不出的状态格现在**抛**，不再 `continue`——理由见 `progress-check.mjs` 里那段。
  */
 export function ledgerEvidenceRows(path = LEDGER_PATH) {
   const rows = []
   const lines = readFileSync(path, 'utf8').split('\n')
   for (const [i, line] of lines.entries()) {
-    const t = line.trim()
-    if (!t.startsWith('|')) continue
-    const cells = t.split('|').slice(1, -1).map((c) => c.trim())
-    if (cells.length < 3) continue
-    const m = /^(PRT-\d+)/.exec(cells[0])
-    if (m === null) continue
-    if (!/^(✅|🟡|⏸|⬜)$/.test(cells[1])) continue
-    rows.push({ prt: m[1], status: cells[1], line: i + 1, desc: cells[0], evidence: cells[2] })
+    const r = ledgerTaskRow(line)
+    if (r === null) continue
+    rows.push({ prt: r.prt, status: r.status, line: i + 1, desc: r.cells[0], evidence: r.cells[2] })
   }
   return rows
 }

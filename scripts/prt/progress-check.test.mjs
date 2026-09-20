@@ -13,9 +13,12 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  LEDGER_STATUS_MARKS,
+  STATUS_CELL_RE,
   STATUS_MARKS,
   checkProgress,
   fixProgress,
+  ledgerTaskRow,
   parseProgress,
   parseSummary,
   tally,
@@ -343,6 +346,100 @@ test('① 真实台账里没有裸竖线，也没有格子数不对的行', asyn
   const r = checkProgress(readFileSync(path, 'utf8'))
   const bad = r.problems.filter((p) => p.kind === 'ROW_PIPE_UNESCAPED' || p.kind === 'ROW_CELLS_MISSING')
   assert.deepEqual(bad, [], `真实台账里有形状不对的行：\n${bad.map((p) => p.message).join('\n')}`)
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// ★★★ 第 45 轮：台账状态词表是**一处所有**，且认不出来就**抛**
+//
+// 起因：第 44 轮 `PRT-316` 由 ⬜ 转 **🟡**，而"认得 🟡"这件事在**四个**地方
+// 各写了一遍，改到第四处才认全。其中最坏的一处 `boundary-facts.tallyLedger`
+// 认不出就 `continue` ⇒ 报 **144** 而台账有 145 条，**而那个错数正好能过门禁**。
+//
+// 第 45 轮把这个问题做成**可证伪**的：往合成台账里放一个今天**不存在**的
+// 第 5 个标记（🔵），看每个解析器的**行数**有没有少
+// （`scratch/_probe-status-poison.mjs`）。读数：**两个**解析器静默丢行
+// （`ledgerEvidenceRows`、`ledgerRows`）。
+//
+//   > 一个"认不出的标记就跳过"的解析器，在今天**不会**被任何真实输入触发，
+//   > 所以它与一个正确的解析器读数**完全一样**；
+//   > 而"要不要加第 5 个状态"这件事一旦发生，
+//   > 它们会**同时**安静地少算——而不是报错。
+// ══════════════════════════════════════════════════════════════════════════
+
+test('⑫ ★★★ 词表**只有一处**：`LEDGER_STATUS_MARKS` 由 `STATUS_MARKS` 派生', () => {
+  // 这条钉的是"**一处所有**"这个性质本身，而不是那四个字面量。
+  assert.deepEqual([...LEDGER_STATUS_MARKS], STATUS_MARKS.map((s) => s.mark),
+    '`LEDGER_STATUS_MARKS` 不再等于 `STATUS_MARKS` 的标记列 ⇒ 词表被抄成了第二份')
+
+  // ★ 反面控制：**顺序无关**的判据不能替我们证明"是派生的"。
+  //   所以再钉一条**位置**性质：往 `STATUS_MARKS` 里加一个标记，
+  //   `LEDGER_STATUS_MARKS` 必须**立刻**跟着变——派生量不是快照。
+  //   （用的是同一个冻结数组的 `map` 结果，所以这条只能靠"同一个来源"成立。）
+  const derived = Object.freeze(STATUS_MARKS.map((s) => s.mark))
+  assert.deepEqual([...LEDGER_STATUS_MARKS], [...derived],
+    '两处各算一遍的结果不同 ⇒ 其中至少一处不是从 `STATUS_MARKS` 来的')
+})
+
+test('⑬ ★★★ `STATUS_CELL_RE` 与词表同源（加一个标记，正则跟着认）', () => {
+  for (const { mark } of STATUS_MARKS) {
+    assert.equal(STATUS_CELL_RE.test(mark), true, `${mark} 是词表成员，但正则不认`)
+  }
+  // ★ 反面控制：**不在**词表里的必须不认——否则这条正则在验"它认得一切"。
+  assert.equal(STATUS_CELL_RE.test('🔵'), false, '正则认了一个不在词表里的标记')
+  assert.equal(STATUS_CELL_RE.test('✅ '), false, '正则接受了带空格的格子（它要求**整格**相等）')
+  assert.equal(STATUS_CELL_RE.test('✅→🟡'), false,
+    '迁移写法是**功能表**的词表，不是台账状态格——台账里只放终态')
+})
+
+test('⑭ ★★★ `ledgerTaskRow`：认不出的状态格**抛**，不许静默跳过', () => {
+  // ★ 正对照：认得的那四个都要**收下**（否则下面那条"抛"可能是"它什么都抛"）。
+  for (const { mark } of STATUS_MARKS) {
+    const r = ledgerTaskRow(`| PRT-001 甲 | ${mark} | \`a.md\` |`)
+    assert.notEqual(r, null, `${mark} 是词表成员，却被当成"不是任务行"`)
+    assert.equal(r.status, mark)
+    assert.equal(r.prt, 'PRT-001')
+    assert.deepEqual(r.cells, ['PRT-001 甲', mark, '`a.md`'])
+  }
+
+  // ★ 核心：任务行形状但状态认不出 ⇒ **抛**。
+  assert.throws(() => ledgerTaskRow('| PRT-004 丁 | 🔵 | `d.md` |'),
+    /状态格不是已知标记/,
+    '认不出的状态被跳过了 ⇒ 那一行会安静地从每个读数里消失')
+
+  // ★ 反向控制：**不是**任务行的一律 `null`（不是抛）。
+  //   如果这条不成立，"抛"会变成"它在任何表格上都炸"，判据就没法用了。
+  for (const notTask of [
+    '| 任务 | 状态 | 证据 |',            // 表头：第一格不是 PRT 编号
+    '| --- | --- | --- |',                 // 分隔行
+    '| PRT-001 甲 | ✅ |',                // 只有 2 个格子（形状不对，不归这条管）
+    '不是表格行',
+    '| F-22 摩擦 | 🟡 | `x.md` |',        // 功能表：第一格不是 PRT 编号
+  ]) {
+    assert.equal(ledgerTaskRow(notTask), null, `这条不是任务行，却报了：${notTask}`)
+  }
+})
+
+test('⑮ ★★★ `marks` 可注入：它跟着**给它的那张表**走，而不是跟着四个字面量', () => {
+  // ★★★ 这一条是本轮最关键的判据。
+  //
+  //   只用"🔵 会抛"来验，无法区分这两种实现：
+  //     ① 它查的是 `LEDGER_STATUS_MARKS`（**派生**，加状态只改一处）；
+  //     ② 它自己写死 `['✅','🟡','⏸','⬜']`（**抄了一份**，加状态要改 N 处）。
+  //   两者在**今天**行为完全一样（🔵 都会抛）——这正是第 42/43 轮反复遇到的
+  //   "行为等价 ⇒ 不可证伪"形状。
+  //
+  //   ⇒ 处置不是加断言，而是**把被跟随的那张表做成可注入的参数**：
+  //     拿一张**多一个标记**的表去试，实现必须跟着认。
+  const withFifth = ['✅', '🟡', '⏸', '⬜', '🔵']
+  const r = ledgerTaskRow('| PRT-004 丁 | 🔵 | `d.md` |', { marks: withFifth })
+  assert.notEqual(r, null, '把 🔵 加进词表后仍然不认 ⇒ 它跟的不是这张表')
+  assert.equal(r.status, '🔵')
+
+  // ★ 反面控制：注入一张**少一个**标记的表，那个标记就必须开始抛。
+  const withoutTodo = ['✅', '🟡', '⏸']
+  assert.throws(() => ledgerTaskRow('| PRT-003 丙 | ⬜ | `c.md` |', { marks: withoutTodo }),
+    /状态格不是已知标记/,
+    '抽掉 ⬜ 之后仍认 ⇒ 它跟的不是这张表（是写死的四个字面量）')
 })
 
 

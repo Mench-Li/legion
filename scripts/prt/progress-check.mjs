@@ -35,6 +35,74 @@ export const STATUS_MARKS = Object.freeze([
   { mark: '⏸', label: '需外部输入' },
 ])
 
+// ── ★★★ 台账状态**词表的唯一所有者**（第 45 轮）──────────────────────────────
+//
+// 本模块是台账**格式**的所有者：竖线怎么数（`countUnescapedPipes`）、
+// 行怎么闭（`ROW_NOT_CLOSED`）、恰好几个格子（`ROW_CELLS_MISSING`）、
+// 分哪几节、状态有哪几种。其余模块**都从这里取**，不许再手抄一份。
+//
+// ★ 为什么这件事必须在第 45 轮说清楚：第 44 轮 `PRT-316` 由 ⬜ 转 **🟡**，
+//   而"认得 🟡"这件事在**四个**地方各写了一遍，改到第四处才认全：
+//
+// | 处 | 症状 |
+// | --- | --- |
+// | `boundary-facts.mjs` `tallyLedger` | 代码只认 ✅/⏸/⬜ ⇒ 报 **144** 而台账 145 |
+// | `boundary-facts.test.mjs` ⑭b | 断言把那个 144 **锁死**，还配了句解释 |
+// | `ledger-evidence.test.mjs` ⑩ | 代码已认 🟡，**断言**没跟着改 |
+// | `boundary-facts.mjs:142`、`intervention-coverage.test.mjs:46` | **注释**里的分布是假的 |
+//
+// ★★ 第 45 轮把这个问题做成**可证伪**的：往一份合成台账里放一个今天**不存在**的
+//   第 5 个标记（🔵），看每个解析器的**行数**有没有少
+//   （`scratch/_probe-status-poison.mjs`）。读数：**两个**解析器静默丢行——
+//   `ledger-evidence.ledgerEvidenceRows` 与 `intervention-coverage.ledgerRows`／
+//   `ledgerRowTexts`（后者那个文件**自己**的文件头就写着"两处各写一遍取法，
+//   正是本模块警告的那种漂移"，而它把状态正则写了**三**遍）。
+//
+//   > 一个"认不出的标记就跳过"的解析器，在今天**不会**被任何真实输入触发，
+//   > 所以它与一个正确的解析器读数**完全一样**；
+//   > 而"要不要加第 5 个状态"这件事一旦发生，
+//   > 它们会**同时**安静地少算——而不是报错。
+//
+// ⇒ 两件事一起做：① 词表**只有一个所有者**（就是上面那张 `STATUS_MARKS`）；
+//   ② 认不出来**就抛**，不许静默跳过。
+
+/** 台账状态标记的**集合**（唯一所有者）。★ 加第 5 个状态只改 `STATUS_MARKS`。 */
+export const LEDGER_STATUS_MARKS = Object.freeze(STATUS_MARKS.map((s) => s.mark))
+
+/** 状态格必须**整格**等于一个已知标记。★ 由 `LEDGER_STATUS_MARKS` 派生。 */
+export const STATUS_CELL_RE = new RegExp(`^(?:${LEDGER_STATUS_MARKS.join('|')})$`)
+
+/**
+ * 把一行拆成台账任务行；**不是**任务行就返回 `null`。
+ *
+ * ★ 与"认不出状态就 `continue`"的关键差别：本函数在**确认**这是一条任务行
+ *   （第一格以 `PRT-<数字>` 开头、行闭合、至少 3 个格子）之后，如果状态格不是
+ *   已知标记，就**抛**——因为那时候"跳过"与"台账真的少一条"读数同形。
+ *
+ * ★ `marks` 可注入：调用方（或用例）能拿一份**别的**词表来试，
+ *   从而验证"它真的在读那张表"，而不是在验证"它今天恰好认得这四个字"。
+ *
+ * @param {string} line 原始行（未 trim）
+ * @param {{marks?: readonly string[]}} [opts]
+ * @returns {{prt: string, status: string, cells: string[]}|null}
+ */
+export function ledgerTaskRow(line, { marks = LEDGER_STATUS_MARKS } = {}) {
+  const t = String(line).trim()
+  if (!t.startsWith('|')) return null
+  const cells = t.split('|').slice(1, -1).map((c) => c.trim())
+  if (cells.length < 3) return null
+  const m = /^(PRT-\d+)/.exec(cells[0])
+  if (m === null) return null
+  if (!marks.includes(cells[1])) {
+    throw new Error(`台账任务行的状态格不是已知标记：`
+      + `第 1 格 "${cells[0].slice(0, 40)}" 以 \`PRT-\` 开头，第 2 格是 "${cells[1]}"，`
+      + `而认得的是 ${marks.join(' ')}。`
+      + `★ 这里**抛**而不是跳过：跳过会让"认不出的标记"与"台账真的少一条"读数同形，`
+      + `而少算出来的那个数可能正好能过门禁（第 44 轮 tallyLedger 的实测形状）。`)
+  }
+  return { prt: m[1], status: cells[1], cells }
+}
+
 /**
  * 数一行的**未转义**竖线条数（正确的任务行恰好 4 条，即 5 个格子）。
  *

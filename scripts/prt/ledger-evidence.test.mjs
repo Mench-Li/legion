@@ -2,6 +2,9 @@
 // 台账每一条 ✅ 的"可复跑证据"必须解得开（第 35 轮）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { writeFileSync, mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join as joinPath } from 'node:path'
 
 import {
   NAME_RE,
@@ -10,6 +13,18 @@ import {
   checkRepo,
   ledgerEvidenceRows,
 } from './ledger-evidence.mjs'
+
+/**
+ * 把一段文字写成临时台账，返回它的路径。
+ *
+ * ★ 本套件其余用例读的都是**真台账**；这一条要的是一份**毒药输入**
+ *   （一个今天不存在的状态标记），所以必须能喂自己的文件。
+ */
+function writeLedger(text) {
+  const p = joinPath(mkdtempSync(joinPath(tmpdir(), 'ledger-ev-')), 'ledger.md')
+  writeFileSync(p, text)
+  return p
+}
 
 test('① ★★ 正对照：真仓库里每一条 ✅ 的证据都解得开', () => {
   const res = checkRepo()
@@ -122,4 +137,38 @@ test('⑩ ★★ 台账解析：145 行、状态口径与"第一格以 PRT- 开�
   for (const r of rows) {
     assert.ok(r.evidence.length > 0, `${r.prt} 的证据栏是空的`)
   }
+})
+
+test('⑪ ★★★ 认不出的状态格必须**抛**，不许把那一行安静地丢掉', () => {
+  // ★★ 第 45 轮实测（`scratch/_probe-status-poison.mjs`）：本模块原来自己写了一份
+  //   `^(✅|🟡|⏸|⬜)$`，认不出就 `continue` ⇒ 往合成台账里放一个第 5 个标记（🔵），
+  //   它安静地从 4 行变成 3 行，**一声不响**。
+  //
+  //   > 一个"认不出的标记就跳过"的解析器，在今天**不会**被任何真实输入触发，
+  //   > 所以它与一个正确的解析器读数**完全一样**；
+  //   > 而"要不要加第 5 个状态"这件事一旦发生，它会安静地少算——而不是报错。
+  //
+  //   ⇒ 现在取法收敛到 `progress-check.ledgerTaskRow()`（词表的唯一所有者），
+  //     认不出来就抛。这条用例把那个行为钉住。
+  const head = [
+    '# PRT 任务进度表',
+    '',
+    '| 任务 | 状态 | 证据 |',
+    '| --- | --- | --- |',
+  ]
+  const rowsOf = (mark) => [...head, `| PRT-001 甲 | ${mark} | \`a.md\` |`].join('\n')
+
+  // ★ 正对照：**四个**已知标记都要收下（且证据栏就是第 3 格）。
+  for (const mark of ['✅', '🟡', '⏸', '⬜']) {
+    const r = ledgerEvidenceRows(writeLedger(rowsOf(mark)))
+    assert.equal(r.length, 1, `${mark} 那一行没被收下`)
+    assert.equal(r[0].status, mark)
+    assert.equal(r[0].evidence, '`a.md`')
+    assert.equal(r[0].prt, 'PRT-001')
+  }
+
+  // ★ 核心：第 5 个标记（今天不存在）⇒ **抛**，不是"少一行"。
+  assert.throws(() => ledgerEvidenceRows(writeLedger(rowsOf('🔵'))),
+    /状态格不是已知标记/,
+    '认不出的状态被跳过了 ⇒ 那一行会安静地从每个读数里消失')
 })

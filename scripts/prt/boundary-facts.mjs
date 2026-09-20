@@ -54,6 +54,11 @@ import { PATCH_LAYER_ROWS } from '../../runtime/dsh-composition/patch-layer.mjs'
 // ★ 借用**同一份**「清单形状」正则（见下面 D2 一节）：两份会漂的键表就是本仓的旧账。
 import { MANIFEST_PATTERNS } from './reachability.mjs'
 import { REPO_WIDE_BASELINE } from './doc-table-integrity.mjs'
+// ★ 台账状态词表的**唯一所有者**是 `progress-check.mjs`。
+//   本模块第 44 轮自己手抄过一份"三个标记"的表（`✅|⏸|⬜`），
+//   于是认不出 🟡、报 144 而台账有 145——而那个错数正好能过门禁。
+//   ⇒ 现在**取**它，不再抄它（见 `LEDGER_STATUS_MARKERS` 那一段）。
+import { LEDGER_STATUS_MARKS } from './progress-check.mjs'
 
 export const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
@@ -146,9 +151,12 @@ export const REACHABILITY_BASELINE = 'docs/superpowers/prt/prt-reachability-base
  * ★★★ 第 44 轮：这里原来是 `✅|⏸|⬜` **三个**（写在 `tallyLedger` 里），
  * 而台账现在还有 **🟡**（"部分"）⇒ 少一个标记 = 少算一条，
  * 而少算出来的那个数**正好**能过 `handover-ledger-tallies`（见该事实的 `why`）。
- * ⇒ 提到模块级单独声明，并且**认不出来就抛**（`tallyLedger` 里）。
+ *
+ * ★★ 第 45 轮：**不再在这里列**，改为取 `progress-check.mjs` 的那张表——
+ * 它是台账格式（含状态词表）的唯一所有者。★ 这一行原本是该模块第 **5** 处
+ * 手抄的词表，而"手抄一份"正是第 44 轮那个缺陷的**形状**本身。
  */
-export const LEDGER_STATUS_MARKERS = Object.freeze(['✅', '🟡', '⏸', '⬜'])
+export const LEDGER_STATUS_MARKERS = LEDGER_STATUS_MARKS
 
 export function tallyLedger(text) {
   let done = 0; let partial = 0; let paused = 0; let todo = 0; let total = 0

@@ -317,3 +317,41 @@ test('⑬b ★★ 台账行取法：ledgerRowTexts 与 ledgerRows 认出同一�
   const b = rows.map((r) => r.prt).sort()
   assert.deepEqual(a, b, 'ledgerRowTexts 与 ledgerRows 认出的编号集合不同')
 })
+
+test('⑬c ★★★ 认不出的状态格必须**抛**——两个取法都不许安静丢行', () => {
+  // ★★ 第 45 轮实测（`scratch/_probe-status-poison.mjs`）：本模块把同一条状态正则
+  //   写了**三**遍（`ledgerRows`、`ledgerRowTexts`，外加 `NON_DONE_STATUSES` 那张
+  //   子集表），而它**自己的文件头**就在警告"两处各写一遍取法，正是本模块警告的
+  //   那种漂移"。往合成台账里放一个第 5 个标记（🔵），它安静地少一行。
+  //
+  //   ★ 而 ⑬b 那条"两个取法认出同一批编号"**抓不到它**——两边以**同样的方式**
+  //     各丢一行，所以左边 == 右边，判据照样绿。
+  //
+  //     > 一条"两个实现必须一致"的判据，在两个实现**一起错**的时候是绿的；
+  //     > 而"一起错"恰恰是"同一份取法被抄了两遍"最常见的失效方式。
+  //
+  //   ⇒ 现在两者都走 `progress-check.ledgerTaskRow()`，认不出来就抛。
+  const head = [
+    '# PRT 任务进度表',
+    '',
+    '| 任务 | 状态 | 证据 |',
+    '| --- | --- | --- |',
+  ]
+  const write = (mark) => {
+    const p = join(mkdtempSync(join(tmpdir(), 'iv-')), 'ledger.md')
+    writeFileSync(p, [...head, `| PRT-001 甲 | ${mark} | \`a.md\` |`].join('\n'))
+    return p
+  }
+
+  // ★ 正对照：四个已知标记都要收下（否则下面那条"抛"可能是"它什么都抛"）。
+  for (const mark of ['✅', '🟡', '⏸', '⬜']) {
+    assert.equal(ledgerRows(write(mark)).length, 1, `ledgerRows 没收下 ${mark}`)
+    assert.equal(ledgerRowTexts(write(mark)).length, 1, `ledgerRowTexts 没收下 ${mark}`)
+  }
+
+  // ★ 核心：第 5 个标记 ⇒ 两个取法都必须**抛**，不是"少一行"。
+  assert.throws(() => ledgerRows(write('🔵')), /状态格不是已知标记/,
+    'ledgerRows 认不出就跳过 ⇒ 那一行安静地消失')
+  assert.throws(() => ledgerRowTexts(write('🔵')), /状态格不是已知标记/,
+    'ledgerRowTexts 认不出就跳过 ⇒ 引用检查会悄悄少看一行')
+})

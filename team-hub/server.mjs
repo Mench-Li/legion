@@ -241,6 +241,7 @@ import { createConfigRoutes } from './routes/config.mjs'
 import { createCreateRoutes } from './routes/create.mjs'
 import { createCommentRoutes } from './routes/comment.mjs'
 import { createMembersRoutes } from './routes/members.mjs'
+import { createExecRoutes } from './routes/exec.mjs'
 import { createEmployeeManifestsRoutes } from './routes/employee-manifests.mjs'
 import { createTeamPlansRoutes } from './routes/team-plans.mjs'
 import { createPriceTablesRoutes } from './routes/price-tables.mjs'
@@ -5075,6 +5076,11 @@ const router = createRouter([
     json,
     contextPlanStore, CONTEXT_PLAN_ERRORS, handleRun,
   }),
+  createExecRoutes({
+    json,
+    db, audit, now,
+    listTasks, NON_AUTO_ROLES, handleWrite,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -6111,54 +6117,9 @@ async function handle(req, res, stripPrefix) {
       return
     }
 
-    if (req.method === 'GET' && path === '/api/exec') {
-      const scopeParam = url.searchParams.get('scope') ?? ''
-      const hit = scopeParam ? db.prepare('SELECT * FROM exec_state WHERE scope = ?').get(scopeParam) : undefined
-      json(res, 200, { scope: scopeParam, enabled: !!hit?.enabled, updatedAt: hit?.updatedAt ?? null })
-      return
-    }
-    if (req.method === 'POST' && path === '/api/exec') {
-      await handleWrite(req, res, (body, by, scope) => {
-        const targetScope = typeof body.scope === 'string' && body.scope.trim().length > 0 ? body.scope.trim() : scope
-        const enabled = body.enabled === true
-        db.prepare('INSERT INTO exec_state (scope, enabled, updatedAt) VALUES (?, ?, ?) ON CONFLICT(scope) DO UPDATE SET enabled=excluded.enabled, updatedAt=excluded.updatedAt')
-          .run(targetScope, enabled ? 1 : 0, now())
-        audit(by, targetScope, 'exec:toggle', null, { enabled })
-        return { scope: targetScope, enabled }
-      })
-      return
-    }
-    if (req.method === 'GET' && path === '/api/exec/queue') {
-      // 应由编排自动执行的任务：自动目标链中「非写码角色」的待办/进行中任务。
-      const scopeParam = url.searchParams.get('scope') ?? undefined
-      const rows = listTasks({ scope: scopeParam }).filter(t =>
-        (t.status === 'todo' || t.status === 'in_progress') &&
-        String(t.description ?? '').includes('[auto-goal]') &&
-        !NON_AUTO_ROLES.has(t.role ?? ''),
-      )
-      const pending = new Set(db.prepare("SELECT taskId FROM exec_requests WHERE status='pending'").all().map(r => r.taskId))
-      json(res, 200, { scope: scopeParam ?? 'all', tasks: rows.filter(t => !pending.has(t.id)) })
-      return
-    }
-    if (req.method === 'POST' && path === '/api/exec/request') {
-      // 用户点「派 AI 执行」：记录请求（含写码类任务），由执行守护消费。
-      await handleWrite(req, res, (body, by, scope) => {
-        const id = body.taskId
-        if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 taskId')
-        const t = db.prepare('SELECT scope FROM tasks WHERE id = ?').get(id)
-        if (!t) throw new Error(`未知任务 ${id}`)
-        db.prepare('INSERT INTO exec_requests (taskId, scope, status, createdAt) VALUES (?, ?, \'pending\', ?) ON CONFLICT(taskId) DO UPDATE SET status=\'pending\'')
-          .run(id, t.scope, now())
-        audit(by, t.scope, 'exec:request', id, {})
-        return { taskId: id, scope: t.scope, status: 'pending' }
-      })
-      return
-    }
-    if (req.method === 'GET' && path === '/api/exec/requests') {
-      const rows = db.prepare("SELECT * FROM exec_requests WHERE status='pending' ORDER BY createdAt").all()
-      json(res, 200, rows.map(r => ({ taskId: r.taskId, scope: r.scope, createdAt: r.createdAt })))
-      return
-    }
+    // ── 自动执行开关与请求队列（开关读/写 + 待执行队列 + 请求登记/查看） —— 已提取到 `./routes/exec.mjs`（PRT-316 第 24 族 / 切片 25）──
+    // 整段搬走：`server.mjs` 里现在**不再有** `/api/exec` 路由，该命名空间只住一个地方。
+    if (await router.dispatch(req, res, { path, url })) return
 
     // 智能体默认模型配置
     if (req.method === 'GET' && path === '/api/models') {

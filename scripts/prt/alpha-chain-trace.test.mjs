@@ -36,17 +36,30 @@ const ONE = (over = {}) => ({
   exists: (p) => (over.missing ?? []).includes(p) === false,
 })
 
-test('① ★★ 真仓库：九节、模块文件全在、首个硬断是 L5、链不全绿', () => {
+test('① ★★ 真仓库：九节、模块文件全在、**没有硬断**、链仍不全绿', () => {
   const t = traceChain()
   assert.equal(t.sections.length, 9, `§9 应当是九节，实际 ${t.sections.length}`)
-  assert.equal(t.allGreen, false, '整条链被报成全绿——第 32/33 轮的读数说 L5 是断的')
+  // ★ `allGreen` 仍是 false —— 但**理由变了**：不再是 L5 硬断，而是 L7/L9 两处软缺口。
+  //   这两件事用同一个 `false` 表达过，所以这里必须把"为什么不是全绿"说清楚，
+  //   否则"还有一处硬断"与"只剩软缺口"在这一行上是同一个读数。
+  assert.equal(t.allGreen, false, '整条链被报成全绿——L7/L9 两处软缺口还在（见下面的 softGaps）')
 
   // ★ 每个模块路径都必须是**真文件**（`file不存在`与"没人挂"不许混作一谈）
   const missing = t.sections.flatMap((s) => s.modules.filter((m) => !m.present).map((m) => m.module))
   assert.deepEqual(missing, [], `链定义里写了不存在的路径：${JSON.stringify(missing)}`)
 
-  assert.equal(t.firstHardBreak?.id, 'L5',
-    `最先硬断的应当是 L5（执行 Run），实际 ${t.firstHardBreak?.id ?? '（没有）'}`)
+  // ★★★ 第 44 轮改：这里曾经断言 `firstHardBreak?.id === 'L5'`。
+  //
+  //   `2f5a4b3`（§5 第 20 条 · 甲）把 `runtime-contract-server-row` 挂进了补丁层，
+  //   于是 L5 全部模块可达 ⇒ **§9 九节链上唯一的硬断没有了**。
+  //   本行因此变成"断言**没有**硬断"——而它仍然是有用的判据：
+  //   任何一节的核心模块掉回 gap，这里立刻红。
+  //
+  //   > 一条"盯着唯一那个硬断"的判据，在硬断被修好之后如果只是被删掉，
+  //   > 那么下一条硬断出现时**没人在看**——
+  //   > 所以正确动作不是删断言，是把它翻过来（从"是 L5"改成"没有"）。
+  assert.equal(t.firstHardBreak, null,
+    `§9 链今天不该有硬断，实际最先硬断的是 ${t.firstHardBreak?.id ?? '（没有）'}`)
   assert.deepEqual(t.softGaps.map((s) => s.id), ['L7', 'L9'],
     '软缺口的集合变了——要么真变了（请复核 §9 投影），要么判定逻辑跑偏')
 })
@@ -165,15 +178,22 @@ const sec = (id, { breaks = [], core = [], owner, ownerWhy } = {}) => ({
 
 const WHY = '这一条逐字点名了这个文件，并给了两个可选的处置动作。'
 
-test('⑨ ★★ 正对照：真仓库里**全部断点都有归属**，且恰有三节声明了归属', () => {
+test('⑨ ★★ 正对照：真仓库里**全部断点都有归属**，且恰有**两**节声明了归属', () => {
   const r = checkChainOwners()
   assert.equal(r.ok, true, '真仓库的断点归属有问题：' + JSON.stringify(r.violations))
-  // 链上今天有三处断点（L5 硬断 + L7/L9 软缺口），它们都必须带归属
+  // ★★★ 第 44 轮改：这里曾经是"恰有三节（L5 + L7/L9）"。
+  //
+  //   L5 通了（`2f5a4b3`），于是链上只剩 **L7/L9 两处软缺口**，
+  //   那个 "L5" 的归属指针随即被判成 `owner-stale`（"那个指针该删"）。
+  //   ⇒ 从三节变两节。**归属是给断点写的，不是给节写的**——
+  //     所以这一行的数量必须跟着断点数量走，不能停在"链上固定三处"。
   const t = traceChain()
   const withOwner = t.sections.filter((s) => s.owner !== undefined).map((s) => s.id)
-  assert.deepEqual(withOwner, ['L5', 'L7', 'L9'],
+  assert.deepEqual(withOwner, ['L7', 'L9'],
     `声明了归属的节变了：${JSON.stringify(withOwner)}`)
-  // ★ 反向：每一节**有断点**的都必须在那三个里面（否则 ⑩ 那条规则漏了）
+  // ★ 反向：每一节**有断点**的都必须在那两个里面（否则 ⑩ 那条规则漏了）
+  //   ★★ 这条反向对照是本节真正的价值：它让"归属数量"不是一个可以随便改的数字，
+  //      而是**由断点集合算出来的**。上面那行写死两个，这行保证它两个不重不漏。
   const broken = t.sections.filter((s) => s.hardBroken || s.softGap).map((s) => s.id)
   assert.deepEqual(broken, withOwner, '有断点的节与声明了归属的节对不上——判据有缝')
 })

@@ -245,6 +245,7 @@ import { createExecRoutes } from './routes/exec.mjs'
 import { createModelsRoutes } from './routes/models.mjs'
 import { createWebRoutes } from './routes/web.mjs'
 import { createActivityRoutes } from './routes/activity.mjs'
+import { createArtifactContentRoutes } from './routes/artifact-content.mjs'
 import { createRunBudgetMaySwitchModelRoutes } from './routes/run-budget-may-switch-model.mjs'
 import { createGoalSlicesRoutes } from './routes/goal-slices.mjs'
 import { createTeamPlanReadRoutes } from './routes/team-plan-read.mjs'
@@ -5230,6 +5231,10 @@ const router = createRouter([
     json,
     db, auditEvent,
   }),
+  createArtifactContentRoutes({
+    json,
+    artifactContent,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -5262,7 +5267,6 @@ async function handle(req, res, stripPrefix) {
     if (await router.dispatch(req, res, { path, url })) return
     // ── 任务上的五张记录表：进度 / 改动补丁 / 逐文件验收意见 / 产物 / 测试报告（都走 handleWrite，都 version+1） —— 已提取到 `./routes/task-records.mjs`（PRT-316 第 39 族 / 切片 41）──
     // 本族这 5 条已全部搬进模块，`server.mjs` 里不再有它们。
-    // ⚠️ **前缀下还有不属于本族的**（别顺手搬走）：GET /api/artifact/content
     if (await router.dispatch(req, res, { path, url })) return
     // ── 切片展开（testDesignerTaskId 必填，其余交给 expandGoalSlices） —— 已提取到 `./routes/goal-slices.mjs`（PRT-316 第 46 族 / 切片 48）──
     // 本族这 1 条已全部搬进模块，`server.mjs` 里不再有它们。
@@ -5541,12 +5545,10 @@ async function handle(req, res, stripPrefix) {
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/config` 路由，该命名空间只住一个地方。
     if (await router.dispatch(req, res, { path, url })) return
 
-    if (req.method === 'GET' && path === '/api/artifact/content') {
-      // R-3/S3 只读内容端点：任务登记产物文件内容（task + i；i 缺省取最新一条）。
-      const result = artifactContent(url.searchParams.get('task') ?? '', url.searchParams.get('i') ?? undefined)
-      json(res, result.status, result.body)
-      return
-    }
+    // ── 产物文件内容（状态码由域层给，路由原样透传） —— 已提取到 `./routes/artifact-content.mjs`（PRT-316 第 49 族 / 切片 51）──
+    // 本族这 1 条已全部搬进模块，`server.mjs` 里不再有它们。
+    // 归属 /api/artifact 的那 1 条都在这里了。
+    if (await router.dispatch(req, res, { path, url })) return
 
     json(res, 404, { error: `not found: ${path}` })
   } catch (e) {

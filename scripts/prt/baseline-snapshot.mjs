@@ -287,6 +287,7 @@ SOURCES.routesTeamPlanRead = join(ROOT, 'team-hub', 'routes', 'team-plan-read.mj
 SOURCES.routesGoalSlices = join(ROOT, 'team-hub', 'routes', 'goal-slices.mjs')
 SOURCES.routesRunBudgetMaySwitchModel = join(ROOT, 'team-hub', 'routes', 'run-budget-may-switch-model.mjs')
 SOURCES.routesActivity = join(ROOT, 'team-hub', 'routes', 'activity.mjs')
+SOURCES.routesArtifactContent = join(ROOT, 'team-hub', 'routes', 'artifact-content.mjs')
 
 /** 已提取出去的路由族模块（值 = 该文件里**声明式**路由的归属名）。 */
 export const ROUTE_FAMILY_SOURCES = Object.freeze([
@@ -338,6 +339,7 @@ export const ROUTE_FAMILY_SOURCES = Object.freeze([
   { module: 'routesGoalSlices', family: 'goal-slices', factory: 'createGoalSlicesRoutes' },
   { module: 'routesRunBudgetMaySwitchModel', family: 'run-budget-may-switch-model', factory: 'createRunBudgetMaySwitchModelRoutes' },
   { module: 'routesActivity', family: 'activity', factory: 'createActivityRoutes' },
+  { module: 'routesArtifactContent', family: 'artifact-content', factory: 'createArtifactContentRoutes' },
 ])
 SOURCES.experienceStore = join(ROOT, 'team-hub', 'experience-store.mjs')
 

@@ -1189,6 +1189,31 @@ test('⑰b ★★ 真仓库：读数块声明的总数 = 同一块里各套件�
   assert.equal(v2.actual, Number(m[1]))
 })
 
+// ★★★★★ 第 96 轮：⑰ 盯的是**读数块**的标题，而这份文档的**第一屏**还有一句活口径。
+//   它已经错过两次（第 80 轮在交付物 §一、第 95 轮在本文件开头），两次都是用手找出来的。
+test('⑰c ★★★★★ 真仓库：清单**开头那句口径**的"复核到第 N 轮" = 家族表最大轮次', () => {
+  const r = checkFacts({ ctx: defaultContext() })
+  const v = r.violations.find((x) => x.id === 'intervention-reviewed-round')
+  assert.equal(v, undefined,
+    '★ 清单开头那句口径与家族表脱节：' + JSON.stringify(v)
+    + '\n  第一屏是读者判断"这东西新不新"的**唯一**依据，'
+    + '\n  而它恰恰是**读的人唯一一定会看**的地方。'
+    + '\n  ⑰ 红不了这一处 —— 因为那一句**不在**读数块里。')
+  // ★ 反向控制：把那个数改小 ⇒ 必须红（证明上面那条不是恒绿）
+  const text = defaultContext().doc(INTERVENTION_DOC)
+  // ★★ 锚点必须与判据**同一处**：`复核到第 N 轮` 在本文件里有 3 处
+  //    （那句更正引用了旧值、家族行也引用了旧值与新值）。
+  //    只有那句**活口径**写成 `本文件已**复核到第 N 轮**`（整句加粗）。
+  const ANCHOR = /本文件已\*\*复核到第 (\d+) 轮\*\*/
+  const m = ANCHOR.exec(text)
+  assert.notEqual(m, null, '找不到那句口径 —— 本用例的锚点没了')
+  const lower = text.replace(ANCHOR, (all, a) => `本文件已**复核到第 ${Number(a) - 1} 轮**`)
+  assert.notEqual(lower, text, '改写没生效，这条控制是假的')
+  const r2 = checkFacts({ ctx: withDoc(INTERVENTION_DOC, () => lower) })
+  assert.ok(r2.violations.some((x) => x.id === 'intervention-reviewed-round'),
+    '把口径的轮次改小却没红 ⇒ 这条判据测不出"第一屏过期"')
+})
+
 // ══════════════════════════════════════════════════════════════════════════
 // ★★★ 第 52 轮：**最终报告**（交付物本身）的 §三 此前零判据
 //

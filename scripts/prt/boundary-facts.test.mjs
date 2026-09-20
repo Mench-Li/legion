@@ -37,6 +37,7 @@ import {
   GENERATED_STATUS_VOCAB, GENERATED_STATUS_RE, canonicalJson,
 } from './boundary-facts.mjs'
 import { LEDGER_STATUS_MARKS, STATUS_MARKS, ledgerTaskRow } from './progress-check.mjs'
+import { matrixItems, MATRIX_PATH } from './reachability.mjs'
 
 const REAL = checkFacts()
 
@@ -1462,4 +1463,40 @@ test('⑱ ★★ 交付物现行区里每一处分档说法都要等于台账（
     }
   }
   assert.deepEqual(bad, [], `现行区里的分档说法与台账不符：\n${bad.join('\n')}`)
+})
+
+// ── 第 61 轮：`第 N 条` 在同一节里指过**两个东西** ────────────────────────
+//
+//   实测（交付物 §2，相邻两行）：
+//
+//     L131 「…而那正是**第 1 条**」                  ← §2.0 表里 `先看` 那一列的**排名 1**
+//     L132 「解掉它同时关掉**第 15 条**（PRT-610）」   ← **§5 第 15 条**
+//
+//   > 同一节里"第 N 条"指两个东西时，读者分不出自己读到的是哪一个 ——
+//   > 而分不出的地方，恰好是"先看哪一格"这句话最要紧的地方。
+//
+//   ★ 文档自己早写对了：L118「（**§5** 第 20 条 · 甲）」、L130「（★ **§5** 第 25 条）」；
+//     而 L122 讲同一件事时用的是**「行」**。
+//
+//   ⇒ 现行区里 ① `第 N 条` 必须带 `§5` / `决策表` 限定词；② 那个 N 必须是 **§5 里真有的条号**。
+test('⑲ ★★ 交付物现行区里的 `第 N 条` 必须带限定词，且指得到 §5 里真有的那一条', () => {
+  const lines = readFileSync(resolve(REPO, FINAL_REPORT_DOC), 'utf8').split('\n')
+  const iArch = lines.findIndex((l) => /^## 三、逐轮留档/.test(l))
+  assert.ok(iArch > 0, '找不到 §三 边界')
+  const valid = matrixItems(MATRIX_PATH)
+  assert.ok(valid.size >= 29, `§5 决策表只取到 ${valid.size} 条 —— 边界没了，不能静默免检`)
+  const bare = []
+  const oob = []
+  for (let i = 0; i < iArch; i += 1) {
+    const l = lines[i]
+    for (const m of l.matchAll(/第\s*(\d{1,2})\s*条/g)) {
+      const pre = l.slice(Math.max(0, m.index - 10), m.index)
+      if (!/§5\s*$|决策表\s*$|表\s*$/.test(pre)) {
+        bare.push(`L${i + 1} …${l.slice(Math.max(0, m.index - 28), m.index + 14)}…`)
+      }
+      if (!valid.has(Number(m[1]))) oob.push(`L${i + 1} 第 ${m[1]} 条 不在 §5 里`)
+    }
+  }
+  assert.deepEqual(bare, [], `现行区里有不带限定词的 \`第 N 条\`（同一节里 §5 项与"先看排名"会撞）：\n${bare.join('\n')}`)
+  assert.deepEqual(oob, [], `现行区里引用了**不存在**的条号：\n${oob.join('\n')}`)
 })

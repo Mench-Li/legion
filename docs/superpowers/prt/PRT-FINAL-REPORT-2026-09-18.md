@@ -4,7 +4,7 @@
 - 仓库：`D:\project\DSH\legion`（DSH 检出 `D:\project\DSH\dsh\deepseek-harness\`）
 - 权威台账：[`PRT-PROGRESS.md`](./PRT-PROGRESS.md) —— **145 行 = 140 ✅ / 1 🟡 / 4 ⏸ / 0 ⬜**
 - 对照表：[`MULTI-AGENT-FEATURE-STATUS.md`](../../MULTI-AGENT-FEATURE-STATUS.md) —— F-01…F-25，**裁决项 1～29**
-- ★ **决策摘要**：[`DECISION-BRIEF.md`](../../DECISION-BRIEF.md) —— 把那 29 条压成「**你要说的那一句话**」，**按 §9 链排序**；★ **§0A 当初就是那条链唯一的硬断（第 20 条）** —— ★★★ **第 44 轮已落地**（2f5a4b3，选甲），那条链**不再有硬断**，见 §3.0z.2
+- ★ **决策摘要**：[`DECISION-BRIEF.md`](../../DECISION-BRIEF.md) —— 把那 29 条压成「**你要说的那一句话**」，**按 §9 链排序**；★ **§0A 当初就是那条链唯一的硬断（§5 第 20 条）** —— ★★★ **第 44 轮已落地**（2f5a4b3，选甲），那条链**不再有硬断**，见 §3.0z.2
 - 目标文档：[`MULTI-AGENT-FEATURE-OPTIMIZATION.md`](../../MULTI-AGENT-FEATURE-OPTIMIZATION.md) —— §1.2 状态注记校准 / §1.3 正文级偏离
 - 最近一轮 CI：**`.ci/r45c`**（HEAD `1a62c38`，**这一行就是被那次 CI 跑过的那棵树**）—— ⚠️ **7/9，exit 1**
   （`test` **1254292ms** + `doc` 红，`skipped=1` 为已知的 secret-store；树指纹 `ab3a77b49ee6a67e` ——
@@ -89,7 +89,7 @@
 | §6 优先级与退出条件 | ★ `spec-tests-7.mjs` 拿它当**锚** | 5 条退出条件，被 §7 的归属**逐字**引用校对 |
 | **§7 测试与指标** | ★ `spec-tests-7.mjs`（**第 37 轮新增**） | 6 条 → 6 行投影（5 退出条件 + 1 观测）、**18 处落点** |
 | §8 代码参考与建议落点 | 落点已逐个核过 | 表一那 6 个「Legion 现有参考」**全部存在且被跟踪**；表二是**仓外**绝对路径（不应核） |
-| §9 商业 Alpha 完成标准 | ★ `alpha-chain` 一族（第 33/34 轮） | 九节链**当时断在第 5 节** = **第 20 条**（★★★ 第 44 轮已落地，2f5a4b3；今天 最先硬断的一节：（没有），只剩 L7/L9 两处软缺口） |
+| §9 商业 Alpha 完成标准 | ★ `alpha-chain` 一族（第 33/34 轮） | 九节链**当时断在第 5 节** = **§5 第 20 条**（★★★ 第 44 轮已落地，2f5a4b3；今天 最先硬断的一节：（没有），只剩 L7/L9 两处软缺口） |
 
 ★ **结论：目标文档的每一节，现在要么有判据管着，要么有文档自己写明的"机械判不了"。**
 在此之前的任何一轮，这句话都答不出来。
@@ -107,14 +107,14 @@
 ### 2.0 一页纸：**要您做的决定**（按"不决定的后果"排序）
 
 > 这张表是 §2.1 / §2.2 / §2.3 的**合并索引**，不是新内容——它存在的理由只有一个：
-> §2.1 的 A–L（外加第 30 轮新增的**第 29 条**）每一格都写满了一屏，而您需要先知道**先看哪一格**。
+> §2.1 的 A–L（外加第 30 轮新增的**§5 第 29 条**）每一格都写满了一屏，而您需要先知道**先看哪一格**。
 > 每一行的"详见"都指到下面那张全表里的同一个字母。
 >
 > ★★ **第 33 轮按目标文档 §9 重排过一次**：那一条九节的链当时断在第 5 节，
-> 而**断点就是第 20 条**（Runtime 契约服务端那一行没挂）⇒ 它当时是第 **0** 条。
+> 而**断点就是§5 第 20 条**（Runtime 契约服务端那一行没挂）⇒ 它当时是第 **0** 条。
 > 排序依据是**目标文档自己的"完成标准"**，不是我的偏好。见 §3.0o。
 >
-> ★★★ **第 44 轮更新：第 0 条已经落地，那条链上不再有硬断。**
+> ★★★ **第 44 轮更新：上面表里「先看 0」那一行已经落地，那条链上不再有硬断。**
 > 另一个会话落了 `2f5a4b3`（§5 第 20 条 · **甲**）：
 > `PATCH_LAYER_ROWS` 从 5 行变 **7 行**（新增 `runtime-host-registrar` / `runtime-contract-server`），
 > `legion-host.patch.yml` 从 3 行落点变 **5 行**（4 `insert` + 1 `patch-over`）。
@@ -123,18 +123,18 @@
 
 | 先看 | 决定 | 一句话 | 不决定的后果 | 详见 |
 | --- | --- | --- | --- | --- |
-| ★★★ **0** | ✅ **已落地**（第 44 轮，`2f5a4b3`）：**第 20 条** Runtime 契约**服务端那一行**挂进补丁层（选**甲**） | 目标文档 §9 那条九节链当时**唯一的硬断**（L5「DshRuntimeAdapter 执行 Run」）。消费侧已接线，服务端那一行**不在** `PATCH_LAYER_ROWS`、**没有**生产 importer ⇒ 发布永不被写出 ⇒ worker 报 `EXECUTOR_HOST_PORT_REQUIRED`、**不认领任何任务**。**甲**＝挂上但让 `probeRuntime` 如实报 unknown（fail closed） | ~~产品的完成标准今天不成立~~ ⇒ **已解除**：`PATCH_LAYER_ROWS` 5→**7** 行、`legion-host.patch.yml` 3→**5** 行落点；那条断链从"一声不响地缺席"变成"**在树里、apply 过、按具名码拒绝**"（`RUNTIME_CONTRACT_ROW_NO_INPUTS_FACTORY`）。★ 但它**今天仍然干不了活**——真实部署的读数仍是 worker 明说自己干不了活；变的是"它是**可见地**没接上"而不是"没人知道" | §3.0o / §3.0z.2 / `DECISION-BRIEF.md` §0A |
+| ★★★ **0** | ✅ **已落地**（第 44 轮，`2f5a4b3`）：**§5 第 20 条** Runtime 契约**服务端那一行**挂进补丁层（选**甲**） | 目标文档 §9 那条九节链当时**唯一的硬断**（L5「DshRuntimeAdapter 执行 Run」）。消费侧已接线，服务端那一行**不在** `PATCH_LAYER_ROWS`、**没有**生产 importer ⇒ 发布永不被写出 ⇒ worker 报 `EXECUTOR_HOST_PORT_REQUIRED`、**不认领任何任务**。**甲**＝挂上但让 `probeRuntime` 如实报 unknown（fail closed） | ~~产品的完成标准今天不成立~~ ⇒ **已解除**：`PATCH_LAYER_ROWS` 5→**7** 行、`legion-host.patch.yml` 3→**5** 行落点；那条断链从"一声不响地缺席"变成"**在树里、apply 过、按具名码拒绝**"（`RUNTIME_CONTRACT_ROW_NO_INPUTS_FACTORY`）。★ 但它**今天仍然干不了活**——真实部署的读数仍是 worker 明说自己干不了活；变的是"它是**可见地**没接上"而不是"没人知道" | §3.0o / §3.0z.2 / `DECISION-BRIEF.md` §0A |
 | ★★★ 1 | ✅ **已落地**（`6ff673d`）：**A** 把 **4** 把范围键加进 runtime 的 `envNames` | 那**一个数组**（`product/process-manifest.mjs:284-285`）原本缺 `LEGION_PATH_SCOPE` / `LEGION_CONNECTOR_DECLARATIONS` / `LEGION_EXECUTION_SCOPE` / `LEGION_EXTERNAL_API_SCOPE` | ~~三道范围检查与连接器判定在**真实部署里全都不生效**（而各自的用例全绿）~~ ⇒ **已解除**：四道范围检查第一次真的能到执行面 | §2.1 **A** |
 | ★★★ 2 | **K**：岗位清单说的是「Legion 能力名」还是「执行面工具名」 | 两个词汇表**结构上不相交**（`tool-capability.mjs:465-492` 早写过同一件事）⇒ `whitelist`（PRT-603）**配了也接不上**，接上去是一个**全拒**的强制面 | 这一道**永远接不上**；而"接上去"的表现看起来像"岗位清单写错了" | §2.1 **K** / §3.0f |
 | ★★★ 3 | **H**：政策门要不要从连接器声明里读「能力」 | MCP 公开名不在 `tool-capability.mjs` 目录里 ⇒ 连接器层**只能更严、不能更松** | 连接器策略事实上只用于收紧；"配了 `allow`"与"没接上"的**最终判决相同** | §2.1 **H** |
 | ★★ 4 | **I**：两张 MCP 表谁是权威 | `execution-scope.mjs` 的 `mcp` 段 vs F-21 的连接器登记表 | 两种坏结果各占一半（两道对同一工具给**两个**结论 / `mcp` 段只能表达"没有授权"） | §2.1 **I**（★ §5 第 **25** 条） |
-| ★★ 5 | **J**：外部 API 授权表要不要管 scheme | `checkExternalApi` 不看 scheme ⇒ `ftp://api.example.com/api/items/1` 会被放行 | 今天不致命**只因为**那一格在真部署里是 `false`——而那正是第 1 条 | §2.1 **J** |
-| ★★ 6 | **L**：那条工具账出站车道的**文件放在哪个目录** | 第 22 轮造出了写入侧（`runtime/toolcall/spool.mjs`）与收账侧（`orchestrator/worker/toolcall-drain.mjs`），并在**真库**上把环走通——而生产里还没人调它们，因为收账方**拿不到那个目录** | ★ **第 33 轮升级**：这两个模块是 §9 链 **L7 的软缺口**——解掉它同时关掉第 15 条（PRT-610）与 L7 | §2.1 **L** / §3.0g / §3.0o |
+| ★★ 5 | **J**：外部 API 授权表要不要管 scheme | `checkExternalApi` 不看 scheme ⇒ `ftp://api.example.com/api/items/1` 会被放行 | 今天不致命**只因为**那一格在真部署里是 `false`——而那正是「先看 1」那一行（**A**，已落地） | §2.1 **J** |
+| ★★ 6 | **L**：那条工具账出站车道的**文件放在哪个目录** | 第 22 轮造出了写入侧（`runtime/toolcall/spool.mjs`）与收账侧（`orchestrator/worker/toolcall-drain.mjs`），并在**真库**上把环走通——而生产里还没人调它们，因为收账方**拿不到那个目录** | ★ **第 33 轮升级**：这两个模块是 §9 链 **L7 的软缺口**——解掉它同时关掉§5 第 15 条（PRT-610）与 L7 | §2.1 **L** / §3.0g / §3.0o |
 | ★★ 7 | ✅ **已落地**（`896fcc8` 补生产者 + **第 44 轮**补"成功 Run 那条路"）：**B**：`persistRunRecord()` 传 `peakResource` | 记录层已能带、能校验、能落盘、能读回（判据 47 例） | ~~PRT-009 停在 ⏸~~ ⇒ **那一半已解除**：`launcher.mjs:1270` 现在带 `peakResource`；第 44 轮又在 `supervisor.mjs` 的**主动停止**分支补上报，并第一次跑通端到端真读数（194.5 MiB 原样落盘）。★ PRT-009 **仍是 ⏸**，卡的是"真实部署上一次 Run 的**基线数值**" | §2.1 **B** / §3.0z |
 | ★★ 8 | **D**：`TEAM_HUB_TOKEN` 进 `envNames`，还是从 `fields` 拿掉 | "这个进程**能配**它"与"它**能拿到**它"必须有一处让步 | 一个**读不出、也不报错**的配置项 | §2.1 **D** |
 | ★ 9 | **C**：死代码处置 | 模块级 **9** 个不可达 / 函数级 **43** 条 | "死代码还有多少"这个数**只涨不跌** | §2.1 **C** |
 | — | **E / F / G**（环境） | 真额度**已验**；剩下是平台边界（Windows 上不会有自动执行）、真实外部用户、真实用户项目 | 三条 ⏸ 台账行 | §2.2 |
-| ★★ 10 | **第 29 条**：`RunRequest.env`（环境变量白名单）要不要有真消费者 | 两份规格都写"RunRequest **必须包含**环境变量白名单"；实测它**不在必填字段里**、**被校验**、**缺席静默折成 `[]`**、而**读者一个都没有** ⇒ 报不报它，对执行**没有任何影响** | 这一条**永远不起作用**，而它在契约层**看起来是实现了的**（字段在、校验在、注释还引注了 spec §6.1）——**任何字面核对都会通过** | §2.1 **第 29 条** / §3.0k |
+| ★★ 10 | **§5 第 29 条**：`RunRequest.env`（环境变量白名单）要不要有真消费者 | 两份规格都写"RunRequest **必须包含**环境变量白名单"；实测它**不在必填字段里**、**被校验**、**缺席静默折成 `[]`**、而**读者一个都没有** ⇒ 报不报它，对执行**没有任何影响** | 这一条**永远不起作用**，而它在契约层**看起来是实现了的**（字段在、校验在、注释还引注了 spec §6.1）——**任何字面核对都会通过** | §2.1 **§5 第 29 条** / §3.0k |
 | — | **PRT-316**（时间） | 最早 **2026-09-24**（**绝对日期**，不写"还差几天"）；评审闸门**已过** | 台账里唯一的 **🟡** | §2.3 |
 
 ★ **前两条是同一类，也是最容易被漏掉的一类**：它们都不是"还没做"，
@@ -151,9 +151,9 @@
 
 | # | 项 | 状态 | 精确的最后一根线 | 为什么我没做 |
 | --- | --- | --- | --- | --- |
-| **A** | **第 19 条**：部署配置键 → 组合根 | ★ **本轮已推进一大步**：投递面建好了（`connector-port.mjs` → `root-row.mjs`），`connectorJudgment` 在有那个键时**真的**是 `true` | 剩下的那一根线**只剩一处，而且与 `LEGION_PATH_SCOPE` 是同一处**：`LEGION_CONNECTOR_DECLARATIONS` 在 `runtime/config-schema.mjs` 的 `fields` 里，却**不在** `product/process-manifest.mjs` 的 runtime `envNames` 里。决定性实测：`buildChildEnv()` 对未声明的键在 `values` 里**抛**、在 `baseEnv` 里**静默丢掉** | `product/process-manifest.mjs` 是**另一会话的在制品**（`git status` 显示 M）。加一行到那个数组即可，但按纪律不碰 |
+| **A** | **§5 第 19 条**：部署配置键 → 组合根 | ★ **本轮已推进一大步**：投递面建好了（`connector-port.mjs` → `root-row.mjs`），`connectorJudgment` 在有那个键时**真的**是 `true` | 剩下的那一根线**只剩一处，而且与 `LEGION_PATH_SCOPE` 是同一处**：`LEGION_CONNECTOR_DECLARATIONS` 在 `runtime/config-schema.mjs` 的 `fields` 里，却**不在** `product/process-manifest.mjs` 的 runtime `envNames` 里。决定性实测：`buildChildEnv()` 对未声明的键在 `values` 里**抛**、在 `baseEnv` 里**静默丢掉** | `product/process-manifest.mjs` 是**另一会话的在制品**（`git status` 显示 M）。加一行到那个数组即可，但按纪律不碰 |
 | **B** | **PRT-009 的最后一根线** | 峰值资源落盘 | `launcher.mjs` 的 `persistRunRecord()` 要把 `peakResource` 传进来（记录层已能带、能校验、能落盘、能读回，判据 47 例、变异 6/6） | `product/launcher/launcher.mjs` 是**另一会话的在制品**，按纪律不碰 |
-| **C** | **第 16 条**：死代码处置 | 待裁决 | 模块级探针：**9** 个不可达模块；函数级探针：**43** 条（其中 `product/` 一簇 **23** 个）。9 vs 43 的差本身就是裁决依据 | 这是"要不要删/要不要接"的**产品决定**，不是代码问题 |
+| **C** | **§5 第 16 条**：死代码处置 | 待裁决 | 模块级探针：**9** 个不可达模块；函数级探针：**43** 条（其中 `product/` 一簇 **23** 个）。9 vs 43 的差本身就是裁决依据 | 这是"要不要删/要不要接"的**产品决定**，不是代码问题 |
 | **D** | ★★ **`TEAM_HUB_TOKEN` 到底该不该进 runtime 的 `envNames`**（本轮**新查出**，早于本轮且**没有任何归属**） | 待裁决 | `runtime/dsh-composition/root.mjs` 的 `readString(source, keys)` **确实**会读它（`ENFORCEMENT_CONFIG_FIELDS.hubToken`），但它**不在** `product/process-manifest.mjs` 的 runtime `envNames` 里 ⇒ **配了也传不到进程**。不致命的原因是它**可选**（`MISSING_FIELD_CODES` 里没有它，缺了不拦装配） | 两条路都行、但必须选一条：**①** 加进 runtime 的 `envNames`（那就真的能配了）；**②** 从 `runtime/config-schema.mjs` 的 `fields` 里**拿掉**它（那就别再声称本进程能配它）。"这个进程能配它"与"它能拿到它"必须有一处让步——★ 我**没有**替您选 |
 | **E** | ★★★ **F-21 那条「未声明就拒绝」的教义要不要在生产里生效** | ★ **第 17 轮已解决**（原记"需要一条本仓没有的源信号"是**错**的——约定在执行引擎那边） | 新增 `runtime/connectors/public-name.mjs` 逐字镜像 DSH 的 MCP 公开名契约（`mcp__<serverName>__<rawName>`，逐字读 `packages/mcp/mcp-client/src/tools.ts`），并接成归属的**第一条**依据 ⇒ **`mcp__github__delete_repo` 从 `allow` → `deny`**，理由 `[连接器 github] …没有声明工具「…」`。判据含**一条把 DSH 真源码切片求值对跑 18 组**的用例（18/18 一致） | 本条已不需裁决。★ 而它**照出了两条新的**，见下面的 F/G |
 | **F** | ★★★ **连接器声明里的工具名该写「公开名」还是「裸名」**（第 17 轮**新查出**；第 18 轮**功能上已两可**，只剩约定要定） | 只需定约定 | 声明里写的是**裸名**（`list_issues`），而**线上来的永远是公开名**（`mcp__github__list_issues`）。第 17 轮实测：调 `mcp__github__list_issues` ⇒ **`deny`「没有声明工具」** ⇒ **一个正确声明过的工具，在真 DSH 进程里会被拒**。★★ **第 18 轮已修**：`registry.mjs` 的 `declaredToolNames` 让登记表**同时**认两个名字（归属与判定共用一份实现），实测该调用在**连接器层**从 `deny` 变成 **`allow`** | ★ 功能上**两种写法现在都能工作**。**不要**为"统一"删掉裸名那一半——它兜住"连接器声明一个 DSH 核心工具名"那一类合法用法。★ 也**不许**在归属时"把命名空间剥掉"：公开名在归一化/截断时会被替换成 12 位 SHA-256 后缀（`mcp__github__a b` ⇒ `mcp__github__a_b_200f08ef849a`），那时**剥不出**原名；`tools.ts:9-10` 逐字写着 "the public name is never parsed to recover it"。★ 建议**按连接器自己那一侧的名字写**（可读，且是唯一总能写对的形式），由登记表负责换算 |
@@ -165,8 +165,8 @@
 | **J** | ★★★ **外部 API 授权表要不要管 scheme**（第 20 轮**新查出**，**本表最新的一条**） | 待裁决 | 给 PRT-606 接上端口之后，`checkExternalApi` 的**输入**第一次真的从线上来了。而它**不看 scheme**——`normalizeHost` 只取 host、`normalizeUrlPath` 只取 path，`scheme` 从头到尾没被读过（`SCHEME_DENIED` 那一条归 PRT-605 的 `checkNetwork`）。⇒ 精确读数：**一个 `ftp://api.example.com/api/items/1` 只要 host 与模式对得上，就会被 `externalApiScope` 放行** | ★ 我**没有**顺手加"必须 http(s)"——那是**发明策略**（PRT-253 §3 明令禁止发明默认值），而"哪些 scheme 算外部 API"是一个产品决定。三条路：**(a)** 保持现状（scheme 只由 `checkNetwork` 管，两道各管一段）；**(b)** 让 `checkExternalApi` 也拒非 http(s)（一道能自洽，但从此两道对同一个 URL 有两套 scheme 规则）；**(c)** 在端口适配器里拒（**最坏**：把策略写进适配器，而适配器本该只做形状转换）。★ 它今天**不致命**的原因**不是**"已经拦住了"，是"这一格在真实部署里仍是 `false`"——两件事不能混。★ 而它**为什么仍然要记**：两道检查谁先谁后在 `preExecute` 上是**短路**（先拒的说了算），不是真的一次取严合并；那个顺序一旦被改，`ftp://` 这类 URL 的处置就跟着变，而**没有任何读数会发现** |
 
 | **K** | ★★★ **岗位清单说的是「Legion 能力名」还是「执行面工具名」**（第 21 轮**新查出**，**本表最新的一条**） | 待裁决 | 第 21 轮把 `DECISION-RUNREQUEST-EXECUTION-PLANE.md` §11 **逐字留下的**两处"我没有量"量掉了：`whitelist`（PRT-603）这道缺口**不在配置里**——唯一那个产出者 `permitsTool`（`employee-manifest.mjs:317`）的输入是 **Legion 能力名**（`read-file` / `git-push` / …），而桥交给这个端口的投影里那个工具名是**执行面（DSH）名**（`read` / `write` / `bash` / `web_fetch` / …），两个空间**结构上不相交**（`tool-capability.mjs:465-492` 早就逐字写过这件事——那条讲的是**静态下限**，`createHardFloorGuard` 只看 `execution.name`、中间没有翻译）。实测：同一份 permit，喂 Legion 名 ⇒ **放行**；喂 DSH 名 ⇒ **一个都不放行**，而把 `maxRisk` 抬到最高也**救不了**（拒因从 `risk-above-ceiling` 挪到 `unknown-tool-not-named`，**还是拒**）⇒ 只要喂进来的是 DSH 名，这道白名单**永远只能拒、不可能放行** | ★ 我**没有**接线，也**没有**"顺手加一个翻译"——因为翻译**不是机械的**：`LEGION_TOOL_ROUTING` 的反推在 `bash` / `pwsh`（各 4 个：`run-command` / `git-status` / `git-commit` / `git-push`）与 `web_fetch`（2 个：`fetch-url` / `call-external-api`）上**一对多**，而 `bash` 那一堆里**同时塌着**低风险的 `git-status` 与高风险的 `git-push`。三条路：**(a)** 让 `permitsTool` 收**执行面名** + 一份**执行面能力表**（把词汇表换到线上那一侧，`tool-capability.mjs` 要跟着扩）；**(b)** 继续收 Legion 名，新增一层**带取舍的翻译**（取严？看参数？——那个取舍本身就是决定）；**(c)** 让岗位清单**直接写执行面工具名**（最直白，但清单从此绑死 DSH 的名字，与"能力名"那条设计理由冲突）。★ 而它**为什么仍然要记**：这一道今天**不是"暂时没配"**——配了也只会得到一个**全拒**的强制面，而那个全拒**看起来像"岗位清单写错了"**。★ 顺带记账：仓库里有**两个同名 `EmployeeManifest`**（强制面 `MANIFEST_FIELDS` **10** 个 / 上下文 `stableRecord` 写死 **11** 键），**两个方向都不可转换**（context→强制面**抛**、强制面→context **丢字段**）——它是否要合并是**另一个**裁决 |
-| **第 29 条** | ★★ **`RunRequest.env`（环境变量白名单）要不要有真消费者**（第 30 轮**新查出**，**本表最新的一条**） | 待裁决 | 两份规格都把它写成 RunRequest 的**必要内容**（目标文档 `:146` 逐字「`RunRequest` 必须包含 …环境变量白名单和工具权限」；设计规格 `:195` 同）。第 30 轮逐项量了一遍（`scratch/_probe-env-whitelist.mjs`）：① **不在** `RUN_REQUEST_REQUIRED`（15 个必填字段）里；② 给了**会**校验形状（`run.mjs:218-222`）；③ 不给**静默补成 `[]`**（`run.mjs:227`）；④ **读者一个都没有**——全仓 `req.env` / `request.env` **零命中**，`runtime/adapters/**` 没有任何一处碰它。⇒ 一次 Run 报不报白名单，对执行**没有任何影响** | ★ **不许**顺手改成必填：今天唯一的生产者（`orchestrator/worker/executor.mjs:1061-1091`）**不发**这个字段，改必填等于**逼每个人编一份**白名单——而同一个文件 `run.mjs:97-125` 用一整段论证过**为什么那正是错的形状**（它为 `enforcementFloor` 选的是三态 `absent`/`installed`/`refused`，原话：「一个'用必填字段把缺席挡在门外'的契约，与一个'让每个人都编一份空下限才进得来'的契约，是同一个东西」）。★ 两条路：**①** 给它接一个**真消费者**（那它才是一条真的白名单，且要照 PRT-214 的五性质办）；**②** 承认环境的作用域**本来**就是**进程级**的（`product/process-manifest.mjs` 的 `envNames` + `buildChildEnv()`——今天真正在起作用的那一层），于是把两句"必须包含"改掉、并决定这个字段是留还是删。★ 它**不作恶**的原因只有一个：这一格本来就没被消费——"**它没伤人**"与"**它是对的**"是两件事。★ **与 §2.1 里别的条目都不同**：其余每条的红都是"做了而没生效"，这一条是"**字面为真、而断言的东西是惰性的**"——把它拿去做任何字面核对**都会通过** |
-| **L** | ★★★ **那条出站车道的文件该放在哪个目录**（第 22 轮**新查出**，**本表最新的一条**） | 待裁决 | 第 22 轮给决策表第 15 条（PRT-610 的写入方）造了一条**逐 Run 的载荷**：写入侧 `runtime/toolcall/spool.mjs`（套件 `toolcall-spool` 14 例）、收账侧 `orchestrator/worker/toolcall-drain.mjs`（套件 `toolcall-drain` 13 例），并在**真 SQLite** 上把整条环走通（执行面无 token 写 spool → 收账侧有 token 调 `recordToolCall`/`markDispatched`/`recordResult` → `recorded` 翻成 `true`，并有否定对照）。⚠️ **但生产里还没有人调它们**，而缺的**不是代码**：收账的一方今天拿不到 spool 的目录（hub 的库是 `team-hub/team.db`，`server.mjs:279`，它**不读** `LEGION_DATA_DIR`），而**猜一个两边都同意的路径**正是 PRT-253 §3 禁止的"发明默认值"⇒ 立为决策表**第 28 条** | **不决定**则第 15 条停在原处：表在、读面在、就绪判据在，而 `decisionSourceRecorded` **依然没有任何产出者**——发布门禁永远判否。★ 两个候选接缝已读出（hub 进程 / `root-row.mjs:591` 的 `onDecision`），但后者必须从**按 Run 安装**的缝读 runId——`root-row.mjs` 是**进程级单例**，在那儿绑死一个 Run 会让整个进程只往**第一个** Run 的账本里写。详见 §3.0g |
+| **§5 第 29 条** | ★★ **`RunRequest.env`（环境变量白名单）要不要有真消费者**（第 30 轮**新查出**，**本表最新的一条**） | 待裁决 | 两份规格都把它写成 RunRequest 的**必要内容**（目标文档 `:146` 逐字「`RunRequest` 必须包含 …环境变量白名单和工具权限」；设计规格 `:195` 同）。第 30 轮逐项量了一遍（`scratch/_probe-env-whitelist.mjs`）：① **不在** `RUN_REQUEST_REQUIRED`（15 个必填字段）里；② 给了**会**校验形状（`run.mjs:218-222`）；③ 不给**静默补成 `[]`**（`run.mjs:227`）；④ **读者一个都没有**——全仓 `req.env` / `request.env` **零命中**，`runtime/adapters/**` 没有任何一处碰它。⇒ 一次 Run 报不报白名单，对执行**没有任何影响** | ★ **不许**顺手改成必填：今天唯一的生产者（`orchestrator/worker/executor.mjs:1061-1091`）**不发**这个字段，改必填等于**逼每个人编一份**白名单——而同一个文件 `run.mjs:97-125` 用一整段论证过**为什么那正是错的形状**（它为 `enforcementFloor` 选的是三态 `absent`/`installed`/`refused`，原话：「一个'用必填字段把缺席挡在门外'的契约，与一个'让每个人都编一份空下限才进得来'的契约，是同一个东西」）。★ 两条路：**①** 给它接一个**真消费者**（那它才是一条真的白名单，且要照 PRT-214 的五性质办）；**②** 承认环境的作用域**本来**就是**进程级**的（`product/process-manifest.mjs` 的 `envNames` + `buildChildEnv()`——今天真正在起作用的那一层），于是把两句"必须包含"改掉、并决定这个字段是留还是删。★ 它**不作恶**的原因只有一个：这一格本来就没被消费——"**它没伤人**"与"**它是对的**"是两件事。★ **与 §2.1 里别的条目都不同**：其余每条的红都是"做了而没生效"，这一条是"**字面为真、而断言的东西是惰性的**"——把它拿去做任何字面核对**都会通过** |
+| **L** | ★★★ **那条出站车道的文件该放在哪个目录**（第 22 轮**新查出**，**本表最新的一条**） | 待裁决 | 第 22 轮给决策表第 15 条（PRT-610 的写入方）造了一条**逐 Run 的载荷**：写入侧 `runtime/toolcall/spool.mjs`（套件 `toolcall-spool` 14 例）、收账侧 `orchestrator/worker/toolcall-drain.mjs`（套件 `toolcall-drain` 13 例），并在**真 SQLite** 上把整条环走通（执行面无 token 写 spool → 收账侧有 token 调 `recordToolCall`/`markDispatched`/`recordResult` → `recorded` 翻成 `true`，并有否定对照）。⚠️ **但生产里还没有人调它们**，而缺的**不是代码**：收账的一方今天拿不到 spool 的目录（hub 的库是 `team-hub/team.db`，`server.mjs:279`，它**不读** `LEGION_DATA_DIR`），而**猜一个两边都同意的路径**正是 PRT-253 §3 禁止的"发明默认值"⇒ 立为决策表**§5 第 28 条** | **不决定**则§5 第 15 条停在原处：表在、读面在、就绪判据在，而 `decisionSourceRecorded` **依然没有任何产出者**——发布门禁永远判否。★ 两个候选接缝已读出（hub 进程 / `root-row.mjs:591` 的 `onDecision`），但后者必须从**按 Run 安装**的缝读 runId——`root-row.mjs` 是**进程级单例**，在那儿绑死一个 Run 会让整个进程只往**第一个** Run 的账本里写。详见 §3.0g |
 
 > **A 与 B 都可以由另一会话收尾，或由您在它提交后让我收尾。** 两处都精确到一处调用点。
 >
@@ -185,7 +185,7 @@
 
 | # | 项 | 状态 | 阻塞 |
 | --- | --- | --- | --- |
-| D | **PRT-253** | ⏸ | 要一次**真的自动执行**（worker → Runtime 契约 → DSH → 模型）。真额度**已经花过且已验**（`dsh --profile headless` → exit=0、9.2s、`PONG`），剩下的是平台边界：`docs/STATUS.md` §4 第 15 条（Windows 上不会有自动执行） |
+| D | **PRT-253** | ⏸ | 要一次**真的自动执行**（worker → Runtime 契约 → DSH → 模型）。真额度**已经花过且已验**（`dsh --profile headless` → exit=0、9.2s、`PONG`），剩下的是平台边界：`docs/STATUS.md` §4 §5 第 15 条（Windows 上不会有自动执行） |
 | E | **PRT-256** | ⏸ | 需**真实外部用户** |
 | F | **PRT-910** | ⏸ | 需**真实用户项目** |
 

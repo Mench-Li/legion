@@ -469,6 +469,73 @@ export function gapPointerViolations(entries, items) {
   return { missing, dangling }
 }
 
+/**
+ * `reason` 里的**位置指称**（"同上" / "上面那条" / "上一条"）必须真的指得上。
+ *
+ * ## 为什么有这条规则（第 49 轮实测到一次**已经发生**的错位）
+ *
+ * 44 条 baseline 里 **18 条**的 `reason` 以「同上」开头 —— 它是一个
+ * **相对指针**（"和上面那条一样"），而不是内容。于是它的含义
+ * **由数组次序决定**，而数组次序不承担语义、也没有任何判据看着它。
+ *
+ * ★ 而这**不是理论风险**：`runtime/toolcall/spool.mjs` 的 reason 写着
+ *
+ *     同上（那条缝的**写入侧**：执行面没有 TEAM_HUB_TOKEN …）。
+ *     它的消费者就是**上面那条收账侧**，因此两条的阻塞是**同一个**位置决定 …
+ *
+ *   而"上面那条"今天是 `runtime/packs/store.mjs`（`gap`，裁决处 **§5 第 19 条**）。
+ *   真正的收账侧 `orchestrator/worker/toolcall-drain.mjs` 在下标 **2**，与它**不相邻**。
+ *   ⇒ 那句话里"上面那条"从它被写下时的收账侧，**悄悄变成了另一个子系统的条目**，
+ *     而它的文字**一个字都没改**。JSON 仍然合法、class 没变、条数没变 —— 没有东西会报。
+ *
+ *   > 一条相对指称在表里插进一行无关条目之后，
+ *   > 会**改变另一行说的话**，而不改变那一行的任何一个字。
+ *
+ * ## 规则（两条，都能在今天的表上跑）
+ *
+ *   · `no-predecessor` —— 它是第一条，"上一条"不存在；
+ *   · `class-mismatch` —— 上一条与它**不是同一类**（`by-design`/`deliberate`/`gap`
+ *     混在一起时，"同上"继承的是另一类条目的理由）；
+ *   · `owner-mismatch` —— 本条声明了裁决处，而上一条声明的是**另一个**条号
+ *     （或者上一条没声明）。这正是 `spool.mjs` 那一条。
+ *
+ * ★ 放过的：同一类、且裁决处相同的连续条目（例如 7 条 `product/upgrade/*`
+ *   都写「同上（升级链的一环）」）——那是**同一组**，指针是对的。
+ *
+ * @param {Array<{file: string, class: string, reason?: string}>} entries 基线条目（**按数组次序**）
+ * @returns {Array<{file: string, why: string}>}
+ */
+export function positionalReasonViolations(entries) {
+  const POSITIONAL = /同上|上面那条|上一条/
+  const itemOf = (e) => {
+    const m = /§5\s*第\s*(\d+)\s*条/.exec(e.reason ?? '')
+    return m === null ? null : Number(m[1])
+  }
+  const bad = []
+  entries.forEach((e, i) => {
+    if (!POSITIONAL.test(e.reason ?? '')) return
+    const prev = entries[i - 1]
+    if (prev === undefined) {
+      bad.push({ file: e.file, why: '它是第一条，没有"上一条"可指' })
+      return
+    }
+    if (prev.class !== e.class) {
+      bad.push({ file: e.file, why: `上一条（${prev.file}）是 ${prev.class}，本条是 ${e.class}` })
+      return
+    }
+    const mine = itemOf(e)
+    const theirs = itemOf(prev)
+    if (mine !== null && mine !== theirs) {
+      bad.push({
+        file: e.file,
+        why: `本条说"同上"并声明 §5 第 ${mine} 条，而上一条（${prev.file}）是 `
+          + (theirs === null ? '**未写裁决处**' : `§5 第 ${theirs} 条`),
+      })
+    }
+  })
+  return bad
+}
+
 /** `in-flight` 是一个**带到期日的断言**，不是一种永久分类。
  *
  * 它的判据是「另一个 agent 当轮正在接线（**工作树未提交**）」——所以它

@@ -35,7 +35,7 @@ import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { analyze, ignoredFiles, loadBaseline, REPO, SCAN_DIRS, PROCESS_ENTRIES, dirtyFiles, inFlightViolations, matrixItems, gapPointerViolations } from './reachability.mjs'
+import { analyze, ignoredFiles, loadBaseline, REPO, SCAN_DIRS, PROCESS_ENTRIES, dirtyFiles, inFlightViolations, matrixItems, gapPointerViolations, positionalReasonViolations } from './reachability.mjs'
 
 const a = analyze()
 const baseline = loadBaseline()
@@ -664,4 +664,68 @@ test('⑧ ★★★ gap 必须指向一个**真实存在**的 §5 条号（治"�
     '\n  这就是指针腐烂：§5 的清单改了（重排/删条），而引用没跟着改。' +
     '\n  一个指向不存在条号的引用，与没有引用，对读的人是同一个结果——' +
     '\n  只不过前者看起来像已经归档过了。')
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// ★★★ 第 49 轮：`reason` 里的**位置指称**（"同上" / "上面那条"）
+//
+// 44 条 baseline 里有 **21 条**用位置指称 —— 它的含义**由数组次序决定**，
+// 而数组次序不承担语义、也没有任何判据看着它。
+//
+// ★ 这不是理论风险：`runtime/toolcall/spool.mjs` 的 reason 写着
+//   「它的消费者就是**上面那条**收账侧」，而"上面那条"今天是
+//   `runtime/packs/store.mjs`（`gap`，裁决处 **§5 第 19 条**）——
+//   真正的收账侧在下标 **2**，与它**不相邻**。
+//
+//   > 一条相对指称在表里插进一行无关条目之后，
+//   > 会**改变另一行说的话**，而不改变那一行的任何一个字。
+//   > JSON 仍然合法、class 没变、条数没变 —— 没有东西会报。
+// ══════════════════════════════════════════════════════════════════════════
+
+test('★ 位置指称：三种指不上（无前驱 / 类不同 / 裁决处不同）都要报出来', () => {
+  const FIX = [
+    { file: 'a.mjs', class: 'gap', reason: '同上。⇒ 裁决处：§5 第 20 条' },           // ① 第一条，无前驱
+    { file: 'b.mjs', class: 'gap', reason: '自己写了理由。⇒ 裁决处：§5 第 20 条' },
+    // ★★★ ② 同类、但裁决处**不同** —— 这一条是**单独**需要的：
+    //   本用例第一版只有下面那个 `f.mjs` 来测"裁决处不同"，而它上一条是
+    //   `by-design` ⇒ 它**先**被"类不同"那条规则抓住，
+    //   于是"裁决处不同"这一支**从来没有被任何用例碰到过**。
+    //   变异 X2（摘掉那一支）当时**没咬住** —— 是变异把它翻出来的。
+    //
+    //   > 一条"顺便也被另一种情形覆盖"的用例，
+    //   > 与一条"真的覆盖了这一种情形"的用例，在绿灯下没有区别。
+    { file: 'g.mjs', class: 'gap', reason: '同上。⇒ 裁决处：§5 第 21 条' },
+    { file: 'c.mjs', class: 'by-design', reason: '同上' },                            // ③ 上一条是 gap
+    { file: 'd.mjs', class: 'by-design', reason: '自己写了理由' },
+    { file: 'e.mjs', class: 'by-design', reason: '同上（同一组）' },                  // 合法：同类、无裁决处
+    { file: 'f.mjs', class: 'gap', reason: '同上。⇒ 裁决处：§5 第 999 条' },          // 上一条是 by-design
+  ]
+  const bad = positionalReasonViolations(FIX)
+  const files = bad.map((b) => b.file)
+  assert.deepEqual(files, ['a.mjs', 'g.mjs', 'c.mjs', 'f.mjs'],
+    `规则报出的是 ${JSON.stringify(files)} ⇒ 三种情形没有各自被抓住`)
+  assert.match(bad[0].why, /第一条/, '第一种情形（无前驱）的理由没说清')
+  assert.match(bad[1].why, /§5 第 21 条/, '第二种情形（裁决处不同）的理由没说清')
+  assert.match(bad[2].why, /by-design|gap/, '第三种情形（类不同）的理由没说清')
+  assert.equal(files.includes('e.mjs'), false,
+    '★ 反向控制失败：同类的合法"同上"被判红了 ⇒ 会让人不敢写"同上"，'
+    + '而它本来是这 44 条里最有用的写法（7 条 product/upgrade/* 就是一组）')
+})
+
+test('★★★ 真基线：**没有一条**位置指称指不上（本轮修掉 5 条）', () => {
+  const bad = positionalReasonViolations(baseline.unreachable)
+  assert.deepEqual(bad, [],
+    `★ 有 ${bad.length} 条 reason 的"同上/上面那条"指不上：\n`
+    + bad.map((b) => `    ${b.file} —— ${b.why}`).join('\n')
+    + '\n  它们的含义由**数组次序**决定：在表里插进一行无关条目，'
+    + '\n  就会改变这些话的意思，而不改变任何一个字。')
+})
+
+test('★ 位置指称的正对照：把收账侧移到 spool **上面** ⇒ 它不再被报', () => {
+  // ★ 这条证明上面那条断言**测的是相邻关系**，不是"它恒绿"。
+  const moved = baseline.unreachable.filter((e) => e.file !== 'orchestrator/worker/toolcall-drain.mjs')
+  const drain = baseline.unreachable.find((e) => e.file === 'orchestrator/worker/toolcall-drain.mjs')
+  moved.splice(moved.findIndex((e) => e.file === 'runtime/toolcall/spool.mjs'), 0, drain)
+  assert.equal(positionalReasonViolations(moved).some((b) => b.file === 'runtime/toolcall/spool.mjs'),
+    false, '把收账侧移到 spool 上面之后仍被报 ⇒ 本规则测的不是相邻关系')
 })

@@ -140,9 +140,14 @@ export const HANDOVER_DOC = 'docs/superpowers/prt/PRT-HANDOVER-2026-09-18-ROUND2
 export const REACHABILITY_BASELINE = 'docs/superpowers/prt/prt-reachability-baseline.json'
 
 /** 数台账每一档状态。★/⏸/⬜ 三个都要数——只数 ✅ 会把"4 条暂停"读成"都完了"。 */
+/** 台账里出现的**全部**状态标记。★ 少写一个，那一条就会被安静地丢掉。 */
+export const LEDGER_STATUS_MARKERS = Object.freeze(['✅', '🟡', '⏸', '⬜'])
+
 export function tallyLedger(text) {
-  let done = 0; let paused = 0; let todo = 0; let total = 0
-  for (const line of String(text).split(/\r?\n/)) {
+  let done = 0; let partial = 0; let paused = 0; let todo = 0; let total = 0
+  const lines = String(text).split(/\r?\n/)
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
     if (!/^\|\s*PRT-\d+/.test(line)) continue
     const cells = line.replace(/^\|/, '').replace(/\|$/, '').split(/(?<!\\)\|/)
     if (cells.length < 2) continue
@@ -155,14 +160,39 @@ export function tallyLedger(text) {
     //
     //   > 一个"下标差了一位"的解析器，与一个"台账真的有几条没做完"，
     //   > 在报告里长得一模一样——而后者看起来更像个发现。
-    const st = cells.map((c) => c.trim()).find((c) => /^(✅|⏸|⬜)/.test(c))
-    if (st === undefined) continue
+    //
+    // ★★★ 第 44 轮：原来这里只认 `✅|⏸|⬜`，认不出就 `continue`。
+    //
+    //   `PRT-316` 转成 **🟡** 之后，那一条就既不计入 `total`、也不计入任何一档
+    //   ⇒ 本函数对真实台账报 **144**，而台账有 **145** 条（实测
+    //   `scratch/_probe-tally-ledger.mjs`：140 ✅ + 4 ⏸ + 1 🟡 = 145，
+    //   而台账自己的合计行写的是「140 / **1** / 0 / 4 / **145**」）。
+    //
+    //   最坏的地方不是"少算一条"，而是**它少算出来的那个数正好能过门禁**：
+    //   `derive` 给出 144，报告里若写「144 行 = 140 ✅ / 4 ⏸ / 0 ⬜」，
+    //   这条事实就**判绿**——一条把 145 说成 144 的绿。
+    //
+    //   > 一个"不认识的标记就跳过"的解析器，与一个"台账真的只有 144 行"的台账，
+    //   > 在报告里长得一模一样——
+    //   > 只不过前者会随着**每一个新状态**安静地少算一条，
+    //   > 而它的少算**恰好**是门禁会接受的那个值。
+    //
+    //   ⇒ 两处一起改：① 🟡 计入 `partial`（台账汇总行本来就有"部分"这一列）；
+    //     ② **认不出来就抛**，不再静默跳过——这一族已经在
+    //     `scripts/prt/progress-check.mjs` 那边学过一遍了（"认不出的状态标记
+    //     必须报「读不出来」，而**不是**默认成未开始"），这里是同一个道理。
+    const st = cells.map((c) => c.trim()).find((c) => LEDGER_STATUS_MARKERS.some((m) => c.startsWith(m)))
+    if (st === undefined) {
+      throw new Error(`台账第 ${i + 1} 行是一个 \`| PRT-\` 行，但没有任何可识别的状态标记`
+        + `（认得的是 ${LEDGER_STATUS_MARKERS.join(' ')}）：${line.slice(0, 80)}`)
+    }
     total += 1
     if (st.startsWith('✅')) done += 1
+    else if (st.startsWith('🟡')) partial += 1
     else if (st.includes('⏸')) paused += 1
     else if (st.includes('⬜')) todo += 1
   }
-  return { total, done, paused, todo }
+  return { total, done, partial, paused, todo }
 }
 
 /** 已跟踪的 `*.test.mjs`。★ 用 `-z`：非 ASCII 路径会被 C-quote 成打不开的名字。 */
@@ -928,20 +958,27 @@ export const FACTS = Object.freeze([
   //   另一侧是从产物里推出来的（读台账 / `git ls-files` / 基线 JSON / 常量）。
   Object.freeze({
     id: 'handover-ledger-tallies',
-    what: '交接报告 §二 说台账"145 行 = 140 ✅ / 4 ⏸ / 1 ⬜"',
-    why: '★ 三个数都必须核：只核 ✅ 的话，把 4 条暂停误写成完成、'
+    what: '交接报告 §二 说台账"145 行 = 140 ✅ / 1 🟡 / 4 ⏸ / 0 ⬜"',
+    why: '★ **四个**数都必须核：只核 ✅ 的话，把 4 条暂停误写成完成、'
       + '或反过来把完成误写成暂停，都读不出来。'
       + '（我自己写这条的**探针**时就把台账解析写错过一次：按第 3 列取状态，'
-      + '而真实格式下它报出 `0 ✅ / 3 ⏸ / 2 ⬜` —— 一个**看起来像发现**的错。）',
+      + '而真实格式下它报出 `0 ✅ / 3 ⏸ / 2 ⬜` —— 一个**看起来像发现**的错。）'
+      + '★★ 第 44 轮又添一例，而且更值得记：`tallyLedger` 认不出 **🟡**，'
+      + '于是它报 144 而不是 145。**那次错没有报出来**——因为报告里若写「144 行」，'
+      + '它正好等于 `derive` 的值，这条事实会**判绿**。'
+      + '⇒ 少算一个数与台账真的少一条，在报告里长得一样；'
+      + '而只要**少算出来的那个数**被写进报告，门禁就替它背书。',
     source: LEDGER_DOC + ' 每行第 3 格的状态列',
     derive: (ctx) => JSON.stringify(ctx.ledgerTallies()),
     claim: Object.freeze({
       doc: HANDOVER_DOC,
-      re: /台账 \| \*\*(\d+) 行 = (\d+) ✅ \/ (\d+) ⏸ \/ (\d+) ⬜\*\*/,
+      // ★ 顺序与 `derive` 的字段顺序一致，人读的时候两句能逐字对上。
+      re: /台账 \| \*\*(\d+) 行 = (\d+) ✅ \/ (\d+) 🟡 \/ (\d+) ⏸ \/ (\d+) ⬜\*\*/,
       parse: (m) => JSON.stringify({
-        total: Number(m[1]), done: Number(m[2]), paused: Number(m[3]), todo: Number(m[4]),
+        total: Number(m[1]), done: Number(m[2]), partial: Number(m[3]),
+        paused: Number(m[4]), todo: Number(m[5]),
       }),
-      note: '「台账 | **145 行 = 140 ✅ / 4 ⏸ / 1 ⬜**」',
+      note: '「台账 | **145 行 = 140 ✅ / 1 🟡 / 4 ⏸ / 0 ⬜**」',
     }),
   }),
   Object.freeze({

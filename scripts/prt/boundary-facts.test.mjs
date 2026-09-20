@@ -774,10 +774,25 @@ test('⑭a 五条新事实都真的参与了比对（不许有一条静默不查
 })
 
 test('⑭b ★★ 回归：台账状态**不许**按固定下标取（我第一版写死 `cells[2]`）', () => {
-  // 真实台账：145 = 140 ✅ / 4 ⏸ / 1 ⬜
+  // 真实台账：145 = 140 ✅ / 1 🟡 / 4 ⏸ / 0 ⬜
+  // ★ 2026-09-20：`PRT-316` 由 ⬜ 转 🟡（切片 1 落地）。
+  //   ★★★ 第 44 轮更正：这里**曾经**断言 `{ total: 144, ... }` 并附一句
+  //   "`total` **不含 🟡**，所以它减 1 而不是不变——而这正是本用例该钉住的东西"。
+  //
+  //   那句话把**解析器的缺陷**写成了**用例要钉住的规格**：
+  //   `tallyLedger` 只认 `✅|⏸|⬜`，认不出 🟡 就 `continue` ⇒ 少算一条。
+  //   而它少算出来的 144 **正好**是 `derive` 给出的值——
+  //   报告里只要写「144 行」，`handover-ledger-tallies` 就**判绿**。
+  //
+  //   > 把"它今天算出什么"写进断言，与"它应该算出什么"写进断言，
+  //   > 在一个**恒等**的实现下是同一个东西——
+  //   > 只不过前者会把缺陷锁死，还会给它配一句听起来很懂行的解释。
+  //
+  //   ⇒ 现在 🟡 计入 `partial`，总数回到 145（与台账合计行
+  //   「140 / **1** / 0 / 4 / **145**」逐字对齐）。
   const real = tallyLedger(defaultContext().doc(LEDGER_DOC))
-  assert.deepEqual(real, { total: 145, done: 140, paused: 4, todo: 1 },
-    `真实台账实算 ${JSON.stringify(real)}，与 145/140/4/1 不符`)
+  assert.deepEqual(real, { total: 145, done: 140, partial: 1, paused: 4, todo: 0 },
+    `真实台账实算 ${JSON.stringify(real)}，与 145/140/1/4/0 不符`)
 
   // ★ 反向控制：状态列**不在**第 3 格时也必须数得对。
   //   写死 `cells[2]` 的版本在这种表上会数出别的分布——
@@ -789,12 +804,50 @@ test('⑭b ★★ 回归：台账状态**不许**按固定下标取（我第一�
     '| PRT-002 乙 | ⏸ | `b.md` |',
     '| PRT-003 丙 | ⬜ | `c.md` |',
   ].join('\n')
-  assert.deepEqual(tallyLedger(shifted), { total: 3, done: 1, paused: 1, todo: 1 },
+  assert.deepEqual(tallyLedger(shifted),
+    { total: 3, done: 1, partial: 0, paused: 1, todo: 1 },
     '状态不在固定下标上时数错了 ⇒ 解析器靠的是位置而不是标记')
 
-  // ★ 三档**分开**数：把 ⏸ 折进 ✅（或反之）会让"4 条暂停"读成"都完成了"
+  // ★ 四档**分开**数：把 ⏸ 折进 ✅（或反之）会让"4 条暂停"读成"都完成了"
   const allDone = shifted.replace('⏸', '✅').replace('⬜', '✅')
-  assert.deepEqual(tallyLedger(allDone), { total: 3, done: 3, paused: 0, todo: 0 })
+  assert.deepEqual(tallyLedger(allDone), { total: 3, done: 3, partial: 0, paused: 0, todo: 0 })
+})
+
+test('⑭b-2 ★★★ 认不出的状态标记必须**抛**，不许静默少算一条', () => {
+  // ★★ 这一条钉的是第 44 轮那个真缺陷的**根**，不只是它的一个数值结果。
+  //
+  //   旧实现的最后一道防线是 `if (st === undefined) continue` ——
+  //   一个"不认识就跳过"的默认动作。它让 `PRT-316` 那一条**从总数里消失**，
+  //   而消失之后算出来的 144 看起来完全正常（✔ 与"台账刚好 144 条"同形）。
+  //
+  //   ⇒ 现在改成抛。断言分两半：**认不出的要抛**、**认得的一个都不许丢**。
+  const withUnknown = [
+    '| 任务 | 状态 | 证据 |',
+    '| --- | --- | --- |',
+    '| PRT-001 甲 | ✅ | `a.md` |',
+    '| PRT-002 乙 | 🚧 | `b.md` |',
+  ].join('\n')
+  assert.throws(() => tallyLedger(withUnknown), /没有任何可识别的状态标记/,
+    '一个不认识的状态标记被静默跳过了 ⇒ 那个数会随每个新状态安静地少一条')
+
+  // ★ 反向控制：**四档都认得**，而且四档**互不吞并**。
+  const allFour = [
+    '| 任务 | 状态 | 证据 |',
+    '| --- | --- | --- |',
+    '| PRT-001 甲 | ✅ | `a.md` |',
+    '| PRT-002 乙 | 🟡 | `b.md` |',
+    '| PRT-003 丙 | ⏸ | `c.md` |',
+    '| PRT-004 丁 | ⬜ | `d.md` |',
+  ].join('\n')
+  assert.deepEqual(tallyLedger(allFour),
+    { total: 4, done: 1, partial: 1, paused: 1, todo: 1 },
+    '四档必须各自计一，且 total 等于行数')
+
+  // ★ 真实台账：**行数**与 `total` 必须相等（不允许有任何一条被跳过）。
+  const text = defaultContext().doc(LEDGER_DOC)
+  const rows = text.split(/\r?\n/).filter((l) => /^\|\s*PRT-\d+/.test(l)).length
+  assert.equal(tallyLedger(text).total, rows,
+    `台账里 ${rows} 个 \`| PRT-\` 行，但只数出 ${tallyLedger(text).total} 条`)
 })
 
 test('⑭c 载荷：台账里少一个 ✅ ⇒ 那条事实必须红（钳住"三个数都要核"）', () => {

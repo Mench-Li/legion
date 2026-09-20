@@ -1206,6 +1206,10 @@ export function createLauncher({
       // **映像名此刻拿不到。** 它不是"省略"，是"记录下来下次只能判 unknown"，
       // 而 unknown 的处置是"不动手"——这正是安全的那一侧。
       image: x.image ?? null,
+      // ★ PRT-009：峰值读数**必须**在这里带上。`supervisor.status()` 每一行都带
+      //   `peakResource`，而 `buildRunRecord` 是**闭合映射**——少了这一行，落盘的
+      //   永远是 `null`，而它与"采样器坏了"在磁盘上是同一个东西。
+      peakResource: x.peakResource ?? null,
     }))
     const rec = buildRunRecord({
       runId,

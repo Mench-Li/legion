@@ -36,8 +36,9 @@
 | 台账 | **145 行 = 140 ✅ / 1 🟡 / 4 ⏸ / 0 ⬜** | `node scripts/prt/spec-progress.mjs --check` → `140/145，未完成 5` |
 | 4 条 ⏸ | PRT-009 / PRT-253 / PRT-256 / PRT-910 | 需要一台执行期外的机器 / 一次真的自动执行 / 真实外部用户 / 真实用户项目 |
 | 1 条 🟡 | PRT-316 | **日期闸门**：最早 **2026-09-24**（评审闸门已过）。★ 第 44 轮前后从 ⬜ 变 🟡（"部分"），闸门日期不变 |
+| 全量 CI（**第 45 轮**） | ⚠️ **8/9，exit 1** —— `test` 阶段红（HEAD `60810c4`，`.ci/r45`，**脏树 18 改 + 498 未跟踪**，指纹 `c61b4d166631338d`） | `test` 974483ms、`skipped=1`（secret-store，已知）。★ 红的仍是**同一批**：`*-dsh-process` × 3 + `runtime-contract-cross-process`（另一会话 `2f5a4b3` 的回归，净树复现）+ `model-api`（**脏树**造成的）⇒ "同时红 ≠ 同一个原因"。★★ `env` 那次 FAIL 是**瞬时**的：单独复跑 `--only env` 是 **PASS（3684ms）**——CI 从另一会话的改动中间跑了过去 ⇒ "CI 报红"与"代码是红的"也是两个读数 |
 | 全量 CI（**第 44 轮**） | ⚠️ **8/9，exit 1** —— `test` 阶段红（HEAD `1ce5b90`，`.ci/r44`，**脏树 26 改 + 483 未跟踪**，指纹 `2aff62dcfe0f4d42`） | `test` 1068676ms、`skipped=1`（secret-store，已知）。★ 红的是**另一个会话的 `2f5a4b3` 引入的 4 族回归**（`*-dsh-process` × 3 + `runtime-contract-cross-process`），**净树复现**；不在本会话改的面上，详见 `PRT-HUMAN-INTERVENTION-2026-09-20.md` §二之二 |
-| 全量 CI（**交付 HEAD**） | **9/9 PASS，exit 0**（HEAD `eeedd21`，`.ci/r43`，**脏树 14 改 + 471 未跟踪**，指纹 `cacda41048a5a459`） | `test` 1088879ms、`skipped=1`（secret-store，已知） |
+| 全量 CI（**交付 HEAD**） | **9/9 PASS，exit 0**（HEAD `eeedd21`，`.ci/r43`，**脏树 14 改 + 471 未跟踪**，指纹 `cacda41048a5a459`）★★ 这是**最近一次** 9/9 —— 第 43 轮收口。第 44/45 两轮都是 **8/9**（见上面两行），所以"交付 HEAD"仍是它 | `test` 1088879ms、`skipped=1`（secret-store，已知） |
 | 全量 CI（第 34 轮收口） | **9/9 PASS，exit 0**（HEAD `ff8d9f7`，`.ci/r34`，脏树 14 改 + 446 未跟踪） | `test` 873594ms |
 | 全量 CI（第 33 轮收口） | **9/9 PASS，exit 0**（HEAD `af3a440`，`.ci/r33`，脏树 14 改 + 444 未跟踪） | `test` 877363ms |
 | 全量 CI（第 32 轮收口） | **9/9 PASS，exit 0**（HEAD `89590fc`，`.ci/r32b`，脏树 14 改 + 443 未跟踪） | `test` 873289ms |

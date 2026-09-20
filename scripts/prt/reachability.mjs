@@ -494,7 +494,23 @@ export function decisionStateRows(docText) {
   for (let i = span.h + 2; i < span.e; i += 1) {
     const cells = lines[i].split('|').slice(1, -1).map((c) => c.trim())
     if (cells.length < 5 || /^-+$/.test(cells[0])) continue
-    const all = cells.join(' ')
+    // ★★★ 第 56 轮：先把**行内标记**去掉再匹配。
+    //
+    //   缘由是**真文档里**那两个词被 markdown 加粗从中间隔开了：
+    //
+    //     #28 逐字：「**不决定**则第 15 条继续停在原处…」   ← `不决定则` 被 `**` 劈开
+    //     #28 逐字：「各自与**已裁决事项**的关系都写清了」  ← 同
+    //
+    //   于是 `/不决定则/` **匹配不到**、`/已裁决(?!事项)/` 也判不出来 ——
+    //   而两种失效的方向**相反**：前者让一行**留在**队列里（保守），
+    //   后者让一行**离开**队列（危险）。
+    //
+    //   > 一个被 markdown 加粗从中间劈开的短语，与一个**不存在**的短语，
+    //   > 在任何一条正则眼里都是同一件事。
+    //
+    //   ⇒ 不在每个词表里堆 `\*{0,2}`（那要写 N 处、且漏一处就静默失效），
+    //     而是在**匹配之前**统一把 `**` 与反引号去掉 —— **一处**归一化，两处词表都受益。
+    const all = cells.join(' ').replace(/\*\*/g, '').replace(/`/g, '')
     let state = '未标注'
     for (const k of DECISION_STATE_VOCAB) {
       if (k !== '未标注' && DECISION_STATE_MARKS[k].test(all)) { state = k; break }

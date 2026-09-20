@@ -257,6 +257,7 @@ SOURCES.routesPriceTables = join(ROOT, 'team-hub', 'routes', 'price-tables.mjs')
 // ★ 切片 19（config）：第一族走**活绑定** —— 它读的 `deliveryBookkeepingFailures`
 //   在宿主里是 `let` 且三处 `+= 1`，按值注入会永久陈旧。
 SOURCES.routesConfig = join(ROOT, 'team-hub', 'routes', 'config.mjs')
+SOURCES.routesCreate = join(ROOT, 'team-hub', 'routes', 'create.mjs')
 
 /** 已提取出去的路由族模块（值 = 该文件里**声明式**路由的归属名）。 */
 export const ROUTE_FAMILY_SOURCES = Object.freeze([
@@ -278,6 +279,7 @@ export const ROUTE_FAMILY_SOURCES = Object.freeze([
   { module: 'routesConfigBundle', family: 'config-bundle', factory: 'createConfigBundleRoutes' },
   { module: 'routesPriceTables', family: 'price-tables', factory: 'createPriceTablesRoutes' },
   { module: 'routesConfig', family: 'config', factory: 'createConfigRoutes' },
+  { module: 'routesCreate', family: 'create', factory: 'createCreateRoutes' },
 ])
 SOURCES.experienceStore = join(ROOT, 'team-hub', 'experience-store.mjs')
 

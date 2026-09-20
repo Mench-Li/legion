@@ -238,6 +238,7 @@ import { createPacksRoutes } from './routes/packs.mjs'
 import { createConnectorsRoutes } from './routes/connectors.mjs'
 import { createUsageRoutes } from './routes/usage.mjs'
 import { createConfigRoutes } from './routes/config.mjs'
+import { createCreateRoutes } from './routes/create.mjs'
 import { createPriceTablesRoutes } from './routes/price-tables.mjs'
 import { createConfigBundleRoutes } from './routes/config-bundle.mjs'
 import { createContextSnapshotsRoutes } from './routes/context-snapshots.mjs'
@@ -5050,6 +5051,10 @@ const router = createRouter([
     tokenizerRegistryStatus, eventClients,
     live: () => ({ deliveryBookkeepingFailures }),
   }),
+  createCreateRoutes({
+    json,
+    createTask, audit, handleWrite,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -5077,22 +5082,9 @@ async function handle(req, res, stripPrefix) {
       return
     }
     // 写接口
-    if (req.method === 'POST' && path === '/api/create') {
-      await handleWrite(req, res, (body, by, scope) => {
-        const title = body.title
-        if (typeof title !== 'string' || title.trim().length === 0) throw new Error('缺少参数 title')
-        const task = createTask({
-          title: title.trim(), description: body.description, acceptance: body.acceptance, boundary: body.boundary,
-          priority: body.priority, status: body.status, parent: body.parent, role: body.role,
-          scope, ordersVersion: body.ordersVersion,
-          blockedBy: body.blockedBy, slice: body.slice, sliceIdx: body.sliceIdx, fixOf: body.fixOf, fixCount: body.fixCount,
-          goalId: body.goalId, fileDomain: body.fileDomain, docSync: body.docSync === true,
-        })
-        audit(by, scope, 'create', task.id, { title: task.title }, task.goalId)
-        return task
-      })
-      return
-    }
+    // ── 建任务（写接口：title 必填、其余字段透传，落审计） —— 已提取到 `./routes/create.mjs`（PRT-316 第 19 族 / 切片 20）──
+    // 整段搬走：`server.mjs` 里现在**不再有** `/api/create` 路由，该命名空间只住一个地方。
+    if (await router.dispatch(req, res, { path, url })) return
     if (req.method === 'POST' && path === '/api/progress') {
       // 守护进度心跳（v1 遗留缺口补平，见 docs/P0-CONFIRMATION.md §5）：租约保鲜 + 遥测。
       await handleWrite(req, res, (body, by, scope) => {

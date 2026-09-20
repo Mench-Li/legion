@@ -232,6 +232,7 @@ import { createChatRoutes } from './routes/chat.mjs'
 import { createCalendarRoutes } from './routes/calendar.mjs'
 import { createCompactionRoutes } from './routes/compaction.mjs'
 import { createSecretsRoutes } from './routes/secrets.mjs'
+import { createAutomationRoutes } from './routes/automation.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -4963,6 +4964,12 @@ const router = createRouter([
     secretAdmin, handleRun, audit,
     readScope,
   }),
+  createAutomationRoutes({
+    json,
+    authorized, handleRun, requireString,
+    automationStore, projectOccurrences, automationTick,
+    AUTOMATION_ERRORS,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -6594,141 +6601,9 @@ async function handle(req, res, stripPrefix) {
       })
       return
     }
-    // ── F-16 自动化计划 / 运行历史 ──────────────────────────────────────
-    //
-    // 五条路由，刻意把**写**与**投影**分开：
-    //   · `GET  /api/automation/calendar`  纯投影，不写任何行（"日历只做投影"）
-    //   · `GET  /api/automation/schedules` 计划清单
-    //   · `POST /api/automation/schedules` 建计划
-    //   · `POST /api/automation/schedules/update` 改计划（含启停）
-    //   · `POST /api/automation/tick`      显式物化（与生产定时器共用同一个函数）
-    //   · `GET  /api/automation/runs`      运行历史
-    //   · `GET  /api/automation/summary`   汇总
-    if (path === '/api/automation/summary' && req.method === 'GET') {
-      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
-      const scope = url.searchParams.get('scope')
-      json(res, 200, { ok: true, ...automationStore.summary({ scope: scope !== null && scope.length > 0 ? scope : null }) })
-      return
-    }
-    if (path === '/api/automation/schedules' && req.method === 'GET') {
-      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
-      const scope = url.searchParams.get('scope')
-      const enabledRaw = url.searchParams.get('enabled')
-      const limitRaw = url.searchParams.get('limit')
-      json(res, 200, {
-        ok: true,
-        schedules: automationStore.listSchedules({
-          scope: scope !== null && scope.length > 0 ? scope : null,
-          enabled: enabledRaw === null ? null : enabledRaw === '1' || enabledRaw === 'true',
-          limit: limitRaw === null ? 200 : Number(limitRaw),
-        }),
-      })
-      return
-    }
-    if (path === '/api/automation/schedules' && req.method === 'POST') {
-      await handleRun(req, res, (body) => ({
-        ok: true,
-        schedule: automationStore.createSchedule({
-          id: requireString(body, 'id'),
-          scope: requireString(body, 'scope'),
-          name: requireString(body, 'name'),
-          spec: body.spec,
-          timezone: requireString(body, 'timezone'),
-          enabled: body.enabled !== false,
-          overlapPolicy: body.overlapPolicy ?? 'skip',
-          catchUpPolicy: body.catchUpPolicy ?? 'once',
-          createdBy: body.by ?? null,
-          note: body.note ?? null,
-          // 任务模板：给了就"到点建一张可领的任务卡"，省略就只物化运行。
-          // **不写成 `body.payload ?? null`** —— 那会把"没给"与"显式给 null"
-          // 折成同一个值，而它们在建计划时语义相同（都不建任务），
-          // 到了 `update` 那一侧就必须分开（见 `updateSchedule` 的三态说明）。
-          ...(body.payload === undefined ? {} : { payload: body.payload }),
-        }),
-      }))
-      return
-    }
-    if (path === '/api/automation/schedules/update' && req.method === 'POST') {
-      await handleRun(req, res, (body) => ({
-        ok: true,
-        schedule: automationStore.updateSchedule({
-          id: requireString(body, 'id'),
-          enabled: body.enabled === undefined ? null : body.enabled === true,
-          overlapPolicy: body.overlapPolicy ?? null,
-          catchUpPolicy: body.catchUpPolicy ?? null,
-          spec: body.spec ?? null,
-          timezone: body.timezone ?? null,
-          name: body.name ?? null,
-          note: body.note ?? null,
-          // 三态：不传 = 不改 / `null` = 显式清掉（此后不再建任务）/ 对象 = 换掉。
-          // 用 `body.payload ?? null` 会让"清掉"与"不改"同形——用户想把
-          // 一条计划从"建任务"改成"只提醒"，调用返回成功，而计划继续建任务。
-          ...(body.payload === undefined ? {} : { payload: body.payload }),
-        }),
-      }))
-      return
-    }
-    if (path === '/api/automation/calendar' && req.method === 'GET') {
-      // ★ **纯投影**：这条路由是一段只读计算，库里一行都不会多。
-      //
-      // 参数里没有 `persist` / `materialize` 这种开关，是刻意的：
-      // 一个"顺手把投影落库"的选项，会在某一次翻页之后让运行历史里
-      // 多出一批**因为有人看了一眼**而产生的行。
-      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
-      const id = url.searchParams.get('id')
-      if (id === null || id.length === 0) { json(res, 400, { ok: false, error: '缺少 id', code: 'MISSING_PARAM' }); return }
-      const sched = automationStore.scheduleOf(id)
-      if (sched === null) { json(res, 404, { ok: false, error: `没有这条计划：${id}`, code: AUTOMATION_ERRORS.SCHEDULE_NOT_FOUND }); return }
-      const fromRaw = Number(url.searchParams.get('fromMs'))
-      const toRaw = Number(url.searchParams.get('toMs'))
-      const fromMs = Number.isSafeInteger(fromRaw) ? fromRaw : Date.now()
-      const toMs = Number.isSafeInteger(toRaw) ? toRaw : fromMs + 7 * 24 * 3600 * 1000
-      const capRaw = Number(url.searchParams.get('max'))
-      try {
-        json(res, 200, {
-          ok: true,
-          scheduleId: id,
-          // `projected: true` 是一个**能力发现位**：读的人要能一眼看出
-          // 这些时刻不是运行记录，而是算出来的。
-          projected: true,
-          occurrences: projectOccurrences(sched, {
-            fromMs, toMs,
-            maxOccurrences: Number.isSafeInteger(capRaw) && capRaw > 0 ? Math.min(capRaw, 2000) : 500,
-          }),
-          serverTimeMs: Date.now(),
-        })
-      } catch (e) {
-        json(res, Number(e?.statusCode) || 400, { ok: false, error: e instanceof Error ? e.message : String(e), code: e?.code ?? AUTOMATION_ERRORS.BAD_WINDOW })
-      }
-      return
-    }
-    if (path === '/api/automation/runs' && req.method === 'GET') {
-      if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
-      const scheduleId = url.searchParams.get('scheduleId')
-      const scope = url.searchParams.get('scope')
-      const state = url.searchParams.get('state')
-      const limitRaw = url.searchParams.get('limit')
-      json(res, 200, {
-        ok: true,
-        runs: automationStore.runsOf({
-          scheduleId: scheduleId !== null && scheduleId.length > 0 ? scheduleId : null,
-          scope: scope !== null && scope.length > 0 ? scope : null,
-          state: state !== null && state.length > 0 ? state : null,
-          limit: limitRaw === null ? 200 : Number(limitRaw),
-        }),
-      })
-      return
-    }
-    if (path === '/api/automation/tick' && req.method === 'POST') {
-      // 显式 tick。与生产定时器**共用 `automationTick`**——两条实现漂移的
-      // 表现是"手动 tick 对、自动 tick 错"，而后者只在生产上发生。
-      await handleRun(req, res, (body) => automationTick({
-        scope: typeof body.scope === 'string' && body.scope.length > 0 ? body.scope : null,
-        nowMs: body.nowMs ?? null,
-        limit: body.limit ?? null,
-      }))
-      return
-    }
+    // ── 自动化计划（automation）：计划清单/建改 + 运行历史 + 汇总 + 日历投影 + 显式 tick —— 已提取到 `./routes/automation.mjs`（PRT-316 第 7 族 / 切片 7）──
+    // 整段搬走：`server.mjs` 里现在**不再有** `/api/automation` 路由，该命名空间只住一个地方。
+    if (await router.dispatch(req, res, { path, url })) return
     // ── 上下文压缩（compaction）：只追加原文 + CAS 摘要 + 有效上下文读数 —— 已提取到 `./routes/compaction.mjs`（PRT-316 切片 5）──
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/compaction/*` 路由，该命名空间只住一个地方。
     if (await router.dispatch(req, res, { path, url })) return

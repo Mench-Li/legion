@@ -282,3 +282,277 @@ test('⑦ 未授权一律 401（读面也不例外）', async () => {
   const p = await fetch(base + '/api/automation/tick', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
   assert.equal(p.status, 401)
 })
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ④ PRT-316 切片 7：automation 族搬进 `routes/automation.mjs` 之后的**缝上契约**
+//
+// 为什么补：破验 15 条变异，第一轮咬住 10 条、漏网 1 条（另有 3 条锚点写错）。
+//
+//   ★★ 漏网的那条是**真缺口**，而且缺口很具体：
+//      「`calendar` 从纯投影变成顺手落库（改成调 `automationTick`）」没被咬住。
+//
+//      既有用例 ① 确实盯着这条性质（"打 50 次，运行表一行都不多"），
+//      但它用的计划是 `{ kind: 'daily', hour: 9, minute: 0 }` ——
+//      它的 `nextRunAtMs` 在**未来**，于是 `materializeDue({ nowMs: Date.now() })`
+//      **什么都不物化**。那一次 tick 是个**空操作**。
+//
+//      > 一个"从不写库的投影"，与一个"每次都调一次写库、只是恰好没东西可写"的投影，
+//      > 在测试用的那条计划**不在点**的时候是同一个东西。
+//
+//      ⇒ 判据不能再依赖"这条计划恰好在不在点"，而要**直接问**：
+//        "这一条路由碰过任何写方法吗？"—— 用注入桩问，与计划到不到点无关。
+//
+//   ▲ 三条锚点写错（K5/K6/K7 的 `authorized` 护栏）：生成器把体整体缩进 +2，
+//     我按原文的 6 空格缩进写的锚点全部失配。教训与切片 6 的 K6 同一条：
+//     报"锚点没命中"与报"漏网"退出码相同、含义相反 —— 都**不算**测过。
+//
+// ▲ 既有 9 例仍在**真 hub** 上验（不替换、不删除）。
+// ▲ 追加而非新建文件：`git ls-files "*.test.mjs"` 的条数被 `boundary-facts` 钉着。
+// ══════════════════════════════════════════════════════════════════════════════
+
+import { createAutomationRoutes } from './routes/automation.mjs'
+
+/** 会记录调用的假 `automationStore` + 假 `automationTick`。 */
+function autoSpy(over = {}) {
+  const calls = []
+  const SCHED = { id: 's1', scope: 'software', spec: { kind: 'daily', hour: 9, minute: 0 }, nextRunAtMs: 1, enabled: true }
+  const store = {
+    summary: (a) => { calls.push(['summary', a]); return { schedules: 0 } },
+    listSchedules: (a) => { calls.push(['listSchedules', a]); return [] },
+    createSchedule: (a) => { calls.push(['createSchedule', a]); return { ...SCHED, id: a.id } },
+    updateSchedule: (a) => { calls.push(['updateSchedule', a]); return SCHED },
+    scheduleOf: (id) => { calls.push(['scheduleOf', id]); return id === 'nope' ? null : SCHED },
+    runsOf: (a) => { calls.push(['runsOf', a]); return [] },
+    // 写方法（投影端点一个都不许碰）
+    materializeDue: (a) => { calls.push(['materializeDue', a]); return { ok: true, results: [] } },
+  }
+  Object.assign(store, over.store ?? {})
+  const sent = []
+  const deps = {
+    json: (_res, code, obj) => { sent.push([code, obj]) },
+    authorized: () => true,
+    handleRun: async (_req, _res, fn) => {
+      const out = await fn({ id: 's1', scope: 'software', name: 'n', timezone: 'UTC', by: 'me' }, 'me')
+      sent.push([200, out])
+      return out
+    },
+    requireString: (b, k) => {
+      const v = b?.[k]
+      if (typeof v !== 'string' || v.trim() === '') { const e = new Error(`缺少参数 ${k}`); e.code = 'MISSING_PARAM'; throw e }
+      return v
+    },
+    automationStore: store,
+    projectOccurrences: (sched, o) => { calls.push(['projectOccurrences', o]); return [{ atMs: 1 }] },
+    automationTick: (a) => { calls.push(['automationTick', a]); return { ok: true, results: [], wired: true, tasksCreated: 0 } },
+    AUTOMATION_ERRORS: { SCHEDULE_NOT_FOUND: 'SCHEDULE_NOT_FOUND', BAD_CALENDAR_WINDOW: 'BAD_CALENDAR_WINDOW' },
+  }
+  Object.assign(deps, over.deps ?? {})
+  const fam = createAutomationRoutes(deps)
+  const dispatch = (method, target) => {
+    const url = new URL(`http://x${target}`)
+    return fam.dispatch({ method, headers: {} }, {}, { path: url.pathname, url })
+  }
+  return { dispatch, calls, sent }
+}
+const names = (calls) => calls.map((c) => c[0])
+const last = (calls, n) => calls.filter((c) => c[0] === n).at(-1)
+
+test('④ ★★ K1 的正解：`calendar` 是纯投影 —— 一个**写方法**都不许碰（与计划到不到点无关）', async () => {
+  const WRITES = ['materializeDue', 'createSchedule', 'updateSchedule']
+  const s = autoSpy()
+  assert.equal(await s.dispatch('GET', '/api/automation/calendar?id=s1'), true)
+  assert.equal(s.sent.at(-1)?.[0], 200, JSON.stringify(s.sent))
+  const touched = names(s.calls).filter((n) => WRITES.includes(n))
+  assert.deepEqual(touched, [],
+    `投影端点碰了写方法 ${touched.join(',')} —— "日历只做投影"不是风格，是它的判据`)
+  // ★ 连 `automationTick` 也不许调：那是"显式物化"的入口，投影不该有它。
+  assert.equal(names(s.calls).includes('automationTick'), false,
+    '投影端点调了 automationTick —— 它就是那个会落库的门')
+  // 正面：它确实去查了计划、确实算了投影（否则"什么都没碰"是空过）
+  assert.ok(last(s.calls, 'scheduleOf'), 'calendar 没有查计划')
+  assert.ok(last(s.calls, 'projectOccurrences'), 'calendar 没有算投影')
+  assert.equal(s.sent.at(-1)[1].projected, true, '投影端点没有声明 projected')
+})
+
+test('④ 七条路由各自接到正确的方法上（正向 + 反向：不许串到别的动作）', async () => {
+  const table = [
+    ['GET', '/api/automation/summary', 'summary'],
+    ['GET', '/api/automation/schedules', 'listSchedules'],
+    ['POST', '/api/automation/schedules', 'createSchedule'],
+    ['POST', '/api/automation/schedules/update', 'updateSchedule'],
+    ['GET', '/api/automation/calendar?id=s1', 'scheduleOf'],
+    ['GET', '/api/automation/runs', 'runsOf'],
+  ]
+  for (const [m, p, fn] of table) {
+    const s = autoSpy()
+    assert.equal(await s.dispatch(m, p), true, `${m} ${p} 没被本族接住`)
+    assert.ok(last(s.calls, fn), `${m} ${p} 没有走到 ${fn}（走了 ${names(s.calls).join(',') || '无'}）`)
+  }
+  // tick 走的是**注入的 `automationTick`**，不是自己再实现一遍物化。
+  const t = autoSpy()
+  assert.equal(await t.dispatch('POST', '/api/automation/tick'), true)
+  assert.ok(last(t.calls, 'automationTick'), 'tick 没有走注入的 automationTick')
+  assert.equal(names(t.calls).includes('materializeDue'), false,
+    'tick 直接调了 materializeDue —— 那就绕过了"与生产定时器共用同一个函数"')
+})
+
+test('④ 四条带 authorized 的路由：未授权 401 且**不查仓储**', async () => {
+  for (const p of ['/api/automation/summary', '/api/automation/schedules',
+    '/api/automation/calendar?id=s1', '/api/automation/runs']) {
+    const s = autoSpy({ deps: { authorized: () => false } })
+    assert.equal(await s.dispatch('GET', p), true)
+    assert.equal(s.sent.at(-1)?.[0], 401, `${p} 没有 401：${JSON.stringify(s.sent)}`)
+    assert.deepEqual(s.calls, [], `${p} 在未授权时仍然查了仓储`)
+  }
+})
+
+test('④ 两条写路由**不**做 authorized 前置（它们走 handleRun 自己的鉴权）', async () => {
+  // 记录既有事实：写路由与其他族一致，鉴权在 `handleRun` 里，不在路由头上。
+  // 钉住它是为了区分"我搬错了"与"本来就这样"。
+  for (const p of ['/api/automation/schedules', '/api/automation/schedules/update', '/api/automation/tick']) {
+    const s = autoSpy({ deps: { authorized: () => false } })
+    await s.dispatch('POST', p)
+    assert.notEqual(s.sent.at(-1)?.[0], 401, `${p} 在路由头做了 401 —— 与既有语义不符`)
+  }
+})
+
+test('④ ★ 记录既有不对称：`scope` 与 `enabled` 对**空串**的处理不同（本片不改，只钉住）', async () => {
+  // `?scope=` 走 `scope !== null && scope.length > 0 ? scope : null` ⇒ **null**（等于没筛）；
+  // `?enabled=` 走 `enabledRaw === null ? null : (enabledRaw === '1' || enabledRaw === 'true')`
+  // ⇒ **false**（等于"只看停用的"）。两条判据对"空串"给出了不同的答案。
+  //
+  // ★ 这是搬运**之前**就有的行为，不是本片引入的。本片只搬路由、不改语义，
+  //   所以把它钉成契约 —— 否则下一个人会把 `scope` 的 `length > 0` 顺手复制到 `enabled`，
+  //   而那是行为变更（`?enabled=` 会从"只看停用的"变成"不看状态"）。
+  const cases = [
+    ['', { scope: null, enabled: null }],
+    ['?scope=&enabled=', { scope: null, enabled: false }],
+    ['?scope=software&enabled=1', { scope: 'software', enabled: true }],
+    ['?scope=software&enabled=true', { scope: 'software', enabled: true }],
+    ['?scope=software&enabled=0', { scope: 'software', enabled: false }],
+    ['?scope=software&enabled=nope', { scope: 'software', enabled: false }],
+  ]
+  for (const [q, want] of cases) {
+    const s = autoSpy()
+    await s.dispatch('GET', `/api/automation/schedules${q}`)
+    const a = last(s.calls, 'listSchedules')[1]
+    assert.equal(a.scope, want.scope, `scope 解析：${q || '(无参)'} 得到 ${JSON.stringify(a.scope)}`)
+    assert.equal(a.enabled, want.enabled, `enabled 解析：${q || '(无参)'} 得到 ${JSON.stringify(a.enabled)}`)
+  }
+  // summary 的 scope 同样是"空串 ⇒ null"
+  const sm = autoSpy()
+  await sm.dispatch('GET', '/api/automation/summary?scope=')
+  assert.equal(last(sm.calls, 'summary')[1].scope, null, 'summary 把空 scope 当成了一个真作用域')
+  // ★ runs 的 scheduleId / scope / state 三条也都是"空串 ⇒ null"。
+  //   这一条是破验 K15 指出的缺口：原判据只验了"`runsOf` 被调用"，
+  //   没验**传进去的是什么** —— 于是 `scheduleId: scheduleId` （不折 null）
+  //   照样全绿，而空串会被当成一个真的计划 id 去筛。
+  for (const q of ['?scheduleId=&scope=&state=', '']) {
+    const rn = autoSpy()
+    await rn.dispatch('GET', `/api/automation/runs${q}`)
+    const a = last(rn.calls, 'runsOf')[1]
+    for (const k of ['scheduleId', 'scope', 'state']) {
+      assert.equal(a[k], null, `runs 的 ${k}：${q || '(无参)'} 得到 ${JSON.stringify(a[k])}，应为 null`)
+    }
+    assert.equal(a.limit, 200, 'runs 的 limit 缺省应为 200')
+  }
+  const rn2 = autoSpy()
+  await rn2.dispatch('GET', '/api/automation/runs?scheduleId=s1&scope=software&state=scheduled&limit=5')
+  const a2 = last(rn2.calls, 'runsOf')[1]
+  assert.equal(a2.scheduleId, 's1')
+  assert.equal(a2.scope, 'software')
+  assert.equal(a2.state, 'scheduled')
+  assert.equal(a2.limit, 5)
+})
+
+test('④ ★ `update` 的 payload 三态：不改 / 显式清掉 / 换掉 —— 三者**必须可分**', async () => {
+  // 原文的注释逐字写了这件事：
+  //   用 `body.payload ?? null` 会让"清掉"与"不改"同形——用户想把一条计划从
+  //   "建任务"改成"只提醒"，调用返回成功，而计划继续建任务。
+  const missing = autoSpy()
+  await missing.dispatch('POST', '/api/automation/schedules/update')
+  assert.equal('payload' in last(missing.calls, 'updateSchedule')[1], false,
+    '不传 payload ⇒ 键**不该出现**（出现就等于"清掉"）')
+  const cleared = autoSpy()
+  await cleared.dispatch('POST', '/api/automation/schedules/update')
+  // 桩的 handleRun 给的 body 里没有 payload，所以上面两条都等于"不传"。
+  // 显式传 null 的路径用下面的 deps 覆盖来验。
+  const withNull = autoSpy({ deps: { handleRun: async (_q, _s, fn) => { const o = await fn({ id: 's1', payload: null }, 'me'); sentPushNull(o) } } })
+  function sentPushNull(o) { withNull.sent.push([200, o]) }
+  await withNull.dispatch('POST', '/api/automation/schedules/update')
+  assert.ok('payload' in last(withNull.calls, 'updateSchedule')[1], '显式 null 没有被当成"清掉"')
+  assert.equal(last(withNull.calls, 'updateSchedule')[1].payload, null)
+  // 反向控制：`?? null` 那种实现会让"不传"也带上 payload 键
+  assert.equal('payload' in last(cleared.calls, 'updateSchedule')[1], false)
+})
+
+test('④ ★★ K6/K7 的正解：建计划时**每一个**必填字段都必须过 `requireString`', async () => {
+  // 这一条是破验指出来的真缺口：既有用例 ③ 只喂了"时区**值**写错"，
+  // 走的是**仓储**的具名拒绝；它从没喂过"时区**整个没给**"。
+  // 于是把 `timezone: requireString(body,'timezone')` 改成 `timezone: body.timezone`
+  // 之后，`undefined` 被静默交给仓储，而**没有任何用例说过这件事**。
+  //
+  //   > 一个"字段写错被拒"，与一个"字段没写也被拒"，
+  //   > 在用例只喂过前者的时候是同一个东西。
+  //
+  // 判据：逐个删掉一个必填字段 ⇒ 必须 400 MISSING_PARAM，且**一次仓储调用都不能发生**。
+  const REQUIRED = ['id', 'scope', 'name', 'timezone']
+  const BASE = { id: 's1', scope: 'software', name: 'n', timezone: 'UTC' }
+  for (const drop of REQUIRED) {
+    const body = { ...BASE }
+    delete body[drop]
+    const s = autoSpy({ deps: {
+      handleRun: async (_q, _r, fn) => {
+        try {
+          const out = await fn(body, 'me')
+          s.sent.push([200, out])
+        } catch (e) {
+          s.sent.push([400, { ok: false, error: String(e.message), code: e.code ?? null }])
+        }
+      },
+    } })
+    await s.dispatch('POST', '/api/automation/schedules')
+    assert.equal(s.sent.at(-1)?.[0], 400, `缺 ${drop} 没有被拒，响应：${JSON.stringify(s.sent.at(-1))}`)
+    assert.equal(s.sent.at(-1)[1].code, 'MISSING_PARAM', `缺 ${drop} 的错误码不是 MISSING_PARAM`)
+    assert.deepEqual(s.calls, [], `缺 ${drop} 却已经碰了仓储（${names(s.calls).join(',')}）`)
+  }
+  // ★ 正面控制：四个字段都给的时候必须**建得成**。
+  //   没有它，"一律拒绝"也能让上面四条通过。
+  const ok = autoSpy()
+  await ok.dispatch('POST', '/api/automation/schedules')
+  assert.equal(ok.sent.at(-1)?.[0], 200, `四字段齐全却没建成：${JSON.stringify(ok.sent)}`)
+  assert.ok(last(ok.calls, 'createSchedule'), '四字段齐全却没调 createSchedule')
+  const args = last(ok.calls, 'createSchedule')[1]
+  assert.equal(args.id, 's1')
+  assert.equal(args.scope, 'software')
+  assert.equal(args.name, 'n')
+  assert.equal(args.timezone, 'UTC')
+  // `enabled` 缺省 ⇒ true（不传即启用）；`enabled: false` ⇒ false
+  assert.equal(args.enabled, true, '不传 enabled 时默认值不是 true')
+})
+
+test('④ 缺参数走 requireString 的具名拒绝，而不是静默 undefined', async () => {
+  const s = autoSpy()
+  // 桩的 body 有 id/scope/name/timezone，所以这里要换成缺 name 的
+  const bad = autoSpy({ deps: {
+    handleRun: async (_q, _r, fn) => {
+      try { await fn({ id: 's1', scope: 'software' }, 'me') } catch (e) {
+        bad.sent.push([400, { ok: false, code: e.code ?? null }]); return
+      }
+      bad.sent.push([200, {}])
+    },
+  } })
+  await bad.dispatch('POST', '/api/automation/schedules')
+  assert.equal(bad.sent.at(-1)?.[0], 400, '缺 name 没有被拒')
+  assert.equal(bad.sent.at(-1)[1].code, 'MISSING_PARAM')
+  assert.equal(names(bad.calls).includes('createSchedule'), false, '参数不全却已经建了计划')
+  void s
+})
+
+test('④ 段的边界：别的命名空间不许被本族吃掉', async () => {
+  const s = autoSpy()
+  for (const [m, p] of [['GET', '/api/automation'], ['GET', '/api/automationX'],
+    ['GET', '/api/automation/schedules/x'], ['DELETE', '/api/automation/schedules']]) {
+    assert.equal(await s.dispatch(m, p), false, `${m} ${p} 被本族接住了 —— 它不该归 automation 管`)
+  }
+})

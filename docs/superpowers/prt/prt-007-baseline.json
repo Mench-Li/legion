@@ -2,7 +2,7 @@
   "$comment": "PRT-007 旧系统平台契约基线。由 scripts/prt/baseline-snapshot.mjs 生成；不含时间戳以便逐字节 diff。漂移由 sources 的 sha256 归因。",
   "version": 1,
   "sources": {
-    "team-hub/server.mjs": "2af7c90603c75c4768c066636f0490127a80cab1668159eb69f1c0793718d9c5",
+    "team-hub/server.mjs": "4e02ca84de7ac3eec3fc6e68038c38d7eb98f7f822836db92d5728921f489e88",
     "team-hub/permission-engine.mjs": "ad399442a1bb50f5a5796126caf402f114462e6b9f60735e24380d7a8672350f",
     "team-hub/run-store.mjs": "2ab3bce1e2cbc457415f303796bcc27bb1852629eb30d83aa75ccc001297d8d8",
     "team-hub/model-store.mjs": "2d2cc90f9a4d357e9138b7e9933ce68215fd32d4d5cfe7179d63cf8f015d78e8",
@@ -25,6 +25,7 @@
     "team-hub/routes/calendar.mjs": "ac6082e424ee6a030350b10099fe40f32e42220278509cfc751bc2d3ec7b49de",
     "team-hub/routes/compaction.mjs": "2ea1857d158055a6dd269218d4c633e178fe77f259f1db9504fe2403bd4639c6",
     "team-hub/routes/secrets.mjs": "f238bfd559497a27f4f3ca57ecba99a2e7d1273e9bd5f950b2d25eecfe64ede1",
+    "team-hub/routes/automation.mjs": "3acb9598816f56b711763ee88273ad0b6b721d797daf8991d50c717936aa77cf",
     "team-hub/experience-store.mjs": "6b10c0b844a02fa4bd60e2acdaefca2193d385a4c294e0655800d63c2509bdd0"
   },
   "httpRoutes": [

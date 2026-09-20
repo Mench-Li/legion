@@ -215,5 +215,24 @@ test('**探测这件事真的有非测试调用方**（PRT-504 此前是死代�
   const { readFileSync } = await import('node:fs')
   const server = readFileSync(new URL('./server.mjs', import.meta.url), 'utf8')
   assert.match(server, /createProbeService/, 'team-hub 必须真的构造探测服务')
-  assert.match(server, /probeModelProfile\(/, '必须有路由调用它')
+  // ★★ 调用方**不再住在 `server.mjs` 里**（PRT-316 切片 13 把模型档案那 7 条
+  //   路由搬进了 `./routes/model-profiles.mjs`）。原来这一行只读 `server.mjs`，
+  //   于是搬家之后它**如实**变红 —— 但红的原因不是"没有调用方了"，
+  //   而是"它换了住处"。
+  //
+  //   > 一条"在某一个文件里找调用方"的判据，与一条"在整个**非测试**代码里
+  //   > 找调用方"的判据，在这个功能只有一个住处、而那个住处没搬过的时候，
+  //   > 是同一个东西。
+  //
+  //   修法：按**已登记的路由族模块**（`ROUTE_FAMILY_SOURCES`，那是"路由代码现在
+  //   住哪"的唯一权威名单）去找，而不是钉死一个文件名。这条判据因此**更强**：
+  //   它现在还会核对"调用方真的是某一族路由"，而不只是"某个文件里有这串字"。
+  const { ROUTE_FAMILY_SOURCES, SCHEMA_SOURCE_FOR } = await import('../scripts/prt/baseline-snapshot.mjs')
+  const callers = ROUTE_FAMILY_SOURCES
+    .filter((f) => SCHEMA_SOURCE_FOR[f.module] !== undefined)
+    .filter((f) => readFileSync(SCHEMA_SOURCE_FOR[f.module], 'utf8').includes('probeModelProfile('))
+    .map((f) => f.family)
+  if (callers.length === 0) assert.match(server, /probeModelProfile\(/, '必须有路由调用它')
+  assert.deepEqual(callers, ['model-profiles'],
+    '调用它的必须是模型档案族 —— 换了族、或没人调用，这里都要说话')
 })

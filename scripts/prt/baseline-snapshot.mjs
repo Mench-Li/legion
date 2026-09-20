@@ -235,6 +235,12 @@ SOURCES.routesPacks = join(ROOT, 'team-hub', 'routes', 'packs.mjs')
 SOURCES.routesRolePacks = join(ROOT, 'team-hub', 'routes', 'role-packs.mjs')
 SOURCES.routesToolCalls = join(ROOT, 'team-hub', 'routes', 'tool-calls.mjs')
 SOURCES.routesConnectors = join(ROOT, 'team-hub', 'routes', 'connectors.mjs')
+// ★ 切片 13（model-profiles）是第一个**带块前言**的族：5 条路由裹在一个裸块里，
+//   块内先声明 `MODEL_PREFIX` 与 `modelId` 再写那 5 条。抽取器只认
+//   `req.method === '…' && path …` 这一种**同一行**的写法，所以块前言
+//   对它是透明的 —— 但这一点值得在这里写一句，因为下一个人遇到"路由在块里"
+//   时会先怀疑抽取器，而它其实没问题（`findOpaqueRouteGuards` 也不响）。
+SOURCES.routesModelProfiles = join(ROOT, 'team-hub', 'routes', 'model-profiles.mjs')
 
 /** 已提取出去的路由族模块（值 = 该文件里**声明式**路由的归属名）。 */
 export const ROUTE_FAMILY_SOURCES = Object.freeze([
@@ -250,6 +256,7 @@ export const ROUTE_FAMILY_SOURCES = Object.freeze([
   { module: 'routesRolePacks', family: 'role-packs', factory: 'createRolePacksRoutes' },
   { module: 'routesToolCalls', family: 'tool-calls', factory: 'createToolCallsRoutes' },
   { module: 'routesConnectors', family: 'connectors', factory: 'createConnectorsRoutes' },
+  { module: 'routesModelProfiles', family: 'model-profiles', factory: 'createModelProfilesRoutes' },
 ])
 SOURCES.experienceStore = join(ROOT, 'team-hub', 'experience-store.mjs')
 

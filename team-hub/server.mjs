@@ -236,6 +236,7 @@ import { createAutomationRoutes } from './routes/automation.mjs'
 import { createExperienceRoutes } from './routes/experience.mjs'
 import { createPacksRoutes } from './routes/packs.mjs'
 import { createConnectorsRoutes } from './routes/connectors.mjs'
+import { createModelProfilesRoutes } from './routes/model-profiles.mjs'
 import { createToolCallsRoutes } from './routes/tool-calls.mjs'
 import { createRolePacksRoutes } from './routes/role-packs.mjs'
 
@@ -5008,6 +5009,11 @@ const router = createRouter([
     connectorCounts, connectorIncidents, exportConnectors,
     appendIncident, db,
   }),
+  createModelProfilesRoutes({
+    json,
+    handleRun, modelStore, probeService,
+    MODEL_ERRORS,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -5900,147 +5906,9 @@ async function handle(req, res, stripPrefix) {
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/secrets` 路由，该命名空间只住一个地方。
     if (await router.dispatch(req, res, { path, url })) return
 
-    // ── 模型档案（PRT-501，spec §6.6） ──
-    //
-    // 这些路由**不接受**任何密钥字段：`validateProfile` 会拒绝未知字段与明文
-    // 密钥形态（含 endpoint 内嵌凭证）。API 层不重复校验——重复的后果不是
-    // 多一道防线，而是两处判据会漂移，而漂移的那一次就是把密钥写进库的那一次。
-    //
-    // `actor` 必填：谁改的模型配置必须留痕。审计里**只有** provider/model/
-    // 字段名清单/「引用变了没有」，没有任何值——包括引用名本身。
-    if (req.method === 'GET' && path === '/api/model-profiles') {
-      // 默认只给未删除的。要连墓碑一起看必须显式 `?includeDeleted=1`：
-      // 默认带上会让界面上出现"已经被删掉的模型"，而它其实选不了。
-      const includeDeleted = url.searchParams.get('includeDeleted') === '1'
-      json(res, 200, {
-        ok: true,
-        profiles: modelStore.list({ includeDeleted }),
-        serverTimeMs: Date.now(),
-      })
-      return
-    }
-    if (req.method === 'POST' && path === '/api/model-profiles') {
-      await handleRun(req, res, (body) => modelStore.create(body.profile ?? body, { actor: body.actor }))
-      return
-    }
-    {
-      // `/api/model-profiles/<id>` 的三件事（读/改/删）。
-      //
-      // 写成 `req.method === '…' && path.startsWith('…')` 这个**同一行**的形态，
-      // 不是风格洁癖：`scripts/prt/baseline-snapshot.mjs` 的抽取规则只认这一种
-      // 与 `path === '…'`。把 method 判断嵌进块里（或改用正则 exec）会让这条
-      // 路由对**契约基线不可见**，于是它能不经评审地增删——平台契约里少一条，
-      // 而没有任何门禁会说话。
-      const MODEL_PREFIX = '/api/model-profiles/'
-      // 解 id；不是合法编码时回 null，空串时回 ''
-      const modelId = () => {
-        try {
-          return decodeURIComponent(path.slice(MODEL_PREFIX.length))
-        } catch {
-          return null
-        }
-      }
-      // 测试连接（PRT-507）。**位置必须在下面那批 startsWith 之前**：
-      // 否则 /api/model-profiles/p1/probe 会被当成 id = "p1/probe" 查档案，
-      // 然后以一个完全指向错误方向的 404 结束。
-      //
-      // 路径用**字面量**而不是上面那个 MODEL_PREFIX 常量：PRT-007 的路由抽取器
-      // 只认字符串字面量，用常量写会让这条路由**静默地**不进平台契约基线——
-      // 基线照样报「与已记录一致」，而它少了一条真实端点。
-      // （`baseline-snapshot.mjs` 现在会主动拒绝这种写法，见 findOpaqueRouteGuards。）
-      if (req.method === 'POST' && path.startsWith('/api/model-profiles/') && path.endsWith('/probe')) {
-        const rawId = path.slice('/api/model-profiles/'.length, path.length - '/probe'.length)
-        if (rawId === '') { json(res, 400, { ok: false, error: '缺少模型档案 id', code: 'MISSING_PARAM' }); return }
-        let probeId
-        try {
-          probeId = decodeURIComponent(rawId)
-        } catch {
-          json(res, 400, { ok: false, error: '模型档案 id 不是合法的 URL 编码', code: 'BAD_ID_ENCODING' }); return
-        }
-        if (probeId.includes('/')) {
-          // 多段路径不是 id：明确拒绝，不去猜用户想要哪一个档案。
-          json(res, 400, { ok: false, error: '模型档案 id 不能包含斜杠', code: 'BAD_ID_ENCODING' }); return
-        }
-        await handleRun(req, res, async (body) => {
-          const profile = modelStore.get(probeId)
-          if (profile === null) {
-            const hist = modelStore.resolveForHistory(probeId)
-            if (hist !== null) {
-              const err = new Error('模型档案 ' + probeId + ' 已被删除')
-              err.statusCode = 409
-              err.code = MODEL_ERRORS.PROFILE_DELETED
-              throw err
-            }
-            const err = new Error('没有这个模型档案：' + probeId)
-            err.statusCode = 404
-            err.code = MODEL_ERRORS.PROFILE_NOT_FOUND
-            throw err
-          }
-          // force 默认为 **true**：这是用户主动按下的按钮。
-          // 按钮按下去若只回一个缓存里的旧结论，用户会以为“刚才那次点击验证了现在”。
-          // 缓存的价值在于**自动**重复检查（后台巡检），不在于回应一次点击。
-          const force = body.force !== false
-          const requiredCapabilities = Array.isArray(body.requiredCapabilities) ? body.requiredCapabilities : []
-          const verdict = await probeService().probeModelProfile(profile, { requiredCapabilities, force })
-          // 「没探测过」用 **503**：它不是客户端错误（用户没做错），也不是 200
-          // （那会让前端把它当成一个判定）。503 = 现在没法提供这项服务。
-          if (verdict.unavailable === true) {
-            const err = new Error(verdict.message)
-            err.statusCode = 503
-            err.code = verdict.code
-            throw err
-          }
-          return { probe: verdict, profileId: probeId }
-        })
-        return
-      }
-      if (req.method === 'GET' && path.startsWith('/api/model-profiles/')) {
-        const id = modelId()
-        if (id === null) { json(res, 400, { ok: false, error: '模型档案 id 不是合法的 URL 编码', code: 'BAD_ID_ENCODING' }); return }
-        if (id === '') { json(res, 400, { ok: false, error: '缺少模型档案 id', code: 'MISSING_PARAM' }); return }
-        const p = modelStore.get(id)
-        if (p === null) {
-          // 墓碑与"从没存在过"分开报：混成一个 404 会让
-          // 「删掉再用同名建」看起来像一次干净的首次创建。
-          const hist = modelStore.resolveForHistory(id)
-          if (hist !== null) {
-            json(res, 409, {
-              ok: false, code: MODEL_ERRORS.PROFILE_DELETED,
-              error: `模型档案 ${id} 已被删除`,
-              deletedAtMs: hist.deletedAtMs, serverTimeMs: Date.now(),
-            })
-            return
-          }
-          json(res, 404, { ok: false, code: MODEL_ERRORS.PROFILE_NOT_FOUND, error: `没有这个模型档案：${id}` })
-          return
-        }
-        json(res, 200, { ok: true, profile: p, serverTimeMs: Date.now() })
-        return
-      }
-      if (req.method === 'PATCH' && path.startsWith('/api/model-profiles/')) {
-        const id = modelId()
-        if (id === null) { json(res, 400, { ok: false, error: '模型档案 id 不是合法的 URL 编码', code: 'BAD_ID_ENCODING' }); return }
-        if (id === '') { json(res, 400, { ok: false, error: '缺少模型档案 id', code: 'MISSING_PARAM' }); return }
-        await handleRun(req, res, (body) =>
-          modelStore.update(id, body.profile ?? body, { actor: body.actor, version: body.version }))
-        return
-      }
-      if (req.method === 'PUT' && path.startsWith('/api/model-profiles/')) {
-        const id = modelId()
-        if (id === null) { json(res, 400, { ok: false, error: '模型档案 id 不是合法的 URL 编码', code: 'BAD_ID_ENCODING' }); return }
-        if (id === '') { json(res, 400, { ok: false, error: '缺少模型档案 id', code: 'MISSING_PARAM' }); return }
-        await handleRun(req, res, (body) =>
-          modelStore.update(id, body.profile ?? body, { actor: body.actor, version: body.version }))
-        return
-      }
-      if (req.method === 'DELETE' && path.startsWith('/api/model-profiles/')) {
-        const id = modelId()
-        if (id === null) { json(res, 400, { ok: false, error: '模型档案 id 不是合法的 URL 编码', code: 'BAD_ID_ENCODING' }); return }
-        if (id === '') { json(res, 400, { ok: false, error: '缺少模型档案 id', code: 'MISSING_PARAM' }); return }
-        await handleRun(req, res, (body) => modelStore.remove(id, { actor: body.actor, version: body.version }))
-        return
-      }
-    }
+    // ── 模型档案（spec §6.6） —— 已提取到 `./routes/model-profiles.mjs`（PRT-316 第 13 族 / 切片 13）──
+    // 整段搬走：`server.mjs` 里现在**不再有** `/api/model-profiles` 路由，该命名空间只住一个地方。
+    if (await router.dispatch(req, res, { path, url })) return
     // ── 岗位模型绑定与 fallback（PRT-502，spec §6.6） ──
     //
     // 键是 (scope, employee_role)：同一条流水线里编码岗与审查岗可以绑不同模型，

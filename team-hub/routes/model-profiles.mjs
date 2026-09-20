@@ -121,6 +121,13 @@ export function createModelProfilesRoutes({
         await handleRun(req, res, (body) => modelStore.create(body.profile ?? body, { actor: body.actor }))
       },
     },
+    // 测试连接（PRT-507）。**位置必须在下面那批 startsWith 之前**：
+    // 否则 /api/model-profiles/p1/probe 会被当成 id = "p1/probe" 查档案，
+    // 然后以一个完全指向错误方向的 404 结束。
+    // 路径用**字面量**而不是上面那个 MODEL_PREFIX 常量：PRT-007 的路由抽取器
+    // 只认字符串字面量，用常量写会让这条路由**静默地**不进平台契约基线——
+    // 基线照样报「与已记录一致」，而它少了一条真实端点。
+    // （`baseline-snapshot.mjs` 现在会主动拒绝这种写法，见 findOpaqueRouteGuards。）
     {
       method: 'POST',
       match: 'prefix+suffix',

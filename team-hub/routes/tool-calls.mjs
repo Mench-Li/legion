@@ -108,6 +108,13 @@ export function createToolCallsRoutes({
         })
       },
     },
+    // ★★★ `/api/tool-calls/evidence` —— **就绪判据的产出点**（放在 `/api/tool-calls` 之后，
+    // 否则前缀会先把这个更长的路径吃掉；这个顺序本身就是一处会安静失效的地方）。
+    // 它存在之前，`release-gate.mjs` 的 `decisionSourceRecorded` 在全仓**没有任何产出者**：
+    // 那一项写得很谨慎（"缺失的证据不是证据"），于是它永远判否——
+    //   > 一个「判据说缺少证据、而没有任何地方能提供证据」的判据，
+    //   > 与一个「永远判否」的判据，是同一个东西——只不过前者看起来更谨慎。
+    // 证据**从库里读**，不由调用方传一个它自己相信的布尔：这一项问的是生产事实。
     {
       method: 'GET',
       match: 'exact',
@@ -124,6 +131,9 @@ export function createToolCallsRoutes({
         })
       },
     },
+    // `/api/tool-calls/repair` —— 拿一条拒绝，直接读出修复动作。
+    // 这是 §6.8 line 480 最终要服务的那个人：值班的人拿着一条拒绝记录，
+    // 要能立刻知道"该去改哪里"。缺了它，那条"两类修复动作不同"就只是文档里的一句话。
     {
       method: 'GET',
       match: 'exact',

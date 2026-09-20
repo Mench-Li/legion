@@ -185,6 +185,10 @@ export function createConnectorsRoutes({
         res.end(text)
       },
     },
+    // `/api/connectors/<id>/incidents` —— 记一条熔断事件
+    // ★ 与 F-18 的 settle 同形：**字面量** + `startsWith`/`endsWith`，
+    //   而不是正则守卫。理由见上面那段长注释（`baseline-snapshot.mjs` 的
+    //   抽取器只认字面量，正则守卫会**悄悄**不进平台契约）。
     {
       method: 'POST',
       match: 'prefix+suffix',

@@ -149,6 +149,17 @@ export function createExperienceRoutes({
         json(res, 200, { ok: true, ...experienceAccount({ db, scope }) })
       },
     },
+    // `/api/experience/drafts/<id>/settle`
+    // ★ 形状刻意与 PRT-507 的 `/api/model-profiles/<id>/probe` 一致：
+    //   `startsWith` + `endsWith` 配**字面量**，而不是一个正则守卫。
+    //   原因不是风格：`scripts/prt/baseline-snapshot.mjs` 的抽取器只认
+    //   字面量（`path === '…'` / `path.startsWith('…')`），而它用
+    //   `findOpaqueRouteGuards` **主动拒绝**用常量做守卫的写法。
+    //   一个正则守卫两条都躲得过——于是这条路由会**悄悄**不进平台契约，
+    //   而 `--record` 会写下一份"看起来正常、少了一条端点"的基线。
+    //   这正是本仓库记过的最贵的一条：**一道看不见某类改动的闸门，
+    //   比没有闸门更危险**——它给人"已经守住了"的错觉。
+    //   所以这里按既有约定写成字面量 + startsWith/endsWith。
     {
       method: 'POST',
       match: 'prefix+suffix',

@@ -217,6 +217,43 @@
 > 早已不存在的决定——而它真正等的是「谁来采、采哪个进程」这个实现问题。
 > 本批把后者答掉了（见 `peak-resource.mjs` 文件头那段"采的是哪个进程"）。
 
+> ★★★ **2026-09-20 独立复核（另一会话，读数不是推断）：上面那句"缺实跑读数"是对的，但**不完整**——今天就算真跑一次，这一半的读数也到不了磁盘。**
+>
+> 逐段核下面那条链，前三段都有读数，第四段是缺的：
+>
+> | 段 | 位置 | 读数 |
+> | --- | --- | --- |
+> | 生产者 | `product/launcher/supervisor.mjs:508` `peakResource: readPeakResource()` | ✔ **在产出** |
+> | 记录层收不收 | `product/launcher/run-record.mjs` 的 `buildRunRecord` 遍历 `RUN_RECORD_OPTIONAL_FIELDS` | ✔ **收**（实测 11/11 字段原样往返） |
+> | 校验层认不认 | 同文件的 `validateRunRecord` | ✔ **认**（`ok=true`、`problems=[]`） |
+> | **中间那一跳** | `product/launcher/launcher.mjs:1261-1267` 只映射 `key`/`pid`/`image` | ✖ **就是这里丢的** |
+>
+> 缺的**恰好一行** —— 在 `image: x.image ?? null,` 之后加：
+>
+> ```js
+> peakResource: x.peakResource ?? null,
+> ```
+>
+> ★ **为什么"不完整"这件事有后果**：把今天那句映射**逐字复刻**、喂一份真形状的
+> `status()` 行，落盘记录里 `processes[0].peakResource` 是 **`null`**；补上那一行之后，
+> **11 个字段全字段往返一致**。⇒ 若有人照着"缺实跑读数"去跑一次，他会**什么也读不到**，
+> 而那个空结果与"采样器坏了"在磁盘上长得一样。
+>
+> > 一次"跑过了但没有读数"的实跑，与一次"根本产不出读数"的实跑，
+> > 在事后看是同一个东西——只不过前者会让人去查采样器。
+>
+> ★ **实测记录（2026-09-20）**：`normalizePeakResource` 逐字段保留 **11/11**；
+> `buildRunRecord → writeRunRecord → readRunRecord` 全字段往返一致；
+> 逐字复刻 launcher 那句映射 ⇒ 磁盘 `peakResource=null`，补那一行 ⇒ 全字段一致；
+> `product/launcher/run-record.test.mjs` **53/53**。
+>
+> ★ **挡着它的不是裁决，是文件归属**：`product/launcher/launcher.mjs` 此刻是
+> **另一会话的在制品**（`git status` 显示 ` M`）。对方的改动是 PRT-251 的
+> `readiness`/stdout 行缓冲，与 `peakResource` **零重叠**（实测其未提交 diff 里
+> `peakResource` 出现 **0** 次）。⚠️ 而 `docs/DECISION-BRIEF.md` §0B 那句
+> "那个文件我可以动"指的是 **`product/process-manifest.mjs`**，**不是**这一个文件——
+> 所以那句话**解不开这一条**。这一条需要**单独一句**授权，或等那个会话提交。
+
 > 唯一仍阻塞的那一项，原因**不是**「需要一次真实执行」——那个理由已经被用掉了。
 > 清单长期挂着同一个理由，读的人会默认它没变，清单就成了噪音；
 > 因此 `baseline-measure.test.mjs` 有一条用例专门断言阻塞项的原因里不再出现

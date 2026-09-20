@@ -7,6 +7,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+// ★ PRT-316 切片 3：chat 族已搬进独立模块——本文件末尾按**缝上契约**补判据。
+import { createChatRoutes } from './routes/chat.mjs'
 
 const tmpRoot = mkdtempSync(join(tmpdir(), 'legion-chat-'))
 let mod
@@ -868,3 +870,223 @@ describe('S3 TTL 小值：staged 孤儿与 sent 过期清理（TC-S3-11/12）', 
   })
 })
 
+// ══════════════════════════════════════════════════════════════════════════════
+// PRT-316 切片 3：搬走的 chat 族的**缝上契约**
+//
+// 为什么补（破验量出来的，8 条变异只咬住 1 条）：
+// 逐条查清之后，漏网的 7 条分成**三类**——把它们混成一句"覆盖不足"是错的：
+//
+//   ① **真的没人问过**（3 条）：`GET /api/chat/messages` 的缺省 limit、
+//      `GET /api/chat/reply-settings` 的 scope 合法性、`GET /api/chat/conversations`
+//      的 scope 过滤。本文件此前只在 HTTP 面发过
+//      `reply-settings`/`replies`/`messages(POST)`/`health`/`attachments`，
+//      上面三条**一次都没发出过**。
+//   ② **路由护栏与 DAO 校验重复**，于是去掉路由那条在读数上等价（3 条）：
+//      `listMessages` / `listAwaitingReplies` 自己用**同样的话**校验
+//      conv / scope / sinceMsgId（见 `server.mjs` L3206 / L3288 / L3291）。
+//      ★ 这类"等价"必须逐条读 DAO 才能说，不能由"没变红"推出。
+//   ③ **本次 hub 里不可观测**（1 条）：`PUT /api/chat/attachments` 的鉴权。
+//      `authorized()` 在 `TOKEN === ''` 时**恒真**，而本套件没有设 token。
+//
+//   > 一句"覆盖率不够"会把上面三类说成同一件事；
+//   > 而它们的修法完全不同（补用例 / 什么都不用做 / 换一个配了 token 的 hub）。
+//
+// ★ 打**缝上契约**（注入桩），而不是再起一个 hub：本片改动引入的正是缝——
+//   "13 条路由有没有接到正确的注入依赖上"。既有 42 例仍在**真 hub** 上验
+//   "hub 会怎么答"，两层互补。
+//
+// ★ 追加在**这个文件**里而不是新建：新建 `*.test.mjs` 会改变
+//   `git ls-files "*.test.mjs"` 的条数，而那个数被 `boundary-facts` 钉着。
+// ══════════════════════════════════════════════════════════════════════════════
+
+const CHAT_DEPS = ['createConversation', 'listConversations', 'postMessage', 'listMessages',
+  'cleanupChatAttachments', 'uploadChatAttachment', 'readChatAttachmentContent', 'chatHealth',
+  'getReplySettings', 'saveReplySettings', 'listAwaitingReplies', 'postAiReply',
+  'failAiReply', 'retryAiReply']
+
+/** 造一个 chat 族：所有注入点都被记录；`overrides` 可覆写任意项。 */
+function chatSpy(overrides = {}) {
+  const calls = { sent: [], writeArgs: [], readRaw: 0, auth: 0, dep: {} }
+  for (const d of CHAT_DEPS) calls.dep[d] = []
+  const deps = {
+    json: (_res, code, obj) => { calls.sent.push([code, obj]) },
+    // 把 fn 的返回值也留下来——写路由的"落到哪个 DAO"只能从这里看
+    handleWrite: async (_req, _res, fn) => { calls.writeArgs.push(fn({}, 'general')) },
+    authorized: () => { calls.auth += 1; return true },
+    readRawBody: async () => { calls.readRaw += 1; return Buffer.from('body') },
+    CHAT_ATTACH_MAX_BYTES: 1 << 20,
+  }
+  for (const d of CHAT_DEPS) {
+    // listAwaitingReplies 的返回值后面还要 .filter ⇒ 必须是数组
+    deps[d] = (...a) => { calls.dep[d].push(a); return d === 'listAwaitingReplies' ? [] : { ok: true } }
+  }
+  Object.assign(deps, overrides)
+  return { fam: createChatRoutes(deps), calls }
+}
+
+/** 按**真实 handle() 的约定**派发：path 是 pathname，url 带查询串。 */
+function chatDispatch(fam, method, target, headers = {}) {
+  const url = new URL(`http://x${target}`)
+  return fam.dispatch({ method, headers }, {}, { path: url.pathname, url })
+}
+
+const n = (arr) => arr.length
+
+describe('PRT-316 切片 3：chat 族 13 条路由的**接线**契约（缝上）', () => {
+  it('① 13 条路由每一条都接到正确的注入依赖上（方法+路径 → 依赖）', async () => {
+    // ★ 第 5 条额外允许 cleanupChatAttachments：上传路径**有意**先跑一次孤儿清理
+    //   （原文 `server.mjs` L8408 的注释："顺带孤儿/过期清理（hub 周期宿主之一）"）。
+    //   把"额外碰了别的 DAO"一律当错会让这条正常的副作用报假红。
+    const table = [
+      ['POST', '/api/chat/conversations', 'createConversation', []],
+      ['GET', '/api/chat/conversations?scope=software', 'listConversations', []],
+      ['POST', '/api/chat/messages', 'postMessage', []],
+      ['GET', '/api/chat/messages?conv=7', 'listMessages', []],
+      ['PUT', '/api/chat/attachments?scope=s&by=general&fileName=f.txt', 'uploadChatAttachment', ['cleanupChatAttachments']],
+      ['GET', '/api/chat/attachments/content?id=1&conv=7&scope=s&by=general', 'readChatAttachmentContent', []],
+      ['GET', '/api/chat/health?scope=s', 'chatHealth', []],
+      ['GET', '/api/chat/reply-settings?scope=default', 'getReplySettings', []],
+      ['POST', '/api/chat/reply-settings', 'saveReplySettings', []],
+      ['GET', '/api/chat/replies?scope=s', 'listAwaitingReplies', []],
+      ['POST', '/api/chat/replies/answer', 'postAiReply', []],
+      ['POST', '/api/chat/replies/fail', 'failAiReply', []],
+      ['POST', '/api/chat/replies/retry', 'retryAiReply', []],
+    ]
+    assert.equal(table.length, 13, '路由表条数与族声明不符——加了路由就要来这里登记')
+    for (const [method, target, dep, also] of table) {
+      const { fam, calls } = chatSpy()
+      const handled = await chatDispatch(fam, method, target)
+      assert.equal(handled, true, `${method} ${target} 没被本族接住`)
+      assert.equal(n(calls.dep[dep]), 1, `${method} ${target} 没有走到 ${dep}（走了 ${CHAT_DEPS.filter((d) => n(calls.dep[d])).join(',') || '无'}）`)
+      // ★ 反向：其他 DAO 一个都不许被碰（防"两条路由接到同一个 DAO"）；
+      //   `also` 是**登记过**的合法副作用，不是漏网。
+      const others = CHAT_DEPS.filter((d) => d !== dep && !also.includes(d) && n(calls.dep[d]) > 0)
+      assert.deepEqual(others, [], `${method} ${target} 额外碰了 ${others.join(',')}`)
+      // 而且登记过的副作用**确实**发生了（否则 `also` 会变成一张永久豁免的白名单）
+      for (const a of also) assert.equal(n(calls.dep[a]), 1, `${method} ${target} 应调用 ${a} 一次，实际 ${n(calls.dep[a])} 次`)
+    }
+  })
+
+  it('② 方法或路径不匹配 ⇒ 返回 false（把控制权交回 if 链，不许静默吞掉）', async () => {
+    const { fam } = chatSpy()
+    assert.equal(await chatDispatch(fam, 'GET', '/api/chat/conversations'), true)
+    assert.equal(await chatDispatch(fam, 'DELETE', '/api/chat/conversations'), false, 'DELETE 不该被接住')
+    assert.equal(await chatDispatch(fam, 'GET', '/api/chat/nope'), false)
+    assert.equal(await chatDispatch(fam, 'GET', '/api/chat/conversations/extra'), false, '等值路由不该吞前缀')
+  })
+
+  it('③ GET /api/chat/messages 的 limit 缺省必须是 50（此前 HTTP 面一次都没发过）', async () => {
+    const d = chatSpy()
+    await chatDispatch(d.fam, 'GET', '/api/chat/messages?conv=7')
+    assert.equal(d.calls.dep.listMessages.length, 1)
+    assert.equal(d.calls.dep.listMessages[0][0].limit, 50, '缺省 limit 不是 50')
+    assert.equal(d.calls.dep.listMessages[0][0].before, undefined, '缺省 before 不是 undefined')
+
+    const e = chatSpy()
+    await chatDispatch(e.fam, 'GET', '/api/chat/messages?conv=7&limit=3&before=9')
+    assert.deepEqual(
+      { conv: e.calls.dep.listMessages[0][0].conv, limit: e.calls.dep.listMessages[0][0].limit, before: e.calls.dep.listMessages[0][0].before },
+      { conv: 7, limit: 3, before: 9 }, '显式参数没透传',
+    )
+  })
+
+  it('④ GET /api/chat/reply-settings 的 scope 合法性在**路由层**就拦住（DAO 会静默回落 default）', async () => {
+    // 这一条是"补缺口"的核心：getReplySettings 对非法 scope **不报错**，
+    // 而是回落成 default（server.mjs L3225）。所以路由层那道校验是**承重的**：
+    // 没有它，`?scope=BAD!!` 会 200 地读到 default 空间的设置。
+    const bad = chatSpy()
+    const r = await chatDispatch(bad.fam, 'GET', '/api/chat/reply-settings?scope=BAD!!')
+    assert.equal(r, true)
+    assert.equal(bad.calls.sent.length, 1)
+    assert.equal(bad.calls.sent[0][0], 400, '非法 scope 没有 400：' + JSON.stringify(bad.calls.sent[0]))
+    assert.match(bad.calls.sent[0][1].error, /scope/, '错误信息不可读')
+    assert.equal(n(bad.calls.dep.getReplySettings), 0, '非法 scope 仍然去读了设置（会静默读到 default）')
+
+    const good = chatSpy()
+    await chatDispatch(good.fam, 'GET', '/api/chat/reply-settings?scope=team-a')
+    assert.equal(good.calls.dep.getReplySettings[0][0], 'team-a')
+    // 省略 scope ⇒ 路由给 'default'
+    const def = chatSpy()
+    await chatDispatch(def.fam, 'GET', '/api/chat/reply-settings')
+    assert.equal(def.calls.dep.getReplySettings[0][0], 'default', '省略 scope 没回落成 default')
+  })
+
+  it('⑤ GET /api/chat/conversations 的 scope 透传（不带 ⇒ undefined，即"全部"）', async () => {
+    const a = chatSpy()
+    await chatDispatch(a.fam, 'GET', '/api/chat/conversations?scope=software')
+    assert.equal(a.calls.dep.listConversations[0][0].scope, 'software')
+    const b = chatSpy()
+    await chatDispatch(b.fam, 'GET', '/api/chat/conversations')
+    // ★ 必须是 undefined 而不是 ''：listConversations 只对**非空字符串**加 WHERE，
+    //   传 '' 恰好也走"全部"，但传 'x' 与传 undefined 的差别在这里被钉住。
+    assert.equal(b.calls.dep.listConversations[0][0].scope, undefined, '不带 scope 时透传的不是 undefined')
+  })
+
+  it('⑥ PUT /api/chat/attachments 未授权 ⇒ 401，且**不碰**上传链路（本 hub 里不可观测，故在缝上验）', async () => {
+    // 为什么只能在这里验：authorized() 在 TOKEN === '' 时恒真（server.mjs L4712），
+    // 而本套件不设 token ⇒ 真 hub 上这条鉴权**永远走不到**。
+    const d = chatSpy({ authorized: () => { d.calls.auth += 1; return false } })
+    const r = await chatDispatch(d.fam, 'PUT', '/api/chat/attachments?scope=s&by=general&fileName=f.txt')
+    assert.equal(r, true)
+    assert.equal(d.calls.sent[0]?.[0], 401, '未授权没有 401：' + JSON.stringify(d.calls.sent))
+    assert.equal(d.calls.readRaw, 0, '未授权仍然去读了请求体')
+    assert.equal(n(d.calls.dep.uploadChatAttachment), 0, '未授权仍然调了上传')
+    assert.equal(n(d.calls.dep.cleanupChatAttachments), 0, '未授权仍然跑了清理')
+  })
+
+  it('⑦ GET /api/chat/messages 缺 conv 时在**路由层**就拦住（不是靠 DAO 兜底）', async () => {
+    // ★ 这一条**不是**在断言"能 400"——DAO 自己也会 400（server.mjs L3206 用同样的话）。
+    //   它断言的是**拦在哪一层**：缺参数的请求不该先进到 DAO 里。
+    const d = chatSpy()
+    await chatDispatch(d.fam, 'GET', '/api/chat/messages')
+    assert.equal(d.calls.sent[0][0], 400, '缺 conv 没有 400')
+    assert.equal(n(d.calls.dep.listMessages), 0, '缺 conv 仍然调了 DAO（护栏位置变了）')
+  })
+
+  it('⑨ GET /api/chat/replies 的三道入参护栏在**路由层**就拦住（DAO 也会拦，但拦在哪一层是契约）', async () => {
+    // ★★ 这一条的措辞是关键，不许含糊：
+    //   `listAwaitingReplies` **自己**用同样的话校验 scope/sinceMsgId/limit
+    //   （server.mjs L3288/L3291/L3293），所以去掉路由那道护栏，
+    //   在**真 hub 上观测不到任何差别**——两处都会 400。
+    //   这不是"覆盖不足"，是**观测等价**；破验工具因此不会变红，而那是正确的。
+    //
+    //   但"拦在哪一层"本身是这次提取要保住的性质：
+    //     · 校验在路由层 ⇒ 非法请求**不进** DAO（不建连接、不标 stale、不查库）；
+    //     · 校验只在 DAO ⇒ 每次非法请求都要先进一次业务层。
+    //   用**永不抛错的桩 DAO** 把这一层钉住：桩不抛，唯一能产生 400 的就是路由自己。
+    const CASES = [
+      ['/api/chat/replies', /scope/, '缺 scope'],
+      ['/api/chat/replies?scope=', /scope/, '空 scope'],
+      ['/api/chat/replies?scope=s&sinceMsgId=abc', /sinceMsgId/, '非整数 sinceMsgId'],
+      ['/api/chat/replies?scope=s&sinceMsgId=-1', /sinceMsgId/, '负 sinceMsgId'],
+      ['/api/chat/replies?scope=s&limit=0', /limit/, 'limit=0'],
+      ['/api/chat/replies?scope=s&limit=-3', /limit/, '负 limit'],
+    ]
+    for (const [target, re, why] of CASES) {
+      const d = chatSpy() // 桩 DAO 永不抛错、永远返回 []
+      const r = await chatDispatch(d.fam, 'GET', target)
+      assert.equal(r, true, `${target} 没被接住`)
+      assert.equal(d.calls.sent[0]?.[0], 400, `${why}（${target}）没有在路由层 400：` + JSON.stringify(d.calls.sent))
+      assert.match(d.calls.sent[0][1].error, re, `${why} 的错误信息不可读`)
+      assert.equal(n(d.calls.dep.listAwaitingReplies), 0, `${why}（${target}）仍然进到了 DAO——护栏层变了`)
+    }
+    // 反面控制：合法入参必须真的进 DAO
+    const ok = chatSpy()
+    await chatDispatch(ok.fam, 'GET', '/api/chat/replies?scope=s&sinceMsgId=0&limit=5')
+    assert.equal(n(ok.calls.dep.listAwaitingReplies), 1, '合法入参没有进 DAO')
+    assert.equal(ok.calls.dep.listAwaitingReplies[0][0].scope, 's')
+  })
+
+  it('⑧ 附件上传：authorized → 清理 → 读体 → 上传 的顺序与参数', async () => {
+    const d = chatSpy()
+    const r = await chatDispatch(d.fam, 'PUT', '/api/chat/attachments?scope=s3&by=coder&fileName=a.txt')
+    assert.equal(r, true)
+    assert.equal(d.calls.auth, 1, 'authorized 没有被调用')
+    assert.equal(n(d.calls.dep.cleanupChatAttachments), 1, '没有先做清理')
+    assert.equal(d.calls.readRaw, 1, '没有读原始体')
+    const up = d.calls.dep.uploadChatAttachment[0][0]
+    assert.deepEqual({ scope: up.scope, fileName: up.fileName, by: up.by }, { scope: 's3', fileName: 'a.txt', by: 'coder' }
+      , '上传参数没有逐字透传：' + JSON.stringify(up))
+    assert.ok(Buffer.isBuffer(up.content), '上传内容不是 Buffer')
+  })
+})

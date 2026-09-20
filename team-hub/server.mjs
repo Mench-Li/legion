@@ -228,6 +228,7 @@ import { SCHEMA as CONFIG_SCHEMA } from './config-schema.mjs'
 import { createRouter } from './router.mjs'
 import { createRulesRoutes } from './routes/rules.mjs'
 import { createPermissionsRoutes } from './routes/permissions.mjs'
+import { createChatRoutes } from './routes/chat.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -4937,6 +4938,13 @@ const router = createRouter([
     listPermissionInbox, decidePermission, checkPermission,
     upsertPermissionRule, deletePermissionRule,
   }),
+  createChatRoutes({
+    json, handleWrite, authorized, readRawBody, CHAT_ATTACH_MAX_BYTES,
+    createConversation, listConversations, postMessage, listMessages,
+    cleanupChatAttachments, uploadChatAttachment, readChatAttachmentContent, chatHealth,
+    getReplySettings, saveReplySettings, listAwaitingReplies, postAiReply,
+    failAiReply, retryAiReply,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -8361,137 +8369,9 @@ async function handle(req, res, stripPrefix) {
       await handleWrite(req, res, (body, by) => setSkillSource({ scope: body.scope, url: body.url, branch: body.branch }))
       return
     }
-    // ── 对话中心（chat）：会话 / 消息 REST（scope 分区 + by 写纪律；审计/SSE 在 DAO 内统一留痕）──
-    if (req.method === 'POST' && path === '/api/chat/conversations') {
-      await handleWrite(req, res, (body, by) => createConversation({ ...body, by }))
-      return
-    }
-    if (req.method === 'GET' && path === '/api/chat/conversations') {
-      try {
-        const scopeParam = url.searchParams.get('scope') ?? undefined
-        json(res, 200, { scope: scopeParam ?? null, conversations: listConversations({ scope: scopeParam }) })
-      } catch (e) {
-        json(res, 400, { error: e instanceof Error ? e.message : String(e) })
-      }
-      return
-    }
-    if (req.method === 'POST' && path === '/api/chat/messages') {
-      await handleWrite(req, res, (body, by) => postMessage({ ...body, by }))
-      return
-    }
-    if (req.method === 'GET' && path === '/api/chat/messages') {
-      try {
-        const conv = url.searchParams.get('conv')
-        if (!conv) throw new Error('缺少参数 conv')
-        const limitRaw = url.searchParams.get('limit')
-        const beforeRaw = url.searchParams.get('before')
-        const messages = listMessages({
-          conv: Number(conv),
-          limit: limitRaw === null ? 50 : Number(limitRaw),
-          before: beforeRaw === null ? undefined : Number(beforeRaw),
-        })
-        json(res, 200, { conv: Number(conv), messages })
-      } catch (e) {
-        json(res, 400, { error: e instanceof Error ? e.message : String(e) })
-      }
-      return
-    }
-
-    // ── 对话附件（S3/R-3 决策 E1）：上传 PUT / 取回 GET（服务端护栏 + audit；内容不入 messages 表）──
-    if (req.method === 'PUT' && path === '/api/chat/attachments') {
-      try {
-        if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
-        const scopeParam = (url.searchParams.get('scope') ?? '').trim()
-        const byParam = (url.searchParams.get('by') ?? '').trim()
-        const fileName = (url.searchParams.get('fileName') ?? '').trim()
-        if (!byParam) throw new Error('缺少操作者身份 by')
-        cleanupChatAttachments({ scope: scopeParam }) // 顺带孤儿/过期清理（hub 周期宿主之一）
-        const buf = await readRawBody(req, CHAT_ATTACH_MAX_BYTES)
-        const att = uploadChatAttachment({ scope: scopeParam, fileName, content: buf, by: byParam })
-        json(res, 200, att)
-      } catch (e) {
-        const message = e instanceof Error ? e.message : String(e)
-        const code = e && typeof e === 'object' && 'statusCode' in e ? e.statusCode : 400
-        json(res, code >= 400 && code < 500 ? code : 400, { error: message })
-      }
-      return
-    }
-    if (req.method === 'GET' && path === '/api/chat/attachments/content') {
-      try {
-        const scopeParam = (url.searchParams.get('scope') ?? '').trim()
-        const byParam = (url.searchParams.get('by') ?? '').trim()
-        const out = readChatAttachmentContent({ id: url.searchParams.get('id'), conv: url.searchParams.get('conv'), scope: scopeParam, by: byParam })
-        json(res, 200, out)
-      } catch (e) {
-        const message = e instanceof Error ? e.message : String(e)
-        const status = /不属于该会话|越权|跨会话/.test(message) ? 403 : /不存在|附件文件/.test(message) ? 404 : 400
-        json(res, status, { error: message })
-      }
-      return
-    }
-
-    // ── 对话健康（S2/R-1 决策 B1）：只读聚合（守护在线/开关/模型解析链/最近失败）──
-    if (req.method === 'GET' && path === '/api/chat/health') {
-      try {
-        const scopeParam = url.searchParams.get('scope') ?? ''
-        json(res, 200, chatHealth(scopeParam))
-      } catch (e) {
-        json(res, 400, { error: e instanceof Error ? e.message : String(e) })
-      }
-      return
-    }
-
-    // ── 对话 AI 回复（R-4，S9）：reply-settings / replies 队列 / answer CAS 回写 / retry 重试 ──
-    if (req.method === 'GET' && path === '/api/chat/reply-settings') {
-      try {
-        const scopeParam = url.searchParams.get('scope') ?? 'default'
-        if (typeof scopeParam !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(scopeParam.trim())) throw new Error('scope 非法：小写字母/数字开头的空间 id（≤64 字符）')
-        json(res, 200, getReplySettings(scopeParam.trim()))
-      } catch (e) {
-        json(res, 400, { error: e instanceof Error ? e.message : String(e) })
-      }
-      return
-    }
-    if (req.method === 'POST' && path === '/api/chat/reply-settings') {
-      await handleWrite(req, res, (body, by) => saveReplySettings({ ...body, by }))
-      return
-    }
-    if (req.method === 'GET' && path === '/api/chat/replies') {
-      try {
-        const scopeParam = url.searchParams.get('scope')
-        if (!scopeParam || scopeParam.trim().length === 0) throw new Error('缺少参数 scope')
-        const sinceRaw = url.searchParams.get('sinceMsgId')
-        const limitRaw = url.searchParams.get('limit')
-        const since = sinceRaw === null ? 0 : Number(sinceRaw)
-        if (!Number.isInteger(since) || since < 0) throw new Error('sinceMsgId 必须是 ≥0 的整数')
-        const lim = limitRaw === null ? 20 : Number(limitRaw)
-        if (!Number.isInteger(lim) || lim <= 0) throw new Error('limit 必须是正整数')
-        const convRaw = url.searchParams.get('conv')
-        const convFilter = convRaw === null ? null : Number(convRaw)
-        if (convFilter !== null && (!Number.isInteger(convFilter) || convFilter <= 0)) throw new Error('conv 必须是会话 id')
-        let messages = listAwaitingReplies({ scope: scopeParam.trim(), sinceMsgId: since, limit: lim })
-        if (convFilter !== null) messages = messages.filter(m => m.convId === convFilter)
-        json(res, 200, { scope: scopeParam.trim(), sinceMsgId: since, limit: lim, messages })
-      } catch (e) {
-        json(res, 400, { error: e instanceof Error ? e.message : String(e) })
-      }
-      return
-    }
-    if (req.method === 'POST' && path === '/api/chat/replies/answer') {
-      // 回复方应答：body { msgId, body, model?, kind? }；by 须为回复方身份（author=by 防冒名在 DAO 内绑定）。
-      await handleWrite(req, res, (body, by) => postAiReply({ ...body, by }))
-      return
-    }
-    if (req.method === 'POST' && path === '/api/chat/replies/fail') {
-      // 守护 chat-responder 显式失败回写（body: msgId + error + by；CAS awaiting→failed，幂等）。
-      await handleWrite(req, res, (body, by) => failAiReply({ ...body, by }))
-      return
-    }
-    if (req.method === 'POST' && path === '/api/chat/replies/retry') {
-      // UI 失败重试：把 failed 的 awaiting 源消息重置回 awaiting。
-      await handleWrite(req, res, (body, by) => retryAiReply({ ...body, by }))
-      return
-    }
+    // ── 对话中心（chat）：会话/消息/附件/健康/AI 回复 —— 已提取到 `./routes/chat.mjs`（PRT-316 切片 3）──
+    // 整段搬走：`server.mjs` 里现在**不再有** `/api/chat/*` 路由，该命名空间只住一个地方。
+    if (await router.dispatch(req, res, { path, url })) return
 
     // ── 日程日历（calendar）：事件 REST（scope 必填写纪律 + audit/SSE；写走 handleWrite，见 S5/R-B1 数据面）──
     // P2-5：+ 更新（局部）/ 冲突检测（只读提示，不阻断）/ 关联查询（taskId|goalId，供任务详情双向展示）；

@@ -349,9 +349,20 @@ test('⑧ 声明式路由（提取出去的族）能被提取，且两种书写�
 })
 
 test('⑨ ★★★ 装配了未登记的路由族 ⇒ 必须抛错（否则那个族的路由对基线不可见）', () => {
-  const wired = "const router = createRouter([\n  createRulesRoutes({}),\n  createChatRoutes({}),\n])"
-  // 只登记了 rules，却装配了 chat ⇒ 红，且必须点名 chat
-  assert.throws(() => assertRouteFamilyCoverage(wired), /createChatRoutes/,
+  // ★ 反面例子的工厂名**不许写死**。
+  //   这条判据是切片 1 写的，当时拿 `createChatRoutes` 当"未登记"的例子——
+  //   那在切片 1 是事实，到切片 3（chat 真的登记了）就变成了**假命题**：
+  //   夹具不再是"未登记的族"，于是它不抛错，而它罚的其实是**正确**的行为。
+  //
+  //   > 一个把"哪个族还没登记"写进夹具的用例，
+  //   > 与一个假设"注册表永不变化"的用例，是同一个东西。
+  //
+  //   现在从一个**确定不存在**的名字推出来，本判据再也不会随注册表演进而失效。
+  const registered = new Set(ROUTE_FAMILY_SOURCES.map((x) => x.factory))
+  const unregistered = 'createZzzNeverRegisteredRoutes'
+  assert.ok(!registered.has(unregistered), `夹具选的名字 ${unregistered} 竟然登记了 ⇒ 换一个`)
+  const wired = `const router = createRouter([\n  createRulesRoutes({}),\n  ${unregistered}({}),\n])`
+  assert.throws(() => assertRouteFamilyCoverage(wired), new RegExp(unregistered),
     '装配了未登记的族却报绿 ⇒ 那个族的路由对基线完全不可见，而 --check 会说"一致"')
   // 反过来：登记了却没装配 ⇒ 也要红（列名过期）
   assert.throws(

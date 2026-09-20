@@ -240,6 +240,7 @@ import { createUsageRoutes } from './routes/usage.mjs'
 import { createConfigRoutes } from './routes/config.mjs'
 import { createCreateRoutes } from './routes/create.mjs'
 import { createCommentRoutes } from './routes/comment.mjs'
+import { createMembersRoutes } from './routes/members.mjs'
 import { createTeamPlansRoutes } from './routes/team-plans.mjs'
 import { createPriceTablesRoutes } from './routes/price-tables.mjs'
 import { createConfigBundleRoutes } from './routes/config-bundle.mjs'
@@ -5065,6 +5066,10 @@ const router = createRouter([
     json,
     contextPlanStore, handleRun,
   }),
+  createMembersRoutes({
+    json,
+    db,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -6369,14 +6374,9 @@ async function handle(req, res, stripPrefix) {
       json(res, 200, { agents: [...byRole.values()] })
       return
     }
-    if (req.method === 'GET' && path === '/api/members') {
-      const rows = db.prepare('SELECT * FROM members ORDER BY lastSeenAt DESC').all()
-      json(res, 200, rows.map((r) => ({
-        member: r.id, scope: r.scope, kind: r.kind, lastSeenAt: r.lastSeenAt,
-        online: Date.now() - new Date(r.lastSeenAt ?? 0).getTime() < 60000,
-      })))
-      return
-    }
+    // ── 成员名册（GET：按最近出现倒序列出，带 60 秒在线判定） —— 已提取到 `./routes/members.mjs`（PRT-316 第 22 族 / 切片 23）──
+    // 整段搬走：`server.mjs` 里现在**不再有** `/api/members` 路由，该命名空间只住一个地方。
+    if (await router.dispatch(req, res, { path, url })) return
     if (req.method === 'GET' && path === '/api/roster') {
       // 工作空间专属编队：scope 的智能体队伍 + 每人当前状态/任务（按该空间任务实时投影）。
       // 合流：编队岗位（roster.role 匹配任务的 role/soldier）之外，未入编队但认领了该空间

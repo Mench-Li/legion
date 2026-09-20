@@ -244,6 +244,7 @@ import { createMembersRoutes } from './routes/members.mjs'
 import { createExecRoutes } from './routes/exec.mjs'
 import { createModelsRoutes } from './routes/models.mjs'
 import { createWebRoutes } from './routes/web.mjs'
+import { createModelBindingsRoutes } from './routes/model-bindings.mjs'
 import { createTaskLifecycleRoutes } from './routes/task-lifecycle.mjs'
 import { createReadModelsRoutes } from './routes/read-models.mjs'
 import { createSkillsDocumentsRoutes } from './routes/skills-documents.mjs'
@@ -5136,6 +5137,10 @@ const router = createRouter([
     reassignTask, now, getTask,
     releaseStaleTasks, inboxCount, handleWrite,
   }),
+  createModelBindingsRoutes({
+    json,
+    bindingStore, handleRun, BINDING_STORE_ERRORS,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
@@ -5519,58 +5524,10 @@ async function handle(req, res, stripPrefix) {
     // ── 模型档案（spec §6.6） —— 已提取到 `./routes/model-profiles.mjs`（PRT-316 第 13 族 / 切片 13）──
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/model-profiles` 路由，该命名空间只住一个地方。
     if (await router.dispatch(req, res, { path, url })) return
-    // ── 岗位模型绑定与 fallback（PRT-502，spec §6.6） ──
-    //
-    // 键是 (scope, employee_role)：同一条流水线里编码岗与审查岗可以绑不同模型，
-    // 不同空间也可以各绑各的。
-    //
-    // **写入时就要验主档案能解析**：等到运行时才发现 `primaryProfile` 打错了，
-    // 那次运行已经认领了任务、烧掉一次尝试，而错误出现在运行日志里——
-    // 不是在"保存配置"这个动作上，后者才是真正能改的地方。
-    if (req.method === 'GET' && path === '/api/model-bindings') {
-      const scope = url.searchParams.get('scope')
-      json(res, 200, { ok: true, bindings: bindingStore.list(scope), serverTimeMs: Date.now() })
-      return
-    }
-    if (req.method === 'POST' && path === '/api/model-bindings') {
-      await handleRun(req, res, (body) => {
-        const b = bindingStore.upsert({
-          scope: body.scope,
-          employeeRole: body.employeeRole,
-          primaryProfile: body.primaryProfile,
-          fallbackProfiles: body.fallbackProfiles ?? [],
-          perRunBudget: body.perRunBudget ?? null,
-        }, { actor: body.actor })
-        return { binding: b }
-      })
-      return
-    }
-    if (req.method === 'GET' && path === '/api/model-bindings/resolve') {
-      // 「这个岗位现在该依次用哪些模型，为什么」。
-      // 绑定不存在时 404 而不是 200 带空链：空链会被下游读成"没有可用的模型"，
-      // 而真实情况是"没有绑定"——前者要人去建档案，后者要人去建绑定。
-      const scope = url.searchParams.get('scope')
-      const role = url.searchParams.get('role')
-      // 显式验参数，**不靠异常决定状态码**：`bindingStore.resolve` 在缺 role 时
-      // 会抛 ROLE_REQUIRED，而这个分支没有包在 `handleRun` 里——异常逃到外层
-      // 兜底处理器就变成 500。于是"调用方少传一个参数"报成了"服务端出错"，
-      // 运维会去查服务端日志，而真正要做的是补上参数。
-      if (scope === null || scope.trim() === '') {
-        json(res, 400, { ok: false, code: 'MISSING_PARAM', error: '缺少 scope（绑定是 (scope, role) 二元的）' })
-        return
-      }
-      if (role === null || role.trim() === '') {
-        json(res, 400, { ok: false, code: 'ROLE_REQUIRED', error: '缺少 role：没有岗位就没有"该用哪个模型"的主语' })
-        return
-      }
-      const r = bindingStore.resolve(scope, role)
-      if (r.code === BINDING_STORE_ERRORS.BINDING_NOT_FOUND) {
-        json(res, 404, { ok: false, code: r.code, error: r.message, serverTimeMs: Date.now() })
-        return
-      }
-      json(res, 200, { ok: true, resolution: r, serverTimeMs: Date.now() })
-      return
-    }
+    // ── 岗位模型绑定与 fallback（PRT-502，spec §6.6） —— 已提取到 `./routes/model-bindings.mjs`（PRT-316 第 33 族 / 切片 35）──
+    // 本族这 3 条已全部搬进模块，`server.mjs` 里不再有它们。
+    // 归属 /api/model-bindings 的那 3 条都在这里了。
+    if (await router.dispatch(req, res, { path, url })) return
     // ── 迁移老的非敏感模型配置（算一份计划 / 按确认过的指纹执行） —— 已提取到 `./routes/model-migration.mjs`（PRT-316 第 27 族 / 切片 28）──
     // 整段搬走：`server.mjs` 里现在**不再有** `/api/model-migration` 路由，该命名空间只住一个地方。
     if (await router.dispatch(req, res, { path, url })) return

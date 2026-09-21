@@ -241,6 +241,93 @@ node scripts/prt/spec-progress.mjs         → exit 0
 node scripts/ci/encoding-check.mjs         → PASS
 ```
 
+### 8.4 第二轮：把闸门读数接进 CI、并关掉 PRT-006 的跨版本缺口（2026-09-21 晚）
+
+§8.1 修好的是**探针自己**；这一轮修的是"**读数到不了该看的人手里**"，
+以及 §0 提到的那条遗留缺口。
+
+#### 8.4.1 退出码不再合并（`--strict`：未降温 ⇒ 3，读不到 ⇒ 2）
+
+第一版把两者都给了 `2`。那正好是 §8.1 要防的那类错的重演：
+
+> 一个"闸门读不到"的读数，与一个"闸门读到了、判定不该开工"的读数，
+> 在只看退出码的调用方眼里是同一个东西——只不过前者要修的是探针，后者要修的是排期。
+
+现在 **0 = 已降温 / 2 = 读不到 / 3 = 未降温（仅 `--strict`）**，
+并且三种码来自一个**具名**导出 `CHURN_EXIT`，`main()` 与 CI 都不许再写裸数字。
+
+#### 8.4.2 探针多打一行机器可读结论
+
+```
+CHURN_VERDICT cooled=false recentMax=10/40 historicalPeak=17/40 head=d8dcb4d
+```
+
+因为 CI 此前只能去**猜中文措辞**（匹配「已降温」/「未降温」）——
+*一个靠匹配中文措辞判断机器状态的调用方，会在这句话被改写的那天静默失准*。
+
+#### 8.4.3 读数接进了 CI 的 `doc` 阶段（**记录，不判红**）
+
+实测输出（`node scripts/ci/run-ci.mjs --only doc`）：
+
+```
+阶段 3 闸门（hot-file-churn --strict）exit=3
+  CHURN_VERDICT cooled=false recentMax=10/40 historicalPeak=17/40 head=d8dcb4d
+  ⇒ 未降温：阶段 3 应推迟（按 spec A.5 第 3 条，Program 级停止条件优先）
+
+[doc] -> PASS (4528ms)
+```
+
+三处刻意的取舍：
+
+1. **不参与 `ok`**：未降温是探针的**正常输出**，真当失败会让每个在途提交把 CI 变红。
+2. **读不到（2）也不拦**：那条线现在没人在守，悄悄变门禁会让别人的提交莫名其妙地红。
+3. ★ **"读不到"这个码不覆盖"探针文件缺失"**——我实测过：把探针文件改名后
+   `run-ci.mjs` 顶部那句静态 `import` 在**加载期**就 `ERR_MODULE_NOT_FOUND`，
+   整个 CI 当场死掉，detail 一个字都打不出来。我原先注释里把这条说成
+   "读不到 ⇒ 如实报进 detail"，**那句话是错的**，已订正。
+   行为保留（静态 import 换来"退出码常量不可能与探针漂开"，正是破验 M6/M7 守的东西）。
+   实测记录见 `scratch/_probe-ci-missing-probe.md`。
+
+#### 8.4.4 PRT-006 跨版本恢复：缺口已关
+
+`docs/PRT-006-evidence/backup-restore-evidence.md` §5 此前自己写着
+「**未验证跨版本恢复**……本次未对该声明做实验」，守的是一句**没有任何实验支撑的声明**：
+
+> 表结构只增不改：新代码在老库自动建表/补列（幂等），回滚旧代码时新表闲置互不破坏。
+> —— `docs/DEPLOY.md` §6 回滚表
+
+新增 `scripts/prt/backup-restore-cross-version.test.mjs`（CI 套件 `prt-xver`，**11 例**），
+夹具形状取自**真实历史**：`f53404e`（2026-08-25）那一版 `team-hub/server.mjs` 只有
+`tasks`/`members`/`audit` **三张表**，今天 **50 张**。
+
+| 方向 | 判据 | 读数 |
+| --- | --- | --- |
+| 夹具出处 | 那个提交真的只有三张表；INSERT 列清单与历史逐字一致 | ✔ |
+| 新代码读老库（前滚） | 老数据逐行不丢 / 新表新列建补 / **补上来的列可空或有默认** / 新代码写得进去 | ✔ |
+| 前滚（破坏性迁移） | `goal` 表 DROP+重建**行数不丢**、形状升级、且**幂等**（第二次打开不重建） | ✔ |
+| 老代码读新库（回滚） | 老代码写过的列都还在 / **三条老 INSERT 从历史源码抠出来真的跑一遍** / 老表无触发器 | ✔ |
+
+⚠️ **边界如实保留**：回滚那一向**没有真的去跑那一版 `server.mjs`**——它没有 `isMain` 守卫
+（import 会直接监听端口），且 `ROOT = <所在目录>/..` 从临时目录跑会算错。
+所以它是**结构性 + 执行老 SQL** 的验证，不是"跑了一遍老代码"；
+**别把绿色的 `prt-xver` 读成"回滚已经端到端验过了"**（该边界已同时写进套件文件头与证据文档）。
+
+#### 8.4.5 第二轮的门禁读数（改完复跑）
+
+```
+node --test scripts/prt/hot-file-churn.test.mjs                    → 24/24 pass
+node scratch/_mutate-r115-churn.mjs                                → 6/6 咬住，逐字节还原
+node --test scripts/prt/backup-restore-cross-version.test.mjs      → 11/11 pass
+node scratch/_mutate-r116-xver.mjs                                 → 5/5 咬住，逐字节还原
+node scripts/ci/run-ci.mjs --only doc                              → PASS，闸门读数已入 detail
+node scripts/prt/boundary-facts.mjs                                → PASS 30/30，红 0
+node scripts/prt/progress-check.mjs / spec-progress.mjs            → exit 0 / exit 0
+node scripts/ci/check-docs.mjs / encoding-check.mjs                → PASS / PASS
+```
+
+破验另记一条**可证等价**（不计缺口）：去掉 `tasks.status` 的 `DEFAULT 'backlog'`
+不产生行为差异——新老代码的两条 tasks INSERT **都显式写了 `status`**。
+
 ---
 
 ## 9. 复现命令
@@ -250,9 +337,12 @@ git log -1 --format='%h %ci %s'                      # 基线（★ 会动）
 node --test team-hub/run-plane-e2e.test.mjs          # PRT-214 四跳
 node --test orchestrator/worker/can-read-authorization-source.test.mjs team-hub/run-floor.test.mjs
 node --test product/launcher/run-credential-dsh-process.test.mjs   # PRT-509 ③
-node scripts/prt/hot-file-churn.mjs --strict         # PRT-316 闸门（未降温 ⇒ 2）
-node --test scripts/prt/hot-file-churn.test.mjs      # ⑤⑥⑦
-node scratch/_mutate-r114-churn.mjs                  # 破验 3/3
+node scripts/prt/hot-file-churn.mjs --strict         # PRT-316 闸门（未降温 ⇒ 3 / 读不到 ⇒ 2）
+node --test scripts/prt/hot-file-churn.test.mjs      # ⑤⑥⑦⑧⑨⑩
+node scratch/_mutate-r115-churn.mjs                  # 破验 6/6
+node scripts/ci/run-ci.mjs --only doc                # 闸门读数进 CI detail
+node --test scripts/prt/backup-restore-cross-version.test.mjs      # PRT-006 跨版本 11 例
+node scratch/_mutate-r116-xver.mjs                   # 破验 5/5
 node scripts/prt/boundary-facts.mjs                  # 引文坐标
 git log --oneline -S "resolveRunPermissions" -- team-hub/server.mjs team-hub/run-store.mjs
 ```

@@ -38,6 +38,10 @@ import { createHash } from 'node:crypto'
 // ★ DSH 检出的**唯一**一份判定（见 `stageTest` 里那段 `dshFound`）。
 import { resolveDshCheckout } from '../lib/dsh-checkout.mjs'
 import { parseSuiteCounts, countsFragment } from './parse-suite-output.mjs'
+// ★ 阶段 3 评审闸门的退出码：**按名字**分流，不写裸数字。
+//   裸数字那版被破验证伪过一次（`scratch/_mutate-r115-churn.mjs` 的 M6）：
+//   把 `3` 误写成 `2` 时没有任何判据会红，而"探针读不到"那条告警会静默变成死代码。
+import { CHURN_EXIT } from '../prt/hot-file-churn.mjs'
 
 const SELF_DIR = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(SELF_DIR, '..', '..')            // 仓库根（本 worktree）
@@ -1541,6 +1545,11 @@ async function stageTest() {
     // team.db，依赖它会让本套件在 CI 上永远 skip 或永远红。夹具的关键是留一个
     // 未 checkpoint 的 WAL（插入后保持连接打开），否则「只复制 .db 会丢数据」无从证明。
     { label: 'prt-backup（PRT-006 备份/恢复验证：三条路线 + 陈旧 WAL 危害）', files: ['scripts/prt/backup-restore-verify.test.mjs'], cwd: ROOT },
+    // PRT-006 跨版本恢复（spec A.4 那条「顺延至 PRT-316 之后」）：两个方向各一组读数。
+    // 夹具取自**真实历史**（`f53404e` 那一版 server.mjs 只有三张表，今天 50 张），
+    // 老代码的 INSERT 是**从历史源码里抠出来真的跑一遍**的，不是重写一份。
+    // 它守的是 DEPLOY.md §6 回滚表那句「表结构只增不改」——那在此前没有任何实验支撑。
+    { label: 'prt-xver（PRT-006 跨版本恢复：新代码读老库 / 老代码读新库）', files: ['scripts/prt/backup-restore-cross-version.test.mjs'], cwd: ROOT },
     // 阶段 3 评审闸门：热点文件改动节奏。本套件直接锁定「正确写法 vs 错误写法」的差异——
     // `git log -n 40 -- <file>` 会先按路径过滤再截断，恒返回 40，把「该开工」读成「不能开工」。
     { label: 'prt-churn（阶段 3 评审闸门：热点文件改动节奏探针）', files: ['scripts/prt/hot-file-churn.test.mjs'], cwd: ROOT },
@@ -4637,6 +4646,67 @@ async function stageDoc() {
   //     > 一份"要记得手动同步"的进度表，与一份"从来没同步过"的进度表，
   //     > 在读者眼里是同一个东西——只不过前者在第一次忘记之后开始说谎。
   const rp = await exec(process.execPath, [join(ROOT, 'scripts', 'prt', 'spec-progress.mjs'), '--check'], { cwd: ROOT })
+  // ★ 阶段 3 评审闸门的**读数**（2026-09-21 复核后补）。
+  //
+  //   此前这个探针在 CI 里**只有单测入口**（`prt-churn` 那段跑的是
+  //   `hot-file-churn.test.mjs`，测的是"探针写得对不对"）。于是**真仓的读数
+  //   从来不在 CI 日志里**——而台账 PRT-316 行正是拿"复跑 exit 0"当
+  //   "评审闸门已过"的论据，那次复跑是**人手跑的**，不是 CI 产的。
+  //
+  //   > 一个"只有手工跑过"的门禁读数，与一个"跑过并被记下来"的读数，
+  //   > 在"它现在是什么"这个问题上是同一个东西——只不过前者的上一次
+  //   > 复跑会一直挂在那里，直到有人想起来再跑一次。
+  //
+  //   ★★ 但它**不参与 `ok`**，这是刻意的：
+  //
+  //     · 判「未降温」（退出码 3）**不是失败**——它是这个探针的正常输出。
+  //       真把它当失败，每个在途提交都会把 CI 变红，而 CI 是全体会话共用的一条线。
+  //     · 判「读不到」（退出码 2）**是**一件要人看的事（探针坏了，读数不可信）。
+  //       可它也不该拦下整个 `doc` 阶段——那条线现在没有人在守它，
+  //       悄悄变成门禁会让别人的提交莫名其妙地红。
+  //
+  //   ⇒ 处置：两种情况都**如实打进 detail**（含给机器读的 `CHURN_VERDICT` 行），
+  //     退出码只在 detail 里可见。
+  //
+  //   ★★★ 边界（2026-09-21 实测后订正）：上面有两处**不是**这条分流能覆盖的，
+  //     因为探针文件本身被删掉时**根本走不到**这段：
+  //
+  //       · `run-ci.mjs` 顶部有一句 `import { CHURN_EXIT } from '../prt/hot-file-churn.mjs'`。
+  //         探针文件缺失 ⇒ Node 在**加载期**就 `ERR_MODULE_NOT_FOUND`，整个 CI
+  //         （不只 `doc` 阶段）当场死掉，detail 一个字都打不出来。
+  //
+  //     我一开始把这条写在注释里说成"读不到 ⇒ 如实报进 detail"，实测才发现
+  //     那句是**错的**：*一个"我写了分支所以坏掉时会被记录下来"的印象，
+  //     与一个"坏掉时进程根本起不来"的事实，在我没有真的去删一次文件的时候
+  //     是同一个东西。*（见 `scratch/_probe-ci-missing-probe.md` 的记录。）
+  //
+  //     这是**有意的取舍**：静态 import 换来的是"退出码常量不可能与探针漂开"
+  //     （破验 M6/M7 守的就是这个）。探针文件缺失属于"仓库坏了"，不是"读数异常"——
+  //     那种情况下让 CI 硬停比打一行告警更对。**但要如实记在这里**，
+  //     免得下一个人把 2 这个码当成"覆盖了探针缺失"。
+  //
+  //   ★★ 分流**按名字**，不按裸数字：`CHURN_EXIT` 是探针导出的三个具名码。
+  //     裸数字那版被破验证伪过一次——把 `3` 误写成 `2` 时没有任何判据会红，
+  //     而"探针读不到"那条告警会静默变成死代码。所以这里 import 名字，
+  //     并且在**名字对不上**时明确报出来，而不是让它落进某个 else。
+  const rh = await exec(process.execPath, [join(ROOT, 'scripts', 'prt', 'hot-file-churn.mjs'), '--strict'], { cwd: ROOT })
+  const churnRaw = (rh.out + '\n' + rh.err).trim()
+  const churnVerdict = churnRaw.split('\n').find((l) => l.startsWith('CHURN_VERDICT ')) ?? null
+  const churnLine = (() => {
+    if (rh.code === CHURN_EXIT.COOLED || rh.code === CHURN_EXIT.NOT_COOLED) {
+      const cooled = rh.code === CHURN_EXIT.COOLED
+      return `阶段 3 闸门（hot-file-churn --strict）exit=${rh.code}${churnVerdict ? '　' + churnVerdict : ''}` +
+        (cooled ? '　⇒ 已降温：可安排开工' : '　⇒ 未降温：阶段 3 应推迟（按 spec A.5 第 3 条，Program 级停止条件优先）')
+    }
+    if (rh.code === CHURN_EXIT.UNREADABLE) {
+      // 这一支**不是**失败，但必须与"未降温"分得开：要修的是探针，不是排期。
+      return `阶段 3 闸门（hot-file-churn --strict）exit=${rh.code}　⚠ 探针**读不到**（非 git 仓库 / HEAD 解不开？）——读数不可信` +
+        (churnRaw ? '\n    ' + churnRaw.split('\n').slice(-3).join('\n    ') : '')
+    }
+    // 没见过的退出码：不许静默归到上面任何一支——那正是"合并两个码"的形状。
+    return `阶段 3 闸门（hot-file-churn --strict）exit=${rh.code}　⚠ **退出码不在 CHURN_EXIT 里**（${JSON.stringify(CHURN_EXIT)}）——探针与调用方的约定已经漂了` +
+      (churnRaw ? '\n    ' + churnRaw.split('\n').slice(-3).join('\n    ') : '')
+  })()
   const ok = r.code === 0 && rp.code === 0
   // RC-3 修复（T-117 实测）：原实现只保留 PASS|FAIL 过滤行，check-docs 缺失/脚本语法错等模块级错误被吞
   // （ci.log 仅剩「doc: … exit=1」+「[doc] -> FAIL」，排障只能另跑 check-docs）。失败态改为带原始输出尾部。
@@ -4662,7 +4732,8 @@ async function stageDoc() {
   return {
     ok,
     detail: 'doc: 文档新鲜度校验（check-docs.mjs）exit=' + r.code +
-      ' / 进度表自检（spec-progress.mjs --check）exit=' + rp.code + extra,
+      ' / 进度表自检（spec-progress.mjs --check）exit=' + rp.code + extra +
+      '\n  ' + churnLine,
   }
 }
 

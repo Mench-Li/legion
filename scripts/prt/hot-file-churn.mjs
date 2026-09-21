@@ -32,17 +32,25 @@
 //
 // ## ★ 退出码（2026-09-21 复核后补）
 //
-// 默认**不**因判定而变：读得到 git 历史就 0（判定「未降温」也是 0），
-// 读不到（不是 git 仓库等）才 2。原因是「未降温」是本探针的**正常输出**，
-// 不是运行失败——本文件自己的单测要在这棵工作树上跑，若未降温就非 0，
-// 每个在途提交都会把 CI 弄红。
+// 三个码各说一件事，**不合并**：
 //
-// 但由此存在一个形状问题，值得写下来：
-// *一个"无论判定是哪一侧都返回同一个退出码"的工具，与一个"通过了"的工具，
-// 在被只看退出码的流水线读到时是同一个东西*——而**历史上确实有台账行**
-// 把 `hot-file-churn.mjs ... exit 0` 当成"评审闸门已过"的论据
-// （见 `docs/superpowers/prt/PRT-PROGRESS.md` 的 PRT-316 行）。
-// ⇒ 要把它当**门禁**用的调用方加 `--strict`：判定「未降温」时以 2 收场。
+//   0  读到了，判定「已降温」
+//   2  **读不到**（不是 git 仓库 / HEAD 解不开）——这是一个**坏掉的读数**
+//   3  读到了，判定「未降温」（仅在 `--strict` 下；不加则仍是 0）
+//
+// ★ 2 与 3 必须分开，虽然它们"都是非 0"。第一版把两者都给了 2，而那正好是
+// 本文件要防的那类错的重演：
+//
+//   > 一个"闸门读不到"的读数，与一个"闸门读到了、判定不该开工"的读数，
+//   > 在只看退出码的调用方眼里是同一个东西——只不过前者要修的是探针，
+//   > 后者要修的是排期。
+//
+// 而调用方恰好会同时需要这两件事：CI 要把"未降温"如实**记下来**（那不是失败），
+// 却应当把"读不到"当成一件要人看的事。见 `run-ci.mjs` 的 `stageDoc`。
+//
+// 默认**不**因判定而变（不加 `--strict` 时"未降温"也给 0）：未降温是本探针的
+// **正常输出**，不是运行失败——本文件自己的单测要在这棵工作树上跑，
+// 若未降温就非 0，每个在途提交都会把 CI 弄红。
 // ============================================================================
 import { execFileSync } from 'node:child_process'
 import { dirname, resolve } from 'node:path'
@@ -331,13 +339,69 @@ export function collectChurn({ files = HOT_FILES, size = 40, windows = 6, cwd = 
   }
 }
 
+// ---------------------------------------------------------------------------
+// 退出码的**唯一**映射（纯函数，2026-09-21 复核后补）
+//
+// 抽出来是为了让两条反向控制能对着**夹具**跑：
+//
+//   ① `main()` 里的 `collectChurn` 用模块级 `ROOT`，**不接受 cwd 参数**，
+//      所以从夹具目录 spawn 本 CLI 读到的**永远是本仓**——夹具那几条只能直接
+//      调 `collectChurn({cwd})`，走不到退出码那一行；
+//   ② 于是"降温 ⇒ 0 / 未降温 ⇒ 3 / 读不到 ⇒ 2"这三支里，
+//      真仓今天只能走到"未降温"那一支，另外两支**一次都没被走到**。
+//
+//   > 一支没被走到的分支，与一支不存在的分支，在用例数上是同一个东西。
+//
+// 映射写成纯函数之后，三支都能被钉住，而 `main()` 只是它的一个调用方。
+//
+//   0  读到了，判定「已降温」
+//   2  **读不到**（`ok === false`）——探针坏了，读数不可信
+//   3  读到了，判定「未降温」（仅在 `strict` 下；否则 0）
+// ---------------------------------------------------------------------------
+
+/**
+ * 三种**互不相同**的退出码，具名导出。
+ *
+ * 调用方（`run-ci.mjs` 的 `doc` 阶段）必须用这些常量分流，不许写裸数字：
+ * 裸数字那版被破验当场证伪过一次（`scratch/_mutate-r115-churn.mjs` 的 M6）——
+ * 把 `rh.code === 3` 误改成 `rh.code === 2` 时，**没有任何判据会红**，
+ * 而"探针读不到"那条告警会静默变成死代码。
+ *
+ *   > 一个"合并两个退出码"的改动，与一个"两个码本来就是一个"的实现，
+ *   > 在只看源码（`2`/`3` 散落在条件里）的时候是同一个东西。
+ *
+ * 所以这里给名字，CI 侧按名字分流 —— 名字对不上就是 `undefined`，
+ * 而不是一个"恰好等于另一个码"的数字。
+ */
+export const CHURN_EXIT = Object.freeze({
+  COOLED: 0,
+  UNREADABLE: 2,
+  NOT_COOLED: 3,
+})
+
+/**
+ * 退出码映射。**只**由这里决定，`main()` 不许自己再写一份。
+ *
+ * @param {{ok: boolean, cooled?: boolean}} res `collectChurn` 的返回
+ * @param {{strict?: boolean}} [opts]
+ * @returns {0|2|3}
+ */
+export function exitCodeFor(res, { strict = false } = {}) {
+  if (!res || res.ok !== true) return CHURN_EXIT.UNREADABLE
+  if (!strict) return CHURN_EXIT.COOLED
+  // `verdict` 缺席时**不能**当好话来读：一个没有判定的运行与一个判成"降温"的
+  // 运行，在只看退出码的调用方眼里是同一个东西——所以缺判定按最保守的 3 收场。
+  if (res.verdict?.cooled !== true) return CHURN_EXIT.NOT_COOLED
+  return CHURN_EXIT.COOLED
+}
+
 function usage() {
   console.log('hot-file-churn.mjs — 热点文件改动节奏探针（阶段 3 评审闸门）')
   console.log('')
   console.log('  --window=<n>    窗口大小（默认 40）')
   console.log('  --windows=<n>   窗口个数（默认 6）')
   console.log('  --json          机器可读')
-  console.log('  --strict        判定「未降温」时以退出码 2 收场（见文件头那段）')
+  console.log('  --strict        判定「未降温」时以退出码 3 收场（见文件头那段）')
   console.log('  --help          本说明')
 }
 
@@ -348,9 +412,10 @@ function main() {
   const windows = Number(argv.find((a) => a.startsWith('--windows='))?.slice('--windows='.length)) || 6
 
   const res = collectChurn({ size, windows })
+  const code = exitCodeFor(res, { strict: argv.includes('--strict') })
   if (!res.ok) {
     console.error(`FAIL ${res.reason}`)
-    process.exit(2)
+    process.exit(code)
   }
   if (argv.includes('--json')) {
     console.log(JSON.stringify(res, null, 2))
@@ -373,20 +438,19 @@ function main() {
   const v = res.verdict
   console.log(`判定：最近 ${res.windowSize} 个提交中任一热点文件最多被触及 ${v.recentMax}/${res.windowSize}，历史峰值 ${v.historicalPeak}/${res.windowSize}`)
   console.log(`      ${v.reason}`)
+  // ★ 给调用方一行**机器可读**的结论（2026-09-21 复核后补）。
+  //
+  //   `run-ci.mjs` 的 `doc` 阶段要把这一行如实记进 CI 日志，而它此前只能去
+  //   **猜文案**（匹配「已降温」/「未降温」）——*一个靠匹配中文措辞来判断
+  //   机器状态的调用方，会在这句话被改写的那天静默失准*，而措辞是最容易改的。
+  //   所以这里给一个稳定形状，让 CI 解析它、不再解析散文。
+  console.log(`CHURN_VERDICT cooled=${v.cooled} recentMax=${v.recentMax}/${res.windowSize} historicalPeak=${v.historicalPeak}/${res.windowSize} head=${res.head}`)
   console.log(v.cooled
     ? '  → **已降温**：阶段 3 的文件争用风险低，可安排开工'
     : '  → **未降温**：在途功能仍在改这两个文件，阶段 3 应推迟')
-  // ★ 退出码：默认**不**因判定而变（walk 失败才 2）。
-  //
-  //   但这留下一个形状问题：判「未降温」时退出码**也是 0**，
-  //   于是 *一个"无论判定是哪一侧都返回同一个退出码"的工具，
-  //   与一个"通过了"的工具，在被只看退出码的流水线读到时是同一个东西*。
-  //
-  //   不把默认改成"未降温 ⇒ 非 0"是因为**未降温是探针的正常输出**，
-  //   不是运行失败：CI 里那条 `prt-churn` 跑的是本文件的单测，
-  //   真仓降温与否**不该**让 CI 变红（否则每个在途提交都会把它变红）。
-  //   需要"把它当门禁用"的调用方显式加 `--strict`。
-  if (argv.includes('--strict') && !v.cooled) process.exitCode = 2
+  // 退出码由 `exitCodeFor` 单独决定（纯函数，三支都能被夹具钉住）。
+  // 不在这里再写一份判断：两份判断迟早会分叉，而分叉的那天没人会知道。
+  process.exitCode = code
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {

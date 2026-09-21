@@ -6,12 +6,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { HOT_FILES, collectChurn, windowRanges } from './hot-file-churn.mjs'
+import { HOT_FILES, collectChurn, exitCodeFor, windowRanges } from './hot-file-churn.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 /**
@@ -686,7 +686,7 @@ test('⑤ ★★★ 一个文件都没量到时**不判定**，而不是判「�
 // 否则下一次改动很容易把其中一侧弄丢。
 // ---------------------------------------------------------------------------
 
-test('⑥ ★★★ `--strict`：未降温 ⇒ 2，降温 ⇒ 0；默认恒 0', () => {
+test('⑥ ★★★ `--strict`：未降温 ⇒ 3，降温 ⇒ 0；默认恒 0', () => {
   const script = fileURLToPath(new URL('./hot-file-churn.mjs', import.meta.url))
   const run = (args) => {
     try {
@@ -704,10 +704,19 @@ test('⑥ ★★★ `--strict`：未降温 ⇒ 2，降温 ⇒ 0；默认恒 0', 
   const plain = run([])
   const strict = run(['--strict'])
   assert.equal(plain.code, 0, '默认必须恒 0——未降温是正常输出，不是运行失败')
-  assert.equal(strict.code, res.verdict.cooled ? 0 : 2,
-    `--strict 必须跟随判定：cooled=${res.verdict.cooled} ⇒ 期望 ${res.verdict.cooled ? 0 : 2}`)
+  // ★ 未降温给 **3** 而不是 2：2 已经给了"读不到"。两者合并会让
+  //   "探针坏了"与"判定不该开工"变成同一个读数（见文件头"退出码"一节）。
+  assert.equal(strict.code, res.verdict.cooled ? 0 : 3,
+    `--strict 必须跟随判定：cooled=${res.verdict.cooled} ⇒ 期望 ${res.verdict.cooled ? 0 : 3}`)
   assert.match(strict.out, res.verdict.cooled ? /已降温/ : /未降温/,
     '退出码与文字结论必须是同一个判定，不许分叉')
+  // ★ 机器可读那一行必须与判定一致：CI 靠它，不靠猜中文措辞。
+  const line = strict.out.split('\n').find((l) => l.startsWith('CHURN_VERDICT '))
+  assert.ok(line, '必须打印 `CHURN_VERDICT` 行供机器读')
+  assert.match(line, new RegExp(`cooled=${res.verdict.cooled}\\b`),
+    `CHURN_VERDICT 的 cooled 必须与 verdict 一致：${line}`)
+  assert.match(line, new RegExp(`recentMax=${res.verdict.recentMax}/${res.windowSize}\\b`),
+    `CHURN_VERDICT 的 recentMax 必须与 verdict 一致：${line}`)
 })
 
 // ---------------------------------------------------------------------------
@@ -749,9 +758,108 @@ test('⑦ ★★★ 判定公式被夹具钉住：最近窗口 0 次 ⇒ 降温�
     const hot = collectChurn({ files: ['hot.txt'], size: 3, windows: 2, cwd: dir })
     assert.equal(hot.verdict.recentMax, 3, '最近窗口里 hot.txt 被碰 3 次')
     assert.equal(hot.verdict.cooled, false, '最近窗口 3 次 > 阈值 2 ⇒ 必须判未降温')
+
+    // ★★ 判定**两侧**都要过退出码映射（不 spawn CLI：CLI 读的是模块级 ROOT，
+    //    从夹具目录 spawn 永远读本仓，见 `exitCodeFor` 上面那段）。
+    assert.equal(exitCodeFor(cold, { strict: true }), 0, '降温 + --strict ⇒ 0')
+    assert.equal(exitCodeFor(hot, { strict: true }), 3, '未降温 + --strict ⇒ 3')
+    assert.equal(exitCodeFor(cold, { strict: false }), 0, '默认恒 0')
+    assert.equal(exitCodeFor(hot, { strict: false }), 0, '默认恒 0（未降温也不变）')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+// ---------------------------------------------------------------------------
+// ⑧ ★★★ "读不到"与"未降温"必须是**两个**退出码（2026-09-21 复核后补）
+//
+// 第一版把两者都给了 2。那正好是本文件要防的那类错的重演：
+//
+//   > 一个"闸门读不到"的读数，与一个"闸门读到了、判定不该开工"的读数，
+//   > 在只看退出码的调用方眼里是同一个东西——只不过前者要修的是探针，
+//   > 后者要修的是排期。
+//
+// 而调用方（`run-ci.mjs` 的 `doc` 阶段）恰好**需要**分开处置这两件事：
+// 未降温要如实记下来（它不是失败），读不到则是读数不可信。
+//
+// ★ 这一条量的是 `exitCodeFor`（纯函数），因为 `verdict` 缺席那一支
+//   **在真仓与夹具上都走不到**——只有直接调它才量得到。
+//   而"缺判定"正是一个必须保守收场的情形：一份没有判定的报告，
+//   与一份判成"降温"的报告，在只看退出码的调用方眼里是同一个东西。
+// ---------------------------------------------------------------------------
+
+test('⑧ ★★★ 读不到 ⇒ 2，未降温 ⇒ 3，缺判定 ⇒ 3（三个码不许合并）', () => {
+  // ① 读不到（ok:false）⇒ 2
+  assert.equal(exitCodeFor({ ok: false, reason: '不是 git 仓库' }, { strict: true }), 2)
+  assert.equal(exitCodeFor({ ok: false }, { strict: false }), 2, '"读不到"与 strict 无关')
+  assert.equal(exitCodeFor(null), 2, '没有采集结果同样是"读不到"')
+
+  // ② 未降温 ⇒ 3（与 ① 的 2 分开）
+  assert.equal(exitCodeFor({ ok: true, verdict: { cooled: false } }, { strict: true }), 3)
+
+  // ③ 缺判定 ⇒ 3（保守：不许把"没有判定"当成好话）
+  assert.equal(exitCodeFor({ ok: true }, { strict: true }), 3, '缺 verdict 时不许判成 0')
+  assert.equal(exitCodeFor({ ok: true, verdict: {} }, { strict: true }), 3, 'verdict 里没有 cooled 同样保守')
+
+  // ④ 三种码互不相等 —— 这条是"不许合并"本身
+  const codes = new Set([
+    exitCodeFor({ ok: false }, { strict: true }),
+    exitCodeFor({ ok: true, verdict: { cooled: false } }, { strict: true }),
+    exitCodeFor({ ok: true, verdict: { cooled: true } }, { strict: true }),
+  ])
+  assert.equal(codes.size, 3, '读不到 / 未降温 / 已降温 必须是三个不同的退出码')
+})
+
+// ---------------------------------------------------------------------------
+// ⑨ ★★★ CI 侧不许靠猜中文措辞（2026-09-21 复核后补）
+//
+// `run-ci.mjs` 的 `doc` 阶段要把闸门读数记进 CI 日志。它此前只能匹配
+// 「已降温」/「未降温」这两个**中文短语**——而措辞是最容易改的东西。
+// `CHURN_VERDICT` 那一行就是为此存在的，所以它必须真的在输出里、且与判定一致。
+// ---------------------------------------------------------------------------
+
+test('⑨ ★★★ CLI 打印机器可读的 `CHURN_VERDICT` 行，且与判定一致', () => {
+  const script = fileURLToPath(new URL('./hot-file-churn.mjs', import.meta.url))
+  const out = execFileSync(process.execPath, [script], { cwd: ROOT, encoding: 'utf8' })
+  const line = out.split('\n').find((l) => l.startsWith('CHURN_VERDICT '))
+  assert.ok(line, '必须打印 `CHURN_VERDICT` 行')
+
+  const res = collectChurn({ size: 40, windows: 6 })
+  assert.match(line, new RegExp(`cooled=${res.verdict.cooled}\\b`), `cooled 必须一致：${line}`)
+  assert.match(line, new RegExp(`recentMax=${res.verdict.recentMax}/${res.windowSize}\\b`), `recentMax 必须一致：${line}`)
+  assert.match(line, new RegExp(`historicalPeak=${res.verdict.historicalPeak}\\b`), `historicalPeak 必须一致：${line}`)
+  assert.match(line, new RegExp(`head=${res.head}\\b`), `head 必须一致：${line}`)
+})
+
+// ---------------------------------------------------------------------------
+// ⑩ ★★★ CI 侧不许退回裸数字（破验 M6 逼出来的）
+//
+// ⑧ 钉的是"三个码互不相同"，但它钉的是 `exitCodeFor` 的**返回值**。
+// 调用方那一侧（`run-ci.mjs` 的 `doc` 阶段）此前写的是裸数字
+// `rh.code === 0 || rh.code === 3`，于是：
+//
+//   > 一个"合并两个退出码"的改动，与一个"两个码本来就是一个"的实现，
+//   > 在只看源码（`2`/`3` 散落在条件里）的时候是同一个东西。
+//
+// 破验 M6 就是这一手：把 `3` 改成 `2`，**没有任何判据会红**，
+// 而"探针读不到"那条告警会静默变成死代码。
+//
+// ⇒ 约定改成按**名字**分流，这条判据守住这个约定：
+//   run-ci.mjs 必须 import `CHURN_EXIT`，且在闸门那一段里**分别**提到
+//   `UNREADABLE` 与 `NOT_COOLED`。
+// ---------------------------------------------------------------------------
+
+test('⑩ ★★★ 调用方按名字分流，不写裸数字', () => {
+  const ci = readFileSync(join(ROOT, 'scripts', 'ci', 'run-ci.mjs'), 'utf8')
+
+  assert.match(ci, /import \{[^}]*\bCHURN_EXIT\b[^}]*\} from '\.\.\/prt\/hot-file-churn\.mjs'/,
+    'run-ci.mjs 必须 import `CHURN_EXIT`（裸数字会让"合并两个码"的改动无声通过）')
+
+  // 闸门那一段：两个码必须**分别**被提到，而不是被并进同一个条件。
+  const block = ci.split('\n').filter((l) => /CHURN_EXIT\./.test(l)).join('\n')
+  assert.match(block, /CHURN_EXIT\.UNREADABLE/, '必须单独处理"读不到"')
+  assert.match(block, /CHURN_EXIT\.NOT_COOLED/, '必须单独处理"未降温"')
+  assert.ok(!/rh\.code === [0-9]/.test(block), '闸门分流里不许出现裸数字退出码')
 })
 
 

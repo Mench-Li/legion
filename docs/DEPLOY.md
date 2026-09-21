@@ -242,7 +242,7 @@ Get-Content .legion-services.log -Tail 30  # services-plugin 托管时查看启�
 | --- | --- | --- |
 | 代码回滚（发布后功能异常） | git checkout <上一发布 commit> → node scripts\ci\run-ci.mjs --only build → 重启三件套（§4.2 步骤 2/3） | 上一发布 commit = 本次 promote 前的 main 头 |
 | 前端产物回滚 | 保留上一版 workbench/dist 快照（或 releases/ 上一快照）直接换回 → 重启 serve.mjs | 5173 非热更；无需动 DB |
-| 数据回滚（team.db） | 用备份还原：停 hub → **删除目标目录的 team.db-wal / team.db-shm** → 替换 team-hub/team.db → 重启 | 表结构只增不改：新代码在老库自动建表/补列（幂等），回滚旧代码时新表闲置互不破坏。**必须先删 -wal/-shm**，原因见 §6.1 |
+| 数据回滚（team.db） | 用备份还原：停 hub → **删除目标目录的 team.db-wal / team.db-shm** → 替换 team-hub/team.db → 重启 | 表结构只增不改：新代码在老库自动建表/补列（幂等），回滚旧代码时新表闲置互不破坏。**必须先删 -wal/-shm**，原因见 §6.1。★ 这句话 2026-09-21 起有实验支撑：`scripts/prt/backup-restore-cross-version.test.mjs`（CI 套件 `prt-xver`）逐向验过——但"老代码读新库"那一向是**结构性 + 执行老 SQL**，不是真的跑了那一版进程，别读成端到端 |
 | 进程故障（services-plugin 托管） | 无需人工：托管自愈重启（闪退退避 ≤30s）；手动部署则重启对应进程 | .legion-services.log 记录退出码与重启 |
 | 端口被占 | 结束占用进程或用独立端口（TEAM_HUB_PORT / --port）起服 | services-plugin 探测到占用即跳过该服务 |
 

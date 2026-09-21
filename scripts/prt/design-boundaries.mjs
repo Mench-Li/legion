@@ -290,12 +290,63 @@ export function checkDesignBoundaries({ boundaries, declarations, checks = CHECK
   return { ok: violations.length === 0, violations, reading }
 }
 
-/** 从磁盘按真实仓库核对。 */
+/**
+ * ★★★★★ 第 109 轮加的**按进程缓存** —— 起因是一次**我自己造成的超时**。
+ *
+ * 第 107 轮我给 `boundary-facts` 加了四条事实（四条机械边界各"扫了多少文件"），
+ * 每条都调一次 `checkRepo()`。实测：`checkRepo()` 单次 **372ms** ⇒
+ * `checkFacts()` 从 **~6.3s 变成 7.78s**（+19%）。
+ *
+ * ★★ 而 `boundary-facts.test.mjs` 的用例③（"逐条做反面控制"）会调 `checkFacts()`
+ * **每条事实一次（~30 次）** ⇒ 我那次改动给它加了 **约 45 秒**。
+ *
+ * ★★★ 后果不是"慢一点"：`run-ci.mjs:130` 的 `TEST_SUITE_TIMEOUT_MS = 300000`（5 分钟），
+ * 而那套件实测 **347 秒** ⇒ **它被杀了**。实测 `.ci/r108-full/suites/` 里那份日志只有
+ * `[超时现场]` —— **没有 `ℹ pass` 也没有 `ℹ fail`**。
+ *
+ * > ★★★★★ **一条超时的判据与一条"没跑"的判据，输出完全一样** ——
+ * > 而这套判据存在的全部意义就是"别让一个数字静默失去检查对象"。
+ * > 我自己那条新判据，**把整套判据推进了这个状态**。
+ *
+ * ⇒ 处置分两步：
+ *   ① 这里加**按进程缓存**（`checkRepo()` 在一趟进程里结果不变，纯读盘）；
+ *   ② 把那句"某套件超时 ⇒ 它的判决是**未知**，不是通过"写进读数 ——
+ *      因为缓存只还回我加的那 45 秒，**这套件本来就贴着 300 秒的线**。
+ *
+ * ⚠️ 缓存的**边界**（写清楚，免得下一班人把它当成"checkRepo 是纯函数"）：
+ *    `checkRepo()` **会读目标文档**（`MULTI-AGENT-FEATURE-OPTIMIZATION.md`）来取那 5 条边界声明。
+ *    所以"缓存"意味着：**一趟进程里，改了那份文档再调它，会拿到改动前的结果。**
+ *    ⇒ 谁要那样用，必须先调 `clearCheckRepoMemo()`。
+ *    ★ 而**本套件不受影响**：它 mutate 的是**交付物 / 人工清单**那两份，**不是**目标文档；
+ *      而这四条事实派生的是**扫描到的文件数**（`trackedFiles()`），与任何文档无关。
+ */
+const MEMO_SCANS = new Map()
+
+/** 从磁盘按真实仓库核对（★ 扫描量按进程缓存，理由见上面那段）。 */
 export function checkRepo({ specPath = SPEC_PATH } = {}) {
-  return checkDesignBoundaries({
+  const key = specPath
+  if (MEMO_SCANS.has(key)) return MEMO_SCANS.get(key)
+  const r = checkDesignBoundaries({
     boundaries: designBoundaries(specPath),
     declarations: BOUNDARY_DECLARATIONS,
   })
+  MEMO_SCANS.set(key, r)
+  return r
+}
+
+/**
+ * ★ 给测试用的**清缓存**口子。
+ *
+ * 为什么必须有：`checkRepo()` 会读**目标文档**（`MULTI-AGENT-FEATURE-OPTIMIZATION.md`）
+ * 来取那 5 条边界声明。而本套件里有用例会**改了文档再跑**（用例④"锚点消失"就是）。
+ * ⇒ 缓存若不清，那种用例会**拿到改动前的结果** ⇒ 它会报"没红"，
+ * 而真相是**我缓存了**。
+ *
+ * > ★★★ 一个"缓存没清"与一个"判据咬不住"，在输出里长得一样 ——
+ * > 而处置相反：一个要清缓存，一个要去改判据。
+ */
+export function clearCheckRepoMemo() {
+  MEMO_SCANS.clear()
 }
 
 // ── CLI：`node scripts/prt/design-boundaries.mjs`（只读）──────────────────

@@ -37,6 +37,7 @@ import {
   GENERATED_STATUS_VOCAB, GENERATED_STATUS_RE, canonicalJson,
   scanOriginalCitations, originalQuoteOnLine,
 } from './boundary-facts.mjs'
+import { checkRepo, clearCheckRepoMemo } from './design-boundaries.mjs'
 import { LEDGER_STATUS_MARKS, STATUS_MARKS, ledgerTaskRow } from './progress-check.mjs'
 import { matrixItems, MATRIX_PATH } from './reachability.mjs'
 
@@ -1716,4 +1717,44 @@ test('㉔ ★★★★★ §四那四条机械边界的扫描规模：必须是*
   for (const id of want) {
     assert.ok(!redIds.includes(id), `${id} 在今天这棵树上红了 ⇒ 扫描规模掉到了下限以下（或文档被改大）`)
   }
+})
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ★★★★★ 第 109 轮：`checkRepo()` 的**按进程缓存** —— 起因是一次**我自己造成的超时**
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// 第 107 轮那四条事实每条都调一次 `checkRepo()`（单次 **372ms**）⇒ `checkFacts()` **+19%**。
+// 而本套件的用例③（"逐条做反面控制"）会调 `checkFacts()` **每条事实一次（~30 次）**
+// ⇒ 我那次改动给它加了 **约 45 秒**。
+//
+// ★★★ 后果不是"慢一点"：`run-ci.mjs:130` 的 `TEST_SUITE_TIMEOUT_MS = 300000`（5 分钟），
+// 而实测 `.ci/r108-full/suites/` 里 `boundary-facts` 那份日志**只有 `[超时现场]`** ——
+// **没有 `ℹ pass` 也没有 `ℹ fail`**。
+//
+// > ★★★★★ **一条超时的判据，与一条"没跑"的判据，输出完全一样** ——
+// > 而这套判据存在的全部意义就是"别让一个数字静默失去检查对象"。
+// > 我自己那条新判据，**把整套判据推进了这个状态**。
+test('㉕ ★★★★★ `checkRepo()` 缓存：同一趟进程里不重复扫盘，且**清得掉**', () => {
+  // ── ① 缓存**真的生效**（否则那 45 秒的解法是假的）
+  const a = checkRepo()
+  const b = checkRepo()
+  assert.equal(a, b, '两次 `checkRepo()` 返回的**不是同一个对象** ⇒ 缓存没生效（那 45 秒还留着）')
+
+  // ── ② 缓存**清得掉**，而清完拿到的是**新的**对象
+  //    ★ 这一步是**反向控制**：只有"能清"才允许上游在改了文档之后重新取值。
+  //      少了它，"缓存没清"与"判据咬不住"在输出里长得一样，而处置相反。
+  clearCheckRepoMemo()
+  const c = checkRepo()
+  assert.notEqual(c, a, '`clearCheckRepoMemo()` 之后返回的**还是那个旧对象** ⇒ 清缓存是假的')
+  assert.deepEqual(c.reading.scanned, a.reading.scanned,
+    '清缓存后**扫描量变了** ⇒ 这一趟里仓库文件真的变了，或 `trackedFiles()` 不稳定')
+
+  // ── ③ 三条事实**共用一个**缓存条目（不是各扫各的）
+  //    ★ 这条防的是"有人把缓存键改成每条事实一个"——那等于没缓存。
+  const ctx = defaultContext()
+  const s1 = ctx.designBoundaryScans()
+  const s2 = ctx.designBoundaryScans()
+  assert.notEqual(s1, undefined)
+  assert.equal(s1['no-second-agent-loop'], s2['no-second-agent-loop'],
+    '两次派生的扫描量不一致 ⇒ 缓存键不对，或扫描不稳定')
 })

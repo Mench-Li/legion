@@ -1173,6 +1173,39 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-603 的 `whitelist` 那一格：**判定器对了 ≠ 真名字进去它认得**。
+      //
+      // `employee-manifest.test.mjs` 的 20 例把 `permitsTool` 的每一条规则都走到了，
+      // `whitelist-limb.test.mjs` 把"两个名字空间不相交"量成了事实——两套全绿，
+      // 而生产里那个端口**恒为 `null`**（`tool-request.mjs:998` 那一段一次都不进入）。
+      //
+      //   > 一个「每一条规则都走到了、而生产里那个端口恒为 null」的白名单，
+      //   > 与一个「没有岗位白名单」的部署，在"这次调用被它拦住了吗"上是同一个答案。
+      //
+      // 这一组的对象就是**那一次"跑一次"**：DSH 名（`read` / `bash` / `web_fetch`）
+      // 进端口，看它翻译成 Legion 能力名之后给出什么裁决。
+      //
+      // ★★★ 三条最要紧的读数：
+      //   · ③ 拒因必须是**能力**（`not-whitelisted`）而**不是**"未知工具" ——
+      //     后者是一条**指向错地方**的拒绝：照着它去改的人会去清单里点名，
+      //     而真正的问题是能力没授予（第 21 轮量出来的形状）。
+      //   · ⑤/⑥ `bash` / `pwsh` / `web_fetch` 的**一对多**由**部署裁决**
+      //     （许可对象自己的 `toolNameDecisions`）解决；没有裁决时**具名歧义拒绝**
+      //     并列出候选，**不许猜**（那四个候选里同时塌着低风险的 `git-status`
+      //     与高风险的 `git-push`：按最宽判会让只读岗位能推送，按最严判会让
+      //     `git status` 被拒）。
+      //   · ⑥ 是**反向**读数：端口第一版写的是 `state !== 'unique'`，
+      //     于是裁决那一支（`state: 'decided'`）被当成失败挡回去 ⇒
+      //     **登记了裁决反而恒拒**，且拒绝时 `rule` 是 `null`。
+      //     只断言 `allowed === false` 的用例**看不见它**。
+      // ★ 而这一族判据自己过了破验：7 个变体（含"裁决态被当成失败"、
+      //   "把 DSH 名直接喂给判定器"、"缺席退化成永远放行"）**全部按预期变红**
+      //   （量具 `scratch/_mutate-whitelist-port.mjs`，可复跑）。
+      label: 'whitelist-port（PRT-603：判定器对了 ≠ 真 DSH 名进去它认得）',
+      files: ['runtime/dsh-composition/whitelist-port.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-604：文件与工作目录范围限制（spec line 926、§6.6 line 449/454/460）。
       //
       // 盯四件事：

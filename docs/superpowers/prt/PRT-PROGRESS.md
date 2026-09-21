@@ -1355,6 +1355,61 @@ applier **抛错**的项不参与复核改写（它没有成功执行过，「�
   后一半比原来那条更强：它证明的是"接上了、但没配 = 读起来仍与没接一样"，
   也就是**没配不等于接了个空的**。
 
+  ### ★★★★★ 2026-09-21 第 112 轮：这一族**四道全部接上了** —— 本节上面每一处"未接"记账的取代关系
+
+  > ⚠️ **这是取代关系，不是对上面原文的修正。** 上面逐字写着
+  > `{hardFloor: true, pathScope: false, whitelist: false, policy: true, approval: true}`、
+  > "`execution-scope.mjs` 与 `external-api-scope.mjs` **连端口都没有**"、
+  > "`pathScope:false` / `whitelist:false` 意味着这两道检查在生产里没有被注入"、
+  > "① ……**并且**断言生产入参键集里不出现 `pathScope`/`whitelist`" ——
+  > 那些都是**当时**的真实读数，**一个字都没有删**。
+  > 但它们**今天全部不再成立**，读者若只打开这一节会得到一个反的结论。
+
+  本轮的实测读数（`scratch/_probe-r112-surfaces.mjs`，可复跑）：
+
+  ```text
+  没配任何表：{ hardFloor:true, pathScope:false, executionScope:false,
+               externalApiScope:false, whitelist:false, policy:true, approval:true,
+               connectorFeedback:false, connectorJudgment:false }
+  四道都配上：{ hardFloor:true, pathScope:true,  executionScope:true,
+               externalApiScope:true,  whitelist:true,  policy:true, approval:true, … }
+  越权命令裁决 = deny | 路径越界（path-scope-outside-write）：这个岗位的写范围是空的
+  ```
+
+  | 本节上面那句原话 | 今天的实际状态 | 落地 |
+  | --- | --- | --- |
+  | "`whitelist:false` 意味着这道检查在生产里没有被注入" | ✅ **已接** | `whitelist-port.mjs` + `root-row.mjs` 第四道端口 |
+  | "`execution-scope.mjs` 与 `external-api-scope.mjs` **连端口都没有**" | ✅ **早已接**（第 19/20 轮） | `execution-scope-port.mjs` / `external-api-scope-port.mjs` |
+  | "① 断言生产入参键集里**不出现** `pathScope`/`whitelist`" | 已改为**正向**：四道键**都在** | `production-scope-wiring.test.mjs` ①/②（第 112 轮第四次改指向） |
+  | "PRT-605/606 按告警应是 🟡 而挂着 ✅" | 不再适用：两道都**有生产调用方**了 | 同上 |
+
+  **★ 而 `whitelist` 这一道与前几道的形状不同，这一点值得写下来**
+
+  前三道缺的是"一份表从哪来"；`whitelist` 缺的是**一层翻译**——
+  被判定的名字（Legion 能力名）与桥交出去的名字（DSH 工具名）**不相交**
+  （`whitelist-limb.test.mjs` ③ 第 21 轮量的）。
+  本轮**没有**新增映射表，而是**反向读**仓库里那张唯一权威的表
+  （`employee-preset.mjs` 的 `LEGION_TOOL_ROUTING`），一对多**不猜**、
+  具名拒绝并列出候选；要放行必须在许可对象自己的 `toolNameDecisions` 里具名裁决。
+  详见 `MULTI-AGENT-FEATURE-STATUS.md` §4.5。
+
+  **★★ 本轮新增的两条判据与一次自我破验**
+
+  · 新增套件 `whitelist-port`（15 例，登记进 `run-ci.mjs`）。
+  · `production-scope-wiring.test.mjs` ①/② 按它们自己的失败文案"**再换一个对象**"
+    第四次改指向（这一族从"三道都缺"→"605 缺"→"606 缺"→"`whitelist` 缺"→**全接**）。
+  · ★★★ **破验 7/7 全部按预期变红**（量具 `scratch/_mutate-whitelist-port.mjs`，可复跑）：
+    含"裁决态被当成失败"、"把 DSH 名直接喂给判定器"、"歧义时按最宽候选猜"、
+    "缺席退化成永远放行"、"hosted 守卫被删"。
+  · ★★★★ **而破验当场翻出我自己写的一条空判据**：`hosted: true` 的行
+    **都没有 `dshTools`**，所以"删掉 hosted 过滤"在真实路由表上**不可观测**——
+    那条断言原本是**空的**。已改成用一份**合成**路由表把它逼出来，并同时钉住
+    那个"让守卫不可观测"的前置不变量。
+
+  > 一条「删掉之后没有任何用例变红」的守卫，
+  > 与一条「根本不存在」的守卫，在覆盖率上是同一个读数——
+  > 只不过前者让我以为那张表被守住过。
+
   ### ★★ 这一批里四个"读数同形"的实测，逐条记下
 
   1. **`scan --check` 是先红后绿的，而我以为它一直是绿的。**

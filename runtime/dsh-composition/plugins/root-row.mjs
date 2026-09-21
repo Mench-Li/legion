@@ -147,6 +147,7 @@ import {
   EXTERNAL_API_SCOPE_PORT_ENV_KEY, externalApiScopePortFromEnv,
 } from '../external-api-scope-port.mjs'
 import { CONNECTOR_PORT_ENV_KEY, connectorPortFromEnv } from '../connector-port.mjs'
+import { WHITELIST_PORT_ENV_KEY, whitelistPortFromEnv } from '../whitelist-port.mjs'
 import {
   ENFORCEMENT_ROOT_CODES,
   enforcementInstallation,
@@ -588,6 +589,40 @@ export function createRootRow({
           '那会让一次配置错误与一次真实的"此部署没有连接器"在强制面读数上同形')
       }
 
+      // ★★★ 第 112 轮：岗位白名单（PRT-603）——强制面里**最后一道没接上的**。
+      //
+      //   在此之前 `installEnforcementRoot` 的入参里**没有** `whitelist`，
+      //   于是桥那一格恒为 `null`，而 `tool-request.mjs:998` 的
+      //   `if (whitelist !== null)` **一次都不进入** ⇒ 岗位白名单对每一次
+      //   工具调用**根本不存在**。
+      //
+      //   ★ 而它此前**不是**"等人配一个"：唯一那个产出者
+      //   （`employee-manifest.mjs` 的 `permitsTool`）读的是 **Legion 能力名**
+      //   （`read-file` / `git-push` / …），而桥交出去的是 **DSH 工具名**
+      //   （`read` / `bash` / …）——两个空间结构上不相交，直接接上去得到的是
+      //   一个**全拒**的强制面（第 21 轮实测）。
+      //
+      //   ⇒ 本轮补的那一层是**具名翻译**（`whitelist-port.mjs`）：它反向读
+      //     `LEGION_TOOL_ROUTING` 那张**唯一权威**的表，不新增任何映射；
+      //     一对多（`bash` / `pwsh` / `web_fetch`）时**不猜**——
+      //     没有部署裁决就具名拒绝并列出候选。
+      //
+      //   接法与上面三道**逐字相同**：配了就接上，没配仍然是没配（`port` 为 `null`），
+      //   不补默认值——一个"凭空造出来的空许可"会让这一格报 `true`
+      //   而它一个工具都允许不了（反过来说，它会让**每一次**调用都被拒）。
+      let whitelist
+      try {
+        whitelist = whitelistPortFromEnv({ env: effectiveEnv })
+      } catch (err) {
+        // 配了却解释不通 ⇒ **拦装配**，与"根本没配"分开。
+        //   > 一个"读不出来就当作没配"的组合根，
+        //   > 与一个"这个部署确实没有岗位白名单"的部署，在强制面读数上长得一样。
+        throw rowError(ROOT_ROW_CODES.CONFIG_UNRESOLVED,
+          `${ROOT_ROW_PLUGIN_NAME} 读不出岗位许可「${WHITELIST_PORT_ENV_KEY}」：` +
+          `${err?.message ?? err}。**不**按"没配"处理——` +
+          '那会让一次配置错误与一次真实的"无岗位白名单"在强制面读数上同形')
+      }
+
       const installed = installEnforcementRoot({
         env: effectiveEnv,
         decide: effectiveDecide,
@@ -620,6 +655,11 @@ export function createRootRow({
         //   > 判据都会静静地少看见几个。
         connectorDeclarations: connectors.declarations,
         resolveConnectorId: connectors.resolveConnectorId,
+        // ★★★ PRT-603：岗位白名单。与上面几道**同一个形状**：
+        //   键恒在、缺席时值是 `null`。★ 这里**同样没有**用条件展开——
+        //   理由就是上面那一段（文本解析要能把这组键读成一份清单，
+        //   而 `production-scope-wiring.test.mjs` ① 正是那么读的）。
+        whitelist: whitelist.port,
         // ★ 传的是**工厂**，不是端口：端口的真实实现住在 team-hub 那一侧，
         //   而组合根在装配期拿到的是一份解析好的身份配置。
         createRequestApproval: (resolved) => {

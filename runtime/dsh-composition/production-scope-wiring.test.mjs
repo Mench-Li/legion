@@ -55,6 +55,7 @@ import { fileURLToPath } from 'node:url'
 
 import { createEnforcementBridge } from './tool-request.mjs'
 import { createRuntimeHostInputsFactory } from './plugins/runtime-host-registrar-row.mjs'
+import { translateToolName } from './whitelist-port.mjs'
 
 const ROOT_ROW = fileURLToPath(new URL('./plugins/root-row.mjs', import.meta.url))
 const TOOL_REQUEST = fileURLToPath(new URL('./tool-request.mjs', import.meta.url))
@@ -99,15 +100,38 @@ test('① ★★★ 生产组合根**接上了** pathScope 端口；env 没配�
   assert.equal(keys.includes('pathScope'), true,
     `生产装配没有传 pathScope（keys=${JSON.stringify(keys)}）——`
     + '第 19 条 §9.2 第 4 步的接线被去掉了？那会让越界路径重新变成放行')
-  // `whitelist`（岗位白名单）**仍然**没接——那是另一条缺口，不在本批范围。
-  // ★ 第 21 轮：缺口**不在配置里**（配了也接不上，词汇表不相交 —— 见本文件头
-  //   的版本史与 `scripts/prt/whitelist-limb.test.mjs` ③）。这一行仍然是
-  //   "装配没给它值"的读数，但它**不再**暗示"等人配一个"。
-  assert.equal(keys.includes('whitelist'), false,
-    `生产装配竟然传了 whitelist（keys=${JSON.stringify(keys)}）——`
-    + '那本套件 ②③ 的结论、以及 docs 里"岗位白名单未接生产"的记账都要一起更新。'
-    + '★ 而且传之前先读 `scripts/prt/whitelist-limb.test.mjs` ③：'
-    + '唯一那个产出者说的是另一套工具名，接上去会得到一个**全拒**的强制面')
+  // ★★★ 2026-09-18 第 112 轮：`whitelist`（PRT-603）**接了**。
+  //
+  //   这一条此前钉的是 `keys.includes('whitelist') === false`，而它自己的失败文案
+  //   逐字写着「传之前先读 `scripts/prt/whitelist-limb.test.mjs` ③：唯一那个产出者
+  //   说的是另一套工具名，接上去会得到一个**全拒**的强制面」——
+  //   本轮就是照那句话做的：**先补那一层翻译**（`whitelist-port.mjs`），
+  //   再接进组合根。所以现在钉的是**新的**两件事：
+  //     · 键在（接线存在）；
+  //     · **env 没配时读数仍是 `false`** —— 没配不等于"接了个空的"。
+  //   ★ 后半条比原来那条更强：原来只证明"没接"，现在还证明"接上了、但没配 =
+  //     读起来仍与没接一样"，那才是诚实的读数。
+  assert.equal(keys.includes('whitelist'), true,
+    `生产装配没有传 whitelist（keys=${JSON.stringify(keys)}）——`
+    + 'PRT-603 的接线被去掉了？那会让岗位白名单对每一次工具调用重新变成不存在')
+  // ★ 而"键在"**单独**证明不了这一格是好的：第 21 轮量出来的洞是
+  //   "桥交 DSH 名、`permitsTool` 只认 Legion 名 ⇒ **全拒**"。
+  //   一个把 permit 直接接上去的组合根，键也在、读数也是 `true`，而它拒掉每一次调用。
+  //
+  //   > 一个「键在、而接上去是全拒」的接线，与一个「键不在」的接线，
+  //   > 在"数一数传了哪几个键"这个读数上是不同的——只不过前者看起来已经做完了。
+  //
+  //   ⇒ 所以这里把"翻译层真的在、且真的给得出 Legion 名"与键的存在绑在一起。
+  {
+    const t = translateToolName({ toolName: 'read' })
+    assert.equal(t.state, 'unique')
+    assert.equal(t.legionTool, 'read-file',
+      'whitelist 端口接了，而它的翻译层对 `read` 给不出 Legion 名 ⇒ '
+      + '岗位白名单会拿 DSH 名去查 Legion 目录（**全拒**，而读数上看起来是接好的）')
+    // 而一对多**不许**被猜：没有裁决时必须具名歧义，而不是随便选一个。
+    assert.equal(translateToolName({ toolName: 'bash' }).state, 'ambiguous',
+      '`bash` 那一格开始被猜了 ⇒ 只读岗位可能因此能跑 `git push`')
+  }
   // 正向确认这组键确实被解析出来了（否则上面的断言可能只是解析失败）。
   for (const must of ['env', 'decide', 'createRequestApproval', 'pathScope']) {
     assert.ok(keys.includes(must),
@@ -324,7 +348,7 @@ test('①d ★★★ 同一个组合根，env 里配上外部 API 授权表 ⇒ 
   resetEnforcementRoot()
 })
 
-test('② ★★★ PRT-604/605/606 三道都接了；而 `whitelist` **位置在、值给不进去**', () => {
+test('② ★★★ PRT-603/604/605/606 四道**全部**接进了桥的参数表；默认四格全 false', () => {
   // ★★★ 2026-09-18 第 21 轮：这一条的**措辞**被订正了一次（断言一条都没动）。
   //
   //   它此前把 `whitelist` 写成"**有位置却没人给值**"。那句话在当时是对的、
@@ -382,18 +406,30 @@ test('② ★★★ PRT-604/605/606 三道都接了；而 `whitelist` **位置�
   const params = [...m[1].matchAll(/^\s*([A-Za-z_$][\w$]*)\s*[=,]/gm)].map((x) => x[1])
   assert.ok(params.includes('pathScope'),
     `参数表解析失败（没读到 pathScope）：${JSON.stringify(params)}`)
-  // ★★ 三道范围检查**现在都是正向断言**，不再是"它们不该在"。
-  for (const wired of ['pathScope', 'executionScope', 'externalApiScope']) {
+  // ★★ 四道检查**现在都是正向断言**，不再是"它们不该在"。
+  //    ★ 第 112 轮把 `whitelist` 也并了进来——这一族至此**四道全接**。
+  for (const wired of ['pathScope', 'executionScope', 'externalApiScope', 'whitelist']) {
     assert.equal(params.includes(wired), true,
       `PRT 的范围端口 ${wired} 不见了。★ 这不可能是"回滚"——本套件 ① 与`
       + '对应的 *-port.test.mjs 都指着它；先查是不是参数被改名了')
   }
-  // ★ 而 `whitelist`（PRT-603）是这一族里**仍然没接**的那一个。
-  //   第 21 轮订正措辞：不是"没人给值"，是"**值给不进去**"（词汇表不相交）——
-  //   所以这两句断言仍然成立，但**结论的方向变了**：它不是一个待配置项。
-  assert.equal(params.includes('whitelist'), true,
-    '载具：`whitelist` 必须在参数表里——本条的结论是"**有位置**而给不进值"，'
-    + '不是"没有位置"。若它连参数都没有了，本条要重写成另一件事')
+  // ★★★ 2026-09-18 第 112 轮：`whitelist`（PRT-603）**接了** ⇒ 这一条**第四次**
+  //   换了要钉的东西，而且又是一次按它自己的指示改（前三次见下面的版本史）。
+  //
+  //   它上一版钉的是 `keys.includes('whitelist') === false`，失败文案逐字写着
+  //   「这一族的最后一个缺口被关了。★ 那是好事——请把本条**再换一个对象**
+  //   （或明确写成"这一族已全接"），而不是把它删掉」。
+  //
+  //   ⇒ 现在钉的是：**四道全部接到桥的参数表里**，而默认造出来的桥**四格全 false**
+  //     （没接 ≠ 接了个空的）。"这一族已全接"这件事，从一条**否定**判据
+  //     变成了一条**正向**判据——而正向判据更容易被"删掉就绿了"骗过，
+  //     所以它必须同时钉住"默认是 false"那一半。
+  const { keys } = productionRootInputs()
+  for (const wired of ['pathScope', 'executionScope', 'externalApiScope', 'whitelist']) {
+    assert.equal(keys.includes(wired), true,
+      `生产装配没有传 ${wired}（keys=${JSON.stringify(keys)}）——`
+      + `PRT 的 ${wired} 这道接线被去掉了？`)
+  }
 
   // 行为读数：强制面的键集里三道范围**都在**（键集是一份契约）。
   const surfaces = createEnforcementBridge({ context: CTX }).enforcementSurfaces()
@@ -409,17 +445,15 @@ test('② ★★★ PRT-604/605/606 三道都接了；而 `whitelist` **位置�
   assert.equal(surfaces.externalApiScope, false, '没传外部 API 端口 ⇒ 必须是 false（同上）')
   assert.equal(surfaces.connectorFeedback, false, '没传 listener ⇒ 必须是 false（没接 ≠ 接了个空的）')
   assert.equal(surfaces.connectorJudgment, false, '没传判定端口 ⇒ 必须是 false')
-  // ★★ 而 `whitelist` 在**生产装配**里同样是 `false`——它不是"桥没接"，
-  //    是"装配那一侧从来不给它值"。这一格读得出来，却没有任何门禁会问它。
-  //    第 21 轮：也不该有人去"随便给一个值"——产出者与桥的词汇表不相交。
-  assert.equal(surfaces.whitelist, false, '岗位白名单今天仍然没接（PRT-603 那一族的剩余项）')
-  const { keys } = productionRootInputs()
-  assert.equal(keys.includes('whitelist'), false,
-    '生产装配竟然传了 whitelist ⇒ 这一族的最后一个缺口被关了。'
-    + '★ 那是好事——请把本条**再换一个对象**（或明确写成"这一族已全接"），'
-    + '而不是把它删掉；同时更新 docs 里"岗位白名单未接生产"的记账。'
-    + '★ 但在那之前先读 `scripts/prt/whitelist-limb.test.mjs` ③：'
-    + '`permitsTool` 只认 Legion 名，而桥交进来的是 DSH 名')
+  // ★★ 第 112 轮：`whitelist` 这一格现在**接得上了**，但**默认仍然是 `false`**。
+  //    这两件事必须分开说：
+  //      · "接得上了"由上面那组 `keys` 与 `params` 断言证明；
+  //      · "默认是 false"由这一条证明 —— 它守的是**没配 ≠ 接了个空的**。
+  //    少了后者，一个"装配一上来就塞一个 `() => ({allowed:true})`"的实现
+  //    会让这一格恒 `true`，而上面每一条都仍然是绿的。
+  assert.equal(surfaces.whitelist, false,
+    '默认造的桥里 whitelist 竟然是 true ⇒ 有人给它补了默认值，'
+    + '那会让"这个部署没配岗位白名单"读成"配好了"')
 })
 
 test('③ ★★★ 后果是真的：同一路越界调用，接了 pathScope 拒绝、没接就通过', async () => {

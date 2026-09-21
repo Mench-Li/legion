@@ -966,6 +966,10 @@ test('★★ PRT-254：声明的 env 键必须等于 runtime 源码里两张键�
   const { EXECUTION_SCOPE_PORT_ENV_KEYS } = await import('../../runtime/dsh-composition/execution-scope-port.mjs')
   // ★ 第 20 轮（PRT-606）：外部 API 读/写授权表（LEGION_EXTERNAL_API_SCOPE）。
   const { EXTERNAL_API_SCOPE_PORT_ENV_KEYS } = await import('../../runtime/dsh-composition/external-api-scope-port.mjs')
+  // ★★★ 第 112 轮（PRT-603）：岗位许可（LEGION_EMPLOYEE_PERMIT）。
+  //   强制面里**最后一道**接上的端口。它的键名表同样**从源码取**、不手抄——
+  //   手抄一份进 `expected` 会在两个方向上撒谎（与上面几条同一个理由）。
+  const { WHITELIST_PORT_ENV_KEYS } = await import('../../runtime/dsh-composition/whitelist-port.mjs')
   const expected = [...new Set([
     ...Object.values(DECIDE_ENV_KEYS),
     ...Object.values(ENFORCEMENT_CONFIG_FIELDS).flatMap((f) => [...f.envKeys]),
@@ -973,6 +977,7 @@ test('★★ PRT-254：声明的 env 键必须等于 runtime 源码里两张键�
     ...CONNECTOR_PORT_ENV_KEYS,
     ...EXECUTION_SCOPE_PORT_ENV_KEYS,
     ...EXTERNAL_API_SCOPE_PORT_ENV_KEYS,
+    ...WHITELIST_PORT_ENV_KEYS,
   ])].sort()
   // ★ 13 = 12 + `LEGION_EXECUTION_SCOPE`（第 19 轮，PRT-605）。
   //   这个数**不是**为了方便改的常量：它一变就要求复核"多出来的那个键
@@ -987,13 +992,30 @@ test('★★ PRT-254：声明的 env 键必须等于 runtime 源码里两张键�
   //     所以这里的数量变更是**被复核过的**；它的投递缺口由
   //     `NOT_FORWARDED_YET` 那条（上面）如实登记。
   //
+  //     ★★ **第 112 轮把这半句收口了**：那个数组已经能改了，于是
+  //     `LEGION_PATH_SCOPE` / `LEGION_CONNECTOR_DECLARATIONS` /`LEGION_EXECUTION_SCOPE` /
+  //     `LEGION_EXTERNAL_API_SCOPE` 连同本轮的 `LEGION_EMPLOYEE_PERMIT` **一起**
+  //     进了 `runtime.envNames`。⇒ 上面那句"没有加进清单"对**这五个键**都已过期，
+  //     保留原文是为了让读的人看见它**曾经那样说过**。
+  //
   // ★ 13 → 14（2026-09-18，第 20 轮，PRT-606）：`LEGION_EXTERNAL_API_SCOPE`。
   //   复核过同样的两件事：① 它有一个**真的**生产读取点
   //   （`external-api-scope-port.mjs` 的 `env[EXTERNAL_API_SCOPE_PORT_ENV_KEY]`，
   //   由上面 Trap 1 那条 `source.length` 7 处中的一处作证）；
   //   ② 它同样**没有**进 `product/process-manifest.mjs` 的 runtime `envNames`
   //   （同一个数组），由 `NOT_FORWARDED_YET` 如实登记。
-  assert.equal(expected.length, 14, `四张键名表共 ${expected.length} 个键（复核基线 14）：数量变了就要重新审一遍这份声明`)
+  //
+  // ★ 14 → 15（2026-09-18 第 112 轮，PRT-603）：`LEGION_EMPLOYEE_PERMIT`。
+  //   复核过**三件**事（比上两条多一件，因为本轮那道投递缺口真的补上了）：
+  //   ① 它有一个**真的**生产读取点（`whitelist-port.mjs` 的
+  //      `env[WHITELIST_PORT_ENV_KEY]`，由下面 Trap 1 的 `source.length` 8 处作证）；
+  //   ② 它**已经进了** `product/process-manifest.mjs` 的 runtime `envNames`
+  //      —— 而这一件**不是**顺手补的：`scripts/config/config.test.mjs` 那条
+  //      "schema fields 与清单 envNames 必须对得上"的判据**当场把它抓了出来**
+  //      （它逐字点名 `["LEGION_EMPLOYEE_PERMIT"]`），因为一个"能配、也接好了"
+  //      却传不到子进程的键，在只读配置表的时候与一个好键是同一个东西；
+  //   ③ `NOT_FORWARDED_YET` 那一条**不再**为本键记缺口。
+  assert.equal(expected.length, 15, `五张键名表共 ${expected.length} 个键（复核基线 15）：数量变了就要重新审一遍这份声明`)
   assert.deepEqual(RUNTIME.envNames().sort(), expected,
     'runtime/config-schema.mjs 的 fields 与源码里的键名表不一致（多一个=编了一个环境变量，少一个=门禁看不见它）')
 
@@ -1113,7 +1135,7 @@ test('★★ Trap 1：只按**精确 schema 路径**排除自身登记文本（�
   assert.deepEqual(cov.self.map((d) => d.file), ['demo/config-schema.mjs'], 'schema 文件自身必须被排除，且只排除它一个')
 })
 
-test('★ Trap 1 实测：runtime 13 处 = 8 处 schema 自身登记文本 + 5 处真实源（product 声明后自身文本变 8）', () => {
+test('★ Trap 1 实测：runtime 19 处 = 11 处 schema 自身登记文本 + 8 处真实源（PRT-603 接线后自身文本变 11）', () => {
   // 这组数字是"重数一遍"的锚点：数量变了就要重新审这份声明，而不是改数字让它变绿。
   const rt = scanProcess('runtime', { includeTests: false })
   const rtCov = dynamicCoverage(rt, RUNTIME, { schemaFile: SCHEMA_FILES.runtime, processName: 'runtime' })
@@ -1151,26 +1173,39 @@ test('★ Trap 1 实测：runtime 13 处 = 8 处 schema 自身登记文本 + 5 �
   //   **+1 处真实源**（新文件 `external-api-scope-port.mjs` 的
   //     `env[EXTERNAL_API_SCOPE_PORT_ENV_KEY]`）
   //
-  //   ★★ 而这一次有一个**新的**读数值得记下来：`dynamic.length` 连续两轮以
-  //   "+2" 的步长走（11→13→15→17），形态完全一样。而"每接一道范围检查"这件事
+  // ★ 17 → 19（2026-09-18，第 112 轮，PRT-603 的岗位许可）——**同一个形态第三次**：
+  //   **+1 处自身登记文本**（`config-schema.mjs` 里 `whitelist` 那条 fields 的 `env:` 行
+  //     ＋ 它对应的 dynamicEnvReads 登记，合计算一处 self）
+  //   **+1 处真实源**（新文件 `whitelist-port.mjs` 的 `env[WHITELIST_PORT_ENV_KEY]`）
+  //   ⇒ self 10 → 11、source 7 → 8。
+  //   ★ 而这一次给出了**第三种**"+2"的成因，值得记：前面两次都是"真接了一道检查"，
+  //     这一次同样是真接了一道，但**新文件必须 `git add` 之后才进扫描面**
+  //     （扫描器是 `git-tracked` 模式）—— 所以这三个数字的可复跑前提是
+  //     `whitelist-port.mjs` 已被跟踪。若把它从索引里撤掉，这条会红成 17/11/7，
+  //     而那个红**不是**"少了一处真实源"，是"扫描面里没有这个文件"。
+  //
+  //   ★★ 而这一次有一个**新的**读数值得记下来：`dynamic.length` 连续三轮以
+  //   "+2" 的步长走（11→13→15→17→19），形态完全一样。而"每接一道范围检查"这件事
   //   恰好**同时**产生一条登记文本与一处真实源——所以这条判据在两种情况下都长得一样：
   //   真的接了一道（+1 self +1 source），与"照抄上一轮的登记、真实源其实没写"
   //   （+2 self +0 source）。⇒ `source` 那条断言仍然是唯一能分开它们的读数。
   //
   //   ★★★ 实测踩到的一个顺序陷阱（值得留在这里，因为它会重复发生）：
-  //   本轮我先按预测写了 17/10/7，跑出来是 **16**（10 self + **6** source）——
+  //   第 20 轮我先按预测写了 17/10/7，跑出来是 **16**（10 self + **6** source）——
   //   而差的正是那一处真实源。原因不是数错了，是**新文件还没 `git add`**：
   //   这个扫描器的模式是 `git-tracked`（`scan.mjs` 用 `git ls-files`），
   //   所以 `external-api-scope-port.mjs` 在被跟踪之前**根本不在扫描面里**。
   //   ⇒ `git add` 之后同一条断言立刻是 17/10/7。
+  //   ★ 第 112 轮**同一个陷阱又踩了一次**（本轮先按预测写数，跑出来少 2），
+  //     处置完全相同：读那行"请 git add 后重跑"，而不是把数字改小。
   //
   //     而这件事本身是个读数：**这个文件里的数字断言，在 `git add` 之前
   //     与之后可以完全不同，而两次跑都是"绿/红得很自然"。**
   //     扫描器自己会打出"这些文件不在配置面里，请 git add 后重跑"，
   //     所以正确的应对是读那行输出，而不是把数字改成 16。
-  assert.equal(rt.dynamic.length, 17, 'runtime 动态命中数变了（基线 17）')
-  assert.equal(rtCov.self.length, 10, 'runtime 的 10 处自身登记文本必须被排除，而不是当成待登记读取')
-  assert.equal(rtCov.source.length, 7, 'runtime 的真实源动态读取是 7 处（root-row.mjs 2 + scope-port.mjs 2 + connector-port.mjs 1 + execution-scope-port.mjs 1 + external-api-scope-port.mjs 1）')
+  assert.equal(rt.dynamic.length, 19, 'runtime 动态命中数变了（基线 19）')
+  assert.equal(rtCov.self.length, 11, 'runtime 的 11 处自身登记文本必须被排除，而不是当成待登记读取')
+  assert.equal(rtCov.source.length, 8, 'runtime 的真实源动态读取是 8 处（root-row.mjs 2 + scope-port.mjs 2 + connector-port.mjs 1 + execution-scope-port.mjs 1 + external-api-scope-port.mjs 1 + whitelist-port.mjs 1）')
   assert.ok(rtCov.self.every((d) => d.file === SCHEMA_FILES.runtime))
   assert.deepEqual(rtCov.uncovered, [], 'runtime 的 3 处真实源必须被现有 dynamicEnvReads 覆盖：' + JSON.stringify(rtCov.uncovered))
 

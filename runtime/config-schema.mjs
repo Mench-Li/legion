@@ -606,6 +606,25 @@ export const SCHEMA = defineSchema({
         + '而是"这个岗位能对**哪些服务**做读或写"；两者拒绝的修复动作不同。'
         + '装配规则只有一处：`runtime/dsh-composition/external-api-scope-port.mjs`',
     },
+    {
+      key: 'whitelist', env: 'LEGION_EMPLOYEE_PERMIT', type: 'string', default: '',
+      doc: '执行面的**岗位许可**（JSON 文本：一份有效许可，PRT-603）。'
+        + '这是强制面里**最后一道接上的**：在它之前 `installEnforcementRoot` 的入参里'
+        + '没有 `whitelist`，于是桥那一格恒为 `null`，而 `tool-request.mjs:998` 的'
+        + '`if (whitelist !== null)` **一次都不进入** ⇒ 岗位白名单对每一次工具调用'
+        + '**根本不存在**。'
+        + '★ 而它此前**不是**"等人配一个"：唯一那个产出者（`permitsTool`）读的是'
+        + ' **Legion 能力名**，而桥交出去的是 **DSH 工具名**，两个空间结构上不相交 ——'
+        + '直接接上去得到一个**全拒**的强制面。所以这一格配的是'
+        + '`runtime/dsh-composition/whitelist-port.mjs`（它反向读 `LEGION_TOOL_ROUTING`'
+        + ' 那张唯一权威的表，不新增映射）。'
+        + '⚠️ `bash` / `pwsh` / `web_fetch` 是**一对多**（`bash` 的四个候选里同时塌着'
+        + '低风险的 `git-status` 与高风险的 `git-push`）⇒ 没有部署裁决时这一层'
+        + '**具名拒绝并列出候选**，不许猜。裁决写在许可对象自己的 `toolNameDecisions` 里。'
+        + '「没有默认值」在这里的含义：**空串 = 没配**，而没配那一段根本不进入（放行）'
+        + '——所以缺席必须由组合根显式处置，不能靠一个默认许可把它填上。'
+        + '装配规则只有一处：`runtime/dsh-composition/whitelist-port.mjs`',
+    },
   ],
   foreignEnv: FOREIGN_ENV_NAMES.map((name) => ({ name, owner: FOREIGN_ENV_OWNER, reason: FOREIGN_ENV_REASON })),
   dynamicEnvReads: [
@@ -645,6 +664,16 @@ export const SCHEMA = defineSchema({
       reason: '外部 API 授权表按导出的常量键名下标读取（`EXTERNAL_API_SCOPE_PORT_ENV_KEY` = '
         + 'LEGION_EXTERNAL_API_SCOPE，已在上面 fields 声明）。**故意用常量而不是字面量**，'
         + '与 `scope-port.mjs` / `connector-port.mjs` / `execution-scope-port.mjs` 那三条同一个理由：'
+        + '读取点、用例、`root-row.mjs` 的失败消息要指同一处，两处各写一遍字面量就会漂移。'
+        + '扫描器看不见这一处正是本登记存在的理由。',
+    },
+    {
+      file: 'runtime/dsh-composition/whitelist-port.mjs',
+      expr: 'env[WHITELIST_PORT_ENV_KEY]',
+      reason: '岗位许可按导出的常量键名下标读取（`WHITELIST_PORT_ENV_KEY` = LEGION_EMPLOYEE_PERMIT，'
+        + '已在上面 fields 声明）。**故意用常量而不是字面量**，'
+        + '与 `scope-port.mjs` / `connector-port.mjs` / `execution-scope-port.mjs` / '
+        + '`external-api-scope-port.mjs` 那四条同一个理由：'
         + '读取点、用例、`root-row.mjs` 的失败消息要指同一处，两处各写一遍字面量就会漂移。'
         + '扫描器看不见这一处正是本登记存在的理由。',
     },

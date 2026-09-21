@@ -102,7 +102,12 @@ export function createTeamPlanReadRoutes({
           const askGoal = url.searchParams.get('goalId')
           json(res, 404, {
             ok: false,
-            code: CONTEXT_PLAN_ERRORS.TEAM_PLAN_NOT_FOUND,
+            // ★★★★★ 2026-09-20 修（当初原样搬过来时**钉住未修**的第 20 条缺陷）：
+            //   原来写的是 `CONTEXT_PLAN_ERRORS.TEAM_PLAN_NOT_FOUND` —— 那是**值**，
+            //   而对象上的**键**叫 `PLAN_NOT_FOUND`。取到 `undefined`，
+            //   于是 `JSON.stringify` **把这个字段丢掉了** ⇒ 404 里**没有 `code`**。
+            //   ★ 这个错法特别像对的：那个**值**的字面量恰好长得就像个键名。
+            code: CONTEXT_PLAN_ERRORS.PLAN_NOT_FOUND,
             error: askId !== null && askId.trim() !== ''
               ? `空间 ${scope} 里没有团队计划 ${askId}${version === null ? '' : ` 的第 ${version} 版`}`
               : `空间 ${scope} 里没有挂在目标 ${askGoal} 下的团队计划`,

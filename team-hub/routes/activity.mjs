@@ -57,7 +57,17 @@ export function createActivityRoutes({
       match: 'exact',
       path: '/api/activity',
       async run(req, res, { url }) {
-        const limit = Math.min(Number(url.searchParams.get('limit') ?? 50) || 50, 500)
+        // ★★★★★ 2026-09-20 修（当初原样搬过来时**钉住未修**的第 21 条缺陷）：
+        //   原式 `Math.min(Number(v ?? 50) || 50, 500)` 只夹了**上界**，于是：
+        //     · `limit=2.7` ⇒ 值是 2.7（没取整）⇒ 原样进 `LIMIT ?` ⇒ **SQLite 抛错**
+        //       ⇒ `handle()` 的兜底把它变成 **500**。一个查询参数能把**只读**接口打成 500。
+        //     · `limit=-5` ⇒ `Math.min(-5, 500) = -5`，而 SQLite 的**负** `LIMIT` 意思是
+        //       **不限制** ⇒ "我只要 5 条"变成"给我全部"。
+        //   ⇒ 先 `Math.trunc` 取整（消灭 500），再夹到 `[1, 500]`（消灭负数那个洞）。
+        //   ★ 语义**保持不变**的两处：`limit=0` 与 `limit=abc` 仍回落到 50
+        //     —— `|| 50` 在 `Math.trunc` **之前**，所以 `0` 仍然是 falsy。
+        const n = Math.trunc(Number(url.searchParams.get('limit') ?? 50) || 50)
+        const limit = Math.min(Math.max(n, 1), 500)
         const scopeParam = url.searchParams.get('scope')
         const taskIdParam = url.searchParams.get('taskId')
         const goalIdParam = url.searchParams.get('goalId')

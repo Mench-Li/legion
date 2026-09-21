@@ -98,16 +98,16 @@ test('④ ★★★ 读不到一律 **404**，**绝不是 200 带 null**', async
   assert.ok(!('plan' in r.body), '★★ 404 里不该带 plan 字段')
 })
 
-test('⑤ ★★★★★ 404 里**根本没有 `code` 字段** —— 源码写的是一个不存在的键（真缺陷，钉住）', async () => {
+test('⑤ ★★★★★ 404 里有 `code` —— 原来源码写了一个不存在的键（缺陷 20，已修）', async () => {
   reset()
   const r = await get('scope=ghost&id=nope')
-  // ★★★ 这一条是**量出来的真缺陷**，不是我写错了判据：
-  //   路由里写 `code: CONTEXT_PLAN_ERRORS.TEAM_PLAN_NOT_FOUND`，
+  // ★★★★★ 2026-09-20 修（原为"钉住缺陷"）：
+  //   路由里**原来**写 `code: CONTEXT_PLAN_ERRORS.TEAM_PLAN_NOT_FOUND`，
   //   而 `CONTEXT_PLAN_ERRORS` 的键是
   //     PLAN_NOT_FOUND / PLAN_INVALID / PLAN_FROZEN / MANIFEST_NOT_FOUND /
   //     MANIFEST_INVALID / PLAINTEXT_SECRET / SCOPE_UNKNOWN
   //   —— **没有 `TEAM_PLAN_NOT_FOUND` 这个键**，所以取出来是 `undefined`，
-  //   而 `JSON.stringify` 会把 undefined 的字段**整个丢掉**。
+  //   而 `JSON.stringify` 会把 undefined 的字段**整个丢掉** ⇒ 404 里**没有 `code`**。
   //
   //   > 一个「404 里带着 `code: 'TEAM_PLAN_NOT_FOUND'`，装配器照着它翻成
   //   > "有原因的 missing"」的印象，
@@ -116,11 +116,28 @@ test('⑤ ★★★★★ 404 里**根本没有 `code` 字段** —— 源码写
   //
   //   ★ 影响面正好是这一族存在的理由：`sources-loader.mjs` 要把 404 翻成
   //     `null` + 带原因的 `missing` 候选，而**机器可判的那一格不见了**。
-  //   ★ 已核对：搬之前（e9ae706）与搬之后逐字相同 ⇒ **是搬之前就有的缺陷**，
-  //     本片只是把它**原样**搬了过来（对拍要求如此），没有顺手改。
+  //   ★ 当初核对过：搬之前（e9ae706）与搬之后逐字相同 ⇒ 是**搬之前就有的**缺陷，
+  //     那一轮只搬不改（对拍要求如此）。**现在**它被单独修掉。
+  //
+  //   ★ 错法特别像对的：那个**值**的字面量（`'TEAM_PLAN_NOT_FOUND'`）
+  //     恰好长得就像个键名 —— 把"值"写在了"键"的位置上。
   assert.equal(r.status, 404)
-  assert.equal(r.body.code, undefined, '★★★ 实测就是 undefined')
-  assert.ok(!('code' in r.body), '★★★ `code` 这一格**不在响应里**（JSON 把 undefined 丢了）')
+  assert.equal(r.body.code, 'TEAM_PLAN_NOT_FOUND',
+    '★★★★★ 修好之后 404 里有机器可判的 `code`（值还是那个字符串，走的是对的键）')
+  assert.ok('code' in r.body, '★★★ `code` 这一格**必须在响应里**（以前 JSON 把 undefined 丢了）')
+  // ★★ 反自检：源码必须走**对的键** —— 谁改回 `TEAM_PLAN_NOT_FOUND` 这个键名，这里就红
+  //
+  //   ★★★★★ **必须先剥掉注释再判**：这段注释里把**旧写法当反例抄了一遍**
+  //     （那正是给下一个人看的东西），而断言若扫整个文件就会命中**我自己的注释**。
+  //     > 一个「"不许退回去"的断言会守住这个修复」的印象，
+  //     > 与一个「它扫的是整个文件，而我把旧写法抄在同一段里」的事实，
+  //     > 在它在我刚写好的修复上报红之前是同一个东西。
+  const src = await import('node:fs').then((m) => m.readFileSync('team-hub/routes/team-plan-read.mjs', 'utf8'))
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, '').split(/\r?\n/).filter((l) => !/^\s*\/\//.test(l)).join('\n')
+  assert.match(code, /CONTEXT_PLAN_ERRORS\.PLAN_NOT_FOUND\b/,
+    '★★★★★ 缺陷 20 的修复：必须用**键** `PLAN_NOT_FOUND`')
+  assert.ok(!/CONTEXT_PLAN_ERRORS\.TEAM_PLAN_NOT_FOUND\b/.test(code),
+    '★★★★★ 不许退回"把值当键用"的那个错法（它取到 undefined ⇒ 字段被丢掉）★ 已剥注释')
   assert.equal(r.body.ok, false, '★ 只有 `ok:false` 这一格是可判的')
   assert.match(String(r.body.error), /没有团队计划/, '★ 只剩人读的文案')
   // ★ 仍然要带服务器时间

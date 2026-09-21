@@ -63,10 +63,10 @@
     "team-hub/routes/feedback-heartbeat.mjs": "8fa5e23ec81ad6fbf5d53b508b5fdd92dbc3327384626cb088fdaadb53c57f27",
     "team-hub/routes/space-config.mjs": "578cd4de036681943a357486faabbd358bcc3fc6eeddb26a37cdbd75471a5a36",
     "team-hub/routes/agent-intake.mjs": "5921a304f7eb7ff7a6e6ee46156ede3d0bbacc783a0fa884ea01c3b0ddeb0fc4",
-    "team-hub/routes/team-plan-read.mjs": "f023df776d48bb93a44d9b38a2312cf87af3dea58dba6768f3a09facb50b617a",
+    "team-hub/routes/team-plan-read.mjs": "05de1ac652e720a6ba06e08e1773697091e2327acfadf834c8ddc86c0fe6549a",
     "team-hub/routes/goal-slices.mjs": "d3b5c8437f9b6bfb332b9e28d29b841a4c1e9fc549404a6bd61d415eddd0bf2f",
     "team-hub/routes/run-budget-may-switch-model.mjs": "8c81697c2ab4155ab6e488b9c66c152868e0ded80eccb1bad60bedb6cc0621ac",
-    "team-hub/routes/activity.mjs": "b9bf0ba113f5cd316ea76bda4b138c0ddb8611cde4a8114881048ceff96748ba",
+    "team-hub/routes/activity.mjs": "ad4f11fdd62077672312e46c5e5d5874c680e8dd324c496b8a125efebd87da11",
     "team-hub/routes/artifact-content.mjs": "ac7241211e4680d460cbe63d8ed60d5d06d0bcef81bd3c743887c21fa5d1021a",
     "team-hub/experience-store.mjs": "6b10c0b844a02fa4bd60e2acdaefca2193d385a4c294e0655800d63c2509bdd0"
   },

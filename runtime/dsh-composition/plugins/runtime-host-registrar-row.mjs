@@ -45,7 +45,7 @@
 // ⚠️ 这条来源是一个**判断**，不是从契约推出来的：版本取自"启动本进程的那份安装的
 // CLI 包"，不是引擎自报。理由与代价逐条写在文档 §诚实边界。
 //
-// ### 四项能力：一项真有来源，三项按**未确认**报
+// ### 能力表：一项真有来源，两项按**未确认**报，一项**不由本模块表态**
 //
 // `probe.mjs` 的判据是「必须**显式为 true**，缺失不算具备」。能力表里写 `false`
 // 就是"未确认"（不是"引擎说不行"）。逐项：
@@ -56,11 +56,14 @@
 //     而 `start()` 在派发前**真的按它拒收**。所以"这一次会用到的那个 provider
 //     支不支持 outputSchema"是可以从现场读出来的。本模块读它：
 //     注册表读不到 / 空 / 多于一个 provider（说不清会用哪一个）→ 一律**未确认**。
-//   · `tool-permission-enforcement`：**未确认**。本产品里"按 `RunRequest.permissions`
-//     约束工具与文件范围"就是 Legion 自己的补丁层（硬底线 guard / pre-execute 策略 /
-//     审批应答者），而它是否生效由启动自检的 `composition-patch-layer` 与
-//     `enforcement-mapping` 两项判定。探针**不把同一件事再判一遍**（两份判定会漂移），
-//     所以这里报 false + 一个说得清"是谁在判"的码。
+//   · `tool-permission-enforcement`：★ **2026-09-21 起本模块不再表态**
+//     （业主裁决：它移出 `REQUIRED_CAPABILITIES`，进 `PRODUCT_PLANE_CAPABILITIES`）。
+//     本产品里"按 `RunRequest.permissions` 约束工具与文件范围"就是 Legion 自己的
+//     补丁层（硬底线 guard / pre-execute 策略 / 审批应答者），生效与否由启动自检的
+//     `composition-patch-layer` 与 `enforcement-mapping` 两项判定。
+//     ★ 为什么**不再**在这里报一个 `false`：本函数的产物会被 `probeRuntime()`
+//     当作**引擎自报的能力表**交出去，在里面放一个产品侧能力 = 替引擎答一个
+//     它不负责的问题，而那个 `false` 会被下游读成"产品没有强制面"。
 //   · `cancel-and-timeout`：**未确认**，而且理由是一条**已发生的生产故障**：
 //     `runtime/adapters/dsh/port.mjs` 的文件头记着「subagent 可能挂死且
 //     `run.result` 永不结算（abort 不保证杀死子代理）」——适配器的看门狗正是为它存在。
@@ -217,8 +220,13 @@ import realRuntimeHostRow, { setDshRuntimeInputsFactory } from './runtime-host-r
  *
  * 3 = `startRun` 按 Run 安装静态 hard floor。
  * 4 = `startRun` 按 Run 安装**授权身份**（PRT-214 缺口②）。
+ * 5 = `tool-permission-enforcement` 移出 `REQUIRED_CAPABILITIES`（产品面能力，
+ *     2026-09-21 业主裁决）⇒ 本模块的能力表从 4 项变 3 项，且**不再对它表态**。
+ *     ⚠️ 兼容性影响：本模块的 5 与"探针报 4 项"不再配对。本仓内所有消费者
+ *     都从 `REQUIRED_CAPABILITIES` 派生（不写死项数），所以**无需**同步升级；
+ *     但若外部有按"恰好 4 项"读这份读数的人，它会看到 3 项——故递增此号。
  */
-export const RUNTIME_HOST_REGISTRAR_VERSION = 4
+export const RUNTIME_HOST_REGISTRAR_VERSION = 5
 
 /** 本模块的具名码。每一个对应**一样具体的输入**，不是一个笼统的"注册失败"。 */
 export const RUNTIME_HOST_REGISTRAR_CODES = Object.freeze({
@@ -312,7 +320,23 @@ export const CAPABILITY_EVIDENCE_CODES = Object.freeze({
   PROVIDER_REGISTRY_ABSENT: 'RUNTIME_HOST_REGISTRAR_CAPABILITY_PROVIDER_REGISTRY_ABSENT',
   /** 注册了多于一个 provider：说不清这次会用哪一个，**不挑一个**。 */
   PROVIDER_REGISTRY_AMBIGUOUS: 'RUNTIME_HOST_REGISTRAR_CAPABILITY_PROVIDER_REGISTRY_AMBIGUOUS',
-  /** 强制面由 Legion 补丁层实现，生效与否由启动自检判定——探针不重复判一遍。 */
+  /**
+   * ★ **已退役**（2026-09-21）：`tool-permission-enforcement` 移出
+   * `REQUIRED_CAPABILITIES` 之后，本模块不再对它表态 ⇒ **本码没有任何产出者**。
+   *
+   * 保留（而不是删掉）的理由：它出现在**已归档的证据文件**里
+   * （`docs/superpowers/prt/PRT-253-capability-criteria.md`、
+   * `PRT-HUMAN-INTERVENTION-2026-09-20.md`、`PRT-FINAL-REPORT-2026-09-18.md`），
+   * 且仍登记在 `runtime/config-schema.mjs` 的 `NON_ENV_LITERALS` 里。
+   * 删掉它会让那些归档读起来像"记了一个从未存在过的码"。
+   *
+   *   > 一个"保留着但没人再产出的码"，与一个"我当时忘了删"的码，
+   *   > 在源码里长得一样——所以这里必须写明它**为什么**还在。
+   *
+   * ⚠️ 谁要是想用它，先回答一个问题：**强制面该由谁判？**
+   * 今天的答案是启动自检（`composition-patch-layer` / `enforcement-mapping`），
+   * 引擎探针不判——用它等于把那个决定又搬回引擎侧。
+   */
   ENFORCEMENT_PLANE_MEASURED_ELSEWHERE: 'RUNTIME_HOST_REGISTRAR_CAPABILITY_ENFORCEMENT_PLANE_MEASURED_ELSEWHERE',
   /** 仓库记录了"abort 不保证杀死子代理"这条生产故障。 */
   CANCEL_NOT_GUARANTEED_BY_ENGINE: 'RUNTIME_HOST_REGISTRAR_CAPABILITY_CANCEL_NOT_GUARANTEED_BY_ENGINE',
@@ -580,14 +604,21 @@ export function runtimeCapabilityEvidence(ctx) {
   const structured = structuredResultEvidence(ctx)
   const evidence = {
     'structured-result': structured,
-    'tool-permission-enforcement': {
-      satisfied: false,
-      code: CAPABILITY_EVIDENCE_CODES.ENFORCEMENT_PLANE_MEASURED_ELSEWHERE,
-      source: 'runtime/dsh-composition/selfcheck.mjs 的 composition-patch-layer / enforcement-mapping',
-      reason: '本产品里"按 RunRequest.permissions 约束工具与文件范围"由 Legion 自己的补丁层' +
-        '（硬底线 guard / pre-execute 策略 / 审批应答者）实现，生效与否由启动自检那两项判定。' +
-        '探针**不把同一件事再判一遍**（两份判定会漂移），所以这里报未确认',
-    },
+    // ★ 2026-09-21 业主裁决：这一项**已移出 `REQUIRED_CAPABILITIES`**。
+    //
+    //   它以前在这里报 `satisfied: false`（码 `ENFORCEMENT_PLANE_MEASURED_ELSEWHERE`），
+    //   而现在 `REQUIRED_CAPABILITIES` 里没有它了 ⇒ **本函数不再对它表态**。
+    //
+    //   为什么不继续报一个 `false`：本函数产出的表会被 `probeRuntime()` 当作
+    //   **引擎自报的能力表**交出去（`probeDshRuntime()` → `capabilities`）。
+    //   在里面放一个产品侧能力，等于**替引擎答了一个它不负责的问题**——
+    //   而那个 `false` 会被下游读成"产品没有强制面"。
+    //
+    //   > 一份"我顺手把产品那格也填成 false"的能力表，
+    //   > 与一份"引擎真的不具备这项能力"的能力表，在 `probe.mjs` 的眼里是同一个东西。
+    //
+    //   强制面由启动自检 ①`composition-patch-layer` 与 ④`enforcement-mapping` 判，
+    //   那两项**直接读补丁层**，与本函数无关。
     'cancel-and-timeout': {
       satisfied: false,
       code: CAPABILITY_EVIDENCE_CODES.CANCEL_NOT_GUARANTEED_BY_ENGINE,

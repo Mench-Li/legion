@@ -20,6 +20,8 @@ import assert from 'node:assert/strict'
 import {
   ERROR_CATALOG,
   ERROR_CODES,
+  OPTIONAL_CAPABILITIES,
+  PRODUCT_PLANE_CAPABILITIES,
   RUNTIME_CONTRACT_VERSION,
   REQUIRED_CAPABILITIES,
   RuntimeContractError,
@@ -426,6 +428,71 @@ test('⑤ 可选能力缺失不算不兼容，但必须说明应禁用对应功�
   const res = checkCompatibility({ adapterContractVersion: RUNTIME_CONTRACT_VERSION, capabilities: caps })
   assert.equal(res.compatible, true)
   assert.match(res.reason, /可选能力缺失/)
+})
+
+// ---------------------------------------------------------------------------
+// ★ 2026-09-21 裁决的配套判据：两类"可选能力"的措辞**必须分开**
+//
+// `tool-permission-enforcement` 移进 `PRODUCT_PLANE_CAPABILITIES` 之后，
+// 它落在 `OPTIONAL_CAPABILITIES` 里。而那一张表的语义是
+// 「缺失时应**禁用对应产品功能**，而不是报错」——**这句话用在这一项上是危险的**：
+// 一个值班的人看到「可选能力缺失（应禁用对应功能）：tool-permission-enforcement」，
+// 会照着字面把一个**正在生效**的强制面关掉。
+//
+//   > 一条"引擎不表态"的记录，与一条"产品不具备"的记录，
+//   > 在只写 `false` 一格的时候是同一个东西——而**处置相反**。
+//
+// 所以这里逐条钉住两句措辞的边界，两个方向都钉。
+// ---------------------------------------------------------------------------
+
+test('⑤ ★ 产品面能力缺失时，措辞必须是"不由引擎自答"，**不许**说"应禁用对应功能"', () => {
+  const caps = Object.fromEntries(REQUIRED_CAPABILITIES.map((c) => [c, true]))
+  const res = checkCompatibility({ adapterContractVersion: RUNTIME_CONTRACT_VERSION, capabilities: caps })
+  assert.equal(res.compatible, true)
+
+  // ① 引擎可选特性的措辞照旧（`streaming-deltas` 等确实缺）
+  assert.match(res.reason, /应禁用对应功能/)
+  // ② 产品面那一项**必须**单独说，且说得不一样
+  assert.match(res.reason, /不由引擎自答/)
+  assert.match(res.reason, /由 Legion 启动自检判定/)
+  // ③ ★ 关键：产品面那一项**不许**出现在"应禁用对应功能"那一句里。
+  //    这是本用例存在的全部理由——措辞混了，值班的人就会去关一个正当生效的强制面。
+  const disableClause = res.reason.split('；').find((s) => s.includes('应禁用对应功能')) ?? ''
+  assert.ok(!disableClause.includes('tool-permission-enforcement'),
+    `"应禁用对应功能"那一句里出现了 tool-permission-enforcement，` +
+    `会让人把正在生效的强制面关掉：\n${res.reason}`)
+  // ④ 机器可读的那一格也要能分开读
+  assert.deepEqual(res.missingProductPlane, ['tool-permission-enforcement'])
+  assert.ok(!res.missingOptional.includes('nonexistent'), '哨兵：missingOptional 必须仍然列出缺失项')
+  assert.ok(res.missingOptional.includes('tool-permission-enforcement'),
+    '它仍属 OPTIONAL（否则 checkCompatibility 会对它一句都不说）')
+})
+
+test('⑤ ★ 反向：引擎可选能力缺失时，**不许**被说成"产品面能力"', () => {
+  // 反向控制——少了它，"两句分开"与"把两句都写成产品面口径"在只看上一条时一样。
+  const caps = Object.fromEntries(REQUIRED_CAPABILITIES.map((c) => [c, true]))
+  caps['streaming-deltas'] = false
+  const res = checkCompatibility({ adapterContractVersion: RUNTIME_CONTRACT_VERSION, capabilities: caps })
+  assert.equal(res.compatible, true)
+  const productClause = res.reason.split('；').find((s) => s.includes('不由引擎自答')) ?? ''
+  assert.ok(!productClause.includes('streaming-deltas'),
+    `streaming-deltas 是**引擎**可选特性，不该被说成产品面能力：\n${res.reason}`)
+  assert.deepEqual(res.missingProductPlane, ['tool-permission-enforcement'],
+    '产品面缺失项必须只含那张表里的成员')
+})
+
+test('⑤ ★ 必需表里没有产品面能力（引擎不替产品答）', () => {
+  assert.ok(!REQUIRED_CAPABILITIES.includes('tool-permission-enforcement'),
+    '它已移出必需表：引擎探针不该答一个它不负责的问题')
+  assert.ok(PRODUCT_PLANE_CAPABILITIES.includes('tool-permission-enforcement'))
+  // 两张表的关系：产品面表必须是可选表的**子集**（否则它既不必需也不可选 = 无人管）
+  for (const c of PRODUCT_PLANE_CAPABILITIES) {
+    assert.ok(OPTIONAL_CAPABILITIES.includes(c), `${c} 必须在 OPTIONAL_CAPABILITIES 里`)
+  }
+  // 且必需与可选**不重叠**（重叠会让"缺了算不算不兼容"没有唯一答案）
+  for (const c of REQUIRED_CAPABILITIES) {
+    assert.ok(!OPTIONAL_CAPABILITIES.includes(c), `${c} 同时出现在必需与可选表里`)
+  }
 })
 
 test('⑤ 契约主版本精确匹配：不匹配即拒绝，不做向后兼容猜测', () => {

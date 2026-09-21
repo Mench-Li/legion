@@ -35,10 +35,28 @@ export const RUNTIME_HEALTH_STATES = Object.freeze([
   'upgrading',
 ])
 
-/** 执行器**必须**声明支持的能力键。缺失即无法执行受约束的任务。 */
+/**
+ * 执行器**必须**声明支持的能力键。缺失即无法执行受约束的任务。
+ *
+ * ★ 2026-09-21 业主裁决：`tool-permission-enforcement` **移出本表**，
+ * 移进下面的 `PRODUCT_PLANE_CAPABILITIES`（它是 `OPTIONAL_CAPABILITIES` 的子集）。
+ *
+ * 移出的理由**不是**"它不重要"，而是**问错了侧**：本表管的是
+ * 「执行器**必须**声明支持的能力键」（本文件上面那句），而这一项的实现
+ * **不在引擎里**——它是 Legion 自己的补丁层（硬底线 guard / pre-execute 策略 /
+ * 审批应答者）。拿引擎能力表去问一件引擎不负责的事，答案只可能是恒 false，
+ * 而那个 false 会被下游读成"产品没有强制面"。
+ *
+ *   > 一个"把产品侧判定塞进引擎能力表"的问法，与一个"强制面没生效"的读数，
+ *   > 在启动自检的输出里是同一个东西——只不过前者**永远修不好**，因为它问错了人。
+ *
+ * ⚠️ 移出**不等于**放松 fail-closed，这条边界有读数支撑：
+ *   · 强制面是否生效由启动自检 ①`composition-patch-layer`（`selfcheck.mjs:139`）
+ *     与 ④`enforcement-mapping`（`:183`）**两项**直接判定，**与本表无关**；
+ *   · 而 `autoExecutionForbidden` 是"六项里任一不过"（`selfcheck.mjs:259`
+ *     `failed.length > 0`）——移走本表里的一项**碰不到**那个判定。
+ */
 export const REQUIRED_CAPABILITIES = Object.freeze([
-  /** 能按 RunRequest.permissions 约束工具与文件范围。 */
-  'tool-permission-enforcement',
   /** 能在超时/取消时真正终止执行并回收资源。 */
   'cancel-and-timeout',
   /** 能输出结构化结果供机器验收。 */
@@ -47,8 +65,36 @@ export const REQUIRED_CAPABILITIES = Object.freeze([
   'usage-reporting',
 ])
 
-/** 可选能力：缺失时应禁用对应产品功能，而不是报错（spec §6.14 的同类口径）。 */
+/**
+ * ★ 由**产品面**判定、**不由引擎自答**的能力（`OPTIONAL_CAPABILITIES` 的子集）。
+ *
+ * 与其它可选能力的**唯一**区别是"缺失"的含义：
+ *   · 其它可选能力缺失 ⇒ "引擎没有这个特性" ⇒ 应**禁用对应产品功能**；
+ *   · 本表能力缺失 ⇒ "**引擎不表态**（它本来就不负责这一项）" ⇒ 由 Legion
+ *     启动自检判，**绝不等于**"禁用强制面"。
+ *
+ * 所以 `checkCompatibility()` 把这两类的**措辞分开**（见该函数）。合成一句的后果是
+ * 具体的：一个值班的人看到「可选能力缺失（应禁用对应功能）：
+ * tool-permission-enforcement」，会照着字面把一个**正在生效**的强制面关掉。
+ *
+ *   > 一条"引擎不表态"的记录，与一条"产品不具备"的记录，
+ *   > 在只写 `false` 一格的时候是同一个东西——而处置相反。
+ */
+export const PRODUCT_PLANE_CAPABILITIES = Object.freeze([
+  /** 按 `RunRequest.permissions` 约束工具与文件范围：由 Legion 补丁层实现，自检判定。 */
+  'tool-permission-enforcement',
+])
+
+/**
+ * 可选能力：缺失时应禁用对应产品功能，而不是报错（spec §6.14 的同类口径）。
+ *
+ * ⚠️ 上面那句**对 `PRODUCT_PLANE_CAPABILITIES` 不成立**——它们的缺失含义是
+ * "引擎不表态"，**不是**"禁用功能"。逐条区别写在那一张表的注释里。
+ */
 export const OPTIONAL_CAPABILITIES = Object.freeze([
+  // 产品面判定（缺失 ≠ 禁用功能）
+  ...PRODUCT_PLANE_CAPABILITIES,
+  // 引擎可选特性（缺失 ⇒ 禁用对应产品功能）
   'streaming-deltas',
   'artifact-emission',
   'session-resume',
@@ -117,15 +163,30 @@ export function checkCompatibility({
     }
   }
   const missingOptional = OPTIONAL_CAPABILITIES.filter((c) => caps[c] !== true)
+  // ★ 两类可选能力**分开措辞**（2026-09-21 裁决的配套）：
+  //   产品面那一类缺失是"引擎不表态"，不是"禁用功能"。合成一句会让人把
+  //   一个正在生效的强制面按字面关掉——理由见 `PRODUCT_PLANE_CAPABILITIES` 的注释。
+  const missingProductPlane = missingOptional.filter((c) => PRODUCT_PLANE_CAPABILITIES.includes(c))
+  const missingEngineOptional = missingOptional.filter((c) => !PRODUCT_PLANE_CAPABILITIES.includes(c))
+  const optionalNotes = [
+    ...(missingEngineOptional.length > 0
+      ? [`可选能力缺失（应禁用对应功能，不报错）：${missingEngineOptional.join(', ')}`]
+      : []),
+    ...(missingProductPlane.length > 0
+      ? [`产品面能力不由引擎自答（缺失≠不具备，由 Legion 启动自检判定）：${missingProductPlane.join(', ')}`]
+      : []),
+  ]
   return {
     compatible: true,
     code: null,
     userMessage: null,
     reason:
-      missingOptional.length === 0
+      optionalNotes.length === 0
         ? '契约版本与全部能力均满足'
-        : `契约版本匹配；可选能力缺失（应禁用对应功能，不报错）：${missingOptional.join(', ')}`,
+        : `契约版本匹配；${optionalNotes.join('；')}`,
     missingRequired: [],
+    missingOptional,
+    missingProductPlane,
   }
 }
 

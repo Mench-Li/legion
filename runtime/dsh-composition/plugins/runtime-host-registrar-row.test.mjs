@@ -27,13 +27,13 @@
 // ============================================================================
 
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { after, describe, test } from 'node:test'
 
-import { REQUIRED_CAPABILITIES } from '../../contracts/adapter.mjs'
+import { OPTIONAL_CAPABILITIES, PRODUCT_PLANE_CAPABILITIES, REQUIRED_CAPABILITIES } from '../../contracts/adapter.mjs'
 import { LEGION_PERMISSION_PRESETS, PATCH_LAYER_ROWS, RUNTIME_ONLY_ROW_IDS } from '../patch-layer.mjs'
 import { startupSelfCheck } from '../selfcheck.mjs'
 import { HIGH_RISK_TOOL_NAMES } from '../tool-capability.mjs'
@@ -221,14 +221,39 @@ describe('PRT-253 续批二 · 四项能力逐项有据', () => {
     assert.equal(many.capabilities['structured-result'], false, '说不清用哪个 provider 时不挑一个')
   })
 
-  test('另外三项：未确认，各自一个说得清"为什么"的码', () => {
+  test('另外两项：未确认，各自一个说得清"为什么"的码', () => {
     const { capabilities, evidence } = runtimeCapabilityEvidence(ctxWith({}))
-    assert.equal(capabilities['tool-permission-enforcement'], false)
-    assert.equal(evidence['tool-permission-enforcement'].code, CAPABILITY_EVIDENCE_CODES.ENFORCEMENT_PLANE_MEASURED_ELSEWHERE)
     assert.equal(capabilities['cancel-and-timeout'], false)
     assert.equal(evidence['cancel-and-timeout'].code, CAPABILITY_EVIDENCE_CODES.CANCEL_NOT_GUARANTEED_BY_ENGINE)
     assert.equal(capabilities['usage-reporting'], false)
     assert.equal(evidence['usage-reporting'].code, CAPABILITY_EVIDENCE_CODES.RESULT_CONTRACT_HAS_NO_USAGE)
+  })
+
+  // -------------------------------------------------------------------------
+  // ★ 2026-09-21 业主裁决的判据：产品面能力**不由本模块表态**
+  //
+  // 这一条替换了原来那条「`tool-permission-enforcement` 报 false + 码是
+  // `ENFORCEMENT_PLANE_MEASURED_ELSEWHERE`」。换掉的理由不是"用例旧了"，
+  // 而是**被钉住的那件事本身改了**：它移出了 `REQUIRED_CAPABILITIES`。
+  //
+  // ★★ 但原来那条用例里有一个**必须留下**的东西：它守着"两个读数不许合并"。
+  //    现在这两个读数还会不会合并不再取决于能力表（那一项已经不在这张表里了），
+  //    所以那条不变量搬去了下面 ⑳/㉑（对着能力表整体与强制面判定）。
+  // -------------------------------------------------------------------------
+
+  test('★ 产品面能力（tool-permission-enforcement）**不在**本模块的能力表里', () => {
+    const { capabilities, evidence } = runtimeCapabilityEvidence(ctxWith({}))
+    assert.ok(!('tool-permission-enforcement' in capabilities),
+      '它已移出 REQUIRED_CAPABILITIES，本模块不该再替引擎答这一项——' +
+      '本函数的产物会被 probeRuntime() 当作**引擎自报**的能力表交出去')
+    assert.ok(!('tool-permission-enforcement' in evidence))
+    // 反向：它必须在**产品侧**那张表里，否则就是"从两个表里一起消失了"。
+    assert.ok(PRODUCT_PLANE_CAPABILITIES.includes('tool-permission-enforcement'),
+      '移出必需表 ≠ 从产品里去掉：它必须落在 PRODUCT_PLANE_CAPABILITIES 里')
+    assert.ok(OPTIONAL_CAPABILITIES.includes('tool-permission-enforcement'),
+      '它还必须是 OPTIONAL_CAPABILITIES 的子集，否则 checkCompatibility 会对它一句都不说')
+    assert.ok(!REQUIRED_CAPABILITIES.includes('tool-permission-enforcement'),
+      '移出后不许又出现在必需表里（两边都在会让"谁来判它"没有答案）')
   })
 
   test('能力表**恰好**是产品的必需清单（多一项 / 少一项都会让探针读错）', () => {
@@ -244,7 +269,10 @@ describe('PRT-253 续批二 · 四项能力逐项有据', () => {
     // 4 = PRT-214 缺口②：`startRun` 按 Run 安装**授权身份**（`enforcementIdentity`）。
     //     同样地，3 与 4 在"两个载体键都没有"时行为逐字相同——这条注释是唯一能说出
     //     "这台进程里的 `scope` 不再等于进程启动时那一个"的地方。
-    assert.equal(RUNTIME_HOST_REGISTRAR_VERSION, 4)
+    // 5 = `tool-permission-enforcement` 移出 `REQUIRED_CAPABILITIES` ⇒ 本表 4 项变 3 项。
+    //     与 3/4 同一个形状：4 与 5 的**能力表读数不同**（少一项），但这一条注释
+    //     之所以必要，是因为"表里有几项"能读出来、"为什么少那一项"读不出来。
+    assert.equal(RUNTIME_HOST_REGISTRAR_VERSION, 5)
   })
 
   test('布尔表里只有布尔值：判据码不会被混进 capabilities（probe.mjs 会把非 true 当 false）', () => {
@@ -890,36 +918,89 @@ describe('PRT-253 能力判据批 · 强制面判定在能力探针**之后**才
 
     const { capabilities, evidence } = runtimeCapabilityEvidence(confirmingCtx())
     assert.equal(capabilities['structured-result'], true, '这一项有真来源（现场 provider 注册表），必须为 true')
-    assert.equal(capabilities['tool-permission-enforcement'], false)
-    assert.equal(evidence['tool-permission-enforcement'].code,
-      CAPABILITY_EVIDENCE_CODES.ENFORCEMENT_PLANE_MEASURED_ELSEWHERE)
 
-    // ★ 这一条就是"顺序边界"的读数：判定说生效，能力说未确认。
-    //   两者若哪天相同，说明有人把能力接到了那份判定上——而那份判定在
-    //   `runtimeCapabilityEvidence()` 跑的时候**还不存在**（它在自检里才算），
-    //   接上它只可能靠"再判一遍"（两份判定会漂移）或"写死一个值"（两个都不是）。
-    assert.notEqual(itemOf('composition-patch-layer').ok, capabilities['tool-permission-enforcement'],
-      '强制面判定与能力表不再是两个不同的读数：有人把二者接上了，而接法必须是"同一份测量"')
+    // ★★ 2026-09-21 改法：原来这里断言 `capabilities['tool-permission-enforcement'] === false`。
+    //    那一项已移出必需表 ⇒ 本模块不再对它表态 ⇒ 断言改成"**它不在表里**"，
+    //    而下面那条"两个读数必须不同"的不变量**换成另一个载体**：
+    //    强制面判定（自检①）与"能力表整体"必须仍是两个不同的读数。
+    //
+    //    ★ 为什么这条不变量必须活下来：它守的是"有人把能力表接到那份判定上"。
+    //    这一项移出去之后，那个接法**照样**是可能的（把自检结果整份灌进能力表），
+    //    而它导致的后果一模一样：两份判定开始漂移。
+    //    > 一条被移走的那一项顺带带走的不变量，与一条不再需要的不变量，
+    //    > 在"用例还绿着"这件事上是同一个东西。
+    assert.ok(!('tool-permission-enforcement' in capabilities),
+      '产品面能力不该由本模块代答（它移出必需表了）')
+
+    // ★ 顺序边界的读数：判定说生效，而能力表说的**不是**那份判定。
+    assert.equal(itemOf('composition-patch-layer').ok, true)
+    assert.equal(capabilities['cancel-and-timeout'], false,
+      '另一项必需能力在任何输入下都必须是未确认（它不读补丁层）')
+    assert.notEqual(
+      Object.values(capabilities).every((v) => v === true),
+      itemOf('composition-patch-layer').ok,
+      '能力表整体与强制面判定变成了同一个读数：有人把二者接上了，' +
+      '而接法必须是"同一份测量"（那份判定在 runtimeCapabilityEvidence() 跑的时候还不存在）')
   })
 
-  test('★ 反向控制：判定变红时能力判据码**一字不变**（能力表不跟着那份判定动）', async () => {
+  test('★ 反向控制：判定变红时能力表**一字不变**（能力表不跟着那份判定动）', async () => {
     const broken = {
       ...effectiveComposition(),
       rows: effectiveComposition().rows.filter((r) => r.id !== PATCH_LAYER_ROWS[0].id),
     }
-    const check = await startupSelfCheck({
+    const brokenCheck = await startupSelfCheck({
       composition: broken,
       sandbox: fullSandbox(),
       runtime: { ok: true, version: '1.0.0' },
     })
-    assert.equal(check.checks.find((c) => c.name === 'composition-patch-layer').ok, false,
+    const okCheck = await startupSelfCheck({
+      composition: effectiveComposition(),
+      sandbox: fullSandbox(),
+      runtime: { ok: true, version: '1.0.0' },
+    })
+    assert.equal(brokenCheck.checks.find((c) => c.name === 'composition-patch-layer').ok, false,
       '反向控制必须真的变红，否则这条用例只在一个"本来就全绿"的输入上跑过')
+    assert.equal(okCheck.checks.find((c) => c.name === 'composition-patch-layer').ok, true,
+      '另一侧也必须真的绿，否则"两个方向"其实是同一个方向')
 
-    const { capabilities, evidence } = runtimeCapabilityEvidence(confirmingCtx())
-    assert.equal(capabilities['tool-permission-enforcement'], false)
-    assert.equal(evidence['tool-permission-enforcement'].code,
-      CAPABILITY_EVIDENCE_CODES.ENFORCEMENT_PLANE_MEASURED_ELSEWHERE,
-      '两个方向上报同一个码 ⇒ 能力表既没接判定、也没被判定驱动；接了就必须两个方向一起变')
+    // ★ 真正的反向控制：让**被对照的那一项（组合）真的不同**，然后核能力表
+    //   不受它影响。
+    //
+    //   ⚠️ 我第一版写成 `runtimeCapabilityEvidence(confirmingCtx())` 调两次再比 ——
+    //   那是**同义反复**（同一函数、同一入参）。★ 而更值得记下的是：
+    //   **原来那条用例其实也是同义反复**（它只对 broken 组合调一次，断言那个码
+    //   等于一个常量）。它看着像"反向控制"，其实只是一条静态断言。
+    //
+    //   > 一条"调两次比一比"的用例，与一条"真的让对照组不同"的用例，
+    //   > 在恒为绿的输出里长得一样。
+    //
+    //   这条不变量真正的结构依据是：`runtimeCapabilityEvidence(ctx)` 的入参里
+    //   **没有 composition**。所以最诚实的判法是核**源码**：它的函数体里不许
+    //   出现补丁层判定。这直接钉住"没人把那份判定接进来"。
+    const pristineSrc = readFileSync(fileURLToPath(new URL('./runtime-host-registrar-row.mjs', import.meta.url)), 'utf8')
+    const body = pristineSrc.slice(
+      pristineSrc.indexOf('export function runtimeCapabilityEvidence'),
+      pristineSrc.indexOf('\n}\n', pristineSrc.indexOf('export function runtimeCapabilityEvidence')),
+    )
+    assert.ok(body.length > 0, '应当能在源码里定位 runtimeCapabilityEvidence 的函数体')
+    // ⚠️ 只核**代码行**，不核注释行：第一版把注释也算进去，于是我在函数里
+    //    写的解释（"强制面由启动自检判…"）里的 `composition-patch-layer` 一词
+    //    把它自己判红了 —— *一条把注释也当代码读的判据，会惩罚"把理由写在现场"
+    //    这个好习惯，而它报的红指向的是写字的人而不是接线的人。*
+    const codeLines = body.split('\n')
+      .map((l) => l.trim())
+      .filter((l) => !l.startsWith('//') && !l.startsWith('*') && !l.startsWith('/*'))
+      .join('\n')
+    for (const forbidden of ['reconcilePatchLayer', 'startupSelfCheck', 'patchVersion', 'effective']) {
+      assert.ok(!codeLines.includes(forbidden),
+        `runtimeCapabilityEvidence() 的**代码**里出现了 ${forbidden} ——` +
+        '能力表**被那份判定驱动**了，而那份判定在本函数跑的时候还不存在（两份判定会漂移）')
+    }
+    assert.deepEqual(Object.keys(runtimeCapabilityEvidence(confirmingCtx()).evidence).sort(),
+      [...REQUIRED_CAPABILITIES].sort(),
+      '能力表的项集必须仍然恰好等于必需清单')
+    assert.ok(!('tool-permission-enforcement' in runtimeCapabilityEvidence(confirmingCtx()).capabilities),
+      '★ 这条同时钉住"没人把产品面那一项又加回来自答"')
   })
 })
 

@@ -615,20 +615,27 @@ describe('PRT-253 续批二：生产注册方在**真 DSH 进程**里的读数',
     // 候选第一项就是本进程的入口（版本是从它推导出来的）。
     assert.equal(reading(r.stderr, 'CANDIDATE0VERSION'), CLI_VERSION, r.stderr)
 
-    // ② 能力表：structured-result 由**现场注册表**确认，另外三项未确认。
+    // ② 能力表：structured-result 由**现场注册表**确认，另外两项未确认，
+    //    产品面那一项**不在表里**（2026-09-21 裁决：它移出 REQUIRED_CAPABILITIES）。
     const caps = JSON.parse(reading(r.stderr, 'PROBEDCAPS'))
-    assert.deepEqual(Object.keys(caps).sort(), [...REQUIRED_CAPABILITIES].sort())
+    assert.deepEqual(Object.keys(caps).sort(), [...REQUIRED_CAPABILITIES].sort(),
+      '能力表的项集必须恰好等于必需清单（不许多、不许少）')
     assert.equal(caps['structured-result'], true, r.stderr)
     for (const cap of REQUIRED_CAPABILITIES.filter((c) => c !== 'structured-result')) {
       assert.equal(caps[cap], false, `${cap} 在没有任何来源时必须是 false（未确认）：${r.stderr}`)
     }
+    // ★ 产品面能力**不许**出现在引擎自报的能力表里：本表会被 probeRuntime()
+    //   当作**引擎自报**交出去，在里面放一个产品侧能力 = 替引擎答它不负责的问题。
+    assert.ok(!('tool-permission-enforcement' in caps),
+      `产品面能力不该由引擎自报：${JSON.stringify(caps)}`)
     // ③ 逐项判据码。
     const ev = JSON.parse(reading(r.stderr, 'PROBEDEVIDENCE'))
     assert.equal(ev['structured-result'], CAPABILITY_EVIDENCE_CODES.PROVIDER_REGISTRY_CONFIRMS)
-    assert.equal(ev['tool-permission-enforcement'], CAPABILITY_EVIDENCE_CODES.ENFORCEMENT_PLANE_MEASURED_ELSEWHERE)
     assert.equal(ev['cancel-and-timeout'], CAPABILITY_EVIDENCE_CODES.CANCEL_NOT_GUARANTEED_BY_ENGINE)
     assert.equal(ev['usage-reporting'], CAPABILITY_EVIDENCE_CODES.RESULT_CONTRACT_HAS_NO_USAGE)
-    assert.equal(new Set(Object.values(ev)).size, 4, '四项的判据码必须互不相同（否则"哪一项没来源"读不出来）')
+    assert.ok(!('tool-permission-enforcement' in ev), '它已不在证据表里')
+    assert.equal(new Set(Object.values(ev)).size, Object.keys(ev).length,
+      '每一项的判据码必须互不相同（否则"哪一项没来源"读不出来）')
 
     // ④ 生产工厂在真 ctx 上建得出端口，`startRun` 按引用转发到真服务。
     assert.equal(reading(r.stderr, 'FACTORY'), 'built', r.stderr)

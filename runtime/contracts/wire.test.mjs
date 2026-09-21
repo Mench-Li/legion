@@ -415,5 +415,18 @@ test('⑥ isWireTerminalEvent 转发契约判定，不在这里抄一遍那四�
 test('⑥ 能力表与需求表仍然来自契约（线上不另立一份）', () => {
   // wire 不导出自己的能力表——它直接用契约的。这里钉住"没有平行的一份"：
   // 若哪天 wire 里出现了一个 `WIRE_CAPABILITIES`，这条会红。
-  assert.equal(REQUIRED_CAPABILITIES.includes('tool-permission-enforcement'), true)
+  //
+  // ★ 2026-09-21：锚点从 `tool-permission-enforcement` 换成
+  // `cancel-and-timeout`。换的理由**不是**前者"不对了"，而是它移出了
+  // `REQUIRED_CAPABILITIES`（产品面能力不由引擎自答）⇒ 拿它当"必需表非空"的
+  // 锚会红；而这条用例要钉的是"wire 用的是契约那份表"，与**表里有哪几项无关**。
+  //
+  //   > 一条拿"某一项在不在表里"当锚的用例，与一条拿"这张表从哪来"当锚的用例，
+  //   > 在表**内容**变动的那天分得开——只不过前者的红指向 wire，而 wire 没动。
+  //
+  // ★ 并补一条正向断言：产品面那一项**不许**回到必需表里。
+  assert.equal(REQUIRED_CAPABILITIES.includes('cancel-and-timeout'), true)
+  assert.equal(REQUIRED_CAPABILITIES.includes('tool-permission-enforcement'), false,
+    'tool-permission-enforcement 是产品面能力（PRODUCT_PLANE_CAPABILITIES），' +
+    '回到必需表会让引擎探针又去答一个它不负责的问题')
 })

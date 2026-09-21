@@ -108,6 +108,16 @@ export const EXTRACTED_MODULES = [
 ]
 
 /**
+ * ★★★★★ 裁定标记：那对 SSE「**判定不该提取**」的裁定必须**写在源码里**。
+ *   ★ 少了它，"它们还在"就分不出是"裁定留下的"还是"还没做"——
+ *     而这两种在**任何机器读数上都长得一模一样**（都是"剩 2 条"）。
+ *   > 一个「台账上写着"剩 2 条"，那就是还没做完」的印象，
+ *   > 与一个「同一行读数既可能是"没做完"、也可能是"裁定不做"，而两者**字节相同**」的事实，
+ *   > 在我要求源码里必须落一句理由之前是同一个东西。
+ */
+export const RULING_MARKER = '裁定：下面这 2 条**不提取**'
+
+/**
  * 守卫：返回诊断数组（空 = 通过）。
  *
  * ★ 第二参数可覆盖"提取之后要看哪些模块" —— 这是**为了让它自己的 ③ 那条可测**。
@@ -133,6 +143,13 @@ export function checkSseTail(src, opts = {}) {
     } else if (mutationCount(src, MUTABLE_BINDING) < 1) {
       problems.push(`\`${MUTABLE_BINDING}\` 除了声明之外一次都没被写过 —— 那对 SSE 的写法前提变了`
         + `（writeCount=${writeCount(src, MUTABLE_BINDING)}、mutationCount=${mutationCount(src, MUTABLE_BINDING)}）`)
+    }
+    // ④ ★★★★★ 裁定必须**写在源码里**。少了它，"还在"与"还没做"在机器读数上无法区分。
+    if (src.includes(RULING_MARKER) === false) {
+      problems.push(
+        '★★★ 那对 SSE 还在，但源码里**找不到裁定标记**'
+        + `（\`${RULING_MARKER}\`）—— "裁定留下"与"还没做"在任何机器读数上都长得一样，`
+        + '所以理由必须落在源码里；若是有意恢复提取，请同步更新本守卫与它的测试。')
     }
   }
 

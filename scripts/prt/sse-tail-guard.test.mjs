@@ -11,7 +11,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 import {
-  SSE_PAIR, MUTABLE_BINDING,
+  SSE_PAIR, MUTABLE_BINDING, RULING_MARKER,
   remainingRouteConditions, mutableModuleBindings, writeCount, mutationCount, byValueInjection, checkSseTail,
 } from './sse-tail-guard.mjs'
 
@@ -203,4 +203,16 @@ test('⑩ ★★★ 真实文件上，守卫**不会**因为"那对还在"就误
   // ★ 反向自检：确保 ③ 只在 `rest.length === 0` 时生效。
   const p = checkSseTail(REAL)
   assert.deepEqual(p, [], '★★ 那对还在时，③ 那条（检查新模块注入面）**必须不生效**')
+})
+
+test('⑩b ★★★★★ 裁定标记必须**在源码里** —— 否则"裁定留下"与"还没做"读数相同', () => {
+  assert.ok(REAL.includes(RULING_MARKER), '★★★ 真实 server.mjs 里必须落着那句裁定')
+  // ★ 把裁定标记删掉 ⇒ 必须报（这是区分"裁定留下"与"还没做"的唯一机器可读线索）
+  const noRuling = REAL.split(RULING_MARKER).join('（此处原有裁定，已删）')
+  assert.notEqual(noRuling, REAL, '★ 替换要真的发生')
+  assert.deepEqual(remainingRouteConditions(noRuling), SSE_PAIR, '★ 前提：那对还在')
+  const p = checkSseTail(noRuling)
+  assert.equal(p.length, 1, '★★★★★ 少了裁定标记 ⇒ 必须报')
+  assert.match(p[0], /裁定标记/)
+  assert.match(p[0], /长得一样/, '★ 报错要说清**为什么**要求它')
 })

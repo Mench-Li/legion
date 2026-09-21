@@ -160,7 +160,15 @@ test('③ 反面控制：改动文档里那个声称，**那一条**必须红（
     }
     assert.notEqual(corrupted, before, `${f.id}：改写没生效，这条控制是假的`)
 
-    const r = checkFacts({ ctx: withDoc(f.claim.doc, () => corrupted) })
+    // ★★★★★ 第 111 轮：这里原来是 `checkFacts({ ctx: ... })` —— 即**为了判一条事实红了没有，
+    //   把全部 ~30 条都跑了一遍**。实测 `checkFacts()` 一次 ~5.4s、本循环 ~30 次 ⇒ **约 160 秒**，
+    //   占该套件总时长（281s）的一半以上 ⇒ 而 `run-ci.mjs:130` 的硬上限是 **300 秒**。
+    //
+    //   > ★★★ 这条断言说的是「**那一条**必须红」。为了知道**一条**的判决而跑**全部**，
+    //   > 是把"那一条"写成了"每一条" —— 而它换来的不是更强的检查，**是更长的墙钟**。
+    //
+    //   ⇒ 只跑这一条。★ 判据本身一个字没改（同一个 derive、同一个 claim、同一套红码）。
+    const r = checkFacts({ ctx: withDoc(f.claim.doc, () => corrupted), only: [f.id] })
     assert.ok(idsOf(r).includes(f.id),
       `${f.id}：文档声称被改掉了它却没红（红的是 ${JSON.stringify(idsOf(r))}）`)
     const v = r.violations.find((x) => x.id === f.id)
@@ -597,20 +605,28 @@ test('⑫b ★★ 控制：把**历史上那次真实位移的旧坐标**钉上�
   //      ★ 而**这一次载具自己是绿的**——因为这一轮插入的位置在 `564` **之上**，
   //      所以 `lines[563]` 恰好还是那一行调用……直到我把它插在上面之后它才不是。
   //      实测：这一条是先红在"第 564 行不再是那个调用点"，那正是它该做的事。
+  //   ★★★ ⑤ `:591`（第 20 轮的正确答案）→ `:626`（2026-09-21 **第 112 轮**：
+  //      在同一个调用点**前**插入 PRT-603 岗位白名单那一块 +35 行）。
+  //      而这一节描述的"**从不腐坏**"性质再次成立：上一轮的正确答案（**591**）
+  //      这一次成了新的旧坐标——下面那个 `injected` 钉的就是它。
+  //
+  //   > 一条"每次位移之后、上一轮的正确答案就变成新的旧坐标"的控制，
+  //   > 与一条"把旧坐标写死成一个再也不会变的数"的控制，
+  //   > 在**第一次**位移时都是红的——只不过前者的红**每次都还能复现**。
   const real = resolve(REPO, 'runtime/dsh-composition/plugins/root-row.mjs')
   const lines = readFileSync(real, 'utf8').split('\n')
   // 先核载具本身（载具坏了，下面的结论就不成立）
-  assert.match(lines[590], /installEnforcementRoot\(\{/,
-    '第 591 行不再是那个调用点 ⇒ 载具失效，先重写这个控制')
-  assert.ok(!/installEnforcementRoot\(\{/.test(lines[563]),
-    '第 564 行**又**是那个调用点了 ⇒ 旧坐标这一层失去对象，先重写这个控制')
-  assert.ok(592 <= lines.length,
+  assert.match(lines[625], /installEnforcementRoot\(\{/,
+    '第 626 行不再是那个调用点 ⇒ 载具失效，先重写这个控制')
+  assert.ok(!/installEnforcementRoot\(\{/.test(lines[590]),
+    '第 591 行**又**是那个调用点了 ⇒ 旧坐标这一层失去对象，先重写这个控制')
+  assert.ok(627 <= lines.length,
     '旧行号居然超范围了 ⇒ 那上一批的判据本来就能抓到，这一节的立论要改')
 
   // ★ 用**同一份**核法（不重抄逻辑）去钉旧坐标（= 上一轮的正确答案）
   const injected = Object.freeze([Object.freeze({
     file: 'runtime/dsh-composition/plugins/root-row.mjs',
-    line: 564,
+    line: 591,
     text: 'const installed = installEnforcementRoot({',
   })])
   const r = checkPinnedCitations(injected)
@@ -622,7 +638,7 @@ test('⑫b ★★ 控制：把**历史上那次真实位移的旧坐标**钉上�
   //    少了这一条，"永远报红"的实现也能通过上面那个断言。
   const good = Object.freeze([Object.freeze({
     file: 'runtime/dsh-composition/plugins/root-row.mjs',
-    line: 591,
+    line: 626,
     text: 'const installed = installEnforcementRoot({',
   })])
   const g = checkPinnedCitations(good)
@@ -813,9 +829,18 @@ test('⑭b ★★ 回归：台账状态**不许**按固定下标取（我第一�
   //
   //   ⇒ 现在 🟡 计入 `partial`，总数回到 145（与台账合计行
   //   「140 / **1** / 0 / 4 / **145**」逐字对齐）。
+  //
+  // ★★★ 2026-09-21 第 113 轮：`PRT-316` 由 🟡 转 **✅**（`2967119`，08:43:35）
+  //   ⇒ 真值变成 `{ total:145, done:141, partial:0, paused:4, todo:0 }`。
+  //   ★ 这一行与 `ledger-evidence.test.mjs` ⑩、以及交付物里那几处**现行分档抄写**
+  //     是**同一根因的四个受害者**：台账动了，而**四处**期望都没跟着动。
+  //
+  //   > 一个数被抄在四处、而只有一处有判据，与"这个数只有一个所有者"，
+  //   > 在台账不动的时候是同一个东西——
+  //   > 只不过前者会在台账动的那一天**同时**红在四个看起来无关的地方。
   const real = tallyLedger(defaultContext().doc(LEDGER_DOC))
-  assert.deepEqual(real, { total: 145, done: 140, partial: 1, paused: 4, todo: 0 },
-    `真实台账实算 ${JSON.stringify(real)}，与 145/140/1/4/0 不符`)
+  assert.deepEqual(real, { total: 145, done: 141, partial: 0, paused: 4, todo: 0 },
+    `真实台账实算 ${JSON.stringify(real)}，与 145/141/0/4/0 不符`)
 
   // ★ 反向控制：状态列**不在**第 3 格时也必须数得对。
   //   写死 `cells[2]` 的版本在这种表上会数出别的分布——
@@ -1439,6 +1464,10 @@ const TALLY_DOCS = [
 const TALLY_LIVE = [
   { doc: TALLY_DOCS[0], starts: '- 权威台账：', what: '交付物开头那句现行摘要' },
   { doc: TALLY_DOCS[1], starts: '功能实现**已完成到', what: '交接报告 §一 一句话结论' },
+  // ★★ 第 113 轮：交接报告 §一 里**第二处**现行抄写（"真值（第 111 轮实测）"那一行）。
+  //   它是另一个会话为收口 PRT-316 加的，而**没有人登记它** ⇒ 本判据报"有 1 处没有登记"。
+  //   按本判据自己的指示（"现行就核值"）登记在这里——它的内容确实是现行值。
+  { doc: TALLY_DOCS[1], starts: '★ 真值（第 111 轮实测）：', what: '交接报告 §一 真值行（第 113 轮登记）' },
   { doc: TALLY_DOCS[1], starts: '| 台账 | **145 行 =', what: '交接报告 §二 最终读数' },
   { doc: TALLY_DOCS[2], starts: '> 台账 `docs/', what: '人工清单抬头' },
 ]

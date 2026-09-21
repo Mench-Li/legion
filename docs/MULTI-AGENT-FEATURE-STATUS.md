@@ -802,6 +802,54 @@ is `mcp__<serverName>__<rawName>`, normalized to the DeepSeek function-name
 ★ 其中 M4 给出了一条预想之外的读数：把两处**结构**断言都挖成"只数个数"之后
 套件**仍然红**——那条**行为**断言独立守住了它。
 
+### 4.7 ★★★ 第 113 轮的量产读数：**23 个 `gap` 类模块**（有实现、无生产路径）
+
+§4.5/§4.6 修完之后，"能力在、而生产里没有消费者"这一族**还剩多少**？
+本轮不再逐个撞见，而是**量一遍**——用仓库自己的工具：
+
+```text
+node scripts/prt/reachability.mjs --diff
+→ reachability: 与基线一致（不可达 44 条，全部分类）
+   分类分布：by-design 13 · deliberate 8 · gap 23
+```
+
+`gap` 的定义逐字写在基线文件头：**"真的没有生产路径，且台账/对照表说它已交付
+⇒ 需要在 §5 里裁决"**。所以那 23 条不是"没写代码"，是**写好了而没人调用它**。
+
+按族看（不是逐条列，那是基线文件的事）：
+
+| 族 | 代表模块 | 已在 §5 的哪一条 |
+| --- | --- | --- |
+| **生命周期 / 阶段 9 产品动作** | `product/lifecycle/{data-classes,data-export,retention,uninstall}.mjs` | 第 16 条 |
+| **发布与合规** | `product/release/{checklist,privacy}.mjs`、`product/support/runbook.mjs` | 第 16 条 |
+| **度量** | `product/metrics-source.mjs`、`metrics-spec7*.mjs` | 第 15 条同族 |
+| **能力包（packs）** | `runtime/packs/{authority,compiled-plan,store}.mjs`、`builtin/software-delivery.mjs` | 第 19/28 条 |
+| **执行面数据（F-18/F-19）** | `runtime/experience/{friction,graph}.mjs`、`runtime/employee/role-pack.mjs` | 第 18 条 |
+| **落账车道** | `runtime/toolcall/spool.mjs`、`orchestrator/worker/toolcall-drain.mjs` | 第 15/28 条 |
+| **崩溃报告** | `product/diagnostics/crash-report.mjs` | 第 16 条 |
+| **部署配置读取点** | `product/execution-plane-config.mjs` | 第 19 条 |
+| **连接目标组装** | `runtime/connectors/target-binding.mjs` | 第 19 条 |
+
+★ **它们不是 23 个独立决定，而是四五个决定**。这正是基线文件头那条告警在讲的事
+（"可达性是**逐模块**测的，而一条链是**端到端**才通的"）。
+
+**★ 两条诚实边界（这一节只是一份读数，不是判据）**
+
+1. **它**没有**进门禁**。这一节是审计读数；把它变成判据需要先有"哪些 `gap` 是可接受的"
+   的一份口径——而那本身是一次裁决。
+2. **我第一版的审计器是错的**（`scratch/_audit-zero-prod-consumers.mjs`，留着当反面教材）：
+   它只查**别的文件**是否引用某个导出，于是把"导出了、但在**本文件内**被用"的
+   也标成"谁都不用"——211 条里我抽查的 6 条**全都是假阳性**
+   （`runtimeInstallRepair` / `createSystemIo` / `renderRuntimePlan` /
+   `runtimeInstallInputFrom` / `snapshotSqlite` / `verifySqlite` 都在本文件内被调用）。
+
+   > 一个"用 grep 数引用"的审计器，与一个"真的走 import 图"的审计器，
+   > 在**只被本文件使用的导出**上是两个相反的结论——
+   > 而前者报出来的那一列，读起来跟后者一模一样。
+
+   ⇒ 所以最终给的数是**那件真工具**的（`reachability.mjs`，它走 import 图），
+     不是我那个自造的。
+
 ---
 
 ## 5. 需人工介入清单（汇总给到项目方）

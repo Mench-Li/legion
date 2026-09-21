@@ -107,10 +107,27 @@ export function normalizeRunHandle(raw) {
   } else {
     warnings.push('startRun 句柄缺少 dispose：子代理可能无法回收')
   }
+  // ★ 句柄的 `id` 是 `SessionId`（`SubagentRun.id`），而它是**一次 Run 的用量的
+  //   唯一归因键**：`SubagentResult` 契约里没有 usage 字段，用量只能从那次 Run 的
+  //   会话投影里读回来，而"哪一次 Run"由这个 id 回答。
+  //
+  //   ⚠️ 在补上这一行之前，这里把 `id` **丢掉了**——于是用量永远归不了因，
+  //   而"丢掉一个没人在用的字段"与"丢掉归因键"在 diff 上是同一个读数。
+  //
+  //   缺失时如实记成 `null`（不是编一个）：没有归因键就是读不到用量，
+  //   那要由读取方按具名码读到，而不是被静默当成"这次没用 token"。
+  //
+  //   ★ 这一格**刻意不进 `warnings`**：真 DSH 的 `SubagentRun.id` 是**必填**字段
+  //   （`types.ts` 的 `SubagentRun`），所以"缺席"只可能出现在替身上。
+  //   把每一条替身用例都染上一条 `run.progress` 审计事件，是拿"替身不够真"
+  //   去污染真产品的读数——而真产品永远走不到这一格。
+  //   缺席这件事本身由 `sessionId === null` 如实可读，不需要再喊一声。
+  const sessionId = typeof raw.id === 'string' && raw.id !== '' ? raw.id : null
   return {
     result: raw.result,
     dispose,
     events: raw.events ?? null,
+    sessionId,
     warnings,
   }
 }

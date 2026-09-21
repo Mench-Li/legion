@@ -267,6 +267,50 @@ describe('PRT-253 runtime-host-row：组合树观察', () => {
     assert.equal(pending.activated, false)
   })
 
+  test('①d ★★★ 自指测量：观察者**自己**那一行按"已激活"记，别人不受影响', () => {
+    // 为什么要这一条：`legion-enforcement-runtime-host-registrar` 的模块 default
+    // **就是** `runtimeHostRow` 本体（`===`，业主裁决甲有意为之），所以本行会从自己的
+    // `apply` 里观察到自己。而执行 `apply` 的 fiber 在 `apply` 返回前不是
+    // `ACTIVE_FIBER_STATE` ⇒ 旧实现把自己读成「行已挂载但未激活（等待依赖服务）」，
+    // 于是 `composition-patch-layer` 判不生效、启动自检 `incompatible`、
+    // **在所有平台上都禁止自动执行**。实测（第 7 轮）同一份部署里从**另一行**观察，
+    // 九条条目全是 `state=2` —— 那条红纯粹是自指的产物。
+    const own = { state: 1 } // 正在 apply：状态不是 ACTIVE
+    const other = { state: 1 } // 另一条**真的**没激活的行
+    const ctx = {
+      fiber: own,
+      get: (name) => (name === 'loader'
+        ? {
+          entries: () => [
+            { options: { id: 'legion-enforcement-runtime-host-registrar' }, fiber: own },
+            { options: { id: 'legion-enforcement-hard-floor' }, fiber: other },
+          ],
+        }
+        : undefined),
+    }
+    const observation = observeComposition(ctx)
+
+    const self = observation.rows.find((r) => r.id === 'legion-enforcement-runtime-host-registrar')
+    assert.equal(self.activated, true, '自己那一行必须按已激活记（它的 apply 正在执行）')
+    assert.equal(self.selfObserved, true, '而且要把"这是自指读数"标出来，别让读者以为它是别人证的')
+
+    // ★ 反向锚：这条修法**不许**把"未激活"整体变绿 —— 别人没激活仍然是没激活。
+    const external = observation.rows.find((r) => r.id === 'legion-enforcement-hard-floor')
+    assert.equal(external.activated, false, '别人（fiber 不是我）没激活就得读成未激活')
+    assert.equal(external.selfObserved, false, '别人不是自指读数')
+
+    // 而认自己必须按**对象身份**，不能按名字：fiber.name 是插件名，与树条目 id 不同名。
+    const nameCollision = observeComposition({
+      fiber: own,
+      get: () => ({ entries: () => [{ options: { id: 'legion-enforcement-hard-floor' }, fiber: { state: 1 } }] }),
+    })
+    assert.equal(
+      nameCollision.rows.find((r) => r.id === 'legion-enforcement-hard-floor').activated, false,
+      '一个"状态不同、只是名字撞了"的 fiber 不许被当成自己',
+    )
+  })
+
+
   test('② 没有 permission 行 → `permissionPresets` 是 `null`，**不是** `[]`', () => {
     const observation = observeComposition(ctxWithLoader([
       { options: { id: 'legion-enforcement-hard-floor' }, fiber: { state: 2 } },

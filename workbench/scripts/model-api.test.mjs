@@ -312,8 +312,21 @@ describe('③ 每条路径都必须在平台契约里真实存在（交叉校验
   const ROOT = resolve(HERE, '..', '..')
 
   test('api.ts 里用到的每个 /api/ 路径都能在源码抽出的路由表里找到', async () => {
-    const { extractRoutes } = await import('../../scripts/prt/baseline-snapshot.mjs')
-    const routes = extractRoutes(readFileSync(resolve(ROOT, 'team-hub/server.mjs'), 'utf8'))
+    // ★★★★★ 2026-09-21：这一行此前是
+    //     `extractRoutes(readFileSync('team-hub/server.mjs'))`
+    //   ——而 PRT-316 把路由逐片搬进 `team-hub/routes/*.mjs` 之后，
+    //   `server.mjs` 里**只剩 2 条**，真正的 186 条在族模块里。
+    //   于是这条用例报了 70 条"前端写了个不存在的端点"，而那 70 条**全都存在**。
+    //
+    //   > 一个「搬家之后观测点塌了」的交叉校验，
+    //   > 与一个「前端真的写了 70 个不存在的端点」的交叉校验，
+    //   > 报的是**同一句话**——而这句话读起来完全正确，所以没人会去怀疑它。
+    //
+    //   修法不是"把 server.mjs 加回去"，而是**改用唯一权威**：
+    //   `platformHttpRoutes()`（`buildSnapshot()` 用的是同一个函数）。
+    //   判据一个字没改弱——它现在真的在查**全部** 188 条路由。
+    const { platformHttpRoutes } = await import('../../scripts/prt/baseline-snapshot.mjs')
+    const routes = platformHttpRoutes()
     // 路由形如 "POST /api/model-profiles/"（startsWith 形态）——用前缀匹配。
     const byMethod = new Map()
     for (const r of routes) {

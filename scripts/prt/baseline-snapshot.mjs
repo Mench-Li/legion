@@ -552,6 +552,80 @@ export function extractDeclaredRoutes(source) {
 }
 
 /**
+ * ★★★★★ **平台契约里"真实存在的路由"的唯一定义**（2026-09-21 新增）。
+ *
+ * ## 为什么需要它：一次真实的、让判据自己失效的搬家
+ *
+ * 2026-09-21 的 CI 上 `model-api` ③ 报红，逐字是：
+ *
+ *     这些路径在 team-hub 的路由表里不存在（前端写了个不存在的端点…）
+ *     actual: [ 'GET /api/missions', 'GET /api/scopes', … ]   ← 70 条
+ *
+ * 而**那 70 条全都存在**。它们不存在的是那个**观测点**：
+ *
+ *     extractRoutes(readFileSync('team-hub/server.mjs'))   // ⇒ 只有 2 条
+ *
+ * PRT-316 逐片把路由搬进 `team-hub/routes/*.mjs` 之后，`server.mjs` 里**本来**
+ * 就只剩 2 条；真正的 186 条在 `ROUTE_FAMILY_SOURCES` 声明的那些族模块里。
+ * `buildSnapshot()` 早就在用**并集**（`extractRoutes(server)` ∪ 各族的
+ * `extractDeclaredRoutes`），而这一处消费方自己另写了一份"只读 server.mjs"的取法。
+ *
+ * ⇒ 精确读数：**判据没有坏，它量的那个集合塌了。** 一条"前端写了个不存在的端点"
+ *   的检查，在搬家之后会对着 70 条**真实存在**的端点报同一句话——
+ *   而这句话读起来完全正确，所以没有人会去怀疑它。
+ *
+ *   > 一个「照搬 buildSnapshot 的一半取法」的交叉校验，
+ *   > 与一个「搬家之后把全部端点报成不存在」的交叉校验，
+ *   > 在输出上是同一个东西——只不过前者让人去改**正确的服务端代码**。
+ *
+ * 所以这里把并集**导出成唯一权威**，消费方不许再自己拼一遍：
+ * 谁要问"这条路径在平台契约里存在吗"，答案只有一个来源。
+ *
+ * @returns {ReadonlyArray<string>} 形如 `'GET /api/rules'`，已排序去重
+ */
+export function platformHttpRoutes() {
+  const server = readFileSync(SOURCES.server, 'utf8')
+  const union = [
+    ...extractRoutes(server),
+    ...ROUTE_FAMILY_SOURCES.flatMap(({ module }) => extractDeclaredRoutes(readFileSync(SOURCES[module], 'utf8'))),
+  ]
+  return Object.freeze([...new Set(union)].sort())
+}
+
+/**
+ * ★★★★★ **路由装配面的源码文本**（server.mjs ∪ 各路由族模块），2026-09-21 新增。
+ *
+ * 与 `platformHttpRoutes()` 是**同一个问题的两个面**：
+ *
+ *   · 那个回答"**有哪些**端点"（结构化：`'GET /api/rules'`）；
+ *   · 这个回答"**装配代码在哪**"（源码文本，供**源码级**防回退断言用）。
+ *
+ * 为什么源码级断言也要走这里：`model-config.test.mjs` 的
+ * 「**路由真的接上了校验**」是一条**源码断言**（注释里自己写明"它比行为用例弱"），
+ * 它断的是 `server.mjs` 里存在那句 `validateAgentModelSelection({...})`。
+ * PRT-316 把 `/api/models` 那一族搬进 `team-hub/routes/models.mjs` 之后，
+ * 那句**还在**，只是在另一个文件里 ⇒ 断言报红，而**接线一点没坏**。
+ *
+ *   > 一条「观测点跟着代码搬走就失效」的防回退断言，
+ *   > 与一条「接线真的被拔掉了」的防回退断言，
+ *   > 报出来的是同一句话——只不过前者会让下一个人去**恢复一段并没有被删的代码**。
+ *
+ * 所以它不该钉在某一个文件名上，而应钉在**整个路由装配面**上：
+ * 搬家的账由 `ROUTE_FAMILY_SOURCES` 记着，断言跟着那张表走。
+ *
+ * @returns {string} 已归一化换行；文件缺失时**抛**（不安静地少一半）
+ */
+export function routeAssemblySource() {
+  const parts = [readFileSync(SOURCES.server, 'utf8')]
+  for (const { module } of ROUTE_FAMILY_SOURCES) {
+    const p = SOURCES[module]
+    must(existsSync(p), `路由族源文件不存在：${rel(p)}（${module}）—— 源码级断言会安静地少查一半`)
+    parts.push(readFileSync(p, 'utf8'))
+  }
+  return parts.join('\n').replace(/\r\n/g, '\n')
+}
+
+/**
  * ★★★ 列名齐全性：`server.mjs` 的 `createRouter([...])` 装配处是**权威**。
  *
  * 装配里调用了哪些 `createXxxRoutes(`，就必须在 `ROUTE_FAMILY_SOURCES` 里逐个列到，
@@ -807,10 +881,10 @@ export function buildSnapshot() {
     // ★★★ 这个**并集**就是"搬家没搬丢"的真正护栏（见 `MIN_ROUTES` 上方的说明）：
     //   `extractRoutes` 若与源码脱节，这里会**少掉**那部分路由，`diffSnapshots`
     //   便会逐条报 `- 路由: …`。它不依赖任何绝对条数，**剩下 0 条时也成立**。
-    httpRoutes: [
-      ...extractRoutes(server),
-      ...ROUTE_FAMILY_SOURCES.flatMap(({ module }) => extractDeclaredRoutes(readFileSync(SOURCES[module], 'utf8'))),
-    ].sort(),
+    // ★ 走 `platformHttpRoutes()`（**唯一权威**）而不是在这里再拼一次并集：
+    //   2026-09-21 那次 `model-api` 红就是因为有消费方自己拼了一份"只读 server.mjs"
+    //   的取法。同一个集合不能在两个地方各定义一次。
+    httpRoutes: [...platformHttpRoutes()],
     dbTables: extractTables(schemaText),
     taskStatuses: extractStringArray(server, 'STATUSES'),
     taskTransitions: extractTransitions(server, 'TRANSITIONS'),

@@ -250,6 +250,11 @@ const REAL_PATCH = join(REPO, 'runtime', 'dsh-composition', 'legion-host.patch.y
  * 本文件补一个替身好让跨进程那次运行能走完；**真实部署里那个缺口仍在**。
  */
 const REGISTRAR_SRC = `import { setDshRuntimeInputsFactory } from ${JSON.stringify(fileUrl(join(REPO, 'runtime', 'dsh-composition', 'plugins', 'runtime-host-row.mjs')))}
+// ★ 只为**副作用**而 import：真补丁层那一行（legion-enforcement-runtime-host-registrar）
+//   在**模块求值期**就注册了它自己的工厂（runtime-host-registrar-row.mjs:1063）。
+//   ESM 保证被 import 的模块先求值完，所以这一行过后"真注册已经发生"是一个确定的事实，
+//   而不是一个取决于 Loader 并发顺序的赌。下面 unregister 那一步要用它。
+import { unregisterRuntimeHostInputsFactory } from ${JSON.stringify(fileUrl(join(REPO, 'runtime', 'dsh-composition', 'plugins', 'runtime-host-registrar-row.mjs')))}
 import { setRuntimeContractInputsFactory } from ${JSON.stringify(fileUrl(join(REPO, 'runtime', 'dsh-composition', 'plugins', 'runtime-contract-server-row.mjs')))}
 import { REQUIRED_CAPABILITIES } from ${JSON.stringify(fileUrl(join(REPO, 'runtime', 'contracts', 'adapter.mjs')))}
 import { SUPPORTED_RUNTIME } from ${JSON.stringify(fileUrl(join(REPO, 'runtime', 'adapters', 'dsh', 'probe.mjs')))}
@@ -294,6 +299,18 @@ function buildRuntimeHost() {
 /** 权限判定同样是替身：真权威是 lease / 岗位清单，DSH Runtime 进程里两者都不在。 */
 const canReadStub = () => true
 
+// ★★ 确定性地让**本套件的替身**赢，而不是赌谁最后注册。
+//
+//   真补丁层那一行在模块求值期注册了它自己的工厂，而 Loader 用
+//   Promise.allSettled 并发创建所有补丁行 ⇒ "真工厂先、替身后"只在两个模块都不挂起时
+//   碰巧成立。真工厂要 ctx.get('subagents')，而本进程只有脚手架服务（tools / approval /
+//   sandbox）⇒ 它一旦赢，bootstrapDshRuntime 的自检就报 composition-patch-layer 红、
+//   worker 读到 EXECUTOR_SELF_CHECK_INCOMPATIBLE，本套件要测的"跨进程边界"整条读不出来。
+//
+//   上面那次 import 已经保证真注册发生过，unregister 撤掉的正是它那一次
+//   （幂等、且只撤自己那一次，见 runtime-host-row.mjs:243）。于是这里的替身是**唯一**
+//   活着的工厂 —— 读数不再随求值顺序摆动。
+unregisterRuntimeHostInputsFactory()
 setDshRuntimeInputsFactory(() => ({ runtimeHost: buildRuntimeHost(), canRead: canReadStub }))
 
 setRuntimeContractInputsFactory(() => {
@@ -317,24 +334,38 @@ setRuntimeContractInputsFactory(() => {
 })
 `
 
-const HOSTROW_WRAPPER_SRC = `import './prt253ct-registrar.mjs'
-import realRuntimeHostRow from ${JSON.stringify(fileUrl(join(REPO, 'runtime', 'dsh-composition', 'plugins', 'runtime-host-row.mjs')))}
-export default realRuntimeHostRow
+/**
+ * 工厂注册行：**只**注册两个输入工厂，**自己不挂任何产品行**。
+ *
+ * ★★ 为什么不能再像原来那样多挂一份 `runtime-host-row` / `runtime-contract-server-row`：
+ *   真补丁层（`legion-host.patch.yml`）**已经**声明了那两行 ——
+ *   `legion-enforcement-runtime-host-registrar` 的模块是
+ *   `runtime-host-registrar-row.mjs`，而它的 default **就是** `runtimeHostRow` 本体
+ *   （`===`，业主裁决甲有意为之）；`legion-enforcement-runtime-contract-server` 同理。
+ *   于是"夹具再挂一份" = 同一个插件对象被两个 fiber 各 apply 一次 ⇒
+ *   两行都 `ctx.provide` 同一个服务名 ⇒ cordis 当场抛
+ *   `service "legionRuntimeHostBinding" has been registered`，
+ *   或者那一行被报成"已挂载但未激活（等待依赖服务）" ⇒
+ *   `composition-patch-layer` 红 ⇒ 自检不兼容 ⇒ 本套件要测的跨进程边界整条读不出来。
+ *
+ *   > 一个"为了让夹具自足而多挂一份"的写法，
+ *   > 与一个"把产品那一行挤掉"的写法，在只数"行在不在树里"的时候是同一个东西 ——
+ *   > 只不过后者会让服务注册互相打架。
+ *
+ * 本行只做一件事：import 注册方模块（ESM 保证它先求值完）⇒ 两个工厂都已注册。
+ * 产品那两行随后用自己的 default 挂上，并从这两个工厂取输入。
+ */
+const FACTORY_ROW_SRC = `import './prt253ct-registrar.mjs'
+export default {
+  name: 'prt253ct-factory',
+  inject: [],
+  apply() {},
+}
 `
 
-const HOSTROW_PATCH_SRC = `- insert:
-    - id: "legion-runtime-host"
-      name: "./prt253ct-hostrow.mjs"
-`
-
-const SERVERROW_WRAPPER_SRC = `import './prt253ct-registrar.mjs'
-import realServerRow from ${JSON.stringify(fileUrl(join(REPO, 'runtime', 'dsh-composition', 'plugins', 'runtime-contract-server-row.mjs')))}
-export default realServerRow
-`
-
-const SERVERROW_PATCH_SRC = `- insert:
-    - id: ${JSON.stringify('legion-runtime-contract-server')}
-      name: "./prt253ct-serverrow.mjs"
+const FACTORY_ROW_PATCH_SRC = `- insert:
+    - id: "prt253ct-factory"
+      name: "./prt253ct-factory.mjs"
 `
 
 /** 反向对照 C：**产品自己的**那一行模块直接当补丁行挂 = "行交付了、没人注册工厂"。 */
@@ -343,11 +374,15 @@ const SERVERROW_ONLY_PATCH_SRC = `- insert:
       name: ${JSON.stringify(join(REPO, 'runtime', 'dsh-composition', 'plugins', 'runtime-contract-server-row.mjs'))}
 `
 
-/** 反向对照 B：**没有**本行，其余一字不变。 */
-const NO_SERVERROW_PATCH_SRC = `- insert:
-    - id: "prt253ct-placeholder"
-      name: "./prt253ct-services.mjs"
-      disabled: true
+/**
+ * 反向对照 B：把**真补丁层那一行**关掉 —— 它现在才是契约行在树里的唯一来源。
+ *
+ * 原来那个"插一个 disabled 占位行"的写法**不会**让服务消失：契约行还有真补丁层
+ * 那一份在树里，于是 B 读到的是"不挂那一行却读到了服务"。要构造"没有本行"这个处境，
+ * 必须关掉**真那一个 id**。
+ */
+const DISABLE_SERVERROW_PATCH_SRC = `- id: "legion-enforcement-runtime-contract-server"
+  disabled: true
 `
 
 /**
@@ -436,12 +471,10 @@ const SCRATCH_FILES = {
   permissionPatch: ['prt253ct-permission.patch.yml', PERMISSION_PATCH_SRC],
   runtimeRowsPatch: ['prt253ct-runtime-rows.patch.yml', RUNTIME_ROWS_PATCH_SRC],
   registrar: ['prt253ct-registrar.mjs', REGISTRAR_SRC],
-  hostRow: ['prt253ct-hostrow.mjs', HOSTROW_WRAPPER_SRC],
-  hostRowPatch: ['prt253ct-hostrow.patch.yml', HOSTROW_PATCH_SRC],
-  serverRow: ['prt253ct-serverrow.mjs', SERVERROW_WRAPPER_SRC],
-  serverRowPatch: ['prt253ct-serverrow.patch.yml', SERVERROW_PATCH_SRC],
+  factoryRow: ['prt253ct-factory.mjs', FACTORY_ROW_SRC],
+  factoryRowPatch: ['prt253ct-factory.patch.yml', FACTORY_ROW_PATCH_SRC],
   serverRowOnlyPatch: ['prt253ct-serverrow-only.patch.yml', SERVERROW_ONLY_PATCH_SRC],
-  noServerRowPatch: ['prt253ct-no-serverrow.patch.yml', NO_SERVERROW_PATCH_SRC],
+  disableServerRowPatch: ['prt253ct-disable-serverrow.patch.yml', DISABLE_SERVERROW_PATCH_SRC],
   probe: ['prt253ct-probe.mjs', PROBE_SRC],
   probePatch: ['prt253ct-probe.patch.yml', PROBE_PATCH_SRC],
 }
@@ -482,14 +515,14 @@ const SCENARIOS = Object.freeze({
     tag: 'full',
     token: TOKEN,
     waitMs: 25_000,
-    patches: Object.freeze([...BASE_PATCHES, SCRATCH_PATH.hostRowPatch, SCRATCH_PATH.serverRowPatch, SCRATCH_PATH.probePatch]),
+    patches: Object.freeze([...BASE_PATCHES, SCRATCH_PATH.factoryRowPatch, SCRATCH_PATH.probePatch]),
   }),
   /** B：**不挂**契约行，其余一字不变。 */
   noRow: Object.freeze({
     tag: 'norow',
     token: TOKEN,
     waitMs: 8_000,
-    patches: Object.freeze([...BASE_PATCHES, SCRATCH_PATH.hostRowPatch, SCRATCH_PATH.noServerRowPatch, SCRATCH_PATH.probePatch]),
+    patches: Object.freeze([...BASE_PATCHES, SCRATCH_PATH.factoryRowPatch, SCRATCH_PATH.disableServerRowPatch, SCRATCH_PATH.probePatch]),
   }),
   /** C：挂上真模块，但**没有人注册工厂**。 */
   noInputs: Object.freeze({
@@ -503,14 +536,14 @@ const SCENARIOS = Object.freeze({
     tag: 'notoken',
     token: null,
     waitMs: 25_000,
-    patches: Object.freeze([...BASE_PATCHES, SCRATCH_PATH.hostRowPatch, SCRATCH_PATH.serverRowPatch, SCRATCH_PATH.probePatch]),
+    patches: Object.freeze([...BASE_PATCHES, SCRATCH_PATH.factoryRowPatch, SCRATCH_PATH.probePatch]),
   }),
   /** E：令牌配了（与 A 同一个），worker 给**另一个**。 */
   otherToken: Object.freeze({
     tag: 'othertoken',
     token: TOKEN_OTHER,
     waitMs: 25_000,
-    patches: Object.freeze([...BASE_PATCHES, SCRATCH_PATH.hostRowPatch, SCRATCH_PATH.serverRowPatch, SCRATCH_PATH.probePatch]),
+    patches: Object.freeze([...BASE_PATCHES, SCRATCH_PATH.factoryRowPatch, SCRATCH_PATH.probePatch]),
   }),
 })
 

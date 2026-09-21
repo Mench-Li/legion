@@ -343,6 +343,31 @@ export function observeComposition(ctx) {
   // 读错了东西；把它报成"读到零行"会让自检去逐行判未生效，而真因是读错了。
   if (byTreeId.size === 0) return null
 
+  // ★★★ 自指测量：本函数是从**某一行的 `apply` 里**被调用的，而那一行的插件对象
+  //   与补丁层里某一条声明是**同一个**——`legion-enforcement-runtime-host-registrar`
+  //   的 default 就是 `runtimeHostRow` 本体（`runtime-host-registrar-row.mjs:1076`
+  //   的 `===`，业主裁决甲有意为之）。
+  //
+  //   而执行 `apply` 的那个 fiber 在 `apply` 返回**之前**不是 `ACTIVE_FIBER_STATE`
+  //   ⇒ 那一行会把**自己**读成「行已挂载但未激活（等待依赖服务）」，
+  //   而"它的 `apply` 此刻正在执行"本身就是它已挂载的**直接证据**。
+  //
+  //   实测（第 7 轮，`scratch/_r6-probe-root.mjs`，同一份真补丁层 + 真 DSH 进程）：
+  //     · 从**另一行**观察：九条条目**全部** `state=2`、`OBS-ROWS` 全 `true`；
+  //     · 而从 registrar 自己的 `apply` 里观察：它报自己"未激活"。
+  //   ⇒ 那条红是自指的产物，不是"补丁层真的没生效"。
+  //
+  //   后果不是装饰：`composition-patch-layer` 因此（或竞速地）判不生效 ⇒ 启动自检
+  //   `incompatible` ⇒ `autoExecutionForbidden` ⇒ **在所有平台上都禁止自动执行**
+  //   （与 Windows 沙箱那是**另一个**因）。
+  //
+  //   > 一个"让一行证明自己已激活"的检查，
+  //   > 与一个"只有别人能证明它已激活"的检查，在只有它自己读的时候是同一个东西——
+  //   > 只不过前者永远读出"未激活"。
+  const ownFiber = (ctx !== null && typeof ctx === 'object' && ctx.fiber !== undefined && ctx.fiber !== null)
+    ? ctx.fiber
+    : null
+
   const rows = []
   for (const [declaredId, treeId] of declaredToTreeId.entries()) {
     const hit = byTreeId.get(treeId)
@@ -350,7 +375,21 @@ export function observeComposition(ctx) {
       rows.push({ id: declaredId, activated: false, treeId, present: false })
       continue
     }
-    rows.push({ id: declaredId, activated: hit.entry?.fiber?.state === ACTIVE_FIBER_STATE, treeId, present: true })
+    const fiber = hit.entry?.fiber ?? null
+    // 认自己**按对象身份**，不按名字：fiber.name 是插件名（实测 `legion-runtime-host`），
+    // 而树条目 id 是 `legion-enforcement-runtime-host-registrar` —— 两者不同名，
+    // 按名字比会在真进程里静默匹配不上，于是这条修法本身变成装饰。
+    const selfObserved = ownFiber !== null && fiber !== null && fiber === ownFiber
+    rows.push({
+      id: declaredId,
+      // 自指那一行按**已激活**记。它没有放宽任何安全语义：
+      // `apply` 判自检不兼容时仍然是 `provide({ok:false, autoExecutionForbidden:true})`，
+      // 所以"这一行活着"与"强制面允许自动执行"依然是两件事。
+      activated: selfObserved || fiber?.state === ACTIVE_FIBER_STATE,
+      selfObserved,
+      treeId,
+      present: true,
+    })
   }
 
   // preset 表从 `patch-over` 的**靶子**那一条上读。`declaredToTreeId` 里只有一个

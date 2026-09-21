@@ -2111,6 +2111,19 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // PRT-253 / usage-reporting：一次 Run 的 token 用量从**会话投影**读回来。
+      //
+      // 引擎的 `SubagentResult` 契约里没有 usage 字段（逐字读过），所以
+      // `collectUsage(result)` 在真结果上恒返回 null —— 这就是这一项长期是
+      // `false` 的原因。用量确实存在，只是要经 `ctx.sessionProjections` 读，
+      // 归因键是 `SubagentRun.id`（= `SessionId`）。
+      //
+      // ★ 套件的重心不在"能不能读出数字"，而在**读不到时会不会编一个 0**。
+      label: 'dsh-composition-usage-projection（一次 Run 的用量：读不到就是 null，不补 0）',
+      files: ['runtime/dsh-composition/usage-projection.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-601：工具能力描述与风险等级。
       //
       // 这一组盯的**不是**"登记表里有没有那些工具"，而是**风险等级能不能被填低**。
@@ -2549,6 +2562,81 @@ async function stageTest() {
       //   在只有一个空间的那些用例里是同一个东西。*
       label: 'run-identity（PRT-214 续：授权身份按 Run 生效，多空间不错标）',
       files: ['runtime/dsh-composition/run-identity.test.mjs'],
+      cwd: ROOT,
+    },
+    // ══════════════════════════════════════════════════════════════════════════
+    // ★★★★★ 2026-09-21：PRT-316 逐片搬进 `team-hub/routes/*.mjs` 的那一族
+    //   **路由契约测试**，此前**一个都没有登记**。
+    //
+    //   CI 的"套件清单完备性"检查逐条点名了 **34 个** `*.test.mjs`
+    //   （`FAIL 套件清单不完备：34 个 *.test.mjs 不会被任何套件执行`）。
+    //   本批实测那 34 个文件合起来 **527 例、527 通过、0 失败**——
+    //   也就是说它们是**真的断言**，只是一次都没被 CI 跑过。
+    //
+    //   > 一条写在文件里、跑起来全绿、而**没有任何套件会执行它**的断言，
+    //   > 与一条根本不存在的断言，在"它拦住过什么"这个问题上是同一个东西——
+    //   > 只不过前者的作者以为自己写下了保护。
+    //
+    //   ★ 处置选**登记**而不是 `EXEMPT`：豁免一份可执行且能过的证据，
+    //     等于把它降级成一句声明（与 `reveal-open` 那一处的理由逐字相同）。
+    //
+    //   ★ 这 32 个路由文件**同族**（每个 = 一族路由的 HTTP 契约），
+    //     所以合成一个套件跑，而不是各起一次 node —— 后者会让 CI
+    //     多出 30+ 次进程启动，而它们量的是同一件事。
+    //     ⚠️ 但**逐文件列出**、不用通配符：通配符会让"新增一个未登记的
+    //     `-routes.test.mjs`"继续落在这个套件里，而完备性检查之所以有用，
+    //     正是因为它要求**每一个**文件在清单里被点名。
+    // ══════════════════════════════════════════════════════════════════════════
+    {
+      label: 'route-family（PRT-316 逐片搬家：各族路由的 HTTP 契约，32 个文件）',
+      files: [
+        'team-hub/activity-routes.test.mjs',
+        'team-hub/agent-intake-routes.test.mjs',
+        'team-hub/artifact-content-routes.test.mjs',
+        'team-hub/comment-routes.test.mjs',
+        'team-hub/config-routes.test.mjs',
+        'team-hub/content-reads-routes.test.mjs',
+        'team-hub/create-routes.test.mjs',
+        'team-hub/employee-manifests-routes.test.mjs',
+        'team-hub/exec-routes.test.mjs',
+        'team-hub/feedback-heartbeat-routes.test.mjs',
+        'team-hub/goal-lifecycle-routes.test.mjs',
+        'team-hub/goal-slices-routes.test.mjs',
+        'team-hub/members-routes.test.mjs',
+        'team-hub/model-bindings-by-path-routes.test.mjs',
+        'team-hub/model-bindings-routes.test.mjs',
+        'team-hub/model-migration-routes.test.mjs',
+        'team-hub/models-routes.test.mjs',
+        'team-hub/read-models-routes.test.mjs',
+        'team-hub/run-budget-may-switch-model-routes.test.mjs',
+        'team-hub/run-budget-routes.test.mjs',
+        'team-hub/runtime-lease-routes.test.mjs',
+        'team-hub/runtime-verification-routes.test.mjs',
+        'team-hub/skill-source-routes.test.mjs',
+        'team-hub/skills-documents-routes.test.mjs',
+        'team-hub/space-config-routes.test.mjs',
+        'team-hub/space-operations-routes.test.mjs',
+        'team-hub/task-lifecycle-routes.test.mjs',
+        'team-hub/task-records-routes.test.mjs',
+        'team-hub/team-plan-read-routes.test.mjs',
+        'team-hub/team-plans-routes.test.mjs',
+        'team-hub/team-views-routes.test.mjs',
+        'team-hub/web-routes.test.mjs',
+      ],
+      cwd: ROOT,
+    },
+    // 同一次完备性检查里的另外两个（**不是**路由族，各自单独成组）：
+    //   · `mutate-lib` —— 破验量具自己的库（`scratch/mutate.mjs` 的引擎）。
+    //     量具坏了会把"没咬住"读成"咬住了"，所以它自己也要有断言。
+    //   · `sse-tail-guard` —— SSE 尾读守卫。
+    {
+      label: 'mutate-lib（破验量具的引擎：夹具锚点/还原/判定，坏量具会把"没咬住"读成"咬住了"）',
+      files: ['scripts/prt/mutate-lib.test.mjs'],
+      cwd: ROOT,
+    },
+    {
+      label: 'sse-tail-guard（SSE 尾读守卫：读到底是"流结束"还是"断了"必须不同形）',
+      files: ['scripts/prt/sse-tail-guard.test.mjs'],
       cwd: ROOT,
     },
     {

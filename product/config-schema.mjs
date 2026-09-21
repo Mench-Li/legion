@@ -59,6 +59,20 @@ export const CHILD_ENV_NAMES = Object.freeze([
   //   本批两边一起补——本表与清单 `envNames` 的并集必须一致（`scan --check` 判）。
   'LEGION_PATH_SCOPE', 'LEGION_CONNECTOR_DECLARATIONS',
   'LEGION_EXECUTION_SCOPE', 'LEGION_EXTERNAL_API_SCOPE',
+  // ★★★ 2026-09-21 第 112 轮（PRT-603）：**第五道**——岗位许可。
+  //
+  //   它把上面那条纪律又演示了一次，而且这次的代价是**当场可见的**：
+  //   我只把它加进了 `runtime/config-schema.mjs` 的 `fields` 与 runtime 的
+  //   `envNames`，**漏了本表** ⇒ `scan --check` 立刻报
+  //   「未处理字面量（1）：LEGION_EMPLOYEE_PERMIT」。
+  //
+  //   > 一个「登记在 runtime 那一侧、而没登记在这里」的键，
+  //   > 与一个「压根没接线」的键，在**运行期**是同一个东西——
+  //   > 只不过前者的配置表上写着它可用，而子进程永远收不到它。
+  //
+  //   ★ 而这一次的红**不是**"少写一行"，是那份抄本要求的东西：
+  //     本表声明的键必须**恰好等于**清单里两个进程 `envNames` 的并集。
+  'LEGION_EMPLOYEE_PERMIT',
 ])
 
 /** Launcher 从环境读取、但**不属于**产品配置面的键（操作系统必需键，见 allowlist.mjs）。 */
@@ -962,15 +976,28 @@ export const SCHEMA = defineSchema({
     // ── PRT-251 续 ④ 接管**结论**（`launcher.adoptLegacyData()`）─────────
     //
     // `LEGACY_ADOPTION` 是一行汇总（运维最常问的是"这次启动有没有接管"，
-    // 而它不该靠拼四条逐项记录才能答出来）；`LEGACY_ADOPTION_<STATE>` 由
-    // `LEGACY_ADOPTION_${state.toUpperCase()}` 拼出。
+    // 而它不该靠拼四条逐项记录才能答出来）；`LEGACY_ADOPTION_ITEM` 是**逐项**
+    // 那几行回调的码。
     //
-    // ★ `RUNNING` 是**结论还没算出来**那一刻的替身：日志回调在 `runLegacyAdoption()`
-    //   运行**期间**就在跑，而那时 `state` 还不存在。它不是 `ADOPTION_STATES`
-    //   的成员，正是因为它表达的是"还没有状态"——把它登记成状态之一，
-    //   会让"跑着呢"与"跑完了、结果是这个"在读数上同形。
+    // ★★ 这两个码**不是**一开始就长这样，那段历史必须留在这里，因为它是
+    //    同一类错误的一个干净标本。最初的写法是：
+    //
+    //        code: `LEGACY_ADOPTION_${String(adoptionReading?.state ?? 'RUNNING').toUpperCase()}`
+    //
+    //    而那个回调是在 `runLegacyAdoption()` **运行期间**触发的——`adoptionReading`
+    //    在那一刻**必然是 `undefined`**（它正是被这次调用的返回值赋值的）。
+    //    于是逐项那几行**每一行**都叫 `LEGACY_ADOPTION_RUNNING`：一项明明接管成功、
+    //    一项明明失败，码完全一样。
+    //
+    //    > 一个恒为 `RUNNING` 的码不是信息，是让人以为"这里能看出进度"的装饰。
+    //
+    //    这条缺口是被**门禁**咬出来的：`RUNNING` 这个名字以 `_RUNNING` 结尾、
+    //    形如 env 键，于是 `scan --check` 报它未登记。如果当初照着报错把 `RUNNING`
+    //    登记成一个"进度态"了事，那道门禁就从"发现了一个错误码"变成了"给这个错误
+    //    盖章"——**登记一条字面量之前必须先问它是不是对的**。
+    //    （本文件的第一版登记正是这么写的，已按事实改正。）
     'LEGACY_ADOPTION',
-    'RUNNING',
+    'LEGACY_ADOPTION_ITEM',
 
     // ── PRT-251 续：`ports.runtime` 的**权威冲突**（阻塞启动）─────────────
     //
@@ -978,6 +1005,20 @@ export const SCHEMA = defineSchema({
     // `--port` 时产出它。名字是 SCREAMING_SNAKE，但它不是 env 键：
     // 它是一条 **error 级诊断**的码，产品靠它决定"这次启动不许继续"。
     'PORT_AUTHORITY_CONFLICT',
+
+    // ── PRT-251 续批：**同一个形状的另一面**——`--host` ────────────────────
+    //
+    // 与 `PORT_AUTHORITY_CONFLICT` 逐字同理：`runtime.command` 自带 `--host`
+    // 而清单也声明了 `host` 时，两个值来源 ⇒ 「实际生效的是哪一个」取决于
+    // argv 先后。它比端口那一面更隐蔽一点：宿主探测（`ports.mjs` 的 `canBind`）
+    // 按**清单**的 host 走，于是「探测说 127.0.0.1 可用、而进程其实绑在别处」
+    // 是可能的，且外部看不出差别。
+    //
+    // ⚠️ 注意这里**没有** `NO_OPEN_..._CONFLICT` 这种码，而且不该有：
+    // `--no-open` 是**开关**，用户自己那条命令里已经有它时我们**跳过**、
+    // **不报错**（重复一个开关不是两个答案，是同一个断言说了两遍）。
+    // 把开关也按值旗标处理，会因为用户写了一句"不要开浏览器"就拒绝启动。
+    'HOST_AUTHORITY_CONFLICT',
 
     // `product/launcher/tray-wiring.mjs` 的 `iconNoticeOf()` 在一份探测读数
     // 连 `code` 都没有时的兜底文案。它不是诊断码，是一个**占位**——

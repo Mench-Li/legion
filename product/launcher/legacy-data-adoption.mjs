@@ -131,12 +131,24 @@ export function kindOfFragment(fragment) {
  * 安装目录内**」）。所以 `dataDir/team-hub/team.db` 的旧落点是
  * `installDir/team-hub/team.db`——**同一条片段**，不需要第二张表。
  *
- * @param {{ dataPathEnv: Record<string, Record<string, string>> }} args
+ * @param {{ dataPathEnv: Record<string, Record<string, string>>, processes?: Iterable<string>|null }} args
  * @returns {ReadonlyArray<{process: string, env: string, fragment: string, kind: string}>}
  */
-export function adoptionItems({ dataPathEnv }) {
+export function adoptionItems({ dataPathEnv, processes = null }) {
+  // ★ `processes` 是**受限启动范围**（`--include`）。语义：
+  //   **只为这次真的要启动的进程接管它的数据。**
+  //
+  //   这不是优化，是正确性。否则 `--include=runtime` 那种"我只想试试把 DSH
+  //   起起来"的启动会顺手把 team-hub 的库接走——而接管是**一次性的快照**
+  //   （目标存在即永远跳过），于是那次试运行把唯一一次接管机会用掉了，
+  //   而且是在旧 hub 还在写那个库的时候。
+  //
+  //   `null` 表示"不设范围"（全量），与"空集合"是两件事：
+  //   前者是"没告诉我要启动哪些"，后者是"一个都不启动"。
+  const scope = processes === null || processes === undefined ? null : new Set(processes)
   const items = []
   for (const [process, mapping] of Object.entries(dataPathEnv ?? {})) {
+    if (scope !== null && !scope.has(process)) continue
     for (const [env, fragment] of Object.entries(mapping)) {
       items.push(Object.freeze({ process, env, fragment, kind: kindOfFragment(fragment) }))
     }
@@ -170,12 +182,12 @@ function verdictOf(item, code, message, extra = {}) {
  * @param {(p: string) => boolean} [args.exists]
  * @returns {{ok: boolean, items: ReadonlyArray<object>, counts: object}}
  */
-export function planAdoption({ layout, dataPathEnv, exists = existsSync } = {}) {
+export function planAdoption({ layout, dataPathEnv, processes = null, exists = existsSync } = {}) {
   const platform = layout?.platform ?? process.platform
   const items = []
   const dataDir = layout?.dataDir ?? null
 
-  for (const item of adoptionItems({ dataPathEnv })) {
+  for (const item of adoptionItems({ dataPathEnv, processes })) {
     const { source, target } = adoptionPathsFor({ layout, item, platform })
 
     if (typeof dataDir !== 'string' || dataDir === '') {
@@ -328,16 +340,21 @@ export function copyTree({ source, target, fs = { existsSync, mkdirSync, readdir
  * `openDatabase` 默认惰性加载 `node:sqlite`——**不在模块顶层 import**：
  * 那份内建模块在 Node 22 之前不存在，而本模块在 `--check` / 计划路径上
  * 也要能被加载（"加载即崩"会让"没有旧库"这件事长得像"接管功能坏了"）。
+ *
+ * `processes` 是受限启动范围（`--include`），见 `adoptionItems()`。
  */
 export async function adoptLegacyData({
   layout,
   dataPathEnv,
+  processes = null,
   plan = null,
   openDatabase = null,
   fs = null,
   log = null,
 } = {}) {
-  const resolvedPlan = plan ?? planAdoption({ layout, dataPathEnv, exists: fs?.existsSync ?? existsSync })
+  const resolvedPlan = plan ?? planAdoption({
+    layout, dataPathEnv, processes, exists: fs?.existsSync ?? existsSync,
+  })
   const results = []
   const dataDir = layout?.dataDir ?? null
 

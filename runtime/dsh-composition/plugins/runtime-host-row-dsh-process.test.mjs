@@ -274,8 +274,8 @@ const RUNTIME_ROWS_PATCH_SRC = `- insert:
  * ⚠️ 端口是**替身**：`probeRuntime` 的版本与能力由 `REQUIRED_CAPABILITIES` 推导，
  * 不是任何一台真引擎报出来的。
  */
-const HOST_ROW_WRAPPER_SRC = `import { setDshRuntimeInputsFactory } from ${JSON.stringify(fileUrl(RUNTIME_HOST_ROW_ABS))}
-import realRuntimeHostRow from ${JSON.stringify(fileUrl(RUNTIME_HOST_ROW_ABS))}
+const FACTORY_ROW_SRC = `import { setDshRuntimeInputsFactory } from ${JSON.stringify(fileUrl(RUNTIME_HOST_ROW_ABS))}
+import { unregisterRuntimeHostInputsFactory } from ${JSON.stringify(fileUrl(join(HERE, 'runtime-host-registrar-row.mjs')))}
 import { REQUIRED_CAPABILITIES } from ${JSON.stringify(fileUrl(CONTRACTS_ABS))}
 import { SUPPORTED_RUNTIME } from ${JSON.stringify(fileUrl(PROBE_ABS))}
 
@@ -298,13 +298,26 @@ const host = {
 }
 
 const runtimeHostInputs = { runtimeHost: host, canRead: () => true }
+// ★★ 确定性地让**本套件的替身**赢，而不是赌谁最后注册。
+//   真补丁层那一行（legion-enforcement-runtime-host-registrar）的模块 default
+//   **就是** runtimeHostRow 本体（===，业主裁决甲有意为之），它在**模块求值期**
+//   注册了自己的工厂；而 Loader 用 Promise.allSettled 并发创建所有补丁行
+//   ⇒ "真工厂先、替身后"只碰巧成立。真工厂要 ctx.get('subagents') 并读真能力表
+//   （三项写死未确认）⇒ 它一赢，自检就报 runtime-probe 红、宿主端口不注册。
+//   上面那次 import 保证真注册已经发生，unregister 撤掉的正是它那一次
+//   （幂等、只撤自己那一次），于是这里装的替身是**唯一**活着的工厂。
+unregisterRuntimeHostInputsFactory()
 setDshRuntimeInputsFactory(() => runtimeHostInputs)
 
-export default realRuntimeHostRow
+// ★ 本行**只**注册工厂，**不挂任何产品行** —— 真补丁层那一行自己就是宿主行。
+//   原来这里 export 的是 realRuntimeHostRow，于是同一个插件对象被挂两次
+//   （真补丁层的 registrar 行 + 本行），两行都 ctx.provide 同一个服务名
+//   ⇒ cordis 当场抛 service "legionRuntimeHostBinding" has been registered。
+export default { name: 'prt253rt-factory', inject: [], apply() {} }
 `
 
-const HOST_ROW_PATCH_SRC = `- insert:
-    - id: "legion-runtime-host"
+const FACTORY_ROW_PATCH_SRC = `- insert:
+    - id: "prt253rt-factory"
       name: "./prt253rt-hostrow.mjs"
 `
 
@@ -316,10 +329,8 @@ const HOST_ROW_ONLY_PATCH_SRC = `- insert:
 `
 
 // 反向对照 B 用：**没有**本行，其余一字不变。
-const NO_HOST_ROW_PATCH_SRC = `- insert:
-    - id: "prt253rt-placeholder"
-      name: "./prt253rt-services.mjs"
-      disabled: true
+const DISABLE_HOSTROW_PATCH_SRC = `- id: "legion-enforcement-runtime-host-registrar"
+  disabled: true
 `
 
 /**
@@ -457,16 +468,21 @@ const RECONCILE_PROBE_PATCH_SRC = `- insert:
 
 const REAL_PATCH = join(COMPOSITION, 'legion-host.patch.yml')
 
+const ROOT_ROW_ONLY_PATCH_SRC = `- insert:
+    - id: "legion-enforcement-root"
+      name: ${JSON.stringify(join(ROOT_DIR, 'team-hub', 'approval-registrar-row.mjs'))}
+`
+
 const SCRATCH_FILES = {
   services: ['prt253rt-services.mjs', SERVICES_SRC],
   servicesPatch: ['prt253rt-services.patch.yml', SERVICES_PATCH_SRC],
   permission: ['prt253rt-permission.mjs', PERMISSION_SRC],
   permissionPatch: ['prt253rt-permission.patch.yml', PERMISSION_PATCH_SRC],
   runtimeRowsPatch: ['prt253rt-runtime-rows.patch.yml', RUNTIME_ROWS_PATCH_SRC],
-  hostRow: ['prt253rt-hostrow.mjs', HOST_ROW_WRAPPER_SRC],
-  hostRowPatch: ['prt253rt-hostrow.patch.yml', HOST_ROW_PATCH_SRC],
+  factoryRow: ['prt253rt-hostrow.mjs', FACTORY_ROW_SRC],
+  factoryRowPatch: ['prt253rt-hostrow.patch.yml', FACTORY_ROW_PATCH_SRC],
   hostRowOnlyPatch: ['prt253rt-hostrow-only.patch.yml', HOST_ROW_ONLY_PATCH_SRC],
-  noHostRowPatch: ['prt253rt-no-hostrow.patch.yml', NO_HOST_ROW_PATCH_SRC],
+  disableHostRowPatch: ['prt253rt-no-hostrow.patch.yml', DISABLE_HOSTROW_PATCH_SRC],
   probe: ['prt253rt-probe.mjs', PROBE_SRC],
   probePatch: ['prt253rt-probe.patch.yml', PROBE_PATCH_SRC],
   reconcileProbe: ['prt253rt-reconcile.mjs', RECONCILE_PROBE_SRC],
@@ -545,14 +561,14 @@ describe('PRT-253：`bindDshRuntime` 的生产调用方在**真 DSH 进程**里�
   guarded('A. ★★★ 本行挂上：worker 自己的 `productionExecutorProvider()` **不再**报缺端口', (t) => {
     const r = runDsh({
       tag: 'a',
-      patches: [...BASE_PATCHES, SCRATCH_PATH.hostRowPatch, SCRATCH_PATH.probePatch],
+      patches: [...BASE_PATCHES, SCRATCH_PATH.factoryRowPatch, SCRATCH_PATH.probePatch],
     })
 
     assert.equal(r.spawnError, null)
     // 真补丁层（含 root 行）装配成功 + 本行绑定成功 ⇒ 进程正常收尾。
     assert.equal(r.code, 0, `期望装配成功：\n${r.stderr}`)
     assert.match(r.stderr, /^RUNTIME-HOST-FACTORY-INSTALLED$/m, r.stderr)
-    assert.match(r.stderr, /^SERVICES-PROVIDED tools,approval,sandbox$/m, r.stderr)
+    assert.match(r.stderr, /^SERVICES-PROVIDED tools,approval,sandbox,subagents$/m, r.stderr)
     // 组合树对账是**真的**全过了：那条 patch-over 打到了靶子（否则自检会拒）。
     assert.match(r.stderr, /^PERMISSION-STANDIN-APPLY-RAN$/m, r.stderr)
     // 本行没有被 DSH 判为"没激活"。
@@ -579,7 +595,7 @@ describe('PRT-253：`bindDshRuntime` 的生产调用方在**真 DSH 进程**里�
   guarded('B. ★★★ 反向对照：**不挂本行**（其余一字不变）→ 两个读数都反转', (t) => {
     const r = runDsh({
       tag: 'b',
-      patches: [...BASE_PATCHES, SCRATCH_PATH.noHostRowPatch, SCRATCH_PATH.probePatch],
+      patches: [...BASE_PATCHES, SCRATCH_PATH.disableHostRowPatch, SCRATCH_PATH.probePatch],
     })
 
     assert.equal(r.spawnError, null)
@@ -599,7 +615,22 @@ describe('PRT-253：`bindDshRuntime` 的生产调用方在**真 DSH 进程**里�
   guarded('C. ★★ 本行挂上、但**没有人注册端口** → 真进程里具名拒绝（进程照常起来，端口没绑上）', (t) => {
     const r = runDsh({
       tag: 'c',
-      patches: [...BASE_PATCHES, SCRATCH_PATH.hostRowOnlyPatch, SCRATCH_PATH.probePatch],
+      // ★★★ 必须**同时**关掉真补丁层里那个注册方（`disableHostRowPatch`），否则这一条
+      //   测的不是它自己声称的那件事——实测报的是
+      //   `service "legionRuntimeHostBinding" has been registered`。
+      //
+      //   为什么：`legion-enforcement-runtime-host-registrar` 的模块 default **就是**
+      //   `runtimeHostRow` 本体（`===`，业主裁决甲），而本场景又 insert 了一份指向
+      //   **同一个模块**的行 ⇒ 同一个插件对象被两个 fiber 各 apply 一次 ⇒
+      //   两行都 `ctx.provide('legionRuntimeHostBinding')` ⇒ cordis 当场抛。
+      //
+      //   > 一个"行交付了、没有人注册端口"的场景，与一个"两行抢同一个服务名"的场景，
+      //   > 在只数"那一行在不在树里"的时候是同一个东西——只不过后者报的错
+      //   > 与"没有人注册工厂"毫无关系。
+      //
+      //   B 场景用的是同一个 `disable` 补丁，所以这一跳与 A/B 的差别仍然只有**一个变量**：
+      //   A 有工厂行、B 关掉整行、C 关掉注册方但把组件本体当模块挂上。
+      patches: [...BASE_PATCHES, SCRATCH_PATH.disableHostRowPatch, SCRATCH_PATH.hostRowOnlyPatch, SCRATCH_PATH.probePatch],
     })
 
     assert.equal(r.spawnError, null)
@@ -660,7 +691,7 @@ describe('PRT-253：`bindDshRuntime` 的生产调用方在**真 DSH 进程**里�
   guarded('E. ★★★ 真补丁层 + 靶子替身 → 自检**判生效**（`effective=true`、`reasons=[]`）', (t) => {
     // 与 A 用的是同一份 BASE_PATCHES：真 `legion-host.patch.yml`、真注册方、
     // 真运行期两行由组合根在进程内挂载。加一个对账探针，把**判决**读出来。
-    const r = runDsh({ tag: 'e', patches: [...BASE_PATCHES, SCRATCH_PATH.hostRowPatch, SCRATCH_PATH.reconcileProbePatch] })
+    const r = runDsh({ tag: 'e', patches: [...BASE_PATCHES, SCRATCH_PATH.factoryRowPatch, SCRATCH_PATH.reconcileProbePatch] })
     assert.equal(r.spawnError, null)
     assert.equal(r.code, 0, `期望装配成功：\n${r.stderr}`)
     assert.match(r.stderr, /^RECONCILE-PROBE-DONE$/m, `对账探针没跑完：\n${r.stderr}`)
@@ -756,7 +787,7 @@ describe('PRT-253：`bindDshRuntime` 的生产调用方在**真 DSH 进程**里�
         SCRATCH_PATH.servicesPatch,
         REAL_PATCH,
         SCRATCH_PATH.runtimeRowsPatch,
-        SCRATCH_PATH.hostRowPatch,
+        SCRATCH_PATH.factoryRowPatch,
         SCRATCH_PATH.probePatch,
       ],
     })
@@ -897,7 +928,7 @@ describe('PRT-253：`bindDshRuntime` 的生产调用方在**真 DSH 进程**里�
     const r = runDsh({
       tag: 'j',
       bundles: ['@deepseek-ai/dsh-base'],
-      patches: [REAL_PATCH, SCRATCH_PATH.hostRowPatch, SCRATCH_PATH.reconcileProbePatch],
+      patches: [REAL_PATCH, SCRATCH_PATH.factoryRowPatch, SCRATCH_PATH.reconcileProbePatch],
     })
     assert.equal(r.spawnError, null)
 

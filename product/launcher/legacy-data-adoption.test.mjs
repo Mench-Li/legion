@@ -388,8 +388,24 @@ test('⑬ ★★★ Launcher：有旧数据却接不成就**拒绝启动**，而
     // ★ 先证明**体检本身是过的**。否则"start 失败了"这句话可能只是在说
     //   体检挡住了，而接管那一条根本没被执行到——那是本套件里最容易
     //   假装成证据的一种绿。
+    //
+    // ★ `include: ['team-hub']` 不是随手加的：接管**按启动范围**发生
+    //   （见 `adoptionItems()` 的 `processes`）。`include: []` 是"一个进程都不启"，
+    //   那时不该接管任何人的数据——于是这条用例会**绕过**它要验的那条路，
+    //   然后以"start 成功了"的样子变红（或者更坏：被别人放宽判据后变绿）。
+    //   要验"接不成 ⇒ 拒绝启动"，就必须让那个数据的主人在范围内。
+    //
+    // ★ 端口用 `ports` 挪开、并显式 `allowPortInUse`：本机真实跑着旧 team-hub
+    //   （占 8787），而这条用例**不是**在验端口。让它去撞一个别人正在用的端口，
+    //   会让"体检没过"和"接管拒绝了"混成同一个红——那样这条用例就不再
+    //   是在验接管了。
     const L = createLauncher({
-      layout: f.layout, include: [], exists: () => true, runtimeCommand: 'node runtime.mjs',
+      layout: f.layout,
+      include: ['team-hub'],
+      ports: { 'team-hub': 0 },
+      allowPortInUse: ['team-hub'],
+      exists: () => true,
+      runtimeCommand: 'node runtime.mjs',
     })
     const pre = await L.preflight()
     assert.equal(pre.ok, true,
@@ -456,6 +472,166 @@ test('⑭ ★★ Launcher：`adoptLegacyData({dryRun:true})` 只算不写', asyn
     // 诊断里必须有那一行总结（否则"这次接管了没有"要靠拼四条逐项记录）
     assert.ok(L.allDiagnostics().some((d) => d.code === 'LEGACY_ADOPTION'),
       `诊断里没有接管总结：${JSON.stringify(L.allDiagnostics().map((d) => d.code))}`)
+    await L.stop({ graceMs: 50 })
+  } finally { f.done() }
+})
+
+// ============================================================================
+// PRT-251 续 ④：接管**按启动范围**发生（`--include`）
+//
+// 这一组的存在理由是一句话：接管是一次性快照（目标存在即永远跳过），
+// 所以「我只是想把 runtime 起起来看看」不该顺手把 team-hub 的库接走。
+// ============================================================================
+
+test('㉗ ★★★ 纯计划：`processes` 只放行范围内的进程（否则试运行会烧掉唯一一次接管）', async () => {
+  const { adoptionItems, planAdoption } = await import('./legacy-data-adoption.mjs')
+  const { DATA_PATH_ENV } = await import('./launcher.mjs')
+
+  const all = adoptionItems({ dataPathEnv: DATA_PATH_ENV })
+  assert.ok(all.some((i) => i.process === 'team-hub'), '全量范围里居然没有 team-hub')
+
+  // `--include=runtime`：范围内没有 team-hub ⇒ 一项都不该出现。
+  // 不是"跳过"，是"根本不在计划里"——两者的区别是后者不会报 TARGET_EXISTS，
+  // 于是"这次没接管"不会被误读成"早就接管过了"。
+  const scoped = adoptionItems({ dataPathEnv: DATA_PATH_ENV, processes: ['runtime'] })
+  assert.equal(scoped.length, 0, `runtime 范围内不该有可接管的落点：${JSON.stringify(scoped)}`)
+
+  // 反面控制：范围内**有** team-hub 时照常列出来。
+  const withHub = adoptionItems({ dataPathEnv: DATA_PATH_ENV, processes: ['runtime', 'team-hub'] })
+  assert.ok(withHub.some((i) => i.process === 'team-hub'), '范围里有 team-hub 却没列出来')
+
+  // ★ `null`（不设范围）与 `[]`（一个都不启）是两件事
+  assert.notEqual(
+    adoptionItems({ dataPathEnv: DATA_PATH_ENV, processes: null }).length,
+    adoptionItems({ dataPathEnv: DATA_PATH_ENV, processes: [] }).length,
+    '「没告诉我要启动哪些」与「一个都不启动」被当成了同一件事',
+  )
+  assert.equal(adoptionItems({ dataPathEnv: DATA_PATH_ENV, processes: [] }).length, 0)
+})
+
+test('㉘ ★★★ Launcher：`--include=runtime` **不接管** team-hub 的库（真旧库在，也不动）', async () => {
+  const { createLauncher } = await import('./launcher.mjs')
+  const f = launcherFixture('launcher-scoped')
+  try {
+    // 布置一份**真的**旧库（可接管的那种）——这样"没接管"不可能是
+    // "因为没有东西可接"造成的。
+    const legacyDir = join(f.layout.installDir, 'team-hub')
+    mkdirSync(legacyDir, { recursive: true })
+    const db = new DatabaseSync(join(legacyDir, 'team.db'))
+    db.exec('CREATE TABLE t (n INTEGER)')
+    db.exec('INSERT INTO t (n) VALUES (1)')
+    db.close()
+
+    const L = createLauncher({
+      layout: f.layout, include: ['runtime'], exists: () => true, runtimeCommand: 'node runtime.mjs',
+    })
+    // 先用**全量**计划证明"确实有东西可接"——否则下面那句"没接管"是空的。
+    const full = await L.adoptLegacyData({ dryRun: true })
+    assert.equal(full.counts.adoptable, 1, '全量计划里没有可接管的项，这条用例验不到范围')
+
+    // 再按启动范围真跑一次。
+    const scoped = await L.adoptLegacyData({ processes: ['runtime'] })
+    assert.equal(scoped.state, ADOPTION_STATES.NOTHING, `范围内不该接管，实际：${scoped.state}`)
+    assert.equal(scoped.counts.adopted, 0)
+
+    // ★ 最要紧的一格：**盘上真的什么都没写**。
+    //   只断 state 的话，一个"照抄了但错报了状态"的实现照样绿。
+    assert.equal(existsSync(join(f.layout.dataDir, 'team-hub', 'team.db')), false,
+      '--include=runtime 却把 team-hub 的库接走了——一次性快照被一次试运行烧掉了')
+
+    // 受限范围必须在诊断里**说出来**，否则"接管 0"看起来像"什么都没查"
+    const summary = L.allDiagnostics().find((d) => d.code === 'LEGACY_ADOPTION')
+    assert.ok(summary, '没有接管总结')
+    assert.match(summary.message, /只覆盖启动范围内的进程/, `总结没说范围：${summary.message}`)
+    await L.stop({ graceMs: 50 })
+  } finally { f.done() }
+})
+
+test('㉙ ★★ 受限那次**不许**污染全量读数（记忆化只记无范围的那一次）', async () => {
+  const { createLauncher } = await import('./launcher.mjs')
+  const f = launcherFixture('launcher-memo')
+  try {
+    const legacyDir = join(f.layout.installDir, 'team-hub')
+    mkdirSync(legacyDir, { recursive: true })
+    const db = new DatabaseSync(join(legacyDir, 'team.db'))
+    db.exec('CREATE TABLE t (n INTEGER)')
+    db.close()
+
+    const L = createLauncher({
+      layout: f.layout, include: [], exists: () => true, runtimeCommand: 'node runtime.mjs',
+    })
+    // 先来一次受限的（它什么都不会接）
+    const scoped = await L.adoptLegacyData({ processes: ['runtime'] })
+    assert.equal(scoped.state, ADOPTION_STATES.NOTHING)
+
+    // 再来一次全量：**必须**仍然看到"有一项可接管"。
+    // 受限那次若被记忆化，这里会读到那份空读数，
+    // 于是真正的第一次全量启动会以为无事可做——那不是幂等，是数据丢失。
+    const real = await L.adoptLegacyData()
+    assert.equal(real.state, ADOPTION_STATES.ADOPTED,
+      '受限那次把全量读数覆盖了——真正的启动会以为无事可做')
+    assert.equal(existsSync(join(f.layout.dataDir, 'team-hub', 'team.db')), true)
+    await L.stop({ graceMs: 50 })
+  } finally { f.done() }
+})
+
+test('㉚ ★★★ 端到端：以 runtime 为启动范围时，`start()` 之后盘上仍然没有 team-hub 的库', async () => {
+  const { createLauncher } = await import('./launcher.mjs')
+  const f = launcherFixture('launcher-start-scoped')
+  try {
+    const legacyDir = join(f.layout.installDir, 'team-hub')
+    mkdirSync(legacyDir, { recursive: true })
+    const db = new DatabaseSync(join(legacyDir, 'team.db'))
+    db.exec('CREATE TABLE t (n INTEGER)')
+    db.close()
+
+    // ★ 这条用例走的是 `start()` **本身**，不是 `adoptLegacyData()`：
+    //   `--include` 到底有没有被传给接管，只有这一条能答。
+    //   直接调 `adoptLegacyData({processes})` 是在验那个参数管不管用，
+    //   不是在验**启动路径**有没有把范围交下去——两件事，
+    //   而后者才是"用户加 --include 时会发生什么"。
+    //
+    // ★ `allowPortInUse` 是**必需**的，不是省事：本机 3080 上跑着用户那个 DSH，
+    //   而 runtime 的缺省端口正是 3080。不加它，体检会在 `ports` 阶段就失败，
+    //   `start()` 根本走不到接管——于是这条用例会**因为一个与它无关的原因**
+    //   通过（"盘上没写"是因为什么都没跑），而它看起来完全一样。
+    //   下面的 `pre.ok` 与"接管真的跑过"两条断言就是为此加的：破坏性验证
+    //   第一次跑时，正是这条用例以 0 条变红暴露了那个假绿。
+    const L = createLauncher({
+      layout: f.layout,
+      include: ['runtime'],
+      allowPortInUse: ['runtime'],
+      // 覆盖层那道闸也要关掉，理由与 `allowPortInUse` 同：
+      // 它在**体检阶段**就会挡住，而这条用例验的是接管。
+      // 让一条用例因为几件无关的事之一而变红/变绿，等于它什么都没验。
+      //
+      // ⚠️ 这里**没有** `enforcementIdentity: false` 这种开关——
+      // 身份不是 Launcher 的入参，是从产品配置解析出来的
+      // （`resolveEnforcementIdentity`）。写一个不存在的选项不会报错、
+      // 也不会生效，只会让读代码的人以为"身份已经关掉了"。
+      enforcementOverlay: false,
+      exists: () => true,
+      runtimeCommand: 'node runtime.mjs',
+    })
+    const pre = await L.preflight()
+    assert.equal(pre.ok, true,
+      `体检没过，这条用例就走不到接管：${JSON.stringify(pre.diagnostics.map((d) => d.code))}`)
+
+    await L.start()   // 起不起得来不重要——接管的位置在 spawn **之前**
+
+    // ★ 先证明接管**真的执行过**。否则"盘上没写"可能只是"start 早就退了"，
+    //   而那与"范围生效了"在盘上是同一个读数。
+    assert.ok(L.allDiagnostics().some((d) => d.code === 'LEGACY_ADOPTION'),
+      'start() 根本没走到接管——这条用例没验到任何东西')
+
+    assert.equal(existsSync(join(f.layout.dataDir, 'team-hub', 'team.db')), false,
+      'start() 没把启动范围交给接管：一次 --include=runtime 的试运行把库接走了')
+
+    // 反面控制：同一个 Launcher 换成全量范围就会真的接（否则上面那条
+    // 可能只是因为"接管根本没跑"而绿）。
+    const full = await L.adoptLegacyData()
+    assert.equal(full.state, ADOPTION_STATES.ADOPTED)
+    assert.equal(existsSync(join(f.layout.dataDir, 'team-hub', 'team.db')), true)
     await L.stop({ graceMs: 50 })
   } finally { f.done() }
 })

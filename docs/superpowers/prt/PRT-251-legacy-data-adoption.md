@@ -133,6 +133,45 @@ start() → 日志 → 单实例锁 → 上一次残留 → preflight()
 | `scripts/ci/run-ci.mjs` | 新套件登记 |
 | `scratch/probe-adoption-live.mjs` | **新增**只读探针（对**真**旧库跑，本文 §3 的读数来自它） |
 
+### 5.5 ★ 接管**按启动范围**发生（`--include`）——后续批补上的
+
+上面 §5.2 说接管的位置是「`preflight()` 之后、spawn 之前」，并说那是位置的全部理由。
+那个说法**漏了一半**：位置对，但范围当时是"全量"——于是
+
+> `--include=runtime`（「我只想把 DSH 起起来看看」）
+> 会顺手把 team-hub 的库接走。
+
+而接管是**一次性快照**（目标存在即永远跳过，见 §4 第一条不变量），
+所以那样一次试运行会把唯一一次接管机会用掉，
+而且是在旧 hub **还在写那个库**的时候。
+
+修法：`adoptionItems()` / `planAdoption()` / `adoptLegacyData()` 都接受
+`processes`（启动范围），`start()` 传 `includedKeys`：
+
+```
+接管项 = DATA_PATH_ENV 里那些「拥有者进程 ∈ 本次启动范围」的项
+```
+
+`null`（不设范围）与 `[]`（一个都不启动）是**两件事**：前者是"没告诉我要启动哪些"，
+后者是"一个都不启动"。用例 ㉗ 把这条差别单独钉住。
+
+★ 还有一格**必须**单独说：受限那一次**不许**写进记忆化。
+
+```js
+if (!scoped) adoptionReading = reading
+```
+
+否则一次 `--include=runtime` 会把「这个 Launcher 的接管读数」替换成
+「我这次没看 team-hub」，于是随后一次真正的全量启动读到那份**空**读数，
+并据此认为无事可做。那不是幂等，是记忆化把范围问题变成了数据问题（用例 ㉙）。
+
+### 5.6 实现坐标（追加）
+
+| 文件 | 改动 |
+| --- | --- |
+| `product/launcher/legacy-data-adoption.mjs` | `adoptionItems`/`planAdoption`/`adoptLegacyData` 接受 `processes` |
+| `product/launcher/launcher.mjs` | `start()` 传 `includedKeys`；`adoptLegacyData({dryRun, processes})`；**受限那次不写记忆化**；总结诊断里报出范围 |
+
 ## 6 复现与核对（**机器判据**）
 
 ```bash
@@ -180,6 +219,33 @@ $env:MUTATE_ONLY='㉑,㉒,㉓,㉔,㉕,㉖'; node scratch/mutate.mjs
 不把 `expect` 放宽到"随便红一条就算咬住"——那会把"整个文件加载失败"
 也算成一次成功的破坏性验证。
 
+### 6.2 范围那几条的破坏性验证（追加）
+
+```bash
+$env:MUTATE_ONLY='㉞,㉟,㊱'; node scratch/mutate.mjs
+```
+
+| 变异 | 期望变红 |
+| --- | --- |
+| ㉞ `start()` 不再把 `--include` 交给接管 | ㉚（端到端） |
+| ㊱ 接管忽略 `processes` | ㉗（纯计划） |
+| ㊲ 受限那次也写记忆化 | ㉙ |
+
+㉞ 是这三条里最要紧的：另外两条验的是"那个参数管不管用"，
+而它验的是**启动路径有没有把范围交下去**——也就是用户加 `--include` 时
+实际会发生什么。直接调 `adoptLegacyData({processes})` 的用例答不了这个问题。
+
+★ 而 ㉞ 第一次跑出的是 **0 条变红**，暴露了用例 ㉚ 的**假绿**：
+本机 3080 上跑着用户的 DSH，而 runtime 的缺省端口就是 3080 ⇒ 体检在 `ports`
+阶段就失败 ⇒ `start()` **根本走不到接管** ⇒ "盘上没写"成立，
+但它与"范围生效了"毫无关系。
+
+> 一条"因为什么都没跑所以盘上没写"的用例，
+> 与一条"因为范围生效所以盘上没写"的用例，在盘上是同一个读数。
+
+修法三处一起加，这个形状才不会回来：`allowPortInUse`，
+断言 `pre.ok === true`，以及断言接管**真的执行过**（`LEGACY_ADOPTION` 诊断存在）。
+
 ## 7 诚实边界
 
 1. **没有起过一个由 Launcher 完整启动的部署**（用户在跑的 DSH 在 3080 上，
@@ -201,5 +267,8 @@ $env:MUTATE_ONLY='㉑,㉒,㉓,㉔,㉕,㉖'; node scratch/mutate.mjs
 6. **白板的三个落点在本机全都不存在**（`whiteboard/whiteboard.db`、
    `rooms`、`audit` 都没有），所以那三项走的是 `SOURCE_MISSING`；
    目录递归拷贝由 ⑧ 用**造的**目录验，不是真机数据。
-7. 本批**不主张**新建任务号：它是 PRT-251 的续篇，与 `PRT-214`/`PRT-253`
+7. **范围是按"拥有者进程"切的**，而一个落点的拥有者是 `DATA_PATH_ENV`
+   那张表说的。若将来某个进程**读**另一个进程的库（今天没有），
+   "按拥有者切"就不再等于"按读者切"了——那时这个假设要重新审。
+8. 本批**不主张**新建任务号：它是 PRT-251 的续篇，与 `PRT-214`/`PRT-253`
    的续篇同例。

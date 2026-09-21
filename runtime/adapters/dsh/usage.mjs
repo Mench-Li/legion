@@ -108,6 +108,80 @@ export function collectUsage(result, options = {}) {
 }
 
 /**
+ * 从**会话投影**取一次 Run 的用量（`collectUsage()` 读不到时的第二来源）。
+ *
+ * ## 为什么需要第二条路
+ *
+ * `collectUsage(result)` 读 `result.usage` / `tokenUsage` / `tokens`——而 DSH 的
+ * `SubagentResult` 契约里**一个都没有**（逐字读过）。所以它在真结果上恒返回 `null`，
+ * 预算闸门因此永远拿不到 token 数。
+ *
+ * 而用量是**存在的**：DSH 把每条 `assistant/message` 的 provider 上报计数写进会话日志，
+ * 经 `sessionProjections` 可读（见 `runtime/dsh-composition/usage-projection.mjs`）。
+ * 归因键是 `SubagentRun.id`（= `SessionId`），由端口如实带回来。
+ *
+ * ## 三条不许越过的线
+ *
+ *   ① **读不到就是 `null`**，不补 0。本文件上面那一整段注释说的就是这件事，
+ *      在这里破例等于明知故犯：`0` 是一个测量结论（"一个 token 都没花"）。
+ *   ② **费用只有一处算术**：仍然是本文件的 `estimateCostUsd()`。投影只给计数，
+ *      乘价目表这一步不搬第二遍——"按两份算术算出两个数"的失败形态
+ *      是预算闸门与报表各说各话，两者都看起来正常。
+ *   ③ **不抛**：用量是可选信息。读不到（服务缺席 / 归因键缺失 / 投影没注册）
+ *      一律归成 `null`，并让调用方按具名码读到"为什么读不到"。
+ *
+ * @param {{host?: object, sessionId?: string|null, model?: string|null, pricing?: object}} args
+ * @returns {object|null} 与 `collectUsage()` **同形状**（含 `estimatedCostUsd`）。
+ */
+export function collectUsageFromProjection({ host, sessionId = null, model = null, pricing = PRICING } = {}) {
+  // 归因键缺失 ⇒ 读不到。**不是**"没花 token"。
+  if (typeof sessionId !== 'string' || sessionId === '') return null
+  if (host === null || typeof host !== 'object' || typeof host.runUsage !== 'function') return null
+
+  let raw
+  try {
+    raw = host.runUsage(sessionId)
+  } catch {
+    // 端口那一侧坏了不该让一次成功的运行变成失败（与 `estimateCostUsd` 同一条取舍）。
+    return null
+  }
+  if (raw === null || typeof raw !== 'object') return null
+
+  const inTok = Number.isSafeInteger(raw.tokensIn) && raw.tokensIn >= 0 ? raw.tokensIn : null
+  const outTok = Number.isSafeInteger(raw.tokensOut) && raw.tokensOut >= 0 ? raw.tokensOut : null
+  // 两侧都拿不到 ⇒ 没有可用用量（与 `collectUsage()` 同一条判据）。
+  if (inTok === null && outTok === null) return null
+
+  return {
+    tokensIn: inTok,
+    tokensOut: outTok,
+    estimatedCostUsd: estimateCostUsd({ model, tokensIn: inTok, tokensOut: outTok, pricing }),
+  }
+}
+
+/**
+ * 一次 Run 的用量：**先**问结果对象，读不到再问会话投影。
+ *
+ * 顺序是有意的：`collectUsage()` 若真读到了（替身、或将来引擎补上了字段），
+ * 那就是**引擎自报**的第一手读数，比从会话日志回读更直接。
+ * 投影是**补充**，不是替代。
+ *
+ * ★ 两个来源都读不到 ⇒ `null`。**绝不**合成一个 `{tokensIn: 0, tokensOut: 0}`——
+ *   那会把"不知道"变成一个看起来专业的零。
+ *
+ * @returns {{usage: object|null, source: 'result'|'projection'|null}}
+ */
+export function collectRunUsage({ result, host, sessionId, model, pricing } = {}) {
+  const fromResult = collectUsage(result, { pricing, model })
+  if (fromResult !== null) return { usage: fromResult, source: 'result' }
+
+  const fromProjection = collectUsageFromProjection({ host, sessionId, model, pricing })
+  if (fromProjection !== null) return { usage: fromProjection, source: 'projection' }
+
+  return { usage: null, source: null }
+}
+
+/**
  * 把**老形状**的价格表折进契约价目表：
  * `{ asOf, currency, models: { m: { inPerMTok, outPerMTok } } }`。
  *

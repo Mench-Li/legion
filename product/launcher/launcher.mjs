@@ -53,7 +53,12 @@ import {
 } from './runtime-contract-endpoint.mjs'
 import { buildChildEnv, isSecretLikeKey, OS_ESSENTIAL_ENV } from './allowlist.mjs'
 import { checkPorts } from './ports.mjs'
-import { readinessResultToDiagnostic, waitForReadiness } from './readiness.mjs'
+import {
+  createLineCollector,
+  readinessResultToDiagnostic,
+  waitForReadiness,
+  waitForStdoutReadiness,
+} from './readiness.mjs'
 import { createSupervisor, defaultKillTree } from './supervisor.mjs'
 import { createLogSink } from '../logging/sink.mjs'
 import { createLauncherHeartbeat } from './heartbeat-wiring.mjs'
@@ -494,6 +499,15 @@ export function createLauncher({
   const adoptionDiagnostics = []
 
   /**
+   * ★ PRT-251 续 ③ §4：子进程输出的**行缓冲**，供 `kind: 'stdout'` 的就绪判据读取。
+   *
+   * 它由 `onOutput` 喂（那段代码本来就无条件排空 stdout/stderr，见
+   * `supervisor.mjs` 里那段「不接管道会卡住子进程」的说明），
+   * 所以这里**不新增任何管道处理**，只是把已经流过的字节多留一份有界的副本。
+   */
+  const outputLines = createLineCollector()
+
+  /**
    * 运行时凭证（**每次 createLauncher 一份**，即每次启动一份）。
    *
    * 惰性求值 + 记忆化：`envSurface()`（诊断用）与 `envFor()`（真的 spawn）
@@ -926,6 +940,50 @@ export function createLauncher({
    */
   async function awaitReadiness(proc, handle) {
     const r = proc.readiness ?? { kind: 'none' }
+
+    // ★ PRT-251 续 ③ §4：`stdout` 判据。**必须排在下面那条早退之前**——
+    //   那条的判据是 `r.kind !== 'http'`，任何非 http 的判据都会被它当成
+    //   "没有就绪判据"而**立刻 markReady()**。于是"判据没实现"与"判据通过了"
+    //   是同一个读数，而 `kind:'stdout'` 会在一个字都没检查的情况下报就绪。
+    if (r.kind === 'stdout') {
+      const stream = r.stream ?? 'stdout'
+      const result = await waitForStdoutReadiness(
+        { stream, expectMatch: r.expectMatch, portGroup: r.portGroup ?? 1 },
+        {
+          timeoutMs: r.timeoutMs ?? readiness.timeoutMs ?? 30000,
+          intervalMs: r.intervalMs ?? readiness.intervalMs ?? 250,
+          sleep,
+          now,
+          isProcessAlive: () => handle.isAlive(),
+          // ★ 取数函数而不是数组：每轮重新取，否则循环永远看着第一份快照。
+          lines: () => outputLines.linesFor(proc.key, stream),
+          // ★ 端到端那一条：子进程报告的端口必须是**计划里那个**——
+          //   它是「`--port` 真的到达了它」的机器判据。
+          plannedPort: proc.port ?? null,
+        },
+      )
+      if (result.ok === true) {
+        handle.markReady()
+      } else {
+        handle.markUnready({
+          fatal: result.retryable !== true && result.code !== 'readiness-timeout',
+          detail: result.detail ?? result.last?.detail ?? null,
+        })
+      }
+      return {
+        result,
+        readiness: {
+          kind: 'stdout',
+          // 没有 URL：`readinessResultToDiagnostic` 会按模式名报出来，
+          // 而**不报匹配到的那一行**（那里可能有凭证）。
+          url: null,
+          stream,
+          expectMatch: r.expectMatch,
+          matchedPattern: result.last?.matchedPattern ?? null,
+        },
+      }
+    }
+
     if (r.kind !== 'http' || proc.kind !== 'server' || proc.port === null) {
       handle.markReady()
       return {
@@ -1448,9 +1506,15 @@ export function createLauncher({
       //   > 在**界面**上是同一个读数（都是空的）——只不过前者的数据
       //   > 就在旁边一个目录里，而用户会以为数据丢了。
       //
-      //   而"没有旧数据"（`nothing-to-adopt`）是**正常**，照常启动——
-      //   拒绝只针对"有东西该接、却没接成"。
-      const adoption = await this.adoptLegacyData()
+      //     而"没有旧数据"（`nothing-to-adopt`）是**正常**，照常启动——
+      //     拒绝只针对"有东西该接、却没接成"。
+      //
+      //   ★ 范围：**只为这次真的要启动的进程**接管（`includedKeys`）。
+      //     `--include=runtime` 那种"我只想把 DSH 起起来看看"的启动，
+      //     不该顺手把 team-hub 的库接走——接管是一次性快照（目标存在即永远
+      //     跳过），所以那样一次试运行会烧掉唯一一次机会，
+      //     而且是在旧 hub 还在写那个库的时候。
+      const adoption = await this.adoptLegacyData({ processes: includedKeys })
       if (adoption.ok !== true) {
         forgetRunRecord()
         return Object.freeze({
@@ -1520,6 +1584,10 @@ export function createLauncher({
         spawnImpl,
         spawnOptions,
         onOutput: (key, stream, chunk) => {
+          // ★ 先喂行缓冲，再写日志：`kind:'stdout'` 的就绪判据读的是前者，
+          //   而日志 sink 可能根本没建起来（那是遗憾，不是故障）——
+          //   把两件事绑在一起会让"没有日志"顺带变成"永远等不到就绪"。
+          outputLines.push(key, stream, chunk)
           if (logSink !== null) logSink.write(`${key}.${stream}`, chunk)
         },
         onOutputError: (key, e) => logSinkDiagnostics.push(Object.freeze({
@@ -1558,6 +1626,14 @@ export function createLauncher({
           runtimeContractEndpoint = await resolveRuntimeContractEndpoint(failures)
         }
         for (const proc of waveProcs) {
+          // ★ 清掉上一代留下的输出，**必须在 spawn 之前**。
+          //
+          //   重启后新实例的 `stdout` 判据如果被上一代那一行 `dsh web: …` 满足，
+          //   就是一次假就绪——而"上一代报过就绪、这一代还没说话"
+          //   与"这一代真的起来了"，在读数上是同一个东西。
+          //   （`attemptStart()` 每次 spawn 全新 child，但那**不会**清掉我们的行缓冲，
+          //   因为缓冲属于 Launcher，不属于 child。）
+          outputLines.clear(proc.key)
           const result = supervisor.handles.get(proc.key).start()
           if (result.started !== true) failures.push(Object.freeze({ process: proc.key, code: 'SPAWN_REFUSED', detail: result.reason }))
         }
@@ -1908,11 +1984,21 @@ export function createLauncher({
      * 返回的是 `adoptLegacyData()` 的读数本身——**不加工**。计划与执行
      * 分开（`planAdoption()` 是纯的），是为了让"该不该接"能在不真的拷一份库
      * 的前提下被断言。
+     *
+     * ★ `processes`：**只为这次真的要启动的进程**接管它的数据（默认全量）。
+     *   理由见 `adoptionItems()`——`--include=runtime` 那种试运行不该顺手
+     *   把 team-hub 的库接走，因为接管是一次性快照。
+     *
+     * ⚠️ 记忆化**只记无范围的那一次**。受限范围的那次如果也写进 `adoptionReading`，
+     *   一次 `--include=runtime` 就会把"这个 Launcher 的接管读数"替换成
+     *   "我这次没看 team-hub"——于是随后一次真正的全量启动会读到那份**空**读数，
+     *   并据此认为无事可做。那不是幂等，是记忆化把范围问题变成了数据问题。
      */
-    async adoptLegacyData({ dryRun = false } = {}) {
-      if (adoptionReading !== null && !dryRun) return adoptionReading
+    async adoptLegacyData({ dryRun = false, processes = null } = {}) {
+      const scoped = processes !== null && processes !== undefined
+      if (adoptionReading !== null && !dryRun && !scoped) return adoptionReading
       if (dryRun) {
-        const planned = planAdoption({ layout, dataPathEnv: DATA_PATH_ENV })
+        const planned = planAdoption({ layout, dataPathEnv: DATA_PATH_ENV, processes })
         return Object.freeze({
           dryRun: true, ok: planned.ok, state: null, items: planned.items, counts: planned.counts,
         })
@@ -1920,28 +2006,40 @@ export function createLauncher({
       // 逐项结论进 `adoptionDiagnostics`（聚合进 `allDiagnostics()`），
       // **不直接写日志 sink**：sink 是按「进程.流」分文件的，而这件事不属于
       // 任何一个子进程——塞进某个进程的日志会让"这是谁说的话"变成猜的。
-      adoptionReading = await runLegacyAdoption({
+      //
+      // ⚠️ 逐项那几行的码是 `LEGACY_ADOPTION_ITEM`，**不带总体状态**：
+      //   这些回调是 `runLegacyAdoption()` **执行期间**逐项触发的，那时总体状态
+      //   还不存在。原来写的是 `LEGACY_ADOPTION_${reading?.state ?? 'RUNNING'}`，
+      //   而 `reading` 在那一刻必然是 `undefined` ⇒ 每一行都叫 `..._RUNNING`，
+      //   无论它其实是"已接管"还是"失败"。一个恒为 `RUNNING` 的码不是信息，
+      //   是让人以为"这里能看出进度"的装饰。
+      //   总体状态在下面那一行总结里，那里它才真的存在。
+      const reading = await runLegacyAdoption({
         layout,
         dataPathEnv: DATA_PATH_ENV,
+        processes,
         log: (severity, message) => adoptionDiagnostics.push(Object.freeze({
           severity: severity === 'error' ? 'error' : 'info',
-          code: `LEGACY_ADOPTION_${String(adoptionReading?.state ?? 'RUNNING').toUpperCase()}`,
+          code: 'LEGACY_ADOPTION_ITEM',
           process: null,
           message,
         })),
       })
+      if (!scoped) adoptionReading = reading
       adoptionDiagnostics.push(Object.freeze({
-        severity: adoptionReading.ok ? 'info' : 'error',
+        severity: reading.ok ? 'info' : 'error',
         code: 'LEGACY_ADOPTION',
         process: null,
         // 一行结论。运维最常问的是"这次启动有没有接管"，而它不该要靠拼
-        // 四条逐项记录才能答出来。
-        message: `旧数据接管：${adoptionReading.state}`
-          + `（接管 ${adoptionReading.counts.adopted}／已是 ${adoptionReading.counts.already}`
-          + `／无来源 ${adoptionReading.counts.nothing}／失败 ${adoptionReading.counts.failed}`
-          + `／拒绝 ${adoptionReading.counts.refused}）`,
+        // 四条逐项记录才能答出来。受限范围那几次要**说出来**，
+        // 否则"接管 0／已是 0／无来源 0"看起来像"什么都没查"。
+        message: `旧数据接管：${reading.state}`
+          + `（接管 ${reading.counts.adopted}／已是 ${reading.counts.already}`
+          + `／无来源 ${reading.counts.nothing}／失败 ${reading.counts.failed}`
+          + `／拒绝 ${reading.counts.refused}）`
+          + (scoped ? `；本次只覆盖启动范围内的进程：${[...processes].join('、') || '（空）'}` : ''),
       }))
-      return adoptionReading
+      return reading
     },
   }
 

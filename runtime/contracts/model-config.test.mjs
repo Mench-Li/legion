@@ -228,8 +228,24 @@ test('**路由真的接上了校验**（这条守的是"接线被拔掉"）', as
   //
   // 真正的行为验证在 `scripts/prt/` 的端到端冒烟里（真起 hub、真发请求，
   // 断言 400 + 可读文案）；这里只做一道防回退的闸门。
-  const { readFileSync } = await import('node:fs')
-  const src = readFileSync(new URL('../../team-hub/server.mjs', import.meta.url), 'utf8')
+  //
+  // ★★★★★ 2026-09-21：观测点从"只读 `team-hub/server.mjs`"改成
+  //   `routeAssemblySource()`（server.mjs ∪ 各路由族模块）。
+  //
+  //   此前这一行是 `readFileSync('../../team-hub/server.mjs')`。PRT-316 把
+  //   `/api/models` 那一族搬进 `team-hub/routes/models.mjs` 之后，
+  //   那句 `validateAgentModelSelection({...})` **还在**、接线**一点没坏**，
+  //   只是住在另一个文件里 ⇒ 这条断言报红。
+  //
+  //   而它报的那句话是「POST /api/models 必须调用产品化校验」——
+  //   读起来完全正确，所以下一个人会去**把一段并没有被删的代码再加一遍**。
+  //
+  //   > 一条「观测点没跟着代码搬家」的防回退断言，
+  //   > 与一条「接线真的被拔掉了」的防回退断言，报的是同一句话。
+  //
+  //   判据一个字没改弱：它现在真的在查**整个装配面**（1 + 各族的源码）。
+  const { routeAssemblySource } = await import('../../scripts/prt/baseline-snapshot.mjs')
+  const src = routeAssemblySource()
   assert.match(src, /validateAgentModelSelection\(\{ provider, model, profiles: modelStore\.list\(\) \}\)/,
     'POST /api/models 必须调用产品化校验')
   assert.match(src, /throw modelConfigErrorFor\(verdict\)/,

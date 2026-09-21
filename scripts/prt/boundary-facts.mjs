@@ -1895,11 +1895,41 @@ export const FACTS = Object.freeze([
  * ★ `checked` 是**实际参与比对**的条数。调用方应当断言它等于 `FACTS.length`：
  *   一个"报 0 条红"的运行，如果它其实一条都没跑，与"全绿"长得一模一样。
  */
-export function checkFacts({ ctx = defaultContext() } = {}) {
+export function checkFacts({ ctx = defaultContext(), only = null } = {}) {
   const violations = []
   let checked = 0
 
-  for (const fact of FACTS) {
+  // ★★★★★ 第 111 轮加的 `only` —— 起因是**这个套件贴着 300 秒的硬上限**。
+  //
+  //   本套件用例③（"反面控制：改动文档里那个声称，那一条必须红（逐条做）"）
+  //   是这么写的：对**每一条**带锚点的事实，改掉它的声称，然后断言**它**红了。
+  //   而它调的是 `checkFacts()` —— 于是那一次断言**把全部 ~30 条事实都跑了一遍**。
+  //
+  //   ★ 实测代价：`checkFacts()` 一次 ~5.4s（其中 `scanLineCitations` 读台账一次 ~4.4s），
+  //     ×30 次 ⇒ **约 160 秒**，占该套件总时长（281s）的一半以上。
+  //
+  //   > ★★★ 而它要断言的那句话是「**那一条**必须红」——
+  //   > 为了知道**一条**事实的判决，把**全部**事实跑一遍，是**把"那一条"写成了"每一条"**。
+  //
+  //   ⇒ `only` 只跑指定的那几条。★ 它**不改变判据本身**（同一个 `derive`、同一个 `claim`、
+  //     同一套红码），只改**这一趟跑几条**。
+  //
+  //   ⚠️ 边界：`only` 置上之后，**别的事实不会参与比对**了。所以它**只该给
+  //      "我确实只关心这几条"的调用方用**（用例③ 就是）；`only` 为 `null`（默认）
+  //      时行为与从前**逐字相同** —— 全量比对，一个都不跳。
+  const selected = only === null ? FACTS : FACTS.filter((f) => only.includes(f.id))
+  if (only !== null && selected.length !== only.length) {
+    // ★ "我要的那几条里有不存在的 id" 必须**报出来**，不许静默少跑 ——
+    //   否则打错一个 id 就会让那条断言**再也不检查任何东西**，而输出一切正常。
+    const found = new Set(selected.map((f) => f.id))
+    for (const id of only) {
+      if (!found.has(id)) {
+        violations.push({ id, code: 'ONLY_SELECTED_UNKNOWN', detail: `FACTS 里没有 id 为 ${id} 的事实` })
+      }
+    }
+  }
+
+  for (const fact of selected) {
     let actual
     try {
       actual = fact.derive(ctx)

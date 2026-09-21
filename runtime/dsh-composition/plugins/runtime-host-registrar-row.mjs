@@ -213,6 +213,7 @@ import {
   withRunIdentityCarrier,
 } from '../run-identity.mjs'
 import { RUN_IDENTITY_STATES } from '../../contracts/run-identity.mjs'
+import { createUsageProjectionDefinition, readRunUsage } from '../usage-projection.mjs'
 import realRuntimeHostRow, { setDshRuntimeInputsFactory } from './runtime-host-row.mjs'
 
 /**
@@ -736,6 +737,57 @@ export function readModelSelection(ctx) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// 一次 Run 的用量：注册仅主机会话投影
+// ───────────────────────────────────────────────────────────────────────────
+
+/** 注册结果的具名码。三种"没注册成"修法不同，所以不许合成一个。 */
+export const USAGE_REGISTRATION_CODES = Object.freeze({
+  /** 注册了。 */
+  REGISTERED: 'RUNTIME_HOST_REGISTRAR_USAGE_PROJECTION_REGISTERED',
+  /** 现场没有 `sessionProjections` 服务（DSH 组合层没挂那一行）。 */
+  SERVICE_ABSENT: 'RUNTIME_HOST_REGISTRAR_USAGE_PROJECTION_SERVICE_ABSENT',
+  /** 服务在，但没有 `register`（引擎版本不对）。 */
+  SERVICE_MALFORMED: 'RUNTIME_HOST_REGISTRAR_USAGE_PROJECTION_SERVICE_MALFORMED',
+  /** 注册抛了（例如同一个 key 被别的 stateVersion 占用）。 */
+  REGISTER_THREW: 'RUNTIME_HOST_REGISTRAR_USAGE_PROJECTION_REGISTER_THREW',
+})
+
+/**
+ * 注册 Legion 自己的用量投影。**不抛**：用量是可选信息。
+ *
+ * @returns {{ok: boolean, code: string, dispose: Function|null, detail: string|null}}
+ */
+export function registerUsageProjection(ctx) {
+  const service = serviceOf(ctx, 'sessionProjections')
+  if (service === undefined || service === null) {
+    return { ok: false, code: USAGE_REGISTRATION_CODES.SERVICE_ABSENT, dispose: null, detail: null }
+  }
+  if (typeof service !== 'object' || typeof service.register !== 'function') {
+    return { ok: false, code: USAGE_REGISTRATION_CODES.SERVICE_MALFORMED, dispose: null, detail: null }
+  }
+  try {
+    const dispose = service.register(createUsageProjectionDefinition())
+    return {
+      ok: true,
+      code: USAGE_REGISTRATION_CODES.REGISTERED,
+      dispose: typeof dispose === 'function' ? dispose : null,
+      detail: null,
+    }
+  } catch (err) {
+    // ★ 吞掉异常**但把真因带出来**：注册失败（比如 key 被别的 stateVersion 占了）
+    //   与"服务不在"是两件事，前者说明有人改了 stateVersion。
+    //   *一个"注册抛了但被吞掉"的部署，与一个"没注册"的部署，
+    //   在下游读到的 `null` 上是同一个东西——区别只在这条 detail。*
+    return {
+      ok: false,
+      code: USAGE_REGISTRATION_CODES.REGISTER_THREW,
+      dispose: null,
+      detail: err instanceof Error ? err.message : String(err),
+    }
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // 工厂：`canRead` **可选**（缺席如实记成 null），端口接上模型选择
 // ───────────────────────────────────────────────────────────────────────────
 
@@ -807,6 +859,21 @@ export function createRuntimeHostInputsFactory({
       ? (line) => ctx.logger.warn(line)
       : (typeof ctx.logger?.info === 'function' ? (line) => ctx.logger.info(line) : null)
 
+    // ── 一次 Run 的 token 用量：注册一个**仅主机**会话投影（usage-reporting）──
+    //
+    // `SubagentResult` 契约里没有 usage 字段（逐字读过），所以用量拿不回来；
+    // 但 DSH 把每条 `assistant/message` 的用量写进会话日志，而
+    // `ctx.sessionProjections` 是它的一等读面（框架急切驱动纯折叠）。
+    // 归因键是 `SubagentRun.id === SessionId`（`startRun` 的返回值上就有）。
+    //
+    // ★ 注册是**effect**（住在调用它的 fiber 上）：本行的 fiber 卸载时，
+    //   这个投影键跟着消失——不会留下一个没人读、也没人负责的注册。
+    //
+    // ★ 服务不在（DSH 组合层没挂 `sessionProjections`）时**不抛**：
+    //   用量是可选信息，缺它不该让一次成功的启动变成失败。
+    //   如实记下"没注册"，并让读取方按具名码读到这件事（见 `runUsageReader`）。
+    const usageRegistration = registerUsageProjection(ctx)
+
     const runtimeHost = Object.freeze({
       startRun: (provider, options) => startRun(provider, options),
       probeRuntime: () => probe(ctx, { readVersion }),
@@ -814,6 +881,9 @@ export function createRuntimeHostInputsFactory({
       //   `agentDefaultModel`。服务不在 → `null`（适配器判 `MODEL_UNAVAILABLE`），
       //   **绝不**编一个模型名。判据码用 `readModelSelection()` 单独读得到。
       currentModelSelection: () => readModelSelection(ctx).selection,
+      // ★ 一次 Run 的用量。`sessionId` 由调用方从 `run.id` 取（那是 `SessionId`）。
+      //   读不到就返回 `null`——绝不补 0（理由见 usage-projection.mjs 的文件头）。
+      runUsage: (sessionId) => readRunUsage(ctx, sessionId).usage,
     })
 
     /**

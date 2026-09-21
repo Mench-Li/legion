@@ -373,25 +373,36 @@ describe('PRT-257 Launcher 用上装好的运行时（接线）', () => {
     const rt = seams.captured[0]
     const overlayArg = join(f.installDir, 'runtime', 'dsh-composition', 'legion-host.patch.yml')
     // ★ PRT-251 续：argv 末尾多了一段 `--port <本次端口>`。
+    //   PRT-251 续批：app 段再补上 `--host <清单的 host>` 与 `--no-open`。
     //
     //   这一条同时是本批最硬的一份证据：**生产 argv 的真实形状**就是
-    //   `… --profile web --patch <legion-host.patch.yml> --port <n>`——
-    //   强制面覆盖层在 launcher 段里、端口在 app 段里，两段各归各位。
-    //   如果端口被放进 `argsTemplate`，这里会变成 `… --patch … --port …`
-    //   的顺序被打破（`--port` 在前），而 DSH 会把 `--patch <文件>` 当成 app 参数
+    //   `… --profile web --patch <legion-host.patch.yml> --host 127.0.0.1 --port <n> --no-open`
+    //   ——强制面覆盖层在 launcher 段里，host/port/开关在 app 段里，两段各归各位。
+    //   如果这些被放进 `argsTemplate`，顺序会被打破（`--patch` 落到 app 段），
+    //   而 DSH 会把 `--patch <文件>` 当成 app 参数
     //   **静默丢掉整个强制面**——而这次启动照样成功。
     const runtimePort = L.status().processes.find((p) => p.key === 'runtime').port
     assert.deepEqual(rt.args,
-      [i.active.entryPath, '--profile', DEFAULT_DSH_PROFILE, '--patch', overlayArg, '--port', String(runtimePort)])
+      [i.active.entryPath, '--profile', DEFAULT_DSH_PROFILE, '--patch', overlayArg,
+        '--host', '127.0.0.1', '--port', String(runtimePort), '--no-open'])
     assert.equal(rt.file, process.execPath)
     // 次序：`--profile` 在 `--patch` **之前**。DSH 的参数解析对这两段的次序敏感
     // （profile 是父命令的参数），而"两段都在命令行里"在次序错了的时候照样成立。
     assert.ok(rt.args.indexOf('--profile') < rt.args.indexOf('--patch'))
-    // ★ 而且 `--patch`（launcher 段）必须在 `--port`（app 段）**之前**：
+    // ★ 而且 `--patch`（launcher 段）必须在**整个 app 段之前**：
     //   DSH 遇到第一个不认识的 token 就停止解析自己的旗标，所以反过来的话
     //   覆盖层就不再是 launcher 参数了。
-    assert.ok(rt.args.indexOf('--patch') < rt.args.indexOf('--port'),
-      `--patch 落到了 --port 后面，覆盖层变成 app 参数：${JSON.stringify(rt.args)}`)
+    for (const flag of ['--host', '--port', '--no-open']) {
+      assert.ok(rt.args.indexOf('--patch') < rt.args.indexOf(flag),
+        `--patch 落到了 ${flag} 后面，覆盖层变成 app 参数：${JSON.stringify(rt.args)}`)
+    }
+    // ★ PRT-251 续批：**由 Launcher 拉起的 runtime 不许自己弹浏览器**。
+    //   这一条断的正是本次修复的缺口：Launcher 自己管着"打开界面"这个决定，
+    //   而且管得比裸进程更严（`tray-wiring.mjs` 只在见过 `READINESS_VERIFIED`
+    //   之后才把地址交给浏览器）。少了这个开关，用户会在**没有任何人观测过
+    //   它是否就绪**之前就看到一个弹出的页面。
+    assert.ok(rt.args.includes('--no-open'),
+      'Launcher 拉起的 runtime 没带 --no-open——它会自己弹一个浏览器窗口')
     await L.stop({ graceMs: 100 })
   })
 

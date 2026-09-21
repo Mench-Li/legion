@@ -31,8 +31,25 @@ import { posix, win32 } from 'node:path'
 
 import { isPathInside, pathApi, samePath } from './paths.mjs'
 
-/** 进程清单契约版本：清单结构变化时递增（产品版本清单会引用它）。 */
-export const PROCESS_MANIFEST_VERSION = 1
+/**
+ * 进程清单契约版本：清单结构变化时递增（产品版本清单会引用它）。
+ *
+ * ★ 2026-09-17 由 `1` 提到 `2`。这是在补一次**漏掉**的递增，不是本次新增：
+ *   PRT-251 续给 runtime 行加了 `portArgv`（一个**新字段**，见下面 `PROCESS_SPECS`
+ *   的字段表），却把版本留在了 `1`；本批又加了 `hostArgv` / `boolArgv`。
+ *
+ *   于是这个常量的含义与它的值**已经不一致了两批**：一个读
+ *   `PROCESS_MANIFEST_VERSION === 1` 的消费者，有理由认为行上不存在这三个字段，
+ *   而它们一直都在。如实补上而不是继续留着——因为"同一个字段表下，
+ *   有的行有 `portArgv`、有的没有"这种事，只有靠版本号才看得出来。
+ *
+ *   ⚠️ 今天**没有**任何消费者读这个值（全仓库只有 `product/index.mjs` 的再导出；
+ *   `role-pack` / `packs` 那些 `manifestVersion` 是另一套东西）。所以这次递增
+ *   不改变任何行为——它的作用是把"这个常量说了谎"变成"它说的是真的"。
+ *   值本身由 `product/process-manifest.test.mjs` 钉住，好让下一个加字段的人
+ *   当场看见自己该动它。
+ */
+export const PROCESS_MANIFEST_VERSION = 2
 
 /** 默认端口。运行期可被产品配置覆盖，但默认值集中在这里，避免散落在各进程里。 */
 export const DEFAULT_PORTS = Object.freeze({
@@ -67,6 +84,27 @@ export const LOOPBACK_HOSTS = Object.freeze(['127.0.0.1', '::1', 'localhost'])
  *
  *     所以「端口」不是「又一个模板占位符」，它是**位置敏感**的：必须在所有
  *     launcher 旗标之后。写成一个独立字段，位置这件事才是可断言的。
+ *
+ *   - `hostArgv` / `boolArgv`（**可选**，PRT-251 续批）：**同一件事的另外两面**。
+ *     三者是一个概念（**app 段旗标**），只是命令行形态不同：
+ *
+ *     | 字段 | 形态 | 值来自 |
+ *     | --- | --- | --- |
+ *     | `portArgv` | 值旗标 | `ports.<portKey>` |
+ *     | `hostArgv` | 值旗标 | 本 spec 的 `host` |
+ *     | `boolArgv` | **开关**（无值） | 无 |
+ *
+ *     ⚠️ 但**冲突**的处置必须区分这两类，见 `materializeProcessPlan()`：
+ *     两个**值**来源＝两个不同的答案（谁生效取决于 argv 先后）⇒ **阻塞**；
+ *     重复一个**开关**＝同一个断言说了两遍 ⇒ **跳过**，不报错。
+ *     把两者用同一条规则处理，必然有一边是错的：要么放过一个端口归属不明的部署，
+ *     要么拦住一个本来正确的部署。
+ *
+ *     `boolArgv` 存在的具体理由（`--no-open`）：Launcher 已经**自己**管着
+ *     「打开界面」这个决定，而且管得比裸进程更严——`tray-wiring.mjs` 只在
+ *     见过 `READINESS_VERIFIED` 之后才把 workbench 地址交给浏览器。
+ *     一个由 Launcher 拉起的 runtime 自己弹浏览器，等于**绕过**那道闸：
+ *     在没有任何人观测过它是否就绪之前，用户的桌面上就多了一个页面。
  */
 export const PROCESS_SPECS = Object.freeze([
   Object.freeze({
@@ -151,10 +189,57 @@ export const PROCESS_SPECS = Object.freeze([
     //   「端口修好了但强制面没了」的启动，比「端口没修好」坏得多，而它看起来
     //   更像一次成功的修复。
     portArgv: Object.freeze(['--port']),
+    // ★ PRT-251 续批：同一件事的另外两面（见抬头里那张表）。
+    //
+    //   `--host`：DSH 的缺省监听地址本来就是 `127.0.0.1`，所以今天传它**不改变
+    //   行为**——但 `host` 这个字段并不是装饰：`ports.mjs:175` 拿它去
+    //   `canBind()` 探测。于是「清单说 127.0.0.1、探测也探 127.0.0.1、
+    //   而真正 bind 的是 DSH 自己的缺省值」这件事，今天全靠**两边缺省值恰好相同**
+    //   才对得上。把它接上，`host` 才从"参与探测的字段"变成"参与探测**并且**
+    //   决定实际监听"的字段——而这两者的差别要等到有人改 host 那天才显形。
+    //
+    //   `--no-open`：零参数开关。DSH 自己的帮助文本把它列为 app 族旗标，
+    //   理由是"do not open the Web UI in the default browser"。
+    //   Launcher 拉起它时**必须**给：见抬头里 `boolArgv` 那段。
+    hostArgv: Object.freeze(['--host']),
+    boolArgv: Object.freeze(['--no-open']),
     portKey: 'runtime',
     defaultPort: DEFAULT_PORTS.runtime,
     host: '127.0.0.1',
-    readiness: Object.freeze({ kind: 'http', path: '/', expectStatus: 200, timeoutMs: 60000, intervalMs: 500, verified: false }),
+    // ★ PRT-251 续 ③ §4：就绪判据是 **stdout 上那一行**，不是对 `/` 的一次请求。
+    //
+    //   原来这里是 `{ kind:'http', path:'/', expectStatus:200 }`，而它在真机上
+    //   **永远不可能通过**：DSH 的 Web 面对任何未认证请求都答同一个最小的 401
+    //   （`packages/client/connection/src/browser-auth.ts` 的 `authorizeIndex()`），
+    //   而 401 落进 `FATAL_PROBE_CODES` 的 `http-status-mismatch`
+    //   ⇒ 不可重试、立刻熔断。反过来更坏：那个端口后面若恰好是**别的**对 `/`
+    //   答 200 的服务，这条判据会**通过**——而它后面根本不是 DSH。
+    //
+    //   DSH 自己给出的、被它明确设计为给 supervisor 用的信号就是这一行
+    //   （`packages/bundle/web-app/src/index.ts` 的 `announceReady()`）：
+    //
+    //     "The URL line and browser handoff are readiness signals:
+    //      **supervisors RPC as soon as they observe the line**."
+    //
+    //   而且它比 HTTP 探测**更强**：那行文字来自**我们 spawn 的那个进程本身**。
+    //   team-hub 有 `/api/config` 可做身份断言；DSH 没有等价物，
+    //   它的身份恰恰在"这是我儿子说的"这件事上。
+    //
+    //   ⚠️ 超时从 60s 提到 120s：信号在 Loader 整棵树结算**之后**才打，
+    //   不是端口一张开就有。判据变严了，等待窗口也得跟着放宽，
+    //   否则「判据对了但 60 秒不够」会表现成一次假超时。
+    //
+    //   匹配 `dsh web: http://127.0.0.1:3081/?token=…`，只取 URL 那一段
+    //   （后面可能还跟着 `(LAN: …)`，而我们要的是回环那个）。
+    readiness: Object.freeze({
+      kind: 'stdout',
+      stream: 'stdout',
+      expectMatch: '^dsh web:\\s+(https?://\\S+)',
+      portGroup: 1,
+      timeoutMs: 120000,
+      intervalMs: 250,
+      verified: false,
+    }),
     writesRoles: Object.freeze(['data', 'cache']),
     // ★ PRT-214 续：Legion 身份由 Launcher **派生 + 从产品配置取**后注入本进程，
     //   组合根（`runtime/dsh-composition/root.mjs`）只从进程环境读它。
@@ -198,6 +283,20 @@ export const PROCESS_SPECS = Object.freeze([
       //   把"5 把键一起通"照字面执行会**打开一扇被明令关上的门**。
       'LEGION_PATH_SCOPE', 'LEGION_CONNECTOR_DECLARATIONS',
       'LEGION_EXECUTION_SCOPE', 'LEGION_EXTERNAL_API_SCOPE',
+      // ★★ 第 112 轮（PRT-603 岗位白名单接线）：第五把键。
+      //
+      //   它**必须**在这里，而这一条不是"顺手补一个"：`buildChildEnv()` 只转发
+      //   本数组里的键，所以一个"在 schema 里声明了、也接进组合根了、
+      //   却没进这张清单"的键，**到不了子进程** —— 而两处各自的判据都是绿的。
+      //
+      //   > 一个「能配、也接好了」的键，与一个「真的能到子进程」的键，
+      //   > 在只读配置表的时候是同一个东西。
+      //
+      //   ★ 这条缺口是被 `scripts/config/config.test.mjs` 那条"schema fields 与
+      //     清单 envNames 必须对得上"的判据**当场抓出来的**（它逐字点名
+      //     `["LEGION_EMPLOYEE_PERMIT"]`）。所以这里补的不只是一个字符串，
+      //     是那道判据要的那一半。
+      'LEGION_EMPLOYEE_PERMIT',
     ]),
     milestone: 'PRT-257',
   }),
@@ -357,6 +456,16 @@ export function materializeProcessPlan({
     const portArgs = port === null || spec.portArgv === undefined
       ? []
       : [...spec.portArgv, String(port)]
+    // `hostArgv` 只在 spec **声明了 host** 时才生效：`null` 是「这个进程不绑地址」，
+    // 与「绑到一个叫 null 的地址」是两件事。
+    const hostArgs = spec.host === null || spec.host === undefined || spec.hostArgv === undefined
+      ? []
+      : [...spec.hostArgv, spec.host]
+    // 开关旗标没有值：`[...['--no-open']]` 就是它自己。
+    const boolArgs = spec.boolArgv === undefined ? [] : [...spec.boolArgv]
+    // app 段的顺序：先值旗标（host、port），再开关。DSH 的解析器对这个顺序
+    // 不敏感，但**固定一个顺序**才让"完整 argv"这种断言写得出来。
+    const appArgs = [...hostArgs, ...portArgs, ...boolArgs]
     let command = null
     if (spec.entry.kind === 'node-file') {
       // 入口按**安装目录**解析成绝对路径：命令里出现相对路径时，实际被执行的是
@@ -364,7 +473,7 @@ export function materializeProcessPlan({
       const entryAbs = vars.install === ''
         ? entryPath
         : api.resolve(vars.install, String(entryPath).split('/').join(api.sep))
-      command = Object.freeze({ file: nodePath, args: Object.freeze([entryAbs, ...args, ...extras, ...portArgs]) })
+      command = Object.freeze({ file: nodePath, args: Object.freeze([entryAbs, ...args, ...extras, ...appArgs]) })
     } else {
       const configured = expandConfigured(runtimeCommand, vars)
       if (configured === null) {
@@ -372,12 +481,13 @@ export function materializeProcessPlan({
           `进程 ${spec.key} 的入口由配置项 ${spec.entry.configKey} 提供，但当前未配置其值。未配置时必须拒绝启动，不能跳过该进程——跳过会让「执行引擎不可用」表现成「任务一直没人做」。`))
       } else {
         /**
-         * ★ PRT-251 续：**两处都给了端口**时必须具名拒绝，不许靠 argv 顺序决出胜负。
+         * ★ PRT-251 续：**两处都给了值旗标**时必须具名拒绝，不许靠 argv 顺序决出胜负。
          *
-         * `runtime.command` 可以自带 `--port`（用户手写的那条命令），而计划也会按
-         * `ports.runtime` 补一个。经验上后者赢（commander 取最后一次出现的值），
-         * 但「实际生效的是哪一个」由此变成每次排障都要重新确认的问题——
-         * 而它与 `launcher.mjs:96-98` 拒绝「端口既走 env 又走 argv」是同一条理由。
+         * `runtime.command` 可以自带 `--port` / `--host`（用户手写的那条命令），
+         * 而计划也会按 `ports.runtime` / `host` 补一个。经验上后者赢
+         * （commander 取最后一次出现的值），但「实际生效的是哪一个」由此变成
+         * 每次排障都要重新确认的问题——而它与 `launcher.mjs:96-98` 拒绝
+         * 「端口既走 env 又走 argv」是同一条理由。
          *
          *   > 一个「两处都写了端口、由解析器的取值顺序决定谁生效」的部署，
          *   > 与一个「`ports.runtime` 配了但不起作用」的部署，在**这个端口到底是谁的**
@@ -385,23 +495,61 @@ export function materializeProcessPlan({
          *
          * 所以这里是 **error（阻塞启动）**，不是 warn：这不是风格问题，是一次
          * 权威冲突，而产品必须知道端口归谁管（spec §6.3：端口是计划的一部分）。
+         *
+         * ★ 而**开关**旗标（`boolArgv`）走的是另一条规则：用户那条命令里已经有了
+         *   ⇒ **跳过**我们那一个，**不报错**。两类不能共用一条规则：
+         *
+         *     两个**值**来源 ＝ 两个不同的答案 ⇒ 谁生效取决于先后 ⇒ 必须阻塞；
+         *     重复一个**开关** ＝ 同一个断言说了两遍 ⇒ 再写一个是噪音，
+         *     而报错会**拦住一个本来正确的部署**。
+         *
+         *   把开关也按值旗标处理，等于因为用户写了一句"不要开浏览器"就拒绝启动。
          */
-        const conflict = spec.portArgv === undefined
-          ? null
-          : spec.portArgv.find((flag) => configured.args.includes(flag))
-        if (conflict !== undefined && conflict !== null) {
-          diagnostics.push(diag('error', 'PORT_AUTHORITY_CONFLICT', spec.key,
-            `进程 ${spec.key} 的 ${spec.entry.configKey} 里已经带了 ${conflict}，而计划也会按 `
-            + `ports.${spec.portKey} 补一个（${port}）。两处都能决定端口时，「实际生效的是哪一个」`
-            + `取决于 argv 里谁在后面，而那不是一个能被审计的规则。`
-            + `**请在配置里删掉 ${conflict}**：端口由 ports.${spec.portKey} 管，`
-            + `否则改了 ports.${spec.portKey} 却不生效，而外部看不出任何差别。`))
-        }
+        const valueFamilies = [
+          {
+            flags: spec.hostArgv,
+            args: hostArgs,
+            code: 'HOST_AUTHORITY_CONFLICT',
+            // 把**计划会用哪个值**印出来：只说"两处都写了"而不说"我本来要补什么"，
+            // 用户没法判断该删哪一处。
+            owner: `清单的 host 字段（${spec.host}）`,
+            hint: `否则清单写的是 ${spec.host}、而实际 bind 的是命令里那个，`
+              + `外部看不出任何差别（宿主探测却仍按清单那个 host 走）。`,
+          },
+          {
+            flags: spec.portArgv,
+            args: portArgs,
+            code: 'PORT_AUTHORITY_CONFLICT',
+            owner: `ports.${spec.portKey}（${port}）`,
+            hint: `否则改了 ports.${spec.portKey} 却不生效，而外部看不出任何差别。`,
+          },
+        ]
         // ★ 冲突时**不追加**：计划里显示的就该是用户那条命令本身，加一个重复的
-        //   `--port` 只会让「这个端口是谁的」在诊断输出里更看不清。诊断已经阻塞启动，
+        //   值旗标只会让「这个值是谁的」在诊断输出里更看不清。诊断已经阻塞启动，
         //   所以这里的 argv 不会被执行——留它原样是让报错与它指向的东西对得上。
-        const effectivePortArgs = conflict === undefined || conflict === null ? portArgs : []
-        command = Object.freeze({ file: configured.file, args: Object.freeze([...configured.args, ...args, ...extras, ...effectivePortArgs]) })
+        const effectiveValueArgs = []
+        for (const family of valueFamilies) {
+          const hit = family.flags === undefined
+            ? undefined
+            : family.flags.find((flag) => configured.args.includes(flag))
+          if (hit === undefined) {
+            effectiveValueArgs.push(...family.args)
+            continue
+          }
+          diagnostics.push(diag('error', family.code, spec.key,
+            `进程 ${spec.key} 的 ${spec.entry.configKey} 里已经带了 ${hit}，而计划也会按 `
+            + `${family.owner} 补一个。两处都能决定它时，「实际生效的是哪一个」`
+            + `取决于 argv 里谁在后面，而那不是一个能被审计的规则。`
+            + `**请在配置里删掉 ${hit}**：${family.owner} 管它，${family.hint}`))
+        }
+        // 开关：已经有了就跳过（同一个断言说两遍，不是冲突）。
+        // 注意用 `boolArgs` 而非去重后的结果参与下面的 argv 拼接——被跳过的
+        // 那一个由用户自己那条命令提供，行为完全一致。
+        const effectiveBoolArgs = boolArgs.filter((flag) => !configured.args.includes(flag))
+        command = Object.freeze({
+          file: configured.file,
+          args: Object.freeze([...configured.args, ...args, ...extras, ...effectiveValueArgs, ...effectiveBoolArgs]),
+        })
       }
     }
 

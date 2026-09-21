@@ -266,6 +266,36 @@ const WRAPPER_PATCH_SRC = `- insert:
       name: "./prt253ri-wrapper.mjs"
 `
 
+/**
+ * N 场景专用：**关掉真补丁层里那个注册方**。
+ *
+ * ## 为什么 N 需要它（2026-09-21 实测的根因）
+ *
+ * N 声称模拟的是"**上一批**的补丁层取值：组件本体当模块、没人注册工厂"。
+ * 但 `basePatches()` 里含 `REAL_PATCH`，而真补丁层**现在**已经声明了
+ * `legion-enforcement-runtime-host-registrar` —— 它的模块 default **就是**
+ * `runtimeHostRow` 本体（`===`，业主裁决甲），并且那个模块在**模块求值期**
+ * 就注册了自己的工厂。
+ *
+ * ⇒ 于是 N 的 insert（同一份模块再挂一次）让**同一个插件对象被两个 fiber 各 apply 一次**，
+ *   两行都 `ctx.provide('legionRuntimeHostBinding')` ⇒ cordis 当场抛
+ *   `service "legionRuntimeHostBinding" has been registered`。
+ *
+ * 实测（不带本补丁）：N 报的是重复注册，而"没人注册工厂"那条具名码一次都没出现。
+ * 连带红的"★ 读数对照"依赖 N 留下的读数 ⇒ 也是连带红。
+ *
+ *   > 一个"模拟上一批补丁层"的场景，与一个"把上一批的行叠在当前补丁层之上"的场景，
+ *   > 在只写一个 `insert` 的时候是同一个东西——只不过后者的红
+ *   > 读起来像是"注册方没生效"。
+ *
+ * ★ 这不是把判据改弱：关掉真补丁层那一行**正是** N 声称要模拟的取值
+ *   （"没有人注册工厂"）。修完之后 N 与 R 的差别仍然只有**一个变量**：
+ *   那一行的模块是组件本体（N）还是生产注册方（R）。
+ */
+const DISABLE_REGISTRAR_PATCH_SRC = `- id: "legion-enforcement-runtime-host-registrar"
+  disabled: true
+`
+
 // S / S2：按**路径** import 生产注册方（补丁层就是这么加载它的），读生产函数的输出；
 // **不挂**那一行，于是进程活着，读数拿得到。
 const SCAFFOLD_SRC = `import { CAPABILITY_EVIDENCE_CODES, RUNTIME_HOST_REGISTRAR_CODES, createRuntimeHostInputsFactory, probeDshRuntime, readDshVersionOfInstall, readModelSelection, dshInstallCandidates } from ${JSON.stringify(fileUrl(REGISTRAR_ABS))}
@@ -429,6 +459,7 @@ put('permission', 'prt253ri-permission.mjs', PERMISSION_SRC)
 put('permissionPatch', 'prt253ri-permission.patch.yml', PERMISSION_PATCH_SRC)
 put('runtimeRowsPatch', 'prt253ri-runtime-rows.patch.yml', RUNTIME_ROWS_PATCH_SRC)
 put('rowOnlyPatch', 'prt253ri-row-only.patch.yml', ROW_ONLY_PATCH_SRC)
+put('disableRegistrarPatch', 'prt253ri-disable-registrar.patch.yml', DISABLE_REGISTRAR_PATCH_SRC)
 put('registrarRowPatch', 'prt253ri-registrar-row.patch.yml', REGISTRAR_ROW_PATCH_SRC)
 put('wrapper', 'prt253ri-wrapper.mjs', WRAPPER_SRC)
 put('wrapperPatch', 'prt253ri-wrapper.patch.yml', WRAPPER_PATCH_SRC)
@@ -493,7 +524,12 @@ describe('PRT-253 续批二：生产注册方在**真 DSH 进程**里的读数',
   guarded('N. 上一批的取值（组件本体当模块、没人注册工厂）→ `RUNTIME_HOST_ROW_NO_INPUTS_FACTORY`', (t) => {
     const r = runDsh({
       tag: 'n',
-      patches: [...basePatches(SCRATCH_PATH.servicesTruePatch), SCRATCH_PATH.rowOnlyPatch],
+      // ★★★ 必须**同时**关掉真补丁层里那个注册方，否则本场景测的不是它自己声称的那件事：
+      //   真补丁层的注册方那一行在场（模块 default 就是组件本体、且在模块求值期注册了工厂），
+      //   N 的 insert 让同一个插件对象被两个 fiber 各 apply 一次 ⇒
+      //   两行都 provide 同一个服务名 ⇒ cordis 抛重复注册，而"没人注册工厂"那条具名码
+      //   一次都不会出现。逐条推导见 `DISABLE_REGISTRAR_PATCH_SRC` 的注释。
+      patches: [...basePatches(SCRATCH_PATH.servicesTruePatch), SCRATCH_PATH.disableRegistrarPatch, SCRATCH_PATH.rowOnlyPatch],
     })
     assert.equal(r.spawnError, null)
     // ⚠️ 本行拒绝**不会**让进程非零退出：DSH 的启动严格性是**消费方自有**的

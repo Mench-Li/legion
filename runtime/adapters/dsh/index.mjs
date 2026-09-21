@@ -53,7 +53,7 @@ import { RuntimeContractError, describeError } from '../../contracts/errors.mjs'
 import { assertHostPort, normalizeRunHandle, safeDispose, DshPortError } from './port.mjs'
 import { classifyDshError, classifyStopReason, toContractError } from './errors.mjs'
 import { validateStructured, validateExpectedOutput } from './schema.mjs'
-import { collectUsage, createDurationTracker, checkBudget, PRICING } from './usage.mjs'
+import { collectRunUsage, collectUsage, createDurationTracker, checkBudget, PRICING } from './usage.mjs'
 import { createEventEmitter, mapDshEvent, terminalTypeFor } from './events.mjs'
 import { redactValue } from './redact.mjs'
 import { probeRuntime } from './probe.mjs'
@@ -613,7 +613,20 @@ export function createDshRuntimeAdapter(host, options = {}) {
       }
 
       handle = normalizeRunHandle(rawHandle)
-      for (const w of handle.warnings) emitter.emit('run.progress', { warning: w })
+      // ★ 这里的 `yield` 是**必需的**，而它此前缺席（2026-09-21 修）。
+      //
+      //   `emitter.emit()` 在**分配序号**并把事件交给调用方——不 `yield` 就
+      //   只做了前半步：序号被消耗，事件被丢掉。后果是审计序号出现**空洞**
+      //   （实测序列 `1,2,4`），而 `events.mjs` 的"序号唯一权威"一节明确写着
+      //   「不该让我们的审计序号出现空洞或重号」。
+      //
+      //   *一个"分配了序号"的动作，与一个"发出去了一条事件"的动作，
+      //   在只看事件内容的用例里是同一个读数——空洞只在那条比较整个 seq 数组的
+      //   用例里才现形，而它此前**恰好没有被触发**：唯一会走到这里的告警是
+      //   "句柄缺 dispose"，而所有现存替身的句柄都带 dispose。*
+      //
+      //   本批加的第二条告警（句柄缺 SessionId）第一次把它踩响了。
+      for (const w of handle.warnings) yield emitter.emit('run.progress', { warning: w })
 
       // 可选：宿主提供事件流 → 逐条映射（不合成）
       if (handle.events !== null && typeof handle.events?.[Symbol.asyncIterator] === 'function') {
@@ -699,7 +712,11 @@ export function createDshRuntimeAdapter(host, options = {}) {
           if (!check.ok) {
             const terminal = terminalTypeFor(null, { code })
             const result = buildResult({
-              runId, request, outcome: outcomeFor(code), code, output: null, usage: collectUsage(resultValue, { pricing: opts.pricing, model: selection.model }),
+              runId, request, outcome: outcomeFor(code), code, output: null,
+              usage: collectRunUsage({
+                result: resultValue, host, sessionId: handle?.sessionId ?? null,
+                model: selection?.model, pricing: opts.pricing,
+              }).usage,
               outcomeUnknown: false,
               extraUserMessage: `结构化输出未通过校验：${check.errors.slice(0, 3).join('；')}`,
             })
@@ -710,7 +727,19 @@ export function createDshRuntimeAdapter(host, options = {}) {
         }
       }
 
-      const usage = collectUsage(resultValue, { pricing: opts.pricing, model: selection.model })
+      // ★ 用量：先问结果对象（引擎自报是第一手），读不到再问该次 Run 的会话投影。
+      //   `SubagentResult` 契约里没有 usage 字段，所以真结果上第一条必然落空——
+      //   这就是这条缝一直读不到 token 的原因。第二条的来源与归因见
+      //   `runtime/dsh-composition/usage-projection.mjs`。
+      //   **两个都读不到 ⇒ null**，绝不补 0（那会把"不知道"记成一次零成本运行）。
+      const usageReading = collectRunUsage({
+        result: resultValue,
+        host,
+        sessionId: handle?.sessionId ?? null,
+        model: selection?.model,
+        pricing: opts.pricing,
+      })
+      const usage = usageReading.usage
 
       // 预算闸门（PRT-207 的采集 + 判定；超预算判 BUDGET_EXCEEDED）
       const budgetHit = checkBudget({ budget: request.budget, usage })

@@ -1168,3 +1168,55 @@ test('⑭ 空字符串的 `prompt` 视为没给（不把空上下文当成一份
   assert.notEqual(sent, '', '空提示词是"什么都没告诉模型"，不该被当成一次正常的执行')
   assert.match(sent, /任务：T-1/)
 })
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ⑮ 归因键与序号：两处**曾经埋着**的缺陷
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('⑮ 句柄的 `id`（SessionId）被如实带出来——它是用量的唯一归因键', async () => {
+  const host = makeHost({
+    async startRun() {
+      return { id: 'session-xyz', result: Promise.resolve({ stopReason: 'completed', structured: { ok: true } }), dispose: async () => {} }
+    },
+  })
+  const a = await readyAdapter(host)
+  await collect(a, makeRequest())
+  // 端口那一层如实带出（`.` 直读，不经适配器的公开面）
+  assert.equal(normalizeRunHandle({ id: 'session-xyz', result: Promise.resolve(1), dispose: async () => {} }).sessionId, 'session-xyz')
+  assert.equal(normalizeRunHandle({ result: Promise.resolve(1), dispose: async () => {} }).sessionId, null,
+    '缺席记成 null，不编一个（编一个会让用量被归到别的 Run 上）')
+  assert.equal(normalizeRunHandle({ id: '', result: Promise.resolve(1), dispose: async () => {} }).sessionId, null, '空串等于缺席')
+})
+
+test('⑮ ★ 有告警时审计序号**不许出现空洞**（这条钉住一个曾经存在的缺陷）', async () => {
+  // 缺陷原文：`for (const w of handle.warnings) emitter.emit('run.progress', {warning: w})`
+  // —— 少了 `yield`。`emit()` 已经**分配了序号**，不 yield 就只做了前半步：
+  // 序号被消耗、事件被丢掉 ⇒ 序列出现空洞（实测 `1,2,4`）。
+  //
+  // ★ 它此前一直没被踩响，因为唯一会走到这里的告警是"句柄缺 dispose"，
+  //   而所有现存替身的句柄都带 dispose。这条用例**故意造一个缺 dispose 的句柄**
+  //   来把它踩响。
+  //
+  //   *一个"分配了序号"的动作，与一个"发出去了一条事件"的动作，
+  //   在只看事件内容的用例里是同一个读数。*
+  const host = makeHost({
+    async startRun() {
+      // 缺 dispose ⇒ 端口产生一条告警
+      return { result: Promise.resolve({ stopReason: 'completed', structured: { ok: true } }) }
+    },
+  })
+  const a = await readyAdapter(host)
+  const events = await collect(a, makeRequest())
+
+  // ① 告警**真的**以事件形式出现了（否则这条用例什么都没测到）
+  const progress = events.filter((e) => e.type === 'run.progress')
+  assert.equal(progress.length, 1, `缺 dispose 的告警必须作为事件发出来：${JSON.stringify(events.map((e) => e.type))}`)
+  assert.match(progress[0].warning ?? progress[0].payload?.warning ?? '', /dispose/)
+  // ② ★ 序号连续：1..N，无空洞、无重号
+  const seqs = events.map((e) => e.seq)
+  assert.deepEqual(seqs, Array.from({ length: events.length }, (_, i) => i + 1),
+    `审计序号必须连续：${JSON.stringify(seqs)}（空洞意味着有事件被 emit 了却没 yield）`)
+  // ③ 序号唯一
+  assert.equal(new Set(seqs).size, seqs.length, '重号')
+})
+

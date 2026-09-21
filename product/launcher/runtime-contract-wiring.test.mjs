@@ -92,13 +92,25 @@ const valueOf = (name) => {
 const readinessPort = Number(valueOf('--readiness-port'))
 const noPublish = flag('--no-publish')
 
-// ① DSH 进程"对外端口"上的最小服务：Launcher 的就绪判据打的是 \`/\`。
-//    **与契约监听器是两个端口**（后者绑 0）。
+// ① DSH 进程"对外端口"上的最小服务。
+//
+//   ★ PRT-251 续 ③ §4：这里原来对 \`/\` 答 **200**，而那是**错的模拟**——
+//   真实 DSH 对任何未认证请求答 **401**（\`browser-auth.ts\` 的 \`authorizeIndex()\`：
+//   "every other request receives the same minimal 401 response"）。
+//
+//   于是这一组用例此前一直在用一个"DSH 不会有的行为"喂旧的就绪判据：
+//   判据绿，是因为**替身替错了**。改成 401 之后，旧判据在替身上也会失败，
+//   与它在真 DSH 上的表现一致——于是替身与真身对同一件事给出同一个读数。
+//
+//   \`webPort\` 由本进程自己的监听结果填，供下面那一行 DSH 风格的就绪播报使用。
+//   **与契约监听器是两个端口**（后者绑 0）。
+let webPort = null
 const web = createServer((req, res) => {
-  res.writeHead(200, { 'content-type': 'text/plain' })
-  res.end('legion-runtime-stub')
+  res.writeHead(401, { 'content-type': 'text/plain' })
+  res.end('unauthorized')
 })
 await new Promise((resolve) => web.listen({ port: readinessPort, host: '127.0.0.1' }, resolve))
+webPort = web.address().port
 
 // ② 契约监听器：token 只从环境来，**不给默认值**。
 const envToken = process.env.${TOKEN_ENV}
@@ -122,6 +134,16 @@ console.log('STUB ready contractPort=' + listened.port
   + ' tokenConfigured=' + (token !== null)
   + ' published=' + (published !== null && published.ok === true)
   + ' publicationCode=' + (published !== null && published.ok !== true ? published.code : 'none'))
+// ★ PRT-251 续 ③ §4：DSH 风格的就绪播报。真实 DSH 在 Loader 结算之后打这一行
+//   （\`web-app/src/index.ts\` 的 \`announceReady()\`，注释原文：
+//   "supervisors RPC as soon as they observe the line"），Launcher 的
+//   \`kind:'stdout'\` 判据等的就是它。
+//
+//   ⚠️ token 是**假的**（\`stub-launch-token\`），不是任何真凭证：
+//   真 DSH 那行里挂的是它**自己**的浏览器令牌，与 Legion 的契约令牌是两回事。
+//   在这里写死一个假值，既保住了形状，又让"替身不泄漏真凭证"这件事
+//   在用例 ⑤ 的读数里仍然成立。
+console.log('dsh web: http://127.0.0.1:' + webPort + '/?token=stub-launch-token')
 setInterval(() => {}, 1 << 30)
 `
 

@@ -1341,7 +1341,17 @@ test('★ 端到端：scan --check 必须 PASS，且把「schema 自身登记文
   // ★ 8 → 9（2026-09-18，第 19 轮，PRT-605）：执行面授权表那条登记，
   //   同样是它**自己的**登记文本被同一条规则扫到。
   // ★ 9 → 10（2026-09-18，第 20 轮，PRT-606）：外部 API 授权表那条登记，同上。
-  assert.match(r.out, /runtime\/config-schema\.mjs 命中 10 处/)
+  // ★ 10 → 11（2026-09-21 第 112 轮，PRT-603）：岗位许可那条登记（`fields.whitelist`
+  //   的 `env:` 行 ＋ 它对应的 `dynamicEnvReads` 条目），同上。
+  //
+  //   ⚠️ **这一条是上一轮（112）漏掉的**：那一轮我跑到了 `config.test.mjs` 并看到
+  //   "52/53、唯一红是外部阻塞"，就把它记成了"只剩外部原因"——而那一条红**不是**
+  //   外部原因，是这里这个数字。第 113 轮重读才发现。
+  //
+  //   > 一个"我知道有一条红、而它的理由是 X"的结论，
+  //   > 与一个"我知道有一条红、而 X 恰好也是个真理由"的结论，在报告里是同一句话——
+  //   > 只不过前者的 X 是**推的**。
+  assert.match(r.out, /runtime\/config-schema\.mjs 命中 11 处/)
   assert.match(r.out, /product\/config-schema\.mjs 命中 11 处/)
   assert.match(r.out, /allowlist\.mjs[\s\S]{0,60}write-target/)
   assert.match(r.out, /dsh-credentials\.mjs[\s\S]{0,60}foreign-object/)

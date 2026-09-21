@@ -112,10 +112,61 @@ export const ENFORCEMENT_IDENTITY_CODES = Object.freeze({
 /** 只有这个进程吃这几项。与 `DSH_OVERLAY_PROCESS_KEY` 是同一个进程。 */
 export const ENFORCEMENT_IDENTITY_PROCESS_KEY = 'runtime'
 
-/** `runtime.env` 里允许经本模块透传的键（闭集；多一个就要在这里加上并说明理由）。 */
+/**
+ * **强制面的表**——与上面两组**不同的一类**，但同样只能来自产品配置
+ * `runtime.env`（第 113 轮补上）。
+ *
+ * ## 为什么它们需要一个自己的清单，而不是塞进上面两组
+ *
+ * 上面两组回答的是"**这个运行时以谁的名义做事**"（身份）与"**要不要问人**"
+ * （审批策略）。这一组回答的是"**这个岗位被允许做什么**"——它是**策略数据**，
+ * 不是身份。三类混成一张表之后，"我该往 `runtime.env` 里写什么"就再也没法
+ * 从名单本身读出来了。
+ *
+ * ## ★★★ 为什么必须有这一条（实测的缺陷，第 113 轮）
+ *
+ * 上一批把这五把键加进了 `product/process-manifest.mjs` 的 runtime `envNames`。
+ * 那一批的措辞是"四道范围检查第一次真的能到执行面"。**那句话只对了一半**：
+ *
+ *   · `envNames` 管的是**继承 `baseEnv`**那条路（宿主环境里有，才过得去）；
+ *   · 而"运维把它写进**产品配置文件**"（`runtime.env`）走的是**本文件**这条路。
+ *
+ * 实测（`scratch/_probe-r113-permit-delivery.mjs`）：五把键都写进 `runtime.env`
+ * ⇒ `resolveEnforcementIdentity().values` 里**一把都没有**，而 `ok === true`、
+ * `missing === []` ⇒ **静默丢掉**。于是四道范围检查在真实部署里读到的仍是"没配"，
+ * **而在它们那一侧"没配"是放行**。
+ *
+ *   > 一个"配了、`ok:true`、而值没到"的配置面，
+ *   > 与一个"这一格本来就没人配"的部署，在读数上是同一个东西——
+ *   > 只不过前者让运维以为他配了。
+ *
+ * ★ 与 `runtime/config-schema.mjs` 那五条 `fields` 的关系：那五条声明的是
+ *   "**Runtime 子进程**可以从它的环境里读这些键"，而本清单声明的是
+ *   "**Launcher 会把这些键写进那个环境**"。**两句话都写下来了，才叫接线**——
+ *   只有前一句时，配置表上写着可用，而子进程永远收不到。
+ */
+export const ENFORCEMENT_TABLE_ENV_KEYS = Object.freeze([
+  'LEGION_PATH_SCOPE',
+  'LEGION_CONNECTOR_DECLARATIONS',
+  'LEGION_EXECUTION_SCOPE',
+  'LEGION_EXTERNAL_API_SCOPE',
+  // 第 113 轮新增（PRT-603 岗位白名单）。★ 它**必须**与上面四道一起在这里——
+  //   只把它接进 `root-row.mjs` 而不接这里，等于"第四道接了、而它配不进去"。
+  'LEGION_EMPLOYEE_PERMIT',
+])
+
+/**
+ * `runtime.env` 里允许经本模块透传的键（闭集；多一个就要在这里加上并说明理由）。
+ *
+ * ★ 三类各有主的清单：身份（`ENFORCEMENT_IDENTITY_ENV`，含派生的 hub/cwd）、
+ *   审批策略（`ENFORCEMENT_DECIDE_ENV_KEYS`）、强制面的表（`ENFORCEMENT_TABLE_ENV_KEYS`）。
+ *   前两类是**必填/可选的身份与策略**，第三类是**策略数据**——所以它们被
+ *   分别记在三个常量里，而闭集是三者之和。
+ */
 export const ENFORCEMENT_IDENTITY_PASSTHROUGH = Object.freeze([
   ...Object.values(ENFORCEMENT_IDENTITY_ENV),
   ...ENFORCEMENT_DECIDE_ENV_KEYS,
+  ...ENFORCEMENT_TABLE_ENV_KEYS,
 ])
 
 function identityDiag(severity, code, message, extra = {}) {
@@ -265,6 +316,22 @@ export function resolveEnforcementIdentity({
 
   // ── 透传：`decide` 适配器要的两项（可选，缺了由判定期 fail closed） ──────
   for (const env of ENFORCEMENT_DECIDE_ENV_KEYS) {
+    const v = configuredFrom(env)
+    if (v !== null) values[env] = v
+  }
+
+  // ── 透传：强制面的**表**（第 113 轮补；可选，缺了由各自端口 fail closed） ──
+  //
+  // ★ 与上面那一轮**逐字同形**：给了就写、没给就不写（**不补默认值**）。
+  //   一个"凭空造出来的空范围表"会让 `enforcementSurfaces()` 那一格报 `true`
+  //   而它一条规则都没有——那正是 `scope-port.mjs` 文件头决定 ③ 要避免的形状。
+  //
+  // ★★ 而"没给"这件事的后果**各道不同**，值得写下来（它决定了这一条有多要紧）：
+  //   · `pathScope` / `executionScope` / `externalApiScope` 缺席 ⇒ 那一段**放行**；
+  //   · `whitelist` 缺席 ⇒ 桥那一整段**根本不进入**（也是放行）；
+  //   · `connectorDeclarations` 缺席 ⇒ 如实报 `false`（不建登记表）。
+  //   ⇒ 前三者与第四个的后果都是"**该拦的没拦**"。所以这一条不是便利，是接线。
+  for (const env of ENFORCEMENT_TABLE_ENV_KEYS) {
     const v = configuredFrom(env)
     if (v !== null) values[env] = v
   }

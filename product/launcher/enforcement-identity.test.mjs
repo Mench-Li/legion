@@ -34,9 +34,11 @@ import {
   ENFORCEMENT_IDENTITY_PROCESS_KEY,
   ENFORCEMENT_IDENTITY_REQUIRED,
   ENFORCEMENT_IDENTITY_VERSION,
+  ENFORCEMENT_TABLE_ENV_KEYS,
   resolveEnforcementIdentity,
 } from './enforcement-identity.mjs'
 import { DSH_OVERLAY_CODES, DSH_OVERLAY_RELPATH } from './dsh-overlay.mjs'
+import { buildChildEnv } from './allowlist.mjs'
 import { createLauncher } from './launcher.mjs'
 import { canBind } from './ports.mjs'
 import { createServer } from 'node:net'
@@ -263,12 +265,93 @@ describe('PRT-214 续 Legion 身份：解析', () => {
     for (const k of ENFORCEMENT_DECIDE_ENV_KEYS) assert.equal(k in none.values, false, k)
   })
 
-  test('★ 闭集：透传名单就是那 9 个键，多一个就会红', () => {
+  test('★ 闭集：透传名单 = 身份 6 + 审批策略 3 + 强制面表 5，多一个就会红', () => {
+    // ★ 第 113 轮：9 → 14（新增 `ENFORCEMENT_TABLE_ENV_KEYS` 那五把）。
+    //
+    //   ⚠️ 这里**刻意**不写成 `.length === 9` 那种只数个数、不列成员的形状：
+    //   一份"只数个数"的闭集判据，在有人**换掉**一个键（拿走 A、加上 B）时
+    //   仍然是绿的——而它守的正是"名单里到底是哪几个"。
     assert.deepEqual([...ENFORCEMENT_IDENTITY_PASSTHROUGH].sort(), [
       ...Object.values(ENFORCEMENT_IDENTITY_ENV),
       ...ENFORCEMENT_DECIDE_ENV_KEYS,
+      ...ENFORCEMENT_TABLE_ENV_KEYS,
     ].sort())
-    assert.equal(ENFORCEMENT_IDENTITY_PASSTHROUGH.length, 9)
+    // 而三个来源**各自**也要能被读出来（否则"14"这个数对了、分组却错了）。
+    assert.equal(ENFORCEMENT_TABLE_ENV_KEYS.length, 5)
+    assert.deepEqual([...ENFORCEMENT_TABLE_ENV_KEYS].sort(), [
+      'LEGION_CONNECTOR_DECLARATIONS', 'LEGION_EMPLOYEE_PERMIT', 'LEGION_EXECUTION_SCOPE',
+      'LEGION_EXTERNAL_API_SCOPE', 'LEGION_PATH_SCOPE',
+    ])
+    assert.equal(ENFORCEMENT_IDENTITY_PASSTHROUGH.length, 14)
+    // ★ 三类**不许重叠**：一个键同时属于身份与策略，会让"它为什么在这里"没有唯一答案。
+    const all = [
+      ...Object.values(ENFORCEMENT_IDENTITY_ENV),
+      ...ENFORCEMENT_DECIDE_ENV_KEYS,
+      ...ENFORCEMENT_TABLE_ENV_KEYS,
+    ]
+    assert.equal(new Set(all).size, all.length, '三个来源之间有重复的键')
+  })
+
+  test('★★★★★ 强制面**表**也必须透传：配了 `runtime.env` 就到得了子进程（第 113 轮）', () => {
+    // ## 这条判据守的是什么
+    //
+    // 上一批把五把键加进了 `product/process-manifest.mjs` 的 runtime `envNames`，
+    // 于是它们**可以**经 `baseEnv`（宿主环境）流到子进程。而本模块是另一条路：
+    // `runtime.env`（**产品配置**）。两条路都存在，但只有一条通。
+    //
+    // 实测（第 113 轮，`scratch/_probe-r113-permit-delivery.mjs`）：
+    //
+    //     runtime.env 里同时给五把键
+    //       ⇒ resolveEnforcementIdentity().values 只有
+    //         TEAM_HUB_URL / LEGION_CWD / LEGION_ACTOR / LEGION_SCOPE / LEGION_ENFORCEMENT_ACTION
+    //       ⇒ 四道范围表 + 岗位许可 **一个都没进去**
+    //       ⇒ 而 ok === true、missing === []：**静默丢掉**
+    //
+    //   > 一个"配了、`ok:true`、而值没到"的配置面，
+    //   > 与一个"这一格本来就没人配"的部署，在读数上是同一个东西——
+    //   > 只不过前者让运维以为他配了。
+    //
+    // ## 为什么这条判据要**同时**查两端
+    //
+    // 只查"`values` 里有这把键"会漏掉 `buildChildEnv` 那边（它对**未声明**的键
+    // 直接抛、对 `baseEnv` 里未声明的键**静默丢**）。只查 `buildChildEnv` 会漏掉
+    // "压根没进 values"。所以这里走完整条链：**配置 → values → 子进程 env**。
+    const tables = {
+      LEGION_PATH_SCOPE: '{"platform":"win32","read":["C:/work"],"write":[]}',
+      LEGION_CONNECTOR_DECLARATIONS: '[]',
+      LEGION_EXECUTION_SCOPE: '{"command":{"programs":["git"]}}',
+      LEGION_EXTERNAL_API_SCOPE: '{"endpoints":[]}',
+      LEGION_EMPLOYEE_PERMIT: '{"employeeId":"e1"}',
+    }
+    const configured = { ...CONFIGURED_OK, ...tables }
+    const r = resolveEnforcementIdentity({ teamHubPort: HUB_PORT, cwd: CWD, configured })
+    assert.equal(r.ok, true, `夹具本身要能过：${JSON.stringify(r.missing)}`)
+
+    // ① 先钉住"它们进了 values"——这一步红的时候，理由最直接。
+    for (const key of Object.keys(tables)) {
+      assert.equal(key in r.values, true,
+        `${key} 在 runtime.env 里配了，却没有进 values —— `
+        + '而 ok 仍然是 true，所以这个丢掉是**静默**的。'
+        + '★ 它是**同一个形状的第三处**：先是 schema 与清单对不上，'
+        + '再是清单与 childEnvNames 对不上，现在是"清单声明了、而没人往里写"')
+    }
+
+    // ② 再走完整条链，把它真的送到子进程那一侧去核。
+    const spec = specFor(ENFORCEMENT_IDENTITY_PROCESS_KEY)
+    assert.ok(spec !== null)
+    const built = buildChildEnv({ spec, baseEnv: {}, values: { ...r.values } })
+    for (const [key, value] of Object.entries(tables)) {
+      assert.equal(built.env[key], value,
+        `${key} 没有到 Runtime 子进程（env 里 ${key in built.env ? '有但值不同' : '根本没有'}）——`
+        + '于是真实部署里那一道检查读到的仍是"没配"（而在它那一侧是**放行**）')
+    }
+
+    // ③ 反向对照：**没配**的键不许凭空出现（"透传"不许变成"补默认值"）。
+    const bare = resolveEnforcementIdentity({ teamHubPort: HUB_PORT, cwd: CWD, configured: CONFIGURED_OK })
+    for (const key of Object.keys(tables)) {
+      assert.equal(key in bare.values, false,
+        `${key} 没配却进了 values —— 透传名单变成了默认值来源`)
+    }
   })
 })
 

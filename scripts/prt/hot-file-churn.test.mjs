@@ -635,3 +635,123 @@ test('④ 非 git 目录返回可读原因而非抛错（不向 stderr 漏 fatal
     rmSync(outside, { recursive: true, force: true })
   }
 })
+
+// ---------------------------------------------------------------------------
+// ⑤ ★★★ 空读数不许被印成"已降温"（2026-09-21 复核后补）
+//
+// 判定那一行的输入是 `recentCounts`。它为空时 `Math.max(...[], 0)` 恰好是 **0**，
+// 而 `0 <= 2` ⇒ **判「已降温」**。也就是说：
+//
+//   > 一个"量了、且最近确实没动过"的读数，与一个"一个文件都没量到"的读数，
+//   > 在判定那一行上是同一个东西——只不过后者的结论是**反的**：
+//   > 它把"什么都不知道"印成了"可以安排开工"。
+//
+// 这条与 ② "错误写法会返回窗口大小的假象" 属同一类（探针自己的读数假象），
+// 所以它必须被真的跑到，而不是只在注释里写着。
+// ---------------------------------------------------------------------------
+
+test('⑤ ★★★ 一个文件都没量到时**不判定**，而不是判「已降温」', () => {
+  // 真夹具仓库（与 ② 同一套做法：临时目录 + 真 git），只是 `files` 传空。
+  const dir = mkdtempSync(join(tmpdir(), 'prt-churn-nofiles-'))
+  const g = (args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8' }).trim()
+  try {
+    g(['init', '-q'])
+    g(['config', 'user.email', 't@example.com'])
+    g(['config', 'user.name', 't'])
+    writeFileSync(join(dir, 'hot.txt'), 'a\n')
+    g(['add', '.'])
+    g(['commit', '-qm', 'one'])
+
+    const res = collectChurn({ files: [], size: 40, windows: 3, cwd: dir })
+    assert.equal(res.ok, false, '取到读数的文件数为 0 时不许给出判定')
+    assert.match(res.reason, /空读数/, '理由必须点名这是空读数，而不是别的失败')
+    // 反面：**不许**返回一个 cooled 判定——那正是这条守卫要挡的形状
+    assert.equal(res.verdict, undefined, '空读数时不许带 verdict')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------
+// ⑥ ★★★ `--strict` 让退出码跟随判定（2026-09-21 复核后补）
+//
+// 起因是一句被写进台账的论据："本批复跑 hot-file-churn.mjs 仍然 exit 0、
+// 判定「已降温…可安排开工」"。而当时探针在**未降温**时退出码**也是 0**：
+//
+//   > 一个"无论判定是哪一侧都返回同一个退出码"的工具，
+//   > 与一个"通过了"的工具，在被只看 exit 0 的读者读到时是同一个东西。
+//
+// 默认仍给 0（未降温是探针的正常输出，不是运行失败；否则每个在途提交
+// 都会把 CI 弄红），要当门禁用的调用方显式加 `--strict`。两条都要钉住，
+// 否则下一次改动很容易把其中一侧弄丢。
+// ---------------------------------------------------------------------------
+
+test('⑥ ★★★ `--strict`：未降温 ⇒ 2，降温 ⇒ 0；默认恒 0', () => {
+  const script = fileURLToPath(new URL('./hot-file-churn.mjs', import.meta.url))
+  const run = (args) => {
+    try {
+      const out = execFileSync(process.execPath, [script, ...args], { cwd: ROOT, encoding: 'utf8' })
+      return { code: 0, out }
+    } catch (e) {
+      return { code: e.status, out: `${e.stdout ?? ''}${e.stderr ?? ''}` }
+    }
+  }
+
+  // 真仓当前读数（未降温 ⇒ 10/40），用来判"这一侧现在该给什么码"。
+  const res = collectChurn({ size: 40, windows: 6 })
+  assert.equal(res.ok, true, `真仓上探针应当可用：${res.reason ?? ''}`)
+
+  const plain = run([])
+  const strict = run(['--strict'])
+  assert.equal(plain.code, 0, '默认必须恒 0——未降温是正常输出，不是运行失败')
+  assert.equal(strict.code, res.verdict.cooled ? 0 : 2,
+    `--strict 必须跟随判定：cooled=${res.verdict.cooled} ⇒ 期望 ${res.verdict.cooled ? 0 : 2}`)
+  assert.match(strict.out, res.verdict.cooled ? /已降温/ : /未降温/,
+    '退出码与文字结论必须是同一个判定，不许分叉')
+})
+
+// ---------------------------------------------------------------------------
+// ⑦ ★★★ 判定**公式本身**被钉住（破验 M3 逼出来的）
+//
+// ⑥ 只钉"退出码是否跟随 `verdict.cooled`"——它读的是**同一个** `collectChurn`，
+// 所以把 `cooled` 改成恒 `true` 时，⑥ 的两侧一起变、**照样通过**。
+//
+//   > 一条"报告与判定一致"的断言，与一条"判定本身是对的"的断言，
+//   > 在判定被写死成某一侧的时候是同一个东西——只不过前者的两侧会一起漂。
+//
+// ⇒ 判定必须对着**夹具**钉一次：最近窗口 0 次 ⇒ 降温；最近窗口 3 次（> 阈值 2）
+//   ⇒ 未降温。这一条不读真仓，所以不受"窗口随 HEAD 移动"影响。
+// ---------------------------------------------------------------------------
+
+test('⑦ ★★★ 判定公式被夹具钉住：最近窗口 0 次 ⇒ 降温；3 次 ⇒ 未降温', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'prt-churn-verdict-'))
+  const g = (args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8' }).trim()
+  const commit = (file, i) => {
+    writeFileSync(join(dir, file), `${i}\n`)
+    g(['add', '.'])
+    g(['commit', '-qm', `c${i}`])
+  }
+  try {
+    g(['init', '-q'])
+    g(['config', 'user.email', 't@example.com'])
+    g(['config', 'user.name', 't'])
+    // 6 个提交：较旧的 3 个碰 hot.txt，较新的 3 个只碰 other.txt
+    for (let i = 1; i <= 6; i++) commit(i <= 3 ? 'hot.txt' : 'other.txt', i)
+
+    const cold = collectChurn({ files: ['hot.txt'], size: 3, windows: 2, cwd: dir })
+    assert.equal(cold.ok, true, `夹具仓库上探针应当可用：${cold.reason ?? ''}`)
+    assert.equal(cold.verdict.recentMax, 0, '最近窗口里 hot.txt 一次都没被碰')
+    assert.equal(cold.verdict.cooled, true, '最近窗口 0 次 ⇒ 必须判降温')
+
+    // 反向：再落 3 个提交，每一个都碰 hot.txt ⇒ 最近窗口 3 次 > 阈值 2
+    for (let i = 7; i <= 9; i++) commit('hot.txt', i)
+
+    const hot = collectChurn({ files: ['hot.txt'], size: 3, windows: 2, cwd: dir })
+    assert.equal(hot.verdict.recentMax, 3, '最近窗口里 hot.txt 被碰 3 次')
+    assert.equal(hot.verdict.cooled, false, '最近窗口 3 次 > 阈值 2 ⇒ 必须判未降温')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+

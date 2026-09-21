@@ -29,6 +29,20 @@
 //   node scripts/prt/hot-file-churn.mjs --json
 //   node scripts/prt/hot-file-churn.mjs --window=40 --windows=6
 //   node scripts/prt/hot-file-churn.mjs --help
+//
+// ## ★ 退出码（2026-09-21 复核后补）
+//
+// 默认**不**因判定而变：读得到 git 历史就 0（判定「未降温」也是 0），
+// 读不到（不是 git 仓库等）才 2。原因是「未降温」是本探针的**正常输出**，
+// 不是运行失败——本文件自己的单测要在这棵工作树上跑，若未降温就非 0，
+// 每个在途提交都会把 CI 弄红。
+//
+// 但由此存在一个形状问题，值得写下来：
+// *一个"无论判定是哪一侧都返回同一个退出码"的工具，与一个"通过了"的工具，
+// 在被只看退出码的流水线读到时是同一个东西*——而**历史上确实有台账行**
+// 把 `hot-file-churn.mjs ... exit 0` 当成"评审闸门已过"的论据
+// （见 `docs/superpowers/prt/PRT-PROGRESS.md` 的 PRT-316 行）。
+// ⇒ 要把它当**门禁**用的调用方加 `--strict`：判定「未降温」时以 2 收场。
 // ============================================================================
 import { execFileSync } from 'node:child_process'
 import { dirname, resolve } from 'node:path'
@@ -216,6 +230,21 @@ export function collectChurn({ files = HOT_FILES, size = 40, windows = 6, cwd = 
    */
   const all = git(['rev-list', head], cwd).split('\n').filter(Boolean)
   const ranges = windowRanges(all.length, size, windows)
+  // ★ 交出去之前先挡一次**空读数**（2026-09-21 复核后补）。
+  //
+  // 这里的 `perFile` 是**每个文件**各量一次；只要 `recentMax` 落在 ≤2 那一侧，
+  // 判定就是「已降温」。而**一个文件都没取到读数**时 `recentCounts` 是空数组、
+  // `Math.max(...[], 0)` 恰好等于 **0** ⇒ `0 <= 2` ⇒ **判「已降温」**。
+  //
+  //   > *一个"量了、且最近确实没动过"的读数，与一个"一个文件都没量到"的读数，
+  //   > 在判定那一行上是同一个东西——只不过后者的结论是**反的**：
+  //   > 它把"什么都不知道"印成了"可以安排开工"。
+  //
+  // 正常调用永远取不到这条分支（`files` 默认是那两个热点文件），
+  // 所以它是一条**便宜的自检**，不是日常路径。
+  if (all.length === 0) {
+    return { ok: false, reason: `空读数：提交数 ${all.length}——不判定` }
+  }
 
   const perFile = {}
   for (const f of files) {
@@ -252,6 +281,14 @@ export function collectChurn({ files = HOT_FILES, size = 40, windows = 6, cwd = 
   // 手工 rebase 完全可承受；比例判据在历史峰值本身很低时会误判「未降温」。
   // 同时要求 recentMax ≤ 历史峰值——否则说明这是史上最热的窗口，不该开工。
   // `historicalPeak` 取 rank>1 的窗口，避免拿自己跟自己比。
+  //
+  // ★ 先挡"一个文件都没量到"（2026-09-21 复核后补）：`recentCounts` 为空时
+  //   `Math.max(...[], 0)` 恰好是 **0**，而 `0 <= 2` ⇒ **判「已降温」**。
+  //   *一个"量了、且最近确实没动过"的读数，与一个"一个文件都没量到"的读数，
+  //   在判定那一行上是同一个东西——只不过后者的结论是**反的**。*
+  if (Object.keys(perFile).length === 0) {
+    return { ok: false, reason: `空读数：取到读数的文件数 0（files=${JSON.stringify(files)}）——不判定` }
+  }
   const recentCounts = Object.values(perFile).map((v) => v.recent ?? 0)
   const busiestPast = Math.max(
     ...Object.values(perFile).flatMap((v) => v.windows.filter((w) => w.rank > 1).map((w) => w.count)),
@@ -259,6 +296,12 @@ export function collectChurn({ files = HOT_FILES, size = 40, windows = 6, cwd = 
   )
   const recentMax = Math.max(...recentCounts, 0)
   const COOLED_ABSOLUTE_BAR = 2
+  // ★ 判定仍必须由**两个**量同时成立才算降温：
+  //   · 绝对阈值（≤2）——阶段 3 的风险来自"每落一个提交都要手工 rebase"，绝对值才是那个风险；
+  //   · 且不高于历史峰值——"最近比历史更热"时，即使这个数很小也不该判降温
+  //     （历史峰值本身很低时，比比例判据可靠）。
+  //   ⚠️ 第二个条件在历史峰值恒 ≥1 时恒真（`Math.max(busiestPast, 1)`）；
+  //      它在 `busiestPast === 0`（整段历史一次都没碰过热点文件）时才会咬住。
   const cooled = recentMax <= COOLED_ABSOLUTE_BAR && recentMax <= Math.max(busiestPast, 1)
   return {
     ok: true,
@@ -294,6 +337,7 @@ function usage() {
   console.log('  --window=<n>    窗口大小（默认 40）')
   console.log('  --windows=<n>   窗口个数（默认 6）')
   console.log('  --json          机器可读')
+  console.log('  --strict        判定「未降温」时以退出码 2 收场（见文件头那段）')
   console.log('  --help          本说明')
 }
 
@@ -332,6 +376,17 @@ function main() {
   console.log(v.cooled
     ? '  → **已降温**：阶段 3 的文件争用风险低，可安排开工'
     : '  → **未降温**：在途功能仍在改这两个文件，阶段 3 应推迟')
+  // ★ 退出码：默认**不**因判定而变（walk 失败才 2）。
+  //
+  //   但这留下一个形状问题：判「未降温」时退出码**也是 0**，
+  //   于是 *一个"无论判定是哪一侧都返回同一个退出码"的工具，
+  //   与一个"通过了"的工具，在被只看退出码的流水线读到时是同一个东西*。
+  //
+  //   不把默认改成"未降温 ⇒ 非 0"是因为**未降温是探针的正常输出**，
+  //   不是运行失败：CI 里那条 `prt-churn` 跑的是本文件的单测，
+  //   真仓降温与否**不该**让 CI 变红（否则每个在途提交都会把它变红）。
+  //   需要"把它当门禁用"的调用方显式加 `--strict`。
+  if (argv.includes('--strict') && !v.cooled) process.exitCode = 2
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {

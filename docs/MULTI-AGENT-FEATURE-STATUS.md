@@ -825,9 +825,12 @@ node scripts/prt/reachability.mjs --diff
 
 ★ 而这一变又逼着另一处读数跟着动：§9 九节链的 **L7** 因此从"软缺口"转 ✔，
 它的 `owner: 28` 随即被 `alpha-chain-trace` 的 `owner-stale` 判掉（第 28 条已裁定）。
-**⚠️ 那个 ✔ 不许读成"审计完整性已达成"**：写入侧（执行面按 Run 调 `appendSpoolRecord`）
-今天仍无调用点，而**可达性看不见调用点缺口**——理由逐字写在 `alpha-chain-trace.mjs`
-的 L7 `coreWhy` 里，残余项在队列 P1-1。
+★ **第 118 轮第八轮：写入侧也接上了** —— `root-row.mjs` 把
+`runtime/toolcall/spool-writer.mjs` 挂成 `onDecision` 观察点，而 Run 号**按事件**取
+（`identityOverlayForExecution`），于是并发的两个 Run 各写各的账。
+**⚠️ 那个 ✔ 仍不许读成"审计完整性已达成"**：`dispatched` / `result` 两种记录今天
+**没有观察点**、只有**带投影**的事件会被写成一行、行里的 `attemptId` 仍是 `null` ——
+理由逐字写在 `alpha-chain-trace.mjs` 的 L7 `coreWhy` 里，残余项在队列 P1-1。
 
 按族看（不是逐条列，那是基线文件的事）：
 

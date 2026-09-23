@@ -994,7 +994,7 @@ export function deriveRunIdentityCarrier(request) {
     //   > 一个"造不出来就干脆不挂"的生产者，
     //   > 与一个"把读不出空间的 Run 记在别的空间名下"的运行时，是同一个东西——
     //   > 只不过前者在代码里看起来像是一次体面的省略。
-    ? Object.freeze({ version: RUN_IDENTITY_WIRE_VERSION, scope: request.workspaceId ?? null, taskId: null, cwd: null })
+    ? Object.freeze({ version: RUN_IDENTITY_WIRE_VERSION, scope: request.workspaceId ?? null, taskId: null, cwd: null, runId: request.runId ?? null })
     : Object.freeze({
       version: RUN_IDENTITY_WIRE_VERSION,
       scope,
@@ -1004,6 +1004,11 @@ export function deriveRunIdentityCarrier(request) {
       // 传 `null` 只发生在绕过契约的调用方那里，而那正是要被读出来的一种处境。
       taskId: request.taskId ?? null,
       cwd: request.workdir ?? null,
+      // ★ 第 118 轮第八轮：`runId` 与前三项**同源**（都随 Run 变、都由本生产者从
+      //   `RunRequest` 搬过来），但它是**归属 metadata**、不是授权身份 ——
+      //   它不进 `CANONICAL_OP_KEYS`（理由见 `runtime/contracts/run-identity.mjs`
+      //   的 `RUN_IDENTITY_OVERLAY_FIELDS`）。车道按它把执行面写下的账**分 Run**。
+      runId: request.runId ?? null,
     })
 
   // 判定**借用传输层那一份**：这里不另写"怎样才算能装"的规则。

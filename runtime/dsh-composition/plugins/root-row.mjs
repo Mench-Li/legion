@@ -148,6 +148,16 @@ import {
 } from '../external-api-scope-port.mjs'
 import { CONNECTOR_PORT_ENV_KEY, connectorPortFromEnv } from '../connector-port.mjs'
 import { WHITELIST_PORT_ENV_KEY, whitelistPortFromEnv } from '../whitelist-port.mjs'
+// ★★★ PRT-610 写入侧（第 118 轮第八轮）：车道按 Run 落盘的两样东西。
+//   · `identityOverlayForExecution`：从**这一个事件**里的执行对象读出按 Run 装上的
+//     身份覆盖（`runId` 在里面）——**不是**在装配期绑一个 Run（理由见 `spool-writer.mjs` 文件头）。
+//   · `toolCallRowOf`：`tool_calls` 那一行的**唯一**形状产出者（PRT-610），本行不重算。
+import { identityOverlayForExecution } from '../run-identity.mjs'
+import { toolCallRowOf } from '../tool-request.mjs'
+import {
+  TOOLCALL_SPOOL_WRITER_CODES,
+  createToolCallSpoolWriter,
+} from '../../toolcall/spool-writer.mjs'
 import {
   ENFORCEMENT_ROOT_CODES,
   enforcementInstallation,
@@ -623,6 +633,51 @@ export function createRootRow({
           '那会让一次配置错误与一次真实的"无岗位白名单"在强制面读数上同形')
       }
 
+      // ★★★ PRT-610 写入侧（第 118 轮第八轮）：**执行面第一次真的往车道里写账**。
+      //
+      //   接线之前，这条车道的两半（`spool.mjs` 写 / `toolcall-drain.mjs` 收）
+      //   各自都有用例，而**生产里一个调用点都没有** —— 于是 `tool_calls` 里
+      //   从来没有执行面写的行，而"没有行"读起来与"那些调用没发生"一样。
+      //
+      //   ⚠️ 这里**不绑 Run**：`onDecision` 是装配期给的，在装配期把 runId 绑死会让
+      //   整个进程只往**第一个** Run 的账本里写（§14.5 量到的那处真问题）。
+      //   Run 号按**事件**取（`identityOverlayForExecution`），于是并发的两个 Run 各写各的。
+      //
+      //   ⚠️ 也只有**带投影**的事件会被写成一行：`onDecision` 有几个发射方，而
+      //   `tool-request.mjs` 那一条（工具调用级、带 `projection`）是唯一一个
+      //   能产出 PRT-610 行形状的。别的事件**具名拒绝**、不猜一行出来 ——
+      //   猜出来的那一行会带着别的强制点的语义混进同一本账。
+      const spoolWriter = createToolCallSpoolWriter({
+        dataDir: typeof effectiveEnv.LEGION_DATA_DIR === 'string' ? effectiveEnv.LEGION_DATA_DIR : null,
+        runIdOf: (event) => identityOverlayForExecution(event?.execution)?.runId ?? null,
+        rowOf: (event, runId) => {
+          const kind = event?.decision?.kind
+          if (typeof kind !== 'string' || kind.trim() === '') {
+            const err = new Error(
+              '这条决定没有 `decision.kind` ⇒ 造不出一行。**不**把 `null` 当成一个判定：'
+              + '一行 `decision: null` 在 `tool_calls` 里读起来像"某个决定"，而它不是')
+            err.code = TOOLCALL_SPOOL_WRITER_CODES.ROW_UNUSABLE
+            throw err
+          }
+          return toolCallRowOf(event.projection, {
+            decision: kind,
+            // 唯一带投影的发射方是桥的 pre-execute 那一条，而它自己记的也是
+            // `source: 'pre-execute'`（`tool-request.mjs` 的 `record()`）——两处同名。
+            decisionSource: (typeof event.source === 'string' && event.source.trim() !== '')
+              ? event.source
+              : 'pre-execute',
+            reason: event.decision?.reason ?? event.reason ?? null,
+            runId,
+            atText: typeof event.atText === 'string' ? event.atText : null,
+          })
+        },
+        // 记账坏了要**看得见**，但不许影响判定：这里只记一行日志。
+        onReading: typeof ctx.logger?.warn === 'function'
+          ? (reading) => ctx.logger.warn(
+            `${ROOT_ROW_PLUGIN_NAME} 的车道写入侧没写成：${reading.code}——${reading.reason}`)
+          : null,
+      })
+
       const installed = installEnforcementRoot({
         env: effectiveEnv,
         decide: effectiveDecide,
@@ -660,6 +715,10 @@ export function createRootRow({
         //   理由就是上面那一段（文本解析要能把这组键读成一份清单，
         //   而 `production-scope-wiring.test.mjs` ① 正是那么读的）。
         whitelist: whitelist.port,
+        // ★★★ PRT-610 写入侧：组合根把 `onDecision` 一路透传（`root.mjs:486` → `assemble.mjs:293`
+        //   → 桥），于是**已经作出的**决定在这里被追加进车道。它是**事后通知**：
+        //   它抛错不会把一次调用变成一次拒绝（`spool-writer.mjs` 因此把失败收成具名读数）。
+        onDecision: spoolWriter.observeDecision,
         // ★ 传的是**工厂**，不是端口：端口的真实实现住在 team-hub 那一侧，
         //   而组合根在装配期拿到的是一份解析好的身份配置。
         createRequestApproval: (resolved) => {

@@ -563,6 +563,17 @@ export const SCHEMA = defineSchema({
       doc: '当前任务标识（把这次执行挂回任务）。**没有默认值**',
     },
     {
+      // ★ 第 118 轮第八轮加：`root-row.mjs` 用**这一个**键给车道的**写入侧**定目录锚
+      //   （`runtime/toolcall/spool-writer.mjs`：缺它时**按条具名拒绝**、不回落成
+      //    cwd / 临时目录 / 库的邻居）。
+      //   ⚠️ 与 runtime 的 `envNames` 是同一个键：登记在这里的是"**谁读它**"，
+      //   而 `product/process-manifest.mjs` 登记的是"**谁拿到它**"——两处都少不得。
+      key: 'dataDir', env: 'LEGION_DATA_DIR', type: 'path', default: '',
+      doc: '数据根（车道 `<dataDir>/toolcall-spool/` 的锚，收账侧也读同一个键）。' +
+        '**没有默认值**：一个"随手找个地方写"的车道，写进去的账没人会来收，' +
+        '而它在返回值上是**成功**的',
+    },
+    {
       key: 'approvalPolicy', env: 'LEGION_APPROVAL_POLICY', type: 'string', default: '',
       doc: '需要人时的审批策略，只接受 `APPROVAL_POLICIES` 里的值。取不到就是 null → 具名拒绝。' +
         '**不猜**：默认 ask 会让无人值守的进程去问一个不在场的人，' +

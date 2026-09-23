@@ -231,7 +231,7 @@ A2: HTTP 503「强制面结论的形状不对：必须是带布尔字段 autoExe
 | --- | --- | --- | --- | --- |
 | **P0-1** | `test` 阶段**全量**复跑 | 验证 | 第 116 轮 7 个红套件修在 `59a6ad9` | ✅ **PASS**（19 套件 / 1204s，第二次单独跑） |
 | **P0-2** | **`legion-enforcement-runtime-contract-server` 行挂载了却从未激活** | 施工·真缺陷 | 两个平面（等的账 ≠ 判的树）＋ 自指等待 | ✅ **已修**（`c735415`）：cross-process 6 败 → **19/19**；全域 1025/1025；新增用例 ①e 钉住 |
-| **P1-1** | 接 `spool` / `toolcall-drain` **落账车道**（解目标链 L7） | 施工 | ★ **收账侧已接进生产**（§3.5）：hub 的收账 tick + hub 的 `LEGION_DATA_DIR` 登记（三处一起落）；端到端实测：真 hub 进程把 spool 文件收进 `tool_calls`。车道三套 34 例 + 接线套件 12 例 | 🟡 **只剩写入侧**：执行面在按 Run 的缝上绑 `runId` 并调 `appendSpoolRecord`（★ L7 那个 ✔ **不许**读成"审计完整性已达成"，见 `alpha-chain-trace.mjs` 的 L7 `coreWhy`） |
+| **P1-1** | 接 `spool` / `toolcall-drain` **落账车道**（解目标链 L7） | 施工 | ★ **两半都已接进生产**（§3.5 / §3.6）：收账侧 = hub 收账 tick（第七轮，端到端实测）；写入侧 = `root-row.mjs` 把 `spool-writer.mjs` 挂成 `onDecision`，Run 号**按事件**取（第八轮，车道三套 + 写入侧 9 例，54 套装配用例 1026 例全绿） | 🟡 **只剩三处未接**：`dispatched` / `result` 两种记录**没有观察点**；只有**带投影**的事件会被写成一行；行里的 `attemptId` 仍是 `null`（载体今天只加了 `runId`） |
 | **P1-2** | 删掉 PRT-707 **死的那份**实现 | 施工 | 业主 2026-09-23 裁决 | 待做 |
 | **P1-3** | `whitelist` 装配 + **Legion 能力词表**映射 | 施工 | 业主 2026-09-23 裁决（第 27 条选 Legion 名 + 加映射） | 待做 |
 | **P1-4** | 阶段 9 产品动作的 **CLI 面** | 施工 | 业主 2026-09-23 裁决（第 16 条：做） | 待做 |
@@ -479,6 +479,51 @@ hub 起来了：true（db=true）
 （`console.warn`，同一种坏法去重），而**没有**进任何可查询的诊断面。
 ⇒ "收账坏着"这件事今天要去看 hub 的 stdout。把它做成一条可读读数排在下一轮
 （与写入侧一起做更自然：那时才有真账可读）。
+
+### 3.6 写入侧接进生产（第 118 轮第八轮）：**Run 号按事件取**，不在装配期绑
+
+§14.5 量到的那处真设计问题在这里收口：`spoolDirFor({dataDir, runId})` 是**逐 Run** 一份，
+而 `onDecision` 是**装配期**给的 —— 在装配期把 Run 绑死，会让**整个进程只往第一个 Run
+的账本里写**：
+
+> 一个「装配期绑死 Run」的车道，与一个「只记第一个 Run」的车道，是同一个东西 ——
+> 只不过前者的表现是"后面的 Run 没有工具账"，而那读起来像"那些 Run 没调过工具"。
+
+⇒ 写入侧宿主 `runtime/toolcall/spool-writer.mjs` **不持有 Run**：`runIdOf(event)` 每次从
+**这一个事件**里读，于是同一个进程里并发的两个 Run 各写各的文件。
+
+**四处一起落**（少任何一处，车道都还是不产账）：
+
+| 落点 | 改的是什么 | 为什么不能只改它 |
+|---|---|---|
+| `runtime/contracts/run-identity.mjs` | 按 Run 的身份载荷加 `runId`（`PAYLOAD_KEYS` / `OVERLAY_FIELDS` / 校验） | 不加 ⇒ `readRunIdentity()` 按**闭合键集**拒绝整份载荷（"多一个就拒"），Run 号到不了执行面 |
+| `orchestrator/worker/executor.mjs` | `deriveRunIdentityCarrier()` 把 `request.runId` 搬上线上形状（**唯一**的生产者） | 不加 ⇒ 载荷里永远没有 Run 号，写入侧每条都具名拒绝 |
+| `runtime/toolcall/spool-writer.mjs` | 写入侧宿主：具名读数码 + **任何失败都不抛** | 不写 ⇒ 车道只有收账侧 |
+| `runtime/dsh-composition/plugins/root-row.mjs` | 装配期把写入侧挂成 `onDecision`（`root.mjs:486` 本来就透传这一个键） | 不挂 ⇒ 前三处都只是"允许它写"，没人写 |
+
+★ **`runId` 刻意不进 `CANONICAL_OP_KEYS`**（`enforcement.mjs` 那份是**闭集**：`scope`/`actor`/
+`action`/`target`/`taskId`/`toolName`/`callId`/`arguments`）。进去会让"同一个不可变操作"
+在不同 Run 下得到不同哈希，于是一次批准覆盖不了真正相同的那次调用 —— 与 `attemptId`
+不进哈希是同一条理由（spec §6.5 line 470）。**这一条是本轮唯一动到安全邻域的地方，
+所以先量了那张闭集表才动手。**
+
+**⚠️ 仍未接的三处**（一处都不许读成"审计完整性已达成"）：
+
+1. **`dispatched` / `result` 两种记录今天没有观察点**：强制面只看得到"决定已作出"
+   （`pre-execute` 那一条通知），看不到"派发了没有、结果是什么" ⇒ 车道**只产 `decision`
+   那一种**。要接它们得先有一个**执行结果**观察点，而那是一个新的缝、不是接线问题 ——
+   写成施工项而不是随手拿 `elapsedMs` 凑一个 `result`。
+2. **只有带投影的事件会被写成一行**：`onDecision` 有几个发射方，只有桥那一条工具调用级
+   通知带 `projection`（`tool-request.mjs` 的 `onDecision`）。别的事件**具名拒绝**
+   （`NO_PROJECTION`），不猜一行出来 —— 猜出来的那一行会带着别的强制点的语义混进同一本账。
+3. **`attemptId` 仍是 `null`**：按 Run 的载体这一轮只加了 `runId`。加它的理由与加 `runId`
+   逐字相同（同为观察 metadata、同不进哈希），**下一轮连同第一处一起做**（那时才有真行可读）。
+
+**读数**：写入侧 9 例（`spool-writer.test.mjs`：按事件分账 / 追加不覆盖 / 缺锚具名拒绝且
+一个字节都不写 / 读不出 Run 号不回落 / 无投影不猜 / 记账失败不抛也不改判定 / 观测点抛错
+不影响写入 / 与收账侧同一份契约）；54 套 `runtime/dsh-composition` 用例 **1026/1026**
+（装配期挂 `onDecision` 没有顶动任何既有读数）；`reachability --diff` 与基线一致（新模块
+经组合根可达，基线不需要新条目）；§9 链仍是"无硬断 + 唯一软缺口 L9 + 断点全部有归属"。
 
 ---
 

@@ -32,7 +32,7 @@
 | L4 | 认领 Task / 生成 Snapshot | ✔ 有活实现 |
 | **L5** | **DshRuntimeAdapter 执行 Run** | **✖ 硬断** |
 | L6 | 工具审批与 hard floor | ✔ 有活实现 |
-| L7 | 产物验收/交接/审计/用量 | ✔ **收账侧已接**（第 118 轮第七轮：hub 的收账 tick + hub 的 `LEGION_DATA_DIR` 登记，端到端实测：真 hub 进程把 spool 收进 `tool_calls`）。★ 但**写入侧**（执行面按 Run 调 `appendSpoolRecord`）今天仍无调用点 ⇒ 生产里这笔账**还是不会被写**——那是**调用点**缺口，可达性看不见它（残余项在队列 P1-1） |
+| L7 | 产物验收/交接/审计/用量 | ✔ **两半都接上了**（第 118 轮第七轮收账侧：hub 的收账 tick + `LEGION_DATA_DIR` 登记；第八轮写入侧：`root-row.mjs` 把 `spool-writer.mjs` 挂成 `onDecision`，Run 号**按事件**取）。★ 仍未接的**三处**（一处都不许读成"审计完整性已达成"）：`dispatched`/`result` 两种记录**没有观察点**、只有**带投影**的事件会被记、行里的 `attemptId` 仍是 `null`（残余项在队列 P1-1） |
 | L8 | Runtime 崩溃可恢复 | ✔ 有活实现 |
 | L9 | 升级失败可回滚 | △ 软缺口（`retention.mjs` 没人挂） |
 

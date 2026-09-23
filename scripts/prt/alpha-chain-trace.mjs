@@ -165,20 +165,30 @@ export const ALPHA_CHAIN = Object.freeze([
     modules: Object.freeze([
       'orchestrator/acceptance/index.mjs',
       'runtime/toolcall/spool.mjs',
+      'runtime/toolcall/spool-writer.mjs',
       'orchestrator/worker/toolcall-drain.mjs',
     ]),
     core: Object.freeze(['orchestrator/acceptance/index.mjs']),
-    coreWhy: '验收是这一节的名字。★ `spool`/`toolcall-drain` 是**支撑**：'
+    coreWhy: '验收是这一节的名字。★ `spool`/`spool-writer`/`toolcall-drain` 是**支撑**：'
       + '它们管的是「一次工具调用在哪一层落账」那条车道（§5 第 28 条），'
       + '缺了它 Run 照跑，缺的是**审计的完整性**——两者不该用同一个词报。'
-      + '★★ 第 118 轮第七轮：这两条已由 hub 的**收账 tick**接上'
+      + '★★ 第 118 轮第七轮：收账侧由 hub 的**收账 tick**接上'
       + '（`team-hub/toolcall-sweep.mjs`；端到端实测过：真 hub 进程 + 真 `LEGION_DATA_DIR`'
       + ' ⇒ spool 文件真的被收进 `tool_calls`），于是这一节在**模块可达性**上转 ✔，'
       + '`owner: 28` 随之被 `owner-stale` 判掉（第 28 条已由业主授权本会话定：'
       + '丙的机制 + 目录锚在既有配置量上）。'
-      + '⚠️ **但它没有全好**：车道的**写入侧**（执行面按 Run 调 `appendSpoolRecord`）'
-      + '今天仍然没有调用点 ⇒ 生产里 `tool_calls` 还是不会被写。'
-      + '那是**调用点**缺口，而可达性**按构造看不见**它 —— 模块可达 ≠ 有人调那个函数。'
+      + '★★ 第 118 轮第八轮：**写入侧**也接上了——`runtime/toolcall/spool-writer.mjs` '
+      + '由组合根（`root-row.mjs`）在装配期挂成 `onDecision` 观察点，而 Run 号**按事件**取'
+      + '（`identityOverlayForExecution(event.execution).runId`，随 Run 送达的那一份身份覆盖）'
+      + '⇒ 并发的两个 Run 各写各的账。★ 这一点是本轮的主要设计约束：'
+      + '在装配期把 Run 绑死会让**整个进程只往第一个 Run 的账本里写**，'
+      + '而"后面的 Run 没有工具账"读起来像"那些 Run 没调过工具"。'
+      + '⚠️ **仍未接的三处**（一处都不许读成"审计完整性已达成"）：'
+      + '① `dispatched` / `result` 两种记录今天**没有观察点** —— 强制面只看得到"决定已作出"，'
+      + '看不到"派发了没有、结果是什么"，于是车道只产 `decision` 那一种；'
+      + '② 只有**带投影**的事件会被写成一行（`projection` 只出现在桥那一条工具调用级通知上），'
+      + '别的事件**具名拒绝**、不猜一行出来；'
+      + '③ 行里的 `attemptId` 仍是 `null`：按 Run 的载体今天只加了 `runId`。'
       + '⇒ 这一节的 ✔ 读作"**有活实现**"，**不**读作"审计完整性已达成"。'
       + '残余施工项记在 `docs/superpowers/prt/PRT-TAKEOVER-QUEUE-2026-09-23.md` 的 P1-1。',
   }),

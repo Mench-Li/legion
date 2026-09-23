@@ -100,10 +100,25 @@ export const RUN_IDENTITY_CODES = Object.freeze({
  * 一个"接受但通常不用"的字段与一个"根本不接受"的字段，差别在于前者会在某一天
  * 被谁填上，而那一天没有任何东西会红（见文件头那段）。
  */
-export const RUN_IDENTITY_PAYLOAD_KEYS = Object.freeze(['version', 'scope', 'taskId', 'cwd'])
+export const RUN_IDENTITY_PAYLOAD_KEYS = Object.freeze(['version', 'scope', 'taskId', 'cwd', 'runId'])
 
-/** 身份里**随 Run 变**的那几个字段名（闭集，别的键一律不接受）。 */
-export const RUN_IDENTITY_OVERLAY_FIELDS = Object.freeze(['scope', 'taskId', 'cwd'])
+/**
+ * 身份里**随 Run 变**的那几个字段名（闭集，别的键一律不接受）。
+ *
+ * ★ 第 118 轮第八轮加 `runId`。它与前三项**同源**（都随 Run 变、权威都在控制面），
+ *   但**用途不同**：前三项是**授权身份**（`scope` / `taskId` 进
+ *   `CANONICAL_OP_KEYS`，参与授权哈希），而 `runId` 是**归属 metadata** ——
+ *   它回答的是"这次执行属于哪个 Run"，用于把执行面写下的工具账
+ *   （`runtime/toolcall/spool.mjs`）按 Run 分文件。
+ *
+ *   ★★ 它**刻意不在** `CANONICAL_OP_KEYS` 里（`enforcement.mjs`）：进去会让
+ *   "同一个不可变操作"在不同 Run 下得到不同哈希，于是一次批准覆盖不了真正相同的
+ *   那次调用——与 `attemptId` 不进哈希是同一条理由（spec §6.5 line 470）。
+ *
+ *   > 一份"把归属也哈希进去"的身份载荷，与一份"每次 Run 都要重新批准一次"的
+ *   > 审批面，是同一个东西——只不过前者的代价写在哈希里，看不见。
+ */
+export const RUN_IDENTITY_OVERLAY_FIELDS = Object.freeze(['scope', 'taskId', 'cwd', 'runId'])
 
 /**
  * 适配器交给宿主端口的**已解析**载荷状态（`startRun(provider, {enforcementIdentity})`）。
@@ -193,16 +208,18 @@ export function readRunIdentity(payload) {
   }
 
   const overlay = { scope: payload.scope.trim() }
-  for (const field of ['taskId', 'cwd']) {
+  for (const field of RUN_IDENTITY_OVERLAY_FIELDS) {
+    if (field === 'scope') continue
     const v = payload[field]
     if (v === undefined) continue
-    // `null` 在这里**是合法的**：`taskId` 的进程级值本来就允许是 null
-    // （`root.mjs:321` 的理由：「进程级装配时常常还没有任务」）。
-    // 于是"这次 Run 明确没有任务"必须能表达出来，不能被读成"沿用上一个任务"。
-    if (v === null && field === 'taskId') { overlay[field] = null; continue }
+    // `null` 在这里**是合法的**（`taskId` / `runId` 两项）：进程级装配时常常还没有任务，
+    // 而"这次 Run 明确没有 Run 号"也必须能表达出来，不能被读成"沿用上一个"。
+    // ★ 对 `runId` 来说这一档尤其重要：车道**不会**在缺 Run 号时回落到一个
+    //   进程级的文件名——那会让多个 Run 的账合流，而合流的账看起来更完整。
+    if (v === null && (field === 'taskId' || field === 'runId')) { overlay[field] = null; continue }
     if (!isNonEmptyString(v)) {
       return refuse(RUN_IDENTITY_CODES.BAD_FIELD,
-        `授权身份载荷的 ${field} 必须是非空字符串${field === 'taskId' ? '或 null' : ''}，`
+        `授权身份载荷的 ${field} 必须是非空字符串${field === 'taskId' || field === 'runId' ? '或 null' : ''}，`
         + `收到 ${JSON.stringify(v)}。**不忽略它**：忽略等于沿用进程级那个值，`
         + '而"这次没有这个字段"与"这次的这个字段是别的值"在授权哈希上是两回事')
     }

@@ -287,6 +287,27 @@ A2: HTTP 503「强制面结论的形状不对：必须是带布尔字段 autoExe
 ★ 三条都**不是**"补一个环境变量"：甲要一个**新的观察点**（桥的 `onDecision` 只报"决定"），
 乙要一次**行形状**的决定，丙要给**载体**加一个字段并在两侧都接上。
 
+★★ **第 118 轮第十六轮实测（本会话顺手读到的，为下一轮备料）**：那个"新观察点"**已经在桥上了，
+只是被接进了错误的那条线**。逐字读 `runtime/dsh-composition/assemble.mjs:313`：
+
+```js
+...(onDecision === null ? {} : { onOutcome: onDecision }),
+```
+
+也就是说——**结果事件（`onOutcome`）今天被拍平送进了 `onDecision`**，
+而 `spool-writer.observeDecision` 的第一道守卫是"没带投影 ⇒ `NO_PROJECTION` 具名拒绝"（上面乙那一行）。
+⇒ 甲与乙是**同一件事的两面**：
+
+| 项 | 之前记的 | 实测之后它变成 |
+| --- | --- | --- |
+| 甲 | "写入侧没有观察点" | **有**（`onOutcome`），但被并进了 `onDecision` ⇒ 需要的是**在 `assemble.mjs:313` 把这个漏斗拆开**，给结果一条自己的写入路径 |
+| 乙 | "要一次行形状的决定" | 同一次决定：结果行的形状（`dispatched` 要 `['callId']`，`result` 要 `['callId','status']`，见 `spool.mjs:124-125`），而**投影不是它的必填项**——今天它却是被投影这道门挡在外面的 |
+| 丙 | "载体里连 `attemptId` 这个名字都没有" | ★ **部分过期**：收账侧**读**它（`orchestrator/worker/toolcall-drain.mjs:159` 逐字 `attemptId: row.attemptId ?? null`）⇒ 缺的是**写入侧把它填上**，不是两侧都加 |
+
+★ 这一格是"账要跟着代码走"的又一次现场：**四行之前那句"要一个新的观察点"是对的，
+但"（桥的 `onDecision` 只报'决定'）"这个括号是错的** —— `assemble.mjs:313` 那一刻正好写着相反的话。
+⇒ 下一轮动它时，**先读那一行**，别信这张表。
+
 **回到 §2.1 那一条**（按 Run 的缝）：`runtime/dsh-composition/plugins/root-row.mjs:724`
 （★ 第十四轮校订：本节原写 `:626`，实测已漂到 `:724` —— 由 §3.8 那条手钉判据先红出来的）
 是 `installEnforcementRoot()` 在全仓**唯一**的生产调用方；在那里绑死 runId
@@ -981,6 +1002,11 @@ syntax:PASS env:PASS boundary:PASS deps:PASS build:PASS test:PASS smoke:PASS sta
 | 不可达总数 | 36 | **33** |
 | 其中 `gap` | 15 | **12** |
 | 第 16 条名下 | 6 | **3**（只剩 metrics 那一支，要一个库句柄） |
+| 全量 CI | 9/9（`f3d960b`） | **9/9 PASS**（`2ca5c51`；`syntax 13463 / env 3957 / boundary 924 / deps 4 / build 14692 / test 1174441 / smoke 9778 / stage 111 / doc 2264` ms） |
+
+★ 本刀**一次全量 CI 就全绿**（上一批的 9/9 里有 3 处红是它抓出来的；这一批 0 处）——
+而它**不代表**这刀没有错：`plan-cli` 自己的 3 处红是在写用例的当场就被自己抓住的
+（见 `plan-cli.test.mjs` 的 ④⑦⑨），没等到 CI。**能把错在当场抓住的，是用例；CI 是第二道网。**
 
 ★ 读数之外的两条**必须一起读**（它们比数字重要）：
 

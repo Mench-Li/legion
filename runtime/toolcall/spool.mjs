@@ -65,7 +65,7 @@
 // @module runtime/toolcall/spool
 // ============================================================================
 
-import { appendFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, existsSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 export const TOOLCALL_SPOOL_VERSION = 'legion/toolcall-spool@1'
@@ -92,6 +92,8 @@ export const TOOLCALL_SPOOL_CODES = Object.freeze({
   MISSING_FIELD: 'toolcall-spool-record-missing-field',
   /** 序列化之后含裸换行（会把一条记录切成两条）。 */
   NOT_ONE_LINE: 'toolcall-spool-record-not-one-line',
+  /** 车道目录存在但**读不动**（权限、IO）。与"目录不在"分开报。 */
+  LIST_FAILED: 'toolcall-spool-list-failed',
 })
 
 /**
@@ -205,6 +207,53 @@ export function spoolDirFor({ dataDir, runId } = {}) {
 /** 这个 Run 的落盘文件（不创建）。 */
 export function spoolFileFor({ dataDir, runId } = {}) {
   return join(spoolDirFor({ dataDir, runId }), TOOLCALL_SPOOL_FILENAME)
+}
+
+/**
+ * 这个 DataDir 下**所有已经开过车道**的 Run（收账侧扫一趟用）。
+ *
+ * ## 为什么不把 runId 从目录名反解回来
+ *
+ * `safeRunId()` 是**单向**的：危险字符它**直接拒绝、绝不消毒**（`:144-191`，理由是
+ * 消毒会让 `a/b` 与 `a_b` 落进同一个目录，即两个 Run 合流成一本账）。而目录名就是
+ * runId 本身 ⇒ 反解要么是恒等变换（那不如直接用目录名），要么就得**猜**——而猜错的
+ * 后果与消毒一样。所以这里返回**目录名**与**已经拼好的文件路径**，不返回 runId。
+ *
+ * ## 两种"空"必须分开
+ *
+ * · `present:false` —— `toolcall-spool/` 这个目录**不在**：这条车道从没开过；
+ * · `present:true` 且 `runs:[]` —— 目录在、里面没有 Run：开过，现在没有待收的。
+ *
+ * 两者在"这一趟收了几条"上是同一个读数（都是 0），所以只有 `present` 分得开
+ * ——而"车道没开"与"车道开着但没人用"要处置的事情完全不同。
+ *
+ * @param {{dataDir?: string, readdirSync?: Function}} [opts]
+ * @returns {Readonly<{present: boolean, runs: ReadonlyArray<Readonly<{dirName: string, file: string}>>}>}
+ */
+export function listSpooledRuns({ dataDir, readdirSync: readdirImpl = readdirSync } = {}) {
+  const root = join(assertDataDir(dataDir), TOOLCALL_SPOOL_DIRNAME)
+  let entries
+  try {
+    entries = readdirImpl(root, { withFileTypes: true })
+  } catch (err) {
+    if (err?.code === 'ENOENT') return Object.freeze({ present: false, runs: Object.freeze([]) })
+    throw spoolError(
+      TOOLCALL_SPOOL_CODES.LIST_FAILED,
+      `车道目录存在但读不动：${root}（${err?.code ?? err?.message ?? String(err)}）`,
+    )
+  }
+  const runs = []
+  for (const entry of entries) {
+    // 只认目录：同名文件（比如有人往那儿丢了个 README）不是一条车道。
+    if (typeof entry?.isDirectory !== 'function' || entry.isDirectory() !== true) continue
+    runs.push(Object.freeze({
+      dirName: entry.name,
+      file: join(root, entry.name, TOOLCALL_SPOOL_FILENAME),
+    }))
+  }
+  // 顺序确定：收账的读数是给人看的，"每次顺序都不一样"会让两次对比失去意义。
+  runs.sort((a, b) => (a.dirName < b.dirName ? -1 : a.dirName > b.dirName ? 1 : 0))
+  return Object.freeze({ present: true, runs: Object.freeze(runs) })
 }
 
 /**

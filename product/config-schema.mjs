@@ -1059,6 +1059,13 @@ export const SCHEMA = defineSchema({
     { target: 'orchestrator', env: 'LEGION_DATA_DIR', via: 'env', from: 'layout.dataDir', note: '**派生值**：worker 的状态文件与端口发布的读取都以它为锚' },
     { target: 'orchestrator', env: 'LEGION_RUNTIME_URL', via: 'env', from: 'Runtime 进程发布的实际临时端口', note: '**派生值**（读回来、不是猜出来）：读端口发布并用**本次那个 runtime 子进程的 pid** 校验；读不到/对不上就**不注入**并记具名诊断——绝不回落成默认端口' },
     { target: 'orchestrator', env: 'LEGION_RUNTIME_TOKEN', via: 'env', from: 'Launcher 每次启动生成（与 runtime 同一份）', note: '与 runtime 进程逐字相同的凭证。**只**注入这两个进程' },
+    // ── PRT-610 出站车道：收账侧的目录锚 ──────────────────────────────────
+    //
+    // ★ 与上面三条**同一个理由**（Launcher 是唯一知道 `layout.dataDir` 的地方），
+    //   但用途不同：hub 拿它不是为了发布端口，而是为了找到**同一个** spool 目录
+    //   ——按 Run 落在那下面的记录，只有持有 SQLite 连接的那一侧收得进 `tool_calls`。
+    //   **只给目录、不给凭证**：收账不碰契约认证面。
+    { target: 'team-hub', env: 'LEGION_DATA_DIR', via: 'env', from: 'layout.dataDir', note: '**派生值**：收账侧（spool 文件 → `tool_calls`）与 runtime/orchestrator 锚在同一个 DataDir 上。**不注入 `LEGION_RUNTIME_TOKEN`**' },
   ],
   notes: [
     '子进程环境**不继承**宿主进程：只放行进程清单声明的键、平台必需键与 Launcher 显式给定的值（环境白名单模块 product/launcher/allowlist）。',

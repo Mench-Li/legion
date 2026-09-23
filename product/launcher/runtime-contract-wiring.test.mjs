@@ -406,6 +406,38 @@ test('①b ★★ Launcher 也把 `LEGION_DATA_DIR` 交给 worker（否则 worke
   assert.notEqual(b.layout.dataDir, process.env.LEGION_DATA_DIR)
 })
 
+// ═══════════════════════════════════════════ ①b″ PRT-610：收账侧也要这个锚
+
+test('①b″ ★★★ hub 拿到 `LEGION_DATA_DIR`（收账侧），但**拿不到凭证** —— 同一张白名单的两个方向', async (t) => {
+  const b = await boot({ tag: 'datadir-hub' })
+  t.after(() => b.stop())
+  assert.equal(b.started.ok, true, `启动失败：${JSON.stringify(b.started.failures)}`)
+
+  /**
+   * ★ 为什么 hub 需要它：工具调用车道的**收账侧**只能住在持有 SQLite 连接的那个进程里
+   *   （`team-hub/server.mjs` 自己开库），而按 Run 落进 spool 的记录锚在 DataDir 上。
+   *   两边必须是**同一个**值 —— 一边写 `A/…`、一边收 `B/…` 的后果**不是报错**，
+   *   而是一条空读数：空目录是合法局面，收账"成功"地什么也没收。
+   *
+   * ★ 为什么它只拿目录：收账不碰契约认证面。两个方向都要钉住 ——
+   *   只验"hub 拿到了 DataDir"，会让"顺手把凭证也给了 hub"变成一条看不见的放宽。
+   */
+  const hubEnv = b.envOf('team-hub')
+  assert.notEqual(hubEnv, null, 'hub 必须出现在 envSurface 里 —— 否则这一条会静默变成空验')
+  assert.equal(hubEnv.LEGION_DATA_DIR, b.layout.dataDir,
+    `收账侧的目录锚不是 Launcher 给的：${JSON.stringify(hubEnv)}`)
+  assert.equal(TOKEN_ENV in hubEnv, false,
+    `凭证泄漏到 hub 了：收账不需要它，它的 envNames 里也没有它 —— ${JSON.stringify(hubEnv)}`)
+
+  // 反向锚：白名单**没有**放行这个键的进程，连宿主环境里的同名值也不该进得去
+  for (const key of ['workbench', 'whiteboard']) {
+    const env = b.envOf(key)
+    if (env === null || env === undefined) continue
+    assert.equal('LEGION_DATA_DIR' in env, false,
+      `进程 ${key} 的 envNames 里没有这个键，它不该拿到：${JSON.stringify(env)}`)
+  }
+})
+
 // ═══════════════════════════════════════════ ①b′ 同一个形状的反面
 
 test('①b′ ★★★ Launcher 把 `LEGION_WORKSPACE_DIR` 交给 worker（否则一个任务都不认领）', async (t) => {

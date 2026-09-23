@@ -100,7 +100,7 @@ test('① ★★★ 正对照：入口认得出、已知接上的可达、清单
   //  被报成 `[gap] 只被自己的用例 import`——而它有两个真实消费者
   //  （另一个是 `board-plugin/src/index.ts:18`，编成未跟踪的 `lib/`）。
   //
-  //  权威来源不是猜的：`scripts/ci/run-ci.mjs:4738` 的 `tracked` 清单
+  //  权威来源不是猜的：`scripts/ci/run-ci.mjs:4781` 的 `tracked` 清单
   //  （★ 第 118 轮第十三轮校订坐标：原写 3748，实测漂了 990 行）
   //  （stage 阶段算 SHA256SUMS 的那一份）逐字列着 `scrum/serve.mjs`。
   //
@@ -339,8 +339,26 @@ test('④ ★★ 读数：四族 gap 仍然不可达（谁把它们接上，这�
     //   只在基线里；实测 `--diff` 一次报出 5 条，而我这一轮只 import 了 3 个模块。
     //
     //   ⇒ 按规矩补上同族的**真实**成员（本族接完这一刀还剩 6 个，见队列 §5.1）：
-    ['product/lifecycle/data-export.mjs', '§5 第 16 条 / 队列 P1-4（阶段 9：模块 + 用例齐备、零生产 import 者）'],
-    ['product/lifecycle/retention.mjs', '§5 第 16 条 / 队列 P1-4（同上；它的输入要目录与策略、碰数据 ⇒ 另一次裁决）'],
+    //
+    // ★★★ 第 118 轮第十六轮：上面那**两条**（`data-export.mjs` / `retention.mjs`）
+    //   **也变成可达了**，同样按规矩从这里删掉。
+    //
+    //     这一轮的接线方式与前几次又不同：**它是直接的**。
+    //     第二刀没有去 import 这两个模块本身，而是 import 了
+    //     `product/lifecycle/plan-cli.mjs` —— 而 `plan-cli.mjs` 自己 import 了
+    //     `data-export` / `retention` / `uninstall` 三个（三份计划）。
+    //     ⇒ **一次接线，`--diff` 会报"基线过期 3 条"**：我记着的是 2 条，
+    //       第三条 `uninstall.mjs` **根本不在这张表里**（它只在基线 JSON 里）。
+    //
+    //   > 一次接线会让**几个**模块同时变成可达，而基线与本表只会报出
+    //   > "你记着的那几条"——剩下那几条**没人记得**，于是它们从账上消失。
+    //
+    //   ★ 本条与上一轮那条注释逐字是同一句 —— 而它**又对了一次**。
+    //     这不是巧合：只要"接线"与"记账"是两件事，这个形状就会反复出现。
+    //
+    //   ⇒ 按规矩补上同族的**真实**成员（本族还剩 3 个，全是 metrics 那一支）：
+    ['product/metrics-spec7.mjs', '§5 第 16 条 / 队列 P1-4（PRT-712 的 spec7 指标：要一个快照，快照要库句柄）'],
+    ['product/metrics-spec7-source.mjs', '§5 第 16 条 / 队列 P1-4（同上；它是那个句柄的读取器，`spec7CountsFromHubDb(db)`）'],
     ['product/metrics-source.mjs', '§5 第 16 条 / 队列 P1-4（PRT-712：台账自己写了"还没有界面/CLI 消费者"）'],
     // 族五（第 19 轮补入）：**执行面那几份数据的投递读取器**。
     //
@@ -548,11 +566,24 @@ test('⑥ ★★ `evidenceFrom:` 只是存在性断言，不是加载指令（�
     assert.equal(existsSync(join(REPO, p)), true, `${p} 被 evidenceFrom 指着却不存在`)
   }
 
-  // ★ 反方向：它们**不在**基线里被当成入口，且仍有 8 个是不可达的。
+  // ★ 反方向：它们**不在**基线里被当成入口，且仍有 4 个是不可达的。
   //   如果哪天有人把 evidenceFrom 加进 MANIFEST_PATTERNS，这些会突然变可达 ⇒ 本用例红。
+  //
+  // ★★★ 第 118 轮第十六轮：阈值从 `>= 5` 改成 `>= 4`，而**这一次的下降本身就是本条的最好证据**。
+  //
+  //   掉出去的那一个是 `product/lifecycle/retention.mjs` —— `product/release/checklist.mjs:174`
+  //   一直用 `evidenceFrom:` 指着它，而它**从来不可达**（那正是本条要证明的：
+  //   这条声明**不加载**任何东西）。
+  //
+  //   本轮它变成可达，**走的是一条真实 import**：`--retention-plan` ⇒
+  //   `product/lifecycle/plan-cli.mjs` ⇒ `./retention.mjs`。
+  //   ⇒ "被 evidenceFrom 指着的模块，最后由一条**真的 import** 接上" ——
+  //     这正是本条与它上面那段注释想钉的那件事，只不过这次是从**结果那一侧**看到的。
+  //
+  //   > 一个"存在性声明"要在一年后变成"在用"，唯一的途径是有人真的去 import 它。
   const wouldFlip = [...withEvidence].filter((f) => a.unreachable.includes(f))
-  assert.ok(wouldFlip.length >= 5,
-    `★ 只有 ${wouldFlip.length} 个 evidenceFrom 目标当前不可达（期望 ≥5）。\n` +
+  assert.ok(wouldFlip.length >= 4,
+    `★ 只有 ${wouldFlip.length} 个 evidenceFrom 目标当前不可达（期望 ≥4）。\n` +
     '  要么是有人把 `evidenceFrom` 当成了入口声明（把"存在"读成了"在用"），\n' +
     '  要么是这些模块真的被接上了——两种都必须先看清再改本用例。\n' +
     `  目标：${[...withEvidence].join(', ')}`)

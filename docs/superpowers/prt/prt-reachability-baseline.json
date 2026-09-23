@@ -38,21 +38,6 @@
       "reason": "产品层公开出口；`cli.mjs` 直接 import `./launcher.mjs`（进程入口走 `cli.mjs`）"
     },
     {
-      "file": "product/lifecycle/data-export.mjs",
-      "class": "gap",
-      "reason": "阶段 9 产品动作：模块 + 用例齐备，零生产 import 者（同 `product/lifecycle/data-classes.mjs`）。⇒ 裁决处：§5 第 16 条"
-    },
-    {
-      "file": "product/lifecycle/retention.mjs",
-      "class": "gap",
-      "reason": "阶段 9 产品动作：模块 + 用例齐备，零生产 import 者（同 `product/lifecycle/data-classes.mjs`）。⇒ 裁决处：§5 第 16 条"
-    },
-    {
-      "file": "product/lifecycle/uninstall.mjs",
-      "class": "gap",
-      "reason": "阶段 9 产品动作：模块 + 用例齐备，零生产 import 者（同 `product/lifecycle/data-classes.mjs`）。⇒ 裁决处：§5 第 16 条"
-    },
-    {
       "file": "product/metrics-source.mjs",
       "class": "gap",
       "reason": "PRT-712：台账自己写了\"还没有界面/CLI 消费者\"。⇒ 裁决处：§5 第 16 条"

@@ -118,6 +118,22 @@ export const CLI_FLAGS = Object.freeze([
     '`checklist`（PRT-909 商业 Alpha 发布检查清单）/ `privacy`（PRT-903/906 隐私说明与外发面）/ ' +
     '`runbook`（PRT-907 支持手册）。与 `--json` 同用时打结构化那份。' +
     '**kind 不认识时具名拒绝并列出可选项**（不回落成第一份——那会让人拿着别的报告去核对发布条件）' },
+  // ── 第 16 条第二刀：三份**计划**（要读盘，但零副作用）─────────────────────
+  //
+  // ★ 与第一刀那三份报告的关键区别：这三份**要一份磁盘上的现实**
+  //   （`stores` / `entries`），由 `product/lifecycle/store-scan.mjs` 读出来。
+  //   扫的根**全部来自 `resolveLayout`**（含安装目录——`program-only` 要删的就是它），
+  //   这一层一个默认值都不加。
+  { name: '--uninstall-plan=<mode>', kind: 'value', doc: '（第 16 条）按 <mode> 算一份**卸载计划**（PRT-908）：' +
+    '会删什么、会留什么、**拒绝**什么。**模式必须显式给**（见 `--help` 打印的合法值）。' +
+    '**零副作用**：只算不删。' +
+    '模式不认识时整份不可用（`planUninstall` 对未知模式什么都不删——猜 `purge` 会删掉用户的数据）' },
+  { name: '--export-plan', kind: 'boolean', doc: '（第 16 条）算一份**数据导出计划**（PRT-905）：' +
+    '会进包什么、按台账排除什么、哪些落不下来（要人决定）。按**可移植格式**算：' +
+    '`sqlite`/`db`/二进制是备份格式，不算"导出"。**零副作用**：不写任何文件' },
+  { name: '--retention-plan', kind: 'boolean', doc: '（第 16 条）算一份**保留计划**（PRT-904）：' +
+    '按策略会清什么，以及每类的**用量 / 上限**（`null` 是"显式不设上限"，不是"忘了配"）。' +
+    '**零副作用**：只算不删' },
   { name: '--wizard', kind: 'boolean', doc: '跑一次首次运行向导（PRT-707）：环境 → 目录 → 启动 → 配模型 → 实测 →（可选）心跳 → 完成。' +
     '**只有实测通过才报完成**；最后一步「健康心跳」是**可选项**，不回答也照样走完' },
   { name: '--wizard-consent=<who>', kind: 'value', doc: '（PRT-707）在向导里**预先**回答「愿意发送健康心跳」，署名为 <who>。' +
@@ -1490,6 +1506,38 @@ export async function run({
     if (r.ok === true) return 0
     // 与 `--set-log-policy` 同一条口径：**参数**错是 2，别的一律 9。
     return r.code === REPORT_CLI_CODES.UNKNOWN_KIND ? 2 : 9
+  }
+
+  // ── 第 16 条第二刀：三份**计划**（读盘，但零副作用）─────────────────────
+  //
+  // ★ 位置与那三份报告**不同**，理由是它们要的东西不同：
+  //   报告不读任何东西 ⇒ 排在配置校验之前（"配置坏了"正是最需要看清单的时刻）；
+  //   计划要 **layout**（要扫的根的唯一来源）⇒ 必须排在 `launcherOptionsFrom` 之后。
+  //   而它仍然排在任何**写**动作之前：这一层只读盘、只打印。
+  const planKind = typeof parsed.flags['uninstall-plan'] === 'string' ? 'uninstall'
+    : parsed.flags['export-plan'] === true ? 'export'
+      : parsed.flags['retention-plan'] === true ? 'retention' : null
+  if (planKind !== null) {
+    const { renderPlan, PLAN_CLI_CODES } = await import('../lifecycle/plan-cli.mjs')
+    const r = renderPlan(planKind, {
+      layout: options.layout ?? {},
+      mode: typeof parsed.flags['uninstall-plan'] === 'string' ? parsed.flags['uninstall-plan'] : null,
+      json,
+    })
+    if (json && r.data !== null) {
+      write(JSON.stringify({
+        ok: r.ok === true, kind: r.kind, code: r.code ?? null,
+        message: r.message ?? null, data: r.data,
+      }, null, 2))
+    } else if (r.text !== undefined) {
+      write(r.text)
+      if (r.ok !== true && r.message !== null) write(`✖ ${r.message}`)
+    } else {
+      write(`✖ ${r.message}`)
+    }
+    if (r.ok === true) return 0
+    // 不认识 kind / 不认识模式都是**参数错** ⇒ 2；渲染不出来一律 9。
+    return r.code === PLAN_CLI_CODES.UNKNOWN_KIND || r.code === PLAN_CLI_CODES.MODE_UNKNOWN ? 2 : 9
   }
 
   // ── 日志策略：查看 / 修改（PRT-709 收尾）──────────────────────────────

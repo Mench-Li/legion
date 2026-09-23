@@ -234,7 +234,7 @@ A2: HTTP 503「强制面结论的形状不对：必须是带布尔字段 autoExe
 | **P1-1** | 接 `spool` / `toolcall-drain` **落账车道**（解目标链 L7） | 施工 | ★ **两半都已接进生产**（§3.5 / §3.6）：收账侧 = hub 收账 tick（第七轮，端到端实测）；写入侧 = `root-row.mjs` 把 `spool-writer.mjs` 挂成 `onDecision`，Run 号**按事件**取（第八轮，车道三套 + 写入侧 9 例，54 套装配用例 1026 例全绿） | 🟡 **只剩三处未接**：`dispatched` / `result` 两种记录**没有观察点**；只有**带投影**的事件会被写成一行；行里的 `attemptId` 仍是 `null`（载体今天只加了 `runId`） |
 | **P1-2** | 删掉 PRT-707 **死的那份**实现 | 施工 | 业主 2026-09-23 裁决（第 17 条） | **✅ 已执行（第九轮，`943ccdc`）** —— ★ 第十四轮核实：上一版这里还写着"待做"，而 `product/launcher/first-run.mjs` **早已不存在**（`Test-Path` = False）；活的那份 `wizard.mjs` / `--wizard` 仍在。> 一张"状态"列与台账的行内散文犯了同一个病：**做完之后没有人回头改那一格**。 |
 | **P1-3** | `whitelist` 装配 + **Legion 能力词表**映射 | 施工 | 业主 2026-09-23 裁决（第 27 条：Legion 名 + 加映射层） | **✅ 两半都清了（第十四轮核实）**：① 映射层在 `whitelist-port.mjs:278`（执行面名 → Legion 名）/`:309`（交给 `permitsTool`）；② 端口的**生产装配**在 `root-row.mjs:645`（`whitelistPortFromEnv({ env: effectiveEnv })`）⇒ `:760` 喂给桥 ⇒ 它**不再是**"在生产里恒为 null"。剩下的"**许可的取值从哪来**"已**并入第 14 条**（§3.7.1），而业主已答（部署方在配置里给，缺失即未接）⇒ 本会话无待办 |
-| **P1-4** | 阶段 9 产品动作的 **CLI 面** | 施工 | 业主 2026-09-23 裁决（第 16 条：做） | **🟡 第一刀已落（第十四轮）**：3 份只读报告接进 `legion --report=<kind>`（`product/report-cli.mjs`）；不可达 41→**36**、`gap` 20→**15**、本族 11→**6**；剩 6 个要目录 / 模式 / 库连接（**碰数据**）⇒ 各有各的裁决（§3.10） |
+| **P1-4** | 阶段 9 产品动作的 **CLI 面** | 施工 | 业主 2026-09-23 裁决（第 16 条：做） | **🟡 两刀都已落（第十四 / 第十六轮）**：第一刀 3 份只读报告接进 `legion --report=<kind>`（`product/report-cli.mjs`）；**第二刀接的是一条读法**——`product/lifecycle/store-scan.mjs`（把落点从磁盘读出来）+ `product/lifecycle/plan-cli.mjs` 三面旗标（`--uninstall-plan=<mode>` / `--export-plan` / `--retention-plan`）。合计：不可达 41→**33**、`gap` 20→**12**、本族 11→**3**；★ 第二刀**不需要**另一次业主裁决——那三个模块要的"目录"就是布局自己那几个根（`resolveLayout` 给的），真正还差的只有 metrics 那一支的**库句柄**（§3.10 / §7） |
 | **P1-5** | 外部 API 授权表**管 scheme** | 施工 | 业主 2026-09-23 裁决（第 26 条：管） | **✅ 已执行（第十一轮）**，见 §3.8 |
 | **P2-1** | 第 24 / 25 条的**临时口径**：政策门暂不从连接器声明读能力；MCP 工具归属暂以 F-21 登记表为准 | 记账 | 业主本轮未给，先按保守一侧记，等他改 | 已记 |
 | **P2-2** | 剩下的裁决项：第 12 / 10 / 8 / 6 / 21 条 | 裁决 | `DECISION-BRIEF.md` §1 / §2 | 待业主 |
@@ -365,7 +365,7 @@ A2: HTTP 503「强制面结论的形状不对：必须是带布尔字段 autoExe
 
 ⇒ 取 **丙 的机制**（按 Run 交付；runId 在**按 Run 安装**的那处绑 —— PRT-214 已跑通两遍），
 而**目录锚在 `LEGION_DATA_DIR`**：这是"既有配置量"，**runtime 与 orchestrator 今天就已经
-各拿一份**（`product/config-schema.mjs:1064` / `:1066`）⇒ 两半都不需要新键，
+各拿一份**（`product/config-schema.mjs:1074` / `:1076`）⇒ 两半都不需要新键，
 甲与乙各自的代价都不付。
 
 **收账侧的宿主**（§14.7 没把它当成要裁的事）随之定下：**hub** —— 它是唯一持有**可写 db**
@@ -766,7 +766,7 @@ hard floor、`canonicalHash`（账本）全都读那份投影 ⇒ 全都判错�
 | 文档里写的 | 今天的实际 | 差 |
 | --- | --- | --- |
 | `product/config-schema.mjs:88` 定义 `dataDir` | `:88` 是 `export const SCHEMA = defineSchema({`；`dataDir` 在 **`:102`** | 漂 14 行 |
-| `product/config-schema.mjs:1043` / `:1045` 是 `LEGION_DATA_DIR` 的两行派生 | 那两行现在是 `TEAM_HUB_URL` 与 `LEGION_ACTOR`；`LEGION_DATA_DIR` 在 **`:1064`** / **`:1066`**（★ 第 118 轮第十五轮再校订：写这份表时是 `:1057`/`:1059`，我在同一个文件的 `nonEnvLiterals` 里插了 3 个新码（第 16 条第一刀）⇒ 两行 +7。**这正是这个面每天在做的事**） | 漂 14 → **21** 行 |
+| `product/config-schema.mjs:1043` / `:1045` 是 `LEGION_DATA_DIR` 的两行派生 | 那两行现在是 `TEAM_HUB_URL` 与 `LEGION_ACTOR`；`LEGION_DATA_DIR` 在 **`:1074`** / **`:1076`**（★ 第 118 轮第十五轮校订到 `:1064`/`:1066`，**第十六轮又 +10**：我在同一个文件的 `nonEnvLiterals` 里插了第 16 条第二刀的 4 个码 ⇒ 两行再往后挪。**同一个面在一轮之内漂了两次**，而两次都不是"写错了"，是**物理位移**） | 漂 14 → 21 → **31** 行 |
 | `team-hub/server.mjs:279` 是 hub 的库 | `:279` 是 `ROOT` 的算法；库在 **`:335`** | 漂 56 行 |
 | `runtime/dsh-composition/plugins/root-row.mjs:591` 是 `installEnforcementRoot` 的生产调用方 | **那一行是空的**；真正的调用在 **`:626`** | 漂 35 行，且落在空行上 |
 
@@ -893,7 +893,7 @@ hard floor、`canonicalHash`（账本）全都读那份投影 ⇒ 全都判错�
 | **P1-3** | 待做 | **✅ 两半都做完** | 映射层 `whitelist-port.mjs:278` / `:309`；**生产装配** `root-row.mjs:645`（`whitelistPortFromEnv`）⇒ `:760` 喂桥；剩下的"许可取值从哪来"并入第 14 条，**业主已答** |
 | **P3-1** | 待排 | **✅ 清点完成** | 20 个 gap 逐条有名字、全部挂着裁决处：第 16 条 11 / 第 19 条 6 / 第 18 条 3（见 §5.1） |
 | **P1-1** | 🟡 只剩三处未接 | **仍然如此**（三处都在代码里点到）；★ 而 **§2 那四处施工面第七轮就全落了**（`d955dac`）—— 本节此前只会让人**再去做一遍** | ① `spool-writer.mjs:128` 对 `projection == null` **具名拒绝**（`NO_PROJECTION`）⇒ "只有带投影的事件会被写成一行"；② `spool-writer.mjs:144` **只追加 `DECISION`**，而 `spool.mjs:110`/`:112` 定义了 `dispatched`/`result`、`toolcall-drain.mjs` 也认它们 ⇒ 那两种记录**没有写入侧观察点**；③ 行里的 `attemptId` 仍是 `null`（载体只带 `runId`，`spool.mjs:124` 的必填字段只有 `['callId']`） |
-| **P1-4** | 待做 | **🟡 第一刀已落**（本轮下半场） | 它本来不是一个"CLI 面"，是 **11 个模块**没有生产入口；第一刀只接 3 个只读报告，却**连带**清掉 5 个 ⇒ **剩 6 个**（§3.10 / §5.1） |
+| **P1-4** | 待做 | **🟡 两刀都已落**（第十四 / 第十六轮） | 它本来不是一个"CLI 面"，是 **11 个模块**没有生产入口；第一刀接 3 个只读报告（**连带**清掉 5 个），第二刀接**一条读法**（`store-scan.mjs` + 三面计划旗标，**直接**接上 3 个）⇒ **剩 3 个**（全是 metrics 那一支，要库句柄）（§3.10 / §7 / §5.1） |
 | **P3-3** | 待排 | 待排（读数已有） | `security/` 下 15 个 `.mjs` 里 **6 处**「原文/原句」，今天不在任何判据面内 |
 | **§4 那个面** | 待决定 | 待决定（**读数补齐**） | markdown 21 处同形坐标：10 对、**7 真漂**、4 处是"记录漂移本身"的表（§4.3）⇒ 做之前必须先有"引用旧坐标"的写法 |
 
@@ -901,7 +901,7 @@ hard floor、`canonicalHash`（账本）全都读那份投影 ⇒ 全都判错�
 
 | 裁决处 | 个数 | 模块 |
 | --- | --- | --- |
-| **§5 第 16 条**（业主已裁：**做**） | ~~11~~ → **6** | **已清（第十四轮第一刀连带）**：`release/{checklist,privacy}.mjs`、`support/runbook.mjs`（直接接）、`lifecycle/data-classes.mjs`、`diagnostics/crash-report.mjs`（**连带**接上）。**剩下**：`product/lifecycle/{data-export,retention,uninstall}.mjs`、`product/metrics-source.mjs`、`product/metrics-spec7.mjs`、`product/metrics-spec7-source.mjs` |
+| **§5 第 16 条**（业主已裁：**做**） | ~~11~~ → 6 → **3** | **已清（第十四轮第一刀连带）**：`release/{checklist,privacy}.mjs`、`support/runbook.mjs`（直接接）、`lifecycle/data-classes.mjs`、`diagnostics/crash-report.mjs`（**连带**接上）。**已清（第十六轮第二刀直连）**：`lifecycle/{data-export,retention,uninstall}.mjs` —— 走 `plan-cli.mjs` 三面旗标，共同入参由新模块 `store-scan.mjs` 从磁盘读。**剩下 3 个**：`product/metrics-source.mjs`、`product/metrics-spec7.mjs`、`product/metrics-spec7-source.mjs` —— ★ 它们要的是**库句柄**（只读打开 hub 的 `team.db`），那是"谁可以在什么时候读运行中的库"那一类问题，与前三者的"目录"不同 |
 | §5 第 19 条 | **6** | `product/execution-plane-config.mjs`、`runtime/connectors/target-binding.mjs`、`runtime/packs/store.mjs`（PRT-1003）、`runtime/packs/compiled-plan.mjs`（PRT-1004）、`runtime/packs/authority.mjs`（PRT-1005）、`runtime/packs/builtin/software-delivery.mjs`（PRT-1006） |
 
 | §5 第 18 条 | **3** | `runtime/employee/role-pack.mjs`（F-19 执行面）、`runtime/experience/friction.mjs`（F-18 摩擦分）、`runtime/experience/graph.mjs`（F-18 图） |
@@ -912,7 +912,7 @@ hard floor、`canonicalHash`（账本）全都读那份投影 ⇒ 全都判错�
 
 ---
 
-## 7. 本批收口：全量 CI **9/9 PASS**（第十五轮末，`f3d960b`）
+## 6. 本批收口（第十五轮末）：全量 CI **9/9 PASS**（`f3d960b`）
 
 ```
 syntax:PASS env:PASS boundary:PASS deps:PASS build:PASS test:PASS smoke:PASS stage:PASS doc:PASS
@@ -927,7 +927,7 @@ syntax:PASS env:PASS boundary:PASS deps:PASS build:PASS test:PASS smoke:PASS sta
 | ② | `reachability` ⑭：§5 状态索引 28 vs 29，且第 16 条派生出 `待裁决` | **该红的**：我把索引那一格写成了词表外的词（整条掉出索引），又把正文那行的标记写成了词表不认的形式（`已裁「做」` ≠ `已裁决` / `业主 <日期> 裁定`） |
 | ③ | `reachability` ⑦：`dirty.size > 0` 假红 | ★ **门禁自己的缺陷**：它要求工作树**必须是脏的**，于是把"收工"判成了红。已换成更强的断言：**干净 ⇒ `in-flight` 必须为空** |
 
-### 7.1 一条操作纪律（我自己踩的）
+### 6.1 一条操作纪律（我自己踩的）
 
 我第一次跑 CI 时用了 `… | Select-String … | Select-Object -First 60` —— **`-First` 会在取够 60 行后
 关掉上游管道**，于是那个 CI 跑到 `test` 阶段开头就被**掐死**，作业退出码 1。
@@ -936,7 +936,7 @@ syntax:PASS env:PASS boundary:PASS deps:PASS build:PASS test:PASS smoke:PASS sta
 
 > CI 的输出**不许被下游截断**：`-First N` 与"这个进程还在跑"是不相容的。
 
-### 7.2 本会话这一批的完整读数
+### 6.2 本会话这一批的完整读数（★ 这是**第一刀之后、第二刀之前**的快照）
 
 | 面 | 之前 | 现在 | 出处 |
 | --- | --- | --- | --- |
@@ -946,18 +946,26 @@ syntax:PASS env:PASS boundary:PASS deps:PASS build:PASS test:PASS smoke:PASS sta
 | 生产入口 | `--report` 无 | `--report=checklist\|privacy\|runbook`（3 份只读报告） | `product/report-cli.mjs` + `product/launcher/cli.mjs` |
 | 全量 CI | — | **9/9 PASS**（`f3d960b`） | 本节 |
 
+★ 上表三行数字（36 / 15 / 6）在**第十六轮第二刀之后**又变了（**33 / 12 / 3**）——
+**§7 开头那张表**是新的。★ 两张都留着：这一张是"第一刀落地时"的读数，
+而它**当时是对的**；把它改成新数字，就等于把"这一批做了两次"这件事从账上抹掉。
+
 
 ---
 
-## 6. 第 16 条第二刀：**真正卡在哪**（第十五轮实读，只读没动代码）
+## 7. 第 16 条第二刀（第十六轮）：**缺的不是 CLI，是一个读法** —— 已落
 
-把剩下 6 个逐一看它们的**主入口要什么入参**，结论只有两类：
+★ 本节是**第十五轮只读实测**留下的记录（它当时**没有**动代码），而**第十六轮把它做掉了**。
+两段都留着：前一段是"为什么不能拿静态目录打印去关掉 gap"（这条劝阻现在仍然成立），
+后一段是"实际怎么落的、读数是多少"。
+
+把当时剩下 6 个逐一看它们的**主入口要什么入参**，结论只有两类：
 
 | 模块 | 主入口 | 要的入参 | 仓里有吗 |
 | --- | --- | --- | --- |
-| `lifecycle/data-export.mjs` | `planExport({stores, include, scannedSecrets})` | 磁盘上**实际存在**的落点（带 class） | ❌ **没有** |
-| `lifecycle/retention.mjs` | `planRetention({entries, policy, nowMs, activeRefs})` | 逐条的 `{path, bytes, mtimeMs}` | ❌ **没有** |
-| `lifecycle/uninstall.mjs` | `planUninstall({stores, mode, layout})` | 同 `planExport` 的落点清单 **+ 一个显式模式** | ❌ 落点清单没有 |
+| `lifecycle/data-export.mjs` | `planExport({stores, include, scannedSecrets})` | 磁盘上**实际存在**的落点（带 class） | ❌ **没有** → ★ **第十六轮补上**：`store-scan.mjs` |
+| `lifecycle/retention.mjs` | `planRetention({entries, policy, nowMs, activeRefs})` | 逐条的 `{path, bytes, mtimeMs}` | ❌ **没有** → ★ 同上 |
+| `lifecycle/uninstall.mjs` | `planUninstall({stores, mode, layout})` | 同 `planExport` 的落点清单 **+ 一个显式模式** | ❌ 落点清单没有 → ★ 同上（模式由 `--uninstall-plan=<mode>` 显式给） |
 | `metrics-spec7-source.mjs` | `spec7CountsFromHubDb(db, …)` | 一个**库句柄** | ⚠️ 路径知道（`team-hub/server.mjs:335`），但没有"只读打开"的入口 |
 | `metrics-spec7.mjs` | `computeSpec7Metrics(snapshot)` | 上面那个 source 的产物 | ❌ 同上 |
 | `metrics-source.mjs` | `createMetricsSource({store, auditDir, …})` | 库句柄 + 审计目录 | ❌ 同上 |
@@ -965,7 +973,23 @@ syntax:PASS env:PASS boundary:PASS deps:PASS build:PASS test:PASS smoke:PASS sta
 **★ 四条卡在同一个东西上：仓里没有任何"把数据目录走一遍、按 `classifyPath` 分出类别"的生产读法。**
 （`product/init.mjs:268` 的 `directorySize()` 走的是同一棵树，但它**只回一个总量**，不落每条 ⇒ 不是枚举器。）
 
-### 6.1 ⚠️ 一个很容易犯、而且会骗过判据的走法：**拿静态目录打印去把 gap 关掉**
+★★ **第十六轮已落**：那个读法是 `product/lifecycle/store-scan.mjs`，三个消费者是
+`product/lifecycle/plan-cli.mjs` 接的三面旗标 —— `--uninstall-plan=<mode>` / `--export-plan` / `--retention-plan`。
+
+| 面 | 之前 | 现在 |
+| --- | --- | --- |
+| 不可达总数 | 36 | **33** |
+| 其中 `gap` | 15 | **12** |
+| 第 16 条名下 | 6 | **3**（只剩 metrics 那一支，要一个库句柄） |
+
+★ 读数之外的两条**必须一起读**（它们比数字重要）：
+
+1. **`--diff` 报"过期 3 条"，而人读表里只记着 2 条** —— 第三条 `uninstall.mjs` **只在基线 JSON 里**。
+   "一次接线让几个模块同时可达，而账只会报出你记着的那几条" —— 这句话上一轮刚写过，这一轮**又对了一次**。
+2. **这一刀是直接 import，不是连带**（第一刀那 5 个是连带）。两种接线方式在 `--diff` 上**长得一样**，
+   所以"为什么这个模块可达了"永远要**逐条看**，不能只看条数。
+
+### 7.1 ⚠️ 一个很容易犯、而且会骗过判据的走法：**拿静态目录打印去把 gap 关掉**
 
 `data-classes.mjs` / `retention.mjs` / `data-export.mjs` 各自都导出**静态表**
 （类别表、`DEFAULT_RETENTION`、`EXPORT_CLASS_POLICY`）。于是"给 `--report` 加四个目录类报告"
@@ -975,13 +999,20 @@ syntax:PASS env:PASS boundary:PASS deps:PASS build:PASS test:PASS smoke:PASS sta
 > 一个"模块可达"的读数，与一个"这条链真的跑了"的读数，
 > 在只看探针汇总的时候是**同一个东西**。
 
-⇒ **不做这件事。** 第二刀要先有那个**读法**（枚举器），而不是先有那个**读数**。
+⇒ **第十六轮没有走这条路** —— 先有那个**读法**（枚举器），再有那个**读数**。
+★ 这一格是留给下一个人看的：**当时差一点就这么做了**，而它能让上表三行数字立刻变好看。
 
-### 6.2 第二刀的施工面（一个读法解锁 4 个 gap）
+### 7.2 第二刀实际落的形状（一个读法解锁 3 个 gap）
 
-一个"按 `classifyPath` 分类的落点扫描"，形状要照仓里既有的纪律：
+扫的**根**全部来自 `resolveLayout`（安装目录 / 数据 / 工作区 / 缓存 / 日志 / 密钥库 / 配置文件），
+这一层**一个默认值都不加**。扫描器自己守四条纪律（每一条都有用例）：
 
-- **只读**（这是 `data-export.mjs` 文件头坑②明令的："为了导出一致快照先 checkpoint 一下 WAL"是对运行中的产品做了一次写操作）；
-- **有上限**（照 `init.mjs:273` 的 `maxEntries`），并且**扫到上限要说出来**——"没扫完"与"扫完了"不许同形；
-- **不跟符号链接出根**（边界面）；
-- **读不到的条目要报**（照 `inventory.mjs:87` 那句"读不了的目录不算没有清单"）。
+- **只读**（`data-export.mjs` 文件头坑②明令："为了导出一致快照先 checkpoint 一下 WAL"是对运行中的产品做了一次写操作）；
+- **有上限，且到上限要说出来**（`scan-truncated`）——"没扫完"与"扫完了"不许同形；
+- **不跟符号链接出根**（跟着走会扫到**别人的文件**），跳过多少条要报；
+- **认不出就原样带出、不猜一个类别**（`scan-unclassified`）—— 猜了，上层的具名拒绝
+  （`uninstall-unclassified-store` / `export-class-unknown`）就**永远不会出现**。
+
+★ 还有一条**只有真跑一次才会想起来的**：**安装目录必须在要扫的根里**。
+`program-only` 模式要删的就是它；漏了它，计划会打印"会删：无"——**而模式名正说着要删程序**。
+用例 `⑤` 专门钉这一条。

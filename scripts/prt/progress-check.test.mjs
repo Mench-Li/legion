@@ -27,6 +27,11 @@ import {
   // ★★★ 第 48 轮：功能表**数据行**的识别器（本模块是它的唯一所有者）。
   FEATURE_ROW_MIN_CELLS,
   featureTableRow,
+  // ★★★ 第 118 轮第十三轮（业主确认 a + b）：行内正文状态词的判据 + 它的就地标记。
+  STALE_PROSE_MARKER_PREFIX,
+  findProseStatusClaims,
+  markerAfterClaim,
+  staleProseMarker,
 } from './progress-check.mjs'
 
 /** 造一份最小但结构完整的进度表。 */
@@ -599,5 +604,91 @@ test('⑨ ★★★ `marks` 可注入：加第 5 个标记 ⇒ 所有者必须�
   assert.equal(featureTableRow(fRow(3), { minCells: 3 }).id, 'F-99',
     '`minCells` 注入了却没用 ⇒ 阈值是写死的')
 })
+
+// ══════════════════════════════════════════════════════════════════════════
+// ★★★ 第 118 轮第十三轮（业主确认 a + b）：**行内正文**里的状态词
+//
+// 这一段的由来是一次真实的误读：一份递过来的状态表按**行内正文**拼出来，
+// 7 条里 4 条与**状态格**相反（真台账当天实测 33 处「本行仍 🟡」落在状态格
+// 已是 ✅/⏸ 的行里）。
+// ══════════════════════════════════════════════════════════════════════════
+
+/** 造一份「一条任务 + 指定正文」的台账。★ 正文里放状态词，状态格自己选。 */
+function docWithProse(status, prose) {
+  return doc({ statuses: [[status]] }).replace('| 证据 |', `| ${prose} |`)
+}
+
+test('⑰ ★★★ 行内旧状态词：未标记 ⇒ 报；等于状态格 ⇒ 不报；标记对 ⇒ 不报', () => {
+  // ① 状态格 ✅，正文却说「本行仍 🟡」且**没有**标记 ⇒ 必须报
+  const bare = checkProgress(docWithProse('✅', '本行仍 🟡，理由见最后一段'))
+  assert.deepEqual(kinds(bare.problems), ['PROSE_STATUS_STALE'],
+    `正文与状态格相反却没报：${JSON.stringify(bare.problems)}`)
+  assert.equal(bare.problems[0].message.includes('本行仍 🟡'), true, '报出来的话里没带现场')
+
+  // ② 补上就地标记 ⇒ 不报（编年体**允许**留着旧状态，只要它带着标记）
+  const marked = checkProgress(docWithProse('✅', `本行仍 🟡${staleProseMarker('✅')}，理由见最后一段`))
+  assert.deepEqual(marked.problems, [], `补了标记还报：${JSON.stringify(marked.problems)}`)
+
+  // ③ 正文与状态格**一致** ⇒ 不报（判据只钉"读起来像结论"的那种）
+  assert.deepEqual(checkProgress(docWithProse('🟡', '本行仍 🟡，理由见最后一段')).problems, [])
+
+  // ④ 标记写的是**别的**状态 ⇒ 报。★ 这一条防的是"把标记当装饰贴上去"：
+  //    标记里写的是**状态格**，所以抄错、或状态格后来变了，都会红。
+  const wrong = checkProgress(docWithProse('⏸', `本行仍 🟡${staleProseMarker('✅')}，理由见最后一段`))
+  assert.deepEqual(kinds(wrong.problems), ['PROSE_STATUS_STALE'],
+    '标记写错了状态却不报 ⇒ 标记成了"贴上去就过"的装饰')
+
+  // ⑤ 今天真台账里那句最常见的形状（`故本行仍 🟡`、`本行状态不变，仍 🟡`、
+  //    `本行**仍 🟡 的理由**`、`本行状态仍是 ⏸`）都要认得出来
+  for (const prose of ['故本行仍 🟡', '本行状态不变，仍 🟡', '本行**仍 🟡 的理由**', '本行状态仍是 🟡']) {
+    assert.equal(findProseStatusClaims(prose).length, 1, `这种写法没认出来：${prose}`)
+  }
+})
+
+test('⑰b ★★★ 标记必须**紧邻**：拖到几十字之外就不算（这是它唯一能被应付过去的形状）', () => {
+  const far = docWithProse('✅', `本行仍 🟡${'填'.repeat(80)}${staleProseMarker('✅')}`)
+  assert.deepEqual(kinds(checkProgress(far).problems), ['PROSE_STATUS_STALE'],
+    '★ 标记被拖远也算通过 ⇒ 判据退化成了"附近有标记"，而不是"这句话被标注了"')
+  // 紧邻（中间只隔 markdown 星号）必须算通过 —— 否则真台账那 33 处过不了
+  const tight = docWithProse('✅', `本行仍 🟡**${staleProseMarker('✅')}**`)
+  assert.deepEqual(checkProgress(tight).problems, [], '紧邻的标记被判成了没标记')
+  assert.equal(markerAfterClaim('本行仍 🟡', { value: '🟡', endIndex: 6 }), null)
+})
+
+test('⑰c ★★★ `marks` 可注入：加第 5 个标记 ⇒ 行内判据也立刻认它', () => {
+  const withFifth = [...LEDGER_STATUS_MARKS, '🔵']
+  assert.equal(findProseStatusClaims('本行仍 🔵', { marks: withFifth }).length, 1,
+    '★ 注入了第 5 个标记却仍不认 ⇒ 行内判据自己抄了一份词表')
+  assert.equal(markerAfterClaim(`本行仍 🟡${staleProseMarker('🔵')}`,
+    { value: '🟡', endIndex: 6 }, { marks: withFifth }), '🔵')
+  // 今天这张表不认识 🔵 ⇒ 读数为 0（证明上面的 1 不是"什么都能匹配"）
+  assert.equal(findProseStatusClaims('本行仍 🔵').length, 0)
+})
+
+test('⑱ ★★★ 真台账：33 处旧状态词**都已就地标记**，且这条判据不是装饰', async () => {
+  const { readFileSync } = await import('node:fs')
+  const { dirname, join, resolve } = await import('node:path')
+  const { fileURLToPath } = await import('node:url')
+  const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
+  const text = readFileSync(join(ROOT, 'docs', 'superpowers', 'prt', 'PRT-PROGRESS.md'), 'utf8')
+
+  // ★★ 先证明**判据有东西可判**：否则下面那句"0 条问题"是**空的**——
+  //    一个什么都没找到的检查器，与一个所有东西都合规的检查器，
+  //    在只看"问题数 == 0"的时候是同一个东西。
+  const claims = text.split(/\r?\n/).flatMap((l) => findProseStatusClaims(l))
+  assert.ok(claims.length >= 33,
+    `真台账里只找到 ${claims.length} 处行内状态词（此前实测 33 处）——`
+    + '找不到东西的话，"0 条 PROSE_STATUS_STALE"什么也证明不了')
+  const stale = claims.filter((c) => c.value === '🟡')
+  assert.ok(stale.length >= 33, `行内「仍 🟡」只找到 ${stale.length} 处`)
+  // ★ 而这 33 处**全都**落在状态格已是 ✅/⏸ 的行里 —— 正是被误读的那些
+  assert.ok(text.includes(STALE_PROSE_MARKER_PREFIX), '台账里一处就地标记都没有？')
+
+  const r = checkProgress(text)
+  assert.deepEqual(r.problems, [],
+    `真台账有正文/状态格不一致：\n${r.problems.map((p) => `  ✖ [${p.kind}] 行 ${p.line ?? '?'} ${p.message}`).join('\n')}\n`
+    + '修法：就地补 `staleProseMarker(状态格)`，或改状态格')
+})
+
 
 

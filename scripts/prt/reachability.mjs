@@ -76,7 +76,7 @@ export const MATRIX_PATH = join(REPO, 'docs', 'MULTI-AGENT-FEATURE-STATUS.md')
 /** 参与可达性分析的目录。`workbench/` 是**旧 GUI**，不在 145 项范围内，故不收。
  *
  * ★★ `scrum/` 曾经**不在这张表里**，而它是**产品面**、而且**随发布物发出去**：
- *    `scripts/ci/run-ci.mjs:3748` 的 `tracked` 清单（stage 阶段算 SHA256SUMS 的那一份）
+ *    `scripts/ci/run-ci.mjs:4738` 的 `tracked` 清单（stage 阶段算 SHA256SUMS 的那一份）
  *    逐字列着 `scrum/serve.mjs`。
  *
  *    不在表里的后果不是"少扫几个文件"，而是**一处假阳性**：
@@ -117,7 +117,7 @@ export const SKIP_DIRS = Object.freeze([
  *    探针答错了一次——**而它答错的方向是"报成死代码"**，
  *    正好是这张表最容易被信以为真的那一种结论。
  *
- *    权威来源不是猜的：`scripts/ci/run-ci.mjs:3748` 的 `tracked` 清单
+ *    权威来源不是猜的：`scripts/ci/run-ci.mjs:4738` 的 `tracked` 清单
  *    （stage 阶段算 SHA256SUMS 的那一份）逐字列着 `scrum/serve.mjs`——
  *    也就是说，**打包发布的人一直知道它是要按路径跑的那个文件**。
  *

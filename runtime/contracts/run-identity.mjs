@@ -9,7 +9,7 @@
 // 而 Runtime 进程是**长命的**、会服务很多次 Run、很多个空间。
 //
 // 一个 Runtime 进程服务多个空间时，别的空间的执行会被盖上**这一个**空间的 `scope`——
-// 而它进的是 `canonicalOperationHash`（`enforcement.mjs:86` 的 `CANONICAL_OP_KEYS`），
+// 而它进的是 `canonicalOperationHash`（`runtime/dsh-composition/enforcement.mjs:86` 的 `CANONICAL_OP_KEYS`），
 // 也就是**审批绑定与审计归属**。**不报错，只是错标。**
 //
 //   > 一个"把甲空间的事记在乙空间名下"的运行时，

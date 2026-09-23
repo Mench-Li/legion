@@ -149,7 +149,7 @@ export const NON_ENV_LITERALS = Object.freeze([
   //
   //   ⚠️ 2026-09-18 订正：这里原文写的是"虽然两者**今天**都会让**每一次** Run
   //   停下"。**那句已过期**（PRT-214 的 🟡 依据被证伪，见 `934b0b7`）：权限档位
-  //   现在**有**生产来源（`team-hub/server.mjs:438` 的 `resolveRunPermissions`），
+  //   现在**有**生产来源（`team-hub/server.mjs:497` 的 `resolveRunPermissions`），
   //   正常员工的 Run 不再停在派发前。今天**仍会**以本条停下的只剩"这个员工
   //   没有清单"（端口返回 `null` ⇒ `UNSUPPLIED_PERMISSIONS`）那一类——
   //   那是**一部分** Run，不是"每一次"。

@@ -100,7 +100,8 @@ test('① ★★★ 正对照：入口认得出、已知接上的可达、清单
   //  被报成 `[gap] 只被自己的用例 import`——而它有两个真实消费者
   //  （另一个是 `board-plugin/src/index.ts:18`，编成未跟踪的 `lib/`）。
   //
-  //  权威来源不是猜的：`scripts/ci/run-ci.mjs:3748` 的 `tracked` 清单
+  //  权威来源不是猜的：`scripts/ci/run-ci.mjs:4738` 的 `tracked` 清单
+  //  （★ 第 118 轮第十三轮校订坐标：原写 3748，实测漂了 990 行）
   //  （stage 阶段算 SHA256SUMS 的那一份）逐字列着 `scrum/serve.mjs`。
   //
   //  > 一个"把在跑的服务报成死代码"的探针，

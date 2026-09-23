@@ -120,6 +120,10 @@ export function defaultContext() {
     //     这一层          读**源码**（`runtime/` `product/` …），判的是"**那句话在不在那个行号上**"。
     originalCitations: () => scanOriginalCitations(),
     pinnedCitations: () => checkPinnedCitations(),
+    // ★★★ 第 118 轮第十三轮（业主确认 c）：注释里「`路径:行` 的 `符号`」那一层。
+    //   与上面三条**并列的第四层**：它判的不是"引文在不在那一行"，而是
+    //   "**你点名的那个符号还在不在那个坐标附近**"。
+    bareCoordinateSymbols: () => scanBareCoordinateSymbols(),
     manifestImpersonation: () => checkManifestImpersonation(),
     // ── E. 交接报告 §二 自称"机器读数，可复跑"的那张表（第 26 轮）────────────
     ledgerTallies: () => tallyLedger(doc(LEDGER_DOC)),
@@ -1001,6 +1005,190 @@ const PINNED_CITATIONS = Object.freeze([
  *
  * ★ DSH 侧文件在检出不在时记 `external`（与 `scanLineCitations` 同一口径）。
  */
+// ══════════════════════════════════════════════════════════════════════════
+// ★★★ 第三层引文判据：**裸坐标 + 具名符号**（第 118 轮第十三轮，业主确认 c）
+//
+// 形状：源码注释里 `` `路径:行` 的 `符号` `` —— 一句"这个符号在那个坐标上"。
+//
+// 为什么它此前是个**洞**：`originalCitations` 那一层自己写着
+// "多数 `文件:行` 引用**只给坐标、不抄原文**，要判它们必须读语义，做不了"。
+// 那句话对**裸坐标**是对的 —— 但**带具名符号**的那种不需要语义：
+// "这个符号落没落在这个坐标附近"是个机械命题。
+//
+// 实测（本轮，全仓那六个根目录）：这个形状只有 **9 处**，其中 **6 处对不上**：
+//   · **1 处少了目录**（`enforcement.mjs:86` 在 `runtime/contracts/` 下解析不到，
+//     而行号本身是对的 —— 读者照它去找会找不到文件）；
+//   · **5 处行号漂了**，最大的一处漂了 **990 行**（`run-ci.mjs` 的 3748 → 4738）。
+//
+//   > 一句"`X:438` 的 `f()`"，在 `f()` 搬到 `X:497` 之后**读起来一模一样**；
+//   > 它只在"真去那 25 行里找一遍"的时候才露馅。
+//
+// ⚠️ 边界（如实保留，三面都说清楚）：
+//   · 只扫**注释行**（`//` `*` `/*` 开头）—— 写在字符串/数据里的坐标不归这条管
+//     （例如 `PINNED_CITATIONS` 那张表，它有自己那一条判据）；
+//   · 只钉"±25 行内**有没有**这个符号"，**不**判"这一行是不是那一段的开头"——
+//     那是语义，本判据不做；
+//   · 目标解析顺序与 `scanOriginalCitations` 一致（引用者自身 → 仓库根 → DSH 检出），
+//     三处都找不到记 `unresolved`、**不判坏**（目标可能在另一棵检出里）。
+// ══════════════════════════════════════════════════════════════════════════
+
+/** 形如 `` `路径:行` 的 `符号` `` 的引用。 */
+export const CITE_SYMBOL_RE = /`([A-Za-z0-9_./-]+\.(?:mjs|js|ts)):(\d+)`\s*的\s*`([A-Za-z_$][A-Za-z0-9_$]*)`/g
+
+/** 认这个符号落在这个坐标**前后各多少行**之内。 */
+export const CITE_SYMBOL_WINDOW = 25
+
+/**
+ * 本判据扫哪些顶层目录。
+ *
+ * ★★★ 它与 `ORIGINAL_CITATION_ROOTS` **刻意不同**：多一个 `security`。
+ *
+ *   起因是实测：全仓这个形状有 **9 处**，而按 `ORIGINAL_CITATION_ROOTS` 只扫到 **8 处**
+ *   —— 漏掉的那一处正是 `security/config-schema.mjs:36`（它引的是
+ *   `security/secrets/dsh-credentials.mjs:582` 的 `env`，**而且它是对的**）。
+ *   ⇒ `security/` 会写这类引用，却整个目录不在那一层根目录表里。
+ *
+ * ★ 为什么**不**顺手把 `security` 加进 `ORIGINAL_CITATION_ROOTS`：那一层的判据
+ *   （`source-original-citations-on-line`）的 `expect` 里**逐条登记着**它的读数
+ *   （两处已知坏引用），扩它的扫描面要用一轮自己的测量把新面的读数读全。
+ *   实测那一面不小：`security/` 下 15 个 `.mjs` 里有 **6 处**「原文/原句」形状，
+ *   今天**都不在**任何判据的扫描面里 —— 已记进接管队列（P3-3），不在本轮顺手扩。
+ *
+ *   > 一个"根目录表是从邻居那里抄来的"扫描器，与一个"自己的面已经量过"的扫描器，
+ *   > 在**今天**给出同样的绿——只不过前者少扫的那一类，从来没有出现在任何读数里。
+ */
+export const CITE_SYMBOL_ROOTS = Object.freeze([...ORIGINAL_CITATION_ROOTS, 'security'])
+
+/**
+ * 从一段源码里抽出这类引用（**只认注释行**）。
+ *
+ * ★ 导出是为了能被用例拿**合成文本**直接喂 —— 与第 105 轮把"引文是否落在某行"
+ *   抽成纯判定是同一条理由：不抽出来，"扫目录"那层逻辑就没法单独验。
+ */
+export function citeSymbolReferences(text) {
+  const out = []
+  const lines = String(text).split(/\r?\n/)
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^\s*(\/\/|\*|\/\*)/.test(lines[i])) continue
+    for (const m of lines[i].matchAll(CITE_SYMBOL_RE)) {
+      out.push({ line: i + 1, target: m[1], n: Number(m[2]), sym: m[3] })
+    }
+  }
+  return out
+}
+
+/**
+ * 判**一处**引用。
+ *
+ * ★ 目标解析与读取都**注入**：用例能拿一个假仓库试"漂了/没漂/找不到"三种结局，
+ *   而不必去动真文件（动了就不是在验判据了）。
+ *
+ * @returns {{kind: 'ok'|'broken'|'unresolved', why?: string}}
+ */
+export function citeSymbolVerdict(ref, { resolveTarget, readTarget }) {
+  const abs = resolveTarget(ref.target)
+  if (abs === null) {
+    return { kind: 'unresolved', why: '目标文件解析不到（引用者同目录与仓库根都找不到）' }
+  }
+  const target = readTarget(abs)
+  if (target === null) return { kind: 'unresolved', why: '目标文件读不出来' }
+  if (target[ref.n - 1] === undefined) {
+    return { kind: 'broken', why: `目标文件没有第 ${ref.n} 行` }
+  }
+  const lo = Math.max(0, ref.n - 1 - CITE_SYMBOL_WINDOW)
+  const hi = Math.min(target.length, ref.n + CITE_SYMBOL_WINDOW)
+  if (!target.slice(lo, hi).join('\n').includes(ref.sym)) {
+    return { kind: 'broken', why: `±${CITE_SYMBOL_WINDOW} 行里找不到 \`${ref.sym}\`` }
+  }
+  return { kind: 'ok' }
+}
+
+/**
+ * 扫描结果的**进程内记忆**。
+ *
+ * ★★ 为什么必须缓存：这一层要**走一遍全仓**，而它有**两条**事实要读它 ⇒ 不缓存
+ *   就是扫两遍。本套件本来就贴着 300 秒的硬上限（实测 277.8s），而"某条判据各扫
+ *   各的"正是那个套件的 `⑪` 专门防过的形状（"三条事实共用一个缓存条目"）。
+ *   ⇒ 与 `design-boundaries.mjs` 同一条办法：进程内记忆 + 一个显式的清除口。
+ */
+let BARE_CITE_MEMO = null
+
+/** 丢掉缓存（仓库文件在一趟里变了时用；测试里也用它验"缓存真的在起作用"）。 */
+export function clearBareCoordinateSymbolsMemo() {
+  BARE_CITE_MEMO = null
+}
+
+/**
+ * 全仓扫一遍这类引用（带上面那层缓存）。
+ *
+ * @returns {{total: number, ok: number, broken: string[], unresolved: string[]}}
+ */
+export function scanBareCoordinateSymbols() {
+  if (BARE_CITE_MEMO !== null) return BARE_CITE_MEMO
+  const dshRoot = (() => {
+    for (const c of [process.env.DSH_CHECKOUT, 'D:/project/DSH/dsh/deepseek-harness',
+      resolve(REPO, '../dsh/deepseek-harness')]) {
+      if (c && existsSync(c)) return c
+    }
+    return null
+  })()
+
+  const files = []
+  const walk = (dir) => {
+    let ents = []
+    try { ents = readdirSync(dir, { withFileTypes: true }) } catch { return }
+    for (const e of ents) {
+      if (ORIGINAL_CITATION_SKIP.has(e.name)) continue
+      const p = resolve(dir, e.name)
+      if (e.isDirectory()) { walk(p); continue }
+      if (/\.(mjs|js|ts)$/.test(e.name)) files.push(p)
+    }
+  }
+  for (const r of CITE_SYMBOL_ROOTS) {
+    const d = resolve(REPO, r)
+    if (existsSync(d)) walk(d)
+  }
+
+  const broken = []
+  const unresolved = []
+  let total = 0
+  let ok = 0
+
+  for (const f of files) {
+    let text = ''
+    try { text = readFileSync(f, 'utf8') } catch { continue }
+    // ★★ 这里**曾经**有一个"便宜的前置过滤"：`if (!text.includes('` 的 `')) continue`。
+    //   它比判据自己的正则**更严**——正则里 `的` 两侧允许没有空格，而那个过滤要求有。
+    //   实测：全仓 9 处里被它**静默漏掉 1 处**（读数从 9 变成 8），而漏掉的那一处
+    //   不会报错，它只是**不再被看见**。
+    //
+    //   > 一个"便宜的前置过滤"与一个"判据自己的正则"，在写法只差一个空格的时候
+    //   > 给出不同的读数——只不过前者少读的那一处，不会以任何形式出现。
+    //
+    //   现在这条前置只要求"出现过 `的`"（正则有它）⇒ **恒弱于**判据，不会漏。
+    if (!text.includes('的')) continue
+    const rel = relative(REPO, f).split('\\').join('/')
+    const resolveTarget = (target) => {
+      const cands = [resolve(dirname(f), target), resolve(REPO, target)]
+      if (dshRoot !== null) cands.push(resolve(dshRoot, target))
+      return cands.find((c) => existsSync(c)) ?? null
+    }
+    const readTarget = (abs) => {
+      try { return readFileSync(abs, 'utf8').split(/\r?\n/) } catch { return null }
+    }
+    for (const ref of citeSymbolReferences(text)) {
+      total++
+      const v = citeSymbolVerdict(ref, { resolveTarget, readTarget })
+      if (v.kind === 'ok') { ok++; continue }
+      const msg = `${rel}:${ref.line} → ${ref.target}:${ref.n} 的 \`${ref.sym}\`：${v.why}`
+      if (v.kind === 'unresolved') unresolved.push(msg)
+      else broken.push(msg)
+    }
+  }
+  BARE_CITE_MEMO = { total, ok, broken, unresolved }
+  return BARE_CITE_MEMO
+}
+
 export function checkPinnedCitations(pinned = PINNED_CITATIONS) {
   const broken = []
   const external = []
@@ -1790,6 +1978,10 @@ export const FACTS = Object.freeze([
       + '★ 为什么这一层能做机械判定而上一层不能：注释里**逐字抄了原句**，'
       + '于是"引文出现在那个行号上"是个可判的命题；'
       + '而多数 `文件:行` 引用**只给坐标、不抄原文**，要判它们必须读语义，做不了。'
+      + '★ **第 118 轮第十三轮补充（上面那半句的边界被推了一步）**：'
+      + '**带具名符号**的裸坐标（`路径:行` 的 `符号`）**不需要语义**就能判 ——'
+      + '已做成 `source-comment-coordinate-names-its-symbol`（实测该形状全仓 9 处、当时 6 处是坏的）。'
+      + '所以现在**剩下**的盲区只有"既没抄原文、也没点名符号"的纯坐标。'
       + '⚠️ 边界：**只覆盖同时写了行号又抄了原文的那种**。所以绿 ≠ "所有引用都对"。'
       + '★ 目标解析顺序（不能反）：相对**引用它的那个文件** → 相对仓库根 → 相对 DSH 检出。'
       + '本仓里 `launcher.mjs:108` 是同目录相对引用，而 `plugins/src/index.ts` 是仓库根相对引用'
@@ -1821,6 +2013,47 @@ export const FACTS = Object.freeze([
       + '该行是 "* 每个键都必须在进程清单的 `envNames` 里声明过（否则 `build"） '
       + 'product/launcher/legacy-data-adoption.test.mjs:77 → launcher.mjs:108（引文不在这一行；'
       + '该行是 "* 每个键都必须在进程清单的 `envNames` 里声明过（否则 `build"）',
+  }),
+
+  // ── C3b. ★★★ 第 118 轮第十三轮（业主确认 c）：**裸坐标 + 具名符号**那一层 ────
+  //
+  // ★ 它是 C3 的**补集**：C3 只覆盖"抄了原文"的引用，而这一层覆盖
+  //   "点了名但没抄原文"的那些。两层加起来，源码注释里**能被机械判定的引用
+  //   全部有主**；剩下的盲区只有"纯坐标"（既没原文也没符号）——那句写清楚了。
+  Object.freeze({
+    id: 'source-comment-coordinate-names-its-symbol',
+    what: '源码注释里「`路径:行` 的 `符号`」—— 那个符号必须真的落在那个坐标的 ±25 行里',
+    why: '★ 起因是**一次真实的误读**（2026-09-23）：`orchestrator/config-schema.mjs` 里'
+      + '「`team-hub/server.mjs:438` 的 `resolveRunPermissions`」被照字面读了一遍，'
+      + '而那个端口在 **:497** —— 差别 59 行，`:438` 是一句无关的 SQL 插入。'
+      + '★ 同轮实测这个形状全仓只有 **9 处**，**6 处对不上**：'
+      + '5 处行号漂移（最大的一处 `run-ci.mjs` 3748 → **4738**，漂了 990 行）、'
+      + '1 处**引用少写了目录**（行号对，但读者照它去找不到那个文件）。'
+      + '★★ 为什么它值得一条判据而不是"改完就算"：这 9 处里没有一处是"有人偷懒"，'
+      + '全是**别人改动导致的位移** —— 位移不会报错，它只会让引用慢慢变成假的。'
+      + '⚠️ 边界：只钉"±25 行内**有没有**这个符号"，**不**判"这一行是不是那段的开头"；'
+      + '只扫**注释行**；三处候选都解析不到时记 `unresolved`、不判坏'
+      + '（该读数在 `scanBareCoordinateSymbols()` 的返回值里，但**不进**这条判据）。',
+    source: '源码注释（`runtime/` `product/` `orchestrator/` `team-hub/` `scripts/` `plugins/` `security/`，'
+      + '共**七个**根目录 —— ★ 比 `originalCitations` 那一层多一个 `security/`：'
+      + '按邻居那张表只扫到 8 处，第 9 处正是 `security/config-schema.mjs` 里的一处，'
+      + '而它是**对的**。见 `CITE_SYMBOL_ROOTS` 的注释）里形如 `路径:行` 的 `符号` 的引用，'
+      + '目标按"引用文件自身 → 仓库根 → DSH 检出"解析',
+    derive: (ctx) => ctx.bareCoordinateSymbols().broken.slice().sort().join(' '),
+    expect: '', // 空串 = 每一处点名符号都还在它写的那个坐标附近
+  }),
+  Object.freeze({
+    id: 'source-comment-coordinate-symbol-surface-not-empty',
+    what: '上面那条判据的**扫描面**不许是空的（本轮实测 9 处，下限取 7）',
+    why: '一条"坏引用为空"的判据，在**它一处引用都没扫到**的时候**也是绿的** ——'
+      + '而"扫描面塌了"与"引用全对"，在只看结果串的时候是同一个东西。'
+      + '★ 与 `design-boundary-scan-*` 那四条**同一个方向**（把"不是 0"钉住），'
+      + '用的是 `design-boundaries.mjs` 那条 `check-scanned-nothing` 守卫的同一条理由。'
+      + '★ 为什么是 **7** 而不是 9：这个数是**写法**统计（有多少处注释这样写），'
+      + '会随写法增减；取下限是为了"写法变了"不误报，而"扫描面塌了"仍然会红。',
+    source: '`boundary-facts.mjs` 的 `scanBareCoordinateSymbols()`（全仓六个根目录）',
+    derive: (ctx) => ctx.bareCoordinateSymbols().total >= 7,
+    expect: true,
   }),
 
   // ── C4. ★★★★★ 第 107 轮：交付物 §四 那张表里每条机械边界**扫了多少文件** ──────

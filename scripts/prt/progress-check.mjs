@@ -113,6 +113,74 @@ export function nonDoneStatuses(marks = LEDGER_STATUS_MARKS) {
 /** 状态格必须**整格**等于一个已知标记。★ 由 `LEDGER_STATUS_MARKS` 派生。 */
 export const STATUS_CELL_RE = new RegExp(`^(?:${LEDGER_STATUS_MARKS.join('|')})$`)
 
+// ══════════════════════════════════════════════════════════════════════════
+// ★★★ 第三类判据：**行内正文**里的状态词（2026-09-23 业主确认 a + b 落地）
+//
+// 起因是一次真实的误读：一份递过来的状态表按**行内正文**拼出来，7 条里有 4 条
+// 与**状态格**相反。机器实测（当天、真台账）：状态格已经是 ✅/⏸ 的行里，
+// 仍留着 **32 处**「本行仍 🟡」。
+//
+// 它**不是**"正文写错了"：这张台账是**编年体**——每一批把进展**追加**在行内，
+// 「当前状态」只在第 2 格。于是行内那些状态词说的是**当时**的口径，
+// 而且它们**永远**读得通、永远像结论。
+//
+//   > 一份「当前状态」与一份「当时状态」写在同一个格子里，
+//   > 在只读正文的时候是同一个东西——只不过前者的读者拿到今天的答案，
+//   > 后者的读者拿到某个批次的答案，而两者读起来一样像结论。
+//
+// ⇒ 判据不是"把正文里的旧状态删掉"（那会毁掉编年体），而是**要求它带着标记**：
+//   行内每一处「本行…仍 X」的 X 要么**等于状态格**，要么紧跟就地标记。
+//
+// ★ 标记里写的是**状态格**、不是 X —— 于是"把某行的标记抄到另一行"照样红，
+//   而"状态格后来变了、标记没跟着改"也照样红。
+// ══════════════════════════════════════════════════════════════════════════
+
+/** 就地标记的**前缀**（唯一所有者）。完整标记 = 前缀 + 状态格 + `）`。 */
+export const STALE_PROSE_MARKER_PREFIX = '（★ 当时口径；状态格现为 '
+
+/** 某个状态格对应的就地标记。★ 由状态格拼出来 ⇒ 抄到别的行、或状态格变了都会红。 */
+export function staleProseMarker(status) {
+  return `${STALE_PROSE_MARKER_PREFIX}${status}）`
+}
+
+/**
+ * 行内**自称「本行…仍 X」**的那些位置。
+ *
+ * ★ 形状取自真台账（当天实测 32 处）：「故本行仍 🟡」「本行状态不变，仍 🟡」
+ *   「**本行仍 🟡 的确切理由**」「本行状态仍是 ⏸」——所以 `仍` 与状态之间
+ *   **允许**一个 `是`，`本行` 与 `仍` 之间允许 14 个字符（含 markdown 星号）。
+ *
+ * ★ `marks` 可注入、`window` 可注入：与 `ledgerTaskRow` 同一条办法——
+ *   "它跟着**给它的那张表**走"只有拿另一张表才验得出来。
+ *
+ * ★ 刻意**不**匹配「仍然需要…」这类没有状态词的句子：判据只钉**状态词**。
+ */
+export function findProseStatusClaims(text, { marks = LEDGER_STATUS_MARKS, window = 14 } = {}) {
+  const re = new RegExp(`本行[^。]{0,${window}}?仍\\s*是?\\s*(${marks.join('|')})`, 'g')
+  const out = []
+  for (const m of String(text).matchAll(re)) {
+    out.push({ value: m[1], index: m.index, endIndex: m.index + m[0].length })
+  }
+  return out
+}
+
+/**
+ * 一处 claim **紧邻**着的就地标记读出来的状态；没有标记 ⇒ `null`。
+ *
+ * ★ 只认**紧邻**（中间最多隔几个 markdown 星号/空白）：标记是"就地"的。
+ *   允许它出现在几十字之外，就等于允许"把标记丢在附近任何一个地方"——
+ *   而那是这条判据唯一能被**应付**过去的形状（*一个"附近有标记"的检查，
+ *   与一个"这句话被标注了"的检查，在标记被拖远的时候读数一样*）。
+ *
+ * ★ `marks` 可注入（与 `findProseStatusClaims` 同一条办法）。
+ */
+export function markerAfterClaim(text, claim, { marks = LEDGER_STATUS_MARKS } = {}) {
+  const tail = String(text).slice(claim.endIndex, claim.endIndex + 40)
+  const re = new RegExp(`^[*\\s]{0,6}${STALE_PROSE_MARKER_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(${marks.join('|')})`)
+  const m = re.exec(tail)
+  return m === null ? null : m[1]
+}
+
 /**
  * 把一行拆成台账任务行；**不是**任务行就返回 `null`。
  *
@@ -420,6 +488,9 @@ export function parseProgress(text) {
       // 也不要默认成「未开始」——那会让一个已完成的条目被静默地算成没做。
       status: found === undefined ? null : found.mark,
       rawStatus: statusCell,
+      // ★★★ 原始行整行留着：行内正文的状态词判据（`PROSE_STATUS_STALE`）要读它。
+      //   只留状态格是不够的——被误读的从来不是状态格。
+      raw: line,
     })
   }
 
@@ -512,6 +583,34 @@ export function checkProgress(text) {
         phase: phase.key,
         message: `汇总表阶段 ${phase.key} 的合计写 ${row.total}，明细有 ${t.total}`,
       })
+    }
+  }
+
+  // ★★★ 行内正文里的状态词 vs 状态格（见上面「第三类判据」那一段）。
+  //
+  //   放在这里而不是 `parseProgress` 里：解析器只负责**读**，判据归自检。
+  //   放在阶段循环**之外**单起一段：它按行报，不参与任何计数。
+  for (const phase of phases) {
+    for (const task of phase.tasks) {
+      if (task.status === null || typeof task.raw !== 'string') continue
+      for (const claim of findProseStatusClaims(task.raw)) {
+        if (claim.value === task.status) continue
+        if (markerAfterClaim(task.raw, claim) === task.status) continue
+        const around = task.raw
+          .slice(Math.max(0, claim.index - 28), Math.min(task.raw.length, claim.endIndex + 6))
+          .replace(/\s+/g, ' ')
+        problems.push({
+          kind: 'PROSE_STATUS_STALE',
+          phase: phase.key,
+          line: task.lineNumber,
+          message: `${task.id}（第 ${task.lineNumber} 行）正文里写着「…${around}…」，`
+            + `而状态格是 ${task.status}。`
+            + '这份表是编年体：行内的旧状态**可以**留着，但必须紧跟就地标记 '
+            + `\`${staleProseMarker(task.status)}\`（标记里写的是**状态格**）。`
+            + `不标的话，按正文拼状态表的人会拿到 ${claim.value}——`
+            + '而那正是 2026-09-23 那张递过来的表里 4 条反读的来源。',
+        })
+      }
     }
   }
 
@@ -633,6 +732,13 @@ if (isMain) {
     if (after.problems.length !== 0) {
       process.stderr.write('progress-check: 重算后仍不一致，未写入文件：\n')
       for (const p of after.problems) process.stderr.write(`  ✖ [${p.kind}] ${p.message}\n`)
+      // ★ 说清楚 `--fix` 的**能力边界**：它只重算派生数字，改不了行内的旧状态词。
+      //   不说的话，"修不了"会被读成"这个工具坏了"。
+      const stale = after.problems.filter((p) => p.kind === 'PROSE_STATUS_STALE')
+      if (stale.length !== 0) {
+        process.stderr.write(`（其中 ${stale.length} 条是行内正文里的旧状态词：**--fix 修不了它们**——`
+          + '它们不是派生数字。就地补标记（见 `STALE_PROSE_MARKER_PREFIX`）或改状态格，二选一。）\n')
+      }
       process.exit(2)
     }
     // 保留原行尾风格

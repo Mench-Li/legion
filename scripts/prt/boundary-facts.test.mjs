@@ -36,6 +36,10 @@ import {
   reportSectionRounds, roundOrderViolations, sectionFourBareCurrentReadings,
   GENERATED_STATUS_VOCAB, GENERATED_STATUS_RE, canonicalJson,
   scanOriginalCitations, originalQuoteOnLine,
+  // ★★★ 第 118 轮第十三轮（业主确认 c）：裸坐标 + 具名符号那一层。
+  CITE_SYMBOL_ROOTS, CITE_SYMBOL_WINDOW,
+  citeSymbolReferences, citeSymbolVerdict, scanBareCoordinateSymbols,
+  clearBareCoordinateSymbolsMemo,
 } from './boundary-facts.mjs'
 import { checkRepo, clearCheckRepoMemo } from './design-boundaries.mjs'
 import { LEDGER_STATUS_MARKS, STATUS_MARKS, ledgerTaskRow } from './progress-check.mjs'
@@ -1806,4 +1810,90 @@ test('㉕ ★★★★★ `checkRepo()` 缓存：同一趟进程里不重复扫�
   assert.notEqual(s1, undefined)
   assert.equal(s1['no-second-agent-loop'], s2['no-second-agent-loop'],
     '两次派生的扫描量不一致 ⇒ 缓存键不对，或扫描不稳定')
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// ★★★ 第 118 轮第十三轮（业主确认 c）：源码注释里的**裸坐标 + 具名符号**
+//
+// 这一层此前被明确记为"做不了"（`source-original-citations-on-line` 的 why 里那句
+// "只给坐标、不抄原文……要判它们必须读语义"）。它确实需要语义**当且仅当**注释
+// 没有点名符号；点了名的那些是机械可判的。实测全仓 9 处、当时 6 处是坏的。
+// ══════════════════════════════════════════════════════════════════════════
+
+test('⑳ ★★★ 形状抽取：只认注释行，且「的」两侧有没有空格都要认', () => {
+  // ① 注释行里的正常写法
+  assert.deepEqual(citeSymbolReferences('// 见 `a/b.mjs:12` 的 `foo`'),
+    [{ line: 1, target: 'a/b.mjs', n: 12, sym: 'foo' }])
+  // ② ★ 边界：**同一句话写在代码行的字符串里** ⇒ 不在判据面内。
+  //    这不是理论边界：我自己的 FACTS 条目里就为了讲这次缺陷，在 `why`（字符串）
+  //    里**逐字引用**了一处**写错的**坐标 —— 只扫注释行，这条判据才不会对自己开火。
+  assert.deepEqual(citeSymbolReferences("const s = '见 `a/b.mjs:12` 的 `foo`'"), [])
+  // ③ 「的」两侧没空格也要认。★ 实测这个写法真实存在，而一个**更严的前置过滤**
+  //    会静默漏掉它（本轮真踩：读数从 9 变成 8）——见 `scanBareCoordinateSymbols`。
+  assert.equal(citeSymbolReferences('// 见 `a/b.mjs:12`的`foo`').length, 1)
+  // ④ 负面控制：只给坐标、不点名符号 ⇒ **不是**这条判据管的形状（那是剩下的盲区）
+  assert.deepEqual(citeSymbolReferences('// 见 `a/b.mjs:12`'), [])
+  assert.deepEqual(citeSymbolReferences('// 见 `a/b.mjs:12` 的那一段'), [])
+})
+
+test('⑳b ★★★ 判决的四种结局 + ±25 行的窗口边界（注入目标读取，不碰真文件）', () => {
+  const at = (n) => Array.from({ length: 80 }, (_, i) => (i === n - 1 ? 'const foo = 1' : '// 空行'))
+  const target = (lines) => ({ resolveTarget: () => 'target.mjs', readTarget: () => lines })
+  const ref = { line: 1, target: 'target.mjs', n: 40, sym: 'foo' }
+
+  // ① 就在那一行 ⇒ ok
+  assert.equal(citeSymbolVerdict(ref, target(at(40))).kind, 'ok')
+  // ② 窗口**边界上**（±25）⇒ ok —— 边界两侧各钉一次，窗口才是"量出来的"
+  assert.equal(citeSymbolVerdict(ref, target(at(40 - CITE_SYMBOL_WINDOW))).kind, 'ok')
+  assert.equal(citeSymbolVerdict(ref, target(at(40 + CITE_SYMBOL_WINDOW))).kind, 'ok')
+  // ③ 越界 1 行 ⇒ broken（本轮真缺陷的形状：`resolveRunPermissions` 差 59 行）
+  assert.equal(citeSymbolVerdict(ref, target(at(40 - CITE_SYMBOL_WINDOW - 1))).kind, 'broken')
+  assert.equal(citeSymbolVerdict(ref, target(at(40 + CITE_SYMBOL_WINDOW + 1))).kind, 'broken')
+  // ④ 文件在、但**没有这一行** ⇒ broken（与"文件不在"分开报，处置不同）
+  assert.equal(citeSymbolVerdict({ ...ref, n: 999 }, target(at(40))).kind, 'broken')
+  // ⑤ 目标解析不到 ⇒ unresolved，**不判坏**（目标可能在另一棵检出里）
+  assert.equal(citeSymbolVerdict(ref, { resolveTarget: () => null, readTarget: () => [] }).kind, 'unresolved')
+  // ⑥ 读不出来 ⇒ unresolved
+  assert.equal(citeSymbolVerdict(ref, { resolveTarget: () => 'x', readTarget: () => null }).kind, 'unresolved')
+})
+
+test('⑳c ★★★ 真仓库：这条判据的面不许是空的，且两条守卫都真的会红', () => {
+  // ① 面不是空的 —— 否则下面那句"0 处坏"是空的
+  const s = scanBareCoordinateSymbols()
+  assert.ok(s.total >= 7, `扫描面只有 ${s.total} 处 ⇒ "0 处坏"什么也证明不了`)
+  assert.equal(s.broken.length, 0, `真仓库有漂了的裸坐标：\n${s.broken.join('\n')}`)
+  // ② `security/` 必须在面内：它是**实测漏掉过一处**的那个根
+  //    （直接抄邻居的根目录表会漏，见 `CITE_SYMBOL_ROOTS` 的注释）
+  assert.ok(CITE_SYMBOL_ROOTS.includes('security'),
+    '`security/` 不在扫描面里 ⇒ 本轮实测的那一处漏网会原样回来')
+  // ③ 缓存真的在起作用：这一层要**走一遍全仓**，而两条事实都读它。
+  //    没有缓存 ⇒ 每条事实各走一遍（本套件贴着 300 秒上限，见 `⑪` 的同一条理由）。
+  assert.equal(scanBareCoordinateSymbols(), scanBareCoordinateSymbols(),
+    '两次调用不是同一个对象 ⇒ 缓存没生效，全仓会被走两遍')
+  clearBareCoordinateSymbolsMemo()
+  assert.equal(scanBareCoordinateSymbols().total, s.total,
+    '清缓存后读数变了 ⇒ 这一趟里仓库文件真的变了，或扫描不稳定')
+
+  // ④ 载荷控制一：喂一处坏引用 ⇒ **只它自己**红
+  const brokenPayload = checkFacts({
+    ctx: {
+      ...defaultContext(),
+      bareCoordinateSymbols: () => ({ total: 9, ok: 8, broken: ['x.mjs:1 → y.mjs:2 的 `foo`：±25 行里找不到 `foo`'], unresolved: [] }),
+    },
+    only: ['source-comment-coordinate-names-its-symbol'],
+  })
+  assert.deepEqual(idsOf(brokenPayload), ['source-comment-coordinate-names-its-symbol'],
+    '喂了一处坏引用而那条判据没红 ⇒ 它是装饰')
+
+  // ⑤ 载荷控制二：**把面抽空** ⇒ 空转守卫必须红
+  //    （"扫描面塌了"与"引用全对"，在只看结果串的时候是同一个东西）
+  const emptyPayload = checkFacts({
+    ctx: {
+      ...defaultContext(),
+      bareCoordinateSymbols: () => ({ total: 3, ok: 3, broken: [], unresolved: [] }),
+    },
+    only: ['source-comment-coordinate-symbol-surface-not-empty'],
+  })
+  assert.deepEqual(idsOf(emptyPayload), ['source-comment-coordinate-symbol-surface-not-empty'],
+    '面被抽空到 3 处而守卫没红 ⇒ 那条守卫是装饰')
 })

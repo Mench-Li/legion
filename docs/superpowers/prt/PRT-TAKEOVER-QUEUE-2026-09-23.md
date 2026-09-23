@@ -77,6 +77,84 @@ A1: 跨进程那条路没通：{"ok":false,"code":"EXECUTOR_SELF_CHECK_INCOMPATI
 这一条与本轮 P1-1 是**同一族**（"控制面的数据怎么到达执行面"），
 而且它现在挡着 PRT-253 的跨进程证据 —— 所以它排在 P1-1 之前。
 
+### 0.4 P0-2 的根因（第 118 轮，已证到），以及**一次被我自己撤回的修法**
+
+#### 根因：判据与等待**不在同一个平面**
+
+- `settleEnforcementMount()` 等的是**组合根那本挂载账**（`assemble.mjs` 的
+  `mountSettled()`）——**只有进程内 `mount()` 写得出来**；
+- 而 `reconcilePatchLayer()` 判"未激活"判的是 **Loader 那棵树**
+  （`observeComposition()` → `entry.fiber.state === 2`）。
+
+补丁层那些 `insert` 行（`legion-host.patch.yml`）由 Loader 用
+`Promise.allSettled(config.map(create))` **并发**创建，`mountSettled()` 对它们一无所知。
+于是"等挂载收敛"等完之后，树里仍可能有行的 `apply` **正在跑** ——
+只要那一行的 `apply` 里有**一次真 I/O**。`runtime-contract-server-row.mjs:482`
+的 `await created.listen()` 就是。
+
+`activated` 那一个布尔把两件事压成了一件（`runtime-host-row.mjs:128-138` 是**刻意**的）：
+
+| fiber.state | 含义 | 旧读数 |
+| --- | --- | --- |
+| `0 PENDING` | 它在等注入的服务 | `activated:false` |
+| `1 LOADING` | **它的 `apply` 还在跑** | `activated:false` ← 本次的真凶 |
+| `2 ACTIVE` | 跑完了 | `true` |
+| `3 FAILED` / `4 DISPOSED` / `5 UNLOADING` | **跑坏了 / 已经走了** | `activated:false` |
+
+（取值是 `@deepseek-ai/cordis` 的 const enum，在 `plugin-inventory` 与 `web/loader-status`
+里各有一份运行期镜像，逐字核对过。）
+
+#### 证据（同一条组合、同一台进程）
+
+1. **A0 / A0b 是绿的**：探针读到 `CONTRACTSVC ok=1 listening=1 tokenConfigured=1 warnings=`，
+   端口是真内核临时端口，`runtime/runtime-contract.json` 真的写出来了；
+2. **A1 是红的**：同一份 `scenario('full')` 里，worker 拿到的自检结论是
+   `EXECUTOR_SELF_CHECK_INCOMPATIBLE` + `composition-patch-layer:
+   legion-enforcement-runtime-contract-server: 行已挂载但未激活（等待依赖服务）`；
+3. 而且 A1 自己**已经把 HTTP 请求打到了那台进程上**（`base = http://127.0.0.1:${svc.port}`）——
+   一台"没有生效"的服务不会答这个请求。
+
+> 一份"读的时候它还没跑完"的自检，与一份"它真的没跑起来"的自检，
+> 给出同一条红 —— 只不过前者会在几毫秒之后自己变成绿的；
+> 而那一瞬间的读数会被**固化成** `autoExecutionForbidden: true`。
+
+#### 撤回的修法（第一阶段，**已 `git checkout` 还原**）
+
+曾把表补全、给每行加 `state`、加 `observeCompositionSettled()`（有界 5 秒轮询等
+"离开挂载中"）、并让那句诊断按状态分岔。读数：
+
+- `runtime-contract-cross-process`：**6 红 → 2 红**（H 与三条 ★ 转绿）；
+- 但 `runtime/dsh-composition` 全域复跑出现 **14 条新红**，落在三个
+  **CI 里已注册、改动前是绿的**真进程套件上：
+  `runtime-host-binding-unblocked-dsh-process`、
+  `runtime-host-registrar-row-dsh-process`、`runtime-host-registrar-row`。
+- ⇒ 整体**净亏**，当场还原；还原后 `runtime-host-*.test.mjs` **104/104** 绿（已复跑确认）。
+
+**教训（写下来，因为下一次很容易再犯）**：对**任何** `PENDING / LOADING` 的行
+一律等 5 秒，是**太钝**的一刀 —— 那些夹具里有行**合法地**停在 `PENDING`
+（在等一个夹具永远不提供的服务），于是"等收敛"变成了 5 秒启动延迟与读数的整体平移。
+判据没放宽，但**失败从一个套件搬到了三个套件**。
+
+#### 撤回后暴露出来的**第二条缝**
+
+第一阶段之后残留的那 2 条红换了形状，指向下一处：
+
+```text
+A1: EXECUTOR_RUNTIME_REFUSED / RUNTIME_CONTRACT_ENFORCEMENT_UNAVAILABLE
+A2: HTTP 503「强制面结论的形状不对：必须是带布尔字段 autoExecutionForbidden 的对象」
+```
+
+即：worker 可以在注册方把 `legionRuntimeHostBinding` 发布出来**之前**就请求
+`/legion/enforcement`。而那台服务端把"**还没发布**"说成了"**形状不对**" ——
+与本次同类：两个不同的处境，一句诊断。
+
+#### 下一阶段的两个候选（先记形状，不先写码）
+
+1. 等待只针对 `LOADING(1)`（"`apply` 在跑"），**永不**针对 `PENDING(0)`
+   （那是一个可能永远不来的依赖）——且必须证明三个真进程套件仍然全绿；
+2. `runtime-contract-server-row.mjs` 里把"注册方还没发布"与"形状不对"分成两个读数
+   （前者可等，后者当场拒），而不是都落进 503 的同一句话。
+
 ---
 
 ## 1. 优先级队列
@@ -87,7 +165,7 @@ A1: 跨进程那条路没通：{"ok":false,"code":"EXECUTOR_SELF_CHECK_INCOMPATI
 | 序 | 任务 | 类型 | 依据 | 状态 |
 | --- | --- | --- | --- | --- |
 | **P0-1** | `test` 阶段**全量**复跑 | 验证 | 第 116 轮 7 个红套件修在 `59a6ad9`，此后只跑过 `--only` | ✅ 已跑（本轮，1295s）：2 红 —— 一个我已修，一个见 P0-2 |
-| **P0-2** | **`legion-enforcement-runtime-contract-server` 行挂载了却从未激活** | 施工·真缺陷 | `EXECUTOR_SELF_CHECK_INCOMPATIBLE` + `行已挂载但未激活（等待依赖服务）`；19 例 6 败 | **待做（第一优先）** |
+| **P0-2** | **`legion-enforcement-runtime-contract-server` 行挂载了却从未激活** | 施工·真缺陷 | `EXECUTOR_SELF_CHECK_INCOMPATIBLE` + `行已挂载但未激活（等待依赖服务）`；19 例 6 败 | 🟡 根因已证（§0.4）；第一阶段修法**净亏、已撤回**；下一阶段两个候选待做 |
 | **P1-1** | 接 `spool` / `toolcall-drain` **落账车道**（解目标链 L7） | 施工 | §14.4 / §14.5；两半各有一套用例（14 + 13 例），环已在真 SQLite 上走通 | **本轮开工**（业主已选定） |
 | **P1-2** | 删掉 PRT-707 **死的那份**实现 | 施工 | 业主 2026-09-23 裁决 | 待做 |
 | **P1-3** | `whitelist` 装配 + **Legion 能力词表**映射 | 施工 | 业主 2026-09-23 裁决（第 27 条选 Legion 名 + 加映射） | 待做 |

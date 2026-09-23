@@ -1,0 +1,143 @@
+# 接管队列（2026-09-23）—— 守护全停之后
+
+> **本文件是"本会话接下来按什么顺序做什么"的队列，不是新的台账。**
+> 「PRT 实施到哪一步」的唯一权威入口仍是
+> [`PRT-PROGRESS.md`](PRT-PROGRESS.md)（141/145 ✅，未完成 4）；
+> 需要业主一句话的事项在 [`../../DECISION-BRIEF.md`](../../DECISION-BRIEF.md)。
+> 本文件**不改任何状态格**，只记录：谁在做、按什么顺序、以及为什么是这个顺序。
+> 台账、spec 与本文件冲突时，以台账与 spec 为准。
+
+---
+
+## 0. 本轮已落地的两件事（都有读数）
+
+### 0.1 守护全停
+
+| 对象 | 之前 | 现在 | 读法 |
+| --- | --- | --- | --- |
+| `include:legion-scrum-worker-ozon` | `enabled: true` | **`enabled: false`** | `plugin_manager` 改的，**profile 级、立即应用** |
+| `include:legion-scrum-worker`（software） | false | false | 本来就停着 |
+| `include:legion-mediator` | false | false | 本来就停着 |
+| `include:legion-scrum-worker-gf001` | false | false | 本来就停着 |
+| `scrum/control.json` | `{"paused":false}` | **`{"paused":true}`** | 第二道闸：守护每轮扫单前读它（`plugins/src/index.ts` 的 `readControlPaused()`） |
+
+- **验证读数**：`scrum/daemon-ozon.json` 的 mtime 在 **45 秒**窗口内未再变化
+  （此前它每 `intervalMs=20000` 一轮改写一次，最后写入 2026-09-23 09:54:31）。
+- **刻意保留**：`include:legion-team-hub`（服务）与 `include:legion-scrum-board`（看板 UI）——
+  它们不是守护，不认领任务、不派工。
+- **恢复方法**：`plugin_manager` 把那一行 `set_plugin enabled=true`；
+  再把 `scrum/control.json` 改回 `{"paused":false}`。
+- **冲突的根因（供以后参考）**：`legion-scrum-worker` 这一族是**同一模块挂四行**
+  （software / ozon / mediator / gf001），各自带自己的 `scope` 与 `repo.root`。
+  同一时刻只要有两行是 `enabled`，就会有两个进程在**同一棵工作树**上
+  认领任务、写同一批文件——本轮之前 ozon 那行在跑，software 那行停着，
+  所以"看起来只有一个"，但**看板/健康页只认 `daemon.json`**，
+  而 ozon 写的是 `daemon-ozon.json`，于是读数与实际在跑的东西并不同形。
+
+### 0.2 在制改动已提交
+
+| 提交 | 内容 | 提交前复跑的门禁 |
+| --- | --- | --- |
+| `061974f` | `runtime/config-schema.mjs` 补登 9 个字面量 + `runtime/adapters/dsh/adapter.test.mjs` ⑯ 三例 | `env` PASS / `config.test.mjs` 53/53 / `suite-counts` 33/33 |
+| `762d979` | 两份在制证据文档（用法投影 / 第 116 轮红套件逐条根因） | `check-docs` PASS / `encoding-check` PASS / `boundary-facts` 30/30 |
+
+工作树里**已无被跟踪文件的未提交改动**；`scrum/daemon-ozon.json` 的运行时抖动
+（`lastSweepAt` / `uptimeMs` / `checkedAt`）已还原到 `HEAD` 的值，
+不把运行时状态写进提交。
+
+---
+
+## 1. 优先级队列
+
+排序依据只有一条：**会不会让下一个人照着一个反的读数做决定**。
+同档之内，先做"解锁别人的"。
+
+| 序 | 任务 | 类型 | 依据 | 状态 |
+| --- | --- | --- | --- | --- |
+| **P0-1** | `test` 阶段**全量**复跑 | 验证 | 第 116 轮 7 个红套件修在 `59a6ad9`，此后只跑过 `--only`；最后一次全量读数（`e5196f7`）是 `test FAIL` | 本轮已启动（后台，约 20 分钟） |
+| **P1-1** | 接 `spool` / `toolcall-drain` **落账车道**（解目标链 L7） | 施工 | §14.4 / §14.5；两半各有一套用例（14 + 13 例），环已在真 SQLite 上走通 | **本轮开工**（业主已选定） |
+| **P1-2** | 删掉 PRT-707 **死的那份**实现 | 施工 | 业主 2026-09-23 裁决 | 待做 |
+| **P1-3** | `whitelist` 装配 + **Legion 能力词表**映射 | 施工 | 业主 2026-09-23 裁决（第 27 条选 Legion 名 + 加映射） | 待做 |
+| **P1-4** | 阶段 9 产品动作的 **CLI 面** | 施工 | 业主 2026-09-23 裁决（第 16 条：做） | 待做 |
+| **P1-5** | 外部 API 授权表**管 scheme** | 施工 | 业主 2026-09-23 裁决（第 26 条：管） | 待做 |
+| **P2-1** | 第 24 / 25 条的**临时口径**：政策门暂不从连接器声明读能力；MCP 工具归属暂以 F-21 登记表为准 | 记账 | 业主本轮未给，先按保守一侧记，等他改 | 已记 |
+| **P2-2** | 剩下的裁决项：第 12 / 10 / 8 / 6 / 21 条 | 裁决 | `DECISION-BRIEF.md` §1 / §2 | 待业主 |
+| **P3-1** | 23 个 `gap` 类模块（有实现、无生产路径）的收口盘点 | 记账 | `reachability.mjs --diff`：不可达 44 = by-design 13 · deliberate 8 · **gap 23** | 待排 |
+| **P3-2** | 19 个陈旧 worktree（`w/T-043`…`w/T-117`、`codex/prt-phase0-1`、`codex/prt-runtime`） | 卫生 | 分支领先 `main` 1–2 个提交未合并，最后活动 9/5–9/12；其中 4 个还有未提交改动 | 待排 |
+| **P4-1** | PRT-009 / PRT-253 / PRT-256 / PRT-910 | 等外部 | 需执行期外的机器 / 真实外部用户 / 真实用户项目 | 本机无可做动作 |
+| **P4-2** | PRT-316 的日期闸门 | 等日期 | 最早可启动 **2026-09-24**；但 churn 闸门读数 `cooled=false recentMax=9/40`（阈值 ≤2）⇒ 阶段 3 **仍应推迟** | 等日期 + 等降温 |
+
+---
+
+## 2. P1-1 的施工面（先把坐标钉准）
+
+第 22/76/84/87 轮反复量过这一条。**要改的不是"实现什么"，是接线**；
+而接线的前提是"车道的目录由哪一个既有配置量派生"——第 84 轮已经把这一半答掉了：
+
+> `product/config-schema.mjs:102` 定义了产品**唯一**的 `dataDir`（`LEGION_DATA_DIR`，落点由冻结的目录布局定），
+> 而 `:1057`（runtime）与 `:1059`（orchestrator）已经把它派给了那两个进程。
+> `product/process-manifest.mjs:111` 显示 `team-hub` 是**同一份进程清单里的兄弟进程**，
+> 只是它的 `envNames`（`:135`）里**没有** `LEGION_DATA_DIR`。
+
+于是施工面是三处 + 一处设计：
+
+| # | 位置 | 要做什么 |
+| --- | --- | --- |
+| 1 | `product/config-schema.mjs` 的派生表（`:1057` / `:1059` 那一族） | 补一行 `{ target: 'team-hub', env: 'LEGION_DATA_DIR', via: 'env', from: 'layout.dataDir', … }` |
+| 2 | `product/process-manifest.mjs` 的 team-hub 块（`:111` / `:135`） | 把 `LEGION_DATA_DIR` 加进它的 `envNames`（不加 ⇒ `buildChildEnv()` 对未声明的键**直接抛**） |
+| 3 | `product/launcher/launcher.mjs` | 拼子进程环境时把该键真的传下去 |
+| 4 | **按 Run 的缝**（设计） | `onDecision` 是**装配期**参数，而 spool 是**逐 Run** 一份。观察点必须从**按 Run 安装**的那个缝（PRT-214 已跑通两遍的形状）读当前 runId |
+
+第 4 条是**唯一还带设计成分**的一处。`runtime/dsh-composition/plugins/root-row.mjs:626`
+是 `installEnforcementRoot()` 在全仓**唯一**的生产调用方；在那里绑死 runId
+会让**整个进程只往第一个 Run 的账本里写**——而"第二个 Run 的工具账不见了"
+在任何单 Run 的用例里都是绿的。
+
+⚠️ 两条口径先写在前面，免得施工时走偏：
+
+1. **不许发明默认值**（PRT-253 §3）。收账侧的库路径今天是 `team-hub/server.mjs:335`
+   的 `join(ROOT, 'team-hub', 'team.db')`——那是**库**的位置，不是**车道**的位置，
+   不能顺手拿它当 spool 的目录。
+2. **收账侧不住进 hub 进程**（第 28 条的"乙"）。本轮裁决走的是"按 Run 交付"
+   这一族形状（与第 19 条逐字一致），不是把车道绑死在库旁边。
+
+---
+
+## 3. 本轮业主裁决（2026-09-23，六条）
+
+| 项 | 裁决 | 直接后果 |
+| --- | --- | --- |
+| 守护停止范围 | 保持**全停**，由本会话接管 | 不再有第二个进程争同一棵工作树 |
+| P1 首项 | **接 spool / toolcall-drain 车道** | 见 §2 |
+| 第 27 条（whitelist 词汇表） | 用 **Legion 能力名**，在强制面**加一层映射** | `runtime/dsh-composition/whitelist-port.mjs:177` 的 `translateToolName()` / `:350` 的 `whitelistPortFromEnv()` 就是那层；缺的是**装配里没人传值**（`surfaces.whitelist === false`，有用例钉着） |
+| 第 17 条（两份向导实现） | **删掉死的那份**（`product/launcher/first-run.mjs`） | 它被三条判据围着：`wizard-wiring.test.mjs` 的 ③（零生产导入者）、`scripts/prt/reachability.test.mjs:309` 的基线、`scripts/ci/run-ci.mjs:4285` 的套件登记——删文件必须同时处置这三处 |
+| 第 16 条（阶段 9 CLI 面） | **做** | 14 个"零生产入口"模块里唯一"轮到补入口"的一类 |
+| 第 26 条（外部 API 的 scheme） | **管**：不在白名单协议里一律拒绝 | `runtime/dsh-composition/external-api-scope.mjs:806` 的 `checkExternalApi()` 今天**完全不看 scheme**（全文件搜 `scheme` 零命中）⇒ `ftp://…` 会被放行 |
+
+---
+
+## 4. 顺带量到的一条：**决策面文档的引文坐标在漂**（本轮新读数）
+
+写 §2 时逐个核了坐标，结果**四处对不上**：
+
+| 文档里写的 | 今天的实际 | 差 |
+| --- | --- | --- |
+| `product/config-schema.mjs:88` 定义 `dataDir` | `:88` 是 `export const SCHEMA = defineSchema({`；`dataDir` 在 **`:102`** | 漂 14 行 |
+| `product/config-schema.mjs:1043` / `:1045` 是 `LEGION_DATA_DIR` 的两行派生 | 那两行现在是 `TEAM_HUB_URL` 与 `LEGION_ACTOR`；`LEGION_DATA_DIR` 在 **`:1057`** / **`:1059`** | 漂 14 行 |
+| `team-hub/server.mjs:279` 是 hub 的库 | `:279` 是 `ROOT` 的算法；库在 **`:335`** | 漂 56 行 |
+| `runtime/dsh-composition/plugins/root-row.mjs:591` 是 `installEnforcementRoot` 的生产调用方 | **那一行是空的**；真正的调用在 **`:626`** | 漂 35 行，且落在空行上 |
+
+**为什么没有任何闸门变红**：`scripts/prt/boundary-facts.mjs` 的坐标判据
+只扫**台账**那一个文件（`lineCitations: () => scanLineCitations(doc(LEDGER_DOC))`），
+而上面四条都在 `DECISION-RUNREQUEST-EXECUTION-PLANE.md` 与
+`MULTI-AGENT-FEATURE-STATUS.md` 里。这与第 104 轮那条
+「漂了 414 行的引用落在**所有判据的视野之外**」是同一个形状——
+只不过那次在台账里，这次在决策面文档里。
+
+> 一条"写着出处、但没人再核对过"的坐标，与一条"当初就是编的"坐标，
+> 在读者的眼里是同一个东西——只不过前者在被引用时看起来更有依据。
+
+**处置（本轮只记账，不改那两份文档）**：§2 的施工坐标一律用**本次实核过的行号**；
+要不要把坐标判据从"只扫台账"扩到决策面文档，是一次独立的决定——
+扩了会当场翻出上面这四条，也会让每次重排注释都可能变红
+（而**一个总是叫狼来了的门禁会被关掉**）。

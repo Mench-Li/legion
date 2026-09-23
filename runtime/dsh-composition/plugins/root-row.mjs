@@ -154,8 +154,12 @@ import { WHITELIST_PORT_ENV_KEY, whitelistPortFromEnv } from '../whitelist-port.
 //   · `toolCallRowOf`：`tool_calls` 那一行的**唯一**形状产出者（PRT-610），本行不重算。
 import { identityOverlayForExecution } from '../run-identity.mjs'
 import { toolCallRowOf } from '../tool-request.mjs'
+// ★ 决定词表**只有一份**（`runtime/connectors/decision-port.mjs:109`）——
+//   这一行读它，而不是在本文件里再写一个字面量 `'allow'`。
+import { DECISION_KINDS } from '../../connectors/decision-port.mjs'
 import {
   TOOLCALL_SPOOL_WRITER_CODES,
+  createSpoolObserver,
   createToolCallSpoolWriter,
 } from '../../toolcall/spool-writer.mjs'
 import {
@@ -700,11 +704,27 @@ export function createRootRow({
         //
         // ⚠️ 观测点**自己要去重**，理由是本轮实测出来的一条：`onDecision` 有**两个**发射方
         //   （`assemble.mjs` 把同一个回调同时给了桥与 pre-execute 插件），而 pre-execute
-        //   那一条**按设计**不带投影 ⇒ **每一次工具调用**都会得到一次 `NO_PROJECTION`
-        //   拒绝。逐条告警会把日志淹掉，而"每次都告警"与"没有告警"在值班眼里一样没用。
+        //   那一条**按设计**没有行的形状（它既不带投影、键名也是 `exec` 而不是 `execution`）
+        //   ⇒ **每一次工具调用**都会多出拒绝。逐条告警会把日志淹掉，
+        //   而"每次都告警"与"没有告警"在值班眼里一样没用。
         //
         //   ★ 而它也**不是丢账**：同一次决定已经从桥那一条（带投影的）记进去了 ——
         //     这条只是"另一个通知点也想记，但它没有行的形状"。
+        //
+        // ★★★ 第 118 轮第十七轮**校订**（实测，不照注释）：上一版这里写的是
+        //   "pre-execute 那一条会得到一次 `NO_PROJECTION`"。**实测是 `NO_RUN_ID`**
+        //   （`runtime/toolcall/spool-writer.test.mjs` ⑫ 逐字用那个载荷形状钉住）：
+        //   守卫顺序是**先取 Run 号**，而那个载荷里 Run 号取自 `event.execution`
+        //   —— 它的键叫 `exec` ⇒ 先卡在 Run 号上。
+        //
+        //   ⇒ 于是这套日志里会出现**两种**码，来源不同，都必须解释：
+        //     · `NO_RUN_ID` ← pre-execute 插件的第二个通知点（键名不同，取不到 Run）；
+        //     · `NO_PROJECTION` ← 桥自己的**可用性**那几条（`enforcement.mjs:484/495/501/504`：
+        //       有 `execution`（Run 号取得到）、但没有投影）。
+        //
+        //   > 两者的**处置**相同（不写、不丢账、只告警一次），所以这个差别不改变行为；
+        //   > 它改变的是**值班看到的那一行理由**。而"理由指错了一格"正是这个仓库
+        //   > 反复量到的那种账：*看起来有解释，只是解释的是别的东西*。
         onReading: (() => {
           if (typeof ctx.logger?.warn !== 'function') return null
           const warned = new Set()
@@ -712,10 +732,13 @@ export function createRootRow({
             if (warned.has(reading.code)) return
             warned.add(reading.code)
             ctx.logger.warn(`${ROOT_ROW_PLUGIN_NAME} 的车道写入侧：${reading.code}——${reading.reason}`
-              + (reading.code === TOOLCALL_SPOOL_WRITER_CODES.NO_PROJECTION
+              + ((reading.code === TOOLCALL_SPOOL_WRITER_CODES.NO_PROJECTION
+                || reading.code === TOOLCALL_SPOOL_WRITER_CODES.NO_RUN_ID)
                 ? '（★ 这一条**按设计**会出现：桥与 pre-execute 插件共用这一个回调，'
-                  + '而 pre-execute 那一条不带投影。同一个决定已由**带投影**那一条记进去了，'
-                  + '所以这里不是丢账，是"另一个通知点没有行的形状"。只告警一次。'
+                  + '而只有桥那一条带得出一个工具调用级的行。同一个决定已由**带投影**那一条'
+                  + '记进去了，所以这里不是丢账，是"另一个通知点没有行的形状"。'
+                  + '★ 两种码对应两个不同的通知点（`NO_RUN_ID`=载荷键名是 `exec`、取不到 Run 号；'
+                  + '`NO_PROJECTION`=有 Run 号但没投影）。只告警一次。'
                 : '（同一种坏法只告警一次。）'))
           }
         })(),
@@ -761,7 +784,28 @@ export function createRootRow({
         // ★★★ PRT-610 写入侧：组合根把 `onDecision` 一路透传（`root.mjs:486` → `assemble.mjs:293`
         //   → 桥），于是**已经作出的**决定在这里被追加进车道。它是**事后通知**：
         //   它抛错不会把一次调用变成一次拒绝（`spool-writer.mjs` 因此把失败收成具名读数）。
-        onDecision: spoolWriter.observeDecision,
+        //
+        // ★★★ 第 118 轮第十七轮：这一行由"直接透传一个函数引用"改成一段**包装**。
+        //
+        //   起因是核实第 28 条那一族（`spool` 车道）时量到的一件事：`spool.mjs:110` / `:112`
+        //   定义了 `dispatched` / `result` 两种记录，`toolcall-drain.mjs` 也认它们
+        //   （`markDispatched()` / `recordResult()`），而**写入侧只调 `observeDecision`**
+        //   ⇒ 收账侧那两条分支在生产里是**死代码**：`tool_calls.dispatched_at`
+        //   永远是 null，而"还没派发"与"没人记过派发"在账上是同一个读数。
+        //
+        //   现在补上**能被补上的那一半**：决定是 `allow` 时，紧接着追加一条 `dispatched`。
+        //   ★ 位置不是随手挑的：`docs/superpowers/prt/PRT-610-tool-call-log.md:157`
+        //   逐字写着 `markDispatched` "**必须发生在真的派发之前**" ——
+        //   而"这次调用被放行"这一刻正是那个位置。
+        //
+        //   ⚠️ 只有 `allow` 写它。`deny` / `ask` 永远不会有"派发"这个时刻，
+        //     给它们也写一条，账上就会多出一批**并不存在的派发**。
+        //   ⚠️ `result`（第三种）**这里补不了**：执行面拿不到"工具跑完了"这件事
+        //     （唯一能带那个事件的通道 `subscribeRun` 全仓没有生产者）。见 `spool-writer.mjs` 文件头。
+        //
+        //   ★ 包装本身是 `createSpoolObserver`（住在写入侧那一侧）——**生产与用例调同一个函数**，
+        //     不让"用例证明的那条接线"与这一行各写一份。
+        onDecision: createSpoolObserver(spoolWriter, { allowKind: DECISION_KINDS.ALLOW }),
         // ★ 传的是**工厂**，不是端口：端口的真实实现住在 team-hub 那一侧，
         //   而组合根在装配期拿到的是一份解析好的身份配置。
         createRequestApproval: (resolved) => {

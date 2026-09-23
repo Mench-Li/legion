@@ -14,6 +14,7 @@ import { join } from 'node:path'
 
 import {
   TOOLCALL_SPOOL_WRITER_CODES,
+  createSpoolObserver,
   createToolCallSpoolWriter,
 } from './spool-writer.mjs'
 import { readSpoolRecords, spoolFileFor } from './spool.mjs'
@@ -216,5 +217,108 @@ test('⑦ 写入的账**收得回来**：与收账侧共用同一份契约（读
     for (const k of ['callId', 'toolName', 'decision', 'decisionSource', 'canonicalHash']) {
       assert.ok(rows[0].row[k] !== undefined && rows[0].row[k] !== null, `行缺 ${k}`)
     }
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+// ── 第 118 轮第十七轮：`dispatched` 的写入侧 ────────────────────────────────
+//
+// ★ 这一族钉的是"派发这件事真的被记下来了"，而最容易的失败方式是
+//   **看起来记下来了**：写了一条状态不是"派发"的记录、或者给 deny 也写一条。
+
+test('⑧ ★★★ 放行 ⇒ 两条记录，且**顺序**是契约（`decision` 在前、`dispatched` 在后）', () => {
+  const dir = tempDir()
+  try {
+    const writer = writerFor(dir)
+    const observe = createSpoolObserver(writer, { allowKind: 'allow' })
+    const reading = observe(eventOf({ runId: 'run-d', decided: 'allow' }))
+    assert.equal(reading.ok, true)
+
+    const rows = readSpoolRecords({ file: writer.fileOf('run-d') }).records
+    assert.deepEqual(rows.map((r) => r.kind), ['decision', 'dispatched'])
+    // ★ 两条说的是**同一次调用**（收账侧靠 `callId` 算幂等键找到那一行）
+    assert.equal(rows[0].row.callId, rows[1].row.callId)
+    assert.equal(rows[1].row.runId, 'run-d')
+    // ★ 顺序不是审美：收账侧按文件里的先后逐条应用（`decision` 建行 → `dispatched` 推状态），
+    //   反过来 `markDispatched` 会**找不到那一行**，而"找不到"与"这次调用没派发"
+    //   在收账读数上是同一个东西。
+    assert.equal(writer.reading().written, 2, '两条记录都该计进 `written`')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('⑨ ★★★ `deny` / `ask` **不许**产生派发行（那会是一批并不存在的派发）', () => {
+  const dir = tempDir()
+  try {
+    const writer = writerFor(dir)
+    const observe = createSpoolObserver(writer, { allowKind: 'allow' })
+    observe(eventOf({ runId: 'run-deny', decided: 'deny' }))
+    observe(eventOf({ runId: 'run-ask', decided: 'ask' }))
+
+    for (const runId of ['run-deny', 'run-ask']) {
+      const rows = readSpoolRecords({ file: writer.fileOf(runId) }).records
+      assert.deepEqual(rows.map((r) => r.kind), ['decision'],
+        `${runId}：只有决定，没有派发`)
+    }
+    assert.equal(writer.reading().written, 2)
+    // ★ 反向对照：同一个 writer 上一条 `allow` **必须**多出那一条 ——
+    //   否则上面两条断言在一个"永远不写派发"的实现下也会全绿。
+    observe(eventOf({ runId: 'run-allow', decided: 'allow' }))
+    assert.deepEqual(
+      readSpoolRecords({ file: writer.fileOf('run-allow') }).records.map((r) => r.kind),
+      ['decision', 'dispatched'])
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('⑩ ★★ 两个入口**共用同一组具名拒绝**：第二种记录不会因为"是新的"而放松', () => {
+  const dir = tempDir()
+  try {
+    // 缺 Run 号 ⇒ NO_RUN_ID（两个入口同码）
+    const noRun = writerFor(dir, { runIdOf: () => null })
+    assert.equal(noRun.observeDecision(eventOf()).code, TOOLCALL_SPOOL_WRITER_CODES.NO_RUN_ID)
+    assert.equal(noRun.observeDispatch(eventOf()).code, TOOLCALL_SPOOL_WRITER_CODES.NO_RUN_ID)
+    assert.equal(noRun.reading().written, 0)
+
+    // 有 Run 号、没投影 ⇒ NO_PROJECTION（两个入口同码）
+    const noProj = writerFor(dir)
+    assert.equal(noProj.observeDecision(eventOf({ projection: null })).code,
+      TOOLCALL_SPOOL_WRITER_CODES.NO_PROJECTION)
+    assert.equal(noProj.observeDispatch(eventOf({ projection: null })).code,
+      TOOLCALL_SPOOL_WRITER_CODES.NO_PROJECTION)
+    assert.equal(noProj.reading().written, 0)
+
+    // 没配 DataDir ⇒ NO_DATA_DIR
+    const noDir = createToolCallSpoolWriter({
+      dataDir: null, runIdOf: (e) => e.__runId, rowOf: () => ({}),
+    })
+    assert.equal(noDir.observeDispatch(eventOf()).code, TOOLCALL_SPOOL_WRITER_CODES.NO_DATA_DIR)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('⑪ ★★ 写入宿主缺半个入口 ⇒ **装配期就抛**，不静默降级成"只记决定"', () => {
+  assert.throws(() => createSpoolObserver({ observeDecision: () => ({}) }), /observeDispatch/)
+  assert.throws(() => createSpoolObserver(null), /observeDecision/)
+})
+
+test('⑫ ★★★ 第二个通知点（`plugins/pre-execute.mjs`）报的是哪个码 —— 实测，不照注释', () => {
+  const dir = tempDir()
+  try {
+    const writer = writerFor(dir)
+    const observe = createSpoolObserver(writer, { allowKind: 'allow' })
+    // 逐字是 `plugins/pre-execute.mjs:112/134/142` 的载荷形状：`{exec, decision, claimed}`
+    // ——它既没有 `execution`（Run 号从那里取）也没有 `projection`。
+    observe({ exec: { name: 'write-file', callId: 'c-1' }, decision: { kind: 'allow' }, claimed: true })
+
+    assert.equal(writer.reading().written, 0, '这一条本来就没有行的形状，不许写')
+    // ★★★ 实测结果：**`NO_RUN_ID`**，不是 `NO_PROJECTION`。
+    //   `root-row.mjs` 那段注释（第 118 轮第八轮写的）说这一条会得到 `NO_PROJECTION`
+    //   —— 那是**从"它没有投影"推出来的**，而守卫的顺序是先取 Run 号：
+    //   这个载荷的键叫 `exec` 而不是 `execution`，于是**先**卡在 Run 号上。
+    //
+    //   两者的**处置相同**（不写、只告警一次、不丢账），所以这个差别不改变行为；
+    //   它改变的是**值班的人看到的那一行理由** —— 而"理由指错了一格"
+    //   正是这个仓库反复量到的那种账：看起来有解释，只是解释的是别的东西。
+    assert.equal(writer.reading().lastRefusal.code, TOOLCALL_SPOOL_WRITER_CODES.NO_RUN_ID)
+    assert.notEqual(writer.reading().lastRefusal.code, TOOLCALL_SPOOL_WRITER_CODES.NO_PROJECTION)
+    // ★ 同一次调用**两条记录都拒绝**（决定 + 派发），而告警按码去重 ⇒ 值班仍只看到一行。
+    assert.equal(writer.reading().refused, 2)
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })

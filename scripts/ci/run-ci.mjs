@@ -1378,6 +1378,9 @@ async function stageTest() {
     //
     //   （第八轮那三套装配用例是手工跑的：`node --test <file>`。手工跑出来的绿
     //   与 CI 里的绿在**当天**是同一个读数，在**下一次改动**之后就不是了。）
+    //
+    //   ★ 第十七轮的例数：写入宿主 9 → **14**（`dispatched` 那一族 ⑧⑨⑩⑪⑫ 五条）、
+    //     生产路径 5 → **6**（①b：被 `deny` 的调用不许留下派发行）。
     { label: 'toolcall-spool-writer（PRT-610 车道·写入宿主：按事件取 Run 号、具名拒绝、绝不抛）', files: ['runtime/toolcall/spool-writer.test.mjs'], cwd: ROOT },
     { label: 'toolcall-spool-writer-wiring（PRT-610 车道·生产路径：真桥 + 真身份 ⇒ 决定落进**这个 Run** 的文件）', files: ['runtime/dsh-composition/spool-writer-wiring.test.mjs'], cwd: ROOT },
     { label: 'toolcall-drain（PRT-610 出站车道·收账侧：整条环走到真库，把 decisionSourceRecorded 翻成 true）', files: ['orchestrator/worker/toolcall-drain.test.mjs'], cwd: ROOT },

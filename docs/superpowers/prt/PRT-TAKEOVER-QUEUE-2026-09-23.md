@@ -231,9 +231,9 @@ A2: HTTP 503「强制面结论的形状不对：必须是带布尔字段 autoExe
 | --- | --- | --- | --- | --- |
 | **P0-1** | `test` 阶段**全量**复跑 | 验证 | 第 116 轮 7 个红套件修在 `59a6ad9` | ✅ **PASS**（19 套件 / 1204s，第二次单独跑） |
 | **P0-2** | **`legion-enforcement-runtime-contract-server` 行挂载了却从未激活** | 施工·真缺陷 | 两个平面（等的账 ≠ 判的树）＋ 自指等待 | ✅ **已修**（`c735415`）：cross-process 6 败 → **19/19**；全域 1025/1025；新增用例 ①e 钉住 |
-| **P1-1** | 接 `spool` / `toolcall-drain` **落账车道**（解目标链 L7） | 施工 | ★ **两半都已接进生产**（§3.5 / §3.6）：收账侧 = hub 收账 tick（第七轮，端到端实测）；写入侧 = `root-row.mjs` 把 `spool-writer.mjs` 挂成 `onDecision`，Run 号**按事件**取（第八轮，车道三套 + 写入侧 9 例，54 套装配用例 1026 例全绿） | 🟡 **只剩三处未接**：`dispatched` / `result` 两种记录**没有观察点**；只有**带投影**的事件会被写成一行；行里的 `attemptId` 仍是 `null`（载体今天只加了 `runId`） |
+| **P1-1** | 接 `spool` / `toolcall-drain` **落账车道**（解目标链 L7） | 施工 | ★ **两半都已接进生产**（§3.5 / §3.6）：收账侧 = hub 收账 tick（第七轮，端到端实测）；写入侧 = `root-row.mjs` 把 `spool-writer.mjs` 挂成 `onDecision`，Run 号**按事件**取（第八轮，车道三套 + 写入侧 9 例，54 套装配用例 1026 例全绿） | 🟡 **三处里清了一处**（第十七轮）：**`dispatched` 已落** —— 放行时写入侧多记一条（`observeDispatch` + `createSpoolObserver`，生产与用例同一函数）；★ **`result` 仍无通道**（唯一能带的 `subscribeRun` 全仓无生产者）、**`attemptId` 仍无定义**（且 DSH 侧同名的是 `LlmAttemptId`，语义不同）⇒ 两者见 §7.4 待裁 |
 | **P1-2** | 删掉 PRT-707 **死的那份**实现 | 施工 | 业主 2026-09-23 裁决（第 17 条） | **✅ 已执行（第九轮，`943ccdc`）** —— ★ 第十四轮核实：上一版这里还写着"待做"，而 `product/launcher/first-run.mjs` **早已不存在**（`Test-Path` = False）；活的那份 `wizard.mjs` / `--wizard` 仍在。> 一张"状态"列与台账的行内散文犯了同一个病：**做完之后没有人回头改那一格**。 |
-| **P1-3** | `whitelist` 装配 + **Legion 能力词表**映射 | 施工 | 业主 2026-09-23 裁决（第 27 条：Legion 名 + 加映射层） | **✅ 两半都清了（第十四轮核实）**：① 映射层在 `whitelist-port.mjs:278`（执行面名 → Legion 名）/`:309`（交给 `permitsTool`）；② 端口的**生产装配**在 `root-row.mjs:645`（`whitelistPortFromEnv({ env: effectiveEnv })`）⇒ `:760` 喂给桥 ⇒ 它**不再是**"在生产里恒为 null"。剩下的"**许可的取值从哪来**"已**并入第 14 条**（§3.7.1），而业主已答（部署方在配置里给，缺失即未接）⇒ 本会话无待办 |
+| **P1-3** | `whitelist` 装配 + **Legion 能力词表**映射 | 施工 | 业主 2026-09-23 裁决（第 27 条：Legion 名 + 加映射层） | **✅ 两半都清了（第十四轮核实）**：① 映射层在 `whitelist-port.mjs:278`（执行面名 → Legion 名）/`:309`（交给 `permitsTool`）；② 端口的**生产装配**在 `root-row.mjs:649`（`whitelistPortFromEnv({ env: effectiveEnv })`）⇒ `:783` 喂给桥 ⇒ 它**不再是**"在生产里恒为 null"。（★ 第十七轮校订：原写 `:645`/`:760`，本轮同文件加了三行 import 与一段注释 ⇒ 漂到 `:649`/`:783`）剩下的"**许可的取值从哪来**"已**并入第 14 条**（§3.7.1），而业主已答（部署方在配置里给，缺失即未接）⇒ 本会话无待办 |
 | **P1-4** | 阶段 9 产品动作的 **CLI 面** | 施工 | 业主 2026-09-23 裁决（第 16 条：做） | **🟡 两刀都已落（第十四 / 第十六轮）**：第一刀 3 份只读报告接进 `legion --report=<kind>`（`product/report-cli.mjs`）；**第二刀接的是一条读法**——`product/lifecycle/store-scan.mjs`（把落点从磁盘读出来）+ `product/lifecycle/plan-cli.mjs` 三面旗标（`--uninstall-plan=<mode>` / `--export-plan` / `--retention-plan`）。合计：不可达 41→**33**、`gap` 20→**12**、本族 11→**3**；★ 第二刀**不需要**另一次业主裁决——那三个模块要的"目录"就是布局自己那几个根（`resolveLayout` 给的），真正还差的只有 metrics 那一支的**库句柄**（§3.10 / §7） |
 | **P1-5** | 外部 API 授权表**管 scheme** | 施工 | 业主 2026-09-23 裁决（第 26 条：管） | **✅ 已执行（第十一轮）**，见 §3.8 |
 | **P2-1** | 第 24 / 25 条的**临时口径**：政策门暂不从连接器声明读能力；MCP 工具归属暂以 F-21 登记表为准 | 记账 | 业主本轮未给，先按保守一侧记，等他改 | 已记 |
@@ -287,29 +287,66 @@ A2: HTTP 503「强制面结论的形状不对：必须是带布尔字段 autoExe
 ★ 三条都**不是**"补一个环境变量"：甲要一个**新的观察点**（桥的 `onDecision` 只报"决定"），
 乙要一次**行形状**的决定，丙要给**载体**加一个字段并在两侧都接上。
 
-★★ **第 118 轮第十六轮实测（本会话顺手读到的，为下一轮备料）**：那个"新观察点"**已经在桥上了，
-只是被接进了错误的那条线**。逐字读 `runtime/dsh-composition/assemble.mjs:313`：
+★★ **第 118 轮第十七轮：上面那三条逐条核实过，并落地了能落地的那一半。**
 
-```js
-...(onDecision === null ? {} : { onOutcome: onDecision }),
-```
+⚠️ **先更正一段我自己在第十六轮写错的账**（原文保留在下面"❌"里，因为这张表的用途就是
+让下一个人看到"账可以错成什么样"）：我当时从 `assemble.mjs:313` 那一行
+`...(onDecision === null ? {} : { onOutcome: onDecision })` 推出
+"结果事件被拍平送进了 `onDecision`"。**那是错的** —— 那一行属于
+`createApprovalAnswererPlugin`（同一个调用里 `:298` 给 pre-execute、
+`:313` 给审批应答器），它报的是**审批**的结局
+（`enforcement.mjs:610`：`{req, outcome, reason, elapsedMs}`，`outcome` 是
+`approved`/`rejected`/`cancelled`/`unavailable`），**不是**工具执行的结果。
 
-也就是说——**结果事件（`onOutcome`）今天被拍平送进了 `onDecision`**，
-而 `spool-writer.observeDecision` 的第一道守卫是"没带投影 ⇒ `NO_PROJECTION` 具名拒绝"（上面乙那一行）。
-⇒ 甲与乙是**同一件事的两面**：
+> ❌ **错的写法**："那个新观察点已经在桥上了，只是被接进了错误的那条线 ⇒ 要做的不是发明一个钩子，
+> > 而是在 `assemble.mjs:313` 把漏斗拆开。"
+>
+> ★ **错在哪**：我在一个 20 行的窗口里看到**同一段条件展开形状**出现四次
+> （`:293` 桥 / `:298` pre-execute / `:313` 审批应答器），就把"`onOutcome`"这个名字
+> 当成了"工具结果的出口"。**同一个名字在不同发射方那里指不同的东西**，
+> 而我只读了一行。
+>
+> ★★ 这正是本会话反复在修的那种账：*一个从一行代码推出来的结论，
+> 与一个读过它周围二十行之后写下的结论，在纸上长得一模一样。*
 
-| 项 | 之前记的 | 实测之后它变成 |
+**核实之后的真实状态**（每条都有可复跑读数）：
+
+| 项 | 实测读数（第十七轮） | 结论 |
 | --- | --- | --- |
-| 甲 | "写入侧没有观察点" | **有**（`onOutcome`），但被并进了 `onDecision` ⇒ 需要的是**在 `assemble.mjs:313` 把这个漏斗拆开**，给结果一条自己的写入路径 |
-| 乙 | "要一次行形状的决定" | 同一次决定：结果行的形状（`dispatched` 要 `['callId']`，`result` 要 `['callId','status']`，见 `spool.mjs:124-125`），而**投影不是它的必填项**——今天它却是被投影这道门挡在外面的 |
-| 丙 | "载体里连 `attemptId` 这个名字都没有" | ★ **部分过期**：收账侧**读**它（`orchestrator/worker/toolcall-drain.mjs:159` 逐字 `attemptId: row.attemptId ?? null`）⇒ 缺的是**写入侧把它填上**，不是两侧都加 |
+| 甲 `dispatched` | `appendSpoolRecord` 的**生产调用方只有 `spool-writer.mjs`**（grep 全仓）；`spool.mjs:110` 定义了 `dispatched`、`toolcall-drain.mjs:167` 认它 ⇒ 收账侧那条分支在生产里是**死代码** | **可做，已做**（见下） |
+| 甲 `result` | 全仓 **0 处** post-execute / `toolResult` / `afterExecute`；唯一能带工具完成事件的通道是宿主端口的 `subscribeRun`，而它**全仓没有生产者**（`docs/PRT-253-evidence/usage-reporting-projection.md:75-77` 实测，且业主当时已裁定改走**投影**） | **做不了**，需业主裁决（见 §7.4） |
+| 乙 结果行形状 | 形状**已经定了**（`spool.mjs:124-125`：`dispatched:['callId']`、`result:['callId','status']`）——缺的从来不是形状，是**事件** | 随甲 |
+| 丙 `attemptId` | `toolCallRowOf` **已经收** `attemptId`（`tool-request.mjs:444`），`root-row.mjs` 的 `rowOf` 不传；而 `attemptId` 在 `OBSERVATION_KEYS` 里（`tool-request.mjs:175-178`）⇒ **出现在主体参数里会被拒绝投影**、且**不参与授权哈希**（spec §6.5 line 470） | **做不了**，需先定义（见 §7.4） |
 
-★ 这一格是"账要跟着代码走"的又一次现场：**四行之前那句"要一个新的观察点"是对的，
-但"（桥的 `onDecision` 只报'决定'）"这个括号是错的** —— `assemble.mjs:313` 那一刻正好写着相反的话。
-⇒ 下一轮动它时，**先读那一行**，别信这张表。
+★★ 丙那条还查出一个**会让人接错**的事实：DSH 侧同名的那东西**不是一回事**——
+`packages/core/agent-loop/src/assistant-stream.ts:45` 里
+`LlmAttemptId(\`${sessionId}:${attempt}\`)` 是**模型调用尝试**的身份，
+与"工具调用尝试"无关。⇒ 谁要是照字面去读 `execution.attemptId` 填进
+`tool_calls.attemptId`，账上就会出现一列**语义完全不同**的值，而它会通过所有形状检查。
 
-**回到 §2.1 那一条**（按 Run 的缝）：`runtime/dsh-composition/plugins/root-row.mjs:724`
-（★ 第十四轮校订：本节原写 `:626`，实测已漂到 `:724` —— 由 §3.8 那条手钉判据先红出来的）
+### 2.2.1 ★ 本轮落地的那一半：`dispatched`
+
+`dispatched` 的写入点**不是随便挑的**：`docs/superpowers/prt/PRT-610-tool-call-log.md:157`
+逐字写着 `markDispatched` "**必须发生在真的派发之前**" ——
+而"这次调用被**放行**"这一刻正是那个位置。
+
+| 改动 | 位置 |
+| --- | --- |
+| 抽出共用的追加路径 + 新增 `observeDispatch(event)` | `runtime/toolcall/spool-writer.mjs`（守卫与具名拒绝码**一个字没改**，两个入口共用同一组） |
+| 新增 `createSpoolObserver(writer, {allowKind})` —— **生产与用例调同一个函数** | 同上（避免"用例证明的那条接线"与生产各写一份包装） |
+| 组合根把它接到 `onDecision`：**只有 `allow`** 才多记一条派发 | `runtime/dsh-composition/plugins/root-row.mjs:808` |
+| 用例：放行 ⇒ 两条且**顺序**是契约；`deny`/`ask` ⇒ 只有决定；两入口同码；缺半个宿主装配期就抛 | `runtime/toolcall/spool-writer.test.mjs` ⑧⑨⑩⑪⑫ |
+| 生产路径用例（真桥 + 真身份 + 同一条接线） | `runtime/dsh-composition/spool-writer-wiring.test.mjs` ①①b② |
+
+★ 副产品：**`tool_calls.dispatched_at` 从此会有值**（此前恒为 null），
+而"还没派发"与"没人记过派发"第一次分得开。
+
+**回到 §2.1 那一条**（按 Run 的缝）：`runtime/dsh-composition/plugins/root-row.mjs:747`
+（★ 第十四轮校订：本节原写 `:626`，实测已漂到 `:724` —— 由 §3.8 那条手钉判据先红出来的。
+★★ **第十七轮再校订：`:724` → `:747`** —— 本轮给写入侧加 `observeDispatch` 时，
+那个文件里多了一段注释与一个 import ⇒ 它**又**往下挪了 23 行。
+⚠️ 这一次**没有任何判据报警**（`boundary-facts` 全绿）：它查的是**源码注释**里的坐标，
+而这一段是**文档**里的坐标 —— 见 §4.3）
 是 `installEnforcementRoot()` 在全仓**唯一**的生产调用方；在那里绑死 runId
 会让**整个进程只往第一个 Run 的账本里写**——而"第二个 Run 的工具账不见了"
 在任何单 Run 的用例里都是绿的。
@@ -900,6 +937,41 @@ hard floor、`canonicalHash`（账本）全都读那份投影 ⇒ 全都判错�
 ★ 顺带：本会话在 (c) 里订正的 6 处是**源码注释面**，全部不在这 21 里；
 两个面**没有重叠** —— §4 那个面今天仍然**一处都没改**。
 
+★★★ **第十七轮实测：这个面又涨了，而且这一次是"合法编辑把它顶漂的"**。
+
+本轮只做了 P1-1 的 `dispatched` 那一半：在 `runtime/dsh-composition/plugins/root-row.mjs`
+加了**一个 import（+3 行）与两段注释（+20 行）**——都是正常施工。结果是：
+
+| 引文（文档/用例里） | 写的时候 | 本轮实测 | 漂 |
+| --- | --- | --- | --- |
+| `root-row.mjs:724` 的 `installEnforcementRoot()` | §2.1 | **:747** | +23 |
+| `root-row.mjs:645` 的 `whitelistPortFromEnv()` | §1/§5 的 P1-3 行 | **:649** | +4 |
+| `root-row.mjs:760` 喂给桥的 `whitelist` | 同上 | **:783** | +23 |
+| `root-row.mjs:764` 的 `onDecision` | 本轮我自己刚写的用例注释 | **:808** | +44 |
+
+**四处、一次施工、零判据报警**（`boundary-facts` 32/32 绿、`check-docs` 绿）。
+
+> 这一格比第十四轮那 21 处更有说服力：那 21 处是**历史**漂移，
+> 而这一轮是**我在同一个会话里亲手制造**的 —— 上一轮我刚把"坐标会漂"写成一条读数，
+> 这一轮就漂了四处，而**没有任何东西提醒我**。
+>
+> ★ 于是真正的问题不再是"要不要做这个判据"，而是：**它得先允许"引用旧坐标"**
+> （第十四轮那条实测结论），否则它第一个红的是这两张表。
+> ⇒ 这一条**仍然要业主裁决**（§7.4 之外的另一条：见 §4.4）。
+
+### 4.4 待裁：§4 那个面**要不要做成判据**，以及"引用旧坐标"的合法写法
+
+三条候选（都需要一句裁决，因为**它们互斥**）：
+
+| 方案 | 代价 | 好处 |
+| --- | --- | --- |
+| **A. 不做**（维持现状） | 每轮施工都会像本轮一样漂掉几处引文，而**没有任何东西告诉你**；本轮实测是"一次施工 4 处" | 零成本 |
+| **B. 做判据 + 允许显式 `（旧）` 标记** | 要先把 §4 与 §4.2 两张**记录表**里的旧坐标都标上（那是 4 处）；以后引用旧坐标必须显式标 | 引文一旦漂就红，且"记录漂移"这件事本身仍然写得下来 |
+| **C. 做判据 + 只查"带具名符号"的引文** | 那些**故意**引用旧坐标的地方仍然会红（第十四轮实测结论） | 面更窄，但仍会惩罚记录 |
+
+★ 本会话的读数偏向 **B**：它同时满足"漂了要红"与"要把问题写下来"。但**写法**（`（旧）`？
+还是别的标记？）是业主的措辞权，所以留在这里等那一句。
+
 ---
 
 ## 5. 本会话欠账清单（第 118 轮第十四轮**逐条核实**）
@@ -911,7 +983,7 @@ hard floor、`canonicalHash`（账本）全都读那份投影 ⇒ 全都判错�
 | 项 | 上一版状态列 | 第十四轮核实到的 | 读数 / 证据 |
 | --- | --- | --- | --- |
 | **P1-2** | 待做 | **✅ 已做完**（第九轮） | `product/launcher/first-run.mjs` 不存在（`Test-Path` = False）；删除提交 `943ccdc`；活的那份 `wizard.mjs` / `--wizard` 仍在 |
-| **P1-3** | 待做 | **✅ 两半都做完** | 映射层 `whitelist-port.mjs:278` / `:309`；**生产装配** `root-row.mjs:645`（`whitelistPortFromEnv`）⇒ `:760` 喂桥；剩下的"许可取值从哪来"并入第 14 条，**业主已答** |
+| **P1-3** | 待做 | **✅ 两半都做完** | 映射层 `whitelist-port.mjs:278` / `:309`；**生产装配** `root-row.mjs:649`（`whitelistPortFromEnv`）⇒ `:783` 喂桥（★ 第十七轮校订，原写 `:645`/`:760`）；剩下的"许可取值从哪来"并入第 14 条，**业主已答** |
 | **P3-1** | 待排 | **✅ 清点完成** | 20 个 gap 逐条有名字、全部挂着裁决处：第 16 条 11 / 第 19 条 6 / 第 18 条 3（见 §5.1） |
 | **P1-1** | 🟡 只剩三处未接 | **仍然如此**（三处都在代码里点到）；★ 而 **§2 那四处施工面第七轮就全落了**（`d955dac`）—— 本节此前只会让人**再去做一遍** | ① `spool-writer.mjs:128` 对 `projection == null` **具名拒绝**（`NO_PROJECTION`）⇒ "只有带投影的事件会被写成一行"；② `spool-writer.mjs:144` **只追加 `DECISION`**，而 `spool.mjs:110`/`:112` 定义了 `dispatched`/`result`、`toolcall-drain.mjs` 也认它们 ⇒ 那两种记录**没有写入侧观察点**；③ 行里的 `attemptId` 仍是 `null`（载体只带 `runId`，`spool.mjs:124` 的必填字段只有 `['callId']`） |
 | **P1-4** | 待做 | **🟡 两刀都已落**（第十四 / 第十六轮） | 它本来不是一个"CLI 面"，是 **11 个模块**没有生产入口；第一刀接 3 个只读报告（**连带**清掉 5 个），第二刀接**一条读法**（`store-scan.mjs` + 三面计划旗标，**直接**接上 3 个）⇒ **剩 3 个**（全是 metrics 那一支，要库句柄）（§3.10 / §7 / §5.1） |
@@ -1042,3 +1114,15 @@ syntax:PASS env:PASS boundary:PASS deps:PASS build:PASS test:PASS smoke:PASS sta
 ★ 还有一条**只有真跑一次才会想起来的**：**安装目录必须在要扫的根里**。
 `program-only` 模式要删的就是它；漏了它，计划会打印"会删：无"——**而模式名正说着要删程序**。
 用例 `⑤` 专门钉这一条。
+
+### 7.4 第十七轮：P1-1 剩下两处**要业主裁决**（本会话做不了的那一半）
+
+★ 两处都**不是**"难"，是**没有决定就做不了**：不是施工量的问题，是"要做的东西长什么样"没定。
+
+| # | 待裁的事 | 今天的实测读数（可复跑） | 为什么非裁不可 |
+| --- | --- | --- | --- |
+| ① | **工具结果从哪里来**（`result` 记录） | 全仓 **0 处** post-execute / `toolResult` / `afterExecute`；唯一能带工具完成事件的通道是宿主端口的 `subscribeRun`，而它**全仓没有生产者**（`docs/PRT-253-evidence/usage-reporting-projection.md:75-77` 实测）。契约里**已经有** `tool.started` / `tool.completed` / `tool.failed` 三种 RunEvent（`runtime/adapters/dsh/events.mjs:47-49`），适配器也认它们——**缺的是有人往那条通道里发** | 两条路都通向"谁来发"：(a) 在宿主端口实现 `subscribeRun` 生产者（DSH 侧能力，等于开一条新的观测通道）；(b) 明文接受"工具结果**永不入账**"（那 `tool_calls.result_*` 那一列就是**永久为空的**，而"没结果"与"没人记"继续同形）。★ 业主在 PRT-253 已经就**用量**选过投影而非该通道，但工具结果**没有投影替代物** |
+| ② | **`attemptId` 指什么**（一次"工具调用尝试"的身份） | `toolCallRowOf` 已经收这个字段（`tool-request.mjs:444`）而组合根不传；它是 spec §6.5 line 470 点名的**观察 metadata**（`OBSERVATION_KEYS`，`tool-request.mjs:175-178`）——**不参与授权哈希**，且**出现在主体参数里会被拒绝投影**。★ 全仓没有"工具调用重试"这个概念的生产者（`retryCount` 同样在 metadata 表里、同样零生产者） | 要么定义"什么算一次尝试"（哪个组件重试、身份从哪来），要么**明确这一列不做**（那 `spool.mjs:124` 的 `['callId']` 就是它的终态、`toolCallRowOf` 的 `attemptId` 参数就该标成"预留但无源"）。★★ 特别提醒：**不能**去读 DSH 的 `attemptId` —— 那是 `LlmAttemptId`（`packages/core/agent-loop/src/assistant-stream.ts:45`），**模型调用尝试**的身份，语义完全不同；填进去会通过所有形状检查而记下别的意思 |
+
+★ 两处都**不影响已落的那一半**：`dispatched` 已经能让 `tool_calls.dispatched_at` 有值，
+链路 L7 的收账侧那两条分支里，`markDispatched` 从此**在生产里也被走到**了。

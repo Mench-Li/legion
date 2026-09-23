@@ -13,6 +13,10 @@
 // ★ 这里**不**复制 `root-row.mjs` 的那三行注入逻辑就完事：下面 `writerWiredTo()`
 //   逐字复写它们，并在测试里断言"注入点用的是**按事件取 Run**"——
 //   否则这份用例会在有人把注入改成装配期绑死时**继续绿**。
+//
+// ★★ 第 118 轮第十七轮起，`onDecision` 那一个注入点**不再各写一份**：
+//   生产与这里都调 `createSpoolObserver()`（住在写入侧那一侧）。
+//   理由同上——包装写两份，两条接线总有一天不是同一条。
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -30,8 +34,10 @@ import {
   installRunIdentityIntoAgent,
 } from './run-identity.mjs'
 import { createEnforcementBridge, toolCallRowOf } from './tool-request.mjs'
+import { DECISION_KINDS } from '../connectors/decision-port.mjs'
 import {
   TOOLCALL_SPOOL_WRITER_CODES,
+  createSpoolObserver,
   createToolCallSpoolWriter,
 } from '../toolcall/spool-writer.mjs'
 import { readSpoolRecords, spoolFileFor } from '../toolcall/spool.mjs'
@@ -83,7 +89,8 @@ function bridgeFor(dataDir, { decide = () => ({ kind: 'allow' }) } = {}) {
   const bridge = createEnforcementBridge({
     context: PROC_CTX,
     decide,
-    onDecision: writer.observeDecision,
+    // ★ 与 `root-row.mjs:808` 逐字同一条：**放行时**多记一条 `dispatched`。
+    onDecision: createSpoolObserver(writer, { allowKind: DECISION_KINDS.ALLOW }),
   })
   return { bridge, writer }
 }
@@ -111,19 +118,46 @@ test('① ★★★ 生产路径：真桥 + 真身份 + 组合根那三行 ⇒ �
     const agent = agentWithRun('run-42')
     await driveOnce(bridge, execOf(agent, 'e2e-1'))
 
-    assert.equal(writer.reading().written, 1, '一条决定都没写进车道')
+    // ★★ 第 118 轮第十七轮：一条 `allow` 决定现在产**两条**记录
+    //   （`decision` + `dispatched`）——这一行跟着生产接线走。
+    assert.equal(writer.reading().written, 2, '决定与派发两条都该进车道')
     assert.deepEqual(writer.reading().lastRefusal, null)
     const file = spoolFileFor({ dataDir: dir, runId: 'run-42' })
     assert.equal(writer.fileOf('run-42'), file)
     const rows = readSpoolRecords({ file }).records
-    assert.equal(rows.length, 1)
-    assert.equal(rows[0].kind, 'decision')
+    assert.deepEqual(rows.map((r) => r.kind), ['decision', 'dispatched'],
+      '顺序是契约：收账侧先建行（decision）再推状态（dispatched）')
     assert.equal(rows[0].row.runId, 'run-42', 'Run 号没有从身份覆盖里取到')
     assert.equal(rows[0].row.decision, 'allow')
     assert.equal(rows[0].row.decisionSource, 'pre-execute')
     assert.equal(rows[0].row.callId, 'e2e-1')
     assert.equal(rows[0].row.toolName, 'write-file')
     assert.ok(rows[0].row.canonicalHash, '行里没有授权哈希（`toolCallRowOf` 的必填项）')
+    // 派发行指向**同一次调用**（收账侧靠 `callId` 算幂等键找到那一行）
+    assert.equal(rows[1].row.callId, 'e2e-1')
+    assert.equal(rows[1].row.runId, 'run-42')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('①b ★★★ 被 `deny` 的调用**没有派发行**（真桥路径上的"并不存在的派发"）', async () => {
+  const dir = tempDir()
+  try {
+    const { bridge, writer } = bridgeFor(dir, { decide: () => ({ kind: 'deny', reason: '越界' }) })
+    const agent = agentWithRun('run-deny')
+    const decision = await driveOnce(bridge, execOf(agent, 'deny-1'))
+    assert.equal(decision.kind, 'deny', '判定自己必须照常拒绝')
+
+    const rows = readSpoolRecords({ file: spoolFileFor({ dataDir: dir, runId: 'run-deny' }) }).records
+    assert.deepEqual(rows.map((r) => r.kind), ['decision'])
+    assert.equal(rows[0].row.decision, 'deny')
+    assert.equal(writer.reading().written, 1)
+    // ★ 反向对照：同一条路径上 `allow` **必须**多出那一条 ——
+    //   否则上面那条断言在一个"永远不写派发"的实现下也会绿。
+    const ok = bridgeFor(dir)
+    await driveOnce(ok.bridge, execOf(agentWithRun('run-allow'), 'allow-1'))
+    assert.deepEqual(
+      readSpoolRecords({ file: spoolFileFor({ dataDir: dir, runId: 'run-allow' }) }).records.map((r) => r.kind),
+      ['decision', 'dispatched'])
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
@@ -136,11 +170,11 @@ test('② ★★★ 一个进程里两个 Run：各写各的账（§14.5 那处�
     await driveOnce(bridge, execOf(a, 'call-a'))
     await driveOnce(bridge, execOf(b, 'call-b'))
 
-    assert.equal(writer.reading().written, 2)
+    assert.equal(writer.reading().written, 4, '两个 Run 各两条（decision + dispatched）')
     const rowsA = readSpoolRecords({ file: spoolFileFor({ dataDir: dir, runId: 'run-a' }) }).records
     const rowsB = readSpoolRecords({ file: spoolFileFor({ dataDir: dir, runId: 'run-b' }) }).records
-    assert.equal(rowsA.length, 1, 'run-a 的账不对')
-    assert.equal(rowsB.length, 1, 'run-b 的账不对')
+    assert.equal(rowsA.length, 2, 'run-a 的账不对')
+    assert.equal(rowsB.length, 2, 'run-b 的账不对')
     assert.equal(rowsA[0].row.callId, 'call-a')
     assert.equal(rowsB[0].row.callId, 'call-b')
     // ★ 两个 Run 的空间不同，而**账没有合流**：这一条就是"装配期绑死 Run"会红的地方。

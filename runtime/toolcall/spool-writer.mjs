@@ -2,6 +2,16 @@
 // ============================================================================
 // PRT-610 出站车道的**写入侧宿主**：把执行面**已经作出的**工具决定追加进车道文件。
 //
+// ★ 第 118 轮第十七轮起，它追加**两种**记录（`spool.mjs` 的封闭词表里本就有三种）：
+//
+//   · `observeDecision(event)` → `decision`：决定作出（含 `deny` / `ask`）；
+//   · `observeDispatch(event)` → `dispatched`：**这次调用真的要出去了**（只在放行时调）。
+//
+//   `result`（第三种）**仍然没有生产者** —— 执行面拿不到"工具跑完了"这件事：
+//   唯一能带工具完成事件的通道是宿主端口的 `subscribeRun`，而它**全仓没有生产者**
+//   （`docs/PRT-253-evidence/usage-reporting-projection.md:75-77` 实测并已由业主裁定改走投影）。
+//   那一半要接，得先决定"结果从哪里来"（见接管队列 §2.2），**不是**本模块能自己补上的。
+//
 // 这条车道的两半：本模块是**写入侧**（执行面按 Run 落盘），
 // `orchestrator/worker/toolcall-drain.mjs` 是**收账侧**（有人把它收进 `tool_calls`，
 // 宿主是 hub —— `team-hub/toolcall-sweep.mjs`）。
@@ -61,6 +71,33 @@ export const TOOLCALL_SPOOL_WRITER_CODES = Object.freeze({
 const nonEmpty = (v) => typeof v === 'string' && v.trim() !== ''
 
 /**
+ * 组合根要的那个 `onDecision`：**决定 + （放行时）派发**两条记录。
+ *
+ * ★★ 生产装配（`runtime/dsh-composition/plugins/root-row.mjs`）与用例
+ *   （`runtime/dsh-composition/spool-writer-wiring.test.mjs`）调**同一个**函数。
+ *   理由就是 `toolcall-drain.mjs:167-175` 那条引用纪律的同一条：包装写两份，
+ *   "用例证明的那条接线"与"生产跑的那条接线"就会在某一天悄悄不是同一条了。
+ *
+ * @param {object} writer `createToolCallSpoolWriter()` 的产物
+ * @param {string} allowKind 哪个 `decision.kind` 算"这次调用要出去了"
+ *        （★ 由组合根传 `DECISION_KINDS.ALLOW` —— 本模块不认识决定词表）
+ * @returns {(event: object) => (object|null)}
+ */
+export function createSpoolObserver(writer, { allowKind = 'allow' } = {}) {
+  if (typeof writer?.observeDecision !== 'function' || typeof writer?.observeDispatch !== 'function') {
+    throw new Error('createSpoolObserver 需要一个写入侧宿主（它必须同时有 '
+      + '`observeDecision` 与 `observeDispatch`）—— 装配错误，不给一个"半个观察点"')
+  }
+  return (event) => {
+    const reading = writer.observeDecision(event)
+    // ★ 只有"放行"才有派发这个时刻。`deny` / `ask` 也记一条，
+    //   账上就会多出一批**并不存在的派发**。
+    if (event?.decision?.kind === allowKind) writer.observeDispatch(event)
+    return reading
+  }
+}
+
+/**
  * 造一个写入侧宿主。
  *
  * 依赖**全部注入**（`runIdOf` / `rowOf` / `append` / `fileFor`）：本模块因此只依赖
@@ -108,6 +145,44 @@ export function createToolCallSpoolWriter({
    * @returns {Readonly<{ok: boolean, code: string|null, reason: string, file: string|null}>}
    */
   function observeDecision(event) {
+    return appendFor(event, TOOLCALL_SPOOL_KINDS.DECISION)
+  }
+
+  /**
+   * 收到一条**派发**（"这次调用真的要出去了"）。
+   *
+   * ★★ 谁调它、什么时候调，是一个**契约**问题，不是一个"想记就记"的问题：
+   *   `docs/superpowers/prt/PRT-610-tool-call-log.md:157` 逐字写着
+   *   ——"`markDispatched` 把 `none → unknown` 并写下 `dispatchedAt`，
+   *   **必须发生在真的派发之前**"。⇒ 本方法要**在派发动作之前**被调用，
+   *   而它的状态语义正是"我们正准备派发、结果未知"（`unknown`）。
+   *
+   * ★ 它**不判断**"这条决定会不会真的派发"：那个判断住在**组合根**
+   *   （`root-row.mjs`，它看得见 `decision.kind`）。理由与 `runIdOf`/`rowOf`
+   *   留在组合面是同一条 —— 把"哪些决定算派发"写进车道契约，
+   *   就是让这条车道偷偷携带强制面的语义：
+   *
+   *   > 一个"自己判断该不该记派发"的车道，与一个"强制面换了判定词表
+   *   > 而账上多出一批并不存在的派发"的车道，是同一个东西 ——
+   *   > 只不过后者的表现是"有的调用刚决定就被记成已派发"。
+   *
+   * ★ 顺序：同一次调用里**先 `observeDecision` 再 `observeDispatch`**，
+   *   收账侧按文件里的先后逐条应用（`decision` 建行 → `dispatched` 推状态），
+   *   反过来会让 `markDispatched` 找不到那一行。
+   */
+  function observeDispatch(event) {
+    return appendFor(event, TOOLCALL_SPOOL_KINDS.DISPATCHED)
+  }
+
+  /**
+   * 两种记录**共用**的追加路径：守卫与具名拒绝码**一个字都不改**。
+   *
+   * ★ 不把 `dispatched` 塞进 `observeDecision`：`decision` 与 `dispatched`
+   *   是**两个时刻**（决定作出 / 决定要被执行），而 `deny` / `ask`
+   *   永远不会有第二个时刻 —— 合并会让"记了一条决定"与"记了一条派发"
+   *   在读数上再分不开。
+   */
+  function appendFor(event, kind) {
     try {
       if (!nonEmpty(dataDir)) {
         return refuse(TOOLCALL_SPOOL_WRITER_CODES.NO_DATA_DIR,
@@ -141,7 +216,7 @@ export function createToolCallSpoolWriter({
           `行构造器给的是 ${row === null ? 'null' : typeof row}，而它必须是一个行对象`)
       }
       const file = fileFor({ dataDir, runId })
-      append({ file, record: Object.freeze({ kind: TOOLCALL_SPOOL_KINDS.DECISION, row }) })
+      append({ file, record: Object.freeze({ kind, row }) })
       counters.written += 1
       return Object.freeze({ ok: true, code: null, reason: '', file })
     } catch (err) {
@@ -154,6 +229,7 @@ export function createToolCallSpoolWriter({
   return Object.freeze({
     version: TOOLCALL_SPOOL_WRITER_VERSION,
     observeDecision,
+    observeDispatch,
     /** 只读读数（诊断面/用例看它，判定不看它）。 */
     reading: () => Object.freeze({
       version: TOOLCALL_SPOOL_WRITER_VERSION,

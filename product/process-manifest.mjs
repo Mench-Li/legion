@@ -132,7 +132,18 @@ export const PROCESS_SPECS = Object.freeze([
       verified: false,
     }),
     writesRoles: Object.freeze(['data']),
-    envNames: Object.freeze(['TEAM_HUB_PORT', 'TEAM_HUB_HOST', 'TEAM_HUB_TOKEN', 'TEAM_HUB_DB']),
+    // ★ 第 118 轮第七轮：hub 拿到 `LEGION_DATA_DIR` —— 它是**收账侧宿主**
+    //   （hub 是唯一持有**可写** db 的进程，`server.mjs` 的 `ensureToolCallSchema(db)`）。
+    //   第 28 条由业主授权本会话定，取法是**丙的机制 + 目录锚在既有配置量上**（队列 §3.2.1）。
+    //
+    //   ⚠️ **只加目录，不加 `LEGION_RUNTIME_TOKEN`**：hub 收账，不执行 ——
+    //   「给它目录」与「给它钥匙」是两件事，而白名单是这两件事**唯一**的落点
+    //   （有用例 ①b″ 把这一对钉在一起）。
+    //
+    //   ⚠️ 第三/四轮这里**加过又撤回**过同一行：那时它等于替业主选了第 28 条的乙。
+    //   撤回是对的，但那不代表"这行永远不该有"——今天它有两半在做事的证据：
+    //   `team-hub/toolcall-sweep.mjs`（收账侧宿主）与它的 7 条用例。
+    envNames: Object.freeze(['TEAM_HUB_PORT', 'TEAM_HUB_HOST', 'TEAM_HUB_TOKEN', 'TEAM_HUB_DB', 'LEGION_DATA_DIR']),
     milestone: 'PRT-251',
   }),
   Object.freeze({

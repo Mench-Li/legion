@@ -207,6 +207,9 @@ import {
   toolCallIdempotencyKey,
   toolCallLogEvidence,
 } from './tool-call-log.mjs'
+// PRT-610 出站车道的**收账侧宿主**（第 118 轮第七轮，压在第 28 条裁决上）。
+// 目录从 `LEGION_DATA_DIR` 来（Launcher 按冻结布局注入），**不从库的位置派生**。
+import { sweepToolCallSpool } from './toolcall-sweep.mjs'
 import {
   PACK_FACT_ERRORS,
   appendPackFact,
@@ -711,8 +714,13 @@ ensureConnectorSchema(db)
  * 而且它的创建位置**本身就是一条判据**：表只在这里建 ⇒ 没有别的模块能先在
  * 别处建一张同名的、少几列的表，让这三条索引与那三个写入函数悄悄对不上。
  *
- * ⚠️ 这里只建表，**不**在这里写记录：写入方是执行面（它才知道一次调用被谁拦下）。
- * 本进程负责的是"这笔账有地方可记、且有 HTTP 面能读"（见下面的 `/api/tool-calls*`）。
+ * ⚠️ 这里只建表，**不**在这里**直接**写记录：记录的**产生**在执行面（它才知道一次调用
+ * 被谁拦下）。本进程负责的是"这笔账有地方可记、且有 HTTP 面能读"（见下面的 `/api/tool-calls*`）。
+ *
+ * ★ 第 118 轮第七轮补上另一半：本进程**收账**、但**不产生**账 —— 执行面按 Run 往
+ * `toolcall-spool/<runId>/records.jsonl` 追加，`toolcall-sweep.mjs` 每 30s 把它们收进
+ * 这张表（见 `isMain` 里那个 tick）。这一半新增的是**读取本进程自己那个 DataDir**，
+ * **不是**新的网络写入口：表的所有权与那三个写入函数仍然只有一份（`tool-call-log.mjs`）。
  */
 ensureToolCallSchema(db)
 
@@ -5623,6 +5631,9 @@ export function disposeHub() {
 
 // 直接运行（node server.mjs）才监听；被 import 时（测试/复用）不占端口。
 const isMain = process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+/** 收账 tick 上一次报出来的"坏法"签名（`ok` 或 `码:条数`）。只用来**去重**，不参与判定。 */
+let lastToolCallSweepSignature = null
+
 if (isMain) {
   console.log(configSummaryLine()) // P3-2：启动即打印脱敏后的最终配置（token 只显示是否设置）
   validateSecurityConfig()
@@ -5667,6 +5678,35 @@ if (isMain) {
   // `unref()`：与上面那条同一个理由，一个会阻止进程退出的定时器会让
   // 测试进程永远不结束（PRT-708 那次"测试卡住"就是这么来的）。
   setInterval(() => { automationTick() }, 30000).unref()
+  // PRT-610：出站车道的**收账 tick**（第 118 轮第七轮接上）。
+  //
+  // 执行面按 Run 把「决定 / 已派发 / 结果」追加进 `toolcall-spool/<runId>/records.jsonl`，
+  // 这里把它们收进 `tool_calls` —— 这是那条车道**第一次有生产调用方**。
+  //
+  // 目录从 `LEGION_DATA_DIR` 来（Launcher 按冻结布局注入），**不从库的位置派生**：
+  // 那种隐式耦合断了只表现为一条**空读数**（空目录是合法局面，收账会"成功地"什么也没收），
+  // 所以缺 DataDir 时它返回**具名**的 `NO_DATA_DIR` 而**不去猜**。
+  //
+  // 30s：与投递回收同一个量级。它**不是**唯一路径 —— 按 Run 的主路径收完之后这一趟是
+  // 空跑，而那正是它该有的样子（重放读数幂等：`complete:true`、`applied.total:0`、
+  // `replayed.total:N`，见 `toolcall-drain.mjs` ②′）。
+  //
+  // ★ 不静默、也不刷屏：读数不干净时**说一次**，同一种坏法不重复印 ——
+  //   每 30 秒重印同一条警告，与把警告关掉是同一个东西。
+  setInterval(() => {
+    let reading = null
+    try { reading = sweepToolCallSpool({ db }) } catch { return /* 连读数都拿不到，下一轮再试 */ }
+    const sig = reading.complete ? 'ok' : `${reading.code ?? 'refusals'}:${reading.refusals.length}`
+    if (sig === lastToolCallSweepSignature) return
+    const was = lastToolCallSweepSignature
+    lastToolCallSweepSignature = sig
+    if (sig !== 'ok') {
+      console.warn(`[team-hub] 工具账收账有东西没进去（${sig}）：`
+        + `${reading.refusals[0]?.reason ?? reading.reason}`)
+    } else if (was !== null) {
+      console.log('[team-hub] 工具账收账恢复正常')
+    }
+  }, 30000).unref()
 }
 
 export { db, server, handle, registerSkill, reviewSkill, listSkills, grantSkill, revokeSkill, getSkill,

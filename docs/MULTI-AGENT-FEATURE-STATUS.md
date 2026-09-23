@@ -816,6 +816,19 @@ node scripts/prt/reachability.mjs --diff
 `gap` 的定义逐字写在基线文件头：**"真的没有生产路径，且台账/对照表说它已交付
 ⇒ 需要在 §5 里裁决"**。所以那 23 条不是"没写代码"，是**写好了而没人调用它**。
 
+★★ **第 118 轮第七轮更新这个读数**：**44 → 42**，`gap` **23 → 21** ——
+`orchestrator/worker/toolcall-drain.mjs` 与 `runtime/toolcall/spool.mjs` 被 hub 的
+**收账 tick** 接上（`team-hub/server.mjs` → `team-hub/toolcall-sweep.mjs`），
+两条从 `gap` 转为**可达**；基线随 `node scripts/prt/reachability.mjs --record` 删掉了
+那两条记录（**不是改分类**，是它们真的到得了了）。
+本次复查的读数：`不可达 42 = by-design 13 · deliberate 8 · gap 21`。
+
+★ 而这一变又逼着另一处读数跟着动：§9 九节链的 **L7** 因此从"软缺口"转 ✔，
+它的 `owner: 28` 随即被 `alpha-chain-trace` 的 `owner-stale` 判掉（第 28 条已裁定）。
+**⚠️ 那个 ✔ 不许读成"审计完整性已达成"**：写入侧（执行面按 Run 调 `appendSpoolRecord`）
+今天仍无调用点，而**可达性看不见调用点缺口**——理由逐字写在 `alpha-chain-trace.mjs`
+的 L7 `coreWhy` 里，残余项在队列 P1-1。
+
 按族看（不是逐条列，那是基线文件的事）：
 
 | 族 | 代表模块 | 已在 §5 的哪一条 |

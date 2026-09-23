@@ -1059,6 +1059,14 @@ export const SCHEMA = defineSchema({
     { target: 'orchestrator', env: 'LEGION_DATA_DIR', via: 'env', from: 'layout.dataDir', note: '**派生值**：worker 的状态文件与端口发布的读取都以它为锚' },
     { target: 'orchestrator', env: 'LEGION_RUNTIME_URL', via: 'env', from: 'Runtime 进程发布的实际临时端口', note: '**派生值**（读回来、不是猜出来）：读端口发布并用**本次那个 runtime 子进程的 pid** 校验；读不到/对不上就**不注入**并记具名诊断——绝不回落成默认端口' },
     { target: 'orchestrator', env: 'LEGION_RUNTIME_TOKEN', via: 'env', from: 'Launcher 每次启动生成（与 runtime 同一份）', note: '与 runtime 进程逐字相同的凭证。**只**注入这两个进程' },
+    // ── 第 118 轮第七轮：收账侧宿主的**目录锚**（与上面那组同一来源，不是猜的）──
+    //
+    // ★ hub 与 runtime/orchestrator 是**同一份进程清单里的兄弟进程**，用的是同一个
+    //   冻结目录布局（`layout.dataDir`）⇒ 这一行是**派生值**，与 :1057 / :1059 同源。
+    // ★ 但**只给目录、不给凭证**：hub 的活是收账（把执行面写下的 spool 收进
+    //   `tool_calls`），它不执行任何工具。凭证那一行的理由是 spec §6.7
+    //   「密钥只注入需要它的执行进程」，hub 不在其中。
+    { target: 'team-hub', env: 'LEGION_DATA_DIR', via: 'env', from: 'layout.dataDir', note: '**派生值**：收账侧（`team-hub/toolcall-sweep.mjs`）按它找 `toolcall-spool/`。★ 库的位置（`TEAM_HUB_DB`）与车道的位置是**两个锚** —— 刻意**不从库的位置派生**：那种隐式耦合断了只会表现为一条"空读数"（空目录是合法局面，收账会"成功地"什么也没收）' },
   ],
   notes: [
     '子进程环境**不继承**宿主进程：只放行进程清单声明的键、平台必需键与 Launcher 显式给定的值（环境白名单模块 product/launcher/allowlist）。',

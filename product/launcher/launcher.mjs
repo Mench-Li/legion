@@ -866,10 +866,12 @@ export function createLauncher({
     //   `buildChildEnv()` 因此连 baseEnv 里的同名值都不会放行。
     //   这就是 spec §6.7「密钥只注入需要它的执行进程」在实现层的落点。
     //
-    //   ⚠️ 第 118 轮一度给 hub 加过 `LEGION_DATA_DIR`，理由是"收账要住在持有 db 的
-    //   进程里"。那**恰好就是第 28 条的选项乙**（收账侧住在 hub 里），而那条**还没裁**
-    //   （`docs/DECISION-RUNREQUEST-EXECUTION-PLANE.md` §14.7 三条路，业主未选）。
-    //   ⇒ 撤回：一个未裁决的选项不该由一篇 diff 悄悄选定。
+    //   ⚠️ 第 118 轮第三/四轮这里一度给 hub 加过 `LEGION_DATA_DIR` 又撤回：
+    //   当时的理由是"收账要住在持有 db 的进程里"，而那**恰好就是第 28 条的选项乙**
+    //   （`docs/DECISION-RUNREQUEST-EXECUTION-PLANE.md` §14.7 三条路），那时业主未选。
+    //   ★ **第七轮它回来了，但带着裁决**：业主把第 28 条授权本会话定，取法是
+    //   **丙的机制 + 目录锚在 `LEGION_DATA_DIR`**（队列 §3.2.1）—— 而 hub 是收账侧宿主。
+    //   差别不在那几行 diff，在于**这一次它有一个已写下的理由**（下面 team-hub 那一段）。
     //
     // ★ 凭证**不进 argv**、不进日志、不进运行记录、不进状态文件。
     //   它唯一的去处是这两个子进程的环境块（`envSurface()` 对外是 `<redacted>`）。
@@ -913,6 +915,25 @@ export function createLauncher({
       }
       const token = runtimeToken()
       if (token.ok === true) out.LEGION_RUNTIME_TOKEN = token.token
+    }
+    // ── 第 118 轮第七轮：收账侧宿主的目录锚 ─────────────────────────────
+    //
+    // ★ 与 orchestrator 那一段**同一个形状、同一个理由**：Launcher 是唯一知道
+    //   `layout.dataDir` 的地方（它来自冻结的目录布局），所以由它显式写进去，
+    //   而不是指望宿主环境里恰好有。
+    //
+    // ★ **只给目录，不给凭证** —— hub 的活是收账（把执行面写下的 spool 收进
+    //   `tool_calls`），它不执行工具。凭证那一行的理由是 spec §6.7「密钥只注入
+    //   需要它的执行进程」，hub 不在其中；这一对（给目录 / 不给钥匙）有用例钉着。
+    //
+    // 缺了它会怎样：`team-hub/toolcall-sweep.mjs` 返回**具名**的 `NO_DATA_DIR`
+    //   （`ran:false`）而**不去猜** —— 刻意不提供"从库的位置（`TEAM_HUB_DB`）派生"
+    //   的回落。那种回落断了只会表现为一条**空读数**：空目录是合法局面，
+    //   收账会"成功地"什么也没收。
+    if (proc.key === 'team-hub') {
+      if (typeof layout.dataDir === 'string' && layout.dataDir !== '') {
+        out.LEGION_DATA_DIR = layout.dataDir
+      }
     }
     return out
   }

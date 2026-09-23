@@ -13,11 +13,6 @@
       "reason": "re-export 出口；调用方直接 import 叶子（main.mjs/run.mjs 都可达）"
     },
     {
-      "file": "orchestrator/worker/toolcall-drain.mjs",
-      "class": "gap",
-      "reason": "★★ 2026-09-18 第 22 轮新建（PRT-610 的**收账侧**：把 spool 收进 `tool_calls`，把 `toolCallLogEvidence().recorded` 由 `false` 翻成 `true`）。**生产里还没有人调它**，而缺的**不是代码、是一个位置决定**：收账方拿不到 spool 的目录（hub 的库是 `team-hub/team.db`，`server.mjs:279`，它**不读** `LEGION_DATA_DIR`），而猜一个两边都同意的路径正是 PRT-253 §3 禁止的\"发明默认值\"。★ 不记成\"模块全绿而零生产入口\"的那种：这次缺的是**一个决定**，它有名字、有编号、有两个候选接缝。⇒ 裁决处：§5 第 28 条"
-    },
-    {
       "file": "product/config-schema.mjs",
       "class": "by-design",
       "reason": "config-schema 由 `scan.mjs` 读源码对账，不由别的模块 import（同 `orchestrator/config-schema.mjs`）"
@@ -196,11 +191,6 @@
       "file": "runtime/packs/store.mjs",
       "class": "gap",
       "reason": "PRT-1003：唯一的 import 者是下面的内置包（传递不可达）⇒ 生产里没有任何安装/升级记录产生。⇒ 裁决处：§5 第 19 条"
-    },
-    {
-      "file": "runtime/toolcall/spool.mjs",
-      "class": "gap",
-      "reason": "与 `orchestrator/worker/toolcall-drain.mjs` 是**同一条缝的两半**；本条是**写入侧**：执行面没有 `TEAM_HUB_TOKEN`，所以它只能把账按 Run 落盘带出去。它的消费者就是 `orchestrator/worker/toolcall-drain.mjs`（收账侧），因此两条的阻塞是**同一个**位置决定，不是两处要修的地方。CI 侧已有两个独立套件（`toolcall-spool` 14 例 / `toolcall-drain` 13 例）把环在**真 SQLite** 上走通，含否定对照。⇒ 裁决处：§5 第 28 条"
     },
     {
       "file": "security/config-schema.mjs",

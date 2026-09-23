@@ -32,7 +32,7 @@
 | L4 | 认领 Task / 生成 Snapshot | ✔ 有活实现 |
 | **L5** | **DshRuntimeAdapter 执行 Run** | **✖ 硬断** |
 | L6 | 工具审批与 hard floor | ✔ 有活实现 |
-| L7 | 产物验收/交接/审计/用量 | △ 软缺口（`spool`/`toolcall-drain` 没人挂）★ **第 84 轮**：根因已定 —— 不是缺一个落点决定，是 hub **没被登记进派生表**（第 75/76 轮） |
+| L7 | 产物验收/交接/审计/用量 | ✔ **收账侧已接**（第 118 轮第七轮：hub 的收账 tick + hub 的 `LEGION_DATA_DIR` 登记，端到端实测：真 hub 进程把 spool 收进 `tool_calls`）。★ 但**写入侧**（执行面按 Run 调 `appendSpoolRecord`）今天仍无调用点 ⇒ 生产里这笔账**还是不会被写**——那是**调用点**缺口，可达性看不见它（残余项在队列 P1-1） |
 | L8 | Runtime 崩溃可恢复 | ✔ 有活实现 |
 | L9 | 升级失败可回滚 | △ 软缺口（`retention.mjs` 没人挂） |
 

@@ -39,10 +39,12 @@ const ONE = (over = {}) => ({
 test('① ★★ 真仓库：九节、模块文件全在、**没有硬断**、链仍不全绿', () => {
   const t = traceChain()
   assert.equal(t.sections.length, 9, `§9 应当是九节，实际 ${t.sections.length}`)
-  // ★ `allGreen` 仍是 false —— 但**理由变了**：不再是 L5 硬断，而是 L7/L9 两处软缺口。
-  //   这两件事用同一个 `false` 表达过，所以这里必须把"为什么不是全绿"说清楚，
-  //   否则"还有一处硬断"与"只剩软缺口"在这一行上是同一个读数。
-  assert.equal(t.allGreen, false, '整条链被报成全绿——L7/L9 两处软缺口还在（见下面的 softGaps）')
+  // ★ `allGreen` 仍是 false —— 而**理由又变了一次**：
+  //   第 44 轮之前是 L5 硬断；第 44 轮之后是 **L7/L9 两处软缺口**；
+  //   第 118 轮第七轮 L7 的支撑模块（`spool`/`toolcall-drain`）被 hub 的收账 tick 接上，
+  //   于是只剩 **L9** 一处。三次都是同一个 `false`，所以每次都必须把"为什么"写下来——
+  //   否则"还有一个硬断"、"还有两处软缺口"、"只剩一处"在这一行上是同一个读数。
+  assert.equal(t.allGreen, false, '整条链被报成全绿——L9 那处软缺口还在（见下面的 softGaps）')
 
   // ★ 每个模块路径都必须是**真文件**（`file不存在`与"没人挂"不许混作一谈）
   const missing = t.sections.flatMap((s) => s.modules.filter((m) => !m.present).map((m) => m.module))
@@ -60,7 +62,21 @@ test('① ★★ 真仓库：九节、模块文件全在、**没有硬断**、�
   //   > 所以正确动作不是删断言，是把它翻过来（从"是 L5"改成"没有"）。
   assert.equal(t.firstHardBreak, null,
     `§9 链今天不该有硬断，实际最先硬断的是 ${t.firstHardBreak?.id ?? '（没有）'}`)
-  assert.deepEqual(t.softGaps.map((s) => s.id), ['L7', 'L9'],
+  /**
+   * ★★ 第 118 轮第七轮把 **L7** 从这一行移出去，理由必须写在这里（不能只改数组）：
+   *   `runtime/toolcall/spool.mjs` 与 `orchestrator/worker/toolcall-drain.mjs` 由
+   *   `team-hub/server.mjs` 的收账 tick 接上（→ `team-hub/toolcall-sweep.mjs`），
+   *   两条在 import 图上**真的可达了** —— 所以它们不再是"支撑模块没人挂"。
+   *
+   *   ⚠️ 而**产品事实只走了一半**：写入侧（执行面按 Run 调 `appendSpoolRecord`）
+   *   今天仍无调用点 ⇒ 生产里这笔账还是不会被写。那是**调用点**缺口，
+   *   本探针（模块可达性）**按构造看不见它**。这一点逐字写在 L7 的 `coreWhy` 里
+   *   （一处 ✔ 不许被读成"审计完整性已达成"），残余施工项在队列 P1-1。
+   *
+   *   ⇒ 判据不因此放松：哪一节的核心模块掉回 gap，上面那条"没有硬断"立刻红；
+   *     而支撑模块再次掉回去，这一行也会红。
+   */
+  assert.deepEqual(t.softGaps.map((s) => s.id), ['L9'],
     '软缺口的集合变了——要么真变了（请复核 §9 投影），要么判定逻辑跑偏')
 })
 
@@ -178,7 +194,7 @@ const sec = (id, { breaks = [], core = [], owner, ownerWhy } = {}) => ({
 
 const WHY = '这一条逐字点名了这个文件，并给了两个可选的处置动作。'
 
-test('⑨ ★★ 正对照：真仓库里**全部断点都有归属**，且恰有**两**节声明了归属', () => {
+test('⑨ ★★ 正对照：真仓库里**全部断点都有归属**，且恰有**一**节声明了归属', () => {
   const r = checkChainOwners()
   assert.equal(r.ok, true, '真仓库的断点归属有问题：' + JSON.stringify(r.violations))
   // ★★★ 第 44 轮改：这里曾经是"恰有三节（L5 + L7/L9）"。
@@ -187,9 +203,15 @@ test('⑨ ★★ 正对照：真仓库里**全部断点都有归属**，且恰�
   //   那个 "L5" 的归属指针随即被判成 `owner-stale`（"那个指针该删"）。
   //   ⇒ 从三节变两节。**归属是给断点写的，不是给节写的**——
   //     所以这一行的数量必须跟着断点数量走，不能停在"链上固定三处"。
+  //
+  // ★★★ 第 118 轮第七轮再从两节变**一节**：L7 的支撑模块被 hub 的收账 tick 接上，
+  //   它不再有断点，于是 `owner: 28` 被 `owner-stale` 判了出来（判据没被放松，
+  //   是它自己把过期的指针逼掉的）。★ 这一变**不只是数字**：第 28 条从"待业主裁决"
+  //   变成"已裁定 + 残余施工项"，所以它不该再出现在**业主裁决**的归属表里——
+  //   残余那一半（写入侧无调用点）归队列 P1-1，那是施工，不是等人拍。
   const t = traceChain()
   const withOwner = t.sections.filter((s) => s.owner !== undefined).map((s) => s.id)
-  assert.deepEqual(withOwner, ['L7', 'L9'],
+  assert.deepEqual(withOwner, ['L9'],
     `声明了归属的节变了：${JSON.stringify(withOwner)}`)
   // ★ 反向：每一节**有断点**的都必须在那两个里面（否则 ⑩ 那条规则漏了）
   //   ★★ 这条反向对照是本节真正的价值：它让"归属数量"不是一个可以随便改的数字，

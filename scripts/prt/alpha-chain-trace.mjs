@@ -170,11 +170,17 @@ export const ALPHA_CHAIN = Object.freeze([
     core: Object.freeze(['orchestrator/acceptance/index.mjs']),
     coreWhy: '验收是这一节的名字。★ `spool`/`toolcall-drain` 是**支撑**：'
       + '它们管的是「一次工具调用在哪一层落账」那条车道（§5 第 28 条），'
-      + '缺了它 Run 照跑，缺的是**审计的完整性**——两者不该用同一个词报。',
-    owner: 28,
-    ownerWhy: '第 28 条逐字点名了 `runtime/toolcall/spool.mjs` 与 '
-      + '`orchestrator/worker/toolcall-drain.mjs` 两个文件，并说明它们'
-      + '"在**真 SQLite** 上把整条环走通"而"生产里还没人调它们"。',
+      + '缺了它 Run 照跑，缺的是**审计的完整性**——两者不该用同一个词报。'
+      + '★★ 第 118 轮第七轮：这两条已由 hub 的**收账 tick**接上'
+      + '（`team-hub/toolcall-sweep.mjs`；端到端实测过：真 hub 进程 + 真 `LEGION_DATA_DIR`'
+      + ' ⇒ spool 文件真的被收进 `tool_calls`），于是这一节在**模块可达性**上转 ✔，'
+      + '`owner: 28` 随之被 `owner-stale` 判掉（第 28 条已由业主授权本会话定：'
+      + '丙的机制 + 目录锚在既有配置量上）。'
+      + '⚠️ **但它没有全好**：车道的**写入侧**（执行面按 Run 调 `appendSpoolRecord`）'
+      + '今天仍然没有调用点 ⇒ 生产里 `tool_calls` 还是不会被写。'
+      + '那是**调用点**缺口，而可达性**按构造看不见**它 —— 模块可达 ≠ 有人调那个函数。'
+      + '⇒ 这一节的 ✔ 读作"**有活实现**"，**不**读作"审计完整性已达成"。'
+      + '残余施工项记在 `docs/superpowers/prt/PRT-TAKEOVER-QUEUE-2026-09-23.md` 的 P1-1。',
   }),
   Object.freeze({
     id: 'L8',

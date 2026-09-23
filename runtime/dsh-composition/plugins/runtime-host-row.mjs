@@ -137,6 +137,50 @@ export const RUNTIME_HOST_BINDING_SERVICE = 'legionRuntimeHostBinding'
  */
 export const ACTIVE_FIBER_STATE = 2
 
+/**
+ * `FiberState` 的运行期镜像（`const enum` 没有名字，只有数字；与 DSH 自己的
+ * `plugin-inventory` / `web/loader-status` 两份镜像逐字一致）。
+ */
+export const FIBER_STATE = Object.freeze({
+  PENDING: 0,
+  LOADING: 1,
+  ACTIVE: 2,
+  FAILED: 3,
+  DISPOSED: 4,
+  UNLOADING: 5,
+})
+
+/**
+ * ★★ **只等这一个状态**：`LOADING(1)` ＝ "这一行的 `apply` 正在跑"。
+ *
+ * 为什么**不**把 `PENDING(0)` 也一起等（第 118 轮实测的教训）：
+ * `PENDING` 是"它在等一个注入的服务"，而那个服务**可能永远不来** ——
+ * 在夹具与降级场景里那是**合法**的常态。把它一起等，会把"等收敛"变成
+ * 每个进程一次白等满超时，于是**失败从一个套件搬到另外三个套件**
+ * （`runtime-host-binding-unblocked-dsh-process` /
+ * `runtime-host-registrar-row-dsh-process` / `runtime-host-registrar-row`，
+ * 三条都是 CI 里已注册、改动前全绿的）。
+ *
+ *   > 一个"等所有还没就位的行"的等待，
+ *   > 与一个"把不该等的也等了"的等待，在只有健康部署的读数里是同一个东西 ——
+ *   > 只不过前者会在**降级场景**里白等。
+ */
+export const LOADING_FIBER_STATE = 1
+
+/**
+ * 等 `LOADING` 离开的上限（毫秒）与轮询间隔。
+ *
+ * 这是一个**凭空的常数**，所以理由写在这里：`settleEnforcementMount()` 那一侧
+ * 可以不加超时（它 await 的是组合根的一本账，`mountSettled()` 自己会 settle），
+ * 而这里读的是 **Loader 的树**，只能轮询；不加上限的轮询会在"某一行永远停在
+ * LOADING"时把进程挂在启动期 —— 那比一次拒绝更难排查。
+ *
+ * 超时**不放宽任何判据**：到点了仍拿最后一次观察去对账。
+ * 健康部署里这些行在**毫秒**级就位，所以这个常数只在真出问题时才被用到。
+ */
+export const COMPOSITION_SETTLE_TIMEOUT_MS = 5000
+export const COMPOSITION_SETTLE_INTERVAL_MS = 10
+
 /** 本行的拒绝码。每一个都对应**一样具体的输入**，不是一个笼统的"接线不对"。 */
 export const RUNTIME_HOST_ROW_CODES = Object.freeze({
   /** 挂到了一个不是 Cordis Context 的东西上。 */
@@ -372,7 +416,7 @@ export function observeComposition(ctx) {
   for (const [declaredId, treeId] of declaredToTreeId.entries()) {
     const hit = byTreeId.get(treeId)
     if (hit === undefined) {
-      rows.push({ id: declaredId, activated: false, treeId, present: false })
+      rows.push({ id: declaredId, activated: false, treeId, present: false, state: null })
       continue
     }
     const fiber = hit.entry?.fiber ?? null
@@ -386,6 +430,10 @@ export function observeComposition(ctx) {
       // `apply` 判自检不兼容时仍然是 `provide({ok:false, autoExecutionForbidden:true})`，
       // 所以"这一行活着"与"强制面允许自动执行"依然是两件事。
       activated: selfObserved || fiber?.state === ACTIVE_FIBER_STATE,
+      // ★ `state` 是**原始读数**：上面那个布尔要喂既有判据（`ROW_NOT_ACTIVATED`），
+      //   而"`apply` 还在跑"（LOADING）与"跑坏了"（FAILED）的区分只有它说得出来。
+      //   它缺席（`null`）＝这一行的 fiber 读不出来 —— 与"读到 0"分开。
+      state: typeof fiber?.state === 'number' ? fiber.state : null,
       selfObserved,
       treeId,
       present: true,
@@ -405,6 +453,94 @@ export function observeComposition(ctx) {
   }
 
   return { rows, permissionPresets, inProcessMounted: mountedEnforcementRows(ctx) }
+}
+
+/**
+ * 这次观察里**`apply` 仍在跑**（`LOADING(1)`）的行 id。
+ *
+ * 空数组＝这一刻没有行在"还没跑完"这个状态里。`PENDING(0)` **不算**（见
+ * `LOADING_FIBER_STATE` 上那段），读不到 state 的行（`null`）也不算 ——
+ * 把"读不出状态"当成"还在跑"，会让一次**读失败**换来一次白等。
+ */
+export function rowsApplying(observation) {
+  if (observation === null || typeof observation !== 'object' || !Array.isArray(observation.rows)) return []
+  return observation.rows
+    // ★★★ **自己那一行必须排除**：本函数是从注册方**自己的 `apply` 里**调的，
+    //   而执行那个 `apply` 的 fiber 在它返回之前**就是** `LOADING` —— 观察自己
+    //   永远读到"还在跑"，于是每一次观察都白等满超时（第 118 轮实测：三个套件里
+    //   每一条失败的用例都恰好花掉 5 秒，正是这个常数）。
+    //   这与 `selfObserved` 那段注释是**同一条自指**，只是它出现在另一个字段上。
+    .filter((row) => row?.selfObserved !== true && row?.state === LOADING_FIBER_STATE)
+    .map((row) => row.id)
+}
+
+/**
+ * ★★★ 等 Loader 那一侧**正在 `apply`** 的行跑完，再给观察结果。
+ *
+ * ## 它补的是哪一截
+ *
+ * `settleEnforcementMount()` 等的是**组合根那本挂载账**（`assemble.mjs` 的
+ * `mountSettled()`，只有进程内 `mount()` 写得出来）；而 `reconcilePatchLayer()`
+ * 判"未激活"判的是 **Loader 那棵树**。这是**两个平面**。
+ *
+ * 补丁层那些 `insert` 行（`legion-host.patch.yml`）由 Loader 用
+ * `Promise.allSettled(config.map(create))` **并发**创建，`mountSettled()` 对它们
+ * 一无所知 —— 于是"等挂载收敛"等完之后，树里仍可能有行的 `apply` **正在跑**，
+ * 只要那一行的 `apply` 里有**一次真 I/O**：`runtime-contract-server-row.mjs:482`
+ * 的 `await created.listen()` 就是。
+ *
+ * 实测后果（第 118 轮，`runtime-contract-cross-process` 19 例 6 败）：同一台真 DSH
+ * 进程**已经把契约服务听上、并答了 `/legion/runtime/v1/enforcement`**，而自检说
+ * "legion-enforcement-runtime-contract-server：行已挂载但未激活（等待依赖服务）"
+ * ⇒ `autoExecutionForbidden:true` ⇒ worker 拒绝造执行器 ⇒ 跨进程那条路整条读不出来。
+ *
+ *   > 一份"读的时候它还没跑完"的自检，
+ *   > 与一份"它真的没跑起来"的自检，给出同一条红 ——
+ *   > 只不过前者会在几毫秒之后自己变成绿的。
+ *
+ * ## 为什么等待放在这一侧
+ *
+ * 与 `settleEnforcementMount()` 同一个理由：判据不变，只把**读取时机**推到更收敛
+ * 的一侧。反过来说，把 `activated` 改成"LOADING 也算激活"**是错**的 ——
+ * 那会把"假红"换成"假绿"，而假绿正好落在「强制面未生效时禁止自动执行」这条保证上。
+ *
+ * ## 返回值
+ *
+ * 观察结果原样 ＋ 两个字段：`settled`（这次观察有没有收敛）与 `applying`
+ * （没收敛时是哪些行）。**判据一个都没放宽**：没收敛时下游照旧按"未激活"拒绝。
+ *
+ * @param {object|null} ctx Cordis Context
+ * @param {{timeoutMs?: number, intervalMs?: number, sleep?: (ms: number) => Promise<void>, now?: () => number}} [opts]
+ * @returns {Promise<object|null>} 观察结果（读不到组合树时 `null`，与 `observeComposition` 一致）
+ */
+export async function observeCompositionSettled(ctx, {
+  timeoutMs = COMPOSITION_SETTLE_TIMEOUT_MS,
+  intervalMs = COMPOSITION_SETTLE_INTERVAL_MS,
+  sleep = (ms) => new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms)
+    // 别让这一次等待把进程的退出拖住（真进程里它总在启动期，能退就退）。
+    if (timer !== null && typeof timer === 'object' && typeof timer.unref === 'function') timer.unref()
+  }),
+  now = () => Date.now(),
+} = {}) {
+  let observation = observeComposition(ctx)
+  if (observation === null) return null
+  let applying = rowsApplying(observation)
+  const deadline = now() + (typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : 0)
+  while (applying.length > 0 && now() < deadline) {
+    await sleep(intervalMs)
+    const next = observeComposition(ctx)
+    // 等的过程里组合树变得读不出来了 ⇒ 照旧按"没读到"返回 `null`，
+    // 不拿一份半截的观察去对账。
+    if (next === null) return null
+    observation = next
+    applying = rowsApplying(observation)
+  }
+  return Object.freeze({
+    ...observation,
+    settled: applying.length === 0,
+    applying: Object.freeze(applying),
+  })
 }
 
 /**
@@ -719,7 +855,13 @@ export const runtimeHostRow = {
     //    假绿正好落在「强制面未生效时禁止自动执行」这条保证上。
     const settled = await settleEnforcementMount(ctx)
 
-    const composition = observeComposition(ctx)
+    // ★★★ 两个平面都要等，缺一不可：`settleEnforcementMount()` 等的是**组合根那本
+    //   挂载账**（只有进程内 `mount()` 写得出来），而下面这次观察读的是 **Loader 的树**。
+    //   补丁层那些 insert 行由 Loader 并发创建，`apply` 里有真 I/O 的那一行
+    //   （`runtime-contract-server-row.mjs:482` 的 `await listen()`）在被观察的那一刻
+    //   必然还在 `LOADING` ⇒ 被记成"已挂载但未激活" ⇒ 自检判未生效 ⇒ 禁止自动执行。
+    //   理由、只等 LOADING 的理由、以及实测读数见 `observeCompositionSettled()`。
+    const composition = await observeCompositionSettled(ctx)
     if (composition === null || composition.rows.length === 0) {
       const got = composition === null ? '读不到加载器树' : 'rows 为空'
       throw rowError(RUNTIME_HOST_ROW_CODES.NO_COMPOSITION,

@@ -30,12 +30,16 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import runtimeHostRow, {
   ACTIVE_FIBER_STATE,
+  FIBER_STATE,
+  LOADING_FIBER_STATE,
   RUNTIME_HOST_BINDING_SERVICE,
   RUNTIME_HOST_ROW_CODES,
   RUNTIME_HOST_ROW_PLUGIN_NAME,
   dshRuntimeInputsFactory,
   observeComposition,
+  observeCompositionSettled,
   resetDshRuntimeInputsFactory,
+  rowsApplying,
   setDshRuntimeInputsFactory,
 } from './runtime-host-row.mjs'
 import { ENFORCEMENT_ROOT_SERVICE } from './root-row.mjs'
@@ -265,6 +269,64 @@ describe('PRT-253 runtime-host-row：组合树观察', () => {
     ])).rows.find((r) => r.id === PRESETS_ROW_ID)
     assert.equal(pending.present, true)
     assert.equal(pending.activated, false)
+  })
+
+  test('①e ★★★ "等它跑完"等的是 LOADING，而且**不等自己**、**不等 PENDING**', async () => {
+    // 这一条钉的是第 118 轮那两半：**读的时机**（plan A）错了会假红，
+    // 而**等的方式**（plan B）错了会把红搬到别的套件去。
+    const CONTRACT_ROW_ID = PATCH_LAYER_ROWS.find((r) => r.id.includes('runtime-contract-server'))?.id
+    assert.ok(typeof CONTRACT_ROW_ID === 'string', '契约服务那一行必须在补丁层声明里')
+
+    // (a) LOADING ＝ "这一行的 `apply` 还在跑"：算
+    const loading = observeComposition(ctxWithLoader([
+      { options: { id: CONTRACT_ROW_ID }, fiber: { state: LOADING_FIBER_STATE } },
+    ]))
+    assert.deepEqual(rowsApplying(loading), [CONTRACT_ROW_ID])
+
+    // (b) PENDING ＝ "它在等一个**可能永远不来**的服务"：**不算**
+    //     把它算进去，降级场景里每次观察都会白等满超时 —— 实测那会让三个
+    //     CI 里已注册、改动前全绿的真进程套件一起变红。
+    const pending = observeComposition(ctxWithLoader([
+      { options: { id: CONTRACT_ROW_ID }, fiber: { state: FIBER_STATE.PENDING } },
+    ]))
+    assert.deepEqual(rowsApplying(pending), [], 'PENDING 不是"apply 还在跑"')
+
+    // (c) 观察者**自己**那一行：它在自己的 `apply` 里**永远**是 LOADING ⇒ 必须排除。
+    //     这一条是上一版修法净亏的直接原因（每条失败的用例恰好花掉 5 秒＝那个常数）。
+    const ownFiber = { state: LOADING_FIBER_STATE }
+    const selfCtx = {
+      get: (name) => (name === 'loader'
+        ? { entries: () => [{ options: { id: CONTRACT_ROW_ID }, fiber: ownFiber }] }
+        : undefined),
+      fiber: ownFiber,
+    }
+    const selfObservation = observeComposition(selfCtx)
+    assert.equal(selfObservation.rows.find((r) => r.id === CONTRACT_ROW_ID).selfObserved, true,
+      '前提：这一份观察里那一行认出了"自己"')
+    assert.deepEqual(rowsApplying(selfObservation), [], '自己那一行不许算进"还在跑"')
+
+    // (d) 等的是**读取时机**：同一棵树从 LOADING 变 ACTIVE ⇒ 等到之后读到"已激活"
+    const fiber = { state: LOADING_FIBER_STATE }
+    const settledObservation = await observeCompositionSettled(
+      ctxWithLoader([{ options: { id: CONTRACT_ROW_ID }, fiber }]),
+      { timeoutMs: 500, intervalMs: 1, sleep: async () => { fiber.state = ACTIVE_FIBER_STATE } },
+    )
+    assert.equal(settledObservation.settled, true)
+    assert.equal(settledObservation.rows.find((r) => r.id === CONTRACT_ROW_ID).activated, true)
+
+    // (e) 到点还没跑完：`settled:false` 且**具名**，而**判据一条都没放宽**
+    const timedOut = await observeCompositionSettled(
+      ctxWithLoader([{ options: { id: CONTRACT_ROW_ID }, fiber: { state: LOADING_FIBER_STATE } }]),
+      { timeoutMs: 0, sleep: async () => {} },
+    )
+    assert.equal(timedOut.settled, false)
+    assert.deepEqual(timedOut.applying, [CONTRACT_ROW_ID])
+    assert.equal(timedOut.rows.find((r) => r.id === CONTRACT_ROW_ID).activated, false,
+      '没收敛时照旧按"未激活"拒绝 —— 等待不许把假红换成假绿')
+
+    // (f) 读不到组合树 ⇒ `null`（与 `observeComposition` 同一条口径），不拿半截观察去对账
+    assert.equal(await observeCompositionSettled({}), null)
+    assert.equal(await observeCompositionSettled({ get: () => undefined }), null)
   })
 
   test('①d ★★★ 自指测量：观察者**自己**那一行按"已激活"记，别人不受影响', () => {

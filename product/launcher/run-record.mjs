@@ -249,7 +249,7 @@ const OPTIONAL_FIELD_VALIDATORS = Object.freeze({
  *     · `validateRunRecord` 只校验**它自己手写的那几个**名字 ⇒ 新字段**静默不校验**；
  *     · 于是记录看起来**完全正常**，而那个读数从来没到过磁盘。
  *
- *   实测（`scratch/_probe-record-drop.mjs`）：生产者交上 `diskUsageBytes`，
+ *   实测（`scripts/probes/_probe-record-drop.mjs`）：生产者交上 `diskUsageBytes`，
  *   写出的记录里没有它，`validateRunRecord(...).problems` 为 **`[]`**。
  *
  *   > 一张只写在注释里的扩展点，与一条真的能扩展的通路，

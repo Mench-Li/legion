@@ -347,7 +347,7 @@ export const PENDING_ITEMS = Object.freeze([
     //   **零调用方**（整个仓库只出现一次：它自己的定义）。也就是说
     //   *就算跑一次真实执行，那个数也会被算出来然后丢掉*。
     //   现在退出路径会经 `describePeakResource()` 把读数交出去
-    //   （4+2 条变异钉住，见 `scratch/verify-peak-resource-wired.mjs`）。
+    //   （4+2 条变异钉住，见 `scripts/probes/verify-peak-resource-wired.mjs`）。
     //
     //   于是**剩下的是真的缺一个读数**：缺一次黄金任务真实执行留下的数，
     //   以及承接它的证据文件。本轮**不伪造**那个文件——

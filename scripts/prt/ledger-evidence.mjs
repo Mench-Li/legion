@@ -52,7 +52,7 @@ import { suiteFilesFromCi, trackedTests } from './suite-counts.mjs'
 // ★ 台账状态词表与"任务行长什么样"的**唯一所有者**是 `progress-check.mjs`
 //   （它是台账格式的所有者）。本模块**不再**自己写一份 `^(✅|🟡|⏸|⬜)$`——
 //   第 44～45 轮实测：手抄的那一份在 🟡 出现时**静默丢行**
-//   （`scratch/_probe-status-poison.mjs`：毒药行数 4 → 3，一声不响）。
+//   （`scripts/probes/_probe-status-poison.mjs`：毒药行数 4 → 3，一声不响）。
 import { ledgerTaskRow } from './progress-check.mjs'
 
 export const LEDGER_PATH = join(REPO, 'docs', 'superpowers', 'prt', 'PRT-PROGRESS.md')

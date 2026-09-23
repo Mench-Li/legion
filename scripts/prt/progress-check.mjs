@@ -65,7 +65,7 @@ export const STATUS_MARKS = Object.freeze([
 //
 // ★★ 第 45 轮把这个问题做成**可证伪**的：往一份合成台账里放一个今天**不存在**的
 //   第 5 个标记（🔵），看每个解析器的**行数**有没有少
-//   （`scratch/_probe-status-poison.mjs`）。读数：**两个**解析器静默丢行——
+//   （`scripts/probes/_probe-status-poison.mjs`）。读数：**两个**解析器静默丢行——
 //   `ledger-evidence.ledgerEvidenceRows` 与 `intervention-coverage.ledgerRows`／
 //   `ledgerRowTexts`（后者那个文件**自己**的文件头就写着"两处各写一遍取法，
 //   正是本模块警告的那种漂移"，而它把状态正则写了**三**遍）。

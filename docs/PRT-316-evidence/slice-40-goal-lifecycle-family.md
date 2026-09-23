@@ -82,7 +82,7 @@ L5787  POST /api/goal/status     上邻  6 行前（POST /api/goal/context）
 全仓库搜过：
 
 - `goal/context` —— **连一个调用方都没有**（只有文档、模块自身、`server.mjs` 的定义与注释）。
-- `goal/status` —— 只在 `scratch/verify-cancel-strand.mjs` 与 `scripts/prt/gf001-run.mjs` 里被调过，
+- `goal/status` —— 只在 `scripts/probes/verify-cancel-strand.mjs` 与 `scripts/prt/gf001-run.mjs` 里被调过，
   而那两处**不在回归选择器里**（选择器只扫 `team-hub/*.test.mjs` 且要含 `server.mjs`）。
 
 > 一个「这一族有 3 套判据」的印象，

@@ -42,7 +42,7 @@ WAL 模式下，已提交但尚未 checkpoint 的事务**只存在于 `-wal` 文
 "把 team.db 拷过去"因此得到一个**能打开、能查询、schema 齐全、
 却少了一部分已提交数据**的库。
 
-这不是推测，是并排跑出来的读数（`scratch/probe-adoption-live.mjs`，只读）：
+这不是推测，是并排跑出来的读数（`scripts/probes/probe-adoption-live.mjs`，只读）：
 
 ```
 ③ 同一个旧库，两条路径
@@ -131,7 +131,7 @@ start() → 日志 → 单实例锁 → 上一次残留 → preflight()
 | `product/launcher/launcher.mjs` | 导入；`start()` 里 `preflight()` 之后调 `this.adoptLegacyData()`，不成则早退；新增 `adoptLegacyData({dryRun})` 方法；`adoptionDiagnostics` 聚合进 `allDiagnostics()` |
 | `product/launcher/legacy-data-adoption.test.mjs` | **新增**，15 例 |
 | `scripts/ci/run-ci.mjs` | 新套件登记 |
-| `scratch/probe-adoption-live.mjs` | **新增**只读探针（对**真**旧库跑，本文 §3 的读数来自它） |
+| `scripts/probes/probe-adoption-live.mjs` | **新增**只读探针（对**真**旧库跑，本文 §3 的读数来自它） |
 
 ### 5.5 ★ 接管**按启动范围**发生（`--include`）——后续批补上的
 
@@ -179,7 +179,7 @@ if (!scoped) adoptionReading = reading
 node --test product/launcher/legacy-data-adoption.test.mjs
 
 # ② 对**真**旧库跑一遍完整链路（只读；不碰正在跑的 DSH 与那份库）
-node scratch/probe-adoption-live.mjs
+node scripts/probes/probe-adoption-live.mjs
 
 node scripts/prt/progress-check.mjs
 node scripts/prt/spec-progress.mjs --check
@@ -193,7 +193,7 @@ node scripts/prt/spec-progress.mjs --check
 ### 6.1 破坏性验证（每条都必须**变红**）
 
 ```bash
-$env:MUTATE_ONLY='㉑,㉒,㉓,㉔,㉕,㉖'; node scratch/mutate.mjs
+$env:MUTATE_ONLY='㉑,㉒,㉓,㉔,㉕,㉖'; node scripts/probes/mutate.mjs
 ```
 
 **6/6 全部咬住**：
@@ -222,7 +222,7 @@ $env:MUTATE_ONLY='㉑,㉒,㉓,㉔,㉕,㉖'; node scratch/mutate.mjs
 ### 6.2 范围那几条的破坏性验证（追加）
 
 ```bash
-$env:MUTATE_ONLY='㉞,㉟,㊱'; node scratch/mutate.mjs
+$env:MUTATE_ONLY='㉞,㉟,㊱'; node scripts/probes/mutate.mjs
 ```
 
 | 变异 | 期望变红 |

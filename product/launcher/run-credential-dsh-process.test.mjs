@@ -140,7 +140,7 @@ function probeHandle(refs = [RUNTIME_MODEL_KEY_REF]) {
  *
  * ## 为什么要"拿到证据就收手"（2026-09-18 加，依据是实测出来的分布）
  *
- * 本套件此前是"一直等到进程退出，超时才算输"。而 `scratch/prt509-flake-rate.mjs`
+ * 本套件此前是"一直等到进程退出，超时才算输"。而 `scripts/probes/prt509-flake-rate.mjs`
  * 量出来的是**双峰**：正常 3.1–3.7s 退出，出问题的那一半**永远不退出**
  * （240s 预算下同样挂满）。根因也已经定位（见本文件末尾的说明）：
  * 宿主残留了 5 个 chokidar `FSWatcher`，事件循环永远不空。
@@ -379,7 +379,7 @@ test('★★★★★ 缺口 ③（真进程）：一个真 DSH 进程在启动�
     // ★★ 这条断言 2026-09-18 **改了形态**：从"超时就红"改成"超时只记录"。
     //
     //   理由是一个**实测出来的分布**，不是措辞。本批用一个 20s 预算连跑 8 轮
-    //   （`scratch/prt509-flake-rate.mjs`，用与本套件在 CI 里**同一种**起法）：
+    //   （`scripts/probes/prt509-flake-rate.mjs`，用与本套件在 CI 里**同一种**起法）：
     //
     //     正常 4 轮：宿主 **3.1s / 3.2s / 3.2s / 3.5s**
     //     挂死 4 轮：宿主 **>20s**（且 240s 预算下同样是 >240s）
@@ -419,7 +419,7 @@ test('★★★★★ 缺口 ③（真进程）：一个真 DSH 进程在启动�
     //     **这不是"把判据放松到能过"**：②没有任何一刻被断言过"通过"，
     //     它每轮都以 `MEASURE … exit_code=…` 原样出现在 CI 摘要里。
     //
-    //   ★★★ 根因（2026-09-18 当天晚些时候量出来的，见 `scratch/prt509-handle-probe.mjs`
+    //   ★★★ 根因（2026-09-18 当天晚些时候量出来的，见 `scripts/probes/prt509-handle-probe.mjs`
     //     / `prt509-timeline.mjs`）。**从进程内部**读 `process._getActiveHandles()`：
     //
     //     挂死那一轮：handles=7 [Socket×2 **FSWatcher×5**]（一直保持到被杀）

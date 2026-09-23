@@ -258,7 +258,7 @@
 >
 > 两件事，分开说。
 >
-> **（一）先补上那次真读数**（`scratch/_probe-peak-e2e.mjs`，可复跑）。
+> **（一）先补上那次真读数**（`scripts/probes/_probe-peak-e2e.mjs`，可复跑）。
 >   此前已有的两条证据**都不是端到端**：
 >
 >   | 已有证据 | 覆盖到哪 | 没覆盖 |
@@ -301,7 +301,7 @@
 > ```
 >
 > 而"主动停止"正是一次**成功** Run 的正常结束方式（Launcher 关停 Runtime 走的就是它）。
-> 实测两条路并排跑（`scratch/_probe-peak-on-stop.mjs`，同一替身、同一 io，只差是不是主动停止）：
+> 实测两条路并排跑（`scripts/probes/_probe-peak-on-stop.mjs`，同一替身、同一 io，只差是不是主动停止）：
 >
 > | | `status()` 上的读数 | 那条日志 |
 > | --- | --- | --- |
@@ -323,7 +323,7 @@
 > 所以**只有它**仍然不报。修完后 A 1 条 / B 1 条，**两条路都印**。
 >
 > 读数：`product/launcher/supervisor.test.mjs` **22 → 25/25**（+3 例，把"该报的报、
-> 该静的静"两侧都钉住）；破验 `scratch/_mutate-r44.mjs` **5/5 咬住、0 漏网**、逐字节还原。
+> 该静的静"两侧都钉住）；破验 `scripts/probes/_mutate-r44.mjs` **5/5 咬住、0 漏网**、逐字节还原。
 >
 > ★ 顺带修了 `status()` 里那句**已经过期**的注释（它写着"launcher 今天只挑了
 > `key/pid/image`，所以这一项暂时还不会流进运行记录"——而 `launcher.mjs:1270` 已经接上了）。

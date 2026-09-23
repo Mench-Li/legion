@@ -84,7 +84,7 @@ Runtime Contract → DshRuntimeAdapter → Orchestrator
 
 > `RunRequest` 必须包含 `runId`、…、工作目录、**环境变量白名单**和工具权限。
 
-第 30 轮实测这条的落地情况（`scratch/_probe-env-whitelist.mjs`，可复跑）：
+第 30 轮实测这条的落地情况（`scripts/probes/_probe-env-whitelist.mjs`，可复跑）：
 
 | 问题 | 实测读数 |
 |---|---|

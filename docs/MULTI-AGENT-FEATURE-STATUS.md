@@ -788,7 +788,7 @@ is `mcp__<serverName>__<rawName>`, normalized to the DeepSeek function-name
 | 宿主环境（`baseEnv`）→ `envNames` → 子进程 | ✅ 通 |
 | 产品配置（`runtime.env`）→ `resolveEnforcementIdentity()` → `values` → 子进程 | ✖ **静默丢掉** |
 
-**实测**（`scratch/_probe-r113-permit-delivery.mjs`，可复跑）：五把键都写进 `runtime.env`
+**实测**（`scripts/probes/_probe-r113-permit-delivery.mjs`，可复跑）：五把键都写进 `runtime.env`
 ⇒ `values` 里**一把都没有**，而 `ok === true`、`missing === []`。
 **后果**：四道范围检查在真实部署里读到的仍是"没配"，
 **而在它们那一侧"没配"是放行**。
@@ -804,7 +804,7 @@ is `mcp__<serverName>__<rawName>`, normalized to the DeepSeek function-name
 
 **判据**：`enforcement-identity.test.mjs` 新增一条**走完整条链**的用例
 （配置 → `values` → `buildChildEnv` → 子进程 env）；闭集 9 → 14。
-**破验 5/5 达标**（`scratch/_mutate-r113-passthrough.mjs`）。
+**破验 5/5 达标**（`scripts/probes/_mutate-r113-passthrough.mjs`）。
 ★ 其中 M4 给出了一条预想之外的读数：把两处**结构**断言都挖成"只数个数"之后
 套件**仍然红**——那条**行为**断言独立守住了它。
 
@@ -862,7 +862,7 @@ node scripts/prt/reachability.mjs --diff
 
 1. **它**没有**进门禁**。这一节是审计读数；把它变成判据需要先有"哪些 `gap` 是可接受的"
    的一份口径——而那本身是一次裁决。
-2. **我第一版的审计器是错的**（`scratch/_audit-zero-prod-consumers.mjs`，留着当反面教材）：
+2. **我第一版的审计器是错的**（`scripts/probes/_audit-zero-prod-consumers.mjs`，留着当反面教材）：
    它只查**别的文件**是否引用某个导出，于是把"导出了、但在**本文件内**被用"的
    也标成"谁都不用"——211 条里我抽查的 6 条**全都是假阳性**
    （`runtimeInstallRepair` / `createSystemIo` / `renderRuntimePlan` /
@@ -897,10 +897,10 @@ node scripts/prt/reachability.mjs --diff
 | 11 | **PRT-509 剩余三条** | 环境 + 项目方 | ① win32 上 `0600` **本机无法证明**；② **生产默认句柄工厂**（走 `resolveDshBaseBundlePatchPath` 解析器）**只有注入式覆盖**，真实调用没跑过；③ 已证明的是"**DSH 的凭据提供方**从 Legion 材料化的文件里读到了值"，**不是**"一个真 DSH 进程启动时把那份覆盖层文档解析出来了" | 三条都**如实记为 🟡 的剩余**，不冒充已闭合。②③ 需要一次**真 DSH 进程启动**的现场（有 `DSH_CHECKOUT` 时可跑，但没有覆盖层真实生效的那条路径）  ★★★ **2026-09-18 订正：本格那句"三条都如实记为 🟡 的剩余，不冒充已闭合"已过期——PRT-509 已于 2026-09-18 转为 ✅（业主裁定 `065bc57`）。** 原文保留。该裁定**逐条对齐了正好这三条**：② 已于 2026-09-17 关上，且带**破验**（把那个默认分支换成一句 `throw`，19 条仍全绿、只有新加的那条红）；③ 已于 2026-09-17 关上，关闭物是 `product/launcher/run-credential-dsh-process.test.mjs`（真 `apps/…` 子进程）；① win32 `0600` **不是交付缺口，是已裁定的永久平台边界**（与 `sandbox-enforcement=partial` 同类，见 `docs/STATUS.md` §4 第 15 条）。★ **本轮的独立复核**（不是引用裁决，是自己跑的）：`run-credential-materialization.test.mjs` **21/21**；`run-credential-dsh-process.test.mjs` **1/1、skipped 0**，且它是**真的**跑了——真宿主进程 **2.8s**、`settle=natural`、`exit_code=0`、证据落盘，不是走那条"没有 `DSH_CHECKOUT` 就整条 skip"的退路。★ 因此本格现在应当读作：**三条都已闭合或已裁定，不再需要"环境 + 项目方"提供现场**；若仍要挂一条，只能挂①那个已裁定的平台边界（本机不可测），而它**不是**外部输入。★ 另：本条此前要"一次真 DSH 进程启动的现场（有 `DSH_CHECKOUT` 时可跑）"——那个现场**已经跑过了**（上条读数），所以"需要现场"这个说法本身也不再成立。|
 | 12 | **F-19 Role Pack 的"七类版本"范围确认** | 产品 | 七类（prompt / skills / tools / permissions / model / connectors / budget）是否就是这个岗位包的全部版本面 | 若产品认为还缺一类（例如"环境"或"路由"），现在加是**新增一节**；等到有真实岗位包在库里之后再改，就要处理"旧包缺这一节"的兼容问题（而现在按设计**拒绝缺节**的包） |
 | 13 | **F-21 判定面的接线资格**（★★★ 2026-09-18 **两次**订正：并发那条已过期 ⇒ 真实阻塞是**数据**；而第 19 条选定后本条**仍未解开** ⇒ 它有自己的决定，见"缺口"末段与裁决栏末段） | 项目主 + 产品（★ **要裁决的是"连接目标放哪"**，不只是"确认可以动文件"） | 把连接器判定接进 `createEnforcementBridge().preExecute`（DSH `tools/pre-execute` 瀑布，见 §4.2）。**当时唯一没做的原因是并发**：同一工作树上另一个 agent 进程正在改那个文件。★★ **本批核实：并发那条已经过期，但清掉它并不解开本条。** ① 那个改动**已经落地**（`f291f9c`，`runtime/dsh-composition/tool-request.mjs` 最后一次改动），且另一个 agent 今天的工作树里**不含** `runtime/dsh-composition/` ⇒ 并发确实没了。② **但接线接不上，缺的是"判定要对着什么判"**：`runtime/connectors/registry.mjs` 的 `createRegistry` / `declareConnector` **全仓库只有它自己的用例在调**（`git grep` 命中只在 `registry.mjs` 与 `registry.test.mjs`），而**声明**（策略 / 风险 / 工具清单 / transport / secretRef）的唯一真相在**控制面** `team-hub/connector-store.mjs`。③ 执行面**没有任何渠道**拿到那些声明：`runtime/contracts/*.mjs` 与 `run-floor.mjs` 提 `connector` **零命中**；`runtime/dsh-composition/` 下的**生产**代码提 `connector` **零命中**；`runtime` 进程的 `envNames` 故意**不含** `TEAM_HUB_TOKEN`（`product/process-manifest.mjs`）。④ 岗位包（`runtime/employee/role-pack.mjs:184`）里的 `connectors` 是 `Object.freeze(['id','version'])`——**只是引用，不含声明**，拿它判不出 allow/deny/ask。⇒ **本条的真实阻塞与第 14/15/18 条是同一个**（第 19 条那道"数据进 `RunRequest` 还是注入 `TEAM_HUB_TOKEN`"）。★ 这与第 19 条自己的标题（"第 13/14/15/18 条其实是**一条**决定"）**一致**；只是本条"缺口"里那句"唯一没做的原因是并发"是**当时**的事实，过期后**没人改**，而它会让读到这一格的人**以为清掉并发就只差一次编辑**。★★★ **但最后那句在本批当天又被实测修正了**：真实阻塞**不是**第 19 条那道二选一，而是**本条自己的一个决定**——执行面要的两半里，**连接目标**（`command`/`url`）在控制面**不存**、全仓**零生产者**（`4290254`，读数见裁决栏末段）⇒ 第 19 条选定「放进 `RunRequest`」**并没有**解开本条。 | 不接则 F-21 停在 🟡：登记、冻结、审计、导出都能用，但**没有任何一次真调用被它拦过**——"闸门写好了、还没装到门上"。★ 若产品认为"现在产品里没有 MCP 客户端，接线是给不存在的东西装门"，**请显式说明**，那我就把 F-21 的定位改成"控制面已就绪、判定面随 MCP 客户端一起做"，并在文档里这么写。★★ **订正后的可选方案**（本批）：既然真实阻塞是第 19 条，那么第 19 条一旦选定，本条自然解开——**不需要单独裁决**。⇒ 请把本条**并入第 19 条一起回答**；★ **但见本格末段：这句当天就被实测证伪了**；★ 我**没有**擅自接线：在没有声明的执行面上装这道闸，它只会对所有连接器调用**一律拒绝**（那与"没装"在用户眼里一样），而"反正它更严"这个辩护**不成立**——收成"全拒"会同时拒掉将来合法的连接器调用，表现成"工具莫名其妙失败"。★ 顺带一处**规格支持**：`docs/MULTI-AGENT-FEATURE-OPTIMIZATION.md:106` 把"外部网络/连接器"列在 `tools/pre-execute` 动态检查的**首批纳管**名单里 ⇒ 接线本身是规格要的；但同文件 `:164` 又写"**只有在上述闭环稳定后**，才扩展……连接器"，所以"现在接不接"确实仍是一个**排期**决定，那就更该与第 19 条一起答。★★★ **末段（2026-09-18 同日证伪）：本条不是"并入第 19 条即可"，它有自己的一个决定。** 第 19 条**已经**选定（业主裁定「放进 `RunRequest`」），而另一个会话按那份裁决文件自己的硬约束（**不许凭空造数据**）**开工前复核**，量到连接器这一条**喂不进去**（`4290254`）：① hub 的 `normalizeDeclaration()` 产出的字段是 `version / connectorId / version_label / transport / policy / tools / secretRefs`——**没有 `command`，也没有 `url`**；② 把这份记录**原样**喂进执行面的 `createRegistry()` ⇒ 具名拒绝 `connector-transport-target-missing`（"transport 是 stdio，必须给 command"）；③ 反向对照：**只**补上 `command` ⇒ 就建起来了（`connectors() = 1`）。⇒ 执行面要**两半**：**策略**（hub 存）与**连接目标**（`command`/`url`，hub **不存**，且**导出时也刻意不含**——既有用例⑤的标题就是「含权限面与引用**名**，**不含命令与 URL**」，所以那是**有判据守着的设计性质，不是遗漏**）。而连接目标在全仓**零生产者**。⇒ 本条的真实阻塞是**它自己的一个决定：连接目标放哪**（四个候选方向见 `docs/DECISION-RUNREQUEST-EXECUTION-PLANE.md` §7.4），**不是**"照抄 PRT-214 的形状"那种纯代码工作量。★★ 那个会话还立了一条**会响的判据**（`team-hub/connector-store.test.mjs` 用例⑧，23/23，含 http/sse 缺 `url` 的同一具名码），并做了破坏性验证（关掉执行面那条判据 ⇒ 用例⑧变红，还原后逐字节相同）⇒ **"接上了它就会红"**。★ 他们那句话值得抄在这里：**"没接线看得出来，接错了看不出来。"** ★ 我**没有**擅自接线（理由见上），这一条我两批都只动了**文档**。 ★★★ **[2026-09-18 第三批订正·这一条的施工分两半] 上面那句"不是纯代码工作量"是对的，但**理由还不完整**：即使把连接目标那个决定做掉，把 `decide()` 接进 `preExecute` 也**仍然接不出一条能按设计动作的链**。逐条量出来的读数（写在 `docs/DECISION-RUNREQUEST-EXECUTION-PLANE.md` §10）：① `decide()` **读得到**熔断器状态（`registry.mjs:556` `circuits.get(id)`，`:565` 开路即 `deny` `connector-circuit-open`，`:573-585` 半开只放行一次探针）；② 而改熔断器状态的**只有** `recordOutcome({connectorId, ok, error, atMs})`（`:607`，阈值 3 / 冷却 30 s），它的**生产调用方是 0 处**——全仓 `grep` 只命中定义与它自己的用例；③ **强制面桥没有"执行后"的钩子**：`createEnforcementBridge()` 的返回对象（`tool-request.mjs:876-901`）只有 `project` / `projectionFor` / `guard` / `preExecute` / `answerer` / `ledgerOf` / `ledgerHashes` / `contradictions` / `assertNoContradiction` / `enforcementSurfaces`——`preExecute` 是**判定**点、`onDecision` 是**事后通知**（那时决定已作出去了），**没有任何一处**看得到"这次调用最后成功了没有"；④ `enforcementSurfaces()`（`:894-900`）**恰好 5 个面**，**没有** `connector` 这一格 ⇒ 少装了什么都**不会有人知道**。⇒ **只接判定面 = 接了一个永远合闸的熔断器**，而且这一版**一行错都不报**、用例全绿、`enforcementSurfaces()` 也照常。这比 §7 那次更坏：§7 会在运行时具名拒绝（看得见），这一次看不出来——**§7.4 那句"没接线看得出来，接错了看不出来"要再往前一步：接了一半，也看不出来。** ★ 于是这一条的施工顺序应当是：**先定"执行结果在哪一层可见"**（第二半今天没有接缝；它与**第 15 条**——`tool_calls` 写入方为 0——是**同一个缺口**，不是两个问题），**再一次性接两半**。★ 本批**没有动任何代码**：这不是"来不及"，是 §3 那条硬约束的直接后果——这里能造的不是数据，是一个**看起来完整、永远不会跳闸**的接缝。⚠️ 边界：我没有去核 DSH `tools/` 那一侧有没有执行后钩子（`pre-execute` 是**前置**瀑布，名字就说清了位置），所以精确的意思是"**本仓的强制面桥**没有这个接缝"，**不是**"DSH 不提供任何钩子"。 ★★★ **[2026-09-18 第三批·接缝已建好]** 上面那句"桥**没有**这个接缝"**现在不成立了**——本批**动了代码**：`runtime/connectors/outcome-port.mjs`（把 DSH 的 `tools/result` 载荷变成 `recordOutcome({connectorId, ok, error})`）＋ `runtime/dsh-composition/plugins/connector-feedback.mjs`（订阅 `tools/result` 的那一行），由 `assemble.mjs` 在拿到连接器声明时**一次装齐两半**；`enforcementSurfaces()` 从 **5 格变 6 格**（原来连"连接器"这一格都**没有**）。★ **边界也核了**：DSH 的钩子**有两个且语义不同**——`:169 'tools/post-execute'` 是 `waterfall`（在派发路径里，可 accept/replace/block ⇒ **改变**结果），`:191 'tools/result'` 是 `emit`（"Observe the frozen, lossless-JSON **final** outcome"）；熔断器是**记录器** ⇒ 要后者。⚠️ **但归零 ≠ 通了**：`runtime/connectors/registry.mjs` 因此**有了生产 importer**（探针 47/26 → **46/25**，本条归零），可是 `createRegistry()` 在 `assembleEnforcement` 里是**条件调用**，而**今天没有任何生产路径**给 `connectorDeclarations`（来源是**第 19 条**那个部署配置键）⇒ 精确读数是"**从没人 import 变成了被 import、但那个函数从不被调用**"。⇒ **本条不再是"要不要接"、也不再是"缺反馈接缝"：剩下的并进第 19 条。** 详见会话报告 §10.43。 |
-| 14 | ★★★ **三道范围检查的生产接线（PRT-603/604/605/606）** | 产品 + 项目主 | **这三道检查今天在生产里一次都不跑**（读数见 §5.2）。要决定的是：**这一次 Run 的范围表（读根/写根/平台、命令/网络/MCP 授权、外部 API 读写端点）从哪来、挂在哪一层**。可选方向：(A) 随 Run 的载荷到达，像 PRT-214 的下限/授权身份那样由 `runtime-host-registrar-row.mjs` 按 Run 安装；(B) 由岗位包（F-19 的 `permissions` 一节）派生，装配期算一次；(C) 仍留在 hub 侧判（那 `path-scope.mjs` 这类执行面检查器就应当明确废弃，而不是挂在桥上当"可选端口"） | 不决定则**越界路径今天拦不住**：`tool-request.mjs` 的 `scopeGuard` 在 `pathScope === null` 时返回"放行"，而生产从不注入。★★ 我**没有**擅自接线，因为凭空造一份范围表正是 PRT-253 §3 明令禁止的"不发明任何默认值、替身或暂时放行"——那会让"没接线"与"接好了"在读数上同形。本轮的处置是把读数钉住（`production-scope-wiring.test.mjs` 5 例 + 5/5 变异），所以**接上了它会红**。★ 另注意：三个台账行（PRT-604/605/606）的 ✅ 依据是"模块 + 自己那套用例"——按本表 §0 那条告警（"只有自己的用例驱动的原语一律 🟡"），它们的口径需要在台账里对齐  ★★★ **2026-09-18 订正（当天更晚）：上面那句"这三道检查今天在生产里一次都不跑"与"我**没有**擅自接线"**已经不再成立**——三道里的**第一道（`pathScope`，PRT-604）已经接进生产组合根**（`40d2d60`）。逐条对齐，原文保留：① **接线是真的、而且不是"凭空造一份范围表"**：范围表从**部署配置**来（`LEGION_PATH_SCOPE`，登记在 `runtime/config-schema.mjs`），由 `runtime/dsh-composition/scope-port.mjs` 变成桥要的那个函数（`pathScope(projection)`），在 `root-row.mjs` 接上。**没配**时端口仍是 `null`、读数仍是 `pathScope:false`——**没配不等于接了个空的**（`production-scope-wiring.test.mjs` ①b 钉住"配了翻成 true"）。② 所以本格"可选方向"实际没有走 A/B/C 中的任何一条，而是走**第 4 条**：数据由**部署方**在配置里给出（`§9.2 第 3 步`"汇合到同一个部署配置读取点"）。A/B/C 那道裁决**仍然只对另外两道**（`execution-scope` / `external-api-scope`）有效。③ "不决定则越界路径今天拦不住"要按**条件**读：**没配 `LEGION_PATH_SCOPE` 的部署仍然拦不住**（今天这是默认），配了才拦得住——与 §5.2 那张两行表一致。④ `production-scope-wiring.test.mjs` 现在 **6 例**（原 5 例 + ①b），且**它确实红了**——"接上了它会红"这条预言当时写对了，红的时候就照本格末句去改了账（本段就是那次改账）。⑤ **仍未接的**：`whitelist`（岗位白名单）与 `execution-scope`（PRT-605）/ `external-api-scope`（PRT-606）两道——**桥的参数表里连它们的位置都没有**。⑥ ★ 一条**可达性**上的机器可核证据（同一次改动）：`runtime/dsh-composition/path-scope.mjs` 与 `scope-table-binding.mjs` 从"不可达"变成**可达**（基线 49 → 47）。"判定写好了、只是没人给它一份表"这句话，现在有了一条会自动红的读数。 ★★ **2026-09-18 续：上面这条"口径不一致"现在有了一个机器可核的独立记录。** `docs/superpowers/prt/prt-reachability-baseline.json` 给这两个模块**各自带了一个 `class`**：`runtime/dsh-composition/execution-scope.mjs` 与 `runtime/dsh-composition/external-api-scope.mjs` **都是** `class: "gap"`，且 `reason` 明写「§5.2：连端口都没有 ⇒ 裁决处：§5 第 14 条（三道范围检查的生产接线）」——**reason 直接指向本条**。而 `runtime/dsh-composition/path-scope.mjs`（PRT-604）**不在**这份基线里（已可达，实测）。⇒ 三行的 ✅ 分两种：PRT-604 有**接线为据**（`40d2d60`）；PRT-605/606 的 ✅ 与**本仓库自己那份基线文件**直接冲突，且与台账 §0 告警「只有自己的用例驱动的原语一律 🟡」指向同一结论。★ **待裁决（两条都要写清理由）**：要么把 605/606 改 🟡 并接线，要么把那条告警**明确豁免**这两个模块。不能两样都不做——*一个「✅ 但没有生产调用方」的记录，与一个「这道检查在生产里跑着」的记录，下一个人读起来是同一个东西。* ★ 而且方向是**偏乐观**的那一边：它让人以为那两道检查在拦，实际它们一次都没被调用过。★ 本轮**没有**改这几行的状态：① 状态口径由项目方（台账的读者）定；② `PRT-PROGRESS.md` 此刻是**另一个会话的在制品**，按纪律不得触碰。 【2026-09-18 新读数·只订正事实，不改裁决】**本条开头那句"这三道检查今天在生产里一次都不跑"对 `path-scope.mjs` 已经**不成立**（对 `execution-scope` / `external-api-scope` 仍然成立）。**已核到端到端**（不是"有人 import 了它"）：`patch-layer.mjs` 的 `PATCH_LAYER_ROWS` 加载 `plugins/pre-execute-row.mjs` → `plugins/root-row.mjs:535` 真的调 `scopePortFromEnv({ env })`（读不出就 `throw`，**fail closed**）→ `:724-730` 把 `scope.port` 传进 `installEnforcementRoot({ pathScope })` → `scope-port.mjs:169` 调 `checkPathScope(...)`。落在 `40d2d60`（§9.2 第 4 步），**不是本会话做的**。 ⚠️ 但这**不等于"默认就拦"**：**没配**范围表时 `port` 是 `null`，而 `tool-request.mjs` 的 `scopeGuard` 那句 `if (pathScope === null) return undefined` ⇒ 那次缺席仍然落到**放行**。所以"越界路径今天拦不住"**只在没配范围表的部署上**仍然成立，而这一条正是本行要裁决的那件事——**裁决未变**。 ★★ 值得单独记一句的是**这件事是怎么被发现的**：**不是我读文档看出来的，是可达性探针的红报出来的**——而那条红**同时含一条假消息**（`external-api-scope.mjs`，由我自己那张记账表的键名冒充清单造成，见 `boundary-facts` 的判据 `criteria-files-do-not-impersonate-manifests`）。*一半真、一半假的红，比全假更难查，因为它对了一半——而人会顺手把两半一起"按指示清掉"。* ★ 现状读数（同一探针）：入口 58 / 可达 224 / **不可达 47**（`by-design 13` / `gap 26` / `deliberate 8`），与基线一致。 ★★★ **[2026-09-18 第三批订正·这三道不是同一种缺口]** 上面把三道写成一件事（"这三道检查今天在生产里一次都不跑"），而逐道量下来它们是**两类**：① `pathScope`（PRT-604）**已经接进生产组合根**（`40d2d60`）；② `whitelist`（PRT-603）**端口在，但算这个值的模块自己没在跑**——桥要的端口形状是 `(projection) => {allowed, rule, reason}`（`tool-request.mjs:751-757`），而 `employee-manifest.mjs:317` 的 `permitsTool({permit, toolName, capabilities})` **恰好返回这个形状**（L315 的 JSDoc 逐字写着），可是它**零生产调用方**（全仓 grep 只命中定义与自己的用例）；它要的 `permit` 只能由 `narrowToGrant({manifest, grant})` 产出，而那个函数的**生产调用点全仓只有一处**：`runtime/packs/authority.mjs:759`——**`[gap]`，零生产 importer**（`normalizeManifest` 的两处生产调用 `authority.mjs:752` / `compiled-plan.mjs:313` 同样是 `[gap]`）。⇒ **`whitelist` 至少还压着第 19 条那个包层**：一个配置键能给出 `grant`（宿主授予的那一半），**给不出** `manifest`（岗位包产物）那一半。★ ③ 真正属于本条（"数据从哪来、挂哪一层"）的只有 `execution-scope`（PRT-605）与 `external-api-scope`（PRT-606）——它们**连端口都没有**。⚠️ **本批只改了措辞、没有改判归属**：`permit` 的另一半（`hostGrant`）从哪来、算不算部署配置，我**没有量**，所以不擅自把 `whitelist` 整条移到第 19 条。详见 `docs/DECISION-RUNREQUEST-EXECUTION-PLANE.md` §11。★ 顺带记一条与基线 `$comment` 对上的机制：**可达性是逐模块测的**——`employee-manifest.mjs` 在基线里**是可达的**（不在 47 条里），而它里面那个正是端口要用的函数**零生产调用方**；"模块可达"与"这条链通了"是两件事，这一次有了一个可以指名的例子。 ★★★ **2026-09-18 第 21 轮：本条的范围收窄为两道（`execution-scope` / `external-api-scope`）——`whitelist`（PRT-603）移出。** 它不属于"范围表从哪来、挂在哪一层"，而属于"**词汇表**"：量出唯一那个产出者（`permitsTool`）与桥交进来的输入**结构上不相交**（同一份 permit 喂 Legion 名放行、喂 DSH 名一个都不放行，抬上限也救不了）⇒ 它**接不上**，不是"暂时没配"。详见 §4.4 与第 **27** 条。★ 而 604（`pathScope`）已接（第 19 条 §9.2 第 4 步），所以本条今天**真的**只剩两道  ⚠️ **2026-09-20 订正：上面那段【2026-09-18 续】的两条核心事实都已过期，因此我当时提给业主的那个二选一不必再答。** ① **基线已重生成**：`docs/superpowers/prt/prt-reachability-baseline.json` 现在**不含**这两个模块（实测 0 处；不可达条目 48 条、全部分类）——`runtime/dsh-composition/execution-scope.mjs` 与 `runtime/dsh-composition/external-api-scope.mjs` **都是可达的**，不再有任何 `class: "gap"` 条目，那句 `reason`「§5.2：连端口都没有」也随之消失；② **它们已经有生产调用方，而且是端到端的**：`runtime/dsh-composition/plugins/root-row.mjs` 从环境读两张表——`:531` 调 `executionScopePortFromEnv({ env: effectiveEnv })`（PRT-605，`476e999`）、`:555` 调 `externalApiScopePortFromEnv({ env: effectiveEnv })`（PRT-606，`9b69f8c`）——并在 `:591-605` 把 `pathScope: scope.port` / `executionScope: execScope.port` / `externalApiScope: apiScope.port` 三个端口**一起**交给 `installEnforcementRoot`（键恒在、缺席为 `null`）。⇒ 「605/606 的 ✅ 与本仓库那份基线直接冲突」与「它们一次都没被调用过」**两句都不成立**；上面那段里「对 `execution-scope` / `external-api-scope` 仍然成立」这个括号同样**已过期**。★ **业主 2026-09-20 给的裁决（"改 🟡"）没有执行**：它是在我一份**过期读数**上作出的，前提已经消失——照它改会往台账里写一条**假陈述**，而那是比原来那条不一致更坏的账。★ **仍然成立、且不是本条能解决的是另一个缺口**（605/606 两行里已如实记着）：四个键 `LEGION_PATH_SCOPE` / `LEGION_CONNECTOR_DECLARATIONS` / `LEGION_EXECUTION_SCOPE` / `LEGION_EXTERNAL_API_SCOPE` **都不在** `product/process-manifest.mjs` 的 runtime `envNames` 里 ⇒ 真实部署里那四格仍读 `false`，三道检查仍然是「配了才跑，不是默认就拦」。那是**同一个数组缺四个键**的一件事，不是四处要修的地方。★ 本轮的验证读数：`production-scope-wiring` **11/11**、`execution-scope-port` **8/8**、`external-api-scope-port` **14/14**、`root-row` **42/42**，`reachability --diff` 与基线一致。 ★★ 值得单独记一句的是**这个错是怎么发生的**——两轮之间隔了两天、仓库走了 42 轮（我上一次读基线时它确实还写着 `gap`）：*一份"当天读出来的"证据，与一份"现在读出来的"证据，除非有人重读，否则长得一样；而我拿着前者的结论去请人裁决，于是裁决也跟着过期了。*|
+| 14 | ★★★ **三道范围检查的生产接线（PRT-603/604/605/606）** | 产品 + 项目主 | **这三道检查今天在生产里一次都不跑**（读数见 §5.2）。要决定的是：**这一次 Run 的范围表（读根/写根/平台、命令/网络/MCP 授权、外部 API 读写端点）从哪来、挂在哪一层**。可选方向：(A) 随 Run 的载荷到达，像 PRT-214 的下限/授权身份那样由 `runtime-host-registrar-row.mjs` 按 Run 安装；(B) 由岗位包（F-19 的 `permissions` 一节）派生，装配期算一次；(C) 仍留在 hub 侧判（那 `path-scope.mjs` 这类执行面检查器就应当明确废弃，而不是挂在桥上当"可选端口"） | 不决定则**越界路径今天拦不住**：`tool-request.mjs` 的 `scopeGuard` 在 `pathScope === null` 时返回"放行"，而生产从不注入。★★ 我**没有**擅自接线，因为凭空造一份范围表正是 PRT-253 §3 明令禁止的"不发明任何默认值、替身或暂时放行"——那会让"没接线"与"接好了"在读数上同形。本轮的处置是把读数钉住（`production-scope-wiring.test.mjs` 5 例 + 5/5 变异），所以**接上了它会红**。★ 另注意：三个台账行（PRT-604/605/606）的 ✅ 依据是"模块 + 自己那套用例"——按本表 §0 那条告警（"只有自己的用例驱动的原语一律 🟡"），它们的口径需要在台账里对齐  ★★★ **2026-09-18 订正（当天更晚）：上面那句"这三道检查今天在生产里一次都不跑"与"我**没有**擅自接线"**已经不再成立**——三道里的**第一道（`pathScope`，PRT-604）已经接进生产组合根**（`40d2d60`）。逐条对齐，原文保留：① **接线是真的、而且不是"凭空造一份范围表"**：范围表从**部署配置**来（`LEGION_PATH_SCOPE`，登记在 `runtime/config-schema.mjs`），由 `runtime/dsh-composition/scope-port.mjs` 变成桥要的那个函数（`pathScope(projection)`），在 `root-row.mjs` 接上。**没配**时端口仍是 `null`、读数仍是 `pathScope:false`——**没配不等于接了个空的**（`production-scope-wiring.test.mjs` ①b 钉住"配了翻成 true"）。② 所以本格"可选方向"实际没有走 A/B/C 中的任何一条，而是走**第 4 条**：数据由**部署方**在配置里给出（`§9.2 第 3 步`"汇合到同一个部署配置读取点"）。A/B/C 那道裁决**仍然只对另外两道**（`execution-scope` / `external-api-scope`）有效。③ "不决定则越界路径今天拦不住"要按**条件**读：**没配 `LEGION_PATH_SCOPE` 的部署仍然拦不住**（今天这是默认），配了才拦得住——与 §5.2 那张两行表一致。④ `production-scope-wiring.test.mjs` 现在 **6 例**（原 5 例 + ①b），且**它确实红了**——"接上了它会红"这条预言当时写对了，红的时候就照本格末句去改了账（本段就是那次改账）。⑤ **仍未接的**：`whitelist`（岗位白名单）与 `execution-scope`（PRT-605）/ `external-api-scope`（PRT-606）两道——**桥的参数表里连它们的位置都没有**。⑥ ★ 一条**可达性**上的机器可核证据（同一次改动）：`runtime/dsh-composition/path-scope.mjs` 与 `scope-table-binding.mjs` 从"不可达"变成**可达**（基线 49 → 47）。"判定写好了、只是没人给它一份表"这句话，现在有了一条会自动红的读数。 ★★ **2026-09-18 续：上面这条"口径不一致"现在有了一个机器可核的独立记录。** `docs/superpowers/prt/prt-reachability-baseline.json` 给这两个模块**各自带了一个 `class`**：`runtime/dsh-composition/execution-scope.mjs` 与 `runtime/dsh-composition/external-api-scope.mjs` **都是** `class: "gap"`，且 `reason` 明写「§5.2：连端口都没有 ⇒ 裁决处：§5 第 14 条（三道范围检查的生产接线）」——**reason 直接指向本条**。而 `runtime/dsh-composition/path-scope.mjs`（PRT-604）**不在**这份基线里（已可达，实测）。⇒ 三行的 ✅ 分两种：PRT-604 有**接线为据**（`40d2d60`）；PRT-605/606 的 ✅ 与**本仓库自己那份基线文件**直接冲突，且与台账 §0 告警「只有自己的用例驱动的原语一律 🟡」指向同一结论。★ **待裁决（两条都要写清理由）**：要么把 605/606 改 🟡 并接线，要么把那条告警**明确豁免**这两个模块。不能两样都不做——*一个「✅ 但没有生产调用方」的记录，与一个「这道检查在生产里跑着」的记录，下一个人读起来是同一个东西。* ★ 而且方向是**偏乐观**的那一边：它让人以为那两道检查在拦，实际它们一次都没被调用过。★ 本轮**没有**改这几行的状态：① 状态口径由项目方（台账的读者）定；② `PRT-PROGRESS.md` 此刻是**另一个会话的在制品**，按纪律不得触碰。 【2026-09-18 新读数·只订正事实，不改裁决】**本条开头那句"这三道检查今天在生产里一次都不跑"对 `path-scope.mjs` 已经**不成立**（对 `execution-scope` / `external-api-scope` 仍然成立）。**已核到端到端**（不是"有人 import 了它"）：`patch-layer.mjs` 的 `PATCH_LAYER_ROWS` 加载 `plugins/pre-execute-row.mjs` → `plugins/root-row.mjs:535` 真的调 `scopePortFromEnv({ env })`（读不出就 `throw`，**fail closed**）→ `:724-730` 把 `scope.port` 传进 `installEnforcementRoot({ pathScope })` → `scope-port.mjs:169` 调 `checkPathScope(...)`。落在 `40d2d60`（§9.2 第 4 步），**不是本会话做的**。 ⚠️ 但这**不等于"默认就拦"**：**没配**范围表时 `port` 是 `null`，而 `tool-request.mjs` 的 `scopeGuard` 那句 `if (pathScope === null) return undefined` ⇒ 那次缺席仍然落到**放行**。所以"越界路径今天拦不住"**只在没配范围表的部署上**仍然成立，而这一条正是本行要裁决的那件事——**裁决未变**。 ★★ 值得单独记一句的是**这件事是怎么被发现的**：**不是我读文档看出来的，是可达性探针的红报出来的**——而那条红**同时含一条假消息**（`external-api-scope.mjs`，由我自己那张记账表的键名冒充清单造成，见 `boundary-facts` 的判据 `criteria-files-do-not-impersonate-manifests`）。*一半真、一半假的红，比全假更难查，因为它对了一半——而人会顺手把两半一起"按指示清掉"。* ★ 现状读数（同一探针）：入口 58 / 可达 224 / **不可达 47**（`by-design 13` / `gap 26` / `deliberate 8`），与基线一致。 ★★★ **[2026-09-18 第三批订正·这三道不是同一种缺口]** 上面把三道写成一件事（"这三道检查今天在生产里一次都不跑"），而逐道量下来它们是**两类**：① `pathScope`（PRT-604）**已经接进生产组合根**（`40d2d60`）；② `whitelist`（PRT-603）**端口在，但算这个值的模块自己没在跑**——桥要的端口形状是 `(projection) => {allowed, rule, reason}`（`tool-request.mjs:751-757`），而 `employee-manifest.mjs:317` 的 `permitsTool({permit, toolName, capabilities})` **恰好返回这个形状**（L315 的 JSDoc 逐字写着），可是它**零生产调用方**（全仓 grep 只命中定义与自己的用例）；它要的 `permit` 只能由 `narrowToGrant({manifest, grant})` 产出，而那个函数的**生产调用点全仓只有一处**：`runtime/packs/authority.mjs:759`——**`[gap]`，零生产 importer**（`normalizeManifest` 的两处生产调用 `authority.mjs:752` / `compiled-plan.mjs:313` 同样是 `[gap]`）。⇒ **`whitelist` 至少还压着第 19 条那个包层**：一个配置键能给出 `grant`（宿主授予的那一半），**给不出** `manifest`（岗位包产物）那一半。★ ③ 真正属于本条（"数据从哪来、挂哪一层"）的只有 `execution-scope`（PRT-605）与 `external-api-scope`（PRT-606）——它们**连端口都没有**。⚠️ **本批只改了措辞、没有改判归属**：`permit` 的另一半（`hostGrant`）从哪来、算不算部署配置，我**没有量**，所以不擅自把 `whitelist` 整条移到第 19 条。详见 `docs/DECISION-RUNREQUEST-EXECUTION-PLANE.md` §11。★ 顺带记一条与基线 `$comment` 对上的机制：**可达性是逐模块测的**——`employee-manifest.mjs` 在基线里**是可达的**（不在 47 条里），而它里面那个正是端口要用的函数**零生产调用方**；"模块可达"与"这条链通了"是两件事，这一次有了一个可以指名的例子。 ★★★ **2026-09-18 第 21 轮：本条的范围收窄为两道（`execution-scope` / `external-api-scope`）——`whitelist`（PRT-603）移出。** 它不属于"范围表从哪来、挂在哪一层"，而属于"**词汇表**"：量出唯一那个产出者（`permitsTool`）与桥交进来的输入**结构上不相交**（同一份 permit 喂 Legion 名放行、喂 DSH 名一个都不放行，抬上限也救不了）⇒ 它**接不上**，不是"暂时没配"。详见 §4.4 与第 **27** 条。★ 而 604（`pathScope`）已接（第 19 条 §9.2 第 4 步），所以本条今天**真的**只剩两道  ⚠️ **2026-09-20 订正：上面那段【2026-09-18 续】的两条核心事实都已过期，因此我当时提给业主的那个二选一不必再答。** ① **基线已重生成**：`docs/superpowers/prt/prt-reachability-baseline.json` 现在**不含**这两个模块（实测 0 处；不可达条目 48 条、全部分类）——`runtime/dsh-composition/execution-scope.mjs` 与 `runtime/dsh-composition/external-api-scope.mjs` **都是可达的**，不再有任何 `class: "gap"` 条目，那句 `reason`「§5.2：连端口都没有」也随之消失；② **它们已经有生产调用方，而且是端到端的**：`runtime/dsh-composition/plugins/root-row.mjs` 从环境读两张表——`:531` 调 `executionScopePortFromEnv({ env: effectiveEnv })`（PRT-605，`476e999`）、`:555` 调 `externalApiScopePortFromEnv({ env: effectiveEnv })`（PRT-606，`9b69f8c`）——并在 `:591-605` 把 `pathScope: scope.port` / `executionScope: execScope.port` / `externalApiScope: apiScope.port` 三个端口**一起**交给 `installEnforcementRoot`（键恒在、缺席为 `null`）。⇒ 「605/606 的 ✅ 与本仓库那份基线直接冲突」与「它们一次都没被调用过」**两句都不成立**；上面那段里「对 `execution-scope` / `external-api-scope` 仍然成立」这个括号同样**已过期**。★ **业主 2026-09-20 给的裁决（"改 🟡"）没有执行**：它是在我一份**过期读数**上作出的，前提已经消失——照它改会往台账里写一条**假陈述**，而那是比原来那条不一致更坏的账。★ **仍然成立、且不是本条能解决的是另一个缺口**（605/606 两行里已如实记着）：四个键 `LEGION_PATH_SCOPE` / `LEGION_CONNECTOR_DECLARATIONS` / `LEGION_EXECUTION_SCOPE` / `LEGION_EXTERNAL_API_SCOPE` **都不在** `product/process-manifest.mjs` 的 runtime `envNames` 里 ⇒ 真实部署里那四格仍读 `false`，三道检查仍然是「配了才跑，不是默认就拦」。那是**同一个数组缺四个键**的一件事，不是四处要修的地方。★ 本轮的验证读数：`production-scope-wiring` **11/11**、`execution-scope-port` **8/8**、`external-api-scope-port` **14/14**、`root-row` **42/42**，`reachability --diff` 与基线一致。 ★★ 值得单独记一句的是**这个错是怎么发生的**——两轮之间隔了两天、仓库走了 42 轮（我上一次读基线时它确实还写着 `gap`）：*一份"当天读出来的"证据，与一份"现在读出来的"证据，除非有人重读，否则长得一样；而我拿着前者的结论去请人裁决，于是裁决也跟着过期了。* ★★★ **2026-09-23 第 118 轮第十二轮（业主确认轮）：本格的"可选方向"已由业主定下——走**第 4 条**（与 `pathScope` 同一答案）：取值由**部署方在配置里给**，缺失即"未接"（`port: null`、读数 false），**不新增机制、不发明默认值**。**已执行**（第十一轮把三道里的最后一道 `external-api-scope` 补齐）⇒ 三道（`pathScope` / `executionScope` / `externalApiScope`）现在是**同一个形状**；`LEGION_EMPLOYEE_PERMIT` 同样按此口径（它的"取值生产者"就是部署配置，不再当成待造的机制）|
 | 15 | ★★ **PRT-610 执行面的落账点** | 项目主 + 产品 | `tool_calls` 的**表、读面、就绪证据的产出点**已经接上（本轮），而**写入方仍然是 0**：要接 `recordToolCall`/`markDispatched` 得先定"一次工具调用在哪一层落账"——`tools/pre-execute` 是**判定**点，而 `markDispatched` 必须在**真的派发之前**落库，那个位置比判定点更靠下 | 不接则这笔账永远是空的：表建好了、三条路由能读、就绪判据能回答"在不在记"，而**一条记录都不会有**。★ 这与第 14 条是**同一个决定**（执行面的载荷里今天没有这些字段），不是代码量问题。★★ 另：`release-gate.mjs` 的 `evaluateReadiness` **本身也零生产调用方**，所以"证据有了产出点"之后仍没有人在**发布决策**里读它——本轮只补齐了能被代码单独关闭的那一半 |
 | 16 | ★★ **阶段 9 产品动作的 CLI 面（PRT-903/904/905/908/909、PRT-712、PRT-707）** | 产品 | 这批模块（发布检查清单、隐私说明、保留策略、数据分类、数据导出、卸载、支持手册、首次运行向导、指标数据源、崩溃报告、★ **第 39 轮新增的 §7 指标口径与生产者**：`product/metrics-spec7.mjs` + `product/metrics-spec7-source.mjs`）**全部自带用例、全部 ✅、全部零生产入口**（系统盘点见 §5.3）。要决定的是：**这些"产品级动作"由谁触发**——`legion` 的子命令？一个独立的发布/运维 CLI？还是只作为发布流程里人工跑的一次性脚本？ | 不决定则它们**对用户不存在**。台账自己为 PRT-509 写过这句话：「一个功能没有入口，与这个功能不存在，对用户来说是同一件事」。★ 其中 `metrics-source.mjs` 的台账行已如实写了"还没有界面/CLI 消费者"，另外六个没有写。★★ **第 39 轮的补充**：§7 那六格指标的数据**已经在库里**、读出口**也写好了**（17 例断言、13/13 变异），于是这条决定的代价从"要不要做"变成了**"做好了给谁看"**——并且它**不能**用"顺手接进远程心跳"来绕过：那份载荷走**允许名单**，加一个键就是加一次**数据外流**，那是本条之外的另一个点头。★★ 另：PRT-801～813 的升级执行链**看起来**也在这个清单里，但它**不是**缺口——`runtime-install.mjs` 的注释写明 Launcher **刻意不 import** 它（进程卫生：Launcher 要在那些依赖起来之前先把进程看好）。**不要**给 Launcher 补这个 import，见 §5.3。它的执行者同样取决于第 1 条（PRT-011 DSH 分发形态） |
-| 17 | ★★★ **PRT-707 的两份实现用两个不同的模型密钥引用名** | 产品 + 项目主 | PRT-707（首次运行向导）在仓库里有**两份实现**：**活的**是 `cli.mjs` 的 `--wizard` 分支（内联，写 `model/api-key`），**死的**是 `first-run.mjs`（636 行 + 一整套用例，算 `legion/model/<profileId>`）。要裁决的是：**模型密钥的引用名用哪一个**——Legion 自己的三段式（`legion/model/<id>`，与 `credential-materializer.mjs` 文件头那句"Legion 的模型引用是 `legion/model/<profileId>`"一致，但 `planDshLookup()` 实测 `addressable:false`），还是运行时物化的那一段（`model/api-key`，端到端通、被 drift 用例钉着）？**或者**：两份实现留哪一份、另一份删掉还是明确废弃？ | ★★ **不要**把 `first-run.mjs` 直接接上去。它写进 hub 档案的 `secretRef` 是 `legion/model/<id>`——**三段**，而 `security/secrets/credential-materializer.mjs` 的 `planDshLookup()` 对三段引用返回 `{addressable:false, space:null}`（在 `refs` 与 `records` 两个键空间里**都没有位置**）。接上它的后果**不报错**：向导报"模型已配置"，而运行时拿不到钥匙——正是该模块文件头点破的那种失效（"文件看起来完整、就是少了最要紧那一把钥匙"）。★ 本轮**没有**替任何一方改代码：两份**各自都自洽**，裁决它需要产品决定。已把它变成读数：`product/launcher/wizard-wiring.test.mjs`。★★★ **第 118 轮第九轮：本条已裁决并执行** —— 业主在第 1 轮确认「**删掉死的那份、保留活的 `--wizard`**」，本轮执行完毕：`first-run.mjs` 与 `first-run.test.mjs` 已删除；四个 `FIRST_RUN_*` 诊断码随实现一起从 `product/config-schema.mjs` 的登记项里撤掉（留着一个已无产地的登记项，与登记一个没有产地的码是同一个东西）；可达性基线 42 → **41**（`gap` 21 → **20**）；`run-ci.mjs` 的套件登记同步。★ 而**漂移没有跟着消失**：`security/secrets/credential-materializer.mjs` 的文件头**仍然声称**三段 `legion/model/<profileId>`，而唯一那份实现写两段 `model/api-key` ⇒ 本格留下的读数是**"文档 vs 代码"**那一条（改写后的 `wizard-wiring.test.mjs` **4 例**，含两个可寻址正对照）。★ 一句不能省的话：**删掉重复实现，不等于把那条"文档说 A、代码做 B"的读数也删掉** —— 那会把唯一还看得见这处漂移的地方拿走 |
+| 17 | ★★★ **PRT-707 的两份实现用两个不同的模型密钥引用名** | 产品 + 项目主 | PRT-707（首次运行向导）在仓库里有**两份实现**：**活的**是 `cli.mjs` 的 `--wizard` 分支（内联，写 `model/api-key`），**死的**是 `first-run.mjs`（636 行 + 一整套用例，算 `legion/model/<profileId>`）。要裁决的是：**模型密钥的引用名用哪一个**——Legion 自己的三段式（`legion/model/<id>`，与 `credential-materializer.mjs` 文件头那句"Legion 的模型引用是 `legion/model/<profileId>`"一致，但 `planDshLookup()` 实测 `addressable:false`），还是运行时物化的那一段（`model/api-key`，端到端通、被 drift 用例钉着）？**或者**：两份实现留哪一份、另一份删掉还是明确废弃？ | ★★ **不要**把 `first-run.mjs` 直接接上去。它写进 hub 档案的 `secretRef` 是 `legion/model/<id>`——**三段**，而 `security/secrets/credential-materializer.mjs` 的 `planDshLookup()` 对三段引用返回 `{addressable:false, space:null}`（在 `refs` 与 `records` 两个键空间里**都没有位置**）。接上它的后果**不报错**：向导报"模型已配置"，而运行时拿不到钥匙——正是该模块文件头点破的那种失效（"文件看起来完整、就是少了最要紧那一把钥匙"）。★ 本轮**没有**替任何一方改代码：两份**各自都自洽**，裁决它需要产品决定。已把它变成读数：`product/launcher/wizard-wiring.test.mjs`。★★★ **第 118 轮第九轮：本条已裁决并执行** —— 业主在第 1 轮确认「**删掉死的那份、保留活的 `--wizard`**」，本轮执行完毕：`first-run.mjs` 与 `first-run.test.mjs` 已删除；四个 `FIRST_RUN_*` 诊断码随实现一起从 `product/config-schema.mjs` 的登记项里撤掉（留着一个已无产地的登记项，与登记一个没有产地的码是同一个东西）；可达性基线 42 → **41**（`gap` 21 → **20**）；`run-ci.mjs` 的套件登记同步。★ 而**漂移没有跟着消失**：`security/secrets/credential-materializer.mjs` 的文件头**仍然声称**三段 `legion/model/<profileId>`，而唯一那份实现写两段 `model/api-key` ⇒ 本格留下的读数是**"文档 vs 代码"**那一条（改写后的 `wizard-wiring.test.mjs` **4 例**，含两个可寻址正对照）。★ 一句不能省的话：**删掉重复实现，不等于把那条"文档说 A、代码做 B"的读数也删掉** —— 那会把唯一还看得见这处漂移的地方拿走。 ★★★ **2026-09-23 第 118 轮第十二轮：这处漂移已收口（业主第五轮确认⑤：只改陈旧注释与文档、与活的两段名对齐）。** `credential-materializer.mjs` 的文件头现在说的是 `model/api-key`（两段、`records` 空间可寻址），并写明"三段那句描述的是已删除的 `first-run.mjs`"；`wizard-wiring.test.mjs` ② 的载具跟着翻过来（从"仍然这么写着"变成"不再这么写着且点了活的名"），而**三段不可寻址那几条一条都没动**——那描述的是**键空间的形状**，不是"当前用哪个名" |
 | 18 | ★★★ **F-18 / F-19 的"执行面一半"要谁来调用**（可达性探针新读数，见 §5.4） | 产品 + 项目主 | 从**真实入口**跑 import 图，`runtime/experience/{friction,graph}.mjs`（F-18）与 `runtime/employee/role-pack.mjs`（F-19）**从任何生产入口都到不了**——只被自己的用例驱动。hub 侧**是**接上的（`experience-store`/`role-pack-store` 经 `server.mjs` 可达），缺的是**产出者**：没有任何东西算摩擦分、没有任何东西记图边、没有任何东西建岗位包。要裁决的是：**这三件事由谁在什么时候调用**——执行面在 Run 结束时算（那要定"从哪拿到 validations/attempts"）？还是控制面在写账之前算？★ 同一族：PRT-610 的 `recordToolCall` 写入方（第 15 条）、三道范围表（第 14 条）——**三条都卡在"执行面的载荷里今天没有这些字段"这同一个决定上** | 不决定则这三块能力**对用户不存在**：账能读、读数是干净的、用例全绿，而**一行都不会被写进去**。★ 这三行的 ✅ 依据是"模块 + 自己那套用例"，与台账 §0 自己那条告警（「只有自己的用例驱动的原语一律 🟡」）**口径不一致**。★★ 本轮**没有**改这三行的状态——✅/🟡 的口径由台账的读者（项目方）定，"改状态"与"补证据"是两件事。★★ 另：另有 4 个不可达模块（`runtime-host-registrar-row.mjs`、`runtime-contract-server-row.mjs` 及其传递依赖 `run-floor.mjs` / `runtime-contract-server.mjs`）**本批已由 `in-flight` 改判为 `gap`**——那份"另一个 agent 正持着它们"的工作**已经提交**（`e0b83af` / `69da8fd` / `5c1d698`），而模块**仍然不可达**。它们不在任何清单里（`PATCH_LAYER_ROWS` 只声明 4 行、`legion-host.patch.yml` 只有 2 行），接线的决定与第 14 条是同一个；★ 而本批已把它单列为**第 20 条**，理由见 §5.8：此前它只在 `STATUS.md` 的正文里，**不在**这张待裁决清单上，于是没有任何一处会被人读到 |
 | 19 | ★★★ **第 13/14/15/18 条其实是**一条**决定，而且执行面拿不到控制面凭证**（本轮新读数，见 §5.5） | ★★ **已裁决（2026-09-18）**——不再是"待裁决"，而是**待施工**（纯代码工作量） | §5.5 的三条机器读数：① `runtime` 进程的 `envNames` **故意没有 `TEAM_HUB_TOKEN`**（`product/process-manifest.mjs:203-215`）；② `RunRequest.permissions` 只有 `{preset, tools, deniedTools?}`，**没有**范围表 / host surface（`runtime/contracts/run.mjs:158-181`）；③ `runtime/packs/*` 四个模块（`store` / `compiled-plan` / `authority` / `builtin/software-delivery`）**零生产入口**，`createPackStore` 生产调用点 **0 处**（hub 的 `/api/packs/account` 把账交出去，**没有任何生产代码接住**）。要裁决的**只有一个问题**：把执行面需要的那几份数据（连接器声明 / 范围表 / 落账端点 / 摩擦与岗位包的输入）放进 `RunRequest`，**还是**给执行面开一个控制面入口（注入 `TEAM_HUB_TOKEN`）？ | ★★★ **业主 2026-09-18 裁定：选前者。** 把执行面需要的那几份数据**放进 `RunRequest`**，照抄 PRT-214 已跑通两遍的形状（专属线上字段 / 按 Run 安装 / 对象身份配对 / 可 dispose / 装不上具名拒绝）。**不**给执行面开控制面入口、**不**注入 `TEAM_HUB_TOKEN`。⇒ 本条与它合并的第 13/14/15/18 条从「待裁决」变成「**待施工**」。★ 完整裁决单独成文：`docs/DECISION-RUNREQUEST-EXECUTION-PLANE.md`（含"**不许凭空造范围表**"这条**硬约束**、四项待搬运数据、三条复核读数；单独立文的原因是当时这一行上有别的会话的在制品）。**以下是裁决之前记下的两个选项，保留以备查**：★ 选**前者**：形状已经跑通**两遍**（PRT-214 缺口①的 `enforcementFloor`、缺口②的 `enforcementIdentity`——都是"专属线上字段 + 按 Run 安装 + 对象身份配对 + 可 dispose + 装不上具名拒绝"），照抄即可，是纯代码工作量。★ 选**后者**会让「Runtime 不看业务状态」这条 spec §2 的不可突破边界消失，并且执行面一旦有 token，"读声明"与"改状态"就只差一次调用的距离。**不决定**则这四处继续各记一行 🟡：登记了、能审、能冻，而**没有任何一次真调用被它们拦过 / 记过 / 算过**。★★ 本轮**没有**擅自补任何一行接线：`RunRequest` 里今天没有范围表字段，凭空造一份（例如"读根=写根=`workdir`"）正是 PRT-253 §3 明令禁止的"发明默认值"，且方向是**放行**；而"反正它更严"这个辩护**不成立**——收成 `workdir` 会同时拒掉合法的越目录读，表现成"工具莫名其妙失败" |
 | 20 | ★★★ **Runtime 契约服务端那一行要不要进补丁层**（本批新提，见 §5.8） | 产品 + 项目主 | 可达性探针（2026-09-18）：`runtime/dsh-composition/plugins/runtime-contract-server-row.mjs` 与 `runtime-host-registrar-row.mjs` **不在 `PATCH_LAYER_ROWS` 里**，也不在 `legion-host.patch.yml` 里，也没有任何生产 importer ⇒ **Runtime 契约服务端没有生产挂点**。而**消费侧已经接好了**：`product/launcher/runtime-contract-endpoint.mjs` 会去 DataDir 读那份发布、把 `LEGION_RUNTIME_URL`/`LEGION_RUNTIME_TOKEN` 注入 worker。**没有服务端，那份发布永远不会被写出来。** 要裁决的是：这一行**现在**要不要挂进补丁层——以及挂上去之后 `probeRuntime` 报什么（它要报 version + 四项必需能力，而**全仓没有生产实现**：真 DSH 进程里实测没有版本服务、也没有能力服务） | ★ 两条路都不许"编"：给一张**全 true** 的能力表会让 `checkCompatibility` 在一个**从未验过**的引擎上判"兼容"——那比不接更坏，因为**它会以"已兼容"的样子通过**。可选的是：① 挂行但让 `probeRuntime` **如实报 unknown** 并以具名码拒绝（fail closed，等价于今天"没挂"的效果，但**读数变成"查过且拒了"而不是"没人挂"**）；② 明确本阶段只走**同进程绑定**（`bindDshRuntime`）这一条路，把跨进程契约**显式降级为未启用**并写进产品边界。★ 无论选哪条，都**不要**把这一项继续留在"等另一个 agent 接线"里——那份工作已经提交了（`e0b83af` 等），而模块仍然不可达（本批已把 4 条 `in-flight` 改判 `gap`）。★★ **本批新读数（2026-09-18，见会话报告 §10.24）**：该模块 `state()`（`runtime-contract-server.mjs:592-601`）的**七个**字段里**六个是算出来的**（`listening` / `address` / `tokenConfigured` / `enforcementConfigured` / `probed`，`wireVersion` 是版本常量），**只有 `wireChecked: true` 是写死的字面量**，且全仓库**没有任何地方读它**（连用例都不读）——一个状态面上"线核过没有"的结论，实际是一个常量。⚠️ 我**没有**改它：这个字段的**本意**我判不出来（该服务端**确实**校验请求信封的 `wireVersion`，见 `:469-470`，所以它也可能只是在陈述"本服务端会核信封"这么一句真话）。含义不明时改字段，正是 PRT-253 §3 禁的那种"发明默认值"。**留作该行接线时一并裁决。**  ★★★ **2026-09-20 已裁决并执行（甲，`2f5a4b3`）**：那一行**已挂进补丁层**（连同 `runtime-host-registrar-row.mjs` 两个环节），`legion-host.patch.yml` 已重新生成；行为与接线前**等价**（自检不兼容 ⇒ `autoExecutionForbidden: true`；服务端报 `RUNTIME_CONTRACT_ROW_NO_INPUTS_FACTORY`），换来的读数是"在树里、apply 过、按具名码拒绝"。★ 可达性基线随之由 48 降为 44（`gap` 27 → 23）——而**十道门禁全绿时它仍是 48**，因为 `reachability --diff` 只查"漏登"、不查"过期条目"：是单元测试 ③b 抓住的。 |
@@ -912,7 +912,7 @@ node scripts/prt/reachability.mjs --diff
 | 26 | ★★★ **外部 API 授权表要不要管 scheme**（第 20 轮**新查出**，见 §4.3 第 ⑨ 条） | 产品 + 架构 | 第 20 轮给 PRT-606 接上端口之后，`checkExternalApi` 的**输入**第一次真的从线上来了。而它**不看 scheme**——`normalizeHost` 只取 host、`normalizeUrlPath` 只取 path，`scheme` 从头到尾没被读过（`SCHEME_DENIED` 那一条归 PRT-605 的 `checkNetwork`）。⇒ 精确读数是：**一个 `ftp://api.example.com/api/items/1` 只要 host 与模式对得上，就会被 `externalApiScope` 放行**；它**不会**因此就真的发得出去（`executionScope` 的 `checkNetwork` 会拦 scheme），但"外部 API 读/写授权"这一道自己给的是 `allow`。要裁决的是：**(a)** 保持现状（scheme 只由 `checkNetwork` 管，两道各管一段）；**(b)** 让 `checkExternalApi` 也拒非 http(s)（一道能自洽，但从此两道对同一个 URL 有两套 scheme 规则）；**(c)** 在端口适配器里拒（**最坏**：把策略写进适配器，而适配器本该只做形状转换） | ★ 本轮**没有**顺手加"必须 http(s)"，因为那是**发明策略**——PRT-253 §3 明令禁止发明默认值，而"哪些 scheme 算外部 API"是一个产品决定（`ftp`/`file`/`gopher` 各不相同）。★ 为什么它**今天不致命**：端口为 `null` 时是放行，所以真实部署里 `externalApiScope` 仍是 `false`（见第 ⑨ 条最后一段的 `envNames` 缺口）；而且这一道与 `checkNetwork` 接在**同一个** `preExecute` 上，取严的合并会让 `checkNetwork` 的 `SCHEME_DENIED` 先赢。★ 为什么仍然要记：**这两道今天谁先谁后没有判据钉着**——`externalApiGuard` 在 `executionGuard` **之后**跑（顺序有注释、有用例，但用例钉的是"包装在 code 里对得上"），而"取严"这件事在 `preExecute` 上是**短路**（先拒的说了算），不是真的一次取严合并。⇒ 一旦那个顺序被改，`ftp://` 这种 URL 的处置就跟着变，而**没有任何读数会发现**  ★★★ **2026-09-23 第 118 轮第十一轮：业主裁决「管」，已执行**——协议白名单进了授权表（必填 `schemes`）、请求必带 `scheme`、端口把解析出的协议传下去；读数见 §4.3 第 ⑨ 条订正与本轮套件 ⑱/⑭。★ 而本行最后那句"两道谁先谁后没有判据钉着"**仍然成立**：白名单只让 PRT-606 这一道把 `ftp://` 拒掉，`externalApiGuard` 与 `executionGuard` 在同一个 `preExecute` 上仍是**短路**（先拒的说了算），不是真的一次取严合并 |
 | 27 | ★★★ **岗位清单说的是「Legion 能力名」还是「执行面工具名」**（第 21 轮**新查出**，见 §4.4） | 产品 + 架构 | 第 21 轮把 `DECISION-RUNREQUEST-EXECUTION-PLANE.md` §11 留下的两处"我没有量"量掉之后，`whitelist`（PRT-603）这一道的缺口**不在配置里**：唯一那个产出者 `permitsTool` 的输入是 **Legion 能力名**（`read-file` / `git-push` / …），而桥交给这个端口的投影里那个工具名是**执行面（DSH）名**（`read` / `write` / `bash` / `web_fetch` / …），两个空间**结构上不相交**（`tool-capability.mjs:465-492` 早就写过这件事——那条讲的是**静态下限**）。实测：同一份 permit，喂 Legion 名 ⇒ 放行；喂 DSH 名 ⇒ **一个都不放行**，抬 `maxRisk` 到最高也救不了（拒因从 `risk-above-ceiling` 挪到 `unknown-tool-not-named`，**还是拒**）。而"加一个反向映射"也不行——`LEGION_TOOL_ROUTING` 的反推在 `bash` / `pwsh`（各 4 个）与 `web_fetch`（2 个）上**一对多**，而 `bash` 那一堆里同时塌着低风险的 `git-status` 与高风险的 `git-push`。要裁决的是：**让 `permitsTool` 收执行面名 + 一份执行面能力表，还是继续收 Legion 名并新增一层带取舍的翻译？** | 不决定则这一道**接不上**——不是"暂时没配"，是**接上去也只会全拒**：*一个「拒得对、而理由是错的」的检查，与一个「放行了它该拒的」的检查，在今天的行为上是同一个东西，只不过照着理由去改的人会改错地方，而改完仍然是拒的，于是没有人会发现理由本身是错的*。★ 顺带查出的两个同名 `EmployeeManifest`（强制面 `MANIFEST_FIELDS` **10** 个 / 上下文 `stableRecord` 写死 **11** 键，**两个方向都不可转换**：一个抛、一个丢字段）也在本节一并记账，但它是否要合并是**另一个**裁决 ★★★ **2026-09-21 第 112 轮：本条已裁决（读法甲 + 部署裁决），见 §4.5。** 裁决**不需要**在"改 `permitsTool` 的词汇表"与"新增一层带取舍的翻译"之间二选一——仓库里早就有**唯一权威**的映射表（`employee-preset.mjs` 的 `LEGION_TOOL_ROUTING`），所以取的是第三条：**反向读它**。★ 而"翻译不是机械的"那半（`bash` 一对多、低风险与高风险同塌）**没有被绕开，而是被降级成一次具名裁决**：没有部署裁决时**具名拒绝并列出候选**（绝不放行），要放行必须在许可对象自己的 `toolNameDecisions` 里**具名**判给某一个候选。⇒ `permitsTool` 一行没改（§4.4 那条教义逐字成立），新增的只是**中间那一层**。落地四处与判据见 §4.5  ★★★ **第 118 轮第十轮订正两处（原文保留在上面）**：① 本行前面引的「`permitsTool` 的**生产调用方 = 0 处**」**已经不再成立**——映射层落地之后，它的调用方就是那个端口（`whitelist-port.mjs:309`）；"零调用方"是**第 21 轮**的读数，被本行自己那半件事解掉了而没人回头改。② 本条**已裁决并部分落地**：词汇表这一半有生产路径读数了（`runtime/dsh-composition/whitelist-wiring.test.mjs`，8 例：真端口 + 真 `permitsTool` + 真桥，含"DSH 名进来、Legion 名被判定"的正面证明与两个正对照）。★ 而**剩下的一半不是施工项**：那份许可的**取值**从哪来 = `runtime/packs/authority.mjs`（`[gap]`）→ `narrowToGrant` → 环境键，那正是 §5 第 **14** 条（A/B/C）在问的事 ⇒ 已并入第 14 条。★★ 另：写那条生产路径读数**当天就抓到一起「放行方向」的缺陷**（同一个 `callId` 的第二份不同请求复用第一份的投影 ⇒ 一次放行洗白后续调用，受影响的不止白名单一道），已修 + ⑦/⑧ 两条用例钉住；详见 `PRT-PROGRESS.md` 的 PRT-602 行补记与接管队列 §3.7 |
 | 28 | ★★★ **那条"出站车道"的文件该放在哪个目录**（第 22 轮**新查出**，见 `DECISION-RUNREQUEST-EXECUTION-PLANE.md` §14） | 产品 + 架构 | 第 22 轮把决策表第 15 条（PRT-610 的**写入方**）那条缝造出了能走通的两半：写入侧 `runtime/toolcall/spool.mjs`（套件 `toolcall-spool` 14 例）、收账侧 `orchestrator/worker/toolcall-drain.mjs`（套件 `toolcall-drain` 13 例），并在**真 SQLite** 上把整条环走通：执行面（无 token）写 spool → 收账侧（有 token）调 `recordToolCall`/`markDispatched`/`recordResult` → `toolCallLogEvidence().recorded` 由 `false` 翻成 `true`。⚠️ **但生产里还没有人调它们**，而缺的**不是代码**、是**一个位置决定**：收账的一方今天拿不到 spool 的目录（hub 的库是 `team-hub/team.db`，`server.mjs:279`，它**不读** `LEGION_DATA_DIR`），而生产者那一侧拿不到 Run 维度（`onDecision` 是**装配期**参数，runId 是**按 Run** 到的）。要裁决的**只有一个问题**：这条车道的目录由**哪一个**既有配置量派生（`LEGION_DATA_DIR`？hub 的 `dbFile` 同级的 `dataDir`？还是新登记一个键），以及谁负责在**按 Run** 的缝上绑 runId。 ★★ **要裁的只有一件事**，而这件事有**三条路**（各自与已裁决事项的关系都写清了，`DECISION-RUNREQUEST-EXECUTION-PLANE.md` §14.7）：**甲** 新登记一个部署配置键、两半各自从自己的 env 读——★ 它会落进**同一个没修的数组**（第 19 条那个人工项 A 今天缺 4 把键），等于把本条**并进**第 19 条，一起通或一起不通；**乙** 收账侧住进 hub 进程、路径从 hub 自己的 `dbFile` 同级目录派生（`server.mjs:279`）——不新增键，但把车道位置**绑死在库位置上**，且那条隐式耦合没有任何地方写着；**丙** 照第 19 条裁决的形状按 Run 交付目录（PRT-214 那五个性质）——最贵，但**唯一与第 19 条逐字一致**的一条，且 runId 必须在**按 Run 安装**的那一处绑（`root-row.mjs:591` 是**进程级单例**，在那儿绑死会让整个进程只往**第一个** Run 的账本里写）。★★ **本轮不替业主选**——"猜一个两边都同意的路径"正是 PRT-253 §3 禁止的"发明默认值"。 | ★ **不许"猜一个两边都同意的路径"**——那正是 PRT-253 §3 明令禁止的"发明默认值、替身或暂时放行"，而它的后果是让"没接线"与"接好了"在读数上**同形**，正是过去 21 轮反复付代价的那一件事。**不决定**则第 15 条继续停在原处：表在、读面在、就绪判据在，而 `decisionSourceRecorded` **依然没有任何产出者**——发布门禁永远判否，而它判否的理由（"缺失的证据不是证据"）读起来完全正确。★★ 本轮**没有**擅自接线，也**没有**把第 15 条记成已关：交付口径是"**车道已建、环已证、位置未决**"。★ 生产接线的两个候选接缝已读出（hub 进程 / `root-row.mjs:591` 的 `onDecision`），但第二个必须从**按 Run 安装**的缝读 runId（PRT-214 两遍先例的形状）——`root-row.mjs` 是**进程级单例**，在那儿绑死一个 Run 会让整个进程只往**第一个** Run 的账本里写。 ★★★ **★★ 本条不是一个实例，是一族**（§14.8）：它问的其实是"**控制面的数据怎么到达执行面**"这条**通用契约**，PRT-610 只是第一个被施工的实例。**F-18 / F-19 的执行面一半**（`runtime/experience/{friction,graph}.mjs`、`runtime/employee/role-pack.mjs` 三个模块零生产调用方）与 **Pack 账**（hub 有 `GET /api/packs/account`、**生产里没有任何消费方**）**卡在同一处**。⇒ 这解释了一件本来会显得奇怪的事：**它们代码侧各有进度，却都停在原地——不是缺实现，是缺同一个决定。**★ 反之：范围表与连接器声明**不**在这一族里，它们走的是**部署配置键**那条路，缺口是第 19 条的人工项 A。★ 在裁定之前**不去给它们各自发明一个位置**——那会把 PRT-253 §3 再犯三次。 |
-| 29 | ★★ **`RunRequest.env`（环境变量白名单）要不要有真消费者**（第 30 轮**新查出**） | 产品 + 架构 | 两份规格都把它写成 RunRequest 的**必要内容**：本仓目标文档 §4.1 F-01 逐字「`RunRequest` 必须包含 …工作目录、**环境变量白名单**和工具权限」（`MULTI-AGENT-FEATURE-OPTIMIZATION.md:146`），设计规格 `2026-09-11-legion-runtime-design.md:195` 同。第 30 轮把它逐项量了一遍（`scratch/_probe-env-whitelist.mjs`）：① **不在** `RUN_REQUEST_REQUIRED`（15 个必填字段）里 ⇒ **不是必填**；② 给了**会**校验形状（非数组 ⇒ `env 必须是数组（白名单）`，`run.mjs:218-222`）；③ 不给**静默补成 `[]`**（`run.mjs:227`）；④ **读者一个都没有**——全仓 `req.env` / `request.env` **零命中**，`runtime/adapters/**` 没有任何一处碰它。⇒ 一次 Run 报不报白名单，对执行**没有任何影响**。★★ 而同一个文件 `run.mjs:97-125` 用一整段论证过**为什么 `enforcementFloor` 不能这么写**——那里选的是三态（`absent`/`installed`/`refused`），原话是「一个"用必填字段把缺席挡在门外"的契约，与一个"让每个人都编一份空下限才进得来"的契约，是同一个东西」。`env` 走的是相反的一条：缺席折成 `[]`，于是「**没声明**」与「**声明了一个都不许**」在读数上是**同一个值** | ★ **不许**顺手把 `env` 改成必填：今天唯一的生产者（`orchestrator/worker/executor.mjs:1061-1091`）**不发**这个字段，改成必填等于逼每个人都**编一份**白名单——那正是上面那段论证禁止的形状，而且编出来的值方向是**收窄**（可能拒掉合法环境）。两条路：**①** 给 `env` 接一个**真消费者**（那它才是一条真的白名单，且要照 PRT-214 的五性质办），或 **②** 承认环境的作用域**本来**就是**进程级**的（`product/process-manifest.mjs` 的 `envNames` + `buildChildEnv()`——今天真正在起作用的那一层），于是把两份规格里那句"必须包含"改掉、并决定这个字段是留还是删。★ 本条**不作恶**的原因只有一个：这一格**本来就没被消费**——"它没伤人"与"它是对的"是两件事。★ 与第 15/18 条同族（**能力在、生产里没有消费者**），但**解法不同**：那两条缺的是"谁来调用"，本条缺的是"这个字段到底该不该存在"。详见 `MULTI-AGENT-FEATURE-OPTIMIZATION.md` §1.3.1 |
+| 29 | ★★ **`RunRequest.env`（环境变量白名单）要不要有真消费者**（第 30 轮**新查出**） | 产品 + 架构 | 两份规格都把它写成 RunRequest 的**必要内容**：本仓目标文档 §4.1 F-01 逐字「`RunRequest` 必须包含 …工作目录、**环境变量白名单**和工具权限」（`MULTI-AGENT-FEATURE-OPTIMIZATION.md:146`），设计规格 `2026-09-11-legion-runtime-design.md:195` 同。第 30 轮把它逐项量了一遍（`scripts/probes/_probe-env-whitelist.mjs`）：① **不在** `RUN_REQUEST_REQUIRED`（15 个必填字段）里 ⇒ **不是必填**；② 给了**会**校验形状（非数组 ⇒ `env 必须是数组（白名单）`，`run.mjs:218-222`）；③ 不给**静默补成 `[]`**（`run.mjs:227`）；④ **读者一个都没有**——全仓 `req.env` / `request.env` **零命中**，`runtime/adapters/**` 没有任何一处碰它。⇒ 一次 Run 报不报白名单，对执行**没有任何影响**。★★ 而同一个文件 `run.mjs:97-125` 用一整段论证过**为什么 `enforcementFloor` 不能这么写**——那里选的是三态（`absent`/`installed`/`refused`），原话是「一个"用必填字段把缺席挡在门外"的契约，与一个"让每个人都编一份空下限才进得来"的契约，是同一个东西」。`env` 走的是相反的一条：缺席折成 `[]`，于是「**没声明**」与「**声明了一个都不许**」在读数上是**同一个值** | ★ **不许**顺手把 `env` 改成必填：今天唯一的生产者（`orchestrator/worker/executor.mjs:1061-1091`）**不发**这个字段，改成必填等于逼每个人都**编一份**白名单——那正是上面那段论证禁止的形状，而且编出来的值方向是**收窄**（可能拒掉合法环境）。两条路：**①** 给 `env` 接一个**真消费者**（那它才是一条真的白名单，且要照 PRT-214 的五性质办），或 **②** 承认环境的作用域**本来**就是**进程级**的（`product/process-manifest.mjs` 的 `envNames` + `buildChildEnv()`——今天真正在起作用的那一层），于是把两份规格里那句"必须包含"改掉、并决定这个字段是留还是删。★ 本条**不作恶**的原因只有一个：这一格**本来就没被消费**——"它没伤人"与"它是对的"是两件事。★ 与第 15/18 条同族（**能力在、生产里没有消费者**），但**解法不同**：那两条缺的是"谁来调用"，本条缺的是"这个字段到底该不该存在"。详见 `MULTI-AGENT-FEATURE-OPTIMIZATION.md` §1.3.1 |
 ### 5.0.1 决策表状态索引（机器可读；**只抄每行自己的显式标记**）
 
 ★ 上面那张表有 **29 行、5 列，没有状态列** ⇒ 某一行**还开不开着**，此前只能靠通读散文判出来。
@@ -1284,7 +1284,7 @@ DEEPSEEK_API_KEY             {"addressable":true,"space":"refs"}      ← 正对
 （这里就是：写进去的引用名 == 运行时读出来的引用名）。
 
 ★ **本轮没有替任何一方改代码。** 两份**各自都自洽**：
-死的那份用的是 Legion 自己的三段式（与 `credential-materializer.mjs` 文件头一致），
+死的那份用的是 Legion 自己的三段式（~~与 `credential-materializer.mjs` 文件头一致~~ —— ★ 第十二轮起**不再一致**：文件头已按业主第五轮确认⑤改成活着的两段名 `model/api-key`），
 活的那条链端到端通。裁决它是 §5 第 17 条。本轮把它变成**读数**：
 `product/launcher/wizard-wiring.test.mjs`（5 例，**今天全绿**，7/7 变异成立）。
 
@@ -1716,7 +1716,7 @@ PASS subagents-surface-real-process          tests=12 pass=0  fail=0 skipped=12
 posix 上跑不了 win32 分支、机器上没有浏览器），把它判红会用一个大得多的故障
 （"所有没装 DSH 的机器 CI 全红"）去换一个小得多的故障。它做的是**把它变成读数**。
 
-破坏性验证：`scratch/verify-skip-visibility.mjs` **5/5 咬住**，还原逐字节一致。
+破坏性验证：`scripts/probes/verify-skip-visibility.mjs` **5/5 咬住**，还原逐字节一致。
 
 ### 环境事实（这条必须写下来，否则下一个人会重踩）
 
@@ -1763,7 +1763,7 @@ FAIL product-launcher: exit=1 tests=397 pass=396 fail=1 skipped=0
 
 ### 读数
 
-按套件把 `skipped` 摊开（`scratch/skip-breakdown.mjs`，读的是 `.ci/*/ci.log`）：
+按套件把 `skipped` 摊开（`scripts/probes/skip-breakdown.mjs`，读的是 `.ci/*/ci.log`）：
 
 ```text
 套件数 215，跳过合计 232
@@ -1945,7 +1945,7 @@ if (dsh && existsSync(join(dsh, 'packages'))) {   // ← 变量没导出 ⇒ 整
 
 ### 破坏性验证
 
-`scratch/verify-dsh-resolver.mjs`：逐条把解析器改坏（**只改语义、不改成语法错误**
+`scripts/probes/verify-dsh-resolver.mjs`：逐条把解析器改坏（**只改语义、不改成语法错误**
 ——语法错误会被 `--check` 拦下，那样验的是 Node 不是判据），跑判据套件要求它红，
 再逐字节还原。
 
@@ -2162,7 +2162,7 @@ CI 一行**聚合多个文件**：`path-scope` 那一行 = 4 个文件 ⇒ `test
 ### 判据与变异
 
 - 新套件 `scripts/prt/suite-counts.test.mjs`：**10 例**，已登记进 `run-ci.mjs`；
-- 变异（`scratch/_mutate-counts.mjs`）：把上面三个数**逐个改回去**，
+- 变异（`scripts/probes/_mutate-counts.mjs`）：把上面三个数**逐个改回去**，
   再加一个"漂亮但错的数"，**4/4 逐条咬住**，还原后**逐字相同**；
 - 关键断言不是 `ok`，而是 **`skipped` 必须为 0** —— 见下。
 
@@ -2216,7 +2216,7 @@ CI 一行**聚合多个文件**：`path-scope` 那一行 = 4 个文件 ⇒ `test
 
 > 读者正是**因为**它写着"可复跑"才不去跑。
 
-我去跑了（`scratch/_verify-readings.mjs`）。**大部分对，抓到一处真漂移**：
+我去跑了（`scripts/probes/_verify-readings.mjs`）。**大部分对，抓到一处真漂移**：
 
 | | 值 |
 | --- | --- |
@@ -2385,7 +2385,7 @@ ESM 的**模块缓存**让它仍用改之前那份。
 ★ 顺带订正一处我自己的**推断**：我曾担心"脏树"会污染我对条目 A 的读数
 （4 把键不在 `runtime.envNames` 里）。**实测不必担心**：把 `HEAD` 版与工作树版的
 `process-manifest.mjs` 的 5 个 `envNames` 数组逐字比过，**完全一致**
-（`scratch/_extract-envnames.mjs`）⇒ 条目 A 的读数在两棵树上都成立。
+（`scripts/probes/_extract-envnames.mjs`）⇒ 条目 A 的读数在两棵树上都成立。
 
 ### 修法：两处
 
@@ -2810,7 +2810,7 @@ worker 明说自己干不了活，而不是"看起了却执行了错的写操作
 
 ### ★★ 而我这轮的第一次尝试**报错了**——这一节最值得记的就是它为什么错
 
-第一版探针（`scratch/_probe-break-owners.mjs`）去 §5 的**每一格里搜文件名**，于是它报出：
+第一版探针（`scripts/probes/_probe-break-owners.mjs`）去 §5 的**每一格里搜文件名**，于是它报出：
 
 ```text
 L9 [支撑] product/lifecycle/retention.mjs
@@ -3515,7 +3515,7 @@ token，必须红**。修完读数 **17 → 18 处落点**（被漏掉的那一�
 - `buildRunRecord` **自己手写** `'peakResource'` 这一个名字来抄；
 - `validateRunRecord` **自己手写** `'peakResource'` 这一个名字来校验。
 
-⇒ 那张声明表**没有任何机械消费者**。**照注释做一次**的后果（实测，`scratch/_probe-record-drop.mjs`）：
+⇒ 那张声明表**没有任何机械消费者**。**照注释做一次**的后果（实测，`scripts/probes/_probe-record-drop.mjs`）：
 
     输入字段 = ["key","pid","image","peakResource","diskUsageBytes"]
     写出字段 = ["key","pid","image","peakResource"]
@@ -3657,7 +3657,7 @@ token，必须红**。修完读数 **17 → 18 处落点**（被漏掉的那一�
 第 42 轮我按自己的建议去**裁决**它，读代码读出来的结论是：**豁免错了。**
 
 `product/paths.mjs` 里那两张声明表（`DIR_ROLES` / `WRITABLE_ROLES`）原先**各有一份手写复述**，
-而两份都有静默失效路径（实测：`scratch/_probe-path-roles.mjs`）：
+而两份都有静默失效路径（实测：`scripts/probes/_probe-path-roles.mjs`）：
 
 | | 写法 | 后果（实测） |
 | --- | --- | --- |
@@ -3728,7 +3728,7 @@ M3（把角色清单改回手写的四元对象）与 M4（改成 `DIR_ROLES.sli
     ③ 这张表根本没有任何读者          ← 死声明
 
 于是我 `git grep` 取回每个名字的**全部**命中行，减去声明自己那一行，得到读者点数
-（`scratch/_probe-exempt-consumers.mjs`）：
+（`scripts/probes/_probe-exempt-consumers.mjs`）：
 
 | 名字 | 读者点 | 其中遍历 | 判定 |
 | --- | --- | --- | --- |
@@ -3767,7 +3767,7 @@ return { ok: blockedChecks.length === 0 && fatalUnknown.length === 0, ... }
 ```
 
 往词表里加第四个裁决 `degraded`、并让磁盘那一项返回它，汇总给出（实测
-`scratch/_probe-preflight-verdict.mjs`）：
+`scripts/probes/_probe-preflight-verdict.mjs`）：
 
     ok = true    blocked = []    unknown = []    reasons = []
     checks = compatibility:ok, disk:degraded, in-flight-tasks:ok
@@ -3788,7 +3788,7 @@ return { ok: blockedChecks.length === 0 && fatalUnknown.length === 0, ... }
 
 ### 5.26.1 ★★★ 两句"行为等价"的代码，破验分不开——这是本轮第二次遇到同一个性质
 
-破验（`scratch/_mutate-r43.mjs`）第一轮 **10/12**，两条漏网，而**两条的原因一模一样**：
+破验（`scripts/probes/_mutate-r43.mjs`）第一轮 **10/12**，两条漏网，而**两条的原因一模一样**：
 
 | 漏网 | 为什么分不开 |
 | --- | --- |
@@ -3831,7 +3831,7 @@ return { ok: blockedChecks.length === 0 && fatalUnknown.length === 0, ... }
 | `supervisor.test.mjs:396` | 对**真**进程采样（win32 `Get-Process`） | 只到采样器，**没走 `status()`** |
 | `supervisor.test.mjs:484` | 读数被交出去（那条日志） | 用的是**假 io**（`makePeakIo`） |
 
-`scratch/_probe-peak-e2e.mjs` 起一台**真**子进程走了一次：
+`scripts/probes/_probe-peak-e2e.mjs` 起一台**真**子进程走了一次：
 
 ```text
 真进程 pid=27312  peakWorkingSet=194.5 MiB  cpuMs=47  samples=1  window.ok=true
@@ -3856,7 +3856,7 @@ return { ok: blockedChecks.length === 0 && fatalUnknown.length === 0, ... }
 正常结束方式。再叠加 `forgetRunRecord()` 在正常停止后删记录（那条是**有意**的）
 ⇒ **一次成功 Run 的峰值读数，两处都不留。**
 **修法**：那条分支补一句，判据 `!disposed`（`dispose()` 那条路上 sink 可能已关，只有它仍不报）。
-读数：`supervisor.test.mjs` **22 → 25/25**；破验 `scratch/_mutate-r44.mjs` **5/5 咬住 0 漏网**。
+读数：`supervisor.test.mjs` **22 → 25/25**；破验 `scripts/probes/_mutate-r44.mjs` **5/5 咬住 0 漏网**。
 
 **（三）★ 我自己的门禁，抓住了我自己的缺陷。**
 我往台账 PRT-009 那一格里**引用了一行代码**：`if (stopping || disposed)`。
@@ -3924,7 +3924,7 @@ const st = cells.map(c => c.trim()).find(c => /^(✅|⏸|⬜)/.test(c))
 if (st === undefined) continue        // ← 认不出就跳过
 ```
 
-`PRT-316` 转 🟡 之后，那一条**从总数里消失**。实测（`scratch/_probe-tally-ledger.mjs`）：
+`PRT-316` 转 🟡 之后，那一条**从总数里消失**。实测（`scripts/probes/_probe-tally-ledger.mjs`）：
 
 ```text
 旧 tallyLedger 读数： {"total":144,"done":140,"paused":4,"todo":0}
@@ -3969,7 +3969,7 @@ if (st === undefined) continue        // ← 认不出就跳过
 claim 的 `re`/`parse` 也带上 🟡（"**四个**数都核"），四处写死的台账读数一并订正
 （`DECISION-BRIEF.md`、交接报告 §一 / §二 / 判据清单、本文 §5.22 那一行）。
 
-**破验** `scratch/_mutate-r44-tally.mjs`：**5/5 咬住、0 漏网**、逐字节还原。
+**破验** `scripts/probes/_mutate-r44-tally.mjs`：**5/5 咬住、0 漏网**、逐字节还原。
 五条分别钉住"认得 🟡"、"认不出要抛"、"台账少一条 ✅ 要红"、
 "报告里 🟡 数写错要红"、"两档不许互相吞并"。
 
@@ -3993,7 +3993,7 @@ claim 的 `re`/`parse` 也带上 🟡（"**四个**数都核"），四处写死�
 **同一个问题的其余实例**：还有几个台账解析器，认不出一个状态标记时会**静默丢行**？
 
 ★ 不需要等真的出现第 5 个状态就能问——往一份**合成台账**里放一个今天不存在的标记
-（🔵），看每个解析器的**行数**有没有少。读数（`scratch/_probe-status-poison.mjs`）：
+（🔵），看每个解析器的**行数**有没有少。读数（`scripts/probes/_probe-status-poison.mjs`）：
 
 | 解析器 | 对照(✅) | 毒药(🔵) | 判定 |
 | --- | --- | --- | --- |
@@ -4018,7 +4018,7 @@ claim 的 `re`/`parse` 也带上 🟡（"**四个**数都核"），四处写死�
 > 是同一个东西——只不过前者加第 5 个状态只改一处，后者要改 N 处，
 > 而漏掉的那几处**不报错**，只是安静地少算。
 
-⇒ 破验 `scratch/_mutate-r45-vocab.mjs`：
+⇒ 破验 `scripts/probes/_mutate-r45-vocab.mjs`：
 
 | 变异 | 做法 | 期望 | 实际 |
 | --- | --- | --- | --- |
@@ -4075,7 +4075,7 @@ PRT 编号」。**它抓不到**本轮这个缺陷——两边以**同样的方�
 | | | ⇒ **13 种被静默丢掉** | |
 
 而第 69 行是 `if (!STATUS_RE.test(...)) continue`。**实测**
-（`scratch/_probe-feature-status.mjs`）：喂 `🟡→⏸` ⇒ 收 **0** 行、**不报错**。
+（`scripts/probes/_probe-feature-status.mjs`）：喂 `🟡→⏸` ⇒ 收 **0** 行、**不报错**。
 
 ★★★ 而真文档今天只用 5 种状态格、**全部落在交集里** ⇒ 这个差异当时
 **只存在于理论上**，任何真实输入都碰不到它。
@@ -4100,7 +4100,7 @@ PRT 编号」。**它抓不到**本轮这个缺陷——两边以**同样的方�
 > 一个"已知限制"如果只写在注释里，它与"没有这个限制"长得一样；
 > 只有一条会红的判据能让它在下一次发生时**出声**。
 
-★ **破验**（`scratch/_mutate-r45-feature.mjs`，一条一跑 + 逐字节还原）：
+★ **破验**（`scripts/probes/_mutate-r45-feature.mjs`，一条一跑 + 逐字节还原）：
 **F1** 消费者退回手抄 7 种 ⇒ 套件红 `10/2`；**F2** `throw` 退回 `continue`
 ⇒ 红 `11/1`；**F3** 所有者退回字面量 ⇒ 红 `24/2`。**三条全咬住。**
 
@@ -4157,7 +4157,7 @@ PRT 编号」。**它抓不到**本轮这个缺陷——两边以**同样的方�
 > 在"结论是 0 违规"的时候是同一个读数——
 > 只不过前者证明的是一件**更强**的事，而后者才是每天在跑的那一条。
 
-★ 先量再改（`scratch/_probe-generated-status-vocab.mjs`）：6 个自称生成物的文件，
+★ 先量再改（`scripts/probes/_probe-generated-status-vocab.mjs`）：6 个自称生成物的文件，
 窄表扫 **0** 处、并集扫 **0** 处 ⇒ 差异**只存在于理论上**。
 **而这正是最该修的时候**——一旦某个生成器把 `✅` 印出来，窄的那条会**安静放它过去**。
 
@@ -4165,7 +4165,7 @@ PRT 编号」。**它抓不到**本轮这个缺陷——两边以**同样的方�
 两条判据共用，普查改为 **import** 它 ⇒
 "普查说只有 1 处"与"判据守住 1 处"从此是**同一个面**。
 
-★ 破验（`scratch/_mutate-r45-derived.mjs`，三条全咬住）：**D1** `nonDoneStatuses`
+★ 破验（`scripts/probes/_mutate-r45-derived.mjs`，三条全咬住）：**D1** `nonDoneStatuses`
 不再过滤、**D2** `DONE_STATUS_MARK` 取错一格、**D3** 生成物词表退回窄子集。
 
 #### 5.28.7 ★★★ 第四段：同一个问题在本仓被**回答了两遍**（第 46 轮）
@@ -4179,7 +4179,7 @@ PRT 编号」。**它抓不到**本轮这个缺陷——两边以**同样的方�
 
 ⇒ 同一个问题（"这一行是什么状态"）在本仓被**回答了两遍**。
 
-**先量**（`scratch/_probe-tally-owner.mjs`）：
+**先量**（`scripts/probes/_probe-tally-owner.mjs`）：
 
 | 量什么 | 读数 |
 | --- | --- |
@@ -4218,7 +4218,7 @@ PRT 编号」。**它抓不到**本轮这个缺陷——两边以**同样的方�
 ⇒ 加 `canonicalJson()`（键按排序）。文档侧那行的**书写次序**仍由正则逐字钉住（给人读的），
 与被核的值分开。
 
-★ 破验（`scratch/_mutate-r46-tally.mjs`）：**T1** 接受规则退回 `startsWith`、
+★ 破验（`scripts/probes/_mutate-r46-tally.mjs`）：**T1** 接受规则退回 `startsWith`、
 **T2** 分档退回手写 `if`、**T3** `canonicalJson` 退回插入顺序 —— 三条全咬住。
 
 ★★ **同一个坑又踩了一次**：T3 在工具的时长上限处被强杀 ⇒ `finally` 与
@@ -4234,7 +4234,7 @@ PRT 编号」。**它抓不到**本轮这个缺陷——两边以**同样的方�
 `spec-status-calibration.parseStatusTable()` —— 自己判行、自己分格、
 **自己定格子数**、自己取状态。
 
-**先量**（`scratch/_probe-status-table-owner.mjs`）：
+**先量**（`scripts/probes/_probe-status-table-owner.mjs`）：
 
 | 输入 | 旧 `parseStatusTable` | 所有者（`featureRows`）|
 | --- | --- | --- |
@@ -4272,7 +4272,7 @@ PRT 编号」。**它抓不到**本轮这个缺陷——两边以**同样的方�
 有：`feature-landing-paths.parseLandingCells()` —— 自己判行、自己分格、
 **自己定格子数**（`≠5 且 ≠6 ⇒ continue`）、自己取第 4 格当"代码落点"。
 
-**先量**（`scratch/_probe-landing-owner.mjs`）：真文档上**四个解析器一致**（都是 29 行），
+**先量**（`scripts/probes/_probe-landing-owner.mjs`）：真文档上**四个解析器一致**（都是 29 行），
 但 **4 格与 7 格的功能行被它静默跳过**，而所有者收下。
 
 ★★ **后果比第 47 轮那次更重**：这个模块的职责是
@@ -4294,7 +4294,7 @@ PRT 编号」。**它抓不到**本轮这个缺陷——两边以**同样的方�
 
 ★ 顺手清掉两处**变成死代码**的 import —— 留着就是"声明还在、用它的人没了"。
 
-★ 破验（`scratch/_mutate-r48-landing.mjs`）：**W1** 落点解析器退回 `≠5 且 ≠6`、
+★ 破验（`scripts/probes/_mutate-r48-landing.mjs`）：**W1** 落点解析器退回 `≠5 且 ≠6`、
 **W2** 所有者词表退回写死一份、**W3** `minCells` 被忽略 —— 三条全咬住。
 
 ★ 顺手清掉两处**变成死代码**的 import —— 留着就是"声明还在、用它的人没了"。

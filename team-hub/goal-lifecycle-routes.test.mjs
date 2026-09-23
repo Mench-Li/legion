@@ -8,7 +8,7 @@
 //   survey 读数是 `/api/goal` 强判据 3 套 / 11 个请求点，
 //   而 `/api/goal/context` 与 `/api/goal/status` 都是 **0 套 / 0 个请求点**。
 //   全仓库搜过：`goal/context` **连一个调用方都没有**；
-//   `goal/status` 只在 `scratch/verify-cancel-strand.mjs` 与 `scripts/prt/gf001-run.mjs` 里被调过 ——
+//   `goal/status` 只在 `scripts/probes/verify-cancel-strand.mjs` 与 `scripts/prt/gf001-run.mjs` 里被调过 ——
 //   而那两处**不在回归选择器里**（选择器只扫 `team-hub/*.test.mjs` 且要含 `server.mjs`）。
 //
 //   > 一个「这一族有 3 套判据」的印象，

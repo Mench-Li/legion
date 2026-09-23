@@ -459,7 +459,7 @@ by-design 13 / deliberate 8 / in-flight 5 / **gap 22**。
 | 步骤 | 读数 |
 |---|---|
 | 六套相关用例在提交前跑过 | `run-identity` **20/20**、`legacy-data-adoption` + `runtime-contract-wiring` **26/26**、registrar + run-inputs **78/78** |
-| 端到端探针 | `scratch/probe-identity-loop.mjs`：租约的空间名一路走到授权哈希，两个空间得到**两个不同的 `canonicalHash`** |
+| 端到端探针 | `scripts/probes/probe-identity-loop.mjs`：租约的空间名一路走到授权哈希，两个空间得到**两个不同的 `canonicalHash`** |
 | 破坏性验证 | ⑪–⑰ **5/6**（⑩ 那条见 §10.3）、㉑–㉖ **6/6**、⑱–⑳ **3/3** |
 
 提交 `f291f9c`：**28 个文件、+4046 / −215**。
@@ -470,7 +470,7 @@ by-design 13 / deliberate 8 / in-flight 5 / **gap 22**。
 
 ### 10.2 ★★★ 破坏性验证 harness 被中途杀掉，留下一个**已变异的靶文件**
 
-`scratch/mutate.mjs` 的 ①–⑨ 那一跑被外部超时**在 ⑩ 处杀掉**
+`scripts/probes/mutate.mjs` 的 ①–⑨ 那一跑被外部超时**在 ⑩ 处杀掉**
 （实测：`MUTATE_ONLY=⑩` 单独跑也会超时——它要起真子进程，一条就超过 120s 窗口）。
 而 `mutate.mjs` 的还原写在"跑完之后"，于是 `product/process-manifest.mjs`
 **停在"已变异"状态**：`LEGION_WORKSPACE_DIR` 那一行声明**整个消失**。
@@ -498,7 +498,7 @@ by-design 13 / deliberate 8 / in-flight 5 / **gap 22**。
 **只含这次提交**的树来跑：
 
 ```bash
-node scratch/verify-commit-f291f9c.mjs     # 基线 → 变异 → 还原，全程在隔离树里
+node scripts/probes/verify-commit-f291f9c.mjs     # 基线 → 变异 → 还原，全程在隔离树里
 ```
 
 读数：
@@ -586,12 +586,12 @@ node --test product/launcher/legacy-data-adoption.test.mjs \
             product/launcher/runtime-contract-wiring.test.mjs                # 26/26
 node --test product/launcher/runtime-manifest.test.mjs                       # 9/9
 node --test scripts/config/config.test.mjs                                   # 52/52（修前 50/52）
-node scratch/probe-identity-loop.mjs                                         # 两空间两哈希
+node scripts/probes/probe-identity-loop.mjs                                         # 两空间两哈希
 node scripts/config/scan.mjs --check                                         # PASS（1129 条）
 node scripts/prt/reachability.mjs --diff                                     # 与基线一致（46 条）
-node scratch/verify-reachability-entry.mjs                                   # 破验 2/2 咬住、还原逐字节一致
-node scratch/verify-credential-resolver.mjs                                  # 破验 ㉙ 咬住、还原逐字节一致
-node scratch/probe-real-declaration-chain.mjs                                # 真 DSH：解析 → 声明 ['DEEPSEEK_API_KEY']
+node scripts/probes/verify-reachability-entry.mjs                                   # 破验 2/2 咬住、还原逐字节一致
+node scripts/probes/verify-credential-resolver.mjs                                  # 破验 ㉙ 咬住、还原逐字节一致
+node scripts/probes/probe-real-declaration-chain.mjs                                # 真 DSH：解析 → 声明 ['DEEPSEEK_API_KEY']
 node scripts/prt/progress-check.mjs ; node scripts/prt/spec-progress.mjs --check
 ```
 
@@ -661,14 +661,14 @@ board-plugin/src/index.ts:18 同一个模块（编成 board-plugin/lib/index.js�
 没有任何新模块变成不可达——也就是说 `scrum/` 收进来之后，
 那个目录里的模块本来就都是活的。
 
-破坏性验证 **2/2 咬住**（`scratch/verify-reachability-entry.mjs`）：
+破坏性验证 **2/2 咬住**（`scripts/probes/verify-reachability-entry.mjs`）：
 
 | # | 变异 | 结果 |
 |---|---|---|
 | ㉗ | 从 `PROCESS_ENTRIES` 删掉 `scrum/serve.mjs` | ✔ 红 **3** 条（① / ② / ⑤） |
 | ㉘ | 从 `SCAN_DIRS` 删掉 `scrum` | ✔ 红 **3** 条（同上） |
 
-★ 这个 harness **刻意不复用** `scratch/mutate.mjs`：那个文件的还原写在
+★ 这个 harness **刻意不复用** `scripts/probes/mutate.mjs`：那个文件的还原写在
 "跑完之后"，而本轮已经实测过它的失效模式（§10.2——被超时杀掉，靶文件留在
 "已变异"状态，随后被 `git add -A` 收进索引）。这里的还原写在 `finally` 里，
 **从"跑完之后"改成"无论如何"**，并把"还原逐字节一致"也打印出来当读数。
@@ -740,8 +740,8 @@ usable() per 旧判据                   = false        ← 被当成"没注入"
 新增用例**必须用函数**钉（用对象再测一遍是重复，而重复正是原缺陷藏身的方式），
 外加两条反向（函数但无 `.resolve` ⇒ 仍不可用；字符串 ⇒ 不可用）。
 
-真 DSH 检出上的实测（`scratch/probe-patch-resolution-precise.mjs` /
-`scratch/probe-real-declaration-chain.mjs`，入口 `apps/cli/lib/bin.js`，
+真 DSH 检出上的实测（`scripts/probes/probe-patch-resolution-precise.mjs` /
+`scripts/probes/probe-real-declaration-chain.mjs`，入口 `apps/cli/lib/bin.js`，
 即 DSH 自己的 `package.json` 里 `bin.dsh` 指的那个文件）：
 
 | 步骤 | 修前 | 修后 |
@@ -827,7 +827,7 @@ stdout 上那行 `dsh web: <url>`——而上面那 3 条失败的用例恰好�
 
 ★ 跳过**刻意不判红**：合法跳过有三种（缺 DSH、posix 上跑不了 win32 分支、
 没有浏览器），判红会用"所有没装 DSH 的机器 CI 全红"换一个小得多的故障。
-它做的是**变成读数**。破坏性验证 `scratch/verify-skip-visibility.mjs` **5/5 咬住**。
+它做的是**变成读数**。破坏性验证 `scripts/probes/verify-skip-visibility.mjs` **5/5 咬住**。
 
 #### ② `prt-churn` 的窗口计数在合并历史上**两个方向都错**
 
@@ -875,8 +875,8 @@ stdout 上那行 `dsh web: <url>`——而上面那 3 条失败的用例恰好�
 |---|---|
 | 跳过被解析、逐行可见、汇总成行、进 summary.json、且不判红 | `node --test scripts/ci/skip-visibility.test.mjs`（6 例） |
 | 窗口计数逐格等于独立算出的精确值 | `node --test scripts/prt/hot-file-churn.test.mjs`（17 例） |
-| 三种错法各自变红 | `node scratch/verify-churn-counting.mjs`（**4/4 咬住**） |
-| 跳过可见性五处各自变红 | `node scratch/verify-skip-visibility.mjs`（**5/5 咬住**） |
+| 三种错法各自变红 | `node scripts/probes/verify-churn-counting.mjs`（**4/4 咬住**） |
+| 跳过可见性五处各自变红 | `node scripts/probes/verify-skip-visibility.mjs`（**5/5 咬住**） |
 
 ★ 其中「逐格交叉核对」那一条是**后补的**：补它之前，㊱㊲㊳ 三处变异**一条都不红**——
 因为原套件只有「计数 ≤ 窗口大小」这一条约束，而"每次都答窗口大小"满足它。
@@ -974,7 +974,7 @@ runtime                                            entry=configured 三族齐全
 export DSH_CHECKOUT=D:/project/DSH/dsh/deepseek-harness
 node --test product/launcher/dsh-overlay.test.mjs      # 17/17
 node --test product/process-manifest.test.mjs          # 21/21
-node scratch/verify-overlay-argv.mjs                   # 4/4 咬住，两个套件一起跑
+node scripts/probes/verify-overlay-argv.mjs                   # 4/4 咬住，两个套件一起跑
 ```
 
 ★ 那个验证脚本第一版**只跑 `dsh-overlay`**，于是锚在 `node-file` 分支上的变异
@@ -1047,7 +1047,7 @@ f291f9c / HEAD 的 process-manifest.mjs:
 ```bash
 # 只有我的那一份，跑在**基线 source** 上
 git worktree add --detach /tmp/w f291f9c
-cp scratch/_mineonly-test.mjs /tmp/w/product/process-manifest.test.mjs
+cp scripts/probes/_mineonly-test.mjs /tmp/w/product/process-manifest.test.mjs
 cd /tmp/w && node --test product/process-manifest.test.mjs    # 15/15
 
 # HEAD 单独检出（修正后）
@@ -1070,7 +1070,7 @@ node --test product/process-manifest.test.mjs                 # 21/21
 
 #### 读数
 
-`scratch/skip-breakdown.mjs`（读 `.ci/*/ci.log`）按套件摊开：
+`scripts/probes/skip-breakdown.mjs`（读 `.ci/*/ci.log`）按套件摊开：
 
 ```text
 套件数 215，跳过合计 232
@@ -1140,7 +1140,7 @@ const SKIP = DSH === null ? '未配置 DSH_CHECKOUT' : false
 
 #### 我自己的修法也坏过两次（都写进注释了）
 
-`scratch/migrate-dsh-resolver.mjs` 负责插 import 行，两版都被骗：
+`scripts/probes/migrate-dsh-resolver.mjs` 负责插 import 行，两版都被骗：
 
 1. 第一版按 `/^import\s/` 找最后一行 → 被**多行 import** 骗到，
    新行被插进 `import {`…`} from` 的**中间** ⇒ 语法错误；
@@ -1250,7 +1250,7 @@ if (dsh && existsSync(join(dsh, 'packages'))) {   // ← 变量没导出 ⇒ 整
 
 #### 破坏性验证
 
-`scratch/verify-dsh-resolver.mjs`：逐条把解析器改坏（**只改语义、
+`scripts/probes/verify-dsh-resolver.mjs`：逐条把解析器改坏（**只改语义、
 不改成语法错误**——语法错误会被 `--check` 拦下，那样验的是 Node 不是判据），
 跑判据套件，要求它红，然后逐字节还原。
 
@@ -2369,7 +2369,7 @@ CI 的总时长里减出来（减掉那条套件自己的耗时）：
 - ★ 我**没有**做系统普查：**仓库里还有多少生成物在手写状态/结论？**
   这一批只处理了手上撞见的这一处。
 
-  ★★ **后续（同批）：做了。** `scratch/census-generated-status.mjs` 扫描本仓
+  ★★ **后续（同批）：做了。** `scripts/probes/census-generated-status.mjs` 扫描本仓
   （跳过 `.worktrees` / `.legion-worktrees` / `node_modules`）1939 个文本文件，
   自称"生成物"的 **6** 个，其中"任务号 + 状态词" **0** 个
   （其余唯一命中是 CLI 成功日志里的一个 `✅`，属误报）。
@@ -2416,7 +2416,7 @@ CI 的总时长里减出来（减掉那条套件自己的耗时）：
 
 用**与 CI 同一种起法**（`spawn(node, ['--test', file])` + 管道），预算压到 20s
 （挂死 20s 就结束、正常 3s 就结束）⇒ 8 轮很便宜
-（`scratch/prt509-flake-rate.mjs`）：
+（`scripts/probes/prt509-flake-rate.mjs`）：
 
 ```text
 ✔ 第 1 轮  宿主 20.0s  ✖
@@ -2496,7 +2496,7 @@ CI 的总时长里减出来（减掉那条套件自己的耗时）：
   我没有做置信区间，也没有排查"是否与前一后一轮相关"（第 5–7 轮连着挂，
   那看着像相关，而我只当它是巧合）。
 - ⚠️ `run-ci.mjs` 里那三行**提取**逻辑没有单独跑过（纯过滤）；
-  管道捕获那一半用 `scratch/verify-measure-pipe.mjs` 端到端验过。
+  管道捕获那一半用 `scripts/probes/verify-measure-pipe.mjs` 端到端验过。
 
 ### 10.32 ★★★ 我犯了一次"把别人暂存的工作提交进我的提交"——**路径无关的 `git commit`**
 
@@ -2730,7 +2730,7 @@ worker，否则得到的是"测试挂死"的假象），`prt509-verify-settle-br
 #### 二、我试了"内容锚"，然后**否掉了它**
 
 想法很自然：台账里引用旁边几乎都点着一个标识符，那它应该出现在被引用的那几行附近。
-探针 `scratch/probe-content-anchor.mjs` 跑出来**不成立**：
+探针 `scripts/probes/probe-content-anchor.mjs` 跑出来**不成立**：
 
 **① 覆盖率就不够**：103 条引用里只有 **38 条（37%）** 旁边取得到标识符。
 即使这个检查完美，它也只覆盖三分之一——而**它看起来会覆盖全部**。
@@ -2799,7 +2799,7 @@ packages/credentials/credentials-local/src/index.ts:585 现在是
 #### 一、怎么发现的
 
 我在补完"坐标判据"之后，顺手去看台账里那条被引用的复现脚本
-（`scratch/scan-silent-declarations3.mjs`，PRT-611 引用它）——**它报 0 个哑声明**，
+（`scripts/probes/scan-silent-declarations3.mjs`，PRT-611 引用它）——**它报 0 个哑声明**，
 而台账明明白白写着"全仓还剩 **3 个**，**一个都没改**"。
 
 两边对不上。我第一反应是"大概有人修了"。**不是。**
@@ -2824,7 +2824,7 @@ Object.freeze({ path: '…runtime-contract-server.mjs', line: 599,
 
 #### 三、因果已实测，不是推断
 
-`scratch/probe-pin-blinds-scanner.mjs` 跑两遍同一个判法：
+`scripts/probes/probe-pin-blinds-scanner.mjs` 跑两遍同一个判法：
 A = 今天的样子；B = **只把我那一个文件**排除出"出现次数"的累加。
 
 ```text
@@ -2931,7 +2931,7 @@ B（排除 scripts/prt/boundary-facts.mjs）：
 #### 二、追链：`external-api-scope.mjs` 凭什么算"入口"
 
 它有**零个**生产 importer（唯一的 import 者是它自己的 `.test.mjs`）。
-追链（`scratch/trace-reach.mjs`）后，理由写得清清楚楚：
+追链（`scripts/probes/trace-reach.mjs`）后，理由写得清清楚楚：
 
 ```text
 起点为什么算入口：清单声明（scripts/prt/boundary-facts.mjs）
@@ -3058,7 +3058,7 @@ patch-layer.mjs（PATCH_LAYER_ROWS）加载 plugins/pre-execute-row.mjs
 而不是默认"都堵死了，继续做验证性工作"。
 （本仓 `exp-t092` 那条纪律正是冲着这件事：*多轮空转多为"目标已被上游验证"所致*。）
 
-读数（`scratch/audit-ledger-blockers.mjs`）：
+读数（`scripts/probes/audit-ledger-blockers.mjs`）：
 
 ```text
 台账 145 行：{"✅":140,"⏸":4,"⬜":1}
@@ -3163,7 +3163,7 @@ assert.ok(onDisk.includes(String(64 * 1024 * 1024)),
 
 #### 七、变异验证 6/6
 
-`scratch/mutate-peak-record.mjs`：六种改法全部咬住。
+`scripts/probes/mutate-peak-record.mjs`：六种改法全部咬住。
 
 | 变异 | 结果 |
 | --- | --- |
@@ -3584,7 +3584,7 @@ const okStatus = (s) => legend.includes(s) || /^[✅🟡⬜⏸]+→[✅🟡⬜�
 > > 一个"总数对得上"的表，与一个"每一格都对得上"的表，
 > > 在**只看合计**的读数里是同一个东西——而前者的两个错**互相抵消**了。
 >
-> ★ 抓到它的是一个**脚本**（`scratch/_verify-gap-table.mjs`：把基线 26 条按
+> ★ 抓到它的是一个**脚本**（`scripts/probes/_verify-gap-table.mjs`：把基线 26 条按
 > `reason` 里的条目指针分组，再**逐块**解析两份文档里的表，逐格比对），
 > 不是我再读一遍看出来的。★ 第一版那两格我当时**也"核过"**——
 > 我核了**文件属于哪个能力**，没核**它的裁决指针写着第几条**。
@@ -4292,7 +4292,7 @@ connectorDeclarations ──► createRegistry ──┬──► createOutcomeL
 **但投递面交付的 `resolveConnectorId` 是推导式的**（按"工具名在不在某份声明里"归属）
 ⇒ 一个**没被声明**的工具名归属不到任何连接器 ⇒ **登记表根本不会被问到**。
 
-实测（`scratch/_dbg-unknown-tool-reach.mjs`，不提交）：
+实测（`scripts/probes/_dbg-unknown-tool-reach.mjs`，不提交）：
 
 | 工具名 | 走桥的结果 | `attributed` | `connectorDecided` |
 | --- | --- | --- | --- |
@@ -4340,7 +4340,7 @@ connectorDeclarations ──► createRegistry ──┬──► createOutcomeL
 （`MISSING_FIELD_CODES` 里没有它，缺了不拦装配）⇒ 今天**不致命**，
 但"配了也传不到进程"这件事与另两条**一模一样**。
 
-后果很具体，而且是**决定性实测**过的（`scratch/_probe-childenv-keys.mjs`）：
+后果很具体，而且是**决定性实测**过的（`scripts/probes/_probe-childenv-keys.mjs`）：
 
 ```
 values 里给 LEGION_PATH_SCOPE             ⇒ ★★ 抛：键未在进程 runtime 的 envNames 中声明
@@ -5729,7 +5729,7 @@ git ls-files '*.md'  默认按 core.quotePath 转义，非 ASCII 路径会**加�
     我只当它是巧合，**没有去排查**。
     ⇒ "约 50%"这句话的精度比它读起来的样子低。
 62. `run-ci.mjs` 里 `MEASURE ` 的**提取**那三行没有单独跑过（纯过滤逻辑，靠读）。
-    我用 `scratch/verify-measure-pipe.mjs` 验的是**管道捕获**那一半——
+    我用 `scripts/probes/verify-measure-pipe.mjs` 验的是**管道捕获**那一半——
     那是我当时判断"最可能失败"的一半。**判断哪一半最可能错，本身就是一次猜测。**
 63. §10.32：我**一次不带路径的 `git commit` 把别人暂存的 637 行一起提交了**。
     已用 `--soft` 完整还原（他们的内容逐行完好、仍在索引里），但**这件事发生过**。
@@ -5806,7 +5806,7 @@ git ls-files '*.md'  默认按 core.quotePath 转义，非 ASCII 路径会**加�
     是**判据**中途瞎了一次。这与"文档漂了"是不同的一类：
     **数据没变，测量仪器变了。** 而它比文档漂更难发现，因为它只影响"新出现的问题"，
     对已经记在案的三个字段完全无感——一个瞎了的探测器，报的正是"一切正常"。
-79. §10.36 顺带新立的 `scratch/scan-dead-references.mjs`（查"引用的文件在别人的克隆里
+79. §10.36 顺带新立的 `scripts/probes/scan-dead-references.mjs`（查"引用的文件在别人的克隆里
     能不能落地"）**第六次**栽在同一个形状上：裸文件名、后缀片段、
     以及**只查了一个仓**（`packages/...` 属 DSH 仓，而我只查了 Legion 的 `git ls-files`）。
     *"引用了另一个仓的文件"与"引用了只有本机存在的文件"，在只查一个仓的输出里长得一样——
@@ -5973,7 +5973,7 @@ git ls-files '*.md'  默认按 core.quotePath 转义，非 ASCII 路径会**加�
     于是写成 19→**5** / 13→**2**；按基线自己的 `reason` 逐条量是 19→**6** / 13→**1**。
     > 一个"总数对得上"的表，与一个"每一格都对得上"的表，
     > 在**只看合计**的读数里是同一个东西——而前者的两个错**互相抵消**了。
-    ★ 抓到它的是一个脚本（`scratch/_verify-gap-table.mjs`），不是我再读一遍。
+    ★ 抓到它的是一个脚本（`scripts/probes/_verify-gap-table.mjs`），不是我再读一遍。
     ★ 第一版那两格我当时**也"核过"**：我核了**文件属于哪个能力**，
     **没核它的裁决指针写着第几条**——只有后者是这张表的判据。
     ⇒ 两份文档（`PRT-IMPLEMENTATION-REPORT.md` §九、本报告 §10.41）与台账 ⑪ 已逐格订正并复验通过。
@@ -6270,7 +6270,7 @@ git ls-files '*.md'  默认按 core.quotePath 转义，非 ASCII 路径会**加�
      以及 **`TEAM_HUB_TOKEN`——早于本轮、没有任何归属**（`root.mjs` 的 `readString`
      确实读它，只是**可选**，缺了不拦装配）⇒ 它**需要裁决**：要么加进 runtime 的 `envNames`，
      要么从 schema 的 `fields` 里拿掉。"这个进程能配它"与"它能拿到它"必须有一处让步。
-164. §10.46 ★★ **决定性实测**（`scratch/_probe-childenv-keys.mjs`，不提交）：
+164. §10.46 ★★ **决定性实测**（`scripts/probes/_probe-childenv-keys.mjs`，不提交）：
      `buildChildEnv()` 对这三个键，在 `values` 里**抛**（"键未在进程 runtime 的
      envNames 中声明：先补清单，再写入"），在 `baseEnv` 里**静默丢掉**
      （`dropped=["LEGION_PATH_SCOPE"]`）；对照 `LEGION_ACTOR` 则正常放行。

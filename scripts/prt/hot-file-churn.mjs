@@ -363,7 +363,7 @@ export function collectChurn({ files = HOT_FILES, size = 40, windows = 6, cwd = 
  * 三种**互不相同**的退出码，具名导出。
  *
  * 调用方（`run-ci.mjs` 的 `doc` 阶段）必须用这些常量分流，不许写裸数字：
- * 裸数字那版被破验当场证伪过一次（`scratch/_mutate-r115-churn.mjs` 的 M6）——
+ * 裸数字那版被破验当场证伪过一次（`scripts/probes/_mutate-r115-churn.mjs` 的 M6）——
  * 把 `rh.code === 3` 误改成 `rh.code === 2` 时，**没有任何判据会红**，
  * 而"探针读不到"那条告警会静默变成死代码。
  *

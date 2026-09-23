@@ -299,7 +299,7 @@ describe('PRT-214 续 Legion 身份：解析', () => {
     // 于是它们**可以**经 `baseEnv`（宿主环境）流到子进程。而本模块是另一条路：
     // `runtime.env`（**产品配置**）。两条路都存在，但只有一条通。
     //
-    // 实测（第 113 轮，`scratch/_probe-r113-permit-delivery.mjs`）：
+    // 实测（第 113 轮，`scripts/probes/_probe-r113-permit-delivery.mjs`）：
     //
     //     runtime.env 里同时给五把键
     //       ⇒ resolveEnforcementIdentity().values 只有

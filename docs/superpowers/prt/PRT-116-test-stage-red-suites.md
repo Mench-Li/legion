@@ -64,7 +64,7 @@ A 与 B/C **看起来是同一种红**（都在 `test` 阶段、都是"产物与
 `buildSnapshot()` 也改成调用 `platformHttpRoutes()`（原先它自己拼了一份同样的并集）。
 ⇒ 从"两处各拼一遍"变成"一处定义、三处消费"。
 
-## 4. 破验（`scratch/_mutate-r116-route-obs.mjs`，可复跑）
+## 4. 破验（`scripts/probes/_mutate-r116-route-obs.mjs`，可复跑）
 
 修好的判据**必须仍然咬得住真缺陷**——否则这次修的就不是观测点，是把判据改弱了：
 

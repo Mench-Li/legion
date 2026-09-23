@@ -96,7 +96,7 @@ selfcheck.mjs:135   const { composition, sandbox, runtime, guardProbe, availabil
 - 未改任何生产代码（`runtime/`、`product/`、`orchestrator/` 一行未动）
 - 未改任何 fail-closed 语义（那三项 `false` 一字未动）
 - 未重定那 22 条红的基线（那是第 1 件的**后果**，得先有裁决）
-- `scratch/_probe-r117-caps.mjs` 的夹具**没造出"补丁层生效"的组合**
+- `scripts/probes/_probe-r117-caps.mjs` 的夹具**没造出"补丁层生效"的组合**
   （`reconcilePatchLayer` 在 `patchVersion=1` 下仍报 `effective:false`），
   所以那个探针**没有给出产品结论** —— 它只给出了"那三项不读任何输入"这个**源码事实**。
   ⚠️ **不要把那份输出读成"补丁层没生效"**：那是我的夹具不完整，不是产品读数。
@@ -136,7 +136,7 @@ selfcheck.mjs:259  autoExecutionForbidden: failed.length > 0
 ⇒ **咬住（红）**。也就是说：如果我这次**真的**削弱了 fail-closed，M6 会咬出来；
 它没咬，说明减的是"问错人"的那一问，不是守卫本身。
 
-### 5.3 破验（`scratch/_mutate-r118-caps.mjs`）
+### 5.3 破验（`scripts/probes/_mutate-r118-caps.mjs`）
 
 ```
 ✔ M1 产品面表被清空              → 咬住（红）

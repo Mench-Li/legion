@@ -319,7 +319,7 @@ export function resolveDshBaseBundlePatchPath({ runtimeCommand = null, requireFn
     //   > 只不过前者的用例是绿的，而绿的理由恰恰是
     //   > **用例注入的形状与生产拿到的形状不是同一个**。
     //
-    //   实测（`scratch/probe-patch-resolution-precise.mjs`，真 DSH 检出）：
+    //   实测（`scripts/probes/probe-patch-resolution-precise.mjs`，真 DSH 检出）：
     //   同一个入口，`createRequire(entry).resolve('@deepseek-ai/dsh-base/cordis.patch.yml')`
     //   明明解析得到 `packages/bundle/base/cordis.patch.yml`，
     //   而走这个函数返回 `null`。

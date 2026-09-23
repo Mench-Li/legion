@@ -104,7 +104,7 @@ test('③ ★★ NUL 字节：代码里判失败，采集类文档只记账', ()
     assert.equal(p[0].severity, 'fail', rel)
   }
   // 采集类文档 ⇒ note（仍报出来，但不判失败）
-  for (const rel of ['docs/T058-run.txt', 'scratch/baseline/RESEARCH-T096.md', 'a.markdown']) {
+  for (const rel of ['docs/T058-run.txt', 'scripts/probes/baseline/RESEARCH-T096.md', 'a.markdown']) {
     const p = inspectBuffer(utf16, rel)
     assert.equal(p.length, 1, rel)
     assert.equal(p[0].severity, 'note', rel)

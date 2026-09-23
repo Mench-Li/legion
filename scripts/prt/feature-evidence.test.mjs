@@ -155,7 +155,7 @@ test('⑩ ★ 只认**状态列落在封闭词表里**的行（文档里还有�
 // （`progress-check.mjs` 的 `FEATURE_STATUS_RE`，由 `FEATURE_STATUS_MARKS` 派生）
 // 许可 **20** 种 ⇒ **13 种被静默丢掉**，因为第 69 行是 `continue`。
 //
-//   实测（`scratch/_probe-feature-status.mjs`）：喂 `🟡→⏸` ⇒ 收 **0** 行、**不报错**。
+//   实测（`scripts/probes/_probe-feature-status.mjs`）：喂 `🟡→⏸` ⇒ 收 **0** 行、**不报错**。
 //   而真文档今天只用 5 种、全在交集中 ⇒ 这个差异当时**只存在于理论上**。
 //
 //   > 一份"词表归别人管"的声明，与一份**真的**跟着它走的实现，

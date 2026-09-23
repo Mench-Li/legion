@@ -88,7 +88,7 @@ export function expandBraces(p) {
  * ★★★ 第 48 轮：**行识别交给所有者**（`progress-check.featureTableRow`）。
  *
  *   本函数此前自己判行、自己分格、**自己定格子数**（`≠5 且 ≠6 ⇒ continue`）。
- *   实测（`scratch/_probe-landing-owner.mjs`）：真文档上四个解析器**一致**
+ *   实测（`scripts/probes/_probe-landing-owner.mjs`）：真文档上四个解析器**一致**
  *   （都是 29 行），但**4 格与 7 格的行被它静默跳过**，而所有者收下。
  *
  *   ★★ 后果比第 47 轮那次**更重**：本模块的职责是

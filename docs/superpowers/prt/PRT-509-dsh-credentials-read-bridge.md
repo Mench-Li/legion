@@ -801,7 +801,7 @@ CI 里**同一种**起法（`spawn(node, ['--test', file])` + 管道）、预算
 
 ### 11.9.3 根因已定位（2026-09-18，从**进程内部**读出来的）
 
-"关停挂死"这件事**不是猜测**，有机制层面的读数（`scratch/prt509-handle-probe.mjs`
+"关停挂死"这件事**不是猜测**，有机制层面的读数（`scripts/probes/prt509-handle-probe.mjs`
 + `prt509-handle-dump.cjs`，由 `NODE_OPTIONS=--require` 注入宿主）：
 
 | | 挂死那一轮 | 正常那一轮 | 对照：`node --test` worker |

@@ -226,7 +226,7 @@ PRT-253 续批（`PRT-253-run-request-input-wiring.md` §8）已经让 `workspac
 ### 8.1 一条命令跑完整条链
 
 ```bash
-node scratch/probe-identity-loop.mjs
+node scripts/probes/probe-identity-loop.mjs
 ```
 
 它用**生产代码**（不造替身）在一个进程里把整条链走完，末尾自判成败：
@@ -270,11 +270,11 @@ node --test orchestrator/worker/run-inputs.test.mjs              # 含 ㉖㉗㉘
 ### 8.3 破坏性验证（每条都必须**变红**）
 
 ```bash
-$env:MUTATE_ONLY='⑪,⑫,⑬,⑭,⑮'; node scratch/mutate.mjs
-$env:MUTATE_ONLY='⑯,⑰';          node scratch/mutate.mjs
+$env:MUTATE_ONLY='⑪,⑫,⑬,⑭,⑮'; node scripts/probes/mutate.mjs
+$env:MUTATE_ONLY='⑯,⑰';          node scripts/probes/mutate.mjs
 ```
 
-`scratch/mutate.mjs` 的 ⑪–⑰ 是本批新增的七条。**七条全部咬住**：
+`scripts/probes/mutate.mjs` 的 ⑪–⑰ 是本批新增的七条。**七条全部咬住**：
 
 | 变异 | 期望变红 | 实际 |
 | --- | --- | --- |

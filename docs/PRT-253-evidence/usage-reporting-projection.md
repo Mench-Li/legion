@@ -134,7 +134,7 @@ for (const w of handle.warnings) emitter.emit('run.progress', { warning: w })
 
 ## 7. 破验
 
-### 7.1 投影模块（`scratch/_mutate-r124-usage.mjs`）6/6 + 反向
+### 7.1 投影模块（`scripts/probes/_mutate-r124-usage.mjs`）6/6 + 反向
 
 ```
 ✔ M1 ★「读不到」返回全 0 对象            → 咬住（红）
@@ -147,7 +147,7 @@ for (const w of handle.warnings) emitter.emit('run.progress', { warning: w })
 还原逐字节相同：✔
 ```
 
-### 7.2 接线（`scratch/_mutate-r125-wiring.mjs`）6/6 + 反向
+### 7.2 接线（`scripts/probes/_mutate-r125-wiring.mjs`）6/6 + 反向
 
 ```
 ✔ M1 端口不再带出 id（归因键丢了）       → 咬住（红）

@@ -63,7 +63,7 @@ const CODE_EXT = new Set([
 /**
  * 采集类文档：NUL 字节记为 **note**，不判失败。
  *
- * 为什么分开：仓库里有 **36 个**历史验收证据 `.txt` 与 `scratch/baseline/RESEARCH-T096.md`
+ * 为什么分开：仓库里有 **36 个**历史验收证据 `.txt` 与 `scripts/probes/baseline/RESEARCH-T096.md`
  * 是 PowerShell 重定向/`Set-Content` 写出来的 UTF-16LE（带 `fffe` BOM）。它们是**历史
  * 采集物**，不是回归——把判据放宽到"不看"会让这个事实消失，把判据收紧到"判失败"会让
  * 一次历史遗留永远堵住门禁。

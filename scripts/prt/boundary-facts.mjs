@@ -138,7 +138,7 @@ export function defaultContext() {
 //   **一份专门用来汇总"哪些读数可信"的报告**里，位置比前面那三种都更靠前：
 //   读者正是**因为**它写着"可复跑"才不去跑。
 //
-//   我把它逐行重算了一遍（`scratch/_verify-readings.mjs`）：**大部分对**，
+//   我把它逐行重算了一遍（`scripts/probes/_verify-readings.mjs`）：**大部分对**，
 //   但抓到一处真漂移 —— 正文写着
 //
 //       "`test` 阶段那 808 秒里，工作树的代码与文档一个字节都没动过"
@@ -326,7 +326,7 @@ export const LEDGER_STATUS_MARKERS = LEDGER_STATUS_MARKS
  *
  *   第 45 轮只收敛了"有哪些标记"（`LEDGER_STATUS_MARKERS`），
  *   而行规则与分档仍是本地手写的。实测出两处会走偏的地方
- *   （`scratch/_probe-tally-owner.mjs`）：
+ *   （`scripts/probes/_probe-tally-owner.mjs`）：
  *
  *   | 症状 | 实测 |
  *   | --- | --- |
@@ -561,7 +561,7 @@ const LINE_CITATION_RE = /(?:^|[\s`（(【\[])((?:[\w.@-]+[\\/])*[\w.@-]+\.(?:mj
  * 扫描台账里的 `file:line` 引用。返回
  * `{ checked, broken, ambiguous, unresolved, detail }`。
  *
- * ★★ 第一版（`scratch/scan-line-citations.mjs`）报出 7 条 `PATH-MISSING`
+ * ★★ 第一版（`scripts/probes/scan-line-citations.mjs`）报出 7 条 `PATH-MISSING`
  *   + 2 条 `LINE-OUT-OF-RANGE`，逐条看过之后**9 条全是解析器的错**：
  *
  *     · 那 7 条是**后缀片段**（`plugins/root-row.mjs` 实为
@@ -583,7 +583,7 @@ export function scanLineCitations(text, treeSet = null) {
     //   而这里原来读的是 **`m[4]`** ⇒ `m[4]` 恒为 `undefined` ⇒
     //   **范围终点永远等于起点**（`to: Number(m[2])`）。
     //
-    //   实测后果（`scratch/_prove-range-bug.mjs`）：
+    //   实测后果（`scripts/probes/_prove-range-bug.mjs`）：
     //   `run-floor.mjs:600-9999`（那个文件 614 行）**不报 broken**——
     //   它被判成"只引了第 600 行"。而单行 `:9999` 是报的。
     //
@@ -854,7 +854,7 @@ export function scanOriginalCitations() {
 //   > 我差一点把"别人用推理找到的"记成"我的判据找到的"。
 //   > 一个判据抓到与一个人抓到，在**结果**上一样，在**它值多少**上完全不一样。
 //
-// ★ 然后我试了"内容锚"（`scratch/probe-content-anchor.mjs`）：
+// ★ 然后我试了"内容锚"（`scripts/probes/probe-content-anchor.mjs`）：
 //   拿引用旁边的反引号标识符，看它是否出现在附近 ±20 行。**它不成立**，两个原因：
 //
 //   ① **覆盖率就不够**：103 条引用里只有 **38 条**（37%）旁边取得到一个标识符；
@@ -1108,11 +1108,11 @@ const GENERATED_SELF = Object.freeze([
 //     | --- | --- | --- |
 //     | 判据 A（文件级，只钉 `legion-host.patch.yml`）| `未完成\|已完成\|✅\|🟡\|⏸\|⬜` | 6 |
 //     | 判据 B（类级，全部自称生成物的文件）| `STATUS_VOCAB` | 5 |
-//     | 普查（`scratch/census-generated-status.mjs`，"只有 1 个实例"那句话的来源）| 9（**并集**）| 9 |
+//     | 普查（`scripts/probes/census-generated-status.mjs`，"只有 1 个实例"那句话的来源）| 9（**并集**）| 9 |
 //
 //   ⇒ 判据 A 漏 `待完成/未开始/部分完成`；判据 B 漏**四个标记全部**。
 //
-//   实测（`scratch/_probe-generated-status-vocab.mjs`）：今天两边读数**都是 0**，
+//   实测（`scripts/probes/_probe-generated-status-vocab.mjs`）：今天两边读数**都是 0**，
 //   差异**只存在于理论上**。但——
 //
 //     > 一次用**更大的网**做的普查，与一条用**更小的网**执行的判据，
@@ -1130,8 +1130,20 @@ export const GENERATED_STATUS_VOCAB = Object.freeze([
 const reEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 /** 词表 → 一条"任取其一"的正则（**次序无关**，但案底里按词表原序）。 */
 export const GENERATED_STATUS_RE = new RegExp(`(${GENERATED_STATUS_VOCAB.map(reEsc).join('|')})`)
+// ★★★ 第 118 轮第十二轮（业主裁决 ④「把量具收进 `scripts/probes/` 并跟踪」）：
+//   量具搬家了，**这条跳过清单必须跟着搬**——`scripts/probes/` 就是原来 `scratch/` 里
+//   那批量具的新家，而其中 `census-generated-status.mjs` **正是这条判据的量具**：
+//   它逐字写着状态词表与例子。不跳过它，这条判据就会**被自己的量具判成违规**
+//   （实测：搬家当次就红在 `scripts/probes/census-generated-status.mjs[未完成]`）。
+//
+//   > 一个「把量具搬进跟踪范围、却忘了它同时进了扫描范围」的迁移，
+//   > 与一个「判据开始对自己开火」的迁移，是同一个东西——
+//   > 只不过前者的表现，是这次提交里多出来的一条红。
+//
+//   ⚠️ 边界照旧**只按目录名**跳（与 `scratch` 同一个口径）：`scripts/probes/` 里若真长出
+//   一个自称生成物的**产物**，它就不在这条判据的扫描面内。这是这一跳的代价，写在这里。
 const SCAN_SKIP = new Set([
-  '.git', 'node_modules', '.ci', 'scratch', 'dist', 'build', '.dsh', 'coverage',
+  '.git', 'node_modules', '.ci', 'scratch', 'probes', 'dist', 'build', '.dsh', 'coverage',
   '.worktrees', '.legion-worktrees',
 ])
 const SCAN_EXT = /\.(mjs|js|cjs|ts|json|md|yml|yaml|txt|patch|sql)$/i
@@ -1316,7 +1328,7 @@ export const FACTS = Object.freeze([
     id: 'no-generated-artifact-asserts-task-status',
     what: '**类级**：任何自称"生成物"的文件里都不许出现"任务号 + 状态词"',
     why: '上一条只钉住 `legion-host.patch.yml` **一个**文件。这一条钉住**整类**——'
-      + '因为我这一批做了一次普查（=`scratch/census-generated-status.mjs`），'
+      + '因为我这一批做了一次普查（=`scripts/probes/census-generated-status.mjs`），'
       + '结论是**本仓（不含别的工作树）里这一类只有 1 个实例，且已修**。'
       + '普查是"顺路发现"的解毒剂：'
       + '「发现了一处」与「只有一处」在此之前一直是两件事。'
@@ -1324,7 +1336,7 @@ export const FACTS = Object.freeze([
       + '生成器每跑一次就把手写状态重印一遍。'
       + '★★★ 第 45 轮：这条判据的词表原来**比它引用的那次普查窄**——'
       + '普查用 9 项（并集），这里只有 5 项、**漏掉四个标记全部**。'
-      + '今天两边读数都是 0（`scratch/_probe-generated-status-vocab.mjs`），'
+      + '今天两边读数都是 0（`scripts/probes/_probe-generated-status-vocab.mjs`），'
       + '差异只存在于理论上；但"用更大的网普查、用更小的网执法"这件事本身'
       + '必须消失 ⇒ 两条判据与普查现在共用一份 `GENERATED_STATUS_VOCAB`。'
       + '⚠️ 边界：只覆盖**自称**是生成物的文件；不自称的不在扫描面内。'
@@ -1635,7 +1647,7 @@ export const FACTS = Object.freeze([
   // ══════════════════════════════════════════════════════════════════════════
   // ★★★★★ 第 97 轮：交付物头部那句「与它的家族表（**逐轮到第 N 行**）」
   //
-  // 为什么它可判而「追加至第 N 轮」不可判 —— 本轮**实测**过（`scratch/_probe-r97-report-round.mjs`）：
+  // 为什么它可判而「追加至第 N 轮」不可判 —— 本轮**实测**过（`scripts/probes/_probe-r97-report-round.mjs`）：
   //   §一 自称 **79** · §三「截至」**52** · 本报告提到过的最大轮次 **87** · 那份清单家族表最大 **96**
   //   ⇒ 前三个**互不相同**，没有一个"显然"的派生量（"最后一次修订在第几轮"文档本身推不出来）。
   //   ★★ 而"家族表逐轮到第几行"**是可派生的**（= 那份文档家族表的最大轮次）。
@@ -1748,7 +1760,7 @@ export const FACTS = Object.freeze([
       + '第 19 条 §9.2 第 5 步在前面插入了连接器声明那块）——'
       + '**这一次是判据自己红的**（`boundary-facts.test.mjs` ⑫b 的载具断言），'
       + '不需要有人恰好读到这份文档。两次位移的分工就是这一层的价值所在。'
-      + '★ 我试过"内容锚"（`scratch/probe-content-anchor.mjs`）但它**不成立**：'
+      + '★ 我试过"内容锚"（`scripts/probes/probe-content-anchor.mjs`）但它**不成立**：'
       + '① 103 条引用里只有 38 条（37%）取得到锚词；'
       + '② 更要命——真例子里我打算拿 `installEnforcementRoot` 当锚，'
       + '而它在**旧区间内**也有（`L488` 那句注释"在此之前 `installEnforcementRoot` '

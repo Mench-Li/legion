@@ -198,7 +198,7 @@ export function resolveTargets(claims, trackedTests, suiteFiles = new Map()) {
  * 抓住它的是 `suite-counts.test.mjs` ① —— 那一条断言的不是 `ok`，
  * 而是 **`skipped` 必须为 0**。这一条断言就是为这种形状写的。
  *
- * 实测三种环境（`scratch/_probe-nested.mjs`）：
+ * 实测三种环境（`scripts/probes/_probe-nested.mjs`）：
  *   父进程在 test runner 里 + 不清 env ⇒ len=0（哑）
  *   父进程在 test runner 里 + 清 NODE_TEST_CONTEXT ⇒ len=1169，读得到
  *   父进程不在 test runner 里 ⇒ len=1166，读得到（所以直接跑 CLI 时看不出问题）

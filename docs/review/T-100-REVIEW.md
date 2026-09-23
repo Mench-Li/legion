@@ -3,7 +3,7 @@
 > 审查对象（本任务 = T-099 编码 diff 的独立代码审查）：
 > - coder 提交 **104f99a**（分支 w/T-099，23 文件 +2576/-344，基线 = promote T-105 fa9c568），经 promote **a018666**（mediator merge，另一父 e0e529f = promote T-106）合入当前 HEAD；
 > - blob 级核对：本次审查工作树 w/T-100 @ **a018666**，被审代码与 104f99a 逐字节一致（merge 仅解决 docs 侧 TEST_CASES.md/T106-evidence 文档冲突，业务文件无二次改动）；
-> - 审查基线 AC = 四能力批产物：scratch/baseline/REQUIREMENTS-T095.md（R-1..R-4 与 AC-Rx-y）、TASK_BREAKDOWN-T097.md（S1..S12 机器验收行）、TEST_CASES-T098.md（109 条用例 TC-Sx-yy / I-1..12 / D 系列默认值）。当前 main 的 docs/REQUIREMENTS.md 等已被 T-103/T-105/T-106（「环节产出文档预览」新特性）取代，故以 scratch/baseline 三文档为唯一 AC 基线。
+> - 审查基线 AC = 四能力批产物：scripts/probes/baseline/REQUIREMENTS-T095.md（R-1..R-4 与 AC-Rx-y）、TASK_BREAKDOWN-T097.md（S1..S12 机器验收行）、TEST_CASES-T098.md（109 条用例 TC-Sx-yy / I-1..12 / D 系列默认值）。当前 main 的 docs/REQUIREMENTS.md 等已被 T-103/T-105/T-106（「环节产出文档预览」新特性）取代，故以 scratch/baseline 三文档为唯一 AC 基线。
 > 审查方式：23 个改动文件逐一正读（server.mjs 相关段 + 路由/DAO 上下文、plugins 新纯函数模块全文 + index.ts 接线、workbench 组件全文 + api/App/Sidebar）+ 独立复跑（team-hub 5 套件 + L1 冒烟 + plugins 3 套件 + tsc x2）+ 静态检查（XSS 面 / 级联一致性 / CSS 覆盖 / 残留引用）。只给反馈，未改任何实现代码。
 > 结论分级：**必须修改**（AC 未达成 / 实测行为缺陷 / 安全承诺失实）与**建议优化**（可排期）。严重度 高=红 / 中=橙 / 低=黄。
 

@@ -1,4 +1,4 @@
-﻿== run: node scratch/verify-docs.mjs ==
+﻿== run: node scripts/probes/verify-docs.mjs ==
 == S1（docs/FEATURES.md 功能手册）==
 == S2（README.md 收敛 + 互链去重）==
 == S3（check-docs.mjs 权威校验入口）==

@@ -116,7 +116,7 @@
 **`ok: false`（采过但采不到）时，三个测量值必须都是 `null`。**
 
 ```js
-// 判据在 validateRunRecord 里；变异验证见 scratch/mutate-peak-record.mjs（6/6 咬住）
+// 判据在 validateRunRecord 里；变异验证见 scripts/probes/mutate-peak-record.mjs（6/6 咬住）
 peakResource: { ok: false, peakWorkingSetBytes: 0 }   // ⇒ 坏记录
 ```
 

@@ -477,7 +477,7 @@ function freshCircuit() {
  *   > 在**套件读数**上是同一片 ✔——只不过前者从来没验过
  *   > "DSH 真的会送来的那个名字"。
  *
- * 实测（`scratch/_probe-mcp-namespace.mjs`）：`github` 声明 `list_issues` 时，
+ * 实测（`scripts/probes/_probe-mcp-namespace.mjs`）：`github` 声明 `list_issues` 时，
  * 调 `list_issues` ⇒ `allow`，调 `mcp__github__list_issues` ⇒ **`deny`**
  * 「没有声明工具」——一个**正确声明过**的工具在真进程里被拒。
  *
@@ -784,7 +784,7 @@ export function createRegistry({ connectors = [], now = () => Date.now(), resolv
       //     线上来的是 DSH 的**公开名**（`mcp__<serverName>__<rawName>`），
       //     声明里写的是**连接器自己那一侧**的名字。逐字比对会让一个
       //     **正确声明过**的工具在这里被判"没有声明"——见 `declaredToolNames`
-      //     的文档与 `scratch/_probe-mcp-namespace.mjs` 的实测。
+      //     的文档与 `scripts/probes/_probe-mcp-namespace.mjs` 的实测。
       const tool = decl.tools.find((t) => declaredToolNames(id, t.name).includes(name))
       if (tool === undefined) {
         // ★ 见文件头 ①：这里放行等于"对方加一个工具就等于加一个后门"。

@@ -46,7 +46,7 @@ export const WRITABLE_ROLES = Object.freeze(['data', 'workspace', 'cache', 'log'
  *
  * ---------------------------------------------------------------------------
  * 这两张声明表原先**各有一份手写复述**，而两份都有静默失效路径（第 42 轮实测，
- * 见 `scratch/_probe-path-roles.mjs`）：
+ * 见 `scripts/probes/_probe-path-roles.mjs`）：
  *
  *   ① `for (const role of DIR_ROLES)` 里是一个嵌套三元，**兜底那支是 `layout?.logDir`**：
  *

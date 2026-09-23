@@ -31,9 +31,19 @@
 // DSH 的凭证文档有两个**语法不同**的键空间（见 `planDshLookup`）：
 //   `refs`    键是 POSIX 标识符（`DEEPSEEK_API_KEY`）；
 //   `records` 键是**恰好两段**的小写连字符标识符（`legion/openai`）。
-// 而 Legion 的模型引用是 `legion/model/<profileId>`——**三段**，于是
-// `planDshLookup()` 对它返回 `{addressable:false, space:null}`：
-// 这条引用在两个键空间里**都没有位置**。
+// 而**运行时物化用的那个名字是 `model/api-key`（两段）**，它在 `records` 空间里
+// **可寻址**（`product/launcher/run-credential-materialization.mjs` 的
+// `RUNTIME_MODEL_KEY_REF`）。
+//
+// ★★★ 第 118 轮第十二轮订正（业主第五轮确认，第 17 条的收尾）：本文件头**曾经**写着
+// "Legion 的模型引用是 `legion/model/<profileId>`——**三段**"。那句话描述的是
+// **已删除的** `first-run.mjs`（第 17 条裁决，第九轮删除）⇒ 它是**死的**。
+// 三段的形状在两个键空间里**都没有位置**（`{addressable:false, space:null}`）——
+// 这条**边界仍然成立**、也仍然有用例（`credential-materializer.test.mjs` ① 与
+// `wizard-wiring.test.mjs` ②），但它**不是**今天 Legion 的模型引用形状。
+//
+//   > 一个"文件头描述的是已删除的那份实现"的文件，
+//   > 与一个"文件头描述的是活着的那一份"的文件，在 `cat` 的输出里长得一模一样。
 //
 //   > 一个"文件看起来完整、就是少了最要紧那一把钥匙"的读数，
 //   > 与一个"文件本来就只该有这么多"的读数，在 `cat` 的输出里长得一模一样。

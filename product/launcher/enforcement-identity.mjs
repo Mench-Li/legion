@@ -131,7 +131,7 @@ export const ENFORCEMENT_IDENTITY_PROCESS_KEY = 'runtime'
  *   · `envNames` 管的是**继承 `baseEnv`**那条路（宿主环境里有，才过得去）；
  *   · 而"运维把它写进**产品配置文件**"（`runtime.env`）走的是**本文件**这条路。
  *
- * 实测（`scratch/_probe-r113-permit-delivery.mjs`）：五把键都写进 `runtime.env`
+ * 实测（`scripts/probes/_probe-r113-permit-delivery.mjs`）：五把键都写进 `runtime.env`
  * ⇒ `resolveEnforcementIdentity().values` 里**一把都没有**，而 `ok === true`、
  * `missing === []` ⇒ **静默丢掉**。于是四道范围检查在真实部署里读到的仍是"没配"，
  * **而在它们那一侧"没配"是放行**。

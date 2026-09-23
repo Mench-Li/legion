@@ -32,7 +32,7 @@
 | hub 回归面（I-9） | goal/skills/calendar/chat/spaces/rules 六套件 | 14/14 + 20/20 + 13/13 + 23/23 + 5/5 + 7/7 = **82/82 pass**（goal.test 另覆盖 docsDir 双模式解析） | ✅ 通过 | 08-hub-regression.txt |
 | plugins worker-regression（I-9） | node plugins/tests/worker-regression.test.mjs | 5/7 pass；2 条 git-init spawn 用例 EPERM（沙箱边界，环境受限） | ✅ 5 绿 + 2 受限 | 09-plugins-worker-regression.txt |
 | scrum taskctl.ttl（回归面） | node scrum/taskctl.ttl.test.mjs + EPERM 探针 | 探针 {status:null,error:"EPERM"} → 套件子进程 spawn 全挂（环境受限，非代码缺陷；taskctl.mjs 未被本批改动） | 环境受限 | 10-taskctl-ttl-env.txt |
-| M1/M2 审查项复核 | scratch/t109-probes/probe-m1m2.mjs（驱动真实 lib apply 结算） | **F2（M1）与 F3（M2）确定性复现**（见 §3） | ❌ FAIL | 13-m1m2-probes.txt |
+| M1/M2 审查项复核 | scripts/probes/t109-probes/probe-m1m2.mjs（驱动真实 lib apply 结算） | **F2（M1）与 F3（M2）确定性复现**（见 §3） | ❌ FAIL | 13-m1m2-probes.txt |
 | live 数据核对 | node 只读 SQLite team-hub/team.db | 当前链 T-108 契约登记 docs/review/T-108-REVIEW.md（相对路径+digest）→ 主路径登记线上生效；**docsDir 目标 T-111 契约登记 = 根路径 docs/REQUIREMENTS.md（旧文档误登记）** | ⚠️ F2 生产实锤 | 14-live-artifacts.txt |
 
 ## 3. 失败项（FAIL，均可复现；归属明确）
@@ -44,7 +44,7 @@
 - 证据：15-apptsx-conflict.txt；07-typechecks.txt；T-101 报告（git show 766c7df:docs/TEST_REPORT.md）F4 历史登记。
 
 ### F2【红·并行 docsDir 目标面】S2 契约登记不感知目标级 docsDir（T-108 M1 复核命中，含确定性探针 + 生产实锤）
-- 复现（scratch/t109-probes/probe-m1m2.mjs，驱动真实 plugins lib apply 结算；roles.json 契约 + goal docsDir=docs/G-DIR-1）：
+- 复现（scripts/probes/t109-probes/probe-m1m2.mjs，驱动真实 plugins lib apply 结算；roles.json 契约 + goal docsDir=docs/G-DIR-1）：
   - A1（worker 按提示词只写了 docs/G-DIR-1/REQUIREMENTS.md）：实际 **0 条登记** + 任务被软门禁停 in_review + 评论误报「契约产出文档缺失：docs/REQUIREMENTS.md」；期望 = 登记 docs/G-DIR-1/REQUIREMENTS.md 且照常进闸门。
   - A2（仓库根存在他目标的旧 docs/REQUIREMENTS.md）：实际**登记了根路径旧文档**（path=docs/REQUIREMENTS.md，digest 为旧内容）而真实交付物 docs/G-DIR-1/REQUIREMENTS.md 未登记；期望 = 只登记目标目录文档。
 - 生产实锤：live team.db 中 T-111（goal G-mtpq729o-1，docsDir=docs/G-mtpq729o-1）契约登记条目 = `{path:"docs/REQUIREMENTS.md", title:"需求澄清产出文档", digest:…}`——即把主仓根目录他目标的旧 REQUIREMENTS.md 登记成 T-111 的产出；T-111 真文档在 docs/G-mtpq729o-1/REQUIREMENTS.md（commit 7ffa303 单文件）。任务详情预览将打开错误文档。

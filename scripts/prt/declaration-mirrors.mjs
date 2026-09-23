@@ -12,7 +12,7 @@
 //
 // 而 `buildRunRecord` 与 `validateRunRecord` **各自手写** `'peakResource'` 这个名字。
 // 于是那张表**没有任何机械消费者**：照它的注释加一个字段，得到的是
-// **写不出去 + 不被校验 + 记录看起来完全正常**（实测见 `scratch/_probe-record-drop.mjs`）。
+// **写不出去 + 不被校验 + 记录看起来完全正常**（实测见 `scripts/probes/_probe-record-drop.mjs`）。
 //
 //   > 一张只写在注释里的扩展点，与一条真的能扩展的通路，
 //   > 在"下一个人照做之后会不会发现问题"这个读数上是同一个东西：都不会发现。
@@ -232,7 +232,7 @@ export function isMirroring({ hitCount, total }) {
  *       export const F = Object.freeze(['key','pid']); const row = { key: 1 }
  *
  *   ——`{ key: 1 }` 是一处**真的**键位复述，却被整行跳过丢掉了。
- *   （实测见 `scratch/_probe-decl-exclusion.mjs` 第三个声明：它命中了 `L1:key`，
+ *   （实测见 `scripts/probes/_probe-decl-exclusion.mjs` 第三个声明：它命中了 `L1:key`，
  *   而那道守卫正好把这一行抹掉。）
  *
  *   > 一个"跳掉整行"的排除，与一个"跳掉该跳的那一段"的排除，

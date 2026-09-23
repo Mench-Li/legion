@@ -434,7 +434,7 @@ test('peak-resource：对一台**真**进程采样（win32 走 Get-Process；采
 //
 //   > `supervisor` 采出来的那个读数，**有没有任何消费者**？
 //
-// 实测答案（`scratch/verify-peak-resource-wired.mjs`，4 条变异**全部没咬住**）：
+// 实测答案（`scripts/probes/verify-peak-resource-wired.mjs`，4 条变异**全部没咬住**）：
 //
 //   · 让 `peakResource()` 恒返回 `null`   → launcher 四套件全绿
 //   · 把 `peakResource()` **整个删掉**     → 全绿
@@ -611,7 +611,7 @@ test('★★ peak-resource：**没开采样**时不写那条日志（配置不�
 // 上面那三条退出用例**全都**用 `child.exitNow(0)` 触发，也就是**非主动退出**
 // （`stopping === false`）。于是"主动停止"这条路上发生了什么，没有一条判据问过。
 //
-// 实测（`scratch/_probe-peak-on-stop.mjs`，同一替身、同一 io，只差是不是主动停止）：
+// 实测（`scripts/probes/_probe-peak-on-stop.mjs`，同一替身、同一 io，只差是不是主动停止）：
 //
 //     A 主动停止   → status() 上有 64MiB 读数，而那条日志 **0 条**
 //     B 非主动退出 → 同样 64MiB，日志 **1 条**

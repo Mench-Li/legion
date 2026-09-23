@@ -39,7 +39,7 @@ import { createHash } from 'node:crypto'
 import { resolveDshCheckout } from '../lib/dsh-checkout.mjs'
 import { parseSuiteCounts, countsFragment } from './parse-suite-output.mjs'
 // ★ 阶段 3 评审闸门的退出码：**按名字**分流，不写裸数字。
-//   裸数字那版被破验证伪过一次（`scratch/_mutate-r115-churn.mjs` 的 M6）：
+//   裸数字那版被破验证伪过一次（`scripts/probes/_mutate-r115-churn.mjs` 的 M6）：
 //   把 `3` 误写成 `2` 时没有任何判据会红，而"探针读不到"那条告警会静默变成死代码。
 import { CHURN_EXIT } from '../prt/hot-file-churn.mjs'
 
@@ -1204,7 +1204,7 @@ async function stageTest() {
       //     只断言 `allowed === false` 的用例**看不见它**。
       // ★ 而这一族判据自己过了破验：7 个变体（含"裁决态被当成失败"、
       //   "把 DSH 名直接喂给判定器"、"缺席退化成永远放行"）**全部按预期变红**
-      //   （量具 `scratch/_mutate-whitelist-port.mjs`，可复跑）。
+      //   （量具 `scripts/probes/_mutate-whitelist-port.mjs`，可复跑）。
       label: 'whitelist-port（PRT-603：判定器对了 ≠ 真 DSH 名进去它认得）',
       files: [
         'runtime/dsh-composition/whitelist-port.test.mjs',
@@ -1936,7 +1936,7 @@ async function stageTest() {
     + '每行至少一条落点解析得到；状态词表**归 progress-check ⑥**，本套只钉住那个所有者还在）',
   files: ['scripts/prt/feature-table.test.mjs'], cwd: ROOT },
   // PRT-611 续：「声明了却没人读」的扫描**接进 CI**。
-  //   ★ 起因：台账引用了 `scratch/scan-silent-declarations3.mjs` 的读数
+  //   ★ 起因：台账引用了 `scripts/probes/scan-silent-declarations3.mjs` 的读数
   //   （"还剩 3 个，一个都没改"），而**没有任何东西在跑它** ⇒
   //   它的读数从 3 漂到 0 没人发现，原因是**有人把那三个字段的名字写进了文档**
   //   （含 `boundary-facts.mjs` 里的手钉），纯词频就把"提及"当成了"读者"。
@@ -2660,7 +2660,7 @@ async function stageTest() {
       cwd: ROOT,
     },
     // 同一次完备性检查里的另外两个（**不是**路由族，各自单独成组）：
-    //   · `mutate-lib` —— 破验量具自己的库（`scratch/mutate.mjs` 的引擎）。
+    //   · `mutate-lib` —— 破验量具自己的库（`scripts/probes/mutate.mjs` 的引擎）。
     //     量具坏了会把"没咬住"读成"咬住了"，所以它自己也要有断言。
     //   · `sse-tail-guard` —— SSE 尾读守卫。
     {
@@ -4182,7 +4182,9 @@ async function stageTest() {
         //   与一个"真实读者读得回来"的用例，在两边各自单测时是同一片绿——
         //   只不过前者的绿，在读者一改键空间语法的那天照样是绿的。*
         //
-        // ★ 结构性原因也在这里被钉住：Legion 的模型引用是 `legion/model/<id>`（**三段**），
+        // ★ 结构性原因也在这里被钉住：**活着的**模型引用是 `model/api-key`（**两段**）——
+//   ⚠️ 这段注释曾写作"Legion 的模型引用是 `legion/model/<id>`（三段）"，那句描述的是
+//   已删除的 `first-run.mjs`（第 118 轮第十二轮订正）。三段的形状依然不可寻址：
         //   而 DSH 的 `records` 只收两段、`refs` 一个斜杠都不收 ⇒ `planDshLookup()`
         //   对它返回 `{addressable:false, space:null}`。所以"持有、但既不可寻址又没映射"
         //   必须是**具名拒绝**而不是跳过——*一个"文件看起来完整、就是少了最要紧那一把钥匙"
@@ -4804,7 +4806,7 @@ async function stageDoc() {
   //     我一开始把这条写在注释里说成"读不到 ⇒ 如实报进 detail"，实测才发现
   //     那句是**错的**：*一个"我写了分支所以坏掉时会被记录下来"的印象，
   //     与一个"坏掉时进程根本起不来"的事实，在我没有真的去删一次文件的时候
-  //     是同一个东西。*（见 `scratch/_probe-ci-missing-probe.md` 的记录。）
+  //     是同一个东西。*（见 `scripts/probes/_probe-ci-missing-probe.md` 的记录。）
   //
   //     这是**有意的取舍**：静态 import 换来的是"退出码常量不可能与探针漂开"
   //     （破验 M6/M7 守的就是这个）。探针文件缺失属于"仓库坏了"，不是"读数异常"——

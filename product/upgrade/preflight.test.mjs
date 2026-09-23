@@ -292,7 +292,7 @@ test('⑤ ★★ 补丁层成对关系只认 `match`：`unverified` 与任何认
 //     const unknownChecks = checks.filter((c) => c.verdict === 'unknown')   ← 手写
 //
 //   往词表里加第四个裁决 ⇒ 它**既不进 blocked、也不进 unknown**
-//   ⇒ `ok` 仍然是 `true`。（实测 `scratch/_probe-preflight-verdict.mjs`：
+//   ⇒ `ok` 仍然是 `true`。（实测 `scripts/probes/_probe-preflight-verdict.mjs`：
 //   裁决 `degraded`、`ok = true`、`blocked = []`、`unknown = []`、`reasons = []`，
 //   而**同一份返回值**里 `remedies.disk` 还在给处置建议。）
 //

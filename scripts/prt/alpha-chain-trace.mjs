@@ -298,7 +298,7 @@ export function traceChain({ classMap = loadClassMap(), exists = (p) => existsSy
 //
 // ## ★★ 为什么归属必须是**声明的**，不能靠正则去散文里找文件名
 //
-// 第一版探针（`scratch/_probe-break-owners.mjs`）就是在 §5 每一格里搜文件名，
+// 第一版探针（`scripts/probes/_probe-break-owners.mjs`）就是在 §5 每一格里搜文件名，
 // 结果它报出 `product/lifecycle/retention.mjs` **"没有归属"**——**错的**：
 // 第 16 条管着它，只是 §5 用的是**中文名**「保留策略」。
 //

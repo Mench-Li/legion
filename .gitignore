@@ -43,3 +43,7 @@ Thumbs.db
 .ci/
 releases/
 scrum/pending-goals.json
+
+# 第 118 轮第十二轮（业主确认④）：被引用的"量具"已收进 scripts/probes/ 并跟踪；
+# 剩下的是运行期状态与一次性草稿，明确不进版本控制。
+scratch/

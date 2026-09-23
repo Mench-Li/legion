@@ -122,7 +122,7 @@ export function parseSpecHeadings(specText) {
  *   > 在汇总里是同一个读数——
  *   > 只不过前者会把**读不出来的东西**报成一个**看起来需要关注**的数。
  *
- *   实测（`scratch/_probe-status-table-owner.mjs`）：
+ *   实测（`scripts/probes/_probe-status-table-owner.mjs`）：
  *
  *   | 输入 | 旧 `parseStatusTable` | 所有者（`featureRows`）|
  *   | --- | --- | --- |

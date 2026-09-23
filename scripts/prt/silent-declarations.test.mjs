@@ -4,7 +4,7 @@
  * ## 为什么需要这一层
  *
  * 这一轮实测到的事故是：台账（PRT-611）**引用**了
- * `scratch/scan-silent-declarations3.mjs` 的读数"还剩 3 个"，
+ * `scripts/probes/scan-silent-declarations3.mjs` 的读数"还剩 3 个"，
  * 而那个脚本**没有任何东西在跑它**。于是：
  *
  *   · 它的读数从 3 漂到 0，**没人发现**；
@@ -31,7 +31,7 @@ import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
-const SCANNER = 'scratch/scan-silent-declarations3.mjs'
+const SCANNER = 'scripts/probes/scan-silent-declarations3.mjs'
 
 function runScanner() {
   try {

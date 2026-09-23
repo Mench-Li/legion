@@ -74,7 +74,7 @@ export const DEFAULT_PEAK_SAMPLE_MS = 5000
  *
  * `peakResource()` 此前在**整个仓库里只出现一次**：它自己的定义。
  * 采样器每 5 秒真采一次（win32 上每次起一台 PowerShell），窗口也维护得好好的，
- * 而**没有任何东西读它**。实测（`scratch/verify-peak-resource-wired.mjs`，
+ * 而**没有任何东西读它**。实测（`scripts/probes/verify-peak-resource-wired.mjs`，
  * 变异 4 条）：
  *
  *   · 让 `peakResource()` 恒返回 `null`        → 全绿

@@ -287,7 +287,7 @@ export function createWhitelistPort({ permit, routing = LEGION_TOOL_ROUTING, reg
     //   > 只不过前者的理由栏是**空的**（因为拒绝时 `translated.code` 是 `null`），
     //   > 于是值班的人拿到一条没有理由的拒绝。
     //
-    //   ★ 这条缺陷是`scratch/_probe-r112-whitelist.mjs` 的读数逼出来的：
+    //   ★ 这条缺陷是`scripts/probes/_probe-r112-whitelist.mjs` 的读数逼出来的：
     //     它打印原始返回，`rule: null` + `translationState: 'decided'` 当场现形。
     //     只断言 `allowed === false/true` 的用例**看不见它**。
     if (translated.state !== 'unique' && translated.state !== 'decided') {      // ★ 拒绝理由里带上**是哪一步拒的**：`rule` 是给桥去拼文案的，

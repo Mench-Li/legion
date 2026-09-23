@@ -25,7 +25,7 @@ import { defineExactTokenizer } from './tokenizer.mjs'
  * 分词产物的字段清单。★★★ 它**机械校验**产物形状，不是一句说明。
  *
  * ---------------------------------------------------------------------------
- * 第 43 轮实测到的缺陷（`scratch/_probe-exempt-consumers.mjs` 量出来的）：
+ * 第 43 轮实测到的缺陷（`scripts/probes/_probe-exempt-consumers.mjs` 量出来的）：
  *
  *     声明: ['name', 'model', 'pattern', 'vocab', 'merges', 'evidence']   ← 6 个
  *     产物: { name, model, evidence, vocab, merges, ranks, pattern }      ← 7 个

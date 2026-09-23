@@ -215,7 +215,7 @@ node scripts/prt/hot-file-churn.mjs        （exit=0）
 ★ ⑦ 是**破验逼出来的**：⑥ 只钉"退出码是否跟随 `verdict.cooled`"，而它读的是同一个 `collectChurn`——把 `cooled` 改成恒 `true` 时两侧一起漂、⑥ **照样通过**。
 > 一条"报告与判定一致"的断言，与一条"判定本身是对的"的断言，在判定被写死成某一侧的时候是同一个东西——只不过前者的两侧会一起漂。
 
-**破验**（`scratch/_mutate-r114-churn.mjs`）：M1 空读数守卫失效 / M2 `--strict` 失效 / M3 判定恒已降温 ⇒ **3/3 咬住**，且**逐字节还原**。
+**破验**（`scripts/probes/_mutate-r114-churn.mjs`）：M1 空读数守卫失效 / M2 `--strict` 失效 / M3 判定恒已降温 ⇒ **3/3 咬住**，且**逐字节还原**。
 
 ### 8.2 文档：让"可安排开工"不再从两处读出来
 
@@ -286,7 +286,7 @@ CHURN_VERDICT cooled=false recentMax=10/40 historicalPeak=17/40 head=d8dcb4d
    整个 CI 当场死掉，detail 一个字都打不出来。我原先注释里把这条说成
    "读不到 ⇒ 如实报进 detail"，**那句话是错的**，已订正。
    行为保留（静态 import 换来"退出码常量不可能与探针漂开"，正是破验 M6/M7 守的东西）。
-   实测记录见 `scratch/_probe-ci-missing-probe.md`。
+   实测记录见 `scripts/probes/_probe-ci-missing-probe.md`。
 
 #### 8.4.4 PRT-006 跨版本恢复：缺口已关
 
@@ -316,9 +316,9 @@ CHURN_VERDICT cooled=false recentMax=10/40 historicalPeak=17/40 head=d8dcb4d
 
 ```
 node --test scripts/prt/hot-file-churn.test.mjs                    → 24/24 pass
-node scratch/_mutate-r115-churn.mjs                                → 6/6 咬住，逐字节还原
+node scripts/probes/_mutate-r115-churn.mjs                                → 6/6 咬住，逐字节还原
 node --test scripts/prt/backup-restore-cross-version.test.mjs      → 11/11 pass
-node scratch/_mutate-r116-xver.mjs                                 → 5/5 咬住，逐字节还原
+node scripts/probes/_mutate-r116-xver.mjs                                 → 5/5 咬住，逐字节还原
 node scripts/ci/run-ci.mjs --only doc                              → PASS，闸门读数已入 detail
 node scripts/prt/boundary-facts.mjs                                → PASS 30/30，红 0
 node scripts/prt/progress-check.mjs / spec-progress.mjs            → exit 0 / exit 0
@@ -339,10 +339,10 @@ node --test orchestrator/worker/can-read-authorization-source.test.mjs team-hub/
 node --test product/launcher/run-credential-dsh-process.test.mjs   # PRT-509 ③
 node scripts/prt/hot-file-churn.mjs --strict         # PRT-316 闸门（未降温 ⇒ 3 / 读不到 ⇒ 2）
 node --test scripts/prt/hot-file-churn.test.mjs      # ⑤⑥⑦⑧⑨⑩
-node scratch/_mutate-r115-churn.mjs                  # 破验 6/6
+node scripts/probes/_mutate-r115-churn.mjs                  # 破验 6/6
 node scripts/ci/run-ci.mjs --only doc                # 闸门读数进 CI detail
 node --test scripts/prt/backup-restore-cross-version.test.mjs      # PRT-006 跨版本 11 例
-node scratch/_mutate-r116-xver.mjs                   # 破验 5/5
+node scripts/probes/_mutate-r116-xver.mjs                   # 破验 5/5
 node scripts/prt/boundary-facts.mjs                  # 引文坐标
 git log --oneline -S "resolveRunPermissions" -- team-hub/server.mjs team-hub/run-store.mjs
 ```

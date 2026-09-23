@@ -44,7 +44,7 @@ export const PREFLIGHT_VERDICTS = Object.freeze(['ok', 'blocked', 'unknown'])
  * ★★★ 每个裁决**算哪一类**。这是 `PREFLIGHT_VERDICTS` 唯一的机械消费者。
  *
  * ---------------------------------------------------------------------------
- * 第 43 轮实测到的缺陷（`scratch/_probe-preflight-verdict.mjs`）：
+ * 第 43 轮实测到的缺陷（`scripts/probes/_probe-preflight-verdict.mjs`）：
  *
  *     export const PREFLIGHT_VERDICTS = Object.freeze(['ok', 'blocked', 'unknown'])
  *     ...

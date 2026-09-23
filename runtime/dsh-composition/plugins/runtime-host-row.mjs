@@ -396,7 +396,7 @@ export function observeComposition(ctx) {
   //   ⇒ 那一行会把**自己**读成「行已挂载但未激活（等待依赖服务）」，
   //   而"它的 `apply` 此刻正在执行"本身就是它已挂载的**直接证据**。
   //
-  //   实测（第 7 轮，`scratch/_r6-probe-root.mjs`，同一份真补丁层 + 真 DSH 进程）：
+  //   实测（第 7 轮，`scripts/probes/_r6-probe-root.mjs`，同一份真补丁层 + 真 DSH 进程）：
   //     · 从**另一行**观察：九条条目**全部** `state=2`、`OBS-ROWS` 全 `true`；
   //     · 而从 registrar 自己的 `apply` 里观察：它报自己"未激活"。
   //   ⇒ 那条红是自指的产物，不是"补丁层真的没生效"。

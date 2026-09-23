@@ -245,7 +245,7 @@
 | **J** | ★★★ **外部 API 授权表要不要管 scheme**（第 20 轮**新查出**，**本表最新的一条**） | 待裁决 | 给 PRT-606 接上端口之后，`checkExternalApi` 的**输入**第一次真的从线上来了。而它**不看 scheme**——`normalizeHost` 只取 host、`normalizeUrlPath` 只取 path，`scheme` 从头到尾没被读过（`SCHEME_DENIED` 那一条归 PRT-605 的 `checkNetwork`）。⇒ 精确读数：**一个 `ftp://api.example.com/api/items/1` 只要 host 与模式对得上，就会被 `externalApiScope` 放行** | ★ 我**没有**顺手加"必须 http(s)"——那是**发明策略**（PRT-253 §3 明令禁止发明默认值），而"哪些 scheme 算外部 API"是一个产品决定。三条路：**(a)** 保持现状（scheme 只由 `checkNetwork` 管，两道各管一段）；**(b)** 让 `checkExternalApi` 也拒非 http(s)（一道能自洽，但从此两道对同一个 URL 有两套 scheme 规则）；**(c)** 在端口适配器里拒（**最坏**：把策略写进适配器，而适配器本该只做形状转换）。★ 它今天**不致命**的原因**不是**"已经拦住了"，是"这一格在真实部署里仍是 `false`"——两件事不能混。★ 而它**为什么仍然要记**：两道检查谁先谁后在 `preExecute` 上是**短路**（先拒的说了算），不是真的一次取严合并；那个顺序一旦被改，`ftp://` 这类 URL 的处置就跟着变，而**没有任何读数会发现** |
 
 | **K** | ★★★ **岗位清单说的是「Legion 能力名」还是「执行面工具名」**（第 21 轮**新查出**，**本表最新的一条**） | 待裁决 | 第 21 轮把 `DECISION-RUNREQUEST-EXECUTION-PLANE.md` §11 **逐字留下的**两处"我没有量"量掉了：`whitelist`（PRT-603）这道缺口**不在配置里**——唯一那个产出者 `permitsTool`（`employee-manifest.mjs:317`）的输入是 **Legion 能力名**（`read-file` / `git-push` / …），而桥交给这个端口的投影里那个工具名是**执行面（DSH）名**（`read` / `write` / `bash` / `web_fetch` / …），两个空间**结构上不相交**（`tool-capability.mjs:465-492` 早就逐字写过这件事——那条讲的是**静态下限**，`createHardFloorGuard` 只看 `execution.name`、中间没有翻译）。实测：同一份 permit，喂 Legion 名 ⇒ **放行**；喂 DSH 名 ⇒ **一个都不放行**，而把 `maxRisk` 抬到最高也**救不了**（拒因从 `risk-above-ceiling` 挪到 `unknown-tool-not-named`，**还是拒**）⇒ 只要喂进来的是 DSH 名，这道白名单**永远只能拒、不可能放行** | ★ 我**没有**接线，也**没有**"顺手加一个翻译"——因为翻译**不是机械的**：`LEGION_TOOL_ROUTING` 的反推在 `bash` / `pwsh`（各 4 个：`run-command` / `git-status` / `git-commit` / `git-push`）与 `web_fetch`（2 个：`fetch-url` / `call-external-api`）上**一对多**，而 `bash` 那一堆里**同时塌着**低风险的 `git-status` 与高风险的 `git-push`。三条路：**(a)** 让 `permitsTool` 收**执行面名** + 一份**执行面能力表**（把词汇表换到线上那一侧，`tool-capability.mjs` 要跟着扩）；**(b)** 继续收 Legion 名，新增一层**带取舍的翻译**（取严？看参数？——那个取舍本身就是决定）；**(c)** 让岗位清单**直接写执行面工具名**（最直白，但清单从此绑死 DSH 的名字，与"能力名"那条设计理由冲突）。★ 而它**为什么仍然要记**：这一道今天**不是"暂时没配"**——配了也只会得到一个**全拒**的强制面，而那个全拒**看起来像"岗位清单写错了"**。★ 顺带记账：仓库里有**两个同名 `EmployeeManifest`**（强制面 `MANIFEST_FIELDS` **10** 个 / 上下文 `stableRecord` 写死 **11** 键），**两个方向都不可转换**（context→强制面**抛**、强制面→context **丢字段**）——它是否要合并是**另一个**裁决 |
-| **§5 第 29 条** | ★★ **`RunRequest.env`（环境变量白名单）要不要有真消费者**（第 30 轮**新查出**，**本表最新的一条**） | 待裁决 | 两份规格都把它写成 RunRequest 的**必要内容**（目标文档 `:146` 逐字「`RunRequest` 必须包含 …环境变量白名单和工具权限」；设计规格 `:195` 同）。第 30 轮逐项量了一遍（`scratch/_probe-env-whitelist.mjs`）：① **不在** `RUN_REQUEST_REQUIRED`（15 个必填字段）里；② 给了**会**校验形状（`run.mjs:218-222`）；③ 不给**静默补成 `[]`**（`run.mjs:227`）；④ **读者一个都没有**——全仓 `req.env` / `request.env` **零命中**，`runtime/adapters/**` 没有任何一处碰它。⇒ 一次 Run 报不报白名单，对执行**没有任何影响** | ★ **不许**顺手改成必填：今天唯一的生产者（`orchestrator/worker/executor.mjs:1061-1091`）**不发**这个字段，改必填等于**逼每个人编一份**白名单——而同一个文件 `run.mjs:97-125` 用一整段论证过**为什么那正是错的形状**（它为 `enforcementFloor` 选的是三态 `absent`/`installed`/`refused`，原话：「一个'用必填字段把缺席挡在门外'的契约，与一个'让每个人都编一份空下限才进得来'的契约，是同一个东西」）。★ 两条路：**①** 给它接一个**真消费者**（那它才是一条真的白名单，且要照 PRT-214 的五性质办）；**②** 承认环境的作用域**本来**就是**进程级**的（`product/process-manifest.mjs` 的 `envNames` + `buildChildEnv()`——今天真正在起作用的那一层），于是把两句"必须包含"改掉、并决定这个字段是留还是删。★ 它**不作恶**的原因只有一个：这一格本来就没被消费——"**它没伤人**"与"**它是对的**"是两件事。★ **与 §2.1 里别的条目都不同**：其余每条的红都是"做了而没生效"，这一条是"**字面为真、而断言的东西是惰性的**"——把它拿去做任何字面核对**都会通过** |
+| **§5 第 29 条** | ★★ **`RunRequest.env`（环境变量白名单）要不要有真消费者**（第 30 轮**新查出**，**本表最新的一条**） | 待裁决 | 两份规格都把它写成 RunRequest 的**必要内容**（目标文档 `:146` 逐字「`RunRequest` 必须包含 …环境变量白名单和工具权限」；设计规格 `:195` 同）。第 30 轮逐项量了一遍（`scripts/probes/_probe-env-whitelist.mjs`）：① **不在** `RUN_REQUEST_REQUIRED`（15 个必填字段）里；② 给了**会**校验形状（`run.mjs:218-222`）；③ 不给**静默补成 `[]`**（`run.mjs:227`）；④ **读者一个都没有**——全仓 `req.env` / `request.env` **零命中**，`runtime/adapters/**` 没有任何一处碰它。⇒ 一次 Run 报不报白名单，对执行**没有任何影响** | ★ **不许**顺手改成必填：今天唯一的生产者（`orchestrator/worker/executor.mjs:1061-1091`）**不发**这个字段，改必填等于**逼每个人编一份**白名单——而同一个文件 `run.mjs:97-125` 用一整段论证过**为什么那正是错的形状**（它为 `enforcementFloor` 选的是三态 `absent`/`installed`/`refused`，原话：「一个'用必填字段把缺席挡在门外'的契约，与一个'让每个人都编一份空下限才进得来'的契约，是同一个东西」）。★ 两条路：**①** 给它接一个**真消费者**（那它才是一条真的白名单，且要照 PRT-214 的五性质办）；**②** 承认环境的作用域**本来**就是**进程级**的（`product/process-manifest.mjs` 的 `envNames` + `buildChildEnv()`——今天真正在起作用的那一层），于是把两句"必须包含"改掉、并决定这个字段是留还是删。★ 它**不作恶**的原因只有一个：这一格本来就没被消费——"**它没伤人**"与"**它是对的**"是两件事。★ **与 §2.1 里别的条目都不同**：其余每条的红都是"做了而没生效"，这一条是"**字面为真、而断言的东西是惰性的**"——把它拿去做任何字面核对**都会通过** |
 | **M** | ★★★★★ **自动执行到底该不该开**（第 63～79 轮查出，**第 108 轮才补进这张表**——此前只散在正文里，**§2.0 与 §2.1 两张表上都没有它**） | 待裁决 | `runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs` 的 `runtimeCapabilityEvidence()`（`L579`）逐项给出四项必需能力。其中 **3 项的 `satisfied` 是写死的 `false` 字面量**：`L584` `tool-permission-enforcement`（`ENFORCEMENT_PLANE_MEASURED_ELSEWHERE`）、`L592` `cancel-and-timeout`（`CANCEL_NOT_GUARANTEED_BY_ENGINE`）、`L600` `usage-reporting`（`RESULT_CONTRACT_HAS_NO_USAGE`）；第 4 项 `structured-result` 是**真的算出来的**（`structuredResultEvidence()`）。★ 三项的 `reason` **各不相同、且各指向仓里真实存在的东西**（① 强制面**在别处**被判定，探针"不把同一件事再判一遍，两份判定会漂移"；② `runtime/adapters/dsh/port.mjs` 文件头记的**已发生生产故障**「abort 不保证杀死子代理」；③ DSH 的 `SubagentResult` 契约里**没有任何用量字段**，而 `usage.mjs` 的 `collectUsage()` 读 `result.usage`）。⇒ 而 `probe.mjs` 只认**显式 true** ⇒ **`autoExecutionForbidden` 恒为 true**。★★ 实测：拿四种完全不同的现场各调一次，那三项的取值集合都是 `{false}`（常量）⇒ **与本机平台无关**，**不是**"这次恰好不行"。★ 代价：**22 条端到端用例红 / 6 个套件**（第 103 轮从一次真跑完全部套件的 CI 里数的；第 102 轮前 `test` 一个用例都没跑，所以第 63～77 轮的"21 条"漏了 `model-config`） | ★★★ **两条路，代价相反**：**(甲)** 承认「本设计下自动执行**永不开**」并写成**设计事实** ⇒ §9 链的 L2/L5 **不是"红的"而是"按设计关着"**，红名单据此**重定基线**；**代价**：产品**仍然不能自动执行**，只是这件事从"没人知道"变成"白纸黑字"。**(乙)** 给自检一个**第二来源**（跨进程 / 跨平面的证据通道），让"在别处被判定"能被**本进程验证** ⇒ 门禁变绿；**代价**：要定义"在别处"怎么被核 —— **否则就是把我第 91～93 轮警告过的"两份判定会漂移"重新种回去**，而那正是这三项当初选择"不报 true"的理由。★ 我**没有**替您选，也**故意不动手**（第 98 轮起）：乙的已知代价恰恰是「**门禁会变绿，而产品仍然不能自动执行**」——那正是这份工作通篇在批评的那种绿。★★★ **这一格为什么此前不在表上**：它是第 63～79 轮查出来的，而这两张表是第 16～33 轮那批写的；此后每一轮的发现都进了 §三之三的**留档**，**而没有一步是"把它提升进决策表"**——「写进了日志」与「写进了决策表」不是同一件事，而**只有后者能让您"先看哪一格"**。 |
 
 | **L** | ★★★ **那条出站车道的文件该放在哪个目录**（第 22 轮**新查出**，**本表最新的一条**） | 待裁决 | 第 22 轮给决策表第 15 条（PRT-610 的写入方）造了一条**逐 Run 的载荷**：写入侧 `runtime/toolcall/spool.mjs`（套件 `toolcall-spool` 14 例）、收账侧 `orchestrator/worker/toolcall-drain.mjs`（套件 `toolcall-drain` 13 例），并在**真 SQLite** 上把整条环走通（执行面无 token 写 spool → 收账侧有 token 调 `recordToolCall`/`markDispatched`/`recordResult` → `recorded` 翻成 `true`，并有否定对照）。⚠️ **但生产里还没有人调它们**，而缺的**不是代码**：收账的一方今天拿不到 spool 的目录（hub 的库是 `team-hub/team.db`，`server.mjs:279`，它**不读** `LEGION_DATA_DIR`），而**猜一个两边都同意的路径**正是 PRT-253 §3 禁止的"发明默认值"⇒ 立为决策表**§5 第 28 条** | **不决定**则§5 第 15 条停在原处：表在、读面在、就绪判据在，而 `decisionSourceRecorded` **依然没有任何产出者**——发布门禁永远判否。★ 两个候选接缝已读出（hub 进程 / `root-row.mjs:591` 的 `onDecision`），但后者必须从**按 Run 安装**的缝读 runId——`root-row.mjs` 是**进程级单例**，在那儿绑死一个 Run 会让整个进程只往**第一个** Run 的账本里写。详见 §3.0g |
@@ -866,7 +866,7 @@ CommonMark 的代码跨度里反斜杠**不**转义（`` `a\|b` `` 原样渲染�
 
 > §4.1 F-01 逐字写着「`RunRequest` 必须包含 …工作目录、**环境变量白名单**和工具权限」。
 
-| 问题 | 实测（`scratch/_probe-env-whitelist.mjs`，可复跑） |
+| 问题 | 实测（`scripts/probes/_probe-env-whitelist.mjs`，可复跑） |
 | --- | --- |
 | `env` 在 `RUN_REQUEST_REQUIRED`（15 个必填字段）里吗 | **不在** ⇒ 不是必填 |
 | 给了会校验形状吗 | **会**：非数组 ⇒ `env 必须是数组（白名单）`（`run.mjs:218-222`） |
@@ -894,7 +894,7 @@ CommonMark 的代码跨度里反斜杠**不**转义（`` `a\|b` `` 原样渲染�
 
 写 §1.3 时我引了「本文件 `:66`」指 F-01 那一段——而 §1.2（**我自己第 29 轮刚插进去的**）
 已经把那一行推到了 `:146`。这正是第 24 轮那条 ② 的形态，**当场发生在写这段文字的手上**。
-⇒ 用 `scratch/_verify-citations.mjs` 把每个行号**重量了一遍**才落笔。
+⇒ 用 `scripts/probes/_verify-citations.mjs` 把每个行号**重量了一遍**才落笔。
 
 > *一条判据的价值不在写下来的那天，在于它此后每次都咬得住*——
 > 包括咬住**正在写它的人**。
@@ -1601,7 +1601,7 @@ worktree 与安全边界并列，边界确实建在强制面（PRT-603～606 与
 这一轮我按自己写的"需另行裁决"去裁决它，读代码的结论是：**豁免错了。**
 
 `product/paths.mjs` 的两张声明表原先**各有一份手写复述**，两份都有静默失效路径
-（实测见 `scratch/_probe-path-roles.mjs`）：
+（实测见 `scripts/probes/_probe-path-roles.mjs`）：
 
 | | 写法 | 后果（实测） |
 | --- | --- | --- |
@@ -1653,8 +1653,8 @@ M3（改回手写四元对象）与 M4（改成 `DIR_ROLES.slice(1, 5)`）**都�
 ### 读数
 
     node --test product/paths.test.mjs                    # 18 → **26/26**（接线①…⑧）
-    node scratch/_mutate-path-roles.mjs                   # **10/10** 咬住、0 漏网、逐字节还原
-    node scratch/_probe-path-roles.mjs                    # 修前/修后的实测对照
+    node scripts/probes/_mutate-path-roles.mjs                   # **10/10** 咬住、0 漏网、逐字节还原
+    node scripts/probes/_probe-path-roles.mjs                    # 修前/修后的实测对照
     node scripts/prt/declaration-mirrors.mjs              # 238 张表 / 装饰 3 → **2** 张
     node --test scripts/prt/declaration-mirrors.test.mjs  # 12/12
 ### 3.0y 第 43 轮：**豁免表空了**——三次豁免，三次都以"修好代码"收场
@@ -1664,7 +1664,7 @@ M3（改回手写四元对象）与 M4（改成 `DIR_ROLES.slice(1, 5)`）**都�
 
 **先量，不先信。** 判据只看得见"有没有被**遍历**"，分不出"被人手写重建"（真缺陷）、
 "被用了但没遍历"（我的说法）、"根本没有任何读者"（死声明）。于是 `git grep` 数读者点
-（`scratch/_probe-exempt-consumers.mjs`）：
+（`scripts/probes/_probe-exempt-consumers.mjs`）：
 
 | 名字 | 读者点 | 判定 |
 | --- | --- | --- |
@@ -1729,11 +1729,11 @@ R1 **立刻报**"声明了却没有任何遍历点，而同文件里把它的成
 
     node --test product/upgrade/preflight.test.mjs            # 16 → **21/21**
     node --test runtime/context/bpe.test.mjs                  # 27 → **32/32**
-    node scratch/_mutate-r43.mjs                              # **12/12** 咬住、0 漏网、逐字节还原
+    node scripts/probes/_mutate-r43.mjs                              # **12/12** 咬住、0 漏网、逐字节还原
     node scripts/prt/declaration-mirrors.mjs                  # 238 张表 / 装饰 0 张 / **豁免 0 条**
     node --test scripts/prt/declaration-mirrors.test.mjs       # 12/12
-    node scratch/_probe-exempt-consumers.mjs                   # 豁免表的读者点实测
-    node scratch/_probe-preflight-verdict.mjs                  # 修前/修后三格对照
+    node scripts/probes/_probe-exempt-consumers.mjs                   # 豁免表的读者点实测
+    node scripts/probes/_probe-preflight-verdict.mjs                  # 修前/修后三格对照
 ### 3.0z 第 44 轮：PRT-009 `peak-resource` 的"剩下那一半"，切开了一半
 
 第 43 轮收尾时这一项卡在两句话上：「接线都在」与「**每次 Run 真的印出一行**还没被观测过」。
@@ -1746,7 +1746,7 @@ R1 **立刻报**"声明了却没有任何遍历点，而同文件里把它的成
 | `supervisor.test.mjs:396` | 对**真**进程采样（win32 `Get-Process`） | 只到采样器，**没走 `status()`** |
 | `supervisor.test.mjs:484` | 读数被交出去（那条日志） | 用的是**假 io**（`makePeakIo`） |
 
-`scratch/_probe-peak-e2e.mjs` 起一台**真**子进程走了一次：
+`scripts/probes/_probe-peak-e2e.mjs` 起一台**真**子进程走了一次：
 
 ```text
 真进程 pid=27312  peakWorkingSet=194.5 MiB  cpuMs=47  samples=1  window.ok=true
@@ -1766,7 +1766,7 @@ R1 **立刻报**"声明了却没有任何遍历点，而同文件里把它的成
 **（二）★★★ 而「每次 Run 真的印出一行」当时还不成立。**
 `product/launcher/supervisor.mjs` 的 `handleExit` 在"主动停止"那条分支里**直接 return**，
 `reportPeakResource()` 只在**非主动退出**时走到。并排实测
-（`scratch/_probe-peak-on-stop.mjs`，同一替身、同一 io，**只差是不是主动停止**）：
+（`scripts/probes/_probe-peak-on-stop.mjs`，同一替身、同一 io，**只差是不是主动停止**）：
 
 | | `status()` 上的读数 | 那条日志 |
 | --- | --- | --- |
@@ -1782,7 +1782,7 @@ R1 **立刻报**"声明了却没有任何遍历点，而同文件里把它的成
 > 而资源基线要的恰恰是**正常那次**。
 
 **已修**：那条分支补一句，判据 `!disposed`（`dispose()` 那条路上 sink 可能已关，只有它仍不报）。
-读数：`supervisor.test.mjs` **22 → 25/25**（+3）；破验 `scratch/_mutate-r44.mjs`
+读数：`supervisor.test.mjs` **22 → 25/25**（+3）；破验 `scripts/probes/_mutate-r44.mjs`
 **5/5 咬住、0 漏网**、逐字节还原。
 
 **（三）★ 我自己的门禁，抓住了我自己的缺陷。**
@@ -1897,7 +1897,7 @@ L5  DshRuntimeAdapter 执行 Run  —— ✔ 有活实现
 
 **读数**：`boundary-facts` **PASS 19/19**、自身套件 **43 → 44/44**；
 claim 带上 🟡（"**四个**数都核"），四处写死的台账读数一并订正。
-**破验** `scratch/_mutate-r44-tally.mjs` **5/5 咬住、0 漏网**、逐字节还原。
+**破验** `scripts/probes/_mutate-r44-tally.mjs` **5/5 咬住、0 漏网**、逐字节还原。
 
 ⚠️ **破验自己踩的坑**：整轮 5 条一起跑超过单次命令的 **600 秒**上限 ⇒ 第 5 条跑到一半
 **整个命令被杀** ⇒ `try/finally` **没跑到** ⇒ `boundary-facts.mjs` 被**留在变异形态**。
@@ -1915,7 +1915,7 @@ claim 带上 🟡（"**四个**数都核"），四处写死的台账读数一并
 还有几个台账解析器，认不出一个状态标记时会**静默丢行**？
 
 ★ 不用等真的出现第 5 个状态：往合成台账里放一个今天不存在的标记（🔵），
-看每个解析器的**行数**有没有少（`scratch/_probe-status-poison.mjs`）。
+看每个解析器的**行数**有没有少（`scripts/probes/_probe-status-poison.mjs`）。
 
 | 解析器 | 对照(✅) | 毒药(🔵) | 判定 |
 | --- | --- | --- | --- |
@@ -1938,7 +1938,7 @@ claim 带上 🟡（"**四个**数都核"），四处写死的台账读数一并
 > 是同一个东西——只不过前者加第 5 个状态只改一处，后者要改 N 处，
 > 而漏掉的那几处**不报错**，只是安静地少算。
 
-⇒ `scratch/_mutate-r45-vocab.mjs` 三条：
+⇒ `scripts/probes/_mutate-r45-vocab.mjs` 三条：
 
 | 变异 | 做法 | 期望 | 实际 |
 | --- | --- | --- | --- |
@@ -2028,7 +2028,7 @@ claim 带上 🟡（"**四个**数都核"），四处写死的台账读数一并
 第 45 轮我只收敛了"有哪些标记"。`tallyLedger` 仍然自己判行、自己分格、
 **自己为每个标记写一个 `if`** —— 同一张词表的**第四种**手写形式。
 
-**先量**（`scratch/_probe-tally-owner.mjs`）：真台账上两个所有者**今天一致**
+**先量**（`scripts/probes/_probe-tally-owner.mjs`）：真台账上两个所有者**今天一致**
 （都是 145 = 140/1/4/0）；但
 ① 四种"脏格子"里 **3 处**接受规则分歧（`✅🟡`/`✅（待复核）`/`⏸→🟡`：所有者抛、它照收）；
 ② 词表加第 5 个标记 ⇒ `total=5` 而四档之和 **4**。
@@ -2059,7 +2059,7 @@ claim 带上 🟡（"**四个**数都核"），四处写死的台账读数一并
 我去问**同一张功能表还有没有别的读者**。答案是**有**：
 `spec-status-calibration.parseStatusTable()`。
 
-**先量**（`scratch/_probe-status-table-owner.mjs`）：真文档上两个解析器**一致**
+**先量**（`scripts/probes/_probe-status-table-owner.mjs`）：真文档上两个解析器**一致**
 （25 个 F-NN / 29 行），但
 ① 状态格 = `🔵` ⇒ 它静默算成 **🟡**（`aggregate` 的 `其余 ⇒ 🟡`），而所有者**抛**；
 ② 4 格 / 7 格的状态行 ⇒ 它**静默跳过**，而所有者收下。
@@ -2088,7 +2088,7 @@ claim 带上 🟡（"**四个**数都核"），四处写死的台账读数一并
 `feature-landing-paths.parseLandingCells()` —— 自己判行、自己分格、
 **自己定格子数**（`≠5 且 ≠6 ⇒ continue`）。
 
-**先量**（`scratch/_probe-landing-owner.mjs`）：真文档上**四个解析器一致**（都是 29 行），
+**先量**（`scripts/probes/_probe-landing-owner.mjs`）：真文档上**四个解析器一致**（都是 29 行），
 但 **4 格与 7 格的功能行被它静默跳过**。
 
 ★★ **后果比第 47 轮那次更重**：这个模块的职责是

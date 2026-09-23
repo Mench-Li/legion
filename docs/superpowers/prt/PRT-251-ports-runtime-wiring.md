@@ -218,10 +218,10 @@ dsh --profile web --port 3081 --dump-config >/dev/null   # → 组合通过、ex
 ### 6.2 破坏性验证（每条都必须**变红**）
 
 ```bash
-$env:MUTATE_ONLY='⑱,⑲,⑳'; node scratch/mutate.mjs
+$env:MUTATE_ONLY='⑱,⑲,⑳'; node scripts/probes/mutate.mjs
 ```
 
-`scratch/mutate.mjs` 的 ⑱–⑳ 是本批新增的三条。**三条全部咬住**：
+`scripts/probes/mutate.mjs` 的 ⑱–⑳ 是本批新增的三条。**三条全部咬住**：
 
 | 变异 | 期望变红 | 实际 |
 | --- | --- | --- |
@@ -572,7 +572,7 @@ node --test product/launcher/runtime-resolve.test.mjs     # 19 例（生产 argv
 ### 9.6 破坏性验证（追加 ㊴–㊸）
 
 ```bash
-$env:MUTATE_ONLY='㊴,㊵,㊶,㊷,㊸,㊹'; node scratch/mutate.mjs
+$env:MUTATE_ONLY='㊴,㊵,㊶,㊷,㊸,㊹'; node scripts/probes/mutate.mjs
 ```
 
 | 变异 | 期望变红 | 实际 |

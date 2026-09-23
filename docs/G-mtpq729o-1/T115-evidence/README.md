@@ -11,7 +11,7 @@
 | 文件 | 内容 | 出口 |
 | --- | --- | --- |
 | 01-check-docs.txt | node scripts/ci/check-docs.mjs（正向 exit 0 + --help 用法） | S3 AC-R5-1/2/3、S1/S2 机器行 |
-| 02-s1-s2-verify.txt | scratch/verify-docs.mjs（S1/S2 25 断言） | S1/S2 |
+| 02-s1-s2-verify.txt | scripts/probes/verify-docs.mjs（S1/S2 25 断言） | S1/S2 |
 | 03-run-ci-doc.txt | node scripts/ci/run-ci.mjs --only doc（doc 阶段 PASS）; --skip doc --only env | S5 AC-R5-4 |
 | 04-negative-injection.txt | 坏内联锚点/坏索引列/README断链 → check-docs exit≠0 报文件+行；还原后 exit 0 | S3 AC-R5-2 |
 | 05-s4-sim.txt | 复刻 plugins docSync 契约逻辑 → AC-R4-1/4 + 幂等 + 路径命名空间 全过 | S4 |
@@ -22,10 +22,10 @@
 ```bash
 cd D:\project\DSH\legion\.legion-worktrees\T-115
 node scripts/ci/check-docs.mjs && node scripts/ci/check-docs.mjs --help
-node scratch/verify-docs.mjs
+node scripts/probes/verify-docs.mjs
 node scripts/ci/run-ci.mjs --only doc
 node scripts/ci/run-ci.mjs --skip doc --only env
-node scratch/s4-docsync-sim.mjs
+node scripts/probes/s4-docsync-sim.mjs
 # 插件完整 typecheck（宿主，需先安装依赖）：
 cd plugins && pnpm install && pnpm typecheck   # tsc -p tsconfig.json --noEmit
 ```

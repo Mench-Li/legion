@@ -934,7 +934,7 @@ test('⑭b-2 ★★★ 认不出的状态标记必须**抛**，不许静默少�
 // ★★★ 第 46 轮：`tallyLedger` 是**第二个所有者**吗？
 //
 // 第 45 轮只收敛了"有哪些标记"；行怎么认、标记归哪一档仍是本地手写的。
-// 实测出两处会走偏的地方（`scratch/_probe-tally-owner.mjs`）：
+// 实测出两处会走偏的地方（`scripts/probes/_probe-tally-owner.mjs`）：
 //
 //   ① **接受规则比所有者宽**：`✅🟡` / `✅（待复核）` / `⏸→🟡` 三种格子，
 //      `ledgerTaskRow` **抛**，`tallyLedger` **照收**（判成 done/paused）
@@ -1125,7 +1125,7 @@ test('⑭f 取整规则钉在 round 上：`realSec*1000 - 1` 必须仍算作 rea
 //   普查（"只有 1 个实例"的来源）     并集                          9 项
 //
 //   ⇒ 判据 A 漏 3 个散文写法；判据 B 漏**四个标记全部**。
-//   实测今天两边读数都是 0（`scratch/_probe-generated-status-vocab.mjs`），
+//   实测今天两边读数都是 0（`scripts/probes/_probe-generated-status-vocab.mjs`），
 //   差异**只存在于理论上** —— 而这正是最该修的时候。
 //
 //     > 一次用**更大的网**做的普查，与一条用**更小的网**执行的判据，

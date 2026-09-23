@@ -154,7 +154,7 @@ node --test scripts\prt\backup-restore-verify.test.mjs
     import 会直接监听端口；且它 import 时 `ROOT = <server.mjs 所在目录>/..`，从临时目录跑会算错根目录。
     所以它是**结构性 + 执行老 SQL** 的验证，不是"跑了一遍老代码"。**别把绿色的 `prt-xver`
     读成"回滚已经端到端验过了"。**
-  - 破验 `scratch/_mutate-r116-xver.mjs`：**5/5 咬住、逐字节还原**，另记一条**可证等价**
+  - 破验 `scripts/probes/_mutate-r116-xver.mjs`：**5/5 咬住、逐字节还原**，另记一条**可证等价**
     （去掉 `tasks.status` 的 `DEFAULT 'backlog'`——两侧 INSERT 都显式写了该列，行为无差异）。
   - 判据守的是 `docs/DEPLOY.md` §6 回滚表那句「**表结构只增不改**」：它此前是一条**声明**，
     没有任何实验支撑。

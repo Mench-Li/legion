@@ -21,8 +21,8 @@
 
 ### 0.1 证据强度注记
 - **S3/S5 证据扎实**：01（check-docs 正向 PASS + --help）、03（run-ci `--only doc` PASS / `--skip doc --only env` PASS）、04（坏内联锚点/坏索引列/README断链 → exit 1 且报**文件:行**，还原后 PASS）、07（坏链 → run-ci doc 阶段 FAIL exit=1，还原后 PASS）——正反两条都走了机器并带行号，可信。
-- **S4 证据偏弱**：证据 README 自己已如实登记「完整 tsc -p plugins 无法在沙箱运行（无 node_modules/peerDeps、禁网装），按 R-18 记录复现步骤，不冒充通过」。plugins 侧的 registerContractDocs/docSync 改动**只用 TypeScript 语法解析（parseDiagnostics=0）验证 + scratch 仿真**。而 `scratch/s4-docsync-sim.mjs` 是**复刻（copy）逻辑的可执行脚本**（读 roles.json + 自实现 stageContractDocs/settleContractPaths，未 import 真实 plugins 代码），且它只覆盖「路径追加（AC-R4-1/4）、幂等、路径命名空间」——**未覆盖 AC-R4-2（漏更即停）**，也未验证真实代码行为。结论：S4 的「机制接线」成立，但「机器强制行为」未被证明，且我静态走查发现其不可达（§2-P1-1）。
-- **S1/S2 验证**：evidence 02 显示 `node scratch/verify-docs.mjs`（pass=25/fail=0）——这也是 scratch 脚本，非入库测试；但 S1/S2 交付物是文档本体，其正确性由本审查直接正读判定（见 §1-S1/S2），不依赖该脚本强度。
+- **S4 证据偏弱**：证据 README 自己已如实登记「完整 tsc -p plugins 无法在沙箱运行（无 node_modules/peerDeps、禁网装），按 R-18 记录复现步骤，不冒充通过」。plugins 侧的 registerContractDocs/docSync 改动**只用 TypeScript 语法解析（parseDiagnostics=0）验证 + scratch 仿真**。而 `scripts/probes/s4-docsync-sim.mjs` 是**复刻（copy）逻辑的可执行脚本**（读 roles.json + 自实现 stageContractDocs/settleContractPaths，未 import 真实 plugins 代码），且它只覆盖「路径追加（AC-R4-1/4）、幂等、路径命名空间」——**未覆盖 AC-R4-2（漏更即停）**，也未验证真实代码行为。结论：S4 的「机制接线」成立，但「机器强制行为」未被证明，且我静态走查发现其不可达（§2-P1-1）。
+- **S1/S2 验证**：evidence 02 显示 `node scripts/probes/verify-docs.mjs`（pass=25/fail=0）——这也是 scratch 脚本，非入库测试；但 S1/S2 交付物是文档本体，其正确性由本审查直接正读判定（见 §1-S1/S2），不依赖该脚本强度。
 
 ---
 
@@ -53,7 +53,7 @@
   2. **对 devops docSync 任务**，契约 = [docs/DEPLOY.md, FEATURES, README]，三者均已在仓存在 → 同样 missing 恒空，恒定放行。
   3. **check-docs 只判结构自洽**（锚点/索引列数/无逐字块），**不判「新功能是否多了一条 F-xx/新增小节」**——一个「声明了 docSync 却完全未更新手册」的改动照样过 CI。
   - 于是目标 AC-R4-2 设计的「功能任务未做文档同步直接提交 → 停 in_review 并有提示」这一**机器强制底座在当前实现下对 docSync 任务不可达**；契约追加对「无既有新文档槽位」的 docSync 任务而言，仅在任务审计里多登记了 FEATURES/README 两个**本来就在**的产物（可见性价值），**不带来新鲜度强制力**。
-  - 印证：`scratch/s4-docsync-sim.mjs`（evidence 05）只覆盖 AC-R4-1/4 + 幂等 + 路径命名空间，**未覆盖 AC-R4-2**；`plugins/tests/*.mjs` 中**无任何 docSync/FEATURES 相关用例**（grep 为零），即 AC-R4-2 既未被仿真也未入库验证，且静态走查证明其不可达。
+  - 印证：`scripts/probes/s4-docsync-sim.mjs`（evidence 05）只覆盖 AC-R4-1/4 + 幂等 + 路径命名空间，**未覆盖 AC-R4-2**；`plugins/tests/*.mjs` 中**无任何 docSync/FEATURES 相关用例**（grep 为零），即 AC-R4-2 既未被仿真也未入库验证，且静态走查证明其不可达。
 - **修改建议**（择一或组合，按目标口径取舍）：
   1. **给 docSync 任务加「diff 非空」机器校验**：settle 时对比 FEATURES.md/README.md 相对**基线**（上一成功 docSync 或最近 promote 的 HEAD）存在**非空 diff**，否则停 in_review 并提示「需同步功能文档（AC-R4-2）」。这是最直接地把「漏更即停」落到 docSync 任务的改法。
   2. **check-docs 增补「新鲜度基线」**：维护/比对功能索引行数或新增小节白名单（如把「功能性变更应新增 F-xx」纳入判定），使 CI 对「漏更」也能拦截。
@@ -98,7 +98,7 @@
 - 建议：补一个反向覆盖——遍历 FEATURES 所有 `### 3.x` 模块节标题，要求每节要么被 README `#…` 互链、要么被功能索引 F-xx 收录；孤儿节即 FAIL。
 
 **P2-8【低】S4 插件侧改动无入库测试，仅靠 scratch 复刻仿真（测试保真缺口）**
-- 位置：`plugins/tests/*.mjs` 无 docSync/FEATURES 用例（grep 为零）；`scratch/s4-docsync-sim.mjs` 为复刻逻辑、非 import 真实代码；evidence 06 仅 parseDiagnostics=0。
+- 位置：`plugins/tests/*.mjs` 无 docSync/FEATURES 用例（grep 为零）；`scripts/probes/s4-docsync-sim.mjs` 为复刻逻辑、非 import 真实代码；evidence 06 仅 parseDiagnostics=0。
 - 问题：doc-sync 的 registerContractDocs 条件追加、buildWorkerPrompt 注入、stage-standards 验收项——这三处 S4 改动**没有任何真实入库测试**，验证依赖「复刻脚本 + 语法解析」。若真实代码与复刻有一字之差（或路径来源改动，见 P2-4/5），无测试兜底。T-108 亦曾登记 plugins 套件需宿主补跑的同型环境受限。
 - 建议：在 plugins/tests 增补 docSync 契约测试（import 真实 `stageContractDocs`/`resolveStageDocPaths`，断言 docSync 任务契约含 FEATURES+README、非 docSync 不含、幂等、goalize 不改写）；宿主补跑 `pnpm install && pnpm typecheck` 与 plugins `node --test`，并按 R-18 留证据。
 

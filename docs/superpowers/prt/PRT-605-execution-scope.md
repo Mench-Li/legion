@@ -219,7 +219,7 @@ Set-Content $PS -Value $o -NoNewline   # 还原
 | 代码/配置（`.mjs`/`.ts`/`.json`/`.yml`/`.sql`/`.sh`…）里出现 NUL | **FAIL** |
 | 采集类文档（`.md`/`.txt`）里出现 NUL | **note**，仍逐条列出，不 exit 1 |
 
-37 个历史遗留是 36 个验收证据 `.txt` 加 `scratch/baseline/RESEARCH-T096.md`，
+37 个历史遗留是 36 个验收证据 `.txt` 加 `scripts/probes/baseline/RESEARCH-T096.md`，
 都是早期用 PowerShell 重定向/`Set-Content` 写出的 UTF-16LE（`fffe` BOM）：
 
 > 一个「为了让门禁变绿而不再检查」的检查，

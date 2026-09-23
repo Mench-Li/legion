@@ -322,7 +322,7 @@ test('⑬b ★★ 台账行取法：ledgerRowTexts 与 ledgerRows 认出同一�
 })
 
 test('⑬c ★★★ 认不出的状态格必须**抛**——两个取法都不许安静丢行', () => {
-  // ★★ 第 45 轮实测（`scratch/_probe-status-poison.mjs`）：本模块把同一条状态正则
+  // ★★ 第 45 轮实测（`scripts/probes/_probe-status-poison.mjs`）：本模块把同一条状态正则
   //   写了**三**遍（`ledgerRows`、`ledgerRowTexts`，外加 `NON_DONE_STATUSES` 那张
   //   子集表），而它**自己的文件头**就在警告"两处各写一遍取法，正是本模块警告的
   //   那种漂移"。往合成台账里放一个第 5 个标记（🔵），它安静地少一行。

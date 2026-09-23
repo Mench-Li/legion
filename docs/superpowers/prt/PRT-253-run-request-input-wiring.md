@@ -61,7 +61,7 @@ missing = ["workspaceId", "modelProfileRef", "workdir"]
 探针（临时、未跟踪，可删）：
 
 ```js
-// scratch/probe-lease-wiring.mjs（节选）
+// scripts/probes/probe-lease-wiring.mjs（**已随批次丢弃**）（节选）
 import { defaultRequestFor } from '../orchestrator/worker/executor.mjs'
 
 const claimFromHub = { attemptId: 'att:T-1:1', taskId: 'T-1', scope: 'software', attemptNo: 1,
@@ -123,7 +123,7 @@ catch (e) { console.log(e.code, JSON.stringify(e.missing)) }   // EXECUTOR_BAD_W
 
 ```bash
 # 探针（未跟踪，可删）
-node scratch/probe-lease-wiring.mjs
+node scripts/probes/probe-lease-wiring.mjs（**已随批次丢弃**）
 #  → [hub claim 原样 + 生产快照 associations] 拒绝 code=EXECUTOR_BAD_WIRING
 #     missing=["workspaceId","modelProfileRef","workdir"]
 
@@ -175,8 +175,8 @@ node product/launcher/cli.mjs --check --workspace=D:\project\DSH
 ```bash
 node --test orchestrator/worker/run-inputs.test.mjs     # 25 例
 node --test "orchestrator/worker/*.test.mjs"            # 334 例（315 过 / 19 跳过既有 / 0 失败）
-node scratch/mutate.mjs                                 # 8 条破坏性验证，8/8 咬住
-node scratch/probe-run-inputs-live.mjs                  # 对**真实** hub 的读数（见 §8.5）
+node scripts/probes/mutate.mjs                                 # 8 条破坏性验证，8/8 咬住
+node scripts/probes/probe-run-inputs-live.mjs                  # 对**真实** hub 的读数（见 §8.5）
 ```
 
 破坏性验证逐条（每条都让**指定的**用例变红）：
@@ -324,7 +324,7 @@ runtime **也不需要**——它的目录是**逐 Run** 由 `RunRequest.workdir
 
 ```bash
 node --test product/launcher/runtime-contract-wiring.test.mjs   # 10 例（含新增 ①b′）
-node scratch/mutate.mjs                                          # 10 条破坏性验证
+node scripts/probes/mutate.mjs                                          # 10 条破坏性验证
 ```
 
 新增的两条破坏性验证：

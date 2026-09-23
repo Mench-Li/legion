@@ -9,7 +9,7 @@
 | --- | --- |
 | 01-ci-output.txt | `node scripts/ci/run-ci.mjs` 全量 CI 输出（env deps build test smoke stage；唯一 build FAIL=F1 App.tsx TS1185×3，test/smoke 前序真实运行） |
 | 02-summary.json | CI 六阶段 summary.json |
-| 03-plugins-board-build.txt | `node scratch/t110-build/build-deps.mjs plugins board-plugin`（tsc emit → lib/，exit 0；本批实跑复验） |
+| 03-plugins-board-build.txt | `node scripts/probes/t110-build/build-deps.mjs（**已随批次丢弃**） plugins board-plugin`（tsc emit → lib/，exit 0；本批实跑复验） |
 | 04-feature-l0-tests.txt | 特性 L0 契约测试 node --test：doc-contract 4 + artifact-register 7 + artifact-content 16 + doc-render 11 + artifact-detail 10 = 48 用例全绿 |
 | 05-s3-l1-smoke.txt | 新端点 GET /api/artifact/content 真实 L1 HTTP 冒烟（200/400/404 + worktree 优先 + digest 落库校验）RESULT: PASS |
 | 06-workbench-tsc.txt | **F1 解析后 `tsc --noEmit` 重测：exit 0（0 诊断）**（本批实跑） |

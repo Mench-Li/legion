@@ -672,10 +672,28 @@ export function createRootRow({
           })
         },
         // 记账坏了要**看得见**，但不许影响判定：这里只记一行日志。
-        onReading: typeof ctx.logger?.warn === 'function'
-          ? (reading) => ctx.logger.warn(
-            `${ROOT_ROW_PLUGIN_NAME} 的车道写入侧没写成：${reading.code}——${reading.reason}`)
-          : null,
+        //
+        // ⚠️ 观测点**自己要去重**，理由是本轮实测出来的一条：`onDecision` 有**两个**发射方
+        //   （`assemble.mjs` 把同一个回调同时给了桥与 pre-execute 插件），而 pre-execute
+        //   那一条**按设计**不带投影 ⇒ **每一次工具调用**都会得到一次 `NO_PROJECTION`
+        //   拒绝。逐条告警会把日志淹掉，而"每次都告警"与"没有告警"在值班眼里一样没用。
+        //
+        //   ★ 而它也**不是丢账**：同一次决定已经从桥那一条（带投影的）记进去了 ——
+        //     这条只是"另一个通知点也想记，但它没有行的形状"。
+        onReading: (() => {
+          if (typeof ctx.logger?.warn !== 'function') return null
+          const warned = new Set()
+          return (reading) => {
+            if (warned.has(reading.code)) return
+            warned.add(reading.code)
+            ctx.logger.warn(`${ROOT_ROW_PLUGIN_NAME} 的车道写入侧：${reading.code}——${reading.reason}`
+              + (reading.code === TOOLCALL_SPOOL_WRITER_CODES.NO_PROJECTION
+                ? '（★ 这一条**按设计**会出现：桥与 pre-execute 插件共用这一个回调，'
+                  + '而 pre-execute 那一条不带投影。同一个决定已由**带投影**那一条记进去了，'
+                  + '所以这里不是丢账，是"另一个通知点没有行的形状"。只告警一次。'
+                : '（同一种坏法只告警一次。）'))
+          }
+        })(),
       })
 
       const installed = installEnforcementRoot({

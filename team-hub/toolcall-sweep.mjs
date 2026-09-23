@@ -7,7 +7,7 @@
 // `docs/superpowers/prt/PRT-TAKEOVER-QUEUE-2026-09-23.md` §3.2.1）：
 //
 //   · **目录锚在 `LEGION_DATA_DIR`** —— 这是"既有配置量"，runtime（写侧）与
-//     orchestrator 今天就已经各拿一份（`product/config-schema.mjs:1057` / `:1059`）；
+//     orchestrator 今天就已经各拿一份（`product/config-schema.mjs:1064` / `:1066`）；
 //     不新登记键（甲要落进 runtime 那个**已缺 4 把键**的 `envNames`，第 19 条人工项 A）；
 //     也**不**从库的位置派生（乙的隐式耦合，见下）。
 //   · **宿主是 hub** —— 它是唯一持有**可写** db 的进程

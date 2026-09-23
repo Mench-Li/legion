@@ -1024,6 +1024,13 @@ export const SCHEMA = defineSchema({
     // 连 `code` 都没有时的兜底文案。它不是诊断码，是一个**占位**——
     // 一个说不出是哪种原因的读数也必须能印出来，而不是印出 `undefined`。
     'UNKNOWN',
+
+    // ── 第 118 轮第十五轮：第 16 条第一刀 `legion --report=<kind>`（`product/report-cli.mjs`）──
+    // 三条都是**具名拒绝**：kind 不认识（**不回落**成第一份——那会让人拿着别的报告去核对发布条件）/
+    // 渲染出的不是一段非空文字（"报告是空的"不许被读成"报告说没事"）/ 渲染或判定抛了（带原始原因）。
+    'REPORT_CLI_UNKNOWN_KIND',
+    'REPORT_CLI_NOT_TEXT',
+    'REPORT_CLI_RENDER_FAILED',
   ],
   injects: [
     { target: 'team-hub', env: 'TEAM_HUB_PORT', via: 'env', from: 'ports.team-hub', note: '端口由 Launcher 决定，不由各进程的代码默认值决定' },
@@ -1062,7 +1069,7 @@ export const SCHEMA = defineSchema({
     // ── 第 118 轮第七轮：收账侧宿主的**目录锚**（与上面那组同一来源，不是猜的）──
     //
     // ★ hub 与 runtime/orchestrator 是**同一份进程清单里的兄弟进程**，用的是同一个
-    //   冻结目录布局（`layout.dataDir`）⇒ 这一行是**派生值**，与 :1057 / :1059 同源。
+    //   冻结目录布局（`layout.dataDir`）⇒ 这一行是**派生值**，与 :1064 / :1066 同源。
     // ★ 但**只给目录、不给凭证**：hub 的活是收账（把执行面写下的 spool 收进
     //   `tool_calls`），它不执行任何工具。凭证那一行的理由是 spec §6.7
     //   「密钥只注入需要它的执行进程」，hub 不在其中。

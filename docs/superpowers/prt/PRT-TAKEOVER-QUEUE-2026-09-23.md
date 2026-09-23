@@ -247,26 +247,47 @@ A2: HTTP 503「强制面结论的形状不对：必须是带布尔字段 autoExe
 
 ---
 
-## 2. P1-1 的施工面（先把坐标钉准）
+## 2. P1-1 的施工面（★★ 第十四轮核实：**四处里前三处 + 收账 tick 早就落了**）
 
-第 22/76/84/87 轮反复量过这一条。**要改的不是"实现什么"，是接线**；
-而接线的前提是"车道的目录由哪一个既有配置量派生"——第 84 轮已经把这一半答掉了：
+★★ **本节此前把已经做完的事记成了"待做"** —— 与 §5 里 P1-2 / P1-3 同一种病，
+而这一次犯病的是**我自己写的交接文档**。逐条核实（`git log -S` + 读代码 + 跑用例）：
 
-> `product/config-schema.mjs:102` 定义了产品**唯一**的 `dataDir`（`LEGION_DATA_DIR`，落点由冻结的目录布局定），
-> 而 `:1057`（runtime）与 `:1059`（orchestrator）已经把它派给了那两个进程。
-> `product/process-manifest.mjs:111` 显示 `team-hub` 是**同一份进程清单里的兄弟进程**，
-> 只是它的 `envNames`（`:135`）里**没有** `LEGION_DATA_DIR`。
+| 本节原来写的 | 第十四轮核实到的 |
+| --- | --- |
+| ① 派生表缺 `team-hub` 那一行 | **已落**：`product/config-schema.mjs:1076`（`d955dac`，第 118 轮**第七轮**） |
+| ② `process-manifest` 的 `envNames` 里没有它 | **已落**：`product/process-manifest.mjs:146` 已有 `LEGION_DATA_DIR`（同提交；`:135` 那条注释写明 hub 是**收账侧宿主**） |
+| ③ Launcher 没真的传下去 | **已落**：`product/launcher/launcher.mjs:427`（`dataDir: layout.dataDir ?? null`）+ `derivedValuesFor()` 的 team-hub 分支 |
+| ④ 按 Run 的缝（设计） | **仍未落** —— 见 §2.1 |
+| （本节当时根本没记的）收账侧要有生产调用方 | **已落**：`team-hub/server.mjs:212` import `sweepToolCallSpool`，`:5698` 每 30s 收一次账 |
 
-于是施工面是三处 + 一处设计：
+> 一份交接文档里"待做"那几格，与台账的行内散文犯的是同一个病：
+> **做完之后没有人回头改那一格** —— 而读它的人会**再去做一遍已经做完的事**。
 
-| # | 位置 | 要做什么 |
+而这一变的依据是**第 28 条已裁定**（丙的机制 + 目录锚在既有配置量上，逐字见 `d955dac` 的提交说明）
+⇒ 本节下面那段"已撤回、未裁决"的记录**是当时的事实**，后来被一次裁决追上了；
+它留在这里当**纪律样本**，不是当前状态。
+
+### 2.1 第 4 条：按 Run 的缝（仍然唯一带设计成分的一处）
+
+| # | 位置 | 要做什么 | 状态 |
+| --- | --- | --- | --- |
+| 1 | `product/config-schema.mjs` 的派生表 | 补一行 `{ target: 'team-hub', env: 'LEGION_DATA_DIR', via: 'env', from: 'layout.dataDir', … }` | **✅ 已落**（`:1076`） |
+| 2 | `product/process-manifest.mjs` 的 team-hub 块 | 把 `LEGION_DATA_DIR` 加进它的 `envNames`（不加 ⇒ `buildChildEnv()` 对未声明的键**直接抛**） | **✅ 已落**（`:146`） |
+| 3 | `product/launcher/launcher.mjs` | 拼子进程环境时把该键真的传下去 | **✅ 已落** |
+| 4 | **按 Run 的缝**（设计） | `onDecision` 是**装配期**参数，而 spool 是**逐 Run** 一份。观察点必须从**按 Run 安装**的那个缝（PRT-214 已跑通两遍的形状）读当前 runId | **❌ 未落**（§2.1） |
+
+### 2.2 ★ 真正剩下的三处（第十四轮读到行；本节此前没有这三行，它们只记在 §1 的 P1-1 行里）
+
+| # | 位置 | 缺什么 |
 | --- | --- | --- |
-| 1 | `product/config-schema.mjs` 的派生表（`:1057` / `:1059` 那一族） | 补一行 `{ target: 'team-hub', env: 'LEGION_DATA_DIR', via: 'env', from: 'layout.dataDir', … }` |
-| 2 | `product/process-manifest.mjs` 的 team-hub 块（`:111` / `:135`） | 把 `LEGION_DATA_DIR` 加进它的 `envNames`（不加 ⇒ `buildChildEnv()` 对未声明的键**直接抛**） |
-| 3 | `product/launcher/launcher.mjs` | 拼子进程环境时把该键真的传下去 |
-| 4 | **按 Run 的缝**（设计） | `onDecision` 是**装配期**参数，而 spool 是**逐 Run** 一份。观察点必须从**按 Run 安装**的那个缝（PRT-214 已跑通两遍的形状）读当前 runId |
+| 甲 | `runtime/toolcall/spool-writer.mjs:144` | **只追加 `DECISION` 一种记录**。`spool.mjs:110` / `:112` 定义了 `dispatched` / `result` 两种，`toolcall-drain.mjs` 也认它们（`markDispatched()` / `recordResult()`）—— **写入侧没有观察点** ⇒ 那两种记录在生产里**永远不会出现** |
+| 乙 | 同上（`spool-writer.mjs:128`） | `projection == null` ⇒ 具名拒绝 `NO_PROJECTION`。这**是对的**（"猜不出一行来"），但它意味着**只有带投影的事件会被写成一行**；派发 / 结果那种事件天然被排除在外 —— 要接它们，得先回答"它们的行长什么样" |
+| 丙 | `runtime/toolcall/spool.mjs:124` | `dispatched` 的必填字段今天只有 `['callId']`；行里的 `attemptId` **仍是 `null`** —— 载体上连这个名字都还不在（`spool-writer.mjs` / `spool.mjs` 里 grep `attemptId` **零命中**） |
 
-第 4 条是**唯一还带设计成分**的一处。`runtime/dsh-composition/plugins/root-row.mjs:724`
+★ 三条都**不是**"补一个环境变量"：甲要一个**新的观察点**（桥的 `onDecision` 只报"决定"），
+乙要一次**行形状**的决定，丙要给**载体**加一个字段并在两侧都接上。
+
+**回到 §2.1 那一条**（按 Run 的缝）：`runtime/dsh-composition/plugins/root-row.mjs:724`
 （★ 第十四轮校订：本节原写 `:626`，实测已漂到 `:724` —— 由 §3.8 那条手钉判据先红出来的）
 是 `installEnforcementRoot()` 在全仓**唯一**的生产调用方；在那里绑死 runId
 会让**整个进程只往第一个 Run 的账本里写**——而"第二个 Run 的工具账不见了"
@@ -293,8 +314,13 @@ A2: HTTP 503「强制面结论的形状不对：必须是带布尔字段 autoExe
 3. ★ 由此立一条施工纪律：**未裁决的选项不许由 diff 选定**。
    第 118 轮第三轮给 hub 放行了 `LEGION_DATA_DIR`（理由是"生产进程里只有它开着库"
    —— 那个理由是对的，而它推出的结论**恰好就是选项乙**），等于用一次看起来只是
-   "补一个环境变量"的改动把一条路定了下来。**已撤回**；撤回后用例 `①b″` 钉的正是
+   "补一个环境变量"的改动把一条路定了下来。**当时已撤回**；撤回后用例 `①b″` 钉的正是
    "裁决之前不放行"。
+4. ★★★ **续（第十四轮核实）**：**第 28 条后来真的裁了** —— 逐字见 `d955dac` 的提交说明
+   「第 28 条裁定（**丙的机制** + **目录锚在既有配置量上**）」，于是同一处代码又被落回去
+   （见 §2 的核实表）。**同一处代码先撤回、再落地，两次都对着同一条纪律**：
+   撤回是因为当时**没有裁决**，落地是因为后来**有了裁决**。
+   ⇒ 这一条要读成"**裁决是这类改动的前置条件**"，而不是"这个改动被否掉过"。
 
 ---
 
@@ -339,7 +365,7 @@ A2: HTTP 503「强制面结论的形状不对：必须是带布尔字段 autoExe
 
 ⇒ 取 **丙 的机制**（按 Run 交付；runId 在**按 Run 安装**的那处绑 —— PRT-214 已跑通两遍），
 而**目录锚在 `LEGION_DATA_DIR`**：这是"既有配置量"，**runtime 与 orchestrator 今天就已经
-各拿一份**（`product/config-schema.mjs:1057` / `:1059`）⇒ 两半都不需要新键，
+各拿一份**（`product/config-schema.mjs:1064` / `:1066`）⇒ 两半都不需要新键，
 甲与乙各自的代价都不付。
 
 **收账侧的宿主**（§14.7 没把它当成要裁的事）随之定下：**hub** —— 它是唯一持有**可写 db**
@@ -740,7 +766,7 @@ hard floor、`canonicalHash`（账本）全都读那份投影 ⇒ 全都判错�
 | 文档里写的 | 今天的实际 | 差 |
 | --- | --- | --- |
 | `product/config-schema.mjs:88` 定义 `dataDir` | `:88` 是 `export const SCHEMA = defineSchema({`；`dataDir` 在 **`:102`** | 漂 14 行 |
-| `product/config-schema.mjs:1043` / `:1045` 是 `LEGION_DATA_DIR` 的两行派生 | 那两行现在是 `TEAM_HUB_URL` 与 `LEGION_ACTOR`；`LEGION_DATA_DIR` 在 **`:1057`** / **`:1059`** | 漂 14 行 |
+| `product/config-schema.mjs:1043` / `:1045` 是 `LEGION_DATA_DIR` 的两行派生 | 那两行现在是 `TEAM_HUB_URL` 与 `LEGION_ACTOR`；`LEGION_DATA_DIR` 在 **`:1064`** / **`:1066`**（★ 第 118 轮第十五轮再校订：写这份表时是 `:1057`/`:1059`，我在同一个文件的 `nonEnvLiterals` 里插了 3 个新码（第 16 条第一刀）⇒ 两行 +7。**这正是这个面每天在做的事**） | 漂 14 → **21** 行 |
 | `team-hub/server.mjs:279` 是 hub 的库 | `:279` 是 `ROOT` 的算法；库在 **`:335`** | 漂 56 行 |
 | `runtime/dsh-composition/plugins/root-row.mjs:591` 是 `installEnforcementRoot` 的生产调用方 | **那一行是空的**；真正的调用在 **`:626`** | 漂 35 行，且落在空行上 |
 
@@ -866,7 +892,7 @@ hard floor、`canonicalHash`（账本）全都读那份投影 ⇒ 全都判错�
 | **P1-2** | 待做 | **✅ 已做完**（第九轮） | `product/launcher/first-run.mjs` 不存在（`Test-Path` = False）；删除提交 `943ccdc`；活的那份 `wizard.mjs` / `--wizard` 仍在 |
 | **P1-3** | 待做 | **✅ 两半都做完** | 映射层 `whitelist-port.mjs:278` / `:309`；**生产装配** `root-row.mjs:645`（`whitelistPortFromEnv`）⇒ `:760` 喂桥；剩下的"许可取值从哪来"并入第 14 条，**业主已答** |
 | **P3-1** | 待排 | **✅ 清点完成** | 20 个 gap 逐条有名字、全部挂着裁决处：第 16 条 11 / 第 19 条 6 / 第 18 条 3（见 §5.1） |
-| **P1-1** | 🟡 只剩三处未接 | **仍然如此**（三处都在代码里点到） | ① `spool-writer.mjs:128` 对 `projection == null` **具名拒绝**（`NO_PROJECTION`）⇒ "只有带投影的事件会被写成一行"；② `dispatched` / `result` 两种记录**没有观察点**；③ 行里的 `attemptId` 仍是 `null`（载体只带 `runId`） |
+| **P1-1** | 🟡 只剩三处未接 | **仍然如此**（三处都在代码里点到）；★ 而 **§2 那四处施工面第七轮就全落了**（`d955dac`）—— 本节此前只会让人**再去做一遍** | ① `spool-writer.mjs:128` 对 `projection == null` **具名拒绝**（`NO_PROJECTION`）⇒ "只有带投影的事件会被写成一行"；② `spool-writer.mjs:144` **只追加 `DECISION`**，而 `spool.mjs:110`/`:112` 定义了 `dispatched`/`result`、`toolcall-drain.mjs` 也认它们 ⇒ 那两种记录**没有写入侧观察点**；③ 行里的 `attemptId` 仍是 `null`（载体只带 `runId`，`spool.mjs:124` 的必填字段只有 `['callId']`） |
 | **P1-4** | 待做 | **🟡 第一刀已落**（本轮下半场） | 它本来不是一个"CLI 面"，是 **11 个模块**没有生产入口；第一刀只接 3 个只读报告，却**连带**清掉 5 个 ⇒ **剩 6 个**（§3.10 / §5.1） |
 | **P3-3** | 待排 | 待排（读数已有） | `security/` 下 15 个 `.mjs` 里 **6 处**「原文/原句」，今天不在任何判据面内 |
 | **§4 那个面** | 待决定 | 待决定（**读数补齐**） | markdown 21 处同形坐标：10 对、**7 真漂**、4 处是"记录漂移本身"的表（§4.3）⇒ 做之前必须先有"引用旧坐标"的写法 |

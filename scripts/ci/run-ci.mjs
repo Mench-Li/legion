@@ -4289,15 +4289,19 @@ async function stageTest() {
         // 环境探测必须看存在的最近祖先、档案更新是 PATCH 不是 POST、
         // 绑定字段名是 employeeRole/primaryProfile、密钥引用要按约定算
         // （因为 hub 的单条档案读取**有意不含 secretRef**）。
-        'product/launcher/first-run.test.mjs',
-        // ★★ PRT-707 有**两份**实现，而它们对模型密钥的引用名说法不一致。
+        // ★★ 第 118 轮第九轮：这里原来还登记着 `product/launcher/first-run.test.mjs`
+        // —— 那是 PRT-707 **死的那份**实现（`first-run.mjs`：636 行、零生产导入者）
+        // 的整套用例。业主在第 1 轮确认了第 17 条的裁决：**删掉死的那份、保留活的**
+        // （`cli.mjs` 的 `--wizard` 分支），于是文件与它的套件一起删了。
         //
-        // 上面那一套（`first-run.test.mjs`）验的是**死的那份**
-        // （`first-run.mjs`：636 行、零生产导入者）。**活的那份**是
-        // `cli.mjs` 的 `--wizard` 分支里**内联**的一份，用的是另一个引用名。
+        // ★ 而**下面这一套留着**（改写了）：它盯的东西没有被删掉——两份实现没了，
+        // 但"文档声称三段引用、代码写两段"这处漂移**还在**
+        // （`security/secrets/credential-materializer.mjs` 的文件头）。
         //
-        // 这一套不替任何一方说话（那是一个产品决定），只做三件事：
-        //   ① 把分歧钉住；
+        //   > 一份"删掉了重复实现"的处置，
+        //   > 与一份"删掉了重复实现、于是把唯一还看得见那处漂移的读数也一起删掉"的处置，
+        //   > 在"用户第一次点运行会不会成功"上是同一个东西。
+        'product/launcher/wizard-wiring.test.mjs',
         //   ② ★ 用**真实读者** `planDshLookup()` 证明死的那份算出来的
         //      `legion/model/<id>`（**三段**）在 DSH 的两个键空间里都
         //      `addressable:false` —— 也就是**没有任何位置**；

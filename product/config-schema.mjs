@@ -409,23 +409,23 @@ export const SCHEMA = defineSchema({
     'RUN_CREDENTIALS_OVERLAY_WRITE_FAILED',
     'RUN_CREDENTIALS_TARGET_DIR_UNCREATABLE',
 
-    // ── PRT-707 首次运行向导**接线层**的诊断码 ──────────────────────────
+    // ── PRT-707 首次运行向导**接线层**的诊断码（四个）**已随死的那份一起删掉** ──
     //
-    // `product/launcher/first-run.mjs` 的 `FIRST_RUN_CODES` 的值。名字是
-    // SCREAMING_SNAKE，所以 scan 会怀疑它们是环境变量——它们不是：
-    // 进程不"读"它们，而是把它们放进诊断给用户看。
+    // ★ 第 118 轮第九轮：业主在第 1 轮确认了第 17 条的裁决——**删掉死的那份
+    //   `product/launcher/first-run.mjs`（636 行、零生产导入者），保留活的那份**
+    //   （`cli.mjs` 的 `--wizard` 分支）。于是这里原来登记的四条
+    //   （`FIRST_RUN_SECRETS_UNAVAILABLE` / `FIRST_RUN_SECRET_WRITE_FAILED` /
+    //   `FIRST_RUN_PROFILE_WRITE_FAILED` / `FIRST_RUN_BINDING_WRITE_FAILED`）
+    //   **一个都不再出现**——它们只活在那一份实现里。
     //
-    // ★ 这里**只有四条**，而第一版我写了八条。被 scan 抓出来之后去数了一遍
-    //   引用：另外四条（`NO_LAYOUT`/`NO_HUB`/`BAD_MODEL_INPUT`/
-    //   `NO_ENVIRONMENT_PROBE`）**一次都没被引用过**——前提不成立走的是
-    //   `firstRunPreconditions` 的 `key`，输入非法走的是 `message`。
-    //   处置是**删掉那四条**，不是把它们也登记进来：
-    //   一个导出但永远不会产生的码，与"这条路径已经覆盖了"的宣告，
-    //   在读代码时是同一个东西——只不过运维会照着它去 grep，然后什么也找不到。
-    'FIRST_RUN_SECRETS_UNAVAILABLE',
-    'FIRST_RUN_SECRET_WRITE_FAILED',
-    'FIRST_RUN_PROFILE_WRITE_FAILED',
-    'FIRST_RUN_BINDING_WRITE_FAILED',
+    //   ⚠️ 这里**不是**"这批码删了、判据松了"：scan 的判据是"源码里出现的
+    //   SCREAMING_SNAKE 字面量要能说出属于哪个进程"。字面量随文件一起消失，
+    //   登记项也就该跟着消失——**留着一个已无产地的登记项，与登记一个没有
+    //   产地的码，是同一个东西**（都让"这批码有人管"看起来成立）。
+    //
+    //   活的那份（`cli.mjs --wizard`）用的是运行时物化的引用名
+    //   （`model/api-key`，见 `run-credential-materialization.mjs`），
+    //   它的漂移读数留在 `product/launcher/wizard-wiring.test.mjs`。
 
     // ★ PRT-402 的那 8 个码**不在这里**——它们在 `team-hub/config-schema.mjs`。
     //   第一版我按"是诊断码就放这儿"的思路加进来了，scan 当场报同样 8 项未处理：

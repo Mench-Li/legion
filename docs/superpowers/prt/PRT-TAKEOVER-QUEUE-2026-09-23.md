@@ -238,7 +238,7 @@ A2: HTTP 503「强制面结论的形状不对：必须是带布尔字段 autoExe
 | **P1-5** | 外部 API 授权表**管 scheme** | 施工 | 业主 2026-09-23 裁决（第 26 条：管） | 待做 |
 | **P2-1** | 第 24 / 25 条的**临时口径**：政策门暂不从连接器声明读能力；MCP 工具归属暂以 F-21 登记表为准 | 记账 | 业主本轮未给，先按保守一侧记，等他改 | 已记 |
 | **P2-2** | 剩下的裁决项：第 12 / 10 / 8 / 6 / 21 条 | 裁决 | `DECISION-BRIEF.md` §1 / §2 | 待业主 |
-| **P3-1** | 21 个 `gap` 类模块（有实现、无生产路径）的收口盘点 | 记账 | `reachability.mjs --diff`：不可达 **42** = by-design 13 · deliberate 8 · **gap 21**（第 118 轮第七轮：车道的两半转为可达，基线随之 `--record`；44/23 是上一版读数） | 待排 |
+| **P3-1** | 20 个 `gap` 类模块（有实现、无生产路径）的收口盘点 | 记账 | `reachability.mjs --diff`：不可达 **41** = by-design 13 · deliberate 8 · **gap 20**（第七轮：44 → 42，车道的两半转为可达；**第九轮：42 → 41**，第 17 条删掉 `first-run.mjs`；两次都随 `--record` 重录） | 待排 |
 | **P3-2** | 19 个陈旧 worktree（`w/T-043`…`w/T-117`、`codex/prt-phase0-1`、`codex/prt-runtime`） | 卫生 | 分支领先 `main` 1–2 个提交未合并，最后活动 9/5–9/12；其中 4 个还有未提交改动 | 待排 |
 | **P4-1** | PRT-009 / PRT-253 / PRT-256 / PRT-910 | 等外部 | 需执行期外的机器 / 真实外部用户 / 真实用户项目 | 本机无可做动作 |
 | **P4-2** | PRT-316 的日期闸门 | 等日期 | 最早可启动 **2026-09-24**；但 churn 闸门读数 `cooled=false recentMax=9/40`（阈值 ≤2）⇒ 阶段 3 **仍应推迟** | 等日期 + 等降温 |
@@ -302,7 +302,7 @@ A2: HTTP 503「强制面结论的形状不对：必须是带布尔字段 autoExe
 | 守护停止范围 | 保持**全停**，由本会话接管 | 不再有第二个进程争同一棵工作树 |
 | P1 首项 | **接 spool / toolcall-drain 车道** | 见 §2 |
 | 第 27 条（whitelist 词汇表） | 用 **Legion 能力名**，在强制面**加一层映射** | `runtime/dsh-composition/whitelist-port.mjs:177` 的 `translateToolName()` / `:350` 的 `whitelistPortFromEnv()` 就是那层；缺的是**装配里没人传值**（`surfaces.whitelist === false`，有用例钉着） |
-| 第 17 条（两份向导实现） | **删掉死的那份**（`product/launcher/first-run.mjs`） | 它被三条判据围着：`wizard-wiring.test.mjs` 的 ③（零生产导入者）、`scripts/prt/reachability.test.mjs:309` 的基线、`scripts/ci/run-ci.mjs:4285` 的套件登记——删文件必须同时处置这三处 |
+| 第 17 条（两份向导实现） | **删掉死的那份**（`product/launcher/first-run.mjs`）—— ★ **第 118 轮第九轮已执行** | 它被三条判据围着：`wizard-wiring.test.mjs` 的 ③（零生产导入者）、`scripts/prt/reachability.test.mjs:309` 的基线、`scripts/ci/run-ci.mjs:4285` 的套件登记——删文件必须同时处置这三处。★ **执行读数**：三处都处置了（前两条按规矩补了同族真实成员／改写为"文档 vs 代码"的漂移读数，第三条改成登记改写后的套件）；基线 42 → 41；那四个 `FIRST_RUN_*` 码也随实现从 `product/config-schema.mjs` 撤掉 |
 | 第 16 条（阶段 9 CLI 面） | **做** | 14 个"零生产入口"模块里唯一"轮到补入口"的一类 |
 | 第 26 条（外部 API 的 scheme） | **管**：不在白名单协议里一律拒绝 | `runtime/dsh-composition/external-api-scope.mjs:806` 的 `checkExternalApi()` 今天**完全不看 scheme**（全文件搜 `scheme` 零命中）⇒ `ftp://…` 会被放行 |
 

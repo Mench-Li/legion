@@ -231,7 +231,7 @@ worker（orchestrator 进程）与 DSH Runtime 是**两个进程**，所以同�
 | # | 一句话 | 不决定的后果 |
 |---|---|---|
 | **20** | ★★★ **Runtime 契约服务端那一行要不要进补丁层** —— **见 §0A：这就是那条九节链唯一的硬断** | 消费侧（读回发布并注入 `LEGION_RUNTIME_URL`/`LEGION_RUNTIME_TOKEN`）**已接线**，而没有服务端 ⇒ 真实部署里**那份发布永远不会被写出来** ⇒ worker 报 `EXECUTOR_HOST_PORT_REQUIRED`、**不认领任何任务** |
-| **17** | PRT-707 的**两份实现**（活的 `--wizard` 内联 / 死的 `first-run.mjs` 636 行）用**两个不同的**模型密钥引用名：`model/api-key`（端到端通）vs `legion/model/<id>`（**三段引用，`addressable:false`，运行时拿不到钥匙**） | ★★ **千万别**把 `first-run.mjs` 直接接上去：它**不报错**——向导报"模型已配置"而运行时没有钥匙。已做成读数（`wizard-wiring.test.mjs` 5 例，今天全绿） |
+| **17** | ✅ **已裁决并执行**（业主第 118 轮第 1 轮确认：**删掉死的那份、保留活的 `--wizard`**；第九轮执行完毕） | 两份实现没了，但**漂移还活着**：`security/secrets/credential-materializer.mjs` 的文件头**仍然声称** Legion 的模型引用是三段 `legion/model/<profileId>`，而唯一那份实现写的是 `model/api-key`（两段）——前者在 DSH 的两个键空间里都**不可寻址**。改写成读数的是 `product/launcher/wizard-wiring.test.mjs`（4 例，含两个可寻址正对照） |
 | **16** | 阶段 9 产品动作的 **CLI 面**（PRT-903/904/905/908/909、PRT-712、PRT-707） | 模块 + 用例齐备，**没有 CLI 面** ⇒ 用户按不到 |
 | **1 / 2 / 13 / 23** | 见 §5：PRT-011 分发形态、PRT-214 G1/G4、F-21 判定面接线资格、"命名空间认不出来"按教义拒 | 各自停在原处 |
 | **19** | ✅ **已裁决（2026-09-18 业主裁定"选前者"）** —— 把执行面数据放进 `RunRequest`，**不**注入 `TEAM_HUB_TOKEN` | ★ 它把第 **13/14/15/18** 条从「待裁决」变成「**待施工（纯代码工作量）**」。**唯一剩下的施工缝就是 §0B 那个数组** |

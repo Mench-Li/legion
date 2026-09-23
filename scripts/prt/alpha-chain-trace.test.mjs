@@ -23,10 +23,11 @@
 // ============================================================================
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { ALPHA_CHAIN, REPO, loadClassMap, traceChain, checkOwners, checkChainOwners } from './alpha-chain-trace.mjs'
+import { BASELINE_PATH } from './reachability.mjs'
 
 /** 造一个假的 classMap。 */
 const classOf = (obj) => new Map(Object.entries(obj))
@@ -158,7 +159,16 @@ test('⑦ ★★ 链定义的自洽：`core` 必须是 `modules` 的子集，且
 
 test('⑧ ★ 基线读取：classMap 认得出被跟踪的不可达文件，且 gap 与非 gap 都在', () => {
   const map = loadClassMap()
-  assert.ok(map.size >= 40, `基线里只读出 ${map.size} 条不可达（期望 ≥40）`)
+  // ★★ 第 118 轮第十五轮修正：这里原本硬编码 `map.size >= 40`。
+  //   第 16 条第一刀把不可达从 **41 降到 36** ⇒ 那条阈值当场假红，
+  //   而它红的时候探针读到的数据**是对的** —— 一条会过期的魔数，
+  //   与一条"探针读空了"的判据，在这个断言上是同一个东西。
+  //   ⇒ 改成与**基线文件本身**逐条对齐：魔数没有了，
+  //     而"读空了 / 读了一半"照样会红（那才是这条断言真正要防的）。
+  const raw = JSON.parse(readFileSync(BASELINE_PATH, 'utf8'))
+  assert.equal(map.size, raw.unreachable.length,
+    `classMap 读出 ${map.size} 条，而基线文件里有 ${raw.unreachable.length} 条 ⇒ 读取面漏了`)
+  assert.ok(map.size >= 20, `基线只剩 ${map.size} 条 —— 这不像"读完了"，像"读崩了"`)
   const classes = new Set([...map.values()].map((v) => v.cls))
   for (const want of ['gap', 'by-design', 'deliberate']) {
     assert.ok(classes.has(want), `基线里一类 ${want} 都没有——分类词表变了？`)

@@ -109,6 +109,15 @@ export const CLI_FLAGS = Object.freeze([
   { name: '--set-log-policy=<k=v,...>', kind: 'value', doc: '改日志策略并写入产品配置文件（PRT-709）。' +
     '键：maxFileBytes / maxTotalBytes / keepFiles / minFreeBytes。' +
     '**先校验再写**；配置坏了则拒绝改写（那会把用户原来的内容永久弄没）' },
+  // ── 第 16 条（业主裁决：**做**）第一刀：三份**只读**产品报告 ────────────────
+  //
+  // ★ 三条报告都是**纯读数**（入参是各模块自己的默认，这一层一个默认值都不加）。
+  //   剩下的 8 个 `[gap]` 模块要目录、要模式、要库连接 ⇒ 各有各的那一次裁决，
+  //   不在这里顺手做掉（见 `product/report-cli.mjs` 的文件头）。
+  { name: '--report=<kind>', kind: 'value', doc: '（第 16 条）打印一份**只读**产品报告，**零副作用**：' +
+    '`checklist`（PRT-909 商业 Alpha 发布检查清单）/ `privacy`（PRT-903/906 隐私说明与外发面）/ ' +
+    '`runbook`（PRT-907 支持手册）。与 `--json` 同用时打结构化那份。' +
+    '**kind 不认识时具名拒绝并列出可选项**（不回落成第一份——那会让人拿着别的报告去核对发布条件）' },
   { name: '--wizard', kind: 'boolean', doc: '跑一次首次运行向导（PRT-707）：环境 → 目录 → 启动 → 配模型 → 实测 →（可选）心跳 → 完成。' +
     '**只有实测通过才报完成**；最后一步「健康心跳」是**可选项**，不回答也照样走完' },
   { name: '--wizard-consent=<who>', kind: 'value', doc: '（PRT-707）在向导里**预先**回答「愿意发送健康心跳」，署名为 <who>。' +
@@ -1455,6 +1464,32 @@ export async function run({
       }, null, 2))
     }
     return result.ok === true ? 0 : 9
+  }
+
+  // ── 第 16 条（业主裁决：**做**）第一刀：三份**只读**产品报告 ────────────
+  //
+  // ★ 位置与日志策略、诊断包、同意同一条理由：**排在配置校验之前**。
+  //   三份报告都不读产品配置（入参是各模块自己的默认），
+  //   而"配置坏了"恰恰是用户最需要看一眼发布检查清单与支持手册的时刻。
+  //
+  //   > 一个只在配置正确时才可用的报告入口，
+  //   > 与一个不存在的报告入口，在用户最需要它的那一刻是同一个东西。
+  if (typeof parsed.flags.report === 'string') {
+    const { renderReport, REPORT_CLI_CODES } = await import('../report-cli.mjs')
+    const r = renderReport(parsed.flags.report, { json })
+    if (json) {
+      write(JSON.stringify({
+        ok: r.ok === true, kind: r.kind ?? parsed.flags.report,
+        code: r.code ?? null, message: r.message ?? null, data: r.data ?? null,
+      }, null, 2))
+    } else if (r.ok === true) {
+      write(r.text)
+    } else {
+      write(`✖ ${r.message}`)
+    }
+    if (r.ok === true) return 0
+    // 与 `--set-log-policy` 同一条口径：**参数**错是 2，别的一律 9。
+    return r.code === REPORT_CLI_CODES.UNKNOWN_KIND ? 2 : 9
   }
 
   // ── 日志策略：查看 / 修改（PRT-709 收尾）──────────────────────────────

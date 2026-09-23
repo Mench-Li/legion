@@ -234,7 +234,7 @@ A2: HTTP 503「强制面结论的形状不对：必须是带布尔字段 autoExe
 | **P1-1** | 接 `spool` / `toolcall-drain` **落账车道**（解目标链 L7） | 施工 | ★ **两半都已接进生产**（§3.5 / §3.6）：收账侧 = hub 收账 tick（第七轮，端到端实测）；写入侧 = `root-row.mjs` 把 `spool-writer.mjs` 挂成 `onDecision`，Run 号**按事件**取（第八轮，车道三套 + 写入侧 9 例，54 套装配用例 1026 例全绿） | 🟡 **只剩三处未接**：`dispatched` / `result` 两种记录**没有观察点**；只有**带投影**的事件会被写成一行；行里的 `attemptId` 仍是 `null`（载体今天只加了 `runId`） |
 | **P1-2** | 删掉 PRT-707 **死的那份**实现 | 施工 | 业主 2026-09-23 裁决（第 17 条） | **✅ 已执行（第九轮，`943ccdc`）** —— ★ 第十四轮核实：上一版这里还写着"待做"，而 `product/launcher/first-run.mjs` **早已不存在**（`Test-Path` = False）；活的那份 `wizard.mjs` / `--wizard` 仍在。> 一张"状态"列与台账的行内散文犯了同一个病：**做完之后没有人回头改那一格**。 |
 | **P1-3** | `whitelist` 装配 + **Legion 能力词表**映射 | 施工 | 业主 2026-09-23 裁决（第 27 条：Legion 名 + 加映射层） | **✅ 两半都清了（第十四轮核实）**：① 映射层在 `whitelist-port.mjs:278`（执行面名 → Legion 名）/`:309`（交给 `permitsTool`）；② 端口的**生产装配**在 `root-row.mjs:645`（`whitelistPortFromEnv({ env: effectiveEnv })`）⇒ `:760` 喂给桥 ⇒ 它**不再是**"在生产里恒为 null"。剩下的"**许可的取值从哪来**"已**并入第 14 条**（§3.7.1），而业主已答（部署方在配置里给，缺失即未接）⇒ 本会话无待办 |
-| **P1-4** | 阶段 9 产品动作的 **CLI 面** | 施工 | 业主 2026-09-23 裁决（第 16 条：做） | 待做 |
+| **P1-4** | 阶段 9 产品动作的 **CLI 面** | 施工 | 业主 2026-09-23 裁决（第 16 条：做） | **🟡 第一刀已落（第十四轮）**：3 份只读报告接进 `legion --report=<kind>`（`product/report-cli.mjs`）；不可达 41→**36**、`gap` 20→**15**、本族 11→**6**；剩 6 个要目录 / 模式 / 库连接（**碰数据**）⇒ 各有各的裁决（§3.10） |
 | **P1-5** | 外部 API 授权表**管 scheme** | 施工 | 业主 2026-09-23 裁决（第 26 条：管） | **✅ 已执行（第十一轮）**，见 §3.8 |
 | **P2-1** | 第 24 / 25 条的**临时口径**：政策门暂不从连接器声明读能力；MCP 工具归属暂以 F-21 登记表为准 | 记账 | 业主本轮未给，先按保守一侧记，等他改 | 已记 |
 | **P2-2** | 剩下的裁决项：第 12 / 10 / 8 / 6 / 21 条 | 裁决 | `DECISION-BRIEF.md` §1 / §2 | 待业主 |
@@ -684,6 +684,55 @@ hard floor、`canonicalHash`（账本）全都读那份投影 ⇒ 全都判错�
 把**尚未提交**的 33 处标记一起还原掉了（标记数归零、判据立刻红 33）。
 ⇒ **未提交的交付物不能用 `git checkout` 收尾**；现在这条修复有永久工具兜底（重跑 `--write` 即复原）。
 
+### 3.10 ★ 第 16 条第一刀（第 118 轮第十四轮）：`legion --report=<kind>` —— 接 3 个模块，**5 个 gap 消失**
+
+业主已裁「做」。本条问的形式是"这些产品级动作**由谁触发**"，而本仓**已经有**三处**同一形状**的先例
+（`--log-policy` PRT-709 / `--runtime-install-plan` PRT-257 / `--diagnostics=<dir>` PRT-710）
+⇒ 第一刀**沿用它**（`legion` 的旗标），**不**新造第二个入口（`legion-release` 之类）。
+
+**切哪三个**：`checklist` / `privacy` / `runbook` —— 三份都自带**无参** `render*()`，
+入参**都是模块自己的默认** ⇒ **不发明默认值**（PRT-253 §3），且**零副作用**。
+另外 8 个要目录、要模式、要库连接（**碰数据**）⇒ 各有各的那一次裁决，**不在这一刀里顺手做掉**。
+
+**读数**（实测，不是预期）：
+
+| 读数 | 前 | 后 |
+| --- | --- | --- |
+| 不可达 | 41 | **36** |
+| `gap` | 20 | **15** |
+| 第 16 条那族 | 11 | **6** |
+
+★★ **比预期多两个**：我只 `import` 了 **3** 个模块，而 `--diff` 报出 **5** 条基线过期 ——
+`lifecycle/data-classes.mjs`（`privacy.mjs` import 它）与 `diagnostics/crash-report.mjs`
+（`checklist.mjs` 那条链）是**被连带**接上的，**谁都没有直接去接它们**。
+
+> 一次接线会让**几个**模块同时变成可达，而基线与那张人读表
+> 只会报出"你记着的那几条"——剩下那几条**没人记得**，于是它们从账上消失。
+> ⇒ `--diff` 那句"基线过期 N 条"**必须逐条看**，不能只看数字。
+
+**两个判据如约红了，而且红的方式正是它们设计的样子**：
+
+1. `reachability.test.mjs` ④（"四族 gap 仍然不可达 —— **谁把它们接上，这条就红**"）：
+   第九轮刚把 `data-classes.mjs` 补进那张**人读**表，我这一轮就把它接上了 ⇒ 红 ✓。
+   按它自己写的处置办：删掉那一条、**补同族的真实成员**（否则 `>= 10` 会红，
+   而"把门槛降到刚好够"与"这一层本来就没在查什么"在绿色摘要里长得一样）
+   ⇒ 补了 `data-export` / `retention` / `metrics-source` 三条。
+2. 新写的 `product/report-cli.test.mjs` ⑤：旗标**真的接到了 handler**
+   （`--report=relase` ⇒ 退出码 **2** 且列出可选项；`--report=checklist` ⇒ 0 且输出非空；
+   `--report=runbook --json` ⇒ 可解析）。★ 这一条防的是"**旗标写在帮助里、派发却没接**"，
+   而那正是 `--help` 自己漂移过一次的形状。
+
+**四条守卫各自的负面控制**（`report-cli.test.mjs` ④：注入一张假表）：
+渲染出空串 ⇒ `NOT_TEXT`（不然"报告是空的"会被读成"报告说没事"）；
+渲染抛 / 判定抛 ⇒ `RENDER_FAILED`；不认识的 kind ⇒ `UNKNOWN_KIND`
+**且消息里列出全部可选项、且不带正文**（不回落 —— 回落会让人拿着**别的**那份报告去核对发布条件）。
+
+**登记**：新套件已进 `run-ci.mjs` 的套件表（第八轮那条教训：写好了却不登记 = CI 从不跑它）；
+`--only stage` 的"套件归属"审计 PASS。★ 台账那 6 行（PRT-903/904/905/906/907/909）加了就地注记，
+**状态格一个都没动**（它们本来就是 ✅，这一刀改的是"有没有入口"，不是"做没做完"）。
+
+---
+
 ## 4. 顺带量到的一条：**决策面文档的引文坐标在漂**（本轮新读数）
 
 写 §2 时逐个核了坐标，结果**四处对不上**：
@@ -818,7 +867,7 @@ hard floor、`canonicalHash`（账本）全都读那份投影 ⇒ 全都判错�
 | **P1-3** | 待做 | **✅ 两半都做完** | 映射层 `whitelist-port.mjs:278` / `:309`；**生产装配** `root-row.mjs:645`（`whitelistPortFromEnv`）⇒ `:760` 喂桥；剩下的"许可取值从哪来"并入第 14 条，**业主已答** |
 | **P3-1** | 待排 | **✅ 清点完成** | 20 个 gap 逐条有名字、全部挂着裁决处：第 16 条 11 / 第 19 条 6 / 第 18 条 3（见 §5.1） |
 | **P1-1** | 🟡 只剩三处未接 | **仍然如此**（三处都在代码里点到） | ① `spool-writer.mjs:128` 对 `projection == null` **具名拒绝**（`NO_PROJECTION`）⇒ "只有带投影的事件会被写成一行"；② `dispatched` / `result` 两种记录**没有观察点**；③ 行里的 `attemptId` 仍是 `null`（载体只带 `runId`） |
-| **P1-4** | 待做 | **仍待做，且面比记的大** | 它不是一个"CLI 面"，是 **11 个模块**没有生产入口（§5.1）—— 第 16 条业主已裁"做" |
+| **P1-4** | 待做 | **🟡 第一刀已落**（本轮下半场） | 它本来不是一个"CLI 面"，是 **11 个模块**没有生产入口；第一刀只接 3 个只读报告，却**连带**清掉 5 个 ⇒ **剩 6 个**（§3.10 / §5.1） |
 | **P3-3** | 待排 | 待排（读数已有） | `security/` 下 15 个 `.mjs` 里 **6 处**「原文/原句」，今天不在任何判据面内 |
 | **§4 那个面** | 待决定 | 待决定（**读数补齐**） | markdown 21 处同形坐标：10 对、**7 真漂**、4 处是"记录漂移本身"的表（§4.3）⇒ 做之前必须先有"引用旧坐标"的写法 |
 
@@ -826,7 +875,7 @@ hard floor、`canonicalHash`（账本）全都读那份投影 ⇒ 全都判错�
 
 | 裁决处 | 个数 | 模块 |
 | --- | --- | --- |
-| **§5 第 16 条**（业主已裁：**做**） | **11** | `product/lifecycle/{data-classes,data-export,retention,uninstall}.mjs`、`product/release/{checklist,privacy}.mjs`、`product/support/runbook.mjs`、`product/metrics-source.mjs`、`product/metrics-spec7.mjs`、`product/metrics-spec7-source.mjs`、`product/diagnostics/crash-report.mjs` |
+| **§5 第 16 条**（业主已裁：**做**） | ~~11~~ → **6** | **已清（第十四轮第一刀连带）**：`release/{checklist,privacy}.mjs`、`support/runbook.mjs`（直接接）、`lifecycle/data-classes.mjs`、`diagnostics/crash-report.mjs`（**连带**接上）。**剩下**：`product/lifecycle/{data-export,retention,uninstall}.mjs`、`product/metrics-source.mjs`、`product/metrics-spec7.mjs`、`product/metrics-spec7-source.mjs` |
 | §5 第 19 条 | **6** | `product/execution-plane-config.mjs`、`runtime/connectors/target-binding.mjs`、`runtime/packs/store.mjs`（PRT-1003）、`runtime/packs/compiled-plan.mjs`（PRT-1004）、`runtime/packs/authority.mjs`（PRT-1005）、`runtime/packs/builtin/software-delivery.mjs`（PRT-1006） |
 | §5 第 18 条 | **3** | `runtime/employee/role-pack.mjs`（F-19 执行面）、`runtime/experience/friction.mjs`（F-18 摩擦分）、`runtime/experience/graph.mjs`（F-18 图） |
 

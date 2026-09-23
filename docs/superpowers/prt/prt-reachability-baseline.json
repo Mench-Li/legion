@@ -18,11 +18,6 @@
       "reason": "config-schema 由 `scan.mjs` 读源码对账，不由别的模块 import（同 `orchestrator/config-schema.mjs`）"
     },
     {
-      "file": "product/diagnostics/crash-report.mjs",
-      "class": "gap",
-      "reason": "PRT-906/903：崩溃报告没有生产入口。⇒ 裁决处：§5 第 16 条"
-    },
-    {
       "file": "product/execution-plane-config.mjs",
       "class": "gap",
       "reason": "第 19 条 §9.2 第 3 步的**部署配置读取点**：把\"这个键压根没配\"与\"配了但解释不通\"分开（前者如实记 `absent`，后者由两半各自的模块具名上抛）。**还没有生产调用方**——把两半挂上 `RunRequest` 是第 4 步，尚未做。⇒ 裁决处：§5 第 19 条（`docs/DECISION-RUNREQUEST-EXECUTION-PLANE.md` §9.4）"
@@ -41,11 +36,6 @@
       "file": "product/launcher/index.mjs",
       "class": "by-design",
       "reason": "产品层公开出口；`cli.mjs` 直接 import `./launcher.mjs`（进程入口走 `cli.mjs`）"
-    },
-    {
-      "file": "product/lifecycle/data-classes.mjs",
-      "class": "gap",
-      "reason": "阶段 9 产品动作：模块 + 用例齐备，没有 CLI 面（§5 第 16 条）"
     },
     {
       "file": "product/lifecycle/data-export.mjs",
@@ -76,21 +66,6 @@
       "file": "product/metrics-spec7.mjs",
       "class": "gap",
       "reason": "第 39 轮：spec §7 第 6 条那六格指标的**口径**。与 `metrics-source.mjs` 是**同一个决定**——\"这些产品级动作由谁触发\"，不是本机能定的。★ 刻意**不**接进远程心跳（PRT-713 的载荷走允许名单，加键=加数据外流，该由人点头）。⇒ 裁决处：§5 第 16 条"
-    },
-    {
-      "file": "product/release/checklist.mjs",
-      "class": "gap",
-      "reason": "零生产 import 者。⇒ 裁决处：§5 第 16 条"
-    },
-    {
-      "file": "product/release/privacy.mjs",
-      "class": "gap",
-      "reason": "零生产 import 者。⇒ 裁决处：§5 第 16 条"
-    },
-    {
-      "file": "product/support/runbook.mjs",
-      "class": "gap",
-      "reason": "零生产 import 者。⇒ 裁决处：§5 第 16 条"
     },
     {
       "file": "product/upgrade/audit.mjs",

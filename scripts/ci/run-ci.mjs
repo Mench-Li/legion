@@ -510,6 +510,24 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // 第 16 条第一刀（业主 2026-09-23 裁决「做」）：阶段 9 产品动作的 **CLI 面**。
+      //
+      // ★ 这一条**不是**在测那三份报告的内容（那由 release-checklist /
+      //   privacy-and-consent / support-runbook 三套各自管），它测的是**入口本身**：
+      //   旗标有没有真的接到 handler、不认识的 kind 会不会**回落**成第一份、
+      //   以及"渲染成空串"与"渲染抛了"有没有各自的**具名码**。
+      //
+      //   > 一个"三份报告都打得出来"的读数，
+      //   > 与一个"不管敲什么都会打出来"的读数，在测试报告里是同一个东西。
+      //
+      // ★ 登记在这里是**必须的**：`scripts/prt` 那套"套件清单完备"会数
+      //   `*.test.mjs` 与这张表的差集 —— 第八轮就吃过一次亏
+      //   （三套用例写好了、全绿，而 CI 从不跑它们）。
+      label: 'report-cli（第 16 条：`legion --report=<kind>` 的入口判据）',
+      files: ['product/report-cli.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-905（spec §10 line 988）：数据导出入口。
       //
       // 备份与恢复已由 `product/upgrade/backup.mjs`（PRT-806/812）实现；

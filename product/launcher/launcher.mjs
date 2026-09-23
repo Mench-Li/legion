@@ -862,10 +862,14 @@ export function createLauncher({
     // ★ **只有这两个进程**拿到它们（清单里也只有这两个声明了这两个键）：
     //   · runtime      —— 它是服务端：凭证要它来比对，DataDir 要它来发布。
     //   · orchestrator —— 它是消费端：端点 + 同一份凭证。
-    //   workbench / 白板**拿不到这两个键**；hub 只拿 DataDir（见下面 PRT-610 那段），
-    //   **拿不到凭证**：它的 `envNames` 里没有那个键，
+    //   hub / workbench / 白板**拿不到**：它们的 `envNames` 里没有这两个键，
     //   `buildChildEnv()` 因此连 baseEnv 里的同名值都不会放行。
     //   这就是 spec §6.7「密钥只注入需要它的执行进程」在实现层的落点。
+    //
+    //   ⚠️ 第 118 轮一度给 hub 加过 `LEGION_DATA_DIR`，理由是"收账要住在持有 db 的
+    //   进程里"。那**恰好就是第 28 条的选项乙**（收账侧住在 hub 里），而那条**还没裁**
+    //   （`docs/DECISION-RUNREQUEST-EXECUTION-PLANE.md` §14.7 三条路，业主未选）。
+    //   ⇒ 撤回：一个未裁决的选项不该由一篇 diff 悄悄选定。
     //
     // ★ 凭证**不进 argv**、不进日志、不进运行记录、不进状态文件。
     //   它唯一的去处是这两个子进程的环境块（`envSurface()` 对外是 `<redacted>`）。
@@ -877,20 +881,6 @@ export function createLauncher({
       }
       const token = runtimeToken()
       if (token.ok === true) out.LEGION_RUNTIME_TOKEN = token.token
-    }
-    // ── PRT-610 出站车道的**收账侧**：hub 也要这个目录锚 ─────────────────
-    //
-    // ★ 与上面两个分支**同一个理由**（Launcher 是唯一知道 `layout.dataDir` 的地方），
-    //   但用途不同：hub 不发布端口、也不认凭证，它只是**唯一持有 SQLite 连接**的一侧
-    //   （`team-hub/server.mjs` 自己开库），而按 Run 落在 spool 里的记录只能在那本
-    //   连接上收进 `tool_calls` —— 于是它必须与 runtime/orchestrator 锚在**同一个**
-    //   DataDir 上，否则两边各写各的目录，收账永远读到空。
-    //
-    //   它拿到的**只是目录**：`LEGION_RUNTIME_TOKEN` 仍只注入 runtime 与 orchestrator。
-    if (proc.key === 'team-hub') {
-      if (typeof layout.dataDir === 'string' && layout.dataDir !== '') {
-        out.LEGION_DATA_DIR = layout.dataDir
-      }
     }
     if (proc.key === 'orchestrator') {
       if (typeof layout.dataDir === 'string' && layout.dataDir !== '') {

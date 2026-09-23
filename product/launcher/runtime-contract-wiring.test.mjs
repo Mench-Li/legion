@@ -406,36 +406,47 @@ test('①b ★★ Launcher 也把 `LEGION_DATA_DIR` 交给 worker（否则 worke
   assert.notEqual(b.layout.dataDir, process.env.LEGION_DATA_DIR)
 })
 
-// ═══════════════════════════════════════════ ①b″ PRT-610：收账侧也要这个锚
+// ═══════════════════════════════════════════ ①b″ 未裁决的选项不由 diff 选定
 
-test('①b″ ★★★ hub 拿到 `LEGION_DATA_DIR`（收账侧），但**拿不到凭证** —— 同一张白名单的两个方向', async (t) => {
+test('①b″ ★★★ 第 28 条裁决之前，hub 两个键都没有 —— 白名单不该替业主选"乙"', async (t) => {
   const b = await boot({ tag: 'datadir-hub' })
   t.after(() => b.stop())
   assert.equal(b.started.ok, true, `启动失败：${JSON.stringify(b.started.failures)}`)
 
   /**
-   * ★ 为什么 hub 需要它：工具调用车道的**收账侧**只能住在持有 SQLite 连接的那个进程里
-   *   （`team-hub/server.mjs` 自己开库），而按 Run 落进 spool 的记录锚在 DataDir 上。
-   *   两边必须是**同一个**值 —— 一边写 `A/…`、一边收 `B/…` 的后果**不是报错**，
-   *   而是一条空读数：空目录是合法局面，收账"成功"地什么也没收。
+   * ★ 这条钉的是一条**程序性**约束：第 28 条（车道的目录由哪个既有配置量派生、
+   *   谁在按 Run 的缝上绑 runId）在 `docs/DECISION-RUNREQUEST-EXECUTION-PLANE.md`
+   *   §14.7 摆了三条路 —— 甲（新登记一个部署配置键）/ **乙（收账侧住在 hub 进程里）**
+   *   / 丙（按 Run 交付，唯一与第 19 条逐字一致）—— 而那里逐字写着"本文件不替业主选"。
    *
-   * ★ 为什么它只拿目录：收账不碰契约认证面。两个方向都要钉住 ——
-   *   只验"hub 拿到了 DataDir"，会让"顺手把凭证也给了 hub"变成一条看不见的放宽。
+   * ★ 第 118 轮真的给 hub 放行过 `LEGION_DATA_DIR`：理由是"生产进程里只有它开着库"
+   *   （`team-hub/server.mjs:717`）。那个理由是**对的**，而它推出的结论**恰好是乙** ——
+   *   于是一次看起来只是"补一个环境变量"的改动，实际上把三条路里的一条定了下来，
+   *   而且是**在没人注意到它是个选择**的情况下定的。
+   *
+   *   > 一个"因为只有它开着库，所以顺手把钥匙也给它"的改动，
+   *   > 与一次"我们就选乙吧"的裁决，在 diff 里只差几行 ——
+   *   > 只不过前者没有留下"这是个选择"的痕迹。
+   *
+   * ⇒ 裁决之前不放行：hub 两个键都没有；需要它们的两个进程照旧拿得到（正向对照）。
    */
   const hubEnv = b.envOf('team-hub')
   assert.notEqual(hubEnv, null, 'hub 必须出现在 envSurface 里 —— 否则这一条会静默变成空验')
-  assert.equal(hubEnv.LEGION_DATA_DIR, b.layout.dataDir,
-    `收账侧的目录锚不是 Launcher 给的：${JSON.stringify(hubEnv)}`)
-  assert.equal(TOKEN_ENV in hubEnv, false,
-    `凭证泄漏到 hub 了：收账不需要它，它的 envNames 里也没有它 —— ${JSON.stringify(hubEnv)}`)
+  assert.equal('LEGION_DATA_DIR' in hubEnv, false,
+    `DataDir 被放行给 hub 了 —— 那等于替业主选了第 28 条的乙：${JSON.stringify(hubEnv)}`)
+  assert.equal(TOKEN_ENV in hubEnv, false, `凭证泄漏到 hub 了：${JSON.stringify(hubEnv)}`)
 
-  // 反向锚：白名单**没有**放行这个键的进程，连宿主环境里的同名值也不该进得去
+  // 同一形状的其余两个进程也一起钉住（白名单是边界，不是"清单上写了就都能拿"）
   for (const key of ['workbench', 'whiteboard']) {
     const env = b.envOf(key)
     if (env === null || env === undefined) continue
     assert.equal('LEGION_DATA_DIR' in env, false,
       `进程 ${key} 的 envNames 里没有这个键，它不该拿到：${JSON.stringify(env)}`)
   }
+
+  // 正向对照：需要它的那两个进程仍然拿得到（否则这一条会退化成"谁都拿不到"）
+  assert.equal(b.envOf('runtime').LEGION_DATA_DIR, b.layout.dataDir)
+  assert.equal(b.envOf('orchestrator').LEGION_DATA_DIR, b.layout.dataDir)
 })
 
 // ═══════════════════════════════════════════ ①b′ 同一个形状的反面

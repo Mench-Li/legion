@@ -3,9 +3,29 @@
 // PRT-610 出站车道的**收账侧**：把执行面写下的逐 Run 载荷收进 `tool_calls`。
 //
 // 与 `runtime/toolcall/spool.mjs` 是**同一条车道的两半**：那一半在**没有凭证**的
-// 执行面里写，这一半在**有凭证**的 worker 里收。中间那一层是
-// `team-hub/tool-call-log.mjs` —— 它今天**只提供读与建表**（`server.mjs:7296`：
-// "写侧只有一个入口：执行面调 `recordToolCall`"）。本模块就是那个入口的调用方。
+// 执行面里写，这一半把 spool 收进 `tool_calls`。中间那一层是
+// `team-hub/tool-call-log.mjs` —— 建表、三个写入函数（`recordToolCall` /
+// `markDispatched` / `recordResult`）与 HTTP 读面都已经有了，缺的**只有生产的调用方**。
+//
+//   （本行原先引的是 `server.mjs:7296`，而那个文件只有 5676 行 —— 一处**指不到的
+//   坐标**。它引的那句话也不在别处：见下面这条真正的边界。）
+//
+// ★★ 收账**住在哪个进程**是**尚未裁决**的（`docs/DECISION-RUNREQUEST-EXECUTION-PLANE.md`
+//   §14.7 摆了三条路，业主还没选；那里逐字写着"本文件不替业主选"）：
+//
+//     · **甲** —— 新登记一个部署配置键，两半各自从自己的 env 读；
+//     · **乙** —— 收账侧住在 **hub** 进程里，路径从 hub 自己的库位置派生
+//       （`server.mjs:335` 那个 `dbFile` 的同级目录）；
+//     · **丙** —— 照第 19 条的形状**按 Run** 把目录交给两半（PRT-214 已跑通两遍的
+//       那五个性质）——**唯一与第 19 条裁决逐字一致**的一条。
+//
+//   第 118 轮一度给 hub 放行了 `LEGION_DATA_DIR`（理由是"只有它开着库"）——
+//   那**就是乙**，等于用一个 diff 替业主选了。已撤回：
+//   `product/launcher/launcher.mjs` 的 `derivedValuesFor()` 旁那段与用例
+//   `runtime-contract-wiring.test.mjs` ①b″。
+//
+//   ⇒ 在裁决之前，本模块**不**假定宿主：它只要求一个 `db` 与一个 `file`，
+//     "谁来调、什么时候调"留给调用侧。
 //
 // ```
 //   runtime/toolcall/spool.mjs            orchestrator/worker/toolcall-drain.mjs

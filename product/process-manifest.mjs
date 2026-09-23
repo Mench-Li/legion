@@ -132,11 +132,7 @@ export const PROCESS_SPECS = Object.freeze([
       verified: false,
     }),
     writesRoles: Object.freeze(['data']),
-    // ★ PRT-610 起多一个 `LEGION_DATA_DIR`：hub 是**唯一持有 SQLite 连接**的一侧
-    //   （`team-hub/server.mjs` 自己开库），而工具调用车道的收账（spool 文件 →
-    //   `tool_calls`）只能在那本连接上做。它拿到的**只是目录锚**，不是凭证：
-    //   `LEGION_RUNTIME_TOKEN` 仍然只注入 runtime 与 orchestrator。
-    envNames: Object.freeze(['TEAM_HUB_PORT', 'TEAM_HUB_HOST', 'TEAM_HUB_TOKEN', 'TEAM_HUB_DB', 'LEGION_DATA_DIR']),
+    envNames: Object.freeze(['TEAM_HUB_PORT', 'TEAM_HUB_HOST', 'TEAM_HUB_TOKEN', 'TEAM_HUB_DB']),
     milestone: 'PRT-251',
   }),
   Object.freeze({

@@ -51,7 +51,9 @@ import {
   RESULT_STATUSES,
   TOOL_CALL_TABLE,
   ensureToolCallSchema,
+  markDispatched,
   readToolCall,
+  toolCallIdempotencyKey,
   toolCallLogEvidence,
 } from '../../team-hub/tool-call-log.mjs'
 
@@ -187,7 +189,7 @@ test('②b 未知来源也被收账侧拒（词表只有 tool-call-log.mjs 那�
 // ③ ★★★ 重跑安全
 // ══════════════════════════════════════════════════════════════════════════
 
-test('③ ★★★ 收两遍：行还是一行，第二遍如实报 duplicate（崩溃后重跑必须安全）', () => {
+test('③ ★★★ 收两遍：行还是一行，第二遍如实报**重放**（崩溃后重跑必须安全）', () => {
   const db = freshDb()
   const file = spoolFileFor({ dataDir: root, runId: 'run-twice' })
   appendSpoolRecord({ file, record: decisionRecord('call-2') })
@@ -200,8 +202,20 @@ test('③ ★★★ 收两遍：行还是一行，第二遍如实报 duplicate�
 
   const second = drainToolCallSpool({ db, file })
   assert.equal(second.complete, true, '重跑本身不算"有东西没进去"')
-  assert.equal(second.applied.decision, 1, '仍然处理了这一条')
+  /**
+   * ★★ 第 118 轮第六轮之前，这一行断的是 `second.applied.decision === 1` ——
+   *   那时第二遍走的仍是 `recordToolCall` 的 duplicate 分支，而**那个分支会写**
+   *   （`attempts + 1`、`updatedAt`）。"报 duplicate"与"什么都没写"因此是两件事，
+   *   而当时的用例把前者当成了幂等的证据。
+   *
+   * ⇒ 现在收账先读状态，重放走 `replayed`：`applied` 只数**真的写了**的那些。
+   *   （`recordToolCall` 自己的 duplicate 语义没变，它在 `tool-call-log` 那一侧照旧被验。）
+   */
+  assert.equal(second.applied.decision, 0, '重放不该再写一遍')
+  assert.equal(second.replayed.decision, 1, '它如实报的是重放')
   assert.equal(toolCallLogEvidence({ db }).total, 1, '★ 行数没有变成 2')
+  assert.equal(readToolCall({ db, idempotencyKey: toolCallIdempotencyKey({ callId: 'call-2' }) }).attempts, 0,
+    '★ 重放不是重试：`attempts` 必须一步不动')
 
   // ★ 为什么必须幂等：收一趟要写多行，进程可能死在两行之间。
   //   本模块**不删**处理过的记录，也不记游标——
@@ -212,18 +226,45 @@ test('③ ★★★ 收两遍：行还是一行，第二遍如实报 duplicate�
   }
 })
 
-test('③b 同一条 `dispatched` 收两遍 ⇒ 第二遍具名拒绝（重复派发是外部写做两遍的直接原因）', () => {
+test('③b ★★★ 同一条 `dispatched` 收两遍 ⇒ 第二遍是**重放**（不再拒绝），而守卫**没被放宽**', () => {
   const db = freshDb()
   const file = spoolFileFor({ dataDir: root, runId: 'run-disp-twice' })
   appendSpoolRecord({ file, record: decisionRecord('call-3') })
   appendSpoolRecord({ file, record: decision(TOOLCALL_SPOOL_KINDS.DISPATCHED, { callId: 'call-3', atText: T0 }) })
-  assert.equal(drainToolCallSpool({ db, file }).complete, true)
+
+  const first = drainToolCallSpool({ db, file })
+  assert.equal(first.complete, true)
+  assert.deepEqual(first.applied, { decision: 1, dispatched: 1, result: 0, total: 2 })
+  assert.equal(first.replayed.total, 0)
 
   const again = drainToolCallSpool({ db, file })
-  // `recordToolCall` 幂等（duplicate），但 `markDispatched` **不许**幂等——
-  // 它是一次"none → unknown"的状态迁移，第二次本来就不该成立。
-  assert.equal(again.complete, false, '第二遍的 dispatched 必须被具名拒绝')
-  assert.match(again.refusals[0].reason, /none 状态/, '理由是那条状态迁移，不是"文件坏了"')
+  /**
+   * ★★★ 第 118 轮第六轮改的就是这一条。**在这之前**它的期望是"第二遍必须被具名拒绝"，
+   *   而那正是那条声称（头部 ②"重跑必须安全"）与行为之间的缺口：行幂等、**读数不幂等**。
+   *   `markDispatched` 的守卫没错（它防的是重复派发＝外部写做两遍），错的是**收账**去撞它 ——
+   *   收账从不派发，它只是重放一份日志。
+   *
+   * ⇒ 现在收账**先读状态**：行已经不在 `none` 就是重放，记 `outcome:'replayed'` 并跳过。
+   */
+  assert.equal(again.complete, true, '重放不许再报"有东西没进去"')
+  assert.deepEqual(again.refusals, [])
+  assert.equal(again.applied.dispatched, 0, '重放一个字节都没写')
+  assert.equal(again.replayed.dispatched, 1)
+  assert.equal(again.replayed.decision, 1,
+    '决定的重放也不许写 —— `recordToolCall` 的 duplicate 分支会抬 `attempts`')
+  // ★ `attempts` 是**重试**的读数；重放不是重试，所以它必须一步不动。
+  assert.equal(readToolCall({ db, idempotencyKey: toolCallIdempotencyKey({ callId: 'call-3' }) }).attempts, 0,
+    '重放把 attempts 抬上去了 —— 那会让审计读成"这条调用重试过"')
+
+  /**
+   * ★★ 而那条守卫**一个字都没放宽**：不经收账、直接走派发路径，照旧抛同样的错。
+   *   没有这一条，上面的"跳过"就可能被人顺手做成"把守卫改成忽略"。
+   */
+  assert.throws(
+    () => markDispatched({ db, idempotencyKey: toolCallIdempotencyKey({ callId: 'call-3' }), atText: T0 }),
+    /none 状态/,
+    '重复派发仍然是外部写做两遍的直接原因 —— 收账的跳过只发生在收账那一侧',
+  )
 })
 
 // ══════════════════════════════════════════════════════════════════════════

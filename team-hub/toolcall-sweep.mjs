@@ -33,9 +33,9 @@
 // 都收成**具名读数**：没有 DataDir / 车道目录读不动 / 某个 Run 的收账失败 / 逐行的
 // 落账拒绝——四者分开报，而"收了几条"永远是给出的那个数。
 //
-// ## ★★ 一处**先于接线发现**的缺陷：收账的读数不能安全重跑（本模块因此**还没接进 tick**）
+// ## ★★ 一处**先于接线发现的缺陷** —— 已在第 118 轮第六轮修好（读数因此可用）
 //
-// 实测（`.probe-idem.mjs`，同一个文件收两趟）：
+// 修好**之前**的实测（同一个文件收两趟）——留在这里，因为它是那条修法的理由：
 //
 // ```
 // pass1: applied={decision:1,dispatched:1,result:1,total:3} complete=true  refusals=[]
@@ -45,16 +45,22 @@
 //                            （要么已经派发过、要么已经有结果）——重复派发是外部写做两遍的直接原因' }]
 // ```
 //
-// 凡是文件里**已经收过**的 `dispatched` 记录，第二次都会落进 `refusals` ⇒ `complete:false`；
-// 而 `toolcall-drain.mjs` 头部 ② 逐字写着"结果是幂等的，而且**必须**是——因为'收了一半
-// 崩了'是正常情况"。**行的幂等成立（库里一行不多），读数的幂等不成立。**
+// **行的幂等成立（库里一行不多），当时的读数幂等不成立。** 修法**不在状态守卫那一侧**
+// （`markDispatched` 一个字都没改，它防的是"重复派发＝外部写做两遍"）：收账**先读状态**，
+// 已经不在 `none` 就是**重放**，记 `outcome:'replayed'` 并跳过；`applied` 与 `replayed`
+// 分开报。同一份探针现在给的是：
+//
+// ```
+// pass2: applied={decision:0,dispatched:0,result:0,total:0} replayed={…,total:2}
+//        complete=true  refusals=0  rows=1
+// ```
 //
 //   > 一个"重跑安全"的收账，与一个"重跑之后报告'有东西没进去'"的收账，
 //   > 在只有第一趟的读数里是同一个东西。
 //
-// ⇒ 在 drain 的重放语义修好之前**不把本模块接进 tick**：一个每 30 秒把 `complete:false`
-//   刷一遍的定时器，与一个坏掉的告警是同一个东西（而"总是叫狼来了的门禁会被关掉"）。
-//   本模块今天只在"按 Run 的主路径"上被调用——那条路每个 Run 只收一次，读数是干净的。
+// ⇒ 读数幂等了，"扫一趟"才谈得上接进 tick（下一轮连同 hub 的 `LEGION_DATA_DIR` 登记
+//   一起做，免得又落一次"有登记、没消费者"）。在那之前本模块只在"按 Run 的主路径"上
+//   被调用 —— 那条路每个 Run 只收一次。
 //
 // ## 与"按 Run 交付"的关系（如实）
 //
@@ -112,6 +118,7 @@ export function sweepToolCallSpool({
       present: false,
       runs: Object.freeze([]),
       applied: zeroApplied(),
+      replayed: zeroApplied(),
       refusals: Object.freeze([]),
       complete: false,
     })
@@ -129,6 +136,7 @@ export function sweepToolCallSpool({
       present: false,
       runs: Object.freeze([]),
       applied: zeroApplied(),
+      replayed: zeroApplied(),
       refusals: Object.freeze([Object.freeze({
         line: null,
         code: err?.code ?? TOOLCALL_SWEEP_CODES.LIST_FAILED,
@@ -139,6 +147,7 @@ export function sweepToolCallSpool({
   }
 
   const applied = { decision: 0, dispatched: 0, result: 0 }
+  const replayed = { decision: 0, dispatched: 0, result: 0 }
   const refusals = []
   const runs = []
   for (const entry of listed.runs) {
@@ -156,6 +165,11 @@ export function sweepToolCallSpool({
     applied.decision += reading.applied.decision
     applied.dispatched += reading.applied.dispatched
     applied.result += reading.applied.result
+    // ★ `replayed` 一路带上来（第 118 轮第六轮）：一趟扫过已经收完的车道时，
+    //   `applied` 应当是 0 而 `replayed` 是全部 —— 那正是"这一趟什么都没干、也没坏事"。
+    replayed.decision += reading.replayed?.decision ?? 0
+    replayed.dispatched += reading.replayed?.dispatched ?? 0
+    replayed.result += reading.replayed?.result ?? 0
     // 逐行的拒绝**带着行号往上递**：只报"这个 Run 有一条坏的"，值班的人知道有错
     // 却找不到它在哪一行——而"知道错在哪"与"能去改"是两件事。
     for (const refusal of reading.refusals) refusals.push(refusal)
@@ -182,6 +196,12 @@ export function sweepToolCallSpool({
       dispatched: applied.dispatched,
       result: applied.result,
       total: applied.decision + applied.dispatched + applied.result,
+    }),
+    replayed: Object.freeze({
+      decision: replayed.decision,
+      dispatched: replayed.dispatched,
+      result: replayed.result,
+      total: replayed.decision + replayed.dispatched + replayed.result,
     }),
     refusals: Object.freeze(refusals),
     complete: refusals.length === 0,

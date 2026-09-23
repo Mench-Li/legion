@@ -57,6 +57,28 @@
 //   > 与一个「游标落了、行没落」的收账，是同一个东西——
 //   > 只不过前者在崩溃后会把**没落账的那几条**当成"已经收过了"。
 //
+// **②′ 但"重跑安全"要分两半 —— 另一半是第 118 轮第六轮才补上的。**
+//
+// 一句话：**行的幂等一直成立，读数的幂等曾经不成立。** 同一个文件收第二趟时，
+// 已经收过的 `dispatched` 记录会被 `markDispatched` 的条件守卫拒绝（那条守卫是**对的**
+// ——它防的是"重复派发＝外部写做两遍"），于是第二趟读成 `complete:false` 并带一条 refusal：
+//
+// ```
+// pass1: applied={decision:1,dispatched:1,result:1,total:3} complete=true  refusals=[]
+// pass2: applied={decision:1,dispatched:0,result:1,total:2} complete=false
+//        refusals=[{line:2, code:'toolcall-drain-apply-failed', reason:'…不在 none 状态…'}]
+// ```
+//
+// 修法**不在守卫那一侧**（它一个字都没动）：收账**先读状态** —— 行已经不在 `none`
+// 就是一次**重放**，记 `outcome:'replayed'` 并跳过；`applied` 与 `replayed` 分开报。
+// 直接调 `markDispatched` 的**派发路径**照旧会抛同样的错（有用例钉着）。
+//
+//   > 一个「重放安全」的收账，与一个「把重放读成第二次派发」的收账，
+//   > 在**第一趟**的读数里是同一个东西。
+//
+// ⇒ 为什么这条重要：读数不幂等，"扫一趟"就永远报告"有东西没进去"，而一个每 30 秒
+//   叫一次的告警会被关掉（`team-hub/toolcall-sweep.mjs` 头部记着这件事）。
+//
 // ★ 代价如实写在 §5 的边界里：车道文件会一直长，**裁剪不是本模块的事**。
 //
 // **③ `present:false`（这个 Run 没有车道文件）不是错误，但也不是"收完了"。**
@@ -68,8 +90,10 @@
 import { readSpoolRecords } from '../../runtime/toolcall/spool.mjs'
 import {
   markDispatched,
+  readToolCall,
   recordResult,
   recordToolCall,
+  RESULT_STATUSES,
   toolCallIdempotencyKey,
 } from '../../team-hub/tool-call-log.mjs'
 
@@ -106,6 +130,22 @@ export function applySpoolRecord({ db, record, atText = '' } = {}) {
   const row = record?.row ?? {}
   const kind = record?.kind
   if (kind === 'decision') {
+    // ★★ 同一个形状（第 118 轮第六轮）：**已经收过的决定不许再走一遍 `recordToolCall`**。
+    //
+    // `recordToolCall` 的 duplicate 分支**会写** —— `attempts = attempts + 1` 与 `updatedAt`。
+    // 于是"重放"会随着扫描次数把 `attempts` 抬上去，而 `attempts` 是**重试**的读数：
+    // 把它记成"重试了 N 次"与真的重试过 N 次，在审计里是同一个东西。
+    //
+    // 只跳过**完全一致**的那些（工具名 + canonical 哈希）：不一致的仍然交给
+    // `recordToolCall` 去抛 —— 那是一次真事故，不是重放（它那两条例外逐字写着理由：
+    // 同一个 callId 带着不同的工具名/参数进来，"重试"就不再是同一次调用）。
+    const existingKey = toolCallIdempotencyKey({ callId: row.callId })
+    const existing = readToolCall({ db, idempotencyKey: existingKey })
+    if (existing !== null
+      && existing.toolName === row.toolName
+      && existing.canonicalHash === row.canonicalHash) {
+      return Object.freeze({ kind, outcome: 'replayed', idempotencyKey: existingKey })
+    }
     const res = recordToolCall({
       db,
       callId: row.callId,
@@ -133,11 +173,31 @@ export function applySpoolRecord({ db, record, atText = '' } = {}) {
     //   > 与一个「键不一致时 `markDispatched` 更新到 0 行」的车道，是同一个东西——
     //   > 只不过它的表现是"这条记录的结果还没回来"，而不是一次报错。
     const key = toolCallIdempotencyKey({ callId: row.callId })
+    // ★★ **重放**与"第二次派发"必须先分开（第 118 轮第六轮，见文件头 ②′）。
+    //
+    // `markDispatched()` 的守卫是**故意**严的：它防的是"重复派发＝外部写做两遍"。
+    // 但收账**从不派发**，它只是重放一份日志 —— 不加这一步，一行**已经收过**的
+    // `dispatched` 会被那条守卫读成"有人在派发第二次"，于是整个文件的第二趟报
+    // `complete:false`（实测：pass2 `applied.dispatched:0` + 一条 refusal）。
+    //
+    // ⇒ 先读状态：行已经不在 `none`（已派发过、或已有结果）就是**重放**，跳过并记成
+    //   `outcome:'replayed'`。守卫**一个字都没放宽** —— 直接调 `markDispatched` 的
+    //   派发路径照旧会抛同样的错（有用例钉着）。
+    const before = readToolCall({ db, idempotencyKey: key })
+    if (before !== null && before.resultStatus !== RESULT_STATUSES.NONE) {
+      return Object.freeze({ kind, outcome: 'replayed', idempotencyKey: key })
+    }
     const res = markDispatched({ db, idempotencyKey: key, atText: row.atText ?? atText })
     return Object.freeze({ kind, outcome: res.outcome, idempotencyKey: key })
   }
   if (kind === 'result') {
     const key = toolCallIdempotencyKey({ callId: row.callId })
+    // 同一个形状：**已经落过同一个结果**就是重放。
+    // 状态不同（例如库里是 `unknown`、记录里是 `ok`）⇒ **照旧写**，那是一次真实的状态推进。
+    const settled = readToolCall({ db, idempotencyKey: key })
+    if (settled !== null && settled.settledAt !== null && settled.resultStatus === row.status) {
+      return Object.freeze({ kind, outcome: 'replayed', idempotencyKey: key })
+    }
     const res = recordResult({
       db,
       idempotencyKey: key,
@@ -159,9 +219,11 @@ export function applySpoolRecord({ db, record, atText = '' } = {}) {
  * @returns {Readonly<{
  *   present: boolean, complete: boolean,
  *   applied: Readonly<{decision: number, dispatched: number, result: number, total: number}>,
+ *   replayed: Readonly<{decision: number, dispatched: number, result: number, total: number}>,
  *   refusals: ReadonlyArray<{line: number|null, code: string, reason: string}>,
  * }>}
  *   `complete:false` ⇒ 有东西没进去（读不出来的行，或落账失败的行）。
+ *   `applied` 只数**真的写了**的；已经在目标状态的那些走 `replayed`（见 ②′）。
  */
 export function drainToolCallSpool({ db, file, atText = '' } = {}) {
   if (db === null || typeof db !== 'object' || typeof db.prepare !== 'function') {
@@ -174,6 +236,7 @@ export function drainToolCallSpool({ db, file, atText = '' } = {}) {
   const read = readSpoolRecords({ file })
   const refusals = [...read.refusals]
   const applied = { decision: 0, dispatched: 0, result: 0 }
+  const replayed = { decision: 0, dispatched: 0, result: 0 }
   // ★ 按文件顺序落账。追加写 ⇒ 文件顺序 = 墙钟顺序，而 `recordResult` 依赖
   //   `recordToolCall` 已经落过那一行（它是一次 UPDATE）。
   // ★ 逐条带着**行号**：只报一个 `line: null` 的具名拒绝，值班的人知道"有一条坏了"
@@ -181,7 +244,10 @@ export function drainToolCallSpool({ db, file, atText = '' } = {}) {
   for (const { line, record: rec } of read.entries) {
     try {
       const res = applySpoolRecord({ db, record: rec, atText })
-      applied[res.kind] += 1
+      // ★ 重放**不算 applied**：它一个字节都没写。两者混在一起，"这一趟收了几条"
+      //   会随重跑次数增长，而库里的行数一步不动 —— 那种读数是不能用来判断"收完没有"的。
+      if (res.outcome === 'replayed') replayed[res.kind] += 1
+      else applied[res.kind] += 1
     } catch (err) {
       refusals.push(Object.freeze({
         line,
@@ -201,6 +267,14 @@ export function drainToolCallSpool({ db, file, atText = '' } = {}) {
       dispatched: applied.dispatched,
       result: applied.result,
       total: applied.decision + applied.dispatched + applied.result,
+    }),
+    // ★★ **重放**（这一条已经在库里处于目标状态）与 `applied` 分开报（第 118 轮第六轮）。
+    //   它今天在 sweep 那一侧是"第二趟不再报 `complete:false`"的依据。
+    replayed: Object.freeze({
+      decision: replayed.decision,
+      dispatched: replayed.dispatched,
+      result: replayed.result,
+      total: replayed.decision + replayed.dispatched + replayed.result,
     }),
     refusals: Object.freeze(refusals),
     total: read.total,
@@ -260,11 +334,15 @@ export function toolCallDrainStatus({ evidence, drain = null } = {}) {
     })
   }
   const refusals = Array.isArray(drain.refusals) ? drain.refusals.length : 0
+  // ★ 重放要与"落进账"分开报（第 118 轮第六轮）：一个已经把这一趟**全部重放**过的读数，
+  //   说"落进账的有 0 条"字面上没错、读起来却是"一条都没收"——而它其实什么都收完了。
+  const replayed = Number(drain.replayed?.total ?? 0)
   return Object.freeze({
     state: 'idle',
     readiness: TOOLCALL_DRAIN_READINESS,
     ok: false,
     reason: `执行面写了 ${drain.total ?? 0} 条，落进账的有 ${drain.applied?.total ?? 0} 条`
+      + (replayed > 0 ? `（另有 ${replayed} 条**已经在账上了**，属重放，不是没收）` : '')
       + (refusals > 0 ? `，另有 ${refusals} 条被拒（去看 refusals 里的行号）` : '')
       + ` —— ${evidence?.reason ?? '（没有更多读数）'}`,
   })

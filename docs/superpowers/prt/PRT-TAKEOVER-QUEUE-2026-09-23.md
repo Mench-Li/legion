@@ -231,7 +231,7 @@ A2: HTTP 503「强制面结论的形状不对：必须是带布尔字段 autoExe
 | --- | --- | --- | --- | --- |
 | **P0-1** | `test` 阶段**全量**复跑 | 验证 | 第 116 轮 7 个红套件修在 `59a6ad9` | ✅ **PASS**（19 套件 / 1204s，第二次单独跑） |
 | **P0-2** | **`legion-enforcement-runtime-contract-server` 行挂载了却从未激活** | 施工·真缺陷 | 两个平面（等的账 ≠ 判的树）＋ 自指等待 | ✅ **已修**（`c735415`）：cross-process 6 败 → **19/19**；全域 1025/1025；新增用例 ①e 钉住 |
-| **P1-1** | 接 `spool` / `toolcall-drain` **落账车道**（解目标链 L7） | 施工 | §3.2.1 路线已定；枚举器 `listSpooledRuns` + 收账宿主 `team-hub/toolcall-sweep.mjs` 已落（7 例） | 🟡 **接线前先修一处缺陷**：重放 `dispatched` 会把读数刷成 `complete:false`（§3.3）。修好之前不接 tick、不登记 hub 的 DataDir |
+| **P1-1** | 接 `spool` / `toolcall-drain` **落账车道**（解目标链 L7） | 施工 | §3.2.1 路线已定；枚举器 + 收账宿主 7 例 + **重放语义已修**（§3.3，车道三套共 34 例） | 🟡 收账侧可用；**下一轮**：接 tick + 登记 hub 的 `LEGION_DATA_DIR`（一起落），再做写侧按 Run 绑 `runId` |
 | **P1-2** | 删掉 PRT-707 **死的那份**实现 | 施工 | 业主 2026-09-23 裁决 | 待做 |
 | **P1-3** | `whitelist` 装配 + **Legion 能力词表**映射 | 施工 | 业主 2026-09-23 裁决（第 27 条选 Legion 名 + 加映射） | 待做 |
 | **P1-4** | 阶段 9 产品动作的 **CLI 面** | 施工 | 业主 2026-09-23 裁决（第 16 条：做） | 待做 |
@@ -382,16 +382,28 @@ pass2: applied={decision:1,dispatched:0,result:1,total:2} complete=false
 > 一个每 30 秒把 `complete:false` 刷一遍的定时器，与一个坏掉的告警是同一个东西
 > ——而"总是叫狼来了的门禁会被关掉"。
 
-**本轮处置**：`team-hub/toolcall-sweep.mjs` 与它的 7 条用例落地（含枚举器
-`listSpooledRuns`），**但先不接进 hub 的 tick**，也**不**重新登记 hub 的
-`LEGION_DATA_DIR` —— 那两件事要等重放语义定了再一起做（否则又会落一次
-"有登记、没消费者"）。用例 ③b 今天**钉的就是这个缺陷本身**，并写明了修好之后
-应当改成什么断言。
+**处置（第 118 轮第六轮，已修）**：修法**不在状态守卫那一侧** —— `markDispatched` 一个字
+都没动（它防的是"重复派发＝外部写做两遍"，有用例直接调它钉着）。收账改成**先读状态**：
+行已经不在 `none` 就是**重放**，记 `outcome:'replayed'` 并跳过；`applied` 与 `replayed`
+分开报。同一份探针现在给的是：
 
-**下一步（要先想清楚再动）**：让 drain 把"这条 `dispatched` 我们**已经收过**"与
-"这是一次**新的**派发尝试"分开——后者是那个状态机在防的东西（重复派发＝外部写做两遍），
-所以这不是"顺手把拒绝改成忽略"，而是要先说清**重放凭什么可辨**（同一文件同一行？
-`callId` + 已落库的状态？）。这条改动动的是**一条安全拒绝**，值得单独一轮。
+```
+pass1: applied={decision:1,dispatched:1,result:1,total:3} replayed={total:0} complete=true
+pass2: applied={decision:0,dispatched:0,result:0,total:0} replayed={…,total:2} complete=true
+pass3: 同 pass2                                    refusals=0  rows=1
+```
+
+同一趟还量到**第二个同族副作用**并一并修掉：`recordToolCall` 的 duplicate 分支**会写**
+（`attempts = attempts + 1`、`updatedAt`），于是"重放"会把 `attempts` 随扫描次数抬上去
+——而 `attempts` 是**重试**的读数，记成"重试了 N 次"与真的重试过 N 次，在审计里是同一个
+东西。现在决定的**完全一致**的重放也走 `replayed`（工具名或 canonical 哈希变了仍然交给
+`recordToolCall` 抛 —— 那是真事故，不是重放）。
+
+用例跟着改的是**那两条钉着旧行为的断言**（`toolcall-drain.test.mjs` ③ / ③b、`toolcall-sweep.test.mjs`
+③b），并新增"`attempts` 一步不动"与"守卫照旧拒绝直接派发"两条。
+
+**下一步**：读数幂等了，"扫一趟"才谈得上接进 tick —— 下一轮连同 hub 的
+`LEGION_DATA_DIR` 登记一起做（免得又落一次"有登记、没消费者"），再做写侧按 Run 绑 `runId`。
 
 ---
 

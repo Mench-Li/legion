@@ -147,23 +147,18 @@ test('③ ★★★ 两个 Run 的 spool 文件 → 真库两行；重复扫**�
   assert.deepEqual(first.runs.map((r) => r.dirName), ['run-a', 'run-b'], '顺序必须确定（按目录名）')
   assert.equal(rowCount(db), 2, '库里是两个**不同的**调用')
 
-  // ── ③b 重跑：**行**幂等成立，而**读数**不成立 —— 这是本轮量到的一处缺陷 ──────
+  // ── ③b 重跑：现在**读数也幂等**了（第 118 轮第六轮修好）────────────────────
   //
-  // 同一个文件收第二趟时，已经收过的 `dispatched` 记录会被状态机拒绝，于是这一趟
-  // 报 `complete:false` 并带一条 refusal。`toolcall-drain.mjs` 头部 ② 声称
-  // "结果是幂等的，而且必须是"，**行**那一半成立（下面断言库里一行不多），
-  // **读数**那一半不成立（下面断言 refusal 的具名码与行号）。
-  //
-  // ⇒ 这条用例今天**钉的是缺陷本身**：修好重放语义之后它应当变绿的另一半在
-  //   `applied.dispatched === 2 && complete === true`，届时把这四行一起改掉。
+  // 修好之前这里报 `complete:false` 外加两条带行号的 refusal（重放的 `dispatched` 被
+  // 状态机拒绝）。`toolcall-drain.mjs` 头部 ② 声称"重跑必须安全"：**行**那一半一直成立，
+  // **读数**那一半曾经不成立。现在收账先读状态，重放走 `replayed`。
   const second = sweepToolCallSpool({ db, env: { LEGION_DATA_DIR: root } })
   assert.equal(rowCount(db), 2, '★ 库里**一行都没多**——幂等键在 tool-calls 那一侧')
-  assert.equal(second.applied.dispatched, 0, '★ 而两条重放的 dispatched 都没落账（每个 Run 一条）')
-  assert.equal(second.applied.total, 4, '★ decision 与 result 重放不报错（4 条），dispatched 那 2 条被拒')
-  assert.equal(second.complete, false, '★ 于是这一趟读成"有东西没进去"——这就是缺陷')
-  // 两个 Run 各一条：都落在第 2 行（各自文件里的 `dispatched`），且都带具名码。
-  assert.deepEqual(second.refusals.map((r) => r.line), [2, 2], '拒绝带得出**行号**')
-  assert.deepEqual(second.refusals.map((r) => r.code), ['toolcall-drain-apply-failed', 'toolcall-drain-apply-failed'])
+  assert.equal(second.complete, true, '★ 重放不许再报"有东西没进去"')
+  assert.deepEqual(second.refusals, [], '一条拒绝都不该有')
+  assert.equal(second.applied.total, 0, '★ 第二趟**什么都没写**（`applied` 只数真的写了的那几条）')
+  assert.deepEqual(second.replayed, { decision: 2, dispatched: 2, result: 2, total: 6 },
+    '★ 6 条全部如实报成重放')
 })
 
 // ══════════════════════════════════════════════════════════════════════════

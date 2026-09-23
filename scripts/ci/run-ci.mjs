@@ -1311,14 +1311,13 @@ async function stageTest() {
     //     会在崩溃后把没落账的几条当成"已经收过了"。
     { label: 'toolcall-spool（PRT-610 出站车道·写入侧：执行面无凭证时怎么把账带出去）', files: ['runtime/toolcall/spool.test.mjs'], cwd: ROOT },
     { label: 'toolcall-drain（PRT-610 出站车道·收账侧：整条环走到真库，把 decisionSourceRecorded 翻成 true）', files: ['orchestrator/worker/toolcall-drain.test.mjs'], cwd: ROOT },
-    // 收账**宿主**（第 118 轮第五轮新增）：第 28 条裁决之后才存在的那条路——
-    // 目录只从 `LEGION_DATA_DIR` 来（**不从库的位置派生**）、收账住在 hub、交付按 Run。
+    // 收账**宿主**（第 118 轮第五轮新增，第六轮补上重放语义）：第 28 条裁决之后才存在的
+    // 那条路——目录只从 `LEGION_DATA_DIR` 来（**不从库的位置派生**）、收账住在 hub、交付按 Run。
     //
-    // ★ 这一套里有一条**钉的是缺陷本身**：重放已经收过的 `dispatched` 记录会被状态机
-    //   拒绝，于是第二趟读成 `complete:false`（`toolcall-drain.mjs` 头部 ② 声称
-    //   "重跑必须安全"，**行**那一半成立、**读数**那一半不成立）。
-    //   修好重放语义之后那条断言要一起改——见 `team-hub/toolcall-sweep.test.mjs` ③b。
-    { label: 'toolcall-sweep（PRT-610 出站车道·收账宿主：枚举器 + 缺 DataDir 时具名拒绝而不去猜 + 重放读数缺陷）', files: ['team-hub/toolcall-sweep.test.mjs'], cwd: ROOT },
+    // ★ 这一套里有一条钉的是**重放**（第 118 轮第六轮）：同一个文件收两趟，第二趟
+    //   `complete:true`、`refusals:[]`、`applied.total:0`、`replayed.total:6`。
+    //   在修好之前第二趟会报 `complete:false`，于是"扫一趟"永远在叫狼来了。
+    { label: 'toolcall-sweep（PRT-610 出站车道·收账宿主：枚举器 + 缺 DataDir 时具名拒绝而不去猜 + 重放读数）', files: ['team-hub/toolcall-sweep.test.mjs'], cwd: ROOT },
     // 文档**表格列数一致性**（第 22 轮顺带建立）。修第 23 条那个"单元格里有未转义
     // 竖线"时发现在全仓是**一类**问题，于是把它变成可复跑的读数而不是一次性修。
     //

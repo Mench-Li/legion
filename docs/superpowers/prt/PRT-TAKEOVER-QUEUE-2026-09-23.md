@@ -903,8 +903,85 @@ hard floor、`canonicalHash`（账本）全都读那份投影 ⇒ 全都判错�
 | --- | --- | --- |
 | **§5 第 16 条**（业主已裁：**做**） | ~~11~~ → **6** | **已清（第十四轮第一刀连带）**：`release/{checklist,privacy}.mjs`、`support/runbook.mjs`（直接接）、`lifecycle/data-classes.mjs`、`diagnostics/crash-report.mjs`（**连带**接上）。**剩下**：`product/lifecycle/{data-export,retention,uninstall}.mjs`、`product/metrics-source.mjs`、`product/metrics-spec7.mjs`、`product/metrics-spec7-source.mjs` |
 | §5 第 19 条 | **6** | `product/execution-plane-config.mjs`、`runtime/connectors/target-binding.mjs`、`runtime/packs/store.mjs`（PRT-1003）、`runtime/packs/compiled-plan.mjs`（PRT-1004）、`runtime/packs/authority.mjs`（PRT-1005）、`runtime/packs/builtin/software-delivery.mjs`（PRT-1006） |
+
 | §5 第 18 条 | **3** | `runtime/employee/role-pack.mjs`（F-19 执行面）、`runtime/experience/friction.mjs`（F-18 摩擦分）、`runtime/experience/graph.mjs`（F-18 图） |
 
 ★ 一句要写下来的边界：`product/diagnostics/` 与 `product/launcher/` 里**已经有** CLI 面
 （`diagnostics-cli.mjs`、`wizard-cli.mjs`，两套都在 CI 里），而 `crash-report.mjs` **仍在 gap 里**
 ⇒ "这一族有 CLI" **不等于**"这一族每个模块都有入口"。前者是印象，后者是读数。
+
+---
+
+## 7. 本批收口：全量 CI **9/9 PASS**（第十五轮末，`f3d960b`）
+
+```
+syntax:PASS env:PASS boundary:PASS deps:PASS build:PASS test:PASS smoke:PASS stage:PASS doc:PASS
+```
+
+而这一次的 `test` 阶段是**在三条提交之后、工作树全干净**的状态下跑的 —— ★ 也就是上一次它红的那种状态。
+上一次它抓出 3 处，性质**必须分开说**：
+
+| # | 抓到的 | 性质 |
+| --- | --- | --- |
+| ① | `alpha-chain-trace` ⑧：`map.size >= 40` 假红 | **该红的**：一条会过期的魔数（我把不可达从 41 降到 36）。已改成与**基线文件本身**逐条对齐 |
+| ② | `reachability` ⑭：§5 状态索引 28 vs 29，且第 16 条派生出 `待裁决` | **该红的**：我把索引那一格写成了词表外的词（整条掉出索引），又把正文那行的标记写成了词表不认的形式（`已裁「做」` ≠ `已裁决` / `业主 <日期> 裁定`） |
+| ③ | `reachability` ⑦：`dirty.size > 0` 假红 | ★ **门禁自己的缺陷**：它要求工作树**必须是脏的**，于是把"收工"判成了红。已换成更强的断言：**干净 ⇒ `in-flight` 必须为空** |
+
+### 7.1 一条操作纪律（我自己踩的）
+
+我第一次跑 CI 时用了 `… | Select-String … | Select-Object -First 60` —— **`-First` 会在取够 60 行后
+关掉上游管道**，于是那个 CI 跑到 `test` 阶段开头就被**掐死**，作业退出码 1。
+我一度把它读成"CI 又红了"。分辨它靠的是 CI 自己落盘的 `.ci/<时间戳>/ci.log`
+（末尾停在 `===== [test] L0 … =====`，而 `suites/` 里**一个失败日志都没有**）。
+
+> CI 的输出**不许被下游截断**：`-First N` 与"这个进程还在跑"是不相容的。
+
+### 7.2 本会话这一批的完整读数
+
+| 面 | 之前 | 现在 | 出处 |
+| --- | --- | --- | --- |
+| 不可达总数 | 41 | **36** | `prt-reachability-baseline.json`（36 条，未分类 0） |
+| 其中 `gap` | 20 | **15** | 同上 |
+| 第 16 条名下 | 11 | **6** | §5.1 |
+| 生产入口 | `--report` 无 | `--report=checklist\|privacy\|runbook`（3 份只读报告） | `product/report-cli.mjs` + `product/launcher/cli.mjs` |
+| 全量 CI | — | **9/9 PASS**（`f3d960b`） | 本节 |
+
+
+---
+
+## 6. 第 16 条第二刀：**真正卡在哪**（第十五轮实读，只读没动代码）
+
+把剩下 6 个逐一看它们的**主入口要什么入参**，结论只有两类：
+
+| 模块 | 主入口 | 要的入参 | 仓里有吗 |
+| --- | --- | --- | --- |
+| `lifecycle/data-export.mjs` | `planExport({stores, include, scannedSecrets})` | 磁盘上**实际存在**的落点（带 class） | ❌ **没有** |
+| `lifecycle/retention.mjs` | `planRetention({entries, policy, nowMs, activeRefs})` | 逐条的 `{path, bytes, mtimeMs}` | ❌ **没有** |
+| `lifecycle/uninstall.mjs` | `planUninstall({stores, mode, layout})` | 同 `planExport` 的落点清单 **+ 一个显式模式** | ❌ 落点清单没有 |
+| `metrics-spec7-source.mjs` | `spec7CountsFromHubDb(db, …)` | 一个**库句柄** | ⚠️ 路径知道（`team-hub/server.mjs:335`），但没有"只读打开"的入口 |
+| `metrics-spec7.mjs` | `computeSpec7Metrics(snapshot)` | 上面那个 source 的产物 | ❌ 同上 |
+| `metrics-source.mjs` | `createMetricsSource({store, auditDir, …})` | 库句柄 + 审计目录 | ❌ 同上 |
+
+**★ 四条卡在同一个东西上：仓里没有任何"把数据目录走一遍、按 `classifyPath` 分出类别"的生产读法。**
+（`product/init.mjs:268` 的 `directorySize()` 走的是同一棵树，但它**只回一个总量**，不落每条 ⇒ 不是枚举器。）
+
+### 6.1 ⚠️ 一个很容易犯、而且会骗过判据的走法：**拿静态目录打印去把 gap 关掉**
+
+`data-classes.mjs` / `retention.mjs` / `data-export.mjs` 各自都导出**静态表**
+（类别表、`DEFAULT_RETENTION`、`EXPORT_CLASS_POLICY`）。于是"给 `--report` 加四个目录类报告"
+可以让 4 个模块**今天就变成可达**、`gap` 从 15 掉到 11 —— 而**用户一个动作都按不到**。
+
+> 这正是 `scripts/prt/reachability.test.mjs` ④ 那句自己写着的判据：
+> 一个"模块可达"的读数，与一个"这条链真的跑了"的读数，
+> 在只看探针汇总的时候是**同一个东西**。
+
+⇒ **不做这件事。** 第二刀要先有那个**读法**（枚举器），而不是先有那个**读数**。
+
+### 6.2 第二刀的施工面（一个读法解锁 4 个 gap）
+
+一个"按 `classifyPath` 分类的落点扫描"，形状要照仓里既有的纪律：
+
+- **只读**（这是 `data-export.mjs` 文件头坑②明令的："为了导出一致快照先 checkpoint 一下 WAL"是对运行中的产品做了一次写操作）；
+- **有上限**（照 `init.mjs:273` 的 `maxEntries`），并且**扫到上限要说出来**——"没扫完"与"扫完了"不许同形；
+- **不跟符号链接出根**（边界面）；
+- **读不到的条目要报**（照 `inventory.mjs:87` 那句"读不了的目录不算没有清单"）。

@@ -170,6 +170,13 @@
       ]
     },
     {
+      "id": "legion-scrum-worker-ozon",
+      "package": null,
+      "repoDir": null,
+      "configKeys": [],
+      "emptyConfigKeys": []
+    },
+    {
       "id": "legion-services",
       "package": "@dsh-external/dsh-legion-services",
       "repoDir": "services-plugin",

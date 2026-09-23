@@ -16,7 +16,7 @@ import { assertHostPort, normalizeRunHandle, DshPortError } from './port.mjs'
 import { classifyDshError, classifyStopReason, errorFingerprint } from './errors.mjs'
 import { redactValue, redactText, SENSITIVE_KEY_RE, REDACTED } from './redact.mjs'
 import { validateStructured, validateExpectedOutput } from './schema.mjs'
-import { collectUsage, estimateCostUsd, checkBudget, PRICING } from './usage.mjs'
+import { collectRunUsage, collectUsage, collectUsageFromProjection, estimateCostUsd, checkBudget, PRICING } from './usage.mjs'
 import { mapDshEvent, createEventEmitter, terminalTypeFor, DSH_EVENT_MAP } from './events.mjs'
 import { parseVersion, compareVersion, checkRuntimeVersion, probeRuntime, SUPPORTED_RUNTIME } from './probe.mjs'
 import { validateRunRequest, validateRunEvent, assertTerminalContract, RUN_EVENT_TYPES } from '../../contracts/run.mjs'
@@ -1168,6 +1168,56 @@ test('⑭ 空字符串的 `prompt` 视为没给（不把空上下文当成一份
   assert.notEqual(sent, '', '空提示词是"什么都没告诉模型"，不该被当成一次正常的执行')
   assert.match(sent, /任务：T-1/)
 })
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ⑯ 用量的第二条来源：会话投影（`SubagentResult` 契约里没有 usage 字段）
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('⑯ 结果对象读不到用量时，退回会话投影；两个都读不到 ⇒ null', () => {
+  // ① 结果对象没有 usage（真 DSH 的情形）→ 走投影
+  const host = { runUsage: (id) => (id === 's-1' ? { tokensIn: 120, tokensOut: 40, cacheReadTokens: 900, messages: 3 } : null) }
+  const viaProjection = collectRunUsage({ result: { stopReason: 'completed' }, host, sessionId: 's-1', model: null })
+  assert.equal(viaProjection.source, 'projection')
+  assert.equal(viaProjection.usage.tokensIn, 120)
+  assert.equal(viaProjection.usage.tokensOut, 40)
+
+  // ② 两个都没有 → **null**，绝不合成一个全 0
+  const none = collectRunUsage({ result: { stopReason: 'completed' }, host, sessionId: 's-missing', model: null })
+  assert.equal(none.usage, null, '读不到就是 null —— 补 0 会把"不知道"记成一次零成本运行')
+  assert.equal(none.source, null)
+
+  // ③ 结果对象**有** usage 时优先用它（引擎自报是第一手读数）
+  const viaResult = collectRunUsage({ result: { stopReason: 'completed', usage: { tokensIn: 7, tokensOut: 3 } }, host, sessionId: 's-1', model: null })
+  assert.equal(viaResult.source, 'result', '引擎自报的第一手读数优先于从会话日志回读')
+  assert.equal(viaResult.usage.tokensIn, 7)
+})
+
+test('⑯ ★ 归因键缺席 / 端口没有 runUsage / 端口抛错 ⇒ 一律 null（不补 0、不上抛）', () => {
+  const okHost = { runUsage: () => ({ tokensIn: 5, tokensOut: 5 }) }
+  assert.equal(collectUsageFromProjection({ host: okHost, sessionId: null }), null, '归因键缺席 ⇒ 读不到')
+  assert.equal(collectUsageFromProjection({ host: okHost, sessionId: '' }), null)
+  assert.equal(collectUsageFromProjection({ host: {}, sessionId: 's-1' }), null, '端口没有 runUsage（可选方法缺席）')
+  assert.equal(collectUsageFromProjection({ host: { runUsage: () => null }, sessionId: 's-1' }), null)
+  // 端口抛错不该让一次成功的运行变成失败
+  assert.equal(collectUsageFromProjection({ host: { runUsage: () => { throw new Error('boom') } }, sessionId: 's-1' }), null)
+  // 返回垃圾也不当成有效读数
+  assert.equal(collectUsageFromProjection({ host: { runUsage: () => ({ tokensIn: -5, tokensOut: -5 }) }, sessionId: 's-1' }), null,
+    '两侧都不是合法计数 ⇒ 不可用')
+})
+
+test('⑯ ★ 费用仍由**本文件的** `estimateCostUsd` 算（投影只给计数，不搬第二遍算术）', () => {
+  const host = { runUsage: () => ({ tokensIn: 1_000_000, tokensOut: 0 }) }
+  const u = collectUsageFromProjection({ host, sessionId: 's-1', model: 'deepseek-v4-flash-openai', pricing: PRICING })
+  assert.notEqual(u, null)
+  // 与直接调 estimateCostUsd 逐字相同 —— 这条同时钉住"没有第二份乘法"
+  assert.equal(u.estimatedCostUsd, estimateCostUsd({
+    model: 'deepseek-v4-flash-openai', tokensIn: 1_000_000, tokensOut: 0, pricing: PRICING,
+  }))
+  // 没报价的模型 ⇒ null（绝不返回 0，与 usage.mjs 的既有纪律同源）
+  const unpriced = collectUsageFromProjection({ host, sessionId: 's-1', model: 'no-such-model-xyz', pricing: PRICING })
+  assert.equal(unpriced.estimatedCostUsd, null, '价格未配置时返回 null，不是 0')
+})
+
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ⑮ 归因键与序号：两处**曾经埋着**的缺陷

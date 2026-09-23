@@ -305,7 +305,7 @@ export const NON_ENV_LITERALS = Object.freeze([
   'RUNTIME_CONTRACT_ROW_NO_PUBLICATION_DIR', // runtime/dsh-composition/plugins/runtime-contract-server-row.mjs
   'RUNTIME_CONTRACT_ROW_NO_TOKEN', // runtime/dsh-composition/plugins/runtime-contract-server-row.mjs
   'RUNTIME_CONTRACT_ROW_PUBLICATION_FAILED', // runtime/dsh-composition/plugins/runtime-contract-server-row.mjs
-  // ── runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs（21 条）
+  // ── runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs（25 条）
   'RUNTIME_HOST_REGISTRAR_CAPABILITY_CANCEL_NOT_GUARANTEED_BY_ENGINE', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
   'RUNTIME_HOST_REGISTRAR_CAPABILITY_ENFORCEMENT_PLANE_MEASURED_ELSEWHERE', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
   'RUNTIME_HOST_REGISTRAR_CAPABILITY_PROVIDER_LACKS_OUTPUT_SCHEMA', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
@@ -334,6 +334,15 @@ export const NON_ENV_LITERALS = Object.freeze([
   'RUNTIME_HOST_REGISTRAR_NO_CAN_READ_SOURCE', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
   'RUNTIME_HOST_REGISTRAR_NO_CONTEXT', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
   'RUNTIME_HOST_REGISTRAR_NO_SUBAGENTS_PORT', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
+  // 用量投影（PRT-253 续批三）的四个注册结果码。与上面那批**同源不同事**：
+  // 上面问的是"能力/模型怎么注册"，这四个问的是"用量投影挂上了没有"——
+  // `SERVICE_ABSENT`（DSH 组合层没挂那一行）与 `SERVICE_MALFORMED`（挂了但形状不对）
+  // 要修的东西不同，`REGISTER_THREW` 更是另一条链，合成一个码会让"去挂行"与"去改形状"
+  // 在报错里变成同一句话。
+  'RUNTIME_HOST_REGISTRAR_USAGE_PROJECTION_REGISTERED', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
+  'RUNTIME_HOST_REGISTRAR_USAGE_PROJECTION_REGISTER_THREW', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
+  'RUNTIME_HOST_REGISTRAR_USAGE_PROJECTION_SERVICE_ABSENT', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
+  'RUNTIME_HOST_REGISTRAR_USAGE_PROJECTION_SERVICE_MALFORMED', // runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs
   // ── runtime/dsh-composition/plugins/runtime-host-row.mjs（12 条）
   // `SELF_CHECK_INCOMPATIBLE`：spec `line 854` 要的「按 `incompatible` 处理并禁止自动执行」。
   // 与 `BIND_REFUSED` 分开：那一条是"我们自己的接线错了"（当场响），
@@ -420,6 +429,16 @@ export const NON_ENV_LITERALS = Object.freeze([
   'CAPABILITY_NONE_DECLARED', // runtime/dsh-composition/tool-capability.mjs
   'CAPABILITY_UNKNOWN_KIND', // runtime/dsh-composition/tool-capability.mjs
   'CAPABILITY_UNKNOWN_RISK', // runtime/dsh-composition/tool-capability.mjs
+  // ── runtime/dsh-composition/usage-projection.mjs（5 条）
+  // `USAGE_READ_CODES` 的五种"读不到 / 读到了"。**不是** env 键，虽然一律带
+  // `LEGION_` 前缀（那是共享命名空间）——它们是 `readRunUsage()` 返回的**码**，
+  // 各自要修的东西不同（挂服务 / 查归因键 / 注册投影），合成一个 `null` 会让
+  // 三种处境在值班的人眼里变成同一种。
+  'LEGION_USAGE_NO_PROJECTIONS_SERVICE', // runtime/dsh-composition/usage-projection.mjs
+  'LEGION_USAGE_NO_SESSIONS_SERVICE', // runtime/dsh-composition/usage-projection.mjs
+  'LEGION_USAGE_NO_USAGE_EVENTS', // runtime/dsh-composition/usage-projection.mjs
+  'LEGION_USAGE_OK', // runtime/dsh-composition/usage-projection.mjs
+  'LEGION_USAGE_SESSION_NOT_FOUND', // runtime/dsh-composition/usage-projection.mjs
   // ── runtime/probe/index.mjs（16 条）
   'CERT_HAS_EXPIRED', // runtime/probe/index.mjs
   'DEPTH_ZERO_SELF_SIGNED_CERT', // runtime/probe/index.mjs

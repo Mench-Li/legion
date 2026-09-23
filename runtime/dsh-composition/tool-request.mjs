@@ -93,6 +93,9 @@ import { deriveScopeFacts } from './scope-facts.mjs'
 import { PATCH_LAYER_ROWS } from './patch-layer.mjs'
 // PRT-214 缺口②：身份覆盖的取用缝与叠加。单向依赖（它只 import contracts），不成环。
 import { applyIdentityOverlay } from '../contracts/run-identity.mjs'
+// ★ 第 118 轮第十轮：`callId` 缓存命中时的**身份核对**要用它（共享基础库，
+//   不另写一份规范化——PRT-611 已经为"操作身份"定过一次这件事）。
+import { canonicalJson } from '../contracts/canonical.mjs'
 import { identityOverlayForExecution } from './run-identity.mjs'
 
 export const TOOL_REQUEST_VERSION = 'legion/tool-request@1'
@@ -105,6 +108,8 @@ export const PROJECTION_CODES = Object.freeze({
   LEAKED_OBSERVATION_KEY: 'tool-request-observation-key-in-subject',
   PROJECTION_DRIFT: 'tool-request-projection-drift',
   GUARD_CONTRARY: 'tool-request-guard-contrary-to-pre-execute',
+  /** ★★★ 第 118 轮第十轮：同一个 `callId` 的第二份**不同**请求。 */
+  CALL_ID_REUSED: 'tool-request-call-id-reused',
 })
 
 /**
@@ -701,7 +706,30 @@ export function createEnforcementBridge({
 
   const ledger = new Map()
   const contradictions = []
-  /** 按 callId 记住投影：guard 在 pre-execute 之后跑，读的是**同一份**。 */
+  /**
+   * 按 callId 记住投影：guard / 审批那些**只拿得到 `{toolName, callId}`** 的端口
+   * 读的是**同一份**（它们拿不到 arguments，所以只能按 callId 取）。
+   *
+   * ★★★ 第 118 轮第十轮：这条缓存原来**直接存投影、命中就返回**，于是
+   *   **同一个 `callId` 的第二份请求会被当成第一份来判**——它自己的工具名与
+   *   参数从来没进过判据。实测（`whitelist-wiring.test.mjs` ⑦）：
+   *   只读许可下先 `read`（放行）、再拿**同一个 callId** 发 `write`，
+   *   第二次**放行**；换一个 callId 才被拒。
+   *
+   *   > 一个「按 callId 复用投影、而 callId 是请求方给的」的桥，
+   *   > 与一个「第一次调用长什么样，这个 callId 就永远按那个样子判」的桥，
+   *   > 在"一个人一个 callId 只用一次"时是同一个东西——只不过后者让
+   *   > **一次放行可以洗白任何复用那个 callId 的调用**。
+   *
+   *   ⇒ 现在存的是 `{projection, toolName, argsKey}`，命中时**先核对身份**：
+   *     工具名不同、或这次请求**带着**参数而它与记住的那份不同 ⇒ 这不是
+   *     缓存命中，是**同一个 callId 的两份不同请求**。按拒绝处理（fail closed），
+   *     并留一条 `contradictions` —— 前端本来就有 `assertNoContradiction` 在读它。
+   *
+   *   ★ 真正的重试（同 callId、同工具、同参数）**仍然**命中缓存：那才是这条
+   *     缓存存在的理由（"同一次调用不重复问人"）。所以这一改动没有把重试变慢，
+   *     只是把"名字相同"与"是同一次调用"分开了。
+   */
   const byCallId = new Map()
 
   /**
@@ -745,6 +773,18 @@ export function createEnforcementBridge({
    *   > 一个「投影失败就跳过强制」的路径，
    *   > 与一个「强制面可以被一次畸形请求关掉」的路径，是同一个东西。
    */
+  /** 这次请求的**参数身份**（便宜的那一半）；没有参数时是 `null`（＝"看不到"，不是"空"）。 */
+  const argsKeyOf = (request) => {
+    if (request.arguments === undefined || request.arguments === null) return null
+    try {
+      return canonicalJson(request.arguments)
+    } catch {
+      // 规范化不了 ⇒ 这份请求没有可比的身份。返回 `null` 会让它**只比工具名**，
+      // 与"看不到参数"同形；所以这里给一个**永不等于任何真实键**的值，让它 fail closed。
+      return '\u0000uncomparable'
+    }
+  }
+
   function projectionFor(execution) {
     let request
     try {
@@ -753,10 +793,38 @@ export function createEnforcementBridge({
       return { ok: false, code: err?.code ?? PROJECTION_CODES.BAD_REQUEST, message: err?.message ?? String(err) }
     }
     const remembered = byCallId.get(request.callId)
-    if (remembered !== undefined) return { ok: true, projection: remembered, remembered: true }
+    if (remembered !== undefined) {
+      const incomingArgsKey = argsKeyOf(request)
+      const sameTool = nfc(String(remembered.toolName)) === nfc(String(request.toolName))
+      // 审批 / guard 那些端口只拿得到 `{toolName, callId}`：没有参数就只比工具名。
+      const sameArgs = incomingArgsKey === null || incomingArgsKey === remembered.argsKey
+      if (sameTool && sameArgs) return { ok: true, projection: remembered.projection, remembered: true }
+
+      contradictions.push(Object.freeze({
+        code: PROJECTION_CODES.CALL_ID_REUSED,
+        callId: request.callId,
+        rememberedTool: remembered.toolName,
+        incomingTool: request.toolName,
+        argsDiffer: incomingArgsKey !== null && incomingArgsKey !== remembered.argsKey,
+        at: now(),
+      }))
+      return {
+        ok: false,
+        code: PROJECTION_CODES.CALL_ID_REUSED,
+        message: `callId「${request.callId}」在本进程里已经用于**另一次**调用：`
+          + `已记的是「${remembered.toolName}」，这一次是「${request.toolName}」`
+          + `${incomingArgsKey !== null && incomingArgsKey !== remembered.argsKey ? '（参数也不同）' : ''}。`
+          + '按拒绝处理——**同一个 callId 的两份不同请求不是缓存命中，是矛盾**，'
+          + '复用投影会让第一次的形状替第二次作决定（一次放行洗白任何复用该 callId 的调用）',
+      }
+    }
     try {
       const projection = project(request, execution)
-      byCallId.set(request.callId, projection)
+      byCallId.set(request.callId, Object.freeze({
+        projection,
+        toolName: request.toolName,
+        argsKey: argsKeyOf(request),
+      }))
       return { ok: true, projection, remembered: false }
     } catch (err) {
       return { ok: false, code: err?.code ?? PROJECTION_CODES.BAD_REQUEST, message: err?.message ?? String(err) }
@@ -1064,11 +1132,15 @@ export function createEnforcementBridge({
     // 而"连不上"与"等不到人"的排查方向完全相反：前者去看 hub 起没起，
     // 后者去看审批箱里积压了谁的申请。中间少传一个回调，这两件事就再也分不开了。
     request: async (short) => {
-      const projection = byCallId.get(short?.callId)
-      if (projection === undefined) {
+      // ★ 第 118 轮第十轮：缓存项现在是 `{projection, toolName, argsKey}`（身份核对用），
+      //   所以这里取的是它的 `.projection`。★ 这条路径**只读不写**：它拿不到
+      //   arguments，写进去会让"看不到参数"变成一个可以被别人碰巧命中的身份。
+      const remembered = byCallId.get(short?.callId)
+      if (remembered === undefined) {
         // 没有投影就不问：问不到 = 故障，不是"人说不"。
         return 'unavailable'
       }
+      const projection = remembered.projection
       const outcome = await requestApproval(projection, {
         onConnected: short?.onConnected ?? null,
         signal: short?.signal ?? null,

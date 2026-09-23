@@ -1206,7 +1206,18 @@ async function stageTest() {
       //   "把 DSH 名直接喂给判定器"、"缺席退化成永远放行"）**全部按预期变红**
       //   （量具 `scratch/_mutate-whitelist-port.mjs`，可复跑）。
       label: 'whitelist-port（PRT-603：判定器对了 ≠ 真 DSH 名进去它认得）',
-      files: ['runtime/dsh-composition/whitelist-port.test.mjs'],
+      files: [
+        'runtime/dsh-composition/whitelist-port.test.mjs',
+        // ★★★ 第 118 轮第十轮：**生产路径**那一段（环境里的许可 → 端口 → 真桥）。
+        //
+        // 它盯的是"两侧各自都有自己的用例、而中间那层词汇表没人量过"这个形状：
+        // 端口有 17 例、`permitsTool` 有 20 例，而**接起来**这件事没有读数，
+        // 于是"词汇表没接上、于是拒掉一切"与"接上了"在两侧全绿时同形。
+        //
+        // ★ 而它落地当天就量出一处**真缺陷**（同一个 `callId` 的第二份不同请求
+        //   会复用第一份的投影 ⇒ 一次放行洗白后续调用），见本套件 ⑦/⑧。
+        'runtime/dsh-composition/whitelist-wiring.test.mjs',
+      ],
       cwd: ROOT,
     },
     {
@@ -1310,6 +1321,22 @@ async function stageTest() {
     //     本模块**不出现** `unlinkSync`/`writeFileSync`——"收完就删 + 记游标"
     //     会在崩溃后把没落账的几条当成"已经收过了"。
     { label: 'toolcall-spool（PRT-610 出站车道·写入侧：执行面无凭证时怎么把账带出去）', files: ['runtime/toolcall/spool.test.mjs'], cwd: ROOT },
+    // ★★★ 第 118 轮第十轮**补登记**：上面这一族在第八轮落地时，**两套用例都没进这份清单**
+    //   ——`runtime/toolcall/spool-writer.test.mjs`（写入宿主自己，9 例）与
+    //   `runtime/dsh-composition/spool-writer-wiring.test.mjs`（生产路径证明，5 例）
+    //   都不在 `run-ci` 里，于是 CI **从来没跑过它们**。
+    //
+    //   本轮的处置是量了一遍全仓：333 个 `*.test.mjs` 里只有 3 个没登记，而
+    //   **三个都是本会话加的**（另两个见 `whitelist-port` 那一格）。已全部补上。
+    //
+    //   > 一个"用例写好了、也全绿"的读数，
+    //   > 与一个"用例写好了、而 CI 从不跑它"的读数，在提交记录里是同一个东西——
+    //   > 只不过后者把"这条链有人守着"这句话，变成了一句**没人核过的话**。
+    //
+    //   （第八轮那三套装配用例是手工跑的：`node --test <file>`。手工跑出来的绿
+    //   与 CI 里的绿在**当天**是同一个读数，在**下一次改动**之后就不是了。）
+    { label: 'toolcall-spool-writer（PRT-610 车道·写入宿主：按事件取 Run 号、具名拒绝、绝不抛）', files: ['runtime/toolcall/spool-writer.test.mjs'], cwd: ROOT },
+    { label: 'toolcall-spool-writer-wiring（PRT-610 车道·生产路径：真桥 + 真身份 ⇒ 决定落进**这个 Run** 的文件）', files: ['runtime/dsh-composition/spool-writer-wiring.test.mjs'], cwd: ROOT },
     { label: 'toolcall-drain（PRT-610 出站车道·收账侧：整条环走到真库，把 decisionSourceRecorded 翻成 true）', files: ['orchestrator/worker/toolcall-drain.test.mjs'], cwd: ROOT },
     // 收账**宿主**（第 118 轮第五轮新增，第六轮补上重放语义）：第 28 条裁决之后才存在的
     // 那条路——目录只从 `LEGION_DATA_DIR` 来（**不从库的位置派生**）、收账住在 hub、交付按 Run。

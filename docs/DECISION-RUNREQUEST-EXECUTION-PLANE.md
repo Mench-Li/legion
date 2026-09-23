@@ -567,7 +567,7 @@ verdict = pathScope(projection)
 | --- | --- | --- |
 | ① | 桥要的 `whitelist` 端口是什么形状 | `tool-request.mjs:751` `const verdict = whitelist(got.projection)`，再判 `verdict.allowed !== true`，理由取 `verdict.rule` / `verdict.reason` ⇒ **`(projection) => {allowed, rule, reason}`** |
 | ② | 有没有**已经写好**的产出者 | **有**：`employee-manifest.mjs:317` 的 `permitsTool({permit, toolName, capabilities})`，返回 `{allowed, rule, reason, riskRaised}`（L315 的 JSDoc 逐字写着这个形状）——**与端口要的完全同形** |
-| ③ | `permitsTool` 的**生产调用方** | **0 处**。全仓 `grep permitsTool(` 只命中 `employee-manifest.mjs`（定义）与它自己的用例 |
+| ③ | `permitsTool` 的**生产调用方** | ~~**0 处**~~ ★ **第 118 轮第十轮订正**：第 27 条的映射层落地之后，调用方就是 `runtime/dsh-composition/whitelist-port.mjs:309`（端口把 DSH 名翻成 Legion 名再交给它）。"0 处"是**第 21 轮**的读数，那一轮之后被本条自己那半件事解掉了。⇒ 这一道剩下的缺口不是"没人调判定器"，而是"**那份许可的取值**没有产出者"（`runtime/packs/authority.mjs` → `narrowToGrant`，`[gap]`）——与第 14 条同一个决定 |
 | ④ | 它要的 `permit` 谁产出 | 只有 `narrowToGrant({manifest, grant})`；而后者的**生产调用点只有一处**：`runtime/packs/authority.mjs:759` |
 
 ★ 还量到一条：`normalizeManifest()` 的生产调用方**只有**

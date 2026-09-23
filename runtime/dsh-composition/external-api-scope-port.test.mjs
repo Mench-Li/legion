@@ -53,7 +53,7 @@ import { deriveScopeFacts } from './scope-facts.mjs'
  */
 const GRANT = Object.freeze({
   version: EXTERNAL_API_SCOPE_VERSION,
-  endpoints: Object.freeze([
+  schemes: ['https'], endpoints: Object.freeze([
     Object.freeze({
       host: 'api.example.com',
       pattern: '/api/items/{id}',
@@ -82,18 +82,18 @@ function expectDeny(verdict, code, why) {
 test('① ★★★ 装配期就归一化：坏表**现在**抛，而"什么都不许"是合法的表', () => {
   // 坏表：没写 effects。"第一次调用时才炸"会把错误推迟到已经有副作用的那一刻。
   assert.throws(
-    () => createExternalApiScopePort({ grant: { endpoints: [{ host: 'h.example.com', pattern: '/x' }] } }),
+    () => createExternalApiScopePort({ grant: { schemes: ['https'], endpoints: [{ host: 'h.example.com', pattern: '/x' }] } }),
     (err) => err.code === API_CODES.BAD_GRANT,
     '缺 effects 的表必须在**装配期**抛，而不是等第一次调用',
   )
   // 不认识的字段同样拒（一个多打的字母不该让整条限制静默失效）
   assert.throws(
-    () => createExternalApiScopePort({ grant: { endpoints: [], endpoitns: [] } }),
+    () => createExternalApiScopePort({ grant: { schemes: ['https'], endpoints: [], endpoitns: [] } }),
     (err) => err.code === API_CODES.BAD_GRANT,
   )
   // ★ 反向对照：`endpoints: []` 是**合法**的表——"这个岗位什么外部 API 都不许调"
   //   必须配得出来，否则那条授权形态根本表达不了。
-  const port = createExternalApiScopePort({ grant: { endpoints: [] } })
+  const port = createExternalApiScopePort({ grant: { schemes: ['https'], endpoints: [] } })
   const v = port(projectionFor({ args: { url: 'https://api.example.com/api/items/1' } }))
   expectDeny(v, API_CODES.ENDPOINT_NOT_GRANTED, '空授权表 ⇒ 任何端点都不匹配')
 })
@@ -371,7 +371,7 @@ test('⑩ ★★★ `normalizeApiGrant` **不幂等**（它在端点上挂派生
   const { normalizeGrant } = await import('./execution-scope.mjs')
 
   const raw = {
-    endpoints: [{ host: 'h.example.com', pattern: '/x', effects: ['read'], idempotent: true }],
+    schemes: ['https'], endpoints: [{ host: 'h.example.com', pattern: '/x', effects: ['read'], idempotent: true }],
   }
   const once = normalizeApiGrant(raw)
   // ★ 派生字段：`parsed` 是**算出来的**，而它不在 `ENDPOINT_FIELDS` 里。
@@ -394,4 +394,46 @@ test('⑩ ★★★ `normalizeApiGrant` **不幂等**（它在端点上挂派生
     (err) => err.code === API_CODES.BAD_GRANT,
     '把已归一化的表交给端口也必须抛——所以 fromEnv 只能传**原始**声明',
   )
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// ⑭ ★★★ 第 26 条裁决「管 scheme」的**端到端**读数：协议从 URL 一路走到判定器
+// ══════════════════════════════════════════════════════════════════════════
+
+test('⑭ ★★★ `ftp://` / `http://` 对一份 https-only 的表一律拒（同一 host、同一条路径）', () => {
+  // 缺陷的原读数（§5 第 26 条）：判定器**完全不看 scheme** ⇒ 只要 host 与路径匹配，
+  // `ftp://api.example.com/api/items/1` 会按 `https://…` 的授权**放行**。
+  // 本用例钉住那条链的两端：URL 的协议必须一路走到判定器。
+  const port = createExternalApiScopePort({ grant: GRANT })
+  const at = (p, url) => p(Object.freeze({
+    scopeFacts: deriveScopeFacts({
+      capabilities: ['external-api:read'], args: { url }, toolName: 'fetch-item',
+    }),
+    arguments: Object.freeze({ url }),
+  }))
+
+  // 正对照：`GRANT` 的端点就是 `https://api.example.com/api/items/{id}`
+  assert.equal(at(port, 'https://api.example.com/api/items/1').allowed, true,
+    '正对照失败——那下面的"拒"什么也证明不了')
+
+  for (const url of ['http://api.example.com/api/items/1', 'ftp://api.example.com/api/items/1']) {
+    expectDeny(
+      at(port, url),
+      API_CODES.SCHEME_NOT_GRANTED,
+      `${url} 与那条 https 授权只差协议，必须拒，而且拒因要具名是协议问题`,
+    )
+  }
+
+  // ★ 而"表里声明了 http"之后同一个 URL 就放行 ⇒ 证明拒的依据是**表**，不是硬编码。
+  //   ★ 传的是**原始声明**：`createExternalApiScopePort` 自己会归一化一次，
+  //     喂一份已经归一化的表进去会抛（见本套件 ⑬——`parsed` 不在 ENDPOINT_FIELDS 里）。
+  const both = createExternalApiScopePort({
+    grant: {
+      version: EXTERNAL_API_SCOPE_VERSION,
+      schemes: ['https', 'http'],
+      endpoints: [{ host: 'api.example.com', pattern: '/api/items/{id}', effects: ['read'], idempotent: true }],
+    },
+  })
+  assert.equal(at(both, 'http://api.example.com/api/items/1').allowed, true,
+    '白名单里声明了 http，却还是拒 ⇒ 判据可能是硬编码的')
 })

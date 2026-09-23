@@ -226,10 +226,16 @@ export function createExternalApiScopePort({ grant } = {}) {
     //   ★ `host` 传的是 `rawAuthority`（**不是** `parsed.host`）：前者带着
     //     userinfo 与端口，于是 `normalizeHost` 能给出具名的拒绝码；
     //     后者是解析器洗过的值，端口与 userinfo 都已经不在了。
+    //   ★ `scheme` 由解析器给（`parseEgressUrl` 已经按 RFC 归一化成小写）。
+    //     ★★★ 第 118 轮第十一轮（第 26 条裁决「管 scheme」）：**必须传**——
+    //     判定器那一边"请求没有协议 ⇒ 拒绝"，所以这里少传一个字段的后果不是
+    //     "少了一道检查"，而是**每一次外部调用都被拒**。
+    //     （这个方向是安全的，但它会让"配置对了"看起来像"配置坏了"。）
     //   ★ `method` 缺省给 `GET`（与 `checkExternalApi` → `effectOfMethod` 的那条路
     //     同一个字面量）：一个"适配器给 POST、判定器认为 GET"的分歧，
     //     会让一条写请求按读判定走。
     const request = {
+      scheme: parsed.scheme,
       host: parsed.rawAuthority,
       method: typeof api.method === 'string' && api.method.trim() !== '' ? api.method : 'GET',
       path: raw.path,

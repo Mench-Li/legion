@@ -238,6 +238,26 @@ export const DECIDE_ENV_KEYS = Object.freeze({
   preset: 'LEGION_PERMISSION_PRESET',
 })
 
+/**
+ * 工具调用车道要读的环境键名（**同样是闭集**，与 `DECIDE_ENV_KEYS` 分开两张表）。
+ *
+ * ★★★ 第 118 轮第十一轮：这张表是补出来的，而它补的是一个**真实的红**——
+ * `scripts/config/config.test.mjs` 量到 `runtime/` 里有一个**字面量**形态的 env 读取点
+ * （`effectiveEnv.LEGION_DATA_DIR`），而那条判据的前提是"runtime 的读取全在下标里"。
+ * 同一对判据的另一半也红了：`runtime/config-schema.mjs` 的 fields 里有这个键，
+ * 而五张键名表的并集里没有 ⇒ 两边各自都能自圆其说。
+ *
+ *   > 一个「声明了、也确实被读」的键，与一个「读取点让门禁看不见」的键，
+ *   > 在配置文件里是同一个东西——只不过后者把那条"不许悄悄多读一个环境变量"的
+ *   > 判据，变成了一句**没有人核过的话**。
+ *
+ * ⚠️ 车道锚**仍然只从环境来**（Launcher 按冻结布局注入，见 `launcher.mjs`）：
+ * 本表改的是"怎么读"，不是"从哪来"。
+ */
+export const SPOOL_ENV_KEYS = Object.freeze({
+  dataDir: 'LEGION_DATA_DIR',
+})
+
 /** 一个投影"要不要人"→ `decideApproval` 的 `requirement` 闭集里的一个值。 */
 export const REQUIREMENT_OF = Object.freeze({
   needsHuman: 'ask',
@@ -648,7 +668,12 @@ export function createRootRow({
       //   能产出 PRT-610 行形状的。别的事件**具名拒绝**、不猜一行出来 ——
       //   猜出来的那一行会带着别的强制点的语义混进同一本账。
       const spoolWriter = createToolCallSpoolWriter({
-        dataDir: typeof effectiveEnv.LEGION_DATA_DIR === 'string' ? effectiveEnv.LEGION_DATA_DIR : null,
+        // ★ 键名走**声明的表 + 下标**（第十一轮）：字面量形态的 `env.LEGION_DATA_DIR`
+        //   会让 `scripts/config/scan.mjs` 把它记成一个"看得见却没登记"的字面量，
+        //   于是"runtime 的读取全在下标里"那条判据当场红。
+        dataDir: typeof effectiveEnv[SPOOL_ENV_KEYS.dataDir] === 'string'
+          ? effectiveEnv[SPOOL_ENV_KEYS.dataDir]
+          : null,
         runIdOf: (event) => identityOverlayForExecution(event?.execution)?.runId ?? null,
         rowOf: (event, runId) => {
           const kind = event?.decision?.kind

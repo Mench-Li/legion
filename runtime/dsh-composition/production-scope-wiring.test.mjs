@@ -304,7 +304,7 @@ test('①d ★★★ 同一个组合根，env 里配上外部 API 授权表 ⇒ 
     LEGION_ENFORCEMENT_ACTION: 'write',
     LEGION_CWD: 'C:/work',
     [EXTERNAL_API_SCOPE_PORT_ENV_KEY]: JSON.stringify({
-      endpoints: [{ host: 'api.example.com', pattern: '/api/items/{id}', effects: ['read'], idempotent: true }],
+      schemes: ['https'], endpoints: [{ host: 'api.example.com', pattern: '/api/items/{id}', effects: ['read'], idempotent: true }],
     }),
   }
   const apiScope = externalApiScopePortFromEnv({ env })
@@ -570,7 +570,7 @@ test('③d ★★★ PRT-606 的后果是真的：同一次未被授权的调用
   const scope = externalApiScopePortFromEnv({
     env: {
       LEGION_EXTERNAL_API_SCOPE: JSON.stringify({
-        endpoints: [{ host: 'api.example.com', pattern: '/api/items/{id}', effects: ['read'], idempotent: true }],
+        schemes: ['https'], endpoints: [{ host: 'api.example.com', pattern: '/api/items/{id}', effects: ['read'], idempotent: true }],
       }),
     },
   })

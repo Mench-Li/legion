@@ -970,6 +970,11 @@ test('★★ PRT-254：声明的 env 键必须等于 runtime 源码里两张键�
   //   强制面里**最后一道**接上的端口。它的键名表同样**从源码取**、不手抄——
   //   手抄一份进 `expected` 会在两个方向上撒谎（与上面几条同一个理由）。
   const { WHITELIST_PORT_ENV_KEYS } = await import('../../runtime/dsh-composition/whitelist-port.mjs')
+  // ★★★ 第 118 轮第十一轮：工具调用车道的目录锚（`LEGION_DATA_DIR`）。
+  //   它与上面几张表**同类**，只是当初漏了：`root-row.mjs` 用**字面量**成员访问读它，
+  //   于是这张表不存在 ⇒ 两半判据同时红（`runtime/` 出现字面量读取点；
+  //   以及 `config-schema.mjs` 的 fields 里那个键在并集里找不到出处）。
+  const { SPOOL_ENV_KEYS } = await import('../../runtime/dsh-composition/plugins/root-row.mjs')
   const expected = [...new Set([
     ...Object.values(DECIDE_ENV_KEYS),
     ...Object.values(ENFORCEMENT_CONFIG_FIELDS).flatMap((f) => [...f.envKeys]),
@@ -978,6 +983,7 @@ test('★★ PRT-254：声明的 env 键必须等于 runtime 源码里两张键�
     ...EXECUTION_SCOPE_PORT_ENV_KEYS,
     ...EXTERNAL_API_SCOPE_PORT_ENV_KEYS,
     ...WHITELIST_PORT_ENV_KEYS,
+    ...Object.values(SPOOL_ENV_KEYS),
   ])].sort()
   // ★ 13 = 12 + `LEGION_EXECUTION_SCOPE`（第 19 轮，PRT-605）。
   //   这个数**不是**为了方便改的常量：它一变就要求复核"多出来的那个键
@@ -1015,7 +1021,13 @@ test('★★ PRT-254：声明的 env 键必须等于 runtime 源码里两张键�
   //      （它逐字点名 `["LEGION_EMPLOYEE_PERMIT"]`），因为一个"能配、也接好了"
   //      却传不到子进程的键，在只读配置表的时候与一个好键是同一个东西；
   //   ③ `NOT_FORWARDED_YET` 那一条**不再**为本键记缺口。
-  assert.equal(expected.length, 15, `五张键名表共 ${expected.length} 个键（复核基线 15）：数量变了就要重新审一遍这份声明`)
+  // ★★★ 15 → 16（第 118 轮第十一轮）：`LEGION_DATA_DIR`（工具调用车道的目录锚）。
+  //   复核过同样的两件事，且这次两件都是**被这两条判据当场抓出来的**：
+  //   ① 它有一个**真的**生产读取点——`root-row.mjs` 构造车道写入器时的
+  //      `effectiveEnv[SPOOL_ENV_KEYS.dataDir]`（此前是字面量成员访问，本轮改成下标）；
+  //   ② 它**已经**在 `runtime/config-schema.mjs` 的 fields 里——所以本轮的红不是
+  //      "门禁看不见它"，而是反向的：**看见了、却没在任何键名表里**。
+  assert.equal(expected.length, 16, `六张键名表共 ${expected.length} 个键（复核基线 16）：数量变了就要重新审一遍这份声明`)
   assert.deepEqual(RUNTIME.envNames().sort(), expected,
     'runtime/config-schema.mjs 的 fields 与源码里的键名表不一致（多一个=编了一个环境变量，少一个=门禁看不见它）')
 

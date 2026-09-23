@@ -235,7 +235,7 @@ A2: HTTP 503「强制面结论的形状不对：必须是带布尔字段 autoExe
 | **P1-2** | 删掉 PRT-707 **死的那份**实现 | 施工 | 业主 2026-09-23 裁决 | 待做 |
 | **P1-3** | `whitelist` 装配 + **Legion 能力词表**映射 | 施工 | 业主 2026-09-23 裁决（第 27 条选 Legion 名 + 加映射） | 待做 |
 | **P1-4** | 阶段 9 产品动作的 **CLI 面** | 施工 | 业主 2026-09-23 裁决（第 16 条：做） | 待做 |
-| **P1-5** | 外部 API 授权表**管 scheme** | 施工 | 业主 2026-09-23 裁决（第 26 条：管） | 待做 |
+| **P1-5** | 外部 API 授权表**管 scheme** | 施工 | 业主 2026-09-23 裁决（第 26 条：管） | **✅ 已执行（第十一轮）**，见 §3.8 |
 | **P2-1** | 第 24 / 25 条的**临时口径**：政策门暂不从连接器声明读能力；MCP 工具归属暂以 F-21 登记表为准 | 记账 | 业主本轮未给，先按保守一侧记，等他改 | 已记 |
 | **P2-2** | 剩下的裁决项：第 12 / 10 / 8 / 6 / 21 条 | 裁决 | `DECISION-BRIEF.md` §1 / §2 | 待业主 |
 | **P3-1** | 20 个 `gap` 类模块（有实现、无生产路径）的收口盘点 | 记账 | `reachability.mjs --diff`：不可达 **41** = by-design 13 · deliberate 8 · **gap 20**（第七轮：44 → 42，车道的两半转为可达；**第九轮：42 → 41**，第 17 条删掉 `first-run.mjs`；两次都随 `--record` 重录） | 待排 |
@@ -617,6 +617,41 @@ hard floor、`canonicalHash`（账本）全都读那份投影 ⇒ 全都判错�
 手工跑出来的绿在**当天**与 CI 里的绿同形，在下一次改动之后就不是了。
 
 ---
+
+### 3.8 ★★★ 外部 API 授权表**管 scheme**（第 118 轮第十一轮）：协议白名单是表里的**必填项**
+
+业主第 26 条裁决是「**管**：不在白名单协议里一律拒绝」。落地时**没有**在代码里发明"必须 http(s)"——
+那既是 PRT-253 §3 禁止的发明默认值，也正是第 20 轮当时**故意没做**的那一步。改成"协议从**表**里来"：
+
+| 位置 | 之前 | 现在 |
+| --- | --- | --- |
+| 授权表 | 只有 `endpoints`（host / pattern / effects） | 多一个**必填** `schemes`（协议白名单；不写 ⇒ **建表失败** `BAD_GRANT`） |
+| 请求 | `{method, path, host, ...}` | 必带 `scheme`（缺 ⇒ `SCHEME_MISSING`；不在白名单 ⇒ `SCHEME_NOT_GRANTED`） |
+| 端口 | 只把 `rawAuthority` 传下去 | 把 `parseEgressUrl` 已经解析出的 `scheme` **一并**传下去 |
+
+读数：`external-api-scope.test.mjs` ⑱（**同一 host、同一条路径，只差协议**：`https` 放行 / `http`·`ftp`·`ws` 拒；
+表里声明 `['https','http']` 之后同一个请求放行 ⇒ 判据读的是**表**、不是硬编码；`'HTTPS'` 按 RFC 3986 归一化）
++ 端口套件 ⑭（端到端：URL → 事实 → 端口 → 判定器）+ 模块内自检 `assertSchemeIsDeclaredNotInherited()`。
+
+★ 一处**残余仍然成立**：`externalApiGuard` 与 `executionGuard` 在同一个 `preExecute` 上是**短路**
+（先拒的说了算），不是真的一次取严合并 ⇒ "两道谁先谁后"仍然没有判据钉着。
+
+**同轮量到的两条既有红**（都**不是**本轮改动引入的，且都在**测试**里而不在门禁里）：
+
+1. ★★★ `scripts/config/config.test.mjs` **两条**：① `runtime/` 里出现**字面量**形态的 env 读取点
+   （`root-row.mjs` 的 `effectiveEnv.LEGION_DATA_DIR`）；② `runtime/config-schema.mjs` 的 fields 里有这个键、
+   而五张键名表的并集里没有 ⇒ 两边各自都能自圆其说。修法是**一处改动同时收口两半**：新增导出的
+   `SPOOL_ENV_KEYS`（`root-row.mjs`）并改用下标读取，再把它并进那条判据的并集（15 → **16**，连同它要求的那句复核）。
+   ★ 这正是队列 §3.2.1 里归本会话的那条（**丙的机制 + `LEGION_DATA_DIR` 锚**）——机制在，**读取点**当时没走声明面。
+2. ★★ `scripts/prt/baseline-snapshot` 的平台契约基线：`team-hub/server.mjs` 的**文件哈希**变了
+   （`d955dac`：hub 收账 tick + DataDir 登记）而基线没刷。逐键核对：`httpRoutes`/`dbTables`/`taskStatuses`/
+   `taskTransitions`/`goalStatuses`/`permissionModes` **逐字相同**，只有 `sources` 那一行哈希
+   ⇒ **不是契约变化**，按工具的话 `--record` 刷新，diff 恰好一行。
+
+**以及三处"手钉坐标"的位移**（都由这一族判据自己红出来）：`boundary-facts.test.mjs` ⑫b（`root-row.mjs`
+626 → **724**）、⑫c（`tool-request.mjs` 780 → **848**——★ 这是**第十轮**的位移：当时只改了
+`PINNED_CITATIONS`、**没跑这个套件**，所以它红着过了一轮）、`PINNED_CITATIONS` 里
+`external-api-scope.mjs` 1061 → **1152**（第六次位移，成因是协议白名单那 91 行）。
 
 ## 4. 顺带量到的一条：**决策面文档的引文坐标在漂**（本轮新读数）
 

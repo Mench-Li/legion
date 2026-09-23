@@ -45,11 +45,16 @@ import { normalizeForCompare } from './path-scope.mjs'
 const V = EXTERNAL_API_SCOPE_VERSION
 const H = 'api.example.com'
 
-const grantOf = (endpoints, version = V) => normalizeApiGrant({ version, endpoints })
+// ★★★ 第 118 轮第十一轮（第 26 条裁决「管 scheme」）：
+//   `schemes` 是**授权表的必填项**（不写就建表失败），`scheme` 是**请求的必填项**
+//   （不写就拒）。两处都在下面这两个 helper 里注入，于是每个用例写的仍然是它要证的
+//   那件事，而"这张表 / 这次调用声明了什么协议"只写一次。
+const grantOf = (endpoints, version = V, schemes = ['https']) => normalizeApiGrant({ version, schemes, endpoints })
 
 const readGrant = grantOf([{ host: H, pattern: '/api/items', effects: ['read'] }])
 
-const verdict = (request, grant = readGrant, extra = {}) => checkExternalApi({ request, grant, ...extra })
+const verdict = (request, grant = readGrant, extra = {}) =>
+  checkExternalApi({ request: { scheme: 'https', ...request }, grant, ...extra })
 
 // ============================================================ ① 读 → 写
 
@@ -684,4 +689,58 @@ test('⑰ ★★ 判定对象是冻结的、并且不泄漏内部可变状态', 
   assert.equal(m2.matched, false)
   assert.match(m2.reason, /段数不同/)
   assert.equal(m2.captures, null)
+})
+
+// ============================================================ ⑱ 协议白名单
+
+test('⑱ ★★★ 第 26 条裁决「管 scheme」：同一主机、同一条路径，**只差协议** ⇒ 裁决不同', () => {
+  // 缺陷的原读数（§5 第 26 条）：本模块当时**完全不看 scheme**，
+  // 于是 `ftp://api.example.com/api/items` 会按 `https://…` 的授权放行。
+  //
+  //   > 一个「只看主机名、不看协议的匹配」，
+  //   > 与一个「一张 https 授权表实际还授权了 ftp」的匹配，是同一个东西。
+
+  // ① 正对照：https 放行（没有它，下面的"拒"什么也证明不了）
+  assert.equal(verdict({ method: 'GET', path: '/api/items', host: H }).allowed, true)
+
+  // ② 同一 host + 同一 path，只把协议换掉
+  for (const scheme of ['http', 'ftp', 'ws']) {
+    const v = verdict({ scheme, method: 'GET', path: '/api/items', host: H })
+    assert.equal(v.allowed, false, `${scheme}:// 竟然放行了`)
+    assert.equal(v.code, API_CODES.SCHEME_NOT_GRANTED)
+    assert.match(v.reason, /https/, '拒因要写出表里声明了哪些协议')
+  }
+
+  // ③ 请求**没有**协议 ⇒ 拒：证明不了协议就不判（不是"没写就按 https 算"）
+  const none = checkExternalApi({
+    request: { method: 'GET', path: '/api/items', host: H },
+    grant: readGrant,
+  })
+  assert.equal(none.allowed, false)
+  assert.equal(none.code, API_CODES.SCHEME_MISSING)
+
+  // ④ 协议名大小写按 RFC 3986 归一化：`HTTPS` 就是那一次 https 调用
+  assert.equal(verdict({ scheme: 'HTTPS', method: 'GET', path: '/api/items', host: H }).allowed, true)
+
+  // ⑤ 白名单是**表**说了算：把 http 也声明进去，同一个请求就放行
+  const both = grantOf([{ host: H, pattern: '/api/items', effects: ['read'] }], V, ['https', 'http'])
+  assert.equal(verdict({ scheme: 'http', method: 'GET', path: '/api/items', host: H }, both).allowed, true,
+    '★ 多协议白名单没生效 ⇒ 上面的"拒"可能只是判据恒假')
+
+  // ⑥ 表里不声明协议 ⇒ **建表就失败**，不默认、不猜
+  for (const bad of [{ version: V, endpoints: [] }, { version: V, schemes: [], endpoints: [] }]) {
+    assert.throws(() => normalizeApiGrant(bad), (e) => e.code === API_CODES.BAD_GRANT,
+      '一份没有协议白名单的授权表竟然建成了')
+  }
+  assert.throws(() => normalizeApiGrant({ version: V, schemes: ['-bad'], endpoints: [] }),
+    (e) => e.code === API_CODES.BAD_GRANT, '非法协议名竟然通过了校验')
+
+  // ⑦ 加载自检的结论必须与本用例一致（自检不能退化成空壳）
+  const s = EXTERNAL_API_SCOPE_CHECKED.scheme
+  assert.deepEqual(s.https, { allowed: true, code: null })
+  assert.deepEqual(s.http, { allowed: false, code: API_CODES.SCHEME_NOT_GRANTED })
+  assert.deepEqual(s.ftp, { allowed: false, code: API_CODES.SCHEME_NOT_GRANTED })
+  assert.deepEqual(s.missing, { allowed: false, code: API_CODES.SCHEME_MISSING })
+  assert.equal(s.uppercase.allowed, true)
+  assert.equal(s.grantWithoutSchemes, API_CODES.BAD_GRANT)
 })

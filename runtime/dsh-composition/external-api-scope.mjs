@@ -53,6 +53,17 @@ export const API_CODES = Object.freeze({
   HOST_HAS_PORT: 'api-scope-host-has-port',
   HOST_NON_ASCII: 'api-scope-host-non-ascii',
   HOST_MALFORMED: 'api-scope-host-malformed',
+  // ★★★ 第 118 轮第十一轮（第 26 条裁决「管」）：协议白名单。
+  //
+  //   这一条**今天完全不看 scheme**：`host` 匹配上了就判效果。于是
+  //   `ftp://api.example.com/api/items` 会按 `https://api.example.com/api/items`
+  //   的授权**放行**——一张"只授权了 https"的表，实际授权的还有别的协议。
+  //
+  //   > 一个「只看主机名、不看协议的匹配」，
+  //   > 与一个「`http://` 上的同一个路径也被当成那条 https 授权」的匹配，
+  //   > 是同一个东西——而它的方向是放行。
+  SCHEME_MISSING: 'api-scope-scheme-missing',
+  SCHEME_NOT_GRANTED: 'api-scope-scheme-not-granted',
   UNKNOWN_METHOD: 'api-scope-unknown-method',
   METHOD_OVERRIDE: 'api-scope-method-override',
   READ_WITH_BODY: 'api-scope-read-with-body',
@@ -685,7 +696,14 @@ export const RISK_CLASSES = Object.freeze([
 
 export const EFFECTS = Object.freeze(['read', 'write'])
 
-const GRANT_FIELDS = Object.freeze(['version', 'endpoints'])
+const GRANT_FIELDS = Object.freeze(['version', 'schemes', 'endpoints'])
+
+/**
+ * 协议名的形状（RFC 3986 的 `scheme`）：字母开头，后跟字母/数字/`+`/`-`/`.`。
+ * ★ 大小写**照 RFC 归一化**（协议名本就不区分大小写），但**不猜**：写成
+ *   `htps` 还是会被白名单拦下，`javascript` 也不会因为"看起来不像网络协议"被特判。
+ */
+const SCHEME_TOKEN = /^[a-z][a-z0-9+.-]*$/
 const ENDPOINT_FIELDS = Object.freeze([
   'host', 'pattern', 'effects', 'riskClass', 'idempotent', 'notes',
 ])
@@ -714,6 +732,38 @@ export function normalizeApiGrant(input) {
   if (input.version !== undefined && input.version !== EXTERNAL_API_SCOPE_VERSION) {
     throw fail(API_CODES.BAD_GRANT, `授权表的 version 是 ${JSON.stringify(input.version)}，期望 ${JSON.stringify(EXTERNAL_API_SCOPE_VERSION)}`)
   }
+  // ★★★ 第 118 轮第十一轮（第 26 条裁决「管 scheme」）：协议白名单**必须在表里**。
+  //
+  //   **不给默认值**：不写 `schemes` 就报错，而不是"默认只允许 https"。
+  //
+  //   > 一个「没写协议就默认 https」的表，
+  //   > 与一个「每条端点都被部署显式声明过协议」的表，在建表成功那一刻是同一个东西——
+  //   > 只不过前者的"安全"来自本模块作者的一个猜测，而运维看不见那个猜测。
+  //
+  //   ★ 这是**建表期**的拒绝：一份没有协议白名单的表，与一份端点写错的表同类，
+  //     都必须在装配时就把话说清楚（理由与上面 parseEndpointPattern 那段相同）。
+  if (!Array.isArray(input.schemes) || input.schemes.length === 0) {
+    throw fail(
+      API_CODES.BAD_GRANT,
+      'schemes 必须是非空数组（例如 ["https"]），列出这张表允许用哪些协议。' +
+      '不写就报错，**不默认**：一个"没写协议就默认 https"的授权表，' +
+      '与一个"部署显式声明过协议"的授权表，在建表成功那一刻是同一个东西',
+    )
+  }
+  const schemes = input.schemes.map((s, i) => {
+    if (typeof s !== 'string' || s.trim() === '') {
+      throw fail(API_CODES.BAD_GRANT, `schemes[${i}] 必须是非空字符串，收到 ${JSON.stringify(s)}`)
+    }
+    const token = s.trim().toLowerCase()
+    if (!SCHEME_TOKEN.test(token)) {
+      throw fail(
+        API_CODES.BAD_GRANT,
+        `schemes[${i}] 的 ${JSON.stringify(s)} 不是合法的协议名（RFC 3986 的 scheme：字母开头，` +
+        '后跟字母/数字/`+`/`-`/`.`）',
+      )
+    }
+    return token
+  })
   if (!Array.isArray(input.endpoints)) {
     throw fail(API_CODES.BAD_GRANT, 'endpoints 必须是数组（空数组表示什么都不可调用）')
   }
@@ -784,7 +834,7 @@ export function normalizeApiGrant(input) {
       notes: e.notes === undefined ? null : (e.notes === null ? null : String(e.notes)),
     })
   })
-  return Object.freeze({ version: EXTERNAL_API_SCOPE_VERSION, endpoints: Object.freeze(endpoints) })
+  return Object.freeze({ version: EXTERNAL_API_SCOPE_VERSION, schemes: Object.freeze(schemes), endpoints: Object.freeze(endpoints) })
 }
 
 // ============================================================ ⑥ 判定
@@ -828,6 +878,47 @@ export function checkExternalApi({ request, grant, retryOf = null } = {}) {
   const endpoints = grant?.endpoints
   if (!Array.isArray(endpoints)) {
     return Object.freeze({ allowed: false, code: API_CODES.BAD_GRANT, reason: '这个岗位没有外部 API 授权', ...EMPTY_VERDICT, effect: classified.effect })
+  }
+
+  // ★★★ 第 118 轮第十一轮：**协议白名单**（第 26 条裁决「管」）。
+  //
+  //   位置在 host 之后、端点匹配之前：协议不对的调用**一个端点都不该匹配上**。
+  //
+  //   ★ 三种"证明不了协议"的情形分开报，因为值班的人要做的事不同：
+  //     · 请求里没有协议（`SCHEME_MISSING`）⇒ 适配器坏了（它本该从 URL 里取出来）
+  //     · 表里没有白名单（`BAD_GRANT`）⇒ 那份配置压根不是这张表该有的形状
+  //     · 请求的协议不在白名单里（`SCHEME_NOT_GRANTED`）⇒ 这次调用越界
+  //
+  //   > 一个「三种情形报同一个码」的诊断，
+  //   > 与一个「值班的人照着码去改错那一处」的诊断，是同一个东西。
+  const declaredSchemes = grant?.schemes
+  if (!Array.isArray(declaredSchemes)) {
+    return Object.freeze({
+      allowed: false,
+      code: API_CODES.BAD_GRANT,
+      reason: '这份外部 API 授权表没有声明协议白名单（`schemes`）——'
+        + '按拒绝处理。一张不声明协议的授权表，与一张"部署以为它只授权 https"的表，是同一个东西',
+      ...EMPTY_VERDICT, effect: classified.effect,
+    })
+  }
+  const requestedScheme = typeof request.scheme === 'string' ? request.scheme.trim().toLowerCase() : ''
+  if (requestedScheme === '') {
+    return Object.freeze({
+      allowed: false,
+      code: API_CODES.SCHEME_MISSING,
+      reason: '这次调用没有给出协议（`scheme`）——证明不了它要用哪个协议，按拒绝处理',
+      ...EMPTY_VERDICT, effect: classified.effect,
+    })
+  }
+  if (!declaredSchemes.includes(requestedScheme)) {
+    return Object.freeze({
+      allowed: false,
+      code: API_CODES.SCHEME_NOT_GRANTED,
+      reason: `协议 ${JSON.stringify(requestedScheme)} 不在授权表的白名单里`
+        + `（声明的是 ${JSON.stringify([...declaredSchemes])}）——`
+        + `${classified.method} ${classified.pathKey} 这条授权是**按协议**给的`,
+      ...EMPTY_VERDICT, effect: classified.effect,
+    })
   }
 
   const reqShape = Object.freeze({ host, segments: classified.pathSegments })
@@ -976,7 +1067,7 @@ const H = 'api.example.com'
 
 const PROBE_GRANT = normalizeApiGrant({
   version: EXTERNAL_API_SCOPE_VERSION,
-  endpoints: [
+  schemes: ['https'], endpoints: [
     { host: H, pattern: '/api/items', effects: ['read'] },
     { host: H, pattern: '/api/items/{id}', effects: ['read', 'write'], idempotent: true },
     { host: H, pattern: '/api/orders', effects: ['write'], idempotent: false, riskClass: 'payment' },
@@ -989,22 +1080,22 @@ const PROBE_GRANT = normalizeApiGrant({
 export function assertReadNeverBecomesWrite() {
   const readGrant = normalizeApiGrant({
     version: EXTERNAL_API_SCOPE_VERSION,
-    endpoints: [{ host: 'h.example.com', pattern: '/api/items', effects: ['read'] }],
+    schemes: ['https'], endpoints: [{ host: 'h.example.com', pattern: '/api/items', effects: ['read'] }],
   })
   const samples = [
-    { label: '纯读', request: { method: 'GET', path: '/api/items', host: 'h.example.com' }, expect: 'allow' },
-    { label: '写方法打读端点', request: { method: 'POST', path: '/api/items', host: 'h.example.com', body: {} }, expect: API_CODES.EFFECT_MISMATCH },
-    { label: '方法覆盖头', request: { method: 'GET', path: '/api/items', host: 'h.example.com', headers: { 'X-HTTP-Method-Override': 'DELETE' } }, expect: API_CODES.METHOD_OVERRIDE },
-    { label: '方法覆盖参数', request: { method: 'GET', path: '/api/items', host: 'h.example.com', query: { _method: 'DELETE' } }, expect: API_CODES.METHOD_OVERRIDE },
-    { label: '读带 body', request: { method: 'GET', path: '/api/items', host: 'h.example.com', body: { a: 1 } }, expect: API_CODES.READ_WITH_BODY },
-    { label: '动作写在查询里', request: { method: 'GET', path: '/api/items', host: 'h.example.com', query: { action: 'delete' } }, expect: API_CODES.ACTION_IN_QUERY },
-    { label: '动作写在 path 里（不进 query）', request: { method: 'GET', path: '/api/items?action=delete', host: 'h.example.com' }, expect: API_CODES.PATH_HAS_QUERY },
-    { label: '更深一段（读）', request: { method: 'GET', path: '/api/items/1', host: 'h.example.com' }, expect: API_CODES.ENDPOINT_NOT_GRANTED },
-    { label: '更深一段（写）', request: { method: 'DELETE', path: '/api/items/1/delete', host: 'h.example.com' }, expect: API_CODES.ENDPOINT_NOT_GRANTED },
-    { label: '前缀边界', request: { method: 'GET', path: '/api/items-other', host: 'h.example.com' }, expect: API_CODES.ENDPOINT_NOT_GRANTED },
-    { label: '大写路径（URL 永远大小写敏感）', request: { method: 'GET', path: '/API/ITEMS', host: 'h.example.com' }, expect: API_CODES.ENDPOINT_NOT_GRANTED },
-    { label: '编码斜杠制造第二段', request: { method: 'GET', path: '/api/items%2F1', host: 'h.example.com' }, expect: API_CODES.ENDPOINT_NOT_GRANTED },
-    { label: '百分号编码的同一端点（允许）', request: { method: 'GET', path: '/%61pi/items', host: 'h.example.com' }, expect: 'allow' },
+    { label: '纯读', request: { scheme: 'https', method: 'GET', path: '/api/items', host: 'h.example.com' }, expect: 'allow' },
+    { label: '写方法打读端点', request: { scheme: 'https', method: 'POST', path: '/api/items', host: 'h.example.com', body: {} }, expect: API_CODES.EFFECT_MISMATCH },
+    { label: '方法覆盖头', request: { scheme: 'https', method: 'GET', path: '/api/items', host: 'h.example.com', headers: { 'X-HTTP-Method-Override': 'DELETE' } }, expect: API_CODES.METHOD_OVERRIDE },
+    { label: '方法覆盖参数', request: { scheme: 'https', method: 'GET', path: '/api/items', host: 'h.example.com', query: { _method: 'DELETE' } }, expect: API_CODES.METHOD_OVERRIDE },
+    { label: '读带 body', request: { scheme: 'https', method: 'GET', path: '/api/items', host: 'h.example.com', body: { a: 1 } }, expect: API_CODES.READ_WITH_BODY },
+    { label: '动作写在查询里', request: { scheme: 'https', method: 'GET', path: '/api/items', host: 'h.example.com', query: { action: 'delete' } }, expect: API_CODES.ACTION_IN_QUERY },
+    { label: '动作写在 path 里（不进 query）', request: { scheme: 'https', method: 'GET', path: '/api/items?action=delete', host: 'h.example.com' }, expect: API_CODES.PATH_HAS_QUERY },
+    { label: '更深一段（读）', request: { scheme: 'https', method: 'GET', path: '/api/items/1', host: 'h.example.com' }, expect: API_CODES.ENDPOINT_NOT_GRANTED },
+    { label: '更深一段（写）', request: { scheme: 'https', method: 'DELETE', path: '/api/items/1/delete', host: 'h.example.com' }, expect: API_CODES.ENDPOINT_NOT_GRANTED },
+    { label: '前缀边界', request: { scheme: 'https', method: 'GET', path: '/api/items-other', host: 'h.example.com' }, expect: API_CODES.ENDPOINT_NOT_GRANTED },
+    { label: '大写路径（URL 永远大小写敏感）', request: { scheme: 'https', method: 'GET', path: '/API/ITEMS', host: 'h.example.com' }, expect: API_CODES.ENDPOINT_NOT_GRANTED },
+    { label: '编码斜杠制造第二段', request: { scheme: 'https', method: 'GET', path: '/api/items%2F1', host: 'h.example.com' }, expect: API_CODES.ENDPOINT_NOT_GRANTED },
+    { label: '百分号编码的同一端点（允许）', request: { scheme: 'https', method: 'GET', path: '/%61pi/items', host: 'h.example.com' }, expect: 'allow' },
   ]
   const out = samples.map((s) => {
     const v = checkExternalApi({ request: s.request, grant: readGrant })
@@ -1090,7 +1181,7 @@ export function assertPrefixMatchingWouldAllowWrite() {
 export function assertPlaceholderIsSingleSegment() {
   const g = normalizeApiGrant({
     version: EXTERNAL_API_SCOPE_VERSION,
-    endpoints: [{ host: 'h.example.com', pattern: '/api/items/{id}', effects: ['read'] }],
+    schemes: ['https'], endpoints: [{ host: 'h.example.com', pattern: '/api/items/{id}', effects: ['read'] }],
   })
   const samples = [
     { path: '/api/items/1', expect: 'allow' },
@@ -1099,7 +1190,7 @@ export function assertPlaceholderIsSingleSegment() {
     { path: '/api/items/1/2', expect: API_CODES.ENDPOINT_NOT_GRANTED },
   ]
   const out = samples.map((s) => {
-    const v = checkExternalApi({ request: { method: 'GET', path: s.path, host: 'h.example.com' }, grant: g })
+    const v = checkExternalApi({ request: { scheme: 'https', method: 'GET', path: s.path, host: 'h.example.com' }, grant: g })
     return Object.freeze({ path: s.path, expect: s.expect, got: v.allowed ? 'allow' : v.code, captures: v.captures })
   })
   const parsed = parseEndpointPattern({ pattern: '/api/items/{id}', host: 'h.example.com' })
@@ -1120,11 +1211,11 @@ export function assertPlaceholderIsSingleSegment() {
 export function assertEveryOverrideSpellingRejected() {
   const g = normalizeApiGrant({
     version: EXTERNAL_API_SCOPE_VERSION,
-    endpoints: [{ host: 'h.example.com', pattern: '/api/items', effects: ['read'] }],
+    schemes: ['https'], endpoints: [{ host: 'h.example.com', pattern: '/api/items', effects: ['read'] }],
   })
   const out = METHOD_OVERRIDE_KEYS.map((k) => {
-    const h = (headers) => checkExternalApi({ request: { method: 'GET', path: '/api/items', host: 'h.example.com', headers }, grant: g }).code
-    const q = (query) => checkExternalApi({ request: { method: 'GET', path: '/api/items', host: 'h.example.com', query }, grant: g }).code
+    const h = (headers) => checkExternalApi({ request: { scheme: 'https', method: 'GET', path: '/api/items', host: 'h.example.com', headers }, grant: g }).code
+    const q = (query) => checkExternalApi({ request: { scheme: 'https', method: 'GET', path: '/api/items', host: 'h.example.com', query }, grant: g }).code
     return Object.freeze({
       key: k,
       header: h({ [k]: 'DELETE' }),
@@ -1147,7 +1238,7 @@ export function assertEveryOverrideSpellingRejected() {
 export function assertDryRunDoesNotDowngrade() {
   const out = DRY_RUN_KEYS.map((k) => {
     const v = checkExternalApi({
-      request: { method: 'POST', path: '/api/orders', host: H, body: { amount: 1 }, query: { [k]: 'true' } },
+      request: { scheme: 'https', method: 'POST', path: '/api/orders', host: H, body: { amount: 1 }, query: { [k]: 'true' } },
       grant: PROBE_GRANT,
     })
     return Object.freeze({ key: k, effect: v.effect, highRisk: v.highRisk, allowed: v.allowed, downgradeAttempt: v.downgradeAttempt === true })
@@ -1165,11 +1256,11 @@ export function assertDryRunDoesNotDowngrade() {
 export function assertRiskClassIsDeclaredNotInferred() {
   const readOnly = normalizeApiGrant({
     version: EXTERNAL_API_SCOPE_VERSION,
-    endpoints: [{ host: 'h.example.com', pattern: '/api/items/{id}/delete-preview', effects: ['read'] }],
+    schemes: ['https'], endpoints: [{ host: 'h.example.com', pattern: '/api/items/{id}/delete-preview', effects: ['read'] }],
   })
-  const preview = checkExternalApi({ request: { method: 'GET', path: '/api/items/1/delete-preview', host: 'h.example.com' }, grant: readOnly })
+  const preview = checkExternalApi({ request: { scheme: 'https', method: 'GET', path: '/api/items/1/delete-preview', host: 'h.example.com' }, grant: readOnly })
   const declared = checkExternalApi({
-    request: { method: 'POST', path: '/api/orders', host: H, body: {} },
+    request: { scheme: 'https', method: 'POST', path: '/api/orders', host: H, body: {} },
     grant: PROBE_GRANT,
   })
   const attempt = (input) => codeOf(() => normalizeApiGrant(input))
@@ -1178,8 +1269,8 @@ export function assertRiskClassIsDeclaredNotInferred() {
     pathSaysDeleteButReadOnly: Object.freeze({ allowed: preview.allowed, highRisk: preview.highRisk, riskClass: preview.riskClass }),
     // 路径里什么都没有，但声明的类别是 payment ⇒ 是高风险
     pathSaysNothingButDeclared: Object.freeze({ highRisk: declared.highRisk, riskClass: declared.riskClass, endpointPattern: declared.endpoint?.pattern }),
-    highRiskOnRead: attempt({ version: EXTERNAL_API_SCOPE_VERSION, endpoints: [{ host: 'h', pattern: '/api/x', effects: ['read'], riskClass: 'payment' }] }),
-    unknownClass: attempt({ version: EXTERNAL_API_SCOPE_VERSION, endpoints: [{ host: 'h', pattern: '/api/x', effects: ['write'], idempotent: true, riskClass: 'refund' }] }),
+    highRiskOnRead: attempt({ version: EXTERNAL_API_SCOPE_VERSION, schemes: ['https'], endpoints: [{ host: 'h', pattern: '/api/x', effects: ['read'], riskClass: 'payment' }] }),
+    unknownClass: attempt({ version: EXTERNAL_API_SCOPE_VERSION, schemes: ['https'], endpoints: [{ host: 'h', pattern: '/api/x', effects: ['write'], idempotent: true, riskClass: 'refund' }] }),
     inferredFromPath: RISK_CLASSES.filter((c) => '/api/items/1/delete-preview'.includes(c)),
   })
 }
@@ -1197,10 +1288,10 @@ export function assertReadAndWriteAreSeparatePermissions() {
   const out = cases.map((c) => {
     const g = normalizeApiGrant({
       version: EXTERNAL_API_SCOPE_VERSION,
-      endpoints: [{ host: 'h.example.com', pattern: '/api/x', effects: c.effects, idempotent: true }],
+      schemes: ['https'], endpoints: [{ host: 'h.example.com', pattern: '/api/x', effects: c.effects, idempotent: true }],
     })
     const v = checkExternalApi({
-      request: { method: c.method, path: '/api/x', host: 'h.example.com', body: c.method === 'POST' ? {} : null },
+      request: { scheme: 'https', method: c.method, path: '/api/x', host: 'h.example.com', body: c.method === 'POST' ? {} : null },
       grant: g,
     })
     return Object.freeze({ effects: c.effects, method: c.method, expect: c.expect, allowed: v.allowed, code: v.code })
@@ -1264,27 +1355,27 @@ export function assertWildcardPatternRejected() {
 export function assertGrantRequiresExplicitEffectsAndIdempotency() {
   const V = EXTERNAL_API_SCOPE_VERSION
   const tries = [
-    { label: '缺 effects', input: { version: V, endpoints: [{ host: 'h', pattern: '/api/x' }] } },
-    { label: 'effects 为空', input: { version: V, endpoints: [{ host: 'h', pattern: '/api/x', effects: [] }] } },
-    { label: 'effect 不认识', input: { version: V, endpoints: [{ host: 'h', pattern: '/api/x', effects: ['execute'] }] } },
-    { label: '写端点缺 idempotent', input: { version: V, endpoints: [{ host: 'h', pattern: '/api/x', effects: ['write'] }] } },
-    { label: '端点多余字段', input: { version: V, endpoints: [{ host: 'h', pattern: '/api/x', effects: ['read'], allowPrefix: true }] } },
-    { label: '根多余字段', input: { version: V, endpoints: [], denyPaths: [] } },
-    { label: '版本不对', input: { version: 'legion/external-api-scope@0', endpoints: [] } },
-    { label: 'endpoints 不是数组', input: { version: V, endpoints: null } },
-    { label: 'host 缺失', input: { version: V, endpoints: [{ pattern: '/api/x', effects: ['read'] }] } },
-    { label: 'host 为空', input: { version: V, endpoints: [{ host: '  ', pattern: '/api/x', effects: ['read'] }] } },
-    { label: 'host 带通配', input: { version: V, endpoints: [{ host: '*.example.com', pattern: '/api/x', effects: ['read'] }] } },
-    { label: 'host 带 userinfo', input: { version: V, endpoints: [{ host: 'api.example.com@evil.com', pattern: '/api/x', effects: ['read'] }] } },
-    { label: 'host 带端口', input: { version: V, endpoints: [{ host: 'api.example.com:443', pattern: '/api/x', effects: ['read'] }] } },
-    { label: 'host 非 ASCII', input: { version: V, endpoints: [{ host: 'еxample.com', pattern: '/api/x', effects: ['read'] }] } },
+    { label: '缺 effects', input: { version: V, schemes: ['https'], endpoints: [{ host: 'h', pattern: '/api/x' }] } },
+    { label: 'effects 为空', input: { version: V, schemes: ['https'], endpoints: [{ host: 'h', pattern: '/api/x', effects: [] }] } },
+    { label: 'effect 不认识', input: { version: V, schemes: ['https'], endpoints: [{ host: 'h', pattern: '/api/x', effects: ['execute'] }] } },
+    { label: '写端点缺 idempotent', input: { version: V, schemes: ['https'], endpoints: [{ host: 'h', pattern: '/api/x', effects: ['write'] }] } },
+    { label: '端点多余字段', input: { version: V, schemes: ['https'], endpoints: [{ host: 'h', pattern: '/api/x', effects: ['read'], allowPrefix: true }] } },
+    { label: '根多余字段', input: { version: V, schemes: ['https'], endpoints: [], denyPaths: [] } },
+    { label: '版本不对', input: { version: 'legion/external-api-scope@0', schemes: ['https'], endpoints: [] } },
+    { label: 'endpoints 不是数组', input: { version: V, schemes: ['https'], endpoints: null } },
+    { label: 'host 缺失', input: { version: V, schemes: ['https'], endpoints: [{ pattern: '/api/x', effects: ['read'] }] } },
+    { label: 'host 为空', input: { version: V, schemes: ['https'], endpoints: [{ host: '  ', pattern: '/api/x', effects: ['read'] }] } },
+    { label: 'host 带通配', input: { version: V, schemes: ['https'], endpoints: [{ host: '*.example.com', pattern: '/api/x', effects: ['read'] }] } },
+    { label: 'host 带 userinfo', input: { version: V, schemes: ['https'], endpoints: [{ host: 'api.example.com@evil.com', pattern: '/api/x', effects: ['read'] }] } },
+    { label: 'host 带端口', input: { version: V, schemes: ['https'], endpoints: [{ host: 'api.example.com:443', pattern: '/api/x', effects: ['read'] }] } },
+    { label: 'host 非 ASCII', input: { version: V, schemes: ['https'], endpoints: [{ host: 'еxample.com', pattern: '/api/x', effects: ['read'] }] } },
   ]
   const out = tries.map((t) => Object.freeze({ label: t.label, code: codeOf(() => normalizeApiGrant(t.input)) }))
   return Object.freeze({
     tries: Object.freeze(out),
     allRejected: out.every((o) => o.code !== 'NO-THROW'),
     // 空的 endpoints 数组是合法的（什么都不许调用）
-    emptyOk: normalizeApiGrant({ version: V, endpoints: [] }).endpoints.length,
+    emptyOk: normalizeApiGrant({ version: V, schemes: ['https'], endpoints: [] }).endpoints.length,
     // 归一化后的 host 是规范化过的
     hostNormalized: normalizeHost('API.Example.COM.'),
     // 每种 host 形态有自己的码——这样"哪一处坏了"不用从消息里猜
@@ -1322,20 +1413,20 @@ export function assertGrantRequiresExplicitEffectsAndIdempotency() {
 /** ⑪ 重试仍然是写；幂等键的配对进 canonicalKey。 */
 export function assertRetryIsStillAWrite() {
   const first = checkExternalApi({
-    request: { method: 'POST', path: '/api/items/7', host: H, body: {}, idempotencyKey: 'k-1' },
+    request: { scheme: 'https', method: 'POST', path: '/api/items/7', host: H, body: {}, idempotencyKey: 'k-1' },
     grant: PROBE_GRANT,
   })
   const retry = checkExternalApi({
-    request: { method: 'POST', path: '/api/items/7', host: H, body: {}, idempotencyKey: 'k-1' },
+    request: { scheme: 'https', method: 'POST', path: '/api/items/7', host: H, body: {}, idempotencyKey: 'k-1' },
     grant: PROBE_GRANT,
     retryOf: first.canonicalKey,
   })
   const nonIdempotentWithKey = checkExternalApi({
-    request: { method: 'POST', path: '/api/orders', host: H, body: {}, idempotencyKey: 'k-2' },
+    request: { scheme: 'https', method: 'POST', path: '/api/orders', host: H, body: {}, idempotencyKey: 'k-2' },
     grant: PROBE_GRANT,
   })
   const otherKey = checkExternalApi({
-    request: { method: 'POST', path: '/api/items/7', host: H, body: {}, idempotencyKey: 'k-9' },
+    request: { scheme: 'https', method: 'POST', path: '/api/items/7', host: H, body: {}, idempotencyKey: 'k-9' },
     grant: PROBE_GRANT,
   })
   return Object.freeze({
@@ -1406,13 +1497,13 @@ export function assertUrlPathRulesAreItsOwn() {
 export function assertAmbiguousMatchRejected() {
   const g = normalizeApiGrant({
     version: EXTERNAL_API_SCOPE_VERSION,
-    endpoints: [
+    schemes: ['https'], endpoints: [
       { host: 'h.example.com', pattern: '/api/items/{id}', effects: ['read'] },
       { host: 'h.example.com', pattern: '/api/{collection}/1', effects: ['read'] },
     ],
   })
-  const ambiguous = checkExternalApi({ request: { method: 'GET', path: '/api/items/1', host: 'h.example.com' }, grant: g })
-  const single = checkExternalApi({ request: { method: 'GET', path: '/api/items/2', host: 'h.example.com' }, grant: g })
+  const ambiguous = checkExternalApi({ request: { scheme: 'https', method: 'GET', path: '/api/items/1', host: 'h.example.com' }, grant: g })
+  const single = checkExternalApi({ request: { scheme: 'https', method: 'GET', path: '/api/items/2', host: 'h.example.com' }, grant: g })
   return Object.freeze({
     ambiguous: Object.freeze({ allowed: ambiguous.allowed, code: ambiguous.code }),
     single: Object.freeze({ allowed: single.allowed, code: single.code }),
@@ -1430,6 +1521,54 @@ export function assertAmbiguousMatchRejected() {
  */
 export function assertEveryCodeIsEmitted() {
   return Object.freeze({ codes: Object.freeze(Object.values(API_CODES)), count: Object.keys(API_CODES).length })
+}
+
+/**
+ * ⑮ ★★★ 协议白名单：**表里声明的才作数**，不继承、不猜（第 26 条裁决「管」）。
+ *
+ * 这张自检表要证三件事：
+ *   ① 同一台主机、同一条路径，**只有协议不同** ⇒ 裁决不同（https 放行 / http、ftp 拒）；
+ *   ② 请求**没有**协议 ⇒ 拒（证明不了协议就不判）；
+ *   ③ 授权表**没有**声明协议 ⇒ **建表就失败**（不是"默认允许 https"）。
+ *
+ *   > 一个「主机名对了就放行、协议顺带看一眼」的检查，
+ *   > 与一个「一张 https 授权表实际还授权了 ftp」的检查，是同一个东西。
+ */
+export function assertSchemeIsDeclaredNotInherited() {
+  const grant = normalizeApiGrant({
+    version: EXTERNAL_API_SCOPE_VERSION,
+    schemes: ['https'],
+    endpoints: [{ host: 'h.example.com', pattern: '/api/items', effects: ['read'] }],
+  })
+  const at = (scheme) => checkExternalApi({
+    request: {
+      scheme, method: 'GET', path: '/api/items', host: 'h.example.com',
+    },
+    grant,
+  })
+  const shape = (v) => Object.freeze({ allowed: v.allowed, code: v.code ?? null })
+
+  const noSchemeAtAll = checkExternalApi({
+    request: { method: 'GET', path: '/api/items', host: 'h.example.com' },
+    grant,
+  })
+
+  let grantWithoutSchemes = null
+  try {
+    normalizeApiGrant({ version: EXTERNAL_API_SCOPE_VERSION, endpoints: [] })
+  } catch (err) {
+    grantWithoutSchemes = err?.code ?? 'threw-without-code'
+  }
+
+  return Object.freeze({
+    https: shape(at('https')),
+    http: shape(at('http')),
+    ftp: shape(at('ftp')),
+    // RFC 3986：协议名**不区分大小写** ⇒ 归一化后仍是那一次 https 调用
+    uppercase: shape(at('HTTPS')),
+    missing: shape(noSchemeAtAll),
+    grantWithoutSchemes,
+  })
 }
 
 export const EXTERNAL_API_SCOPE_CHECKED = Object.freeze({
@@ -1453,5 +1592,6 @@ export const EXTERNAL_API_SCOPE_CHECKED = Object.freeze({
   retry: assertRetryIsStillAWrite(),
   urlPath: assertUrlPathRulesAreItsOwn(),
   ambiguity: assertAmbiguousMatchRejected(),
+  scheme: assertSchemeIsDeclaredNotInherited(),
   codeList: assertEveryCodeIsEmitted(),
 })

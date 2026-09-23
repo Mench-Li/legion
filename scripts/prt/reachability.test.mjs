@@ -223,7 +223,7 @@ test('④ ★★ 读数：四族 gap 仍然不可达（谁把它们接上，这�
     // ── `path-scope.mjs` 为什么可以从这里删掉（① 端到端，不是只加了个 import）──
     //   实测的调用链（不是"有人 import 了它"）：
     //     `patch-layer.mjs`（PATCH_LAYER_ROWS）加载 `plugins/pre-execute-row.mjs`
-    //       → `plugins/root-row.mjs:497` 调 `scopePortFromEnv({ env })`（**真调用**）
+    //       → `plugins/root-row.mjs:535` 调 `scopePortFromEnv({ env })`（**真调用**）
     //       → 失败时 `throw`（**fail closed**，不按"没配"处理）
     //       → `root-row.mjs:508-514` 把 `scope.port` 传进
     //         `installEnforcementRoot({ pathScope: scope.port })`

@@ -3026,7 +3026,7 @@ B（排除 scripts/prt/boundary-facts.mjs）：
 
 ```text
 patch-layer.mjs（PATCH_LAYER_ROWS）加载 plugins/pre-execute-row.mjs
-  → plugins/root-row.mjs:497 真的调 scopePortFromEnv({ env })
+  → plugins/root-row.mjs:535 真的调 scopePortFromEnv({ env })
       （读不出就 throw ⇒ fail closed，不按"没配"处理）
   → :508-514 把 scope.port 传进 installEnforcementRoot({ pathScope })
   → scope-port.mjs:169 调 checkPathScope({ target, scope, direction, … })

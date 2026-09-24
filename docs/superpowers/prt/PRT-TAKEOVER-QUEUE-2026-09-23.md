@@ -1880,3 +1880,34 @@ F-21 的「还差什么」格**格首**写着"① 投递：`LEGION_CONNECTOR_DEC
 > 两次都不是靠我的判断拦住的，是**跑全套**拦住的。
 > ★ 这一轮更细的教训：**假阳比漏判更容易骗过自己** —— 那 4 个报警里，我第一反应是"4 处落点有问题"，
 > 而它们**全部**是我的量具自己的毛病（参照集取错 2 个、口径太宽 2 个）。
+
+### 11.17 ★★★ 第四十二轮（第三段）：PRT-1007 片 2 —— **技术动作做对了，但撞上一条我解释不了的判据红，已整片回滚**
+
+**做了什么**：片 2 取"多空间/子实例的**文件命名**族"——`childLogFile` + `statusFileNames`
+（两个只吃字符串、只吐字符串的纯函数，因此**一个新 import 都不需要**；本地没有 typescript，
+"要不要补类型 import"这件事在这里没法用编译验证，所以先挑不需要它的那一族）。
+搬到 `plugins/src/spacePaths.ts`，`index.ts` 里回引。**逐字对拍两片都四问全过**。
+
+**过程中学到的一条真东西（值得留档）**：③ 要求"由 `index.ts` 从新模块**再导出**"，
+我第一版写成 `import { … } from './spacePaths.js'` + `export { … }`（**不带 `from`**）⇒ 判据报红。
+它红得对，而且比"格式不符"更硬：**这两族在 `index.ts` 里都还有调用者**
+（`statusFileNames` 在单空间守护 L755、`childLogFile` 在 `planSpaceRunners` L2670），
+而 `export … from` 在 ESM 里**不引入本地绑定** —— 只写那一行，调用点会当场断。
+片 1 用的一直是**两行**：`import { … } from './docContract.js'`（给本地）+ `export { … } from './docContract.js'`（给公开面）。
+> 一个"再导出"与一个"引入再导出"，在**只看公开面**的时候长得一模一样 —— 差别只在本模块的调用点会不会断。
+
+**撞上的红**：`boundary-facts.mjs` 的 `source-original-citations-on-line`（源码注释里每条
+`路径:行 …原文：「…」` 的引文，都必须出现在它写的那个行号上）。
+它报的 miss 是 **`product/launcher/legacy-data-adoption.mjs:130 → launcher.mjs:108`** ——
+**这两个文件我这一轮一个字节都没碰**。
+
+**对照实验（决定性）**：`git stash push -u`（含未跟踪的新文件）⇒ `boundary-facts` **exit 0**；
+`git stash pop` ⇒ 红。⇒ **因果成立**（就是这次改动引起的），但**机制未解** ⇒ 按纪律**不猜**。
+
+**处置**：整片回滚（`index.ts` / `spacePaths.ts` / 片登记表全部回 HEAD；暂存区一并撤），
+树回绿：`boundary-facts` exit 0、`probe-slice-verbatim` exit 0（片 1 仍四问全过）。
+
+**下一轮的第一件**：先解这条判据的口径再落片 2 —— 已知线索两条：
+① 它的扫描面含 `plugins/`（我的新文件会被它看见）；
+② 目标解析顺序是"**引用文件自身 → 仓库根 → DSH 检出**"，而 `launcher.mjs` 在仓库根**也存在**，
+   于是 `launcher.mjs:108` 这种**裸文件名**的引用到底落在哪个文件上，是这条判据的核心歧义点。

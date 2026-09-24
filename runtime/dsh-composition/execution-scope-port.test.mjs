@@ -143,23 +143,37 @@ test('⑤ ★★★ MCP：没有 mcp 段时**真的在判**；有 mcp 段时**�
   assert.equal(v1.code, EXEC_CODES.MCP_SERVER_DENIED,
     `必须是判定器的"没有 MCP 授权"，而不是本模块的码——这一条是**真在判**：${v1.code}`)
 
-  // ⑤b ★★：授权表里**有** `mcp` 段 ⇒ 未接，用**本模块**的码。
+  // ⑤b ★★ 2026-09-24 裁决后的新语义：段**在**、且**含工具级声明** ⇒ 拒绝，
+  //      理由是"那一段今天不会有任何效力，请删掉它"（不是"未接"、也不是"没有授权"）。
   const withMcp = createExecutionScopePort({
     grant: { mcp: { servers: [{ server: 'github', tools: ['list_issues'] }] } },
   })
   const v2 = withMcp({ scopeFacts: mcpFacts })
-  assert.equal(v2.allowed, false, '★ 未接 ≠ 放行：放行会让"没接这一道"变成"随便调"')
-  assert.equal(v2.code, EXECUTION_SCOPE_PORT_CODES.MCP_LIMB_UNWIRED,
-    `必须是"未接"这个码。两者都拒，但一个说"去裁决两份授权表"，`
-    + `一个说"改授权表"——值班的人照着改，改错方向：${v2.code}`)
+  assert.equal(v2.allowed, false, '★ 工具级声明已废弃 ≠ 放行：留着它只会得到"配了却没生效"')
+  assert.equal(v2.code, EXECUTION_SCOPE_PORT_CODES.MCP_TOOL_LEVEL_DEPRECATED,
+    `必须是"工具级声明已废弃"这个码。三者都拒，但一个说"把工具清单删掉、声明写进登记表"，`
+    + `一个说"这个岗位没有 MCP 授权"——值班的人照着改，改错方向：${v2.code}`)
   assert.match(v2.reason, /连接器登记表/, '理由必须点名权威在哪')
   assert.match(v2.reason, /never parsed to recover|拆开公开名/,
     '理由要写清"为什么不能靠拆名字修"——否则下一个人会去写那段代码')
 
-  // ⑤c ★ 反向对照：**授权表里的那条 MCP 规则**（github/list_issues）
-  //      并没有让这次调用通过。少了它，⑤b 可能只是"有 mcp 段就一律拒"，
-  //      而"授权表里写不写它"这件事就看不出区别——那正是"未接"的形状。
-  assert.equal(withMcp({ scopeFacts: mcpFacts }).allowed, false)
+  // ⑤c ★★ 新的反向对照：改变结论的是"**有没有**工具级声明"，而不是"清单里写了什么"——
+  //      所以换一个工具名，结论**必须一样**（旧的 ⑤c 在裁决前是有效的，
+  //      它当时要排除的是"有 mcp 段就一律拒"；那时"写了什么"确实看不出区别，因为都拒）。
+  const otherTool = createExecutionScopePort({
+    grant: { mcp: { servers: [{ server: 'github', tools: ['some_other_tool'] }] } },
+  })
+  assert.equal(otherTool({ scopeFacts: mcpFacts }).allowed, false)
+  assert.equal(otherTool({ scopeFacts: mcpFacts }).code,
+    EXECUTION_SCOPE_PORT_CODES.MCP_TOOL_LEVEL_DEPRECATED)
+
+  // ⑤d ★★★ 裁决的**正例**：段在、且**不含**工具级声明 ⇒ 放行。
+  //      少了这一条，上面两条会与"有 mcp 段就一律拒"长得一模一样 ——
+  //      而"段的存在 = 本岗位允许调 MCP"正是这次裁决要立起来的那件事。
+  const boolOnly = createExecutionScopePort({ grant: { mcp: { servers: [] } } })
+  const v3 = boolOnly({ scopeFacts: mcpFacts })
+  assert.equal(v3.allowed, true,
+    '★ 段在 ⇒ 本岗位**允许**调 MCP（"能调哪些"由连接器登记表判，不在这里判）')
 })
 
 test('⑥ ★★ 判定器抛异常 ⇒ 拒绝（带码），不把强制面炸掉、也不变成放行', () => {

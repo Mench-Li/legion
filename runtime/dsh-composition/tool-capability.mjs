@@ -446,6 +446,67 @@ export function resolveTool(name) {
 }
 
 /**
+ * **按连接器声明合并**：政策门在"声明里也有能力"时的唯一入口（§5 第 24 条，裁决 (c)）。
+ *
+ * ★★★ 裁决原文（2026-09-24 业主）：**只允许声明抬升** ——
+ *   政策门对声明来的能力取 `max(静态评估, 声明)`，**声明不得下调**。
+ *
+ * 为什么"只抬升"是这一层的**全部**内容，而不是一条风格建议：
+ *   层内那条纪律（`describeTool` 里的 `maxRisk`：`declaredRisk` 只能往上抬）
+ *   **管不到跨层**。一旦政策门的答案改由声明决定，**一条写错的声明就能下调政策门的
+ *   评估** —— 而连接器声明是**配置**（连接器作者填的），不是评审过的常量。
+ *
+ *   > 一个"声明可以让判定更松"的合并，
+ *   > 与一个"把政策门交给配置文件"的实现，是同一个东西。
+ *
+ * 三条不许（三条都被下面的用例钉住，且各有一个变异）：
+ *   ① 声明**不许**让 `risk` 低于静态评估；
+ *   ② 声明**不许**让 `requiresApproval` 由 `true` 变 `false`（审批只能更严）；
+ *   ③ 声明**不许**让 `direction` 由 `write` 退回 `read`（方向不可逆）。
+ *
+ * ★ 未登记的（MCP 公开名今天**全在**这一类）静态读数已经是 `critical` + 要人批，
+ *   所以对它们这条合并**只会更严或不变** —— 它永远不会把一个未知工具变成可自动放行的。
+ * ★ 声明里**不认识**的能力一律判 `critical`（抬高，`unknownDeclaration` 留痕）：
+ *   与 `riskFloorOf` 同一处置 —— "不认识"不能被当成"安全"。
+ *
+ * ⚠️ 边界（如实写）：本函数是**合并纪律**本身。把声明从控制面送到政策门的**接线**
+ *   仍缺（`#13` 的阻塞是"数据"）。所以今天的生产路径上**还没有人**用声明调用它 ——
+ *   它落地的是"怎么取"这个问题，不是"取到了"。
+ */
+export function resolveToolWithDeclaration(name, declaredCapabilities = []) {
+  const base = resolveTool(name)
+  const raw = Array.isArray(declaredCapabilities) ? declaredCapabilities : []
+  const unknownDeclaration = raw
+    .map((c) => String(c).trim())
+    .filter((c) => c !== '' && CAPABILITY_KINDS[c] === undefined)
+  const declared = Object.freeze([...new Set(
+    raw.map((c) => String(c).trim()).filter((c) => CAPABILITY_KINDS[c] !== undefined),
+  )])
+  // ★ 并集，只增不减：`base.capabilities` 一项都不会因为声明而消失。
+  const union = Object.freeze([...new Set([...base.capabilities, ...declared])])
+  const floor = unknownDeclaration.length > 0 ? 'critical' : riskFloorOf(union)
+  // ★★★ 这一行就是 (c)：`max`，不是"以声明为准"。
+  const risk = maxRisk(base.risk, floor)
+  const facts = capabilityFacts(union)
+  return Object.freeze({
+    ...base,
+    capabilities: union,
+    declaredCapabilities: declared,
+    unknownDeclaration: Object.freeze(unknownDeclaration),
+    riskFloor: maxRisk(base.riskFloor, floor),
+    risk,
+    direction: facts.direction === 'write' ? 'write' : base.direction,
+    externalEffectPossible: facts.externalEffect || base.externalEffectPossible,
+    irreversible: facts.irreversible || base.irreversible,
+    // ★ 只做或运算：base 要人批的，声明拿不掉。
+    requiresApproval: base.requiresApproval || facts.hardFloor || RISK_RANK[risk] >= RISK_RANK.high,
+    hardFloor: base.hardFloor || facts.hardFloor,
+    /** 声明把读数抬高了 —— 留痕，供诊断报出来（与 `riskRaised` 同一用途）。 */
+    declarationRaised: RISK_RANK[risk] > RISK_RANK[base.risk],
+  })
+}
+
+/**
  * **高风险工具名单**（`risk >= high`）——`HIGH_RISK_TOOL_NAMES`。
  *
  * 为什么是"算出来的"而不是手写的九个名字：手写的那一份与登记表在

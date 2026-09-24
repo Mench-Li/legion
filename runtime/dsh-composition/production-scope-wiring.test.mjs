@@ -647,7 +647,7 @@ test('③c ★★★ MCP 那一条**未接**，而它必须是**具名**的拒�
   assert.equal(v1.allowed, false)
   assert.equal(v1.code, 'exec-scope-mcp-server-denied', `理由必须是"没有 MCP 授权"，而不是别的：${v1.code}`)
 
-  // ② 授权表里**有** `mcp` 段 ⇒ **未接**，而且要具名。
+  // ② 2026-09-24 裁决：授权表里**有** `mcp` 段、且**含工具级声明** ⇒ 具名拒绝。
   const withMcp = executionScopePortFromEnv({
     env: {
       LEGION_EXECUTION_SCOPE: JSON.stringify({
@@ -659,10 +659,23 @@ test('③c ★★★ MCP 那一条**未接**，而它必须是**具名**的拒�
     scopeFacts: { version: 'legion/scope-facts@1', kinds: ['mcp'], mcp: { tool: 'mcp__github__list_issues', from: 'toolName' } },
   })
   assert.equal(v2.allowed, false, 'MCP 绝不能被静默放行')
-  assert.equal(v2.code, EXECUTION_SCOPE_PORT_CODES.MCP_LIMB_UNWIRED,
-    `这一条必须是"未接"这个码，而不是判定器的某个码——`
-    + `两者都拒，但一个说"去裁决"，一个说"改授权表"：${v2.code}`)
+  assert.equal(v2.code, EXECUTION_SCOPE_PORT_CODES.MCP_TOOL_LEVEL_DEPRECATED,
+    `这一条必须是"工具级声明已废弃"这个码，而不是判定器的某个码——`
+    + `两者都拒，但一个说"把工具清单删掉、声明写进登记表"，一个说"没有授权"：${v2.code}`)
   assert.match(v2.reason, /连接器登记表/, '理由必须点名权威在哪，否则下一个人只会去改授权表')
+
+  // ②b ★★★ 裁决的**正例**（走**生产装配**这条路，不是直接造端口）：
+  //     段在、且不含工具级声明 ⇒ 放行。
+  const boolOnly = executionScopePortFromEnv({
+    env: {
+      LEGION_EXECUTION_SCOPE: JSON.stringify({ mcp: { servers: [] } }),
+    },
+  })
+  const v3 = boolOnly.port({
+    scopeFacts: { version: 'legion/scope-facts@1', kinds: ['mcp'], mcp: { tool: 'mcp__github__list_issues', from: 'toolName' } },
+  })
+  assert.equal(v3.allowed, true,
+    '★ 生产路径上：段在 ⇒ 允许调 MCP（"能调哪些"由连接器登记表判）')
 })
 
 test('⑥ ★★ 生产装配的**唯一**入口是组合根插件行（别处造桥就不在生产链上）', () => {

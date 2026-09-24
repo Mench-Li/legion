@@ -408,3 +408,76 @@ test('⑦ ★ 快照里每一个工具的风险与审批口径**与真表逐项�
     assert.deepEqual([...t.capabilities], [...real.capabilities], `${t.name} 的快照能力不一致`)
   }
 })
+
+// ── PRT-601 / §5 第 24 条（2026-09-24 业主裁决 **(c)**）：声明**只许抬升** ─────────
+//
+// 裁决原文：「政策门要不要（以及怎么）从声明里取能力」⇒ **要，且只允许声明抬升**。
+// 下面这一组盯的**不是**"合并函数会不会报错"，而是**一条写错的声明能不能让判定变松**。
+//
+//   > 一个"声明可以让判定更松"的合并，
+//   > 与一个"把政策门交给配置文件"的实现，是同一个东西。
+// ★ 只引入**新**符号：`resolveTool` 文件头已经 import 过 ——
+//   ESM 的 import 会被提升，但**同名绑定**仍不许声明两次（重名是编译期错误）。
+import { resolveToolWithDeclaration } from './tool-capability.mjs'
+
+test('⑩ ★★★ 未登记的 MCP 公开名：声明**不能**下调（裁决 (c) 的核心反例）', () => {
+  const name = 'mcp__github__list_issues'
+  const base = resolveTool(name)
+  assert.equal(base.known, false)
+  assert.equal(base.risk, 'critical')
+  const merged = resolveToolWithDeclaration(name, ['file:read'])
+  assert.equal(merged.risk, 'critical', '声明 file:read 不许把未登记工具读成 low')
+  assert.equal(merged.requiresApproval, true)
+  assert.equal(merged.direction, 'write')
+  assert.equal(merged.known, false, '声明不能让一个未登记工具变成"已登记"')
+})
+
+test('⑪ 声明**可以**抬升已登记工具（抬升这条路真的通，不是恒不变）', () => {
+  const base = resolveTool('git-status')
+  assert.equal(base.risk, 'low')
+  const merged = resolveToolWithDeclaration('git-status', ['network:write'])
+  assert.equal(merged.risk, 'high')
+  assert.equal(merged.declarationRaised, true)
+})
+
+test('⑫ 空声明 ⇒ 与静态评估**逐字段相同**（合并不引入噪声）', () => {
+  for (const n of KNOWN_TOOL_NAMES) {
+    const a = resolveTool(n)
+    const b = resolveToolWithDeclaration(n, [])
+    for (const k of ['risk', 'riskFloor', 'requiresApproval', 'direction',
+      'externalEffectPossible', 'irreversible', 'hardFloor', 'known']) {
+      assert.equal(b[k], a[k], `${n}.${k}`)
+    }
+    assert.deepEqual(b.capabilities, a.capabilities)
+  }
+})
+
+test('⑬ 声明里**不认识**的能力判 critical（"不认识"不当成"安全"）', () => {
+  const m = resolveToolWithDeclaration('git-status', ['no-such:capability'])
+  assert.equal(m.risk, 'critical')
+  assert.deepEqual(m.unknownDeclaration, ['no-such:capability'])
+  assert.equal(m.requiresApproval, true)
+  assert.equal(m.declarationRaised, true)
+})
+
+test('⑭ ★★★ 穷举：**没有任何**声明能让风险下调、审批取消或方向退回 read', () => {
+  const lying = [[], ['file:read'], ['repo:read'], ['network:read'], ['file:delete'],
+    ['repo:push'], ['credential:read'], ['mcp:call'], ['no-such:cap'], [''], ['file:read', 'file:read']]
+  for (const n of [...KNOWN_TOOL_NAMES, 'mcp__evil__x']) {
+    const base = resolveTool(n)
+    for (const decl of lying) {
+      const m = resolveToolWithDeclaration(n, decl)
+      assert.ok(RISK_RANK[m.risk] >= RISK_RANK[base.risk],
+        `${n} + ${JSON.stringify(decl)}：风险被下调（${base.risk} → ${m.risk}）`)
+      if (base.requiresApproval) {
+        assert.equal(m.requiresApproval, true, `${n} + ${JSON.stringify(decl)}：审批被取消`)
+      }
+      if (base.direction === 'write') {
+        assert.equal(m.direction, 'write', `${n} + ${JSON.stringify(decl)}：方向被退回 read`)
+      }
+      for (const c of base.capabilities) {
+        assert.ok(m.capabilities.includes(c), `${n}：静态能力「${c}」被声明抹掉`)
+      }
+    }
+  }
+})

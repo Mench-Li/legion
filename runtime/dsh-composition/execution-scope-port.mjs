@@ -30,7 +30,7 @@
 //    `argv === null`，意思是"这是一个会起进程的工具，而它这次没给命令"——
 //    那不是"与命令无关"，那是**证明不了它要起什么**。
 //
-// ## ★★★ ③ **MCP 那一条本批没有接**——而它必须**具名**地说出来
+// ## ★★★ ③ MCP：**2026-09-24 已裁** —— `mcp` 段降级为"本岗位允不允许调 MCP"一个布尔
 //
 // `execution-scope.mjs` 的 MCP 授权按 `server__tool` 对（`splitMcpTool` 要求
 // `__` **恰好一个**）。而 DSH 送上来的公开名是 `mcp__<server>__<rawName>`
@@ -53,16 +53,23 @@
 //   > 与一个「其中一道的表更新了、另一道没更新」的组合，是同一个东西——
 //   > 只不过前者的读数看起来像"MCP 授权被检查了两次"。
 //
-// 所以本端口对 MCP 的处置是**分两种、都具名**：
+// ★★★ **业主 2026-09-24 裁决（§5 第 25 条采 ①）**：**F-21 连接器登记表为权威**，
+//   本端口这一段的 MCP 授权**降级为"本岗位允不允许调 MCP"一个布尔**。于是今天分**三种**：
 //
 //   · 授权表里**没有** `mcp` 段 ⇒ 拒绝，码用判定器的 `MCP_SERVER_DENIED`，
 //     理由"这个岗位没有 MCP 授权"。这条**不需要**拆名字，所以它是**真的**在判。
-//   · 授权表里**有** `mcp` 段 ⇒ 拒绝，码 `MCP_LIMB_UNWIRED`，理由逐字说清
-//     "权威在连接器登记表，而两份表不许并存"。这是**未接**，不是"不通过"。
+//   · 授权表里**有** `mcp` 段、且**含工具级声明** ⇒ 拒绝，码
+//     `MCP_TOOL_LEVEL_DEPRECATED`。理由**不是**"未接"，而是"那一段今天不会有任何效力，
+//     请把它删掉" —— 留着它的读数正是这次裁决要消灭的那一种：**配了却没生效**。
+//   · 授权表里**有** `mcp` 段、且**不含工具级声明** ⇒ **放行**（段的存在即"允许"），
+//     "能调哪些工具"交给**连接器登记表**判 —— 它经 `connectorJudgment` 接在**同一个**
+//     `preExecute` 上。
 //
-// ⇒ 净效果：`LEGION_EXECUTION_SCOPE` 打开之后，MCP **不会**被静默放行
-//   （fail closed），也**不会**被静默拒成"名字有歧义"（理由给错）。
-//   要真正接上，需要的是一次裁决（见 §5），不是一段更聪明的拆名字代码。
+//   > 一个"配了工具清单、而那份清单没有任何效力"的授权表，
+//   > 与一个"配了工具清单、而权威在另一处"的授权表，在**值班的人**眼里是同一个东西 ——
+//   > 只不过前者会在某次事故里被当成"我们限制过 MCP 工具"。
+//
+// ⇒ 净效果：MCP **不会**被静默放行（没有段就拒），也**不会**被静默拒成"名字有歧义"（理由给错）。
 //
 // @module runtime/dsh-composition/execution-scope-port
 // ============================================================================
@@ -90,10 +97,11 @@ export const EXECUTION_SCOPE_PORT_CODES = Object.freeze({
   /** 能力说这一类、而事实里没有——证明不了它要做什么。 */
   NO_FACTS: 'execution-scope-port-no-facts',
   /**
-   * ★★★ MCP 那一条**本批未接**：授权表里有 `mcp` 段，而"哪些 MCP 工具"的权威
-   * 是连接器登记表（F-21）。这不是"不通过"，是"未接"。
+   * ★★★ 授权表的 `mcp` 段里还写着**工具级**授权 —— 而"哪些 MCP 工具可用"的权威
+   * **只**在连接器登记表（F-21，2026-09-24 裁决 ①）。这不是"不通过"，是
+   * "**这一段今天不会有任何效力，请删掉它**"。
    */
-  MCP_LIMB_UNWIRED: 'execution-scope-port-mcp-limb-unwired',
+  MCP_TOOL_LEVEL_DEPRECATED: 'execution-scope-port-mcp-tool-level-deprecated',
 })
 
 /** 与 `scope-port.mjs` / `product/execution-plane-config.mjs` 同一套状态词。 */
@@ -202,11 +210,20 @@ export function createExecutionScopePort({ grant, platform } = {}) {
         // 授权表里没有 `mcp` 段 ⇒ 这一条是**真的**在判，而且不需要拆名字。
         return deny(EXEC_CODES.MCP_SERVER_DENIED, '这个岗位没有 MCP 授权', { kind: 'mcp' })
       }
-      // 授权表里有 `mcp` 段 ⇒ 要按 `server__tool` 对，而我们拿不到那一对。
-      // 用具名的码说清这是**未接**，而不是"名字有歧义"。
+      // ★ 段**存在** ⇒ "本岗位允许调 MCP"；而"能调哪些"的权威是**连接器登记表**（F-21）。
+      //   于是这一段的**工具级内容**不再有任何效力 —— 留着它只会得到"配了却没生效"。
+      const toolLevel = normalized.mcp.servers.filter(
+        (s) => Array.isArray(s?.tools) && s.tools.length > 0,
+      )
+      if (toolLevel.length === 0) {
+        // 段在、且不含工具级声明 ⇒ 允许（段的存在即"本岗位允许调 MCP"）
+        return allow(null)
+      }
       return deny(
-        EXECUTION_SCOPE_PORT_CODES.MCP_LIMB_UNWIRED,
-        '授权表里声明了 mcp 段，而"哪些 MCP 工具可用"的权威在**连接器登记表**'
+        EXECUTION_SCOPE_PORT_CODES.MCP_TOOL_LEVEL_DEPRECATED,
+        '授权表的 mcp 段里还写着**工具级**授权（'
+        + toolLevel.map((s) => `${s.server}: ${(s.tools ?? []).join('、')}`).join('；')
+        + '），而"哪些 MCP 工具可用"的权威**只**在**连接器登记表**'
         + '（F-21，经 connectorJudgment 接在同一个 preExecute 上）。'
         + 'DSH 送上来的公开名是 `mcp__<server>__<rawName>`（两个 `__`），'
         + '而 `splitMcpTool` 要求恰好一个——把线上名字喂进去会以"名字有歧义"拒掉，'
@@ -215,8 +232,8 @@ export function createExecutionScopePort({ grant, platform } = {}) {
         + 'DSH 在归一化/截断时会把名字换成 12 位 SHA-256 后缀，那时还原不出来，'
         + '而 `packages/mcp/mcp-client/src/tools.ts:9-10` 逐字写着'
         + '"the public name is never parsed to recover it"（公开名从不被反解）。'
-        + '⇒ 这一条**未接**，不是"不通过"；要接上需要一次裁决'
-        + '（同一个 MCP 授权不许由两张表并存表达）',
+        + '⇒ 请把那段工具清单从授权表里**删掉**（保留 mcp 段本身即表示"这个岗位允许调 MCP"），'
+        + '把工具声明写在连接器登记表里（F-21）。',
         { kind: 'mcp' },
       )
     }

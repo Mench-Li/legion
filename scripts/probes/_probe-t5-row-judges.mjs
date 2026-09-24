@@ -52,5 +52,21 @@ const check = (label, cond, extra = '') => {
   check('⑤ 区间标签不误配为某条的判据', r.rows[0].strongest === null, `strongest=${r.rows[0].strongest}`)
 }
 
-console.log(failures === 0 ? '\n  ⇒ T5 普查的三种判据来源分得开（4 反向 + 1 防误配）' : `\n  ⇒ 有 ${failures} 处不达预期`)
+// ⑥ 两名单漂移之一：未核的行**没标**「未核（T5）」⇒ 必须红
+{
+  const t = HEAD + '| F-06 | 己 | ✅ | `a/b.mjs` | PRT-1 | — |\n'
+  const r = rowJudges({ statusText: t, ciText: CI, exists: () => true })
+  const bit = !r.ok && r.violations.some((v) => v.id === 'unverified-row-not-marked' && v.feature === 'F-06')
+  check('⑥ 未核却没标 ⇒ 红（unverified-row-not-marked）', bit, `ok=${r.ok}`)
+}
+
+// ⑦ 两名单漂移之二：**有判据**的行却标着「未核（T5）」⇒ 必须红（标记漂回去与漏标一样是名单说谎）
+{
+  const t = HEAD + '| F-01 | 甲 | ✅ | `a/b.mjs` | 未核（T5） | — |\n'
+  const r = rowJudges({ statusText: t, ciText: CI, exists: () => true })
+  const bit = !r.ok && r.violations.some((v) => v.id === 'marked-row-has-judge' && v.feature === 'F-01')
+  check('⑦ 有判据却标未核 ⇒ 红（marked-row-has-judge）', bit, `ok=${r.ok}`)
+}
+
+console.log(failures === 0 ? '\n  ⇒ T5 普查的三种判据来源分得开（5 反向 + 1 防误配 + 2 漂移守卫）' : `\n  ⇒ 有 ${failures} 处不达预期`)
 process.exit(failures === 0 ? 0 : 1)

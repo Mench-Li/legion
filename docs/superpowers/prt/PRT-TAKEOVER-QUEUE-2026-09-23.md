@@ -1294,3 +1294,46 @@ stage  PASS (103ms)   / doc  PASS (1720ms)
 它改的是本文件自己，`check-docs` / `doc-table-integrity` / `ci-reading-integrity`
 在提交后**本地单独跑过**（都在门禁那一族里）。
 
+### 9.3 第十九轮：**19 个领先分支逐条判定 = 没有一个该合**（业主让"检查领先的提交"）
+
+判据与读数（每条都可复跑）：
+
+| 类别 | 分支 | 依据（实测） |
+| --- | --- | --- |
+| **已经真的在 main 里** | `codex/prt-509-landing-fix`、`fix/scrum-worker-blocked-resume`，以及领先 0 的 `codex/prt-integration` / `-closure` / `-landing` / `-merge` / `prt-runtime` / `w/p2-8` / `w/p4-7` | `git cherry main <b>` 报**真缺 0**；再按产物核：`product/launcher/fixtures/prt509-credentials-probe.mjs`、`product/launcher/run-credential-dsh-process.test.mjs`、`plugins/tests/worker-regression.test.mjs` **都在 main 里** ⇒ 无需合并 |
+| **被 main 的更新实现取代** | `codex/prt-phase0-1` | 它那条"`parity.mjs` 不再钉死行号、按选项集合定位"在 main 里**已有且更完整**（`runtime/adapters/dsh/parity.mjs:54-82`）；另一提交是 **2026-09-12 的过时状态注记** |
+| 同上 | `wip/main-checkout-2026-09-16` | 它的 `docs/PRT-009-evidence/verify-evidence.md` 是 **126 行旧快照**，main 已是 **484 行**（那句"六阶段全 PASS / test 43 套件 1161 用例"是旧读数，main 现在 416+ 套件） |
+| **合了会回退 main** | 15 个 `w/T-*`（T-043…T-110） | 每个分支**只改 1 个 main 已重写过的文件**（`scripts/ci/run-ci.mjs` 从那时 **493 行**涨到 **5000+ 行**、`docs/STATUS.md`、`README.md`、`board-plugin/src/*`…），而它们**落后 850–1000 个提交** |
+
+★ 有一处看起来"真缺"的，也查了：这 19 个分支里 main **确实没有**的文件共 **39 个**——
+38 个是旧 T 任务的证据转储（`docs/T059-evidence/`、`docs/T080-evidence/` 的探针与日志）
+与 `scratch/t110-build/**`（main 已把 `scratch/` 设为忽略），
+第 39 个是 `team-hub/scripts/ci.mjs`（T-064 期的 team-hub 专用 CI，
+而 main 的 `scripts/ci/run-ci.mjs` 已把 team-hub 全部套件收进统一门禁 ⇒ 同属被取代）。
+
+> ⇒ 这 19 个不是"待合并的欠账"，是"**待清理的残留**"（§8.1 的 K 格）。
+> 合并它们里的任何一个，都会把 main 拉回 2026-08/09 的状态。
+
+### 9.4 ★ 第十九轮：本地 `main` 已**快进推送到远端**（业主授权）
+
+```
+git push origin main        →  ✗ RPC failed; curl 55 Send failure: Connection was reset
+git -c http.version=HTTP/1.1 push origin main
+                            →  ✓ e181c04..fee2bd3  main -> main   （退出码 0）
+```
+
+| 核对方式 | 读数 |
+| --- | --- |
+| push 自身输出 | `e181c04..fee2bd3  main -> main` |
+| GitHub API（`/repos/Mench-Li/legion/commits/main`） | `"sha": "fee2bd338b53821ad937f7c4edf10694e6a83d49"` |
+| `git ls-remote origin refs/heads/main` | `fee2bd338b53821ad937f7c4edf10694e6a83d49` |
+| 本地跟踪引用 / reflog | `origin/main = fee2bd3`；`refs/remotes/origin/main@{0}: update by push` |
+
+★ **根因与处置**：本机 git 走代理 `http.proxy = http://127.0.0.1:7897`，
+**HTTP/2 下的大包推送会被代理重置**（`Connection was reset` / `unexpected disconnect`），
+而 `git ls-remote` / `git fetch` 在同一代理上还会偶发 `schannel: failed to receive handshake`。
+⇒ 已把 `http.version = HTTP/1.1` **写进本仓配置**，之后推送与读取都正常。
+
+⚠️ 推送是**快进**（推送前 `main..origin/main = 0`、`origin/main` 是 `main` 的祖先），
+所以没有覆盖远端任何提交。
+

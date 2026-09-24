@@ -96,6 +96,24 @@ Runtime Contract → DshRuntimeAdapter → Orchestrator
 ⇒ 精确读数：**这一条被携带、被校验、被一行注释引注为"spec §6.1 环境变量白名单"
 （`run.mjs:218`），而没有任何消费者**——一次 Run 报不报白名单，对执行**没有任何影响**。
 
+★★★ **2026-09-24 业主裁决（②：承认环境的作用域本来就是进程级，改规格）**——
+本条**已关闭**。落地两处：
+
+1. **两份规格里那句"必须包含"都改了**：本文件 `:146` 与
+   `docs/superpowers/specs/2026-09-11-legion-product-runtime-design.md:195`
+   的必填清单里**删掉了「环境变量白名单」**（各自带一处日期化注记说明为什么删）。
+2. **字段本身留还是删**：本轮**没有**动 `runtime/contracts/run.mjs`
+   —— 删字段要先做一次形状迁移（`env` 缺席会被静默补成 `[]`，而"删掉"与
+   "补成空"在读数上同形，正是本条要治的那件事）。**留字段、改规格**是本次裁决的形状；
+   字段的去留留给"要不要给环境一个按 Run 的作用域"那个更大的问题
+   （它属于 PRT-214 那条线，不在这里顺手做）。
+
+★ 为什么**不**选另一条路（①给 `env` 接一个真消费者）：那会让白名单成为一条**真的**收窄
+——而今天唯一的生产者（`orchestrator/worker/executor.mjs`）**不发**这个字段，
+接上消费者就等于逼所有人编一份，且编出来的方向是**可能拒掉合法环境**。
+逐项读数见上表；量具 `node scripts/probes/_probe-env-whitelist.mjs`（本轮修好，
+它此前因为量具搬家后相对 import 深度没改而**跑不起来**）。
+
 ★★ 同一个文件在 `run.mjs:97-125` 用一整段论证过**为什么 `enforcementFloor` 不能这么写**：
 
 > 一个"用必填字段把缺席挡在门外"的契约，与一个"让每个人都编一份空下限才进得来"的契约，
@@ -143,7 +161,7 @@ Runtime Contract → DshRuntimeAdapter → Orchestrator
 
 #### F-01 Runtime Contract（基础已落地，收口中）
 
-定义唯一接口：`getHealth`、`getCapabilities`、`listModels`、`validateProfile`、`execute`、`cancel`、`recover`。`RunRequest` 必须包含 `runId`、`attemptId`、`idempotencyKey`、workspace/goal/task/employee、TeamPlan、Context Snapshot、模型、预算、工作目录、环境变量白名单和工具权限。
+定义唯一接口：`getHealth`、`getCapabilities`、`listModels`、`validateProfile`、`execute`、`cancel`、`recover`。`RunRequest` 必须包含 `runId`、`attemptId`、`idempotencyKey`、workspace/goal/task/employee、TeamPlan、Context Snapshot、模型、预算、工作目录和工具权限。★ **2026-09-24 业主裁决：原文是「…工作目录、环境变量白名单和工具权限」，其中「环境变量白名单」已删。** 依据与逐项实测见本文件 §1.3.1 与状态表 §5 第 29 条：那个字段（`RunRequest.env`）**契约里有、校验有、读者一个都没有**，而真实起作用的环境作用域是**进程级**的（`product/process-manifest.mjs` 的 `envNames` + `buildChildEnv()`）
 
 `RunEvent` 固定为 `run.started`、`model.selected`、`message.delta`、`tool.*`、`usage.updated`、`artifact.produced` 和终态事件。未知错误不得静默归类为成功或普通可重试。
 

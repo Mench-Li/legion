@@ -192,7 +192,12 @@ interface RuntimeAdapter {
 - `workspaceId`、`goalId`、`taskId`、`employeeId`。
 - 冻结的 `teamPlanRef` 和 `contextSnapshotRef`。
 - `modelProfileRef`、预算、超时和取消策略。
-- 工作目录、环境变量白名单和工具权限。
+- 工作目录和工具权限。
+  ★ **2026-09-24 业主裁决：原文是「工作目录、环境变量白名单和工具权限」，其中「环境变量白名单」已删** ——
+  环境的作用域**本来就是进程级**的（`product/process-manifest.mjs` 的 `envNames` +
+  `buildChildEnv()`），而 `RunRequest.env` 全仓**零读者**、缺席还会被静默补成 `[]`
+  （于是「没声明」与「声明了一个都不许」在读数上同形）。逐项实测见
+  `scripts/probes/_probe-env-whitelist.mjs` 与 `docs/MULTI-AGENT-FEATURE-STATUS.md` §5 第 29 条。
 - 预期输出 Schema 与验收提示。
 
 `RunEvent` 采用可持久化事件类型：

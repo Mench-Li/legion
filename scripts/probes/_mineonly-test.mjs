@@ -17,7 +17,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { resolveLayout } from './paths.mjs'
+import { resolveLayout } from '../../product/paths.mjs'
 import {
   DEFAULT_PORTS,
   MANIFEST_KNOWN_GAPS,
@@ -31,7 +31,7 @@ import {
   splitCommandLine,
   startupWaves,
   validateProcessPlan,
-} from './process-manifest.mjs'
+} from '../../product/process-manifest.mjs'
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 

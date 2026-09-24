@@ -1,7 +1,7 @@
 // scripts/probes/_probe-break-owners.mjs —— 链上的每个断点，§5 里有没有人认领（**不提交**）
 import { readFileSync } from 'node:fs'
-import { traceChain } from '../scripts/prt/alpha-chain-trace.mjs'
-import { decisionItemNumbers } from '../scripts/prt/intervention-coverage.mjs'
+import { traceChain } from '../../scripts/prt/alpha-chain-trace.mjs'
+import { decisionItemNumbers } from '../../scripts/prt/intervention-coverage.mjs'
 
 const REPO = 'D:/project/DSH/legion'
 const raw = readFileSync(`${REPO}/docs/MULTI-AGENT-FEATURE-STATUS.md`, 'utf8')

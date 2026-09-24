@@ -7,7 +7,7 @@
 // 这不是判据（不进门禁），是一份**审计读数**，用来回答"还有多少这种东西"。
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { REPO } from '../scripts/prt/reachability.mjs'
+import { REPO } from '../../scripts/prt/reachability.mjs'
 
 const SRC_DIRS = ['product', 'runtime', 'orchestrator', 'security', 'services-plugin', 'team-hub']
 

@@ -11,7 +11,7 @@
 // 被判成"只引了第 600 行"（600 <= 614）⇒ **静默放过**。
 // 台账里 `run-floor.mjs:544-559` / `executor-binding.mjs:254-261`
 // 两个范围引用因此**从来没有被当成范围查过**。
-import { scanLineCitations } from '../scripts/prt/boundary-facts.mjs'
+import { scanLineCitations } from '../../scripts/prt/boundary-facts.mjs'
 
 const BT = String.fromCharCode(96) // 反引号：避免在源码里写出来
 const cite = (s) => BT + s + BT

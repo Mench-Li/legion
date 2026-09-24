@@ -1,6 +1,6 @@
-import { createRootRow } from '../runtime/dsh-composition/plugins/root-row.mjs'
-import { enforcementRoot, resetEnforcementRoot } from '../runtime/dsh-composition/root.mjs'
-import { projectToolRequest } from '../runtime/dsh-composition/tool-request.mjs'
+import { createRootRow } from '../../runtime/dsh-composition/plugins/root-row.mjs'
+import { enforcementRoot, resetEnforcementRoot } from '../../runtime/dsh-composition/root.mjs'
+import { projectToolRequest } from '../../runtime/dsh-composition/tool-request.mjs'
 
 const CWD = process.platform === 'win32' ? 'C:/work' : '/work'
 

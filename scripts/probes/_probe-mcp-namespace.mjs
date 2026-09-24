@@ -1,7 +1,7 @@
 // 关键实测：一个 `mcp__<已知连接器>__<未声明工具>` 走桥，今天是什么读数？
-import { installEnforcementRoot, resetEnforcementRoot } from '../runtime/dsh-composition/root.mjs'
-import { namespaceOf } from '../runtime/connectors/public-name.mjs'
-import { connectorPortFromEnv } from '../runtime/dsh-composition/connector-port.mjs'
+import { installEnforcementRoot, resetEnforcementRoot } from '../../runtime/dsh-composition/root.mjs'
+import { namespaceOf } from '../../runtime/connectors/public-name.mjs'
+import { connectorPortFromEnv } from '../../runtime/dsh-composition/connector-port.mjs'
 
 const ENV_OK = {
   TEAM_HUB_URL: 'http://hub.invalid:8787',

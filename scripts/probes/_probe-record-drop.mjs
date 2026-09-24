@@ -1,5 +1,5 @@
 // scripts/probes/_probe-record-drop.mjs —— 证明"按注释说的加一个新可选字段"会被静默丢掉（**不提交**）
-import { buildRunRecord, validateRunRecord, RUN_RECORD_OPTIONAL_FIELDS } from '../product/launcher/run-record.mjs'
+import { buildRunRecord, validateRunRecord, RUN_RECORD_OPTIONAL_FIELDS } from '../../product/launcher/run-record.mjs'
 
 console.log('声明的可选字段 =', JSON.stringify(RUN_RECORD_OPTIONAL_FIELDS))
 

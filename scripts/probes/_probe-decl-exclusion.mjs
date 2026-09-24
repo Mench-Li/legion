@@ -1,5 +1,5 @@
 // scripts/probes/_probe-decl-exclusion.mjs —— 那个"排除声明块自己"的守卫，到底能不能被走到？
-import { mirrorPattern, membersOf, DECL_RE, measureDeclaration } from '../scripts/prt/declaration-mirrors.mjs'
+import { mirrorPattern, membersOf, DECL_RE, measureDeclaration } from '../../scripts/prt/declaration-mirrors.mjs'
 
 const decls = [
   "export const FIELDS = Object.freeze(['key', 'pid', 'image'])",

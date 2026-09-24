@@ -1,8 +1,8 @@
 // 临时探针（未跟踪）：对**真实运行的** team-hub 走一遍新的运行输入解析链。
 // 只读（GET）。目的：把"这条链在真数据上给出什么"量出来，而不是靠夹具断言。
-import { createModelProfileRefResolver, resolveRunInputs } from '../orchestrator/worker/run-inputs.mjs'
-import { defaultRequestFor } from '../orchestrator/worker/executor.mjs'
-import { validateRunRequest } from '../runtime/contracts/run.mjs'
+import { createModelProfileRefResolver, resolveRunInputs } from '../../orchestrator/worker/run-inputs.mjs'
+import { defaultRequestFor } from '../../orchestrator/worker/executor.mjs'
+import { validateRunRequest } from '../../runtime/contracts/run.mjs'
 
 const HUB = process.env.LEGION_PROBE_HUB ?? 'http://127.0.0.1:8787'
 const TOKEN = process.env.TEAM_HUB_TOKEN ?? ''

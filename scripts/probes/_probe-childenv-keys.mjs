@@ -1,7 +1,7 @@
 // 决定性实测：把 LEGION_PATH_SCOPE / LEGION_CONNECTOR_DECLARATIONS 放进 runtime 进程的
 // env 值里，`buildChildEnv()` 会抛、还是会放行？
-import { buildChildEnv } from '../product/launcher/allowlist.mjs'
-import { PROCESS_SPECS } from '../product/process-manifest.mjs'
+import { buildChildEnv } from '../../product/launcher/allowlist.mjs'
+import { PROCESS_SPECS } from '../../product/process-manifest.mjs'
 
 const rt = PROCESS_SPECS.find((s) => s.key === 'runtime')
 console.log('runtime envNames 里有这两个键吗：')

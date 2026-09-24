@@ -1,7 +1,7 @@
 // 精确定位：`resolveDshBaseBundlePatchPath()` 返 null 是哪一步断的。
 import { isAbsolute } from 'node:path'
 import { createRequire } from 'node:module'
-import { resolveDshBaseBundlePatchPath } from '../product/launcher/run-credential-materialization.mjs'
+import { resolveDshBaseBundlePatchPath } from '../../product/launcher/run-credential-materialization.mjs'
 
 const ENTRY = 'D:/project/DSH/dsh/deepseek-harness/apps/cli/lib/bin.js'
 

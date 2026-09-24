@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import {
   dshCredentialNamesFromPatchText,
   resolveDshBaseBundlePatchPath,
-} from '../product/launcher/run-credential-materialization.mjs'
+} from '../../product/launcher/run-credential-materialization.mjs'
 
 const ENTRY = 'D:/project/DSH/dsh/deepseek-harness/apps/cli/lib/bin.js'
 

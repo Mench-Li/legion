@@ -1,8 +1,17 @@
 // 探针：量「产品配置 runtime.env 里的强制面五把键，到底能不能到 Runtime 子进程」
 // 只读，不改任何文件。
-import { resolveEnforcementIdentity, ENFORCEMENT_IDENTITY_ENV } from '../product/launcher/enforcement-identity.mjs'
-import { buildChildEnv } from '../product/launcher/allowlist.mjs'
-import { PROCESS_SPECS } from '../product/process-manifest.mjs'
+//
+// ★ 第 118 轮第三十八轮修：本文件从 `scripts/` 搬进 `scripts/probes/` 时，
+//   相对深度**没有跟着改** —— 三条 import 都写着 `../product/…`，
+//   搬到下一层之后就变成 `scripts/product/…`（不存在）。
+//   ⇒ 而 §4.6 正文**逐字**把它当成"可复跑"的实测依据引着。
+//
+//   > 一支"存在但一跑就 `ERR_MODULE_NOT_FOUND`"的探针，
+//   > 与一支"从来没写"的探针，在"能不能复跑"这件事上是同一个东西 ——
+//   > 只不过前者的名字会出现在别人的报告里。
+import { resolveEnforcementIdentity, ENFORCEMENT_IDENTITY_ENV } from '../../product/launcher/enforcement-identity.mjs'
+import { buildChildEnv } from '../../product/launcher/allowlist.mjs'
+import { PROCESS_SPECS } from '../../product/process-manifest.mjs'
 
 const runtimeProc = PROCESS_SPECS.find((p) => p.key === 'runtime')
 console.log('runtime 进程 envNames 里有没有这五把键：')

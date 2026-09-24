@@ -26,8 +26,8 @@
 // ⇒ **一次成功 Run 的峰值读数，两处都不留。**
 //
 // 本探针把两条退出路径并排跑一次（同一个替身、同一个 io），只差"是不是主动停止"。
-import { buildChildEnv } from '../product/launcher/allowlist.mjs'
-import { createSupervisedProcess } from '../product/launcher/supervisor.mjs'
+import { buildChildEnv } from '../../product/launcher/allowlist.mjs'
+import { createSupervisedProcess } from '../../product/launcher/supervisor.mjs'
 
 const SPEC = Object.freeze({
   key: 'probe', label: 'probe',

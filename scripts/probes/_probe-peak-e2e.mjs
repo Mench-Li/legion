@@ -21,9 +21,9 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { buildChildEnv } from '../product/launcher/allowlist.mjs'
-import { createSupervisor } from '../product/launcher/supervisor.mjs'
-import { buildRunRecord, readRunRecord, writeRunRecord } from '../product/launcher/run-record.mjs'
+import { buildChildEnv } from '../../product/launcher/allowlist.mjs'
+import { createSupervisor } from '../../product/launcher/supervisor.mjs'
+import { buildRunRecord, readRunRecord, writeRunRecord } from '../../product/launcher/run-record.mjs'
 
 const MB = 1024 * 1024
 // 真占内存、活够久，好让周期采样至少采到一次「长大之后」的值。

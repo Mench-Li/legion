@@ -1,6 +1,6 @@
 // scripts/probes/_mutate-counts.mjs —— 变异验证：把修好的数改回去，门禁必须红（**不提交**）
 import { readFileSync, writeFileSync } from 'node:fs'
-import { checkRepo } from '../scripts/prt/suite-counts.mjs'
+import { checkRepo } from '../../scripts/prt/suite-counts.mjs'
 
 const F = 'D:/project/DSH/legion/docs/MULTI-AGENT-FEATURE-STATUS.md'
 const orig = readFileSync(F, 'utf8')

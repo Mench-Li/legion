@@ -3,7 +3,7 @@
 // 第 67 轮我说"自检永远不兼容"。本轮把它证成**结构性的**而不是"难"：
 // 如果那三项 `satisfied` 是**字面量**、不看 ctx、不看配置、不看环境，
 // 那就**不存在**任何一个 fixture 能让自检通过 —— 改 fixture 是白改。
-import { runtimeCapabilityEvidence } from '../runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs'
+import { runtimeCapabilityEvidence } from '../../runtime/dsh-composition/plugins/runtime-host-registrar-row.mjs'
 import { readFileSync } from 'node:fs'
 
 console.log('  ① 用完全不同的"现场"各调一次，看读数变不变')

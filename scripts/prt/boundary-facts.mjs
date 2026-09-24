@@ -125,6 +125,10 @@ export function defaultContext() {
     //   "**你点名的那个符号还在不在那个坐标附近**"。
     bareCoordinateSymbols: () => scanBareCoordinateSymbols(),
     manifestImpersonation: () => checkManifestImpersonation(),
+    // ★★★ 第 118 轮第三十八轮：`scripts/probes/` 里**相对 import 能不能解析**。
+    //   起因见 `checkProbeImports()` 的注释：一整批探针在"搬家"之后
+    //   **一跑就 `ERR_MODULE_NOT_FOUND`**，而文档把它们当"可复跑"的证据引着。
+    probeImports: () => checkProbeImports(),
     // ── E. 交接报告 §二 自称"机器读数，可复跑"的那张表（第 26 轮）────────────
     ledgerTallies: () => tallyLedger(doc(LEDGER_DOC)),
     trackedTestCount: () => trackedTestFiles().length,
@@ -484,6 +488,58 @@ export function checkManifestImpersonation({ dir = CRITERIA_DIR } = {}) {
     }
   }
   return { scanned, bad: bad.sort() }
+}
+
+// ── C0. ★★★ 探针的**相对 import 深度**（第 118 轮第三十八轮）─────────────────
+//
+// 起因（一次真实、且**静默**的成批失效）：
+//   第 118 轮第十二轮按业主裁决把量具从 `scratch/` **收进 `scripts/probes/`**。
+//   搬家当次是有判据红的（`census-generated-status.mjs[未完成]`，见本文件下面的跳过清单），
+//   所以那次搬家**看起来**被验证过了 —— 而"**相对 import 的深度**"不在任何判据的检查面里。
+//
+//   ⇒ 实测（2026-09-24）：`scripts/probes/` 下 **17 个文件 / 33 条**相对说明符
+//     指向了不存在的路径（住在 `scripts/` 时写的 `../product/…`，搬到下一层之后
+//     就变成 `scripts/product/…`）。它们**一跑就 `ERR_MODULE_NOT_FOUND`**。
+//   ⇒ 而文档里多处把这些探针当成"可复跑"的实测依据引着
+//     （例：§4.6 引 `_probe-r113-permit-delivery.mjs`；§1.3.1 引 `_probe-env-whitelist.mjs`）。
+//
+//   > 一支"存在、有名字、被报告引用、而一跑就报模块找不到"的探针，
+//   > 与一支**从来没写**的探针，在"能不能复跑"这件事上是同一个东西 ——
+//   > 只不过前者的名字会让读者**以为**那个读数被复核过。
+//
+// ⚠️ 诚实边界（两条，都是**故意**的）：
+//   ① 只认**真的静态 import/export 语句**（行首 `import…from` / `export…from` /
+//      多行 import 的收尾 `} from`）。**不**扫注释里的样本 ——
+//      `_probe-importers.mjs` 与 `migrate-dsh-resolver.mjs` 的注释里**逐字引用**
+//      一个坏 import 当例子（那是在讲一个历史缺陷），把它算成问题就会
+//      **篡改那句注释的意思**（第一版判据正是这么错的，用例里钉住了）。
+//   ② 动态 `import('…')` 与运行时拼出来的路径**不在**扫描面内 ——
+//      那种形状的判据要执行代码，而"为了判断据能不能跑就去跑它"是另一个问题。
+const PROBES_DIR = 'scripts/probes'
+const PROBE_IMPORT_RE = /^[ \t]*(?:import|export)[^\n]*?\bfrom\s+['"](\.[^'"]+)['"]|^[ \t]*import\s+['"](\.[^'"]+)['"]|^[ \t]*\}\s*from\s+['"](\.[^'"]+)['"]/gm
+
+/** `scripts/probes/*.mjs` 里每条静态相对 import 是否解析得到。 */
+export function checkProbeImports({ dir = PROBES_DIR } = {}) {
+  const bad = []
+  let scanned = 0
+  let files = 0
+  let names = []
+  try { names = readdirSync(resolve(REPO, dir)) } catch { return { scanned: 0, files: 0, bad: [] } }
+  for (const n of names.sort()) {
+    if (!n.endsWith('.mjs')) continue
+    files++
+    let text = ''
+    try { text = readFileSync(resolve(REPO, dir, n), 'utf8') } catch { continue }
+    for (const m of text.matchAll(PROBE_IMPORT_RE)) {
+      const spec = m[1] ?? m[2] ?? m[3]
+      scanned++
+      if (existsSync(resolve(REPO, dir, spec))) continue
+      const line = text.slice(0, m.index).split('\n').length
+      const pointsAt = resolve(REPO, dir, spec).slice(REPO.length + 1).replace(/\\/g, '/')
+      bad.push(`${dir}/${n}:${line} 的 ${JSON.stringify(spec)} 解析不到（它指的是 ${pointsAt}）`)
+    }
+  }
+  return { scanned, files, bad: bad.sort() }
 }
 
 // ── C. 台账里的**坐标**（`file:line` 与提交哈希）─────────────────────────────
@@ -2180,6 +2236,38 @@ export const FACTS = Object.freeze([
       + '只有"抓到的路径**真的是一个模块**"才算问题',
     derive: (ctx) => ctx.manifestImpersonation().bad.join(' | '),
     expect: '', // 空串 = 没有一处冒充
+  }),
+
+  // ── D3. ★★★ 探针搬过家之后，相对 import 的深度还得对 ────────────────────
+  Object.freeze({
+    id: 'probe-relative-imports-resolve',
+    what: '`scripts/probes/` 里每条**静态**相对 import 都解析得到',
+    why: '★ 这是"可复跑"这句话的**第一层**（比 §5.10 那族更早的一层）：'
+      + '报告引一支探针当实测依据，前提是那支探针**跑得起来**。'
+      + '第 118 轮第十二轮把量具从 `scratch/` 收进 `scripts/probes/` 时，'
+      + '**相对 import 的深度没有跟着改** —— 住在 `scripts/` 时写的 `../product/…`，'
+      + '搬到下一层就变成 `scripts/product/…`。'
+      + '实测（2026-09-24）：**17 个文件 / 33 条**说明符指向不存在的路径，'
+      + '它们一跑就是 `ERR_MODULE_NOT_FOUND`；'
+      + '而文档里 §4.6 引 `_probe-r113-permit-delivery.mjs`、'
+      + '§1.3.1 引 `_probe-env-whitelist.mjs` —— 都是这一批。'
+      + '⇒ 那些"实测读数"当时**无法复核**，而报告读起来跟能复核的一样。'
+      + '★ 搬家当次**有**判据红（`census-generated-status.mjs[未完成]`，见跳过清单），'
+      + '所以那次搬家看起来被验证过了：**被验证的是另一件事**。'
+      + '⚠️ 只认真的静态 import/export 语句：注释里逐字引用的坏 import'
+      + '（`_probe-importers.mjs` 讲历史缺陷时那句 `from \'./context-retention.mjs\'`）'
+      + '**不算**问题 —— 第一版判据正是在这里错的，用例 ⑯c 钉住。',
+    source: '`scripts/probes/*.mjs` 的源码文本 × 静态 import/export 语句'
+      + '（行首 `import…from` / `export…from` / 多行 import 的收尾 `} from`）',
+    derive: (ctx) => {
+      const r = ctx.probeImports()
+      // ★ 扫描面自身的下限：一个"找不到任何 import"的判据与"全都对"是同一个读数。
+      if (r.scanned < 20) {
+        return `扫描面只找到 ${r.scanned} 条相对 import（下限 20）⇒ 这条判据可能没落在探针目录上`
+      }
+      return r.bad.join(' | ')
+    },
+    expect: '', // 空串 = 一条都没坏
   }),
 ])
 

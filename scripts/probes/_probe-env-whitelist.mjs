@@ -1,6 +1,6 @@
 // scripts/probes/_probe-env-whitelist.mjs —— spec 要求 RunRequest 带「环境变量白名单」，实测它在不在（**不提交**）
 import { readFileSync } from 'node:fs'
-import { validateRunRequest, RUN_REQUEST_REQUIRED } from '../runtime/contracts/run.mjs'
+import { validateRunRequest, RUN_REQUEST_REQUIRED } from '../../runtime/contracts/run.mjs'
 
 console.log('RUN_REQUEST_REQUIRED =', RUN_REQUEST_REQUIRED.length, '个字段')
 console.log('  含 env / envWhitelist ?', RUN_REQUEST_REQUIRED.some((f) => /env/i.test(f)))

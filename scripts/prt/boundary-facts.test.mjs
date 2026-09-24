@@ -31,6 +31,8 @@ import {
   FACTS, checkFacts, defaultContext, patchYmlRepresentedRows,
   scanCommitCitations, scanLineCitations, checkPinnedCitations,
   checkManifestImpersonation, tallyLedger, tallyUnreachable,
+  // ★★★ 第 118 轮第三十八轮：探针的**相对 import 深度**（"可复跑"的第一层）。
+  checkProbeImports,
   STATUS_DOC, LEDGER_DOC, PATCH_YML, REPO, HUB_TOKEN_ENV, WORKBENCH_TOKEN_ENV,
   HANDOVER_DOC, INTERVENTION_DOC, FINAL_REPORT_DOC,
   reportSectionRounds, roundOrderViolations, sectionFourBareCurrentReadings,
@@ -1913,4 +1915,66 @@ test('⑳c ★★★ 真仓库：这条判据的面不许是空的，且两条�
   })
   assert.deepEqual(idsOf(emptyPayload), ['source-comment-coordinate-symbol-surface-not-empty'],
     '面被抽空到 3 处而守卫没红 ⇒ 那条守卫是装饰')
+})
+
+// ── 第 118 轮第三十八轮：`scripts/probes/` 的相对 import 深度 ────────────────
+//
+//   真有那么一批：探针从 `scratch/` 收进 `scripts/probes/` 时，
+//   `../product/…` 这种写法的**深度没有跟着改** ⇒ 一跑就 `ERR_MODULE_NOT_FOUND`，
+//   而文档把它们当"可复跑"引着。这一族判据补的是"跑得起来"的第一层。
+test('⑰ ★★ 真仓库：`scripts/probes/` 里每条静态相对 import 都解析得到', () => {
+  const r = checkProbeImports()
+  // ★ 先证明扫描面落在目录上：0 条与"没扫到"是同一个读数
+  assert.ok(r.files >= 50, `只扫到 ${r.files} 个探针文件（应 >= 50）⇒ 扫描面可能错了`)
+  assert.ok(r.scanned >= 20, `只找到 ${r.scanned} 条相对 import（应 >= 20）⇒ 扫描面可能错了`)
+  assert.deepEqual(r.bad, [],
+    `有 ${r.bad.length} 条相对 import 解析不到（这些探针**跑不起来**）：\n`
+    + r.bad.map((b) => `    ${b}`).join('\n'))
+})
+
+test('⑰b ★ 反面控制：指向不存在文件的相对 import 必须被报出来', () => {
+  const dir = 'scratch/__probe-imports-b'
+  const abs = resolve(REPO, dir)
+  mkdirSync(abs, { recursive: true })
+  try {
+    writeFileSync(resolve(abs, 'p.mjs'), [
+      "import { x } from '../product/launcher/allowlist.mjs'",
+      'console.log(x)',
+    ].join('\n'))
+    const r = checkProbeImports({ dir })
+    assert.equal(r.scanned, 1, `扫描面不对：${JSON.stringify(r)}`)
+    assert.equal(r.bad.length, 1, `没报出坏 import：${JSON.stringify(r.bad)}`)
+    assert.match(r.bad[0], /p\.mjs:1/, '报出来的位置不对')
+    // ★ 正对照：写对了就不许报
+    writeFileSync(resolve(abs, 'p.mjs'), [
+      "import { x } from '../../product/launcher/allowlist.mjs'",
+      'console.log(x)',
+    ].join('\n'))
+    assert.deepEqual(checkProbeImports({ dir }).bad, [], '写对了还报 ⇒ 这条判据是假的')
+  } finally {
+    rmSync(abs, { recursive: true, force: true })
+  }
+})
+
+test('⑰c ★★ 注释里**引用**一个坏 import 不算问题（第一版判据正是在这里错的）', () => {
+  const dir = 'scratch/__probe-imports-c'
+  const abs = resolve(REPO, dir)
+  mkdirSync(abs, { recursive: true })
+  try {
+    // `_probe-importers.mjs` / `migrate-dsh-resolver.mjs` 的注释就是这样：
+    // 它们**逐字引用**一个坏 import 当例子，讲的是那个例子背后的历史缺陷。
+    writeFileSync(resolve(abs, 'q.mjs'), [
+      '// 实测：它按文件名匹配，于是 `from \'./context-retention.mjs\'` 被算成了',
+      '// `retention.mjs` 的 import 者（子串命中）。',
+      "import { readFileSync } from 'node:fs'",
+      'console.log(readFileSync)',
+    ].join('\n'))
+    const r = checkProbeImports({ dir })
+    assert.deepEqual(r.bad, [],
+      '把注释里的样本当成真 import 了 ⇒ 判据会**篡改那句注释的意思**\n'
+      + r.bad.map((b) => `    ${b}`).join('\n'))
+    assert.equal(r.scanned, 0, '注释里的样本不该进扫描面')
+  } finally {
+    rmSync(abs, { recursive: true, force: true })
+  }
 })

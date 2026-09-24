@@ -8,7 +8,7 @@
  * 探针说"从真实入口顺着 import 边走得到它"。那就把那条路**打印出来**。
  * 若打印不出路，说明"可达"是探针的假象（例如把注释里的路径当成了边）。
  */
-import { collectFiles, buildGraph, findEntries, reachableFrom } from '../scripts/prt/reachability.mjs'
+import { collectFiles, buildGraph, findEntries, reachableFrom } from '../../scripts/prt/reachability.mjs'
 import { readFileSync } from 'node:fs'
 
 const TARGETS = [

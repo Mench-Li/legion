@@ -904,3 +904,77 @@ test('⑲ ★★ YAML 里的行**恰好**是声明里可渲染的那些，且都
     assert.ok(m.rows.includes(id), `${id} 被渲染进了 YAML，却不在冻结清单里`)
   }
 })
+
+
+// ---------------------------------------------------------------------------
+// ⑳ §5 第 4 条**口径**（W-4，2026-09-24）：win32 `sandbox-enforcement` 的「完整 vs 部分」
+//
+//   ★ 口径**不是**"自检通过或不通过"，而是**八条拒绝理由的闭集**（分四组）：
+//
+//     · 服务面（沙箱在不在、肯不肯给管制）：①未挂载 ②confine 抛出（fail closed）③返回非对象
+//     · 管制强度：④未报告 enforcement ⑤enforcement 不是 `full`（`partial`）
+//     · 包装证据：⑥未返回 argv 数组 ⑦原样返回输入 argv
+//     · 拒绝可识别：⑧denialSignatures 为空
+//
+//   ★ 这一版**订正了我自己第一版的错**：我第一版按"四项"写这条判据
+//     （服务 / full / 包装 / 拒绝签名），而**闭集断言当场抓出另外四条** ——
+//     我读代码时把"几个 if"记成了四项，实际有八条 `reasons.push`。
+//     这正是闭集断言存在的理由：一个"把当时读到的几条写成用例"的口径，
+//     与一个"口径是闭的"的口径，在前者的读数上是同一个绿。
+//
+//   ★ 逐项归因：八个反例**每一个**都必须只报一条理由（两项一起报就说明耦合了，
+//     而耦合之后"到底哪里坏了"就没有答案）。
+// ---------------------------------------------------------------------------
+
+test('⑳ ★★★ §5 第 4 条口径：八条拒绝理由**逐条可达**、只报一条，且口径是**闭集**', async () => {
+  const good = { confine: (a) => ({ argv: ['wrap', ...a], enforcement: 'full', denialSignatures: ['denied'] }) }
+  const ok = await probeSandbox(good)
+  assert.equal(ok.effective, true, `全部满足时应当生效，实得：${ok.reasons.join('；')}`)
+  assert.deepEqual([...ok.reasons], [])
+  assert.equal(ok.enforcement, 'full')
+
+  const breakers = [
+    ['①沙箱服务没挂上', {}, /未挂载沙箱服务/],
+    ['②confine 抛出（fail closed）', { confine: () => { throw new Error('probe-denied') } }, /拒绝为探针提供管制/],
+    ['③confine 返回非对象', { confine: () => null }, /未返回对象/],
+    ['④未报告 enforcement', { confine: (a) => ({ argv: ['w', ...a], denialSignatures: ['d'] }) }, /未报告 enforcement/],
+    ['⑤enforcement 不是 full（partial）', { confine: (a) => ({ argv: ['w', ...a], enforcement: 'partial', denialSignatures: ['d'] }) }, /partial/],
+    ['⑥未返回管制后的 argv 数组', { confine: () => ({ enforcement: 'full', denialSignatures: ['d'] }) }, /未返回管制后的 argv/],
+    ['⑦argv 原样返回（没做包装）', { confine: (a) => ({ argv: [...a], enforcement: 'full', denialSignatures: ['d'] }) }, /原样返回/],
+    ['⑧denialSignatures 为空', { confine: (a) => ({ argv: ['w', ...a], enforcement: 'full', denialSignatures: [] }) }, /denialSignatures/],
+  ]
+  assert.equal(breakers.length, 8,
+    '口径就是这八条 —— 要加第九条，先改 §5 第 4 条的口径表（§5.29）')
+
+  const observed = [ok.reasons.join('')]
+  for (const [name, port, re] of breakers) {
+    const r = await probeSandbox(port)
+    assert.equal(r.effective, false, `${name} ⇒ 必须判不生效`)
+    assert.equal(r.reasons.length, 1,
+      `${name} ⇒ 理由应当**只**有一条（逐项归因）：${JSON.stringify(r.reasons)}`)
+    assert.match(r.reasons[0], re, `${name} ⇒ 理由指向了别处：${r.reasons[0]}`)
+    observed.push(r.reasons.join(''))
+  }
+
+  // ★ 闭集：源码里每一条拒绝理由的首段字面量，都必须被上面九种情形真的触发过。
+  //   **两种写法都要覆盖**：`reasons.push(...)` 与早退分支里的 `reasons: [...]` ——
+  //   只盯前一种时，我这个判据自己会把三条早退理由当成"不存在"（第一版就栽在这里：5 ≠ 8）。
+  const src = readFileSync(join(HERE, 'selfcheck.mjs'), 'utf8')
+  //   ★ 只看 `probeSandbox` 体内：`startupSelfCheck` 也有 `reasons:`，混进来就会虚高。
+  const body = src.slice(src.indexOf('export async function probeSandbox'),
+    src.indexOf('export async function startupSelfCheck'))
+  assert.ok(body.length > 0, '取不到 probeSandbox 的函数体')
+  const heads = (re) => [...body.matchAll(re)].map((m) => m[1].replace(/\\+$/, '').split('${')[0])
+  const pushed = [
+    ...heads(/reasons\.push\(\s*\n?\s*['`]([^'`]{4,40})/g),
+    ...heads(/reasons:\s*\[\s*\n?\s*['`]([^'`]{4,40})/g),
+  ]
+  assert.equal(pushed.length, 8,
+    `selfcheck.mjs 里有 ${pushed.length} 条 reasons.push，而口径表是八条 —— `
+    + '多一条少一条都要先改 §5 第 4 条的口径表（§5.29）并同时改这条判据')
+  for (const head of pushed) {
+    assert.ok(observed.some((o) => o.includes(head)),
+      `selfcheck.mjs 里那条「${head}…」没有被任何一种反例触发过 —— `
+      + '要么它是第九条判据，要么它已经死掉了')
+  }
+})

@@ -1,4 +1,4 @@
-# PRT 任务进度表（全 146 项；含业主 2026-09-24 裁决新增的 PRT-1007）
+# PRT 任务进度表（全 146 项；含业主 2026-09-24 裁决新增的 PRT-1007 ★★ 2026-09-24 补：**片 2 已交付** —— `childLogFile` + `statusFileNames`（多空间/子实例的**文件命名**族）逐字搬出 `plugins/src/index.ts` ⇒ 新模块 `plugins/src/spacePaths.ts`；判据 `scripts/probes/probe-slice-verbatim.mjs`现已登记**两片**、四问全过。★ 与片 1 同一纪律：回引写在**被删块的原位置**（写文件头会让其下行号位移，改掉"指向本文件的行号引文"的登记读数）。逐格读数见台账，此处不复制计数。 |
 
 > **本文件是「PRT 实施到哪一步」的唯一入口。** spec
 > [`2026-09-11-legion-product-runtime-design.md`](../specs/2026-09-11-legion-product-runtime-design.md)

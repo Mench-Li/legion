@@ -20,7 +20,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { spawn } from 'node:child_process'
-import { createHash } from 'node:crypto'
 import { appendFileSync, cpSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, readdirSync, statSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { homedir } from 'node:os'
@@ -49,7 +48,29 @@ import {
 } from './experienceRecall.js'
 // 阶段 3 PRT-315：领域类型与合入调解各自成模块（第 1 个切片，见 ./mediation.ts 文件头）。
 export type { StageDef, Task } from './types.js'
-import type { StageDef, Task } from './types.js'
+import type { DiscussionDef, StageDef, Task } from './types.js'
+// ★ PRT-1007「编排提取」片 1：岗位文档契约纯函数已搬去 `./docContract.js`，
+//   下面**原样再导出**同名符号 ⇒ 公开面（`lib/index.js`）零差异，消费者一条都不用改。
+//   六个函数体逐字未动；`DiscussionDef` 同时搬进 `types.ts`（它成了跨模块类型）。
+import {
+  stageContractDocs,
+  resolveStageDocPaths,
+  resolveStageDocPathsWithDocSync,
+  fileDigest,
+  resolveDiscussion,
+  stagesFromHubPayload,
+} from './docContract.js'
+// 再导出**带 `from`**：读者不必往上翻就知道这些名字从哪来。
+// （裸 `export { … }` 靠上一个 import 也能工作，但"这个符号的出处"就变成了要推断的事；
+//  `probe-slice-verbatim.mjs` 的 ③ 把"带 `from` 的再导出"作为契约固定下来。）
+export {
+  stageContractDocs,
+  resolveStageDocPaths,
+  resolveStageDocPathsWithDocSync,
+  fileDigest,
+  resolveDiscussion,
+  stagesFromHubPayload,
+} from './docContract.js'
 import { createMergeMediation } from './mediation.js'
 import { createReclamation, type BootReconcileState } from './reclamation.js'
 import { createStateMachine } from './stateMachine.js'
@@ -178,11 +199,8 @@ interface GoalCtx {
 }
 
 
-/** 需求讨论配置：哪些角色参与群聊 + 最多讨论几轮。 */
-interface DiscussionDef {
-  maxRounds: number
-  roles: string[]
-}
+/** 需求讨论配置：哪些角色参与群聊 + 最多讨论几轮。
+ *  ★ PRT-1007 片 1 已搬去 `types.ts`（`docContract.ts` 要按它定签名，两边得共用同一个类型）。 */
 
 interface PipelineDef {
   name: string
@@ -365,92 +383,11 @@ function runGit(repoRoot: string, args: string[]): Promise<{ code: number; out: 
   })
 }
 
-// ── 岗位文档契约纯函数（R-1/S1：roles.json stage.docs 数据模型的解析面）────────────────────
-// 只读解析、无副作用，供守护结算自动登记（S2）与单测直接 import 断言（AC-R1-1/AC-R1-5）。
-
-/** 某 stage 的契约文档相对路径模板：docs 数组字段优先（合法字符串项），缺省回退既有 artifact 单值语义（researcher 等价）；未知角色/无 docs/空数组一律返回空数组（不报错，前置兼容）。 */
-export function stageContractDocs(stage: { docs?: unknown; artifact?: string } | null | undefined): string[] {
-  if (!stage) return []
-  if (Array.isArray(stage.docs)) {
-    const list = stage.docs
-      .filter((x): x is string => typeof x === 'string')
-      .map(x => x.trim().replace(/\\/g, '/').replace(/^\.\//, ''))
-      .filter(x => x.length > 0)
-    if (list.length > 0) return list
-  }
-  const artifact = typeof stage.artifact === 'string' ? stage.artifact.trim() : ''
-  return artifact.length > 0 ? [artifact.replace(/\\/g, '/').replace(/^\.\//, '')] : []
-}
-
-/** 契约模板按任务展开：把 {taskId} 占位替换为真实任务 id（reviewer 等动态命名文档），返回规范化相对路径。 */
-export function resolveStageDocPaths(stage: { docs?: unknown; artifact?: string } | null | undefined, taskId: string): string[] {
-  return stageContractDocs(stage).map(p => p.replace(/\{taskId\}/g, taskId).replace(/\\/g, '/').replace(/^\.\//, ''))
-}
-
-/** R-4/D2（RC-2 修复，T-117 实测）：docSync（用户可见行为变更）任务的契约路径 = 岗位 stage 契约 + docs/FEATURES.md + README.md。
- *  纯函数供 registerContractDocs（登记/判缺）与结算门禁（contractPaths 非空判定）共用——hub 侧 docSync 声明列上线前
- *  这三处消费点 t.docSync 恒 undefined（断言 H-1 未满足）；本函数把「docSync=true → 追加功能手册+README」固化为可测单元。
- *  非 docSync 任务原样返回（不改岗位既有契约）。 */
-export function resolveStageDocPathsWithDocSync(stage: { docs?: unknown; artifact?: string } | null | undefined, taskId: string, docSync: boolean | null | undefined): string[] {
-  const paths = resolveStageDocPaths(stage, taskId)
-  if (docSync === true) {
-    for (const p of ['docs/FEATURES.md', 'README.md']) if (!paths.includes(p)) paths.push(p)
-  }
-  return paths
-}
-
-/** 文件内容 sha256（契约登记幂等比对用：同 path 同字节不重复登记）。 */
-export function fileDigest(file: string): string {
-  return createHash('sha256').update(readFileSync(file)).digest('hex')
-}
-
-/**
- * SP-P0：hub 空间流水线载荷（GET /api/pipeline 的 stages）→ 守护消费的 StageDef[]。
- *
- * 纯函数、防御式：坏数据整条丢弃（返回空数组即"该空间未配置数据面流水线"→ 回退部署面 rolesFile），
- * 绝不因远端配置缺陷让守护崩或进入半更新态。只接受守护真正消费的字段：
- *   role（空则丢）、label（缺省回落 role）、prompt、next（空串 → null = 末环）、gate、artifact、docs。
- */
-/**
- * SP-P0：解析「需求讨论群聊」配置来源。
- *
- * 数据面（`space_stages` / `POST /api/pipeline`）目前**不承载** `discussion`（属 SP-P1），
- * 所以当活动流水线来自 hub 且未带 discussion 时，必须回落到部署面文件的配置——
- * 否则「切到 hub 来源」会让已在文件里配好讨论的实例**静默失去讨论功能**（P0 的兼容底线：
- * 已有空间行为零差异）。hub 若将来带上 discussion，则以数据面为准。
- */
-export function resolveDiscussion(
-  active: { discussion?: DiscussionDef } | null,
-  filePipeline: { discussion?: DiscussionDef } | null,
-): DiscussionDef | undefined {
-  return active?.discussion ?? filePipeline?.discussion
-}
-
-export function stagesFromHubPayload(raw: unknown): StageDef[] {
-  if (!Array.isArray(raw)) return []
-  const out: StageDef[] = []
-  for (const item of raw) {
-    if (item === null || typeof item !== 'object') continue
-    const s = item as Record<string, unknown>
-    const role = typeof s.role === 'string' ? s.role.trim() : ''
-    if (role === '') continue
-    const label = typeof s.label === 'string' && s.label.trim() !== '' ? s.label.trim() : role
-    const docs = Array.isArray(s.docs)
-      ? s.docs.filter((d): d is string => typeof d === 'string' && d.trim() !== '').map(d => d.trim())
-      : undefined
-    const artifact = typeof s.artifact === 'string' && s.artifact.trim() !== '' ? s.artifact.trim() : undefined
-    out.push({
-      role,
-      label,
-      prompt: typeof s.prompt === 'string' ? s.prompt : '',
-      next: typeof s.next === 'string' && s.next.trim() !== '' ? s.next.trim() : null,
-      gate: s.gate === true,
-      ...(artifact !== undefined ? { artifact } : {}),
-      ...(docs !== undefined && docs.length > 0 ? { docs } : {}),
-    })
-  }
-  return out
-}
+// ── 岗位文档契约纯函数（R-1/S1）★ PRT-1007 片 1：已整体搬去 `./docContract.js` ──────────────
+// 本处**只留这条路标**，不再留实现。六个函数（`stageContractDocs` / `resolveStageDocPaths` /
+// `resolveStageDocPathsWithDocSync` / `fileDigest` / `resolveDiscussion` / `stagesFromHubPayload`）
+// 由上面的 `from './docContract.js'` **原样再导出** ⇒ `lib/index.js` 的公开面对消费者零差异。
+// 为什么第一刀挑它们、以及"行为零变化"怎么证明，写在 `plugins/src/docContract.ts` 的文件头。
 
 export function apply(ctx: AppContext, config: Config): void {
   // SP-P1：`scopes` 非 'off' → 本实例是**多空间监督者**（自己不做派工，只为每个空间挂一个子实例）；

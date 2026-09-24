@@ -86,3 +86,12 @@ export interface StageDef {
    *  缺省回退 artifact 单值语义。守护在 done 结算时按此逐条自动登记到任务 artifacts，详情视图据此直达预览。 */
   docs?: string[]
 }
+
+/** 需求讨论配置：哪些角色参与群聊 + 最多讨论几轮。
+ *  ★ PRT-1007 片 1 搬来这里（原 `index.ts:182` 的私有 interface）：`docContract.ts` 的
+ *  `resolveDiscussion` 要按它定签名，而"从 index.ts `import type`"会让两个模块多一条
+ *  **互相**依赖的边 —— 理由与 `types.ts:10-23` 里那三条路是同一套。 */
+export interface DiscussionDef {
+  maxRounds: number
+  roles: string[]
+}

@@ -129,6 +129,7 @@ export function defaultContext() {
     //   起因见 `checkProbeImports()` 的注释：一整批探针在"搬家"之后
     //   **一跑就 `ERR_MODULE_NOT_FOUND`**，而文档把它们当"可复跑"的证据引着。
     probeImports: () => checkProbeImports(),
+    sliceVerbatim: () => checkSliceVerbatim(),
     // ── E. 交接报告 §二 自称"机器读数，可复跑"的那张表（第 26 轮）────────────
     ledgerTallies: () => tallyLedger(doc(LEDGER_DOC)),
     trackedTestCount: () => trackedTestFiles().length,
@@ -517,6 +518,17 @@ export function checkManifestImpersonation({ dir = CRITERIA_DIR } = {}) {
 //      那种形状的判据要执行代码，而"为了判断据能不能跑就去跑它"是另一个问题。
 const PROBES_DIR = 'scripts/probes'
 const PROBE_IMPORT_RE = /^[ \t]*(?:import|export)[^\n]*?\bfrom\s+['"](\.[^'"]+)['"]|^[ \t]*import\s+['"](\.[^'"]+)['"]|^[ \t]*\}\s*from\s+['"](\.[^'"]+)['"]/gm
+
+// ── C0b. ★★★ PRT-1007「编排提取」的**逐字对拍**（第 118 轮第三十九轮）──────────
+//
+// 判据的实现住在量具里（`scripts/probes/probe-slice-verbatim.mjs`）——
+// 因为它要被判的东西是**一次搬家**：搬过之后，"新位置那份与旧位置那份逐字相同"
+// 只能由那份登记表 + 两份源码文本比出来。门禁在这里只做一件事：**把它接上**。
+//
+// 为什么非接不可：`docs/review/PRT-PRE-REFACTOR-CANDIDATES.md:140` 给的入口叫
+// 「**一个切片一次对拍**」，而"对拍"在本仓此前**没有量具** ——
+// 一次搬家只要编译得过、测试也过，就没人会问"旧位置是不是还留着一份实现"。
+import { checkSlices as checkSliceVerbatim } from '../probes/probe-slice-verbatim.mjs'
 
 /** `scripts/probes/*.mjs` 里每条静态相对 import 是否解析得到。 */
 export function checkProbeImports({ dir = PROBES_DIR } = {}) {
@@ -2268,6 +2280,28 @@ export const FACTS = Object.freeze([
       return r.bad.join(' | ')
     },
     expect: '', // 空串 = 一条都没坏
+  }),
+
+  // ── D4. ★★★ PRT-1007 每一步搬家的**逐字对拍** ────────────────────────────
+  Object.freeze({
+    id: 'slice-migration-verbatim',
+    what: 'PRT-1007「编排提取」片登记表里每一片都过四问（逐字 / 不留实现 / 公开面再导出 / 新模块存在）',
+    why: '★ `docs/review/PRT-PRE-REFACTOR-CANDIDATES.md:140` 给的入口是「**一个切片一次对拍**」，'
+      + '而"对拍"在本仓此前没有量具。一次搬家最危险的失效不是"编译不过"（那会红），而是'
+      + '**旧位置还留着一份实现**、或**新那份被顺手改了两个字** —— 两者都能通过构建与测试，'
+      + '而"行为零变化"这句话从此没有依据；等到两份各自漂移，表现出来是'
+      + '"改了一处、另一处没动"，不报错。'
+      + '★ 业主 2026-09-24 裁决「逐片推进 + 编排提取另行立项」之后，这条判据是那个项目'
+      + '**每一片都要过的那道门**（片登记表加一行即可，量具本身不用改）。',
+    source: '`scripts/probes/probe-slice-verbatim.mjs` 的片登记表 × `git show <片>.from:<旧文件>` 与工作树里的新旧源码文本',
+    derive: (ctx) => {
+      const r = ctx.sliceVerbatim()
+      // ★ 扫描面下限：登记表空了、与"每片都对"是同一个读数。
+      if (r.slices.length === 0) return '片登记表是空的（下限 1 片）⇒ 这条判据可能没有落在登记表上'
+      const bad = r.slices.filter((s) => !s.ok)
+      return bad.map((s) => `${s.id}: ${s.problems.join('；')}`).join(' | ')
+    },
+    expect: '', // 空串 = 每片都过四问
   }),
 ])
 

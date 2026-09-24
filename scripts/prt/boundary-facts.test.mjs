@@ -44,6 +44,7 @@ import {
   clearBareCoordinateSymbolsMemo,
 } from './boundary-facts.mjs'
 import { checkRepo, clearCheckRepoMemo } from './design-boundaries.mjs'
+import { checkSlices } from '../probes/probe-slice-verbatim.mjs'
 import { LEDGER_STATUS_MARKS, STATUS_MARKS, ledgerTaskRow } from './progress-check.mjs'
 import { matrixItems, MATRIX_PATH } from './reachability.mjs'
 
@@ -856,7 +857,7 @@ test('⑭a 五条新事实都真的参与了比对（不许有一条静默不查
 })
 
 test('⑭b ★★ 回归：台账状态**不许**按固定下标取（我第一版写死 `cells[2]`）', () => {
-  // 真实台账：145 = 140 ✅ / 1 🟡 / 4 ⏸ / 0 ⬜
+  // 真实台账：146 = 141 ✅ / 1 🟡 / 4 ⏸ / 0 ⬜（★ 2026-09-24：业主裁决新增 PRT-1007 ⇒ +1 行 / +1 🟡）
   // ★ 2026-09-20：`PRT-316` 由 ⬜ 转 🟡（切片 1 落地）。
   //   ★★★ 第 44 轮更正：这里**曾经**断言 `{ total: 144, ... }` 并附一句
   //   "`total` **不含 🟡**，所以它减 1 而不是不变——而这正是本用例该钉住的东西"。
@@ -874,7 +875,7 @@ test('⑭b ★★ 回归：台账状态**不许**按固定下标取（我第一�
   //   「140 / **1** / 0 / 4 / **145**」逐字对齐）。
   //
   // ★★★ 2026-09-21 第 113 轮：`PRT-316` 由 🟡 转 **✅**（`2967119`，08:43:35）
-  //   ⇒ 真值变成 `{ total:145, done:141, partial:0, paused:4, todo:0 }`。
+  //   ⇒ 真值变成 `{ total:146, done:141, partial:1, paused:4, todo:0 }`（PRT-1007 立项后 +1）。
   //   ★ 这一行与 `ledger-evidence.test.mjs` ⑩、以及交付物里那几处**现行分档抄写**
   //     是**同一根因的四个受害者**：台账动了，而**四处**期望都没跟着动。
   //
@@ -882,8 +883,8 @@ test('⑭b ★★ 回归：台账状态**不许**按固定下标取（我第一�
   //   > 在台账不动的时候是同一个东西——
   //   > 只不过前者会在台账动的那一天**同时**红在四个看起来无关的地方。
   const real = tallyLedger(defaultContext().doc(LEDGER_DOC))
-  assert.deepEqual(real, { total: 145, done: 141, partial: 0, paused: 4, todo: 0 },
-    `真实台账实算 ${JSON.stringify(real)}，与 145/141/0/4/0 不符`)
+  assert.deepEqual(real, { total: 146, done: 141, partial: 1, paused: 4, todo: 0 },
+    `真实台账实算 ${JSON.stringify(real)}，与 146/141/1/4/0 不符`)
 
   // ★ 反向控制：状态列**不在**第 3 格时也必须数得对。
   //   写死 `cells[2]` 的版本在这种表上会数出别的分布——
@@ -1511,7 +1512,7 @@ const TALLY_LIVE = [
   //   它是另一个会话为收口 PRT-316 加的，而**没有人登记它** ⇒ 本判据报"有 1 处没有登记"。
   //   按本判据自己的指示（"现行就核值"）登记在这里——它的内容确实是现行值。
   { doc: TALLY_DOCS[1], starts: '★ 真值（第 111 轮实测）：', what: '交接报告 §一 真值行（第 113 轮登记）' },
-  { doc: TALLY_DOCS[1], starts: '| 台账 | **145 行 =', what: '交接报告 §二 最终读数' },
+  { doc: TALLY_DOCS[1], starts: '| 台账 | **146 行 =', what: '交接报告 §二 最终读数' },
   { doc: TALLY_DOCS[2], starts: '> 台账 `docs/', what: '人工清单抬头' },
 ]
 const TALLY_FROZEN = [
@@ -1724,7 +1725,15 @@ test('㉓ ★★★★★ 源码注释里的「原文」引用：引文必须落
     + r.broken.join('\n'))
 
   // ── ③ 纯判定函数：**正反两个方向都钉住**（这才是"判据咬不咬得住"的那一半）
-  const lines = ['', '// 前言', '// plugins/src/index.ts:1827 现场注释原文：「subagent 可能挂死且 run.result 永不结算', '// 收尾']
+  // ★★ PRT-1007 片 1 订正一处**判据的误报**：这一行的 `路径:行` 是**样本数据**，
+  //    而它此前照抄了一条**真**坐标（`plugins/src/index.ts:1827`）。
+  //    ⇒ `index.ts` 一搬家（本片净 −66 行），这条**假引文**就跟着坏，
+  //      而 `source-original-citations-on-line` 会把**测试夹具**当成一条真引用报红。
+  //    ⇒ 样本改用**解析不到**的路径：扫描器把它记进 `unresolved`（如实记、不判坏），
+  //      而 `originalQuoteOnLine` 是纯函数，路径对它没有任何意义。
+  //    ⚠️ 形状值得记住：**判据的样本数据被当成了判据的对象** ——
+  //      夹具长得越像真引用，它就越会在某次无关改动里把门禁弄红（或更糟：把红洗绿）。
+  const lines = ['', '// 前言', '// example/nowhere.ts:3 现场注释原文：「subagent 可能挂死且 run.result 永不结算', '// 收尾']
   const quote = 'subagent 可能挂死且 run.result 永不结算'
   assert.equal(originalQuoteOnLine(lines, 3, quote), true, '引文就在第 3 行，却判成不在 ⇒ 判据**漏判**（最坏的一种：它永远绿）')
   assert.equal(originalQuoteOnLine(lines, 2, quote), false, '引文不在第 2 行，却判成在 ⇒ 判据**误判**（会逼人改一条对的引用）')
@@ -1977,4 +1986,50 @@ test('⑰c ★★ 注释里**引用**一个坏 import 不算问题（第一版�
   } finally {
     rmSync(abs, { recursive: true, force: true })
   }
+})
+
+// ── 第 118 轮第三十九轮：PRT-1007「编排提取」的**逐字对拍** ──────────────────
+//
+//   这条判据的对象是**一次搬家**：搬过之后，"新位置那份与旧位置那份逐字相同"
+//   与"旧位置不再留实现"两件事，必须有人能机械地判 —— 否则一次搬家
+//   只要编译得过、测试也过，就没人会问后面那件事。
+test('⑱ ★★ 真仓库：片登记表里每一片都过四问', () => {
+  const r = checkSlices()
+  assert.ok(r.slices.length >= 1, '片登记表是空的 ⇒ 这条判据没有对象')
+  for (const s of r.slices) {
+    assert.ok(s.ok, `${s.id} 没通过：\n` + s.problems.map((p) => `    ${p}`).join('\n'))
+  }
+})
+
+test('⑱b ★ 反面控制：新模块不存在 ⇒ 必须报 ④', () => {
+  const r = checkSlices({
+    slices: [{
+      id: 'fixture/missing-target', title: '目标不存在', from: 'HEAD',
+      fromFile: 'plugins/src/index.ts', toFile: 'plugins/src/__不存在__.ts', names: ['hashStr'],
+    }],
+  })
+  assert.equal(r.ok, false, '新模块不存在却判过 ⇒ 这条判据不会咬')
+  assert.match(r.slices[0].problems.join(' | '), /④/, '报的不是 ④（登记问题）')
+})
+
+test('⑱c ★ 反面控制：符号在旧位置找得到、在新模块找不到 ⇒ 必须报 ①', () => {
+  const r = checkSlices({
+    slices: [{
+      id: 'fixture/half-moved', title: '只搬了一半', from: 'HEAD',
+      fromFile: 'plugins/src/index.ts', toFile: 'plugins/src/docContract.ts', names: ['hashStr'],
+    }],
+  })
+  assert.equal(r.ok, false, '新模块里没有这个符号却判过 ⇒ 判据只看了"旧位置有"')
+  assert.match(r.slices[0].problems.join(' | '), /新模块（plugins\/src\/docContract\.ts）里找不到 hashStr/)
+})
+
+test('⑱d ★★ 反面控制：旧位置**还留着实现** ⇒ 必须报 ②（两份实现各自漂移就是从这里开始）', () => {
+  const r = checkSlices({
+    slices: [{
+      id: 'fixture/left-behind', title: '旧位置没清', from: 'HEAD',
+      fromFile: 'plugins/src/index.ts', toFile: 'plugins/src/index.ts', names: ['hashStr'],
+    }],
+  })
+  assert.equal(r.ok, false, '旧位置还留着实现却判过 ⇒ ② 是装饰')
+  assert.match(r.slices[0].problems.join(' | '), /②/, '没报 ②（旧位置留了实现）')
 })

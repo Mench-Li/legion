@@ -160,8 +160,8 @@ test('③ 真实的进度表当前是一致的（这个自检不是装饰）', a
   assert.deepEqual(r.problems, [],
     `进度表的派生数字与明细不一致：\n${r.problems.map((p) => `  ✖ [${p.kind}] ${p.phase ?? ''} ${p.message}`).join('\n')}\n` +
     '修法：node scripts/prt/progress-check.mjs --fix')
-  // 145 是 spec §12 的权威任务总数；各阶段之和必须等于它
-  assert.equal(r.phases.reduce((a, p) => a + p.tally.total, 0), 145)
+  // 145 是 spec §12 的权威任务总数；★ 2026-09-24 业主裁决新增 PRT-1007（不在 §12 的原始清单里）⇒ 台账与各阶段之和是 146。
+  assert.equal(r.phases.reduce((a, p) => a + p.tally.total, 0), 146)
 })
 
 test('④ 解析器认得 2.5 这种小数阶段号', () => {
@@ -247,7 +247,7 @@ test('⑥ ★★★ 对照表引用的每个 PRT 号都必须在台账里真实�
   const status = readFileSync(p.status, 'utf8')
   const ledger = readFileSync(p.ledger, 'utf8')
   const inLedger = new Set([...ledger.matchAll(/^\|\s*(PRT-\d+)/gm)].map((m) => m[1]))
-  assert.equal(inLedger.size, 145, `台账行数变了（解析到 ${inLedger.size} 行），这条判据的基准要一起复核`)
+  assert.equal(inLedger.size, 146, `台账行数变了（解析到 ${inLedger.size} 行），这条判据的基准要一起复核`)
   // 引用一个**不存在**的任务号是最坏的一种：读者会去找那一条，
   // 找不到时会以为是自己看错了，而不是"这份文档编了一个号"。
   const cited = [...new Set([...status.matchAll(/PRT-(\d+)/g)].map((m) => `PRT-${m[1]}`))]

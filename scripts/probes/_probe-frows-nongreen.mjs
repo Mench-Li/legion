@@ -30,6 +30,8 @@ const argOf = (name, dflt) => {
 }
 const ONLY = argOf('--id', null)
 const TAIL = Number(argOf('--tail', '700'))
+const ALL = argv.includes('--all')
+const SWEEP = argv.includes('--sweep')
 
 const lines = readFileSync(STATUS_DOC, 'utf8').split('\n')
 const rows = []
@@ -48,7 +50,27 @@ const FINAL = (s) => {
   return m === null ? (s.match(/✅|🟡|⬜|⏸/) ?? ['?'])[0] : m[1]
 }
 
-const nonGreen = rows.filter((r) => FINAL(r.status) !== '✅' && (ONLY === null || r.id === ONLY))
+const nonGreen = rows.filter((r) => (ALL ? true : FINAL(r.status) !== '✅') && (ONLY === null || r.id === ONLY))
+
+/** 一行引用到的路径（`a/b/c.mjs` 形状）存在性。 */
+const pathsOf = (r) => [...new Set((r.cells.join(' ').match(/[a-z][a-z0-9-]*(?:\/[a-z0-9._-]+)+\.(?:mjs|md)/g) ?? []))]
+
+// ── `--sweep`：**只**给一张全表读数（24 行逐行：状态、引用路径数、缺失数），不打印正文。
+//    为什么要有这一档：✅ 的行也可能**过度声称** —— 而"引用的落点还在不在"是唯一
+//    不用读几千字就能机器核下去的那一层。第四十二轮就是靠它把 9 条非 ✅ 扫完的。
+if (SWEEP) {
+  let bad = 0
+  for (const r of rows) {
+    const ps = pathsOf(r)
+    const miss = ps.filter((p) => !existsSync(path.join(ROOT, p)))
+    if (miss.length > 0) bad += 1
+    console.log(`  ${r.id}  ${FINAL(r.status)}  引用 ${String(ps.length).padStart(2)} 个`
+      + `  缺失 ${miss.length}${miss.length ? '  ★ ' + miss.slice(0, 3).join(' / ') : ''}`)
+  }
+  console.log(`\n  ${rows.length} 行；引用路径有缺失的行 ${bad} 个`)
+  process.exit(bad === 0 ? 0 : 1)
+}
+
 console.log(`权威表 ${rows.length} 行；非 ✅ 的 ${rows.length - rows.filter((r) => FINAL(r.status) === '✅').length} 行`
   + `（本次打印 ${nonGreen.length} 行；格尾取 ${TAIL} 字）\n`)
 

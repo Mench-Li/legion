@@ -35,7 +35,7 @@ import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { analyze, ignoredFiles, loadBaseline, REPO, SCAN_DIRS, PROCESS_ENTRIES, dirtyFiles, inFlightViolations, matrixItems, gapPointerViolations, positionalReasonViolations, MATRIX_PATH, decisionStateRows, decisionStateIndex, decisionStateViolations } from './reachability.mjs'
+import { analyze, ignoredFiles, loadBaseline, REPO, SCAN_DIRS, PROCESS_ENTRIES, dirtyFiles, inFlightViolations, matrixItems, gapPointerViolations, positionalReasonViolations, MATRIX_PATH, decisionStateRows, decisionStateIndex, decisionStateViolations, decisionStateTally, decisionTallyLine, parseDecisionTallyLine } from './reachability.mjs'
 
 const a = analyze()
 const baseline = loadBaseline()
@@ -900,4 +900,82 @@ test('⑮d ★★ 正向对照：显式裁决 / 开口径**必须**认出来（�
 test('⑮e ★ 第 55 轮的假阳性回归：#28 里那句「已裁决**事项**」不许再被当成本行的裁决', () => {
   const doc = mkTable('| 1 | 那条「出站车道」 | 产品 + 架构 | 三条路各自与已裁决**事项**的关系都写清了 | — |')
   assert.equal(decisionStateRows(doc)[0].state, '未标注')
+})
+
+// ── 第三十八轮：同一块里的**第二个数字** ─────────────────────────────────
+//
+//   §5.0.1 那块里有两处状态：① 索引表逐行（判据 ⑭ 盯），
+//   ② 末尾那句「⇒ **合计**：已裁决 N · …」。
+//
+//   第 55 轮加 ⑭ 的时候只盯了 ①。于是本仓实测出现了这一格：
+//   29 行**逐行全对**（8 / 0 / 3 / 18），而**合计那句写 7 / 0 / 4 / 18**——
+//   两句话在同一个代码块里互相矛盾，而 `decisionStateViolations()` 报 **0 条**。
+//
+//   > 一个"逐行都对"的索引表，与一个"末行汇总也对"的索引表，
+//   > 在只比对逐行的判据眼里是同一个东西 ——
+//   > 只不过人记住的往往是最后那一行。
+const TALLY_RE = /^⇒ \*\*合计\*\*：已裁决 \*\*\d+\*\* · 待施工 \*\*\d+\*\* · 待裁决 \*\*\d+\*\* · \*\*未标注 \d+\*\*（共 \d+ 行）。$/
+
+test('⑯ ★★ 真仓库：索引表末尾那句「合计」必须等于逐行派生出来的值', () => {
+  const doc = readFileSync(MATRIX_PATH, 'utf8')
+  const line = decisionTallyLine(doc)
+  assert.ok(line !== undefined, '找不到那句「⇒ **合计**：已裁决 …」⇒ 定位可能失效了')
+  // ★ 先证明那一行的形状还在（形状变了要有人看见，而不是静默解析成 null）
+  assert.match(line, TALLY_RE, '合计行的形状变了（解析器与文档不再对齐）')
+  const got = parseDecisionTallyLine(line)
+  const want = decisionStateTally(doc)
+  assert.deepEqual(got, want,
+    `合计那一句与逐行派生值不符：写的是 ${JSON.stringify(got)}，逐行相加是 ${JSON.stringify(want)}`
+    + ' ⇒ 同一块里两句话互相矛盾（量具：scripts/probes/probe-decision-tally.mjs）')
+  assert.deepEqual(decisionStateViolations(doc), [], '判据自身应当报 0 条')
+})
+
+test('⑯b ★ 反面控制：把合计里的「已裁决」改小 1 ⇒ 必须报 TALLY_STALE', () => {
+  const doc = readFileSync(MATRIX_PATH, 'utf8')
+  const want = decisionStateTally(doc)
+  const mutated = doc.replace(
+    /(⇒ \*\*合计\*\*：已裁决 \*\*)\d+(\*\*)/,
+    `$1${want.已裁决 - 1}$2`)
+  assert.notEqual(mutated, doc, '合计行没被改到 ⇒ 这个反面控制是假的')
+  const bad = decisionStateViolations(mutated)
+  assert.ok(bad.some((x) => x.code === 'TALLY_STALE'),
+    `把合计改小 1 之后判据没报：${JSON.stringify(bad)}`)
+  // ★ 而它**不该**顺带报逐行的问题：这一处失效与"索引陈旧"是两件事
+  assert.equal(bad.some((x) => x.code === 'INDEX_STALE'), false,
+    '改合计不该污染逐行那一路的读数')
+})
+
+test('⑯c ★ 反面控制：删掉合计那一句 ⇒ 必须报 TALLY_MISSING（不是静默通过）', () => {
+  const doc = readFileSync(MATRIX_PATH, 'utf8')
+  const lines = doc.split('\n')
+  const i = lines.findIndex((l) => /^⇒ \*\*合计\*\*：已裁决/.test(l))
+  assert.ok(i > 0, '合计行找不到 ⇒ 控制写不出来')
+  lines.splice(i, 1)
+  const bad = decisionStateViolations(lines.join('\n'))
+  assert.ok(bad.some((x) => x.code === 'TALLY_MISSING'),
+    `删掉合计行之后判据没报：${JSON.stringify(bad)}`)
+})
+
+test('⑯d ★ 正对照：合计与逐行一致时**不许**报（否则 ⑯b 是假绿）', () => {
+  // ★ 夹具是**一张**两行表。第一次写成两张 mkTable 拼接 ⇒ 第二个表头落在表中间，
+  //   派生器把它**当成了一行数据**：实测派生 **3** 行，多出来的那行是
+  //   `{ no: null, state: '未标注', name: '事项', who: '需要谁' }`
+  //   ⇒ 索引 2 条 vs 派生 3 条，这条正对照**假红**。
+  //   （夹具给错输入会让人去改判据——所以这里把两次读数都记下来。）
+  const good = [
+    '| # | 事项 | 需要谁 | 具体决定 | 不决定的后果 |',
+    '|---|---|---|---|---|',
+    '| 1 | x | 产品 | ★★ **已裁决** | — |',
+    '| 2 | y | 产品 | 某决定 | **不决定**则继续停在原处 |',
+    '',
+    '### 5.0.1 决策表状态索引（机器可读）',
+    '',
+    '| 1 | x | 已裁决 | 产品 |',
+    '| 2 | y | 待裁决 | 产品 |',
+    '',
+    '⇒ **合计**：已裁决 **1** · 待施工 **0** · 待裁决 **1** · **未标注 0**（共 2 行）。',
+  ].join('\n')
+  assert.equal(decisionStateRows(good).length, 2, '夹具没派生到 2 行 ⇒ 后面两条断言没有意义')
+  assert.deepEqual(parseDecisionTallyLine(decisionTallyLine(good)), decisionStateTally(good))
+  assert.deepEqual(decisionStateViolations(good), [], '一致时不许报')
 })

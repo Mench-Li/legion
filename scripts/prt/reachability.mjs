@@ -529,11 +529,44 @@ export function decisionStateRows(docText) {
   return out
 }
 
+/**
+ * §5 那 29 行的**状态合计**（唯一一处实现）。
+ *
+ * ★ 为什么单独立成一个函数：这张表有**两个**会写状态的地方 ——
+ *   ① §5.0.1 索引表的**逐行**，② 索引表末尾那一句「⇒ **合计**：已裁决 N · …」。
+ *   第三十八轮实测：① 是对的（已裁决 8 / 待施工 0 / 待裁决 3 / 未标注 18），
+ *   而 ② 当时写着 7 / 0 / 4 / 18 —— **同一块里两句话互相矛盾**，
+ *   而 `decisionStateViolations()` 此前只盯 ①，于是它报 **0 条**。
+ *
+ * > 一处"写下来但没人核对的数字"，与一处"会漂移的计数"，是同一个东西 ——
+ * > 只不过前者的读者会以为它被核对过。
+ */
+export function decisionStateTally(docText) {
+  const t = { 已裁决: 0, 待施工: 0, 待裁决: 0, 未标注: 0 }
+  for (const r of decisionStateRows(docText)) t[r.state] += 1
+  return t
+}
+
+/** 索引表末尾那句合计行（判据与量具共用同一个定位）。 */
+export function decisionTallyLine(docText) {
+  return docText.split('\n')
+    .map((l) => l.replace(/\r$/, ''))
+    .find((l) => /^⇒ \*\*合计\*\*：已裁决/.test(l))
+}
+
+/** 从合计行里解析出四个数（解析不到就是 `null`，**不许**当成 0）。 */
+export function parseDecisionTallyLine(line) {
+  const g = (label) => {
+    const m = new RegExp(`${label}\\s*\\*{0,2}(\\d+)\\*{0,2}`).exec(line)
+    return m === null ? null : Number(m[1])
+  }
+  return { 已裁决: g('已裁决'), 待施工: g('待施工'), 待裁决: g('待裁决'), 未标注: g('未标注') }
+}
+
 /** 把状态索引渲成 markdown 行（生成器与判据共用同一份派生）。 */
 export function renderDecisionStateIndex(docText) {
   const rows = decisionStateRows(docText)
-  const t = { 已裁决: 0, 待施工: 0, 待裁决: 0, 未标注: 0 }
-  for (const r of rows) t[r.state] += 1
+  const t = decisionStateTally(docText)
   return [
     ...rows.map((r) => `| ${r.no} | ${r.name} | ${r.state === '未标注' ? '**未标注**' : r.state} | ${r.who} |`),
     '',
@@ -585,6 +618,28 @@ export function decisionStateViolations(docText) {
   const derivedNos = new Set(derived.map((d) => d.no))
   for (const no of byNo.keys()) {
     if (!derivedNos.has(no)) bad.push({ code: 'INDEX_EXTRA', detail: `#${no} 在索引表里，但决策表里没有这一行` })
+  }
+  // ★★ 第二处状态：索引表末尾那句「⇒ **合计**：已裁决 N · …」。
+  //   它与上面那 29 行处在**同一个代码块**里，却是**另一个数字**。
+  //   本仓第三十八轮实测：29 行全对、合计那句错（7/0/4/18 vs 8/0/3/18），
+  //   而只盯逐行的判据**报 0 条** —— 于是同一块里的两句话互相矛盾，
+  //   且读者手里的那一句（末尾汇总）才是他真正会去记的那一句。
+  const t = decisionStateTally(docText)
+  const tallyLine = decisionTallyLine(docText)
+  if (tallyLine === undefined) {
+    bad.push({ code: 'TALLY_MISSING', detail: '索引表末尾那句「⇒ **合计**：已裁决 …」没找到' })
+  } else {
+    const got = parseDecisionTallyLine(tallyLine)
+    const diff = DECISION_STATE_VOCAB.filter((k) => got[k] !== t[k])
+    if (diff.length > 0) {
+      bad.push({
+        code: 'TALLY_STALE',
+        detail: '合计那一句与派生值不符：'
+          + diff.map((k) => `${k} 写 ${got[k] === null ? '（没解析到）' : got[k]}、派生 ${t[k]}`).join('；')
+          + ' ⇒ 逐行索引可能是对的同时合计是错的，重生成索引即修'
+          + '（量具：`node scripts/probes/probe-decision-tally.mjs`）',
+      })
+    }
   }
   return bad
 }

@@ -1,0 +1,33 @@
+=== S2 静态接线/安全核对（workbench/src，read+grep 证据） ===
+
+[1] dangerouslySetInnerHTML 全 src 出现（期望 2，均注释、0 直插正文）:
+    workbench\src\components\ChatView.tsx:34|*   全程无 dangerouslySetInnerHTML，任何 <img onerror>/<script>/[x](javascript:) 都只是文本。
+    workbench\src\components\FilesView.tsx:34|* 渲染安全（I5 / TC-S5-08）：文件名/预览内容一律 React 文本节点，无 dangerouslySetInnerHTML。
+    说明：ChatView.tsx:34 与 FilesView.tsx:34 均为文档注释行，正文渲染走 React 文本节点。
+
+[2] ChatView 消息正文渲染为 React 文本节点（{m.body}，无 dangerouslySetInnerHTML 直插）:
+    <div className={m.author === 'general' ? 'chat-bubble me' : 'chat-bubble'}>{m.body}</div>
+
+[3] api.ts new EventSource 总数=3（board/events、activity/events = v1 serve.mjs; hub /api/events = S2 单一中枢源）:
+    const es = new EventSource(`${apiBase()}/api/board/events`)
+    const es = new EventSource(`${apiBase()}/api/activity/events`)
+    const es = new EventSource(`${hubBase()}/api/events`)
+    → 唯一 hub /hub/api/events 连接（订阅单一）: 1 处
+
+[4] ChatView SSE 按 action 前缀 chat:* 过滤:
+    if (!String(ev.action).startsWith('chat:')) return
+
+[5] 引导提示（无中枢 / 无具体空间，TC-S2-06 + need-hub）:
+    <span style={{ color: 'var(--yellow)' }}>💬 对话中心需要 team-hub v2（中枢）</span>
+    <span style={{ color: 'var(--yellow)' }}>💬 请先选择具体工作空间</span>
+
+[6] ChatView MAX_BODY=8000（与后端 MAX_CHAT_BODY 对齐，TC-S2-10）:
+    const MAX_BODY = 8000 // 与后端 MAX_CHAT_BODY 对齐（TC-S1-12 / TC-S2-10）
+
+[7] 接线：App.tsx 挂载 ChatView（scope + hubMode 由探测中枢决定）:
+    <ChatView scope={scope} hubMode={hubMode} />
+
+[8] 右侧实时动态走 v1 serve.mjs SSE（/api/activity/events），与中枢 /hub/api/events 分离（TC-S2-08 互不吞并）:
+    const offBoard = subscribeBoard(next => {
+    const offActivity = subscribeActivity(ev => {
+    api.ts: const es = new EventSource(`${apiBase()}/api/activity/events`)

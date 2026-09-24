@@ -1,0 +1,12 @@
+PASS | P0 前置：建会话 ok | conv=1
+PASS | P-XSS POST 三个 XSS 载荷 → 200 且 body 原样存储
+PASS | P-XSS GET 消息 → 三个载荷原样返回（React 文本节点渲染→不执行） | msgs=3
+PASS | P-B1 空正文 → 400 拒绝 | status=400
+PASS | P-B2 正文 8001 字符 → 400（MAX_CHAT_BODY） | status=400
+PASS | P-B3 正文恰好 8000 字符 → 200（边界通过） | status=200
+PASS | P-B4 非法 kind=html → 400（kind 白名单） | status=400
+PASS | P-B5 会话标题 201 字符 → 400（≤200） | status=400
+PASS | P-MD kind=markdown 消息 → 200 且 body 原样返回（前端按纯文本渲染） | kind=markdown
+PASS | P-SSE 单一 /api/events 连接收到 chat:message（action=chat:, scope, member=by） | ev={"seq":7,"ts":"2026-09-04T04:13:53.725Z","member":"general","scope":"software","action":"chat:message","taskId":null,"detail":{"conv":1,"msg":6,"kind":"text"}}
+
+S2 边界/安全探针汇总：10/10 通过

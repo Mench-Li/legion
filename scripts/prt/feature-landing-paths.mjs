@@ -220,14 +220,172 @@ export function checkLandingPaths({ statusText, tracked }) {
   }
 }
 
+/**
+ * ★★ T6（2026-09-24）：一行里的"**可核的锚**"。
+ *
+ *   T6 行原来的说法是「引用 0 路径的 4 行（F-02/F-12/F-23/F-25）另找核法」。
+ *   实测（STATUS 文档今天的原文）**只有两条没有路径**：F-23（L189）与 F-25（L191），
+ *   而它们的状态是 **⏸ 按设计归档** —— 依据格写的是 §2 / §9 的**设计决定**，
+ *   并且在决策台账里有一条 **已裁决**。F-02（L53）与 F-12（L64）都引了路径。
+ *
+ *   > 于是"另找核法"要找的，不是"给这两行也配一条路径"，
+ *   > 而是把一个更一般的问题问出来：**这一行，凭什么可以被核？**
+ *   > 一条谁也核不了的 ✅/🟡/⏸，与一条核实了的，在表里长得一样。
+ *
+ *   锚有四类，任一类成立即可：代码落点路径 / 套件名 / §条款。
+ *   而 **⏸ 行另加两条**：必须指得到条款（设计决定），**且**该条在决策台账里有裁决。
+ */
+export const ROW_CLAUSE_RE = /§\s*\d+(?:\.\d+)*/g
+export const ROW_SUITE_RE = /套件\s*`([^`]+)`/g
+
+/** 一行里四类锚的现状。 */
+export function rowAnchors(row, tracked = undefined) {
+  const text = row.cells.join(' ')
+  const paths = tokensOf(row.cells[LANDING_COLUMN] ?? '')
+  const suites = [...text.matchAll(ROW_SUITE_RE)].map((m) => m[1])
+  const clauses = [...text.matchAll(ROW_CLAUSE_RE)].map((m) => m[0])
+  const dirGlobs = dirGlobAnchors(row, tracked)
+  // ★ 通配锚算不算数，取决于"它指的那个**目录还在不在**"：
+  //   `product/launcher/*` 指向一个真实存在的目录 ⇒ 读者能去那里找；
+  //   而一个指向不存在目录的通配，与没写是同一件事（却看起来写了）。
+  const usableGlobs = dirGlobs.filter((g) => tracked === undefined || g.exists === true)
+  return {
+    paths, suites, clauses, dirGlobs,
+    any: paths.length > 0 || suites.length > 0 || clauses.length > 0 || usableGlobs.length > 0,
+  }
+}
+
+/**
+ * ★★ **目录通配**锚：`` `product/launcher/*` `` 这类。
+ *
+ *   为什么单列一类：落点门禁**跳过通配**（它核不了"这个目录下每一个文件"），
+ *   所以"引了一个通配"比"引了一个具体文件"**弱**。但弱不等于不是锚 ——
+ *   只要那个目录**真的存在**，读者就找得到地方。
+ *
+ *   > 把两种强度混成一个"有锚"，等于用后面那种的诚实去替前面那种背书。
+ */
+export function dirGlobAnchors(row, tracked = undefined) {
+  const out = []
+  for (const m of String(row.cells[LANDING_COLUMN] ?? '').matchAll(/`([^`]+)`/g)) {
+    const raw = m[1].trim()
+    if (!raw.includes('*')) continue
+    const star = raw.indexOf('*')
+    const dir = raw.slice(0, star).replace(/\/+$/, '')
+    if (dir === '' || !dir.includes('/')) continue
+    const prefix = dir + '/'
+    const exists = tracked === undefined ? null : tracked.some((p) => p.startsWith(prefix))
+    out.push({ raw, dir, exists })
+  }
+  return out
+}
+
+/**
+ * 决策台账里**已被裁决**的那些条目：第三格恰好是「已裁决」的行，第二格里的 `F-NN`。
+ * 返回 `Map<F-NN, 行号>`（行号给人读，报红时能直接去看）。
+ */
+export function parseRuledFeatures(statusText) {
+  const out = new Map()
+  const lines = String(statusText).split(/\r?\n/)
+  for (let i = 0; i < lines.length; i += 1) {
+    const t = lines[i].trim()
+    if (!t.startsWith('|')) continue
+    const cells = t.replace(/^\|/, '').replace(/\|$/, '').split(/(?<!\\)\|/).map((c) => c.trim())
+    if (cells.length < 4) continue
+    if (cells[2] !== '已裁决') continue
+    for (const m of cells[1].matchAll(/F-\d+/g)) {
+      if (!out.has(m[0])) out.set(m[0], i + 1)
+    }
+  }
+  return out
+}
+
+/**
+ * ★★ T6：**每一行都要有可核的锚**；⏸ 行还要"条款 + 裁决"两样。
+ *
+ * @param {{statusText: string}} input
+ */
+export function checkRowAnchors({ statusText, tracked }) {
+  const violations = []
+  const ruled = parseRuledFeatures(statusText)
+  const lines = String(statusText).split(/\r?\n/)
+  let rows = 0
+  let byPath = 0
+  let byDirGlob = 0
+  let bySuite = 0
+  let byClause = 0
+  let paused = 0
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const row = featureTableRow(lines[i])
+    if (row === null) continue
+    rows += 1
+    const a = rowAnchors(row, tracked)
+    if (a.paths.length > 0) byPath += 1
+    else if (a.dirGlobs.some((g) => g.exists === true)) byDirGlob += 1
+    else if (a.suites.length > 0) bySuite += 1
+    else if (a.clauses.length > 0) byClause += 1
+    else {
+      const danglingGlob = a.dirGlobs.filter((g) => g.exists === false)
+      violations.push({
+        id: 'feature-row-no-anchor', feature: row.id,
+        message: `第 ${i + 1} 行（${row.id}）**没有任何可核的锚**：`
+          + '既没有能解析到的「代码落点」文件路径，也没有套件名，也没有 §条款'
+          + (danglingGlob.length > 0
+            ? `。★ 它引了目录通配 ${danglingGlob.map((g) => `\`${g.raw}\``).join('、')}，`
+              + '但那个目录**不在被跟踪的文件里** ⇒ 读者去了也是空的'
+            : '')
+          + '。⇒ 这一行是 ✅ 还是 🟡 还是 ⏸，**没有任何东西**在核它。'
+          + '修法：补一条能让别人机械地核回来的锚（路径 / 目录 / 套件 / §条款 / 裁决）。',
+      })
+    }
+
+    if (row.status === '⏸') {
+      paused += 1
+      if (a.clauses.length === 0) {
+        violations.push({
+          id: 'feature-paused-without-clause', feature: row.id,
+          message: `第 ${i + 1} 行（${row.id}）是 **⏸**，却没有指到任何 **§条款**。`
+            + '⏸ 的意思是"**按设计**不做"，那就必须指出是哪一条设计决定 —— '
+            + '否则它与"没人做"在表里是同一个形状。',
+        })
+      }
+      if (!ruled.has(row.id)) {
+        violations.push({
+          id: 'feature-paused-without-ruling', feature: row.id,
+          message: `第 ${i + 1} 行（${row.id}）是 **⏸**，而**决策台账里找不到它的裁决**`
+            + '（台账里第三格为「已裁决」的行，第二格要写到这个 F-NN）。'
+            + '⇒ 一条"按设计归档"的状态，如果台账里没有对应裁决，它就不能自称是设计决定。',
+        })
+      }
+    }
+  }
+
+  if (rows === 0) {
+    violations.push({
+      id: 'anchor-scan-empty-rows',
+      message: '功能表里一行 F-NN 都没解析到 ⇒ 这条判据**什么都没查**。',
+    })
+  }
+
+  return {
+    ok: violations.length === 0,
+    rows, paused, byPath, byDirGlob, bySuite, byClause, ruled: ruled.size, violations,
+  }
+}
+
 /** 从磁盘按真实仓库核对。 */
 export function checkRepo({ cwd = REPO } = {}) {
   const tracked = execFileSync('git', ['ls-files'], { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
     .split('\n').map((s) => s.trim()).filter((s) => s !== '')
-  return checkLandingPaths({
-    statusText: readFileSync(resolve(cwd, STATUS_DOC), 'utf8'),
-    tracked,
-  })
+  const statusText = readFileSync(resolve(cwd, STATUS_DOC), 'utf8')
+  const paths = checkLandingPaths({ statusText, tracked })
+  const anchors = checkRowAnchors({ statusText, tracked })
+  return {
+    ...paths,
+    anchors,
+    violations: [...paths.violations, ...anchors.violations],
+    ok: paths.ok && anchors.ok,
+  }
 }
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
@@ -239,7 +397,17 @@ if (isMain) {
   console.log(`feature-landing-paths: 功能行 ${r.rows} 行；落点引用 ${r.scanned} 个 —— `
     + `原样解得开 ${r.exact}、沿本格目录继承 ${r.inherited}、`
     + `全仓唯一同名 ${r.viaUniqueName}；跳过通配 ${r.globbed}`)
+  const a = r.anchors
+  // ★ 下面这串数字是"**每行按优先级归一类**"（路径 > 目录通配 > 套件 > §条款），
+  //   不是"锚的总数"：F-02 既有目录通配又有套件名，它只出现在"目录通配"那一格。
+  //   混读这两种口径，会让"按套件 0"看起来像"没有行靠套件支撑"。
+  console.log(`  每行的**可核锚**（T6，每行按优先级归一类）：${a.rows} 行 —— 按路径 ${a.byPath}、`
+    + `按**目录通配**（目录存在）${a.byDirGlob}、按套件 ${a.bySuite}、按 §条款 ${a.byClause}；`
+    + `⏸ 行 ${a.paused} 行，决策台账「已裁决」条目 ${a.ruled} 条`)
   for (const v of r.violations) console.log(`  ✖ ${v.message}`)
-  if (r.ok) console.log('  ✅ 每个落点都让读者找得到（带目录的存在；裸名全仓唯一）')
+  if (r.ok) {
+    console.log('  ✅ 每个落点都让读者找得到（带目录的存在；裸名全仓唯一）')
+    console.log('  ✅ 每一行都有可核的锚；⏸ 行都指得到了条款，且台账里都有裁决')
+  }
   process.exit(r.ok ? 0 : 1)
 }

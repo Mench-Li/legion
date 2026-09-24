@@ -1999,3 +1999,41 @@ derive: (ctx) => ctx.originalCitations().broken.slice().sort().join(' '),
 我第 10 轮把失败信息**截断**着看，误以为"实际读数就是那两条、所以红得莫名其妙"。
 **把读数完整打出来**（`scratch/_probe-r118r8-expect.mjs` 打印了它）之后，
 "实际 ≠ 登记"这件事才有形状。
+
+## 12. 第 118 轮第四十二轮（接管会话）收束 —— 交代清了什么、留下了什么
+
+**证据（收束前一次跑齐，全部退出 0）**：
+门禁 17 项全绿（`boundary-facts` / `progress-check` / `ledger-evidence` / `reachability`（含 `--diff`）/
+`feature-table-status` / `feature-landing-paths` / `intervention-coverage` / `spec-status-calibration` /
+`design-boundaries` / `alpha-chain-trace` / `suite-counts` / `check-docs` / `encoding-check` / `ci-syntax` /
+`dsh-boundary` / `spec-progress --check` / `config/scan --check`）；
+套件 `boundary-facts` **77/77**、`reachability` **30/30**、`intervention-coverage` **22/22**、`launcher` **35/35**；
+量具 `probe-slice-verbatim`（两片）、`_probe-frows-nongreen --sweep`、`probe-decision-tally`、
+`verify-peak-resource-wired` 全 0。
+
+**核实（目标第 1 句）**：F/O 两表逐项 ——
+权威表 24 行全表扫描（引用 44 条路径、缺失 0）；**9 条非 ✅ 逐条读到格尾**并就地订正；
+两条优化文档（`MULTI-AGENT-FEATURE-OPTIMIZATION.md` 的"取代关系"表）已核。
+★ 如实保留的盲点：**F-02 / F-12 / F-23 / F-25 各自引用 0 条路径**，路径扫描对它们最无力。
+
+**做完的缺口（目标第 2 句）**：本会话可独立完成的 🟡/⬜ 缺口已全部处理 ——
+F-15 的"最后一根线"经**变异验证**确认已接上（`🟡→✅`）；F-04 的编排提取按业主**乙**的裁决逐片推进，
+本会话落 **PRT-1007 片 2**（判据四问全过）。⇒ **没有剩下的"本会话可独立完成"的代码缺口**。
+
+**裁决清单（目标第 3 句）**：`DECISION-BRIEF.md` 的"一问一句"已补全成员覆盖
+（第 42 轮补上 #11/#15/#22），且覆盖本身有判据（`briefCoverageGaps`，4 条单测 + 变异）。
+
+**如实标出的"被取代的陈述"**：每轮都写进台账 §11.x；★★ 其中**包含我自己的错句**：
+① 「PRT-316 是台账里唯一的 ⬜」（订正过两轮）；② 「第 28 条接线尚未开始 / 没有产出者」（实际 `d955dac` 已裁决并施工）；
+③ 本会话第 42 轮的「`whitelist` 有位无值」（应读作"位置在、值给不进去"）。
+★ 另有**两条我自己造出来又自己删掉**的读数：按上一行"形状"复制出的假台账行、以及一处把缺口说小的"145 行"。
+
+**留给下一轮（如实：没做完的）**：
+1. **PRT-1007 片 3+** —— `index.ts` 里仍压着编排逻辑（F-04 因此**如实保持 🟡**）。
+   ★ 下一片的落点规矩已经有了：**回引写在删除点原位置**，别写在文件头（否则行号位移会改掉
+   `source-original-citations-on-line` 登记的读数 —— 第 42 轮为此回滚过两次）。
+2. **§5 第 28 条剩下的那一处**：runId 绑在**按 Run 安装**的接缝上（裁决（丙）已完备、代码未动）。
+3. 16 条 ✅ 行只核到"引用落点存在 + 引用轴由现成判据把着"，**未逐条核它的声称**。
+
+**★ 两会话共处一个工作区的实况**：`scripts/legion-up.ps1`（今天 17:07、7406 字节，不是我写的）
+**始终未提交、未改动**；`git add -A` 会扫进它 —— 本会话已两次靠"提交前单独读 status"拦住。

@@ -85,6 +85,23 @@ export const SLICES = [
     toFile: 'plugins/src/spacePaths.ts',
     names: ['childLogFile', 'statusFileNames'],
   },
+  {
+    id: 'PRT-1007/3',
+    title: '监督判定（顶层纯函数，第一片"单个符号"）',
+    // 'c9fb95e' = 片 3 落地**之前**的那个提交（同片 1/2：基准必须不可变，不许写 'HEAD'）。
+    //
+    //   ★ 片 3 只搬一个符号，是因为第一次挑的 `runGit` **搬不动**：
+    //     它的返回类型是 `Promise<{ code… }>`，而 `extractSymbol` 按"第一个 `{`"配对
+    //     ⇒ 会把**对象类型**当函数体、只截出签名，写进新模块后两个文件都语法错
+    //     （由 `tsc` 抓住，**不是**由这个量具 —— 它当时是绿的）。
+    //
+    //   > 一个量具"搬错了东西还报绿"这件事，比它搬不动更值得记下来：
+    //   > 前者要等到编译才现形，而编译不在这个量具的输出里。
+    from: 'c9fb95e',
+    fromFile: 'plugins/src/index.ts',
+    toFile: 'plugins/src/proc.ts',
+    names: ['isSupervisor'],
+  },
 ]
 
 /** 从源码文本里取一个函数/接口的**完整文本**（`export function NAME(` 或 `export interface NAME {` 到配对的收尾花括号）。 */

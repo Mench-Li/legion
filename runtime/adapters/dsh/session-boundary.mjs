@@ -132,14 +132,21 @@ export const IMPLEMENTATION_FINDINGS = Object.freeze([
     aspect: 'permission',
     code: 'POLICY_CHANGE_ALWAYS_SAYS_USER',
     source: 'packages/interaction/user-approval/src/index.ts',
-    lines: 'setPolicy 注入的那条 user message（约 181-187）',
+    lines: 'setPolicy 注入的那条 user message（约 184-193；★ T9 2026-09-24 按今天的检出订正，原写 181-187）',
     anchors: Object.freeze([
       '(changed by the user).',
-      "plugin: 'user-approval'",
+      // ★★ T9（2026-09-24）：DSH 改了形状 —— 原锚点 `plugin: 'user-approval'`
+      //   在今天的检出里**一句都没有了**。读实现后确认**结论本身仍成立**
+      //   （L191 仍写着 `(changed by the user).`），变的是 `source` 的形状：
+      //   原来是 `{ kind: 'plugin', plugin: 'user-approval' }`，今天是
+      //   `{ kind: 'user-approval' }`（见该文件 L15 的 ContextFormed 声明）。
+      "kind: 'user-approval'",
     ]),
     claim: '策略变更注入子会话的那句话，永远写着 changed by the user。',
     evidence: '文本是 `` `The approval policy changed from "${previous}" to "${policy}"'
-      + ' (changed by the user).` ``，而 `source` 标的是 `{ kind: \'plugin\', plugin: \'user-approval\' }`。'
+      + ' (changed by the user).` ``，而 `source` 标的是 `{ kind: \'user-approval\' }`。'
+      + '（★ T9 2026-09-24 重新锚定：此前这里引的是 `{ kind: \'plugin\', plugin: \'user-approval\' }`，'
+      + '而 DSH 已把形状改成 `context-form` 那种 `{ kind: \'<包名\'> }`；**结论未变**，变的是出处长什么样。）'
       + 'Legion 改策略时走的是同一条路径。',
     consequence: '子会话里的模型会被告知"这是用户改的"，即使改的人是 Legion。'
       + '这是 DSH 的措辞，本仓库改不了；但它必须留在诚实边界里——'

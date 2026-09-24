@@ -1504,6 +1504,13 @@ const TALLY_DOCS = [
   'docs/superpowers/prt/PRT-HANDOVER-2026-09-18-ROUND22.md',
   'docs/superpowers/prt/PRT-HUMAN-INTERVENTION-2026-09-20.md',
   'docs/MULTI-AGENT-FEATURE-STATUS.md',
+  // ★★ T7（2026-09-24）：本判据只盯这 4 份，而**普查**（`scripts/probes/census-tally-copies.mjs`）
+  //   在 docs/scripts/runtime 下找到 **6** 份带台账分档串的文档 —— 另外两份**没有任何判据在核**：
+  //     · docs/DECISION-BRIEF.md（决策简报 §抬头那行读数）—— 它是**现行**值；
+  //     · docs/superpowers/prt/PRT-SESSION-REPORT-2026-09-17.md（那一轮的会话报告）—— **历史**留档。
+  //   ⇒ 两份都登记进来。★ "只有 4 份"与"全仓就这 4 份"在此之前一直是两件事。
+  'docs/DECISION-BRIEF.md',
+  'docs/superpowers/prt/PRT-SESSION-REPORT-2026-09-17.md',
 ]
 const TALLY_LIVE = [
   { doc: TALLY_DOCS[0], starts: '- 权威台账：', what: '交付物开头那句现行摘要' },
@@ -1514,6 +1521,9 @@ const TALLY_LIVE = [
   { doc: TALLY_DOCS[1], starts: '★ 真值（第 111 轮实测）：', what: '交接报告 §一 真值行（第 113 轮登记）' },
   { doc: TALLY_DOCS[1], starts: '| 台账 | **146 行 =', what: '交接报告 §二 最终读数' },
   { doc: TALLY_DOCS[2], starts: '> 台账 `docs/', what: '人工清单抬头' },
+  // ★★ T7：决策简报抬头那行读数。它此前**不在** TALLY_DOCS 里 ——
+  //   而它自己那句话说得很准："这一行**当时没有任何判据在核**"。
+  { doc: 'docs/DECISION-BRIEF.md', starts: '> 读数：台账 **146 行 =', what: '决策简报 §抬头读数（T7 登记）' },
 ]
 const TALLY_FROZEN = [
   { doc: TALLY_DOCS[0], starts: '| 「145 行 =', where: '交付物 §三 逐轮留档' },
@@ -1521,6 +1531,10 @@ const TALLY_FROZEN = [
   { doc: TALLY_DOCS[3], starts: '| `handover-ledger-tallies` |', where: '状态文档（第 26 轮留档）' },
   { doc: TALLY_DOCS[3], starts: '| 「145 行 =', where: '状态文档 5.27.2（留档）' },
   { doc: TALLY_DOCS[3], starts: '| **真台账** |', where: '状态文档 5.28.7（第 46 轮留档）' },
+  // ★★ T7：2026-09-17 那一轮会话报告里的分档读数（138 ✅ / 4 🟡 / 2 ⏸ / 1 ⬜）。
+  //   它是**当时**的真值，属历史留档；登记在这里是为了让"分类必须完整"这条规则
+  //   真的覆盖它 —— 不登记时它既不红也不被核，读者无从知道它有没有人管。
+  { doc: 'docs/superpowers/prt/PRT-SESSION-REPORT-2026-09-17.md', starts: '台账 145 行是 138 ✅', where: '会话报告 2026-09-17（T7 登记）' },
 ]
 
 test('⑰ ★★★ 台账分档的每一处抄写都被登记过：现行的必须等于台账，历史的必须显式列出', () => {

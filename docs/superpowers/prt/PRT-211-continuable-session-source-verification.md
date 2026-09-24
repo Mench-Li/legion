@@ -95,6 +95,8 @@ setPolicy(agent: Agent, policy: ApprovalPolicy): void {
 
 `setPolicy` 注入子会话的那句话永远写着 **"changed by the user"**，
 而 `source` 标的是 `{ kind: 'plugin', plugin: 'user-approval' }`。
+
+> ⚠️ **订正（2026-09-24，T9）**：上面引的 `source` 形状**已经不存在了** —— DSH 改成了 `{ kind: 'user-approval' }`（`packages/interaction/user-approval/src/index.ts` L193）。★ **本节的结论没有变**（那句话今天仍写着 `(changed by the user).`，同一文件 L191）；变的是**出处长什么样**。上面那句保留原文不改写 —— 它是 2026-09-17 的读数，而"当时的出处"与"今天的出处"是两件事。
 Legion 改策略走的是同一条路径，所以子会话里的模型会被告知「这是用户改的」。
 
 这是 DSH 的措辞，本仓库改不了，但它必须留在诚实边界里——

@@ -2080,9 +2080,9 @@ F-15 的"最后一根线"经**变异验证**确认已接上（`🟡→✅`）；
 | **T4** | §2.2 三种未定记录形状（`dispatched`/`result` 无写入侧观测点、`attemptId` 为 `null`） | 记录层 | 与 T3 同批出反例 |
 | **T5** | 16 条 ✅ 行做**声称级**核对 | 权威表 ✅ 行 | 每行一条可复跑判据，否则如实降级"未核" |
 | **T6** | 引用 **0 条路径**的 4 行（F-02/F-12/F-23/F-25）另找核法 | — | 一种不依赖"引用路径"的核法 |
-| **T7** | 决策简报的台账读数行**不在** ⑰ 的 `TALLY_DOCS`（只有 4 份文档） | `boundary-facts.test.mjs:1502` | 登记进去，或明确写下"刻意不纳入" |
+| **T7** | 决策简报的台账读数行**不在** ⑰ 的 `TALLY_DOCS`（只有 4 份文档） | `boundary-facts.test.mjs:1502` | 登记进去，或明确写下"刻意不纳入" | ★ **✅ 已收（登记进去）** —— 先做**普查**（新增 `scripts/probes/census-tally-copies.mjs`）：docs/scripts/runtime 下带分档串的文档共 **6** 份，未纳管的**正好 2 份**（不只是简报那一份）：`docs/DECISION-BRIEF.md`（**现行**值 ⇒ 登记进 `TALLY_LIVE`）与 `docs/superpowers/prt/PRT-SESSION-REPORT-2026-09-17.md`（**历史**留档 ⇒ 登记进 `TALLY_FROZEN`）；两份都进 `TALLY_DOCS`。★ 普查还自查"本脚本的名单 == ⑰ 的名单"，防两份名单各自漂。判据：`boundary-facts.test.mjs` ⑰（9/9；整个套件 77/77）+ 普查 exit 0；变异 `_probe-t7-tally-copies.mjs` **三个方向**都咬住（改错数 8/1、删历史登记 8/1、新来一份未登记文档 ⇒ 普查红） |
 | **T8** | 两分支各一提交未并入 main：`w/T-065` `5c0ce26`、`w/dual-write-race` `3c78cce`（含"main 里没有"的 `proc-utils.mjs` + 用例） | — | 并入，或**明确丢弃并写理由** |
-| **T9** | `dsh-pin-drift` 本地红的处置 | 边界门禁 | 本地 boundary 阶段可绿 |
+| **T9** | `dsh-pin-drift` 本地红的处置 | 边界门禁  ★ **✅ 已收** —— 先读实现：DSH **确实改了**形状，`{ kind: 'plugin', plugin: 'user-approval' }` 今天是 `{ kind: 'user-approval' }`；而**结论仍成立**（`(changed by the user).` 仍在同一文件 L191）⇒ 按实现**重新锚定**，并订正 `evidence` 里的旧形状与漂了的行号（181-187 → 184-193）。判据：`node scripts/prt/dsh-pin-drift.mjs` ⇒ **PASS（6 条结论 / 15 个锚点逐字命中，exit 0）**，本地 boundary 阶段已绿。★ 顺带量到一个**真边界**：把一条结论的锚点数组从 2 个删成 1 个，门禁**照样 PASS**（15→14）——它核的是"声明的锚点还在不在"，看不见"声明被删"。因此新增 `runtime/adapters/dsh/pin-drift.test.mjs`（5/5）把**锚点数是声明的强度**钉住（删一条 ⇒ 红，要求同时改那张显式表）。变异 `_probe-t9-pin-drift.mjs` **三个方向**都咬住（旧锚点 FAIL / 相似不存在 FAIL / 删一条声明 ⇒ 判据红）。两处旧抄写就地订正：`session-boundary.mjs` 的 evidence、`PRT-211-continuable-session-source-verification.md` §2.2（加日期订正，原文保留） |
 | **T10** | 让 CI 的 build/test **本机可跑**（缺 `packages/preset/agent-presets`、无 typescript、`plugins/lib` 被 ignore） | 环境 | `cd plugins && npm test` 能跑 ⇒ 插件改动从"文本级证明"升到"行为级" |
 | **T11** | `scripts/legion-up.ps1` 归属 + **跨会话并发写入**协调 | 工作区 | 明确谁在写、是否纳管 |
 

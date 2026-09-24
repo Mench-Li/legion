@@ -1236,3 +1236,28 @@ smoke  PASS / stage PASS / doc PASS
 > 顺带记一条纪律上的事：这次如果只写"CI 8/9、已修"，下一个人就看不到
 > **"±25 行的窗口会把日常施工的位移全部吃掉"** 这个事实 —— 而它比这次红本身重要。
 
+### 9.2 第二次（修完之后）：**全量 CI 9/9 PASS @ `a72ed21`**，**干净树**
+
+```
+syntax PASS (12954ms) / env PASS (3425ms) / boundary PASS (807ms) / deps PASS (7ms)
+build  PASS (32261ms) / test PASS (1074223ms) / smoke PASS (8901ms)
+stage  PASS (103ms)   / doc  PASS (1720ms)
+```
+
+| 上一次红的那个 | 这一次 |
+| --- | --- |
+| `boundary-facts` 70 例中 1 败（⑫b 载具） | **PASS 70/70**（载具重钉到 `:754`） |
+| `automation` ④（`tasksCreated` 3≠1） | **PASS 45/45** ⇒ **确认是偶发**，不是本轮改动引入的 |
+
+- 跳过 **1 条断言**（`secret-store` 的 DPAPI 分支，win32 之外的合法跳过）——
+  与上一次同一条，**不是环境没配上**。
+- 发布物暂存：`releases/legion-a72ed21-2026-09-24`，
+  其 `ciStages` 逐字是 `syntax:PASS,env:PASS,boundary:PASS,deps:PASS,build:PASS,test:PASS,smoke:PASS`。
+- 阶段 3 闸门（hot-file-churn `--strict`）：`cooled=true recentMax=1/40 historicalPeak=16/40`。
+
+★ 本会话这一批（第十七 / 十九轮）合计 **4 个提交**、
+**全量 CI 9/9 PASS 跑在 `a72ed21`（干净树）** 这一次读数上。
+⚠️ 本节的最后一段（这一行本身）是在那次 CI **之后**写的，属于文档更新：
+它改的是本文件自己，`check-docs` / `doc-table-integrity` / `ci-reading-integrity`
+在提交后**本地单独跑过**（都在门禁那一族里）。
+

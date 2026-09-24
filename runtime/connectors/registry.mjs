@@ -330,6 +330,36 @@ export function declareConnector(input = {}) {
     )
   }
 
+  // ★★★ 2026-09-24 业主裁决（§5 第 22 条采 ①：「声明写**裸名**」）的**装配期那一半**：
+  //   同一份声明里**既写裸名、又写它的公开名** ⇒ 直接拒。
+  //
+  //   理由不是"重复"这个词本身，而是**它们在判定期指向同一个工具**：
+  //   `declaredToolNames` 把两者都认（第 18 轮修的那件事），
+  //   于是两行声明会同时认领同一次调用 —— 而上一段只比 `t.name`，
+  //   看不出这两个名字是一回事。
+  //
+  //   > 一个"只比对作者写下的那个字符串"的重复检查，
+  //   > 与一个"比对**推导后**的名字"的重复检查，
+  //   > 在作者只写一种写法的那些声明上是同一个东西 ——
+  //   > 只不过前者会让"两种写法各写一遍"变成一个**没人看得见**的重复。
+  const claim = new Map()
+  const collide = []
+  for (const t of declared) {
+    for (const nm of declaredToolNames(id, t.name)) {
+      const prev = claim.get(nm)
+      if (prev !== undefined && prev !== t.name) collide.push(`${prev} / ${t.name} ⇒ ${nm}`)
+      else claim.set(nm, t.name)
+    }
+  }
+  if (collide.length > 0) {
+    throw fail(
+      CONNECTOR_CODES.TOOL_DUPLICATE,
+      `连接器 ${id} 的工具在**推导后的名字**上撞了：${[...new Set(collide)].join('；')}。`
+      + '裸名与它的公开名在判定期**指向同一个工具**（' + `declaredToolNames` + ' 两个都认），'
+      + '于是两行声明会同时认领同一次调用。★ 按 2026-09-24 的约定**只写裸名**即可',
+    )
+  }
+
   const serverPolicy = String(policy ?? 'allow').trim()
   if (!CONNECTOR_DECISIONS.includes(serverPolicy)) {
     throw fail(
@@ -501,6 +531,19 @@ function freshCircuit() {
  * @param {string} connectorId 连接器 id（部署契约里等于 DSH 的 `serverName`）
  * @param {string} toolName 声明里写的名字
  * @returns {readonly string[]} 去重、冻结；顺序是 `[声明名, 公开名]`
+ *
+ * ★★★ **2026-09-24 业主裁决（§5 第 22 条采 ①）：声明按连接器自己那一侧的名字（裸名）写。**
+ *   这是**写作约定**，不是新的功能约束 —— 两种写法在功能上都工作（本函数两个都认）。
+ *   约定要消灭的是"每加一个连接器就多一次即兴选择"：
+ *
+ *   · **要写**：`list_issues`（可读，且**唯一总能写对** —— 公开名在归一化/截断时会被换成
+ *     12 位 SHA-256 后缀，那时还原不出 rawName）；
+ *   · **不许**为了"统一"删掉裸名那一半（它兜住"连接器声明一个 DSH 核心工具名"）；
+ *   · **不许**在归属时"把命名空间剥掉"（同一条理由：还原不出来）。
+ *
+ *   ★ 装配期钉住的那一半：**同一份声明里既写裸名、又写它的公开名** ⇒ `declareConnector`
+ *     直接拒（`CONNECTOR_CODES.TOOL_DUPLICATE`）—— 判定期它们指向同一个工具，
+ *     而只比 `t.name` 的重复检查看不出来。
  */
 export function declaredToolNames(connectorId, toolName) {
   const raw = String(toolName ?? '').trim()

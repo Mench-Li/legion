@@ -689,3 +689,50 @@ test('⑦ ★ 工具名清单按连接器分域（`connector::tool`）', () => {
   // 名字里带 `::` 时不能与"别的连接器的工具"混起来。
   assert.equal(names.every((n) => n.startsWith('github::')), true)
 })
+
+// ── §5 第 22 条（2026-09-24 裁决采 ①「声明写裸名」）的判据 ────────────────────
+//
+// 约定本身不是功能约束（两种写法都工作），所以这一组盯的是**约定的两端**：
+//   ① **裸名必须能推导出公开名**（否则"写裸名"这条约定会让合法调用被拒）；
+//   ② **同一份声明里两种写法各写一遍**必须在**装配期**被拒（判定期它们指向同一个工具）。
+
+test('①g ★★★ 同一份声明里既写裸名、又写它的公开名 ⇒ 装配期就拒', () => {
+  assert.throws(
+    () => declareConnector({
+      connectorId: 'github',
+      transport: 'stdio',
+      command: 'npx mcp-github',
+      tools: [
+        { name: 'list_issues', capabilities: ['network:read'] },
+        { name: 'mcp__github__list_issues', capabilities: ['network:read'] },
+      ],
+    }),
+    (err) => err.code === CONNECTOR_CODES.TOOL_DUPLICATE,
+    '两行声明会在判定期同时认领同一次调用 —— 只比 t.name 的重复检查看不见它',
+  )
+})
+
+test('①h ★ 约定可行：全裸名的声明 ⇒ 通过，且公开名**算得出来**', () => {
+  const d = declareConnector({
+    connectorId: 'github',
+    transport: 'stdio',
+    command: 'npx mcp-github',
+    tools: [{ name: 'list_issues', capabilities: ['network:read'] }],
+  })
+  assert.equal(d.tools[0].name, 'list_issues', '声明里存的是**作者写下的那个名字**')
+  assert.deepEqual([...declaredToolNames('github', 'list_issues')],
+    ['list_issues', 'mcp__github__list_issues'],
+    '★ 这条约定的可行性就靠这一步：写裸名，公开名由登记表换算')
+})
+
+test('①i ★ 如实：只写**公开名**的声明今天仍然被接受（约定是约定，不是硬约束）', () => {
+  const d = declareConnector({
+    connectorId: 'github',
+    transport: 'stdio',
+    command: 'npx mcp-github',
+    tools: [{ name: 'mcp__github__list_issues', capabilities: ['network:read'] }],
+  })
+  assert.equal(d.tools[0].name, 'mcp__github__list_issues')
+  // 而且它**真的**能匹配线上送来的那个名字 —— 所以这不是"坏的"，只是**不合约定**。
+  assert.ok(declaredToolNames('github', 'mcp__github__list_issues').includes('mcp__github__list_issues'))
+})

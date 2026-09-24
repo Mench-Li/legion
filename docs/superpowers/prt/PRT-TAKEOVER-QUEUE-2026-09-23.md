@@ -2056,7 +2056,7 @@ F-15 的"最后一根线"经**变异验证**确认已接上（`🟡→✅`）；
 
 | 编号 | 任务 | 落点 | 判据 / 完成口径 |
 |---|---|---|---|
-| **W-22** | 定下"声明写裸名"的**约定**并禁混写 | 连接器声明表 + 文档 | 一条判据：两种写法不许混，且裸名必须能推导出公开名 |
+| **W-22** | 定下"声明写裸名"的**约定**并禁混写 | 连接器声明表 + 文档 | 一条判据：两种写法不许混，且裸名必须能推导出公开名 | ★ **✅ 已收** —— 约定写进 `declaredToolNames` 的 JSDoc（要写裸名 / 不许删裸名那一半 / 不许剥命名空间）；**装配期**新增"推导名撞车"检查：同一声明里既写裸名又写它的公开名 ⇒ `CONNECTOR_CODES.TOOL_DUPLICATE`（此前只比 `t.name`，看不见它们是同一个工具）。判据 ①g/①h/①i（registry 40/40）；变异 `scripts/probes/_probe-ruling22-naming-convention.mjs` 咬住 |
 | **W-23** | 新增 `connectorShape` 谓词端口 | 端口 + `createEnforcementBridge()` | 反例：`mcp__evil__x`（命名空间无已知连接器）⇒ **具名拒绝**（理由必须是登记表，不是政策门） |
 | **W-24** | 政策门从声明取能力，**只许抬升** | `tool-capability.mjs` | 判据：声明**不得下调**（跨层取 `max(静态, 声明)`）+ 变异：把声明改成 `allow` 而静态是 `write` ⇒ 仍 `write` | ★ **✅ 已收** —— `resolveToolWithDeclaration()` 落地（并集只增 + `maxRisk` + 审批只做或运算）；判据 ⑩～⑭（含"穷举：没有任何声明能让风险下调 / 审批取消 / 方向退回 read"）；变异 `_probe-ruling24-declaration-raise.mjs` 两次都咬住（44/44 → 42/44 ×2 → 逐字还原 44/44） |
 | **W-25** | `execution-scope.mjs` 的 `mcp` 段**降级为布尔**（或删除 + 废弃说明） | `execution-scope.mjs` | 判据：两份 MCP 表**不许并存**；配了 `mcp` 段不再落到 `execution-scope-port-mcp-limb-unwired` | ★ **✅ 已收** —— `mcp` 段改为**三分支**：没有段 ⇒ 拒（判定器的 `MCP_SERVER_DENIED`）；有段+工具级声明 ⇒ 拒（新码 `execution-scope-port-mcp-tool-level-deprecated`，理由"请把工具清单删掉、声明写进登记表"）；**有段+无工具级声明 ⇒ 放行**（段在即"允许"）。两处钉住旧语义的判据已随裁决改（端口 8/8、生产装配 11/11）；变异 `_probe-ruling25-mcp-authority.mjs` **两个方向**都咬住（16/16 → 14/16 ×2 → 逐字还原 16/16） |

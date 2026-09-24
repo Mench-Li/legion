@@ -1460,3 +1460,18 @@ F-21 行的"① 投递"、F-11 行的"另外两道无位"、§5 第 28 条的"�
 ### 10.4 三批提交
 
 `d208272`（合计行）→ `5724917`（重钉 DSH 坐标）→ `7ff595c`（探针 import + 新判据 + 文档订正）。
+
+### 10.5 ⚠️ 环境事实：本轮的推送被网络挡住（下一轮先试这一步）
+
+`git push origin main` 连续 **10 次**失败，两种错**交替**出现，都不是仓库侧问题：
+
+| 路径 | 错 |
+|---|---|
+| 走代理（`http.proxy = http://127.0.0.1:7897`，端口**在监听**） | `schannel: failed to receive handshake, SSL/TLS connection failed` / `schannel: server closed abruptly` |
+| 绕过代理（`-c http.proxy= -c https.proxy=`） | `Recv failure: Connection was reset` |
+
+⇒ 与上一轮那次"HTTP/2 大推送被 reset"**不是同一个错**（那条已用 `http.version = HTTP/1.1` 解掉，
+本次该设置仍在生效）；这次是**代理的上游/握手**坏了。
+★ 结论：本地 `main` 领先 `origin/main` **4 个提交**（`d208272` / `5724917` / `7ff595c` / 本台账那条），
+**一个都没丢**。下一轮第一件事是重试推送（`git ls-remote` 通了再 push）；
+若仍不通，这不是本会话能修的东西。

@@ -24,6 +24,7 @@ import {
   decisionStateViolations,
   ruledElsewhereViolations,
 } from '../prt/reachability.mjs'
+import { checkBrief } from '../prt/intervention-coverage.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const DOC = path.join(ROOT, 'docs', 'MULTI-AGENT-FEATURE-STATUS.md')
@@ -84,6 +85,15 @@ const w = ruledElsewhereViolations({ statusDoc: doc, queueTexts: QUEUE_DOCS })
 console.log(`\n新判据 ruledElsewhereViolations()（扫 ${QUEUE_DOCS.length} 份队列/交接文档）报出 ${w.length} 条：`)
 for (const x of w) console.log(`  - ${x.code}: ${x.detail}`)
 
+// ── ⑤ ★★★ 第四十一轮：**"要您裁决的那几条，得真的写在给您的清单上"**
+//   `checkBriefCount` 一直核**条数**，而**成员**没有判据 ——
+//   2026-09-24 量到 §5 里 14 条「未标注」有 3 条（#11 / #15 / #22）根本没进简报。
+const brief = checkBrief()
+console.log(`\n决策简报覆盖检查：未列的「未标注」${brief.uncovered.length} 条`
+  + `（§5 那张表 ${brief.count} 条；简报自己声明的条数 ${brief.stated.join('/') || '（没写）'}）`)
+for (const x of brief.violations) console.log(`  - ${x.id}: ${x.message}`)
+
 const bad = !same(derived, fromIndex) || !same(derived, fromLine) || v.length > 0 || w.length > 0
+  || brief.violations.length > 0
 console.log(`\n⇒ ${bad ? '**有不一致**（见上）' : '**两处都与派生值一致**'}`)
 process.exit(bad ? 1 : 0)

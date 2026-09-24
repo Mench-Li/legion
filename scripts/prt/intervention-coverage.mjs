@@ -52,7 +52,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { REPO, MATRIX_PATH, sectionFiveText } from './reachability.mjs'
+import { REPO, MATRIX_PATH, sectionFiveText, decisionStateIndex } from './reachability.mjs'
 // ★ 台账状态词表与"任务行长什么样"的**唯一所有者**是 `progress-check.mjs`。
 //   本模块此前把同一条状态正则写了**三**遍（`ledgerRows`、`ledgerRowTexts`，
 //   外加 `NON_DONE_STATUSES` 那张子集表），而它自己的文件头就在警告这件事。
@@ -332,12 +332,57 @@ export function checkBriefCount({ section, briefText }) {
   return { ok: violations.length === 0, count: numbers.length, stated, violations }
 }
 
+/**
+ * ★★★ 第 118 轮第四十一轮：**"要您裁决的那几条，得真的写在给您的清单上"**。
+ *
+ * 现场：`DECISION-BRIEF.md` 的**条数**一直有判据双向核（`checkBriefCount`），
+ * 而**成员**一个判据都没有 —— 2026-09-24 量到：§5 里那 14 条「未标注」有 **3 条**
+ * （`#11` / `#15` / `#22`）**根本没出现在简报的条号列里**。
+ * ⇒ 一份"条数对得上、成员对不上"的清单，**读起来像完整的**：它算得出 15 条，
+ * 却漏掉了三条真正要人说话的东西。★ 而漏掉的那三条里，有一条（`#15`）的正文
+ * 自己就写着"已从本条移出、立为第 **28** 条" —— 也就是说它**被裁决追上了却没被盘点**。
+ *
+ * ★ 口径：简报里**表格行的首格**里出现的整数才算"被列上了"。
+ *   （散文里提一句不算 —— 读者按条号找清单，找的是那一行。）
+ *
+ * @param {{section?: string, briefText?: string}} [input]
+ * @returns {number[]} 没被列上的条号（升序）
+ */
+export function briefCoverageGaps({ section, briefText } = {}) {
+  const index = decisionStateIndex(String(section ?? ''))
+  const covered = briefItemNumbers(briefText)
+  return index
+    .filter((r) => r.state === '未标注' && !covered.has(r.no))
+    .map((r) => r.no)
+    .sort((a, b) => a - b)
+}
+
+/** 简报表格**首格**里出现的条号（读者"按号找那一行"找的就是它）。 */
+export function briefItemNumbers(briefText) {
+  const out = new Set()
+  for (const line of String(briefText ?? '').split('\n')) {
+    if (!/^\s*\|/.test(line)) continue
+    const first = line.split('|')[1] ?? ''
+    for (const m of first.matchAll(/\d{1,2}/g)) out.add(Number(m[0]))
+  }
+  return out
+}
+
 /** 从磁盘按真实仓库核对。 */
 export function checkBrief({ briefPath = DECISION_BRIEF_PATH, matrixPath = MATRIX_PATH } = {}) {
-  return checkBriefCount({
-    section: sectionFive(matrixPath),
-    briefText: readFileSync(briefPath, 'utf8'),
-  })
+  const section = sectionFive(matrixPath)
+  const briefText = readFileSync(briefPath, 'utf8')
+  const base = checkBriefCount({ section, briefText })
+  const missing = briefCoverageGaps({ section, briefText })
+  if (missing.length !== 0) {
+    base.violations.push({
+      id: 'brief-uncovered-items',
+      message: `§5 里标「未标注」的这几条**没出现在决策简报的条号列**里：`
+        + `${missing.map((n) => `#${n}`).join('、')} ⇒ `
+        + '一份漏了成员、却算得对条数的清单，**读起来像完整的**。',
+    })
+  }
+  return { ...base, ok: base.violations.length === 0, uncovered: missing }
 }
 
 

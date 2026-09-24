@@ -32,6 +32,7 @@ import { join } from 'node:path'
 
 import { ledgerRows, ledgerNotDone, sectionFive, uncoveredLedgerRows, NON_DONE_STATUSES,
   checkBrief, checkBriefCount, decisionItemNumbers, briefStatedCounts,
+  briefCoverageGaps, briefItemNumbers,
   boundaryCoverageGaps, ledgerRowTexts, BOUNDARY_CITE, BOUNDARY_LIST_MARKER } from './intervention-coverage.mjs'
 import { DONE_STATUS_MARK, LEDGER_STATUS_MARKS, nonDoneStatuses } from './progress-check.mjs'
 
@@ -394,4 +395,62 @@ test('⑬d ★★★ `NON_DONE_STATUSES` 是**派生**的：词表加一个，�
     assert.ok(NON_DONE_STATUSES.includes(m), `${m} 是非完成状态，却不在表里`)
   }
   assert.equal(NON_DONE_STATUSES.length, LEDGER_STATUS_MARKS.length - 1)
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// ⑨ ★★★ 第四十一轮：**"要您裁决的那几条，得真的写在给您的清单上"**
+//
+//   现场：简报的**条数**一直有判据双向核（`checkBriefCount`），而**成员**一个都没有 ——
+//   2026-09-24 量到 §5 里 14 条「未标注」有 **3 条**（#11 / #15 / #22）根本没进简报。
+//   ⇒ 一份"条数算得对、成员漏了"的清单，**读起来像完整的**。
+// ══════════════════════════════════════════════════════════════════════════
+
+const sectionWithUnmarked = (nums) => [
+  '## 5. 什么要人裁决',
+  '',
+  '| # | 事项 | 需要谁 |',
+  '| --- | --- | --- |',
+  ...nums.map((n) => `| ${n} | 事项 ${n} | 产品 |`),
+  '',
+  '### 5.0.1 决策表状态索引（机器可读）',
+  '',
+  '| 1 | 已定的事 | 已裁决 | 产品 |',
+  ...nums.map((n) => `| ${n} | 事项 ${n} | 未标注 | 产品 |`),
+  '',
+  '⇒ **合计**：已裁决 **1** · 待施工 **0** · 待裁决 **0** · **未标注 ' + nums.length + '**。',
+].join('\n')
+
+test('⑨ ★★★ 变异：简报漏了一条「未标注」⇒ 必须报出那一条的条号', () => {
+  const section = sectionWithUnmarked([11, 15, 22])
+  const brief = [
+    '| # | 一句话 | 选项 |',
+    '| --- | --- | --- |',
+    '| **11** | 等环境的 | — |',
+    '| **22** | 定约定 | — |',
+  ].join('\n')
+  assert.deepEqual(briefCoverageGaps({ section, briefText: brief }), [15],
+    '漏了 #15 却没报 ⇒ 这条判据是装饰')
+})
+
+test('⑨b ★★ 反向控制：每条都列上 ⇒ 不许报（否则判据会天天红，然后被人关掉）', () => {
+  const section = sectionWithUnmarked([11, 15, 22])
+  const brief = ['| **11** | a |', '| **15** | b |', '| **22** | c |'].join('\n')
+  assert.deepEqual(briefCoverageGaps({ section, briefText: brief }), [])
+})
+
+test('⑨c ★★ 口径：条号必须出现在**表格首格**（散文里提一句不算）', () => {
+  const section = sectionWithUnmarked([15])
+  const prose = '第 15 条那件事我们讨论过了，见别处。'
+  assert.deepEqual(briefCoverageGaps({ section, briefText: prose }), [15],
+    '把"散文里提过"当成"上了清单" ⇒ 读者按条号去找那一行会找不到')
+  const inSecondCell = '| 待办 | **15** 这件事 |'
+  assert.deepEqual(briefCoverageGaps({ section, briefText: inSecondCell }), [15],
+    '条号写在第二格也不算"列上了"——清单是按首格读的')
+  assert.deepEqual([...briefItemNumbers('| **15** | b |')], [15])
+})
+
+test('⑨d ★★★ 真文档：真简报必须覆盖真 §5 的每一条「未标注」', () => {
+  const r = checkBrief()
+  assert.deepEqual(r.uncovered, [],
+    `真仓库里这几条「未标注」没进决策简报：${r.uncovered.map((n) => `#${n}`).join('、')}`)
 })

@@ -836,3 +836,71 @@ test('自检：回报补丁层版本与沙箱结论（便于与 dshVersion 成�
   assert.equal(r.patchVersion, DSH_COMPOSITION_PATCH_VERSION)
   assert.equal(r.sandbox.enforcement, 'full')
 })
+
+
+// ---------------------------------------------------------------------------
+// ⑯～⑲ §13.1 **W-3**：host 平面**冻结的边界**（2026-09-24）
+//
+//   上面那条"渲染新鲜度"（L451）只保证 **YAML == 声明**。也就是说：
+//   往 `PATCH_LAYER_ROWS` 加一行、重新生成 YAML，**一切都会是绿的**。
+//   而 §5 第 3 条的裁决是「**Legion host-plane 冻结** —— 不再新增 host 插件」。
+//
+//   > 一个"加一行、重生成、全绿"的补丁层，
+//   > 与一个"host 平面已经冻结"的补丁层，在 CI 上是同一个绿——
+//   > 只不过前者的"冻结"只活在某段散文里。
+//
+//   所以冻结要有**一份显式清单**：`host-plane.manifest.json`。
+//   它是唯一一个"要加 host 行就必须动它"的地方 —— 于是那次新增在 diff 里
+//   **看得见**，而不是混在"重新生成 YAML"的那一行里。
+// ---------------------------------------------------------------------------
+
+function readHostPlaneManifest() {
+  const p = join(HERE, 'host-plane.manifest.json')
+  assert.ok(existsSync(p), `host 平面冻结清单不存在：${p}`)
+  return JSON.parse(readFileSync(p, 'utf8').replace(/^\uFEFF/, ''))
+}
+
+test('⑯ ★★★ host 平面冻结：清单与声明**逐字同序**（新增一行而没动清单 ⇒ 红）', () => {
+  const m = readHostPlaneManifest()
+  assert.equal(m.version, 'legion/host-plane-manifest@1')
+  assert.deepEqual(m.rows, PATCH_LAYER_ROWS.map((r) => r.id),
+    'host 平面的行集合变了，而 `host-plane.manifest.json` 没跟着改。'
+    + '★ 这正是 §5 第 3 条要拦住的那一步：「host-plane 冻结 —— 不再新增 host 插件，新能力走补丁层 / preset」。'
+    + '如果你确实是在做一次**有意的解冻**，把新行写进那份清单（那一步在 diff 里看得见），'
+    + '并同时更新 §5 第 3 条的读数。')
+})
+
+test('⑰ ★★ 边界的**形状**：清单里每个 id 都在 `legion-enforcement-` 命名空间内、不重复、非空', () => {
+  const m = readHostPlaneManifest()
+  assert.ok(Array.isArray(m.rows) && m.rows.length > 0, '清单的 rows 必须是非空数组')
+  assert.equal(new Set(m.rows).size, m.rows.length, '清单里有重复 id')
+  for (const id of m.rows) {
+    assert.equal(typeof id, 'string', `清单里有非字符串 id：${JSON.stringify(id)}`)
+    assert.notEqual(id.trim(), '')
+    assert.ok(id.startsWith(LEGION_ROW_PREFIX),
+      `${id} 不在 ${LEGION_ROW_PREFIX} 命名空间里 —— host 平面的**命名边界**就在这里`)
+  }
+})
+
+test('⑱ ★★ 清单里**不许**落盘推导值（runtime-only / 进 YAML 的那几行都是算出来的）', () => {
+  const m = readHostPlaneManifest()
+  assert.deepEqual(Object.keys(m).filter((k) => !['version', 'frozenAt', 'why', 'rows'].includes(k)), [],
+    '清单里出现了别的键 —— 若是 runtimeOnly / renderedInYaml 这类**推导**值，它们会在'
+    + '补丁层改动的当天变成假话（与 `registry.mjs` 删掉 `risk` 是同一条纪律：推导值不落盘）')
+  const runtimeOnly = PATCH_LAYER_ROWS.filter((r) => isRuntimeOnlyRow(r)).map((r) => r.id)
+  assert.deepEqual(runtimeOnly, [...RUNTIME_ONLY_ROW_IDS])
+  assert.deepEqual(runtimeOnly, [
+    'legion-enforcement-pre-execute', 'legion-enforcement-approval-answerer',
+  ], '★ 这两行是"只能进程内挂载"的：它们不进 YAML —— 改了这个名单等于改了部署形状')
+})
+
+test('⑲ ★★ YAML 里的行**恰好**是声明里可渲染的那些，且都在冻结清单之内', () => {
+  const m = readHostPlaneManifest()
+  const rep = renderPatchReport()
+  const declared = PATCH_LAYER_ROWS.map((r) => r.id)
+  assert.deepEqual(declared.filter((id) => !rep.renderedRowIds.includes(id)), [...RUNTIME_ONLY_ROW_IDS],
+    '声明了却没渲染进 YAML 的行，必须**恰好**是那两个 runtime-only 的行')
+  for (const id of rep.renderedRowIds) {
+    assert.ok(m.rows.includes(id), `${id} 被渲染进了 YAML，却不在冻结清单里`)
+  }
+})

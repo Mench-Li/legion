@@ -1,0 +1,14 @@
+{
+  "version": "legion/host-plane-manifest@1",
+  "frozenAt": "2026-09-24",
+  "why": "host 平面**冻结**的显式清单（§5 第 3 条裁决：Legion host-plane 冻结 —— 不再新增 host 插件，新能力走补丁层 / preset）。这份清单**不是**从代码推导出来的：它就是那份\"要加 host 行就必须动它\"的文件。往 PATCH_LAYER_ROWS 加一行而没动这份清单 ⇒ composition.test ⑯ 变红。★ 只存 `rows` 一份：runtime-only 与\"进 YAML 的那几行\"都是**推导**值，落盘会在补丁层改动的当天变成假话。",
+  "rows": [
+    "legion-enforcement-hard-floor",
+    "legion-enforcement-root",
+    "legion-enforcement-pre-execute",
+    "legion-enforcement-approval-answerer",
+    "legion-enforcement-runtime-host-registrar",
+    "legion-enforcement-runtime-contract-server",
+    "legion-enforcement-permission-presets"
+  ]
+}

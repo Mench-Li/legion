@@ -22,6 +22,7 @@ import {
   decisionStateRows,
   decisionStateIndex,
   decisionStateViolations,
+  ruledElsewhereViolations,
 } from '../prt/reachability.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -70,6 +71,19 @@ const v = decisionStateViolations(doc)
 console.log(`\n既有判据 decisionStateViolations() 报出 ${v.length} 条：`)
 for (const x of v) console.log(`  - ${x.code}: ${x.detail}`)
 
-const bad = !same(derived, fromIndex) || !same(derived, fromLine) || v.length > 0
+// ── ④ ★★★ 第四十轮新判据：**索引表滞后于施工**
+//   三处齐口同声地说"待裁决"时，上面那条判据一个字都不会说 ——
+//   而"待裁决"是不是真的，只有队列/交接文档知道（它记着哪一条已经被裁过、依据是哪个提交）。
+const QUEUE_DOCS = fs.readdirSync(path.join(ROOT, 'docs', 'superpowers', 'prt'))
+  .filter((f) => /^(PRT-TAKEOVER-QUEUE|PRT-SESSION-REPORT|PRT-HUMAN-INTERVENTION).*\.md$/.test(f))
+  .map((f) => ({
+    path: `docs/superpowers/prt/${f}`,
+    text: fs.readFileSync(path.join(ROOT, 'docs', 'superpowers', 'prt', f), 'utf8'),
+  }))
+const w = ruledElsewhereViolations({ statusDoc: doc, queueTexts: QUEUE_DOCS })
+console.log(`\n新判据 ruledElsewhereViolations()（扫 ${QUEUE_DOCS.length} 份队列/交接文档）报出 ${w.length} 条：`)
+for (const x of w) console.log(`  - ${x.code}: ${x.detail}`)
+
+const bad = !same(derived, fromIndex) || !same(derived, fromLine) || v.length > 0 || w.length > 0
 console.log(`\n⇒ ${bad ? '**有不一致**（见上）' : '**两处都与派生值一致**'}`)
 process.exit(bad ? 1 : 0)

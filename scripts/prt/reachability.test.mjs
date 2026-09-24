@@ -35,7 +35,7 @@ import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { analyze, ignoredFiles, loadBaseline, REPO, SCAN_DIRS, PROCESS_ENTRIES, dirtyFiles, inFlightViolations, matrixItems, gapPointerViolations, positionalReasonViolations, MATRIX_PATH, decisionStateRows, decisionStateIndex, decisionStateViolations, decisionStateTally, decisionTallyLine, parseDecisionTallyLine } from './reachability.mjs'
+import { analyze, ignoredFiles, loadBaseline, REPO, SCAN_DIRS, PROCESS_ENTRIES, dirtyFiles, inFlightViolations, matrixItems, gapPointerViolations, positionalReasonViolations, MATRIX_PATH, decisionStateRows, decisionStateIndex, decisionStateViolations, decisionStateTally, decisionTallyLine, parseDecisionTallyLine, ruledElsewhereViolations } from './reachability.mjs'
 
 const a = analyze()
 const baseline = loadBaseline()
@@ -978,4 +978,73 @@ test('⑯d ★ 正对照：合计与逐行一致时**不许**报（否则 ⑯b �
   assert.equal(decisionStateRows(good).length, 2, '夹具没派生到 2 行 ⇒ 后面两条断言没有意义')
   assert.deepEqual(parseDecisionTallyLine(decisionTallyLine(good)), decisionStateTally(good))
   assert.deepEqual(decisionStateViolations(good), [], '一致时不许报')
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// ⑧ ★★★ 第四十轮：**"待裁决"这张索引表会滞后于施工**
+//
+//   2026-09-24 现场：第 28 条在 `d955dac`（一天前）**已裁定并施工完**，
+//   而 §5 索引表还写着"待裁决" —— 三处（正文 / 索引 / 合计）**齐口同声**，
+//   于是 `decisionStateViolations()` 报 0 条，而**我据此向业主提了一次多余的裁决提问**。
+//
+//   > 一个只能自证的清单，与一个恒真的清单，在"它能不能发现过期"上是同一个东西。
+//
+//   这条判据去**文档之外**要证据：队列/交接文档里"第 N 条已裁定（见 `<哈希>`）"，
+//   与 §5 索引表里第 N 条的状态对照。
+// ══════════════════════════════════════════════════════════════════════════
+
+const statusFixture = (state28) => [
+  '### 5.0.1 决策表状态索引（机器可读）',
+  '',
+  '| 18 | F-18/F-19 执行面一半 | 已裁决 | 产品 |',
+  `| 28 | 出站车道目录 | ${state28} | 产品 + 架构 |`,
+  '',
+  '⇒ **合计**：已裁决 **1** · 待施工 **0** · 待裁决 **1** · **未标注 0**（共 2 行）。',
+].join('\n')
+const QUEUE_RULED = '依据是**第 28 条已裁定**（丙的机制 + 目录锚在既有配置量上，逐字见 `d955ac0` 的提交说明）'
+const QUEUE_HISTORY = '本节下面那段"已撤回、未裁决"的记录**是当时的事实**；它留在这里当纪律样本'
+
+test('⑧ ★★ 正对照：队列说已裁定、§5 也写已裁决 ⇒ 不许报', () => {
+  const v = ruledElsewhereViolations({
+    statusDoc: statusFixture('已裁决'),
+    queueTexts: [{ path: 'queue.md', text: QUEUE_RULED }],
+  })
+  assert.deepEqual(v, [], '一致时报了 ⇒ 判据会天天红，然后被人关掉')
+})
+
+test('⑧b ★★★ 变异：队列说已裁定（带哈希），而 §5 还写「待裁决」⇒ 必须报', () => {
+  const v = ruledElsewhereViolations({
+    statusDoc: statusFixture('待裁决'),
+    queueTexts: [{ path: 'queue.md', text: QUEUE_RULED }],
+  })
+  assert.equal(v.length, 1, `本该报 1 条，实报 ${v.length} 条`)
+  assert.equal(v[0].code, 'RULED_ELSEWHERE')
+})
+
+test('⑧c ★★ 变异：索引里**没有**这一条 ⇒ 也必须报（"没登记"与"登记错"两件事）', () => {
+  const v = ruledElsewhereViolations({
+    statusDoc: statusFixture('已裁决').replace(/^\|\s*28\s*\|.*$/m, ''),
+    queueTexts: [{ path: 'queue.md', text: QUEUE_RULED }],
+  })
+  assert.equal(v.length, 1, `本该报 1 条，实报 ${v.length} 条`)
+})
+
+test('⑧d ★★ 反向控制：历史叙述（"已撤回、未裁决"、**不带哈希**）不许被误判', () => {
+  const v = ruledElsewhereViolations({
+    statusDoc: statusFixture('待裁决'),
+    queueTexts: [{ path: 'queue.md', text: QUEUE_HISTORY }],
+  })
+  assert.deepEqual(v, [], '把历史叙述读成裁决声明 ⇒ 误报，而误报会让人去改一条其实没错的行')
+})
+
+test('⑧e ★★★ 真文档：真队列 + 真 §5 必须报 0 条（这条判据不是装饰）', () => {
+  const status = readFileSync(join(REPO, 'docs', 'MULTI-AGENT-FEATURE-STATUS.md'), 'utf8')
+  const queuePath = join(REPO, 'docs', 'superpowers', 'prt', 'PRT-TAKEOVER-QUEUE-2026-09-23.md')
+  const v = ruledElsewhereViolations({
+    statusDoc: status,
+    queueTexts: [{ path: 'PRT-TAKEOVER-QUEUE-2026-09-23.md', text: readFileSync(queuePath, 'utf8') }],
+  })
+  assert.deepEqual(v, [],
+    '真文档里出现了"队列说已裁定、而索引还写待裁决" ⇒ 索引表滞后了：\n'
+    + v.map((x) => `    ${x.code}: ${x.detail}`).join('\n'))
 })

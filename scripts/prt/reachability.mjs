@@ -673,6 +673,56 @@ export function decisionStateViolations(docText) {
  * 后者是**指针腐烂**：一个指向不存在的条号的引用，与没有引用，
  * 对读的人是同一个结果——只不过前者看起来像已经归档过了。
  */
+/**
+ * ★★★ 第 118 轮第四十轮：**"待裁决"这张索引表会滞后于施工**。
+ *
+ * 2026-09-24 现场：第 28 条在 `d955dac`（2026-09-23）**已经裁定并施工完**
+ * （台账 §2 逐字写着"第 28 条已裁定"，提交说明里四处落点 + 端到端读数），
+ * 而 §5 索引表**到 2026-09-24 还写着"待裁决"**。
+ * 后果不是"文档难看"：**我据此向业主提了一次多余的裁决提问** ——
+ * 让他重新裁了一条一天前就裁过、而且**已经落地**的条目。
+ *
+ * ★ 为什么这条判据能抓、而 `decisionStateViolations()` 抓不到：
+ *   后者只核 ① §5 正文 ↔ ② 索引表 ↔ ③ 合计行 **三者彼此**一致 ——
+ *   三处**齐口同声**地说"待裁决"时，它报 0 条。
+ *
+ *   > 一个只能自证的清单，与一个恒真的清单，在"它能不能发现过期"上是同一个东西。
+ *
+ * ★ 判据的形状（**故意取窄：宁少判，不误判**）：
+ *   队列/交接文档里出现「第 N 条**已裁**(定|决)…`<提交哈希>`」——
+ *   也就是**带提交依据的裁决声明** —— 而 §5 索引表里第 N 条仍是「待裁决」
+ *   （或者根本没有第 N 条）⇒ 报 `RULED_ELSEWHERE`。
+ *   ★ 只认"同一行里既有条号、又有反引号哈希"的写法：历史留档里那些
+ *   "已撤回、未裁决"的叙述**不带哈希**，因此不会被误判成裁决。
+ *
+ * @param {{statusDoc?: string, queueTexts?: {path: string, text: string}[]}} [input]
+ * @returns {{ code: string, detail: string }[]}
+ */
+export function ruledElsewhereViolations({ statusDoc, queueTexts = [] } = {}) {
+  const RULED = /第\s*(\d{1,2})\s*条\s*已裁(?:定|决)[^\n]*?`[0-9a-f]{7,40}`/g
+  const byNo = new Map(decisionStateIndex(String(statusDoc ?? '')).map((r) => [r.no, r.state]))
+  const bad = []
+  for (const { path: docPath, text } of queueTexts) {
+    for (const m of String(text).matchAll(RULED)) {
+      const no = Number(m[1])
+      const state = byNo.get(no)
+      if (state === undefined) {
+        bad.push({
+          code: 'RULED_ELSEWHERE',
+          detail: `${docPath} 说第 ${no} 条已裁定（带提交依据），而 §5 索引表里没有第 ${no} 条`,
+        })
+      } else if (state === '待裁决') {
+        bad.push({
+          code: 'RULED_ELSEWHERE',
+          detail: `${docPath} 说第 ${no} 条已裁定（带提交依据），而 §5 索引表里第 ${no} 条仍写着`
+            + '「待裁决」 ⇒ 索引表滞后于施工（2026-09-24 第 28 条就是这样，导致一次多余的裁决提问）',
+        })
+      }
+    }
+  }
+  return bad
+}
+
 export function gapPointerViolations(entries, items) {
   const SPECIFIC = /§5\s*第\s*(\d+)\s*条/
   const missing = []

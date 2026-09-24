@@ -114,6 +114,41 @@ export function oldSource(from, file) {
   return execFileSync('git', ['show', `${from}:${file}`], { cwd: REPO, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
 }
 
+/**
+ * ★★ T2（2026-09-24）：这个符号在文件里**是不是顶层的**。
+ *
+ *   起因：T2 要"给 `spaceWorker` 立缝再搬一族"。实测 `plugins/src/index.ts` 里
+ *   `spaceWorker` 那一族**全是缩进 2 格的闭包**（例：`recallCorpus`），它们捕获外层
+ *   的 `expDraftDir` / `parseDraftState` / `pendingRecallRefs` / `config`…
+ *
+ *   ⇒ **四问①（逐字相同）与闭包是互斥的**：搬走一个闭包，就必须把它捕获的那些东西
+ *     一并变成参数 —— 那一步**必然改文本**。逐字工具搬得动的，只有**顶层**符号。
+ *
+ *   > 一个量具"搬不动闭包"这件事，本该印在它自己的脸上。
+ *   > 否则使用者拿到的是 ①/②/③ 三条**看起来像自己写错了**的报错，
+ *   > 而真相是"这一族不在这个工具的适用范围里"。
+ *
+ *   返回 `{ top: boolean, indent?: number }`；找不到符号返回 `null`。
+ *
+ *   ★ 诚实边界：⑤ 是**保守**规则，不是定理。一个闭包在新模块里**恰好**有同名自由变量
+ *     （例如新模块也 import 了 `expDraftDir`）时，逐字相同**理论上也能成立**。
+ *     本仓的选择是"顶层优先 + 把理由说清楚"，代价是拒绝一种理论上的合法形状 ——
+ *     宁可让使用者看到"这一族不在本工具适用范围里"，也不要他看到三条像自己写错的报错。
+ */
+export function symbolTopLevel(text, name) {
+  const nl = String(text).replace(/\r\n/g, '\n')
+  for (const head of [`export function ${name}(`, `export interface ${name} {`, `function ${name}(`]) {
+    const at = nl.indexOf(head)
+    if (at < 0) continue
+    // 行首 = 前一个换行之后；缩进 = 行首到符号起点之间的空白数
+    const lineStart = nl.lastIndexOf('\n', at) + 1
+    const indentText = nl.slice(lineStart, at)
+    const indent = indentText.length
+    return { top: indent === 0 && /^[ \t]*$/.test(indentText), indent }
+  }
+  return null
+}
+
 /** 逐片对拍。返回 { slices: [{ id, ok, problems: [] }], ok } */
 export function checkSlices({ slices = SLICES, repo = REPO } = {}) {
   const out = []
@@ -130,10 +165,26 @@ export function checkSlices({ slices = SLICES, repo = REPO } = {}) {
     const nowIndex = readFileSync(resolve(repo, s.fromFile), 'utf8').replace(/\r\n/g, '\n')
 
     for (const name of s.names) {
+      // ★★ ⑤ T2：先判"这一族在不在本工具的适用范围里" —— 闭包搬不动，且这不是使用者的错。
+      const topOld = symbolTopLevel(old, name)
+      if (topOld !== null && !topOld.top) {
+        problems.push(`⑤ ${name} 在 ${s.fromFile} 里**不是顶层符号**（缩进 ${topOld.indent} 格）`
+          + '⇒ 它是**闭包**，捕获了外层变量；四问①要求"逐字相同"，'
+          + '而搬走闭包必须把捕获项改成参数 —— **那一步必然改文本**。'
+          + '本量具只搬得动**顶层**符号；要动这一族，得先"立缝"（改行为边界），'
+          + '并用行为级判据（`cd plugins && npm test`）兜底，不是用它。')
+        continue
+      }
       const a = extractSymbol(old, name)
       const b = extractSymbol(now, name)
       if (a === null) { problems.push(`① 旧位置（${s.from}:${s.fromFile}）里找不到 ${name}`); continue }
       if (b === null) { problems.push(`① 新模块（${s.toFile}）里找不到 ${name}`); continue }
+      const topNow = symbolTopLevel(now, name)
+      if (topNow !== null && !topNow.top) {
+        problems.push(`⑤ ${name} 在新模块（${s.toFile}）里**不是顶层符号**（缩进 ${topNow.indent} 格）`
+          + '⇒ 逐字相同也说明不了什么：一个嵌在别人身体里的副本，不是"搬走了"，是"粘过去了"。')
+        continue
+      }
       if (a !== b) {
         // 指出第一处不同，方便直接看
         let i = 0

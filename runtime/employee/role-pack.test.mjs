@@ -12,7 +12,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
-  ROLE_PACK_CODES, ROLE_PACK_DOMAIN, ROLE_PACK_FIELDS, ROLE_PACK_HASHED_SECTIONS,
+  ROLE_PACK_CODES, ROLE_PACK_DOMAIN, ROLE_PACK_FIELDS, ROLE_PACK_HASHED_SECTIONS, ROLE_PACK_LIST_SECTIONS,
   ROLE_PACK_SECTIONS, ROLE_PACK_SECTION_FIELDS, ROLE_PACK_VERSION,
   FORBIDDEN_CONNECTOR_KEYS,
   assertRolePackFieldsClosed, buildRolePack, describeRolePack, diffRolePacks,
@@ -625,4 +625,78 @@ test('⑨ 每一个码都至少被一个用例触达（没有只用不报的码�
   const testSrc = readFileSync(join(HERE, 'role-pack.test.mjs'), 'utf8')
   const unreachable = declared.filter((name) => !testSrc.includes(`ROLE_PACK_CODES.${name}`))
   assert.deepEqual(unreachable, [], `这些码没有任何用例触达：${unreachable.join(', ')}`)
+})
+
+
+// ---------------------------------------------------------------------------
+// ⑩～⑪ §13.1 **W-12**：七类**版本面**写实（2026-09-24）
+//
+//   上面 ⑧ 已经钉住"七类**都进了内容哈希**"。那一条管的是**内容**面。
+//   这里管的是**版本**面 —— 两者不是一回事：
+//
+//     > 一份"每一节都进了哈希、而只有两节的版本号真的被看着"的岗位包，
+//     > 与一份"七节版本都被看着"的岗位包，在⑧的读数上是同一片 ✔——
+//     > 只不过前者的另外五节**换了版本也没人报**。
+//
+//   ★ 所以⑪对**每一类**单独改一次版本，并要求：恰好一处漂移、且就是那一类。
+//     "恰好一处"这半边与"报了那一类"同样重要：它证明另外六类**没有**被误报。
+// ---------------------------------------------------------------------------
+
+/** 世界那一侧的七节回声（与岗位包同形，按需在某一类上动手脚）。 */
+function worldEcho(sec) {
+  return {
+    prompt: { ...sec.prompt },
+    tools: { ...sec.tools },
+    permissions: { ...sec.permissions },
+    budget: { ...sec.budget },
+    model: { ...sec.model },
+    skills: sec.skills.map((x) => ({ ...x })),
+    connectors: sec.connectors.map((x) => ({ ...x })),
+  }
+}
+
+test('⑩ ★★★ 版本面：七类**每一类**都带 `version`，且三种形态**恰好**盖满七类', () => {
+  assert.equal(ROLE_PACK_SECTIONS.length, 7, '七类就是七个')
+  for (const s of ROLE_PACK_SECTIONS) {
+    const fields = ROLE_PACK_SECTION_FIELDS[s]
+    assert.ok(Array.isArray(fields), `${s} 没有字段闭包`)
+    assert.ok(fields.includes('version'),
+      `${s} 的字段闭包里没有 version —— 这一类的"版本面"是空的`)
+    // id 字段 = 闭包里除 version/hash 之外的那一个（推导，不另存一份表）。
+    const idFields = fields.filter((f) => f !== 'version' && f !== 'hash')
+    assert.equal(idFields.length, 1, `${s} 的 id 字段不唯一：${JSON.stringify(idFields)}`)
+    assert.notEqual(String(idFields[0]).trim(), '')
+  }
+  // 三种形态（引用型 / 条目型 / model 型）**恰好**覆盖七类一次，不许有类落在形态之外。
+  const hashed = [...ROLE_PACK_HASHED_SECTIONS]
+  const list = [...ROLE_PACK_LIST_SECTIONS]
+  const model = ROLE_PACK_SECTIONS.filter((s) => !hashed.includes(s) && !list.includes(s))
+  assert.deepEqual(model, ['model'],
+    '未被前两种形态覆盖的**只能**是 model —— 多一个就说明有一类的形态没被定义')
+  assert.deepEqual([...hashed, ...list, ...model].sort(), [...ROLE_PACK_SECTIONS].sort())
+  assert.equal(new Set([...hashed, ...list]).size, hashed.length + list.length, '两种形态不许重叠')
+})
+
+test('⑪ ★★★ 逐一漂移：**七类每一类**换版本都必须被 `verifyRolePack` 报出来', () => {
+  const sec = sections()
+  const pack = buildRolePack({ rolePackId: 'rp.dev', role: 'dev', version: '1.0.0', sections: sec })
+  // 前提对照：原样对账必须**一处都不报**（否则下面的"恰好一处"无从谈起）。
+  const clean = verifyRolePack({ pack, world: worldEcho(sec) })
+  assert.equal(clean.ok, true, `原样对账不该有漂移：${JSON.stringify(clean.drifts)}`)
+
+  for (const s of ROLE_PACK_SECTIONS) {
+    const world = worldEcho(sec)
+    if (ROLE_PACK_LIST_SECTIONS.includes(s)) world[s][0] = { ...world[s][0], version: '9.9.9' }
+    else world[s] = { ...world[s], version: '9.9.9' }
+
+    const r = verifyRolePack({ pack, world })
+    const seen = r.drifts.map((d) => `${d.section}/${d.code}`)
+    assert.equal(r.ok, false, `改了 ${s} 的版本却报"没问题"`)
+    assert.equal(r.drifts.length, 1,
+      `改 ${s} 的版本应**恰好**报一处（多报=误报，少报=没看着）：${JSON.stringify(seen)}`)
+    assert.equal(r.drifts[0].section, s, `报的是别的类：${JSON.stringify(seen)}`)
+    assert.equal(r.drifts[0].code, ROLE_PACK_CODES.VERSION_DRIFT, `码不对：${JSON.stringify(seen)}`)
+    assert.equal(r.contentDrifted, false,
+      '这是**版本**漂移，不是那种"版本没变而内容变了"的阴险漂移')
+  }
 })

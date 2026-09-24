@@ -207,6 +207,7 @@ export function assembleEnforcement({
    */
   connectorDeclarations = null,
   resolveConnectorId = null,
+  connectorShape = null,
 } = {}) {
   if (context === null || typeof context !== 'object') {
     throw assembleError(ASSEMBLE_CODES.NO_CONTEXT,
@@ -272,6 +273,9 @@ export function assembleEnforcement({
       //   而"需要 exec 才能认出连接器"的 resolver 在判定面上会抛 ⇒
       //   端口把它算作**认不出** ⇒ 原样交给政策门（不是放行）。
       resolveConnectorId: (projection) => resolveConnectorId(projection, null),
+      // ★★★ 2026-09-24（§5 第 23 条）：谓词端口**同批**接上 —— 少了它，
+      //   `mcp__evil__x` 又只能落给政策门（"未知工具"是**可以被人批准**的）。
+      ...(connectorShape === null ? {} : { connectorShape }),
       inner: decide,
     })
 

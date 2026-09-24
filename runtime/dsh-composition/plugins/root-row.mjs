@@ -783,6 +783,10 @@ export function createRootRow({
         //   > 判据都会静静地少看见几个。
         connectorDeclarations: connectors.declarations,
         resolveConnectorId: connectors.resolveConnectorId,
+        // ★★★ 2026-09-24（§5 第 23 条）：谓词端口与 resolver **一起**传。
+        //   分开传会让"接上了 resolver 却漏了谓词"表现成
+        //   "未知命名空间又悄悄落回政策门" —— 而两条读数都是绿的。
+        connectorShape: connectors.connectorShape,
         // ★★★ PRT-603：岗位白名单。与上面几道**同一个形状**：
         //   键恒在、缺席时值是 `null`。★ 这里**同样没有**用条件展开——
         //   理由就是上面那一段（文本解析要能把这组键读成一份清单，

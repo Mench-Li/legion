@@ -431,3 +431,72 @@ test('⑪ ★ receipts() 不可枚举（活对象不该被 JSON.stringify 带出
   assert.equal(port.receipts().seen, 1)
   assert.equal(port.receipts().attributed, 1)
 })
+
+
+// ---------------------------------------------------------------------------
+// ⑩～⑮ §5 第 23 条（2026-09-24 裁决采 ①）：`connectorShape` **谓词**端口
+//
+//   这一组盯的是"**连接器形状、而命名空间不认识**"这一类名字的归宿：
+//   裁决前它只能落给政策门，而政策门把它读成**未知工具** ⇒ 要人批 ⇒ **可以被批**。
+//
+//   ★ 所以下面每个用例的 `inner` 都返回 **allow** —— 一个"政策门说放行"的反例，
+//     才能证明"拦下它的是连接器层，而不是政策门碰巧也拒了"。
+// ---------------------------------------------------------------------------
+
+function shapePort({ shape, inner = null, resolve = () => null } = {}) {
+  const registry = createRegistry({ connectors: [declOf()] })
+  const opts = { registry, resolveConnectorId: resolve, inner }
+  if (shape !== undefined) opts.connectorShape = shape
+  return createConnectorDecisionPort(opts)
+}
+const allowInner = () => ({ kind: DECISION_KINDS.ALLOW, reason: '政策门说放行' })
+
+test('⑩ ★★★ 连接器形状 + 命名空间不认识 ⇒ **具名拒绝**（政策门就算放行也拦下）', async () => {
+  const port = shapePort({ shape: () => ({ shaped: true, namespaceKnown: false }), inner: allowInner })
+  const v = await port({ toolName: 'mcp__evil__x' })
+  assert.equal(v.kind, DECISION_KINDS.DENY)
+  assert.match(v.reason, /登记表/, '理由必须指向登记表这一侧')
+  assert.match(v.reason, /命名空间/)
+  const r = port.receipts()
+  assert.equal(r.namespaceUnknown, 1)
+  assert.equal(r.unattributed, 0, '★ 它不算"认不出"——两个读数必须分得开')
+})
+
+test('⑪ ★★ 非连接器形状 ⇒ **原样**交给政策门（"认不出就拒掉一切"不许回来）', async () => {
+  const port = shapePort({ shape: () => ({ shaped: false, namespaceKnown: false }), inner: allowInner })
+  const v = await port({ toolName: 'totally-made-up' })
+  assert.equal(v.kind, DECISION_KINDS.ALLOW, '非 MCP 形状的名字不许被连接器层拒')
+  assert.equal(v.reason, '政策门说放行', '必须是 inner 的**原话**')
+  assert.equal(port.receipts().unattributed, 1)
+  assert.equal(port.receipts().namespaceUnknown, 0)
+})
+
+test('⑫ 不给谓词 ⇒ 逐字回到裁决前的行为（缺席不是"默认拒"）', async () => {
+  const port = shapePort({ inner: allowInner })
+  const v = await port({ toolName: 'mcp__evil__x' })
+  assert.equal(v.kind, DECISION_KINDS.ALLOW)
+  assert.equal(port.receipts().unattributed, 1)
+  assert.equal(port.receipts().namespaceUnknown, 0)
+})
+
+test('⑬ 谓词抛 ⇒ 记 shapeFailed，并按"不是连接器形状"走（不把判定路径炸掉）', async () => {
+  const port = shapePort({ shape: () => { throw new Error('boom') }, inner: allowInner })
+  const v = await port({ toolName: 'mcp__evil__x' })
+  assert.equal(v.kind, DECISION_KINDS.ALLOW)
+  assert.equal(port.receipts().shapeFailed, 1)
+})
+
+test('⑭ 谓词不是函数 ⇒ 造端口时就拒（BAD_SHAPE）', () => {
+  assert.throws(
+    () => shapePort({ shape: 'yes' }),
+    (e) => e.code === CONNECTOR_DECISION_PORT_CODES.BAD_SHAPE,
+  )
+})
+
+test('⑮ ★ 谓词说"命名空间已声明"而 resolver 没认出 ⇒ 仍拒，但理由是**接线不一致**', async () => {
+  const port = shapePort({ shape: () => ({ shaped: true, namespaceKnown: true }), inner: allowInner })
+  const v = await port({ toolName: 'mcp__github__x' })
+  assert.equal(v.kind, DECISION_KINDS.DENY)
+  assert.match(v.reason, /接线不一致/,
+    '两种"形状对但归属不成"是两件事：没有这个命名空间 / 有这个命名空间而 resolver 漏了')
+})

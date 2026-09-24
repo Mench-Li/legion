@@ -119,11 +119,16 @@
 //   > 与一个"根本没有连接器层"的归属，在这一次调用的读数上是同一个 `allow`——
 //   > 只不过前者**刚好把一个已登记的连接器的工具放过去了**。
 //
-// ★ 今**仍未关**的部分（见 ⑧ 末段与人工介入清单）：命名空间**认不出来**的那一类
-//   （`mcp__evil__x`：一个没有任何已知连接器占着的 MCP 命名空间）。
-//   它今天仍然落到政策门。要按教义拒它，需要一个新的端口把
-//   "连接器形状、但命名空间不认识"这件事表达出来——`resolveConnectorId` 的
-//   值域是 `string|null`，装不下"拒"。这件事**没有**被本批偷偷做掉。
+// ★★★ **2026-09-24 已关（§5 第 23 条采 ①）**：命名空间**认不出来**的那一类
+//   （`mcp__evil__x`：一个没有任何已知连接器占着的 MCP 命名空间）
+//   过去**仍然落到政策门** —— 而政策门把它读成**未知工具**（可以被人批准）。
+//   现在由新增的 `connectorShape` **谓词**端口把它表达出来，`decision-port.mjs`
+//   据此**具名拒绝**（计数器 `namespaceUnknown`，理由指向**登记表**而不是政策门）。
+//
+//   ★ 这一段此前逐字写着"这件事**没有**被本批偷偷做掉" —— 那是**取代声明**：
+//     它已被裁决 + 施工**取代**，缺口在 `namespaceUnknown` 这条路径上关掉了。
+//   ★ 而"认不出就拒掉一切"**仍然不许**：非 MCP 形状的名字（`git-commit`、
+//     `totally-made-up`）照旧**原样交给政策门**。
 //
 // 判据钉在 `plugins/root-row.test.mjs` 的「归属的**边界**」那一条上
 // （它已被本批改成钉**新的**读数：命名空间已知 ⇒ 登记表被问到 ⇒ 拒）。
@@ -230,7 +235,7 @@
 // ============================================================================
 
 import { declareConnector, toolOwnershipOf } from '../connectors/registry.mjs'
-import { namespaceOf } from '../connectors/public-name.mjs'
+import { isMcpPublicName, namespaceOf } from '../connectors/public-name.mjs'
 
 export const CONNECTOR_PORT_VERSION = 'legion/connector-port@1'
 
@@ -299,6 +304,7 @@ const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArr
  *   state: string,
  *   declarations: ReadonlyArray<object>|null,
  *   resolveConnectorId: Function|null,
+ *   connectorShape: Function|null,
  *   toolCount: number,
  *   reason: string|null,
  * }}
@@ -314,6 +320,10 @@ export function connectorPortFromEnv({ env } = {}) {
       state: CONNECTOR_PORT_STATES.ABSENT,
       declarations: null,
       resolveConnectorId: null,
+      // ★ 谓词端口与 resolver **同生共死**：没有声明表就没有"已知命名空间"可比，
+      //   此时它必须一并缺席（而不是给一个恒 false 的桩 —— 那会让
+      //   "没配"与"配了但认不出"在读数上长得一样）。
+      connectorShape: null,
       toolCount: 0,
       reason: `环境里没有「${CONNECTOR_PORT_ENV_KEY}」。这**不是**"没有连接器策略"的等价物——`
         + '它是一个要由组合根显式处置的缺席：执行面在没有声明表时**不建**登记表，'
@@ -458,6 +468,26 @@ export function connectorPortFromEnv({ env } = {}) {
         return id !== undefined && id.length === 1 ? id[0] : null
       } catch {
         return null
+      }
+    },
+    // ★★★ 2026-09-24 裁决（§5 第 23 条）：**谓词**端口 `connectorShape`。
+    //   `resolveConnectorId` 的值域是 `string|null` ⇒ 装不下"拒"；
+    //   于是"连接器形状、而命名空间不认识"（`mcp__evil__x`）只能落给政策门，
+    //   而政策门把它读成**未知工具**（可以被人批准）。
+    //
+    //   ★ 这里**只回答形状**，不回答"该不该拒"：拒由 `decision-port.mjs` 出
+    //     （它才知道该给什么理由、该记哪个计数器）。
+    //   ★ **不拆** `__` 取命名空间：`public-name.mjs` 文件头 ③ 记着
+    //     `mcp__a__b__tool` 的命名空间不可判 —— 拆错会让拒绝指向不存在的连接器。
+    connectorShape: (projection) => {
+      try {
+        const name = projection?.toolName ?? projection?.subject?.toolName ?? ''
+        if (!isMcpPublicName(name)) return { shaped: false, namespaceKnown: false }
+        // 形状对：再看有没有**已声明**的命名空间与它匹配（`namespaceOf` 只比前缀）。
+        const ns = namespaceOf(knownIds, String(name))
+        return { shaped: true, namespaceKnown: ns.state === 'matched' }
+      } catch {
+        return { shaped: false, namespaceKnown: false }
       }
     },
     toolCount,

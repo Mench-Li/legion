@@ -1306,18 +1306,30 @@ test('★★★ 归属的**边界**：命名空间让登记表那条「未声明
   assert.equal(d2.kind, 'deny',
     '本夹具只声明了 `git-status`，`list_issues` 从来没被声明过 ⇒ 必须拒')
 
-  // ④ ⚠️ **仍未关**的那一半：命名空间**认不出来**的名字，仍然交给政策门。
-  //    它必须留在这里，否则下一个读到"教义可达了"的人会以为**所有**
-  //    连接器形状的工具都被登记表管住了。
+  // ④ ★★★ **2026-09-24 已关（§5 第 23 条采 ①）**：命名空间**认不出来**的名字现在**具名拒绝**。
+  //
+  //    ★ **取代声明**：这一段此前逐字写着"⚠️ **仍未关**的那一半：命名空间认不出来的名字，
+  //      仍然交给政策门"，并断言 `unattributed + 1`。那条读数已被裁决 + 施工**取代**：
+  //      现在拦下它的是**连接器层**（走新增的 `connectorShape` 谓词），
+  //      而不是政策门把它读成"未知工具" —— 而未知工具是**可以被人批准**的。
+  //
+  //    > 一个"把未登记的 MCP 服务器交给审批"的接线，
+  //    > 与一个"未登记的 MCP 服务器只要有人点一下就能用"的实现，
+  //    > 在同一次调用的读数上是同一个 `ask` —— 只不过前者看起来像已经拦住了。
   const foreign = await root.bridge.preExecute({
     name: 'mcp__evil__rm_rf', callId: 'c-w', arguments: { target: `${CWD}/x` },
   })
   const afterForeign = port.receipts()
-  assert.equal(afterForeign.unattributed, afterDeclaredRaw.unattributed + 1,
-    '`mcp__evil__x`（一个没有任何已知连接器占着的命名空间）**不该**被归属——'
-    + '按教义它该被拒，而 `resolveConnectorId` 的值域装不下"拒"，所以它落到政策门')
+  assert.equal(afterForeign.namespaceUnknown, 1,
+    '★ 新读数：它落在"连接器形状、而命名空间不认识"这一格')
+  assert.equal(afterForeign.unattributed, afterDeclaredRaw.unattributed,
+    '★ 它**不再**算"认不出"——两个读数混在一起，这条裁决就无法被观测')
   assert.equal(afterForeign.attributed, afterDeclaredRaw.attributed,
     '认不出的命名空间**不该**被归属到任何一个连接器上')
+  assert.equal(foreign.kind, 'deny',
+    '一个没登记过的 MCP 命名空间必须被**拒**（而不是"要人批"——那是可以被批准的）')
+  assert.match(String(foreign.reason), /命名空间/, `理由要点名"命名空间"：${foreign.reason}`)
+  assert.match(String(foreign.reason), /登记表/, `理由必须指向登记表这一侧：${foreign.reason}`)
   assert.ok(!/连接器 evil/.test(String(foreign.reason ?? '')),
     `不该出现一个不存在的连接器的理由：${foreign.reason}`)
 })

@@ -482,6 +482,7 @@ export function installEnforcementRoot(input = {}) {
       //   根这一层只负责"拿到之后怎么装"，并保证**一次装齐两半**。
       ...(input.connectorDeclarations === undefined ? {} : { connectorDeclarations: input.connectorDeclarations }),
       ...(input.resolveConnectorId === undefined ? {} : { resolveConnectorId: input.resolveConnectorId }),
+      ...(input.connectorShape === undefined ? {} : { connectorShape: input.connectorShape }),
       now: input.now,
       onDecision: input.onDecision,
       connectTimeoutMs: input.connectTimeoutMs,

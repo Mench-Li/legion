@@ -103,6 +103,8 @@ export const CONNECTOR_DECISION_PORT_CODES = Object.freeze({
   NO_RESOLVE: 'connector-decision-no-resolve',
   /** 给了 `inner` 但它不是函数（也不为 null）。 */
   BAD_INNER: 'connector-decision-bad-inner',
+  /** 给了 `connectorShape`，而它不是函数（2026-09-24 §5 第 23 条新增的谓词端口）。 */
+  BAD_SHAPE: 'connector-decision-bad-shape',
 })
 
 /** 三个决定词。与 `registry.mjs` 的 `CONNECTOR_DECISIONS` 同一套。 */
@@ -209,6 +211,7 @@ export function mergeDecisions(outerKind, innerKind) {
 export function createConnectorDecisionPort({
   registry,
   resolveConnectorId,
+  connectorShape = null,
   inner = null,
   onDecision = null,
 } = {}) {
@@ -227,6 +230,13 @@ export function createConnectorDecisionPort({
       '没有它就认不出"这次调用属于哪一条连接器"，而**猜一个**会让别人的策略管到你头上。',
     )
   }
+  if (connectorShape !== null && typeof connectorShape !== 'function') {
+    throw portError(
+      CONNECTOR_DECISION_PORT_CODES.BAD_SHAPE,
+      `connectorShape（2026-09-24 §5 第 23 条新增的谓词端口）必须是函数或 null，收到 `
+      + `${connectorShape === null ? "null" : typeof connectorShape}`,
+    )
+  }
   if (inner !== null && typeof inner !== 'function') {
     throw portError(
       CONNECTOR_DECISION_PORT_CODES.BAD_INNER,
@@ -240,8 +250,16 @@ export function createConnectorDecisionPort({
     attributed: 0,
     /** 认不出 ⇒ 原样交给 inner（**不是**放行）。 */
     unattributed: 0,
+    /**
+     * ★★★ **连接器形状、而命名空间不认识** ⇒ 已按 `deny` 具名拒掉（§5 第 23 条）。
+     * ★ 它**不算** `unattributed`：这一条恰恰是"认出了它的形状、但登记表里没有
+     *   这个命名空间"——记成"认不出"会让这条新端口在读数上与政策门兜底长得一样。
+     */
+    namespaceUnknown: 0,
     /** resolver 自己抛了 ⇒ 与"认不出"同一条路（见文件头第五条）。 */
     resolveFailed: 0,
+    /** `connectorShape` 自己抛了 ⇒ 当作"不是连接器形状"（与 resolver 抛同一条路）。 */
+    shapeFailed: 0,
     /** `registry.decide` 抛了 ⇒ 已按 `deny` 兜住。 */
     registryFailed: 0,
     /** inner 抛了 ⇒ 已按 `deny` 兜住。 */
@@ -325,6 +343,55 @@ export function createConnectorDecisionPort({
       counters.resolveFailed += 1
       note({ kind: 'resolve-failed', why: err?.message ?? String(err), connectorId: null })
       connectorId = null
+    }
+
+    // ①b ★★★ 2026-09-24 业主裁决（§5 第 23 条采 ①）：**连接器形状、而命名空间不认识**
+    //     ⇒ **具名拒绝**。落点是新加的 `connectorShape` **谓词**端口 ——
+    //     `resolveConnectorId` 的值域是 `string|null`，装不下"拒"，
+    //     所以在这条裁决之前，`mcp__evil__x`（一个没有任何已声明连接器占着的
+    //     MCP 命名空间）**只能落给政策门**。
+    //
+    //     为什么"落给政策门"不等价于拒绝：政策门把它读成**未知工具**
+    //     （`tool-capability.mjs`：`critical` + `requiresApproval: true`），
+    //     而"要人批"是**可以被批的** ⇒ 一个没登记过的 MCP 服务器，只要有人点一次
+    //     "批准"就能用。教义（`registry.mjs` 文件头①「未声明的工具必须拒绝」）
+    //     在这一类名字上是**空的**。
+    //
+    //     > 一个"把未登记的 MCP 服务器交给审批"的接线，
+    //     > 与一个"未登记的 MCP 服务器只要有人点一下就能用"的实现，
+    //     > 在同一次调用的读数上是同一个 `ask` —— 只不过前者看起来像
+    //     > 已经把它拦在门外了。
+    //
+    //     ★ 判据是**形状**而不是"拆命名空间"：`public-name.mjs` 文件头 ③ 逐字写着
+    //     `mcp__a__b__tool` 的命名空间是 `a` 还是 `a__b` **不可判**，
+    //     所以谓词只回答"它是不是 MCP 公开名形状 / 有没有已知命名空间与它匹配"，
+    //     **绝不**按 `__` 拆名字（拆错会让拒绝指向一个不存在的连接器）。
+    if (connectorId === null && typeof connectorShape === 'function') {
+      let shape = null
+      try {
+        shape = connectorShape(projection)
+      } catch (err) {
+        counters.shapeFailed += 1
+        note({ kind: 'shape-failed', why: err?.message ?? String(err), connectorId: null })
+      }
+      if (shape?.shaped === true) {
+        counters.namespaceUnknown += 1
+        const name = projection?.toolName ?? projection?.subject?.toolName ?? ''
+        note({ kind: 'namespace-unknown', toolName: String(name), connectorId: null })
+        return verdict(
+          DECISION_KINDS.DENY,
+          '工具名 ' + JSON.stringify(String(name)) + ' 是**连接器形状**（MCP 公开名 '
+          + `mcp__<命名空间>__<工具>` + (shape.namespaceKnown === true
+            ? '）而**它的命名空间已经声明过**、' + `resolveConnectorId` + ' 却没认出它'
+              + '（接线不一致） ⇒ 拒绝。'
+            : '）而**没有任何已声明连接器的命名空间与它匹配** ⇒ 拒绝。')
+          + '★ 理由在**登记表**这一侧，不在政策门：政策门只会把它读成"未知工具"，'
+          + '而未知工具是**可以被人批准**的 —— 于是一个没登记过的 MCP 服务器'
+          + '只要有人点一次"批准"就能用。'
+          + '⇒ 要么把这条连接器登记进声明表，要么检查 DSH 插件配置里的 serverName '
+          + '与 Legion 的 connectorId 是否**逐字相同**（这是部署契约，本仓无法验证）',
+        )
+      }
     }
 
     // ② 认不出 ⇒ **不插话**，原样交给政策门。

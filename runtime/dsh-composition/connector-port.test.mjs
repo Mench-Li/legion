@@ -282,10 +282,18 @@ test('④d2 ★★★ 一条**字面**声明与别人的**推导**名字撞车 �
   )
 })
 
-test('④f ★★ 同一个连接器的裸名与公开名**不会**被算成"两个连接器在抢"', () => {
-  // 自我撞车：`github` 同时声明 `x` 与 `mcp__github__x`
-  // ⇒ 两个名字都归 `github`，`owners` 里是 `['github']` 而不是 `['github','github']`。
-  const p = connectorPortFromEnv({ env: withEnv(JSON.stringify([
+test('④f ★★★ 同一连接器里裸名 + 公开名 = **混写** ⇒ 装配期就拒（2026-09-24 裁决**取代**旧读数）', () => {
+  // ★ 本用例**钉的是新读数**，旧读数在这里被**取代**（不是被删掉不提）：
+  //   旧读数（本批之前）：`github` 同时声明 `x` 与 `mcp__github__x` ⇒
+  //     两个名字都归 `github`，`owners` 里是 `['github']` ⇒ 不算"两个连接器在抢"，
+  //     于是**通过**。
+  //   新读数（§5 第 22 条裁决「声明写裸名」+「禁混写」）：**拒**。
+  //     理由不是"重名"这个词，而是这两行在**判定期指向同一个工具**
+  //     （`declaredToolNames` 两个都认）⇒ 谁生效只取决于列表顺序，
+  //     后写的那一条的 capabilities 与策略是**死配置**。
+  //   ★ 旧用例真正想守的规则（"两个连接器抢同一个名字"）**没有**丢：
+  //     它由 ④d2 钉着（`CONNECTOR_PORT_CODES.AMBIGUOUS_TOOLS`）。
+  const env = withEnv(JSON.stringify([
     decl({
       connectorId: 'github',
       tools: [
@@ -293,10 +301,12 @@ test('④f ★★ 同一个连接器的裸名与公开名**不会**被算成"两
         { name: 'mcp__github__x', capabilities: ['repo:read'] },
       ],
     }),
-  ])) })
-  assert.equal(p.state, 'configured', '同一个连接器的两个名字不该被判成重名冲突')
-  assert.equal(p.resolveConnectorId({ toolName: 'mcp__github__x' }), 'github')
-  assert.equal(p.resolveConnectorId({ toolName: 'x' }), 'github')
+  ]))
+  assert.throws(
+    () => connectorPortFromEnv({ env }),
+    (e) => e.code === CONNECTOR_PORT_CODES.BAD_DECLARATION,
+    '混写必须在**装配期**被拒（拒的是 BAD_DECLARATION —— 声明没过 declareConnector 的校验）',
+  )
 })
 
 test('④e ★★ 嵌套命名空间：`connectorId` 自己含 `__` 时也要认得出', () => {
@@ -330,4 +340,26 @@ test('⑤b ★★ 声明表是冻结的（下游改不动它）', () => {
   const p = connectorPortFromEnv({ env: withEnv(JSON.stringify([decl()])) })
   assert.equal(Object.isFrozen(p), true)
   assert.equal(Object.isFrozen(p.declarations), true)
+})
+
+
+test('④g ★★★ 谓词端口 `connectorShape` 的读数（§5 第 23 条）', () => {
+  const p = connectorPortFromEnv({ env: withEnv(JSON.stringify([
+    decl({ connectorId: 'github', tools: [{ name: 'x', capabilities: ['repo:read'] }] }),
+  ])) })
+  assert.equal(p.connectorShape({ toolName: 'mcp__github__x' }).shaped, true)
+  assert.equal(p.connectorShape({ toolName: 'mcp__github__x' }).namespaceKnown, true,
+    '命名空间已声明 ⇒ namespaceKnown=true（此时 resolver 认得出，走不到这一步）')
+  assert.equal(p.connectorShape({ toolName: 'mcp__evil__x' }).shaped, true)
+  assert.equal(p.connectorShape({ toolName: 'mcp__evil__x' }).namespaceKnown, false)
+  assert.equal(p.connectorShape({ toolName: 'git-status' }).shaped, false,
+    'DSH 核心工具名**不是** MCP 公开名形状 ⇒ 不许被这条判据收走')
+  assert.deepEqual({ ...p.connectorShape({}) }, { shaped: false, namespaceKnown: false })
+})
+
+test('④h ★ 缺席面：没有声明表 ⇒ `connectorShape` 也是 `null`', () => {
+  const absent = connectorPortFromEnv({ env: {} })
+  assert.equal(absent.resolveConnectorId, null)
+  assert.equal(absent.connectorShape, null,
+    '不许给一个恒 false 的桩 —— 那会让"没配"与"配了但认不出"在读数上长得一样')
 })

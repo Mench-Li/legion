@@ -1395,3 +1395,21 @@ git status          → ## main...origin/main   （干净、与远端同步）
 ★ 纪律：**先量、先存、再删**——这次删掉的 43 个分支里，凡是"唯一副本"的内容
 （2 个存档提交）都被先提交到分支上；凡是"其实没内容"的读数（`_prt009v` 的 112 处）都被先验证掉。
 
+#### 9.5.5 盘上残留：49 个空壳目录已清，**1 个目录故意不动**
+
+`git worktree remove` 在 Windows 上把**内容删干净了，但留下了空目录**
+（`.legion-worktrees/` 41 个、`.worktrees/` 8 个）⇒ 已逐个核对"0 个文件且无 `.git`"后删除 **49 个**。
+
+★ 唯一保留的是 **`.worktrees/_prt-handoff`（2742 个文件 / 129.6 MB）**，两个理由：
+
+1. 它**不是 git 工作树**（没有 `.git`，也不在 `git worktree list` 里）——
+   它是散落的试验脚本堆（`mutate-*.mjs` / `probe-*.mjs`，9/11–9/21）；
+2. ★★ 里面有一个 **`user-main-checkout-backup/`**：**2026-09-17 那份主检出人工备份** ——
+   `local-changes.patch`（**27.8 MB**）、`HEAD-before.txt`、`status-before.txt`、
+   `files/` 里 10 个当时文件的副本、`untracked/` 里的 `*.UNTRACKED-USER-COPY` 等。
+   **这 32 个文件在 main 里一个都没有**（逐个哈希比对：相同 0 / 不同 0 / main 缺失 32）。
+
+> ⇒ 这是**业主自己的备份**，不是陈旧分支。**本会话不擅自删**（要删请说一句）。
+> 注：它俩的同一份材料曾经也在 `wip/main-checkout-2026-09-16`（`67bb71b`）那个分支上，
+> 那个分支已按令删除——**所以这份盘上备份现在是它唯一的副本**。
+

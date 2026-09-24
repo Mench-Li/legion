@@ -71,6 +71,15 @@ export const SLICES = [
       'stagesFromHubPayload',
     ],
   },
+  {
+    id: 'PRT-1007/2',
+    title: '子实例/守护的文件命名族',
+    // 'a2cfffb' = 片 2 落地**之前**的那个提交（同片 1：基准必须不可变，不许写 'HEAD'）。
+    from: 'a2cfffb',
+    fromFile: 'plugins/src/index.ts',
+    toFile: 'plugins/src/spacePaths.ts',
+    names: ['childLogFile', 'statusFileNames'],
+  },
 ]
 
 /** 从源码文本里取一个函数/接口的**完整文本**（`export function NAME(` 或 `export interface NAME {` 到配对的收尾花括号）。 */

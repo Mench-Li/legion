@@ -597,7 +597,7 @@ hub 起来了：true（db=true）
 
 **⚠️ 仍未接的三处**（一处都不许读成"审计完整性已达成"）：
 
-1. **`dispatched` / `result` 两种记录今天没有观察点**：强制面只看得到"决定已作出"
+1. **`dispatched` / `result` 两种记录今天没有观察点**（★ 订正 2026-09-24：本条写于第 118 轮第八轮；**`dispatched` 已在第十七轮接上观察点**，所以"两种"今天只剩 **`result`** 一种 —— 原文保留不改写，读完本条请接着读 §2.2.1）：强制面只看得到"决定已作出"
    （`pre-execute` 那一条通知），看不到"派发了没有、结果是什么" ⇒ 车道**只产 `decision`
    那一种**。要接它们得先有一个**执行结果**观察点，而那是一个新的缝、不是接线问题 ——
    写成施工项而不是随手拿 `elapsedMs` 凑一个 `result`。
@@ -613,7 +613,7 @@ hub 起来了：true（db=true）
 （装配期挂 `onDecision` 没有顶动任何既有读数）；`reachability --diff` 与基线一致（新模块
 经组合根可达，基线不需要新条目）；§9 链仍是"无硬断 + 唯一软缺口 L9 + 断点全部有归属"。
 
-**★★ 生产路径的验收读数**（`runtime/dsh-composition/spool-writer-wiring.test.mjs`，**5 例**）：
+**★★ 生产路径的验收读数**（`runtime/dsh-composition/spool-writer-wiring.test.mjs`，**5 例**；★ 订正 2026-09-24：补 T3② 与 T4 的三处反例后为 **9 例**）：
 **真的**桥 + **真的**按 Run 身份安装 + 组合根**逐字相同**的三个注入点 ⇒ 一次工具决定
 落进**那个 Run** 的车道文件；一个进程里两个 Run 各写各的（§14.5 那处设计的验收点）；
 身份里没有 `runId` 时**判定照常**而账一条不写（具名 `NO_RUN_ID`，不回落）；
@@ -2076,8 +2076,8 @@ F-15 的"最后一根线"经**变异验证**确认已接上（`🟡→✅`）；
 |---|---|---|---|
 | **T1** | ★ 我欠的账：PRT-1007 台账行只写片 1，行数也陈旧 | `PRT-PROGRESS.md:133` | `progress-check`；**不复制计数**，指台账 | ★ **✅ 已收（`255b7bd`）** —— 台账行已补片 2 |
 | **T2** | PRT-1007 片 3+：给 `spaceWorker` 立缝再搬一族 | `plugins/src/index.ts:486-2668` | `probe-slice-verbatim` 登记片 3（`from` 用**不可变提交**）；★ 回引写**删除点原位置** |
-| **T3** | §5 第 28 条残余：runId 绑在**按 Run 安装**的缝 | `root-row.mjs:674` 一带 | ① 车道目录**按 Run 变**；② 反例：绑进程级单例 ⇒ Run #2 写进 Run #1 的台账 |
-| **T4** | §2.2 三种未定记录形状（`dispatched`/`result` 无写入侧观测点、`attemptId` 为 `null`） | 记录层 | 与 T3 同批出反例 |
+| **T3** | §5 第 28 条残余：runId 绑在**按 Run 安装**的缝 | `root-row.mjs:674` 一带 | ① 车道目录**按 Run 变**；② 反例：绑进程级单例 ⇒ Run #2 写进 Run #1 的台账  ★ **✅ 已收** —— ① 生产路径已有（`spool-writer-wiring.test.mjs` ②/⑤：一个进程两个 Run 各写各的、注入点按事件取 Run）；本轮补的是 **②反例**（新增同文件 ⑥）：在**同一次运行**里把"装配期绑死"的错法摆出来 —— Run #2 的两条记录（`decision`+`dispatched`）全部落进 **Run #1** 的车道、账上 `runId` 写着错的 `run-first`、而 Run #2 自己的车道**根本不存在**（不是空文件）；同一条驱动换成生产接线则各归各位（反向对照在同一用例内）。这就是 §14.5 那处设计问题在读数上的形状：**它读起来完全合理，只是记在别人的账上**。 |
+| **T4** | §2.2 三种未定记录形状（`dispatched`/`result` 无写入侧观测点、`attemptId` 为 `null`） | 记录层 | 与 T3 同批出反例  ★ **✅ 已收（两处）** —— ⚠️ 本行的括注**已被后续轮次顶动**：它写"三种未定记录形状（`dispatched`/`result` 无写入侧观测点、`attemptId` 为 `null`）"，而 **`dispatched` 已在第 118 轮第十七轮接上观察点**（一条 `allow` 现在产两条：`decision` + `dispatched`）⇒ 今天只剩**两处**。本轮按两处出反例（`spool-writer-wiring.test.mjs` ⑦/⑧）：⑦ 把"缺的不是词表"与"生产一个都不产"两半摆在一起 —— spool **认识** `result` 并接受一条手写的 `result` 记录，而真桥走 `allow`/`deny` 两条路产出的 kind 只有 `['decision', 'dispatched']`，且**每一行都写着 `resultStatus: 'none'`**⇒「结果还没回来」与「根本没人写结果」在账上是同一行；⑧ 钉住 `attemptId` 今天恒为 `null` 且是**显式的** null（键在，与"缺键"不是同一件事），并把行的键集与 `toolCallRowOf` 对齐（形状漂了就在这里红）。★ `result` 与 `attemptId` 的施工留待真行可读时一并做（§2.2 未接三处的第 1、3 条）。 |
 | **T5** | 16 条 ✅ 行做**声称级**核对 | 权威表 ✅ 行 | 每行一条可复跑判据，否则如实降级"未核" |
 | **T6** | 引用 **0 条路径**的 4 行（F-02/F-12/F-23/F-25）另找核法 | — | 一种不依赖"引用路径"的核法 |
 | **T7** | 决策简报的台账读数行**不在** ⑰ 的 `TALLY_DOCS`（只有 4 份文档） | `boundary-facts.test.mjs:1502` | 登记进去，或明确写下"刻意不纳入" | ★ **✅ 已收（登记进去）** —— 先做**普查**（新增 `scripts/probes/census-tally-copies.mjs`）：docs/scripts/runtime 下带分档串的文档共 **6** 份，未纳管的**正好 2 份**（不只是简报那一份）：`docs/DECISION-BRIEF.md`（**现行**值 ⇒ 登记进 `TALLY_LIVE`）与 `docs/superpowers/prt/PRT-SESSION-REPORT-2026-09-17.md`（**历史**留档 ⇒ 登记进 `TALLY_FROZEN`）；两份都进 `TALLY_DOCS`。★ 普查还自查"本脚本的名单 == ⑰ 的名单"，防两份名单各自漂。判据：`boundary-facts.test.mjs` ⑰（9/9；整个套件 77/77）+ 普查 exit 0；变异 `_probe-t7-tally-copies.mjs` **三个方向**都咬住（改错数 8/1、删历史登记 8/1、新来一份未登记文档 ⇒ 普查红） |

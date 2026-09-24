@@ -40,7 +40,12 @@ import {
   createSpoolObserver,
   createToolCallSpoolWriter,
 } from '../toolcall/spool-writer.mjs'
-import { readSpoolRecords, spoolFileFor } from '../toolcall/spool.mjs'
+import {
+  TOOLCALL_SPOOL_KINDS,
+  appendSpoolRecord,
+  readSpoolRecords,
+  spoolFileFor,
+} from '../toolcall/spool.mjs'
 
 /** 进程级上下文——**故意**与每一次 Run 的覆盖都不同（否则"没覆盖"也会看起来对）。 */
 const PROC_CTX = Object.freeze({
@@ -247,5 +252,133 @@ test('⑤ ★ 组合根的注入点真的是**按事件取 Run**（防"改回装
     assert.equal(f1.ok, true)
     assert.equal(f2.ok, true)
     assert.notEqual(f1.file, f2.file, '两个 Run 写进了同一个文件 ⇒ Run 号不是按事件取的')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+// ============================================================================
+// **T3② / T4**（2026-09-24）：三处**反例**。
+//
+// 前面五例证明的是"按事件取 Run 的接线是对的"。而"对"这个读数有一个老问题：
+// 它在**错法**下会不会绿，用例自己没说。所以下面三例把错法与事实的差别
+// **摆进同一次运行**里 —— 一处是 T3 要的"装配期绑死 ⇒ Run #2 写进 Run #1 的台账"，
+// 两处是 T4 那三种记录形状里今天仍没接的两种（`result` 无生产者、`attemptId` 恒 null）。
+// ============================================================================
+
+test('⑥ ★★★（T3② 反例）装配期把 Run 绑死 ⇒ Run #2 的账写进 Run #1 的车道，而 Run #2 自己的车道不存在', async () => {
+  const dir = tempDir()
+  const okDir = tempDir()
+  try {
+    // ★ 这是**故意的错法**：`runIdOf` 不看事件，装配期就把 Run 定死。
+    //   它与 `writerWiredTo()` 只差这一个函数体 —— 于是两份读数的差别只来自这一处。
+    const firstRun = 'run-first'
+    const wrongWriter = createToolCallSpoolWriter({
+      dataDir: dir,
+      runIdOf: () => firstRun,
+      rowOf: (event, runId) => toolCallRowOf(event.projection, {
+        decision: event.decision?.kind,
+        decisionSource: (typeof event.source === 'string' && event.source.trim() !== '')
+          ? event.source
+          : 'pre-execute',
+        reason: event.decision?.reason ?? event.reason ?? null,
+        runId,
+      }),
+    })
+    const wrongBridge = createEnforcementBridge({
+      context: PROC_CTX,
+      decide: () => ({ kind: 'allow' }),
+      onDecision: createSpoolObserver(wrongWriter, { allowKind: DECISION_KINDS.ALLOW }),
+    })
+    await driveOnce(wrongBridge, execOf(agentWithRun('run-second'), 'call-second'))
+
+    // ① Run #2 的两次写入**全部**落在 Run #1 的车道里
+    const stolen = readSpoolRecords({ file: spoolFileFor({ dataDir: dir, runId: firstRun }) }).records
+    assert.deepEqual(stolen.map((r) => r.kind), ['decision', 'dispatched'])
+    assert.equal(stolen[0].row.callId, 'call-second')
+    // ★ 而且账上写着**错的 Run 号**：这一行说的是 `run-first`。
+    //   这正是那处缺陷最贵的地方 —— 它读起来完全合理，只是记在了别人的账上。
+    assert.equal(stolen[0].row.runId, firstRun,
+      '绑死时账上的 runId 会跟着错法一起错；若这里断言失败，说明"错法"没有真的绑死')
+    // ② Run #2 自己的车道**根本不存在**（不是"空文件"，是没这个文件）
+    assert.equal(readSpoolRecords({ file: spoolFileFor({ dataDir: dir, runId: 'run-second' }) }).present, false)
+
+    // ③ ★ 反向对照：同一条驱动、换成生产的"按事件取" ⇒ 两个 Run 各归各位。
+    //    没有这一段，上面那些断言在一个"两个 Run 都不写"的实现下同样绿。
+    const { bridge: okBridge } = bridgeFor(okDir)
+    await driveOnce(okBridge, execOf(agentWithRun('run-second'), 'call-second'))
+    assert.equal(readSpoolRecords({ file: spoolFileFor({ dataDir: okDir, runId: firstRun }) }).present, false,
+      '生产接线在只跑过 Run #2 时不该有 Run #1 的车道')
+    const own = readSpoolRecords({ file: spoolFileFor({ dataDir: okDir, runId: 'run-second' }) }).records
+    assert.deepEqual(own.map((r) => r.kind), ['decision', 'dispatched'])
+    assert.equal(own[0].row.runId, 'run-second')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+    rmSync(okDir, { recursive: true, force: true })
+  }
+})
+
+test('⑦ ★★★（T4 反例之一）`result` 在词表里、在生产路径上**一个都不产**，而每行都写着 resultStatus:none', async () => {
+  const dir = tempDir()
+  try {
+    // ① 词表层：spool **认识** `result`，并会按它的必填字段校验。
+    //    ⇒ 缺的不是词表。这一半必须与下一半一起读，否则"result 恒 0 行"
+    //      会被读成"还没有结果发生"。
+    assert.equal(TOOLCALL_SPOOL_KINDS.RESULT, 'result')
+    const file = spoolFileFor({ dataDir: dir, runId: 'run-hand' })
+    const hand = appendSpoolRecord({
+      file,
+      record: { kind: TOOLCALL_SPOOL_KINDS.RESULT, row: { callId: 'hand-1', status: 'ok' } },
+    })
+    // ★ 断言用"**写进去再读回来**"，不用返回值的字段名（那是实现细节；
+    //   本节初版就写错过一次：`appendSpoolRecord` 返回的是 `{file, bytes}`，没有 `ok`）。
+    assert.ok(hand.bytes > 0, '写入没有字节数 —— 返回值形状变了，读一下这个函数的契约')
+    const back = readSpoolRecords({ file })
+    assert.equal(back.complete, true, `词表说它认识 result，写入却被拒了：${JSON.stringify(back.refusals)}`)
+    assert.deepEqual(back.records.map((r) => r.kind), [TOOLCALL_SPOOL_KINDS.RESULT])
+    assert.equal(back.records[0].row.status, 'ok')
+
+    // ② 生产层：真桥走 `allow` 与 `deny` 两条真实路径 ⇒ 一个 `result` 都没有
+    const kinds = new Set()
+    const statuses = new Set()
+    for (const [runId, decide, callId] of [
+      ['run-w-allow', () => ({ kind: 'allow' }), 'w1'],
+      ['run-w-deny', () => ({ kind: 'deny', reason: '越界' }), 'w2'],
+    ]) {
+      const { bridge } = bridgeFor(dir, { decide })
+      await driveOnce(bridge, execOf(agentWithRun(runId), callId))
+      for (const r of readSpoolRecords({ file: spoolFileFor({ dataDir: dir, runId }) }).records) {
+        kinds.add(r.kind)
+        statuses.add(r.row.resultStatus)
+      }
+    }
+    assert.ok(!kinds.has(TOOLCALL_SPOOL_KINDS.RESULT),
+      `生产路径上出现了 result 行：${[...kinds].join(', ')} —— 那条缝要是接了，本节与 §2.2 都要改`)
+    assert.deepEqual([...kinds].sort(), ['decision', 'dispatched'])
+    // ③ 最贵的一半：每一行都带着 `resultStatus: 'none'` ⇒
+    //    「结果还没回来」与「根本没人写结果」在账上是**同一行**。
+    assert.deepEqual([...statuses], ['none'])
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('⑧ ★★（T4 反例之二）`attemptId` 今天恒为 `null`，且是**显式的** null（键在）而不是缺键', async () => {
+  const dir = tempDir()
+  try {
+    const { bridge } = bridgeFor(dir)
+    await driveOnce(bridge, execOf(agentWithRun('run-att'), 'att-1'))
+    const rows = readSpoolRecords({ file: spoolFileFor({ dataDir: dir, runId: 'run-att' }) }).records
+    assert.ok(rows.length >= 1)
+    // ★ 契约：行的键集与 `toolCallRowOf` **一致**（不是"我们记得的那几个"）。
+    //   把这条钉住，字段改名/增删会在这里红，而不是在某个下游读数的"看起来对"里。
+    const expected = Object.keys(toolCallRowOf(
+      { callId: 'x', toolName: 'y', arguments: {}, canonicalHash: 'h' },
+      { decision: 'allow', decisionSource: 'pre-execute' },
+    )).sort()
+    for (const r of rows) {
+      assert.deepEqual(Object.keys(r.row).sort(), expected, '行的键集与 `toolCallRowOf` 不一致（形状在漂）')
+      // ★ 显式 null 与缺键在 JSON 里长得不一样：缺键读起来像"这次没有 attempt"，
+      //   而真相是"这一版还没把 attemptId 接上来"（T4 登记，下一轮连同 result 一起做）。
+      assert.ok('attemptId' in r.row, '缺 attemptId 键：读起来与"这次没有 attempt"一样')
+      assert.equal(r.row.attemptId, null)
+      assert.equal(r.row.runId, 'run-att')
+    }
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })

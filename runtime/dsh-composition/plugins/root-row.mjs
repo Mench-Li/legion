@@ -702,29 +702,36 @@ export function createRootRow({
         },
         // 记账坏了要**看得见**，但不许影响判定：这里只记一行日志。
         //
-        // ⚠️ 观测点**自己要去重**，理由是本轮实测出来的一条：`onDecision` 有**两个**发射方
-        //   （`assemble.mjs` 把同一个回调同时给了桥与 pre-execute 插件），而 pre-execute
-        //   那一条**按设计**没有行的形状（它既不带投影、键名也是 `exec` 而不是 `execution`）
-        //   ⇒ **每一次工具调用**都会多出拒绝。逐条告警会把日志淹掉，
-        //   而"每次都告警"与"没有告警"在值班眼里一样没用。
+        // ⚠️ 观测点**自己要去重**，理由是本轮实测出来的一条：**同一个回调有三处发射方**
+        //   （`assemble.mjs` 把消费者这一个 `onDecision` 分别给了三处），
+        //   而其中**只有一处**带得出一个工具调用级的行：
         //
-        //   ★ 而它也**不是丢账**：同一次决定已经从桥那一条（带投影的）记进去了 ——
-        //     这条只是"另一个通知点也想记，但它没有行的形状"。
+        //   | # | 谁发 | 载荷 | 落在写入侧的哪一格 |
+        //   | --- | --- | --- | --- |
+        //   | 1 | 桥 —— 它在**出口包装**过（`tool-request.mjs:1094` 的 `projectionFor`：
+        //         `{...e, canonicalHash, projection: got.ok ? got.projection : null}`） | 有 `execution` | ✅ **记进车道的就是这一条** |
+        //   | 2 | pre-execute 插件（`assemble.mjs:298` 的 `createPreExecutePlugin` 拿的是**裸**回调） | `{exec, decision, claimed}` —— 键名是 `exec` | ❌ `NO_RUN_ID`，**每一次工具调用**一次 |
+        //   | 3 | 审批应答器的 `onOutcome`（`assemble.mjs:313` 的 `createApprovalAnswererPlugin`，同样是裸回调） | `{req, outcome, reason, elapsedMs}`（`enforcement.mjs:610` 的 `onOutcome`） | ❌ `NO_RUN_ID`，每次审批有了结局时一次 |
         //
-        // ★★★ 第 118 轮第十七轮**校订**（实测，不照注释）：上一版这里写的是
-        //   "pre-execute 那一条会得到一次 `NO_PROJECTION`"。**实测是 `NO_RUN_ID`**
-        //   （`runtime/toolcall/spool-writer.test.mjs` ⑫ 逐字用那个载荷形状钉住）：
-        //   守卫顺序是**先取 Run 号**，而那个载荷里 Run 号取自 `event.execution`
-        //   —— 它的键叫 `exec` ⇒ 先卡在 Run 号上。
+        //   ⇒ 逐条告警会把日志淹掉，而"每次都告警"与"没有告警"在值班眼里一样没用。
         //
-        //   ⇒ 于是这套日志里会出现**两种**码，来源不同，都必须解释：
-        //     · `NO_RUN_ID` ← pre-execute 插件的第二个通知点（键名不同，取不到 Run）；
-        //     · `NO_PROJECTION` ← 桥自己的**可用性**那几条（`enforcement.mjs:484/495/501/504`：
-        //       有 `execution`（Run 号取得到）、但没有投影）。
+        //   ★ 2 与 3 **不是丢账**：同一次决定已经由 #1 那一条（带投影的）记进去了 ——
+        //     它们只是"另一个通知点也想记，但它没有行的形状"。
         //
-        //   > 两者的**处置**相同（不写、不丢账、只告警一次），所以这个差别不改变行为；
-        //   > 它改变的是**值班看到的那一行理由**。而"理由指错了一格"正是这个仓库
-        //   > 反复量到的那种账：*看起来有解释，只是解释的是别的东西*。
+        // ★★★ 第 118 轮第十七 / 十九轮**两次校订**（都靠实测，不靠读一行推）：
+        //   ① 上一版写"pre-execute 那一条会得到一次 `NO_PROJECTION`" —— **实测是 `NO_RUN_ID`**
+        //      （`runtime/toolcall/spool-writer.test.mjs` ⑫ 逐字用那个载荷形状钉住）。
+        //   ② 上一版把 `NO_PROJECTION` 归给"桥的可用性那几条"（策略门不可用 / 返回垃圾 /
+        //      拒绝没理由 —— 都在 `enforcement.mjs` 里，走的是同一个包装）
+        //      —— **也不对**：它们走的就是 #1 那条包装，投影得出来时**照样写进车道**。
+        //      真正的 `NO_PROJECTION` 只有一种来法：包装里 `projectionFor(execution)` 失败
+        //      （`got.ok === false`）—— Run 号取得到、但**投影不出这一行**。
+        //
+        //   ⇒ 于是这套日志里会出现**两种**码，处置**不同**，这是重点：
+        //     · `NO_RUN_ID`（#2 / #3）＝ 另一个通知点没有行的形状 —— **不是丢账**；
+        //     · `NO_PROJECTION`（#1 投影失败）＝ **这一次决定真的没进车道** ——
+        //       它是"宁可拒绝也不猜一行"那条纪律的代价。
+        //       ★ 值班要看的是 `NO_PROJECTION`，而不是"又吵了一次"。
         onReading: (() => {
           if (typeof ctx.logger?.warn !== 'function') return null
           const warned = new Set()
@@ -732,14 +739,14 @@ export function createRootRow({
             if (warned.has(reading.code)) return
             warned.add(reading.code)
             ctx.logger.warn(`${ROOT_ROW_PLUGIN_NAME} 的车道写入侧：${reading.code}——${reading.reason}`
-              + ((reading.code === TOOLCALL_SPOOL_WRITER_CODES.NO_PROJECTION
-                || reading.code === TOOLCALL_SPOOL_WRITER_CODES.NO_RUN_ID)
-                ? '（★ 这一条**按设计**会出现：桥与 pre-execute 插件共用这一个回调，'
-                  + '而只有桥那一条带得出一个工具调用级的行。同一个决定已由**带投影**那一条'
-                  + '记进去了，所以这里不是丢账，是"另一个通知点没有行的形状"。'
-                  + '★ 两种码对应两个不同的通知点（`NO_RUN_ID`=载荷键名是 `exec`、取不到 Run 号；'
-                  + '`NO_PROJECTION`=有 Run 号但没投影）。只告警一次。'
-                : '（同一种坏法只告警一次。）'))
+              + (reading.code === TOOLCALL_SPOOL_WRITER_CODES.NO_RUN_ID
+                ? '（★ 这一条**按设计**会出现：另两个通知点（pre-execute 插件、审批应答器）'
+                  + '在那一个回调上，而它们没有行的形状（载荷键是 `exec` / `req`）。'
+                  + '同一个决定已由**带投影**那一条记进去了，所以这里不是丢账。只告警一次。'
+                : reading.code === TOOLCALL_SPOOL_WRITER_CODES.NO_PROJECTION
+                  ? '（⚠️ **这一条要看**：Run 号取到了、但投影不出这一行 ⇒ '
+                    + '**这次决定没有进车道**。它是"宁可拒绝也不猜"的代价，不是被补记了。只告警一次。）'
+                  : '（同一种坏法只告警一次。）'))
           }
         })(),
       })

@@ -89,7 +89,7 @@ function bridgeFor(dataDir, { decide = () => ({ kind: 'allow' }) } = {}) {
   const bridge = createEnforcementBridge({
     context: PROC_CTX,
     decide,
-    // ★ 与 `root-row.mjs:808` 逐字同一条：**放行时**多记一条 `dispatched`。
+    // ★ 与 `root-row.mjs:815` 逐字同一条：**放行时**多记一条 `dispatched`。
     onDecision: createSpoolObserver(writer, { allowKind: DECISION_KINDS.ALLOW }),
   })
   return { bridge, writer }

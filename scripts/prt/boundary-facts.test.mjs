@@ -628,11 +628,28 @@ test('⑫b ★★ 控制：把**历史上那次真实位移的旧坐标**钉上�
   //   > 而这一次的位移**与这个调用点毫无关系**——它不是接线改动，
   //   > 是"别的地方要多读一个环境变量"。一个手钉行号的成本，
   //   > 就是**这个文件被任何理由改动过**的次数。
+  //
+  //   ★★★ ⑦ `:724`（第 118 轮第十一轮的正确答案）→ **`:754`**（2026-09-23
+  //      **第 118 轮第十七 / 十九轮**：给 PRT-610 的车道补上 `dispatched` 那一条记录
+  //      —— 本文件里 +1 行 import、`onDecision` 那一段 +20 行注释，
+  //      另外在 `onReading` 上方把"同一个回调**三处**发射方"那张表写清楚（再 +7 行））。
+  //      ⇒ "上一轮的正确答案变成新的旧坐标"第七次成立：下面那个 `injected` 钉的就是 **724**。
+  //
+  //   ★★★ **而这一次位移是这一节最该记的一笔**：`checkPinnedCitations` 的窗口是
+  //      `CITE_SYMBOL_WINDOW = 25`（`scripts/prt/boundary-facts.mjs:1039`）。
+  //      本轮这个文件被**同一个理由**改了两次：
+  //        · 第一次下移 **23 行 ≤ 25** ⇒ **那条判据对这个真位移完全没有反应**；
+  //        · 合计下移 **30 行 > 25** ⇒ 如果某处引文还写着 724，它**会**说话。
+  //      ⇒ 窗口**以内**那一段是真实存在的盲区，而它恰恰是**日常施工**的幅度
+  //        （加一个 import、写一段注释）。
+  //
+  //      > 一条窗口 ±25 行的判据，与一条"只在位移超过 25 行时才说话"的判据，
+  //      > 是同一个东西 —— 而小于 25 行的位移，正是**每一轮**都会发生的那一种。
   const real = resolve(REPO, 'runtime/dsh-composition/plugins/root-row.mjs')
   const lines = readFileSync(real, 'utf8').split('\n')
   // 先核载具本身（载具坏了，下面的结论就不成立）
-  assert.match(lines[723], /installEnforcementRoot\(\{/,
-    '第 724 行不再是那个调用点 ⇒ 载具失效，先重写这个控制')
+  assert.match(lines[753], /installEnforcementRoot\(\{/,
+    '第 754 行不再是那个调用点 ⇒ 载具失效，先重写这个控制')
   assert.ok(!/installEnforcementRoot\(\{/.test(lines[625]),
     '第 626 行**又**是那个调用点了 ⇒ 旧坐标这一层失去对象，先重写这个控制')
   assert.ok(725 <= lines.length,
@@ -641,7 +658,7 @@ test('⑫b ★★ 控制：把**历史上那次真实位移的旧坐标**钉上�
   // ★ 用**同一份**核法（不重抄逻辑）去钉旧坐标（= 上一轮的正确答案）
   const injected = Object.freeze([Object.freeze({
     file: 'runtime/dsh-composition/plugins/root-row.mjs',
-    line: 626,
+    line: 724,
     text: 'const installed = installEnforcementRoot({',
   })])
   const r = checkPinnedCitations(injected)
@@ -653,7 +670,7 @@ test('⑫b ★★ 控制：把**历史上那次真实位移的旧坐标**钉上�
   //    少了这一条，"永远报红"的实现也能通过上面那个断言。
   const good = Object.freeze([Object.freeze({
     file: 'runtime/dsh-composition/plugins/root-row.mjs',
-    line: 724,
+    line: 754,
     text: 'const installed = installEnforcementRoot({',
   })])
   const g = checkPinnedCitations(good)

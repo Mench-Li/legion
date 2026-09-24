@@ -40,6 +40,14 @@
 //
 //   * `cd plugins && npm test`（先 build 再跑 38 个套件）**在本机跑不了** ——
 //     build 要 DSH 检出里有 `packages/preset/agent-presets`（`46a7f68` 上没有），
+//     ★★ 订正 2026-09-24（T10）：DSH **把原来的包拆成了两个** —— `packages/preset/agent-preset`
+//        （`@deepseek-ai/dsh-agent-preset`，被挂载的类，有 private `config`）与
+//        `packages/preset/agent-preset-registry`（`@deepseek-ai/dsh-agent-preset-registry`，
+//        带 `mount` 的注册表，`export default AgentPresetRegistry` —— 它才是本插件的依赖）。
+//        ★ 我第一版把这次迁移写成了"DSH 改了名单数"，**是错的**：单数包不是同一个东西，
+//        按它迁移会得到 `TS2339 Property 'mount' does not exist on type 'never'`
+//        （`AgentPresetRegistry & AgentPreset` 因两边都有 private `config` 退化成 `never`）。
+//        上面那句是**当时**的读数，保留不可改写。
 //     而 `plugins/lib/` 是 **gitignore** 的（产物不入库）⇒ 仓库里没有可跑的旧产物。
 //     ★ 于是"六个函数在新位置**执行**行为相同"**没有被执行过**；
 //     它目前只由"文本逐字相同 + 类型检查不多一条错"支撑。

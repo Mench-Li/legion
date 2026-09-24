@@ -28,8 +28,13 @@
 //
 // ⚠️ 诚实边界：本量具证明的是**文本搬运的保真**，它**不**证明"跑起来一样"——
 //    后者要 `cd plugins && npm test`（先 build 再跑 38 个套件），
+//    ★★ 订正 2026-09-24（T10）：**本机现在跑得了**，而实测的套件数不是 38：
+//       `cd plugins && npm test` ⇒ **409 例 / 10 套件 / 0 失败**（exit 0）。
 //    而 build 需要 DSH 检出里有 `packages/preset/agent-presets` **且**本机有 typescript；
 //    本机当前**两样都缺**（见台账 §10.7）。所以这一条是"可复跑但当前不可跑"的判据，
+//    ★★ 订正 2026-09-24（T10）：**两样都不缺了**（typescript 在检出里，`plugins/lib` 也在），
+//       真正挡住的是 `build-external-package.mjs` 里一条**过期路径**（DSH 把 `dsh-agent-presets`
+//       拆成了 `dsh-agent-preset` + `dsh-agent-preset-registry`）⇒ 已按注册表包迁移，行为级可跑了。
 //    量具把这件事**印出来**而不是假装它跑过了。
 // ============================================================================
 
@@ -163,7 +168,8 @@ if (isMain) {
       for (const p of s.problems) console.log(`      ${p}`)
     }
     console.log(r.ok ? '\n⇒ 四问全过' : '\n⇒ 有不合格的片')
-    console.log('⚠️ 边界：本量具只证明**文本搬运保真**；"跑起来一样"要 `cd plugins && npm test`（需 DSH 检出 + typescript，本机当前缺）')
+    console.log('⚠️ 边界：本量具只证明**文本搬运保真**；"跑起来一样"要 `cd plugins && npm test`'
+  + '（2026-09-24 T10 起本机可跑：409 例 / 10 套件 / 0 失败）')
   }
   process.exit(r.ok ? 0 : 1)
 }

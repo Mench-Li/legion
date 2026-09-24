@@ -2047,3 +2047,59 @@ test('⑱d ★★ 反面控制：旧位置**还留着实现** ⇒ 必须报 ②�
   assert.equal(r.ok, false, '旧位置还留着实现却判过 ⇒ ② 是装饰')
   assert.match(r.slices[0].problems.join(' | '), /②/, '没报 ②（旧位置留了实现）')
 })
+
+// ── 第 119 轮（T7/T8/T10）：**判据自己也得有人跑** ──────────────────────────
+//
+//   2026-09-24 这两天新增的三条量具 —— 台账抄写普查（T7）、分支处置账（T8）、
+//   构建目标路径（T10）—— 落地时**只被注释与文档引用**：`grep` 得到的是
+//   "有一条判据叫这个名字"，而不是"有一个地方会执行它"。
+//
+//   > "写了判据"与"判据在跑"是两件事。只被引用的判据，
+//   > 在有人读到那句引用之前，与不存在是同一种东西 ——
+//   > 而它制造的安心，恰恰是"这次已经盯住了"。
+//
+//   ⇒ 本节把它们**挂进电池**：每条真跑一次、期望 exit 0。
+//     明确声明 `未观察` 的（找不到 DSH 检出时退出 3）**显式跳过并印出来**，
+//     不假装通过 —— 与 `scripts/prt/dsh-pin-drift.mjs` 同一立场。
+const PROBE_BATTERY = [
+  {
+    no: '㉑a',
+    file: 'scripts/probes/census-tally-copies.mjs', what: '台账抄写的**普查**（T7）',
+    allowUnobserved: false,
+    // 它存在的理由：本仓"只有这几份"与"全仓就这几份"一直是两件事。
+  },
+  {
+    no: '㉑b',
+    file: 'scripts/probes/branch-disposition.mjs', what: '两个未并入分支的**处置账**（T8）',
+    allowUnobserved: false,
+    // 它存在的理由：`w/*` 分支要么已并入、要么写明"不并入"且给出可复跑的理由。
+  },
+  {
+    no: '㉑c',
+    file: 'scripts/probes/build-targets-exist.mjs', what: '外部包构建用的 DSH 目标路径（T10）',
+    allowUnobserved: true,
+    // 它存在的理由：上游拆包/改名会让字面路径静默过期，而报错读起来是"缺这个包"。
+  },
+]
+
+/** 跑一条量具，返回退出码（非零不抛）。 */
+function runProbe(file) {
+  try {
+    execFileSync(process.execPath, [file], { cwd: REPO, encoding: 'utf8', stdio: 'pipe' })
+    return 0
+  } catch (e) {
+    return typeof e.status === 'number' ? e.status : 1
+  }
+}
+
+for (const p of PROBE_BATTERY) {
+  test(`${p.no} ${p.what}：${p.file} 真跑一次且绿`, () => {
+    const code = runProbe(p.file)
+    if (code === 3 && p.allowUnobserved) {
+      console.log(`  ○ **未观察**（跳过，不算通过）：${p.file} —— 环境里没有它要核的对象`)
+      return
+    }
+    assert.equal(code, 0, `${p.file} 应 exit 0，实为 ${code}`
+      + '\n  ★ 若它是刚加的：确认它被列进本节的 PROBE_BATTERY，而不是只写在文档里。')
+  })
+}

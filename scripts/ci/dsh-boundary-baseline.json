@@ -18,7 +18,7 @@
       "@deepseek-ai/dsh-subagent",
       "@deepseek-ai/dsh-agent",
       "@deepseek-ai/dsh-agent-default-model",
-      "@deepseek-ai/dsh-agent-presets",
+      "@deepseek-ai/dsh-agent-preset-registry",
       "@deepseek-ai/dsh-session",
       "@deepseek-ai/dsh-tools"
     ],
@@ -50,7 +50,7 @@
       "@deepseek-ai/dsh-subagent": 1,
       "@deepseek-ai/dsh-agent": 1,
       "@deepseek-ai/dsh-agent-default-model": 1,
-      "@deepseek-ai/dsh-agent-presets": 1,
+      "@deepseek-ai/dsh-agent-preset-registry": 1,
       "@deepseek-ai/dsh-session": 1,
       "@deepseek-ai/dsh-tools": 1,
       "inject.subagents": 1,

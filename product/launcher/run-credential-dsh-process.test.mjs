@@ -430,8 +430,11 @@ test('★★★★★ 缺口 ③（真进程）：一个真 DSH 进程在启动�
     //   监视对象是宿主自己的 `dsh-home/profiles/prt509probe`（含 4 个 profile 文件），
     //   外加 Legion 那份 `/…/Legion/runtime-credentials/.credentials.yaml`。
     //
-    //   创建点在 **DSH 侧**：`packages/credentials/credentials-local/src/index.ts:585`
-    //   的 `chokidarWatch(...)`，关闭点在 `:611` 的 `watcher.close()`（disposer 里）。
+    //   创建点在 **DSH 侧**：`packages/credentials/credentials-local/src/index.ts:578`
+    //   的 `chokidarWatch(...)`，关闭点在 `:604` 的 `watcher.close()`（disposer 里）。
+    //   ★ 这两个坐标要连着**DSH 修订**读：本行写的是检出更新到
+    //     `rel/dsh-0.1.7-rc.1`（`46a7f68`，2026-09-23）之后的读数；
+    //     在那之前（本批手钉时）它们在 `:585` / `:611`。
     //   ⇒ 出问题时那个 disposer 没有把 watcher 关掉，
     //   于是**事件循环永远非空**，Node 不会自然退出。
     //

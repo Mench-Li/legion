@@ -493,7 +493,10 @@ export function checkManifestImpersonation({ dir = CRITERIA_DIR } = {}) {
 //
 //     `tool-request.mjs` 的 `scopeGuard`（缺表 = 放行）、
 //     `runtime-contract-server.mjs:599`（`wireChecked: true` 是写死的字面量）、
-//     `credentials-local/src/index.ts:585` / `:611`（watcher 的创建点/关闭点）
+//     `credentials-local/src/index.ts:578` / `:604`（watcher 的创建点/关闭点）
+//     ★ 这两个坐标读过两个不同的 DSH 修订：本批手钉时是 585/611，
+//       2026-09-23 检出更新到 `rel/dsh-0.1.7-rc.1`（`46a7f68`）后是 578/604。
+//       —— 坐标是**对某个产物的读数**，产物换代就要重量一次。
 //
 //   坐标是最**脆**的证据形式：在它上面插一行注释，它就指到别处去了，
 //   而**句子本身一个字都没变**。
@@ -989,7 +992,24 @@ const PINNED_CITATIONS = Object.freeze([
   }),
   Object.freeze({
     file: 'packages/credentials/credentials-local/src/index.ts',
-    line: 585,
+    // ★★★ 第七次位移（第 118 轮第三十八轮，2026-09-24）：585 → **578**
+    //   （关闭点 `:611` → `:604`）。
+    //
+    //   ★★ 这一次与前六次**不同源**：前六次都是**本仓**的编辑把坐标顶下去，
+    //     这一次是 **DSH 检出自己动了** —— 检出已更新到 `46a7f68b09`
+    //     （`rel/dsh-0.1.7-rc.1` 的合并提交，2026-09-23），
+    //     那个文件在 0.1.7-rc.1 里比本批手钉时**短了 7 行**。
+    //
+    //   > 一条钉进**别的仓**的坐标，与一条钉进本仓的坐标，
+    //   > 在"会不会漂"这件事上是同一个东西 ——
+    //   > 差别只在**谁**是漂移的触发者：一个是我自己，一个是别人的发布。
+    //   > 而这条钉正是靠 `pinned-citations-verbatim` 在**第二天**就报了出来
+    //   > （报的是"文档说…而产物是…"，看不懂的人才需要读这行注释）。
+    //
+    //   ⚠️ 读这张表的人请记住：这 5 条钉读的是**上面那个 DSH 修订**。
+    //     检出再动一次，这条判据会**先红**——那正是它存在的理由，
+    //     处置是重量一次坐标，而**不是**把判据放宽。
+    line: 578,
     text: 'const watcher = chokidarWatch(await canonicalizeWatchPath(this.spec.filename), {',
     why: 'PRT-509 关停缺陷的**根因位置之一**：chokidar watcher 的创建点',
     dsh: true,
@@ -1919,6 +1939,10 @@ export const FACTS = Object.freeze([
       + '那 5 条本会话的结论所依赖的引用（`tool-request.mjs:731`、'
       + '`runtime-contract-server.mjs:599`、`external-api-scope.mjs:1061`、'
       + '`enforcement-mapping.mjs:266`、`credentials-local/src/index.ts:585`）逐条读过，都在。'
+      + '⚠️ 上面那 5 个坐标是 **2026-09-18 的读数**：其中 `external-api-scope.mjs` 那条'
+      + '此后位移到 `:1152`（第十一轮），`credentials-local/src/index.ts` 那条'
+      + '因为 **DSH 检出更新到 `0.1.7-rc.1`** 位移到 `:578`（第三十八轮）——'
+      + '**这句话一个字都没有改**，改的是那两个产物。'
       + '⚠️ 这条**只**判"落到实处"，**不**判"那一行支撑那句话"——'
       + '后者要读上下文，机械判不了。',
     source: LEDGER_DOC + ' 正文里的 `path:line`，按 Legion 仓 + DSH 检出的后缀表解析'

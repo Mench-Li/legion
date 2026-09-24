@@ -1,10 +1,11 @@
-# T-062 测试执行报告（tester）—— S4 upload / mkdir / rename / delete + token 鉴权 + confirm
 
-> 角色：tester（测试执行）｜任务：T-062｜分支：w/T-062（独立 worktree）｜日期：2026-09-04
-> 测试对象：S4 文件中心·写面（workbench/scripts/serve.mjs 的 /api/files/upload|mkdir|rename|delete + 鉴权 + confirm）。
-> 被测基线：本 worktree（w/T-062，HEAD=4f0119f "promote T-061"，工作树干净）即当前仓库已含的 S4 实现（serve.mjs / files-api.test.mjs / web.test.mjs），本阶段仅执行与记录，未改任何实现代码。
-> 依据用例：docs/TEST_CASES.md §S4（TC-S4-01..17）、TASK_BREAKDOWN S4 AC1..AC5、I1/I2/I6。
-> 取代声明：本报告取代 docs/TEST_REPORT.md 上版（T-061 S1 报告，git 历史可回溯）。
+# T-065 测试执行报告（tester）—— S2 workbench ChatView + 接线（SSE 单源按 kind 过滤）
+
+> 角色：tester（测试执行）｜任务：T-065｜分支：w/T-065（独立 worktree）｜日期：2026-09-04
+> 测试对象：S2 对话中心前端（workbench/src/components/ChatView.tsx + 接线）+ 其数据源 team-hub v2（server.mjs /api/chat/* + 单一 /api/events SSE）。
+> 被测基线：本 worktree（w/T-065，HEAD=d3e057d "promote T-062"，工作树干净）即当前仓库已含的 S2 实现（由 T-047 coder 合入、T-060 review 通过）；本阶段只执行与记录，未改任何实现代码。
+> 依据用例：docs/TEST_CASES.md §S2（TC-S2-01..11）、§5 矩阵（I4/I5/I8）、§7.1 浏览器清单、TASK_BREAKDOWN S2 AC1..AC6。
+> 取代声明：本报告取代 docs/TEST_REPORT.md 上版（T-062 S4 报告，git 历史可回溯）。
 
 ---
 
@@ -12,109 +13,100 @@
 
 | 结论 | 说明 |
 | --- | --- |
-| 判定：S4 本域全绿 | S4 验收用例 TC-S4-01..17 全部实测通过：上传（含中文名/嵌套）、上限预检、overwrite 两态、mkdir 多层/已存在/与文件同名、rename/目标已存在、delete confirm 二次确认/非空拒删/空目录可删、token 401/200 矩阵、写路径逃逸全拒、流式超限/中断原子上传（P0-1）、并发上传至多一个 200、零新增依赖。 |
-| L0 契约 | files-api.test.mjs 34/34（suites 14）exit 0 —— 覆盖 TC-S3-01..15（只读面回归）+ TC-S4-01..17（写面）；web.test.mjs 12/12（S6 回归）exit 0 |
-| L1 真实进程 | 独立 serve.mjs 进程（--port 4843 --token tk，DSH_WORKBENCH_SPACES_JSON 注入临时空间）+ curl 实测：token 矩阵 401/401/200/200、mkdir 200/400/400、rename 200/409、delete 400/200/400/200、写逃逸 403/400/400 |
-| 非全绿警示（共享面） | 共享 serve.mjs 仍复现 2 项「必须修改」级既有缺陷（非 S4 引入）：F2 serve.mjs:944 顶层 decodeURIComponent 未捕获 URIError，单请求非法 % 路径即令整个进程崩溃 exit 1（DoS）；F1 assertNotGitInternal 只拦顶层 .git，嵌套仓库 .git/config 可经 read/download 200 外泄（凭证/元数据）。 |
-| 静态 | 零新增运行时依赖（S4 写面仅 import node: 内置）；node --check serve.mjs / files-api.test.mjs / web.test.mjs 均 exit 0 |
-| 回归 | 同文件域 files-api 34/34、web 12/12 全绿；S4 未触发前端/白板/S1/S2/S6 改动（详见 §5） |
+| 判定：S2 本域（可执行面）全绿 | 在本地沙箱**可执行**的自动化/数据面/静态核对全部实测通过：tsc --noEmit exit 0；team-hub chat.test.mjs 13/13、skills.test.mjs 12/12；S2 L1 冒烟 chat-s2-smoke.mjs 9/9；边界/安全探针 s2-probes.mjs 10/10；静态 grep 无 dangerouslySetInnerHTML 直插正文、hub SSE 单源 1 个、kind 白名单 + chat:* 过滤、scope/无中枢引导、MAX_BODY=8000 对齐。 |
+| L0 构建（TC-S2-01） | **部分通过（环境受限，非代码缺陷）**：tsc --noEmit exit 0（strict + noUnusedLocals/noUnusedParameters 0 类型错误）；但 vite build 的 esbuild 服务子进程 spawn 被沙箱 named-pipe 拦截 → spawn EPERM（证据 02/03），与 T-047/T-042/T-061 记录的**同一已知环境限制**，需宿主补跑 cd workbench && pnpm build。 |
+| L1 数据面冒烟 | chat-s2-smoke.mjs 9/9：SPA 入口 200、/hub 单源代理 200、空态可建、建会话、60 条消息 id 严格升序 + last_message_at 更新、分页 50+10 无重无漏（=「加载更早」数据面）、scope 隔离 software/ops、双订阅 ≤5s 同一 live chat:message（=第二标签页实时）、action=chat: 前缀。 |
+| 边界/安全探针 | s2-probes.mjs 10/10：XSS 三载荷原样存读（React 文本节点→不执行）、空正文/超长 8001/非法 kind/title>200 均 400、恰好 8000 通过、markdown(kind) 存读原样、单一 /api/events 收到 action=chat: + scope + member=by。 |
+| 静态接线/安全 | src 零 dangerouslySetInnerHTML 直插正文（2 处均注释）、ChatView 正文渲染 {m.body} 文本节点、hub /hub/api/events 唯一 EventSource（另 2 个为 v1 serve.mjs board/activity）、kind 过滤 chat:*、scope 引导 + 需中枢提示、App.tsx 挂载 <ChatView scope hubMode>、实时动态走 v1 与中枢分离。 |
+| 回归范围 | S2 改动面 = workbench 前端（ChatView/api/types/App）+ team-hub chat 后端。跑 team-hub chat.test 13/13、skills.test 12/12、workbench tsc exit 0（前端无测试 runner，按 TEST_CASES L0 build + §7 清单验收）。S3/S4/S6（web/files）不经手且未改动，不在本域回归。 |
+| 未在本沙箱闭环 | ① vite build（esbuild spawn EPERM，宿主补跑）；② §7.1 L2 浏览器清单的**纯 GUI 渲染项**（气泡即时显示无刷新、自动滚动、toast 文案/位置、双标签 devtools 连接数、断线重连文案）需真实浏览器手工验收（L2 约定 = tester + 将军）。数据面与静态证据已覆盖其数据等价面。 |
 
 ---
 
 ## 1. 执行环境与方式（环境 / 步骤 / 实际结果 / 日志证据）
 
-- 环境：Windows 沙箱（workspace-write，禁网）；node v24.19.0（唯一运行时，node:test / node:http / node:fs 内置）。
-- 工作目录：D:/project/DSH/legion/.legion-worktrees/T-062（分支 w/T-062）。本阶段仅产出报告与证据，未改任何实现代码。
-- 执行方式（沙箱 spawn 受限，故用进程内直跑等效 + 独立进程 curl 冒烟）：
-  - L0 契约：node files-api.test.mjs（进程内 import serve.mjs 直测，三实例 plain/token/cap 内存+真实 HTTP 路由层）；node web.test.mjs（S6 回归）。
-  - L1 冒烟：node serve.mjs --port 4843 --host 127.0.0.1 --token tk（后台真实进程）+ curl.exe 逐请求实测。
-- 日志证据（真实命令输出，存 docs/T062-evidence/）：
-  - 01-filesapi.txt（files-api.test.mjs 34/34）
-  - 02-web.txt（web.test.mjs 12/12）
-  - 03-l1-smoke.txt（独立进程 curl：token 矩阵 + 写契约 + 写逃逸）
-  - 04-f1-f2-probes.txt（F1/F2 复现）
-  - node --check 三项均 exit 0（见 §4）
+- 环境：Windows 沙箱（workspace-write，禁网、禁装依赖）；node v24.19.0（node:test / node:http / node:fs / node:sqlite 内置）。
+- 工作目录：D:/project/DSH/legion/.legion-worktrees/T-065（分支 w/T-065）。本阶段仅产出报告与证据，未改任何实现代码（见 §6 git status）。
+- 依赖说明：worktree 内无 node_modules/dist（沙箱禁联网装依赖）。为跑 TC-S2-01 typecheck 与 S2 冒烟，**复用主仓库同一 commit（HEAD 一致 d3e057d）的 node_modules 作为 junction、dist 作为构建产物**（仅测试环境，非实现改动，均 .gitignore/未跟踪）。
+- 执行方式（沙箱 spawn 受限，子进程一律 stdio:ignore）：
+  - L0 契约（后端回归）：node team-hub/chat.test.mjs、node team-hub/skills.test.mjs（进程内 node:test）。
+  - L0 前端类型：node_modules/.bin/tsc.cmd --noEmit（strict + noUnusedLocals/noUnusedParameters）。
+  - L1 真实进程冒烟：node workbench/scripts/chat-s2-smoke.mjs（真实起 team-hub:随机端口临时库 + serve.mjs:随机端口 DSH_HUB_UPSTREAM→①，客户端走 /hub/...）。
+  - 边界/安全探针：node docs/T065-evidence/s2-probes.mjs（同上双服务，专项 XSS/400/kind/markdown/SSE）。
+  - 静态核对：read + grep 全 workbench/src。
+- 日志证据（真实命令输出，存 docs/T065-evidence/）：
 
-> 注：写鉴权仅接受 Authorization: Bearer <token>（serve.mjs requireWriteToken，仅比较 req.headers.authorization 的 Bearer 段）；x-dsh-token / ?token= 传送方式不被本实现支持——这不是缺陷，契约即 Bearer-only，TC-S4-13 用 Bearer 验证（见 §2 TC-S4-13）。
+| 文件 | 命令 | 结果 | 对应 |
+| --- | --- | --- | --- |
+| 01-typecheck.txt | tsc --noEmit | EXIT=0，0 类型错误 | TC-S2-01（前半） |
+| 02-vite-build.txt | vite build | spawn EPERM（esbuild 服务 spawn 被沙箱拦） | TC-S2-01（后半，环境） |
+| 03-pnpm-build.txt | pnpm build | 同 EPERM（tsc 先过、vite 崩） | TC-S2-01（环境） |
+| 04-chat-test.txt | team-hub/chat.test.mjs | 13/13 pass（suites 5） | S1 后端契约回归 |
+| 05-skills-test.txt | team-hub/skills.test.mjs | 12/12 pass | team-hub 基线 |
+| 06-chat-s2-smoke.txt | chat-s2-smoke.mjs | 9/9 断言通过 | S2 数据面 |
+| 07-s2-probes.txt | s2-probes.mjs | 10/10 通过 | 边界/安全/kind/SSE |
+| 08-static-wiring.txt | read+grep | 见 §4 静态表 | I5/I8/AC5/AC2 |
 
 ---
 
-## 2. 用例执行结果（TC-S4-01..17；每行 前置/步骤/实际结果，判据对照 TEST_CASES「期望结果」列）
+## 2. 用例执行结果（TC-S2-01..11）
+
+> 判据对照 docs/TEST_CASES.md §S2「期望结果/通过判据」列。✅=通过（含数据面+静态）；⚠️=仅数据面/静态证据通过，纯 GUI 渲染项需 L2 浏览器补验（本沙箱无浏览器）。
 
 | 用例 | 判据 | 实际结果（证据） |
 | --- | --- | --- |
-| TC-S4-01 上传成功（中文名+嵌套） | ✅ PASS | L0：上传新文件（中文名 + 嵌套目录）→ 200；list 可见；download 字节一致（64MB 以内）。L1：PUT upload?path=ok.txt → 200 |
-| TC-S4-02 上限（MAX/MAX+1） | ✅ PASS | L0：MAX_UPLOAD 恰好 200 落盘；+1 → 413/400 拒绝且目标零落盘；L1 路由层实例（真实 64MB 上限）声明超限 Content-Length → 413 预检快速拒绝、零落盘 |
-| TC-S4-03 覆盖需 overwrite=1 | ✅ PASS | L0+L1：带 overwrite 上传已存在文件 → 409{"error":"目标已存在：如需覆盖请带 overwrite=1"}，原文件内容未动 |
-| TC-S4-04 overwrite=1 覆盖 | ✅ PASS | L0+L1：带 overwrite=1 上传 → 200 覆盖成功、新内容可读回 |
-| TC-S4-05 mkdir 多层 | ✅ PASS | L0+L1：mkdir path=a/b/c（嵌套一次建多层）→ 200；list 逐层可见 |
-| TC-S4-06 mkdir 已存在/与文件同名 | ✅ PASS | L0+L1：mkdir 已存在目录 → 400{"error":"目录已存在"}；mkdir 与文件同名 → 400（目录与文件冲突） |
-| TC-S4-07 rename 迁移 | ✅ PASS | L0+L1：rename from=new.txt to=renamed.txt → 200；源消失、目标存在且内容一致 |
-| TC-S4-08 rename 目标已存在/越界 | ✅ PASS | L0+L1：rename 到已存在目标 → 409{"error":"目标已存在，不能覆盖"}；from/to 带 ../ → 400 拒绝（与 S3 同强度规范化） |
-| TC-S4-09 delete 无 confirm | ✅ PASS | L0+L1：delete 无 confirm/confirm≠yes → 400{"error":"删除需要二次确认：请带 confirm=yes"}，文件仍在 |
-| TC-S4-10 delete confirm=yes | ✅ PASS | L0+L1：delete confirm=yes 删文件 → 200；list 不再可见；read → 400 不存在 |
-| TC-S4-11 非空目录拒删 | ✅ PASS | L0+L1：delete 非空目录 confirm=yes → 400{"error":"非空目录拒绝删除：请先清空目录内容"}，内容原样保留 |
-| TC-S4-12 空目录可删 | ✅ PASS | L0+L1：delete 空目录 confirm=yes → 200；list 不可见 |
-| TC-S4-13 token 矩阵 | ✅ PASS | L1（独立进程 --token tk）：①无 token 写 401 ②错 token 写 401 ③对 token(Bearer tk) 写 200 ④无 token 读(list) 200；未配置 token 时写放行（AC2 现状语义）由 L0 plain 实例确认 |
-| TC-S4-14 写路径逃逸全拒 | ✅ PASS | L0 全样本 + L1 抽样：upload/mkdir/rename/delete 注入 ../、绝对路径、NUL、盘符、根外 symlink → 全部 400/403，根外零副作用（L1：../→403"路径越界"，C:/abs→400，%00→400） |
-| TC-S4-15 流式/限长（P0-1） | ✅ PASS | L0 cap 实例（16KB 注入口）：overwrite=1 流式超限 → 413/断连，原文件字节原样、无临时残留；上传中断 → 原文件保持、零残留、服务不崩；超限+1 拒绝无整读内存迹象 |
-| TC-S4-16 并发上传同路径 | ✅ PASS | L0：两请求并发写同一新路径（均无 overwrite）→ 一个 200 一个 409；最终字节 = 二写之一完整内容（无半写/混合/损坏） |
-| TC-S4-17 零新增依赖 | ✅ PASS | S4 写面 serve.mjs 仅 import node:http/fs/child_process/path/os/url/dns/promises 等内置；文件接口测试仅 node:test/assert/fs/os/path/module/url/http；package.json 未因 S4 新增依赖（详见 §4） |
-
-合计：TC-S4-01..17 全部 ✅ PASS，0 失败（S4 本域）。
+| TC-S2-01 构建 | ✅（类型）/⚠️(vite 环境) | typecheck：tsc --noEmit EXIT=0，0 类型错误（strict+noUnused）。vite build：spawn EPERM（esbuild 服务子进程被沙箱 named-pipe 拦截），**非代码缺陷**，与 T-047/T-042/T-061 同因；宿主需 cd workbench && pnpm build 闭环。产物含 chat 独立 chunk 无法在本域验证（当前 ChatView 未用 React.lazy） |
+| TC-S2-02 主路径 | ✅（数据面+静态） | 数据面：S2-A GET / 200 html；S2-C 空态会话列表 []；S2-D POST 会话 200 ok:true task{title,kind,last_message_at:null}；S2-E 60 条消息全 200 + id 严格升序。静态：ChatView send() setMsgs(prev=>mergeById(prev,[msg])) 即时插入气泡（无整页刷新）；App.tsx 挂载 <ChatView scope hubMode>。GUI「气泡即时出现/滚动」需 L2 |
+| TC-S2-03 双标签实时 | ✅（数据面） | S2-H：两个订阅（均经 /hub 代理的唯一 /api/events）≤5s 收到同一 live chat:message（msg=61）＝第二标签页 ≤15s 实时收发的数据面等价。<15s 满足 |
+| TC-S2-04 历史恢复 | ✅（数据面） | S2-F：limit=50 最新升序 + before=最旧向前翻 → 60 条无重无漏、页内升序、页间连续（=ChatView「加载更早」P1-4 数据面）；后端 listMessages 分页契约由 chat.test TC-S1-08/09 佐证 |
+| TC-S2-05 scope 隔离 | ✅（数据面+静态） | S2-G：software/ops 两空间会话列表各自独立互不含对方（反向断言）；chat.test TC-S1-03（跨 scope 写不串）佐证。静态：ChatView 会话/消息随 scope 切换（useEffect [scope] 清空重载）。**注：reviewer M1 竞态（loadOlder/send 异步回写缺会话身份守卫）在快速切会话/空间时可能串显，见 §5** |
+| TC-S2-06 全部空间引导 | ✅（静态） | ChatView if(!scope) 返回「请先选择具体工作空间」引导卡片（line 199-205），非错误非白屏 |
+| TC-S2-07 断中枢失败路径 | ✅（数据面+静态） | 数据面：中枢不可达 → postChatMessage fetch reject → catch 分支 toast('err',发送失败)+草稿不清空；后端对非法写返回 400（07-s2-probes P-B1/B2）映射 toast。静态：send() 仅成功分支 setDraft('')，失败分支只 toast，草稿保留。恢复后重发＝S2-D/E 正常 |
+| TC-S2-08 单事件源 kind 过滤 | ✅（数据面+静态） | 静态：api.ts new EventSource(hubBase()/api/events) 唯一 hub 连接（另 2 个为 v1 serve.mjs board/activity，不在中枢）；ChatView 订阅后 String(ev.action).startsWith('chat:') 过滤。数据面：S2-H2 收到 action=chat: + scope + member=general；s2-probes P-SSE 单一连接收 chat:message（detail{conv,msg,kind}）。「实时动态」走 /api/activity/events 与中枢分离，不被 chat 事件吞并 |
+| TC-S2-09 XSS 渲染安全 | ✅（数据面+静态） | 数据面：s2-probes P-XSS 将 <img src=x onerror=alert(1)>、<script>alert(1)</script>、[x](javascript:alert(1)) 三个载荷 POST 200 且 GET 原样返回（无转义/吞并）。静态：grep 全 src 零 dangerouslySetInnerHTML 直插正文（仅 ChatView/FilesView 注释 line 34）；ChatView 正文渲染为 {m.body} React 文本节点（HTML 被转义→纯文本显示、脚本不执行）。GUI 无弹窗断言需 L2 浏览器 |
+| TC-S2-10 空/超长/连发 | ✅（数据面+静态） | 数据面：s2-probes P-B1 空正文 400、P-B2 8001 字符 400、P-B3 恰好 8000 200（边界）、P-B4 非法 kind 400；chat.test TC-S1-12 恰界/+1 拒绝。连发 60 条 id 严格升序、会话 last_message_at 单调＝S2-E。前端：发送按钮在 draft 空/超长时禁用、超长 toast；「快速连发 5 条顺序一致无丢失」= 后端 id 单调 + mergeById 保序（数据面等价） |
+| TC-S2-11 未知/非文本 kind | ✅（数据面+静态） | 数据面：s2-probes P-MD kind=markdown 消息 200 且 body 原样返回（# ...、- a 等原样）。静态：ChatView 渲染消息只取 m.body，不按 kind 分支/不抛错，kind 白名单外按文本兜底（line 315-320）——未知 kind 不白屏 |
 
 ---
 
-## 3. 依赖与静态校验（TC-S4-17 / S4 AC5）
+## 3. 回归范围与结论
 
-- S4 写面依赖：serve.mjs 的 /api/files/* 实现仅用 node: 内置（http/fs/child_process/path/os/url/dns/promises）；files-api.test.mjs / web.test.mjs 仅 node:test/assert/strict/fs/os/path/module/url/http。
-- package.json（workbench）：dependencies 为前端构建用 react/three/@react-three/*（既有，非 S4 引入）；S4 文件写面未新增任何依赖；serving 运行无需第三方包。
-- node --check serve.mjs / files-api.test.mjs / web.test.mjs 均 exit 0（语法有效）。
-- 环境依赖缺口说明：workbench 前端 vite/tsc 未跑（需 node_modules + @types，沙箱禁下载）；S4 功能为纯 JS（.mjs），不在 TS 构建图，按规则不擅自安装、如实声明。
-
----
-
-## 4. 回归范围与结论
-
-- 回归范围：S4 改动集中在 workbench/scripts/serve.mjs（新增 /api/files/upload|mkdir|rename|delete 写路由 + 鉴权/confirm/写路径防护），与既有 S3 只读面（list/read/download）共用同一文件与请求入口。故回归覆盖：
-  - 同文件域 S3 只读面：files-api.test.mjs 中 TC-S3-01..15（list 形状/根语义、read 预览/截断/二进制、download 流式、路径逃逸、仅回环、.git 拦截）→ 全绿。
-  - 同文件域 S6 web-fetch：web.test.mjs 12/12（正文抽取/协议白名单/SSRF 矩阵/重定向链/共享 deadline P0-3/超时/非文本/4xx-5xx）→ 全绿。
-- 回归结论：S4 写面未触发 S3 只读面、S6 web-fetch 的任何回归；S4 仅影响 workbench/scripts/serve.mjs，未触及 team-hub（S1/S2）、白板 contracts 等其它模块。未发现 S4 引入的既有模块回归。
+- **改动面**：S2 只涉及 workbench 前端（ChatView.tsx、api.ts、types.ts、App.tsx 接线）+ team-hub chat 后端（server.mjs 对话/SSE 面）；S1（后端 API）由 chat.test.mjs、skills.test.mjs 回归覆盖。
+- **回归结论**：
+  - team-hub/chat.test.mjs 13/13（会话/消息/分页/scope/author/审计/SSE 前置/老库迁移）——S1 后端契约全绿。
+  - team-hub/skills.test.mjs 12/12——team-hub 共享面基线全绿。
+  - workbench tsc --noEmit exit 0——前端类型全绿。
+  - S2 数据面冒烟 9/9 + 边界探针 10/10——S2 新功能全绿。
+  - 未复跑 web.test（S6）/files-api（S3/S4）：S2 不经手且未改动这些实现；如需完整回归建议宿主补跑 node workbench/scripts/files-api.test.mjs（34/34 基线）与 web.test 12/12。
+- **结论**：在本沙箱可执行面内，S2 未复现任何代码缺陷；全部自动断言 + 静态核对通过。遗留两项需宿主闭环：① vite build（esbuild spawn EPERM，环境）；② §7.1 L2 浏览器清单的纯 GUI 渲染项。
 
 ---
 
-## 5. 共享文件面既有「必须修改」级缺陷（本次真实复现；非 S4 引入）
+## 4. 静态核对表（I5/I8/S2 AC2/AC5）
 
-> 归属：T-054 代码审查（R1/R2）与 T-058 测试执行（F1/F2）已发现并记录；本阶段 T-062 在 S4 被测基线上再次复现，均在真实 serve.mjs 进程验证。S4 实现本身未引入、亦未修复这两项。
-
-### F2（P0/DoS）在路径上 decodeURIComponent 未捕获 —— 单请求崩溃整个进程
-- 复现步骤：
-  1) node serve.mjs --port 4843 --host 127.0.0.1 --token tk（后台进程，正常启动）
-  2) curl.exe -s -o NUL -w '%{http_code}' "http://127.0.0.1:4843/api/files%zz"   （pathname 含非法 % 编码）
-- 实际结果：HTTP=000（进程死亡）；随后任何请求（含 /api/config）均 HTTP=000。
-  stderr：serve.mjs:944 const pathname = decodeURIComponent(url.pathname) → URIError: URI malformed
-  at Server.<anonymous> (serve.mjs:944:20)；进程退出码=1。
-- 影响：任意端点（含 S4 写 upload/mkdir/rename/delete）在配对非法 % 路径的请求下即可击穿服务进程，属拒绝服务。
-- 归属：既有缺陷（T-054/T-058 已知），非 T-062 S4 引入；本 S4 报告未修改（只报告）。
-
-### F1（安全性）assertNotGitInternal 只拦顶层 .git —— 嵌套仓库 .git 元数据外泄
-- 复现步骤（空间目录含 subrepo/.git/config 内容 [core]...）：
-  1) curl.exe -s -w '%{http_code}' "http://127.0.0.1:4843/api/files/read?scope=fx&path=subrepo/.git/config"
-  2) curl.exe -s -w '%{http_code}' ".../api/files/download?scope=fx&path=subrepo/.git/config"
-  3) 对照：curl.exe -s -w '%{http_code}' ".../api/files/read?scope=fx&path=.git/config"
-- 实际结果：read subrepo/.git/config → HTTP=200，返回"[core]\n  repositoryformatversion = 0..."；download → HTTP=200 返回字节；read .git/config → HTTP=403{"error":"禁止访问 .git 内部"}。
-- 根因：assertNotGitInternal 仅判 rel 首段 === '.git'（serve.mjs:211），嵌套仓库（子目录内含 .git）的 metapath（如 subrepo/.git/config）首段为 'subrepo'，未被拦截；写路径同样调该守卫，含 .git 的嵌套路径亦不受保护。
-- 影响：嵌套 git 仓库的指纹/配置等元数据可经 read/download 读取，外泄仓库基线。
-- 归属：既有缺陷（T-054 R1 / T-058 F1 已知），非 T-062 S4 引入。
+| # | 检查 | 结果 |
+| --- | --- | --- |
+| 1 | dangerouslySetInnerHTML 全 src | 2 处，均注释（ChatView.tsx:34、FilesView.tsx:34），非注释行 0 → 无 HTML 直插 |
+| 2 | 消息正文渲染 | <div className={...}>{m.body}</div> React 文本节点 → 纯文本、HTML 转义 |
+| 3 | hub SSE 单源 | api.ts new EventSource(hubBase()/api/events) 唯一中枢连接（另 2 个 v1 serve.mjs board/activity） |
+| 4 | kind 过滤 | ChatView String(ev.action).startsWith('chat:') 过滤（不吞并 v1 动态） |
+| 5 | scope 引导 | if(!scope) →「请先选择具体工作空间」；if(!hubMode) →「需要 team-hub v2」 |
+| 6 | MAX_BODY | ChatView const MAX_BODY = 8000，与后端 MAX_CHAT_BODY = 8000（server.mjs:512）对齐 |
+| 7 | 接线 | App.tsx <ChatView scope={scope} hubMode={hubMode} />；hubMode 由 probeHub() 决定 |
+| 8 | 动态与中枢分离 | 实时动态走 /api/activity/events（v1 serve.mjs），非中枢 /hub/api/events |
 
 ---
 
-## 6. 结论与建议
+## 5. 风险与待将军确认 / 遗留项
 
-- S4 本域验收：TC-S4-01..17 全部实测通过（files-api 34/34、web 12/12、L1 独立进程 curl 冒烟），S4 各 AC（写契约/鉴权/写路径防护/流式限长/零新增依赖）达成，无失败项。
-- 整体交付面：因共享 serve.mjs 仍存在 F1/F2 两项「必须修改」级既有缺陷（均真实复现，其中 F2 属单请求即击穿进程的 DoS），按「全绿才判定通过」口径，files-api 共享面整体判定「非全绿（S4 本域绿、共享面挂起 F1/F2）」。
-- 建议：将军组织修复 F1（assertNotGitInternal 改为对任意路径段命中 .git 段即拒绝，读+写同强度）与 F2（顶层 decodeURIComponent 包 try/catch 或改 safeDecode，非法 % 回 400 而非崩溃），并补对应回归用例（嵌套 .git 读/写拒、非法 % 路径 400 不崩）后一并 promote。
-- 本阶段未修改任何实现代码（git status 仅 docs/TEST_REPORT.md 与 docs/T062-evidence/）；T-062 S4 本域测评完毕。
+- **M1（reviewer T-060 标记「必须修改」，本域未在数据面复现）**：ChatView.loadOlder()/send() 在 await 后直接 setMsgs(prev=>mergeById(...))，**缺会话身份守卫**（未校验 activeRef.current===activeId）；若用户在请求飞行中快速切换会话/空间，旧会话消息可能合入新会话 → 违反 TC-S2-05「互不串」/ I4 的边界。影响面：窄（需 GUI 级时序）；归属：S2 ChatView（前端状态管理）。建议：纳入 §7.1 L2 浏览器清单专项走查 + 后续补 if(activeRef.current!==activeId) return 守卫并加前端单测。
+- **vite build**：本域 spawn EPERM，需宿主 cd workbench && pnpm build 补跑并确认产物（当前 ChatView 未用 lazy，产物为单一 index chunk + Scene3D 动态 chunk，见 dist 探测）。
+- **零新增依赖**：S2 前端未新增 package.json 依赖（比对 workbench/package.json 仅 React/three 既有项）；team-hub 由 node: 内置实现。
 
 ---
-证据见 docs/T062-evidence/（README.md 链接各日志）。
+
+## 6. 交付物与 git 状态
+
+- 本阶段**未修改任何实现代码**（仅测试执行与记录）：docs/TEST_REPORT.md、docs/T065-evidence/*。
+- 产物：docs/T065-evidence/{01-typecheck,02-vite-build,03-pnpm-build,04-chat-test,05-skills-test,06-chat-s2-smoke,07-s2-probes,08-static-wiring}.txt + s2-probes.mjs + README.md。
+

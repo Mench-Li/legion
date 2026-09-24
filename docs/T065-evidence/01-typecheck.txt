@@ -1,0 +1,2 @@
+﻿CMD: node_modules/.bin/tsc.cmd --noEmit
+EXIT=0  (0 类型错误，strict + noUnusedLocals/noUnusedParameters 通过)

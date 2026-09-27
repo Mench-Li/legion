@@ -3,6 +3,26 @@
   "version": 1,
   "unreachable": [
     {
+      "file": "packages/shared/src/repo-identity.mjs",
+      "class": "gap",
+      "reason": "T-170 新增。全仓只有 `packages/shared/test/repo-identity.test.mjs` import 它，**没有生产引用**。★ 裁决处：`docs/review/T-171-REVIEW.md`（T-171 审查确认的缺口）与 `docs/G-mujfc9vi-1/TEST_REPORT.md`。"
+    },
+    {
+      "file": "team-hub/integration-worker.mjs",
+      "class": "gap",
+      "reason": "T-170 新增。全仓只有 `team-hub/integration-worker.test.mjs` import 它 ⇒ 唯一的集成 worker **没有生产调用方**。★ 裁决处：同上。"
+    },
+    {
+      "file": "team-hub/git-plumbing.mjs",
+      "class": "gap",
+      "reason": "T-170 新增。生产侧的 import 只来自 `team-hub/integration-worker.mjs`，而后者自己也没有生产入口（见上一条）⇒ **这条链没有生产入口**。★ 裁决处：同上。"
+    },
+    {
+      "file": "team-hub/verify-config.mjs",
+      "class": "gap",
+      "reason": "T-170 新增。被 `team-hub/integration-worker.mjs` 与 `team-hub/delivery-store.test.mjs` 引用，前者的链没有生产入口 ⇒ 同上。★ 裁决处：同上。"
+    },
+    {
       "file": "orchestrator/config-schema.mjs",
       "class": "by-design",
       "reason": "scan.mjs 读源码对账，不由别的模块 import"

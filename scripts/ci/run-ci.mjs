@@ -389,7 +389,7 @@ async function stageTest() {
       // 名单本身在 `runtime/dsh-composition/enforcement.mjs`（定义强制面的地方），
       // 控制面与 DSH 侧目录取到的是**同一个数组对象**。这一组盯的就是那件事：
       // 谁把名单改回"两处各声明一份"，恒等断言立刻红（实测破验 3/3 咬）。
-      label: 'permissions（F-02 权限内核与审批）', files: ['team-hub/permission-engine.test.mjs', 'team-hub/permissions.test.mjs', 'team-hub/skills-permission.test.mjs', 'team-hub/run-floor.test.mjs'], cwd: ROOT,
+      label: 'permissions（F-02 权限内核与审批；F-10 权限/审批/审计：这套跑的 permission-engine.test.mjs 就是 F-10 落点引的那个实现）', files: ['team-hub/permission-engine.test.mjs', 'team-hub/permissions.test.mjs', 'team-hub/skills-permission.test.mjs', 'team-hub/run-floor.test.mjs'], cwd: ROOT,
     },
     {
       // PRT-611：F-02 canonical operation —— 键序不是操作身份。

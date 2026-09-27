@@ -53,12 +53,64 @@ export const UNVERIFIED_MARK = '未核（T5）'
  *  ★ 排除区间写法（`（F-01～F-25 …）` 是整表的套件，不是某一条的判据）。 */
 export function idNamedSuites(ciText) {
   const out = []
-  for (const m of String(ciText).matchAll(/label:\s*'([^']*（(F-\d+)([^']*)')/g)) {
-    if (/^[～~]/.test(m[3] ?? '')) continue
-    out.push({ label: m[1], feature: m[2] })
+  // ★ 2026-09-24（T5 收口）：一个标签可以点名**多个** F-id —— 本来就该如此：
+  //   套件「permissions」跑着 `permission-engine.test.mjs`，它同时是 F-02 与 F-10 的判据；
+  //   第一版一个标签只取一个 F-id（贪婪匹配取最后一个），会让先前的那个**静默失去判据**。
+  for (const m of String(ciText).matchAll(/label:\s*'([^']+)'/g)) {
+    const label = m[1]
+    for (const f of label.matchAll(/（(F-\d+)([^）]*)）/g)) {
+      if (/^[～~]/.test(f[2] ?? '')) continue      // 区间写法（F-01～F-25）不是某一条的判据
+      out.push({ label, feature: f[1] })
+    }
   }
   return out
 }
+
+/**
+ * ★★ T5 补判据（2026-09-24）：**点名的 PRT 号 + 套件真跑着本行落的文件**。
+ *
+ * 起因：缺口普查最初只认"标签里点名 F-id"。实测这 6 行（F-03/06/08/10/12/14）里，
+ * 判据**早就存在、也一直在跑** —— 只是套件标签点的是 **PRT 号**
+ *（例 `runtime-state（PRT-711：六态 → 认领策略…）` ⇒ `files: ['product/runtime-state.test.mjs']`），
+ * 而功能表那一行引的落点正是 `product/runtime-state.mjs`。
+ *
+ * > 缺口不是"没东西在核"，是"**这个链接没人写出来**"。
+ *
+ * ⇒ 这一类要求**两条同时成立**（任一条单独都不算）：
+ *   ① 该套件标签里出现这一行引用的某个 `PRT-\d+`；
+ *   ② 该套件 `files` 里有文件名，与本行**落点**列引用的文件同名。
+ *   这比"行内引用一个套件名"强（套件真的跑着那个文件），但不如"标签直接点名 F-id"直白。
+ */
+export function idNamedPrtSuites(ciText) {
+  const text = String(ciText)
+  const out = []
+  // 逐行找 label / files（files 可能是数组字面量或 readdirSync(...) —— 后者没有具体文件，跳过）
+  const lines = text.split(/\r?\n/)
+  let cur = null
+  let collecting = null
+  for (const line of lines) {
+    const lm = line.match(/label:\s*'([^']+)'/)
+    if (lm !== null) {
+      const prts = [...lm[1].matchAll(/PRT-(\d+)/g)].map((m) => m[1])
+      cur = { label: lm[1], prts, files: [] }
+      out.push(cur)
+      continue
+    }
+    // ★ 多行数组：`files: [` 之后可能换行好几个文件（`product-launcher` 就是），
+    //   第一版只读单行 ⇒ 那一整族套件当成"没有文件"，于是 F-12/F-14 一直被误判成"没判据"。
+    if (cur !== null && collecting === null && /files:\s*\[/.test(line)) collecting = []
+    if (collecting !== null) {
+      collecting.push(line)
+      if (/\]/.test(line)) {
+        for (const m of collecting.join('\n').matchAll(/'([^']+)'/g)) cur.files.push(m[1])
+        collecting = null
+      }
+      continue
+    }
+  }
+  return out.filter((s) => s.prts.length > 0 && s.files.length > 0)
+}
+
 
 /** `run-ci.mjs` 里所有套件标签的集合（用来判"引用的套件名真的存在吗"）。 */
 export function knownSuiteLabels(ciText) {
@@ -72,6 +124,7 @@ export function knownSuiteLabels(ciText) {
  */
 export function rowJudges({ statusText, ciText, exists = (rel) => existsSync(resolve(REPO, rel)) }) {
   const idNamed = idNamedSuites(ciText)
+  const prtSuites = idNamedPrtSuites(ciText)
   const labels = knownSuiteLabels(ciText)
   const rows = []
   for (const [i, line] of String(statusText).split(/\r?\n/).entries()) {
@@ -89,6 +142,32 @@ export function rowJudges({ statusText, ciText, exists = (rel) => existsSync(res
       //   于是 `undefined !== null` ⇒ **最强的那一类判据被静默排除**，
       //   名单里凭空多出一批"没有判据"的 ✅ 行（我第一版据此读到"16 条"，那是**错数**）。
       if (s.feature === r.id) judges.push({ kind: 'named-suite', what: s.label, strong: true, note: null })
+    }
+    // ★ 第四类：点名的 PRT 号相同 + 套件真跑着本行落的文件（两条同时成立才算）
+    {
+      // ★ 行里写的是**区间**（`PRT-701～713`、`PRT-801～813、PRT-1001～1006`），
+      //   而套件标签写的是单个号 ⇒ 不展开区间，F-12/F-14 永远配不上。
+      const rowPrts = new Set()
+      for (const m of text.matchAll(/PRT-(\d+)(?:\s*[～~—-]\s*(?:PRT-)?(\d+))?/g)) {
+        const a = Number(m[1]); const b = m[2] === undefined ? a : Number(m[2])
+        for (let i = a; i <= b; i += 1) rowPrts.add(String(i))
+      }
+      const rowFiles = new Set([...text.matchAll(/[\w./-]+\.(?:mjs|ts)/g)]
+        .map((m) => m[0].split('/').pop()))   // 行内引用的（多为实现文件）
+      for (const s of prtSuites) {
+        if (!s.prts.some((p) => rowPrts.has(p))) continue
+        // ★ 归一化：行里引的是**实现文件**（`runtime-state.mjs`），套件跑的是**测试文件**
+        //   （`runtime-state.test.mjs`）—— 基名本来永远不同，去掉 `.test` 才能对上。
+        const norm = (p) => p.split('/').pop().replace(/\.test\.(mjs|ts)$/, '.$1')
+        // ★ 行内引的可能是**目录**（F-06 引 `orchestrator/acceptance/`）⇒ 套件只要跑着
+        //   该目录**里的**文件，就算"跑着本行落的落点"（前缀匹配，且必须是整段目录名）。
+        const dirs = [...text.matchAll(/([\w./-]+\/)(?=[*\s`、]|$)/g)]
+          .map((m) => m[1]).filter((d) => d.includes('/') && !d.endsWith('.mjs/'))
+        const hit = s.files.filter((f) => rowFiles.has(norm(f)) || dirs.some((d) => f.startsWith(d)))
+        if (hit.length === 0) continue
+        judges.push({ kind: 'prt-suite', what: s.label, strong: true, note: null,
+          why: `该行引用 PRT-${s.prts.find((p) => rowPrts.has(p))}，而套件跑着 ${hit[0]}` })
+      }
     }
     for (const m of scanText.matchAll(/套件\s*`([^`]+)`/g)) {
       const name = m[1]

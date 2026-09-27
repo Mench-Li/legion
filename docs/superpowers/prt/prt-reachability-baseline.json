@@ -113,6 +113,11 @@
       "reason": "re-export 出口"
     },
     {
+      "file": "runtime/contracts/channel-contract.mjs",
+      "class": "gap",
+      "reason": "F-25 渠道入口契约（业主 2026-09-24 裁：先立契约再接渠道）：契约与判据已落（channel-contract.test.mjs 8 例全过），但**还没有生产 import 者** —— 第一个渠道（飞书/REST）接上时才会被 import。裁决处：docs/superpowers/prt/F-25-CHANNEL-ENTRY-CONTRACT.md §5「下一刀」"
+    },
+    {
       "file": "runtime/employee/role-pack.mjs",
       "class": "gap",
       "reason": "F-19 的**执行面**一半：hub 侧 role-pack-store 已接（server.mjs 可达），执行面这一半没有路径。⇒ 裁决处：§5 第 18 条"

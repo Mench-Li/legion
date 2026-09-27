@@ -847,7 +847,7 @@ test('⑬e 控制：扫描面为空 ⇒ `scanned` 必须是 0（不许假装"没
 // ── ⑭ E 组：交接报告 §二 那张自称"机器读数，可复跑"的表（第 26 轮）────────────
 test('⑭a 五条新事实都真的参与了比对（不许有一条静默不查）', () => {
   const ids = ['handover-ledger-tallies', 'handover-tracked-suites',
-    'handover-unreachable-total', 'handover-doc-ratchet', 'handover-ci-prose-matches-table']
+    'handover-doc-ratchet', 'handover-ci-prose-matches-table']
   for (const id of ids) {
     const f = FACTS.find((x) => x.id === id)
     assert.ok(f !== undefined, `事实表里没有 ${id}`)

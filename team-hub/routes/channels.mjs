@@ -1,56 +1,57 @@
 // team-hub/routes/channels.mjs
 // ============================================================================
-// 路由层新族：**渠道入站**（F-25 渠道入口契约的第一个生产消费者）
+// 路由层新族：**渠道**（F-25 渠道入口契约的生产消费者）
 //
-// ## 这一族为什么住在这里
+// 四条路：
+//   POST /api/channels/inbound   渠道入站：翻译 → 定身份 → 幂等 →（准入则）落待办
+//   POST /api/channels/identity  绑定 / 解绑（业主裁决 A：用户自行绑定，`action:'unbind'` 解绑）
+//   GET  /api/channels/identity  列出已绑定
+//   GET  /api/channels/inbox     列出待办（业主裁决 B：准入后落待办，不建 Task）
 //
-// `runtime/contracts/channel-contract.mjs` 是**契约**（渠道怎么翻译、身份怎么定、
-// 幂等怎么算），`runtime/channels/rest.mjs` 是**适配器**（把 HTTP 侧载荷规范化）。
-// 两者此前**没有任何生产 import 者** ⇒ 可达性门禁把 rest.mjs 记作 `gap`。
-// 接进 hub 的真实入口之后，它们从"没人调用的模块"变成"被生产入口走到的模块"。
+// ## 边界（写清楚，免得被读成"渠道全接完了"）
 //
-// ## 本族的边界（写清楚，免得被读成"渠道全接完了"）
+// 本族只做**入口判定 + 落待办**。它**不建 Task、不动运行面** —— 准入之后的语义
+// （带什么 role/scope/goal）是产品决定，等那一刀。
 //
-// 本族**只做入口判定**：翻译 → 定身份 → 幂等 → 给出结论与 `runKey`。
-// **它不创建 Run** —— `runKey` 是"这条外部消息对应哪个 Run 键"的**保留票**，
-// 真正的 Run 创建是下一刀（要动运行面，属另一族）。
+// ## ★ 生产默认失败关闭
 //
-// ## ★ 生产默认是失败关闭
-//
-// 不注入 `identityMap` 时映射表是**空**的 ⇒ **任何**入站都以 `UNMAPPED_USER`
-// 具名拒绝并记账，**一个都不放行**。这不是"没接好"，是这一刀刻意的姿态：
-// *外部身份 → Legion 用户 的映射该由谁定、从哪读，是**产品决定**，不是顺手能定的。
-// 在它定下来之前，正确的默认是"接进来了，但一条都进不去"，而不是"先放行再说"。*
+// 映射取自**存储的活视图**；一张表都没绑时 ⇒ 任何入站都以 `unmapped-user` 具名拒绝、
+// `runCount()===0`。**一条都不放行**是刻意的默认值。
 // ============================================================================
 
 import { createChannelRegistry, createInboundGate, REJECT } from '../../runtime/contracts/channel-contract.mjs'
 import { createRestChannel } from '../../runtime/channels/rest.mjs'
 import { createFeishuChannel } from '../../runtime/channels/feishu.mjs'
 import { createEmailChannel } from '../../runtime/channels/email.mjs'
+import { LiveIdentityMap } from '../channel-store.mjs'
 
 /**
- * 造渠道入站族路由。
+ * 造渠道族路由。
  *
  * @param {object} deps 依赖由 `server.mjs` 注入
- * @param {object} [deps.identityMap] `${channelId}:${externalUserId}` → Legion userId；
- *   **不传 ⇒ 空映射 ⇒ 一律 `UNMAPPED_USER`**（失败关闭）
+ * @param {object} deps.channelStore 身份映射 + 待办队列（`team-hub/channel-store.mjs`）
+ * @param {Map} [deps.identityMap] 覆盖映射来源（判据用；生产走 store 的活视图）
  */
 export function createChannelRoutes({
   json,
   handleWrite,
+  channelStore,
   identityMap,
 }) {
-  const deps = { json, handleWrite }
+  const deps = { json, handleWrite, channelStore }
   for (const [k, v] of Object.entries(deps)) {
     if (v === undefined || v === null) throw new TypeError(`createChannelRoutes 缺注入项：${k}`)
   }
 
   const registry = createChannelRegistry()
-  // ★ 三个渠道都注册进**同一个**闸门：新增渠道不需要动契约、也不需要动本族的判定逻辑。
+  // ★ 三个渠道注册进**同一个**闸门：新增渠道不需要动契约、也不需要动本族的判定逻辑。
   registry.register(createRestChannel())
   registry.register(createFeishuChannel())
   registry.register(createEmailChannel())
-  const gate = createInboundGate({ registry, identityMap: identityMap ?? new Map() })
+
+  // ★ 映射取自**活视图**：绑定发生在闸门构造之后也照样生效。
+  const identitySource = identityMap ?? new LiveIdentityMap(() => channelStore.toMap())
+  const gate = createInboundGate({ registry, identityMap: identitySource })
 
   const routes = [
     {
@@ -63,15 +64,51 @@ export function createChannelRoutes({
           if (typeof channelId !== 'string') throw new Error('缺少参数 channel')
           const decision = gate.accept(channelId, body?.payload)
           if (decision.ok) {
-            return { accepted: true, channelId, runKey: decision.runKey, userId: decision.event.userId }
+            // B：准入后**只落待办**，不建 Task、不动运行面 —— 由编排或人来认领。
+            const queued = channelStore.enqueue({
+              channelId,
+              rawId: decision.event.rawId,
+              userId: decision.event.userId,
+              runKey: decision.runKey,
+              text: decision.event.text,
+              receivedAtMs: decision.event.receivedAtMs,
+            })
+            return { accepted: true, channelId, runKey: decision.runKey, userId: decision.event.userId, inboxId: queued.id }
           }
-          // ★ 幂等命中**不是错误**：它必须指回同一个 runKey，调用方据此知道"这条已经进过了"。
+          // ★ 幂等命中**不是错误**：它必须指回同一个 runKey（且不重复入队）。
           if (decision.reason === REJECT.DUPLICATE) {
             return { accepted: true, duplicate: true, channelId, runKey: decision.runKey }
           }
-          // 其余一律以具名理由拒绝（handleWrite 会把抛出转成 4xx，理由随体返回）。
           throw new Error(`渠道入站被拒：${decision.reason}`)
         })
+      },
+    },
+    {
+      method: 'POST',
+      match: 'exact',
+      path: '/api/channels/identity',
+      async run(req, res) {
+        await handleWrite(req, res, (body) => {
+          if (body?.action === 'unbind') {
+            return channelStore.unbind({ channelId: body?.channel, externalUserId: body?.externalUserId })
+          }
+          return channelStore.bind({ channelId: body?.channel, externalUserId: body?.externalUserId, userId: body?.userId })
+        })
+      },
+    },
+    {
+      method: 'GET',
+      match: 'exact',
+      path: '/api/channels/identity',
+      async run(req, res) { json(res, 200, { identities: channelStore.list() }) },
+    },
+    {
+      method: 'GET',
+      match: 'exact',
+      path: '/api/channels/inbox',
+      async run(req, res) {
+        const limit = Number(new URL(req.url ?? '/', 'http://x').searchParams.get('limit') ?? 50)
+        json(res, 200, { pending: channelStore.pending({ limit }) })
       },
     },
   ]
@@ -102,13 +139,11 @@ export function createChannelRoutes({
 /**
  * **纯解析器**：把一份 JSON 文本解析成身份映射表（`${channelId}:${externalUserId}` → Legion userId）。
  *
- * ★ 它只做解析与形状校验，**不决定这份表从哪来** —— "外部身份 → Legion 用户"的来源是
- *   **产品决定**（Workbench 里配？hub 里存一张表？），在这里不能靠默认值替它决定。
- *   因此本函数要一个**显式的 path 或文本**，没有默认位置、没有内置兜底表。
+ * ★ 它只做解析与形状校验，**不决定这份表从哪来** —— 生产走的是 `channelStore`（用户自行绑定）；
+ *   本函数留给**批量导入**用（要一个显式的文本，没有默认位置、没有兜底表）。
  *
- * ★ 形状不对**当场抛**，不静默忽略：一张"看着像映射表、其实键写错了"的表，
- *   与一张空表，在"每条入站都被拒"这个读数上是同一个东西 —— 于是人们会去查渠道，
- *   而问题在那张表。
+ * ★ 形状不对**当场抛**：一张"看着像映射表、其实键写错了"的表，与一张空表，
+ *   在"每条入站都被拒"这个读数上是同一个东西 —— 于是人们会去查渠道，而问题在那张表。
  */
 export function parseIdentityMap(text) {
   if (typeof text !== 'string') throw new TypeError('parseIdentityMap 需要文本')

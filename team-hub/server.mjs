@@ -279,6 +279,7 @@ import { createModelProfilesRoutes } from './routes/model-profiles.mjs'
 import { createToolCallsRoutes } from './routes/tool-calls.mjs'
 import { createRolePacksRoutes } from './routes/role-packs.mjs'
 import { createChannelRoutes } from './routes/channels.mjs'
+import { createChannelStore } from './channel-store.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -5244,7 +5245,7 @@ const router = createRouter([
     json,
     artifactContent,
   }),
-  createChannelRoutes({ json, handleWrite }),
+  createChannelRoutes({ json, handleWrite, channelStore: createChannelStore({ db }) }),
 ])
 
 async function handle(req, res, stripPrefix) {

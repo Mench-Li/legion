@@ -4174,8 +4174,7 @@ function createTaskInTx(input) {
 
 /** 建任务的**唯一对外入口**：自己开一个事务，然后走上面那个函数体。 */
 function createTask(input) {
-  // ★ F-23：建任务前先判定交给哪个 harness（指名不在册 ⇒ 在这里抛，不建这个任务）。
-  return withTx(() => { routeHarnessForTask(input); return createTaskInTx(input) })
+  return withTx(() => { routeHarnessForTask(input); return createTaskInTx(input) })   // ★ F-23：建任务前先判定交给哪个 harness（指名不在册 ⇒ 抛，不建这个任务）
 }
 
 // ── 目标自动分解：发布目标时按空间编队生成「阶段任务链」，指派给对应智能体 ──

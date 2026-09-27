@@ -1,0 +1,8 @@
+skeleton-1.mjs (doc 行 444): node --check OK
+skeleton-2.mjs (doc 行 503): node --check OK
+skeleton-3.mjs (doc 行 534): node --check OK
+skeleton-4.mjs (doc 行 587): node --check OK
+skeleton-5.mjs (doc 行 621): node --check OK
+skeleton-6.mjs (doc 行 649): node --check OK
+skeleton-7.mjs (doc 行 692): node --check OK
+skeleton-8.mjs (doc 行 713): node --check OK

@@ -10,7 +10,7 @@
 
 - T-166｜requirement｜done
 - T-167｜researcher｜done
-- T-168｜breaker｜todo
+- T-168｜breaker｜done
 - T-169｜test-designer｜todo
 - T-170｜coder｜todo
 - T-171｜reviewer｜todo

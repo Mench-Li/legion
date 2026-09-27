@@ -2711,15 +2711,35 @@ function runnerSignature(child: Config): string {
  * 对齐是幂等的：空间消失 / 执行关闭 / 关键配置变化 → 卸载（或重启）；新空间 → 挂载。
  * 卸载走 fiber.dispose()：子实例的 setInterval、effect、在跑 controller 随其 Fiber 回收。
  */
-function superviseSpaces(ctx: AppContext, config: Config): void {
-  const SHORT = 'dsh-scrum-worker'
-  const logFile = config.logFile || join(homedir(), '.dsh', 'super-injector', SHORT + '.log')
-  const log = (msg: string): void => {
+/** ★ T2 立缝第一刀（2026-09-24）：`superviseSpaces` 用的文件日志器。
+ *
+ *  原来它是**捕获 `logFile` 的闭包**，现在提成顶层具名函数：`logFile` 由参数进来。
+ *  这是这一刀**唯一**的语义变化 —— "捕获"变"传参"，其余（mkdir 递归、ISO 时间戳、
+ *  失败静默）逐字不动。
+ *
+ *  ★ 为什么只提这一个：同一段日志闭包在 `spaceWorker` 里**还有一份**，两处并不共享。
+ *  立缝的第一刀只动一个函数体，另一处原样留着 —— 等它自己被需要时再走同样的路，
+ *  不在这里顺手"统一"，因为那会把"一次一刀"变成"一次两处"，而两边跑起来并不等价。
+ *
+ *  > 第一刀不追求"搬走多少行"，追求"**从此有一个能被单独指认的名字**"：
+ *  > 在此之前，这个空间的日志行为只能靠"读那一大段的第三行"来讨论。
+ */
+function makeFileLogger(logFile: string): (msg: string) => void {
+  return (msg: string): void => {
     try {
       mkdirSync(dirname(logFile), { recursive: true })
       appendFileSync(logFile, `[${new Date().toISOString()}] ${msg}\n`)
     } catch { /* 日志失败静默 */ }
   }
+}
+function superviseSpaces(ctx: AppContext, config: Config): void {
+  const SHORT = 'dsh-scrum-worker'
+  const logFile = config.logFile || join(homedir(), '.dsh', 'super-injector', SHORT + '.log')
+  // ★ T2 立缝第一刀（2026-09-24）：这段原本是**捕获 `logFile` 的闭包**，已提成顶层
+  //   具名函数 `makeFileLogger`（参数进来、行为不变）。刀痕留在这里：
+  //   要改这个空间的日志行为，改 `makeFileLogger`。
+  //   ★ `spaceWorker` 里那份同类闭包**没有动**（它们不共享）。
+  const log = makeFileLogger(logFile)
 
   type MountedRunner = { dispose: () => void; signature: string }
   const mounted = new Map<string, MountedRunner>()

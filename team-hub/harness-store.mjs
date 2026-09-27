@@ -35,6 +35,14 @@ export function createHarnessStore({ db } = {}) {
       provider      TEXT NOT NULL,
       updated_at_ms INTEGER NOT NULL)`)
 
+  db.exec('CREATE TABLE IF NOT EXISTS harness_decisions (' +
+    ' id INTEGER PRIMARY KEY AUTOINCREMENT, task_type TEXT, requested TEXT, suggested TEXT,' +
+    ' provider TEXT, source TEXT NOT NULL, accepted INTEGER NOT NULL, at_ms INTEGER NOT NULL)')
+
+  db.exec('CREATE TABLE IF NOT EXISTS harness_decisions (' +
+    ' id INTEGER PRIMARY KEY AUTOINCREMENT, task_type TEXT, requested TEXT, suggested TEXT,' +
+    ' provider TEXT, source TEXT NOT NULL, accepted INTEGER NOT NULL, at_ms INTEGER NOT NULL)')
+
   const need = (v, what) => {
     if (typeof v !== 'string' || v.trim() === '') throw new Error('缺少参数 ' + what)
     return v.trim()
@@ -123,6 +131,27 @@ export function createHarnessStore({ db } = {}) {
     listRules() {
       return db.prepare('SELECT task_type, provider, updated_at_ms FROM harness_rules ORDER BY task_type').all()
         .map((r) => ({ taskType: r.task_type, provider: r.provider, updatedAtMs: r.updated_at_ms }))
+    },
+
+    /** ★ 来源如实记账：记的是**判定**，`accepted=0` 的行也照记（"这次为什么没派出去"的唯一去处）。入账**永不抛**。 */
+    recordDecision({ taskType = null, requested = null, suggested = null, provider = null, source, accepted, nowMs = Date.now() } = {}) {
+      try {
+        db.prepare('INSERT INTO harness_decisions (task_type, requested, suggested, provider, source, accepted, at_ms) VALUES (?, ?, ?, ?, ?, ?, ?)')
+          .run(taskType === null ? null : String(taskType), requested === null ? null : String(requested),
+            suggested === null ? null : String(suggested), provider === null ? null : String(provider),
+            String(source), accepted ? 1 : 0, nowMs)
+        return { recorded: true }
+      } catch (e) { return { recorded: false, error: e.message } }
+    },
+
+    listDecisions({ limit = 50 } = {}) {
+      return db.prepare('SELECT id, task_type, requested, suggested, provider, source, accepted, at_ms FROM harness_decisions ORDER BY id DESC LIMIT ?')
+        .all(Number(limit) || 50)
+        .map((r) => ({ id: r.id, taskType: r.task_type, requested: r.requested, suggested: r.suggested, provider: r.provider, source: r.source, accepted: r.accepted === 1, atMs: r.at_ms }))
+    },
+
+    countDecisions() {
+      return Number(db.prepare('SELECT COUNT(*) AS n FROM harness_decisions').get()?.n ?? 0)
     },
   }
 }

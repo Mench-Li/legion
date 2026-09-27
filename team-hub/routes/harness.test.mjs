@@ -108,10 +108,50 @@ test('F-23 provider 字段校验：permission 只有 reject/allow；args 必须�
   }
 })
 
+test('★★ F-23 来源如实记账：每条判定都入账，source 记的是**实际**来源（default/table/explicit/suggested）', async () => {
+  const s = mk()
+  await s.hit('/api/harness/providers', CODEX)
+  await s.hit('/api/harness/rules', { taskType: 'code-review', provider: 'codex' })
+  await s.hit('/api/harness/resolve', {})                                  // default
+  await s.hit('/api/harness/resolve', { taskType: 'code-review' })         // table
+  await s.hit('/api/harness/resolve', { requested: DEFAULT_HARNESS_NAME }) // explicit
+  await s.hit('/api/harness/resolve', { suggested: 'codex' })              // suggested
+  const d = s.store.listDecisions()
+  assert.equal(d.length, 4)
+  assert.deepEqual(d.map((x) => x.source).sort(), ['default', 'explicit', 'suggested', 'table'])
+  assert.equal(d.every((x) => x.accepted === true), true)
+  assert.equal(d.every((x) => x.provider !== null), true)
+})
+
+test('★★ F-23 **被拒的判定也入账**（记 reason、记 accepted=0、provider 为空）——"这次为什么没派出去"有据可查', async () => {
+  const s = mk()
+  await s.hit('/api/harness/resolve', { requested: 'gemini' })
+  assert.equal(s.calls[0].ok, false)
+  const d = s.store.listDecisions()
+  assert.equal(d.length, 1, '被拒也必须留下一条')
+  assert.equal(d[0].accepted, false)
+  assert.equal(d[0].provider, null)
+  assert.equal(d[0].source, ROUTE_REJECT.UNKNOWN_PROVIDER, '记的是**具名理由**，不是"失败"两个字')
+  assert.equal(d[0].requested, 'gemini')
+  assert.equal(s.store.countDecisions(), 1)
+})
+
+test('F-23 台账**只记流水、不替代判定**：清不掉的账不妨碍下一次判定；查询按时间倒序', async () => {
+  const s = mk()
+  await s.hit('/api/harness/resolve', {})
+  await s.hit('/api/harness/resolve', { requested: DEFAULT_HARNESS_NAME })
+  const d = s.store.listDecisions({ limit: 1 })
+  assert.equal(d.length, 1)
+  assert.equal(d[0].source, ROUTE_SOURCES.EXPLICIT, '倒序：最新那条在前')
+  await s.hit('/api/harness/resolve', { taskType: '任意' })
+  assert.equal(s.calls[2].value.provider, DEFAULT_HARNESS_NAME, '台账变化不影响判定结果')
+})
+
 test('F-23 本族只认自己那几条路', async () => {
   const s = mk()
   assert.equal(await s.hit('/api/tasks', {}), false)
   assert.equal(await s.hit('/api/harness/resolve', {}, 'GET'), false)
+  assert.equal(await s.hit('/api/harness/decisions', {}, 'POST'), false)
   assert.equal(s.routes.id, 'harness')
-  assert.equal(s.routes.routes.length, 7)
+  assert.equal(s.routes.routes.length, 8)
 })

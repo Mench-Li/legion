@@ -76,12 +76,26 @@ export function createHarnessRoutes({ json, handleWrite, harnessStore } = {}) {
       async run(req, res) { json(res, 200, { rules: harnessStore.listRules() }) },
     },
     {
+      method: 'GET',
+      match: 'exact',
+      path: '/api/harness/decisions',
+      async run(req, res) {
+        const limit = Number(new URL(req.url ?? '/', 'http://x').searchParams.get('limit') ?? 50)
+        json(res, 200, { decisions: harnessStore.listDecisions({ limit }) })
+      },
+    },
+    {
       method: 'POST',
       match: 'exact',
       path: '/api/harness/resolve',
       async run(req, res) {
         await handleWrite(req, res, (body) => {
           const out = decide({ taskType: body?.taskType, requested: body?.requested, suggested: body?.suggested })
+          // ★ 来源如实记账：**成功与被拒都记** —— 被拒那条是"这次为什么没派出去"的唯一去处。
+          harnessStore.recordDecision({
+            taskType: body?.taskType ?? null, requested: body?.requested ?? null, suggested: body?.suggested ?? null,
+            provider: out.ok ? out.provider : null, source: out.ok ? out.source : out.reason, accepted: out.ok,
+          })
           // ★ 不在册 ⇒ 具名拒绝（**不回落**）。message 里带上理由，便于调用方分辨"没人接"与"配错了"。
           if (!out.ok) throw new Error('harness 路由被拒：' + out.reason + '（' + JSON.stringify(out.detail ?? {}) + '）')
           return out

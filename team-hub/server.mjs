@@ -280,6 +280,8 @@ import { createToolCallsRoutes } from './routes/tool-calls.mjs'
 import { createRolePacksRoutes } from './routes/role-packs.mjs'
 import { createChannelRoutes } from './routes/channels.mjs'
 import { createChannelStore } from './channel-store.mjs'
+import { createHarnessRoutes } from './routes/harness.mjs'
+import { createHarnessStore } from './harness-store.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -5246,6 +5248,7 @@ const router = createRouter([
     artifactContent,
   }),
   createChannelRoutes({ json, handleWrite, channelStore: createChannelStore({ db }) }),
+  createHarnessRoutes({ json, handleWrite, harnessStore: createHarnessStore({ db }) }),
 ])
 
 async function handle(req, res, stripPrefix) {

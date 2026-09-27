@@ -2800,6 +2800,7 @@ async function stageTest() {
     label: 'harness-routing（F-23：多 Harness 路由——配置表为权威、单次指定、建议只作兜底、指名不在册具名拒绝）',
     files: [
       'runtime/contracts/harness-routing.test.mjs',
+      'team-hub/routes/harness.test.mjs',
     ],
   },
     {

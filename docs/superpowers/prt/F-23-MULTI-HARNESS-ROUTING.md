@@ -100,3 +100,20 @@ F-21 已经裁过同一类事（**权威只能有一个**）；prompt 可以是*
 **第一刀交付**：`runtime/contracts/harness-routing.mjs`（纯结构，不做 I/O）+ `harness-routing.test.mjs`（8 例）。
 
 **下一刀**：把它接进运行面的派工路径（谁在派工时调 `resolve()`），以及配置表的落点（hub 侧，与 F-25 同处）。★ 真跑 Codex / Claude Code 仍需装 CLI（本机没有）。
+
+## 8. 第二刀：配置表落点 + 判定进入生产可达面（2026-09-24）
+
+| 件 | 说明 |
+|---|---|
+| `team-hub/harness-store.mjs` | 配置表两张表：`harness_providers`（名字 + `command`/`args`/`env`/`permission`/`enabled`）、`harness_rules`（任务类型 ⇒ provider） |
+| `team-hub/routes/harness.mjs` | 7 条路：provider 增删列、规则增删列、**`POST /api/harness/resolve`（派工前问一句"这次交给谁"，返回 `{provider, source}`）** |
+| `team-hub/routes/harness.test.mjs` | 10 例 |
+
+**三条钉死的性质**：
+
+1. **默认 provider 永远在册、不可摘除、不可被规则悬空** —— 摘它报 `protected-default`，停用它会被规则写入拒绝。
+2. **判定是现读配置表的**（不是启动时的快照）：改了表，下一次判定立刻变 —— 判据里真的改了再判一次。
+3. **规则指向不在册 ⇒ 写入当场拒**：错误发生在改配置的人面前，不是发生在派工时的别人身上。
+
+**仍是 🟡 的原因（写清楚）**：本刀把判定放上生产路径，但**还没有**把它接进真正建任务/起 Run 的那条路。
+接入那一步要同时定"source 记进哪条审计"，所以留作下一刀。

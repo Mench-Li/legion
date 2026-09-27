@@ -3,11 +3,6 @@
   "version": 1,
   "unreachable": [
     {
-      "file": "runtime/contracts/harness-routing.mjs",
-      "class": "gap",
-      "reason": "F-23 路由判定（业主 2026-09-24 裁决：2 为主 1 兜底）：契约与判据已落（harness-routing.test.mjs 8 例），但**还没有生产 import 者** —— 接进运行面的派工路径是下一刀。裁决处：docs/superpowers/prt/F-23-MULTI-HARNESS-ROUTING.md §7"
-    },
-    {
       "file": "orchestrator/config-schema.mjs",
       "class": "by-design",
       "reason": "scan.mjs 读源码对账，不由别的模块 import"

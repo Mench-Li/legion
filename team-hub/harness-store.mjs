@@ -158,15 +158,16 @@ export function createHarnessStore({ db } = {}) {
 
     /**
      * ★ **建任务时的判定**（F-23 接进派工路径的那一处）。
-     * 输入 = 任务类型（用 `role`）+ 调用方这次是否指名；输出与路由契约同形。
+     * 输入 = 任务类型（用 `role`）+ 调用方这次是否指名 + **模型建议**（裁决「2 为主、1 兜底」里的兜底）；
+     * 输出与路由契约同形。★ 建议只在**配置表没命中**时才轮得到，且它**必须在册**。
      * ★ 判定结果**不落进任务行** —— 它是 `harness_rules` 的**推导值**（规则一改就过期，
      *   而一份过期的、看起来像记录的东西比没有更糟）。要追溯看 `harness_decisions` 流水。
      * ★ **必记流水**（成功与被拒都记），哪怕调用方随后放弃建任务。
      */
-    routeForTask({ taskType = null, requested = null, nowMs = Date.now() } = {}) {
-      const out = createHarnessRouter(this.routerConfig()).resolve({ taskType, requested })
+    routeForTask({ taskType = null, requested = null, suggested = null, nowMs = Date.now() } = {}) {
+      const out = createHarnessRouter(this.routerConfig()).resolve({ taskType, requested, suggested })
       this.recordDecision({
-        taskType, requested, provider: out.ok ? out.provider : null,
+        taskType, requested, suggested, provider: out.ok ? out.provider : null,
         source: out.ok ? out.source : out.reason, accepted: out.ok, nowMs,
       })
       return out

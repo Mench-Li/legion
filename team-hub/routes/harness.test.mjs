@@ -168,6 +168,25 @@ test('★★ F-23 建任务前指名不在册 ⇒ 拒（这是「指定」有后
   assert.equal(store.listDecisions()[0].accepted, false)
 })
 
+test('★★ F-23 裁决里的"1 兜底"：表没命中才轮到建议，命中时建议不插手；建议也必须在册', () => {
+  const store = createHarnessStore({ db: new DatabaseSync(':memory:') })
+  store.upsertProvider(CODEX)
+  // 表没命中 ⇒ 建议生效，来源如实记 suggested
+  const a = store.routeForTask({ taskType: '未登记的活儿', suggested: 'codex' })
+  assert.equal(a.ok, true); assert.equal(a.provider, 'codex'); assert.equal(a.source, ROUTE_SOURCES.SUGGESTED)
+  // 表命中 ⇒ 建议不插手（"表是权威"这句在建议同时存在时也必须是真的）
+  store.setRule({ taskType: 'coder', provider: DEFAULT_HARNESS_NAME })
+  const b = store.routeForTask({ taskType: 'coder', suggested: 'codex' })
+  assert.equal(b.provider, DEFAULT_HARNESS_NAME); assert.equal(b.source, ROUTE_SOURCES.TABLE)
+  // 建议不在册 ⇒ 具名拒绝（不回落默认）
+  const c = store.routeForTask({ taskType: '未登记的活儿', suggested: 'gemini' })
+  assert.equal(c.ok, false); assert.equal(c.reason, ROUTE_REJECT.UNKNOWN_PROVIDER)
+  // 三条都留了流水，且 suggested 也记下来了
+  const d = store.listDecisions()
+  assert.equal(d.length, 3)
+  assert.equal(d.find((x) => x.source === ROUTE_SOURCES.SUGGESTED).suggested, 'codex')
+})
+
 test('F-23 本族只认自己那几条路', async () => {
   const s = mk()
   assert.equal(await s.hit('/api/tasks', {}), false)

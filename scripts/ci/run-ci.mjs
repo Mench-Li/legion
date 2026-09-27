@@ -2796,6 +2796,12 @@ async function stageTest() {
       'team-hub/routes/channels.test.mjs',
     ],
   },
+  {
+    label: 'harness-routing（F-23：多 Harness 路由——配置表为权威、单次指定、建议只作兜底、指名不在册具名拒绝）',
+    files: [
+      'runtime/contracts/harness-routing.test.mjs',
+    ],
+  },
     {
       // 同一半的 HTTP 契约，外加本节最要害的那根线：
       // **写成功之后探测缓存必须失效**（`probe-service.mjs:39` 要的调用方）。

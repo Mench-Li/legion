@@ -1723,20 +1723,15 @@ test('㉓ ★★★★★ 源码注释里的「原文」引用：引文必须落
     `只解析到 ${r.total} 条"路径:行 … 原文：「…」"引用 ⇒ 扫描面塌了或注释格式变了（这条判据会静默失去检查对象）`)
   assert.ok(r.ok >= 1, `解析到 ${r.total} 条却一条都没对上 ⇒ 判据本身坏了`)
 
-  // ── ② 已知的两处坏引用：**必须还是那两处**（多一处少一处都要人来看）
-  //    ★ 这两处登记在 FACTS 的 `expect` 里，此处再钉一遍，免得有人"顺手清空 expect 让它绿"。
-  const known = [
-    'product/launcher/legacy-data-adoption.mjs:130 → launcher.mjs:108',
-    'product/launcher/legacy-data-adoption.test.mjs:77 → launcher.mjs:108',
-  ]
-  for (const k of known) {
-    assert.ok(r.broken.some((b) => b.startsWith(k)),
-      `登记在案的那处坏引用不见了：${k} ⇒ 要么它被修好了（**好事**，但要把 FACTS 的 expect 同步改掉，`
-      + '否则那条记录会变成一句不再成立的旧话），要么扫描器漏掉了它')
-  }
-  assert.equal(r.broken.length, known.length,
-    `坏引用数变了（${r.broken.length} vs 登记的 ${known.length}）⇒ 有新漂移，或有一处被修好了：\n`
-    + r.broken.join('\n'))
+  // ── ② ★ 第 118 轮本批（2026-09-23）：原来登记在案的那两处坏引用**已经修好了** ——
+  //    `product/launcher/legacy-data-adoption{.mjs:130,.test.mjs:77} → launcher.mjs:108`：
+  //    坐标按内容重定为 `launcher.mjs:118`，且 `.mjs` 那处**跨行**的引文收成了一行
+  //    （判据 `originalQuoteOnLine` 只比引文**前 14 字**，而换行会被归一成空格 ⇒ 跨行引文必然对不上）。
+  //    ⇒ 这里从"那两处必须还在"改成"**一条都不许有**"，是更强的那一条断言；
+  //    ★ 同一批已把 FACTS 的 `expect` 同步清空 —— 那次教训是**两份登记各说各话**：
+  //      FACTS 说"没有违规"而这里说"必须有两处"，修好之后两边会互相打架。
+  assert.equal(r.broken.length, 0,
+    `源码注释里的「原文」引文对不上它写的坐标：\n` + r.broken.join('\n'))
 
   // ── ③ 纯判定函数：**正反两个方向都钉住**（这才是"判据咬不咬得住"的那一半）
   // ★★ PRT-1007 片 1 订正一处**判据的误报**：这一行的 `路径:行` 是**样本数据**，

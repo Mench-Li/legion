@@ -1205,12 +1205,19 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     return out
   }
 
-  /** 把 docs/goals/ 加入仓库本地忽略（.git/info/exclude）：镜像 = 运行期产物，绝不能被 worker 的 git add -A 带进提交/合入。 */
+  /** 把 docs/goals/ 加入仓库本地忽略（公共 .git/info/exclude）：镜像 = 运行期产物，绝不能被 worker 的 git add -A 带进提交/合入。 */
   async function ignoreGoalMirrorDir(cwd: string): Promise<void> {
     try {
-      const top = await runGit(cwd, ['rev-parse', '--show-toplevel'])
-      if (top.code !== 0 || top.out.trim() === '') return
-      const exclude = join(top.out.trim(), '.git', 'info', 'exclude')
+      // ⚠ 不能拼 `<top>/.git/info/exclude`：隔离 worktree 里 `.git` 是**文件**（`gitdir: …/.git/worktrees/<id>`），
+      // 该路径必然 ENOTDIR，异常又被本函数 catch 吞掉 —— 规则于是一次都没装上，镜像被 worker 的 git add -A
+      // 带进分支提交，合入时与主干撞成真冲突（T-170 现场：docs/goals/G-mujfc9vi-1.md 冲突）。
+      // `rev-parse --git-path info/exclude` 在 worktree 下解析到**公共目录**（主仓库 .git/info/exclude），
+      // 而公共目录正是所有 worktree 共读的那一份；返回值可能是相对 cwd 的路径，故此处再绝对化。
+      const p = await runGit(cwd, ['rev-parse', '--git-path', 'info/exclude'])
+      const raw = p.code === 0 ? p.out.trim() : ''
+      if (raw === '') return
+      const exclude = isAbsolute(raw) ? raw : join(cwd, raw)
+      mkdirSync(dirname(exclude), { recursive: true })
       const existing = existsSync(exclude) ? readFileSync(exclude, 'utf8') : ''
       if (existing.includes('docs/goals/')) return
       writeFileSync(exclude, `${existing.replace(/\s*$/, '')}\n# legion 目标上下文镜像（运行期产物，不入库）\ndocs/goals/\n`, 'utf8')

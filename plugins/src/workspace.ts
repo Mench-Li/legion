@@ -87,8 +87,8 @@
 // 落到仓库根下的默认位置：这是那种"不报错、只是位置不对"的坏症状）。
 // ============================================================================
 
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 
 /** 本 scope 的空间仓库绑定（`refreshSpaceBinding()` 解析出来的结果）。 */
 export interface SpaceBinding {
@@ -184,11 +184,60 @@ export function createWorkspace(deps: WorkspaceDeps): Workspace {
   function worktreeRootFor(): string { return config.worktreeRoot || join(repoRootFor(), '.legion-worktrees') }
 
   /**
+   * 给 worktree 补依赖：把主仓库里已装好的各包 `node_modules` 以**目录联接（junction）**挂进来。
+   *
+   * 为什么需要：隔离 worktree 是 `git worktree add` 从版本库检出的，而 `node_modules` 不在版本库里
+   * ——于是「编码实现」阶段拿到的是一个**没有 tsc/vite/测试依赖**的空树。T-170 现场正是如此：
+   * worker 只能如实声明「本工作树无 node_modules（无 tsc/vite/pnpm），JSX 接线与类型检查/打包未执行」，
+   * 即「编码实现完成」这一关的机器验证是**打折的**（不是 worker 偷懒，是隔离的结构性缺口）。
+   *
+   * 做法与边界：
+   *   · junction 指向主仓库**同一物理目录**（零拷贝、Windows 下无需管理员）；pnpm 内部的相对/绝对符号链接
+   *     因为指向同一物理位置而仍然解析；
+   *   · `node_modules/` 已在 `.gitignore` ⇒ 不会出现在 `git status`，也不会被 worker 的 `git add -A` 带进提交；
+   *   · **共享语义**：在 worktree 里跑 `pnpm install` 会写到主仓库的 node_modules；且写进 node_modules 的缓存
+   *     （如 vite 的 `node_modules/.vite`）受 DSH 沙箱限制可能被拒——这类失败按「未执行」如实上报，不得伪造通过；
+   *   · 联接失败只记日志、不阻断 worktree 可用性（worker 照实声明未跑即可）。
+   */
+  function linkNodeModulesForWorktree(dir: string): void {
+    const root = repoRootFor()
+    const rels: string[] = ['']
+    try {
+      for (const e of readdirSync(root, { withFileTypes: true })) {
+        if (!e.isDirectory() || e.name.startsWith('.') || e.name === 'node_modules') continue
+        if (e.name === 'packages') {
+          for (const sub of readdirSync(join(root, e.name), { withFileTypes: true })) {
+            if (sub.isDirectory() && existsSync(join(root, e.name, sub.name, 'node_modules'))) rels.push(join('packages', sub.name))
+          }
+          continue
+        }
+        if (existsSync(join(root, e.name, 'node_modules'))) rels.push(e.name)
+      }
+    } catch { /* 目录扫描失败：至少尝试仓库根 */ }
+    let linked = 0
+    for (const rel of rels) {
+      const src = join(root, rel, 'node_modules')
+      const dst = join(dir, rel, 'node_modules')
+      if (!existsSync(src) || existsSync(dst)) continue
+      try {
+        mkdirSync(dirname(dst), { recursive: true })
+        symlinkSync(src, dst, 'junction')
+        linked += 1
+      } catch (e) {
+        log(`worktree 依赖联接失败（${rel || '仓库根'}）：${String(e)}`)
+      }
+    }
+    log(linked > 0
+      ? `worktree 依赖联接就绪：${linked} 个 node_modules 已挂入（可跑本仓 tsc/vite/构建；共享主仓库依赖，勿在 worktree 里 install）`
+      : 'worktree 无 node_modules 可联接：类型检查/构建不可用，须在报告里如实声明未执行')
+  }
+
+  /**
    * worktree 隔离：为任务建独立分支 worktree（w/<taskId>）。失败返回 null 由调用方回退。
    * 复用优先：同任务已有 worktree（blocked 解阻 / 退回纠错续做）直接复用，不删除上一轮部分改动；
    * worktree 被清理但分支仍在（blocked 时已提交 WIP）则从分支重新挂载。
    */
-  async function prepareWorktree(taskId: string): Promise<string | null> {
+  async function prepareWorktreeRaw(taskId: string): Promise<string | null> {
     const root = worktreeRootFor()
     const dir = join(root, taskId)
     try {
@@ -225,6 +274,23 @@ export function createWorkspace(deps: WorkspaceDeps): Workspace {
       log(`${taskId} prepareWorktree 异常：${String(e)}`)
       return null
     }
+  }
+
+  /**
+   * worktree 就绪后补依赖联接（见 `linkNodeModulesForWorktree`）再交给调用方：
+   * 让「编码实现」阶段至少跑得起本仓的 tsc/vite/构建，而不是只能声明「未执行」。
+   * 联接本身失败不影响已就绪的 worktree。
+   */
+  async function prepareWorktree(taskId: string): Promise<string | null> {
+    const dir = await prepareWorktreeRaw(taskId)
+    if (dir !== null) {
+      try {
+        linkNodeModulesForWorktree(dir)
+      } catch (e) {
+        log(`${taskId} 依赖联接异常：${String(e)}`)
+      }
+    }
+    return dir
   }
 
   /**

@@ -4174,7 +4174,8 @@ function createTaskInTx(input) {
 
 /** 建任务的**唯一对外入口**：自己开一个事务，然后走上面那个函数体。 */
 function createTask(input) {
-  return withTx(() => createTaskInTx(input))
+  // ★ F-23：建任务前先判定交给哪个 harness（指名不在册 ⇒ 在这里抛，不建这个任务）。
+  return withTx(() => { routeHarnessForTask(input); return createTaskInTx(input) })
 }
 
 // ── 目标自动分解：发布目标时按空间编队生成「阶段任务链」，指派给对应智能体 ──
@@ -5720,3 +5721,34 @@ export { db, server, handle, registerSkill, reviewSkill, listSkills, grantSkill,
   publishGoalRecord, setGoalState, setGoalContext, listGoals, goalView, settleGoalsOfScope, createGoalChain,
   goalDocDirOf, goalDocPathOf,
   expandGoalSlices, createTask }
+
+
+/**
+ * ★ F-23：**建任务时问一句"这次交给哪个 harness"**（派工路径上的那一处）。
+ *
+ * 放在文件**末尾**是刻意的：本仓有多处**手钉行号**的引用（源码注释里的「路径:行 原文：…」，
+ * 由 `boundary-facts` ㉓ 守着；以及台账里的 `server.mjs:NNNN`）。加在中间会让它下面每一行后移，
+ * 于是那些引用指到别的行上 —— 它们的判据会红，但那是**发现得晚**，不是没发生。
+ * 函数声明会提升，末尾定义照样在 createTask 里可用。
+ *
+ * 每进程一份 store 句柄、指向**同一个** `db` —— 与路由族那份是两张视图，不是两张表。
+ *
+ * ★ 指名了不在册的 provider ⇒ **拒建这个任务**（具名理由，不回落默认）。这是这条接线唯一
+ *   的承重点：若只是"记一笔然后照建"，调用方拿到的仍是一个被交给别人的任务，
+ *   而"指定"就成了一句没有后果的话。
+ * ★ 没指名 ⇒ 按配置表/默认定，**不阻断建任务**（配置表是权威，不是关卡）。
+ */
+let harnessStoreSingleton = null
+function harnessStoreForDispatch() {
+  if (harnessStoreSingleton === null) harnessStoreSingleton = createHarnessStore({ db })
+  return harnessStoreSingleton
+}
+
+function routeHarnessForTask(input) {
+  const out = harnessStoreForDispatch().routeForTask({
+    taskType: input?.role ?? null,
+    requested: input?.harness ?? null,
+  })
+  if (out.ok) return out.provider
+  throw new Error('harness 路由被拒：' + out.reason + '（' + JSON.stringify(out.detail ?? {}) + '）')
+}

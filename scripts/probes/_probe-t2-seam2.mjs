@@ -16,6 +16,10 @@ const REAL = readFileSync(F, 'utf8')
 const LOOP_HEAD = 'for (const scope of [...mounted.keys()]) {'
 const CALL = 'unmountStale(desiredScopes)'
 const MARK = 'T2 立缝第二刀'
+// ★ 核刀痕要核到**调用点那一条**：`T2 立缝第二刀` 在具名函数的文档注释里**也有一份**，
+//   所以只查这个短语的话，删掉调用点的刀痕仍然绿（本探针第一次跑就栽在这 —— 而且我当时
+//   还把这个红探针提交了，因为那条命令只把门禁电池算进退出码，没算探针本身）。
+const CALL_MARK = '这段已提成上面的具名函数'
 
 /** 结构判据：返回违规列表（空 = 合规）。 */
 export function checkSeamTwo(text) {
@@ -33,7 +37,7 @@ export function checkSeamTwo(text) {
     + ' ⇒ 要么原地的还在（两份实现），要么连具名函数里的都没了')
   // ③ 调用点必须存在，且带刀痕
   if (!sup.includes(CALL)) v.push('③ 没有调用点 `unmountStale(desiredScopes)` ⇒ 提出来了却没人用')
-  if (!sup.includes(MARK)) v.push('③ 调用点没有**刀痕标记** ⇒ 读这段的人不知道这里被切过、改去哪改')
+  if (!sup.includes(CALL_MARK)) v.push('③ 调用点没有**刀痕标记** ⇒ 读这段的人不知道这里被切过、改去哪改')
   // ④ 不该动的：挂载那一侧（真正"起"空间的地方）必须原样
   if ((sup.split('mounted.set(child.scope, mountRunner(child))').length - 1) !== 1) {
     v.push('④ 挂载侧被动过（`mounted.set(child.scope, mountRunner(child))` 应恰好 1 处）'

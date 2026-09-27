@@ -2751,6 +2751,23 @@ function superviseSpaces(ctx: AppContext, config: Config): void {
     return { dispose: () => fiber.dispose(), signature: runnerSignature(child) }
   }
 
+  /** ★ T2 立缝第二刀（2026-09-24）：`reconcile` 里"卸载不再需要的空间"这一段。
+   *
+   *  它仍然捕获同一作用域里的 `mounted` 与 `log`（**没有**改成传参）—— 所以这一刀
+   *  **行为逐字不变**，唯一的产物是"这段逻辑从此有一个能被单独指认的名字"。
+   *
+   *  ★ 与第一刀的区别，也是立缝的层次感：第一刀把"捕获"变成了"传参"（因为那个闭包
+   *    只依赖 `logFile` 一个外部量）；这一刀依赖两个**属于监督者生命周期**的量，
+   *    把它们改成参数等于把状态所有权搬出去 —— 那是后面某一刀的事，不是这一刀。
+   */
+  function unmountStale(desiredScopes: Set<string>): void {
+  for (const scope of [...mounted.keys()]) {
+    if (desiredScopes.has(scope)) continue
+    try { mounted.get(scope)?.dispose() } catch (e) { log(`空间 ${scope} 卸载异常：${String(e)}`) }
+    mounted.delete(scope)
+    log(`[-] 空间 ${scope} 已卸载（数据面关闭执行 / 空间已移除 / 不再配置流水线）`)
+  }
+  }
   async function reconcile(): Promise<void> {
     if (reconciling) return
     reconciling = true
@@ -2759,12 +2776,9 @@ function superviseSpaces(ctx: AppContext, config: Config): void {
       const desired = planSpaceRunners(config, views)
       const desiredScopes = new Set(desired.map(c => c.scope))
 
-      for (const scope of [...mounted.keys()]) {
-        if (desiredScopes.has(scope)) continue
-        try { mounted.get(scope)?.dispose() } catch (e) { log(`空间 ${scope} 卸载异常：${String(e)}`) }
-        mounted.delete(scope)
-        log(`[-] 空间 ${scope} 已卸载（数据面关闭执行 / 空间已移除 / 不再配置流水线）`)
-      }
+      // ★ T2 立缝第二刀（2026-09-24）：这段已提成上面的具名函数 `unmountStale`。
+      //   要改"哪些空间该卸载"，改 `unmountStale`。
+      unmountStale(desiredScopes)
 
       for (const child of desired) {
         const current = mounted.get(child.scope)

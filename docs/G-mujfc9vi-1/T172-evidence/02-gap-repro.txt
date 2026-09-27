@@ -1,0 +1,107 @@
+# T-172 实跑证据：失败项复现与原始输出
+
+===== F1 守护 claim 未授予预约（E2E-1） =====
+$ node docs/G-mujfc9vi-1/T172-evidence/e2e-claim-reservation.mjs
+intent A: 200 | intent B: 200
+reserve A (生产路由): 200 {"ok":true,"reservation":{"id":1,"repoId":"scope:default","taskId":"T-a","attemptId":"a1","leaseEpoch":1,"paths":[{"ok":true,"path":"src/a.mjs","type":"file"}],"state":"reserved","reason":null,"expiresAtMs":null,"created
+claim B (守护真实入口 POST /api/claim): 200 {"ok":true,"task":{"id":"T-b","title":"B","description":"","acceptance":[],"boundary":[],"hold":false,"priority":"medium","status":"in_progress","version":2,"so
+T-b task row: {"status":"in_progress","s":"unplanned"}
+T-b reservation count: {"n":0}
+E2E-1 VERDICT: claim 后 T-b 是否被授予预约 = false | status = in_progress | scheduling_state = unplanned
+EXIT=0
+
+===== F2 .legion/delivery.json 校验 =====
+$ node -e "import('./team-hub/verify-config.mjs').then(m=>{const r=m.loadDeliveryConfig(process.cwd());console.log(JSON.stringify({ok:r.ok,errors:r.errors},null,1))})"
+{
+ "ok": false,
+ "errors": [
+  "verify[0].id 缺失",
+  "verify[1].id 缺失",
+  "verify[2].id 缺失",
+  "verify[3].id 缺失",
+  "verify[4].id 缺失",
+  "verify[5].id 缺失",
+  "verify[6].id 缺失",
+  "verify[7].id 缺失",
+  "verify[8].id 缺失",
+  "verify[9].id 缺失",
+  "verify[10].id 缺失",
+  "verify[11].id 缺失",
+  "verify[12].id 缺失"
+ ]
+}
+EXIT=0
+
+===== F3/F6/F10 关键符号生产调用点（非测试/非文档） =====
+$ git grep -n -e selectEligibleCandidate -e claimWithReservation -e createIntegrationWorker -e enqueueIntegration -e evaluatePreExecute -e schedulingView -e resolveRepoMode -e canProduceDone -- ':!*.test.*' ':!docs/*'
+plugins/src/legacyConvergence.ts:23:  enqueueIntegration: boolean
+plugins/src/legacyConvergence.ts:39:      enqueueIntegration: true, simulated: false,
+plugins/src/legacyConvergence.ts:46:      enqueueIntegration: false, simulated: true,
+plugins/src/legacyConvergence.ts:52:    enqueueIntegration: false, simulated: false, message: '',
+plugins/src/legacyConvergence.ts:57:export function resolveRepoMode(bindings: Array<{ spaceId: string, mode: IntegrationMode }>): { ok: true, mode: IntegrationMode } | { ok: false, code: 'REPO_MODE_CONFLICT', message: string } {
+plugins/src/legacyConvergence.ts:67:export function canProduceDone({ deliveryState, acceptancePassed }: { deliveryState: string | null, acceptancePassed: boolean }): boolean {
+plugins/src/writeEligibility.ts:69:export function evaluatePreExecute(input: PreExecuteInput): WriteDecision {
+plugins/src/writeEligibility.ts:135:export function schedulingView(input: {
+team-hub/claim-policy.mjs:341:export function selectEligibleCandidate(candidates, {
+team-hub/integration-worker.mjs:74:export function createIntegrationWorker({
+team-hub/integration-worker.mjs:89:  if (!deliveryStore) throw new TypeError('createIntegrationWorker 缺 deliveryStore')
+team-hub/integration-worker.mjs:90:  if (!repoDir) throw new TypeError('createIntegrationWorker 缺 repoDir')
+team-hub/integration-worker.mjs:91:  if (!targetRef) throw new TypeError('createIntegrationWorker 缺 targetRef')
+team-hub/write-intent-store.mjs:382:    claimWithReservation({ repoId, taskId, attemptId, epoch, paths, targetRef = null, source = 'claim', capability = 'git', leaseMs = null, createAttempt }) {
+EXIT=0
+
+===== F7a server.mjs 是否下发调度/交付字段 =====
+$ git grep -n -e schedulingState -e deliveryState team-hub/server.mjs
+EXIT=1
+
+===== F7b 任务详情 API 字段实测 =====
+$ node docs/G-mujfc9vi-1/T172-evidence/e2e-task-fields.mjs
+tasks 表含调度/交付列 = true / true
+GET /api/task 状态 = 200
+返回体里调度/交付相关键 = ["blockedBy"]
+schedulingState = undefined | deliveryState = undefined
+VERDICT: 前端徽标所需字段是否下发 = false
+EXIT=0
+
+===== F7c legacy-unknown 徽标映射 =====
+$ node --experimental-strip-types --input-type=module -e "import { deliveryBadgeOf } from './workbench/src/deliveryBadge.ts'; console.log(JSON.stringify({legacyUnknown: deliveryBadgeOf({deliveryState:'legacy-unknown'}), awaiting: deliveryBadgeOf({deliveryState:'awaiting-acceptance'})}))"
+{"legacyUnknown":null,"awaiting":{"key":"delivery:awaiting-acceptance","label":"⏳ 待裁决","tone":"warn","title":"交付状态：awaiting-acceptance（服务端权威）"}}
+EXIT=0
+
+===== F8 客户端自造仓库身份/ref =====
+$ node docs/G-mujfc9vi-1/T172-evidence/e2e-client-repo-identity.mjs
+write-intent {repoId:attacker-pool, targetRef:refs/heads/evil} → 200 {"ok":true,"intent":{"taskId":"T-x","attemptId":null,"repoId":"attacker-pool","targetRef":"refs/heads/evil","paths":[{"ok":true,"path":"src/a.mjs","type":"file"}],"revision":1,"source":"planner","state":"proposed","createdAtMs":1790518664342,"updatedAtMs":1790
+VERDICT: 客户端自造身份是否被接受 = true
+EXIT=0
+
+===== F9 delivery-store 认领无事务 =====
+$ git grep -n -e 'BEGIN IMMEDIATE' -e withTx team-hub/delivery-store.mjs
+EXIT=1
+
+===== F5 mediation 在拒绝前 stash（源码行） =====
+$ Select-String -Path plugins/src/mediation.ts -Pattern 'stash|pop' | ForEach-Object { $_.LineNumber.ToString() + ': ' + $_.Line.Trim().Substring(0, [Math]::Min(130, $_.Line.Trim().Length)) }
+300: // 2. 脏工作区保护：若有已跟踪改动挡住 merge（git 会拒绝），先定向 stash → merge → pop。
+301: //    只取已跟踪文件的改动（git diff HEAD），未跟踪文件不参与 merge 且会让 stash pathspec 失败。
+304: const stashDone: string[] = []
+306: const stash = await runGit(root, ['stash', 'push', '-m', `mediator-${id}`, '--', ...dirtyPaths])
+307: if (stash.code === 0) stashDone.push(...dirtyPaths)
+324: if (stashDone.length > 0) await runGit(root, ['stash', 'pop'])
+336: if (stashDone.length > 0) await runGit(root, ['stash', 'pop'])
+345: if (stashDone.length > 0) await runGit(root, ['stash', 'pop'])
+354: if (stashDone.length > 0) await runGit(root, ['stash', 'pop'])
+363: if (stashDone.length > 0) await runGit(root, ['stash', 'pop'])
+375: // 分支保留（不 -D），供将军人工核查/合入；stash 还原照旧
+376: if (stashDone.length > 0) await runGit(root, ['stash', 'pop'])
+386: if (stashDone.length > 0) await runGit(root, ['stash', 'pop'])
+EXIT=
+
+===== F4 旧通道只拒不入队（源码行） =====
+$ Select-String -Path plugins/src/index.ts -Pattern 'refuse-legacy|自动合入失败' | ForEach-Object { $_.LineNumber.ToString() + ': ' + $_.Line.Trim().Substring(0, [Math]::Min(130, $_.Line.Trim().Length)) }
+1482: if (integrationDecision.action === 'refuse-legacy') {
+1491: log(`${taskId} 自动合入失败：${(merge.err || merge.out).trim()}`)
+1863: activity('blocked', t.id, `${stage.label}完成但自动合入失败，转 in_review 等待人工合入`)
+1864: log(`${t.id} → in_review（中间阶段自动合入失败，等待人工处理）`)
+1905: activity('blocked', t.id, `${stage.label}完成但自动合入失败，转 in_review 等待人工合入`)
+1906: log(`${t.id} → in_review（最终阶段自动合入失败，等待人工处理）`)
+2546: // 4.5 合入调解（将军已授权自动处理类）：发现 in_review 且评论带「自动合入失败」标记的任务 →
+EXIT=

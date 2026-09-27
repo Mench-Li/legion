@@ -2793,6 +2793,7 @@ async function stageTest() {
     files: [
       'runtime/contracts/channel-contract.test.mjs',
       'runtime/channels/channels.test.mjs',
+      'team-hub/routes/channels.test.mjs',
     ],
   },
     {

@@ -278,6 +278,7 @@ import { createContextSnapshotsRoutes } from './routes/context-snapshots.mjs'
 import { createModelProfilesRoutes } from './routes/model-profiles.mjs'
 import { createToolCallsRoutes } from './routes/tool-calls.mjs'
 import { createRolePacksRoutes } from './routes/role-packs.mjs'
+import { createChannelRoutes } from './routes/channels.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -5243,6 +5244,7 @@ const router = createRouter([
     json,
     artifactContent,
   }),
+  createChannelRoutes({ json, handleWrite }),
 ])
 
 async function handle(req, res, stripPrefix) {

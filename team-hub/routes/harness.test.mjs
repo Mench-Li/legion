@@ -147,6 +147,27 @@ test('F-23 台账**只记流水、不替代判定**：清不掉的账不妨碍�
   assert.equal(s.calls[2].value.provider, DEFAULT_HARNESS_NAME, '台账变化不影响判定结果')
 })
 
+test('★★ F-23 建任务前的判定(routeForTask)：不指名⇒按表/默认，且必记流水', () => {
+  const store = createHarnessStore({ db: new DatabaseSync(':memory:') })
+  store.upsertProvider(CODEX)
+  store.setRule({ taskType: 'coder', provider: 'codex' })
+  const a = store.routeForTask({ taskType: 'coder' })
+  assert.equal(a.ok, true); assert.equal(a.provider, 'codex'); assert.equal(a.source, ROUTE_SOURCES.TABLE)
+  const b = store.routeForTask({ taskType: 'tester' })
+  assert.equal(b.provider, DEFAULT_HARNESS_NAME)
+  assert.equal(b.source, ROUTE_SOURCES.DEFAULT)
+  assert.equal(store.countDecisions(), 2, '判定必记流水')
+})
+
+test('★★ F-23 建任务前指名不在册 ⇒ 拒（这是「指定」有后果的地方），被拒也留流水', () => {
+  const store = createHarnessStore({ db: new DatabaseSync(':memory:') })
+  const out = store.routeForTask({ taskType: 'coder', requested: 'gemini' })
+  assert.equal(out.ok, false)
+  assert.equal(out.reason, ROUTE_REJECT.UNKNOWN_PROVIDER)
+  assert.equal(store.listDecisions()[0].source, ROUTE_REJECT.UNKNOWN_PROVIDER)
+  assert.equal(store.listDecisions()[0].accepted, false)
+})
+
 test('F-23 本族只认自己那几条路', async () => {
   const s = mk()
   assert.equal(await s.hit('/api/tasks', {}), false)

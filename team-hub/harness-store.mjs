@@ -15,6 +15,8 @@
 //   空表不是"没配好"，是**有意的默认**。
 // ============================================================================
 
+import { createHarnessRouter } from '../runtime/contracts/harness-routing.mjs'
+
 /** 产品默认：不指定时用它。这个名字是**产品事实**，不是配置项。 */
 export const DEFAULT_HARNESS_NAME = 'deepseek-harness'
 
@@ -152,6 +154,22 @@ export function createHarnessStore({ db } = {}) {
 
     countDecisions() {
       return Number(db.prepare('SELECT COUNT(*) AS n FROM harness_decisions').get()?.n ?? 0)
+    },
+
+    /**
+     * ★ **建任务时的判定**（F-23 接进派工路径的那一处）。
+     * 输入 = 任务类型（用 `role`）+ 调用方这次是否指名；输出与路由契约同形。
+     * ★ 判定结果**不落进任务行** —— 它是 `harness_rules` 的**推导值**（规则一改就过期，
+     *   而一份过期的、看起来像记录的东西比没有更糟）。要追溯看 `harness_decisions` 流水。
+     * ★ **必记流水**（成功与被拒都记），哪怕调用方随后放弃建任务。
+     */
+    routeForTask({ taskType = null, requested = null, nowMs = Date.now() } = {}) {
+      const out = createHarnessRouter(this.routerConfig()).resolve({ taskType, requested })
+      this.recordDecision({
+        taskType, requested, provider: out.ok ? out.provider : null,
+        source: out.ok ? out.source : out.reason, accepted: out.ok, nowMs,
+      })
+      return out
     },
   }
 }

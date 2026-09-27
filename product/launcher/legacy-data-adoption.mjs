@@ -127,9 +127,9 @@ export function kindOfFragment(fragment) {
  *   > 而接管路径其实没有"——那正是本模块要修的那个缺口的形状。
  *
  * **旧的落点由同一份映射推出来**：每个片段的旧默认值就在**安装目录**下的
- * 同一相对位置（`launcher.mjs:108-110` 原文：「这些键的**代码默认值落在
- * 安装目录内**」）。所以 `dataDir/team-hub/team.db` 的旧落点是
- * `installDir/team-hub/team.db`——**同一条片段**，不需要第二张表。
+ * 同一相对位置（`launcher.mjs:118` 原文：「这些键的**代码默认值落在安装目录内**」）。
+ * 所以 `dataDir/team-hub/team.db` 的旧落点是 `installDir/team-hub/team.db`——
+ * **同一条片段**，不需要第二张表。
  *
  * @param {{ dataPathEnv: Record<string, Record<string, string>>, processes?: Iterable<string>|null }} args
  * @returns {ReadonlyArray<{process: string, env: string, fragment: string, kind: string}>}

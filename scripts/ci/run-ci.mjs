@@ -2786,6 +2786,10 @@ async function stageTest() {
       //     ② 全新安装上第一次写入**必然**发生在"文件还不存在 ⇒ 没加固过"之后。
       label: 'secret-admin（spec §6.7 凭证管理的写一半：新增/更新/轮换/删除、fail closed、每次写完复核 ACL）',
       files: ['team-hub/secret-admin.test.mjs'],
+  {
+    label: 'channel-contract（F-25：渠道入口契约——身份不来自渠道、幂等、接入第二个渠道核心零 diff）',
+    files: ['runtime/contracts/channel-contract.test.mjs'],
+  },
       cwd: ROOT,
     },
     {

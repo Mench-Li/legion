@@ -1,0 +1,112 @@
+{
+  "targetRef": "refs/heads/main",
+  "verify": [
+    {
+      "name": "path-domain",
+      "argv": [
+        "node",
+        "packages/shared/test/path-domain.test.mjs"
+      ],
+      "timeoutMs": 120000
+    },
+    {
+      "name": "repo-identity",
+      "argv": [
+        "node",
+        "packages/shared/test/repo-identity.test.mjs"
+      ],
+      "timeoutMs": 120000
+    },
+    {
+      "name": "write-intent-store",
+      "argv": [
+        "node",
+        "team-hub/write-intent-store.test.mjs"
+      ],
+      "timeoutMs": 120000
+    },
+    {
+      "name": "claim-policy",
+      "argv": [
+        "node",
+        "team-hub/claim-policy.test.mjs"
+      ],
+      "timeoutMs": 120000
+    },
+    {
+      "name": "git-plumbing",
+      "argv": [
+        "node",
+        "team-hub/git-plumbing.test.mjs"
+      ],
+      "timeoutMs": 120000
+    },
+    {
+      "name": "delivery-store",
+      "argv": [
+        "node",
+        "team-hub/delivery-store.test.mjs"
+      ],
+      "timeoutMs": 120000
+    },
+    {
+      "name": "integration-worker",
+      "argv": [
+        "node",
+        "team-hub/integration-worker.test.mjs"
+      ],
+      "timeoutMs": 180000
+    },
+    {
+      "name": "write-intent-routes",
+      "argv": [
+        "node",
+        "team-hub/write-intent-routes.test.mjs"
+      ],
+      "timeoutMs": 180000
+    },
+    {
+      "name": "delivery-routes",
+      "argv": [
+        "node",
+        "team-hub/delivery-routes.test.mjs"
+      ],
+      "timeoutMs": 180000
+    },
+    {
+      "name": "metrics",
+      "argv": [
+        "node",
+        "team-hub/metrics.test.mjs"
+      ],
+      "timeoutMs": 180000
+    },
+    {
+      "name": "write-eligibility",
+      "argv": [
+        "node",
+        "--experimental-strip-types",
+        "plugins/tests/write-eligibility.test.mjs"
+      ],
+      "timeoutMs": 120000
+    },
+    {
+      "name": "legacy-convergence",
+      "argv": [
+        "node",
+        "--experimental-strip-types",
+        "plugins/tests/legacy-convergence.test.mjs"
+      ],
+      "timeoutMs": 120000
+    },
+    {
+      "name": "delivery-ui",
+      "argv": [
+        "node",
+        "--experimental-strip-types",
+        "workbench/scripts/delivery-ui.test.mjs"
+      ],
+      "timeoutMs": 120000
+    }
+  ]
+}

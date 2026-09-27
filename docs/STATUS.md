@@ -13541,6 +13541,14 @@ CLI 新增 `--wizard` / `--wizard-consent=<who>` / `--wizard-reset`。
 代价是**界面无法确认「存进去的到底是什么」**。没有骨架屏 / 乐观更新 / 分页 / i18n。
 详见 `docs/superpowers/prt/PRT-507-model-settings-ui.md`。
 
+## 4.5 并行任务文件冲突治理（目标 G-mujfc9vi-1 · T-170）
+
+**当前可复现事实**：写入资格与预约、交付子状态与集成 job 已落在 team-hub SQLite 同一事务域（`team-hub/write-intent-store.mjs`、`team-hub/delivery-store.mjs`），HTTP 面为 `/api/tasks/:id/write-intent`、`/api/tasks/:id/reservation`、`/api/deliveries`、`/api/integrations`、`/api/metrics/repository`。等待写入资格的任务保持 `todo` 且 `scheduling_state=waiting-file`，不消耗重试；**默认不启用强制同文件并行写入**，旧的 autoPromote/mediation 直合并通道默认保留，集成阶段由 `LEGION_INTEGRATION_MODE=legacy|observation|integration` 切换，启用后旧通道被拒并转入唯一集成 worker。
+
+**基线 / CI 证据 / 复跑命令**：本批基线 = T-170 工作树（w/T-170）；13 个新测试文件 123 例全绿，命令见 [docs/G-mujfc9vi-1/TEST_REPORT.md](G-mujfc9vi-1/TEST_REPORT.md)。全量门禁以 `node scripts/ci/run-ci.mjs` 为准，其逐阶段结果落在 `.ci/<run>/summary.json`。
+
+**已知限制**：本工作树无 `node_modules`（无 `tsc`/`vite`/`pnpm`），故 `tsc --noEmit`、`vite build` 与前端 JSX 接线未执行；集成 worker 夹具不做 `git push`/本地传输。详见自测报告的「诚实边界」。
+
 ## 5. 维护约定
 
 - **状态变化**（拓扑、端口、数据池、测试基线、已知限制）→ 更新本文件，并同步 `README.md` 的必要部分。

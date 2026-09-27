@@ -342,6 +342,13 @@ export interface HubTask {
   boundary?: TaskBoundary
   /** 将军逐任务拦截（hold=true 时守护不得自动认领/执行，见 POST /api/hold）。 */
   hold?: boolean
+  /** 并行任务文件冲突治理：写入调度状态（unplanned/waiting-file/reserved/reconciling/released）。等待不是执行失败。 */
+  schedulingState?: string | null
+  /** 等待文件时挡路的任务/文件（供徽标写明「等谁、等哪个文件」）。 */
+  schedulingBlockedBy?: string | null
+  schedulingBlockedPath?: string | null
+  /** 交付子状态（awaiting-acceptance/ready/preparing/validating/needs-review/integrated/abandoned）。 */
+  deliveryState?: string | null
   priority: string
   status: CardStatus
   version: number

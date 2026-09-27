@@ -495,3 +495,46 @@ test('⑤ 纯函数的返回对象都是冻结的', () => {
   assert.equal(Object.isFrozen(isAttemptClaimable(null)), true)
   assert.equal(Object.isFrozen(explainClaim({ path: 'claimable-task', task: { status: 'todo', hold: 0 } })), true)
 })
+
+
+// ---------------------------------------------------------------- ⑥ S2：候选扫描不队头阻塞
+import { selectEligibleCandidate, DEFAULT_CLAIM_SCAN_LIMIT } from './claim-policy.mjs'
+import { pathsIntersect } from '../packages/shared/src/path-domain.mjs'
+
+test('⑥ 队首冲突而后部不相交时，后部先被领取（不队头阻塞）', () => {
+  const candidates = [
+    { taskId: 't-head', paths: ['src/a.mjs'], priority: 'high' },
+    { taskId: 't-back', paths: ['src/b.mjs'] },
+  ]
+  const active = [{ taskId: 't-holder', paths: ['src/a.mjs'] }]
+  const r = selectEligibleCandidate(candidates, { activeReservations: active })
+  assert.equal(r.ok, true)
+  assert.equal(r.candidate.taskId, 't-back')
+  assert.equal(r.skipped.length, 1)
+  assert.equal(r.skipped[0].holderTaskId, 't-holder')
+  assert.deepEqual(r.skipped[0].paths, ['src/a.mjs'])
+})
+
+test('⑥ 全部候选都冲突时返回 no-eligible-candidate，且不消耗重试', () => {
+  const candidates = [{ taskId: 't1', paths: ['src/a/b.mjs'] }, { taskId: 't2', paths: ['src/a/c.mjs'] }]
+  const active = [{ taskId: 'holder', paths: [{ path: 'src/a', type: 'dir' }] }]
+  const r = selectEligibleCandidate(candidates, { activeReservations: active })
+  assert.equal(r.ok, false)
+  assert.equal(r.code, 'claim-no-eligible-candidate')
+  assert.equal(r.scanned.length, 2)
+})
+
+test('⑥ 扫描有上限且稳定排序：超过上限不继续扫，已扫下标可复核', () => {
+  const many = Array.from({ length: 10 }, (_, i) => ({ taskId: 'c' + i, paths: ['src/x' + i + '.mjs'] }))
+  const active = many.slice(0, 5).map((c) => ({ taskId: 'h' + c.taskId, paths: c.paths }))
+  const r = selectEligibleCandidate(many, { activeReservations: active, limit: 4 })
+  assert.equal(r.ok, false)
+  assert.deepEqual(r.scanned, [0, 1, 2, 3])
+  assert.equal(r.limit, 4)
+  assert.equal(DEFAULT_CLAIM_SCAN_LIMIT, 50)
+})
+
+test('⑥ 候选选择复用共享 path-domain 判定（无第二份前缀判定）', () => {
+  assert.equal(pathsIntersect([{ path: 'src/a', type: 'dir' }], ['src/ab'], { caseInsensitive: false }), false)
+  assert.equal(pathsIntersect([{ path: 'src/a', type: 'dir' }], ['src/a/b.mjs'], { caseInsensitive: false }), true)
+})

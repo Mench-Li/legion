@@ -56,6 +56,7 @@ import { cpSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 import type { StageDef, Task } from './types.js'
+import { decideIntegrationPath, resolveIntegrationMode } from './legacyConvergence.js'
 
 /**
  * 调解员输出 schema 的**形状**——本模块自己声明，不从 `@deepseek-ai/dsh-tools` import。
@@ -305,6 +306,12 @@ export function createMergeMediation(deps: MergeMediationDeps): MergeMediation {
         const stash = await runGit(root, ['stash', 'push', '-m', `mediator-${id}`, '--', ...dirtyPaths])
         if (stash.code === 0) stashDone.push(...dirtyPaths)
         else log(`${id} 调解：脏工作区暂存失败（继续尝试合并）`)
+      }
+      // 2.5 S6/R-6：集成阶段启用后，调解员的 direct merge 通道同样必须停用。
+      const integrationDecision = decideIntegrationPath({ mode: resolveIntegrationMode(process.env), source: 'mediation', taskId: id })
+      if (integrationDecision.action === 'refuse-legacy') {
+        await safeComment(id, `⛔ ${integrationDecision.message}`, taskScope)
+        return
       }
       // 3. 合并
       const merge = await runGit(root, ['merge', '--no-ff', `w/${id}`, '-m', `promote ${id} (mediator)`])

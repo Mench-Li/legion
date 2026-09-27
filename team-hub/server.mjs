@@ -282,6 +282,11 @@ import { createChannelRoutes } from './routes/channels.mjs'
 import { createChannelStore } from './channel-store.mjs'
 import { createHarnessRoutes } from './routes/harness.mjs'
 import { createHarnessStore } from './harness-store.mjs'
+import { createWriteIntentRoutes } from './routes/write-intent.mjs'
+import { createDeliveryRoutes } from './routes/delivery.mjs'
+import { createMetricsRoutes } from './routes/metrics.mjs'
+import { createWriteIntentStore, ensureWriteIntentSchema } from './write-intent-store.mjs'
+import { createDeliveryStore, ensureDeliverySchema } from './delivery-store.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -654,6 +659,13 @@ const compactionStore = (() => {
   ensureCompactionSchema(db)
   return createCompactionStore({ db })
 })()
+
+// ── 并行任务文件冲突治理（G-mujfc9vi-1）：写入意图/预约 + 交付子状态/集成 job ──
+// 与既有看板/运行仓储共享同一个 SQLite 连接与事务域（设计 §4：team-hub SQLite 是唯一调度事实源）。
+ensureWriteIntentSchema(db)
+ensureDeliverySchema(db)
+const writeIntentStore = createWriteIntentStore(db)
+const taskDeliveryStore = createDeliveryStore(db)
 
 /**
  * 能力包安装事实（F-20 缺口③，spec §4.4）。
@@ -1707,6 +1719,10 @@ ensureColumn('goal', 'docsDir', 'docsDir TEXT')
 ensureColumn('goal', 'docSync', 'docSync INTEGER DEFAULT 0')
 ensureColumn('tasks', 'docSync', 'docSync INTEGER DEFAULT 0')
 ensureColumn('tasks', 'fileDomain', 'fileDomain TEXT')
+// 6) 并行任务文件冲突治理：写入调度状态（unplanned/waiting-file/reserved/reconciling/released）
+//    与交付子状态快照列。它们是**独立**的两列：调度状态不进执行失败通道，交付状态不进文件占用池。
+ensureColumn('tasks', 'scheduling_state', "scheduling_state TEXT DEFAULT 'unplanned'")
+ensureColumn('tasks', 'delivery_state', 'delivery_state TEXT')
 ensureColumn('audit', 'goalId', 'goalId TEXT')
 // 历史链回填：老库「一空间一目标」时代的 [auto-goal] 任务没有 goalId。
 // 启动时把该空间**未取消**的自动目标链任务挂到本空间迁移后的目标记录上（老模型每空间至多一条 active 目标）。
@@ -4990,6 +5006,13 @@ export function artifactContent(taskId, rawI) {
 // 依赖由本文件注入（各族自己不 import hub 内部件）。新族加进这个数组即可，
 // 不需要再往下面那条 if 链里抄一遍同样的形状。
 const router = createRouter([
+  // 冲突治理族放在最前：/api/tasks/:id/write-intent 等具体路径必须先于宽前缀匹配。
+  createWriteIntentRoutes({
+    json, readBody, authorized, writeIntentStore, db,
+    setSchedulingState: (taskId, state) => { try { db.prepare('UPDATE tasks SET scheduling_state = ? WHERE id = ?').run(state, taskId) } catch { /* 列缺失忽略 */ } },
+  }),
+  createDeliveryRoutes({ json, readBody, authorized, deliveryStore: taskDeliveryStore, db }),
+  createMetricsRoutes({ json, authorized, db, writeIntentStore, deliveryStore: taskDeliveryStore }),
   createRulesRoutes({ json, handleWrite, validRuleScope, getRule, saveRule }),
   createPermissionsRoutes({
     json, handleWrite, authorized, readBody, requireMember,
@@ -5747,6 +5770,7 @@ function routeHarnessForTask(input) {
   const out = harnessStoreForDispatch().routeForTask({
     taskType: input?.role ?? null,
     requested: input?.harness ?? null,
+    suggested: input?.harnessSuggestion ?? null,
   })
   if (out.ok) return out.provider
   throw new Error('harness 路由被拒：' + out.reason + '（' + JSON.stringify(out.detail ?? {}) + '）')

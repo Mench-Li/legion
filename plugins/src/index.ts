@@ -74,6 +74,7 @@ export {
   stagesFromHubPayload,
 } from './docContract.js'
 import { createMergeMediation } from './mediation.js'
+import { decideIntegrationPath, resolveIntegrationMode } from './legacyConvergence.js'
 import { createReclamation, type BootReconcileState } from './reclamation.js'
 import { createStateMachine } from './stateMachine.js'
 import { createWorkspace, type SpaceBinding } from './workspace.js'
@@ -1476,6 +1477,12 @@ function spaceWorker(ctx: AppContext, config: Config): void {
    */
   async function autoPromote(taskId: string, dir: string): Promise<boolean> {
     try {
+      // S6/R-6：集成阶段启用后，旧的 direct merge 通道必须拒绝，改走唯一集成 worker。
+      const integrationDecision = decideIntegrationPath({ mode: resolveIntegrationMode(process.env), source: 'autoPromote', taskId })
+      if (integrationDecision.action === 'refuse-legacy') {
+        log(`${taskId} 自动合入被拒绝：${integrationDecision.message}`)
+        return false
+      }
       // 防御：上一次合入失败可能遗留冲突态（MERGE_HEAD/未合并文件），会挡住后续所有 merge —— 先清一次
       const staleAbort = await runGit(workspace.repoRootFor(), ['merge', '--abort'])
       if (staleAbort.code === 0) log(`${taskId} 清理了上次遗留的合入冲突态（merge --abort）`)

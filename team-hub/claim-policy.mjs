@@ -1,3 +1,4 @@
+import { pathsIntersect } from '../packages/shared/src/path-domain.mjs'
 // ============================================================================
 // PRT-304 任务扫描与认领策略（从 run-store 里提取出来的资格规则）
 //
@@ -319,3 +320,62 @@ export function claimPolicySnapshot() {
     rejections: CLAIM_REJECTIONS,
   })
 }
+/**
+ * claim 候选扫描的默认上限（设计 §5.1：候选扫描必须有上限，避免长队列拖慢事务）。
+ */
+export const DEFAULT_CLAIM_SCAN_LIMIT = 50
+
+/**
+ * 纯函数：在候选队列里按**稳定顺序**挑选第一个不与活跃预约冲突的候选。
+ *
+ * 队列前部为冲突任务时**继续扫描后部**——这就是「不队头阻塞」：
+ * 一个被占用文件挡住的任务不该让整条队列停下来（AC-R3-2 / 设计 §5.1 第 3 条）。
+ *
+ * 顺序规则：候选按传入数组顺序扫描（调用方已按优先级 + 稳定次序排好），
+ * 扫描到上限即停；排序不因本函数而变（稳定）。
+ *
+ * @param {Array<object>} candidates
+ * @param {{ activeReservations?: Array<{taskId:string, paths:Array}>, limit?: number,
+ *           pathsOf?: (c:object)=>Array, caseInsensitive?: boolean }} [opts]
+ */
+export function selectEligibleCandidate(candidates, {
+  activeReservations = [], limit = DEFAULT_CLAIM_SCAN_LIMIT, pathsOf = (c) => c?.paths ?? [], caseInsensitive = false,
+} = {}) {
+  const list = Array.isArray(candidates) ? candidates : []
+  const capped = Math.max(0, Number(limit) || 0)
+  const scanned = []
+  const skipped = []
+  const scanThrough = Math.min(list.length, capped)
+  for (let i = 0; i < scanThrough; i += 1) {
+    const candidate = list[i]
+    scanned.push(i)
+    const requested = pathsOf(candidate)
+    let contendedBy = null
+    let conflictPaths = []
+    for (const res of activeReservations) {
+      if (res.taskId === candidate.taskId) continue
+      if (pathsIntersect(requested, res.paths, { caseInsensitive })) {
+        contendedBy = res
+        conflictPaths = [...requested].filter((p) => pathsIntersect([{ path: p, type: 'file' }], res.paths, { caseInsensitive }))
+        break
+      }
+    }
+    if (contendedBy) {
+      skipped.push(Object.freeze({
+        index: i, taskId: candidate.taskId, code: 'FILE_CONTENTION',
+        paths: Object.freeze(conflictPaths.length > 0 ? conflictPaths : requested),
+        holderTaskId: contendedBy.taskId,
+      }))
+      continue
+    }
+    return Object.freeze({
+      ok: true, candidate, index: i, scanned: Object.freeze(scanned),
+      skipped: Object.freeze(skipped), limit: capped,
+    })
+  }
+  return Object.freeze({
+    ok: false, code: 'claim-no-eligible-candidate', candidate: null, index: null,
+    scanned: Object.freeze(scanned), skipped: Object.freeze(skipped), limit: capped,
+  })
+}
+

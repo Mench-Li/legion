@@ -1456,6 +1456,20 @@ async function stageTest() {
     //   豁免它们等于把一份可执行的证据降级成一份声明。
     { label: 'reveal-open（P4-7 打开所在位置：落点计算/祖先回落/安全矩阵与读面同强度/引导）', files: ['workbench/scripts/reveal-open.test.mjs'], cwd: ROOT },
     { label: 'hub-event-stream（F-01 scope/游标/信封）', files: ['workbench/scripts/hub-event-stream.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    // ── 并行任务文件冲突治理（G-mujfc9vi-1 S1–S8）──
+    // 每个测试文件都必须显式登记：未登记 = 不存在的断言（本文件 4568 行的完备性检查会拦）。
+    { label: 'path-domain（S1 路径域唯一判定：归一/覆盖/相交）', files: ['packages/shared/test/path-domain.test.mjs'], cwd: ROOT },
+    { label: 'repo-identity（S1 仓库身份与 Git 能力探测）', files: ['packages/shared/test/repo-identity.test.mjs'], cwd: ROOT },
+    { label: 'write-intent-store（S2 写入意图/预约/epoch 隔离）', files: ['team-hub/write-intent-store.test.mjs'], cwd: ROOT },
+    { label: 'git-plumbing（S3 git 原语：merge-tree/commit-tree/update-ref）', files: ['team-hub/git-plumbing.test.mjs'], cwd: ROOT },
+    { label: 'delivery-store（S3 交付子状态与集成 job 仓储）', files: ['team-hub/delivery-store.test.mjs'], cwd: ROOT },
+    { label: 'integration-worker（S3 集成 worker 与恢复）', files: ['team-hub/integration-worker.test.mjs'], cwd: ROOT },
+    { label: 'write-intent-routes（S4 写入资格/预约 HTTP 契约）', files: ['team-hub/write-intent-routes.test.mjs'], cwd: ROOT },
+    { label: 'delivery-routes（S4 交付/集成/裁决 HTTP 契约）', files: ['team-hub/delivery-routes.test.mjs'], cwd: ROOT },
+    { label: 'metrics（S4 指标只读聚合与不可读降级）', files: ['team-hub/metrics.test.mjs'], cwd: ROOT },
+    { label: 'write-eligibility（S5 守护侧写入资格/RunRequest 冻结/等待视图）', files: ['plugins/tests/write-eligibility.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    { label: 'legacy-convergence（S6 唯一集成入口/模式收敛/回滚）', files: ['plugins/tests/legacy-convergence.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    { label: 'delivery-ui（S7 交付/调度徽标前端纯函数）', files: ['workbench/scripts/delivery-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     // `dual-write-smoke` 守「两个进程同时启动、迁移同一新库」的**行为**，
     // 并在第 3 个锚点里按**源码**禁掉两种坏写法（自己 exec ALTER / try-catch 吞掉 ALTER）。
     // `schema-util.test.mjs` 守的是那个并发原语**自己**的两种调用形态：

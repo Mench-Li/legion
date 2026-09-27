@@ -4,6 +4,7 @@ import { execRequest, fetchHubActivity, fetchHubCalendarByLink, fetchHubDocConte
 import type { AuditPatch, HubActivity, HubDocContent, HubTask, OverlapGroup, ReviewNote } from '../types'
 import type { LinkedCalendarEvent } from '../api'
 import { fmtRange, occKey } from '../calendar'
+import { deliveryBadgeOf, schedulingBadgeOf } from '../deliveryBadge.ts'
 import DocReader from './DocReader'
 import MarkdownDocView from './MarkdownDocView'
 import { RevealButton } from './RevealButton'
@@ -396,6 +397,8 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
             <div className="td-title">
               <span className={`status-pill ${t.status}`}>{STATUS_PILL[t.status] ?? t.status}</span>
               {t.hold && <span className="status-pill hold">✋ 将军拦截中</span>}
+              {(() => { const b = schedulingBadgeOf({ schedulingState: t.schedulingState, blockingTaskId: t.schedulingBlockedBy, blockingPath: t.schedulingBlockedPath }); return b ? <span className="status-pill scheduling" title={b.title}>{b.label}</span> : null })()}
+              {(() => { const b = deliveryBadgeOf({ deliveryState: t.deliveryState }); return b ? <span className="status-pill delivery" title={b.title}>{b.label}</span> : null })()}
               {askComment !== null && <span className="status-pill ask" title="在该条评论下方可直接答复，无需拉到页面底部">❓ 待将军确认</span>}
               <span className="td-title-text">{t.title}</span>
             </div>

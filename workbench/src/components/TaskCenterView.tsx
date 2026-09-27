@@ -9,6 +9,7 @@ import {
 } from '../api'
 import type { Card, CardComment, CardStatus, HubTask, SpaceInfo } from '../types'
 import { toast } from './Toast'
+import { deliveryBadgeOf, schedulingBadgeOf } from '../deliveryBadge.ts'
 import { TaskDetailModal } from './TaskDetailModal'
 
 /**
@@ -95,6 +96,10 @@ interface TcRow {
   id: string
   title: string
   status: CardStatus
+  schedulingState?: string | null
+  schedulingBlockedBy?: string | null
+  schedulingBlockedPath?: string | null
+  deliveryState?: string | null
   priority: string
   scope?: string
   role?: string
@@ -117,6 +122,10 @@ function rowFromHub(t: HubTask): TcRow {
     id: t.id,
     title: t.title,
     status: t.status,
+    schedulingState: t.schedulingState ?? null,
+    schedulingBlockedBy: t.schedulingBlockedBy ?? null,
+    schedulingBlockedPath: t.schedulingBlockedPath ?? null,
+    deliveryState: t.deliveryState ?? null,
     priority: t.priority ?? 'medium',
     scope: t.scope,
     role: t.role ?? undefined,
@@ -439,6 +448,10 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
     if (r.priority !== 'medium') chips.push(<span key="prio" className={`tc-chip tc-prio-${r.priority}`}>{r.priority === 'high' ? 'P0' : 'P2'}</span>)
     if (r.hold) chips.push(<span key="hold" className="tc-chip tc-chip-hold">🖐 拦截</span>)
     if (askOpen(r)) chips.push(<span key="ask" className="tc-chip tc-chip-ask">❓ 待将军确认</span>)
+    const schedBadge = schedulingBadgeOf({ schedulingState: r.schedulingState, blockingTaskId: r.schedulingBlockedBy, blockingPath: r.schedulingBlockedPath })
+    if (schedBadge) chips.push(<span key="sched" className={`tc-chip tc-chip-sched-${schedBadge.tone}`} title={schedBadge.title}>{schedBadge.label}</span>)
+    const delBadge = deliveryBadgeOf({ deliveryState: r.deliveryState })
+    if (delBadge) chips.push(<span key="delivery" className={`tc-chip tc-chip-del-${delBadge.tone}`} title={delBadge.title}>{delBadge.label}</span>)
 
     const meta: string[] = []
     if (r.status === 'in_progress' && r.claimedAt) meta.push(`⏱ ${fmtDur(Date.now() - new Date(r.claimedAt).getTime())}`)

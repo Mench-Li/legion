@@ -1612,3 +1612,26 @@ export function rotateSecret(
 export function deleteSecret(ref: string, actor: string): Promise<{ removed: boolean } & HubSecretWriteResult> {
   return hubRequest('DELETE', `/api/secrets/${encodeURIComponent(ref)}`, { actor }) as Promise<{ removed: boolean } & HubSecretWriteResult>
 }
+
+
+/**
+ * 并行任务文件冲突治理（G-mujfc9vi-1）：读取某任务的交付子状态与集成事件。
+ * 只读；交付状态是服务端权威，前端不得自行推导 done。
+ */
+export function fetchTaskDelivery(taskId: string): Promise<{ delivery: unknown; events: unknown[] } | null> {
+  return hubRequest('GET', `/api/deliveries?taskId=${encodeURIComponent(taskId)}`) as Promise<{ delivery: unknown; events: unknown[] } | null>
+}
+
+/**
+ * 实时的仓库占用视图（只读、不写库）。返回 { ok, repoId, readOnly, active, overlaps }。
+ */
+export function fetchRepoContention(repoId: string): Promise<{ readOnly: boolean; active: unknown[]; overlaps: unknown[] }> {
+  return hubRequest('GET', `/api/repositories/${encodeURIComponent(repoId)}/contention`) as Promise<{ readOnly: boolean; active: unknown[]; overlaps: unknown[] }>
+}
+
+/**
+ * 指标聚合（只读）。不可读项以 available:false + reason 呈现，**不得**回退为 0。
+ */
+export function fetchRepoMetrics(repoId: string): Promise<{ ok: boolean; repoId: string; metrics: Record<string, { available: boolean; value: number | null; reason: string | null }> }> {
+  return hubRequest('GET', `/api/metrics/repository?repoId=${encodeURIComponent(repoId)}`) as Promise<{ ok: boolean; repoId: string; metrics: Record<string, { available: boolean; value: number | null; reason: string | null }> }>
+}

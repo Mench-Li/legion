@@ -2788,6 +2788,13 @@ async function stageTest() {
       files: ['team-hub/secret-admin.test.mjs'],
       cwd: ROOT,
     },
+  {
+    label: 'channel-contract（F-25：渠道入口契约——身份不来自渠道、幂等、接入新渠道核心零 diff；飞书/REST/邮件三适配器）',
+    files: [
+      'runtime/contracts/channel-contract.test.mjs',
+      'runtime/channels/channels.test.mjs',
+    ],
+  },
     {
       // 同一半的 HTTP 契约，外加本节最要害的那根线：
       // **写成功之后探测缓存必须失效**（`probe-service.mjs:39` 要的调用方）。

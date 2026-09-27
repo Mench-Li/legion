@@ -1,0 +1,78 @@
+# F-23 多 Harness 路由 —— 立项与核实（2026-09-24）
+
+> 业主指令（逐字）：「23要仔细确认，因为 **Deepseek harness 本身应该支持接入 codex/claude code**，做成**配置表 + prompt** 形式，用户可以设置**默认哪些任务交给哪个 harness 产品**，也可以**单次任务里指定使用**，**如不指定，默认使用 deep seek harness**。」
+
+本文件是**核实结果**，不是设计定稿。结论先行：**上面那条判断成立，且比"应该支持"更强 —— DSH 里已经有两个现成的 provider 包。**
+
+## 1. 核实：DSH 到底支不支持
+
+`D:\project\DSH\dsh\deepseek-harness\packages\subagent\` 下的包（目录实测）：
+
+```
+subagent                    ← seam 本体（provider 注册表 + 一次性委派 + 可续子代理）
+subagent-codex              ← ★ 现成：Codex
+subagent-claude-code        ← ★ 现成：Claude Code
+subagent-acp                ← 通用：任何 ACP agent
+subagent-dsh-sdk / -spawn-in-process / -fork-in-process / -in-process-driver
+tool-subagent / tool-subagent-control
+```
+
+**逐字证据**（各自的 `README.md` 首段）：
+
+- `subagent-codex`：「The one-shot **Codex** subagent provider … should run in a genuine, **unattended Codex session**」
+  —— 接线方式：「Mount this provider when a delegation should **run as a real Codex session in the parent's workspace**」
+- `subagent-claude-code`：「should run as a fresh, **unattended Claude Code session** in the parent workspace」
+- `subagent-acp`：「choose it when delegation needs process isolation or **a non-Harness ACP agent**」
+  —— 配置面：`command`（必填，"the child ACP agent"）+ `args` + `cwd` + `permission`（默认 **`reject`**）+ `env`
+
+⇒ **结论**：接 Codex / Claude Code **不是"要新造的能力"**，是 DSH 已有的两个 provider 包；Legion 这一项要做的是**路由与配置**，不是协议。
+
+## 2. 核实：能不能"单次任务里指定"
+
+能，而且是 seam 的**原生形状**。`docs/subsystems/subagent.md` 逐字：
+
+- 「The tool layer builds this request from the model input and its own config; the service **validates it against the named provider** before `start`」
+- 「A provider advertises its **start-time** features on a static descriptor the service checks **BEFORE a one-shot run exists**」
+
+⇒ 委派请求里可以**指名 provider**，服务在起跑前按**该 provider 的静态能力描述**校验 ✓。
+
+★ 同时注意一条**与本次设计直接相关**的边界（`subagent-acp` README 逐字）：ACP provider
+「advertises **no optional start-time capabilities**, so the seam **rejects** requests for `agentOptions`, structured output, depth caps, tool filters, or personas rather than **silently omitting** them」
+⇒ **能力不足是具名拒绝，不是静默降级** —— 这与 Legion 自己 `runtime/contracts/adapter.mjs` 里那条
+「任何必需能力缺失都返回 `UNSUPPORTED_CAPABILITY`，**不得静默降级**」是同一条纪律 ✓✓。
+
+## 3. 本机现状（外部输入）
+
+| 命令 | 结果 |
+|---|---|
+| `claude` / `codex` | **（本机没有）** |
+| `claude-code-acp` / `codex-acp` | **（本机没有）** |
+
+⇒ **路由与配置这一层不受影响**（可写判据、可用替身）；**真跑一次 Codex/Claude Code 会话在本机不可达**，要装 CLI（外部输入，与 F-25 的凭据同类）。
+
+## 4. 你那条需求映射到已有形状
+
+| 你的要求 | 落到哪 |
+|---|---|
+| 配置表 | provider 清单（DeepSeek Harness / Codex / Claude Code / 任意 ACP）+ 各自的 `command`/`args`/`permission`/`env` |
+| 默认：哪些任务交给哪个 harness | 一张「任务类型 / 角色 ⇒ provider」的**结构化**表 |
+| 单次任务里指定 | 委派请求里**指名 provider**（seam 原生支持 ✓） |
+| 不指定 ⇒ DeepSeek Harness | **显式默认值**（★ 与"静默降级"是两回事：默认是**写下来的**，降级是**没写下来的**） |
+
+## 5. 待你裁决的一处（我不猜）
+
+**"prompt 形式"具体指什么？** 三种读法：
+
+1. **路由规则写成自然语言**，由模型读它决定用哪个 harness。（灵活，但同一条任务两次可能路由不同 ⇒ **判据不可复跑**）
+2. **路由表是结构化配置（权威），prompt 只携带"本次用哪个"这个显式参数**。（可复跑、可审计）
+3. ②为主 + ①作为**兜底建议**（模型只能建议，选定仍走表）。
+
+★ 我的建议是 **②**：理由是 ① 会让"同一条任务路由到不同 harness"成为常态，而本仓对
+F-21 已经裁过同一类事（**权威只能有一个**）；prompt 可以是**输入**，不能是**权威**。
+
+## 6. 下一步（确认完 §5 就开工）
+
+1. 在 Legion 侧读清"谁把 provider 名传下去"（`tool-subagent` 是否把它作为参数暴露给模型）。
+2. 配置表的落点：与 F-25 同一处（hub 侧配置 + 读写路由），以及**未配置时的失败姿态**。
+3. 判据：不指定 ⇒ DeepSeek Harness；指定 ⇒ 指定者；**指名不存在的 provider ⇒ 具名拒绝**（不得回落到默认）。
+4. ★ 真跑两件事要外部输入：装 `codex` / `claude` CLI。

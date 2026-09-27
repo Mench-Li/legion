@@ -9,7 +9,7 @@
 ## 目标下并行任务快照（派工时刻）
 
 - T-166｜requirement｜done
-- T-167｜researcher｜todo
+- T-167｜researcher｜done
 - T-168｜breaker｜todo
 - T-169｜test-designer｜todo
 - T-170｜coder｜todo

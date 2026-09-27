@@ -108,11 +108,6 @@
       "reason": "F-25 渠道适配器（飞书（最先接））：判据已落（runtime/channels/channels.test.mjs），但**还没有生产 import 者** —— 接进 hub 入口是后续一刀。裁决处：docs/superpowers/prt/F-25-CHANNEL-ENTRY-CONTRACT.md §5\"下一刀\""
     },
     {
-      "file": "runtime/channels/rest.mjs",
-      "class": "gap",
-      "reason": "F-25 渠道适配器（公开 REST API）：判据已落（runtime/channels/channels.test.mjs），但**还没有生产 import 者** —— 接进 hub 入口是后续一刀。裁决处：docs/superpowers/prt/F-25-CHANNEL-ENTRY-CONTRACT.md §5\"下一刀\""
-    },
-    {
       "file": "runtime/config-schema.mjs",
       "class": "by-design",
       "reason": "config-schema 由 `scan.mjs` 读源码对账，不由别的模块 import（同 `orchestrator/config-schema.mjs`）"
@@ -126,11 +121,6 @@
       "file": "runtime/context/index.mjs",
       "class": "by-design",
       "reason": "re-export 出口"
-    },
-    {
-      "file": "runtime/contracts/channel-contract.mjs",
-      "class": "gap",
-      "reason": "F-25 渠道入口契约（业主 2026-09-24 裁：先立契约再接渠道）：契约与判据已落（channel-contract.test.mjs 8 例全过），但**还没有生产 import 者** —— 第一个渠道（飞书/REST）接上时才会被 import。裁决处：docs/superpowers/prt/F-25-CHANNEL-ENTRY-CONTRACT.md §5「下一刀」"
     },
     {
       "file": "runtime/employee/role-pack.mjs",

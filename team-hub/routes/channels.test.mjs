@@ -1,7 +1,7 @@
 // F-25 渠道入站族判据：生产路径上的"身份不来自渠道 / 幂等 / 新渠道不改核心"。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createChannelRoutes } from './channels.mjs'
+import { createChannelRoutes, parseIdentityMap } from './channels.mjs'
 import { REJECT } from '../../runtime/contracts/channel-contract.mjs'
 
 test('F-25 缺注入项 ⇒ 当场抛（与其它族同一条纪律）', () => {
@@ -74,4 +74,40 @@ test('★ F-25 核心零 diff：本族只注册适配器，判定全在契约闸
   const routes = createChannelRoutes({ json: () => {}, handleWrite: async () => {} })
   assert.equal(typeof routes.gate.accept, 'function')
   assert.equal(routes.routes.length, 1, '本族只认一条路')
+})
+
+test('★ F-25 三渠道（飞书/REST/邮件）走同一条生产路径，判定逻辑一份', async () => {
+  const map = parseIdentityMap(JSON.stringify({
+    'feishu:ou_9': 'legion-9',
+    'rest:u-9': 'legion-9',
+    'email:a@b.c': 'legion-9',
+  }))
+  const bodies = [
+    { channel: 'feishu', payload: { header: { event_id: 'f1' }, event: { sender: { sender_id: { open_id: 'ou_9' } }, message: { content: '{"text":"部署"}' } } } },
+    { channel: 'rest', payload: { userId: 'u-9', eventId: 'r1', text: '部署' } },
+    { channel: 'email', payload: { messageId: '<m1@x>', from: 'a@b.c', subject: '部署' } },
+  ]
+  let i = 0
+  const outs = []
+  const handleWrite = async (_q, _s, cb) => { outs.push(await cb(bodies[i++], 'b', 's')) }
+  const routes = createChannelRoutes({ json: () => {}, handleWrite, identityMap: map })
+  for (let k = 0; k < bodies.length; k += 1) {
+    const hit = await routes.dispatch({ method: 'POST' }, {}, { path: '/api/channels/inbound' })
+    assert.equal(hit, true)
+  }
+  assert.equal(outs.length, 3)
+  for (const o of outs) { assert.equal(o.accepted, true); assert.equal(o.userId, 'legion-9') }
+  assert.deepEqual(outs.map((o) => o.channelId), ['feishu', 'rest', 'email'])
+  assert.equal(routes.gate.runCount(), 3)
+  assert.equal(new Set(outs.map((o) => o.runKey)).size, 3, '三个渠道各自一个 Run 键')
+})
+
+test('F-25 身份映射解析器：合法解析 / 坏形状当场抛（不静默忽略）', () => {
+  const m = parseIdentityMap('{"feishu:ou_1":"legion-1"}')
+  assert.equal(m.get('feishu:ou_1'), 'legion-1')
+  assert.equal(parseIdentityMap('{}').size, 0)
+  for (const bad of ['not json', '[]', '{"nokey":"u"}', '{"feishu:x":""}']) {
+    assert.throws(() => parseIdentityMap(bad), undefined, bad)
+  }
+  assert.throws(() => parseIdentityMap(null), /需要文本/)
 })

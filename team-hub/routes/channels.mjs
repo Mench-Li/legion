@@ -25,6 +25,8 @@
 
 import { createChannelRegistry, createInboundGate, REJECT } from '../../runtime/contracts/channel-contract.mjs'
 import { createRestChannel } from '../../runtime/channels/rest.mjs'
+import { createFeishuChannel } from '../../runtime/channels/feishu.mjs'
+import { createEmailChannel } from '../../runtime/channels/email.mjs'
 
 /**
  * 造渠道入站族路由。
@@ -44,7 +46,10 @@ export function createChannelRoutes({
   }
 
   const registry = createChannelRegistry()
+  // ★ 三个渠道都注册进**同一个**闸门：新增渠道不需要动契约、也不需要动本族的判定逻辑。
   registry.register(createRestChannel())
+  registry.register(createFeishuChannel())
+  registry.register(createEmailChannel())
   const gate = createInboundGate({ registry, identityMap: identityMap ?? new Map() })
 
   const routes = [
@@ -92,4 +97,29 @@ export function createChannelRoutes({
       return false
     },
   }
+}
+
+/**
+ * **纯解析器**：把一份 JSON 文本解析成身份映射表（`${channelId}:${externalUserId}` → Legion userId）。
+ *
+ * ★ 它只做解析与形状校验，**不决定这份表从哪来** —— "外部身份 → Legion 用户"的来源是
+ *   **产品决定**（Workbench 里配？hub 里存一张表？），在这里不能靠默认值替它决定。
+ *   因此本函数要一个**显式的 path 或文本**，没有默认位置、没有内置兜底表。
+ *
+ * ★ 形状不对**当场抛**，不静默忽略：一张"看着像映射表、其实键写错了"的表，
+ *   与一张空表，在"每条入站都被拒"这个读数上是同一个东西 —— 于是人们会去查渠道，
+ *   而问题在那张表。
+ */
+export function parseIdentityMap(text) {
+  if (typeof text !== 'string') throw new TypeError('parseIdentityMap 需要文本')
+  let obj
+  try { obj = JSON.parse(text) } catch (e) { throw new Error(`身份映射不是合法 JSON：${e.message}`) }
+  if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) throw new Error('身份映射必须是对象：{"渠道:外部id":"Legion用户id"}')
+  const map = new Map()
+  for (const [k, v] of Object.entries(obj)) {
+    if (typeof v !== 'string' || v === '') throw new Error(`身份映射的值为空：${k}`)
+    if (!k.includes(':')) throw new Error(`身份映射的键必须形如 渠道:外部id：${k}`)
+    map.set(k, v)
+  }
+  return map
 }

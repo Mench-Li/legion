@@ -1,4 +1,4 @@
-import { Component, useEffect, useMemo, useState } from 'react'
+import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import { Canvas, useThree } from '@react-three/fiber'
 import { Grid, Html, Line, OrbitControls } from '@react-three/drei'
 import * as THREE from 'three'
@@ -44,7 +44,7 @@ function CameraRig({ layout }: { layout: SceneLayout }): null {
   return null
 }
 
-function OfficeWorld({ agents, cues, layout, preset, goalPercent, motion, onAgentClick }: Scene3DProps & { layout: SceneLayout; motion: boolean }): React.JSX.Element {
+function OfficeWorld({ agents, cues, layout, preset, goalPercent, motion, compact, onAgentClick }: Scene3DProps & { layout: SceneLayout; motion: boolean; compact: boolean }): React.JSX.Element {
   const theme = PRESETS[preset]
   const stations = new Map(layout.stations.map(station => [station.key, station]))
   const liveCues = cues.filter(cue => cue.expiresAtMs > Date.now())
@@ -85,7 +85,7 @@ function OfficeWorld({ agents, cues, layout, preset, goalPercent, motion, onAgen
       const station = stations.get(agent.key)
       if (!station) return null
       const celebrating = motion && liveCues.some(cue => cue.kind === 'completed' && cue.fromRole === agent.role)
-      return <Employee3D key={agent.key} agent={agent} x={station.x} z={station.z} motion={motion} celebrate={celebrating} compact={agents.length > 12} onSelect={() => onAgentClick?.(agent.role)} />
+      return <Employee3D key={agent.key} agent={agent} x={station.x} z={station.z} motion={motion} celebrate={celebrating} compact={compact} onSelect={() => onAgentClick?.(agent.role)} />
     })}
     {motion && liveCues.filter(cue => cue.kind === 'handoff').map(cue => {
       const from = agents.find(agent => agent.role === cue.fromRole)
@@ -98,13 +98,21 @@ function OfficeWorld({ agents, cues, layout, preset, goalPercent, motion, onAgen
 }
 
 export function Scene3D({ agents, cues, preset, goalPercent, motionEnabled = true, onAgentClick }: Scene3DProps): React.JSX.Element {
+  const container = useRef<HTMLDivElement>(null)
+  const [width, setWidth] = useState(1000)
   const keys = agents.map(agent => agent.key).join('\n')
   const layout = useMemo(() => layoutScene(agents.map(agent => agent.key), preset), [keys, preset])
   const [available] = useState(webglAvailable)
   const [motionOn, setMotionOn] = useState(true)
   const [reduced, setReduced] = useState(false)
   const [visible, setVisible] = useState(true)
-  const [, setCueTick] = useState(0)
+  const [cueTick, setCueTick] = useState(0)
+  useEffect(() => {
+    if (!container.current) return
+    const observer = new ResizeObserver(entries => setWidth(entries[0].contentRect.width))
+    observer.observe(container.current)
+    return () => observer.disconnect()
+  }, [])
   useEffect(() => {
     const media = window.matchMedia('(prefers-reduced-motion: reduce)')
     const update = (): void => setReduced(media.matches)
@@ -117,16 +125,17 @@ export function Scene3D({ agents, cues, preset, goalPercent, motionEnabled = tru
     return () => document.removeEventListener('visibilitychange', update)
   }, [])
   useEffect(() => {
-    if (!cues.length) return
-    const timer = window.setTimeout(() => setCueTick(value => value + 1), Math.max(0, Math.min(...cues.map(cue => cue.expiresAtMs)) - Date.now()))
+    const nextExpiry = cues.map(cue => cue.expiresAtMs).filter(expiry => expiry > Date.now()).sort((a, b) => a - b)[0]
+    if (nextExpiry === undefined) return
+    const timer = window.setTimeout(() => setCueTick(value => value + 1), Math.max(0, nextExpiry - Date.now()))
     return () => window.clearTimeout(timer)
-  }, [cues])
+  }, [cues, cueTick])
   const motion = motionEnabled && motionOn && !reduced && visible
-  const fallback = <div className="scene-webgl-fallback">3D 场景暂不可用，可从下面的员工列表查看任务。</div>
-  return <div className="pixel-scene-content">
+  const fallback = <div className="scene-webgl-fallback">3D 场景暂不可用，可从下面的员工列表查看状态{onAgentClick ? '与任务' : ''}。</div>
+  return <div className="pixel-scene-content" ref={container}>
     <div className="pixel-scene-canvas">
       {available ? <SceneBoundary fallback={fallback}><Canvas orthographic shadows frameloop={motion ? 'always' : 'demand'} dpr={[1, 1.5]}>
-        <OfficeWorld agents={agents} cues={cues} preset={preset} goalPercent={goalPercent} motion={motion} onAgentClick={onAgentClick} layout={layout} />
+        <OfficeWorld agents={agents} cues={cues} preset={preset} goalPercent={goalPercent} motion={motion} compact={agents.length > 12 || width < 700} onAgentClick={onAgentClick} layout={layout} />
       </Canvas></SceneBoundary> : fallback}
     </div>
     <div className="pixel-scene-toolbar"><span>{PRESETS[preset].label} · {agents.length} 位员工</span>

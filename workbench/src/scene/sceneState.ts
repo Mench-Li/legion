@@ -37,7 +37,7 @@ export interface SceneFacts {
   tasks: readonly HubTask[]
 }
 
-const rank: Record<string, number> = { blocked: 0, in_review: 1, in_progress: 2 }
+const rank: Record<string, number> = { blocked: 0, in_review: 1, in_progress: 2, todo: 3, backlog: 4, done: 5 }
 
 export function identitySeed(key: string): number {
   let hash = 2166136261
@@ -45,13 +45,16 @@ export function identitySeed(key: string): number {
   return hash >>> 0
 }
 
-function owned(agent: Pick<RosterAgent, 'role' | 'external'>, task: Pick<HubTask, 'role' | 'soldier'>): boolean {
-  return agent.external ? task.soldier === agent.role : (task.role ?? task.soldier) === agent.role
+function owned(agent: Pick<RosterAgent, 'role' | 'external'>, task: Pick<HubTask, 'role' | 'soldier'>, rosterRoles: ReadonlySet<string>): boolean {
+  return agent.external
+    ? task.soldier === agent.role && !rosterRoles.has(task.role ?? task.soldier ?? '')
+    : (task.role ?? task.soldier) === agent.role
 }
 
 export function projectSceneAgents(scope: string, roster: readonly RosterAgent[], tasks: readonly HubTask[]): SceneAgent[] {
+  const rosterRoles = new Set(roster.filter(agent => !agent.external).map(agent => agent.role))
   return roster.filter(agent => !agent.scope || agent.scope === scope).map(agent => {
-    const mine = tasks.filter(task => task.status !== 'canceled' && (!task.scope || task.scope === scope) && owned(agent, task))
+    const mine = tasks.filter(task => task.status !== 'canceled' && (!task.scope || task.scope === scope) && owned(agent, task, rosterRoles))
     const focus = [...mine].sort((a, b) => (rank[a.status] ?? 3) - (rank[b.status] ?? 3) || a.id.localeCompare(b.id))[0]
     const mode: SceneMode = mine.some(task => task.status === 'blocked') ? 'blocked'
       : mine.some(task => task.status === 'in_review') ? 'review'
@@ -91,10 +94,11 @@ export function deriveSceneCues(
     const after = fresh.get(event.taskId)
     if (!before || !after) continue
     const toRole = owner(after, current.roster)
-    if (before.status !== 'done' && after.status === 'done' && toRole) {
+    const completedEvent = event.action === 'advance' || (event.action === 'transition' && event.payload?.to === 'done')
+    if (completedEvent && before.status !== 'done' && after.status === 'done' && toRole) {
       cues.push({ id: `${event.seq}:${after.id}:completed`, scope: current.scope, kind: 'completed', fromRole: toRole, taskId: after.id, eventSeq: event.seq, expiresAtMs: nowMs + 1800 })
     }
-    if (event.action !== 'claim' || before.status === 'in_progress' || after.status !== 'in_progress' || !toRole) continue
+    if (event.action !== 'claim' || event.payload?.soldier !== after.soldier || before.status === 'in_progress' || after.status !== 'in_progress' || !toRole) continue
     for (const predecessorId of after.blockedBy ?? []) {
       const predecessor = fresh.get(predecessorId)
       if (!predecessor || predecessor.status !== 'done' || predecessor.scope !== after.scope) continue

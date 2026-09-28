@@ -121,7 +121,7 @@
 - Create: `workbench/src/components/Employee3D.tsx`, `workbench/src/components/SceneAgentList.tsx`
 - Rewrite: `workbench/src/components/Scene3D.tsx`
 - Modify: `workbench/src/components/CenterPanel.tsx`, `workbench/src/index.css`
-- Test: `workbench/scripts/scene-state.test.mjs`, `workbench/scripts/scene-layout.test.mjs`; visual scenario checks in Task 8
+- Test: `workbench/scripts/scene-state.test.mjs`, `workbench/scripts/scene-layout.test.mjs`; visual scenario checks in Task 7
 
 **Interfaces:** `Scene3D({ agents, cues, preset, goalPercent, motionEnabled, onAgentClick })`; `SceneAgentList({ agents, onAgentClick })`. Existing modal click path stays intact.
 

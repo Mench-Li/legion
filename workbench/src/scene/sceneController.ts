@@ -3,7 +3,7 @@ import type { HubSseStatus } from '../api'
 import { deriveSceneCues } from './sceneState.ts'
 import type { SceneCue, SceneFacts } from './sceneState.ts'
 
-const SCENE_ACTIONS = new Set(['create', 'claim', 'transition', 'advance', 'goal:publish', 'agent:create', 'space:add-agents', 'space:remove-agent', 'space:update'])
+const SCENE_ACTIONS = new Set(['create', 'claim', 'transition', 'advance', 'reassign', 'goal:publish', 'agent:create', 'space:add-agents', 'space:remove-agent', 'space:update'])
 
 interface Timers {
   setTimeout: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>
@@ -42,8 +42,7 @@ export function createSceneController(options: SceneControllerOptions): { start:
     if (!running) return
     const startedEpoch = epoch
     const request = ++refreshVersion
-    const candidates = pendingEvents
-    pendingEvents = []
+    const candidates = [...pendingEvents]
     try {
       const [roster, tasks] = await Promise.all([options.fetchRoster(options.scope), options.fetchTasks(options.scope)])
       if (!running || startedEpoch !== epoch || request !== refreshVersion) return
@@ -54,12 +53,13 @@ export function createSceneController(options: SceneControllerOptions): { start:
         return true
       })
       if (played.size > 500) played = new Set([...played].slice(-250))
+      const consumed = new Set(candidates.map(event => event.seq))
+      pendingEvents = pendingEvents.filter(event => !consumed.has(event.seq))
       previous = current
       options.onSnapshot(current, cues)
       options.onError('')
     } catch (error) {
       if (!running || startedEpoch !== epoch || request !== refreshVersion) return
-      pendingEvents = [...candidates, ...pendingEvents]
       options.onError(error instanceof Error ? error.message : String(error))
     }
   }
@@ -76,6 +76,7 @@ export function createSceneController(options: SceneControllerOptions): { start:
     unsubscribe = options.subscribe(event => {
       if (event.scope !== options.scope || !SCENE_ACTIONS.has(event.action)) return
       pendingEvents.push(event)
+      if (pendingEvents.length > 300) pendingEvents = pendingEvents.slice(-300)
       schedule()
     }, { scope: options.scope, onStatus: status => {
       if (status.state === 'open' || status.state === 'reconnected') void refresh()

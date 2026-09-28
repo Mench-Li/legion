@@ -23,6 +23,20 @@ function faceTexture(): THREE.CanvasTexture {
   return texture
 }
 
+function shirtTexture(tone: string): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas')
+  canvas.width = canvas.height = 8
+  const ctx = canvas.getContext('2d')!
+  ctx.fillStyle = tone; ctx.fillRect(0, 0, 8, 8)
+  ctx.fillStyle = '#dbe9f1'; ctx.fillRect(1, 1, 6, 1); ctx.fillRect(3, 2, 2, 2)
+  ctx.fillStyle = '#203245'; ctx.fillRect(3, 4, 2, 3)
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.magFilter = THREE.NearestFilter
+  texture.minFilter = THREE.NearestFilter
+  texture.colorSpace = THREE.SRGBColorSpace
+  return texture
+}
+
 export function Employee3D({ agent, x, z, motion, celebrate, compact, onSelect }: {
   agent: SceneAgent; x: number; z: number; motion: boolean; celebrate: boolean; compact: boolean; onSelect: () => void
 }): React.JSX.Element {
@@ -34,8 +48,10 @@ export function Employee3D({ agent, x, z, motion, celebrate, compact, onSelect }
   const walkStart = useRef<number | null>(null)
   const face = useMemo(faceTexture, [])
   const tone = agent.external ? '#586879' : PALETTES[agent.appearanceSeed % PALETTES.length]
+  const shirt = useMemo(() => shirtTexture(tone), [tone])
   const status = STATUS[agent.mode]
   useEffect(() => () => face.dispose(), [face])
+  useEffect(() => () => shirt.dispose(), [shirt])
   useEffect(() => {
     if (previousMode.current === 'idle' && agent.mode === 'busy' && motion) walkStart.current = performance.now()
     previousMode.current = agent.mode
@@ -76,6 +92,9 @@ export function Employee3D({ agent, x, z, motion, celebrate, compact, onSelect }
       </mesh>
       <group ref={root}>
         {part('torso', tone, [0, 0.83, 0], [0.58, 0.7, 0.32])}
+        <mesh geometry={BOX} position={[0, 0.83, 0.168]} scale={[0.51, 0.62, 0.012]}>
+          <meshBasicMaterial map={shirt} />
+        </mesh>
         {part('belt', '#253344', [0, 0.46, 0.02], [0.6, 0.1, 0.34])}
         {part('head', '#e9bd93', [0, 1.47, 0], [0.56, 0.53, 0.5])}
         {part('hair', agent.external ? '#596b7b' : '#28364b', [0, 1.76, -0.015], [0.62, 0.13, 0.54])}

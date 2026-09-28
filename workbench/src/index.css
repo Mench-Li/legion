@@ -838,8 +838,10 @@ body {
 .pixel-scene-toolbar { display: flex; justify-content: space-between; align-items: center; padding: 3px 12px; color: #b7c8d9; font-size: 11px; }
 .pixel-scene-toolbar button { color: #b7c8d9; background: #1b2d40; border: 1px solid #35506a; border-radius: 5px; cursor: pointer; padding: 3px 9px; }
 .scene-agent-list { display: flex; gap: 6px; overflow-x: auto; min-height: 68px; padding: 7px 12px 10px; border-top: 1px solid #31445a; background: #101b2a; }
+.scene-agent-entry { flex: 0 0 auto; }
 .scene-agent-item { min-width: 105px; max-width: 155px; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 5px 8px; background: #1a2b3e; border: 1px solid #38516a; border-radius: 7px; color: #e2ebf4; cursor: pointer; text-align: left; }
 .scene-agent-item:hover, .scene-agent-item:focus-visible { border-color: #8abce5; outline: 2px solid #8abce5; outline-offset: 1px; }
+.scene-agent-item:disabled { cursor: default; opacity: 0.8; }
 .scene-agent-avatar { font-size: 12px; }
 .scene-agent-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; font-size: 11px; }
 .scene-agent-mode { color: #9db5ca; font-size: 9px; }

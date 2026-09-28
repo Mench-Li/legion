@@ -260,7 +260,6 @@ export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces
         </div>
       ) : allMode ? (
         <div className="scene-3d">
-          {sceneError && <div className="scene-error">状态更新中断：{sceneError}</div>}
           <div className="scene-legend">
             <span className="legend-title">⚔ 全部空间 · 按分区查看编队</span>
             <span className="legend-hint">🖱 左侧选择具体工作空间，查看该空间的专属智能体编队</span>
@@ -275,6 +274,7 @@ export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces
         </div>
       ) : (
         <div className="scene-3d">
+          {sceneError && <div className="scene-error">状态更新中断：{sceneError}</div>}
           <div className="scene-legend">
             <span className="legend-title">⚔ {scope ?? '全局'}编队{isRoster ? ` · ${agents.length} 岗` : ''}</span>
             <span>
@@ -295,7 +295,9 @@ export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces
             </span>
             <span className="legend-hint">🖱 拖动旋转 · 滚轮缩放 · 状态实时投影</span>
           </div>
-          <Suspense fallback={<div className="scene-loading">⏳ 正在构建 3D 办公场景…</div>}>
+          {hubActive && scope && !sceneFacts && rosterAgents == null ? (
+            <div className="scene-loading">{sceneError ? '无法读取空间员工，请刷新重试' : '正在读取空间员工…'}</div>
+          ) : <Suspense fallback={<div className="scene-loading">⏳ 正在构建 3D 办公场景…</div>}>
             <Scene3D
               key={scope ?? 'all'}
               agents={sceneAgents}
@@ -304,12 +306,13 @@ export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces
               goalPercent={hubActive ? (aggPct ?? 0) : v1Goal.progress.percent}
               onAgentClick={isRoster ? openAgent : undefined}
             />
-          </Suspense>
+          </Suspense>}
         </div>
       )}
       {agentView && (
         <AgentTasksModal
           agent={agentView}
+          roster={currentRoster}
           onClose={() => setAgentView(null)}
           onOpenTask={openTaskFromAgent}
         />

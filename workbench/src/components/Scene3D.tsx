@@ -1,213 +1,139 @@
-import { useRef } from 'react'
-import { Canvas, useFrame } from '@react-three/fiber'
-import { Grid, Html, OrbitControls } from '@react-three/drei'
+import { Component, useEffect, useMemo, useState } from 'react'
+import { Canvas, useThree } from '@react-three/fiber'
+import { Grid, Html, Line, OrbitControls } from '@react-three/drei'
 import * as THREE from 'three'
-
-export type AgentMode = 'busy' | 'review' | 'blocked' | 'idle'
-
-export interface AgentPose {
-  id: string
-  name: string
-  mode: AgentMode
-  tasks: number
-  avatar?: string
-}
+import type { ScenePreset } from '../types'
+import type { SceneAgent, SceneCue } from '../scene/sceneState'
+import { layoutScene } from '../scene/sceneLayout'
+import type { SceneLayout } from '../scene/sceneLayout'
+import { Employee3D } from './Employee3D'
+import { SceneAgentList } from './SceneAgentList'
 
 interface Scene3DProps {
-  agents: AgentPose[]
-  goalPercent: number
-  /** 点击某个智能体（身体或名牌）→ 打开它的任务清单。 */
-  onAgentClick?: (id: string) => void
+  agents: SceneAgent[]; cues: SceneCue[]; preset: ScenePreset; goalPercent: number
+  motionEnabled?: boolean; onAgentClick?: (role: string) => void
 }
 
-const MODE_COLOR: Record<AgentMode, string> = {
-  busy: '#40ffa0',
-  review: '#ffd54a',
-  blocked: '#ff5c5c',
-  idle: '#5b8cff',
+const PRESETS: Record<ScenePreset, { floor: string; desk: string; accent: string; light: string; label: string }> = {
+  office: { floor: '#15283a', desk: '#41607b', accent: '#5e9ed2', light: '#b9d8ff', label: '办公室' },
+  studio: { floor: '#30263a', desk: '#765579', accent: '#dc9acb', light: '#f8c8ec', label: '创作室' },
+  lab: { floor: '#193138', desk: '#3a6972', accent: '#67d9c7', light: '#b2fff1', label: '实验室' },
+  operations: { floor: '#342a21', desk: '#796443', accent: '#e8bf69', light: '#fff0ba', label: '运营中心' },
 }
 
-const MODE_TEXT: Record<AgentMode, string> = {
-  busy: '进行中',
-  review: '待验收',
-  blocked: '受阻',
-  idle: '待命',
+function webglAvailable(): boolean {
+  try { const canvas = document.createElement('canvas'); return !!(canvas.getContext('webgl2') || canvas.getContext('webgl')) }
+  catch { return false }
 }
 
-/** 一名 AI 员工：身体 + 发光头部（状态色）+ 悬浮名牌，头部带轻微呼吸动画。点击身体或名牌可查看其任务。 */
-function AgentFigure({ pose, index, count, onSelect }: { pose: AgentPose; index: number; count: number; onSelect?: () => void }): React.JSX.Element {
-  const head = useRef<THREE.Mesh>(null)
-  const color = MODE_COLOR[pose.mode]
-  const angle = (index / Math.max(count, 1)) * Math.PI * 2
-  // 围桌半径随编队人数自适应（3～14 人）
-  const radius = Math.max(2.6, Math.min(count, 14) * 0.62)
-  const x = Math.sin(angle) * radius
-  const z = Math.cos(angle) * radius
+class SceneBoundary extends Component<{ children: React.ReactNode; fallback: React.ReactNode }, { failed: boolean }> {
+  state = { failed: false }
+  static getDerivedStateFromError(): { failed: boolean } { return { failed: true } }
+  render(): React.ReactNode { return this.state.failed ? this.props.fallback : this.props.children }
+}
 
-  useFrame(({ clock }) => {
-    if (head.current) {
-      head.current.position.y = 1.34 + Math.sin(clock.elapsedTime * 1.6 + index * 1.7) * 0.045
-    }
-  })
+function CameraRig({ layout }: { layout: SceneLayout }): null {
+  const { camera, size, invalidate } = useThree()
+  useEffect(() => {
+    const ortho = camera as THREE.OrthographicCamera
+    ortho.position.set(layout.camera.distance * 0.64, layout.camera.distance * 0.75, layout.camera.distance * 0.78)
+    ortho.lookAt(0, layout.camera.targetY, 0)
+    ortho.zoom = Math.max(14, Math.min(75, size.width / (layout.floorWidth * 1.2), size.height / (layout.floorDepth * 1.2)))
+    ortho.updateProjectionMatrix(); invalidate()
+  }, [camera, invalidate, layout, size.width, size.height])
+  return null
+}
 
-  const hoverCursor = (on: boolean) => (e: { stopPropagation: () => void }) => {
-    e.stopPropagation()
-    document.body.style.cursor = on ? 'pointer' : 'default'
-  }
-
-  return (
-    <group
-      position={[x, 0, z]}
-      rotation={[0, -angle + Math.PI / 2, 0]}
-      onClick={e => {
-        e.stopPropagation()
-        onSelect?.()
-      }}
-      onPointerOver={hoverCursor(true)}
-      onPointerOut={hoverCursor(false)}
-    >
-      {/* 底座 */}
-      <mesh position={[0, 0.06, 0]}>
-        <cylinderGeometry args={[0.44, 0.5, 0.12, 24]} />
-        <meshStandardMaterial color="#101a26" roughness={0.8} />
-      </mesh>
-      {/* 身体 */}
-      <mesh position={[0, 0.66, 0]}>
-        <cylinderGeometry args={[0.3, 0.36, 1.1, 20]} />
-        <meshStandardMaterial color="#1d2a3a" roughness={0.65} metalness={0.15} />
-      </mesh>
-      {/* 头（状态色发光） */}
-      <mesh ref={head} position={[0, 1.34, 0]}>
-        <sphereGeometry args={[0.27, 24, 24]} />
-        <meshStandardMaterial
-          color={color}
-          emissive={color}
-          emissiveIntensity={pose.mode === 'blocked' ? 0.6 : 0.3}
-          roughness={0.35}
-        />
-      </mesh>
-      {/* 名牌（zIndexRange 限到 40，避免穿透盖到弹窗/浮层之上；可点击查看任务） */}
-      <Html position={[0, 1.92, 0]} center zIndexRange={[40, 0]} style={{ pointerEvents: 'none' }}>
-        <div
-          className="agent-tag clickable"
-          title={`查看 ${pose.name} 的任务（进行中/待办/完成）`}
-          onClick={e => {
-            e.stopPropagation()
-            onSelect?.()
-          }}
-        >
-          <div className="agent-tag-name">
-            {pose.avatar ? <span className="agent-tag-avatar">{pose.avatar}</span> : null}
-            {pose.name}
-          </div>
-          <div className={`agent-tag-chip ${pose.mode}`}>
-            {MODE_TEXT[pose.mode]}
-            {pose.tasks > 0 ? ` · ${pose.tasks}` : ''}
-          </div>
-        </div>
-      </Html>
+function OfficeWorld({ agents, cues, layout, preset, goalPercent, motion, onAgentClick }: Scene3DProps & { layout: SceneLayout; motion: boolean }): React.JSX.Element {
+  const theme = PRESETS[preset]
+  const stations = new Map(layout.stations.map(station => [station.key, station]))
+  const liveCues = cues.filter(cue => cue.expiresAtMs > Date.now())
+  return <>
+    <color attach="background" args={['#0b111a']} />
+    <ambientLight intensity={1.3} />
+    <hemisphereLight color={theme.light} groundColor="#17202a" intensity={1.5} />
+    <directionalLight position={[8, 14, 10]} intensity={2.5} color={theme.light} castShadow />
+    <CameraRig layout={layout} />
+    <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.025, 0]} receiveShadow>
+      <planeGeometry args={[layout.floorWidth, layout.floorDepth]} /><meshStandardMaterial color={theme.floor} roughness={1} />
+    </mesh>
+    <Grid position={[0, 0, 0]} args={[layout.floorWidth, layout.floorDepth]} cellSize={0.5} cellColor={theme.desk}
+      sectionSize={2} sectionColor={theme.accent} sectionThickness={0.5} infiniteGrid={false} fadeDistance={80} />
+    {layout.stations.map(station => <group key={station.key} position={[station.x, 0, station.z]}>
+      <mesh position={[0, 0.48, -0.76]} castShadow><boxGeometry args={[1.55, 0.14, 0.74]} /><meshStandardMaterial color={theme.desk} roughness={0.85} /></mesh>
+      <mesh position={[0, 0.77, -0.95]} castShadow><boxGeometry args={[0.62, 0.48, 0.07]} /><meshStandardMaterial color="#18293a" emissive={theme.accent} emissiveIntensity={0.25} /></mesh>
+      <mesh position={[0, 0.52, -0.38]}><boxGeometry args={[0.42, 0.025, 0.16]} /><meshStandardMaterial color="#192535" /></mesh>
+    </group>)}
+    <group>
+      <mesh position={[0, 0.2, 0]}><boxGeometry args={[1.2, 0.4, 1.2]} /><meshStandardMaterial color={theme.desk} /></mesh>
+      <mesh position={[0, 0.57, 0]}><boxGeometry args={[0.72, 0.36, 0.72]} /><meshStandardMaterial color={theme.accent} emissive={theme.accent} emissiveIntensity={0.2} /></mesh>
+      <Html center position={[0, 1.02, 0]} zIndexRange={[25, 0]} style={{ pointerEvents: 'none' }}><div className="pixel-goal-label">🎯 目标 {goalPercent}%</div></Html>
     </group>
-  )
+    {[layout.review, layout.help].map((place, index) => <group key={index} position={[place.x, 0, place.z]}>
+      <mesh position={[0, 0.36, 0]}><boxGeometry args={[1.05, 0.7, 0.5]} /><meshStandardMaterial color={theme.desk} /></mesh>
+      {preset === 'studio' ? <mesh position={[0, 1, -0.08]} rotation={[0, index ? 0.3 : -0.3, 0]}>
+        <boxGeometry args={[0.7, 0.8, 0.08]} /><meshStandardMaterial color="#eed3a9" />
+      </mesh> : preset === 'lab' ? <mesh position={[0, 0.98, -0.08]}>
+        <boxGeometry args={[0.72, 0.56, 0.14]} /><meshStandardMaterial color="#8bded0" emissive="#329b90" emissiveIntensity={0.25} />
+      </mesh> : preset === 'operations' ? <mesh position={[0, 0.94, -0.08]}>
+        <boxGeometry args={[0.82, 0.42, 0.1]} /><meshStandardMaterial color="#e5b95f" emissive="#9b6c25" emissiveIntensity={0.3} />
+      </mesh> : <mesh position={[0, 0.95, -0.08]}>
+        <boxGeometry args={[0.65, 0.48, 0.14]} /><meshStandardMaterial color="#bed8ec" />
+      </mesh>}
+    </group>)}
+    {agents.map(agent => {
+      const station = stations.get(agent.key)
+      if (!station) return null
+      const celebrating = motion && liveCues.some(cue => cue.kind === 'completed' && cue.fromRole === agent.role)
+      return <Employee3D key={agent.key} agent={agent} x={station.x} z={station.z} motion={motion} celebrate={celebrating} compact={agents.length > 12} onSelect={() => onAgentClick?.(agent.role)} />
+    })}
+    {motion && liveCues.filter(cue => cue.kind === 'handoff').map(cue => {
+      const from = agents.find(agent => agent.role === cue.fromRole)
+      const to = agents.find(agent => agent.role === cue.toRole)
+      const a = from && stations.get(from.key), b = to && stations.get(to.key)
+      return a && b ? <Line key={cue.id} points={[[a.x, 1.3, a.z], [b.x, 1.3, b.z]]} color={theme.accent} lineWidth={3} dashed /> : null
+    })}
+    <OrbitControls target={[0, layout.camera.targetY, 0]} enablePan={false} enableDamping={motion} minPolarAngle={0.35} maxPolarAngle={Math.PI / 2.2} minZoom={14} maxZoom={95} />
+  </>
 }
 
-/** 会议桌旁的空椅子。 */
-function Chair({ angle }: { angle: number }): React.JSX.Element {
-  const r = 1.55
-  const x = Math.sin(angle) * r
-  const z = Math.cos(angle) * r
-  return (
-    <group position={[x, 0, z]} rotation={[0, -angle, 0]}>
-      <mesh position={[0, 0.32, 0]}>
-        <boxGeometry args={[0.52, 0.08, 0.5]} />
-        <meshStandardMaterial color="#1a2533" roughness={0.7} />
-      </mesh>
-      <mesh position={[0, 0.66, -0.2]}>
-        <boxGeometry args={[0.52, 0.7, 0.06]} />
-        <meshStandardMaterial color="#1a2533" roughness={0.7} />
-      </mesh>
-      <mesh position={[0, 0.64, 0]}>
-        <cylinderGeometry args={[0.05, 0.05, 0.62, 10]} />
-        <meshStandardMaterial color="#101a26" roughness={0.8} />
-      </mesh>
-    </group>
-  )
-}
-
-export function Scene3D({ agents, goalPercent, onAgentClick }: Scene3DProps): React.JSX.Element {
-  return (
-    <Canvas
-      camera={{ position: [7.4, 6.4, 8.6], fov: 38 }}
-      gl={{ antialias: true }}
-      dpr={[1, 1.8]}
-      style={{ position: 'absolute', inset: 0 }}
-    >
-      <color attach="background" args={['#0b1017']} />
-
-      {/* 灯光 */}
-      <ambientLight intensity={0.55} />
-      <directionalLight position={[6, 9, 4]} intensity={1.15} />
-      <directionalLight position={[-5, 4, -4]} intensity={0.35} color="#7fb0ff" />
-
-      {/* 地板 + 网格 */}
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.02, 0]}>
-        <planeGeometry args={[16, 12]} />
-        <meshStandardMaterial color="#0d1219" roughness={1} />
-      </mesh>
-      <Grid
-        position={[0, 0, 0]}
-        args={[16, 12]}
-        cellSize={0.5}
-        cellThickness={0.6}
-        cellColor="#1b2839"
-        sectionSize={2.5}
-        sectionThickness={1.1}
-        sectionColor="#233a56"
-        fadeDistance={26}
-        fadeStrength={1.6}
-        infiniteGrid={false}
-      />
-
-      {/* 会议桌 */}
-      <group>
-        <mesh position={[0, 0.13, 0]} receiveShadow>
-          <cylinderGeometry args={[1.75, 1.75, 0.26, 48]} />
-          <meshStandardMaterial color="#17222f" roughness={0.45} metalness={0.4} />
-        </mesh>
-        <mesh position={[0, 0.27, 0]}>
-          <torusGeometry args={[1.75, 0.025, 8, 64]} />
-          <meshStandardMaterial color="#2b4a6b" emissive="#2b4a6b" emissiveIntensity={0.5} />
-        </mesh>
-        <Html position={[0, 0.78, 0]} center zIndexRange={[40, 0]} style={{ pointerEvents: 'none' }}>
-          <div className="table-goal">🎯 目标 {goalPercent}%</div>
-        </Html>
-      </group>
-
-      {/* 空椅子一圈 */}
-      {Array.from({ length: 8 }, (_, i) => (
-        <Chair key={`c${i}`} angle={(i / 8) * Math.PI * 2 + Math.PI / 8} />
-      ))}
-
-      {/* AI 员工（绕桌一圈，状态实时投影；点击查看任务） */}
-      {agents.map((a, i) => (
-        <AgentFigure key={a.id} pose={a} index={i} count={agents.length} onSelect={() => onAgentClick?.(a.id)} />
-      ))}
-      {agents.length === 0 && (
-        <Html position={[0, 1.6, 0]} center zIndexRange={[40, 0]} style={{ pointerEvents: 'none' }}>
-          <div className="table-goal">暂无智能体任务（发布 goal 后士兵就位）</div>
-        </Html>
-      )}
-
-      <OrbitControls
-        target={[0, 1.1, 0]}
-        minDistance={5}
-        maxDistance={26}
-        maxPolarAngle={Math.PI / 2.12}
-        enablePan={false}
-        autoRotate={agents.length > 0}
-        autoRotateSpeed={0.45}
-      />
-    </Canvas>
-  )
+export function Scene3D({ agents, cues, preset, goalPercent, motionEnabled = true, onAgentClick }: Scene3DProps): React.JSX.Element {
+  const keys = agents.map(agent => agent.key).join('\n')
+  const layout = useMemo(() => layoutScene(agents.map(agent => agent.key), preset), [keys, preset])
+  const [available] = useState(webglAvailable)
+  const [motionOn, setMotionOn] = useState(true)
+  const [reduced, setReduced] = useState(false)
+  const [visible, setVisible] = useState(true)
+  const [, setCueTick] = useState(0)
+  useEffect(() => {
+    const media = window.matchMedia('(prefers-reduced-motion: reduce)')
+    const update = (): void => setReduced(media.matches)
+    update(); media.addEventListener('change', update)
+    return () => media.removeEventListener('change', update)
+  }, [])
+  useEffect(() => {
+    const update = (): void => setVisible(document.visibilityState === 'visible')
+    document.addEventListener('visibilitychange', update)
+    return () => document.removeEventListener('visibilitychange', update)
+  }, [])
+  useEffect(() => {
+    if (!cues.length) return
+    const timer = window.setTimeout(() => setCueTick(value => value + 1), Math.max(0, Math.min(...cues.map(cue => cue.expiresAtMs)) - Date.now()))
+    return () => window.clearTimeout(timer)
+  }, [cues])
+  const motion = motionEnabled && motionOn && !reduced && visible
+  const fallback = <div className="scene-webgl-fallback">3D 场景暂不可用，可从下面的员工列表查看任务。</div>
+  return <div className="pixel-scene-content">
+    <div className="pixel-scene-canvas">
+      {available ? <SceneBoundary fallback={fallback}><Canvas orthographic shadows frameloop={motion ? 'always' : 'demand'} dpr={[1, 1.5]}>
+        <OfficeWorld agents={agents} cues={cues} preset={preset} goalPercent={goalPercent} motion={motion} onAgentClick={onAgentClick} layout={layout} />
+      </Canvas></SceneBoundary> : fallback}
+    </div>
+    <div className="pixel-scene-toolbar"><span>{PRESETS[preset].label} · {agents.length} 位员工</span>
+      <button type="button" onClick={() => setMotionOn(value => !value)} aria-pressed={motionOn}>{motionOn ? '暂停动画' : '开启动画'}</button>
+    </div>
+    <SceneAgentList agents={agents} onAgentClick={onAgentClick} />
+  </div>
 }
 
 export default Scene3D

@@ -880,8 +880,8 @@ function evidenceError(attemptId, state, to, missing) {
 }
 
 /** 任务状态投影：只有「有运行尝试的任务」才被投影，避免影响纯看板任务。 */
-function projectToTask(db, attempt, attemptState, atMs, { hasNextPost, approvalFrom } = {}) {
-  const status = projectTaskStatus(attemptState, {
+function projectToTask(db, attempt, attemptState, atMs, { hasNextPost, approvalFrom, statusOverride = null } = {}) {
+  const status = statusOverride ?? projectTaskStatus(attemptState, {
     retryBudgetRemaining: true,
     approvalFrom: approvalFrom ?? (attemptState === 'AwaitingApproval' ? 'Running' : undefined),
   })
@@ -892,6 +892,7 @@ function projectToTask(db, attempt, attemptState, atMs, { hasNextPost, approvalF
     .run(status, new Date(atMs).toISOString(), attempt.task_id)
   return status
 }
+const projectTaskToBoard = projectToTask
 
 function shapeAttempt(row) {
   if (row === null) return null
@@ -1105,6 +1106,13 @@ export function createRunStore({
   //
   // 端口**抛错**或返回形状不对时本仓储抛 `RUN_TIER_UNRESOLVABLE`（见那个码的注释）。
   resolveRunPermissions = null,
+  // Called inside the claim transaction, after the Attempt ID is known and
+  // before the lease is granted. A failed reservation rolls the Attempt back.
+  reserveWrite = null,
+  onWriteContention = null,
+  deliveryStateForTask = null,
+  integrationMode = false,
+  onAttemptProjected = null,
 } = {}) {
   if (db === undefined || db === null) throw new TypeError('createRunStore 需要 db')
   if (typeof clock !== 'function') throw new TypeError('createRunStore 的 clock 必须是函数')
@@ -1112,6 +1120,19 @@ export function createRunStore({
   const attemptLimit = resolveMaxAttempts(maxAttempts)
   const backoffPolicy = Object.freeze({ ...DEFAULT_BACKOFF, ...(backoff ?? {}) })
   ensureRunSchema(db)
+
+  // All state transitions in this store call this local projection. Keep
+  // delivery state separate from Attempt state, and close the write lease only
+  // when the execution process has actually finished.
+  const projectToTask = (storeDb, attempt, state, atMs, options = {}) => {
+    const deliveryState = integrationMode && state === 'Completed' && typeof deliveryStateForTask === 'function'
+      ? deliveryStateForTask(attempt.task_id) : null
+    const status = projectTaskToBoard(storeDb, attempt, state, atMs, {
+      ...options, statusOverride: integrationMode && state === 'Completed' && deliveryState !== 'integrated' ? 'in_review' : null,
+    })
+    if (typeof onAttemptProjected === 'function') onAttemptProjected({ attempt, state, status, deliveryState })
+    return status
+  }
 
   let txDepth = 0
   /**
@@ -1423,25 +1444,33 @@ export function createRunStore({
     const ttl = resolveTtl(rawTtl ?? undefined)
     const ignoredClientFields = []
     if (nowMs !== null && nowMs !== undefined) ignoredClientFields.push('nowMs')
-    return withTx(() => {
+    const outcome = withTx(() => {
       const atMs = clock()
       const queued = scopedSql(QUEUED_CANDIDATE_SQL, scope, 'a.scope')
       // 第一个参数是退避闸门（服务端时钟），第二个才是可选的 scope——
       // 顺序反了会让 scope 被当成时间比较，于是"永远领取不到任何任务"。
-      let candidate = db.prepare(queued.sql).get(atMs, ...queued.params)
-
-      if (candidate === undefined || candidate === null) {
-        // 没有排队尝试 → 把一个可入队的看板任务变成第 1 次尝试
-        const claimable = scopedSql(CLAIMABLE_TASK_SQL, scope, 't.scope')
-        const task = db.prepare(claimable.sql).get(...claimable.params)
-        if (task === undefined || task === null) {
-          return Object.freeze({ ok: true, claimed: null, reason: 'queue-empty', serverTimeMs: atMs, ignoredClientFields: Object.freeze(ignoredClientFields) })
-        }
-        candidate = createAttempt({ taskId: task.id, scope: task.scope, state: 'Queued', atMs, returnTo: null })
-      }
-
+      const claimable = scopedSql(CLAIMABLE_TASK_SQL, scope, 't.scope')
+      const candidates = [
+        ...db.prepare(queued.sql).all(atMs, ...queued.params).map((row) => ({ kind: 'queued', row })),
+        ...db.prepare(claimable.sql).all(...claimable.params).map((row) => ({ kind: 'task', row })),
+      ]
+      const blocked = []
+      for (const selected of candidates) {
+      db.exec('SAVEPOINT claim_candidate')
+      const candidate = selected.kind === 'task'
+        ? createAttempt({ taskId: selected.row.id, scope: selected.row.scope, state: 'Queued', atMs, returnTo: null })
+        : selected.row
       const nextEpoch = Number(candidate.lease_epoch) + 1
       const expiresAtMs = atMs + ttl
+      if (typeof reserveWrite === 'function') {
+        const grant = reserveWrite({ taskId: candidate.task_id, scope: candidate.scope, attemptId: candidate.id, epoch: nextEpoch, leaseMs: ttl })
+        if (grant?.ok !== true) {
+          db.exec('ROLLBACK TO claim_candidate')
+          db.exec('RELEASE claim_candidate')
+          blocked.push({ taskId: candidate.task_id, conflict: grant })
+          continue
+        }
+      }
       // **条件更新 + 看 changes**：并发下唯一能保证「同一条任务只被领一次」的写法。
       const res = db.prepare(
         `UPDATE run_attempts
@@ -1449,6 +1478,8 @@ export function createRunStore({
           WHERE id = ? AND state = 'Queued'`,
       ).run(worker, nextEpoch, expiresAtMs, atMs, candidate.id)
       if (Number(res.changes) !== 1) {
+        db.exec('ROLLBACK TO claim_candidate')
+        db.exec('RELEASE claim_candidate')
         // 另一个 worker 抢先改了这一行。**不能**换一条重试：那会让一次 claim
         // 的语义变成「尽量领一条」，而调用方以为拿到的是它看到的那个任务。
         return Object.freeze({
@@ -1476,6 +1507,7 @@ export function createRunStore({
       //   > 在清单从不改变的部署里是同一个东西——只不过后者让一次已经在跑的
       //   > Run 的权限，随着一次与它无关的清单编辑而改变。
       const tier = resolveTier({ row, scope: row.scope, workerId: worker })
+      db.exec('RELEASE claim_candidate')
       return Object.freeze({
         ok: true,
         claimed: Object.freeze({
@@ -1508,8 +1540,22 @@ export function createRunStore({
         }),
         serverTimeMs: atMs,
         ignoredClientFields: Object.freeze(ignoredClientFields),
+        blocked,
+      })
+      }
+      const conflict = blocked[0]?.conflict
+      return Object.freeze({
+        ok: true, claimed: null,
+        reason: conflict ? (conflict.code === 'FILE_CONTENTION' || conflict.code === 'SINGLE_WRITER_REQUIRED' ? 'file-contention' : 'write-reservation-failed') : 'queue-empty',
+        ...(conflict ? { contention: conflict } : {}),
+        serverTimeMs: atMs, ignoredClientFields: Object.freeze(ignoredClientFields), blocked,
       })
     })
+    for (const item of outcome.blocked ?? []) {
+      if (typeof onWriteContention === 'function') onWriteContention(item)
+    }
+    const { blocked, ...result } = outcome
+    return Object.freeze(result)
   }
 
   /**

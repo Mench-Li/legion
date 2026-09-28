@@ -1621,15 +1621,81 @@ export function deleteSecret(ref: string, actor: string): Promise<{ removed: boo
  * 并行任务文件冲突治理（G-mujfc9vi-1）：读取某任务的交付子状态与集成事件。
  * 只读；交付状态是服务端权威，前端不得自行推导 done。
  */
-export function fetchTaskDelivery(taskId: string): Promise<{ delivery: unknown; events: unknown[] } | null> {
-  return hubRequest('GET', `/api/deliveries?taskId=${encodeURIComponent(taskId)}`) as Promise<{ delivery: unknown; events: unknown[] } | null>
+export interface LiveDelivery {
+  id: string
+  state: string
+  version: number
+  targetRef: string
+  sourceCommit: string
+  integratedCommit: string | null
+}
+export interface LiveIntegrationEvent {
+  id: number
+  to_state: string | null
+  error_code: string | null
+  at_ms: number
+}
+export function fetchTaskDelivery(taskId: string): Promise<{ delivery: LiveDelivery; events: LiveIntegrationEvent[] }> {
+  return hubRequest('GET', `/api/deliveries?taskId=${encodeURIComponent(taskId)}`) as Promise<{ delivery: LiveDelivery; events: LiveIntegrationEvent[] }>
+}
+
+export interface LiveWriteIntent {
+  repoId: string
+  paths: Array<{ path: string; type: 'file' | 'dir' }>
+  revision: number
+  state: string
+}
+export function fetchTaskWriteIntent(taskId: string): Promise<{ intent: LiveWriteIntent }> {
+  return hubRequest('GET', `/api/tasks/${encodeURIComponent(taskId)}/write-intent`) as Promise<{ intent: LiveWriteIntent }>
+}
+export function setTaskWriteIntent(taskId: string, scope: string, paths: LiveWriteIntent['paths'], expectedRevision: number | null): Promise<{ intent: LiveWriteIntent }> {
+  return hubPost(`/api/tasks/${encodeURIComponent(taskId)}/write-intent`, { scope, paths, expectedRevision }) as Promise<{ intent: LiveWriteIntent }>
+}
+
+export interface LiveTaskContention {
+  ok: boolean
+  code?: string
+  repoId: string
+  schedulingState: string
+  integrationMode?: boolean
+  paths?: string[]
+  holderTaskId?: string
+  reason?: string
+}
+/** 人工验收先由服务端验证并集成候选提交；请求可能包含完整的回归测试。 */
+export async function approveTaskDelivery(taskId: string, scope: string): Promise<LiveDelivery> {
+  const res = await fetch(`${hubBase()}/api/deliveries/approve`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ by: 'general', scope, taskId }),
+    signal: AbortSignal.timeout(10 * 60_000),
+  })
+  const data = await res.json() as { ok?: boolean; delivery?: LiveDelivery; code?: string; message?: string }
+  if (!res.ok || data.ok !== true || data.delivery?.state !== 'integrated') {
+    throw new Error(data.message ?? data.code ?? `交付验证未通过（${res.status}）`)
+  }
+  return data.delivery
+}
+export function fetchTaskContention(taskId: string): Promise<LiveTaskContention> {
+  return hubRequest('GET', `/api/tasks/${encodeURIComponent(taskId)}/contention`) as Promise<LiveTaskContention>
+}
+export function confirmTaskWorkerStopped(taskId: string, scope: string): Promise<unknown> {
+  return hubPost(`/api/tasks/${encodeURIComponent(taskId)}/reservation/confirm-stopped`, { scope, confirm: `stopped:${taskId}` })
 }
 
 /**
  * 实时的仓库占用视图（只读、不写库）。返回 { ok, repoId, readOnly, active, overlaps }。
  */
-export function fetchRepoContention(repoId: string): Promise<{ readOnly: boolean; active: unknown[]; overlaps: unknown[] }> {
-  return hubRequest('GET', `/api/repositories/${encodeURIComponent(repoId)}/contention`) as Promise<{ readOnly: boolean; active: unknown[]; overlaps: unknown[] }>
+export interface LiveReservation {
+  taskId: string
+  attemptId: string | null
+  paths: Array<{ path: string; type: 'file' | 'dir' }>
+  state: string
+  leaseEpoch: number
+  expiresAtMs: number | null
+}
+export function fetchRepoContention(repoId: string): Promise<{ readOnly: boolean; active: LiveReservation[]; overlaps: unknown[] }> {
+  return hubRequest('GET', `/api/repositories/${encodeURIComponent(repoId)}/contention`) as Promise<{ readOnly: boolean; active: LiveReservation[]; overlaps: unknown[] }>
 }
 
 /**

@@ -164,6 +164,16 @@ test('TC-S3-07/08 同仓库同 target ref 同时至多一个活跃 integration j
   assert.equal(reusable.ok, true, 'job 完成后释放同一仓库的集成锁')
 })
 
+test('数据库唯一约束阻止绕过 store 的并发活跃集成任务', () => {
+  const { db, store } = fresh()
+  const first = store.claimIntegrationJob({ repoId: 'shared', targetRef: 'refs/heads/main', owner: 'one' })
+  assert.equal(first.ok, true)
+  assert.throws(() => db.prepare(`INSERT INTO integration_jobs
+    (id,repo_id,target_ref,journal_phase,state,lease_epoch,attempts,created_at_ms,updated_at_ms)
+    VALUES ('forced','shared','refs/heads/other','prepared','leased',1,0,1,1)`).run())
+  assert.equal(store.listIntegrationJobs('shared').length, 1)
+})
+
 test('TC-S3-19 integration_events 只追加：每个状态迁移都留下事件', () => {
   const { store } = fresh()
   const d = store.createDelivery(base).delivery

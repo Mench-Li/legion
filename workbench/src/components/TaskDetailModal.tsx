@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
-import { execRequest, fetchHubActivity, fetchHubCalendarByLink, fetchHubDocContent, fetchHubOverlaps, fetchHubTask, fetchHubTasks, hubClaim, hubComment, hubHold, hubReassign, hubReviewNote, hubTransition } from '../api'
+import { approveTaskDelivery, confirmTaskWorkerStopped, execRequest, fetchHubActivity, fetchHubCalendarByLink, fetchHubDocContent, fetchHubOverlaps, fetchHubTask, fetchHubTasks, fetchRepoContention, fetchTaskContention, fetchTaskDelivery, fetchTaskWriteIntent, hubClaim, hubComment, hubHold, hubReassign, hubReviewNote, hubTransition, setTaskWriteIntent } from '../api'
+import type { LiveDelivery, LiveIntegrationEvent, LiveReservation, LiveTaskContention, LiveWriteIntent } from '../api'
 import type { AuditPatch, HubActivity, HubDocContent, HubTask, OverlapGroup, ReviewNote } from '../types'
 import type { LinkedCalendarEvent } from '../api'
 import { fmtRange, occKey } from '../calendar'
@@ -166,6 +167,13 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
   const [busy, setBusy] = useState(false)
   const [auditOpen, setAuditOpen] = useState<Record<string, boolean>>({})
   const [overlaps, setOverlaps] = useState<OverlapGroup[]>([])
+  const [liveIntent, setLiveIntent] = useState<LiveWriteIntent | null>(null)
+  const [liveContention, setLiveContention] = useState<LiveTaskContention | null>(null)
+  const [liveReservations, setLiveReservations] = useState<LiveReservation[]>([])
+  const [liveDelivery, setLiveDelivery] = useState<LiveDelivery | null>(null)
+  const [liveDeliveryEvents, setLiveDeliveryEvents] = useState<LiveIntegrationEvent[]>([])
+  const [intentEditing, setIntentEditing] = useState(false)
+  const [intentDraft, setIntentDraft] = useState('')
   /** P2-5 双向关联：本任务关联的日程（null = 加载中）。 */
   const [calEvents, setCalEvents] = useState<LinkedCalendarEvent[] | null>(null)
   // —— S5：产出文档直达区（打开中的产物条目下标 + 按条目缓存的内容状态）——
@@ -207,6 +215,17 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
       } catch {
         setOverlaps([])
       }
+      const [intentResult, contentionResult, deliveryResult] = await Promise.allSettled([
+        fetchTaskWriteIntent(taskId), fetchTaskContention(taskId), fetchTaskDelivery(taskId),
+      ])
+      setLiveIntent(intentResult.status === 'fulfilled' ? intentResult.value.intent : null)
+      setLiveContention(contentionResult.status === 'fulfilled' ? contentionResult.value : null)
+      setLiveDelivery(deliveryResult.status === 'fulfilled' ? deliveryResult.value.delivery : null)
+      setLiveDeliveryEvents(deliveryResult.status === 'fulfilled' ? deliveryResult.value.events ?? [] : [])
+      if (contentionResult.status === 'fulfilled') {
+        try { setLiveReservations((await fetchRepoContention(contentionResult.value.repoId)).active) }
+        catch { setLiveReservations([]) }
+      } else setLiveReservations([])
       // P2-5 双向关联：本任务关联的日程（今天起一年窗口内展开重复实例）
       try {
         const from = new Date()
@@ -235,6 +254,8 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
     setCommentDraft('')
     setCommentOpen(false)
     setReaderIndex(null)
+    setIntentEditing(false)
+    setIntentDraft('')
   }, [taskId])
 
   const act = async (action: () => Promise<unknown>, okText: string): Promise<void> => {
@@ -301,7 +322,22 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
   }
   const clearAudit = (file: string): Promise<void> => act(() => hubReviewNote(t.id, file, 'clear', ''), `已清除 ${file} 的批注`)
 
-  const doReview = (): Promise<void> => act(() => hubTransition({ id: t.id, to: 'done', by: 'general', ifVersion: t.version }), `${t.id} 已验收通过 ✓`)
+  const doReview = (): Promise<void> => act(async () => {
+    if (liveContention?.integrationMode) await approveTaskDelivery(t.id, t.scope ?? 'default')
+    await hubTransition({ id: t.id, to: 'done', by: 'general', ifVersion: t.version })
+  }, `${t.id} 已验收并交付 ✓`)
+  const saveIntent = (): Promise<void> => act(async () => {
+    const paths = intentDraft.split(/\r?\n/).map(p => p.trim()).filter(Boolean).map(path => ({
+      path: path.endsWith('/') ? path.slice(0, -1) : path,
+      type: path.endsWith('/') ? 'dir' as const : 'file' as const,
+    }))
+    await setTaskWriteIntent(t.id, t.scope ?? 'default', paths, liveIntent?.revision ?? null)
+    setIntentEditing(false)
+  }, '写入范围已更新')
+  const confirmStopped = (): Promise<void> => {
+    if (!window.confirm('请先确认该任务的执行进程已经停止。确认后将释放文件占用，其他任务即可开始写入。')) return Promise.resolve()
+    return act(() => confirmTaskWorkerStopped(t.id, t.scope ?? 'default'), '已确认执行停止，文件占用已释放')
+  }
   const doReject = (): Promise<void> => {
     const reason = window.prompt(`打回 ${t.id} 的原因（归还待办）`)
     if (reason === null) return Promise.resolve()
@@ -408,6 +444,31 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
               {t.blockedBy.length > 0 ? ` · 依赖：${t.blockedBy.join('、')}` : ''}
               <div style={{ color: 'var(--muted-2)', fontSize: 10.5, marginTop: 2 }}>
                 创建 {fmt(t.createdAt)} · 更新 {fmt(t.updatedAt)}
+              </div>
+            </div>
+
+            <div className="td-section">
+              <div className="td-section-title">🔒 写入占用与交付 <button type="button" onClick={() => void load()} disabled={busy}>刷新</button></div>
+              <div style={{ fontSize: 12, lineHeight: 1.7 }}>
+                {liveContention?.code === 'FILE_CONTENTION'
+                  ? <div>等待任务 <b>{liveContention.holderTaskId}</b> 释放 {liveContention.paths?.join('、') || '写入范围'}。等待期间可以继续只读调研。</div>
+                  : t.schedulingState === 'waiting-file' ? <div>正在等待写入资格；刷新后查看当前占用。</div> : null}
+                  <div>计划范围：{liveIntent?.paths.length ? liveIntent.paths.map(p => p.path + (p.type === 'dir' ? '/' : '')).join('、') : '未声明，执行时独占仓库'}</div>
+                  {['todo', 'blocked'].includes(t.status) && (intentEditing ?
+                    <div style={{ marginTop: 6 }}>
+                      <textarea value={intentDraft} onChange={e => setIntentDraft(e.target.value)} rows={3} placeholder={'每行一个仓库内路径；目录以 / 结尾'} style={{ width: '100%' }} />
+                      <button type="button" disabled={busy} onClick={() => void saveIntent()}>保存范围</button>
+                      <button type="button" disabled={busy} onClick={() => setIntentEditing(false)}>取消</button>
+                    </div> :
+                    <button type="button" disabled={busy} onClick={() => { setIntentDraft((liveIntent?.paths ?? []).map(p => p.path + (p.type === 'dir' ? '/' : '')).join('\n')); setIntentEditing(true) }}>调整范围</button>)}
+                {liveReservations.length > 0 && <div>当前占用：{liveReservations.map(r => `${r.taskId}（${r.paths.length ? r.paths.map(p => p.path).join('、') : '整个仓库'}）`).join('；')}</div>}
+                {t.schedulingState === 'reconciling' && ['todo', 'blocked', 'canceled'].includes(t.status) &&
+                  <div>上一次执行是否停止尚未确认，文件占用会继续保留。<button type="button" disabled={busy} onClick={() => void confirmStopped()}>确认已停止并释放占用</button></div>}
+                <div>交付状态：{liveDelivery ? (deliveryBadgeOf({ deliveryState: liveDelivery.state })?.label ?? liveDelivery.state) : '尚未提交交付'}
+                  {liveDelivery?.targetRef ? ` · 目标 ${liveDelivery.targetRef}` : ''}</div>
+                {liveDeliveryEvents.length > 0 && liveDeliveryEvents.at(-1)?.error_code &&
+                  <div>最近一次集成问题：{liveDeliveryEvents.at(-1)?.error_code}</div>}
+                {liveDelivery?.integratedCommit && <div>已交付版本：{liveDelivery.integratedCommit.slice(0, 12)}</div>}
               </div>
             </div>
 

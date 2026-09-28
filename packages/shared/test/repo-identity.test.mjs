@@ -1,7 +1,7 @@
 // packages/shared/test/repo-identity.test.mjs —— S1（R-7 / R-4 / D-P4）
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { repoIdFromCommonDir, detectRepoCapability, probeRepoFacts, defaultRunGit, resolveRepoIdentity } from '../src/repo-identity.mjs'
@@ -66,4 +66,21 @@ test('TC-S1-13c 非 Git 目录降级且原因可读', () => {
   assert.equal(cap.capability, 'degraded')
   assert.equal(cap.singleWriterRequired, true)
   assert.ok(cap.reason.length > 0)
+})
+
+test('物理仓库与其 worktree 的相对 common-dir 解析成同一身份', () => {
+  const root = mkdtempSync(join(tmpdir(), 'legion-repo-binding-'))
+  const repo = join(root, 'repo')
+  const wt = join(root, 'wt')
+  assert.equal(defaultRunGit(['init', '-q', '-b', 'main', repo], root).status, 0)
+  defaultRunGit(['config', 'user.email', 'test@example.invalid'], repo)
+  defaultRunGit(['config', 'user.name', 'Test'], repo)
+  writeFileSync(join(repo, 'a.txt'), 'a')
+  defaultRunGit(['add', 'a.txt'], repo)
+  assert.equal(defaultRunGit(['commit', '-qm', 'init'], repo).status, 0)
+  assert.equal(defaultRunGit(['worktree', 'add', '-q', '-b', 'other', wt], repo).status, 0)
+  const a = resolveRepoIdentity(repo)
+  const b = resolveRepoIdentity(wt)
+  assert.equal(a.repoId, b.repoId)
+  assert.notEqual(a.repoId, '.git')
 })

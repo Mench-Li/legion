@@ -52,9 +52,9 @@ const post = (p, b) => call('POST', p, b)
  *  > 一个"我量过了、没有区分度"的印象，与一个"**夹具是空的**、所以什么都没量到"的事实，
  *  > 在我没有去把那一行插进去的**值**念一遍的时候是同一个东西。 */
 const ins = (id, o = {}) => mod.db.prepare(
-  'INSERT OR REPLACE INTO tasks (id,title,priority,status,scope,hold,role,soldier,goalId,version,createdAt,updatedAt) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+  'INSERT OR REPLACE INTO tasks (id,title,priority,status,scope,hold,role,soldier,goalId,version,fileDomain,createdAt,updatedAt) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
 ).run(id, id, 'medium', o.status ?? 'todo', o.scope === null ? null : (o.scope ?? 'default'), o.hold ?? 0, o.role ?? null,
-  o.soldier ?? null, o.goalId ?? null, o.version ?? 1, 'T', 'T')
+  o.soldier ?? null, o.goalId ?? null, o.version ?? 1, JSON.stringify(o.fileDomain ?? [`test/${id}`]), 'T', 'T')
 const row = (id) => mod.db.prepare('SELECT * FROM tasks WHERE id = ?').get(id)
 // ★ 直接读 `goal` 表，**不**走 `/api/goal` —— 那条路自己也会调 settleGoalsOfScope，
 //   用它来验"transition/advance 有没有收尾"会把缺口整个盖住。

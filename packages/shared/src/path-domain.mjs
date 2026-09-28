@@ -119,6 +119,16 @@ export function pathsIntersect(a, b, opts = {}) {
   return false
 }
 
+/** True only when the proposed file/directory is entirely inside an allowed domain. */
+export function entriesWithinDomain(entries, domain, opts = {}) {
+  const proposed = toEntryList(entries, opts)
+  const allowed = toEntryList((domain ?? []).map((item) => typeof item === 'string' ? { path: item, type: 'dir' } : item), opts)
+  if (proposed.rejected.length || allowed.rejected.length) return false
+  return proposed.entries.every((entry) => allowed.entries.some((bound) =>
+    (entry.path === bound.path && (bound.type === 'dir' || entry.type === 'file'))
+    || (bound.type === 'dir' && entry.path.startsWith(bound.path + '/'))))
+}
+
 /** 找出两组路径中相交的具体路径对（给 FILE_CONTENTION 报冲突路径用）。 */
 export function intersectingPaths(a, b, opts = {}) {
   const left = toEntryList(a, opts).entries

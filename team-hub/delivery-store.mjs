@@ -90,7 +90,26 @@ export function ensureDeliverySchema(db) {
   )`)
   db.exec('CREATE INDEX IF NOT EXISTS idx_task_deliveries_task ON task_deliveries(task_id, created_at_ms)')
   db.exec('CREATE INDEX IF NOT EXISTS idx_integration_jobs_active ON integration_jobs(repo_id, target_ref, state)')
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS uq_integration_one_active_repo ON integration_jobs(repo_id) WHERE state IN ('leased','applying','ref-updated')")
   return true
+}
+
+let jobSavepointSerial = 0
+function withWriteTx(db, fn) {
+  const nested = db.isTransaction === true
+  const savepoint = `integration_job_${++jobSavepointSerial}`
+  db.exec(nested ? `SAVEPOINT ${savepoint}` : 'BEGIN IMMEDIATE')
+  try {
+    const result = fn()
+    db.exec(nested ? `RELEASE ${savepoint}` : 'COMMIT')
+    return result
+  } catch (error) {
+    try {
+      if (nested) { db.exec(`ROLLBACK TO ${savepoint}`); db.exec(`RELEASE ${savepoint}`) }
+      else db.exec('ROLLBACK')
+    } catch { /* preserve the original error */ }
+    throw error
+  }
 }
 
 /**
@@ -248,9 +267,10 @@ export function createDeliveryStore(db, { now = () => Date.now(), idFactory = de
 
     /** 认领集成 job：同仓库同 target ref 至多一个活跃 job。 */
     claimIntegrationJob({ repoId, targetRef, deliveryId = null, owner = null, expectedHead = null, leaseEpoch = 1, jobId = null }) {
+      return withWriteTx(db, () => {
       const active = db.prepare(
-        "SELECT * FROM integration_jobs WHERE repo_id = ? AND target_ref = ? AND state IN ('leased','applying','ref-updated') ORDER BY created_at_ms DESC LIMIT 1",
-      ).get(repoId, targetRef)
+        "SELECT * FROM integration_jobs WHERE repo_id = ? AND state IN ('leased','applying','ref-updated') ORDER BY created_at_ms DESC LIMIT 1",
+      ).get(repoId)
       if (active) {
         return Object.freeze({ ok: false, code: DELIVERY_ERRORS.JOB_CONTENTION, holder: toJob(active) })
       }
@@ -262,6 +282,7 @@ export function createDeliveryStore(db, { now = () => Date.now(), idFactory = de
         id, repoId, targetRef, deliveryId, expectedHead, null, 'prepared', 'leased', leaseEpoch, owner, 0, ts, ts)
       appendEvent({ jobId: id, deliveryId, actor: owner, fromState: null, toState: 'leased', detail: { expectedHead } })
       return Object.freeze({ ok: true, job: toJob(jobRow(id)) })
+      })
     },
 
     getIntegrationJob(id) { return toJob(jobRow(id)) },

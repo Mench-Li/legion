@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { addSpaceAgents, createAgent, createSpace, fetchAgents } from '../api'
-import type { AgentCatalogItem } from '../types'
+import type { AgentCatalogItem, ScenePreset } from '../types'
 import { toast } from './Toast'
 import { FolderPickerField } from './FolderPickerField'
 
@@ -18,6 +18,7 @@ export function NewSpaceModal({ onClose, onCreated }: NewSpaceModalProps): React
   const [local, setLocal] = useState(false)
   const [localDir, setLocalDir] = useState('')
   const [remoteUrl, setRemoteUrl] = useState('')
+  const [scenePreset, setScenePreset] = useState<ScenePreset>('office')
   const [catalog, setCatalog] = useState<AgentCatalogItem[]>([])
   const [catalogError, setCatalogError] = useState('')
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -90,7 +91,7 @@ export function NewSpaceModal({ onClose, onCreated }: NewSpaceModalProps): React
     // 创建空间 + 选人入编
     setBusy(true)
     try {
-      await createSpace(spaceId.trim(), spaceName.trim(), local, { localDir: localDir.trim(), remoteUrl: remoteUrl.trim() })
+      await createSpace(spaceId.trim(), spaceName.trim(), local, { localDir: localDir.trim(), remoteUrl: remoteUrl.trim() }, scenePreset)
       const roles = [...selected]
       if (roles.length > 0) {
         await addSpaceAgents(spaceId.trim(), roles)
@@ -129,6 +130,13 @@ export function NewSpaceModal({ onClose, onCreated }: NewSpaceModalProps): React
             <div className="field">
               <label>空间名称 *</label>
               <input value={spaceName} onChange={e => setSpaceName(e.target.value)} placeholder="例如：人力资源部空间" />
+            </div>
+            <div className="field">
+              <label>3D 办公室场景</label>
+              <select value={scenePreset} onChange={e => setScenePreset(e.target.value as ScenePreset)}>
+                <option value="office">办公室</option><option value="studio">创作室</option>
+                <option value="lab">实验室</option><option value="operations">运营中心</option>
+              </select>
             </div>
             <label className="local-toggle">
               <input type="checkbox" checked={local} onChange={e => setLocal(e.target.checked)} />

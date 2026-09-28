@@ -168,6 +168,7 @@ export function createReadModelsRoutes({
           return {
             id, name: k?.name ?? id, private: !!k?.private,
             localDir: k?.local_dir ?? '', remoteUrl: k?.remote_url ?? '',
+            scenePreset: k?.scene_preset ?? 'office',
             agentCount: countStmt.get(id).c,
           }
         })

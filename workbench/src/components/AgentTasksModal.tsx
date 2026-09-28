@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react'
 import { fetchAgentModels, fetchHubTasks, MODEL_OPTIONS } from '../api'
 import type { CardStatus, HubTask, RosterAgent } from '../types'
+import { tasksForRosterAgent } from '../scene/agentOwnership'
 
 interface AgentTasksModalProps {
   agent: RosterAgent
+  roster?: RosterAgent[]
   onClose: () => void
   /** 点任务 → 由父级打开统一任务详情（返回后父级可重新打开本列表）。 */
   onOpenTask: (id: string) => void
@@ -26,7 +28,8 @@ function askOpen(t: HubTask): boolean {
   return (cs[cs.length - 1].text ?? '').startsWith('❓')
 }
 
-export function AgentTasksModal({ agent, onClose, onOpenTask }: AgentTasksModalProps): React.JSX.Element {
+export function AgentTasksModal({ agent, roster = [], onClose, onOpenTask }: AgentTasksModalProps): React.JSX.Element {
+  const rosterRolesKey = roster.filter(member => !member.external).map(member => member.role).sort().join('\0')
   const [tasks, setTasks] = useState<HubTask[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [modelLabel, setModelLabel] = useState<string | null>(null)
@@ -37,9 +40,7 @@ export function AgentTasksModal({ agent, onClose, onOpenTask }: AgentTasksModalP
       try {
         const all = await fetchHubTasks(agent.scope ?? null)
         if (cancelled) return
-        const mine = all.filter(
-          t => t.status !== 'canceled' && ((t.soldier !== null && t.soldier === agent.role) || (t.soldier === null && t.role === agent.role)),
-        )
+        const mine = tasksForRosterAgent(agent, all, roster)
         setTasks(mine)
       } catch (e) {
         if (!cancelled) setErr(e instanceof Error ? e.message : String(e))
@@ -47,7 +48,7 @@ export function AgentTasksModal({ agent, onClose, onOpenTask }: AgentTasksModalP
     })()
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agent.role, agent.scope])
+  }, [agent.role, agent.scope, agent.external, rosterRolesKey])
 
   // 该角色的默认模型（配置了才显示）
   useEffect(() => {

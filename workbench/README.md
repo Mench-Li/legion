@@ -41,9 +41,16 @@ node scripts/serve.mjs --port 5173   # 独立静态服务 → http://127.0.0.1:5
 | 浏览器助手 | `BrowserPanel`：serve.mjs `/api/web/fetch`（SSRF 防护代理）——地址栏（自动补 https://）+ 标题/正文/链接结构化结果 + 分错误文案与重试；`ssrf_blocked` 明确文案 | ✅ |
 | 日程日历 / 通知中心 | `Sidebar` 模块为**占位**：点击给出「P1 后续阶段接入」提示（不静默无响应，TC-S8-03） | ⏳ |
 | 技能中心 | `SkillsPanel`：team-hub v2 技能库真实接入——列表（含待审/被拒复审视角）、注册新技能（提交即 pending）、将军发布/驳回、按成员或 scope 授权；随当前空间过滤，15s 轮询刷新 | ✅ |
-| 中央智能体状态 | `CenterPanel`：**中枢模式下智能体 = 当前工作空间的专属编队**（每空间不同职业，team-hub `/api/roster`）；首页 = 3D 办公场景（编队绕会议桌、状态色实时投影），「智能体」模块 = 2D 状态总览；v1 回退看板聚合 | ✅ |
+| 中央智能体状态 | `CenterPanel`：**中枢模式下智能体 = 当前工作空间的专属编队**（每空间不同职业，team-hub `/api/roster`）；首页 = 像素员工 3D 办公场景，「智能体」模块 = 2D 状态总览；v1 回退看板聚合 | ✅ |
 | 底部命令栏 | 新建任务/任务调度/导出日报可用；**全部暂停/继续已真实接入**（`/api/pause`/`/api/resume`，守护扫单前读取 control.json）；安排会议待引擎 | ✅/⏳ |
-| 中央 3D 办公场景 | `Scene3D.tsx`（three + @react-three/fiber v9 + drei，懒加载独立 chunk）：等距办公室、会议桌 + 空椅一圈、AI 员工发光头部随状态变色（🟢进行中/🟡待验收/🔴受阻/🔵待命）、头顶名牌带任务数、目标进度环、轨道控制 + 自动旋转 | ✅ |
+| 中央 3D 办公场景 | `Scene3D.tsx`（three + @react-three/fiber v9 + drei，懒加载独立 chunk）：正交镜头、按人数扩展的工位、方块像素员工、四种场景预设、状态标记和任务事实驱动的短动作；支持员工列表、减少动画与无 WebGL 降级 | ✅ |
+
+### 像素员工场景
+
+- 在左侧选定一个具体空间后，中间显示该空间的员工与工位；「全部空间」仍显示按空间分组的总览。创建或设置空间时，可在「3D 办公室场景」选择办公室、创作室、实验室或运营中心；旧空间默认办公室。
+- 绿色表示进行中、黄色表示待验收、红色表示受阻、蓝色表示待命。员工状态由当前编队与任务快照决定；近期真实完成任务才播放短庆祝，后续任务明确依赖前序任务且被另一员工认领时才显示交接。
+- 点击员工身体或下方员工列表可打开原有任务清单，再点任务进入详情。人数较多或面板较窄时，3D 名牌默认收起；悬停可查看完整姓名与任务。列表支持键盘操作，WebGL 不可用时仍可使用。
+- 场景右下方可关闭动画；系统的「减少动态效果」设置及页面进入后台时也会停用动作。连接中断时保留上次成功画面并显示提示，恢复连接或手动刷新后重新读取当前空间。
 
 ## 服务端配套（第 2 步，legion 引擎侧）
 
@@ -172,7 +179,7 @@ node scripts/serve.mjs --port 5173   # 独立静态服务 → http://127.0.0.1:5
 ## 智能体任务清单（点击智能体）
 
 - **入口**：中部「🤖 智能体」2D 总览卡、或 3D 办公场景里的智能体（点身体/名牌均可）→ 打开该智能体的「任务清单」。
-- 清单按 **🟢 运行中（进行中/待验收/受阻）/ ⚪ 待办 / ✅ 已完成** 分组（`GET /api/board?scope=` 按 `soldier=role` + `role=role` 过滤，roster 投影数据先展示后刷新）；点任务行 → 进入任务详情。
+- 清单按 **🟢 运行中（进行中/待验收/受阻）/ ⚪ 待办 / ✅ 已完成** 分组（`GET /api/board?scope=`；编队成员按 `task.role ?? task.soldier`、临时执行者按 `task.soldier` 归属，roster 投影数据先展示后刷新）；点任务行 → 进入任务详情。
 - 头部显示该角色**默认模型徽标**（若已配置）。
 
 ## 自动交接与持续执行（守护全自动流水线）
@@ -204,13 +211,15 @@ workbench/
     api.ts            数据层：board/activity/config/missions + SSE 订阅 + 写接口 + team-hub 中枢（hub 探测/scopes/分区创建/exec/models/task/空间仓库配置 createSpace·updateSpaceConfig）
     missions.ts       任务集聚合视图（按角色泳道 + 状态统计，客户端兜底）
     components/
-      Scene3D.tsx     中央 3D 办公场景（three + @react-three/fiber v9 + drei，懒加载 chunk；智能体可点击）
+      Scene3D.tsx     中央 3D 像素员工办公室（四种预设、正交镜头、状态短动作）
+      Employee3D.tsx / SceneAgentList.tsx   方块人物与键盘可选员工列表
+    scene/             员工状态、工位布局、空间事件协调与任务归属
       Sidebar / KpiBar / CenterPanel / MissionPanel /
       ActivityFeed / QuickTools / CommandBar /
       TaskDetailModal     任务详情（AI 执行过程 / 时间线 / 验收 / 派 AI 执行）
       AgentTasksModal     智能体任务清单（运行中/待办/已完成 + 模型徽标）
       ModelConfigModal    模型×智能体配置（按角色选默认模型）
-      SpaceSettingsModal  空间设置（名称 / 本地·私有 / 本地文件夹 + 远程仓库绑定）
+      SpaceSettingsModal  空间设置（名称 / 3D 场景 / 本地·私有 / 本地文件夹 + 远程仓库绑定）
       FolderPickerField   仓库绑定的「本地文件夹」字段（选文件夹 + git 探测 + 远程建议）
       FolderPickerModal   选文件夹弹窗（/api/fs 目录浏览，照搬 DSH 工作空间选目录）
       HubSchedulerModal / SchedulerModal / GoalModal / NewTaskModal / NewSpaceModal / Toast

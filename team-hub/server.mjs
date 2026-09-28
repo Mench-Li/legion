@@ -1229,6 +1229,7 @@ db.exec(`
     private INTEGER DEFAULT 0,
     local_dir TEXT DEFAULT '',
     remote_url TEXT DEFAULT '',
+    scene_preset TEXT DEFAULT 'office',
     createdAt TEXT,
     updatedAt TEXT
   )
@@ -1238,6 +1239,7 @@ db.exec(`
 ensureColumn('spaces', 'private', 'private INTEGER DEFAULT 0')
 ensureColumn('spaces', 'local_dir', "local_dir TEXT DEFAULT ''")
 ensureColumn('spaces', 'remote_url', "remote_url TEXT DEFAULT ''")
+ensureColumn('spaces', 'scene_preset', "scene_preset TEXT DEFAULT 'office'")
 // ── SP-P0 空间流水线：编队即流水线 ────────────────────────────────────────────
 // 背景（T-127 现场）：阶段定义原本只存在于守护宿主的 roles.json（部署面文件），与空间编队（roster，数据面）
 // 是两份必须手工对齐的数据；新增空间一旦漏配，目标链会静默停在 todo。本层把阶段定义搬进数据面：

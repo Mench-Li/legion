@@ -22,7 +22,10 @@ import {
   setGoalStatus,
   subscribeActivity,
   subscribeBoard,
+  subscribeHubAudit,
 } from './api'
+import { createSceneController } from './scene/sceneController'
+import type { SceneCue, SceneFacts } from './scene/sceneState'
 import { buildMissions, labelsFromPipeline } from './missions'
 import { boardFromHubTasks } from './hubBoard'
 import { activityFingerprint } from './dedupe'
@@ -61,6 +64,10 @@ export default function App(): React.JSX.Element {
   const [hubMode, setHubMode] = useState(false)
   const [hubSpaces, setHubSpaces] = useState<SpaceInfo[]>([])
   const [roster, setRoster] = useState<RosterAgent[] | null>(null)
+  const [sceneFacts, setSceneFacts] = useState<SceneFacts | null>(null)
+  const [sceneCues, setSceneCues] = useState<SceneCue[]>([])
+  const [sceneError, setSceneError] = useState('')
+  const sceneRefreshRef = useRef<(() => Promise<void>) | null>(null)
   const [goalInfo, setGoalInfo] = useState<GoalInfo | null>(null)
   const [execEnabled, setExecEnabled] = useState(false)
   const [execDaemonOnline, setExecDaemonOnline] = useState(false)
@@ -204,6 +211,35 @@ export default function App(): React.JSX.Element {
     }
   }, [hubMode, scope])
 
+  useEffect(() => {
+    setSceneFacts(null)
+    setSceneCues([])
+    setSceneError('')
+    if (!hubMode || !scope || active !== 'home') {
+      sceneRefreshRef.current = null
+      return
+    }
+    const controller = createSceneController({
+      scope, subscribe: subscribeHubAudit, fetchRoster, fetchTasks: fetchHubTasks,
+      onSnapshot: (facts, cues) => {
+        setSceneFacts(facts)
+        setSceneCues(cues)
+        setRoster([...facts.roster])
+      },
+      onError: setSceneError,
+      visible: () => document.visibilityState === 'visible',
+    })
+    controller.start()
+    sceneRefreshRef.current = controller.refresh
+    const onVisible = (): void => { if (document.visibilityState === 'visible') void controller.refresh() }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      controller.stop()
+      document.removeEventListener('visibilitychange', onVisible)
+      sceneRefreshRef.current = null
+    }
+  }, [hubMode, scope, active])
+
   // 中枢模式下按空间拉全部目标（多目标并发：每目标带 status/version + 各自链进度）
   useEffect(() => {
     if (!hubMode) {
@@ -297,6 +333,7 @@ export default function App(): React.JSX.Element {
         setBoard(boardFromHubTasks(tasks))
         setActivity(acts.map(ev => ({ ts: ev.ts, kind: ev.action, taskId: ev.taskId ?? undefined, text: `${ev.member} · ${ev.action}` })))
         setHubSpaces(spaces)
+        await sceneRefreshRef.current?.()
       } else {
         const [bd, acts] = await Promise.all([fetchBoard(), fetchActivity()])
         setBoard(bd)
@@ -497,7 +534,7 @@ export default function App(): React.JSX.Element {
           ) : active === 'snapshots' ? (
             <SnapshotView scope={scope} hubMode={hubMode} />
           ) : (
-            <CenterPanel board={displayBoard} labels={labels} active={active} rosterAgents={hubMode ? roster : null} scope={scope} spaces={hubSpaces} goalInfo={hubMode ? goalInfo : null} hubActive={hubMode} onGoalStatus={hubMode ? handleGoalStatus : undefined} onSaveContext={hubMode ? handleGoalContext : undefined} />
+            <CenterPanel board={displayBoard} labels={labels} active={active} rosterAgents={hubMode ? roster : null} scope={scope} spaces={hubSpaces} goalInfo={hubMode ? goalInfo : null} hubActive={hubMode} sceneFacts={sceneFacts?.scope === scope ? sceneFacts : null} sceneCues={sceneCues} sceneError={sceneError} onGoalStatus={hubMode ? handleGoalStatus : undefined} onSaveContext={hubMode ? handleGoalContext : undefined} />
           )
         ) : (
           <div className="center-col" />

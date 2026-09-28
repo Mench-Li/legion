@@ -1,4 +1,4 @@
-import type { ActivityEvent, AgentCatalogItem, AgentModelCfg, ApiConfig, BoardData, CardStatus, ChatAttachmentRef, ChatConversation, ChatHealthInfo, ChatMessage, DirListing, FileListResponse, FilePreview, GoalInfo, GoalStatus, HubActivity, HubAuditEvent, HubDocContent, HubTask, MissionsResponse, ModelOption, OverlapGroup, RepoInspect, RosterResponse, SkillInfo, SpaceInfo, WebFetchResult, WebHistoryResponse, WebMetaResponse, WebShotResult } from './types'
+import type { ActivityEvent, AgentCatalogItem, AgentModelCfg, ApiConfig, BoardData, CardStatus, ChatAttachmentRef, ChatConversation, ChatHealthInfo, ChatMessage, DirListing, FileListResponse, FilePreview, GoalInfo, GoalStatus, HubActivity, HubAuditEvent, HubDocContent, HubTask, MissionsResponse, ModelOption, OverlapGroup, RepoInspect, RosterResponse, ScenePreset, SkillInfo, SpaceInfo, WebFetchResult, WebHistoryResponse, WebMetaResponse, WebShotResult } from './types'
 import { subscribeHubEventStream } from './hubEventStream.ts'
 import { hubErrorFromBody } from './hub-errors.ts'
 
@@ -193,9 +193,10 @@ export function createSpace(
   name: string,
   local = false,
   repo?: { localDir?: string; remoteUrl?: string },
+  scenePreset: ScenePreset = 'office',
 ): Promise<unknown> {
   return hubPost('/api/spaces', {
-    id, name, private: local,
+    id, name, private: local, scenePreset,
     localDir: repo?.localDir?.trim() ?? '',
     remoteUrl: repo?.remoteUrl?.trim() ?? '',
   })
@@ -208,6 +209,7 @@ export function updateSpaceConfig(input: {
   private?: boolean
   localDir?: string
   remoteUrl?: string
+  scenePreset?: ScenePreset
 }): Promise<unknown> {
   return hubPost('/api/spaces', {
     id: input.id,
@@ -215,6 +217,7 @@ export function updateSpaceConfig(input: {
     private: input.private ?? false,
     localDir: input.localDir?.trim() ?? '',
     remoteUrl: input.remoteUrl?.trim() ?? '',
+    scenePreset: input.scenePreset,
   })
 }
 

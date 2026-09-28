@@ -234,6 +234,8 @@ export interface GoalInfo {
 }
 
 /** team-hub v2 工作空间（scope 实体，含注册名与编队人数）。 */
+export type ScenePreset = 'office' | 'studio' | 'lab' | 'operations'
+
 export interface SpaceInfo {
   id: string
   name: string
@@ -243,6 +245,7 @@ export interface SpaceInfo {
   localDir?: string
   /** 空间绑定的远程仓库 URL（空 = 仅本地 / 不进共享仓库）。 */
   remoteUrl?: string
+  scenePreset: ScenePreset
   agentCount: number
 }
 

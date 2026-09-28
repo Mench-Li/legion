@@ -289,6 +289,7 @@ test('㉕ ★★ spaces 的 `name` 取不到时**回退成 id**（未注册的�
   assert.equal(byId['unregistered-space'].name, 'unregistered-space', '★ 不回退的话这里会是 undefined')
   assert.equal(byId['unregistered-space'].localDir, '')
   assert.equal(byId['unregistered-space'].remoteUrl, '')
+  assert.equal(byId['unregistered-space'].scenePreset, 'office')
 })
 
 // ── ㉖~㉙ goal ───────────────────────────────────────────────────────────

@@ -60,7 +60,7 @@ test('① ★★ 注册成功 ⇒ 200 带 `{id,name,private,localDir,remoteUrl,a
   const r = await post('/api/spaces', { by: 'general', id: 'sp1', name: '空间一' })
   assert.equal(r.status, 200, JSON.stringify(r.body))
   assert.equal(r.body.ok, true, '★★ handleWrite 外面那层形状')
-  assert.deepEqual(r.body.task, { id: 'sp1', name: '空间一', private: false, localDir: '', remoteUrl: '', agentCount: 0 })
+  assert.deepEqual(r.body.task, { id: 'sp1', name: '空间一', private: false, localDir: '', remoteUrl: '', scenePreset: 'office', agentCount: 0 })
   const row = spaceRow('sp1')
   assert.ok(row, '★★ 必须真的落库')
   assert.equal(row.name, '空间一')
@@ -137,6 +137,30 @@ test('⑧ ★★ `private` 是**真值**判定（回的是布尔，存的是 0/1
   assert.equal(r.body.task.private, true, '★ 回的是布尔')
   assert.equal(r.body.task.agentCount, 2, '★★ 只数**这个空间**的编队（不能全库数）')
   assert.equal(spaceRow('ro').private, 1, '★ 存的是 0/1')
+})
+
+test('空间场景预设支持四种值，并保存在空间配置中', async () => {
+  reset()
+  for (const scenePreset of ['office', 'studio', 'lab', 'operations']) {
+    const id = `scene-${scenePreset}`
+    const r = await post('/api/spaces', { by: 'general', id, name: id, scenePreset })
+    assert.equal(r.status, 200)
+    assert.equal(r.body.task.scenePreset, scenePreset)
+    assert.equal(spaceRow(id).scene_preset, scenePreset)
+    const listed = (await get('/api/spaces')).body.spaces.find((space) => space.id === id)
+    assert.equal(listed.scenePreset, scenePreset)
+  }
+})
+
+test('场景预设拒绝非法值，旧版更新请求保留已有选择', async () => {
+  reset()
+  const invalid = await post('/api/spaces', { by: 'general', id: 'invalid-scene', name: 'Invalid', scenePreset: 'forest' })
+  assert.equal(invalid.status, 400)
+  assert.equal(spaceRow('invalid-scene'), undefined)
+  await post('/api/spaces', { by: 'general', id: 'legacy-scene', name: 'First', scenePreset: 'lab' })
+  const updated = await post('/api/spaces', { by: 'general', id: 'legacy-scene', name: 'Second' })
+  assert.equal(updated.body.task.scenePreset, 'lab')
+  assert.equal(spaceRow('legacy-scene').scene_preset, 'lab')
 })
 
 // ══════════════════════ POST /api/pipeline ══════════════════════

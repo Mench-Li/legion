@@ -81,13 +81,15 @@ export function createSpaceConfigRoutes({
           const remoteUrl = typeof body.remoteUrl === 'string' ? body.remoteUrl.trim() : ''
           if (localDir.length > 512) throw new Error('localDir 过长（≤512 字符）')
           if (remoteUrl.length > 1024) throw new Error('remoteUrl 过长（≤1024 字符）')
-          const existed = db.prepare('SELECT id FROM spaces WHERE id = ?').get(id)
-          db.prepare(`INSERT INTO spaces (id, name, private, local_dir, remote_url, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET name=excluded.name, private=excluded.private, local_dir=excluded.local_dir, remote_url=excluded.remote_url, updatedAt=excluded.updatedAt`)
-            .run(id, name.trim(), body.private ? 1 : 0, localDir, remoteUrl, now(), now())
+          if (body.scenePreset !== undefined && !['office', 'studio', 'lab', 'operations'].includes(body.scenePreset)) throw new Error('scenePreset 非法')
+          const existed = db.prepare('SELECT id, scene_preset FROM spaces WHERE id = ?').get(id)
+          const scenePreset = body.scenePreset ?? existed?.scene_preset ?? 'office'
+          db.prepare(`INSERT INTO spaces (id, name, private, local_dir, remote_url, scene_preset, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET name=excluded.name, private=excluded.private, local_dir=excluded.local_dir, remote_url=excluded.remote_url, scene_preset=excluded.scene_preset, updatedAt=excluded.updatedAt`)
+            .run(id, name.trim(), body.private ? 1 : 0, localDir, remoteUrl, scenePreset, now(), now())
           const count = db.prepare('SELECT COUNT(*) AS c FROM roster WHERE scope = ?').get(id).c
           audit(by, scope, existed ? 'space:update' : 'space:create', null, { space: id, name: name.trim(), private: !!body.private, localDir, remoteUrl })
-          return { id, name: name.trim(), private: !!body.private, localDir, remoteUrl, agentCount: count }
+          return { id, name: name.trim(), private: !!body.private, localDir, remoteUrl, scenePreset, agentCount: count }
         })
       },
     },

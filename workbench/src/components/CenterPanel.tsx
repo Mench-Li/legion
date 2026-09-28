@@ -2,6 +2,7 @@ import { lazy, Suspense, useState } from 'react'
 import type { BoardData, CardStatus, GoalInfo, GoalStatus, RosterAgent, SpaceInfo } from '../types'
 import type { StatusCard } from '../missions'
 import type { AgentPose } from './Scene3D'
+import type { SceneCue, SceneFacts } from '../scene/sceneState'
 import { AgentTasksModal } from './AgentTasksModal'
 import { TaskDetailModal } from './TaskDetailModal'
 import { GoalsBoard } from './GoalsBoard'
@@ -64,6 +65,9 @@ interface CenterPanelProps {
   goalInfo?: GoalInfo | null
   /** 中枢模式开关：开启时目标进度一律取 hub goal，禁止回退到 v1 board.goal 造成数字串台。 */
   hubActive?: boolean
+  sceneFacts?: SceneFacts | null
+  sceneCues?: SceneCue[]
+  sceneError?: string
   /** 目标状态迁移（暂停/恢复/取消；仅将军）。 */
   onGoalStatus?: (goalId: string, status: GoalStatus, label: string) => Promise<void>
   /** 保存目标上下文（仅将军；更新 bump contextVersion，守护下一派工对齐）。 */

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { fetchAgentModels, fetchHubTasks, MODEL_OPTIONS } from '../api'
 import type { CardStatus, HubTask, RosterAgent } from '../types'
+import { tasksForRosterAgent } from '../scene/agentOwnership'
 
 interface AgentTasksModalProps {
   agent: RosterAgent
@@ -37,9 +38,7 @@ export function AgentTasksModal({ agent, onClose, onOpenTask }: AgentTasksModalP
       try {
         const all = await fetchHubTasks(agent.scope ?? null)
         if (cancelled) return
-        const mine = all.filter(
-          t => t.status !== 'canceled' && ((t.soldier !== null && t.soldier === agent.role) || (t.soldier === null && t.role === agent.role)),
-        )
+        const mine = tasksForRosterAgent(agent, all)
         setTasks(mine)
       } catch (e) {
         if (!cancelled) setErr(e instanceof Error ? e.message : String(e))

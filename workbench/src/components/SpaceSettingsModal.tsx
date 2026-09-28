@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { deleteSpace, fetchSpaceImpact, updateSpaceConfig } from '../api'
 import type { SpaceDeleteImpact } from '../api'
-import type { SpaceInfo } from '../types'
+import type { ScenePreset, SpaceInfo } from '../types'
 import { toast } from './Toast'
 import { FolderPickerField } from './FolderPickerField'
 
@@ -20,6 +20,7 @@ export function SpaceSettingsModal({ space, onClose, onSaved, onDeleted }: Space
   const [local, setLocal] = useState(space.private === true)
   const [localDir, setLocalDir] = useState(space.localDir ?? '')
   const [remoteUrl, setRemoteUrl] = useState(space.remoteUrl ?? '')
+  const [scenePreset, setScenePreset] = useState<ScenePreset>(space.scenePreset ?? 'office')
   const [busy, setBusy] = useState(false)
   const [dangerOpen, setDangerOpen] = useState(false)
   const [impact, setImpact] = useState<SpaceDeleteImpact | null>(null)
@@ -44,9 +45,10 @@ export function SpaceSettingsModal({ space, onClose, onSaved, onDeleted }: Space
         private: local,
         localDir: localDir.trim(),
         remoteUrl: remoteUrl.trim(),
+        scenePreset,
       })
       toast('ok', `空间「${name.trim()}」配置已保存`)
-      onSaved({ ...space, name: name.trim(), private: local, localDir: localDir.trim(), remoteUrl: remoteUrl.trim() })
+      onSaved({ ...space, name: name.trim(), private: local, localDir: localDir.trim(), remoteUrl: remoteUrl.trim(), scenePreset })
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       toast('err', msg.includes('401') ? '令牌无效或缺失：请在右上角「🔑 令牌」设置' : `保存失败：${msg}`)
@@ -117,6 +119,13 @@ export function SpaceSettingsModal({ space, onClose, onSaved, onDeleted }: Space
           <div className="field">
             <label>空间名称</label>
             <input value={name} onChange={e => setName(e.target.value)} autoFocus />
+          </div>
+          <div className="field">
+            <label>3D 办公室场景</label>
+            <select value={scenePreset} onChange={e => setScenePreset(e.target.value as ScenePreset)}>
+              <option value="office">办公室</option><option value="studio">创作室</option>
+              <option value="lab">实验室</option><option value="operations">运营中心</option>
+            </select>
           </div>
           <label className="local-toggle">
             <input type="checkbox" checked={local} onChange={e => setLocal(e.target.checked)} />

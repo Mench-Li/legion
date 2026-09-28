@@ -156,7 +156,7 @@ export function createTaskLifecycleRoutes({
           if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
           const soldier = typeof body.soldier === 'string' && body.soldier.length > 0 ? body.soldier : by
           const ttl = typeof body.ttlMinutes === 'number' && Number.isInteger(body.ttlMinutes) && body.ttlMinutes > 0 ? body.ttlMinutes : undefined
-          const task = claimTask(id, soldier, body.ifVersion, body.force === true, body.round, body.requestId, ttl)
+          const task = claimTask(id, soldier, body.ifVersion, body.force === true, body.round, body.requestId, ttl, scope)
           audit(by, scope, 'claim', id, { soldier }, task.goalId)
           return task
         })
@@ -172,7 +172,7 @@ export function createTaskLifecycleRoutes({
           const to = body.to
           if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
           if (typeof to !== 'string' || to.length === 0) throw new Error('缺少参数 to')
-          const task = transitionTask(id, to, by, body.ifVersion, body.force === true)
+          const task = transitionTask(id, to, by, body.ifVersion, body.force === true, body.confirmedStopped === true)
           audit(by, scope, 'transition', id, { to }, task.goalId)
           if (task.goalId || task.status === 'done' || task.status === 'canceled') settleGoalsOfScope(task.scope) // 链收尾 → 目标自动 done
           return task

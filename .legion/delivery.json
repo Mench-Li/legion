@@ -2,7 +2,7 @@
   "targetRef": "refs/heads/main",
   "verify": [
     {
-      "name": "path-domain",
+      "id": "path-domain",
       "argv": [
         "node",
         "packages/shared/test/path-domain.test.mjs"
@@ -10,7 +10,7 @@
       "timeoutMs": 120000
     },
     {
-      "name": "repo-identity",
+      "id": "repo-identity",
       "argv": [
         "node",
         "packages/shared/test/repo-identity.test.mjs"
@@ -18,7 +18,7 @@
       "timeoutMs": 120000
     },
     {
-      "name": "write-intent-store",
+      "id": "write-intent-store",
       "argv": [
         "node",
         "team-hub/write-intent-store.test.mjs"
@@ -26,7 +26,7 @@
       "timeoutMs": 120000
     },
     {
-      "name": "claim-policy",
+      "id": "claim-policy",
       "argv": [
         "node",
         "team-hub/claim-policy.test.mjs"
@@ -34,7 +34,7 @@
       "timeoutMs": 120000
     },
     {
-      "name": "git-plumbing",
+      "id": "git-plumbing",
       "argv": [
         "node",
         "team-hub/git-plumbing.test.mjs"
@@ -42,7 +42,7 @@
       "timeoutMs": 120000
     },
     {
-      "name": "delivery-store",
+      "id": "delivery-store",
       "argv": [
         "node",
         "team-hub/delivery-store.test.mjs"
@@ -50,7 +50,7 @@
       "timeoutMs": 120000
     },
     {
-      "name": "integration-worker",
+      "id": "integration-worker",
       "argv": [
         "node",
         "team-hub/integration-worker.test.mjs"
@@ -58,7 +58,7 @@
       "timeoutMs": 180000
     },
     {
-      "name": "write-intent-routes",
+      "id": "write-intent-routes",
       "argv": [
         "node",
         "team-hub/write-intent-routes.test.mjs"
@@ -66,7 +66,7 @@
       "timeoutMs": 180000
     },
     {
-      "name": "delivery-routes",
+      "id": "delivery-routes",
       "argv": [
         "node",
         "team-hub/delivery-routes.test.mjs"
@@ -74,7 +74,7 @@
       "timeoutMs": 180000
     },
     {
-      "name": "metrics",
+      "id": "metrics",
       "argv": [
         "node",
         "team-hub/metrics.test.mjs"
@@ -82,7 +82,7 @@
       "timeoutMs": 180000
     },
     {
-      "name": "write-eligibility",
+      "id": "write-eligibility",
       "argv": [
         "node",
         "--experimental-strip-types",
@@ -91,7 +91,7 @@
       "timeoutMs": 120000
     },
     {
-      "name": "legacy-convergence",
+      "id": "legacy-convergence",
       "argv": [
         "node",
         "--experimental-strip-types",
@@ -100,7 +100,7 @@
       "timeoutMs": 120000
     },
     {
-      "name": "delivery-ui",
+      "id": "delivery-ui",
       "argv": [
         "node",
         "--experimental-strip-types",

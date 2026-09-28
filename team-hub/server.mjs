@@ -96,6 +96,9 @@ import {
   resolveApprovalTtlMs,
 } from './approval-ttl.mjs'
 import { createRunStore, RunError } from './run-store.mjs'
+import { Worker } from 'node:worker_threads'
+import { resolveRepoIdentity } from '../packages/shared/src/repo-identity.mjs'
+import { runGit as runDeliveryGit } from './git-plumbing.mjs'
 import { MODEL_ERRORS, ModelError, createModelStore, ensureModelSchema } from './model-store.mjs'
 import {
   BINDING_STORE_ERRORS, BindingStoreError, createBindingStore, ensureBindingSchema,
@@ -520,6 +523,40 @@ const runStore = createRunStore({
       approvalPolicy: manifest.approvalPolicy,
     }
   },
+  reserveWrite: ({ taskId, scope, attemptId, epoch, leaseMs }) => {
+    const binding = resolveDeliveryBinding(scope)
+    if (binding.error) return { ok: false, code: 'REPO_UNBOUND', reason: binding.error }
+      const intent = writeIntentStore.getIntent(taskId)
+      if (intent && (intent.repoId !== binding.repoId || intent.targetRef !== binding.targetRef)) return { ok: false, code: 'REPO_BINDING_CHANGED', reason: '任务写入意图指向过期仓库或目标分支绑定' }
+      const domain = db.prepare('SELECT fileDomain FROM tasks WHERE id=?').get(taskId)?.fileDomain
+      const fallback = parseJson(domain, [])
+      const paths = intent?.paths ?? (Array.isArray(fallback) ? fallback.map((path) => typeof path === 'string' ? { path, type: 'dir' } : path) : [])
+    return writeIntentStore.reserve({
+      repoId: binding.repoId, taskId, attemptId, epoch, paths,
+      exclusive: paths.length === 0, capability: binding.capability,
+        targetRef: binding.targetRef, leaseMs, source: intent ? 'runtime-claim' : paths.length ? 'file-domain-fallback' : 'unplanned-exclusive',
+    })
+  },
+  onWriteContention: ({ taskId, conflict }) => {
+    if (conflict?.code === 'FILE_CONTENTION' || conflict?.code === 'SINGLE_WRITER_REQUIRED') {
+      db.prepare("UPDATE tasks SET scheduling_state='waiting-file' WHERE id=?").run(taskId)
+    }
+  },
+  integrationMode: process.env.LEGION_INTEGRATION_MODE === 'integration',
+  deliveryStateForTask: (taskId) => taskDeliveryStore.getDeliveryByTask(taskId)?.state ?? null,
+  onAttemptProjected: ({ attempt, state }) => {
+    if (!['Completed', 'Cancelled', 'DeadLetter', 'RetryableFailure', 'UnknownOutcome'].includes(state)) return
+    const row = db.prepare("SELECT repo_id, attempt_id, lease_epoch FROM write_reservations WHERE task_id=? AND attempt_id=? AND state IN ('reserved','reconciling') ORDER BY id DESC LIMIT 1").get(attempt.task_id, attempt.id)
+    if (!row) return
+    const args = { repoId: row.repo_id, taskId: attempt.task_id, attemptId: row.attempt_id, epoch: row.lease_epoch }
+    if (state === 'Completed' && process.env.LEGION_INTEGRATION_MODE === 'integration') return
+    const frozen = state === 'Cancelled' || state === 'UnknownOutcome'
+    const result = frozen
+      ? writeIntentStore.markReconciling({ ...args, reason: state })
+      : writeIntentStore.release(args)
+    if (!result.ok) throw new Error(`运行预约无法结清：${result.code}`)
+    db.prepare('UPDATE tasks SET scheduling_state=? WHERE id=?').run(frozen ? 'reconciling' : 'released', attempt.task_id)
+  },
 })
 
 /**
@@ -664,7 +701,7 @@ const compactionStore = (() => {
 // 与既有看板/运行仓储共享同一个 SQLite 连接与事务域（设计 §4：team-hub SQLite 是唯一调度事实源）。
 ensureWriteIntentSchema(db)
 ensureDeliverySchema(db)
-const writeIntentStore = createWriteIntentStore(db)
+const writeIntentStore = createWriteIntentStore(db, { caseInsensitive: process.platform === 'win32' })
 const taskDeliveryStore = createDeliveryStore(db)
 
 /**
@@ -2271,6 +2308,8 @@ function setGoalState(id, to, by = 'general', forceGeneral = false) {
     let strandedTasks = []
     if (to === 'canceled') {
       // 只取消未开工的链任务（in_progress/in_review 属于在办，交给将军收尾）
+      const candidates = db.prepare("SELECT id FROM tasks WHERE goalId=? AND status IN ('backlog','todo','blocked')").all(id)
+      for (const candidate of candidates) finishTaskReservationInTx(candidate.id, { cancelled: true })
       canceledTasks = db.prepare("UPDATE tasks SET status='canceled', version=version+1, updatedAt=? WHERE goalId=? AND status IN ('backlog','todo','blocked')").run(at, id).changes
       strandedTasks = strandOpenTasksOfCanceledGoal(id, by, at)
     }
@@ -4382,9 +4421,10 @@ function expandGoalSlices({ testDesignerTaskId, slices, by }) {
   })
 }
 
-function claimTask(id, soldier, ifVersion, force, round, requestId, ttlMinutes) {
-  return withTx(() => {
+function claimTask(id, soldier, ifVersion, force, round, requestId, ttlMinutes, requestedScope = null) {
+  const outcome = withTx(() => {
     const t = getTask(id)
+    if (requestedScope !== null && t.scope !== requestedScope) throw Object.assign(new Error('任务不属于请求空间'), { code: 'SCOPE_MISMATCH', statusCode: 403 })
     if (ifVersion !== undefined) {
       if (!Number.isInteger(ifVersion)) throw new Error(`ifVersion 必须是整数`)
       if (t.version !== ifVersion) throw new Error(`乐观锁冲突：任务 ${id} 当前 version=${t.version}，你期望 ${ifVersion}`)
@@ -4400,14 +4440,64 @@ function claimTask(id, soldier, ifVersion, force, round, requestId, ttlMinutes) 
     const at = now()
     const ttl = ttlMinutes !== undefined ? ttlMinutes : t.ttlMinutes
     const expires = ttl !== null && ttl !== undefined ? new Date(new Date(at).getTime() + ttl * 60_000).toISOString() : null
+    const binding = resolveDeliveryBinding(t.scope)
+    if (binding.error) throw Object.assign(new Error(binding.error), { code: 'REPO_UNBOUND', statusCode: 409 })
+    const intent = writeIntentStore.getIntent(id)
+    if (intent && (intent.repoId !== binding.repoId || intent.targetRef !== binding.targetRef)) throw Object.assign(new Error('任务写入意图指向了过期的仓库或目标分支绑定，请重新规划范围'), { code: 'REPO_BINDING_CHANGED', statusCode: 409 })
+    const fallback = parseJson(db.prepare('SELECT fileDomain FROM tasks WHERE id=?').get(id)?.fileDomain, [])
+    const plannedPaths = intent?.paths ?? (Array.isArray(fallback) ? fallback.map((path) => typeof path === 'string' ? { path, type: 'dir' } : path) : [])
+    const old = writeIntentStore.listActiveReservations(binding.repoId).find((r) => r.taskId === id)
+    const leaseEpoch = Math.max(t.version + 1, (old?.leaseEpoch ?? 0) + 1)
+    const attemptId = `legacy:${id}:${leaseEpoch}`
+    const reserved = old && ['todo', 'blocked'].includes(t.status) && old.state === 'reserved'
+      ? writeIntentStore.rebindForRetry({ repoId: binding.repoId, taskId: id, oldAttemptId: old.attemptId, newAttemptId: attemptId, epoch: leaseEpoch })
+      : writeIntentStore.reserve({
+        repoId: binding.repoId, taskId: id, attemptId,
+        epoch: leaseEpoch, paths: plannedPaths, exclusive: plannedPaths.length === 0,
+        targetRef: binding.targetRef, capability: binding.capability,
+        leaseMs: ttl ? ttl * 60_000 : null, source: intent ? 'claim' : plannedPaths.length ? 'file-domain-fallback' : 'unplanned-exclusive',
+      })
+    if (!reserved.ok) {
+      if (reserved.code === 'FILE_CONTENTION' || reserved.code === 'SINGLE_WRITER_REQUIRED') {
+        db.prepare("UPDATE tasks SET scheduling_state='waiting-file' WHERE id=?").run(id)
+      }
+      return { blocked: reserved }
+    }
     db.prepare('UPDATE tasks SET status=\'in_progress\', soldier=?, claimedRound=?, claimedAt=?, ttlMinutes=?, expiresAt=?, claimRequestId=?, version=version+1, updatedAt=? WHERE id=?')
       .run(soldier, round ?? null, at, ttl ?? null, expires, requestId ?? null, now(), id)
-    return getTask(id)
+    db.prepare("UPDATE tasks SET scheduling_state='reserved' WHERE id=?").run(id)
+    return { task: getTask(id) }
   })
+  if (outcome.blocked) {
+    const r = outcome.blocked
+    throw Object.assign(new Error(r.reason ?? r.code), {
+      code: r.code, statusCode: 409, paths: r.paths ?? [], holderTaskId: r.holderTaskId ?? null,
+    })
+  }
+  return outcome.task
 }
 
-function transitionTask(id, to, by, ifVersion, force) {
-  return withTx(() => {
+function finishTaskReservationInTx(taskId, { cancelled = false } = {}) {
+  const row = db.prepare("SELECT repo_id, attempt_id, lease_epoch FROM write_reservations WHERE task_id=? AND state IN ('reserved','reconciling') ORDER BY id DESC LIMIT 1").get(taskId)
+  if (!row) return
+  const args = { repoId: row.repo_id, taskId, attemptId: row.attempt_id, epoch: row.lease_epoch }
+  const result = cancelled
+    ? writeIntentStore.markReconciling({ ...args, reason: 'task-cancelled' })
+    : writeIntentStore.release(args)
+  if (!result.ok) throw new Error(`任务预约无法结清：${result.code}`)
+  db.prepare('UPDATE tasks SET scheduling_state=? WHERE id=?').run(cancelled ? 'reconciling' : 'released', taskId)
+}
+
+function assertIntegratedBeforeDone(taskId) {
+  if (process.env.LEGION_INTEGRATION_MODE !== 'integration') return
+  const delivery = taskDeliveryStore.getDeliveryByTask(taskId)
+  if (delivery?.state !== 'integrated') {
+    throw Object.assign(new Error('任务尚未通过集成验证，不能标记已交付'), { code: 'DELIVERY_NOT_INTEGRATED', statusCode: 409 })
+  }
+}
+
+function transitionTask(id, to, by, ifVersion, force, confirmedStopped = false) {
+  const result = withTx(() => {
     const t = getTask(id)
     if (ifVersion !== undefined) {
       if (!Number.isInteger(ifVersion)) throw new Error(`ifVersion 必须是整数`)
@@ -4418,22 +4508,68 @@ function transitionTask(id, to, by, ifVersion, force) {
     if (to === 'in_progress') {
       if (t.soldier !== null && t.soldier !== by) throw new Error(`任务 ${t.id} 已绑定 ${t.soldier}，不能由 ${by} 开工`)
       assertUnblocked(t, force)
+      const binding = resolveDeliveryBinding(t.scope)
+      if (binding.error) throw Object.assign(new Error(binding.error), { code: 'REPO_UNBOUND', statusCode: 409 })
+      const intent = writeIntentStore.getIntent(id)
+      if (intent && (intent.repoId !== binding.repoId || intent.targetRef !== binding.targetRef)) throw Object.assign(new Error('任务写入意图指向了过期的仓库或目标分支绑定'), { code: 'REPO_BINDING_CHANGED', statusCode: 409 })
+      const active = writeIntentStore.listActiveReservations(binding.repoId).find((r) => r.taskId === id)
+      if (active?.state === 'reconciling') return { blocked: { code: 'RESERVATION_RECONCILING', reason: '上一次写入尚未确认停止' } }
+      if (!active) {
+        const fallback = parseJson(db.prepare('SELECT fileDomain FROM tasks WHERE id=?').get(id)?.fileDomain, [])
+        const paths = intent?.paths ?? (Array.isArray(fallback) ? fallback.map((path) => typeof path === 'string' ? { path, type: 'dir' } : path) : [])
+        const reserved = writeIntentStore.reserve({
+          repoId: binding.repoId, taskId: id, attemptId: `legacy:${id}:${t.version + 1}`,
+          epoch: t.version + 1, paths, exclusive: paths.length === 0,
+          targetRef: binding.targetRef, capability: binding.capability,
+          source: intent ? 'transition' : paths.length ? 'file-domain-fallback' : 'unplanned-exclusive',
+        })
+        if (!reserved.ok) {
+          if (reserved.code === 'FILE_CONTENTION' || reserved.code === 'SINGLE_WRITER_REQUIRED') {
+            db.prepare("UPDATE tasks SET scheduling_state='waiting-file' WHERE id=?").run(id)
+          }
+          return { blocked: reserved }
+        }
+      } else if (['todo', 'blocked'].includes(t.status)) {
+        const rebound = writeIntentStore.rebindForRetry({
+          repoId: binding.repoId, taskId: id, oldAttemptId: active.attemptId,
+          newAttemptId: `legacy:${id}:${Math.max(t.version + 1, active.leaseEpoch + 1)}`,
+          epoch: Math.max(t.version + 1, active.leaseEpoch + 1),
+        })
+        if (!rebound.ok) return { blocked: rebound }
+      }
+      db.prepare("UPDATE tasks SET scheduling_state='reserved' WHERE id=?").run(id)
       // 开工/认领统一记 claimedAt：避免「in_progress 但无认领时间」的孤儿任务无法被租约回收
       if (by) db.prepare('UPDATE tasks SET soldier=?, claimedAt=?, claimedRound=NULL WHERE id=?').run(by, now(), id)
     }
     if (to === 'done') {
       if (t.status !== 'in_review') throw new Error('只有 in_review 可完成；先迁移到 in_review')
       if (by !== 'general') throw new Error('只有将军（by=general）能在用户接受后把任务移到 done')
+      assertIntegratedBeforeDone(id)
     }
     if (to === 'in_review' && by && t.soldier !== null && t.soldier !== by) {
       throw new Error(`任务 ${t.id} 由 ${t.soldier} 负责，不能由 ${by} 提交验收`)
+    }
+    if (t.status === 'in_progress' && (to === 'todo' || to === 'blocked')) {
+      // The worker may have finished its blocked report, or a human may have
+      // interrupted a still-running worker. Only the former can release now.
+      if (confirmedStopped && by !== t.soldier) throw Object.assign(new Error('只有当前执行者可确认 worker 已停止'), { code: 'STOP_CONFIRMATION_DENIED', statusCode: 403 })
+      finishTaskReservationInTx(id, { cancelled: !confirmedStopped })
     }
     if (to === 'todo') {
       db.prepare('UPDATE tasks SET soldier=NULL, claimedAt=NULL, claimedRound=NULL WHERE id=?').run(id)
     }
     db.prepare('UPDATE tasks SET status=?, version=version+1, updatedAt=? WHERE id=?').run(to, now(), id)
+    if (to === 'done') finishTaskReservationInTx(id)
+    if (to === 'canceled') finishTaskReservationInTx(id, { cancelled: true })
     return getTask(id)
   })
+  if (result?.blocked) {
+    throw Object.assign(new Error(result.blocked.reason ?? result.blocked.code), {
+      code: result.blocked.code, statusCode: 409,
+      paths: result.blocked.paths ?? [], holderTaskId: result.blocked.holderTaskId ?? null,
+    })
+  }
+  return result
 }
 
 function advanceTask(id, by, ifVersion) {
@@ -4443,7 +4579,9 @@ function advanceTask(id, by, ifVersion) {
     if (t.status !== 'in_progress' && t.status !== 'in_review') throw new Error(`无法推进：任务 ${id} 当前 ${t.status}`)
     const expected = t.role ?? t.soldier
     if (expected !== null && expected !== by) throw new Error(`只有 ${expected} 可推进任务 ${id}`)
+    assertIntegratedBeforeDone(id)
     db.prepare('UPDATE tasks SET status=\'done\', version=version+1, updatedAt=? WHERE id=?').run(now(), id)
+    finishTaskReservationInTx(id)
     return getTask(id)
   })
 }
@@ -4509,6 +4647,7 @@ function releaseStaleTasks(olderThanMinutes, by, ids) {
         const t = getTask(r.id)
         const comments = parseJson(t.comments, [])
         comments.push({ by, at: now(), text: reason })
+        finishTaskReservationInTx(r.id, { cancelled: true })
         db.prepare('UPDATE tasks SET status=\'todo\', soldier=NULL, claimedAt=NULL, claimedRound=NULL, ttlMinutes=NULL, expiresAt=NULL, claimRequestId=NULL, comments=?, version=version+1, updatedAt=? WHERE id=?')
           .run(JSON.stringify(comments), now(), r.id)
         released.push(r.id)
@@ -4524,6 +4663,7 @@ function releaseStaleTasks(olderThanMinutes, by, ids) {
       const t = getTask(r.id)
       const comments = parseJson(t.comments, [])
       comments.push({ by, at: now(), text: reason })
+      finishTaskReservationInTx(r.id, { cancelled: true })
       db.prepare('UPDATE tasks SET status=\'todo\', soldier=NULL, claimedAt=NULL, claimedRound=NULL, ttlMinutes=NULL, expiresAt=NULL, claimRequestId=NULL, comments=?, version=version+1, updatedAt=? WHERE id=?')
         .run(JSON.stringify(comments), now(), r.id)
       released.push(r.id)
@@ -4882,6 +5022,8 @@ async function handleWrite(req, res, run) {
     if (typeof e?.hint === 'string') extra.hint = e.hint
     if (Array.isArray(e?.candidates)) extra.candidates = e.candidates
     if (Array.isArray(e?.errors)) extra.errors = e.errors
+    if (Array.isArray(e?.paths)) extra.paths = e.paths
+    if (typeof e?.holderTaskId === 'string') extra.holderTaskId = e.holderTaskId
     json(res, status, Object.keys(extra).length > 0 ? { error: message, ...extra } : { error: message })
   }
 }
@@ -4962,6 +5104,131 @@ function boundLocalDirFor(scopeId) {
   return ROOT
 }
 
+/** Repository identity and delivery branch are facts of the space binding, never request fields. */
+function resolveDeliveryBinding(scopeId) {
+  const workspaceDir = boundLocalDirFor(scopeId)
+  let physicalDir
+  try { physicalDir = realpathSync(workspaceDir) }
+  catch { return { error: '绑定的本地工作区不存在：' + workspaceDir } }
+  const identity = resolveRepoIdentity(physicalDir)
+  if (identity.capability !== 'git') {
+    return { repoId: 'local:' + physicalDir.replaceAll('\\', '/').toLowerCase(), targetRef: null, capability: 'degraded', workspaceDir: physicalDir }
+  }
+  const top = runDeliveryGit(['rev-parse', '--show-toplevel'], physicalDir)
+  if (!top.ok || !top.stdout.trim()) return { error: '无法确认绑定仓库的完整工作区根目录' }
+  let checkoutRoot
+  try { checkoutRoot = realpathSync(top.stdout.trim()) }
+  catch { return { error: '绑定仓库的完整工作区根目录不存在' } }
+  const ref = runDeliveryGit(['symbolic-ref', '-q', 'HEAD'], physicalDir)
+  if (!ref.ok || !/^refs\/heads\/[A-Za-z0-9._/-]+$/.test(ref.stdout.trim())) {
+    return { error: '绑定工作区未检出可交付分支，请先切换到目标分支' }
+  }
+  for (const space of db.prepare("SELECT id, local_dir FROM spaces WHERE local_dir IS NOT NULL AND TRIM(local_dir) <> ''").all()) {
+    if (space.id === scopeId) continue
+    let otherDir
+    try { otherDir = realpathSync(space.local_dir) } catch { continue }
+    if (resolveRepoIdentity(otherDir).repoId !== identity.repoId) continue
+    const otherRef = runDeliveryGit(['symbolic-ref', '-q', 'HEAD'], otherDir)
+    if (!otherRef.ok || otherRef.stdout.trim() !== ref.stdout.trim()) {
+      return { error: `同一物理仓库被空间 ${space.id} 绑定到不同目标分支；请统一交付目标后重试` }
+    }
+  }
+  return { repoId: identity.repoId, targetRef: ref.stdout.trim(), capability: 'git', workspaceDir: checkoutRoot }
+}
+
+function submitVerifiedDelivery({ body, by, humanApproval = false }) {
+  const task = db.prepare('SELECT id, scope, status, role, soldier, claimedAt, evidence, fileDomain FROM tasks WHERE id=?').get(body.taskId)
+  if (!task) return { ok: false, code: 'TASK_NOT_FOUND', status: 404 }
+  if (task.scope !== body.scope) return { ok: false, code: 'SCOPE_MISMATCH', status: 403 }
+  if (!['in_progress', 'in_review'].includes(task.status)) return { ok: false, code: 'TASK_NOT_EXECUTING', status: 409 }
+  const binding = resolveDeliveryBinding(task.scope)
+  if (binding.error || binding.capability !== 'git') return { ok: false, code: 'REPO_UNBOUND', status: 409, message: binding.error }
+  if (body.targetRef !== undefined && body.targetRef !== binding.targetRef) return { ok: false, code: 'INVALID_TARGET_REF', status: 400 }
+  const sourceRef = `refs/heads/w/${task.id}`
+  const resolvedSource = runDeliveryGit(['rev-parse', '--verify', sourceRef], binding.workspaceDir)
+  const source = resolvedSource.ok ? resolvedSource.stdout.trim() : ''
+  if (!/^[0-9a-f]{40,64}$/i.test(source) || (body.sourceCommit !== undefined && body.sourceCommit !== source)
+    || runDeliveryGit(['cat-file', '-t', source], binding.workspaceDir).stdout.trim() !== 'commit') {
+    return { ok: false, code: 'INVALID_SOURCE_COMMIT', status: 400 }
+  }
+  const evidence = parseJson(task.evidence, [])
+  const accepted = Array.isArray(evidence) && evidence.some((entry) =>
+    entry?.by === task.soldier && typeof entry.text === 'string'
+    && entry.text.includes(`sourceCommit=${source}`)
+    && Date.parse(entry.at) >= Date.parse(task.claimedAt ?? 0))
+  const stage = readPipeline(task.scope).stages.find((item) => item.enabled && item.role === task.role)
+  const humanApprovalRequired = stage ? stage.gate === true : true
+  const humanApproved = humanApproval && by === 'general'
+  const intent = writeIntentStore.getIntent(task.id)
+  const reservation = writeIntentStore.listActiveReservations(binding.repoId).find((r) => r.taskId === task.id && r.state === 'reserved')
+  if (!reservation || !intent || intent.repoId !== binding.repoId || intent.targetRef !== binding.targetRef || reservation.attemptId !== intent.attemptId || (!reservation.exclusive && intent.paths.length === 0)) {
+    return { ok: false, code: 'WRITE_INTENT_REQUIRED', status: 409, message: '交付前需确认实际写入范围并持有对应预约' }
+  }
+  const base = runDeliveryGit(['merge-base', binding.targetRef, source], binding.workspaceDir)
+  if (!base.ok) return { ok: false, code: 'BASE_MISSING', status: 409 }
+  const diff = runDeliveryGit(['diff', '--name-only', '-z', base.stdout.trim(), source], binding.workspaceDir)
+  if (!diff.ok) return { ok: false, code: 'DIFF_FAILED', status: 409 }
+  const finalDiffPaths = diff.stdout.split('\0').filter(Boolean)
+  const fileDomain = (() => { try { return JSON.parse(task.fileDomain) } catch { return null } })()
+  const gates = {
+    finalDiffPaths, fileDomain, intentPaths: reservation.exclusive ? null : intent.paths,
+    acceptanceEvidence: { passed: accepted }, humanApprovalRequired, humanApproved,
+    caseInsensitive: process.platform === 'win32',
+  }
+  const existing = taskDeliveryStore.getDeliveryByTask(task.id)
+  let pending = null
+  if (existing && existing.attemptId === reservation.attemptId && existing.sourceCommit !== source) {
+    return { ok: false, code: 'NEW_ATTEMPT_REQUIRED', status: 409, message: '本轮交付候选已登记；修改候选后请打回并重新认领任务' }
+  }
+  if (existing && existing.sourceCommit === source && existing.attemptId === reservation.attemptId) {
+    if (existing.state === 'ready' || existing.state === 'integrated') return { ok: true, delivery: existing, binding }
+    if (existing.state !== 'awaiting-acceptance' && existing.state !== 'needs-review') return { ok: false, code: 'DELIVERY_ALREADY_EXISTS', status: 409, delivery: existing }
+    pending = existing
+  }
+  if (!pending) {
+    const created = taskDeliveryStore.createDelivery({
+      taskId: task.id, attemptId: reservation.attemptId, sourceCommit: source,
+      baseCommit: base.stdout.trim(), targetRef: binding.targetRef, actor: by,
+    })
+    if (!created.ok) return { ...created, status: 400 }
+    pending = created.delivery
+  }
+  const enqueued = taskDeliveryStore.enqueueDelivery({ id: pending.id, version: pending.version, gates, actor: by })
+  if (!enqueued.ok) return { ...enqueued, status: 422, delivery: pending }
+  db.prepare("UPDATE tasks SET status='in_review' WHERE id=? AND status='in_progress'").run(task.id)
+  return { ok: true, delivery: enqueued.delivery, binding }
+}
+
+const runningIntegrationThreads = new Map()
+function runIntegrationInThread(deliveryId, binding, recoverJobId = null) {
+  const key = binding.repoId
+  if (runningIntegrationThreads.has(key)) return Promise.resolve({ ok: false, code: 'JOB_CONTENTION' })
+  const promise = new Promise((resolveResult) => {
+    const worker = new Worker(new URL('./integration-job-thread.mjs', import.meta.url), {
+      workerData: { dbFile: DB_FILE, repoDir: binding.workspaceDir, repoId: binding.repoId, targetRef: binding.targetRef, deliveryId, recoverJobId },
+    })
+    let settled = false
+    worker.once('message', (result) => { settled = true; resolveResult(result) })
+    worker.once('error', (error) => { if (!settled) { settled = true; resolveResult({ ok: false, code: 'INTEGRATION_RUNNER_ERROR', message: error.message }) } })
+    worker.once('exit', (code) => { if (!settled) resolveResult({ ok: false, code: 'INTEGRATION_RUNNER_EXIT', exitCode: code }) })
+  })
+  runningIntegrationThreads.set(key, promise)
+  return promise.finally(() => runningIntegrationThreads.delete(key))
+}
+
+function recoverIntegrationJob(jobId) {
+  const job = taskDeliveryStore.getIntegrationJob(jobId)
+  if (!job) return Promise.resolve({ ok: false, code: 'JOB_NOT_FOUND' })
+  const delivery = taskDeliveryStore.getDelivery(job.deliveryId)
+  const task = delivery ? db.prepare('SELECT scope FROM tasks WHERE id=?').get(delivery.taskId) : null
+  if (!task) return Promise.resolve({ ok: false, code: 'TASK_NOT_FOUND' })
+  const binding = resolveDeliveryBinding(task.scope)
+  if (binding.error || binding.repoId !== job.repoId || binding.targetRef !== job.targetRef) {
+    return Promise.resolve({ ok: false, code: 'REPO_BINDING_CHANGED' })
+  }
+  return runIntegrationInThread(delivery.id, binding, jobId)
+}
+
 /** 读端点核心（纯函数便于单测）：给定 task + 登记序号 i，返回 {status, body}。 */
 export function artifactContent(taskId, rawI) {
   if (typeof taskId !== 'string' || taskId.trim().length === 0) return { status: 400, body: { error: '缺少参数 task' } }
@@ -5009,9 +5276,11 @@ const router = createRouter([
   // 冲突治理族放在最前：/api/tasks/:id/write-intent 等具体路径必须先于宽前缀匹配。
   createWriteIntentRoutes({
     json, readBody, authorized, writeIntentStore, db,
+    resolveRepoBinding: resolveDeliveryBinding,
     setSchedulingState: (taskId, state) => { try { db.prepare('UPDATE tasks SET scheduling_state = ? WHERE id = ?').run(state, taskId) } catch { /* 列缺失忽略 */ } },
   }),
-  createDeliveryRoutes({ json, readBody, authorized, deliveryStore: taskDeliveryStore, db }),
+  createDeliveryRoutes({ json, readBody, authorized, deliveryStore: taskDeliveryStore, db,
+    submitVerifiedDelivery, runIntegrationInThread, recoverIntegrationJob }),
   createMetricsRoutes({ json, authorized, db, writeIntentStore, deliveryStore: taskDeliveryStore }),
   createRulesRoutes({ json, handleWrite, validRuleScope, getRule, saveRule }),
   createPermissionsRoutes({

@@ -12,9 +12,9 @@
 // 一律把 stdout/stderr 写进临时文件描述符再读回。
 // ============================================================================
 import { spawnSync } from 'node:child_process'
-import { closeSync, mkdtempSync, openSync, readFileSync } from 'node:fs'
+import { closeSync, mkdtempSync, openSync, readFileSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 export const REPO_CAPABILITIES = Object.freeze({ GIT: 'git', DEGRADED: 'degraded' })
 
@@ -104,7 +104,13 @@ export function probeRepoFacts(cwd, { runGit } = {}) {
   let commonDir = null
   if (isGit) {
     const c = git(['rev-parse', '--git-common-dir'], cwd)
-    if (c.status === 0) commonDir = String(c.stdout).trim() || null
+    if (c.status === 0) {
+      const reported = String(c.stdout).trim()
+      if (reported) {
+        try { commonDir = realpathSync(resolve(cwd, reported)) }
+        catch { commonDir = null }
+      }
+    }
   }
   return Object.freeze({ isGit, gitAvailable, commonDir })
 }

@@ -74,6 +74,7 @@ function advanceTo(deliveryStore, deliveryId, target, extra = {}) {
 export function createIntegrationWorker({
   deliveryStore,
   repoDir,
+  repoId = repoDir,
   targetRef,
   verifyConfig = null,
   workspaceDir = null,
@@ -230,8 +231,12 @@ export function createIntegrationWorker({
 
         // 4. 仅允许快进接入（expectedOld = expectedHead，CAS）。
         deliveryStore.transitionIntegrationJob({ id: jobId, leaseEpoch: job.leaseEpoch, to: 'applying', phase: 'applying', actor })
-        const applied = git.updateRef(repoDir, targetRef, candidate.commit, expectedHead)
+        const applied = git.fastForwardCheckedOut(checkDir, targetRef, candidate.commit, expectedHead)
         if (!applied.ok) {
+          if (applied.code !== 'HEAD_ADVANCED') {
+            pauseJob(jobId, job.leaseEpoch, applied.code ?? 'FAST_FORWARD_FAILED', { stderr: applied.stderr, reasons: applied.reasons })
+            return Object.freeze({ ok: false, code: applied.code ?? 'FAST_FORWARD_FAILED', targetRefUnchanged: git.revParse(repoDir, targetRef) === expectedHead })
+          }
           recompute += 1
           if (recompute > maxRecompute) {
             pauseJob(jobId, job.leaseEpoch, 'REF_CAS_FAILED', { recompute, stderr: applied.stderr })
@@ -248,7 +253,7 @@ export function createIntegrationWorker({
         }
         advanceTo(deliveryStore, dlvId, 'validating', { actor })
         const done = advanceTo(deliveryStore, dlvId, 'integrated', { actor, integratedCommit: candidate.commit })
-        if (typeof releaseReservation === 'function') releaseReservation()
+        if (typeof releaseReservation === 'function') releaseReservation({ deliveryId: dlvId })
         deliveryStore.transitionIntegrationJob({ id: jobId, leaseEpoch: job.leaseEpoch, to: 'finalized', phase: 'finalized', gitSha: candidate.commit, actor })
         return Object.freeze({
           ok: true, outcome: INTEGRATION_OUTCOMES.INTEGRATED,
@@ -260,8 +265,8 @@ export function createIntegrationWorker({
     /**
      * 崩溃恢复：读 journal + Git SHA 对账，判定「未应用／已应用未记账／结果不明」。
      */
-    recover() {
-      const jobs = deliveryStore.listIntegrationJobs(repoDir).filter((j) => j.state !== 'finalized' && j.state !== 'failed')
+    recover({ jobId = null } = {}) {
+      const jobs = deliveryStore.listIntegrationJobs(repoId).filter((j) => j.state !== 'finalized' && j.state !== 'failed' && (jobId === null || j.id === jobId))
       const actions = []
       for (const job of jobs) {
         const targetHead = git.revParse(repoDir, targetRef)
@@ -269,12 +274,26 @@ export function createIntegrationWorker({
         const applied = Boolean(prepared && targetHead && (targetHead === prepared || git.isAncestor(repoDir, prepared, targetRef)))
         const recorded = job.state === 'ref-updated' || job.state === 'finalized'
           || (job.deliveryId ? deliveryStore.getDelivery(job.deliveryId)?.state === 'integrated' : false)
-        if (applied && !recorded) {
+        const workspaceClean = git.isWorktreeClean(workspaceDir ?? repoDir).clean
+        const verifiedApplyStarted = job.journalPhase === 'applying' || job.journalPhase === 'ref-updated'
+        if (applied && !workspaceClean) {
+          pauseJob(job.id, job.leaseEpoch, 'WORKSPACE_OUT_OF_SYNC', { prepared, targetHead })
+          actions.push(Object.freeze({ jobId: job.id, action: 'pause', deleteBranch: false, rerunMerge: false, reason: '目标 ref 与绑定工作区文件/索引不一致或有本地改动' }))
+        } else if (applied && !verifiedApplyStarted) {
+          pauseJob(job.id, job.leaseEpoch, 'VALIDATION_UNCONFIRMED', { prepared, targetHead })
+          actions.push(Object.freeze({ jobId: job.id, action: 'pause', deleteBranch: false, rerunMerge: false, reason: '候选验证通过的证据不完整' }))
+        } else if (applied && !recorded) {
           advanceTo(deliveryStore, job.deliveryId, 'integrated', { actor, integratedCommit: prepared })
+          if (typeof releaseReservation === 'function') releaseReservation({ deliveryId: job.deliveryId })
           deliveryStore.transitionIntegrationJob({ id: job.id, leaseEpoch: job.leaseEpoch, to: 'finalized', phase: 'finalized', gitSha: prepared, actor, detail: { recovered: 'record-only' } })
           actions.push(Object.freeze({ jobId: job.id, action: 'record-only', integratedCommit: prepared, deleteBranch: false, rerunMerge: false }))
-        } else if (!applied && !recorded && job.state === 'applying') {
-          actions.push(Object.freeze({ jobId: job.id, action: 'discard-candidate', deleteBranch: false, rerunMerge: false }))
+        } else if (applied && recorded && job.state === 'ref-updated') {
+          if (typeof releaseReservation === 'function') releaseReservation({ deliveryId: job.deliveryId })
+          deliveryStore.transitionIntegrationJob({ id: job.id, leaseEpoch: job.leaseEpoch, to: 'finalized', phase: 'finalized', gitSha: prepared, actor, detail: { recovered: 'finalize-recorded' } })
+          actions.push(Object.freeze({ jobId: job.id, action: 'finalize-recorded', integratedCommit: prepared, deleteBranch: false, rerunMerge: false }))
+        } else if (!applied && !recorded && (job.state === 'applying' || job.state === 'leased')) {
+          pauseJob(job.id, job.leaseEpoch, 'UNAPPLIED_AFTER_CRASH', { prepared, targetHead })
+          actions.push(Object.freeze({ jobId: job.id, action: 'retry-ready', deleteBranch: false, rerunMerge: false }))
         } else if (targetHead && prepared && !applied && recorded) {
           actions.push(Object.freeze({ jobId: job.id, action: 'pause', deleteBranch: false, rerunMerge: false, reason: 'ref 与账不符' }))
         } else {

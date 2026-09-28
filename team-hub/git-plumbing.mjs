@@ -60,7 +60,9 @@ export function isAncestor(repo, ancestor, descendant) {
 
 /** 绑定工作区是否整体干净（未提交与未跟踪改动都算脏）。 */
 export function isWorktreeClean(repo) {
-  const r = runGit(['status', '--porcelain=v1', '--untracked-files=all'], repo)
+  const top = runGit(['rev-parse', '--show-toplevel'], repo)
+  if (!top.ok || !top.stdout.trim()) return Object.freeze({ clean: false, reasons: ['无法确认完整工作区根目录'] })
+  const r = runGit(['status', '--porcelain=v1', '--untracked-files=all'], top.stdout.trim())
   if (!r.ok) return Object.freeze({ clean: false, reasons: ['git status 失败：' + (r.stderr || r.error || 'unknown')] })
   const lines = r.stdout.split('\n').map((l) => l.trimEnd()).filter(Boolean)
   return Object.freeze({ clean: lines.length === 0, reasons: Object.freeze(lines) })
@@ -110,6 +112,32 @@ export function updateRef(repo, ref, newSha, expectedOld = null) {
   if (expectedOld) args.push(expectedOld)
   const r = runGit(args, repo)
   return Object.freeze({ ok: r.ok, status: r.status, stderr: r.stderr.trim() })
+}
+
+/**
+ * Fast-forward the branch checked out in the bound workspace. `update-ref`
+ * alone leaves its index and files at the old commit, which makes a delivery
+ * appear integrated while the user still sees the old code.
+ */
+export function fastForwardCheckedOut(workspace, targetRef, newSha, expectedOld) {
+  const checkedOut = runGit(['symbolic-ref', '-q', 'HEAD'], workspace)
+  if (!checkedOut.ok || checkedOut.stdout.trim() !== targetRef) {
+    return Object.freeze({ ok: false, code: 'TARGET_NOT_CHECKED_OUT', stderr: checkedOut.stderr.trim() })
+  }
+  const head = currentHead(workspace)
+  if (head !== expectedOld) return Object.freeze({ ok: false, code: 'HEAD_ADVANCED', currentHead: head })
+  const clean = isWorktreeClean(workspace)
+  if (!clean.clean) return Object.freeze({ ok: false, code: 'DIRTY_WORKSPACE', reasons: clean.reasons })
+  if (!isAncestor(workspace, expectedOld, newSha)) {
+    return Object.freeze({ ok: false, code: 'NON_FAST_FORWARD' })
+  }
+  const applied = runGit(['merge', '--ff-only', '--no-stat', newSha], workspace)
+  if (!applied.ok) return Object.freeze({ ok: false, code: 'FAST_FORWARD_FAILED', stderr: applied.stderr.trim() })
+  const actual = currentHead(workspace)
+  if (actual !== newSha || !isWorktreeClean(workspace).clean) {
+    return Object.freeze({ ok: false, code: 'APPLY_UNVERIFIED', currentHead: actual })
+  }
+  return Object.freeze({ ok: true, currentHead: actual })
 }
 
 export function worktreeAdd(repo, dir, ref, { detach = true } = {}) {

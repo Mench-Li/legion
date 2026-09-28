@@ -118,7 +118,7 @@ export function buildClaimableTaskSql() {
     )
     {scope}
   ORDER BY ${PRIORITY_ORDER_SQL}, t.createdAt ASC
-  LIMIT 1
+  LIMIT 64
 `
 }
 
@@ -145,7 +145,7 @@ export function buildQueuedCandidateSql() {
     AND a.attempt_no = (SELECT MAX(b.attempt_no) FROM run_attempts b WHERE b.task_id = a.task_id)
     {scope}
   ORDER BY a.created_at_ms ASC, a.attempt_no ASC
-  LIMIT 1
+  LIMIT 64
 `
 }
 

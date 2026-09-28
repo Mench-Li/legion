@@ -6,7 +6,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { runGit, revParse, isAncestor, commitTree, updateRef } from './git-plumbing.mjs'
+import { runGit, revParse, isAncestor, isWorktreeClean, commitTree, updateRef, fastForwardCheckedOut } from './git-plumbing.mjs'
 import { createDeliveryStore, ensureDeliverySchema } from './delivery-store.mjs'
 import { createIntegrationWorker, INTEGRATION_OUTCOMES } from './integration-worker.mjs'
 
@@ -69,6 +69,8 @@ test('TC-S3-11 干净合入：目标 ref 前进且包含 source commit，deliver
   assert.equal(r.outcome, INTEGRATION_OUTCOMES.INTEGRATED)
   assert.equal(revParse(fix.repo, TARGET), r.integratedCommit)
   assert.equal(isAncestor(fix.repo, fix.source, TARGET), true)
+  assert.equal(readFileSync(join(fix.repo, 'feat.txt'), 'utf8').replaceAll('\r\n', '\n'), 'feature\n')
+  assert.equal(isWorktreeClean(fix.repo).clean, true, '已交付后绑定工作区和索引也必须同步')
   const d = store.getDelivery(delivery.id)
   assert.equal(d.state, 'integrated')
   assert.equal(d.integratedCommit, r.integratedCommit)
@@ -161,8 +163,8 @@ test('TC-S3-14/15 journal 恢复：已应用未记账只补记不重跑 merge，
   const merged = runGit(['merge-tree', '--write-tree', fix.base, fix.source], fix.repo)
   assert.equal(merged.status, 0)
   const candidate = commitTree(fix.repo, merged.stdout.split('\n')[0].trim(), [fix.base, fix.source], 'candidate-recover', { env: ENV }).commit
-  assert.equal(updateRef(fix.repo, TARGET, candidate, fix.base).ok, true)
-  store.transitionIntegrationJob({ id: job.id, leaseEpoch: 1, to: 'applying', phase: 'prepared', preparedCommit: candidate, expectedHead: fix.base })
+  assert.equal(fastForwardCheckedOut(fix.repo, TARGET, candidate, fix.base).ok, true)
+  store.transitionIntegrationJob({ id: job.id, leaseEpoch: 1, to: 'applying', phase: 'applying', preparedCommit: candidate, expectedHead: fix.base })
 
   const worker = createIntegrationWorker({ deliveryStore: store, repoDir: fix.repo, targetRef: TARGET, verifyConfig: passVerify, workspaceDir: fix.repo, env: ENV })
   const rec = worker.recover()
@@ -190,4 +192,31 @@ test('TC-S3-14b 每个 source commit 至多集成一次（重复 recover 无副�
   assert.equal(revParse(fix.repo, TARGET), headAfter)
   const d = store.getDelivery(delivery.id)
   assert.equal(d.state, 'integrated')
+})
+
+test('旧式仅移动 ref 留下脏工作区时，恢复不得宣称已交付', () => {
+  const fix = fixture('stale-workspace')
+  const store = freshStore()
+  const { delivery, job } = readyJob(store, fix, 'stale-workspace')
+  const merged = runGit(['merge-tree', '--write-tree', fix.base, fix.source], fix.repo)
+  const candidate = commitTree(fix.repo, merged.stdout.split('\n')[0].trim(), [fix.base, fix.source], 'stale', { env: ENV }).commit
+  assert.equal(updateRef(fix.repo, TARGET, candidate, fix.base).ok, true)
+  store.transitionIntegrationJob({ id: job.id, leaseEpoch: 1, to: 'applying', phase: 'prepared', preparedCommit: candidate, expectedHead: fix.base })
+  const worker = createIntegrationWorker({ deliveryStore: store, repoDir: fix.repo, targetRef: TARGET, verifyConfig: passVerify, workspaceDir: fix.repo, env: ENV })
+  const recovered = worker.recover()
+  assert.equal(recovered.actions[0].action, 'pause')
+  assert.notEqual(store.getDelivery(delivery.id).state, 'integrated')
+  assert.equal(isWorktreeClean(fix.repo).clean, false)
+})
+
+test('崩在应用前的 job 退出活跃锁，保留 ready 交付供重试', () => {
+  const fix = fixture('before-apply')
+  const store = freshStore()
+  const { delivery, job } = readyJob(store, fix, 'before-apply')
+  const worker = createIntegrationWorker({ deliveryStore: store, repoDir: fix.repo, targetRef: TARGET, verifyConfig: passVerify, workspaceDir: fix.repo, env: ENV })
+  const recovered = worker.recover()
+  assert.equal(recovered.actions[0].action, 'retry-ready')
+  assert.equal(store.getIntegrationJob(job.id).state, 'paused')
+  assert.equal(store.getDelivery(delivery.id).state, 'ready')
+  assert.equal(revParse(fix.repo, TARGET), fix.base)
 })

@@ -27,7 +27,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
+import { foldSubagentDescriptor, type SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import type { ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import type AgentPresets from '@deepseek-ai/dsh-agent-preset-registry'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
@@ -81,6 +81,7 @@ import { createWorkspace, type SpaceBinding } from './workspace.js'
 import { createAcceptance } from './acceptance.js'
 import { createHandoff, isSliceTesterTask } from './handoff.js'
 import { createSliceOrchestration } from './sliceOrchestration.js'
+import { decideProductionTool, type GrantedWrite } from './productionWriteGuard.js'
 
 type AppContext = Context & {
   subagents: SubagentRuntime
@@ -695,6 +696,54 @@ function spaceWorker(ctx: AppContext, config: Config): void {
   // 注意：scope 在数据面流水线加载之前就需要确定（它是拉取 key），因此这里刻意只看部署面文件。
   const scope = config.scope !== 'default' ? config.scope : (filePipeline?.name ?? 'default')
 
+  const activeWriteGuards = new Map<string, GrantedWrite>()
+  const childTaskIds = new Map<string, string>()
+  async function fetchWriteGrant(taskId: string, worktree: string): Promise<GrantedWrite | null> {
+    if (!useHub) return null
+    try {
+      const res = await fetch(`${hubUrl}/api/tasks/${encodeURIComponent(taskId)}/reservation`, {
+        headers: config.hubToken ? { authorization: `Bearer ${config.hubToken}` } : {},
+        signal: AbortSignal.timeout(5000),
+      })
+      if (!res.ok) return null
+      const data = await res.json() as {
+        reservation?: { state?: string, attemptId?: string, leaseEpoch?: number, paths?: GrantedWrite['paths'], exclusive?: boolean }
+        intent?: { revision?: number, attemptId?: string }
+      }
+      const r = data.reservation
+      if (r?.state !== 'reserved' || !r.attemptId || !Number.isInteger(r.leaseEpoch)
+        || !Number.isInteger(data.intent?.revision) || data.intent?.attemptId !== r.attemptId || !Array.isArray(r.paths)) return null
+      return { attemptId: r.attemptId, epoch: r.leaseEpoch!, revision: data.intent.revision!, workspace: worktree, paths: r.paths, exclusive: r.exclusive === true }
+    } catch { return null }
+  }
+  if (resolveIntegrationMode(process.env) === 'integration') {
+    if (typeof ctx.on !== 'function') throw new Error('集成模式要求工具执行前拦截接口')
+    ctx.on('session/event', (session, event) => {
+      if (event.type !== 'subagent/descriptor') return
+      const label = foldSubagentDescriptor([event])?.label
+      if (label?.startsWith('scrum:')) {
+        const taskId = label.slice('scrum:'.length)
+        if (activeWriteGuards.has(taskId)) childTaskIds.set(session.id, taskId)
+      }
+    }, { global: true })
+    ctx.on('tools/pre-execute', async (exec, next) => {
+      const taskId = exec.agent ? childTaskIds.get(exec.agent.id) : undefined
+      if (!taskId || resolveIntegrationMode(process.env) !== 'integration') return next()
+      const granted = activeWriteGuards.get(taskId)
+      if (!granted) return { kind: 'deny', reason: '任务没有有效的写入授权快照' }
+      const policy = exec.agent?.ctx.get('sandboxPolicy')?.resolve({ session: exec.agent.session })
+      const sameRoot = policy?.workspaceRoot && (process.platform === 'win32'
+        ? resolve(policy.workspaceRoot).toLowerCase() === resolve(granted.workspace).toLowerCase()
+        : resolve(policy.workspaceRoot) === resolve(granted.workspace))
+      if (policy?.mode !== 'workspace-write' || !sameRoot) {
+        return { kind: 'deny', reason: '集成模式要求文件沙箱限定在该任务的独立工作区' }
+      }
+      const current = exec.name === 'run_code' ? null : await fetchWriteGrant(taskId, granted.workspace)
+      const decision = decideProductionTool({ toolName: exec.name, args: exec.arguments, granted, current })
+      return decision.allow ? next() : { kind: 'deny', reason: `${decision.code}: ${decision.message}` }
+    }, { global: true })
+  }
+
   // ── 切片流水线（v3 slice 模式，见 docs/ORCHESTRATION-V3.md）──
   // slice-mode 目标：分析前缀任务（…→test-designer）描述带 [slice-mode] 标记；切片束任务带 slice 键。
   const SLICE_ANALYSIS_TAIL = 'test-designer'
@@ -1063,11 +1112,11 @@ function spaceWorker(ctx: AppContext, config: Config): void {
    * in_review 提交校验要求 by === soldier，若硬编码 config.role 会在最终阶段被 taskctl 拒绝。
    * scopeFor：跨空间操作（公共调解员）时传任务所属 scope；默认本实例 scope。
    */
-  async function transitionTo(id: string, to: string, scopeFor: string = scope): Promise<void> {
+  async function transitionTo(id: string, to: string, scopeFor: string = scope, confirmedStopped = false): Promise<void> {
     const t = await getTask(id, scopeFor)
     const by = t.soldier ?? config.role
     if (useHub) {
-      await hubPost('/api/transition', { id, to, by, ifVersion: t.version, scope: scopeFor })
+      await hubPost('/api/transition', { id, to, by, ifVersion: t.version, scope: scopeFor, confirmedStopped })
       return
     }
     await runTaskctl(config.scrumDir, ['transition', id, '--to', to, '--by', by, '--if-version', String(t.version)])
@@ -1480,8 +1529,27 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       // S6/R-6：集成阶段启用后，旧的 direct merge 通道必须拒绝，改走唯一集成 worker。
       const integrationDecision = decideIntegrationPath({ mode: resolveIntegrationMode(process.env), source: 'autoPromote', taskId })
       if (integrationDecision.action === 'refuse-legacy') {
-        log(`${taskId} 自动合入被拒绝：${integrationDecision.message}`)
-        return false
+        if (!useHub) {
+          log(`${taskId} 集成服务不可用：请连接 team-hub 后重试交付`)
+          return false
+        }
+        const source = await runGit(workspace.repoRootFor(), ['rev-parse', '--verify', `w/${taskId}`])
+        if (source.code !== 0 || !/^[0-9a-f]{40,64}$/i.test(source.out.trim())) {
+          log(`${taskId} 任务分支没有可交付提交：${source.err || source.out}`)
+          return false
+        }
+        const result = await hubPost('/api/deliveries/submit', {
+          by: config.role, scope, taskId, sourceCommit: source.out.trim(),
+        }) as { ok?: boolean, delivery?: { state?: string }, code?: string }
+        if (result.ok !== true || result.delivery?.state !== 'integrated') {
+          log(`${taskId} 集成未完成：${result.code ?? result.delivery?.state ?? 'unknown'}`)
+          return false
+        }
+        const removed = await runGit(workspace.repoRootFor(), ['worktree', 'remove', '--force', dir])
+        if (removed.code !== 0) log(`${taskId} 已交付，工作区清理稍后重试：${removed.err || removed.out}`)
+        else await runGit(workspace.repoRootFor(), ['branch', '-D', `w/${taskId}`])
+        log(`${taskId} 已通过集成验证并合入目标分支`)
+        return true
       }
       // 防御：上一次合入失败可能遗留冲突态（MERGE_HEAD/未合并文件），会挡住后续所有 merge —— 先清一次
       const staleAbort = await runGit(workspace.repoRootFor(), ['merge', '--abort'])
@@ -1740,10 +1808,43 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       if (worktreeDir !== null) cwd = worktreeDir
       else log(`${t.id} worktree 不可用，回退到 workspace 直接工作`)
     }
+    if (resolveIntegrationMode(process.env) === 'integration' && worktreeDir === null) {
+      await safeComment(t.id, '⛔ 集成模式要求独立工作区；本次未获得独立工作区，已停止写入派工。请修复工作区后重试。')
+      await transitionTo(t.id, 'blocked', scope, true)
+      return
+    }
+    if (resolveIntegrationMode(process.env) === 'integration' && worktreeDir !== null) {
+      const target = await runGit(workspace.repoRootFor(), ['symbolic-ref', '-q', 'HEAD'])
+      const status = await runGit(worktreeDir, ['status', '--porcelain=v1', '--untracked-files=all'])
+      if (target.code !== 0 || !/^refs\/heads\/[A-Za-z0-9._/-]+$/.test(target.out.trim()) || status.code !== 0 || status.out.trim()) {
+        await safeComment(t.id, '⛔ 隔离工作区有未提交改动，或目标分支无法确认；请先保存现场，随后重试派工。')
+        await transitionTo(t.id, 'blocked', scope, true)
+        return
+      }
+      const fresh = await runGit(worktreeDir, ['merge-base', '--is-ancestor', target.out.trim(), 'HEAD'])
+      if (fresh.code !== 0) {
+        const rebase = await runGit(worktreeDir, ['rebase', target.out.trim()])
+        if (rebase.code !== 0) {
+          const aborted = await runGit(worktreeDir, ['rebase', '--abort'])
+          await safeComment(t.id, `⛔ 续做前无法把既有成果对齐到最新目标版本，已暂停派工。${aborted.code === 0 ? '原有提交已保留。' : '自动撤销失败，请检查隔离工作区。'} 原因：${(rebase.err || rebase.out).slice(0, 300)}`)
+          await transitionTo(t.id, 'blocked', scope, true)
+          return
+        }
+      }
+    }
     const parent = await ensureForeman(cwd)
     if (parent === undefined) {
       log(`${t.id} 跳过：foreman 不可用`)
       return
+    }
+    if (resolveIntegrationMode(process.env) === 'integration' && worktreeDir !== null) {
+      const grant = await fetchWriteGrant(t.id, worktreeDir)
+      if (!grant) {
+        await safeComment(t.id, '⛔ 写入预约或范围版本不可用，已停止派工。请检查任务范围和服务连接。')
+        await transitionTo(t.id, 'blocked', scope, true)
+        return
+      }
+      activeWriteGuards.set(t.id, grant)
     }
     const controller = new AbortController()
     controllers.add(controller)
@@ -1755,7 +1856,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     if (goal !== null) goalMirror = await writeGoalContextMirror(goal, cwd)
     const run = await (async () => {
       try {
-        return await ctx.subagents.start(config.provider, {
+        const started = await ctx.subagents.start(config.provider, {
           label: `scrum:${t.id}`,
           prompt: [{ type: 'text', text: buildWorkerPrompt(t, feedback, cwd, worktreeDir !== null, stage, goal, goalMirror) }],
           parent,
@@ -1763,7 +1864,14 @@ function spaceWorker(ctx: AppContext, config: Config): void {
           outputSchema: WORKER_SCHEMA,
           ...(config.denyTools.length > 0 ? { toolFilter: { deny: config.denyTools } } : {}),
         })
+        if (resolveIntegrationMode(process.env) === 'integration' && !started.localAgent) {
+          await started.dispose()
+          throw new Error('集成模式要求支持执行前拦截的本地 worker')
+        }
+        void started.result.finally(() => activeWriteGuards.delete(t.id)).catch(() => undefined)
+        return started
       } catch (e) {
+        activeWriteGuards.delete(t.id)
         log(`${t.id} 派工失败：${String(e)}`)
         await safeComment(t.id, `⚠ 派工失败：${String(e).slice(0, 200)}`)
         return undefined
@@ -1772,7 +1880,10 @@ function spaceWorker(ctx: AppContext, config: Config): void {
         controllers.delete(controller)
       }
     })()
-    if (run === undefined) return
+    if (run === undefined) {
+      if (resolveIntegrationMode(process.env) === 'integration') await transitionTo(t.id, 'blocked', scope, true)
+      return
+    }
     activity('dispatch', t.id, 'worker 已派工，开始实现')
     // 派工成功即写 hub 评论：任务详情的「AI 执行过程」立刻可见，避免「in_progress 却看不到 AI 在跑」的观感错位
     await safeComment(t.id, `🟢 已派 AI worker 开始执行（worker=scrum:${t.id}${worktreeDir ? `，隔离 worktree=${worktreeDir}` : ''}）——进行中，完成/异常将自动更新并流转`)
@@ -1822,6 +1933,14 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       // worktree 隔离：先提交到 w/<id> 分支再记录 diff
       if (worktreeDir !== null) await workspace.commitWorktree(t.id, worktreeDir, report.summary)
       await recordPatch(t.id, worktreeDir, report.summary)
+      if (worktreeDir !== null && useHub && resolveIntegrationMode(process.env) === 'integration') {
+        const source = await runGit(workspace.repoRootFor(), ['rev-parse', '--verify', `w/${t.id}`])
+        if (source.code !== 0 || !/^[0-9a-f]{40,64}$/i.test(source.out.trim())) throw new Error(`任务 ${t.id} 缺少可验收提交`)
+        await hubPost('/api/comment', {
+          id: t.id, by: t.soldier ?? config.role, scope, isEvidence: true,
+          text: `sourceCommit=${source.out.trim()}\n${report.summary}\n${report.evidence}`.slice(0, 800),
+        })
+      }
       if (report.artifact && report.artifact.path) await recordArtifact(t.id, report.artifact, worktreeDir)
       // S2 契约文档自动登记：commitWorktree 之后、autoPromote 之前（存在性以 worktree 目录为基准）。
       // 流水线文档型岗位（roles.json stage.docs 契约）结算时逐条登记仓库相对路径条目；worker 未填 artifact 亦登记（AC-R1-2）。
@@ -1855,10 +1974,22 @@ function spaceWorker(ctx: AppContext, config: Config): void {
             return
           }
         }
+        if (stage.gate && resolveIntegrationMode(process.env) === 'integration') {
+          const gateDoc = goalDocPath(goal, stage.artifact)
+          const docOk = gateDoc === '' || (worktreeDir !== null && existsSync(join(worktreeDir, gateDoc)))
+          await transitionTo(t.id, 'in_review')
+          await safeComment(t.id, docOk
+            ? `✅ ${stage.label}已完成，候选提交和验收证据已保留。请在任务详情审阅并点击「验收通过」；批准后由集成服务验证并交付。\n要点：${report.summary}\n证据：${report.evidence}`
+            : `⚠ ${stage.label}完成，但隔离工作区缺少要求的文档 ${gateDoc}；请打回补全。`)
+          activity('gate', t.id, docOk ? `${stage.label}待人工验收` : `${stage.label}缺少产物文档`)
+          return
+        }
         // 流水线中间阶段：自动合入主分支 → done → 流转下一角色；合入失败转 in_review 等人工，不静默丢产出
         const merged = worktreeDir !== null ? await autoPromote(t.id, worktreeDir) : true
         if (!merged) {
-          await safeComment(t.id, `⚠ ${stage.label}完成，但自动合入主分支失败（可能冲突），改动保留在分支 w/${t.id}。请人工合入并推进：git -C ${workspace.repoRootFor()} merge --no-ff w/${t.id} 解决冲突 → git -C ${workspace.repoRootFor()} worktree remove --force ${worktreeDir} → git -C ${workspace.repoRootFor()} branch -D w/${t.id} → 将军把任务 transition 到 done`)
+          await safeComment(t.id, resolveIntegrationMode(process.env) === 'integration'
+            ? `⚠ ${stage.label}已完成执行，但集成验证未通过或仍在等待。改动保留在分支 w/${t.id}；请在任务交付详情查看失败原因并重试或裁决。`
+            : `⚠ ${stage.label}完成，但自动合入主分支失败（可能冲突），改动保留在分支 w/${t.id}。请人工合入并推进：git -C ${workspace.repoRootFor()} merge --no-ff w/${t.id} 解决冲突 → git -C ${workspace.repoRootFor()} worktree remove --force ${worktreeDir} → git -C ${workspace.repoRootFor()} branch -D w/${t.id} → 将军把任务 transition 到 done`)
           await transitionTo(t.id, 'in_review')
           activity('blocked', t.id, `${stage.label}完成但自动合入失败，转 in_review 等待人工合入`)
           log(`${t.id} → in_review（中间阶段自动合入失败，等待人工处理）`)
@@ -1900,7 +2031,9 @@ function spaceWorker(ctx: AppContext, config: Config): void {
         // settleGoalsOfScope 判定（链全部 done → 目标自动 done）。
         const mergedFinal = worktreeDir !== null ? await autoPromote(t.id, worktreeDir) : true
         if (!mergedFinal) {
-          await safeComment(t.id, `⚠ ${stage.label}完成，但自动合入主分支失败（可能冲突），改动保留在分支 w/${t.id}。请人工合入并推进：git -C ${workspace.repoRootFor()} merge --no-ff w/${t.id} 解决冲突 → git -C ${workspace.repoRootFor()} worktree remove --force ${worktreeDir} → git -C ${workspace.repoRootFor()} branch -D w/${t.id} → 任务 transition 到 done`)
+          await safeComment(t.id, resolveIntegrationMode(process.env) === 'integration'
+            ? `⚠ ${stage.label}已完成执行，但集成验证未通过或仍在等待。改动保留在分支 w/${t.id}；请在任务交付详情查看失败原因并重试或裁决。`
+            : `⚠ ${stage.label}完成，但自动合入主分支失败（可能冲突），改动保留在分支 w/${t.id}。请人工合入并推进：git -C ${workspace.repoRootFor()} merge --no-ff w/${t.id} 解决冲突 → git -C ${workspace.repoRootFor()} worktree remove --force ${worktreeDir} → git -C ${workspace.repoRootFor()} branch -D w/${t.id} → 任务 transition 到 done`)
           await transitionTo(t.id, 'in_review')
           activity('blocked', t.id, `${stage.label}完成但自动合入失败，转 in_review 等待人工合入`)
           log(`${t.id} → in_review（最终阶段自动合入失败，等待人工处理）`)
@@ -1914,7 +2047,9 @@ function spaceWorker(ctx: AppContext, config: Config): void {
         // 非流水线单角色任务（人工派活）或 stage 缺失：停 in_review 等将军验收
         await transitionTo(t.id, 'in_review')
         const promoteHint = worktreeDir !== null
-          ? `\n[worktree] 改动在分支 w/${t.id}。验收通过后 promote：git -C ${workspace.repoRootFor()} merge --no-ff w/${t.id}；放弃：git -C ${workspace.repoRootFor()} worktree remove --force ${worktreeDir} && git -C ${workspace.repoRootFor()} branch -D w/${t.id}`
+          ? resolveIntegrationMode(process.env) === 'integration'
+            ? `\n[worktree] 改动保留在分支 w/${t.id}，请在任务详情验收；批准后由集成服务交付。`
+            : `\n[worktree] 改动在分支 w/${t.id}。验收通过后 promote：git -C ${workspace.repoRootFor()} merge --no-ff w/${t.id}；放弃：git -C ${workspace.repoRootFor()} worktree remove --force ${worktreeDir} && git -C ${workspace.repoRootFor()} branch -D w/${t.id}`
           : ''
         await safeComment(t.id, `✓ 完成并提交验收：${report.summary}\n证据：${report.evidence}${contractDocSummary(contractReg)}${promoteHint}`)
         activity('done', t.id, `完成：${report.summary}${worktreeDir !== null ? `（worktree 分支 w/${t.id} 待 promote）` : ''}`)
@@ -1932,7 +2067,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
         ? `\n[worktree] 部分改动已提交到分支 w/${t.id}（${worktreeDir}），解阻后续做会自动复用`
         : ''
       await safeComment(t.id, `❓ 需要将军介入确认：${report.blocker || report.summary}${wtHint}\n请将军在本任务评论里给出处理意见（例如：继续的方向 / 放宽或调整要求 / 打回原因），士兵会带着答复续做；也可先 🖐 拦截或转派。`)
-      await transitionTo(t.id, 'blocked')
+      await transitionTo(t.id, 'blocked', scope, true)
       activity('ask', t.id, `需要将军确认：${report.blocker || report.summary}`)
       log(`${t.id} → blocked（❓ 待将军确认：${report.blocker || report.summary}）`)
     }

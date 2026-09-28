@@ -283,6 +283,11 @@ export function createMergeMediation(deps: MergeMediationDeps): MergeMediation {
     }
     const root = ctxRepo.root
     const wtRoot = ctxRepo.wtRoot
+    const integrationDecision = decideIntegrationPath({ mode: resolveIntegrationMode(process.env), source: 'mediation', taskId: id })
+    if (integrationDecision.action === 'refuse-legacy') {
+      await safeComment(id, `⛔ ${integrationDecision.message}`, taskScope)
+      return
+    }
     try {
       await safeComment(id, '🛠 守护调解员接管：正在自动合入主分支（解决冲突后推进），将军无需操作', taskScope)
       const dir = join(wtRoot, id)
@@ -308,11 +313,6 @@ export function createMergeMediation(deps: MergeMediationDeps): MergeMediation {
         else log(`${id} 调解：脏工作区暂存失败（继续尝试合并）`)
       }
       // 2.5 S6/R-6：集成阶段启用后，调解员的 direct merge 通道同样必须停用。
-      const integrationDecision = decideIntegrationPath({ mode: resolveIntegrationMode(process.env), source: 'mediation', taskId: id })
-      if (integrationDecision.action === 'refuse-legacy') {
-        await safeComment(id, `⛔ ${integrationDecision.message}`, taskScope)
-        return
-      }
       // 3. 合并
       const merge = await runGit(root, ['merge', '--no-ff', `w/${id}`, '-m', `promote ${id} (mediator)`])
       if (merge.code === 0) {

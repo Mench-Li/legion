@@ -107,10 +107,16 @@ export interface RunIdentity {
 
 /** 冻结一次 Run 的**身份**字段；模型的任何 patch 都不能改它们。 */
 export function freezeRunRequest(input: Partial<RunIdentity> & Record<string, unknown>): Readonly<RunIdentity & Record<string, unknown>> {
-  const identity: Record<string, unknown> = {}
-  for (const field of IDENTITY_FIELDS) identity[field] = (input as Record<string, unknown>)[field] ?? null
-  identity.modelOverridable = Object.freeze([])
-  return Object.freeze({ ...(input as Record<string, unknown>), ...identity, modelOverridable: Object.freeze([]) })
+  return Object.freeze({
+    ...input,
+    attemptId: input.attemptId ?? null,
+    epoch: input.epoch ?? null,
+    intentRevision: input.intentRevision ?? null,
+    workspaceId: input.workspaceId ?? null,
+    repoId: input.repoId ?? null,
+    targetRef: input.targetRef ?? null,
+    modelOverridable: Object.freeze([]),
+  })
 }
 
 /** 应用一个（可能来自模型的）补丁：身份字段一律忽略。 */
@@ -128,7 +134,7 @@ export interface SchedulingView {
   waitReason: string | null
   blockingTaskId: string | null
   blockingPath: string | null
-  readOnlyWork: string[]
+  readOnlyWork: readonly string[]
 }
 
 /** 用户可读的等待视图：等谁、等哪个文件、等待期间还能做哪些只读工作。 */

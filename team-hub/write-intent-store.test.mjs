@@ -189,3 +189,62 @@ test('TC-S2-15 取消/打回重做保留预约；确认结束后可释放并允�
   const ok = a.reserve({ repoId: 'r1', taskId: 't2', attemptId: 'a2', epoch: 1, paths: ['src/a.mjs'] })
   assert.equal(ok.ok, true)
 })
+
+test('未规划写入独占仓库，与已规划文件预约双向互斥', () => {
+  const { dbA: db } = pair()
+  const a = createWriteIntentStore(db)
+  const unplanned = a.reserve({ repoId: 'r1', taskId: 'old', attemptId: 'old:1', epoch: 1, paths: [], exclusive: true })
+  assert.equal(unplanned.ok, true)
+  assert.equal(unplanned.reservation.exclusive, true)
+  const blocked = a.reserve({ repoId: 'r1', taskId: 'planned', attemptId: 'p:1', epoch: 1, paths: ['src/a.mjs'] })
+  assert.equal(blocked.code, 'FILE_CONTENTION')
+  a.release({ repoId: 'r1', taskId: 'old', attemptId: 'old:1', epoch: 1 })
+  assert.equal(a.reserve({ repoId: 'r1', taskId: 'planned', attemptId: 'p:1', epoch: 1, paths: ['src/a.mjs'] }).ok, true)
+  assert.equal(a.reserve({ repoId: 'r1', taskId: 'later', attemptId: 'l:1', epoch: 1, paths: [], exclusive: true }).code, 'FILE_CONTENTION')
+})
+
+test('预约可嵌入任务认领事务；错误 Attempt 不能释放', () => {
+  const { dbA: db } = pair()
+  const a = createWriteIntentStore(db)
+  db.exec('BEGIN IMMEDIATE')
+  const got = a.reserve({ repoId: 'r1', taskId: 't1', attemptId: 'a1', epoch: 1, paths: ['x.mjs'] })
+  assert.equal(got.ok, true)
+  db.exec('COMMIT')
+  const bad = a.release({ repoId: 'r1', taskId: 't1', attemptId: 'wrong', epoch: 1 })
+  assert.equal(bad.ok, false)
+  assert.equal(a.listActiveReservations('r1').length, 1)
+})
+
+test('冻结预约不能被旧请求重新激活；旧 epoch 不能覆盖新租约', () => {
+  const { dbA: db } = pair()
+  const store = createWriteIntentStore(db)
+  store.reserve({ repoId: 'r1', taskId: 't1', attemptId: 'a1', epoch: 5, paths: ['x.mjs'] })
+  assert.equal(store.reserve({ repoId: 'r1', taskId: 't1', attemptId: 'a1', epoch: 4, paths: ['x.mjs'] }).code, 'EPOCH_STALE')
+  store.markReconciling({ repoId: 'r1', taskId: 't1', attemptId: 'a1', epoch: 5 })
+  assert.equal(store.reserve({ repoId: 'r1', taskId: 't1', attemptId: 'a1', epoch: 6, paths: ['x.mjs'] }).code, 'RECONCILING')
+  assert.equal(store.listActiveReservations('r1')[0].state, 'reconciling')
+})
+
+test('活跃预约期间不能通过规划接口绕开扩域检查', () => {
+  const { dbA: db } = pair()
+  const store = createWriteIntentStore(db)
+  store.reserve({ repoId: 'r1', taskId: 't1', attemptId: 'a1', epoch: 1, paths: ['x.mjs'] })
+  const before = store.getIntent('t1')
+  const changed = store.upsertIntent({ repoId: 'r1', taskId: 't1', attemptId: 'a1', paths: ['y.mjs'], expectedRevision: before.revision })
+  assert.equal(changed.code, 'RESERVATION_ACTIVE')
+  assert.deepEqual(store.getIntent('t1').paths, before.paths)
+})
+
+test('活跃预约只允许原样重放，不能缩小范围或改写 epoch', () => {
+  const { dbA: db } = pair()
+  const store = createWriteIntentStore(db)
+  const args = { repoId: 'r1', taskId: 't1', attemptId: 'a1', epoch: 1, paths: ['a.mjs', 'b.mjs'] }
+  const first = store.reserve(args)
+  assert.equal(first.ok, true)
+  assert.equal(store.reserve(args).reservation.id, first.reservation.id)
+  assert.equal(store.reserve({ ...args, paths: ['a.mjs'] }).code, 'RESERVATION_ACTIVE')
+  assert.equal(store.reserve({ ...args, epoch: 2 }).code, 'RESERVATION_ACTIVE')
+  assert.equal(store.reserve({ ...args, exclusive: true }).code, 'RESERVATION_ACTIVE')
+  assert.deepEqual(store.listActiveReservations('r1')[0].paths, first.reservation.paths)
+  assert.equal(store.reserve({ repoId: 'r1', taskId: 't2', attemptId: 'a2', epoch: 1, paths: ['b.mjs'] }).code, 'FILE_CONTENTION')
+})

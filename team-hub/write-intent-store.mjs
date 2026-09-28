@@ -18,6 +18,7 @@
 // 本模块不自建连接：db 由调用方注入（与 run-store.mjs 立场相同）。零第三方依赖。
 // ============================================================================
 import { toEntryList, intersectingPaths, normalizeRepoPath } from '../packages/shared/src/path-domain.mjs'
+import { ensureColumn } from './schema-util.mjs'
 
 export const INTENT_STATES = Object.freeze(['proposed', 'reserved', 'released'])
 export const RESERVATION_STATES = Object.freeze(['unplanned', 'waiting-file', 'reserved', 'reconciling', 'released'])
@@ -53,12 +54,14 @@ export function ensureWriteIntentSchema(db) {
     attempt_id TEXT,
     lease_epoch INTEGER NOT NULL,
     paths_json TEXT NOT NULL,
+    exclusive INTEGER NOT NULL DEFAULT 0,
     state TEXT NOT NULL,
     reason TEXT,
     expires_at_ms INTEGER,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL
   )`)
+  ensureColumn(db, 'write_reservations', 'exclusive', 'INTEGER NOT NULL DEFAULT 0')
   db.exec(`CREATE TABLE IF NOT EXISTS write_intent_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     repo_id TEXT NOT NULL,
@@ -94,6 +97,7 @@ function toReservation(row) {
     attemptId: row.attempt_id,
     leaseEpoch: row.lease_epoch,
     paths: Object.freeze(parsePaths(row.paths_json)),
+    exclusive: Number(row.exclusive ?? 0) === 1,
     state: row.state,
     reason: row.reason ?? null,
     expiresAtMs: row.expires_at_ms ?? null,
@@ -118,14 +122,20 @@ function toIntent(row) {
   })
 }
 
+let savepointSerial = 0
 function withTx(db, fn) {
-  db.exec('BEGIN IMMEDIATE')
+  const nested = db.isTransaction === true
+  const savepoint = `write_intent_${++savepointSerial}`
+  db.exec(nested ? `SAVEPOINT ${savepoint}` : 'BEGIN IMMEDIATE')
   try {
     const out = fn()
-    db.exec('COMMIT')
+    db.exec(nested ? `RELEASE ${savepoint}` : 'COMMIT')
     return out
   } catch (err) {
-    try { db.exec('ROLLBACK') } catch { /* 已回滚 */ }
+    try {
+      if (nested) { db.exec(`ROLLBACK TO ${savepoint}`); db.exec(`RELEASE ${savepoint}`) }
+      else db.exec('ROLLBACK')
+    } catch { /* 已回滚 */ }
     throw err
   }
 }
@@ -158,13 +168,15 @@ export function createWriteIntentStore(db, { now = () => Date.now(), caseInsensi
   }
 
   /** 请求路径 ∩ 活跃预约路径：返回结构化冲突列表。 */
-  function findConflicts(repoId, entries, { ignoreTaskId = null, ignoreAttemptId = null } = {}) {
+  function findConflicts(repoId, entries, { ignoreTaskId = null, ignoreAttemptId = null, exclusive = false } = {}) {
     const out = []
     for (const row of activeRows(repoId)) {
       if (ignoreTaskId !== null && row.task_id === ignoreTaskId
         && (ignoreAttemptId === null || row.attempt_id === ignoreAttemptId)) continue
       const holder = parsePaths(row.paths_json).map((p) => (typeof p === 'string' ? { path: p, type: 'file' } : p))
-      const pairs = intersectingPaths(entries, holder, opts)
+      const pairs = (exclusive || Number(row.exclusive ?? 0) === 1)
+        ? [{ a: entries[0]?.path ?? '(whole repository)', b: holder[0]?.path ?? '(whole repository)' }]
+        : intersectingPaths(entries, holder, opts)
       for (const pair of pairs) out.push(Object.freeze({
         path: pair.a,
         holderPath: pair.b,
@@ -226,6 +238,8 @@ export function createWriteIntentStore(db, { now = () => Date.now(), caseInsensi
         return Object.freeze({ ok: false, code: WRITE_INTENT_ERRORS.INVALID_PATHS, reason: set.rejected[0].reason, rejected: set.rejected })
       }
       return withTx(db, () => {
+        const active = db.prepare(`SELECT id FROM write_reservations WHERE task_id=? AND ${ACTIVE_SQL} LIMIT 1`).get(taskId)
+        if (active) return Object.freeze({ ok: false, code: 'RESERVATION_ACTIVE', reason: '执行中的范围只能走扩域事务修改' })
         const r = upsertIntentRow({ repoId, taskId, attemptId, targetRef, paths: set.entries, source, state, expectedRevision })
         if (r.conflict) return r.conflict
         return Object.freeze({ ok: true, intent: r.intent })
@@ -234,6 +248,12 @@ export function createWriteIntentStore(db, { now = () => Date.now(), caseInsensi
 
     getIntent(taskId) { return toIntent(intentRow(taskId)) },
     listActiveReservations(repoId) { return Object.freeze(activeRows(repoId).map(toReservation)) },
+    inspectContention({ repoId, taskId, paths = [], exclusive = false }) {
+      const set = toEntryList(paths, opts)
+      if (set.rejected.length > 0) return Object.freeze({ ok: false, code: WRITE_INTENT_ERRORS.INVALID_PATHS, rejected: set.rejected })
+      const conflicts = findConflicts(repoId, set.entries, { ignoreTaskId: taskId, exclusive })
+      return conflicts.length > 0 ? contention(conflicts) : Object.freeze({ ok: true, conflicts: Object.freeze([]) })
+    },
     listWriteIntentEvents(repoId = null) {
       const rows = repoId === null
         ? db.prepare('SELECT * FROM write_intent_events ORDER BY id ASC').all()
@@ -244,13 +264,33 @@ export function createWriteIntentStore(db, { now = () => Date.now(), caseInsensi
     /**
      * 申请写入资格（预约）。同仓库相交路径只允许一个赢家。
      */
-    reserve({ repoId, taskId, attemptId = null, epoch, paths, targetRef = null, source = 'orchestrator', leaseMs = null, expectedRevision = null, capability = 'git' }) {
+    reserve({ repoId, taskId, attemptId = null, epoch, paths, targetRef = null, source = 'orchestrator', leaseMs = null, expectedRevision = null, capability = 'git', exclusive = false }) {
       const set = toEntryList(paths, opts)
       if (set.rejected.length > 0) {
         return Object.freeze({ ok: false, code: WRITE_INTENT_ERRORS.INVALID_PATHS, reason: set.rejected[0].reason, rejected: set.rejected })
       }
       const entries = set.entries
       return withTx(db, () => {
+        const own = db.prepare(
+          `SELECT * FROM write_reservations WHERE repo_id = ? AND task_id = ? AND ${ACTIVE_SQL} ORDER BY id DESC LIMIT 1`,
+        ).get(repoId, taskId)
+        if (own?.state === 'reconciling') return Object.freeze({ ok: false, code: 'RECONCILING', reason: '上一轮执行尚未确认停止' })
+        if (own && Number(epoch) < Number(own.lease_epoch)) {
+          return Object.freeze({ ok: false, code: WRITE_INTENT_ERRORS.EPOCH_STALE, currentEpoch: own.lease_epoch })
+        }
+        if (own && attemptId !== null && own.attempt_id !== null && own.attempt_id !== attemptId) {
+          return Object.freeze({ ok: false, code: 'ATTEMPT_MISMATCH', reason: '上一轮执行仍持有预约' })
+        }
+        // A running attempt may only replay its original request. Scope changes must
+        // use expandIntent, which checks the new paths and never shrinks the lock.
+        if (own) {
+          const same = Number(epoch) === Number(own.lease_epoch)
+            && own.attempt_id === attemptId
+            && Number(own.exclusive ?? 0) === (exclusive ? 1 : 0)
+            && JSON.stringify(parsePaths(own.paths_json)) === JSON.stringify(entries)
+          if (!same) return Object.freeze({ ok: false, code: 'RESERVATION_ACTIVE', reason: '执行中的预约不能覆盖范围或 epoch；扩域请使用扩域事务' })
+          return Object.freeze({ ok: true, reservation: toReservation(own), intent: toIntent(intentRow(taskId)) })
+        }
         const others = activeRows(repoId).filter((row) => !(row.task_id === taskId && (attemptId === null || row.attempt_id === attemptId)))
         if (capability !== 'git' && others.length > 0) {
           return Object.freeze({
@@ -260,7 +300,7 @@ export function createWriteIntentStore(db, { now = () => Date.now(), caseInsensi
             holderTaskId: others[0].task_id,
           })
         }
-        const conflicts = findConflicts(repoId, entries, { ignoreTaskId: taskId, ignoreAttemptId: attemptId })
+        const conflicts = findConflicts(repoId, entries, { ignoreTaskId: taskId, ignoreAttemptId: attemptId, exclusive })
         if (conflicts.length > 0) {
           appendEvent({ repoId, taskId, attemptId, kind: 'FILE_CONTENTION', detail: { paths: uniqueConflictPaths(conflicts), holderTaskId: conflicts[0].holderTaskId } })
           return contention(conflicts)
@@ -271,17 +311,11 @@ export function createWriteIntentStore(db, { now = () => Date.now(), caseInsensi
         appendEvent({ repoId, taskId, attemptId, kind: 'RESERVED', atMs: ts })
         const expires = leaseMs === null || leaseMs === undefined ? null : ts + Number(leaseMs)
         const json = JSON.stringify(entries)
-        const own = db.prepare(
-          `SELECT * FROM write_reservations WHERE repo_id = ? AND task_id = ? AND ${ACTIVE_SQL} ORDER BY id DESC LIMIT 1`,
-        ).get(repoId, taskId)
-        if (own && (attemptId === null || own.attempt_id === attemptId)) {
-          db.prepare('UPDATE write_reservations SET attempt_id=?, lease_epoch=?, paths_json=?, state=?, expires_at_ms=?, updated_at_ms=? WHERE id=?')
-            .run(attemptId ?? own.attempt_id, epoch, json, 'reserved', expires, ts, own.id)
-        } else {
+        {
           db.prepare(`INSERT INTO write_reservations
-            (repo_id, task_id, attempt_id, lease_epoch, paths_json, state, reason, expires_at_ms, created_at_ms, updated_at_ms)
-            VALUES (?,?,?,?,?,?,?,?,?,?)`).run(
-            repoId, taskId, attemptId, epoch, json, 'reserved', null, expires, ts, ts)
+            (repo_id, task_id, attempt_id, lease_epoch, paths_json, exclusive, state, reason, expires_at_ms, created_at_ms, updated_at_ms)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(
+            repoId, taskId, attemptId, epoch, json, exclusive ? 1 : 0, 'reserved', null, expires, ts, ts)
         }
         const r = upsertIntentRow({ repoId, taskId, attemptId, targetRef, paths: entries, source, state: 'reserved', expectedRevision })
         if (r.conflict) throw Object.assign(new Error('intent revision conflict'), { code: r.conflict.code, payload: r.conflict })
@@ -290,21 +324,31 @@ export function createWriteIntentStore(db, { now = () => Date.now(), caseInsensi
       })
     },
 
+    /** A reviewed attempt has stopped; keep the same path lock while binding it to its retry. */
+    rebindForRetry({ repoId, taskId, oldAttemptId, newAttemptId, epoch }) {
+      return withTx(db, () => {
+        const row = db.prepare(`SELECT * FROM write_reservations WHERE repo_id=? AND task_id=? AND ${ACTIVE_SQL} ORDER BY id DESC LIMIT 1`).get(repoId, taskId)
+        if (!row || row.state !== 'reserved' || row.attempt_id !== oldAttemptId) return Object.freeze({ ok: false, code: 'RETRY_RESERVATION_MISSING' })
+        if (!Number.isInteger(epoch) || epoch <= Number(row.lease_epoch)) return Object.freeze({ ok: false, code: WRITE_INTENT_ERRORS.EPOCH_STALE, currentEpoch: row.lease_epoch })
+        const ts = now()
+        db.prepare('UPDATE write_reservations SET attempt_id=?, lease_epoch=?, updated_at_ms=? WHERE id=?').run(newAttemptId, epoch, ts, row.id)
+        db.prepare('UPDATE task_write_intents SET attempt_id=?, revision=revision+1, updated_at_ms=? WHERE task_id=?').run(newAttemptId, ts, taskId)
+        appendEvent({ repoId, taskId, attemptId: newAttemptId, kind: 'REBOUND_FOR_RETRY', atMs: ts, detail: { oldAttemptId, epoch } })
+        return Object.freeze({ ok: true, reservation: toReservation(db.prepare('SELECT * FROM write_reservations WHERE id=?').get(row.id)) })
+      })
+    },
+
     /** 释放预约：必须核对 Attempt 与 epoch。 */
     release({ repoId, taskId, attemptId = null, epoch }) {
-      const row = db.prepare(
-        `SELECT * FROM write_reservations WHERE repo_id = ? AND task_id = ? AND ${ACTIVE_SQL} ORDER BY id DESC LIMIT 1`,
-      ).get(repoId, taskId)
-      if (!row) return Object.freeze({ ok: false, code: WRITE_INTENT_ERRORS.NO_ACTIVE_RESERVATION, reason: '没有活跃的写入预约' })
-      if (Number(row.lease_epoch) !== Number(epoch)) {
-        return Object.freeze({
-          ok: false,
-          code: WRITE_INTENT_ERRORS.EPOCH_STALE,
-          reason: `epoch 已过期：当前真实 epoch 为 ${row.lease_epoch}`,
-          currentEpoch: row.lease_epoch,
-        })
-      }
       return withTx(db, () => {
+        const row = db.prepare(
+          `SELECT * FROM write_reservations WHERE repo_id = ? AND task_id = ? AND ${ACTIVE_SQL} ORDER BY id DESC LIMIT 1`,
+        ).get(repoId, taskId)
+        if (!row) return Object.freeze({ ok: false, code: WRITE_INTENT_ERRORS.NO_ACTIVE_RESERVATION, reason: '没有活跃的写入预约' })
+        if (Number(row.lease_epoch) !== Number(epoch)) {
+          return Object.freeze({ ok: false, code: WRITE_INTENT_ERRORS.EPOCH_STALE, reason: `epoch 已过期：当前真实 epoch 为 ${row.lease_epoch}`, currentEpoch: row.lease_epoch })
+        }
+        if (attemptId !== null && row.attempt_id !== attemptId) return Object.freeze({ ok: false, code: 'ATTEMPT_MISMATCH', reason: '预约属于另一运行尝试' })
         const ts = now()
         db.prepare('UPDATE write_reservations SET state=?, updated_at_ms=? WHERE id=?').run('released', ts, row.id)
         const intent = intentRow(taskId)
@@ -315,29 +359,32 @@ export function createWriteIntentStore(db, { now = () => Date.now(), caseInsensi
 
     /** 进程未确认退出：冻结为 reconciling，而不是立即释放。 */
     markReconciling({ repoId, taskId, attemptId = null, epoch, reason = 'lease-expired' }) {
-      const row = db.prepare(
-        `SELECT * FROM write_reservations WHERE repo_id = ? AND task_id = ? AND ${ACTIVE_SQL} ORDER BY id DESC LIMIT 1`,
-      ).get(repoId, taskId)
-      if (!row) return Object.freeze({ ok: false, code: WRITE_INTENT_ERRORS.NO_ACTIVE_RESERVATION })
-      if (Number(row.lease_epoch) !== Number(epoch)) {
-        return Object.freeze({ ok: false, code: WRITE_INTENT_ERRORS.EPOCH_STALE, currentEpoch: row.lease_epoch })
-      }
-      const ts = now()
-      db.prepare('UPDATE write_reservations SET state=?, reason=?, updated_at_ms=? WHERE id=?').run('reconciling', reason, ts, row.id)
-      return Object.freeze({ ok: true, reservation: toReservation({ ...row, state: 'reconciling', reason, updated_at_ms: ts }) })
+      return withTx(db, () => {
+        const row = db.prepare(
+          `SELECT * FROM write_reservations WHERE repo_id = ? AND task_id = ? AND ${ACTIVE_SQL} ORDER BY id DESC LIMIT 1`,
+        ).get(repoId, taskId)
+        if (!row) return Object.freeze({ ok: false, code: WRITE_INTENT_ERRORS.NO_ACTIVE_RESERVATION })
+        if (Number(row.lease_epoch) !== Number(epoch)) return Object.freeze({ ok: false, code: WRITE_INTENT_ERRORS.EPOCH_STALE, currentEpoch: row.lease_epoch })
+        if (attemptId !== null && row.attempt_id !== attemptId) return Object.freeze({ ok: false, code: 'ATTEMPT_MISMATCH' })
+        const ts = now()
+        db.prepare('UPDATE write_reservations SET state=?, reason=?, updated_at_ms=? WHERE id=?').run('reconciling', reason, ts, row.id)
+        return Object.freeze({ ok: true, reservation: toReservation({ ...row, state: 'reconciling', reason, updated_at_ms: ts }) })
+      })
     },
 
     /** 扫描过期租约：冻结为 reconciling（需要人工/对账确认才真正释放）。 */
     sweepExpiredLeases({ repoId = null, nowMs = now() } = {}) {
-      const rows = repoId === null
-        ? db.prepare(`SELECT * FROM write_reservations WHERE ${ACTIVE_SQL} AND expires_at_ms IS NOT NULL AND expires_at_ms <= ?`).all(nowMs)
-        : db.prepare(`SELECT * FROM write_reservations WHERE repo_id = ? AND ${ACTIVE_SQL} AND expires_at_ms IS NOT NULL AND expires_at_ms <= ?`).all(repoId, nowMs)
-      const frozen = []
-      for (const row of rows) {
-        db.prepare('UPDATE write_reservations SET state=?, reason=?, updated_at_ms=? WHERE id=?').run('reconciling', 'lease-expired', nowMs, row.id)
-        frozen.push(toReservation({ ...row, state: 'reconciling', reason: 'lease-expired', updated_at_ms: nowMs }))
-      }
-      return Object.freeze(frozen)
+      return withTx(db, () => {
+        const rows = repoId === null
+          ? db.prepare(`SELECT * FROM write_reservations WHERE state='reserved' AND expires_at_ms IS NOT NULL AND expires_at_ms <= ?`).all(nowMs)
+          : db.prepare(`SELECT * FROM write_reservations WHERE repo_id = ? AND state='reserved' AND expires_at_ms IS NOT NULL AND expires_at_ms <= ?`).all(repoId, nowMs)
+        const frozen = []
+        for (const row of rows) {
+          db.prepare('UPDATE write_reservations SET state=?, reason=?, updated_at_ms=? WHERE id=?').run('reconciling', 'lease-expired', nowMs, row.id)
+          frozen.push(toReservation({ ...row, state: 'reconciling', reason: 'lease-expired', updated_at_ms: nowMs }))
+        }
+        return Object.freeze(frozen)
+      })
     },
 
     /** 动态扩域：事务内检查新增范围是否撞上其他活跃预约。 */
@@ -352,6 +399,12 @@ export function createWriteIntentStore(db, { now = () => Date.now(), caseInsensi
         if (expectedRevision !== null && Number(intent.revision) !== Number(expectedRevision)) {
           return Object.freeze({ ok: false, code: WRITE_INTENT_ERRORS.REVISION_CONFLICT, currentRevision: intent.revision })
         }
+        const row = db.prepare(
+          `SELECT * FROM write_reservations WHERE repo_id = ? AND task_id = ? AND ${ACTIVE_SQL} ORDER BY id DESC LIMIT 1`,
+        ).get(repoId, taskId)
+        if (!row) return Object.freeze({ ok: false, code: WRITE_INTENT_ERRORS.NO_ACTIVE_RESERVATION })
+        if (Number(row.lease_epoch) !== Number(epoch)) return Object.freeze({ ok: false, code: WRITE_INTENT_ERRORS.EPOCH_STALE, currentEpoch: row.lease_epoch })
+        if (attemptId !== null && row.attempt_id !== attemptId) return Object.freeze({ ok: false, code: 'ATTEMPT_MISMATCH' })
         const conflicts = findConflicts(repoId, set.entries, { ignoreTaskId: taskId, ignoreAttemptId: attemptId })
         if (conflicts.length > 0) return contention(conflicts)
         const merged = []
@@ -367,9 +420,6 @@ export function createWriteIntentStore(db, { now = () => Date.now(), caseInsensi
         const ts = now()
         db.prepare('UPDATE task_write_intents SET paths_json=?, revision=?, updated_at_ms=? WHERE task_id=?')
           .run(JSON.stringify(merged), Number(intent.revision) + 1, ts, taskId)
-        const row = db.prepare(
-          `SELECT * FROM write_reservations WHERE repo_id = ? AND task_id = ? AND ${ACTIVE_SQL} ORDER BY id DESC LIMIT 1`,
-        ).get(repoId, taskId)
         if (row) db.prepare('UPDATE write_reservations SET paths_json=?, updated_at_ms=? WHERE id=?').run(JSON.stringify(merged), ts, row.id)
         return Object.freeze({ ok: true, revision: Number(intent.revision) + 1, paths: Object.freeze(merged) })
       })
@@ -379,7 +429,7 @@ export function createWriteIntentStore(db, { now = () => Date.now(), caseInsensi
      * claim 事务：Attempt 创建与首次 reservation 在同一 BEGIN IMMEDIATE 内完成；
      * createAttempt 抛错或预约冲突都整体回滚（无半状态）。
      */
-    claimWithReservation({ repoId, taskId, attemptId, epoch, paths, targetRef = null, source = 'claim', capability = 'git', leaseMs = null, createAttempt }) {
+    claimWithReservation({ repoId, taskId, attemptId, epoch, paths, targetRef = null, source = 'claim', capability = 'git', leaseMs = null, exclusive = false, createAttempt }) {
       const set = toEntryList(paths, opts)
       if (set.rejected.length > 0) {
         return Object.freeze({ ok: false, code: WRITE_INTENT_ERRORS.INVALID_PATHS, rejected: set.rejected })
@@ -390,15 +440,15 @@ export function createWriteIntentStore(db, { now = () => Date.now(), caseInsensi
         if (capability !== 'git' && others.length > 0) {
           throw Object.assign(new Error('single-writer-required'), { code: WRITE_INTENT_ERRORS.SINGLE_WRITER_REQUIRED })
         }
-        const conflicts = findConflicts(repoId, set.entries)
+        const conflicts = findConflicts(repoId, set.entries, { exclusive })
         if (conflicts.length > 0) {
           throw Object.assign(new Error('file-contention'), { code: WRITE_INTENT_ERRORS.FILE_CONTENTION, payload: contention(conflicts) })
         }
         const ts = now()
         const expires = leaseMs === null || leaseMs === undefined ? null : ts + Number(leaseMs)
         db.prepare(`INSERT INTO write_reservations
-          (repo_id, task_id, attempt_id, lease_epoch, paths_json, state, reason, expires_at_ms, created_at_ms, updated_at_ms)
-          VALUES (?,?,?,?,?,?,?,?,?,?)`).run(repoId, taskId, attemptId, epoch, JSON.stringify(set.entries), 'reserved', null, expires, ts, ts)
+          (repo_id, task_id, attempt_id, lease_epoch, paths_json, exclusive, state, reason, expires_at_ms, created_at_ms, updated_at_ms)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(repoId, taskId, attemptId, epoch, JSON.stringify(set.entries), exclusive ? 1 : 0, 'reserved', null, expires, ts, ts)
         const r = upsertIntentRow({ repoId, taskId, attemptId, targetRef, paths: set.entries, source, state: 'reserved' })
         const row = db.prepare('SELECT * FROM write_reservations WHERE repo_id = ? AND task_id = ? ORDER BY id DESC LIMIT 1').get(repoId, taskId)
         return Object.freeze({ ok: true, attempt, reservation: toReservation(row), intent: r.intent })
@@ -413,7 +463,9 @@ export function createWriteIntentStore(db, { now = () => Date.now(), caseInsensi
         for (let j = i + 1; j < rows.length; j += 1) {
           const a = parsePaths(rows[i].paths_json).map((p) => (typeof p === 'string' ? { path: p, type: 'file' } : p))
           const b = parsePaths(rows[j].paths_json).map((p) => (typeof p === 'string' ? { path: p, type: 'file' } : p))
-          const pairs = intersectingPaths(a, b, opts)
+          const pairs = (Number(rows[i].exclusive ?? 0) === 1 || Number(rows[j].exclusive ?? 0) === 1)
+            ? [{ a: '(whole repository)', b: '(whole repository)' }]
+            : intersectingPaths(a, b, opts)
           if (pairs.length > 0) conflicts.push(Object.freeze({ a: rows[i].task_id, b: rows[j].task_id, paths: pairs }))
         }
       }

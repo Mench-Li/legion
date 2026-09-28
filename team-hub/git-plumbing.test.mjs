@@ -1,10 +1,10 @@
 // team-hub/git-plumbing.test.mjs —— S3（R-4 / 方案 A / I-9）
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { runGit, revParse, currentHead, isAncestor, isWorktreeClean, mergeTree, commitTree, updateRef } from './git-plumbing.mjs'
+import { runGit, revParse, currentHead, isAncestor, isWorktreeClean, mergeTree, commitTree, updateRef, fastForwardCheckedOut } from './git-plumbing.mjs'
 
 function initRepo(tag) {
   const repo = mkdtempSync(join(tmpdir(), 'legion-s3-' + tag + '-'))
@@ -97,4 +97,33 @@ test('TC-S3-16 工作区脏检测把未跟踪文件也算脏', () => {
   const dirty = isWorktreeClean(repo)
   assert.equal(dirty.clean, false)
   assert.ok(dirty.reasons.some((l) => l.includes('untracked.txt')))
+})
+
+test('从绑定子目录检查时也覆盖完整仓库的本地改动', () => {
+  const repo = initRepo('subdir-dirty')
+  commitFile(repo, 'a.txt', 'a\n', 'init')
+  const subdir = join(repo, 'package')
+  mkdirSync(subdir)
+  writeFileSync(join(repo, 'outside.txt'), 'local\n')
+  const result = isWorktreeClean(subdir)
+  assert.equal(result.clean, false)
+  assert.ok(result.reasons.some((reason) => reason.includes('outside.txt')))
+})
+
+test('集成快进同时更新已检出的文件和索引，且拒绝脏工作区', () => {
+  const repo = initRepo('checked-out-ff')
+  const old = commitFile(repo, 'a.txt', 'old\n', 'base')
+  runGit(['checkout', '-q', '-b', 'task'], repo)
+  const candidate = commitFile(repo, 'a.txt', 'new\n', 'task')
+  runGit(['checkout', '-q', 'main'], repo)
+  assert.equal(fastForwardCheckedOut(repo, 'refs/heads/main', candidate, old).ok, true)
+  assert.equal(currentHead(repo), candidate)
+  assert.equal(readFileSync(join(repo, 'a.txt'), 'utf8').replaceAll('\r\n', '\n'), 'new\n')
+  assert.equal(isWorktreeClean(repo).clean, true)
+
+  writeFileSync(join(repo, 'a.txt'), 'user change\n')
+  const refusal = fastForwardCheckedOut(repo, 'refs/heads/main', candidate, candidate)
+  assert.equal(refusal.ok, false)
+  assert.equal(refusal.code, 'DIRTY_WORKSPACE')
+  assert.equal(readFileSync(join(repo, 'a.txt'), 'utf8'), 'user change\n')
 })

@@ -8,6 +8,7 @@ import { join } from 'node:path'
 let mod
 let base
 let dir
+let activeRepoId
 
 before(async () => {
   dir = mkdtempSync(join(tmpdir(), 'legion-t170-wroutes-'))
@@ -19,6 +20,7 @@ before(async () => {
   const ins = mod.db.prepare("INSERT INTO tasks (id, title, status, scope, fixCount) VALUES (?,?,?,?,?)")
   ins.run('T-w1', 'w1', 'todo', 'default', 0)
   ins.run('T-w2', 'w2', 'todo', 'default', 0)
+  ins.run('T-w3', 'w3', 'todo', 'other-space', 0)
 })
 
 after(() => {
@@ -42,10 +44,10 @@ const intent = (taskId, body) => call('POST', '/api/tasks/' + taskId + '/write-i
 const reserve = (taskId, body) => call('POST', '/api/tasks/' + taskId + '/reservation', body)
 
 test('TC-S4-01/02 意图登记 revision CAS：创建 revision=1，过期提交 409', async () => {
-  const first = await intent('T-w1', { by: 'planner', scope: 'default', paths: ['src/a.mjs'], targetRef: 'refs/heads/main' })
+  const first = await intent('T-w1', { by: 'planner', scope: 'default', paths: ['src/a.mjs'] })
   assert.equal(first.status, 200, JSON.stringify(first.body))
   assert.equal(first.body.intent.revision, 1)
-  const bump = await intent('T-w1', { by: 'planner', scope: 'default', paths: ['src/a.mjs', 'src/b.mjs'], targetRef: 'refs/heads/main', expectedRevision: 1 })
+  const bump = await intent('T-w1', { by: 'planner', scope: 'default', paths: ['src/a.mjs', 'src/b.mjs'], expectedRevision: 1 })
   assert.equal(bump.status, 200)
   assert.equal(bump.body.intent.revision, 2)
   const stale = await intent('T-w1', { by: 'planner', scope: 'default', paths: ['src/c.mjs'], expectedRevision: 1 })
@@ -58,6 +60,7 @@ test('TC-S4-03 预约成功写调度状态 reserved；冲突返回 FILE_CONTENTI
   const ok = await reserve('T-w1', { by: 'worker', scope: 'default', attemptId: 'a1', epoch: 1, paths: ['src/a.mjs'] })
   assert.equal(ok.status, 200, JSON.stringify(ok.body))
   assert.equal(ok.body.ok, true)
+  activeRepoId = ok.body.reservation.repoId
   assert.equal(mod.db.prepare("SELECT scheduling_state AS s FROM tasks WHERE id='T-w1'").get().s, 'reserved')
 
   const blocked = await reserve('T-w2', { by: 'worker', scope: 'default', attemptId: 'a2', epoch: 1, paths: ['src/a.mjs'] })
@@ -74,7 +77,7 @@ test('TC-S4-03 预约成功写调度状态 reserved；冲突返回 FILE_CONTENTI
 })
 
 test('TC-S4-04 实时冲突视图只读且如实列出占用者；历史提示不冒充实时占用', async () => {
-  const r = await call('GET', '/api/repositories/scope%3Adefault/contention')
+  const r = await call('GET', '/api/repositories/' + encodeURIComponent(activeRepoId) + '/contention')
   assert.equal(r.status, 200)
   assert.equal(r.body.readOnly, true)
   assert.equal(r.body.active.length, 1)
@@ -100,6 +103,9 @@ test('TC-S4-06 服务端权威：绝对路径 / 非法 ref / 缺 scope 一律 40
   const abs = await intent('T-w1', { by: 'planner', scope: 'default', repoId: 'C:/repo/.git', paths: ['src/a.mjs'] })
   assert.equal(abs.status, 400)
   assert.equal(abs.body.code, 'INVALID_REPO')
+  const spoof = await intent('T-w1', { by: 'planner', scope: 'default', repoId: 'some-other-repo', paths: ['src/a.mjs'] })
+  assert.equal(spoof.status, 400)
+  assert.equal(spoof.body.code, 'INVALID_REPO')
   const badRef = await intent('T-w1', { by: 'planner', scope: 'default', targetRef: 'main', paths: ['src/a.mjs'] })
   assert.equal(badRef.status, 400)
   assert.equal(badRef.body.code, 'INVALID_TARGET_REF')
@@ -111,4 +117,27 @@ test('TC-S4-06 服务端权威：绝对路径 / 非法 ref / 缺 scope 一律 40
   assert.equal(traversal.body.code, 'INVALID_PATHS')
   const shellRef = await intent('T-w1', { by: 'planner', scope: 'default', targetRef: 'refs/heads/main; rm -rf /', paths: ['src/a.mjs'] })
   assert.equal(shellRef.status, 400)
+})
+
+test('文件域是规划范围的上界；宽目录不能覆盖未授权文件', async () => {
+  mod.db.prepare("INSERT INTO tasks (id,title,status,scope,fixCount,fileDomain) VALUES ('T-domain','domain','todo','default',0,?)").run(JSON.stringify(['src/a']))
+  const tooWide = await intent('T-domain', { by: 'planner', scope: 'default', paths: [{ path: 'src', type: 'dir' }] })
+  assert.equal(tooWide.status, 422)
+  assert.equal(tooWide.body.code, 'OUT_OF_FILE_DOMAIN')
+  const allowed = await intent('T-domain', { by: 'planner', scope: 'default', paths: [{ path: 'src/a', type: 'dir' }] })
+  assert.equal(allowed.status, 200, JSON.stringify(allowed.body))
+})
+
+test('不同空间绑定同一物理仓库，不能绕过文件占用；任务 scope 也必须匹配', async () => {
+  const other = await reserve('T-w3', { by: 'worker', scope: 'other-space', attemptId: 'a3', epoch: 1, paths: ['src/a.mjs'] })
+  assert.equal(other.status, 200)
+  assert.equal(other.body.reservation.repoId, activeRepoId)
+  const wrongScope = await intent('T-w3', { by: 'planner', scope: 'default', paths: ['src/a.mjs'] })
+  assert.equal(wrongScope.status, 403)
+  const overlap = await reserve('T-w2', { by: 'worker', scope: 'default', attemptId: 'a2', epoch: 2, paths: ['src/a.mjs'] })
+  assert.equal(overlap.body.code, 'FILE_CONTENTION')
+  assert.equal(overlap.body.holderTaskId, 'T-w3')
+  const live = await call('GET', '/api/tasks/T-w2/contention')
+  assert.equal(live.body.code, 'FILE_CONTENTION')
+  assert.equal(live.body.holderTaskId, 'T-w3')
 })

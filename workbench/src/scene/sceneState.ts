@@ -1,4 +1,4 @@
-import type { HubAuditEvent, HubTask, RosterAgent } from '../types'
+import type { HubAuditEvent, HubGoal, HubTask, RosterAgent } from '../types'
 
 export type SceneMode = 'idle' | 'busy' | 'review' | 'blocked'
 export type SceneActivity = SceneMode | 'walk' | 'work' | 'celebrate'
@@ -38,6 +38,13 @@ export interface SceneFacts {
 }
 
 const rank: Record<string, number> = { blocked: 0, in_review: 1, in_progress: 2, todo: 3, backlog: 4, done: 5 }
+
+/** 当前场景目标只取进行中的目标，其次暂停目标；不把已完成历史目标显示成当前进度。 */
+export function currentGoalProgress(goals: readonly Pick<HubGoal, 'status' | 'percent'>[]): number | null {
+  return goals.find(goal => goal.status === 'active')?.percent
+    ?? goals.find(goal => goal.status === 'paused')?.percent
+    ?? null
+}
 
 export function identitySeed(key: string): number {
   let hash = 2166136261

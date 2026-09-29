@@ -1,10 +1,23 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { deriveSceneCues, projectSceneAgents } from '../src/scene/sceneState.ts'
+import * as sceneState from '../src/scene/sceneState.ts'
 
 const agent = (role, external = false) => ({ role, name: role, scope: 'lab', external, avatar: '🤖', tasks: [], mode: 'idle' })
 const task = (id, role, status, extra = {}) => ({ id, role, soldier: role, status, scope: 'lab', blockedBy: [], goalId: null, ...extra })
 const event = (seq, taskId, action = 'transition') => ({ seq, taskId, action, scope: 'lab', ts: new Date(1000).toISOString(), payload: action === 'transition' ? { to: 'done' } : action === 'claim' ? { soldier: 'qa' } : {} })
+
+test('3D 场景的当前目标进度优先取活动目标，其次暂停目标，不把历史目标当当前目标', () => {
+  const currentGoalProgress = sceneState.currentGoalProgress
+  assert.equal(typeof currentGoalProgress, 'function')
+  assert.equal(currentGoalProgress([
+    { status: 'done', percent: 100 },
+    { status: 'paused', percent: 42 },
+    { status: 'active', percent: 88 },
+  ]), 88)
+  assert.equal(currentGoalProgress([{ status: 'done', percent: 100 }, { status: 'paused', percent: 42 }]), 42)
+  assert.equal(currentGoalProgress([{ status: 'done', percent: 100 }, { status: 'canceled', percent: 0 }]), null)
+})
 
 test('状态优先级、稳定身份、临时成员和焦点任务', () => {
   const roster = [agent('dev'), agent('runner', true)]

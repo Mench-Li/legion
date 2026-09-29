@@ -1,7 +1,7 @@
 import { lazy, Suspense, useState } from 'react'
 import type { BoardData, CardStatus, GoalInfo, GoalStatus, RosterAgent, SpaceInfo } from '../types'
 import type { StatusCard } from '../missions'
-import { identitySeed, projectSceneAgents } from '../scene/sceneState'
+import { currentGoalProgress, identitySeed, projectSceneAgents } from '../scene/sceneState'
 import type { SceneAgent, SceneCue, SceneFacts } from '../scene/sceneState'
 import { AgentTasksModal } from './AgentTasksModal'
 import { TaskDetailModal } from './TaskDetailModal'
@@ -94,6 +94,11 @@ export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces
   const aggDone = countedGoals.reduce((a, g) => a + g.done, 0)
   const aggTotal = countedGoals.reduce((a, g) => a + g.total, 0)
   const aggPct = aggTotal > 0 ? Math.round((aggDone / aggTotal) * 100) : null
+  const v1Goal = board.goal
+  const activeGoalPct = hubActive ? currentGoalProgress(hubGoals) : null
+  const sceneGoalLabel = hubActive
+    ? (activeGoalPct === null ? '当前目标 暂无' : `当前目标 ${activeGoalPct}%`)
+    : `目标 ${v1Goal.progress.percent}%`
   // 中核对当前空间的兜底过滤：只保留属于本空间的智能体（杜绝「全部空间」数据泄漏/窜台）
   const currentRoster = scope
     ? (rosterAgents ?? []).filter(a => !a.scope || a.scope === scope)
@@ -102,7 +107,6 @@ export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces
   const allMode = isRoster && !scope
   // 中枢模式：智能体 = 该空间专属编队（每空间不同职业）；v1：从看板聚合
   const agents = currentRoster.length > 0 ? currentRoster.map(fromRoster) : (isRoster ? [] : agentViews(board, labels))
-  const v1Goal = board.goal
   const sceneAgents: SceneAgent[] = sceneFacts && scope
     ? projectSceneAgents(scope, sceneFacts.roster, sceneFacts.tasks)
     : agents.map(a => {
@@ -154,7 +158,7 @@ export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces
                     <i style={{ width: `${aggPct ?? 0}%` }} />
                   </span>
                   <span className="goal-bar-meta">
-                    <span>未取消目标合计 {aggDone}/{aggTotal} 完成</span>
+                    <span>所有未取消目标累计 {aggDone}/{aggTotal} 完成</span>
                     <span>{aggPct === null ? '--' : `${aggPct}%`}</span>
                   </span>
                 </span>
@@ -303,7 +307,7 @@ export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces
               agents={sceneAgents}
               cues={sceneCues.filter(cue => cue.scope === scope)}
               preset={spaces?.find(space => space.id === scope)?.scenePreset ?? 'office'}
-              goalPercent={hubActive ? (aggPct ?? 0) : v1Goal.progress.percent}
+              goalLabel={sceneGoalLabel}
               onAgentClick={isRoster ? openAgent : undefined}
             />
           </Suspense>}

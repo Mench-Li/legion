@@ -10,7 +10,7 @@ import { Employee3D } from './Employee3D'
 import { SceneAgentList } from './SceneAgentList'
 
 interface Scene3DProps {
-  agents: SceneAgent[]; cues: SceneCue[]; preset: ScenePreset; goalPercent: number
+  agents: SceneAgent[]; cues: SceneCue[]; preset: ScenePreset; goalLabel: string
   motionEnabled?: boolean; onAgentClick?: (role: string) => void
 }
 
@@ -44,7 +44,7 @@ function CameraRig({ layout }: { layout: SceneLayout }): null {
   return null
 }
 
-function OfficeWorld({ agents, cues, layout, preset, goalPercent, motion, compact, onAgentClick }: Scene3DProps & { layout: SceneLayout; motion: boolean; compact: boolean }): React.JSX.Element {
+function OfficeWorld({ agents, cues, layout, preset, goalLabel, motion, compact, onAgentClick }: Scene3DProps & { layout: SceneLayout; motion: boolean; compact: boolean }): React.JSX.Element {
   const theme = PRESETS[preset]
   const stations = new Map(layout.stations.map(station => [station.key, station]))
   const liveCues = cues.filter(cue => cue.expiresAtMs > Date.now())
@@ -67,7 +67,7 @@ function OfficeWorld({ agents, cues, layout, preset, goalPercent, motion, compac
     <group>
       <mesh position={[0, 0.2, 0]}><boxGeometry args={[1.2, 0.4, 1.2]} /><meshStandardMaterial color={theme.desk} /></mesh>
       <mesh position={[0, 0.57, 0]}><boxGeometry args={[0.72, 0.36, 0.72]} /><meshStandardMaterial color={theme.accent} emissive={theme.accent} emissiveIntensity={0.2} /></mesh>
-      <Html center position={[0, 1.02, 0]} zIndexRange={[25, 0]} style={{ pointerEvents: 'none' }}><div className="pixel-goal-label">🎯 目标 {goalPercent}%</div></Html>
+      <Html center position={[0, 1.02, 0]} zIndexRange={[25, 0]} style={{ pointerEvents: 'none' }}><div className="pixel-goal-label">🎯 {goalLabel}</div></Html>
     </group>
     {[layout.review, layout.help].map((place, index) => <group key={index} position={[place.x, 0, place.z]}>
       <mesh position={[0, 0.36, 0]}><boxGeometry args={[1.05, 0.7, 0.5]} /><meshStandardMaterial color={theme.desk} /></mesh>
@@ -97,7 +97,7 @@ function OfficeWorld({ agents, cues, layout, preset, goalPercent, motion, compac
   </>
 }
 
-export function Scene3D({ agents, cues, preset, goalPercent, motionEnabled = true, onAgentClick }: Scene3DProps): React.JSX.Element {
+export function Scene3D({ agents, cues, preset, goalLabel, motionEnabled = true, onAgentClick }: Scene3DProps): React.JSX.Element {
   const container = useRef<HTMLDivElement>(null)
   const [width, setWidth] = useState(1000)
   const keys = agents.map(agent => agent.key).join('\n')
@@ -135,7 +135,7 @@ export function Scene3D({ agents, cues, preset, goalPercent, motionEnabled = tru
   return <div className="pixel-scene-content" ref={container}>
     <div className="pixel-scene-canvas">
       {available ? <SceneBoundary fallback={fallback}><Canvas orthographic shadows frameloop={motion ? 'always' : 'demand'} dpr={[1, 1.5]}>
-        <OfficeWorld agents={agents} cues={cues} preset={preset} goalPercent={goalPercent} motion={motion} compact={agents.length > 12 || width < 700} onAgentClick={onAgentClick} layout={layout} />
+        <OfficeWorld agents={agents} cues={cues} preset={preset} goalLabel={goalLabel} motion={motion} compact={agents.length > 12 || width < 700} onAgentClick={onAgentClick} layout={layout} />
       </Canvas></SceneBoundary> : fallback}
     </div>
     <div className="pixel-scene-toolbar"><span>{PRESETS[preset].label} · {agents.length} 位员工</span>

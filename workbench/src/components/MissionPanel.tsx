@@ -86,7 +86,7 @@ export function MissionPanel({ missions, scopeAware, scope, hubMode, onDataChang
           <div className="mission-head">
             <span className="mission-name">{m.name}</span>
             <span className={`status-pill ${m.status}`}>{STATUS_TEXT[m.status]}</span>
-            <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--muted)' }}>{m.percent}%</span>
+            <span title="岗位任务完成率" aria-label={`岗位任务完成率 ${m.percent}%`} style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--muted)' }}>{m.percent}%</span>
           </div>
           <div className={`mission-bar${m.status === 'blocked' ? ' blocked' : ''}`}>
             <i style={{ width: `${m.percent}%` }} />
@@ -97,7 +97,7 @@ export function MissionPanel({ missions, scopeAware, scope, hubMode, onDataChang
               {m.inReview > 0 && `待验收 ${m.inReview} · `}
               {m.blocked > 0 && `受阻 ${m.blocked} · `}
               {m.waiting > 0 && `待命 ${m.waiting} · `}
-              完成 {m.done}/{m.total}
+              岗位任务 {m.done}/{m.total}
             </span>
             <span>{m.role}</span>
           </div>

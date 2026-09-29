@@ -25,7 +25,13 @@ interface SceneControllerOptions {
 }
 
 export function createSceneController(options: SceneControllerOptions): { start: () => void; refresh: () => Promise<void>; stop: () => void } {
-  const timers = options.timers ?? { setTimeout, clearTimeout, setInterval, clearInterval }
+  const timerHost = globalThis
+  const timers = options.timers ?? {
+    setTimeout: timerHost.setTimeout.bind(timerHost),
+    clearTimeout: timerHost.clearTimeout.bind(timerHost),
+    setInterval: timerHost.setInterval.bind(timerHost),
+    clearInterval: timerHost.clearInterval.bind(timerHost),
+  }
   const now = options.now ?? Date.now
   const visible = options.visible ?? (() => true)
   let running = false

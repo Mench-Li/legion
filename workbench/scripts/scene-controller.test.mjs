@@ -5,6 +5,34 @@ import { createSceneController } from '../src/scene/sceneController.ts'
 const tick = () => new Promise(resolve => setTimeout(resolve, 0))
 const roster = { agents: [{ role: 'dev', name: 'Dev', scope: 'lab', external: false }] }
 
+test('默认计时器以 globalThis 为接收者调用浏览器原生定时器', () => {
+  const original = {
+    setTimeout: globalThis.setTimeout,
+    clearTimeout: globalThis.clearTimeout,
+    setInterval: globalThis.setInterval,
+    clearInterval: globalThis.clearInterval,
+  }
+  const browserTimer = result => function () {
+    if (this !== globalThis) throw new TypeError('Illegal invocation')
+    return result
+  }
+  try {
+    globalThis.setTimeout = browserTimer(1)
+    globalThis.clearTimeout = browserTimer(undefined)
+    globalThis.setInterval = browserTimer(2)
+    globalThis.clearInterval = browserTimer(undefined)
+    const controller = createSceneController({
+      scope: 'lab', subscribe: () => () => {},
+      fetchRoster: async () => roster, fetchTasks: async () => [],
+      onSnapshot: () => {}, onError: () => {},
+    })
+    assert.doesNotThrow(() => controller.start())
+    controller.stop()
+  } finally {
+    Object.assign(globalThis, original)
+  }
+})
+
 test('订阅当前空间，事件合并、重连与手动刷新读取同空间快照', async () => {
   let event, status, off = false, timeout, poll
   let reads = 0

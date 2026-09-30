@@ -8,6 +8,17 @@ import { resolveLayout } from '../paths.mjs'
 import { createLauncher } from './launcher.mjs'
 import { reserveEphemeralPort } from './ports.mjs'
 
+test('desktop runtime cannot inherit or override the operator DSH home', () => {
+  const root = mkdtempSync(join(tmpdir(), 'legion-profile-'))
+  try {
+    const { layout } = resolveLayout({ installDir: fileURLToPath(new URL('../../', import.meta.url)), homeDir: root, workspaceDir: join(root, 'workspace') })
+    const owner = createLauncher({ layout, baseEnv: { ...process.env, DSH_HOME: 'C:/operator/.dsh' },
+      runtimeEnv: { DSH_HOME: 'C:/uncontrolled/.dsh' }, desktopCredentials: { hub: 'private-hub-token', workbench: 'private-desktop-token' } })
+    const runtime = owner.envSurface().find(process => process.process === 'runtime')
+    assert.equal(runtime.values.DSH_HOME, join(layout.dataDir, 'runtime', 'dsh', 'home'))
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
 test('real desktop Launcher authenticates its probes and both local API services', async () => {
   const root = mkdtempSync(join(tmpdir(), 'legion-desktop-auth-'))
   const workspaceDir = join(root, 'workspace'); mkdirSync(workspaceDir)

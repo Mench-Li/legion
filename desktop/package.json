@@ -6,8 +6,14 @@
   "main": "main.mjs",
   "scripts": {
     "start": "electron .",
-    "test": "node --test main.test.mjs",
-    "dist": "electron-builder --win nsis --x64"
+    "test": "node --test main.test.mjs scripts/prepare-payload.test.mjs",
+    "prepare:payload": "node scripts/prepare-payload.mjs",
+    "prepare:node": "node scripts/prepare-node.mjs",
+    "prepare:git": "node scripts/prepare-git.mjs",
+    "stage": "node scripts/stage.mjs",
+    "verify:closure": "node scripts/verify-closure.mjs",
+    "pack": "node scripts/build.mjs --dir",
+    "dist": "node scripts/build.mjs"
   },
   "devDependencies": {
     "electron": "44.4.5",

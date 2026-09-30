@@ -96,7 +96,8 @@ function createTray() {
 function connectBridge() {
   const child = spawn(nodePath, [bridgePath], {
     cwd: installRoot, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, LEGION_INSTALL_DIR: installRoot },
+    env: { ...process.env, LEGION_INSTALL_DIR: installRoot,
+      ...(app.isPackaged ? { PATH: `${join(process.resourcesPath, 'node')};${join(process.resourcesPath, 'git', 'cmd')};${process.env.PATH ?? ''}` } : {}) },
   })
   child.stderr.resume()
   bridge = createBridgeClient(child, {
@@ -120,7 +121,8 @@ async function performStart(type, generation) {
   try {
     workbenchOrigin = null
     report({ state: 'starting', phase: type === 'restart' ? 'restarting' : 'starting' })
-    const result = await bridge.request(type, { token: desktopToken })
+    const result = await bridge.request(type, { token: desktopToken,
+      ...(app.isPackaged ? { bundleRoot: process.resourcesPath } : {}) })
     if (generation !== viewGeneration || stopping) return
     const target = workbenchTarget(result)
     if (target) {

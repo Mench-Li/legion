@@ -136,6 +136,7 @@ Workbench 是唯一主工作窗口。DSH Web UI 不自动打开。默认关闭�
 
 - Electron 主进程、启动/向导页面、图标与托盘资源；
 - 固定版本 Node/npm，含许可证和哈希清单；
+- 固定版本的私有 MinGit，供 Legion 的 Git/worktree 操作使用；只加入本次服务进程的 PATH，不修改系统 Git 或全局 PATH。当前构建输入为 `2.56.0.windows.1`，发行资产及 SHA-256 来自 [Git for Windows 官方发行页](https://github.com/git-for-windows/git/releases/tag/v2.56.0.windows.1)；
 - Legion 的生产代码、产品清单、DSH 组合补丁、运行时契约文件；
 - 固定版本 `@deepseek-ai/dsh` 与生产依赖的已校验载荷，含 Legion 自有包的实际文件；
 - 已构建的 `workbench/dist`、team-hub 与 Orchestrator 必要依赖；
@@ -150,6 +151,8 @@ Workbench 是唯一主工作窗口。DSH Web UI 不自动打开。默认关闭�
 `prepare-runtime` 新增 `source=bundled` 分支，复用现有版本/补丁配对、写入边界与完成标记判据。在 DataDir 独占锁下，把包内生产树复制到 `DataDir/runtime/dsh/versions/` 的唯一暂存目录；根据发行文件清单验证路径、类型、大小及哈希，验证入口与目标平台原生依赖，再发布版本目录、写完成标记并原子切换 `current.json`。实际目录名以 `runtimePathsOf` 为准。任何失败都不得修改现役指针；已完成但未切换的目录先重新校验，允许继续切换，不能要求用户手动删除数据。
 
 现有 Launcher 主要在 `start()` 期间取得锁；实施时需补受同一所有者管理的准备阶段，使向导、载荷复制与服务启动共享一份锁。不得由 bridge 创建第二套独立锁或在初始化完成与启动之间释放所有权，让另一个实例插入写入。
+
+2026-10-01 实现补充：产品层的 Desktop Launcher 负责准备阶段，完成后将同一个 DataDir 锁句柄交给现有 Launcher；bridge 不持有文件锁。载荷校验/复制在产品拥有的准备进程中执行，可取消并等待其真实退出。真实准备进程取消测试已通过；这部分完成不代表首次向导或完整桌面交付已完成。
 
 安装资源保持只读；可写 profile、产品 home、配置与任务数据放在 DataDir。运行时复制是兼容现有 Launcher 布局的首发选择，会占用第二份生产载荷空间；磁盘预检与卸载保留策略须说明这一成本。后续直接使用安装目录内不可变依赖需要先扩展 Runtime Resolution 和升级回滚接口，不能靠指向源码的 junction 实现。
 

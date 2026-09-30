@@ -33,13 +33,14 @@ test('stop and restart serialize lifecycle and close stops the owned launcher', 
   }
   const bridge = createDesktopBridge({ launcherFactory: () => launcher, optionsFactory: () => ({ options: {} }), emit: () => {} })
   await bridge.handle({ version: 1, id: '1', type: 'start', payload: { token: 'a'.repeat(64) } })
-  await Promise.all([
+  const responses = await Promise.all([
     bridge.handle({ version: 1, id: '2', type: 'restart', payload: {} }),
     bridge.handle({ version: 1, id: '3', type: 'stop', payload: {} }),
   ])
-  assert.deepEqual(events, ['start', 'stop', 'start', 'stop'])
+  assert.equal(responses[0].payload.code, 'PREPARATION_CANCELLED')
+  assert.deepEqual(events, ['start', 'stop'])
   await bridge.close()
-  assert.deepEqual(events, ['start', 'stop', 'start', 'stop'])
+  assert.deepEqual(events, ['start', 'stop'])
 })
 
 test('launcher failure remains failed even when status claims ready', async () => {
@@ -102,5 +103,35 @@ test('bridge requires a credential handshake and privately scopes distinct servi
   assert.notEqual(options.desktopCredentials.hub, token)
   assert.doesNotMatch(JSON.stringify(events), new RegExp(`${token}|${options.desktopCredentials.hub}`))
   assert.equal((await bridge.handle({ version: 1, id: 'changed', type: 'restart', payload: { token: 'b'.repeat(64) } })).payload.code, 'DESKTOP_CREDENTIAL_CHANGED')
+  await bridge.close()
+})
+
+test('stdio status and stop remain serviceable while runtime preparation is pending', { timeout: 1000 }, async () => {
+  const input = new PassThrough(), output = new PassThrough()
+  let entered, cancel, finished
+  const began = new Promise(resolve => { entered = resolve })
+  const done = new Promise(resolve => { finished = resolve })
+  const lines = []
+  output.on('data', chunk => {
+    for (const line of String(chunk).trim().split('\n')) {
+      const message = JSON.parse(line); lines.push(message)
+      if (message.id === 'stop') finished()
+    }
+  })
+  const bridge = runDesktopBridge({ input, output, bridgeFactory: ({ emit }) => createDesktopBridge({ emit,
+    optionsFactory: () => ({ options: {} }), launcherFactory: () => ({
+      async start() { entered(); await new Promise(resolve => { cancel = resolve }); return { ok: false, code: 'PREPARATION_CANCELLED' } },
+      cancelPreparation() { cancel?.() }, async stop() {}, status() { return { state: 'preparing', processes: [] } },
+    }),
+  }) })
+  input.write(`${JSON.stringify({ version: 1, id: 'start', type: 'start', payload: { token: 'a'.repeat(64) } })}\n`)
+  await began
+  input.write(`${JSON.stringify({ version: 1, id: 'status', type: 'status', payload: {} })}\n`)
+  input.write(`${JSON.stringify({ version: 1, id: 'stop', type: 'stop', payload: {} })}\n`)
+  await done
+  assert.equal(lines.find(line => line.id === 'status').payload.state, 'preparing')
+  assert.equal(lines.find(line => line.id === 'start').payload.code, 'PREPARATION_CANCELLED')
+  assert.equal(lines.find(line => line.id === 'stop').payload.state, 'stopped')
+  input.end()
   await bridge.close()
 })

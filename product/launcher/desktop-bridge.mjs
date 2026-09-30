@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import { pathToFileURL } from 'node:url'
 import { randomBytes } from 'node:crypto'
-import { realpathSync } from 'node:fs'
+import { realpathSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { createDesktopLauncher } from './desktop-launcher.mjs'
 import { createLauncher } from './launcher.mjs'
 import { launcherOptionsFrom } from './cli.mjs'
 import { createLineDecoder, DESKTOP_PROTOCOL_VERSION, parseRequest } from './desktop-protocol.mjs'
@@ -28,7 +30,7 @@ function publicStatus(status) {
 }
 
 export function createDesktopBridge({
-  launcherFactory = createLauncher,
+  launcherFactory = options => options.bundledRuntime ? createDesktopLauncher(options) : createLauncher(options),
   optionsFactory = () => launcherOptionsFrom({ env: process.env, nodePath: process.execPath }),
   emit = () => {},
 } = {}) {
@@ -38,6 +40,8 @@ export function createDesktopBridge({
   let closed = false
   let queue = Promise.resolve()
   let credentials = null
+  let bundleRoot = null
+  let stopPending = false
 
   function status() {
     return launcher === null ? { state: 'unavailable', processes: [], workbenchUrl: null } : publicStatus(launcher.status())
@@ -53,7 +57,15 @@ export function createDesktopBridge({
       error.code = safeCode(blocking[0].code, 'CONFIG_INVALID')
       throw error
     }
-    launcher = launcherFactory({ ...input.options, desktopCredentials: credentials })
+    const options = { ...input.options, desktopCredentials: credentials }
+    if (bundleRoot !== null) {
+      const release = JSON.parse(readFileSync(join(options.layout.installDir, 'product', 'release', 'runtime-manifest.json'), 'utf8'))
+      options.bundledRuntime = { bundleRoot, release }
+      options.onPrepareProgress = progress => emit({ version: DESKTOP_PROTOCOL_VERSION, type: 'progress', payload: { phase: progress.phase } })
+      options.baseEnv = { ...options.baseEnv, DSH_HOME: join(options.layout.dataDir, 'runtime', 'dsh', 'home') }
+      options.dshCredentialsFile = null
+    }
+    launcher = launcherFactory(options)
     return launcher
   }
 
@@ -62,7 +74,14 @@ export function createDesktopBridge({
     if (closed) return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: false, payload: { code: 'BRIDGE_CLOSED' } }
     try {
       if (type === 'status') return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: true, payload: status() }
-      if (type === 'start' || type === 'restart') {
+      if (type === 'start' || type === 'restart' || type === 'prepare-runtime') {
+        if (stopPending) throw Object.assign(new Error('Start superseded by stop'), { code: 'PREPARATION_CANCELLED' })
+        const suppliedRoot = request.payload?.bundleRoot
+        if (suppliedRoot !== undefined) {
+          if (typeof suppliedRoot !== 'string' || suppliedRoot.length > 1024) throw Object.assign(new Error('Bundle path invalid'), { code: 'BUNDLE_PATH_INVALID' })
+          if ((bundleRoot !== null || launcher !== null) && bundleRoot !== suppliedRoot) throw Object.assign(new Error('Bundle changed'), { code: 'BUNDLE_PATH_CHANGED' })
+          bundleRoot = suppliedRoot
+        }
         const token = request.payload?.token
         if (credentials === null) {
           if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{32,256}$/.test(token)) {
@@ -73,6 +92,12 @@ export function createDesktopBridge({
           throw Object.assign(new Error('Desktop credential changed'), { code: 'DESKTOP_CREDENTIAL_CHANGED' })
         }
         const owner = ensureLauncher()
+        if (type === 'prepare-runtime') {
+          if (typeof owner.prepareRuntime !== 'function') throw Object.assign(new Error('Bundle required'), { code: 'BUNDLE_PATH_REQUIRED' })
+          ownsLifecycle = true
+          await owner.prepareRuntime()
+          return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: true, payload: { state: 'prepared' } }
+        }
         if (type === 'restart' && running) {
           emit({ version: DESKTOP_PROTOCOL_VERSION, type: 'progress', payload: { phase: 'stopping' } })
           await owner.stop({ reason: '桌面端重启服务' })
@@ -99,6 +124,7 @@ export function createDesktopBridge({
           running = false
           ownsLifecycle = false
         }
+        stopPending = false
         return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: true, payload: { state: 'stopped' } }
       }
       return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: false, payload: { code: 'UNKNOWN_TYPE' } }
@@ -109,15 +135,17 @@ export function createDesktopBridge({
   }
 
   function handle(request) {
+    if (request.type === 'stop') { stopPending = true; launcher?.cancelPreparation?.() }
+    if (request.type === 'status') return Promise.resolve(run(request))
     const work = queue.then(() => run(request))
     queue = work.catch(() => {})
     return work
   }
 
   async function close() {
-    await queue
-    if (closed) return
     closed = true
+    launcher?.cancelPreparation?.()
+    await queue
     if (ownsLifecycle && launcher !== null) {
       await launcher.stop({ reason: '桌面控制通道关闭' })
       running = false
@@ -131,9 +159,9 @@ export function createDesktopBridge({
 export function runDesktopBridge({ input = process.stdin, output = process.stdout, bridgeFactory = createDesktopBridge } = {}) {
   const send = (message) => output.write(`${JSON.stringify(message)}\n`)
   const bridge = bridgeFactory({ emit: send })
-  let queue = Promise.resolve()
+  const inFlight = new Set()
   const decoder = createLineDecoder((line) => {
-    queue = queue.then(async () => {
+    const work = (async () => {
       let request
       try {
         if (typeof line !== 'string') throw Object.assign(new Error(line.code), line)
@@ -143,11 +171,17 @@ export function runDesktopBridge({ input = process.stdin, output = process.stdou
           payload: { code: error.code ?? 'BAD_REQUEST' } })
         return
       }
+      if (inFlight.size >= 32) {
+        send({ version: DESKTOP_PROTOCOL_VERSION, id: request.id, type: 'result', ok: false, payload: { code: 'BRIDGE_BUSY' } })
+        return
+      }
       send(await bridge.handle(request))
-    })
+    })()
+    inFlight.add(work)
+    void work.finally(() => inFlight.delete(work))
   })
   input.on('data', (chunk) => decoder.push(chunk))
-  input.on('end', () => { void queue.then(() => bridge.close()) })
+  input.on('end', () => { void bridge.close() })
   return bridge
 }
 

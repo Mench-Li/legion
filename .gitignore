@@ -1,5 +1,8 @@
 # 依赖与构建产物
 node_modules/
+/.desktop-build/
+/desktop/dist/
+/workbench/dist/
 
 # 运行时状态
 state.json

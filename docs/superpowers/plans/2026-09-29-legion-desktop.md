@@ -58,10 +58,10 @@ Updated order: **Task 4 → Task 1 follow-up → prepare Task 5 payload → Task
 **Files:** `desktop/runtime.mjs`, `desktop/main.test.mjs`, `product/launcher/desktop-protocol.mjs`, `product/launcher/desktop-bridge.mjs` and focused tests.
 
 - [x] Add control deadlines, a pending-request cap and tests for timeout cleanup, late replies and bridge death. Deduplicate desktop retries; preparation cancellation follows in Task 3.
-- [ ] Keep long initialization in an owned worker with explicit progress/cancellation; a stop request must remain serviceable while preparation runs.
+- [x] Keep long initialization in an owned worker with explicit progress/cancellation; status and stop remain serviceable during preparation. Real-worker cancellation and stdio responsiveness tests pass.
 - [x] Require both stop acknowledgement and observed bridge exit for desktop teardown. A sent kill signal no longer counts as process exit; failed process teardown retains Launcher ownership and evidence. Preparation cancellation follows in Task 3.
 - [ ] Add `inspect-quit` and `begin-update` typed requests when Task 6 integrates task admission control. Do not expose generic commands or dump task details in status events.
-- [ ] Commit `feat(desktop): bound lifecycle requests and confirm shutdown` after focused verification.
+- [x] Commit `feat(desktop): bound lifecycle requests and confirm shutdown` (`74513fd`).
 
 2026-10-01 evidence: the new supervisor assertions first failed because a signalled process was treated as dead and forced termination was reported successful without exit. Desktop/bridge/supervisor/Launcher verification then passed **77/77**. A real Electron smoke completed two quit/reopen cycles with a fresh DataDir and an explicit missing-identity error. This confirms source-mode lifecycle behavior; it is not complete product or installer acceptance. Production payload preparation is now running separately with exact recursive DSH family overrides (including peer dependencies) and pinned Cordis/Schemastery versions.
 
@@ -83,11 +83,13 @@ Updated order: **Task 4 → Task 1 follow-up → prepare Task 5 payload → Task
 **Produces:** Bridge `prepare-runtime` validates the release descriptor and imports the bundled production tree through staging, verification, completion marker and atomic pointer switch. Initialization and running services share one Launcher-owned DataDir lock. UI exposes workspace selection, explicit enforcement identity/scope, model configuration and real verification with resume/retry. Model secret travels only via private stdio and protected secrets storage. Orchestrator admission remains paused until contracts and setup consent succeed.
 
 - [ ] Write failing tests for offline local preparation, bad file hash/platform/version/patch, interrupted copy, cancellation, orphaned complete directory and wizard resume.
-- [ ] Extend Launcher ownership to preparation without releasing the lock between initialization and service startup. Verify a concurrent CLI launch is rejected without touching data.
-- [ ] Implement local importer with shared paths, write guard and current-pointer semantics; never run npm or silently fall back to network in packaged mode.
+- [x] Extend product Launcher ownership to preparation without releasing the same lock before service startup. A real concurrent DataDir acquisition is rejected during preparation and service running.
+- [x] Implement local importer with shared paths, write guard, symlink rejection, completion marker and atomic current-pointer semantics. Packaged preparation has no npm or network path.
 - [ ] Connect wizard with real model-profile probe and Runtime Contract observation; failed verification cannot enable automatic work.
 - [ ] Exercise a fresh temporary DataDir with network disabled, then separately verify model setup and a real task when credentials/network are available.
 - [ ] Commit `feat(desktop): connect first-run setup`.
+
+2026-10-01 implementation checkpoint: desktop preparation/descriptor/ownership/control tests passed **30/30**; the desktop-owned DSH profile and real authenticated hub/Workbench check passed **2/2**. The importer tests include changed bytes, cancellation and retry, complete orphan recovery, escaping destination junctions, a real preparation worker and its cancellation. Wizard UI/model setup and real scoped execution are still pending. Prepared production inputs include Node `24.19.0`, DSH `0.1.5-rc.2` (231 exact-version family packages; 517 installed production packages) and private MinGit `2.56.0.windows.1`. Workbench built from its committed pnpm lockfile. Staging and closure/installer verification are the next gate; no installer completion or clean-VM PASS is claimed.
 
 ## Task 4: Desktop local API authentication
 

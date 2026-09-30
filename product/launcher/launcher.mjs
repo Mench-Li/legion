@@ -28,6 +28,7 @@
 import { existsSync } from 'node:fs'
 
 import { hasBlockingDiagnostic, layoutDiagnostics } from '../paths.mjs'
+import { join } from 'node:path'
 import { entryAbsolutePath, materializeProcessPlan, validateProcessPlan } from '../process-manifest.mjs'
 import {
   DSH_OVERLAY_PROCESS_KEY,
@@ -847,6 +848,7 @@ export function createLauncher({
       if (['team-hub', 'workbench', 'orchestrator'].includes(proc.key)) out.TEAM_HUB_TOKEN = desktopCredentials.hub
       if (['team-hub', 'workbench'].includes(proc.key)) out.LEGION_DESKTOP_MODE = '1'
       if (proc.key === 'workbench') out.DSH_WORKBENCH_TOKEN = desktopCredentials.workbench
+      if (proc.key === 'runtime') out.DSH_HOME = join(layout.dataDir, 'runtime', 'dsh', 'home')
     }
     if (proc.key === 'team-hub') {
       out.TEAM_HUB_HOST = proc.host

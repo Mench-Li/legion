@@ -294,7 +294,7 @@ export const SCHEMA = defineSchema({
       name: 'DSH_HOME',
       owner: 'DeepSeek Harness（DSH）',
       reason: 'DSH 用它定位自己的 $DSH_HOME/.credentials.yaml。Legion **只读**该文件作为凭证回退来源（PRT-509 路线 A′），'
-        + '只在 Legion 自己的密钥库里没有那条引用时才去读，结果里带出处；不写它、不迁移、不猜路径',
+        + 'CLI 只在 Legion 自己的密钥库缺少引用时读取外部凭证，不写外部 DSH home。独立桌面桥将 Runtime 的 DSH_HOME 固定为产品 DataDir/runtime/dsh/home，并关闭外部凭证回退',
     },
     // PRT-253 续批：`product/orchestrator/worker.mjs` **也**读这两个键
     // （`workerHubUrl = process.env.TEAM_HUB_URL`、`hubIo({hubToken: process.env.TEAM_HUB_TOKEN})`），
@@ -349,6 +349,13 @@ export const SCHEMA = defineSchema({
     'BRIDGE_CLOSED', 'BRIDGE_FAILED', 'CONFIG_INVALID', 'LINE_TOO_LARGE', 'START_FAILED', 'UNKNOWN_TYPE',
     'DESKTOP_AUTH_REQUIRED', 'DESKTOP_CREDENTIAL_CHANGED', 'DESKTOP_CREDENTIAL_REQUIRED',
     'DESKTOP_HOST_FORBIDDEN', 'DESKTOP_ORIGIN_FORBIDDEN', 'DESKTOP_UNAUTHORIZED',
+    'BRIDGE_BUSY', 'PREPARATION_CANCELLED', 'STOP_FAILED', 'PROCESS_EXIT_TIMEOUT', 'PROCESS_TREE_STOP_FAILED',
+    'INSTANCE_LOCK_RELEASE_FAILED', 'BUNDLE_PATH_INVALID', 'BUNDLE_PATH_CHANGED', 'BUNDLE_PATH_REQUIRED',
+    'BUNDLE_WORKER_FAILED', 'BUNDLE_IMPORT_FAILED', 'BUNDLE_STATE_UNREADABLE', 'BUNDLE_ENTRY_MISSING',
+    'BUNDLE_DESTINATION_LINK', 'BUNDLE_EXISTING_VERSION_MISMATCH', 'BUNDLE_TARGET_INCOMPLETE',
+    'BUNDLE_FORMAT_INVALID', 'BUNDLE_PLATFORM_MISMATCH', 'BUNDLE_VERSION_MISMATCH', 'BUNDLE_NODE_MISMATCH',
+    'BUNDLE_INVENTORY_INVALID', 'BUNDLE_LINK_REJECTED', 'BUNDLE_FILE_INVALID', 'BUNDLE_HASH_MISMATCH',
+    'BUNDLE_MANIFEST_UNREADABLE',
 
     // ── PRT-009 `peak-resource` 采不到时的具名码 ─────────────────────────
     //

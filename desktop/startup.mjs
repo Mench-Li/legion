@@ -10,6 +10,9 @@ const text = {
   starting: '正在启动后台服务…',
   stopping: '正在停止服务…',
   restarting: '正在重新启动服务…',
+  'verifying-bundle': '校验随附的 DSH 文件…',
+  'importing-runtime': '正在本地初始化 DSH…',
+  'runtime-prepared': 'DSH 已准备完成…',
 }
 
 function render(state) {

@@ -8,6 +8,8 @@ const setup = document.querySelector('#setup')
 const description = document.querySelector('#description')
 const workspacePath = document.querySelector('#workspace-path')
 const configureWorkspace = document.querySelector('#configure-workspace')
+const identityForm = document.querySelector('#identity-form')
+const allowWrites = document.querySelector('#allow-workspace-writes')
 
 const text = {
   preparing: '检查本机环境…',
@@ -29,10 +31,13 @@ function render(state) {
     ? '先选择一个工作区，再配置执行身份和模型。' : '工作区已保存。执行身份和模型配置完成后，才能运行任务。'
     : '正在准备工作台和后台服务，请稍候。'
   if (configuring) {
-    heading.textContent = state.phase === 'workspace' ? '设置 Legion 工作区' : '继续首次设置'
-    detail.textContent = state.phase === 'workspace' ? '请选择项目文件夹。' : '尚未完成执行身份和模型验证。'
+    heading.textContent = state.phase === 'workspace' ? '设置 Legion 工作区' : state.phase === 'identity' ? '设置执行身份与范围' : '配置并验证模型'
+    detail.textContent = state.phase === 'workspace' ? '请选择项目文件夹。'
+      : state.phase === 'identity' ? '身份用于执行审计；读写路径将限制在所选工作区。'
+        : '完成模型配置和真实连通性验证后才能运行任务。'
     workspacePath.textContent = state.workspace ?? '尚未选择文件夹'
     configureWorkspace.disabled = !state.workspace
+    identityForm.hidden = state.phase !== 'identity'
     progress.hidden = true
     actions.hidden = true
     return
@@ -61,3 +66,17 @@ async function workspaceCommand(command) {
 }
 document.querySelector('#choose-workspace').addEventListener('click', () => workspaceCommand('chooseWorkspace'))
 configureWorkspace.addEventListener('click', () => workspaceCommand('configureWorkspace'))
+identityForm.addEventListener('submit', async event => {
+  event.preventDefault()
+  const form = new FormData(identityForm)
+  const button = identityForm.querySelector('button[type="submit"]')
+  button.disabled = true
+  detail.textContent = '正在保存配置…'
+  try {
+    render(await window.legion.configureIdentity({
+      actor: form.get('actor'), scope: form.get('scope'), action: form.get('action'),
+      allowWorkspaceWrites: allowWrites.checked,
+    }))
+  } catch { detail.textContent = '设置未完成，请检查填写内容后重试。' }
+  finally { button.disabled = false }
+})

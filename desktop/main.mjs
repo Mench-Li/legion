@@ -39,6 +39,18 @@ function report(state) {
   if (tray) tray.setToolTip(`Legion · ${state.state ?? '正在启动'}`)
 }
 
+function identityInput(value) {
+  const fields = ['actor', 'scope', 'action']
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || Object.keys(value).some(key => ![...fields, 'allowWorkspaceWrites'].includes(key))
+    || typeof value.allowWorkspaceWrites !== 'boolean') throw new Error('DESKTOP_IDENTITY_INVALID')
+  for (const field of fields) {
+    if (typeof value[field] !== 'string' || value[field].trim() === '' || value[field].trim().length > 128
+      || /[\u0000-\u001f\u007f]/u.test(value[field])) throw new Error('DESKTOP_IDENTITY_INVALID')
+  }
+  return { actor: value.actor.trim(), scope: value.scope.trim(), action: value.action.trim(), allowWorkspaceWrites: value.allowWorkspaceWrites }
+}
+
 function createWindow() {
   window = new BrowserWindow({
     width: 1180, height: 800, minWidth: 840, minHeight: 560,
@@ -145,7 +157,8 @@ async function performStart(type, generation) {
   } catch (error) {
     if (generation !== viewGeneration || stopping) return
     const phase = error?.code === 'WORKSPACE_NOT_CONFIGURED' ? 'workspace'
-      : error?.code === 'ENFORCEMENT_IDENTITY_MISSING' ? 'identity' : null
+      : error?.code === 'ENFORCEMENT_IDENTITY_MISSING' ? 'identity'
+        : error?.code === 'MODEL_NOT_CONFIGURED' ? 'model' : null
     report(phase ? { state: 'setup-required', phase, workspace: selectedWorkspace }
       : { state: 'failed', code: error?.code ?? 'START_FAILED' })
     if (window && !window.isDestroyed()) {
@@ -196,7 +209,7 @@ if (!app.requestSingleInstanceLock()) {
     Menu.setApplicationMenu(null)
     createWindow()
     createTray()
-    ipcMain.handle('legion:command', async (event, command) => {
+    ipcMain.handle('legion:command', async (event, command, payload) => {
       if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame || event.senderFrame?.url !== startupUrl) throw new Error('IPC_FORBIDDEN')
       if (command === 'status') return current
       if (command === 'choose-workspace') {
@@ -220,6 +233,19 @@ if (!app.requestSingleInstanceLock()) {
           try {
             report({ state: 'starting', phase: 'initializing' })
             const result = await bridge.request('configure-workspace', { workspace, token: desktopToken,
+              ...(app.isPackaged ? { bundleRoot: process.resourcesPath } : {}) })
+            if (!stopping && !quitting) report(result)
+          } catch (error) { if (!stopping && !quitting) report({ state: 'failed', code: error?.code ?? 'DESKTOP_SETUP_FAILED' }) }
+        })()
+        try { await serviceTransition; return current } finally { serviceTransition = null }
+      }
+      if (command === 'configure-identity') {
+        if (stopping || serviceTransition || current.state !== 'setup-required' || current.phase !== 'identity') throw new Error('DESKTOP_SETUP_BUSY')
+        const identity = identityInput(payload)
+        serviceTransition = (async () => {
+          try {
+            report({ state: 'starting', phase: 'saving-identity' })
+            const result = await bridge.request('configure-identity', { identity, token: desktopToken,
               ...(app.isPackaged ? { bundleRoot: process.resourcesPath } : {}) })
             if (!stopping && !quitting) report(result)
           } catch (error) { if (!stopping && !quitting) report({ state: 'failed', code: error?.code ?? 'DESKTOP_SETUP_FAILED' }) }

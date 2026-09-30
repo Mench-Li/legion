@@ -8,7 +8,7 @@ This development entry is an internal integration build. Desktop mode requires p
 
 The desktop payload builder and cancellable local importer now exist. Runtime preparation and service supervision share one Launcher-owned DataDir lease. Core dependencies are resolved at build time and imported from the installed files without npm or network access. The desktop runtime uses its own DSH home and does not load an operator's DSH profile.
 
-The source startup page now provides workspace selection and confirmation. Only the owned main frame can invoke the native directory picker; confirmation uses the path held by main. Initialization and non-secret settings persistence share the product owner's DataDir lease. Existing configuration is preserved, and subsequent launches resume the identity step before runtime preparation. Identity/model setup and complete wizard verification are still being developed; this source change is not yet included in the recorded installer artifact.
+The source startup page provides workspace selection plus actor/scope/action and explicit read/write bounds. Only the owned main frame can invoke the native directory picker; confirmation uses the path held by main. Initialization and non-secret settings persistence share the product owner's DataDir lease. Operator policy is saved in the highest-precedence Legion settings layer, above project config. The page resumes at the model step but does not run without a verified model. Model-key/profile setup, real probes and complete wizard verification are still being developed; this source change is not yet included in the recorded installer artifact.
 
 ## Internal Windows build
 

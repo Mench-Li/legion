@@ -2,7 +2,7 @@ import { Worker } from 'node:worker_threads'
 import { createLauncher } from './launcher.mjs'
 import { acquireSingleInstance } from './single-instance.mjs'
 import { initializeProductDir } from '../init.mjs'
-import { assertDesktopSetupLayout, writeDesktopSettings } from './desktop-settings.mjs'
+import { assertDesktopSetupLayout, writeDesktopIdentity, writeDesktopSettings } from './desktop-settings.mjs'
 
 export function prepareInWorker(input, { signal, onProgress = () => {} } = {}) {
   return new Promise((resolve, reject) => {
@@ -72,6 +72,13 @@ export function createDesktopLauncher(options, {
         })
         return writeDesktopSettings(options.layout)
       } catch (error) { release(); throw error }
+    },
+    async configureIdentity(input) {
+      if (inner || preparing) throw Object.assign(new Error('Services already started'), { code: 'DESKTOP_SETUP_BUSY' })
+      assertDesktopSetupLayout(options.layout)
+      await ensureLease()
+      try { return writeDesktopIdentity(options.layout, input) }
+      catch (error) { release(); throw error }
     },
     cancelPreparation() { abort?.abort() },
     async start() {

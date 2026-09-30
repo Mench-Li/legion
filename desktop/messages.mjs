@@ -1,5 +1,6 @@
 const remedies = Object.freeze({
   ENFORCEMENT_IDENTITY_MISSING: '缺少执行身份配置，请完成首次设置。',
+  MODEL_NOT_CONFIGURED: '模型尚未完成安全配置和连通性验证。',
   ENTRY_UNRESOLVED: '安装文件不完整，请重新安装 Legion。',
   PORT_IN_USE: '服务端口被其他程序占用，请关闭冲突程序后重试。',
   BRIDGE_EXITED: '后台服务控制已中断，请重新打开 Legion。',

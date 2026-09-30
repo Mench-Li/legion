@@ -1,6 +1,6 @@
 export const DESKTOP_PROTOCOL_VERSION = 1
 export const MAX_LINE_BYTES = 64 * 1024
-const TYPES = new Set(['start', 'status', 'stop', 'restart', 'prepare-runtime', 'configure-workspace'])
+const TYPES = new Set(['start', 'status', 'stop', 'restart', 'prepare-runtime', 'configure-workspace', 'configure-identity'])
 
 export function protocolError(code) {
   const error = new Error(code)

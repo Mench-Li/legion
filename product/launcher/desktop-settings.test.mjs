@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, readFile, writeFile, symlink, rename, rm } from 'node:f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { resolveLayout } from '../paths.mjs'
+import { configValueAt, loadProductConfig } from '../config.mjs'
 import { createDesktopLauncher } from './desktop-launcher.mjs'
 import { createDesktopBridge, desktopOptionsFrom } from './desktop-bridge.mjs'
 import { readDesktopSettings, selectedWorkspace, writeDesktopSettings } from './desktop-settings.mjs'
@@ -100,6 +101,55 @@ test('a saved workspace replaced by a junction cannot silently change the select
   await mkdir(other)
   await symlink(other, workspace, process.platform === 'win32' ? 'junction' : 'dir')
   assert.throws(() => readDesktopSettings(layout.dataDir), { code: 'WORKSPACE_SELECTION_CHANGED' })
+})
+
+test('identity setup persists a user-confirmed workspace fence above project configuration', async t => {
+  const { root, workspace, layout } = await fixture(t)
+  await mkdir(layout.dataDir, { recursive: true })
+  await writeDesktopSettings(layout)
+  const workspaceConfig = join(workspace, '.legion')
+  await mkdir(workspaceConfig)
+  await writeFile(join(workspaceConfig, 'product.config.json'), JSON.stringify({ runtime: {
+    pathScope: { version: 'legion/path-scope@1', platform: process.platform, read: [root], write: [root] },
+    env: { LEGION_ACTOR: 'project-override', LEGION_SCOPE: 'project-override', LEGION_ENFORCEMENT_ACTION: 'project-override' },
+  } }))
+  const input = { actor: 'operator-阿简', scope: '项目仓库维护', action: 'repository:write', allowWorkspaceWrites: true }
+  const owner = createDesktopLauncher({ layout })
+  t.after(() => owner.stop().catch(() => {}))
+  assert.deepEqual(await owner.configureIdentity(input), { state: 'setup-required', phase: 'model', workspace })
+  const loaded = loadProductConfig(layout)
+  assert.equal(loaded.ok, true, JSON.stringify(loaded.diagnostics))
+  assert.equal(configValueAt(loaded.merged, 'runtime.env.LEGION_ACTOR'), input.actor)
+  assert.equal(configValueAt(loaded.merged, 'runtime.env.LEGION_SCOPE'), input.scope)
+  assert.equal(configValueAt(loaded.merged, 'runtime.env.LEGION_ENFORCEMENT_ACTION'), input.action)
+  assert.equal(configValueAt(loaded.merged, 'runtime.env.LEGION_ATTENDED'), 'true')
+  assert.equal(configValueAt(loaded.merged, 'runtime.pathScope.platform'), process.platform)
+  assert.deepEqual(configValueAt(loaded.merged, 'runtime.pathScope.read'), [workspace])
+  assert.deepEqual(configValueAt(loaded.merged, 'runtime.pathScope.write'), [workspace])
+  const homeSettings = JSON.parse(await readFile(join(layout.productHome, 'settings.json'), 'utf8'))
+  assert.equal(Object.hasOwn(homeSettings, 'apiKey'), false)
+  assert.equal(Object.hasOwn(homeSettings.runtime.env, 'apiKey'), false)
+  await owner.stop()
+})
+
+test('identity persistence rejects incomplete input and plaintext credential fields without changing prior settings', async t => {
+  const { workspace, layout } = await fixture(t)
+  await mkdir(layout.dataDir, { recursive: true })
+  await writeDesktopSettings(layout)
+  const owner = createDesktopLauncher({ layout })
+  t.after(() => owner.stop())
+  await owner.configureIdentity({ actor: 'operator', scope: 'repo', action: 'repo:read', allowWorkspaceWrites: false })
+  const path = join(layout.productHome, 'settings.json')
+  const prior = await readFile(path, 'utf8')
+  await assert.rejects(owner.configureIdentity({ actor: '', scope: 'repo', action: 'repo:read', allowWorkspaceWrites: true }), { code: 'DESKTOP_IDENTITY_INVALID' })
+  await assert.rejects(owner.configureIdentity({ actor: 'operator', scope: 'repo', action: 'apiKey', allowWorkspaceWrites: true, apiKey: 'secret-fixture' }), { code: 'DESKTOP_IDENTITY_INVALID' })
+  assert.equal(await readFile(path, 'utf8'), prior)
+  const settings = JSON.parse(prior)
+  assert.deepEqual(settings.runtime.pathScope.write, [])
+  assert.equal(settings.runtime.env.LEGION_PERMISSION_PRESET, 'legion-attended')
+  assert.equal(settings.runtime.env.LEGION_APPROVAL_POLICY, 'ask')
+  assert.equal(workspace, settings.runtime.pathScope.read[0])
+  await owner.stop()
 })
 
 test('invalid selection cannot instantiate a launcher or stop a running owner', async () => {

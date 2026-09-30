@@ -19,6 +19,10 @@
     .actions { display: flex; gap: 10px; margin-top: 25px; }
     #workspace-path { overflow-wrap: anywhere; margin-top: 14px; }
     #setup p { font-size: 14px; }
+    #identity-form { margin-top: 16px; }
+    #identity-form label { display: block; margin-top: 12px; color: #b9c8dd; font-size: 14px; }
+    #identity-form input[type="text"] { width: 100%; margin-top: 6px; padding: 10px; border: 1px solid #415779; border-radius: 8px; background: #101726; color: #edf4ff; font: inherit; }
+    #identity-form .check { display: flex; gap: 9px; align-items: center; }
     button { border: 0; border-radius: 9px; padding: 11px 19px; background: #357dff; color: white; font: inherit; cursor: pointer; }
     button.secondary { background: #32435f; }
     button:disabled { opacity: .5; cursor: wait; }
@@ -40,6 +44,14 @@
         <button id="configure-workspace" disabled>继续设置</button>
       </div>
     </section>
+    <form id="identity-form" hidden>
+      <label>执行者名称<input name="actor" type="text" maxlength="128" required autocomplete="off" placeholder="例如：你的团队成员名"></label>
+      <label>授权范围名称<input name="scope" type="text" maxlength="128" required autocomplete="off" placeholder="例如：当前项目代码维护"></label>
+      <label>操作名称<input name="action" type="text" maxlength="128" required autocomplete="off" placeholder="例如：repository:write"></label>
+      <label class="check"><input id="allow-workspace-writes" type="checkbox">允许在所选工作区内读写文件</label>
+      <p>权限边界固定为当前工作区；工作区外的文件操作会被拒绝。越界人工审批尚未接通，不会放行越界请求。</p>
+      <div class="actions"><button type="submit">保存身份与范围</button></div>
+    </form>
     <div class="actions" id="actions" hidden>
       <button id="retry">重试启动</button>
       <button id="stop" class="secondary">停止服务</button>

@@ -29,6 +29,18 @@ export function closeAction({ quitting, closeToTray }) {
   return !quitting && closeToTray ? 'hide' : 'close'
 }
 
+export function desktopRequestHeaders(details, { origin, token, webContentsId }) {
+  const headers = { ...details.requestHeaders }
+  if (!origin || !token || details.webContentsId !== webContentsId || details.frame?.parent !== null
+    || details.resourceType === 'subFrame' || !canNavigate(details.url, { origin })) return headers
+  if (details.resourceType !== 'mainFrame' && !canNavigate(details.frame.url, { origin })) return headers
+  const suppliedOrigin = Object.entries(headers).find(([key]) => key.toLowerCase() === 'origin')?.[1]
+  if (suppliedOrigin !== undefined && suppliedOrigin !== origin) return headers
+  for (const key of Object.keys(headers)) if (key.toLowerCase() === 'authorization') delete headers[key]
+  headers.Authorization = `Bearer ${token}`
+  return headers
+}
+
 function clientError(code) {
   return Object.assign(new Error(code), { code })
 }

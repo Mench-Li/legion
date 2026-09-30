@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { pathToFileURL } from 'node:url'
+import { randomBytes } from 'node:crypto'
 import { createLauncher } from './launcher.mjs'
 import { launcherOptionsFrom } from './cli.mjs'
 import { createLineDecoder, DESKTOP_PROTOCOL_VERSION, parseRequest } from './desktop-protocol.mjs'
@@ -34,6 +35,7 @@ export function createDesktopBridge({
   let running = false
   let closed = false
   let queue = Promise.resolve()
+  let credentials = null
 
   function status() {
     return launcher === null ? { state: 'unavailable', processes: [], workbenchUrl: null } : publicStatus(launcher.status())
@@ -49,7 +51,7 @@ export function createDesktopBridge({
       error.code = safeCode(blocking[0].code, 'CONFIG_INVALID')
       throw error
     }
-    launcher = launcherFactory(input.options)
+    launcher = launcherFactory({ ...input.options, desktopCredentials: credentials })
     return launcher
   }
 
@@ -59,6 +61,15 @@ export function createDesktopBridge({
     try {
       if (type === 'status') return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: true, payload: status() }
       if (type === 'start' || type === 'restart') {
+        const token = request.payload?.token
+        if (credentials === null) {
+          if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{32,256}$/.test(token)) {
+            throw Object.assign(new Error('Desktop credential required'), { code: 'DESKTOP_CREDENTIAL_REQUIRED' })
+          }
+          credentials = { workbench: token, hub: randomBytes(32).toString('hex') }
+        } else if (token !== undefined && token !== credentials.workbench) {
+          throw Object.assign(new Error('Desktop credential changed'), { code: 'DESKTOP_CREDENTIAL_CHANGED' })
+        }
         const owner = ensureLauncher()
         if (type === 'restart' && running) {
           emit({ version: DESKTOP_PROTOCOL_VERSION, type: 'progress', payload: { phase: 'stopping' } })

@@ -238,6 +238,7 @@ export function createLauncher({
   runtimeCommand = null,
   baseEnv = {},
   envValues = {},
+  desktopCredentials = null,
   extraEnvAllow = [],
   nodePath = process.execPath,
   installRoot = layout?.installDir ?? null,
@@ -841,6 +842,12 @@ export function createLauncher({
    */
   function derivedValuesFor(proc) {
     const out = {}
+    if (desktopCredentials !== null) {
+      if (!desktopCredentials.hub || !desktopCredentials.workbench) throw new Error('DESKTOP_AUTH_REQUIRED')
+      if (['team-hub', 'workbench', 'orchestrator'].includes(proc.key)) out.TEAM_HUB_TOKEN = desktopCredentials.hub
+      if (['team-hub', 'workbench'].includes(proc.key)) out.LEGION_DESKTOP_MODE = '1'
+      if (proc.key === 'workbench') out.DSH_WORKBENCH_TOKEN = desktopCredentials.workbench
+    }
     if (proc.key === 'team-hub') {
       out.TEAM_HUB_HOST = proc.host
     }
@@ -1028,7 +1035,10 @@ export function createLauncher({
     const result = await waitForReadiness(expected, {
       timeoutMs: r.timeoutMs ?? readiness.timeoutMs ?? 30000,
       intervalMs: r.intervalMs ?? readiness.intervalMs ?? 250,
-      fetchImpl,
+      fetchImpl: desktopCredentials && ['team-hub', 'workbench'].includes(proc.key)
+        ? (target, options) => fetchImpl(target, { ...options, headers: { ...options?.headers,
+          authorization: `Bearer ${proc.key === 'workbench' ? desktopCredentials.workbench : desktopCredentials.hub}` } })
+        : fetchImpl,
       sleep,
       now,
       isProcessAlive: () => handle.isAlive(),

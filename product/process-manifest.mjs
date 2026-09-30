@@ -143,7 +143,7 @@ export const PROCESS_SPECS = Object.freeze([
     //   ⚠️ 第三/四轮这里**加过又撤回**过同一行：那时它等于替业主选了第 28 条的乙。
     //   撤回是对的，但那不代表"这行永远不该有"——今天它有两半在做事的证据：
     //   `team-hub/toolcall-sweep.mjs`（收账侧宿主）与它的 7 条用例。
-    envNames: Object.freeze(['TEAM_HUB_PORT', 'TEAM_HUB_HOST', 'TEAM_HUB_TOKEN', 'TEAM_HUB_DB', 'LEGION_DATA_DIR']),
+    envNames: Object.freeze(['TEAM_HUB_PORT', 'TEAM_HUB_HOST', 'TEAM_HUB_TOKEN', 'TEAM_HUB_DB', 'LEGION_DATA_DIR', 'LEGION_DESKTOP_MODE']),
     milestone: 'PRT-251',
   }),
   Object.freeze({
@@ -171,7 +171,7 @@ export const PROCESS_SPECS = Object.freeze([
       verified: false,
     }),
     writesRoles: Object.freeze(['data']),
-    envNames: Object.freeze(['DSH_HUB_UPSTREAM', 'TEAM_HUB_TOKEN', 'DSH_WORKBENCH_TOKEN']),
+    envNames: Object.freeze(['DSH_HUB_UPSTREAM', 'TEAM_HUB_TOKEN', 'DSH_WORKBENCH_TOKEN', 'LEGION_DESKTOP_MODE']),
     milestone: 'PRT-251',
   }),
   Object.freeze({

@@ -27,9 +27,9 @@
 
 Task 1 is committed as `8e5e4f31`; the bridge/protocol and existing Launcher suites passed 114/114. Task 2 is committed as `f1ccd0e`; focused desktop tests passed 5/5, and real Windows Electron launches verified second-launch focus, close-to-tray, reopen and two graceful quit/relaunch cycles with no bridge remaining. These are source-mode checks; they do not establish complete product startup or installer readiness.
 
-Task 4 has partial API guards and two passing real-server tests in the worktree. Main-process token delivery and bridge credential propagation remain open. Tasks 3, 5, 6 and 7 are pending.
+Task 4 is implemented: bridge credential handshake, scoped service credentials, protected hub/Workbench APIs and owned-session request injection. Desktop-focused tests passed 14/14, Launcher/static-service regression passed 122/122, and a real Electron session verified authorized owned-origin requests without sending credentials to an external origin. Source-mode graceful quit/relaunch also passed again. Tasks 3, 5, 6 and 7 are pending.
 
-Updated order: **finish Task 4 → Task 1 follow-up → prepare Task 5 payload → Task 3 local initialization and wizard → complete Task 5 installer → Task 6 → Task 7**. The official-reference design update is committed before further implementation. Follow-up Task 1 changes are a separate commit; keep the original completed evidence intact.
+Updated order: **Task 4 → Task 1 follow-up → prepare Task 5 payload → Task 4 follow-up approval transport → Task 3 local initialization and wizard → complete Task 5 installer → Task 6 → Task 7**. The official-reference design update is committed before further implementation. Follow-up Task 1 changes are a separate commit; keep the original completed evidence intact.
 
 ## Review Focus
 
@@ -93,10 +93,25 @@ Updated order: **finish Task 4 → Task 1 follow-up → prepare Task 5 payload �
 
 **Produces:** Non-empty per-launch Workbench token flows from main through bridge to Workbench; a separate private hub token reaches only team-hub, its proxy and authorized workers. Desktop API and `/hub` proxy enforce token, exact loopback `Host`, and expected `Origin`; hub reads are protected too. Main injects credentials only for the owned main frame/session and verified Workbench target. Readiness probes authenticate; browser/development compatibility remains tested.
 
-- [ ] Write tests that unauthenticated reads and writes, malicious Host/Origin, and direct proxy requests fail; valid trusted requests succeed. See RED.
-- [ ] Implement authentication and token propagation without logging credentials; see GREEN.
-- [ ] Verify developer mode compatibility and inspect logs/diagnostics for token leakage.
-- [ ] Commit `feat(desktop): enforce local API credentials`.
+- [x] Write tests that unauthenticated reads and writes, malicious Host/Origin, and direct proxy requests fail; valid trusted requests succeed. See RED.
+- [x] Implement authentication and token propagation without logging credentials; see GREEN.
+- [x] Verify developer mode compatibility and inspect logs/diagnostics for token leakage.
+- [x] Commit `feat(desktop): enforce local API credentials`.
+
+### Task 4 follow-up for Runtime approval transport
+
+**Spec:** §7.1. `team-hub/approval-registrar-row.mjs` currently uses a generic hub client without hub credentials in Runtime; a token-protected hub therefore denies its check/inbox calls. The API boundary above is implemented, but full approved execution requires this additional connection.
+
+**Files:** a Launcher-owned approval channel and tests, `team-hub/approval-registrar-row.mjs`, Runtime port configuration/allowlists, Run/attempt lease integration and related schemas.
+
+- [ ] Test against a real authenticated hub: Runtime may submit a scoped request and see only its own request status; it cannot decide approvals, read the whole inbox or write other hub routes.
+- [ ] Bind channel grants to active Run/attempt, actor/scope, normalized call hash and cwd; test revoked leases, expired credentials and cross-scope requests.
+- [ ] Keep hub credentials in the control plane. Deliver only the narrow short-lived channel credential to Runtime, outside argv/model context/logs.
+- [ ] Replace the registrar's direct generic hub transport with the scoped port in desktop mode; retain fail-closed behavior on channel errors.
+- [ ] Verify one real request, explicit human approval and a single matching tool execution before marking the complete desktop execution path available.
+- [ ] Commit `feat(desktop): add scoped runtime approval transport` after the above verification.
+
+**Existing repository gate:** full configuration scan retains 97 pre-existing integration-related findings in team-hub/workbench/plugins, confirmed identical to committed source. Product configuration scan passes for the desktop changes. Resolve or separately qualify those baseline findings before release; no full-repository PASS is claimed here.
 
 ## Task 5: Production asset closure and installer
 

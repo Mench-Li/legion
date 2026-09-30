@@ -60,6 +60,7 @@
  * 状态机 + 乐观锁 + 角色纪律与 taskctl.mjs 一致；scope 是任务分区的一等字段。
  */
 import http from 'node:http'
+import { checkDesktopRequest } from '../product/local-auth.mjs'
 import { DatabaseSync } from 'node:sqlite'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
@@ -355,6 +356,7 @@ export const DEFAULT_DB_FILE = DB_FILE
 const UPLOADS_ROOT = join(dirname(DB_FILE), 'uploads')
 const PORT = CFG.values.port
 const TOKEN = CFG.values.token
+if (CFG.values.desktopMode && (!TOKEN || CFG.values.host !== '127.0.0.1')) throw new Error('DESKTOP_AUTH_REQUIRED')
 const HOST = CFG.values.host
 /** 启动时打印的脱敏配置摘要（含实际生效的 DB 路径）；供日志与故障排查使用，绝不包含 token 原文。 */
 export function configSummaryLine() {
@@ -5546,6 +5548,10 @@ const router = createRouter([
 ])
 
 async function handle(req, res, stripPrefix) {
+  if (CFG.values.desktopMode) {
+    const failure = checkDesktopRequest(req, TOKEN)
+    if (failure) { json(res, failure.status, { code: failure.code }); return }
+  }
   const url = new URL(req.url ?? '/', 'http://x')
   let path = url.pathname
   // P1-1 宿主集成：DSH webServer 把前缀路由（如 /team-hub）下所有请求交给本 handle，

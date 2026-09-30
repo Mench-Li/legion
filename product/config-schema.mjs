@@ -37,6 +37,7 @@ export const LAUNCHER_ENV_NAMES = Object.freeze(['LEGION_READINESS_TIMEOUT_MS'])
 export const CHILD_ENV_NAMES = Object.freeze([
   'TEAM_HUB_PORT', 'TEAM_HUB_HOST', 'TEAM_HUB_TOKEN', 'TEAM_HUB_DB', 'TEAM_HUB_URL',
   'DSH_HUB_UPSTREAM', 'DSH_WORKBENCH_TOKEN',
+  'LEGION_DESKTOP_MODE',
   'DSH_HOME', 'LEGION_DATA_DIR', 'LEGION_LOG_DIR',
   // PRT-214 续：注入 Runtime 子进程的 Legion 身份（组合根的六项输入 + 三项审批口径）。
   // 它们是注入目标的**变量名**，不是本进程的读取点——本进程从不读它们，
@@ -342,6 +343,12 @@ export const SCHEMA = defineSchema({
     },
   ],
   nonEnvLiterals: [
+
+    // Desktop bridge/protocol and local HTTP guard error codes, not environment keys.
+    'BAD_ID', 'BAD_JSON', 'BAD_PAYLOAD', 'BAD_REQUEST', 'BAD_VERSION',
+    'BRIDGE_CLOSED', 'BRIDGE_FAILED', 'CONFIG_INVALID', 'LINE_TOO_LARGE', 'START_FAILED', 'UNKNOWN_TYPE',
+    'DESKTOP_AUTH_REQUIRED', 'DESKTOP_CREDENTIAL_CHANGED', 'DESKTOP_CREDENTIAL_REQUIRED',
+    'DESKTOP_HOST_FORBIDDEN', 'DESKTOP_ORIGIN_FORBIDDEN', 'DESKTOP_UNAUTHORIZED',
 
     // ── PRT-009 `peak-resource` 采不到时的具名码 ─────────────────────────
     //

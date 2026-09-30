@@ -5,7 +5,7 @@ import { createDesktopBridge, runDesktopBridge } from './desktop-bridge.mjs'
 
 test('start correlates response and hides secrets from all emitted data', async () => {
   const emitted = []
-  const secret = 'secret-should-never-appear'
+  const secret = 'secret-should-never-appear'.padEnd(64, 'x')
   let starts = 0
   const launcher = {
     async start() { starts++; return { ok: true, diagnostics: [{ code: 'OK', message: secret }] } },
@@ -32,7 +32,7 @@ test('stop and restart serialize lifecycle and close stops the owned launcher', 
     status() { return { state: 'ready', processes: [] } },
   }
   const bridge = createDesktopBridge({ launcherFactory: () => launcher, optionsFactory: () => ({ options: {} }), emit: () => {} })
-  await bridge.handle({ version: 1, id: '1', type: 'start', payload: {} })
+  await bridge.handle({ version: 1, id: '1', type: 'start', payload: { token: 'a'.repeat(64) } })
   await Promise.all([
     bridge.handle({ version: 1, id: '2', type: 'restart', payload: {} }),
     bridge.handle({ version: 1, id: '3', type: 'stop', payload: {} }),
@@ -47,7 +47,7 @@ test('launcher failure remains failed even when status claims ready', async () =
     launcherFactory: () => ({ async start() { return { ok: false, phase: 'ports', code: 'PORT_IN_USE' } }, status() { return { state: 'ready', processes: [] } }, async stop() {} }),
     optionsFactory: () => ({ options: {} }), emit: () => {},
   })
-  const response = await bridge.handle({ version: 1, id: 'a', type: 'start', payload: {} })
+  const response = await bridge.handle({ version: 1, id: 'a', type: 'start', payload: { token: 'a'.repeat(64) } })
   assert.equal(response.ok, false)
   assert.equal(response.payload.code, 'PORT_IN_USE')
   assert.equal(response.payload.state, 'failed')
@@ -59,7 +59,7 @@ test('unexpected failure details cannot escape through a diagnostic code', async
     launcherFactory: () => ({ async start() { return { ok: false, code: secret } }, status() { return { state: 'unavailable', processes: [] } } }),
     optionsFactory: () => ({ options: {} }), emit: () => {},
   })
-  const response = await bridge.handle({ version: 1, id: 'a', type: 'start', payload: {} })
+  const response = await bridge.handle({ version: 1, id: 'a', type: 'start', payload: { token: 'a'.repeat(64) } })
   assert.equal(response.payload.code, 'START_FAILED')
   assert.doesNotMatch(JSON.stringify(response), /sk-live-secret-value/)
 })
@@ -82,4 +82,25 @@ test('stdio wiring rejects bad input, handles a later request, and closes the ow
   assert.equal(lines[1].id, 'y')
   assert.equal(lines[1].payload.state, 'ready')
   assert.equal(closed, true)
+})
+
+test('bridge requires a credential handshake and privately scopes distinct service credentials', async () => {
+  let options
+  const token = 'a'.repeat(64)
+  const events = []
+  const bridge = createDesktopBridge({
+    optionsFactory: () => ({ options: {} }), emit: event => events.push(event),
+    launcherFactory: input => { options = input; return {
+      async start() { return { ok: true } }, async stop() {}, status() { return { state: 'ready', processes: [] } },
+    } },
+  })
+  assert.equal((await bridge.handle({ version: 1, id: 'missing', type: 'start', payload: {} })).payload.code, 'DESKTOP_CREDENTIAL_REQUIRED')
+  assert.equal(options, undefined)
+  assert.equal((await bridge.handle({ version: 1, id: 'valid', type: 'start', payload: { token } })).ok, true)
+  assert.equal(options.desktopCredentials.workbench, token)
+  assert.match(options.desktopCredentials.hub, /^[a-f0-9]{64}$/)
+  assert.notEqual(options.desktopCredentials.hub, token)
+  assert.doesNotMatch(JSON.stringify(events), new RegExp(`${token}|${options.desktopCredentials.hub}`))
+  assert.equal((await bridge.handle({ version: 1, id: 'changed', type: 'restart', payload: { token: 'b'.repeat(64) } })).payload.code, 'DESKTOP_CREDENTIAL_CHANGED')
+  await bridge.close()
 })

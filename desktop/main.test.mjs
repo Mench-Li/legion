@@ -5,7 +5,7 @@ import { PassThrough } from 'node:stream'
 import { readFileSync } from 'node:fs'
 import { runInNewContext } from 'node:vm'
 import { fileURLToPath } from 'node:url'
-import { canNavigate, closeAction, createBridgeClient, externalUrl, workbenchTarget } from './runtime.mjs'
+import { canNavigate, closeAction, createBridgeClient, desktopRequestHeaders, externalUrl, workbenchTarget } from './runtime.mjs'
 import { failureMessage } from './messages.mjs'
 
 test('window allows only bundled startup page and the verified Workbench origin', () => {
@@ -65,4 +65,23 @@ test('sandbox-compatible preload exposes only the startup command allowlist', as
 
 test('startup failure identifies missing execution identity instead of blaming the network', () => {
   assert.equal(failureMessage('ENFORCEMENT_IDENTITY_MISSING'), '缺少执行身份配置，请完成首次设置。')
+})
+
+test('desktop credential belongs only to the owned main frame and verified origin', () => {
+  const origin = 'http://127.0.0.1:5173'
+  const owner = { origin, token: 'private-test-token', webContentsId: 7 }
+  const request = { url: `${origin}/api/fs/home`, webContentsId: 7, resourceType: 'xhr',
+    frame: { parent: null, url: `${origin}/tasks` }, requestHeaders: { Accept: 'application/json' } }
+  assert.equal(desktopRequestHeaders(request, owner).Authorization, 'Bearer private-test-token')
+  for (const details of [
+    { ...request, webContentsId: 8 },
+    { ...request, url: 'https://evil.test/api' },
+    { ...request, frame: { parent: {}, url: `${origin}/tasks` } },
+    { ...request, frame: null },
+    { ...request, frame: { parent: null, url: 'https://evil.test/' } },
+    { ...request, requestHeaders: { Origin: 'https://evil.test' } },
+    { ...request, resourceType: 'subFrame' },
+  ]) assert.equal(desktopRequestHeaders(details, owner).Authorization, undefined)
+  assert.equal(desktopRequestHeaders(request, { ...owner, origin: null }).Authorization, undefined)
+  assert.equal(desktopRequestHeaders({ ...request, resourceType: 'mainFrame', frame: { parent: null, url: 'file:///startup.html' } }, owner).Authorization, 'Bearer private-test-token')
 })

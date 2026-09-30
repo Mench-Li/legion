@@ -1,8 +1,9 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray } from 'electron'
 import { spawn } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { canNavigate, closeAction, createBridgeClient, externalUrl, workbenchTarget } from './runtime.mjs'
+import { canNavigate, closeAction, createBridgeClient, desktopRequestHeaders, externalUrl, workbenchTarget } from './runtime.mjs'
 
 const desktopDir = fileURLToPath(new URL('.', import.meta.url))
 const startupPath = join(desktopDir, 'startup.html')
@@ -10,6 +11,7 @@ const startupUrl = pathToFileURL(startupPath).href
 const installRoot = app.isPackaged ? join(process.resourcesPath, 'legion') : join(desktopDir, '..')
 const nodePath = app.isPackaged ? join(process.resourcesPath, 'node', 'node.exe') : process.env.LEGION_DESKTOP_NODE || 'node'
 const bridgePath = join(installRoot, 'product', 'launcher', 'desktop-bridge.mjs')
+const desktopToken = randomBytes(32).toString('hex')
 
 let window = null
 let tray = null
@@ -39,11 +41,25 @@ function createWindow() {
     title: 'Legion', show: false, backgroundColor: '#101726',
     webPreferences: {
       preload: join(desktopDir, 'preload.cjs'),
-      nodeIntegration: false, contextIsolation: true, sandbox: true,
+      nodeIntegration: false, contextIsolation: true, sandbox: true, partition: 'legion-desktop',
     },
   })
   window.webContents.on('will-navigate', (event, url) => {
     if (!canNavigate(url, { startup: startupUrl, origin: workbenchOrigin })) event.preventDefault()
+  })
+  window.webContents.on('will-redirect', (event, url) => {
+    if (!canNavigate(url, { startup: startupUrl, origin: workbenchOrigin })) event.preventDefault()
+  })
+  const ownedSession = window.webContents.session
+  ownedSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
+  ownedSession.setPermissionCheckHandler(() => false)
+  ownedSession.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, (details, callback) => {
+    callback({ cancel: details.resourceType === 'subFrame' })
+  })
+  ownedSession.webRequest.onBeforeSendHeaders({ urls: ['<all_urls>'] }, (details, callback) => {
+    callback({ requestHeaders: desktopRequestHeaders(details, {
+      origin: workbenchOrigin, token: desktopToken, webContentsId: window?.webContents.id,
+    }) })
   })
   window.webContents.setWindowOpenHandler(({ url }) => {
     const allowed = externalUrl(url)
@@ -68,7 +84,7 @@ function createTray() {
   tray.on('double-click', showWindow)
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: '打开 Legion', click: showWindow },
-    { label: '运行状态', click: () => { showWindow(); if (window?.webContents.getURL() !== startupUrl) void window.loadURL(startupUrl) } },
+    { label: '运行状态', click: () => { showWindow(); if (window?.webContents.getURL() !== startupUrl) void window.loadURL(startupUrl).catch(() => report({ state: 'failed', code: 'STARTUP_PAGE_FAILED' })) } },
     { label: '重新启动服务', click: () => void restartServices() },
     { type: 'separator' },
     { label: '退出 Legion', click: () => app.quit() },
@@ -92,8 +108,9 @@ function connectBridge() {
 
 async function startServices(type = 'start') {
   try {
+    workbenchOrigin = null
     report({ state: 'starting', phase: type === 'restart' ? 'restarting' : 'starting' })
-    const result = await bridge.request(type)
+    const result = await bridge.request(type, { token: desktopToken })
     const target = workbenchTarget(result)
     if (target) {
       workbenchOrigin = new URL(target).origin
@@ -128,6 +145,7 @@ if (!app.requestSingleInstanceLock()) {
     if (stopping) return
     stopping = true
     quitting = true
+    workbenchOrigin = null
     report({ state: 'stopping' })
     void (async () => {
       try {
@@ -150,10 +168,11 @@ if (!app.requestSingleInstanceLock()) {
     createWindow()
     createTray()
     ipcMain.handle('legion:command', async (event, command) => {
-      if (!window || event.sender !== window.webContents || event.senderFrame?.url !== startupUrl) throw new Error('IPC_FORBIDDEN')
+      if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame || event.senderFrame?.url !== startupUrl) throw new Error('IPC_FORBIDDEN')
       if (command === 'status') return current
       if (command === 'retry') { await startServices('restart'); return current }
       if (command === 'stop') {
+        workbenchOrigin = null
         await bridge.request('stop')
         report({ state: 'stopped' })
         return current

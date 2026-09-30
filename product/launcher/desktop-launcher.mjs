@@ -1,6 +1,8 @@
 import { Worker } from 'node:worker_threads'
 import { createLauncher } from './launcher.mjs'
 import { acquireSingleInstance } from './single-instance.mjs'
+import { initializeProductDir } from '../init.mjs'
+import { assertDesktopSetupLayout, writeDesktopSettings } from './desktop-settings.mjs'
 
 export function prepareInWorker(input, { signal, onProgress = () => {} } = {}) {
   return new Promise((resolve, reject) => {
@@ -32,6 +34,12 @@ export function createDesktopLauncher(options, {
   let inner = null
   let preparing = null
   let abort = null
+  async function ensureLease() {
+    if (lease !== null) return
+    const acquired = await acquireLock({ dataDir: options.layout.dataDir, pid: process.pid })
+    if (acquired.ok !== true) throw Object.assign(new Error('Product already owned'), { code: acquired.code })
+    lease = acquired
+  }
   function release() {
     if (lease === null) return null
     const outcome = lease.handle.release()
@@ -43,11 +51,7 @@ export function createDesktopLauncher(options, {
     if (preparing) return preparing
     abort = new AbortController()
     preparing = (async () => {
-      if (lease === null) {
-        const acquired = await acquireLock({ dataDir: options.layout.dataDir, pid: process.pid })
-        if (acquired.ok !== true) throw Object.assign(new Error('Product already owned'), { code: acquired.code })
-        lease = acquired
-      }
+      await ensureLease()
       try {
         return await prepare({ ...options.bundledRuntime, dataDir: options.layout.dataDir, installDir: options.layout.installDir },
           { signal: abort.signal, onProgress: options.onPrepareProgress })
@@ -57,6 +61,18 @@ export function createDesktopLauncher(options, {
   }
   return {
     prepareRuntime,
+    async configureWorkspace() {
+      if (inner || preparing) throw Object.assign(new Error('Services already started'), { code: 'DESKTOP_SETUP_BUSY' })
+      assertDesktopSetupLayout(options.layout)
+      await ensureLease()
+      try {
+        const result = initializeProductDir(options.layout)
+        if (result.ok !== true) throw Object.assign(new Error('Initialization failed'), {
+          code: result.diagnostics.find(item => item.severity === 'error')?.code ?? 'INIT_FAILED',
+        })
+        return writeDesktopSettings(options.layout)
+      } catch (error) { release(); throw error }
+    },
     cancelPreparation() { abort?.abort() },
     async start() {
       await prepareRuntime()

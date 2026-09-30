@@ -7,6 +7,22 @@ import { createDesktopLauncher } from './desktop-launcher.mjs'
 import { createLauncher } from './launcher.mjs'
 import { launcherOptionsFrom } from './cli.mjs'
 import { createLineDecoder, DESKTOP_PROTOCOL_VERSION, parseRequest } from './desktop-protocol.mjs'
+import { readDesktopSettings, selectedWorkspace } from './desktop-settings.mjs'
+import { ENFORCEMENT_IDENTITY_ENV } from './enforcement-identity.mjs'
+
+export function desktopOptionsFrom({ workspace, env = process.env, nodePath = process.execPath } = {}) {
+  const initial = launcherOptionsFrom({ env, nodePath })
+  const saved = workspace ?? (initial.options.layout.dataDir ? readDesktopSettings(initial.options.layout.dataDir)?.workspace : undefined)
+  const input = saved === undefined ? initial : launcherOptionsFrom({ argv: [`--workspace=${saved}`],
+    env: { ...env, LEGION_WORKSPACE_DIR: undefined }, nodePath })
+  // Missing operator declarations are a setup step. This checks only absence;
+  // the real Launcher still validates all effective policy and readiness later.
+  if (input.options.layout.workspaceDir !== null && ['actor', 'scope', 'action'].some(field => {
+    const value = input.options.runtimeEnv[ENFORCEMENT_IDENTITY_ENV[field]]
+    return typeof value !== 'string' || value.trim() === ''
+  })) input.desktopSetupPhase = 'identity'
+  return input
+}
 
 function safeCode(value, fallback) {
   return typeof value === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(value) ? value : fallback
@@ -30,8 +46,8 @@ function publicStatus(status) {
 }
 
 export function createDesktopBridge({
-  launcherFactory = options => options.bundledRuntime ? createDesktopLauncher(options) : createLauncher(options),
-  optionsFactory = () => launcherOptionsFrom({ env: process.env, nodePath: process.execPath }),
+  launcherFactory = options => options.bundledRuntime || options.desktopSetup ? createDesktopLauncher(options) : createLauncher(options),
+  optionsFactory = desktopOptionsFrom,
   emit = () => {},
 } = {}) {
   let launcher = null
@@ -42,14 +58,15 @@ export function createDesktopBridge({
   let credentials = null
   let bundleRoot = null
   let stopPending = false
+  let selected = null
 
   function status() {
     return launcher === null ? { state: 'unavailable', processes: [], workbenchUrl: null } : publicStatus(launcher.status())
   }
 
-  function ensureLauncher() {
+  function ensureLauncher({ setup = false } = {}) {
     if (launcher !== null) return launcher
-    const input = optionsFactory()
+    const input = optionsFactory(selected === null ? {} : { workspace: selected })
     const blocking = [...(input.layoutDiagnostics ?? []), ...(input.configDiagnostics ?? [])]
       .filter((item) => item.severity === 'error')
     if (blocking.length > 0) {
@@ -57,7 +74,10 @@ export function createDesktopBridge({
       error.code = safeCode(blocking[0].code, 'CONFIG_INVALID')
       throw error
     }
-    const options = { ...input.options, desktopCredentials: credentials }
+    if (!setup && input.desktopSetupPhase === 'identity') {
+      throw Object.assign(new Error('Operator declarations required'), { code: 'ENFORCEMENT_IDENTITY_MISSING' })
+    }
+    const options = { ...input.options, desktopCredentials: credentials, desktopSetup: setup }
     if (bundleRoot !== null) {
       const release = JSON.parse(readFileSync(join(options.layout.installDir, 'product', 'release', 'runtime-manifest.json'), 'utf8'))
       options.bundledRuntime = { bundleRoot, release }
@@ -75,7 +95,7 @@ export function createDesktopBridge({
     if (closed) return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: false, payload: { code: 'BRIDGE_CLOSED' } }
     try {
       if (type === 'status') return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: true, payload: status() }
-      if (type === 'start' || type === 'restart' || type === 'prepare-runtime') {
+      if (type === 'start' || type === 'restart' || type === 'prepare-runtime' || type === 'configure-workspace') {
         if (stopPending) throw Object.assign(new Error('Start superseded by stop'), { code: 'PREPARATION_CANCELLED' })
         const suppliedRoot = request.payload?.bundleRoot
         if (suppliedRoot !== undefined) {
@@ -91,6 +111,18 @@ export function createDesktopBridge({
           credentials = { workbench: token, hub: randomBytes(32).toString('hex') }
         } else if (token !== undefined && token !== credentials.workbench) {
           throw Object.assign(new Error('Desktop credential changed'), { code: 'DESKTOP_CREDENTIAL_CHANGED' })
+        }
+        if (type === 'configure-workspace') {
+          const workspace = selectedWorkspace(request.payload?.workspace)
+          if (running) throw Object.assign(new Error('Services running'), { code: 'DESKTOP_SETUP_BUSY' })
+          if (launcher !== null && ownsLifecycle) await launcher.stop({ reason: '更换首次设置工作区' })
+          ownsLifecycle = false
+          launcher = null
+          selected = workspace
+          const owner = ensureLauncher({ setup: true })
+          ownsLifecycle = true
+          const payload = await owner.configureWorkspace()
+          return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: true, payload }
         }
         const owner = ensureLauncher()
         if (type === 'prepare-runtime') {

@@ -8,6 +8,8 @@ This development entry is an internal integration build. Desktop mode requires p
 
 The desktop payload builder and cancellable local importer now exist. Runtime preparation and service supervision share one Launcher-owned DataDir lease. Core dependencies are resolved at build time and imported from the installed files without npm or network access. The desktop runtime uses its own DSH home and does not load an operator's DSH profile.
 
+The source startup page now provides workspace selection and confirmation. Only the owned main frame can invoke the native directory picker; confirmation uses the path held by main. Initialization and non-secret settings persistence share the product owner's DataDir lease. Existing configuration is preserved, and subsequent launches resume the identity step before runtime preparation. Identity/model setup and complete wizard verification are still being developed; this source change is not yet included in the recorded installer artifact.
+
 ## Internal Windows build
 
 Use a Windows x64 builder. From `desktop/`, run `npm ci`, `npm run prepare:node`, `npm run prepare:payload`, and `npm run prepare:git`. Node/Git archives have pinned SHA-256 inputs; DSH has a production lockfile and exact family overrides. Build Workbench using its committed pnpm lockfile, then run `npm run stage`, `npm run verify:closure`, and `npm run pack` or `npm run dist`.

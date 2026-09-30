@@ -17,6 +17,8 @@
     .bar::after { content: ""; display: block; width: 42%; height: 100%; border-radius: inherit; background: #64a1ff; animation: move 1.5s infinite alternate ease-in-out; }
     @keyframes move { to { transform: translateX(150%); } }
     .actions { display: flex; gap: 10px; margin-top: 25px; }
+    #workspace-path { overflow-wrap: anywhere; margin-top: 14px; }
+    #setup p { font-size: 14px; }
     button { border: 0; border-radius: 9px; padding: 11px 19px; background: #357dff; color: white; font: inherit; cursor: pointer; }
     button.secondary { background: #32435f; }
     button:disabled { opacity: .5; cursor: wait; }
@@ -27,9 +29,17 @@
   <main>
     <div class="mark">L</div>
     <h1 id="heading">正在启动 Legion</h1>
-    <p>正在准备工作台和后台服务，请稍候。</p>
+    <p id="description">正在准备工作台和后台服务，请稍候。</p>
     <p id="detail" role="status" aria-live="polite">检查本机环境…</p>
     <div class="bar" id="progress"></div>
+    <section id="setup" hidden>
+      <p>选择要使用的项目文件夹。设置保存在 Legion 的应用数据目录；任务执行范围会在后续设置中确认。</p>
+      <p id="workspace-path">尚未选择文件夹</p>
+      <div class="actions">
+        <button id="choose-workspace" class="secondary">选择文件夹</button>
+        <button id="configure-workspace" disabled>继续设置</button>
+      </div>
+    </section>
     <div class="actions" id="actions" hidden>
       <button id="retry">重试启动</button>
       <button id="stop" class="secondary">停止服务</button>

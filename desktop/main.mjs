@@ -23,6 +23,8 @@ let allowQuit = false
 let serviceTransition = null
 let viewGeneration = 0
 let current = { state: 'starting', phase: 'preparing' }
+let selectedWorkspace = null
+let choosingWorkspace = false
 
 function showWindow() {
   if (!window) return
@@ -101,6 +103,7 @@ function connectBridge() {
         LEGION_HOME: join(app.getPath('userData'), 'product'),
         LEGION_DATA_DIR: undefined, LEGION_CACHE_DIR: undefined, LEGION_LOG_DIR: undefined,
         LEGION_PRODUCT_CONFIG: undefined, LEGION_SECRETS_FILE: undefined,
+        LEGION_WORKSPACE_DIR: undefined,
         NODE_OPTIONS: undefined, NODE_PATH: undefined,
         PATH: `${join(process.resourcesPath, 'node')};${join(process.resourcesPath, 'git', 'cmd')};${join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0')};${process.env.PATH ?? ''}`,
       } : {}) },
@@ -141,7 +144,10 @@ async function performStart(type, generation) {
     }
   } catch (error) {
     if (generation !== viewGeneration || stopping) return
-    report({ state: 'failed', code: error?.code ?? 'START_FAILED' })
+    const phase = error?.code === 'WORKSPACE_NOT_CONFIGURED' ? 'workspace'
+      : error?.code === 'ENFORCEMENT_IDENTITY_MISSING' ? 'identity' : null
+    report(phase ? { state: 'setup-required', phase, workspace: selectedWorkspace }
+      : { state: 'failed', code: error?.code ?? 'START_FAILED' })
     if (window && !window.isDestroyed()) {
       try { await window.loadURL(startupUrl) } catch { report({ state: 'failed', code: 'STARTUP_PAGE_FAILED' }) }
     }
@@ -193,6 +199,33 @@ if (!app.requestSingleInstanceLock()) {
     ipcMain.handle('legion:command', async (event, command) => {
       if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame || event.senderFrame?.url !== startupUrl) throw new Error('IPC_FORBIDDEN')
       if (command === 'status') return current
+      if (command === 'choose-workspace') {
+        if (stopping || serviceTransition || choosingWorkspace || current.state !== 'setup-required' || current.phase !== 'workspace') throw new Error('DESKTOP_SETUP_BUSY')
+        choosingWorkspace = true
+        try {
+          const selection = await dialog.showOpenDialog(window, {
+            title: '选择 Legion 工作区', buttonLabel: '选择此文件夹', properties: ['openDirectory'],
+          })
+          if (!stopping && !selection.canceled && selection.filePaths.length === 1) {
+            selectedWorkspace = selection.filePaths[0]
+            report({ state: 'setup-required', phase: 'workspace', workspace: selectedWorkspace })
+          }
+          return current
+        } finally { choosingWorkspace = false }
+      }
+      if (command === 'configure-workspace') {
+        if (stopping || serviceTransition || choosingWorkspace || selectedWorkspace === null || current.state !== 'setup-required' || current.phase !== 'workspace') throw new Error('DESKTOP_SETUP_BUSY')
+        const workspace = selectedWorkspace
+        serviceTransition = (async () => {
+          try {
+            report({ state: 'starting', phase: 'initializing' })
+            const result = await bridge.request('configure-workspace', { workspace, token: desktopToken,
+              ...(app.isPackaged ? { bundleRoot: process.resourcesPath } : {}) })
+            if (!stopping && !quitting) report(result)
+          } catch (error) { if (!stopping && !quitting) report({ state: 'failed', code: error?.code ?? 'DESKTOP_SETUP_FAILED' }) }
+        })()
+        try { await serviceTransition; return current } finally { serviceTransition = null }
+      }
       if (command === 'retry') { await startServices('restart'); return current }
       if (command === 'stop') {
         viewGeneration++

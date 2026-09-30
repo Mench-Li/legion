@@ -428,6 +428,10 @@ export function createLauncher({
     runtimeCommand,
     dataDir: layout.dataDir ?? null,
     profile: dshProfile,
+    nodePath,
+    // Match the official desktop's Node loader configuration. Keep the flag
+    // before the script path; the managed profile loads patches on restart.
+    nodeArgs: desktopCredentials === null ? [] : ['--expose-internals'],
     fs: runtimeResolveFs ?? null,
     platform: layout.platform ?? process.platform,
   })

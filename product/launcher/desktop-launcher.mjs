@@ -61,7 +61,8 @@ export function createDesktopLauncher(options, {
     async start() {
       await prepareRuntime()
       if (lease === null) throw Object.assign(new Error('Preparation ownership lost'), { code: 'PREPARATION_CANCELLED' })
-      inner = launcherFactory({ ...options, acquireInstanceLockImpl: async () => ({
+      // A packaged desktop always uses the verified bundled runtime pointer.
+      inner = launcherFactory({ ...options, runtimeCommand: null, dshProfile: 'legion-desktop', acquireInstanceLockImpl: async () => ({
         ...lease, handle: { release },
       }) })
       return inner.start()

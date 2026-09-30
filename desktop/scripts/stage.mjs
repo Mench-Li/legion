@@ -37,7 +37,7 @@ for (const [from, to] of [[`node-v${node.version}-win-x64`, 'node'], ['dsh', 'ds
 }
 const { stdout } = await exec('git', ['ls-files', '-z'], { cwd: root, maxBuffer: 4 * 1024 * 1024, windowsHide: true })
 const untracked = await exec('git', ['ls-files', '--others', '--exclude-standard', '-z'], { cwd: root, maxBuffer: 4 * 1024 * 1024, windowsHide: true })
-const productionRoots = new Set(['product', 'team-hub', 'runtime', 'orchestrator', 'security', 'mesh', 'scrum', 'whiteboard', 'skills', 'instructions', 'plugins'])
+const productionRoots = new Set(['product', 'team-hub', 'runtime', 'orchestrator', 'security', 'mesh', 'scrum', 'whiteboard', 'skills', 'instructions', 'plugins', 'packages'])
 const paths = [...new Set(`${stdout}${untracked.stdout}`.split('\0').filter(Boolean))]
 for (const path of paths) {
   const production = productionRoots.has(path.split('/')[0]) || path.startsWith('workbench/scripts/') || /^roles[^/]*\.json$/.test(path)
@@ -49,10 +49,11 @@ for (const path of paths) {
   await mkdir(dirname(target), { recursive: true })
   await copyFile(join(root, path), target)
 }
-await cp(join(root, 'workbench', 'dist'), join(resources, 'legion', 'workbench', 'dist'), { recursive: true })
+await copyTree(join(root, 'workbench', 'dist'), join(resources, 'legion', 'workbench', 'dist'))
 await mkdir(join(shell, 'desktop'), { recursive: true })
 for (const file of ['main.mjs', 'runtime.mjs', 'preload.cjs', 'startup.html', 'startup.mjs', 'messages.mjs', 'assets']) {
-  await cp(join(root, 'desktop', file), join(shell, 'desktop', file), { recursive: true })
+  if (file === 'assets') await copyTree(join(root, 'desktop', file), join(shell, 'desktop', file))
+  else await copyFile(join(root, 'desktop', file), join(shell, 'desktop', file))
 }
 await mkdir(join(shell, 'product', 'launcher'), { recursive: true })
 await copyFile(join(root, 'product', 'launcher', 'desktop-protocol.mjs'), join(shell, 'product', 'launcher', 'desktop-protocol.mjs'))

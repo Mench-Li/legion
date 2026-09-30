@@ -59,7 +59,7 @@ const scratch = join(root, '.desktop-build', `closure-smoke-${Date.now()}`)
 await mkdir(scratch, { recursive: true })
 const env = { SystemRoot: process.env.SystemRoot, windir: process.env.windir, ComSpec: process.env.ComSpec,
   TEMP: scratch, TMP: scratch, USERPROFILE: scratch, HOME: scratch, DSH_HOME: join(scratch, 'dsh-home'),
-  PATH: `${join(resources, 'node')};${join(resources, 'git', 'cmd')};${join(process.env.SystemRoot, 'System32')}` }
+  PATH: `${join(resources, 'node')};${join(resources, 'git', 'cmd')};${join(process.env.SystemRoot, 'System32')};${join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0')}` }
 const version = await exec(nodePath, ['--version'], { cwd: scratch, env, windowsHide: true })
 if (version.stdout.trim() !== `v${descriptor.versions.node}`) throw new Error('Bundled Node version mismatch')
 const nativeScript = join(scratch, 'native.cjs')
@@ -67,6 +67,9 @@ await import('node:fs/promises').then(fs => fs.writeFile(nativeScript, `
 const { createRequire } = require('node:module')
 const r = createRequire(process.argv[2])
 r('koffi'); r('sharp')
+const dpapi = r(process.argv[3])
+const protection = dpapi.probeDpapi()
+if (!protection.available || dpapi.unprotectValue(dpapi.protectValue('Legion 测试 fixture', protection), protection) !== 'Legion 测试 fixture') process.exit(3)
 const pty = r('node-pty')
 const child = pty.spawn(process.env.ComSpec, ['/d','/c','echo LEGION_NATIVE_OK'], { cwd: process.cwd(), env: process.env })
 let output = ''
@@ -74,8 +77,8 @@ child.onData(data => { output += data })
 const timer = setTimeout(() => { child.kill(); process.exit(2) }, 10000)
 child.onExit(({ exitCode }) => { clearTimeout(timer); process.exit(exitCode === 0 && output.includes('LEGION_NATIVE_OK') ? 0 : 1) })
 `))
-await exec(nodePath, [nativeScript, join(resources, 'dsh', 'package.json')], { cwd: scratch, env, timeout: 15_000, windowsHide: true })
+await exec(nodePath, [nativeScript, join(resources, 'dsh', 'package.json'), join(resources, 'legion', 'security', 'secrets', 'dpapi.mjs')], { cwd: scratch, env, timeout: 30_000, windowsHide: true })
 await exec(nodePath, [join(resources, 'dsh', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'), '--profile', 'web', '--dump-config'],
   { cwd: scratch, env, timeout: 20_000, windowsHide: true, maxBuffer: 2 * 1024 * 1024 })
 const git = await exec(join(resources, 'git', 'cmd', 'git.exe'), ['--version'], { cwd: scratch, env, windowsHide: true })
-console.log(JSON.stringify({ ok: true, checkedModules: visited.size, node: version.stdout.trim(), git: git.stdout.trim(), native: ['koffi', 'sharp', 'node-pty/ConPTY'], profile: 'isolated web' }))
+console.log(JSON.stringify({ ok: true, checkedModules: visited.size, node: version.stdout.trim(), git: git.stdout.trim(), native: ['koffi', 'sharp', 'node-pty/ConPTY', 'Windows DPAPI'], profile: 'isolated web' }))

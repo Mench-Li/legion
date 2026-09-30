@@ -156,6 +156,8 @@ Workbench 是唯一主工作窗口。DSH Web UI 不自动打开。默认关闭�
 
 安装资源保持只读；可写 profile、产品 home、配置与任务数据放在 DataDir。运行时复制是兼容现有 Launcher 布局的首发选择，会占用第二份生产载荷空间；磁盘预检与卸载保留策略须说明这一成本。后续直接使用安装目录内不可变依赖需要先扩展 Runtime Resolution 和升级回滚接口，不能靠指向源码的 junction 实现。
 
+2026-10-01 实施约束：桌面使用产品私有的 `legion-desktop` profile，固定 `dsh-base` / `dsh-web-app` bundles，并采用 `patchReload=startup`。固定 DSH 版本的 live watcher 在打印服务 URL 后仍可能因 HMR 未装配而退出，故产品配置通过受控重启应用；现有 CLI profile 不随此决定改变。发行载荷实际启动验证必须等待服务判据并复查存活，不能以 URL 已打印作为完整桌面验收。Windows 内置 PowerShell 的路径加入私有启动环境，用于当前用户作用域 DPAPI，不要求安装宿主 pwsh。
+
 正式包只接受发行清单中绑定的载荷，不从配置读取任意安装来源。开发态的 npm 路线显式启用，显示网络阶段与可取消状态，不能成为正式包缺失载荷时的自动回退。
 
 ### 6.3 持久化位置

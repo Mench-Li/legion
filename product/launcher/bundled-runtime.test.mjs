@@ -17,7 +17,9 @@ async function fixture(t) {
   const entryDir = join(bundleRoot, 'dsh', 'node_modules', '@deepseek-ai', 'dsh', 'lib')
   await mkdir(entryDir, { recursive: true })
   await writeFile(join(entryDir, 'bin.js'), '// bundled fixture')
-  await writeFile(join(bundleRoot, 'dsh', 'package-lock.json'), '{}')
+  await writeFile(join(entryDir, '..', 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: release.dshVersion }))
+  await writeFile(join(bundleRoot, 'dsh', 'package-lock.json'), JSON.stringify({ lockfileVersion: 3,
+    packages: { 'node_modules/@deepseek-ai/dsh': { version: release.dshVersion } } }))
   const files = await inventoryTree(join(bundleRoot, 'dsh'), 'dsh')
   const manifest = { format: DESKTOP_MANIFEST_FORMAT, platform: process.platform, arch: process.arch,
     bridgeProtocol: 1, versions: { ...release, node: process.versions.node }, files }
@@ -33,6 +35,9 @@ test('offline import publishes the shared pointer only after verified completion
   assert.equal(active.version, release.dshVersion)
   assert.equal(active.complete, true)
   assert.equal((await importBundledRuntime(input)).reused, true)
+  const profile = JSON.parse(await readFile(join(input.dataDir, 'runtime', 'dsh', 'home', 'profiles', 'legion-desktop', 'package.json'), 'utf8'))
+  assert.equal(profile.dsh.profile.patchReload, 'startup')
+  assert.deepEqual(profile.dsh.profile.bundles, ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'])
 })
 
 test('tampered bundled bytes preserve the old pointer and do not create a completed installation', async t => {
@@ -43,6 +48,20 @@ test('tampered bundled bytes preserve the old pointer and do not create a comple
   await writeFile(join(input.bundleRoot, 'dsh', 'package-lock.json'), 'tampered')
   await assert.rejects(importBundledRuntime(input), { code: 'BUNDLE_HASH_MISMATCH' })
   assert.equal(await readFile(paths.pointerPath, 'utf8'), '{"version":"previous"}')
+})
+
+test('desktop profile configuration drift is rejected without overwriting user files or the active pointer', async t => {
+  const input = await fixture(t)
+  await importBundledRuntime(input)
+  const paths = runtimePathsOf({ dataDir: input.dataDir, targetVersion: release.dshVersion })
+  const before = await readFile(paths.pointerPath, 'utf8')
+  const path = join(input.dataDir, 'runtime', 'dsh', 'home', 'profiles', 'legion-desktop', 'package.json')
+  const changed = JSON.parse(await readFile(path, 'utf8'))
+  changed.dsh.profile.patchReload = 'live'
+  await writeFile(path, JSON.stringify(changed))
+  await assert.rejects(importBundledRuntime(input), { code: 'BUNDLE_PROFILE_MISMATCH' })
+  assert.equal(JSON.parse(await readFile(path, 'utf8')).dsh.profile.patchReload, 'live')
+  assert.equal(await readFile(paths.pointerPath, 'utf8'), before)
 })
 
 test('cancel during local copy removes staging and never advances the pointer; retry succeeds', async t => {
@@ -95,4 +114,13 @@ test('real worker cancellation during import leaves no active pointer', async t 
   const paths = runtimePathsOf({ dataDir: input.dataDir, targetVersion: release.dshVersion })
   await assert.rejects(readFile(paths.pointerPath), { code: 'ENOENT' })
   assert.deepEqual(await readdir(paths.versionsDir), [])
+})
+
+test('a self-consistent inventory cannot disguise an unqualified actual DSH version', async t => {
+  const input = await fixture(t)
+  await writeFile(join(input.bundleRoot, 'dsh', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'),
+    JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.0' }))
+  input.manifest.files = await inventoryTree(join(input.bundleRoot, 'dsh'), 'dsh')
+  await writeFile(join(input.bundleRoot, 'desktop-release.json'), JSON.stringify(input.manifest))
+  await assert.rejects(importBundledRuntime(input), { code: 'BUNDLE_VERSION_MISMATCH' })
 })

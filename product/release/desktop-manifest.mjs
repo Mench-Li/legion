@@ -44,21 +44,37 @@ export async function hashFile(path) {
 
 export async function inventoryTree(root, prefix = '', { signal, onProgress = () => {}, exclude = [] } = {}) {
   const files = []
+  const rootStat = await lstat(root)
+  if (rootStat.isSymbolicLink()) throw releaseError('BUNDLE_LINK_REJECTED')
+  if (!rootStat.isDirectory()) throw releaseError('BUNDLE_FILE_INVALID')
   async function walk(relative) {
     signal?.throwIfAborted()
     const path = join(root, relative)
-    const stat = await lstat(path)
-    if (stat.isSymbolicLink()) throw releaseError('BUNDLE_LINK_REJECTED')
-    if (exclude.includes(relative)) return
-    if (stat.isDirectory()) {
-      for (const name of (await readdir(path)).sort()) await walk(relative ? `${relative}/${name}` : name)
-    } else if (stat.isFile()) {
-      const entry = { path: prefix ? `${prefix}/${relative}` : relative, bytes: stat.size, sha256: await hashFile(path) }
-      files.push(entry)
-      onProgress(files.length)
-    } else throw releaseError('BUNDLE_FILE_INVALID')
+    const children = (await readdir(path, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))
+    for (const child of children) {
+      const rel = relative ? `${relative}/${child.name}` : child.name
+      if (child.isSymbolicLink()) throw releaseError('BUNDLE_LINK_REJECTED')
+      if (exclude.includes(rel)) continue
+      if (child.isDirectory()) await walk(rel)
+      else if (child.isFile()) files.push({ path: prefix ? `${prefix}/${rel}` : rel, file: join(root, rel) })
+      else throw releaseError('BUNDLE_FILE_INVALID')
+    }
   }
   await walk('')
+  let index = 0, completed = 0
+  await Promise.all(Array.from({ length: Math.min(8, files.length) }, async () => {
+    while (index < files.length) {
+      signal?.throwIfAborted()
+      const entry = files[index++]
+      const stat = await lstat(entry.file)
+      if (stat.isSymbolicLink()) throw releaseError('BUNDLE_LINK_REJECTED')
+      if (!stat.isFile()) throw releaseError('BUNDLE_FILE_INVALID')
+      entry.bytes = stat.size
+      entry.sha256 = await hashFile(entry.file)
+      delete entry.file
+      onProgress(++completed)
+    }
+  }))
   return files.sort((a, b) => a.path.localeCompare(b.path))
 }
 

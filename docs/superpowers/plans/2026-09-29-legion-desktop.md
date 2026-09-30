@@ -89,6 +89,8 @@ Updated order: **Task 4 → Task 1 follow-up → prepare Task 5 payload → Task
 - [ ] Exercise a fresh temporary DataDir with network disabled, then separately verify model setup and a real task when credentials/network are available.
 - [ ] Commit `feat(desktop): connect first-run setup`.
 
+2026-10-01 follow-up: importer/profile/ownership/runtime resolution tests passed **30/30**; focused desktop controls and release validation passed **35/35**. The actual pinned web profile failed during live HMR mounting after printing its URL. The product now creates its own `legion-desktop` profile with startup patch loading, uses the verified bundled pointer even when an external Runtime command is configured, and passes the Node loader flag before the DSH entry. Three isolated backend services reached their readiness predicates and remained ready after 3 seconds, then shut down with observed bridge exit. Scope explicitly excluded task scheduling; no full-product or model/task PASS is inferred.
+
 2026-10-01 implementation checkpoint: desktop preparation/descriptor/ownership/control tests passed **30/30**; the desktop-owned DSH profile and real authenticated hub/Workbench check passed **2/2**. The importer tests include changed bytes, cancellation and retry, complete orphan recovery, escaping destination junctions, a real preparation worker and its cancellation. Wizard UI/model setup and real scoped execution are still pending. Prepared production inputs include Node `24.19.0`, DSH `0.1.5-rc.2` (231 exact-version family packages; 517 installed production packages) and private MinGit `2.56.0.windows.1`. Workbench built from its committed pnpm lockfile. Staging and closure/installer verification are the next gate; no installer completion or clean-VM PASS is claimed.
 
 ## Task 4: Desktop local API authentication
@@ -129,6 +131,8 @@ Updated order: **Task 4 → Task 1 follow-up → prepare Task 5 payload → Task
 - [ ] Implement NSIS/install staging and pass unpacked and installed-app smoke checks with no developer paths available.
 - [ ] Build installer; test installation path containing spaces under non-admin user, offline first preparation and an existing user DSH home remaining independent.
 - [ ] Commit `build(desktop): stage and package Windows installer`.
+
+2026-10-01 build checkpoint: production inputs and Workbench built from pinned lockfiles; physical staging contains approximately **28,275 files / 436 MB**. A 265-module static closure check and actual bundled-Node Koffi/Sharp/ConPTY/Windows-DPAPI probes pass. The NSIS resources download was recovered using the official release asset API with the upstream pinned SHA-256, and the first unsigned internal installer was generated at approximately **225 MB**. Real packaged-window and offline runtime-import checks pass. Initial per-user installation smoke was interrupted at its 240-second bound while extraction was still in progress; installed-app and uninstall gates remain open. See [acceptance evidence](../../release/legion-desktop-acceptance.md).
 
 ## Task 6: Upgrade, recovery, and uninstall wiring
 

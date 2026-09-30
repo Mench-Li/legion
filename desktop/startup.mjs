@@ -13,12 +13,16 @@ const text = {
   'verifying-bundle': '校验随附的 DSH 文件…',
   'importing-runtime': '正在本地初始化 DSH…',
   'runtime-prepared': 'DSH 已准备完成…',
+  'verifying-runtime': '校验初始化后的文件…',
 }
 
 function render(state) {
   const failed = state?.state === 'failed'
   heading.textContent = failed ? 'Legion 暂时无法启动' : state?.state === 'stopped' ? 'Legion 服务已停止' : '正在启动 Legion'
   detail.textContent = failed ? `错误代码：${state.code ?? 'START_FAILED'}。${failureMessage(state.code)}` : text[state?.phase] ?? '正在检查服务状态…'
+  if (!failed && Number.isSafeInteger(state?.completed) && Number.isSafeInteger(state?.total) && state.total > 0 && state.completed >= 0 && state.completed <= state.total) {
+    detail.textContent += `（${Math.floor(state.completed * 100 / state.total)}%）`
+  }
   progress.hidden = failed || state?.state === 'stopped'
   actions.hidden = !failed && state?.state !== 'stopped'
 }

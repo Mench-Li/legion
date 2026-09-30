@@ -56,9 +56,17 @@ export async function importBundledRuntime({ bundleRoot, dataDir, installDir, re
   }
   signal?.throwIfAborted()
   onProgress({ phase: 'verifying-bundle', completed: 0, total: files.length })
-  await verifyInventory(join(bundleRoot, 'dsh'), files, { prefix: 'dsh', signal })
+  await verifyInventory(join(bundleRoot, 'dsh'), files, { prefix: 'dsh', signal,
+    onProgress(completed) { if (completed % 100 === 0 || completed === files.length) onProgress({ phase: 'verifying-bundle', completed, total: files.length }) } })
+  const actualPackage = await json(join(bundleRoot, 'dsh', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'))
+  const lock = await json(join(bundleRoot, 'dsh', 'package-lock.json'))
+  if (actualPackage?.name !== '@deepseek-ai/dsh' || actualPackage.version !== release.dshVersion
+    || lock?.lockfileVersion !== 3 || lock.packages?.['node_modules/@deepseek-ai/dsh']?.version !== release.dshVersion
+    || Object.entries(lock.packages ?? {}).some(([path, pkg]) => /(^|\/)node_modules\/@deepseek-ai\/dsh(?:-[^/]+)?$/.test(path)
+      && pkg.version !== release.dshVersion)) throw releaseError('BUNDLE_VERSION_MISMATCH')
   await checked(paths.versionsDir)
   await mkdir(paths.versionsDir, { recursive: true })
+  await checked(paths.versionDir)
   let reused = await checkTarget()
   let staging = null
   if (!reused) {
@@ -78,7 +86,8 @@ export async function importBundledRuntime({ bundleRoot, dataDir, installDir, re
           onProgress({ phase: 'importing-runtime', completed: index + 1, total: files.length })
         }
       }
-      await verifyInventory(staging, files, { prefix: 'dsh', signal })
+      await verifyInventory(staging, files, { prefix: 'dsh', signal,
+        onProgress(completed) { if (completed % 100 === 0 || completed === files.length) onProgress({ phase: 'verifying-runtime', completed, total: files.length }) } })
       signal?.throwIfAborted()
       const marker = { version: release.dshVersion, packageName: '@deepseek-ai/dsh',
         dshCompositionPatchVersion: release.dshCompositionPatchVersion, legionRoute: 'bundled',
@@ -92,6 +101,25 @@ export async function importBundledRuntime({ bundleRoot, dataDir, installDir, re
       if (staging !== null) { await checked(staging); await rm(staging, { recursive: true, force: true }) }
     }
   }
+  signal?.throwIfAborted()
+  // Product-owned profile: fixed web bundles, reconfigured on controlled restart.
+  // The pinned DSH's live patch watcher requires a dynamically mounted HMR
+  // service; it can announce a URL before that mount fails. No live watcher is
+  // needed for the managed desktop profile.
+  const profileDir = join(dataDir, 'runtime', 'dsh', 'home', 'profiles', 'legion-desktop')
+  await checked(profileDir); await mkdir(profileDir, { recursive: true })
+  const profilePath = join(profileDir, 'package.json')
+  await checked(profilePath)
+  const profile = await json(profilePath)
+  const bundles = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']
+  if (profile === null) {
+    await atomicJson(profilePath, { name: 'dsh-profile-legion-desktop', private: true, dependencies: {},
+      dsh: { profile: { bundles, patchReload: 'startup' } } })
+  } else if (profile.dsh?.profile?.patchReload !== 'startup'
+    || JSON.stringify(profile.dsh.profile.bundles) !== JSON.stringify(bundles)) throw releaseError('BUNDLE_PROFILE_MISMATCH')
+  const rootConfig = join(profileDir, 'cordis.yml')
+  await checked(rootConfig)
+  try { await writeFile(rootConfig, '[]\n', { flag: 'wx' }) } catch (error) { if (error.code !== 'EEXIST') throw error }
   signal?.throwIfAborted()
   await checked(paths.pointerPath)
   const previous = await json(paths.pointerPath)

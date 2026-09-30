@@ -61,7 +61,8 @@ export function createDesktopBridge({
     if (bundleRoot !== null) {
       const release = JSON.parse(readFileSync(join(options.layout.installDir, 'product', 'release', 'runtime-manifest.json'), 'utf8'))
       options.bundledRuntime = { bundleRoot, release }
-      options.onPrepareProgress = progress => emit({ version: DESKTOP_PROTOCOL_VERSION, type: 'progress', payload: { phase: progress.phase } })
+      options.onPrepareProgress = progress => emit({ version: DESKTOP_PROTOCOL_VERSION, type: 'progress',
+        payload: { phase: progress.phase, completed: progress.completed, total: progress.total } })
       options.baseEnv = { ...options.baseEnv, DSH_HOME: join(options.layout.dataDir, 'runtime', 'dsh', 'home') }
       options.dshCredentialsFile = null
     }

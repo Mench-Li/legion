@@ -9,13 +9,17 @@ import { acquireSingleInstance } from './single-instance.mjs'
 test('preparation and service start retain one real DataDir lease until stop', async t => {
   const root = await mkdtemp(join(tmpdir(), 'legion-owner-'))
   t.after(() => rm(root, { recursive: true, force: true }))
-  const options = { layout: { dataDir: root, installDir: join(root, 'install') }, bundledRuntime: {} }
+  const options = { layout: { dataDir: root, installDir: join(root, 'install') }, bundledRuntime: {}, runtimeCommand: 'uncontrolled-host-dsh' }
   let releaseInner
   const owner = createDesktopLauncher(options, { prepare: async () => ({ ok: true }),
-    launcherFactory: input => ({
-      async start() { const lease = await input.acquireInstanceLockImpl(); releaseInner = lease.handle.release; return { ok: true } },
-      async stop() { releaseInner(); return {} }, status() { return { state: 'ready', processes: [] } },
-    }) })
+    launcherFactory: input => {
+      assert.equal(input.runtimeCommand, null)
+      assert.equal(input.dshProfile, 'legion-desktop')
+      return {
+        async start() { const lease = await input.acquireInstanceLockImpl(); releaseInner = lease.handle.release; return { ok: true } },
+        async stop() { releaseInner(); return {} }, status() { return { state: 'ready', processes: [] } },
+      }
+    } })
   await owner.prepareRuntime()
   assert.equal((await acquireSingleInstance({ dataDir: root })).ok, false)
   assert.equal((await owner.start()).ok, true)

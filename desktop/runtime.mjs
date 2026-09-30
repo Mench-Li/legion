@@ -45,7 +45,7 @@ function clientError(code) {
   return Object.assign(new Error(code), { code })
 }
 
-export const BRIDGE_DEADLINES = Object.freeze({ status: 10_000, start: 180_000, restart: 240_000, stop: 90_000, 'prepare-runtime': 180_000 })
+export const BRIDGE_DEADLINES = Object.freeze({ status: 10_000, start: 720_000, restart: 780_000, stop: 90_000, 'prepare-runtime': 600_000 })
 
 export function createBridgeClient(child, {
   onEvent = () => {}, deadlines = BRIDGE_DEADLINES, maxPending = 16, exitTimeoutMs = 15_000,

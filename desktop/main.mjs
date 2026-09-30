@@ -97,12 +97,19 @@ function connectBridge() {
   const child = spawn(nodePath, [bridgePath], {
     cwd: installRoot, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
     env: { ...process.env, LEGION_INSTALL_DIR: installRoot,
-      ...(app.isPackaged ? { PATH: `${join(process.resourcesPath, 'node')};${join(process.resourcesPath, 'git', 'cmd')};${process.env.PATH ?? ''}` } : {}) },
+      ...(app.isPackaged ? {
+        LEGION_HOME: join(app.getPath('userData'), 'product'),
+        LEGION_DATA_DIR: undefined, LEGION_CACHE_DIR: undefined, LEGION_LOG_DIR: undefined,
+        LEGION_PRODUCT_CONFIG: undefined, LEGION_SECRETS_FILE: undefined,
+        NODE_OPTIONS: undefined, NODE_PATH: undefined,
+        PATH: `${join(process.resourcesPath, 'node')};${join(process.resourcesPath, 'git', 'cmd')};${join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0')};${process.env.PATH ?? ''}`,
+      } : {}) },
   })
   child.stderr.resume()
   bridge = createBridgeClient(child, {
     onEvent: (event) => {
-      if (event.type === 'progress') report({ state: 'starting', phase: event.payload?.phase ?? 'starting' })
+      if (event.type === 'progress') report({ state: 'starting', phase: event.payload?.phase ?? 'starting',
+        completed: event.payload?.completed, total: event.payload?.total })
     },
   })
   child.on('exit', () => { if (!quitting) report({ state: 'failed', code: 'BRIDGE_EXITED' }) })

@@ -1740,7 +1740,7 @@ export function createLauncher({
         // 什么都没起来也要删记录：这条记录此刻只可能描述**上一次**运行，
         // 而它已经被 `checkPreviousRun` 读过、报告过了。留着它会让下一次
         // 启动把同一批残留**再报一遍**，用户会以为残留一直在长。
-        forgetRunRecord()
+        if (instanceLock !== null) forgetRunRecord()
         // 心跳同样要停：`start()` 在**成功之后**才装配它，所以这里通常
         // 本来就是空的；但"通常"不是"一定"——一次中途失败的启动
         // 可能已经装配过。停止路径不该依赖"另一条路径应该没走到那一步"。
@@ -1754,6 +1754,11 @@ export function createLauncher({
       log('info', `停止：${reason}`)
       const results = await supervisor.stopAll({ graceMs })
       const states = supervisor.status()
+      if (results.some(result => result.stopped !== true)) {
+        // Retain supervisor, run evidence and the DataDir lock for a safe retry.
+        persistRunRecord()
+        throw Object.assign(new Error('Owned processes have not stopped'), { code: 'STOP_FAILED' })
+      }
       supervisor.dispose()
       stoppedAt = now()
       supervisor = null

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { pathToFileURL } from 'node:url'
 import { randomBytes } from 'node:crypto'
+import { realpathSync } from 'node:fs'
 import { createLauncher } from './launcher.mjs'
 import { launcherOptionsFrom } from './cli.mjs'
 import { createLineDecoder, DESKTOP_PROTOCOL_VERSION, parseRequest } from './desktop-protocol.mjs'
@@ -33,6 +34,7 @@ export function createDesktopBridge({
 } = {}) {
   let launcher = null
   let running = false
+  let ownsLifecycle = false
   let closed = false
   let queue = Promise.resolve()
   let credentials = null
@@ -78,8 +80,11 @@ export function createDesktopBridge({
         }
         if (!running) {
           emit({ version: DESKTOP_PROTOCOL_VERSION, type: 'progress', payload: { phase: 'starting' } })
+          ownsLifecycle = true
           const result = await owner.start()
           if (result.ok !== true) {
+            await owner.stop({ reason: '桌面启动失败后清理' })
+            ownsLifecycle = false
             return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: false,
               payload: { state: 'failed', code: safeCode(result.code ?? result.failures?.[0]?.code ?? result.diagnostics?.find((d) => d.severity === 'error')?.code, 'START_FAILED'), phase: safePhase(result.phase) } }
           }
@@ -88,10 +93,11 @@ export function createDesktopBridge({
         return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: true, payload: status() }
       }
       if (type === 'stop') {
-        if (running) {
+        if (ownsLifecycle && launcher !== null) {
           emit({ version: DESKTOP_PROTOCOL_VERSION, type: 'progress', payload: { phase: 'stopping' } })
           await launcher.stop({ reason: '桌面端停止服务' })
           running = false
+          ownsLifecycle = false
         }
         return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: true, payload: { state: 'stopped' } }
       }
@@ -112,9 +118,10 @@ export function createDesktopBridge({
     await queue
     if (closed) return
     closed = true
-    if (running && launcher !== null) {
+    if (ownsLifecycle && launcher !== null) {
       await launcher.stop({ reason: '桌面控制通道关闭' })
       running = false
+      ownsLifecycle = false
     }
   }
 
@@ -144,4 +151,4 @@ export function runDesktopBridge({ input = process.stdin, output = process.stdou
   return bridge
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) runDesktopBridge()
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) runDesktopBridge()

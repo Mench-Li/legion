@@ -20,6 +20,8 @@ let workbenchOrigin = null
 let quitting = false
 let stopping = false
 let allowQuit = false
+let serviceTransition = null
+let viewGeneration = 0
 let current = { state: 'starting', phase: 'preparing' }
 
 function showWindow() {
@@ -102,15 +104,24 @@ function connectBridge() {
       if (event.type === 'progress') report({ state: 'starting', phase: event.payload?.phase ?? 'starting' })
     },
   })
-  child.on('exit', () => report({ state: 'failed', code: 'BRIDGE_EXITED' }))
+  child.on('exit', () => { if (!quitting) report({ state: 'failed', code: 'BRIDGE_EXITED' }) })
   child.on('error', () => report({ state: 'failed', code: 'BRIDGE_EXITED' }))
 }
 
 async function startServices(type = 'start') {
+  if (stopping) return
+  if (serviceTransition) return serviceTransition
+  const generation = ++viewGeneration
+  serviceTransition = performStart(type, generation)
+  try { return await serviceTransition } finally { serviceTransition = null }
+}
+
+async function performStart(type, generation) {
   try {
     workbenchOrigin = null
     report({ state: 'starting', phase: type === 'restart' ? 'restarting' : 'starting' })
     const result = await bridge.request(type, { token: desktopToken })
+    if (generation !== viewGeneration || stopping) return
     const target = workbenchTarget(result)
     if (target) {
       workbenchOrigin = new URL(target).origin
@@ -120,6 +131,7 @@ async function startServices(type = 'start') {
       report({ state: result.state, code: 'WORKBENCH_NOT_READY' })
     }
   } catch (error) {
+    if (generation !== viewGeneration || stopping) return
     report({ state: 'failed', code: error?.code ?? 'START_FAILED' })
     if (window && !window.isDestroyed()) {
       try { await window.loadURL(startupUrl) } catch { report({ state: 'failed', code: 'STARTUP_PAGE_FAILED' }) }
@@ -144,13 +156,15 @@ if (!app.requestSingleInstanceLock()) {
     event.preventDefault()
     if (stopping) return
     stopping = true
+    viewGeneration++
     quitting = true
     workbenchOrigin = null
     report({ state: 'stopping' })
     void (async () => {
       try {
         if (bridge) {
-          await bridge.request('stop')
+          const acknowledgement = await bridge.request('stop')
+          if (acknowledgement?.state !== 'stopped') throw Object.assign(new Error('Stop unconfirmed'), { code: 'STOP_FAILED' })
           await bridge.close()
         }
         allowQuit = true
@@ -172,8 +186,10 @@ if (!app.requestSingleInstanceLock()) {
       if (command === 'status') return current
       if (command === 'retry') { await startServices('restart'); return current }
       if (command === 'stop') {
+        viewGeneration++
         workbenchOrigin = null
-        await bridge.request('stop')
+        const acknowledgement = await bridge.request('stop')
+        if (acknowledgement?.state !== 'stopped') throw Object.assign(new Error('Stop unconfirmed'), { code: 'STOP_FAILED' })
         report({ state: 'stopped' })
         return current
       }

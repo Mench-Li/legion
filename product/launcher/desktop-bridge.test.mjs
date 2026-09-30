@@ -56,7 +56,7 @@ test('launcher failure remains failed even when status claims ready', async () =
 test('unexpected failure details cannot escape through a diagnostic code', async () => {
   const secret = 'sk-live-secret-value'
   const bridge = createDesktopBridge({
-    launcherFactory: () => ({ async start() { return { ok: false, code: secret } }, status() { return { state: 'unavailable', processes: [] } } }),
+    launcherFactory: () => ({ async start() { return { ok: false, code: secret } }, async stop() {}, status() { return { state: 'unavailable', processes: [] } } }),
     optionsFactory: () => ({ options: {} }), emit: () => {},
   })
   const response = await bridge.handle({ version: 1, id: 'a', type: 'start', payload: { token: 'a'.repeat(64) } })

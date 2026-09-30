@@ -37,7 +37,7 @@ function liveFakeChild(pid = 1234) {
   c.exitCode = null
   c.signalCode = null
   c.killed = false
-  c.kill = () => { c.killed = true; return true }
+  c.kill = () => { c.killed = true; c.exitCode = 0; c.emit('exit', 0, null); return true }
   return c
 }
 

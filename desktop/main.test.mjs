@@ -8,6 +8,51 @@ import { fileURLToPath } from 'node:url'
 import { canNavigate, closeAction, createBridgeClient, desktopRequestHeaders, externalUrl, workbenchTarget } from './runtime.mjs'
 import { failureMessage } from './messages.mjs'
 
+function fakeBridge() {
+  const child = new EventEmitter()
+  child.stdin = new PassThrough()
+  child.stdout = new PassThrough()
+  const sent = []
+  child.stdin.on('data', chunk => sent.push(JSON.parse(String(chunk))))
+  return { child, sent }
+}
+
+test('request deadline clears its slot; a late reply cannot resolve another request', { timeout: 1000 }, async () => {
+  const { child, sent } = fakeBridge()
+  const client = createBridgeClient(child, { deadlines: { status: 10 }, maxPending: 1 })
+  const expired = client.request('status')
+  await assert.rejects(client.request('status'), { code: 'BRIDGE_BUSY' })
+  await assert.rejects(expired, { code: 'BRIDGE_TIMEOUT' })
+  const next = client.request('status')
+  child.stdout.write(`${JSON.stringify({ version: 1, type: 'result', id: sent[0].id, ok: true, payload: { old: true } })}\n`)
+  child.stdout.write(`${JSON.stringify({ version: 1, type: 'result', id: sent[1].id, ok: true, payload: { current: true } })}\n`)
+  assert.deepEqual(await next, { current: true })
+  child.emit('exit', 0)
+})
+
+test('stop acknowledgement and ending stdin do not prove bridge exit', async () => {
+  const { child, sent } = fakeBridge()
+  const client = createBridgeClient(child, { exitTimeoutMs: 15 })
+  const stop = client.request('stop')
+  child.stdout.write(`${JSON.stringify({ version: 1, type: 'result', id: sent[0].id, ok: true, payload: { state: 'stopped' } })}\n`)
+  await stop
+  await assert.rejects(client.close(), { code: 'BRIDGE_EXIT_TIMEOUT' })
+  await assert.rejects(client.request('start'), { code: 'BRIDGE_CLOSING' })
+  child.emit('exit', 0)
+  await client.close()
+})
+
+test('malformed transport rejects requests but shutdown still waits for actual process exit', async () => {
+  const { child } = fakeBridge()
+  const client = createBridgeClient(child, { exitTimeoutMs: 10 })
+  const pending = client.request('status')
+  child.stdout.write('not-json\n')
+  await assert.rejects(pending, { code: 'BRIDGE_PROTOCOL_ERROR' })
+  await assert.rejects(client.close(), { code: 'BRIDGE_EXIT_TIMEOUT' })
+  child.emit('exit', 1)
+  await assert.rejects(client.close(), { code: 'BRIDGE_EXIT_FAILED' })
+})
+
 test('window allows only bundled startup page and the verified Workbench origin', () => {
   const startup = 'file:///C:/Program%20Files/Legion/startup.html'
   const origin = 'http://127.0.0.1:5173'

@@ -57,11 +57,13 @@ Updated order: **Task 4 → Task 1 follow-up → prepare Task 5 payload → Task
 
 **Files:** `desktop/runtime.mjs`, `desktop/main.test.mjs`, `product/launcher/desktop-protocol.mjs`, `product/launcher/desktop-bridge.mjs` and focused tests.
 
-- [ ] Add control deadlines and test timeout cleanup, late replies, bridge death, stop during preparation and repeated retries.
+- [x] Add control deadlines, a pending-request cap and tests for timeout cleanup, late replies and bridge death. Deduplicate desktop retries; preparation cancellation follows in Task 3.
 - [ ] Keep long initialization in an owned worker with explicit progress/cancellation; a stop request must remain serviceable while preparation runs.
-- [ ] Add a stop acknowledgement distinct from bridge exit. Require both for safe teardown; preparation cancellation must not publish a partial runtime or advance the pointer.
+- [x] Require both stop acknowledgement and observed bridge exit for desktop teardown. A sent kill signal no longer counts as process exit; failed process teardown retains Launcher ownership and evidence. Preparation cancellation follows in Task 3.
 - [ ] Add `inspect-quit` and `begin-update` typed requests when Task 6 integrates task admission control. Do not expose generic commands or dump task details in status events.
 - [ ] Commit `feat(desktop): bound lifecycle requests and confirm shutdown` after focused verification.
+
+2026-10-01 evidence: the new supervisor assertions first failed because a signalled process was treated as dead and forced termination was reported successful without exit. Desktop/bridge/supervisor/Launcher verification then passed **77/77**. A real Electron smoke completed two quit/reopen cycles with a fresh DataDir and an explicit missing-identity error. This confirms source-mode lifecycle behavior; it is not complete product or installer acceptance. Production payload preparation is now running separately with exact recursive DSH family overrides (including peer dependencies) and pinned Cordis/Schemastery versions.
 
 ## Task 2: Window, local startup page, and tray
 

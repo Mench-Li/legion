@@ -1,10 +1,10 @@
 # Legion Desktop Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> Created: 2026-09-29. Revised: 2026-09-30 after inspecting the official Harness desktop at commit `639ed015397290b3745d163aafe02ffee4aa3f84`. Work in the existing isolated worktree on branch `codex/legion-desktop`; implement the tasks below sequentially and record evidence.
 
-**Goal:** Ship a Windows x64, per-user Legion desktop application that starts and owns Product Launcher, installs the pinned DSH runtime on first use, presents Workbench in a secure window, and can be installed without a development environment.
+**Goal:** Ship a Windows x64, per-user Legion desktop application that starts and owns Product Launcher, initializes a bundled pinned DSH production payload on first use, presents Workbench in a secure window, and can be installed without a development environment or a first-launch npm download.
 
-**Architecture:** Electron owns the window, tray, and one private credential. A bounded NDJSON child process bridges Electron to the existing Product Launcher; Launcher alone owns services and their DataDir lock. Product data remains outside the install tree. Workbench and the local proxy enforce a desktop-only authentication boundary. Packaging uses a pinned Node/npm and a verified production file closure.
+**Architecture:** Electron owns the window, tray, and one private credential. A bounded NDJSON child process bridges Electron to the existing Product Launcher; Launcher alone owns preparation, services and the DataDir lock. Product data remains outside the install tree. Workbench and team-hub enforce a desktop authentication boundary. Packaging binds pinned Node/npm, DSH, Legion and patch versions into one verified release. Core dependencies are prepared during the build, then imported locally at first launch. CLI/development can explicitly use the existing npm installer.
 
 **Tech Stack:** Electron, Node.js ESM, Node test runner, existing Vite/React Workbench, electron-builder/NSIS, PowerShell Windows acceptance scripts.
 
@@ -19,6 +19,17 @@
 - Do not claim a releasable installer until a clean Windows x64 standard-user VM with no Node, DSH, or source checkout passes the acceptance matrix.
 - Keep secrets out of argv, URL, events, diagnostics, renderer state, and logs. The desktop token passes only through private stdio and trusted request headers.
 - Baseline on 2026-09-29: `node --test product/launcher/cli.test.mjs product/launcher/launcher.test.mjs product/launcher/supervisor.test.mjs` passed 106/106 in the isolated worktree.
+- Preserve the qualified `0.1.5-rc.2` DSH candidate until a separate compatibility check authorizes a new exact DSH/patch combination. Referencing official `0.2.0-rc.2` desktop code does not upgrade our runtime.
+- Keep Node-based backend code, DSH modules, native addons and executable resources outside ASAR. No profile or dependency may resolve through the original developer checkout.
+- Main-process credential injection must bind both the owned window/session and the verified Workbench origin. Local IPC accepts the owning window's main frame only.
+
+## Progress and execution order
+
+Task 1 is committed as `8e5e4f31`; the bridge/protocol and existing Launcher suites passed 114/114. Task 2 is committed as `f1ccd0e`; focused desktop tests passed 5/5, and real Windows Electron launches verified second-launch focus, close-to-tray, reopen and two graceful quit/relaunch cycles with no bridge remaining. These are source-mode checks; they do not establish complete product startup or installer readiness.
+
+Task 4 has partial API guards and two passing real-server tests in the worktree. Main-process token delivery and bridge credential propagation remain open. Tasks 3, 5, 6 and 7 are pending.
+
+Updated order: **finish Task 4 → Task 1 follow-up → prepare Task 5 payload → Task 3 local initialization and wizard → complete Task 5 installer → Task 6 → Task 7**. The official-reference design update is committed before further implementation. Follow-up Task 1 changes are a separate commit; keep the original completed evidence intact.
 
 ## Review Focus
 
@@ -36,39 +47,51 @@
 
 **Produces:** A version-1, 64 KiB maximum line protocol. `start`, `status`, `stop`, `restart` each have an ID and one final response. Bridge invokes `launcherOptionsFrom` and `createLauncher`, serializes lifecycle mutations, sends only allowlisted status fields, and stops owned services on clean stdin close. Unknown commands and malformed lines receive named errors without exiting.
 
-- [ ] Write protocol and bridge tests for partial lines, oversized input, invalid version/type, request correlation, duplicate start, stop/restart, and secret-free events. Identify the expected failure.
-- [ ] Run only these tests and see RED for missing behavior.
-- [ ] Implement parsing, bounded writes, lifecycle state, and Launcher adapter. Keep stdio wiring separate from the testable handler.
-- [ ] Run focused tests to GREEN, then existing Launcher tests.
-- [ ] Commit `feat(desktop): add bounded launcher control bridge`.
+- [x] Write protocol and bridge tests for partial lines, oversized input, invalid version/type, request correlation, duplicate start, stop/restart, and secret-free events. Identify the expected failure.
+- [x] Run only these tests and see RED for missing behavior.
+- [x] Implement parsing, bounded writes, lifecycle state, and Launcher adapter. Keep stdio wiring separate from the testable handler.
+- [x] Run focused tests to GREEN, then existing Launcher tests.
+- [x] Commit `feat(desktop): add bounded launcher control bridge`.
+
+### Task 1 follow-up from the official reference
+
+**Files:** `desktop/runtime.mjs`, `desktop/main.test.mjs`, `product/launcher/desktop-protocol.mjs`, `product/launcher/desktop-bridge.mjs` and focused tests.
+
+- [ ] Add control deadlines and test timeout cleanup, late replies, bridge death, stop during preparation and repeated retries.
+- [ ] Keep long initialization in an owned worker with explicit progress/cancellation; a stop request must remain serviceable while preparation runs.
+- [ ] Add a stop acknowledgement distinct from bridge exit. Require both for safe teardown; preparation cancellation must not publish a partial runtime or advance the pointer.
+- [ ] Add `inspect-quit` and `begin-update` typed requests when Task 6 integrates task admission control. Do not expose generic commands or dump task details in status events.
+- [ ] Commit `feat(desktop): bound lifecycle requests and confirm shutdown` after focused verification.
 
 ## Task 2: Window, local startup page, and tray
 
-**Files:** `desktop/package.json`, `desktop/main.mjs`, `desktop/preload.mjs`, `desktop/startup.html`, `desktop/startup.mjs`, `desktop/main.test.mjs`, `desktop/README.md`.
+**Files:** `desktop/package.json`, `desktop/main.mjs`, `desktop/preload.cjs`, `desktop/startup.html`, `desktop/startup.mjs`, `desktop/main.test.mjs`, `desktop/README.md`.
 
 **Produces:** Electron single-instance window and physical tray; local page shows bridge status and retry/stop actions. Main process starts exactly one bridge with packaged Node, validates IPC sender, waits for verified Workbench URL, and handles bridge death as a visible error. Navigation is restricted to the startup page and verified local Workbench origin; external links use protocol allowlist. Closing hides to tray and “Exit” stops Launcher.
 
-- [ ] Test the pure lifecycle/window policy and bridge client with controlled child streams; see RED.
-- [ ] Implement minimal Electron shell and preload allowlist; see GREEN.
-- [ ] Perform manual double-launch, close-to-tray, reopen, and exit check on Windows; capture process tree.
-- [ ] Commit `feat(desktop): add Electron shell and tray`.
+- [x] Test the pure lifecycle/window policy and bridge client with controlled child streams; see RED.
+- [x] Implement minimal Electron shell and preload allowlist; see GREEN.
+- [x] Perform manual double-launch, close-to-tray, reopen, and exit check on Windows; capture process tree.
+- [x] Commit `feat(desktop): add Electron shell and tray`.
 
 ## Task 3: First-run installation and configuration
 
-**Files:** `product/launcher/desktop-bridge.mjs`, `product/launcher/desktop-bridge.test.mjs`, `desktop/startup.mjs`, `desktop/startup.html`, `desktop/startup.test.mjs` plus existing runtime-install/wizard modules only as required.
+**Files:** `product/launcher/desktop-bridge.mjs`, `product/launcher/desktop-bridge.test.mjs`, new bundled-runtime importer and tests, `desktop/startup.mjs`, `desktop/startup.html`, `desktop/startup.test.mjs` plus existing runtime-install/wizard/ownership modules as required.
 
-**Produces:** Bridge `prepare-runtime` uses the shipped signed/validated manifest and existing atomic runtime installer, then exposes wizard steps as structured requests. UI shows real download/start/configure/verify states and retry. Model secret travels only via stdio, never URL/argv/event. Configuration must be verified before claiming first-run complete.
+**Produces:** Bridge `prepare-runtime` validates the release descriptor and imports the bundled production tree through staging, verification, completion marker and atomic pointer switch. Initialization and running services share one Launcher-owned DataDir lock. UI exposes workspace selection, explicit enforcement identity/scope, model configuration and real verification with resume/retry. Model secret travels only via private stdio and protected secrets storage. Orchestrator admission remains paused until contracts and setup consent succeed.
 
-- [ ] Write failing offline/retry/manifest rejection and wizard-resume tests.
-- [ ] Connect existing runtime installer and wizard APIs; make tests pass.
-- [ ] Exercise first run using a fresh temporary DataDir, with network-failure injection.
+- [ ] Write failing tests for offline local preparation, bad file hash/platform/version/patch, interrupted copy, cancellation, orphaned complete directory and wizard resume.
+- [ ] Extend Launcher ownership to preparation without releasing the lock between initialization and service startup. Verify a concurrent CLI launch is rejected without touching data.
+- [ ] Implement local importer with shared paths, write guard and current-pointer semantics; never run npm or silently fall back to network in packaged mode.
+- [ ] Connect wizard with real model-profile probe and Runtime Contract observation; failed verification cannot enable automatic work.
+- [ ] Exercise a fresh temporary DataDir with network disabled, then separately verify model setup and a real task when credentials/network are available.
 - [ ] Commit `feat(desktop): connect first-run setup`.
 
 ## Task 4: Desktop local API authentication
 
-**Files:** `workbench/scripts/serve.mjs`, `workbench/scripts/serve.test.mjs`, `product/launcher/launcher.mjs`, `product/launcher/launcher.test.mjs`, `desktop/main.mjs`.
+**Files:** `product/local-auth.mjs`, `workbench/scripts/serve.mjs`, `workbench/scripts/desktop-auth.test.mjs`, `team-hub/server.mjs`, related config schemas, `product/process-manifest.mjs`, `product/launcher/launcher.mjs`, `product/launcher/desktop-security.test.mjs`, `product/launcher/desktop-bridge.mjs`, `desktop/main.mjs` and focused tests.
 
-**Produces:** Non-empty per-launch Workbench token flows from main process through bridge to Workbench. Desktop-mode API and `/hub` proxy enforce token, exact loopback `Host`, and expected `Origin`. Main process injects token only into trusted Workbench requests; renderer cannot read it. Existing browser/dev mode remains explicitly configured and tested.
+**Produces:** Non-empty per-launch Workbench token flows from main through bridge to Workbench; a separate private hub token reaches only team-hub, its proxy and authorized workers. Desktop API and `/hub` proxy enforce token, exact loopback `Host`, and expected `Origin`; hub reads are protected too. Main injects credentials only for the owned main frame/session and verified Workbench target. Readiness probes authenticate; browser/development compatibility remains tested.
 
 - [ ] Write tests that unauthenticated reads and writes, malicious Host/Origin, and direct proxy requests fail; valid trusted requests succeed. See RED.
 - [ ] Implement authentication and token propagation without logging credentials; see GREEN.
@@ -77,22 +100,25 @@
 
 ## Task 5: Production asset closure and installer
 
-**Files:** `desktop/package.json`, `desktop/electron-builder.yml`, `desktop/scripts/stage.mjs`, `desktop/scripts/verify-closure.mjs`, tests, `product/release/runtime-manifest.json`, `docs/prt/PRT-011-dsh-distribution-decision.md`.
+**Files:** `desktop/package.json`, `desktop/electron-builder.yml`, `desktop/scripts/stage.mjs`, `desktop/scripts/verify-closure.mjs`, payload build script and lock inputs, release-descriptor module/tests, `product/release/runtime-manifest.json`, `docs/superpowers/prt/PRT-011-dsh-distribution-decision.md`.
 
-**Produces:** Version-pinned Electron/Node/npm, built Workbench, production Legion modules and dependencies staged in a clean tree. Closure check rejects missing imports, development-root references, escaping symlinks/junctions, and missing executable assets. NSIS creates per-user Windows x64 installer and stable shortcuts. Product manifest binds desktop, Node, Legion, DSH, patch versions and hashes. Update PRT-011 to record bundled Node decision.
+**Produces:** Version-pinned Electron/Node/npm, built Workbench, Legion production modules and a locked DSH production payload staged in a clean tree. A desktop release descriptor binds exact component versions, bridge generation, target and inventory hashes against the existing runtime manifest. Closure checks reject missing imports, developer-root references, escaping links and unavailable native resources. NSIS creates a current-user x64 installer and stable shortcuts. PRT-011 records the desktop payload decision separately from CLI route C.
 
-- [ ] Write failing closure tests for missing module, outside link, and absent Workbench build.
-- [ ] Implement staging and installer config, then pass closure tests and unpacked-app smoke test.
-- [ ] Build installer; test installation path containing spaces under non-admin user.
+- [ ] Write failing closure/descriptor tests for missing module/build/native asset, outside link, wrong target, file-hash or component-version mismatch.
+- [ ] Build a locked production payload in an isolated build root; materialize dependency links, retain required licenses and target assets, measure actual payload and staging disk size.
+- [ ] Verify payload using the bundled Node rather than host PATH; keep backend modules and resources outside ASAR. This payload is a prerequisite for Task 3 acceptance.
+- [ ] Implement NSIS/install staging and pass unpacked and installed-app smoke checks with no developer paths available.
+- [ ] Build installer; test installation path containing spaces under non-admin user, offline first preparation and an existing user DSH home remaining independent.
 - [ ] Commit `build(desktop): stage and package Windows installer`.
 
 ## Task 6: Upgrade, recovery, and uninstall wiring
 
 **Files:** `desktop/main.mjs`, `product/upgrade/*` targeted modules/tests, `desktop/scripts/*`, NSIS hooks.
 
-**Produces:** Existing upgrade coordinator is sole update owner. Stop accepting work, verify artifact, wait for owned processes to exit, switch version pointer, run real health probes, and expose rollback/forward-repair status. Uninstall preserves product data and workspace by default.
+**Produces:** Existing upgrade coordinator is sole update owner. Inspect quit impact, stop new admission and drain accepted requests before upgrade, verify the bound release, receive graceful teardown confirmation and observe process exit, switch pointers and run real probes. Forced termination or unknown work cannot authorize installer handoff. Independent recovery works while Host/Workbench are unavailable, and bounded redacted reports retain up to ten failures. Uninstall preserves product data and workspace by default.
 
-- [ ] Write failing tests for locked files, bad signature/hash, migration failure, health failure, and data-preserving uninstall.
+- [ ] Write failing tests for active/unknown quit impact, inspection deadline, admission race, missing stop acknowledgement, locked files, bad signature/hash, migration/health failure and data-preserving uninstall.
+- [ ] Add bounded crash reports and native/local recovery; verify secret redaction and report-write timeout, and back up optional plugin settings without disabling enforcement.
 - [ ] Wire upgrade and UI events, then pass the focused and product upgrade suites.
 - [ ] Rehearse upgrade and rollback on Windows VM with real installed app.
 - [ ] Commit `feat(desktop): wire upgrade and recovery`.
@@ -101,7 +127,7 @@
 
 **Files:** `desktop/scripts/acceptance.ps1`, `docs/release/legion-desktop-acceptance.md`, license/SBOM outputs.
 
-**Produces:** Repeatable Windows x64 standard-user acceptance evidence for install, first run, task execution, second launch, crash/recovery, shutdown, upgrade, uninstall, data retention, license/SBOM, hashes and signing. Record every unmet gate as open; internal build is not stable merely because unit tests pass.
+**Produces:** Repeatable Windows x64 standard-user acceptance evidence for install, offline core preparation, real model/task execution, second launch, crash/recovery, task-aware shutdown, upgrade, uninstall, data retention, license/SBOM, hashes and signing. Record every unmet gate as open; internal build is not stable merely because unit tests pass.
 
 - [ ] Run full repository test gates and installed-app acceptance on a clean VM without developer tools.
 - [ ] Capture exact installer hash, signed/unsigned status, process tree, readiness probes, task/audit evidence, and recovery results.

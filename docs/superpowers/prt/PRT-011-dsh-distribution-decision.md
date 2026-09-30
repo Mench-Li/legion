@@ -1,11 +1,28 @@
 # PRT-011 DSH 分发形态决策
 
 **对应**：`PRT-011`
-**状态**：✅ **已裁决（2026-09-11）：路线 C** —— 依赖 `@deepseek-ai/dsh` npm 包，
-由 Launcher 装进 `DataDir` 并做原子切换。
+**状态**：已裁决。2026-09-11 路线 C 继续适用于 CLI/开发部署；2026-09-30 独立桌面发行增加随包生产载荷决定，见下文修订。
 **采集方式**：`D:\project\DSH\dsh\deepseek-harness` 与 `$DSH_HOME` 实测（2026-09-11）
 
 ---
+
+## 2026-09-30 桌面发行修订
+
+本节对独立 Windows x64 桌面发行生效，覆盖下文历史裁决中“首启联网安装 DSH”和“不内置 Node”的对应限制。历史采集结果与 CLI npm 安装器保留，便于追溯。
+
+| 项目 | 桌面正式包决定 |
+| --- | --- |
+| 核心代码来源 | 构建时获取精确版本 `@deepseek-ai/dsh`，携带锁定、校验后的生产依赖和 Legion 组合包 |
+| 客户运行时 | 自带固定 Node/npm；首次启动不依赖系统 Node，不执行 npm 获取核心包 |
+| 首次初始化 | Launcher 在同一 DataDir 所有权下把随包载荷暂存、校验并原子发布到 `runtime/dsh/versions/`，最后切换 `current.json` |
+| 隔离 | 安装资源只读；产品专属 home/profile 和数据可写，独立于用户已有 CLI/官方桌面可执行依赖 |
+| 版本选择 | 桌面、Node/npm、DSH、Legion、补丁与协议形成精确发行组合；不在客户端选 `latest` 或兼容区间 |
+| 网络边界 | 完整包可断网初始化核心；远程模型验证/执行与更新仍需对应网络；载荷损坏不自动联网补装 |
+| 发行成本 | 测量生产闭包包体和 DataDir 复制空间，随 Legion 发行维护签名、许可证与安全更新 |
+
+依据为官方 [生产载荷构建](https://github.com/deepseek-ai/deepseek-harness/blob/639ed015397290b3745d163aafe02ffee4aa3f84/apps/desktop/scripts/prepare-dsh.ts)，设计详见 [Legion 桌面方案 §6 与 §13](../specs/2026-09-27-legion-desktop-design.md)。官方 Host 使用 Electron Node 模式；Legion 首发保留独立 Node，以沿用现有 Launcher/运行时契约。此决定不自动把本项目 DSH `0.1.5-rc.2` 升级为参考提交的 `0.2.0-rc.2`。
+
+2026-09-11 的约 1.6 GB 数字来自包含 dev 依赖的 checkout，不能用于预测桌面生产包体。原先据此排除随包路线的推断不再用于桌面发行。随包初始化、真实安装器及干净机器验收仍是待交付项，本修订不宣称它们已经实现。
 
 ## 0. 裁决结果
 

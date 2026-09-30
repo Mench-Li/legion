@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('legion', Object.freeze({
   chooseWorkspace: () => ipcRenderer.invoke('legion:command', 'choose-workspace'),
   configureWorkspace: () => ipcRenderer.invoke('legion:command', 'configure-workspace'),
   configureIdentity: (identity) => ipcRenderer.invoke('legion:command', 'configure-identity', identity),
+  configureModel: (model) => ipcRenderer.invoke('legion:command', 'configure-model', model),
   onState: (callback) => {
     if (typeof callback !== 'function') return () => {}
     const listener = (_event, state) => callback(state)

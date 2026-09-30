@@ -7,7 +7,7 @@ import { resolveLayout } from '../paths.mjs'
 import { configValueAt, loadProductConfig } from '../config.mjs'
 import { createDesktopLauncher } from './desktop-launcher.mjs'
 import { createDesktopBridge, desktopOptionsFrom } from './desktop-bridge.mjs'
-import { readDesktopSettings, selectedWorkspace, writeDesktopSettings } from './desktop-settings.mjs'
+import { readDesktopSettings, selectedWorkspace, writeDesktopModelVerified, writeDesktopSettings } from './desktop-settings.mjs'
 import { acquireSingleInstance } from './single-instance.mjs'
 
 async function fixture(t) {
@@ -152,6 +152,20 @@ test('identity persistence rejects incomplete input and plaintext credential fie
   await owner.stop()
 })
 
+test('verified model metadata is stored without a key and remains tied to the selected workspace', async t => {
+  const { workspace, layout } = await fixture(t)
+  await mkdir(layout.dataDir, { recursive: true })
+  writeDesktopSettings(layout)
+  const verified = writeDesktopModelVerified(layout, { verifiedAt: '2026-10-01T00:00:00.000Z', credentialUpdatedAt: '2026-10-01T00:00:00.000Z' })
+  assert.deepEqual(verified, { state: 'configured', phase: 'model-verified', workspace })
+  assert.deepEqual(readDesktopSettings(layout.dataDir), { version: 1, workspace,
+    model: { provider: 'deepseek-official', model: 'deepseek-flash', endpoint: 'https://api.deepseek.com', verifiedAt: '2026-10-01T00:00:00.000Z', credentialUpdatedAt: '2026-10-01T00:00:00.000Z' } })
+  const persisted = await readFile(join(layout.dataDir, 'desktop.settings.json'), 'utf8')
+  assert.doesNotMatch(persisted, /apiKey|secret-fixture/)
+  await assert.rejects(Promise.resolve().then(() => writeDesktopModelVerified({ ...layout, workspaceDir: join(workspace, 'missing') })),
+    { code: 'WORKSPACE_SELECTION_CHANGED' })
+})
+
 test('invalid selection cannot instantiate a launcher or stop a running owner', async () => {
   let stopped = false
   const bridge = createDesktopBridge({ optionsFactory: () => ({ options: {} }), launcherFactory: () => ({
@@ -180,4 +194,19 @@ test('saved workspace resumes identity setup and overrides an inherited workspac
   assert.equal(result.payload.code, 'ENFORCEMENT_IDENTITY_MISSING')
   assert.equal(constructed, false)
   await bridge.close()
+})
+
+test('desktop startup gates the model step until a successful model verification is recorded', async t => {
+  const { workspace, layout } = await fixture(t)
+  await mkdir(layout.dataDir, { recursive: true })
+  writeDesktopSettings(layout)
+  const env = { LEGION_HOME: layout.productHome, LEGION_INSTALL_DIR: layout.installDir,
+    LEGION_WORKSPACE_DIR: join(workspace, 'unrelated-missing') }
+  const owner = createDesktopLauncher({ layout })
+  t.after(() => owner.stop())
+  await owner.configureIdentity({ actor: 'operator', scope: 'repo', action: 'repo:read', allowWorkspaceWrites: false })
+  assert.equal(desktopOptionsFrom({ env }).desktopSetupPhase, 'model')
+  writeDesktopModelVerified(layout, { credentialUpdatedAt: new Date().toISOString() })
+  assert.equal(desktopOptionsFrom({ env }).desktopSetupPhase, undefined)
+  await owner.stop()
 })

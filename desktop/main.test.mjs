@@ -103,7 +103,7 @@ test('sandbox-compatible preload exposes only the startup command allowlist', as
       ipcRenderer: { invoke(_channel, command) { calls.push(command); return Promise.resolve(command) }, on() {}, removeListener() {} },
     }),
   })
-  assert.deepEqual(Object.keys(exposed).sort(), ['chooseWorkspace', 'configureIdentity', 'configureWorkspace', 'onState', 'retry', 'status', 'stop'])
+  assert.deepEqual(Object.keys(exposed).sort(), ['chooseWorkspace', 'configureIdentity', 'configureModel', 'configureWorkspace', 'onState', 'retry', 'status', 'stop'])
   assert.equal(await exposed.retry(), 'retry')
   assert.deepEqual(calls, ['retry'])
 })

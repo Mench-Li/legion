@@ -2,7 +2,31 @@ import { Worker } from 'node:worker_threads'
 import { createLauncher } from './launcher.mjs'
 import { acquireSingleInstance } from './single-instance.mjs'
 import { initializeProductDir } from '../init.mjs'
-import { assertDesktopSetupLayout, writeDesktopIdentity, writeDesktopSettings } from './desktop-settings.mjs'
+import { assertDesktopSetupLayout, writeDesktopIdentity, writeDesktopModelVerified, writeDesktopSettings } from './desktop-settings.mjs'
+
+const MODEL_KEY_REF = 'model/api-key'
+const MODEL_PROFILE = Object.freeze({ id: 'deepseek-official', provider: 'deepseek-official',
+  model: 'deepseek-flash', endpoint: 'https://api.deepseek.com', secretRef: MODEL_KEY_REF })
+
+function validateDesktopModelInput(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)
+    || Object.keys(input).some(key => key !== 'apiKey')
+    || typeof input.apiKey !== 'string' || !/^[\x21-\x7e]{8,512}$/u.test(input.apiKey)) {
+    throw Object.assign(new Error('Model setup invalid'), { code: 'MODEL_INPUT_INVALID' })
+  }
+  return input.apiKey
+}
+
+async function probeDeepSeekModel(apiKey) {
+  const [{ createModelProbe }, { createHttpTransport }] = await Promise.all([
+    import('../../runtime/probe/index.mjs'), import('../../runtime/probe/http.mjs'),
+  ])
+  const probe = createModelProbe({ transport: createHttpTransport(), resolveSecret: async ref => {
+    if (ref !== MODEL_KEY_REF) throw Object.assign(new Error('Unexpected model secret reference'), { code: 'SECRET_REF_INVALID' })
+    return apiKey
+  } })
+  return probe.probe({ profile: MODEL_PROFILE, force: true })
+}
 
 export function prepareInWorker(input, { signal, onProgress = () => {} } = {}) {
   return new Promise((resolve, reject) => {
@@ -29,6 +53,7 @@ export function prepareInWorker(input, { signal, onProgress = () => {} } = {}) {
 // owns no filesystem lock; the same lock handle is handed to the existing Launcher.
 export function createDesktopLauncher(options, {
   launcherFactory = createLauncher, acquireLock = acquireSingleInstance, prepare = prepareInWorker,
+  openSecrets = null, probeModel = probeDeepSeekModel,
 } = {}) {
   let lease = null
   let inner = null
@@ -79,6 +104,34 @@ export function createDesktopLauncher(options, {
       await ensureLease()
       try { return writeDesktopIdentity(options.layout, input) }
       catch (error) { release(); throw error }
+    },
+    async configureModel(input) {
+      if (inner || preparing) throw Object.assign(new Error('Services already started'), { code: 'DESKTOP_SETUP_BUSY' })
+      assertDesktopSetupLayout(options.layout)
+      const apiKey = validateDesktopModelInput(input)
+      await ensureLease()
+      const verdict = await probeModel(apiKey, MODEL_PROFILE)
+      if (verdict?.ok !== true) {
+        throw Object.assign(new Error('DeepSeek model verification failed'), {
+          code: typeof verdict?.code === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(verdict.code)
+            ? `MODEL_PROBE_${verdict.code}` : 'MODEL_PROBE_FAILED',
+        })
+      }
+      const opened = typeof openSecrets === 'function'
+        ? await openSecrets({ layout: options.layout, requireProtected: true })
+        : await (await import('../secrets.mjs')).openProductSecrets({ layout: options.layout, requireProtected: true })
+      if (opened?.ok !== true || opened?.store?.protection?.().protected !== true) {
+        throw Object.assign(new Error('Protected SecretStore unavailable'), { code: 'SECRETS_STORE_UNAVAILABLE' })
+      }
+      try {
+        const metadata = await opened.store.put(MODEL_KEY_REF, apiKey, { purpose: 'model' })
+        return writeDesktopModelVerified(options.layout, { credentialUpdatedAt: metadata?.updatedAt })
+      } catch (error) {
+        if (/^[A-Z][A-Z0-9_]{1,63}$/.test(error?.code ?? '')) {
+          throw Object.assign(new Error('Could not save model configuration'), { code: error.code })
+        }
+        throw Object.assign(new Error('Could not save model configuration'), { code: 'MODEL_SECRET_STORE_FAILED' })
+      }
     },
     cancelPreparation() { abort?.abort() },
     async start() {

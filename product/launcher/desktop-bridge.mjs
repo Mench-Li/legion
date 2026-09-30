@@ -12,7 +12,8 @@ import { ENFORCEMENT_IDENTITY_ENV } from './enforcement-identity.mjs'
 
 export function desktopOptionsFrom({ workspace, env = process.env, nodePath = process.execPath } = {}) {
   const initial = launcherOptionsFrom({ env, nodePath })
-  const saved = workspace ?? (initial.options.layout.dataDir ? readDesktopSettings(initial.options.layout.dataDir)?.workspace : undefined)
+  const savedSettings = initial.options.layout.dataDir ? readDesktopSettings(initial.options.layout.dataDir) : null
+  const saved = workspace ?? savedSettings?.workspace
   const input = saved === undefined ? initial : launcherOptionsFrom({ argv: [`--workspace=${saved}`],
     env: { ...env, LEGION_WORKSPACE_DIR: undefined }, nodePath })
   // Missing operator declarations are a setup step. This checks only absence;
@@ -21,7 +22,8 @@ export function desktopOptionsFrom({ workspace, env = process.env, nodePath = pr
     const value = input.options.runtimeEnv[ENFORCEMENT_IDENTITY_ENV[field]]
     return typeof value !== 'string' || value.trim() === ''
   })) input.desktopSetupPhase = 'identity'
-  else if (input.options.layout.workspaceDir !== null) input.desktopSetupPhase = 'model'
+  else if (input.options.layout.workspaceDir !== null && savedSettings?.model === undefined) input.desktopSetupPhase = 'model'
+  input.desktopModelSetup = savedSettings?.model ?? null
   return input
 }
 
@@ -49,6 +51,15 @@ function publicStatus(status) {
 export function createDesktopBridge({
   launcherFactory = options => options.bundledRuntime || options.desktopSetup ? createDesktopLauncher(options) : createLauncher(options),
   optionsFactory = desktopOptionsFrom,
+  modelCredentialVerifier = async (input) => {
+    try {
+      const { openProductSecrets } = await import('../secrets.mjs')
+      const opened = await openProductSecrets({ layout: input.options.layout, requireProtected: true })
+      if (opened?.ok !== true) return false
+      const metadata = await opened.store.describe('model/api-key')
+      return metadata?.updatedAt === input.desktopModelSetup?.credentialUpdatedAt
+    } catch { return false }
+  },
   emit = () => {},
 } = {}) {
   let launcher = null
@@ -65,7 +76,7 @@ export function createDesktopBridge({
     return launcher === null ? { state: 'unavailable', processes: [], workbenchUrl: null } : publicStatus(launcher.status())
   }
 
-  function ensureLauncher({ setup = false } = {}) {
+  async function ensureLauncher({ setup = false } = {}) {
     if (launcher !== null) return launcher
     const input = optionsFactory(selected === null ? {} : { workspace: selected })
     const blocking = [...(input.layoutDiagnostics ?? []), ...(input.configDiagnostics ?? [])]
@@ -79,6 +90,11 @@ export function createDesktopBridge({
       throw Object.assign(new Error('First-run setup is incomplete'), {
         code: input.desktopSetupPhase === 'identity' ? 'ENFORCEMENT_IDENTITY_MISSING' : 'MODEL_NOT_CONFIGURED',
       })
+    }
+    if (!setup && input.desktopModelSetup !== null && input.desktopModelSetup !== undefined) {
+      if (!await modelCredentialVerifier(input)) {
+        throw Object.assign(new Error('Verified model credential has changed'), { code: 'MODEL_NOT_CONFIGURED' })
+      }
     }
     const options = { ...input.options, desktopCredentials: credentials, desktopSetup: setup }
     if (bundleRoot !== null) {
@@ -98,7 +114,7 @@ export function createDesktopBridge({
     if (closed) return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: false, payload: { code: 'BRIDGE_CLOSED' } }
     try {
       if (type === 'status') return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: true, payload: status() }
-      if (type === 'start' || type === 'restart' || type === 'prepare-runtime' || type === 'configure-workspace' || type === 'configure-identity') {
+      if (type === 'start' || type === 'restart' || type === 'prepare-runtime' || type === 'configure-workspace' || type === 'configure-identity' || type === 'configure-model') {
         if (stopPending) throw Object.assign(new Error('Start superseded by stop'), { code: 'PREPARATION_CANCELLED' })
         const suppliedRoot = request.payload?.bundleRoot
         if (suppliedRoot !== undefined) {
@@ -122,7 +138,7 @@ export function createDesktopBridge({
           ownsLifecycle = false
           launcher = null
           selected = workspace
-          const owner = ensureLauncher({ setup: true })
+          const owner = await ensureLauncher({ setup: true })
           ownsLifecycle = true
           const payload = await owner.configureWorkspace()
           return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: true, payload }
@@ -133,12 +149,22 @@ export function createDesktopBridge({
           if (launcher !== null && ownsLifecycle) await launcher.stop({ reason: '保存操作者身份设置' })
           ownsLifecycle = false
           launcher = null
-          const owner = ensureLauncher({ setup: true })
+          const owner = await ensureLauncher({ setup: true })
           ownsLifecycle = true
           const payload = await owner.configureIdentity(identity)
           return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: true, payload }
         }
-        const owner = ensureLauncher()
+        if (type === 'configure-model') {
+          if (running) throw Object.assign(new Error('Services running'), { code: 'DESKTOP_SETUP_BUSY' })
+          if (launcher !== null && ownsLifecycle) await launcher.stop({ reason: '验证桌面端模型设置' })
+          ownsLifecycle = false
+          launcher = null
+          const owner = await ensureLauncher({ setup: true })
+          ownsLifecycle = true
+          const payload = await owner.configureModel(request.payload?.model)
+          return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: true, payload }
+        }
+        const owner = await ensureLauncher()
         if (type === 'prepare-runtime') {
           if (typeof owner.prepareRuntime !== 'function') throw Object.assign(new Error('Bundle required'), { code: 'BUNDLE_PATH_REQUIRED' })
           ownsLifecycle = true

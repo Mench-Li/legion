@@ -106,6 +106,55 @@ test('bridge requires a credential handshake and privately scopes distinct servi
   await bridge.close()
 })
 
+test('model configuration crosses only the authenticated bridge request and never returns the key', async () => {
+  const key = 'sk-model-setup-secret'
+  let received = null
+  const events = []
+  const bridge = createDesktopBridge({
+    optionsFactory: () => ({ options: {} }), emit: event => events.push(event),
+    launcherFactory: () => ({
+      async configureModel(input) { received = input; return { state: 'configured', phase: 'model-verified' } },
+      async start() { return { ok: true } }, async stop() {}, status() { return { state: 'unavailable', processes: [] } },
+    }),
+  })
+  const response = await bridge.handle({ version: 1, id: 'model-setup', type: 'configure-model',
+    payload: { token: 'a'.repeat(64), model: { apiKey: key } } })
+  assert.equal(response.ok, true)
+  assert.equal(received.apiKey, key)
+  assert.doesNotMatch(JSON.stringify([response, events]), /sk-model-setup-secret/)
+  await bridge.close()
+})
+
+test('changed or missing protected model credentials reopen setup instead of trusting an old verification', async () => {
+  let constructed = false
+  const bridge = createDesktopBridge({
+    optionsFactory: () => ({ options: {}, desktopModelSetup: { credentialUpdatedAt: 'old-version' } }),
+    modelCredentialVerifier: async input => input.desktopModelSetup.credentialUpdatedAt === 'current-version',
+    launcherFactory: () => { constructed = true; throw new Error('must not start') },
+  })
+  const result = await bridge.handle({ version: 1, id: 'start', type: 'start', payload: { token: 'a'.repeat(64) } })
+  assert.equal(result.payload.code, 'MODEL_NOT_CONFIGURED')
+  assert.equal(constructed, false)
+  await bridge.close()
+})
+
+test('current protected credential metadata permits automatic backend startup', async () => {
+  let starts = 0
+  const bridge = createDesktopBridge({
+    optionsFactory: () => ({ options: {}, desktopModelSetup: { credentialUpdatedAt: 'current-version' } }),
+    modelCredentialVerifier: async () => true,
+    launcherFactory: () => ({
+      async start() { starts++; return { ok: true } }, async stop() {},
+      status() { return { state: 'ready', processes: [{ key: 'workbench', state: 'ready', url: 'http://127.0.0.1:5173' }] } },
+    }),
+  })
+  const result = await bridge.handle({ version: 1, id: 'start-current', type: 'start', payload: { token: 'a'.repeat(64) } })
+  assert.equal(result.ok, true)
+  assert.equal(result.payload.state, 'ready')
+  assert.equal(starts, 1)
+  await bridge.close()
+})
+
 test('stdio status and stop remain serviceable while runtime preparation is pending', { timeout: 1000 }, async () => {
   const input = new PassThrough(), output = new PassThrough()
   let entered, cancel, finished

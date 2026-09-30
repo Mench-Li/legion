@@ -162,7 +162,9 @@ async function performStart(type, generation) {
     report(phase ? { state: 'setup-required', phase, workspace: selectedWorkspace }
       : { state: 'failed', code: error?.code ?? 'START_FAILED' })
     if (window && !window.isDestroyed()) {
-      try { await window.loadURL(startupUrl) } catch { report({ state: 'failed', code: 'STARTUP_PAGE_FAILED' }) }
+      if (window.webContents.getURL() !== startupUrl) {
+        try { await window.loadURL(startupUrl) } catch { report({ state: 'failed', code: 'STARTUP_PAGE_FAILED' }) }
+      }
     }
   }
 }
@@ -249,6 +251,23 @@ if (!app.requestSingleInstanceLock()) {
               ...(app.isPackaged ? { bundleRoot: process.resourcesPath } : {}) })
             if (!stopping && !quitting) report(result)
           } catch (error) { if (!stopping && !quitting) report({ state: 'failed', code: error?.code ?? 'DESKTOP_SETUP_FAILED' }) }
+        })()
+        try { await serviceTransition; return current } finally { serviceTransition = null }
+      }
+      if (command === 'configure-model') {
+        if (stopping || serviceTransition || current.state !== 'setup-required' || current.phase !== 'model') throw new Error('DESKTOP_SETUP_BUSY')
+        serviceTransition = (async () => {
+          try {
+            report({ state: 'starting', phase: 'verifying-model' })
+            const model = await bridge.request('configure-model', { model: payload, token: desktopToken,
+              ...(app.isPackaged ? { bundleRoot: process.resourcesPath } : {}) })
+            if (!stopping && !quitting && model?.state === 'configured') {
+              await performStart('start', ++viewGeneration)
+            } else if (!stopping && !quitting) report({ state: 'setup-required', phase: 'model', workspace: selectedWorkspace })
+          } catch (error) {
+            if (!stopping && !quitting) report({ state: 'setup-required', phase: 'model', workspace: selectedWorkspace,
+              code: error?.code ?? 'MODEL_SETUP_FAILED' })
+          }
         })()
         try { await serviceTransition; return current } finally { serviceTransition = null }
       }

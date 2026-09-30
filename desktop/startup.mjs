@@ -10,10 +10,12 @@ const workspacePath = document.querySelector('#workspace-path')
 const configureWorkspace = document.querySelector('#configure-workspace')
 const identityForm = document.querySelector('#identity-form')
 const allowWrites = document.querySelector('#allow-workspace-writes')
+const modelForm = document.querySelector('#model-form')
 
 const text = {
   preparing: '检查本机环境…',
   initializing: '正在保存工作区设置…',
+  'verifying-model': '正在验证 API Key 与模型…',
   starting: '正在启动后台服务…',
   stopping: '正在停止服务…',
   restarting: '正在重新启动服务…',
@@ -38,6 +40,8 @@ function render(state) {
     workspacePath.textContent = state.workspace ?? '尚未选择文件夹'
     configureWorkspace.disabled = !state.workspace
     identityForm.hidden = state.phase !== 'identity'
+    modelForm.hidden = state.phase !== 'model'
+    if (state.phase === 'model' && state.code) detail.textContent = failureMessage(state.code)
     progress.hidden = true
     actions.hidden = true
     return
@@ -79,4 +83,17 @@ identityForm.addEventListener('submit', async event => {
     }))
   } catch { detail.textContent = '设置未完成，请检查填写内容后重试。' }
   finally { button.disabled = false }
+})
+modelForm.addEventListener('submit', async event => {
+  event.preventDefault()
+  const apiKey = new FormData(modelForm).get('apiKey')
+  const button = modelForm.querySelector('button[type="submit"]')
+  button.disabled = true
+  detail.textContent = '正在验证密钥与模型…'
+  try { render(await window.legion.configureModel({ apiKey })) }
+  catch { detail.textContent = '验证未通过。请检查 API Key 和网络连接后重试。' }
+  finally {
+    modelForm.reset()
+    button.disabled = false
+  }
 })

@@ -22,6 +22,9 @@
     #identity-form { margin-top: 16px; }
     #identity-form label { display: block; margin-top: 12px; color: #b9c8dd; font-size: 14px; }
     #identity-form input[type="text"] { width: 100%; margin-top: 6px; padding: 10px; border: 1px solid #415779; border-radius: 8px; background: #101726; color: #edf4ff; font: inherit; }
+    #model-form { margin-top: 16px; }
+    #model-form label { display: block; margin-top: 12px; color: #b9c8dd; font-size: 14px; }
+    #model-form input[type="password"] { width: 100%; margin-top: 6px; padding: 10px; border: 1px solid #415779; border-radius: 8px; background: #101726; color: #edf4ff; font: inherit; }
     #identity-form .check { display: flex; gap: 9px; align-items: center; }
     button { border: 0; border-radius: 9px; padding: 11px 19px; background: #357dff; color: white; font: inherit; cursor: pointer; }
     button.secondary { background: #32435f; }
@@ -51,6 +54,11 @@
       <label class="check"><input id="allow-workspace-writes" type="checkbox">允许在所选工作区内读写文件</label>
       <p>权限边界固定为当前工作区；工作区外的文件操作会被拒绝。越界人工审批尚未接通，不会放行越界请求。</p>
       <div class="actions"><button type="submit">保存身份与范围</button></div>
+    </form>
+    <form id="model-form" hidden>
+      <p>默认模型：DeepSeek Flash（官方服务）。模型密钥会保存在 Windows 受保护密钥库中。Legion 会先用不产生推理费用的模型列表请求验证密钥与连通性。</p>
+      <label>DeepSeek API Key<input name="apiKey" type="password" minlength="8" maxlength="512" required autocomplete="new-password" spellcheck="false" placeholder="粘贴 API Key"></label>
+      <div class="actions"><button type="submit">安全保存并验证</button></div>
     </form>
     <div class="actions" id="actions" hidden>
       <button id="retry">重试启动</button>

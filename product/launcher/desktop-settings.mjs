@@ -62,10 +62,22 @@ export function readDesktopSettings(dataDir) {
   if (!stat.isFile() || stat.size > 8192) throw invalid()
   let value
   try { value = JSON.parse(readFileSync(path, 'utf8')) } catch { throw invalid() }
-  if (value?.version !== 1 || Object.keys(value).some(key => !['version', 'workspace'].includes(key))) throw invalid()
+  if (value?.version !== 1 || Object.keys(value).some(key => !['version', 'workspace', 'model'].includes(key))) throw invalid()
   const workspace = selectedWorkspace(value.workspace)
   if (!samePath(value.workspace, workspace, process.platform)) throw invalid('WORKSPACE_SELECTION_CHANGED')
-  return Object.freeze({ version: 1, workspace })
+  let model = null
+  if (value.model !== undefined) {
+    const candidate = value.model
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)
+      || Object.keys(candidate).some(key => !['provider', 'model', 'endpoint', 'verifiedAt', 'credentialUpdatedAt'].includes(key))
+      || candidate.provider !== 'deepseek-official' || candidate.model !== 'deepseek-flash'
+      || candidate.endpoint !== 'https://api.deepseek.com'
+      || typeof candidate.verifiedAt !== 'string' || !Number.isFinite(Date.parse(candidate.verifiedAt))
+      || typeof candidate.credentialUpdatedAt !== 'string' || !Number.isFinite(Date.parse(candidate.credentialUpdatedAt))) throw invalid()
+    model = Object.freeze({ provider: candidate.provider, model: candidate.model,
+      endpoint: candidate.endpoint, verifiedAt: candidate.verifiedAt, credentialUpdatedAt: candidate.credentialUpdatedAt })
+  }
+  return Object.freeze(model === null ? { version: 1, workspace } : { version: 1, workspace, model })
 }
 
 // Called only by the product owner while it holds the existing DataDir lease.
@@ -82,6 +94,28 @@ export function writeDesktopSettings(layout) {
     try { unlinkSync(temporary) } catch (error) { if (error.code !== 'ENOENT') throw error }
   }
   return { state: 'setup-required', phase: 'identity', workspace }
+}
+
+// Record only non-secret verification metadata. The key itself stays in the
+// protected SecretStore and is never copied into desktop settings or DSH config.
+export function writeDesktopModelVerified(layout, { verifiedAt = new Date().toISOString(), credentialUpdatedAt } = {}) {
+  const current = readDesktopSettings(layout.dataDir)
+  if (current === null || !samePath(current.workspace, layout.workspaceDir, process.platform)) {
+    throw invalid('WORKSPACE_SELECTION_CHANGED')
+  }
+  if (typeof credentialUpdatedAt !== 'string' || !Number.isFinite(Date.parse(credentialUpdatedAt))) throw invalid('MODEL_VERIFICATION_INVALID')
+  const path = join(layout.dataDir, filename)
+  guard(path)
+  const model = Object.freeze({ provider: 'deepseek-official', model: 'deepseek-flash',
+    endpoint: 'https://api.deepseek.com', verifiedAt, credentialUpdatedAt })
+  const temporary = join(layout.dataDir, `.desktop-settings-${randomUUID()}.tmp`)
+  try {
+    writeFileSync(temporary, `${JSON.stringify({ version: 1, workspace: current.workspace, model }, null, 2)}\n`, { flag: 'wx', mode: 0o600 })
+    renameSync(temporary, path)
+  } finally {
+    try { unlinkSync(temporary) } catch (error) { if (error.code !== 'ENOENT') throw error }
+  }
+  return { state: 'configured', phase: 'model-verified', workspace: current.workspace }
 }
 
 // Identity policy lives in the highest-precedence product-owned user-settings

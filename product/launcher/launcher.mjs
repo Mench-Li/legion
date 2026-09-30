@@ -222,12 +222,21 @@ export function withRunCredentialPatch(plan, applied, paths) {
   if (extras.length === 0) return plan
   const processes = plan.processes.map((p) => {
     if (p.key !== DSH_OVERLAY_PROCESS_KEY || p.command === null) return p
+    const insertAt = Number.isInteger(p.launcherArgsEnd)
+      ? Math.max(0, Math.min(p.launcherArgsEnd, p.command.args.length))
+      : p.command.args.length
     return Object.freeze({
       ...p,
       command: Object.freeze({
         file: p.command.file,
-        args: Object.freeze([...p.command.args, ...extras]),
+        args: Object.freeze([
+          ...p.command.args.slice(0, insertAt),
+          ...extras,
+          ...p.command.args.slice(insertAt),
+        ]),
       }),
+      launcherArgsEnd: p.launcherArgsEnd === null || p.launcherArgsEnd === undefined
+        ? p.launcherArgsEnd : p.launcherArgsEnd + extras.length,
     })
   })
   return Object.freeze({ ...plan, processes: Object.freeze(processes) })

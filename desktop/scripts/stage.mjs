@@ -4,6 +4,7 @@ import { promisify } from 'node:util'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { inventoryTree, DESKTOP_MANIFEST_FORMAT, DESKTOP_COMPONENTS, validateDesktopManifest } from '../../product/release/desktop-manifest.mjs'
+import { pruneWindowsX64Payload } from './platform-filter.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const build = join(root, '.desktop-build')
@@ -35,6 +36,7 @@ for (const [from, to] of [[`node-v${node.version}-win-x64`, 'node'], ['dsh', 'ds
   console.log(`Staging ${to} payload`)
   await copyTree(source, join(resources, to))
 }
+await pruneWindowsX64Payload(join(resources, 'dsh'))
 const { stdout } = await exec('git', ['ls-files', '-z'], { cwd: root, maxBuffer: 4 * 1024 * 1024, windowsHide: true })
 const untracked = await exec('git', ['ls-files', '--others', '--exclude-standard', '-z'], { cwd: root, maxBuffer: 4 * 1024 * 1024, windowsHide: true })
 const productionRoots = new Set(['product', 'team-hub', 'runtime', 'orchestrator', 'security', 'mesh', 'scrum', 'whiteboard', 'skills', 'instructions', 'plugins', 'packages'])

@@ -143,6 +143,8 @@ test('★★★ PRT-251 续：端口进 argv，且**在所有 launcher 旗标之
     'bin.js', '--profile', 'web', '--patch', 'legion-host.patch.yml',
     '--host', '127.0.0.1', '--port', '3081', '--no-open',
   ])
+  assert.equal(plan.processes.find((p) => p.key === 'runtime').launcherArgsEnd, 5,
+    'late credential patches need the launcher/app boundary after existing DSH patches')
 
   // ★ 顺序断言（不是 includes）：**整个 app 段**都必须晚于 `--patch`。
   //   一个只断言两个都在的用例对这个坑完全不敏感——它们的 argv 里两个都在，
@@ -346,12 +348,12 @@ test('★★★ `--host` 两处都给了 → 与 `--port` 同一条规则：具�
 
 test('★★ 清单契约版本被钉住（加字段必须动它——它已经漏过两次）', () => {
   // 这个常量声称"清单结构变化时递增"，而 `portArgv`（PRT-251 续）与
-  // `hostArgv` / `boolArgv`（本批）都是**新字段**，加的时候都没动它。
+  // `hostArgv` / `boolArgv` 和 launcher/app 参数边界都是**新字段**。
   // 钉住值不是为了记一个数字，是为了让下一个加字段的人**当场**看见这件事：
   //
   //   > 一个说"结构没变"的版本号，与一个真的没变的清单，
   //   > 在只读代码的人眼里是同一个东西。
-  assert.equal(PROCESS_MANIFEST_VERSION, 2)
+  assert.equal(PROCESS_MANIFEST_VERSION, 3)
 })
 
 test('★★ 清单里的 `host` 与 `hostArgv` 一一对应，且 host 都落在回环内', () => {

@@ -239,7 +239,7 @@ test('start：Run 的凭证材料化**接在生产启动路径上**，且那份�
   }
 })
 
-test('★★★★★ 凭证覆盖层的 `--patch` 是**按需**追加的：没写出凭证就一个参数都不加', () => {
+test('★★★★★ 凭证覆盖层的 `--patch` 只在写出凭证后进入 DSH launcher 参数段', () => {
   // 这一条判的是 PRT-509 收尾时发现的一个真问题：覆盖层参数最初是**无条件**
   // 追加到冻结的 `plan` 上的，于是每一次启动的 argv 都变——包括那些
   // **根本没有凭证可写**的部署。而三条既有用例正是按 `--patch` 这个 flag
@@ -262,7 +262,9 @@ test('★★★★★ 凭证覆盖层的 `--patch` 是**按需**追加的：没�
     const mkPlan = () => Object.freeze({
       waves: Object.freeze([Object.freeze(['runtime']), Object.freeze(['team-hub'])]),
       processes: Object.freeze([
-        Object.freeze({ key: 'runtime', command: Object.freeze({ file: 'node', args: Object.freeze(['bin.js', '--profile', 'web']) }) }),
+        Object.freeze({ key: 'runtime', launcherArgsEnd: 3, command: Object.freeze({ file: 'node', args: Object.freeze([
+          'bin.js', '--profile', 'web', '--host', '127.0.0.1', '--port', '3080', '--no-open',
+        ]) }) }),
         Object.freeze({ key: 'team-hub', command: Object.freeze({ file: 'node', args: Object.freeze(['hub.js']) }) }),
       ]),
     })
@@ -272,19 +274,22 @@ test('★★★★★ 凭证覆盖层的 `--patch` 是**按需**追加的：没�
     // ① 没有写出凭证 ⇒ **逐字不变**（同一个对象，连参数都不多一个）。
     assert.equal(withRunCredentialPatch(base, false, paths), base,
       'applied=false 时计划必须原样返回——否则每次启动的 argv 都会多出指向空覆盖层的 --patch')
-    assert.deepEqual(argsOf(withRunCredentialPatch(base, false, paths), 'runtime'), ['bin.js', '--profile', 'web'])
+    assert.deepEqual(argsOf(withRunCredentialPatch(base, false, paths), 'runtime'),
+      ['bin.js', '--profile', 'web', '--host', '127.0.0.1', '--port', '3080', '--no-open'])
 
-    // ② 写出来了 ⇒ runtime 的命令行**末尾**追加 `--patch <覆盖层>`。
+    // ② 写出来了 ⇒ --patch 仍处于 DSH launcher 参数段，在应用参数之前。
     const patched = withRunCredentialPatch(base, true, paths)
     assert.deepEqual(argsOf(patched, 'runtime'),
-      ['bin.js', '--profile', 'web', '--patch', paths.overlayFile],
-      '写出凭证之后，runtime 的命令行必须真的把 DSH 指到那份覆盖层上')
+      ['bin.js', '--profile', 'web', '--patch', paths.overlayFile,
+        '--host', '127.0.0.1', '--port', '3080', '--no-open'],
+      '写出凭证之后，--patch 必须留在 DSH launcher 参数段，不能落入 web app 参数段')
 
     // ③ 别的进程**一点都不变**：覆盖层是给 DSH 的，不是给 hub 的。
     assert.deepEqual(argsOf(patched, 'team-hub'), ['hub.js'], '覆盖层被顺手加到了别的进程上')
 
     // ④ 原计划没被就地改（`plan` 是冻结的，但这条判的是"我们真的复制了"）：
-    assert.deepEqual(argsOf(base, 'runtime'), ['bin.js', '--profile', 'web'], '原计划被就地改掉了')
+    assert.deepEqual(argsOf(base, 'runtime'),
+      ['bin.js', '--profile', 'web', '--host', '127.0.0.1', '--port', '3080', '--no-open'], '原计划被就地改掉了')
 
     // ⑤ 路径算不出来（`ok !== true`）时 ⇒ 一个参数都不加。
     //    这条防的是"路径是空字符串却照样加 --patch"——那会让 DSH 起不来，

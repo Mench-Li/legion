@@ -4,21 +4,35 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join, relative, resolve } from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { readDesktopManifest, verifyInventory } from '../../product/release/desktop-manifest.mjs'
+import { hashFile, readDesktopManifest, verifyInventory } from '../../product/release/desktop-manifest.mjs'
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const exec = promisify(execFile)
 const { resources } = JSON.parse(await readFile(join(root, '.desktop-build', 'current-stage.json'), 'utf8'))
 const release = JSON.parse(await readFile(join(resources, 'legion', 'product', 'release', 'runtime-manifest.json'), 'utf8'))
 const nodeSpec = JSON.parse(await readFile(join(root, 'desktop', 'payload', 'node.json'), 'utf8'))
 const descriptor = await readDesktopManifest(join(resources, 'desktop-release.json'), { release, nodeVersion: nodeSpec.version, platform: 'win32', arch: 'x64' })
-for (const component of ['node', 'dsh', 'git', 'legion']) {
+const scratch = join(root, '.desktop-build', `closure-smoke-${Date.now()}`)
+await mkdir(scratch, { recursive: true })
+let dshRoot = join(resources, 'dsh')
+const dshFiles = descriptor.files.filter(file => file.path.startsWith('dsh/'))
+const dshArchive = descriptor.archives?.find(item => item.component === 'dsh')
+if (dshArchive) {
+  const archivePath = join(resources, dshArchive.path)
+  const archiveStat = await import('node:fs/promises').then(fs => fs.stat(archivePath))
+  if (archiveStat.size !== dshArchive.bytes || await hashFile(archivePath) !== dshArchive.sha256) throw new Error('DSH archive hash mismatch')
+  dshRoot = join(scratch, 'dsh-from-archive')
+  await exec(join(resources, 'node', 'node.exe'), [join(resources, 'legion', 'product', 'launcher', 'bundle-extract-worker.mjs'),
+    archivePath, dshRoot, join(resources, 'legion', 'vendor', 'archive')], { cwd: scratch, windowsHide: true })
+  await verifyInventory(dshRoot, dshFiles, { prefix: 'dsh' })
+} else await verifyInventory(dshRoot, dshFiles, { prefix: 'dsh' })
+for (const component of ['node', 'git', 'legion']) {
   await verifyInventory(join(resources, component), descriptor.files.filter(file => file.path.startsWith(`${component}/`)), { prefix: component })
 }
 for (const path of ['node/node.exe', 'node/node_modules/npm/bin/npm-cli.js', 'git/cmd/git.exe',
-  'dsh/node_modules/@deepseek-ai/dsh/lib/bin.js', 'dsh/node_modules/node-pty/prebuilds/win32-x64/conpty.node',
-  'dsh/node_modules/node-pty/prebuilds/win32-x64/conpty/conpty.dll',
   'legion/workbench/dist/index.html', 'legion/product/launcher/desktop-bridge.mjs',
   'legion/runtime/dsh-composition/legion-host.patch.yml']) await access(join(resources, path))
+for (const path of ['node_modules/@deepseek-ai/dsh/lib/bin.js', 'node_modules/node-pty/prebuilds/win32-x64/conpty.node',
+  'node_modules/node-pty/prebuilds/win32-x64/conpty/conpty.dll']) await access(join(dshRoot, path))
 
 // Build-time AST parsing checks static relative imports without interpreting comments.
 const requireBuild = createRequire(join(root, 'workbench', 'package.json'))
@@ -55,8 +69,6 @@ async function checkModule(path) {
 for (const entry of entrypoints) await checkModule(join(resources, 'legion', entry))
 
 const nodePath = join(resources, 'node', 'node.exe')
-const scratch = join(root, '.desktop-build', `closure-smoke-${Date.now()}`)
-await mkdir(scratch, { recursive: true })
 const env = { SystemRoot: process.env.SystemRoot, windir: process.env.windir, ComSpec: process.env.ComSpec,
   TEMP: scratch, TMP: scratch, USERPROFILE: scratch, HOME: scratch, DSH_HOME: join(scratch, 'dsh-home'),
   PATH: `${join(resources, 'node')};${join(resources, 'git', 'cmd')};${join(process.env.SystemRoot, 'System32')};${join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0')}` }
@@ -77,8 +89,8 @@ child.onData(data => { output += data })
 const timer = setTimeout(() => { child.kill(); process.exit(2) }, 10000)
 child.onExit(({ exitCode }) => { clearTimeout(timer); process.exit(exitCode === 0 && output.includes('LEGION_NATIVE_OK') ? 0 : 1) })
 `))
-await exec(nodePath, [nativeScript, join(resources, 'dsh', 'package.json'), join(resources, 'legion', 'security', 'secrets', 'dpapi.mjs')], { cwd: scratch, env, timeout: 30_000, windowsHide: true })
-await exec(nodePath, [join(resources, 'dsh', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'), '--profile', 'web', '--dump-config'],
+await exec(nodePath, [nativeScript, join(dshRoot, 'package.json'), join(resources, 'legion', 'security', 'secrets', 'dpapi.mjs')], { cwd: scratch, env, timeout: 30_000, windowsHide: true })
+await exec(nodePath, [join(dshRoot, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'), '--profile', 'web', '--dump-config'],
   { cwd: scratch, env, timeout: 20_000, windowsHide: true, maxBuffer: 2 * 1024 * 1024 })
 const git = await exec(join(resources, 'git', 'cmd', 'git.exe'), ['--version'], { cwd: scratch, env, windowsHide: true })
 console.log(JSON.stringify({ ok: true, checkedModules: visited.size, node: version.stdout.trim(), git: git.stdout.trim(), native: ['koffi', 'sharp', 'node-pty/ConPTY', 'Windows DPAPI'], profile: 'isolated web' }))

@@ -1,11 +1,79 @@
 // Called only by the Launcher while holding its DataDir ownership lock.
 // No executable dependency resolution, network access or npm fallback occurs here.
 import * as fs from 'node:fs'
+import { execFile, spawn } from 'node:child_process'
 import { copyFile, lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
+import { createRequire } from 'node:module'
+import { promisify } from 'node:util'
 import { dirname, join, relative, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { performance } from 'node:perf_hooks'
 import { createRuntimeWriteGuard, runtimePathsOf, COMPLETION_MARKER_FILENAME } from './runtime-install.mjs'
-import { readDesktopManifest, releaseError, verifyInventory } from '../release/desktop-manifest.mjs'
+import { hashFile, readDesktopManifest, releaseError, verifyInventory } from '../release/desktop-manifest.mjs'
+
+const execFileAsync = promisify(execFile)
+
+// Windows Defender and NTFS pay a high per-file cost. Copy the already verified
+// tree with Robocopy's bounded worker pool, then verify every output byte against
+// the release inventory before publishing it. The destination is a new private
+// staging directory; junction traversal is explicitly disabled.
+async function copyPayloadTree(source, destination, { signal, platform = process.platform } = {}) {
+  signal?.throwIfAborted()
+  if (platform === 'win32') {
+    try {
+      await execFileAsync('robocopy.exe', [source, destination, '/E', '/COPY:DAT', '/DCOPY:DAT', '/R:0', '/W:0',
+        '/MT:8', '/XJ', '/NFL', '/NDL', '/NJH', '/NJS', '/NP'],
+      { windowsHide: true, timeout: 600_000, maxBuffer: 1024 * 1024, signal })
+      return
+    } catch (error) {
+      if (signal?.aborted) signal.throwIfAborted()
+      // Robocopy's 0–7 exit statuses indicate success or successful copying.
+      if (Number.isInteger(error.code) && error.code >= 0 && error.code < 8) return
+      throw releaseError('BUNDLE_COPY_FAILED')
+    }
+  }
+  // Portable fallback for development and non-Windows tests.
+  async function walk(from, to) {
+    signal?.throwIfAborted()
+    await mkdir(to, { recursive: true })
+    for (const item of await fs.promises.readdir(from, { withFileTypes: true })) {
+      signal?.throwIfAborted()
+      if (item.isSymbolicLink()) throw releaseError('BUNDLE_LINK_REJECTED')
+      const childFrom = join(from, item.name), childTo = join(to, item.name)
+      if (item.isDirectory()) await walk(childFrom, childTo)
+      else if (item.isFile()) await copyFile(childFrom, childTo)
+      else throw releaseError('BUNDLE_FILE_INVALID')
+    }
+  }
+  await walk(source, destination)
+}
+
+async function extractPayloadArchive({ archivePath, destination, vendorRoot, signal, extractArchive }) {
+  signal?.throwIfAborted()
+  if (extractArchive) return extractArchive(archivePath, destination)
+  if (process.platform !== 'win32') {
+    const asar = createRequire(join(vendorRoot, 'package.json'))('@electron/asar')
+    return asar.extractAll(archivePath, destination)
+  }
+  const extractor = fileURLToPath(new URL('./bundle-extract-worker.mjs', import.meta.url))
+  const child = spawn(process.execPath, [extractor, archivePath, destination, vendorRoot], {
+    windowsHide: true, stdio: 'ignore',
+    env: Object.fromEntries(['SystemRoot', 'windir', 'ComSpec', 'TEMP', 'TMP', 'PATH']
+      .filter(key => typeof process.env[key] === 'string').map(key => [key, process.env[key]])),
+  })
+  const abortChild = () => { if (child.exitCode === null) child.kill() }
+  signal?.addEventListener('abort', abortChild, { once: true })
+  if (signal?.aborted) abortChild()
+  try {
+    const outcome = await new Promise((resolve, reject) => {
+      child.once('error', reject)
+      child.once('close', (code, childSignal) => resolve({ code, childSignal }))
+    })
+    signal?.throwIfAborted()
+    if (outcome.code !== 0) throw releaseError('BUNDLE_EXTRACT_FAILED')
+  } finally { signal?.removeEventListener('abort', abortChild) }
+}
 
 async function json(path) {
   try { return JSON.parse(await readFile(path, 'utf8')) } catch (error) {
@@ -16,10 +84,18 @@ async function json(path) {
 
 export async function importBundledRuntime({ bundleRoot, dataDir, installDir, release,
   nodeVersion = process.versions.node, platform = process.platform, arch = process.arch,
-  signal, onProgress = () => {},
+  signal, onProgress = () => {}, extractArchive = null, loadArchiveApi = null,
 }) {
+  const startedAt = performance.now()
+  const timingsMs = {}
+  let phaseStartedAt = startedAt
+  const markPhase = phase => {
+    timingsMs[phase] = Math.round(performance.now() - phaseStartedAt)
+    phaseStartedAt = performance.now()
+  }
   const manifest = await readDesktopManifest(join(bundleRoot, 'desktop-release.json'), { release, nodeVersion, platform, arch })
   const files = manifest.files.filter(item => item.path.startsWith('dsh/'))
+  const archive = manifest.archives?.find(item => item.component === 'dsh') ?? null
   const entry = 'dsh/node_modules/@deepseek-ai/dsh/lib/bin.js'
   if (!files.some(file => file.path === entry) || !files.some(file => file.path === 'dsh/package-lock.json')) {
     throw releaseError('BUNDLE_ENTRY_MISSING')
@@ -56,14 +132,32 @@ export async function importBundledRuntime({ bundleRoot, dataDir, installDir, re
   }
   signal?.throwIfAborted()
   onProgress({ phase: 'verifying-bundle', completed: 0, total: files.length })
-  await verifyInventory(join(bundleRoot, 'dsh'), files, { prefix: 'dsh', signal,
-    onProgress(completed) { if (completed % 100 === 0 || completed === files.length) onProgress({ phase: 'verifying-bundle', completed, total: files.length }) } })
-  const actualPackage = await json(join(bundleRoot, 'dsh', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'))
-  const lock = await json(join(bundleRoot, 'dsh', 'package-lock.json'))
-  if (actualPackage?.name !== '@deepseek-ai/dsh' || actualPackage.version !== release.dshVersion
-    || lock?.lockfileVersion !== 3 || lock.packages?.['node_modules/@deepseek-ai/dsh']?.version !== release.dshVersion
-    || Object.entries(lock.packages ?? {}).some(([path, pkg]) => /(^|\/)node_modules\/@deepseek-ai\/dsh(?:-[^/]+)?$/.test(path)
-      && pkg.version !== release.dshVersion)) throw releaseError('BUNDLE_VERSION_MISMATCH')
+  let sourceDshRoot = join(bundleRoot, 'dsh')
+  let asar = null
+  if (archive !== null) {
+    const archivePath = join(bundleRoot, archive.path)
+    if ((await fs.promises.stat(archivePath)).size !== archive.bytes || await hashFile(archivePath) !== archive.sha256) {
+      throw releaseError('BUNDLE_HASH_MISMATCH')
+    }
+    const vendorRoot = join(bundleRoot, 'legion', 'vendor', 'archive')
+    asar = loadArchiveApi?.() ?? createRequire(join(vendorRoot, 'package.json'))('@electron/asar')
+    const actualAsar = JSON.parse(await readFile(join(vendorRoot, 'node_modules', '@electron', 'asar', 'package.json'), 'utf8'))
+    if (manifest.versions.asar !== actualAsar.version) throw releaseError('BUNDLE_ARCHIVE_VERSION_MISMATCH')
+    sourceDshRoot = null
+  } else {
+    await verifyInventory(sourceDshRoot, files, { prefix: 'dsh', signal,
+      onProgress(completed) { if (completed % 100 === 0 || completed === files.length) onProgress({ phase: 'verifying-bundle', completed, total: files.length }) } })
+  }
+  markPhase('verifyBundle')
+  const verifyDshVersion = async root => {
+    const actualPackage = await json(join(root, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'))
+    const lock = await json(join(root, 'package-lock.json'))
+    if (actualPackage?.name !== '@deepseek-ai/dsh' || actualPackage.version !== release.dshVersion
+      || lock?.lockfileVersion !== 3 || lock.packages?.['node_modules/@deepseek-ai/dsh']?.version !== release.dshVersion
+      || Object.entries(lock.packages ?? {}).some(([path, pkg]) => /(^|\/)node_modules\/@deepseek-ai\/dsh(?:-[^/]+)?$/.test(path)
+        && pkg.version !== release.dshVersion)) throw releaseError('BUNDLE_VERSION_MISMATCH')
+  }
+  if (archive === null) await verifyDshVersion(join(bundleRoot, 'dsh'))
   await checked(paths.versionsDir)
   await mkdir(paths.versionsDir, { recursive: true })
   await checked(paths.versionDir)
@@ -75,19 +169,17 @@ export async function importBundledRuntime({ bundleRoot, dataDir, installDir, re
     staging = join(paths.versionsDir, `.staging-${release.dshVersion}-${randomUUID()}`)
     await checked(staging); await mkdir(staging)
     try {
-      for (let index = 0; index < files.length; index++) {
-        signal?.throwIfAborted()
-        const file = files[index]
-        const dest = join(staging, ...file.path.slice(4).split('/'))
-        await checked(dest)
-        await mkdir(dirname(dest), { recursive: true })
-        await copyFile(join(bundleRoot, ...file.path.split('/')), dest)
-        if (index % 100 === 0 || index === files.length - 1) {
-          onProgress({ phase: 'importing-runtime', completed: index + 1, total: files.length })
-        }
-      }
+      onProgress({ phase: 'importing-runtime', completed: 0, total: files.length })
+      if (archive !== null) {
+        await extractPayloadArchive({ archivePath: join(bundleRoot, archive.path), destination: staging,
+          vendorRoot: join(bundleRoot, 'legion', 'vendor', 'archive'), signal, extractArchive })
+      } else await copyPayloadTree(sourceDshRoot, staging, { signal, platform })
+      signal?.throwIfAborted()
+      markPhase('copyRuntime')
       await verifyInventory(staging, files, { prefix: 'dsh', signal,
         onProgress(completed) { if (completed % 100 === 0 || completed === files.length) onProgress({ phase: 'verifying-runtime', completed, total: files.length }) } })
+      if (archive !== null) await verifyDshVersion(staging)
+      markPhase('verifyImportedRuntime')
       signal?.throwIfAborted()
       const marker = { version: release.dshVersion, packageName: '@deepseek-ai/dsh',
         dshCompositionPatchVersion: release.dshCompositionPatchVersion, legionRoute: 'bundled',
@@ -132,5 +224,6 @@ export async function importBundledRuntime({ bundleRoot, dataDir, installDir, re
     packageName: '@deepseek-ai/dsh', dshCompositionPatchVersion: release.dshCompositionPatchVersion, switchedAtMs: Date.now() }
   await atomicJson(paths.pointerPath, pointer)
   onProgress({ phase: 'runtime-prepared', completed: files.length, total: files.length })
-  return { ok: true, reused, version: release.dshVersion }
+  timingsMs.prepareTotal = Math.round(performance.now() - startedAt)
+  return { ok: true, reused, version: release.dshVersion, timingsMs }
 }

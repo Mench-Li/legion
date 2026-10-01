@@ -30,6 +30,19 @@ test('inventory rejects traversal, case aliases, injected completion markers and
   assert.throws(() => validateDesktopManifest(bad, options), { code: 'BUNDLE_INVENTORY_INVALID' })
 })
 
+test('archive descriptor binds only the expected DSH archive path, size and hash', () => {
+  const valid = spec()
+  valid.files[0].path = 'dsh/node_modules/@deepseek-ai/dsh/lib/bin.js'
+  valid.archives = [{ component: 'dsh', path: 'dsh.asar', bytes: 1234, sha256: 'b'.repeat(64) }]
+  assert.equal(validateDesktopManifest(valid, options).archives[0].path, 'dsh.asar')
+  for (const change of [
+    { path: '../dsh.asar' }, { path: 'other.asar' }, { bytes: 0 }, { sha256: 'nope' }, { component: 'node' },
+  ]) {
+    const bad = { ...valid, archives: [{ ...valid.archives[0], ...change }] }
+    assert.throws(() => validateDesktopManifest(bad, options), { code: 'BUNDLE_ARCHIVE_INVALID' })
+  }
+})
+
 test('real tree verification rejects changed bytes, extra files and escaping junctions', async () => {
   const root = await mkdtemp(join(tmpdir(), 'legion-bundle-'))
   try {

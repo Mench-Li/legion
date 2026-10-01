@@ -12,6 +12,8 @@
     "prepare:git": "node scripts/prepare-git.mjs",
     "stage": "node scripts/stage.mjs",
     "verify:closure": "node scripts/verify-closure.mjs",
+    "benchmark:import": "node scripts/benchmark-import.mjs",
+    "benchmark:archive": "node scripts/benchmark-archive.mjs",
     "pack": "node scripts/build.mjs --dir",
     "dist": "node scripts/build.mjs"
   },

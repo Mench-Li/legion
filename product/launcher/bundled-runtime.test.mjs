@@ -1,12 +1,15 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile, readFile, rm, readdir, symlink } from 'node:fs/promises'
-import { join } from 'node:path'
+import { cp, mkdtemp, mkdir, writeFile, readFile, rm, readdir, stat, symlink } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 import { importBundledRuntime } from './bundled-runtime.mjs'
 import { readActiveRuntime, runtimePathsOf } from './runtime-install.mjs'
 import { inventoryTree, DESKTOP_MANIFEST_FORMAT } from '../release/desktop-manifest.mjs'
 import { prepareInWorker } from './desktop-launcher.mjs'
+import asar from '../../desktop/node_modules/@electron/asar/lib/asar.js'
+import { hashFile } from '../release/desktop-manifest.mjs'
 
 const release = { productVersion: '0.1.0', legionVersion: '0.1.0', dshVersion: '0.1.5-rc.2',
   dshCompositionPatchVersion: 1, runtimeContractVersion: 1, packProtocolVersion: 1, schemaVersion: 1 }
@@ -27,10 +30,54 @@ async function fixture(t) {
   return { root, bundleRoot, dataDir, installDir: bundleRoot, release, manifest }
 }
 
+async function stageArchiveRuntime(bundleRoot) {
+  const desktopModules = fileURLToPath(new URL('../../desktop/node_modules', import.meta.url))
+  const vendorRoot = join(bundleRoot, 'legion', 'vendor', 'archive')
+  const targetModules = join(vendorRoot, 'node_modules')
+  await mkdir(targetModules, { recursive: true })
+  const packages = [
+    ['@electron/asar', join(desktopModules, '@electron', 'asar')],
+    ['glob', join(desktopModules, 'glob')],
+    ['minimatch', join(desktopModules, '@electron', 'asar', 'node_modules', 'minimatch')],
+    ...['fs.realpath', 'inflight', 'inherits', 'once', 'path-is-absolute', 'wrappy', 'concat-map']
+      .map(name => [name, join(desktopModules, name)]),
+  ]
+  for (const [name, source] of packages) {
+    const target = join(targetModules, ...name.split('/'))
+    await mkdir(dirname(target), { recursive: true })
+    await cp(source, target, { recursive: true })
+  }
+  await writeFile(join(vendorRoot, 'package.json'), JSON.stringify({ name: 'legion-archive-runtime', private: true }))
+  return JSON.parse(await readFile(join(desktopModules, '@electron', 'asar', 'package.json'), 'utf8')).version
+}
+
+async function createArchiveBundle(input, { additionalFiles = [] } = {}) {
+  const asarVersion = await stageArchiveRuntime(input.bundleRoot)
+  const source = join(input.bundleRoot, 'dsh')
+  for (const [name, contents] of additionalFiles) {
+    const path = join(source, name)
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, contents)
+  }
+  input.manifest.files = await inventoryTree(source, 'dsh')
+  const archivePath = join(input.bundleRoot, 'dsh.asar')
+  await asar.createPackage(source, archivePath)
+  const archiveStats = await stat(archivePath)
+  input.manifest.versions.asar = asarVersion
+  input.manifest.archives = [{ component: 'dsh', path: 'dsh.asar', bytes: archiveStats.size, sha256: await hashFile(archivePath) }]
+  await writeFile(join(input.bundleRoot, 'desktop-release.json'), JSON.stringify(input.manifest))
+  await rm(source, { recursive: true, force: true })
+  return archivePath
+}
+
 test('offline import publishes the shared pointer only after verified completion; repeat launch reuses it', async t => {
   const input = await fixture(t)
   const result = await importBundledRuntime(input)
   assert.equal(result.ok, true)
+  assert.equal(Number.isFinite(result.timingsMs.verifyBundle), true)
+  assert.equal(Number.isFinite(result.timingsMs.copyRuntime), true)
+  assert.equal(Number.isFinite(result.timingsMs.verifyImportedRuntime), true)
+  assert.equal(result.timingsMs.prepareTotal >= result.timingsMs.copyRuntime, true)
   const active = readActiveRuntime({ dataDir: input.dataDir })
   assert.equal(active.version, release.dshVersion)
   assert.equal(active.complete, true)
@@ -38,6 +85,40 @@ test('offline import publishes the shared pointer only after verified completion
   const profile = JSON.parse(await readFile(join(input.dataDir, 'runtime', 'dsh', 'home', 'profiles', 'legion-desktop', 'package.json'), 'utf8'))
   assert.equal(profile.dsh.profile.patchReload, 'startup')
   assert.deepEqual(profile.dsh.profile.bundles, ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'])
+})
+
+test('hashed ASAR payload is locally extracted, individually verified, and published through the same pointer', async t => {
+  const input = await fixture(t)
+  await createArchiveBundle(input)
+  const result = await importBundledRuntime(input)
+  assert.equal(result.ok, true)
+  assert.equal(readActiveRuntime({ dataDir: input.dataDir }).complete, true)
+  const installed = runtimePathsOf({ dataDir: input.dataDir, targetVersion: release.dshVersion })
+  assert.equal(await readFile(installed.entryPath, 'utf8'), '// bundled fixture')
+})
+
+test('changed ASAR bytes are rejected before staging or current-pointer mutation', async t => {
+  const input = await fixture(t)
+  const archivePath = await createArchiveBundle(input)
+  await writeFile(archivePath, 'tampered')
+  await assert.rejects(importBundledRuntime(input), { code: 'BUNDLE_HASH_MISMATCH' })
+  const paths = runtimePathsOf({ dataDir: input.dataDir, targetVersion: release.dshVersion })
+  await assert.rejects(readFile(paths.pointerPath), { code: 'ENOENT' })
+  await assert.rejects(readdir(paths.versionsDir), { code: 'ENOENT' })
+})
+
+test('cancelling a real ASAR extraction worker leaves no staging files or runtime pointer', async t => {
+  const input = await fixture(t)
+  const content = Buffer.alloc(1024, 7)
+  const files = Array.from({ length: 1200 }, (_, index) => [`assets/${index}.bin`, content])
+  await createArchiveBundle(input, { additionalFiles: files })
+  const abort = new AbortController()
+  await assert.rejects(prepareInWorker(input, { signal: abort.signal, onProgress(progress) {
+    if (progress.phase === 'importing-runtime') abort.abort()
+  } }), { code: 'PREPARATION_CANCELLED' })
+  const paths = runtimePathsOf({ dataDir: input.dataDir, targetVersion: release.dshVersion })
+  await assert.rejects(readFile(paths.pointerPath), { code: 'ENOENT' })
+  assert.deepEqual(await readdir(paths.versionsDir), [])
 })
 
 test('tampered bundled bytes preserve the old pointer and do not create a completed installation', async t => {

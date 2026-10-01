@@ -33,6 +33,20 @@ export function validateDesktopManifest(manifest, {
     }
     names.add(item.path.toLowerCase())
   }
+  if (manifest.archives !== undefined) {
+    if (!Array.isArray(manifest.archives)) throw releaseError('BUNDLE_ARCHIVE_INVALID')
+    const components = new Set()
+    for (const archive of manifest.archives) {
+      if (!['dsh'].includes(archive?.component) || components.has(archive.component)
+        || archive.path !== `${archive.component}.asar`
+        || !Number.isSafeInteger(archive.bytes) || archive.bytes < 1
+        || !/^[a-f0-9]{64}$/.test(archive.sha256)) throw releaseError('BUNDLE_ARCHIVE_INVALID')
+      components.add(archive.component)
+    }
+    if (components.has('dsh') && !manifest.files.some(file => file.path === 'dsh/node_modules/@deepseek-ai/dsh/lib/bin.js')) {
+      throw releaseError('BUNDLE_ARCHIVE_INVALID')
+    }
+  }
   return manifest
 }
 

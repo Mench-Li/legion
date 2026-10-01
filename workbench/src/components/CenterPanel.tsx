@@ -11,6 +11,7 @@ const Scene3D = lazy(() => import('./Scene3D'))
 
 interface AgentView {
   role: string
+  scope?: string
   name: string
   avatar: string
   mode: 'busy' | 'review' | 'blocked' | 'idle'
@@ -78,6 +79,7 @@ interface CenterPanelProps {
 function fromRoster(a: RosterAgent): AgentView {
   return {
     role: a.role,
+    scope: a.scope,
     name: a.name,
     avatar: a.avatar,
     mode: a.mode,
@@ -135,10 +137,10 @@ export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces
   // 点击智能体查看其任务（进行中/待办/待验收/完成），任务可再点进详情
   const [agentView, setAgentView] = useState<RosterAgent | null>(null)
   const [detailTaskId, setDetailTaskId] = useState<string | null>(null)
-  const rosterById = new Map(currentRoster.map(a => [a.role, a]))
-  const openAgent = (role: string): void => {
-    const hit = rosterById.get(role)
-    if (hit) setAgentView({ ...hit,scope:hit.scope ?? scope ?? 'default' })
+  const openAgent = (role: string, agentScope?: string): void => {
+    const selectedScope=agentScope ?? scope
+    const hit = currentRoster.find(a => a.role===role && (!selectedScope || a.scope===selectedScope))
+    if (hit) setAgentView({ ...hit,scope:hit.scope ?? selectedScope ?? 'default' })
   }
   const openTaskFromAgent = (id: string): void => {
     setAgentView(null)
@@ -210,7 +212,7 @@ export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces
                   <div key={gid} className="agent-group">
                     <div className="agent-group-title">🗂 {spaceName(gid)} · {list.length} 岗</div>
                     {list.map(a => (
-                      <div key={a.role} className={`panel agent-card ${a.mode} clickable`} onClick={() => openAgent(a.role)} title={`查看 ${a.name} 的任务`}>
+                      <div key={`${gid}:${a.role}`} className={`panel agent-card ${a.mode} clickable`} onClick={() => openAgent(a.role,gid)} title={`查看 ${a.name} 的任务`}>
                         <div className="agent-head">
                           <div className="agent-avatar">{a.avatar}</div>
                           <div>
@@ -230,7 +232,7 @@ export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces
                   </div>
                 ))
               : agents.map(a => (
-                  <div key={a.role} className={`panel agent-card ${a.mode} clickable`} onClick={() => openAgent(a.role)} title={`查看 ${a.name} 的任务（进行中/待办/完成）`}>
+                  <div key={`${a.scope ?? scope ?? 'default'}:${a.role}`} className={`panel agent-card ${a.mode} clickable`} onClick={() => openAgent(a.role,a.scope)} title={`查看 ${a.name} 的任务（进行中/待办/完成）`}>
                     <div className="agent-head">
                       <div className="agent-avatar">{a.avatar}</div>
                       <div>

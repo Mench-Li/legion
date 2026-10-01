@@ -138,7 +138,7 @@ export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces
   const rosterById = new Map(currentRoster.map(a => [a.role, a]))
   const openAgent = (role: string): void => {
     const hit = rosterById.get(role)
-    if (hit) setAgentView(hit)
+    if (hit) setAgentView({ ...hit,scope:hit.scope ?? scope ?? 'default' })
   }
   const openTaskFromAgent = (id: string): void => {
     setAgentView(null)

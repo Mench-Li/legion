@@ -10,6 +10,9 @@ import DocReader from './DocReader'
 import MarkdownDocView from './MarkdownDocView'
 import { RevealButton } from './RevealButton'
 import { toast } from './Toast'
+import { fetchRoster } from '../api'
+import type { RosterAgent } from '../types'
+import { AgentTasksModal } from './AgentTasksModal'
 
 interface TaskDetailModalProps {
   taskId: string
@@ -160,6 +163,7 @@ function childDeps(c: HubTask): string {
 }
 
 export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalProps): React.JSX.Element {
+  const [chatAgent,setChatAgent]=useState<RosterAgent | null>(null)
   const [task, setTask] = useState<HubTask | null>(null)
   const [timeline, setTimeline] = useState<HubActivity[]>([])
   const [children, setChildren] = useState<HubTask[]>([])
@@ -427,9 +431,14 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
         <div className="modal task-detail-modal" onClick={e => e.stopPropagation()}>
           <div className="modal-head">
             <span className="tid-big">{t.id}</span> 任务详情
+            <button onClick={() => { void fetchRoster(t.scope).then(r => {
+              const a=r.agents.find(a => a.role===(t.role ?? t.soldier))
+              if (a) setChatAgent({ ...a,scope:t.scope });else toast('err','该岗位未注册 Agent')
+            }).catch(e => toast('err',String(e))) }}>与负责 Agent 聊天</button>
             <span className="x" onClick={onClose}>✕</span>
           </div>
           <div className="modal-body">
+            {chatAgent && <AgentTasksModal agent={chatAgent} roster={[chatAgent]} onClose={() => setChatAgent(null)} onOpenTask={() => setChatAgent(null)} />}
             <div className="td-title">
               <span className={`status-pill ${t.status}`}>{STATUS_PILL[t.status] ?? t.status}</span>
               {t.hold && <span className="status-pill hold">✋ 将军拦截中</span>}

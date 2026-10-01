@@ -47,6 +47,7 @@ export function createTaskLifecycleRoutes({
   transitionTask, settleGoalsOfScope, advanceTask,
   reassignTask, now, getTask,
   releaseStaleTasks, inboxCount, handleWrite,
+  onManualHold = null,
 }) {
   const deps = { json,
     runStore, db, readPipeline,
@@ -221,10 +222,11 @@ export function createTaskLifecycleRoutes({
           const id = body.id
           if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
           const hold = body.hold === true
-          const t = db.prepare('SELECT status, goalId FROM tasks WHERE id = ?').get(id)
+            const t = db.prepare('SELECT status, goalId FROM tasks WHERE id = ? AND scope=?').get(id,scope)
           if (!t) throw new Error(`未知任务 ${id}`)
           if (t.status === 'done' || t.status === 'canceled') throw new Error(`任务 ${id} 已 ${t.status}，不可拦截/放行`)
-          db.prepare('UPDATE tasks SET hold=?, version=version+1, updatedAt=? WHERE id=?').run(hold ? 1 : 0, now(), id)
+            onManualHold?.(id,hold)
+            db.prepare('UPDATE tasks SET hold=?, version=version+1, updatedAt=? WHERE id=?').run(hold ? 1 : 0, now(), id)
           audit(by, scope, hold ? 'hold' : 'unhold', id, {}, t.goalId)
           return getTask(id)
         })

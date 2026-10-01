@@ -235,6 +235,8 @@ import { createRouter } from './router.mjs'
 import { createRulesRoutes } from './routes/rules.mjs'
 import { createPermissionsRoutes } from './routes/permissions.mjs'
 import { createChatRoutes } from './routes/chat.mjs'
+import { createAgentConversationService } from './agent-conversations.mjs'
+import { createAgentsRoutes } from './routes/agents.mjs'
 import { createCalendarRoutes } from './routes/calendar.mjs'
 import { createCompactionRoutes } from './routes/compaction.mjs'
 import { createSecretsRoutes } from './routes/secrets.mjs'
@@ -3266,7 +3268,7 @@ export function createConversation(input) {
 
 /** 会话列表：scope 过滤（TC-S1-01/02）；按 updatedAt desc、id desc（新建/活跃优先）。 */
 export function listConversations({ scope } = {}) {
-  const where = typeof scope === 'string' && scope.trim().length > 0 ? 'WHERE scope = ?' : ''
+  const where = `WHERE NOT EXISTS (SELECT 1 FROM agent_conversation_bindings b WHERE b.conv_id=conversations.id)${typeof scope === 'string' && scope.trim().length > 0 ? ' AND scope = ?' : ''}`
   const params = typeof scope === 'string' && scope.trim().length > 0 ? [scope.trim()] : []
   const rows = db.prepare(`SELECT * FROM conversations ${where} ORDER BY updatedAt DESC, id DESC`).all(...params)
   return rows.map(convToObj)
@@ -3274,6 +3276,9 @@ export function listConversations({ scope } = {}) {
 
 /** 发消息（统一写纪律：by 必填 + author=by 防冒名 + 审计/SSE；消息 scope 恒等于会话 scope，跨 scope 写不串）。 */
 export function postMessage(input) {
+  if (agentConversations.binding(input?.conv)) {
+    throw new Error('Agent 会话请通过 /api/agent-messages 提交，不能走普通空间助手路径')
+  }
   const by = input?.by
   if (typeof by !== 'string' || by.trim().length === 0) throw new Error('缺少操作者身份 by')
   const convId = Number(input?.conv)
@@ -3455,7 +3460,8 @@ export function postAiReply(input) {
     const conv = getConversation(s2.conv_id)
     const t = now()
     const r = db.prepare('INSERT INTO messages (conv_id, scope, author, kind, body, meta, client_ts, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(s2.conv_id, conv.scope, by.trim(), kind, body, JSON.stringify({ replyTo: msgId, aiModel: model }), null, t)
+      .run(s2.conv_id, conv.scope, agentConversations.binding(s2.conv_id)?.agent_id ?? by.trim(), kind, body,
+        JSON.stringify({ replyTo: msgId, aiModel: model, ...(agentConversations.binding(s2.conv_id) ? { source:'answer',semanticType:'answer',generatedFromRecords:true,evidenceAsOf:meta2.agentContext?.evidenceAsOf } : {}) }), null, t)
     db.prepare('UPDATE conversations SET last_message_at = ?, updatedAt = ? WHERE id = ?').run(t, t, s2.conv_id)
     meta2.aiStatus = 'replied'
     meta2.repliedAt = t
@@ -5274,7 +5280,19 @@ export function artifactContent(taskId, rawI) {
 // ── 路由层（PRT-316）：`handle` 里已提取出去的路由族在这里装配。──
 // 依赖由本文件注入（各族自己不 import hub 内部件）。新族加进这个数组即可，
 // 不需要再往下面那条 if 链里抄一遍同样的形状。
+export const agentConversations = createAgentConversationService({
+  db, withTx, audit, createTask,
+  recordRunEvents: input => runStore.recordRunEvents(input),
+})
+export function reconcileAgentConversations() { return agentConversations.reconcile() }
+const agentConversationTimer = setInterval(() => {
+  if (db.isOpen === false) { clearInterval(agentConversationTimer);return }
+  try { reconcileAgentConversations() } catch (e) { console.error('[agent-conversations] reconciliation failed:', e.message) }
+}, 3000)
+agentConversationTimer.unref()
+
 const router = createRouter([
+  createAgentsRoutes({ service:agentConversations,json,authorized,readBody,requireMember,readScope }),
   // 冲突治理族放在最前：/api/tasks/:id/write-intent 等具体路径必须先于宽前缀匹配。
   createWriteIntentRoutes({
     json, readBody, authorized, writeIntentStore, db,
@@ -5364,6 +5382,7 @@ const router = createRouter([
   }),
   createContextSnapshotsRoutes({
     json,
+    onSnapshotRecorded: (attemptId,snapshot) => agentConversations.includeFeedback(attemptId,snapshot),
     contextStore, handleRun, assembleContext,
     describeAssembly, collectCandidates, createContextSource,
     createConservativeTokenizer, tokenizerForProfile, planSnapshotRetention,
@@ -5458,6 +5477,7 @@ const router = createRouter([
     transitionTask, settleGoalsOfScope, advanceTask,
     reassignTask, now, getTask,
     releaseStaleTasks, inboxCount, handleWrite,
+    onManualHold: (taskId,hold) => agentConversations.manualHold(taskId,hold),
   }),
   createModelBindingsRoutes({
     json,
@@ -5925,6 +5945,7 @@ const server = http.createServer((req, res) => {
  * 所以本函数只做"关连接 + 清集合"，并**不**推进任何投递状态。
  */
 export function disposeHub() {
+  clearInterval(agentConversationTimer)
   for (const client of eventClients) client.res.end()
   eventClients.clear()
 }

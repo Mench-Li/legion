@@ -56,7 +56,7 @@ export function createContextSnapshotsRoutes({
   describeAssembly, collectCandidates, createContextSource,
   createConservativeTokenizer, tokenizerForProfile, planSnapshotRetention,
   buildSnapshotExport, verifySnapshotExport, CONTEXT_EXPORT_CODES,
-  ContextExportError, SourceError, TOKENIZER_REGISTRY,
+  ContextExportError, SourceError, TOKENIZER_REGISTRY, onSnapshotRecorded = null,
 }) {
   const deps = { json,
     contextStore, handleRun, assembleContext,
@@ -394,6 +394,7 @@ export function createContextSnapshotsRoutes({
             tokenizer,
           })
           const rec = contextStore().record(snapshot, { scope, actor: body.actor ?? null })
+          if (onSnapshotRecorded) onSnapshotRecorded(body.attemptId, snapshot)
           return { recorded: rec, summary: describeAssembly(snapshot), snapshotHash: snapshot.snapshotHash }
         })
       },

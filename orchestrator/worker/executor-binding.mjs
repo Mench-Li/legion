@@ -340,6 +340,7 @@ export async function productionExecutorProvider(io = {}) {
   })
 
   return createProductionExecutor({
+    agentInteractions: true,
     host, selfCheck, canRead, post, get, ...rest,
     loadSources: sourceLoader.loadSources,
     ...(budgetActor === null ? {} : { budgetActor }),
@@ -509,6 +510,7 @@ async function crossProcessExecutorProvider({ runtimeUrl, runtimeToken, post, ge
     // ★ 宿主端口在跨进程时**不是** DSH 端口，而是"怎么找到那台 Runtime 进程"。
     //   `adapterFactory` 是本批接入的注入点（`executor.mjs` 的执行逻辑一行未改）。
     host: contractHost,
+    agentInteractions: true,
     adapterFactory: (h) => createRuntimeContractAdapter(h),
     selfCheck: async () => ({
       autoExecutionForbidden: verdict.autoExecutionForbidden === true,
@@ -609,8 +611,8 @@ export function hubIo({ hubUrl, hubToken, fetchImpl = globalThis.fetch } = {}) {
   }
 
   return Object.freeze({
-    async post(path, body) {
-      const res = await fetchImpl(root + path, { method: 'POST', headers, body: JSON.stringify(body) })
+    async post(path, body, options = {}) {
+      const res = await fetchImpl(root + path, { method: 'POST', headers, body: JSON.stringify(body), ...(options.signal ? { signal:options.signal } : {}) })
       return decode(res)
     },
     async get(path) {

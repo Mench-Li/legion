@@ -4,6 +4,7 @@ import { cp, mkdtemp, mkdir, writeFile, readFile, rm, readdir, stat, symlink } f
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
+import { createHash } from 'node:crypto'
 import { importBundledRuntime } from './bundled-runtime.mjs'
 import { readActiveRuntime, runtimePathsOf } from './runtime-install.mjs'
 import { inventoryTree, DESKTOP_MANIFEST_FORMAT } from '../release/desktop-manifest.mjs'
@@ -95,6 +96,44 @@ test('hashed ASAR payload is locally extracted, individually verified, and publi
   assert.equal(readActiveRuntime({ dataDir: input.dataDir }).complete, true)
   const installed = runtimePathsOf({ dataDir: input.dataDir, targetVersion: release.dshVersion })
   assert.equal(await readFile(installed.entryPath, 'utf8'), '// bundled fixture')
+})
+
+test('existing same-version runtime migrates only when differences are pruned metadata or x64-excluded files', async t => {
+  const input = await fixture(t)
+  const oldFiles = [
+    ['node_modules/@deepseek-ai/dsh/lib/bin.js.map', 'source map'],
+    ['node_modules/@deepseek-ai/dsh/lib/index.d.ts', 'declaration'],
+    ['node_modules/node-pty/prebuilds/win32-arm64/pty.node', 'arm64 binary'],
+    ['node_modules/node-pty/third_party/conpty/1.25.260303002/win10-arm64/conpty.dll', 'arm64 dll'],
+  ]
+  for (const [name, contents] of oldFiles) {
+    const path = join(input.bundleRoot, 'dsh', name)
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, contents)
+  }
+  input.manifest.files = await inventoryTree(join(input.bundleRoot, 'dsh'), 'dsh')
+  await writeFile(join(input.bundleRoot, 'desktop-release.json'), JSON.stringify(input.manifest))
+  await importBundledRuntime(input)
+
+  const paths = runtimePathsOf({ dataDir: input.dataDir, targetVersion: release.dshVersion })
+  const oldPointer = await readFile(paths.pointerPath, 'utf8')
+  for (const [name] of oldFiles) await rm(join(input.bundleRoot, 'dsh', ...name.split('/')), { force: true })
+  await createArchiveBundle(input)
+  const migrated = await importBundledRuntime(input)
+
+  assert.equal(migrated.ok, true)
+  assert.equal(migrated.reused, true)
+  assert.equal(await readFile(paths.pointerPath, 'utf8'), oldPointer)
+  const marker = JSON.parse(await readFile(paths.markerPath, 'utf8'))
+  assert.equal(marker.payloadDigest, createHash('sha256').update(JSON.stringify(input.manifest.files)).digest('hex'))
+  assert.equal(Number.isFinite(marker.migratedAtMs), true)
+  for (const [name] of oldFiles) await assert.rejects(readFile(join(paths.versionDir, ...name.split('/'))), { code: 'ENOENT' })
+
+  const pointerAfterMigration = await readFile(paths.pointerPath, 'utf8')
+  await writeFile(join(paths.versionDir, 'untracked-runtime.js'), 'must be rejected')
+  await writeFile(paths.markerPath, JSON.stringify({ ...marker, payloadDigest: 'previous-payload' }))
+  await assert.rejects(importBundledRuntime(input), { code: 'BUNDLE_EXISTING_VERSION_MISMATCH' })
+  assert.equal(await readFile(paths.pointerPath, 'utf8'), pointerAfterMigration)
 })
 
 test('changed ASAR bytes are rejected before staging or current-pointer mutation', async t => {

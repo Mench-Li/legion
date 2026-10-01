@@ -10,7 +10,7 @@ import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { performance } from 'node:perf_hooks'
 import { createRuntimeWriteGuard, runtimePathsOf, COMPLETION_MARKER_FILENAME } from './runtime-install.mjs'
-import { hashFile, readDesktopManifest, releaseError, verifyInventory } from '../release/desktop-manifest.mjs'
+import { hashFile, inventoryTree, readDesktopManifest, releaseError, verifyInventory } from '../release/desktop-manifest.mjs'
 
 const execFileAsync = promisify(execFile)
 
@@ -122,11 +122,48 @@ export async function importBundledRuntime({ bundleRoot, dataDir, installDir, re
     try { await rename(temporary, path) } finally { await rm(temporary, { force: true }) }
   }
   const digest = createHash('sha256').update(JSON.stringify(files)).digest('hex')
+  const migratePrunedPayload = async marker => {
+    if (marker.version !== release.dshVersion
+      || marker.dshCompositionPatchVersion !== release.dshCompositionPatchVersion
+      || typeof marker.payloadDigest !== 'string') return false
+    // Earlier desktop builds installed the same DSH runtime files plus only
+    // metadata and ARM64 node-pty payloads that Windows x64 staging now prunes.
+    // Permit that exact transition after hashing every retained file, then
+    // remove only the known-pruned paths and advance the completion marker.
+    const expected = new Map(files.map(file => [file.path, file]))
+    const actual = await inventoryTree(paths.versionDir, 'dsh', { signal, exclude: [COMPLETION_MARKER_FILENAME] })
+    const extras = []
+    for (const item of actual) {
+      const wanted = expected.get(item.path)
+      if (wanted) {
+        if (item.bytes !== wanted.bytes || item.sha256 !== wanted.sha256) return false
+        expected.delete(item.path)
+        continue
+      }
+      const relative = item.path.slice('dsh/'.length)
+      const knownPruned = relative.endsWith('.map') || relative.endsWith('.d.ts')
+        || relative.startsWith('node_modules/node-pty/prebuilds/win32-arm64/')
+        || relative.startsWith('node_modules/node-pty/third_party/conpty/1.25.260303002/win10-arm64/')
+      if (!knownPruned) return false
+      extras.push(relative)
+    }
+    if (expected.size !== 0) return false
+    for (const relative of extras) {
+      const path = join(paths.versionDir, ...relative.split('/'))
+      await checked(path)
+      await rm(path, { force: true })
+    }
+    const nextMarker = { ...marker, payloadDigest: digest, migratedAtMs: Date.now() }
+    await atomicJson(paths.markerPath, nextMarker)
+    return true
+  }
   const checkTarget = async () => {
     const marker = await json(paths.markerPath)
     if (marker === null) return false
     if (marker.version !== release.dshVersion || marker.dshCompositionPatchVersion !== release.dshCompositionPatchVersion
-      || marker.payloadDigest !== digest) throw releaseError('BUNDLE_EXISTING_VERSION_MISMATCH')
+      || (marker.payloadDigest !== digest && !await migratePrunedPayload(marker))) {
+      throw releaseError('BUNDLE_EXISTING_VERSION_MISMATCH')
+    }
     await verifyInventory(paths.versionDir, files, { prefix: 'dsh', signal, exclude: [COMPLETION_MARKER_FILENAME] })
     return true
   }

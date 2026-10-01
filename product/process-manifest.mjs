@@ -187,7 +187,12 @@ export const PROCESS_SPECS = Object.freeze([
     // boundary between DSH launcher flags and the web app's own flags so a
     // late --patch can still be inserted before --host/--port/--no-open.
     launcherArgumentBoundary: true,
-    cwd: '{install}',
+    // DSH binds its path-scope policy to process.cwd(). The selected workspace
+    // is the operator-authorized project root; keeping cwd at {install} makes
+    // a valid workspace write scope fail on every packaged install. The DSH
+    // entry itself still resolves from the active DataDir pointer and all
+    // product resources still resolve from InstallDir.
+    cwd: '{workspace}',
     argsTemplate: Object.freeze([]),
     // ★ PRT-251 续：端口**必须**走这里，不能走 `argsTemplate`。
     //

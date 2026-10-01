@@ -41,9 +41,10 @@
 | 打包后的首次导入 | 从真实应用目录的 Node 和桥接入口执行，PATH 不包含宿主 Node/Git；无宿主 DSH profile；本地导入成功后停止确认与真实桥接退出成功 |
 | 独立后台服务 | 在隔离测试目录中，以发行载荷的 Node 启动 team-hub、DSH Runtime、Workbench；三项就绪判据通过，3 秒后仍就绪，再停止并观察桥接退出。明确只启用三项，整体状态为 degraded；未据此放行调度或声称模型可用 |
 | 优化前 NSIS 基线包 | 已实际生成 222,542,124 字节的当前用户安装器，Authenticode 状态为 NotSigned；旧物理文件布局，仅作性能对照 |
-| ASAR 归档版内部 NSIS 构建（含旧 DataDir 兼容修复） | 199,252,431 字节，SHA-256 `4335EB1D7861743E060F56D1CAFE0AB135F037C1972D86028601EE40F6774AF4`，Authenticode **NotSigned**。其中 DSH 归档 143,201,284 字节，SHA-256 `5ac81b5b9dd836e04309bf2e36014fc3d330ec16142f35769cfaada27329dbd9`；释放描述符保留 13,895 个 DSH 逻辑文件的逐项哈希 |
+| 当前 ASAR 归档版内部 NSIS 构建 | 199,252,652 字节，SHA-256 `B5577BEE833205EB027FB1AF865033479D2F60408EEB9C92E30D56031504EDC8`，Authenticode **NotSigned**。其中 DSH 归档 143,201,284 字节，SHA-256 `5ac81b5b9dd836e04309bf2e36014fc3d330ec16142f35769cfaada27329dbd9`；释放描述符保留 13,895 个 DSH 逻辑文件的逐项哈希 |
 | 安装/首启性能优化 | DSH source maps 和 `.d.ts` 声明文件不进入 Windows x64 运行载荷；其他 DSH 内容压成一个 `dsh.asar`，首启由独立 Node 子进程展开到 DataDir、完整校验后原子切换。旧物理目录基线：安装 **526,759 ms**，首启至 Workbench **259,036 ms**；归档包当前主机两次真实 per-user 安装为 **88,048 ms**、**66,232 ms**，一次实际 NSIS 安装后首启到 Workbench **87,989 ms**，同数据目录第二次启动 **25,200 ms**。首启 DSH、Team Hub、Workbench、Whiteboard 全部就绪，退出/卸载及隔离数据保留通过 |
 | 旧 DataDir 迁移回归 | 修复前旧运行时标记会因优化包裁剪 metadata 而报 `BUNDLE_EXISTING_VERSION_MISMATCH`。新版仅当同版本所有保留文件哈希匹配、额外项只属于已裁剪 source maps / `.d.ts` / ARM64 node-pty 文件时自动迁移标记；差异或未知额外项仍拒绝。模拟旧物理布局的真实安装包首启通过迁移，四项服务就绪，旧文件清理、退出、卸载和数据保留通过 |
+| 安装路径与工作区路由 | Electron 资源根和 DSH 入口按真实安装路径解析；DSH `cwd` 跟随用户选择的工作区，使路径范围表与工作目录一致。含工作区写权限的真实打包启动验收通过；没有任何资源依赖仓库绝对路径 |
 | 优化前 NSIS 安装、资源完整性与卸载基线 | 安装到含空格的 per-user 临时目录，安装耗时 **526,759 ms**；Node、DSH、Git、Legion 共 **28,268** 个物理文件逐项哈希与当时清单一致；安装版实际启动/退出通过；卸载在 **4,616 ms** 完成，隔离 userData 中产品设置仍保留 |
 | 首次安装后离线 DSH 与 Legion 服务启动 | 通过：首次启动从安装包导入并校验固定 DSH `0.1.5-rc.2`；DSH 的 `runtime.stdout.log` 启动 URL 中 token 确认为 `[REDACTED]`；Team Hub `8787`、Workbench `5173`、Whiteboard `8080` 均记录启动就绪；Electron 窗口导航至 Workbench；全程没有启动外部 DSH Web/Desktop。Orchestrator 报 `no-executor` 并保持 0 个任务认领，按设计 fail-closed |
 | 第二次打包版启动 | 使用卸载后保留的同一测试数据启动 `app.isPackaged=true` 的新 Legion 进程；启动前后 DSH、Team Hub、Workbench、Whiteboard 的就绪日志计数均由 **1** 增至 **2**；工作台再次打开，DSH token 仍未以明文写入日志 |
@@ -61,6 +62,8 @@
 优化前的物理目录安装包基线：`Legion-0.1.0-internal-x64-setup.exe`，**222,542,124 字节**，SHA-256 `18D52D2AB29E4F3FE9941C8A87C1ADAECEC7B10B5E802A9E4E823B87A7A76B8E`。归档优化包保持同一 Legion/DSH 精确版本组合，未向真实 DeepSeek API 发请求。
 
 修复版归档优化包：`Legion-0.1.0-internal-x64-setup.exe`，**199,252,431 字节**，SHA-256 `4335EB1D7861743E060F56D1CAFE0AB135F037C1972D86028601EE40F6774AF4`，Authenticode **NotSigned**。真实安装烟测在含空格的隔离路径中安装，先核对归档大小和 SHA-256；再将测试 DataDir 预置为同版本旧物理布局和旧摘要，应用首启成功验证并迁移，四项后台服务就绪。应用正常退出、静默卸载并确认测试数据仍存在。日志审计没有发现 DSH URL token 明文。安装本次耗时 **164,647 ms**，首启到四项服务就绪 **67,463 ms**；当前宿主负载与之前测量不同，性能验收仍以之前两次优化安装及单独基准为准。
+
+最新工作区路由修正版：`Legion-0.1.0-internal-x64-setup.exe`，**199,252,652 字节**，SHA-256 `B5577BEE833205EB027FB1AF865033479D2F60408EEB9C92E30D56031504EDC8`，Authenticode **NotSigned**。真实安装烟测启用了工作区写权限，并预置同版本旧物理布局数据；安装耗时 **107,027 ms**，首启到 DSH、Team Hub、Workbench、Whiteboard 全部就绪 **42,847 ms**。DSH 的 cwd 与选定工作区一致，旧数据迁移成功，卸载后隔离数据仍保留，日志中的 Runtime token 已脱敏。
 
 安装 smoke 首次发现日志中残留 DSH 启动 URL token。sink 现在对完整行做 URL query token 日志专用脱敏，保留启动器内存中的原始输出供 readiness 判定；覆盖拆分 chunk 的单测通过。第一次重打包误用了旧暂存目录，安装态断言正确失败；重新运行 stage 后构建并真实安装复验通过，安装日志只保存 `[REDACTED]`，卸载及用户数据保留也通过。
 

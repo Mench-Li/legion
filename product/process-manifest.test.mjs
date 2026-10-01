@@ -118,6 +118,7 @@ test('runtime 入口由配置提供：未配置必须报错，而不是「跳过
   //   「值旗标（host、port）→ 开关」。
   const resolved = planFor({}, { runtimeCommand: '"C:\\Program Files\\nodejs\\node.exe" "C:\\Legion\\dsh\\bin.mjs" --profile web' })
   const runtime = resolved.processes.find((p) => p.key === 'runtime')
+  assert.equal(runtime.cwd, 'D:\\Projects', 'DSH path-scope must be anchored to the selected workspace')
   assert.equal(runtime.command.file, 'C:\\Program Files\\nodejs\\node.exe')
   assert.deepEqual([...runtime.command.args],
     ['C:\\Legion\\dsh\\bin.mjs', '--profile', 'web', '--host', '127.0.0.1', '--port', '3080', '--no-open'])

@@ -148,6 +148,8 @@ Workbench 是唯一主工作窗口。DSH Web UI 不自动打开。默认关闭�
 
 随包 Node、MinGit 与 Legion 服务资源放在 `resources/` 的实际目录，Electron 页面和壳代码放 ASAR。DSH 生产树在构建时压成经过 SHA-256 绑定的单个 `dsh.asar` 资源以减少安装器逐文件解包；首启由随包独立 Node 启动隔离的解包 worker，展开到 DataDir 暂存目录，再逐文件按发行清单校验，最后原子切换现役指针。运行中的 DSH、原生模块和需执行的资源仍从 DataDir 的普通文件系统读取，不依赖独立 Node 访问 ASAR。
 
+桌面壳通过 Electron 的 `process.resourcesPath` 动态解析安装资源根，Launcher 与 DSH 入口都不依赖开发机 checkout 路径。项目工作区是独立的操作者选择；DSH 可执行文件从已校验的 DataDir 指针解析，DSH 进程的当前工作目录跟随所选工作区，因为 `LEGION_PATH_SCOPE` 会按 `process.cwd()` 收窄。这样既支持任意安装位置，也不把可写工作区放进会被升级替换的 InstallDir。
+
 `prepare-runtime` 新增 `source=bundled` 分支，复用现有版本/补丁配对、写入边界与完成标记判据。在 DataDir 独占锁下，把包内生产树复制到 `DataDir/runtime/dsh/versions/` 的唯一暂存目录；根据发行文件清单验证路径、类型、大小及哈希，验证入口与目标平台原生依赖，再发布版本目录、写完成标记并原子切换 `current.json`。实际目录名以 `runtimePathsOf` 为准。任何失败都不得修改现役指针；已完成但未切换的目录先重新校验，允许继续切换，不能要求用户手动删除数据。
 
 桌面载荷裁剪策略变化时，已安装的同版本 DataDir 运行时可能仍含旧版 source maps、`.d.ts` 声明文件或 x64 不使用的 ARM64 node-pty 资源。只在 DSH 与组合补丁版本相同、所有当前清单文件逐字节匹配且额外文件全部属于这些明确类别时，才自动删除额外文件并原子更新完成标记；任何必需文件哈希不同、未知额外文件或版本不同都继续 fail closed，不能切换现役指针。

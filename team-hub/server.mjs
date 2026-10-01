@@ -164,6 +164,8 @@ import {
 import { resolveNextPost } from '../orchestrator/pipeline/index.mjs'
 import { columnExists as columnExistsImpl, ensureColumn as ensureColumnImpl } from './schema-util.mjs'
 import { createEventDeliveryStore } from './event-delivery.mjs'
+import { bootstrapWorkflowPack, ensureWorkflowPackSchema, validateWorkflowPack } from '../product/workflow-packs/pack.mjs'
+import { createWorkflowPackRoutes } from './routes/workflow-packs.mjs'
 import {
   AUTOMATION_ERRORS,
   createAutomationStore,
@@ -4911,12 +4913,30 @@ function json(res, status, data) {
   res.end(JSON.stringify(data, null, 2))
 }
 
-function readBody(req) {
+function readBody(req, cap = Number.POSITIVE_INFINITY) {
   return new Promise((resolve, reject) => {
-    let raw = ''
-    req.on('data', (d) => { raw += d })
+    const chunks = []
+    let total = 0
+    let finished = false
+    req.on('data', (d) => {
+      if (finished) return
+      const chunk = Buffer.isBuffer(d) ? d : Buffer.from(d)
+      total += chunk.length
+      if (total > cap) {
+        finished = true
+        req.removeAllListeners('data')
+        req.resume()
+        reject(Object.assign(new Error('请求体超大小'), { statusCode: 413, code: 'REQUEST_TOO_LARGE' }))
+        return
+      }
+      chunks.push(chunk)
+    })
     req.on('end', () => {
-      try { resolve(raw.length === 0 ? {} : JSON.parse(raw)) } catch { reject(new Error('请求体不是合法 JSON')) }
+      if (finished) return
+      try {
+        const raw = Buffer.concat(chunks).toString('utf8')
+        resolve(raw.length === 0 ? {} : JSON.parse(raw))
+      } catch { reject(new Error('请求体不是合法 JSON')) }
     })
     req.on('error', reject)
   })
@@ -5005,10 +5025,10 @@ function optionalIntParam(url, name) {
   return Number.isSafeInteger(n) ? n : null
 }
 
-async function handleWrite(req, res, run) {
+async function handleWrite(req, res, run, { maxBytes = Number.POSITIVE_INFINITY } = {}) {
   try {
     if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
-    const body = await readBody(req)
+    const body = await readBody(req, maxBytes)
     const by = requireMember(body)
     const scope = readScope(body)
     const result = await run(body, by, scope)
@@ -5276,6 +5296,8 @@ export function artifactContent(taskId, rawI) {
 // ── 路由层（PRT-316）：`handle` 里已提取出去的路由族在这里装配。──
 // 依赖由本文件注入（各族自己不 import hub 内部件）。新族加进这个数组即可，
 // 不需要再往下面那条 if 链里抄一遍同样的形状。
+ensureWorkflowPackSchema(db)
+
 const router = createRouter([
   // 冲突治理族放在最前：/api/tasks/:id/write-intent 等具体路径必须先于宽前缀匹配。
   createWriteIntentRoutes({
@@ -5516,6 +5538,9 @@ const router = createRouter([
     handleWrite, SCOPE_KEY_RE, normalizeStages,
     normalizeRuntime, withTx, readPipeline,
     pipelineWarnings,
+  }),
+  createWorkflowPackRoutes({
+    db, json, handleWrite: (req, res, run) => handleWrite(req, res, run, { maxBytes: 2 * 1024 * 1024 }), audit, withTx,
   }),
   createAgentIntakeRoutes({
     json,
@@ -5941,6 +5966,18 @@ const isMain = process.argv[1] !== undefined && resolve(process.argv[1]) === fil
 let lastToolCallSweepSignature = null
 
 if (isMain) {
+  // Packaged desktop first-run: install the built-in software collaboration
+  // pack before listening, so Workbench never opens into an empty space list.
+  // Re-import is idempotent; the package store refuses to overwrite local edits.
+  if (process.env.LEGION_DESKTOP_MODE === '1' && process.env.LEGION_WORKFLOW_PACK_PATH) {
+    let rawPack
+    try { rawPack = JSON.parse(readFileSync(process.env.LEGION_WORKFLOW_PACK_PATH, 'utf8')) }
+    catch { throw Object.assign(new Error('Built-in workflow pack cannot be read'), { code: 'WORKFLOW_PACK_UNREADABLE' }) }
+    const validatedPack = validateWorkflowPack(rawPack)
+    const result = bootstrapWorkflowPack(db, validatedPack, { withTx,
+      workspaceDir: process.env.LEGION_WORKSPACE_DIR ?? '' })
+    console.log(`[team-hub] workflow pack ${validatedPack.pack.id}@${validatedPack.pack.version}: ${result.action}${result.skipped ? ' skipped' : ''} scope=${validatedPack.pack.scope.id}`)
+  }
   console.log(configSummaryLine()) // P3-2：启动即打印脱敏后的最终配置（token 只显示是否设置）
   validateSecurityConfig()
   server.listen(PORT, HOST, () => {

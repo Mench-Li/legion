@@ -38,6 +38,7 @@ import { ActivityFeed } from './components/ActivityFeed'
 import { QuickTools } from './components/QuickTools'
 import { CommandBar } from './components/CommandBar'
 import { SkillsPanel } from './components/SkillsPanel'
+import { WorkflowPacksPanel } from './components/WorkflowPacksPanel'
 import { RulesPanel } from './components/RulesPanel'
 import { ChatView } from './components/ChatView'
 import { FilesView } from './components/FilesView'
@@ -514,6 +515,8 @@ export default function App(): React.JSX.Element {
             />
           ) : active === 'skills' ? (
             <SkillsPanel scope={scope} hubMode={hubMode} spaces={hubSpaces} />
+          ) : active === 'packs' ? (
+            <WorkflowPacksPanel hubMode={hubMode} />
           ) : active === 'rules' ? (
             <RulesPanel scope={scope} hubMode={hubMode} spaces={hubSpaces} onOpenFiles={() => setActive('files')} />
           ) : active === 'chat' ? (

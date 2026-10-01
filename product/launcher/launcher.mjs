@@ -956,6 +956,18 @@ export function createLauncher({
       if (typeof layout.dataDir === 'string' && layout.dataDir !== '') {
         out.LEGION_DATA_DIR = layout.dataDir
       }
+      // Packaged Legion seeds its built-in workflow pack inside the private Hub
+      // before the readiness listener starts. Both paths derive from the
+      // verified install root / selected workspace; neither is a source path.
+      if (desktopCredentials !== null && typeof installRoot === 'string' && installRoot !== '') {
+        const builtinPack = join(installRoot, 'workflow-packs', 'software-collaboration.legionpack')
+        if (exists(builtinPack)) {
+          out.LEGION_WORKFLOW_PACK_PATH = builtinPack
+          if (typeof layout.workspaceDir === 'string' && layout.workspaceDir !== '') {
+            out.LEGION_WORKSPACE_DIR = layout.workspaceDir
+          }
+        }
+      }
     }
     return out
   }

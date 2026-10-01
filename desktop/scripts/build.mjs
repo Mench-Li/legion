@@ -1,4 +1,4 @@
-import { readFile, stat } from 'node:fs/promises'
+import { copyFile, readFile, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { performance } from 'node:perf_hooks'
@@ -23,6 +23,10 @@ await build({ projectDir: join(root, 'desktop'),
       createDesktopShortcut: true, createStartMenuShortcut: true, deleteAppDataOnUninstall: false, runAfterFinish: false },
   },
 })
+// Keep an easy-to-copy authoring example beside the installer. The installed
+// copy remains the verified source used for first-run bootstrap.
+const workflowPackSource = join(resources, 'legion', 'workflow-packs', 'software-collaboration.legionpack')
+await copyFile(workflowPackSource, join(root, 'desktop', 'dist', 'software-collaboration.legionpack'))
 const installerPath = join(outputDir, `Legion-${pkg.version}-internal-x64-setup.exe`)
 let installer = null
 if (!process.argv.includes('--dir')) {

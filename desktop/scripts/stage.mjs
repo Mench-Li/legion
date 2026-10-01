@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url'
 import { performance } from 'node:perf_hooks'
 import asar from '@electron/asar'
 import { inventoryTree, hashFile, DESKTOP_MANIFEST_FORMAT, DESKTOP_COMPONENTS, validateDesktopManifest } from '../../product/release/desktop-manifest.mjs'
+import { validateWorkflowPack } from '../../product/workflow-packs/pack.mjs'
+import { createSoftwareCollaborationPack } from './software-collaboration-pack.mjs'
 import { pruneWindowsX64Payload } from './platform-filter.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
@@ -62,6 +64,18 @@ for (const path of paths) {
   await copyFile(join(root, path), target)
 }
 await copyTree(join(root, 'workbench', 'dist'), join(resources, 'legion', 'workbench', 'dist'))
+
+// The generic software workflow is a first-party declarative package, not a
+// workspace snapshot. Its source is explicit and versioned; local/user data
+// such as roles-ozon.json and .legion are never included.
+const softwarePack = createSoftwareCollaborationPack({
+  rolesDefinition: JSON.parse(await readFile(join(root, 'roles.json'), 'utf8')),
+  soldierPrompt: await readFile(join(root, 'workflows', 'soldier-prompt.md'), 'utf8'),
+})
+const validatedSoftwarePack = validateWorkflowPack(softwarePack)
+const packDir = join(resources, 'legion', 'workflow-packs')
+await mkdir(packDir, { recursive: true })
+await writeFile(join(packDir, 'software-collaboration.legionpack'), `${JSON.stringify(validatedSoftwarePack.pack, null, 2)}\n`)
 
 // Runtime extraction needs only @electron/asar's library closure. Stage exact
 // installed packages beside Legion so the private Node can expand dsh.asar

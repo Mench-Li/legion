@@ -43,6 +43,7 @@
 | 内部 NSIS 构建 | 已实际生成约 225 MB、当前用户安装器，Authenticode 状态为 NotSigned；默认 Electron 图标，尚未作为完整交付提供 |
 | 最新 NSIS 安装、资源完整性与卸载 | 安装到含空格的 per-user 临时目录，安装耗时 **526,759 ms**；Node、DSH、Git、Legion 共 **28,268** 项逐项哈希与清单一致；安装版实际启动/退出通过；卸载在 **4,616 ms** 完成，隔离 userData 中产品设置仍保留 |
 | 首次安装后离线 DSH 与 Legion 服务启动 | 通过：首次启动从安装包导入并校验固定 DSH `0.1.5-rc.2`；DSH 的 `runtime.stdout.log` 启动 URL 中 token 确认为 `[REDACTED]`；Team Hub `8787`、Workbench `5173`、Whiteboard `8080` 均记录启动就绪；Electron 窗口导航至 Workbench；全程没有启动外部 DSH Web/Desktop。Orchestrator 报 `no-executor` 并保持 0 个任务认领，按设计 fail-closed |
+| 第二次打包版启动 | 使用卸载后保留的同一测试数据启动 `app.isPackaged=true` 的新 Legion 进程；启动前后 DSH、Team Hub、Workbench、Whiteboard 的就绪日志计数均由 **1** 增至 **2**；工作台再次打开，DSH token 仍未以明文写入日志 |
 | 工作区设置源码窗口 | 真实 Electron 窗口通过工作区选择、确认、产品目录初始化与设置持久化；再次启动恢复为 identity 设置步骤，尚未运行任务。测试替换了原生目录对话框的返回值，未替换 IPC、后台桥接、初始化或存储；另一窗口即使加载同一启动页也不能调用目录选择 |
 | 身份和路径范围源码设置 | 真实 Electron 表单保存 operator 输入的 actor/scope/action、attended `ask` 策略和明确选择的工作区读写根。用配置加载器验证 Legion 用户设置优先于冲突的项目级配置；安全用例不含真实密钥。再次启动停留在模型设置，没有假报 Runtime 或模型 ready |
 

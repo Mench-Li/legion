@@ -469,6 +469,8 @@ test('envSurface：跨进程接线是**派生**的，不是各自猜默认值', 
     const rows = Object.fromEntries(L.envSurface().map((r) => [r.process, r]))
     // workbench 必须指到本次启动的 hub，而不是默认 8787
     assert.equal(rows.workbench.allowed.includes('DSH_HUB_UPSTREAM'), true)
+    assert.equal(rows.orchestrator.values.TEAM_HUB_URL, 'http://127.0.0.1:51814',
+      'worker 必须连接本次启动的 hub，不能依赖父进程环境或默认端口')
     // 白板拿不到 hub 的令牌；team-hub 拿不到白板的令牌
     assert.equal(rows.whiteboard.allowed.includes('TEAM_HUB_TOKEN'), false)
     assert.equal(rows['team-hub'].allowed.includes('WHITEBOARD_TOKEN'), false)

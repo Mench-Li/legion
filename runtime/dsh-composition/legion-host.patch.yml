@@ -52,7 +52,7 @@
     - id: "legion-enforcement-runtime-host-registrar"
       name: "./plugins/runtime-host-registrar-row.mjs"
     - id: "legion-enforcement-runtime-contract-server"
-      name: "./plugins/runtime-contract-server-row.mjs"
+      name: "./plugins/runtime-contract-registrar-row.mjs"
 - id: "permission"
   config:
     presets:

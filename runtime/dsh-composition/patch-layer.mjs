@@ -297,12 +297,8 @@ export const PATCH_LAYER_ROWS = Object.freeze([
     //   那是**可见的降级**，不是静默失效。所以你在这里读不到 `throw`：
     //   它一律 `ctx.provide({ok:false, code, ...})`（文件头 L34）。
     //
-    //   ⚠️ 诚实的边界：本行今天**没有生产输入工厂**
-    //   （`setRuntimeContractInputsFactory()` 全仓只有定义与注释，没有调用方）
-    //   ⇒ 它 apply 之后报的具名码是 `RUNTIME_CONTRACT_ROW_NO_INPUTS_FACTORY`。
-    //   这也正是本条要的读数：从"这一行根本不在树里"变成
-    //   "它在树里、它 apply 过、它按一个具名码拒绝了"。
-    module: './plugins/runtime-contract-server-row.mjs',
+    // 生产注册模块从现场 subagents 服务和 Launcher 环境装配输入。
+    module: './plugins/runtime-contract-registrar-row.mjs',
   }),
   Object.freeze({
     id: `${LEGION_ROW_PREFIX}permission-presets`,

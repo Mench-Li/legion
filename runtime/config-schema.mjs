@@ -574,6 +574,10 @@ export const SCHEMA = defineSchema({
         '而它在返回值上是**成功**的',
     },
     {
+      key: 'runtimeToken', env: 'LEGION_RUNTIME_TOKEN', type: 'string', default: '', sensitive: true,
+      doc: 'Launcher 为本次启动生成的执行接口凭证；只经子进程环境传递，不进入日志或摘要。缺失时执行接口拒绝鉴权操作。',
+    },
+    {
       key: 'approvalPolicy', env: 'LEGION_APPROVAL_POLICY', type: 'string', default: '',
       doc: '需要人时的审批策略，只接受 `APPROVAL_POLICIES` 里的值。取不到就是 null → 具名拒绝。' +
         '**不猜**：默认 ask 会让无人值守的进程去问一个不在场的人，' +

@@ -869,6 +869,9 @@ export function createLauncher({
     if (proc.key === 'workbench' && teamHubPort !== null) {
       out.DSH_HUB_UPSTREAM = `http://127.0.0.1:${teamHubPort}`
     }
+    if (proc.key === 'orchestrator' && teamHubPort !== null) {
+      out.TEAM_HUB_URL = `http://127.0.0.1:${teamHubPort}`
+    }
     // Legion 身份（PRT-214 续）。**只有 Runtime 子进程**拿到它们：
     // 它们是"这个运行时以谁的名义、在哪个空间、干什么"的声明，
     // 别的进程（hub / workbench / 白板）不需要，也就拿不到。

@@ -40,14 +40,18 @@ Windows，Node 24.19.0，pnpm 11.7.0。
 | CI syntax、DSH boundary、文档检查 | 通过 |
 | 配置扫描 | 未通过：本次新增错误码已登记；仍有 97 项既有配置/错误码登记问题 |
 | 全仓 CI | 尝试执行，环境配置扫描未过；全仓测试长时间未结束后已终止，不计作通过 |
-| 真实 Runtime | DSH Headless CLI 已实际调用模型并完成一次运行；Legion 分支 Worker 尚未接入该 Runtime，生产探测仍返回 `EXECUTOR_HOST_PORT_REQUIRED` |
+| 真实 Runtime | DSH Headless CLI 已实际调用模型并完成一次运行。随后用分支代码、隔离 DSH Home 和一次性 Hub 启动了真实 Runtime；其能力自检为 incompatible，`autoExecutionForbidden=true`。生产 Worker 拒绝认领，未执行模型任务；详见下文 |
 | 浏览器交互验收 | 未执行自动浏览器验收；已通过前端编译及真实 HTTP 集成验证 |
 
 真实 HTTP 集成使用一次性 SQLite 和 `listen(0)`，验证会话创建、消息幂等、跨空间拒绝、追加要求经真实 SourceLoader 读取、服务端装配并冻结快照、纳入回执，以及删除回执后的对账恢复。测试同时覆盖重复事件投递、取消前的等待状态、过期租约、部分反馈截断、问题重复回答和人工恢复依据。
 
 2026-10-02 通过 DSH 官方 Headless CLI 命令 `pnpm dsh --profile headless --json "仅输出 READY。不要调用任何工具、不要读取或修改文件。"` 启动了一次真实模型运行。模型返回 `READY`，Run 状态为 `completed`，用量为 11,583 tokens（输入 11,196，输出 3，缓存读取 384）。这证明本机 DSH 与模型凭证可用，但 Headless 探针没有载入 Legion 分支 Worker，也没有测试本功能的生产执行器路径。
 
-当前桌面 DSH profile 的模块路径指向主工作区，且配置了现有 Hub；直接启动它会运行主工作区代码并可能认领真实任务，因此没有拿它冒充功能分支验收。完整的真实模型编码闭环仍未验证：还需要一个指向该分支的隔离 DSH profile、一次性 Hub 数据库和临时执行目录，然后执行“实际模型开工 → 运行中查询 → 取消 → 新 Attempt → 新模型产物 → 用户验收”。没有改动正式数据库、启动生产守护或自动合并主分支。
+当前桌面 DSH profile 的模块路径指向主工作区，且配置了现有 Hub；直接启动它会运行主工作区代码并可能认领真实任务，因此没有拿它冒充功能分支验收。2026-10-02 后续验证在分支工作区的 `.tmp/agent-e2e` 下创建独立 DSH Home、Runtime 发布目录、Worker 数据目录和 Hub SQLite，并启动真实 DSH Web Runtime。Runtime `/health` 和 `/enforcement` 均可访问，但自检明确报告版本 `0.2.0-rc.2` 缺少 `cancel-and-timeout`、`structured-result`、`usage-reporting`，沙箱级别也只有 partial；结论是 `state=incompatible`、`autoExecutionForbidden=true`。真实 Worker 连到隔离 Hub 后保持 `state=no-executor`、`claimGateMode=installed`、`claimed=0`。其生产入口还因没有 Worker 侧 `canRead` 授权来源而以 `EXECUTOR_CAN_READ_REQUIRED` 拒绝装配；单独把真实 Runtime 接入生产跨进程执行器并显式注入测试用授权判定后，自检仍以 `EXECUTOR_SELF_CHECK_INCOMPATIBLE` 拒绝。没有创建可执行任务，也没有发出模型 Run，因此“模型开工 → 运行中汇报 → 取消 → 新 Attempt”真实闭环仍未验证。不能把 Runtime 强制面判定改成通过来继续测试。
+
+本轮回归：`node --test orchestrator/worker/*.test.mjs product/orchestrator/*.test.mjs runtime/contracts/*.test.mjs runtime/adapters/dsh/*.test.mjs` 共 820 项通过；`node --test team-hub/agent-conversations.test.mjs` 共 18 项通过。第一次运行 820 项时暴露 3 条既有断言仍将 claim lease 固定为 8 个键；真实响应已包含身份字段 `workerId`。更新断言到当前 9 键契约后，相关用例 8/8 通过，完整回归复跑 820/820 通过。未执行浏览器交互验收或全仓 CI。
+
+本轮隔离 Hub、Runtime 和 Worker 均已停止，测试 SQLite 与运行数据只在分支 `.tmp/agent-e2e`，不会进入提交。没有改动正式数据库、启动生产守护或自动合并主分支。
 
 测试命令及证据保存在工作区 `.ci/agent-regression-final.log`、`.ci/agent-route-tests.log`、`.ci/agent-plugin-tests.log`、`.ci/agent-final-gates-2/summary.json`、`.ci/agent-config-final.log`。这些是本次运行产物，不进入源码提交。
 

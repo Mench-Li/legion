@@ -41,8 +41,16 @@ export function desktopRequestHeaders(details, { origin, token, webContentsId })
   return headers
 }
 
-function clientError(code) {
-  return Object.assign(new Error(code), { code })
+const PORT_PROCESS_KEYS = new Set(['team-hub', 'workbench', 'runtime', 'whiteboard'])
+
+function clientError(code, { portConflict = null } = {}) {
+  const error = Object.assign(new Error(code), { code })
+  if (portConflict && typeof portConflict === 'object' && PORT_PROCESS_KEYS.has(portConflict.process)
+    && Number.isInteger(portConflict.port) && portConflict.port > 0 && portConflict.port <= 65535
+    && typeof portConflict.listening === 'boolean') {
+    error.portConflict = Object.freeze({ process: portConflict.process, port: portConflict.port, listening: portConflict.listening })
+  }
+  return error
 }
 
 export const BRIDGE_DEADLINES = Object.freeze({ status: 10_000, start: 720_000, restart: 780_000, stop: 90_000, 'prepare-runtime': 600_000, 'configure-workspace': 30_000, 'configure-identity': 30_000, 'configure-model': 45_000 })
@@ -77,7 +85,7 @@ export function createBridgeClient(child, {
     pending.delete(message.id)
     clearTimeout(slot.timer)
     if (message.ok === true) slot.resolve(message.payload)
-    else slot.reject(clientError(message.payload?.code ?? 'BRIDGE_FAILED'))
+    else slot.reject(clientError(message.payload?.code ?? 'BRIDGE_FAILED', { portConflict: message.payload?.portConflict }))
   })
   child.stdout.on('data', (chunk) => decoder.push(chunk))
   child.on('exit', (code, signal) => {

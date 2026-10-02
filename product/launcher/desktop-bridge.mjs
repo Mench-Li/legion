@@ -7,6 +7,7 @@ import { createDesktopLauncher } from './desktop-launcher.mjs'
 import { createLauncher } from './launcher.mjs'
 import { launcherOptionsFrom } from './cli.mjs'
 import { createLineDecoder, DESKTOP_PROTOCOL_VERSION, parseRequest } from './desktop-protocol.mjs'
+import { DEFAULT_PORTS } from '../process-manifest.mjs'
 import { readDesktopSettings, selectedWorkspace, validateDesktopIdentity } from './desktop-settings.mjs'
 import { ENFORCEMENT_IDENTITY_ENV } from './enforcement-identity.mjs'
 
@@ -33,6 +34,15 @@ function safeCode(value, fallback) {
 
 function safePhase(value) {
   return typeof value === 'string' && /^[a-z][a-z0-9-]{0,31}$/.test(value) ? value : null
+}
+
+function publicPortConflict(result) {
+  const diagnostic = Array.isArray(result?.diagnostics)
+    ? result.diagnostics.find(item => item?.severity === 'error' && item?.code === 'PORT_IN_USE')
+    : null
+  if (!diagnostic || !Object.hasOwn(DEFAULT_PORTS, diagnostic.process)
+    || !Number.isInteger(diagnostic.port) || diagnostic.port < 1 || diagnostic.port > 65535) return null
+  return Object.freeze({ process: diagnostic.process, port: diagnostic.port, listening: diagnostic.portListening === true })
 }
 
 function publicStatus(status) {
@@ -183,8 +193,10 @@ export function createDesktopBridge({
           if (result.ok !== true) {
             await owner.stop({ reason: '桌面启动失败后清理' })
             ownsLifecycle = false
+            const portConflict = publicPortConflict(result)
             return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: false,
-              payload: { state: 'failed', code: safeCode(result.code ?? result.failures?.[0]?.code ?? result.diagnostics?.find((d) => d.severity === 'error')?.code, 'START_FAILED'), phase: safePhase(result.phase) } }
+              payload: { state: 'failed', code: safeCode(result.code ?? result.failures?.[0]?.code ?? result.diagnostics?.find((d) => d.severity === 'error')?.code, 'START_FAILED'),
+                phase: safePhase(result.phase), ...(portConflict ? { portConflict } : {}) } }
           }
           running = true
         }

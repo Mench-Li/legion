@@ -45,13 +45,18 @@ test('stop and restart serialize lifecycle and close stops the owned launcher', 
 
 test('launcher failure remains failed even when status claims ready', async () => {
   const bridge = createDesktopBridge({
-    launcherFactory: () => ({ async start() { return { ok: false, phase: 'ports', code: 'PORT_IN_USE' } }, status() { return { state: 'ready', processes: [] } }, async stop() {} }),
+    launcherFactory: () => ({ async start() { return { ok: false, phase: 'ports', code: 'PORT_IN_USE', diagnostics: [
+      { severity: 'error', code: 'PORT_IN_USE', process: 'team-hub', port: 8787, portListening: true,
+        message: 'text must not be forwarded' },
+    ] } }, status() { return { state: 'ready', processes: [] } }, async stop() {} }),
     optionsFactory: () => ({ options: {} }), emit: () => {},
   })
   const response = await bridge.handle({ version: 1, id: 'a', type: 'start', payload: { token: 'a'.repeat(64) } })
   assert.equal(response.ok, false)
   assert.equal(response.payload.code, 'PORT_IN_USE')
   assert.equal(response.payload.state, 'failed')
+  assert.deepEqual(response.payload.portConflict, { process: 'team-hub', port: 8787, listening: true })
+  assert.doesNotMatch(JSON.stringify(response), /text must not be forwarded/)
 })
 
 test('unexpected failure details cannot escape through a diagnostic code', async () => {

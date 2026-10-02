@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs'
 import { runInNewContext } from 'node:vm'
 import { fileURLToPath } from 'node:url'
 import { canNavigate, closeAction, createBridgeClient, desktopRequestHeaders, externalUrl, workbenchTarget } from './runtime.mjs'
-import { failureMessage } from './messages.mjs'
+import { failureMessage, portConflictMessage } from './messages.mjs'
 
 function fakeBridge() {
   const child = new EventEmitter()
@@ -92,6 +92,22 @@ test('bridge client correlates request and rejects pending work when child dies'
   await assert.rejects(client.request('status'), { code: 'BRIDGE_EXITED' })
 })
 
+test('bridge client forwards only validated port conflict context', async () => {
+  const { child, sent } = fakeBridge()
+  const client = createBridgeClient(child)
+  const pending = client.request('start')
+  child.stdout.write(`${JSON.stringify({ version: 1, id: sent[0].id, type: 'result', ok: false, payload: {
+    code: 'PORT_IN_USE', portConflict: { process: 'workbench', port: 5173, listening: true, secret: 'drop-this' },
+  } })}\n`)
+  await assert.rejects(pending, error => {
+    assert.equal(error.code, 'PORT_IN_USE')
+    assert.deepEqual(error.portConflict, { process: 'workbench', port: 5173, listening: true })
+    assert.equal(error.portConflict.secret, undefined)
+    return true
+  })
+  child.emit('exit', 0)
+})
+
 test('sandbox-compatible preload exposes only the startup command allowlist', async () => {
   let exposed
   const calls = []
@@ -110,6 +126,14 @@ test('sandbox-compatible preload exposes only the startup command allowlist', as
 
 test('startup failure identifies missing execution identity instead of blaming the network', () => {
   assert.equal(failureMessage('ENFORCEMENT_IDENTITY_MISSING'), '缺少执行身份配置，请完成首次设置。')
+})
+
+test('port conflict help names the service and port and rejects untrusted detail', () => {
+  assert.equal(portConflictMessage({ process: 'team-hub', port: 8787, listening: true }),
+    'team-hub 数据服务需要端口 8787，已有进程正在监听。\n'
+      + 'PowerShell 查看占用：Get-NetTCPConnection -LocalPort 8787 -State Listen | Select-Object LocalPort,OwningProcess')
+  assert.equal(portConflictMessage({ process: 'unknown', port: 8787, listening: true }), '')
+  assert.equal(portConflictMessage({ process: 'runtime', port: '8787', listening: true }), '')
 })
 
 test('desktop credential belongs only to the owned main frame and verified origin', () => {

@@ -15,6 +15,22 @@ const remedies = Object.freeze({
   STOP_FAILED: '后台服务尚未全部停止，请查看运行状态后重试。',
 })
 
+const portServices = Object.freeze({
+  'team-hub': 'team-hub 数据服务',
+  workbench: 'Workbench 工作台',
+  runtime: 'DSH 执行引擎',
+  whiteboard: 'Whiteboard 服务',
+})
+
 export function failureMessage(code) {
   return remedies[code] ?? '请查看诊断信息后重试。'
+}
+
+export function portConflictMessage(conflict) {
+  if (!conflict || typeof conflict !== 'object' || !Object.hasOwn(portServices, conflict.process)
+    || !Number.isInteger(conflict.port) || conflict.port < 1 || conflict.port > 65535
+    || typeof conflict.listening !== 'boolean') return ''
+  const condition = conflict.listening ? '已有进程正在监听' : '绑定检查失败'
+  return `${portServices[conflict.process]}需要端口 ${conflict.port}，${condition}。\n`
+    + `PowerShell 查看占用：Get-NetTCPConnection -LocalPort ${conflict.port} -State Listen | Select-Object LocalPort,OwningProcess`
 }

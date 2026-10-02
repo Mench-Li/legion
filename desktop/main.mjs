@@ -160,7 +160,8 @@ async function performStart(type, generation) {
       : error?.code === 'ENFORCEMENT_IDENTITY_MISSING' ? 'identity'
         : error?.code === 'MODEL_NOT_CONFIGURED' ? 'model' : null
     report(phase ? { state: 'setup-required', phase, workspace: selectedWorkspace }
-      : { state: 'failed', code: error?.code ?? 'START_FAILED' })
+      : { state: 'failed', code: error?.code ?? 'START_FAILED',
+        ...(error?.portConflict ? { portConflict: error.portConflict } : {}) })
     if (window && !window.isDestroyed()) {
       if (window.webContents.getURL() !== startupUrl) {
         try { await window.loadURL(startupUrl) } catch { report({ state: 'failed', code: 'STARTUP_PAGE_FAILED' }) }

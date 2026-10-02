@@ -1,4 +1,4 @@
-import { failureMessage } from './messages.mjs'
+import { failureMessage, portConflictMessage } from './messages.mjs'
 
 const heading = document.querySelector('#heading')
 const detail = document.querySelector('#detail')
@@ -47,7 +47,9 @@ function render(state) {
     return
   }
   heading.textContent = failed ? 'Legion 暂时无法启动' : state?.state === 'stopped' ? 'Legion 服务已停止' : '正在启动 Legion'
-  detail.textContent = failed ? `错误代码：${state.code ?? 'START_FAILED'}。${failureMessage(state.code)}` : text[state?.phase] ?? '正在检查服务状态…'
+  detail.textContent = failed
+    ? `错误代码：${state.code ?? 'START_FAILED'}。${failureMessage(state.code)}${portConflictMessage(state.portConflict) ? `\n${portConflictMessage(state.portConflict)}` : ''}`
+    : text[state?.phase] ?? '正在检查服务状态…'
   if (!failed && Number.isSafeInteger(state?.completed) && Number.isSafeInteger(state?.total) && state.total > 0 && state.completed >= 0 && state.completed <= state.total) {
     detail.textContent += `（${Math.floor(state.completed * 100 / state.total)}%）`
   }

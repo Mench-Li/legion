@@ -57,7 +57,7 @@
 
 验证：受影响回归 240 项、路由回归 81 项、插件回归 58 项通过（部分套件重叠）；前端及插件构建通过；syntax、DSH boundary、doc 门禁通过。配置扫描保留 97 项既有未登记问题；全仓测试尝试后终止，不计通过。
 
-真实 HTTP 已验证反馈经生产 SourceLoader、服务端冻结快照、纳入回执及缺失回执补偿。当前 Runtime 探测返回 `EXECUTOR_HOST_PORT_REQUIRED`，真实模型编码闭环与浏览器交互验收未验证。
+真实 HTTP 已验证反馈经生产 SourceLoader、服务端冻结快照、纳入回执及缺失回执补偿。2026-10-02 DSH Headless CLI 真实模型探针完成并返回 `READY`（11,583 tokens）；该探针未载入 Legion 分支 Worker。生产 Runtime 探测仍返回 `EXECUTOR_HOST_PORT_REQUIRED`，真实模型编码闭环与浏览器交互验收未验证。
 
 接口采用现有中枢的 flat API。关键事件模板加三秒对账承担首版汇报，不生成 token delta 聊天消息。规则页读取空间规范与技能目录，岗位实际授权以本轮输入快照为准。已读游标与面板新消息计数已实现，编队全局未读徽标另行扩展。
 

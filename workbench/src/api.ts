@@ -1362,7 +1362,7 @@ export interface HubMigrationPlan {
 }
 
 /** 通用 JSON 请求。**写请求都带 20s 超时**（与 hubPost 一致：界面不能无感卡住）。 */
-async function hubRequest(method: string, path: string, body?: Record<string, unknown>): Promise<unknown> {
+export async function hubRequest(method: string, path: string, body?: Record<string, unknown>): Promise<unknown> {
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), 20_000)
   let res: Response

@@ -3556,3 +3556,12 @@ body {
 .snapshot-view .snap-note.err { background: rgba(248,81,73,.14); border-left-color: #f85149; }
 .snapshot-view table th { font-weight: 500; padding: 4px 8px 4px 0; }
 .snapshot-view table td { padding: 4px 8px 4px 0; vertical-align: top; }
+.agent-tasks-modal { width: min(760px, 94vw); }
+.agent-detail-tabs, .agent-chat-controls { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.agent-detail-tabs .active { color: var(--cyan); border-color: var(--cyan); }
+.agent-chat-feed { height: 330px; overflow-y: auto; margin: 12px 0; border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+.agent-chat-message { padding: 10px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; margin: 8px 0; overflow-wrap: anywhere; }
+.agent-chat-message.mine { margin-left: 30px; }
+.agent-chat-message small { display: block; color: var(--muted-2); margin-bottom: 5px; }
+.agent-chat-compose { display: grid; gap: 8px; }
+.agent-chat-compose textarea { width: 100%; min-height: 80px; resize: vertical; box-sizing: border-box; }

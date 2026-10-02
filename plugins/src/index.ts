@@ -2409,7 +2409,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     body: string
     context?: Array<{ id: number; author: string; kind?: string; body: string }>
     /** S3/E1：本条消息绑定的附件引用（内容不入消息体，答问前另行取回）。 */
-    meta?: { attachments?: AttachmentRef[] }
+    meta?: { attachments?: AttachmentRef[]; agentContext?: { name?: string; role?: string; agentId?: string; evidenceAsOf?: string; tasks?: unknown[] } }
   }
   interface ReplySettingsPayload { enabled: boolean; model: string | null; identity: string | null; systemHint: string | null }
   async function fetchJson<T>(url: string): Promise<T | null> {
@@ -2446,7 +2446,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
         if (s && s.model) fallback = { provider: s.provider || config.provider, model: s.model }
       } catch { /* 取不到默认模型则用空串，由子代理 start 失败路径兜底 */ }
       const rows = await fetchJson<Array<{ role: string; provider?: string; model?: string }>>(`${hubUrl}/api/models?scope=${encodeURIComponent(msg.scope)}`)
-      const pick = (rows ?? []).find(r => r.role === 'assistant') ?? (rows ?? []).find(r => r.role === '') ?? (rows ?? [])[0]
+      const pick = (rows ?? []).find(r => r.role === (msg.meta?.agentContext?.role ?? 'assistant')) ?? (rows ?? []).find(r => r.role === 'assistant') ?? (rows ?? []).find(r => r.role === '') ?? (rows ?? [])[0]
       const chosenProvider = (pick?.provider && pick.provider.trim()) || fallback.provider
       const chosenModel = (settings.model && settings.model.trim()) || (pick?.model && pick.model.trim()) || fallback.model
       // 4) foreman 父级（无则标记失败，不重试同一轮）
@@ -2478,7 +2478,9 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       const prompt = buildChatAnswerPrompt({
         scope: msg.scope,
         convTitle: msg.convTitle,
-        systemHint: settings.systemHint,
+        systemHint: msg.meta?.agentContext
+          ? `${settings.systemHint ?? ''}\n你代表 ${msg.meta.agentContext.name ?? 'Agent'} 答问。只依据以下已保存记录解释，不声称收到运行中指令，不修改任务。记录时间 ${msg.meta.agentContext.evidenceAsOf ?? '未知'}。\n${JSON.stringify(msg.meta.agentContext)}`
+          : settings.systemHint,
         identity,
         context: [...(msg.context ?? []), { id: msg.id, author: msg.author, body: msg.body }],
         spaceDigest: ctxBundle.spaceDigest,
@@ -2494,6 +2496,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
           signal: controller.signal,
           outputSchema: CHAT_REPLY_SCHEMA,
           agentOptions: { provider: chosenProvider, model: chosenModel },
+          ...(msg.meta?.agentContext ? { toolFilter: { allow: [] } } : {}),
         })
         const result = await new Promise<{ stopReason: string; structured?: unknown } | null>((resolve) => {
           const t = setTimeout(() => { controller.abort(); resolve(null) }, budgetMs)

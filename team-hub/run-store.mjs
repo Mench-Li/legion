@@ -1521,6 +1521,7 @@ export function createRunStore({
           // 或者自己猜一个默认空间（一次静默的越权）。
           // 两条都不是"参数没传"那种能一眼看出来的错误。
           scope: row.scope,
+          workerId: worker,
           attemptNo: row.attempt_no,
           leaseEpoch: row.lease_epoch,
           leaseExpiresAtMs: row.lease_expires_at_ms,

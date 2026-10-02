@@ -14,7 +14,6 @@ import {
   fetchMissions,
   fetchRoster,
   fetchSpaces,
-  hubBase,
   probeHub,
   publishGoal,
   setExec,
@@ -36,8 +35,8 @@ import { WorkspaceSettings } from './components/WorkspaceSettings'
 import { UiIcon } from './components/UiIcon'
 import { agentKey, NAV_GROUPS, SUB_NAV } from './navigation'
 import type { TaskViewId } from './navigation'
-import { KpiBar } from './components/KpiBar'
 import { CenterPanel } from './components/CenterPanel'
+import { SpaceOverview } from './components/SpaceOverview'
 import { MissionPanel } from './components/MissionPanel'
 import { ActivityFeed } from './components/ActivityFeed'
 import { QuickTools } from './components/QuickTools'
@@ -237,7 +236,7 @@ export default function App(): React.JSX.Element {
     setSceneFacts(null)
     setSceneCues([])
     setSceneError('')
-    if (!hubMode || !scope || active !== 'home') {
+    if (!hubMode || !scope || active !== 'team-scene') {
       sceneRefreshRef.current = null
       return
     }
@@ -544,10 +543,11 @@ export default function App(): React.JSX.Element {
         />
         <section className="workspace-stage">
         <div className="mobile-workspace-toolbar"><button className="ui-icon-button" aria-label="打开侧栏导航" onClick={() => setNavigationOpen(true)}><UiIcon name="menu" /></button><span>Legion 协作台</span></div>
-        {active === 'home' && <KpiBar board={displayBoard} paused={paused} hubMode={hubMode} hubBase={hubBase()} staffCount={hubMode ? (roster?.length ?? 0) : null} />}
-        <div className={`workspace-page${active === 'home' ? ' workspace-overview' : ''}`}>
+        <div className={`workspace-page${active === 'team-scene' && scope ? ' workspace-overview' : ''}`}>
         {displayBoard ? (
-          active === 'agents' ? (
+          active === 'home' || (active === 'team-scene' && !scope) ? (
+            <SpaceOverview scope={scope} spaces={hubSpaces} hubMode={hubMode} scenePicker={active === 'team-scene'} onSelectSpace={selectScope} onNavigate={page => { if (page === 'agents') { setSelectedAgent(null); try { localStorage.removeItem('legion.workspace.agent') } catch { /* 当前导航不依赖持久化 */ } }; setActive(page) }} />
+          ) : active === 'agents' ? (
             <AgentWorkspace key={selectedAgent ? agentKey(selectedAgent.scope ?? '', selectedAgent.role) : 'unselected'} agent={selectedAgent} hubMode={hubMode} spaces={hubSpaces} roster={roster} onContactAgent={contactAgent} onModelSettings={() => { if (selectedAgent?.scope) selectScope(selectedAgent.scope); setActive('settings-models') }} />
           ) : active.startsWith('settings-') ? (
             <WorkspaceSettings active={active} scope={scope} spaces={hubSpaces} roster={roster} hubMode={hubMode} execEnabled={execEnabled} execDaemonOnline={execDaemonOnline} paused={paused} onToggleExec={handleToggleExec} onPausedChange={() => void refreshConfig()} onNewSpace={openNewSpace} onSpaceSettings={s => setSpaceSettings(s)} />
@@ -591,13 +591,13 @@ export default function App(): React.JSX.Element {
         ) : (
           <div className="center-col" />
         )}
-        {active === 'home' && <div className="right-col">
+        {active === 'team-scene' && scope && <div className="right-col">
           <MissionPanel missions={missionsShown} scopeAware={scopeAware} scope={scope} hubMode={hubMode} onDataChanged={() => void loadMissions(scope)} />
           <ActivityFeed events={activity} />
           <QuickTools onRefresh={() => void refresh()} refreshing={refreshing} onOpenModule={setActive} />
         </div>}
         </div>
-      {['home', 'goals', 'tasks'].includes(active) && <CommandBar
+      {['goals', 'tasks'].includes(active) && <CommandBar
         board={displayBoard}
         activity={activity}
         labels={labels}

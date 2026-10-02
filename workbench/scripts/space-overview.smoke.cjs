@@ -1,0 +1,28 @@
+const path=require('node:path'),assert=require('node:assert/strict');
+const {chromium}=require(require.resolve('playwright',{paths:[process.argv[2]]}));
+(async()=>{
+ const browser=await chromium.launch({headless:true,channel:'chrome'}),page=await browser.newPage({baseURL:'http://127.0.0.1:4821',viewport:{width:1440,height:900}});
+ const errors=[];page.on('pageerror',error=>errors.push(error.message));
+ await page.goto('http://127.0.0.1:4821/?api=http://127.0.0.1:4821');
+ await page.getByRole('button',{name:'空间概览',exact:true}).click();
+ await page.waitForFunction(()=>document.querySelector('.space-overview-metrics strong')?.textContent!=='—'&&document.querySelectorAll('.space-overview-card').length>0);
+ const spaces=await(await page.request.get('/hub/api/spaces')).json();
+ const roster=await(await page.request.get('/hub/api/roster')).json();
+ const count=Array.isArray(spaces)?spaces.length:spaces.spaces.length;
+ assert.equal(await page.locator('.space-overview-card').count(),count);
+ assert.equal(await page.locator('.space-overview-metrics strong').nth(1).innerText(),String(roster.agents.filter(agent=>!agent.external).length));
+ assert.equal(await page.locator('.scene-3d').count(),0);assert.equal(await page.locator('.kpi-bar').count(),0);
+ assert.equal(await page.getByText('尚未发布目标（该空间）',{exact:false}).count(),0);
+ await page.screenshot({path:path.join(process.cwd(),'.interface-preview','space-overview.png')});
+ await page.getByLabel('选择工作空间',{exact:true}).selectOption('software');
+ await page.waitForFunction(()=>document.querySelectorAll('.space-overview-card').length===1&&document.querySelector('.space-overview-card').dataset.space==='software'&&document.querySelector('.space-overview-metrics strong')?.textContent==='1');
+ const software=roster.agents.filter(agent=>agent.scope==='software'&&!agent.external);
+ assert.equal(await page.locator('.space-overview-metrics strong').nth(1).innerText(),String(software.length));
+ await page.getByLabel('选择工作空间',{exact:true}).selectOption('');
+ await page.getByRole('button',{name:'团队场景',exact:true}).click();await page.getByRole('button',{name:'进入团队场景',exact:true}).first().waitFor();assert.equal(await page.locator('.scene-3d').count(),0);
+ await page.getByRole('button',{name:'空间概览',exact:true}).click();await page.getByRole('button',{name:'查看任务',exact:true}).first().click();await page.locator('.tc-board').waitFor();
+ assert.equal(await page.locator('.tc-col').count(),6);
+ await page.getByRole('button',{name:'概览',exact:true}).click();await page.locator('.space-overview-card').waitFor();
+ await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+ assert.deepEqual(errors,[]);await browser.close();console.log('PASS: real spaces, registered Agent counts, scope isolation, distinct overview/scene routes, task navigation and mobile');
+})().catch(error=>{console.error(error);process.exit(1)});

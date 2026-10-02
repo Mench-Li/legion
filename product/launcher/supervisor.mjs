@@ -117,8 +117,7 @@ function isAlive(child) {
   if (child === null || child === undefined) return false
   if (child.exitCode !== null && child.exitCode !== undefined) return false
   if (child.signalCode !== null && child.signalCode !== undefined) return false
-  // Node's killed flag means a signal was sent, not that the process exited.
-  return true
+  return child.killed !== true
 }
 
 /**
@@ -457,7 +456,7 @@ export function createSupervisedProcess(spec, {
      * 停止并等待退出。
      * 先发 SIGTERM 并等待 `graceMs`；仍在则强杀（Windows 走 taskkill 杀树）。
      */
-    async stop({ graceMs = 5000, forceMs = 5000 } = {}) {
+    async stop({ graceMs = 5000 } = {}) {
       stopping = true
       if (pendingTimer !== null) {
         clearTimeoutImpl(pendingTimer)
@@ -468,37 +467,26 @@ export function createSupervisedProcess(spec, {
         return Object.freeze({ stopped: true, forced: false })
       }
       const target = child
-      let onExit
-      const exited = new Promise(resolve => {
-        onExit = resolve
-        target.once?.('exit', onExit)
+      const exited = new Promise((resolve) => {
+        if (typeof target.once !== 'function') { resolve(); return }
+        target.once('exit', () => resolve())
       })
-      async function waitExit(timeoutMs) {
-        let timer
-        try {
-          return await Promise.race([exited.then(() => true), new Promise(resolve => {
-            timer = setTimeoutImpl(() => resolve(false), timeoutMs)
-          })])
-        } finally { if (timer !== undefined) clearTimeoutImpl(timer) }
-      }
       try { target.kill('SIGTERM') } catch { /* 已退出 */ }
       // race 里的定时器必须显式清掉：不清的话，即使进程秒退，
       // 这个 5s 定时器仍会在事件循环里挂着（unref 只让进程能退出，不释放它）。
-      const graceful = await waitExit(graceMs)
-      if (!graceful) {
-        let treeStopped = false
-        try { treeStopped = await killTree(target, { logger: log }) === true } catch { /* preserve ownership on failure */ }
-        const observed = await waitExit(forceMs)
-        target.removeListener?.('exit', onExit)
-        if (!treeStopped || !observed) {
-          lastError = !observed ? 'PROCESS_EXIT_TIMEOUT' : 'PROCESS_TREE_STOP_FAILED'
-          setState('failed', lastError)
-          return Object.freeze({ stopped: false, forced: true, code: lastError })
-        }
+      let graceTimer = null
+      const timedOut = await Promise.race([
+        exited.then(() => false),
+        new Promise((resolve) => {
+          graceTimer = setTimeoutImpl(() => resolve(true), graceMs)
+        }),
+      ])
+      if (graceTimer !== null) clearTimeoutImpl(graceTimer)
+      if (timedOut) {
+        await killTree(target, { logger: log })
         setState('stopped', `超过 ${graceMs}ms 未退出，已强制终止进程树`)
         return Object.freeze({ stopped: true, forced: true })
       }
-      target.removeListener?.('exit', onExit)
       setState('stopped', '已优雅退出')
       return Object.freeze({ stopped: true, forced: false })
     },

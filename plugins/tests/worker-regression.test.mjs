@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import test from 'node:test'
 
 import { apply } from '../lib/index.js'
@@ -754,6 +755,817 @@ test('repeated worker failures are re-dispatched by the mediator instead of esca
   } finally {
     for (const dispose of harness.disposers) await dispose()
     globalThis.fetch = originalFetch
+    restoreTasks()
+    await cleanup(root)
+  }
+})
+
+test('workflow worker persists Attempt before provider start and binds Run ID before consuming its result', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'scrum-worker-attempt-order-'))
+  const originalFetch = globalThis.fetch
+  const restoreTasks = protectTasksFile(root)
+  initGitRepo(root)
+
+  const reviewWorkflow = {
+    instanceId: 'G-attempt-order',
+    designRole: 'designer', implementationRole: 'coder', reviewRole: 'reviewer',
+    designStageId: 'design', implementationStageId: 'implement', reviewStageId: 'review',
+    maxReworkRounds: 2,
+    stageDefinitionsById: {
+      design: {
+        workflowStageId: 'design', role: 'designer', label: 'Design', nextStageIds: ['implement'],
+        agentToolConfig: {
+          id: 'claude-code', version: 1, providerName: 'claude-code', adapter: 'dsh-subagent', enabled: true,
+          permissionProfile: 'claude-code-acceptEdits', workspacePolicy: 'attempt-worktree-parent-cwd',
+          capabilities: { outputSchema: false, toolFilter: false },
+        },
+      },
+    },
+  }
+  let task = {
+    ...structuredClone(TASK),
+    id: 'G-attempt-order-design', role: 'designer', goalId: 'G-attempt-order',
+    status: 'todo', soldier: null, claimedAt: null,
+    agentSelectionSnapshot: {
+      source: 'goal-agent-workflow', pipelineVersion: 'workflow-v1', stageRole: 'designer',
+      reviewWorkflow, workflowStageId: 'design',
+      agentToolConfig: reviewWorkflow.stageDefinitionsById.design.agentToolConfig,
+    },
+  }
+  const calls = []
+  let resolveRun
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input))
+    const body = init.body ? JSON.parse(String(init.body)) : {}
+    if (url.pathname === '/api/spaces') return response({ spaces: [] })
+    if (url.pathname === '/api/pipeline') return response({
+      version: 'workflow-v1',
+      stages: [{
+        role: 'designer', label: 'Design', prompt: 'Create the design', next: 'coder',
+        agentToolConfig: reviewWorkflow.stageDefinitionsById.design.agentToolConfig,
+      }],
+      workflow: { designRole: 'designer', implementationRole: 'coder', reviewRole: 'reviewer', maxReworkRounds: 2 },
+    })
+    if (url.pathname === '/api/heartbeat' || url.pathname === '/api/agent-nodes/heartbeat') return response({ ok: true })
+    if (url.pathname === '/api/skills') return response([])
+    if (url.pathname === '/api/rules') return response({ rules: null })
+    if (url.pathname === '/api/chat/replies') return response({ messages: [] })
+    if (url.pathname === '/api/board') return response([task])
+    if (url.pathname === '/api/goal') return response({ goals: [{ id: task.goalId, status: 'active' }] })
+    if (url.pathname === '/api/claim') {
+      task = { ...task, status: 'in_progress', soldier: body.soldier, claimedAt: new Date().toISOString() }
+      return response({ task })
+    }
+    if (url.pathname === '/api/release-stale') return response({ released: [], quarantined: [] })
+    if (url.pathname === '/api/agent-workflow/stage-attempts/start') {
+      calls.push({ kind: 'attempt-start', body })
+      return response({ id: 'attempt-persisted-before-provider' })
+    }
+    if (url.pathname === '/api/agent-workflow/stage-attempts/report') {
+      calls.push({ kind: 'attempt-report', body })
+      return response({ ok: true })
+    }
+    if (url.pathname === '/api/comment') {
+      calls.push({ kind: 'comment', body })
+      task = { ...task, comments: [...(task.comments ?? []), { by: body.by, at: new Date().toISOString(), text: body.text }] }
+      return response({ task })
+    }
+    if (url.pathname === '/api/progress') return response({ ok: true })
+    if (url.pathname === '/api/hold') { calls.push({ kind: 'hold', body }); return response({ ok: true }) }
+    if (url.pathname === '/api/transition') {
+      calls.push({ kind: 'transition', body })
+      task = { ...task, status: body.to }
+      return response({ task })
+    }
+    throw new Error(`unexpected request ${url.pathname}`)
+  }
+
+  const harness = fakeContext(
+    { status: 'done', summary: 'unused', evidence: '', blocker: '' },
+    async () => {},
+    async () => {},
+    async (providerName, options) => {
+      assert.ok(calls.some(call => call.kind === 'attempt-start'), 'provider must not start before its Stage Attempt is durable')
+      calls.push({ kind: 'provider-start' })
+      assert.equal(providerName, 'claude-code')
+      assert.equal(options.prompt[0].type, 'text')
+      assert.match(options.prompt[0].text, /不要调用 Bash、PowerShell、终端/)
+      assert.match(options.prompt[0].text, /Legion 计算并登记 SHA-256/)
+      return {
+        id: 'provider-run-73',
+        result: new Promise(resolve => { resolveRun = resolve }),
+        dispose: async () => { calls.push({ kind: 'provider-dispose' }) },
+      }
+    },
+  )
+  harness.ctx.subagents.getProvider = name => name === 'claude-code' ? {
+    name, permissionMode: 'acceptEdits',
+    capabilities: { outputSchema: false, toolFilter: false, agentOptions: false },
+  } : undefined
+  harness.ctx.agents.create = async options => ({
+    agent: { session: { id: String(options.sessionId), header: { cwd: options.meta.cwd } } },
+    dispose: async () => {},
+  })
+  try {
+    apply(harness.ctx, config(root, { isolate: true, scopes: 'off' }))
+    harness.intervals[0]()
+    try {
+      await waitFor(() => calls.some(call => call.kind === 'attempt-report' && call.body.state === 'running'), 'provider Run ID was never persisted')
+    } catch (error) {
+      const workerLog = readFileSync(join(root, 'worker.log'), 'utf8')
+      throw new Error(`${String(error)}; workerLog=${workerLog}`)
+    }
+    const attemptStartIndex = calls.findIndex(call => call.kind === 'attempt-start')
+    const providerStartIndex = calls.findIndex(call => call.kind === 'provider-start')
+    const runningReportIndex = calls.findIndex(call => call.kind === 'attempt-report' && call.body.state === 'running')
+    assert.ok(attemptStartIndex >= 0 && attemptStartIndex < providerStartIndex, 'durable Attempt must precede provider start')
+    assert.ok(providerStartIndex < runningReportIndex, 'Run ID must be reported as soon as provider returns its handle')
+    assert.equal(calls[runningReportIndex].body.providerRunId, 'provider-run-73')
+
+    resolveRun({ stopReason: 'error', diagnostic: 'Claude provider returned HTTP 429 after writing its partial design artifact' })
+    await waitFor(() => calls.some(call => call.kind === 'attempt-report' && call.body.state === 'unknown'), 'failed execution was not recorded as unknown')
+    const unknown = calls.find(call => call.kind === 'attempt-report' && call.body.state === 'unknown')
+    assert.equal(unknown.body.providerRunId, 'provider-run-73')
+    assert.match(unknown.body.error, /provider 诊断：Claude provider returned HTTP 429/)
+    assert.ok(calls.some(call => call.kind === 'hold'), 'unknown side effects must quarantine the task')
+    assert.ok(calls.some(call => call.kind === 'transition' && call.body.to === 'in_review'))
+  } finally {
+    for (const dispose of harness.disposers) await dispose()
+    globalThis.fetch = originalFetch
+    restoreTasks()
+    await cleanup(root)
+  }
+})
+
+test('workflow task cancellation reaches DSH provider and records a confirmed canceled Attempt', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'scrum-worker-attempt-cancel-'))
+  const originalFetch = globalThis.fetch
+  const restoreTasks = protectTasksFile(root)
+  initGitRepo(root)
+
+  const reviewWorkflow = {
+    instanceId: 'G-attempt-cancel',
+    designRole: 'designer', implementationRole: 'coder', reviewRole: 'reviewer',
+    designStageId: 'design', implementationStageId: 'implement', reviewStageId: 'review',
+    maxReworkRounds: 2,
+    stageDefinitionsById: {
+      design: { workflowStageId: 'design', role: 'designer', label: 'Design', nextStageIds: ['implement'] },
+    },
+  }
+  let task = {
+    ...structuredClone(TASK),
+    id: 'G-attempt-cancel-design', role: 'designer', goalId: 'G-attempt-cancel',
+    status: 'todo', soldier: null, claimedAt: null,
+    agentSelectionSnapshot: {
+      source: 'goal-agent-workflow', pipelineVersion: 'workflow-v1', stageRole: 'designer',
+      reviewWorkflow, workflowStageId: 'design',
+    },
+  }
+  const calls = []
+  let signal
+  let providerResolve
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input))
+    const body = init.body ? JSON.parse(String(init.body)) : {}
+    if (url.pathname === '/api/spaces') return response({ spaces: [] })
+    if (url.pathname === '/api/pipeline') return response({
+      version: 'workflow-v1', stages: [{ role: 'designer', label: 'Design', prompt: 'Create the design' }],
+    })
+    if (url.pathname === '/api/heartbeat' || url.pathname === '/api/agent-nodes/heartbeat') return response({ ok: true })
+    if (url.pathname === '/api/skills') return response([])
+    if (url.pathname === '/api/rules') return response({ rules: null })
+    if (url.pathname === '/api/chat/replies') return response({ messages: [] })
+    if (url.pathname === '/api/board') return response([task])
+    if (url.pathname === '/api/goal') return response({ goals: [{ id: task.goalId, status: 'active' }] })
+    if (url.pathname === '/api/claim') {
+      task = { ...task, status: 'in_progress', soldier: body.soldier, claimedAt: new Date().toISOString() }
+      return response({ task })
+    }
+    if (url.pathname === '/api/release-stale') return response({ released: [], quarantined: [] })
+    if (url.pathname === '/api/agent-workflow/stage-attempts/start') {
+      calls.push({ kind: 'attempt-start', body })
+      return response({ id: 'attempt-canceled-confirmed' })
+    }
+    if (url.pathname === '/api/agent-workflow/stage-attempts/report') {
+      calls.push({ kind: 'attempt-report', body })
+      return response({ ok: true })
+    }
+    if (url.pathname === '/api/comment') {
+      calls.push({ kind: 'comment', body })
+      task = { ...task, comments: [...(task.comments ?? []), { by: body.by, at: new Date().toISOString(), text: body.text }] }
+      return response({ task })
+    }
+    if (url.pathname === '/api/progress') return response({ ok: true })
+    if (url.pathname === '/api/hold' || url.pathname === '/api/transition') {
+      calls.push({ kind: 'unexpected-state-change', body })
+      return response({ ok: true })
+    }
+    throw new Error(`unexpected request ${url.pathname}`)
+  }
+
+  const harness = fakeContext(
+    { status: 'done', summary: 'unused', evidence: '', blocker: '' },
+    async () => {}, async () => {}, async (_provider, options) => {
+      signal = options.signal
+      return {
+        id: 'provider-run-canceled',
+        result: new Promise(resolve => { providerResolve = resolve }),
+        dispose: async () => { calls.push({ kind: 'provider-dispose' }) },
+      }
+    },
+  )
+  try {
+    apply(harness.ctx, config(root, { isolate: true, scopes: 'off' }))
+    harness.intervals[0]()
+    await waitFor(() => typeof providerResolve === 'function', 'workflow provider did not start')
+    task = { ...task, status: 'canceled' }
+    await waitFor(() => signal?.aborted === true, 'Hub cancellation was not propagated to provider AbortSignal', 3000)
+    providerResolve({ stopReason: 'cancelled' })
+    await waitFor(() => calls.some(call => call.kind === 'attempt-report' && call.body.state === 'canceled'), 'confirmed cancellation was not persisted')
+    const terminal = calls.find(call => call.kind === 'attempt-report' && call.body.state === 'canceled')
+    assert.equal(terminal.body.providerRunId, 'provider-run-canceled')
+    assert.equal(calls.some(call => call.kind === 'unexpected-state-change'), false, 'worker must not overwrite the user cancellation state')
+    assert.equal(calls.some(call => call.kind === 'hold'), false, 'confirmed cancellation does not need unknown-outcome quarantine')
+    assert.ok(calls.some(call => call.kind === 'provider-dispose'), 'provider resources must be disposed after cancellation')
+  } finally {
+    for (const dispose of harness.disposers) await dispose()
+    globalThis.fetch = originalFetch
+    restoreTasks()
+    await cleanup(root)
+  }
+})
+
+test('standalone workflow design task commits a checkpoint and auto-completes without space pipeline coupling', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'scrum-worker-workflow-design-handoff-'))
+  const originalFetch = globalThis.fetch
+  const restoreTasks = protectTasksFile(root)
+  initGitRepo(root)
+
+  const reviewWorkflow = {
+    instanceId: 'G-design-checkpoint',
+    designRole: 'designer', implementationRole: 'coder', reviewRole: 'reviewer',
+    designStageId: 'design', implementationStageId: 'implement', reviewStageId: 'review',
+    maxReworkRounds: 2,
+    stageDefinitionsById: {
+      design: { workflowStageId: 'design', id: 'design', role: 'designer', label: 'Design', nextStageIds: ['implement'] },
+    },
+  }
+  let task = {
+    ...structuredClone(TASK), id: 'G-design-checkpoint-design', role: 'designer', goalId: 'G-design-checkpoint',
+    status: 'todo', soldier: null, claimedAt: null,
+    agentSelectionSnapshot: {
+      source: 'goal-agent-workflow', pipelineVersion: 'workflow-v1', stageRole: 'designer',
+      reviewWorkflow, workflowStageId: 'design',
+      workflowContext: { designArtifacts: [], implementation: null, upstreamStages: [] },
+    },
+  }
+  const calls = []
+  let foremanCwd
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input))
+    const body = init.body ? JSON.parse(String(init.body)) : {}
+    if (url.pathname === '/api/spaces') return response({ spaces: [] })
+    if (url.pathname === '/api/pipeline') return response({ version: 'space-pipeline-v1', stages: [] })
+    if (url.pathname === '/api/heartbeat' || url.pathname === '/api/agent-nodes/heartbeat') return response({ ok: true })
+    if (url.pathname === '/api/skills') return response([])
+    if (url.pathname === '/api/rules') return response({ rules: null })
+    if (url.pathname === '/api/chat/replies') return response({ messages: [] })
+    if (url.pathname === '/api/board') return response([task])
+    if (url.pathname === '/api/goal') return response({ goals: [{ id: task.goalId, status: 'active' }] })
+    if (url.pathname === '/api/claim') {
+      task = { ...task, status: 'in_progress', soldier: body.soldier, claimedAt: new Date().toISOString() }
+      return response({ task })
+    }
+    if (url.pathname === '/api/release-stale') return response({ released: [], quarantined: [] })
+    if (url.pathname === '/api/agent-workflow/stage-attempts/start') {
+      calls.push({ kind: 'attempt-start', body })
+      return response({ id: 'attempt-design-checkpoint' })
+    }
+    if (url.pathname === '/api/agent-workflow/stage-attempts/report') {
+      calls.push({ kind: 'attempt-report', body })
+      return response({ ok: true })
+    }
+    if (url.pathname === '/api/artifact') {
+      task = { ...task, artifacts: [...(task.artifacts ?? []), { kind: body.kind, path: body.path, title: body.title, digest: body.digest }] }
+      return response({ task })
+    }
+    if (url.pathname === '/api/comment') {
+      calls.push({ kind: body.isEvidence ? 'evidence' : 'comment', body })
+      const item = { by: body.by, at: new Date().toISOString(), text: body.text }
+      task = body.isEvidence
+        ? { ...task, evidence: [...(task.evidence ?? []), item] }
+        : { ...task, comments: [...(task.comments ?? []), item] }
+      return response({ task })
+    }
+    if (url.pathname === '/api/progress') return response({ ok: true })
+    if (url.pathname === '/api/advance') {
+      calls.push({ kind: 'advance', body })
+      task = { ...task, status: 'done', version: task.version + 1 }
+      return response({ task })
+    }
+    if (url.pathname === '/api/transition') {
+      calls.push({ kind: 'transition', body })
+      task = { ...task, status: body.to, version: task.version + 1 }
+      return response({ task })
+    }
+    throw new Error(`unexpected request ${url.pathname}`)
+  }
+
+  const harness = fakeContext(
+    { status: 'done', summary: 'design is ready', evidence: 'acceptance is explicit', blocker: '',
+      artifact: { kind: 'file', path: 'docs/design.md', title: 'Design' } },
+    async options => { foremanCwd = options.meta.cwd },
+    async () => {},
+    async () => {
+      mkdirSync(join(foremanCwd, 'docs'), { recursive: true })
+      writeFileSync(join(foremanCwd, 'docs', 'design.md'), '# Design\n\nAcceptance: deterministic handoff.\n')
+      return { id: 'provider-design-run', result: Promise.resolve({ stopReason: 'completed', structured: {
+        status: 'done', summary: 'design is ready', evidence: 'acceptance is explicit', blocker: '',
+        artifact: { kind: 'file', path: 'docs/design.md', title: 'Design' },
+      } }), dispose: async () => {} }
+    },
+  )
+  try {
+    apply(harness.ctx, config(root, { isolate: true, scopes: 'off' }))
+    harness.intervals[0]()
+    await waitFor(() => task.status === 'done', 'independent workflow stage did not auto-complete')
+    const checkpoint = calls.find(call => call.kind === 'evidence' && call.body.text.startsWith('agent-workflow-stage-checkpoint:'))
+    assert.ok(checkpoint, 'stage Git checkpoint must be persisted before making downstream tasks runnable')
+    const saved = JSON.parse(checkpoint.body.text.slice('agent-workflow-stage-checkpoint:'.length))
+    assert.equal(saved.stageId, 'design')
+    assert.match(saved.sourceCommit, /^[0-9a-f]{40,64}$/i)
+    assert.equal(calls.some(call => call.kind === 'advance'), true, 'success uses the frozen workflow DAG without depending on space stages')
+    assert.equal(calls.some(call => call.kind === 'transition' && call.body.to === 'in_review'), false)
+    assert.equal(task.artifacts?.[0]?.digest?.length, 64, 'design artifact digest remains available for downstream verification')
+  } finally {
+    for (const dispose of harness.disposers) await dispose()
+    globalThis.fetch = originalFetch
+    restoreTasks()
+    await cleanup(root)
+  }
+})
+
+test('Agent 自报通过且 runner 测试成功但修改冻结 worktree 时不交给 Codex', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'scrum-worker-independent-test-failure-'))
+  const originalFetch = globalThis.fetch
+  const restoreTasks = protectTasksFile(root)
+  mkdirSync(join(root, 'test'), { recursive: true })
+  writeFileSync(join(root, 'test', 'mutates-source.test.mjs'), [
+    "import { writeFileSync } from 'node:fs'",
+    "import assert from 'node:assert/strict'",
+    "import test from 'node:test'",
+    "test('independent check passes but rewrites the frozen source', () => {",
+    "  writeFileSync(new URL('../src.js', import.meta.url), \"export const value = 'rewritten by test'\\n\")",
+    '  assert.equal(2 + 2, 4)',
+    '})',
+    '',
+  ].join('\n'))
+  mkdirSync(join(root, 'docs'), { recursive: true })
+  writeFileSync(join(root, 'docs', 'design.md'), 'Implementation design\n')
+  const designDigest = createHash('sha256').update(readFileSync(join(root, 'docs', 'design.md'))).digest('hex')
+  initGitRepo(root)
+  const designCommit = git(root, ['rev-parse', 'HEAD']).out.trim()
+
+  const runner = { executable: 'node', args: ['--test', 'test/mutates-source.test.mjs'], timeoutMs: 300000 }
+  const reviewWorkflow = {
+    instanceId: 'G-independent-test-failure', designRole: 'designer', implementationRole: 'coder', reviewRole: 'reviewer',
+    designStageId: 'design', implementationStageId: 'implement', reviewStageId: 'review', maxReworkRounds: 1,
+    stageDefinitionsById: { implement: { id: 'implement', role: 'coder', testRunner: runner } },
+  }
+  const task = {
+    ...structuredClone(TASK), id: 'G-independent-test-failure-implement', goalId: reviewWorkflow.instanceId,
+    title: 'Implement but do not bypass the independent test gate', role: 'coder', status: 'todo', soldier: null,
+    claimedAt: null, blockedBy: ['G-independent-test-failure-design'], artifacts: [], evidence: [], comments: [],
+    agentSelectionSnapshot: {
+      source: 'goal-agent-workflow', pipelineVersion: 'workflow-v1', stageRole: 'coder', workflowStageId: 'implement',
+      agentToolConfig: { id: 'deepseek', version: 1, providerName: 'deepseek', adapter: 'dsh-native',
+        permissionProfile: 'workspace-write', workspacePolicy: 'attempt-worktree-parent-cwd', enabled: true,
+        capabilities: { outputSchema: true, toolFilter: true, agentOptions: true, cancellation: true } },
+      reviewWorkflow, workflowContext: { designArtifacts: [{ taskId: 'G-independent-test-failure-design', path: 'docs/design.md', digest: designDigest, title: 'Design' }], implementation: null, upstreamStages: [{
+        taskId: 'G-independent-test-failure-design', stageId: 'design', artifacts: [{ kind: 'file', path: 'docs/design.md', digest: designDigest }],
+        evidence: [{ text: `agent-workflow-stage-checkpoint:${JSON.stringify({ stageId: 'design', sourceCommit: designCommit })}` }],
+      }] },
+    },
+  }
+  const designTask = {
+    id: 'G-independent-test-failure-design', title: 'Design', role: 'designer', goalId: reviewWorkflow.instanceId,
+    status: 'done', blockedBy: [], artifacts: [{ kind: 'file', path: 'docs/design.md', title: 'Design', digest: designDigest }],
+    evidence: [{ text: `agent-workflow-stage-checkpoint:${JSON.stringify({ stageId: 'design', sourceCommit: designCommit })}` }], comments: [], agentSelectionSnapshot: { workflowStageId: 'design', reviewWorkflow },
+  }
+  const calls = []
+  const providerStarts = []
+  const stageAttempts = []
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input))
+    const body = init.body ? JSON.parse(String(init.body)) : {}
+    if (url.pathname === '/api/spaces') return response({ spaces: [] })
+    if (url.pathname === '/api/pipeline') return response({ version: 'workflow-v1', stages: [] })
+    if (url.pathname === '/api/heartbeat' || url.pathname === '/api/agent-nodes/heartbeat') return response({ ok: true })
+    if (url.pathname === '/api/skills') return response([])
+    if (url.pathname === '/api/rules') return response({ rules: null })
+    if (url.pathname === '/api/chat/replies') return response({ messages: [] })
+    if (url.pathname === '/api/board') return response([designTask, task])
+    if (url.pathname === '/api/goal') return response({ goals: [{ id: task.goalId, status: 'active' }] })
+    if (url.pathname === '/api/claim') {
+      task.status = 'in_progress'; task.soldier = body.soldier; task.claimedAt = new Date().toISOString()
+      return response({ task })
+    }
+    if (url.pathname === '/api/release-stale') return response({ released: [], quarantined: [] })
+    if (url.pathname === '/api/agent-workflow/stage-attempts/start') {
+      stageAttempts.push({ id: 'attempt-test-failure', state: 'starting' })
+      calls.push({ kind: 'attempt-start', body })
+      return response({ id: stageAttempts[0].id })
+    }
+    if (url.pathname === '/api/agent-workflow/stage-attempts/report') {
+      const attempt = stageAttempts[0]
+      Object.assign(attempt, { state: body.state, providerRunId: body.providerRunId, result: body.result })
+      calls.push({ kind: 'attempt-report', body })
+      return response({ ok: true })
+    }
+    if (url.pathname === '/api/comment') {
+      const item = { by: body.by, at: new Date().toISOString(), text: body.text }
+      if (body.isEvidence) task.evidence.push(item)
+      else task.comments.push(item)
+      calls.push({ kind: body.isEvidence ? 'evidence' : 'comment', body })
+      return response({ task })
+    }
+    if (url.pathname === '/api/progress') return response({ ok: true })
+    if (url.pathname === '/api/transition') {
+      task.status = body.to
+      calls.push({ kind: 'transition', body })
+      return response({ task })
+    }
+    if (url.pathname === '/api/advance') {
+      calls.push({ kind: 'advance', body })
+      task.status = 'done'
+      return response({ task })
+    }
+    throw new Error(`unexpected request ${url.pathname}`)
+  }
+  const harness = fakeContext(
+    { status: 'done', summary: 'unused', evidence: '', blocker: '' },
+    async () => {}, async () => {},
+    async (provider, options) => {
+      providerStarts.push(provider)
+      writeFileSync(join(options.parent.session.header.cwd, 'src.js'), "export const value = 'present'\n")
+      return { id: 'run-failing-implementation', result: Promise.resolve({ stopReason: 'completed', structured: {
+        status: 'done', summary: 'implementation complete', evidence: 'DSH says tests passed', blocker: '', artifact: null,
+        testReport: { passed: true, command: 'agent-claimed-test', summary: 'passed', evidence: 'agent output', failures: [] },
+      } }), dispose: async () => {} }
+    },
+  )
+  harness.ctx.subagents.getProvider = name => ({
+    capabilities: { outputSchema: true, toolFilter: true, agentOptions: true, cancellation: true },
+  })
+  harness.ctx.agents.create = async options => ({
+    agent: { session: { id: String(options.sessionId), header: { cwd: options.meta.cwd } } },
+    dispose: async () => {},
+  })
+  try {
+    apply(harness.ctx, config(root, { isolate: true, scopes: 'off' }))
+    harness.intervals[0]()
+    await waitFor(() => task.status === 'in_review', 'worktree-changing test did not stop implementation handoff').catch(error => {
+      const log = readFileSync(join(root, 'worker.log'), 'utf8')
+      throw new Error(`${String(error)}; calls=${JSON.stringify(calls)}; workerLog=${log}`)
+    })
+    assert.deepEqual(providerStarts, ['deepseek'], `Codex must not start when the runner changes the frozen worktree; calls=${JSON.stringify(calls)}; attempts=${JSON.stringify(stageAttempts)}; workerLog=${readFileSync(join(root, 'worker.log'), 'utf8')}`)
+    assert.equal(stageAttempts[0].state, 'completed')
+    assert.equal(stageAttempts[0].providerRunId, 'run-failing-implementation')
+    assert.equal(stageAttempts[0].result.testVerification.state, 'failed')
+    assert.notEqual(stageAttempts[0].result.testVerification.exitCode, 0)
+    assert.match(stageAttempts[0].result.testVerification.outputExcerpt, /ℹ pass 1\s+ℹ fail 0/,
+      'the underlying test process passed; Legion rejected its receipt because the worktree changed')
+    assert.equal(stageAttempts[0].result.testVerification.error, '测试执行期间实现提交或 worktree 状态发生变化')
+    assert.equal(stageAttempts[0].result.testReport.passed, false)
+    assert.equal(task.evidence.some(item => item.text.startsWith('agent-workflow-implementation:')), false)
+    assert.equal(calls.some(call => call.kind === 'advance'), false)
+  } finally {
+    for (const dispose of harness.disposers) await dispose()
+    globalThis.fetch = originalFetch
+    restoreTasks()
+    await cleanup(root)
+  }
+})
+
+test('Claude design → DSH implementation → Codex review closes over the exact Git and artifact versions', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'scrum-worker-three-agent-loop-'))
+  const originalFetch = globalThis.fetch
+  const originalIntegrationMode = process.env.LEGION_INTEGRATION_MODE
+  const restoreTasks = protectTasksFile(root)
+  delete process.env.LEGION_INTEGRATION_MODE
+  mkdirSync(join(root, 'test'), { recursive: true })
+  writeFileSync(join(root, 'test', 'greeting.test.mjs'), [
+    "import assert from 'node:assert/strict'",
+    "import { readFileSync } from 'node:fs'",
+    "import test from 'node:test'",
+    "test('implementation exports greeting', () => assert.match(readFileSync(new URL('../src.js', import.meta.url), 'utf8'), /greeting/))",
+    '',
+  ].join('\n'))
+  initGitRepo(root)
+  const workflow = {
+    instanceId: 'G-three-agent-loop', designRole: 'designer', implementationRole: 'coder', reviewRole: 'reviewer',
+    designStageId: 'design', implementationStageId: 'implement', reviewStageId: 'review', maxReworkRounds: 2,
+    stageDefinitionsById: {
+      design: { id: 'design', workflowStageId: 'design', role: 'designer', label: 'Design', nextStageIds: ['implement'] },
+      implement: { id: 'implement', workflowStageId: 'implement', role: 'coder', label: 'Implementation', previousStageIds: ['design'], nextStageIds: ['review'], testRunner: { executable: 'node', args: ['--test', 'test/greeting.test.mjs'], timeoutMs: 300000 } },
+      review: { id: 'review', workflowStageId: 'review', role: 'reviewer', label: 'Review', previousStageIds: ['implement'], nextStageIds: [] },
+    },
+  }
+  const tool = (providerName, adapter, permissionProfile) => ({
+    id: `tool-${providerName}`, version: 1, providerName, adapter,
+    permissionProfile, workspacePolicy: 'attempt-worktree-parent-cwd', enabled: true,
+    capabilities: adapter === 'dsh-subagent'
+      ? { outputSchema: false, toolFilter: false, agentOptions: false, cancellation: true }
+      : { outputSchema: true, toolFilter: true, agentOptions: true, cancellation: true },
+  })
+  const tasks = [
+    {
+      id: 'G-loop-design', title: 'Create an implementation design', description: 'Specify the greeting behavior.', acceptance: [],
+      role: 'designer', status: 'todo', blockedBy: [], artifacts: [], evidence: [], comments: [],
+      agentSelectionSnapshot: {
+        source: 'goal-agent-workflow', pipelineVersion: 'workflow-v1', stageRole: 'designer', workflowStageId: 'design',
+        agentToolConfig: tool('claude-code', 'dsh-subagent', 'claude-code-acceptEdits'), modelConfig: null,
+        reviewWorkflow: workflow, workflowContext: { designArtifacts: [], implementation: null, upstreamStages: [] },
+      },
+    },
+    {
+      id: 'G-loop-implementation', title: 'Implement the design', description: 'Implement and test the approved design.', acceptance: [],
+      role: 'coder', status: 'todo', blockedBy: ['G-loop-design'], artifacts: [], evidence: [], comments: [],
+      agentSelectionSnapshot: {
+        source: 'goal-agent-workflow', pipelineVersion: 'workflow-v1', stageRole: 'coder', workflowStageId: 'implement',
+        agentToolConfig: tool('deepseek', 'dsh-native', 'workspace-write'), modelConfig: null,
+        reviewWorkflow: workflow, workflowContext: { designArtifacts: [], implementation: null, upstreamStages: [] },
+      },
+    },
+    {
+      id: 'G-loop-review', title: 'Review the implementation', description: 'Review the design, implementation, and test evidence.', acceptance: [],
+      role: 'reviewer', status: 'todo', blockedBy: ['G-loop-implementation'], artifacts: [], evidence: [], comments: [],
+      agentSelectionSnapshot: {
+        source: 'goal-agent-workflow', pipelineVersion: 'workflow-v1', stageRole: 'reviewer', workflowStageId: 'review',
+        agentToolConfig: tool('codex', 'dsh-subagent', 'codex-workspace-write'), modelConfig: null,
+        reviewWorkflow: workflow, workflowContext: { designArtifacts: [], implementation: null, upstreamStages: [] },
+      },
+    },
+  ]
+  const calls = []
+  const providerStarts = []
+  const stageAttempts = []
+  let reviewStatus = null
+  let reviewFindings = null
+  let currentTasks = () => tasks
+  const reviewContextFor = (task) => {
+    const index = tasks.indexOf(task)
+    const ancestors = tasks.slice(0, index)
+    const design = tasks[0]
+    const implementation = tasks[1]
+    let implementationEvidence = null
+    if (index >= 2) {
+      const proof = [...implementation.evidence].reverse().find(entry => entry.text.startsWith('agent-workflow-implementation:'))
+      if (proof) implementationEvidence = JSON.parse(proof.text.slice('agent-workflow-implementation:'.length))
+    }
+    const workflowContext = {
+      designArtifacts: index === 0 ? [] : design.artifacts.filter(item => item.kind === 'file').map(item => ({
+        taskId: design.id, path: item.path, digest: item.digest, title: item.title,
+      })),
+      implementation: index < 2 || !implementationEvidence ? null : {
+        taskId: implementation.id, sourceCommit: implementationEvidence.sourceCommit,
+        stageAttemptId: implementationEvidence.stageAttemptId, providerRunId: implementationEvidence.providerRunId,
+        testCommand: implementationEvidence.testCommand, testSummary: implementationEvidence.testSummary,
+        testEvidence: implementationEvidence.testEvidence, testVerification: implementationEvidence.testVerification,
+      },
+      upstreamStages: ancestors.map(upstream => ({
+        stageId: upstream.agentSelectionSnapshot.workflowStageId,
+        taskId: upstream.id, artifacts: upstream.artifacts, evidence: upstream.evidence,
+      })),
+    }
+    task.agentSelectionSnapshot = { ...task.agentSelectionSnapshot, workflowContext }
+  }
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input))
+    const body = init.body ? JSON.parse(String(init.body)) : {}
+    if (url.pathname === '/api/spaces') return response({ spaces: [] })
+    if (url.pathname === '/api/pipeline') return response({ version: 'ordinary-pipeline-empty', stages: [] })
+    if (url.pathname === '/api/heartbeat' || url.pathname === '/api/agent-nodes/heartbeat') return response({ ok: true })
+    if (url.pathname === '/api/skills') return response([])
+    if (url.pathname === '/api/rules') return response({ rules: null })
+    if (url.pathname === '/api/chat/replies') return response({ messages: [] })
+    if (url.pathname === '/api/board') return response(currentTasks())
+    if (url.pathname === '/api/goal') return response({ goals: [{ id: workflow.instanceId, status: 'active' }] })
+    if (url.pathname === '/api/claim') {
+      const task = tasks.find(item => item.id === body.id)
+      if (!task) throw new Error(`unknown task ${body.id}`)
+      reviewContextFor(task)
+      task.status = 'in_progress'
+      task.soldier = body.soldier
+      task.claimedAt = new Date().toISOString()
+      return response({ task })
+    }
+    if (url.pathname === '/api/release-stale') return response({ released: [], quarantined: [] })
+    if (url.pathname === '/api/agent-workflow/stage-attempts/start') {
+      calls.push({ kind: 'attempt-start', body })
+      stageAttempts.push({ id: `attempt-${stageAttempts.length + 1}`, taskId: body.taskId,
+        providerName: body.providerName, workspaceDir: body.workspaceDir, state: 'starting' })
+      return response({ id: stageAttempts.at(-1).id })
+    }
+    if (url.pathname === '/api/agent-workflow/stage-attempts/report') {
+      calls.push({ kind: 'attempt-report', body })
+      const attempt = stageAttempts.find(item => item.id === body.attemptId)
+      attempt.state = body.state
+      attempt.providerRunId = body.providerRunId
+      attempt.result = body.result
+      return response({ ok: true })
+    }
+    if (url.pathname === '/api/agent-workflow/review') {
+      calls.push({ kind: 'review', body })
+      const task = tasks.find(item => item.id === body.taskId)
+      task.status = 'done'
+      const reworkKind = body.findings.some(finding => finding.kind === 'design') ? 'design' : 'implementation'
+      return response({ kind: 'rework', nextTaskId: `G-loop-${reworkKind}-rework`, reworkKind, round: 1, maxReworkRounds: 2 })
+    }
+    if (url.pathname === '/api/artifact') {
+      const task = tasks.find(item => item.id === body.id)
+      task.artifacts.push({ by: body.by, at: new Date().toISOString(), kind: body.kind, path: body.path, title: body.title, digest: body.digest })
+      return response({ task })
+    }
+    if (url.pathname === '/api/comment') {
+      const task = tasks.find(item => item.id === body.id)
+      const entry = { by: body.by, at: new Date().toISOString(), text: body.text }
+      if (body.isEvidence) task.evidence.push(entry)
+      else task.comments.push(entry)
+      calls.push({ kind: body.isEvidence ? 'evidence' : 'comment', body })
+      return response({ task })
+    }
+    if (url.pathname === '/api/progress' || url.pathname === '/api/patch') return response({ ok: true })
+    if (url.pathname === '/api/advance') {
+      const task = tasks.find(item => item.id === body.id)
+      task.status = 'done'
+      task.version = (task.version ?? 1) + 1
+      calls.push({ kind: 'advance', body })
+      return response({ task })
+    }
+    if (url.pathname === '/api/transition') {
+      const task = tasks.find(item => item.id === body.id)
+      task.status = body.to
+      task.version = (task.version ?? 1) + 1
+      calls.push({ kind: 'transition', body })
+      return response({ task })
+    }
+    throw new Error(`unexpected request ${url.pathname}`)
+  }
+
+  const reportFor = async (provider, options) => {
+    providerStarts.push(provider)
+    const cwd = options.parent.session.header.cwd
+    const activeAttempt = [...stageAttempts].reverse().find(item => item.state === 'starting' && item.providerName === provider)
+    assert.ok(activeAttempt, `${provider} must have a persisted Stage Attempt before startup`)
+    assert.equal(resolve(cwd), resolve(activeAttempt.workspaceDir), `${provider} parent session cwd must be the frozen Attempt worktree`)
+    if (provider === 'claude-code') {
+      mkdirSync(join(cwd, 'docs'), { recursive: true })
+      writeFileSync(join(cwd, 'docs', 'design.md'), '# Versioned design\n\nContract: render the greeting.\n')
+      const report = { status: 'done', summary: 'design ready', evidence: 'docs/design.md contains the acceptance contract', blocker: '',
+        artifact: { kind: 'file', path: resolve(cwd, 'docs/design.md'), title: 'Versioned design' } }
+      return { id: 'run-claude-design', result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text: JSON.stringify(report) }] }), dispose: async () => {} }
+    }
+    if (provider === 'deepseek') {
+      const promptText = options.prompt.map(block => block.text ?? '').join('')
+      assert.match(promptText, /UTF-8 文本按 LF 规范化后计算，CRLF 与 LF 等价/,
+        'downstream agents must know workflow artifact digests ignore platform checkout line endings')
+      const designText = readFileSync(join(cwd, 'docs', 'design.md'), 'utf8')
+      assert.match(designText, /Contract: render the greeting/)
+      writeFileSync(join(cwd, 'src.js'), "export const greeting = () => 'hello'\n")
+      git(cwd, ['add', '-A'])
+      assert.equal(git(cwd, ['commit', '-m', 'Agent implementation commit']).code, 0,
+        'the coding Agent may commit its isolated worktree before Legion runs the independent tests')
+      const report = { status: 'done', summary: 'implementation complete', evidence: 'src.js implements the versioned design', blocker: '', artifact: null,
+        testReport: { passed: true, command: 'node --test test/greeting.test.js', summary: '1 test passed', evidence: '1 pass, 0 fail', failures: [] } }
+      return { id: 'run-dsh-implementation', result: Promise.resolve({ stopReason: 'completed', structured: Object.freeze(report) }), dispose: async () => {} }
+    }
+    if (provider === 'codex') {
+      const promptText = options.prompt.map(block => block.text ?? '').join('')
+      assert.match(promptText, /允许使用只读文件查看与只读终端命令/,
+        'the external reviewer must be allowed to inspect the worktree without permission to modify it')
+      reviewStatus = git(cwd, ['status', '--porcelain=v1', '--untracked-files=all']).out
+      assert.match(readFileSync(join(cwd, 'docs', 'design.md'), 'utf8'), /Contract: render the greeting/)
+      assert.match(readFileSync(join(cwd, 'src.js'), 'utf8'), /greeting/)
+      const report = { status: 'done', summary: 'review passed', evidence: 'design and implementation commits are present', blocker: '', artifact: null,
+        review: reviewFindings === null ? { passed: true, findings: [] } : { passed: false, findings: reviewFindings } }
+      return { id: 'run-codex-review', result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text: JSON.stringify(report) }] }), dispose: async () => {} }
+    }
+    throw new Error(`unexpected provider ${provider}`)
+  }
+  const harness = fakeContext(
+    { status: 'done', summary: 'unused', evidence: '', blocker: '' },
+    async () => {},
+    async () => {},
+    reportFor,
+  )
+  harness.ctx.agents.create = async options => ({
+    agent: { session: { id: String(options.sessionId), header: { cwd: options.meta.cwd } } },
+    dispose: async () => {},
+  })
+  harness.ctx.subagents.getProvider = providerName => ({
+    name: providerName,
+    permissionMode: providerName === 'codex' ? 'approve-for-me' : providerName === 'claude-code' ? 'acceptEdits' : undefined,
+    capabilities: providerName === 'deepseek'
+      ? { outputSchema: true, toolFilter: true, agentOptions: true, cancellation: true }
+      : { outputSchema: false, toolFilter: false, agentOptions: false, cancellation: true },
+  })
+
+  try {
+    apply(harness.ctx, config(root, { isolate: true, scopes: 'off' }))
+    harness.intervals[0]()
+    await waitFor(() => tasks[0].status === 'done' && tasks[0].evidence.some(item => item.text.startsWith('agent-workflow-stage-checkpoint:')),
+      'Claude design stage did not save its artifact and Git checkpoint').catch(error => {
+      throw new Error(`${String(error)}; task=${JSON.stringify(tasks[0])}; attempts=${JSON.stringify(stageAttempts)}; log=${readFileSync(join(root, 'worker.log'), 'utf8')}`)
+    })
+    await new Promise(resolve => setTimeout(resolve, 40))
+
+    harness.intervals[0]()
+    await waitFor(() => tasks[1].status === 'done' && tasks[1].evidence.some(item => item.text.startsWith('agent-workflow-implementation:')),
+      'DSH implementation did not consume design or save implementation evidence').catch(error => {
+      throw new Error(`${String(error)}; task=${JSON.stringify(tasks[1])}; attempts=${JSON.stringify(stageAttempts)}; log=${readFileSync(join(root, 'worker.log'), 'utf8')}`)
+    })
+    await new Promise(resolve => setTimeout(resolve, 40))
+
+    harness.intervals[0]()
+    await waitFor(() => tasks[2].status === 'in_review', 'Codex review pass did not enter Legion final acceptance')
+    assert.deepEqual(providerStarts, ['claude-code', 'deepseek', 'codex'])
+    assert.deepEqual(stageAttempts.map(item => [item.state, item.providerRunId]), [
+      ['completed', 'run-claude-design'], ['completed', 'run-dsh-implementation'], ['completed', 'run-codex-review'],
+    ])
+    assert.deepEqual(stageAttempts[2].result.review, { passed: true, findings: [] },
+      'successful Codex conclusion is included in the Stage Attempt report sent to Hub')
+    assert.equal(stageAttempts[2].result.summary, 'review passed')
+    assert.equal(tasks[0].artifacts[0].path, 'docs/design.md', 'absolute artifact paths from an independent workflow worktree are stored relative to that worktree')
+    assert.equal(tasks[0].artifacts[0].digest.length, 64)
+    const reviewCheckpoint = tasks[2].evidence.find(item => item.text.startsWith('agent-workflow-stage-checkpoint:'))
+    assert.ok(reviewCheckpoint, 'review stage checkpoint must be persisted before final acceptance')
+    const reviewCheckpointText = reviewCheckpoint.text
+    assert.equal(JSON.parse(reviewCheckpointText.slice('agent-workflow-stage-checkpoint:'.length)).stageId, 'review')
+    const implementationProof = JSON.parse(tasks[1].evidence.find(item => item.text.startsWith('agent-workflow-implementation:')).text.slice('agent-workflow-implementation:'.length))
+    assert.match(implementationProof.sourceCommit, /^[0-9a-f]{40,64}$/i)
+    assert.equal(implementationProof.stageAttemptId, stageAttempts[1].id)
+    assert.equal(implementationProof.providerRunId, 'run-dsh-implementation')
+    assert.ok(tasks[1].artifacts.some(item => item.kind === 'file' && item.path === 'src.js'),
+      'files in the implementation commit are registered as artifacts even when the Agent did not name them in its report')
+    assert.equal(implementationProof.testCommand, 'node --test test/greeting.test.mjs')
+    assert.equal(implementationProof.testVerification.state, 'passed')
+    assert.equal(implementationProof.testVerification.sourceCommit, implementationProof.sourceCommit)
+    assert.equal(implementationProof.testVerification.stageAttemptId, stageAttempts[1].id)
+    assert.equal(implementationProof.testVerification.providerRunId, 'run-dsh-implementation')
+    assert.match(implementationProof.testEvidence, /implementation exports greeting/)
+    assert.equal(stageAttempts[1].result.testVerification.id, implementationProof.testVerification.id,
+      'the independent runner receipt must be persisted with its Stage Attempt')
+    assert.deepEqual(stageAttempts[1].result.agentTestReport, {
+      passed: true, command: 'node --test test/greeting.test.js', summary: '1 test passed',
+      evidence: '1 pass, 0 fail', failures: [],
+    }, 'Agent self-report remains separately auditable and is not confused with Legion test evidence')
+    assert.equal(reviewStatus, '', `Codex review must start from a clean imported worktree: ${reviewStatus}`)
+    assert.ok(git(join(root, '.legion-worktrees', tasks[2].id), ['merge-base', '--is-ancestor', implementationProof.sourceCommit, 'HEAD']).code === 0,
+      'Codex review worktree must contain the exact implementation commit')
+    assert.equal(tasks[2].status, 'in_review', 'passed code review still waits for Legion independent verification and acceptance')
+
+    reviewFindings = [{ kind: 'implementation', severity: 'major', summary: 'Handle the empty greeting case', file: 'src.js', verification: 'Add and run an empty-input test.' }]
+    tasks[2].status = 'todo'
+    harness.intervals[0]()
+    await waitFor(() => calls.some(call => call.kind === 'review'), 'typed Codex finding was not sent to the Hub review handler')
+    const reviewCall = calls.find(call => call.kind === 'review')
+    assert.equal(reviewCall.body.taskId, tasks[2].id)
+    assert.deepEqual(reviewCall.body.findings, reviewFindings)
+    assert.equal(reviewCall.body.summary, 'review passed')
+    assert.deepEqual(stageAttempts[3].result.review, { passed: false, findings: reviewFindings },
+      'typed Codex findings stay attached to the exact review Stage Attempt before Hub routes rework')
+    assert.equal(tasks[2].status, 'done', 'worker settles the review task only after the Hub returns a persisted rework outcome')
+    assert.equal(tasks[2].comments.at(-1).text.includes('G-loop-implementation-rework'), true)
+
+    reviewFindings = [{ kind: 'design', severity: 'major', summary: 'Define behavior for empty greetings', file: 'docs/design.md', verification: 'State the empty-input acceptance case.' }]
+    tasks[2].status = 'todo'
+    harness.intervals[0]()
+    await waitFor(() => calls.filter(call => call.kind === 'review').length === 2, 'design finding was not sent to the Hub review handler')
+    await waitFor(() => tasks[2].comments.some(comment => comment.text.includes('G-loop-design-rework')),
+      'worker did not settle the design rework returned by Hub')
+    const designReviewCall = calls.filter(call => call.kind === 'review')[1]
+    assert.deepEqual(designReviewCall.body.findings, reviewFindings)
+    assert.equal(tasks[2].status, 'done')
+
+    reviewFindings = [
+      { kind: 'implementation', severity: 'major', summary: 'Add boundary validation', file: 'src.js', verification: 'Test invalid values.' },
+      { kind: 'design', severity: 'major', summary: 'Define the invalid-value contract', file: 'docs/design.md', verification: 'Update the acceptance contract.' },
+    ]
+    tasks[2].status = 'todo'
+    harness.intervals[0]()
+    await waitFor(() => calls.filter(call => call.kind === 'review').length === 3, 'mixed findings were not sent to the Hub review handler')
+    await waitFor(() => tasks[2].comments.filter(comment => comment.text.includes('G-loop-design-rework')).length >= 2,
+      'worker did not settle the design-first rework returned for mixed findings')
+    const mixedReviewCall = calls.filter(call => call.kind === 'review')[2]
+    assert.deepEqual(mixedReviewCall.body.findings, reviewFindings, 'worker preserves both finding categories for Hub policy')
+    assert.equal(tasks[2].status, 'done')
+    assert.deepEqual(providerStarts, ['claude-code', 'deepseek', 'codex', 'codex', 'codex', 'codex'])
+  } finally {
+    for (const dispose of harness.disposers) await dispose()
+    globalThis.fetch = originalFetch
+    if (originalIntegrationMode === undefined) delete process.env.LEGION_INTEGRATION_MODE
+    else process.env.LEGION_INTEGRATION_MODE = originalIntegrationMode
     restoreTasks()
     await cleanup(root)
   }

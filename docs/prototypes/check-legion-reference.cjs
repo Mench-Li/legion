@@ -1,0 +1,53 @@
+const assert = require('node:assert/strict');
+const path = require('node:path');
+const {pathToFileURL} = require('node:url');
+const {chromium} = require('C:/Users/11150/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
+(async()=>{
+ const browser=await chromium.launch({headless:true,channel:'chrome'});
+ const page=await browser.newPage({viewport:{width:1440,height:900}});
+ const errors=[];page.on('pageerror',e=>errors.push(e.message));
+ await page.goto(pathToFileURL(path.join(__dirname,'legion-workbench.html')).href);
+ assert.equal(await page.locator('#directory .agent').count(),8);
+ await page.locator('#agent-search').fill('编码');
+ assert.equal(await page.locator('#directory .agent').count(),1);
+ await page.locator('#agent-search').fill('');
+ await page.locator('#message-input').fill('保留的草稿');
+ await page.locator('[data-page="tasks"]').click();
+ assert.equal(await page.locator('.repo-columns .column').count(),6);
+ await page.locator('.board-card').first().click();
+ await page.locator('#detail-modal').waitFor();
+ await page.locator('#detail-close').click();
+ await page.locator('#task-search').fill('T-174');
+ assert.equal(await page.locator('.board-card').count(),1);
+ await page.locator('[data-page="agents"]').click();
+ assert.equal(await page.locator('#message-input').inputValue(),'保留的草稿');
+ await page.locator('#send').click();
+ assert.equal(await page.locator('#messages .message').count(),1);
+ await page.locator('#context-toggle').click();
+ assert.equal(await page.locator('#drawer').isVisible(),true);
+ await page.locator('#drawer-close').click();
+ await page.locator('#space-picker').selectOption('');
+ assert.equal(await page.locator('#directory .agent').count(),24);
+ await page.locator('#space-picker').selectOption('software');
+ await page.screenshot({path:path.join(__dirname,'legion-reference-desktop.png')});
+ for(const name of ['overview','resources','activity','settings','tasks']){
+  await page.locator(`[data-page="${name}"]`).click();
+  const names=await page.locator('#sidebar [data-sub]').evaluateAll(nodes=>nodes.map(n=>n.dataset.sub));
+  for(const sub of names){await page.locator(`#sidebar [data-sub="${sub}"]`).click();assert.equal(await page.locator('#main').innerText().then(t=>t.length>20),true)}
+ }
+ await page.locator('[data-page="settings"]').click();
+ await page.locator('[data-sub="模型与凭证"]').click();
+ for(const tab of ['快速分配','模型档案','岗位绑定','配置搬家','凭证库'])await page.locator(`[data-model-tab="${tab}"]`).click();
+ await page.locator('[data-page="agents"]').click();
+ await page.setViewportSize({width:390,height:844});
+ await page.locator('[data-mobile]').click();
+ assert.equal(await page.locator('#sidebar').isVisible(),true);
+ await page.locator('#directory .agent').first().click();
+ assert.equal(await page.locator('#sidebar').isVisible(),false);
+ assert.equal(await page.locator('#send').isVisible(),true);
+ assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
+ await page.screenshot({path:path.join(__dirname,'legion-reference-mobile.png')});
+ assert.deepEqual(errors,[]);
+ console.log('PASS: navigation, 24 agents, search, six lanes, task detail, drafts, local messages, model tabs, mobile layout; no browser errors');
+ await browser.close();
+})().catch(e=>{console.error(e);process.exit(1)});

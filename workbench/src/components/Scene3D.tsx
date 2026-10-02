@@ -11,7 +11,7 @@ import { SceneAgentList } from './SceneAgentList'
 
 interface Scene3DProps {
   agents: SceneAgent[]; cues: SceneCue[]; preset: ScenePreset; goalLabel: string
-  motionEnabled?: boolean; onAgentClick?: (role: string, scope?: string) => void
+  motionEnabled?: boolean; onAgentClick?: (role: string) => void
 }
 
 const PRESETS: Record<ScenePreset, { floor: string; desk: string; accent: string; light: string; label: string }> = {
@@ -85,7 +85,7 @@ function OfficeWorld({ agents, cues, layout, preset, goalLabel, motion, compact,
       const station = stations.get(agent.key)
       if (!station) return null
       const celebrating = motion && liveCues.some(cue => cue.kind === 'completed' && cue.fromRole === agent.role)
-      return <Employee3D key={agent.key} agent={agent} x={station.x} z={station.z} motion={motion} celebrate={celebrating} compact={compact} onSelect={() => onAgentClick?.(agent.role,agent.scope)} />
+      return <Employee3D key={agent.key} agent={agent} x={station.x} z={station.z} motion={motion} celebrate={celebrating} compact={compact} onSelect={() => onAgentClick?.(agent.role)} />
     })}
     {motion && liveCues.filter(cue => cue.kind === 'handoff').map(cue => {
       const from = agents.find(agent => agent.role === cue.fromRole)

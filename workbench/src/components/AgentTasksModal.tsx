@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react'
 import { fetchAgentModels, fetchHubTasks, MODEL_OPTIONS } from '../api'
 import type { CardStatus, HubTask, RosterAgent } from '../types'
 import { tasksForRosterAgent } from '../scene/agentOwnership'
-import { AgentConversationPanel } from './AgentConversationPanel'
 
 interface AgentTasksModalProps {
   agent: RosterAgent
@@ -30,7 +29,6 @@ function askOpen(t: HubTask): boolean {
 }
 
 export function AgentTasksModal({ agent, roster = [], onClose, onOpenTask }: AgentTasksModalProps): React.JSX.Element {
-  const [tab,setTab] = useState<'chat' | 'tasks' | 'artifacts' | 'rules' | 'records'>('chat')
   const rosterRolesKey = roster.filter(member => !member.external).map(member => member.role).sort().join('\0')
   const [tasks, setTasks] = useState<HubTask[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
@@ -94,7 +92,7 @@ export function AgentTasksModal({ agent, roster = [], onClose, onOpenTask }: Age
       <div className="modal agent-tasks-modal" onClick={e => e.stopPropagation()}>
         <div className="modal-head">
           <span className="agent-avatar" style={{ fontSize: 16 }}>{agent.avatar}</span>
-          {agent.name} · Agent 详情
+          {agent.name} · 任务清单
           {modelLabel && (
             <span className="agent-model-badge" title="该智能体默认模型（⚙️ 模型配置可改）">⚙️ {modelLabel}</span>
           )}
@@ -102,8 +100,6 @@ export function AgentTasksModal({ agent, roster = [], onClose, onOpenTask }: Age
           <span className="x" onClick={onClose}>✕</span>
         </div>
         <div className="modal-body">
-          <nav className="agent-detail-tabs">{([['chat','对话'],['tasks','任务'],['artifacts','产物'],['rules','规则与技能'],['records','运行记录']] as const).map(([key,label]) => <button key={key} className={tab===key ? 'active' : ''} onClick={() => setTab(key)}>{label}</button>)}</nav>
-          {tab!=='tasks' ? <AgentConversationPanel agent={agent} onOpenTask={onOpenTask} view={tab} /> : <>
           <div className="agent-chips" style={{ marginBottom: 8 }}>
             {agent.chips.map((c, idx) => (
               <span key={idx} className={c.cls ? `chip ${c.cls}` : 'chip'}>{c.label}</span>
@@ -144,7 +140,6 @@ export function AgentTasksModal({ agent, roster = [], onClose, onOpenTask }: Age
           <div style={{ fontSize: 10.5, color: 'var(--muted-2)', marginTop: 10, lineHeight: 1.6 }}>
             💡 点任务查看详情与 AI 执行过程；发布目标时该智能体会自动分到对应阶段任务。
           </div>
-          </>}
         </div>
       </div>
     </div>

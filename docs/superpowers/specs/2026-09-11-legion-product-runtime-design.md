@@ -26,6 +26,16 @@ Legion 当前已经具备 Workbench 指挥台、team-hub 权威数据源、数�
 
 该路线优先验证数字团队的付费意愿、可信交付和真实业务价值，同时保留未来替换 DSH 或增加其他执行器的能力。
 
+### 1.1 阶段级 Agent 协作需求修订
+
+2026-09-30 用户明确要求同一项工作跨 Agent 工具闭环：Claude Code 设计方案，DeepSeek Harness 按方案编码并运行测试，Codex 审查；实现问题退回 DSH，设计问题退回 Claude Code，修订后重新实现与审查。因此多 Harness 的设计单位是**工作流阶段**，每个阶段可产生独立 Task，每次执行产生 Attempt 与 Run，并通过同一工作流关联。
+
+Legion 负责阶段流转、版本化交接、返工归因、独立验证与预算控制。岗位、Agent 工具和底层模型分别配置；默认仍为 DSH，用户可选择混合工具工作流或逐阶段覆盖。每次 Attempt 冻结实际工具选择和产物版本，规则更新只影响后续派工。外部工具通过 Adapter 或 DSH 已有 provider 调用，其权限、结构化输出、事件与续接能力必须分别校验；不得把 DSH 内部强制面视为自动覆盖外部进程。
+
+产品意图与外部 Agent 能力边界以[外部 Agent 工具接入能力与 Legion 接入方案](../../research/external-agent-tools-2026-09-30.md)为基准：Legion 编排 Claude Code 设计、DeepSeek Harness 编码和测试、Codex 审查的接力闭环，并确保交接物版本明确、问题按类型回流。F-23 定义这条闭环在 Legion 内的配置、状态和验收行为；本文只记录它与 Product Runtime 的架构关系。节点、provider、SDK、ACP 或 CLI 均是执行机制，不改变这一产品目标。
+
+该修订扩展 F-23 的设计范围，不改变现有实施进度，也不表示真实跨工具执行、返工或界面已完成。完整配置、交接与验收设计见 [F-23 阶段级工作流设计](../prt/F-23-MULTI-HARNESS-ROUTING.md#14-阶段级-agent-工作流设计)。原有安装与升级约定适用于 Legion 内部 DSH；外部工具的运行组件、版本和认证就绪情况须另行检查。
+
 ## 2. 背景与现状
 
 当前仓库的生产主路径为：

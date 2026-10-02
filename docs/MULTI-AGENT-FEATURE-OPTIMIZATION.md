@@ -244,7 +244,7 @@ Runtime Contract → DshRuntimeAdapter → Orchestrator
 
 - **F-21 MCP/Connector Registry**：server/tool 级策略、风险等级、SecretStore 和故障隔离。
 - **F-22 Execution Backend**：统一 local process + worktree，后续扩展 Docker/SSH/remote worker。
-- **F-23 多 Harness 路由**：按角色能力、模型、上下文、预算和健康状态路由。
+- **F-23 多 Harness 路由**：按工作流阶段选择 Agent 工具，支持 Claude Code 设计 → DeepSeek Harness 编码与测试 → Codex 审查，以及实现问题退回编码、设计问题退回设计后的复审闭环。岗位、Agent 工具与底层模型分别配置；支持默认工作流和单次阶段覆盖。路由须校验能力、权限、预算和健康状态，每次 Attempt 冻结实际选择、交接产物版本及审查依据。具体设计见 [F-23 阶段级工作流设计](superpowers/prt/F-23-MULTI-HARNESS-ROUTING.md#14-阶段级-agent-工作流设计)。本条为 2026-09-30 需求修订，不表示闭环已实现。
 - **F-24 多用户 ACL**：身份贯穿 API、SSE、附件、技能、聊天和审计。
 - **F-25 外部消息渠道**：仅作传输适配器，先完成 pairing、可靠投递、权限和限流。
 

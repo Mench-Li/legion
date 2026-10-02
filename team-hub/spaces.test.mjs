@@ -57,6 +57,19 @@ function seedSpaceZ() {
   mod.db.prepare("INSERT INTO skills (id, name, prompt, scope, owner, grants, version, status, contentHash, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run('z-skill-1', 'zs1', 'p1', Z, 'general', '[]', 1, 'published', 'h', t, t)
   mod.db.prepare("INSERT INTO skills (id, name, prompt, scope, owner, grants, version, status, contentHash, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run('z-skill-2', 'zs2', 'p2', Z, 'general', '[]', 1, 'pending', 'h', t, t)
   mod.db.prepare("INSERT INTO goal (scope, objective, createdAt, updatedAt) VALUES (?, ?, ?, ?)").run(Z, 'z 目标', t, t)
+  mod.db.prepare('INSERT INTO agent_workflow_definitions (scope, id, version, definition_json, created_at_ms) VALUES (?, ?, ?, ?, ?)')
+    .run(Z, 'workflow-space-Z', 1, '{}', 1)
+  mod.db.prepare(`INSERT INTO agent_workflow_instances (id, scope, goal_id, definition_id, definition_version, snapshot_json, created_at_ms, updated_at_ms)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run('workflow-instance-Z', Z, 'goal-workflow-Z', 'workflow-space-Z', 1, '{}', 1, 1)
+  mod.db.prepare(`INSERT INTO agent_workflow_reviews (source_review_task_id, workflow_instance_id, round_no, kind, result_json, at_ms)
+    VALUES (?, ?, ?, ?, ?, ?)`)
+    .run('workflow-review-Z', 'workflow-instance-Z', 1, 'implementation', '{}', 1)
+  mod.db.prepare(`INSERT INTO agent_workflow_stage_attempts
+    (id, scope, workflow_instance_id, task_id, stage_id, attempt_no, idempotency_key, started_by,
+     provider_name, workspace_dir, state, selection_snapshot_json, created_at_ms, updated_at_ms)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run('workflow-attempt-Z', Z, 'workflow-instance-Z', 'T-Z1', 'implement', 1, 'workflow-attempt-Z-key', 'coder', 'dsh-native', 'C:/worktrees/T-Z1', 'unknown', '{}', 1, 1)
   mod.db.prepare("INSERT INTO exec_state (scope, enabled, updatedAt) VALUES (?, ?, ?)").run(Z, 1, t)
   // conversations 2 + messages 5
   const c1 = mod.db.prepare("INSERT INTO conversations (scope, title, kind, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?)").run(Z, '会话1', 'space', t, t).lastInsertRowid
@@ -83,9 +96,11 @@ function seedSpaceZ() {
 
 /** 各表 scope=Z 剩余计数。 */
 function leftovers() {
-  const keys = ['tasks', 'roster', 'agent_models', 'exec_requests', 'skills', 'goal', 'exec_state', 'conversations', 'messages', 'calendar_events', 'members', 'chat_reply_settings', 'chat_attachments', 'rules', 'skill_sources', 'space_stages', 'space_runtime']
+  const keys = ['tasks', 'roster', 'agent_models', 'exec_requests', 'skills', 'goal', 'exec_state', 'conversations', 'messages', 'calendar_events', 'members', 'chat_reply_settings', 'chat_attachments', 'rules', 'skill_sources', 'space_stages', 'space_runtime', 'agent_workflow_stage_attempts', 'agent_workflow_instances', 'agent_workflow_definitions']
   const out = {}
   for (const k of keys) out[k] = mod.db.prepare("SELECT COUNT(*) AS c FROM " + k + " WHERE scope = ?").get(Z).c
+  out.agent_workflow_reviews = mod.db.prepare(`SELECT COUNT(*) AS c FROM agent_workflow_reviews WHERE workflow_instance_id IN
+    (SELECT id FROM agent_workflow_instances WHERE scope = ?)`).get(Z).c
   out.spaces = mod.db.prepare("SELECT COUNT(*) AS c FROM spaces WHERE id = ?").get(Z).c
   return out
 }
@@ -112,6 +127,10 @@ describe('TC-S7-01..04 正常删除：removed 逐表计数 + 收口断言 + audi
     assert.equal(c.chatAttachments, 1)
     assert.equal(c.rules, 1)
     assert.equal(c.skillSources, 1)
+    assert.equal(c.agentWorkflowInstances, 1)
+    assert.equal(c.agentWorkflowStageAttempts, 1)
+    assert.equal(c.agentWorkflowReviews, 1)
+    assert.equal(c.agentWorkflowDefinitions, 1)
     assert.equal(impactBefore.json.running.tasks.length, 2, '在办任务(进行中+待验收) 2 条')
     const again = await get('/api/spaces/impact?id=' + Z)
     assert.deepEqual(again.json.counts, impactBefore.json.counts, '只读预检：两次调用间零变化')
@@ -128,6 +147,10 @@ describe('TC-S7-01..04 正常删除：removed 逐表计数 + 收口断言 + audi
     assert.equal(del.json.task.removed.chatAttachments, 1)
     assert.equal(del.json.task.removed.rules, 1)
     assert.equal(del.json.task.removed.skillSources, 1)
+    assert.equal(del.json.task.removed.agentWorkflowInstances, 1)
+    assert.equal(del.json.task.removed.agentWorkflowStageAttempts, 1)
+    assert.equal(del.json.task.removed.agentWorkflowReviews, 1)
+    assert.equal(del.json.task.removed.agentWorkflowDefinitions, 1)
     assert.equal(existsSync(join(tmpRoot, 'uploads', Z)), false, '空间附件目录已清理')
     const remain = leftovers()
     for (const k of Object.keys(remain)) assert.equal(remain[k], 0, k + ' 零残留')

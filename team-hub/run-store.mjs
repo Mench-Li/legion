@@ -276,6 +276,8 @@ export function ensureRunSchema(db) {
   // 人工处置留痕：谁在什么时候以什么理由把它结掉的。
   ensureColumn(db, 'run_attempts', 'resolved_by', 'TEXT')
   ensureColumn(db, 'run_attempts', 'resolved_note', 'TEXT')
+  // 首次认领时冻结实际的阶段工具/模型选择；重试复制快照，不重新读可变默认配置。
+  ensureColumn(db, 'run_attempts', 'agent_selection_snapshot', 'TEXT')
 
   // 领取查询走这个索引：按状态挑最早的排队尝试。
   db.exec('CREATE INDEX IF NOT EXISTS idx_run_attempts_state ON run_attempts(state, created_at_ms)')
@@ -916,10 +918,44 @@ function shapeAttempt(row) {
     detail: row.detail,
     resolvedBy: row.resolved_by ?? null,
     resolvedNote: row.resolved_note ?? null,
+    agentSelectionSnapshot: parseAgentSelectionSnapshot(row.agent_selection_snapshot),
     createdAtMs: row.created_at_ms,
     updatedAtMs: row.updated_at_ms,
     finishedAtMs: row.finished_at_ms,
   })
+}
+
+function parseAgentSelectionSnapshot(raw) {
+  if (raw === null || raw === undefined || raw === '') return null
+  try {
+    const value = JSON.parse(raw)
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid shape')
+    return deepFreezeJson(value)
+  } catch {
+    throw new ContractError('BAD_AGENT_SELECTION_SNAPSHOT', 'Attempt 中的 Agent 选择快照不是合法 JSON 对象')
+  }
+}
+
+function deepFreezeJson(value) {
+  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const child of Object.values(value)) deepFreezeJson(child)
+    Object.freeze(value)
+  }
+  return value
+}
+
+function encodeAgentSelectionSnapshot(value) {
+  if (value === null || value === undefined) return null
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new ContractError('BAD_AGENT_SELECTION_SNAPSHOT', 'Agent 选择快照必须是 JSON 对象')
+  }
+  let encoded
+  try { encoded = JSON.stringify(value) }
+  catch { throw new ContractError('BAD_AGENT_SELECTION_SNAPSHOT', 'Agent 选择快照不能序列化为 JSON') }
+  if (encoded === undefined || encoded.length > 32768) {
+    throw new ContractError('BAD_AGENT_SELECTION_SNAPSHOT', 'Agent 选择快照超过 32 KiB 或不可序列化')
+  }
+  return encoded
 }
 
 function requireWorker(workerId) {
@@ -1113,6 +1149,7 @@ export function createRunStore({
   deliveryStateForTask = null,
   integrationMode = false,
   onAttemptProjected = null,
+  resolveAgentSelection = null,
 } = {}) {
   if (db === undefined || db === null) throw new TypeError('createRunStore 需要 db')
   if (typeof clock !== 'function') throw new TypeError('createRunStore 的 clock 必须是函数')
@@ -1176,7 +1213,7 @@ export function createRunStore({
    *    没有这一条时 `retryDelayMs` 只是一段没人调用的纯函数：
    *    一个持续失败的引擎会被立刻反复重试，把配额和日志一起打满。
    */
-  function createAttempt({ taskId, scope, state = 'Queued', atMs, actor = null, returnTo = null, idempotencyKey = null, nextAttemptAtMs = null }) {
+  function createAttempt({ taskId, scope, state = 'Queued', atMs, actor = null, returnTo = null, idempotencyKey = null, nextAttemptAtMs = null, agentSelectionSnapshot = null }) {
     const maxRow = db.prepare('SELECT COALESCE(MAX(attempt_no), 0) AS n FROM run_attempts WHERE task_id = ?').get(taskId)
     const attemptNo = Number(maxRow.n) + 1
     const id = `att:${taskId}:${attemptNo}`
@@ -1184,9 +1221,10 @@ export function createRunStore({
       ? String(idempotencyKey)
       : `idem:${taskId}`
     db.prepare(
-      `INSERT INTO run_attempts (id, task_id, scope, attempt_no, state, worker_id, lease_epoch, lease_expires_at_ms, return_to, idempotency_key, next_attempt_at_ms, created_at_ms, updated_at_ms)
-       VALUES (?, ?, ?, ?, ?, NULL, 0, NULL, ?, ?, ?, ?, ?)`,
-    ).run(id, taskId, scope, attemptNo, state, returnTo, idem, nextAttemptAtMs, atMs, atMs)
+      `INSERT INTO run_attempts (id, task_id, scope, attempt_no, state, worker_id, lease_epoch, lease_expires_at_ms, return_to, idempotency_key, next_attempt_at_ms, agent_selection_snapshot, created_at_ms, updated_at_ms)
+       VALUES (?, ?, ?, ?, ?, NULL, 0, NULL, ?, ?, ?, ?, ?, ?)`,
+    ).run(id, taskId, scope, attemptNo, state, returnTo, idem, nextAttemptAtMs,
+      encodeAgentSelectionSnapshot(agentSelectionSnapshot), atMs, atMs)
     const row = rowOf(db, id)
     appendEvent(db, { attempt: row, from: null, to: state, actor, epoch: 0, reason: 'attempt-created', atMs })
     return row
@@ -1294,6 +1332,7 @@ export function createRunStore({
       taskId: row.task_id, scope: row.scope, state: 'Queued', atMs, actor,
       idempotencyKey: row.idempotency_key ?? null,
       nextAttemptAtMs: nextAttemptAtMs ?? null,
+      agentSelectionSnapshot: parseAgentSelectionSnapshot(row.agent_selection_snapshot),
     })
     appendEvent(db, { attempt: fresh, from: settled.state, to: 'Queued', actor, epoch: 0, reason: `${reason}:new-attempt`, atMs })
     return fresh
@@ -1457,8 +1496,11 @@ export function createRunStore({
       const blocked = []
       for (const selected of candidates) {
       db.exec('SAVEPOINT claim_candidate')
+      const selection = selected.kind === 'task' && typeof resolveAgentSelection === 'function'
+        ? resolveAgentSelection({ taskId: selected.row.id, scope: selected.row.scope })
+        : null
       const candidate = selected.kind === 'task'
-        ? createAttempt({ taskId: selected.row.id, scope: selected.row.scope, state: 'Queued', atMs, returnTo: null })
+        ? createAttempt({ taskId: selected.row.id, scope: selected.row.scope, state: 'Queued', atMs, returnTo: null, agentSelectionSnapshot: selection })
         : selected.row
       const nextEpoch = Number(candidate.lease_epoch) + 1
       const expiresAtMs = atMs + ttl
@@ -1521,11 +1563,11 @@ export function createRunStore({
           // 或者自己猜一个默认空间（一次静默的越权）。
           // 两条都不是"参数没传"那种能一眼看出来的错误。
           scope: row.scope,
-          workerId: worker,
           attemptNo: row.attempt_no,
           leaseEpoch: row.lease_epoch,
           leaseExpiresAtMs: row.lease_expires_at_ms,
           state: row.state,
+          agentSelectionSnapshot: parseAgentSelectionSnapshot(row.agent_selection_snapshot),
           serverTimeMs: atMs,
           // ★ 权限档位（PRT-214 第二步）。三态，**不是**"有/没有"：
           //

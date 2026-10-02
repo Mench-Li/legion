@@ -4,6 +4,7 @@ import type { SpaceDeleteImpact } from '../api'
 import type { ScenePreset, SpaceInfo } from '../types'
 import { toast } from './Toast'
 import { FolderPickerField } from './FolderPickerField'
+import { AgentWorkflowConfigurator } from './AgentWorkflowConfigurator'
 
 interface SpaceSettingsModalProps {
   space: SpaceInfo
@@ -152,6 +153,7 @@ export function SpaceSettingsModal({ space, onClose, onSaved, onDeleted }: Space
             {space.remoteUrl && <div>远程仓库：<code>{space.remoteUrl}</code></div>}
             {!space.localDir && !space.remoteUrl && <div>未绑定（沿用平台默认仓库）。个人空间可绑定自己的本地目录并留空远程，避免业务内容进共享仓库。</div>}
           </div>
+          <AgentWorkflowConfigurator scope={space.id} />
         </div>
         <div className="modal-foot">
           <button className="btn ghost" onClick={onClose}>取消</button>

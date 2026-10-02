@@ -160,6 +160,44 @@ test('★ 释放后同步本轮快照：status/soldier/claimedAt 三个字段都
   ])
 })
 
+test('工作流 stale/重启隔离结果同步到本轮快照，不得误派自动重试', async () => {
+  const snapshot = { reviewWorkflow: { instanceId: 'workflow-1' } }
+  const stale = task({ id: 'T-workflow-stale', agentSelectionSnapshot: snapshot })
+  const staleHarness = harness({ useHub: true, hubResult: { released: [], quarantined: [stale.id] } })
+  await staleHarness.r.reclaimStaleLeases(new Map([[stale.id, stale]]))
+  assert.equal(stale.status, 'in_review')
+  assert.equal(stale.hold, true)
+  assert.equal(stale.soldier, null)
+  assert.equal(stale.claimedAt, null)
+  assert.deepEqual(staleHarness.activities, [{
+    kind: 'gate', id: stale.id, text: '工作流阶段结果未知，已隔离等待人工核对；不会自动重派',
+  }])
+
+  const orphan = task({ id: 'T-workflow-orphan', agentSelectionSnapshot: snapshot })
+  const bootHarness = harness({ useHub: true, hubResult: { released: [], quarantined: [orphan.id] } })
+  await bootHarness.r.reclaimBootOrphans([orphan], new Map([[orphan.id, orphan]]))
+  assert.equal(orphan.status, 'in_review')
+  assert.equal(orphan.hold, true)
+  assert.equal(orphan.soldier, null)
+  assert.equal(orphan.claimedAt, null)
+  assert.match(bootHarness.log[0], /in_review \+ hold/)
+})
+
+test('本地 taskctl 不支持按任务排除工作流时，stale 与启动回收都 fail-closed 跳过批量释放', async () => {
+  const t = task({ agentSelectionSnapshot: { reviewWorkflow: { instanceId: 'workflow-1' } } })
+  const staleHarness = harness({ useHub: false })
+  await staleHarness.r.reclaimStaleLeases(new Map([[t.id, t]]))
+  assert.deepEqual(staleHarness.tctlCalls, [])
+  assert.match(staleHarness.log[0], /stale 回收跳过/)
+
+  const bootTask = task({ agentSelectionSnapshot: { reviewWorkflow: { instanceId: 'workflow-1' } } })
+  const bootHarness = harness({ useHub: false })
+  await bootHarness.r.reclaimBootOrphans([bootTask], new Map([[bootTask.id, bootTask]]))
+  assert.deepEqual(bootHarness.tctlCalls, [])
+  assert.match(bootHarness.log[0], /重启孤儿回收跳过/)
+  assert.equal(bootTask.status, 'in_progress', '无安全的按 ID 隔离路径时保留现场供人工核对')
+})
+
 test('释放列表里的 id 不在本轮快照里 → 照样记事件，不得抛（activity 在查表之前）', async () => {
   const h = harness({ useHub: true, hubResult: { released: ['T-404'] } })
   await h.r.reclaimStaleLeases(new Map()) // 空快照

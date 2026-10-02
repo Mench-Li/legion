@@ -177,14 +177,13 @@ export class ExecutorError extends Error {
  *   适配器工厂，默认 `createDshRuntimeAdapter`。注入是为了在不启动 DSH 的
  *   前提下测这条接线。
  */
-import { createAgentRunChannel } from './agent-channel.mjs'
 export async function createProductionExecutor(deps = {}) {
   const {
     post, get, host = null, selfCheck = null, canRead,
     loadSources, requestFor = null, clock = () => Date.now(),
     adapterFactory = createDshRuntimeAdapter,
     // PRT-510 运行侧：给了 actor 才接预算闸门（见下面为什么没有默认值）。
-    budgetActor = null, currency, onBudgetNote, scope = 'default', agentInteractions = false,
+    budgetActor = null, currency, onBudgetNote, scope = 'default',
     // PRT-214 续：静态下限**派生成功**时那些"必须被记录"的告诫（连带禁止、
     // 政策禁令落不了地）的出口。默认 `null`。
     //
@@ -511,12 +510,8 @@ export async function createProductionExecutor(deps = {}) {
       const collectedEvents = []
       let eventsTruncated = false
       let synthesizedSeq = -1
-      const agentChannel = agentInteractions ? createAgentRunChannel({ post,adapter,lease,runId:request.runId,
-        onError:e => console.warn('[agent-channel]', e.message) }) : null
-      await agentChannel?.start()
       try {
         for await (const ev of adapter.execute(request)) {
-          agentChannel?.observe(ev)
           if (ev !== null && typeof ev === 'object') {
             if (collectedEvents.length < MAX_COLLECTED_RUN_EVENTS) {
               const hasSeq = Number.isSafeInteger(ev.seq) && ev.seq >= 0
@@ -562,8 +557,6 @@ export async function createProductionExecutor(deps = {}) {
             runEvents: Object.freeze([...collectedEvents]),
             runEventsTruncated: eventsTruncated,
           })
-      } finally {
-        await agentChannel?.stop()
       }
 
       const outcome = terminal === null

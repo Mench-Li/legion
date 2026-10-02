@@ -38,7 +38,6 @@ import { ActivityFeed } from './components/ActivityFeed'
 import { QuickTools } from './components/QuickTools'
 import { CommandBar } from './components/CommandBar'
 import { SkillsPanel } from './components/SkillsPanel'
-import { WorkflowPacksPanel } from './components/WorkflowPacksPanel'
 import { RulesPanel } from './components/RulesPanel'
 import { ChatView } from './components/ChatView'
 import { FilesView } from './components/FilesView'
@@ -393,9 +392,9 @@ export default function App(): React.JSX.Element {
   }, [scope, loadMissions])
 
   /** 发布目标：写 team-hub 后刷新目标列表。每次发布 = 新建一个目标（与既有目标并存，不取消旧链）。 */
-  const handlePublishGoal = useCallback(async (scopeValue: string, objective: string): Promise<void> => {
+  const handlePublishGoal = useCallback(async (scopeValue: string, objective: string, workflowDefinition?: { id: string; version: number }): Promise<void> => {
     // publishGoal 失败向上抛 → GoalModal 捕获并 toast（弹窗保留，可改后重试）
-    await publishGoal(scopeValue, objective)
+    await publishGoal(scopeValue, objective, undefined, workflowDefinition)
     try {
       const info = await fetchGoal(scopeValue)
       setGoalInfo(info)
@@ -515,8 +514,6 @@ export default function App(): React.JSX.Element {
             />
           ) : active === 'skills' ? (
             <SkillsPanel scope={scope} hubMode={hubMode} spaces={hubSpaces} />
-          ) : active === 'packs' ? (
-            <WorkflowPacksPanel hubMode={hubMode} />
           ) : active === 'rules' ? (
             <RulesPanel scope={scope} hubMode={hubMode} spaces={hubSpaces} onOpenFiles={() => setActive('files')} />
           ) : active === 'chat' ? (

@@ -139,7 +139,7 @@ function fakeHarnessBase() {
 function capturePromptHarness(captured) {
   const h = fakeHarnessBase()
   h.ctx.subagents = {
-    start: async (provider, options) => {
+    start: async (_provider, options) => {
       captured.push(options.prompt?.[0]?.text ?? '')
       return {
         result: Promise.resolve({

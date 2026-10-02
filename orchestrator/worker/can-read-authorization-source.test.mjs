@@ -45,7 +45,7 @@
 // ## ★ PRT-214 第二步之后：这个文件现在是**两半**，而两半都必须留着
 //
 // ①②③④ 跑的是**没有接线**的 `createRunStore`（不给 `resolveRunPermissions`）。
-// 那时租约上**恰好还是那 9 个键**——所以它们一字未改地继续成立，而且继续承重：
+// 那时租约上**恰好还是那 8 个键**——所以它们一字未改地继续成立，而且继续承重：
 // 它们证明的是"档位不会自己长出来"，这正是"为什么必须显式接线"的证据。
 //
 // ⑤ 跑的是**接了线**的那个，结论**恰好相反**：租约上多出三个键，它们**是**
@@ -72,9 +72,9 @@ import { defaultRequestFor, deriveRunFloorCarrier } from './executor.mjs'
 import { RUN_REQUEST_REQUIRED } from '../../runtime/contracts/run.mjs'
 import { RUN_FLOOR_STATES } from '../../runtime/contracts/run-floor.mjs'
 
-/** 真 claim 回来的那 9 个键（**带顺序无关的整体比较**，不是"包含"）。 */
+/** 真 claim 回来的那 8 个键（**带顺序无关的整体比较**，不是"包含"）。 */
 const CLAIMED_LEASE_KEYS = Object.freeze([
-  'attemptId', 'attemptNo', 'leaseEpoch', 'leaseExpiresAtMs', 'scope', 'serverTimeMs', 'state', 'taskId', 'workerId',
+  'attemptId', 'attemptNo', 'leaseEpoch', 'leaseExpiresAtMs', 'scope', 'serverTimeMs', 'state', 'taskId',
 ])
 
 const AUTHORITY_LOOKING = /read|auth|grant|permit|acl|visib/i
@@ -113,7 +113,7 @@ function claimOnce(tag) {
   return { lease: claimed.claimed, taskId, db }
 }
 
-test('① 真 claim() 返回的对象**恰好**那 9 个键，且没有任何读 / 授权形状的键', () => {
+test('① 真 claim() 返回的对象**恰好**那 8 个键，且没有任何读 / 授权形状的键', () => {
   const { lease, db } = claimOnce('shape')
   try {
     // ★ 整体比较，不是 `includes`：多一个键就红，而"多一个键"正是本批要找的东西。
@@ -271,10 +271,10 @@ test('⑤ ★★★★★ 接了线：租约上**多出**恰好三个键，而�
   const tier = { allowedTools: ['read-file', 'git-push'], deniedTools: ['mcp-invoke'], approvalPolicy: 'never' }
   const { lease, db } = claimWithTier('wired', tier)
   try {
-    // 键集 = 原来那 9 个 ∪ 恰好这三个。多一个少一个都要重判。
+    // 键集 = 原来那 8 个 ∪ 恰好这三个。多一个少一个都要重判。
     assert.deepEqual(Object.keys(lease).sort(),
       [...CLAIMED_LEASE_KEYS, 'allowedTools', 'approvalPolicy', 'deniedTools'].sort(),
-      '接了线之后的键集不是"9 + 3"——那要么少搬了字段，要么搬了没人要的东西')
+      '接了线之后的键集不是"8 + 3"——那要么少搬了字段，要么搬了没人要的东西')
     assert.deepEqual([...lease.allowedTools], ['read-file', 'git-push'])
     assert.deepEqual([...lease.deniedTools], ['mcp-invoke'])
     assert.equal(lease.approvalPolicy, 'never')

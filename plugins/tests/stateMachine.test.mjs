@@ -85,7 +85,7 @@ function harness(over = {}) {
     scope: over.scope ?? 'app',
     isPipeline: () => over.isPipeline ?? false,
     stageByRole: () => over.stageByRole ?? emptyStages,
-    stageOf: (t) => ((over.isPipeline ?? false) ? (over.stageByRole ?? emptyStages).get(t.role ?? '') : undefined),
+    stageOf: (t) => over.stageOf?.(t) ?? ((over.isPipeline ?? false) ? (over.stageByRole ?? emptyStages).get(t.role ?? '') : undefined),
     inflight,
     room: () => over.room ?? true,
     sliceRoomOk: () => over.sliceRoomOk ?? true,
@@ -149,6 +149,25 @@ test('★ 流水线模式：按任务角色取阶段并派工；未知角色的 
   assert.equal(h.inflight.has('T-1'), true)
   assert.equal(h.inflight.has('T-2'), false, '未知角色不认领')
   assert.equal(h.inflight.has('T-3'), false, '无角色不认领')
+})
+
+test('冻结 Agent 工作流任务在普通岗位链删除角色后仍可认领与续做', async () => {
+  const frozenStage = { role: 'coder', label: 'DSH 实现', next: 'reviewer' }
+  const h = harness({ isPipeline: true, stageByRole: new Map(), stageOf: (t) =>
+    t.agentSelectionSnapshot?.reviewWorkflow ? frozenStage : undefined })
+  const t = task({
+    id: 'T-frozen', role: 'coder',
+    agentSelectionSnapshot: { reviewWorkflow: { designRole: 'designer', implementationRole: 'coder', reviewRole: 'reviewer' } },
+  })
+  h.run([t])
+  await h.flush()
+  assert.deepEqual(jobs(h).filter(c => c[0] === 'workTodo'), [['workTodo', 'T-frozen', 'coder']])
+
+  h.calls.length = 0
+  h.inflight.clear()
+  h.run([{ ...t, status: 'blocked', soldier: 'deepseek' }])
+  await h.flush()
+  assert.deepEqual(jobs(h).filter(c => c[0] === 'workTodo' || c[0] === 'workReturned'), [['workTodo', 'T-frozen', 'coder']])
 })
 
 test('讨论任务走群聊：role=discussion 派 runDiscussion，不走 workTodo', () => {

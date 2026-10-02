@@ -179,7 +179,10 @@ export function createHandoff(deps: HandoffDeps): Handoff {
 
   /** 流水线流转：done 任务所属角色有 next 且尚无后继时，创建下一角色任务（todo）。 */
   async function advancePipeline(doneTask: Task): Promise<void> {
-    if (pipeline() === null) return
+    if (pipeline() === null && doneTask.agentSelectionSnapshot?.reviewWorkflow === undefined) return
+    // 命名 Agent 工作流的完整 DAG 已在目标发布时预创建，并以 blockedBy 驱动解锁；
+    // 不得把它退化成下方 legacy design→implementation→review 三段补建逻辑。
+    if (doneTask.agentSelectionSnapshot?.source === 'goal-agent-workflow') return
     // 切片流水线任务不走 roles.json 的 next 流转：
     // 切片束任务（slice≠null）的"下一环"由切片编排决定（coder→tester 已由 blockedBy 预建、
     // tester→devops 尾同理）；fix 回炉任务合入即闭环（重测由编排重开 tester）。
@@ -221,10 +224,24 @@ export function createHandoff(deps: HandoffDeps): Handoff {
         return
       }
     }
-    const stage = stageByRole().get(doneTask.role ?? '')
-    if (!stage || !stage.next) return
-    const nextStage = stageByRole().get(stage.next)
-    if (!nextStage) return
+    const frozenWorkflow = doneTask.agentSelectionSnapshot?.reviewWorkflow
+    let stage: StageDef | undefined
+    let nextStage: StageDef | undefined
+    if (frozenWorkflow) {
+      const roles = [frozenWorkflow.designRole, frozenWorkflow.implementationRole, frozenWorkflow.reviewRole]
+      const index = roles.indexOf(doneTask.role ?? '')
+      if (index < 0 || index >= roles.length - 1) return
+      const role = roles[index]
+      const nextRole = roles[index + 1]
+      stage = { role, label: frozenWorkflow.stageLabels?.[role] ?? role, next: nextRole } as typeof stage
+      nextStage = { role: nextRole, label: frozenWorkflow.stageLabels?.[nextRole] ?? nextRole, next: null } as typeof stage
+    } else {
+      stage = stageByRole().get(doneTask.role ?? '')
+      if (!stage || !stage.next) return
+      nextStage = stageByRole().get(stage.next)
+      if (!nextStage) return
+    }
+    if (!stage || !nextStage) return
     const all = await listTasks()
     // 后继已存在则跳过：advance 补建的任务以 parent 链识别（任意状态，含 canceled——避免将军
     // 废弃补建任务后每轮重建的拉锯）；createGoalChain 预建的全链任务以「同 scope 同 role 且

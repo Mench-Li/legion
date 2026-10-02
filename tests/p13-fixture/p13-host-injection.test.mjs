@@ -73,7 +73,7 @@ describeHost('P1-3 真实 DSH 宿主注入冒烟（legion 三插件）', () => {
 
   before(async () => {
     const port = await freePort()
-    fx = makeFixture({ port, teamToken: TOKEN })
+    fx = makeFixture({ port, teamToken: TOKEN, withAgentProviders: true })
     // P4-2：**启动之前**先预检组合行的入口产物。这正是 CI 现场「team-hub/lib 缺失」的形状：
     // 以前只能等 60s 超时；现在直接点名「哪个条目 / 哪个入口 / 怎么构建」。
     const pre = fx.preflight()
@@ -81,6 +81,11 @@ describeHost('P1-3 真实 DSH 宿主注入冒烟（legion 三插件）', () => {
     child = spawnHost(fx)
     // 传 child/rows/packageDirs：任何启动期失败都会变成点名到插件条目的诊断，而不是「host not ready within Nms」
     await waitReady(fx.base, { timeoutMs: 60000, child, rows: fx.rows, packageDirs: fx.packageDirs })
+    const nodeConfig = await req(fx.base, 'POST', '/team-hub/api/agent-nodes/configs', {
+      id: 'p13-fixture-node', label: 'Isolated DSH provider fixture', scope: '__p13fixture__',
+      providerNames: ['codex', 'claude-code'], by: 'general',
+    }, TOKEN)
+    assert.equal(nodeConfig.status, 200, `agent node config failed: ${JSON.stringify(nodeConfig.data)}`)
   }, { timeout: 90000 })
 
   after(async () => {
@@ -122,6 +127,23 @@ describeHost('P1-3 真实 DSH 宿主注入冒烟（legion 三插件）', () => {
     assert.equal(daemon.scope, '__p13fixture__')
     assert.ok(daemon.lastSweepAt, 'daemon.json 应含 lastSweepAt')
     assert.ok(daemon.model && daemon.model.provider, 'agentDefaultModel.currentSelection() 应解析出模型（base 默认）')
+
+    // Real DSH bundles must register both providers on the same host; the worker reports
+    // observed names/capabilities through the node heartbeat without starting either tool.
+    let node = null
+    const nodeDeadline = Date.now() + 20000
+    while (Date.now() < nodeDeadline) {
+      const listed = await req(fx.base, 'GET', '/team-hub/api/agent-nodes?scope=__p13fixture__', undefined, TOKEN)
+      node = listed.data?.nodes?.find((item) => item.id === 'p13-fixture-node') ?? null
+      if (node?.status === 'ready') break
+      await sleep(250)
+    }
+    assert.equal(node?.status, 'ready', `DSH worker did not report both registered providers: ${JSON.stringify(node)}`)
+    assert.ok(node.observedProviders.includes('codex'))
+    assert.ok(node.observedProviders.includes('claude-code'))
+    assert.equal(node.observedCapabilities.externalAgent, true)
+    assert.deepEqual(node.observedCapabilities.providers.codex, { outputSchema: false, toolFilter: false, cancellation: true, permissionMode: 'approve-for-me', systemProxyMode: 'system' })
+    assert.deepEqual(node.observedCapabilities.providers['claude-code'], { outputSchema: false, toolFilter: false, cancellation: true, permissionMode: 'acceptEdits' })
 
     // 控制插件（file:// 注入的普通 cordis 插件）也在同一宿主生效
     const ctl = await req(fx.base, 'GET', '/__p13/ready')

@@ -51,13 +51,13 @@ export function createSpaceConfigRoutes({
   json,
   db, now, audit,
   handleWrite, SCOPE_KEY_RE, normalizeStages,
-  normalizeRuntime, withTx, readPipeline,
+  normalizeRuntime, normalizeAgentWorkflow, withTx, readPipeline,
   pipelineWarnings,
 }) {
   const deps = { json,
     db, now, audit,
     handleWrite, SCOPE_KEY_RE, normalizeStages,
-    normalizeRuntime, withTx, readPipeline,
+    normalizeRuntime, normalizeAgentWorkflow, withTx, readPipeline,
     pipelineWarnings,
   }
   for (const [k, v] of Object.entries(deps)) {
@@ -110,15 +110,21 @@ export function createSpaceConfigRoutes({
           if (body.by !== 'general' && by !== 'general' && body.forceGeneral !== true) throw new Error('流水线配置仅允许 general 执行（body.by 或操作者身份须为 general）')
           const stages = normalizeStages(targetScope, body.stages)
           const runtime = body.runtime === undefined ? null : normalizeRuntime(body.runtime)
+          const hasWorkflow = Object.hasOwn(body, 'workflow')
+          const workflow = hasWorkflow ? normalizeAgentWorkflow(targetScope, body.workflow, stages) : undefined
           const result = withTx(() => {
             const prevRoles = new Set(db.prepare('SELECT role FROM space_stages WHERE scope = ?').all(targetScope).map(r => r.role))
-            const upsert = db.prepare(`INSERT INTO space_stages (scope, role, label, prompt, next, gate, artifact, docs, sort, enabled, updatedAt)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            const upsert = db.prepare(`INSERT INTO space_stages (scope, role, label, prompt, next, gate, artifact, docs, agent_tool_config, model_config, sort, enabled, updatedAt)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
               ON CONFLICT(scope, role) DO UPDATE SET label=excluded.label, prompt=excluded.prompt, next=excluded.next,
-                gate=excluded.gate, artifact=excluded.artifact, docs=excluded.docs, sort=excluded.sort, enabled=excluded.enabled, updatedAt=excluded.updatedAt`)
+                gate=excluded.gate, artifact=excluded.artifact, docs=excluded.docs, agent_tool_config=excluded.agent_tool_config,
+                model_config=excluded.model_config, sort=excluded.sort, enabled=excluded.enabled, updatedAt=excluded.updatedAt`)
             const ts = now()
             for (const s of stages) {
-              upsert.run(targetScope, s.role, s.label, s.prompt, s.next, s.gate, s.artifact, s.docs === null ? null : JSON.stringify(s.docs), s.sort, s.enabled, ts)
+              upsert.run(targetScope, s.role, s.label, s.prompt, s.next, s.gate, s.artifact,
+                s.docs === null ? null : JSON.stringify(s.docs),
+                s.agentToolConfig === null ? null : JSON.stringify(s.agentToolConfig),
+                s.modelConfig === null ? null : JSON.stringify(s.modelConfig), s.sort, s.enabled, ts)
             }
             const keep = stages.map(s => s.role)
             const dropped = [...prevRoles].filter(r => !keep.includes(r))
@@ -126,16 +132,26 @@ export function createSpaceConfigRoutes({
               const del = db.prepare('DELETE FROM space_stages WHERE scope = ? AND role = ?')
               for (const r of dropped) del.run(targetScope, r)
             }
-            if (runtime !== null) {
-              db.prepare(`INSERT INTO space_runtime (scope, enabled, maxWorkers, isolate, updatedAt) VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(scope) DO UPDATE SET enabled=excluded.enabled, maxWorkers=excluded.maxWorkers, isolate=excluded.isolate, updatedAt=excluded.updatedAt`)
-                .run(targetScope, runtime.enabled ? 1 : 0, runtime.maxWorkers, runtime.isolate ? 1 : 0, ts)
+            if (runtime !== null || hasWorkflow) {
+              const previous = db.prepare('SELECT * FROM space_runtime WHERE scope = ?').get(targetScope)
+              const effectiveRuntime = runtime ?? {
+                enabled: previous?.enabled === 1,
+                maxWorkers: previous?.maxWorkers ?? 1,
+                isolate: previous?.isolate !== 0,
+              }
+              const reviewWorkflow = hasWorkflow ? workflow : JSON.parse(previous?.review_workflow ?? 'null')
+              db.prepare(`INSERT INTO space_runtime (scope, enabled, maxWorkers, isolate, review_workflow, updatedAt) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(scope) DO UPDATE SET enabled=excluded.enabled, maxWorkers=excluded.maxWorkers, isolate=excluded.isolate,
+                  review_workflow=excluded.review_workflow, updatedAt=excluded.updatedAt`)
+                .run(targetScope, effectiveRuntime.enabled ? 1 : 0, effectiveRuntime.maxWorkers, effectiveRuntime.isolate ? 1 : 0,
+                  reviewWorkflow === null ? null : JSON.stringify(reviewWorkflow), ts)
             }
             audit(by, targetScope, 'pipeline:update', null, {
               stages: stages.length,
               added: stages.filter(s => !prevRoles.has(s.role)).map(s => s.role),
               dropped,
               runtime,
+              workflow: hasWorkflow ? workflow : undefined,
             })
             return { scope: targetScope, stages: stages.length, dropped, added: stages.filter(s => !prevRoles.has(s.role)).length, runtime }
           })

@@ -179,21 +179,9 @@ const LEGACY_CALL_RE = new RegExp('ctx\\.' + 'subagents' + '\\.start\\(')
  *   所以规矩不变：每次都重新对拍，算术只用来解释位移，不用来产出新行号。 */
 export const LEGACY_CALL_SITE = Object.freeze({
   file: 'plugins/src/index.ts',
-  // ★ 2026-09-16（main 整合）：1721 → **1794**。这一处**不是**手工算的，
-  //   是对拍出来的——用本模块自己的抽取器在合并后的 `index.ts` 里求全部调用点
-  //   （1001 / 1794 / 2010 / 2391，共 4 处），取"选项集合与复刻件完全一致"的**恰好一处**。
-  //
-  //   这次之所以会动，原因与上面四个切片都不同：不是本分支又搬了代码，
-  //   而是**两条线在同一个函数上各自动过**——main 侧给它加了一段生产修复
-  //   （T-156：目标已终态不再补建后继），而本分支把这个函数整体搬去了 ./handoff.ts。
-  //   两者合起来使这个调用点整体下移。
-  //
-  //   > 一个"行号常量"在**只有一条线**在动的时候，
-  //   > 与它在上游也在动的时候，读起来是同一种东西——
-  //   > 只不过后者的失效发生在**别人的提交**之后，而那时没有人会想到去看它。
-  //   好在 `locateLegacyCall()` 现在会把"还在、只是挪了"与"真的没了"分开报告，
-  //   所以下一次它漂移时，症状是一句"按内容重新定位成功"，而不是一次静默的覆盖率损失。
-  line: 1794,
+  // 2026-10-02：命名工作流派工为冻结的模型配置增加了第二个条件展开。
+  // 锚点按选项集合重新定位；测试要求唯一匹配，避免悄悄对拍到其他子代理调用。
+  line: 2327,
   context: 'worker 派工（scrum:<taskId>）',
 })
 
@@ -203,19 +191,17 @@ export const LEGACY_CALL_SITE = Object.freeze({
  * 这是**复刻件必须与旧代码一致**的部分：多一个少一个都意味着两条路径不再是同一件事。
  * 由 `detectLegacyDrift()` 对着真实源码校验。
  *
- * `...spread` 是现场那行条件展开：
- *   `...(config.denyTools.length > 0 ? { toolFilter: { deny: config.denyTools } } : {})`
- * 它只在 denyTools 非空时贡献 `toolFilter`。因此 `toolFilter` **不是**顶层字面量键，
- * 而是一个条件项 —— 复刻件把它做成可选参数正是因为这个条件性。
- * 把它写成必传，会让对拍在一个默认配置下就偏离旧路径。
+ * 两个 `...spread` 分别是按条件传入 `toolFilter` 和冻结模型的 `agentOptions`。
+ * 两者都不是无条件顶层键；复刻路径需保留各自的可选条件，默认配置不能多传键。
  */
 export const LEGACY_CALL_OPTIONS = Object.freeze([
-  'label', 'prompt', 'parent', 'signal', 'outputSchema', '...spread',
+  'label', 'prompt', 'parent', 'signal', 'outputSchema', '...spread', '...spread',
 ])
 
 /** 旧调用经条件展开可贡献的选项（及其条件）。 */
 export const LEGACY_CONDITIONAL_OPTIONS = Object.freeze([
   Object.freeze({ key: 'toolFilter', when: 'config.denyTools.length > 0' }),
+  Object.freeze({ key: 'agentOptions', when: 'modelAgentOptions !== null' }),
 ])
 
 /**
@@ -457,8 +443,8 @@ export function detectLegacyDriftFromRepo(root, readFile = readFileSync) {
 /**
  * 旧调用的语义复刻。
  *
- * 逐条对应 `plugins/src/index.ts:2219-2266`（调用记法见 {@link LEGACY_CALL_TOKEN}）：
- *   1. `start(provider, { label, prompt, parent, signal, outputSchema, toolFilter? })`
+ * 逐条对应命名工作流中的 DSH 启动调用（调用记法见 {@link LEGACY_CALL_TOKEN}）：
+ *   1. `start(provider, { label, prompt, parent, signal, outputSchema, toolFilter?, agentOptions? })`
  *   2. 自建看门狗：`workerTimeoutMs` 到点 → `controller.abort()` 并**强制结算为 null**
  *      （现场注释原文：「subagent 可能挂死且 run.result 永不结算（abort 不保证杀死子代理）」）
  *   3. `run.result` 结算后 `await run.dispose()`；超时分支是 `dispose().catch(() => undefined)`
@@ -479,6 +465,7 @@ export async function runLegacyPath(host, {
   parent = undefined,
   timeoutMs = 5000,
   toolFilter,
+  agentOptions,
   now = () => Date.now(),
 } = {}) {
   const startedAt = now()
@@ -494,6 +481,7 @@ export async function runLegacyPath(host, {
       signal: controller.signal,
       outputSchema,
       ...(toolFilter !== undefined ? { toolFilter } : {}),
+      ...(agentOptions !== undefined ? { agentOptions } : {}),
     })
   } catch (err) {
     return {

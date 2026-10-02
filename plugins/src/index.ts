@@ -22,8 +22,9 @@ import { isSupervisor } from './proc.js'
 export { isSupervisor } from './proc.js'
 import z from '@deepseek-ai/schemastery'
 import { spawn } from 'node:child_process'
+import { createHash, randomUUID } from 'node:crypto'
 import { appendFileSync, cpSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, readdirSync, statSync } from 'node:fs'
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { homedir } from 'node:os'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -32,6 +33,7 @@ import type { ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import type AgentPresets from '@deepseek-ai/dsh-agent-preset-registry'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { formatSkill, skillsChanged, type SkillRef } from './skillsCache.js'
+import { runWorkflowTestCommand, type WorkflowTestRunReceipt } from './workflowTestRunner.js'
 import { buildNormSections, type NormFile } from './norms.js'
 import { buildChatAnswerPrompt, chatIdentityFor, type ChatCtxMsg } from './chatResponder.js'
 import { classifyChatError } from './chatErrorClassifier.js'
@@ -50,7 +52,7 @@ import {
 } from './experienceRecall.js'
 // 阶段 3 PRT-315：领域类型与合入调解各自成模块（第 1 个切片，见 ./mediation.ts 文件头）。
 export type { StageDef, Task } from './types.js'
-import type { DiscussionDef, StageDef, Task } from './types.js'
+import type { AgentReviewWorkflow, DiscussionDef, StageDef, Task } from './types.js'
 // ★ PRT-1007「编排提取」片 1：岗位文档契约纯函数已搬去 `./docContract.js`，
 //   下面**原样再导出**同名符号 ⇒ 公开面（`lib/index.js`）零差异，消费者一条都不用改。
 //   六个函数体逐字未动；`DiscussionDef` 同时搬进 `types.ts`（它成了跨模块类型）。
@@ -82,6 +84,12 @@ import { createAcceptance } from './acceptance.js'
 import { createHandoff, isSliceTesterTask } from './handoff.js'
 import { createSliceOrchestration } from './sliceOrchestration.js'
 import { decideProductionTool, type GrantedWrite } from './productionWriteGuard.js'
+import { executeExternalAgent, parseExternalWorkerReport } from '../../runtime/adapters/dsh/external-agent.mjs'
+import { waitForWorkflowAgentRun } from '../../runtime/adapters/dsh/workflow-run.mjs'
+import { materializeWorkflowCheckpoints, WORKFLOW_CHECKPOINT_EVIDENCE_PREFIX } from '../../runtime/contracts/agent-workflow-checkpoints.mjs'
+import { validateAgentWorkflowTestReport } from '../../runtime/contracts/agent-workflow.mjs'
+import { expectedExternalPermissionMode } from '../../runtime/contracts/agent-provider-policy.mjs'
+import { agentOptionsForFrozenModel } from '../../runtime/contracts/agent-model-selection.mjs'
 
 type AppContext = Context & {
   subagents: SubagentRuntime
@@ -130,6 +138,8 @@ export interface Config {
   hubToken: string
   /** 守护负责的项目 scope（默认 default；goal 发布目标时默认用 roles.json 的 name）。 */
   scope: string
+  /** 可选执行节点身份；登记后会上报实际 provider 与能力。 */
+  agentNodeId: string
   /** 切片流水线类型化槽位：并发 coder 上限（fix 任务占 coder 槽）。 */
   sliceCoderSlots: number
   /** 切片流水线类型化槽位：并发 tester 上限。 */
@@ -176,6 +186,7 @@ export const Config = z.object({
   hubUrl: z.string().default(''),
   hubToken: z.string().default(''),
   scope: z.string().default('default'),
+  agentNodeId: z.string().default(''),
   sliceCoderSlots: z.number().min(0).max(8).default(2),
   sliceTesterSlots: z.number().min(0).max(8).default(2),
   perGoalSliceCap: z.number().min(0).max(16).default(4),
@@ -209,7 +220,52 @@ interface GoalCtx {
 interface PipelineDef {
   name: string
   discussion?: DiscussionDef
+  workflow?: AgentReviewWorkflow | null
   stages: StageDef[]
+}
+
+function parseAgentReviewWorkflow(raw: unknown): AgentReviewWorkflow | null {
+  if (raw === null || raw === undefined) return null
+  if (typeof raw !== 'object' || Array.isArray(raw)) throw new Error('hub workflow 配置形状无效')
+  const value = raw as Record<string, unknown>
+  const roles = [value.designRole, value.implementationRole, value.reviewRole]
+  if (!roles.every(role => typeof role === 'string' && role.trim() !== '')
+    || new Set(roles).size !== 3
+    || !Number.isSafeInteger(value.maxReworkRounds)
+    || (value.maxReworkRounds as number) < 0 || (value.maxReworkRounds as number) > 20) {
+    throw new Error('hub workflow 缺少合法的角色或返工上限')
+  }
+  return {
+    designRole: (value.designRole as string).trim(),
+    implementationRole: (value.implementationRole as string).trim(),
+    reviewRole: (value.reviewRole as string).trim(),
+    maxReworkRounds: value.maxReworkRounds as number,
+  }
+}
+
+function workflowStageIdFor(workflow: NonNullable<NonNullable<Task['agentSelectionSnapshot']>['reviewWorkflow']>, key: 'design' | 'implementation' | 'review'): string {
+  const stageId = key === 'design' ? workflow.designStageId
+    : key === 'implementation' ? workflow.implementationStageId : workflow.reviewStageId
+  if (typeof stageId === 'string' && stageId.trim() !== '') return stageId
+  const role = key === 'design' ? workflow.designRole
+    : key === 'implementation' ? workflow.implementationRole : workflow.reviewRole
+  return workflow.stageIdByRole?.[role] ?? role
+}
+
+function isWorkflowStage(task: Task, stage: StageDef | undefined, key: 'design' | 'implementation' | 'review'): boolean {
+  const workflow = task.agentSelectionSnapshot?.reviewWorkflow
+  if (workflow === null || workflow === undefined || stage === undefined) return false
+  const selectedStageId = task.agentSelectionSnapshot?.workflowStageId ?? stage.workflowStageId ?? stage.id ?? stage.role
+  return selectedStageId === workflowStageIdFor(workflow, key)
+}
+
+function workflowHasForwardEdges(task: Task, stage: StageDef | undefined): boolean {
+  const workflow = task.agentSelectionSnapshot?.reviewWorkflow
+  if (workflow === null || workflow === undefined || stage === undefined) return stage?.next != null
+  const stageId = task.agentSelectionSnapshot?.workflowStageId ?? stage.workflowStageId ?? stage.id
+  const frozen = stageId ? workflow.stageDefinitionsById?.[stageId] : undefined
+  if (Array.isArray(frozen?.nextStageIds)) return frozen.nextStageIds.length > 0
+  return stage.next !== null
 }
 
 /** worker 结构回报。 */
@@ -220,9 +276,18 @@ interface WorkerReport {
   blocker: string
   artifact: WorkerArtifact | null
   /** 仅切片测试士兵（tester，D7' 机器闸门）回报：结构化测试结果。 */
-  testReport?: { passed: boolean; summary?: string; failures?: Array<{ name: string; log: string; repro: string }> } | null
+  testReport?: { passed: boolean; command?: string; summary?: string; evidence?: string; failures?: Array<{ name: string; log: string; repro: string }> } | null
+  /** Legion 独立测试执行器生成并绑定到实现提交的回执。 */
+  testVerification?: {
+    id: string; state: 'passed' | 'failed' | 'unknown'; sourceCommit: string; stageAttemptId: string
+    providerRunId: string | null; runnerNodeId: string | null; executable: string; args: string[]
+    timeoutMs: number; exitCode: number | null; startedAtMs: number; finishedAtMs: number
+    outputDigest: string; outputExcerpt: string; outputTruncated: boolean; error: string | null
+  } | null
   /** 可选：执行时所依据的目标上下文（goalId + contextVersion，守护据此核对"下一派工对齐"语义）。 */
   goalRef?: { goalId?: string; contextVersion?: number } | null
+  /** reviewStage 专用：无 findings 才可 passed；问题按设计/实现分类。 */
+  review?: { passed: boolean; findings: Array<{ kind: 'implementation' | 'design'; summary: string; evidence?: string }> }
 }
 
 /** worker 产物（借鉴 dsh-worktable 的 widget-result.json 握手：html 看板 iframe 预览、file 链接、url 跳转）。 */
@@ -260,6 +325,27 @@ const WORKER_SCHEMA: ObjectJsonSchema = {
     summary: { type: 'string' },
     evidence: { type: 'string' },
     blocker: { type: 'string' },
+    review: {
+      type: 'object',
+      properties: {
+        passed: { type: 'boolean' },
+        findings: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              kind: { type: 'string', enum: ['implementation', 'design'] },
+              summary: { type: 'string' },
+              evidence: { type: 'string' },
+            },
+            required: ['kind', 'summary'],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ['passed', 'findings'],
+      additionalProperties: false,
+    },
     artifact: {
       type: 'object',
       properties: {
@@ -274,7 +360,9 @@ const WORKER_SCHEMA: ObjectJsonSchema = {
       type: 'object',
       properties: {
         passed: { type: 'boolean' },
+        command: { type: 'string' },
         summary: { type: 'string' },
+        evidence: { type: 'string' },
         failures: {
           type: 'array',
           items: {
@@ -610,6 +698,16 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     }
     return runTaskctl(config.scrumDir, ['get', id]) as Promise<Task>
   }
+  const getWorkflowCancellationState = async (id: string): Promise<Task & { goalStatus?: string | null }> => {
+    const task = await getTask(id, scope)
+    if (!useHub || !task.goalId) return task
+    const response = await fetch(`${hubUrl}/api/goal?scope=${encodeURIComponent(scope)}`, { signal: AbortSignal.timeout(5000) })
+    if (!response.ok) throw new Error(`hub goal status failed (${response.status})`)
+    const data = await response.json() as { goals?: Array<{ id?: string; status?: string }> }
+    const goal = data.goals?.find(item => item.id === task.goalId)
+    if (!goal || typeof goal.status !== 'string') throw new Error(`hub goal status missing for workflow task ${id}`)
+    return { ...task, goalStatus: goal.status }
+  }
 
   /** 多角色流水线：读 roles.json，存在则进入流水线模式（按角色派工 + done 自动流转）。 */
   const rolesFilePath = config.rolesFile || join(config.repoRoot, 'roles.json')
@@ -618,7 +716,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       if (!existsSync(rolesFilePath)) return null
       const raw = JSON.parse(readFileSync(rolesFilePath, 'utf8'))
       if (!Array.isArray(raw.stages) || raw.stages.length === 0) return null
-      return raw as PipelineDef
+      return { ...raw, workflow: parseAgentReviewWorkflow(raw.workflow) } as PipelineDef
     } catch (e) {
       log(`roles.json 读取失败（按单角色模式运行）：${String(e)}`)
       return null
@@ -669,7 +767,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     try {
       const res = await fetch(`${hubUrl}/api/pipeline?scope=${encodeURIComponent(scope)}&include=active`)
       if (!res.ok) return // hub 不可达/4xx：沿用当前来源（含部署面兜底），不降级为单角色
-      const data = await res.json() as { version?: unknown; stages?: unknown }
+      const data = await res.json() as { version?: unknown; stages?: unknown; workflow?: unknown }
       const stages = stagesFromHubPayload(data.stages)
       if (stages.length === 0) {
         // 该空间未在数据面配置流水线 → 回退部署面 rolesFile（既有空间零影响）。
@@ -682,9 +780,10 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       }
       const version = typeof data.version === 'string' ? data.version : String(data.version ?? '')
       if (pipelineSource === 'hub' && version === hubPipelineVersion) return // 内容指纹未变：零成本
+      const workflow = parseAgentReviewWorkflow(data.workflow)
       hubPipelineVersion = version
       const changed = pipelineSource !== 'hub' || isPipeline === false
-      applyPipeline({ name: scope, stages }, 'hub')
+      applyPipeline({ name: scope, stages, workflow }, 'hub')
       log(`空间流水线来源=hub（scope=${scope}，version=${version}，${stages.length} 环：${stages.map(s => s.role).join(' → ')}）`
         + (changed ? '' : '（内容已更新）'))
     } catch (e) {
@@ -1160,12 +1259,18 @@ function spaceWorker(ctx: AppContext, config: Config): void {
 
   /** 认领任务（hub 或本地）。带幂等 request-id（同守护同任务稳定），可选 TTL。 */
   async function claimTask(id: string, soldier: string): Promise<void> {
+    await claimTaskWithResult(id, soldier)
+  }
+
+  async function claimTaskWithResult(id: string, soldier: string): Promise<Task | null> {
     const requestId = `daemon:${config.role}:${id}`
+    let claimed: Task | null = null
     if (useHub) {
-      await hubPost('/api/claim', {
+      claimed = await hubPost('/api/claim', {
         id, soldier, by: config.role, scope: scope, requestId,
         ...(config.taskTtlMinutes > 0 ? { ttlMinutes: config.taskTtlMinutes } : {}),
-      })
+        ...((config.agentNodeId ?? '').trim() !== '' ? { agentNodeId: (config.agentNodeId ?? '').trim() } : {}),
+      }) as Task
     } else {
       const argv = ['claim', id, '--soldier', soldier, '--request-id', requestId]
       if (config.taskTtlMinutes > 0) argv.push('--ttl-minutes', String(config.taskTtlMinutes))
@@ -1173,6 +1278,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     }
     await reportProgress(id, 0, '认领开工')
     abortRetryAt.delete(id) // 新一轮认领（含解阻续做）重置中止退避
+    return claimed
   }
 
   // prepareWorktree / ensurePrePushGuard / commitWorktree 随 workspace 边界搬到 ./workspace.ts，
@@ -1429,9 +1535,10 @@ function spaceWorker(ctx: AppContext, config: Config): void {
    *   绝对路径在工作树合并/清理后失效、不可移植、详情里显示难懂（T-111 现场：绝对 worktree 路径已不存在）。
    *   读端 resolveArtifactReadTarget 已支持相对路径（worktree 优先 / 主仓兜底 + 越界拒读）。
    */
-  async function recordArtifact(taskId: string, a: WorkerArtifact, worktreeDir: string | null): Promise<void> {
+  async function recordArtifact(taskId: string, a: WorkerArtifact, worktreeDir: string | null, workflowVersioned = false): Promise<void> {
     try {
       let path = a.path
+      let digest: string | undefined
       if (a.kind !== 'url') {
         const base = worktreeDir ?? workspace.workspaceFor()
         const resolved = isAbsolute(path) ? path : join(base, path)
@@ -1440,22 +1547,25 @@ function spaceWorker(ctx: AppContext, config: Config): void {
           await safeComment(taskId, `⚠ 产物路径不存在（未登记预览）：${resolved}`)
           return
         }
-        // 规整为仓库相对路径：relative(repoRoot, resolved)，再剥掉 .legion-worktrees/<task>/ 分支态前缀。
+        // 独立 workflow worktree 可位于仓库根目录之外，workflow 产物必须相对其冻结 worktree 登记。
+        // 普通任务继续相对 repoRoot，并剥掉 .legion-worktrees/<task>/ 分支态前缀以保持兼容。
         const repo = resolve(workspace.repoRootFor())
-        let rel = relative(repo, resolve(resolved)).replace(/\\/g, '/')
+        const artifactBase = workflowVersioned && worktreeDir ? resolve(worktreeDir) : repo
+        let rel = relative(artifactBase, resolve(resolved)).replace(/\\/g, '/')
         if (rel === '' || rel.startsWith('..')) {
           path = resolved // 越出仓库根/根路径本身：保留绝对路径（读端 K10 兼容）
         } else {
           rel = rel.replace(/^\.\//, '')
           const wtPrefix = `.legion-worktrees/${taskId}/`
-          if (rel.startsWith(wtPrefix)) rel = rel.slice(wtPrefix.length)
+          if (!(workflowVersioned && worktreeDir) && rel.startsWith(wtPrefix)) rel = rel.slice(wtPrefix.length)
           path = rel
         }
+        digest = workflowVersioned ? workflowArtifactDigest(resolved) : fileDigest(resolved)
       }
       const argv = ['artifact', taskId, '--by', config.role, '--kind', a.kind, '--path', path]
       if (a.title && a.title.length > 0) argv.push('--title', a.title.slice(0, 120))
       if (useHub) {
-        await hubPost('/api/artifact', { id: taskId, kind: a.kind, path, title: a.title ?? '', by: config.role, scope: scope })
+        await hubPost('/api/artifact', { id: taskId, kind: a.kind, path, title: a.title ?? '', ...(digest ? { digest } : {}), by: config.role, scope: scope })
       } else {
         await runTaskctl(config.scrumDir, argv)
       }
@@ -1490,7 +1600,9 @@ function spaceWorker(ctx: AppContext, config: Config): void {
           missing.push(rel)
           continue
         }
-        digest = fileDigest(abs)
+        digest = t.agentSelectionSnapshot?.source === 'goal-agent-workflow'
+          ? workflowArtifactDigest(abs)
+          : fileDigest(abs)
         const prev = (t.artifacts ?? []).filter(a => a.kind === 'file' && typeof a.path === 'string' && a.path.split('\\').join('/') === rel).slice(-1)[0]
         if (prev && typeof prev.digest === 'string' && prev.digest === digest) continue // 字节未变幂等跳过
         const argv = ['artifact', t.id, '--by', config.role, '--kind', 'file', '--path', rel]
@@ -1617,12 +1729,77 @@ function spaceWorker(ctx: AppContext, config: Config): void {
         ...t.fileDomain.map(f => `- ${f}`),
       )
     }
+    const reviewWorkflow = t.agentSelectionSnapshot?.reviewWorkflow
+    const workflowContext = t.agentSelectionSnapshot?.workflowContext
+    const externalProviderStage = t.agentSelectionSnapshot?.agentToolConfig?.adapter === 'dsh-subagent'
+    const externalDesignStage = externalProviderStage && isWorkflowStage(t, stage, 'design')
+    const externalReviewStage = externalProviderStage && isWorkflowStage(t, stage, 'review')
+    const handoffLines: string[] = []
+    for (const artifact of workflowContext?.designArtifacts ?? []) {
+      handoffLines.push(`冻结设计版本：task=${artifact.taskId} path=${artifact.path} sha256=${artifact.digest}（UTF-8 文本按 LF 规范化后计算，CRLF 与 LF 等价）；必须以该文件内容为本阶段设计输入，不要用工作树原始字节哈希与此摘要比较。`)
+    }
+    if (workflowContext?.implementation !== null && workflowContext?.implementation !== undefined) {
+      handoffLines.push(`冻结实现版本：task=${workflowContext.implementation.taskId} commit=${workflowContext.implementation.sourceCommit} stageAttempt=${workflowContext.implementation.stageAttemptId} providerRun=${workflowContext.implementation.providerRunId ?? '(provider未提供)'}`)
+      handoffLines.push(`测试命令：${workflowContext.implementation.testCommand}\n测试结果：${workflowContext.implementation.testSummary}\n测试证据：${workflowContext.implementation.testEvidence}`)
+      const verification = workflowContext.implementation.testVerification
+      if (verification) {
+        handoffLines.push(`Legion 独立测试回执：testRun=${verification.id} state=${verification.state} commit=${verification.sourceCommit} stageAttempt=${verification.stageAttemptId} providerRun=${verification.providerRunId ?? '(provider未提供)'} runnerNode=${verification.runnerNodeId ?? '(unknown)'} argv=${JSON.stringify([verification.executable, ...verification.args])} exitCode=${verification.exitCode} outputSHA256=${verification.outputDigest}\n独立测试输出摘录：${verification.outputExcerpt}`)
+      }
+    }
+    for (const upstream of workflowContext?.upstreamStages ?? []) {
+      if (upstream.artifacts.length > 0) {
+        handoffLines.push(`上游阶段 ${upstream.stageId ?? upstream.role}（task=${upstream.taskId}）产物：${upstream.artifacts.map((artifact) => `${artifact.path}${artifact.digest ? ` sha256=${artifact.digest}` : ''}`).join(', ')}`)
+      }
+      const evidence = upstream.evidence.map((item) => item.text).filter((text) => typeof text === 'string' && text.trim() !== '')
+      if (evidence.length > 0) handoffLines.push(`上游阶段 ${upstream.stageId ?? upstream.role} 证据（task=${upstream.taskId}）：${evidence.join('\n')}`)
+    }
+    const frozenStage = t.agentSelectionSnapshot?.reviewWorkflow?.stageDefinitionsById?.[t.agentSelectionSnapshot.workflowStageId ?? '']
+      ?? t.agentSelectionSnapshot?.reviewWorkflow?.stageDefinitions?.[t.role ?? '']
+    if (frozenStage?.inputContract || frozenStage?.outputContract) {
+      handoffLines.push(`冻结阶段 ${frozenStage.id ?? frozenStage.role} 输入契约：${JSON.stringify(frozenStage.inputContract ?? {})}`)
+      handoffLines.push(`冻结阶段 ${frozenStage.id ?? frozenStage.role} 输出契约：${JSON.stringify(frozenStage.outputContract ?? {})}`)
+    }
     const lines = [
       stage
         ? `你是军团士兵，当前角色「${stage.label}」（${stage.role}）。任务 ${t.id} 由你独立完成。`
         : `你是军团士兵 ${config.role}（守护循环派发的临时 worker），任务 ${t.id} 由你独立完成。`,
       '',
       ...(stage ? [`角色职责（必须遵守）：${goalizePrompt(stage.prompt, goal)}`, ''] : []),
+      ...(isWorkflowStage(t, stage, 'review')
+        ? [
+            '本阶段是 Codex 风格的独立审查。只审查，不修改代码或设计产物；逐条给出可复现依据。',
+            '报告 JSON 必须包含 review：无问题时 {"passed":true,"findings":[]}；有问题时 {"passed":false,"findings":[{"kind":"implementation|design","summary":"问题","evidence":"文件/行号/复现证据"}]}。',
+            `实现问题回到 ${reviewWorkflow?.implementationRole ?? '实现阶段'}；设计问题回到 ${reviewWorkflow?.designRole ?? '设计阶段'}；混合问题必须同时分类，系统会优先退回设计。返工上限：${reviewWorkflow?.maxReworkRounds ?? 0} 轮。`,
+            '无法归类、证据不足或结论矛盾时不要声称通过；写入 blocker 并停在待澄清状态。',
+            '',
+          ]
+        : []),
+      ...(isWorkflowStage(t, stage, 'design')
+        ? [
+            '本阶段必须产出可提交到仓库的设计文件，并在最终 JSON 的 artifact 中登记 kind=file、仓库相对 path 和标题；没有带 SHA-256 的文件版本不得完成设计阶段。',
+            '设计文件必须包含接口/数据结构、实施步骤、验收标准与风险；后续实现只消费系统冻结的该版本。',
+            '',
+          ]
+        : []),
+      ...(externalDesignStage
+        ? [
+            '外部设计 Agent 权限与收尾约束：只使用冻结权限模式已允许的工具；不要请求交互式人工审批，也不要调用 Bash、PowerShell、终端、网络或包管理器。设计文件写完后由 Legion 计算并登记 SHA-256，无需自行运行 git/hash 命令；完成后立即输出下方严格 JSON，不再调用额外工具。若在此权限范围内无法完成，返回 status=blocked 并说明具体原因。',
+            '',
+          ]
+        : []),
+      ...(externalReviewStage
+        ? [
+            '外部审查 Agent 权限约束：这是只读审查，必须实际查看隔离 worktree 中的设计、实现、测试和 git diff；允许使用只读文件查看与只读终端命令（例如 git status/diff/show、rg、sed、cat）。禁止编辑、创建、删除、格式化文件，禁止 git checkout/reset/commit/push，禁止网络访问和包管理器，也不要请求人工审批。引用具体文件与行号或可复现证据；无法读取材料时返回 status=blocked 并说清限制。',
+            '',
+          ]
+        : []),
+      ...(isWorkflowStage(t, stage, 'implementation')
+        ? [
+            '本阶段必须基于提示中列出的冻结设计文件实现，并运行相关测试。最终 JSON 必须包含 testReport：passed=true、command 为实际执行的测试命令、summary 非空、evidence 为实际测试输出或结果摘录、failures 为空；没有真实通过证据时不得报告 done。',
+            '',
+          ]
+        : []),
+      ...(handoffLines.length > 0 ? ['不可变上游交接证据（派工前已校验摘要，禁止以其他版本替代）：', ...handoffLines, ''] : []),
       `工作目录：${cwd}`,
       isolated ? `隔离模式：你在独立 git worktree（分支 w/${t.id}）中工作；不要 push（pre-push 已拦截）；改动只留在本 worktree，由将军验收后 promote 合并。若 w/${t.id} 已存在上一轮的部分改动（WIP 提交），请在其基础上继续完成，不要删除既有内容。` : '',
       `任务看板：${config.scrumDir}（taskctl 是唯一变更入口，但你不要调用它）`,
@@ -1682,7 +1859,11 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       '',
       '纪律：',
       '1. 只做实现与验证；状态迁移一律由守护负责。唯一允许调用的 taskctl 命令是 `taskctl progress <id> --by <角色> --percent <0-100> --note <一句话>`（上报进度遥测，不迁移状态）；其余 taskctl / task_* / 看板写接口一律禁止。',
-      '2. 完成标准 = 验收标准逐条真实满足：跑真实命令验证（typecheck / build / test），给出证据。',
+      externalDesignStage
+        ? '2. 完成标准 = 验收标准逐条真实满足；设计阶段按上方权限边界工作，不要求运行 shell 命令，给出基于实际读取内容与检查的证据。'
+        : externalReviewStage
+          ? '2. 完成标准 = 验收标准逐条真实满足；审查阶段必须按上方约束只读查看文件与差异，不得修改工作区，给出逐项审查证据。'
+          : '2. 完成标准 = 验收标准逐条真实满足：跑真实命令验证（typecheck / build / test），给出证据。',
       '3. 改动落在工作目录内；如需更新 legion 文档一并更新。',
       '4. 禁止联网与任何 push（pre-push 已拦截 w/* 分支）；外部依赖若缺失，在证据里说明而非擅自下载。',
       '4b. 遇到**必须将军拍板**的疑问（关键歧义无法自行消解 / 取舍超出本角色职权 / 关键输入缺失等）：不要臆断硬做，也不要悄悄绕过——把疑问逐条写进报告 blocker（每条以「❓ 待将军确认」开头，附你的倾向与依据），走 status=blocked；任务会醒目提示将军，将军评论答复后你会带着答复继续。能自行合理决策的小问题自己定，在 evidence 里写明假设。',
@@ -1798,11 +1979,113 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     }
   }
 
+  /**
+   * Workflow handoffs identify text artifacts independent of Git's Windows CRLF checkout conversion.
+   * Keep the ordinary space-pipeline byte digest unchanged; workflow artifacts use canonical LF text.
+   */
+  function workflowArtifactDigest(file: string): string {
+    const bytes = readFileSync(file)
+    if (bytes.includes(0)) return createHash('sha256').update(bytes).digest('hex')
+    const text = bytes.toString('utf8')
+    if (!Buffer.from(text, 'utf8').equals(bytes)) return createHash('sha256').update(bytes).digest('hex')
+    return createHash('sha256').update(text.replaceAll('\r\n', '\n').replaceAll('\r', '\n'), 'utf8').digest('hex')
+  }
+
+  function stageContractArtifacts(stage: StageDef | undefined, direction: 'input' | 'output'): string[] {
+    const contract = direction === 'input' ? stage?.inputContract : stage?.outputContract
+    const value = contract?.artifacts
+    if (value === undefined) return []
+    if (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || item.trim() === '')) {
+      throw new Error(`阶段 ${stage?.workflowStageId ?? stage?.id ?? stage?.role ?? '(unknown)'} 的 ${direction}Contract.artifacts 格式无效`)
+    }
+    return value.map((item) => item.trim())
+  }
+
+  function artifactLabels(items: Array<{ path?: string; title?: string }>): Set<string> {
+    const labels = new Set<string>()
+    for (const item of items) {
+      if (typeof item.path === 'string') {
+        labels.add(item.path.trim().toLowerCase())
+        labels.add(basename(item.path.replaceAll('\\', '/')).trim().toLowerCase())
+      }
+      if (typeof item.title === 'string') labels.add(item.title.trim().toLowerCase())
+    }
+    return labels
+  }
+
+  async function verifyAgentWorkflowInputs(t: Task, stage: StageDef | undefined, cwd: string): Promise<void> {
+    const workflow = t.agentSelectionSnapshot?.reviewWorkflow
+    if (workflow === null || workflow === undefined || stage === undefined) return
+    if (!useHub) throw new Error('阶段 Agent 工作流需要 team-hub 持久化工具快照与交接证据')
+    const context = t.agentSelectionSnapshot?.workflowContext
+    const needsDesign = isWorkflowStage(t, stage, 'implementation') || isWorkflowStage(t, stage, 'review')
+    if (needsDesign && (!Array.isArray(context?.designArtifacts) || context.designArtifacts.length === 0)) {
+      throw new Error(`阶段 ${stage.role} 缺少冻结设计产物版本`)
+    }
+    for (const artifact of context?.designArtifacts ?? []) {
+      if (typeof artifact.path !== 'string' || artifact.path.trim() === '' || isAbsolute(artifact.path)
+        || !/^[0-9a-f]{64}$/.test(artifact.digest)) {
+        throw new Error(`设计产物版本引用格式无效：${artifact.path ?? '(missing)'}`)
+      }
+      const target = resolve(cwd, artifact.path)
+      const fromRoot = relative(resolve(cwd), target)
+      if (fromRoot === '..' || fromRoot.startsWith(`..${sep}`) || !existsSync(target)) {
+        throw new Error(`冻结设计产物不存在或越出工作区：${artifact.path}`)
+      }
+      if (fileDigest(target) !== artifact.digest && workflowArtifactDigest(target) !== artifact.digest) {
+        throw new Error(`冻结设计产物摘要已变化：${artifact.path}（期望 ${artifact.digest}）`)
+      }
+    }
+    for (const upstream of context?.upstreamStages ?? []) {
+      for (const artifact of upstream.artifacts) {
+        if (artifact.kind !== 'file' || typeof artifact.path !== 'string' || !/^[0-9a-f]{64}$/.test(artifact.digest ?? '')) continue
+        if (isAbsolute(artifact.path)) throw new Error(`上游阶段产物路径必须相对工作区：${artifact.path}`)
+        const target = resolve(cwd, artifact.path)
+        const fromRoot = relative(resolve(cwd), target)
+        if (fromRoot === '..' || fromRoot.startsWith(`..${sep}`) || !existsSync(target)) {
+          throw new Error(`上游阶段产物不存在或越出工作区：${artifact.path}`)
+        }
+        if (fileDigest(target) !== artifact.digest && workflowArtifactDigest(target) !== artifact.digest) {
+          throw new Error(`上游阶段产物摘要已变化：${artifact.path}（期望 ${artifact.digest}）`)
+        }
+      }
+    }
+    const requiredInputs = stageContractArtifacts(stage, 'input')
+    const upstreamArtifacts = (context?.upstreamStages ?? []).flatMap((upstream) => upstream.artifacts)
+    const availableInputs = artifactLabels(upstreamArtifacts)
+    if ((context?.implementation?.sourceCommit ?? '') !== '') availableInputs.add('commit')
+    if ((context?.implementation?.testEvidence ?? '').trim() !== '') availableInputs.add('test-evidence')
+    if ((context?.implementation?.testSummary ?? '').trim() !== '') availableInputs.add('test-results')
+    const missingInputs = requiredInputs.filter((name) => !availableInputs.has(name.toLowerCase()))
+    if (missingInputs.length > 0) {
+      throw new Error(`阶段 ${t.agentSelectionSnapshot?.workflowStageId ?? stage.role} 缺少契约要求的上游产物：${missingInputs.join(', ')}`)
+    }
+    if (isWorkflowStage(t, stage, 'review')) {
+      const implementation = context?.implementation
+      if (implementation === null || implementation === undefined
+        || !/^[0-9a-f]{40,64}$/i.test(implementation.sourceCommit)
+        || implementation.testSummary.trim() === '' || implementation.testCommand.trim() === ''
+        || implementation.testEvidence.trim() === '') {
+        throw new Error('审查阶段缺少实现提交或测试证据')
+      }
+      const commit = await runGit(cwd, ['cat-file', '-e', `${implementation.sourceCommit}^{commit}`])
+      if (commit.code !== 0) throw new Error(`审查提交不存在于当前工作区历史：${implementation.sourceCommit}`)
+      const ancestor = await runGit(cwd, ['merge-base', '--is-ancestor', implementation.sourceCommit, 'HEAD'])
+      if (ancestor.code !== 0) throw new Error(`当前审查工作区不包含待审实现提交：${implementation.sourceCommit}`)
+    }
+  }
+
   /** 派一个 worker 处理任务（认领已完成或任务本身可开工）。 */
   async function runWorker(t: Task, feedback: Task['comments'], stage?: StageDef): Promise<void> {
+    // 跨 Agent 目标的阶段定义与拓扑在目标发布时冻结；不能因空间普通阶段被重排、停用或删除而换岗。
+    const frozenStage = t.agentSelectionSnapshot?.reviewWorkflow?.stageDefinitionsById?.[t.agentSelectionSnapshot.workflowStageId ?? '']
+      ?? t.agentSelectionSnapshot?.reviewWorkflow?.stageDefinitions?.[t.role ?? '']
+    if (frozenStage?.role === t.role) stage = frozenStage
     // 决定工作目录：isolate 时建 worktree（分支 w/<id>），失败回退工作目录（可能为空间绑定的本地文件夹）
     let cwd = workspace.workspaceFor()
     let worktreeDir: string | null = null
+    let workflowReviewBaseCommit: string | null = null
+    let workflowImplementationBaseCommit: string | null = null
     if (config.isolate) {
       worktreeDir = await workspace.prepareWorktree(t.id)
       if (worktreeDir !== null) cwd = worktreeDir
@@ -1832,6 +2115,42 @@ function spaceWorker(ctx: AppContext, config: Config): void {
         }
       }
     }
+    try {
+      if (t.agentSelectionSnapshot?.reviewWorkflow !== null && t.agentSelectionSnapshot?.reviewWorkflow !== undefined && worktreeDir === null) {
+        throw new Error('阶段 Agent 工作流必须使用本任务独立 worktree')
+      }
+      if (t.agentSelectionSnapshot?.source === 'goal-agent-workflow' && worktreeDir !== null) {
+        const imported = await materializeWorkflowCheckpoints({
+          workflowContext: t.agentSelectionSnapshot.workflowContext,
+          workdir: worktreeDir,
+          runGit,
+        })
+        if (imported.length > 0) activity('handoff', t.id, `已将 ${imported.length} 个上游阶段冻结提交合并到隔离分支`)
+      }
+      await verifyAgentWorkflowInputs(t, stage, worktreeDir ?? cwd)
+      if (t.agentSelectionSnapshot?.source === 'goal-agent-workflow'
+        && isWorkflowStage(t, stage, 'review') && worktreeDir !== null) {
+        const base = await runGit(worktreeDir, ['rev-parse', '--verify', 'HEAD'])
+        if (base.code !== 0 || !/^[0-9a-f]{40,64}$/i.test(base.out.trim())) {
+          throw new Error('无法冻结审查开始前的 Git 提交')
+        }
+        workflowReviewBaseCommit = base.out.trim()
+      }
+      if (t.agentSelectionSnapshot?.reviewWorkflow !== null
+        && t.agentSelectionSnapshot?.reviewWorkflow !== undefined
+        && isWorkflowStage(t, stage, 'implementation') && worktreeDir !== null) {
+        const base = await runGit(worktreeDir, ['rev-parse', '--verify', 'HEAD'])
+        if (base.code !== 0 || !/^[0-9a-f]{40,64}$/i.test(base.out.trim())) {
+          throw new Error('无法冻结实现阶段开始前的 Git 提交')
+        }
+        workflowImplementationBaseCommit = base.out.trim()
+      }
+    } catch (error) {
+      await safeComment(t.id, `⛔ 工作流上游版本核验失败，已停止自动派工：${String(error).slice(0, 400)}`, scope)
+      await transitionTo(t.id, 'in_review')
+      activity('gate', t.id, '工作流交接物版本核验失败，等待人工处理')
+      return
+    }
     const parent = await ensureForeman(cwd)
     if (parent === undefined) {
       log(`${t.id} 跳过：foreman 不可用`)
@@ -1854,16 +2173,204 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     const goal = t.goalId && t.goalId.length > 0 ? goalCtxById.get(t.goalId) ?? null : null
     let goalMirror: string | null = null
     if (goal !== null) goalMirror = await writeGoalContextMirror(goal, cwd)
+    const isWorkflowTask = t.agentSelectionSnapshot?.reviewWorkflow !== null
+      && t.agentSelectionSnapshot?.reviewWorkflow !== undefined
+    const isIndependentWorkflowTask = t.agentSelectionSnapshot?.source === 'goal-agent-workflow'
+    let providerRunId: string | null = null
+    let workflowStageAttemptId: string | null = null
+    const reportWorkflowStageAttempt = async (input: {
+      state: 'running' | 'completed' | 'failed' | 'unknown' | 'canceled'
+      providerRunId?: string | null
+      stopReason?: string
+      error?: string
+      result?: unknown
+    }): Promise<void> => {
+      if (workflowStageAttemptId === null) return
+      if (!useHub) throw new Error('持久化工作流阶段 Attempt 需要 team-hub')
+      await hubPost('/api/agent-workflow/stage-attempts/report', {
+        attemptId: workflowStageAttemptId,
+        ...input,
+        by: t.soldier ?? config.role,
+        scope,
+      })
+    }
+    const quarantineUnknownWorkflowResult = async (reason: string, preserveCanceledTask = false): Promise<boolean> => {
+      if (!isWorkflowTask) return false
+      const providerName = t.agentSelectionSnapshot?.agentToolConfig?.providerName ?? config.provider
+      const stageId = t.agentSelectionSnapshot?.workflowStageId ?? t.role ?? 'unknown'
+      const runRef = providerRunId === null ? '' : `，providerRunId=${providerRunId}`
+      await reportWorkflowStageAttempt({ state: 'unknown', providerRunId, stopReason: 'outcome-unknown', error: reason })
+        .catch(error => log(`${t.id} 阶段 Attempt 未能登记未知结果：${String(error)}`))
+      await safeComment(t.id, preserveCanceledTask
+        ? `⛔ 工作流阶段结果未知（stage=${stageId}, provider=${providerName}${runRef}）：${reason}。任务保持取消状态，工作区已保留并等待人工核对；不会自动推进或重派。`
+        : `⛔ 工作流阶段结果未知（stage=${stageId}, provider=${providerName}${runRef}）：${reason}。任务已隔离并等待人工核对；确认外部执行未产生副作用前不会自动重试。`, scope)
+      if (preserveCanceledTask) {
+        activity('gate', t.id, `用户已取消工作流任务，但 provider 终态未知；保留取消状态和工作区，等待人工核对（${stageId}）`)
+        return true
+      }
+      try {
+        if (useHub) {
+          await hubPost('/api/hold', { id: t.id, hold: true, by: t.soldier ?? config.role, scope })
+        } else {
+          await runTaskctl(config.scrumDir, ['hold', t.id, '--by', t.soldier ?? config.role])
+        }
+        await transitionTo(t.id, 'in_review', scope)
+        activity('gate', t.id, `工作流阶段结果未知，已隔离等待人工核对（${stageId}）`)
+      } catch (error) {
+        // Keep the lease held in in_progress when possible. Hub boot recovery also
+        // quarantines workflow orphans, so a failed transition cannot trigger a retry.
+        log(`${t.id} 工作流未知结果隔离迁移失败：${String(error)}`)
+        activity('gate', t.id, `工作流阶段结果未知，隔离迁移失败，需人工核对（${stageId}）`)
+      }
+      return true
+    }
     const run = await (async () => {
       try {
-        const started = await ctx.subagents.start(config.provider, {
-          label: `scrum:${t.id}`,
-          prompt: [{ type: 'text', text: buildWorkerPrompt(t, feedback, cwd, worktreeDir !== null, stage, goal, goalMirror) }],
-          parent,
-          signal: controller.signal,
-          outputSchema: WORKER_SCHEMA,
-          ...(config.denyTools.length > 0 ? { toolFilter: { deny: config.denyTools } } : {}),
-        })
+        const frozenConfig = t.agentSelectionSnapshot?.agentToolConfig ?? null
+        const stageRef = stage?.agentToolConfig ?? null
+        const selectionSnapshot = t.agentSelectionSnapshot
+        if (selectionSnapshot !== null && selectionSnapshot !== undefined
+          && (!['space-pipeline', 'goal-agent-workflow'].includes(selectionSnapshot.source)
+            || typeof selectionSnapshot.pipelineVersion !== 'string'
+            || selectionSnapshot.pipelineVersion === ''
+            || selectionSnapshot.stageRole !== stage?.role)) {
+          throw new Error('阶段角色与任务首次认领时的冻结快照不匹配；拒绝按实时流水线配置派工')
+        }
+        if (stageRef !== null && frozenConfig === null) {
+          throw new Error('阶段 Agent 工具配置缺少任务首次认领时的冻结快照；拒绝按实时流水线配置派工')
+        }
+        const modelRef = t.agentSelectionSnapshot?.modelConfig ?? null
+        const resolvedModel = t.agentSelectionSnapshot?.resolvedModelConfig ?? null
+        if (modelRef !== null && (resolvedModel === null || resolvedModel.id !== modelRef.id || resolvedModel.version !== modelRef.version)) {
+          throw new Error('该任务的模型档案引用没有匹配的冻结版本；拒绝静默忽略模型选择')
+        }
+        if (modelRef === null && resolvedModel !== null) throw new Error('任务包含未绑定引用的模型快照；拒绝使用未追溯的模型')
+        const hasFrozenTool = frozenConfig !== null
+        const selectedProvider = hasFrozenTool ? frozenConfig.providerName : config.provider
+        if (resolvedModel !== null && frozenConfig?.adapter !== 'dsh-native') {
+          throw new Error('模型档案覆盖只支持具备 agentOptions 能力的 DSH 原生 Agent provider')
+        }
+        let nativeProviderCapabilities: { agentOptions?: boolean } | null = null
+        const promptText = buildWorkerPrompt(t, feedback, cwd, worktreeDir !== null, stage, goal, goalMirror)
+        const beginWorkflowStageAttempt = async (providerName: string): Promise<void> => {
+          if (!isWorkflowTask) return
+          if (!useHub) throw new Error('跨 Agent 工作流阶段必须由 team-hub 保存 Attempt 事实后才能派工')
+          const stageId = t.agentSelectionSnapshot?.workflowStageId ?? t.role
+          if (typeof stageId !== 'string' || stageId.length === 0) throw new Error('工作流任务缺少冻结 stageId')
+          const record = await hubPost('/api/agent-workflow/stage-attempts/start', {
+            taskId: t.id,
+            stageId,
+            providerName,
+            workspaceDir: worktreeDir ?? cwd,
+            idempotencyKey: randomUUID(),
+            by: t.soldier ?? config.role,
+            scope,
+          }) as { id?: unknown }
+          if (typeof record.id !== 'string' || record.id.length === 0) throw new Error('team-hub 未返回持久化阶段 Attempt id')
+          workflowStageAttemptId = record.id
+          activity('dispatch', t.id, `已创建阶段 Attempt ${record.id}（provider=${providerName}）`)
+        }
+        let started
+        if (hasFrozenTool && frozenConfig.adapter === 'dsh-subagent') {
+          const expectedPermissionMode = expectedExternalPermissionMode(frozenConfig)
+          if (frozenConfig.enabled !== true || frozenConfig.workspacePolicy !== 'attempt-worktree-parent-cwd'
+            || expectedPermissionMode === null) {
+            throw new Error('外部 Agent 必须使用受支持的 Codex/Claude 工作区权限档与独立 worktree 策略')
+          }
+          if (worktreeDir === null) throw new Error('外部 Agent 必须运行在本任务独立 worktree 中')
+          const runtimeProvider = ctx.subagents.getProvider(selectedProvider) as { permissionMode?: unknown } | undefined
+          if (runtimeProvider?.permissionMode !== expectedPermissionMode) {
+            throw new Error(`外部 Agent provider 未报告与冻结配置一致的生效权限模式（expected=${expectedPermissionMode}, actual=${typeof runtimeProvider?.permissionMode === 'string' ? runtimeProvider.permissionMode : 'unknown'}）`)
+          }
+          if (resolveIntegrationMode(process.env) === 'integration') {
+            throw new Error('当前集成模式要求本地 Agent 执行拦截；所选外部 provider 不提供 localAgent')
+          }
+          if (config.denyTools.length > 0 && frozenConfig.capabilities.toolFilter !== true) {
+            throw new Error('当前外部 Agent 不支持配置要求的工具过滤，拒绝派工')
+          }
+          await beginWorkflowStageAttempt(selectedProvider)
+          const external = await executeExternalAgent({
+            subagents: ctx.subagents,
+            providerName: selectedProvider,
+            parent,
+            workdir: worktreeDir,
+            prompt: promptText,
+            label: `scrum:${t.id}`,
+            signal: controller.signal,
+            policyPreflightPassed: true,
+            expectedCapabilities: frozenConfig.capabilities,
+            expectedPermissionMode,
+            returnRun: true,
+          })
+          if (external.ok !== true || external.run === undefined) {
+            throw new Error(`${external.code ?? 'EXTERNAL_AGENT_START_FAILED'}：${external.message ?? '外部 Agent 启动失败'}`)
+          }
+          providerRunId = external.runId ?? null
+          const externalRun = external.run
+          started = {
+            id: external.runId,
+            result: externalRun.result.then((result: { stopReason?: string; diagnostic?: string; output?: Array<{ type?: string; text?: string }> }) => {
+              const diagnostic = typeof result?.diagnostic === 'string'
+                ? result.diagnostic.replace(/[\r\n\t]+/g, ' ').slice(0, 500)
+                : undefined
+              if (result?.stopReason !== 'completed') {
+                return { stopReason: result?.stopReason ?? 'unknown', ...(diagnostic === undefined ? {} : { diagnostic }) }
+              }
+              const output = Array.isArray(result.output)
+                ? result.output.filter(block => block?.type === 'text' && typeof block.text === 'string').map(block => block.text).join('')
+                : ''
+              const parsed = parseExternalWorkerReport(output)
+              return parsed.ok === true
+                ? { stopReason: 'completed', structured: parsed.report }
+                : { stopReason: 'invalid-external-report', diagnostic: parsed.message }
+            }),
+            dispose: () => externalRun.dispose(),
+            localAgent: undefined,
+          }
+        } else {
+          if (hasFrozenTool && frozenConfig.adapter !== 'dsh-native') {
+            throw new Error(`阶段 Agent 工具 adapter 不受支持：${frozenConfig?.adapter ?? 'missing'}`)
+          }
+          if (hasFrozenTool) {
+            const registered = ctx.subagents.getProvider(selectedProvider)
+            if (registered === undefined) throw new Error(`冻结配置指定的 DSH provider 未注册：${selectedProvider}`)
+            nativeProviderCapabilities = registered.capabilities
+            if (registered.capabilities.outputSchema !== frozenConfig.capabilities.outputSchema
+              || registered.capabilities.toolFilter !== frozenConfig.capabilities.toolFilter
+              || frozenConfig.capabilities.outputSchema !== true
+              || (config.denyTools.length > 0 && frozenConfig.capabilities.toolFilter !== true)) {
+              throw new Error(`冻结配置与 DSH provider ${selectedProvider} 的结构化输出/工具过滤能力不一致`)
+            }
+          }
+          let modelAgentOptions: Record<string, string> | null = null
+          try {
+            modelAgentOptions = agentOptionsForFrozenModel({
+              modelRef, resolvedModel, agentToolConfig: frozenConfig,
+              providerCapabilities: nativeProviderCapabilities,
+            })
+          } catch (error) {
+            throw new Error(`冻结模型配置不可用于 provider ${selectedProvider}：${String(error)}`)
+          }
+          await beginWorkflowStageAttempt(selectedProvider)
+          started = await ctx.subagents.start(selectedProvider, {
+            label: `scrum:${t.id}`,
+            prompt: [{ type: 'text', text: promptText }],
+            parent,
+            signal: controller.signal,
+            outputSchema: WORKER_SCHEMA,
+            ...(modelAgentOptions === null ? {} : { agentOptions: modelAgentOptions }),
+            ...(config.denyTools.length > 0 ? { toolFilter: { deny: config.denyTools } } : {}),
+          })
+          providerRunId = started.id ?? null
+        }
+        if (workflowStageAttemptId !== null) {
+          try {
+            await reportWorkflowStageAttempt({ state: 'running', providerRunId })
+          } catch (error) {
+            await started.dispose().catch(() => undefined)
+            throw new Error(`provider 已启动但 run 身份未能持久化：${String(error)}`)
+          }
+        }
         if (resolveIntegrationMode(process.env) === 'integration' && !started.localAgent) {
           await started.dispose()
           throw new Error('集成模式要求支持执行前拦截的本地 worker')
@@ -1873,6 +2380,10 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       } catch (e) {
         activeWriteGuards.delete(t.id)
         log(`${t.id} 派工失败：${String(e)}`)
+        if (workflowStageAttemptId !== null) {
+          await reportWorkflowStageAttempt({ state: 'unknown', providerRunId, stopReason: 'start-error', error: String(e) })
+            .catch(reportError => log(`${t.id} 阶段 Attempt 启动异常未能持久化：${String(reportError)}`))
+        }
         await safeComment(t.id, `⚠ 派工失败：${String(e).slice(0, 200)}`)
         return undefined
       } finally {
@@ -1881,6 +2392,10 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       }
     })()
     if (run === undefined) {
+      if (isWorkflowTask) {
+        await quarantineUnknownWorkflowResult('Agent 启动结果未知或启动请求失败')
+        return
+      }
       if (resolveIntegrationMode(process.env) === 'integration') await transitionTo(t.id, 'blocked', scope, true)
       return
     }
@@ -1890,31 +2405,221 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     await reportProgress(t.id, 10, '已派工')
     // 看门狗：subagent 可能挂死且 run.result 永不结算（abort 不保证杀死子代理）。
     // workerTimeoutMs 内未完成 → 强制结算为超时，放行 inflight/单槽，下轮自动重试（带退避）。
-    const result = await new Promise<{ stopReason: string; structured?: unknown } | null>((resolve) => {
-      const tmr = setTimeout(() => {
-        controller.abort()
-        log(`${t.id} worker 超时（>${Math.round(config.workerTimeoutMs / 60000)} 分钟），守护强制结算`)
-        resolve(null)
-      }, config.workerTimeoutMs)
-      void run.result.then(
-        r => { clearTimeout(tmr); resolve(r) },
-        () => { clearTimeout(tmr); resolve(null) },
-      )
-    })
+    const waited = isWorkflowTask
+      ? await waitForWorkflowAgentRun({
+        run, taskId: t.id, getTask: getWorkflowCancellationState, controller,
+        timeoutMs: config.workerTimeoutMs, pollIntervalMs: 1000,
+        onPollError: error => log(`${t.id} 取消状态轮询失败：${String(error)}`),
+      })
+      : await new Promise<{ result: { stopReason: string; structured?: unknown } | null; taskCanceled: false; timedOut: boolean }>((resolve) => {
+        const tmr = setTimeout(() => {
+          controller.abort()
+          log(`${t.id} worker 超时（>${Math.round(config.workerTimeoutMs / 60000)} 分钟），守护强制结算`)
+          resolve({ result: null, taskCanceled: false, timedOut: true })
+        }, config.workerTimeoutMs)
+        void run.result.then(
+          result => { clearTimeout(tmr); resolve({ result, taskCanceled: false, timedOut: false }) },
+          () => { clearTimeout(tmr); resolve({ result: null, taskCanceled: false, timedOut: false }) },
+        )
+      })
+    const result = waited.result as { stopReason: string; structured?: unknown; diagnostic?: string } | null
+    const taskCanceled = waited.taskCanceled
     if (result === null) {
+      if (isWorkflowTask) {
+        const failureType = 'failureType' in waited && typeof waited.failureType === 'string' ? waited.failureType : null
+        const reason = taskCanceled
+          ? `任务取消后 provider 未返回可确认的终态${failureType ? `（result rejection type=${failureType}）` : ''}`
+          : waited.timedOut
+            ? 'worker 超过执行时限，provider 未返回可确认的终态'
+            : failureType
+              ? `provider result promise rejected（type=${failureType}）`
+              : 'worker 连接中断或 provider 未返回可确认的终态'
+        await quarantineUnknownWorkflowResult(reason, taskCanceled)
+        await run.dispose().catch(() => undefined)
+        return
+      }
       await safeComment(t.id, '⚠ worker 超时（守护强制结算），任务保留在 in_progress，下一轮自动重试（会复用 w/<id> 的 WIP 续做）')
       activity('aborted', t.id, 'worker 超时强制结算，保留 in_progress 待重试')
       await run.dispose().catch(() => undefined)
       return
     }
     await run.dispose()
+    if (isWorkflowTask && taskCanceled) {
+      const providerStopReason = result.stopReason.toLowerCase()
+      if (['cancelled', 'canceled', 'aborted'].includes(providerStopReason)) {
+        await reportWorkflowStageAttempt({ state: 'canceled', providerRunId, stopReason: result.stopReason })
+        await safeComment(t.id, `已确认外部 Agent 在用户取消后停止（provider=${t.agentSelectionSnapshot?.agentToolConfig?.providerName ?? config.provider}${providerRunId ? `，run=${providerRunId}` : ''}）。工作区保留供检查；此任务不会自动推进。`, scope)
+        activity('aborted', t.id, '用户取消已传到 Agent provider，provider 返回取消终态')
+        return
+      }
+      await quarantineUnknownWorkflowResult(`任务取消与 provider 终态发生竞态（${result.stopReason}）；结果未用于推进工作流`, true)
+      return
+    }
     if (result.stopReason !== 'completed' || result.structured === undefined) {
-      log(`${t.id} worker 未完成（${result.stopReason}）`)
-      await safeComment(t.id, `⚠ worker 未完成（${result.stopReason}），任务保留在 in_progress，等待人工处理或下一轮重试`)
+      const diagnostic = typeof result.diagnostic === 'string' && result.diagnostic.trim() !== ''
+        ? `；provider 诊断：${result.diagnostic.slice(0, 500)}`
+        : ''
+      log(`${t.id} worker 未完成（${result.stopReason}）${diagnostic}`)
+      if (isWorkflowTask) {
+        await quarantineUnknownWorkflowResult(`worker 未完成（${result.stopReason}）${diagnostic}`)
+        return
+      }
+      await safeComment(t.id, `⚠ worker 未完成（${result.stopReason}）${diagnostic}，任务保留在 in_progress，等待人工处理或下一轮重试`)
       activity('aborted', t.id, `worker 未完成（${result.stopReason}），保留 in_progress 待租约回收`)
       return
     }
-    const report = result.structured as WorkerReport
+    // External Agent reports are frozen by the strict parser; workflow gates add
+    // Legion-owned test receipts to the top-level report after provider return.
+    const report = { ...(result.structured as WorkerReport) }
+    const agentTestReport = report.testReport ?? null
+    let workflowAttemptResult: unknown = report
+    let implementationPrecommitted = false
+    if (isWorkflowTask && report.status === 'done' && isWorkflowStage(t, stage, 'implementation')) {
+      const testRunner = stage?.testRunner
+      type BoundTestReceipt = WorkflowTestRunReceipt & {
+        sourceCommit: string
+        stageAttemptId: string
+        providerRunId: string | null
+        runnerNodeId: string | null
+      }
+      let receipt: BoundTestReceipt | null = null
+      let sourceCommit = ''
+      try {
+        if (worktreeDir === null || !testRunner || workflowStageAttemptId === null) {
+          throw new Error('独立测试需要冻结 runner、实现 worktree 与 Stage Attempt')
+        }
+        const committedByWorker = await workspace.commitWorktree(t.id, worktreeDir, report.summary)
+        const head = await runGit(worktreeDir, ['rev-parse', '--verify', 'HEAD'])
+        sourceCommit = head.out.trim()
+        if (head.code !== 0 || !/^[0-9a-f]{40,64}$/i.test(sourceCommit)) throw new Error('无法冻结独立测试对应的实现提交 SHA')
+        const cleanBefore = await runGit(worktreeDir, ['status', '--porcelain=v1', '--untracked-files=all'])
+        if (cleanBefore.code !== 0 || cleanBefore.out.trim() !== '') throw new Error('独立测试开始前实现 worktree 不干净')
+        if (!committedByWorker) {
+          const baseCommit = workflowImplementationBaseCommit
+          const includesStageBase = baseCommit === null
+            ? { code: 1 }
+            : await runGit(worktreeDir, ['merge-base', '--is-ancestor', baseCommit, sourceCommit])
+          if (baseCommit === null || sourceCommit === baseCommit || includesStageBase.code !== 0) {
+            throw new Error('实现改动未能提交，也没有可核验的 Agent 阶段提交；独立测试不在未提交工作树上执行')
+          }
+        }
+        implementationPrecommitted = true
+        const run = await runWorkflowTestCommand({ runner: testRunner, cwd: worktreeDir })
+        const headAfter = await runGit(worktreeDir, ['rev-parse', '--verify', 'HEAD'])
+        const cleanAfter = await runGit(worktreeDir, ['status', '--porcelain=v1', '--untracked-files=all'])
+        const changedDuringTests = headAfter.code !== 0 || headAfter.out.trim() !== sourceCommit
+          || cleanAfter.code !== 0 || cleanAfter.out.trim() !== ''
+        receipt = {
+          ...run,
+          sourceCommit,
+          stageAttemptId: workflowStageAttemptId,
+          providerRunId,
+          runnerNodeId: (config.agentNodeId ?? '').trim() || null,
+        }
+        if (changedDuringTests) {
+          const completedReceipt = receipt
+          receipt = {
+            ...completedReceipt,
+            state: 'failed',
+            exitCode: completedReceipt.exitCode === 0 ? 1 : completedReceipt.exitCode,
+            error: '测试执行期间实现提交或 worktree 状态发生变化',
+          }
+        }
+      } catch (error) {
+        log(`${t.id} 独立测试执行未完成：${String(error)}`)
+      }
+      if (receipt !== null) {
+        report.testVerification = receipt
+        report.testReport = {
+          passed: receipt.state === 'passed',
+          command: [receipt.executable, ...receipt.args].join(' '),
+          summary: receipt.state === 'passed' ? `Legion 独立测试通过（exit ${receipt.exitCode}）` : `Legion 独立测试${receipt.state === 'unknown' ? '结果未知' : '失败'}`,
+          evidence: receipt.outputExcerpt || receipt.error || `输出摘要 SHA-256：${receipt.outputDigest}`,
+          failures: receipt.state === 'passed' ? [] : [{ name: '独立测试执行', log: receipt.error ?? receipt.outputExcerpt, repro: [receipt.executable, ...receipt.args].join(' ') }],
+        }
+      } else {
+        report.testReport = {
+          passed: false,
+          command: testRunner ? [testRunner.executable, ...testRunner.args].join(' ') : '',
+          summary: 'Legion 独立测试未能启动或未返回可核验回执',
+          evidence: '',
+          failures: [{ name: '独立测试执行', log: '未生成绑定 Stage Attempt 和实现提交的 runner receipt', repro: '' }],
+        }
+      }
+      workflowAttemptResult = { ...report, agentTestReport }
+    }
+    if (isWorkflowTask) {
+      try {
+        await reportWorkflowStageAttempt({ state: 'completed', providerRunId, stopReason: result.stopReason, result: workflowAttemptResult })
+      } catch (error) {
+        await quarantineUnknownWorkflowResult(`worker 已返回结果但阶段 Attempt 终态未能持久化：${String(error)}`)
+        return
+      }
+    }
+    const reviewWorkflow = t.agentSelectionSnapshot?.reviewWorkflow
+    if (reviewWorkflow !== null && reviewWorkflow !== undefined && isWorkflowStage(t, stage, 'review')) {
+      if (worktreeDir !== null) {
+        const status = await runGit(worktreeDir, ['status', '--porcelain=v1', '--untracked-files=all'])
+        const isIndependentWorkflowReview = t.agentSelectionSnapshot?.source === 'goal-agent-workflow'
+        const reviewHead = isIndependentWorkflowReview
+          ? await runGit(worktreeDir, ['rev-parse', '--verify', 'HEAD'])
+          : null
+        const branchChanges = isIndependentWorkflowReview ? [] : await changedFilesOfBranch(t)
+        const workflowReviewCommittedChanges = isIndependentWorkflowReview
+          && (reviewHead?.code !== 0 || reviewHead?.out.trim() !== workflowReviewBaseCommit)
+        if (status.code !== 0 || status.out.trim() !== '' || workflowReviewCommittedChanges || branchChanges.length > 0) {
+          await transitionTo(t.id, 'in_review')
+          await safeComment(t.id, `⛔ 审查阶段工作区出现文件改动，未接受审查结论或推进返工。请人工检查审查分支 w/${t.id}；审查阶段只读。`, scope)
+          activity('gate', t.id, '审查阶段工作区有改动，停止自动结算')
+          return
+        }
+      }
+      const review = report.review
+      const findings = Array.isArray(review?.findings) ? review.findings : []
+      const malformed = review === undefined
+        || report.status !== 'done'
+        || (review.passed === true && findings.length > 0)
+        || (review.passed === false && findings.length === 0)
+      if (malformed) {
+        await transitionTo(t.id, 'in_review')
+        await safeComment(t.id, `⚠ 审查报告格式不一致，未自动通过或派发返工。要求：通过时 status=done 且 findings 为空；未通过时必须提供可分类的 findings。报告摘要：${report.summary}`, scope)
+        activity('gate', t.id, '审查报告不完整，等待人工核对')
+        return
+      }
+      if (review.passed === false) {
+        if (!useHub) {
+          await transitionTo(t.id, 'in_review')
+          await safeComment(t.id, '⚠ typed review 返工需要 team-hub 持久化工作流服务；当前未连接 hub，报告已保留待人工处理。', scope)
+          return
+        }
+        try {
+          const outcome = await hubPost('/api/agent-workflow/review', {
+            taskId: t.id,
+            by: t.soldier ?? config.role,
+            scope,
+            findings,
+            summary: report.summary,
+            evidence: report.evidence,
+          }) as Record<string, unknown>
+          if (outcome.kind === 'rework') {
+            await safeComment(t.id, `✓ 已按审查结论创建返工任务 ${String(outcome.nextTaskId ?? '')}（${String(outcome.reworkKind ?? '')}，第 ${String(outcome.round ?? '')}/${String(outcome.maxReworkRounds ?? '')} 轮）；审查任务已结算。`, scope)
+            activity('done', t.id, `审查触发 ${String(outcome.reworkKind ?? '')} 返工 ${String(outcome.nextTaskId ?? '')}`)
+            return
+          }
+          await transitionTo(t.id, 'in_review')
+          const reason = outcome.kind === 'rework-limit'
+            ? `自动返工已达到上限（${String(outcome.round ?? '')}/${String(outcome.maxReworkRounds ?? '')} 轮）`
+            : String(outcome.reason ?? '审查结果需要补充说明')
+          await safeComment(t.id, `⚠ ${reason}。问题已保留，请人工裁定后续处理：\n${findings.map(f => `- [${f.kind}] ${f.summary}`).join('\n')}`, scope)
+          activity('gate', t.id, `审查返工未自动派发：${reason}`)
+        } catch (error) {
+          await transitionTo(t.id, 'in_review')
+          await safeComment(t.id, `⚠ 审查返工未能原子结算，任务保留待人工处理：${String(error).slice(0, 300)}\n${findings.map(f => `- [${f.kind}] ${f.summary}`).join('\n')}`, scope)
+          activity('gate', t.id, '审查返工结算失败，保留待人工处理')
+        }
+        return
+      }
+    }
     // 目标上下文版本对账（"下一派工对齐"语义，仅提示不阻断）：
     // worker 声明了执行时依据的 contextVersion 但已落后 → 提醒将军本报告基于旧上下文，是否打回由将军定。
     const goalRef = report.goalRef && typeof report.goalRef === 'object' ? report.goalRef : null
@@ -1931,8 +2636,50 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     }
     if (report.status === 'done') {
       // worktree 隔离：先提交到 w/<id> 分支再记录 diff
-      if (worktreeDir !== null) await workspace.commitWorktree(t.id, worktreeDir, report.summary)
+      const committed = implementationPrecommitted || worktreeDir === null ? true : await workspace.commitWorktree(t.id, worktreeDir, report.summary)
+      const reviewWorkflow = t.agentSelectionSnapshot?.reviewWorkflow
+      const checkedTestReport = validateAgentWorkflowTestReport(report.testReport)
+      if (reviewWorkflow !== null && reviewWorkflow !== undefined && isWorkflowStage(t, stage, 'implementation')
+        && (worktreeDir === null || !useHub || !committed || report.testReport?.passed !== true
+          || !checkedTestReport.ok
+          || report.testVerification?.state !== 'passed'
+          || (report.testReport.failures?.length ?? 0) > 0)) {
+        await transitionTo(t.id, 'in_review')
+        await safeComment(t.id, '⚠ 实现阶段未提供可验证的隔离提交或明确通过的测试报告，未推进到审查阶段。请保留工作现场，补齐测试证据后重试。', scope)
+        activity('gate', t.id, '实现阶段缺少通过的测试/提交证据，停止自动交接')
+        return
+      }
       await recordPatch(t.id, worktreeDir, report.summary)
+      if (reviewWorkflow !== null && reviewWorkflow !== undefined && isWorkflowStage(t, stage, 'implementation')) {
+        const source = await runGit(worktreeDir!, ['rev-parse', '--verify', 'HEAD'])
+        const sourceCommit = source.out.trim()
+        if (source.code !== 0 || !/^[0-9a-f]{40,64}$/i.test(sourceCommit)) {
+          await transitionTo(t.id, 'in_review')
+          await safeComment(t.id, '⚠ 无法核验实现提交 SHA，未推进到审查阶段。请将军检查隔离分支后处理。', scope)
+          activity('gate', t.id, '实现阶段提交 SHA 无法核验')
+          return
+        }
+        try {
+          await hubPost('/api/comment', {
+            id: t.id, by: t.soldier ?? config.role, scope, isEvidence: true,
+            text: `agent-workflow-implementation:${JSON.stringify({
+              passed: true,
+              sourceCommit,
+              stageAttemptId: workflowStageAttemptId,
+              providerRunId,
+              testVerification: report.testVerification,
+              testCommand: checkedTestReport.ok ? checkedTestReport.command : '',
+              testSummary: checkedTestReport.ok ? checkedTestReport.summary : '',
+              testEvidence: checkedTestReport.ok ? checkedTestReport.evidence : '',
+            })}`,
+          })
+        } catch (error) {
+          await transitionTo(t.id, 'in_review')
+          await safeComment(t.id, `⚠ 实现提交与测试证据未能写入 team-hub，未推进到审查阶段：${String(error).slice(0, 240)}`, scope)
+          activity('gate', t.id, '实现版本证据写入失败，停止自动交接')
+          return
+        }
+      }
       if (worktreeDir !== null && useHub && resolveIntegrationMode(process.env) === 'integration') {
         const source = await runGit(workspace.repoRootFor(), ['rev-parse', '--verify', `w/${t.id}`])
         if (source.code !== 0 || !/^[0-9a-f]{40,64}$/i.test(source.out.trim())) throw new Error(`任务 ${t.id} 缺少可验收提交`)
@@ -1941,7 +2688,8 @@ function spaceWorker(ctx: AppContext, config: Config): void {
           text: `sourceCommit=${source.out.trim()}\n${report.summary}\n${report.evidence}`.slice(0, 800),
         })
       }
-      if (report.artifact && report.artifact.path) await recordArtifact(t.id, report.artifact, worktreeDir)
+    if (report.artifact && report.artifact.path) await recordArtifact(t.id, report.artifact, worktreeDir,
+      t.agentSelectionSnapshot?.source === 'goal-agent-workflow')
       // S2 契约文档自动登记：commitWorktree 之后、autoPromote 之前（存在性以 worktree 目录为基准）。
       // 流水线文档型岗位（roles.json stage.docs 契约）结算时逐条登记仓库相对路径条目；worker 未填 artifact 亦登记（AC-R1-2）。
       // R-4/D2 文档同步契约：docSync（用户可见行为变更）任务对 coder/devops 追加 docs/FEATURES.md + README.md，
@@ -1961,7 +2709,107 @@ function spaceWorker(ctx: AppContext, config: Config): void {
           return
         }
       }
-      if (isPipeline && stage && stage.next) {
+      if (reviewWorkflow !== null && reviewWorkflow !== undefined
+        && isWorkflowStage(t, stage, 'implementation') && worktreeDir !== null
+        && workflowImplementationBaseCommit !== null) {
+        const committedFiles = await runGit(worktreeDir, [
+          'diff', '--name-only', '-z', `${workflowImplementationBaseCommit}..HEAD`,
+        ])
+        if (committedFiles.code !== 0) {
+          await transitionTo(t.id, 'in_review')
+          await safeComment(t.id, '⚠ 无法枚举实现阶段提交中的文件，未推进到审查阶段。', scope)
+          activity('gate', t.id, '无法枚举实现阶段提交文件')
+          return
+        }
+        for (const path of committedFiles.out.split('\0').filter(Boolean)) {
+          await recordArtifact(t.id, { kind: 'file', path, title: basename(path) }, worktreeDir,
+            t.agentSelectionSnapshot?.source === 'goal-agent-workflow')
+        }
+      }
+      const requiredOutputs = stageContractArtifacts(stage, 'output')
+      if (requiredOutputs.length > 0) {
+        const latest = useHub ? await getTask(t.id, scope) : null
+        const produced = artifactLabels([
+          ...(latest?.artifacts ?? []),
+          ...(report.artifact ? [report.artifact] : []),
+        ])
+        if (isWorkflowStage(t, stage, 'implementation')) {
+          produced.add('commit')
+          if ((report.testReport?.evidence ?? '').trim() !== '') produced.add('test-evidence')
+        }
+        if (report.testReport?.passed === true && typeof report.testReport.summary === 'string' && report.testReport.summary.trim() !== '') {
+          produced.add('test-results')
+        }
+        const missingOutputs = requiredOutputs.filter((name) => !produced.has(name.toLowerCase()))
+        if (missingOutputs.length > 0) {
+          await safeComment(t.id, `⚠ 阶段输出未满足冻结契约：缺少 ${missingOutputs.join(', ')}。任务已停在 in_review，补齐可核验产物后再推进。`, scope)
+          await transitionTo(t.id, 'in_review')
+          activity('gate', t.id, `工作流阶段输出契约缺失：${missingOutputs.join(', ')}`)
+          return
+        }
+      }
+      if (reviewWorkflow !== null && reviewWorkflow !== undefined && isWorkflowStage(t, stage, 'design')) {
+        const latest = useHub ? await getTask(t.id, scope) : null
+        const immutableFiles = (latest?.artifacts ?? []).filter((artifact) =>
+          artifact.kind === 'file' && typeof artifact.path === 'string' && !isAbsolute(artifact.path)
+          && /^[0-9a-f]{64}$/.test(artifact.digest ?? ''),
+        )
+        const verifiedDesign = immutableFiles.some((artifact) => {
+          const path = resolve(worktreeDir ?? workspace.repoRootFor(), artifact.path)
+          const fromRoot = relative(resolve(worktreeDir ?? workspace.repoRootFor()), path)
+          if (fromRoot === '..' || fromRoot.startsWith(`..${sep}`) || !existsSync(path)) return false
+          try { return fileDigest(path) === artifact.digest || workflowArtifactDigest(path) === artifact.digest } catch { return false }
+        })
+        if (!verifiedDesign) {
+          await safeComment(t.id, '⚠ 设计阶段没有登记可核验的仓库内文件版本（SHA-256），未推进到实现阶段。请补交设计文件并重试。', scope)
+          await transitionTo(t.id, 'in_review')
+          activity('gate', t.id, '设计阶段缺少不可变产物版本，停止自动交接')
+          return
+        }
+      }
+      if (isIndependentWorkflowTask) {
+        const stageId = t.agentSelectionSnapshot?.workflowStageId ?? stage?.workflowStageId ?? stage?.id ?? stage?.role
+        const checkpoint = await runGit(worktreeDir!, ['rev-parse', '--verify', 'HEAD'])
+        const sourceCommit = checkpoint.out.trim()
+        if (checkpoint.code !== 0 || !/^[0-9a-f]{40,64}$/i.test(sourceCommit)) {
+          await transitionTo(t.id, 'in_review')
+          await safeComment(t.id, '⚠ 无法核验本阶段冻结 Git 提交，未推进工作流。请检查隔离分支后处理。', scope)
+          activity('gate', t.id, '工作流阶段缺少有效 Git 提交检查点')
+          return
+        }
+        if (typeof stageId !== 'string' || stageId.trim() === '') {
+          await transitionTo(t.id, 'in_review')
+          await safeComment(t.id, '⚠ 工作流阶段缺少冻结 stageId，未推进工作流。', scope)
+          return
+        }
+        await hubPost('/api/comment', {
+          id: t.id,
+          by: t.soldier ?? config.role,
+          scope,
+          isEvidence: true,
+          text: `${WORKFLOW_CHECKPOINT_EVIDENCE_PREFIX}${JSON.stringify({ stageId, sourceCommit })}`,
+        })
+
+        if (isWorkflowStage(t, stage, 'review')) {
+          await transitionTo(t.id, 'in_review')
+          await safeComment(t.id, `✓ Codex 审查已通过，已冻结设计与实现提交（design=${t.agentSelectionSnapshot?.workflowContext?.designArtifacts?.map(item => item.digest.slice(0, 12)).join(',') ?? 'verified'}；implementation=${t.agentSelectionSnapshot?.workflowContext?.implementation?.sourceCommit ?? 'verified'}）。任务停在 Legion 独立验证与最终验收；候选分支为 w/${t.id}。`, scope)
+          activity('gate', t.id, 'Codex 工作流审查通过，等待 Legion 独立验证与最终验收')
+          return
+        }
+
+        if (stage?.gate === true || resolveIntegrationMode(process.env) === 'integration') {
+          await transitionTo(t.id, 'in_review')
+          await safeComment(t.id, `✓ 工作流阶段 ${stage?.label ?? stageId} 已完成并冻结提交 ${sourceCommit}，等待 Legion 验收后再解锁下游阶段。候选分支为 w/${t.id}。`, scope)
+          activity('gate', t.id, `工作流阶段 ${stage?.label ?? stageId} 等待集成验收`)
+          return
+        }
+
+        await advanceTo(t.id, stage?.role ?? t.role ?? config.role)
+        await safeComment(t.id, `✓ 工作流阶段 ${stage?.label ?? stageId} 已完成，冻结提交 ${sourceCommit} 已保存；下游任务会从该提交建立自己的隔离分支。`, scope)
+        activity('done', t.id, `工作流阶段 ${stage?.label ?? stageId} 完成，提交检查点已持久化`)
+        return
+      }
+      if (isPipeline && stage && workflowHasForwardEdges(t, stage)) {
         // 文件域机器闸门（B 层防窜台）：声明了文件域的切片任务，改动越出声明域 → 拦截合入转 in_review 等将军裁决。
         if (worktreeDir !== null) {
           const outside = outsideDomainFiles(t, await changedFilesOfBranch(t))
@@ -2075,8 +2923,9 @@ function spaceWorker(ctx: AppContext, config: Config): void {
 
   /** 认领 todo 并派工（流水线模式按任务角色认领 + 用角色提示词）。 */
   async function workTodo(t: Task, stage?: StageDef): Promise<void> {
+    let claimed = t
     try {
-      await claimTask(t.id, stage ? stage.role : config.role)
+      claimed = await claimTaskWithResult(t.id, stage ? stage.role : config.role) ?? t
     } catch (e) {
       log(`${t.id} 认领失败（可能已被他人认领）：${String(e)}`)
       return
@@ -2084,12 +2933,12 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     activity('claim', t.id, stage ? `${stage.label}（${stage.role}）认领开工` : '认领开工')
     // 审计/打回闭环：认领时把历史有效反馈（将军评论/打回原因/审计批注评论，排除自身系统噪音）带进提示词，
     // 使「打回原因 → 重跑」不丢失上下文（与 in_progress 退回的 feedback 语义一致）。
-    const prior = t.comments.filter(c => {
+    const prior = claimed.comments.filter(c => {
       if (c.by === config.role) return false
       const txt = c.text ?? ''
       return !(txt.startsWith('⚠ worker 未完成') || txt.startsWith('⚠ 派工失败') || txt.startsWith('🟢 已派 AI') || txt.startsWith('⏳'))
     }).slice(-12)
-    await runWorker(t, prior, stage)
+    await runWorker(claimed, prior, stage)
   }
 
   /** 处理被退回/解阻的任务。 */
@@ -2409,7 +3258,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     body: string
     context?: Array<{ id: number; author: string; kind?: string; body: string }>
     /** S3/E1：本条消息绑定的附件引用（内容不入消息体，答问前另行取回）。 */
-    meta?: { attachments?: AttachmentRef[]; agentContext?: { name?: string; role?: string; agentId?: string; evidenceAsOf?: string; tasks?: unknown[] } }
+    meta?: { attachments?: AttachmentRef[] }
   }
   interface ReplySettingsPayload { enabled: boolean; model: string | null; identity: string | null; systemHint: string | null }
   async function fetchJson<T>(url: string): Promise<T | null> {
@@ -2446,7 +3295,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
         if (s && s.model) fallback = { provider: s.provider || config.provider, model: s.model }
       } catch { /* 取不到默认模型则用空串，由子代理 start 失败路径兜底 */ }
       const rows = await fetchJson<Array<{ role: string; provider?: string; model?: string }>>(`${hubUrl}/api/models?scope=${encodeURIComponent(msg.scope)}`)
-      const pick = (rows ?? []).find(r => r.role === (msg.meta?.agentContext?.role ?? 'assistant')) ?? (rows ?? []).find(r => r.role === 'assistant') ?? (rows ?? []).find(r => r.role === '') ?? (rows ?? [])[0]
+      const pick = (rows ?? []).find(r => r.role === 'assistant') ?? (rows ?? []).find(r => r.role === '') ?? (rows ?? [])[0]
       const chosenProvider = (pick?.provider && pick.provider.trim()) || fallback.provider
       const chosenModel = (settings.model && settings.model.trim()) || (pick?.model && pick.model.trim()) || fallback.model
       // 4) foreman 父级（无则标记失败，不重试同一轮）
@@ -2478,9 +3327,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       const prompt = buildChatAnswerPrompt({
         scope: msg.scope,
         convTitle: msg.convTitle,
-        systemHint: msg.meta?.agentContext
-          ? `${settings.systemHint ?? ''}\n你代表 ${msg.meta.agentContext.name ?? 'Agent'} 答问。只依据以下已保存记录解释，不声称收到运行中指令，不修改任务。记录时间 ${msg.meta.agentContext.evidenceAsOf ?? '未知'}。\n${JSON.stringify(msg.meta.agentContext)}`
-          : settings.systemHint,
+        systemHint: settings.systemHint,
         identity,
         context: [...(msg.context ?? []), { id: msg.id, author: msg.author, body: msg.body }],
         spaceDigest: ctxBundle.spaceDigest,
@@ -2496,7 +3343,6 @@ function spaceWorker(ctx: AppContext, config: Config): void {
           signal: controller.signal,
           outputSchema: CHAT_REPLY_SCHEMA,
           agentOptions: { provider: chosenProvider, model: chosenModel },
-          ...(msg.meta?.agentContext ? { toolFilter: { allow: [] } } : {}),
         })
         const result = await new Promise<{ stopReason: string; structured?: unknown } | null>((resolve) => {
           const t = setTimeout(() => { controller.abort(); resolve(null) }, budgetMs)
@@ -2547,6 +3393,38 @@ function spaceWorker(ctx: AppContext, config: Config): void {
         kind: 'worker',
         model: { provider: sel.provider || config.provider, model: sel.model || '' },
       })
+      if ((config.agentNodeId ?? '').trim() !== '') {
+        const worktreeProbe = config.isolate
+          ? await runGit(workspace.repoRootFor(), ['rev-parse', '--is-inside-work-tree'])
+          : { code: 1 }
+        const providerNames = ctx.subagents.list()
+        const providers = Object.fromEntries(providerNames.map((name) => {
+          const provider = ctx.subagents.getProvider(name) as ({ capabilities?: Record<string, unknown>; permissionMode?: unknown; systemProxyMode?: unknown } | undefined)
+          const caps = provider?.capabilities
+          return [name, {
+            outputSchema: caps?.outputSchema === true,
+            toolFilter: caps?.toolFilter === true,
+            // DSH run handles expose dispose(); abort support remains a best-effort host guarantee.
+            cancellation: true,
+            ...(typeof provider?.permissionMode === 'string' ? { permissionMode: provider.permissionMode } : {}),
+            ...(typeof provider?.systemProxyMode === 'string' ? { systemProxyMode: provider.systemProxyMode } : {}),
+          }]
+        }))
+        await hubPost('/api/agent-nodes/heartbeat', {
+          id: (config.agentNodeId ?? '').trim(),
+          scope,
+          by: `${config.role}@${scope}`,
+          providerNames,
+          capabilities: {
+            isolatedWorktree: config.isolate && worktreeProbe.code === 0,
+            externalAgent: providerNames.some((name) => name === 'codex' || name === 'claude-code'),
+            structuredOutput: Object.values(providers).some((caps) => caps.outputSchema),
+            toolFilter: Object.values(providers).some((caps) => caps.toolFilter),
+            cancellation: Object.values(providers).some((caps) => caps.cancellation),
+            providers,
+          },
+        })
+      }
     } catch (e) {
       log(`chat 心跳上报失败：${String(e)}`)
     }
@@ -2632,7 +3510,9 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       }
       // 流水线模式：守护按任务角色认领/派工；单角色模式：只认 config.role 的任务
       // `self` / `isOurs`（本角色判定）随状态机搬到 ./stateMachine.ts（读 isPipeline/stageByRole 取值函数）。
-      const stageOf = (t: Task) => (isPipeline ? stageByRole.get(t.role ?? '') : undefined)
+      const frozenStageOf = (t: Task) => t.agentSelectionSnapshot?.reviewWorkflow?.stageDefinitionsById?.[t.agentSelectionSnapshot.workflowStageId ?? '']
+        ?? t.agentSelectionSnapshot?.reviewWorkflow?.stageDefinitions?.[t.role ?? '']
+      const stageOf = (t: Task) => frozenStageOf(t) ?? (isPipeline ? stageByRole.get(t.role ?? '') : undefined)
       const runDetached = (taskId: string, job: Promise<void>): void => {
         void job
           .catch(e => log(`${taskId} 后台派工异常：${String(e)}`))
@@ -2642,7 +3522,9 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       // medWorkerRedispatchCount 六个判定谓词随状态机一起搬到 ./stateMachine.ts（含原始注释）。
 
       // 离线 inbox 计数：本守护名下待认领（todo/blocked 未认领）任务，每轮汇报一次（将军拦截的除外）
-      const isOurInbox = (t: Task) => (isPipeline ? (t.role !== null && stageByRole.has(t.role)) : true)
+      const isOurInbox = (t: Task) => (isPipeline
+        ? (t.role !== null && (stageByRole.has(t.role) || frozenStageOf(t) !== undefined))
+        : true)
       const inboxIds = tasks.filter(t => (t.status === 'todo' || t.status === 'blocked') && (t.soldier === null || t.soldier === undefined) && !t.hold && isOurInbox(t))
       if (inboxIds.length > 0) log(`inbox=${inboxIds.length}（${inboxIds.map(t => t.id).join(', ')}）`)
 
@@ -2667,7 +3549,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       })
       stateMachine.runRound(tasks, byId)
       // 4. 流水线 done 补流转：将军人工合入/验收后手动 done 的中间阶段任务 → 创建下一角色任务（幂等：已有后继则跳过）
-      if (isPipeline) {
+      if (isPipeline || tasks.some(x => x.status === 'done' && x.agentSelectionSnapshot?.reviewWorkflow !== undefined)) {
         for (const t of tasks.filter(x => x.status === 'done' && stageOf(x) !== undefined)) {
           await handoff.advancePipeline(t)
         }

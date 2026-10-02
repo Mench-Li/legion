@@ -175,7 +175,6 @@ export function resolveRuntimeCommand({
   extraArgs = [],
   fs = null,
   nodePath = process.execPath,
-  nodeArgs = [],
   platform = process.platform,
   packageName = DEFAULT_DSH_PACKAGE,
   entryRelpath = DEFAULT_ENTRY_RELPATH,
@@ -259,7 +258,7 @@ export function resolveRuntimeCommand({
     source: 'installed-pointer',
     command: Object.freeze({
       file: nodePath,
-      args: Object.freeze([...nodeArgs, entryPath, '--profile', base.profile, ...extraArgs.map(String)]),
+      args: Object.freeze([entryPath, '--profile', base.profile, ...extraArgs.map(String)]),
     }),
     profile: base.profile,
     active,
@@ -338,7 +337,6 @@ export function resolveRuntimeForLaunch({
   profile = DEFAULT_DSH_PROFILE,
   fs = null,
   nodePath = process.execPath,
-  nodeArgs = [],
   platform = process.platform,
   packageName = DEFAULT_DSH_PACKAGE,
   entryRelpath = DEFAULT_ENTRY_RELPATH,
@@ -350,7 +348,7 @@ export function resolveRuntimeForLaunch({
   //   在产品里没有任何读数会提到它。它占着磁盘、留着版本目录，
   //   而所有界面都是绿的——那正是本任务要消灭的那一类"两个绿了的半边"。
   const resolution = resolveRuntimeCommand({
-    dataDir, profile, fs, nodePath, nodeArgs, platform, packageName, entryRelpath,
+    dataDir, profile, fs, nodePath, platform, packageName, entryRelpath,
   })
   const diagnostics = []
   const base = { version: RUNTIME_RESOLVE_VERSION, given, resolution }

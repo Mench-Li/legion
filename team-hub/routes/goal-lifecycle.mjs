@@ -68,7 +68,14 @@ export function createGoalLifecycleRoutes({
           const targetScope = typeof body.scope === 'string' && body.scope.trim().length > 0 ? body.scope.trim() : scope
           // RC-2：body.docSync / body.feature=true → 目标级 docSync 声明（链上 coder 任务承接，见 createGoalChain）
           const docSync = body.docSync === true || body.feature === true
-          return publishGoalRecord(targetScope, objective, body.mode === 'slice' ? 'slice' : 'chain', by, docSync)
+          return publishGoalRecord(
+            targetScope,
+            objective,
+            body.mode === 'slice' ? 'slice' : 'chain',
+            by,
+            docSync,
+            body.workflowDefinition ?? null,
+          )
         })
       },
     },

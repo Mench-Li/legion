@@ -202,19 +202,9 @@ export function createLogSink({
   function redactLine(line) {
     if (redact !== true) return { text: line, hits: 0 }
     try {
-      // DSH prints its browser URL, including the local access token, to stdout.
-      // Keep this log-only rule here: readiness consumes the raw line in memory,
-      // while the sink buffers chunks by line before anything reaches disk.
-      const tokenPattern = /([?&]token=)[^&#\s"'<>]+/gi
-      let tokenHits = 0
-      const withoutUrlTokens = line.replace(tokenPattern, (_match, prefix) => {
-        tokenHits += 1
-        return `${prefix}[REDACTED]`
-      })
-      const { text, hits } = redactText(withoutUrlTokens)
-      const totalHits = hits.length + tokenHits
-      if (totalHits > 0) { stats.redactionHits += totalHits; stats.redactedLines += 1 }
-      return { text, hits: totalHits }
+      const { text, hits } = redactText(line)
+      if (hits.length > 0) { stats.redactionHits += hits.length; stats.redactedLines += 1 }
+      return { text, hits: hits.length }
     } catch (e) {
       report('error', SINK_CODES.REDACT_FAILED,
         `脱敏抛错（${e?.name ?? 'Error'}）：这一行**没有落盘**，只写了占位符。` +

@@ -43,12 +43,23 @@ export function requireDshCheckout() {
 }
 
 const DSH = requireDshCheckout()
+const STANDARD_AGENT_PRESET_PATCH = readFileSync(join(DSH, 'packages', 'bundle', 'web-app', 'presets', 'standard.patch.yml'), 'utf8')
+const STANDARD_AGENT_PRESET_INSERT = (() => {
+  const marker = '- insert:\n'
+  const index = STANDARD_AGENT_PRESET_PATCH.indexOf(marker)
+  if (index < 0) throw new Error('DSH standard Agent preset patch has no insert block')
+  return STANDARD_AGENT_PRESET_PATCH.slice(index + marker.length).trimEnd()
+})()
 export const CLI_BIN = join(DSH, 'apps', 'cli', 'lib', 'bin.js')
 const PROFILE = 'p13fixture'
 const EXTERNAL = {
   'dsh-team-hub': join(REPO, 'team-hub'),
   'dsh-scrum-board': join(REPO, 'board-plugin'),
   'dsh-scrum-worker': join(REPO, 'plugins'),
+}
+const AGENT_PROVIDERS = {
+  '@deepseek-ai/dsh-subagent-codex': join(DSH, 'packages', 'subagent', 'subagent-codex'),
+  '@deepseek-ai/dsh-subagent-claude-code': join(DSH, 'packages', 'subagent', 'subagent-claude-code'),
 }
 
 /** An OS-assigned free port (release immediately; boot race window is small). */
@@ -81,18 +92,22 @@ function scrumFixture(parent) {
  *   `@dsh-external/<key>` junctions pointing at arbitrary directories (used to reproduce
  *   the "package main points at a missing lib/index.js" shape).
  */
-export function makeFixture({ port, teamToken = 'p13-fixture-token', workerIntervalMs = 5000, extraRows = [], extraPackages = {} } = {}) {
+export function makeFixture({ port, teamToken = 'p13-fixture-token', workerIntervalMs = 5000, extraRows = [], extraPackages = {}, withAgentProviders = false, isolate = false, workerScope = '__p13fixture__' } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'dsh-p13-home-'))
   const profileDir = join(home, 'profiles', PROFILE)
   mkdirSync(join(profileDir, 'node_modules', '@dsh-external'), { recursive: true })
+  mkdirSync(join(profileDir, 'node_modules', '@deepseek-ai'), { recursive: true })
   const scrumDir = scrumFixture(join(home, 'workspace'))
   const repoRoot = join(home, 'workspace')
 
+  const agentProviderNames = withAgentProviders ? Object.keys(AGENT_PROVIDERS) : []
+  const bundles = ['@deepseek-ai/dsh-base', ...agentProviderNames]
+  const dependencies = Object.fromEntries(agentProviderNames.map((name) => [name, '0.2.0-rc.2']))
   writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
     name: 'dsh-profile-p13fixture',
     private: true,
-    dependencies: {},
-    dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } },
+    dependencies,
+    dsh: { profile: { bundles } },
   }, undefined, 2) + '\n')
   writeFileSync(join(profileDir, 'pnpm-workspace.yaml'), 'packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\n')
 
@@ -102,6 +117,13 @@ export function makeFixture({ port, teamToken = 'p13-fixture-token', workerInter
   for (const [pkg, target] of Object.entries(EXTERNAL)) {
     const link = join(profileDir, 'node_modules', '@dsh-external', pkg)
     try { symlinkSync(target, link, 'junction') } catch { /* already there */ }
+  }
+  if (withAgentProviders) {
+    for (const [pkg, target] of Object.entries(AGENT_PROVIDERS)) {
+      if (!existsSync(join(target, 'lib', 'index.js'))) throw new Error(`DSH provider bundle is not built: ${target}`)
+      const link = join(profileDir, 'node_modules', ...pkg.split('/'))
+      try { symlinkSync(target, link, 'junction') } catch { /* already there */ }
+    }
   }
   for (const [pkg, target] of Object.entries(extraPackages)) {
     const link = join(profileDir, 'node_modules', '@dsh-external', pkg)
@@ -116,17 +138,27 @@ export function makeFixture({ port, teamToken = 'p13-fixture-token', workerInter
   const logFileYaml = join(home, 'p13-worker.log').replace(/\\/g, '/')
   const hubDbYaml = join(home, 'workspace', 'p13-hub.db').replace(/\\/g, '/')
   const patchYaml = `# P1-3 fixture user patch layer (isolated host, never the 3080 web profile).
+- id: subagent-codex
+  config:
+    permissionMode: approve-for-me
+    systemProxyMode: system
+- id: subagent-claude-code
+  config:
+    permissionMode: acceptEdits
 - insert:
     - id: p13-webserver
       name: '@deepseek-ai/dsh-host-webserver'
       config:
         host: '127.0.0.1'
         port: ${port}
-    - id: p13-agent-presets
-      name: '@deepseek-ai/dsh-agent-presets'
+    - id: p13-agent-preset-registry
+      name: '@deepseek-ai/dsh-agent-preset-registry'
       config:
         default: standard
-    - id: p13-control
+${withAgentProviders ? `    - id: p13-subagent-model-selection-settings
+      name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
+${STANDARD_AGENT_PRESET_INSERT}
+` : ''}    - id: p13-control
       name: 'file:///${controlYaml}'
     - id: p13-team-hub
       name: '@dsh-external/dsh-team-hub'
@@ -163,10 +195,10 @@ export function makeFixture({ port, teamToken = 'p13-fixture-token', workerInter
         workerTimeoutMs: 600000
         staleMinutes: 30
         provider: 'spawn'
-        agentPreset: 'code'
+        agentPreset: 'standard'
         scrumDir: '${scrumDirYaml}'
         workspace: '${repoRootYaml}'
-        isolate: false
+        isolate: ${isolate ? 'true' : 'false'}
         repoRoot: '${repoRootYaml}'
         worktreeRoot: ''
         denyTools: []
@@ -174,7 +206,8 @@ export function makeFixture({ port, teamToken = 'p13-fixture-token', workerInter
         logFile: '${logFileYaml}'
         hubUrl: 'http://127.0.0.1:${port}/team-hub'
         hubToken: '${teamToken}'
-        scope: '__p13fixture__'
+        scope: '${workerScope}'
+        ${withAgentProviders ? "agentNodeId: 'p13-fixture-node'" : ''}
         sliceCoderSlots: 1
         sliceTesterSlots: 1
         perGoalSliceCap: 1

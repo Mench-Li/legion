@@ -15,7 +15,6 @@ const MODULES: ModuleDef[] = [
   { id: 'agents', name: '智能体', icon: '🤖' },
   { id: 'files', name: '文件中心', icon: '📁' },
   { id: 'skills', name: '技能中心', icon: '🧩' },
-  { id: 'packs', name: '流程包', icon: '📦' },
   { id: 'rules', name: '规范', icon: '📜' },
   { id: 'browser', name: '浏览器助手', icon: '🌐' },
   { id: 'chat', name: '对话中心', icon: '💬' },
@@ -74,7 +73,7 @@ export function Sidebar({ board, active, scope, hubMode, spaces, onNavigate, onS
 
   const clickModule = (mod: ModuleDef): void => {
     // 面板化模块：任务中心（融合 Scrum 看板 + 总指挥部）与各中心面板（S2/S5/S6/S7 先例）
-    if (mod.id === 'tasks' || mod.id === 'home' || mod.id === 'agents' || mod.id === 'skills' || mod.id === 'packs' || mod.id === 'rules' || mod.id === 'chat' || mod.id === 'files' || mod.id === 'browser' || mod.id === 'calendar' || mod.id === 'notify' || mod.id === 'snapshots') {
+    if (mod.id === 'tasks' || mod.id === 'home' || mod.id === 'agents' || mod.id === 'skills' || mod.id === 'rules' || mod.id === 'chat' || mod.id === 'files' || mod.id === 'browser' || mod.id === 'calendar' || mod.id === 'notify' || mod.id === 'snapshots') {
       onNavigate(mod.id)
       return
     }

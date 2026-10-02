@@ -90,6 +90,11 @@ export function createSpaceOperationsRoutes({
             skillSources: countOf('SELECT COUNT(*) AS c FROM skill_sources WHERE scope = ?'),
             spaceStages: countOf('SELECT COUNT(*) AS c FROM space_stages WHERE scope = ?'),
             spaceRuntime: countOf('SELECT COUNT(*) AS c FROM space_runtime WHERE scope = ?'),
+            agentWorkflowInstances: countOf('SELECT COUNT(*) AS c FROM agent_workflow_instances WHERE scope = ?'),
+            agentWorkflowStageAttempts: countOf('SELECT COUNT(*) AS c FROM agent_workflow_stage_attempts WHERE scope = ?'),
+            agentWorkflowReviews: countOf(`SELECT COUNT(*) AS c FROM agent_workflow_reviews WHERE workflow_instance_id IN
+              (SELECT id FROM agent_workflow_instances WHERE scope = ?)`),
+            agentWorkflowDefinitions: countOf('SELECT COUNT(*) AS c FROM agent_workflow_definitions WHERE scope = ?'),
           }
           const running = db.prepare("SELECT id, title, status FROM tasks WHERE scope = ? AND status IN ('in_progress','in_review','blocked') ORDER BY id").all(id)
           json(res, 200, { id, counts, running: { tasks: running } })
@@ -230,6 +235,11 @@ export function createSpaceOperationsRoutes({
                ['skillSources', 'DELETE FROM skill_sources WHERE scope = ?'],
                ['spaceStages', 'DELETE FROM space_stages WHERE scope = ?'],
                ['spaceRuntime', 'DELETE FROM space_runtime WHERE scope = ?'],
+               ['agentWorkflowStageAttempts', 'DELETE FROM agent_workflow_stage_attempts WHERE scope = ?'],
+               ['agentWorkflowReviews', `DELETE FROM agent_workflow_reviews WHERE workflow_instance_id IN
+                 (SELECT id FROM agent_workflow_instances WHERE scope = ?)`],
+               ['agentWorkflowInstances', 'DELETE FROM agent_workflow_instances WHERE scope = ?'],
+               ['agentWorkflowDefinitions', 'DELETE FROM agent_workflow_definitions WHERE scope = ?'],
              ]) counts[key] = db.prepare(sql).run(id).changes
              db.prepare('DELETE FROM spaces WHERE id = ?').run(id)
              return counts

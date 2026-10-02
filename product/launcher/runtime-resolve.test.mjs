@@ -101,16 +101,6 @@ function fixture(tag, { withPatchLayer = true } = {}) {
   return { root, dataDir, installDir, dshHome, operatorHome, shippedPresetRoot }
 }
 
-test('desktop Node boot flag precedes the DSH entry and never becomes an app argument', () => {
-  const f = fixture('desktop-node-flag')
-  installOnce(f)
-  const result = resolveRuntimeForLaunch({ dataDir: f.dataDir, profile: 'web', nodeArgs: ['--expose-internals'] })
-  assert.equal(result.resolution.ok, true)
-  assert.equal(result.command.args[0], '--expose-internals')
-  assert.match(result.command.args[1], /bin\.js$/)
-  assert.deepEqual(result.command.args.slice(2), ['--profile', 'web'])
-})
-
 /** 假命令运行器：只把请求的那一版写进 `node_modules/<包>/{package.json,lib/bin.js}`。 */
 function fakeRunner(version = DSH_VERSION) {
   const calls = []
@@ -174,7 +164,7 @@ function liveFakeChild(pid = 1) {
   c.exitCode = null
   c.signalCode = null
   c.killed = false
-  c.kill = () => { c.killed = true; c.exitCode = 0; c.emit('exit', 0, null); return true }
+  c.kill = () => { c.killed = true; return true }
   return c
 }
 

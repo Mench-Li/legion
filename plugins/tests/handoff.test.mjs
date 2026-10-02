@@ -244,6 +244,43 @@ test('★ 对照：同样是 test-designer，但描述**不带** [slice-mode] �
   assert.equal(hubCalls(h)[0][2].role, 'coder')
 })
 
+test('named workflow DAG uses its pre-created blockedBy graph instead of legacy role-order successor creation', async () => {
+  const h = harness()
+  await h.handoff.advancePipeline(task({
+    id: 'workflow-design', role: 'designer', goalId: 'G-workflow',
+    agentSelectionSnapshot: {
+      source: 'goal-agent-workflow',
+      workflowDefinitionSnapshot: { id: 'custom-parallel-review', version: 3 },
+      reviewWorkflow: { designRole: 'designer', implementationRole: 'coder', reviewRole: 'reviewer', maxReworkRounds: 2 },
+    },
+  }))
+  assert.deepEqual(h.calls, [], 'named workflow stages are already materialized; no role-order fallback may create an extra task')
+})
+
+test('冻结的 Agent 工作流按自己的阶段顺序推进，不读取空间流水线 next', async () => {
+  const reviewWorkflow = {
+    instanceId: 'G-agent-flow', designRole: 'designer', implementationRole: 'coder', reviewRole: 'reviewer',
+    maxReworkRounds: 2, pipelineVersion: 'frozen-v1',
+    stageLabels: { designer: '方案设计', coder: '实现与测试', reviewer: 'Codex 审查' }, stageTools: {},
+  }
+  const h = harness({
+    // 普通空间流水线把 designer 指向 analyst；Agent 工作流应仍转给 coder。
+    stageByRole: new Map([
+      STAGE('designer', '方案设计', 'analyst'), STAGE('analyst', '分析', 'coder'),
+      STAGE('coder', '实现与测试', 'reviewer'), STAGE('reviewer', '审查', null),
+    ].map(s => [s.role, s])),
+    goals: new Map([['G-agent-flow', { id: 'G-agent-flow', status: 'active' }]]),
+    tasks: [],
+  })
+  await h.handoff.advancePipeline(task({
+    id: 'G-agent-flow-design', role: 'designer', goalId: 'G-agent-flow',
+    agentSelectionSnapshot: { reviewWorkflow },
+  }))
+  assert.equal(hubCalls(h).length, 1)
+  assert.equal(hubCalls(h)[0][2].role, 'coder')
+  assert.match(hubCalls(h)[0][2].description, /方案设计.*已完成/)
+})
+
 test('未知角色（stageByRole 里没有）→ 不建', async () => {
   const h = harness()
   await h.handoff.advancePipeline(task({ role: 'nobody' }))

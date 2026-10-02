@@ -10,7 +10,6 @@ export const SCHEMA = defineSchema({
   title: '军团指挥台（workbench 宿主：静态托管 + /hub 代理 + 文件/浏览器 API）',
   prefixes: ['DSH_WORKBENCH_', 'DSH_WEB_', 'DSH_HUB_'],
   fields: [
-    { key: 'desktopMode', env: 'LEGION_DESKTOP_MODE', type: 'bool', default: false, doc: '桌面模式：敏感读写及代理入口强制鉴权' },
     // ── 监听与鉴权（P3-2 统一项）──
     // 0 合法（Node listen(0) = OS 分配空闲端口）；契约测试有用 `?root=` + 导入式用法，勿收紧为 >= 1
     { key: 'port', env: 'DSH_WORKBENCH_PORT', cli: 'port', type: 'int', default: 5173, min: 0, max: 65535, doc: '监听端口（生产实例默认 5173；0 = 由 OS 分配）' },
@@ -46,7 +45,6 @@ export const SCHEMA = defineSchema({
     { file: 'workbench/scripts/serve.mjs', expr: 'process.env[env[name]]', reason: '配置读取辅助按映射表取 env；键名集合已在上方声明' },
   ],
   nonEnvLiterals: [
-    'DESKTOP_AUTH_REQUIRED', // Desktop startup refusal, not an environment variable.
     'DELETE', 'OPTIONS', 'PATCH', 'ENOENT', 'ENOTDIR', 'INCOMPLETE', 'OFFSET_MISMATCH', 'SIGINT', 'SIGTERM',
     // PRT-507 模型设置页（workbench/src/modelSettings.ts）。这两个是**探测判定的码**，
     // 由 hub 的运行时契约（runtime/contracts/model-probe.mjs 的 PROBE_VERDICT_CODES）产生，

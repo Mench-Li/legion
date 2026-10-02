@@ -16,6 +16,21 @@
 // ============================================================================
 
 import { createHarnessRouter } from '../runtime/contracts/harness-routing.mjs'
+import { createAgentWorkflowDefinition } from '../runtime/contracts/agent-workflow-definition.mjs'
+import { expectedExternalPermissionMode } from '../runtime/contracts/agent-provider-policy.mjs'
+
+function agentToolConfigFromRow(row) {
+  return {
+    id: row.id,
+    version: row.version,
+    providerName: row.provider_name,
+    adapter: row.adapter,
+    permissionProfile: row.permission_profile,
+    workspacePolicy: row.workspace_policy,
+    capabilities: JSON.parse(row.capabilities_json),
+    enabled: row.enabled === 1,
+  }
+}
 
 /** 产品默认：不指定时用它。这个名字是**产品事实**，不是配置项。 */
 export const DEFAULT_HARNESS_NAME = 'deepseek-harness'
@@ -41,6 +56,49 @@ export function createHarnessStore({ db } = {}) {
     ' id INTEGER PRIMARY KEY AUTOINCREMENT, task_type TEXT, requested TEXT, suggested TEXT,' +
     ' provider TEXT, source TEXT NOT NULL, accepted INTEGER NOT NULL, at_ms INTEGER NOT NULL)')
 
+  // Agent 工具配置按 (id, version) 不可变保存；密钥与用户登录状态不进入此表。
+  db.exec(`CREATE TABLE IF NOT EXISTS agent_tool_configs (
+      id TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      provider_name TEXT NOT NULL,
+      adapter TEXT NOT NULL,
+      permission_profile TEXT NOT NULL,
+      workspace_policy TEXT NOT NULL,
+      capabilities_json TEXT NOT NULL,
+      enabled INTEGER NOT NULL,
+      created_at_ms INTEGER NOT NULL,
+      PRIMARY KEY (id, version))`)
+
+  // Execution nodes are DSH worker locations, separate from the Agent product
+  // and model configured for a stage. Presence is ephemeral; the node record
+  // contains no credentials or user session data.
+  db.exec(`CREATE TABLE IF NOT EXISTS agent_node_configs (
+      id TEXT PRIMARY KEY,
+      version INTEGER NOT NULL,
+      label TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      provider_names_json TEXT NOT NULL,
+      capabilities_json TEXT NOT NULL,
+      enabled INTEGER NOT NULL,
+      updated_at_ms INTEGER NOT NULL)`)
+  db.exec(`CREATE TABLE IF NOT EXISTS agent_node_presence (
+      node_id TEXT PRIMARY KEY,
+      config_version INTEGER NOT NULL,
+      scope TEXT NOT NULL,
+      providers_json TEXT NOT NULL,
+      capabilities_json TEXT NOT NULL,
+      last_seen_at_ms INTEGER NOT NULL)`)
+
+  // Reusable workflow definitions are versioned independently from the
+  // mutable space_stages pipeline. Runs will snapshot one exact definition.
+  db.exec(`CREATE TABLE IF NOT EXISTS agent_workflow_definitions (
+      scope TEXT NOT NULL,
+      id TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      definition_json TEXT NOT NULL,
+      created_at_ms INTEGER NOT NULL,
+      PRIMARY KEY (scope, id, version))`)
+
   db.exec('CREATE TABLE IF NOT EXISTS harness_decisions (' +
     ' id INTEGER PRIMARY KEY AUTOINCREMENT, task_type TEXT, requested TEXT, suggested TEXT,' +
     ' provider TEXT, source TEXT NOT NULL, accepted INTEGER NOT NULL, at_ms INTEGER NOT NULL)')
@@ -52,6 +110,62 @@ export function createHarnessStore({ db } = {}) {
   const parseArr = (s, what) => {
     try { const v = JSON.parse(s); if (!Array.isArray(v)) throw new Error('不是数组'); return v }
     catch (e) { throw new Error(what + ' 不是合法 JSON 数组：' + e.message) }
+  }
+  const parseCapabilities = (value) => {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('capabilities 必须是对象')
+    const allowed = ['textInput', 'textOutput', 'outputSchema', 'toolFilter', 'localAgent', 'sessionResume', 'cancellation']
+    const out = {}
+    for (const [key, flag] of Object.entries(value)) {
+      if (!allowed.includes(key) || typeof flag !== 'boolean') throw new Error(`capabilities.${key} 必须是受支持的布尔能力`)
+      out[key] = flag
+    }
+    for (const key of allowed) if (typeof out[key] !== 'boolean') throw new Error(`capabilities.${key} 必须明确声明`)
+    if (out.textInput !== true || out.textOutput !== true) throw new Error('Agent 工具配置必须支持文本输入与输出')
+    return out
+  }
+  const parseNodeCapabilities = (value) => {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('node capabilities 必须是对象')
+    const allowed = ['isolatedWorktree', 'externalAgent', 'structuredOutput', 'toolFilter', 'cancellation']
+    const out = {}
+    for (const [key, flag] of Object.entries(value)) {
+      if (key === 'providers') {
+        if (flag === null || typeof flag !== 'object' || Array.isArray(flag)) throw new Error('node capabilities.providers 必须是对象')
+        const providers = {}
+        for (const [name, caps] of Object.entries(flag)) {
+          if (name.trim() === '' || caps === null || typeof caps !== 'object' || Array.isArray(caps)
+            || Object.entries(caps).some(([capability, enabled]) => capability === 'permissionMode'
+              ? (typeof enabled !== 'string' || enabled.trim() === '')
+              : capability === 'systemProxyMode'
+                ? !['inherit', 'system'].includes(enabled)
+                : (!['outputSchema', 'toolFilter', 'cancellation'].includes(capability) || typeof enabled !== 'boolean'))) {
+            throw new Error(`node capabilities.providers.${name} 格式无效`)
+          }
+          providers[name] = { ...caps }
+        }
+        out.providers = providers
+        continue
+      }
+      if (!allowed.includes(key) || typeof flag !== 'boolean') throw new Error(`node capabilities.${key} 必须是受支持的布尔能力`)
+      out[key] = flag
+    }
+    for (const key of allowed) if (typeof out[key] !== 'boolean') throw new Error(`node capabilities.${key} 必须明确声明`)
+    return out
+  }
+  const nodeConfigFromRow = (row) => ({
+    id: row.id, version: row.version, label: row.label, scope: row.scope,
+    providerNames: JSON.parse(row.provider_names_json), capabilities: JSON.parse(row.capabilities_json),
+    enabled: row.enabled === 1, updatedAtMs: row.updated_at_ms,
+  })
+  const nodePresence = (node, nowMs = Date.now()) => {
+    const row = db.prepare('SELECT * FROM agent_node_presence WHERE node_id=?').get(node.id)
+    if (row === undefined) return { status: 'unknown', lastSeenAtMs: null, observedProviders: [], observedCapabilities: null }
+    const fresh = row.config_version === node.version && row.scope === node.scope && nowMs - row.last_seen_at_ms <= 60_000
+    const observedProviders = JSON.parse(row.providers_json)
+    const observedCapabilities = JSON.parse(row.capabilities_json)
+    const providersReady = node.providerNames.every((name) => observedProviders.includes(name))
+    const capabilitiesReady = Object.entries(node.capabilities).every(([key, required]) => required !== true || observedCapabilities[key] === true)
+    const status = !node.enabled ? 'disabled' : !fresh ? 'offline' : providersReady && capabilitiesReady ? 'ready' : 'incompatible'
+    return { status, lastSeenAtMs: row.last_seen_at_ms, observedProviders, observedCapabilities }
   }
 
   // ★ 默认 provider 的底行：不存在则补上，且**不由外部写入覆盖**（名字固定）。
@@ -154,6 +268,145 @@ export function createHarnessStore({ db } = {}) {
 
     countDecisions() {
       return Number(db.prepare('SELECT COUNT(*) AS n FROM harness_decisions').get()?.n ?? 0)
+    },
+
+    /** 写入不可变 Agent 工具配置版本；相同内容可幂等重放，冲突必须递增版本。 */
+    putAgentToolConfig({ id, version, providerName, adapter = 'dsh-subagent', permissionProfile, workspacePolicy, capabilities, enabled = true, nowMs = Date.now() } = {}) {
+      const configId = need(id, 'id')
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(configId)) throw new Error('id 格式无效')
+      if (!Number.isSafeInteger(version) || version < 1) throw new Error('version 必须为正整数')
+      const provider = need(providerName, 'providerName')
+      if (!['dsh-subagent', 'dsh-native'].includes(adapter)) throw new Error('adapter 不受支持')
+      const permission = need(permissionProfile, 'permissionProfile')
+      if (adapter === 'dsh-subagent' && expectedExternalPermissionMode({ adapter, providerName: provider, permissionProfile: permission }) === null) {
+        throw new Error(`DSH 外部 provider ${provider} 的 permissionProfile 未映射到受支持的原生权限模式`)
+      }
+      const workspace = need(workspacePolicy, 'workspacePolicy')
+      const caps = parseCapabilities(capabilities)
+      const value = { id: configId, version, providerName: provider, adapter, permissionProfile: permission,
+        workspacePolicy: workspace, capabilities: caps, enabled: enabled !== false }
+      const existing = db.prepare('SELECT * FROM agent_tool_configs WHERE id = ? AND version = ?').get(configId, version)
+      if (existing !== undefined) {
+        const current = agentToolConfigFromRow(existing)
+        if (JSON.stringify(current) !== JSON.stringify(value)) throw new Error('Agent 工具配置版本不可变；请递增 version')
+        return { ...current, createdAtMs: existing.created_at_ms, idempotent: true }
+      }
+      db.prepare(`INSERT INTO agent_tool_configs
+        (id, version, provider_name, adapter, permission_profile, workspace_policy, capabilities_json, enabled, created_at_ms)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(configId, version, provider, adapter, permission, workspace, JSON.stringify(caps), value.enabled ? 1 : 0, nowMs)
+      return { ...value, createdAtMs: nowMs, idempotent: false }
+    },
+
+    getAgentToolConfig({ id, version, includeDisabled = false } = {}) {
+      const row = db.prepare(`SELECT * FROM agent_tool_configs WHERE id = ? AND version = ?${includeDisabled ? '' : ' AND enabled = 1'}`).get(id, version)
+      return row === undefined ? null : { ...agentToolConfigFromRow(row), createdAtMs: row.created_at_ms }
+    },
+
+    listAgentToolConfigs({ includeDisabled = true } = {}) {
+      const rows = db.prepare(`SELECT * FROM agent_tool_configs${includeDisabled ? '' : ' WHERE enabled = 1'} ORDER BY id, version`).all()
+      return rows.map((row) => ({ ...agentToolConfigFromRow(row), createdAtMs: row.created_at_ms }))
+    },
+
+    /** Save a DSH execution node. Node IDs are stable; config updates advance a version. */
+    putAgentNodeConfig({ id, label, scope, providerNames, capabilities, enabled = true, nowMs = Date.now() } = {}) {
+      const nodeId = need(id, 'id')
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(nodeId)) throw new Error('node id 格式无效')
+      const nodeLabel = need(label, 'label')
+      const nodeScope = need(scope, 'scope')
+      if (!/^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$/.test(nodeScope)) throw new Error('node scope 格式无效')
+      const declaredProviders = providerNames ?? []
+      if (!Array.isArray(declaredProviders)
+        || declaredProviders.some((name) => typeof name !== 'string' || name.trim() === '')
+        || new Set(declaredProviders.map((name) => name.trim())).size !== declaredProviders.length) {
+        throw new Error('providerNames 必须是无重复的名称数组')
+      }
+      const providers = declaredProviders.map((name) => need(name, 'providerNames[]'))
+      const caps = parseNodeCapabilities(capabilities ?? {
+        isolatedWorktree: false, externalAgent: false, structuredOutput: false, toolFilter: false, cancellation: false,
+      })
+      const prior = db.prepare('SELECT * FROM agent_node_configs WHERE id=?').get(nodeId)
+      const version = prior === undefined ? 1 : prior.version + 1
+      db.prepare(`INSERT INTO agent_node_configs
+        (id, version, label, scope, provider_names_json, capabilities_json, enabled, updated_at_ms)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET version=excluded.version, label=excluded.label, scope=excluded.scope,
+          provider_names_json=excluded.provider_names_json, capabilities_json=excluded.capabilities_json,
+          enabled=excluded.enabled, updated_at_ms=excluded.updated_at_ms`)
+        .run(nodeId, version, nodeLabel, nodeScope, JSON.stringify(providers), JSON.stringify(caps), enabled === false ? 0 : 1, nowMs)
+      return { ...nodeConfigFromRow(db.prepare('SELECT * FROM agent_node_configs WHERE id=?').get(nodeId)), status: 'unknown' }
+    },
+
+    getAgentNodeConfig({ id, version = null, scope = null, includeDisabled = false } = {}) {
+      const row = db.prepare(`SELECT * FROM agent_node_configs WHERE id=?${version === null ? '' : ' AND version=?'}${scope === null ? '' : ' AND scope=?'}${includeDisabled ? '' : ' AND enabled=1'}`)
+        .get(...[id, ...(version === null ? [] : [version]), ...(scope === null ? [] : [scope])])
+      return row === undefined ? null : nodeConfigFromRow(row)
+    },
+
+    listAgentNodeConfigs({ scope = null, includeDisabled = false, nowMs = Date.now() } = {}) {
+      const rows = db.prepare(`SELECT * FROM agent_node_configs${scope === null ? '' : ' WHERE scope=?'}${includeDisabled ? '' : (scope === null ? ' WHERE' : ' AND') + ' enabled=1'} ORDER BY scope, label, id`)
+        .all(...(scope === null ? [] : [scope]))
+      return rows.map((row) => {
+        const config = nodeConfigFromRow(row)
+        return { ...config, ...nodePresence(config, nowMs) }
+      })
+    },
+
+    heartbeatAgentNode({ id, version, scope, providerNames, capabilities, nowMs = Date.now() } = {}) {
+      const node = this.getAgentNodeConfig({ id, version, scope })
+      if (node === null) throw new Error('节点配置不存在、版本不匹配、空间不匹配或已停用')
+      if (!Array.isArray(providerNames) || providerNames.some((name) => typeof name !== 'string' || name.trim() === '')) throw new Error('observed providerNames 必须是字符串数组')
+      const providers = [...new Set(providerNames.map((name) => name.trim()))]
+      const caps = parseNodeCapabilities(capabilities)
+      db.prepare(`INSERT INTO agent_node_presence (node_id, config_version, scope, providers_json, capabilities_json, last_seen_at_ms)
+        VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(node_id) DO UPDATE SET config_version=excluded.config_version,
+        scope=excluded.scope, providers_json=excluded.providers_json, capabilities_json=excluded.capabilities_json,
+        last_seen_at_ms=excluded.last_seen_at_ms`)
+        .run(node.id, node.version, node.scope, JSON.stringify(providers), JSON.stringify(caps), nowMs)
+      return this.listAgentNodeConfigs({ scope: node.scope, nowMs }).find((item) => item.id === node.id)
+    },
+
+    /**
+     * Save an immutable named workflow version, separate from space pipeline
+     * settings. Tool references must resolve to enabled immutable configs.
+     */
+    putAgentWorkflowDefinition({ scope, definition, nowMs = Date.now() } = {}) {
+      const workflowScope = need(scope, 'scope')
+      if (!/^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$/.test(workflowScope)) throw new Error('workflow scope 格式无效')
+      const normalized = createAgentWorkflowDefinition(definition ?? {})
+      const serialized = JSON.stringify(normalized)
+      const existing = db.prepare('SELECT definition_json, created_at_ms FROM agent_workflow_definitions WHERE scope=? AND id=? AND version=?')
+        .get(workflowScope, normalized.id, normalized.version)
+      if (existing !== undefined) {
+        if (existing.definition_json !== serialized) throw new Error('工作流定义版本不可变；请递增 version')
+        return { ...normalized, scope: workflowScope, createdAtMs: existing.created_at_ms, idempotent: true }
+      }
+      for (const stage of normalized.stages) {
+        const tool = db.prepare('SELECT enabled FROM agent_tool_configs WHERE id=? AND version=?').get(stage.agentToolConfig.id, stage.agentToolConfig.version)
+        if (tool === undefined || tool.enabled !== 1) {
+          throw new Error(`工作流阶段 ${stage.id} 引用的 Agent 工具配置不存在或已停用：${stage.agentToolConfig.id}@${stage.agentToolConfig.version}`)
+        }
+      }
+      db.prepare(`INSERT INTO agent_workflow_definitions (scope, id, version, definition_json, created_at_ms)
+        VALUES (?, ?, ?, ?, ?)`)
+        .run(workflowScope, normalized.id, normalized.version, serialized, nowMs)
+      return { ...normalized, scope: workflowScope, createdAtMs: nowMs, idempotent: false }
+    },
+
+    getAgentWorkflowDefinition({ scope, id, version } = {}) {
+      const workflowScope = need(scope, 'scope')
+      const workflowId = need(id, 'id')
+      if (!Number.isSafeInteger(version) || version < 1) throw new Error('version 必须为正整数')
+      const row = db.prepare('SELECT definition_json, created_at_ms FROM agent_workflow_definitions WHERE scope=? AND id=? AND version=?')
+        .get(workflowScope, workflowId, version)
+      return row === undefined ? null : { ...JSON.parse(row.definition_json), scope: workflowScope, createdAtMs: row.created_at_ms }
+    },
+
+    listAgentWorkflowDefinitions({ scope = null } = {}) {
+      const rows = db.prepare(`SELECT scope, definition_json, created_at_ms FROM agent_workflow_definitions
+        ${scope === null ? '' : 'WHERE scope=?'} ORDER BY scope, id, version`)
+        .all(...(scope === null ? [] : [scope]))
+      return rows.map((row) => ({ ...JSON.parse(row.definition_json), scope: row.scope, createdAtMs: row.created_at_ms }))
     },
 
     /**

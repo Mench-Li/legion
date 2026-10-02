@@ -403,8 +403,7 @@ export function createHubSourceLoader({
   function toFeedback(body) {
     const raw = Array.isArray(body?.feedback) ? body.feedback : []
     return raw.map((c) => ({
-      id: typeof c?.id === 'string' && /^feedback-[0-9a-f-]{36}$/.test(c.id)
-        ? c.id : commentIdOf({ by: c?.by, at: c?.at, text: c?.text }),
+      id: commentIdOf({ by: c?.by, at: c?.at, text: c?.text }),
       author: c?.by ?? null,
       body: c?.text ?? '',
       createdAtMs: epochMsOf(c?.at),

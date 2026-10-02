@@ -223,7 +223,7 @@ export function runCredentialOverlayDocument({ targetFile } = {}) {
 }
 
 /**
- * 要追加到 DSH launcher 参数段的 `--patch` 参数；调用方负责放在 app flags 之前。
+ * 要追加到 runtime 命令之后的 `--patch` 参数。
  *
  * `[]` 时**不追加**：一个把 `--patch` 指向不存在文件的接线，会让 DSH 起不来，
  * 而那条失败看起来像"运行时装坏了"。

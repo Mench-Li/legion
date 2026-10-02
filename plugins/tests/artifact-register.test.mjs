@@ -3,6 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createHash } from 'node:crypto'
 import test from 'node:test'
 
 import { apply } from '../lib/index.js'
@@ -344,7 +345,8 @@ test('worker 自填 artifact 的绝对 worktree 路径登记为仓库相对路�
     sweep(harness)
     await waitFor(() => requests.some(r => r.startsWith('artifact:docs/x.md:file:')), '绝对 worktree 路径应规整为仓库相对路径')
     const reg = requests.find(r => r.startsWith('artifact:'))
-    assert.match(reg, /^artifact:docs\/x\.md:file:$/, `应登记仓库相对路径（剥掉 worktree 前缀）：${reg}`)
+    assert.match(reg, /^artifact:docs\/x\.md:file:[0-9a-f]{64}$/, `应登记仓库相对路径及 SHA-256：${reg}`)
+    assert.equal(reg, `artifact:docs/x.md:file:${createHash('sha256').update('# x\n').digest('hex')}`, '摘要应对应工作区文件的真实字节')
     assert.ok(!reg.includes('.legion-worktrees'), '不得登记含 worktree 分支态目录的绝对路径')
   } finally {
     for (const d of harness.disposers) await d()

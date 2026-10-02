@@ -207,17 +207,6 @@ test('② 默认用的是**共享模式表**（不是自己写一份会漂移的
     '默认脱敏没有认出共享表里的两种形态')
 })
 
-test('② DSH 启动 URL 的 token 经分块 stdout 后也不会落盘', () => {
-  const fs = fakeFs()
-  const sink = createLogSink({ logDir: D, fs })
-  sink.write('runtime.stdout', 'dsh web: http://127.0.0.1:3080/?to')
-  sink.write('runtime.stdout', 'ken=private-startup-token&mode=desktop\n')
-  const body = contentOf(fs, 'runtime.stdout.log')
-  assert.ok(body.includes('dsh web: http://127.0.0.1:3080/?token=[REDACTED]&mode=desktop'))
-  assert.ok(!body.includes('private-startup-token'), 'DSH 浏览器令牌被写入日志')
-  assert.equal(sink.stats().redactionHits, 1)
-})
-
 test('② `redact: false` 是**显式**的（默认一定脱敏）', () => {
   const fsDefault = fakeFs()
   createLogSink({ logDir: D, fs: fsDefault }).write('stdout', `${SECRET}\n`)

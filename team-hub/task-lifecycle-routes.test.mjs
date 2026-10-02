@@ -203,7 +203,7 @@ test('⑤e ★★★ claim 的审计：action=`claim`、detail 里带 soldier、
   const a = lastAudit()
   assert.equal(a.action, 'claim', '★ 动作名改了的话，按动作查账的地方就断了')
   assert.equal(a.taskId, 'cl-3')
-  assert.deepEqual(JSON.parse(a.detail), { soldier: 's-9' })
+  assert.deepEqual(JSON.parse(a.detail), { soldier: 's-9', agentNodeId: null })
   assert.equal(a.goalId, 'goal-x', '★★ 不记 goalId 的话，这条账**挂不到目标上**')
 })
 
@@ -339,7 +339,7 @@ test('⑩b ★★ release-stale：`ids` 非数组 ⇒ 当作没给；审计 scop
   //   > 在我没有把 audit 的形参表对着念一遍的时候是同一个东西。
   assert.equal(a.taskId, '*', '★★ 跨空间的批量动作：任务是 `*`（这条动作不属于任何一个任务）')
   assert.equal(a.scope, 'default', '★ scope 是写路径解析出来的（没给就 default）')
-  assert.deepEqual(Object.keys(JSON.parse(a.detail)), ['released'])
+  assert.deepEqual(Object.keys(JSON.parse(a.detail)), ['released', 'quarantined'])
 })
 
 // ── 11. /api/inbox（此前 0 个判据）──────────────────────────────────────

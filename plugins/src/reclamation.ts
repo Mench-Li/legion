@@ -127,26 +127,36 @@ export interface Reclamation {
 export function createReclamation(deps: ReclamationDeps): Reclamation {
   const { config, log, scope, useHub, isPipeline, hubPost, runTaskctl, activity, mediating, boot } = deps
 
-  // 0. 认领租约回收：释放超过 staleMinutes 无进展（距最近 progress 起算）或过 TTL 的 in_progress 任务。
+  // 0. 认领租约回收：普通任务超时后释放；工作流阶段结果未知时由 Hub 隔离，不自动重派。
   //    hub 模式走 hub 的 /api/release-stale（守护不直连本地库，多存储部署下避免误碰其他任务池）；本地模式带 --scope 限定本守护 scope。
   async function reclaimStaleLeases(byId: Map<string, Task>): Promise<void> {
     try {
+      if (!useHub() && [...byId.values()].some(t => t.status === 'in_progress' && t.agentSelectionSnapshot?.reviewWorkflow)) {
+        // Local taskctl has only a bulk release command and cannot exclude workflow stages.
+        // Fail closed rather than risk reissuing an external Agent task with an unknown result.
+        log('本地 stale 回收跳过：当前有在办工作流任务，taskctl 尚不支持按任务排除；避免重复派发')
+        return
+      }
       const res = useHub()
-        ? await hubPost('/api/release-stale', { by: config.role, scope, olderThan: config.staleMinutes }) as { released?: string[] }
-        : await runTaskctl(config.scrumDir, ['release-stale', '--older-than', String(config.staleMinutes), '--by', config.role, '--scope', scope]) as { released?: string[] }
+        ? await hubPost('/api/release-stale', { by: config.role, scope, olderThan: config.staleMinutes }) as { released?: string[]; quarantined?: string[] }
+        : await runTaskctl(config.scrumDir, ['release-stale', '--older-than', String(config.staleMinutes), '--by', config.role, '--scope', scope]) as { released?: string[]; quarantined?: string[] }
       for (const id of res.released ?? []) {
         activity('released', id, `距最近进展超过 ${config.staleMinutes} 分钟或过 TTL，自动释放回 todo`)
         const t = byId.get(id)
         if (t) { t.status = 'todo'; t.soldier = null; t.claimedAt = null }
+      }
+      for (const id of res.quarantined ?? []) {
+        activity('gate', id, '工作流阶段结果未知，已隔离等待人工核对；不会自动重派')
+        const t = byId.get(id)
+        if (t) { t.status = 'in_review'; t.hold = true; t.soldier = null; t.claimedAt = null }
       }
     } catch (e) {
       log(`release-stale 失败：${String(e)}`)
     }
   }
 
-  // 0.5 守护重启孤儿回收（仅进程启动后第一轮）：重启前进程的 worker 已随进程消失，
-  //     其任务停在 in_progress 且通常无「未完成」评论——若只靠 stale 释放要等 staleMinutes（如 100 分钟）。
-  //     立即把「本守护名下、未拦截」的 in_progress 释放回 todo，下轮自动重新认领续做（复用 w/<id> WIP）。
+  // 0.5 守护重启孤儿回收（仅进程启动后第一轮）：重启前进程的 worker 已随进程消失。
+  //     普通任务立即释放回 todo；带 workflow 快照的任务交给 Hub 隔离，避免重复执行外部副作用。
   //
   //     闸门语义（见文件头）：`boot.done` 在**动手之前**置位，故即使下面的释放调用抛错，
   //     本轮也算「做过了」——与原来闭包里 `bootReconciled = true` 的位置逐字一致。
@@ -160,10 +170,17 @@ export function createReclamation(deps: ReclamationDeps): Reclamation {
       .filter(t => t.status === 'in_progress' && claimedByUs(t) && !t.hold && !mediating.has(t.id))
       .map(t => t.id)
     if (orphans.length > 0) {
+      const hasWorkflowOrphan = tasks.some(t => orphans.includes(t.id) && t.agentSelectionSnapshot?.reviewWorkflow)
+      if (!useHub() && hasWorkflowOrphan) {
+        // Local taskctl cannot express an id-scoped orphan release. Do not run its
+        // bulk release while a workflow orphan is present; human reconciliation is safer.
+        log('本地重启孤儿回收跳过：包含工作流阶段且 taskctl 不支持按任务隔离；避免重复派发')
+        return
+      }
       try {
         const res = useHub()
-          ? await hubPost('/api/release-stale', { by: config.role, scope, olderThan: config.staleMinutes, ids: orphans }) as { released?: string[] }
-          : await runTaskctl(config.scrumDir, ['release-stale', '--older-than', '0', '--by', config.role, '--scope', scope]) as { released?: string[] }
+          ? await hubPost('/api/release-stale', { by: config.role, scope, olderThan: config.staleMinutes, ids: orphans }) as { released?: string[]; quarantined?: string[] }
+          : await runTaskctl(config.scrumDir, ['release-stale', '--older-than', '0', '--by', config.role, '--scope', scope]) as { released?: string[]; quarantined?: string[] }
         for (const id of res.released ?? []) {
           activity('released', id, '守护重启：孤儿 in_progress 释放回 todo，自动重新认领续做')
           log(`${id} 守护重启孤儿回收 → todo（下轮重新认领续做）`)
@@ -171,6 +188,12 @@ export function createReclamation(deps: ReclamationDeps): Reclamation {
           // abortDriven 重派会派「无主 worker」（workReturned 不 claim），占满 inflight 且任务仍是 todo。
           const t = byId.get(id)
           if (t) { t.status = 'todo'; t.soldier = null; t.claimedAt = null }
+        }
+        for (const id of res.quarantined ?? []) {
+          activity('gate', id, '守护重启：工作流阶段结果未知，已隔离等待人工核对；不会自动重派')
+          log(`${id} 守护重启孤儿回收 → in_review + hold（工作流未知结果，等待人工核对）`)
+          const t = byId.get(id)
+          if (t) { t.status = 'in_review'; t.hold = true; t.soldier = null; t.claimedAt = null }
         }
       } catch (e) {
         log(`守护重启孤儿回收失败：${String(e)}`)

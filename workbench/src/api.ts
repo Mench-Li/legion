@@ -857,6 +857,14 @@ export async function fetchChatMessages(conv: number, opts: { before?: number; l
   return resp.messages
 }
 
+export interface DshModelCatalog { default: { provider: string; model: string }; groups: { id: string; name: string; models: { id: string; name: string }[] }[]; failures?: { id: string; message: string }[] }
+export async function dshModelsRpc<T>(method: string, args: Record<string, unknown> = {}): Promise<T> {
+  const response = await fetch(`${apiBase()}/api/dsh-models`, { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json', ...authHeaders() }, body: JSON.stringify({ method, args }) })
+  const body = await response.json()
+  if (!response.ok || body.ok !== true) throw new Error(body.error ?? `DSH 接口返回 ${response.status}`)
+  return body.value as T
+}
+
 /** 服务端幂等绑定每空间每岗位的唯一主对话，不能按会话标题匹配。 */
 export function ensureAgentChatConversation(scope: string, agentRole: string): Promise<ChatConversation> {
   return hubPost('/api/chat/conversations', { scope, agentRole }).then(res => (res as { task: ChatConversation }).task)

@@ -37,6 +37,7 @@ import { fileURLToPath } from 'node:url'
 import { buildGithubTarballUrl, scanSkillDirs, sanitizeSkillId } from './skillImporter.mjs'
 import { loadConfig } from '../../packages/shared/src/config.mjs'
 import { SCHEMA as CONFIG_SCHEMA } from './config-schema.mjs'
+import { forwardDshModels } from './dsh-models-bridge.mjs'
 
 // ── P3-2 统一配置：核心项（host/port/token/静态根/hub 上游）经统一引擎解析 ──
 // 优先级 CLI > env > 默认；类型/范围校验；非法值报错退出（不静默回退）。其余 DSH_WEB_* 限值
@@ -2604,6 +2605,20 @@ function routeRequest(req, res) {
   let pathname
   try { pathname = decodeURIComponent(url.pathname) } catch { httpErr(res, 400, 'bad request：路径含畸形 percent-encoding，已拒绝'); return }
   if (pathname.includes('\0')) { httpErr(res, 400, 'bad request：路径含非法字符（NUL）'); return }
+  if (pathname === '/api/dsh-models') {
+    if (!isLoopback(req)) { httpErr(res, 403, '模型配置仅限本机访问'); return }
+    if (req.method !== 'POST') { httpErr(res, 405, 'method not allowed'); return }
+    void (async () => {
+      try {
+        requireWriteToken(req)
+        const body = await readBodyJson(req)
+        // Same-origin browser calls only. DSH owns its own session authentication.
+        if (req.headers.origin && new URL(req.headers.origin).host !== req.headers.host) { httpErr(res, 403, '模型配置请求来源无效'); return }
+        sendJson(res, 200, { ok: true, value: await forwardDshModels(body, { cookie: req.headers.cookie ?? '' }) })
+      } catch (e) { httpErr(res, e.status ?? (String(e.message).includes('token 无效') ? 401 : 400), e.message) }
+    })()
+    return
+  }
   // 同源 /hub/* 反向代理 → team-hub v2（规避浏览器跨域/CORS/localStorage 导致的中枢探测失败）
   if (pathname === '/hub' || pathname.startsWith('/hub/')) {
     const qs = url.search

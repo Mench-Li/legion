@@ -1,45 +1,14 @@
-// workbench/src/components/ModelConfigModal.tsx
-// ============================================================================
-// 模型设置页（PRT-507）——**界面入口**
-//
-// ## 这个文件此前是什么
-//
-// 它只有一个硬编码列表（`MODEL_OPTIONS`）+ 一个 per-agent 快捷选择框。
-// 而后端早就把六件事做完了：模型档案 CRUD、岗位绑定与 fallback、连通性探测、
-// 非敏感配置迁移、配置导入导出、**凭证管理的增删改轮换**——
-// `workbench/src/api.ts` 里连一个调用都没有。
-//
-//   > 功能在、测试在、文档在，**没有入口**。
-//   > 而"一个功能没有入口"与"这个功能不存在"，对用户来说是同一件事。
-//
-// 现在它是一组页签：
-//   ① 快速分配 —— **原有的** per-agent 角色→模型 快捷选择（未改动，不许回归）
-//   ② 模型档案 —— CRUD + 测试连接（`ModelProfilesPanel`）
-//   ③ 岗位绑定 —— `(scope, 岗位) → 主档案 + fallback`（`ModelBindingsPanel`）
-//   ④ 配置搬家 —— 迁移 + 导入导出（`ModelTransferPanel`）
-//   ⑤ 凭证库   —— 密钥库自检 + 增/轮换/删（`SecretVaultPanel`）
-//
-// ## 关于 `MODEL_OPTIONS`（它没有被删掉，理由要说清）
-//
-// 「快速分配」写的是**老的** `POST /api/models`（`{provider, model}` 对），
-// 而模型档案是 `{profileId}` 的世界。两者不是同一个东西：
-// `MODEL_OPTIONS` 是 DSH 部署的候选清单（来自 settings.yaml），
-// 在档案页那条线上**不构成**任何判据。所以它继续留在快捷选择里，
-// 而不是被替换成"档案列表"——换掉会把一个能用的下拉框换成一条不同的写路径，
-// 而那条路径上"角色 → 档案 id"的绑定由「岗位绑定」页负责。
-//
-// 每个面板的失败都**就地**渲染（具体到码/字段/下一步），不弹一句通用 toast：
-// 后端加了码、前端还是笼统提示，那条码就等于没加。
-// ============================================================================
-
+// DSH owns provider configuration and credentials; Legion owns per-space role assignments.
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { MODEL_OPTIONS, MODEL_TIER_TEXT, clearAgentModel, fetchAgentModels, saveAgentModel } from '../api'
+import { dshModelsRpc, clearAgentModel, fetchAgentModels, saveAgentModel } from '../api'
+import type { DshModelCatalog } from '../api'
 import type { AgentModelCfg, RosterAgent } from '../types'
 import { toast } from './Toast'
 import { ModelProfilesPanel } from './ModelProfilesPanel'
 import { ModelBindingsPanel } from './ModelBindingsPanel'
 import { ModelTransferPanel } from './ModelTransferPanel'
 import { SecretVaultPanel } from './SecretVaultPanel'
+import { DshProvidersPanel } from './DshProvidersPanel'
 
 interface ModelConfigModalProps {
   scope: string
@@ -48,11 +17,10 @@ interface ModelConfigModalProps {
   embedded?: boolean
 }
 
-const TIER_ORDER = ['light', 'balanced', 'heavy', 'vision'] as const
-
-type Tab = 'quick' | 'profiles' | 'bindings' | 'transfer' | 'secrets'
+type Tab = 'providers' | 'quick' | 'profiles' | 'bindings' | 'transfer' | 'secrets'
 
 const TABS: Array<{ id: Tab; label: string }> = [
+  { id: 'providers', label: '供应商与模型' },
   { id: 'quick', label: '⚡ 快速分配' },
   { id: 'profiles', label: '🗂 模型档案' },
   { id: 'bindings', label: '🔗 岗位绑定' },
@@ -70,6 +38,8 @@ function QuickAssignTab({ scope, roster }: { scope: string; roster: RosterAgent[
   const [busyRole, setBusyRole] = useState<string | null>(null)
   const [loadErr, setLoadErr] = useState<string | null>(null)
   const [loaded, setLoaded] = useState(false)
+  const [catalog, setCatalog] = useState<DshModelCatalog | null>(null)
+  const [catalogError, setCatalogError] = useState('')
 
   const load = useCallback(async (): Promise<void> => {
     try {
@@ -88,11 +58,12 @@ function QuickAssignTab({ scope, roster }: { scope: string; roster: RosterAgent[
 
   useEffect(() => {
     void load()
+    void dshModelsRpc<DshModelCatalog>('session/modelCatalog').then(value => { setCatalog(value); setCatalogError('') }).catch(e => setCatalogError(e instanceof Error ? e.message : String(e)))
   }, [load])
 
   const roles = useMemo(
-    () => (roster ?? []).map(a => ({ role: a.role, name: a.name, avatar: a.avatar })),
-    [roster],
+    () => (roster ?? []).filter(a => !a.external && a.scope === scope).map(a => ({ role: a.role, name: a.name, avatar: a.avatar })),
+    [roster, scope],
   )
 
   const apply = async (role: string, provider: string, model: string): Promise<void> => {
@@ -124,18 +95,12 @@ function QuickAssignTab({ scope, roster }: { scope: string; roster: RosterAgent[
     }
   }
 
-  const tiers = useMemo(() => {
-    const m: Record<string, { provider: string; model: string; name: string }[]> = { light: [], balanced: [], heavy: [], vision: [] }
-    for (const o of MODEL_OPTIONS) m[o.tier].push(o)
-    return m
-  }, [])
-
   const selected = (role: string): AgentModelCfg | undefined => cfgs[role]
 
   return (
     <>
       <div className="mc-tip">
-        💡 每个智能体(角色)默认用不同模型:日常/分析/写码用轻量模型省 token,复杂推理/旗舰任务用强模型。未配置的智能体走平台默认(<b>custom-ds / deepseek-v4-flash-openai</b>)。配置在 AI 执行该角色任务时生效。
+        为每个岗位选择 DSH 实际提供的模型。未单独配置的岗位使用平台默认{catalog ? `（${catalog.default.provider} / ${catalog.default.model}）` : '模型'}，下一次 AI 执行该岗位任务时生效。
       </div>
       {loadErr !== null && (
         <div className="set-notice bad">
@@ -144,11 +109,7 @@ function QuickAssignTab({ scope, roster }: { scope: string; roster: RosterAgent[
           <div className="set-notice-action">下一步：先确认中枢可达，再重新打开这个窗口；**不要**照着这份看不清的列表重配一遍。</div>
         </div>
       )}
-      <div className="mc-legend">
-        {TIER_ORDER.map(t => (
-          <span key={t} className="mc-tier-hint">{MODEL_TIER_TEXT[t]}</span>
-        ))}
-      </div>
+      {catalogError && <div className="set-notice warn">无法读取 DSH 实际模型目录：{catalogError} 已保存的岗位配置仍显示在下方；登录 DSH 后重新进入此页。</div>}
       {loaded && loadErr === null && roles.length === 0 && (
         <div style={{ color: 'var(--muted-2)', fontSize: 12, padding: '14px 0' }}>该空间暂无编队智能体(发布目标或先选具体工作空间)。</div>
       )}
@@ -166,23 +127,18 @@ function QuickAssignTab({ scope, roster }: { scope: string; roster: RosterAgent[
               </div>
               <div className="mc-pick">
                 <select
-                  value={cfg ? `${cfg.provider}/${cfg.model}` : ''}
-                  disabled={busyRole === role}
+                  aria-label={`${name}的模型`}
+                  value={cfg ? JSON.stringify([cfg.provider, cfg.model]) : ''}
+                  disabled={busyRole === role || !catalog}
                   onChange={e => {
-                    const [provider, model] = e.target.value.split('/', 2)
+                    if (!e.target.value) { void clearRole(role); return }
+                    const [provider, model] = JSON.parse(e.target.value) as [string, string]
                     if (provider && model) void apply(role, provider, model)
                   }}
                 >
                   <option value="">⚪ 默认(平台路由)</option>
-                  {TIER_ORDER.map(t => (
-                    <optgroup key={t} label={MODEL_TIER_TEXT[t]}>
-                      {tiers[t].map(o => (
-                        <option key={`${o.provider}/${o.model}`} value={`${o.provider}/${o.model}`}>
-                          {o.name}（{o.provider}）
-                        </option>
-                      ))}
-                    </optgroup>
-                  ))}
+                  {cfg && !catalog?.groups.some(g => g.id === cfg.provider && g.models.some(m => m.id === cfg.model)) && <option value={JSON.stringify([cfg.provider, cfg.model])}>{cfg.provider} / {cfg.model}（已保存 · 目录未确认）</option>}
+                  {catalog?.groups.map(group => <optgroup key={group.id} label={`${group.name}（${group.id}）`}>{group.models.map(model => <option key={model.id} value={JSON.stringify([group.id, model.id])}>{model.name || model.id}</option>)}</optgroup>)}
                 </select>
                 {cfg && (
                   <button className="btn ghost" style={{ padding: '1px 8px', fontSize: 11 }} onClick={() => void clearRole(role)} title="恢复平台默认">
@@ -199,7 +155,7 @@ function QuickAssignTab({ scope, roster }: { scope: string; roster: RosterAgent[
 }
 
 export function ModelConfigModal({ scope, roster, onClose, embedded = false }: ModelConfigModalProps): React.JSX.Element {
-  const [tab, setTab] = useState<Tab>('quick')
+  const [tab, setTab] = useState<Tab>('providers')
   const roles = useMemo(() => (roster ?? []).map(a => a.role), [roster])
 
   return (
@@ -207,7 +163,7 @@ export function ModelConfigModal({ scope, roster, onClose, embedded = false }: M
       <div className="modal model-config-modal" onClick={e => e.stopPropagation()}>
         <div className="modal-head">
           ⚙️ 模型与凭证设置
-          <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--muted-2)' }}>{scope}</span>
+          <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--muted-2)' }}>{scope || 'DSH 全局配置'}</span>
           {!embedded && <span className="x" onClick={onClose}>✕</span>}
         </div>
         <div className="set-tabs">
@@ -218,9 +174,10 @@ export function ModelConfigModal({ scope, roster, onClose, embedded = false }: M
           ))}
         </div>
         <div className="modal-body">
-          {tab === 'quick' && <QuickAssignTab scope={scope} roster={roster} />}
+          {tab === 'providers' && <DshProvidersPanel />}
+          {tab === 'quick' && (scope ? <QuickAssignTab scope={scope} roster={roster} /> : <div className="set-notice muted">请在左侧选择具体工作空间，再分配岗位模型。</div>)}
           {tab === 'profiles' && <ModelProfilesPanel />}
-          {tab === 'bindings' && <ModelBindingsPanel scope={scope} rosterRoles={roles} />}
+          {tab === 'bindings' && (scope ? <ModelBindingsPanel scope={scope} rosterRoles={roles} /> : <div className="set-notice muted">请在左侧选择具体工作空间，再配置岗位绑定。</div>)}
           {tab === 'transfer' && <ModelTransferPanel />}
           {tab === 'secrets' && <SecretVaultPanel />}
         </div>

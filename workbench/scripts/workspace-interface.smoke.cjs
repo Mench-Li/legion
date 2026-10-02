@@ -55,7 +55,7 @@ const root=path.resolve(__dirname,'../..');
  await page.getByRole('button',{name:'设置',exact:true}).click();
  for(const name of ['空间管理','持续执行','Agent 工作流','模型与凭证','连接与令牌','浏览器助手']){await page.getByRole('button',{name,exact:true}).first().click();await page.waitForTimeout(150)}
  await page.getByRole('button',{name:'模型与凭证',exact:true}).click();
- assert.equal(await page.locator('.model-settings-inline .set-tab').count(),5);
+ assert.equal(await page.locator('.model-settings-inline .set-tab').count(),6);
  for(const tab of await page.locator('.model-settings-inline .set-tab').all())await tab.click();
  await page.getByRole('button',{name:'Agent',exact:true}).click();
  await coder.click();await input.waitFor();

@@ -90,6 +90,7 @@ import {
   writeRunRecord,
 } from './run-record.mjs'
 import * as nodeFs from 'node:fs'
+import { publishBackend } from './shared-backend.mjs'
 
 /** 产品级状态 → 用户可见文案（spec §6.3 的「产品状态」列）。 */
 export const PRODUCT_STATE_TEXT = Object.freeze({
@@ -249,6 +250,8 @@ export function createLauncher({
   baseEnv = {},
   envValues = {},
   desktopCredentials = null,
+  sharedBackend = false,
+  onSharedStop = () => {},
   extraEnvAllow = [],
   nodePath = process.execPath,
   installRoot = layout?.installDir ?? null,
@@ -712,6 +715,7 @@ export function createLauncher({
    * （`launcher.instanceLock`），也要在**每一条**退出路径上被释放。
    */
   let instanceLock = null
+  let backendPublication = null
   let instanceLockReading = null
   /** 日志 sink（PRT-709）。`null` 表示建不起来——**不阻止启动**。 */
   let logSink = null
@@ -1734,6 +1738,20 @@ export function createLauncher({
       // 就绪之后立刻落一条记录：此后这台机器上如果 Legion 被强杀，
       // 下一次启动就能认出这些 pid。晚于就绪是因为 pids 到这时才齐。
       persistRunRecord()
+      if (sharedBackend) {
+        try {
+          backendPublication = await publishBackend({ layout, status: () => this.status(),
+            stop: async () => {
+              const result = await this.stop({ reason: '停止共享后台服务' })
+              onSharedStop()
+              return result
+            }, restart: () => this.retry() })
+        } catch (error) {
+          await this.stop({ reason: '共享后台发布失败' })
+          return { ok: false, phase: 'discovery', code: error.code ?? 'BACKEND_PUBLISH_FAILED',
+            failures: [], diagnostics, states: [], elapsedMs: now() - beganAt }
+        }
+      }
       // ★ PRT-713 收尾：**产品真的起来了**，这时才装配并起心跳。
       //
       //   排在就绪之后、而不是 `start()` 的第一步：一个在产品其实没起来时
@@ -1790,6 +1808,8 @@ export function createLauncher({
         throw Object.assign(new Error('Owned processes have not stopped'), { code: 'STOP_FAILED' })
       }
       supervisor.dispose()
+      backendPublication?.close()
+      backendPublication = null
       stoppedAt = now()
       supervisor = null
       // 停止之后**必须** flush：还没换行的尾巴是最后那几行退出信息，

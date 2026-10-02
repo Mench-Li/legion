@@ -102,20 +102,17 @@ function createTray() {
     { label: '打开 Legion', click: showWindow },
     { label: '运行状态', click: () => { showWindow(); if (window?.webContents.getURL() !== startupUrl) void window.loadURL(startupUrl).catch(() => report({ state: 'failed', code: 'STARTUP_PAGE_FAILED' })) } },
     { label: '重新启动服务', click: () => void restartServices() },
+    { label: '停止共享后台（Web 和桌面均停止服务）', click: () => void stopServices().catch(error => report({ state: 'failed', code: error?.code ?? 'STOP_FAILED' })) },
     { type: 'separator' },
-    { label: '退出 Legion', click: () => app.quit() },
+    { label: '退出桌面端（后台继续运行）', click: () => app.quit() },
   ]))
 }
 
 function connectBridge() {
   const child = spawn(nodePath, [bridgePath], {
-    cwd: installRoot, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+    cwd: installRoot, windowsHide: true, detached: true, stdio: ['pipe', 'pipe', 'pipe'],
     env: { ...process.env, LEGION_INSTALL_DIR: installRoot,
       ...(app.isPackaged ? {
-        LEGION_HOME: join(app.getPath('userData'), 'product'),
-        LEGION_DATA_DIR: undefined, LEGION_CACHE_DIR: undefined, LEGION_LOG_DIR: undefined,
-        LEGION_PRODUCT_CONFIG: undefined, LEGION_SECRETS_FILE: undefined,
-        LEGION_WORKSPACE_DIR: undefined,
         NODE_OPTIONS: undefined, NODE_PATH: undefined,
         PATH: `${join(process.resourcesPath, 'node')};${join(process.resourcesPath, 'git', 'cmd')};${join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0')};${process.env.PATH ?? ''}`,
       } : {}) },
@@ -178,6 +175,16 @@ async function restartServices() {
   await startServices('restart')
 }
 
+async function stopServices() {
+  viewGeneration++
+  workbenchOrigin = null
+  const acknowledgement = await bridge.request('stop')
+  if (acknowledgement?.state !== 'stopped') throw Object.assign(new Error('Stop unconfirmed'), { code: 'STOP_FAILED' })
+  report({ state: 'stopped' })
+  if (window && !window.isDestroyed() && window.webContents.getURL() !== startupUrl) await window.loadURL(startupUrl)
+  return current
+}
+
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
@@ -194,9 +201,9 @@ if (!app.requestSingleInstanceLock()) {
     void (async () => {
       try {
         if (bridge) {
-          const acknowledgement = await bridge.request('stop')
-          if (acknowledgement?.state !== 'stopped') throw Object.assign(new Error('Stop unconfirmed'), { code: 'STOP_FAILED' })
-          await bridge.close()
+          const acknowledgement = await bridge.request('detach')
+          if (acknowledgement?.state !== 'detached') throw Object.assign(new Error('Detach unconfirmed'), { code: 'DETACH_FAILED' })
+          await bridge.close({ detach: true })
         }
         allowQuit = true
         app.quit()
@@ -204,7 +211,7 @@ if (!app.requestSingleInstanceLock()) {
         quitting = false
         stopping = false
         report({ state: 'failed', code: error?.code ?? 'STOP_FAILED' })
-        dialog.showErrorBox('Legion 未能安全退出', '后台服务停止失败。请查看运行状态后重试。')
+        dialog.showErrorBox('Legion 未能安全退出', '桌面连接断开失败。请查看运行状态后重试。')
       }
     })()
   })
@@ -274,12 +281,7 @@ if (!app.requestSingleInstanceLock()) {
       }
       if (command === 'retry') { await startServices('restart'); return current }
       if (command === 'stop') {
-        viewGeneration++
-        workbenchOrigin = null
-        const acknowledgement = await bridge.request('stop')
-        if (acknowledgement?.state !== 'stopped') throw Object.assign(new Error('Stop unconfirmed'), { code: 'STOP_FAILED' })
-        report({ state: 'stopped' })
-        return current
+        return stopServices()
       }
       throw new Error('IPC_UNKNOWN_COMMAND')
     })

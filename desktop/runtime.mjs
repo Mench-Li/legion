@@ -53,7 +53,7 @@ function clientError(code, { portConflict = null } = {}) {
   return error
 }
 
-export const BRIDGE_DEADLINES = Object.freeze({ status: 10_000, start: 720_000, restart: 780_000, stop: 90_000, 'prepare-runtime': 600_000, 'configure-workspace': 30_000, 'configure-identity': 30_000, 'configure-model': 45_000 })
+export const BRIDGE_DEADLINES = Object.freeze({ status: 10_000, detach: 10_000, start: 720_000, restart: 780_000, stop: 90_000, 'prepare-runtime': 600_000, 'configure-workspace': 30_000, 'configure-identity': 30_000, 'configure-model': 45_000 })
 
 export function createBridgeClient(child, {
   onEvent = () => {}, deadlines = BRIDGE_DEADLINES, maxPending = 16, exitTimeoutMs = 15_000,
@@ -125,10 +125,17 @@ export function createBridgeClient(child, {
         try { child.stdin.write(wire, error => { if (error) writeFailed() }) } catch { writeFailed() }
       })
     },
-    async close() {
+    async close({ detach = false } = {}) {
       if (!closing) {
         closing = true
         if (!exited) child.stdin.end()
+      }
+      if (detach) {
+        child.stdout.destroy()
+        child.stderr?.destroy()
+        child.stdin.destroy()
+        child.unref?.()
+        return
       }
       let timer
       try {

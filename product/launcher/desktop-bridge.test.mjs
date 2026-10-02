@@ -3,6 +3,18 @@ import assert from 'node:assert/strict'
 import { PassThrough } from 'node:stream'
 import { createDesktopBridge, runDesktopBridge } from './desktop-bridge.mjs'
 
+test('detaching a running desktop owner preserves services when its UI pipe closes', async () => {
+  let stops = 0
+  const bridge = createDesktopBridge({ optionsFactory: () => ({ options: {} }), launcherFactory: () => ({
+    async start() { return { ok: true } }, async stop() { stops++ },
+    status() { return { state: 'ready', processes: [] } },
+  }) })
+  await bridge.handle({ id: 'start', type: 'start', payload: { token: 'a'.repeat(64) } })
+  assert.equal((await bridge.handle({ id: 'detach', type: 'detach', payload: {} })).payload.state, 'detached')
+  await bridge.close()
+  assert.equal(stops, 0)
+})
+
 test('start correlates response and hides secrets from all emitted data', async () => {
   const emitted = []
   const secret = 'secret-should-never-appear'.padEnd(64, 'x')

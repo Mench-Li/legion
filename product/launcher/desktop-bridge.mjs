@@ -10,6 +10,7 @@ import { createLineDecoder, DESKTOP_PROTOCOL_VERSION, parseRequest } from './des
 import { DEFAULT_PORTS } from '../process-manifest.mjs'
 import { readDesktopSettings, selectedWorkspace, validateDesktopIdentity } from './desktop-settings.mjs'
 import { ENFORCEMENT_IDENTITY_ENV } from './enforcement-identity.mjs'
+import { discoverBackend } from './shared-backend.mjs'
 
 export function desktopOptionsFrom({ workspace, env = process.env, nodePath = process.execPath } = {}) {
   const initial = launcherOptionsFrom({ env, nodePath })
@@ -61,6 +62,7 @@ function publicStatus(status) {
 export function createDesktopBridge({
   launcherFactory = options => options.bundledRuntime || options.desktopSetup ? createDesktopLauncher(options) : createLauncher(options),
   optionsFactory = desktopOptionsFrom,
+  discover = discoverBackend,
   modelCredentialVerifier = async (input) => {
     try {
       const { openProductSecrets } = await import('../secrets.mjs')
@@ -81,6 +83,7 @@ export function createDesktopBridge({
   let bundleRoot = null
   let stopPending = false
   let selected = null
+  let detached = false
 
   function status() {
     return launcher === null ? { state: 'unavailable', processes: [], workbenchUrl: null } : publicStatus(launcher.status())
@@ -96,6 +99,10 @@ export function createDesktopBridge({
       error.code = safeCode(blocking[0].code, 'CONFIG_INVALID')
       throw error
     }
+    if (!setup) {
+      launcher = await discover(input.options.layout, { timeoutMs: 720_000 })
+      if (launcher) return launcher
+    }
     if (!setup && input.desktopSetupPhase) {
       throw Object.assign(new Error('First-run setup is incomplete'), {
         code: input.desktopSetupPhase === 'identity' ? 'ENFORCEMENT_IDENTITY_MISSING' : 'MODEL_NOT_CONFIGURED',
@@ -106,7 +113,7 @@ export function createDesktopBridge({
         throw Object.assign(new Error('Verified model credential has changed'), { code: 'MODEL_NOT_CONFIGURED' })
       }
     }
-    const options = { ...input.options, desktopCredentials: credentials, desktopSetup: setup }
+    const options = { ...input.options, desktopCredentials: credentials, desktopSetup: setup, sharedBackend: true }
     if (bundleRoot !== null) {
       const release = JSON.parse(readFileSync(join(options.layout.installDir, 'product', 'release', 'runtime-manifest.json'), 'utf8'))
       options.bundledRuntime = { bundleRoot, release }
@@ -123,7 +130,14 @@ export function createDesktopBridge({
     const { id, type } = request
     if (closed) return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: false, payload: { code: 'BRIDGE_CLOSED' } }
     try {
-      if (type === 'status') return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: true, payload: status() }
+      if (type === 'status') {
+        await launcher?.refresh?.()
+        return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: true, payload: status() }
+      }
+      if (type === 'detach') {
+        detached = running
+        return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: true, payload: { state: 'detached' } }
+      }
       if (type === 'start' || type === 'restart' || type === 'prepare-runtime' || type === 'configure-workspace' || type === 'configure-identity' || type === 'configure-model') {
         if (stopPending) throw Object.assign(new Error('Start superseded by stop'), { code: 'PREPARATION_CANCELLED' })
         const suppliedRoot = request.payload?.bundleRoot
@@ -174,7 +188,7 @@ export function createDesktopBridge({
           const payload = await owner.configureModel(request.payload?.model)
           return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: true, payload }
         }
-        const owner = await ensureLauncher()
+        let owner = await ensureLauncher()
         if (type === 'prepare-runtime') {
           if (typeof owner.prepareRuntime !== 'function') throw Object.assign(new Error('Bundle required'), { code: 'BUNDLE_PATH_REQUIRED' })
           ownsLifecycle = true
@@ -182,6 +196,11 @@ export function createDesktopBridge({
           return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: true, payload: { state: 'prepared' } }
         }
         if (type === 'restart' && running) {
+          if (owner.shared) {
+            const result = await owner.restart()
+            if (!result.ok) throw Object.assign(new Error('Shared backend restart failed'), { code: 'BACKEND_RESTART_FAILED' })
+            return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: true, payload: status() }
+          }
           emit({ version: DESKTOP_PROTOCOL_VERSION, type: 'progress', payload: { phase: 'stopping' } })
           await owner.stop({ reason: '桌面端重启服务' })
           running = false
@@ -189,7 +208,18 @@ export function createDesktopBridge({
         if (!running) {
           emit({ version: DESKTOP_PROTOCOL_VERSION, type: 'progress', payload: { phase: 'starting' } })
           ownsLifecycle = true
-          const result = await owner.start()
+          let result
+          try { result = await owner.start() }
+          catch (error) {
+            if (error.code !== 'INSTANCE_ALREADY_RUNNING') throw error
+            result = { ok: false, code: error.code }
+          }
+          if (result.code === 'INSTANCE_ALREADY_RUNNING') {
+            await owner.stop({ reason: '连接已运行的共享后台' })
+            launcher = null
+            owner = await ensureLauncher()
+            result = await owner.start()
+          }
           if (result.ok !== true) {
             await owner.stop({ reason: '桌面启动失败后清理' })
             ownsLifecycle = false
@@ -208,6 +238,7 @@ export function createDesktopBridge({
           await launcher.stop({ reason: '桌面端停止服务' })
           running = false
           ownsLifecycle = false
+          launcher = null
         }
         stopPending = false
         return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: true, payload: { state: 'stopped' } }
@@ -231,7 +262,7 @@ export function createDesktopBridge({
     closed = true
     launcher?.cancelPreparation?.()
     await queue
-    if (ownsLifecycle && launcher !== null) {
+    if (ownsLifecycle && launcher !== null && !detached && !launcher.shared) {
       await launcher.stop({ reason: '桌面控制通道关闭' })
       running = false
       ownsLifecycle = false

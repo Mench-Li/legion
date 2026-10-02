@@ -780,6 +780,12 @@ export const SCHEMA = defineSchema({
     // 「查了，太宽」与「没查出来」——这两个必须保持不同的码，把前者塌成后者
     // 会让"已经确认的危险"看起来像"这次没查到"。
     'SECRETS_PLACEMENT_INVALID', 'SECRETS_CHECK_FAILED', 'ACL_TOO_PERMISSIVE',
+    // Shared backend discovery/lifecycle outcomes; these are diagnostic codes,
+    // not environment variables or configurable authentication bypasses.
+    'BACKEND_NOT_RUNNING', 'BACKEND_PUBLISH_FAILED', 'BACKEND_RESTART_FAILED',
+    'BACKEND_VERSION_INVALID', 'BACKEND_NOT_OWNER', 'BACKEND_ROUTE_UNKNOWN',
+    'BACKEND_DISCOVERY_INVALID', 'BACKEND_WORKSPACE_MISMATCH', 'BACKEND_VERSION_MISMATCH',
+    'BACKEND_UNAVAILABLE', 'BACKEND_IDENTITY_MISMATCH', 'BACKEND_STARTING',
     // PRT-509 路线 A′：DSH 只读回退来源的两条启动诊断码
     // （`product/launcher/secrets-check.mjs` 的 `fallbackDiagnostic`）。
     //

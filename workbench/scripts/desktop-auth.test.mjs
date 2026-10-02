@@ -27,6 +27,18 @@ test('desktop Workbench protects reads, writes, Host, Origin and proxy credentia
     assert.equal((await fetch(`${base}/api/fs/home`, { headers: { ...headers, origin: 'https://evil.test' } })).status, 403)
     assert.equal((await fetch(`${base}/api/fs/home`, { headers })).status, 200)
     assert.equal((await fetch(`${base}/hub/api/config`, { headers })).status, 200)
+    const navigate = site => new Promise((accept, reject) => {
+      const req = request(`${base}/`, { headers: {
+        'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-site': site,
+      } }, res => { res.resume(); res.once('end', () => accept(res.headers['set-cookie']?.[0]?.split(';')[0])) })
+      req.on('error', reject); req.end()
+    })
+    const cookie = await navigate('none')
+    assert.ok(cookie, 'direct browser navigation must establish its own session')
+    assert.equal((await fetch(`${base}/api/fs/home`, { headers: { cookie } })).status, 200)
+    assert.equal((await fetch(`${base}/hub/api/config`, { headers: { cookie } })).status, 200)
+    assert.equal((await fetch(`${base}/api/fs/home`, { headers: { cookie, origin: 'https://evil.test' } })).status, 403)
+    assert.equal(await navigate('cross-site'), undefined)
   } finally {
     server.closeAllConnections(); upstream.closeAllConnections()
     await Promise.all([new Promise(resolve => server.close(resolve)), new Promise(resolve => upstream.close(resolve))])

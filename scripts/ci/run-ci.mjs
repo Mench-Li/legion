@@ -4292,6 +4292,8 @@ async function stageTest() {
         'product/launcher/supervisor.test.mjs',
         'product/launcher/launcher.test.mjs',
         'product/launcher/cli.test.mjs',
+        'product/launcher/shared-backend.test.mjs',
+        'product/local-auth.test.mjs',
         // PRT-257：DSH 强制面覆盖层的**接线**（`--patch` 到底有没有交给 runtime）。
         // 17 条里只有 2 条需要 DSH_CHECKOUT（真 DSH CLI），其余照常跑；
         // 缺检出时那 2 条逐条 `t.skip()`，于是 `skipped: 2` 看得见——

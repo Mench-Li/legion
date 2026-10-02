@@ -13,6 +13,13 @@ const remedies = Object.freeze({
   BRIDGE_TIMEOUT: '后台操作超时，请先停止服务，再重试。',
   BRIDGE_EXIT_TIMEOUT: '后台进程尚未退出，请稍后重试退出。',
   STOP_FAILED: '后台服务尚未全部停止，请查看运行状态后重试。',
+  BACKEND_WORKSPACE_MISMATCH: '当前后台属于另一个工作区，请连接对应工作区或先停止后台。',
+  BACKEND_VERSION_MISMATCH: '当前后台与桌面端版本不一致，请更新到同一版本后重试。',
+  BACKEND_STARTING: '共享后台正在启动，请稍后重试。',
+  BACKEND_UNAVAILABLE: '共享后台无法连接，请检查原启动入口的运行状态。',
+  BACKEND_RESTART_FAILED: '共享后台重启失败，请检查后台状态后重试。',
+  BACKEND_DISCOVERY_INVALID: '共享后台的运行记录无法验证，请检查后台状态后重试。',
+  BACKEND_IDENTITY_MISMATCH: '共享后台的身份不匹配，请检查运行记录后重试。',
 })
 
 const portServices = Object.freeze({

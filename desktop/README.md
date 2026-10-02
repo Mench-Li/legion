@@ -6,7 +6,9 @@ Windows x64 桌面入口，负责启动现有的 Legion Product Launcher。Elect
 
 在源码检出目录中，进入 `desktop/` 安装依赖并运行 `npm start`。`PATH` 中必须有本机 Node 可执行文件，也可以将 `LEGION_DESKTOP_NODE` 设为该文件的绝对路径。正式安装器会附带固定版本的 Node 和 Legion 运行时目录。
 
-此开发入口属于内部集成构建。桌面模式需要每次启动时生成的私有 Workbench 和 Hub 凭据；Electron 只会将 Workbench 凭据注入到所属窗口的已验证本地来源。浏览器开发模式与桌面模式相互独立。首次设置和独立安装器的工作仍按[实施计划](../docs/superpowers/plans/2026-09-29-legion-desktop.md)跟踪。
+Web 和桌面使用同一套后台和数据。桌面会先验证并连接当前 DataDir 的后台；只有后台未运行时才启动服务。两端使用相同的默认产品目录（Windows 为 `%LOCALAPPDATA%\Legion`），也都支持显式的 `LEGION_HOME` / `LEGION_DATA_DIR` 设置。详见[共享后台说明](../docs/shared-web-desktop-backend.md)。
+
+桌面启动后台时继续使用私有 Workbench 和 Hub 凭据。用户直接在本机浏览器打开工作台地址后，会建立 HttpOnly、SameSite=Strict 会话；跨站页面不能建立会话。关闭窗口或退出桌面端保留后台，托盘中的“停止共享后台”会同时停止两端使用的服务。首次设置和独立安装器的工作仍按[实施计划](../docs/superpowers/plans/2026-09-29-legion-desktop.md)跟踪。
 
 ## 打包与服务准备
 

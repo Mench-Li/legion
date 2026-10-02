@@ -116,6 +116,20 @@ test('put/get/list/rotate/remove：闭环可用，且元数据接口不带值', 
   assert.equal(auditText.includes('enc:'), false)
 })
 
+test('首次写入会先创建密钥库父目录，再创建旁路写锁', async () => {
+  const { dir, cleanup } = tmpFile()
+  const file = join(dir, 'product', 'secrets', 'credentials.json')
+  try {
+    const store = createSecretStore({ backend: fileBackend({ file }), protector: fakeProtector() })
+    await store.put('legion/model', SECRET)
+    assert.equal((await store.get('legion/model')).value, SECRET)
+    assert.equal(existsSync(file), true)
+    assert.equal(existsSync(`${file}.lock`), false, '成功写入后必须释放锁')
+  } finally {
+    cleanup()
+  }
+})
+
 test('rotate 不存在的引用必须失败，而不是静默创建', async () => {
   const store = createSecretStore({ backend: memoryBackend(), protector: fakeProtector(), now: () => 't' })
   await assert.rejects(() => store.rotate('legion/missing', 'x'), (e) => e.code === 'SECRET_NOT_FOUND')

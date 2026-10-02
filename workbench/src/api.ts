@@ -542,6 +542,70 @@ async function hubPost(path: string, body: Record<string, unknown>): Promise<unk
   return res.json().catch(() => undefined)
 }
 
+export interface WorkflowPackFile {
+  format: 'legion/workflow-pack@1'
+  id: string
+  version: string
+  name: string
+  description: string
+  scope: { id: string; name: string }
+  roles: unknown[]
+  stages: unknown[]
+  assets: unknown[]
+}
+
+export interface WorkflowPackPreview {
+  action: 'install' | 'upgrade' | 'current' | 'conflict'
+  reason: string | null
+  packageId: string
+  version: string
+  scope: string
+  name: string
+  description: string
+  roles: number
+  stages: number
+  assets: number
+}
+
+export interface InstalledWorkflowPack {
+  id: string
+  scope: string
+  version: string
+  digest: string
+  installedAt: string
+}
+
+export interface WorkflowPackAsset {
+  id: string
+  type: 'skill' | 'document' | 'template'
+  title: string
+  path: string
+  content: string
+}
+
+export async function fetchWorkflowPacks(): Promise<InstalledWorkflowPack[]> {
+  const result = await readJson<{ packages: InstalledWorkflowPack[] }>(await hubGet('/api/workflow-packs'))
+  return Array.isArray(result.packages) ? result.packages : []
+}
+
+export async function fetchWorkflowPackAssets(scope: string, packId: string): Promise<WorkflowPackAsset[]> {
+  const query = new URLSearchParams({ scope, pack: packId })
+  const result = await readJson<{ assets: WorkflowPackAsset[] }>(await hubGet(`/api/workflow-packs/assets?${query}`))
+  return Array.isArray(result.assets) ? result.assets : []
+}
+
+export async function previewWorkflowPack(pack: WorkflowPackFile): Promise<WorkflowPackPreview> {
+  const response = await hubPost('/api/workflow-packs/preview', { scope: pack.scope.id, pack }) as { task?: WorkflowPackPreview }
+  if (!response.task) throw new Error('流程包预览响应无效')
+  return response.task
+}
+
+export async function installWorkflowPack(pack: WorkflowPackFile): Promise<WorkflowPackPreview> {
+  const response = await hubPost('/api/workflow-packs/install', { scope: pack.scope.id, pack }) as { task?: WorkflowPackPreview }
+  if (!response.task) throw new Error('流程包安装响应无效')
+  return response.task
+}
+
 /** team-hub v2：技能列表。includePending=true 时含待审/被拒（仅 member=general 复审视角，服务端收口）。 */export async function fetchSkills(opts: { scope?: string | null; includePending?: boolean; member?: string } = {}): Promise<SkillInfo[]> {
   const qs = new URLSearchParams()
   if (opts.scope) qs.set('scope', opts.scope)

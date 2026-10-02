@@ -60,6 +60,7 @@
  * 状态机 + 乐观锁 + 角色纪律与 taskctl.mjs 一致；scope 是任务分区的一等字段。
  */
 import http from 'node:http'
+import { checkDesktopRequest } from '../product/local-auth.mjs'
 import { DatabaseSync } from 'node:sqlite'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
@@ -163,6 +164,8 @@ import {
 import { resolveNextPost } from '../orchestrator/pipeline/index.mjs'
 import { columnExists as columnExistsImpl, ensureColumn as ensureColumnImpl } from './schema-util.mjs'
 import { createEventDeliveryStore } from './event-delivery.mjs'
+import { bootstrapWorkflowPack, ensureWorkflowPackSchema, validateWorkflowPack } from '../product/workflow-packs/pack.mjs'
+import { createWorkflowPackRoutes } from './routes/workflow-packs.mjs'
 import {
   AUTOMATION_ERRORS,
   createAutomationStore,
@@ -355,6 +358,7 @@ export const DEFAULT_DB_FILE = DB_FILE
 const UPLOADS_ROOT = join(dirname(DB_FILE), 'uploads')
 const PORT = CFG.values.port
 const TOKEN = CFG.values.token
+if (CFG.values.desktopMode && (!TOKEN || CFG.values.host !== '127.0.0.1')) throw new Error('DESKTOP_AUTH_REQUIRED')
 const HOST = CFG.values.host
 /** 启动时打印的脱敏配置摘要（含实际生效的 DB 路径）；供日志与故障排查使用，绝不包含 token 原文。 */
 export function configSummaryLine() {
@@ -4909,12 +4913,30 @@ function json(res, status, data) {
   res.end(JSON.stringify(data, null, 2))
 }
 
-function readBody(req) {
+function readBody(req, cap = Number.POSITIVE_INFINITY) {
   return new Promise((resolve, reject) => {
-    let raw = ''
-    req.on('data', (d) => { raw += d })
+    const chunks = []
+    let total = 0
+    let finished = false
+    req.on('data', (d) => {
+      if (finished) return
+      const chunk = Buffer.isBuffer(d) ? d : Buffer.from(d)
+      total += chunk.length
+      if (total > cap) {
+        finished = true
+        req.removeAllListeners('data')
+        req.resume()
+        reject(Object.assign(new Error('请求体超大小'), { statusCode: 413, code: 'REQUEST_TOO_LARGE' }))
+        return
+      }
+      chunks.push(chunk)
+    })
     req.on('end', () => {
-      try { resolve(raw.length === 0 ? {} : JSON.parse(raw)) } catch { reject(new Error('请求体不是合法 JSON')) }
+      if (finished) return
+      try {
+        const raw = Buffer.concat(chunks).toString('utf8')
+        resolve(raw.length === 0 ? {} : JSON.parse(raw))
+      } catch { reject(new Error('请求体不是合法 JSON')) }
     })
     req.on('error', reject)
   })
@@ -5003,10 +5025,10 @@ function optionalIntParam(url, name) {
   return Number.isSafeInteger(n) ? n : null
 }
 
-async function handleWrite(req, res, run) {
+async function handleWrite(req, res, run, { maxBytes = Number.POSITIVE_INFINITY } = {}) {
   try {
     if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
-    const body = await readBody(req)
+    const body = await readBody(req, maxBytes)
     const by = requireMember(body)
     const scope = readScope(body)
     const result = await run(body, by, scope)
@@ -5274,6 +5296,8 @@ export function artifactContent(taskId, rawI) {
 // ── 路由层（PRT-316）：`handle` 里已提取出去的路由族在这里装配。──
 // 依赖由本文件注入（各族自己不 import hub 内部件）。新族加进这个数组即可，
 // 不需要再往下面那条 if 链里抄一遍同样的形状。
+ensureWorkflowPackSchema(db)
+
 const router = createRouter([
   // 冲突治理族放在最前：/api/tasks/:id/write-intent 等具体路径必须先于宽前缀匹配。
   createWriteIntentRoutes({
@@ -5515,6 +5539,9 @@ const router = createRouter([
     normalizeRuntime, withTx, readPipeline,
     pipelineWarnings,
   }),
+  createWorkflowPackRoutes({
+    db, json, handleWrite: (req, res, run) => handleWrite(req, res, run, { maxBytes: 2 * 1024 * 1024 }), audit, withTx,
+  }),
   createAgentIntakeRoutes({
     json,
     db, handleWrite, withTx,
@@ -5546,6 +5573,10 @@ const router = createRouter([
 ])
 
 async function handle(req, res, stripPrefix) {
+  if (CFG.values.desktopMode) {
+    const failure = checkDesktopRequest(req, TOKEN)
+    if (failure) { json(res, failure.status, { code: failure.code }); return }
+  }
   const url = new URL(req.url ?? '/', 'http://x')
   let path = url.pathname
   // P1-1 宿主集成：DSH webServer 把前缀路由（如 /team-hub）下所有请求交给本 handle，
@@ -5935,6 +5966,18 @@ const isMain = process.argv[1] !== undefined && resolve(process.argv[1]) === fil
 let lastToolCallSweepSignature = null
 
 if (isMain) {
+  // Packaged desktop first-run: install the built-in software collaboration
+  // pack before listening, so Workbench never opens into an empty space list.
+  // Re-import is idempotent; the package store refuses to overwrite local edits.
+  if (process.env.LEGION_DESKTOP_MODE === '1' && process.env.LEGION_WORKFLOW_PACK_PATH) {
+    let rawPack
+    try { rawPack = JSON.parse(readFileSync(process.env.LEGION_WORKFLOW_PACK_PATH, 'utf8')) }
+    catch { throw Object.assign(new Error('Built-in workflow pack cannot be read'), { code: 'WORKFLOW_PACK_UNREADABLE' }) }
+    const validatedPack = validateWorkflowPack(rawPack)
+    const result = bootstrapWorkflowPack(db, validatedPack, { withTx,
+      workspaceDir: process.env.LEGION_WORKSPACE_DIR ?? '' })
+    console.log(`[team-hub] workflow pack ${validatedPack.pack.id}@${validatedPack.pack.version}: ${result.action}${result.skipped ? ' skipped' : ''} scope=${validatedPack.pack.scope.id}`)
+  }
   console.log(configSummaryLine()) // P3-2：启动即打印脱敏后的最终配置（token 只显示是否设置）
   validateSecurityConfig()
   server.listen(PORT, HOST, () => {

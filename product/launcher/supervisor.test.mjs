@@ -175,7 +175,7 @@ test('stop：SIGTERM 优雅退出；超过 graceMs 则强制杀进程树', async
     now: clock.now,
     setTimeoutImpl: clock.setTimeout,
     clearTimeoutImpl: clock.clearTimeout,
-    killTree: async (c) => { killed = c.pid; return true },
+    killTree: async (c) => { killed = c.pid; c.exitNow(0); return true },
   })
   h.start()
   const stopping = h.stop({ graceMs: 5000 })
@@ -205,6 +205,31 @@ test('stop：进程在 grace 期内退出则不调用强杀', async () => {
   const r = await stopping
   assert.equal(r.forced, false)
   assert.equal(killed, false)
+})
+
+test('sending a kill signal does not make an alive process safe to abandon', async () => {
+  const child = makeFakeChild()
+  const h = createSupervisedProcess(SPEC, { spawnImpl: () => child, envFor: () => ENV })
+  h.start()
+  child.killed = true
+  assert.equal(h.isAlive(), true)
+  assert.equal(h.status().pid, child.pid)
+  const stopping = h.stop({ graceMs: 50 })
+  child.exitNow(0)
+  assert.equal((await stopping).stopped, true)
+})
+
+test('forced termination without an observed exit cannot report stopped', async () => {
+  const child = makeFakeChild()
+  const h = createSupervisedProcess(SPEC, {
+    spawnImpl: () => child, envFor: () => ENV, killTree: async () => true,
+  })
+  h.start()
+  const result = await h.stop({ graceMs: 1, forceMs: 10 })
+  assert.equal(result.stopped, false)
+  assert.equal(result.code, 'PROCESS_EXIT_TIMEOUT')
+  assert.equal(h.isAlive(), true)
+  child.exitNow(0)
 })
 
 test('未提供 envFor / spawnOptions.env 时抛错（不得默认继承宿主环境）', () => {

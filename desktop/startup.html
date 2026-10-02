@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Legion</title>
+  <style>
+    :root { color-scheme: dark; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: radial-gradient(circle at 25% 20%, #243b62, #101726 58%); color: #edf4ff; }
+    main { width: min(520px, calc(100vw - 48px)); padding: 42px; border: 1px solid #415779; border-radius: 18px; background: #172239e8; box-shadow: 0 24px 70px #080d1b99; }
+    .mark { display: inline-grid; place-items: center; width: 52px; height: 52px; border-radius: 14px; background: #357dff; font-size: 29px; font-weight: 750; }
+    h1 { font-size: 26px; margin: 25px 0 8px; }
+    p { margin: 0; color: #b9c8dd; line-height: 1.65; }
+    #detail { margin-top: 20px; min-height: 45px; font-size: 14px; }
+    .bar { margin-top: 20px; height: 5px; border-radius: 8px; overflow: hidden; background: #35445e; }
+    .bar::after { content: ""; display: block; width: 42%; height: 100%; border-radius: inherit; background: #64a1ff; animation: move 1.5s infinite alternate ease-in-out; }
+    @keyframes move { to { transform: translateX(150%); } }
+    .actions { display: flex; gap: 10px; margin-top: 25px; }
+    #workspace-path { overflow-wrap: anywhere; margin-top: 14px; }
+    #setup p { font-size: 14px; }
+    #identity-form { margin-top: 16px; }
+    #identity-form label { display: block; margin-top: 12px; color: #b9c8dd; font-size: 14px; }
+    #identity-form input[type="text"] { width: 100%; margin-top: 6px; padding: 10px; border: 1px solid #415779; border-radius: 8px; background: #101726; color: #edf4ff; font: inherit; }
+    #model-form { margin-top: 16px; }
+    #model-form label { display: block; margin-top: 12px; color: #b9c8dd; font-size: 14px; }
+    #model-form input[type="password"] { width: 100%; margin-top: 6px; padding: 10px; border: 1px solid #415779; border-radius: 8px; background: #101726; color: #edf4ff; font: inherit; }
+    #identity-form .check { display: flex; gap: 9px; align-items: center; }
+    button { border: 0; border-radius: 9px; padding: 11px 19px; background: #357dff; color: white; font: inherit; cursor: pointer; }
+    button.secondary { background: #32435f; }
+    button:disabled { opacity: .5; cursor: wait; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="mark">L</div>
+    <h1 id="heading">正在启动 Legion</h1>
+    <p id="description">正在准备工作台和后台服务，请稍候。</p>
+    <p id="detail" role="status" aria-live="polite">检查本机环境…</p>
+    <div class="bar" id="progress"></div>
+    <section id="setup" hidden>
+      <p>选择要使用的项目文件夹。设置保存在 Legion 的应用数据目录；任务执行范围会在后续设置中确认。</p>
+      <p id="workspace-path">尚未选择文件夹</p>
+      <div class="actions">
+        <button id="choose-workspace" class="secondary">选择文件夹</button>
+        <button id="configure-workspace" disabled>继续设置</button>
+      </div>
+    </section>
+    <form id="identity-form" hidden>
+      <label>执行者名称<input name="actor" type="text" maxlength="128" required autocomplete="off" placeholder="例如：你的团队成员名"></label>
+      <label>授权范围名称<input name="scope" type="text" maxlength="128" required autocomplete="off" placeholder="例如：当前项目代码维护"></label>
+      <label>操作名称<input name="action" type="text" maxlength="128" required autocomplete="off" placeholder="例如：repository:write"></label>
+      <label class="check"><input id="allow-workspace-writes" type="checkbox">允许在所选工作区内读写文件</label>
+      <p>权限边界固定为当前工作区；工作区外的文件操作会被拒绝。越界人工审批尚未接通，不会放行越界请求。</p>
+      <div class="actions"><button type="submit">保存身份与范围</button></div>
+    </form>
+    <form id="model-form" hidden>
+      <p>默认模型：DeepSeek Flash（官方服务）。模型密钥会保存在 Windows 受保护密钥库中。Legion 会先用不产生推理费用的模型列表请求验证密钥与连通性。</p>
+      <label>DeepSeek API Key<input name="apiKey" type="password" minlength="8" maxlength="512" required autocomplete="new-password" spellcheck="false" placeholder="粘贴 API Key"></label>
+      <div class="actions"><button type="submit">安全保存并验证</button></div>
+    </form>
+    <div class="actions" id="actions" hidden>
+      <button id="retry">重试启动</button>
+      <button id="stop" class="secondary">停止服务</button>
+    </div>
+  </main>
+  <script type="module" src="./startup.mjs"></script>
+</body>
+</html>

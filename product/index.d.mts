@@ -101,7 +101,7 @@ export declare function assertConfigWritable<T>(values: T): T
 
 // ---------------------------------------------------------------- process manifest
 
-export declare const PROCESS_MANIFEST_VERSION: 1
+export declare const PROCESS_MANIFEST_VERSION: 3
 export declare const DEFAULT_PORTS: Readonly<{ runtime: number; 'team-hub': number; workbench: number; whiteboard: number }>
 export declare const LOOPBACK_HOSTS: readonly string[]
 export declare const PROCESS_KEYS: readonly string[]
@@ -116,6 +116,7 @@ export interface ProcessSpec {
   readonly entry: { kind: 'node-file'; path: string } | { kind: 'configured'; configKey: string }
   readonly cwd: string
   readonly argsTemplate: readonly string[]
+  readonly launcherArgumentBoundary?: boolean
   readonly portKey: string | null
   readonly defaultPort: number | null
   readonly host: string | null
@@ -136,6 +137,8 @@ export interface ProcessPlanEntry {
   readonly dependsOn: readonly string[]
   readonly entryPath: string | null
   readonly entryKind: 'node-file' | 'configured'
+  /** Index in command.args separating DSH launcher flags from its app flags. */
+  readonly launcherArgsEnd: number | null
   readonly command: { readonly file: string; readonly args: readonly string[] } | null
   readonly cwd: string
   readonly port: number | null

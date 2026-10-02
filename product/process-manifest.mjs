@@ -47,9 +47,11 @@ import { isPathInside, pathApi, samePath } from './paths.mjs'
  *   `role-pack` / `packs` 那些 `manifestVersion` 是另一套东西）。所以这次递增
  *   不改变任何行为——它的作用是把"这个常量说了谎"变成"它说的是真的"。
  *   值本身由 `product/process-manifest.test.mjs` 钉住，好让下一个加字段的人
+ * 2026-10-01 递增到 `3`：加入 `launcherArgumentBoundary` / `launcherArgsEnd`，
+ * 让启动后才生成的凭证 `--patch` 仍位于 DSH app flags 之前。
  *   当场看见自己该动它。
  */
-export const PROCESS_MANIFEST_VERSION = 2
+export const PROCESS_MANIFEST_VERSION = 3
 
 /** 默认端口。运行期可被产品配置覆盖，但默认值集中在这里，避免散落在各进程里。 */
 export const DEFAULT_PORTS = Object.freeze({
@@ -143,7 +145,8 @@ export const PROCESS_SPECS = Object.freeze([
     //   ⚠️ 第三/四轮这里**加过又撤回**过同一行：那时它等于替业主选了第 28 条的乙。
     //   撤回是对的，但那不代表"这行永远不该有"——今天它有两半在做事的证据：
     //   `team-hub/toolcall-sweep.mjs`（收账侧宿主）与它的 7 条用例。
-    envNames: Object.freeze(['TEAM_HUB_PORT', 'TEAM_HUB_HOST', 'TEAM_HUB_TOKEN', 'TEAM_HUB_DB', 'LEGION_DATA_DIR']),
+    envNames: Object.freeze(['TEAM_HUB_PORT', 'TEAM_HUB_HOST', 'TEAM_HUB_TOKEN', 'TEAM_HUB_DB', 'LEGION_DATA_DIR',
+      'LEGION_DESKTOP_MODE', 'LEGION_WORKFLOW_PACK_PATH', 'LEGION_WORKSPACE_DIR']),
     milestone: 'PRT-251',
   }),
   Object.freeze({
@@ -171,7 +174,7 @@ export const PROCESS_SPECS = Object.freeze([
       verified: false,
     }),
     writesRoles: Object.freeze(['data']),
-    envNames: Object.freeze(['DSH_HUB_UPSTREAM', 'TEAM_HUB_TOKEN', 'DSH_WORKBENCH_TOKEN']),
+    envNames: Object.freeze(['DSH_HUB_UPSTREAM', 'TEAM_HUB_TOKEN', 'DSH_WORKBENCH_TOKEN', 'LEGION_DESKTOP_MODE']),
     milestone: 'PRT-251',
   }),
   Object.freeze({
@@ -181,7 +184,16 @@ export const PROCESS_SPECS = Object.freeze([
     required: true,
     dependsOn: Object.freeze([]),
     entry: Object.freeze({ kind: 'configured', configKey: 'runtime.command' }),
-    cwd: '{install}',
+    // Runtime credentials are materialized after preflight. Preserve the
+    // boundary between DSH launcher flags and the web app's own flags so a
+    // late --patch can still be inserted before --host/--port/--no-open.
+    launcherArgumentBoundary: true,
+    // DSH binds its path-scope policy to process.cwd(). The selected workspace
+    // is the operator-authorized project root; keeping cwd at {install} makes
+    // a valid workspace write scope fail on every packaged install. The DSH
+    // entry itself still resolves from the active DataDir pointer and all
+    // product resources still resolve from InstallDir.
+    cwd: '{workspace}',
     argsTemplate: Object.freeze([]),
     // ★ PRT-251 续：端口**必须**走这里，不能走 `argsTemplate`。
     //
@@ -478,6 +490,7 @@ export function materializeProcessPlan({
     // 不敏感，但**固定一个顺序**才让"完整 argv"这种断言写得出来。
     const appArgs = [...hostArgs, ...portArgs, ...boolArgs]
     let command = null
+    let launcherArgsEnd = null
     if (spec.entry.kind === 'node-file') {
       // 入口按**安装目录**解析成绝对路径：命令里出现相对路径时，实际被执行的是
       // 「相对于 Launcher 的 cwd」那一个文件，而它与清单里写的可能不是同一个。
@@ -557,6 +570,9 @@ export function materializeProcessPlan({
         // 注意用 `boolArgs` 而非去重后的结果参与下面的 argv 拼接——被跳过的
         // 那一个由用户自己那条命令提供，行为完全一致。
         const effectiveBoolArgs = boolArgs.filter((flag) => !configured.args.includes(flag))
+        if (spec.launcherArgumentBoundary === true) {
+          launcherArgsEnd = configured.args.length + args.length + extras.length
+        }
         command = Object.freeze({
           file: configured.file,
           args: Object.freeze([...configured.args, ...args, ...extras, ...effectiveValueArgs, ...effectiveBoolArgs]),
@@ -572,6 +588,7 @@ export function materializeProcessPlan({
       dependsOn: spec.dependsOn,
       entryPath,
       entryKind: spec.entry.kind,
+      launcherArgsEnd,
       command,
       cwd,
       port,

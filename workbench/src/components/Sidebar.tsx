@@ -84,7 +84,7 @@ export function Sidebar({ board, active, scope, hubMode, spaces, onNavigate, onS
   return (
     <aside className="sidebar">
       <div className="sidebar-brand">
-        <span className="emblem">⚔</span>
+        <img className="desktop-product-icon" src={`${import.meta.env.BASE_URL}legion-icon.png`} alt="" />
         <span>Legion 协作台</span>
       </div>
 

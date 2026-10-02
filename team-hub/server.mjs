@@ -1597,6 +1597,8 @@ db.exec(`
 `)
 db.exec('CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages (conv_id, id)')
 db.exec('CREATE INDEX IF NOT EXISTS idx_conversations_scope ON conversations (scope, updatedAt)')
+ensureColumn('conversations', 'agent_role', 'agent_role TEXT DEFAULT NULL')
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_main_conversation ON conversations(scope, agent_role) WHERE agent_role IS NOT NULL')
 // ── 对话 AI 回复设置（R-4，S9）：每空间独立开关 + 模型/身份/systemHint 覆盖 ──
 // 老库自动建表（CREATE TABLE IF NOT EXISTS 幂等，零迁移）；默认 enabled=1（D-13 默认开）。
 db.exec(`
@@ -3441,6 +3443,7 @@ function convToObj(row) {
     title: row.title,
     kind: row.kind,
     participants: parseJson(row.participants, []),
+    ...(row.agent_role ? { agentRole: row.agent_role } : {}),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     last_message_at: row.last_message_at,
@@ -3473,6 +3476,24 @@ export function createConversation(input) {
   const by = input?.by
   if (typeof by !== 'string' || by.trim().length === 0) throw new Error('缺少操作者身份 by')
   const scope = readScope(input ?? {})
+  // 按服务端岗位绑定主会话；展示名及进程身份不能用来猜测历史归属。
+  if (input?.agentRole !== undefined) {
+    if (typeof input.scope !== 'string' || !input.scope.trim()) throw new Error('Agent 会话必须指定具体空间 scope')
+    if (typeof input.agentRole !== 'string' || !input.agentRole.trim()) throw new Error('Agent 会话必须指定岗位 agentRole')
+    const role = input.agentRole.trim()
+    return withTx(() => {
+      const agent = db.prepare('SELECT name FROM roster WHERE scope = ? AND role = ?').get(scope, role)
+      if (!agent) throw new Error(`空间 ${scope} 中不存在 Agent 岗位 ${role}`)
+      const existing = db.prepare('SELECT * FROM conversations WHERE scope = ? AND agent_role = ?').get(scope, role)
+      if (existing) return convToObj(existing)
+      const t = now()
+      const result = db.prepare("INSERT INTO conversations (scope,title,kind,participants,createdAt,updatedAt,last_message_at,agent_role) VALUES (?,?,'direct',?,?,?,NULL,?)")
+        .run(scope, agent.name, JSON.stringify([by.trim(), role]), t, t, role)
+      const conv = getConversation(result.lastInsertRowid)
+      audit(by.trim(), scope, 'chat:create', null, { conv: conv.id, title: conv.title, kind: conv.kind, agentRole: role })
+      return conv
+    })
+  }
   const title = input?.title
   if (typeof title !== 'string' || title.trim().length === 0) throw new Error('缺少参数 title')
   const kind = input?.kind ?? 'space'
@@ -3506,6 +3527,9 @@ export function postMessage(input) {
   const convId = Number(input?.conv)
   if (!Number.isInteger(convId) || convId <= 0) throw new Error('缺少参数 conv')
   const conv = getConversation(convId)
+  if (conv.agentRole && !db.prepare('SELECT 1 FROM roster WHERE scope = ? AND role = ?').get(conv.scope, conv.agentRole)) {
+    throw new Error('该 Agent 已不在空间编队中，不能继续发送消息')
+  }
   const kind = input?.kind ?? 'text'
   if (!CHAT_MSG_KINDS.includes(kind)) throw new Error(`kind 必须 ∈ {${CHAT_MSG_KINDS.join(',')}}，实际收到：${kind}`)
   const body = input?.body
@@ -3518,7 +3542,7 @@ export function postMessage(input) {
     // R-4/S9：回复开关开 + 发送者非本空间回复方身份 → meta.aiStatus=awaiting（同事务写入，零迁移 meta 扩展）。
     // 回复方身份消息（by === <scope>-assistant）不标 awaiting，防自我触发死循环（TC-S9-05/AC-R4-2/I-12）。
     const replySettings = getReplySettings(conv.scope)
-    const identity = replyIdentityFor(conv.scope)
+    const identity = conv.agentRole ? `agent:${conv.scope}:${conv.agentRole}` : replyIdentityFor(conv.scope)
     // S3/R-3（决策 E1）：附件引用校验（存在/同 scope/未绑定/数量上限）先于消息插入执行；
     // 校验失败抛错 → 事务回滚，消息与绑定零落库（AC-R3-3 / TC-S3-05/10）。
     const attRefs = validateAttachmentRefs(conv.scope, input?.attachmentIds)
@@ -3640,13 +3664,25 @@ export function listAwaitingReplies({ scope, sinceMsgId = 0, limit = 20 } = {}) 
   for (const row of rows) {
     const meta = parseJson(row.meta, {})
     if (meta.aiStatus !== 'awaiting') continue
-    const conv = db.prepare('SELECT title FROM conversations WHERE id = ?').get(row.conv_id)
+    const conv = db.prepare('SELECT title, agent_role FROM conversations WHERE id = ?').get(row.conv_id)
+    const agentRow = conv?.agent_role
+      ? db.prepare('SELECT role,name,kind FROM roster WHERE scope = ? AND role = ?').get(sc, conv.agent_role)
+      : null
+    if (conv?.agent_role && !agentRow) {
+      failAiReply({ msgId: row.id, by: `agent:${sc}:${conv.agent_role}`, error: '该 Agent 已不在空间编队中' })
+      continue
+    }
     const ctxRows = db.prepare('SELECT id, author, kind, body, createdAt FROM messages WHERE conv_id = ? AND id < ? ORDER BY id DESC LIMIT ?').all(row.conv_id, row.id, CHAT_REPLY_CONTEXT_LIMIT)
     ctxRows.reverse()
     out.push({
       ...msgToObj(row),
       convId: row.conv_id,
       convTitle: conv?.title ?? '',
+      ...(agentRow ? { agent: {
+        ...agentRow,
+        identity: `agent:${sc}:${agentRow.role}`,
+        tasks: db.prepare("SELECT id,title,status,goalId,updatedAt FROM tasks WHERE scope = ? AND COALESCE(role,soldier) = ? AND status != 'canceled' ORDER BY updatedAt DESC LIMIT 16").all(sc, agentRow.role),
+      } } : {}),
       context: ctxRows.map(c => ({ id: c.id, author: c.author, kind: c.kind, body: c.body, createdAt: c.createdAt })),
     })
     if (out.length >= n) break

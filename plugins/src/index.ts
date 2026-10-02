@@ -3254,6 +3254,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     convId: number
     scope: string
     convTitle?: string
+    agent?: { role: string; name: string; kind: string; identity: string; tasks: Array<{ id: string; title: string; status: string; updatedAt?: string }> }
     author: string
     body: string
     context?: Array<{ id: number; author: string; kind?: string; body: string }>
@@ -3285,7 +3286,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       // 1) 回复设置：开关关 / 拉取失败 → 空转零出站（TC-S10-05；失败按「等下一轮」处理）
       const settings = await fetchJson<ReplySettingsPayload>(`${hubUrl}/api/chat/reply-settings?scope=${encodeURIComponent(msg.scope)}`)
       if (settings === null || !settings.enabled) return
-      const identity = chatIdentityFor(msg.scope, settings.identity)
+      const identity = msg.agent?.identity ?? chatIdentityFor(msg.scope, settings.identity)
       // 2) 防自我触发：identity 消息不再次进入回答流程（TC-S10-04，服务端已不标 awaiting，双保险）
       if (msg.author === identity) return
       // 3) 模型解析（TC-S10-06/D-14）：settings.model ?? 该空间默认（agent_models）?? 守护当前选择
@@ -3295,7 +3296,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
         if (s && s.model) fallback = { provider: s.provider || config.provider, model: s.model }
       } catch { /* 取不到默认模型则用空串，由子代理 start 失败路径兜底 */ }
       const rows = await fetchJson<Array<{ role: string; provider?: string; model?: string }>>(`${hubUrl}/api/models?scope=${encodeURIComponent(msg.scope)}`)
-      const pick = (rows ?? []).find(r => r.role === 'assistant') ?? (rows ?? []).find(r => r.role === '') ?? (rows ?? [])[0]
+      const pick = (msg.agent ? (rows ?? []).find(r => r.role === msg.agent?.role) : undefined) ?? (rows ?? []).find(r => r.role === 'assistant') ?? (rows ?? []).find(r => r.role === '') ?? (rows ?? [])[0]
       const chosenProvider = (pick?.provider && pick.provider.trim()) || fallback.provider
       const chosenModel = (settings.model && settings.model.trim()) || (pick?.model && pick.model.trim()) || fallback.model
       // 4) foreman 父级（无则标记失败，不重试同一轮）
@@ -3327,6 +3328,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       const prompt = buildChatAnswerPrompt({
         scope: msg.scope,
         convTitle: msg.convTitle,
+        agent: msg.agent,
         systemHint: settings.systemHint,
         identity,
         context: [...(msg.context ?? []), { id: msg.id, author: msg.author, body: msg.body }],
@@ -3375,7 +3377,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       }
     } catch (e) {
       log(`chat-responder 处理消息 ${msg.id} 失败：${String(e)}`)
-      const ident = chatIdentityFor(msg.scope)
+      const ident = msg.agent?.identity ?? chatIdentityFor(msg.scope)
       // S1（R-1/A1）：catch 吞错路径同样经分类器生成可行动文案（含原文片段 ≤500 契约），不悬挂 awaiting
       await markChatFailed(msg.id, msg.scope, ident, classifyChatError({ stopReason: 'error', error: String(e) }).message).catch(() => undefined)
     }

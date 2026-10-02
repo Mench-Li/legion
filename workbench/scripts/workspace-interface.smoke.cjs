@@ -1,0 +1,75 @@
+// 对独立预览做浏览器验收；仅写入独立数据库，运行时传入 Playwright 模块目录。
+const assert=require('node:assert/strict'),path=require('node:path'),fs=require('node:fs');
+const {chromium}=require(require.resolve('playwright',{paths:[process.argv[2]||process.cwd()]}));
+const root=path.resolve(__dirname,'../..');
+(async()=>{
+ const browser=await chromium.launch({headless:true,channel:'chrome'});
+ const page=await browser.newPage({viewport:{width:1440,height:900}});
+ const errors=[];page.on('pageerror',e=>errors.push(e.message));
+ await page.goto('http://127.0.0.1:4821/?api=http://127.0.0.1:4821');
+ await page.getByRole('button',{name:'Agent',exact:true}).click();
+ await page.locator('.directory-agent').first().waitFor();
+ assert.equal(await page.locator('.app-rail .rail-button').count(),6);
+ const coder=page.locator('.directory-agent').filter({hasText:'编码工程师'}).first();
+ await coder.click();
+ await page.locator('textarea[aria-label="发消息给 编码工程师"]').waitFor();
+ await page.locator('.agent-chat-embedded .chat-main-head').waitFor({state:'attached'});
+ assert.equal(await page.locator('.right-col').count(),0);
+ assert.equal(await page.locator('.command-bar').count(),0);
+ assert.equal(await page.locator('.kpi-bar').count(),0);
+ const input=page.getByRole('textbox',{name:'发消息给 编码工程师'});
+ await input.fill('切换后保留的草稿');
+ await page.locator('.directory-agent').filter({hasText:'需求分析师'}).first().click();
+ await page.getByRole('textbox',{name:'发消息给 需求分析师'}).waitFor();
+ await page.getByRole('textbox',{name:'发消息给 需求分析师'}).fill('需求岗位草稿');
+ await coder.click();
+ assert.equal(await input.inputValue(),'切换后保留的草稿');
+ const list=await (await page.request.get('http://127.0.0.1:4821/hub/api/chat/conversations?scope=software')).json();
+ assert.equal(list.conversations.filter(c=>c.agentRole==='coder').length,1);
+ const conv=list.conversations.find(c=>c.agentRole==='coder');
+ const sample=`界面验收消息 ${Date.now()}`;
+ await input.fill(sample);await input.press('Enter');
+ await page.locator('.chat-bubble.me').filter({hasText:sample}).waitFor();
+ const messages=await (await page.request.get(`http://127.0.0.1:4821/hub/api/chat/messages?conv=${conv.id}`)).json();
+ const msg=messages.messages.find(m=>m.body===sample);
+ assert.equal(msg.scope,'software');assert.equal(msg.author,'general');
+ // 不调用外部模型，用正式回写接口验证 Agent 回复身份与消息实时显示。
+ await page.request.post('http://127.0.0.1:4821/hub/api/chat/replies/answer',{data:{msgId:msg.id,body:'浏览器验收回复（测试数据）',by:'agent:software:coder'}});
+ await page.locator('.chat-bubble').filter({hasText:'浏览器验收回复（测试数据）'}).last().waitFor();
+ await input.fill('刷新后保留的草稿');
+ await page.reload();
+ await input.waitFor();assert.equal(await input.inputValue(),'刷新后保留的草稿');
+ await page.getByRole('button',{name:/任务清单/}).click();
+ await page.locator('.agent-context-drawer').waitFor();
+ await page.locator('.agent-context-drawer .x').click();
+ await page.getByRole('button',{name:'任务',exact:true}).click();
+ await page.locator('.tc-card').first().waitFor();assert.equal(await page.locator('.tc-col').count(),6);
+ await page.locator('.tc-card').filter({hasText:'T-174'}).first().click();
+ await page.getByRole('button',{name:'联系 Agent',exact:true}).waitFor();
+ await page.getByRole('button',{name:'联系 Agent',exact:true}).click();
+ await input.waitFor();assert.equal(await input.inputValue(),'刷新后保留的草稿');
+ await page.getByRole('button',{name:'资源',exact:true}).click();
+ for(const name of ['文件中心','技能中心','规范']){await page.getByRole('button',{name,exact:true}).first().click();await page.waitForTimeout(150)}
+ await page.getByRole('button',{name:'动态',exact:true}).click();
+ for(const name of ['通知中心','实时动态','上下文快照']){await page.getByRole('button',{name,exact:true}).click();await page.waitForTimeout(150)}
+ await page.getByRole('button',{name:'设置',exact:true}).click();
+ for(const name of ['空间管理','持续执行','Agent 工作流','模型与凭证','连接与令牌','浏览器助手']){await page.getByRole('button',{name,exact:true}).first().click();await page.waitForTimeout(150)}
+ await page.getByRole('button',{name:'模型与凭证',exact:true}).click();
+ assert.equal(await page.locator('.model-settings-inline .set-tab').count(),5);
+ for(const tab of await page.locator('.model-settings-inline .set-tab').all())await tab.click();
+ await page.getByRole('button',{name:'Agent',exact:true}).click();
+ await coder.click();await input.waitFor();
+ await page.screenshot({path:path.join(root,'.interface-preview','desktop.png')});
+ await page.setViewportSize({width:390,height:844});
+ await page.getByRole('button',{name:'打开侧栏导航',exact:true}).click();
+ await page.locator('.workspace-sidebar.mobile-open').waitFor();
+ await coder.click();
+ assert.equal(await page.locator('.workspace-sidebar').isVisible(),false);
+ assert.equal(await page.getByRole('button',{name:'发送 ➤',exact:true}).isVisible(),true);
+ assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+ await page.screenshot({path:path.join(root,'.interface-preview','mobile.png')});
+ assert.deepEqual(errors,[]);
+ fs.writeFileSync(path.join(root,'.interface-preview','browser-check.json'),JSON.stringify({passed:true,checks:['navigation','agent binding','draft switch and restore','real message API','reply SSE','six task lanes','task contact','resource and settings pages','model tabs','mobile'],pageErrors:errors},null,2));
+ console.log('PASS: actual API, Agent conversation isolation, draft restore, reply SSE, task navigation, settings and mobile; no browser errors');
+ await browser.close();
+})().catch(e=>{console.error(e);process.exit(1)});

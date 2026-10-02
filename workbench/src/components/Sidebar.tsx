@@ -85,7 +85,7 @@ export function Sidebar({ board, active, scope, hubMode, spaces, onNavigate, onS
     <aside className="sidebar">
       <div className="sidebar-brand">
         <span className="emblem">⚔</span>
-        <span>军团指挥台</span>
+        <span>Legion 协作台</span>
       </div>
 
       <div className="sidebar-section">模块</div>
@@ -174,8 +174,8 @@ export function Sidebar({ board, active, scope, hubMode, spaces, onNavigate, onS
       <div className="user-card">
         <div className="user-avatar">⚙</div>
         <div className="user-meta">
-          <div className="name">general · 将军</div>
-          <div className="role">在线 · 指挥员</div>
+          <div className="name">general</div>
+          <div className="role">空间管理员</div>
         </div>
       </div>
     </aside>

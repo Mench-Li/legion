@@ -72,6 +72,7 @@ interface CenterPanelProps {
   onGoalStatus?: (goalId: string, status: GoalStatus, label: string) => Promise<void>
   /** 保存目标上下文（仅将军；更新 bump contextVersion，守护下一派工对齐）。 */
   onSaveContext?: (goalId: string, text: string) => Promise<void>
+  onContactAgent?: (agent: RosterAgent) => void
 }
 
 /** 编队（服务端形状）→ 面板 AgentView。chips.cls 由服务端给 'green'/'yellow'/'red'/''，补 'chip' 前缀。 */
@@ -86,7 +87,7 @@ function fromRoster(a: RosterAgent): AgentView {
   }
 }
 
-export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces, goalInfo, hubActive = false, sceneFacts, sceneCues = [], sceneError = '', onGoalStatus, onSaveContext }: CenterPanelProps): React.JSX.Element {
+export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces, goalInfo, hubActive = false, sceneFacts, sceneCues = [], sceneError = '', onGoalStatus, onSaveContext, onContactAgent }: CenterPanelProps): React.JSX.Element {
   const isRoster = hubActive || (rosterAgents !== null && rosterAgents !== undefined)
   // 多目标：进度 = 该空间未取消目标的任务合计（各目标各自链独立统计后加总）；未就绪显示占位，绝不回退 v1 board.goal
   const hubGoals = hubActive && goalInfo ? goalInfo.goals : []
@@ -136,9 +137,9 @@ export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces
   const [agentView, setAgentView] = useState<RosterAgent | null>(null)
   const [detailTaskId, setDetailTaskId] = useState<string | null>(null)
   const rosterById = new Map(currentRoster.map(a => [a.role, a]))
-  const openAgent = (role: string): void => {
-    const hit = rosterById.get(role)
-    if (hit) setAgentView(hit)
+  const openAgent = (role: string, targetScope?: string): void => {
+    const hit = targetScope ? currentRoster.find(a => a.scope === targetScope && a.role === role) : rosterById.get(role)
+    if (hit) { if (onContactAgent) onContactAgent(hit); else setAgentView(hit) }
   }
   const openTaskFromAgent = (id: string): void => {
     setAgentView(null)
@@ -196,7 +197,7 @@ export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces
         </div>
       )}
 
-      {active === 'agents' ? (
+      {active === 'goals' ? null : active === 'agents' ? (
         <div className="panel" style={{ padding: 12, overflow: 'auto' }}>
           <div style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 600, marginBottom: 10 }}>
             🤖 智能体状态总览{isRoster ? ` · ${scope ?? '全部空间'} 专属编队` : ''}
@@ -210,7 +211,7 @@ export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces
                   <div key={gid} className="agent-group">
                     <div className="agent-group-title">🗂 {spaceName(gid)} · {list.length} 岗</div>
                     {list.map(a => (
-                      <div key={a.role} className={`panel agent-card ${a.mode} clickable`} onClick={() => openAgent(a.role)} title={`查看 ${a.name} 的任务`}>
+                      <div key={a.role} className={`panel agent-card ${a.mode} clickable`} onClick={() => openAgent(a.role, a.scope)} title={`联系 ${a.name}`}>
                         <div className="agent-head">
                           <div className="agent-avatar">{a.avatar}</div>
                           <div>

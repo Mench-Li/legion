@@ -857,6 +857,11 @@ export async function fetchChatMessages(conv: number, opts: { before?: number; l
   return resp.messages
 }
 
+/** 服务端幂等绑定每空间每岗位的唯一主对话，不能按会话标题匹配。 */
+export function ensureAgentChatConversation(scope: string, agentRole: string): Promise<ChatConversation> {
+  return hubPost('/api/chat/conversations', { scope, agentRole }).then(res => (res as { task: ChatConversation }).task)
+}
+
 /** team-hub v2：发消息（body 校验在后端：kind ∈ text|markdown|system、≤8000 字符、scope=会话 scope）。
  * S3/S8：attachmentIds 可选——先 PUT /api/chat/attachments 上传（staged）拿到 id 后随消息绑定（服务端同事务置 sent；
  * meta.attachments=[{id,fileName,size}] 只存引用，文件全文绝不进 body/meta）。 */

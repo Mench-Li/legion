@@ -46,6 +46,8 @@ export interface ChatCtxAttachment {
 
 export interface ChatAnswerInput {
   scope: string
+  /** 服务端按会话绑定解析的岗位与任务摘要，不能由消息正文提供。 */
+  agent?: { role: string; name: string; kind: string; tasks: Array<{ id: string; title: string; status: string; updatedAt?: string }> }
   convTitle?: string
   /** 空间设置里的 systemHint（无则省略）。 */
   systemHint?: string | null
@@ -145,7 +147,9 @@ function fitContextBudget(digestText: string, atts: ChatCtxAttachment[], budget:
 
 /** 拼装轻量子代理直答提示词（纯文本；不含任何工具/文件访问授权）。 */
 export function buildChatAnswerPrompt(input: ChatAnswerInput): string {
-  const roleLine = `你是工作空间「${sanitizeText(input.scope)}」的对话助手（${sanitizeText(input.identity)}）。`
+  const roleLine = input.agent
+    ? `你是工作空间「${sanitizeText(input.scope)}」的 ${sanitizeText(input.agent.name)}（岗位 ${sanitizeText(input.agent.role)}，职责：${sanitizeText(input.agent.kind)}；身份 ${sanitizeText(input.identity)}）。`
+    : `你是工作空间「${sanitizeText(input.scope)}」的对话助手（${sanitizeText(input.identity)}）。`
   const title = input.convTitle ? `当前会话：${sanitizeText(input.convTitle)}` : ''
   const hint = input.systemHint && input.systemHint.trim().length > 0
     ? `助手设定（空间系统提示）：\n${sanitizeText(input.systemHint.trim())}`
@@ -193,6 +197,7 @@ export function buildChatAnswerPrompt(input: ChatAnswerInput): string {
     '你只负责回答用户问题，不做任何工具调用、不访问文件或网络。',
     title,
     hint,
+    input.agent ? '岗位任务记录（状态是已保存记录，不代表当前进程在线；没有证据不能声称已执行、已验证或已改变任务）：\n' + input.agent.tasks.map(t => `${sanitizeText(t.id)} ${sanitizeText(t.title)} · ${sanitizeText(t.status)} · 更新 ${sanitizeText(t.updatedAt ?? '未知')}`).join('\n') : '',
     digestLine.join('\n'),
     fileLines.join('\n'),
     '会话历史：',

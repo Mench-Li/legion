@@ -4,6 +4,14 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { chatIdentityFor, buildChatAnswerPrompt } from '../lib/chatResponder.js'
 
+test('Agent 会话使用服务端岗位与任务记录；空间助手旧行为仍兼容', () => {
+  const input={scope:'software',identity:'agent:software:coder',context:[],agent:{role:'coder',name:'编码工程师',kind:'代码实现',tasks:[{id:'T-42',title:'登录界面',status:'todo',updatedAt:'2026-10-02'}]}}
+  const p=buildChatAnswerPrompt(input)
+  assert.ok(p.includes('编码工程师'));assert.ok(p.includes('岗位 coder'));assert.ok(p.includes('T-42 登录界面 · todo'))
+  assert.ok(p.includes('没有证据不能声称已执行'));assert.ok(p.includes('不做任何工具调用'))
+  assert.ok(buildChatAnswerPrompt({...input,agent:undefined}).includes('对话助手'))
+})
+
 test('TC-S10-04/D-15 回复方身份默认 <scope>-assistant；settings.identity 覆盖；与 general 不同', () => {
   assert.equal(chatIdentityFor('software'), 'software-assistant')
   assert.notEqual(chatIdentityFor('software'), 'general')

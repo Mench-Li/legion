@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { createChatConversation, fetchChatConversations, fetchChatHealth, fetchChatMessages, fetchChatReplySettings, fetchSpaces, hubBase, postChatMessage, retryChatReply, saveChatReplySettings, subscribeHubAudit, uploadChatAttachment } from '../api'
-import type { ChatAttachmentRef, ChatConversation, ChatHealthInfo, ChatMessage, SpaceInfo } from '../types'
+import { createChatConversation, ensureAgentChatConversation, fetchChatConversations, fetchChatHealth, fetchChatMessages, fetchChatReplySettings, fetchSpaces, hubBase, postChatMessage, retryChatReply, saveChatReplySettings, subscribeHubAudit, uploadChatAttachment } from '../api'
+import type { ChatAttachmentRef, ChatConversation, ChatHealthInfo, ChatMessage, SpaceInfo, RosterAgent } from '../types'
 import { mergeById } from '../dedupe'
 import { aiStateView, canSend, chatHealthView, chatSseLabel, maxSeqOf, replyModelOf, sendFailText, shouldRefillChat } from '../chatUi'
 import type { ChatHealthLite, ChatMsgLite } from '../chatUi'
@@ -103,21 +103,34 @@ function identityStale(scopeAtCall: string | null, convAtCall: number | null, sc
  *   全程无 dangerouslySetInnerHTML，任何 <img onerror>/<script>/[x](javascript:) 都只是文本。
  * - 失败路径（S2 AC6 / TC-S2-07/10）：中枢不可达/写失败 → toast 错误且草稿不丢；EventSource 原生自动重连 + 15s 轮询兜底。
  */
-export function ChatView({ scope, hubMode, spaces, onPickScope }: {
+export function ChatView({ scope, hubMode, spaces, onPickScope, agent }: {
   scope: string | null
   hubMode: boolean
   /** S7（R-2）：可选空间列表（「全部空间」视图选空间入口；缺省时组件自行 fetchSpaces）。 */
   spaces?: SpaceInfo[]
   /** S7（R-2）：点选某工作空间后回调（App 传 selectScope）。 */
   onPickScope?: (scopeId: string) => void
+  agent?: RosterAgent
 }): React.JSX.Element {
+  const draftStorageKey = agent ? `legion.agent.draft:${JSON.stringify([scope, agent.role])}` : null
+  const scrollStorageKey = agent ? `legion.agent.scroll:${JSON.stringify([scope, agent.role])}` : null
+  const restoredScrollRef = useRef<{ top: number; stick: boolean } | null>(null)
+  const scrollInitializedRef = useRef(false)
+  if (!scrollInitializedRef.current) {
+    scrollInitializedRef.current = true
+    try {
+      const saved = scrollStorageKey ? JSON.parse(sessionStorage.getItem(scrollStorageKey) ?? 'null') as { top?: unknown; stick?: unknown } | null : null
+      if (saved && typeof saved.top === 'number' && Number.isFinite(saved.top) && saved.top >= 0 && typeof saved.stick === 'boolean') restoredScrollRef.current = { top: saved.top, stick: saved.stick }
+    } catch { /* 损坏的滚动缓存回到最近消息 */ }
+  }
   const [convs, setConvs] = useState<ChatConversation[]>([])
   const [activeId, setActiveId] = useState<number | null>(null)
   const [msgs, setMsgs] = useState<ChatMessage[]>([])
   const [hasOlder, setHasOlder] = useState(false)
   const [loadingMsgs, setLoadingMsgs] = useState(false)
   const [loadingOlder, setLoadingOlder] = useState(false)
-  const [draft, setDraft] = useState('')
+  const [draft, setDraft] = useState(() => { try { return draftStorageKey ? localStorage.getItem(draftStorageKey) ?? '' : '' } catch { return '' } })
+  const [conversationError, setConversationError] = useState('')
   const [sending, setSending] = useState(false)
   const [retryingId, setRetryingId] = useState<number | null>(null) // R-4/S11：正在重试的消息 id
   const [creating, setCreating] = useState(false)
@@ -148,6 +161,7 @@ export function ChatView({ scope, hubMode, spaces, onPickScope }: {
   const [refillCount, setRefillCount] = useState(0)
   const seqWatermarkRef = useRef(0)
   const refillCountRef = useRef(0)
+  useEffect(() => { if (draftStorageKey) { try { localStorage.setItem(draftStorageKey, draft) } catch { /* 存储不可用时仍可收发 */ } } }, [draft, draftStorageKey])
 
   const loadConvs = useCallback(async (): Promise<void> => {
     const scopeAtCall = scope
@@ -155,12 +169,21 @@ export function ChatView({ scope, hubMode, spaces, onPickScope }: {
       const list = await fetchChatConversations(scope)
       // 空间身份守卫（R-A5）：await 期间空间已切走 → 旧空间会话列表/自动选中不回写当前视图
       if (scopeAtCall !== scopeRef.current) return
-      setConvs(list)
-      setActiveId(cur => (cur !== null && list.some(c => c.id === cur) ? cur : (list[0]?.id ?? null)))
+      if (agent && scopeAtCall) {
+        const conversation = list.find(c => c.agentRole === agent.role) ?? await ensureAgentChatConversation(scopeAtCall, agent.role)
+        if (scopeAtCall !== scopeRef.current) return
+        setConvs([conversation])
+        setActiveId(conversation.id)
+      } else {
+        const spaceConversations = list.filter(c => !c.agentRole)
+        setConvs(spaceConversations)
+        setActiveId(cur => (cur !== null && spaceConversations.some(c => c.id === cur) ? cur : (spaceConversations[0]?.id ?? null)))
+      }
+      setConversationError('')
     } catch (e) {
-      if (scopeAtCall === scopeRef.current) toast('err', `会话列表加载失败：${e instanceof Error ? e.message : String(e)}`)
+      if (scopeAtCall === scopeRef.current) { const message = `会话列表加载失败：${e instanceof Error ? e.message : String(e)}`; setConversationError(message); toast('err', message) }
     }
-  }, [scope])
+  }, [scope, agent?.role])
 
   // S7（R-2）：「全部空间」视图拉取空间列表（props.spaces 为空时兜底；成功后缓存 localSpaces 供切换回来看）
   useEffect(() => {
@@ -323,6 +346,12 @@ export function ChatView({ scope, hubMode, spaces, onPickScope }: {
   // 贴底自动滚动（新消息/新会话）；用户上翻读历史时不抢滚动（stickRef 由 onScroll 维护）
   useEffect(() => {
     const el = scrollRef.current
+    if (el && !loadingMsgs && msgs.length > 0 && restoredScrollRef.current) {
+      el.scrollTop = restoredScrollRef.current.top
+      stickRef.current = restoredScrollRef.current.stick
+      restoredScrollRef.current = null
+      return
+    }
     if (el && stickRef.current) el.scrollTop = el.scrollHeight
   }, [msgs, loadingMsgs, loadingOlder])
 
@@ -588,9 +617,9 @@ export function ChatView({ scope, hubMode, spaces, onPickScope }: {
   }
 
   return (
-    <div className="center-col">
+    <div className={`center-col${agent ? ' agent-chat-embedded' : ''}`}>
       <div className="panel goal-card chat-head">
-        <span className="tag">💬 对话中心</span>
+        <span className="tag">{agent ? '空间答问通道' : '空间会话'}</span>
         <span style={{ fontSize: 12, color: 'var(--text)' }}>
           {scope}
           <span style={{ color: 'var(--muted-2)', fontSize: 11 }}> · {convs.length} 个会话 · team-hub（{hubBase()}）</span>
@@ -618,12 +647,12 @@ export function ChatView({ scope, hubMode, spaces, onPickScope }: {
         </span>
         <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 6 }}>
           <button className="btn ghost" title="AI 回复设置（开关/模型/身份/systemHint）" onClick={() => void openSettings()}>⚙ 回复设置</button>
-          <button className="btn primary" onClick={startCreate}>＋ 新会话</button>
+          {!agent && <button className="btn primary" onClick={startCreate}>＋ 新会话</button>}
         </span>
       </div>
 
       <div className="chat-layout">
-        <div className="chat-conv-list panel">
+        {!agent && <div className="chat-conv-list panel">
           <div className="chat-conv-title">会话</div>
           {convs.length === 0 && <div className="chat-empty">暂无会话，点「＋ 新会话」开始</div>}
           {convs.map(c => (
@@ -639,7 +668,7 @@ export function ChatView({ scope, hubMode, spaces, onPickScope }: {
               </div>
             </div>
           ))}
-        </div>
+        </div>}
 
         <div className="chat-main panel">
           {active ? (
@@ -662,13 +691,14 @@ export function ChatView({ scope, hubMode, spaces, onPickScope }: {
                 onScroll={e => {
                   const el = e.currentTarget
                   stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+                  if (scrollStorageKey) { try { sessionStorage.setItem(scrollStorageKey, JSON.stringify({ top: el.scrollTop, stick: stickRef.current })) } catch { /* 存储不可用不影响阅读 */ } }
                 }}
               >
                 {loadingMsgs && msgs.length === 0 && <div className="chat-empty">⏳ 加载中…</div>}
                 {!loadingMsgs && msgs.length === 0 && <div className="chat-empty">还没有消息，发第一条吧</div>}
                 {msgs.map(m => {
                   const me = isMe(m.author)
-                  const bot = isBot(m)
+                  const bot = !me && isBot(m)
                   const st = metaStr(m, 'aiStatus')
                   // P2-6：回复模型在**回复行**的 meta 上（服务端 postAiReply 写 {replyTo, aiModel}），
                   // 源消息 meta 只有 aiStatus/repliedAt/replyMsg → 必须回到列表按 replyMsg 找，否则永远显示不出模型。
@@ -678,7 +708,7 @@ export function ChatView({ scope, hubMode, spaces, onPickScope }: {
                   return (
                     <div key={m.id} className={`chat-row${me ? ' me-row' : ''}${bot ? ' bot-row' : ''}`}>
                       <div className={`chat-author${me ? ' me' : ''}`}>
-                        {authorLabel(m)}
+                        {me ? '我' : agent && m.author === `agent:${scope}:${agent.role}` ? agent.name : authorLabel(m)}
                         {bot && <span className="chip" style={{ marginLeft: 4 }} title="AI 回复">🤖</span>}
                         {bot && aiModel && <span className="chip" style={{ marginLeft: 4 }} title="AI 回复模型">{aiModel}</span>}
                         <span style={{ color: 'var(--muted-2)', fontSize: 11 }}> · {fmt(m.createdAt)}</span>
@@ -724,10 +754,11 @@ export function ChatView({ scope, hubMode, spaces, onPickScope }: {
                 <textarea
                   value={draft}
                   rows={3}
-                  placeholder={'输入消息（Enter 发送 / Shift+Enter 换行；上限 ' + String(MAX_BODY) + ' 字符）… 可点「📎 附件」上传文本文件作为本次回复上下文'}
+                      aria-label={agent ? `发消息给 ${agent.name}` : '输入消息'}
+                      placeholder={agent ? `发消息给 ${agent.name}…` : '输入消息…'}
                   onChange={e => setDraft(e.target.value)}
                   onKeyDown={e => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
+                    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                       e.preventDefault()
                       void send()
                     }
@@ -775,7 +806,7 @@ export function ChatView({ scope, hubMode, spaces, onPickScope }: {
             </>
           ) : (
             <div className="chat-empty" style={{ padding: 40, textAlign: 'center' }}>
-              选择一个会话，或点「＋ 新会话」创建
+              {conversationError ? <><div role="alert">{conversationError}</div><button className="btn" onClick={() => void loadConvs()}>重试</button></> : agent ? '正在打开 Agent 对话…' : '选择一个会话，或点「＋ 新会话」创建'}
             </div>
           )}
         </div>

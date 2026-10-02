@@ -25,6 +25,7 @@ interface CommandBarProps {
   onPublishGoal?: (scope: string, objective: string, workflowDefinition?: AgentWorkflowDefinitionRef) => Promise<void>
   /** 中枢模式：当前空间编队（模型配置弹窗按它列角色）。 */
   roster?: RosterAgent[] | null
+  onOpenCalendar?: () => void
 }
 
 function exportDailyReport(board: BoardData, activity: ActivityEvent[], labels: Record<string, string>): void {
@@ -32,7 +33,7 @@ function exportDailyReport(board: BoardData, activity: ActivityEvent[], labels: 
   const today = new Date().toISOString().slice(0, 10)
   const missions = buildMissions(board, labels)
   const lines: string[] = []
-  lines.push(`# 军团日报 · ${today}`)
+  lines.push(`# Legion 协作日报 · ${today}`)
   lines.push('')
   lines.push(`- 目标：${board.goal.objective}`)
   lines.push(`- 目标进度：${board.goal.progress.done}/${board.goal.progress.total}（${board.goal.progress.percent}%）`)
@@ -64,12 +65,12 @@ function exportDailyReport(board: BoardData, activity: ActivityEvent[], labels: 
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `军团日报-${today}.md`
+  a.download = `Legion协作日报-${today}.md`
   a.click()
   URL.revokeObjectURL(url)
 }
 
-export function CommandBar({ board, activity, labels, paused, scope, hubMode, onPausedChange, goalCount, spaceName, onPublishGoal, roster }: CommandBarProps): React.JSX.Element {
+export function CommandBar({ board, activity, labels, paused, scope, hubMode, onPausedChange, goalCount, spaceName, onPublishGoal, roster, onOpenCalendar }: CommandBarProps): React.JSX.Element {
   const [showNew, setShowNew] = useState(false)
   const [showSched, setShowSched] = useState(false)
   const [showGoal, setShowGoal] = useState(false)
@@ -117,8 +118,8 @@ export function CommandBar({ board, activity, labels, paused, scope, hubMode, on
         <button className="btn" disabled={!goalReady} onClick={() => setShowGoal(true)} title={goalReady ? '发布目标：每次发布会新建一个目标（可与既有目标并存并发推进）' : '需中枢模式且已选具体工作空间'}>
           🎯 发布目标
         </button>
-        <button className="btn" onClick={() => toast('info', '日程/会议不在 legion 引擎内，随第 2 步接入 team-hub 日程表')}>
-          📅 安排会议
+        <button className="btn" onClick={onOpenCalendar} disabled={!onOpenCalendar}>
+          📅 日程日历
         </button>
         <button
           className="btn"

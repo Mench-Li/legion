@@ -41,6 +41,9 @@ interface TaskCenterViewProps {
   onSelectScope?: (scope: string | null) => void
   /** 任务状态变更后通知外层刷新（右侧任务集等）。 */
   onDataChanged?: () => void
+  selectedView?: TcView
+  onViewChange?: (view: TcView) => void
+  onContactAgent?: (scope: string, role: string) => void
 }
 
 /** 服务端状态机允许的迁移（与 team-hub/server.mjs TRANSITIONS 同构，客户端预检用）。 */
@@ -198,7 +201,7 @@ function normId(a: string, b: string): number {
   return a.localeCompare(b, undefined, { numeric: true })
 }
 
-export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onDataChanged }: TaskCenterViewProps): React.JSX.Element {
+export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onDataChanged, selectedView, onViewChange, onContactAgent }: TaskCenterViewProps): React.JSX.Element {
   /** 将军视角过滤（原「指挥总览」分组语义并入看板；默认「全部」= 经典泳道全貌）。 */
   const [view, setView] = useState<TcView>(() => {
     const saved = localStorage.getItem('legion.taskcenter.view')
@@ -269,8 +272,10 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
 
   const switchView = (next: TcView): void => {
     setView(next)
+    onViewChange?.(next)
     localStorage.setItem('legion.taskcenter.view', next)
   }
+  useEffect(() => { if (selectedView) setView(selectedView) }, [selectedView])
 
   const spaceName = useCallback(
     (id?: string): string => {
@@ -652,6 +657,7 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
           taskId={detailId}
           onClose={() => setDetailId(null)}
           onChanged={reload}
+          onContactAgent={onContactAgent}
         />
       )}
     </div>

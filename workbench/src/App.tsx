@@ -30,7 +30,12 @@ import { buildMissions, labelsFromPipeline } from './missions'
 import { boardFromHubTasks } from './hubBoard'
 import { activityFingerprint } from './dedupe'
 import type { ActivityEvent, ApiConfig, BoardData, GoalInfo, GoalStatus, Mission, RosterAgent, SpaceInfo } from './types'
-import { Sidebar } from './components/Sidebar'
+import { WorkspaceNavigation } from './components/WorkspaceNavigation'
+import { AgentWorkspace } from './components/AgentWorkspace'
+import { WorkspaceSettings } from './components/WorkspaceSettings'
+import { UiIcon } from './components/UiIcon'
+import { agentKey, NAV_GROUPS, SUB_NAV } from './navigation'
+import type { TaskViewId } from './navigation'
 import { KpiBar } from './components/KpiBar'
 import { CenterPanel } from './components/CenterPanel'
 import { MissionPanel } from './components/MissionPanel'
@@ -76,7 +81,12 @@ export default function App(): React.JSX.Element {
   const [, setConfig] = useState<ApiConfig | null>(null)
   const [conn, setConn] = useState<ConnState>('connecting')
   const [error, setError] = useState('')
-  const [active, setActive] = useState('home')
+  const [active, setActive] = useState(() => {
+    try { const saved = localStorage.getItem('legion.workspace.page'); return saved && (saved === 'chat' || NAV_GROUPS.some(g => g.target === saved || SUB_NAV[g.id].some(n => n.id === saved))) ? saved : 'home' } catch { return 'home' }
+  })
+  const [selectedAgent, setSelectedAgent] = useState<RosterAgent | null>(null)
+  const [taskView, setTaskView] = useState<TaskViewId>('all')
+  const [navigationOpen, setNavigationOpen] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   /** 通知未读徽标（S7 ← R-B2）：通知面板打开时由 NotifyView 实时上报，否则本组件低频刷新。 */
   const [notifyUnread, setNotifyUnread] = useState(0)
@@ -84,6 +94,18 @@ export default function App(): React.JSX.Element {
   const seenEvents = useRef<Set<string>>(new Set())
   const hubModeRef = useRef(false)
   hubModeRef.current = hubMode
+  useEffect(() => { try { localStorage.setItem('legion.workspace.page', active) } catch { /* 存储不可用不影响导航 */ } }, [active])
+  useEffect(() => {
+    if (!hubMode) return
+    let cancelled = false
+    try {
+      const saved = JSON.parse(localStorage.getItem('legion.workspace.agent') ?? 'null') as unknown
+      if (Array.isArray(saved) && saved.length === 2 && saved.every(x => typeof x === 'string')) {
+        void fetchRoster(saved[0]).then(rows => { if (!cancelled) setSelectedAgent(rows.agents.find(a => a.scope === saved[0] && a.role === saved[1]) ?? null) }).catch(() => { if (!cancelled) setSelectedAgent(null) })
+      }
+    } catch { /* 已损坏的缓存不选择 Agent */ }
+    return () => { cancelled = true }
+  }, [hubMode])
 
   // v1 activity 事件内容指纹（P2-3 S6：实现统一在 ../dedupe.ts，供单测锁定与组件共用）
   const eventKey = (ev: ActivityEvent): string => activityFingerprint(ev)
@@ -362,6 +384,21 @@ export default function App(): React.JSX.Element {
     setScope(next)
     void loadMissions(next)
   }, [loadMissions])
+  const pickAgent = useCallback((agent: RosterAgent): void => {
+    setSelectedAgent(agent)
+    setActive('agents')
+    try { localStorage.setItem('legion.workspace.agent', agentKey(agent.scope ?? '', agent.role)) } catch { /* 存储不可用不影响当前会话 */ }
+  }, [])
+  const refreshSelectedAgent = useCallback((agents: RosterAgent[]): void => {
+    setSelectedAgent(previous => previous ? agents.find(a => agentKey(a.scope ?? '', a.role) === agentKey(previous.scope ?? '', previous.role)) ?? null : null)
+  }, [])
+  const contactAgent = useCallback((spaceId: string, role: string): void => {
+    void fetchRoster(spaceId).then(rows => {
+      const agent = rows.agents.find(a => a.scope === spaceId && a.role === role)
+      if (agent) { selectScope(spaceId); pickAgent(agent) }
+      else toast('info', '该执行者当前不在空间 Agent 编队中')
+    }).catch(e => toast('err', e instanceof Error ? e.message : String(e)))
+  }, [pickAgent, selectScope])
 
   const handleSpaceCreated = useCallback((spaceId: string): void => {
     setShowNewSpace(false)
@@ -485,11 +522,9 @@ export default function App(): React.JSX.Element {
   const missionsShown = missions.length > 0 ? missions : displayBoard ? buildMissions(displayBoard, labels) : []
 
   return (
-    <div className="app">
-      <KpiBar board={displayBoard} paused={paused} hubMode={hubMode} hubBase={hubBase()} staffCount={hubMode ? (roster?.length ?? 0) : null} />
-      <div className="app-main">
-          <Sidebar
-          board={displayBoard}
+    <div className="app workspace-app">
+      <div className="workspace-shell">
+          <WorkspaceNavigation
           active={active}
           scope={scope}
           hubMode={hubMode}
@@ -498,19 +533,36 @@ export default function App(): React.JSX.Element {
           onSelectScope={selectScope}
           onNewSpace={openNewSpace}
           onSpaceSettings={s => setSpaceSettings(s)}
-          execEnabled={hubMode && scope ? execEnabled : false}
-          execDaemonOnline={execDaemonOnline}
-          onToggleExec={handleToggleExec}
           notifyUnread={notifyUnread}
+          selectedAgent={selectedAgent}
+          onPickAgent={pickAgent}
+          onAgentsRefreshed={refreshSelectedAgent}
+          taskView={taskView}
+          onTaskView={setTaskView}
+          open={navigationOpen}
+          onClose={() => setNavigationOpen(false)}
         />
+        <section className="workspace-stage">
+        <div className="mobile-workspace-toolbar"><button className="ui-icon-button" aria-label="打开侧栏导航" onClick={() => setNavigationOpen(true)}><UiIcon name="menu" /></button><span>Legion 协作台</span></div>
+        {active === 'home' && <KpiBar board={displayBoard} paused={paused} hubMode={hubMode} hubBase={hubBase()} staffCount={hubMode ? (roster?.length ?? 0) : null} />}
+        <div className={`workspace-page${active === 'home' ? ' workspace-overview' : ''}`}>
         {displayBoard ? (
-          active === 'tasks' ? (
+          active === 'agents' ? (
+            <AgentWorkspace key={selectedAgent ? agentKey(selectedAgent.scope ?? '', selectedAgent.role) : 'unselected'} agent={selectedAgent} hubMode={hubMode} spaces={hubSpaces} roster={roster} onContactAgent={contactAgent} onModelSettings={() => { if (selectedAgent?.scope) selectScope(selectedAgent.scope); setActive('settings-models') }} />
+          ) : active.startsWith('settings-') ? (
+            <WorkspaceSettings active={active} scope={scope} spaces={hubSpaces} roster={roster} hubMode={hubMode} execEnabled={execEnabled} execDaemonOnline={execDaemonOnline} paused={paused} onToggleExec={handleToggleExec} onPausedChange={() => void refreshConfig()} onNewSpace={openNewSpace} onSpaceSettings={s => setSpaceSettings(s)} />
+          ) : active === 'activity-feed' ? (
+            <div className="center-col workspace-activity"><ActivityFeed events={activity} /></div>
+          ) : active === 'tasks' ? (
             <TaskCenterView
               scope={scope}
               hubMode={hubMode}
               spaces={hubSpaces}
               onSelectScope={selectScope}
               onDataChanged={() => void loadMissions(scope)}
+              selectedView={taskView}
+              onViewChange={setTaskView}
+              onContactAgent={contactAgent}
             />
           ) : active === 'skills' ? (
             <SkillsPanel scope={scope} hubMode={hubMode} spaces={hubSpaces} />
@@ -534,18 +586,18 @@ export default function App(): React.JSX.Element {
           ) : active === 'snapshots' ? (
             <SnapshotView scope={scope} hubMode={hubMode} />
           ) : (
-            <CenterPanel board={displayBoard} labels={labels} active={active} rosterAgents={hubMode ? roster : null} scope={scope} spaces={hubSpaces} goalInfo={hubMode ? goalInfo : null} hubActive={hubMode} sceneFacts={sceneFacts?.scope === scope ? sceneFacts : null} sceneCues={sceneCues} sceneError={sceneError} onGoalStatus={hubMode ? handleGoalStatus : undefined} onSaveContext={hubMode ? handleGoalContext : undefined} />
+            <CenterPanel board={displayBoard} labels={labels} active={active === 'goals' ? 'goals' : 'home'} rosterAgents={hubMode ? roster : null} scope={scope} spaces={hubSpaces} goalInfo={hubMode ? goalInfo : null} hubActive={hubMode} sceneFacts={sceneFacts?.scope === scope ? sceneFacts : null} sceneCues={sceneCues} sceneError={sceneError} onGoalStatus={hubMode ? handleGoalStatus : undefined} onSaveContext={hubMode ? handleGoalContext : undefined} onContactAgent={pickAgent} />
           )
         ) : (
           <div className="center-col" />
         )}
-        <div className="right-col">
+        {active === 'home' && <div className="right-col">
           <MissionPanel missions={missionsShown} scopeAware={scopeAware} scope={scope} hubMode={hubMode} onDataChanged={() => void loadMissions(scope)} />
           <ActivityFeed events={activity} />
           <QuickTools onRefresh={() => void refresh()} refreshing={refreshing} onOpenModule={setActive} />
+        </div>}
         </div>
-      </div>
-      <CommandBar
+      {['home', 'goals', 'tasks'].includes(active) && <CommandBar
         board={displayBoard}
         activity={activity}
         labels={labels}
@@ -557,7 +609,10 @@ export default function App(): React.JSX.Element {
         spaceName={scope ? hubSpaces.find(s => s.id === scope)?.name ?? scope : undefined}
         onPublishGoal={hubMode ? handlePublishGoal : undefined}
         roster={hubMode ? roster : null}
-      />
+        onOpenCalendar={() => setActive('calendar')}
+      />}
+      </section>
+      </div>
       {showNewSpace && <NewSpaceModal onClose={() => setShowNewSpace(false)} onCreated={handleSpaceCreated} />}
       {spaceSettings && <SpaceSettingsModal space={spaceSettings} onClose={() => setSpaceSettings(null)} onSaved={handleSpaceSaved} onDeleted={handleSpaceDeleted} />}
       <ToastHost />

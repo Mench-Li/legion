@@ -422,6 +422,8 @@ export interface ChatConversation {
   kind: 'space' | 'direct' | 'task'
   title: string
   participants: string[]
+  /** 服务端绑定的岗位，仅 Agent 主会话存在。 */
+  agentRole?: string
   createdAt: string
   updatedAt: string
   last_message_at: string | null

@@ -16,6 +16,7 @@ interface TaskDetailModalProps {
   onClose: () => void
   /** 任务状态变更后通知上层刷新（任务集/编队）。 */
   onChanged?: () => void
+  onContactAgent?: (scope: string, role: string) => void
 }
 
 const STATUS_PILL: Record<string, string> = {
@@ -159,7 +160,7 @@ function childDeps(c: HubTask): string {
   return '← ' + deps.join(', ')
 }
 
-export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalProps): React.JSX.Element {
+export function TaskDetailModal({ taskId, onClose, onChanged, onContactAgent }: TaskDetailModalProps): React.JSX.Element {
   const [task, setTask] = useState<HubTask | null>(null)
   const [agentWorkflowHistory, setAgentWorkflowHistory] = useState<AgentWorkflowHistory | null>(null)
   const [attemptReconciliationDrafts, setAttemptReconciliationDrafts] = useState<Record<string, { disposition: 'confirmed-stopped' | 'still-running' | 'unable-to-confirm'; note: string }>>({})
@@ -1035,6 +1036,7 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
                 {commentOpen ? '💬 收起输入框' : '💬 评论/记录'}
               </button>
               <button className="btn ghost" disabled={busy} onClick={() => void doReassign()}>转派</button>
+              {onContactAgent && t.scope && (t.soldier || t.role) && <button className="btn" onClick={() => { onContactAgent(t.scope!, (t.soldier || t.role)!); onClose() }}>联系 Agent</button>}
             </div>
 
             {/* 就地评论输入框（替代 window.prompt 二级弹框；与上方「AI 执行过程」同一数据源） */}

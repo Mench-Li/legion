@@ -45,6 +45,7 @@ interface ModelConfigModalProps {
   scope: string
   roster: RosterAgent[] | null
   onClose: () => void
+  embedded?: boolean
 }
 
 const TIER_ORDER = ['light', 'balanced', 'heavy', 'vision'] as const
@@ -197,17 +198,17 @@ function QuickAssignTab({ scope, roster }: { scope: string; roster: RosterAgent[
   )
 }
 
-export function ModelConfigModal({ scope, roster, onClose }: ModelConfigModalProps): React.JSX.Element {
+export function ModelConfigModal({ scope, roster, onClose, embedded = false }: ModelConfigModalProps): React.JSX.Element {
   const [tab, setTab] = useState<Tab>('quick')
   const roles = useMemo(() => (roster ?? []).map(a => a.role), [roster])
 
   return (
-    <div className="modal-mask" onClick={onClose}>
+    <div className={embedded ? 'model-settings-inline' : 'modal-mask'} onClick={embedded ? undefined : onClose}>
       <div className="modal model-config-modal" onClick={e => e.stopPropagation()}>
         <div className="modal-head">
           ⚙️ 模型与凭证设置
           <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--muted-2)' }}>{scope}</span>
-          <span className="x" onClick={onClose}>✕</span>
+          {!embedded && <span className="x" onClick={onClose}>✕</span>}
         </div>
         <div className="set-tabs">
           {TABS.map(t => (

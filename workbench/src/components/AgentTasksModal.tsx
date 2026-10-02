@@ -9,6 +9,7 @@ interface AgentTasksModalProps {
   onClose: () => void
   /** 点任务 → 由父级打开统一任务详情（返回后父级可重新打开本列表）。 */
   onOpenTask: (id: string) => void
+  embedded?: boolean
 }
 
 const STATUS_GROUP: { key: string; label: string; statuses: CardStatus[] }[] = [
@@ -28,7 +29,7 @@ function askOpen(t: HubTask): boolean {
   return (cs[cs.length - 1].text ?? '').startsWith('❓')
 }
 
-export function AgentTasksModal({ agent, roster = [], onClose, onOpenTask }: AgentTasksModalProps): React.JSX.Element {
+export function AgentTasksModal({ agent, roster = [], onClose, onOpenTask, embedded = false }: AgentTasksModalProps): React.JSX.Element {
   const rosterRolesKey = roster.filter(member => !member.external).map(member => member.role).sort().join('\0')
   const [tasks, setTasks] = useState<HubTask[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
@@ -88,7 +89,7 @@ export function AgentTasksModal({ agent, roster = [], onClose, onOpenTask }: Age
   const shown: HubTask[] = tasks ?? quick
 
   return (
-    <div className="modal-mask" onClick={onClose}>
+    <div className={embedded ? 'agent-tasks-inline' : 'modal-mask'} onClick={embedded ? undefined : onClose}>
       <div className="modal agent-tasks-modal" onClick={e => e.stopPropagation()}>
         <div className="modal-head">
           <span className="agent-avatar" style={{ fontSize: 16 }}>{agent.avatar}</span>

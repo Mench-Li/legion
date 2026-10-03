@@ -41,7 +41,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $cli = Join-Path $repo 'product\launcher\cli.mjs'
-$legionHome = Join-Path $env:LOCALAPPDATA 'Legion'
+$legionHome = if ($env:LEGION_HOME) { $env:LEGION_HOME } else { Join-Path $env:LOCALAPPDATA 'Legion' }
 $configPath = Join-Path $legionHome 'data\product.config.json'
 
 if (-not (Test-Path $cli)) { throw "找不到 Launcher：$cli" }
@@ -99,6 +99,15 @@ if ($Url) {
   Write-Host '反向拉起的 DSH 地址（整条含 token，直接贴浏览器）：'
   Write-Host "  $u"
   exit 0
+}
+
+# Reuse before port selection and preflight: occupied ports belong to the shared
+# backend, and must not trigger a second set of services or a runtime install.
+if (-not $Check) {
+  $connectArgs = @('--connect-existing')
+  if ($PSBoundParameters.ContainsKey('Workspace')) { $connectArgs += "--workspace=$Workspace" }
+  & node $cli @connectArgs
+  if ($LASTEXITCODE -ne 11) { exit $LASTEXITCODE }
 }
 
 $runtimePort = Select-Port 3080 $RuntimePort 'runtime(DSH)'

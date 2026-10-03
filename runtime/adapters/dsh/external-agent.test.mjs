@@ -126,8 +126,13 @@ test('外部 WorkerReport 要求唯一且完整的 JSON 契约，拒绝自然语
   assert.deepEqual(parseExternalWorkerReport(`已完成审查。\n${valid}\n有一处小结。`).report, JSON.parse(valid))
   const bracesInString = JSON.stringify({ status: 'done', summary: 'brace } in text', evidence: 'checked', blocker: '', artifact: null })
   assert.deepEqual(parseExternalWorkerReport(`结果：${bracesInString}`).report, JSON.parse(bracesInString))
+  assert.deepEqual(parseExternalWorkerReport(`辅助元数据 {"trace":"ignored"}\n${valid}`).report, JSON.parse(valid),
+    '多个 JSON 片段中只接受唯一满足 WorkerReport 契约的对象')
   assert.equal(parseExternalWorkerReport(`${valid}\n${valid}`).ok, false)
   assert.equal(parseExternalWorkerReport('Looks good').code, EXTERNAL_AGENT_CODES.RESULT_INVALID)
+  const malformed = parseExternalWorkerReport('PRIVATE_RESPONSE_SENTINEL')
+  assert.equal(malformed.message, '外部 Agent 报告不是有效 JSON（安全结构诊断：chars=25, prefix=other, objects=0, topLevel=0, depth=0, candidate=none, json=none, fenced=false）')
+  assert.equal(malformed.message.includes('PRIVATE_RESPONSE_SENTINEL'), false, 'safe diagnostics never retain or echo response text')
   assert.equal(parseExternalWorkerReport(JSON.stringify({ status: 'done', summary: 'x', evidence: '', blocker: '' })).ok, false)
   assert.equal(parseExternalWorkerReport(JSON.stringify({ status: 'done', summary: 'x', evidence: '', blocker: '', artifact: null, testReport: { passed: 'yes' } })).ok, false)
   assert.equal(parseExternalWorkerReport(JSON.stringify({ status: 'done', summary: 'reviewed', evidence: 'diff checked', blocker: '', artifact: null, review: { passed: false, findings: [{ kind: 'design', summary: 'criteria missing', evidence: 'spec §2' }] } })).ok, true)

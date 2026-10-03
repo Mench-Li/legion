@@ -1510,7 +1510,7 @@ export interface HubMigrationPlan {
 }
 
 /** 通用 JSON 请求。**写请求都带 20s 超时**（与 hubPost 一致：界面不能无感卡住）。 */
-async function hubRequest(method: string, path: string, body?: Record<string, unknown>): Promise<unknown> {
+export async function hubRequest(method: string, path: string, body?: Record<string, unknown>): Promise<unknown> {
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), 20_000)
   let res: Response
@@ -1915,4 +1915,68 @@ export function fetchRepoContention(repoId: string): Promise<{ readOnly: boolean
  */
 export function fetchRepoMetrics(repoId: string): Promise<{ ok: boolean; repoId: string; metrics: Record<string, { available: boolean; value: number | null; reason: string | null }> }> {
   return hubRequest('GET', `/api/metrics/repository?repoId=${encodeURIComponent(repoId)}`) as Promise<{ ok: boolean; repoId: string; metrics: Record<string, { available: boolean; value: number | null; reason: string | null }> }>
+}
+
+export interface WorkflowPackFile {
+  format: 'legion/workflow-pack@1'
+  id: string
+  version: string
+  name: string
+  description: string
+  scope: { id: string; name: string }
+  roles: unknown[]
+  stages: unknown[]
+  assets: unknown[]
+}
+
+export interface WorkflowPackPreview {
+  action: 'install' | 'upgrade' | 'current' | 'conflict'
+  reason: string | null
+  packageId: string
+  version: string
+  scope: string
+  name: string
+  description: string
+  roles: number
+  stages: number
+  assets: number
+}
+
+export interface InstalledWorkflowPack {
+  id: string
+  scope: string
+  version: string
+  digest: string
+  installedAt: string
+}
+
+export interface WorkflowPackAsset {
+  id: string
+  type: 'skill' | 'document' | 'template'
+  title: string
+  path: string
+  content: string
+}
+
+export async function fetchWorkflowPacks(): Promise<InstalledWorkflowPack[]> {
+  const result = await readJson<{ packages: InstalledWorkflowPack[] }>(await hubGet('/api/workflow-packs'))
+  return Array.isArray(result.packages) ? result.packages : []
+}
+
+export async function fetchWorkflowPackAssets(scope: string, packId: string): Promise<WorkflowPackAsset[]> {
+  const query = new URLSearchParams({ scope, pack: packId })
+  const result = await readJson<{ assets: WorkflowPackAsset[] }>(await hubGet(`/api/workflow-packs/assets?${query}`))
+  return Array.isArray(result.assets) ? result.assets : []
+}
+
+export async function previewWorkflowPack(pack: WorkflowPackFile): Promise<WorkflowPackPreview> {
+  const response = await hubPost('/api/workflow-packs/preview', { scope: pack.scope.id, pack }) as { task?: WorkflowPackPreview }
+  if (!response.task) throw new Error('流程包预览响应无效')
+  return response.task
+}
+
+export async function installWorkflowPack(pack: WorkflowPackFile): Promise<WorkflowPackPreview> {
+  const response = await hubPost('/api/workflow-packs/install', { scope: pack.scope.id, pack }) as { task?: WorkflowPackPreview }
+  if (!response.task) throw new Error('流程包安装响应无效')
+  return response.task
 }

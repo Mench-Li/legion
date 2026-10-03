@@ -10,7 +10,7 @@
 
 export const name = 'p13-control'
 
-export const inject = ['webServer', 'appExit']
+export const inject = ['webServer', 'appExit', 'subagents']
 
 export function apply(ctx) {
   ctx.webServer.register({
@@ -38,6 +38,19 @@ export function apply(ctx) {
           throw error
         }
       }, 50)
+    },
+  })
+
+  ctx.webServer.register({
+    kind: 'exact',
+    path: '/__p13/providers',
+    handler: (req, res) => {
+      const providers = ctx.subagents.list().map((providerName) => {
+        const provider = ctx.subagents.getProvider(providerName)
+        return { name: providerName, capabilities: provider?.capabilities ?? {} }
+      })
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({ providers }))
     },
   })
 }

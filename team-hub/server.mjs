@@ -63,6 +63,8 @@ import http from 'node:http'
 import { checkDesktopRequest } from '../product/local-auth.mjs'
 import { createAgentConversationService } from './agent-conversations.mjs'
 import { createAgentsRoutes } from './routes/agents.mjs'
+import { bootstrapWorkflowPack, ensureWorkflowPackSchema, validateWorkflowPack } from '../product/workflow-packs/pack.mjs'
+import { createWorkflowPackRoutes } from './routes/workflow-packs.mjs'
 import { DatabaseSync } from 'node:sqlite'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
@@ -4531,6 +4533,11 @@ function submitAgentWorkflowReview({ taskId, by, scope, findings, summary, evide
     if (prior !== undefined) {
       return { kind: prior.kind, round: prior.round_no, nextTaskId: prior.next_task_id, replayed: true, result: parseJson(prior.result_json, null) }
     }
+    if (task.goalId !== null && task.goalId !== undefined && getGoal(task.goalId).status === 'canceled') {
+      throw Object.assign(new Error(`所属目标 ${task.goalId} 已取消，不能再提交审查或创建返工阶段`), {
+        code: 'AGENT_WORKFLOW_GOAL_CANCELED', statusCode: 409,
+      })
+    }
     if (task.status !== 'in_progress' && task.status !== 'in_review') {
       throw Object.assign(new Error(`审查任务当前状态不可结算：${task.status}`), { code: 'AGENT_WORKFLOW_TASK_STATE', statusCode: 409 })
     }
@@ -5420,14 +5427,26 @@ function resolveAgentWorkflowContextSnapshot(workflowOrPipeline, taskId) {
   let designArtifacts = []
   let implementation = null
   let implementationHandoffError = null
-  const upstreamStages = ancestors.map((upstream) => ({
-    stageId: upstream.agentSelectionSnapshot?.workflowStageId ?? null,
-    taskId: upstream.id,
-    role: upstream.role,
-    artifacts: (upstream.artifacts ?? []).filter((item) => item?.kind !== 'file' || isRelativeWorkflowFileArtifact(item)),
-    evidence: upstream.evidence ?? [],
-    workflowContext: upstream.agentSelectionSnapshot?.workflowContext ?? null,
-  }))
+  // Review stages are read-only control stages. They can produce typed
+  // findings, but intentionally do not write Git checkpoint evidence; rework
+  // tasks must import the design/implementation commits without requiring a
+  // synthetic commit from the review task itself.
+  const upstreamStageId = (upstream) => upstream.agentSelectionSnapshot?.workflowStageId
+    ?? workflow.stageIdByRole?.[upstream.role]
+    ?? (upstream.role === workflow.designRole ? designStageId : null)
+    ?? (upstream.role === workflow.implementationRole ? implementationStageId : null)
+    ?? (upstream.role === workflow.reviewRole ? reviewStageId : null)
+    ?? null
+  let upstreamStages = ancestors
+    .filter((upstream) => upstreamStageId(upstream) !== reviewStageId)
+    .map((upstream) => ({
+      stageId: upstreamStageId(upstream),
+      taskId: upstream.id,
+      role: upstream.role,
+      artifacts: (upstream.artifacts ?? []).filter((item) => item?.kind !== 'file' || isRelativeWorkflowFileArtifact(item)),
+      evidence: upstream.evidence ?? [],
+      workflowContext: upstream.agentSelectionSnapshot?.workflowContext ?? null,
+    }))
 
   if (taskStageId === implementationStageId || taskStageId === reviewStageId) {
     const designTask = findWorkflowStageAncestor(taskId, workflow, designStageId)
@@ -5435,6 +5454,35 @@ function resolveAgentWorkflowContextSnapshot(workflowOrPipeline, taskId) {
       designArtifacts = (designTask.artifacts ?? [])
         .filter(isRelativeWorkflowFileArtifact)
         .map((item) => ({ taskId: designTask.id, path: item.path, digest: item.digest, title: item.title ?? '' }))
+    }
+    // Rework keeps earlier generations in the task ancestry. If a later
+    // descendant stage has replaced a file artifact at the same path, only
+    // that descendant's version belongs in the handoff. Keep same-path
+    // artifacts from sibling branches: they are independent inputs and a
+    // genuine conflict must remain visible to the worker.
+    const fileArtifacts = upstreamStages.flatMap((upstream) => upstream.artifacts
+      .filter((item) => item?.kind === 'file' && typeof item.path === 'string')
+      .map((item) => ({ taskId: upstream.taskId, path: item.path.replaceAll('\\', '/'), digest: item.digest })))
+    const ancestryByTask = new Map()
+    const isDescendantOf = (candidateTaskId, possibleAncestorId) => {
+      if (!ancestryByTask.has(candidateTaskId)) {
+        ancestryByTask.set(candidateTaskId, new Set(workflowAncestors(candidateTaskId, workflow).map((item) => item.id)))
+      }
+      return ancestryByTask.get(candidateTaskId).has(possibleAncestorId)
+    }
+    const supersededArtifacts = new Set()
+    for (const older of fileArtifacts) {
+      if (fileArtifacts.some((newer) => newer.path === older.path && newer.taskId !== older.taskId
+        && isDescendantOf(newer.taskId, older.taskId))) {
+        supersededArtifacts.add(`${older.taskId}\0${older.path}\0${older.digest}`)
+      }
+    }
+    if (supersededArtifacts.size > 0) {
+      upstreamStages = upstreamStages.map((upstream) => ({
+        ...upstream,
+        artifacts: upstream.artifacts.filter((item) => item?.kind !== 'file' || typeof item.path !== 'string'
+          || !supersededArtifacts.has(`${upstream.taskId}\0${item.path.replaceAll('\\', '/')}\0${item.digest}`)),
+      }))
     }
   }
 
@@ -6657,6 +6705,7 @@ export function artifactContent(taskId, rawI) {
 // ── 路由层（PRT-316）：`handle` 里已提取出去的路由族在这里装配。──
 // 依赖由本文件注入（各族自己不 import hub 内部件）。新族加进这个数组即可，
 // 不需要再往下面那条 if 链里抄一遍同样的形状。
+ensureWorkflowPackSchema(db)
 export const agentConversations = createAgentConversationService({
   db, withTx, audit, createTask,
   recordRunEvents: input => runStore.recordRunEvents(input),
@@ -6669,6 +6718,9 @@ const agentConversationTimer = setInterval(() => {
 agentConversationTimer.unref()
 
 const router = createRouter([
+  createWorkflowPackRoutes({
+    db, json, handleWrite: (req, res, run) => handleWrite(req, res, run, { maxBytes: 2 * 1024 * 1024 }), audit, withTx,
+  }),
   createAgentsRoutes({ service:agentConversations,json,authorized,readBody,requireMember,readScope }),
   // 冲突治理族放在最前：/api/tasks/:id/write-intent 等具体路径必须先于宽前缀匹配。
   createWriteIntentRoutes({

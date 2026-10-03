@@ -26,8 +26,8 @@
     ]
   },
   "inbox": 1,
-  "lastSweepAt": "2026-10-02T11:46:25.493Z",
-  "uptimeMs": 694353,
+  "lastSweepAt": "2026-10-03T00:47:16.466Z",
+  "uptimeMs": 394676,
   "model": {
     "provider": "custom-ds",
     "model": "deepseek-v4-flash-openai"
@@ -54,6 +54,6 @@
     "total": 4,
     "present": 4,
     "missing": [],
-    "checkedAt": "2026-10-02T11:46:25.493Z"
+    "checkedAt": "2026-10-03T00:47:16.466Z"
   }
 }

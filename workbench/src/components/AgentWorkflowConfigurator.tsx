@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react'
 import { fetchAgentNodes, fetchAgentToolConfigs, fetchAgentWorkflowDefinitions, fetchAgentWorkflowHistory, fetchAgentWorkflowInstances, fetchModelProfiles, fetchSpacePipeline, registerAgentNode, registerAgentToolConfig, registerAgentWorkflowDefinition, saveSpacePipeline, setGoalStatus } from '../api'
 import type { AgentNodeRecord, AgentToolConfigRecord, AgentWorkflowDefinition, AgentWorkflowHistory, AgentWorkflowInstanceSummary, HubModelProfile, SpacePipelineConfig } from '../api'
+import { formatCodexSystemProxyMode } from '../agentWorkflowView'
 import { toast } from './Toast'
 import type { GoalStatus } from '../types'
 
@@ -51,12 +52,6 @@ function observedCodexSystemProxyMode(node: AgentNodeRecord): string | null {
   if (providers === null || typeof providers !== 'object' || Array.isArray(providers)) return null
   const provider = (providers as Record<string, { systemProxyMode?: unknown }>).codex
   return typeof provider?.systemProxyMode === 'string' ? provider.systemProxyMode : null
-}
-
-function formatCodexSystemProxyMode(mode: string | null): string {
-  if (mode === 'system') return '系统代理已启用'
-  if (mode === 'inherit') return '继承 Codex 原生设置'
-  return '未上报（需更新 Codex 执行服务）'
 }
 
 function defaultRole(stages: SpacePipelineConfig['stages'], key: RoleKey): string {
@@ -533,7 +528,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
               </div>
               <div style={{ color: 'var(--muted-2)' }}>节点是运行 Legion worker 的 执行服务实例，不是 Claude/Codex 产品。Provider、能力和 生效权限模式由 daemon 心跳报告；外部阶段只有匹配冻结权限模式时才会派工。登记不会复制登录凭据。随后需在 daemon 配置中设置相同的 agentNodeId。</div>
               {nodes.some(node => node.providerNames.includes('codex')) && <div style={{ color: 'var(--muted-2)', marginTop: 6 }}>
-                Codex 网络代理（节点级）：{nodes.filter(node => node.providerNames.includes('codex')).map(node => `${node.label}：${formatCodexSystemProxyMode(observedCodexSystemProxyMode(node))}`).join('；')}。
+                Codex 网络代理状态（逐节点）：{nodes.filter(node => node.providerNames.includes('codex')).map(node => `${node.label}：${formatCodexSystemProxyMode(observedCodexSystemProxyMode(node))}`).join('；')}。
               </div>}
             </div>
             {(Object.values(tools).includes('codex') || graphStages.some(stage => stage.tool === 'codex')) && <div style={{ color: 'var(--yellow)', marginTop: 10, padding: 8, border: '1px solid var(--line)', borderRadius: 6 }}>

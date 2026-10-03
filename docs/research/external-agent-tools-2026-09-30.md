@@ -10,7 +10,7 @@ Legion 要让多个 Agent 工具围绕同一目标接力工作，并以版本化
 
 ## 调查结论与当前实现
 
-用户记忆中的“创建节点并接 Claude Code、Codex”项目是 Agent Network。DSH 已有真正调用这两个产品的 provider，但当前提供一次性委派。Legion 现已把阶段工具配置冻结到目标，并把设计文件 SHA-256、实现提交 SHA 与测试证据冻结到后续阶段快照，派工前核验设计内容和待审提交；Hub 还会核对测试报告引用的完成态 Stage Attempt、provider、Run ID 和已持久化报告内容是否完全一致。typed review 按类别创建可审计返工：实现问题回编码阶段，设计问题回设计阶段，混合问题优先回设计阶段；轮数受工作流上限限制。Legion 也已支持登记本机 DSH 执行节点、心跳上报 provider/能力、阶段绑定节点与认领时核验；跨机器工作区和 Git 同步尚未支持。Workbench 的空间设置提供三阶段工具/角色/节点配置，任务详情展示阶段工具、设计版本、实现提交/测试证据与审查返工历史；真实 Claude/Codex 认证执行和整条产品闭环仍未完成，因此当前是可配置、可审计的闭环骨架，不代表真实产品完整跑通。
+用户记忆中的“创建节点并接 Claude Code、Codex”项目是 Agent Network。DSH 已有真正调用这两个产品的 provider，但当前提供一次性委派。Legion 现已把阶段工具配置冻结到目标，并把设计文件 SHA-256、实现提交 SHA 与测试证据冻结到后续阶段快照，派工前核验设计内容和待审提交；Hub 还会核对测试报告引用的完成态 Stage Attempt、provider、Run ID 和已持久化报告内容是否完全一致。typed review 按类别创建可审计返工：实现问题回编码阶段，设计问题回设计阶段，混合问题优先回设计阶段；轮数受工作流上限限制。Legion 也已支持登记本机 DSH 执行节点、心跳上报 provider/能力、阶段绑定节点与认领时核验；跨机器工作区和 Git 同步尚未支持。Workbench 的空间设置提供三阶段工具/角色/节点配置，任务详情展示阶段工具、设计版本、实现提交/测试证据与审查返工历史。真实 Claude→DSH native DeepSeek→Codex 正常链和真实 design finding 返工链均已通过；其余认证/取消矩阵及跨机器扩展仍需单独验收。
 
 未知执行结果会保留 Attempt、Run ID 与工作区并将任务挂起，防止未经核实自动重派。Hub 现提供仅限 `general` 操作人的结构化核对记录，可追加 `confirmed-stopped`、`still-running` 或 `unable-to-confirm` 结论及必填依据，并在工作流历史和 Workbench 中回读。该记录是人工判断的审计证据，不是 provider 终态的技术证明；它不会把 `unknown` 改写成成功、失败或已取消，也不会自动释放工作区或重派。未知 Run 的真实终态仍需 provider 查询/恢复能力或独立运行证据确认。
 
@@ -302,4 +302,22 @@ Claude Code 与 Codex 的接入需要同时保留产品原生 OAuth 登录和 AP
 
 2026-10-02 交接路径回归修复：独立 workflow worktree 可能位于仓库根目录外，版本化阶段产物现在相对冻结 worktree 登记；Hub 下游快照会丢弃 append-only 历史中的绝对 file artifact，只消费有 SHA-256 且路径为相对路径的产物。插件全量 442 项与 Hub pipeline 24 项通过。P13 T-001 设计提交/摘要经复核后，修正 Hub 产物路径并补入冻结提交证据；T-002 现能正确导入设计上下文，但 DSH native `spawn` Attempt 以未知错误结束并保持隔离，未生成代码。详见[实施计划](../superpowers/plans/2026-09-30-stage-agent-workflow-implementation.md)。
 
-凭据安全状态更正：2026-10-02 的一次本机凭据检查误将 credential file 中的 API-key 值输出到会话工具结果中；不记录、不复用这些值，要求用户在本机轮换后再继续真实 API-key 验收。早期研究段落关于未读取/未输出凭据的陈述仅适用于早期检查，不适用于这次操作。
+凭据安全状态更正：2026-10-02 的早先一次本机凭据检查误将 credential file 中的 API-key 值输出到会话工具结果中；该值不记录、不复用。用户随后确认已在本机轮换旧密钥。后续真实验收使用 DSH credential service 的无值 `describe` 确认 `DEEPSEEK_API_KEY` 来源为本地文件，再由 DSH provider 在内存中解析并用于一次 `deepseek-v4-flash` 请求；只记录完成状态和固定响应标记，不读取或回显值。轮换后的 DeepSeek API-key 请求成功，但尚未构成 Legion 持久化 coding Attempt。准备运行首选 Claude→DSH→Codex 持久化流程时，本地 CC Switch 路由 `127.0.0.1:15721` 当前拒绝连接且无对应进程；因此没有创建任何该流程的目标或 Attempt。重启 CC Switch 路由后可运行 [首选真实 provider 闭环探针](../../tests/p13-fixture/real-claude-deepseek-codex.mjs)。
+
+2026-10-02 当前工作区复核：Codex 代理模式的节点级文案单测 3/3 通过；Hub pipeline 与工作流契约回归 36/36；Workbench TypeScript 检查和 production build 通过（保留已有大 chunk 警告）。真实 DSH host 使用隔离 profile 启动成功，验证其 credentials-local 插件可指向本机 credential file，Claude provider env 可在隔离 profile 覆写为 CC Switch 路由；该启动未派发任务或发起模型请求。首选闭环探针使用独立临时仓库与 Hub，路由不可用时先退出，不留下目标或 Stage Attempt。
+
+持久化证据审计：当前可访问的 P13 临时 Hub 数据库中，`greet` 工作流任务的冻结 Agent 工具快照和 Stage Attempt 均记为 `codex` provider；任务标题里的“Claude design”不能证明 Claude 实际执行。现存数据库没有可用的 Claude 或 DeepSeek coding Attempt 记录。Claude 的已确认实跑目前只有没有 Legion Attempt 的 DSH provider 单阶段 smoke；DeepSeek 通过本机凭证引用发起的固定请求证明 API key 可用，但仍需 Stage Attempt/Run、coding diff 和 Legion receipt 才能证明完整 Agent 阶段。
+
+## 2026-10-02 Codex 系统代理的节点级可见性
+
+Codex 的 `systemProxyMode` 是执行节点上 DSH Codex provider 的配置，不是 Legion 自动探测出的连通性结论。Workbench 必须逐个标明安装 Codex provider 的执行节点当前上报模式：`system` 表示已配置 Codex CLI 的 `respect_system_proxy`（该 CLI 功能仍标为开发中，节点上要用实际模型发起只读请求验证）；`inherit` 表示 DSH 不强制系统代理，而沿用 Codex 原生配置与进程代理环境变量，因此仍可能走代理，不能标成“直连”；模式缺失/未知时说明无法判断。节点心跳只能证明配置已加载，不能替代目标节点网络请求验收。
+
+当前界面位于 Workbench 空间设置的跨 Agent 工作流配置中，以节点名称逐项显示 Codex 代理状态，并附 DSH profile 配置示例和本机只读验收提示。状态文案纯逻辑测试覆盖 `system`、`inherit`、未上报三条分支，3/3 通过；Workbench TypeScript/Vite production build 通过（保留既有大 chunk 警告）。当前目标节点的真实 `system` 模式连通性已按前述记录验收；其他执行节点仍需分别测试。
+
+2026-10-02 密钥轮换后再次实跑首选链：用户确认旧密钥已轮换；CC Switch `127.0.0.1:15721` 可达，隔离 DSH 节点同时上报 `claude-code`、`spawn`、`codex`。两次 Claude design Stage Attempt 均绑定 provider Run 后结束为 `unknown`，日志给出 `invalid-external-report` / “外部 Agent 报告不是有效 JSON”。第二次已把任务提示改成严格匹配 WorkerReport schema 的单一 JSON 示例，仍复现。该诊断表明 DSH→Legion 收到的终态不满足 JSON 解析，但因为响应正文不落库，不能进一步断言其具体格式，也不应把失败归咎于路由或认证；没有进入 DeepSeek coding 或 Codex review。探针修正为失败现场保留。外部报告解析器增加只记录文本字符数、首部类别、JSON 对象数与代码围栏状态的脱敏诊断，不回显正文；adapter 测试 12/12、真实 DSH host injection 14/14、Workbench 节点代理状态 3/3 通过。没有因相同失败继续重复真实模型调用。当前首选闭环仍未验收，之前关于该路由始终缺少 assistant 最终文本的观察不能覆盖这两次新运行；应以每次 Attempt 的实际安全诊断为准。
+
+2026-10-03 首选正常链真实闭环通过，修正并取代前述“首选链仍未验收”的当前状态：新隔离 DSH profile 中真实 Claude Code 设计 Attempt `wfa-50386cb8-eaed-43a1-8124-f0d3f39b74da` / Run `f7013f0e-ed41-49b0-8ac4-6124b3d7d5d4`、DSH native DeepSeek 编码 Attempt `wfa-ffd51512-b0a7-4b10-8f6a-9ac021aa9230` / Run `34250f22-5513-4bbd-9fca-90e1af0548e0`、Codex review Attempt `wfa-fd9f7191-91cc-4fdc-86bb-05d14cf8779f` / Run `6d4f1632-b3e2-4721-97a5-a4dd7a0de137` 全部完成。设计冻结 SHA-256 为 `270872fd0fd8961e1ecad17e6c1b0166d508d0c8e7a1338d2eef61861d2590c2`；实现提交 `6daecff8980783f461e5a1780e624a0f8e1b4bce`，包含 `src/greet.mjs` 和 `test/greet.test.mjs`；Legion runner receipt 绑定实现 Attempt、provider Run 与提交 SHA，测试通过；Codex review 通过；最终 worktree clean。成功探针结束后清理临时 profile、数据库和仓库。
+
+本次实跑还揭示并修复了沙箱与 Git worktree 的职责边界：DSH coder 若自行 `git commit`，会因公共 `.git` 元数据位于该阶段 worktree 可写根以外而被阻止。工作流提示现明确由 Legion 宿主创建阶段提交；DSH 只负责实现和自测，返回后由 Legion 先冻结提交再执行独立测试。没有扩大 DSH sandbox 权限。`plugins/tests/worker-regression.test.mjs` 的三 Agent 持久化回归现验证不要求 DSH agent 写 Git 元数据，Legion 仍能产生并审计绑定 receipt 的提交。此前两次 Claude WorkerReport 解析失败保留为历史记录，不再是当前正常链阻断状态。
+
+2026-10-03 真实 design finding 返工链通过：在独立临时仓库中，Claude 初版设计遗漏输入首尾空格语义；DSH native DeepSeek 完成实现和测试；Codex 实际提交 typed `design` finding。随后新 Claude Attempt 修订设计，新 DSH Attempt 重新编码/独立测试，新 Codex Attempt 复审通过。六个 Attempt 分别绑定真实 Provider Run，最终 Legion receipt 关联新的 coder Attempt、Run 与提交，worktree clean。详细 Attempt/Run、commit 和验收证据见[实施计划记录](../superpowers/plans/2026-09-30-stage-agent-workflow-implementation.md#2026-10-03-真实-claude-design-finding-返工闭环通过)。此次修复 Hub 上游快照仅淘汰被后代阶段替换的同路径旧文件版本，同时保留同级分支产物；也增强外部报告解析，使多段输出里唯一有效 WorkerReport 可被提取，而多个有效报告仍会拒绝。真实首选链的正常路径和设计返工路径均已通过；跨机器同步和剩余 provider/认证专项矩阵另行验收。

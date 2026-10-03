@@ -410,9 +410,32 @@ describe('TC-SP-P0-01/02 读写：空态 → 写入 → 回读 → version 指�
     assert.equal(mod.db.prepare('SELECT COUNT(*) AS n FROM tasks WHERE parent=?').get(taskId).n, 1)
     assert.equal(mod.db.prepare('SELECT COUNT(*) AS n FROM agent_workflow_reviews WHERE workflow_instance_id=?').get(rootId).n, 1)
 
+    const canceledGoalId = 'typed-review-canceled-goal'
+    const canceledReviewTaskId = 'typed-review-canceled-goal-review'
+    mod.db.prepare(`INSERT INTO goal (id, scope, objective, status, version, mode, createdAt, updatedAt)
+      VALUES (?, ?, ?, 'active', 1, 'chain', ?, ?)`).run(canceledGoalId, scope, 'Canceled review must not create rework', T, T)
+    mod.db.prepare(`INSERT INTO tasks (id, title, priority, status, role, scope, soldier, goalId, agent_selection_snapshot)
+      VALUES (?, ?, 'high', 'in_progress', 'reviewer', ?, 'codex', ?, ?)`).run(
+      canceledReviewTaskId, 'Canceled goal review', scope, canceledGoalId, JSON.stringify(snapshot),
+    )
+    const cancelGoal = await post('/api/goal/status', { id: canceledGoalId, status: 'canceled', by: 'general', scope })
+    assert.equal(cancelGoal.status, 200, cancelGoal.text)
+    const canceledReview = await post('/api/agent-workflow/review', {
+      taskId: canceledReviewTaskId, by: 'codex', scope,
+      findings: [{ kind: 'implementation', summary: 'late provider response after goal cancellation' }],
+      summary: 'Late review', evidence: 'review.md#L1',
+    })
+    assert.equal(canceledReview.status, 409, canceledReview.text)
+    assert.equal(canceledReview.json.code, 'AGENT_WORKFLOW_GOAL_CANCELED')
+    assert.equal(mod.db.prepare('SELECT status FROM tasks WHERE id=?').get(canceledReviewTaskId).status, 'in_progress')
+    assert.equal(mod.db.prepare('SELECT COUNT(*) AS n FROM agent_workflow_reviews WHERE source_review_task_id=?').get(canceledReviewTaskId).n, 0)
+    assert.equal(mod.db.prepare('SELECT COUNT(*) AS n FROM tasks WHERE parent=?').get(canceledReviewTaskId).n, 0)
+
     const addReviewAttempt = (id) => mod.db.prepare("INSERT INTO tasks (id, title, priority, status, role, scope, soldier, agent_selection_snapshot) VALUES (?, ?, 'high', 'in_progress', 'reviewer', ?, 'codex', ?)")
       .run(id, `Follow-up review ${id}`, scope, JSON.stringify(snapshot))
     addReviewAttempt('typed-review-implementation-round')
+    mod.db.prepare('UPDATE tasks SET parent=?, blockedBy=? WHERE id=?')
+      .run(implementationId, JSON.stringify([implementationId]), 'typed-review-implementation-round')
     const implementationReturn = await post('/api/agent-workflow/review', {
       taskId: 'typed-review-implementation-round', by: 'codex', scope,
       findings: [{ kind: 'implementation', summary: '实现漏掉超时边界' }], summary: '实现问题', evidence: 'review.md#L20',
@@ -425,6 +448,20 @@ describe('TC-SP-P0-01/02 读写：空态 → 写入 → 回读 → version 指�
     const coderSnapshot = JSON.parse(mod.db.prepare('SELECT agent_selection_snapshot FROM tasks WHERE id=?').get(implementationReturn.json.task.nextTaskId).agent_selection_snapshot)
     assert.deepEqual(coderSnapshot.workflowContext.designArtifacts, snapshot.workflowContext.designArtifacts)
     assert.equal(coderSnapshot.workflowContext.implementation, null, '实现返工必须丢弃旧提交和测试证据')
+    mod.db.prepare('UPDATE tasks SET parent=?, blockedBy=? WHERE id=?')
+      .run(taskId, JSON.stringify([taskId]), implementationReturn.json.task.nextTaskId)
+    const coderClaim = await post('/api/claim', {
+      id: implementationReturn.json.task.nextTaskId, soldier: 'deepseek', by: 'general', scope,
+    })
+    assert.equal(coderClaim.status, 200, coderClaim.text)
+    const importedStageIds = coderClaim.json.task.agentSelectionSnapshot.workflowContext.upstreamStages.map((item) => item.stageId)
+    const releaseCoderClaim = await post('/api/transition', {
+      id: implementationReturn.json.task.nextTaskId, to: 'blocked', by: 'deepseek', scope, confirmedStopped: true,
+    })
+    assert.equal(releaseCoderClaim.status, 200, releaseCoderClaim.text)
+    assert.ok(importedStageIds.includes('designer'), `expected design checkpoint in rework context, got ${JSON.stringify(importedStageIds)}`)
+    assert.ok(importedStageIds.includes('coder'), `expected prior implementation checkpoint in rework context, got ${JSON.stringify(importedStageIds)}`)
+    assert.equal(importedStageIds.includes('reviewer'), false, 'read-only review tasks have no Git checkpoint and must not be imported by rework worktrees')
 
     addReviewAttempt('typed-review-limit-round')
     const limited = await post('/api/agent-workflow/review', {
@@ -643,12 +680,12 @@ describe('TC-SP-P0-01/02 读写：空态 → 写入 → 回读 → version 指�
     const dagImplementationAttempt = storeImplementationAttempt(dagTasks[1].id, {
       testCommand: 'npm test', testSummary: 'branch tests passed', testEvidence: 'test evidence', sourceCommit: 'f'.repeat(40),
     })
-    mod.db.prepare('UPDATE tasks SET status=\'done\', evidence=? WHERE id=?')
+    mod.db.prepare('UPDATE tasks SET status=\'done\', evidence=?, artifacts=? WHERE id=?')
       .run(JSON.stringify([{ text: `agent-workflow-implementation:${JSON.stringify({
         passed: true, sourceCommit: 'f'.repeat(40), stageAttemptId: dagImplementationAttempt.attemptId,
         testVerification: dagImplementationAttempt.testVerification,
         providerRunId: dagImplementationAttempt.providerRunId, testCommand: 'npm test', testSummary: 'branch tests passed', testEvidence: 'test evidence',
-      })}` }]), dagTasks[1].id)
+      })}` }]), JSON.stringify([{ kind: 'file', path: 'test/dag.test.mjs', title: 'Legacy tests', digest: 'c'.repeat(64) }]), dagTasks[1].id)
     mod.db.prepare("UPDATE tasks SET status='done', artifacts=? WHERE id=?")
       .run(JSON.stringify([{ kind: 'file', path: 'reports/branch-tests.json', title: 'test-results', digest: 'a'.repeat(64) }]), dagTasks[2].id)
     const readyJoin = await post('/api/claim', { id: dagTasks[3].id, scope, by: 'general', soldier: 'codex', agentNodeId: 'executor-a' })
@@ -712,7 +749,59 @@ describe('TC-SP-P0-01/02 读写：空态 → 写入 → 回读 → version 指�
     assert.deepEqual(regeneratedByStage.get('implement').blockedBy, [designRework.json.task.nextTaskId])
     assert.deepEqual(regeneratedByStage.get('test').blockedBy, [designRework.json.task.nextTaskId])
     assert.deepEqual(regeneratedByStage.get('review').blockedBy, [regeneratedByStage.get('implement').id, regeneratedByStage.get('test').id])
-
+    const revisedDesignDigest = 'b'.repeat(64)
+    mod.db.prepare("UPDATE tasks SET status='done', artifacts=? WHERE id=?")
+      .run(JSON.stringify([{ kind: 'file', path: 'docs/dag/design.md', title: 'Revised design', digest: revisedDesignDigest }]), designRework.json.task.nextTaskId)
+    mod.db.prepare('UPDATE tasks SET artifacts=? WHERE id=?')
+      .run(JSON.stringify([{ kind: 'file', path: 'test/dag.test.mjs', title: 'Current tests', digest: 'd'.repeat(64) }]), regeneratedByStage.get('implement').id)
+    const designReworkImplementation = await post('/api/claim', {
+      id: regeneratedByStage.get('implement').id, scope, by: 'general', soldier: 'deepseek', agentNodeId: 'executor-a',
+    })
+    assert.equal(designReworkImplementation.status, 200, designReworkImplementation.text)
+    const designReworkContext = designReworkImplementation.json.task.agentSelectionSnapshot.workflowContext
+    assert.deepEqual(designReworkContext.designArtifacts, [{
+      taskId: designRework.json.task.nextTaskId, path: 'docs/dag/design.md', digest: revisedDesignDigest, title: 'Revised design',
+    }])
+    const designArtifactsInHandoff = designReworkContext.upstreamStages.flatMap((stage) => stage.artifacts)
+      .filter((item) => item.kind === 'file' && item.path === 'docs/dag/design.md')
+    assert.deepEqual(designArtifactsInHandoff.map((item) => item.digest), [revisedDesignDigest],
+      '设计返工后的输入快照只包含当前设计摘要，不得包含同路径旧一代设计')
+    const testArtifactsInHandoff = designReworkContext.upstreamStages.flatMap((stage) => stage.artifacts)
+      .filter((item) => item.kind === 'file' && item.path === 'test/dag.test.mjs')
+    assert.deepEqual(testArtifactsInHandoff.map((item) => item.digest), ['c'.repeat(64)],
+      '实现阶段仍可读取当前返工尚未替换的上一版测试文件')
+    const releaseDesignReworkClaim = await post('/api/transition', {
+      id: regeneratedByStage.get('implement').id, to: 'blocked', by: 'deepseek', scope, confirmedStopped: true,
+    })
+    assert.equal(releaseDesignReworkClaim.status, 200, releaseDesignReworkClaim.text)
+    const revisedImplementationAttempt = storeImplementationAttempt(regeneratedByStage.get('implement').id, {
+      testCommand: 'npm test', testSummary: 'revised tests passed', testEvidence: 'revised test evidence', sourceCommit: '2'.repeat(40),
+    })
+    const revisedImplementationProof = `agent-workflow-implementation:${JSON.stringify({
+      passed: true, sourceCommit: '2'.repeat(40), stageAttemptId: revisedImplementationAttempt.attemptId,
+      testVerification: revisedImplementationAttempt.testVerification,
+      providerRunId: revisedImplementationAttempt.providerRunId, testCommand: 'npm test',
+      testSummary: 'revised tests passed', testEvidence: 'revised test evidence',
+    })}`
+    mod.db.prepare("UPDATE tasks SET status='done', evidence=?, artifacts=? WHERE id=?")
+      .run(JSON.stringify([{ text: revisedImplementationProof }]),
+        JSON.stringify([{ kind: 'file', path: 'test/dag.test.mjs', title: 'Current tests', digest: 'd'.repeat(64) }]),
+        regeneratedByStage.get('implement').id)
+    mod.db.prepare("UPDATE tasks SET status='done', artifacts=? WHERE id=?")
+      .run(JSON.stringify([{ kind: 'file', path: 'reports/dag-tests.json', title: 'test-results', digest: 'e'.repeat(64) }]),
+        regeneratedByStage.get('test').id)
+    const designReworkReview = await post('/api/claim', {
+      id: regeneratedByStage.get('review').id, scope, by: 'general', soldier: 'codex', agentNodeId: 'executor-a',
+    })
+    assert.equal(designReworkReview.status, 200, designReworkReview.text)
+    const revisedTestArtifactsInReview = designReworkReview.json.task.agentSelectionSnapshot.workflowContext.upstreamStages
+      .flatMap((stage) => stage.artifacts).filter((item) => item.kind === 'file' && item.path === 'test/dag.test.mjs')
+    assert.deepEqual(revisedTestArtifactsInReview.map((item) => item.digest), ['d'.repeat(64)],
+      'review 交接只包含下游实现已替换的最新测试文件摘要')
+    const releaseDesignReworkReview = await post('/api/transition', {
+      id: regeneratedByStage.get('review').id, to: 'blocked', by: 'codex', scope, confirmedStopped: true,
+    })
+    assert.equal(releaseDesignReworkReview.status, 200, releaseDesignReworkReview.text)
     const registeredV2 = await post('/api/agent-tools/configs', {
       by: 'general', id: 'workflow.designer', version: 2, providerName: 'claude-code', adapter: 'dsh-subagent',
       permissionProfile: 'claude-code-acceptEdits', workspacePolicy: 'attempt-worktree-parent-cwd',

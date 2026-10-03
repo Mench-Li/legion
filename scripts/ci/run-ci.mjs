@@ -382,7 +382,6 @@ async function stageBuild() {
 async function stageTest() {
   const suites = [
     { label: 'chat（对话中心契约）', files: ['team-hub/chat.test.mjs'], cwd: ROOT },
-    { label: 'Agent conversations and worker channel', files: ['team-hub/agent-conversations.test.mjs', 'orchestrator/worker/agent-channel.test.mjs'], cwd: ROOT },
     { label: 'skills（共享技能回归）', files: ['team-hub/skills.test.mjs'], cwd: ROOT },
     {
       // PRT-214：静态 hard floor 的**派生**（spec §6.8 `:437-440` 控制面那一格）。

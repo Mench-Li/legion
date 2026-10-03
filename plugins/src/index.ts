@@ -1768,7 +1768,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       ...(isWorkflowStage(t, stage, 'review')
         ? [
             '本阶段是 Codex 风格的独立审查。只审查，不修改代码或设计产物；逐条给出可复现依据。',
-            '报告 JSON 必须包含 review：无问题时 {"passed":true,"findings":[]}；有问题时 {"passed":false,"findings":[{"kind":"implementation|design","summary":"问题","evidence":"文件/行号/复现证据"}]}。',
+            '最终只输出一个完整 WorkerReport JSON 对象；review 必须是顶层字段，与 status、summary、evidence、blocker、artifact 同级，不能把 review JSON 写进 evidence/summary，也不能写成 review= 前缀。通过示例：{"status":"done","summary":"审查通过","evidence":"核对了设计、实现与测试","blocker":"","artifact":null,"review":{"passed":true,"findings":[]}}。发现问题示例：{"status":"done","summary":"发现实现问题","evidence":"src/example.js:12 与设计不一致","blocker":"","artifact":null,"review":{"passed":false,"findings":[{"kind":"implementation","summary":"问题","evidence":"文件/行号/可复现依据"}]}}。finding.kind 只能是 implementation 或 design。',
             `实现问题回到 ${reviewWorkflow?.implementationRole ?? '实现阶段'}；设计问题回到 ${reviewWorkflow?.designRole ?? '设计阶段'}；混合问题必须同时分类，系统会优先退回设计。返工上限：${reviewWorkflow?.maxReworkRounds ?? 0} 轮。`,
             '无法归类、证据不足或结论矛盾时不要声称通过；写入 blocker 并停在待澄清状态。',
             '',
@@ -1796,6 +1796,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       ...(isWorkflowStage(t, stage, 'implementation')
         ? [
             '本阶段必须基于提示中列出的冻结设计文件实现，并运行相关测试。最终 JSON 必须包含 testReport：passed=true、command 为实际执行的测试命令、summary 非空、evidence 为实际测试输出或结果摘录、failures 为空；没有真实通过证据时不得报告 done。',
+            'Git 提交由 Legion 在 Agent 返回后于宿主侧创建，供独立测试与后续审查绑定准确提交；不要运行 git add、git commit 或其他 Git 写操作。完成实现和测试后直接返回 done 报告，不要因沙箱拒绝访问 worktree 外的公共 .git 目录而改报 blocked。',
             '',
           ]
         : []),
@@ -1868,10 +1869,14 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       '4. 禁止联网与任何 push（pre-push 已拦截 w/* 分支）；外部依赖若缺失，在证据里说明而非擅自下载。',
       '4b. 遇到**必须将军拍板**的疑问（关键歧义无法自行消解 / 取舍超出本角色职权 / 关键输入缺失等）：不要臆断硬做，也不要悄悄绕过——把疑问逐条写进报告 blocker（每条以「❓ 待将军确认」开头，附你的倾向与依据），走 status=blocked；任务会醒目提示将军，将军评论答复后你会带着答复继续。能自行合理决策的小问题自己定，在 evidence 里写明假设。',
       '5. 最终回复只输出 JSON 报告，不要额外叙述：',
-      '   {"status":"done","summary":"一句话总结","evidence":"验证证据（命令与输出要点）","blocker":"","artifact":null}',
-      '   "artifact" 可选（无产物必须为 null）：{"kind":"html|file|url","path":"产物绝对路径（工作目录内）","title":"一句话标题"}——html 会进看板 iframe 预览，file/url 变成看板链接。',
-      '   或 {"status":"blocked","summary":"已完成的部分","evidence":"","blocker":"卡在哪个文件/命令/什么报错（必须具体）","artifact":null}',
-      ...(goal !== null && goal !== undefined
+      ...(externalDesignStage || externalReviewStage
+        ? ['严格遵循上方冻结阶段提示中的 WorkerReport 字段与结果约束，只输出一个最终报告对象；不要复述 schema 或附加其他 JSON 示例。']
+        : [
+            '   {"status":"done","summary":"一句话总结","evidence":"验证证据（命令与输出要点）","blocker":"","artifact":null}',
+            '   "artifact" 可选（无产物必须为 null）：{"kind":"html|file|url","path":"产物绝对路径（工作目录内）","title":"一句话标题"}——html 会进看板 iframe 预览，file/url 变成看板链接。',
+            '   或 {"status":"blocked","summary":"已完成的部分","evidence":"","blocker":"卡在哪个文件/命令/什么报错（必须具体）","artifact":null}',
+          ]),
+      ...(goal !== null && goal !== undefined && !externalDesignStage && !externalReviewStage
         ? ['   若上方含「所属目标」，报告 JSON 请再追加 "goalRef":{"goalId":"<目标ID>","contextVersion":<执行时依据的版本整数>}（仅用于版本对账，不改变报告语义）。']
         : []),
       ...(isSliceTesterTask(stage, t)
@@ -3254,7 +3259,6 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     convId: number
     scope: string
     convTitle?: string
-    agent?: { role: string; name: string; kind: string; identity: string; tasks: Array<{ id: string; title: string; status: string; updatedAt?: string }> }
     author: string
     body: string
     context?: Array<{ id: number; author: string; kind?: string; body: string }>
@@ -3286,7 +3290,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       // 1) 回复设置：开关关 / 拉取失败 → 空转零出站（TC-S10-05；失败按「等下一轮」处理）
       const settings = await fetchJson<ReplySettingsPayload>(`${hubUrl}/api/chat/reply-settings?scope=${encodeURIComponent(msg.scope)}`)
       if (settings === null || !settings.enabled) return
-      const identity = msg.agent?.identity ?? chatIdentityFor(msg.scope, settings.identity)
+      const identity = chatIdentityFor(msg.scope, settings.identity)
       // 2) 防自我触发：identity 消息不再次进入回答流程（TC-S10-04，服务端已不标 awaiting，双保险）
       if (msg.author === identity) return
       // 3) 模型解析（TC-S10-06/D-14）：settings.model ?? 该空间默认（agent_models）?? 守护当前选择
@@ -3296,7 +3300,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
         if (s && s.model) fallback = { provider: s.provider || config.provider, model: s.model }
       } catch { /* 取不到默认模型则用空串，由子代理 start 失败路径兜底 */ }
       const rows = await fetchJson<Array<{ role: string; provider?: string; model?: string }>>(`${hubUrl}/api/models?scope=${encodeURIComponent(msg.scope)}`)
-      const pick = (msg.agent ? (rows ?? []).find(r => r.role === msg.agent?.role) : undefined) ?? (rows ?? []).find(r => r.role === 'assistant') ?? (rows ?? []).find(r => r.role === '') ?? (rows ?? [])[0]
+      const pick = (rows ?? []).find(r => r.role === 'assistant') ?? (rows ?? []).find(r => r.role === '') ?? (rows ?? [])[0]
       const chosenProvider = (pick?.provider && pick.provider.trim()) || fallback.provider
       const chosenModel = (settings.model && settings.model.trim()) || (pick?.model && pick.model.trim()) || fallback.model
       // 4) foreman 父级（无则标记失败，不重试同一轮）
@@ -3328,7 +3332,6 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       const prompt = buildChatAnswerPrompt({
         scope: msg.scope,
         convTitle: msg.convTitle,
-        agent: msg.agent,
         systemHint: settings.systemHint,
         identity,
         context: [...(msg.context ?? []), { id: msg.id, author: msg.author, body: msg.body }],
@@ -3377,7 +3380,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       }
     } catch (e) {
       log(`chat-responder 处理消息 ${msg.id} 失败：${String(e)}`)
-      const ident = msg.agent?.identity ?? chatIdentityFor(msg.scope)
+      const ident = chatIdentityFor(msg.scope)
       // S1（R-1/A1）：catch 吞错路径同样经分类器生成可行动文案（含原文片段 ≤500 契约），不悬挂 awaiting
       await markChatFailed(msg.id, msg.scope, ident, classifyChatError({ stopReason: 'error', error: String(e) }).message).catch(() => undefined)
     }

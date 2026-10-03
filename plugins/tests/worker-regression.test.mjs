@@ -1430,12 +1430,13 @@ test('Claude design → DSH implementation → Codex review closes over the exac
       const promptText = options.prompt.map(block => block.text ?? '').join('')
       assert.match(promptText, /UTF-8 文本按 LF 规范化后计算，CRLF 与 LF 等价/,
         'downstream agents must know workflow artifact digests ignore platform checkout line endings')
+      assert.match(promptText, /Git 提交由 Legion 在 Agent 返回后于宿主侧创建/,
+        'Legion, not the sandboxed Agent, must own commits so the shared worktree metadata remains outside Agent write access')
       const designText = readFileSync(join(cwd, 'docs', 'design.md'), 'utf8')
       assert.match(designText, /Contract: render the greeting/)
       writeFileSync(join(cwd, 'src.js'), "export const greeting = () => 'hello'\n")
-      git(cwd, ['add', '-A'])
-      assert.equal(git(cwd, ['commit', '-m', 'Agent implementation commit']).code, 0,
-        'the coding Agent may commit its isolated worktree before Legion runs the independent tests')
+      assert.notEqual(git(cwd, ['status', '--porcelain=v1', '--untracked-files=all']).out.trim(), '',
+        'the Agent returns its verified source changes without modifying the shared Git metadata')
       const report = { status: 'done', summary: 'implementation complete', evidence: 'src.js implements the versioned design', blocker: '', artifact: null,
         testReport: { passed: true, command: 'node --test test/greeting.test.js', summary: '1 test passed', evidence: '1 pass, 0 fail', failures: [] } }
       return { id: 'run-dsh-implementation', result: Promise.resolve({ stopReason: 'completed', structured: Object.freeze(report) }), dispose: async () => {} }
@@ -1444,6 +1445,10 @@ test('Claude design → DSH implementation → Codex review closes over the exac
       const promptText = options.prompt.map(block => block.text ?? '').join('')
       assert.match(promptText, /允许使用只读文件查看与只读终端命令/,
         'the external reviewer must be allowed to inspect the worktree without permission to modify it')
+      assert.match(promptText, /review 必须是顶层字段，与 status、summary、evidence、blocker、artifact 同级/,
+        'the external reviewer must return the typed outcome as a top-level WorkerReport field')
+      assert.match(promptText, /"review":\{"passed":false,"findings":\[/,
+        'the external reviewer prompt must show the complete JSON shape for a typed finding')
       reviewStatus = git(cwd, ['status', '--porcelain=v1', '--untracked-files=all']).out
       assert.match(readFileSync(join(cwd, 'docs', 'design.md'), 'utf8'), /Contract: render the greeting/)
       assert.match(readFileSync(join(cwd, 'src.js'), 'utf8'), /greeting/)
@@ -1488,7 +1493,9 @@ test('Claude design → DSH implementation → Codex review closes over the exac
     await new Promise(resolve => setTimeout(resolve, 40))
 
     harness.intervals[0]()
-    await waitFor(() => tasks[2].status === 'in_review', 'Codex review pass did not enter Legion final acceptance')
+    await waitFor(() => tasks[2].status === 'in_review', 'Codex review pass did not enter Legion final acceptance').catch(error => {
+      throw new Error(`${String(error)}; task=${JSON.stringify(tasks[2])}; attempts=${JSON.stringify(stageAttempts)}; log=${readFileSync(join(root, 'worker.log'), 'utf8')}`)
+    })
     assert.deepEqual(providerStarts, ['claude-code', 'deepseek', 'codex'])
     assert.deepEqual(stageAttempts.map(item => [item.state, item.providerRunId]), [
       ['completed', 'run-claude-design'], ['completed', 'run-dsh-implementation'], ['completed', 'run-codex-review'],

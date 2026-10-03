@@ -86,13 +86,13 @@ function scrumFixture(parent) {
 /**
  * Build one isolated fixture: home + profile composition + junctions + scrum.
  * @param {{ port: number, teamToken?: string, workerIntervalMs?: number,
- *           extraRows?: string[], extraPackages?: Record<string,string> }} opts
+ *           extraRows?: string[], extraPackages?: Record<string,string>, codexModel?: string }} opts
  *   `extraRows` are raw YAML rows appended to the patch layer (used by the P4-2 negative
  *   tests to mount a deliberately broken plugin entry); `extraPackages` adds
  *   `@dsh-external/<key>` junctions pointing at arbitrary directories (used to reproduce
  *   the "package main points at a missing lib/index.js" shape).
  */
-export function makeFixture({ port, teamToken = 'p13-fixture-token', workerIntervalMs = 5000, extraRows = [], extraPackages = {}, withAgentProviders = false, isolate = false, workerScope = '__p13fixture__' } = {}) {
+export function makeFixture({ port, teamToken = 'p13-fixture-token', workerIntervalMs = 5000, extraRows = [], extraPackages = {}, withAgentProviders = false, isolate = false, workerScope = '__p13fixture__', codexModel = null } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'dsh-p13-home-'))
   const profileDir = join(home, 'profiles', PROFILE)
   mkdirSync(join(profileDir, 'node_modules', '@dsh-external'), { recursive: true })
@@ -101,6 +101,9 @@ export function makeFixture({ port, teamToken = 'p13-fixture-token', workerInter
   const repoRoot = join(home, 'workspace')
 
   const agentProviderNames = withAgentProviders ? Object.keys(AGENT_PROVIDERS) : []
+  if (codexModel !== null && (typeof codexModel !== 'string' || !/^[A-Za-z0-9._:/-]{1,128}$/.test(codexModel))) {
+    throw new TypeError('codexModel must be a safe model identifier')
+  }
   const bundles = ['@deepseek-ai/dsh-base', ...agentProviderNames]
   const dependencies = Object.fromEntries(agentProviderNames.map((name) => [name, '0.2.0-rc.2']))
   writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
@@ -142,6 +145,7 @@ export function makeFixture({ port, teamToken = 'p13-fixture-token', workerInter
   config:
     permissionMode: approve-for-me
     systemProxyMode: system
+${codexModel === null ? '' : `    model: '${codexModel}'\n`}
 - id: subagent-claude-code
   config:
     permissionMode: acceptEdits

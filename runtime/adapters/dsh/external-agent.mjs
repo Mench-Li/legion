@@ -201,6 +201,101 @@ function extractSingleJsonObject(text) {
   return candidate
 }
 
+/** Find balanced top-level JSON objects so a unique WorkerReport can be selected from mixed model output. */
+function extractTopLevelJsonObjects(text) {
+  const candidates = []
+  let start = -1
+  let depth = 0
+  let inString = false
+  let escaped = false
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]
+    if (inString) {
+      if (escaped) escaped = false
+      else if (char === '\\') escaped = true
+      else if (char === '"') inString = false
+      continue
+    }
+    if (char === '"' && depth > 0) { inString = true; continue }
+    if (char === '{') {
+      if (depth === 0) start = index
+      depth += 1
+    } else if (char === '}' && depth > 0) {
+      depth -= 1
+      if (depth === 0) candidates.push(text.slice(start, index + 1))
+    }
+  }
+  return depth === 0 ? candidates : []
+}
+
+function safeJsonShape(text, { candidate = 'unchecked', parseError = null } = {}) {
+  const trimmed = text.trim()
+  const prefix = trimmed.startsWith('{') ? 'object'
+    : trimmed.startsWith('[') ? 'array'
+      : /^```(?:json)?\b/i.test(trimmed) ? 'fenced'
+        : 'other'
+  let objectCount = 0
+  let inString = false
+  let escaped = false
+  for (const char of trimmed) {
+    if (inString) {
+      if (escaped) escaped = false
+      else if (char === '\\') escaped = true
+      else if (char === '"') inString = false
+      continue
+    }
+    if (char === '"') inString = true
+    else if (char === '{') objectCount += 1
+  }
+  let topLevelObjects = 0
+  let depth = 0
+  inString = false
+  escaped = false
+  for (const char of trimmed) {
+    if (inString) {
+      if (escaped) escaped = false
+      else if (char === '\\') escaped = true
+      else if (char === '"') inString = false
+      continue
+    }
+    if (char === '"' && depth > 0) inString = true
+    else if (char === '{') {
+      if (depth === 0) topLevelObjects += 1
+      depth += 1
+    } else if (char === '}' && depth > 0) depth -= 1
+  }
+  const errorKind = parseError === null ? 'none'
+    : /end of JSON input/i.test(parseError) ? 'incomplete'
+      : /expected property name|property name enclosed/i.test(parseError) ? 'invalid-key'
+        : /expected ',' or '}'/i.test(parseError) ? 'missing-separator'
+          : /unexpected token|unexpected non-whitespace/i.test(parseError) ? 'unexpected-token'
+            : 'invalid-syntax'
+  return `chars=${trimmed.length}, prefix=${prefix}, objects=${objectCount}, topLevel=${topLevelObjects}, depth=${depth}, candidate=${candidate}, json=${errorKind}, fenced=${trimmed.includes('```')}`
+}
+
+function workerReportShape(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return 'root'
+  if (!['done', 'blocked'].includes(value.status)) return 'status'
+  if (typeof value.summary !== 'string') return 'summary'
+  if (typeof value.evidence !== 'string') return 'evidence'
+  if (typeof value.blocker !== 'string') return 'blocker'
+  if (!(value.artifact === null || (value.artifact !== null && typeof value.artifact === 'object' && !Array.isArray(value.artifact)
+    && ['html', 'file', 'url'].includes(value.artifact.kind)
+    && typeof value.artifact.path === 'string'
+    && (value.artifact.title === undefined || typeof value.artifact.title === 'string')))) return 'artifact'
+  if (value.testReport !== undefined && (value.testReport === null || typeof value.testReport !== 'object'
+    || typeof value.testReport.passed !== 'boolean'
+    || (value.testReport.summary !== undefined && typeof value.testReport.summary !== 'string')
+    || (value.testReport.failures !== undefined && (!Array.isArray(value.testReport.failures)
+      || value.testReport.failures.some((failure) => failure === null || typeof failure !== 'object' || typeof failure.name !== 'string'))))) return 'test-report'
+  if (value.review !== undefined && (value.review === null || typeof value.review !== 'object'
+    || typeof value.review.passed !== 'boolean' || !Array.isArray(value.review.findings)
+    || value.review.findings.some((finding) => finding === null || typeof finding !== 'object'
+      || !['implementation', 'design'].includes(finding.kind) || typeof finding.summary !== 'string'
+      || (finding.evidence !== undefined && typeof finding.evidence !== 'string')))) return 'review'
+  return 'valid'
+}
+
 /** Parse and validate one strict JSON WorkerReport from external text. */
 export function parseExternalWorkerReport(raw) {
   if (typeof raw !== 'string' || raw.trim() === '') return denied(EXTERNAL_AGENT_CODES.RESULT_INVALID, '外部 Agent 没有返回报告文本')
@@ -210,35 +305,29 @@ export function parseExternalWorkerReport(raw) {
   let value
   try { value = JSON.parse(text) } catch {
     const candidate = text.startsWith('[') ? null : extractSingleJsonObject(text)
-    if (candidate === null) return denied(EXTERNAL_AGENT_CODES.RESULT_INVALID, '外部 Agent 报告不是有效 JSON')
-    try { value = JSON.parse(candidate) } catch {
-      return denied(EXTERNAL_AGENT_CODES.RESULT_INVALID, '外部 Agent 报告不是有效 JSON')
+    if (candidate === null) {
+      const candidates = text.startsWith('[') ? [] : extractTopLevelJsonObjects(text)
+      if (candidates.length === 0) return denied(EXTERNAL_AGENT_CODES.RESULT_INVALID,
+        `外部 Agent 报告不是有效 JSON（安全结构诊断：${safeJsonShape(text, { candidate: 'none' })}）`)
+      const reports = candidates
+        .flatMap((item) => {
+          try {
+            const parsed = JSON.parse(item)
+            return workerReportShape(parsed) === 'valid' ? [parsed] : []
+          } catch { return [] }
+        })
+      if (reports.length === 1) value = reports[0]
+      else return denied(EXTERNAL_AGENT_CODES.RESULT_INVALID,
+        `外部 Agent 报告不是唯一有效 WorkerReport（安全结构诊断：${safeJsonShape(text, { candidate: 'multiple', parseError: 'candidate ambiguity' })}, validReports=${reports.length}）`)
+    } else {
+      try { value = JSON.parse(candidate) } catch (error) {
+        const parseError = error instanceof Error ? error.message : ''
+        return denied(EXTERNAL_AGENT_CODES.RESULT_INVALID, `外部 Agent 报告不是有效 JSON（安全结构诊断：${safeJsonShape(text, { candidate: 'single', parseError })}）`)
+      }
     }
   }
-  if (value === null || typeof value !== 'object' || Array.isArray(value)
-    || !['done', 'blocked'].includes(value.status)
-    || typeof value.summary !== 'string' || typeof value.evidence !== 'string'
-    || typeof value.blocker !== 'string'
-    || !(value.artifact === null || (value.artifact !== null && typeof value.artifact === 'object' && !Array.isArray(value.artifact)
-      && ['html', 'file', 'url'].includes(value.artifact.kind)
-      && typeof value.artifact.path === 'string'
-      && (value.artifact.title === undefined || typeof value.artifact.title === 'string')))) {
-    return denied(EXTERNAL_AGENT_CODES.RESULT_INVALID, '外部 Agent 报告不符合 WorkerReport 契约')
-  }
-  if (value.testReport !== undefined && (value.testReport === null || typeof value.testReport !== 'object'
-    || typeof value.testReport.passed !== 'boolean'
-    || (value.testReport.summary !== undefined && typeof value.testReport.summary !== 'string')
-    || (value.testReport.failures !== undefined && (!Array.isArray(value.testReport.failures)
-      || value.testReport.failures.some((failure) => failure === null || typeof failure !== 'object' || typeof failure.name !== 'string'))))) {
-    return denied(EXTERNAL_AGENT_CODES.RESULT_INVALID, '外部 Agent 的 testReport 不符合契约')
-  }
-  if (value.review !== undefined && (value.review === null || typeof value.review !== 'object'
-    || typeof value.review.passed !== 'boolean' || !Array.isArray(value.review.findings)
-    || value.review.findings.some((finding) => finding === null || typeof finding !== 'object'
-      || !['implementation', 'design'].includes(finding.kind) || typeof finding.summary !== 'string'
-      || (finding.evidence !== undefined && typeof finding.evidence !== 'string')))) {
-    return denied(EXTERNAL_AGENT_CODES.RESULT_INVALID, '外部 Agent 的 review 结论不符合契约')
-  }
+  const shape = workerReportShape(value)
+  if (shape !== 'valid') return denied(EXTERNAL_AGENT_CODES.RESULT_INVALID, `外部 Agent 报告不符合 WorkerReport 契约（安全结构诊断：field=${shape}）`)
   return Object.freeze({ ok: true, report: Object.freeze(value) })
 }
 

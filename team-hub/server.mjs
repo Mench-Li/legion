@@ -60,11 +60,10 @@
  * 状态机 + 乐观锁 + 角色纪律与 taskctl.mjs 一致；scope 是任务分区的一等字段。
  */
 import http from 'node:http'
-import { checkDesktopRequest } from '../product/local-auth.mjs'
 import { DatabaseSync } from 'node:sqlite'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { createHash } from 'node:crypto'
-import { dirname, extname, join, resolve } from 'node:path'
+import { createHash, randomUUID } from 'node:crypto'
+import { dirname, extname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { standardsFor } from './stage-standards.mjs'
 import { evaluatePermission, normalizeOperation } from './permission-engine.mjs'
@@ -164,8 +163,6 @@ import {
 import { resolveNextPost } from '../orchestrator/pipeline/index.mjs'
 import { columnExists as columnExistsImpl, ensureColumn as ensureColumnImpl } from './schema-util.mjs'
 import { createEventDeliveryStore } from './event-delivery.mjs'
-import { bootstrapWorkflowPack, ensureWorkflowPackSchema, validateWorkflowPack } from '../product/workflow-packs/pack.mjs'
-import { createWorkflowPackRoutes } from './routes/workflow-packs.mjs'
 import {
   AUTOMATION_ERRORS,
   createAutomationStore,
@@ -238,8 +235,6 @@ import { createRouter } from './router.mjs'
 import { createRulesRoutes } from './routes/rules.mjs'
 import { createPermissionsRoutes } from './routes/permissions.mjs'
 import { createChatRoutes } from './routes/chat.mjs'
-import { createAgentConversationService } from './agent-conversations.mjs'
-import { createAgentsRoutes } from './routes/agents.mjs'
 import { createCalendarRoutes } from './routes/calendar.mjs'
 import { createCompactionRoutes } from './routes/compaction.mjs'
 import { createSecretsRoutes } from './routes/secrets.mjs'
@@ -290,6 +285,11 @@ import { createChannelRoutes } from './routes/channels.mjs'
 import { createChannelStore } from './channel-store.mjs'
 import { createHarnessRoutes } from './routes/harness.mjs'
 import { createHarnessStore } from './harness-store.mjs'
+import { createAgentWorkflowRoutes } from './routes/agent-workflow.mjs'
+import { validateAgentWorkflowImplementationEvidence, validateAgentWorkflowTestReport, validateAgentWorkflowTestVerification } from '../runtime/contracts/agent-workflow.mjs'
+import { validateWorkflowTestRunner } from '../runtime/contracts/agent-workflow-test-runner.mjs'
+import { expectedExternalPermissionMode } from '../runtime/contracts/agent-provider-policy.mjs'
+import { redactText } from '../runtime/contracts/redact-patterns.mjs'
 import { createWriteIntentRoutes } from './routes/write-intent.mjs'
 import { createDeliveryRoutes } from './routes/delivery.mjs'
 import { createMetricsRoutes } from './routes/metrics.mjs'
@@ -360,7 +360,6 @@ export const DEFAULT_DB_FILE = DB_FILE
 const UPLOADS_ROOT = join(dirname(DB_FILE), 'uploads')
 const PORT = CFG.values.port
 const TOKEN = CFG.values.token
-if (CFG.values.desktopMode && (!TOKEN || CFG.values.host !== '127.0.0.1')) throw new Error('DESKTOP_AUTH_REQUIRED')
 const HOST = CFG.values.host
 /** 启动时打印的脱敏配置摘要（含实际生效的 DB 路径）；供日志与故障排查使用，绝不包含 token 原文。 */
 export function configSummaryLine() {
@@ -492,6 +491,37 @@ const runStore = createRunStore({
   // 而人会一直等下去。`permission_requests` 的 schema 属于本文件 / approval-binding.mjs，
   // 所以那一行由这里注入的端口写（运行仓储不认识它）。
   createApproval: (payload) => createAwaitingApprovalInTx(payload),
+  // 阶段工具/模型选择在首次认领时冻结到 Attempt；同一任务的重试沿用这份快照。
+  // 工具配置必须解析到不可变注册表版本；引用悬空/停用时阻止认领，不做 provider 回退。
+  resolveAgentSelection: ({ taskId, scope }) => {
+    const task = getTask(taskId)
+    if (task?.agentSelectionSnapshot?.reviewWorkflow) return resolveLegacyAgentSelection(task)
+    if (typeof task?.role !== 'string' || task.role.trim() === '') return null
+    const pipeline = readPipeline(scope)
+    const stage = pipeline.stages.find((item) => item.enabled && item.role === task.role)
+    if (stage === undefined || (stage.agentToolConfig == null && stage.modelConfig == null && pipeline.workflow == null)) return null
+    const reviewWorkflow = resolveAgentReviewWorkflowSnapshot(pipeline, taskId)
+    let agentToolConfig = null
+    if (stage.agentToolConfig !== null && stage.agentToolConfig !== undefined) {
+      const registered = harnessStoreForDispatch().getAgentToolConfig(stage.agentToolConfig)
+      if (registered === null) {
+        throw new Error(`阶段 ${stage.role} 引用的 Agent 工具配置不存在或已停用：${stage.agentToolConfig.id}@${stage.agentToolConfig.version}`)
+      }
+      const { createdAtMs: _createdAtMs, ...resolved } = registered
+      agentToolConfig = resolved
+    }
+    const resolvedModelConfig = resolveFrozenAgentModelConfig(stage.modelConfig ?? null, agentToolConfig, stage.role)
+    return {
+      source: 'space-pipeline',
+      pipelineVersion: pipeline.version,
+      stageRole: stage.role,
+      agentToolConfig,
+      modelConfig: stage.modelConfig ?? null,
+      resolvedModelConfig,
+      reviewWorkflow,
+      workflowContext: resolveAgentWorkflowContextSnapshot(pipeline, taskId),
+    }
+  },
   // ★ PRT-214 第二步：**这次 Run 的权限档位**在认领时定下来。
   //
   // 来源就是员工清单那一行——它住在本文件同一个 `db` 上，但它的列与
@@ -1300,21 +1330,27 @@ db.exec(`
     gate INTEGER DEFAULT 0,
     artifact TEXT DEFAULT NULL,
     docs TEXT DEFAULT NULL,
+    agent_tool_config TEXT,
+    model_config TEXT,
     sort INTEGER DEFAULT 0,
     enabled INTEGER DEFAULT 1,
     updatedAt TEXT,
     PRIMARY KEY (scope, role)
   )
 `)
+ensureColumn('space_stages', 'agent_tool_config', 'agent_tool_config TEXT')
+ensureColumn('space_stages', 'model_config', 'model_config TEXT')
 db.exec(`
   CREATE TABLE IF NOT EXISTS space_runtime (
     scope TEXT PRIMARY KEY,
     enabled INTEGER DEFAULT 0,
     maxWorkers INTEGER DEFAULT 1,
     isolate INTEGER DEFAULT 1,
+    review_workflow TEXT DEFAULT NULL,
     updatedAt TEXT
   )
 `)
+ensureColumn('space_runtime', 'review_workflow', 'review_workflow TEXT DEFAULT NULL')
 
 // 迁移：members 补充 model 列（S2/R-1 决策 B1：守护心跳可携带当前选用模型，供 GET /api/chat/health 聚合展示；
 // 列可空，既有成员行/插入语句零影响）。走 ensureColumn：双进程并发启动时非原子写法会崩在这里
@@ -1729,6 +1765,7 @@ ensureColumn('documents', 'sha256', "sha256 TEXT DEFAULT ''")
 ensureColumn('tasks', 'ttlMinutes', 'ttlMinutes INTEGER')
 ensureColumn('tasks', 'expiresAt', 'expiresAt TEXT')
 ensureColumn('tasks', 'claimRequestId', 'claimRequestId TEXT')
+ensureColumn('tasks', 'agent_selection_snapshot', 'agent_selection_snapshot TEXT')
 // 边界列（做什么/不做什么 JSON：{"do":[],"dont":[]}）——任务生成必须带验收标准与边界
 ensureColumn('tasks', 'boundary', "boundary TEXT DEFAULT '[]'")
 // 拦截列（将军逐任务拦截：hold=1 时守护不自动认领/执行，见 POST /api/hold）
@@ -1743,6 +1780,58 @@ ensureColumn('tasks', 'fixCount', 'fixCount INTEGER DEFAULT 0')
 ensureColumn('tasks', 'testReport', 'testReport TEXT')
 // 审计批注列（L2 审计工作台）：review_notes JSON = [{ file:'*'|相对路径, verdict:'ok'|'issue', note, by, at }]
 ensureColumn('tasks', 'review_notes', "review_notes TEXT DEFAULT '[]'")
+db.exec(`CREATE TABLE IF NOT EXISTS agent_workflow_reviews (
+  source_review_task_id TEXT PRIMARY KEY,
+  workflow_instance_id TEXT NOT NULL,
+  round_no INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  result_json TEXT NOT NULL,
+  next_task_id TEXT,
+  at_ms INTEGER NOT NULL
+)`)
+db.exec(`CREATE TABLE IF NOT EXISTS agent_workflow_instances (
+  id TEXT PRIMARY KEY,
+  scope TEXT NOT NULL,
+  goal_id TEXT NOT NULL UNIQUE,
+  definition_id TEXT,
+  definition_version INTEGER,
+  snapshot_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+)`)
+db.exec(`CREATE TABLE IF NOT EXISTS agent_workflow_stage_attempts (
+  id TEXT PRIMARY KEY,
+  scope TEXT NOT NULL,
+  workflow_instance_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  stage_id TEXT NOT NULL,
+  attempt_no INTEGER NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  started_by TEXT NOT NULL,
+  provider_name TEXT NOT NULL,
+  workspace_dir TEXT NOT NULL,
+  provider_run_id TEXT,
+  state TEXT NOT NULL,
+  stop_reason TEXT,
+  error_text TEXT,
+  result_json TEXT,
+  selection_snapshot_json TEXT NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  started_at_ms INTEGER,
+  finished_at_ms INTEGER,
+  UNIQUE (task_id, attempt_no),
+  UNIQUE (scope, idempotency_key)
+)`)
+ensureColumn('agent_workflow_stage_attempts', 'workspace_dir', "workspace_dir TEXT NOT NULL DEFAULT ''")
+db.exec('CREATE INDEX IF NOT EXISTS idx_agent_workflow_stage_attempts_instance ON agent_workflow_stage_attempts (workflow_instance_id, created_at_ms, id)')
+db.exec('CREATE INDEX IF NOT EXISTS idx_agent_workflow_stage_attempts_task ON agent_workflow_stage_attempts (task_id, attempt_no)')
+db.exec('CREATE INDEX IF NOT EXISTS idx_agent_workflow_instances_scope_created ON agent_workflow_instances (scope, created_at_ms DESC, id DESC)')
+db.exec('CREATE INDEX IF NOT EXISTS idx_agent_workflow_instances_scope_status_created ON agent_workflow_instances (scope, status, created_at_ms DESC, id DESC)')
+function setWorkflowInstanceStatusByGoal(goalId, status, at = Date.now()) {
+  db.prepare('UPDATE agent_workflow_instances SET status=?, updated_at_ms=? WHERE goal_id=?').run(status, at, goalId)
+}
 // PRT-404 用户反馈列：feedback JSON = [{ by, at, text }]。老库幂等补齐。
 // 与 `comments` 分开存（不是加 kind 标记）——理由见 CREATE TABLE tasks 里那段说明。
 ensureColumn('tasks', 'feedback', "feedback TEXT DEFAULT '[]'")
@@ -1869,6 +1958,17 @@ function normalizeStage(raw, index) {
   if (artifact !== null && artifact.length > 512) throw new Error(`stages[${index}]（${role}）.artifact 过长（≤512 字符）`)
   // 人工闸门的产物路径若为空，闸门永远无法通过（守护按 <目标docsDir>/<basename> 校验）→ 写入期即拦截。
   if (gate && artifact === null) throw new Error(`stages[${index}]（${role}）配了 gate:true 但没有 artifact（闸门将永远无法通过）`)
+  const versionedRef = (value, field) => {
+    if (value === undefined || value === null) return null
+    if (typeof value !== 'object' || Array.isArray(value) || typeof value.id !== 'string'
+      || value.id.trim() === '' || value.id.length > 128
+      || !Number.isSafeInteger(value.version) || value.version < 1) {
+      throw new Error(`stages[${index}]（${role}）.${field} 必须为 null 或含 id 与正整数 version 的对象`)
+    }
+    return { id: value.id.trim(), version: value.version }
+  }
+  const agentToolConfig = versionedRef(raw.agentToolConfig, 'agentToolConfig')
+  const modelConfig = versionedRef(raw.modelConfig, 'modelConfig')
   let docs = null
   if (raw.docs !== null && raw.docs !== undefined) {
     if (!Array.isArray(raw.docs)) throw new Error(`stages[${index}]（${role}）.docs 必须是字符串数组`)
@@ -1885,7 +1985,7 @@ function normalizeStage(raw, index) {
   }
   const sort = Number.isFinite(raw.sort) ? Math.trunc(raw.sort) : index
   const enabled = raw.enabled === false ? 0 : 1
-  return { role, label, prompt, next, gate: gate ? 1 : 0, artifact, docs, sort, enabled }
+  return { role, label, prompt, next, gate: gate ? 1 : 0, artifact, docs, agentToolConfig, modelConfig, sort, enabled }
 }
 
 /** 写路径整批校验：role 唯一 + next 指向本批或存量阶段。 */
@@ -1914,6 +2014,70 @@ function normalizeRuntime(raw) {
   return { enabled, maxWorkers, isolate }
 }
 
+function normalizeAgentWorkflow(scope, raw, stages) {
+  if (raw === undefined || raw === null) return null
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('workflow 必须是对象')
+  const designRole = typeof raw.designRole === 'string' ? raw.designRole.trim() : ''
+  const implementationRole = typeof raw.implementationRole === 'string' ? raw.implementationRole.trim() : ''
+  const reviewRole = typeof raw.reviewRole === 'string' ? raw.reviewRole.trim() : ''
+  const maxReworkRounds = raw.maxReworkRounds === undefined ? 3 : Number(raw.maxReworkRounds)
+  if (![designRole, implementationRole, reviewRole].every((role) => ROLE_ID_RE.test(role))) {
+    throw new Error('workflow 必须提供有效的 designRole、implementationRole 与 reviewRole')
+  }
+  if (!Number.isSafeInteger(maxReworkRounds) || maxReworkRounds < 0 || maxReworkRounds > 20) {
+    throw new Error('workflow.maxReworkRounds 必须是 0..20 的整数')
+  }
+  if (new Set([designRole, implementationRole, reviewRole]).size !== 3) throw new Error('workflow 三个阶段角色必须不同')
+  const byRole = new Map(stages.map((stage) => [stage.role, stage]))
+  for (const role of [designRole, implementationRole, reviewRole]) {
+    if (!byRole.has(role) || byRole.get(role).enabled !== 1) throw new Error(`workflow 阶段未启用或不存在：${role}`)
+  }
+  const stageTools = {}
+  if (raw.stageTools !== undefined && raw.stageTools !== null
+    && (typeof raw.stageTools !== 'object' || Array.isArray(raw.stageTools))) {
+    throw new Error('workflow.stageTools 必须是按阶段 role 索引的对象')
+  }
+  const suppliedTools = raw.stageTools ?? {}
+  const selectedRoleSet = new Set([designRole, implementationRole, reviewRole])
+  const unknownToolRoles = Object.keys(suppliedTools).filter((role) => !selectedRoleSet.has(role))
+  if (unknownToolRoles.length > 0) throw new Error(`workflow.stageTools 包含未选择的阶段：${unknownToolRoles.join('、')}`)
+  for (const role of [designRole, implementationRole, reviewRole]) {
+    const configured = suppliedTools[role]
+    if (configured !== undefined && (configured === null || typeof configured !== 'object' || Array.isArray(configured))) {
+      throw new Error(`workflow.stageTools.${role} 必须是对象`)
+    }
+    const legacyStage = byRole.get(role)
+    const versionedRef = (value, field) => {
+      if (value === null || value === undefined) return null
+      if (typeof value !== 'object' || Array.isArray(value) || typeof value.id !== 'string'
+        || value.id.trim() === '' || value.id.length > 128 || !Number.isSafeInteger(value.version) || value.version < 1) {
+        throw new Error(`workflow.stageTools.${role}.${field} 必须是 null 或含 id 与正整数 version 的对象`)
+      }
+      return { id: value.id.trim(), version: value.version }
+    }
+    const agentToolRef = configured && Object.hasOwn(configured, 'agentToolConfig') ? configured.agentToolConfig : legacyStage.agentToolConfig
+    const modelRef = configured && Object.hasOwn(configured, 'modelConfig') ? configured.modelConfig : legacyStage.modelConfig
+    const rawTestRunner = configured && Object.hasOwn(configured, 'testRunner') ? configured.testRunner : legacyStage.testRunner
+    const testRunnerResult = rawTestRunner == null ? null : validateWorkflowTestRunner(rawTestRunner)
+    if (testRunnerResult !== null && !testRunnerResult.ok) throw new Error(`workflow.stageTools.${role}.testRunner 无效：${testRunnerResult.message}`)
+    if (role === implementationRole && testRunnerResult === null) throw new Error(`workflow.stageTools.${role}.testRunner 必须配置独立测试命令`)
+    const nodeId = configured?.nodeId === undefined || configured?.nodeId === null || configured?.nodeId === ''
+      ? null : (typeof configured.nodeId === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(configured.nodeId.trim())
+        ? configured.nodeId.trim() : (() => { throw new Error(`workflow.stageTools.${role}.nodeId 格式无效`) })())
+    stageTools[role] = {
+      agentToolConfig: versionedRef(agentToolRef, 'agentToolConfig'),
+      modelConfig: versionedRef(modelRef, 'modelConfig'),
+      nodeId,
+      testRunner: testRunnerResult?.value ?? null,
+    }
+  }
+  const boundNodeIds = [...new Set(Object.values(stageTools).map((item) => item.nodeId).filter(Boolean))]
+  if (boundNodeIds.length > 1 || (boundNodeIds.length === 1 && Object.values(stageTools).some((item) => item.nodeId !== boundNodeIds[0]))) {
+    throw new Error('当前工作流的阶段必须全部自动选节点，或全部绑定到同一节点；跨节点 workspace/Git 交接尚未实现')
+  }
+  return { designRole, implementationRole, reviewRole, maxReworkRounds, stageTools }
+}
+
 /** 读该空间流水线（读路径：守护每轮 + 指挥台展示共用）。 */
 function readPipeline(scope, { includeDisabled = true } = {}) {
   const rows = db.prepare('SELECT * FROM space_stages WHERE scope = ? ORDER BY sort, role').all(scope)
@@ -1925,6 +2089,8 @@ function readPipeline(scope, { includeDisabled = true } = {}) {
     gate: r.gate === 1,
     artifact: r.artifact ?? null,
     docs: parseJson(r.docs, null),
+    agentToolConfig: parseJson(r.agent_tool_config, null),
+    modelConfig: parseJson(r.model_config, null),
     sort: r.sort ?? 0,
     enabled: r.enabled !== 0,
     updatedAt: r.updatedAt ?? null,
@@ -1933,24 +2099,28 @@ function readPipeline(scope, { includeDisabled = true } = {}) {
   const runtime = rt
     ? { enabled: rt.enabled === 1, maxWorkers: rt.maxWorkers ?? 1, isolate: rt.isolate !== 0, updatedAt: rt.updatedAt ?? null }
     : { enabled: false, maxWorkers: 1, isolate: true, updatedAt: null }
+  const workflow = rt ? parseJson(rt.review_workflow, null) : null
   const effective = stages.filter(s => s.enabled)
   return {
     scope,
     name: scope,
-    version: pipelineVersion(stages),
+    version: pipelineVersion(stages, workflow),
     runtime,
+    workflow,
     stages: includeDisabled ? stages : effective,
     activeRoles: effective.map(s => s.role),
   }
 }
 
 /** 稳定指纹：内容变化才变（守护据此零成本判「无需重建」）。 */
-function pipelineVersion(stages) {
+function pipelineVersion(stages, workflow = null) {
   const h = createHash('sha1')
   for (const s of stages) {
-    h.update([s.role, s.label, s.enabled ? 1 : 0, s.next ?? '', s.gate ? 1 : 0, s.artifact ?? '', (s.docs ?? []).join(','), s.prompt.length].join('\u0001'))
+    h.update([s.role, s.label, s.enabled ? 1 : 0, s.next ?? '', s.gate ? 1 : 0, s.artifact ?? '', (s.docs ?? []).join(','), s.prompt.length,
+      JSON.stringify(s.agentToolConfig ?? null), JSON.stringify(s.modelConfig ?? null)].join('\u0001'))
     h.update('\u0002')
   }
+  h.update(JSON.stringify(workflow ?? null))
   return h.digest('hex').slice(0, 16)
 }
 
@@ -2023,6 +2193,7 @@ function rowToTask(row) {
     soldier: row.soldier,
     claimedRound: row.claimedRound,
     claimedAt: row.claimedAt,
+    agentSelectionSnapshot: parseJson(row.agent_selection_snapshot, null),
     ordersVersion: row.ordersVersion,
     parent: row.parent,
     role: row.role,
@@ -2144,6 +2315,7 @@ function settleGoalsOfScope(scope, by = 'general') {
     if (s.total > 0 && s.done === s.total) {
       const at = now()
       db.prepare("UPDATE goal SET status='done', version=version+1, updatedAt=?, endedAt=? WHERE id=? AND status='active'").run(at, at, g.id)
+      setWorkflowInstanceStatusByGoal(g.id, 'done', new Date(at).getTime())
       audit(by, scope, 'goal:done', g.id, { objective: g.objective }, g.id)
       settled += 1
     }
@@ -2197,14 +2369,42 @@ function nextGoalId() {
  * 目标级分析文档命名空间：新目标分配 docsDir = `docs/<goalId>`（阶段产物文档进目标独立目录，
  * 跨目标分析前缀可安全并行）；本列上线前已发布的目标 docsDir=NULL，沿用根 docs/ 固定槽位（旧链兼容）。
  */
-function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general', docSync = false) {
+function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general', docSync = false, workflowDefinitionRef = null) {
   return withTx(() => {
     const rawMode = mode === 'slice' ? 'slice' : 'chain'
+    let workflowDefinition = null
+    if (workflowDefinitionRef !== null && workflowDefinitionRef !== undefined) {
+      if (rawMode !== 'chain') throw new Error('命名 Agent 工作流定义当前仅支持 chain 目标')
+      if (typeof workflowDefinitionRef !== 'object' || Array.isArray(workflowDefinitionRef)
+        || typeof workflowDefinitionRef.id !== 'string' || !Number.isSafeInteger(workflowDefinitionRef.version)) {
+        throw new Error('workflowDefinition 必须包含 id 与 version')
+      }
+      workflowDefinition = harnessStoreForDispatch().getAgentWorkflowDefinition({
+        scope: targetScope, id: workflowDefinitionRef.id, version: workflowDefinitionRef.version,
+      })
+      if (workflowDefinition === null) throw new Error(`工作流定义不存在：${workflowDefinitionRef.id}@${workflowDefinitionRef.version}`)
+    }
     const t = now()
     const goalId = nextGoalId()
     db.prepare('INSERT INTO goal (id, scope, objective, status, version, mode, createdAt, updatedAt, endedAt, docsDir, docSync) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
       .run(goalId, targetScope, objective.trim(), 'active', 1, rawMode, t, t, null, `docs/${goalId}`, docSync === true ? 1 : 0)
-    const chain = createGoalChain(goalId, targetScope, objective.trim(), rawMode)
+    const chain = createGoalChain(goalId, targetScope, objective.trim(), rawMode, workflowDefinition)
+    if (chain.workflowSnapshot !== null && chain.workflowSnapshot !== undefined) {
+      const createdAtMs = new Date(t).getTime()
+      db.prepare(`INSERT INTO agent_workflow_instances
+        (id, scope, goal_id, definition_id, definition_version, snapshot_json, status, created_at_ms, updated_at_ms)
+        VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)`)
+        .run(
+          chain.workflowSnapshot.instanceId,
+          targetScope,
+          goalId,
+          chain.workflowSnapshot.workflowDefinitionRef?.id ?? null,
+          chain.workflowSnapshot.workflowDefinitionRef?.version ?? null,
+          JSON.stringify(chain.workflowSnapshot),
+          createdAtMs,
+          createdAtMs,
+        )
+    }
     // 记录实际生效的模式（slice 缺岗会回退 chain）
     if (chain.mode !== rawMode) {
       db.prepare('UPDATE goal SET mode=?, updatedAt=? WHERE id=?').run(chain.mode, now(), goalId)
@@ -2241,16 +2441,36 @@ function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general
       version: 1,
       goalId,
       title: `目标 ${goalId} 的团队计划`,
-      stages: chain.tasks.map((t) => ({ role: t.role, label: t.label })),
-      note: `目标创建时冻结（编队 ∩ 流水线，${chain.mode} 模式，${chain.count} 个阶段）`,
+      stages: chain.tasks.map((t, index) => ({
+        role: t.role,
+        label: t.label,
+        ...(chain.workflowSnapshot ? {
+          workflowStageId: t.workflowStageId,
+          workflowId: chain.workflowSnapshot.instanceId,
+          stageOrder: index,
+          blockedByStageIds: chain.workflowSnapshot.stageDefinitionsById?.[t.workflowStageId]?.previousStageIds ?? [],
+          nextStageIds: chain.workflowSnapshot.stageDefinitionsById?.[t.workflowStageId]?.nextStageIds ?? [],
+          nextRole: chain.workflowSnapshot.stageDefinitionsById?.[t.workflowStageId]?.nextStageIds?.length === 1
+            ? chain.workflowSnapshot.stageDefinitionsById[chain.workflowSnapshot.stageDefinitionsById[t.workflowStageId].nextStageIds[0]]?.role ?? null
+            : null,
+          workflowSnapshot: chain.workflowSnapshot,
+        } : {}),
+      })),
+      note: chain.workflowSnapshot
+        ? `目标创建时冻结跨 Agent 工作流（${chain.workflowSnapshot.workflowDefinitionSnapshot?.name ?? `${chain.workflowSnapshot.designRole} → ${chain.workflowSnapshot.implementationRole} → ${chain.workflowSnapshot.reviewRole}`}，${chain.count} 个阶段）`
+        : `目标创建时冻结（编队 ∩ 流水线，${chain.mode} 模式，${chain.count} 个阶段）`,
     }, { scope: targetScope, actor: by })
 
-    audit(by, targetScope, 'goal:publish', goalId, { goal: goalId, objective: objective.trim(), mode: chain.mode, stages: chain.count }, goalId)
+    audit(by, targetScope, 'goal:publish', goalId, {
+      goal: goalId, objective: objective.trim(), mode: chain.mode, stages: chain.count,
+      workflowDefinition: workflowDefinition === null ? null : { id: workflowDefinition.id, version: workflowDefinition.version },
+    }, goalId)
     return {
       goal: goalView(getGoal(goalId)),
       stages: chain.count,
       mode: chain.mode,
       objective: objective.trim(),
+      workflowDefinition: workflowDefinition === null ? null : { id: workflowDefinition.id, version: workflowDefinition.version },
       // 冻结结果的引用：调用方与验收用例要能一眼看到"计划被冻住了、冻的是第几版"。
       teamPlan: { id: frozen.plan.id, version: frozen.plan.version, stages: frozen.plan.stages.length },
     }
@@ -2312,6 +2532,7 @@ function setGoalState(id, to, by = 'general', forceGeneral = false) {
     const terminal = to === 'done' || to === 'canceled'
     db.prepare('UPDATE goal SET status=?, version=version+1, updatedAt=?, endedAt=? WHERE id=?')
       .run(to, at, terminal ? at : null, id)
+    setWorkflowInstanceStatusByGoal(id, to, new Date(at).getTime())
     let canceledTasks = 0
     let strandedTasks = []
     if (to === 'canceled') {
@@ -3272,7 +3493,7 @@ export function createConversation(input) {
 
 /** 会话列表：scope 过滤（TC-S1-01/02）；按 updatedAt desc、id desc（新建/活跃优先）。 */
 export function listConversations({ scope } = {}) {
-  const where = `WHERE NOT EXISTS (SELECT 1 FROM agent_conversation_bindings b WHERE b.conv_id=conversations.id)${typeof scope === 'string' && scope.trim().length > 0 ? ' AND scope = ?' : ''}`
+  const where = typeof scope === 'string' && scope.trim().length > 0 ? 'WHERE scope = ?' : ''
   const params = typeof scope === 'string' && scope.trim().length > 0 ? [scope.trim()] : []
   const rows = db.prepare(`SELECT * FROM conversations ${where} ORDER BY updatedAt DESC, id DESC`).all(...params)
   return rows.map(convToObj)
@@ -3280,9 +3501,6 @@ export function listConversations({ scope } = {}) {
 
 /** 发消息（统一写纪律：by 必填 + author=by 防冒名 + 审计/SSE；消息 scope 恒等于会话 scope，跨 scope 写不串）。 */
 export function postMessage(input) {
-  if (agentConversations.binding(input?.conv)) {
-    throw new Error('Agent 会话请通过 /api/agent-messages 提交，不能走普通空间助手路径')
-  }
   const by = input?.by
   if (typeof by !== 'string' || by.trim().length === 0) throw new Error('缺少操作者身份 by')
   const convId = Number(input?.conv)
@@ -3464,8 +3682,7 @@ export function postAiReply(input) {
     const conv = getConversation(s2.conv_id)
     const t = now()
     const r = db.prepare('INSERT INTO messages (conv_id, scope, author, kind, body, meta, client_ts, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(s2.conv_id, conv.scope, agentConversations.binding(s2.conv_id)?.agent_id ?? by.trim(), kind, body,
-        JSON.stringify({ replyTo: msgId, aiModel: model, ...(agentConversations.binding(s2.conv_id) ? { source:'answer',semanticType:'answer',generatedFromRecords:true,evidenceAsOf:meta2.agentContext?.evidenceAsOf } : {}) }), null, t)
+      .run(s2.conv_id, conv.scope, by.trim(), kind, body, JSON.stringify({ replyTo: msgId, aiModel: model }), null, t)
     db.prepare('UPDATE conversations SET last_message_at = ?, updatedAt = ? WHERE id = ?').run(t, t, s2.conv_id)
     meta2.aiStatus = 'replied'
     meta2.repliedAt = t
@@ -4235,8 +4452,544 @@ function createTaskInTx(input) {
         ordersVersion, parent, role, scope, blocks, blockedBy, comments, evidence, patches, artifacts, slice, sliceIdx, fixOf, fixCount, goalId, fileDomain, docSync, createdAt, updatedAt)
       VALUES (?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, NULL, ?, ?, ?, ?, '[]', ?, '[]', '[]', '[]', '[]', ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(t.id, t.title, t.description, JSON.stringify(t.acceptance), JSON.stringify(t.boundary), t.priority, t.status, t.ordersVersion, t.parent, t.role, t.scope, JSON.stringify(t.blockedBy), t.slice, t.sliceIdx, t.fixOf, t.fixCount, t.goalId, t.fileDomain ? JSON.stringify(t.fileDomain) : null, t.docSync ? 1 : 0, t.createdAt, t.updatedAt)
+    // 自动补建的工作流后继也必须在入队时绑定目标创建时冻结的工作流。
+    // 否则插件扫描 inbox 时只能看到已被修改的常规岗位链，岗位被删除后任务会失去归属。
+    const workflow = frozenGoalWorkflow(t)
+    const workflowStage = workflow?.stageTools?.[t.role]
+    if (workflow && workflowStage !== undefined) {
+      const selection = {
+        source: 'goal-agent-workflow',
+        pipelineVersion: workflow.pipelineVersion,
+        stageRole: t.role,
+        agentToolConfig: workflowStage.agentToolConfig ?? null,
+        modelConfig: workflowStage.modelConfig ?? null,
+        executionNode: workflowStage.executionNode ?? null,
+        reviewWorkflow: workflow,
+        workflowContext: { designArtifacts: [], implementation: null },
+      }
+      db.prepare('UPDATE tasks SET agent_selection_snapshot=? WHERE id=?').run(JSON.stringify(selection), t.id)
+    }
     return getTask(id)
   }
+}
+
+/** 结算一次 typed Agent 审查并原子创建返工阶段；source_review_task_id 保证重放不重复派工。 */
+function submitAgentWorkflowReview({ taskId, by, scope, findings, summary, evidence } = {}) {
+  return withTx(() => {
+    const task = getTask(taskId)
+    if (task === null) throw Object.assign(new Error(`审查任务不存在：${taskId}`), { statusCode: 404 })
+    if (task.scope !== scope) throw Object.assign(new Error('审查任务不属于请求空间'), { code: 'SCOPE_MISMATCH', statusCode: 403 })
+    const selection = task.agentSelectionSnapshot
+    const workflow = selection?.reviewWorkflow
+    const reviewStageId = workflow?.reviewStageId ?? workflow?.stageIdByRole?.[workflow?.reviewRole] ?? workflow?.reviewRole
+    if (workflow === null || workflow === undefined || selection.stageRole !== task.role
+      || (selection.workflowStageId ?? task.role) !== reviewStageId || workflow.reviewRole !== task.role) {
+      throw Object.assign(new Error('该任务没有匹配的冻结审查工作流配置'), { code: 'AGENT_WORKFLOW_SNAPSHOT_MISSING', statusCode: 409 })
+    }
+    const prior = db.prepare('SELECT * FROM agent_workflow_reviews WHERE source_review_task_id=?').get(task.id)
+    if (prior !== undefined) {
+      return { kind: prior.kind, round: prior.round_no, nextTaskId: prior.next_task_id, replayed: true, result: parseJson(prior.result_json, null) }
+    }
+    if (task.goalId !== null && task.goalId !== undefined && getGoal(task.goalId).status === 'canceled') {
+      throw Object.assign(new Error(`所属目标 ${task.goalId} 已取消，不能再提交审查或创建返工阶段`), {
+        code: 'AGENT_WORKFLOW_GOAL_CANCELED', statusCode: 409,
+      })
+    }
+    if (task.status !== 'in_progress' && task.status !== 'in_review') {
+      throw Object.assign(new Error(`审查任务当前状态不可结算：${task.status}`), { code: 'AGENT_WORKFLOW_TASK_STATE', statusCode: 409 })
+    }
+    if (task.soldier !== by) throw Object.assign(new Error('只有当前审查执行者可以提交 review 结果'), { code: 'AGENT_WORKFLOW_ACTOR_MISMATCH', statusCode: 403 })
+    if (!Array.isArray(findings) || findings.length === 0
+      || findings.some((finding) => finding === null || typeof finding !== 'object'
+        || !['implementation', 'design'].includes(finding.kind)
+        || typeof finding.summary !== 'string' || finding.summary.trim() === '')) {
+      return { kind: 'needs-clarification', reason: 'review findings 缺失或存在无法分类的问题', round: null, nextTaskId: null }
+    }
+    const selectedKind = findings.some((finding) => finding.kind === 'design') ? 'design' : 'implementation'
+    const targetStageId = workflow.reviewRoutes?.[selectedKind]
+      ?? (selectedKind === 'design' ? workflow.designStageId : workflow.implementationStageId)
+    const targetRole = workflow.stageDefinitionsById?.[targetStageId]?.role
+      ?? (selectedKind === 'design' ? workflow.designRole : workflow.implementationRole)
+    const rootId = workflow.instanceId
+    if (typeof rootId !== 'string' || rootId.trim() === '') {
+      throw Object.assign(new Error('冻结审查工作流缺少 instanceId'), { code: 'AGENT_WORKFLOW_INSTANCE_MISSING', statusCode: 409 })
+    }
+    const completedRounds = Number(db.prepare('SELECT COUNT(*) AS n FROM agent_workflow_reviews WHERE workflow_instance_id=?').get(rootId)?.n ?? 0)
+    if (completedRounds >= workflow.maxReworkRounds) {
+      return { kind: 'rework-limit', round: completedRounds, maxReworkRounds: workflow.maxReworkRounds, nextTaskId: null }
+    }
+    const targetConfig = workflow.stageToolsById?.[targetStageId] ?? workflow.stageTools?.[targetRole]
+    if (targetConfig === undefined) {
+      throw Object.assign(new Error(`冻结工作流缺少返工阶段配置：${targetRole}`), { code: 'AGENT_WORKFLOW_TARGET_MISSING', statusCode: 409 })
+    }
+    const targetStage = {
+      role: targetRole,
+      id: targetStageId,
+      label: workflow.stageDefinitionsById?.[targetStageId]?.label ?? workflow.stageLabels?.[targetRole] ?? targetRole,
+    }
+    const round = completedRounds + 1
+    const workflowGenerationId = `review-rework:${task.id}`
+    const findingText = findings.map((finding, index) => `${index + 1}. [${finding.kind}] ${finding.summary}${finding.evidence ? `\n   evidence: ${finding.evidence}` : ''}`).join('\n')
+    const reworkTask = createTaskInTx({
+      title: `【${targetStage.label}·审查返工第${round}轮】${task.title.replace(/^【[^】]*】/, '').slice(0, 48)}`,
+      description: [
+        `[agent-workflow-rework] 工作流 ${rootId} 第 ${round}/${workflow.maxReworkRounds} 轮返工。`,
+        `审查任务 ${task.id}：${summary ?? ''}`,
+        `审查证据：${evidence ?? ''}`,
+        `Codex findings（混合问题已按设计优先选择 ${targetRole}）：\n${findingText}`,
+        `请在修订后交回正常流水线；当前冻结设计角色=${workflow.designRole}，实现角色=${workflow.implementationRole}，审查角色=${workflow.reviewRole}。`,
+      ].join('\n\n'),
+      priority: task.priority,
+      status: 'todo',
+      parent: task.id,
+      role: targetRole,
+      scope: task.scope,
+      blockedBy: [task.id],
+      goalId: task.goalId ?? null,
+      fileDomain: task.fileDomain ?? null,
+      docSync: task.docSync === true,
+    })
+    const nextSnapshot = {
+      source: selection.source,
+      pipelineVersion: workflow.pipelineVersion,
+      stageRole: targetRole,
+      workflowStageId: targetStageId,
+      workflowGenerationId,
+      agentToolConfig: targetConfig.agentToolConfig ?? null,
+      modelConfig: targetConfig.modelConfig ?? null,
+      resolvedModelConfig: targetConfig.resolvedModelConfig ?? null,
+      executionNode: targetConfig.executionNode ?? null,
+      reviewWorkflow: workflow,
+      workflowContext: {
+        designArtifacts: selection.workflowContext?.designArtifacts ?? [],
+        implementation: selectedKind === 'design' ? selection.workflowContext?.implementation ?? null : null,
+      },
+    }
+    db.prepare('UPDATE tasks SET agent_selection_snapshot=? WHERE id=?').run(JSON.stringify(nextSnapshot), reworkTask.id)
+    const generatedStageTaskIds = [reworkTask.id]
+    if (workflow.workflowDefinitionSnapshot !== null && workflow.workflowDefinitionSnapshot !== undefined) {
+      const outgoingByStageId = new Map(workflow.workflowDefinitionSnapshot.stages.map((stage) => [stage.id, []]))
+      for (const edge of workflow.workflowDefinitionSnapshot.edges) outgoingByStageId.get(edge.from).push(edge.to)
+      const descendants = new Set()
+      const pending = [...(outgoingByStageId.get(targetStageId) ?? [])]
+      while (pending.length > 0) {
+        const stageId = pending.shift()
+        if (descendants.has(stageId)) continue
+        descendants.add(stageId)
+        pending.push(...(outgoingByStageId.get(stageId) ?? []))
+      }
+      const taskByStageId = new Map([[targetStageId, reworkTask.id]])
+      const existingTasks = db.prepare('SELECT * FROM tasks WHERE scope=? AND goalId=? ORDER BY createdAt, rowid')
+        .all(task.scope, task.goalId)
+        .map(rowToTask)
+        .filter((item) => item.agentSelectionSnapshot?.reviewWorkflow?.instanceId === workflow.instanceId)
+      for (const stageId of workflow.topologicalStageIds ?? workflow.workflowDefinitionSnapshot.stages.map((stage) => stage.id)) {
+        if (stageId === targetStageId || !descendants.has(stageId)) continue
+        const stage = workflow.stageDefinitionsById?.[stageId]
+        if (stage === undefined) throw Object.assign(new Error(`冻结工作流缺少下游阶段定义：${stageId}`), { code: 'AGENT_WORKFLOW_TARGET_MISSING', statusCode: 409 })
+        const incomingIds = stage.previousStageIds.map((predecessorStageId) => {
+          const regeneratedTaskId = taskByStageId.get(predecessorStageId)
+          if (regeneratedTaskId !== undefined) return regeneratedTaskId
+          const existing = [...existingTasks].reverse().find((candidate) =>
+            candidate.agentSelectionSnapshot?.workflowStageId === predecessorStageId && candidate.status === 'done')
+          if (existing === undefined) {
+            throw Object.assign(new Error(`返工阶段 ${stageId} 缺少可复用的已完成前驱阶段 ${predecessorStageId}`), {
+              code: 'AGENT_WORKFLOW_HANDOFF_EVIDENCE_MISSING', statusCode: 409,
+            })
+          }
+          return existing.id
+        })
+        const config = workflow.stageToolsById?.[stageId]
+        if (config === undefined) throw Object.assign(new Error(`冻结工作流缺少返工阶段配置：${stageId}`), { code: 'AGENT_WORKFLOW_TARGET_MISSING', statusCode: 409 })
+        const created = createTaskInTx({
+          title: `【${stage.label}·返工第${round}轮】${task.title.replace(/^【[^】]*】/, '').slice(0, 40)}`,
+          description: [
+            `[agent-workflow-rework] 工作流 ${rootId} 第 ${round}/${workflow.maxReworkRounds} 轮下游阶段。`,
+            `本阶段：${stage.id}（${stage.role}）。由阶段 ${targetStageId} 返工完成后按冻结 DAG 自动推进。`,
+            `本阶段输入契约：${JSON.stringify(stage.inputContract ?? {})}`,
+            `本阶段输出契约：${JSON.stringify(stage.outputContract ?? {})}`,
+          ].join('\n\n'),
+          priority: task.priority,
+          status: 'todo',
+          role: stage.role,
+          scope: task.scope,
+          blockedBy: incomingIds,
+          goalId: task.goalId ?? null,
+          fileDomain: task.fileDomain ?? null,
+          docSync: task.docSync === true,
+        })
+        const stageSnapshot = {
+          source: selection.source,
+          pipelineVersion: workflow.pipelineVersion,
+          stageRole: stage.role,
+          workflowStageId: stageId,
+          workflowGenerationId,
+          agentToolConfig: config.agentToolConfig ?? null,
+          modelConfig: config.modelConfig ?? null,
+          resolvedModelConfig: config.resolvedModelConfig ?? null,
+          executionNode: config.executionNode ?? null,
+          reviewWorkflow: workflow,
+          workflowContext: { designArtifacts: [], implementation: null, upstreamStages: [] },
+        }
+        db.prepare('UPDATE tasks SET agent_selection_snapshot=? WHERE id=?').run(JSON.stringify(stageSnapshot), created.id)
+        taskByStageId.set(stageId, created.id)
+        generatedStageTaskIds.push(created.id)
+      }
+    }
+    assertIntegratedBeforeDone(task.id)
+    const comments = [...task.comments, { by, at: now(), text: `✓ 审查发现 ${findings.length} 项问题，按 ${selectedKind} 返回 ${targetRole}（第 ${round}/${workflow.maxReworkRounds} 轮）。` }]
+    db.prepare("UPDATE tasks SET status='done', comments=?, version=version+1, updatedAt=? WHERE id=?")
+      .run(JSON.stringify(comments), now(), task.id)
+    finishTaskReservationInTx(task.id)
+    const result = { kind: selectedKind, findings, summary: summary ?? '', evidence: evidence ?? '', targetRole, targetStageId, round, generatedStageTaskIds }
+    db.prepare(`INSERT INTO agent_workflow_reviews
+      (source_review_task_id, workflow_instance_id, round_no, kind, result_json, next_task_id, at_ms)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(task.id, rootId, round, selectedKind, JSON.stringify(result), reworkTask.id, Date.now())
+    audit(by, task.scope, 'agent-workflow:review-rework', task.id, { workflowInstanceId: rootId, round, kind: selectedKind, nextTaskId: reworkTask.id, generatedStageTaskIds }, task.goalId)
+    return { kind: 'rework', reworkKind: selectedKind, round, maxReworkRounds: workflow.maxReworkRounds, nextTaskId: reworkTask.id, generatedStageTaskIds, result }
+  })
+}
+
+function rowToAgentWorkflowStageAttempt(row) {
+  if (!row) return null
+  return {
+    id: row.id,
+    scope: row.scope,
+    workflowInstanceId: row.workflow_instance_id,
+    taskId: row.task_id,
+    stageId: row.stage_id,
+    attemptNo: row.attempt_no,
+    startedBy: row.started_by,
+    providerName: row.provider_name,
+    workspaceDir: row.workspace_dir,
+    providerRunId: row.provider_run_id,
+    state: row.state,
+    stopReason: row.stop_reason,
+    error: row.error_text,
+    result: parseJson(row.result_json, null),
+    selectionSnapshot: parseJson(row.selection_snapshot_json, null),
+    createdAtMs: row.created_at_ms,
+    updatedAtMs: row.updated_at_ms,
+    startedAtMs: row.started_at_ms,
+    finishedAtMs: row.finished_at_ms,
+  }
+}
+
+function beginAgentWorkflowStageAttempt({ taskId, stageId, providerName: requestedProviderName, workspaceDir, idempotencyKey, by, scope } = {}) {
+  if (typeof taskId !== 'string' || taskId.trim() === '') throw new Error('缺少参数 taskId')
+  if (typeof stageId !== 'string' || stageId.trim() === '') throw new Error('缺少参数 stageId')
+  if (typeof requestedProviderName !== 'string' || requestedProviderName.trim() === '') throw new Error('缺少参数 providerName')
+  if (typeof workspaceDir !== 'string' || workspaceDir.trim() === '' || workspaceDir.length > 2048) throw new Error('workspaceDir 必须是 1 到 2048 个字符')
+  if (typeof idempotencyKey !== 'string' || idempotencyKey.trim().length < 8 || idempotencyKey.length > 200) {
+    throw new Error('idempotencyKey 必须是 8 到 200 个字符')
+  }
+  return withTx(() => {
+    const task = getTask(taskId)
+    const frozen = task.agentSelectionSnapshot
+    const workflow = frozen?.reviewWorkflow
+    if (task.scope !== scope) throw Object.assign(new Error('任务不属于请求空间'), { statusCode: 403 })
+    if (workflow == null) throw Object.assign(new Error('任务没有冻结的 Agent 工作流快照'), { statusCode: 409 })
+    if (task.status !== 'in_progress' || task.soldier !== by) throw Object.assign(new Error('只有当前认领者可为在办工作流阶段登记执行 Attempt'), { statusCode: 409 })
+    if (frozen.workflowStageId !== stageId) throw Object.assign(new Error('stageId 与任务冻结快照不匹配'), { statusCode: 409 })
+    const existing = db.prepare('SELECT * FROM agent_workflow_stage_attempts WHERE scope=? AND idempotency_key=?').get(scope, idempotencyKey)
+    if (existing) {
+      if (existing.task_id !== taskId || existing.stage_id !== stageId || existing.started_by !== by
+        || existing.provider_name !== requestedProviderName || existing.workspace_dir !== workspaceDir) {
+        throw Object.assign(new Error('idempotencyKey 已用于另一阶段 Attempt'), { statusCode: 409 })
+      }
+      return rowToAgentWorkflowStageAttempt(existing)
+    }
+    const attemptNo = db.prepare('SELECT COALESCE(MAX(attempt_no), 0) + 1 AS n FROM agent_workflow_stage_attempts WHERE task_id=?').get(taskId).n
+    const atMs = Date.now()
+    const id = `wfa-${randomUUID()}`
+    const frozenProviderName = frozen.agentToolConfig?.providerName
+    if (typeof frozenProviderName === 'string' && frozenProviderName !== requestedProviderName) {
+      throw Object.assign(new Error('providerName 与任务冻结的 Agent 工具配置不匹配'), { statusCode: 409 })
+    }
+    const providerName = frozenProviderName ?? requestedProviderName
+    db.prepare(`INSERT INTO agent_workflow_stage_attempts
+      (id, scope, workflow_instance_id, task_id, stage_id, attempt_no, idempotency_key, started_by,
+       provider_name, workspace_dir, state, selection_snapshot_json, created_at_ms, updated_at_ms)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?)`)
+      .run(id, scope, workflow.instanceId, taskId, stageId, attemptNo, idempotencyKey, by,
+        providerName, workspaceDir, JSON.stringify(frozen), atMs, atMs)
+    audit(by, scope, 'agent-workflow:attempt-start', taskId, { attemptId: id, stageId, attemptNo, providerName }, task.goalId)
+    return rowToAgentWorkflowStageAttempt(db.prepare('SELECT * FROM agent_workflow_stage_attempts WHERE id=?').get(id))
+  })
+}
+
+function reportAgentWorkflowStageAttempt({ attemptId, providerRunId, state, stopReason, error, result, by, scope } = {}) {
+  if (typeof attemptId !== 'string' || attemptId.trim() === '') throw new Error('缺少参数 attemptId')
+  const allowedStates = new Set(['running', 'completed', 'failed', 'unknown', 'canceled'])
+  if (!allowedStates.has(state)) throw new Error('state 必须为 running、completed、failed、unknown 或 canceled')
+  if (providerRunId !== undefined && providerRunId !== null && (typeof providerRunId !== 'string' || providerRunId.length > 512)) {
+    throw new Error('providerRunId 必须是最长 512 字符的字符串或 null')
+  }
+  return withTx(() => {
+    const current = db.prepare('SELECT * FROM agent_workflow_stage_attempts WHERE id=? AND scope=?').get(attemptId, scope)
+    if (!current) throw Object.assign(new Error(`Agent 工作流阶段 Attempt 不存在：${attemptId}`), { statusCode: 404 })
+    if (current.started_by !== by) throw Object.assign(new Error('只有创建该阶段 Attempt 的 worker 可回报执行结果'), { statusCode: 403 })
+    const existingRunId = current.provider_run_id
+    if (existingRunId && providerRunId && existingRunId !== providerRunId) {
+      throw Object.assign(new Error('providerRunId 已绑定到该 Attempt，不能改写'), { statusCode: 409 })
+    }
+    const terminal = new Set(['completed', 'failed', 'canceled'])
+    const sameState = current.state === state
+    if (terminal.has(current.state) && !sameState) throw Object.assign(new Error(`阶段 Attempt 已以 ${current.state} 结算，不能改为 ${state}`), { statusCode: 409 })
+    if (terminal.has(current.state) && sameState) return rowToAgentWorkflowStageAttempt(current)
+    if (current.state === 'unknown' && state === 'running') throw Object.assign(new Error('未知结果 Attempt 不能恢复为运行中；需对账后报告终态'), { statusCode: 409 })
+    const atMs = Date.now()
+    const nextRunId = existingRunId ?? providerRunId ?? null
+    const safeText = (value, limit) => typeof value === 'string' ? redactText(value).text.trim().slice(0, limit) : null
+    const sanitizeTestReport = (report) => report && typeof report === 'object' && !Array.isArray(report)
+      ? {
+          passed: report.passed === true,
+          command: safeText(report.command, 1000),
+          summary: safeText(report.summary, 2000),
+          evidence: safeText(report.evidence, 4000),
+          failures: Array.isArray(report.failures)
+            ? report.failures.slice(0, 20).map((failure) => ({
+                name: safeText(failure?.name, 300),
+                log: safeText(failure?.log, 1500),
+                repro: safeText(failure?.repro, 1000),
+              }))
+            : [],
+        }
+      : null
+    const sanitizeReviewReport = (review) => review && typeof review === 'object' && !Array.isArray(review)
+      ? {
+          passed: review.passed === true,
+          findings: Array.isArray(review.findings)
+            ? review.findings.slice(0, 100)
+              .filter((finding) => finding && typeof finding === 'object'
+                && ['implementation', 'design'].includes(finding.kind)
+                && typeof finding.summary === 'string')
+              .map((finding) => ({
+                kind: finding.kind,
+                summary: safeText(finding.summary, 4000),
+                ...(typeof finding.file === 'string' ? { file: safeText(finding.file, 1000) } : {}),
+                ...(typeof finding.severity === 'string' ? { severity: safeText(finding.severity, 80) } : {}),
+                ...(typeof finding.evidence === 'string' ? { evidence: safeText(finding.evidence, 4000) } : {}),
+                ...(typeof finding.verification === 'string' ? { verification: safeText(finding.verification, 4000) } : {}),
+              }))
+            : [],
+        }
+      : null
+    const rawTestReport = result?.testReport
+    const safeAgentTestReport = sanitizeTestReport(result?.agentTestReport)
+    const safeReviewReport = sanitizeReviewReport(result?.review)
+    const rawTestVerification = result?.testVerification
+    const checkedTestVerification = rawTestVerification == null ? null : validateAgentWorkflowTestVerification(rawTestVerification)
+    if (rawTestVerification != null && checkedTestVerification?.ok !== true) {
+      throw Object.assign(new Error(checkedTestVerification?.message ?? '独立测试执行回执无效'), { statusCode: 400 })
+    }
+    if (checkedTestVerification?.ok === true) {
+      const attemptTask = getTask(current.task_id)
+      const frozen = attemptTask.agentSelectionSnapshot
+      const workflow = frozen?.reviewWorkflow
+      const stage = workflow?.stageDefinitionsById?.[current.stage_id]
+      const expectedRunId = current.provider_run_id ?? providerRunId ?? null
+      const expectedNodeId = frozen?.executionNode?.id ?? stage?.nodeId ?? null
+      const expectedRunner = stage?.testRunner
+      const receipt = checkedTestVerification.receipt
+      const reportedTestCommand = [receipt.executable, ...receipt.args].join(' ')
+      if (state !== 'completed' || current.state !== 'running'
+        || receipt.stageAttemptId !== current.id
+        || receipt.providerRunId !== expectedRunId
+        || (expectedNodeId !== null && receipt.runnerNodeId !== expectedNodeId)
+        || expectedRunner === null || expectedRunner === undefined
+        || receipt.executable !== expectedRunner.executable
+        || receipt.timeoutMs !== expectedRunner.timeoutMs
+        || JSON.stringify(receipt.args) !== JSON.stringify(expectedRunner.args)
+        || rawTestReport?.command !== reportedTestCommand
+        || rawTestReport?.passed !== (receipt.state === 'passed')) {
+        throw Object.assign(new Error('独立测试回执未匹配当前完成态 Attempt、冻结 provider/node 或冻结 runner 命令'), { statusCode: 409 })
+      }
+    }
+    let safeTestReport = sanitizeTestReport(rawTestReport)
+    if (checkedTestVerification?.ok === true) {
+      const receipt = checkedTestVerification.receipt
+      const command = [receipt.executable, ...receipt.args].join(' ')
+      const passed = receipt.state === 'passed'
+      const evidence = receipt.outputExcerpt || receipt.error || `输出摘要 SHA-256：${receipt.outputDigest}`
+      safeTestReport = {
+        passed,
+        command,
+        summary: passed ? `Legion 独立测试通过（exit ${receipt.exitCode}）` : `Legion 独立测试${receipt.state === 'unknown' ? '结果未知' : '失败'}`,
+        evidence,
+        failures: passed ? [] : [{
+          name: '独立测试执行',
+          log: receipt.error ?? receipt.outputExcerpt,
+          repro: command,
+        }],
+      }
+    }
+    const safeResult = result && typeof result === 'object' && !Array.isArray(result)
+      ? {
+          status: safeText(result.status, 80),
+          summary: safeText(result.summary, 4000),
+          evidence: safeText(result.evidence, 4000),
+          testReport: safeTestReport,
+          testVerification: checkedTestVerification?.ok === true ? checkedTestVerification.receipt : null,
+          ...(safeReviewReport === null ? {} : { review: safeReviewReport }),
+          ...(safeAgentTestReport === null ? {} : { agentTestReport: safeAgentTestReport }),
+        }
+      : null
+    const normalizedStopReason = typeof stopReason === 'string' ? stopReason.slice(0, 160) : null
+    const normalizedError = typeof error === 'string' ? error.slice(0, 2000) : null
+    const finishedAtMs = terminal.has(state) ? atMs : null
+    if (!sameState || (providerRunId && !existingRunId) || safeResult !== null || normalizedError !== null || normalizedStopReason !== null) {
+      db.prepare(`UPDATE agent_workflow_stage_attempts SET provider_run_id=?, state=?, stop_reason=COALESCE(?, stop_reason),
+        error_text=COALESCE(?, error_text), result_json=COALESCE(?, result_json), updated_at_ms=?,
+        started_at_ms=CASE WHEN ?='running' THEN COALESCE(started_at_ms, ?) ELSE started_at_ms END,
+        finished_at_ms=CASE WHEN ? IS NULL THEN finished_at_ms ELSE ? END WHERE id=?`)
+        .run(nextRunId, state, normalizedStopReason, normalizedError, safeResult === null ? null : JSON.stringify(safeResult),
+          atMs, state, atMs, finishedAtMs, finishedAtMs, attemptId)
+      audit(by, scope, 'agent-workflow:attempt-report', current.task_id, {
+        attemptId, stageId: current.stage_id, providerName: current.provider_name, providerRunId: nextRunId,
+        state, stopReason: normalizedStopReason,
+      })
+    }
+    return rowToAgentWorkflowStageAttempt(db.prepare('SELECT * FROM agent_workflow_stage_attempts WHERE id=?').get(attemptId))
+  })
+}
+
+function reconcileAgentWorkflowStageAttempt({ attemptId, disposition, note, idempotencyKey, by, scope } = {}) {
+  if (by !== 'general') throw Object.assign(new Error('未知 Agent Attempt 的人工核对仅允许 general 操作'), { statusCode: 403 })
+  if (typeof attemptId !== 'string' || attemptId.trim() === '') throw new Error('缺少参数 attemptId')
+  const dispositions = new Set(['confirmed-stopped', 'still-running', 'unable-to-confirm'])
+  if (!dispositions.has(disposition)) throw new Error('disposition 必须为 confirmed-stopped、still-running 或 unable-to-confirm')
+  if (typeof idempotencyKey !== 'string' || idempotencyKey.trim() === '' || idempotencyKey.length > 200) {
+    throw new Error('缺少有效 idempotencyKey（≤200 字符）')
+  }
+  if (typeof note !== 'string' || note.trim() === '') throw new Error('人工核对需要填写核对依据')
+  const safeNote = redactText(note).text.trim().slice(0, 2000)
+  if (safeNote === '') throw new Error('人工核对依据脱敏后为空')
+  return withTx(() => {
+    const attempt = db.prepare('SELECT * FROM agent_workflow_stage_attempts WHERE id=? AND scope=?').get(attemptId, scope)
+    if (attempt === undefined) throw Object.assign(new Error(`Agent 工作流阶段 Attempt 不存在：${attemptId}`), { statusCode: 404 })
+    if (attempt.state !== 'unknown') throw Object.assign(new Error('仅结果未知的 Stage Attempt 可以人工核对；该操作不会改变 Attempt 终态'), { statusCode: 409 })
+    const priorEvents = db.prepare("SELECT detail FROM audit WHERE scope=? AND action='agent-workflow:attempt-reconciliation' AND taskId=?").all(scope, attempt.task_id)
+    const prior = priorEvents.map(row => parseJson(row.detail, null)).find(item => item?.idempotencyKey === idempotencyKey)
+    if (prior !== undefined) {
+      if (prior.attemptId !== attemptId || prior.disposition !== disposition || prior.note !== safeNote) {
+        throw Object.assign(new Error('核对幂等键已用于不同的人工处置'), { statusCode: 409 })
+      }
+      return { id: prior.id, attemptId, disposition, note: safeNote, by: prior.by, at: prior.at, idempotent: true }
+    }
+    const id = randomUUID()
+    const at = now()
+    audit(by, scope, 'agent-workflow:attempt-reconciliation', attempt.task_id, {
+      id, attemptId, workflowInstanceId: attempt.workflow_instance_id, stageId: attempt.stage_id,
+      providerName: attempt.provider_name, providerRunId: attempt.provider_run_id ?? null,
+      disposition, note: safeNote, idempotencyKey, by, at,
+    }, db.prepare('SELECT goal_id FROM agent_workflow_instances WHERE id=?').get(attempt.workflow_instance_id)?.goal_id ?? null)
+    return { id, attemptId, disposition, note: safeNote, by, at, idempotent: false }
+  })
+}
+
+function readAgentWorkflowHistory({ taskId, scope } = {}) {
+  const task = getTask(taskId)
+  if (task === null) throw Object.assign(new Error(`任务不存在：${taskId}`), { statusCode: 404 })
+  if (task.scope !== scope) throw Object.assign(new Error('任务不属于请求空间'), { code: 'SCOPE_MISMATCH', statusCode: 403 })
+  const workflow = task.agentSelectionSnapshot?.reviewWorkflow
+  if (workflow === null || workflow === undefined) {
+    throw Object.assign(new Error('该任务没有冻结的 Agent 工作流快照'), { code: 'AGENT_WORKFLOW_SNAPSHOT_MISSING', statusCode: 404 })
+  }
+    const tasks = db.prepare('SELECT * FROM tasks WHERE scope=? AND agent_selection_snapshot IS NOT NULL ORDER BY createdAt, id')
+    .all(scope)
+    .map(rowToTask)
+    .filter((item) => item.agentSelectionSnapshot?.reviewWorkflow?.instanceId === workflow.instanceId)
+    .map((item) => ({
+      id: item.id, title: item.title, role: item.role, status: item.status,
+      workflowStageId: item.agentSelectionSnapshot?.workflowStageId ?? null,
+      parent: item.parent, blockedBy: item.blockedBy,
+      agentSelectionSnapshot: item.agentSelectionSnapshot,
+      artifacts: item.artifacts, evidence: item.evidence, comments: item.comments,
+    }))
+  const reviews = db.prepare('SELECT source_review_task_id, round_no, kind, result_json, next_task_id, at_ms FROM agent_workflow_reviews WHERE workflow_instance_id=? ORDER BY round_no, at_ms, source_review_task_id')
+    .all(workflow.instanceId)
+    .map((row) => ({
+      sourceReviewTaskId: row.source_review_task_id,
+      round: row.round_no,
+      kind: row.kind,
+      result: parseJson(row.result_json, null),
+      nextTaskId: row.next_task_id,
+      atMs: row.at_ms,
+    }))
+  const stageAttempts = db.prepare('SELECT * FROM agent_workflow_stage_attempts WHERE workflow_instance_id=? ORDER BY created_at_ms, id')
+    .all(workflow.instanceId)
+    .map(rowToAgentWorkflowStageAttempt)
+  const reconciliations = db.prepare(`SELECT seq, ts, member, taskId, detail FROM audit
+    WHERE scope=? AND action='agent-workflow:attempt-reconciliation' AND taskId IN
+      (SELECT task_id FROM agent_workflow_stage_attempts WHERE workflow_instance_id=?)
+    ORDER BY seq`).all(scope, workflow.instanceId).map(row => {
+      const { id, attemptId, workflowInstanceId, stageId, providerName, providerRunId, disposition, note } = parseJson(row.detail, {})
+      return { id, attemptId, workflowInstanceId, stageId, providerName, providerRunId, disposition, note, by: row.member, at: row.ts, taskId: row.taskId }
+    })
+  return {
+    workflowId: workflow.instanceId,
+    instance: db.prepare('SELECT id, scope, goal_id AS goalId, definition_id AS definitionId, definition_version AS definitionVersion, status, created_at_ms AS createdAtMs, updated_at_ms AS updatedAtMs FROM agent_workflow_instances WHERE id=?').get(workflow.instanceId) ?? null,
+    pipelineVersion: workflow.pipelineVersion,
+    designRole: workflow.designRole,
+    implementationRole: workflow.implementationRole,
+    reviewRole: workflow.reviewRole,
+    maxReworkRounds: workflow.maxReworkRounds,
+    tasks,
+    reviews,
+    stageAttempts,
+    reconciliations,
+  }
+}
+
+function readAgentWorkflowInstances({ scope, limit = 20, offset = 0, status = 'all', search = '' } = {}) {
+  const filters = ['i.scope = ?']
+  const params = [scope]
+  if (status !== 'all') { filters.push('i.status = ?'); params.push(status) }
+  const normalizedSearch = String(search ?? '').trim().slice(0, 200)
+  if (normalizedSearch) {
+    filters.push('(i.id LIKE ? OR COALESCE(i.definition_id, \'\') LIKE ? OR COALESCE(g.objective, \'\') LIKE ?)')
+    const pattern = `%${normalizedSearch}%`
+    params.push(pattern, pattern, pattern)
+  }
+  const where = filters.join(' AND ')
+  const total = db.prepare(`SELECT COUNT(*) AS count FROM agent_workflow_instances i LEFT JOIN goal g ON g.id=i.goal_id WHERE ${where}`).get(...params).count
+  const rows = db.prepare(`
+    SELECT i.id, i.scope, i.goal_id AS goalId, i.definition_id AS definitionId,
+      i.definition_version AS definitionVersion, i.snapshot_json AS snapshotJson,
+      i.status, i.created_at_ms AS createdAtMs, i.updated_at_ms AS updatedAtMs,
+      g.objective AS objective
+    FROM agent_workflow_instances i
+    LEFT JOIN goal g ON g.id = i.goal_id
+    WHERE ${where}
+    ORDER BY i.created_at_ms DESC, i.id DESC
+    LIMIT ?
+    OFFSET ?
+  `).all(...params, Math.max(1, Math.min(Number(limit) || 20, 100)), Math.max(0, Number(offset) || 0))
+  const instances = rows.map((row) => {
+    const taskRows = db.prepare(`SELECT id, status, agent_selection_snapshot AS snapshotJson
+      FROM tasks WHERE scope=? AND goalId=? ORDER BY createdAt, id`).all(scope, row.goalId)
+    const tasks = taskRows.map((task) => ({ ...task, snapshot: parseJson(task.snapshotJson, null) }))
+      .filter((task) => task.snapshot?.reviewWorkflow?.instanceId === row.id)
+    const counts = { total: tasks.length, todo: 0, doing: 0, blocked: 0, done: 0, in_review: 0, other: 0 }
+    for (const task of tasks) {
+      const countStatus = task.status === 'in_progress' ? 'doing' : task.status
+      if (Object.hasOwn(counts, countStatus) && countStatus !== 'total') counts[countStatus] += 1
+      else counts.other += 1
+    }
+    const rootTask = tasks[0]
+    const snapshot = parseJson(row.snapshotJson, null)
+    return {
+      id: row.id, scope: row.scope, goalId: row.goalId,
+      definitionId: row.definitionId, definitionVersion: row.definitionVersion,
+      definitionName: snapshot?.workflowDefinitionSnapshot?.name ?? null,
+      objective: row.objective ?? '', status: row.status,
+      createdAtMs: row.createdAtMs, updatedAtMs: row.updatedAtMs,
+      anchorTaskId: rootTask?.id ?? null, counts,
+    }
+  })
+  return { instances, total, offset: Math.max(0, Number(offset) || 0), limit: Math.max(1, Math.min(Number(limit) || 20, 100)) }
 }
 
 /** 建任务的**唯一对外入口**：自己开一个事务，然后走上面那个函数体。 */
@@ -4250,14 +5003,14 @@ function createTask(input) {
 const GOAL_STAGE_LABELS = ['需求讨论', '方案设计', '任务拆分', '用例设计', '代码开发', '代码审查', '测试验收', '发布部署']
 
 /** 建一个 [auto-goal] 任务行（chain / slice 展开共用）。goalId = 所属目标（多目标并发按目标挂接）。返回新任务。 */
-function insertGoalTask({ title, description, acceptance, boundary, role, scope, blockedBy = [], status = 'todo', parent = null, slice = null, sliceIdx = null, fixOf = null, fixCount = 0, priority = 'high', goalId = null, fileDomain = null, docSync = false }) {
+function insertGoalTask({ title, description, acceptance, boundary, role, scope, blockedBy = [], status = 'todo', parent = null, slice = null, sliceIdx = null, fixOf = null, fixCount = 0, priority = 'high', goalId = null, fileDomain = null, docSync = false, agentSelectionSnapshot = null }) {
   assertGoalOpen(goalId)
   const id = nextId()
   db.prepare(`
     INSERT INTO tasks (id, title, description, acceptance, boundary, priority, status, version, soldier, claimedRound, claimedAt,
-      ordersVersion, parent, role, scope, blocks, blockedBy, comments, evidence, patches, artifacts, slice, sliceIdx, fixOf, fixCount, goalId, fileDomain, docSync, createdAt, updatedAt)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, NULL, 1, ?, ?, ?, '[]', ?, '[]', '[]', '[]', '[]', ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(id, title, description, JSON.stringify(acceptance), JSON.stringify(boundary), priority, status, parent, role, scope, JSON.stringify(blockedBy), slice, sliceIdx, fixOf, fixCount, goalId, Array.isArray(fileDomain) ? JSON.stringify(fileDomain) : null, docSync === true ? 1 : 0, now(), now())
+      ordersVersion, parent, role, scope, blocks, blockedBy, comments, evidence, patches, artifacts, slice, sliceIdx, fixOf, fixCount, goalId, fileDomain, docSync, agent_selection_snapshot, createdAt, updatedAt)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, NULL, 1, ?, ?, ?, '[]', ?, '[]', '[]', '[]', '[]', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, title, description, JSON.stringify(acceptance), JSON.stringify(boundary), priority, status, parent, role, scope, JSON.stringify(blockedBy), slice, sliceIdx, fixOf, fixCount, goalId, Array.isArray(fileDomain) ? JSON.stringify(fileDomain) : null, docSync === true ? 1 : 0, agentSelectionSnapshot === null ? null : JSON.stringify(agentSelectionSnapshot), now(), now())
   return getTask(id)
 }
 
@@ -4273,22 +5026,129 @@ function insertGoalTask({ title, description, acceptance, boundary, role, scope,
  * **不再取消**该空间其他目标/历史链的任务——目标并存、各自推进、互不干扰
  * （将军可在指挥台按目标 暂停/恢复/取消 收尾）。
  */
-function createGoalChain(goalId, scope, objective, mode = 'chain') {
+function workflowDefinitionForChain(definition) {
+  for (const stage of definition.stages) {
+    for (const [direction, contract] of [['input', stage.inputContract], ['output', stage.outputContract]]) {
+      if (contract !== null && contract !== undefined && Object.hasOwn(contract, 'artifacts')
+        && (!Array.isArray(contract.artifacts) || contract.artifacts.some((item) => typeof item !== 'string' || item.trim() === ''))) {
+        throw Object.assign(new Error(`阶段 ${stage.id} 的 ${direction}Contract.artifacts 必须是非空字符串数组`), {
+          code: 'AGENT_WORKFLOW_CONTRACT_INVALID', statusCode: 409,
+        })
+      }
+    }
+  }
+  const stageById = new Map(definition.stages.map((stage) => [stage.id, stage]))
+  const designId = definition.reviewRoutes?.design
+  const implementationId = definition.reviewRoutes?.implementation
+  const reviewId = definition.reviewStageId
+  if (![designId, implementationId, reviewId].every((stageId) => stageById.has(stageId))) {
+    throw Object.assign(new Error('工作流审查阶段或返工目标引用了不存在的阶段'), { code: 'AGENT_WORKFLOW_GRAPH_INVALID', statusCode: 409 })
+  }
+  const stageIds = definition.stages.map((stage) => stage.id)
+  const incoming = new Map(stageIds.map((stageId) => [stageId, []]))
+  const outgoing = new Map(stageIds.map((stageId) => [stageId, []]))
+  for (const edge of definition.edges) {
+    incoming.get(edge.to).push(edge.from)
+    outgoing.get(edge.from).push(edge.to)
+  }
+  // Stable Kahn order follows the definition's declared stage order when branches are ready together.
+  const remaining = new Map([...incoming].map(([stageId, predecessors]) => [stageId, predecessors.length]))
+  const queue = stageIds.filter((stageId) => remaining.get(stageId) === 0)
+  const orderedIds = []
+  while (queue.length > 0) {
+    const stageId = queue.shift()
+    orderedIds.push(stageId)
+    for (const nextId of outgoing.get(stageId)) {
+      remaining.set(nextId, remaining.get(nextId) - 1)
+      if (remaining.get(nextId) === 0) queue.push(nextId)
+    }
+  }
+  if (orderedIds.length !== stageIds.length) {
+    throw Object.assign(new Error('工作流成功路径存在环，不能实例化'), { code: 'AGENT_WORKFLOW_GRAPH_INVALID', statusCode: 409 })
+  }
+  const design = stageById.get(designId)
+  const implementation = stageById.get(implementationId)
+  const review = stageById.get(reviewId)
+  const stageTools = Object.fromEntries(definition.stages.map((stage) => [stage.role, {
+    agentToolConfig: stage.agentToolConfig,
+    modelConfig: stage.modelConfig,
+    nodeId: stage.nodeId,
+    testRunner: stage.testRunner,
+  }]))
+  const stageToolsById = Object.fromEntries(definition.stages.map((stage) => [stage.id, {
+    agentToolConfig: stage.agentToolConfig,
+    modelConfig: stage.modelConfig,
+    nodeId: stage.nodeId,
+    testRunner: stage.testRunner,
+  }]))
+  const stageDefinitionsById = Object.fromEntries(definition.stages.map((stage) => [stage.id, {
+    ...stage,
+    previousStageIds: incoming.get(stage.id),
+    nextStageIds: outgoing.get(stage.id),
+  }]))
+  return {
+    id: definition.id,
+    version: definition.version,
+    designRole: design.role,
+    implementationRole: implementation.role,
+    reviewRole: review.role,
+    designStageId: design.id,
+    implementationStageId: implementation.id,
+    reviewStageId: review.id,
+    reviewRoutes: { ...definition.reviewRoutes },
+    stageIdByRole: Object.fromEntries(definition.stages.map((stage) => [stage.role, stage.id])),
+    maxReworkRounds: definition.maxReworkRounds,
+    stageTools,
+    stageToolsById,
+    stageDefinitionsById,
+    topologicalStageIds: orderedIds,
+    workflowDefinitionRef: { id: definition.id, version: definition.version },
+    workflowDefinitionSnapshot: definition,
+  }
+}
+
+function createGoalChain(goalId, scope, objective, mode = 'chain', workflowDefinition = null) {
   return withTx(() => {
     const goal = getGoal(goalId)
     if (goal.scope !== scope) throw new Error(`目标 ${goalId} 不属于空间 ${scope}`)
     const roster = db.prepare('SELECT role, name, kind, avatar FROM roster WHERE scope = ? ORDER BY sort, role').all(scope)
     const pipe = pipelineLabels()
+    const pipeline = readPipeline(scope)
+    if (mode === 'slice' && pipeline.workflow !== null && pipeline.workflow !== undefined) {
+      throw new Error('已启用跨 Agent 三阶段工作流的空间暂不支持 slice 目标；请关闭其中一种编排后再发布目标')
+    }
+    const configuredWorkflow = mode === 'chain'
+      ? workflowDefinition === null ? pipeline.workflow : workflowDefinitionForChain(workflowDefinition)
+      : null
+    const workflowStagePlan = configuredWorkflow === null || configuredWorkflow === undefined ? null
+      : configuredWorkflow.workflowDefinitionSnapshot
+        ? configuredWorkflow.topologicalStageIds.map((stageId) => configuredWorkflow.workflowDefinitionSnapshot.stages.find((stage) => stage.id === stageId))
+        : [configuredWorkflow.designRole, configuredWorkflow.implementationRole, configuredWorkflow.reviewRole]
+          .map((role) => ({ id: role, role }))
+    const workflowRoles = workflowStagePlan?.map((stage) => stage.role) ?? null
+    const workflowStages = new Map(pipeline.stages.map((stage) => [stage.role, stage]))
+    const frozenWorkflow = workflowRoles === null ? null
+      : resolveAgentReviewWorkflowSnapshot({ ...pipeline, workflow: configuredWorkflow }, goalId, workflowRoles)
     // SP-P0：空间流水线（space_stages）优先——入链 = 编队 ∩ 流水线启用岗位。
     // 这一层是「非执行岗入编导致 blockedBy 链死锁」的机制性消除：编队里没配阶段（或显式 enabled=0）的成员
     // 不再进链，链上每一环都保证有守护认领方；编队与流水线的差异由 GET /api/spaces/provision 报给将军。
     const spaceStages = stagesByRoleOf(scope)
-    const route = spaceStages.size > 0
+    const legacyRoute = spaceStages.size > 0
       ? roster.filter(r => {
         const st = spaceStages.get(r.role)
         return st !== undefined && st.enabled !== 0
       })
       : roster
+    // 跨 Agent 工作流是目标级编排，不受普通空间任务链的 roster 顺序或 next 边约束。
+    // 仍要求所选岗位有实际员工可认领，缺员时在创建目标的事务中明确失败。
+    const route = workflowStagePlan === null ? legacyRoute : workflowStagePlan.map((workflowStage) => {
+      const { role } = workflowStage
+      const employee = roster.find((item) => item.role === role)
+      if (employee === undefined) throw new Error(`跨 Agent 工作流岗位未加入空间编队，无法创建可执行阶段：${role}`)
+      const stage = workflowStages.get(role)
+      if (stage === undefined || !stage.enabled) throw new Error(`跨 Agent 工作流阶段未启用：${role}`)
+      return { ...employee, workflowStageId: workflowStage.id }
+    })
     // slice 模式前置条件：编队含分析尾（test-designer）与构建岗位（coder/tester）；缺则回退 chain
     const tdIdx = route.findIndex(r => r.role === 'test-designer')
     const sliced = mode === 'slice' && tdIdx >= 0 && route.some(r => r.role === 'coder') && route.some(r => r.role === 'tester')
@@ -4300,10 +5160,19 @@ function createGoalChain(goalId, scope, objective, mode = 'chain') {
       throw new Error(`空间 ${scope} 编队与流水线没有交集（编队 ${roster.length} 人：${roster.map(r => r.role).join('、')}；流水线启用岗位 ${[...spaceStages.values()].filter(s => s.enabled !== 0).map(s => s.role).join('、') || '（无）'}）——请先为该空间配置流水线或调整编队`)
     }
     const created = []
-    let prev = null
+    const workflowTaskIdsByStageId = new Map()
     build.forEach((r, i) => {
+      const workflowStageId = frozenWorkflow === null ? null : (r.workflowStageId ?? frozenWorkflow.stageIdByRole?.[r.role] ?? r.role)
+      const predecessorIds = workflowStageId === null
+        ? (created.length > 0 ? [created.at(-1).id] : [])
+        : (frozenWorkflow.stageDefinitionsById[workflowStageId].previousStageIds.map((stageId) => workflowTaskIdsByStageId.get(stageId)))
+      if (predecessorIds.some((id) => typeof id !== 'string')) {
+        throw Object.assign(new Error(`工作流阶段 ${workflowStageId} 的前序任务未按拓扑顺序创建`), { code: 'AGENT_WORKFLOW_GRAPH_INVALID', statusCode: 409 })
+      }
       // 阶段名：空间流水线 label > roles.json 标签 > 通用阶段标签（与任务集泳道名保持一致）
-      const stageLabel = spaceStages.get(r.role)?.label
+      const stageLabel = workflowStageId === null
+        ? spaceStages.get(r.role)?.label
+        : frozenWorkflow.stageDefinitionsById[workflowStageId].label
       const named = stageLabel && stageLabel !== r.role ? stageLabel : (pipe[r.role] && pipe[r.role] !== r.role ? pipe[r.role] : null)
       const label = named ?? GOAL_STAGE_LABELS[i % GOAL_STAGE_LABELS.length]
       const description = sliced
@@ -4321,14 +5190,26 @@ function createGoalChain(goalId, scope, objective, mode = 'chain') {
         boundary: { do: s.do, dont: s.dont },
         role: r.role,
         scope,
-        blockedBy: prev ? [prev] : [],
+        blockedBy: predecessorIds,
         goalId,
         docSync: chainTaskDocSync,
+        agentSelectionSnapshot: frozenWorkflow === null ? null : {
+          source: 'goal-agent-workflow',
+          pipelineVersion: frozenWorkflow.pipelineVersion,
+          stageRole: r.role,
+          workflowStageId,
+          agentToolConfig: frozenWorkflow.stageToolsById?.[workflowStageId]?.agentToolConfig ?? frozenWorkflow.stageTools[r.role]?.agentToolConfig ?? null,
+          modelConfig: frozenWorkflow.stageToolsById?.[workflowStageId]?.modelConfig ?? frozenWorkflow.stageTools[r.role]?.modelConfig ?? null,
+          resolvedModelConfig: frozenWorkflow.stageToolsById?.[workflowStageId]?.resolvedModelConfig ?? frozenWorkflow.stageTools[r.role]?.resolvedModelConfig ?? null,
+          executionNode: frozenWorkflow.stageToolsById?.[workflowStageId]?.executionNode ?? frozenWorkflow.stageTools[r.role]?.executionNode ?? null,
+          reviewWorkflow: frozenWorkflow,
+          workflowContext: { designArtifacts: [], implementation: null },
+        },
       })
-      created.push({ id: task.id, role: r.role, label })
-      prev = task.id
+      created.push({ id: task.id, role: r.role, label, workflowStageId })
+      if (workflowStageId !== null) workflowTaskIdsByStageId.set(workflowStageId, task.id)
     })
-    return { count: created.length, tasks: created, mode: sliced ? 'slice' : 'chain' }
+    return { count: created.length, tasks: created, mode: sliced ? 'slice' : 'chain', workflowSnapshot: frozenWorkflow }
   })
 }
 
@@ -4433,7 +5314,419 @@ function expandGoalSlices({ testDesignerTaskId, slices, by }) {
   })
 }
 
-function claimTask(id, soldier, ifVersion, force, round, requestId, ttlMinutes, requestedScope = null) {
+function taskWorkflowRootId(taskId) {
+  let current = getTask(taskId)
+  const seen = new Set()
+  while (current !== null && current !== undefined) {
+    if (seen.has(current.id)) throw new Error(`任务工作流 parent/blockedBy 存在循环：${current.id}`)
+    seen.add(current.id)
+    const predecessorId = current.parent ?? current.blockedBy?.[0] ?? null
+    if (predecessorId === null) return current.id
+    const predecessor = getTask(predecessorId)
+    if (predecessor === null) throw new Error(`工作流前序任务不存在：${predecessorId}`)
+    current = predecessor
+  }
+  throw new Error(`无法解析工作流根任务：${taskId}`)
+}
+
+function workflowAncestors(taskId, workflow) {
+  const root = getTask(taskId)
+  if (root === null) return []
+  const pending = [...new Set([...(root.blockedBy ?? []), ...(root.parent ? [root.parent] : [])])]
+  const seen = new Set([root.id])
+  const ancestors = []
+  while (pending.length > 0) {
+    const id = pending.shift()
+    if (seen.has(id)) continue
+    seen.add(id)
+    const task = getTask(id)
+    if (task === null || task === undefined || task.scope !== root.scope || task.goalId !== root.goalId) continue
+    const instanceId = task.agentSelectionSnapshot?.reviewWorkflow?.instanceId
+    if (workflow.instanceId === undefined || workflow.instanceId === null || instanceId === undefined || instanceId === null
+      || instanceId === workflow.instanceId) ancestors.push(task)
+    pending.push(...(task.blockedBy ?? []), ...(task.parent ? [task.parent] : []))
+  }
+  return ancestors
+}
+
+function findWorkflowStageAncestor(taskId, workflow, stageId) {
+  const stageRole = workflow.stageDefinitionsById?.[stageId]?.role
+    ?? workflow.workflowDefinitionSnapshot?.stages?.find((stage) => stage.id === stageId)?.role
+    ?? (stageId === workflow.designStageId || stageId === workflow.designRole ? workflow.designRole
+      : stageId === workflow.implementationStageId || stageId === workflow.implementationRole ? workflow.implementationRole
+        : stageId === workflow.reviewStageId || stageId === workflow.reviewRole ? workflow.reviewRole : null)
+  return workflowAncestors(taskId, workflow).find((task) =>
+    task.agentSelectionSnapshot?.workflowStageId === stageId
+    || (task.agentSelectionSnapshot?.workflowStageId == null && stageRole !== null && task.role === stageRole)) ?? null
+}
+
+function isRelativeWorkflowFileArtifact(item) {
+  if (item?.kind !== 'file' || typeof item.path !== 'string') return false
+  const path = item.path
+  // Hub may run on a different OS than a worker; reject Windows absolute paths even on POSIX.
+  if (isAbsolute(path) || /^[A-Za-z]:[\\/]/.test(path) || /^\\\\/.test(path)) return false
+  return /^[0-9a-f]{64}$/.test(item.digest ?? '')
+}
+
+function resolveAgentWorkflowContextSnapshot(workflowOrPipeline, taskId) {
+  const workflow = workflowOrPipeline !== null && typeof workflowOrPipeline === 'object'
+    && Object.hasOwn(workflowOrPipeline, 'workflow')
+    ? workflowOrPipeline.workflow : workflowOrPipeline
+  if (workflow === null || workflow === undefined) return null
+  const task = getTask(taskId)
+  const ancestors = workflowAncestors(taskId, workflow)
+  const taskStageId = task?.agentSelectionSnapshot?.workflowStageId
+    ?? workflow.stageIdByRole?.[task?.role]
+    ?? task?.role
+  const designStageId = workflow.designStageId ?? workflow.stageIdByRole?.[workflow.designRole] ?? workflow.designRole
+  const implementationStageId = workflow.implementationStageId ?? workflow.stageIdByRole?.[workflow.implementationRole] ?? workflow.implementationRole
+  const reviewStageId = workflow.reviewStageId ?? workflow.stageIdByRole?.[workflow.reviewRole] ?? workflow.reviewRole
+  let designArtifacts = []
+  let implementation = null
+  let implementationHandoffError = null
+  // Review stages are read-only control stages. They can produce typed
+  // findings, but intentionally do not write Git checkpoint evidence; rework
+  // tasks must import the design/implementation commits without requiring a
+  // synthetic commit from the review task itself.
+  const upstreamStageId = (upstream) => upstream.agentSelectionSnapshot?.workflowStageId
+    ?? workflow.stageIdByRole?.[upstream.role]
+    ?? (upstream.role === workflow.designRole ? designStageId : null)
+    ?? (upstream.role === workflow.implementationRole ? implementationStageId : null)
+    ?? (upstream.role === workflow.reviewRole ? reviewStageId : null)
+    ?? null
+  let upstreamStages = ancestors
+    .filter((upstream) => upstreamStageId(upstream) !== reviewStageId)
+    .map((upstream) => ({
+      stageId: upstreamStageId(upstream),
+      taskId: upstream.id,
+      role: upstream.role,
+      artifacts: (upstream.artifacts ?? []).filter((item) => item?.kind !== 'file' || isRelativeWorkflowFileArtifact(item)),
+      evidence: upstream.evidence ?? [],
+      workflowContext: upstream.agentSelectionSnapshot?.workflowContext ?? null,
+    }))
+
+  if (taskStageId === implementationStageId || taskStageId === reviewStageId) {
+    const designTask = findWorkflowStageAncestor(taskId, workflow, designStageId)
+    if (designTask !== null) {
+      designArtifacts = (designTask.artifacts ?? [])
+        .filter(isRelativeWorkflowFileArtifact)
+        .map((item) => ({ taskId: designTask.id, path: item.path, digest: item.digest, title: item.title ?? '' }))
+    }
+    // Rework keeps earlier generations in the task ancestry. If a later
+    // descendant stage has replaced a file artifact at the same path, only
+    // that descendant's version belongs in the handoff. Keep same-path
+    // artifacts from sibling branches: they are independent inputs and a
+    // genuine conflict must remain visible to the worker.
+    const fileArtifacts = upstreamStages.flatMap((upstream) => upstream.artifacts
+      .filter((item) => item?.kind === 'file' && typeof item.path === 'string')
+      .map((item) => ({ taskId: upstream.taskId, path: item.path.replaceAll('\\', '/'), digest: item.digest })))
+    const ancestryByTask = new Map()
+    const isDescendantOf = (candidateTaskId, possibleAncestorId) => {
+      if (!ancestryByTask.has(candidateTaskId)) {
+        ancestryByTask.set(candidateTaskId, new Set(workflowAncestors(candidateTaskId, workflow).map((item) => item.id)))
+      }
+      return ancestryByTask.get(candidateTaskId).has(possibleAncestorId)
+    }
+    const supersededArtifacts = new Set()
+    for (const older of fileArtifacts) {
+      if (fileArtifacts.some((newer) => newer.path === older.path && newer.taskId !== older.taskId
+        && isDescendantOf(newer.taskId, older.taskId))) {
+        supersededArtifacts.add(`${older.taskId}\0${older.path}\0${older.digest}`)
+      }
+    }
+    if (supersededArtifacts.size > 0) {
+      upstreamStages = upstreamStages.map((upstream) => ({
+        ...upstream,
+        artifacts: upstream.artifacts.filter((item) => item?.kind !== 'file' || typeof item.path !== 'string'
+          || !supersededArtifacts.has(`${upstream.taskId}\0${item.path.replaceAll('\\', '/')}\0${item.digest}`)),
+      }))
+    }
+  }
+
+  if (taskStageId === implementationStageId) {
+    if (designArtifacts.length === 0) {
+      throw Object.assign(new Error(`实现阶段 ${task.role} 缺少带 SHA-256 摘要的设计产物，拒绝开工`), {
+        code: 'AGENT_WORKFLOW_DESIGN_ARTIFACT_MISSING', statusCode: 409,
+      })
+    }
+    // 新实现任务必须重新给出代码/测试证据；不得把上一轮的实现版本冒充当前结果。
+    implementation = null
+  } else if (taskStageId === reviewStageId) {
+    const implementationTask = findWorkflowStageAncestor(taskId, workflow, implementationStageId)
+    if (implementationTask !== null) {
+      const evidence = [...(implementationTask.evidence ?? [])].reverse().find((item) => typeof item?.text === 'string' && item.text.startsWith('agent-workflow-implementation:'))
+      let payload = null
+      try { payload = evidence ? JSON.parse(evidence.text.slice('agent-workflow-implementation:'.length)) : null } catch { /* 缺失证据会在下方 fail closed */ }
+      const checkedEvidence = payload?.passed === true ? validateAgentWorkflowImplementationEvidence({
+        sourceCommit: payload.sourceCommit,
+        passed: payload.passed,
+        command: payload.testCommand,
+        summary: payload.testSummary,
+        evidence: payload.testEvidence,
+        failures: payload.failures,
+        testVerification: payload.testVerification,
+      }) : null
+      const providerRunId = typeof payload?.providerRunId === 'string' ? payload.providerRunId : null
+      const stageAttempt = typeof payload?.stageAttemptId === 'string'
+        ? db.prepare('SELECT * FROM agent_workflow_stage_attempts WHERE id=? AND task_id=? AND scope=?')
+          .get(payload.stageAttemptId, implementationTask.id, implementationTask.scope)
+        : null
+      const attemptResult = stageAttempt === null ? null : parseJson(stageAttempt.result_json, null)
+      const attemptTest = validateAgentWorkflowTestReport(attemptResult?.testReport)
+      const attemptVerification = validateAgentWorkflowTestVerification(attemptResult?.testVerification)
+      const frozenImplementationTool = implementationTask.agentSelectionSnapshot?.agentToolConfig
+      const frozenRunner = implementationTask.agentSelectionSnapshot?.reviewWorkflow?.stageDefinitionsById?.[implementationStageId]?.testRunner
+      const expectedWorkflowInstanceId = implementationTask.agentSelectionSnapshot?.reviewWorkflow?.instanceId ?? workflow.instanceId
+      const reportMatchesAttempt = checkedEvidence?.ok === true && attemptTest.ok
+        && attemptVerification.ok
+        && stageAttempt?.state === 'completed'
+        && stageAttempt.workflow_instance_id === expectedWorkflowInstanceId
+        && stageAttempt.stage_id === implementationStageId
+        && stageAttempt.provider_name === (frozenImplementationTool?.providerName ?? stageAttempt.provider_name)
+        && (stageAttempt.provider_run_id ?? null) === providerRunId
+        && checkedEvidence.testVerification.id === attemptVerification.receipt.id
+        && checkedEvidence.testVerification.sourceCommit === checkedEvidence.sourceCommit
+        && checkedEvidence.testVerification.stageAttemptId === stageAttempt.id
+        && checkedEvidence.testVerification.state === 'passed'
+        && JSON.stringify(checkedEvidence.testVerification) === JSON.stringify(attemptVerification.receipt)
+        && attemptVerification.receipt.state === 'passed'
+        && attemptVerification.receipt.sourceCommit === checkedEvidence.sourceCommit
+        && attemptVerification.receipt.stageAttemptId === stageAttempt.id
+        && attemptVerification.receipt.providerRunId === providerRunId
+        && frozenRunner?.executable === attemptVerification.receipt.executable
+        && frozenRunner?.timeoutMs === attemptVerification.receipt.timeoutMs
+        && JSON.stringify(frozenRunner?.args) === JSON.stringify(attemptVerification.receipt.args)
+        && checkedEvidence.command === attemptTest.command
+        && checkedEvidence.summary === attemptTest.summary
+        && checkedEvidence.evidence === attemptTest.evidence
+      if (checkedEvidence?.ok !== true) implementationHandoffError = '实现报告字段或独立测试回执无效'
+      else if (stageAttempt === null) implementationHandoffError = '找不到引用的实现 Stage Attempt'
+      else if (stageAttempt.state !== 'completed') implementationHandoffError = '实现 Stage Attempt 尚未以 completed 结算'
+      else if (stageAttempt.workflow_instance_id !== expectedWorkflowInstanceId || stageAttempt.stage_id !== implementationStageId) {
+        implementationHandoffError = `Stage Attempt 工作流/阶段不匹配（${stageAttempt.workflow_instance_id}/${stageAttempt.stage_id}，期望 ${expectedWorkflowInstanceId}/${implementationStageId}）`
+      } else if (stageAttempt.provider_name !== (frozenImplementationTool?.providerName ?? stageAttempt.provider_name)) {
+        implementationHandoffError = 'Stage Attempt 的 provider 与冻结工具不匹配'
+      } else if ((stageAttempt.provider_run_id ?? null) !== providerRunId) {
+        implementationHandoffError = 'provider Run ID 与 Stage Attempt 不匹配'
+      } else if (!attemptTest.ok || checkedEvidence.command !== attemptTest.command
+        || checkedEvidence.summary !== attemptTest.summary || checkedEvidence.evidence !== attemptTest.evidence) {
+        implementationHandoffError = '实现报告与 Stage Attempt 中保存的测试报告不一致'
+      } else if (!attemptVerification.ok || !reportMatchesAttempt) {
+        implementationHandoffError = `独立测试回执缺失、未通过或与冻结 runner/实现提交不一致（receipt=${attemptVerification.ok ? attemptVerification.receipt.state : 'invalid'}; attempt=${stageAttempt?.state ?? 'missing'}; source=${attemptVerification.ok && attemptVerification.receipt.sourceCommit === checkedEvidence.sourceCommit}; runner=${attemptVerification.ok && frozenRunner?.executable === attemptVerification.receipt.executable && frozenRunner?.timeoutMs === attemptVerification.receipt.timeoutMs && JSON.stringify(frozenRunner?.args) === JSON.stringify(attemptVerification.receipt.args)}; run=${attemptVerification.ok && attemptVerification.receipt.providerRunId === providerRunId}）`
+      }
+      if (reportMatchesAttempt) {
+        implementation = {
+          taskId: implementationTask.id,
+          sourceCommit: checkedEvidence.sourceCommit,
+          stageAttemptId: stageAttempt.id,
+          providerRunId,
+          testCommand: checkedEvidence.command,
+          testSummary: checkedEvidence.summary,
+          testEvidence: checkedEvidence.evidence,
+          testVerification: checkedEvidence.testVerification,
+        }
+      }
+    }
+    if (designArtifacts.length === 0 || implementation === null) {
+      throw Object.assign(new Error(`审查阶段缺少冻结设计版本或实现提交/测试证据，拒绝进入 review${implementationHandoffError ? `：${implementationHandoffError}` : ''}`), {
+        code: 'AGENT_WORKFLOW_HANDOFF_EVIDENCE_MISSING', statusCode: 409,
+      })
+    }
+  }
+
+  return { designArtifacts, implementation, upstreamStages }
+}
+
+function resolveFrozenAgentModelConfig(modelRef, agentToolConfig, stageId) {
+  if (modelRef === null || modelRef === undefined) return null
+  if (agentToolConfig?.adapter !== 'dsh-native') {
+    throw Object.assign(new Error(`工作流阶段 ${stageId} 的外部 Agent provider 不支持模型档案覆盖；请在该 Agent 工具自身配置中选择模型`), {
+      code: 'AGENT_MODEL_CONFIG_UNSUPPORTED', statusCode: 409,
+    })
+  }
+  const profile = modelStore.get(modelRef.id)
+  if (profile === null || profile.version !== modelRef.version) {
+    throw Object.assign(new Error(`工作流阶段 ${stageId} 引用的模型档案不存在、已删除或版本已变化：${modelRef.id}@${modelRef.version}`), {
+      code: 'AGENT_MODEL_CONFIG_UNRESOLVED', statusCode: 409,
+    })
+  }
+  if (profile.runtimeType !== 'dsh') {
+    throw Object.assign(new Error(`工作流阶段 ${stageId} 引用的模型档案运行时为 ${profile.runtimeType}，当前只支持 DSH 原生 provider 的模型覆盖`), {
+      code: 'AGENT_MODEL_CONFIG_UNSUPPORTED', statusCode: 409,
+    })
+  }
+  return {
+    id: profile.id,
+    version: profile.version,
+    provider: profile.provider,
+    model: profile.model,
+    reasoningEffort: profile.reasoningEffort ?? null,
+  }
+}
+
+function resolveAgentReviewWorkflowSnapshot(pipeline, taskId, selectedRoles = null) {
+  if (pipeline.workflow === null || pipeline.workflow === undefined) return null
+  const stageTools = {}
+  const definitionStages = pipeline.workflow.workflowDefinitionSnapshot?.stages ?? null
+  const roles = selectedRoles ?? (definitionStages
+    ? definitionStages.map((stage) => stage.role)
+    : [pipeline.workflow.designRole, pipeline.workflow.implementationRole, pipeline.workflow.reviewRole])
+  const selected = new Set(roles)
+  const stageDefinitions = {}
+  const stageToolsById = {}
+  const stageDefinitionsById = {}
+  const configuredStages = definitionStages
+    ? definitionStages.map((definitionStage) => ({
+      ...definitionStage,
+      ...(pipeline.stages.find((item) => item.role === definitionStage.role) ?? {}),
+      id: definitionStage.id,
+      workflowStageId: definitionStage.id,
+      role: definitionStage.role,
+      inputContract: definitionStage.inputContract ?? null,
+      outputContract: definitionStage.outputContract ?? null,
+      previousStageIds: pipeline.workflow.stageDefinitionsById?.[definitionStage.id]?.previousStageIds ?? [],
+      nextStageIds: pipeline.workflow.stageDefinitionsById?.[definitionStage.id]?.nextStageIds ?? [],
+    }))
+    : pipeline.stages.filter((item) => item.enabled && selected.has(item.role)).map((stage) => {
+      const index = roles.indexOf(stage.role)
+      return {
+        ...stage,
+        id: stage.role,
+        workflowStageId: stage.role,
+        previousStageIds: index > 0 ? [roles[index - 1]] : [],
+        nextStageIds: index >= 0 && index < roles.length - 1 ? [roles[index + 1]] : [],
+      }
+    })
+  const roleByStageId = Object.fromEntries(configuredStages.map((stage) => [stage.workflowStageId, stage.role]))
+  for (const stage of configuredStages.filter((item) => selected.has(item.role))) {
+    const workflowStage = pipeline.workflow.stageToolsById?.[stage.workflowStageId]
+      ?? pipeline.workflow.stageTools?.[stage.role]
+    const toolRef = workflowStage && Object.hasOwn(workflowStage, 'agentToolConfig') ? workflowStage.agentToolConfig : stage.agentToolConfig
+    const modelRef = workflowStage && Object.hasOwn(workflowStage, 'modelConfig') ? workflowStage.modelConfig : stage.modelConfig
+    let agentToolConfig = null
+    if (toolRef !== null && toolRef !== undefined) {
+      const registered = harnessStoreForDispatch().getAgentToolConfig(toolRef)
+      if (registered === null) {
+        throw Object.assign(new Error(`工作流阶段 ${stage.role} 引用的 Agent 工具配置不存在或已停用：${toolRef.id}@${toolRef.version}`), {
+          code: 'AGENT_TOOL_CONFIG_UNRESOLVED', statusCode: 409,
+        })
+      }
+      const { createdAtMs: _createdAtMs, ...resolved } = registered
+      agentToolConfig = resolved
+    }
+    let executionNode = null
+    const nodeId = workflowStage?.nodeId ?? null
+    if (nodeId !== null) {
+      const node = harnessStoreForDispatch().getAgentNodeConfig({ id: nodeId, scope: pipeline.scope })
+      const live = harnessStoreForDispatch().listAgentNodeConfigs({ scope: pipeline.scope }).find((item) => item.id === nodeId)
+      if (node === null || live === undefined) throw new Error(`工作流阶段 ${stage.role} 指定的执行节点不存在或已停用：${nodeId}`)
+      if (live.status !== 'ready') throw new Error(`工作流阶段 ${stage.role} 执行节点尚未就绪：${nodeId} (${live.status})`)
+      const provider = agentToolConfig?.providerName
+      const actual = typeof provider === 'string' ? live.observedCapabilities?.providers?.[provider] : null
+      const expectedPermissionMode = expectedExternalPermissionMode(agentToolConfig)
+      if (!provider || !live.observedProviders.includes(provider) || actual === null || actual === undefined
+        || actual.outputSchema !== agentToolConfig.capabilities.outputSchema
+        || actual.toolFilter !== agentToolConfig.capabilities.toolFilter
+        || actual.cancellation !== agentToolConfig.capabilities.cancellation
+        || (expectedPermissionMode !== null && actual.permissionMode !== expectedPermissionMode)) {
+        throw new Error(`工作流阶段 ${stage.role} 执行节点未报告与 Agent 工具匹配的 provider 能力：${nodeId}/${provider ?? '(none)'}`)
+      }
+      if (live.observedCapabilities.isolatedWorktree !== true) throw new Error(`工作流阶段 ${stage.role} 执行节点不支持独立 worktree：${nodeId}`)
+      executionNode = {
+        id: node.id, version: node.version, label: node.label,
+        capabilities: live.observedCapabilities, providers: live.observedProviders,
+      }
+    }
+    const resolvedModelConfig = resolveFrozenAgentModelConfig(modelRef, agentToolConfig, stage.workflowStageId)
+    const resolvedTool = { agentToolConfig, modelConfig: modelRef ?? null, resolvedModelConfig, executionNode }
+    stageTools[stage.role] = resolvedTool
+    stageToolsById[stage.workflowStageId] = resolvedTool
+    const successors = stage.nextStageIds ?? []
+    stageDefinitions[stage.role] = {
+      ...stage,
+      next: successors.length === 1 ? (roleByStageId[successors[0]] ?? null) : null,
+      agentToolConfig: toolRef ?? null,
+      modelConfig: modelRef ?? null,
+    }
+    stageDefinitionsById[stage.workflowStageId] = {
+      ...stageDefinitions[stage.role],
+      id: stage.workflowStageId,
+      testRunner: workflowStage?.testRunner ?? stage.testRunner ?? null,
+      previousStageIds: stage.previousStageIds ?? [],
+      nextStageIds: successors,
+    }
+  }
+  return {
+    ...pipeline.workflow,
+    pipelineVersion: pipeline.version,
+    instanceId: db.prepare('SELECT 1 FROM tasks WHERE id=?').get(taskId) === undefined ? taskId : taskWorkflowRootId(taskId),
+    stageLabels: Object.fromEntries(Object.entries(stageDefinitions).map(([role, stage]) => [role, stage.label])),
+    stageDefinitions,
+    stageTools,
+    stageDefinitionsById,
+    stageToolsById,
+  }
+}
+
+function frozenGoalWorkflow(task) {
+  if (task?.agentSelectionSnapshot?.reviewWorkflow) return task.agentSelectionSnapshot.reviewWorkflow
+  if (typeof task?.goalId !== 'string' || task.goalId === '') return null
+  const plan = contextPlanStore().readTeamPlan(null, { scope: task.scope, goalId: task.goalId })
+  return plan?.stages?.find((stage) => stage?.workflowStageId === task.agentSelectionSnapshot?.workflowStageId
+    || stage?.role === task.role)?.workflowSnapshot ?? null
+}
+
+function resolveLegacyAgentSelection(task) {
+  if (typeof task?.role !== 'string' || task.role.trim() === '') return null
+  const goalWorkflow = frozenGoalWorkflow(task)
+  if (goalWorkflow) {
+    const workflowStageId = task.agentSelectionSnapshot?.workflowStageId ?? goalWorkflow.stageIdByRole?.[task.role]
+    const target = goalWorkflow.stageToolsById?.[workflowStageId] ?? goalWorkflow.stageTools?.[task.role]
+    if (target === undefined) throw Object.assign(new Error(`冻结工作流缺少阶段配置：${task.role}`), { code: 'AGENT_WORKFLOW_TARGET_MISSING', statusCode: 409 })
+    const frozen = task.agentSelectionSnapshot ?? {
+      source: 'goal-agent-workflow',
+      pipelineVersion: goalWorkflow.pipelineVersion,
+      stageRole: task.role,
+      workflowStageId,
+      agentToolConfig: target.agentToolConfig ?? null,
+      modelConfig: target.modelConfig ?? null,
+      reviewWorkflow: goalWorkflow,
+    }
+    return {
+      ...frozen,
+      resolvedModelConfig: frozen.resolvedModelConfig ?? target.resolvedModelConfig ?? null,
+      reviewWorkflow: goalWorkflow,
+      workflowContext: resolveAgentWorkflowContextSnapshot(frozen.reviewWorkflow, task.id),
+    }
+  }
+  const pipeline = readPipeline(task.scope)
+  const stage = pipeline.stages.find((item) => item.enabled && item.role === task.role)
+  if (stage === undefined || (stage.agentToolConfig == null && stage.modelConfig == null && pipeline.workflow == null)) return null
+  let agentToolConfig = null
+  if (stage.agentToolConfig !== null && stage.agentToolConfig !== undefined) {
+    const registered = harnessStoreForDispatch().getAgentToolConfig(stage.agentToolConfig)
+    if (registered === null) {
+      throw Object.assign(new Error(`阶段 ${stage.role} 引用的 Agent 工具配置不存在或已停用：${stage.agentToolConfig.id}@${stage.agentToolConfig.version}`), {
+        code: 'AGENT_TOOL_CONFIG_UNRESOLVED', statusCode: 409,
+      })
+    }
+    const { createdAtMs: _createdAtMs, ...resolved } = registered
+    agentToolConfig = resolved
+  }
+  const resolvedModelConfig = resolveFrozenAgentModelConfig(stage.modelConfig ?? null, agentToolConfig, stage.role)
+  return {
+      source: 'space-pipeline',
+      pipelineVersion: pipeline.version,
+      stageRole: stage.role,
+      agentToolConfig,
+      modelConfig: stage.modelConfig ?? null,
+      resolvedModelConfig,
+      reviewWorkflow: resolveAgentReviewWorkflowSnapshot(pipeline, task.id),
+      workflowContext: resolveAgentWorkflowContextSnapshot(pipeline.workflow, task.id),
+    }
+}
+
+function claimTask(id, soldier, ifVersion, force, round, requestId, ttlMinutes, requestedScope = null, requestedAgentNodeId = null) {
   const outcome = withTx(() => {
     const t = getTask(id)
     if (requestedScope !== null && t.scope !== requestedScope) throw Object.assign(new Error('任务不属于请求空间'), { code: 'SCOPE_MISMATCH', statusCode: 403 })
@@ -4448,6 +5741,51 @@ function claimTask(id, soldier, ifVersion, force, round, requestId, ttlMinutes, 
     if (t.soldier !== null && t.soldier !== soldier) throw new Error(`任务 ${t.id} 已被 ${t.soldier} 认领，不得抢占`)
     if (t.status !== 'todo' && t.status !== 'blocked') throw new Error(`无法认领：任务 ${t.id} 当前 ${t.status}`)
     if (t.hold) throw new Error(`任务 ${t.id} 被将军拦截（hold），先在任务详情「放行」后再自动执行`)
+    const goalWorkflow = frozenGoalWorkflow(t)
+    const workflowStageId = t.agentSelectionSnapshot?.workflowStageId ?? goalWorkflow?.stageIdByRole?.[t.role ?? ''] ?? null
+    const workflowTool = goalWorkflow?.stageToolsById?.[workflowStageId]
+      ?? goalWorkflow?.stageTools?.[t.role ?? ''] ?? null
+    const selectedTool = t.agentSelectionSnapshot?.agentToolConfig ?? workflowTool?.agentToolConfig ?? null
+    let inheritedNode = null
+    if (goalWorkflow !== null && goalWorkflow !== undefined) {
+      const inheritedNodes = new Map()
+      for (const ancestor of workflowAncestors(t.id, goalWorkflow)) {
+        const node = ancestor.agentSelectionSnapshot?.executionNode
+        if (node?.id) inheritedNodes.set(node.id, node)
+      }
+      if (inheritedNodes.size > 1) throw Object.assign(new Error(`工作流上游阶段绑定了多个执行节点（${[...inheritedNodes.keys()].join(', ')}）；跨节点 workspace/Git 交接尚未实现`), { code: 'AGENT_NODE_WORKSPACE_MISMATCH', statusCode: 409 })
+      inheritedNode = inheritedNodes.values().next().value ?? null
+    }
+    const configuredNode = t.agentSelectionSnapshot?.executionNode ?? workflowTool?.executionNode ?? null
+    if (configuredNode && inheritedNode && configuredNode.id !== inheritedNode.id) {
+      throw Object.assign(new Error(`工作流阶段指定节点 ${configuredNode.id} 与上游执行节点 ${inheritedNode.id} 不同；跨节点 workspace/Git 交接尚未实现`), { code: 'AGENT_NODE_WORKSPACE_MISMATCH', statusCode: 409 })
+    }
+    const expectedNode = configuredNode ?? inheritedNode
+    if (expectedNode !== null && expectedNode !== undefined && requestedAgentNodeId !== expectedNode.id) {
+      throw Object.assign(new Error(`任务阶段绑定执行节点 ${expectedNode.id}，当前节点 ${requestedAgentNodeId ?? '(未登记)'}`), { code: 'AGENT_NODE_MISMATCH', statusCode: 409 })
+    }
+    let claimedNodeSnapshot = null
+    if (requestedAgentNodeId !== null && requestedAgentNodeId !== undefined && requestedAgentNodeId !== '') {
+      const node = harnessStoreForDispatch().getAgentNodeConfig({ id: requestedAgentNodeId, scope: t.scope })
+      const liveNode = harnessStoreForDispatch().listAgentNodeConfigs({ scope: t.scope }).find((item) => item.id === requestedAgentNodeId)
+      if (node === null || liveNode?.status !== 'ready') {
+        throw Object.assign(new Error(`执行节点未注册或未就绪：${requestedAgentNodeId} (${liveNode?.status ?? 'unknown'})`), { code: 'AGENT_NODE_NOT_READY', statusCode: 409 })
+      }
+      const providerName = selectedTool?.providerName
+      const reported = typeof providerName === 'string' ? liveNode.observedCapabilities?.providers?.[providerName] : null
+      const expectedPermissionMode = expectedExternalPermissionMode(selectedTool)
+      if (selectedTool && (!providerName || !liveNode.observedProviders.includes(providerName) || reported === null || reported === undefined
+        || reported.outputSchema !== selectedTool.capabilities.outputSchema
+        || reported.toolFilter !== selectedTool.capabilities.toolFilter
+        || reported.cancellation !== selectedTool.capabilities.cancellation
+        || (expectedPermissionMode !== null && reported.permissionMode !== expectedPermissionMode))) {
+        throw Object.assign(new Error(`节点 ${requestedAgentNodeId} 未报告与冻结 Agent 工具相符的 provider 能力/权限模式：${providerName ?? '(none)'}`), { code: 'AGENT_NODE_PROVIDER_INCOMPATIBLE', statusCode: 409 })
+      }
+      if (liveNode.observedCapabilities.isolatedWorktree !== true) {
+        throw Object.assign(new Error(`节点 ${requestedAgentNodeId} 未报告独立 worktree 能力，拒绝认领跨 Agent 阶段`), { code: 'AGENT_NODE_WORKSPACE_UNAVAILABLE', statusCode: 409 })
+      }
+      claimedNodeSnapshot = { id: node.id, version: node.version, label: node.label, capabilities: liveNode.observedCapabilities, providers: liveNode.observedProviders }
+    }
     assertUnblocked(t, force)
     const at = now()
     const ttl = ttlMinutes !== undefined ? ttlMinutes : t.ttlMinutes
@@ -4475,8 +5813,15 @@ function claimTask(id, soldier, ifVersion, force, round, requestId, ttlMinutes, 
       }
       return { blocked: reserved }
     }
-    db.prepare('UPDATE tasks SET status=\'in_progress\', soldier=?, claimedRound=?, claimedAt=?, ttlMinutes=?, expiresAt=?, claimRequestId=?, version=version+1, updatedAt=? WHERE id=?')
-      .run(soldier, round ?? null, at, ttl ?? null, expires, requestId ?? null, now(), id)
+    let agentSelectionSnapshot = t.agentSelectionSnapshot?.reviewWorkflow
+      ? resolveLegacyAgentSelection(t)
+      : t.agentSelectionSnapshot ?? resolveLegacyAgentSelection(t)
+    if (agentSelectionSnapshot && claimedNodeSnapshot && agentSelectionSnapshot.executionNode == null) {
+      agentSelectionSnapshot = { ...agentSelectionSnapshot, executionNode: claimedNodeSnapshot }
+    }
+    db.prepare('UPDATE tasks SET status=\'in_progress\', soldier=?, claimedRound=?, claimedAt=?, ttlMinutes=?, expiresAt=?, claimRequestId=?, agent_selection_snapshot=?, version=version+1, updatedAt=? WHERE id=?')
+      .run(soldier, round ?? null, at, ttl ?? null, expires, requestId ?? null,
+        agentSelectionSnapshot === null ? null : JSON.stringify(agentSelectionSnapshot), now(), id)
     db.prepare("UPDATE tasks SET scheduling_state='reserved' WHERE id=?").run(id)
     return { task: getTask(id) }
   })
@@ -4652,11 +5997,33 @@ function releaseStaleTasks(olderThanMinutes, by, ids) {
     const nowMs = Date.now()
     const rows = db.prepare("SELECT id, claimedAt, expiresAt, updatedAt FROM tasks WHERE status='in_progress'").all()
     const released = []
+    const quarantined = []
+    const quarantineWorkflowTask = (task) => {
+      const providerName = task.agentSelectionSnapshot?.agentToolConfig?.providerName ?? 'unknown'
+      const workflowStageId = task.agentSelectionSnapshot?.workflowStageId ?? task.role ?? 'unknown'
+      const reason = `守护重启后工作流阶段结果未知（stage=${workflowStageId}, provider=${providerName}）；可能已发生外部副作用，已挂起等待人工核对，不自动重派`
+      const comments = parseJson(task.comments, [])
+      comments.push({ by, at: now(), text: reason })
+      finishTaskReservationInTx(task.id, { cancelled: true })
+      db.prepare(`UPDATE agent_workflow_stage_attempts SET state='unknown', stop_reason=COALESCE(stop_reason, 'worker-restarted'),
+        error_text=COALESCE(error_text, 'worker process ended before a terminal provider result was recorded'), updated_at_ms=?
+        WHERE task_id=? AND state IN ('starting', 'running')`)
+        .run(Date.now(), task.id)
+      db.prepare(`UPDATE tasks SET status='in_review', hold=1, soldier=NULL, claimedAt=NULL,
+        claimedRound=NULL, ttlMinutes=NULL, expiresAt=NULL, claimRequestId=NULL, comments=?,
+        version=version+1, updatedAt=? WHERE id=?`)
+        .run(JSON.stringify(comments), now(), task.id)
+      quarantined.push(task.id)
+    }
     for (const r of rows) {
       if (Array.isArray(ids)) {
         if (!ids.includes(r.id)) continue
-        const reason = `守护重启检测到孤儿在办任务（worker 已随进程消失），自动释放回 todo 重新认领续做`
         const t = getTask(r.id)
+        if (t.agentSelectionSnapshot?.reviewWorkflow) {
+          quarantineWorkflowTask(t)
+          continue
+        }
+        const reason = `守护重启检测到孤儿在办任务（worker 已随进程消失），自动释放回 todo 重新认领续做`
         const comments = parseJson(t.comments, [])
         comments.push({ by, at: now(), text: reason })
         finishTaskReservationInTx(r.id, { cancelled: true })
@@ -4669,18 +6036,29 @@ function releaseStaleTasks(olderThanMinutes, by, ids) {
       const staleByAge = !Number.isNaN(base) && base <= cutoff
       const staleByTtl = r.expiresAt !== null && r.expiresAt !== undefined && new Date(r.expiresAt).getTime() <= nowMs
       if (!staleByAge && !staleByTtl) continue
+      const task = getTask(r.id)
+      const workflow = task.agentSelectionSnapshot?.reviewWorkflow
+      if (workflow) {
+        // A live workflow stage may already have crossed an external Agent's side-effect
+        // boundary. Ordinary age/TTL expiry cannot prove that its worker stopped, so
+        // leave it leased for the worker watchdog to settle. Boot-orphan recovery passes
+        // explicit ids only after the old worker process is gone; quarantine those for
+        // human reconciliation instead of issuing the same Agent task again.
+        if (!Array.isArray(ids)) continue
+        quarantineWorkflowTask(task)
+        continue
+      }
       const reason = staleByTtl
         ? `守护检测到任务已过 TTL（expiresAt=${r.expiresAt}），自动释放回 todo`
         : `守护检测到认领超过 ${olderThanMinutes} 分钟无进展，自动释放回 todo`
-      const t = getTask(r.id)
-      const comments = parseJson(t.comments, [])
+      const comments = parseJson(task.comments, [])
       comments.push({ by, at: now(), text: reason })
       finishTaskReservationInTx(r.id, { cancelled: true })
       db.prepare('UPDATE tasks SET status=\'todo\', soldier=NULL, claimedAt=NULL, claimedRound=NULL, ttlMinutes=NULL, expiresAt=NULL, claimRequestId=NULL, comments=?, version=version+1, updatedAt=? WHERE id=?')
         .run(JSON.stringify(comments), now(), r.id)
       released.push(r.id)
     }
-    return released
+    return { released, quarantined }
   })
 }
 
@@ -4919,30 +6297,12 @@ function json(res, status, data) {
   res.end(JSON.stringify(data, null, 2))
 }
 
-function readBody(req, cap = Number.POSITIVE_INFINITY) {
+function readBody(req) {
   return new Promise((resolve, reject) => {
-    const chunks = []
-    let total = 0
-    let finished = false
-    req.on('data', (d) => {
-      if (finished) return
-      const chunk = Buffer.isBuffer(d) ? d : Buffer.from(d)
-      total += chunk.length
-      if (total > cap) {
-        finished = true
-        req.removeAllListeners('data')
-        req.resume()
-        reject(Object.assign(new Error('请求体超大小'), { statusCode: 413, code: 'REQUEST_TOO_LARGE' }))
-        return
-      }
-      chunks.push(chunk)
-    })
+    let raw = ''
+    req.on('data', (d) => { raw += d })
     req.on('end', () => {
-      if (finished) return
-      try {
-        const raw = Buffer.concat(chunks).toString('utf8')
-        resolve(raw.length === 0 ? {} : JSON.parse(raw))
-      } catch { reject(new Error('请求体不是合法 JSON')) }
+      try { resolve(raw.length === 0 ? {} : JSON.parse(raw)) } catch { reject(new Error('请求体不是合法 JSON')) }
     })
     req.on('error', reject)
   })
@@ -5031,10 +6391,10 @@ function optionalIntParam(url, name) {
   return Number.isSafeInteger(n) ? n : null
 }
 
-async function handleWrite(req, res, run, { maxBytes = Number.POSITIVE_INFINITY } = {}) {
+async function handleWrite(req, res, run) {
   try {
     if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
-    const body = await readBody(req, maxBytes)
+    const body = await readBody(req)
     const by = requireMember(body)
     const scope = readScope(body)
     const result = await run(body, by, scope)
@@ -5302,20 +6662,7 @@ export function artifactContent(taskId, rawI) {
 // ── 路由层（PRT-316）：`handle` 里已提取出去的路由族在这里装配。──
 // 依赖由本文件注入（各族自己不 import hub 内部件）。新族加进这个数组即可，
 // 不需要再往下面那条 if 链里抄一遍同样的形状。
-ensureWorkflowPackSchema(db)
-export const agentConversations = createAgentConversationService({
-  db, withTx, audit, createTask,
-  recordRunEvents: input => runStore.recordRunEvents(input),
-})
-export function reconcileAgentConversations() { return agentConversations.reconcile() }
-const agentConversationTimer = setInterval(() => {
-  if (db.isOpen === false) { clearInterval(agentConversationTimer);return }
-  try { reconcileAgentConversations() } catch (e) { console.error('[agent-conversations] reconciliation failed:', e.message) }
-}, 3000)
-agentConversationTimer.unref()
-
 const router = createRouter([
-  createAgentsRoutes({ service:agentConversations,json,authorized,readBody,requireMember,readScope }),
   // 冲突治理族放在最前：/api/tasks/:id/write-intent 等具体路径必须先于宽前缀匹配。
   createWriteIntentRoutes({
     json, readBody, authorized, writeIntentStore, db,
@@ -5405,7 +6752,6 @@ const router = createRouter([
   }),
   createContextSnapshotsRoutes({
     json,
-    onSnapshotRecorded: (attemptId,snapshot) => agentConversations.includeFeedback(attemptId,snapshot),
     contextStore, handleRun, assembleContext,
     describeAssembly, collectCandidates, createContextSource,
     createConservativeTokenizer, tokenizerForProfile, planSnapshotRetention,
@@ -5500,7 +6846,6 @@ const router = createRouter([
     transitionTask, settleGoalsOfScope, advanceTask,
     reassignTask, now, getTask,
     releaseStaleTasks, inboxCount, handleWrite,
-    onManualHold: (taskId,hold) => agentConversations.manualHold(taskId,hold),
   }),
   createModelBindingsRoutes({
     json,
@@ -5555,11 +6900,8 @@ const router = createRouter([
     json,
     db, now, audit,
     handleWrite, SCOPE_KEY_RE, normalizeStages,
-    normalizeRuntime, withTx, readPipeline,
+    normalizeRuntime, normalizeAgentWorkflow, withTx, readPipeline,
     pipelineWarnings,
-  }),
-  createWorkflowPackRoutes({
-    db, json, handleWrite: (req, res, run) => handleWrite(req, res, run, { maxBytes: 2 * 1024 * 1024 }), audit, withTx,
   }),
   createAgentIntakeRoutes({
     json,
@@ -5589,13 +6931,18 @@ const router = createRouter([
   }),
   createChannelRoutes({ json, handleWrite, channelStore: createChannelStore({ db }) }),
   createHarnessRoutes({ json, handleWrite, harnessStore: createHarnessStore({ db }) }),
+  createAgentWorkflowRoutes({
+    json, handleWrite,
+    submitReview: submitAgentWorkflowReview,
+    readHistory: readAgentWorkflowHistory,
+    readInstances: readAgentWorkflowInstances,
+    beginStageAttempt: beginAgentWorkflowStageAttempt,
+    reportStageAttempt: reportAgentWorkflowStageAttempt,
+    reconcileStageAttempt: reconcileAgentWorkflowStageAttempt,
+  }),
 ])
 
 async function handle(req, res, stripPrefix) {
-  if (CFG.values.desktopMode) {
-    const failure = checkDesktopRequest(req, TOKEN)
-    if (failure) { json(res, failure.status, { code: failure.code }); return }
-  }
   const url = new URL(req.url ?? '/', 'http://x')
   let path = url.pathname
   // P1-1 宿主集成：DSH webServer 把前缀路由（如 /team-hub）下所有请求交给本 handle，
@@ -5975,7 +7322,6 @@ const server = http.createServer((req, res) => {
  * 所以本函数只做"关连接 + 清集合"，并**不**推进任何投递状态。
  */
 export function disposeHub() {
-  clearInterval(agentConversationTimer)
   for (const client of eventClients) client.res.end()
   eventClients.clear()
 }
@@ -5986,18 +7332,6 @@ const isMain = process.argv[1] !== undefined && resolve(process.argv[1]) === fil
 let lastToolCallSweepSignature = null
 
 if (isMain) {
-  // Packaged desktop first-run: install the built-in software collaboration
-  // pack before listening, so Workbench never opens into an empty space list.
-  // Re-import is idempotent; the package store refuses to overwrite local edits.
-  if (process.env.LEGION_DESKTOP_MODE === '1' && process.env.LEGION_WORKFLOW_PACK_PATH) {
-    let rawPack
-    try { rawPack = JSON.parse(readFileSync(process.env.LEGION_WORKFLOW_PACK_PATH, 'utf8')) }
-    catch { throw Object.assign(new Error('Built-in workflow pack cannot be read'), { code: 'WORKFLOW_PACK_UNREADABLE' }) }
-    const validatedPack = validateWorkflowPack(rawPack)
-    const result = bootstrapWorkflowPack(db, validatedPack, { withTx,
-      workspaceDir: process.env.LEGION_WORKSPACE_DIR ?? '' })
-    console.log(`[team-hub] workflow pack ${validatedPack.pack.id}@${validatedPack.pack.version}: ${result.action}${result.skipped ? ' skipped' : ''} scope=${validatedPack.pack.scope.id}`)
-  }
   console.log(configSummaryLine()) // P3-2：启动即打印脱敏后的最终配置（token 只显示是否设置）
   validateSecurityConfig()
   server.listen(PORT, HOST, () => {

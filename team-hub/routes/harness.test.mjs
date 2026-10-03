@@ -9,19 +9,97 @@ import { ROUTE_SOURCES, ROUTE_REJECT } from '../../runtime/contracts/harness-rou
 function mk() {
   const store = createHarnessStore({ db: new DatabaseSync(':memory:') })
   const calls = []
+  const responses = []
   let body
   const handleWrite = async (_q, _s, cb) => {
     try { calls.push({ ok: true, value: await cb(body, 'tester', 'default') }) }
     catch (e) { calls.push({ ok: false, message: String(e.message) }) }
   }
-  const routes = createHarnessRoutes({ json: () => {}, handleWrite, harnessStore: store })
-  const hit = async (path, b, method = 'POST') => { body = b; return routes.dispatch({ method }, {}, { path }) }
-  return { store, routes, calls, hit }
+  const routes = createHarnessRoutes({ json: (_res, status, value) => responses.push({ status, value }), handleWrite, harnessStore: store })
+  const hit = async (path, b, method = 'POST') => { body = b; return routes.dispatch({ method, url: `http://x${path}` }, {}, { path: path.split('?')[0] }) }
+  return { store, routes, calls, responses, hit }
 }
 const CODEX = { name: 'codex', kind: 'codex', command: 'codex', args: ['exec'], permission: 'reject' }
 
 test('F-23 缺注入项 ⇒ 当场抛', () => {
   assert.throws(() => createHarnessRoutes({ json: () => {}, handleWrite: async () => {} }), /createHarnessRoutes 缺注入项：harnessStore/)
+})
+
+test('Agent 节点身份独立登记；心跳报告真实 provider/能力，未知、离线与在线状态分开', () => {
+  const { store } = mk()
+  const config = store.putAgentNodeConfig({ id: 'workstation-a', label: '本机 DSH', scope: 'default' })
+  assert.equal(config.version, 1)
+  assert.equal(config.status, 'unknown')
+  assert.equal(store.listAgentNodeConfigs({ scope: 'default', nowMs: 50_000 })[0].status, 'unknown')
+  const heartbeat = store.heartbeatAgentNode({
+    id: 'workstation-a', version: 1, scope: 'default', providerNames: ['codex', 'deepseek'],
+    capabilities: {
+      isolatedWorktree: true, externalAgent: true, structuredOutput: true, toolFilter: true, cancellation: true,
+      providers: { codex: { outputSchema: false, toolFilter: false, cancellation: true, permissionMode: 'approve-for-me', systemProxyMode: 'system' } },
+    }, nowMs: 50_000,
+  })
+  assert.equal(heartbeat.status, 'ready')
+  assert.deepEqual(heartbeat.observedProviders, ['codex', 'deepseek'])
+  assert.equal(heartbeat.observedCapabilities.providers.codex.systemProxyMode, 'system')
+  assert.equal(store.listAgentNodeConfigs({ scope: 'default', nowMs: 111_001 })[0].status, 'offline')
+  const revised = store.putAgentNodeConfig({ id: 'workstation-a', label: '本机 DSH', scope: 'default' })
+  assert.equal(revised.version, 2)
+  assert.equal(store.listAgentNodeConfigs({ scope: 'default', nowMs: 50_001 })[0].status, 'offline', '旧版节点心跳不得冒充新配置在线')
+  assert.throws(() => store.heartbeatAgentNode({
+    id: 'workstation-a', version: 1, scope: 'default', providerNames: ['codex'],
+    capabilities: { isolatedWorktree: true, externalAgent: true, structuredOutput: true, toolFilter: true, cancellation: true },
+  }), /配置不存在/)
+})
+
+test('Agent 节点路由可创建配置并接收心跳；配置读面按空间隔离', async () => {
+  const s = mk()
+  await s.hit('/api/agent-nodes/configs', { id: 'node-a', label: 'DSH workstation', scope: 'default' })
+  assert.equal(s.calls[0].ok, true)
+  assert.equal(s.calls[0].value.version, 1)
+  await s.hit('/api/agent-nodes/heartbeat', {
+    id: 'node-a', providerNames: ['codex'],
+    capabilities: { isolatedWorktree: true, externalAgent: true, structuredOutput: false, toolFilter: false, cancellation: true },
+  })
+  assert.equal(s.calls[1].ok, true)
+  assert.equal(s.calls[1].value.status, 'ready')
+})
+
+test('命名工作流定义独立于空间阶段配置，按 scope/id/version 不可变保存并可读回', async () => {
+  const s = mk()
+  const caps = { textInput: true, textOutput: true, outputSchema: false, toolFilter: false, localAgent: false, sessionResume: false, cancellation: true }
+  for (const [id, providerName, adapter, permissionProfile] of [['tool.claude', 'claude-code', 'dsh-subagent', 'claude-code-acceptEdits'], ['tool.dsh', 'deepseek', 'dsh-native', 'native'], ['tool.codex', 'codex', 'dsh-subagent', 'codex-workspace-write']]) {
+    s.store.putAgentToolConfig({ id, version: 1, providerName, adapter, permissionProfile, workspacePolicy: 'attempt-worktree', capabilities: caps })
+  }
+  const workflow = {
+    id: 'design-code-review', version: 1, name: '设计-实现-审查', description: '跨 Agent 标准闭环',
+    stages: [
+      { id: 'design', role: 'designer', agentToolConfig: { id: 'tool.claude', version: 1 }, outputContract: { artifacts: ['design.md'] } },
+      { id: 'implement', role: 'coder', agentToolConfig: { id: 'tool.dsh', version: 1 }, inputContract: { artifacts: ['design.md'] }, outputContract: { artifacts: ['commit', 'test-evidence'] }, testRunner: { executable: 'node', args: ['--test'], timeoutMs: 300000 } },
+      { id: 'review', role: 'reviewer', agentToolConfig: { id: 'tool.codex', version: 1 }, inputContract: { artifacts: ['design.md', 'commit', 'test-evidence'] } },
+    ],
+    edges: [{ from: 'design', to: 'implement' }, { from: 'implement', to: 'review' }],
+    entryStageIds: ['design'], terminalStageIds: ['review'], reviewStageId: 'review',
+    reviewRoutes: { design: 'design', implementation: 'implement' }, maxReworkRounds: 3,
+  }
+  await s.hit('/api/agent-workflows/definitions', { definition: workflow })
+  assert.equal(s.calls[0].ok, true)
+  assert.equal(s.calls[0].value.idempotent, false)
+  await s.hit('/api/agent-workflows/definitions', { definition: workflow })
+  assert.equal(s.calls[1].value.idempotent, true)
+  await s.hit('/api/agent-workflows/definitions', { definition: { ...workflow, name: '改写同版本' } })
+  assert.equal(s.calls[2].ok, false)
+  assert.match(s.calls[2].message, /版本不可变/)
+  await s.hit('/api/agent-workflows/definitions', { definition: { ...workflow, id: 'missing-tool', version: 1,
+    stages: workflow.stages.map((item, index) => index === 0 ? { ...item, agentToolConfig: { id: 'tool.missing', version: 1 } } : item) } })
+  assert.equal(s.calls[3].ok, false)
+  assert.match(s.calls[3].message, /工具配置不存在/)
+
+  await s.hit('/api/agent-workflows/definitions?scope=default', {}, 'GET')
+  assert.equal(s.responses.at(-1).value.definitions.length, 1)
+  await s.hit('/api/agent-workflows/definitions?scope=default&id=design-code-review&version=1', {}, 'GET')
+  assert.equal(s.responses.at(-1).status, 200)
+  assert.deepEqual(s.responses.at(-1).value.definition.edges, workflow.edges)
+  assert.equal(s.store.getAgentWorkflowDefinition({ scope: 'other', id: workflow.id, version: 1 }), null)
 })
 
 test('★ F-23 默认表：只有 DeepSeek Harness 一行，且标记 protected；不指定就走它', async () => {
@@ -105,6 +183,47 @@ test('F-23 provider 字段校验：permission 只有 reject/allow；args 必须�
     await s.hit('/api/harness/providers', b)
     assert.equal(s.calls[0].ok, false, JSON.stringify(b))
     assert.match(s.calls[0].message, re)
+  }
+})
+
+test('Agent 工具配置按 id+version 保存完整执行能力，配置版本不可被覆盖', async () => {
+  const s = mk()
+  const config = {
+    id: 'tool.codex', version: 1, providerName: 'codex', adapter: 'dsh-subagent',
+    permissionProfile: 'codex-workspace-write', workspacePolicy: 'attempt-worktree-parent-cwd',
+    capabilities: { textInput: true, textOutput: true, outputSchema: false, toolFilter: false, localAgent: false, sessionResume: false, cancellation: true },
+  }
+  await s.hit('/api/agent-tools/configs', config)
+  assert.equal(s.calls[0].ok, true)
+  assert.equal(s.store.getAgentToolConfig({ id: config.id, version: 1 }).providerName, 'codex')
+  await s.hit('/api/agent-tools/configs', config)
+  assert.equal(s.calls[1].value.idempotent, true, '同一不可变版本允许幂等写入')
+  await s.hit('/api/agent-tools/configs', { ...config, providerName: 'claude-code', permissionProfile: 'claude-code-acceptEdits' })
+  assert.equal(s.calls[2].ok, false, '同版本不能改指向另一个 provider')
+  assert.match(s.calls[2].message, /不可变/)
+  assert.equal(s.store.getAgentToolConfig({ id: config.id, version: 1 }).providerName, 'codex')
+})
+
+test('Agent 工具配置拒绝不完整能力与悬空 version', async () => {
+  const s = mk()
+  await s.hit('/api/agent-tools/configs', { id: 'tool.codex', version: 0, providerName: 'codex' })
+  assert.equal(s.calls[0].ok, false)
+  await s.hit('/api/agent-tools/configs', {
+    id: 'tool.codex', version: 1, providerName: 'codex', permissionProfile: 'default',
+    workspacePolicy: 'attempt-worktree-parent-cwd', capabilities: { outputSchema: 'yes' },
+  })
+  assert.equal(s.calls[1].ok, false)
+  assert.equal(s.store.getAgentToolConfig({ id: 'tool.codex', version: 1 }), null)
+})
+
+test('DSH 外部工具配置拒绝含糊的默认档和危险权限档', () => {
+  const { store } = mk()
+  const caps = { textInput: true, textOutput: true, outputSchema: false, toolFilter: false, localAgent: false, sessionResume: false, cancellation: true }
+  for (const permissionProfile of ['codex-native-default', 'dangerously-bypass-approvals-and-sandbox']) {
+    assert.throws(() => store.putAgentToolConfig({
+      id: `tool.codex.${permissionProfile}`, version: 1, providerName: 'codex', adapter: 'dsh-subagent',
+      permissionProfile, workspacePolicy: 'attempt-worktree-parent-cwd', capabilities: caps,
+    }), /permissionProfile 未映射到受支持的原生权限模式/)
   }
 })
 
@@ -193,5 +312,5 @@ test('F-23 本族只认自己那几条路', async () => {
   assert.equal(await s.hit('/api/harness/resolve', {}, 'GET'), false)
   assert.equal(await s.hit('/api/harness/decisions', {}, 'POST'), false)
   assert.equal(s.routes.id, 'harness')
-  assert.equal(s.routes.routes.length, 8)
+  assert.equal(s.routes.routes.length, 15)
 })

@@ -8,6 +8,15 @@ import assert from 'node:assert/strict'
 import { stagesFromHubPayload, resolveDiscussion } from '../lib/index.js'
 
 describe('TC-SP-P0-D1 hub 载荷 → StageDef：正常映射', () => {
+  it('保留独立且带版本的 Agent 工具与模型配置引用', () => {
+    const stages = stagesFromHubPayload([{
+      role: 'designer', agentToolConfig: { id: 'tool.claude-code', version: 4 },
+      modelConfig: { id: 'model.sonnet', version: 2 },
+    }])
+    assert.deepEqual(stages[0].agentToolConfig, { id: 'tool.claude-code', version: 4 })
+    assert.deepEqual(stages[0].modelConfig, { id: 'model.sonnet', version: 2 })
+  })
+
   it('逐字段映射：role/label/prompt/next/gate/artifact/docs', () => {
     const stages = stagesFromHubPayload([
       { role: 'soldier-research', label: '需求调研', prompt: '调研……', next: 'soldier-selection', gate: false, docs: ['research/ozon/rerun-brief.md'] },
@@ -74,6 +83,14 @@ describe('TC-SP-P0-D2 防御式解析：坏数据整条丢弃，绝不半更新'
     assert.equal(s.gate, false, 'gate 必须严格 === true')
     assert.equal('artifact' in s, false, '空白 artifact → 省略（等价于无闸门产物）')
     assert.deepEqual(s.docs, ['ok.md', 'x/y.md'], 'docs 只保留非空字符串')
+  })
+
+  it('版本引用形状错误时忽略，避免把伪造的版本传进派工层', () => {
+    const stage = stagesFromHubPayload([{
+      role: 'reviewer', agentToolConfig: { id: 'codex', version: 0 }, modelConfig: { id: 'model' },
+    }])[0]
+    assert.equal('agentToolConfig' in stage, false)
+    assert.equal('modelConfig' in stage, false)
   })
 
   it('role 前后空白被裁剪（hub 与编队逐字对齐的前提）', () => {

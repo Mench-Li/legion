@@ -138,6 +138,7 @@ function gitCreatesWorktree() {
 }
 
 const GUARD_LOG = '已安装 pre-push 守卫（拦截 w/* 分支 push）'
+const WORKTREE_DEPS_WARNING = 'worktree 无 node_modules 可联接：类型检查/构建不可用，须在报告里如实声明未执行'
 
 // ── 静态契约 ─────────────────────────────────────────────────────────────────
 
@@ -333,7 +334,7 @@ test('★ 全新任务：rev-parse 探测分支 → worktree add -b（argv 逐�
   assert.equal(h.calls[1].repoRoot, h.ws.repoRootFor())
   assert.deepEqual(h.activities, [{ kind: 'worktree', taskId: 'T-1', text: `隔离 worktree 就绪：${dir}（分支 w/T-1）` }])
   // 第一步永远是装守卫（幂等），第二步才判断目录
-  assert.deepEqual(h.logs, [GUARD_LOG])
+  assert.deepEqual(h.logs, [GUARD_LOG, WORKTREE_DEPS_WARNING])
 })
 
 test('★ git 一律在**绑定的**仓库里执行，目录也建在绑定仓库根下', async (t) => {
@@ -351,7 +352,7 @@ test('★ git 一律在**绑定的**仓库里执行，目录也建在绑定仓�
   ])
   assert.deepEqual(h.calls.map(c => c.repoRoot), [boundRoot, boundRoot], '★ 必须用绑定的仓库根，不是注入的 config.repoRoot')
   assert.equal(existsSync(join(boundRoot, '.git', 'hooks', 'pre-push')), true, '守卫装在**绑定仓库**里（也走 repoRootFor）')
-  assert.deepEqual(h.logs, [GUARD_LOG])
+  assert.deepEqual(h.logs, [GUARD_LOG, WORKTREE_DEPS_WARNING])
   assert.equal(h.activities[0].text, `隔离 worktree 就绪：${dir}（分支 w/T-7）`)
 })
 
@@ -377,7 +378,7 @@ test('★ 复用既有 worktree：一发 git 命令都不发（argv 为空），
   assert.deepEqual(argv(h), [], '★ 复用 = 不重建：不得发 worktree add（更不得 remove）')
   assert.equal(readFileSync(join(dir, 'WIP.txt'), 'utf8'), '上一轮未提交的改动\n')
   assert.deepEqual(h.activities, [{ kind: 'worktree', taskId: 'T-1', text: `复用既有 worktree：${dir}（分支 w/T-1）` }])
-  assert.deepEqual(h.logs, [GUARD_LOG, `T-1 复用既有 worktree：${dir}`])
+  assert.deepEqual(h.logs, [GUARD_LOG, `T-1 复用既有 worktree：${dir}`, WORKTREE_DEPS_WARNING])
 })
 
 test('★ 两次派工同一个任务：第二次复用第一次建的目录，WIP 还在、git 一次都不再发', async (t) => {
@@ -503,7 +504,7 @@ test('★ 全新仓库：装 pre-push 守卫，脚本内容与放行/拦截口�
   assert.match(body, /# legion worktree guard：禁止 push worktree 分支（w\/\*）；普通分支放行/)
   assert.match(body, /refs\/heads\/w\/\*\) echo "legion: worktree 分支 w\/\* 禁止 push（须经 promote 合并回主分支）" >&2; exit 1/)
   assert.match(body, /\nexit 0\n$/)
-  assert.deepEqual(h.logs, [GUARD_LOG])
+  assert.deepEqual(h.logs, [GUARD_LOG, WORKTREE_DEPS_WARNING])
 })
 
 test('★ 守卫幂等：已装过（含 marker）→ 不重写、不记日志', async (t) => {
@@ -513,7 +514,7 @@ test('★ 守卫幂等：已装过（含 marker）→ 不重写、不记日志',
   writeFileSync(hook, '#!/bin/sh\n# legion worktree guard：我自己的版本\n')
   await h.ws.prepareWorktree('T-1')
   assert.equal(readFileSync(hook, 'utf8'), '#!/bin/sh\n# legion worktree guard：我自己的版本\n', '★ 已装过不得覆盖（可能是将军手改过的版本）')
-  assert.deepEqual(h.logs, [])
+  assert.deepEqual(h.logs, [WORKTREE_DEPS_WARNING])
 })
 
 test('★ 已有自定义 pre-push（不含 marker）→ 不动它，只记一行提示', async (t) => {
@@ -523,7 +524,7 @@ test('★ 已有自定义 pre-push（不含 marker）→ 不动它，只记一�
   writeFileSync(hook, '#!/bin/sh\necho 我的自定义钩子\n')
   await h.ws.prepareWorktree('T-1')
   assert.equal(readFileSync(hook, 'utf8'), '#!/bin/sh\necho 我的自定义钩子\n')
-  assert.deepEqual(h.logs, ['检测到已有自定义 pre-push 钩子，跳过安装守卫（请自行确保 w/* 分支不被 push）'])
+  assert.deepEqual(h.logs, ['检测到已有自定义 pre-push 钩子，跳过安装守卫（请自行确保 w/* 分支不被 push）', WORKTREE_DEPS_WARNING])
 })
 
 test('★ 守卫安装失败 → 吞掉、记日志，worktree 流程照常继续（守卫只是尽力而为）', async (t) => {

@@ -13,7 +13,7 @@
   "pipeline": {
     "name": "software",
     "source": "hub",
-    "version": "e7c0f44ad10d63cd",
+    "version": "c151993ee1887111",
     "stages": [
       "requirement",
       "researcher",
@@ -25,12 +25,12 @@
       "devops"
     ]
   },
-  "inbox": 0,
-  "lastSweepAt": "2026-09-11T15:45:35.563Z",
-  "uptimeMs": 194449,
+  "inbox": 1,
+  "lastSweepAt": "2026-10-03T00:47:16.466Z",
+  "uptimeMs": 394676,
   "model": {
     "provider": "custom-ds",
-    "model": "deepseek-v4-flash-vision-openai"
+    "model": "deepseek-v4-flash-openai"
   },
   "repo": {
     "root": "D:/project/DSH/legion",
@@ -43,6 +43,10 @@
     "lastFailAt": null,
     "lastFailReason": ""
   },
+  "foreman": {
+    "ok": true,
+    "down": []
+  },
   "rulesDoctor": {
     "ok": true,
     "truncated": false,
@@ -50,6 +54,6 @@
     "total": 4,
     "present": 4,
     "missing": [],
-    "checkedAt": "2026-09-11T15:45:35.563Z"
+    "checkedAt": "2026-10-03T00:47:16.466Z"
   }
 }

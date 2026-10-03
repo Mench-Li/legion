@@ -47,7 +47,6 @@ export function createTaskLifecycleRoutes({
   transitionTask, settleGoalsOfScope, advanceTask,
   reassignTask, now, getTask,
   releaseStaleTasks, inboxCount, handleWrite,
-  onManualHold = null,
 }) {
   const deps = { json,
     runStore, db, readPipeline,
@@ -157,8 +156,9 @@ export function createTaskLifecycleRoutes({
           if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
           const soldier = typeof body.soldier === 'string' && body.soldier.length > 0 ? body.soldier : by
           const ttl = typeof body.ttlMinutes === 'number' && Number.isInteger(body.ttlMinutes) && body.ttlMinutes > 0 ? body.ttlMinutes : undefined
-          const task = claimTask(id, soldier, body.ifVersion, body.force === true, body.round, body.requestId, ttl, scope)
-          audit(by, scope, 'claim', id, { soldier }, task.goalId)
+          const agentNodeId = typeof body.agentNodeId === 'string' && body.agentNodeId.trim() !== '' ? body.agentNodeId.trim() : null
+          const task = claimTask(id, soldier, body.ifVersion, body.force === true, body.round, body.requestId, ttl, scope, agentNodeId)
+          audit(by, scope, 'claim', id, { soldier, agentNodeId }, task.goalId)
           return task
         })
       },
@@ -222,11 +222,10 @@ export function createTaskLifecycleRoutes({
           const id = body.id
           if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
           const hold = body.hold === true
-            const t = db.prepare('SELECT status, goalId FROM tasks WHERE id = ? AND scope=?').get(id,scope)
+          const t = db.prepare('SELECT status, goalId FROM tasks WHERE id = ?').get(id)
           if (!t) throw new Error(`未知任务 ${id}`)
           if (t.status === 'done' || t.status === 'canceled') throw new Error(`任务 ${id} 已 ${t.status}，不可拦截/放行`)
-            onManualHold?.(id,hold)
-            db.prepare('UPDATE tasks SET hold=?, version=version+1, updatedAt=? WHERE id=?').run(hold ? 1 : 0, now(), id)
+          db.prepare('UPDATE tasks SET hold=?, version=version+1, updatedAt=? WHERE id=?').run(hold ? 1 : 0, now(), id)
           audit(by, scope, hold ? 'hold' : 'unhold', id, {}, t.goalId)
           return getTask(id)
         })
@@ -241,9 +240,11 @@ export function createTaskLifecycleRoutes({
           const ids = Array.isArray(body.ids) ? body.ids.filter(x => typeof x === 'string') : undefined
           const minutes = Number(body.olderThan ?? 60)
           if (!Number.isFinite(minutes) || minutes <= 0) throw new Error('olderThan 必须是正整数分钟数')
-          const released = releaseStaleTasks(minutes, by, ids)
-          audit(by, scope, 'release-stale', '*', { released })
-          return { released }
+          const result = releaseStaleTasks(minutes, by, ids)
+          const released = Array.isArray(result) ? result : result.released ?? []
+          const quarantined = Array.isArray(result) ? [] : result.quarantined ?? []
+          audit(by, scope, 'release-stale', '*', { released, quarantined })
+          return { released, quarantined }
         })
       },
     },

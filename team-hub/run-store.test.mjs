@@ -49,7 +49,7 @@ import { TOKEN_ESTIMATOR_KINDS } from '../runtime/contracts/context.mjs'
  * 凡是走到那一步的用例都得注入它。默认 `null` —— 现有的用例都不进 `AwaitingApproval`，
  * 保持它们在"没有接线"这个事实下的原样。
  */
-function makeEnv({ startMs = 1_700_000_000_000, createApproval = null } = {}) {
+function makeEnv({ startMs = 1_700_000_000_000, createApproval = null, resolveAgentSelection = null } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'legion-runstore-'))
   const dbFile = join(root, 'team.db')
   const db = new DatabaseSync(dbFile)
@@ -72,6 +72,7 @@ function makeEnv({ startMs = 1_700_000_000_000, createApproval = null } = {}) {
   const store = createRunStore({
     db, clock,
     createApproval: typeof createApproval === 'function' ? createApproval(db) : null,
+    resolveAgentSelection,
   })
   const addTask = (id, { status = 'todo', scope = 'default', priority = 'medium', hold = 0 } = {}) => {
     db.prepare('INSERT INTO tasks (id, title, priority, status, scope, hold, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
@@ -494,6 +495,39 @@ test('⑤ 重试新建尝试，历史尝试不被改写（「试过几次、每�
     assert.equal(again.attemptNo, 2)
     const third = env.store.claim({ workerId: 'w3' })
     assert.equal(third.claimed, null, '同一任务不得同时有两条活跃尝试')
+  } finally { env.cleanup() }
+})
+
+test('⑤ 阶段工具/模型选择在首次认领时冻结，并由同任务重试沿用', () => {
+  let version = 3
+  const env = makeEnv({
+    resolveAgentSelection: () => ({
+      source: 'space-pipeline', pipelineVersion: `pipe-v${version}`, stageRole: 'reviewer',
+      agentToolConfig: { id: 'tool.codex', version }, modelConfig: { id: 'model.gpt', version: 2 },
+    }),
+  })
+  try {
+    env.addTask('t1')
+    const a1 = env.store.claim({ workerId: 'w1' }).claimed
+    assert.deepEqual(a1.agentSelectionSnapshot, {
+      source: 'space-pipeline', pipelineVersion: 'pipe-v3', stageRole: 'reviewer',
+      agentToolConfig: { id: 'tool.codex', version: 3 }, modelConfig: { id: 'model.gpt', version: 2 },
+    })
+    assert.equal(Object.isFrozen(a1.agentSelectionSnapshot.agentToolConfig), true)
+
+    version = 4
+    env.store.transition({ attemptId: a1.attemptId, leaseEpoch: a1.leaseEpoch, workerId: 'w1', to: 'PreparingWorkspace' })
+    env.store.transition({
+      attemptId: a1.attemptId, leaseEpoch: a1.leaseEpoch, workerId: 'w1', to: 'RetryableFailure',
+      context: { failureCode: 'runtime-unavailable', detail: '重试验证' },
+    })
+    const queued = env.store.transition({
+      attemptId: a1.attemptId, leaseEpoch: a1.leaseEpoch, workerId: 'w1', to: 'Queued',
+      context: { retryBudgetRemaining: true },
+    }).attempt
+    assert.deepEqual(queued.agentSelectionSnapshot, a1.agentSelectionSnapshot, '配置变化不得改写本任务阶段的重试选择')
+    const a2 = env.store.claim({ workerId: 'w2' }).claimed
+    assert.deepEqual(a2.agentSelectionSnapshot, a1.agentSelectionSnapshot)
   } finally { env.cleanup() }
 })
 

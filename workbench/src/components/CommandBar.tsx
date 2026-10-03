@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { ActivityEvent, BoardData, RosterAgent } from '../types'
 import { buildMissions } from '../missions'
-import { setPaused } from '../api'
+import { setPaused, type AgentWorkflowDefinitionRef } from '../api'
 import { toast } from './Toast'
 import { NewTaskModal } from './NewTaskModal'
 import { SchedulerModal } from './SchedulerModal'
@@ -22,7 +22,7 @@ interface CommandBarProps {
   /** 中枢模式：当前空间名（发布目标标题用）。 */
   spaceName?: string
   /** 发布空间目标（每次发布会新建一个目标，与既有目标并存）。 */
-  onPublishGoal?: (scope: string, objective: string) => Promise<void>
+  onPublishGoal?: (scope: string, objective: string, workflowDefinition?: AgentWorkflowDefinitionRef) => Promise<void>
   /** 中枢模式：当前空间编队（模型配置弹窗按它列角色）。 */
   roster?: RosterAgent[] | null
 }

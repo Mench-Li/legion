@@ -134,6 +134,17 @@ export function stagesFromHubPayload(raw: unknown): StageDef[] {
       ? s.docs.filter((d): d is string => typeof d === 'string' && d.trim() !== '').map(d => d.trim())
       : undefined
     const artifact = typeof s.artifact === 'string' && s.artifact.trim() !== '' ? s.artifact.trim() : undefined
+    const readVersionedRef = (value: unknown): { id: string; version: number } | null | undefined => {
+      if (value === null) return null
+      if (value === undefined || typeof value !== 'object' || Array.isArray(value)) return undefined
+      const ref = value as Record<string, unknown>
+      return typeof ref.id === 'string' && ref.id.trim() !== '' && typeof ref.version === 'number'
+        && Number.isSafeInteger(ref.version) && ref.version > 0
+        ? { id: ref.id.trim(), version: Number(ref.version) }
+        : undefined
+    }
+    const agentToolConfig = readVersionedRef(s.agentToolConfig)
+    const modelConfig = readVersionedRef(s.modelConfig)
     out.push({
       role,
       label,
@@ -142,6 +153,8 @@ export function stagesFromHubPayload(raw: unknown): StageDef[] {
       gate: s.gate === true,
       ...(artifact !== undefined ? { artifact } : {}),
       ...(docs !== undefined && docs.length > 0 ? { docs } : {}),
+      ...(agentToolConfig !== undefined ? { agentToolConfig } : {}),
+      ...(modelConfig !== undefined ? { modelConfig } : {}),
     })
   }
   return out

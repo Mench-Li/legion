@@ -315,6 +315,7 @@ const stub = (over = {}) => createSpaceConfigRoutes({
   SCOPE_KEY_RE: /^[a-z0-9_-]{1,64}$/i,
   normalizeStages: () => [],
   normalizeRuntime: () => ({ enabled: false, maxWorkers: 1, isolate: true }),
+  normalizeAgentWorkflow: () => null,
   withTx: (f) => f(),
   readPipeline: () => ({ version: 1, activeRoles: [] }),
   pipelineWarnings: () => [],
@@ -340,7 +341,7 @@ test('⑱ ★★★ dispatch 契约：两条都只认 POST / `exact` 不退化�
 test('⑲ ★★ 缺注入项 ⇒ **构造时**就抛（fail closed）', async () => {
   const full = {
     json: () => {}, db: {}, now: () => 'T', audit: () => {}, handleWrite: async () => {},
-    SCOPE_KEY_RE: /x/, normalizeStages: () => [], normalizeRuntime: () => ({}),
+    SCOPE_KEY_RE: /x/, normalizeStages: () => [], normalizeRuntime: () => ({}), normalizeAgentWorkflow: () => null,
     withTx: (f) => f(), readPipeline: () => ({}), pipelineWarnings: () => [],
   }
   for (const k of Object.keys(full)) {

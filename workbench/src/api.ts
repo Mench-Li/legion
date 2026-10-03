@@ -269,9 +269,46 @@ export async function fetchGoal(scope: string | null): Promise<GoalInfo> {
   return readJson<GoalInfo>(await hubGet(`/api/goal${qs}`))
 }
 
+export interface AgentWorkflowDefinitionRef { id: string; version: number }
+export interface AgentWorkflowDefinition {
+  id: string
+  version: number
+  name: string
+  description: string
+  scope: string
+  stages: Array<{
+    id: string
+    role: string
+    label: string
+    agentToolConfig: AgentWorkflowDefinitionRef
+    modelConfig: AgentWorkflowDefinitionRef | null
+    nodeId: string | null
+    inputContract: Record<string, unknown> | null
+    outputContract: Record<string, unknown> | null
+    testRunner: { executable: string; args: string[]; timeoutMs: number } | null
+  }>
+  edges: Array<{ from: string; to: string }>
+  entryStageIds: string[]
+  terminalStageIds: string[]
+  reviewStageId: string
+  reviewRoutes: { implementation: string; design: string }
+  maxReworkRounds: number
+  createdAtMs: number
+}
+
+export async function fetchAgentWorkflowDefinitions(scope: string): Promise<AgentWorkflowDefinition[]> {
+  const qs = new URLSearchParams({ scope })
+  const value = await readJson<{ definitions: AgentWorkflowDefinition[] }>(await hubGet(`/api/agent-workflows/definitions?${qs}`))
+  return value.definitions
+}
+
+export function registerAgentWorkflowDefinition(scope: string, definition: Omit<AgentWorkflowDefinition, 'scope' | 'createdAtMs'>): Promise<unknown> {
+  return hubPost('/api/agent-workflows/definitions', { scope, definition })
+}
+
 /** team-hub v2：发布目标——每次**新建**一个目标并生成其独立阶段任务链；与既有目标并存，互不取消。 */
-export function publishGoal(scope: string, objective: string, mode?: 'chain' | 'slice'): Promise<unknown> {
-  return hubPost('/api/goal', mode ? { scope, objective, mode } : { scope, objective })
+export function publishGoal(scope: string, objective: string, mode?: 'chain' | 'slice', workflowDefinition?: AgentWorkflowDefinitionRef): Promise<unknown> {
+  return hubPost('/api/goal', { scope, objective, ...(mode ? { mode } : {}), ...(workflowDefinition ? { workflowDefinition } : {}) })
 }
 
 /** 目标状态迁移（POST /api/goal/status）响应：hub 写端点统一信封 `{ ok, task }`，
@@ -354,6 +391,168 @@ export async function fetchHubTasks(scope: string | null): Promise<HubTask[]> {
 /** team-hub v2：单任务完整详情（任务详情视图）。 */
 export async function fetchHubTask(id: string): Promise<HubTask> {
   return readJson<HubTask>(await hubGet(`/api/task?id=${encodeURIComponent(id)}`))
+}
+
+export interface SpacePipelineStage {
+  role: string; label: string; prompt: string; next: string | null; gate: boolean; artifact: string | null
+  docs: string[] | null; agentToolConfig: { id: string; version: number } | null
+  modelConfig: { id: string; version: number } | null; sort: number; enabled: boolean
+}
+
+export interface SpacePipelineConfig {
+  scope: string; version: string
+  runtime: { enabled: boolean; maxWorkers: number; isolate: boolean }
+  workflow: {
+    designRole: string; implementationRole: string; reviewRole: string; maxReworkRounds: number
+    stageTools?: Record<string, {
+      agentToolConfig: { id: string; version: number } | null
+      modelConfig: { id: string; version: number } | null
+      nodeId?: string | null
+      executionNode?: { id: string; version: number; label: string } | null
+    }>
+  } | null
+  stages: SpacePipelineStage[]
+  activeRoles: string[]
+}
+
+export interface AgentToolConfigRecord {
+  id: string; version: number; providerName: string; adapter: 'dsh-native' | 'dsh-subagent'
+  permissionProfile: string; workspacePolicy: string
+  capabilities: { textInput: boolean; textOutput: boolean; outputSchema: boolean; toolFilter: boolean; localAgent: boolean; sessionResume: boolean; cancellation: boolean }
+  enabled: boolean; createdAtMs?: number
+}
+
+export interface AgentNodeRecord {
+  id: string; version: number; label: string; scope: string; enabled: boolean
+  providerNames: string[]; capabilities: Record<string, unknown>
+  status: 'unknown' | 'offline' | 'ready' | 'incompatible' | 'disabled'
+  lastSeenAtMs: number | null; observedProviders: string[]
+  observedCapabilities: Record<string, unknown> | null
+}
+
+/** 读取某空间阶段链及跨 Agent 工作流配置。 */
+export async function fetchSpacePipeline(scope: string): Promise<SpacePipelineConfig> {
+  return readJson<SpacePipelineConfig>(await hubGet(`/api/pipeline?scope=${encodeURIComponent(scope)}`))
+}
+
+/** 读取版本化 Agent 工具配置（不含账号密钥，产品登录态由对应 provider 管理）。 */
+export async function fetchAgentToolConfigs(): Promise<AgentToolConfigRecord[]> {
+  const result = await readJson<{ configs: AgentToolConfigRecord[] }>(await hubGet('/api/agent-tools/configs'))
+  return result.configs
+}
+
+/** 读取一个空间的本地 DSH 执行节点与实时心跳状态。 */
+export async function fetchAgentNodes(scope: string): Promise<AgentNodeRecord[]> {
+  const result = await readJson<{ nodes: AgentNodeRecord[] }>(await hubGet(`/api/agent-nodes?scope=${encodeURIComponent(scope)}`))
+  return result.nodes
+}
+
+/** 登记一个不含凭据的执行节点配置；对应 daemon 需配置相同 agentNodeId 后上报心跳。 */
+export function registerAgentNode(input: { id: string; label: string; scope: string; enabled?: boolean }): Promise<unknown> {
+  return hubPost('/api/agent-nodes/configs', input as unknown as Record<string, unknown>)
+}
+
+/** 新增不可变 Agent 工具配置版本。 */
+export function registerAgentToolConfig(config: AgentToolConfigRecord): Promise<unknown> {
+  return hubPost('/api/agent-tools/configs', config as unknown as Record<string, unknown>)
+}
+
+/** 保存空间阶段工具选择和审查返工策略。 */
+export function saveSpacePipeline(input: {
+  scope: string; stages: SpacePipelineStage[]; runtime: SpacePipelineConfig['runtime']
+  workflow: NonNullable<SpacePipelineConfig['workflow']> | null
+}): Promise<unknown> {
+  return hubPost('/api/pipeline', input as unknown as Record<string, unknown>)
+}
+
+export interface AgentWorkflowHistory {
+  workflowId: string
+  instance: { id: string; scope: string; goalId: string; definitionId: string | null; definitionVersion: number | null; status: string; createdAtMs: number; updatedAtMs: number } | null
+  pipelineVersion: string
+  designRole: string
+  implementationRole: string
+  reviewRole: string
+  maxReworkRounds: number
+  tasks: Array<{
+    id: string; title: string; role: string | null; status: string; parent: string | null; blockedBy: string[]
+    workflowStageId?: string | null
+    agentSelectionSnapshot?: HubTask['agentSelectionSnapshot']
+    artifacts?: HubTask['artifacts']
+    evidence?: HubTask['evidence']
+    comments?: HubTask['comments']
+  }>
+  stageAttempts: Array<{
+    id: string; taskId: string; stageId: string; attemptNo: number; startedBy: string
+    providerName: string; workspaceDir: string; providerRunId: string | null
+    state: 'starting' | 'running' | 'completed' | 'failed' | 'unknown' | 'canceled'
+    stopReason: string | null; error: string | null
+    result: {
+      status: string | null; summary: string | null; evidence: string | null
+      testReport?: {
+        passed: boolean; command: string | null; summary: string | null; evidence: string | null
+        failures: Array<{ name: string | null; log: string | null; repro: string | null }>
+      } | null
+      agentTestReport?: {
+        passed: boolean; command: string | null; summary: string | null; evidence: string | null
+        failures: Array<{ name: string | null; log: string | null; repro: string | null }>
+      } | null
+      review?: {
+        passed: boolean
+        findings: Array<{
+          kind: 'implementation' | 'design'; summary: string
+          file?: string; severity?: string; evidence?: string; verification?: string
+        }>
+      } | null
+      testVerification?: {
+        id: string; state: 'passed' | 'failed' | 'unknown'; sourceCommit: string; stageAttemptId: string
+        providerRunId: string | null; runnerNodeId: string | null; executable: string; args: string[]
+        timeoutMs: number; exitCode: number | null; startedAtMs: number; finishedAtMs: number
+        outputDigest: string; outputExcerpt: string; outputTruncated: boolean; error: string | null
+      } | null
+    } | null
+    createdAtMs: number; updatedAtMs: number; startedAtMs: number | null; finishedAtMs: number | null
+  }>
+  reconciliations: Array<{
+    id: string; attemptId: string; taskId: string; workflowInstanceId: string; stageId: string
+    providerName: string; providerRunId: string | null
+    disposition: 'confirmed-stopped' | 'still-running' | 'unable-to-confirm'
+    note: string; by: string; at: string
+  }>
+  reviews: Array<{
+    sourceReviewTaskId: string; round: number; kind: string; nextTaskId: string; atMs: number
+    result: { summary?: string; evidence?: string; targetRole?: string; findings?: Array<{ kind: string; summary: string; evidence?: string }> } | null
+  }>
+}
+
+export interface AgentWorkflowInstanceSummary {
+  id: string; scope: string; goalId: string; definitionId: string | null; definitionVersion: number | null
+  definitionName: string | null; objective: string; status: string; createdAtMs: number; updatedAtMs: number
+  anchorTaskId: string | null
+  counts: { total: number; todo: number; doing: number; blocked: number; done: number; in_review: number; other: number }
+}
+
+/** 当前空间最近的独立 Agent 工作流实例及阶段任务计数。 */
+export async function fetchAgentWorkflowInstances(scope: string, options: { limit?: number; offset?: number; status?: string; search?: string } = {}): Promise<{ instances: AgentWorkflowInstanceSummary[]; total: number; offset: number; limit: number }> {
+  const qs = new URLSearchParams({ scope, limit: String(options.limit ?? 20), offset: String(options.offset ?? 0), status: options.status ?? 'all' })
+  if (options.search?.trim()) qs.set('search', options.search.trim())
+  return readJson(await hubGet(`/api/agent-workflow/instances?${qs}`))
+}
+
+/** 当前 Agent 工作流全链快照（设计版本、实现证据、阶段任务与审查返工台账）。 */
+export async function fetchAgentWorkflowHistory(taskId: string, scope: string): Promise<AgentWorkflowHistory> {
+  const qs = new URLSearchParams({ taskId, scope })
+  return readJson<AgentWorkflowHistory>(await hubGet(`/api/agent-workflow/history?${qs.toString()}`))
+}
+
+/** Append a general's manual assessment for an unknown Agent attempt; it never changes attempt or task state. */
+export function reconcileAgentWorkflowAttempt(input: {
+  attemptId: string
+  disposition: 'confirmed-stopped' | 'still-running' | 'unable-to-confirm'
+  note: string
+  idempotencyKey: string
+  scope: string
+}): Promise<unknown> {
+  return hubPost('/api/agent-workflow/stage-attempts/reconcile', input as unknown as Record<string, unknown>)
 }
 
 /** team-hub v2：某空间/某任务的审计时间线（进展历史）。taskId 优先，其次 scope；limit 可选（服务端上限 500）。 */
@@ -540,70 +739,6 @@ async function hubPost(path: string, body: Record<string, unknown>): Promise<unk
     throw hubErrorFromBody(res.status, text, parsed)
   }
   return res.json().catch(() => undefined)
-}
-
-export interface WorkflowPackFile {
-  format: 'legion/workflow-pack@1'
-  id: string
-  version: string
-  name: string
-  description: string
-  scope: { id: string; name: string }
-  roles: unknown[]
-  stages: unknown[]
-  assets: unknown[]
-}
-
-export interface WorkflowPackPreview {
-  action: 'install' | 'upgrade' | 'current' | 'conflict'
-  reason: string | null
-  packageId: string
-  version: string
-  scope: string
-  name: string
-  description: string
-  roles: number
-  stages: number
-  assets: number
-}
-
-export interface InstalledWorkflowPack {
-  id: string
-  scope: string
-  version: string
-  digest: string
-  installedAt: string
-}
-
-export interface WorkflowPackAsset {
-  id: string
-  type: 'skill' | 'document' | 'template'
-  title: string
-  path: string
-  content: string
-}
-
-export async function fetchWorkflowPacks(): Promise<InstalledWorkflowPack[]> {
-  const result = await readJson<{ packages: InstalledWorkflowPack[] }>(await hubGet('/api/workflow-packs'))
-  return Array.isArray(result.packages) ? result.packages : []
-}
-
-export async function fetchWorkflowPackAssets(scope: string, packId: string): Promise<WorkflowPackAsset[]> {
-  const query = new URLSearchParams({ scope, pack: packId })
-  const result = await readJson<{ assets: WorkflowPackAsset[] }>(await hubGet(`/api/workflow-packs/assets?${query}`))
-  return Array.isArray(result.assets) ? result.assets : []
-}
-
-export async function previewWorkflowPack(pack: WorkflowPackFile): Promise<WorkflowPackPreview> {
-  const response = await hubPost('/api/workflow-packs/preview', { scope: pack.scope.id, pack }) as { task?: WorkflowPackPreview }
-  if (!response.task) throw new Error('流程包预览响应无效')
-  return response.task
-}
-
-export async function installWorkflowPack(pack: WorkflowPackFile): Promise<WorkflowPackPreview> {
-  const response = await hubPost('/api/workflow-packs/install', { scope: pack.scope.id, pack }) as { task?: WorkflowPackPreview }
-  if (!response.task) throw new Error('流程包安装响应无效')
-  return response.task
 }
 
 /** team-hub v2：技能列表。includePending=true 时含待审/被拒（仅 member=general 复审视角，服务端收口）。 */export async function fetchSkills(opts: { scope?: string | null; includePending?: boolean; member?: string } = {}): Promise<SkillInfo[]> {
@@ -1362,7 +1497,7 @@ export interface HubMigrationPlan {
 }
 
 /** 通用 JSON 请求。**写请求都带 20s 超时**（与 hubPost 一致：界面不能无感卡住）。 */
-export async function hubRequest(method: string, path: string, body?: Record<string, unknown>): Promise<unknown> {
+async function hubRequest(method: string, path: string, body?: Record<string, unknown>): Promise<unknown> {
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), 20_000)
   let res: Response

@@ -60,6 +60,83 @@ export function createHarnessRoutes({ json, handleWrite, harnessStore } = {}) {
     {
       method: 'POST',
       match: 'exact',
+      path: '/api/agent-tools/configs',
+      async run(req, res) { await handleWrite(req, res, (body) => harnessStore.putAgentToolConfig(body ?? {})) },
+    },
+    {
+      method: 'GET',
+      match: 'exact',
+      path: '/api/agent-tools/configs',
+      async run(req, res) {
+        const includeDisabled = new URL(req.url ?? '/', 'http://x').searchParams.get('includeDisabled') === 'true'
+        json(res, 200, { configs: harnessStore.listAgentToolConfigs({ includeDisabled }) })
+      },
+    },
+    {
+      method: 'POST',
+      match: 'exact',
+      path: '/api/agent-nodes/configs',
+      async run(req, res) {
+        await handleWrite(req, res, (body, _by, scope) => harnessStore.putAgentNodeConfig({ ...body, scope }))
+      },
+    },
+    {
+      method: 'GET',
+      match: 'exact',
+      path: '/api/agent-nodes',
+      async run(req, res) {
+        const url = new URL(req.url ?? '/', 'http://x')
+        const scope = url.searchParams.get('scope')
+        json(res, 200, { nodes: harnessStore.listAgentNodeConfigs({ scope: scope || null }) })
+      },
+    },
+    {
+      method: 'POST',
+      match: 'exact',
+      path: '/api/agent-nodes/heartbeat',
+      async run(req, res) {
+        await handleWrite(req, res, (body, _by, scope) => harnessStore.heartbeatAgentNode({ ...body, scope }))
+      },
+    },
+    {
+      method: 'POST',
+      match: 'exact',
+      path: '/api/agent-workflows/definitions',
+      async run(req, res) {
+        await handleWrite(req, res, (body, _by, scope) => harnessStore.putAgentWorkflowDefinition({
+          scope,
+          definition: body?.definition,
+        }))
+      },
+    },
+    {
+      method: 'GET',
+      match: 'exact',
+      path: '/api/agent-workflows/definitions',
+      async run(req, res) {
+        const params = new URL(req.url ?? '/', 'http://x').searchParams
+        const scope = params.get('scope')
+        const id = params.get('id')
+        const version = params.has('version') ? Number(params.get('version')) : null
+        if (!scope) {
+          json(res, 400, { error: '读取工作流定义需要 scope' })
+          return
+        }
+        if (id !== null || version !== null) {
+          if (!id || !Number.isSafeInteger(version) || version < 1) {
+            json(res, 400, { error: '读取单个工作流定义需要 scope、id 与正整数 version' })
+            return
+          }
+          const definition = harnessStore.getAgentWorkflowDefinition({ scope, id, version })
+          json(res, definition === null ? 404 : 200, definition === null ? { error: '工作流定义不存在' } : { definition })
+          return
+        }
+        json(res, 200, { definitions: harnessStore.listAgentWorkflowDefinitions({ scope }) })
+      },
+    },
+    {
+      method: 'POST',
+      match: 'exact',
       path: '/api/harness/rules',
       async run(req, res) { await handleWrite(req, res, (body) => harnessStore.setRule(body ?? {})) },
     },

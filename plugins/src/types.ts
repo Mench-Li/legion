@@ -43,6 +43,54 @@ export interface Task {
   version: number
   soldier: string | null
   claimedAt: string | null
+  /** 首次认领冻结的阶段工具/模型版本选择；重派与重试沿用同一配置。 */
+  agentSelectionSnapshot?: {
+    source: string
+    pipelineVersion: string
+    stageRole: string
+    workflowStageId?: string | null
+    agentToolConfig: AgentToolConfigSnapshot | null
+    modelConfig: { id: string; version: number } | null
+    resolvedModelConfig?: { id: string; version: number; provider: string; model: string; reasoningEffort: string | null } | null
+    executionNode?: { id: string; version: number; label: string; capabilities?: Record<string, unknown>; providers?: string[] } | null
+    reviewWorkflow?: {
+      designRole: string; implementationRole: string; reviewRole: string; maxReworkRounds: number
+      pipelineVersion: string; instanceId: string
+      stageLabels?: Record<string, string>
+      stageDefinitions?: Record<string, StageDef>
+      stageDefinitionsById?: Record<string, StageDef & { previousStageIds?: string[]; nextStageIds?: string[] }>
+      stageToolsById?: AgentWorkflowStageToolSnapshot
+      stageIdByRole?: Record<string, string>
+      designStageId?: string
+      implementationStageId?: string
+      reviewStageId?: string
+      reviewRoutes?: { design: string; implementation: string }
+      stageTools: Record<string, {
+        agentToolConfig: AgentToolConfigSnapshot | null
+        modelConfig: { id: string; version: number } | null
+        resolvedModelConfig?: { id: string; version: number; provider: string; model: string; reasoningEffort: string | null } | null
+        nodeId?: string | null
+        executionNode?: { id: string; version: number; label: string; capabilities?: Record<string, unknown>; providers?: string[] } | null
+      }>
+    } | null
+    workflowContext?: {
+      designArtifacts: Array<{ taskId: string; path: string; digest: string; title: string }>
+      implementation: null | {
+        taskId: string; sourceCommit: string; stageAttemptId: string; providerRunId: string | null
+        testCommand: string; testSummary: string; testEvidence: string
+        testVerification?: {
+          id: string; state: 'passed' | 'failed' | 'unknown'; sourceCommit: string; stageAttemptId: string
+          providerRunId: string | null; runnerNodeId: string | null; executable: string; args: string[]
+          timeoutMs: number; exitCode: number | null; startedAtMs: number; finishedAtMs: number
+          outputDigest: string; outputExcerpt: string; outputTruncated: boolean; error: string | null
+        }
+      }
+      upstreamStages?: Array<{
+        stageId: string | null; taskId: string; role: string
+        artifacts: NonNullable<Task['artifacts']>; evidence: NonNullable<Task['evidence']>
+      }>
+    } | null
+  } | null
   parent: string | null
   role: string | null
   scope?: string
@@ -74,6 +122,8 @@ export interface Task {
 
 /** 多角色流水线中的一个阶段（角色）。 */
 export interface StageDef {
+  id?: string
+  workflowStageId?: string
   role: string
   label: string
   prompt: string
@@ -85,6 +135,38 @@ export interface StageDef {
   /** 岗位文档契约（R-1，S1）：该阶段产出文档的相对路径模板数组，支持 {taskId} 占位（reviewer 等按任务动态命名）；
    *  缺省回退 artifact 单值语义。守护在 done 结算时按此逐条自动登记到任务 artifacts，详情视图据此直达预览。 */
   docs?: string[]
+  /** 阶段绑定的 Agent 工具配置与版本；不是 DSH provider 名或模型 API provider。 */
+  agentToolConfig?: { id: string; version: number } | null
+  /** 可选的模型配置引用；模型与 Agent 工具分别版本化。 */
+  modelConfig?: { id: string; version: number } | null
+  inputContract?: Record<string, unknown> | null
+  outputContract?: Record<string, unknown> | null
+  testRunner?: { executable: string; args: string[]; timeoutMs: number } | null
+  previousStageIds?: string[]
+  nextStageIds?: string[]
+}
+
+export interface AgentWorkflowStageToolSnapshot {
+  [stageId: string]: {
+    agentToolConfig: AgentToolConfigSnapshot | null
+    modelConfig: { id: string; version: number } | null
+    resolvedModelConfig?: { id: string; version: number; provider: string; model: string; reasoningEffort: string | null } | null
+    nodeId?: string | null
+    executionNode?: { id: string; version: number; label: string; capabilities?: Record<string, unknown>; providers?: string[] } | null
+  }
+}
+
+export interface AgentToolConfigSnapshot {
+  id: string; version: number; providerName: string; adapter: string
+  permissionProfile: string; workspacePolicy: string
+  capabilities: Record<string, boolean>; enabled: boolean
+}
+
+export interface AgentReviewWorkflow {
+  designRole: string
+  implementationRole: string
+  reviewRole: string
+  maxReworkRounds: number
 }
 
 /** 需求讨论配置：哪些角色参与群聊 + 最多讨论几轮。

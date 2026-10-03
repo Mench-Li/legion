@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
-import { approveTaskDelivery, confirmTaskWorkerStopped, execRequest, fetchHubActivity, fetchHubCalendarByLink, fetchHubDocContent, fetchHubOverlaps, fetchHubTask, fetchHubTasks, fetchRepoContention, fetchTaskContention, fetchTaskDelivery, fetchTaskWriteIntent, hubClaim, hubComment, hubHold, hubReassign, hubReviewNote, hubTransition, setTaskWriteIntent } from '../api'
-import type { LiveDelivery, LiveIntegrationEvent, LiveReservation, LiveTaskContention, LiveWriteIntent } from '../api'
+import { approveTaskDelivery, confirmTaskWorkerStopped, execRequest, fetchAgentWorkflowHistory, fetchHubActivity, fetchHubCalendarByLink, fetchHubDocContent, fetchHubOverlaps, fetchHubTask, fetchHubTasks, fetchRepoContention, fetchTaskContention, fetchTaskDelivery, fetchTaskWriteIntent, hubClaim, hubComment, hubHold, hubReassign, hubReviewNote, hubTransition, reconcileAgentWorkflowAttempt, setTaskWriteIntent } from '../api'
+import type { AgentWorkflowHistory, LiveDelivery, LiveIntegrationEvent, LiveReservation, LiveTaskContention, LiveWriteIntent } from '../api'
 import type { AuditPatch, HubActivity, HubDocContent, HubTask, OverlapGroup, ReviewNote } from '../types'
 import type { LinkedCalendarEvent } from '../api'
 import { fmtRange, occKey } from '../calendar'
@@ -10,9 +10,6 @@ import DocReader from './DocReader'
 import MarkdownDocView from './MarkdownDocView'
 import { RevealButton } from './RevealButton'
 import { toast } from './Toast'
-import { fetchRoster } from '../api'
-import type { RosterAgent } from '../types'
-import { AgentTasksModal } from './AgentTasksModal'
 
 interface TaskDetailModalProps {
   taskId: string
@@ -163,8 +160,9 @@ function childDeps(c: HubTask): string {
 }
 
 export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalProps): React.JSX.Element {
-  const [chatAgent,setChatAgent]=useState<RosterAgent | null>(null)
   const [task, setTask] = useState<HubTask | null>(null)
+  const [agentWorkflowHistory, setAgentWorkflowHistory] = useState<AgentWorkflowHistory | null>(null)
+  const [attemptReconciliationDrafts, setAttemptReconciliationDrafts] = useState<Record<string, { disposition: 'confirmed-stopped' | 'still-running' | 'unable-to-confirm'; note: string }>>({})
   const [timeline, setTimeline] = useState<HubActivity[]>([])
   const [children, setChildren] = useState<HubTask[]>([])
   const [err, setErr] = useState<string | null>(null)
@@ -197,6 +195,11 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
     try {
       const t = await fetchHubTask(taskId)
       setTask(t)
+      const workflow = t.agentSelectionSnapshot?.reviewWorkflow
+      if (workflow && t.scope) {
+        try { setAgentWorkflowHistory(await fetchAgentWorkflowHistory(taskId, t.scope)) }
+        catch { setAgentWorkflowHistory(null) }
+      } else setAgentWorkflowHistory(null)
       if (t.scope) {
         try {
           const all = await fetchHubTasks(t.scope)
@@ -260,6 +263,7 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
     setReaderIndex(null)
     setIntentEditing(false)
     setIntentDraft('')
+    setAttemptReconciliationDrafts({})
   }, [taskId])
 
   const act = async (action: () => Promise<unknown>, okText: string): Promise<void> => {
@@ -341,6 +345,17 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
   const confirmStopped = (): Promise<void> => {
     if (!window.confirm('请先确认该任务的执行进程已经停止。确认后将释放文件占用，其他任务即可开始写入。')) return Promise.resolve()
     return act(() => confirmTaskWorkerStopped(t.id, t.scope ?? 'default'), '已确认执行停止，文件占用已释放')
+  }
+  const submitAttemptReconciliation = (attemptId: string): Promise<void> => {
+    const draft = attemptReconciliationDrafts[attemptId]
+    if (!draft || draft.note.trim() === '') return Promise.resolve()
+    return act(() => reconcileAgentWorkflowAttempt({
+      attemptId,
+      disposition: draft.disposition,
+      note: draft.note.trim(),
+      idempotencyKey: globalThis.crypto.randomUUID(),
+      scope: t.scope ?? 'default',
+    }), '核对结论已记入工作流审计；Attempt 状态与任务调度未自动改变')
   }
   const doReject = (): Promise<void> => {
     const reason = window.prompt(`打回 ${t.id} 的原因（归还待办）`)
@@ -431,14 +446,9 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
         <div className="modal task-detail-modal" onClick={e => e.stopPropagation()}>
           <div className="modal-head">
             <span className="tid-big">{t.id}</span> 任务详情
-            <button onClick={() => { void fetchRoster(t.scope).then(r => {
-              const a=r.agents.find(a => a.role===(t.role ?? t.soldier))
-              if (a) setChatAgent({ ...a,scope:t.scope });else toast('err','该岗位未注册 Agent')
-            }).catch(e => toast('err',String(e))) }}>与负责 Agent 聊天</button>
             <span className="x" onClick={onClose}>✕</span>
           </div>
           <div className="modal-body">
-            {chatAgent && <AgentTasksModal agent={chatAgent} roster={[chatAgent]} onClose={() => setChatAgent(null)} onOpenTask={() => setChatAgent(null)} />}
             <div className="td-title">
               <span className={`status-pill ${t.status}`}>{STATUS_PILL[t.status] ?? t.status}</span>
               {t.hold && <span className="status-pill hold">✋ 将军拦截中</span>}
@@ -455,6 +465,121 @@ export function TaskDetailModal({ taskId, onClose, onChanged }: TaskDetailModalP
                 创建 {fmt(t.createdAt)} · 更新 {fmt(t.updatedAt)}
               </div>
             </div>
+
+            {agentWorkflowHistory && (
+              <div className="td-section">
+                <div className="td-section-title">🔁 跨 Agent 阶段交接 · {agentWorkflowHistory.workflowId}</div>
+                <div style={{ fontSize: 12, lineHeight: 1.7 }}>
+                  <div>流程版本：<b>{agentWorkflowHistory.pipelineVersion}</b> · 返工轮数上限：{agentWorkflowHistory.maxReworkRounds}</div>
+                  <div>岗位链：{agentWorkflowHistory.designRole}（设计） → {agentWorkflowHistory.implementationRole}（实现） → {agentWorkflowHistory.reviewRole}（审查）</div>
+                  {(() => {
+                    const context = t.agentSelectionSnapshot?.workflowContext
+                    const designs = context?.designArtifacts ?? []
+                    const implementation = context?.implementation
+                    return (
+                      <div style={{ marginTop: 6, padding: '6px 8px', background: 'var(--bg-2)', borderRadius: 4 }}>
+                        <b>当前交接依据</b>
+                        {designs.length > 0 ? designs.map((a, i) => (
+                          <div key={`${a.taskId}:${a.path}:${i}`}>设计 {a.taskId} · {a.path} · SHA-256 <code>{a.digest}</code></div>
+                        )) : <div>设计文件尚未进入此阶段快照</div>}
+                        {implementation
+                          ? <div>实现 {implementation.taskId} · Attempt <code>{implementation.stageAttemptId}</code> · Run <code>{implementation.providerRunId ?? '未提供'}</code> · 提交 <code>{implementation.sourceCommit}</code> · 测试命令：<code>{implementation.testCommand}</code> · 测试：{implementation.testSummary} · 证据：{implementation.testEvidence}</div>
+                          : <div>实现提交与测试证据尚未进入此阶段快照</div>}
+                      </div>
+                    )
+                  })()}
+                  <div style={{ marginTop: 8 }}><b>阶段任务</b></div>
+                  {agentWorkflowHistory.tasks.map(stageTask => {
+                    const snapshot = stageTask.agentSelectionSnapshot
+                    const tool = snapshot?.agentToolConfig
+                    const provider = tool?.providerName ?? tool?.id ?? '未冻结工具'
+                    const stage = snapshot?.stageRole ?? stageTask.role ?? '阶段'
+                    return <div key={stageTask.id} style={{ borderTop: '1px solid var(--line)', padding: '4px 0' }}>
+                      <b>{stageTask.id}</b> · {stage} · {provider}{tool ? `@${tool.version}` : ''} · {STATUS_PILL[stageTask.status] ?? stageTask.status}
+                      <span style={{ color: 'var(--muted-2)' }}> · {stageTask.title}</span>
+                    </div>
+                  })}
+                  {agentWorkflowHistory.stageAttempts.length > 0 && <>
+                    <div style={{ marginTop: 8 }}><b>Agent 实际运行记录</b></div>
+                    {agentWorkflowHistory.stageAttempts.map(attempt => {
+                      const reconciliationDraft = attemptReconciliationDrafts[attempt.id] ?? { disposition: 'unable-to-confirm' as const, note: '' }
+                      const reconciliations = agentWorkflowHistory.reconciliations.filter(item => item.attemptId === attempt.id)
+                      return <div key={attempt.id} style={{ borderTop: '1px solid var(--line)', padding: '4px 0' }}>
+                      <b>{attempt.taskId}</b> · {attempt.stageId} · 第 {attempt.attemptNo} 次 · {attempt.providerName} · {({
+                        starting: '准备启动', running: '运行中', completed: '已完成', failed: '失败', unknown: '结果未知，待核对', canceled: '已取消',
+                      } as Record<string, string>)[attempt.state] ?? attempt.state}
+                      <div style={{ color: 'var(--muted-2)' }}>
+                        Attempt {attempt.id}{attempt.providerRunId ? ` · Provider Run ${attempt.providerRunId}` : ' · Provider 未提供 Run ID'}
+                        {attempt.stopReason ? ` · 终止原因：${attempt.stopReason}` : ''}
+                      </div>
+                      <div style={{ color: 'var(--muted-2)', fontSize: 11 }}>执行工作区：<code>{attempt.workspaceDir}</code></div>
+                      {attempt.result?.summary ? <div>{attempt.result.summary}</div> : null}
+                      {attempt.result?.review ? <div style={{ marginTop: 4, padding: 6, border: '1px solid var(--line)', borderRadius: 6 }}>
+                        <b>结构化审查：{attempt.result.review.passed ? '通过' : '未通过'}</b>
+                        {attempt.result.review.findings.length === 0
+                          ? <div style={{ color: 'var(--muted-2)', fontSize: 11 }}>没有分类 finding</div>
+                          : <div style={{ marginTop: 4 }}>
+                            {attempt.result.review.findings.map((finding, index) => <div key={`${finding.kind}:${finding.file ?? ''}:${index}`} style={{ borderTop: '1px solid var(--line)', paddingTop: 4, marginTop: 4 }}>
+                              <div>
+                                <b>{finding.kind === 'design' ? '设计问题' : '实现问题'}</b>
+                                {finding.severity ? ` · ${finding.severity}` : ''}
+                                {finding.file ? <> · <code>{finding.file}</code></> : null}
+                              </div>
+                              <div>{finding.summary}</div>
+                              {finding.evidence ? <div style={{ color: 'var(--muted-2)', fontSize: 11 }}>证据：{finding.evidence}</div> : null}
+                              {finding.verification ? <div style={{ color: 'var(--muted-2)', fontSize: 11 }}>验证要求：{finding.verification}</div> : null}
+                            </div>)}
+                          </div>}
+                      </div> : null}
+                      {attempt.result?.testReport ? <div style={{ color: 'var(--muted-2)' }}>
+                        Legion 独立测试 {attempt.result.testReport.passed ? '通过' : '未通过'}
+                        {attempt.result.testReport.command ? <> · 命令：<code>{attempt.result.testReport.command}</code></> : null}
+                        {attempt.result.testReport.summary ? <> · {attempt.result.testReport.summary}</> : null}
+                        {attempt.result.testReport.evidence ? <div>测试输出：{attempt.result.testReport.evidence}</div> : null}
+                      </div> : null}
+                      {attempt.result?.agentTestReport ? <div style={{ color: 'var(--muted-2)', fontSize: 11 }}>
+                        Agent 自报测试（参考）{attempt.result.agentTestReport.passed ? '：通过' : '：未通过'}
+                        {attempt.result.agentTestReport.command ? <> · 命令：<code>{attempt.result.agentTestReport.command}</code></> : null}
+                        {attempt.result.agentTestReport.summary ? <> · {attempt.result.agentTestReport.summary}</> : null}
+                        {attempt.result.agentTestReport.evidence ? <div>Agent 输出：{attempt.result.agentTestReport.evidence}</div> : null}
+                      </div> : null}
+                      {attempt.result?.testVerification ? <div style={{ color: 'var(--muted-2)', fontSize: 11 }}>
+                        独立 Run {attempt.result.testVerification.id} · commit {attempt.result.testVerification.sourceCommit}
+                        {' · '}exit {attempt.result.testVerification.exitCode ?? 'unknown'} · 输出 SHA-256 {attempt.result.testVerification.outputDigest}
+                        {attempt.result.testVerification.runnerNodeId ? ` · 节点 ${attempt.result.testVerification.runnerNodeId}` : ''}
+                        {attempt.result.testVerification.error ? <div style={{ color: 'var(--danger)' }}>{attempt.result.testVerification.error}</div> : null}
+                      </div> : null}
+                      {attempt.error ? <div style={{ color: 'var(--danger)' }}>{attempt.error}</div> : null}
+                      {reconciliations.map(item => <div key={item.id} style={{ marginTop: 4, padding: 6, background: 'var(--surface-2)', fontSize: 11 }}>
+                        人工核对 · {item.disposition === 'confirmed-stopped' ? '已确认停止' : item.disposition === 'still-running' ? '仍在运行' : '无法确认'} · {item.by} · {item.at}
+                        <div>{item.note}</div>
+                      </div>)}
+                      {attempt.state === 'unknown' && <div style={{ marginTop: 6, padding: 8, border: '1px solid var(--line)', borderRadius: 6 }}>
+                        <div style={{ fontSize: 11, color: 'var(--muted-2)' }}>人工核对只追加审计记录；不会改写 Attempt 终态、释放工作区或自动重派。</div>
+                        <select aria-label={`Attempt ${attempt.id} 核对结论`} value={reconciliationDraft.disposition} disabled={busy}
+                          onChange={event => setAttemptReconciliationDrafts(current => ({ ...current, [attempt.id]: { ...reconciliationDraft, disposition: event.target.value as typeof reconciliationDraft.disposition } }))}>
+                          <option value="confirmed-stopped">已确认 Agent 已停止</option>
+                          <option value="still-running">确认 Agent 仍在运行</option>
+                          <option value="unable-to-confirm">仍无法确认执行状态</option>
+                        </select>
+                        <textarea aria-label={`Attempt ${attempt.id} 核对依据`} value={reconciliationDraft.note} rows={2} disabled={busy}
+                          placeholder="记录核对来源与依据；不要填写凭据。"
+                          onChange={event => setAttemptReconciliationDrafts(current => ({ ...current, [attempt.id]: { ...reconciliationDraft, note: event.target.value } }))} />
+                        <button type="button" disabled={busy || reconciliationDraft.note.trim() === ''} onClick={() => void submitAttemptReconciliation(attempt.id)}>记录核对</button>
+                      </div>}
+                    </div>})}
+                  </>}
+                  {agentWorkflowHistory.reviews.length > 0 && <>
+                    <div style={{ marginTop: 8 }}><b>审查与返工记录</b></div>
+                    {agentWorkflowHistory.reviews.map((review, i) => <div key={`${review.sourceReviewTaskId}:${i}`} style={{ borderTop: '1px solid var(--line)', padding: '4px 0' }}>
+                      第 {review.round} 轮 · {review.kind} · {review.sourceReviewTaskId} → {review.nextTaskId}
+                      {review.result?.summary ? <div>{review.result.summary}</div> : null}
+                      {review.result?.findings?.map((finding, j) => <div key={j} style={{ color: 'var(--muted-2)' }}>• {finding.kind}：{finding.summary}{finding.evidence ? `（${finding.evidence}）` : ''}</div>)}
+                    </div>)}
+                  </>}
+                </div>
+              </div>
+            )}
 
             <div className="td-section">
               <div className="td-section-title">🔒 写入占用与交付 <button type="button" onClick={() => void load()} disabled={busy}>刷新</button></div>

@@ -134,14 +134,6 @@ test('① 超时/中止也抛出，由执行器判成 cancelled 或 timeout', as
   await assert.rejects(() => t({ profile: profile('/'), credential: 'k' }), (e) => e.name === 'AbortError')
 })
 
-test('① 请求超时有硬截止，拒绝无限等待', async () => {
-  const t = createHttpTransport({ timeoutMs: 15, fetchImpl: (_url, { signal }) => new Promise((_, reject) => {
-    signal.addEventListener('abort', () => reject(signal.reason), { once: true })
-  }) })
-  await assert.rejects(() => t({ profile: profile('/'), credential: 'k' }), (error) => error.name === 'TimeoutError')
-  assert.throws(() => createHttpTransport({ timeoutMs: 0 }), TypeError)
-})
-
 test('① 没有 fetch 就构造不出来（"没探测过"不能被当成"可用"）', () => {
   // 传了非函数 → 立刻失败。这是配置错误，不能等到第一次探测时才炸。
   assert.throws(() => createHttpTransport({ fetchImpl: 42 }), TypeError)

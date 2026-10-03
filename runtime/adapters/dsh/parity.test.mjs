@@ -216,6 +216,7 @@ test('① 漂移检测：记录行下移但调用仍在 → **不漂移**，按�
     '  signal,',
     '  outputSchema,',
     '  ...(denyTools.length > 0 ? { toolFilter: { deny: denyTools } } : {}),',
+    '  ...(modelAgentOptions === null ? {} : { agentOptions: modelAgentOptions }),',
     '})',
   ].join('\n')
 
@@ -435,6 +436,17 @@ test('③ 复刻件：denyTools 非空时才传 toolFilter（对应旧调用的�
   const without = makeHost({ structured: { ok: true } })
   await runLegacyPath(without, { provider: 'p', label: 'l', promptText: 't', outputSchema: OK_SCHEMA, timeoutMs: 200 })
   assert.ok(!('toolFilter' in without.calls.startRun[0].options), '默认配置下不得传 toolFilter')
+})
+
+test('③ 复刻件：冻结模型配置存在时传 agentOptions，否则省略', async () => {
+  const withModel = makeHost({ structured: { ok: true } })
+  const agentOptions = { provider: 'deepseek', model: 'v4' }
+  await runLegacyPath(withModel, { provider: 'p', label: 'l', promptText: 't', outputSchema: OK_SCHEMA, timeoutMs: 200, agentOptions })
+  assert.deepEqual(withModel.calls.startRun[0].options.agentOptions, agentOptions)
+
+  const withoutModel = makeHost({ structured: { ok: true } })
+  await runLegacyPath(withoutModel, { provider: 'p', label: 'l', promptText: 't', outputSchema: OK_SCHEMA, timeoutMs: 200 })
+  assert.ok(!('agentOptions' in withoutModel.calls.startRun[0].options), '无冻结模型配置时不得传 agentOptions')
 })
 
 // ================================================================ ④ 端到端对拍

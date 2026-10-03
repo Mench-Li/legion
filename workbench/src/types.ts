@@ -365,6 +365,20 @@ export interface HubTask {
   evidence: Array<{ by: string; at: string; text: string }>
   /** 结构化补丁记录（L1 审计：改动文件 + diff）。兼容旧版字符串补丁列表。 */
   patches: Array<AuditPatch | string>
+  /** 首次认领冻结的 Agent 与上游工作流版本选择。 */
+  agentSelectionSnapshot?: {
+    source?: string
+    pipelineVersion?: string
+    stageRole?: string
+    workflowStageId?: string | null
+    agentToolConfig?: { id: string; version: number; providerName?: string; adapter?: string } | null
+    reviewWorkflow?: { designRole: string; implementationRole: string; reviewRole: string; maxReworkRounds: number; instanceId?: string } | null
+    workflowContext?: {
+      designArtifacts: Array<{ taskId: string; path: string; digest: string; title: string }>
+      implementation: null | { taskId: string; sourceCommit: string; stageAttemptId: string; providerRunId: string | null; testCommand: string; testSummary: string; testEvidence: string }
+      upstreamStages?: Array<{ stageId: string | null; taskId: string; role: string; artifacts?: Array<{ path: string; digest?: string }> }>
+    } | null
+  } | null
   /** 产物登记（html/file/url）。digest 为 S2 结算登记的 sha256（幂等去重用）。 */
   artifacts?: Array<{ by: string; at: string; kind: string; path: string; title?: string; digest?: string }>
   /** 结构化测试报告（D7' 闸门输入）。 */

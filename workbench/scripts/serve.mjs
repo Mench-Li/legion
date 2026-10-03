@@ -37,7 +37,6 @@ import { fileURLToPath } from 'node:url'
 import { buildGithubTarballUrl, scanSkillDirs, sanitizeSkillId } from './skillImporter.mjs'
 import { loadConfig } from '../../packages/shared/src/config.mjs'
 import { SCHEMA as CONFIG_SCHEMA } from './config-schema.mjs'
-import { checkDesktopRequest, createLocalBrowserAuth } from '../../product/local-auth.mjs'
 
 // ── P3-2 统一配置：核心项（host/port/token/静态根/hub 上游）经统一引擎解析 ──
 // 优先级 CLI > env > 默认；类型/范围校验；非法值报错退出（不静默回退）。其余 DSH_WEB_* 限值
@@ -67,8 +66,6 @@ for (let i = 2; i < process.argv.length; i += 1) {
 }
 const port = CFG.values.port
 const host = CFG.values.host
-if (CFG.values.desktopMode && (!CFG.values.token || host !== '127.0.0.1')) throw new Error('DESKTOP_AUTH_REQUIRED')
-const browserAuth = createLocalBrowserAuth(CFG.values.token ?? '')
 /** 启动时打印的脱敏配置摘要（token 只显示是否设置）。 */
 export function configSummaryLine() {
   return `${CFG.summary} staticRoot=${ROOT}`
@@ -2607,19 +2604,13 @@ function routeRequest(req, res) {
   let pathname
   try { pathname = decodeURIComponent(url.pathname) } catch { httpErr(res, 400, 'bad request：路径含畸形 percent-encoding，已拒绝'); return }
   if (pathname.includes('\0')) { httpErr(res, 400, 'bad request：路径含非法字符（NUL）'); return }
-  if (CFG.values.desktopMode) {
-    browserAuth(req, res, { document: !(pathname === '/api' || pathname.startsWith('/api/') || pathname === '/hub' || pathname.startsWith('/hub/')) })
-    const failure = checkDesktopRequest(req, CFG.values.token, { requireToken: pathname === '/api' || pathname.startsWith('/api/') || pathname === '/hub' || pathname.startsWith('/hub/') })
-    if (failure) { sendJson(res, failure.status, { code: failure.code }); return }
-  }
   // 同源 /hub/* 反向代理 → team-hub v2（规避浏览器跨域/CORS/localStorage 导致的中枢探测失败）
   if (pathname === '/hub' || pathname.startsWith('/hub/')) {
     const qs = url.search
     const up = new URL((process.env.DSH_HUB_UPSTREAM ?? 'http://127.0.0.1:8787') + pathname.slice(4) + qs)
     const proxyReq = request({
       hostname: up.hostname, port: up.port, path: up.pathname + up.search,
-      method: req.method, headers: { ...req.headers, host: up.host,
-        ...(CFG.values.desktopMode ? { ...hubAuthHeaders(), ...(req.headers.origin ? { origin: up.origin } : {}) } : {}) },
+      method: req.method, headers: { ...req.headers, host: up.host },
     }, (upRes) => {
       try {
         res.writeHead(upRes.statusCode, upRes.headers)

@@ -139,7 +139,9 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
 
   // 流水线模式：守护按任务角色认领/派工；单角色模式：只认 config.role 的任务
   const self = (t: Task) => (isPipeline() ? (t.role ?? config.role) : config.role)
-  const isOurs = (t: Task) => (isPipeline() ? (t.role !== null && stageByRole().has(t.role)) : t.soldier === config.role)
+  const isOurs = (t: Task) => (isPipeline()
+    ? (t.role !== null && (stageByRole().has(t.role) || stageOf(t) !== undefined))
+    : (t.agentSelectionSnapshot?.reviewWorkflow !== undefined || t.soldier === config.role))
 
   // ❓ 士兵提问待将军答复状态：最后一条 ❓（守护评论）之后还没有他人（非守护）评论 = 仍待答复。
   // 返回 { open: 是否仍在等答复, answers: 将军/他人已给的答复评论（供重跑时带进提示词） }

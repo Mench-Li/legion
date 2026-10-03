@@ -264,6 +264,10 @@ export function fileBackend({
   /** 尝试占位：成功 `true`，被别人占了 `false`。 */
   const tryAcquireLock = () => {
     try {
+      // A fresh product has no secrets directory yet. Create the store's parent
+      // before creating the sibling lock file; writeAll() creates it later, but
+      // that is too late because writes are serialized by this lock.
+      if (typeof io.mkdirSync === 'function') io.mkdirSync(dirname(lockFile), { recursive: true, mode: 0o700 })
       io.writeFileSync(lockFile, lockToken, { encoding: 'utf8', flag: 'wx' })
       return true
     } catch (e) {

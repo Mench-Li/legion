@@ -56,7 +56,7 @@ function observedCodexSystemProxyMode(node: AgentNodeRecord): string | null {
 function formatCodexSystemProxyMode(mode: string | null): string {
   if (mode === 'system') return '系统代理已启用'
   if (mode === 'inherit') return '继承 Codex 原生设置'
-  return '未上报（需更新 DSH Codex provider）'
+  return '未上报（需更新 Codex 执行服务）'
 }
 
 function defaultRole(stages: SpacePipelineConfig['stages'], key: RoleKey): string {
@@ -235,7 +235,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
 
   const createOrReuseConfig = async (choice: ToolChoice): Promise<{ id: string; version: number }> => {
     const providerName = choice === 'dsh-native' ? dshProvider.trim() : choice
-    if (!providerName) throw new Error('请填写 DSH 中已注册的子 Agent provider 名称')
+    if (!providerName) throw new Error('请填写 已注册的子 Agent provider 名称')
     const adapter = choice === 'dsh-native' ? 'dsh-native' : 'dsh-subagent'
     const permissionProfile = choice === 'codex' ? 'codex-workspace-write'
       : choice === 'claude-code' ? 'claude-code-acceptEdits' : `dsh-native:${providerName}`
@@ -274,7 +274,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
       setNodes(await fetchAgentNodes(scope))
       setNewNodeId('')
       setNewNodeLabel('')
-      toast('ok', `节点 ${label} 已登记；请在对应 DSH daemon 配置相同 agentNodeId 并重启以开始心跳。`)
+      toast('ok', `节点 ${label} 已登记；请在对应 执行服务 配置相同 agentNodeId 并重启以开始心跳。`)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -485,21 +485,21 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
         {loading ? <div>正在读取阶段链与工具配置…</div> : error && !pipeline ? <div style={{ color: 'var(--red)' }}>{error}</div> : pipeline && <>
             <div style={{ color: 'var(--muted-2)' }}>
             独立定义跨 Agent 的设计 → 实现/测试 → 审查链，不要求岗位在空间常规流水线中相邻。发布目标时冻结工作流和工具版本；后续配置变化不改写已有目标。
-            Claude Code 与 Codex 使用各自的 DSH 外部 provider；DSH 本地 provider 必须与运行环境注册名及能力一致。
+            Claude Code 与 Codex 使用各自的 外部执行服务；本地执行服务 必须与运行环境注册名及能力一致。
               此处只配置交接链，不会自动开启空间执行守护；启用执行仍由侧栏的「持续执行编排」控制。
             </div>
             {Object.values(tools).some(tool => tool !== 'dsh-native') && <div style={{ color: 'var(--yellow)', marginTop: 8 }}>
-              外部 provider 心跳会报告 DSH 实例解析的原生权限模式；该值可核对配置是否匹配，但不证明文件访问边界已生效。真实验收请在可丢弃的系统账户或容器内检查读写边界、取消和清理。
+              外部 provider 心跳会报告 执行服务实例解析的原生权限模式；该值可核对配置是否匹配，但不证明文件访问边界已生效。真实验收请在可丢弃的系统账户或容器内检查读写边界、取消和清理。
             </div>}
             {permissionModeMismatches.length > 0 && <div style={{ color: 'var(--yellow)', marginTop: 8 }}>
-              节点权限模式与工作流要求不匹配：{permissionModeMismatches.map(([providerName, mode]) => `${providerName}（需要 ${mode}）`).join('、')}。请在对应 DSH profile 中应用以下配置并重启 worker，否则阶段不会派工。
+              节点权限模式与工作流要求不匹配：{permissionModeMismatches.map(([providerName, mode]) => `${providerName}（需要 ${mode}）`).join('、')}。请在对应 执行服务配置 中应用以下配置并重启 worker，否则阶段不会派工。
               <pre style={{ whiteSpace: 'pre-wrap', margin: '6px 0', padding: 8, background: 'var(--surface-2)' }}>{permissionModePatch}</pre>
             </div>}
             {providerRequirements.length === 0
-              ? <div style={{ color: 'var(--yellow)', marginTop: 8 }}>先填写实际的 DSH provider 注册名，运行节点心跳后才能检查 provider 是否可用。</div>
+              ? <div style={{ color: 'var(--yellow)', marginTop: 8 }}>先填写实际的 本地执行服务 注册名，运行节点心跳后才能检查 provider 是否可用。</div>
               : missingProviderLabels.length > 0
               ? <div style={{ color: 'var(--yellow)', marginTop: 8 }}>
-                尚无符合节点绑定的就绪心跳报告这些 provider：{missingProviderLabels.join('、')}。请在执行节点的 DSH profile 安装对应的子 Agent provider bundle 并重启；认证状态仍需真实启动任务确认。
+                尚无符合节点绑定的就绪心跳报告这些 provider：{missingProviderLabels.join('、')}。请在执行节点的 执行服务配置 安装对应的子 Agent provider bundle 并重启；认证状态仍需真实启动任务确认。
                 {missingAgentBundles.length > 0 && <pre style={{ whiteSpace: 'pre-wrap', margin: '6px 0', padding: 8, background: 'var(--surface-2)' }}>
                   {`dsh plugin --profile <profile-name> add ${missingAgentBundles.join(' ')}`}
                 </pre>}
@@ -515,7 +515,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
               </select>
               <select value={tools[key]} onChange={e => setTools(prev => ({ ...prev, [key]: e.target.value as ToolChoice }))}>
                 <option value="claude-code">Claude Code</option>
-                <option value="dsh-native">DSH 本地 Agent</option>
+                <option value="dsh-native">本地 Agent</option>
                 <option value="codex">Codex</option>
               </select>
               <select value={nodeIds[key]} onChange={e => setNodeIds(prev => ({ ...prev, [key]: e.target.value }))}>
@@ -525,26 +525,26 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
             </div>)}
             <div style={{ marginTop: 10, padding: 8, border: '1px solid var(--line)', borderRadius: 6 }}>
               <b>执行节点</b>
-              {nodes.length === 0 ? <div style={{ color: 'var(--muted-2)' }}>尚未登记节点。留空时由任一在线 DSH worker 认领。</div> : nodes.map(node => <div key={node.id} style={{ color: 'var(--muted-2)' }}>{node.label} · {node.id} · {node.status}{node.observedProviders.length ? ` · ${node.observedProviders.join(', ')}` : ''} · {observedPermissionModes(node)}</div>)}
+              {nodes.length === 0 ? <div style={{ color: 'var(--muted-2)' }}>尚未登记节点。留空时由任一在线 执行节点 认领。</div> : nodes.map(node => <div key={node.id} style={{ color: 'var(--muted-2)' }}>{node.label} · {node.id} · {node.status}{node.observedProviders.length ? ` · ${node.observedProviders.join(', ')}` : ''} · {observedPermissionModes(node)}</div>)}
               <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
                 <input value={newNodeId} onChange={e => setNewNodeId(e.target.value)} placeholder="节点 ID，如 workstation-a" />
                 <input value={newNodeLabel} onChange={e => setNewNodeLabel(e.target.value)} placeholder="显示名称" />
                 <button type="button" className="btn ghost" disabled={saving} onClick={() => void createNode()}>登记节点</button>
               </div>
-              <div style={{ color: 'var(--muted-2)' }}>节点是运行 Legion worker 的 DSH 实例，不是 Claude/Codex 产品。Provider、能力和 DSH 生效权限模式由 daemon 心跳报告；外部阶段只有匹配冻结权限模式时才会派工。登记不会复制登录凭据。随后需在 daemon 配置中设置相同的 agentNodeId。</div>
+              <div style={{ color: 'var(--muted-2)' }}>节点是运行 Legion worker 的 执行服务实例，不是 Claude/Codex 产品。Provider、能力和 生效权限模式由 daemon 心跳报告；外部阶段只有匹配冻结权限模式时才会派工。登记不会复制登录凭据。随后需在 daemon 配置中设置相同的 agentNodeId。</div>
               {nodes.some(node => node.providerNames.includes('codex')) && <div style={{ color: 'var(--muted-2)', marginTop: 6 }}>
                 Codex 网络代理（节点级）：{nodes.filter(node => node.providerNames.includes('codex')).map(node => `${node.label}：${formatCodexSystemProxyMode(observedCodexSystemProxyMode(node))}`).join('；')}。
               </div>}
             </div>
             {(Object.values(tools).includes('codex') || graphStages.some(stage => stage.tool === 'codex')) && <div style={{ color: 'var(--yellow)', marginTop: 10, padding: 8, border: '1px solid var(--line)', borderRadius: 6 }}>
               <b>Codex 网络代理设置（按执行节点配置）</b>
-              <div>在执行节点的 DSH `subagent-codex` 配置中设置 `systemProxyMode`。`system` 会为 Codex 子进程启用系统代理；`inherit`（默认）沿用 Codex 原生配置和进程代理环境变量，不会强制开启系统代理。Codex CLI 仍将 `respect_system_proxy` 标为开发中；节点心跳只确认配置模式，不代表服务端已连通。启用 `system` 后，应在每个目标节点用该节点实际使用的兼容模型发起只读请求验收网络。修改后重启 DSH，并确认上方心跳模式；未上报表示 DSH Codex provider 版本较旧。</div>
+              <div>在执行节点的 Codex 子 Agent 配置中设置 `systemProxyMode`。`system` 会为 Codex 子进程启用系统代理；`inherit`（默认）沿用 Codex 原生配置和进程代理环境变量，不会强制开启系统代理。Codex CLI 仍将 `respect_system_proxy` 标为开发中；节点心跳只确认配置模式，不代表服务端已连通。启用 `system` 后，应在每个目标节点用该节点实际使用的兼容模型发起只读请求验收网络。修改后重启执行服务，并确认上方心跳模式；未上报表示 Codex 执行服务 版本较旧。</div>
               <pre style={{ whiteSpace: 'pre-wrap', margin: '6px 0', padding: 8, background: 'var(--surface-2)' }}>{'- id: subagent-codex\n  config:\n    systemProxyMode: system  # 或 inherit'}</pre>
             </div>}
             {Object.values(tools).includes('dsh-native') && <div style={{ marginTop: 10 }}>
-              <label>DSH provider 注册名 <input value={dshProvider} onChange={e => setDshProvider(e.target.value)} placeholder="填写 ctx.subagents 中的 provider 名称" /></label>
+              <label>本地执行服务 注册名 <input value={dshProvider} onChange={e => setDshProvider(e.target.value)} placeholder="填写 ctx.subagents 中的 provider 名称" /></label>
               <div style={{ color: 'var(--muted-2)' }}>能力声明必须与该 provider 一致；执行时会再次核验结构化输出和工具过滤能力。</div>
-              <div style={{ color: 'var(--muted-2)' }}>DSH worker 要求结构化报告；所选 provider 必须支持输出 schema。</div>
+              <div style={{ color: 'var(--muted-2)' }}>执行节点 要求结构化报告；所选 provider 必须支持输出 schema。</div>
               <label style={{ display: 'block' }}><input type="checkbox" checked={nativeToolFilter} onChange={e => setNativeToolFilter(e.target.checked)} /> 支持工具过滤</label>
               <label style={{ display: 'block' }}><input type="checkbox" checked={nativeLocalAgent} onChange={e => setNativeLocalAgent(e.target.checked)} /> 提供本地 Agent 拦截能力</label>
               <label style={{ display: 'block' }}><input type="checkbox" checked={nativeSessionResume} onChange={e => setNativeSessionResume(e.target.checked)} /> 支持会话续接</label>
@@ -578,7 +578,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                     const tool = selected.slice(4) as ToolChoice
                     return { ...item, tool, toolConfigRef: null }
                   }))}>
-                    <option value="new:claude-code">新增/复用 Claude Code 配置</option><option value="new:dsh-native">新增/复用 DSH provider 配置</option><option value="new:codex">新增/复用 Codex 配置</option>
+                    <option value="new:claude-code">新增/复用 Claude Code 配置</option><option value="new:dsh-native">新增/复用 本地执行服务 配置</option><option value="new:codex">新增/复用 Codex 配置</option>
                     {configs.filter(config => config.enabled).map(config => <option key={`${config.id}@${config.version}`} value={`ref:${config.id}@${config.version}`}>{config.providerName} · {config.id} v{config.version}</option>)}
                   </select>
                   <button type="button" className="btn ghost" disabled={graphStages.length <= 2} aria-label={`删除阶段 ${stage.id}`} onClick={() => {
@@ -599,7 +599,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                     <input aria-label={`${stage.id} 独立测试 argv JSON`} value={stage.testArgs} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, testArgs: event.target.value } : item))} placeholder='["--test"]' />
                     <input aria-label={`${stage.id} 独立测试超时毫秒`} type="number" min={1000} max={3600000} step={1000} value={stage.testTimeoutMs} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, testTimeoutMs: Number(event.target.value) } : item))} />
                   </div>}
-                  <select aria-label={`${stage.id} 模型配置`} title="模型档案覆盖仅支持 DSH 原生 Agent 工具；Claude Code/Codex 使用其自身模型设置" disabled={stage.toolConfigRef
+                  <select aria-label={`${stage.id} 模型配置`} title="模型档案覆盖仅支持 本地 Agent 工具；Claude Code/Codex 使用其自身模型设置" disabled={stage.toolConfigRef
                     ? configs.find(config => config.id === stage.toolConfigRef?.id && config.version === stage.toolConfigRef?.version)?.adapter !== 'dsh-native'
                     : stage.tool !== 'dsh-native'} value={stage.modelConfigRef ? `${stage.modelConfigRef.id}@${stage.modelConfigRef.version}` : ''} onChange={event => {
                     const selected = event.target.value

@@ -35,6 +35,7 @@ import { launcherInputFromConfig, loadProductConfig, readJsonFile } from '../con
 import { AUTO_EXPORT_DEFAULTS, runAutoExport } from '../diagnostics/auto-export.mjs'
 import { initializeProductDir, isInitialized } from '../init.mjs'
 import { createLauncher, PRODUCT_STATE_TEXT } from './launcher.mjs'
+import { discoverBackend } from './shared-backend.mjs'
 import { DEFAULT_BACKOFF } from './supervisor.mjs'
 // PRT-257 修复入口（spec `line 275`：「禁止自动执行，**提示修复或回滚**」）。
 // 零 IO 的纯模块：它只把结论讲清楚，不碰磁盘、不改环境（理由见那个文件头）。
@@ -75,6 +76,7 @@ export function defaultInstallDir(moduleUrl = import.meta.url) {
 
 /** 支持的 CLI 参数（也是 `--help` 的唯一来源）。 */
 export const CLI_FLAGS = Object.freeze([
+  { name: '--connect-existing', kind: 'boolean', doc: '连接已运行的共享后台；没有后台时返回 11，不启动服务' },
   { name: '--check', kind: 'boolean', doc: '只做启动前体检（端口/入口/依赖/目录边界），不启动任何进程' },
   { name: '--init', kind: 'boolean', doc: '首次运行初始化：建目录、写默认产品配置与产品元数据，然后退出（不启动进程）' },
   { name: '--dry-run', kind: 'boolean', doc: '与 --init / --runtime-install 同用：只报告将会创建什么、将要跑哪条命令，**不落盘、不起 npm**' },
@@ -1696,7 +1698,24 @@ export async function run({
   //
   // `--init` 例外：初始化**就是**来修「目录还没建好」的，因此它只要求布局
   // 没有 error（有 error 时 init 自己会拒绝并说明，一个目录都不建）。
-  if (layoutDiagnostics.some((d) => d.severity === 'error') && parsed.flags.init !== true) {
+  const shared = createLauncherFn === createLauncher && (waitForSignal || parsed.flags['connect-existing'] === true)
+    && parsed.flags.check !== true && parsed.flags.init !== true
+  let launcher = null
+  if (shared && !configDiagnostics.some(d => d.severity === 'error')
+    && !layoutDiagnostics.some(d => d.severity === 'error' && d.code !== 'WORKSPACE_NOT_CONFIGURED')) {
+    try { launcher = await discoverBackend(options.layout, { timeoutMs: 720_000 }) }
+    catch (error) {
+      write(json ? JSON.stringify({ ok: false, code: error.code }) : `✖ 无法连接共享后台：${error.code}`)
+      return 5
+    }
+  }
+  if (parsed.flags['connect-existing'] === true && launcher === null
+    && !configDiagnostics.some(d => d.severity === 'error')
+    && !layoutDiagnostics.some(d => d.severity === 'error' && d.code !== 'WORKSPACE_NOT_CONFIGURED')) {
+    write(json ? JSON.stringify({ ok: false, code: 'BACKEND_NOT_RUNNING' }) : 'Legion 共享后台尚未运行。')
+    return 11
+  }
+  if (layoutDiagnostics.some((d) => d.severity === 'error') && parsed.flags.init !== true && launcher === null) {
     if (json) write(JSON.stringify({ ok: false, phase: 'layout', diagnostics: layoutDiagnostics }, null, 2))
     else {
       write('✖ Legion 无法启动：目录布局未确定')
@@ -1737,7 +1756,12 @@ export async function run({
     return init.ok === true ? 0 : 7
   }
 
-  const launcher = createLauncherFn(options)
+  let sharedStopped = false
+  let resolveSharedStop = null
+  launcher ??= createLauncherFn({ ...options, sharedBackend: shared, onSharedStop: () => {
+    sharedStopped = true
+    resolveSharedStop?.()
+  } })
 
   if (parsed.flags.check === true) {
     const pre = await launcher.preflight()
@@ -1752,7 +1776,17 @@ export async function run({
     return pre.ok === true ? 0 : 4
   }
 
-  const result = await launcher.start()
+  let result = await launcher.start()
+  if (shared && result.code === 'INSTANCE_ALREADY_RUNNING') {
+    try {
+      await launcher.stop({ reason: '连接已运行的共享后台' })
+      launcher = await discoverBackend(options.layout, { timeoutMs: 720_000 }) ?? launcher
+      result = await launcher.start()
+    } catch (error) {
+      write(json ? JSON.stringify({ ok: false, code: error.code }) : `✖ 无法连接共享后台：${error.code}`)
+      return 5
+    }
+  }
   const status = launcher.status()
 
   if (json) {
@@ -1762,7 +1796,7 @@ export async function run({
     for (const p of status.processes) {
       write(`  ${p.state === 'ready' ? '●' : '○'} ${p.key.padEnd(13)} ${p.state.padEnd(9)} ${p.url ?? '(worker，无监听端口)'}`)
     }
-    write('  （Ctrl+C 停止；进程状态与诊断可反复查询）')
+    if (!launcher.shared) write('  （Ctrl+C 停止后台；关闭网页或桌面窗口不会停止后台）')
   } else {
     write(`✖ 启动失败（阶段：${result.phase}）`)
     for (const f of result.failures) write(`  ✖ [${f.process}] ${f.code}：${f.detail ?? '无详情'}`)
@@ -1802,6 +1836,10 @@ export async function run({
   }
 
   if (result.ok !== true) return 5
+  if (launcher.shared) {
+    if (!json) write('  已连接现有后台，数据共用；后台生命周期由原启动入口管理。')
+    return 0
+  }
 
   if (waitForSignal) {
     // ── PRT-708：产品真的在跑了，把托盘挂上 ──────────────────────────────
@@ -1843,6 +1881,8 @@ export async function run({
 
     try {
       await new Promise((resolve) => {
+        resolveSharedStop = resolve
+        if (sharedStopped) { resolve(); return }
         const stop = () => resolve()
         process.once('SIGINT', stop)
         process.once('SIGTERM', stop)
@@ -1879,6 +1919,7 @@ if (isMain) {
 // 退出码（脚本与验收依赖它们，因此是契约的一部分）：
 //   0 = 成功；2 = 参数错误；3 = 目录布局未确定；4 = --check 未通过；
 //   5 = 启动失败；6 = 产品配置文件有 error；7 = 初始化未完成。
+//   11 = --connect-existing 没有发现后台（不启动任何服务）。
 //   9 = `--wizard` 自己抛错（HEAD 起就在用，只是此前一直没写进这份契约——
 //       一条"已经在用但没登记"的退出码，与一条没人用的退出码，
 //       在读这份契约的人眼里是同一个东西：都不存在）。

@@ -861,7 +861,7 @@ export interface DshModelCatalog { default: { provider: string; model: string };
 export async function dshModelsRpc<T>(method: string, args: Record<string, unknown> = {}): Promise<T> {
   const response = await fetch(`${apiBase()}/api/dsh-models`, { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json', ...authHeaders() }, body: JSON.stringify({ method, args }) })
   const body = await response.json()
-  if (!response.ok || body.ok !== true) throw new Error(body.error ?? `DSH 接口返回 ${response.status}`)
+  if (!response.ok || body.ok !== true) throw new Error(response.status === 401 ? '模型服务连接未授权，请重新连接服务后刷新配置。' : String(body.error ?? `模型服务返回 ${response.status}`).replace(/DSH/gi, '模型服务'))
   return body.value as T
 }
 

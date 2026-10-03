@@ -28,6 +28,7 @@
 import { existsSync } from 'node:fs'
 
 import { hasBlockingDiagnostic, layoutDiagnostics } from '../paths.mjs'
+import { join } from 'node:path'
 import { entryAbsolutePath, materializeProcessPlan, validateProcessPlan } from '../process-manifest.mjs'
 import {
   DSH_OVERLAY_PROCESS_KEY,
@@ -89,6 +90,7 @@ import {
   writeRunRecord,
 } from './run-record.mjs'
 import * as nodeFs from 'node:fs'
+import { publishBackend } from './shared-backend.mjs'
 
 /** 产品级状态 → 用户可见文案（spec §6.3 的「产品状态」列）。 */
 export const PRODUCT_STATE_TEXT = Object.freeze({
@@ -221,12 +223,21 @@ export function withRunCredentialPatch(plan, applied, paths) {
   if (extras.length === 0) return plan
   const processes = plan.processes.map((p) => {
     if (p.key !== DSH_OVERLAY_PROCESS_KEY || p.command === null) return p
+    const insertAt = Number.isInteger(p.launcherArgsEnd)
+      ? Math.max(0, Math.min(p.launcherArgsEnd, p.command.args.length))
+      : p.command.args.length
     return Object.freeze({
       ...p,
       command: Object.freeze({
         file: p.command.file,
-        args: Object.freeze([...p.command.args, ...extras]),
+        args: Object.freeze([
+          ...p.command.args.slice(0, insertAt),
+          ...extras,
+          ...p.command.args.slice(insertAt),
+        ]),
       }),
+      launcherArgsEnd: p.launcherArgsEnd === null || p.launcherArgsEnd === undefined
+        ? p.launcherArgsEnd : p.launcherArgsEnd + extras.length,
     })
   })
   return Object.freeze({ ...plan, processes: Object.freeze(processes) })
@@ -238,6 +249,9 @@ export function createLauncher({
   runtimeCommand = null,
   baseEnv = {},
   envValues = {},
+  desktopCredentials = null,
+  sharedBackend = false,
+  onSharedStop = () => {},
   extraEnvAllow = [],
   nodePath = process.execPath,
   installRoot = layout?.installDir ?? null,
@@ -426,6 +440,10 @@ export function createLauncher({
     runtimeCommand,
     dataDir: layout.dataDir ?? null,
     profile: dshProfile,
+    nodePath,
+    // Match the official desktop's Node loader configuration. Keep the flag
+    // before the script path; the managed profile loads patches on restart.
+    nodeArgs: desktopCredentials === null ? [] : ['--expose-internals'],
     fs: runtimeResolveFs ?? null,
     platform: layout.platform ?? process.platform,
   })
@@ -697,6 +715,7 @@ export function createLauncher({
    * （`launcher.instanceLock`），也要在**每一条**退出路径上被释放。
    */
   let instanceLock = null
+  let backendPublication = null
   let instanceLockReading = null
   /** 日志 sink（PRT-709）。`null` 表示建不起来——**不阻止启动**。 */
   let logSink = null
@@ -841,6 +860,13 @@ export function createLauncher({
    */
   function derivedValuesFor(proc) {
     const out = {}
+    if (desktopCredentials !== null) {
+      if (!desktopCredentials.hub || !desktopCredentials.workbench) throw new Error('DESKTOP_AUTH_REQUIRED')
+      if (['team-hub', 'workbench', 'orchestrator'].includes(proc.key)) out.TEAM_HUB_TOKEN = desktopCredentials.hub
+      if (['team-hub', 'workbench'].includes(proc.key)) out.LEGION_DESKTOP_MODE = '1'
+      if (proc.key === 'workbench') out.DSH_WORKBENCH_TOKEN = desktopCredentials.workbench
+      if (proc.key === 'runtime') out.DSH_HOME = join(layout.dataDir, 'runtime', 'dsh', 'home')
+    }
     if (proc.key === 'team-hub') {
       out.TEAM_HUB_HOST = proc.host
     }
@@ -937,6 +963,18 @@ export function createLauncher({
       if (typeof layout.dataDir === 'string' && layout.dataDir !== '') {
         out.LEGION_DATA_DIR = layout.dataDir
       }
+      // Packaged Legion seeds its built-in workflow pack inside the private Hub
+      // before the readiness listener starts. Both paths derive from the
+      // verified install root / selected workspace; neither is a source path.
+      if (desktopCredentials !== null && typeof installRoot === 'string' && installRoot !== '') {
+        const builtinPack = join(installRoot, 'workflow-packs', 'software-collaboration.legionpack')
+        if (exists(builtinPack)) {
+          out.LEGION_WORKFLOW_PACK_PATH = builtinPack
+          if (typeof layout.workspaceDir === 'string' && layout.workspaceDir !== '') {
+            out.LEGION_WORKSPACE_DIR = layout.workspaceDir
+          }
+        }
+      }
     }
     return out
   }
@@ -1031,7 +1069,10 @@ export function createLauncher({
     const result = await waitForReadiness(expected, {
       timeoutMs: r.timeoutMs ?? readiness.timeoutMs ?? 30000,
       intervalMs: r.intervalMs ?? readiness.intervalMs ?? 250,
-      fetchImpl,
+      fetchImpl: desktopCredentials && ['team-hub', 'workbench'].includes(proc.key)
+        ? (target, options) => fetchImpl(target, { ...options, headers: { ...options?.headers,
+          authorization: `Bearer ${proc.key === 'workbench' ? desktopCredentials.workbench : desktopCredentials.hub}` } })
+        : fetchImpl,
       sleep,
       now,
       isProcessAlive: () => handle.isAlive(),
@@ -1697,6 +1738,20 @@ export function createLauncher({
       // 就绪之后立刻落一条记录：此后这台机器上如果 Legion 被强杀，
       // 下一次启动就能认出这些 pid。晚于就绪是因为 pids 到这时才齐。
       persistRunRecord()
+      if (sharedBackend) {
+        try {
+          backendPublication = await publishBackend({ layout, status: () => this.status(),
+            stop: async () => {
+              const result = await this.stop({ reason: '停止共享后台服务' })
+              onSharedStop()
+              return result
+            }, restart: () => this.retry() })
+        } catch (error) {
+          await this.stop({ reason: '共享后台发布失败' })
+          return { ok: false, phase: 'discovery', code: error.code ?? 'BACKEND_PUBLISH_FAILED',
+            failures: [], diagnostics, states: [], elapsedMs: now() - beganAt }
+        }
+      }
       // ★ PRT-713 收尾：**产品真的起来了**，这时才装配并起心跳。
       //
       //   排在就绪之后、而不是 `start()` 的第一步：一个在产品其实没起来时
@@ -1733,7 +1788,7 @@ export function createLauncher({
         // 什么都没起来也要删记录：这条记录此刻只可能描述**上一次**运行，
         // 而它已经被 `checkPreviousRun` 读过、报告过了。留着它会让下一次
         // 启动把同一批残留**再报一遍**，用户会以为残留一直在长。
-        forgetRunRecord()
+        if (instanceLock !== null) forgetRunRecord()
         // 心跳同样要停：`start()` 在**成功之后**才装配它，所以这里通常
         // 本来就是空的；但"通常"不是"一定"——一次中途失败的启动
         // 可能已经装配过。停止路径不该依赖"另一条路径应该没走到那一步"。
@@ -1747,7 +1802,14 @@ export function createLauncher({
       log('info', `停止：${reason}`)
       const results = await supervisor.stopAll({ graceMs })
       const states = supervisor.status()
+      if (results.some(result => result.stopped !== true)) {
+        // Retain supervisor, run evidence and the DataDir lock for a safe retry.
+        persistRunRecord()
+        throw Object.assign(new Error('Owned processes have not stopped'), { code: 'STOP_FAILED' })
+      }
       supervisor.dispose()
+      backendPublication?.close()
+      backendPublication = null
       stoppedAt = now()
       supervisor = null
       // 停止之后**必须** flush：还没换行的尾巴是最后那几行退出信息，

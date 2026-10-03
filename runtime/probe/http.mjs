@@ -144,12 +144,14 @@ export function hasModelList(payload) {
  * @param {Function} [opts.fetchImpl]  注入的 fetch（测试与宿主适配用）
  * @param {string}   [opts.modelsPath]
  * @param {boolean}  [opts.verifyModelId] 列表里没有这个 id 时判 `MODEL_NOT_FOUND`
+ * @param {number}   [opts.timeoutMs] 单次请求的硬超时（默认 15 秒）
  * @param {Function} [opts.clock]
  */
 export function createHttpTransport({
   fetchImpl,
   modelsPath = DEFAULT_MODELS_PATH,
   verifyModelId = true,
+  timeoutMs = 15_000,
   clock = () => Date.now(),
 } = {}) {
   const doFetch = fetchImpl ?? globalThis.fetch
@@ -158,6 +160,9 @@ export function createHttpTransport({
       'createHttpTransport 需要一个 fetch 实现（Node 18+ 有全局 fetch）：' +
       '没有它就无法真的发起探测，而"没探测过"不能被当成"可用"',
     )
+  }
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000) {
+    throw new TypeError('timeoutMs 必须是 1 到 120000 毫秒之间的整数')
   }
 
   return async function httpTransport({ profile, credential }) {
@@ -172,7 +177,7 @@ export function createHttpTransport({
 
     // 网络层异常**原样抛出**，由执行器的 `normalizeTransportError` 归一化。
     // 在这里自己 try/catch 再映射一次会让分类逻辑存在两份，而两份必然漂移。
-    const res = await doFetch(url, { method: 'GET', headers })
+    const res = await doFetch(url, { method: 'GET', headers, signal: AbortSignal.timeout(timeoutMs) })
 
     const latencyMs = clock() - startedAtMs
     const status = res.status

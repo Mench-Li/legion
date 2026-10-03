@@ -60,6 +60,9 @@
  * 状态机 + 乐观锁 + 角色纪律与 taskctl.mjs 一致；scope 是任务分区的一等字段。
  */
 import http from 'node:http'
+import { checkDesktopRequest } from '../product/local-auth.mjs'
+import { createAgentConversationService } from './agent-conversations.mjs'
+import { createAgentsRoutes } from './routes/agents.mjs'
 import { DatabaseSync } from 'node:sqlite'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
@@ -360,6 +363,7 @@ export const DEFAULT_DB_FILE = DB_FILE
 const UPLOADS_ROOT = join(dirname(DB_FILE), 'uploads')
 const PORT = CFG.values.port
 const TOKEN = CFG.values.token
+if (CFG.values.desktopMode && (!TOKEN || CFG.values.host !== '127.0.0.1')) throw new Error('DESKTOP_AUTH_REQUIRED')
 const HOST = CFG.values.host
 /** 启动时打印的脱敏配置摘要（含实际生效的 DB 路径）；供日志与故障排查使用，绝不包含 token 原文。 */
 export function configSummaryLine() {
@@ -3522,6 +3526,7 @@ export function listConversations({ scope } = {}) {
 
 /** 发消息（统一写纪律：by 必填 + author=by 防冒名 + 审计/SSE；消息 scope 恒等于会话 scope，跨 scope 写不串）。 */
 export function postMessage(input) {
+  if (agentConversations.binding(input?.conv)) throw new Error('Agent conversation requires /api/agent-messages');
   const by = input?.by
   if (typeof by !== 'string' || by.trim().length === 0) throw new Error('缺少操作者身份 by')
   const convId = Number(input?.conv)
@@ -3718,7 +3723,7 @@ export function postAiReply(input) {
     const conv = getConversation(s2.conv_id)
     const t = now()
     const r = db.prepare('INSERT INTO messages (conv_id, scope, author, kind, body, meta, client_ts, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(s2.conv_id, conv.scope, by.trim(), kind, body, JSON.stringify({ replyTo: msgId, aiModel: model }), null, t)
+      .run(s2.conv_id, conv.scope, agentConversations.binding(s2.conv_id)?.agent_id ?? by.trim(), kind, body, JSON.stringify({ replyTo: msgId, aiModel: model }), null, t)
     db.prepare('UPDATE conversations SET last_message_at = ?, updatedAt = ? WHERE id = ?').run(t, t, s2.conv_id)
     meta2.aiStatus = 'replied'
     meta2.repliedAt = t
@@ -6652,7 +6657,19 @@ export function artifactContent(taskId, rawI) {
 // ── 路由层（PRT-316）：`handle` 里已提取出去的路由族在这里装配。──
 // 依赖由本文件注入（各族自己不 import hub 内部件）。新族加进这个数组即可，
 // 不需要再往下面那条 if 链里抄一遍同样的形状。
+export const agentConversations = createAgentConversationService({
+  db, withTx, audit, createTask,
+  recordRunEvents: input => runStore.recordRunEvents(input),
+})
+export function reconcileAgentConversations() { return agentConversations.reconcile() }
+const agentConversationTimer = setInterval(() => {
+  if (db.isOpen === false) { clearInterval(agentConversationTimer);return }
+  try { reconcileAgentConversations() } catch (e) { console.error('[agent-conversations] reconciliation failed:', e.message) }
+}, 3000)
+agentConversationTimer.unref()
+
 const router = createRouter([
+  createAgentsRoutes({ service:agentConversations,json,authorized,readBody,requireMember,readScope }),
   // 冲突治理族放在最前：/api/tasks/:id/write-intent 等具体路径必须先于宽前缀匹配。
   createWriteIntentRoutes({
     json, readBody, authorized, writeIntentStore, db,
@@ -6742,6 +6759,7 @@ const router = createRouter([
   }),
   createContextSnapshotsRoutes({
     json,
+    onSnapshotRecorded: (attemptId,snapshot) => agentConversations.includeFeedback(attemptId,snapshot),
     contextStore, handleRun, assembleContext,
     describeAssembly, collectCandidates, createContextSource,
     createConservativeTokenizer, tokenizerForProfile, planSnapshotRetention,
@@ -6933,6 +6951,10 @@ const router = createRouter([
 ])
 
 async function handle(req, res, stripPrefix) {
+  if (CFG.values.desktopMode) {
+    const failure = checkDesktopRequest(req, TOKEN)
+    if (failure) { json(res, failure.status, { code: failure.code }); return }
+  }
   const url = new URL(req.url ?? '/', 'http://x')
   let path = url.pathname
   // P1-1 宿主集成：DSH webServer 把前缀路由（如 /team-hub）下所有请求交给本 handle，

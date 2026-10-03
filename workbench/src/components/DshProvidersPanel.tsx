@@ -22,6 +22,7 @@ export function DshProvidersPanel(): React.JSX.Element {
   const [busy, setBusy] = useState(false)
   const [editing, setEditing] = useState<Provider | null>(null)
   const [open, setOpen] = useState(false)
+  const [removing, setRemoving] = useState<Provider | null>(null)
   const [form, setForm] = useState<Form>(empty)
   async function load(): Promise<void> {
     setLoading(true); setError('')
@@ -41,6 +42,17 @@ export function DshProvidersPanel(): React.JSX.Element {
     setEditing(provider); setNotice(''); setOpen(true)
     setForm({ provider: provider.provider, name: String(profile.displayName ?? provider.displayName), endpoint: String(profile.baseURL ?? ''), protocol: String(profile.api ?? 'openai-completions'), models: models.map(m => typeof m === 'string' ? m : String(m.id)).join('\n'), key: '' })
   }
+  async function remove(): Promise<void> {
+    if (!removing?.declared || removing.settingsNs !== 'llm-pi-ai') return
+    const ns = settings?.namespaces.find(n => n.ns === removing.settingsNs)
+    if (!ns || !settings?.writable) return
+    setBusy(true); setError('')
+    try {
+      await dshModelsRpc('settings/mutate', { ns: ns.ns, expectedRevision: ns.revision, ops: [{ op: 'unset', path: removing.settingsPath }] })
+      setRemoving(null); setNotice('供应商已删除。'); await load()
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)); setRemoving(null) }
+    finally { setBusy(false) }
+  }
   async function discover(): Promise<void> {
     setBusy(true); setError(''); setNotice('')
     try {
@@ -59,7 +71,7 @@ export function DshProvidersPanel(): React.JSX.Element {
       if (!/^[a-z][a-z0-9_-]*$/.test(provider)) throw new Error('供应商 ID 须以小写字母开头，仅包含小写字母、数字、横线或下划线。')
       if (!editing && providers.some(p => p.provider === provider)) throw new Error('供应商已存在，请从列表编辑。')
       const namespace = settings?.namespaces.find(ns => ns.ns === (editing?.settingsNs ?? 'llm-pi-ai'))
-      if (!namespace || !settings?.writable) throw new Error('当前 DSH 未提供可写的模型配置。')
+      if (!namespace || !settings?.writable) throw new Error('当前模型配置不可写，请检查服务连接。')
       const ids = [...new Set(form.models.split('\n').map(id => id.trim()).filter(Boolean))]
       if (!ids.length && !editing) throw new Error('请至少填写一个模型 ID。')
       if (form.endpoint.trim()) { const endpoint = new URL(form.endpoint.trim()); if (!['http:', 'https:'].includes(endpoint.protocol) || endpoint.username || endpoint.password) throw new Error('API 地址需使用 HTTP(S)，且不能内嵌账号密码。') }
@@ -78,7 +90,7 @@ export function DshProvidersPanel(): React.JSX.Element {
       await dshModelsRpc('settings/mutate', { ns: namespace.ns, ops, expectedRevision: namespace.revision }); profileSaved = true
       if (form.key) await dshModelsRpc('credentials/set', { ref: keyRef, value: form.key })
       setForm(empty); setOpen(false); setEditing(null)
-      setNotice('DSH 供应商配置已保存，下一次模型请求生效。')
+      setNotice('供应商配置已保存，下一次模型请求生效。')
       await load()
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
@@ -87,24 +99,27 @@ export function DshProvidersPanel(): React.JSX.Element {
     } finally { setBusy(false) }
   }
   return <div className="set-panel dsh-providers-panel">
-    <div className="model-config-intro"><div><h2>供应商与模型</h2><p>沿用 DSH 的供应商目录、配置和凭证库。这里修改的是 DSH 全局配置，适用于所有空间。</p></div><div className="set-row-space"><a className="btn" href="http://127.0.0.1:3080/" target="_blank" rel="noreferrer">打开 DSH</a><button className="btn" disabled={loading || busy} onClick={() => void load()}>刷新配置</button><button className="btn primary" disabled={!settings?.writable || busy} onClick={() => { setEditing(null); setForm(empty); setOpen(true); setNotice('') }}>添加供应商</button></div></div>
-    {loading && <p>正在读取 DSH 配置…</p>}
-    {error && <div className="set-notice bad" role="alert"><div className="set-notice-title">{error}</div>{error.includes('登录') && <div className="set-notice-text">DSH 使用独立登录会话。请用 DSH 启动时提供的登录链接登录，再点击刷新配置。</div>}</div>}
+    <div className="model-config-intro"><div><h2>模型</h2><p>填入模型供应商的 API 密钥即可使用其模型。配置适用于所有空间。</p></div><button className="btn" disabled={loading || busy} onClick={() => void load()}>刷新配置</button></div>
+    {loading && <p>正在读取模型配置…</p>}
+    {error && <div className="set-notice bad" role="alert">{error}</div>}
     {notice && <div className="set-notice ok" role="status">{notice}</div>}
     {!loading && !error && catalog && <p className="model-catalog-summary">已配置 {catalog.groups.length} 个供应商 · {catalog.groups.reduce((sum, g) => sum + g.models.length, 0)} 个模型 · 默认：{catalog.default.provider} / {catalog.default.model}</p>}
-    {!loading && settings && providers.filter(p => ['llm-pi-ai', 'llm-deepseek'].includes(p.settingsNs)).map(p => {
+    <div className="provider-settings-list">
+    {!loading && settings && providers.filter(p => ['llm-pi-ai', 'llm-deepseek'].includes(p.settingsNs)).filter(p => p.settingsNs === 'llm-deepseek' || p.provider === 'deepseek' || p.declared || catalog?.groups.some(g => g.id === p.provider) || Object.keys(profileAt(settings.namespaces.find(ns => ns.ns === p.settingsNs), p.settingsPath)).length > 0).map(p => {
       const group = catalog?.groups.find(g => g.id === p.provider)
-      const profile = profileAt(settings.namespaces.find(ns => ns.ns === p.settingsNs), p.settingsPath)
-      const configured = Object.keys(profile).length > 0
-      return <div className="set-card" key={p.provider}><div className="set-card-head"><strong>{p.displayName}</strong><span className="chip">{p.provider}</span><span className="model-provider-status">{group ? `${group.models.length} 个模型` : configured ? '已配置 · 暂无可用模型' : '尚未配置'}</span><button className="btn" disabled={busy || !settings.writable} onClick={() => edit(p)}>{configured ? '编辑供应商' : '配置供应商'}</button></div><div className="set-card-sub">{String(profile.baseURL ?? '使用供应商默认地址')} · {String(profile.api ?? '供应商默认协议')}</div>{group && <div className="model-provider-models">{group.models.map(m => <span key={m.id} title={m.id}>{m.name || m.id}</span>)}</div>}</div>
+      return <div className="provider-settings-row" key={p.provider}><strong>{p.displayName}</strong>{p.declared && <span className="provider-custom-badge">自定义</span>}<span className={`provider-state-dot${group?.models.length ? ' ready' : ''}`} role="img" aria-label={group?.models.length ? '模型已就绪' : '待配置'} title={group?.models.length ? `${group.models.length} 个可用模型` : '待配置'} /><button className="btn" disabled={busy || !settings.writable} onClick={() => edit(p)}>编辑</button>{p.declared && <button className="btn provider-delete" disabled={busy || !settings.writable} onClick={() => setRemoving(p)}>删除</button>}</div>
     })}
+    <button className="provider-add" disabled={!settings?.writable || busy} onClick={() => { setEditing(null); setForm(empty); setOpen(true); setNotice('') }}>＋ 添加模型供应商</button>
+    </div>
+    {removing && <div className="provider-editor-mask"><div className="provider-editor-dialog" role="alertdialog" aria-label="删除供应商"><h3>删除 {removing.displayName}？</h3><p>删除后，使用该供应商的岗位需要重新选择模型。已存储的密钥不会被删除。</p><button className="btn provider-delete" disabled={busy} onClick={() => void remove()}>确认删除</button><button className="btn" disabled={busy} onClick={() => setRemoving(null)}>取消</button></div></div>}
     {catalog?.failures?.map(f => <div className="set-notice warn" key={f.id}>{f.id}：{f.message}</div>)}
-    {open && <form className="set-form model-provider-form" onSubmit={e => { e.preventDefault(); void save() }}><h3>{editing ? `编辑 ${editing.displayName}` : '添加自定义供应商'}</h3><div className="set-grid">
+    {open && <div className="provider-editor-mask"><form role="dialog" aria-modal="true" aria-label={editing ? `编辑 ${editing.displayName}` : '添加模型供应商'} className="set-form model-provider-form" onSubmit={e => { e.preventDefault(); void save() }}><h3>{editing ? `编辑 ${editing.displayName}` : '添加自定义供应商'}</h3>{error && <div className="set-notice bad" role="alert">{error}</div>}{notice && <div className="set-notice ok" role="status">{notice}</div>}<div className="set-grid">
+      {!editing && <label className="field"><span>选择供应商</span><select className="set-input" value="" onChange={e => { const provider = providers.find(p => p.provider === e.target.value); if (provider) edit(provider) }}><option value="">自定义供应商</option>{providers.filter(p => ['llm-pi-ai', 'llm-deepseek'].includes(p.settingsNs) && !p.declared).map(p => <option key={p.provider} value={p.provider}>{p.displayName}</option>)}</select></label>}
       <label className="field"><span>供应商 ID</span><input className="set-input" value={form.provider} disabled={!!editing || busy} onChange={e => set('provider', e.target.value)} required placeholder="例如 company-gateway" /></label>
       <label className="field"><span>显示名称</span><input className="set-input" value={form.name} disabled={busy} onChange={e => set('name', e.target.value)} /></label>
       <label className="field"><span>API 地址</span><input className="set-input" value={form.endpoint} disabled={busy} onChange={e => set('endpoint', e.target.value)} placeholder="https://gateway.example/v1" /></label>
       {(!editing || editing.declared || typeof profileAt(settings?.namespaces.find(ns => ns.ns === editing.settingsNs), editing.settingsPath).api === 'string') && <label className="field"><span>API 协议</span><select className="set-input" value={form.protocol} disabled={busy} onChange={e => set('protocol', e.target.value)}><option value="openai-completions">OpenAI Chat Completions</option><option value="openai-responses">OpenAI Responses</option><option value="anthropic-messages">Anthropic Messages</option></select></label>}
-      <label className="field"><span>API 密钥（留空保留原凭证）</span><input type="password" autoComplete="new-password" className="set-input" value={form.key} disabled={busy} onChange={e => set('key', e.target.value)} placeholder="密钥仅写入 DSH 凭证库" /></label>
-    </div><label className="field"><span>模型 ID（每行一个）</span><textarea aria-label="模型 ID（每行一个）" className="set-textarea" value={form.models} disabled={busy} onChange={e => set('models', e.target.value)} rows={5} placeholder="填写该供应商实际支持的模型 ID" /></label><div className="set-row-space"><button className="btn" type="button" disabled={busy} onClick={() => void discover()}>获取可用模型</button><button className="btn primary" disabled={busy} type="submit">{busy ? '正在保存…' : '保存供应商'}</button><button className="btn" type="button" disabled={busy} onClick={() => { setOpen(false); setForm(empty) }}>取消</button></div></form>}
+      <label className="field"><span>API 密钥（留空保留原凭证）</span><input type="password" autoComplete="new-password" className="set-input" value={form.key} disabled={busy} onChange={e => set('key', e.target.value)} placeholder="密钥安全存储，保存后不回显" /></label>
+    </div><label className="field"><span>模型 ID（每行一个）</span><textarea aria-label="模型 ID（每行一个）" className="set-textarea" value={form.models} disabled={busy} onChange={e => set('models', e.target.value)} rows={5} placeholder="填写该供应商实际支持的模型 ID" /></label><div className="set-row-space"><button className="btn" type="button" disabled={busy} onClick={() => void discover()}>获取可用模型</button><button className="btn primary" disabled={busy} type="submit">{busy ? '正在保存…' : '保存供应商'}</button><button className="btn" type="button" disabled={busy} onClick={() => { setOpen(false); setForm(empty) }}>取消</button></div></form></div>}
   </div>
 }

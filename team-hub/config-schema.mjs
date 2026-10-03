@@ -9,6 +9,7 @@ export const SCHEMA = defineSchema({
   title: 'team-hub v2（对话/日程数据面 + SSE + 审计）',
   prefixes: ['TEAM_HUB_', 'CHAT_', 'LEGION_HUB_'],
   fields: [
+    { key: 'desktopMode', env: 'LEGION_DESKTOP_MODE', type: 'bool', default: false, doc: '桌面模式：本机接口也强制鉴权与来源验证' },
     // ── 监听、鉴权、存储（P3-2 统一项）──
     // 0 是**合法值**：Node `listen(0)` 语义 = 由 OS 分配空闲端口。契约测试
     // （tests/contract/team-hub-parity.test.mjs）就是「env 设 0 + 自己 listen(0)」，且 /api/config
@@ -74,6 +75,14 @@ export const SCHEMA = defineSchema({
     { key: 'osUserDomain', env: 'USERDOMAIN', type: 'string', default: '', doc: 'Windows 上的域/机器名，与账户名拼成 DOMAIN\\user' },
   ],
   nonEnvLiterals: [
+    'DESKTOP_AUTH_REQUIRED', // Desktop startup refusal, not an environment variable.
+    // Agent conversation/control API response codes, not environment keys.
+    'AGENT_ARCHIVED', 'AGENT_NOT_FOUND', 'AGENT_NOT_REGISTERED', 'AGENT_REQUEST_FAILED',
+    'COMMAND_NOT_FOUND', 'CONVERSATION_NOT_FOUND', 'EVENT_LIMIT', 'HOLD_NOT_OWNED',
+    'IDEMPOTENCY_CONFLICT', 'INVALID_BODY', 'INVALID_EVENT', 'INVALID_INTENT',
+    'MESSAGE_NOT_FOUND', 'OUTCOME_UNKNOWN', 'QUESTION_RESOLVED', 'RECONCILIATION_REQUIRED',
+    'STALE_RUN_TARGET', 'TARGET_AMBIGUOUS', 'TARGET_MISMATCH', 'TASK_HELD',
+    'TASK_TERMINAL', 'TASK_VERSION_CONFLICT', 'UNSUPPORTED_CAPABILITY',
     'COMMIT', 'ROLLBACK', 'DELETE', 'OPTIONS', 'SIGINT', 'SIGTERM', 'ENOENT',
     // 运行面（PRT-302/303/313）的具名错误码，来自 team-hub/run-store.mjs 的 RUN_ERRORS。
     // 逐个登记而不是加前缀通配：这份清单的价值在于「每一条都被看过一次」。

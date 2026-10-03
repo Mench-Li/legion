@@ -100,7 +100,7 @@ function QuickAssignTab({ scope, roster }: { scope: string; roster: RosterAgent[
   return (
     <>
       <div className="mc-tip">
-        为每个岗位选择 DSH 实际提供的模型。未单独配置的岗位使用平台默认{catalog ? `（${catalog.default.provider} / ${catalog.default.model}）` : '模型'}，下一次 AI 执行该岗位任务时生效。
+        为每个岗位选择已配置的模型。未单独配置的岗位使用平台默认{catalog ? `（${catalog.default.provider} / ${catalog.default.model}）` : '模型'}，下一次 AI 执行该岗位任务时生效。
       </div>
       {loadErr !== null && (
         <div className="set-notice bad">
@@ -109,7 +109,7 @@ function QuickAssignTab({ scope, roster }: { scope: string; roster: RosterAgent[
           <div className="set-notice-action">下一步：先确认中枢可达，再重新打开这个窗口；**不要**照着这份看不清的列表重配一遍。</div>
         </div>
       )}
-      {catalogError && <div className="set-notice warn">无法读取 DSH 实际模型目录：{catalogError} 已保存的岗位配置仍显示在下方；登录 DSH 后重新进入此页。</div>}
+      {catalogError && <div className="set-notice warn">无法读取模型目录：{catalogError} 已保存的岗位配置仍显示在下方；请检查模型服务连接后重试。</div>}
       {loaded && loadErr === null && roles.length === 0 && (
         <div style={{ color: 'var(--muted-2)', fontSize: 12, padding: '14px 0' }}>该空间暂无编队智能体(发布目标或先选具体工作空间)。</div>
       )}
@@ -163,7 +163,7 @@ export function ModelConfigModal({ scope, roster, onClose, embedded = false }: M
       <div className="modal model-config-modal" onClick={e => e.stopPropagation()}>
         <div className="modal-head">
           ⚙️ 模型与凭证设置
-          <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--muted-2)' }}>{scope || 'DSH 全局配置'}</span>
+          <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--muted-2)' }}>{scope || '全局配置'}</span>
           {!embedded && <span className="x" onClick={onClose}>✕</span>}
         </div>
         <div className="set-tabs">

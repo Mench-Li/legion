@@ -83,6 +83,7 @@
 // ============================================================================
 
 import { spawn } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { existsSync, lstatSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 
 import { isPathInside, normalizePath, pathApi, samePath } from '../paths.mjs'
@@ -572,6 +573,7 @@ export function renderTrayScript({
   tickMs = TRAY_ICON_DEFAULT_TICK_MS,
   heartbeatMs = TRAY_ICON_DEFAULT_HEARTBEAT_MS,
   windowTitle = 'Legion',
+  iconPath = fileURLToPath(new URL('../assets/legion.ico', import.meta.url)),
   protocol = TRAY_ICON_HOST_PROTOCOL_VERSION,
 } = {}) {
   if (typeof menuPath !== 'string' || menuPath === '') throw new TypeError('renderTrayScript 需要 menuPath')
@@ -702,7 +704,7 @@ export function renderTrayScript({
   push('}')
   push('try {')
   push('  $script:icon = New-Object System.Windows.Forms.NotifyIcon')
-  push('  $script:icon.Icon = [System.Drawing.SystemIcons]::Application')
+  push(`  $script:icon.Icon = New-Object System.Drawing.Icon('${iconPath.replace(/'/g, "''")}')`)
   push('  $script:icon.Text = $WindowTitle')
   push('  $script:icon.ContextMenuStrip = Build-Menu $menuText')
   push('  $script:lastMenu = $menuText')

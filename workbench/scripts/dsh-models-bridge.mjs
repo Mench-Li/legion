@@ -7,7 +7,8 @@ export function validateDshModelsRequest(body) {
     if (!['llm-pi-ai', 'llm-deepseek'].includes(ns) || !Number.isInteger(expectedRevision) || !Array.isArray(ops) || ops.length === 0) throw new Error('模型配置命名空间或版本无效')
     for (const op of ops) {
       const path = op?.path
-      if (op.op !== 'set' || !Array.isArray(path) || path.some(p => typeof p !== 'string' || ['__proto__', 'prototype', 'constructor'].includes(p))) throw new Error('模型配置路径无效')
+      if (!['set', 'unset'].includes(op.op) || !Array.isArray(path) || path.some(p => typeof p !== 'string' || ['__proto__', 'prototype', 'constructor'].includes(p))) throw new Error('模型配置路径无效')
+      if (op.op === 'unset' && !(ns === 'llm-pi-ai' && path[0] === 'providers' && path.length === 2)) throw new Error('仅允许删除自定义供应商配置')
       if (ns === 'llm-pi-ai' && !(path[0] === 'providers' && path.length >= 2)) throw new Error('仅允许修改供应商配置')
       if (ns === 'llm-deepseek' && !['baseURL', 'models', 'apiKeyEnv'].includes(path[0])) throw new Error('仅允许修改模型连接配置')
     }
@@ -23,11 +24,11 @@ export async function forwardDshModels(body, { cookie = '', fetchImpl = fetch } 
     body: JSON.stringify({ type: 'client-request', rpcId: `legion-models-${crypto.randomUUID()}`, method: body.method, payload: { args: body.args } }),
     signal: AbortSignal.timeout(15000),
   })
-  if (response.status === 401) throw Object.assign(new Error('请先登录本机 DSH，再刷新供应商配置。'), { status: 401 })
-  if (!response.ok) throw new Error(`DSH 模型接口返回 ${response.status}`)
+  if (response.status === 401) throw Object.assign(new Error('模型服务连接未授权，请重新连接服务后刷新配置。'), { status: 401 })
+  if (!response.ok) throw new Error(`模型服务接口返回 ${response.status}`)
   const envelope = await response.json()
   const result = envelope.result
-  if (!result || typeof result.ok !== 'boolean') throw new Error('DSH 模型接口版本不兼容')
-  if (!result.ok) throw new Error(result.error?.message ?? 'DSH 拒绝了模型配置请求')
+  if (!result || typeof result.ok !== 'boolean') throw new Error('模型服务接口版本不兼容')
+  if (!result.ok) throw new Error(result.error?.message ?? '模型服务拒绝了配置请求')
   return result.value ?? null
 }

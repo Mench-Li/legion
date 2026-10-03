@@ -505,7 +505,7 @@ export default function App(): React.JSX.Element {
         <div style={{ fontSize: 12 }}>错误：{error}</div>
         <div style={{ fontSize: 12, lineHeight: 1.9 }}>
           1. 启动看板服务：
-          <code>cd D:\project\DSH\legion &amp;&amp; node scrum\serve.mjs --port 4820</code>
+          <code>在 Legion 安装目录运行：node scrum/serve.mjs --port 4820</code>
           <br />
           2. 换数据源：刷新页面后加 <code>?api=http://其他主机:4820</code>
         </div>

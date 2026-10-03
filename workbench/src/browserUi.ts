@@ -54,7 +54,7 @@ export function errorText(r: { code?: string; error?: string; retryAfterSec?: nu
   if (code === 'concurrency_limited') return '⏳ 同时进行的抓取太多：' + (r.error ?? '请等前一个抓取结束') + `（${retryAfterText(r.retryAfterSec)}）`
   if (code === 'daily_quota_exceeded') return '📊 今日抓取流量已用完：' + (r.error ?? '明日自动重置')
   // P2-8③ 截图：三态都可行动
-  if (code === 'shot_disabled') return '📷 截图未启用：' + (r.error ?? '需以 DSH_WEB_SHOT_ENABLE=1 启动 serve.mjs')
+  if (code === 'shot_disabled') return '📷 截图未启用：' + (r.error ?? '请在浏览器服务设置中启用截图')
   if (code === 'shot_unavailable') return '📷 截图不可用：' + (r.error ?? '未找到 Edge/Chrome')
   if (code === 'shot_busy') return '📷 截图忙碌：' + (r.error ?? '请稍后重试')
   if (code === 'shot_failed') return '📷 截图失败：' + (r.error ?? '浏览器未产出图片')
@@ -184,7 +184,7 @@ export function shortUrlText(u: string): string {
 /** 截图按钮文案与可用性：未启用/未找到浏览器时按钮禁用并说明原因（不让人点了才知道）。 */
 export function shotButtonView(st?: WebShotStatus | null): { label: string; disabled: boolean; hint: string; tone: 'ok' | 'warn' | 'muted' } {
   if (!st) return { label: '📷 截图', disabled: true, hint: '截图能力状态未知（serve.mjs 未响应 /api/web/meta）', tone: 'muted' }
-  if (!st.enabled) return { label: '📷 截图（未启用）', disabled: true, hint: st.hint || '需以 DSH_WEB_SHOT_ENABLE=1 启动 serve.mjs', tone: 'muted' }
+  if (!st.enabled) return { label: '📷 截图（未启用）', disabled: true, hint: st.hint || '请在浏览器服务设置中启用截图', tone: 'muted' }
   if (!st.available) return { label: '📷 截图（无浏览器）', disabled: true, hint: st.hint || '未找到 Edge/Chrome', tone: 'warn' }
   return { label: '📷 截图', disabled: false, hint: `将用本机 ${st.browser ?? '浏览器'} 以 headless 方式截图（会真实启动浏览器进程）`, tone: 'ok' }
 }

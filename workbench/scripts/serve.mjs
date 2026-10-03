@@ -37,6 +37,7 @@ import { fileURLToPath } from 'node:url'
 import { buildGithubTarballUrl, scanSkillDirs, sanitizeSkillId } from './skillImporter.mjs'
 import { loadConfig } from '../../packages/shared/src/config.mjs'
 import { SCHEMA as CONFIG_SCHEMA } from './config-schema.mjs'
+import { checkDesktopRequest, createLocalBrowserAuth } from '../../product/local-auth.mjs'
 import { forwardDshModels } from './dsh-models-bridge.mjs'
 
 // ── P3-2 统一配置：核心项（host/port/token/静态根/hub 上游）经统一引擎解析 ──
@@ -67,6 +68,8 @@ for (let i = 2; i < process.argv.length; i += 1) {
 }
 const port = CFG.values.port
 const host = CFG.values.host
+if (CFG.values.desktopMode && (!CFG.values.token || host !== '127.0.0.1')) throw new Error('DESKTOP_AUTH_REQUIRED')
+const browserAuth = createLocalBrowserAuth(CFG.values.token ?? '')
 /** 启动时打印的脱敏配置摘要（token 只显示是否设置）。 */
 export function configSummaryLine() {
   return `${CFG.summary} staticRoot=${ROOT}`
@@ -2605,6 +2608,11 @@ function routeRequest(req, res) {
   let pathname
   try { pathname = decodeURIComponent(url.pathname) } catch { httpErr(res, 400, 'bad request：路径含畸形 percent-encoding，已拒绝'); return }
   if (pathname.includes('\0')) { httpErr(res, 400, 'bad request：路径含非法字符（NUL）'); return }
+  if (CFG.values.desktopMode) {
+    browserAuth(req, res, { document: !(pathname === '/api' || pathname.startsWith('/api/') || pathname === '/hub' || pathname.startsWith('/hub/')) })
+    const failure = checkDesktopRequest(req, CFG.values.token, { requireToken: pathname === '/api' || pathname.startsWith('/api/') || pathname === '/hub' || pathname.startsWith('/hub/') })
+    if (failure) { sendJson(res, failure.status, { code: failure.code }); return }
+  }
   if (pathname === '/api/dsh-models') {
     if (!isLoopback(req)) { httpErr(res, 403, '模型配置仅限本机访问'); return }
     if (req.method !== 'POST') { httpErr(res, 405, 'method not allowed'); return }
@@ -2625,7 +2633,8 @@ function routeRequest(req, res) {
     const up = new URL((process.env.DSH_HUB_UPSTREAM ?? 'http://127.0.0.1:8787') + pathname.slice(4) + qs)
     const proxyReq = request({
       hostname: up.hostname, port: up.port, path: up.pathname + up.search,
-      method: req.method, headers: { ...req.headers, host: up.host },
+      method: req.method, headers: { ...req.headers, host: up.host,
+        ...(CFG.values.desktopMode ? { ...hubAuthHeaders(), ...(req.headers.origin ? { origin: up.origin } : {}) } : {}) },
     }, (upRes) => {
       try {
         res.writeHead(upRes.statusCode, upRes.headers)

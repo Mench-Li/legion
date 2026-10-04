@@ -1046,6 +1046,62 @@ test('★★★ 补丁层成对表缺失 → 预检拦（这是"每一次真实�
   assert.notEqual(okResult.reachedStep, 'recheck', `给了成对表仍然停在预检：${okResult.reason}`)
 })
 
+test('★★★ 磁盘读数缺失 → 预检拦（第三个"判据的输入没有生产方"）', async (t) => {
+  // 预检在 `stage: 'pre-switch'` 跑，而那一档对没有磁盘读数的处置是
+  // `unknown` → 拦。桌面上此前从不传 `freeBytes`，于是每一次真实安装都
+  // 停在 `preflight-disk-unobserved`。
+  //
+  // ⚠️ 每一次事务都要用**新的** setup：成功走到屏障之后会留下活动描述符，
+  //    同一个 ctx 里的下一次调用会先撞上 `install-busy`。
+  const noReadingCtx = setup(t)
+  const noReading = await runInstallTransaction({
+    ...baseArgs(noReadingCtx, effects()), freeBytes: null,
+  })
+  assert.equal(noReading.ok, false, '没有磁盘读数却放行了安装')
+  assert.equal(noReading.reachedStep, 'recheck')
+  const disk = noReading.preflight.checks.find((c) => c.check === 'disk')
+  assert.equal(disk.verdict, 'unknown')
+  assert.equal(disk.code, 'preflight-disk-unobserved')
+
+  // 给了足够的读数就过（否则这条只证明了"什么都拦"）。
+  const enoughCtx = setup(t)
+  const withReading = await runInstallTransaction({
+    ...baseArgs(enoughCtx, effects()), freeBytes: 10 ** 12,
+  })
+  assert.notEqual(withReading.reachedStep, 'recheck', `给了磁盘读数仍然停在预检：${withReading.reason}`)
+
+  // ★ 空间真的不够时必须拦（读数不能只是"有就行"）。
+  const smallCtx = setup(t)
+  const tooSmall = await runInstallTransaction({
+    ...baseArgs(smallCtx, effects()), freeBytes: 1024,
+  })
+  assert.equal(tooSmall.ok, false, '空间不足却放行了安装')
+  assert.equal(tooSmall.reachedStep, 'recheck', `空间不足没有停在预检：${tooSmall.reachedStep}/${tooSmall.code}`)
+  const blocked = tooSmall.preflight.checks.find((c) => c.check === 'disk')
+  assert.equal(blocked.verdict, 'blocked')
+})
+
+test('★★ 包描述符**不能**当作 `package` 传进预检（一个看起来正确的错修）', async (t) => {
+  // `install.mjs` 的 `pkg` 参数要的是**包内那份独立签名的清单**
+  // （`legion-package.json`），不是发行清单里的 `release.package`。
+  //
+  // 把 `release.package` 传进去的后果是：`verifyPackage` 会跑起来，
+  // 报 `signature.verdict === 'unsigned'`，而 `requireSignature` 为假
+  // ⇒ 结论 `unsigned`（**不拦**）。也就是"看起来补上了签名校验"，实际
+  // 是让一个永远不会通过的校验跑一遍再忽略它。
+  const ctx = setup(t)
+  const args = baseArgs(ctx, effects())
+  const result = await runInstallTransaction({ ...args, package: args.release.package })
+  // 关键读数：verification 存在，但它的 verdict 是 `unsigned` 而不是
+  // `verified` —— 它**没有**为"包被签名"提供任何证据。
+  const verification = result.verification ?? result.recheck?.verification
+  if (verification !== undefined) {
+    assert.notEqual(verification.verdict, 'verified',
+      '把 release.package 当 pkg 传进去竟然得到了 verified：这说明两者形状相同，'
+      + '而它们不是同一个东西，形状相同只会让这个错修更难被发现')
+  }
+})
+
 test('helper：调用面缺字段一律拒绝', () => {
   assert.equal(validateInvocation({}).ok, false)
   assert.equal(validateInvocation({

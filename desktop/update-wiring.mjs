@@ -22,8 +22,8 @@
 //      而不是假装成功（"假装成功"的代价是用户以为升级了）。
 // ============================================================================
 
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, readFileSync, readdirSync, statSync, statfsSync } from 'node:fs'
+import { dirname as dirnameFn, join } from 'node:path'
 
 import { loadUpdateConfig } from '../product/update/config.mjs'
 import { createUpdateClient } from '../product/update/client.mjs'
@@ -339,6 +339,88 @@ export async function readPendingTasks({ bridge = null, timeoutMs = null } = {})
 }
 
 /**
+ * 读某个路径所在卷的**可用字节数**（预检的磁盘判据需要的读数）。
+ *
+ * ★ 这是第三个"判据的输入没有生产方"的地方。
+ *
+ *   预检在 `stage: 'pre-switch'` 跑，而那一档对**没有磁盘读数**的处置是
+ *   `unknown` → 拦（`preflight.mjs` 的 `diskNoReadingAtPreSwitch`）。
+ *   桌面上此前从不传 `freeBytes`，于是 `freeBytes: null` 的结论是
+ *   `preflight-disk-unobserved` —— **每一次真实安装都停在预检上**。
+ *   （前两个是 ⑪ 在途任务、⑫ 补丁层成对表。）
+ *
+ * ★ 读不到时返回 `null`，**不返回一个乐观的估计值**。
+ *   `null` → 预检判"没有磁盘读数" → 拦。一个"估一个很大的数让预检过去"
+ *   的实现会把一次必然写一半就没空间的升级放行——而**写到一半**正是最坏的
+ *   时刻：程序已经换了一半，数据库可能已经迁移。
+ *
+ * 目录还不存在时向上找到最近的已存在祖先：安装目录刚被删掉/还没建好时，
+ * 我们要回答的是"**将要**放这些东西的那个卷还有多少空间"。
+ */
+export function readFreeBytes(targetPath, {
+  statfs = statfsSync, exists = existsSync, dirname = dirnameFn, maxDepth = 32,
+} = {}) {
+  if (typeof targetPath !== 'string' || targetPath === '') return null
+  let current = targetPath
+  for (let depth = 0; depth < maxDepth; depth += 1) {
+    if (exists(current)) {
+      try {
+        const stats = statfs(current)
+        // `bavail` 是"非特权用户可用块数"，`bsize` 是块大小。
+        // 用 `bavail` 而不是 `bfree`：后者含保留块，报出来的数字会**大于**
+        // 我们真正能写的量，方向是错的。
+        const available = Number(stats?.bavail) * Number(stats?.bsize)
+        if (!Number.isSafeInteger(available) || available < 0) return null
+        return available
+      } catch {
+        return null
+      }
+    }
+    const parent = dirname(current)
+    if (parent === current) return null
+    current = parent
+  }
+  return null
+}
+
+/**
+ * 目录树的总字节数（预检算磁盘余量用）。
+ *
+ * ★ 读不到就返回 **0**，不是 `null`：预检的 `backupBytes`/`dataDirBytes`
+ *   是"再要多少空间"的**加数**，而没有读数在那里等价于 0（基准是
+ *   `freeBytes` 与包大小）。返回 `null` 会让 `requiredBytes` 算出 `NaN`，
+ *   而 `NaN` 的比较全部为假 —— 一次"余量检查静默通过"。
+ *
+ * 不递归跟随符号链接：跟随会让一次统计走到别的卷上，从而算出一个与
+ * 本次安装无关的数字。
+ */
+export function directoryBytes(root, {
+  exists = existsSync, readdir = readdirSync, stat = statSync,
+  maxEntries = 200_000,
+} = {}) {
+  if (typeof root !== 'string' || root === '' || !exists(root)) return 0
+  let total = 0
+  let seen = 0
+  const walk = (dir) => {
+    if (seen > maxEntries) return
+    let entries
+    try { entries = readdir(dir, { withFileTypes: true }) } catch { return }
+    for (const entry of entries) {
+      seen += 1
+      if (seen > maxEntries) return
+      const absolute = join(dir, entry.name)
+      try {
+        if (entry.isSymbolicLink()) continue
+        if (entry.isDirectory()) { walk(absolute); continue }
+        if (entry.isFile()) total += Number(stat(absolute)?.size) || 0
+      } catch { /* 单个条目读不到就跳过：一个统计不该因为一个文件而失败 */ }
+    }
+  }
+  walk(root)
+  return Number.isSafeInteger(total) && total >= 0 ? total : 0
+}
+
+/**
  * 校验签过名发行清单里的补丁层成对表。
  *
  * ★ 为什么在最严的地方还要再校验一次形状。
@@ -526,6 +608,54 @@ export function buildDesktopInstaller({
         //   `normalizeTaskReadings` 还会保留归一化失败的条目（不丢），
         //   因为"丢掉它然后报没有活跃任务"会让升级踩着一条读不懂的记录开始。
         tasks: normalizeTaskReadings(effectiveTasks).tasks,
+        // ★ 磁盘读数（第三个"判据的输入没有生产方"的地方）。
+        //   不传它 → `preflight-disk-unobserved` → pre-switch 挡下**每一次**安装。
+        //   读不到就传 `null`（仍然拦），而不是估一个乐观的数。
+        freeBytes: readFreeBytes(installRoot),
+        // 备份与数据目录的字节量：预检按"最坏情况"算余量
+        // （旧版本 + 新版本 + 备份 + 解压临时文件），所以这两个数是 **0**
+        // 时余量估计偏小 —— 方向是危险的（可能放行一次写到一半没空间的升级）。
+        // 用实际目录大小，读不到就 0（保持与不传一致，并且 preflight 的
+        // 主要判据仍由 `freeBytes` 承担）。
+        /**
+         * ★ **刻意不传** `package` / `publicKeyPem`。
+         *
+         *   看起来这两处是缺口（`install.mjs` 的 `if (pkg !== null)` 分支整个
+         *   跳过，而 `publicKeyPem === null` 会让 `requireSignature` 算成
+         *   `false`，于是"未签名"被判成 `unsigned` 而不是 `rejected`）。
+         *   但它们**不是**可以在这里补上的东西，而且补错了比不补更坏：
+         *
+         *   `install.mjs` 的 `pkg` 参数要的是**包内那份独立签名的清单**
+         *   （`legion-package.json`，由 `package.mjs` 的 `verifyPackage` 读），
+         *   而**不是**发行清单里的 `release.package`（那个描述符只有
+         *   `path`/`sizeBytes`/`sha256`[/闭包字段]，**没有 `signature`**）。
+         *
+         *   把 `release.package` 当作 `pkg` 传进去的后果是：
+         *   `verifyPackage` 会跑起来，然后报 `signature.verdict === 'unsigned'`
+         *   →（因为 `requireSignature` 为假）→ 结论 `unsigned`，**不拦**。
+         *   也就是说：一个看起来"补上了签名校验"的改动，实际做的是让一个
+         *   永远不会通过的校验跑一遍，然后把它不通过的事实忽略掉。
+         *   `update-wiring.test.mjs` 有一条断言守着这一点。
+         *
+         *   而桌面这条路上的**主完整性链是完整的**，只是不在这个参数上：
+         *
+         *     签名发行清单（`release.package.sha256` 在签名覆盖的字节里）
+         *       → 下载时 `transport` 按 `expectedSha256` 校验
+         *       → 安装前 `install.mjs` 的 recheck **重新算一遍**包摘要并比对
+         *
+         *   缺的是纵深那一层（包自己那份清单没有被核对），它需要先把包解开
+         *   才能读到 `legion-package.json`——那是解压阶段（第 7 步）的职责，
+         *   而解压阶段现在的证据是 `closure.json` 的逐文件摘要（见 ⑩）。
+         */
+
+        /**
+         * 备份与数据目录的字节量：预检按"最坏情况"算余量
+         * （旧版本 + 新版本 + 备份 + 解压临时文件）。这两个数是 **0** 时
+         * 余量估计偏小 —— 方向是危险的（可能放行一次写到一半没空间的升级），
+         * 所以按实际目录大小算。
+         */
+        backupBytes: directoryBytes(join(dataDir, 'backups')),
+        dataDirBytes: directoryBytes(dataDir),
         stopClaiming: () => runner.forward('stop-claiming'),
         drainInFlight: async () => {
           const status = await runner.forward('status')
@@ -755,6 +885,29 @@ export async function selfCheckWiringAsync() {
   if (!Array.isArray(partiallyBad) || partiallyBad.length !== 1) {
     problems.push(`坏项没有被精确丢掉：${JSON.stringify(partiallyBad)}`)
   }
+
+  // ★ 磁盘读数（第三个"判据的输入没有生产方"的地方）。
+  //   本机一定读得到当前目录所在的卷。
+  const free = readFreeBytes(process.cwd())
+  if (!Number.isSafeInteger(free) || free < 0) problems.push(`读不出本机可用空间：${free}`)
+  // 不存在的路径要向上找已存在的祖先（回答"将要放这些东西的卷还有多少"）。
+  if (!Number.isSafeInteger(readFreeBytes(join(process.cwd(), 'no-such-dir-xyz', 'deeper')))) {
+    problems.push('不存在的路径没有向上找到已存在的祖先')
+  }
+  // 读不到时必须是 `null`（预检判"没有磁盘读数"→ 拦），不是乐观的估计值。
+  if (readFreeBytes('') !== null) problems.push('空路径没有返回 null')
+  if (readFreeBytes(null) !== null) problems.push('null 路径没有返回 null')
+  const failingStatfs = readFreeBytes(process.cwd(), { statfs: () => { throw new Error('nope') } })
+  if (failingStatfs !== null) problems.push('statfs 抛错时没有返回 null（会放行一次没空间的升级）')
+  const zeroStatfs = readFreeBytes(process.cwd(), { statfs: () => ({ bavail: 0, bsize: 4096 }) })
+  if (zeroStatfs !== 0) problems.push(`零可用空间读成了 ${zeroStatfs}`)
+  const oddStatfs = readFreeBytes(process.cwd(), { statfs: () => ({ bavail: 'x', bsize: 4096 }) })
+  if (oddStatfs !== null) problems.push('非数值的块数没有返回 null')
+
+  // 目录字节数：读不到返回 0（不是 null —— 它是余量的**加数**，null 会算出 NaN）。
+  if (directoryBytes('C:\\definitely-not-here') !== 0) problems.push('不存在的目录没有返回 0')
+  if (directoryBytes(null) !== 0) problems.push('null 目录没有返回 0')
+  if (directoryBytes(process.cwd()) <= 0) problems.push('当前目录的字节数应当大于 0')
 
   return Object.freeze({ ok: problems.length === 0, problems: Object.freeze(problems) })
 }

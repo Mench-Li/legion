@@ -241,6 +241,35 @@ describe('远程 Agent 通道接线', () => {
     const body = await res.json()
     assert.equal(body.code, 'REMOTE_AUTH_MISSING')
   })
+
+  it('手机端页面**免鉴权**可取（否则用户拿不到那个能让他登录的页面）', async () => {
+    // ★ 静态资源排在门禁**之前**。把登录页也挡在门禁后面是一个死锁：
+    //   页面需要令牌才能取，而令牌要靠页面才能拿到。
+    const page = await fetch(`${base}/mobile/`)
+    assert.equal(page.status, 200)
+    assert.match(page.headers.get('content-type'), /text\/html/)
+    const html = await page.text()
+    assert.match(html, /Legion/)
+
+    const script = await fetch(`${base}/mobile/app.mjs`)
+    assert.equal(script.status, 200)
+    assert.match(script.headers.get('content-type'), /javascript/)
+
+    const manifest = await fetch(`${base}/mobile/manifest.webmanifest`)
+    assert.equal(manifest.status, 200)
+
+    // 页面可取不等于 API 开放：同一时刻业务端点仍然要令牌。
+    const board = await fetch(`${base}/api/board?scope=software`)
+    assert.equal(board.status, 401)
+  })
+
+  it('手机端静态资源不能读到目录外（经真实 Hub 也一样）', async () => {
+    const res = await fetch(`${base}/mobile/../server.mjs`, { redirect: 'manual' })
+    // fetch 会规范化 `..`，所以真正到达服务端的可能是 `/server.mjs`（404 兜底）
+    // 或原样路径（403）。两种都可接受，**不可接受**的是把源码吐出来。
+    const text = await res.text()
+    assert.ok(!text.includes('createUserStore'), '不应读到 Hub 源码')
+  })
 })
 
 describe('远程通道默认关闭', () => {

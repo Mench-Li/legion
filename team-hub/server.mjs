@@ -7529,6 +7529,7 @@ function routeHarnessForTask(input) {
 // 见 `team-hub/remote-auth.mjs` 文件头。
 // ════════════════════════════════════════════════════════════════════════════
 import { createIdentityRoutes } from './routes/identity.mjs'
+import { createMobileRoutes } from './routes/mobile.mjs'
 import { createUserStore } from './user-store.mjs'
 import { createDeviceStore } from './device-store.mjs'
 import { createNodeGateway } from './node-gateway.mjs'
@@ -7608,6 +7609,12 @@ if (REMOTE_AGENT_ENABLED) {
       },
     })
   }
+
+  // 手机端静态资源**排在门禁之前**：它是页面本身（HTML/JS/图标），
+  // 而鉴权发生在页面发出的 API 调用上。把登录页也挡在门禁后面，
+  // 用户就永远拿不到那个能让他登录的页面。
+  // 位置最后 unshift ⇒ 数组最前 ⇒ 最先派发。
+  router.families.unshift(createMobileRoutes({ root: join(ROOT, 'workbench', 'mobile') }))
 
   nodeGateway.attach(server)
 }

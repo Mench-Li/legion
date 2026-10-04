@@ -115,6 +115,8 @@ export const SCHEMA = defineSchema({
     'NODE_CAPABILITY_MISSING', 'NODE_FRAME_BUILD_FAILED', 'NODE_HELLO_REQUIRED', 'NODE_HELLO_TIMEOUT',
     'NODE_ID_MISMATCH', 'NODE_LEASE_NOT_OWNED', 'NODE_STORE_REJECTED', 'NODE_VERSION_REJECTED',
     'REMOTE_AUTH_EXPIRED', 'REMOTE_AUTH_INVALID', 'REMOTE_AUTH_MISSING',
+    // 手机端静态路由（`routes/mobile.mjs`）的拒绝原因；不是环境变量。
+    'BAD_PATH', 'OUT_OF_ROOT', 'TYPE_NOT_SERVED',
     // 运行面（PRT-302/303/313）的具名错误码，来自 team-hub/run-store.mjs 的 RUN_ERRORS。
     // 逐个登记而不是加前缀通配：这份清单的价值在于「每一条都被看过一次」。
     'WORKER_REQUIRED', 'EPOCH_REQUIRED', 'BAD_LEASE_TTL', 'ATTEMPT_NOT_FOUND',

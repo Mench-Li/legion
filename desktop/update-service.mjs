@@ -167,7 +167,10 @@ export function projectState(snapshot) {
     releaseNotes: typeof snapshot?.releaseNotes === 'string' ? snapshot.releaseNotes.slice(0, 64 * 1024) : null,
     releaseNotesUnavailableReason: typeof snapshot?.releaseNotesUnavailableReason === 'string'
       ? snapshot.releaseNotesUnavailableReason : null,
-    pendingTasks: snapshot?.pendingTasks ?? null,
+    // ★ 这里**没有** `pendingTasks`（早先投影的是快照里一个恒为 `null` 的字段）。
+    //   在途任务的**展示**读数走独立的 `update.tasks`（它由主进程实时去读），
+    //   而**判据**读数在安装那一刻由主进程再读一次——两者都不来自快照。
+    //   在快照里放一个恒 null 的同名字段，只会让人以为它才是那个来源。
     progress: progress === null ? null : Object.freeze({
       phase: typeof progress.phase === 'string' ? progress.phase : null,
       bytes: Number.isSafeInteger(progress.bytes) ? progress.bytes : 0,

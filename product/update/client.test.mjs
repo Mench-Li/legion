@@ -618,8 +618,11 @@ test('安装事务接线后：按阶段驱动状态机，提交落到 committed'
   const ctx = setup()
   t.after(() => rmSync(ctx.cacheDir, { recursive: true, force: true }))
   const stages = []
+  const installerCalls = []
   const installer = {
-    async install({ onStage, identity }) {
+    async install(args) {
+      installerCalls.push(args)
+      const { onStage, identity } = args
       for (const stage of ['waiting-for-tasks', 'preparing', 'installing', 'validating', 'committed']) {
         stages.push(stage)
         onStage(stage)
@@ -637,11 +640,15 @@ test('安装事务接线后：按阶段驱动状态机，提交落到 committed'
   })
   const check = await client.check()
   await client.download(check.candidate.releaseId, check.candidate.manifestSha256)
-  const result = await client.install(check.candidate.releaseId, check.candidate.manifestSha256,
-    { pendingTasks: [{ id: 't1', state: 'running' }] })
+  // ★ 不传在途任务读数：`install` **没有**这个参数（见 `client.mjs` 的注释——
+  //   那个读数必须由主进程在按下安装的那一刻自己去读，不能由调用方提供）。
+  const result = await client.install(check.candidate.releaseId, check.candidate.manifestSha256)
   assert.equal(result.ok, true, result.reason)
   assert.deepEqual(stages, ['waiting-for-tasks', 'preparing', 'installing', 'validating', 'committed'])
   assert.equal(client.state(), 'committed')
+  // 而 installer 收到的入参里没有任务读数（透传那条路已经不存在了）。
+  assert.equal('pendingTasks' in installerCalls.at(-1),
+    false, 'install 把任务读数透传给了安装事务：那意味着调用方能决定预检的结论')
 })
 
 test('安装事务失败在切换后：落到 rolled-back / recovery-required', async (t) => {

@@ -180,7 +180,14 @@ export function createUpdateClient({
       releaseNotes: releaseNotes === null ? null : releaseNotes.text,
       releaseNotesUnavailableReason: releaseNotes === null ? null : releaseNotes.reason,
       snoozedUntilMs,
-      pendingTasks: null,
+      /**
+       * ★ 这里**没有** `pendingTasks`（早先是硬编码的 `null`）。
+       *
+       *   一个恒为 `null` 的字段读起来像"这个读数还没拿到"，而实际上是
+       *   "这个读数**不从这里来**"——在途任务由主进程在按下安装的那一刻
+       *   通过 bridge 去读（见 `install` 的注释）。留着这个字段会让下一个
+       *   读代码的人往"把它接上"的方向走，而正确方向是"它不该在这里"。
+       */
       operationId: activeDownload === null ? null : activeDownload.operationId,
     })
   }
@@ -572,8 +579,20 @@ export function createUpdateClient({
    * 输入是身份（设计 §7 line 159：「releaseId + manifestDigest，匹配已就绪包
    * 与用户确认」），并且必须先有 `readyIdentity`——也就是**用户已经确认过
    * 下载完之后**才可能发生的动作。
+   *
+   * ★ **不接受**在途任务读数，这是刻意的。
+   *
+   *   那个读数是预检的**输入**（`[]` → 放行、`null` → 拦），所以它的来源
+   *   决定了这次升级安不安全。它必须由**主进程**在按下安装的那一刻去读
+   *   （它有 bridge 与 team-hub 的端口），而不是由调用方传进来——一个能传
+   *   数组的调用方就能把"任务正在跑"说成"没有任务"。
+   *
+   *   早先这里有一个 `pendingTasks` 参数，一路透传到 `installer.install`，
+   *   而 `installer` 那边"给了就用给的"。桌面上那条透传已经拿掉了，但
+   *   **这个参数还在**——于是"接回去"只需要在调用点加一个参数。删掉它，
+   *   那个决定就不再是"没人这么做"，而是"做不到"。
    */
-  async function install(releaseId, manifestDigest, { onProgress = null, signal = null, pendingTasks = null } = {}) {
+  async function install(releaseId, manifestDigest, { onProgress = null, signal = null } = {}) {
     const wanted = Object.freeze({
       releaseId, productVersion: candidate?.productVersion ?? null, channel: config?.channel ?? null,
       platform: config?.host?.platform ?? platform, arch: config?.host?.arch ?? arch,
@@ -598,7 +617,6 @@ export function createUpdateClient({
       identity: readyIdentity,
       release,
       packagePath,
-      pendingTasks,
       signal,
       onProgress: (update) => {
         progress = update === null ? null : Object.freeze({ ...update })

@@ -105,6 +105,24 @@ test('★ helper 闭包与壳闭包的交集只允许是 product/ 下的共享�
   }
 })
 
+test('★ fixtures/ 下的代码**不得**出现在任何打包闭包里', () => {
+  // `stage.mjs` 的打包过滤规则按**目录名**排除 `fixtures`/`tests`。所以
+  // "造恶意归档的样例代码"必须待在这些目录里——否则它会被当成生产代码
+  // 拷进用户的安装包，而那份代码的唯一用途是构造攻击样例。
+  //
+  //   > 一份"只用于测试、但会被打进安装包"的恶意样例构造器，
+  //   > 与一份"忘记排除的调试后门"在安装包里的字节形态上没有区别。
+  const shell = desktopShellClosure({ root: ROOT })
+  const helper = helperClosure({ root: ROOT }).closure
+  for (const path of [...shell, ...helper]) {
+    assert.equal(/(^|\/)(fixtures?|tests?|__tests__|probes)\//.test(path), false,
+      `打包闭包里出现了测试样例代码：${path}`)
+  }
+  // 而且它确实存在（避免这条断言因为"文件被删了"而永远成立）。
+  assert.equal(existsSync(join(ROOT, 'product', 'update', 'fixtures', 'zip.mjs')), true,
+    '样例构造器不见了——如果它被改名或搬走，这条判据要跟着更新')
+})
+
 test('说明符提取器认得四种写法（含 new URL 那种）', () => {
   const source = [
     "import { a } from './a.mjs'",

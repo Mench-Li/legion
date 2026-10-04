@@ -47,6 +47,7 @@
 | §6 退避 15/30/60 分钟 → 6 小时上限 | `describeBackoff` | 阶梯递增与上限夹住 |
 | §6 空闲 60s / 清单 30s / 256 KiB | `transport.mjs` | 边收边判，超限立刻 abort |
 | §6 `.part` 流式下载与原子改名 | `transport.mjs` + `cache.mjs` | 改名**在验签之后**，由调用方显式提交 |
+| §6 解压前后校验闭包、拒越界/链接/重复/炸弹/未知可执行 | `product/update/extract.mjs` | 25 条用例，含**语法合法但恶意**的归档（自带 ZIP 构造器） |
 | §6 重启后复用前重新校验 | `cache.verifyReady` | 篡改缓存文件的用例证明它真的重算摘要 |
 | §6 取消不影响当前程序 | `cache.discard` | 只删 `.part`；取消不进失败退避 |
 | §7 有界操作表 | `desktop/update-service.mjs` + `update-preload.cjs` | 17 条 IPC 面用例：路径/URL/多余字段一律拒 |
@@ -129,9 +130,10 @@
 - **没有生产 HTTPS 入口**。设计 §11 的"部署时填写"（域名、存储供应商、
   签名发布者、公钥、责任人）仍未填写；仓库里只有
   `product/release/update-config.example.json` 与 `update-trust.example.json`。
-- **helper 的 `unpack` 未接线**。解压 ZIP 到版本目录需要与桌面打包闭包
-  对齐，目前 helper 会明确报 `helper-unpack-failed`（也就是"没有假装完成"）
-  而不是切换一个不完整的版本目录。
+- **helper 的打包闭包已接线，`unpack` 已用真实实现**（`extract.mjs`：
+  越界路径/软链接/重复目标/解压炸弹/未知可执行五条判据，解压前后各核一次
+  闭包）。仍未验证的是**真实发行包的 ZIP 形状**——发布端目前产出的 ZIP 由
+  外部打包含成，没有一次"上传 → 下载 → 解压 → 切换"的真机端到端。
 - **健康探针未接线**。`healthProbe` 是一个函数，跨不过进程边界，必须由
   helper 在进程内构造；目前留空。接线之前 helper 的行为是**不提交**
   （`helper-health-unverified` → 尝试回退程序）：设计 §8 第 8–9 步要求

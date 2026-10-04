@@ -22,8 +22,8 @@ import { fileURLToPath } from 'node:url'
 
 const EXPECTED_MODULES = Object.freeze([
   'barrier', 'cache', 'canonical', 'client', 'config', 'credential', 'envelope',
-  'errors', 'feed', 'helper', 'host', 'index', 'install', 'journal', 'release',
-  'schedule', 'semver', 'state', 'transport',
+  'errors', 'extract', 'feed', 'helper', 'host', 'index', 'install', 'journal',
+  'release', 'schedule', 'semver', 'state', 'transport',
 ])
 
 /** 模块 → 它导出的自检结论名。 */
@@ -40,6 +40,7 @@ const CHECKED_EXPORTS = Object.freeze({
   state: 'STATE_CHECKED',
   config: 'CONFIG_CHECKED',
   errors: 'ERRORS_CHECKED',
+  extract: 'EXTRACT_CHECKED',
   journal: 'JOURNAL_CHECKED',
   barrier: 'BARRIER_CHECKED',
   credential: 'CREDENTIAL_CHECKED',
@@ -87,6 +88,7 @@ test('自检结论本身是检查过的（不是恒真的占位）', async () =>
     schedule: (c) => Array.isArray(c.sample.ladder) && c.sample.ladder.length === 3,
     state: (c) => c.sample.chainLength >= 11,
     install: (c) => c.steps.length >= 8,
+    extract: (c) => c.executableExtensions >= 15,
   })
   for (const [name, predicate] of Object.entries(requirements)) {
     const mod = await import(new URL(`./${name}.mjs`, import.meta.url))

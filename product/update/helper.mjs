@@ -38,10 +38,12 @@ import { consumeCredential, destroyCredential, isOutsideSwitchTarget, verifyProg
 import { createJournal } from './journal.mjs'
 import { readBarrier, releaseBarrier } from './barrier.mjs'
 import { helperReportPath, writeHelperReport } from './install.mjs'
+import { extractArchive, verifyExtractedTree } from './extract.mjs'
 import { activateVersion, installLayout, listInstalledVersions, probeHealth, readActivePointer, rollbackUpgrade } from '../upgrade/switchover.mjs'
 import { planRetention, restoreSnapshot, listSnapshots } from '../upgrade/backup.mjs'
 import { runMigrations } from '../upgrade/migration.mjs'
 import { hashFile } from '../upgrade/package.mjs'
+import { readFileSync as readFileSyncDefault } from 'node:fs'
 
 export const HELPER_PROTOCOL = 'legion/update-helper@1'
 
@@ -65,7 +67,14 @@ export const HELPER_CODES = Object.freeze({
 
 /** helper 需要的全部注入点。默认实现是"真的去做"，测试里换成替身。 */
 const DEFAULT_EFFECTS = Object.freeze({
-  unpack: null,
+  /**
+   * 解压目标版本目录（设计 §6 line 142 + §8 第 7 步）。
+   *
+   * 默认实现是**真的**解压：读包 → 过五条拒绝判据 → 写进版本目录 →
+   * 解压之后再核一次闭包。发布端由我们自己控制，所以这里不需要"可插拔"，
+   * 需要的是"判据一定在"。注入点仍然保留（测试要能按需制造解压失败）。
+   */
+  unpack: defaultUnpack,
   /** 由 helper **自己**在进程内构造迁移存储（活的数据库句柄跨不过进程边界）。 */
   createMigrationStore: null,
   runMigrationsImpl: runMigrations,
@@ -77,6 +86,45 @@ const DEFAULT_EFFECTS = Object.freeze({
   hashFileImpl: hashFile,
   now: () => Date.now(),
 })
+
+/**
+ * 默认解压实现。
+ *
+ * 返回的 `closure` 用来在**解压之后**再核一次目录内容——设计 §6 要求
+ * "解压前后校验闭包"，而两次校验回答的是不同的问题：
+ *
+ *   · 解压**前**：这个归档允不允许展开（越界/链接/重复/炸弹/未知可执行）；
+ *   · 解压**后**：展开出来的东西与计划是否逐字节一致（含"目录里有没有
+ *     上次留下的残留"）。
+ */
+async function defaultUnpack({
+  packagePath, installDir, toVersion, releaseId,
+  closure = null, readFile = readFileSyncDefault, log = () => {},
+} = {}) {
+  const layout = installLayout(installDir)
+  const targetDir = join(layout.versionsDir, toVersion)
+  let archiveBytes
+  try {
+    archiveBytes = readFile(packagePath)
+  } catch (error) {
+    return { ok: false, reason: `读不到升级包 ${packagePath}：${error?.message ?? error}` }
+  }
+  const extracted = extractArchive({ archiveBytes, targetDir, closure })
+  if (extracted.ok !== true) {
+    return { ok: false, reason: `${extracted.code}：${extracted.reason}` }
+  }
+  const verdict = verifyExtractedTree({ targetDir, expected: extracted.written })
+  if (verdict.ok !== true) {
+    return { ok: false, reason: `解压之后的闭包核对失败：${verdict.problems.join('；')}` }
+  }
+  log(`[update-helper] 解压 ${extracted.fileCount} 个文件到 ${targetDir}（releaseId=${releaseId ?? '?'}）`)
+  return {
+    ok: true,
+    detail: `${extracted.fileCount} 个文件 / ${extracted.totalBytes} 字节`,
+    targetDir,
+    digests: extracted.digests,
+  }
+}
 
 /**
  * 跑 helper 主流程。
@@ -192,6 +240,11 @@ export async function runHelper({
         toVersion: transaction.toVersion,
         releaseId: transaction.releaseId,
         expectedSha256: transaction.packageSha256,
+        // 闭包由发布端在发行清单里给出；没有它时 `extractArchive` 仍然会
+        // 拒可执行文件（见 extract.mjs 的注释：一条"没给闭包所以随便进"
+        // 的默认路径会在某次调用方忘了传闭包时静默放行）。
+        closure: Array.isArray(transaction.closure) ? transaction.closure : null,
+        log,
       })
     } catch (error) {
       unpacked = { ok: false, reason: String(error?.message ?? error) }

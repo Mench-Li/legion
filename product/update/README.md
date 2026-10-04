@@ -14,8 +14,8 @@ Legion 桌面端自动更新的协议与客户端。
 协议层    host → release → feed → semver
           "发行的形状对不对，我能不能升上去？"
 
-传输层    transport → schedule → cache
-          "什么时候取、取到哪儿、失败怎么办？"
+传输层    transport → schedule → cache → extract
+          "什么时候取、取到哪儿、失败怎么办、包里的东西能不能展开？"
 
 事务层    state → client → journal → barrier → credential → install → helper
           "谁在什么时候动程序，崩了之后回到哪里？"

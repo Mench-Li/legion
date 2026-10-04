@@ -1,4 +1,4 @@
-// product/update/install.test.mjs
+﻿// product/update/install.test.mjs
 // ============================================================================
 // 安装事务的失败点驱动 —— 设计 §8 的失败表逐行
 //
@@ -730,6 +730,97 @@ test('★ helper：没有探针且回退被拒 → 保持维护模式', async (t
   })
   assert.equal(report.verdict, 'recovery-required')
   assert.equal(readBarrier(ctx.dataDir).blocked, true, '不能自动恢复时把屏障放掉了')
+})
+
+test('★ helper：默认解压实现真的解包，且**解压后**再核一次闭包', async (t) => {
+  // 这一条不替换 `unpack`：它走 `extract.mjs` 的真实实现，验证的是
+  // "第 7 步的解压接上了"这件事——一个永远注入替身的测试不会发现
+  // `defaultUnpack` 根本没被接进去。
+  const ctx = setup(t)
+  const { createHash } = await import('node:crypto')
+  const { writeFileSync } = await import('node:fs')
+  const { makeZipFixture } = await import('./fixtures/zip.mjs')
+
+  const manifest = Buffer.from('{"manifestFormat":"legion/version-manifest@1","productVersion":"1.1.0"}\n', 'utf8')
+  const launcher = Buffer.from('#!/usr/bin/env node\nconsole.log("launcher")\n', 'utf8')
+  const zip = makeZipFixture([
+    { name: 'product/release/runtime-manifest.json', bytes: manifest },
+    { name: 'product/launcher/cli.mjs', bytes: launcher },
+  ])
+  const packagePath = join(ctx.root, 'package.zip')
+  writeFileSync(packagePath, zip)
+  const packageSha256 = createHash('sha256').update(zip).digest('hex')
+
+  // 版本目录布局：`switchover.mjs` 的 `installLayout`。
+  const versionsDir = join(ctx.installDir, 'versions')
+  mkdirSync(versionsDir, { recursive: true })
+
+  acquireBarrier({ dataDir: ctx.dataDir, txnId: 'ut-h2', now: () => NOW })
+  const issued = issueCredential({
+    dataDir: ctx.dataDir, txnId: 'ut-h2', toVersion: NEXT_VERSION,
+    fromVersion: CURRENT_VERSION, releaseId: `rel-${NEXT_VERSION}`,
+    packageSha256, now: () => NOW,
+  })
+  const transaction = {
+    txnId: 'ut-h2', fromVersion: CURRENT_VERSION, toVersion: NEXT_VERSION,
+    releaseId: `rel-${NEXT_VERSION}`, packagePath, packageSha256,
+    closure: [
+      { path: 'product/release/runtime-manifest.json', bytes: manifest.length, sha256: createHash('sha256').update(manifest).digest('hex') },
+      { path: 'product/launcher/cli.mjs', bytes: launcher.length, sha256: createHash('sha256').update(launcher).digest('hex') },
+    ],
+    healthProbe: async () => ({ ok: true }),
+  }
+  const fx = helperEffects({ listInstalledVersionsImpl: () => [CURRENT_VERSION, NEXT_VERSION] })
+  // 用真实的 unpack，但把 `unpack` 从替身里去掉。
+  delete fx.unpack
+  const report = await runHelper({
+    paths: { installDir: ctx.installDir, dataDir: ctx.dataDir, helperDir: join(ctx.root, 'helper') },
+    transaction, credentialSecretHex: issued.secretHex, effects: fx,
+  })
+  assert.equal(report.verdict, 'committed', report.reason)
+  // 文件真的落在版本目录里，而且字节与闭包一致。
+  const extracted = readFileSync(join(versionsDir, NEXT_VERSION, 'product', 'launcher', 'cli.mjs'))
+  assert.deepEqual(extracted, launcher)
+})
+
+test('★ helper：包里有闭包之外的可执行文件 → 解压被拒，不切换指针', async (t) => {
+  const ctx = setup(t)
+  const { createHash } = await import('node:crypto')
+  const { writeFileSync } = await import('node:fs')
+  const { makeZipFixture } = await import('./fixtures/zip.mjs')
+
+  const good = Buffer.from('#!/usr/bin/env node\n', 'utf8')
+  const zip = makeZipFixture([
+    { name: 'product/launcher/cli.mjs', bytes: good },
+    { name: 'product/surprise.exe', bytes: Buffer.from('MZ') },
+  ])
+  const packagePath = join(ctx.root, 'package.zip')
+  writeFileSync(packagePath, zip)
+  const packageSha256 = createHash('sha256').update(zip).digest('hex')
+  mkdirSync(join(ctx.installDir, 'versions'), { recursive: true })
+
+  acquireBarrier({ dataDir: ctx.dataDir, txnId: 'ut-h3', now: () => NOW })
+  const issued = issueCredential({
+    dataDir: ctx.dataDir, txnId: 'ut-h3', toVersion: NEXT_VERSION,
+    fromVersion: CURRENT_VERSION, releaseId: `rel-${NEXT_VERSION}`, packageSha256, now: () => NOW,
+  })
+  const fx = helperEffects()
+  delete fx.unpack
+  const report = await runHelper({
+    paths: { installDir: ctx.installDir, dataDir: ctx.dataDir, helperDir: join(ctx.root, 'helper') },
+    transaction: {
+      txnId: 'ut-h3', fromVersion: CURRENT_VERSION, toVersion: NEXT_VERSION,
+      releaseId: `rel-${NEXT_VERSION}`, packagePath, packageSha256,
+      closure: [{ path: 'product/launcher/cli.mjs', bytes: good.length, sha256: createHash('sha256').update(good).digest('hex') }],
+      healthProbe: async () => ({ ok: true }),
+    },
+    credentialSecretHex: issued.secretHex, effects: fx,
+  })
+  assert.equal(report.verdict, 'rolled-back', report.reason)
+  assert.equal(report.code, 'helper-unpack-failed')
+  assert.match(report.reason, /unknown-executable/)
+  assert.equal(fx.calls.some((c) => Array.isArray(c) && c[0] === 'activate'), false, '解压被拒之后仍然切换了指针')
+  assert.equal(readBarrier(ctx.dataDir).blocked, false)
 })
 
 test('helper：调用面缺字段一律拒绝', () => {  assert.equal(validateInvocation({}).ok, false)

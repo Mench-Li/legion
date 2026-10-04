@@ -68,6 +68,11 @@ export {
   describeBackoff, jitterSeed, planNextCheck, planResumeCatchUp, selfCheckSchedule, withJitter,
 } from './schedule.mjs'
 export { CACHE_CHECKED, CACHE_CODES, PART_SUFFIX, cacheRelativePath, createDownloadCache, selfCheckCache } from './cache.mjs'
+export {
+  BOMB_POLICY, EXECUTABLE_EXTENSIONS, EXTRACT_CHECKED, EXTRACT_CODES, SUPPORTED_METHODS,
+  extractArchive, isInside, looksExecutable, planExtraction, readCentralDirectory, selfCheckExtract,
+  validateEntryName, verifyExtractedTree,
+} from './extract.mjs'
 
 // —— 事务层 ——
 export {
@@ -130,6 +135,7 @@ export async function selfCheckAll() {
     layer('transport', await import('./transport.mjs')),
     layer('schedule', await import('./schedule.mjs')),
     layer('cache', await import('./cache.mjs')),
+    layer('extract', await import('./extract.mjs')),
     layer('state', await import('./state.mjs')),
     layer('config', await import('./config.mjs')),
     layer('errors', await import('./errors.mjs')),
@@ -149,7 +155,7 @@ export async function selfCheckAll() {
 export const UPDATE_MODULES = Object.freeze({
   trust: Object.freeze(['./canonical.mjs', './envelope.mjs']),
   protocol: Object.freeze(['./host.mjs', './release.mjs', './feed.mjs', './semver.mjs']),
-  transport: Object.freeze(['./transport.mjs', './schedule.mjs', './cache.mjs']),
+  transport: Object.freeze(['./transport.mjs', './schedule.mjs', './cache.mjs', './extract.mjs']),
   transaction: Object.freeze([
     './state.mjs', './client.mjs', './journal.mjs', './barrier.mjs',
     './credential.mjs', './install.mjs', './helper.mjs',

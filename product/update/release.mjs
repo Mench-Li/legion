@@ -419,6 +419,27 @@ export function validateRelease(payload, {
       installer: payload.installer,
       notes: payload.notes,
       migrationPlanDigest: payload.migrationPlanDigest,
+      /**
+       * ★ 补丁层成对表**必须出现在这个投影里**。
+       *
+       *   上面那段长注释说明了它是「目标补丁层与 DSH 版本成对」这条判据的
+       *   唯一来源。而第一版**只校验、不携带**：`validateRelease` 逐项检查了
+       *   `payload.dshPatchBindings`，投影里却没有它。于是客户端拿到的
+       *   `release.dshPatchBindings` 是 `undefined`，一路走到
+       *   `patchPairOf(target, null)` → `'unverified'` → 预检 `unknown` →
+       *   **每一次安装仍然被拦**。
+       *
+       *   也就是说：那个字段"加进签名清单"了，但**没有加进客户端会读的那份
+       *   对象**。一个只被校验、不被携带的字段，与一个不存在的字段，在
+       *   调用点上是同一个东西。
+       *
+       *   抓住它的是 `integration.test.mjs` 的全链路用例——各层的单元用例
+       *   都过（夹具自己给了 `patchBindings`），而真实链路上客户端永远给不出。
+       */
+      dshPatchBindings: Object.freeze((payload.dshPatchBindings ?? []).map((binding) => Object.freeze({
+        dshVersion: binding.dshVersion,
+        compositionPatchVersion: binding.compositionPatchVersion,
+      }))),
       rollbackPolicy: payload.rollbackPolicy,
       issuedAt: payload.issuedAt,
       expiresAt: payload.expiresAt,

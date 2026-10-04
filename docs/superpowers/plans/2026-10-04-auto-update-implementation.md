@@ -241,28 +241,51 @@ sha256 没有不动点），所以 `closure.json` 必须**跳过**成员判定�
 的用例，`os.release()` 是 `6.8.0-45-generic`——把"读不出 Windows build"当失败
 会让每一条这样的用例红，而它们测的是别的东西。
 
-## 6.0 一个反复出现的模式（四个缺陷同源）
+**⑮ 迁移计划被静默跳过（fail-open）。** `migrationPlanDigest` 只校验**格式**，
+全仓没有一处拿它去比对；`release.mjs` 的 `BAD_MIGRATION_PLAN` **从未被 emit**；
+桌面侧从不传 `migrations`，于是 `[]` 一路走到 helper，报 `no-migrations` 并
+**提交**。一份声明了迁移计划的发行，它的迁移会被跳过——"升级成功、数据库结构
+从未迁移"，而每一句成功读数都是真的。
 
-⑪、⑫、⑬、⑭ 是同一个模式：**一个判据的输入在真实链路上不存在，而测试夹具
-把它补上了。**（⑧ 的 `{teamHubPort}` 未展开是它的变体。）
+修法：`migrationPlanDigest(migrations)` 可算（摘要覆盖 `up` 的源码，所以
+"版本号没变、实现变了"也会被发现），客户端核对"声明 == 将要执行的集合"，
+不符则 `install-migration-plan-mismatch`。发布端与客户端用**同一个函数**。
 
-| # | 判据 | 缺的读数 | 症状 |
-|---|---|---|---|
-| ⑪ | 在途任务 | `tasks` 没有生产方，词表还与真实词表不相交 | 接上也永久拦 |
-| ⑫ | 补丁层成对 | `dshPatchBindings` 连**载体**都没有 | 每次安装停在 `preflight-patch-pair-unverified` |
-| ⑬ | 磁盘余量 | `freeBytes` 从不传 | 每次安装停在 `preflight-disk-unobserved` |
-| ⑭ | Windows 版本 | `minWindowsBuildRequired` 无调用方、`windowsBuild` 是死参数 | 门禁**从未生效**（fail-open） |
+**⑯ `checkOnStartup` 被静默忽略（fail-open）。** 这个键在 `config.mjs` 的
+JSON 示例里是文档化的、被解析、被给默认值，而**全仓没有消费者**：用户关掉
+自动检查之后，首次检查与每 6 小时的周期检查照常发出网络请求。
+
+修法：`createCheckScheduler({ automatic })` 在 `automatic === false` 时
+**不安排任何定时器**，并把 `automatic` 与"自动检查已关闭"作为**读数**报出来
+（界面要能说出"为什么什么都没安排"）；手动检查不受影响。
+
+## 6.0 一个反复出现的模式（六个缺陷同源）
+
+⑪、⑫、⑬、⑭、⑮、⑯ 是同一个模式：**一个判据（或一个承诺）需要一个读数，
+而那个读数在真实链路上不存在。**（⑧ 的 `{teamHubPort}` 未展开是它的变体。）
+
+| # | 判据 / 承诺 | 缺的读数 | 症状 | 方向 |
+|---|---|---|---|---|
+| ⑪ | 在途任务 | `tasks` 无生产方，且词表与真实词表**交集为空** | 接上也永久拦 | fail-closed |
+| ⑫ | 补丁层成对 | `dshPatchBindings` 连**载体**都没有 | 每次安装停在 `patch-pair-unverified` | fail-closed |
+| ⑬ | 磁盘余量 | `freeBytes` 从不传 | 每次安装停在 `disk-unobserved` | fail-closed |
+| ⑭ | Windows 版本 | `minWindowsBuildRequired` 无调用方、`windowsBuild` 是死参数 | 门禁**从未生效** | **fail-open** |
+| ⑮ | 迁移计划 | `migrationPlanDigest` 无人比对，`migrations` 从不传；`BAD_MIGRATION_PLAN` 从未 emit | 迁移被**静默跳过** | **fail-open** |
+| ⑯ | `checkOnStartup` | 键被解析、被文档化，无消费者 | 用户的"关闭"被静默忽略 | **fail-open** |
 
 它们共同的：
 
-- **表现**：`install.test.mjs` / `client.test.mjs` 全绿，真实链路一次都跑不通
-  （或反向：一次都拦不住）。
+- **表现**：测试全绿，真实链路一次都跑不通（或反向：一次都拦不住）。
 - **成因**：夹具替生产补上了缺失的入参。`install.mjs` 的注释甚至**三次**
   写明了"缺一个预检就会拦"，但没有人去看桌面调用点。
-- **处置**：从**真实来源**派生（不是手写清单、不是猜默认值、不是从本机推断），
-  缺失时说得出原因。
-- **方向**：⑪⑫⑬ 是 fail-closed 到永远失败（安全，功能为零）；⑭ 是 fail-open
-  （门禁从未生效），**那一类更危险**。
+- **处置**：从**真实来源**派生（不是手写清单、不是猜默认值、不是从本机
+  推断，也不是"声明了就算"），缺失时说得出原因。
+
+方向上的分布值得单独记住：**三个 fail-closed（安全但功能为零），三个
+fail-open（承诺没有兑现）**。fail-open 的三个（⑭⑮⑯）都不是"校验写错了"，
+而是"**校验/承诺从来没有接上**"——它们的共同形态是**一个被声明、被文档化、
+而不产生任何效果的东西**。这类东西在代码 review 里几乎不可见，因为每一处
+单独看都是对的。
 
 所以本文件的"仍未验证"一节要按这条模式读：凡是"有生产方吗"这个问题的
 答案只是"某个测试给了它"，那一条就还没有被验证。

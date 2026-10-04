@@ -42,7 +42,6 @@ import { createSnapshot, restoreSnapshot } from '../upgrade/backup.mjs'
 import { checkMigrationPlanRollback, dataSafetyOf, patchPairOf } from '../upgrade/index.mjs'
 import { migrationPlanDigest, planRollback } from '../upgrade/migration.mjs'
 import { verifyPackage } from '../upgrade/package.mjs'
-import { readActivePointer } from '../upgrade/switchover.mjs'
 
 /**
  * 包文件的**裸十六进制**摘要。
@@ -182,7 +181,6 @@ export async function runInstallTransaction({
   now = () => Date.now(),
   journalFactory = createJournal,
   snapshotFactory = createSnapshot,
-  readActivePointerImpl = readActivePointer,
   helperLauncher = null,
   txnId = null,
 } = {}) {

@@ -508,6 +508,9 @@ async function stageTest() {
         'product/update/health.test.mjs',
         'product/update/platform-build.test.mjs',
         'product/update/install.test.mjs',
+        // ★ 全链路集成：发布 → 托管 → 检查 → 下载 → 安装事务 → helper → 提交。
+        //   它不注入任何业务读数，所以是"六条判据都有生产方"的联合守卫。
+        'product/update/integration.test.mjs',
         'product/update/modules.test.mjs',
         // 在途任务读数：词表（两套真实词表的一致性）与生产端。
         // 这两条守的是"接上真实读数会不会永久阻塞升级"那个缺陷。

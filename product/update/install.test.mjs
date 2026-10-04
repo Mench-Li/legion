@@ -281,6 +281,32 @@ test('等待在途任务超时：**回到可选择界面**，不默认强杀，�
   assert.equal(fx.calls.includes('snapshot'), false, '超时之后仍然做了备份')
 })
 
+test('★★ 停止认领**抛错**时也要恢复认领（"不知道"要解到用户能干活的那一边）', async (t) => {
+  // 抛错意味着"**不知道**它停没停"——最典型的是一次 `BRIDGE_TIMEOUT`：
+  // Launcher 已经在做这件事了，只是答复没回来。那种情况下认领**可能已经停了**，
+  // 而直接返回 not-started 会在用户手上留下一个"服务都在跑、却再也不领活"的
+  // Legion——正是 ㉓ 修掉的那个形状，只是换了条路径。
+  //
+  // 所以"不知道"必须解到**对用户安全**的那一边：试着恢复。而恢复是幂等的
+  // （对已在运行的进程返回 already-running），所以"其实没停过"时它什么也不做。
+  const ctx = setup(t)
+  const fx = effects({
+    stopClaiming: async () => { fx.calls.push('stopClaiming'); throw Object.assign(new Error('bridge 超时'), { code: 'BRIDGE_TIMEOUT' }) },
+  })
+  const result = await runInstallTransaction(baseArgs(ctx, fx))
+  assert.equal(result.verdict, 'not-started')
+  assert.equal(result.code, 'install-services-refused')
+  assert.equal(result.reachedStep, 'stop-claiming')
+  assert.match(result.reason, /bridge 超时/)
+  // ★ 关键：即便"停认领"这一步报了错，也要试一次恢复。
+  assert.equal(fx.calls.includes('resumeClaiming'), true,
+    '"停认领"抛错之后没有尝试恢复认领：用户可能留下一个再也领不到活的 Legion')
+  // 什么都没动：没立屏障、没备份、没停服务。
+  assert.equal(fx.calls.includes('snapshot'), false)
+  assert.equal(fx.calls.includes('stopServices'), false)
+  assert.equal(readBarrier(ctx.dataDir).blocked, false)
+})
+
 test('停止服务失败：保留旧版本并恢复维护状态', async (t) => {
   const ctx = setup(t)
   const fx = effects({ stopServices: async () => { throw Object.assign(new Error('team-hub 拒绝退出'), { code: 'STOP_TIMEOUT' }) } })

@@ -424,8 +424,22 @@ export async function runInstallTransaction({
       journal.advance('stop-claiming', '已停止任务认领')
     } catch (error) {
       journal.result('stop-claiming', { ok: false, reason: String(error?.message ?? error) })
-      // 认领没能停掉 ⇒ 什么都没变（`stopClaiming` 自己失败时不会留下半停状态），
-      // 所以这里可以干净地回到"当前版本继续运行"。
+      /**
+       * ★ 抛错意味着"**不知道**它停没停"——而不是"确定没停"。
+       *
+       *   最典型的形状是一次 `BRIDGE_TIMEOUT`：Launcher 已经在做这件事了，
+       *   只是答复没回来。那种情况下认领**可能已经停了**，而我们直接返回
+       *   `not-started` 会在用户手上留下一个"服务都在跑、却再也不领活"的
+       *   Legion——正是 ㉓ 修掉的那个形状，只是换了条路径。
+       *
+       *   所以"不知道"必须解到**对用户安全**的那一边：试着把认领恢复回来。
+       *   而恢复本身是幂等的（`supervisor.start()` 对已在运行的进程返回
+       *   `already-running` 而不是再起一个），所以"其实没停过"时它什么也不做。
+       *
+       *   > 在"我不知道它处于哪个状态"的时候，
+       *   > 唯一安全的动作是那个**在两种情况下都无害**的动作。
+       */
+      await resumeClaimingAfterAbort(journal, resumeClaiming)
       return finish('not-started', INSTALL_CODES.SERVICES_REFUSED, {
         reachedStep: 'stop-claiming', preflight,
         reason: `停止任务认领失败，未做任何改动：${error?.message ?? error}`,

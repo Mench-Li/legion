@@ -4,6 +4,14 @@ import { redactValue } from '../runtime/adapters/dsh/redact.mjs'
 const parse = (value, fallback = []) => { try { return JSON.parse(value ?? '') } catch { return fallback } }
 const keyOf = (...parts) => JSON.stringify(parts)
 const id = prefix => `${prefix}-${randomUUID()}`
+/** 汇报流会话的标题后缀（BUG-003 的顺手项）。
+ *
+ *  为什么需要：同一个 (空间, 岗位) 有两条会话——这条汇报流（`agent_conversation_bindings`）
+ *  与对话中心那条（`conversations.agent_role`），标题都是岗位名。空间会话列表里那条
+ *  与 Agent 页面的那条**同名不同内容**，用户分不出哪条是汇报。
+ *  加一个后缀只为可分辨；它不改任何数据归属，也不改会话的身份（身份是 binding_key）。 */
+export const REPORT_STREAM_SUFFIX = ' · 汇报流'
+const reportStreamTitle = (agentName) => `${agentName}${REPORT_STREAM_SUFFIX}`
 export class AgentConversationError extends Error {
   constructor(code, message, status = 400) { super(message); this.code = code; this.status = status }
 }
@@ -106,7 +114,7 @@ export function createAgentConversationService({ db, withTx, audit, clock = Date
       if (a.archived) fail('AGENT_ARCHIVED', 'Agent 已归档', 409)
       const time = iso()
       const r = db.prepare(`INSERT INTO conversations(scope,title,kind,participants,createdAt,updatedAt)
-        VALUES(?,?,?,?,?,?)`).run(scope, `${a.name}${taskId ? ` · ${taskId}` : ''}`, taskId ? 'task' : 'direct', JSON.stringify(['general',agentId]), time, time)
+        VALUES(?,?,?,?,?,?)`).run(scope, taskId ? `${a.name} · ${taskId}` : reportStreamTitle(a.name), taskId ? 'task' : 'direct', JSON.stringify(['general',agentId]), time, time)
       const convId = Number(r.lastInsertRowid)
       db.prepare('INSERT INTO agent_conversation_bindings VALUES(?,?,?,?,?)').run(convId,scope,agentId,taskId,bindingKey)
       audit(by,scope,'chat:create',taskId,{ conv: convId,agentId })
@@ -422,6 +430,24 @@ export function createAgentConversationService({ db, withTx, audit, clock = Date
       }
     })
   }
+  /**
+   * 把**已经存在**的汇报流会话标题补上后缀（BUG-003 顺手项，幂等）。
+   *
+   * 只动一类行：`agent_conversation_bindings.task_id IS NULL`（直接绑定那条 = 汇报流），
+   * 且标题**正好等于**岗位名（既没有后缀、也不是任务会话 `岗位名 · T-xxx`）。
+   * 已有后缀的不动，用户能看见的历史标题不会被反复改写。
+   * 这是纯展示层改写：会话身份是 `binding_key`，标题从来不参与匹配。
+   */
+  function backfillReportStreamTitles() {
+    const rows = db.prepare(`SELECT b.conv_id, r.name FROM agent_conversation_bindings b
+      JOIN agent_registry r ON r.agent_id = b.agent_id
+      WHERE b.task_id IS NULL`).all()
+    for (const row of rows) {
+      const conv = db.prepare('SELECT title FROM conversations WHERE id=?').get(row.conv_id)
+      if (!conv || conv.title !== row.name) continue
+      db.prepare('UPDATE conversations SET title=? WHERE id=?').run(reportStreamTitle(row.name), row.conv_id)
+    }
+  }
   function getCommand(commandId,scope) {
     const c=db.prepare('SELECT * FROM agent_commands WHERE id=? AND scope=?').get(commandId,required(scope,'scope'))
     if (!c) fail('COMMAND_NOT_FOUND','命令不存在',404)
@@ -432,6 +458,7 @@ export function createAgentConversationService({ db, withTx, audit, clock = Date
     db.prepare('DELETE FROM agent_dispatch_holds WHERE task_id=?').run(taskId)
   }
   syncRoster()
-  return { syncRoster,list,detail,conversation,send,read,command,runtime,question,reconcile,includeFeedback,getCommand,manualHold,
+  backfillReportStreamTitles()
+  return { syncRoster,backfillReportStreamTitles,list,detail,conversation,send,read,command,runtime,question,reconcile,includeFeedback,getCommand,manualHold,
     binding: (convId) => db.prepare('SELECT * FROM agent_conversation_bindings WHERE conv_id=?').get(Number(convId)) ?? null }
 }

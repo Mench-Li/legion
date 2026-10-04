@@ -1,4 +1,4 @@
-﻿# BUG-003｜「Agent 定时汇报任务」：检查结论 + 修法 A（汇报多播进用户在用的那条会话）
+# BUG-003｜「Agent 定时汇报任务」：检查结论 + 修法 A（汇报多播进用户在用的那条会话）
 
 > 这是**检查报告 + 已落地的修法 A**。检查与验证全程只读生产库（`mode=ro`），
 > 写入只落在库副本与测试夹具上。结论分三块：生效的、**不生效的**、以及设计上**不做**的。
@@ -142,6 +142,21 @@ RunResult / 验收…）。生产库里这些输入表是**空的**：
 | ① 存量 | 直接 `reconcile()` | 新增 **0** 条消息、**0** 条落进用户会话 ⇒ 不补播 ✅ |
 | ② 新事件 | 在副本上把 `T-173` 置 `in_review`（版本+1）再 `reconcile()` | 新增 **2** 条：conv 10（绑定，`author=agent-bfe138ac…`）+ **conv 24**（用户会话，`author=agent:software:devops`） |
 
+### 5.2 顺手项：汇报流会话标题加后缀（用户要求）
+
+同一个 (空间, 岗位) 的两条会话**标题完全一样**，而它们出现在不同位置：
+汇报流那条（无 `agent_role`）出现在**对话中心的空间会话列表**里，对话中心那条出现在
+**点开 Agent → 对话**。为了不再分不出哪条是汇报：
+
+- 新建时：直接绑定那条的标题 = `岗位名 · 汇报流`（任务会话仍是 `岗位名 · T-xxxx`，不变）；
+- **存量会话在服务启动时补一次**（`backfillReportStreamTitles()`，幂等）：只动
+  「绑定直接会话 + 标题正好等于岗位名」的行，已有后缀或已被改过的不动。
+  生产库现状（只读实测，`docs/bugs/BUG-003-title-check.py`）：**8 条**这样的会话
+  （conv 3–10）与 2 条对话中心的会话（conv 24/25）同名，重启后前者各自带上后缀。
+
+这是**纯展示层**改写：会话身份是 `binding_key`，标题从不参与任何匹配
+（`conversation()` 用 `binding_key` 查重、`/api/agent-conversations` 用 `agent_id` 找）。
+
 ## 6. 判据（可复跑）
 
 ```bash
@@ -151,15 +166,18 @@ python docs/bugs/BUG-003-inspect.py
 # ② 修法 A 的两段判据（库副本；①应为 0、②应为 intoChatView=1 / intoAllConvs=2）
 node docs/bugs/BUG-003-reconcile-probe.mjs
 
-# ③ 单测：多播身份正确 + 幂等 + **存量不补播**
-node --test team-hub/agent-conversations.test.mjs        # 20 例（新增 2 例）
+# ③ 单测：多播身份正确 + 幂等 + 存量不补播 + 标题后缀与存量补标题
+node --test team-hub/agent-conversations.test.mjs        # 21 例（新增 3 例）
 node --test team-hub/agent-main-chat.test.mjs            # 5 例（岗位载荷由服务端解析）
 node --test team-hub/chat.test.mjs                       # 53 例（对话中心契约，不回归）
 
-# ④ 定时器是否活着（看 WAL 每 3.000s 推进一次；只读采样）
+# ④ 标题现状（只读）
+python docs/bugs/BUG-003-title-check.py
+
+# ⑤ 定时器是否活着（看 WAL 每 3.000s 推进一次；只读采样）
 #    PowerShell：每 3 秒打印一次 team-hub/team.db-wal 的 LastWriteTime，连续 5 次间隔应≈3s
 
-# ⑤ 现场对照（live hub，与界面同源）
+# ⑥ 现场对照（live hub，与界面同源）
 curl "http://127.0.0.1:8787/api/chat/messages?conv=7&limit=200"   # 绑定会话：汇报流
 curl "http://127.0.0.1:8787/api/chat/messages?conv=25&limit=200"  # 用户会话：部署后由下一次状态变化起有汇报
 ```

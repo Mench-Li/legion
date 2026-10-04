@@ -127,6 +127,27 @@ test('★ 存量汇报不补播：已投递过的事件不许以"现在"的戳�
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM messages WHERE conv_id=? AND body LIKE '%已取消%'").get(bound.convId).n,1,
     '新事件同样必须进绑定会话')
 })
+test('★ 汇报流会话标题带后缀，且**存量**会话启动时被补上（幂等，任务会话不动）',async () => {
+  // 独立空间，避免与其余用例共用 agent_registry / conversations
+  db.prepare('INSERT OR REPLACE INTO roster(scope,role,name) VALUES(?,?,?)').run('agent-title','coder','编码员')
+  db.prepare('INSERT INTO tasks(id,title,scope,role,status,createdAt,updatedAt) VALUES(?,?,?,?,?,?,?)')
+    .run('T-9911','任务会话','agent-title','coder','todo',new Date().toISOString(),new Date().toISOString())
+  service.syncRoster()
+  const at=service.list('agent-title').find(x => x.role==='coder')
+  // 新会话：建出来就带后缀
+  const fresh=service.conversation({ agentId:at.agentId,scope:'agent-title',by:'general' })
+  assert.equal(db.prepare('SELECT title FROM conversations WHERE id=?').get(fresh.convId).title,'编码员 · 汇报流')
+  // 任务会话保持「岗位 · 任务号」的形状，不加汇报流后缀
+  service.conversation({ agentId:at.agentId,scope:'agent-title',taskId:'T-9911',by:'general' })
+  assert.equal(db.prepare("SELECT title FROM conversations WHERE scope='agent-title' AND kind='task'").get().title,'编码员 · T-9911')
+  // 存量：手工把标题改回岗位名（模拟修复前建的会话），重跑补标题应把它补上；已有后缀的不重复叠加
+  db.prepare('UPDATE conversations SET title=? WHERE id=?').run('编码员',fresh.convId)
+  service.backfillReportStreamTitles()
+  assert.equal(db.prepare('SELECT title FROM conversations WHERE id=?').get(fresh.convId).title,'编码员 · 汇报流','存量汇报流会话的标题没有被补上（空间列表里仍然与同名会话分不开）')
+  assert.equal(db.prepare("SELECT title FROM conversations WHERE scope='agent-title' AND kind='task'").get().title,'编码员 · T-9911','任务会话的标题不许被改写')
+  service.backfillReportStreamTitles();service.backfillReportStreamTitles()
+  assert.equal(db.prepare('SELECT title FROM conversations WHERE id=?').get(fresh.convId).title,'编码员 · 汇报流','重复执行不许把后缀叠成两遍')
+})
 test('hold is persistent, release versioned and stale commands rejected',() => {
   db.prepare("UPDATE tasks SET status='todo' WHERE id='T-9999'").run()
   const t=db.prepare("SELECT * FROM tasks WHERE id='T-9999'").get()

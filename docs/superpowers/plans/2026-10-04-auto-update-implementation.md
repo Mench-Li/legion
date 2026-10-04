@@ -411,7 +411,7 @@ node scripts/update/verify-host.mjs --origin <生产 origin> --prefix /legion \
 ## 7. 复现证据
 
 ```bash
-# 全部自动更新相关用例（546 条）
+# 全部自动更新相关用例（549 条）
 node --test product/update/*.test.mjs product/upgrade/*.test.mjs \
   desktop/update-*.test.mjs desktop/main.test.mjs \
   scripts/update/*.test.mjs product/launcher/update-gate.test.mjs \
@@ -428,4 +428,36 @@ node -e "import('./product/update/index.mjs').then(async m => console.log(JSON.s
 
 # 打包闭包判据
 node --test desktop/scripts/shell-files.test.mjs
+
+# 全量 CI（含九道门禁）
+node scripts/ci/run-ci.mjs --out .ci-frozen
 ```
+
+### 7.1 全量 CI 里**不属于本分支**的红灯（前存债务）
+
+`run-ci.mjs` 的九道门禁里，`env` 与 `boundary` 在本分支上是红的。逐条在
+本分支的基点 `a8ff20de` 上核对过，**数量与内容完全相同**，所以它们是前存
+债务，不是这次工作引入的：
+
+| 门禁 | 现象 | 基点 `a8ff20de` | 本分支 |
+|---|---|---|---|
+| `env` | `scan --check`：未在 schema 中处理的字面量 | **187 项** | 187 项（修复前是 198） |
+| `env` | `scripts/config/config.test.mjs` | 53 跑 / 47 过 / **6 失败** | 同左，且**失败用例名逐条相同** |
+| `boundary` | `dsh-boundary.mjs` 边界违规 | **8 处** | 8 处 |
+
+★ `env` 那 187 项里**曾经有 11 项是本分支的**（自动更新的错误码：七个网络
+错误码、两个任务读数码、两个维护闸门码）。它们已登记进
+`product/config-schema.mjs` 的 `nonEnvLiterals`，198 → 187 与本分支基点齐平。
+剩下的 187 项分布完全在别处（`runtime/`、`plugins/`、`workflow-pack`、
+`bundle` 等），处理它们是另一件事——顺手改会让这份改动的边界与理由都变得
+说不清。
+
+★ 核对方法（值得复用）：把基点检出一个临时 worktree，在上面跑同一条判据，
+把两份输出逐行比对。**"我的改动让它变差了吗"这个问题，只有这个办法能回答。**
+
+```bash
+git worktree add --detach .tmp-basecheck a8ff20de
+node scripts/config/scan.mjs --check    # 在两边各跑一次，取「未在 schema 中处理」那一行
+git worktree remove --force .tmp-basecheck
+```
+

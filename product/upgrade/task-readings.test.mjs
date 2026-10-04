@@ -210,3 +210,126 @@ test('模块自检全绿', () => {
   assert.deepEqual([...TASK_READINGS_CHECKED.problems], [])
   assert.equal(TASK_READINGS_CHECKED.ok, true)
 })
+
+// ---------------------------------------------------------------------------
+// ⑤ 真实 team-hub 上跑一次（合成响应只能证明"判据自洽"）
+// ---------------------------------------------------------------------------
+
+/**
+ * 起一个**真的** team-hub，用真实生产端读它的看板。
+ *
+ * 这一条要回答的是合成响应回答不了的三件事：
+ *
+ *   ① `/api/board` 在**回环**下到底要不要 token
+ *      （`server.mjs` 的注释说不要，而 `desktop-security.test.mjs` 里
+ *      `/api/spaces` 无 auth 却拿到 401 —— 两处说法需要实测来对齐）；
+ *   ② 响应体到底是**顶层数组**还是 `{tasks:[…]}`（`boardTasksFromPayload`
+ *      两种都认，但认哪一种决定了真实部署走哪条分支）；
+ *   ③ 字段名是 `status` 还是 `state`（归一化两种都认，但同上）。
+ *
+ * 起不来就跳过：这条用例要的是"能起的时候必须通"，而不是把环境依赖
+ * 变成红灯——产品里真正必须成立的那两条（读不到 ≠ 没有、在跑必须拦）
+ * 由上面的合成用例守着。
+ */
+test('★ 真实 team-hub：/api/board 的形状与真实生产端一致', async (t) => {
+  const { mkdtempSync, mkdirSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { fileURLToPath } = await import('node:url')
+
+  let launcherModule
+  let layoutModule
+  let portsModule
+  try {
+    launcherModule = await import('../launcher/launcher.mjs')
+    layoutModule = await import('../paths.mjs')
+    portsModule = await import('../launcher/ports.mjs')
+  } catch {
+    t.skip('本环境缺少启动 team-hub 所需的模块')
+    return
+  }
+
+  const root = mkdtempSync(join(tmpdir(), 'legion-task-readings-'))
+  const workspaceDir = join(root, 'workspace')
+  mkdirSync(workspaceDir)
+  const repoRoot = fileURLToPath(new URL('../../', import.meta.url))
+  const { layout } = layoutModule.resolveLayout({ installDir: repoRoot, homeDir: root, workspaceDir })
+  const ports = { 'team-hub': await portsModule.reserveEphemeralPort() }
+  const owner = launcherModule.createLauncher({
+    layout, ports, include: ['team-hub'], baseEnv: process.env,
+    desktopCredentials: { hub: 'probe-hub-token', workbench: 'probe-wb-token' },
+  })
+  t.after(async () => {
+    try { await owner.stop({ graceMs: 1000 }) } catch { /* 收尾失败不该盖住断言 */ }
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  let started
+  try {
+    started = await owner.start()
+  } catch (error) {
+    t.skip(`本环境起不动 team-hub：${error?.message ?? error}`)
+    return
+  }
+  if (started?.ok !== true) {
+    t.skip(`本环境起不动 team-hub：${(started?.diagnostics ?? []).map((d) => d.code).join(',')}`)
+    return
+  }
+
+  const baseUrl = `http://127.0.0.1:${ports['team-hub']}`
+
+  // ① 回环无 auth：实测确认（这决定了真实部署要不要把 token 搬过去）。
+  const anonymous = await fetch(`${baseUrl}/api/board`)
+  assert.equal(anonymous.status, 200, '回环下读看板没有被放行')
+  const anonymousBody = await anonymous.text()
+  assert.equal(anonymousBody.trim().startsWith('['), true,
+    `看板响应不是顶层数组，真实形状是：${anonymousBody.slice(0, 120)}`)
+
+  // ② 真实生产端能读它。
+  const reading = await readBoardTasks({ baseUrl })
+  assert.equal(reading.ok, true, `真实生产端读不了真实看板：${reading.reason}`)
+  assert.equal(reading.source, TASK_READING_SOURCES.BOARD)
+  assert.ok(Array.isArray(reading.tasks))
+  // 一个刚起、没有任务的 team-hub：读数必须是**空数组**（真的没有任务），
+  // 而不是失败。这两种在预检那里结论相反。
+  assert.equal(reading.total, 0)
+  assert.equal(reading.summary, '没有任务')
+  assert.equal(checkInFlightTasks({ tasks: reading.tasks }).verdict, 'ok')
+})
+
+test('★ 真实 team-hub：带 token 也照样读得到（监听地址改变时的路径）', async (t) => {
+  const { mkdtempSync, mkdirSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { fileURLToPath } = await import('node:url')
+
+  const { createLauncher } = await import('../launcher/launcher.mjs')
+  const { resolveLayout } = await import('../paths.mjs')
+  const { reserveEphemeralPort } = await import('../launcher/ports.mjs')
+
+  const root = mkdtempSync(join(tmpdir(), 'legion-task-readings-token-'))
+  const workspaceDir = join(root, 'workspace')
+  mkdirSync(workspaceDir)
+  const { layout } = resolveLayout({
+    installDir: fileURLToPath(new URL('../../', import.meta.url)), homeDir: root, workspaceDir,
+  })
+  const ports = { 'team-hub': await reserveEphemeralPort() }
+  const owner = createLauncher({
+    layout, ports, include: ['team-hub'], baseEnv: process.env,
+    desktopCredentials: { hub: 'probe-hub-token', workbench: 'probe-wb-token' },
+  })
+  t.after(async () => {
+    try { await owner.stop({ graceMs: 1000 }) } catch { /* 同上 */ }
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  let started
+  try { started = await owner.start() } catch (error) { t.skip(`起不动 team-hub：${error?.message ?? error}`); return }
+  if (started?.ok !== true) { t.skip('起不动 team-hub'); return }
+
+  const reading = await readBoardTasks({
+    baseUrl: `http://127.0.0.1:${ports['team-hub']}`, token: 'probe-hub-token',
+  })
+  assert.equal(reading.ok, true, `带 token 反而读不了：${reading.reason}`)
+  assert.equal(reading.total, 0)
+})

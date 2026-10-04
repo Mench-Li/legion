@@ -60,6 +60,8 @@
 | §4 line 121「固定迁移计划」 | `migration.mjs` 的 `migrationPlanDigest` + `EMPTY_MIGRATION_PLAN_DIGEST` | 发布端与客户端用**同一个函数**；不符 → `install-migration-plan-mismatch` |
 | §6 line 132 自动检查的开关 | `createCheckScheduler({ automatic })` ← `config.checkOnStartup` | 关掉时不安排任何定时器；手动检查不受影响 |
 | **全链路联合守卫** | `product/update/integration.test.mjs` | 不注入任何业务读数：发布 → 托管 → 检查 → 下载 → 事务 → helper → 提交 |
+| **接线层守卫** | `desktop/update-wiring.test.mjs` | 断言写进事务文件的那六个读数；夹具的清单必须能过真实 `validateRelease` |
+| 端口读数（⑱） | `install()` 开始时取一次，`spawnHelper` 用那次读数 | 用例断言 `status` 出现在 `stop` **之前** |
 | §6 重启后复用前重新校验 | `cache.verifyReady` | 篡改缓存文件的用例证明它真的重算摘要 |
 | §6 取消不影响当前程序 | `cache.discard` | 只删 `.part`；取消不进失败退避 |
 | §7 有界操作表 | `desktop/update-service.mjs` + `update-preload.cjs` | 17 条 IPC 面用例：路径/URL/多余字段一律拒 |
@@ -276,6 +278,7 @@ JSON 示例里是文档化的、被解析、被给默认值，而**全仓没有�
 | ⑮ | 迁移计划 | `migrationPlanDigest` 无人比对，`migrations` 从不传；`BAD_MIGRATION_PLAN` 从未 emit | 迁移被**静默跳过** | **fail-open** |
 | ⑯ | `checkOnStartup` | 键被解析、被文档化，无消费者 | 用户的"关闭"被静默忽略 | **fail-open** |
 | ⑰ | 补丁层成对表（**第二次**） | `validateRelease` 校验了它，投影**不携带**它 | 客户端拿到的仍是 `undefined` → 仍被拦 | fail-closed |
+| ⑱ | 健康规格的端口读数 | 读数发生在**停服务之后**，依赖"已停止的进程仍在 `processes` 里" | 一个自然的清理 → 规格静默派生不出 → 永不提交 | **fail-open**→fail-closed |
 
 ⑰ 值得单独一句：它是**同一个字段的第二次失误**——⑫ 把字段加进了签名清单，
 而 `validateRelease` 的投影没有携带它。**加密清单里有它**，而**客户端会读的

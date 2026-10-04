@@ -55,6 +55,8 @@
 | §8 健康检查用**实际**端口 | `desktop-bridge.mjs` 透出 `port` → `readLauncherPorts` | 拿不到读数就不写规格（fail-closed），**不**拿默认值凑 |
 | §7 line 150 安装确认显示在途任务 | `product/upgrade/task-state.mjs` + `task-readings.mjs` + bridge `tasks` + `update.tasks` | 词表从**两套真实词表**派生（读源码比对）；读不到 ≠ 没有任务 |
 | §6.3 补丁层成对判据的读数来源 | `product/update/release.mjs` 的 `dshPatchBindings`（签名覆盖） | 发布方声明；空表 = 没测过 → 客户端硬拒；不从本机推断 |
+| §6 磁盘余量判据的读数 | `readFreeBytes`（`statfsSync` 的 `bavail`）+ `directoryBytes` | 读不到 → `null` → 拦；**不**估一个乐观的数 |
+| `minWindowsBuild` 门禁 | `product/update/platform-build.mjs` | 三态；读不出本机 build 是**失败**不是跳过；`hostPlatform` ≠ 目标 `platform` |
 | §6 重启后复用前重新校验 | `cache.verifyReady` | 篡改缓存文件的用例证明它真的重算摘要 |
 | §6 取消不影响当前程序 | `cache.discard` | 只删 `.part`；取消不进失败退避 |
 | §7 有界操作表 | `desktop/update-service.mjs` + `update-preload.cjs` | 17 条 IPC 面用例：路径/URL/多余字段一律拒 |
@@ -220,15 +222,47 @@ sha256 没有不动点），所以 `closure.json` 必须**跳过**成员判定�
 不从本机推断的理由是硬的：客户端只能算出"目标与本机是不是同一对"，
 而**正常的 DSH 升级本来就会换掉这一对**。
 
-## 6.0 一个反复出现的模式（三个缺陷同源）
+**⑬ 磁盘读数（`freeBytes`）没有生产方。** 预检在 `stage: 'pre-switch'` 跑，
+而那一档对没有磁盘读数的处置是 `unknown` → 拦。桌面上从不传它，于是结论恒为
+`preflight-disk-unobserved`。修法：用 `statfsSync` 读**实际**可用空间
+（用 `bavail` 而不是 `bfree`——后者含保留块，方向是错的），读不到返回 `null`
+（仍然拦），**不返回一个乐观的估计值**（那会放行一次必然写到一半就没空间的
+升级）。
 
-⑪ 与 ⑫ 是同一个模式的两次出现，而 ⑧（`{teamHubPort}` 未展开）也是它的
-变体：**一个判据的输入在真实链路上不存在，而测试夹具把它补上了。**
+**⑭ Windows 版本门禁从未生效（fail-open）。** `minWindowsBuildRequired` 无
+调用方 ⇒ `validateRelease` 里那条「需要 Windows build N，本机是 M」**不可达**；
+同时 `install.mjs` 传给 `runPreflight` 的 `windowsBuild` 是**死参数**。
+于是一份声明只支持 Win11（22000）的发行会在 Win10 19045 上被接受并安装。
+修法：新增 `platform-build.mjs`，从 `os.release()` 取真实 build，三态判据，
+**读不出本机版本是失败而不是跳过**。
 
-它们的共同症状是"测试全绿、真实链路一次都跑不通"，而共同的表现是
-**fail-closed 到永远失败**——安全，但功能为零。三处的处置也都是同一条：
-把读数**从真实来源派生**（不是手写清单、不是猜默认值、不是从本机推断），
-并在缺失时给出**说得出原因**的失败。
+★ 这一处还逼出一条设计判据：`hostPlatform`（正在跑代码的机器）与目标
+`platform`（发行清单声明的）是**两件事**。Linux CI 上声明 `platform: 'win32'`
+的用例，`os.release()` 是 `6.8.0-45-generic`——把"读不出 Windows build"当失败
+会让每一条这样的用例红，而它们测的是别的东西。
+
+## 6.0 一个反复出现的模式（四个缺陷同源）
+
+⑪、⑫、⑬、⑭ 是同一个模式：**一个判据的输入在真实链路上不存在，而测试夹具
+把它补上了。**（⑧ 的 `{teamHubPort}` 未展开是它的变体。）
+
+| # | 判据 | 缺的读数 | 症状 |
+|---|---|---|---|
+| ⑪ | 在途任务 | `tasks` 没有生产方，词表还与真实词表不相交 | 接上也永久拦 |
+| ⑫ | 补丁层成对 | `dshPatchBindings` 连**载体**都没有 | 每次安装停在 `preflight-patch-pair-unverified` |
+| ⑬ | 磁盘余量 | `freeBytes` 从不传 | 每次安装停在 `preflight-disk-unobserved` |
+| ⑭ | Windows 版本 | `minWindowsBuildRequired` 无调用方、`windowsBuild` 是死参数 | 门禁**从未生效**（fail-open） |
+
+它们共同的：
+
+- **表现**：`install.test.mjs` / `client.test.mjs` 全绿，真实链路一次都跑不通
+  （或反向：一次都拦不住）。
+- **成因**：夹具替生产补上了缺失的入参。`install.mjs` 的注释甚至**三次**
+  写明了"缺一个预检就会拦"，但没有人去看桌面调用点。
+- **处置**：从**真实来源**派生（不是手写清单、不是猜默认值、不是从本机推断），
+  缺失时说得出原因。
+- **方向**：⑪⑫⑬ 是 fail-closed 到永远失败（安全，功能为零）；⑭ 是 fail-open
+  （门禁从未生效），**那一类更危险**。
 
 所以本文件的"仍未验证"一节要按这条模式读：凡是"有生产方吗"这个问题的
 答案只是"某个测试给了它"，那一条就还没有被验证。

@@ -41,7 +41,7 @@ import { helperReportPath, writeHelperReport } from './install.mjs'
 import { extractArchive, verifyExtractedTree } from './extract.mjs'
 import { createHealthProbe } from './health.mjs'
 import { activateVersion, installLayout, listInstalledVersions, probeHealth, readActivePointer, rollbackUpgrade } from '../upgrade/switchover.mjs'
-import { planRetention, restoreSnapshot, listSnapshots } from '../upgrade/backup.mjs'
+import { planRetention, listSnapshots } from '../upgrade/backup.mjs'
 import { runMigrations } from '../upgrade/migration.mjs'
 import { hashFile } from '../upgrade/package.mjs'
 import { readFileSync as readFileSyncDefault } from 'node:fs'
@@ -82,7 +82,21 @@ const DEFAULT_EFFECTS = Object.freeze({
   activateVersionImpl: activateVersion,
   probeHealthImpl: probeHealth,
   rollbackUpgradeImpl: rollbackUpgrade,
-  restoreSnapshotImpl: restoreSnapshot,
+  // ★ 这里原本还有 `restoreSnapshotImpl: restoreSnapshot`，已删除：**它从来没被
+  //   调用过**（全文件只出现那一次）。
+  //
+  //   它比一个无用的导入更糟：一个叫 `restoreSnapshotImpl` 的参数**看起来就是**
+  //   "helper 会在失败时恢复备份"。而设计 §8 line 192 恰恰是**限制**这件事的：
+  //
+  //     「自动恢复备份仅限已证明维护屏障期间没有业务写入的**未提交**事务。
+  //       提交后恢复旧备份可能丢失新写入，必须明确告知并取得用户确认。」
+  //
+  //   所以 helper 在迁移之后失败时的正确落点是 `recovery-required`（保持维护
+  //   模式、交给人），**不是**自己把库换回去。留着这个参数会让下一个人以为
+  //   那条自动恢复已经实现了——而"看起来实现了的危险动作"是最不该留的注释。
+  //
+  //   用户侧的恢复入口是另一件事（`docs/DEPLOY.md` §6 有手工步骤），见实施
+  //   记录 §6.1 里如实记下的那一条。
   listInstalledVersionsImpl: listInstalledVersions,
   hashFileImpl: hashFile,
   now: () => Date.now(),

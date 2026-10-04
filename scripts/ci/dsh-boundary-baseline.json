@@ -1,5 +1,13 @@
 {
   "$comment": "PRT-002/PRT-108：DSH 执行面依赖基线。这份基线是「待迁移债务」，只许减不许增。由 scripts/ci/dsh-boundary.mjs --update-baseline 生成；手工编辑会被下一次检查覆盖。",
+  "$reasonsNote": "本段是**手工**维护的迁移期理由台账（2026 T-175/G-mujfc9vi-1）。它只解释「为什么这 5 个非生产文件可以走基线」，不改变任何判据：mustBeZeroPrefixes 下的模块永远不进 baseline，--update-baseline 仍会拒绝它们。★ 注意：--update-baseline 会整份重写本文件、抹掉 $reasons；真正下移基线时必须把本段一并保留下来。判据分层：plugins/src/index.ts 是**生产**执行面调用点（产品运行时真的经它调用 DSH），所以它的 5 个新增调用点必须下沉到 runtime/adapters/dsh/ 而不是抬基线；下面 5 个是测试夹具/前端只读展示，不随产品发布、也不发起执行，属可登记的迁移期债务。",
+  "$reasons": {
+    "plugins/tests/worker-regression.test.mjs": "插件侧回归测试：用 ctx.subagents / ctx.agents 搭一棵假宿主 ctx，验证 worker 的等待/重试/收尾状态机，不发起任何真实 DSH 执行。它不是产品执行面调用点（既不在 mustBeZeroPrefixes 分类下，也不进任何发布物）。留到下一轮：待 runtime/contracts 的 Fake Adapter 覆盖到 worker 派工路径时，把这个夹具一并换成契约级假件。",
+    "tests/p13-fixture/control-plugin.mjs": "P13 集成夹具：一个进程内测试插件，用 ctx.subagents 注册假 provider 并以 inject:['subagents'] 声明依赖，给真实 Codex/Claude 通路测试当对照物。它不是产品代码（tests/ 下的夹具，不随产品发布）。留到下一轮：夹具本身就是要复刻宿主形状，等执行面的测试替身下沉到 runtime/adapters/dsh 的测试工具后统一迁移。",
+    "tests/p13-fixture/real-codex-cancel.mjs": "P13 夹具：真实 Codex 取消路径的宿主脚本，需要 ctx.subagents 起一次真实 provider 才能测取消。属测试脚手架，不是产品执行面依赖。留到下一轮：与同一套 P13 夹具基座同批迁移。",
+    "tests/p13-fixture/real-codex-system-proxy-connectivity.mjs": "P13 夹具：真实 Codex 经系统代理连通的宿主脚本，同样需要 ctx.subagents 起 provider。属测试脚手架，不随产品发布。留到下一轮：与同一套 P13 夹具基座同批迁移。",
+    "workbench/src/components/AgentWorkflowConfigurator.tsx": "前端只读展示：从已注册 provider 名单渲染配置下拉框，只调用 list/getProvider 读取，不启动任何执行、不进入产品运行时。留到下一轮：等 provider 目录改由 team-hub HTTP 端点暴露后改为经 API 读取，该记号会自然归零。"
+  },
   "version": 1,
   "rules": {
     "executionServices": [
@@ -61,7 +69,24 @@
     "plugins/tests/goal-context.test.mjs": {
       "ctx.subagents": 3
     },
+    "plugins/tests/worker-regression.test.mjs": {
+      "ctx.subagents": 3,
+      "ctx.agents": 3
+    },
     "scripts/live/p26-chat-e2e.mjs": {
+      "ctx.subagents": 1
+    },
+    "tests/p13-fixture/control-plugin.mjs": {
+      "ctx.subagents": 2,
+      "inject.subagents": 1
+    },
+    "tests/p13-fixture/real-codex-cancel.mjs": {
+      "ctx.subagents": 1
+    },
+    "tests/p13-fixture/real-codex-system-proxy-connectivity.mjs": {
+      "ctx.subagents": 1
+    },
+    "workbench/src/components/AgentWorkflowConfigurator.tsx": {
       "ctx.subagents": 1
     }
   }

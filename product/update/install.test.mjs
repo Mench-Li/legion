@@ -1020,6 +1020,32 @@ test('★ 端到端：闭包摘要被改掉 → 在写任何文件之前拒绝',
   void closureDigest
 })
 
+test('★★★ 补丁层成对表缺失 → 预检拦（这是"每一次真实安装都撞上"的那条）', async (t) => {
+  // 这条钉住的是那个缺陷的**结局**：`patchBindings` 没有生产方时，
+  // `patchPairOf(target, null)` 恒为 `'unverified'` → 预检判 `unknown`
+  // → 拦。
+  //
+  // ★ 注意 `baseArgs` 上面那段注释（第 123–129 行）**早就写明**了这条要求
+  //   （"缺任何一个预检都会拦（那是设计要求的行为）"）。写那条注释的人
+  //   （也是我）知道它，却没有去看**生产路径**有没有给——用例全都自己给上了，
+  //   所以 50 条用例全绿，而真实安装一次都进不去。这正是"测试与代码共享
+  //   同一个便利假设"那一类：夹具补上了生产缺失的东西。
+  const ctx = setup(t)
+  const args = baseArgs(ctx, effects())
+  const withoutBindings = { ...args, patchBindings: null }
+  const result = await runInstallTransaction(withoutBindings)
+  assert.equal(result.ok, false, '缺补丁层成对表却放行了安装')
+  assert.equal(result.reachedStep, 'recheck')
+  const compatibility = result.preflight.checks.find((c) => c.check === 'compatibility')
+  assert.equal(compatibility.verdict, 'unknown')
+  assert.equal(compatibility.code, 'preflight-patch-pair-unverified')
+  assert.match(result.reason, /patchPair="unverified"/)
+  // 而给了正确的成对表就放行（否则这条只证明了"什么都拦"）。
+  const withBindings = { ...args, patchBindings: [{ dshVersion: '0.8.2', compositionPatchVersion: 2 }] }
+  const okResult = await runInstallTransaction(withBindings)
+  assert.notEqual(okResult.reachedStep, 'recheck', `给了成对表仍然停在预检：${okResult.reason}`)
+})
+
 test('helper：调用面缺字段一律拒绝', () => {
   assert.equal(validateInvocation({}).ok, false)
   assert.equal(validateInvocation({

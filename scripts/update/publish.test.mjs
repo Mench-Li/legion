@@ -19,10 +19,10 @@ import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { test } from 'node:test'
 
-import { buildPublish, packDirectory, renderUploadPlan, writePublish } from './publish.mjs'
+import { buildPublish, packDirectory, parsePatchBindings, renderUploadPlan, writePublish } from './publish.mjs'
 import { verifyHost } from './verify-host.mjs'
 import { buildTrustTable } from './trust-file.mjs'
-import { createTrustStore, generateReleaseKeyPair } from '../../product/update/envelope.mjs'
+import { createTrustStore, generateReleaseKeyPair, verifyEnvelope } from '../../product/update/envelope.mjs'
 import { extractArchive, planExtraction, verifyExtractedTree } from '../../product/update/extract.mjs'
 import { buildZip } from '../../product/update/zip.mjs'
 import { createTransport } from '../../product/update/transport.mjs'
@@ -331,6 +331,79 @@ test('端到端：sequence 与预期不符 → 那一条检查失败但其余照
   assert.match(check.detail, /43/)
   // 签名与 schema 仍然是通过的：一次"序号不对"不该掩盖"签名是好的"。
   assert.equal(result.checks.find((c) => c.name === 'feed-signature').ok, true)
+})
+
+test('★★★ 补丁层成对表进发行清单（客户端那条判据的唯一来源）', async (t) => {
+  const ctx = setup(t)
+  // 不给 → 空表。这是**合法**的，后果是客户端判 `unverified` 并拒绝安装。
+  const withoutBindings = buildPublish(publishArgs(ctx))
+  assert.deepEqual([...withoutBindings.release.dshPatchBindings], [])
+  // 而"没给"与"给了但表坏了"必须是两个不同的读数。
+  assert.equal(withoutBindings.release.dshPatchBindings.length, 0)
+
+  // 给了 → 进清单，并被 `validateRelease` 接受。
+  const withBindings = buildPublish(publishArgs(ctx, {
+    dshPatchBindings: [{ dshVersion: '0.8.2', compositionPatchVersion: 2 }],
+  }))
+  assert.deepEqual(withBindings.release.dshPatchBindings.map((b) => ({ ...b })), [
+    { dshVersion: '0.8.2', compositionPatchVersion: 2 },
+  ])
+  // ★ 排序：它进签名覆盖的字节，所以同输入必须同字节。
+  const sorted = buildPublish(publishArgs(ctx, {
+    dshPatchBindings: [
+      { dshVersion: '0.9.0', compositionPatchVersion: 1 },
+      { dshVersion: '0.8.2', compositionPatchVersion: 3 },
+      { dshVersion: '0.8.2', compositionPatchVersion: 2 },
+    ],
+  }))
+  assert.deepEqual(sorted.release.dshPatchBindings.map((b) => `${b.dshVersion}/${b.compositionPatchVersion}`),
+    ['0.8.2/2', '0.8.2/3', '0.9.0/1'])
+
+  // 形状不对的表在**发布**时就被拒（而不是变成客户端一条无法归因的失败）。
+  assert.throws(() => buildPublish(publishArgs(ctx, { dshPatchBindings: [{ dshVersion: '', compositionPatchVersion: 1 }] })), /dshPatchBindings/)
+  assert.throws(() => buildPublish(publishArgs(ctx, { dshPatchBindings: [{ dshVersion: '0.8.2', compositionPatchVersion: 0 }] })), /dshPatchBindings/)
+})
+
+test('★ --dsh-patch-bindings 的解析：逗号分隔，形状在发布时拒', () => {
+  assert.deepEqual(parsePatchBindings(undefined), [])
+  assert.deepEqual(parsePatchBindings(true), [])
+  assert.deepEqual(parsePatchBindings(''), [])
+  assert.deepEqual(parsePatchBindings('0.8.2:2').map((b) => ({ ...b })), [{ dshVersion: '0.8.2', compositionPatchVersion: 2 }])
+  assert.deepEqual(
+    parsePatchBindings('0.8.2:2, 0.9.0:1').map((b) => `${b.dshVersion}/${b.compositionPatchVersion}`),
+    ['0.8.2/2', '0.9.0/1'],
+  )
+  // DSH 版本里有冒号的写法（例如带 build 元数据）：取**最后一个**冒号，
+  // 因为补丁版本在右边。
+  assert.deepEqual(parsePatchBindings('0.8.2+build:7:3').map((b) => ({ ...b })),
+    [{ dshVersion: '0.8.2+build:7', compositionPatchVersion: 3 }])
+  // 坏形状一律抛，而不是变成一个永远匹配不上的表项。
+  for (const bad of ['0.8.2', ':2', '0.8.2:', '0.8.2:x', '0.8.2:-1', '0.8.2:2.5']) {
+    assert.throws(() => parsePatchBindings(bad), /dsh-patch-bindings/, `${bad} 被接受了`)
+  }
+})
+
+test('★ 补丁层成对表进签名覆盖的字节：改了它签名就不过', async (t) => {
+  const ctx = setup(t)
+  const publish = buildPublish(publishArgs(ctx, {
+    dshPatchBindings: [{ dshVersion: '0.8.2', compositionPatchVersion: 2 }],
+  }))
+  // 签名覆盖的字节就是上传清单里那一条 `manifest.json`。
+  // `verifyEnvelope` 收的是**序列化后的字节**（它自己按 ENVELOPE_PREFIX 解析），
+  // 不是先 JSON.parse 出来的对象。
+  const manifestEntry = publish.immutable.find((item) => item.path.endsWith('/manifest.json'))
+  assert.notEqual(manifestEntry, undefined)
+  const verified = verifyEnvelope(manifestEntry.bytes, { trust: ctx.trustStore, nowMs: NOW_MS })
+  assert.equal(verified.ok, true, verified.reason)
+  assert.deepEqual(verified.payload.dshPatchBindings.map((b) => ({ ...b })),
+    [{ dshVersion: '0.8.2', compositionPatchVersion: 2 }])
+
+  // ★ 改一个成对项 → 签名不过（它确实在签名覆盖的字节里）。
+  const text = manifestEntry.bytes.toString('utf8')
+  const tamperedText = text.replace('"0.8.2"', '"0.9.9"')
+  assert.notEqual(tamperedText, text, '测试没有真的改到成对表')
+  const rejected = verifyEnvelope(Buffer.from(tamperedText, 'utf8'), { trust: ctx.trustStore, nowMs: NOW_MS })
+  assert.equal(rejected.ok, false, '改了补丁层成对表签名却仍然通过')
 })
 
 // ---------------------------------------------------------------------------

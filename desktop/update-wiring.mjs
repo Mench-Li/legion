@@ -338,6 +338,40 @@ export async function readPendingTasks({ bridge = null, timeoutMs = null } = {})
   return Object.freeze(reading.tasks)
 }
 
+/**
+ * 校验签过名发行清单里的补丁层成对表。
+ *
+ * ★ 为什么在最严的地方还要再校验一次形状。
+ *
+ *   签名保证的是"这确实是发布方发的"，**不是**"发的东西形状一定对"。
+ *   发布方可能用了另一版的 `publish.mjs`、或者发行清单是手工拼的。
+ *   一个形状不对的项（缺 `dshVersion`、补丁版本是字符串）会让
+ *   `patchPairOf` 的 `some()` 永远匹配不上——于是结论是 `mismatch`，
+ *   而错误文案说的是"目标补丁层与 DSH 版本不成对"，排查方向会落在
+ *   补丁层上，而不是"这份清单里有一项是坏的"。
+ *
+ * 返回 `null`（而不是空数组）当整份表不可用时：`patchPairOf(target, null)`
+ * 得到 `unverified`（"没有结论"），与"给了表但里面没有这一对"（"结论是不
+ * 成对"）是两件事，而它们的处置不同（前者可重试/需发布方补，后者是硬拒）。
+ */
+export function normalizePatchBindings(bindings) {
+  if (!Array.isArray(bindings)) return null
+  const out = []
+  for (const binding of bindings) {
+    if (binding === null || typeof binding !== 'object' || Array.isArray(binding)) continue
+    if (typeof binding.dshVersion !== 'string' || binding.dshVersion === '' || binding.dshVersion.length > 64) continue
+    if (!Number.isInteger(binding.compositionPatchVersion) || binding.compositionPatchVersion < 1) continue
+    out.push(Object.freeze({
+      dshVersion: binding.dshVersion,
+      compositionPatchVersion: binding.compositionPatchVersion,
+    }))
+  }
+  // ★ 表里**所有**项都坏掉时返回 `null`，而不是"一张空表"。
+  //   空表的含义是"发布方声明它没验证过任何组合"（硬拒），而"表全坏"
+  //   的含义是"这份清单不可用"（没有结论）。两者都不放行，但说法不同。
+  return out.length === 0 ? (bindings.length === 0 ? Object.freeze([]) : null) : Object.freeze(out)
+}
+
 export async function readLauncherPorts({ bridge = null } = {}) {  if (bridge === null || typeof bridge.request !== 'function') return null
   let status
   try {
@@ -464,6 +498,22 @@ export function buildDesktopInstaller({
         identity,
         packagePath,
         txnId,
+        // ★ 补丁层成对表来自**签过名的发行清单**（`release.dshPatchBindings`）。
+        //
+        //   它是 `checkCompatibility` 回答"目标补丁层与它声明的 DSH 版本是不是
+        //   一对验证过的组合"的唯一来源。在此之前桌面上**没有任何一层**传它，
+        //   于是 `patchPairOf(target, null)` 恒为 `'unverified'` → 预检判
+        //   `unknown` → **每一次真实安装都被拦在兼容性检查上**。
+        //
+        //   为什么不从本机推断：客户端只能算出"目标与本机是不是同一对"，而
+        //   正常的 DSH 升级**本来就会换掉这一对**——所以"与本机不同即拒绝"
+        //   会把每一次正常的 DSH 升级都拦下来。
+        //
+        //   形状在这里再过一遍：它来自一个**签名覆盖**的地方，但仍然要在
+        //   使用点校验（签名的意思是"这确实是发布方发的"，不是"发的东西
+        //   形状一定对")。形状不对的项会被丢掉——而丢掉之后 `patchPairOf`
+        //   得到的是"表里没有这一对"→ `mismatch` → 拦，方向是安全的。
+        patchBindings: normalizePatchBindings(release.dshPatchBindings),
         // ★ 用 `normalizeTaskReadings` 归一化，而不是就地 `{ id, state: 'running' }`。
         //
         //   原先那一行给一个纯 id 字符串**编造**了状态 `'running'`——而
@@ -678,6 +728,33 @@ export async function selfCheckWiringAsync() {
   // 真正的空数组是**合法**读数（确实没有任务）。
   const emptyTasks = await readPendingTasks({ bridge: { request: async () => ({ ok: true, tasks: [] }) } })
   if (!Array.isArray(emptyTasks) || emptyTasks.length !== 0) problems.push('真正的空读数没有被接受')
+
+  // ★ 补丁层成对表：三种输入必须给出三个**不同**的结论。
+  //   `null`（没有结论）与 `[]`（声明了空表）与有内容，在预检那侧对应
+  //   `unverified` / `unverified` / `match|mismatch` —— 前两者的差别在于
+  //   "这份清单不可用"与"发布方声明没测过"，说法不同、处置相同（都不放行）。
+  const goodBindings = normalizePatchBindings([{ dshVersion: '0.8.3', compositionPatchVersion: 2 }])
+  if (!Array.isArray(goodBindings) || goodBindings.length !== 1) problems.push('合法的成对表没有通过')
+  if (normalizePatchBindings(null) !== null) problems.push('非数组的成对表没有返回 null')
+  if (normalizePatchBindings('nope') !== null) problems.push('字符串成对表没有返回 null')
+  const declaredEmpty = normalizePatchBindings([])
+  if (!Array.isArray(declaredEmpty) || declaredEmpty.length !== 0) {
+    problems.push('"发布方声明空表"没有被区分于"表不可用"')
+  }
+  // ★ 全部坏掉的表 → `null`（"这份清单不可用"），不是空表（"没测过"）。
+  if (normalizePatchBindings([{ dshVersion: '' }, 'x', null]) !== null) {
+    problems.push('全部坏掉的成对表被当成了"发布方声明空表"')
+  }
+  // 坏项被丢掉，好项留下。
+  const partiallyBad = normalizePatchBindings([
+    { dshVersion: '0.8.3', compositionPatchVersion: 2 },
+    { dshVersion: '0.8.4', compositionPatchVersion: '3' },   // 字符串 → 丢
+    { dshVersion: '0.8.5', compositionPatchVersion: 0 },     // 0 → 丢
+    { dshVersion: 'x'.repeat(70), compositionPatchVersion: 1 }, // 太长 → 丢
+  ])
+  if (!Array.isArray(partiallyBad) || partiallyBad.length !== 1) {
+    problems.push(`坏项没有被精确丢掉：${JSON.stringify(partiallyBad)}`)
+  }
 
   return Object.freeze({ ok: problems.length === 0, problems: Object.freeze(problems) })
 }

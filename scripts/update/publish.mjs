@@ -159,6 +159,20 @@ export function buildPublish({
   productManifest, supportedFromVersions, minWindowsBuild = 19045, requiredFreeBytes,
   packageZipPath = null, packageRoot = null, installerPath, notesPath,
   migrationPlanDigest, rollbackPolicy = 'program-only',
+  /**
+   * 补丁层成对表：`[{ dshVersion, compositionPatchVersion }]`。
+   *
+   * ★ 这是**发布方**的断言，必须显式给（默认空数组 = "没有验证过任何组合"）。
+   *   客户端拿它回答"目标补丁层与它声明的 DSH 版本是不是一对验证过的组合"，
+   *   而这个问题的答案**只有发布方知道**：客户端从本机推断只能得到
+   *   "目标与本机是不是同一对"，那恰好与真相相反——正常的 DSH 升级本来
+   *   就会换掉这一对。
+   *
+   *   空数组是合法的，后果是客户端把这次发行判为 `unverified` 并拒绝安装
+   *   （`preflight-patch-pair-unverified`）。那是刻意的：与其让客户端猜，
+   *   不如让"这一批没测过"在用户之前先被说出来。
+   */
+  dshPatchBindings = [],
   keyId, privateKeyPem, sequence, issuedAt, expiresAt, outDir = null,
 } = {}) {
   if (!RELEASE_CHANNELS.includes(channel)) throw new Error(`未知通道：${channel}`)
@@ -212,6 +226,7 @@ export function buildPublish({
     supportedFromVersions,
     minWindowsBuild,
     requiredFreeBytes: requiredFreeBytes ?? (pkg.sizeBytes * 3 + 512 * 1024 * 1024),
+    dshPatchBindings,
     package: pkg,
     installer,
     notes,
@@ -341,6 +356,39 @@ export function renderUploadPlan(publish, outDir, { remoteRoot = 'root@117.72.14
   return `${lines.join('\n')}\n`
 }
 
+/**
+ * 解析 `--dsh-patch-bindings <dshVersion>:<n>[,<dshVersion>:<n>…]`。
+ *
+ * ★ 用**逗号分隔的一个参数**，不是可重复的参数。
+ *   `parseArgs` 把参数收进一个 `Map`，重复给同一个开关只会**覆盖**——
+ *   于是 `--dsh-patch-binding a:1 --dsh-patch-binding b:2` 会静默地只剩
+ *   最后一项，而症状是"表里少了一对"，看起来像补丁层的问题。
+ *   （要支持可重复就得改 `parseArgs` 的返回形状，而那会影响这个脚本里
+ *   其它每一个开关。）
+ *
+ * 形状在这里就拒（缺冒号、补丁版本不是正整数）：一个拼错的绑定**不会**
+ * 导致发布失败——它会变成表里一个永远匹配不上的项，于是症状是客户端报
+ * "目标补丁层与 DSH 版本不成对"，而原因看起来像补丁层的问题。
+ */
+export function parsePatchBindings(raw) {
+  if (raw === undefined || raw === null || raw === true) return []
+  const values = String(raw).split(',').map((item) => item.trim()).filter(Boolean)
+  const out = []
+  for (const value of values) {
+    const at = value.lastIndexOf(':')
+    if (at <= 0 || at === value.length - 1) {
+      throw new Error(`--dsh-patch-bindings 的格式是 <dshVersion>:<compositionPatchVersion>，实际是 ${JSON.stringify(value)}`)
+    }
+    const dshVersion = value.slice(0, at)
+    const patchText = value.slice(at + 1)
+    if (!/^\d+$/.test(patchText)) {
+      throw new Error(`--dsh-patch-bindings 的补丁层版本必须是正整数，实际是 ${JSON.stringify(patchText)}`)
+    }
+    out.push(Object.freeze({ dshVersion, compositionPatchVersion: Number(patchText) }))
+  }
+  return out
+}
+
 export function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv)
   try {
@@ -361,6 +409,9 @@ export function main(argv = process.argv.slice(2)) {
       supportedFromVersions: String(args.get('from-versions') ?? requireString(args, 'from-version')).split(',').map((s) => s.trim()).filter(Boolean),
       minWindowsBuild: Number(args.get('min-windows-build') ?? 19045),
       requiredFreeBytes: args.get('required-free-bytes') !== undefined ? Number(args.get('required-free-bytes')) : undefined,
+      // `--dsh-patch-bindings <dshVersion>:<n>[,…]`。
+      // 一个都没给就是**空表**（= 本次没有验证过任何组合）→ 客户端会拒绝安装。
+      dshPatchBindings: parsePatchBindings(args.get('dsh-patch-bindings')),
       // ★ 两者只能给一个。都由 `buildPublish` 检查，理由在那里。
       packageRoot,
       packageZipPath: packageZipArg,

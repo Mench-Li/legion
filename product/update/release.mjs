@@ -274,6 +274,71 @@ export function validateRelease(payload, {
   if (!Number.isSafeInteger(payload.requiredFreeBytes) || payload.requiredFreeBytes <= 0) {
     problems.push(releaseProblem(RELEASE_CODES.BAD_FIELD, 'requiredFreeBytes 必须是正的安全整数', 'requiredFreeBytes'))
   }
+  // ★ 补丁层成对表（`dshPatchBindings`）：**必须存在**，允许为空数组。
+  //
+  //   `preflight.mjs` 的 `checkCompatibility` 需要它来回答"目标补丁层与它声明
+  //   的 DSH 版本是不是一对验证过的组合"：
+  //
+  //     · 在表里          → `match`    → 放行
+  //     · 给了表但不在里面 → `mismatch` → 拦（补丁层锚点失效，强制面会全不在）
+  //     · **没给表**       → `unverified` → `unknown` → 拦
+  //
+  //   在加这个字段之前，客户端**没有任何来源**能给出这张表，于是每一次真实
+  //   安装都停在 `preflight-patch-pair-unverified`。这与在途任务那个缺陷是
+  //   同一类：一个判断需要一个读数，而那个读数没有生产方。
+  //
+  //   为什么放在**签过名的发行清单**里，而不是让客户端从本机推断：
+  //   「这一对组合被验证过」是一个**发布方**的断言——只有它知道自己测过
+  //   哪些组合。客户端从本机推断只能得到"目标与本机是不是同一对"，而那种
+  //   推断的结论恰好与真相相反：**正常的 DSH 升级本来就会换掉这一对**，
+  //   所以"与本机不同即拒绝"会把每一次正常的 DSH 升级都拦下来。
+  //
+  //   ★ 为什么是"必须存在、可为空"而不是"可选"：
+  //     可选字段一旦缺省，客户端又会回到"没有来源"那个状态，而那个状态的
+  //     表现（`unverified` → 拦）与"发布方声明了空表"完全一样——两种不同的
+  //     事实给出同一个读数。强制要求这个字段，就把"发布方还没声明过"
+  //     这件事变成一次**发布期的**失败（很快、很明确），而不是用户侧的一次
+  //     无法归因的安装失败。
+  if (!Array.isArray(payload.dshPatchBindings)) {
+    problems.push(releaseProblem(RELEASE_CODES.BAD_FIELD,
+      'dshPatchBindings 必须是数组（可以为空数组，但不能缺）——它是"目标补丁层与 DSH 版本成对"这一断言的唯一来源',
+      'dshPatchBindings'))
+  } else {
+    for (const [index, binding] of payload.dshPatchBindings.entries()) {
+      if (binding === null || typeof binding !== 'object' || Array.isArray(binding)) {
+        problems.push(releaseProblem(RELEASE_CODES.BAD_FIELD, `dshPatchBindings[${index}] 必须是对象`, 'dshPatchBindings'))
+        continue
+      }
+      const keys = Object.keys(binding).sort()
+      if (keys.join(',') !== 'compositionPatchVersion,dshVersion') {
+        problems.push(releaseProblem(RELEASE_CODES.BAD_FIELD,
+          `dshPatchBindings[${index}] 的字段必须是 dshVersion/compositionPatchVersion，实际 ${keys.join(',') || '(空)'}`,
+          'dshPatchBindings'))
+        continue
+      }
+      // `dshVersion` 的**形状**判据只能是"非空字符串"：DSH 自己的版本号口径
+      // 由 DSH 决定，这里再写一份 SemVer 判据就会在 DSH 用了别的口径时
+      // 拒掉一个其实合法的发行。真正的成对关系由发布方声明。
+      if (typeof binding.dshVersion !== 'string' || binding.dshVersion === '' || binding.dshVersion.length > 64) {
+        problems.push(releaseProblem(RELEASE_CODES.BAD_FIELD, `dshPatchBindings[${index}].dshVersion 必须是 1–64 字符的字符串`, 'dshPatchBindings'))
+      }
+      if (!Number.isInteger(binding.compositionPatchVersion) || binding.compositionPatchVersion < 1) {
+        problems.push(releaseProblem(RELEASE_CODES.BAD_FIELD,
+          `dshPatchBindings[${index}].compositionPatchVersion 必须是正整数`, 'dshPatchBindings'))
+      }
+    }
+    // 重复项会让"这份表里有几对"在没有意义的地方出现两个答案。
+    const seen = new Set()
+    for (const binding of payload.dshPatchBindings) {
+      if (binding === null || typeof binding !== 'object') continue
+      const key = `${binding.dshVersion}\u0000${binding.compositionPatchVersion}`
+      if (seen.has(key)) {
+        problems.push(releaseProblem(RELEASE_CODES.BAD_FIELD,
+          `dshPatchBindings 含重复项 ${binding.dshVersion}/${binding.compositionPatchVersion}`, 'dshPatchBindings'))
+      }
+      seen.add(key)
+    }
+  }
   if (!Number.isSafeInteger(payload.minWindowsBuild) || payload.minWindowsBuild <= 0) {
     problems.push(releaseProblem(RELEASE_CODES.BAD_FIELD, 'minWindowsBuild 必须是正的安全整数', 'minWindowsBuild'))
   } else if (Number.isSafeInteger(minWindowsBuildRequired) && payload.minWindowsBuild > minWindowsBuildRequired) {
@@ -352,6 +417,7 @@ function sha256OfCanonical(value) {
 export function buildRelease({
   releaseId, productVersion, channel, platform = 'win32', arch = 'x64',
   productManifest, supportedFromVersions, minWindowsBuild, requiredFreeBytes,
+  dshPatchBindings = [],
   package: pkg, installer, notes, migrationPlanDigest, rollbackPolicy, issuedAt, expiresAt,
 } = {}) {
   return Object.freeze({
@@ -366,6 +432,16 @@ export function buildRelease({
     supportedFromVersions: Object.freeze([...supportedFromVersions]),
     minWindowsBuild,
     requiredFreeBytes,
+    // 补丁层成对表（见 `validateRelease` 里的长注释：这是那条判据的唯一来源）。
+    // 排序 + 冻结：它进签名覆盖的字节，所以必须确定。
+    dshPatchBindings: Object.freeze([...dshPatchBindings]
+      .map((binding) => Object.freeze({
+        dshVersion: binding?.dshVersion,
+        compositionPatchVersion: binding?.compositionPatchVersion,
+      }))
+      .sort((a, b) => (a.dshVersion < b.dshVersion ? -1
+        : a.dshVersion > b.dshVersion ? 1
+          : a.compositionPatchVersion - b.compositionPatchVersion))),
     package: pkg,
     installer,
     notes,
@@ -498,6 +574,22 @@ export function selfCheckRelease() {
     ['产品清单版本不符', { productManifest: sampleProductManifest('9.9.9') }],
     ['未知平台', { platform: 'darwin' }],
     ['win32 非 x64', { arch: 'arm64' }],
+    // 补丁层成对表：缺字段是最要紧的一条——没有它，客户端只能报
+    // `preflight-patch-pair-unverified`，而那是每一次真实安装都会撞上的结论。
+    ['缺 dshPatchBindings', { dshPatchBindings: undefined }],
+    ['dshPatchBindings 不是数组', { dshPatchBindings: null }],
+    ['成对项不是对象', { dshPatchBindings: ['0.8.3'] }],
+    ['成对项多字段', { dshPatchBindings: [{ dshVersion: '0.8.3', compositionPatchVersion: 2, extra: 1 }] }],
+    ['成对项缺 dshVersion', { dshPatchBindings: [{ compositionPatchVersion: 2 }] }],
+    ['成对项 dshVersion 为空', { dshPatchBindings: [{ dshVersion: '', compositionPatchVersion: 2 }] }],
+    ['成对项补丁版本为 0', { dshPatchBindings: [{ dshVersion: '0.8.3', compositionPatchVersion: 0 }] }],
+    ['成对项补丁版本不是整数', { dshPatchBindings: [{ dshVersion: '0.8.3', compositionPatchVersion: 2.5 }] }],
+    ['成对项重复', {
+      dshPatchBindings: [
+        { dshVersion: '0.8.3', compositionPatchVersion: 2 },
+        { dshVersion: '0.8.3', compositionPatchVersion: 2 },
+      ],
+    }],
   ]
   for (const [name, override] of cases) {
     const result = validateRelease({ ...sample, ...override })

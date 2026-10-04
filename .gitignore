@@ -28,6 +28,12 @@ scrum/discussion/
 # 守护/调解员运行时状态（进程心跳每轮改写，不入库）
 scrum/daemon.json
 scrum/daemon-mediator.json
+# ★ 2026-10-04：按空间分的守护心跳（daemon-software / daemon-ozon / daemon-gf001）
+#   此前**被跟踪**，于是守护每 20~30s 写一次心跳就让主工作树永远有一处 `M`——
+#   任何 `git status`/CI 都因此读不到"树干净"这个结论（run-ci 的脏树警告指纹一直在变）。
+#   同一条规则本该覆盖它们：这三个文件与上面两个是同一类（运行时状态，不是源码）。
+#   取消跟踪用 `git rm --cached`（文件留在磁盘上，守护读写不受影响）。
+scrum/daemon-*.json
 scrum/control.json
 team-hub/.watch.mjs
 _link_deps.mjs

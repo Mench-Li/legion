@@ -519,6 +519,20 @@ export function buildDesktopInstaller({
    *   要不到 → 不写健康规格 → helper fail-closed 不提交。
    */
   ports = null,
+  /**
+   * 本次升级要执行的迁移计划。
+   *
+   * ★ 默认**空数组**，而且这是一个**诚实的默认值**：产品里目前没有任何
+   *   `defineMigration` 调用（`product/upgrade/migration.mjs` 只有自检用的
+   *   `sampleMigrations()`），所以"没有迁移"是事实，不是偷懒。
+   *
+   *   它仍然是显式参数：`install.mjs` 会拿它算出的摘要与发行清单声明的
+   *   `migrationPlanDigest` 比对，不一致就拒绝。于是"产品开始有迁移"的那一天，
+   *   如果这里没有跟着接上，**发布出去的包会被挡下**，而不是被静默跳过。
+   */
+  productMigrations = Object.freeze([]),
+  /** breaking 迁移需要调用方显式声明（设计 §8 line 189 的回滚可达性）。 */
+  allowBreakingMigrations = false,
   now = () => Date.now(),
   drainTimeoutMs = null,
   log = () => {},
@@ -596,6 +610,22 @@ export function buildDesktopInstaller({
         //   形状一定对")。形状不对的项会被丢掉——而丢掉之后 `patchPairOf`
         //   得到的是"表里没有这一对"→ `mismatch` → 拦，方向是安全的。
         patchBindings: normalizePatchBindings(release.dshPatchBindings),
+        /**
+         * ★ 迁移计划：当前产品**还没有任何迁移**，所以是空数组——但它必须
+         *   显式给出，而且必须与发行清单声明的摘要一致（`install.mjs` 会核对）。
+         *
+         *   在加这条判据之前，这里连参数都不传（默认 `[]`），而
+         *   `release.migrationPlanDigest` 只校验格式、无人比对。于是
+         *   **一份声明了迁移计划的发行，它的迁移会被静默跳过**：
+         *   升级"成功"，而数据库结构从未迁移。
+         *
+         *   现在不一致会被挡在 `install-migration-plan-mismatch` 上。
+         *   这也让"接入迁移"这件事有了一个明确的落点：
+         *   生产这份列表的那一天，它必须与 `publish.mjs --migration-plan-digest`
+         *   用的是同一个算法（`migration.mjs` 的 `migrationPlanDigest`）。
+         */
+        migrations: productMigrations,
+        allowBreakingMigrations,
         // ★ 用 `normalizeTaskReadings` 归一化，而不是就地 `{ id, state: 'running' }`。
         //
         //   原先那一行给一个纯 id 字符串**编造**了状态 `'running'`——而

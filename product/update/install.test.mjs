@@ -24,6 +24,7 @@ import { createJournal, planRecovery, readActive, readJournal } from './journal.
 import { acquireBarrier, canAcceptWrites, readBarrier, releaseBarrier, startupGate } from './barrier.mjs'
 import { consumeCredential, isOutsideSwitchTarget, issueCredential, verifyProgramDigest } from './credential.mjs'
 import { runHelper, validateInvocation } from './helper.mjs'
+import { migrationPlanDigest, sampleMigrations } from '../upgrade/migration.mjs'
 import { createHash } from 'node:crypto'
 
 const NOW = Date.parse('2026-10-04T12:00:00Z')
@@ -41,7 +42,8 @@ function currentManifest(version = CURRENT_VERSION) {
   })
 }
 
-function releaseFixture({ packagePath, sha256 }) {
+function releaseFixture({ packagePath, sha256, migrations = [], migrationPlanDigest: digestOverride = null }) {
+  void packagePath
   return Object.freeze({
     format: 'legion/update-release@1',
     releaseId: `rel-${NEXT_VERSION}`,
@@ -56,7 +58,13 @@ function releaseFixture({ packagePath, sha256 }) {
     package: Object.freeze({ path: `releases/rel-${NEXT_VERSION}/legion-win-x64.zip`, sizeBytes: 16, sha256 }),
     installer: Object.freeze({ path: `releases/rel-${NEXT_VERSION}/Legion-Setup-win-x64.exe`, sizeBytes: 8, sha256: 'b'.repeat(64) }),
     notes: Object.freeze({ path: `releases/rel-${NEXT_VERSION}/notes.zh-CN.txt`, sizeBytes: 8, sha256: 'c'.repeat(64) }),
-    migrationPlanDigest: 'd'.repeat(64),
+    // ★ 摘要必须**真的**对应将要跑的迁移集合。
+    //
+    //   这一行原先写的是 `'d'.repeat(64)` —— 一个谁也核对不了的占位值，
+    //   而当时**没有任何判据会去看它**，所以 50 多条用例全绿。
+    //   现在它由 `migrationPlanDigest(migrations)` 算出来，于是
+    //   "清单声明的计划"与"将要执行的集合"必须一致。
+    migrationPlanDigest: digestOverride ?? migrationPlanDigest(migrations),
     rollbackPolicy: 'program-only',
     issuedAt: '2026-10-03T00:00:00Z',
     expiresAt: '2026-10-10T00:00:00Z',
@@ -1100,6 +1108,69 @@ test('★★ 包描述符**不能**当作 `package` 传进预检（一个看起�
       '把 release.package 当 pkg 传进去竟然得到了 verified：这说明两者形状相同，'
       + '而它们不是同一个东西，形状相同只会让这个错修更难被发现')
   }
+})
+
+test('★★★ 迁移计划与清单声明不符 → 在动任何东西之前拒绝', async (t) => {
+  // 这条钉住的是那个缺陷的**结局**：`migrationPlanDigest` 以前只校验格式，
+  // 全仓没有一处拿它去和任何内容比对，而桌面侧从不传 `migrations`
+  // ⇒ `[]` 一路走下去、helper 报 `no-migrations` 并**提交**。
+  // 于是一份声明了迁移计划的发行，它的迁移被**静默跳过**：
+  // "升级成功、数据库结构从未迁移"，而每一句成功读数都是真的。
+  const ctx = setup(t)
+
+  // ① 清单声明了一个非空计划，而本次要跑的是空集合 → 拒。
+  const declaredNonEmpty = releaseFixture({
+    packagePath: ctx.packagePath, sha256: ctx.sha256,
+    migrationPlanDigest: migrationPlanDigest(sampleMigrations()),
+  })
+  const mismatch = await runInstallTransaction({
+    ...baseArgs(ctx, effects()), release: declaredNonEmpty, migrations: [],
+  })
+  assert.equal(mismatch.ok, false, '声明了迁移却静默跳过')
+  assert.equal(mismatch.code, 'install-migration-plan-mismatch')
+  assert.equal(mismatch.reachedStep, 'recheck')
+  assert.match(mismatch.reason, /迁移计划不符/)
+  // ★ 两个摘要都要报出来：只说"不符"会让排查从零开始。
+  assert.equal(mismatch.declaredPlanDigest, migrationPlanDigest(sampleMigrations()))
+  assert.equal(mismatch.actualPlanDigest, migrationPlanDigest([]))
+
+  // ② 声明与将要跑的集合一致 → 放行（否则这条只证明了"什么都拦"）。
+  //
+  //   这里用 `sampleMigrations()` 的**前两份**（都是 additive）：第三份是
+  //   `breaking`，而 breaking 计划需要调用方显式 `allowBreakingMigrations`
+  //   ——那是**另一条**判据，混进这条用例会让"为什么停在预检"有两种可能。
+  const matchingCtx = setup(t)
+  const plan = Object.freeze(sampleMigrations().slice(0, 2))
+  const matching = releaseFixture({
+    packagePath: matchingCtx.packagePath, sha256: matchingCtx.sha256, migrations: plan,
+  })
+  const okResult = await runInstallTransaction({
+    ...baseArgs(matchingCtx, effects()), release: matching, migrations: plan,
+  })
+  assert.notEqual(okResult.reachedStep, 'recheck',
+    `声明与集合一致却停在预检：${okResult.reason}`)
+
+  // ③ 空计划 + 声明空摘要 → 放行（这是**今天**产品里唯一合法的组合）。
+  const emptyCtx = setup(t)
+  const emptyRelease = releaseFixture({ packagePath: emptyCtx.packagePath, sha256: emptyCtx.sha256 })
+  const emptyOk = await runInstallTransaction({ ...baseArgs(emptyCtx, effects()), release: emptyRelease, migrations: [] })
+  assert.notEqual(emptyOk.reachedStep, 'recheck', `空计划对空摘要被拦：${emptyOk.reason}`)
+})
+
+test('★★ 迁移实现被改过（同一版本号）也会被发现：checksum 进了计划摘要', () => {
+  // `checksumOf` 覆盖了 `up` 的**源码**，所以"版本号没变、实现变了"这件事
+  // 会改变计划摘要。这一条证明摘要是**内容**的摘要，不是版本号的摘要。
+  const plan = sampleMigrations()
+  const before = migrationPlanDigest(plan)
+  const tampered = plan.map((m, index) => (index === 0
+    ? { ...m, checksum: 'sha256:00000000000000000000000000000000' }
+    : m))
+  assert.notEqual(migrationPlanDigest(tampered), before)
+  // 顺序无关：同一集合换个顺序摘要必须相同（否则"同一份计划"有两个摘要）。
+  assert.equal(migrationPlanDigest([...plan].reverse()), before)
+  // 空计划有**固定**摘要（不是 null）——"本次没有迁移"是一个可声明的断言。
+  assert.equal(migrationPlanDigest([]), migrationPlanDigest([]))
+  assert.match(migrationPlanDigest([]), /^[0-9a-f]{64}$/)
 })
 
 test('helper：调用面缺字段一律拒绝', () => {

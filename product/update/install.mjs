@@ -40,7 +40,7 @@ import { destroyCredential, issueCredential } from './credential.mjs'
 import { runPreflight } from '../upgrade/preflight.mjs'
 import { createSnapshot, restoreSnapshot } from '../upgrade/backup.mjs'
 import { checkMigrationPlanRollback, dataSafetyOf, patchPairOf } from '../upgrade/index.mjs'
-import { planRollback } from '../upgrade/migration.mjs'
+import { migrationPlanDigest, planRollback } from '../upgrade/migration.mjs'
 import { verifyPackage } from '../upgrade/package.mjs'
 import { readActivePointer } from '../upgrade/switchover.mjs'
 
@@ -88,6 +88,15 @@ export const INSTALL_CODES = Object.freeze({
   BUSY: 'install-busy',
   LOCKED: 'install-locked',
   RECHECK_FAILED: 'install-recheck-failed',
+  /**
+   * 发行清单声明的固定迁移计划与本次将要执行的集合不一致。
+   *
+   * 与 `RECHECK_FAILED` 分开的**理由**：前者是"包里/清单里的东西不对"，
+   * 而这一条是"**声明与实现**对不上"。它们的处置相同（都在动任何东西之前
+   * 停下），但排查方向完全不同——一条要去看包，一条要去看发布端有没有把
+   * 迁移计划接上。共用一个码会让后者永远被读成前者。
+   */
+  MIGRATION_PLAN_MISMATCH: 'install-migration-plan-mismatch',
   PREPARE_FAILED: 'install-prepare-failed',
   BARRIER_FAILED: 'install-barrier-failed',
   BACKUP_FAILED: 'install-backup-failed',
@@ -290,7 +299,34 @@ export async function runInstallTransaction({
       reason: migrationRollback.reason,
     })
   }
-  journal.result('recheck', { ok: true, actualPackageSha, preflightOk: true })
+
+  // ★★ 迁移计划必须与发行清单声明的**固定迁移计划**一致。
+  //
+  //   在加这条判据之前：`release.mjs` 只校验 `migrationPlanDigest` 的**格式**，
+  //   全仓没有一处拿它去和任何内容比对，而桌面侧从不传 `migrations` ——
+  //   于是 `[]` 一路走下去，helper 报 `no-migrations` 并**提交**。
+  //   一份声明了迁移计划的发行，它的迁移会被**静默跳过**：结果是
+  //   "升级成功、数据库结构从未迁移"，而用户看到的每一句话都是成功的。
+  //
+  //   现在：声明与将要跑的集合不一致 → **拒绝**（在动任何东西之前）。
+  //   方向是 fail-closed：`migrations` 的生产方还没有接上时，任何声明了
+  //   非空迁移计划的发行都会被挡下，而不是被静默降级成"没有迁移"。
+  const declaredPlanDigest = typeof release.migrationPlanDigest === 'string' ? release.migrationPlanDigest : null
+  const actualPlanDigest = migrationPlanDigest(migrations)
+  if (declaredPlanDigest !== null && declaredPlanDigest !== actualPlanDigest) {
+    const reason = '发行清单声明的迁移计划与本次将要执行的集合不一致：'
+      + `清单 ${declaredPlanDigest.slice(0, 12)}…（${migrations.length} 份迁移），`
+      + `本次 ${actualPlanDigest.slice(0, 12)}…。`
+      + '把"没跑的迁移"报成"没有迁移"，会在升级之后留下一个结构从未迁移的数据库，'
+      + '而每一句成功读数都是真的'
+    journal.result('recheck', { ok: false, reason, declaredPlanDigest, actualPlanDigest, migrationCount: migrations.length })
+    return finish('not-started', INSTALL_CODES.MIGRATION_PLAN_MISMATCH, {
+      reachedStep: 'recheck',
+      declaredPlanDigest, actualPlanDigest,
+      reason: `迁移计划不符，未做任何改动：${reason}`,
+    })
+  }
+  journal.result('recheck', { ok: true, actualPackageSha, preflightOk: true, actualPlanDigest })
 
   // ── ② 准备目标运行时（不改变活动指针）──
   //

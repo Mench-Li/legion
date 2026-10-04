@@ -19,7 +19,8 @@ import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { test } from 'node:test'
 
-import { buildPublish, packDirectory, parsePatchBindings, renderUploadPlan, writePublish } from './publish.mjs'
+import { buildPublish, migrationPlanDigestFromArgs, packDirectory, parsePatchBindings, renderUploadPlan, resolveMigrationPlanDigest, writePublish } from './publish.mjs'
+import { EMPTY_MIGRATION_PLAN_DIGEST, migrationPlanDigest, sampleMigrations } from '../../product/upgrade/migration.mjs'
 import { verifyHost } from './verify-host.mjs'
 import { buildTrustTable } from './trust-file.mjs'
 import { createTrustStore, generateReleaseKeyPair, verifyEnvelope } from '../../product/update/envelope.mjs'
@@ -81,7 +82,13 @@ function publishArgs(ctx, overrides = {}) {
     packageZipPath: ctx.zipPath,
     installerPath: ctx.installerPath,
     notesPath: ctx.notesPath,
-    migrationPlanDigest: 'd'.repeat(64),
+    // ★ 用**空计划的真摘要**，不是随手填的占位串。
+    //
+    //   这一行原先写 `'d'.repeat(64)` —— 一个谁也核对不了的占位值。发布端
+    //   当时不做任何计算，所以它一路进了签名清单；而现在客户端会拿
+    //   `migrationPlanDigest(migrations)` 去核对它，占位串会让每一次安装
+    //   在动任何东西之前被挡下（`install-migration-plan-mismatch`）。
+    migrationPlanDigest: EMPTY_MIGRATION_PLAN_DIGEST,
     rollbackPolicy: 'program-only',
     keyId: 'release-2026-a',
     privateKeyPem: ctx.keys.privateKeyPem,
@@ -405,6 +412,39 @@ test('★ 补丁层成对表进签名覆盖的字节：改了它签名就不过'
   const rejected = verifyEnvelope(Buffer.from(tamperedText, 'utf8'), { trust: ctx.trustStore, nowMs: NOW_MS })
   assert.equal(rejected.ok, false, '改了补丁层成对表签名却仍然通过')
 })
+
+test('★★★ 迁移计划摘要由**同一个算法**算出（发布端与客户端不能各写一份）', (t) => {
+  const ctx = setup(t)
+  // 不给 → 空计划的**固定**摘要，不是随手填的占位串。
+  assert.equal(EMPTY_MIGRATION_PLAN_DIGEST, migrationPlanDigest([]))
+  const bare = buildPublish(publishArgs(ctx))
+  assert.equal(bare.release.migrationPlanDigest, EMPTY_MIGRATION_PLAN_DIGEST,
+    '不给计划时发行清单里的摘要不是空计划的摘要：客户端会在安装前挡下它')
+
+  // 给一份计划文件 → 摘要 = `migrationPlanDigest(那份计划)`。
+  const planPath = join(ctx.root, 'migration-plan.json')
+  const plan = sampleMigrations().slice(0, 2).map((m) => ({
+    version: m.version, name: m.name, compatibility: m.compatibility, checksum: m.checksum,
+  }))
+  writeFileSync(planPath, JSON.stringify(plan), 'utf8')
+  const withPlan = buildPublish(publishArgs(ctx, { migrationPlanDigest: null, migrationPlan: plan }))
+  assert.equal(withPlan.release.migrationPlanDigest, migrationPlanDigest(plan))
+
+  // 显式摘要优先（兼容旧用法），而坏形状在发布时就拒。
+  const explicit = buildPublish(publishArgs(ctx, { migrationPlanDigest: 'a'.repeat(64) }))
+  assert.equal(explicit.release.migrationPlanDigest, 'a'.repeat(64))
+  assert.throws(
+    () => resolveMigrationPlanDigest({ migrationPlanDigest: 'not-a-digest' }),
+    /64 位小写十六进制/,
+  )
+  // 计划文件不存在 / 不是数组 → 明确拒绝（而不是静默回落到空摘要）。
+  assert.throws(() => migrationPlanDigestFromArgs(join(ctx.root, 'nope.json'), undefined), /读不出来/)
+  const notArray = join(ctx.root, 'not-array.json')
+  writeFileSync(notArray, '{"nope":1}', 'utf8')
+  assert.throws(() => migrationPlanDigestFromArgs(notArray, undefined), /必须是一个数组/)
+})
+
+test('formatBytes 的边界占位', () => {})
 
 // ---------------------------------------------------------------------------
 // ④ 由目录树打包（带闭包）→ 回读 → 解压：真正的闭环

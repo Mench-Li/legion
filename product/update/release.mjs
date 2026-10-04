@@ -39,6 +39,7 @@ import { createHash } from 'node:crypto'
 import { ENVELOPE_FORMATS } from './envelope.mjs'
 import { canonicalJson as canonicalOf, isSha256Hex } from './canonical.mjs'
 import { RELEASE_CHANNELS } from '../upgrade/channels.mjs'
+import { migrationPlanDigest } from '../upgrade/migration.mjs'
 import { isSemver, parseSemver } from './semver.mjs'
 
 export const RELEASE_FORMAT = ENVELOPE_FORMATS.RELEASE
@@ -227,6 +228,31 @@ export function validateRelease(payload, {
 
   if (payload.platform === 'win32' && !KNOWN_PLATFORMS.win32.includes(payload.arch)) {
     problems.push(releaseProblem(RELEASE_CODES.UNSUPPORTED_PLATFORM, `win32 只支持 ${KNOWN_PLATFORMS.win32.join('/')}`, 'arch'))
+  }
+
+  // ★ 迁移计划摘要必须与**随发行给出的摘要**里那一条自洽。
+  //
+  //   `migrationPlanDigest` 是「固定迁移计划」的身份，而客户端的判据是
+  //   "清单声明的摘要 == 将要执行的集合算出来的摘要"（见 `install.mjs`）。
+  //   这里再加一条**发布端**的判据：如果发布端同时给出了计划本身
+  //   （`migrationPlan`，只用于本函数的一致性检查，不进签名清单——
+  //   函数跨不过 JSON 边界，见 `migration.mjs` 的 `migrationPlanDigest`），
+  //   那么两者必须一致。
+  //
+  //   为什么这条判据属于发布期：一份"摘要与计划不符"的发行，会在每一位
+  //   用户的机器上以 `install-migration-plan-mismatch` 失败。那个失败是
+  //   fail-closed（安全的），但它的排查方向在用户侧，而原因在发布侧。
+  if (Array.isArray(payload.migrationPlan)) {
+    const actual = migrationPlanDigest(payload.migrationPlan)
+    if (actual !== payload.migrationPlanDigest) {
+      problems.push(releaseProblem(RELEASE_CODES.BAD_MIGRATION_PLAN,
+        `migrationPlanDigest=${JSON.stringify(payload.migrationPlanDigest)} 与随发行给出的迁移计划不符`
+        + `（计划算出 ${actual}）。这份发行会在每一台机器上被拒，而原因在发布侧`,
+        'migrationPlanDigest'))
+    }
+  } else if (payload.migrationPlan !== undefined && payload.migrationPlan !== null) {
+    problems.push(releaseProblem(RELEASE_CODES.BAD_MIGRATION_PLAN,
+      'migrationPlan 必须是数组（它只用于发布期的一致性检查，不进签名清单）', 'migrationPlan'))
   }
 
   // 产品清单：必须是对象（精确组件版本的载体）。这里不重复校验它的 schema，
@@ -590,6 +616,14 @@ export function selfCheckRelease() {
         { dshVersion: '0.8.3', compositionPatchVersion: 2 },
       ],
     }],
+    // ★ 迁移计划摘要：`BAD_MIGRATION_PLAN` 在此之前是**一个从未被 emit 的
+    //   错误码**——一个只声明不发出的错误码，与一条不存在的判据是同一回事。
+    //   现在它有一条真的判据：随发行给出的计划必须与摘要自洽。
+    ['计划与摘要不符', {
+      migrationPlan: [{ version: 1, name: 'x', compatibility: 'additive', checksum: 'sha256:a' }],
+      migrationPlanDigest: 'f'.repeat(64),
+    }],
+    ['计划不是数组', { migrationPlan: { version: 1 } }],
   ]
   for (const [name, override] of cases) {
     const result = validateRelease({ ...sample, ...override })

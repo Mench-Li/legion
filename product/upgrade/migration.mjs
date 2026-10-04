@@ -194,6 +194,57 @@ export function validateMigrationPlan(migrations) {
   return Object.freeze({ ok: problems.length === 0, problems: Object.freeze(problems) })
 }
 
+/**
+ * 迁移**计划**的摘要（发行清单里的 `migrationPlanDigest` 就是它）。
+ *
+ * ## 为什么需要它（这是一个真实缺陷的记录）
+ *
+ * 设计 §4 line 121 要求发行清单携带「**固定迁移计划**」的摘要，
+ * §8 第 8 步要求新 Launcher「运行**固定迁移计划**」。而在加这个函数之前：
+ *
+ *   · `release.mjs` 只校验 `migrationPlanDigest` 的**格式**（64 位十六进制）；
+ *   · 全仓**没有一处**拿它去和任何内容比对；
+ *   · `release.mjs` 甚至声明了一个 `BAD_MIGRATION_PLAN` 错误码，而它
+ *     **从未被 emit 过**——一个只声明不发出的错误码，与一条不存在的判据
+ *     是同一回事；
+ *   · 桌面侧 `update-wiring.mjs` 从不传 `migrations`，于是
+ *     `runInstallTransaction` 拿到 `[]`，helper 报 `no-migrations` 并**提交**。
+ *
+ * 合起来的意思是：**一份声明了迁移计划的发行，它的迁移会被静默跳过**，
+ * 结果是"升级成功、数据库结构从未迁移"，而用户看到的每一句话都是成功的。
+ *
+ *   > 一个"把没跑的迁移报成没有迁移"的升级事务，
+ *   > 与一个"跑完了迁移"的升级事务，在成功路径上一模一样。
+ *
+ * ## 摘要怎么算
+ *
+ * 按 `version` 升序，逐份取 `version`、`name`、`compatibility` 与 `checksum`。
+ * `checksum` 已经覆盖了 `up` 的**源码**（见 `checksumOf`），所以"同一个版本号
+ * 的迁移实现被改过"也会被发现。
+ *
+ * `up` 的函数体**不单独**进摘要（它在 `checksum` 里），这是刻意的：函数跨不过
+ * 进程边界（helper 的事务文件是 JSON，见 `helper.mjs` 的文件头），而摘要是要
+ * 在两侧都能算出来的东西。
+ *
+ * 空计划有一个**固定**的摘要（不是 `null`）：这样"本次发行没有迁移"是一个可以
+ * 写进签名清单的**声明**，而不是一个"字段恰好是空的"的巧合。
+ */
+export function migrationPlanDigest(migrations) {
+  const list = Array.isArray(migrations) ? migrations : []
+  const canonical = list
+    .map((m) => ({
+      version: Number.isInteger(m?.version) ? m.version : null,
+      name: typeof m?.name === 'string' ? m.name : null,
+      compatibility: typeof m?.compatibility === 'string' ? m.compatibility : null,
+      checksum: typeof m?.checksum === 'string' ? m.checksum : null,
+    }))
+    .sort((a, b) => (a.version ?? -1) - (b.version ?? -1))
+  return createHash('sha256').update(JSON.stringify(canonical), 'utf8').digest('hex')
+}
+
+/** 空迁移计划的摘要（常量，供自检与"本次没有迁移"的声明使用）。 */
+export const EMPTY_MIGRATION_PLAN_DIGEST = migrationPlanDigest([])
+
 // ---------------------------------------------------------------------------
 // 存储端口
 // ---------------------------------------------------------------------------

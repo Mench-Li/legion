@@ -49,6 +49,7 @@ import { canonicalJson } from '../../product/update/canonical.mjs'
 import { feedRelativePath } from '../../product/update/host.mjs'
 import { CLOSURE_ENTRY_NAME, closureDigest, closureFromDirectory, serializeClosure } from '../../product/update/closure.mjs'
 import { buildZip } from '../../product/update/zip.mjs'
+import { EMPTY_MIGRATION_PLAN_DIGEST, migrationPlanDigest } from '../../product/upgrade/migration.mjs'
 import { RELEASE_CHANNELS } from '../../product/upgrade/channels.mjs'
 import { validateManifest } from '../../product/upgrade/manifest.mjs'
 
@@ -158,7 +159,16 @@ export function buildPublish({
   productVersion, channel, releaseId, platform = 'win32', arch = 'x64',
   productManifest, supportedFromVersions, minWindowsBuild = 19045, requiredFreeBytes,
   packageZipPath = null, packageRoot = null, installerPath, notesPath,
-  migrationPlanDigest, rollbackPolicy = 'program-only',
+  /**
+   * 固定迁移计划（数组，可省略 = 空计划）。
+   *
+   * 给它时摘要由 `migrationPlanDigest()` **算出来**——与客户端核对时用的是
+   * 同一个函数。发布端与客户端各写一份算法，就是一条"两边算出不同值、
+   * 而升级永远失败"的路径。
+   */
+  migrationPlan = null,
+  migrationPlanDigest: explicitPlanDigest = null,
+  rollbackPolicy = 'program-only',
   /**
    * 补丁层成对表：`[{ dshVersion, compositionPatchVersion }]`。
    *
@@ -230,7 +240,7 @@ export function buildPublish({
     package: pkg,
     installer,
     notes,
-    migrationPlanDigest,
+    migrationPlanDigest: resolveMigrationPlanDigest({ migrationPlan, migrationPlanDigest: explicitPlanDigest }),
     rollbackPolicy,
     issuedAt,
     expiresAt,
@@ -389,6 +399,50 @@ export function parsePatchBindings(raw) {
   return out
 }
 
+/**
+ * 求"固定迁移计划"的摘要。
+ *
+ * ★ 优先**算**而不是优先收。
+ *
+ *   · `migrationPlan`（数组）：摘要由 `migration.mjs` 的 `migrationPlanDigest`
+ *     **算出来**——与客户端核对时用的是**同一个函数**。发布端与客户端各写
+ *     一份算法，就是一条"两边算出不同值、而升级永远失败"的路径。
+ *   · `migrationPlanDigest`（字符串）：直接给摘要（兼容旧用法）。
+ *   · 都不给：**空计划的固定摘要**（不是抛错，也不是随手填的占位串）。
+ *     产品目前没有迁移，而"本次发行没有迁移"是一个合法的声明——
+ *     它必须等于客户端算出的那个值，否则安装会在动任何东西之前被挡下
+ *     （`install-migration-plan-mismatch`）。
+ */
+export function resolveMigrationPlanDigest({ migrationPlan = null, migrationPlanDigest: explicit = null } = {}) {
+  if (Array.isArray(migrationPlan)) return migrationPlanDigest(migrationPlan)
+  if (migrationPlan !== null && migrationPlan !== undefined) throw new Error('migrationPlan 必须是数组')
+  if (typeof explicit === 'string' && explicit !== '') {
+    if (!/^[0-9a-f]{64}$/.test(explicit)) {
+      throw new Error(`migrationPlanDigest 必须是 64 位小写十六进制，实际是 ${JSON.stringify(explicit)}`)
+    }
+    return explicit
+  }
+  return EMPTY_MIGRATION_PLAN_DIGEST
+}
+
+/** 命令行侧：`--migration-plan <文件>` 读成数组；`--migration-plan-digest` 直传。 */
+export function migrationPlanDigestFromArgs(planPath, explicitDigest) {
+  let migrationPlan = null
+  if (typeof planPath === 'string' && planPath !== '' && planPath !== 'true') {
+    try {
+      migrationPlan = JSON.parse(readFileSync(planPath, 'utf8'))
+    } catch (error) {
+      throw new Error(`--migration-plan 读不出来：${error?.message ?? error}`)
+    }
+    if (!Array.isArray(migrationPlan)) throw new Error('--migration-plan 必须是一个数组')
+  }
+  return resolveMigrationPlanDigest({
+    migrationPlan,
+    migrationPlanDigest: typeof explicitDigest === 'string' && explicitDigest !== '' && explicitDigest !== 'true'
+      ? explicitDigest : null,
+  })
+}
+
 export function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv)
   try {
@@ -417,7 +471,7 @@ export function main(argv = process.argv.slice(2)) {
       packageZipPath: packageZipArg,
       installerPath: requireString(args, 'installer'),
       notesPath: requireString(args, 'notes'),
-      migrationPlanDigest: requireString(args, 'migration-plan-digest'),
+      migrationPlanDigest: migrationPlanDigestFromArgs(args.get('migration-plan'), args.get('migration-plan-digest')),
       rollbackPolicy: args.get('rollback-policy') ?? 'program-only',
       keyId: requireString(args, 'key-id'),
       privateKeyPem: readFileSync(requireString(args, 'private-key'), 'utf8'),

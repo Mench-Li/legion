@@ -57,6 +57,9 @@
 | §6.3 补丁层成对判据的读数来源 | `product/update/release.mjs` 的 `dshPatchBindings`（签名覆盖） | 发布方声明；空表 = 没测过 → 客户端硬拒；不从本机推断 |
 | §6 磁盘余量判据的读数 | `readFreeBytes`（`statfsSync` 的 `bavail`）+ `directoryBytes` | 读不到 → `null` → 拦；**不**估一个乐观的数 |
 | `minWindowsBuild` 门禁 | `product/update/platform-build.mjs` | 三态；读不出本机 build 是**失败**不是跳过；`hostPlatform` ≠ 目标 `platform` |
+| §4 line 121「固定迁移计划」 | `migration.mjs` 的 `migrationPlanDigest` + `EMPTY_MIGRATION_PLAN_DIGEST` | 发布端与客户端用**同一个函数**；不符 → `install-migration-plan-mismatch` |
+| §6 line 132 自动检查的开关 | `createCheckScheduler({ automatic })` ← `config.checkOnStartup` | 关掉时不安排任何定时器；手动检查不受影响 |
+| **全链路联合守卫** | `product/update/integration.test.mjs` | 不注入任何业务读数：发布 → 托管 → 检查 → 下载 → 事务 → helper → 提交 |
 | §6 重启后复用前重新校验 | `cache.verifyReady` | 篡改缓存文件的用例证明它真的重算摘要 |
 | §6 取消不影响当前程序 | `cache.discard` | 只删 `.part`；取消不进失败退避 |
 | §7 有界操作表 | `desktop/update-service.mjs` + `update-preload.cjs` | 17 条 IPC 面用例：路径/URL/多余字段一律拒 |
@@ -272,6 +275,18 @@ JSON 示例里是文档化的、被解析、被给默认值，而**全仓没有�
 | ⑭ | Windows 版本 | `minWindowsBuildRequired` 无调用方、`windowsBuild` 是死参数 | 门禁**从未生效** | **fail-open** |
 | ⑮ | 迁移计划 | `migrationPlanDigest` 无人比对，`migrations` 从不传；`BAD_MIGRATION_PLAN` 从未 emit | 迁移被**静默跳过** | **fail-open** |
 | ⑯ | `checkOnStartup` | 键被解析、被文档化，无消费者 | 用户的"关闭"被静默忽略 | **fail-open** |
+| ⑰ | 补丁层成对表（**第二次**） | `validateRelease` 校验了它，投影**不携带**它 | 客户端拿到的仍是 `undefined` → 仍被拦 | fail-closed |
+
+⑰ 值得单独一句：它是**同一个字段的第二次失误**——⑫ 把字段加进了签名清单，
+而 `validateRelease` 的投影没有携带它。**加密清单里有它**，而**客户端会读的
+那份对象里没有**。抓出它的是 `integration.test.mjs` 的全链路用例：各层单测
+都过（夹具自己给了 `patchBindings`），而真实链路上客户端永远给不出。
+
+  > 一个只被校验、不被携带的字段，与一个不存在的字段，
+  > 在调用点上是同一个东西。
+
+这也是本文件加 `integration.test.mjs` 的**直接理由**：六条判据各自的单测
+做不到"联合守卫"，因为它们的夹具正是当年掩盖缺陷的东西。
 
 它们共同的：
 

@@ -5,6 +5,7 @@ import { PassThrough } from 'node:stream'
 import { readFileSync } from 'node:fs'
 import { runInNewContext } from 'node:vm'
 import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
 import { canNavigate, closeAction, createBridgeClient, desktopRequestHeaders, externalUrl, workbenchTarget } from './runtime.mjs'
 import { failureMessage, portConflictMessage } from './messages.mjs'
 
@@ -126,6 +127,100 @@ test('sandbox-compatible preload exposes only the startup command allowlist', as
 
 test('startup failure identifies missing execution identity instead of blaming the network', () => {
   assert.equal(failureMessage('ENFORCEMENT_IDENTITY_MISSING'), '缺少执行身份配置，请完成首次设置。')
+})
+
+test('★★★ 升级期间被挡下的启动：说"正在升级"，不说"无法启动"，也不给错误代码', () => {
+  // 这两个码来自 `barrier.mjs` 的 `startupGate`，意思是"有一次升级正在进行
+  // 或尚未收尾"——一个**正常的、会自己结束**的状态。
+  //
+  // 在此之前它们不在 `remedies` 表里，于是落到兜底「请查看诊断信息后重试。」，
+  // 显示在「Legion 暂时无法启动」之下。也就是说：用户在一次正常升级进行中
+  // 重新打开 Legion，看到的是"这个软件坏了"。
+  //
+  //   > 一个"看起来像故障"的正常状态，会换来用户针对故障才该做的处置——
+  //   > 重装、删数据目录、联系管理员，而其中任何一个都可能把升级弄坏。
+  for (const code of ['UPDATE_MAINTENANCE', 'UPDATE_TRANSACTION_UNFINISHED']) {
+    const message = failureMessage(code)
+    assert.notEqual(message, '请查看诊断信息后重试。', `${code} 落到了兜底文案（表里没有它）`)
+    assert.match(message, /升级|维护/, `${code} 的文案没有说明"这是升级/维护"：${message}`)
+    // ★ 必须说"稍候/等待"：用户唯一该做的动作是等，而不是修。
+    assert.match(message, /稍候|等待/, `${code} 的文案没有让用户等：${message}`)
+  }
+  // 最危险的那一条要明确劝阻删数据目录（`adviceFor('recovery-required')` 的意图）。
+  assert.match(failureMessage('UPDATE_TRANSACTION_UNFINISHED'), /不要.*删除数据目录/)
+})
+
+/**
+ * 在 VM 里跑 `startup.mjs`，拿到它真正的 `render`。
+ *
+ * `startup.mjs` 是一个**浏览器脚本**（模块作用域里就 `querySelector` 并订阅
+ * `window.legion`），所以它在 Node 里 import 不进来。给它一套最小的 DOM 替身
+ * 之后，`render` 会注册到 `window.legion.onState` 上，于是断言可以打在
+ * **真正渲染出来的文案**上，而不是源码字符串上。
+ *
+ * 源码文本断言在这里是不够的：`heading.textContent = false ? '正在升级' : …`
+ * 里那个字符串仍然在文件里，而用户看到的是"无法启动"。
+ *
+ * ★ 它的 `import { failureMessage, … } from './messages.mjs'` 被剥掉，
+ *   改由 VM 上下文注入**真正的**那两个函数——注入替身会让文案断言失去意义。
+ */
+function renderStartup() {
+  const elements = new Map()
+  const makeElement = (selector) => {
+    const node = {
+      selector, textContent: '', hidden: false, disabled: false, listeners: {},
+      addEventListener(type, fn) { node.listeners[type] = fn },
+      querySelector: () => makeElement(`${selector} > *`),
+      reset() {},
+    }
+    elements.set(selector, node)
+    return node
+  }
+  let render = null
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'startup.mjs'), 'utf8')
+    .replace(/^import .*$/m, '')
+  const context = {
+    document: { querySelector: (selector) => elements.get(selector) ?? makeElement(selector) },
+    window: {
+      legion: {
+        onState: (fn) => { render = fn },
+        status: () => Promise.resolve(null), retry: () => {}, stop: () => {},
+      },
+    },
+    // 真的那两个函数，不是替身。
+    failureMessage, portConflictMessage,
+    FormData: class { get() { return null } },
+    console,
+  }
+  runInNewContext(source, context)
+  return { render, elements }
+}
+
+test('★★★ 升级期间的启动拒绝渲染成"正在升级"，而不是"无法启动"', () => {
+  for (const code of ['UPDATE_MAINTENANCE', 'UPDATE_TRANSACTION_UNFINISHED']) {
+    const { render, elements } = renderStartup()
+    assert.equal(typeof render, 'function', 'startup.mjs 没有注册 render')
+    render({ state: 'failed', code })
+    const heading = elements.get('#heading').textContent
+    const detail = elements.get('#detail').textContent
+    assert.equal(heading, 'Legion 正在升级', `${code} 的标题是「${heading}」`)
+    // ★ 正文里**不该**出现错误代码：那串码只对排查故障的人有意义，而这里
+    //   不是故障。出现了就意味着它落到了通用失败分支。
+    assert.equal(detail.includes(code), false, `${code} 的正文里出现了错误代码：${detail}`)
+    assert.match(detail, /稍候|等待/, `${code} 的正文没有让用户等：${detail}`)
+    // ★ 不显示进度条：一条不动的进度条读起来是"卡住了"。
+    assert.equal(elements.get('#progress').hidden, true, `${code} 显示了进度条`)
+    // ★ 但动作区要留着：升级可能刚好做完了，重试是用户唯一该做的事。
+    assert.equal(elements.get('#actions').hidden, false, `${code} 把动作区藏起来了（用户没法重试）`)
+  }
+})
+
+test('★ 真正的故障仍然说"无法启动"并给出错误代码', () => {
+  // 反向对照：上面那条不能是靠"什么状态都显示正在升级"通过的。
+  const { render, elements } = renderStartup()
+  render({ state: 'failed', code: 'PORT_IN_USE' })
+  assert.equal(elements.get('#heading').textContent, 'Legion 暂时无法启动')
+  assert.match(elements.get('#detail').textContent, /PORT_IN_USE/)
 })
 
 test('port conflict help names the service and port and rejects untrusted detail', () => {

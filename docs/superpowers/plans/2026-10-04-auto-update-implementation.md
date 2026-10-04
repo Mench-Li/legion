@@ -345,16 +345,44 @@ node scripts/update/verify-host.mjs --origin <生产 origin> --prefix /legion \
 - **未接 CI 的真实 Electron 运行**。桌面端用例全部不依赖 Electron
   （`update-service.mjs` 延迟导入它），所以"面板窗口真的能加载"这件事
   没有自动化证据。
+- **阶段 D 的全部内容**（签名真安装包、干净机器安装、N-1→N、文件占用与断电
+  故障注入、召回演练，以及生产 HTTPS 源、存储商、签名发布方、公钥与责任人）。
+  设计 §10 要求真机验收，而测试替身的成功**不能**替代它——详见 §6。
+
+### 6.2.1 "沉默的判据"：有开关、有实现、**没有要求**
+
+下面这些是上面那条模式的**弱形式**。它们的形状一样（一个判据的输入在生产里
+没有来源），但**方向相反**：这里没有"承诺没有兑现"，因为**没有任何承诺**——
+设计要求里没有那一条，产品清单里也没有承载它的字段。所以修法不是"接上生产方"
+（那会变成**发明**一条策略），而是**把它记下来**，让读代码的人不会以为它在生效。
+
+| 位置 | 参数 | 现状 | 为什么**不是**缺陷 |
+|---|---|---|---|
+| `preflight.mjs` `checkCompatibility` | `minDshVersionMajor` | 默认 `null` = 不设下限，生产里无人传 | 设计 §里没有"最低 DSH 主版本"这条要求，也没有字段承载它。与 `minWindowsBuild` 的区别正在这里：后者**是**设计要求，且清单里有字段 |
+| `preflight.mjs` `checkDiskSpace` | `diskPolicy` | 默认 `DEFAULT_DISK_POLICY`（3×/2×/64MiB） | 它是一条**策略**而不是一个读数：默认值本身就是"正确的那一个"，所以判据仍然成立 |
+
+对照之下，⑭ 的 `minWindowsBuild` 之所以是真缺陷，恰恰因为设计**要求**了它、
+清单里也**有**那个字段——**要求存在、载体存在，而链接不存在**。
+
+  > "有开关没接线"与"没要求所以没线"，在源码里长得一模一样，
+  > 而它们该做的事相反：前者要接上，后者只需要被说出来。
 
 ## 7. 复现证据
 
 ```bash
-# 全部自动更新相关用例（130 条）
-node --test product/update/*.test.mjs desktop/update-*.test.mjs \
+# 全部自动更新相关用例（546 条）
+node --test product/update/*.test.mjs product/upgrade/*.test.mjs \
+  desktop/update-*.test.mjs desktop/main.test.mjs \
   scripts/update/*.test.mjs product/launcher/update-gate.test.mjs \
-  desktop/scripts/shell-files.test.mjs
+  desktop/scripts/shell-files.test.mjs desktop/scripts/update-payload.test.mjs
 
-# 各模块的装载期自检汇总（17 层）
+# 全链路集成（发布 → 托管 → 检查 → 下载 → 事务 → helper → 提交）
+node --test product/update/integration.test.mjs
+
+# 接线层：六个读数的生产方
+node --test desktop/update-wiring.test.mjs
+
+# 各模块的装载期自检汇总（22 层）
 node -e "import('./product/update/index.mjs').then(async m => console.log(JSON.stringify(await m.selfCheckAll(), null, 2)))"
 
 # 打包闭包判据

@@ -12,9 +12,11 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { runInNewContext } from 'node:vm'
 
 import {
-  describeCommandResult, describeLastCheck, describeVersionLine, formatBytes, projectView, render,
+  describeCommandResult, describeLastCheck, describePendingTasks, describeVersionLine, formatBytes,
+  projectView, render,
 } from './update-panel.mjs'
 
 const DIGEST = 'a'.repeat(64)
@@ -334,6 +336,95 @@ test('命令结果的提示：稍后与取消都不是失败', () => {
   const failed = describeCommandResult('update.install', { ok: false, reason: '健康检查失败，已回退' })
   assert.equal(failed.ok, false)
   assert.match(failed.text, /回退/)
+})
+
+test('★ 安装确认显示在途任务：三态，"读不到"不显示成"没有"', () => {
+  // 设计 §7 line 150。
+  assert.match(describePendingTasks(null), /未知/)
+  assert.match(describePendingTasks(undefined), /未知/)
+  assert.match(describePendingTasks('nope'), /未知/)
+  assert.equal(describePendingTasks([]), '在途任务：没有')
+  assert.match(describePendingTasks([{ id: 'a', state: 'in_progress' }]), /1 个在跑/)
+  assert.match(describePendingTasks([{ id: 'a', state: 'Running' }]), /1 个在跑/)
+  assert.match(describePendingTasks([{ id: 'a', state: '全新状态' }]), /认不出/)
+  // 只有已完成/等待的任务 → "没有"，但要把总数说清楚。
+  const idle = describePendingTasks([{ id: 'a', state: 'done' }, { id: 'b', state: 'todo' }])
+  assert.match(idle, /^在途任务：没有/)
+  assert.match(idle, /2 个/)
+})
+
+test('★★ 读不到时的说法里不能出现"没有在途"这个结论', () => {
+  // 用户会在"看起来环境干净"的界面上按下一个正在被任务使用的升级，
+  // 所以这一条单独钉住：未知与没有是两句话。
+  for (const reading of [null, undefined, 'nope', 42, {}]) {
+    const text = describePendingTasks(reading)
+    assert.match(text, /未知/, `读不到时没有说"未知"：${text}`)
+    assert.equal(text.includes('在途任务：没有'), false, `读不到被说成了"没有"：${text}`)
+  }
+})
+
+test('★ projectView 把在途任务读数带出来（界面才有东西可显示）', () => {
+  const withTasks = projectView({ state: 'ready', usable: true, pendingTasks: [{ id: 'a', state: 'in_progress' }] })
+  assert.match(withTasks.taskSummary, /1 个在跑/)
+  const without = projectView({ state: 'ready', usable: true, pendingTasks: null })
+  assert.match(without.taskSummary, /未知/)
+})
+
+test('★★ update preload 暴露的命令是固定集合，且 install 不接受任务读数', () => {
+  // 这是渲染进程能看到**全部**东西。`main.test.mjs` 用同一套手法
+  // （在一个新 context 里跑 preload 源码）守 `preload.cjs`。
+  let exposed = null
+  const calls = []
+  const filename = fileURLToPath(new URL('./update-preload.cjs', import.meta.url))
+  runInNewContext(readFileSync(filename, 'utf8'), {
+    require: () => ({
+      contextBridge: { exposeInMainWorld(_name, api) { exposed = api } },
+      ipcRenderer: {
+        invoke: (_channel, command, payload) => {
+          calls.push([command, payload])
+          return Promise.resolve({ ok: true })
+        },
+        on() {}, removeListener() {},
+      },
+    }),
+  })
+  assert.notEqual(exposed, null, 'update-preload.cjs 没有暴露任何东西')
+  assert.deepEqual(Object.keys(exposed).sort(), [
+    'cancelDownload', 'check', 'download', 'install', 'snooze', 'status', 'subscribe', 'tasks',
+  ])
+
+  // ★ `install` 只接受两个参数：身份的两半。任务读数**不是**它的入参。
+  calls.length = 0
+  return exposed.install('rel-1.0.0', DIGEST).then(() => {
+    assert.equal(calls.length, 1)
+    const [command, payload] = calls[0]
+    assert.equal(command, 'update.install')
+    assert.deepEqual(Object.keys(payload).sort(), ['manifestDigest', 'releaseId'],
+      'install 的载荷出现了第三个字段：在途任务读数是预检的输入，不能来自渲染进程')
+  })
+})
+
+test('update preload：tasks 是无参数只读命令', () => {
+  let exposed = null
+  const calls = []
+  const filename = fileURLToPath(new URL('./update-preload.cjs', import.meta.url))
+  runInNewContext(readFileSync(filename, 'utf8'), {
+    require: () => ({
+      contextBridge: { exposeInMainWorld(_name, api) { exposed = api } },
+      ipcRenderer: {
+        invoke: (_channel, command, payload) => { calls.push([command, payload]); return Promise.resolve({ ok: true }) },
+        on() {}, removeListener() {},
+      },
+    }),
+  })
+  return exposed.tasks().then(() => {
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0][0], 'update.tasks')
+    // 载荷是**空对象**：无参数命令不该有可传的输入。
+    // 用 JSON 比较：vm 里造出来的对象与这里的对象不是同一个 realm 的
+    // `Object.prototype`，`deepStrictEqual` 会因为原型不同而失败。
+    assert.equal(JSON.stringify(Object.keys(calls[0][1] ?? {})), '[]')
+  })
 })
 
 test('formatBytes 的边界', () => {

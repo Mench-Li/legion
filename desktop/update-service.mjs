@@ -53,11 +53,15 @@ async function electron() {
 
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { join } from 'node:path'
+import { describeTaskReadings } from '../product/upgrade/task-state.mjs'
 
 /** §7 那张表的**精确**命令名。除此之外一律拒绝。 */
 export const UPDATE_COMMANDS = Object.freeze([
   'update.status',
   'update.check',
+  // 只读：在途任务读数（设计 §7 line 150 的展示读数）。它没有参数、
+  // 不接受任何输入，所以把它加进白名单不会扩大"preload 暴露面"。
+  'update.tasks',
   'update.download',
   'update.cancelDownload',
   'update.install',
@@ -203,6 +207,13 @@ export function createUpdateService({
   createPanel = defaultPanelFactory,
   onNotify = () => {},
   log = () => {},
+  /**
+   * 在途任务读数来源（**主进程**提供）。
+   *
+   * 返回数组 = 读到了（`[]` 表示确实没有任务）；返回 `null`/非数组 = 读不到。
+   * 渲染进程**不能**提供这个读数：它是预检的输入（见 `update.install`）。
+   */
+  readTasks = null,
 } = {}) {
   if (client === null || typeof client !== 'object') throw new Error('createUpdateService 需要 client')
 
@@ -274,12 +285,48 @@ export function createUpdateService({
         if (!input.ok) return input
         return client.cancelDownload(input.operationId)
       }
+      /**
+       * 只读：在途任务读数（设计 §7 line 150「安装确认显示是否有在途任务」）。
+       *
+       * ★ 这是**展示**用的读数，与安装时那条**判据**用的读数分开取。
+       *   两者由同一个 provider 提供（主进程里那一个），所以"界面说有 2 个
+       *   在跑"与"预检拦下这次安装"不会互相矛盾；但它们不是同一次调用——
+       *   展示发生在用户打开面板时，判据发生在用户按下安装时，中间任务
+       *   完全可能变化。把展示的读数**复用**为判据的输入，就是拿一个可能
+       *   过期的读数去决定要不要动程序目录。
+       */
+      case 'update.tasks': {
+        if (typeof readTasks !== 'function') {
+          return Object.freeze({ ok: false, code: UPDATE_INPUT_CODES.UNAVAILABLE,
+            reason: '本机没有配置在途任务读数来源' })
+        }
+        let reading
+        try {
+          reading = await readTasks()
+        } catch (error) {
+          return Object.freeze({ ok: false, code: UPDATE_INPUT_CODES.UNAVAILABLE,
+            reason: `读在途任务失败：${error?.message ?? error}` })
+        }
+        // ★ 读不到就是 `ok: false`，**不是** `tasks: []`。
+        //   界面上"未知"与"没有"是两句不同的话（见 describePendingTasks）。
+        if (reading === null || !Array.isArray(reading)) {
+          return Object.freeze({ ok: false, code: UPDATE_INPUT_CODES.UNAVAILABLE,
+            reason: '读不到在途任务读数：查不到不等于没有在途任务' })
+        }
+        return Object.freeze({ ok: true, code: null, reason: null,
+          tasks: Object.freeze(reading.map((item) => Object.freeze({ id: item?.id ?? null, state: item?.state ?? null }))),
+          summary: describeTaskReadings(reading) })
+      }
       case 'update.install': {
         const input = validateTargetInput(payload)
         if (!input.ok) return input
-        const result = await client.install(input.target.releaseId, input.target.manifestDigest, {
-          pendingTasks: payload?.pendingTasks ?? null,
-        })
+        // ★ 不读 `payload.pendingTasks`。
+        //
+        //   在途任务读数是预检的**输入**（对 `[]` 判 ok、对 `null` 判 unknown），
+        //   所以它不能来自渲染进程——一个能传空数组的渲染进程就能让一次
+        //   "任务正在跑"的升级通过预检。主进程自己读（它有 bridge 与
+        //   team-hub 的端口，渲染进程都没有）。
+        const result = await client.install(input.target.releaseId, input.target.manifestDigest)
         return Object.freeze({ ...result, code: result.code ?? null })
       }
       case 'update.snooze':

@@ -508,6 +508,11 @@ async function stageTest() {
         'product/update/health.test.mjs',
         'product/update/install.test.mjs',
         'product/update/modules.test.mjs',
+        // 在途任务读数：词表（两套真实词表的一致性）与生产端。
+        // 这两条守的是"接上真实读数会不会永久阻塞升级"那个缺陷。
+        'product/upgrade/task-state.test.mjs',
+        'product/upgrade/task-readings.test.mjs',
+        'product/upgrade/preflight.test.mjs',
         'product/launcher/update-gate.test.mjs',
         'desktop/update-service.test.mjs',
         'desktop/update-panel.test.mjs',

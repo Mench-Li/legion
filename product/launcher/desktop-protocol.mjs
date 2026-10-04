@@ -1,6 +1,8 @@
 export const DESKTOP_PROTOCOL_VERSION = 1
 export const MAX_LINE_BYTES = 64 * 1024
-const TYPES = new Set(['start', 'status', 'stop', 'detach', 'restart', 'prepare-runtime', 'configure-workspace', 'configure-identity', 'configure-model'])
+// `tasks` 是一个**读**命令（在途任务读数，设计 §7 line 150）。
+// 与 `status` 并列放在前面：它们都不改变产品状态。
+const TYPES = new Set(['start', 'status', 'tasks', 'stop', 'detach', 'restart', 'prepare-runtime', 'configure-workspace', 'configure-identity', 'configure-model'])
 
 export function protocolError(code) {
   const error = new Error(code)

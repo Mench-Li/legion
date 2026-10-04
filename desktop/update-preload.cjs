@@ -51,16 +51,37 @@ contextBridge.exposeInMainWorld('legionUpdate', Object.freeze({
     return send('update.cancelDownload', { operationId })
   },
   // —— update.install：releaseId + manifestDigest ——
-  install: (releaseId, manifestDigest, pendingTasks = null) => {
+  //
+  // ★ **不接受**在途任务读数。
+  //
+  //   早先这里接受第三个参数 `pendingTasks`，注释写的是"只用于界面展示"。
+  //   那句话与该值的**作用**不符：它会一路流进预检
+  //   （`runPreflight({ tasks })`），而预检对 `[]` 判 `ok`（放行）、对
+  //   `null` 判 `unknown`（拦）。
+  //
+  //   ★ 说明准确一点：主进程那边的 `validateTargetInput` 要求载荷**恰好**
+  //     是 `releaseId`/`manifestDigest` 两个字段，所以那个额外的
+  //     `pendingTasks` 实际上到不了预检——它是**不可达**的，不是一条
+  //     可被利用的绕过。这里删掉它的理由是另外两条：
+  //
+  //       ① 一段"看起来能把安全判据说成安全"的代码，下一次有人放宽
+  //          字段集判据时就会变成一条真的绕过；不可达的安全性靠的是
+  //          **另一个文件**里的一个判据，而那个判据没有义务一直这样。
+  //       ② 注释与作用不符本身就是缺陷：读它的人会以为任务读数是由
+  //          界面提供的，从而在别处继续这样接。
+  //
+  //   这个读数现在完全由主进程读：它有 bridge、能连上 team-hub 的端口，
+  //   而渲染进程两样都没有。
+  install: (releaseId, manifestDigest) => {
     const value = target(releaseId, manifestDigest)
     if (value === null) return Promise.resolve({ ok: false, code: 'UPDATE_IPC_BAD_INPUT', reason: '安装目标的身份不合法' })
-    // 在途任务的读数只用于界面展示"是否有任务在跑"，因此只允许一个很小的
-    // 数字与一个字符串数组，不接受任意对象。
-    const tasks = Array.isArray(pendingTasks)
-      ? pendingTasks.filter((item) => typeof item === 'string').slice(0, 64)
-      : null
-    return send('update.install', { ...value, pendingTasks: tasks })
+    return send('update.install', value)
   },
+  // —— update.tasks：无参数（只读；设计 §7 line 150 的展示读数） ——
+  //
+  // ★ 这是一个**只读**命令，且它返回的是主进程自己读到的读数——
+  //   渲染进程既不能提供它、也不能影响它。它只用于显示"是否有在途任务"。
+  tasks: () => send('update.tasks', {}),
   // —— update.snooze：无参数（"稍后"固定 24 小时，不接受时长） ——
   snooze: () => send('update.snooze', {}),
   // —— update.subscribe：单向状态推送 ——

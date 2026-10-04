@@ -30,6 +30,7 @@ import { createUpdateClient } from '../product/update/client.mjs'
 import { runInstallTransaction } from '../product/update/install.mjs'
 import { writeTransactionFile, clearTransactionFile } from '../product/update/helper.mjs'
 import { healthSpecFromProcesses } from '../product/update/health.mjs'
+import { normalizeTaskReadings } from '../product/upgrade/task-state.mjs'
 import { PROCESS_SPECS } from '../product/process-manifest.mjs'
 import { createUpdateService, registerUpdateIpc } from './update-service.mjs'
 
@@ -140,6 +141,10 @@ export async function resolveUpdateRuntime({
     ...(createPanel === undefined ? {} : { createPanel }),
     onNotify,
     log,
+    // ★ 在途任务的**展示**读数（设计 §7 line 150）。主进程提供：
+    //   它有 bridge 与 team-hub 的端口，渲染进程两样都没有。
+    //   读不到 → `null` → 界面显示"未知"，而不是"没有"。
+    readTasks: () => readPendingTasks({ bridge }),
   })
 
   let unregister = () => {}
@@ -303,8 +308,37 @@ export function createInstallTransactionRunner({
  *   所以：拿不到真实读数时**返回 null**，让调用方走 fail-closed
  *   （不写健康规格 → helper 不提交），而不是拿默认值去凑一次检测。
  */
-export async function readLauncherPorts({ bridge = null } = {}) {
+/**
+ * 本次在途任务读数（设计 §7 line 150：安装确认要显示有没有在途任务）。
+ *
+ * @returns {Promise<ReadonlyArray<object>|null>} `null` = **没读到**（不是"没有任务"）
+ *
+ * ★ 为什么 `null` 与 `[]` 必须分开。
+ *
+ *   `runPreflight` 对 `tasks: null` 的处置是 `unknown`（"查不到在途任务不等于
+ *   没有在途任务"），对 `[]` 的处置是 `ok`。这两个结论在**升级要不要继续**
+ *   上是相反的，而它们最容易在实现里被混成一件事——一个 `catch { return [] }`
+ *   就会把"读不到"说成"环境是干净的"。
+ *
+ *   所以这里在任何失败路径上都返回 `null`，把 fail-closed 交给预检。
+ *   返回 `null` 的表现是升级停在"没有拿到任务读数"（安全，可重试），
+ *   而返回 `[]` 的表现是升级在**任务正在跑**的时候开始换程序。
+ */
+export async function readPendingTasks({ bridge = null, timeoutMs = null } = {}) {
   if (bridge === null || typeof bridge.request !== 'function') return null
+  let reading
+  try {
+    reading = await bridge.request('tasks', timeoutMs === null ? {} : { timeoutMs })
+  } catch {
+    return null
+  }
+  // ★ 只有 `ok: true` **且**带着数组时才算读到了。
+  //   `ok: true` 但没有 `tasks` 字段同样按"没读到"处置——不能把缺失当成空。
+  if (reading?.ok !== true || !Array.isArray(reading.tasks)) return null
+  return Object.freeze(reading.tasks)
+}
+
+export async function readLauncherPorts({ bridge = null } = {}) {  if (bridge === null || typeof bridge.request !== 'function') return null
   let status
   try {
     status = await bridge.request('status', {})
@@ -400,6 +434,22 @@ export function buildDesktopInstaller({
         return { ok: false, code: 'update-not-ready', reason: '没有已就绪的更新包' }
       }
 
+      // ★ 在途任务读数在这里**生产**出来（设计 §7 line 150）。
+      //
+      //   早先 `pendingTasks` 由调用方一路透传，而**没有任何一层**去读它
+      //   （`client.mjs` 的快照里恒为 `null`）——于是预检每次都停在
+      //   "没有拿到任务读数"，升级一次都进不去。
+      //
+      //   显式给了 `pendingTasks` 就用给的（测试与显式调用方），
+      //   否则向 Launcher 读。读不到 → `null` → 预检判 `unknown` → 拦。
+      let effectiveTasks = pendingTasks
+      if (!Array.isArray(effectiveTasks)) {
+        effectiveTasks = await readPendingTasks({ bridge })
+        log(effectiveTasks === null
+          ? '[update] 读不到在途任务读数，本次安装会被预检拦下（查不到 ≠ 没有）'
+          : `[update] 在途任务读数：${effectiveTasks.length} 条`)
+      }
+
       return runInstallTransaction({
         paths: {
           installDir: installRoot,
@@ -414,9 +464,18 @@ export function buildDesktopInstaller({
         identity,
         packagePath,
         txnId,
-        // `tasks: null` 会被预检拦成"未知"——那是刻意的：真实部署里调用方
-        // 必须给出任务读数（`update.install` 的 `pendingTasks`）。
-        tasks: Array.isArray(pendingTasks) ? pendingTasks.map((item) => (typeof item === 'string' ? { id: item, state: 'running' } : item)) : null,
+        // ★ 用 `normalizeTaskReadings` 归一化，而不是就地 `{ id, state: 'running' }`。
+        //
+        //   原先那一行给一个纯 id 字符串**编造**了状态 `'running'`——而
+        //   `'running'` 不是产品里任何一个真实状态（看板用 `in_progress`，
+        //   运行尝试用 `Running`）。编造出来的状态在判据里落进"认不出 →
+        //   按活跃处理"，结论**恰好**是拦——所以它看起来能用。
+        //
+        //   归一化之后这个条目是 `{ id, state: null }`，同样落进"认不出 →
+        //   活跃"，结论一样，但**理由是真的**：我们确实不知道它的状态。
+        //   `normalizeTaskReadings` 还会保留归一化失败的条目（不丢），
+        //   因为"丢掉它然后报没有活跃任务"会让升级踩着一条读不懂的记录开始。
+        tasks: normalizeTaskReadings(effectiveTasks).tasks,
         stopClaiming: () => runner.forward('stop-claiming'),
         drainInFlight: async () => {
           const status = await runner.forward('status')
@@ -601,6 +660,24 @@ export async function selfCheckWiringAsync() {
   if (withPorts !== null && ('workbench' in withPorts || 'broken' in withPorts)) {
     problems.push(`非法端口没有被丢掉：${JSON.stringify(withPorts)}`)
   }
+
+  // ★ 在途任务读数：读不到必须是 `null`，**不是**空数组。
+  //   预检对 `null` 判 `unknown`（拦），对 `[]` 判 `ok`（放行）——
+  //   把"读不到"说成"环境是干净的"是这一层最不能犯的错。
+  if (await readPendingTasks({ bridge: null }) !== null) problems.push('没有 bridge 时在途任务读数不是 null')
+  if (await readPendingTasks({ bridge: { request: async () => { throw new Error('nope') } } }) !== null) {
+    problems.push('bridge 报错时在途任务读数不是 null（读不到被说成了没有任务）')
+  }
+  if (await readPendingTasks({ bridge: { request: async () => ({ ok: false, code: 'X' }) } }) !== null) {
+    problems.push('ok:false 的读数不是 null')
+  }
+  // `ok: true` 但缺 `tasks` 字段：同样按"没读到"，不能当成空。
+  if (await readPendingTasks({ bridge: { request: async () => ({ ok: true }) } }) !== null) {
+    problems.push('缺 tasks 字段的读数被当成了空读数')
+  }
+  // 真正的空数组是**合法**读数（确实没有任务）。
+  const emptyTasks = await readPendingTasks({ bridge: { request: async () => ({ ok: true, tasks: [] }) } })
+  if (!Array.isArray(emptyTasks) || emptyTasks.length !== 0) problems.push('真正的空读数没有被接受')
 
   return Object.freeze({ ok: problems.length === 0, problems: Object.freeze(problems) })
 }

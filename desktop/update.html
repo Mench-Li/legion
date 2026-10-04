@@ -71,6 +71,10 @@
     <dt>更新通道</dt><dd id="channel">—</dd>
     <dt>上次检查</dt><dd id="last-check">尚未检查</dd>
     <dt>最新版本</dt><dd id="latest">—</dd>
+    <!-- 设计 §7 line 150：安装确认要显示**是否有**在途任务。
+         三态（未知 / 没有 / 有 N 个）由 describePendingTasks 决定，
+         而"读不到"不会被显示成"没有"。 -->
+    <dt>在途任务</dt><dd id="pending-tasks">—</dd>
   </dl>
 
   <div id="status" class="status">正在读取更新状态…</div>

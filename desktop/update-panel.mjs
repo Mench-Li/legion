@@ -8,8 +8,7 @@
 //   · `projectView(state)`：状态 → 界面读数（纯函数）。它同时决定：
 //       显示哪些按钮、状态那一行说什么、进度条怎么画、错误要不要显示。
 //     这是设计 §7 的界面规则**唯一**的落点。
-//   · 底部那一段只做"把 projectView 的结果写到 DOM 上"。
-//
+//   · 底部那一段只做"把 projectView 的结果写到 DOM 上"。//
 // ## 三条界面纪律
 //
 // ① **"稍后"不隐藏设置页**（设计 §7 line 146）。`projectView` 里
@@ -24,7 +23,12 @@
 // ③ **"安装并重启"只在就绪时出现，且从不自动触发**（设计 §7 line 148）。
 //    这里连"下载完自动开始安装"这种便利都不做：`install` 的可见性完全由
 //    `state === 'ready' || state === 'install-blocked'` 决定。
+//
+// ④ **安装确认要显示"是否有在途任务"**（设计 §7 line 150）。读数有三态，
+//    而"读不到"绝不能显示成"没有"——见 `describePendingTasks`。
 // ============================================================================
+
+import { classifyTaskState } from '../product/upgrade/task-state.mjs'
 
 /** 这些触发来源的失败要对用户显示完整理由与重试（设计 §6 line 134）。 */
 const USER_INITIATED_TRIGGERS = Object.freeze(['manual', 'retry'])
@@ -113,6 +117,19 @@ export function projectView(state, { formatTime = defaultFormatTime } = {}) {
       ? (current.unavailableReason ?? '本机尚未配置更新地址，检查更新不可用。')
       : (STATE_TEXT[status] ?? '未知状态。'),
     statusKind: statusTone(status, current.usable === false),
+    // —— 在途任务（设计 §7 line 150：安装确认要显示**是否有**在途任务）——
+    //
+    // ★ 三态，不是两态：
+    //
+    //   · `null`  —— 读不到。**不能**显示成"没有在途任务"：查不到与没有
+    //     是两件事，而用户在按下"立即安装"之前应当知道这一点
+    //     （预检也会因此在 `unknown` 上拦下来）。
+    //   · `[]`    —— 确实没有。
+    //   · 有内容  —— 逐个报出数量。
+    //
+    //   把 `null` 说成"没有"是本面板最不能犯的错：用户会在"看起来环境干净"
+    //   的界面上按下一个正在被任务使用的升级。
+    taskSummary: describePendingTasks(current.pendingTasks),
     // —— 按钮可见性 ——
     // 有候选、或在可重试的下载状态时，才显示"下载更新"。
     showDownload: current.usable !== false
@@ -192,6 +209,25 @@ export function formatBytes(bytes) {
 }
 
 /**
+ * 把在途任务读数转成一句人话（三态，见 `projectView` 里的注释）。
+ *
+ * 分类用的是升级侧**同一份**词表（`task-state.mjs`）：界面说"有 2 个在跑"
+ * 而预检说"可以装"，是这一层最坏的两种说法之一。共用一份词表就不会出现。
+ */
+export function describePendingTasks(tasks) {
+  if (tasks === null || tasks === undefined) return '在途任务：未知（读不到任务读数）'
+  if (!Array.isArray(tasks)) return '在途任务：未知（读数形状不对）'
+  if (tasks.length === 0) return '在途任务：没有'
+  const running = tasks.filter((task) => classifyTaskState(task?.state) === 'active').length
+  const unknown = tasks.filter((task) => classifyTaskState(task?.state) === 'unrecognized').length
+  if (running === 0 && unknown === 0) return `在途任务：没有（共 ${tasks.length} 个，都不在执行）`
+  const parts = []
+  if (running > 0) parts.push(`${running} 个在跑`)
+  if (unknown > 0) parts.push(`${unknown} 个状态认不出（按在跑处理）`)
+  return `在途任务：${parts.join('，')}`
+}
+
+/**
  * 把一次命令的结果转成一条提示。
  *
  * 「稍后」在这里被明确处理：它不是失败，也不该显示红色。
@@ -238,6 +274,7 @@ export function render(view, document) {
   set('channel', view.channelLine)
   set('last-check', view.lastCheckLine)
   set('latest', view.latestLine)
+  set('pending-tasks', view.taskSummary)
   set('hint', view.hint)
 
   const status = document.getElementById('status')
@@ -281,8 +318,30 @@ function bootstrap() {
   if (document === undefined) return
 
   let latest = null
+  // 在途任务读数：**单独**取（设计 §7 line 150 的展示读数）。
+  //
+  // ★ 初值是 `undefined`（= 不知道），**不是** `[]`。
+  //   `[]` 在界面上是一句"没有在途任务"的断言，而面板刚打开时并没有
+  //   任何依据说这句话。
+  let tasksReading
 
-  const redraw = () => { if (latest !== null) render(projectView(latest), document) }
+  const redraw = () => {
+    if (latest === null) return
+    // 展示读数与快照分开：它来自 `update.tasks`，而快照里没有这个字段。
+    render(projectView({ ...latest, pendingTasks: tasksReading === undefined ? null : tasksReading }), document)
+  }
+
+  /** 取一次展示用的在途任务读数。读不到就保持"未知"。 */
+  const refreshTasks = async () => {
+    if (typeof api.tasks !== 'function') return
+    try {
+      const reading = await api.tasks()
+      tasksReading = reading?.ok === true && Array.isArray(reading.tasks) ? reading.tasks : null
+    } catch {
+      tasksReading = null
+    }
+    redraw()
+  }
 
   const notify = (result) => {
     const described = describeCommandResult(null, result)
@@ -295,12 +354,15 @@ function bootstrap() {
     const result = await action()
     notify(result)
     redraw()
+    // 安装确认要显示当前的在途任务，所以每次操作之后都重新取一次。
+    await refreshTasks()
     return result
   }
 
   api.subscribe((state) => {
     latest = state
     render(projectView(state), document)
+    void refreshTasks()
   })
 
   const bind = (id, listener) => {
@@ -319,7 +381,9 @@ function bootstrap() {
   bind('install', handler('update.install', () => {
     const target = latest === null ? null : projectView(latest).target
     if (target === null) return Promise.resolve({ ok: false, code: 'UPDATE_IPC_BAD_INPUT', reason: '还没有可安装的版本。' })
-    return api.install(target.releaseId, target.manifestDigest, latest?.pendingTasks ?? null)
+    // ★ 不把在途任务读数发给主进程：它是预检的输入，渲染进程不可信。
+    //   界面上的那个读数只用于**显示**（见 `describePendingTasks`）。
+    return api.install(target.releaseId, target.manifestDigest)
   }))
   bind('close', () => globalThis.close())
 

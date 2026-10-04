@@ -11,6 +11,7 @@ import { DEFAULT_PORTS } from '../process-manifest.mjs'
 import { readDesktopSettings, selectedWorkspace, validateDesktopIdentity } from './desktop-settings.mjs'
 import { ENFORCEMENT_IDENTITY_ENV } from './enforcement-identity.mjs'
 import { discoverBackend } from './shared-backend.mjs'
+import { readPendingTasksFromLauncher } from '../upgrade/task-readings.mjs'
 
 export function desktopOptionsFrom({ workspace, env = process.env, nodePath = process.execPath } = {}) {
   const initial = launcherOptionsFrom({ env, nodePath })
@@ -262,6 +263,48 @@ export function createDesktopBridge({
         stopPending = false
         return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: true, payload: { state: 'stopped' } }
       }
+      // ── 在途任务读数（设计 §7 line 150：安装确认要显示有没有在途任务）──
+      //
+      // ★ 这是一个**读**命令，所以它不走队列（与 `status` 同样处置）：
+      //   它要能被用来回答"现在能不能装"，而排队等一次 start/stop 才能回答
+      //   这个问题会让答案在等待期间过期。
+      //
+      // ★ 读不到时返回 `ok: false` 且**不带** `tasks` 字段。
+      //   一个"读不到就返回空数组"的读数会让升级在**任务正在跑**的时候
+      //   认为环境是干净的——那是本模块最不能犯的错。
+      if (type === 'tasks') {
+        if (launcher === null) {
+          // ★ Launcher 还没起来 → **不**报"没有在途任务"。
+          //
+          //   常见的第一反应是返回空数组（"没起来当然没有任务"）。这里不这么做，
+          //   因为同一条推理在**别的**情况下会错：`launcher === null` 也可能是
+          //   "上一次启动留下了没被收敛的进程，而这次还没接管"。那种情况下
+          //   报空数组就是让升级在一个未知环境上动手。
+          //
+          //   代码与理由分开给出，于是"升级被拦"能查到**拦的原因是什么**——
+          //   而一个笼统的"没有拿到任务读数"会把排查方向引向任务本身。
+          return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: false,
+            payload: {
+              code: 'TASKS_LAUNCHER_NOT_STARTED',
+              reason: 'Launcher 未启动，因此读不到在途任务：这不等于没有在途任务（未收敛的旧进程也算）',
+            } }
+        }
+        const reading = await readPendingTasksFromLauncher(launcher.status(), {
+          token: credentials?.hub ?? null,
+        })
+        if (reading.ok !== true) {
+          return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: false,
+            payload: { code: safeCode(reading.code, 'TASKS_UNREADABLE'), reason: reading.reason } }
+        }
+        return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: true,
+          payload: {
+            tasks: reading.tasks,
+            total: reading.total,
+            observedAtMs: reading.observedAtMs,
+            source: reading.source,
+            summary: reading.summary,
+          } }
+      }
       return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: false, payload: { code: 'UNKNOWN_TYPE' } }
     } catch (error) {
       return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: false,
@@ -271,7 +314,10 @@ export function createDesktopBridge({
 
   function handle(request) {
     if (request.type === 'stop') { stopPending = true; launcher?.cancelPreparation?.() }
-    if (request.type === 'status') return Promise.resolve(run(request))
+    // ★ `status` 与 `tasks` 都是**读**命令，不进队列。
+    //   `tasks` 要能被用来回答"现在能不能装"；排队等一次 start/stop 才能
+    //   回答这个问题，会让答案在等待期间过期——而它正是升级前那一刻要用的。
+    if (request.type === 'status' || request.type === 'tasks') return Promise.resolve(run(request))
     const work = queue.then(() => run(request))
     queue = work.catch(() => {})
     return work

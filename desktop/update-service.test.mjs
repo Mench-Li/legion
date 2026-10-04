@@ -1,4 +1,4 @@
-﻿// desktop/update-service.test.mjs
+// desktop/update-service.test.mjs
 // ============================================================================
 // 更新 IPC 面的回归 —— 设计 §7 那张"有界操作"表
 //
@@ -73,7 +73,9 @@ function allowedEvent(service) {
  *   **所有**调用都是拒绝的（`panel === null`）。这一点本身就是一条判据，
  *   由「面板尚未打开时 → 拒绝」那个用例覆盖。
  */
-async function setupService({ client = createFakeClient(), panelUrl = 'file:///C:/legion/desktop/update.html' } = {}) {
+async function setupService({
+  client = createFakeClient(), panelUrl = 'file:///C:/legion/desktop/update.html', readTasks = null,
+} = {}) {
   const contents = {
     mainFrame: { url: panelUrl }, id: 42, send() {},
   }
@@ -84,6 +86,7 @@ async function setupService({ client = createFakeClient(), panelUrl = 'file:///C
     client,
     desktopDir: 'C:\\legion\\desktop',
     createPanel: () => ({ window: panel, url: panelUrl, ready: Promise.resolve() }),
+    ...(readTasks === null ? {} : { readTasks }),
   })
   await service.showPanel()
   const event = { sender: contents, senderFrame: contents.mainFrame }
@@ -103,10 +106,22 @@ test('未知命令被拒绝：没有通用入口可以越权', async () => {
   }
 })
 
-test('暴露的命令恰好是设计 §7 那张表', async () => {
+test('暴露的命令恰好是设计 §7 那张表（+ 一个只读的 update.tasks）', async () => {
+  // 设计 §7 line 152 列了 5 条（status/check 算一条、download、
+  // cancelDownload、install、subscribe），加上 snooze。
+  //
+  // `update.tasks` 是**本实现新增**的一条，理由要写在这里：设计 §7 line 150
+  // 要求「安装确认显示是否有在途任务」，而那张表里没有一条命令能取到这个
+  // 读数（快照里也没有它）。它是**无参数**的只读命令，返回主进程自己读到的
+  // 读数——所以它不扩大"渲染进程能做什么"这个面。
   assert.deepEqual([...UPDATE_COMMANDS], [
-    'update.status', 'update.check', 'update.download', 'update.cancelDownload', 'update.install', 'update.snooze',
+    'update.status', 'update.check', 'update.tasks',
+    'update.download', 'update.cancelDownload', 'update.install', 'update.snooze',
   ])
+  // ★ 没有"传我一个 URL / 路径"的入口。
+  for (const command of UPDATE_COMMANDS) {
+    assert.equal(/fetch|url|path|exec|shell|spawn|open/.test(command), false, `${command} 看起来像是一个能越权的入口`)
+  }
 })
 
 // ---------------------------------------------------------------------------
@@ -278,14 +293,85 @@ test('稍后：转成 snooze，不改变"能不能安装"这件事', async () =>
   assert.equal(client.calls.at(-1)[0], 'snooze')
 })
 
-test('安装：只把身份与在途任务读数转交，不转交任何路径', async () => {
+test('安装：只把身份转交，不转交任何路径', async () => {
   const { service, client, event } = await setupService({ client: createFakeClient({ state: 'ready' }) })
   const result = await service.dispatch('update.install', { releaseId: RELEASE, manifestDigest: DIGEST }, event)
   assert.equal(result.ok, true)
   const [, call] = client.calls.at(-1)
   assert.equal(call.releaseId, RELEASE)
   assert.equal(call.manifestDigest, DIGEST)
-  assert.equal(call.pendingTasks, null)
+})
+
+test('★★ 安装：渲染进程**不可能**提供在途任务读数（它是预检的输入）', async () => {
+  // 在途任务读数决定预检的结论：`[]` → ok（放行）、`null` → unknown（拦）。
+  // 所以渲染进程若能提供它，就能把"任务正在跑"说成"没有任务"。
+  //
+  // 实际的防线是 `validateTargetInput` 的**精确字段集**判据
+  // （`['manifestDigest','releaseId']`，多一个字段就拒）。这一条把那条
+  // 防线与它的**目的**连起来：光说"多字段被拒"看不出为什么不能多。
+  const { service, client, event } = await setupService({ client: createFakeClient({ state: 'ready' }) })
+
+  // ① 带 `pendingTasks` 的载荷被输入校验直接拒掉，根本到不了 client。
+  const before = client.calls.length
+  const rejected = await service.dispatch('update.install', {
+    releaseId: RELEASE, manifestDigest: DIGEST,
+    pendingTasks: [],   // ← 企图把环境说成干净的
+  }, event)
+  assert.equal(rejected.ok, false)
+  assert.equal(rejected.code, 'UPDATE_IPC_BAD_INPUT')
+  assert.match(rejected.reason, /只接受 releaseId\/manifestDigest/)
+  assert.equal(client.calls.length, before, '被拒的载荷仍然被转交下去了')
+
+  // ② 合法载荷只带身份：client 拿不到任何任务读数（由主进程自己读）。
+  const accepted = await service.dispatch('update.install', { releaseId: RELEASE, manifestDigest: DIGEST }, event)
+  assert.equal(accepted.ok, true)
+  const [, call] = client.calls.at(-1)
+  assert.equal(call.pendingTasks, undefined,
+    'client 收到了来自渲染进程的任务读数')
+})
+
+test('★ update.tasks：只读读数，读不到是 ok:false 而不是空数组', async () => {
+  // 设计 §7 line 150 的**展示**读数。它与安装判据用的读数分开取，
+  // 但由同一个 provider 提供，所以界面与预检不会互相矛盾。
+  const { service, event } = await setupService({
+    client: createFakeClient({ state: 'ready' }),
+    readTasks: async () => [{ id: 't-1', state: 'in_progress' }, { id: 't-2', state: 'done' }],
+  })
+  const reading = await service.dispatch('update.tasks', {}, event)
+  assert.equal(reading.ok, true)
+  assert.equal(reading.tasks.length, 2)
+  assert.match(reading.summary, /1 个在跑/)
+  // ★ 投影只带 id/state（界面不需要别的，别的也不该过去）。
+  assert.deepEqual(Object.keys(reading.tasks[0]).sort(), ['id', 'state'])
+
+  // 确实没有任务：`[]` 是**合法**读数。
+  const empty = await setupService({ client: createFakeClient({ state: 'ready' }), readTasks: async () => [] })
+  const emptyReading = await empty.service.dispatch('update.tasks', {}, empty.event)
+  assert.equal(emptyReading.ok, true)
+  assert.deepEqual([...emptyReading.tasks], [])
+  assert.equal(emptyReading.summary, '没有任务')
+
+  // 读不到（provider 返回 null）→ `ok: false`，**不是** `tasks: []`。
+  const unreadable = await setupService({ client: createFakeClient({ state: 'ready' }), readTasks: async () => null })
+  const failed = await unreadable.service.dispatch('update.tasks', {}, unreadable.event)
+  assert.equal(failed.ok, false, '读不到被报成了成功')
+  assert.equal(failed.tasks, undefined, '读不到时给出了 tasks 字段')
+  assert.match(failed.reason, /查不到不等于没有/)
+
+  // provider 抛错 → 同样是 `ok: false`。
+  const throwing = await setupService({
+    client: createFakeClient({ state: 'ready' }),
+    readTasks: async () => { throw new Error('bridge 断了') },
+  })
+  const thrown = await throwing.service.dispatch('update.tasks', {}, throwing.event)
+  assert.equal(thrown.ok, false)
+  assert.match(thrown.reason, /bridge 断了/)
+
+  // 没有 provider（例如测试环境）→ 明确不可用，而不是假装"没有任务"。
+  const noProvider = await setupService({ client: createFakeClient({ state: 'ready' }) })
+  const absent = await noProvider.service.dispatch('update.tasks', {}, noProvider.event)
+  assert.equal(absent.ok, false)
+  assert.match(absent.reason, /没有配置/)
 })
 
 test('安装失败：把失败原因如实带出去（不假装成功）', async () => {

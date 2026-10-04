@@ -25,6 +25,7 @@ import {
   PREFLIGHT_CODES,
   PREFLIGHT_VERDICT_KINDS,
   PREFLIGHT_VERDICTS,
+  TERMINAL_TASK_STATES,
   checkCompatibility,
   checkDiskSpace,
   checkInFlightTasks,
@@ -156,19 +157,81 @@ test('③ ★★ 查不到任务读数必须是 `unknown`：查不到 ≠ 没有
 })
 
 test('③ 活跃任务让体检变红；收敛之后变绿；两种读数是分开的', () => {
+  // ★ 用**真实**词表：看板侧是 `in_progress`，尝试侧是 `Running`。
+  //   这两个值是 `team-hub/server.mjs` 的 `STATUSES` 与 `run-store.mjs` 的
+  //   `IN_FLIGHT_ATTEMPT_STATES` 里的原样字面量。
   const running = checkInFlightTasks({
-    tasks: [{ id: 'a', state: 'running' }, { id: 'b', state: 'completed' }],
+    tasks: [{ id: 'a', state: 'in_progress' }, { id: 'b', state: 'done' }],
   })
   assert.equal(running.verdict, 'blocked')
   assert.equal(running.activeCount, 1)
+  assert.equal(running.unrecognizedCount, 0, '真实状态被当成了认不出的状态')
   assert.deepEqual([...running.activeIds], ['a'])
 
   const drained = checkInFlightTasks({
-    tasks: [{ id: 'a', state: 'completed' }, { id: 'b', state: 'dead-letter' }],
+    tasks: [{ id: 'a', state: 'done' }, { id: 'b', state: 'Cancelled' }],
   })
   assert.equal(drained.verdict, 'ok')
   assert.equal(drained.activeCount, 0)
-  assert.deepEqual([...ACTIVE_TASK_STATES].includes('running'), true)
+  assert.equal(drained.unrecognizedCount, 0)
+
+  // ★★ 回归判据：真实词表必须在活跃集合里。
+  //
+  //   这一条是本次修掉的缺陷的守卫：原先的活跃集合是
+  //   `['claimed','running','awaiting-approval','cancelling','retrying']`，
+  //   与产品里任何一个生产方都对不上。
+  for (const state of ['in_progress', 'Running', 'Leased', 'AwaitingApproval']) {
+    assert.equal(ACTIVE_TASK_STATES.includes(state), true, `${state} 不在活跃集合里`)
+  }
+  // 而真实的"已完成"必须在终态集合里 —— 否则它们会被当成认不出的状态
+  // 按活跃处理，于是**一台有过任务历史的机器升级被永久拦下**。
+  for (const state of ['done', 'canceled', 'Completed', 'DeadLetter']) {
+    assert.equal(TERMINAL_TASK_STATES.includes(state), true, `${state} 不在终态集合里`)
+  }
+})
+
+test('③ ★★★ 回归：一整份"全都做完了"的看板读数必须放行', () => {
+  // 这是那个缺陷的**直接**复现形态。
+  //
+  // 旧词表下：`done` / `canceled` 既不在活跃集合、也不在终态集合里 →
+  // 全部落进 `unrecognized` → 按活跃处理 → verdict=blocked。
+  // 于是**任何有任务历史的机器都升不了级**，而被点名的全是早就做完的任务。
+  const r = checkInFlightTasks({
+    tasks: [
+      { id: 't-1', state: 'done' },
+      { id: 't-2', state: 'done' },
+      { id: 't-3', state: 'canceled' },
+      { id: 't-4', state: 'blocked' },   // 等人解阻：没在跑
+      { id: 't-5', state: 'in_review' }, // 等人评审：没在跑
+      { id: 't-6', state: 'todo' },
+      { id: 't-7', state: 'backlog' },
+    ],
+  })
+  assert.equal(r.verdict, 'ok', `全做完的看板把升级拦住了：${JSON.stringify(r.reasons)}`)
+  assert.equal(r.activeCount, 0)
+  assert.equal(r.unrecognizedCount, 0)
+
+  // 而只要有一个真在跑，就必须拦。
+  const oneRunning = checkInFlightTasks({ tasks: [{ id: 't-1', state: 'done' }, { id: 't-9', state: 'in_progress' }] })
+  assert.equal(oneRunning.verdict, 'blocked')
+  assert.deepEqual([...oneRunning.activeIds], ['t-9'])
+})
+
+test('③ ★★ 运行尝试读数同样按真实词表判：在途的拦、终态的放行', () => {
+  for (const state of ['Leased', 'PreparingWorkspace', 'BuildingContext', 'Running', 'Validating', 'HandingOff', 'AwaitingApproval']) {
+    const r = checkInFlightTasks({ tasks: [{ id: 'a', state }] })
+    assert.equal(r.verdict, 'blocked', `尝试状态 ${state} 没有被判为在途`)
+    assert.equal(r.unrecognizedCount, 0, `尝试状态 ${state} 被当成了认不出的状态`)
+  }
+  for (const state of ['Completed', 'Cancelled', 'DeadLetter']) {
+    const r = checkInFlightTasks({ tasks: [{ id: 'a', state }] })
+    assert.equal(r.verdict, 'ok', `尝试状态 ${state} 没有被判为已收敛`)
+  }
+  // ★ `RetryableFailure` 故意落在"认不出 → 按活跃"：它没在跑，但也**没有收敛**
+  //   （马上会有下一个尝试）。放进终态就是允许升级在重试间隙里动手。
+  const retryable = checkInFlightTasks({ tasks: [{ id: 'a', state: 'RetryableFailure' }] })
+  assert.equal(retryable.verdict, 'blocked')
+  assert.equal(retryable.unrecognizedCount, 1)
 })
 
 test('③ ★★ 认不出的状态按**活跃**处理（把它当完成会让升级踩着它开始）', () => {
@@ -178,7 +241,7 @@ test('③ ★★ 认不出的状态按**活跃**处理（把它当完成会让�
   assert.ok(r.reasons.some((x) => x.includes('some-new-state')), JSON.stringify(r.reasons))
 
   // 而一个明确在活跃集合里的状态**不算**"认不出"。
-  const known = checkInFlightTasks({ tasks: [{ id: 'x', state: 'awaiting-approval' }] })
+  const known = checkInFlightTasks({ tasks: [{ id: 'x', state: 'AwaitingApproval' }] })
   assert.equal(known.unrecognizedCount, 0)
   assert.equal(known.activeCount, 1)
 })

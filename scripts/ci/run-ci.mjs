@@ -519,6 +519,7 @@ async function stageTest() {
         'product/upgrade/preflight.test.mjs',
         'product/launcher/update-gate.test.mjs',
         'desktop/update-service.test.mjs',
+        'desktop/update-wiring.test.mjs',
         'desktop/update-panel.test.mjs',
         'desktop/scripts/shell-files.test.mjs',
         'desktop/scripts/update-payload.test.mjs',

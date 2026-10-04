@@ -533,6 +533,15 @@ export function buildDesktopInstaller({
   productMigrations = Object.freeze([]),
   /** breaking 迁移需要调用方显式声明（设计 §8 line 189 的回滚可达性）。 */
   allowBreakingMigrations = false,
+  /**
+   * 进程边界（`createInstallTransactionRunner` 的同名参数透传）。
+   *
+   * ★ 这是**唯一**一处允许替身进入安装路径的地方，而且它是诚实的：
+   *   事务文件在起进程**之前**就写好了，所以"桌面到底给了 helper 什么"
+   *   在替身之下是完整可观测的。用例注入它之后就不必真的起一个 node
+   *   （那会在 Windows 上留下一个短暂的句柄，让临时目录删不掉）。
+   */
+  spawnImpl = null,
   now = () => Date.now(),
   drainTimeoutMs = null,
   log = () => {},
@@ -544,6 +553,8 @@ export function buildDesktopInstaller({
     async install({ identity, release, packagePath, pendingTasks = null, onStage = () => {}, signal = null } = {}) {
       const runner = createInstallTransactionRunner({
         bridge, dataDir, installDir: installRoot, nodePath, helperEntry, now, drainTimeoutMs,
+        // 进程边界可注入（见 `buildDesktopInstaller` 的参数注释）。
+        spawnImpl,
       })
       const current = readRuntimeManifest(installRoot)
       const stage = (name) => { try { onStage(name) } catch (error) { log(`[update] 阶段回调报错：${error?.message ?? error}`) } }
@@ -578,6 +589,28 @@ export function buildDesktopInstaller({
         log(effectiveTasks === null
           ? '[update] 读不到在途任务读数，本次安装会被预检拦下（查不到 ≠ 没有）'
           : `[update] 在途任务读数：${effectiveTasks.length} 条`)
+      }
+
+      // ★ 端口读数也在**这里**取，而不是等到写事务文件那一刻（`spawnHelper` 里）。
+      //
+      //   事务文件是在**停服务之后**写的（设计 §8 的顺序），而端口是从
+      //   Launcher 的进程读数里取的。今天这条路能用，靠的是一个**没有写在
+      //   任何地方的**事实：`supervisor.status()` 只给出 `key/state/pid/…`，
+      //   端口是 `launcher.status()` 从 `plan.processes` 上补出来的，而
+      //   `plan.processes` 在停止之后**仍然在**。
+      //
+      //   也就是说：如果一个改动让 `status()` 不再列出已停止的进程（一个
+      //   很自然的"清理"），健康规格会**静默地**派生不出来，而后果是
+      //   helper fail-closed 到永不提交——每一次升级都失败，且原因看起来
+      //   像"服务没起来"。
+      //
+      //   在开始装之前取一次，就把这条依赖去掉了：那个时刻服务还在跑，
+      //   端口一定读得到。`update-wiring.test.mjs` 有一条断言守着"读端口
+      //   发生在停服务**之前**"。
+      const resolvedPorts = ports ?? await readLauncherPorts({ bridge })
+      if (resolvedPorts === null) {
+        log('[update] 拿不到 Launcher 的实际端口读数：健康检查的身份断言需要它，'
+          + '本次升级不会提交（helper 会按 fail-closed 处理）')
       }
 
       return runInstallTransaction({
@@ -712,9 +745,9 @@ export function buildDesktopInstaller({
           //   在别处再写一遍"哪个服务的哪个路径算健康"，两处会漂移——而漂移的
           //   表现是"升级成功之后用户发现某个服务是坏的"。
           //
-          //   ★ 端口用**实际读数**：显式给的优先，否则向 Launcher 要。
-          //     要不到就不写规格（见下面 health.ok 分支）。
-          const resolvedPorts = ports ?? await readLauncherPorts({ bridge })
+          //   ★ 端口来自**安装开始时**取的那一次读数（见 `install()` 里的
+          //     注释：事务文件是在停服务之后写的，而在那一刻再取端口就依赖
+          //     一个没写在任何地方的事实）。
           const health = resolvedPorts === null
             ? { ok: false, reason: '拿不到 Launcher 的实际端口读数（健康检查的身份断言需要它）' }
             : healthSpecFromProcesses({ processes: PROCESS_SPECS, ports: resolvedPorts })

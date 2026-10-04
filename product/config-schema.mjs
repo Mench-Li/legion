@@ -264,6 +264,25 @@ export const SCHEMA = defineSchema({
         + '这一档在 Windows 上通常是空的（pwsh 装在 ProgramFiles 或 System32），'
         + '但用户自装的 pwsh 只在这一档里——不读它就会把一个能画图标的机器报成"不支持"。',
     },
+    // ── 内嵌运行时解包：转发给解包子进程的操作系统键 ──
+    //
+    // `product/launcher/bundled-runtime.mjs:62-63` 把一张**写死的白名单**
+    //（SystemRoot / windir / ComSpec / TEMP / TMP / PATH）逐个按下标从 `process.env` 取出来，
+    // 转交给 `bundle-extract-worker.mjs`。文件名是 win32 上才走的那条路（非 win32 用 @electron/asar）。
+    //
+    // 为什么是"真实读取"而不是赋值左值：左侧 `Object.fromEntries([...])` 是**构造**新对象，
+    // 右侧 `process.env[key]` 确实在取值——所以它进 dynamicEnvReads，不进非 env 名单
+    //（对照 `allowlist.mjs` 的 `env[key] = ...`，那才是左值）。
+    // 键必须计算：`key` 由同一行的白名单数组给出，把六个名字逐条写进这里会与那行漂移。
+    {
+      file: 'product/launcher/bundled-runtime.mjs',
+      expr: 'env[key]',
+      reason: '解包子进程的环境白名单（SystemRoot / windir / ComSpec / TEMP / TMP / PATH）：'
+        + '逐个按下标从进程环境取值后整表交给 `bundle-extract-worker.mjs`。'
+        + '键由同一行的字面量数组给出，取值前先判"这个键在环境里存在且是字符串"，'
+        + '因此这里既不是写目标、也不是可以写死成六条的字面量读取点。'
+        + '（同一行有两处下标，扫描器按两处算；本登记按「文件 + 归一化键」覆盖它们。）',
+    },
   ],
   // 子进程的 env 键名 + 平台必需键名：都是「变量名」，不是本进程的读取点。
   // 不显式列出的话 `scan --check` 会要求把它们登记为读取点（P3-4 遇到过同类问题）。
@@ -340,6 +359,34 @@ export const SCHEMA = defineSchema({
       reason: '`node --test` 在测试子进程里设它。Legion **只读**它来判断"这一跑是不是测试"，'
         + '并据此拒绝构造真实的 npm 运行器（用例必须注入运行器）——它不改变任何产品行为',
     },
+    // ── 本进程**注入给子进程**、自己从不读的两个键（desktop 线）──
+    //
+    // 它们确实是环境变量名，只是**不属于本进程**——所以既不能进 `fields`
+    // （那等于宣称"产品可被配成这个"），也不能进 `nonEnvLiterals`
+    // （`runtime/config-schema.mjs:478` 那条纪律：非 env 名单管的是"根本不是环境变量的字面量"）。
+    // 它们在这里登记的**唯一**理由是 `scan --check` 只在 fields / nonEnvLiterals /
+    // prefixes / foreignEnv 四处找字面量的去处，而这两种都不属于前三类。
+    //
+    //   · LEGION_DESKTOP_MODE —— `product/launcher/launcher.mjs:866` 往 team-hub 与 workbench
+    //     子进程写 `'1'`，`product/process-manifest.mjs:177` 把它放进 workbench 的 envNames。
+    //     读它的是 workbench（它据"桌面模式"收紧敏感读写与代理入口鉴权）。
+    //   · LEGION_WORKFLOW_PACK_PATH —— `product/launcher/launcher.mjs:972` 把内置工作流包路径
+    //     注入子进程环境；读它的是 Runtime/编排侧，不是 Launcher。
+    //
+    // ★ 与 `CHILD_ENV_NAMES` 的分工：那一份是"注入目标的变量名"总表（供清单与用例对账），
+    //   这一份是"名字形如 env 键、且会被扫描器看见、但本进程不读"的**具名去处**。
+    //   一个键若同时出现在两处，本处必须写明"为什么它只配待在这里"。
+    {
+      name: 'LEGION_DESKTOP_MODE',
+      owner: 'workbench（由 Launcher 注入）',
+      reason: 'Launcher 往 team-hub/workbench 子进程写 `LEGION_DESKTOP_MODE=1`；'
+        + '读它的是 workbench（桌面模式下敏感读写与代理入口强制鉴权）。本进程只写不读',
+    },
+    {
+      name: 'LEGION_WORKFLOW_PACK_PATH',
+      owner: 'Runtime / 编排侧（由 Launcher 注入）',
+      reason: 'Launcher 把内置工作流包的路径注入子进程环境；读它的是 Runtime 侧的工作流包装载。本进程只写不读',
+    },
   ],
   nonEnvLiterals: [
 
@@ -373,6 +420,51 @@ export const SCHEMA = defineSchema({
     'BACKEND_VERSION_INVALID', 'BACKEND_VERSION_MISMATCH', 'BACKEND_WORKSPACE_MISMATCH', 'STOP_FAILED',
     'DESKTOP_HOST_FORBIDDEN', 'DESKTOP_ORIGIN_FORBIDDEN', 'DESKTOP_UNAUTHORIZED',
     'BACKEND_NOT_RUNNING',
+
+    // ── desktop 桥 / 打包闭包 / 引导与设置（product/launcher/*、product/release/*）──
+    //
+    // 这一组是**同一批 desktop 线代码**的具名码：它们此前随一次「把 desktop 相关文件
+    // 从索引里撤掉」的操作一起从本数组消失了，而那些文件**仍在 HEAD 里、也仍在产出这些码**
+    // （本次把索引恢复到 HEAD 后，`scan --check` 立刻把这 58 条重新报了出来）。
+    // 教训写在这里：登记数组与产出点必须同生共死——只删代码不改这里，会让门禁变红；
+    // 只删这里不改代码，会让门禁**假绿**（那更糟）。
+    //
+    // 逐组来源（都是错误码 / 诊断结论，没有一条是 `process.env.X` 的键名）：
+    //   · product/launcher/desktop-protocol.mjs（5）——桥协议接帧失败的原因：字段/版本非法、帧过长。
+    //   · product/launcher/desktop-bridge.mjs（14）——桥的请求与准备阶段拒绝：请求体不合法、
+    //     桥忙/已关闭/失败、打包路径非法或变了、配置非法、桌面凭证缺失或已变、设置正忙、
+    //     模型没配、启动失败、未知消息类型。
+    //   · product/launcher/bundled-runtime.mjs（13）——内嵌运行时（打包闭包）的解包与校验结论：
+    //     归档版本不符 / 拷贝失败 / 目标是指向别处的链接 / 缺入口 / 已有版本不符 / 解包失败 /
+    //     文件不合法 / 哈希不符 / 链接被拒 / profile 不符 / 状态读不出 / 目标不完整 / 版本不符。
+    //   · product/launcher/desktop-launcher.mjs（8）——桌面启动器：打包 worker 失败、初始化失败、
+    //     实例锁没释放、模型输入非法、探测失败、密钥库失败、密钥库不可用、密钥引用非法。
+    //   · product/launcher/desktop-settings.mjs（6）——设置与工作区选择：身份非法、设置非法或是指向别处的链接、
+    //     模型校验非法、工作区选择变了或非法。
+    //   · product/launcher/launcher.mjs（2）——BACKEND_PUBLISH_FAILED（共享后端发布失败）、
+    //     DESKTOP_AUTH_REQUIRED（桌面模式下未鉴权，与 workbench 侧同名登记同族）。
+    //   · product/launcher/bundle-worker.mjs（2）——打包导入失败、准备被取消。
+    //   · product/launcher/supervisor.mjs（2）——进程退出超时、进程树停止失败。
+    //   · product/release/desktop-manifest.mjs（6）——发布清单校验：归档非法、格式非法、
+    //     清单读不出、Node 版本不符、平台不符、清单条目非法。
+    'BAD_ID', 'BAD_JSON', 'BAD_PAYLOAD', 'BAD_VERSION', 'LINE_TOO_LARGE',
+    'BAD_REQUEST', 'BRIDGE_BUSY', 'BRIDGE_CLOSED', 'BRIDGE_FAILED', 'BUNDLE_PATH_CHANGED',
+    'BUNDLE_PATH_INVALID', 'BUNDLE_PATH_REQUIRED', 'CONFIG_INVALID', 'DESKTOP_CREDENTIAL_CHANGED',
+    'DESKTOP_CREDENTIAL_REQUIRED', 'DESKTOP_SETUP_BUSY', 'MODEL_NOT_CONFIGURED', 'START_FAILED',
+    'UNKNOWN_TYPE',
+    'BUNDLE_ARCHIVE_VERSION_MISMATCH', 'BUNDLE_COPY_FAILED', 'BUNDLE_DESTINATION_LINK',
+    'BUNDLE_ENTRY_MISSING', 'BUNDLE_EXISTING_VERSION_MISMATCH', 'BUNDLE_EXTRACT_FAILED',
+    'BUNDLE_FILE_INVALID', 'BUNDLE_HASH_MISMATCH', 'BUNDLE_LINK_REJECTED', 'BUNDLE_PROFILE_MISMATCH',
+    'BUNDLE_STATE_UNREADABLE', 'BUNDLE_TARGET_INCOMPLETE', 'BUNDLE_VERSION_MISMATCH',
+    'BUNDLE_WORKER_FAILED', 'INIT_FAILED', 'INSTANCE_LOCK_RELEASE_FAILED', 'MODEL_INPUT_INVALID',
+    'MODEL_PROBE_FAILED', 'MODEL_SECRET_STORE_FAILED', 'SECRETS_STORE_UNAVAILABLE', 'SECRET_REF_INVALID',
+    'DESKTOP_IDENTITY_INVALID', 'DESKTOP_SETTINGS_INVALID', 'DESKTOP_SETTINGS_LINK',
+    'MODEL_VERIFICATION_INVALID', 'WORKSPACE_SELECTION_CHANGED', 'WORKSPACE_SELECTION_INVALID',
+    'BACKEND_PUBLISH_FAILED', 'DESKTOP_AUTH_REQUIRED',
+    'BUNDLE_IMPORT_FAILED', 'PREPARATION_CANCELLED',
+    'PROCESS_EXIT_TIMEOUT', 'PROCESS_TREE_STOP_FAILED',
+    'BUNDLE_ARCHIVE_INVALID', 'BUNDLE_FORMAT_INVALID', 'BUNDLE_INVENTORY_INVALID',
+    'BUNDLE_MANIFEST_UNREADABLE', 'BUNDLE_NODE_MISMATCH', 'BUNDLE_PLATFORM_MISMATCH',
 
     // ── PRT-009 `peak-resource` 采不到时的具名码 ─────────────────────────
     //

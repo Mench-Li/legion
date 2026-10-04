@@ -1066,6 +1066,35 @@ export const SCHEMA = defineSchema({
     'PLAN_CLI_MODE_UNKNOWN',
     'PLAN_CLI_NOT_TEXT',
     'PLAN_CLI_RENDER_FAILED',
+
+    // ── 桌面自动更新（设计 `2026-10-02-legion-desktop-auto-update-design.md`）──
+    //
+    // 这一组与上面每一组同一个来路：**全大写下划线连写，形如 env 键**，而
+    // 它们没有一个是配置项。按本文件记下的那条纪律，登记之前先问一句
+    // **这几个码对不对**——逐类答：
+    //
+    // ① `transport.mjs` 的七个：它们是**网络栈抛出来的**错误码
+    //    （`error.code`），不是我们定义的。`ENOTFOUND`/`EAI_AGAIN` 来自 DNS，
+    //    `ECONNRESET`/`EHOSTUNREACH`/`ENETUNREACH` 来自连接，
+    //    `UND_ERR_CONNECT_TIMEOUT` 来自 undici，`NET_TOO_LARGE` 是我们自己
+    //    给"响应超过上限"起的名字。它们进这张表是因为下载失败要给出
+    //    **可分辨的原因**：把七种归并成一个"下载失败"，会让"域名解析不了"
+    //    （发布端配错）与"响应太大"（可能被投毒）在读数上同形。
+    // ② `TASKS_LAUNCHER_NOT_STARTED` / `TASKS_UNREADABLE`：Launcher 的
+    //    `tasks` 命令的两个具名拒绝。**必须分开**：前者是"后台还没起来"
+    //    （等一会就好），后者是"问了但读不出来"（要去查）。而两者与"没有
+    //    任务"（空数组）又是三件事——预检在它们之间的结论完全不同。
+    // ③ `UPDATE_MAINTENANCE` / `UPDATE_TRANSACTION_UNFINISHED`：维护闸门的
+    //    两个拒绝码。合并它们会让"另有升级正在做"与"上一次升级没收尾"同形，
+    //    而处置完全不同（前者只需要等，后者要按记录恢复）。
+    //
+    // ★ 为什么值得一条条写清：这 11 个码全都是**给用户看的**
+    //   （`desktop/messages.mjs` 把它们译成中文），所以"归并"在这里的代价
+    //   不是内部可读性，而是用户拿到一句对他没有任何用处的通用提示。
+    'EAI_AGAIN', 'ECONNRESET', 'EHOSTUNREACH', 'ENETUNREACH', 'ENOTFOUND',
+    'NET_TOO_LARGE', 'UND_ERR_CONNECT_TIMEOUT',
+    'TASKS_LAUNCHER_NOT_STARTED', 'TASKS_UNREADABLE',
+    'UPDATE_MAINTENANCE', 'UPDATE_TRANSACTION_UNFINISHED',
   ],
   injects: [
     { target: 'team-hub', env: 'TEAM_HUB_PORT', via: 'env', from: 'ports.team-hub', note: '端口由 Launcher 决定，不由各进程的代码默认值决定' },

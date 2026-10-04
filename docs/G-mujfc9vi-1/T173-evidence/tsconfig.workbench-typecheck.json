@@ -1,0 +1,67 @@
+{
+  "_comment": "T-173 部署阶段证据用：workbench tsc --noEmit 的替代 tsconfig。本工作树无 node_modules 且沙箱禁止 junction/符号链接，故用 paths 把裸模块映射到主 checkout 的 pnpm 真实目录（.pnpm），并 skipLibCheck。等价于 workbench/tsconfig.json 的编译器选项。",
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "skipLibCheck": true,
+    "types": [],
+    "paths": {
+      "react": [
+        "D:/project/DSH/legion/workbench/node_modules/.pnpm/@types+react@19.2.18/node_modules/@types/react"
+      ],
+      "react/*": [
+        "D:/project/DSH/legion/workbench/node_modules/.pnpm/@types+react@19.2.18/node_modules/@types/react/*"
+      ],
+      "react-dom/client": [
+        "D:/project/DSH/legion/workbench/node_modules/.pnpm/@types+react-dom@19.2.5_@types+react@19.2.18/node_modules/@types/react-dom/client"
+      ],
+      "react-dom/*": [
+        "D:/project/DSH/legion/workbench/node_modules/.pnpm/@types+react-dom@19.2.5_@types+react@19.2.18/node_modules/@types/react-dom/*"
+      ],
+      "three": [
+        "D:/project/DSH/legion/workbench/node_modules/.pnpm/@types+three@0.185.4/node_modules/@types/three"
+      ],
+      "three/*": [
+        "D:/project/DSH/legion/workbench/node_modules/.pnpm/@types+three@0.185.4/node_modules/@types/three/*"
+      ],
+      "@react-three/fiber": [
+        "D:/project/DSH/legion/workbench/node_modules/.pnpm/@react-three+fiber@9.7.0_@t_cc0de4bc002641dbdc7365ad2c6dbd50/node_modules/@react-three/fiber"
+      ],
+      "@react-three/fiber/*": [
+        "D:/project/DSH/legion/workbench/node_modules/.pnpm/@react-three+fiber@9.7.0_@t_cc0de4bc002641dbdc7365ad2c6dbd50/node_modules/@react-three/fiber/*"
+      ],
+      "@react-three/drei": [
+        "D:/project/DSH/legion/workbench/node_modules/.pnpm/@react-three+drei@10.7.8_@r_9724569db946891d852549b326850b4c/node_modules/@react-three/drei"
+      ],
+      "@react-three/drei/*": [
+        "D:/project/DSH/legion/workbench/node_modules/.pnpm/@react-three+drei@10.7.8_@r_9724569db946891d852549b326850b4c/node_modules/@react-three/drei/*"
+      ],
+      "vite": [
+        "D:/project/DSH/legion/workbench/node_modules/.pnpm/vite@7.3.6/node_modules/vite"
+      ],
+      "@vitejs/plugin-react": [
+        "D:/project/DSH/legion/workbench/node_modules/.pnpm/@vitejs+plugin-react@5.2.0_vite@7.3.6/node_modules/@vitejs/plugin-react/dist/index.d.ts"
+      ]
+    }
+  },
+  "include": [
+    "D:/project/DSH/legion/.legion-worktrees/T-173/workbench/src",
+    "D:/project/DSH/legion/.legion-worktrees/T-173/workbench/vite.config.ts"
+  ]
+}

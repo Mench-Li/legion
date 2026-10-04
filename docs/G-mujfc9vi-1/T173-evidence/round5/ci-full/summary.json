@@ -1,0 +1,71 @@
+{
+  "root": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-173",
+  "outDir": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-173\\docs\\G-mujfc9vi-1\\T173-evidence\\round5\\ci-full",
+  "finishedAt": "2026-10-04T16:22:14.574Z",
+  "stages": [
+    {
+      "name": "syntax",
+      "status": "PASS",
+      "ms": 30317,
+      "skipped": 0
+    },
+    {
+      "name": "env",
+      "status": "PASS",
+      "ms": 16130,
+      "skipped": 0
+    },
+    {
+      "name": "boundary",
+      "status": "FAIL",
+      "ms": 1715,
+      "skipped": 0
+    },
+    {
+      "name": "deps",
+      "status": "PASS",
+      "ms": 11,
+      "skipped": 0
+    },
+    {
+      "name": "build",
+      "status": "FAIL",
+      "ms": 20448,
+      "skipped": 0
+    },
+    {
+      "name": "test",
+      "status": "FAIL",
+      "ms": 187,
+      "skipped": 0
+    },
+    {
+      "name": "smoke",
+      "status": "FAIL",
+      "ms": 11336,
+      "skipped": 0
+    },
+    {
+      "name": "stage",
+      "status": "FAIL",
+      "ms": 117,
+      "skipped": 0
+    },
+    {
+      "name": "doc",
+      "status": "PASS",
+      "ms": 4005,
+      "skipped": 0
+    }
+  ],
+  "failed": 5,
+  "skippedTotal": 0,
+  "tree": {
+    "known": true,
+    "head": "66c85a0e",
+    "dirty": true,
+    "modifiedCount": 316,
+    "untrackedCount": 11,
+    "fingerprint": "77ff4b0c6135a078"
+  }
+}

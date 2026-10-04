@@ -1,0 +1,8 @@
+dsh-pin-drift: PASS（6 条结论、15 个锚点，在被引文件里逐字命中）
+  ✓ CHILD_POLICY_NOT_INHERITED  行 158-244  （packages/interaction/user-approval/src/index.ts）
+  ✓ SET_POLICY_MAY_WRITE_NOTHING  行 100-186  （packages/interaction/user-approval/src/index.ts）
+  ✓ POLICY_CHANGE_ALWAYS_SAYS_USER  行 15-191  （packages/interaction/user-approval/src/index.ts）
+  ✓ OWNERSHIP_IS_LIVE_ONLY  行 572-579  （packages/core/agent/src/index.ts）
+  ✓ OWNERSHIP_BY_REFERENCE_NOT_BY_ID  行 571-573  （packages/core/agent/src/index.ts）
+  ✓ SENDER_MUST_BE_LIVE_TARGET_NEED_NOT_BE  行 196-210  （packages/subagent/subagent/src/continuation.ts）
+  被引文件：packages/interaction/user-approval/src/index.ts、packages/core/agent/src/index.ts、packages/subagent/subagent/src/continuation.ts

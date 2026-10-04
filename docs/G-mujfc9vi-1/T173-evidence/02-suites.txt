@@ -1,0 +1,503 @@
+===== $ node packages/shared/test/path-domain.test.mjs [exit=0] =====
+✔ TC-S1-01/02 目录按段边界：src/a 覆盖 src/a/b.mjs 但不覆盖 src/ab (2.6408ms)
+✔ TC-S1-03/04 文件精确相等、跨文件不误判 (0.4285ms)
+✔ TC-S1-05 五类拒绝面逐条结构化拒绝（不静默通过） (0.3733ms)
+✔ TC-S1-05b 非法条目类型与形状也被拒绝 (0.1539ms)
+✔ TC-S1-06/07 大小写按仓库配置归一，两向结论不同 (0.198ms)
+✔ TC-S1-08/09 重命名同时占用旧路径与新路径 (0.2447ms)
+✔ TC-S1-10 边界：空集合不抛、自身相交为真 (0.2916ms)
+✔ TC-S1-11 纯函数同输入同输出 (0.1444ms)
+✔ TC-S1-14 路径集合逐条拒绝且不静默丢失 (0.346ms)
+ℹ tests 9
+ℹ suites 0
+ℹ pass 9
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 14.4797
+
+===== $ node packages/shared/test/repo-identity.test.mjs [exit=0] =====
+✔ TC-S1-12 两个 worktree 的 common-dir 归一到同一 repoId（大小写/尾斜杠归一） (1.4021ms)
+✔ TC-S1-13 非 Git / Git 不可用 / 不可规范化 -> degraded + 可读原因 + 单写 (0.5287ms)
+✔ TC-S1-13b 正常 Git 仓库能力为 git 且不强制单写 (0.1502ms)
+✔ TC-S1-11b 判定是纯函数：同事实同输出，事实注入不触盘 (0.7936ms)
+✔ TC-S1-12b 临时仓库实测 git rev-parse --git-common-dir（非管道 stdio 捕获） (413.5806ms)
+✔ TC-S1-13c 非 Git 目录降级且原因可读 (56.4756ms)
+ℹ tests 6
+ℹ suites 0
+ℹ pass 6
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 482.4618
+
+===== $ node team-hub/write-intent-store.test.mjs [exit=0] =====
+✔ TC-S2-01/02 异文件并行成功、同文件恰一活跃且另一 FILE_CONTENTION (46.0308ms)
+✔ TC-S2-03 claim 事务无半状态：预约冲突时 Attempt 与 reservation 都不落 (66.6294ms)
+✔ TC-S2-03b claim 事务成功时 Attempt 与 reservation 一并落库 (39.3393ms)
+✔ TC-S2-04 epoch 过期释放被拒且回报当前真实 epoch (43.1138ms)
+✔ TC-S2-05 租约过期且进程未确认退出 -> reconciling 而非立即释放，确认后可释放 (41.9528ms)
+✔ TC-S2-06/07 扩域：成功 revision+1，撞车失败且 revision/路径不变 (52.0971ms)
+✔ TC-S2-08 目录段边界：src/a 预约挡住 src/a/b.mjs，但不挡 src/ab (37.7586ms)
+✔ TC-S2-09 全库活跃预约两两不相交（不变量扫描） (35.0547ms)
+✔ TC-S2-10 非 Git 仓库第二个写入任务被拒且原因可读 (29.4675ms)
+✔ TC-S2-11 非法路径整体拒绝，不写任何行 (25.0452ms)
+✔ TC-S2-13 迁移幂等、可从旧库启动、重复迁移无错 (28.5622ms)
+✔ TC-S2-14 静态反证：write-intent-store 复用共享 path-domain，无第二份前缀判定 (0.8892ms)
+✔ TC-S2-15 取消/打回重做保留预约；确认结束后可释放并允许新任务 (48.9818ms)
+ℹ tests 13
+ℹ suites 0
+ℹ pass 13
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 507.0111
+
+===== $ node team-hub/claim-policy.test.mjs [exit=0] =====
+✔ ① ★★ 两条候选路径**逐条**包含每一个任务级资格（这是本模块存在的理由） (2.0189ms)
+✔ ① ★ 「将军拦截」（hold）必须在**两条**路径上都出现 (0.2738ms)
+✔ ① `assertTaskGatesShared()` 对生成出来的两条 SQL 判 ok (1.1141ms)
+✔ ① ★★ 有人绕过生成器手写一条 SQL 时，自检**必须**报出来 (0.3402ms)
+✔ ① ★ 两条 SQL 都必须保留 `{scope}`（删掉它会静默变成跨空间领取） (0.3612ms)
+✔ ① ★★ 加载时自检**真的会拦**（不是一段删掉也不会变红的判断） (1.6308ms)
+✔ ② 终态尝试状态只有**一处**定义，两条 SQL 的 `NOT IN` 列表由它生成 (0.2175ms)
+✔ ② ★★ 终态名单被钉死成字面量（漏一个＝那条任务永远领不到，而 SQL 会忠实地跟着漏） (0.1994ms)
+✔ ② ★ 三种终态之外的状态一律算活跃 (0.2819ms)
+✔ ② `isTerminalAttemptState` 与 SQL 列表同源 (0.2799ms)
+✔ ② `hasActiveAttempt` 只把非终态算活跃 (0.2235ms)
+✔ ② 策略版本与快照都是冻结的纯数据（供 --json 诊断） (0.3784ms)
+✔ ② 优先级排序片段出现在可入队任务的 ORDER BY 里 (0.1774ms)
+✔ ③ ★ 每个 gate 的 `sql` 与 `holds` 必须在**同一批任务**上给出同一结论 (2.7317ms)
+✔ ③ `isTaskEligible` 认可一条正常的 todo 任务 (0.2532ms)
+✔ ③ ★ 被将军拦下的任务被拒，且给出**具体的**理由码 (0.1303ms)
+✔ ③ 非 todo 状态被拒，理由码与 hold 不同（两者不该混成一件事） (0.0847ms)
+✔ ③ ★ 空间不匹配有**自己的**理由码（把它混进"资格不够"里会掩盖一次跨空间访问） (0.0967ms)
+✔ ③ 找不到任务与"资格不够"是两件事 (0.0737ms)
+✔ ③ ★ 退避没到点时拒绝，并说清还要等多久 (0.287ms)
+✔ ③ 退避到点、或没有闸门时放行 (0.1753ms)
+✔ ③ ★★ 不是最新那一次尝试时拒绝（否则同一条任务会被执行两遍） (0.124ms)
+✔ ③ 非 Queued 的尝试被拒（码与"退避"不同） (0.1184ms)
+✔ ③ `explainClaim` 把两条路径的前提分清楚 (0.2631ms)
+✔ ③ ★ 任务级不合格时，两条路径都**不会**走到尝试级判定（任务级优先） (0.1436ms)
+✔ ③ `QUEUED_ATTEMPT_GATES` 的 holds 与它的 sql 也一致 (0.103ms)
+✔ ④ ★★ 被将军拦下的任务：**两条路径都领不走**（端到端） (6.1615ms)
+✔ ④ ★ 被标成 done 的任务同样两条路径都领不走 (3.3835ms)
+✔ ④ ★ 正常任务仍然领得到（改动没有把整条路堵死） (4.8023ms)
+✔ ④ 认领响应里带着 scope（缺了它 worker 只能拒绝一切或自己猜一个） (2.9577ms)
+✔ ④ ★ 分空间领取：另一个空间的任务领不走 (2.7058ms)
+✔ ④ ★ 退避没到点时那条排队尝试领不走（端到端） (3.998ms)
+✔ ④ ★ 只有最新那一次尝试会被领走（老的不该被重放） (2.9801ms)
+✔ ⑤ 每一个拒绝码都是一句能读的话的键（不是缩写） (0.2607ms)
+✔ ⑤ 纯函数的返回对象都是冻结的 (0.1791ms)
+✔ ⑥ 队首冲突而后部不相交时，后部先被领取（不队头阻塞） (0.7974ms)
+✔ ⑥ 全部候选都冲突时返回 no-eligible-candidate，且不消耗重试 (0.2563ms)
+✔ ⑥ 扫描有上限且稳定排序：超过上限不继续扫，已扫下标可复核 (0.3602ms)
+✔ ⑥ 候选选择复用共享 path-domain 判定（无第二份前缀判定） (0.1242ms)
+ℹ tests 39
+ℹ suites 0
+ℹ pass 39
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 53.6232
+
+===== $ node team-hub/git-plumbing.test.mjs [exit=0] =====
+✔ TC-S3-08 非管道 stdio：git 输出可捕获（默认管道在本沙箱会 EPERM） (762.114ms)
+✔ TC-S3-08b merge-tree --write-tree 干净退出 0、内容冲突退出 1 可区分 (2843.4617ms)
+✔ TC-S3-09 commit-tree 第一父等于 expected_head (793.0522ms)
+✔ TC-S3-10 merge-base --is-ancestor 可判是否已应用 (575.0833ms)
+✔ TC-S3-09b update-ref 的 CAS：expectedOld 不符时拒绝 (1031.1036ms)
+✔ TC-S3-16 工作区脏检测把未跟踪文件也算脏 (816.2838ms)
+ℹ tests 6
+ℹ suites 0
+ℹ pass 6
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 6834.1405
+
+===== $ node team-hub/delivery-store.test.mjs [exit=0] =====
+✔ TC-S3-01/02/03 入队门禁：越域 diff / 证据缺失 / 人审未批都不得进入 ready (48.8058ms)
+✔ TC-S3-04 门禁全过才进入 ready；纯函数判定与 store 一致 (34.8003ms)
+✔ TC-S3-05 version CAS：过期提交被拒且不落库 (33.3426ms)
+✔ TC-S3-06 状态机：awaiting-acceptance→ready→preparing→validating→integrated；终态不可再迁 (58.5098ms)
+✔ TC-S3-06b needs-review→abandoned 与 needs-review→ready 两条路 (103.3291ms)
+✔ TC-S3-06c 重做产生新 Attempt 与新 delivery，旧 integrated 行不被覆盖 (45.4463ms)
+✔ TC-S3-07/08 同仓库同 target ref 同时至多一个活跃 integration job（epoch 租约唯一赢家） (69.511ms)
+✔ TC-S3-19 integration_events 只追加：每个状态迁移都留下事件 (39.0856ms)
+✔ TC-S3-20 legacy-unknown 迁移不倒推历史 done（不写假成功证据） (26.164ms)
+✔ TC-S3-18 未配置验证命令 -> 校验失败且不得标记交付 (0.7107ms)
+✔ TC-S3-06d 词表固定且交付/调度状态互相独立 (0.1556ms)
+ℹ tests 11
+ℹ suites 0
+ℹ pass 11
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 467.2947
+
+===== $ node team-hub/integration-worker.test.mjs [exit=0] =====
+✔ TC-S3-11 干净合入：目标 ref 前进且包含 source commit，delivery=integrated，记录 integrated_commit，释放预约 (2074.3972ms)
+✔ TC-S3-12 Git 无冲突但候选验证失败：目标 ref SHA 不变且不 integrated (2113.3734ms)
+✔ TC-S3-18 未配置仓库验证命令 -> 停 needs-review 且不集成 (1383.4654ms)
+✔ TC-S3-16 绑定工作区脏时集成暂停且这些字节前后不变 (1716.933ms)
+✔ TC-S3-13 集成期间目标 HEAD 前进：候选与验证作废并按新 HEAD 重算，超上限进 needs-review (5741.5314ms)
+✔ TC-S3-14/15 journal 恢复：已应用未记账只补记不重跑 merge，不删分支 (1962.1475ms)
+✔ TC-S3-14b 每个 source commit 至多集成一次（重复 recover 无副作用） (2142.6619ms)
+ℹ tests 7
+ℹ suites 0
+ℹ pass 7
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 17141.6071
+
+===== $ node team-hub/write-intent-routes.test.mjs [exit=0] =====
+✔ TC-S4-01/02 意图登记 revision CAS：创建 revision=1，过期提交 409 (202.0862ms)
+✔ TC-S4-03 预约成功写调度状态 reserved；冲突返回 FILE_CONTENTION 且等待不烧重试 (30.55ms)
+✔ TC-S4-04 实时冲突视图只读且如实列出占用者；历史提示不冒充实时占用 (14.1571ms)
+✔ TC-S4-05 epoch 过期释放被拒（409），正确 epoch 释放成功 (20.8328ms)
+✔ TC-S4-06 服务端权威：绝对路径 / 非法 ref / 缺 scope 一律 400 (75.2529ms)
+ℹ tests 5
+ℹ suites 0
+ℹ pass 5
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 497.2207
+
+===== $ node team-hub/delivery-routes.test.mjs [exit=0] =====
+✔ TC-S4-07 创建交付（带门禁入队）→ ready；非法 targetRef/sourceCommit 400 (199.165ms)
+✔ TC-S4-08 权限负例：无裁决职责的岗位 403，且不落裁决 (35.4778ms)
+✔ TC-S4-09 并发裁决：同一 version 的第二页 409 且内容不落库 (52.1673ms)
+✔ TC-S4-10 同仓库同 ref 至多一个活跃集成 job；epoch fencing (64.8979ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 4
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 506.9803
+
+===== $ node team-hub/metrics.test.mjs [exit=0] =====
+✔ TC-S4-11 缺 repoId 时整组不可读：available=false + reason，value 不为 0 (182.7131ms)
+✔ TC-S4-12/13 发生事件后可读且口径与事件一致；无样本项降级为 reason (72.2244ms)
+✔ TC-S4-14 读面不写库：重复 GET 指标不改变任何事件计数 (31.8144ms)
+ℹ tests 3
+ℹ suites 0
+ℹ pass 3
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 439.0869
+
+===== $ node --experimental-strip-types plugins/tests/write-eligibility.test.mjs [exit=0] =====
+✔ TC-S5-01 只读工具放行且不申请写入资格 (0.8671ms)
+✔ TC-S5-02 越域写入被拒，理由可读且指向扩域事务 (0.5392ms)
+✔ TC-S5-03 epoch 过期 / revision 变化 / 工作区不符分别给出独立拒绝码 (0.1741ms)
+✔ TC-S5-04 非法路径（穿越、绝对）在守卫处被拒 (0.1504ms)
+✔ TC-S5-05 RunRequest 结构断言：模型补丁改不动 attempt/epoch/revision/worktree (1.3294ms)
+✔ TC-S5-06 等待视图：等谁/等哪个文件/等待期间可做的只读工作 (0.3615ms)
+✔ TC-S5-07 HEAD 变化需要重核计划；非 Git 有可读降级提示 (0.1463ms)
+✔ TC-S5-08 判定来源唯一：复用 path-domain，不写第二份前缀判定 (0.1473ms)
+ℹ tests 8
+ℹ suites 0
+ℹ pass 8
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 9.251
+
+===== $ node --experimental-strip-types plugins/tests/legacy-convergence.test.mjs [exit=0] =====
+✔ TC-S6-01 集成阶段启用：autoPromote 与 mediation 两条旧直合并通道都被拒并转唯一入口 (0.8883ms)
+✔ TC-S6-02 默认 legacy 与观察模式：观察只记录、不改派工 (0.1645ms)
+✔ TC-S6-03 同一仓库被多空间以不同模式绑定 → 冲突而非静默取一个 (0.1571ms)
+✔ TC-S6-04 done 只由 integrated + 原有验收通过产生 (0.1276ms)
+✔ TC-S6-05 回滚保留 DB/分支/临时工作区，只关新任务自动认领并做在途对账 (0.1423ms)
+✔ TC-S6-06 旧通道已实际接线：index.ts autoPromote 与 mediation.ts 都调用闸门 (1.4721ms)
+ℹ tests 6
+ℹ suites 0
+ℹ pass 6
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 8.8499
+
+===== $ node --experimental-strip-types workbench/scripts/delivery-ui.test.mjs [exit=0] =====
+✔ TC-S7-01 交付子状态逐个映射为可读徽标，未知状态不发明徽标 (0.9567ms)
+✔ TC-S7-02 integrated / needs-review 徽标语义不混淆 (0.2478ms)
+✔ TC-S7-03 waiting-file 徽标写出「等谁/等哪个文件」，等待不伪装成失败 (0.1871ms)
+✔ TC-S7-04 组合徽标顺序稳定：调度在前、交付在后 (0.7607ms)
+✔ TC-S7-05 不可读显式为「无读数」而非 0 (0.2241ms)
+✔ TC-S7-06 标签表覆盖设计中的全部子状态（不漏词） (0.1574ms)
+ℹ tests 6
+ℹ suites 0
+ℹ pass 6
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 9.0713
+
+===== $ node team-hub/run-store.test.mjs [exit=0] =====
+✔ ① 建表幂等：重复 ensureRunSchema 不报错，且历史表相关路径不提供 UPDATE (38.4512ms)
+✔ ① 空队列返回 claimed: null 且不是一个错误（「没事可做」不是异常） (32.1351ms)
+✔ ① 领取把 todo 任务变成第 1 次尝试，并返回 leaseEpoch 与到期时间 (34.7513ms)
+✔ ① 已被 hold 的任务不得被领取（将军拦截优先于队列） (32.6552ms)
+✔ ① 已在进行的看板任务不会被重复入队（同一任务不得有两条活跃尝试） (32.4901ms)
+✔ ① 高优先级先被领取（队列顺序不是随机的） (34.8921ms)
+✔ ① 分空间领取：指定 scope 时不得领到别的空间的任务 (37.6299ms)
+✔ ① 领取输入校验：workerId 必填，租期必须是正数且有上限 (34.7167ms)
+✔ ② 客户端时间被忽略并如实回报（租期不能由持有者自己申报） (48.7011ms)
+✔ ② 心跳续租延长到期时间；请求里带的时间不参与判定 (33.9594ms)
+✔ ② 心跳区分三种失败：epoch 不符 / 已被他人持有 / 租期已过 (33.4067ms)
+✔ ③ 过期 worker 的写入被拒，且错误里带**当前** epoch（只说「拒绝」会让它无限重试） (37.2597ms)
+✔ ③ 同一尝试的旧 epoch 写入被拒（epoch 是单调的，不是「随便给个数字」） (40.4866ms)
+✔ ④ 结果名义映射：completed 落到 Validating 而不是 Completed（执行完成 ≠ 交付被接受） (0.1662ms)
+✔ ④ 无法确定目标状态时拒绝写入（不给默认值） (33.2902ms)
+✔ ④ 非法迁移被状态机拒掉，仓储码与状态机码各自可辨 (32.4885ms)
+✔ ④ 正常路径逐段可走，且每段落库的要求（requiresPersist）被回报 (37.4089ms)
+✔ ④ 幂等：重复提交同一次迁移是「已生效」，不追加事件、不报错 (38.5207ms)
+✔ ④ UnknownOutcome 不得回到队列：仓储层同样返回具名码 (38.4504ms)
+✔ ⑤ 重试新建尝试，历史尝试不被改写（「试过几次、每次错在哪」必须能查） (37.1674ms)
+✔ ⑤ 事件流只追加：每次迁移一条，序号单调，且带 requiresPersist 证据 (33.6415ms)
+✔ ⑥ 过期租约回收：未越过外部写边界 → 新建尝试重试，任务可被再次领取（不丢任务） (36.7809ms)
+✔ ⑥ 可能已产生外部副作用 → 挂起等人工，**绝不**自动重跑 (38.6465ms)
+✔ ⑥ 缺少「外部副作用是否可能已发生」时拒绝回收（这一条不能猜） (34.3747ms)
+✔ ⑥ 未过期的租约不被回收（正常执行中的任务不得被抢走） (34.175ms)
+✔ ⑥ 已终结的尝试即使租约字段还在也不会被回收（终态不得被改写） (35.8203ms)
+✔ ⑦ 优雅释放回到 RetryableFailure（不是直接回队列，否则同一次尝试会被重跑） (40.2656ms)
+✔ ⑦ 释放必须立刻让任务可被重新领取（「让别人接」不能等到租期过期） (34.4983ms)
+✔ ⑦ 排队中的尝试也必须遵守将军拦截（hold 优先于队列，且不留痕的失效最危险） (37.0495ms)
+✔ ⑦ 释放终态尝试是幂等的（停止路径上多发一次是正常竞态） (35.0164ms)
+✔ ⑦ stats：每个已登记状态都有计数，且过期租约单独报出来 (33.889ms)
+✔ ⑧ 两个独立连接同时领取：同一条任务只可能被一个 worker 拿到 (49.1988ms)
+✔ ⑧ 两个连接同时写：第二个用过期 epoch 写入被拒，且第一个的结果完好 (50.5782ms)
+✔ ⑧ 事务失败要完整回滚：被拒的迁移不留半个状态，也不留半条事件 (33.3069ms)
+✔ ⑪ **没有上下文快照就不能进 Running**（声明变成闸门，而不是一段 JSON） (35.4941ms)
+✔ ⑪ 冻结之后就进得去了（闸门不是"总是拒绝"） (42.7091ms)
+✔ ⑪ 别人（别的 Attempt）的快照不算数——闸门查的是**这一次** (37.1123ms)
+✔ ⑪ 表不存在时报 EVIDENCE_MISSING 而不是崩成 500 (36.9801ms)
+✔ ⑪ 核验清单是**总**的：状态机声明的每一项都有归宿 (2.5355ms)
+✔ ⑫ 进入 AwaitingApproval 会在同一次事务里建出**恰好一条**属于这条 Attempt 的审批行 (39.5236ms)
+✔ ⑫ 没有接线时进入 AwaitingApproval **失败**，且尝试不得停在等待状态（整笔回滚） (36.1451ms)
+✔ ⑫ 端口什么都不写 → 后置条件核验让迁移失败，且没有东西留在 AwaitingApproval (42.4056ms)
+✔ ⑫ 目标不是 AwaitingApproval 时**不调用**审批端口，也不建审批行 (42.2601ms)
+ℹ tests 43
+ℹ suites 0
+ℹ pass 43
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1542.0257
+
+===== $ node team-hub/schema-util.test.mjs [exit=0] =====
+✔ ① 表不存在时 columnExists 返回 false（"该加"的语义） (1.8325ms)
+✔ ② ensureColumn 补列、返回 true；已存在返回 false 且不动手 (0.4398ms)
+✔ ③ ★★★ 已经在事务里时不能再开一个事务（否则报的错与补列毫无关系） (0.4355ms)
+✔ ③ ★★ 事务内补列失败要照抛，不能吞掉（真失败会让调用方回滚） (0.5886ms)
+✔ ④ ★★ 事务内嵌套两次补不同的列都生效 (1.1389ms)
+✔ ⑤ ★ 顶层分支回滚后不留下半个事务（异常路径不污染连接） (0.3442ms)
+ℹ tests 6
+ℹ suites 0
+ℹ pass 6
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 10.3793
+
+===== $ node team-hub/members-routes.test.mjs [exit=0] =====
+✔ ① 一个成员都没有时返回**裸空数组**（不是 `{ok, members:[]}`） (175.5057ms)
+✔ ② 每行恰好 5 个键，`member` 取的是库里的 id (5.1575ms)
+✔ ③ 顺序是 `lastSeenAt DESC`（最近出现的排最前，null 排最后） (6.5131ms)
+✔ ④ ★ `online` 的 60 秒窗口（两边各留 1 秒余量） (5.718ms)
+✔ ⑤ `lastSeenAt` 是 null 的人：`online` 为 false，且不抛 (19.4954ms)
+✔ ⑥ ★ 未来时间戳（时钟偏了）算在线 (14.1342ms)
+✔ ⑦ 名册跨范围（这条端点**不**按 scope 过滤） (32.063ms)
+✔ ⑧ 只有 GET 认这条路径 (51.2412ms)
+ℹ tests 8
+ℹ suites 0
+ℹ pass 8
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 459.2206
+
+===== $ node team-hub/create-routes.test.mjs [exit=0] =====
+✔ ① 建成功：`{ok:true, task}`，id 是 `T-n`，默认 status=backlog / priority=medium (192.8542ms)
+✔ ② title 四种坏法都要 400，且文案是 `缺少参数 title` (38.6714ms)
+✔ ③ title 存进去之前被 trim（回执与读回一致） (15.663ms)
+✔ ④ scope 要跟着走：任务与审计都落在它上面，且能按它筛出来 (61.0833ms)
+✔ ⑤ goalId 要跟着走：任务与审计都要有它 (46.9257ms)
+✔ ⑥ `docSync` 只有**字面 true** 才算开 (150.4993ms)
+✔ ⑦ acceptance / blockedBy / description 都要落进去 (31.8893ms)
+✔ ⑧ 只有 POST 认这条路径（写接口不该被 GET 读到） (50.5077ms)
+✔ ⑨ 同一个 title 建两次是两个任务（这条端点不去重） (23.4457ms)
+✔ ⑩ ★★★ 写门面炸了必须**向调用方抛出**，不能变成没人管的 promise (1.2125ms)
+ℹ tests 10
+ℹ suites 0
+ℹ pass 10
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 768.934
+
+===== $ node team-hub/chat.test.mjs [exit=0] =====
+▶ TC-S1-01/02/04/05 会话创建与 scope 列表
+  ✔ TC-S1-01 创建会话 → 含 id/createdAt/updatedAt/last_message_at=null；列表按 updatedAt desc 排首 (5.8766ms)
+  ✔ TC-S1-02 scope 过滤：software 列表不含 default/marketing 会话 (2.2545ms)
+  ✔ TC-S1-04 kind 非法 → 拒绝并指明合法枚举；TC-S1-05 缺 by 被拒且无 chat 审计留痕 (0.9905ms)
+✔ TC-S1-01/02/04/05 会话创建与 scope 列表 (186.7932ms)
+▶ TC-S1-03/06/07 scope 隔离 + author 绑定
+  ✔ TC-S1-03 scope 隔离反向：default 列表查不到 software 会话；跨 scope 写不串（消息 scope = 会话 scope） (28.943ms)
+  ✔ TC-S1-06 发消息 → author=by、createdAt 有值、会话 last_message_at 更新 (2.7364ms)
+  ✔ TC-S1-07 author 冒名被服务端绑定：传入 author:other 恒等于 by (3.8881ms)
+✔ TC-S1-03/06/07 scope 隔离 + author 绑定 (35.9637ms)
+▶ TC-S1-08/09 分页与边界
+  ✔ TC-S1-08 25 条消息 limit=10 → 三页 10/10/5，页内升序、拼接无重无漏 (26.7151ms)
+  ✔ TC-S1-09 分页边界：空会话 []、超界游标 []、缺省 limit=50、非法 limit 拒绝 (5.8493ms)
+  ✔ TC-S1-10 未知会话发消息/列消息 → 拒绝且不落任何消息行 (0.3554ms)
+  ✔ TC-S1-11 空正文被拒 (1.2795ms)
+  ✔ TC-S1-12 正文长度上限 MAX_CHAT_BODY：恰好通过、+1 拒绝且不落库 (2.2702ms)
+✔ TC-S1-08/09 分页与边界 (36.9171ms)
+▶ TC-S1-13 审计留痕（chat 写统一 audit：by + scope + SSE 广播前置）
+  ✔ create + message 各产生 chat:* 审计行（member/scope/detail 形状 + seq 升序） (2.2682ms)
+✔ TC-S1-13 审计留痕（chat 写统一 audit：by + scope + SSE 广播前置） (2.3615ms)
+▶ TC-S1-16 老库迁移：无 chat 表旧库自动建表 + 存量数据无损
+  ✔ 旧 schema（tasks/skills 有数据、无 conversations/messages）import 后自动建两表且 chat 可用 (184.2093ms)
+✔ TC-S1-16 老库迁移：无 chat 表旧库自动建表 + 存量数据无损 (184.371ms)
+▶ S9 TC-S9-01 chat_reply_settings 建表幂等 + 旧库自动建表
+  ✔ 新库含 chat_reply_settings；旧库（无此表）import 自动建表且 chat 存量完整 (169.6651ms)
+✔ S9 TC-S9-01 chat_reply_settings 建表幂等 + 旧库自动建表 (169.8788ms)
+▶ S9 TC-S9-02 回复开关：默认开 + 持久化 + per-scope 隔离
+  ✔ 未设置默认 enabled=true；POST enabled:false 持久化；software/marketing 互不影响；重启（新 import 同库）后保持 (55.5824ms)
+✔ S9 TC-S9-02 回复开关：默认开 + 持久化 + per-scope 隔离 (55.7306ms)
+▶ S9 TC-S9-03/04 awaiting 状态机：开关开标 awaiting；开关关无 awaiting 且人-人消息正常
+  ✔ 开关开（默认）发送 → meta.aiStatus=awaiting；author=general；会话更新正常 (2.1993ms)
+  ✔ 开关关（enabled:false）发送 → 无 aiStatus；不进队列；人-人消息本身正常 (3.139ms)
+✔ S9 TC-S9-03/04 awaiting 状态机：开关开标 awaiting；开关关无 awaiting 且人-人消息正常 (5.4634ms)
+▶ S9 TC-S9-05 回复方身份：默认 <scope>-assistant；identity 消息不自我触发
+  ✔ replyIdentityFor 默认 = scope+-assistant；该身份发消息 author=by 且不被再标 awaiting (2.9159ms)
+✔ S9 TC-S9-05 回复方身份：默认 <scope>-assistant；identity 消息不自我触发 (3.0146ms)
+▶ S9 TC-S9-06 回复队列：awaiting 列表含上下文 + limit + 跨空间隔离
+  ✔ 两会话 awaiting → 队列含两者（conv/msg id/body/context 最近 N 条）；limit 上限防爆；marketing 不含 software (8.374ms)
+✔ S9 TC-S9-06 回复队列：awaiting 列表含上下文 + limit + 跨空间隔离 (8.5137ms)
+▶ S9 TC-S9-08/11 CAS 回写：awaiting→replied；重复/并发幂等不产生第二条回复
+  ✔ postAiReply 落回复消息（author=by）+ 源消息 replied + audit/SSE；第二次回写幂等 skipped (3.9788ms)
+✔ S9 TC-S9-08/11 CAS 回写：awaiting→replied；重复/并发幂等不产生第二条回复 (4.0629ms)
+▶ S9 TC-S9-07 超龄兜底：CHAT_REPLY_TIMEOUT_MS 小值注入 → failed + error，退出队列
+  ✔ awaiting 超时后被标 failed（含 timeout 语义）且不再出现在 replies (492.6252ms)
+✔ S9 TC-S9-07 超龄兜底：CHAT_REPLY_TIMEOUT_MS 小值注入 → failed + error，退出队列 (492.9637ms)
+▶ S9 retry 重试 + 边界（TC-S9-10 族）
+  ✔ failed 消息重试回 awaiting；已 replied 拒绝重试；回复正文 8000 边界 (13.6812ms)
+✔ S9 retry 重试 + 边界（TC-S9-10 族） (13.8476ms)
+▶ S9 HTTP 层：settings/replies/answer 路由契约 + 非法入参 400（listen(0)）
+  ✔ GET/POST /api/chat/reply-settings 读写；GET /api/chat/replies 队列与非法入参 400 (184.97ms)
+✔ S9 HTTP 层：settings/replies/answer 路由契约 + 非法入参 400（listen(0)） (203.5202ms)
+▶ S2 TC-S2-01..08 chat/health 聚合 + 只读 + 诚实标注
+  ✔ TC-S2-01/05/08 形状 + 守护在线判定 + 最近失败透出 + 诚实标注 (7.937ms)
+  ✔ TC-S2-02 心跳窗：59s 内在线 / 超 60s 离线 / 无 worker 行按任意成员兜底 / 无行 false (9.6919ms)
+  ✔ TC-S2-03 settings.enabled=false → health.enabled=false（UI 黄态数据源） (2.4349ms)
+  ✔ TC-S2-04 模型解析链：reply-settings 优先 → agent_models(assistant) → 无 → null 带诚实标注 (5.3957ms)
+  ✔ TC-S2-09 scope 隔离：其他空间的 worker 心跳/模型不影响当前空间，成功回复清除历史失败 (11.4193ms)
+✔ S2 TC-S2-01..08 chat/health 聚合 + 只读 + 诚实标注 (37.5754ms)
+▶ S2 HTTP /api/chat/health：只读 + 非法入参 400 + 心跳 model 透出
+  ✔ TC-S2-07 只读：GET health 前后 audit 与业务表无变化 (8.9553ms)
+  ✔ TC-S2-06 非法入参：缺 scope / 非法 scope → 400 可读错误 (43.5283ms)
+  ✔ 心跳携带 model → health.model source=daemon-heartbeat (30.5804ms)
+✔ S2 HTTP /api/chat/health：只读 + 非法入参 400 + 心跳 model 透出 (86.3852ms)
+▶ S3 TC-S3-01/02/03/06/07/08/09/10/13/15/16 chat_attachments 数据面（默认 env）
+  ✔ TC-S3-01 合法 UTF-8 文本上传 → id/fileName/size + staged + 落盘文件内容一致 (14.6662ms)
+  ✔ TC-S3-02/03 黑名单扩展名与非法 UTF-8 → 4xx 可读文案；无行无落盘 (42.9411ms)
+  ✔ TC-S3-06 恰 32 字节文本上传成功（上界） (19.2952ms)
+  ✔ TC-S3-07/15 绑定：meta.attachments 只存引用 + body 不含文件全文 (34.6693ms)
+  ✔ TC-S3-08/09 归属取回：拥有会话 200；跨会话/跨 scope 4xx 且不含内容 (55.5946ms)
+  ✔ TC-S3-10 悬空/跨空间 staged 引用 → 400 且消息不落库 (22.6259ms)
+  ✔ TC-S3-13 audit：chat:attachment:upload/bind/read 行 detail 含 fileName/size/scope (16.2726ms)
+  ✔ TC-S3-16 uploads 落盘目录与 TEAM_HUB_DB 同基（临时库 mkdtemp 内，不含 live 库路径） (9.7444ms)
+✔ S3 TC-S3-01/02/03/06/07/08/09/10/13/15/16 chat_attachments 数据面（默认 env） (218.8402ms)
+▶ S3 env 小值：大小上界/数量上限（TC-S3-04/05/06）
+  ✔ CHAT_ATTACH_MAX_BYTES=32：33 字节 413，恰 32 成功；CHAT_ATTACH_MAX_PER_MSG=1：2 附件 400 且消息不落库 (307.8195ms)
+✔ S3 env 小值：大小上界/数量上限（TC-S3-04/05/06） (308.0288ms)
+▶ S3 TC-S3-14 旧库无 chat_attachments 表：import 自动建表且存量无损、可继续上传绑定
+  ✔ 旧库（conversations/messages 有存量、无 chat_attachments）→ 自动建表 + 上传/绑定可用 (181.4783ms)
+✔ S3 TC-S3-14 旧库无 chat_attachments 表：import 自动建表且存量无损、可继续上传绑定 (181.6868ms)
+▶ S3 TTL 小值：staged 孤儿与 sent 过期清理（TC-S3-11/12）
+  ✔ CHAT_ATTACH_STAGED_TTL_MS=50 / CHAT_ATTACH_TTL_MS=60：未到期不清理，到期清理行+文件 (155.1217ms)
+✔ S3 TTL 小值：staged 孤儿与 sent 过期清理（TC-S3-11/12） (155.3208ms)
+▶ PRT-316 切片 3：chat 族 13 条路由的**接线**契约（缝上）
+  ✔ ① 13 条路由每一条都接到正确的注入依赖上（方法+路径 → 依赖） (3.7935ms)
+  ✔ ② 方法或路径不匹配 ⇒ 返回 false（把控制权交回 if 链，不许静默吞掉） (0.1593ms)
+  ✔ ③ GET /api/chat/messages 的 limit 缺省必须是 50（此前 HTTP 面一次都没发过） (0.2043ms)
+  ✔ ④ GET /api/chat/reply-settings 的 scope 合法性在**路由层**就拦住（DAO 会静默回落 default） (0.2082ms)
+  ✔ ⑤ GET /api/chat/conversations 的 scope 透传（不带 ⇒ undefined，即"全部"） (0.1176ms)
+  ✔ ⑥ PUT /api/chat/attachments 未授权 ⇒ 401，且**不碰**上传链路（本 hub 里不可观测，故在缝上验） (0.1318ms)
+  ✔ ⑦ GET /api/chat/messages 缺 conv 时在**路由层**就拦住（不是靠 DAO 兜底） (0.1031ms)
+  ✔ ⑨ GET /api/chat/replies 的三道入参护栏在**路由层**就拦住（DAO 也会拦，但拦在哪一层是契约） (0.4557ms)
+  ✔ ⑧ 附件上传：authorized → 清理 → 读体 → 上传 的顺序与参数 (0.2012ms)
+✔ PRT-316 切片 3：chat 族 13 条路由的**接线**契约（缝上） (5.9872ms)
+ℹ tests 51
+ℹ suites 21
+ℹ pass 51
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2581.4661
+
+===== $ node team-hub/task-lifecycle-routes.test.mjs [exit=0] =====
+✔ ① ★★ 对账读数：缺/空 attemptId ⇒ 400 + 具名码 MISSING_PARAM (29.3647ms)
+✔ ①b ★ 对账读数：未知 attemptId 也回 200 + 空数组（不是 404） (3.32ms)
+✔ ② ★★★ 下一岗读数：缺 taskId ⇒ 400；未知任务 ⇒ **404**（不是 500）；岗位不在流水线 ⇒ **409** (22.1793ms)
+✔ ③ ★★★ 重试预算：缺 taskId ⇒ 400；有 taskId ⇒ 200 且读数字段齐全 (19.0223ms)
+✔ ③b ★★★ `/api/runtime/budget`（重试）与 `/api/runtime/run-budget`（费用）是**两条**路 (4.7214ms)
+✔ ④ ★★ 诊断端点：两个参数都给不出 ⇒ 400；未知 attemptId ⇒ 404；只给 taskId ⇒ 200 (46.7817ms)
+✔ ⑤ ★★★ `POST /api/claim`：缺 id ⇒ 400；缺 by ⇒ 400（身份是硬要求） (32.269ms)
+✔ ⑤b ★★★ claim：不传 `soldier` 时**回退到 `by`**，认领后状态与 hold 都变了 (19.8228ms)
+✔ ⑤c ★★★ claim：已认领的任务再认领 ⇒ 400（不能静默抢走） (26.2596ms)
+✔ ⑤d ★★ claim：`ttlMinutes` 不是正整数时**当作没给**（回退），不是报错 (19.573ms)
+✔ ⑤e ★★★ claim 的审计：action=`claim`、detail 里带 soldier、taskId 挂在目标上 (13.5206ms)
+✔ ⑥ ★★★ transition：缺 id / 缺 to / 未知任务 ⇒ 400，且报的是**各自**那句 (61.8796ms)
+✔ ⑦ ★★★ advance：缺 id ⇒ 400；未知任务 ⇒ 400（这条路由此前**一个判据都没有**） (28.7745ms)
+✔ ⑧ ★★★ reassign：缺 soldier / 全空白 ⇒ 400；给了就**去空白**再落库 (48.0848ms)
+✔ ⑨ ★★★ hold：缺 id / 未知任务 / 已 done / 已 canceled 四种都拒 (29.0933ms)
+✔ ⑨b ★★★ hold=true：库里 hold=1、version+1、updatedAt 刷新，且回的是**重读的任务** (17.1354ms)
+✔ ⑨c ★★ 放行：审计动作是 `unhold`（不是又一个 `hold`） (15.2189ms)
+✔ ⑨d ★★★ 记录一处**实测的不对称**：`hold` 传字符串 "true" 等于**放行** (31.2733ms)
+✔ ⑩ ★★★ release-stale：`olderThan` 缺省 60；0 / 负数 / 非数 一律 400 (61.5024ms)
+✔ ⑩b ★★ release-stale：`ids` 非数组 ⇒ 当作没给；审计 scope 是 `*` (32.3832ms)
+✔ ⑪ ★★★ inbox：role 与 soldier 都不给 ⇒ 400；给一个就 200 (45.0225ms)
+✔ ⑪b ★★ inbox 认 `scope`；并记录一处不对称：`soldier=` 空串**算"给了"** (32.0187ms)
+✔ ⑪c ★★ inbox 的 400 走的是**自己的** try/catch（错误形状与其它路由不同） (15.6819ms)
+✔ ⑤f ★★★ claim 的 `round` / `requestId` 各自落到**自己的**字段上 (17.6263ms)
+✔ ⑦b ★★★ advance 走通时**收尾目标**（全部完成 ⇒ 目标自动 done） (18.314ms)
+✔ ⑦c ★★★ advance 认 `ifVersion`：过期就 409 乐观锁冲突 (30.2823ms)
+✔ ⑥b ★★★ transition 走通时也**收尾目标**（与 advance 是两条路） (15.4654ms)
+✔ ⑪d ★★★ inbox 的 `scope` 过滤真的在过滤（不是一个被吞掉的参数） (28.3278ms)
+✔ ②b ★★★ next-post 把 `scope` 为空的任务**回退到 default 空间** (17.2311ms)
+✔ ⑫ ★★★ dispatch 契约：命中 ⇒ 恰好一次并回 true；不命中（含方法不符）⇒ false (0.5254ms)
+ℹ tests 30
+ℹ suites 0
+ℹ pass 30
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 807.1143
+

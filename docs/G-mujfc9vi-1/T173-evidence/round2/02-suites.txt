@@ -1,0 +1,54 @@
+﻿packages/shared/test/path-domain.test.mjs            exit=0   pass=9    fail=0
+packages/shared/test/repo-identity.test.mjs          exit=0   pass=7    fail=0
+team-hub/write-intent-store.test.mjs                 exit=0   pass=18   fail=0
+team-hub/claim-policy.test.mjs                       exit=0   pass=39   fail=0
+team-hub/git-plumbing.test.mjs                       exit=0   pass=8    fail=0
+team-hub/delivery-store.test.mjs                     exit=0   pass=12   fail=0
+team-hub/integration-worker.test.mjs                 exit=0   pass=9    fail=0
+team-hub/integration-runner.test.mjs                 exit=0   pass=1    fail=0
+team-hub/write-intent-routes.test.mjs                exit=0   pass=7    fail=0
+team-hub/delivery-routes.test.mjs                    exit=0   pass=4    fail=0
+team-hub/metrics.test.mjs                            exit=1   pass=2    fail=1
+  ---- tail ----
+  
+      assert.ok(r.body.metrics.sameFileWriteBlocked.value >= 1)
+  
+        at TestContext.<anonymous> (file:///D:/project/DSH/legion/.legion-worktrees/T-173/.ci-main/team-hub/metrics.test.mjs:67:10)
+        at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+        at async Test.run (node:internal/test_runner/test:1389:7)
+        at async Test.processPendingSubtests (node:internal/test_runner/test:960:7) {
+      generatedMessage: true,
+      code: 'ERR_ASSERTION',
+      actual: false,
+      expected: true,
+      operator: '==',
+      diff: 'simple'
+    }
+plugins/tests/write-eligibility.test.mjs             exit=0   pass=8    fail=0
+plugins/tests/legacy-convergence.test.mjs            exit=0   pass=6    fail=0
+workbench/scripts/delivery-ui.test.mjs               exit=0   pass=6    fail=0
+scripts/config/config.test.mjs                       exit=1   pass=46   fail=7
+  ---- tail ----
+        at TestContext.<anonymous> (file:///D:/project/DSH/legion/.legion-worktrees/T-173/.ci-main/scripts/config/config.test.mjs:1376:10)
+        at Test.runInAsyncScope (node:async_hooks:227:14)
+        at Test.run (node:internal/test_runner/test:1382:25)
+        at Test.processPendingSubtests (node:internal/test_runner/test:960:18)
+        at Test.postRun (node:internal/test_runner/test:1522:19)
+        at Test.run (node:internal/test_runner/test:1447:12)
+        at async Test.processPendingSubtests (node:internal/test_runner/test:960:7) {
+      generatedMessage: false,
+      code: 'ERR_ASSERTION',
+      actual: 1,
+      expected: 0,
+      operator: 'strictEqual',
+      diff: 'simple'
+    }
+team-hub/run-store.test.mjs                          exit=0   pass=44   fail=0
+team-hub/schema-util.test.mjs                        exit=0   pass=6    fail=0
+team-hub/members-routes.test.mjs                     exit=0   pass=8    fail=0
+team-hub/create-routes.test.mjs                      exit=0   pass=10   fail=0
+team-hub/chat.test.mjs                               exit=0   pass=51   fail=0
+team-hub/task-lifecycle-routes.test.mjs              exit=0   pass=30   fail=0
+
+合计：套件 21 个（绿 19 / 红 2）；pass=331 fail=8
+root=D:/project/DSH/legion/.legion-worktrees/T-173/.ci-main githead_no_gitenv=unset node=v24.19.0

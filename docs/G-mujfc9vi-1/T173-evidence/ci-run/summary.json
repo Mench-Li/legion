@@ -1,0 +1,41 @@
+{
+  "root": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-173",
+  "outDir": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-173\\docs\\G-mujfc9vi-1\\T173-evidence\\ci-run",
+  "finishedAt": "2026-09-27T14:35:53.410Z",
+  "stages": [
+    {
+      "name": "syntax",
+      "status": "PASS",
+      "ms": 25788,
+      "skipped": 0
+    },
+    {
+      "name": "env",
+      "status": "FAIL",
+      "ms": 4976,
+      "skipped": 0
+    },
+    {
+      "name": "boundary",
+      "status": "PASS",
+      "ms": 1245,
+      "skipped": 0
+    },
+    {
+      "name": "doc",
+      "status": "PASS",
+      "ms": 2844,
+      "skipped": 0
+    }
+  ],
+  "failed": 1,
+  "skippedTotal": 0,
+  "tree": {
+    "known": true,
+    "head": "200ef1f",
+    "dirty": true,
+    "modifiedCount": 0,
+    "untrackedCount": 2,
+    "fingerprint": "f758b38c34756a90"
+  }
+}

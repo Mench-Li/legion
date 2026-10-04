@@ -1,0 +1,2 @@
+[build] copied 12 shared modules -> apps/web/public/shared/
+[build] excluded (node-only): hash.mjs, index.mjs, config.mjs

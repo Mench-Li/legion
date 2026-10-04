@@ -1,0 +1,32 @@
+# T-173 round5 —— 生产接线复核（对齐树 main 3b0dd879；git grep 走 GIT_INDEX_FILE=main 树）
+
+## 1) .legion/delivery.json 经它自己服务的校验器（team-hub/verify-config.mjs loadDeliveryConfig）
+{
+  "ok": true,
+  "errors": [],
+  "verifyCount": 13
+}
+
+## 2) 生产消费者
+$ git grep -n "writeIntentStore.reserve" -- team-hub/server.mjs
+team-hub/server.mjs:576:    return writeIntentStore.reserve({
+team-hub/server.mjs:5860:      : writeIntentStore.reserve({
+team-hub/server.mjs:5933:        const reserved = writeIntentStore.reserve({
+$ git grep -n "createIntegrationWorker" -- team-hub/integration-runner.mjs
+team-hub/integration-runner.mjs:4:import { createIntegrationWorker } from './integration-worker.mjs'
+team-hub/integration-runner.mjs:33:  const worker = createIntegrationWorker({
+team-hub/integration-runner.mjs:57:  const worker = createIntegrationWorker({
+$ git grep -n "integration-runner" -- team-hub/server.mjs team-hub
+team-hub/config-schema.mjs:565:    //    delivery-store.mjs 的 DELIVERY_ERRORS、integration-runner.mjs、integration-worker.mjs、
+team-hub/integration-job-thread.mjs:3:import { runDeliveryJob, recoverDeliveryJob } from './integration-runner.mjs'
+team-hub/integration-runner.mjs:9:export function runDeliveryJob({ db, repoDir, repoId, targetRef, deliveryId, actor = 'integration-runner' }) {
+team-hub/integration-runner.test.mjs:11:import { runDeliveryJob } from './integration-runner.mjs'
+$ git grep -n "deliveries/submit" -- team-hub plugins/src
+plugins/src/index.ts:1653:        const result = await hubPost('/api/deliveries/submit', {
+team-hub/config-schema.mjs:566:    //    integration-job-thread.mjs、routes/delivery.mjs、server.mjs 的 /api/deliveries/submit 与
+team-hub/delivery-submit.e2e.test.mjs:44:    const missingEvidence = await post('/api/deliveries/submit', { by: 'worker', scope: 'delivery-test', taskId: 'T-e2e', sourceCommit: source, acceptanceEvidence: { passed: true }, humanApproved: true })
+team-hub/delivery-submit.e2e.test.mjs:49:    const unapproved = await post('/api/deliveries/submit', { by: 'worker', scope: 'delivery-test', taskId: 'T-e2e', sourceCommit: source, humanApproved: true, humanApprovalRequired: false })
+$ git grep -n "legacyConvergence" -- plugins/src
+plugins/src/index.ts:79:import { decideIntegrationPath, resolveIntegrationMode } from './legacyConvergence.js'
+plugins/src/legacyConvergence.ts:1:// plugins/src/legacyConvergence.ts
+plugins/src/mediation.ts:59:import { decideIntegrationPath, resolveIntegrationMode } from './legacyConvergence.js'

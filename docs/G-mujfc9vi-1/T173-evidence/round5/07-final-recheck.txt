@@ -1,0 +1,33 @@
+# T-173 round5 —— 清理临时脚手架后的收尾复核（树 = main 3b0dd879 + docs/G-mujfc9vi-1/ 交付物）
+
+## 未跟踪项（清理后）
+?? .git-local-index
+?? docs/G-mujfc9vi-1/DEPLOY.md
+?? docs/G-mujfc9vi-1/T173-evidence/
+
+## scan --check  exit=0
+扫描模式 git-tracked；扫描文件 113 个；直接读取 env 键 15 个；疑似 env 字面量 347 个
+  扫描模式 git-tracked；扫描文件 78 个；直接读取 env 键 14 个；疑似 env 字面量 46 个；动态访问 6 处（真实源 2，schema 自身登记文本 4 处已排除）
+  扫描模式 git-tracked；扫描文件 13 个；直接读取 env 键 7 个；疑似 env 字面量 31 个；动态访问 4 处（真实源 2，schema 自身登记文本 2 处已排除）
+  扫描模式 git-tracked；扫描文件 28 个；直接读取 env 键 2 个；疑似 env 字面量 22 个；动态访问 1 处（真实源 1，schema 自身登记文本 0 处已排除）
+  扫描模式 git-tracked；扫描文件 3 个；直接读取 env 键 1 个；疑似 env 字面量 2 个
+  扫描模式 git-tracked；扫描文件 2 个；直接读取 env 键 4 个；疑似 env 字面量 7 个
+  扫描模式 git-tracked；扫描文件 84 个；直接读取 env 键 10 个；疑似 env 字面量 432 个；动态访问 28 处（真实源 16，schema 自身登记文本 12 处已排除）
+  扫描模式 git-tracked；扫描文件 24 个；直接读取 env 键 6 个；疑似 env 字面量 119 个
+  扫描模式 git-tracked；扫描文件 120 个；直接读取 env 键 0 个；疑似 env 字面量 351 个；动态访问 23 处（真实源 10，schema 自身登记文本 13 处已排除）
+  扫描模式 git-tracked；扫描文件 11 个；直接读取 env 键 0 个；疑似 env 字面量 86 个；动态访问 1 处（真实源 1，schema 自身登记文本 0 处已排除）
+scan: PASS（全部 env 读取点、疑似字面量与动态读取均已处理；共 1443 个疑似字面量）
+## dsh-boundary --check  exit=1
+FAIL [increased] plugins/src/index.ts
+  FAIL [new-file] plugins/tests/worker-regression.test.mjs
+  FAIL [new-file] plugins/tests/worker-regression.test.mjs
+  FAIL [new-file] tests/p13-fixture/control-plugin.mjs
+  FAIL [new-file] tests/p13-fixture/control-plugin.mjs
+  FAIL [new-file] tests/p13-fixture/real-codex-cancel.mjs
+  FAIL [new-file] tests/p13-fixture/real-codex-system-proxy-connectivity.mjs
+  FAIL [new-file] workbench/src/components/AgentWorkflowConfigurator.tsx
+  共 8 处边界违规。
+## check-docs  exit=0
+check-docs: PASS（README.md + docs/FEATURES.md 结构/链接/索引一致，11 类校验项全绿）
+## evidence-banner --check  exit=0
+evidence-banner: PASS（76 个证据快照目录的文档均已标注历史 banner）

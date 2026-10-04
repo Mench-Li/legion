@@ -1,0 +1,44 @@
+# T-173 round5 —— 基线与对齐证据
+
+## 0) 结论
+本 worktree 的**文件内容**已对齐到 main 3b0dd879（逐路径与 main 树的 blob 一致），但因会话沙箱不允许写共享 .git（index.lock 创建被拒），无法 git add/commit/merge；
+索引是用 GIT_INDEX_FILE 指向工作树内的 .git-local-index + `git read-tree main` 物化的，CI/门禁在该索引下以 git-tracked 口径运行。
+
+## 1) 版本事实
+66c85a0e7e7b5f2d10f452b1202a21d3e888f42e  <- HEAD (w/T-173 的 WIP 提交 66c85a0e)
+3b0dd879c976a8430a8abb081ad27db7c1fcebfd  <- main
+3b0dd879 merge: fix/bugs（BUG-003 修法 C 方案与部署实况记录）
+index(local) 跟踪文件数 = 2985
+branch = w/T-173
+node = v24.19.0 ; git = git version 2.55.0.windows.5
+
+## 2) 工作树 vs 索引(=main 树) 的差异（应为空）
+(empty) —— 工作树内容 == 索引 == main 树
+
+## 3) 对齐方法（可复现）
+$env:GIT_INDEX_FILE="$PWD\.git-local-index"
+git read-tree main            # 索引 := main 树
+git checkout main -- .        # 工作树内容 := main（只写工作树与本地索引）
+
+## 4) 相对旧 HEAD(66c85a0e) 的差异汇总（前 5 行）
+316 files changed, 38078 insertions(+), 2328 deletions(-)
+
+## 5) 未跟踪项（工作树里不属于 main 树的文件）
+?? .ci-full-run.txt
+?? .ci-main-index
+?? .ci-main/
+?? .ci-run-env/
+?? .git-local-index
+?? .scan-ci-main.txt
+?? .scan-cimain.txt
+?? .scan-main.txt
+?? .tmp-verify/
+?? docs/G-mujfc9vi-1/DEPLOY.md
+?? docs/G-mujfc9vi-1/T173-evidence/
+
+## 6) 本任务新增/改写的交付物（都在 docs/G-mujfc9vi-1/ 下）
+docs/G-mujfc9vi-1/DEPLOY.md
+docs/G-mujfc9vi-1/T173-evidence/round5/**
+
+## 7) 沙箱对 git 写操作的拒绝（原文）
+fatal: Unable to create '.git/worktrees/T-173/index.lock': Permission denied

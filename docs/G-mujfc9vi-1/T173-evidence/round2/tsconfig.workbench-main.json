@@ -1,0 +1,71 @@
+{
+  "_comment": "T-173 round2 证据：workbench tsc --noEmit 的替代 tsconfig（本会话无 node_modules、沙箱禁 junction）。裸模块 paths 指向主 checkout 的 pnpm 链接目录；编译器选项与 workbench/tsconfig.json 等价。",
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "skipLibCheck": true,
+    "types": [],
+    "paths": {
+      "@react-three/drei": [
+        "D:/project/DSH/legion/workbench/node_modules/@react-three/drei"
+      ],
+      "@react-three/drei/*": [
+        "D:/project/DSH/legion/workbench/node_modules/@react-three/drei/*"
+      ],
+      "@react-three/fiber": [
+        "D:/project/DSH/legion/workbench/node_modules/@react-three/fiber"
+      ],
+      "@react-three/fiber/*": [
+        "D:/project/DSH/legion/workbench/node_modules/@react-three/fiber/*"
+      ],
+      "react": [
+        "D:/project/DSH/legion/workbench/node_modules/@types/react"
+      ],
+      "react/*": [
+        "D:/project/DSH/legion/workbench/node_modules/@types/react/*"
+      ],
+      "react-dom": [
+        "D:/project/DSH/legion/workbench/node_modules/@types/react-dom"
+      ],
+      "react-dom/*": [
+        "D:/project/DSH/legion/workbench/node_modules/@types/react-dom/*"
+      ],
+      "three": [
+        "D:/project/DSH/legion/workbench/node_modules/@types/three"
+      ],
+      "three/*": [
+        "D:/project/DSH/legion/workbench/node_modules/@types/three/*"
+      ],
+      "vite": [
+        "D:/project/DSH/legion/workbench/node_modules/vite"
+      ],
+      "vite/*": [
+        "D:/project/DSH/legion/workbench/node_modules/vite/*"
+      ],
+      "@vitejs/plugin-react": [
+        "D:/project/DSH/legion/workbench/node_modules/@vitejs/plugin-react/dist/index.d.ts"
+      ]
+    }
+  },
+  "include": [
+    "D:/project/DSH/legion/.legion-worktrees/T-173/.ci-main/workbench/src",
+    "D:/project/DSH/legion/.legion-worktrees/T-173/.ci-main/workbench/vite.config.ts",
+    "D:/project/DSH/legion/workbench/node_modules/vite/client.d.ts"
+  ]
+}

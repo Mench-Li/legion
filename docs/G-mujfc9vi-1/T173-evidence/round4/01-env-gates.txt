@@ -1,0 +1,56 @@
+# T-173 round4 env 门禁复跑（干净 main 快照树 .ci-main，tracked 集 == main 30bacf09 的 2974 文件）
+# node=v24.19.0 | ci-main HEAD=aec0c22 | status=0 条
+# 本树由 git archive main 解出、内容即 main 30bacf09；不掺任何会话在制品。
+
+## 1) node scripts/config/scan.mjs --check   （git-tracked 模式）
+exit=0
+  扫描模式 walk（git 不可用：结果已包含未跟踪文件，仅作调试参考）；扫描文件 113 个；直接读取 env 键 15 个；疑似 env 字面量 347 个
+  扫描模式 walk（git 不可用：结果已包含未跟踪文件，仅作调试参考）；扫描文件 78 个；直接读取 env 键 13 个；疑似 env 字面量 44 个；动态访问 6 处（真实源 2，schema 自身登记文本 4 处已排除）
+  扫描模式 walk（git 不可用：结果已包含未跟踪文件，仅作调试参考）；扫描文件 13 个；直接读取 env 键 7 个；疑似 env 字面量 31 个；动态访问 4 处（真实源 2，schema 自身登记文本 2 处已排除）
+  扫描模式 walk（git 不可用：结果已包含未跟踪文件，仅作调试参考）；扫描文件 28 个；直接读取 env 键 2 个；疑似 env 字面量 22 个；动态访问 1 处（真实源 1，schema 自身登记文本 0 处已排除）
+  扫描模式 walk（git 不可用：结果已包含未跟踪文件，仅作调试参考）；扫描文件 3 个；直接读取 env 键 1 个；疑似 env 字面量 2 个
+  扫描模式 walk（git 不可用：结果已包含未跟踪文件，仅作调试参考）；扫描文件 2 个；直接读取 env 键 3 个；疑似 env 字面量 5 个
+  扫描模式 walk（git 不可用：结果已包含未跟踪文件，仅作调试参考）；扫描文件 84 个；直接读取 env 键 10 个；疑似 env 字面量 432 个；动态访问 28 处（真实源 16，schema 自身登记文本 12 处已排除）
+  扫描模式 walk（git 不可用：结果已包含未跟踪文件，仅作调试参考）；扫描文件 24 个；直接读取 env 键 6 个；疑似 env 字面量 119 个
+  扫描模式 walk（git 不可用：结果已包含未跟踪文件，仅作调试参考）；扫描文件 120 个；直接读取 env 键 0 个；疑似 env 字面量 351 个；动态访问 23 处（真实源 10，schema 自身登记文本 13 处已排除）
+  扫描模式 walk（git 不可用：结果已包含未跟踪文件，仅作调试参考）；扫描文件 11 个；直接读取 env 键 0 个；疑似 env 字面量 86 个；动态访问 1 处（真实源 1，schema 自身登记文本 0 处已排除）
+scan: PASS（全部 env 读取点、疑似字面量与动态读取均已处理；共 1439 个疑似字面量）
+
+## 2) node scripts/config/sync.mjs --check
+exit=0
+sync: PASS（白板副本与根实现一致）
+
+## 3) node scripts/config/check.mjs --env-file=scr ipts/config/fixtures/good.env --isolated-env --strict --quiet
+exit=0
+
+config check: PASS（error 0，warning 0，strict）
+
+## 4) node scripts/config/config.test.mjs （无 shim）
+exit=1
+
+--- 失败项 ---
+✖ 夹具 good.env：--isolated-env --strict 必须 PASS（error=0 warning=0） (7.9832ms)
+✖ 夹具 bad.env：必须 FAIL，且错误码/类型错误与文档一致（验证校验器有牙齿） (1.7404ms)
+✖ check --json：可解析、ok 标志正确，且不含夹具里的任何明文 token (1.9417ms)
+✖ check：--process 只校验单个进程，未知进程返回用法错误码 2 (1.6216ms)
+✖ 跨平台：CRLF 检出（Windows autocrlf）下 sync --check 仍必须 PASS (14.1382ms)
+✖ P3-4：plugins schema 覆盖插件真实读取的全部 env，且扫描器能看到别名 env 对象的读取 (110.1484ms)
+✖ P3-4：夹具与 CLI —— good 夹具 strict PASS 覆盖插件字段，bad 夹具报出插件非法值，--process=plugins 可用 (1.8229ms)
+✖ ★ PRT-254：runtime/ 与 security/ 真的被扫到了（不是"扫了 0 个文件"的绿） (384.3894ms)
+✖ ★ 端到端：scan --check 必须 PASS，且把「schema 自身登记文本」与「真实源」分开报（Trap 1 可见） (1.6887ms)
+✖ failing tests:
+✖ 夹具 good.env：--isolated-env --strict 必须 PASS（error=0 warning=0） (7.9832ms)
+✖ 夹具 bad.env：必须 FAIL，且错误码/类型错误与文档一致（验证校验器有牙齿） (1.7404ms)
+✖ check --json：可解析、ok 标志正确，且不含夹具里的任何明文 token (1.9417ms)
+✖ check：--process 只校验单个进程，未知进程返回用法错误码 2 (1.6216ms)
+✖ 跨平台：CRLF 检出（Windows autocrlf）下 sync --check 仍必须 PASS (14.1382ms)
+✖ P3-4：plugins schema 覆盖插件真实读取的全部 env，且扫描器能看到别名 env 对象的读取 (110.1484ms)
+✖ P3-4：夹具与 CLI —— good 夹具 strict PASS 覆盖插件字段，bad 夹具报出插件非法值，--process=plugins 可用 (1.8229ms)
+✖ ★ PRT-254：runtime/ 与 security/ 真的被扫到了（不是"扫了 0 个文件"的绿） (384.3894ms)
+✖ ★ 端到端：scan --check 必须 PASS，且把「schema 自身登记文本」与「真实源」分开报（Trap 1 可见） (1.6887ms)
+
+## 5) NODE_OPTIONS=shim 下 node scripts/config/config.test.mjs
+exit=0
+
+--- 失败项 ---
+

@@ -1,0 +1,33 @@
+# T-173 门禁证据（devops）
+# 环境：node v24.19.0 / root=D:\project\DSH\legion\.legion-worktrees\T-173
+
+## 1) 脚本语法门禁 ci-syntax.mjs（守 scripts/ 全部 .mjs）
+$ node scripts/ci/ci-syntax.mjs   -> exit=0
+ci-syntax: PASS（234 个脚本全部可被 Node 解析）
+  其中包含 scripts/ci/run-ci.mjs —— 它是跑门禁的程序，此前它坏掉时六道门禁全绿。
+
+
+## 2) 编码门禁 encoding-check.mjs --quiet
+$ node scripts/ci/encoding-check.mjs --quiet   -> exit=0
+encoding-check: PASS（2710 个文本文件：无 U+FFFD；代码/配置无 NUL 字节；38 个历史采集物为 UTF-16，已列出）
+
+
+## 3) 配置读取点门禁 config/scan.mjs --check（env 阶段）
+$ node scripts/config/scan.mjs --check   -> exit=1
+  ✖ 未处理字面量（38）：APPLY_UNVERIFIED, BAD_BODY, BAD_JSON, COMMIT_TREE_FAILED, DELIVERY_NOT_FOUND, DIRTY_WORKSPACE, ENQUEUE_GATE, EPOCH_STALE, FILE_CONTENTION, FORBIDDEN, GIT_CONFLICT, GIT_ERROR, HEAD_ADVANCED_LIMIT, INVALID_PATHS, INVALID_REPO, INVALID_SOURCE_COMMIT, INVALID_TARGET_REF, INVALID_TRANSITION, JOB_CONTENTION, MISSING_ACTOR, MISSING_EPOCH, MISSING_REPO, MISSING_SCOPE, MISSING_TASK_ID, NOT_FOUND, NO_ACTIVE_RESERVATION, NO_INTENT, NO_VERIFY_CONFIG, REF_CAS_FAILED, RESERVED, REVISION_CONFLICT, SINGLE_WRITER_REQUIRED, SOURCE_MISSING, TARGET_REF_MISSING, TERMINAL_STATE, UNAUTHORIZED, VALIDATION_FAILED, WORKTREE_FAILED
+  ✖ 未声明 env 键（1）：LEGION_INTEGRATION_MODE
+  ✖ 未处理字面量（11）：ALLOWED, EPOCH_STALE, LEGACY_ALLOWED, LEGACY_INTEGRATION_DISABLED, OBSERVE_ONLY, OUT_OF_SCOPE, PATH_REJECTED, READ_PHASE_NO_RESERVATION, REPO_MODE_CONFLICT, REVISION_MISMATCH, WORKSPACE_MISMATCH
+
+
+## 4) DSH 执行面边界棘轮 dsh-boundary.mjs（boundary 阶段）
+$ node scripts/ci/dsh-boundary.mjs   -> exit=0
+dsh-boundary: PASS（执行面依赖未增长：7 个文件 / 85 处，均在基线内）
+
+
+## 5) 文档新鲜度门禁 check-docs.mjs（doc 阶段）
+$ node scripts/ci/check-docs.mjs   -> exit=0
+  表格行形状完整（docs/ + README 共 13200 个表行，收尾与孤儿行 0 处异常）
+check-docs: PASS（README.md + docs/FEATURES.md 结构/链接/索引一致，11 类校验项全绿）
+
+
+完整 run-ci 输出见 ci-run/ci.log 与 ci-run/summary.json（syntax/boundary/doc PASS，env FAIL）。

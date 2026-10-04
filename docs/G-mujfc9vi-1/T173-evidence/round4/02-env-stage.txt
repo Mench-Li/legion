@@ -1,0 +1,49 @@
+# T-173 round4 —— run-ci env 阶段 + scan(git-tracked) + config.test 计数
+# .ci-main HEAD=aec0c22  node=v24.19.0
+
+## 1) 带 shim：node scripts/config/scan.mjs --check（应回到 git-tracked 模式）
+exit=0
+  扫描模式 git-tracked；扫描文件 113 个；直接读取 env 键 15 个；疑似 env 字面量 347 个
+  扫描模式 git-tracked；扫描文件 78 个；直接读取 env 键 13 个；疑似 env 字面量 44 个；动态访问 6 处（真实源 2，schema 自身登记文本 4 处已排除）
+  扫描模式 git-tracked；扫描文件 13 个；直接读取 env 键 7 个；疑似 env 字面量 31 个；动态访问 4 处（真实源 2，schema 自身登记文本 2 处已排除）
+  扫描模式 git-tracked；扫描文件 28 个；直接读取 env 键 2 个；疑似 env 字面量 22 个；动态访问 1 处（真实源 1，schema 自身登记文本 0 处已排除）
+  扫描模式 git-tracked；扫描文件 3 个；直接读取 env 键 1 个；疑似 env 字面量 2 个
+  扫描模式 git-tracked；扫描文件 2 个；直接读取 env 键 3 个；疑似 env 字面量 5 个
+  扫描模式 git-tracked；扫描文件 84 个；直接读取 env 键 10 个；疑似 env 字面量 432 个；动态访问 28 处（真实源 16，schema 自身登记文本 12 处已排除）
+  扫描模式 git-tracked；扫描文件 24 个；直接读取 env 键 6 个；疑似 env 字面量 119 个
+  扫描模式 git-tracked；扫描文件 120 个；直接读取 env 键 0 个；疑似 env 字面量 351 个；动态访问 23 处（真实源 10，schema 自身登记文本 13 处已排除）
+  扫描模式 git-tracked；扫描文件 11 个；直接读取 env 键 0 个；疑似 env 字面量 86 个；动态访问 1 处（真实源 1，schema 自身登记文本 0 处已排除）
+scan: PASS（全部 env 读取点、疑似字面量与动态读取均已处理；共 1439 个疑似字面量）
+
+## 2) 带 shim：node scripts/ci/run-ci.mjs --only env
+exit=0
+Legion CI run: root=D:\project\DSH\legion\.legion-worktrees\T-173\.ci-main node=24.19.0
+all stages: syntax,env,boundary,deps,build,test,smoke,stage,doc | out=D:\project\DSH\legion\.legion-worktrees\T-173\docs\G-mujfc9vi-1\T173-evidence\round4\ci-env
+selected: env
+
+===== [env] 环境自检 =====
+env 自检：
+  root=D:\project\DSH\legion\.legion-worktrees\T-173\.ci-main
+  node=24.19.0（要求 >= 22.5，node:sqlite）
+  platform=win32 x64
+  git head=aec0c22
+  config scan: PASS scan: PASS（全部 env 读取点、疑似字面量与动态读取均已处理；共 1439 个疑似字面量）
+  config sync: PASS sync: PASS（白板副本与根实现一致）
+  config check(good fixture): PASS config check: PASS（error 0，warning 0，strict）
+  encoding: PASS encoding-check: PASS（2853 个文本文件：无 U+FFFD；代码/配置无 NUL 字节；38 个历史采集物为 UTF-16，已列出）
+[env] -> PASS (8865ms)
+
+===== SUMMARY =====
+  env    PASS (8862ms)
+summary.json -> D:\project\DSH\legion\.legion-worktrees\T-173\docs\G-mujfc9vi-1\T173-evidence\round4\ci-env\summary.json
+
+## 3) 带 shim：node scripts/config/config.test.mjs 计数
+exit=0
+✔ 跨平台：CRLF 检出（Windows autocrlf）下 sync --check 仍必须 PASS (273.8087ms)
+✔ P3-4：夹具与 CLI —— good 夹具 strict PASS 覆盖插件字段，bad 夹具报出插件非法值，--process=plugins 可用 (868.9987ms)
+ℹ tests 53
+ℹ suites 0
+ℹ pass 53
+ℹ fail 0
+ℹ cancelled 0
+

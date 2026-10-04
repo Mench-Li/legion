@@ -1,0 +1,25 @@
+DSH 执行面边界检查（PRT-108）
+
+  FAIL [increased] plugins/src/index.ts
+       ctx.subagents：实际 11，允许 6 —— 超出基线次数
+  FAIL [new-file] plugins/tests/worker-regression.test.mjs
+       ctx.subagents：实际 3，允许 0 —— 文件不在基线中，却出现 DSH 执行面记号
+  FAIL [new-file] plugins/tests/worker-regression.test.mjs
+       ctx.agents：实际 3，允许 0 —— 文件不在基线中，却出现 DSH 执行面记号
+  FAIL [new-file] tests/p13-fixture/control-plugin.mjs
+       ctx.subagents：实际 2，允许 0 —— 文件不在基线中，却出现 DSH 执行面记号
+  FAIL [new-file] tests/p13-fixture/control-plugin.mjs
+       inject.subagents：实际 1，允许 0 —— 文件不在基线中，却出现 DSH 执行面记号
+  FAIL [new-file] tests/p13-fixture/real-codex-cancel.mjs
+       ctx.subagents：实际 1，允许 0 —— 文件不在基线中，却出现 DSH 执行面记号
+  FAIL [new-file] tests/p13-fixture/real-codex-system-proxy-connectivity.mjs
+       ctx.subagents：实际 1，允许 0 —— 文件不在基线中，却出现 DSH 执行面记号
+  FAIL [new-file] workbench/src/components/AgentWorkflowConfigurator.tsx
+       ctx.subagents：实际 1，允许 0 —— 文件不在基线中，却出现 DSH 执行面记号
+
+  共 8 处边界违规。
+
+  处理方式（按优先级）：
+    1. 把该调用移入 runtime/adapters/dsh/（适配层是唯一允许调用 DSH 执行面的地方）。
+    2. 若确实属于迁移期兼容基线，需显式运行 --update-baseline 并在提交信息中说明理由；
+       边界模块（runtime/contracts、orchestrator、product、security）永不接受基线例外。

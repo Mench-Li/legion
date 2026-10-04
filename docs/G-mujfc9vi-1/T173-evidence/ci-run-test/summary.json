@@ -1,0 +1,23 @@
+{
+  "root": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-173",
+  "outDir": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-173\\docs\\G-mujfc9vi-1\\T173-evidence\\ci-run-test",
+  "finishedAt": "2026-09-27T14:27:31.556Z",
+  "stages": [
+    {
+      "name": "test",
+      "status": "FAIL",
+      "ms": 95,
+      "skipped": 0
+    }
+  ],
+  "failed": 1,
+  "skippedTotal": 0,
+  "tree": {
+    "known": true,
+    "head": "200ef1f",
+    "dirty": true,
+    "modifiedCount": 0,
+    "untrackedCount": 4,
+    "fingerprint": "fdb976a6ef0395e3"
+  }
+}

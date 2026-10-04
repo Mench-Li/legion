@@ -1,0 +1,19 @@
+# T-173 构建证据（devops）
+# 环境：node v24.19.0 / git version 2.55.0.windows.5 / root=D:\project\DSH\legion\.legion-worktrees\T-173
+
+## 1) whiteboard build（零依赖 node 脚本）
+$ node whiteboard/scripts/build.mjs   -> exit=0
+[build] copied 12 shared modules -> apps/web/public/shared/
+[build] excluded (node-only): hash.mjs, index.mjs, config.mjs
+
+## 2) workbench tsc --noEmit（= pnpm build 的第一半）
+# 本工作树无 node_modules 且沙箱禁 junction/符号链接，故用 tsconfig.workbench-typecheck.json
+# 把裸模块 paths 映射到主 checkout 的 .pnpm 真实目录（编译器选项与 workbench/tsconfig.json 一致）。
+$ node <main>/workbench/node_modules/typescript/bin/tsc -p docs/G-mujfc9vi-1/T173-evidence/tsconfig.workbench-typecheck.json --noEmit   -> exit=0  diagnostics=0
+
+## 3) vite build 的前置 esbuild 服务（本会话沙箱不可用）
+# 3a) 原样（esbuild 以 stdio:pipe 启动长驻服务）
+$ node -e "<esbuild.transformSync>"   -> esbuild FAIL spawn EPERM
+# 3b) 套 sandbox-pipe-shim（pipe -> 临时文件 fd；esbuild 需要双向 stdio，不适用）
+$ NODE_OPTIONS="--require sandbox-pipe-shim.cjs" node -e "<esbuild.transformSync>"   -> esbuild FAIL Cannot read properties of undefined (reading 'on')
+=> 结论：vite build 依赖 esbuild 长驻服务的 stdio 管道，本会话沙箱下无法启动；构建证据到 tsc 为止。

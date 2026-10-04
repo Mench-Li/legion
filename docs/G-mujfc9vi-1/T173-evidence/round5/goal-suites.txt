@@ -1,0 +1,25 @@
+# G-mujfc9vi-1 / T-173 round5 —— 目标相关套件逐文件直跑（node <file>，cwd=D:\project\DSH\legion\.legion-worktrees\T-173）
+# node v24.19.0 ; NODE_OPTIONS=--require sandbox-pipe-shim.cjs --test-isolation=none ; GIT_INDEX_FILE 未设置
+exit=0   tests=9    pass=9    fail=0     packages/shared/test/path-domain.test.mjs
+exit=0   tests=7    pass=7    fail=0     packages/shared/test/repo-identity.test.mjs
+exit=0   tests=18   pass=18   fail=0     team-hub/write-intent-store.test.mjs
+exit=0   tests=39   pass=39   fail=0     team-hub/claim-policy.test.mjs
+exit=0   tests=1    pass=1    fail=0     team-hub/claim-reservation.e2e.test.mjs
+exit=0   tests=8    pass=8    fail=0     team-hub/git-plumbing.test.mjs
+exit=0   tests=12   pass=12   fail=0     team-hub/delivery-store.test.mjs
+exit=0   tests=9    pass=9    fail=0     team-hub/integration-worker.test.mjs
+exit=0   tests=1    pass=1    fail=0     team-hub/integration-runner.test.mjs
+exit=0   tests=7    pass=7    fail=0     team-hub/write-intent-routes.test.mjs
+exit=0   tests=4    pass=4    fail=0     team-hub/delivery-routes.test.mjs
+exit=0   tests=1    pass=1    fail=0     team-hub/delivery-submit.e2e.test.mjs
+exit=0   tests=31   pass=31   fail=0     team-hub/event-delivery.test.mjs
+exit=0   tests=7    pass=7    fail=0     team-hub/event-delivery-wiring.test.mjs
+exit=1   tests=3    pass=2    fail=1     team-hub/metrics.test.mjs
+      ✖ TC-S4-12/13 发生事件后可读且口径与事件一致；无样本项降级为 reason (2160.719ms)
+      ✖ failing tests:
+      ✖ TC-S4-12/13 发生事件后可读且口径与事件一致；无样本项降级为 reason (2160.719ms)
+      AssertionError [ERR_ASSERTION]: The expression evaluated to a falsy value:
+exit=0   tests=8    pass=8    fail=0     plugins/tests/write-eligibility.test.mjs
+exit=0   tests=6    pass=6    fail=0     plugins/tests/legacy-convergence.test.mjs
+exit=0   tests=6    pass=6    fail=0     workbench/scripts/delivery-ui.test.mjs
+TOTAL files=18 tests=177 pass=176 fail=1

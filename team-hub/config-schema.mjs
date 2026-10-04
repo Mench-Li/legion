@@ -17,6 +17,24 @@ export const SCHEMA = defineSchema({
     { key: 'host', env: 'TEAM_HUB_HOST', cli: 'host', type: 'string', default: '127.0.0.1', doc: '监听地址；非回环必须配 token' },
     { key: 'token', env: 'TEAM_HUB_TOKEN', cli: 'token', type: 'string', default: '', sensitive: true, doc: '访问 token（读写鉴权）' },
     { key: 'dbFile', env: 'TEAM_HUB_DB', type: 'path', default: 'team-hub/team.db', doc: 'SQLite 数据库文件（WAL）' },
+    // ── 远程 Agent 通道（身份 / 设备 / Node 网关）──
+    //
+    // 三者的**共同默认值是"关闭"**，而且关闭方式是"密钥为空"而不是一个 `enabled` 开关：
+    // 一个布尔开关会在有人把它打开而忘了配密钥时，起一个**没有签名**的令牌体系
+    // （也就是任何人都能伪造令牌）。密钥为空 ⇒ 路由不注册、网关不挂载，
+    // 不存在"打开了但没配好"这个中间态。
+    {
+      key: 'identityKey', env: 'LEGION_IDENTITY_KEY', type: 'string', default: '', sensitive: true,
+      doc: '用户/设备令牌的 HMAC 签名密钥（>=16 字符）；留空 = 关闭远程 Agent 通道',
+    },
+    {
+      key: 'remoteAuth', env: 'LEGION_REMOTE_AUTH', type: 'string', default: '',
+      doc: "设为 '1' 时启用远程门禁：除白名单外的 /api/* 都要求用户访问令牌（Hub 绑回环+反代时必须开）",
+    },
+    {
+      key: 'claimScope', env: 'LEGION_NODE_CLAIM_SCOPE', type: 'string', default: '',
+      doc: 'Node 网关认领任务时限定到某个空间；留空 = 不限（单机部署的安全做法是限定）',
+    },
     // ── 附件（P3-2 统一项：附件目录相关限值）──
     { key: 'attachMaxBytes', env: 'CHAT_ATTACH_MAX_BYTES', type: 'int', default: 10 * 1024 * 1024, min: 1, doc: '单附件大小上限（字节）' },
     { key: 'attachMaxPerMsg', env: 'CHAT_ATTACH_MAX_PER_MSG', type: 'int', default: 3, min: 1, doc: '每条消息附件数量上限' },
@@ -75,6 +93,28 @@ export const SCHEMA = defineSchema({
   ],
   nonEnvLiterals: [
     'COMMIT', 'ROLLBACK', 'DELETE', 'OPTIONS', 'SIGINT', 'SIGTERM', 'ENOENT',
+    // ── 远程 Agent 通道（S-B / S-D）的具名错误码 ──
+    //
+    // 三个来源，都**不是**环境变量读取点，只是长得像（全大写）：
+    //   · `user-store.mjs` 的 IDENTITY_*（登录/会话/邀请/空间授权）；
+    //   · `device-store.mjs` 的 DEVICE_*（配对/令牌/能力）；
+    //   · `node-gateway.mjs` / `remote-auth.mjs` / `routes/identity.mjs` 的
+    //     NODE_* / REMOTE_AUTH_* / HUB_TOKEN_REQUIRED。
+    // `UNIQUE` 是 SQLite 唯一约束报错里的字样，用于把"重名"翻成具名结果。
+    'DEVICE_CAPABILITY_NOT_ALLOWED', 'DEVICE_INVALID_INPUT', 'DEVICE_NOT_FOUND',
+    'DEVICE_PAIRING_CONSUMED', 'DEVICE_PAIRING_EXPIRED', 'DEVICE_PAIRING_NOT_FOUND',
+    'DEVICE_PAIRING_RATE_LIMITED', 'DEVICE_REVOKED', 'DEVICE_TOKEN_INVALID', 'DEVICE_USER_NOT_FOUND',
+    'HUB_TOKEN_REQUIRED', 'UNIQUE',
+    'IDENTITY_ACCOUNT_LOCKED', 'IDENTITY_ALREADY_BOOTSTRAPPED', 'IDENTITY_BOOTSTRAP_DENIED',
+    'IDENTITY_FORBIDDEN', 'IDENTITY_INVALID_CREDENTIALS', 'IDENTITY_INVALID_INPUT',
+    'IDENTITY_INVITE_CONSUMED', 'IDENTITY_INVITE_EXPIRED', 'IDENTITY_INVITE_NOT_FOUND',
+    'IDENTITY_KEY_REQUIRED', 'IDENTITY_NAME_TAKEN', 'IDENTITY_NOT_BOOTSTRAPPED',
+    'IDENTITY_REFRESH_REUSE_DETECTED', 'IDENTITY_REQUEST_FAILED', 'IDENTITY_SESSION_EXPIRED',
+    'IDENTITY_SESSION_NOT_FOUND', 'IDENTITY_SESSION_REVOKED', 'IDENTITY_TOKEN_BAD_SIGNATURE',
+    'IDENTITY_TOKEN_EXPIRED', 'IDENTITY_TOKEN_MALFORMED', 'IDENTITY_TOKEN_MISSING', 'IDENTITY_USER_NOT_FOUND',
+    'NODE_CAPABILITY_MISSING', 'NODE_FRAME_BUILD_FAILED', 'NODE_HELLO_REQUIRED', 'NODE_HELLO_TIMEOUT',
+    'NODE_ID_MISMATCH', 'NODE_LEASE_NOT_OWNED', 'NODE_STORE_REJECTED', 'NODE_VERSION_REJECTED',
+    'REMOTE_AUTH_EXPIRED', 'REMOTE_AUTH_INVALID', 'REMOTE_AUTH_MISSING',
     // 运行面（PRT-302/303/313）的具名错误码，来自 team-hub/run-store.mjs 的 RUN_ERRORS。
     // 逐个登记而不是加前缀通配：这份清单的价值在于「每一条都被看过一次」。
     'WORKER_REQUIRED', 'EPOCH_REQUIRED', 'BAD_LEASE_TTL', 'ATTEMPT_NOT_FOUND',

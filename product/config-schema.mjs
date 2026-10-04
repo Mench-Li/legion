@@ -345,6 +345,21 @@ export const SCHEMA = defineSchema({
   ],
   nonEnvLiterals: [
 
+    // ── 远程 Agent 通道（S-E：电脑侧 Node）的具名错误码 ──
+    //
+    // 不是环境变量读取点，只是长得像（全大写）：
+    //   · `product/node/egress.mjs` 的 EGRESS_*（出境策略的拦截/收敛原因）；
+    //   · `product/node/executor.mjs` 的 EXECUTOR_*（执行器接缝的失败分类）；
+    //   · `product/node/agent.mjs` 的 NODE_*（客户端侧拒收理由）。
+    // 后面那三个 LEASE_* 是**从 Hub 的错误码里读回来的**（Hub 说这条租约已经
+    // 不归你了），客户端按它们停手——它们是跨端约定的字符串，不是本地常量。
+    'EGRESS_BINARY_BLOB_SUSPECTED', 'EGRESS_ENV_DUMP_SUSPECTED', 'EGRESS_FIELD_NOT_ALLOWED',
+    'EGRESS_LOG_DUMP_SUSPECTED', 'EGRESS_REDACTED', 'EGRESS_TRUNCATED',
+    'EXECUTOR_BAD_RESULT', 'EXECUTOR_CANCELLED', 'EXECUTOR_EXIT_NONZERO', 'EXECUTOR_NO_RESULT',
+    'EXECUTOR_OUTPUT_TOO_LARGE', 'EXECUTOR_SPAWN_FAILED', 'EXECUTOR_TIMEOUT',
+    'NODE_ATTEMPT_ALREADY_RUNNING', 'NODE_EXECUTOR_MISSING', 'NODE_VERSION_REJECTED', 'NODE_WORKSPACE_NOT_AUTHORIZED',
+    'LEASE_EPOCH_STALE', 'LEASE_EXPIRED', 'LEASE_NOT_HELD',
+
     // Desktop bridge/protocol and local HTTP guard error codes, not environment keys.
     'BAD_ID', 'BAD_JSON', 'BAD_PAYLOAD', 'BAD_REQUEST', 'BAD_VERSION',
     'BRIDGE_CLOSED', 'BRIDGE_FAILED', 'CONFIG_INVALID', 'LINE_TOO_LARGE', 'START_FAILED', 'UNKNOWN_TYPE',

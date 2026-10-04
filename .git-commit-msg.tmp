@@ -1,0 +1,24 @@
+feat(remote): 服务器/电脑/手机远程 Agent 通道
+
+设计依据 docs/superpowers/specs/2026-10-02-legion-server-pc-mobile-agent-architecture.md，
+实施计划 docs/superpowers/plans/2026-10-04-legion-server-pc-mobile-agent-implementation.md。
+
+本轮交付设计文档的阶段 A–E（帧编解码、协议契约、身份与设备、Hub 网关、电脑侧 Node），
+全部按仓库既有的「零第三方依赖 + 纯模块可测」方式实现。
+
+新增：
+- packages/shared：ws-frames（RFC6455 帧与握手）、ws-client（客户端方向）、node-protocol（协议契约）
+- team-hub：user-store（用户/会话/邀请/空间角色）、device-store（配对/设备令牌/presence）、
+  remote-auth（远程门禁策略）、node-gateway（WSS 网关）、routes/identity
+- product/node：agent（出站客户端 + 重连 + 对账）、executor（执行器接缝）、
+  ledger（本地运行账本）、egress（出境策略）、entry（CLI）
+
+几条刻意守住的边界：
+- 远程层不拥有任务状态：网关只调 run-store 的既有入口，自己无状态；presence 表无任务状态列
+- 失败走 failAndRetry（含重试排队），而不是 transition 到 RetryableFailure
+- 终态用 outcome 直通状态机（completed → Validating，不是 Completed）
+- 出境策略在发送前生效：私钥块 / 环境变量转储 / 二进制大块整段拦下
+- 远程通道默认关闭：未配 LEGION_IDENTITY_KEY 时不注册路由、不挂网关
+
+测试：新增 200+ 用例（帧 27、协议 22、客户端 8、身份 28、设备 22、网关 22、
+agent 端到端 9、出境 14、账本 11、执行器 12、接线 11），既有套件无回归。

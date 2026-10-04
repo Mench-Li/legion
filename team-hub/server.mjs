@@ -7507,3 +7507,110 @@ function routeHarnessForTask(input) {
   if (out.ok) return out.provider
   throw new Error('harness 路由被拒：' + out.reason + '（' + JSON.stringify(out.detail ?? {}) + '）')
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// 远程 Agent 通道接线（S-B / S-D）：身份、设备与 Node 网关
+//
+// 与上面那段 `harnessStoreForDispatch` 同一个理由，整段放在**文件末尾**：
+// 本仓有多处手钉行号的引用，加在中间会让它们全部后移。
+// ESM 的 `import` 声明在模块体里任何顶层位置都合法（且会被提升），
+// 所以末尾声明不改变任何导入语义。
+//
+// ## 默认关闭，且**必须**显式打开
+//
+// `LEGION_IDENTITY_KEY` 没配时，身份与设备路由**不注册**、Node 网关**不挂**。
+// 这样做的理由是：本文件是既有的本机服务（桌面 / 守护 / 看板都指过来），
+// 把一条公网通道顺手打开会让"我升级了一次代码"变成"我多了一个公网入口"。
+// 打开它需要一个显式动作（见 `docs/DEPLOY.md` 或实施计划 §阶段 G）。
+//
+// ## 它不替换 `TEAM_HUB_TOKEN`
+//
+// 两把门并存：机器令牌保护本机/服务间那一面，用户与设备身份保护远程那一面。
+// 见 `team-hub/remote-auth.mjs` 文件头。
+// ════════════════════════════════════════════════════════════════════════════
+import { createIdentityRoutes } from './routes/identity.mjs'
+import { createUserStore } from './user-store.mjs'
+import { createDeviceStore } from './device-store.mjs'
+import { createNodeGateway } from './node-gateway.mjs'
+import { PUBLIC_PATHS, decideRemoteAuth, extractBearer } from './remote-auth.mjs'
+
+/** 远程通道是否启用：配了身份签名密钥即启用。 */
+export const REMOTE_AGENT_ENABLED = String(CFG.values.identityKey ?? '').length >= 16
+
+/**
+ * 身份签名密钥。**没有它就没有令牌签名**，而"没有签名的令牌"与
+ * "任何人都能伪造的令牌"是同一个东西——所以缺它时整个远程通道不注册。
+ */
+const IDENTITY_KEY = String(CFG.values.identityKey ?? '')
+const REMOTE_AUTH_ENABLED = REMOTE_AGENT_ENABLED && String(CFG.values.remoteAuth ?? '') === '1'
+
+export const userStore = REMOTE_AGENT_ENABLED
+  ? createUserStore({ db, withTx, key: IDENTITY_KEY, audit })
+  : null
+export const deviceStore = REMOTE_AGENT_ENABLED
+  ? createDeviceStore({ db, withTx, audit })
+  : null
+
+/** 网关需要一个任务摘要端口（它不认识 `tasks` 表的列）。 */
+function describeTaskForNode(taskId, scope) {
+  try {
+    const t = db.prepare('SELECT id,title,status,version,role,soldier FROM tasks WHERE id=? AND scope=?').get(taskId, scope)
+    if (!t) return null
+    // 只给身份与状态。**不给**描述/验收标准/评论——那些可能含用户原文，
+    // 而任务的正文由 `claim`/上下文包那条路径送，不从这里绕。
+    return { id: t.id, title: t.title, status: t.status, version: t.version, role: t.role ?? t.soldier ?? null }
+  } catch { return null }
+}
+
+export const nodeGateway = REMOTE_AGENT_ENABLED
+  ? createNodeGateway({
+    deviceStore, runStore, audit,
+    describeTask: describeTaskForNode,
+    claimScope: CFG.values.claimScope || null,
+    onWarn: (code, detail) => console.warn(`[node-gateway] ${code}: ${JSON.stringify(detail)}`),
+  })
+  : null
+
+if (REMOTE_AGENT_ENABLED) {
+  // 身份/设备族挂在**最前**，路由层与既有 `if` 链都不需要改一行。
+  router.families.unshift(createIdentityRoutes({
+    json, readBody, authorized, requireString,
+    userStore, deviceStore, remoteAuthEnabled: REMOTE_AUTH_ENABLED,
+  }))
+  router.list.push(
+    { family: 'identity', method: 'GET', path: '/api/identity/status' },
+    { family: 'identity', method: 'POST', path: '/api/identity/login' },
+    { family: 'identity', method: 'POST', path: '/api/devices/pair' },
+  )
+
+  if (REMOTE_AUTH_ENABLED) {
+    // 远程门禁也要挂在最前：它必须先于所有业务族做判定，且**放行时返回 false**
+    // 让请求继续落到真正的路由上。见 remote-auth.mjs 文件头那段"为什么需要它"。
+    router.families.unshift({
+      id: 'remote-auth-gate',
+      routes: [],
+      async dispatch(req, res, ctx) {
+        const { token } = extractBearer({
+          path: ctx.path, headers: req.headers, searchParams: ctx.url.searchParams, legacyToken: TOKEN,
+        })
+        const decision = decideRemoteAuth({
+          path: ctx.path,
+          method: req.method,
+          remoteAuth: true,
+          token,
+          legacyAuthorized: authorized(req),
+          verifyAccessToken: (t) => userStore.verifyAccessToken(t),
+        })
+        if (decision.allow === true) return false
+        if (decision.headers) for (const [k, v] of Object.entries(decision.headers)) res.setHeader(k, v)
+        json(res, decision.status, { error: decision.message, code: decision.code })
+        return true
+      },
+    })
+  }
+
+  nodeGateway.attach(server)
+}
+
+export { PUBLIC_PATHS }
+

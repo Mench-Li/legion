@@ -50,6 +50,16 @@ Thumbs.db
 releases/
 scrum/pending-goals.json
 
+# 战斗报告只入库 .md（见 reports/README.md 的命名约定：`YYYYMMDD-HHMM-roundN-batch.md`）。
+# 机器生成的证据包（整棵源码快照 / zip / db 备份 / 日志）既不该入库，也不该进 CI 的文件面：
+# `scripts/ci/dsh-boundary.mjs` 按「已跟踪 + 未跟踪但未被忽略」取文件
+#（`git ls-files --cached --others --exclude-standard`），一个未忽略的源码副本
+# 会让整棵树的 DSH 记号都被算成"新违规"。
+# 实测（2026-10-04）：reports/main-web-restart/ 共 94MB（main-source/ 49MB 源码副本 +
+# main-source.zip 16MB + team-before-main-*.db 29MB），一次全量 CI 的 boundary 阶段
+# 因此报了 30+ 条**与提交内容无关**的 FAIL。
+reports/*/
+
 # 第 118 轮第十二轮（业主确认④）：被引用的"量具"已收进 scripts/probes/ 并跟踪；
 # 剩下的是运行期状态与一次性草稿，明确不进版本控制。
 scratch/

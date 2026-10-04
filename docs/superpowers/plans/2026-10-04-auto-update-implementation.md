@@ -510,11 +510,31 @@ node scripts/update/verify-host.mjs --origin <生产 origin> --prefix /legion \
 - **`releaseId` 被复用没有专门的读数**。设计 §5 line 78：「`releaseId` 唯一且
   不可覆盖；同版本不同字节也必须使用不同 `releaseId`，并**禁止客户端把它当成
   常规同版本更新**」。客户端持久化的只有**通道 sequence** 高水位
-  （`channel-sequence.json`），没有 `releaseId → manifestSha256` 的绑定。
+  （`channel-sequence.json`），而 `judgeSequence` 只在
+  `sequence === previous.sequence` 时比对摘要——**sequence 一涨就不再比对**。
   所以"同一个 releaseId 换了字节"会在**装的那一刻**被 ⑲ 的重查拦下
   （`releaseId` 相同而 `manifestSha256` 不同 → 走 `update-target-recalled`），
   安全性成立，但**报出来的原因是错的**（说"被撤回"，而实际是"发布端复用了
-  releaseId"）。补一个绑定表能把诊断说准，那是另一件事。
+  releaseId"）。
+
+  ★★ **不要用"加一条 `releaseId → manifestSha256` 的绑定并拒绝变化"来修它。**
+  那会把一个**合法**动作一起判红：设计 §9 line 206 明确允许「签名清单定期
+  续签可由 CI 定时任务执行」——续签会改 `issuedAt`/`expiresAt`，
+  于是**同一个 releaseId 的清单字节必然变**。一条"releaseId 的摘要不许变"的
+  判据会让每一次正常续签都变成一次攻击告警，而告警疲劳正是这类判据最常见的
+  死法。
+
+  所以正确的修法是**把两件事分开**：续签（内容不变、字节变）与换包
+  （内容变、releaseId 也该变）。前者要放行，后者要具名拒绝。而"内容有没有变"
+  不能看清单字节——要看清单**内部**已经签名的那几个字段（`package.sha256`、
+  `productManifestSha256`、`productVersion`）。那是一个需要新读数的小功能
+  （把每次接受的 `releaseId → 内容摘要` 记在 `channel-sequence.json` 的同一
+  条记录里，`judgeSequence` 在 sequence 前进时比它），本轮没有做——但**前提
+  已经查清了**：值不值得做取决于"发布端会不会复用 releaseId"，而这不是本仓
+  能回答的问题。
+
+  > 一条"这个值不许变"的判据，在**这个值本来就会合法地变**的时候，
+  > 收获的不是安全，而是把它关掉的理由。
 
 ### 6.1.1 "沉默的判据"：有开关、有实现、**没有要求**
 

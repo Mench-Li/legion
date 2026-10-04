@@ -65,7 +65,7 @@ node scripts/config/check.mjs --show-source --process=workbench
 | `MAX_RULES_LEN` | — | int | `3000` | 规范内容长度上限 |
 | `LEGION_HUB_URL` | — | string | `http://127.0.0.1:8787` | `scripts/seed-pipeline.mjs` 写入目标 |
 
-### 3.2 workbench（`workbench/scripts/config-schema.mjs`，21 项）
+### 3.2 workbench（`workbench/scripts/config-schema.mjs`，22 项）
 
 | 环境变量 | CLI | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- | --- |
@@ -74,6 +74,7 @@ node scripts/config/check.mjs --show-source --process=workbench
 | `DSH_WORKBENCH_TOKEN` | `--token` | string（secret） | 空 | 写操作鉴权；空 = 只读部署（写接口拒绝） |
 | `TEAM_HUB_TOKEN` | — | string（secret） | 空 | 调 hub 读接口用；**与 team-hub 同一个变量** |
 | `DSH_HUB_UPSTREAM` | — | string | `http://127.0.0.1:8787` | `/hub/*` 反向代理目标 |
+| `DSH_MODELS_BASE_URL` | — | string | 空 = `http://127.0.0.1:3080` | **DSH 宿主地址**（模型配置 Remote 的上游）。**派生值**：由 legion-services 按 `ctx.webServer.port` 注入；空 = 独立跑 web profile 时回落 3080。写死 3080 会让 Desktop 部署的「供应商与模型」整页读不出来（Bug #1） |
 | `DSH_WORKBENCH_ROOT` | — | path | 空 = `workbench/dist` | 静态产物根 |
 | `DSH_WORKBENCH_SPACES_JSON` | — | path | 空 | 空间定义 JSON（默认内置） |
 | `DSH_WORKBENCH_MAX_UPLOAD` | — | int | `67108864` | 单文件上传上限 |
@@ -153,7 +154,7 @@ schema 还声明了两条**进程内一致性规则**（`plugins/config-schema.m
 该文件是**声明式**的：插件是纯 `.ts`，运行时没有独立的配置解析代码，schema 的作用是让
 「从环境读 token」这一事实可见（`scan --check` 保证新增读取点必须登记），并让跨进程 token 规则能覆盖它。
 
-### 3.6 services-plugin（服务托管插件，`services-plugin/config-schema.mjs`，3 项）
+### 3.6 services-plugin（服务托管插件，`services-plugin/config-schema.mjs`，4 项）
 
 它不监听端口、不读业务配置，而是决定**被托管进程启动时拿到什么环境**：
 
@@ -162,6 +163,7 @@ schema 还声明了两条**进程内一致性规则**（`plugins/config-schema.m
 | `TEAM_HUB_HOST` | string | `127.0.0.1` | 注入给 team-hub 的监听地址（composition 的 `config.teamHubHost` 优先） |
 | `TEAM_HUB_TOKEN` | string（secret） | 空 | 注入给 team-hub / workbench 的 token（composition 的 `config.teamHubToken` 优先） |
 | `DSH_HUB_UPSTREAM` | string | `http://127.0.0.1:8787` | 注入给 workbench 的上游（composition 的 `config.hubUpstream` 优先） |
+| `DSH_WEB_URL` | string | 空 | **只读兜底**：拿不到 `ctx.webServer.port` 时，用它派生 workbench 的 `DSH_MODELS_BASE_URL`（宿主自己注入的 GUI 地址） |
 
 它还会**注入**下列值（schema 的 `injects`，不是读取点）——这点决定了「环境里改了却不生效」类问题的答案：
 
@@ -170,11 +172,16 @@ schema 还声明了两条**进程内一致性规则**（`plugins/config-schema.m
 | team-hub | `TEAM_HUB_PORT` | env | composition 的 `teamHubPort`（**不读**同名环境变量），缺省 `8787` |
 | team-hub | `TEAM_HUB_HOST` / `TEAM_HUB_TOKEN` | env | composition 选项优先，否则回落到同名环境变量 |
 | workbench | `DSH_HUB_UPSTREAM` / `TEAM_HUB_TOKEN` | env | 同上 |
+| workbench | `DSH_MODELS_BASE_URL` | env | **派生值**：composition 的 `config.dshModelsBaseUrl` > `ctx.webServer.port` > 宿主的 `DSH_WEB_URL`；都拿不到就**不注入**（由 workbench 自己回落 3080）并在启动日志里说清楚 |
 | workbench | 端口 | **CLI** `--port` | composition 的 `workbenchPort`，缺省 `5173`（CLI 优先级高于环境变量） |
 
 > ⚠️ 托管实例与手工实例的区别就在这张表：**`TEAM_HUB_PORT` 环境变量对「由 services-plugin 托管的 team-hub」无效**
 > ——要改端口请改 `legion-services` 的 `config.teamHubPort`。跨进程规则 `services_inject_overrides_env`
 > 会在两者不一致时报出来（P3-4 实测）。
+>
+> `DSH_MODELS_BASE_URL` 是这条规则的一个**例外**：它没有静态 `value`（宿主端口要等 composition
+> 把 `webServer` 挂起来才知道），所以 ⑧ 那条规则**不**拿它跟环境解析值比较——比了会得出「托管实例
+> 与配置不一致」的假结论。跨进程规则只比对**有固定取值**的注入项。
 
 ## 4. 校验命令
 
@@ -328,10 +335,15 @@ node scripts/config/sync.mjs --check   # CI env 阶段校验一致性
   插件的主配置面（composition 的 `config:` 块：角色、间隔、`hubUrl`、`scope`…）**check.mjs 看不到**，
   它是宿主侧的 YAML，只有 `check.mjs` 之外的部署核对才能验证。
 - **board-plugin / services-plugin 只做声明与校验，未改运行时**：它们仍直接读 env（板卡插件读 1 项、
-  托管插件读 3 项），schema 保证这些读取点可见、可跨进程校验；把它们的运行时也接到引擎上价值有限
+  托管插件读 4 项），schema 保证这些读取点可见、可跨进程校验；把它们的运行时也接到引擎上价值有限
   （board-plugin 的 token 主要来自 composition），故未在 P3-4 改动。
+  （唯一例外是 Bug #1 的宿主地址：`services-plugin` 那一处**是**运行时改动——它必须按
+  `ctx.webServer.port` 派生并注入 `DSH_MODELS_BASE_URL`，因此读取点 `DSH_WEB_URL` 只作兜底。）
 - **不做运行时热更新**：配置在进程启动时解析一次；改配置需重启进程。插件同样如此——改环境变量后必须重启 DSH 宿主。
-- **不校验语义可达性**：`DSH_HUB_UPSTREAM` 指向的 hub 是否真的在跑，只有连上去才知道——`check.mjs` 只做配置面一致性，不发网络请求（因此可安全地在离线环境运行）。
+- **不校验语义可达性**：`DSH_HUB_UPSTREAM` 指向的 hub 是否真的在跑，只有连上去才知道——`check.mjs` 只做配置面一致性，不发网络请求（因此可安全地在离线环境运行）。**同理**：`DSH_MODELS_BASE_URL` 指向的宿主是否活着，check.mjs 也不发请求；它只能保证"这个键被声明了、由谁注入"。
+- **派生值的可达性靠启动期日志，不靠配置面**：`DSH_MODELS_BASE_URL` 每次启动现取（宿主端口要等 composition 把 `webServer` 挂起来才知道）。取不到时**不注入**，并写一行
+  `取不到宿主端口（ctx.webServer.port / DSH_WEB_URL 都没有）→ 不注入 DSH_MODELS_BASE_URL…`
+  ——"没注入"与"注入了对的地址"必须能从日志上分开（Bug #1「供应商与模型无法读取」）。
 - **`check.mjs` 默认读当前 shell 环境**：在 DSH 会话内直接跑会把宿主的 `TEAM_HUB_PORT` / `DSH_WEB_URL` 一起算进来，可能出现「真实但与本机会话相关」的告警；用 `--isolated-env --env-file=…` 复核。
 - **token 一致性规则在单份环境里无法触发**：两个进程读同一个 `TEAM_HUB_TOKEN`，只有分别在不同 shell 配置启动时才可能不一致；这属于真实故障场景，规则的单元测试用两份构造配置覆盖。
 - **白板副本是本仓库特有的折衷**：若将来白板 Docker 上下文改为仓库根，或白板抽出为独立仓库，应改为直接引用/发包，并删除副本与 `sync.mjs`。

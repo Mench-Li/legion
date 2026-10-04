@@ -584,10 +584,10 @@ test('P3-4：plugins schema 覆盖插件真实读取的全部 env，且扫描器
 
   // services-plugin 读的是 `baseEnv.NAME`（别名对象）——直接扫描看不到，靠 P3-4 新增的识别规则
   const svc = scanProcess('services-plugin', { includeTests: false })
-  for (const key of ['TEAM_HUB_HOST', 'TEAM_HUB_TOKEN', 'DSH_HUB_UPSTREAM']) {
+  for (const key of ['TEAM_HUB_HOST', 'TEAM_HUB_TOKEN', 'DSH_HUB_UPSTREAM', 'DSH_WEB_URL']) {
     assert.ok(svc.reads.has(key), `services-plugin 的 baseEnv.${key} 读取点必须被扫出来（否则配置面有盲区）`)
   }
-  assert.deepEqual(SERVICES.envNames().sort(), ['DSH_HUB_UPSTREAM', 'TEAM_HUB_HOST', 'TEAM_HUB_TOKEN'])
+  assert.deepEqual(SERVICES.envNames().sort(), ['DSH_HUB_UPSTREAM', 'DSH_WEB_URL', 'TEAM_HUB_HOST', 'TEAM_HUB_TOKEN'])
 
   // board-plugin 从环境回落的 hub token
   const boardPlug = scanProcess('board-plugin', { includeTests: false })
@@ -680,9 +680,15 @@ test('P3-4：插件族的 schema 不接管宿主 composition 的主配置面（�
   const injects = SERVICES.injects
   assert.deepEqual(injects.map((i) => `${i.target}:${i.env}`).sort(), [
     'team-hub:TEAM_HUB_HOST', 'team-hub:TEAM_HUB_PORT', 'team-hub:TEAM_HUB_TOKEN',
-    'workbench:DSH_HUB_UPSTREAM', 'workbench:DSH_WORKBENCH_PORT', 'workbench:TEAM_HUB_TOKEN',
+    'workbench:DSH_HUB_UPSTREAM', 'workbench:DSH_MODELS_BASE_URL', 'workbench:DSH_WORKBENCH_PORT', 'workbench:TEAM_HUB_TOKEN',
   ])
   assert.equal(injects.find((i) => i.env === 'DSH_WORKBENCH_PORT').via, 'cli')
+  // 宿主地址是**派生值**：它没有静态 value（端口要等 composition 起来才知道），
+  // 因此跨进程规则 ⑧ 不拿它跟环境解析值比较——比较会得出"托管实例与配置不一致"的假结论。
+  const modelsInject = injects.find((i) => i.env === 'DSH_MODELS_BASE_URL')
+  assert.equal(modelsInject.via, 'env')
+  assert.equal(modelsInject.from, 'ctx.webServer.port')
+  assert.equal(modelsInject.value, undefined)
 })
 
 // ───────────────────────── ⑥ PRT-254：runtime / security 的扫描覆盖 ─────────────────────────

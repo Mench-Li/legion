@@ -1455,6 +1455,16 @@ async function stageTest() {
     //   选择"登记"而不是"加进 EXEMPT"：这 21 例断言是真的、且真的能过（实测 21/21），
     //   豁免它们等于把一份可执行的证据降级成一份声明。
     { label: 'reveal-open（P4-7 打开所在位置：落点计算/祖先回落/安全矩阵与读面同强度/引导）', files: ['workbench/scripts/reveal-open.test.mjs'], cwd: ROOT },
+    // ── Bug #1「供应商与模型无法读取」：桥接层的判据必须**真的跑** ──
+    //   `workbench/scripts/dsh-models-bridge.test.mjs` 是 71d737e1/1a1ee3fc 一起写下的
+    //   （含"未授权要说得清、写路径只许改供应商配置"这些护栏），却**从未登记进任何套件**：
+    //   CI 的完备性检查会点名它，而在那之前，这些断言一次都没执行过。
+    //   Bug #1 的真因（宿主地址写死 3080）当时也没有任何一条断言守着——正是这件事的后果。
+    //   处置选**登记**而不是 `EXEMPT`：这些断言是真的、也能过，豁免等于把它们降级成声明。
+    { label: 'dsh-models（模型配置桥：宿主地址随部署走、连不上时说得清、宿主鉴权与写入边界）', files: ['workbench/scripts/dsh-models-bridge.test.mjs'], cwd: ROOT },
+    //   同一个 Bug #1 的**注入侧**：`DSH_MODELS_BASE_URL` 由 legion-services 按宿主端口派生。
+    //   这一侧的失败形状更隐蔽——注入了错的地址，界面还是那句 `fetch failed`。
+    { label: 'legion-services（服务托管插件：宿主地址派生自本次启动的宿主，取不到就**不注入**）', files: ['services-plugin/index.test.mjs'], cwd: ROOT },
     { label: 'hub-event-stream（F-01 scope/游标/信封）', files: ['workbench/scripts/hub-event-stream.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     // ── 并行任务文件冲突治理（G-mujfc9vi-1 S1–S8）──
     // 每个测试文件都必须显式登记：未登记 = 不存在的断言（本文件 4568 行的完备性检查会拦）。

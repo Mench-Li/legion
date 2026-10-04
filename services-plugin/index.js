@@ -36,6 +36,47 @@ function looksLikeLegionRoot(p) {
   } catch { return false }
 }
 
+/**
+ * 派生 workbench 要用的 **DSH 宿主地址**（Bug #1「供应商与模型无法读取」）。
+ *
+ * 模型配置 Remote 直连的是**本次启动的宿主**：Desktop 部署实测在 19387，而指挥台此前把它
+ * 写死成 3080 ⇒ 三个读取方法全部连不上，「供应商与模型」整页读不出来，界面只报一句
+ * `fetch failed`。与 `DSH_HUB_UPSTREAM` 是同一条教训（`product/config-schema.mjs` 的 injects 表）。
+ *
+ * 优先级：composition 的 `config.dshModelsBaseUrl` > 宿主 `ctx.webServer.port` > 宿主的 `DSH_WEB_URL`。
+ * 三者都拿不到时返回 `''`——**不编一个默认值**：编了就会得到"看起来配了、其实指向没人监听的端口"
+ * 这种最难查的形状。调用方据此在启动日志里说清楚这一轮有没有注入成功。
+ *
+ * 抽成纯函数是为了**能测**：一个只能靠"看日志像不像"来确认的派生逻辑，
+ * 与一个没有派生逻辑的部署，在事故现场长得一样。
+ */
+export function deriveDshModelsBaseUrl({ configured = '', webServerPort = null, env = {} } = {}) {
+  const explicit = String(configured ?? '').trim()
+  if (explicit) return explicit.replace(/\/+$/, '')
+  const port = Number(webServerPort)
+  if (Number.isInteger(port) && port > 0 && port <= 65535) return `http://127.0.0.1:${port}`
+  try {
+    const url = new URL(String(env.DSH_WEB_URL ?? ''))
+    if (url.protocol === 'http:' || url.protocol === 'https:') return url.origin
+  } catch { /* 宿主没给 DSH_WEB_URL：调用方按"没注入"记一笔 */ }
+  return ''
+}
+
+/**
+ * workbench 子进程要拿到的环境（**每次 spawn 现算**，所以宿主端口后到也拿得到）。
+ *
+ * 抽出来的理由与 `deriveDshModelsBaseUrl` 相同：能被断言的东西，才拦得住回归。
+ * 特别是"取不到宿主就不注入"这一条——静默注入一个默认地址会退化成 Bug #1 的形状。
+ */
+export function buildWorkbenchEnv({ baseEnv = {}, hubUpstream = '', teamHubToken = '', dshModelsBaseUrl = '' } = {}) {
+  return {
+    ...baseEnv,
+    DSH_HUB_UPSTREAM: hubUpstream,
+    TEAM_HUB_TOKEN: teamHubToken,
+    ...(dshModelsBaseUrl ? { DSH_MODELS_BASE_URL: dshModelsBaseUrl } : {}),
+  }
+}
+
 export function apply(ctx, rawConfig = {}) {
   const cfg = rawConfig && typeof rawConfig === 'object' ? rawConfig : {}
   const cfgDir = typeof cfg.legionDir === 'string' && cfg.legionDir.trim() ? cfg.legionDir.trim() : ''
@@ -62,6 +103,14 @@ export function apply(ctx, rawConfig = {}) {
     ? cfg.hubUpstream.trim()
     : (typeof baseEnv.DSH_HUB_UPSTREAM === 'string' && baseEnv.DSH_HUB_UPSTREAM ? baseEnv.DSH_HUB_UPSTREAM : 'http://127.0.0.1:8787')
 
+  const cfgDshModelsBaseUrl = typeof cfg.dshModelsBaseUrl === 'string' ? cfg.dshModelsBaseUrl.trim() : ''
+  /** ★ 宿主地址是**派生值**，不是默认值（Bug #1「供应商与模型无法读取」）。
+   *  宿主端口要等 composition 把 webServer 挂起来才拿得到，所以**每次启动现取**
+   *  （不在 apply 时固化成常量——那正是"看起来配了、其实取不到"的来源）。 */
+  const resolveDshModelsBaseUrl = () => deriveDshModelsBaseUrl({
+    configured: cfgDshModelsBaseUrl, webServerPort: ctx?.webServer?.port, env: baseEnv,
+  })
+
   const services = [
     {
       key: 'team-hub',
@@ -77,7 +126,11 @@ export function apply(ctx, rawConfig = {}) {
       port: workbenchPort,
       cwd: join(legionDir, 'workbench'),
       args: [join(legionDir, 'workbench', 'scripts', 'serve.mjs'), '--port', String(workbenchPort)],
-      env: { ...baseEnv, DSH_HUB_UPSTREAM: hubUpstream, TEAM_HUB_TOKEN: teamHubToken },
+      // 宿主端口要等 composition 把 webServer 挂起来才拿得到，所以**每次启动现取**
+      // （不在 apply 时固化成常量——那正是"看起来配了、其实取不到"的来源）。
+      env: () => buildWorkbenchEnv({
+        baseEnv, hubUpstream, teamHubToken, dshModelsBaseUrl: resolveDshModelsBaseUrl(),
+      }),
     },
   ]
 
@@ -116,8 +169,9 @@ export function apply(ctx, rawConfig = {}) {
       return
     }
     let child
+    const svcEnv = typeof svc.env === 'function' ? svc.env() : svc.env
     try {
-      child = spawn(nodeBin, svc.args, { cwd: svc.cwd, env: svc.env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+      child = spawn(nodeBin, svc.args, { cwd: svc.cwd, env: svcEnv, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
     } catch (e) {
       log(`[${svc.key}] 启动失败：${e instanceof Error ? e.message : String(e)}`)
       return
@@ -166,6 +220,10 @@ export function apply(ctx, rawConfig = {}) {
 
   const bootTimer = setTimeout(() => {
     void (async () => {
+      const dshModelsBaseUrl = resolveDshModelsBaseUrl()
+      log(dshModelsBaseUrl
+        ? `模型配置宿主地址 DSH_MODELS_BASE_URL=${dshModelsBaseUrl}（派生自本次启动的宿主；Bug #1：写死 3080 时「供应商与模型」读不出来）`
+        : '取不到宿主端口（ctx.webServer.port / DSH_WEB_URL 都没有）→ 不注入 DSH_MODELS_BASE_URL，workbench 将按自身默认回落；Desktop 部署下「供应商与模型」可能读不出来')
       for (const svc of services) {
         await startService(svc)
         await new Promise(r => setTimeout(r, 150))

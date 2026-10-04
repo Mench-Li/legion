@@ -44,8 +44,12 @@ if(sourceFile){
 hub.db.close()
 const children=[]
 const start=(script,env)=>{const child=spawn(process.execPath,[join(root,script)],{cwd:root,env:{...process.env,...env},stdio:'inherit',windowsHide:true});children.push(child);child.on('exit',code=>{if(code){console.error(`${script} exited: ${code}`);for(const peer of children)peer.kill();process.exitCode=code}});return child}
+// 预览实例同样要被告知宿主地址（Bug #1「供应商与模型无法读取」）：不注入的话桥接层会回落到
+// 3080 —— 在 Desktop 部署上那是没人监听的端口，模型供应商页会整页读不出来。
+// 宿主地址优先取显式配置，其次取 DSH 会话里的 DSH_WEB_URL。
+const dshModelsBaseUrl=process.env.DSH_MODELS_BASE_URL??process.env.DSH_WEB_URL??''
 start('team-hub/server.mjs',{})
-start('workbench/scripts/serve.mjs',{DSH_WORKBENCH_PORT:'4821',DSH_WORKBENCH_HOST:'127.0.0.1',DSH_WORKBENCH_TOKEN:'',DSH_HUB_UPSTREAM:'http://127.0.0.1:8791'})
+start('workbench/scripts/serve.mjs',{DSH_WORKBENCH_PORT:'4821',DSH_WORKBENCH_HOST:'127.0.0.1',DSH_WORKBENCH_TOKEN:'',DSH_HUB_UPSTREAM:'http://127.0.0.1:8791',...(dshModelsBaseUrl?{DSH_MODELS_BASE_URL:dshModelsBaseUrl}:{})})
 const stop=()=>{for(const child of children)child.kill()};process.on('SIGINT',stop);process.on('SIGTERM',stop)
 console.log('Independent interface preview: http://127.0.0.1:4821/?api=http://127.0.0.1:4821')
 console.log(`Isolated database: ${fixture}`)

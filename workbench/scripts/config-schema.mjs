@@ -8,7 +8,7 @@ import { defineSchema } from '../../packages/shared/src/config.mjs'
 export const SCHEMA = defineSchema({
   process: 'workbench',
   title: '军团指挥台（workbench 宿主：静态托管 + /hub 代理 + 文件/浏览器 API）',
-  prefixes: ['DSH_WORKBENCH_', 'DSH_WEB_', 'DSH_HUB_'],
+  prefixes: ['DSH_WORKBENCH_', 'DSH_WEB_', 'DSH_HUB_', 'DSH_MODELS_'],
   fields: [
     { key: 'desktopMode', env: 'LEGION_DESKTOP_MODE', type: 'bool', default: false, doc: '桌面模式：敏感读写及代理入口强制鉴权' },
     // ── 监听与鉴权（P3-2 统一项）──
@@ -19,6 +19,11 @@ export const SCHEMA = defineSchema({
     { key: 'teamHubToken', env: 'TEAM_HUB_TOKEN', type: 'string', default: '', sensitive: true, doc: '调用 team-hub 读接口用的 token（须与 hub 的 TEAM_HUB_TOKEN 一致）' },
     // ── 上游与静态产物（P3-2 统一项：附件/产物目录）──
     { key: 'hubUpstream', env: 'DSH_HUB_UPSTREAM', type: 'string', default: 'http://127.0.0.1:8787', doc: 'team-hub 上游地址（/hub/* 反向代理目标）' },
+    // ★ **派生值**，不是默认值（Bug #1「供应商与模型无法读取」）：模型配置 Remote 直连的是
+    //   **本次启动的 DSH 宿主**，它的端口由宿主决定（Desktop 实测 19387），不是 3080。
+    //   legion-services 插件用 `ctx.webServer.port` 派生并注入；空 = 独立跑 web profile 时
+    //   回落 `http://127.0.0.1:3080`（见 workbench/scripts/dsh-models-bridge.mjs）。
+    { key: 'modelsBaseUrl', env: 'DSH_MODELS_BASE_URL', type: 'string', default: '', doc: 'DSH 宿主地址（模型配置 Remote 的上游；空=回落 http://127.0.0.1:3080）' },
     { key: 'staticRoot', env: 'DSH_WORKBENCH_ROOT', type: 'path', default: '', doc: '静态产物根（空=workbench/dist 内置默认；P3-1 修补引入，供产物缺失场景测试）' },
     { key: 'spacesJson', env: 'DSH_WORKBENCH_SPACES_JSON', type: 'path', default: '', doc: '空间定义 JSON 路径（默认内置）' },
     // ── 文件中心（P2-7）──

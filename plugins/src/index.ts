@@ -84,7 +84,16 @@ import { createAcceptance } from './acceptance.js'
 import { createHandoff, isSliceTesterTask } from './handoff.js'
 import { createSliceOrchestration } from './sliceOrchestration.js'
 import { decideProductionTool, type GrantedWrite } from './productionWriteGuard.js'
-import { executeExternalAgent, parseExternalWorkerReport } from '../../runtime/adapters/dsh/external-agent.mjs'
+import { parseExternalWorkerReport } from '../../runtime/adapters/dsh/external-agent.mjs'
+// PRT-108 棘轮：provider 目录读取与外部 Agent 接线一律经适配层，插件不再直接依赖执行面服务。
+// 见 runtime/adapters/dsh/subagent-client.mjs 的文件头（为什么这 5 个调用点必须下沉）。
+import {
+  executeExternalAgentInContext,
+  listSubagentProviders,
+  subagentProvider,
+  subagentProviderCapabilities,
+  subagentProviderPermissionMode,
+} from '../../runtime/adapters/dsh/subagent-client.mjs'
 import { waitForWorkflowAgentRun } from '../../runtime/adapters/dsh/workflow-run.mjs'
 import { materializeWorkflowCheckpoints, WORKFLOW_CHECKPOINT_EVIDENCE_PREFIX } from '../../runtime/contracts/agent-workflow-checkpoints.mjs'
 import { validateAgentWorkflowTestReport } from '../../runtime/contracts/agent-workflow.mjs'
@@ -2283,9 +2292,9 @@ function spaceWorker(ctx: AppContext, config: Config): void {
             throw new Error('外部 Agent 必须使用受支持的 Codex/Claude 工作区权限档与独立 worktree 策略')
           }
           if (worktreeDir === null) throw new Error('外部 Agent 必须运行在本任务独立 worktree 中')
-          const runtimeProvider = ctx.subagents.getProvider(selectedProvider) as { permissionMode?: unknown } | undefined
-          if (runtimeProvider?.permissionMode !== expectedPermissionMode) {
-            throw new Error(`外部 Agent provider 未报告与冻结配置一致的生效权限模式（expected=${expectedPermissionMode}, actual=${typeof runtimeProvider?.permissionMode === 'string' ? runtimeProvider.permissionMode : 'unknown'}）`)
+          const runtimePermissionMode = subagentProviderPermissionMode(ctx, selectedProvider)
+          if (runtimePermissionMode !== expectedPermissionMode) {
+            throw new Error(`外部 Agent provider 未报告与冻结配置一致的生效权限模式（expected=${expectedPermissionMode}, actual=${typeof runtimePermissionMode === 'string' ? runtimePermissionMode : 'unknown'}）`)
           }
           if (resolveIntegrationMode(process.env) === 'integration') {
             throw new Error('当前集成模式要求本地 Agent 执行拦截；所选外部 provider 不提供 localAgent')
@@ -2294,8 +2303,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
             throw new Error('当前外部 Agent 不支持配置要求的工具过滤，拒绝派工')
           }
           await beginWorkflowStageAttempt(selectedProvider)
-          const external = await executeExternalAgent({
-            subagents: ctx.subagents,
+          const external = await executeExternalAgentInContext(ctx, {
             providerName: selectedProvider,
             parent,
             workdir: worktreeDir,
@@ -2337,7 +2345,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
             throw new Error(`阶段 Agent 工具 adapter 不受支持：${frozenConfig?.adapter ?? 'missing'}`)
           }
           if (hasFrozenTool) {
-            const registered = ctx.subagents.getProvider(selectedProvider)
+            const registered = subagentProvider(ctx, selectedProvider)
             if (registered === undefined) throw new Error(`冻结配置指定的 DSH provider 未注册：${selectedProvider}`)
             nativeProviderCapabilities = registered.capabilities
             if (registered.capabilities.outputSchema !== frozenConfig.capabilities.outputSchema
@@ -3424,19 +3432,8 @@ function spaceWorker(ctx: AppContext, config: Config): void {
         const worktreeProbe = config.isolate
           ? await runGit(workspace.repoRootFor(), ['rev-parse', '--is-inside-work-tree'])
           : { code: 1 }
-        const providerNames = ctx.subagents.list()
-        const providers = Object.fromEntries(providerNames.map((name) => {
-          const provider = ctx.subagents.getProvider(name) as ({ capabilities?: Record<string, unknown>; permissionMode?: unknown; systemProxyMode?: unknown } | undefined)
-          const caps = provider?.capabilities
-          return [name, {
-            outputSchema: caps?.outputSchema === true,
-            toolFilter: caps?.toolFilter === true,
-            // DSH run handles expose dispose(); abort support remains a best-effort host guarantee.
-            cancellation: true,
-            ...(typeof provider?.permissionMode === 'string' ? { permissionMode: provider.permissionMode } : {}),
-            ...(typeof provider?.systemProxyMode === 'string' ? { systemProxyMode: provider.systemProxyMode } : {}),
-          }]
-        }))
+        const providerNames = listSubagentProviders(ctx)
+        const providers = Object.fromEntries(providerNames.map((name) => [name, subagentProviderCapabilities(ctx, name)]))
         await hubPost('/api/agent-nodes/heartbeat', {
           id: (config.agentNodeId ?? '').trim(),
           scope,

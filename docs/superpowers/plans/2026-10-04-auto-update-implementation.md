@@ -429,8 +429,9 @@ node -e "import('./product/update/index.mjs').then(async m => console.log(JSON.s
 # 打包闭包判据
 node --test desktop/scripts/shell-files.test.mjs
 
-# 全量 CI（含九道门禁）
-node scripts/ci/run-ci.mjs --out .ci-frozen
+# 全量 CI（含九道门禁）。`--out` 省略时会落到 `.ci/<时间戳>/`，而 `.ci/` 在
+# .gitignore 里——产出物不该进版本库。
+node scripts/ci/run-ci.mjs
 ```
 
 ### 7.1 全量 CI 里**不属于本分支**的红灯（前存债务）
